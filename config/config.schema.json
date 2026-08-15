@@ -623,6 +623,20 @@
               "exclusiveMinimum": 0,
               "default": 60000
             },
+            "overrides": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "object",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean",
+                    "default": true
+                  }
+                },
+                "additionalProperties": false
+              },
+              "default": {}
+            },
             "fs": {
               "type": "object",
               "properties": {
@@ -850,6 +864,10 @@
             "workspaceDir": {
               "type": "string",
               "default": "./data/workspace"
+            },
+            "hostWorkspaceDir": {
+              "type": "string",
+              "default": ""
             },
             "dockerBin": {
               "type": "string",

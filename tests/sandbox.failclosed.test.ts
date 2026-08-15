@@ -1,3 +1,5 @@
+import { rmSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { Sandbox, ToolRegistry } from '@luoli/core';
@@ -7,7 +9,7 @@ import type { RuntimeTurnContext } from '@luoli/shared';
 const broker: ApprovalBroker = { request: async () => true };
 const log = { span: () => ({ id: 'span', end: () => undefined }) } as unknown as LogSink;
 const turn = { turnId: 't', key: 'chat:1', chatId: '1', threadId: null, initiatorUserId: '2', effectiveRole: 'trusted', isPrivate: false, baseCommitId: null, snapshot: { messages: [], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 0 }, delta: [], abortSignal: new AbortController().signal, config: {} } satisfies RuntimeTurnContext;
-const sandboxConfig = { mode: 'none' as const, bypassRoles: ['owner' as const], dockerBin: 'docker', image: 'none', network: 'none' as const, memoryMb: 128, cpus: 1, pidsLimit: 8, readOnlyRoot: true, tmpfsMb: 8, defaultTimeoutMs: 1000, maxTimeoutMs: 1000, maxOutputBytes: 1024 };
+const sandboxConfig = { mode: 'none' as const, bypassRoles: ['owner' as const], dockerBin: 'docker', image: 'none', network: 'none' as const, memoryMb: 128, cpus: 1, pidsLimit: 8, readOnlyRoot: true, tmpfsMb: 8, workspaceDir: './data/sandbox-map.test', hostWorkspaceDir: '', defaultTimeoutMs: 1000, maxTimeoutMs: 1000, maxOutputBytes: 1024 };
 
 describe('sandbox fail-closed visibility', () => {
   it('hides execution tools from trusted roles while preserving owner bypass', () => {
@@ -20,15 +22,55 @@ describe('sandbox fail-closed visibility', () => {
   });
 
   it('hides Docker execution tools when Docker is known unavailable', () => {
-    const sandbox = new Sandbox({ ...sandboxConfig, mode: 'docker' }, false);
+    const sandbox = new Sandbox({ ...sandboxConfig, mode: 'docker' }, false, false);
     expect(sandbox.plan('trusted').allowed).toBe(false);
     expect(sandbox.plan('owner').allowed).toBe(true);
   });
 
   it('records a failed Docker binary probe and remains fail closed', async () => {
-    const sandbox = new Sandbox({ ...sandboxConfig, mode: 'docker', dockerBin: 'definitely-missing-docker' });
+    const sandbox = new Sandbox({ ...sandboxConfig, mode: 'docker', dockerBin: 'definitely-missing-docker' }, undefined, false);
     const result = await sandbox.probe();
     expect(result.available).toBe(false);
     expect(sandbox.plan('trusted').allowed).toBe(false);
+  });
+});
+
+// docker run -v 的路径由宿主 daemon 解析。本进程在容器里时它和进程视角的路径不是一回事，
+// 而 docker 对不存在的宿主路径不报错、只是默默建个空目录 —— 沙箱和 fs 工具会看到两个目录。
+describe('sandbox host path mapping', () => {
+  const docker = { ...sandboxConfig, mode: 'docker' as const };
+
+  it('refuses to run in a container without an explicit host workspace mapping', async () => {
+    const sandbox = new Sandbox(docker, true, true);
+    expect(sandbox.plan('trusted').allowed).toBe(false);
+    expect(sandbox.plan('trusted').reason).toMatch(/hostWorkspaceDir/);
+    // owner 走 bypassRoles，在宿主直跑、不经过 -v，不受映射影响。
+    expect(sandbox.plan('owner').allowed).toBe(true);
+    const probe = await sandbox.probe();
+    expect(probe.available).toBe(false);
+    expect(probe.error).toMatch(/hostWorkspaceDir/);
+  });
+
+  it('allows execution in a container once the mapping is configured', () => {
+    const sandbox = new Sandbox({ ...docker, hostWorkspaceDir: '/srv/luoli/data/workspace' }, true, true);
+    expect(sandbox.plan('trusted').allowed).toBe(true);
+  });
+
+  it('rewrites the bind mount to the host path', async () => {
+    const workspace = resolve(sandboxConfig.workspaceDir, 'chat-1');
+    rmSync(sandboxConfig.workspaceDir, { recursive: true, force: true });
+    // dockerBin 换成 echo：不真的起容器，直接把参数打回 stdout，断言 -v 的左半边。
+    const sandbox = new Sandbox({ ...docker, hostWorkspaceDir: '/srv/luoli/data/workspace', dockerBin: '/bin/echo' }, true, true);
+    const result = await sandbox.run('true', 'trusted', workspace, new AbortController().signal);
+    expect(result.stdout).toContain('-v /srv/luoli/data/workspace/chat-1:/workspace:rw');
+    expect(result.stdout).not.toContain(workspace);
+    rmSync(sandboxConfig.workspaceDir, { recursive: true, force: true });
+  });
+
+  it('refuses a workspace that escapes sandbox.workspaceDir', async () => {
+    const sandbox = new Sandbox({ ...docker, hostWorkspaceDir: '/srv/luoli/data/workspace' }, true, true);
+    const result = await sandbox.run('true', 'trusted', resolve('data/elsewhere'), new AbortController().signal);
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toMatch(/workspaceDir/);
   });
 });

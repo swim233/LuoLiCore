@@ -77,6 +77,7 @@ toolRegistry.bindOverrides(() => configStore.snapshot().tools.overrides);
 const sandbox = new Sandbox({ mode: config.sandbox.mode, bypassRoles: config.sandbox.bypassRoles, dockerBin: config.sandbox.dockerBin,
   image: config.sandbox.image, network: config.sandbox.network, memoryMb: config.sandbox.memoryMb, cpus: config.sandbox.cpus,
   pidsLimit: config.sandbox.pidsLimit, readOnlyRoot: config.sandbox.readOnlyRoot, tmpfsMb: config.sandbox.tmpfsMb,
+  workspaceDir: config.sandbox.workspaceDir, hostWorkspaceDir: config.sandbox.hostWorkspaceDir,
   defaultTimeoutMs: config.tools.exec.defaultTimeoutMs, maxTimeoutMs: config.tools.exec.maxTimeoutMs, maxOutputBytes: config.tools.exec.maxOutputBytes });
 const sandboxProbe = await sandbox.probe();
 if (!sandboxProbe.available && config.sandbox.mode === 'docker') log.event({ level: 'error', kind: 'sandbox.unavailable', summary: sandboxProbe.error ?? 'Docker sandbox unavailable' });

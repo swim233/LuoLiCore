@@ -7,6 +7,9 @@ services:
     env_file: .env
     environment:
       LUOLI_WEBUI_HOST: 0.0.0.0
+      # 沙箱的 `docker run -v` 由宿主 daemon 解析，容器内的 /app/data/workspace 在宿主上不存在。
+      # 这里给出同一目录的宿主路径。从别的目录跑 compose 时 ${PWD} 不等于本文件所在目录，需显式指定。
+      LUOLI_HOST_WORKSPACE_DIR: ${PWD}/data/workspace
     ports:
       - "127.0.0.1:8787:8787"
     volumes:

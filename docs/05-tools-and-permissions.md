@@ -252,6 +252,7 @@ role ∉ bypassRoles ∧ mode='docker'      → 容器执行
 role ∉ bypassRoles ∧ mode='jail'        → jail 执行（日志 level=warn 提示隔离较弱）
 role ∉ bypassRoles ∧ mode='none'        → ✗ 拒绝：{ allowed:false, reason:'沙箱未启用，执行类工具已禁用' }
 mode='docker' ∧ docker 不可用            → ✗ 拒绝（fail-closed），WebUI 显红；owner 仍可 bypass
+mode='docker' ∧ 本进程在容器内 ∧ 未配 hostWorkspaceDir → ✗ 拒绝（见 5.3 路径映射）；owner 仍可 bypass
 ```
 
 > **这是 D10 的精确落地**：沙箱可开关；owner 直跑；非 owner 在无沙箱时**工具消失而非降级**。
@@ -271,6 +272,17 @@ docker run --rm \
   luoli-sandbox:latest \
   timeout -s KILL 60 sh -lc '<command>'
 ```
+
+**`-v` 左半边的路径映射。** 它由**宿主** docker daemon 解析，而 `Sandbox.run()` 收到的 workspace 是
+**本进程视角**的路径。应用直接跑在宿主上时两者相同；应用自己也在容器里时不同（容器内是
+`/app/data/workspace/<chatId>`），而 docker 对不存在的宿主路径不报错，只会默默建一个空目录 ——
+沙箱和 `read_file`/`write_file` 于是看到两个不同的目录，症状是 `bash` 写的文件读不回来。
+所以：
+
+- `sandbox.hostWorkspaceDir` 给出同一目录的宿主路径，`Sandbox` 按相对 `workspaceDir` 的路径换算；
+- 本进程在容器内（`/.dockerenv` / `/run/.containerenv`）而该项为空 → **禁用执行类工具**并报
+  `sandbox.unavailable`，不做「先挂上去试试」的兜底（`docs/16 §5`：摘除比伪造安全）；
+- 换算越界（workspace 不在 `workspaceDir` 之下）→ 同样拒绝。
 
 - 命令通过 stdin 或 `sh -lc` 传参，**不做字符串拼接进 shell 之外的地方**。
 - 容器名 `luoli-sbx-<turnId>-<n>`，便于 `/cancel` 时 `docker kill`。
