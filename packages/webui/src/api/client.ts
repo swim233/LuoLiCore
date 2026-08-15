@@ -12,3 +12,13 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   if (!result.ok) throw new Error(result.error?.message ?? '请求失败');
   return result.data as T;
 }
+
+/** 刷新页面后内存里的 csrf 没了，先从 session 换一份回来，否则所有写操作都会 403。 */
+export async function hydrateSession(): Promise<boolean> {
+  try {
+    const me = await api<{ csrf?: string }>('/api/auth/me');
+    if (me.csrf) auth.csrf = me.csrf;
+    auth.authenticated = true;
+    return true;
+  } catch { auth.authenticated = false; return false; }
+}

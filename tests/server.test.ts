@@ -33,6 +33,16 @@ describe('server security', () => {
     closeDatabase(db);
   });
 
+  it('hands the session csrf back to an authenticated same-origin caller but not across origins', async () => {
+    const { app, db } = appHarness();
+    const session = new OperationsRepository(db).createSession(1);
+    const me = await app.request('/api/auth/me', { headers: { cookie: `luoli_sid=${session.id}` } });
+    expect((await me.json() as { data: { csrf: string; expiresAt: number } }).data).toMatchObject({ csrf: session.csrf, expiresAt: session.expiresAt });
+    expect((await app.request('/api/auth/me', { headers: { cookie: `luoli_sid=${session.id}`, origin: 'https://evil.example' } })).status).toBe(403);
+    expect((await app.request('/api/auth/me')).status).toBe(401);
+    closeDatabase(db);
+  });
+
   it('adds documented security headers', async () => {
     const { app, db } = appHarness();
     const response = await app.request('/api/health');

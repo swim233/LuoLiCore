@@ -37,9 +37,14 @@ export class ProviderStore {
     return this.db.prepare('SELECT id,name,kind,base_url AS baseUrl,api_key_hint AS apiKeyHint,enabled,health_state AS healthState,health_error AS healthError FROM providers ORDER BY name').all();
   }
 
-  key(id: string): string | null {
-    const row = this.db.prepare('SELECT api_key_enc AS encrypted FROM providers WHERE id=? AND enabled=1').get(id) as { encrypted: string | null } | undefined;
+  /** `includeDisabled` 只给「测试连接」用：停用的 provider 也要能在启用前先探一次。 */
+  key(id: string, includeDisabled = false): string | null {
+    const row = this.db.prepare(`SELECT api_key_enc AS encrypted FROM providers WHERE id=?${includeDisabled ? '' : ' AND enabled=1'}`).get(id) as { encrypted: string | null } | undefined;
     return row?.encrypted ? this.secrets.decrypt(row.encrypted) : null;
+  }
+
+  get secretsAvailable(): boolean {
+    return this.secrets.available;
   }
 }
 

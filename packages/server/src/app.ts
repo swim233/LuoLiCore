@@ -6,7 +6,8 @@ import argon2 from 'argon2';
 import { Hono } from 'hono';
 import { serveStatic } from '@hono/node-server/serve-static';
 import type { AgentManager, Config, ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceService, McpManager, MemoryStore, PluginManager, PromptDocuments, ProviderStore, Sandbox, SkillLoader, TurnRegistry } from '@luoli/core';
-import { TOOL_POLICY, configSchema as runtimeConfigSchema } from '@luoli/core';
+import { TOOL_POLICY, configSchema as runtimeConfigSchema, probeProvider } from '@luoli/core';
+import type { ProviderProbe } from '@luoli/core';
 import type { ArchiveRepository, OperationsRepository, PrincipalRepository, Sqlite } from '@luoli/db';
 
 export interface ServerDependencies {
@@ -51,7 +52,7 @@ function cookie(header: string | undefined, name: string): string | null {
   return null;
 }
 
-const apiError = (code: string, message: string, status: 400 | 401 | 403 | 404 | 429 | 500 = 400) => ({ body: { ok: false as const, error: { code, message } }, status });
+const apiError = (code: string, message: string, status: 400 | 401 | 403 | 404 | 429 | 500 | 502 = 400) => ({ body: { ok: false as const, error: { code, message } }, status });
 
 function mergeDotted(base: unknown, updates: Record<string, unknown>): unknown {
   const clone = structuredClone(base) as Record<string, unknown>;
@@ -185,7 +186,9 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     ctx.header('Set-Cookie', 'luoli_sid=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0');
     return ctx.json({ ok: true });
   });
-  app.get('/api/auth/me', (ctx) => ctx.json({ ok: true, data: { role: 'owner' } }));
+  // SPA 只把 csrf 放在内存里，刷新页面就丢了；不在这里发回去，刷新之后每个写操作都是 403。
+  // 这不削弱 CSRF 防护：跨站请求既读不到响应（无 CORS 放行），也过不了上面的 Origin 中间件。
+  app.get('/api/auth/me', (ctx) => ctx.json({ ok: true, data: { role: 'owner', csrf: ctx.get('csrf'), expiresAt: dependencies.operations.session(ctx.get('sessionId'))?.expiresAt ?? null } }));
   app.get('/api/dashboard', (ctx) => ctx.json({ ok: true, data: dependencies.operations.dashboard() }));
   app.get('/api/chats', (ctx) => ctx.json({ ok: true, data: dependencies.db.prepare(`SELECT c.key,c.chat_id AS chatId,c.thread_id AS threadId,c.scope,c.claim_watermark AS claimWatermark,
     cc.head_ordinal AS headOrdinal,cc.tokens_total AS tokens,cc.msg_count AS messages FROM contexts c LEFT JOIN refs r ON r.key=c.key AND r.name='done' LEFT JOIN context_commits cc ON cc.id=r.commit_id ORDER BY c.updated_at DESC`).all() }));
@@ -228,6 +231,23 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     dependencies.log.event({ level: 'info', kind: 'webui.action', summary: 'principal role changed', data: { id: ctx.req.param('id'), role: body.role } });
     return ctx.json({ ok: true, data: { changed } });
   });
+  interface ProviderRow { id: string; name: string; kind: string; baseUrl: string | null; headers: string | null }
+  const providerProbe = async (id: string, overrides: { kind?: unknown; baseUrl?: unknown; apiKey?: unknown } = {}): Promise<{ row: ProviderRow; result: ProviderProbe; adhoc: boolean } | null> => {
+    const row = dependencies.db.prepare('SELECT id,name,kind,base_url AS baseUrl,headers_json AS headers FROM providers WHERE id=?').get(id) as ProviderRow | undefined;
+    if (!row) return null;
+    const overrideKey = typeof overrides.apiKey === 'string' && overrides.apiKey ? overrides.apiKey : null;
+    const adhoc = Boolean(overrideKey) || typeof overrides.baseUrl === 'string' || typeof overrides.kind === 'string';
+    let apiKey = overrideKey;
+    // 停用的 provider 也要能在启用前先探一次，所以 includeDisabled。
+    if (!apiKey) try { apiKey = dependencies.providers.key(row.id, true); } catch {
+      return { row, adhoc, result: { reachable: false, code: 'no_master_key', message: 'LUOLI_MASTER_KEY 缺失或已更换，无法解密该 provider 的 API Key', status: null, latencyMs: 0, models: [] } };
+    }
+    let headers: Record<string, string> | null = null;
+    try { headers = row.headers ? JSON.parse(row.headers) as Record<string, string> : null; } catch { headers = null; }
+    const kind = typeof overrides.kind === 'string' && overrides.kind ? overrides.kind : row.kind;
+    const baseUrl = typeof overrides.baseUrl === 'string' ? overrides.baseUrl : row.baseUrl;
+    return { row, adhoc, result: await probeProvider({ name: row.name, kind, baseUrl, headers }, apiKey) };
+  };
   app.get('/api/providers', (ctx) => ctx.json({ ok: true, data: dependencies.providers.list() }));
   app.post('/api/providers', async (ctx) => { try { const id = dependencies.providers.save(await ctx.req.json()); dependencies.rebuildModels?.(); return ctx.json({ ok: true, data: { id } }); } catch (error) { return ctx.json(apiError('provider_invalid', error instanceof Error ? error.message : 'Provider 配置无效').body, 400); } });
   app.get('/api/models', (ctx) => ctx.json({ ok: true, data: dependencies.db.prepare('SELECT * FROM models ORDER BY provider_id,sort').all() }));
@@ -245,7 +265,66 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
   });
   app.patch('/api/providers/:id', async (ctx) => { try { const id = dependencies.providers.save({ ...(await ctx.req.json()), id: ctx.req.param('id') }); dependencies.rebuildModels?.(); return ctx.json({ ok: true, data: { id } }); } catch (error) { return ctx.json(apiError('provider_invalid', error instanceof Error ? error.message : 'Provider 配置无效').body, 400); } });
   app.delete('/api/providers/:id', (ctx) => { const changes = dependencies.db.prepare('DELETE FROM providers WHERE id=?').run(ctx.req.param('id')).changes; dependencies.rebuildModels?.(); return ctx.json({ ok: true, data: { changes } }); });
-  app.post('/api/providers/:id/test', (ctx) => { const provider = dependencies.db.prepare('SELECT id FROM providers WHERE id=?').get(ctx.req.param('id')); return ctx.json({ ok: true, data: { reachable: Boolean(provider) } }); });
+  app.post('/api/providers/:id/test', async (ctx) => {
+    const body = await ctx.req.json<Record<string, unknown>>().catch(() => ({}));
+    const probe = await providerProbe(ctx.req.param('id'), body);
+    if (!probe) return ctx.json(apiError('not_found', 'Provider 不存在', 404).body, 404);
+    const { row, result, adhoc } = probe;
+    // 只有测「库里那份配置」才动健康状态：拿临时 key 试错不该把线上 provider 摘掉。
+    // 成功写回 up 是 markProviderDown 之后唯一的人工恢复路径；而 404/超时/5xx 不写 down ——
+    // 网关缺 /models 不等于对话不可用，据此摘掉 provider 会把能用的模型链整条打断。
+    if (!adhoc) {
+      const now = Date.now();
+      if (result.reachable) dependencies.db.prepare("UPDATE providers SET health_state='up',health_checked_at=?,health_error=NULL WHERE id=?").run(now, row.id);
+      else if (result.code === 'unauthorized') dependencies.db.prepare("UPDATE providers SET health_state='down',health_checked_at=?,health_error=? WHERE id=?").run(now, result.message.slice(0, 500), row.id);
+      else dependencies.db.prepare('UPDATE providers SET health_checked_at=? WHERE id=?').run(now, row.id);
+      dependencies.rebuildModels?.();
+    }
+    dependencies.log.event({ level: result.reachable ? 'info' : 'warn', kind: 'provider.health', summary: `provider test ${result.code}`,
+      data: { provider: row.name, code: result.code, status: result.status, latencyMs: result.latencyMs, models: result.models.length, adhoc } });
+    return ctx.json({ ok: true, data: { reachable: result.reachable, code: result.code, message: result.message, status: result.status, latencyMs: result.latencyMs, models: result.models.length } });
+  });
+  app.get('/api/providers/:id/models', async (ctx) => {
+    const probe = await providerProbe(ctx.req.param('id'));
+    if (!probe) return ctx.json(apiError('not_found', 'Provider 不存在', 404).body, 404);
+    const { result } = probe;
+    if (!result.reachable) {
+      const status = result.code === 'unauthorized' ? 403 : result.code === 'missing_base_url' || result.code === 'no_master_key' ? 400 : 502;
+      return ctx.json(apiError(result.code, result.message, status).body, status);
+    }
+    return ctx.json({ ok: true, data: { models: result.models, latencyMs: result.latencyMs } });
+  });
+  app.post('/api/models/import', async (ctx) => {
+    const body = await ctx.req.json<{ providerId?: unknown; models?: unknown; contextWindow?: unknown; maxOutput?: unknown }>();
+    const providerId = typeof body.providerId === 'string' ? body.providerId : '';
+    if (!providerId || !dependencies.db.prepare('SELECT 1 FROM providers WHERE id=?').get(providerId)) return ctx.json(apiError('not_found', 'providerId 不存在', 404).body, 404);
+    if (!Array.isArray(body.models) || body.models.length === 0) return ctx.json(apiError('model_invalid', 'models 必须是非空数组').body, 400);
+    if (body.models.length > 200) return ctx.json(apiError('model_invalid', '单次最多导入 200 个模型').body, 400);
+    const int = (value: unknown): number | null => (Number.isInteger(Number(value)) && Number(value) > 0 ? Number(value) : null);
+    const fallbackWindow = int(body.contextWindow) ?? 128_000;
+    const fallbackOutput = int(body.maxOutput) ?? 8192;
+    const entries: Array<{ modelId: string; displayName: string | null; contextWindow: number; maxOutput: number }> = [];
+    for (const raw of body.models) {
+      const entry = raw && typeof raw === 'object' ? raw as Record<string, unknown> : null;
+      const modelId = entry && typeof entry.modelId === 'string' ? entry.modelId.trim() : '';
+      if (!modelId) return ctx.json(apiError('model_invalid', '每一项都必须带非空的 modelId').body, 400);
+      entries.push({ modelId, displayName: typeof entry?.displayName === 'string' && entry.displayName ? entry.displayName : null,
+        contextWindow: int(entry?.contextWindow) ?? fallbackWindow, maxOutput: int(entry?.maxOutput) ?? fallbackOutput });
+    }
+    // 定价一律留空由 owner 手填（docs/04 §5.5：不自动抓取），已存在的 (provider,model) 跳过而不是覆盖 —— 覆盖会把调好的定价冲掉。
+    const insert = dependencies.db.prepare(`INSERT INTO models(id,provider_id,model_id,display_name,context_window,max_output,capabilities_json,price_in,price_out,price_cache_read,price_cache_write,enabled,sort,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,'{}',NULL,NULL,NULL,NULL,1,0,?,?) ON CONFLICT(provider_id,model_id) DO NOTHING`);
+    const ids: string[] = [];
+    const now = Date.now();
+    dependencies.db.transaction(() => {
+      for (const entry of entries) {
+        const id = randomBytes(16).toString('hex');
+        if (insert.run(id, providerId, entry.modelId, entry.displayName, entry.contextWindow, entry.maxOutput, now, now).changes > 0) ids.push(id);
+      }
+    })();
+    dependencies.rebuildModels?.();
+    return ctx.json({ ok: true, data: { inserted: ids.length, skipped: entries.length - ids.length, ids } });
+  });
   app.get('/api/aliases', (ctx) => ctx.json({ ok: true, data: dependencies.db.prepare('SELECT * FROM model_aliases ORDER BY alias').all() }));
   app.put('/api/aliases/:alias', async (ctx) => {
     const body = await ctx.req.json<{ modelIds?: string[]; settings?: unknown; description?: string }>();
