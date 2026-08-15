@@ -1,17 +1,21 @@
 import type { Bot } from 'grammy';
-import { splitTelegramText } from './output.js';
+import { holdReply, splitTelegramText } from './output.js';
 
 export interface StreamOutputOptions {
   mode: 'stream' | 'once';
+  replyDelayMs: number;
   intervalMs: number;
   minDeltaChars: number;
   maxChars: number;
 }
 
 export class TelegramOutput {
-  constructor(private readonly bot: Bot, private readonly chatId: string, private readonly options: StreamOutputOptions, private readonly onDeliveryError?: (error: unknown) => void) {}
+  constructor(private readonly bot: Bot, private readonly chatId: string, private readonly options: StreamOutputOptions, private readonly onDeliveryError?: (error: unknown) => void,
+    /** 起算点是用户那条消息的到达时刻，不是这个对象被构造的时刻：模型本来就想了 3 秒时不该再压 2 秒。 */
+    private readonly since: number = Date.now()) {}
 
   async send(text: string, replyToMessageId?: number): Promise<number[]> {
+    await holdReply(this.since, this.options.replyDelayMs);
     const parts = splitTelegramText(text, this.options.maxChars);
     const ids: number[] = [];
     for (const part of parts) {
@@ -62,6 +66,8 @@ export class TelegramOutput {
         if (step.done) break;
         text += step.value;
         if (this.options.mode === 'once') continue;
+        // 延迟窗口内只攒不发。攒到的文本不会丢：流在窗口内就结束时下面走 send()，它自己也会等满。
+        if (Date.now() - this.since < this.options.replyDelayMs) continue;
         const rendered = splitTelegramText(text, this.options.maxChars);
         while (messageIds.length < rendered.length) {
           const index = messageIds.length;

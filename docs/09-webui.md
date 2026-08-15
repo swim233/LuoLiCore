@@ -69,9 +69,15 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
   2. **Commit 时间线**：`DataGrid` 列出 commits（seq、kind、window、head、tokens、rebased、base≠parent 时的对比）。操作：`[查看快照]` `[回滚到此]`（二次确认）。
   3. **设置**：`contextScope` 切换、唤醒词、`output.mode` 覆盖、模型别名固定、`background.maxPerTurn` 覆盖、`[/new]` `[/undo]` 按钮。
 
-### 3.3 消息检索（Messages）
-- 全库检索（owner 可跨会话）：关键词（FTS）、会话、发言人、时间范围、类型、是否触发。
-- `DataGrid` 分页 + 行展开显示 `raw_json`（折叠区 + 代码高亮）与附件预览（图片预览 / 文件下载）。
+### 3.3 消息与对话（Messages）
+- **默认视图是「最近的模型对话」而不是消息流**：一次 turn 的提问与回答分散在多行 `messages` 里，
+  按行翻页读不出对话的样子。走 `GET /api/turns`，**每页 20 次对话**，服务端 `LIMIT/OFFSET` 分页
+  （`turns` 表可能很大，不整表拉回来再切）。每张卡片显示状态、会话、发起人、触发原因、时间，
+  提问与回答各截断两行，底部一行 `步数 · 工具调用 · token · 花费`；点开展开全文并可跳到该轮 trace。
+  流式回复被切成多条 Telegram 消息时归档里每条存的都是同一份全文，读出来按内容去重，不重复 N 遍。
+- 搜索框与 `[搜索归档]` **在同一行**（`.search-row`），回车等价于点按钮；检索走 `GET /api/messages?q=`
+  （owner 跨会话，中文三字以上 FTS5 trigram，短词回退 LIKE），结果切换成表格视图，
+  `[返回最近对话]` 切回。正文一律纯文本渲染。
 - 单条操作：`[定位到上下文]`（若已被认领）、`[查看所属 turn 的 trace]`、`[软删除]`。
 
 ### 3.4 提示词（Prompts）
@@ -100,13 +106,27 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
 - 每个模型行显示近 7 天调用次数与花费（来自 `usage_ledger`）。
 
 ### 3.6 主体与权限（Principals）
-- 表格：kind、tg_id、显示名/username、角色（内联 `UiSelect` 直接改）、首次出现、最后活跃、消息数、今日花费、备注。
-- 过滤：仅群 / 仅用户 / 按角色。
-- `[批量导入]`（粘贴 id 列表 + 目标角色）、`[导出]`。
+- 表格：kind、tg_id、显示名/username、角色、首次出现、最后活跃、消息数、今日花费、备注。
+- **子导航把用户与群聊分开**（全部 / 用户 / 群聊，每项带计数）：两者的语义不同 ——
+  会话角色只是上限，群里某人的有效角色 = min(他自己的角色, 该群的角色)，混在一张表里看不出来。
+- 点任一行打开二级菜单（`UiModal`）：只读展示 kind / tg_id / 显示名 / username，
+  角色下拉可改并写明该角色意味着什么；升到 `owner` 时额外警示「跳过审批与沙箱」。
+  保存走 `PATCH /api/principals/:id`，下一轮生效并写审计日志。
+- `[批量导入]`：粘贴 Telegram **数字 ID** 列表（换行/空格/逗号分隔，去重）+ 类型 + 目标角色，
+  一次性登记还没跟 bot 说过话的人。前端先标出非法 ID（`@username`、非数字），
+  服务端再校验一次；**已存在的主体必须真的改角色** —— `upsertSeen` 的 `ON CONFLICT` 分支
+  刻意不动 `role`（避免每条消息把手工设的角色冲掉），只调它会「导入成功」却什么都没变，
+  所以写入端对已存在的行补一次 `setRole`，返回 `{count, created, updated}`。
 - 权限矩阵只读视图：把 `TOOL_POLICY` 渲染成 [05 §4](./05-tools-and-permissions.md#4-权限矩阵权威表) 那张表，便于核对；可切「以某角色视角」预览可用工具集。
 
 ### 3.7 工具与沙箱
-- 工具表：名称、来源（builtin/plugin/skill/mcp）、minRole、审批策略、本会话/全局启停、近 7 天调用次数与失败率、平均耗时。
+- 工具表：名称、来源（builtin/plugin/skill/mcp）、minRole、审批策略、作用域、启停状态、近 7 天调用次数与失败率、平均耗时。
+  `GET /api/tools` 除策略外还返回每个工具当前的 `enabled`（来自 `tools.overrides`）——
+  只给静态策略表的话，页面显示的东西与运行时无关。
+- 点任一行打开二级菜单（`UiModal`）：来源 / minRole / 审批 / 作用域**只读**并注明它们来自代码里的
+  单一策略源 `TOOL_POLICY`（注册期 fail-closed）；**能从界面调低某个工具的最低角色等于把权限矩阵
+  变成两份会漂移的真相**，所以这里唯一可写的是启停。停用是硬边界：既从工具目录移除，
+  `ToolRegistry.execute` 也二次拦截返回 `tool_disabled_by_operator`。
 - 沙箱设置：`mode` 单选（含 docker 可用性探测结果）、镜像名 + `[拉取/构建]`、资源限制、网络、`bypassRoles`（多选）、超时。
 - `allowHostFsForOwner` 开关带红色确认对话框。
 - 审批规则编辑器（`DataGrid` 行内编辑）：tool 匹配、正则、风险级别、`[测试正则]`（输入样例命令看是否命中）。
@@ -117,8 +137,15 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
 - **MCP**：server 列表 + 状态、transport 配置表单、发现到的工具清单（含 inputSchema 预览 `UiModal`）、allow/deny glob、`[重连]`、最近错误。
 
 ### 3.9 子 Agent（Agents）
-- 表格：name、description、modelAlias、maxSteps、tools（多选）、minRole、resultMaxChars、来源（config/plugin）。
-- `instructions` 编辑器 + token 计数。
+- 表格：name、description、modelAlias、maxSteps、tools、minRole；`[新建 Agent]` 在页头。
+- 点任一行打开二级菜单（`UiModal`）：名称（新建时可填，之后只读 —— 模型用它调 `spawn_agent`）、
+  职责描述、模型别名（下拉取自别名路由表）、minRole、步数上限、结果最大字符、`injectMemory`、
+  可用工具多选（全不勾 = 不额外限制，沿用父 agent 在当前角色下的工具目录）、`instructions` 编辑器。
+  对话框里同时提供 `[删除]`。
+- 保存写的是**整张 `agent.agents` 数组**（`PUT /api/config`，点分键 `agent.agents`）：
+  没有单条 PATCH 端点，而这个数组本身就是一个 schema 叶子，写入时整体过 `configSchema` 校验。
+- `AgentManager` 的定义表只在构造时读一次，因此 `config.changed` 里带 `agent.agents` 时
+  必须 `replaceDefinitions()`；否则运维看到的是「保存成功但派发的还是旧的」。
 - `[试跑]`：给定 task 文本，直接派发一次并在 `UiModal` 里流式展示步骤/工具/结果与花费（不进任何会话上下文）。
 
 ### 3.10 日志（Logs）
@@ -184,6 +211,7 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
 | `POST /api/chats/:key/commits/:id/checkout` | 回滚 done 指针 |
 | `POST /api/chats/:key/reset` `POST /api/chats/:key/undo` | 等价 `/new` `/undo` |
 | `GET /api/messages` `GET /api/messages/:id` `DELETE /api/messages/:id` | 消息检索（`?q=` 走 FTS） |
+| `GET /api/turns` | 最近的模型对话，按 turn 聚合：`?page=1&size=20`（size 上限 100）→ `{items, total, page, size}`。每项带触发消息正文（`prompt`）与该轮 bot 回复（`reply`，按内容去重）、状态、步数/工具数/token/花费。分页走 SQL `LIMIT/OFFSET` |
 | `GET /api/files/:attachmentId` | 附件下载（校验 session） |
 | `GET /api/prompts` `GET /api/prompts/:id` `PUT /api/prompts/:id` | 提示词/记忆文档 |
 | `GET /api/prompts/:id/revisions` `POST /api/prompts/:id/rollback` | 版本 |
@@ -194,13 +222,14 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
 | `GET/POST/PATCH/DELETE /api/models[/:id]` | 模型 |
 | `POST /api/models/import` | 从上游目录批量落库：`{providerId, models:[{modelId, displayName?, contextWindow?, maxOutput?}], contextWindow?, maxOutput?}`，单次上限 200 条。已存在的 `(provider_id, model_id)` 跳过而不是覆盖（不能把已调好的定价冲掉），返回 `{inserted, skipped, ids}` |
 | `GET/PUT/DELETE /api/aliases[/:alias]` | 别名、fallback 链与采样参数。`PUT` 校验别名名（`^[a-z][a-z0-9_-]{0,31}$`）、链非空且模型存在、`settings` 过 `aliasSettingsSchema`（[04 §5.2.1](./04-agents-and-providers.md#521-别名参数settings_json)），任一不过返回 `alias_invalid` + 具体路径 |
-| `GET/PATCH /api/principals[/:id]` `POST /api/principals/bulk` | 主体与角色 |
-| `GET /api/tools` `PATCH /api/tools/:name` | 工具启停。写入 `tools.overrides.<name>.enabled`；被禁用的工具从工具目录消失，且 `ToolRegistry.execute` 会二次拦截并返回 `tool_disabled_by_operator`。未知工具名返回 404 |
+| `GET/PATCH /api/principals[/:id]` | 主体与角色 |
+| `POST /api/principals/bulk` | 批量登记主体：`{ids:[…], kind: user\|chat, role}`，单次上限 500。ID 必须是 Telegram 数字 ID（`^-?\d{1,20}$`），非法 ID 或非法角色返回 400。已存在的主体补一次 `setRole`（`upsertSeen` 的 `ON CONFLICT` 不动 role），返回 `{count, created, updated}` |
+| `GET /api/tools` `PATCH /api/tools/:name` | 工具启停。`GET` 在静态策略之外一并返回当前 `enabled`（来自 `tools.overrides`）。`PATCH` 写入 `tools.overrides.<name>.enabled`；被禁用的工具从工具目录消失，且 `ToolRegistry.execute` 会二次拦截并返回 `tool_disabled_by_operator`。未知工具名返回 404 |
 | `GET/PUT /api/sandbox` `POST /api/sandbox/probe` | 沙箱配置与探测 |
 | `GET/POST/PATCH/DELETE /api/skills[/:name]` | Skill（含正文读写） |
 | `GET/PATCH /api/plugins[/:name]` `POST /api/plugins/:name/reload` | Plugin |
 | `GET/POST/PATCH/DELETE /api/mcp[/:name]` `POST /api/mcp/:name/reconnect` | MCP |
-| `GET/POST/PATCH/DELETE /api/agents[/:name]` `POST /api/agents/:name/dryrun` | 子 agent |
+| `GET /api/agents` `POST /api/agents/:name/dryrun` | 子 agent。**写不走单条端点**：定义存在配置里，新增/编辑/删除都是把整张 `agent.agents` 数组经 `PUT /api/config` 写进覆盖层，由 `configSchema` 统一校验 |
 | `GET /api/logs` `GET /api/logs/trace/:traceId` `GET /api/logs/blob?ref=` | 日志 |
 | `GET /api/usage` `GET/PUT /api/quota` `POST /api/quota/reset` | 用量与配额 |
 | `GET /api/tasks` `POST /api/tasks/:id/cancel` | 任务 |

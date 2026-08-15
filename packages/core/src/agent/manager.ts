@@ -32,6 +32,12 @@ export class AgentManager {
     for (const definition of definitions) this.#definitions.set(definition.name, definition);
   }
 
+  /** 定义只在构造时读一次；WebUI 改完 agent 若不重建这张表，运维看到的是「保存成功但派发的还是旧的」。 */
+  replaceDefinitions(definitions: readonly AgentDefinition[]): void {
+    this.#definitions.clear();
+    for (const definition of definitions) this.#definitions.set(definition.name, definition);
+  }
+
   available(role: Role): AgentDefinition[] {
     return [...this.#definitions.values()].filter((definition) => roleRank(role) >= roleRank(definition.minRole));
   }

@@ -924,10 +924,16 @@
               ],
               "default": "stream"
             },
+            "replyDelayMs": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 30000,
+              "default": 2000
+            },
             "streamIntervalMs": {
               "type": "integer",
               "exclusiveMinimum": 0,
-              "default": 1500
+              "default": 2000
             },
             "streamMinDeltaChars": {
               "type": "integer",

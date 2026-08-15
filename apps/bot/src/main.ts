@@ -116,6 +116,7 @@ events.subscribe((event) => {
     configStore.replace(next, keys);
     if (keys.some((key) => key.startsWith('logs.level'))) log.setLevel(next.logs.level);
     if (keys.some((key) => key.startsWith('provider.') || key.startsWith('model'))) modelRegistry.rebuild();
+    if (keys.some((key) => key.startsWith('agent.agents'))) agents.replaceDefinitions(next.agent.agents);
     if (keys.some((key) => key.startsWith('skills.'))) skills.scan();
     if (keys.some((key) => key.startsWith('plugins.'))) void plugins.reconcile();
     log.event({ level: 'info', kind: 'config.changed', summary: 'Runtime configuration reloaded', data: { keys } });

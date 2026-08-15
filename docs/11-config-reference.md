@@ -307,7 +307,9 @@ approval:
 # ============================================================ output（D18）
 output:
   mode: stream                    # 热更新 · stream | once（可 perChat 覆盖）
-  streamIntervalMs: 1500
+  replyDelayMs: 2000              # 距离用户那条消息至少等这么久才发第一条回复（0 = 立刻回）；
+                                  # 窗口内流式产出的文本只攒不发，typing 动作照常
+  streamIntervalMs: 2000          # 两次消息编辑之间的最小间隔
   streamMinDeltaChars: 24
   flushOnSentence: true
   maxMessageChars: 3900

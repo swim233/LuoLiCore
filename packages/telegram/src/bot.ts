@@ -9,7 +9,7 @@ import type { Role, RuntimeTurnContext } from '@luoli/shared';
 import { roleRank } from '@luoli/shared';
 import { contextKey, modelAliasKey, readAppKv, writeAppKv } from '@luoli/db';
 import { matchTrigger } from './trigger.js';
-import { splitTelegramText } from './output.js';
+import { holdReply, splitTelegramText } from './output.js';
 
 export interface TelegramDependencies {
   config: Readonly<Config> | ConfigStore;
@@ -246,6 +246,7 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
   });
 
   bot.on('message', async (ctx) => {
+    const receivedAt = Date.now();
     const access = ingress.get(ctx.update.update_id);
     if (!access) return;
     const from = ctx.from;
@@ -310,6 +311,7 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
       const generated = dependencies.onTurn ? await dependencies.onTurn(turn, reservation) : '尚未配置可用模型。请在 WebUI 中添加 Provider、模型和 main 别名。';
       let answer: string;
       if (typeof generated === 'string') {
+        await holdReply(receivedAt, config.output.replyDelayMs);
         for (const part of splitTelegramText(generated, config.output.maxMessageChars)) {
           const sent = await ctx.reply(part, { parse_mode: 'MarkdownV2' });
           scoped.append({ chatId, messageThreadId: message.message_thread_id ?? null, tgMessageId: sent.message_id, direction: 'out', fromKind: 'bot', fromUserId: String(bot.botInfo.id), fromName: bot.botInfo.first_name, fromUsername: bot.botInfo.username,
@@ -317,8 +319,8 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
         }
         answer = generated;
       } else {
-        const output = new (await import('./stream-output.js')).TelegramOutput(bot, chatId, { mode: config.output.mode, intervalMs: config.output.streamIntervalMs, minDeltaChars: config.output.streamMinDeltaChars, maxChars: config.output.maxMessageChars },
-          (error) => dependencies.log.event({ level: 'warn', kind: 'tg.error', summary: 'Streaming delivery failed', traceId: turn.turnId, chatId, data: { error: error instanceof Error ? error.message : String(error) } }));
+        const output = new (await import('./stream-output.js')).TelegramOutput(bot, chatId, { mode: config.output.mode, replyDelayMs: config.output.replyDelayMs, intervalMs: config.output.streamIntervalMs, minDeltaChars: config.output.streamMinDeltaChars, maxChars: config.output.maxMessageChars },
+          (error) => dependencies.log.event({ level: 'warn', kind: 'tg.error', summary: 'Streaming delivery failed', traceId: turn.turnId, chatId, data: { error: error instanceof Error ? error.message : String(error) } }), receivedAt);
         const consumed = await output.consume(generated.stream, message.message_id);
         if (consumed.interrupted) { generated.interrupt(); void generated.final.catch(() => undefined); answer = consumed.text; }
         else answer = await generated.final;

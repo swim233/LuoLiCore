@@ -240,7 +240,12 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     dependencies.events.emit('config.changed', { keys: [key] }); return ctx.json({ ok: true, data: body });
   });
   app.get('/api/config/revisions', (ctx) => ctx.json({ ok: true, data: dependencies.db.prepare('SELECT * FROM config_revisions ORDER BY ts DESC LIMIT 500').all() }));
-  app.get('/api/tools', (ctx) => ctx.json({ ok: true, data: TOOL_POLICY }));
+  // 策略本身是代码里的单一来源（TOOL_POLICY），但「现在这台机器上开着没有」只在 tools.overrides 里，
+  // 不一起返回的话工具页只能显示一份与运行时无关的静态表。
+  app.get('/api/tools', (ctx) => {
+    const overrides = currentConfig().tools.overrides;
+    return ctx.json({ ok: true, data: Object.fromEntries(Object.entries(TOOL_POLICY).map(([name, policy]) => [name, { ...policy, enabled: overrides[name]?.enabled !== false }])) });
+  });
   app.get('/api/principals', (ctx) => ctx.json({ ok: true, data: dependencies.principals.list() }));
   app.patch('/api/principals/:id', async (ctx) => {
     const body = await ctx.req.json<{ role: 'owner' | 'trusted' | 'limited' | 'blocked' }>();
@@ -374,6 +379,32 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     const items = query ? dependencies.archive.adminSearchAll(query, pageNumber * size) : dependencies.db.prepare('SELECT id,chat_id AS chatId,message_thread_id AS threadId,tg_message_id AS tgMessageId,direction,from_kind AS fromKind,from_user_id AS fromUserId,from_name AS fromName,from_username AS fromUsername,kind,text,tg_date AS tgDate,triggered,trigger_reason AS triggerReason,turn_id AS turnId,revision,deleted_at AS deletedAt FROM messages WHERE deleted_at IS NULL ORDER BY tg_date DESC LIMIT 1000').all();
     return ctx.json({ ok: true, data: page(items, pageNumber, size) });
   });
+  // 消息页默认看的是「最近几次模型对话」而不是逐条消息流：一次 turn 的提问与回答分散在多行里，
+  // 按行翻页读不出对话的样子。分页走 SQL 的 LIMIT/OFFSET，turns 表可能很大，不整表拉回来再切。
+  app.get('/api/turns', (ctx) => {
+    const pageNumber = Math.max(1, Number(ctx.req.query('page') ?? 1));
+    const size = Math.min(100, Math.max(1, Number(ctx.req.query('size') ?? 20)));
+    const total = Number(dependencies.db.prepare('SELECT COUNT(*) FROM turns').pluck().get());
+    const items = dependencies.db.prepare(`SELECT t.id,t.key,t.chat_id AS chatId,t.initiator_user_id AS userId,t.effective_role AS role,t.state,t.trigger_reason AS triggerReason,
+      COALESCE(t.started_at,t.queued_at) AS startedAt,t.finished_at AS finishedAt,t.steps,t.tool_calls AS toolCalls,t.input_tokens AS inputTokens,t.output_tokens AS outputTokens,t.cost_usd AS costUsd,t.error,t.rebased,
+      m.text AS prompt,m.kind AS promptKind,m.from_name AS fromName,m.from_username AS fromUsername
+      FROM turns t LEFT JOIN messages m ON m.id=t.trigger_message_id
+      ORDER BY COALESCE(t.started_at,t.queued_at) DESC,t.rowid DESC LIMIT ? OFFSET ?`).all(size, (pageNumber - 1) * size) as Array<Record<string, unknown>>;
+    if (items.length) {
+      const placeholders = items.map(() => '?').join(',');
+      const replies = dependencies.db.prepare(`SELECT turn_id AS turnId,text FROM messages WHERE turn_id IN (${placeholders}) AND direction='out' AND deleted_at IS NULL ORDER BY id`)
+        .all(...items.map((item) => item.id)) as Array<{ turnId: string; text: string | null }>;
+      // 流式回复被切成多条 Telegram 消息时，归档里每条存的都是同一份全文（archive.append 拿的是 answer），
+      // 直接拼会把回答重复 N 遍，所以按内容去重。
+      const grouped = new Map<string, string[]>();
+      for (const row of replies) {
+        const previous = grouped.get(row.turnId) ?? [];
+        if (row.text && !previous.includes(row.text)) grouped.set(row.turnId, [...previous, row.text]);
+      }
+      for (const item of items) item.reply = (grouped.get(String(item.id)) ?? []).join('\n\n');
+    }
+    return ctx.json({ ok: true, data: { items, total, page: pageNumber, size } });
+  });
   app.get('/api/messages/:id', (ctx) => { const row = dependencies.db.prepare('SELECT id,chat_id AS chatId,message_thread_id AS threadId,tg_message_id AS tgMessageId,direction,from_kind AS fromKind,from_user_id AS fromUserId,from_name AS fromName,from_username AS fromUsername,kind,text,tg_date AS tgDate,triggered,trigger_reason AS triggerReason,turn_id AS turnId,revision,deleted_at AS deletedAt FROM messages WHERE id=?').get(Number(ctx.req.param('id'))); return row ? ctx.json({ ok: true, data: row }) : ctx.json(apiError('not_found', '消息不存在', 404).body, 404); });
   app.delete('/api/messages/:id', (ctx) => { const changes = dependencies.db.prepare('UPDATE messages SET deleted_at=? WHERE id=? AND deleted_at IS NULL').run(Date.now(), Number(ctx.req.param('id'))).changes; return ctx.json({ ok: true, data: { changes } }); });
   app.get('/api/files/:attachmentId', (ctx) => { const row = dependencies.db.prepare('SELECT local_path AS path,mime,file_name AS name FROM attachments WHERE id=?').get(ctx.req.param('attachmentId')) as { path: string | null; mime: string | null; name: string | null } | undefined; if (!row?.path || !existsSync(row.path)) return ctx.json(apiError('not_found', '附件不存在', 404).body, 404); return new Response(readFileSync(row.path), { headers: { 'content-type': row.mime ?? 'application/octet-stream', 'content-disposition': contentDisposition(row.name ?? ctx.req.param('attachmentId')) } }); });
@@ -385,7 +416,32 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
   app.patch('/api/models/:id', async (ctx) => { const body = await ctx.req.json<Record<string, unknown>>(); const map: Record<string, string> = { displayName: 'display_name', contextWindow: 'context_window', maxOutput: 'max_output', priceIn: 'price_in', priceOut: 'price_out', priceCacheRead: 'price_cache_read', priceCacheWrite: 'price_cache_write', enabled: 'enabled', sort: 'sort' }; const entries = Object.entries(body).filter(([key]) => map[key]); if (!entries.length) return ctx.json({ ok: true, data: { changes: 0 } }); const sql = entries.map(([key]) => `${map[key]}=?`).join(','); const values = entries.map(([key, value]) => key === 'enabled' ? (value ? 1 : 0) : value); const changes = dependencies.db.prepare(`UPDATE models SET ${sql},updated_at=? WHERE id=?`).run(...values, Date.now(), ctx.req.param('id')).changes; dependencies.rebuildModels?.(); return ctx.json({ ok: true, data: { changes } }); });
   app.delete('/api/models/:id', (ctx) => { const changes = dependencies.db.prepare('DELETE FROM models WHERE id=?').run(ctx.req.param('id')).changes; dependencies.rebuildModels?.(); return ctx.json({ ok: true, data: { changes } }); });
   app.delete('/api/aliases/:alias', (ctx) => { const changes = dependencies.db.prepare('DELETE FROM model_aliases WHERE alias=?').run(ctx.req.param('alias')).changes; dependencies.rebuildModels?.(); return ctx.json({ ok: true, data: { changes } }); });
-  app.post('/api/principals/bulk', async (ctx) => { const body = await ctx.req.json<{ ids: string[]; role: 'owner'|'trusted'|'limited'|'blocked'; kind?: 'user'|'chat' }>(); for (const id of body.ids) dependencies.principals.upsertSeen({ id: `${body.kind ?? 'user'}:${id}`, kind: body.kind ?? 'user', tgId: id, role: body.role, displayName: null, username: null, chatType: null }, 'webui'); return ctx.json({ ok: true, data: { count: body.ids.length } }); });
+  app.post('/api/principals/bulk', async (ctx) => {
+    const body = await ctx.req.json<{ ids?: unknown; role?: unknown; kind?: unknown }>();
+    const kind = body.kind === 'chat' ? 'chat' : 'user';
+    const role = body.role;
+    if (role !== 'owner' && role !== 'trusted' && role !== 'limited' && role !== 'blocked') return ctx.json(apiError('invalid_role', 'role 必须是 owner / trusted / limited / blocked 之一').body, 400);
+    const raw = Array.isArray(body.ids) ? body.ids : [];
+    const ids = [...new Set(raw.filter((entry): entry is string | number => typeof entry === 'string' || typeof entry === 'number').map((entry) => String(entry).trim()).filter(Boolean))];
+    if (!ids.length) return ctx.json(apiError('invalid_ids', 'ids 至少要有一个 Telegram 数字 ID').body, 400);
+    if (ids.length > 500) return ctx.json(apiError('invalid_ids', '单次最多导入 500 个主体').body, 400);
+    // Telegram ID 是整数（群/频道为负）。放行 @username 只会写出一条永远匹配不到任何消息的主体记录。
+    const malformed = ids.filter((id) => !/^-?\d{1,20}$/.test(id));
+    if (malformed.length) return ctx.json(apiError('invalid_ids', `不是合法的 Telegram 数字 ID：${malformed.slice(0, 5).join('、')}${malformed.length > 5 ? ` 等 ${malformed.length} 个` : ''}`).body, 400);
+    // upsertSeen 的 ON CONFLICT 分支刻意不动 role（避免每条消息把手工设的角色冲掉），
+    // 所以只调它的话已存在的主体会「导入成功」却什么都没变 —— 角色必须再走一次 setRole。
+    let created = 0; let updated = 0;
+    dependencies.db.transaction(() => {
+      for (const tgId of ids) {
+        const id = `${kind}:${tgId}`;
+        const existed = Boolean(dependencies.db.prepare('SELECT 1 FROM principals WHERE id=?').get(id));
+        dependencies.principals.upsertSeen({ id, kind, tgId, role, displayName: null, username: null, chatType: null }, 'webui');
+        if (existed) { if (dependencies.principals.setRole(id, role, 'webui')) updated += 1; } else created += 1;
+      }
+    })();
+    dependencies.log.event({ level: 'info', kind: 'webui.action', summary: 'principals bulk import', data: { kind, role, created, updated } });
+    return ctx.json({ ok: true, data: { count: ids.length, created, updated } });
+  });
   app.patch('/api/tools/:name', async (ctx) => {
     const name = ctx.req.param('name');
     const body = await ctx.req.json<{ enabled?: boolean }>();
