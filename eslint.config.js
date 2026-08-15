@@ -11,7 +11,7 @@ export default defineConfig(
       'dist/**',
       'logs/**',
       'node_modules/**',
-      'packages/webui/dist/**',
+      'packages/*/dist/**',
     ],
   },
   ...tseslint.configs.recommended,

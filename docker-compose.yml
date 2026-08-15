@@ -10,6 +10,13 @@ services:
       # 沙箱的 `docker run -v` 由宿主 daemon 解析，容器内的 /app/data/workspace 在宿主上不存在。
       # 这里给出同一目录的宿主路径。从别的目录跑 compose 时 ${PWD} 不等于本文件所在目录，需显式指定。
       LUOLI_HOST_WORKSPACE_DIR: ${PWD}/data/workspace
+    # 镜像默认以 node 用户（uid/gid 1000）跑，对上了宿主用户与沙箱容器的 --user=1000:1000。
+    # 宿主用户不是 1000 时在这里覆盖：user: "1001:1001"（./data 等 bind mount 的属主要能写）。
+    # 容器以非 root 用户跑，而 /var/run/docker.sock 是 root:docker 0660 —— 不把宿主 docker
+    # 组的 gid 加进来就是 EACCES，沙箱直接 fail-closed。gid 各机器不同，必须在 .env 里给：
+    # DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)
+    group_add:
+      - "${DOCKER_GID:?请在 .env 里设置 DOCKER_GID，取值 stat -c '%g' /var/run/docker.sock；不用 docker 沙箱时填 0}"
     ports:
       - "127.0.0.1:8787:8787"
     volumes:

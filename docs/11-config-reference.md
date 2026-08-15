@@ -20,6 +20,7 @@
 | `LUOLI_CONFIG` | ✗ | 配置文件路径，默认 `./config/config.yaml` |
 | `LUOLI_DATA_DIR` | ✗ | 数据目录，默认 `./data` |
 | `LUOLI_HOST_WORKSPACE_DIR` | ✗ | 映射到 `sandbox.hostWorkspaceDir`。**应用跑在容器里且 `sandbox.mode: docker` 时必填**，见 [§2 sandbox](#sandbox) |
+| `DOCKER_GID` | ✗ | 只被 `docker-compose.yml` 的 `group_add` 消费（不进配置）。容器以非 root 跑，不加入宿主 docker 组就读不到挂进来的 `/var/run/docker.sock`。取值 `stat -c '%g' /var/run/docker.sock`；不用 docker 沙箱时填 `0`。未设置时 compose 直接拒绝启动而不是让沙箱在运行时静默失效 |
 | `TZ` | ✗ | 建议显式设置，如 `Asia/Shanghai` |
 | `NODE_ENV` | ✗ | `production` 时关闭 pretty 日志与 dev 代理 |
 | 其他 `${env:X}` 引用 | ✗ | 配置里的 `${env:NAME}` 会在加载时替换（用于 MCP headers 等） |

@@ -8,14 +8,14 @@
     "node": ">=22"
   },
   "scripts": {
-    "dev": "tsx apps/bot/src/main.ts",
-    "start": "node dist/apps/bot/src/main.js",
-    "build": "pnpm webui:build && tsc -p tsconfig.build.json",
+    "dev": "tsx --env-file-if-exists=.env apps/bot/src/main.ts",
+    "start": "node --env-file-if-exists=.env dist/apps/bot/src/main.js",
+    "build": "pnpm webui:build && tsc -p tsconfig.build.json && tsx scripts/postbuild.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
     "smoke": "tsx scripts/smoke.ts",
-    "db:migrate": "tsx scripts/migrate.ts",
+    "db:migrate": "tsx --env-file-if-exists=.env scripts/migrate.ts",
     "config:schema": "tsx scripts/config-schema.ts",
     "webui:build": "vite build --config packages/webui/vite.config.ts",
     "webui:dev": "vite --config packages/webui/vite.config.ts",
@@ -24,6 +24,12 @@
     "format": "prettier --write ."
   },
   "dependencies": {
+    "@luoli/shared": "workspace:*",
+    "@luoli/db": "workspace:*",
+    "@luoli/core": "workspace:*",
+    "@luoli/server": "workspace:*",
+    "@luoli/telegram": "workspace:*",
+    "@luoli/plugin-sdk": "workspace:*",
     "@ai-sdk/anthropic": "^4.0.38",
     "@ai-sdk/google": "^4.0.44",
     "@ai-sdk/openai": "^4.0.41",
