@@ -17,7 +17,7 @@
 | [06-prompt-and-memory.md](./06-prompt-and-memory.md) | 系统提示词装配、ASSIST/CHARACTER/PUBMEMORY/PRIMEMORY | 后端 / 提示词 |
 | [07-skills-plugins-mcp.md](./07-skills-plugins-mcp.md) | SKILL.md 规范、Plugin API、MCP 接入 | 后端 / 扩展开发 |
 | [08-telegram-adapter.md](./08-telegram-adapter.md) | grammY 适配层、触发、流式输出、多模态、命令 | 后端 |
-| [09-webui.md](./09-webui.md) | PrimeVue 管理端页面、REST/SSE API、鉴权 | 前端 / 后端 |
+| [09-webui.md](./09-webui.md) | 管理端页面、REST/SSE API、鉴权 | 前端 / 后端 |
 | [10-logging-and-observability.md](./10-logging-and-observability.md) | 独立日志、trace 模型、成本记账、配额 | 后端 / 运维 |
 | [11-config-reference.md](./11-config-reference.md) | 全量配置项参考（含默认值与热更新语义） | 全体 |
 | [12-implementation-plan.md](./12-implementation-plan.md) | M0–M10 分阶段实施指导与出口条件 | 全体 |
@@ -79,7 +79,7 @@ Telegram ──► 准入(白名单/角色) ──► 归档(DB, 按 chat 隔离
 | D17 | 长任务 | **占位消息 + 进度编辑 + inline `/cancel`** | [08](./08-telegram-adapter.md#6-长任务与进度) |
 | D18 | 输出方式 | **可配置，默认流式 `editMessageText`** | [08](./08-telegram-adapter.md#5-输出与流式) |
 | D19 | 配额 | **记账 + 多级配额硬限**（global/chat/user，日/月，按角色覆盖），超额拒绝并提示 | [10](./10-logging-and-observability.md#5-配额) |
-| D20 | 技术栈 | TypeScript / Node 22 / pnpm workspace / **AI SDK v7** / **grammY** / **Drizzle + better-sqlite3** / Hono / Vite + Vue 3 + **PrimeVue** / vitest | [01](./01-architecture.md#5-技术栈) |
+| D20 | 技术栈 | TypeScript / Node 22 / pnpm workspace / **AI SDK v7** / **grammY** / **Drizzle + better-sqlite3** / Hono / Vite + Vue 3（自建 UI 层）/ vitest | [01](./01-architecture.md#5-技术栈) |
 
 ---
 
