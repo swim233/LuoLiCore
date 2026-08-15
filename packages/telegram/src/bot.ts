@@ -36,6 +36,14 @@ function messageKind(message: Record<string, unknown>): string {
   const ordered = ['text', 'photo', 'document', 'voice', 'video', 'video_note', 'sticker', 'animation', 'audio', 'location', 'poll'];
   return ordered.find((key) => key in message) ?? 'other';
 }
+// 运维态失败（模型没配、缺定价）不能并进「出了点问题」：用户重试多少次都不会好，
+// 得说清楚该由谁去做什么（docs/08 §9）。其余错误仍不暴露内部细节，只给 ref。
+function failureText(error: unknown, reference: string): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message.startsWith('model alias unavailable')) return `模型还没配置好，得管理员在 WebUI 里配上 provider 和 main 别名。(ref: ${reference})`;
+  if (message === 'model_pricing_required') return `当前模型没配价格，管理员补上定价才能用。(ref: ${reference})`;
+  return `出了点问题，已记录。(ref: ${reference})`;
+}
 interface TelegramIngress {
   archived: ArchivedMessage;
   effectiveRole: Role;
@@ -324,7 +332,7 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
       await dependencies.context.abortTurn(turn, cancelled ? 'cancelled' : 'failed', error);
       dependencies.turns.finish(turn.turnId, cancelled ? { state: 'cancelled', cancelReason: String(turn.abortSignal.reason ?? 'cancelled') } : { state: 'failed', error: error instanceof Error ? error.message : String(error) });
       dependencies.log.event({ level: cancelled ? 'warn' : 'error', kind: 'turn.end', summary: cancelled ? 'turn cancelled' : error instanceof Error ? error.message : 'turn failed', traceId: turn.turnId, chatId, userId, key });
-      await ctx.reply(cancelled ? '⛔ 已取消' : `出了点问题，已记录。\(ref: ${turn.turnId.slice(0, 12)}\)`);
+      await ctx.reply(cancelled ? '⛔ 已取消' : failureText(error, turn.turnId.slice(0, 12)));
     } finally {
       dependencies.tools?.releaseTurn(turn.turnId);
       dependencies.approvals?.releaseTurn(turn.turnId);

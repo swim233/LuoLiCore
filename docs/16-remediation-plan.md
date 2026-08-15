@@ -60,7 +60,7 @@
 | G-AGENT-03 | 用生命周期回调产出 `model.call`/`tool.call` span 树（含 `parentSpanId`），body 按 `captureBodies` 落盘 |
 | G-AGENT-05 | 降档后按实际模型记账 |
 | G-AGENT-06 | prompt cache 断点 |
-| G-AGENT-07 | 启动校验 `main` 别名缺失即拒绝启动 |
+| G-AGENT-07 | 启动校验 `main` 别名缺失（后改为告警不阻塞启动，见 [04 §5.2](./04-agents-and-providers.md#52-内建别名语义)） |
 | G-CTX-03 | `prepareStep` 硬天花板 `pruneMessages` |
 | **G-QUOTA-01** | 预留估算 ×1.5、每次模型调用后 commit、`prepareStep` 里的 `canSpend`、`perTurn.*`、`rateLimit`、80% 提示、`requirePricing` |
 

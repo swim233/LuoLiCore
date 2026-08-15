@@ -386,7 +386,10 @@ registry.languageModel('anthropic-main:claude-opus-5')   // 直指（WebUI 测�
 | `embed` | （预留）向量检索 | embedding 模型 |
 
 规则：
-- 别名缺失时按 `main → high → low` 顺序回退；`main` 缺失则**拒绝启动**并在 WebUI 显红。
+- 别名缺失时按 `main → high → low` 顺序回退；`main` 缺失则启动时**打印告警并在 WebUI 显红**，但**不阻塞启动**：
+  零配置首启（无 provider / 无模型 / 无别名）本来就没有 `main`，拒绝启动会把 WebUI 一起带走，
+  运维反而没有地方去补配置。缺 `main` 时轮次在 `streamMainAgent` 里以 `model alias unavailable` 失败，
+  WebUI 写入别名后 `rebuildModels()` 即时生效，无需重启。
 - 轮次包含图片且当前模型 `capabilities.vision=false` → `prepareStep` 自动切 `vision`；若 `vision` 未配置 → 图片降级为 `[图片: <caption>]` 文本占位并在回复末尾提示。
 - 模型可用 `set_model` 工具（`minRole=trusted`）为**当轮**指定别名，写入 `turn.runtime.modelAliasOverride`；不跨轮持久。
 - 用户可用 `/model <alias>` 为**当前会话**固定别名（`minRole=trusted`，存 `config_kv` 的 `perChat.modelAlias.<key>`）。
