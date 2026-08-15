@@ -32,7 +32,7 @@ const db = openDatabase(config.db.path);
 migrateDatabase(db);
 recoverAfterCrash(db);
 const principals = new PrincipalRepository(db);
-principals.upsertSeen({ id: `user:${config.access.bootstrapOwnerId}`, kind: 'user', tgId: config.access.bootstrapOwnerId, role: 'owner', displayName: 'Owner', username: null, chatType: null }, 'bootstrap');
+principals.ensureOwner(config.access.bootstrapOwnerId);
 const archive = new ArchiveRepository(db);
 const operations = new OperationsRepository(db);
 const turns = new TurnRepository(db);

@@ -81,7 +81,11 @@ select { appearance: none; padding-right: 30px; background-image: url("data:imag
 .ui-tag.warn { color: var(--amber); background: color-mix(in srgb, var(--amber), transparent 88%); }
 .ui-tag.danger { color: var(--rose); background: color-mix(in srgb, var(--rose), transparent 88%); }
 .ui-tag.secondary { color: var(--muted); background: var(--surface-2); }
-.callout { display: flex; align-items: flex-start; gap: 10px; margin: 0; padding: 11px 14px; border: 1px solid var(--border); border-radius: 12px; font-size: .8rem; line-height: 1.55; }
+/* 正文里嵌 <code> 是常态。flex 会把每段文本切成独立的 flex item，各自缩到 min-content
+   —— 一句话被挤成三个字一列。改成常规流 + 绝对定位的图标，文字与 code 才会正常连排。 */
+.callout { position: relative; margin: 0; padding: 11px 14px 11px 38px; border: 1px solid var(--border); border-radius: 12px; font-size: .8rem; line-height: 1.6; }
+.callout > i { position: absolute; left: 14px; top: 13px; }
+.callout code { overflow-wrap: anywhere; }
 .callout.warn { border-color: var(--amber); color: var(--amber); background: color-mix(in srgb, var(--amber), transparent 92%); }
 .callout.error { border-color: var(--rose); color: var(--rose); background: color-mix(in srgb, var(--rose), transparent 92%); }
 .ui-fieldset { border: 1px solid var(--border); border-radius: 14px; padding: 0 15px; background: var(--surface); }
@@ -191,7 +195,13 @@ select { appearance: none; padding-right: 30px; background-image: url("data:imag
 .search { position: relative; display: flex; align-items: center; }
 .search i { position: absolute; left: 12px; color: var(--muted); z-index: 1; }
 .search input { width: 290px; padding-left: 38px; background: var(--canvas); }
-.avatar { width: 38px; height: 38px; border-radius: 12px; display: grid; place-items: center; background: var(--primary-soft); color: var(--primary); font: 600 .76rem var(--font-mono); }
+.avatar { width: 38px; height: 38px; flex: none; border-radius: 12px; display: grid; place-items: center; background: var(--primary-soft); color: var(--primary); font: 600 .76rem var(--font-mono); }
+/* 顶栏那个头像以前写死 'OW'：谁是这台 bot 的 owner 得去主体页翻，翻到的还可能是重启时被冲成占位符的名字 */
+.owner-chip { display: flex; align-items: center; gap: 10px; padding: 4px 10px 4px 4px; border: 1px solid transparent; border-radius: 14px; background: transparent; color: inherit; max-width: 15rem; }
+.owner-chip:hover { border-color: var(--border); background: var(--surface-2); }
+.owner-chip .who { display: grid; gap: 2px; min-width: 0; text-align: left; }
+.owner-chip b { font-size: .8rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.owner-chip small { color: var(--muted); font: .68rem var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .content { padding: 32px; max-width: 1600px; margin: auto; }
 .hero-row { display: flex; align-items: end; justify-content: space-between; gap: 30px; padding: 20px 4px 30px; }
 .hero-row h2 { margin: 0 0 10px; font-size: clamp(1.9rem, 3vw, 3rem); letter-spacing: -.04em; }
@@ -326,8 +336,10 @@ select { appearance: none; padding-right: 30px; background-image: url("data:imag
 .conversation { border: 1px solid var(--border); border-radius: 15px; background: var(--surface); overflow: hidden; }
 .conversation.failed { border-color: color-mix(in srgb, var(--rose), transparent 55%); }
 .conversation.cancelled { border-style: dashed; }
-.conversation > button { display: grid; gap: 8px; width: 100%; padding: 15px 17px; border: 0; background: transparent; color: inherit; text-align: left; }
-.conversation > button:hover { background: color-mix(in srgb, var(--primary-soft), transparent 55%); }
+.conversation-body { display: flex; align-items: flex-start; gap: 4px; }
+.conversation-side { flex: none; padding: 14px 14px 0 0; }
+.conversation-body > button { flex: 1 1 auto; min-width: 0; display: grid; gap: 8px; width: 100%; padding: 15px 17px; border: 0; background: transparent; color: inherit; text-align: left; }
+.conversation-body > button:hover { background: color-mix(in srgb, var(--primary-soft), transparent 55%); }
 .conversation-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .conversation-head code { color: var(--muted); }
 .conversation-who { font-size: .82rem; font-weight: 600; }
@@ -345,6 +357,50 @@ select { appearance: none; padding-right: 30px; background-image: url("data:imag
 .conversation-full .field-title { display: flex; gap: 10px; align-items: baseline; margin: 6px 0 0; font-size: .78rem; font-weight: 600; }
 .conversation-full .field-title small { color: var(--muted); font-weight: 400; font-family: var(--font-mono); }
 
+/* ── 对话详情：这一轮实际发给上游的 JSON ── */
+.detail-summary { display: flex; flex-wrap: wrap; gap: 10px 26px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface-2); }
+.detail-summary > span { display: grid; gap: 4px; font-size: .84rem; }
+.detail-summary small { color: var(--muted); font-size: .68rem; letter-spacing: .06em; text-transform: uppercase; font-family: var(--font-mono); }
+.detail-summary .ui-tag { justify-self: start; }
+.ui-modal .subtabs { margin: 16px 0 12px; }
+.ui-modal .callout { margin-top: 12px; }
+.detail-events { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.detail-events > li { border: 1px solid var(--border); border-radius: 12px; background: var(--surface); overflow: hidden; }
+.detail-events > li.empty { border-style: dashed; padding: 30px 16px; }
+.detail-events > li > button { display: grid; grid-template-columns: 14px auto 170px minmax(80px, 1fr) auto auto; align-items: center; gap: 10px; width: 100%; padding: 10px 13px; border: 0; background: transparent; color: inherit; text-align: left; }
+.detail-events > li > button:hover { background: var(--primary-soft); }
+.detail-events > li > button > i { color: var(--muted); font-size: .7rem; }
+.detail-events code { overflow-wrap: anywhere; }
+.detail-summary-text { color: var(--muted); font-size: .8rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.detail-events small { color: var(--muted); font: .68rem var(--font-mono); white-space: nowrap; }
+.detail-events time { color: var(--muted); font: .66rem var(--font-mono); }
+.detail-payload { padding: 0 13px 13px; }
+.detail-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding-bottom: 9px; }
+.detail-actions .ui-btn { text-decoration: none; }
+.detail-truncated { color: var(--amber); }
+/* 一次请求体几十 KB，撑开对话框就没法翻事件列表了：固定高度自己滚 */
+.detail-payload pre { margin: 0; max-height: 46vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: #10131a; color: #d9e0ee; border-radius: 10px; padding: 14px; font: 400 .74rem/1.6 var(--font-mono); }
+.detail-payload .empty { padding: 18px; margin: 0; }
+
+/* ── 提示词卡片：id 认不出用途，把它写在卡片上 ── */
+.prompt-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(232px, 1fr)); align-content: start; gap: 12px; }
+.prompt-card { display: grid; grid-template-columns: 38px 1fr auto; gap: 4px 11px; padding: 15px; border: 1px solid var(--border); border-radius: 16px; background: var(--surface); color: inherit; text-align: left; transition: 160ms ease; }
+.prompt-card:hover { border-color: color-mix(in srgb, var(--primary), transparent 55%); box-shadow: 0 8px 22px rgba(37, 27, 73, .06); transform: translateY(-1px); }
+.prompt-card.active { border-color: var(--primary); background: var(--primary-soft); }
+.prompt-icon { grid-row: span 2; display: grid; place-items: center; width: 38px; height: 38px; border-radius: 12px; background: var(--surface-2); color: var(--primary); }
+.prompt-card.active .prompt-icon { background: var(--surface); }
+.prompt-card b { align-self: center; font-size: .92rem; letter-spacing: -.01em; }
+.prompt-card > .ui-tag { align-self: center; justify-self: end; max-width: 9rem; overflow: hidden; text-overflow: ellipsis; display: block; }
+.prompt-card p { grid-column: 2 / -1; margin: 2px 0 0; color: var(--muted); font-size: .76rem; line-height: 1.55; }
+.prompt-card code { grid-column: 1 / -1; margin-top: 8px; color: var(--primary); overflow-wrap: anywhere; }
+.prompt-card small { grid-column: 1 / -1; color: var(--muted); font: .68rem/1.5 var(--font-mono); }
+.prompt-cards .empty { grid-column: 1 / -1; border: 1px dashed var(--border); border-radius: 16px; }
+.editor-panel > header small { display: block; margin-top: 4px; color: var(--muted); font: .7rem var(--font-mono); overflow-wrap: anywhere; }
+.editor-panel .callout { margin-top: 14px; }
+.editor-panel .revision-list .empty { padding: 18px 0; text-align: left; }
+.editor-panel.empty-card { display: grid; align-content: center; justify-items: center; gap: 8px; }
+.editor-panel.empty-card p { margin: 0; color: var(--muted); font-size: .82rem; }
+
 /* ── 子导航（主体页的用户 / 群聊） ── */
 .subtabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 16px; padding: 4px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-2); width: fit-content; }
 .subtabs button { display: flex; align-items: center; gap: 8px; min-height: 32px; padding: 0 14px; border: 0; border-radius: 9px; background: transparent; color: var(--muted); font-size: .82rem; font-weight: 600; transition: 150ms ease; }
@@ -352,6 +408,11 @@ select { appearance: none; padding-right: 30px; background-image: url("data:imag
 .subtabs button.active { background: var(--surface); color: var(--ink); box-shadow: 0 1px 3px rgba(24, 18, 48, .1); }
 .subtabs button span { padding: 1px 7px; border-radius: 6px; background: var(--surface-2); color: var(--muted); font: 600 .68rem var(--font-mono); }
 .subtabs button.active span { background: var(--primary-soft); color: var(--primary); }
+.bulk-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 12px; padding: 10px 14px; border: 1px solid color-mix(in srgb, var(--primary), transparent 60%); border-radius: 12px; background: var(--primary-soft); font-size: .82rem; }
+.bulk-bar > i { color: var(--primary); }
+.bulk-bar > span { margin-right: auto; }
+.selection-preview { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; max-height: 168px; overflow: auto; }
+.selection-preview code { max-width: 14rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ── 子 Agent 的工具多选 ── */
 .agent-tools { font: .76rem/1.6 var(--font-mono); overflow-wrap: anywhere; }
@@ -375,7 +436,9 @@ select { appearance: none; padding-right: 30px; background-image: url("data:imag
   .mobile-only { display: inline-flex !important; }
   .topbar { padding: 0 16px; justify-content: flex-start; gap: 12px; }
   .top-actions { margin-left: auto; padding-right: 46px; }
-  .search { display: none; }
+  .search, .owner-chip .who { display: none; }
+  .detail-events > li > button { grid-template-columns: 14px auto 1fr auto; }
+  .detail-events > li > button > :nth-child(4), .detail-events time { display: none; }
   .content { padding: 20px 14px; }
   .auth-page { grid-template-columns: 1fr; padding: 26px; }
   .auth-copy { display: none; }

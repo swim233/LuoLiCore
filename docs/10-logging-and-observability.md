@@ -133,6 +133,11 @@ logs:
 
 **DB 索引行 vs 文件全文**：`log_events` 只存摘要字段（可检索、可聚合），完整 payload 只在文件里。这样 DB 不会被大 payload 撑爆，同时 WebUI 仍能按需拉全文（`GET /api/logs/blob?ref=`）。
 
+**读出侧必须解引用**：超过 `logs.bodyMaxBytes` 的 `data` 在库里只剩 `{fileRef, bytes}`。任何展示载荷的地方
+（`GET /api/turns/:id/detail`、`GET /api/logs/:id/data`，见 [09 §4](./09-webui.md#4-rest-api)）都要顺着 `fileRef`
+把 `logs/<day>/blobs/*.json` 读回来 —— 否则「查看这一轮实际发了什么」看到的是一行占位对象，
+而恰恰是最大的那些请求体会命中这条路径。文件已被保留策略清掉时如实说明，不要拿占位对象充数。
+
 ## 4. 成本记账
 
 ### 4.1 记账点
