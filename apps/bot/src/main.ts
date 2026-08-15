@@ -160,3 +160,14 @@ const shutdown = async (signal: string): Promise<void> => {
 };
 process.once('SIGTERM', () => void shutdown('SIGTERM'));
 process.once('SIGINT', () => void shutdown('SIGINT'));
+// 一次 uncaught 的流错误可以直接带走进程，而日志里一个字都不留 —— 上一次排查只能靠翻数据库
+// 猜「最后一条 turn.start 之后发生了什么」。行为不变（照旧退出，恢复交给下次启动的
+// recoverAfterCrash），但崩之前必须留下原因。LogSink 是 appendFileSync，写得完。
+for (const fatal of ['uncaughtException', 'unhandledRejection'] as const) {
+  process.on(fatal, (error: unknown) => {
+    const detail = error instanceof Error ? error.stack ?? error.message : String(error);
+    log.event({ level: 'error', kind: 'system.crash', summary: `${fatal}: ${error instanceof Error ? error.message : String(error)}`, data: { event: fatal, detail } });
+    process.stderr.write(`[crash] ${fatal}: ${detail}\n`);
+    process.exit(1);
+  });
+}

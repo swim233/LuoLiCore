@@ -146,10 +146,26 @@ export class ModelRegistry {
     return this.#chains.get(alias) ?? [];
   }
 }
+/**
+ * tool-result 的 output 必须是 SDK 的带类型形状（`{type:'json'|'text'|…, value}`），裸对象会让
+ * 整个 prompt 过不了 ModelMessage 校验。历史上写进库的是裸对象，而 parts 是持久化的 ——
+ * 只改写入端的话，凡是调过一次工具的会话在 `/new` 之前每轮都会失败，所以读出侧也要兜一层。
+ * 只补 output，不碰判别字段（docs/02 不变量）。
+ */
+export function normalizeToolOutput(output: unknown): { type: string; value: unknown } {
+  if (output && typeof output === 'object' && !Array.isArray(output)) {
+    const typed = output as { type?: unknown; value?: unknown };
+    if (typeof typed.type === 'string' && 'value' in typed) return typed as { type: string; value: unknown };
+  }
+  return { type: 'json', value: output ?? null };
+}
+export function toolResultPart(toolCallId: string, toolName: string, output: unknown): { type: 'tool-result'; toolCallId: string; toolName: string; output: { type: string; value: unknown } } {
+  return { type: 'tool-result', toolCallId, toolName, output: normalizeToolOutput(output) };
+}
 export function contextMessages(turn: RuntimeTurnContext): ModelMessage[] {
   return [...turn.snapshot.messages, ...turn.delta].map((message) => ({
     role: message.role,
-    content: message.parts,
+    content: (message.parts as Array<Record<string, unknown>>).map((part) => part?.type === 'tool-result' ? { ...part, output: normalizeToolOutput(part.output) } : part),
   } as ModelMessage));
 }
 
@@ -271,7 +287,7 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
       if (dependencies.quota && dependencies.reservation) dependencies.quota.commit(dependencies.reservation, cost);
       stepSpans.get(step.stepNumber)?.end({ model: step.model, usage: step.usage, cost, request: bodyForLog(step.request, dependencies.config.logs.captureBodies), response: bodyForLog(step.response, dependencies.config.logs.captureBodies) });
       for (const call of step.toolCalls) dependencies.context.appendDelta(turn, { id: `call:${call.toolCallId}`, role: 'assistant', origin: 'tool_call', parts: [{ type: 'tool-call', toolCallId: call.toolCallId, toolName: call.toolName, input: call.input }], textPreview: `${call.toolName}(${JSON.stringify(call.input).slice(0, 180)})`, pruneLevel: 2 });
-      for (const result of step.toolResults) dependencies.context.appendDelta(turn, { id: `result:${result.toolCallId}`, role: 'tool', origin: 'tool_result', parts: [{ type: 'tool-result', toolCallId: result.toolCallId, toolName: result.toolName, output: result.output }], textPreview: `${result.toolName}: ${JSON.stringify(result.output).slice(0, 180)}`, pruneLevel: 1 });
+      for (const result of step.toolResults) dependencies.context.appendDelta(turn, { id: `result:${result.toolCallId}`, role: 'tool', origin: 'tool_result', parts: [toolResultPart(result.toolCallId, result.toolName, result.output)], textPreview: `${result.toolName}: ${JSON.stringify(result.output).slice(0, 180)}`, pruneLevel: 1 });
       const estimatedInput = Math.max(1, turn.snapshot.tokens + turn.delta.reduce((sum, message) => sum + (message.tokens ?? 0), 0));
       const ratio = dependencies.context.calibrate(turn.key, step.usage.inputTokens ?? 0, estimatedInput, dependencies.config.context.tokenRatioAlpha);
       if (Math.abs((step.usage.inputTokens ?? 0) / estimatedInput - 1) > 0.2) dependencies.log.event({ level: 'warn', kind: 'ctx.token_calibration', summary: `token ratio ${ratio.toFixed(3)}`, traceId: turn.turnId, key: turn.key, data: { estimatedInput, realInput: step.usage.inputTokens ?? 0, ratio } });

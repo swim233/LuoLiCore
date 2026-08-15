@@ -72,6 +72,11 @@ turn 01J8…                                     kind=turn.start / turn.end
 | `config.changed` | info | keys[], actor |
 | `maintenance.*` | info | job, ms, affected |
 | `system.start` / `system.stop` | info | version, mode, uptime |
+| `system.crash` | error | event（`uncaughtException` \| `unhandledRejection`）, detail（stack） |
+
+`system.crash` 是崩溃前的最后一行：进程照旧退出（恢复交给下次启动的 `recoverAfterCrash`），
+但必须留下原因。曾经有一次 uncaught 的流错误把进程直接带走、日志里一个字都没有，
+排查只能靠翻数据库猜「最后一条 `turn.start` 之后发生了什么」——这个钩子就是为了不再有第二次。
 
 ## 3. 落盘格式
 

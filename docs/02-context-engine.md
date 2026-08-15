@@ -447,3 +447,10 @@ export interface CommitResult {
 12. ✅ 背景认领在 `openTurn` 独占、成功提交清 owner、失败/取消/崩溃归还；同一 `sourceMessageId` 在上下文中至多出现一次。
 13. ✅ 分级 prune 保留工具 part 类型与配对 ID；`materialize()` 对 tool 形状和顺序做运行时断言。
 14. ✅ 每个 part 的 `type` 必须属于已知判别集合（text / image / image_url / file / reasoning / tool-call / tool-result）。`openTurn`、`materialize()` 与 `commitTurn` 三处都断言——读出侧和写入侧都要挡，坏形状要在产生它的那一轮报错。
+15. ✅ `tool-result` 的 `output` 必须是 provider SDK 认的**带类型形状** `{ type: 'json' | 'text' | 'error-json' | …, value }`，不能是裸对象。
+    这条不是风格问题：裸对象过不了 `ModelMessage` 校验，整个 prompt 被拒，AI SDK 随后在流的 flush 里抛出
+    **无人接管的** `NoOutputGeneratedError` —— 不是一次可捕获的轮次失败，是直接带走整个进程。
+    而 parts 是持久化的，所以「调过一次工具的会话，之后每一轮都会崩」，且日志里一个字都不留。
+    写入端（`runtime.ts` 的 `toolResultPart`）与读出端（`contextMessages`）都做归一化：只改 `output`，
+    判别字段一个不碰；读出端兜底是为了让已经写坏的历史会话不必 `/new` 就能恢复。降级路径
+    （`packages/db/src/context.ts` 的 `elidePart`）本来就写的是 `{type:'text', value:'[已省略工具结果]'}`，与此一致。

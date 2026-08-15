@@ -103,7 +103,7 @@ function resolveJailed(p: string, root: string): string {
 
 | 工具 | minRole | 说明 |
 |---|---|---|
-| `search_messages` | limited | `{query, from?, after?, before?, kind?, limit?}` — FTS5 检索。**强制**限定当前 context key 的 chat |
+| `search_messages` | limited | `{query, from?, after?, before?, kind?, limit?}` — FTS5 检索。**强制**限定当前 context key 的 chat。`query` 由模型写，绝不能原样进 `MATCH`：FTS5 的 `\|` `"` `*` `:` `-` `^` `()` 和 AND/OR/NOT/NEAR 都是语法，模型写一句 `名字\|我是\|叫\|谁` 就把整次调用打成 `fts5: syntax error`，它只能瞎改参数重试。`archiveQuery()` 先切词：有 ≥3 字的词就逐个加引号 OR 起来走 FTS（trigram 匹配不了更短的词），一个都没有（中文两字词几乎全在这一档）就退回 LIKE，且用最长的那个词而不是原串 —— 原串里还带着运算符，`LIKE '%名字\|我是%'` 永远匹配不到东西 |
 | `read_messages` | limited | 「按顺序读取聊天记录」：`{anchor?, direction?, limit?}`。`anchor` 可为 message id / ordinal / ISO 时间；`direction: 'before'\|'after'\|'around'`；默认 limit 50、上限 200 |
 | `get_message` | limited | `{messageId}` — 单条详情（含附件元数据、回复链） |
 | `admin_search_messages` | **owner** | 跨全部 chat 检索；返回结果附 `chat_id` 与 chat 名 |
