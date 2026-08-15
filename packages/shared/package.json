@@ -1,0 +1,6 @@
+{
+  "name": "@luoli/shared",
+  "private": true,
+  "type": "module",
+  "exports": "./dist/index.js"
+}

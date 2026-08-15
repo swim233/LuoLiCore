@@ -1,0 +1,6 @@
+{
+  "name": "@luoli/bot",
+  "private": true,
+  "type": "module",
+  "dependencies": { "@luoli/shared": "workspace:*", "@luoli/db": "workspace:*", "@luoli/core": "workspace:*", "@luoli/server": "workspace:*", "@luoli/telegram": "workspace:*" }
+}

@@ -1,0 +1,15 @@
+node_modules/
+dist/
+packages/webui/dist/
+data/*
+!data/.gitkeep
+logs/*
+!logs/.gitkeep
+.env
+*.db
+*.db-wal
+*.db-shm
+coverage/
+.luoli-*
+.claude/settings.local.json
+*.tsbuildinfo

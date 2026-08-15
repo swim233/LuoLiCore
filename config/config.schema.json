@@ -1,0 +1,1478 @@
+{
+  "$ref": "#/definitions/LuoLiConfig",
+  "definitions": {
+    "LuoLiConfig": {
+      "type": "object",
+      "properties": {
+        "general": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "default": "洛璃"
+            },
+            "timezone": {
+              "type": "string",
+              "default": "Asia/Shanghai"
+            },
+            "locale": {
+              "type": "string",
+              "default": "zh-CN"
+            },
+            "maintenanceCron": {
+              "type": "string",
+              "default": "0 4 * * *"
+            },
+            "shutdown": {
+              "type": "object",
+              "properties": {
+                "graceMs": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 30000
+                }
+              },
+              "additionalProperties": false,
+              "default": {}
+            }
+          },
+          "additionalProperties": false,
+          "default": {}
+        },
+        "telegram": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "polling",
+                "webhook"
+              ],
+              "default": "polling"
+            },
+            "dropPendingOnStart": {
+              "type": "boolean",
+              "default": false
+            },
+            "allowedUpdates": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": [
+                "message",
+                "edited_message",
+                "callback_query",
+                "my_chat_member",
+                "message_reaction"
+              ]
+            },
+            "webhook": {
+              "type": "object",
+              "properties": {
+                "url": {
+                  "type": "string",
+                  "default": ""
+                },
+                "path": {
+                  "type": "string",
+                  "default": "/webhook/telegram"
+                },
+                "secretToken": {
+                  "type": "string",
+                  "default": ""
+                }
+              },
+              "additionalProperties": false,
+              "default": {}
+            },
+            "allowBots": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "notifyEdits": {
+              "type": "boolean",
+              "default": true
+            },
+            "strictCommandSuffix": {
+              "type": "boolean",
+              "default": false
+            },
+            "throttle": {
+              "type": "object",
+              "properties": {
+                "globalPerSecond": {
+                  "type": "number",
+                  "exclusiveMinimum": 0,
+                  "default": 30
+                },
+                "perChatPerMinute": {
+                  "type": "number",
+                  "exclusiveMinimum": 0,
+                  "default": 20
+                }
+              },
+              "additionalProperties": false,
+              "default": {}
+            }
+          },
+          "additionalProperties": false,
+          "default": {}
+        },
+        "access": {
+          "type": "object",
+          "properties": {
+            "defaultUserRole": {
+              "type": "string",
+              "enum": [
+                "owner",
+                "trusted",
+                "limited",
+                "blocked"
+              ],
+              "default": "blocked"
+            },
+            "defaultChatRole": {
+              "$ref": "#/definitions/LuoLiConfig/properties/access/properties/defaultUserRole",
+              "default": "blocked"
+            },
+            "archiveBlocked": {
+              "type": "boolean",
+              "default": false
+            },
+            "bootstrapOwnerId": {
+              "type": "string",
+              "default": ""
+            }
+          },
+          "additionalProperties": false,
+          "default": {}
+        },
+        "trigger": {
+          "type": "object",
+          "properties": {
+            "private": {
+              "type": "boolean",
+              "default": true
+            },
+            "mention": {
+              "type": "boolean",
+              "default": true
+            },
+            "reply": {
+              "type": "boolean",
+              "default": true
+            },
+            "command": {
+              "type": "boolean",
+              "default": true
+            },
+            "channels": {
+              "type": "boolean",
+              "default": false
+            },
+            "wakewords": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": [
+                "洛璃"
+              ]
+            },
+            "wakewordMinLength": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 2
+            },
+            "requireTextAfterMention": {
+              "type": "boolean",
+              "default": false
+            },
+            "ignoreEditedAsTrigger": {
+              "type": "boolean",
+              "default": true
+            },
+            "cooldownMsPerUser": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          },
+          "additionalProperties": false,
+          "default": {}
+        },
+        "context": {
+          "type": "object",
+          "properties": {
+            "scope": {
+              "type": "string",
+              "enum": [
+                "chat",
+                "thread"
+              ],
+              "default": "chat"
+            },
+            "limit": {
+              "type": "object",
+              "properties": {
+                "tokens": {
+                  "type": "integer",
+                  "minimum": 4000,
+                  "maximum": 500000,
+                  "default": 32000
+                },
+                "maxMessages": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 200
+                },
+                "minKeepTurns": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 1
+                }
+              },
+              "additionalProperties": false,
+              "default": {}
+            },
+            "hardCapRatio": {
+              "type": "number",
+              "exclusiveMinimum": 0.3,
+              "maximum": 0.95,
+              "default": 0.85
+            },
+            "background": {
+              "type": "object",
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "default": true
+                },
+                "maxPerTurn": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "default": 20
+                },
+                "showUsername": {
+                  "type": "boolean",
+                  "default": true
+                },
+                "showTime": {
+                  "type": "boolean",
+                  "default": true
+                },
+                "includeNonText": {
+                  "type": "boolean",
+                  "default": true
+                }
+              },
+              "additionalProperties": false,
+              "default": {}
+            },
+            "rebase": {
+              "type": "object",
+              "properties": {
+                "injectNotice": {
+                  "type": "boolean",
+                  "default": false
+                },
+                "markMeta": {
+                  "type": "boolean",
+                  "default": true
+                }
+              },
+              "additionalProperties": false,
+              "default": {}
+            },
+            "cacheCommits": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "default": 64
+            },
+            "tokenRatioAlpha": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 1,
+              "default": 0.2
+            }
+          },
+          "additionalProperties": false,
+          "default": {}
+        },
+        "concurrency": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "parallel",
+                "serial"
+              ],
+              "default": "parallel"
+            },
+            "perKey": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "default": 3
+            },
+            "global": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "default": 8
+            },
+            "queueMax": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 20
+            },
+            "coalesceSameUserMs": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            },
+            "turnTimeoutMs": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "default": 600000
+            }
+          },
+          "additionalProperties": false,
+          "default": {}
+        },
+        "cancel": {
+          "type": "object",
+          "properties": {
+            "commitPartial": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          "additionalProperties": false,
+          "default": {}
+        },
+        "prompt": {
+          "type": "object",
+          "properties": {
+            "maxTokens": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "default": 12000
+            },
+            "includeToolCatalog": {
+              "type": "boolean",
+              "default": true
+            },
+            "runtimeBlock": {
+              "type": "object",
+              "properties": {
+                "showQuota": {
+                  "type": "boolean",
+                  "default": true
+                },
+                "showContextWatermark": {
+                  "type": "boolean",
+                  "default": true
+                },
+                "showWorkspace": {
+                  "type": "boolean",
+                  "default": true
+                }
+              },
+              "additionalProperties": false,
+              "default": {}
+            }
+          },
+          "additionalProperties": false,
+          "default": {}
+        },
+        "memory": {
+          "type": "object",
+          "properties": {
+            "dir": {
+              "type": "string",
+              "default": "./memory"
+            },
+            "pubWriteMinRole": {
+              "$ref": "#/definitions/LuoLiConfig/properties/access/properties/defaultUserRole",
+              "default": "trusted"
+            },
+            "pubWriteRequiresApproval": {
+              "type": "boolean",
+              "default": false
+            },
+            "softLimitTokens": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "default": 1500
+            },
+            "hardLimitTokens": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "default": 3000
+            },
+            "maxSections": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "default": 12
+            },
+            "compactCron": {
+              "type": "string",
+              "default": "0 3 * * 0"
+            },
+            "autoApplyCompaction": {
+              "type": "boolean",
+              "default": false
+            },
+            "requireSourceTag": {
+              "type": "boolean",
+              "default": true
+            },
+            "forgetMeRetentionDays": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 30
+            }
+          },
+          "additionalProperties": false,
+          "default": {}
+        },
+        "agent": {
+          "type": "object",
+          "properties": {
+            "main": {
+              "type": "object",
+              "properties": {
+                "modelAlias": {
+                  "type": "string",
+                  "default": "main"
+                },
+                "maxSteps": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 12
+                },
+                "downgradeAfterStep": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 8
+                }
+              },
+              "additionalProperties": false,
+              "default": {}
+            },
+            "maxDepth": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "default": 3
+            },
+            "maxConcurrentSubagents": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "default": 3
+            },
+            "maxSubagentsPerTurn": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "default": 10
+            },
+            "askTimeoutMs": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "default": 120000
+            },
+            "maxAsksPerRun": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "default": 5
+            },
+            "askArbiter": {
+              "type": "boolean",
+              "default": true
+            },
+            "askEscalateToUser": {
+              "type": "boolean",
+              "default": false
+            },
+            "progressThrottleMs": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "default": 3000
+            },
+            "agents": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "modelAlias": {
+                    "type": "string"
+                  },
+                  "maxSteps": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0
+                  },
+                  "minRole": {
+                    "$ref": "#/definitions/LuoLiConfig/properties/access/properties/defaultUserRole",
+                    "default": "limited"
+                  },
+                  "tools": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "default": []
+                  },
+                  "resultMaxChars": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "default": 4000
+                  },
+                  "instructions": {
+                    "type": "string"
+                  },
+                  "injectMemory": {
+                    "type": "boolean",
+                    "default": false
+                  }
+                },
+                "required": [
+                  "name",
+                  "description",
+                  "modelAlias",
+                  "maxSteps",
+                  "instructions"
+                ],
+                "additionalProperties": false
+              },
+              "default": []
+            }
+          },
+          "additionalProperties": false,
+          "default": {}
+        },
+        "provider": {
+          "type": "object",
+          "properties": {
+            "maxRetries": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 2
+            },
+            "retryBaseMs": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "default": 1000
+            },
+            "retryMaxMs": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "default": 30000
+            },
+            "healthCheckCron": {
+              "type": "string",
+              "default": "*/10 * * * *"
+            },
+            "healthDownCooldownMinutes": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "default": 30
+            },
+            "requestTimeoutMs": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "default": 120000
+            },
+            "streamIdleTimeoutMs": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "default": 60000
+            }
+          },
+          "additionalProperties": false,
+          "default": {}
+        },
+        "tools": {
+          "type": "object",
+          "properties": {
+            "maxRegistered": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "default": 80
+            },
+            "maxCallsPerTurn": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "default": 40
+            },
+            "maxConsecutiveErrors": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "default": 3
+            },
+            "defaultTimeoutMs": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "default": 60000
+            },
+            "fs": {
+              "type": "object",
+              "properties": {
+                "maxReadBytes": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 262144
+                },
+                "maxWriteBytes": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 5242880
+                },
+                "showHidden": {
+                  "type": "boolean",
+                  "default": false
+                },
+                "allowHostFsForOwner": {
+                  "type": "boolean",
+                  "default": false
+                },
+                "denyGlobs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [
+                    "**/.env*",
+                    "**/*.pem",
+                    "**/*.key",
+                    "**/id_rsa*",
+                    "**/.ssh/**",
+                    "**/.git/config",
+                    "<root>/config/**",
+                    "<root>/data/luoli.db*",
+                    "<root>/memory/**"
+                  ]
+                },
+                "trashDir": {
+                  "type": "string",
+                  "default": ".luoli-trash"
+                },
+                "backupDir": {
+                  "type": "string",
+                  "default": ".luoli-bak"
+                }
+              },
+              "additionalProperties": false,
+              "default": {}
+            },
+            "exec": {
+              "type": "object",
+              "properties": {
+                "defaultTimeoutMs": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 60000
+                },
+                "maxTimeoutMs": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 300000
+                },
+                "maxOutputBytes": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 65536
+                }
+              },
+              "additionalProperties": false,
+              "default": {}
+            },
+            "archive": {
+              "type": "object",
+              "properties": {
+                "defaultSearchLimit": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 20
+                },
+                "maxSearchLimit": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 100
+                },
+                "defaultReadLimit": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 50
+                },
+                "maxReadLimit": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 200
+                }
+              },
+              "additionalProperties": false,
+              "default": {}
+            },
+            "tg": {
+              "type": "object",
+              "properties": {
+                "maxExtraMessagesPerTurn": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "default": 3
+                },
+                "maxFileSendMb": {
+                  "type": "number",
+                  "exclusiveMinimum": 0,
+                  "default": 50
+                }
+              },
+              "additionalProperties": false,
+              "default": {}
+            },
+            "web": {
+              "type": "object",
+              "properties": {
+                "maxResponseBytes": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 2097152
+                },
+                "summarizeWithAlias": {
+                  "type": "string",
+                  "default": "low"
+                },
+                "allowlist": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": []
+                },
+                "denylist": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [
+                    "*.local",
+                    "*.internal"
+                  ]
+                },
+                "searchProvider": {
+                  "type": "string",
+                  "enum": [
+                    "",
+                    "brave",
+                    "serper",
+                    "tavily"
+                  ],
+                  "default": ""
+                },
+                "searchApiKeyRef": {
+                  "type": "string",
+                  "default": ""
+                }
+              },
+              "additionalProperties": false,
+              "default": {}
+            }
+          },
+          "additionalProperties": false,
+          "default": {}
+        },
+        "sandbox": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "none",
+                "jail",
+                "docker"
+              ],
+              "default": "docker"
+            },
+            "bypassRoles": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/LuoLiConfig/properties/access/properties/defaultUserRole"
+              },
+              "default": [
+                "owner"
+              ]
+            },
+            "image": {
+              "type": "string",
+              "default": "luoli-sandbox:latest"
+            },
+            "network": {
+              "type": "string",
+              "enum": [
+                "none",
+                "bridge"
+              ],
+              "default": "none"
+            },
+            "memoryMb": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "default": 512
+            },
+            "cpus": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "default": 1
+            },
+            "pidsLimit": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "default": 128
+            },
+            "readOnlyRoot": {
+              "type": "boolean",
+              "default": true
+            },
+            "tmpfsMb": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "default": 64
+            },
+            "workspaceDir": {
+              "type": "string",
+              "default": "./data/workspace"
+            },
+            "dockerBin": {
+              "type": "string",
+              "default": "docker"
+            }
+          },
+          "additionalProperties": false,
+          "default": {}
+        },
+        "approval": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true
+            },
+            "ttlMs": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "default": 180000
+            },
+            "skipForOwner": {
+              "type": "boolean",
+              "default": true
+            },
+            "allowInitiator": {
+              "type": "boolean",
+              "default": false
+            },
+            "rememberWithinTurn": {
+              "type": "boolean",
+              "default": true
+            },
+            "rules": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": {}
+              },
+              "default": []
+            }
+          },
+          "additionalProperties": false,
+          "default": {}
+        },
+        "output": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "stream",
+                "once"
+              ],
+              "default": "stream"
+            },
+            "streamIntervalMs": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "default": 1500
+            },
+            "streamMinDeltaChars": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "default": 24
+            },
+            "flushOnSentence": {
+              "type": "boolean",
+              "default": true
+            },
+            "maxMessageChars": {
+              "type": "integer",
+              "minimum": 100,
+              "maximum": 4000,
+              "default": 3900
+            },
+            "parseMode": {
+              "type": "string",
+              "enum": [
+                "MarkdownV2",
+                "HTML",
+                "none"
+              ],
+              "default": "MarkdownV2"
+            },
+            "typingWhileWorking": {
+              "type": "boolean",
+              "default": true
+            },
+            "placeholderAfterMs": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "default": 4000
+            },
+            "maxMentions": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 3
+            }
+          },
+          "additionalProperties": false,
+          "default": {}
+        },
+        "media": {
+          "type": "object",
+          "properties": {
+            "dir": {
+              "type": "string",
+              "default": "./data/files"
+            },
+            "maxImageBytes": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "default": 8388608
+            },
+            "maxDocBytes": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "default": 20971520
+            },
+            "maxImageEdge": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "default": 1568
+            },
+            "maxImagesPerTurn": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "default": 4
+            },
+            "groupDebounceMs": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "default": 1500
+            },
+            "stickerAsImage": {
+              "type": "boolean",
+              "default": false
+            },
+            "downloadVoice": {
+              "type": "boolean",
+              "default": true
+            },
+            "extract": {
+              "type": "object",
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "default": true
+                },
+                "maxChars": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 40000
+                },
+                "inlineChars": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 4000
+                },
+                "codeExtensions": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": []
+                }
+              },
+              "additionalProperties": false,
+              "default": {}
+            }
+          },
+          "additionalProperties": false,
+          "default": {}
+        },
+        "skills": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true
+            },
+            "dir": {
+              "type": "string",
+              "default": "./skills"
+            },
+            "watch": {
+              "type": "boolean",
+              "default": true
+            },
+            "defaultMinRole": {
+              "$ref": "#/definitions/LuoLiConfig/properties/access/properties/defaultUserRole",
+              "default": "trusted"
+            }
+          },
+          "additionalProperties": false,
+          "default": {}
+        },
+        "plugins": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true
+            },
+            "dir": {
+              "type": "string",
+              "default": "./plugins"
+            },
+            "watch": {
+              "type": "boolean",
+              "default": false
+            },
+            "hookTimeoutMs": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "default": 5000
+            },
+            "order": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "autoDisableAfterErrors": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "default": 3
+            }
+          },
+          "additionalProperties": false,
+          "default": {}
+        },
+        "mcp": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false
+            },
+            "connectTimeoutMs": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "default": 15000
+            },
+            "healthCheckCron": {
+              "type": "string",
+              "default": "*/5 * * * *"
+            },
+            "defaultMinRole": {
+              "$ref": "#/definitions/LuoLiConfig/properties/access/properties/defaultUserRole",
+              "default": "trusted"
+            },
+            "servers": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": {}
+              },
+              "default": []
+            }
+          },
+          "additionalProperties": false,
+          "default": {}
+        },
+        "db": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "default": "./data/luoli.db"
+            },
+            "backupKeep": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 5
+            },
+            "vacuumCron": {
+              "type": "string",
+              "default": "0 5 * * 0"
+            },
+            "ftsTokenizer": {
+              "type": "string",
+              "enum": [
+                "trigram",
+                "unicode61"
+              ],
+              "default": "trigram"
+            }
+          },
+          "additionalProperties": false,
+          "default": {}
+        },
+        "logs": {
+          "type": "object",
+          "properties": {
+            "level": {
+              "type": "string",
+              "enum": [
+                "debug",
+                "info",
+                "warn",
+                "error"
+              ],
+              "default": "info"
+            },
+            "dir": {
+              "type": "string",
+              "default": "./logs"
+            },
+            "captureBodies": {
+              "type": "boolean",
+              "default": true
+            },
+            "bodyMaxBytes": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "default": 262144
+            },
+            "maxFileMb": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "default": 128
+            },
+            "retentionDays": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 30
+            },
+            "gzipAfterDays": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 3
+            },
+            "console": {
+              "type": "string",
+              "enum": [
+                "pretty",
+                "json",
+                "off"
+              ],
+              "default": "pretty"
+            },
+            "redactPatterns": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            }
+          },
+          "additionalProperties": false,
+          "default": {}
+        },
+        "quota": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true
+            },
+            "requirePricing": {
+              "type": "boolean",
+              "default": true
+            },
+            "minReserveUsd": {
+              "type": "number",
+              "minimum": 0,
+              "default": 0.02
+            },
+            "global": {
+              "type": "object",
+              "properties": {
+                "daily": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "minimum": 0
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": 5
+                },
+                "monthly": {
+                  "$ref": "#/definitions/LuoLiConfig/properties/quota/properties/global/properties/daily",
+                  "default": 100
+                }
+              },
+              "additionalProperties": false,
+              "default": {}
+            },
+            "perChat": {
+              "type": "object",
+              "properties": {
+                "daily": {
+                  "$ref": "#/definitions/LuoLiConfig/properties/quota/properties/global/properties/daily",
+                  "default": 1
+                },
+                "monthly": {
+                  "$ref": "#/definitions/LuoLiConfig/properties/quota/properties/global/properties/daily",
+                  "default": null
+                }
+              },
+              "additionalProperties": false,
+              "default": {}
+            },
+            "perUser": {
+              "type": "object",
+              "properties": {
+                "daily": {
+                  "$ref": "#/definitions/LuoLiConfig/properties/quota/properties/global/properties/daily",
+                  "default": 0.5
+                },
+                "monthly": {
+                  "$ref": "#/definitions/LuoLiConfig/properties/quota/properties/global/properties/daily",
+                  "default": null
+                },
+                "byRole": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "object",
+                    "properties": {
+                      "daily": {
+                        "$ref": "#/definitions/LuoLiConfig/properties/quota/properties/global/properties/daily"
+                      },
+                      "monthly": {
+                        "$ref": "#/definitions/LuoLiConfig/properties/quota/properties/global/properties/daily"
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "default": {}
+                }
+              },
+              "additionalProperties": false,
+              "default": {}
+            },
+            "perTurn": {
+              "type": "object",
+              "properties": {
+                "maxCostUsd": {
+                  "type": "number",
+                  "exclusiveMinimum": 0,
+                  "default": 0.5
+                },
+                "maxSteps": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 12
+                },
+                "maxToolCalls": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 40
+                },
+                "maxSubagents": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 10
+                },
+                "maxDurationMs": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 600000
+                }
+              },
+              "additionalProperties": false,
+              "default": {}
+            },
+            "rateLimit": {
+              "type": "object",
+              "properties": {
+                "turnsPerUserPerHour": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 30
+                },
+                "turnsPerChatPerHour": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 100
+                },
+                "concurrentPerUser": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 2
+                }
+              },
+              "additionalProperties": false,
+              "default": {}
+            },
+            "onExceeded": {
+              "type": "object",
+              "properties": {
+                "reply": {
+                  "type": "boolean",
+                  "default": true
+                },
+                "message": {
+                  "type": "string",
+                  "default": "今天的额度用完了（已用 {spent}/{limit}），{resetAt} 重置。"
+                },
+                "notifyOwner": {
+                  "type": "boolean",
+                  "default": true
+                }
+              },
+              "additionalProperties": false,
+              "default": {}
+            },
+            "warnAtRatio": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 1,
+              "default": 0.8
+            }
+          },
+          "additionalProperties": false,
+          "default": {}
+        },
+        "webui": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true
+            },
+            "host": {
+              "type": "string",
+              "default": "127.0.0.1"
+            },
+            "port": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "default": 8787
+            },
+            "basePath": {
+              "type": "string",
+              "default": "/"
+            },
+            "publicUrl": {
+              "type": "string",
+              "default": ""
+            },
+            "sessionTtlHours": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "default": 168
+            },
+            "passwordHash": {
+              "type": "string",
+              "default": ""
+            },
+            "trustProxy": {
+              "type": "boolean",
+              "default": false
+            },
+            "allowOrigins": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "loginRateLimit": {
+              "type": "object",
+              "properties": {
+                "attempts": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 5
+                },
+                "windowMinutes": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 15
+                }
+              },
+              "additionalProperties": false,
+              "default": {}
+            }
+          },
+          "additionalProperties": false,
+          "default": {}
+        },
+        "alerts": {
+          "type": "object",
+          "properties": {
+            "notifyOwner": {
+              "type": "boolean",
+              "default": true
+            },
+            "dedupeMinutes": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "default": 30
+            },
+            "webhookUrl": {
+              "type": "string",
+              "default": ""
+            },
+            "on": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            }
+          },
+          "additionalProperties": false,
+          "default": {}
+        },
+        "perChat": {
+          "type": "object",
+          "additionalProperties": {},
+          "default": {}
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

@@ -1,0 +1,3 @@
+concurrency:
+  perKey: 20
+  global: 8

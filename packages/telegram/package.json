@@ -1,0 +1,7 @@
+{
+  "name": "@luoli/telegram",
+  "private": true,
+  "type": "module",
+  "exports": "./dist/index.js",
+  "dependencies": { "@luoli/shared": "workspace:*", "@luoli/db": "workspace:*", "@luoli/core": "workspace:*" }
+}
