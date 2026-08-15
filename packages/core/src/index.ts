@@ -20,6 +20,7 @@ export * from './prompt/documents.js';
 export * from './sandbox/index.js';
 export * from './secrets.js';
 export * from './plugins/manager.js';
+export * from './provider/catalog.js';
 export * from './provider/store.js';
 export * from './scheduler.js';
 export * from './skills/loader.js';

@@ -118,7 +118,7 @@
 | [ ] AC-PROV-004 (自动) ★ | 流式已输出 200 字后连接中断 | 已输出内容作为最终回复 + 「(生成中断)」；**delta 照常提交**（上下文与用户所见一致） |
 | [ ] AC-PROV-005 | WebUI 保存 provider（含新 key） | `api_key_enc` 为密文；`GET /api/providers` 只返回 hint；日志中无明文 |
 | [ ] AC-PROV-006 | WebUI 编辑 provider 但 key 留空 | 原 key 保持不变 |
-| [ ] AC-PROV-007 | `[测试连接]` | 返回成功/失败与错误类型；响应体内无 key |
+| [ ] AC-PROV-007 | `[测试连接]` | 真的打一次上游模型目录接口；返回成功/失败与错误类型（`code`）、耗时、模型数；响应体内无 key；结果以右上角 Toast 呈现。成功把 `health_state` 写回 `up`，401/403 写 `down`，超时/404/5xx 不改 `health_state` |
 | [ ] AC-PROV-008 (自动) | P1 连续健康检查失败 3 次 | 标 `down`，从 fallback 链跳过；30 分钟后自动重试 |
 | [ ] AC-PROV-009 (自动) | 含图片的轮次 + 当前模型无 vision | 自动切 `vision` 别名；若无该别名则降级占位符 + 回复末尾提示 |
 | [ ] AC-PROMPT-001 (自动) ★ | 组装私聊系统提示词 | block 顺序为 KERNEL→CHARACTER→ASSIST→CATALOG→PUBMEMORY→PRIMEMORY→RUNTIME |
@@ -290,7 +290,7 @@
 | [ ] AC-WEB-010 ★ | Trace 视图 | 展开一次真实 turn 的全部 span；可查看完整请求消息与工具 IO |
 | [ ] AC-WEB-011 | 消息检索 | FTS 中文命中；跨会话检索仅 owner 可用；`raw_json` 与附件可查看/下载 |
 | [ ] AC-WEB-012 | 提示词编辑 | token 实时计数；保存生成 diff 版本；`[回滚]` 生效；`[预览组装]` 与实际一致 |
-| [ ] AC-WEB-013 | Provider 页 | key 永不回显；`[测试连接]` 可用；模型定价可编辑；别名 fallback 链可拖拽排序 |
+| [ ] AC-WEB-013 | Provider 页 | key 永不回显；`[测试连接]` 可用；`[从 Provider 拉取模型]` 列出上游全部模型、支持搜索与多选批量导入、已存在的行不可重复导入；模型定价可编辑；别名 fallback 链可拖拽排序 |
 | [ ] AC-WEB-014 | 缺 `main` 别名 | 整页红色警示 |
 | [ ] AC-WEB-015 | 主体页内联改角色 | 立即生效（下一轮）；写审计日志 |
 | [ ] AC-WEB-016 | 权限矩阵视图 | 与 `TOOL_POLICY` 一致；「以某角色视角」预览正确 |

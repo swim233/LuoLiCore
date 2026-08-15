@@ -420,6 +420,11 @@ fallbackModel(chain, cfg) 语义：
 - API 返回 provider 时**永远只返回 `api_key_hint`**；前端字段为「写入型」（留空 = 不修改）。
 - 日志脱敏：全局正则移除 `sk-[A-Za-z0-9_\-]{16,}`、`Bearer\s+\S+`、bot token 形态 `\d{8,10}:[A-Za-z0-9_-]{35}`。
 - WebUI「测试连接」按钮：用输入框中的（或已存的）key 发一次最小调用，只返回成功/错误类型，**不回显 key**。
+  「最小调用」= 按 kind 请求上游的模型目录接口（`openai`/`openai-compatible` → `{baseUrl}/models`；
+  `anthropic` → `{baseUrl}/models` + `x-api-key` + `anthropic-version`；`google` → `{baseUrl}/models` + `x-goog-api-key`），
+  15s 超时。选它而不是发一次 1-token 补全，是因为它不花钱、不受模型是否配置影响，且同一次响应正好就是「拉取模型列表」要的数据。
+  错误按 `unauthorized / not_found / upstream_error / timeout / network / invalid_response / missing_base_url / no_master_key` 归类，
+  上游响应体只截前 300 字符做摘要（**先过一遍日志脱敏正则**，网关会把请求头回显进错误体）。健康状态写入规则见 [09 §4](./09-webui.md#4-rest-api)。
 
 ### 5.5 定价与 token 计费
 

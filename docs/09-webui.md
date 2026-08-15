@@ -39,7 +39,7 @@ webui:
 - `POST /api/auth/login {password}` → 校验 → 生成 32 字节随机 session id → 写 `sessions` 表 → `Set-Cookie: luoli_sid=…; HttpOnly; SameSite=Lax; Path=/; Secure(当 https)`。
 - 同时返回 `csrf` token（存 `sessions.csrf`）；前端放内存，所有非 GET 请求带 `X-CSRF-Token`。
 - 失败限流：同 IP 连续失败 5 次 → 锁 15 分钟（内存计数 + 日志 `warn`）。
-- 登出删除 session 行；`GET /api/auth/me` 返回登录态与到期时间。
+- 登出删除 session 行；`GET /api/auth/me` 返回登录态、到期时间**与本 session 的 `csrf`** —— 前端只把 token 放在内存里，刷新页面后必须靠这个端点补回来，否则刷新之后所有写操作都会 403。跨站拿不到它：既过不了 Origin 中间件，也读不到响应体。
 - Session 滑动续期：每次请求更新 `last_seen_at`，超过 `sessionTtlHours` 未活动则失效。
 
 ### 2.2 单角色
@@ -83,9 +83,11 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
 - 待审压缩 diff（`memory/.pending/`）在此显示 `[应用] [丢弃]`。
 
 ### 3.5 Provider 与模型
-- Provider 表：名称、类型、base_url、key hint、启用、健康状态（`Tag`）、`[测试连接]` `[编辑]` `[删除]`。
-- 编辑对话框：类型下拉、base_url、**API Key 写入型输入**（占位符 `保持不变`）、自定义 headers（键值表格）。
+- Provider 表：名称、类型、base_url、key hint、启用、健康状态（`Tag`）、`[测试连接]` `[拉取模型]` `[编辑]` `[删除]`。
+- 编辑对话框：类型下拉、base_url、**API Key 写入型输入**（占位符 `保持不变`）、自定义 headers（键值表格）、`[测试连接]`（用对话框里尚未保存的 key/base_url 试，不写健康状态）。
+- `[测试连接]` 的结果与所有 provider/模型写操作的反馈走**右上角 `Toast`**（`position="top-right"`，自动滑入滑出），不再用顶栏的静态横幅：连通时显示耗时与上游返回的模型数，失败时显示错误类型与上游消息摘要。详见 [04 §5.4](./04-agents-and-providers.md#54-密钥管理)。
 - 模型表（按 provider 分组，`TreeTable`）：model_id、显示名、context_window、max_output、能力开关（vision/tools/reasoning/cache）、四个价格字段、启用、排序。
+- `[从 Provider 拉取模型]`：选 provider → 调 `GET /api/providers/:id/models` 拿上游模型目录 → 带搜索框的多选表格（**不做白名单过滤**，上游返回什么就列什么；已在库中的行灰显且不可勾选）→ 勾选若干 → `POST /api/models/import` 批量落库。上游给了窗口/最大输出（Google）就逐行带入，没给（OpenAI / Anthropic）则用对话框顶部的默认值；**价格一律不猜，落库为空**，需在模型表里手工补齐（对应 [04 §5.5](./04-agents-and-providers.md#55-定价与-token-计费)「不自动抓取」）。
 - **别名管理**：每个别名一行，`OrderList` 拖拽排列 fallback 链 + settings JSON 编辑（temperature / maxOutputTokens / reasoningEffort…）。缺少 `main` 别名时整页红色警示。
 - `[导入]`：粘贴 JSON 批量导入 provider+模型+定价（导出同格式，便于备份/迁移）。
 - 每个模型行显示近 7 天调用次数与花费（来自 `usage_ledger`）。
@@ -173,8 +175,10 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
 | `GET /api/prompts/:id/revisions` `POST /api/prompts/:id/rollback` | 版本 |
 | `POST /api/prompts/preview` | 组装预览（body: `{key, role}`） |
 | `GET/POST/PATCH/DELETE /api/providers[/:id]` | Provider |
-| `POST /api/providers/:id/test` | 测试连接 |
+| `POST /api/providers/:id/test` | 测试连接：按 kind 向上游模型目录接口发一次 GET（15s 超时），返回 `{reachable, code, message, status, latencyMs, models}`（`models` 是数量，不是列表）。body 可选 `{apiKey, baseUrl, kind}` 覆盖库里的值，用于测试尚未保存的配置。**只有不带覆盖的测试写健康状态**：成功写 `health_state='up'` 并清空 `health_error`（这是 `down` 的唯一人工恢复路径），401/403 写 `down`，其余失败只更新 `health_checked_at` —— 网关缺 `/models` 不等于对话不可用，不能因此把可用的 provider 摘掉 |
+| `GET /api/providers/:id/models` | 拉取上游模型目录，返回 `[{modelId, displayName, contextWindow, maxOutput}]`（后两项上游没给就是 `null`）。上游不可达时返回 `502` + 错误 code |
 | `GET/POST/PATCH/DELETE /api/models[/:id]` | 模型 |
+| `POST /api/models/import` | 从上游目录批量落库：`{providerId, models:[{modelId, displayName?, contextWindow?, maxOutput?}], contextWindow?, maxOutput?}`，单次上限 200 条。已存在的 `(provider_id, model_id)` 跳过而不是覆盖（不能把已调好的定价冲掉），返回 `{inserted, skipped, ids}` |
 | `GET/PUT /api/aliases[/:alias]` | 别名与 fallback 链 |
 | `GET/PATCH /api/principals[/:id]` `POST /api/principals/bulk` | 主体与角色 |
 | `GET /api/tools` `PATCH /api/tools/:name` | 工具启停。写入 `tools.overrides.<name>.enabled`；被禁用的工具从工具目录消失，且 `ToolRegistry.execute` 会二次拦截并返回 `tool_disabled_by_operator`。未知工具名返回 404 |
