@@ -66,11 +66,13 @@ export async function buildMainAgent(t: TurnCtx, deps: Deps): Promise<ToolLoopAg
     prepareStep: async ({ stepNumber, messages, model, steps }) => {
       const patch: PrepareStepResult = {};
 
+      // (a0) 推理条目一律不回传（见下方「为什么不回传 reasoning」）
+      patch.messages = pruneMessages(messages, { reasoning: 'all' });
+
       // (a) 硬天花板：仅本次调用的临时裁剪（见 02 §5.4）
       const cap = deps.registry.info(model).contextWindow * cfg.context.hardCapRatio;
-      if (deps.tokens.estimate(messages) > cap) {
-        patch.messages = pruneMessages(messages, {
-          reasoning: 'all',
+      if (deps.tokens.estimate(patch.messages) > cap) {
+        patch.messages = pruneMessages(patch.messages, {
           toolCalls: 'before-last-3-messages',
           empty: 'remove',
         });
@@ -104,6 +106,29 @@ export async function buildMainAgent(t: TurnCtx, deps: Deps): Promise<ToolLoopAg
   });
 }
 ```
+
+### 为什么不回传 reasoning
+
+`@ai-sdk/openai` 的 responses provider 会把上一步的推理条目写成 `{"type":"item_reference","id":"rs_…"}`
+再发回去 —— 那份内容留在 OpenAI 服务端，靠 id 引用。**第三方 OpenAI 兼容网关手上没有那份状态**，
+解析不了就整个请求 502。表现极具迷惑性：
+
+- 第一步（模型决定调工具）正常 200；
+- 带着工具结果的**后续那一步**每次都 502，重试三次全挂；
+- AI SDK 把 `RetryError` 吞进内部的 `onError`，`result.text` 安静地解析成**空串**，
+  `textStream` 一个字都不吐且**不抛异常**；
+- 于是「模型一旦调用工具就再也不说话」，而日志里只有一条 `model.call`，看不出任何失败。
+
+所以 `prepareStep` 无条件 `pruneMessages({ reasoning: 'all' })`。reasoning 本来也只在一轮的
+步骤之间有意义（上下文里不落盘，见 [02](./02-context-engine.md)），代价远小于「工具调用之后没有回复」。
+
+### 上游失败不能伪装成「模型没话说」
+
+承上：链路上任何一层都不能让一次彻底的上游故障看起来像模型无话可说。
+`fallbackLanguageModel` 在整条 fallback 链耗尽时通过 `onExhausted` 交出最后一个错误，
+`streamMainAgent` 记下它；当 `result.text` 为空**且**存在这份错误时，`final` 以该错误 reject，
+轮次记 `failed`，用户收到「模型服务暂时连不上（上游重试已耗尽）」而不是含糊的「没吐出正文」。
+同时写一条 `model.error` 日志（[10 §2](./10-logging-and-observability.md)）—— 上游挂了必须在日志里看得见。
 
 调用：
 

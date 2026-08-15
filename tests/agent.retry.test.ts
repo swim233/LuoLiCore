@@ -23,6 +23,30 @@ describe('model-level provider fallback', () => {
     expect(secondCalls).toBe(1);
   });
 
+  // AI SDK 把步骤级失败吞进内部 onError，让 result.text 安静地解析成空串。不在链耗尽时抓一份，
+  // 一次彻底的上游故障和「模型没话说」在调用方眼里就一模一样 —— 用户看到的是 bot 不回复。
+  it('reports the last error when the whole chain is exhausted', async () => {
+    const seen: unknown[] = [];
+    const wrapped = fallbackLanguageModel([
+      { id: 'first', model: model('first', () => { throw Object.assign(new Error('bad gateway'), { statusCode: 502 }); }) },
+      { id: 'second', model: model('second', () => { throw Object.assign(new Error('still bad'), { statusCode: 502 }); }) },
+    ], { maxRetries: 0, retryBaseMs: 1, retryMaxMs: 1, onExhausted: (error) => seen.push(error) });
+    await expect((wrapped as Exclude<LanguageModel, string>).doStream(params)).rejects.toThrow('still bad');
+    expect(seen).toHaveLength(1);
+    expect((seen[0] as Error).message).toBe('still bad');
+  });
+
+  it('does not report when a later candidate succeeds', async () => {
+    const seen: unknown[] = [];
+    const success = { content: [{ type: 'text', text: 'ok' }], finishReason: { unified: 'stop', raw: 'stop' }, usage: { inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 1, text: 1, reasoning: 0 } }, warnings: [] };
+    const wrapped = fallbackLanguageModel([
+      { id: 'first', model: model('first', () => { throw Object.assign(new Error('busy'), { statusCode: 503 }); }) },
+      { id: 'second', model: model('second', () => success) },
+    ], { maxRetries: 0, retryBaseMs: 1, retryMaxMs: 1, onExhausted: (error) => seen.push(error) });
+    await (wrapped as Exclude<LanguageModel, string>).doGenerate(params);
+    expect(seen).toHaveLength(0);
+  });
+
   it('degrades invalid credentials without retrying or falling back', async () => {
     let invalidCalls = 0;
     let healthyCalls = 0;

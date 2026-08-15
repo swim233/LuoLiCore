@@ -40,6 +40,9 @@ function messageKind(message: Record<string, unknown>): string {
 // 得说清楚该由谁去做什么（docs/08 §9）。其余错误仍不暴露内部细节，只给 ref。
 function failureText(error: unknown, reference: string): string {
   const message = error instanceof Error ? error.message : String(error);
+  const name = error instanceof Error ? error.name : '';
+  // 上游挂了和「模型没话说」得分开讲：前者重试有用，后者重试没用。
+  if (/RetryError|APICallError/i.test(name) || /Failed after \d+ attempts/i.test(message)) return `模型服务暂时连不上（上游重试已耗尽），过一会儿再试。(ref: ${reference})`;
   if (message.startsWith('model alias unavailable')) return `模型还没配置好，得管理员在 WebUI 里配上 provider 和 main 别名。(ref: ${reference})`;
   if (message === 'model_pricing_required') return `当前模型没配价格，管理员补上定价才能用。(ref: ${reference})`;
   if (message === 'model_returned_empty') return `模型这轮没吐出任何正文，我不知道该回你什么。再说一次试试？(ref: ${reference})`;
