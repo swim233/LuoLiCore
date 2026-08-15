@@ -47,9 +47,12 @@ const log = new LogSink(operations, config.logs.dir, [process.env.BOT_TOKEN ?? '
 const context = new ContextEngine(db, archive, log);
 const modelRegistry = new ModelRegistry(db, providers);
 modelRegistry.rebuild();
+// 零配置首启本来就没有 main 别名，拒绝启动会把补配置用的 WebUI 一起带走（docs/04 §5.2）。
+// 缺 main 只告警：轮次会在 streamMainAgent 里失败，WebUI 写入别名后 rebuildModels() 即时生效。
 if (!modelRegistry.aliases().includes('main')) {
   log.event({ level: 'error', kind: 'config.invalid', summary: 'Required model alias main is unavailable' });
-  if (process.env.BOT_TOKEN) throw new Error('model alias unavailable: main');
+  process.stderr.write('[config] 缺少必需的 main 模型别名：服务照常启动，但所有轮次都会以 model alias unavailable 失败。\n'
+    + `[config] 去 WebUI（http://${config.webui.host}:${config.webui.port} → Provider 页）配置 provider / 模型 / main 别名，保存后即时生效，无需重启。\n`);
 }
 const memory = new MemoryStore(db, config.memory.dir, config.memory.softLimitTokens, config.memory.hardLimitTokens, config.memory.maxSections, config.memory.forgetMeRetentionDays, log);
 const skills = new SkillLoader(db, config.skills.dir);

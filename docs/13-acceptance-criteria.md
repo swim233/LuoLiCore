@@ -20,7 +20,7 @@
 | [ ] AC-CFG-002 (自动) | `context.limit.tokens: 1000` | **拒绝启动**，错误信息包含路径 `context.limit.tokens` 与允许范围 |
 | [ ] AC-CFG-003 (自动) | `concurrency.perKey: 20`, `global: 8` | 拒绝启动，提示 perKey ≤ global |
 | [ ] AC-CFG-004 (自动) | `webui.host: 0.0.0.0` 且 `passwordHash` 为空 | 拒绝启动 |
-| [ ] AC-CFG-005 (自动) | 删除 `model_aliases` 中的 `main` | 拒绝启动 |
+| [ ] AC-CFG-005 (自动) | 删除 `model_aliases` 中的 `main` | 启动成功（不阻塞），控制台与日志出现 `config.invalid` 告警，WebUI Provider 页显红；此时发起的轮次以 `model alias unavailable` 失败，用户收到「模型还没配置好…」而不是通用的「出了点问题」 |
 | [ ] AC-CFG-006 (自动) | `perChat` 下写 `access.defaultUserRole: owner` | 拒绝启动，指出该路径不在覆盖白名单 |
 | [ ] AC-CFG-007 | 未设 `LUOLI_OWNER_ID` | 拒绝启动，提示必须指定 owner |
 | [ ] AC-CFG-008 | 未设 `LUOLI_MASTER_KEY` | 启动成功但 provider 功能禁用，WebUI 明确提示；不出现明文落库 |
