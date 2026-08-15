@@ -127,6 +127,8 @@
 | [ ] AC-PROV-008 (自动) | P1 连续健康检查失败 3 次 | 标 `down`，从 fallback 链跳过；30 分钟后自动重试 |
 | [ ] AC-PROV-009 (自动) | 含图片的轮次 + 当前模型无 vision | 自动切 `vision` 别名；若无该别名则降级占位符 + 回复末尾提示 |
 | [ ] AC-PROV-010 (自动) | 给 `main` 配 `settings_json`，再写一个白名单外的键 | 白名单键随每步调用下发（降档到 `low` 后用 `low` 的参数）；白名单外的键 `PUT` 返回 `alias_invalid` + 路径，不落库 |
+| [ ] AC-PROV-011 ★ | 接第三方 OpenAI 兼容网关，让模型在一轮里调用工具 | 带工具结果的后续请求里**不含** `item_reference`，该步返回 200，模型给出最终回复。回归的是「一调工具就再也不说话」 |
+| [ ] AC-PROV-012 (自动) | fallback 链整条耗尽 | `onExhausted` 交出最后一个错误；`result.text` 为空时轮次以该错误记 failed，用户收到「模型服务暂时连不上」而不是「没吐出正文」；日志有 `model.error` |
 | [ ] AC-PROMPT-001 (自动) ★ | 组装私聊系统提示词 | block 顺序为 KERNEL→CHARACTER→ASSIST→CATALOG→PUBMEMORY→PRIMEMORY→RUNTIME |
 | [ ] AC-PROMPT-002 (自动) ★ | 组装群聊系统提示词 | **不含** PRIMEMORY；断言其内容字符串不出现在结果中 |
 | [ ] AC-PROMPT-003 (自动) | RUNTIME 块的工具列表 | 与本 step 的 `activeTools` 完全一致（无多、无少） |
@@ -356,7 +358,7 @@
 | 配置与 DB | | / 17 | | | |
 | **上下文引擎** | | / 29 | | | |
 | Telegram 与准入 | | / 30 | | | |
-| Agent 与 Provider | | / 24 | | | |
+| Agent 与 Provider | | / 26 | | | |
 | 工具/沙箱/审批 | | / 39 | | | |
 | Subagent 与任务 | | / 21 | | | |
 | 记忆 | | / 13 | | | |
@@ -365,6 +367,6 @@
 | WebUI | | / 29 | | | |
 | 安全 | | / 12 | | | |
 | 运维 | | / 9 | | | |
-| **合计** | | **/ 270** | | | |
+| **合计** | | **/ 272** | | | |
 
 **整体通过条件**：全部 ★ 项通过 + 非 ★ 项通过率 ≥ 95% + 所有豁免项经需求方书面确认。

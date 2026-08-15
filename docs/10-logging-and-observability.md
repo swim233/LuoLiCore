@@ -72,7 +72,12 @@ turn 01J8…                                     kind=turn.start / turn.end
 | `config.changed` | info | keys[], actor |
 | `maintenance.*` | info | job, ms, affected |
 | `system.start` / `system.stop` | info | version, mode, uptime |
+| `model.error` | error | alias, modelId, cause —— fallback 链整条耗尽时的最后一个错误 |
 | `system.crash` | error | event（`uncaughtException` \| `unhandledRejection`）, detail（stack） |
+
+`model.error` 补的是一个盲区：AI SDK 会把步骤级失败吞进内部的 `onError`，让 `result.text`
+解析成空串而不抛异常。没有这一行时，一次上游 502 在日志里只留下一条正常的 `model.call`，
+运维看到的只有「bot 不回复」（[04](./04-agents-and-providers.md#上游失败不能伪装成模型没话说)）。
 
 `system.crash` 是崩溃前的最后一行：进程照旧退出（恢复交给下次启动的 `recoverAfterCrash`），
 但必须留下原因。曾经有一次 uncaught 的流错误把进程直接带走、日志里一个字都没有，

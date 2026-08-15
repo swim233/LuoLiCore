@@ -237,6 +237,10 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
   const chain = dependencies.registry.chain(alias);
   if (!chain.length) throw new Error(`model alias unavailable: ${alias}`);
   if (dependencies.config.quota.requirePricing && turn.effectiveRole !== 'owner' && chain.some((candidate) => candidate.info.priceIn === null || candidate.info.priceOut === null)) throw new Error('model_pricing_required');
+  // 步骤级失败（上游 5xx、重试耗尽）不会从 textStream 抛出来：AI SDK 把它吞进内部的 onError，
+  // 让 result.text 安静地解析成空串。不抓住这一份，一次彻底的上游故障和「模型没话说」
+  // 在调用方眼里长得一模一样 —— 上一次就是这样变成「不回复」的。
+  let streamFailure: unknown = null;
   const model = fallbackLanguageModel(chain.map((candidate) => ({ model: candidate.model, id: candidate.info.modelId })), {
     maxRetries: dependencies.config.provider.maxRetries, retryBaseMs: dependencies.config.provider.retryBaseMs,
     retryMaxMs: dependencies.config.provider.retryMaxMs, abortSignal: turn.abortSignal,
@@ -244,6 +248,11 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
     onUnavailable: (candidate, error) => {
       dependencies.registry.markProviderDown(candidate.id, error instanceof Error ? error.message : 'authentication_failed');
       dependencies.log.event({ level: 'error', kind: 'provider.health', summary: `${candidate.id} credentials rejected`, traceId: turn.turnId, data: { modelId: candidate.id } });
+    },
+    onExhausted: (error) => {
+      streamFailure ??= error;
+      dependencies.log.event({ level: 'error', kind: 'model.error', summary: error instanceof Error ? `${error.name}: ${error.message}`.slice(0, 300) : String(error).slice(0, 300),
+        traceId: turn.turnId, key: turn.key, data: { alias, modelId: initialInfo.modelId, cause: error instanceof Error && error.cause instanceof Error ? error.cause.message.slice(0, 300) : undefined } });
     },
   });
   const initialInfo = chain[0]!.info;
@@ -263,10 +272,16 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
       const patch: { activeTools?: string[]; model?: LanguageModel; messages?: ModelMessage[]; toolChoice?: 'none' } & AliasSettings = { activeTools: activeForStep, model: dependencies.registry.resolve(selectedAlias), ...dependencies.registry.settings(selectedAlias) };
       const cost = dependencies.reservation?.committed ?? ((dependencies.db.prepare('SELECT cost_usd FROM turns WHERE id=?').pluck().get(turn.turnId) as number | undefined) ?? 0);
       if (cost >= dependencies.config.quota.perTurn.maxCostUsd || (dependencies.quota && dependencies.reservation && !dependencies.quota.canSpend(dependencies.reservation, dependencies.config.quota.perTurn.maxCostUsd))) { patch.activeTools = []; patch.toolChoice = 'none'; }
+      // 推理条目一律不回传。openai responses provider 会把上一步的 reasoning 写成
+      // `{type:'item_reference', id:'rs_…'}` —— 那份内容存在 OpenAI 服务端，第三方兼容网关
+      // 手上没有，解析不了就整个请求 502。表现是「模型一调工具就再也不说话」：后续那一步
+      // 重试三次全挂，而 AI SDK 把 RetryError 吞成空结果，调用方看到的只是「什么都没生成」。
+      // reasoning 本来也只在一轮的步骤之间有意义（上下文里不落盘），摘掉它换来的是工具调用之后还能有回复。
+      patch.messages = pruneMessages({ messages, reasoning: 'all' });
       const selected = dependencies.registry.info(selectedAlias) ?? initialInfo;
       const cap = selected.contextWindow * dependencies.config.context.hardCapRatio;
-      if (estimateModelMessages(messages) > cap) {
-        patch.messages = pruneMessages({ messages, reasoning: 'all', toolCalls: 'before-last-3-messages', emptyMessages: 'remove' });
+      if (estimateModelMessages(patch.messages) > cap) {
+        patch.messages = pruneMessages({ messages: patch.messages, toolCalls: 'before-last-3-messages', emptyMessages: 'remove' });
         dependencies.log.event({ level: 'warn', kind: 'ctx.hardcap', summary: 'Pruned in-flight model messages', traceId: turn.turnId, key: turn.key, data: { stepNumber, cap, before: estimateModelMessages(messages), after: estimateModelMessages(patch.messages) } });
       }
       return patch;
@@ -299,10 +314,13 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
       let settled = false;
       const finish = (text: string): string => { if (!settled && mainRun) dependencies.agents?.finish(mainRun, text); settled = true; return text; };
       const fail = (error: unknown): never => { if (!settled && mainRun) dependencies.agents?.fail(mainRun, error instanceof Error ? error.message : String(error)); settled = true; throw error; };
-      const final = Promise.resolve(result.text).then(finish, fail);
+      // 空正文 + 捕获到步骤失败 = 上游挂了，不是模型没话说。把真正的原因抛出去，
+      // 让轮次记成 failed 并给用户一句能看懂的话，而不是含糊的「没吐出正文」。
+      const final = Promise.resolve(result.text).then((text) => { if (!text.trim() && streamFailure) throw streamFailure; return text; }).then(finish, fail);
       return { stream: result.textStream, final, interrupt: () => { if (!settled && mainRun) dependencies.agents?.fail(mainRun, 'stream_interrupted'); settled = true; } };
     }
     const result = await agent.generate({ messages: contextMessages(turn), abortSignal: turn.abortSignal });
+    if (!result.text.trim() && streamFailure) throw streamFailure;
     if (mainRun) dependencies.agents?.finish(mainRun, result.text);
     return result.text;
   } catch (error) {

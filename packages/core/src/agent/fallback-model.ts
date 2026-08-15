@@ -15,6 +15,12 @@ interface FallbackOptions {
   abortSignal?: AbortSignal;
   onFallback?: (from: FallbackCandidate, to: FallbackCandidate) => void;
   onUnavailable?: (candidate: FallbackCandidate, error: unknown) => void;
+  /**
+   * 整条链都试完仍然失败时最后一次报告。AI SDK 会把步骤级失败吞进内部的 onError，
+   * 让 `result.text` 安静地解析成空串 —— 不在这里抓一份，一次彻底的上游故障
+   * 和「模型没话说」在调用方眼里就长得一模一样。
+   */
+  onExhausted?: (error: unknown) => void;
 }
 
 function statusCode(error: unknown): number | null {
@@ -49,8 +55,12 @@ async function pause(ms: number, signal?: AbortSignal): Promise<void> {
 export function fallbackLanguageModel(candidates: FallbackCandidate[], options: FallbackOptions): LanguageModel {
   const [first] = candidates;
   if (!first) throw new Error('fallback chain is empty');
+  const reporting = async <T>(run: () => Promise<T>): Promise<T> => {
+    try { return await run(); }
+    catch (error) { options.onExhausted?.(error); throw error; }
+  };
   const middleware: LanguageModelMiddleware = {
-    wrapGenerate: async ({ params }) => {
+    wrapGenerate: ({ params }) => reporting(async () => {
       let last: unknown;
       for (let index = 0; index < candidates.length; index += 1) {
         const candidate = candidates[index]!;
@@ -69,8 +79,8 @@ export function fallbackLanguageModel(candidates: FallbackCandidate[], options: 
         if (next) options.onFallback?.(candidate, next);
       }
       throw last ?? new Error('all providers unavailable');
-    },
-    wrapStream: async ({ params }) => {
+    }),
+    wrapStream: ({ params }) => reporting(async () => {
       let last: unknown;
       for (let index = 0; index < candidates.length; index += 1) {
         const candidate = candidates[index]!;
@@ -89,7 +99,7 @@ export function fallbackLanguageModel(candidates: FallbackCandidate[], options: 
         if (next) options.onFallback?.(candidate, next);
       }
       throw last ?? new Error('all providers unavailable');
-    },
+    }),
   };
   return wrapLanguageModel({ model: first.model, middleware });
 }
