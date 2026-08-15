@@ -1,0 +1,28 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "allowImportingTsExtensions": true,
+    "baseUrl": ".",
+    "paths": {
+      "@luoli/shared": ["packages/shared/src/index.ts"],
+      "@luoli/db": ["packages/db/src/index.ts"],
+      "@luoli/core": ["packages/core/src/index.ts"],
+      "@luoli/telegram": ["packages/telegram/src/index.ts"],
+      "@luoli/server": ["packages/server/src/index.ts"],
+      "@luoli/plugin-sdk": ["packages/plugin-sdk/src/index.ts"]
+    },
+    "types": ["node"]
+  },
+  "include": ["apps/**/*.ts", "packages/**/*.ts", "packages/**/*.vue", "scripts/**/*.ts", "tests/**/*.ts", "vitest.config.ts"]
+}

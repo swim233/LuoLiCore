@@ -1,0 +1,25 @@
+services:
+  luoli:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      LUOLI_WEBUI_HOST: 0.0.0.0
+    ports:
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - ./data:/app/data
+      - ./memory:/app/memory
+      - ./skills:/app/skills
+      - ./plugins:/app/plugins
+      - ./logs:/app/logs
+      - ./config:/app/config
+      - /var/run/docker.sock:/var/run/docker.sock
+  sandbox:
+    profiles: [build-only]
+    build:
+      context: .
+      dockerfile: docker/sandbox.Dockerfile
+    image: luoli-sandbox:latest

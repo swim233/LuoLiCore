@@ -1,0 +1,7 @@
+{
+  "name": "@luoli/server",
+  "private": true,
+  "type": "module",
+  "exports": "./dist/index.js",
+  "dependencies": { "@luoli/db": "workspace:*", "@luoli/core": "workspace:*" }
+}

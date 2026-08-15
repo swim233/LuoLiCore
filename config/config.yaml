@@ -1,0 +1,107 @@
+general:
+  name: 洛璃
+  timezone: Asia/Shanghai
+telegram:
+  mode: polling
+access:
+  defaultUserRole: blocked
+  defaultChatRole: blocked
+trigger:
+  private: true
+  mention: true
+  reply: true
+  command: true
+  wakewords: [洛璃]
+context:
+  scope: chat
+  limit:
+    tokens: 32000
+    maxMessages: 200
+    minKeepTurns: 1
+  background:
+    enabled: true
+    maxPerTurn: 20
+concurrency:
+  mode: parallel
+  perKey: 3
+  global: 8
+  queueMax: 20
+prompt:
+  maxTokens: 12000
+memory:
+  dir: ./memory
+  pubWriteMinRole: trusted
+  softLimitTokens: 1500
+  hardLimitTokens: 3000
+agent:
+  main:
+    modelAlias: main
+    maxSteps: 12
+    downgradeAfterStep: 8
+  agents:
+    - name: researcher
+      description: 在聊天记录、文件和网络中检索资料并给出带引用的结论
+      modelAlias: low
+      maxSteps: 20
+      minRole: limited
+      tools: [read_file, list_dir, grep, glob, search_messages, read_messages, get_message, web_fetch, web_search]
+      resultMaxChars: 4000
+      instructions: 使用最少的调用找到确定答案，输出结论、证据和不确定项。
+    - name: coder
+      description: 在工作目录内完成多文件读写与脚本执行类任务
+      modelAlias: high
+      maxSteps: 30
+      minRole: trusted
+      tools: [read_file, write_file, edit_file, move_file, list_dir, grep, glob, bash, python]
+      resultMaxChars: 6000
+      instructions: 先理解现有代码，再进行最小且完整的实现并验证。
+    - name: summarizer
+      description: 把大段文本压缩为结构化摘要
+      modelAlias: low
+      maxSteps: 3
+      minRole: limited
+      tools: []
+      resultMaxChars: 3000
+      instructions: 输出结论、要点、数据和不确定项。
+tools:
+  maxRegistered: 80
+  maxCallsPerTurn: 40
+sandbox:
+  mode: docker
+  bypassRoles: [owner]
+  network: none
+approval:
+  enabled: true
+  skipForOwner: true
+  rules:
+    - tool: delete_file
+      always: true
+      risk: high
+output:
+  mode: stream
+  streamIntervalMs: 1500
+  maxMessageChars: 3900
+media:
+  dir: ./data/files
+skills:
+  enabled: true
+  dir: ./skills
+plugins:
+  enabled: true
+  dir: ./plugins
+mcp:
+  enabled: false
+db:
+  path: ./data/luoli.db
+logs:
+  level: info
+  dir: ./logs
+  captureBodies: true
+quota:
+  enabled: true
+  requirePricing: true
+webui:
+  enabled: true
+  host: 127.0.0.1
+  port: 8787
+  passwordHash: ''
