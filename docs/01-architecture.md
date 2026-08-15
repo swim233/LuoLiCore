@@ -149,7 +149,7 @@ LuoLiCore/
 │   │   ├── app.ts                  Hono · session · CSRF
 │   │   ├── routes/                 /api/*
 │   │   └── sse.ts                  /api/events
-│   ├── webui/                      Vite + Vue3 + PrimeVue（构建产物由 server 托管）
+│   ├── webui/                      Vite + Vue3 + 自建 ui/ 组件层（构建产物由 server 托管）
 │   └── shared/                     类型 · 常量 · 错误类 · zod 公共 schema
 ├── config/
 │   ├── config.yaml                 主配置（可被 WebUI 写回）
@@ -184,7 +184,7 @@ LuoLiCore/
 | Telegram | **grammY** + `@grammyjs/auto-retry` + `@grammyjs/transformer-throttler` | 长轮询默认，Webhook 可选 |
 | DB | **better-sqlite3** + **Drizzle ORM** + FTS5(trigram) | WAL 模式；`drizzle-kit` 生成迁移 |
 | HTTP | **Hono** + `@hono/node-server` | REST + SSE + 静态托管 |
-| 前端 | Vite + Vue 3 + **PrimeVue 4 (Aura preset)** + Pinia + vue-router + PrimeIcons | 表格用 `DataTable`，编辑器用 `Textarea`/CodeMirror |
+| 前端 | Vite + Vue 3 + Pinia + vue-router + PrimeIcons（**无 UI 组件框架**，`src/ui/` 自建原语） | 视觉基准是总览页，全站共用 `styles.css` 的设计变量；见 [09 §6](./09-webui.md#6-前端结构) |
 | 校验 | **zod** | 工具 `inputSchema`、配置 schema、API body |
 | 日志 | 自建 `LogSink`（JSONL）+ `pino` 作控制台输出 | 见 [10](./10-logging-and-observability.md) |
 | 测试 | **vitest** + `@grammyjs/...` 无需真实 API 的 stub + 内存 SQLite | 见 [13](./13-acceptance-criteria.md) |

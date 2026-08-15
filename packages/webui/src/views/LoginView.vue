@@ -1,9 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
-import Button from 'primevue/button';
-import InputText from 'primevue/inputtext';
-import Message from 'primevue/message';
+import UiButton from '../ui/UiButton.vue';
 import { auth } from '../api/client';
 
 const props = defineProps<{ setup?: boolean }>();
@@ -54,14 +52,15 @@ async function submit(): Promise<void> {
       </div>
       <label v-if="props.setup">
         <span>Setup token</span>
-        <InputText v-model="token" autocomplete="one-time-code" fluid />
+        <input v-model="token" autocomplete="one-time-code">
       </label>
       <label>
         <span>管理员密码</span>
-        <InputText v-model="password" type="password" fluid autocomplete="current-password" />
+        <input v-model="password" type="password" autocomplete="current-password">
       </label>
-      <Message v-if="error" severity="error" :closable="false">{{ error }}</Message>
-      <Button type="submit" :loading="loading" fluid :label="props.setup ? '完成初始化' : '进入控制台'" icon="pi pi-arrow-right" icon-pos="right" />
+      <!-- 登录失败是表单内校验，留在原地；写操作的成败才走右上角通知（docs/09 §6） -->
+      <p v-if="error" class="callout error"><i class="pi pi-times-circle" aria-hidden="true" />{{ error }}</p>
+      <UiButton type="submit" :loading="loading" fluid :label="props.setup ? '完成初始化' : '进入控制台'" icon="pi pi-arrow-right" icon-pos="right" />
       <small><i class="pi pi-info-circle" /> WebUI 默认只监听 127.0.0.1:8787</small>
     </form>
   </main>

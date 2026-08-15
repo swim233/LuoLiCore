@@ -1,6 +1,6 @@
 # 09 · WebUI 管理端
 
-形态：**同进程内置**（Hono + 静态 SPA），单管理员密码 + Session，SSE 实时推送（D15）。前端 **PrimeVue 4**。
+形态：**同进程内置**（Hono + 静态 SPA），单管理员密码 + Session，SSE 实时推送（D15）。前端 **Vue 3 + 自建 UI 层**（`src/ui/`，无第三方组件框架；图标沿用 PrimeIcons 字体）。
 
 ## 1. 部署形态
 
@@ -54,44 +54,44 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
 
 ## 3. 页面清单
 
-用 PrimeVue 组件，左侧 `Menu` 导航 + 顶部 `Toolbar`（状态灯：bot 连接 / provider 健康 / 在途 turn 数 / 今日花费）。
+全站共用 §6 的自建组件与 `styles.css` 的设计变量，视觉基准是总览页：左侧固定深色导航 + 顶栏（状态灯：bot 连接 / provider 健康 / 在途 turn 数 / 今日花费），内容区一律是 `.surface` 卡片。
 
 ### 3.1 Dashboard
-- 实时卡片：在途 turn、今日 turn 数、今日花费/额度环形图（`Knob`）、消息量趋势（`Chart` 折线，近 7 天）。
-- 在途 turn 表（`DataTable`，SSE 增量更新）：turn id、会话、发起人、状态、步数、已用时长、花费、`[取消]`。
-- 最近错误（`DataTable`，level≥warn，10 条，点击跳日志 trace）。
+- 实时卡片：在途 turn、今日 turn 数、今日花费/额度环形图、消息量趋势（折线图，近 7 天）。
+- 在途 turn 表（`DataGrid`，SSE 增量更新）：turn id、会话、发起人、状态、步数、已用时长、花费、`[取消]`。
+- 最近错误（`DataGrid`，level≥warn，10 条，点击跳日志 trace）。
 - 系统信息：版本、上线时长、DB 大小、WAL 大小、workspace 占用、沙箱可用性、MCP 状态摘要。
 
 ### 3.2 会话（Chats）
-- 会话列表（`DataTable`，可搜索/排序）：chat、类型、角色、消息数、上下文 token/上限、最后活跃、今日花费、`contextScope`。
+- 会话列表（`DataGrid`，可搜索/排序）：chat、类型、角色、消息数、上下文 token/上限、最后活跃、今日花费、`contextScope`。
 - 详情三个 Tab：
-  1. **上下文查看器**：当前窗口的消息序列（`Timeline` 或虚拟滚动列表）。每条显示 ordinal、role、origin、speaker、tokens、`prune_level`；被裁剪/降级的条目灰显并可展开原文；`rebased` 消息打红色徽标（`Tag`）并显示「未见 ordinal 5–6」。
-  2. **Commit 时间线**：`DataTable` 列出 commits（seq、kind、window、head、tokens、rebased、base≠parent 时的对比）。操作：`[查看快照]` `[回滚到此]`（`ConfirmDialog`）。
+  1. **上下文查看器**：当前窗口的消息序列（时间线或虚拟滚动列表）。每条显示 ordinal、role、origin、speaker、tokens、`prune_level`；被裁剪/降级的条目灰显并可展开原文；`rebased` 消息打红色徽标（`UiTag`）并显示「未见 ordinal 5–6」。
+  2. **Commit 时间线**：`DataGrid` 列出 commits（seq、kind、window、head、tokens、rebased、base≠parent 时的对比）。操作：`[查看快照]` `[回滚到此]`（二次确认）。
   3. **设置**：`contextScope` 切换、唤醒词、`output.mode` 覆盖、模型别名固定、`background.maxPerTurn` 覆盖、`[/new]` `[/undo]` 按钮。
 
 ### 3.3 消息检索（Messages）
 - 全库检索（owner 可跨会话）：关键词（FTS）、会话、发言人、时间范围、类型、是否触发。
-- `DataTable` 分页 + 行展开显示 `raw_json`（`Fieldset` + 代码高亮）与附件预览（`Image` / 文件下载）。
+- `DataGrid` 分页 + 行展开显示 `raw_json`（折叠区 + 代码高亮）与附件预览（图片预览 / 文件下载）。
 - 单条操作：`[定位到上下文]`（若已被认领）、`[查看所属 turn 的 trace]`、`[软删除]`。
 
 ### 3.4 提示词（Prompts）
-- 左侧文档树（`Tree`）：`CHARACTER.md`、`CHARACTER.<chat>.md`、`ASSIST.md`、`PUBMEMORY.md`、`private/<userId>/PRIMEMORY.md`。
-- 右侧编辑器（`Textarea` + 行号；或按需换 CodeMirror）：实时 token 计数、字节数、保存（`Ctrl+S`）。
-- `[预览组装]`：选一个会话 + 角色 → 展示完整 block 0–6 与各块 token 占比（`ProgressBar` 堆叠）。
-- `[历史]`：`memory_revisions` 列表 + unified diff 展示（`Dialog`）+ `[回滚到此版本]`。
+- 左侧文档树（树形控件）：`CHARACTER.md`、`CHARACTER.<chat>.md`、`ASSIST.md`、`PUBMEMORY.md`、`private/<userId>/PRIMEMORY.md`。
+- 右侧编辑器（文本域 + 行号；或按需换 CodeMirror）：实时 token 计数、字节数、保存（`Ctrl+S`）。
+- `[预览组装]`：选一个会话 + 角色 → 展示完整 block 0–6 与各块 token 占比（堆叠进度条）。
+- `[历史]`：`memory_revisions` 列表 + unified diff 展示（`UiModal`）+ `[回滚到此版本]`。
 - PRIMEMORY 页顶部醒目提示「查看他人私有记忆会被记录」（对应 [06 §5.3](./06-prompt-and-memory.md#53-隐私细节)）。
 - 待审压缩 diff（`memory/.pending/`）在此显示 `[应用] [丢弃]`。
 
 ### 3.5 Provider 与模型
-- Provider 表：名称、类型、base_url、key hint、启用、健康状态（`Tag`）、`[测试连接]` `[拉取模型]` `[编辑]` `[删除]`。
+- Provider 表：名称、类型、base_url、key hint、启用、健康状态（`UiTag`）、`[测试连接]` `[拉取模型]` `[编辑]` `[删除]`。
 - 编辑对话框：类型下拉、base_url、**API Key 写入型输入**（占位符 `保持不变`）、自定义 headers（键值表格）、`[测试连接]`（用对话框里尚未保存的 key/base_url 试，不写健康状态）。
-- `[测试连接]` 的结果与所有 provider/模型写操作的反馈走**右上角 `Toast`**（`position="top-right"`，自动滑入滑出），不再用顶栏的静态横幅：连通时显示耗时与上游返回的模型数，失败时显示错误类型与上游消息摘要。详见 [04 §5.4](./04-agents-and-providers.md#54-密钥管理)。
-- 模型表（按 provider 分组，`TreeTable`）：model_id、显示名、context_window、max_output、能力开关（vision/tools/reasoning/cache）、四个价格字段、启用、排序。
+- `[测试连接]` 的结果与所有 provider/模型写操作的反馈走**右上角 `ToastHost`**（滑入、到点自动消失、可手动关掉，最多同时留 5 条），不再用顶栏的静态横幅：连通时显示耗时与上游返回的模型数，失败时显示错误类型与上游消息摘要。详见 [04 §5.4](./04-agents-and-providers.md#54-密钥管理)。
+- 模型表（按 provider 分组）：model_id、显示名、context_window、max_output、能力开关（vision/tools/reasoning/cache）、四个价格字段、启用、排序。
 - `[从 Provider 拉取模型]`：选 provider → 调 `GET /api/providers/:id/models` 拿上游模型目录 → 带搜索框的多选表格（**不做白名单过滤**，上游返回什么就列什么；已在库中的行灰显且不可勾选）→ 勾选若干 → `POST /api/models/import` 批量落库。上游给了窗口/最大输出（Google）就逐行带入，没给（OpenAI / Anthropic）则用对话框顶部的默认值；**价格一律不猜，落库为空**，需在模型表里手工补齐（对应 [04 §5.5](./04-agents-and-providers.md#55-定价与-token-计费)「不自动抓取」）。
 - **别名管理**：表里**六个内建别名常驻**（`main`/`high`/`low`/`vision`/`title`/`embed`），没配的显示
   「未配置」+ 该别名的用途说明与 `[配置]` 按钮 —— 运维不该靠读文档才知道要填哪几个别名、各是干什么的。
   每行展示解析后的 fallback 链（`provider/model_id`，链里指向已删除或已停用模型的分段标红）与采样参数摘要。
-  编辑对话框：别名下拉（内建六选一或自定义，选中即显示用途说明）、`PickList` 选模型并拖拽排序 fallback 链、
+  编辑对话框：别名下拉（内建六选一或自定义，选中即显示用途说明）、`ChainPicker` 选模型组 fallback 链（拖拽或上下按钮排序）、
   采样参数**逐字段表单**（[04 §5.2.1](./04-agents-and-providers.md#521-别名参数settings_json) 的白名单，
   常用三项常驻、其余进可折叠的「高级」区，每项写明取值范围，留空 = 用 provider 默认）。
   不再暴露裸 JSON 文本框：白名单之外的键本来就会被服务端拒，让人手写 JSON 只是把报错推迟到保存那一刻。
@@ -100,7 +100,7 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
 - 每个模型行显示近 7 天调用次数与花费（来自 `usage_ledger`）。
 
 ### 3.6 主体与权限（Principals）
-- 表格：kind、tg_id、显示名/username、角色（内联 `Select` 直接改）、首次出现、最后活跃、消息数、今日花费、备注。
+- 表格：kind、tg_id、显示名/username、角色（内联 `UiSelect` 直接改）、首次出现、最后活跃、消息数、今日花费、备注。
 - 过滤：仅群 / 仅用户 / 按角色。
 - `[批量导入]`（粘贴 id 列表 + 目标角色）、`[导出]`。
 - 权限矩阵只读视图：把 `TOOL_POLICY` 渲染成 [05 §4](./05-tools-and-permissions.md#4-权限矩阵权威表) 那张表，便于核对；可切「以某角色视角」预览可用工具集。
@@ -109,22 +109,22 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
 - 工具表：名称、来源（builtin/plugin/skill/mcp）、minRole、审批策略、本会话/全局启停、近 7 天调用次数与失败率、平均耗时。
 - 沙箱设置：`mode` 单选（含 docker 可用性探测结果）、镜像名 + `[拉取/构建]`、资源限制、网络、`bypassRoles`（多选）、超时。
 - `allowHostFsForOwner` 开关带红色确认对话框。
-- 审批规则编辑器（`DataTable` 行内编辑）：tool 匹配、正则、风险级别、`[测试正则]`（输入样例命令看是否命中）。
+- 审批规则编辑器（`DataGrid` 行内编辑）：tool 匹配、正则、风险级别、`[测试正则]`（输入样例命令看是否命中）。
 
 ### 3.8 扩展（Skills / Plugins / MCP）
 - **Skills**：卡片/表格列出 name、description、min-role、allowed-tools、token 占用、状态（解析错误显红）。`[编辑]` 打开 frontmatter 表单 + 正文编辑器；`[新建]`；`[启停]`；`[查看附属文件]`。
 - **Plugins**：name、version、minRole、启用（默认关，开启时弹「plugin 以全信任方式运行任意代码」确认）、`configSchema` 生成的表单、provides 概览（工具/钩子/命令/agent）、`load_error`、`[重载]`。
-- **MCP**：server 列表 + 状态、transport 配置表单、发现到的工具清单（含 inputSchema 预览 `Dialog`）、allow/deny glob、`[重连]`、最近错误。
+- **MCP**：server 列表 + 状态、transport 配置表单、发现到的工具清单（含 inputSchema 预览 `UiModal`）、allow/deny glob、`[重连]`、最近错误。
 
 ### 3.9 子 Agent（Agents）
-- 表格：name、description、modelAlias、maxSteps、tools（`MultiSelect`）、minRole、resultMaxChars、来源（config/plugin）。
+- 表格：name、description、modelAlias、maxSteps、tools（多选）、minRole、resultMaxChars、来源（config/plugin）。
 - `instructions` 编辑器 + token 计数。
-- `[试跑]`：给定 task 文本，直接派发一次并在 `Dialog` 里流式展示步骤/工具/结果与花费（不进任何会话上下文）。
+- `[试跑]`：给定 task 文本，直接派发一次并在 `UiModal` 里流式展示步骤/工具/结果与花费（不进任何会话上下文）。
 
 ### 3.10 日志（Logs）
 - 过滤器：时间范围、level、kind（多选）、trace_id、chat、user、关键词。
 - 虚拟滚动表格；`[实时]` 开关走 SSE 追加。
-- **Trace 视图**（重点）：输入/点击 `trace_id` → 树形展开（`Tree`）：
+- **Trace 视图**（重点）：输入/点击 `trace_id` → 树形展开（树形控件）：
   ```
   turn 01J8…  (12.4s, $0.031, committed, rebased)
   ├ context.open        (8ms)  base=c041 claimed=3
@@ -162,7 +162,7 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
   热更新即时生效。列表里有不可用模式时保存会被服务端拒绝（`invalid_wakeword`）并把原因回显在 Toast 上。
   日志 SSE 会不断触发页面刷新，表单在有未保存改动时不被回写覆盖。
 - 会话级覆盖（`perChat.<contextKey>.trigger`）优先于全局值，目前只有 `PATCH /api/chats/:key` 这一个入口，设置页不提供。
-- 由 `config.schema.json`（zod → JSON Schema）**自动生成**表单：分组折叠面板（`Accordion`），每项含描述、默认值、当前值、是否需要重启（`Tag: 热更新 / 需重启`）。🚧 未实现，当前只在卡片下方展示只读的合并配置 JSON。
+- 由 `config.schema.json`（zod → JSON Schema）**自动生成**表单：分组折叠面板（折叠面板），每项含描述、默认值、当前值、是否需要重启（`Tag: 热更新 / 需重启`）。🚧 未实现，当前只在卡片下方展示只读的合并配置 JSON。
 - `[原始 YAML]` 模式：直接编辑，保存前跑 zod 校验，错误定位到行。
 - 保存 → 写 `config_kv` + `config_revisions` → 广播热更新事件；需重启项标注并提供 `[重启进程]`（若在 systemd/docker 下由外部 supervisor 拉起）。
 - `[导出配置]` / `[导入配置]`（密钥字段自动排除）。
@@ -243,12 +243,19 @@ packages/webui/
 ├── index.html
 ├── vite.config.ts             base: '/', proxy /api → :8787（dev）
 └── src/
-    ├── main.ts                createApp + PrimeVue(Aura) + router + pinia
+    ├── main.ts                createApp + router + pinia（无 UI 框架插件）
+    ├── styles.css             设计变量（浅/深两套 + 字体栈）+ 全站样式，唯一的样式来源
     ├── router/index.ts        路由 + 全局守卫（未登录 → /login）
     ├── stores/
     │   ├── auth.ts  events.ts（SSE 单例）  dashboard.ts  chats.ts
     │   ├── providers.ts  logs.ts  usage.ts  config.ts  approvals.ts
     ├── api/client.ts          fetch 封装：CSRF 头、401 跳登录、统一错误 toast
+    ├── ui/                    自建原语，全部只用 styles.css 的变量
+    │   ├── toast.ts           pushToast()：全站唯一的通知通道
+    │   ├── ToastHost.vue      右上角通知栈（success/info/warn/error）
+    │   ├── UiButton.vue  UiTag.vue  UiSelect.vue  UiNumber.vue
+    │   ├── DataGrid.vue       表格：列定义 + 具名插槽 + 分页 + 单/多选
+    │   ├── UiModal.vue  UiDrawer.vue  ChainPicker.vue
     ├── components/
     │   ├── StatusBar.vue  RoleTag.vue  TokenMeter.vue  CostBadge.vue
     │   ├── ContextViewer.vue  CommitTimeline.vue  TraceTree.vue
@@ -256,7 +263,11 @@ packages/webui/
     └── views/                 每个 §3 页面一个 .vue
 ```
 
-- PrimeVue 组件按需引入（`unplugin-vue-components` + `PrimeVueResolver`），主题 Aura + 深/浅色跟随系统（`ToggleButton` 可手动切）。
+- **不引入第三方 UI 框架**。组件框架自带的主题（此前是 PrimeVue + Aura）与总览页那套手写卡片是两套并行的视觉系统，
+  同一个页面上会同时出现两种圆角、两种输入框、两种阴影；调它的 CSS 变量只能逼近、不能对齐。`src/ui/` 下的原语
+  直接用 `styles.css` 的 `--surface` / `--border` / `--primary` 等变量，深浅色跟随 `<html class="dark">` 一处切换。
+- **通知只有一种**：任何写操作的成败反馈都走 `pushToast()`（[§3.5](#35-provider-与模型) 的 `[测试连接]` 是基准样式），
+  不再有第二套「顶栏静态横幅」。页内校验类提示（登录失败、别名链有失效模型）仍用 `.callout` 内联块，因为它们要跟着表单走。
 - 表格统一虚拟滚动 + 服务端分页/排序/筛选（日志与消息量可能很大）。
 - 所有金额显示 4 位小数 + hover 显示完整值；token 显示千分位。
 - **只读渲染安全**：消息内容、日志 payload 一律作为纯文本渲染（`v-text` / `<pre>`），**禁止 `v-html`**（消息内容来自不可信用户）。
@@ -270,3 +281,8 @@ packages/webui/
 - 生产镜像里 dist 已内置，无需 Node 之外的静态服务器。
 - 缓存：带 hash 的资源 `immutable, max-age=31536000`；`index.html` `no-cache`。
 - 安全响应头：`Content-Security-Policy: default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; connect-src 'self'`、`X-Frame-Options: DENY`、`X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`。
+- **字体自托管，不许连外网**：CSP 是 `default-src 'self'`，`fonts.googleapis.com` 的 `@import` 会被整条挡掉 ——
+  表现是本地 dev 好好的、线上悄悄退回系统字体。字体走 `@fontsource/fira-sans`（latin 400/600/700）+
+  `@fontsource-variable/fira-code`（latin 可变字重，一个文件覆盖 300–700），由 `main.ts` 引入、Vite 打进
+  `dist/assets`，浏览器只取 latin 子集（≈110 kB，`immutable` 缓存）。中文字形本来就靠系统回退，Fira 没有 CJK。
+  字体族名只写在 `styles.css` 的 `--font-sans` / `--font-mono` 两个变量里，换字体不用再全文替换。
