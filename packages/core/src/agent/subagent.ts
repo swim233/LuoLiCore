@@ -26,7 +26,7 @@ export async function runSubAgent(run: AgentRun, definition: AgentDefinition, ta
   for (const registered of dependencies.tools.active(run.effectiveRole, toolContext, definition.tools)) {
     toolSet[registered.name] = tool({ description: registered.description, inputSchema: registered.inputSchema, execute: (input) => dependencies.tools.execute(registered.name, input, toolContext) });
   }
-  const agent = new ToolLoopAgent({ model, instructions: definition.instructions, tools: toolSet, activeTools: Object.keys(toolSet), stopWhen: stepCountIs(definition.maxSteps),
+  const agent = new ToolLoopAgent({ model, ...dependencies.registry.settings(alias), instructions: definition.instructions, tools: toolSet, activeTools: Object.keys(toolSet), stopWhen: stepCountIs(definition.maxSteps),
     onStepEnd: (step) => {
       const info = dependencies.registry.infoByModelId(step.model.modelId) ?? dependencies.registry.info(alias);
       if (!info) return;

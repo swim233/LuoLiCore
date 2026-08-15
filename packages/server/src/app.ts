@@ -6,7 +6,7 @@ import argon2 from 'argon2';
 import { Hono } from 'hono';
 import { serveStatic } from '@hono/node-server/serve-static';
 import type { AgentManager, Config, ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceService, McpManager, MemoryStore, PluginManager, PromptDocuments, ProviderStore, Sandbox, SkillLoader, TurnRegistry } from '@luoli/core';
-import { TOOL_POLICY, configSchema as runtimeConfigSchema, probeProvider } from '@luoli/core';
+import { ALIAS_NAME_PATTERN, TOOL_POLICY, aliasSettingsSchema, configSchema as runtimeConfigSchema, probeProvider } from '@luoli/core';
 import type { ProviderProbe } from '@luoli/core';
 import type { ArchiveRepository, OperationsRepository, PrincipalRepository, Sqlite } from '@luoli/db';
 
@@ -328,12 +328,25 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
   app.get('/api/aliases', (ctx) => ctx.json({ ok: true, data: dependencies.db.prepare('SELECT * FROM model_aliases ORDER BY alias').all() }));
   app.put('/api/aliases/:alias', async (ctx) => {
     const body = await ctx.req.json<{ modelIds?: string[]; settings?: unknown; description?: string }>();
+    const alias = ctx.req.param('alias');
+    if (!ALIAS_NAME_PATTERN.test(alias)) return ctx.json(apiError('alias_invalid', '别名只能是小写字母开头的 1-32 位 [a-z0-9_-]').body, 400);
     if (!Array.isArray(body.modelIds) || body.modelIds.some((id) => typeof id !== 'string')) return ctx.json(apiError('alias_invalid', 'modelIds 必须是模型 ID 数组').body, 400);
+    // 空链会让别名在 registry 里静默消失（chain[0] 不存在就整条跳过），删别名要走 DELETE。
+    if (!body.modelIds.length) return ctx.json(apiError('alias_invalid', 'fallback 链至少要有一个模型；要移除别名请用 DELETE').body, 400);
     const placeholders = body.modelIds.map(() => '?').join(',');
-    const found = body.modelIds.length ? Number(dependencies.db.prepare(`SELECT COUNT(*) FROM models WHERE id IN (${placeholders})`).pluck().get(...body.modelIds)) : 0;
+    const found = Number(dependencies.db.prepare(`SELECT COUNT(*) FROM models WHERE id IN (${placeholders})`).pluck().get(...body.modelIds));
     if (found !== body.modelIds.length) return ctx.json(apiError('alias_invalid', 'fallback 链包含不存在的模型').body, 400);
+    const settings = aliasSettingsSchema.safeParse(body.settings ?? {});
+    if (!settings.success) return ctx.json(apiError('alias_invalid', settings.error.issues.map((issue) => `settings${issue.path.length ? `.${issue.path.join('.')}` : ''}: ${issue.message}`).join('；')).body, 400);
+    const hasSettings = Object.keys(settings.data).length > 0;
     dependencies.db.prepare(`INSERT INTO model_aliases(alias,model_ids_json,settings_json,description,updated_at) VALUES (?,?,?,?,?)
-      ON CONFLICT(alias) DO UPDATE SET model_ids_json=excluded.model_ids_json,settings_json=excluded.settings_json,description=excluded.description,updated_at=excluded.updated_at`).run(ctx.req.param('alias'), JSON.stringify(body.modelIds), body.settings ? JSON.stringify(body.settings) : null, body.description ?? null, Date.now());
+      ON CONFLICT(alias) DO UPDATE SET model_ids_json=excluded.model_ids_json,settings_json=excluded.settings_json,description=excluded.description,updated_at=excluded.updated_at`).run(alias, JSON.stringify(body.modelIds), hasSettings ? JSON.stringify(settings.data) : null, body.description ?? null, Date.now());
+    dependencies.rebuildModels?.();
+    return ctx.json({ ok: true });
+  });
+  app.delete('/api/aliases/:alias', (ctx) => {
+    const changed = dependencies.db.prepare('DELETE FROM model_aliases WHERE alias=?').run(ctx.req.param('alias')).changes;
+    if (!changed) return ctx.json(apiError('not_found', '别名不存在', 404).body, 404);
     dependencies.rebuildModels?.();
     return ctx.json({ ok: true });
   });
