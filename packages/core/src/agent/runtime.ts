@@ -14,6 +14,7 @@ import { runtimeBlock } from '../prompt/assembler.js';
 import type { ToolExecutionContext, ToolRegistry } from '../tools/registry.js';
 import type { ProviderStore } from '../provider/store.js';
 import { fallbackLanguageModel } from './fallback-model.js';
+import { type AliasSettings, parseAliasSettings } from '../provider/alias-settings.js';
 import type { UsageLedger } from '../ledger/usage.js';
 import type { QuotaGuard, QuotaReservation } from '../ledger/quota.js';
 import type { LogSink } from '../log/sink.js';
@@ -51,6 +52,7 @@ export class ModelRegistry {
   readonly #models = new Map<string, V4LanguageModel>();
   readonly #info = new Map<string, ModelRow>();
   readonly #chains = new Map<string, Array<{ model: V4LanguageModel; info: ModelRow }>>();
+  readonly #settings = new Map<string, AliasSettings>();
 
   constructor(private readonly db: Sqlite, private readonly providers: ProviderStore) {}
 
@@ -58,6 +60,7 @@ export class ModelRegistry {
     this.#models.clear();
     this.#info.clear();
     this.#chains.clear();
+    this.#settings.clear();
     const providerRows = this.db.prepare("SELECT id,name,kind,base_url AS baseUrl,headers_json AS headers FROM providers WHERE enabled=1 AND COALESCE(health_state,'up') <> 'down'").all() as ProviderRow[];
     const providerInstances = new Map<string, Provider>();
     for (const provider of providerRows) {
@@ -92,13 +95,25 @@ export class ModelRegistry {
       this.#models.set(alias.alias, first.model);
       this.#info.set(alias.alias, first.info);
       this.#chains.set(alias.alias, chain);
+      const settings = parseAliasSettings(alias.settings);
+      if (settings) this.#settings.set(alias.alias, settings);
     }
   }
 
+  /** 别名缺失时的回退顺序（04 §5.2）。模型和采样参数必须落在同一个别名上，否则会串味。 */
+  #pick(alias: string): string | null {
+    return [alias, 'main', 'high', 'low'].find((candidate) => this.#models.has(candidate)) ?? null;
+  }
+
   resolve(alias: string): LanguageModel {
-    const model = this.#models.get(alias) ?? this.#models.get('main') ?? this.#models.get('high') ?? this.#models.get('low');
-    if (!model) throw new Error(`model alias unavailable: ${alias}`);
-    return model;
+    const picked = this.#pick(alias);
+    if (!picked) throw new Error(`model alias unavailable: ${alias}`);
+    return this.#models.get(picked)!;
+  }
+
+  settings(alias: string): AliasSettings {
+    const picked = this.#pick(alias);
+    return picked ? this.#settings.get(picked) ?? {} : {};
   }
 
   info(alias: string): ModelRow | null {
@@ -228,7 +243,8 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
       const requestedAlias = turn.modelAliasOverride ?? alias;
       const downgrade = stepNumber >= dependencies.config.agent.main.downgradeAfterStep && dependencies.registry.aliases().includes('low');
       const selectedAlias = downgrade ? 'low' : requestedAlias;
-      const patch: { activeTools?: string[]; model?: LanguageModel; messages?: ModelMessage[]; toolChoice?: 'none' } = { activeTools: activeForStep, model: dependencies.registry.resolve(selectedAlias) };
+      // 采样参数按「当步实际选中的别名」取：降档到 low 之后就该用 low 的参数（04 §5.2.1）。
+      const patch: { activeTools?: string[]; model?: LanguageModel; messages?: ModelMessage[]; toolChoice?: 'none' } & AliasSettings = { activeTools: activeForStep, model: dependencies.registry.resolve(selectedAlias), ...dependencies.registry.settings(selectedAlias) };
       const cost = dependencies.reservation?.committed ?? ((dependencies.db.prepare('SELECT cost_usd FROM turns WHERE id=?').pluck().get(turn.turnId) as number | undefined) ?? 0);
       if (cost >= dependencies.config.quota.perTurn.maxCostUsd || (dependencies.quota && dependencies.reservation && !dependencies.quota.canSpend(dependencies.reservation, dependencies.config.quota.perTurn.maxCostUsd))) { patch.activeTools = []; patch.toolChoice = 'none'; }
       const selected = dependencies.registry.info(selectedAlias) ?? initialInfo;

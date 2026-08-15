@@ -58,6 +58,18 @@ describe('documented API surface', () => {
     expect((await app.request('/api/aliases/main', { method: 'PUT', headers, body: JSON.stringify({ modelIds: [modelId], settings: { temperature: 0.2 } }) })).status).toBe(200);
     expect(db.prepare("SELECT model_ids_json FROM model_aliases WHERE alias='main'").pluck().get()).toBe(JSON.stringify([modelId]));
     expect((await app.request('/api/aliases/main', { method: 'PUT', headers, body: JSON.stringify({ modelIds: ['missing'] }) })).status).toBe(400);
+    expect(db.prepare("SELECT settings_json FROM model_aliases WHERE alias='main'").pluck().get()).toBe(JSON.stringify({ temperature: 0.2 }));
+    // 空链、非法别名名、白名单外的采样参数都要在写入前挡下来，别名表里不该出现「存在但不可用」的行。
+    expect((await app.request('/api/aliases/main', { method: 'PUT', headers, body: JSON.stringify({ modelIds: [] }) })).status).toBe(400);
+    expect((await app.request('/api/aliases/%E4%B8%BB%E6%A8%A1%E5%9E%8B', { method: 'PUT', headers, body: JSON.stringify({ modelIds: [modelId] }) })).status).toBe(400);
+    const badSettings = await app.request('/api/aliases/main', { method: 'PUT', headers, body: JSON.stringify({ modelIds: [modelId], settings: { temperature: 9, wat: 1 } }) });
+    expect(badSettings.status).toBe(400);
+    expect((await badSettings.json() as { error: { message: string } }).error.message).toContain('settings');
+    expect((await app.request('/api/aliases/main', { method: 'PUT', headers, body: JSON.stringify({ modelIds: [modelId], settings: {} }) })).status).toBe(200);
+    expect(db.prepare("SELECT settings_json FROM model_aliases WHERE alias='main'").pluck().get()).toBeNull();
+    expect((await app.request('/api/aliases/main', { method: 'DELETE', headers })).status).toBe(200);
+    expect((await app.request('/api/aliases/main', { method: 'DELETE', headers })).status).toBe(404);
+    expect(db.prepare("SELECT COUNT(*) FROM model_aliases WHERE alias='main'").pluck().get()).toBe(0);
     closeDatabase(db);
   });
 });

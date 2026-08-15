@@ -370,7 +370,7 @@ CREATE UNIQUE INDEX ux_models_provider_model ON models(provider_id, model_id);
 CREATE TABLE model_aliases (
   alias          TEXT PRIMARY KEY,         -- main|high|low|vision|title|embed|<自定义>
   model_ids_json TEXT NOT NULL,            -- ["mdl_01","mdl_07"]  按顺序 fallback
-  settings_json  TEXT,                     -- { temperature, maxOutputTokens, reasoningEffort, ... }
+  settings_json  TEXT,                     -- 采样参数白名单，见 04 §5.2.1；非白名单键写入即拒
   description    TEXT,
   updated_at     INTEGER NOT NULL
 );

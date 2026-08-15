@@ -88,7 +88,14 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
 - `[测试连接]` 的结果与所有 provider/模型写操作的反馈走**右上角 `Toast`**（`position="top-right"`，自动滑入滑出），不再用顶栏的静态横幅：连通时显示耗时与上游返回的模型数，失败时显示错误类型与上游消息摘要。详见 [04 §5.4](./04-agents-and-providers.md#54-密钥管理)。
 - 模型表（按 provider 分组，`TreeTable`）：model_id、显示名、context_window、max_output、能力开关（vision/tools/reasoning/cache）、四个价格字段、启用、排序。
 - `[从 Provider 拉取模型]`：选 provider → 调 `GET /api/providers/:id/models` 拿上游模型目录 → 带搜索框的多选表格（**不做白名单过滤**，上游返回什么就列什么；已在库中的行灰显且不可勾选）→ 勾选若干 → `POST /api/models/import` 批量落库。上游给了窗口/最大输出（Google）就逐行带入，没给（OpenAI / Anthropic）则用对话框顶部的默认值；**价格一律不猜，落库为空**，需在模型表里手工补齐（对应 [04 §5.5](./04-agents-and-providers.md#55-定价与-token-计费)「不自动抓取」）。
-- **别名管理**：每个别名一行，`OrderList` 拖拽排列 fallback 链 + settings JSON 编辑（temperature / maxOutputTokens / reasoningEffort…）。缺少 `main` 别名时整页红色警示。
+- **别名管理**：表里**六个内建别名常驻**（`main`/`high`/`low`/`vision`/`title`/`embed`），没配的显示
+  「未配置」+ 该别名的用途说明与 `[配置]` 按钮 —— 运维不该靠读文档才知道要填哪几个别名、各是干什么的。
+  每行展示解析后的 fallback 链（`provider/model_id`，链里指向已删除或已停用模型的分段标红）与采样参数摘要。
+  编辑对话框：别名下拉（内建六选一或自定义，选中即显示用途说明）、`PickList` 选模型并拖拽排序 fallback 链、
+  采样参数**逐字段表单**（[04 §5.2.1](./04-agents-and-providers.md#521-别名参数settings_json) 的白名单，
+  常用三项常驻、其余进可折叠的「高级」区，每项写明取值范围，留空 = 用 provider 默认）。
+  不再暴露裸 JSON 文本框：白名单之外的键本来就会被服务端拒，让人手写 JSON 只是把报错推迟到保存那一刻。
+  缺少 `main` 别名时整页红色警示。`[删除]` 走 `DELETE /api/aliases/:alias`（否则打错的别名永远留在表里）。
 - `[导入]`：粘贴 JSON 批量导入 provider+模型+定价（导出同格式，便于备份/迁移）。
 - 每个模型行显示近 7 天调用次数与花费（来自 `usage_ledger`）。
 
@@ -179,7 +186,7 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
 | `GET /api/providers/:id/models` | 拉取上游模型目录，返回 `[{modelId, displayName, contextWindow, maxOutput}]`（后两项上游没给就是 `null`）。上游不可达时返回 `502` + 错误 code |
 | `GET/POST/PATCH/DELETE /api/models[/:id]` | 模型 |
 | `POST /api/models/import` | 从上游目录批量落库：`{providerId, models:[{modelId, displayName?, contextWindow?, maxOutput?}], contextWindow?, maxOutput?}`，单次上限 200 条。已存在的 `(provider_id, model_id)` 跳过而不是覆盖（不能把已调好的定价冲掉），返回 `{inserted, skipped, ids}` |
-| `GET/PUT /api/aliases[/:alias]` | 别名与 fallback 链 |
+| `GET/PUT/DELETE /api/aliases[/:alias]` | 别名、fallback 链与采样参数。`PUT` 校验别名名（`^[a-z][a-z0-9_-]{0,31}$`）、链非空且模型存在、`settings` 过 `aliasSettingsSchema`（[04 §5.2.1](./04-agents-and-providers.md#521-别名参数settings_json)），任一不过返回 `alias_invalid` + 具体路径 |
 | `GET/PATCH /api/principals[/:id]` `POST /api/principals/bulk` | 主体与角色 |
 | `GET /api/tools` `PATCH /api/tools/:name` | 工具启停。写入 `tools.overrides.<name>.enabled`；被禁用的工具从工具目录消失，且 `ToolRegistry.execute` 会二次拦截并返回 `tool_disabled_by_operator`。未知工具名返回 404 |
 | `GET/PUT /api/sandbox` `POST /api/sandbox/probe` | 沙箱配置与探测 |

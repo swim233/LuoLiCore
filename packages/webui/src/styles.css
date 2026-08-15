@@ -184,6 +184,22 @@ code { font-family: 'Fira Code', monospace; font-size: .82rem; }
 .form-grid .wide { grid-column: 1 / -1; }
 .form-grid .switch-line { display: flex; grid-column: 1 / -1; flex-direction: row; align-items: center; gap: 9px; }
 .form-grid .switch-line input { width: auto; }
+.form-grid .field-title { margin: 0 0 6px; font-size: .8rem; font-weight: 600; color: var(--ink); display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.form-grid .field-title small, .form-grid .field-note { font-weight: 400; color: var(--muted); }
+.form-grid .field-note { margin: 0; font-size: .78rem; line-height: 1.5; }
+.form-grid .p-fieldset-content .form-grid { gap: 14px; }
+.pick-item { display: flex; align-items: center; gap: 8px; }
+.pick-item code { font-size: .78rem; }
+.registry-heading .section-note { margin: 4px 0 0; max-width: 62ch; font-size: .78rem; line-height: 1.55; color: var(--muted); }
+.registry-heading h3 { margin: 0; }
+.alias-name { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.alias-name .p-tag { white-space: nowrap; }
+.alias-purpose { margin: 0; color: var(--ink); }
+.alias-chain { display: flex; flex-direction: column; gap: 5px; }
+.alias-seg { padding: 3px 8px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface-2); font: .76rem/1.5 'Fira Code', monospace; }
+.alias-seg.disabled { border-color: var(--amber); color: var(--amber); }
+.alias-seg.missing { border-color: var(--rose); color: var(--rose); text-decoration: line-through; }
+.alias-empty, .alias-settings { color: var(--muted); }
 
 
 @media (max-width: 1100px) {

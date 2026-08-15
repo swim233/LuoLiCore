@@ -394,6 +394,31 @@ registry.languageModel('anthropic-main:claude-opus-5')   // 直指（WebUI 测�
 - 模型可用 `set_model` 工具（`minRole=trusted`）为**当轮**指定别名，写入 `turn.runtime.modelAliasOverride`；不跨轮持久。
 - 用户可用 `/model <alias>` 为**当前会话**固定别名（`minRole=trusted`，存 `config_kv` 的 `perChat.modelAlias.<key>`）。
 
+### 5.2.1 别名参数（`settings_json`）
+
+别名除了指定 fallback 链，还能带一组**采样参数**，随该别名的每次模型调用一起下发。
+键是白名单（`aliasSettingsSchema`，`packages/core/src/provider/alias-settings.ts`），
+写入端点与 registry 共用同一个 schema；未列出的键写入时报 `alias_invalid` 而不是静默忽略：
+
+| 键 | 取值 | 说明 |
+|---|---|---|
+| `temperature` | 0–2 | 采样温度。与 `topP` 二选一 |
+| `topP` | 0–1 | 核采样 |
+| `topK` | ≥1 整数 | 只从概率最高的 K 个 token 里采样 |
+| `maxOutputTokens` | ≥1 整数 | 单次回复上限；超过模型自身 `max_output` 由 provider 报错 |
+| `reasoning` | `provider-default` \| `none` \| `minimal` \| `low` \| `medium` \| `high` \| `xhigh` | 推理档位，模型不支持时由 provider 忽略 |
+| `presencePenalty` / `frequencyPenalty` | -1–1 | 重复惩罚 |
+| `stopSequences` | ≤8 个非空字符串 | 命中即停 |
+| `seed` | 整数 | 支持的 provider 上可复现采样 |
+
+- **留空 = 不下发该字段**，用 provider 默认值。整份 `settings_json` 为空对象等价于 `NULL`。
+- 生效点在 `prepareStep`：**每一步按当步实际选中的别名取参数**，所以 `downgradeAfterStep` 降档到
+  `low` 之后用的是 `low` 的参数而不是 `main` 的。子 agent 走 `runSubAgent`，取它自己别名的参数。
+- 别名不存在而回退到 `main`/`high`/`low` 的模型时，参数也跟着**回退后的那个别名**走
+  （`ModelRegistry.resolve` 与 `.settings` 共用同一段解析），不会出现 A 的模型配 B 的温度。
+- provider 私有选项（如 Anthropic 的 thinking budget）**不在白名单里**，需要时另开字段，
+  不要把 `providerOptions` 当自由夹带通道。
+
 ### 5.3 Fallback 与重试
 
 ```ts
