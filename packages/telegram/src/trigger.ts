@@ -1,4 +1,5 @@
 import type { Context } from 'grammy';
+import { WAKEWORD_SCAN_LIMIT, checkWakeword } from '@luoli/core';
 
 export type TriggerReason = 'private' | 'mention' | 'reply' | 'command' | 'wakeword';
 
@@ -13,11 +14,6 @@ export interface TriggerConfig {
   requireTextAfterMention: boolean;
   strictCommandSuffix?: boolean;
 }
-function safeWakeRegex(source: string): RegExp | null {
-  if ([...source].length > 128 || /\\[1-9]|\(\?[=!<]|(\([^)]*[+*][^)]*\))[+*]|\{\d+,\d*\}\s*[+*{]/.test(source)) return null;
-  try { return new RegExp(source, 'u'); } catch { return null; }
-}
-
 export function matchTrigger(ctx: Context, config: TriggerConfig, botId: number, botUsername: string): TriggerReason | null {
   const chat = ctx.chat;
   const message = ctx.message;
@@ -40,15 +36,17 @@ export function matchTrigger(ctx: Context, config: TriggerConfig, botId: number,
     if (command) {
       const token = text.slice(0, command.length).toLocaleLowerCase();
       const [name, suffix] = token.slice(1).split('@');
-      const ours = new Set(['start', 'help', 'ask', 'new', 'undo', 'ctx', 'cancel', 'tasks', 'model', 'memory', 'forgetme', 'whoami', 'whois', 'grant', 'revoke', 'wake', 'usage', 'webui', 'ping']);
+      // 判成 command 的消息在 bot.on('message') 里被丢弃，只剩各自的 handler 能回话。名字列在这里
+      // 却没注册 handler，用户发出去就石沉大海——/wake（会话唤醒词管理）因此摘除，改在 WebUI 配。
+      const ours = new Set(['start', 'help', 'ask', 'new', 'undo', 'ctx', 'cancel', 'tasks', 'model', 'memory', 'forgetme', 'whoami', 'whois', 'grant', 'revoke', 'usage', 'webui', 'ping']);
       if (name && ours.has(name) && (suffix === undefined ? !config.strictCommandSuffix : suffix === botUsername.toLocaleLowerCase())) return 'command';
     }
   }
-  for (const wakeword of config.wakewords.filter((value) => [...value.replace(/^\^/, '')].length >= config.wakewordMinLength)) {
-    if (wakeword.startsWith('^')) {
-      const regex = safeWakeRegex(wakeword);
-      if (regex?.test(text.slice(0, 4096))) return 'wakeword';
-    } else if (text.includes(wakeword)) return 'wakeword';
+  for (const wakeword of config.wakewords) {
+    const checked = checkWakeword(wakeword, config.wakewordMinLength);
+    if (!checked.ok) continue;
+    if (checked.kind === 'regex') { if (checked.regex.test(text.slice(0, WAKEWORD_SCAN_LIMIT))) return 'wakeword'; }
+    else if (text.includes(wakeword)) return 'wakeword';
   }
   return null;
 }
