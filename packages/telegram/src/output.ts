@@ -33,6 +33,15 @@ export function safeRender(markdown: string): string {
   return text.replace(/\u0000(\d+)\u0000/g, (_, raw: string) => protectedBlocks[Number(raw)] ?? '');
 }
 
+/**
+ * 秒回读起来像自动应答机，流式模式下第一帧还几乎是空的。距离用户那条消息不足
+ * `output.replyDelayMs` 就先压住不发；期间 typing 动作照常，所以看起来是在打字而不是卡住。
+ */
+export function holdReply(since: number, delayMs: number): Promise<void> {
+  const remaining = delayMs - (Date.now() - since);
+  return remaining > 0 ? new Promise((resolve) => setTimeout(resolve, remaining)) : Promise.resolve();
+}
+
 export function splitTelegramText(text: string, max = 3900): string[] {
   const rendered = safeRender(text);
   const parts: string[] = [];

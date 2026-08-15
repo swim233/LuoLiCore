@@ -158,7 +158,8 @@ trigger:
 ```yaml
 output:
   mode: stream                # stream | once   （可 perChat 覆盖）
-  streamIntervalMs: 1500      # 编辑节流
+  replyDelayMs: 2000          # 第一条回复的最早发出时刻（相对用户那条消息），0 = 立刻回
+  streamIntervalMs: 2000      # 编辑节流
   streamMinDeltaChars: 24     # 增量太小不编辑
   flushOnSentence: true       # 遇到 。！？\n 提前 flush（更自然）
   maxMessageChars: 3900       # < 4096 留余量给尾注
@@ -171,7 +172,8 @@ output:
 
 ```
 sendChatAction('typing')  → 每 4s 续期，直到首次消息发出
-首个 chunk 到达（或 1.2s 后仍无内容）→ sendMessage(占位或首段) → 记 messageId
+起算点 = 用户那条消息的到达时刻（不是流开始的时刻）
+首个 chunk 到达 且 已过 replyDelayMs → sendMessage(首段) → 记 messageId
 循环：
   累积 buffer
   若 (now - lastEdit ≥ streamIntervalMs) 且 (Δchars ≥ streamMinDeltaChars 或 命中句末)
@@ -184,6 +186,10 @@ sendChatAction('typing')  → 每 4s 续期，直到首次消息发出
   移除「⏳」类标记
 ```
 
+- **回复节奏**：`replyDelayMs` 的窗口内产出的 chunk **只攒不发**（不是丢弃），窗口一到连同已攒的文本
+  一起作为第一条消息发出；`typing` 动作照常，看起来是在打字而不是卡住。起算点是用户消息的到达时刻，
+  所以模型本来就想了 3 秒时不会再多压 2 秒。流在窗口内就跑完时，走结尾的一次性 `send`，它自己也会等满
+  —— 短回答同样不会秒回。非流式（`mode='once'` 与 agent 直接返回字符串）走同一条规则。
 - 编辑遇 `400 message is not modified` → 忽略。
 - 编辑遇 `429` → **跳过本次增量**（不排队），下次节流窗口再试。
 - 编辑遇 `400 can't parse entities` → 用 `parse_mode: undefined` 重试一次；再失败则把内容作为 `.md` 文档发出并回复一句摘要。

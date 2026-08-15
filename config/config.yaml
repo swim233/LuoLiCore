@@ -79,7 +79,8 @@ approval:
       risk: high
 output:
   mode: stream
-  streamIntervalMs: 1500
+  replyDelayMs: 2000
+  streamIntervalMs: 2000
   maxMessageChars: 3900
 media:
   dir: ./data/files

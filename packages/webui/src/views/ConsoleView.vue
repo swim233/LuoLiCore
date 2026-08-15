@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import UiButton from '../ui/UiButton.vue';
 import UiTag from '../ui/UiTag.vue';
 import UiSelect from '../ui/UiSelect.vue';
@@ -22,6 +22,13 @@ interface LogRow { id: number; ts: number; level: string; kind: string; summary:
 interface Chat { key: string; chatId: string; scope: string; tokens: number | null; messages: number | null }
 interface Usage { id: number; ts: number; model_alias: string; input_tokens: number; output_tokens: number; cost_usd: number; ok: number }
 interface Extension { name: string; description?: string; min_role?: string; enabled?: number; load_error?: string | null }
+interface Paged<T> { items: T[]; total: number; page: number; size: number }
+interface Conversation { id: string; key: string; chatId: string; userId: string; role: string; state: string; triggerReason: string | null; startedAt: number | null; finishedAt: number | null;
+  steps: number; toolCalls: number; inputTokens: number; outputTokens: number; costUsd: number; error: string | null; rebased: number;
+  prompt: string | null; promptKind: string | null; fromName: string | null; fromUsername: string | null; reply: string }
+interface MessageHit { id: number; chatId: string; direction: string; fromName: string | null; fromUsername: string | null; kind: string; text: string | null; tgDate: number; turnId: string | null }
+interface ToolPolicy { minRole: string; approval: string; scope: string; source: string; enabled: boolean }
+interface AgentDefinition { name: string; description: string; modelAlias: string; maxSteps: number; minRole: string; tools: string[]; resultMaxChars: number; instructions: string; injectMemory: boolean }
 const active = ref('dashboard');
 const dashboard = ref<Dashboard>({ turns: { total: 0, running: 0, failed: 0, cost: 0 }, messages: { total: 0 }, providers: { total: 0, enabled: 0 } });
 const principals = ref<Principal[]>([]);
@@ -33,12 +40,12 @@ const usage = ref<Usage[]>([]);
 const skills = ref<Extension[]>([]);
 const plugins = ref<Extension[]>([]);
 const mcp = ref<Extension[]>([]);
-const agents = ref<Extension[]>([]);
+const agents = ref<AgentDefinition[]>([]);
 const approvals = ref<Array<Record<string, unknown>>>([]);
 const tasks = ref<Array<Record<string, unknown>>>([]);
 const prompts = ref<Array<Record<string, unknown>>>([]);
 const config = ref<Record<string, unknown>>({});
-const tools = ref<Record<string, { minRole: string; approval: string; scope: string }>>({});
+const tools = ref<Record<string, ToolPolicy>>({});
 interface TriggerForm { private: boolean; mention: boolean; reply: boolean; command: boolean; channels: boolean; wakewords: string[]; wakewordMinLength: number; requireTextAfterMention: boolean; ignoreEditedAsTrigger: boolean }
 const triggerForm = ref<TriggerForm>({ private: true, mention: true, reply: true, command: true, channels: false, wakewords: [], wakewordMinLength: 2, requireTextAfterMention: false, ignoreEditedAsTrigger: true });
 const wakewordStatus = ref<Array<{ pattern: string; kind: string; ok: boolean; reason: string | null }>>([]);
@@ -136,8 +143,9 @@ const navigation = [
 const currentLabel = computed(() => navigation.find(([key]) => key === active.value)?.[2] ?? '总览');
 const COLUMNS = {
   chats: [{ key: 'key', header: 'Context Key' }, { key: 'scope', header: '范围' }, { key: 'messages', header: '消息' }, { key: 'tokens', header: 'Token' }],
-  tools: [{ key: 'name', header: '工具' }, { key: 'minRole', header: '最低角色' }, { key: 'approval', header: '审批' }, { key: 'scope', header: '作用域' }],
-  agents: [{ key: 'name', header: '名称' }, { key: 'description', header: '职责' }, { key: 'minRole', header: '最低角色' }, { key: 'modelAlias', header: '模型别名' }],
+  tools: [{ key: 'name', header: '工具' }, { key: 'source', header: '来源', width: '7rem' }, { key: 'minRole', header: '最低角色', width: '7rem' }, { key: 'approval', header: '审批', width: '7rem' }, { key: 'scope', header: '作用域', width: '8rem' }, { key: 'enabled', header: '状态', width: '6rem' }],
+  agents: [{ key: 'name', header: '名称' }, { key: 'description', header: '职责' }, { key: 'minRole', header: '最低角色', width: '7rem' }, { key: 'modelAlias', header: '模型别名', width: '8rem' }, { key: 'tools', header: '可用工具' }, { key: 'maxSteps', header: '步数上限', width: '6rem' }],
+  hits: [{ key: 'tgDate', header: '时间', width: '12rem' }, { key: 'chatId', header: '会话', width: '9rem' }, { key: 'from', header: '发言人', width: '10rem' }, { key: 'text', header: '内容' }],
   usage: [{ key: 'ts', header: '时间', width: '13rem' }, { key: 'model_alias', header: '别名' }, { key: 'input_tokens', header: '输入' }, { key: 'output_tokens', header: '输出' }, { key: 'cost_usd', header: '成本' }],
   principals: [{ key: 'kind', header: '类型' }, { key: 'displayName', header: '显示名' }, { key: 'tgId', header: 'Telegram ID' }, { key: 'role', header: '角色', width: '8rem' }, { key: 'username', header: '用户名' }],
   models: [{ key: 'model_id', header: '模型 ID' }, { key: 'provider_id', header: 'Provider' }, { key: 'context_window', header: '窗口' }, { key: 'price_in', header: '输入价格' }, { key: 'price_out', header: '输出价格' }, { key: 'enabled', header: '启用', width: '6rem' }],
@@ -153,7 +161,7 @@ const COLUMNS = {
 async function load(): Promise<void> {
   [dashboard.value, principals.value, providers.value, logs.value, chats.value, usage.value, skills.value, plugins.value, mcp.value, agents.value, tools.value, approvals.value, tasks.value, prompts.value, config.value, models.value, aliases.value] = await Promise.all([
     api<Dashboard>('/api/dashboard'), api<Principal[]>('/api/principals'), api<Provider[]>('/api/providers'), api<LogRow[]>('/api/logs'),
-    api<Chat[]>('/api/chats'), api<Usage[]>('/api/usage'), api<Extension[]>('/api/skills'), api<Extension[]>('/api/plugins'), api<Extension[]>('/api/mcp'), api<Extension[]>('/api/agents'), api<Record<string, { minRole: string; approval: string; scope: string }>>('/api/tools'),
+    api<Chat[]>('/api/chats'), api<Usage[]>('/api/usage'), api<Extension[]>('/api/skills'), api<Extension[]>('/api/plugins'), api<Extension[]>('/api/mcp'), api<AgentDefinition[]>('/api/agents'), api<Record<string, ToolPolicy>>('/api/tools'),
     api<Array<Record<string, unknown>>>('/api/approvals'), api<Array<Record<string, unknown>>>('/api/tasks'), api<Array<Record<string, unknown>>>('/api/prompts'), api<Record<string, unknown>>('/api/config'), api<Array<Record<string, unknown>>>('/api/models'), api<Array<Record<string, unknown>>>('/api/aliases'),
   ]);
   syncTrigger();
@@ -321,6 +329,146 @@ async function removeAlias(alias: string): Promise<void> {
   catch (error) { toastError('删除别名失败', error); }
 }
 function messageMeta(message: Record<string, unknown>): Record<string, unknown> { return message.meta && typeof message.meta === 'object' ? message.meta as Record<string, unknown> : {}; }
+
+// ── 消息：最近的模型对话按 turn 分页，搜索归档另走 FTS ─────────────────────────────
+const CONVERSATION_PAGE_SIZE = 20;
+const conversations = ref<Conversation[]>([]);
+const conversationPage = ref(1);
+const conversationTotal = ref(0);
+const conversationLoading = ref(false);
+const expandedTurns = ref(new Set<string>());
+const searchHits = ref<MessageHit[] | null>(null);
+const searchTerm = ref('');
+const searching = ref(false);
+const conversationPages = computed(() => Math.max(1, Math.ceil(conversationTotal.value / CONVERSATION_PAGE_SIZE)));
+// 这份数据不进 load()：日志 SSE 每来一条事件就重跑 load()，跟着刷新会把运维翻到的页码打回第一页。
+async function loadConversations(target = conversationPage.value): Promise<void> {
+  conversationLoading.value = true;
+  try {
+    const result = await api<Paged<Conversation>>(`/api/turns?page=${target}&size=${CONVERSATION_PAGE_SIZE}`);
+    conversations.value = result.items; conversationTotal.value = result.total; conversationPage.value = result.page;
+  } catch (error) { toastError('加载对话失败', error); }
+  finally { conversationLoading.value = false; }
+}
+function turnState(state: string): { label: string; severity: TagSeverity } {
+  return ({ committed: { label: '已完成', severity: 'success' }, running: { label: '进行中', severity: 'info' }, queued: { label: '排队中', severity: 'secondary' },
+    failed: { label: '失败', severity: 'danger' }, cancelled: { label: '已取消', severity: 'warn' } } as Record<string, { label: string; severity: TagSeverity }>)[state] ?? { label: state, severity: 'secondary' };
+}
+function toggleTurn(id: string): void { const next = new Set(expandedTurns.value); if (next.has(id)) next.delete(id); else next.add(id); expandedTurns.value = next; }
+async function searchArchive(): Promise<void> {
+  const needle = query.value.trim();
+  if (!needle) { clearSearch(); return; }
+  searching.value = true;
+  try { searchHits.value = (await api<Paged<MessageHit>>(`/api/messages?q=${encodeURIComponent(needle)}&size=50`)).items; searchTerm.value = needle; }
+  catch (error) { toastError('检索归档失败', error); }
+  finally { searching.value = false; }
+}
+function clearSearch(): void { searchHits.value = null; searchTerm.value = ''; }
+
+// ── 主体：群聊与用户分开看，角色改动走二级菜单 ────────────────────────────────
+const PRINCIPAL_KINDS = [['all', '全部'], ['user', '用户'], ['chat', '群聊']] as const;
+const ROLES = ['owner', 'trusted', 'limited', 'blocked'];
+const ROLE_HINTS: Record<string, string> = { owner: '不受审批与沙箱限制，可读写所有配置', trusted: '可用写文件、执行代码等高风险工具（按审批策略）', limited: '只读类工具，日常对话', blocked: '消息不触发轮次；archiveBlocked 关闭时连归档都不做' };
+const principalKind = ref<'all' | 'user' | 'chat'>('all');
+const visiblePrincipals = computed(() => principalKind.value === 'all' ? principals.value : principals.value.filter((entry) => entry.kind === principalKind.value));
+const principalCount = (kind: string): number => kind === 'all' ? principals.value.length : principals.value.filter((entry) => entry.kind === kind).length;
+const principalDialog = ref(false);
+const principalSaving = ref(false);
+const principalForm = ref<Principal & { originalRole: string }>({ id: '', kind: 'user', tgId: '', role: 'limited', displayName: null, username: null, originalRole: 'limited' });
+function editPrincipal(row: Principal): void { principalForm.value = { ...row, originalRole: row.role }; principalDialog.value = true; }
+async function savePrincipal(): Promise<void> {
+  const form = principalForm.value;
+  if (form.role === form.originalRole) { principalDialog.value = false; return; }
+  principalSaving.value = true;
+  try {
+    await api(`/api/principals/${encodeURIComponent(form.id)}`, { method: 'PATCH', body: JSON.stringify({ role: form.role }) });
+    principalDialog.value = false;
+    pushToast({ severity: 'success', summary: '角色已更新', detail: `${form.displayName ?? form.id} → ${form.role}` });
+    await load();
+  } catch (error) { toastError('更新角色失败', error); }
+  finally { principalSaving.value = false; }
+}
+const bulkDialog = ref(false);
+const bulkSaving = ref(false);
+const bulkForm = ref({ ids: '', kind: 'user', role: 'limited' });
+const bulkIds = computed(() => [...new Set(bulkForm.value.ids.split(/[\s,;，、]+/).map((entry) => entry.trim()).filter(Boolean))]);
+const bulkBadIds = computed(() => bulkIds.value.filter((id) => !/^-?\d{1,20}$/.test(id)));
+function openBulk(): void { bulkForm.value = { ids: '', kind: 'user', role: 'limited' }; bulkDialog.value = true; }
+async function saveBulk(): Promise<void> {
+  bulkSaving.value = true;
+  try {
+    const result = await api<{ count: number; created: number; updated: number }>('/api/principals/bulk', { method: 'POST', body: JSON.stringify({ ids: bulkIds.value, kind: bulkForm.value.kind, role: bulkForm.value.role }) });
+    bulkDialog.value = false;
+    pushToast({ severity: 'success', summary: `已导入 ${result.count} 个主体`, detail: `新建 ${result.created} 个，改角色 ${result.updated} 个 → ${bulkForm.value.role}`, life: 7000 });
+    await load();
+  } catch (error) { toastError('批量导入失败', error); }
+  finally { bulkSaving.value = false; }
+}
+
+// ── 工具：策略是代码里的常量，这里能改的只有启停 ──────────────────────────────
+const TOOL_SOURCE_LABEL: Record<string, string> = { builtin: '内建', agent: '子 Agent', plugin: 'Plugin', mcp: 'MCP' };
+const APPROVAL_LABEL: Record<string, string> = { never: '不需要', always: '每次都要', conditional: '按规则判定' };
+const SCOPE_LABEL: Record<string, string> = { workspace: '工作区文件', chat: '当前会话', private: '用户私有', global: '全局', sandbox: '沙箱执行', telegram: 'Telegram' };
+const toolRows = computed(() => Object.entries(tools.value).map(([name, policy]) => ({ name, ...policy })));
+const toolDialog = ref(false);
+const toolSaving = ref(false);
+const toolForm = ref<{ name: string; minRole: string; approval: string; scope: string; source: string; enabled: boolean; original: boolean }>({ name: '', minRole: '', approval: '', scope: '', source: '', enabled: true, original: true });
+function editTool(row: { name: string } & ToolPolicy): void { toolForm.value = { ...row, original: row.enabled }; toolDialog.value = true; }
+async function saveTool(): Promise<void> {
+  const form = toolForm.value;
+  if (form.enabled === form.original) { toolDialog.value = false; return; }
+  toolSaving.value = true;
+  try {
+    await api(`/api/tools/${encodeURIComponent(form.name)}`, { method: 'PATCH', body: JSON.stringify({ enabled: form.enabled }) });
+    toolDialog.value = false;
+    pushToast({ severity: 'success', summary: `${form.name} 已${form.enabled ? '启用' : '停用'}`, detail: form.enabled ? '下一轮起重新进入模型的工具目录' : '既从工具目录移除，execute() 也会二次拦截' });
+    await load();
+  } catch (error) { toastError('保存工具开关失败', error); }
+  finally { toolSaving.value = false; }
+}
+
+// ── 子 Agent：整张 agent.agents 数组作为一条配置覆盖写回 ───────────────────────
+const emptyAgent = (): AgentDefinition => ({ name: '', description: '', modelAlias: 'high', maxSteps: 8, minRole: 'limited', tools: [], resultMaxChars: 4000, instructions: '', injectMemory: false });
+const agentDialog = ref(false);
+const agentSaving = ref(false);
+const agentForm = ref<AgentDefinition & { originalName: string; isNew: boolean }>({ ...emptyAgent(), originalName: '', isNew: true });
+const agentNameTaken = computed(() => agentForm.value.isNew && agents.value.some((entry) => entry.name === agentForm.value.name.trim()));
+function editAgent(row?: AgentDefinition): void {
+  agentForm.value = { ...emptyAgent(), ...row, tools: [...row?.tools ?? []], originalName: row?.name ?? '', isNew: !row };
+  agentDialog.value = true;
+}
+function toggleAgentTool(name: string): void {
+  const current = agentForm.value.tools;
+  agentForm.value.tools = current.includes(name) ? current.filter((entry) => entry !== name) : [...current, name];
+}
+/** 写的是整张数组：单条 PATCH 端点不存在，而 agent.agents 本身就是一个 schema 叶子。 */
+async function writeAgents(next: AgentDefinition[], summary: string, detail: string): Promise<void> {
+  await api('/api/config', { method: 'PUT', body: JSON.stringify({ 'agent.agents': next }) });
+  pushToast({ severity: 'success', summary, detail });
+  await load();
+}
+async function saveAgent(): Promise<void> {
+  const form = agentForm.value;
+  const name = form.name.trim();
+  if (!name) { pushToast({ severity: 'warn', summary: '请填 Agent 名称' }); return; }
+  if (agentNameTaken.value) { pushToast({ severity: 'warn', summary: `已存在名为 ${name} 的 Agent` }); return; }
+  if (!form.instructions.trim()) { pushToast({ severity: 'warn', summary: '请填 instructions', detail: '子 agent 的系统提示词为空时模型没有任何职责说明' }); return; }
+  const entry: AgentDefinition = { name, description: form.description, modelAlias: form.modelAlias, maxSteps: form.maxSteps, minRole: form.minRole,
+    tools: form.tools, resultMaxChars: form.resultMaxChars, instructions: form.instructions, injectMemory: form.injectMemory };
+  const next = agents.value.map((existing) => existing.name === form.originalName ? entry : existing);
+  if (form.isNew) next.push(entry);
+  agentSaving.value = true;
+  try { await writeAgents(next, form.isNew ? 'Agent 已创建' : 'Agent 已保存', `${name} · 热更新已生效`); agentDialog.value = false; }
+  catch (error) { toastError('保存 Agent 失败', error); }
+  finally { agentSaving.value = false; }
+}
+async function removeAgent(name: string): Promise<void> {
+  if (!confirm(`删除子 Agent ${name}？正在引用它的 spawn_agent 调用会直接报「未知子 agent」。`)) return;
+  try { await writeAgents(agents.value.filter((entry) => entry.name !== name), `Agent ${name} 已删除`, '写入 agent.agents 覆盖层'); agentDialog.value = false; }
+  catch (error) { toastError('删除 Agent 失败', error); }
+}
+
+watch(active, (value) => { if (value === 'messages') void loadConversations(); });
 onMounted(async () => {
   await hydrateSession();
   await load();
@@ -380,10 +528,72 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             <article class="commit-timeline"><header><div><p class="eyebrow">COMMIT GRAPH</p><h3>Prune / Rebase 时间线</h3></div></header><ol><li v-for="commit in commits" :key="String(commit.id)" :class="['commit-node', String(commit.kind)]"><span class="commit-rail" /><div><b>{{ commit.kind }}</b><code>{{ String(commit.id).slice(0, 12) }}</code><small>窗口 {{ commit.windowStart }} → {{ commit.headOrdinal }} · {{ commit.tokensTotal }} tokens</small><small v-if="commit.rebased">Rebased over {{ commit.rebaseOver }}</small><small v-if="commit.meta">{{ commit.meta }}</small></div><div class="commit-actions"><UiButton size="small" variant="text" label="快照" @click="inspectCommit(commit.id)" /><UiButton size="small" variant="outlined" label="回滚到此" @click="checkoutCommit(commit.id)" /></div></li></ol><pre v-if="inspectedSnapshot" class="snapshot-preview" v-text="JSON.stringify(inspectedSnapshot, null, 2)" /></article>
           </div>
         </section>
-        <section v-else-if="active === 'messages'" class="surface page-surface"><header><div><p class="eyebrow">ARCHIVE</p><h2>消息检索</h2><p>中文三字以上走 FTS5 trigram，短词回退 LIKE。</p></div></header><div class="search-results"><input v-model="query" placeholder="输入关键词搜索中文或英文消息"><UiButton label="搜索归档" icon="pi pi-search" /><p class="empty">结果经 owner 跨会话检索 API 返回；消息正文始终以纯文本渲染。</p></div></section>
-        <section v-else-if="active === 'tools'" class="surface page-surface"><header><div><p class="eyebrow">TOOL POLICY</p><h2>工具与权限</h2><p>单一策略源决定角色、审批和作用域。</p></div></header><DataGrid :rows="Object.entries(tools).map(([name, policy]) => ({ name, ...policy }))" :columns="COLUMNS.tools" data-key="name" paginate /></section>
+        <section v-else-if="active === 'messages'" class="surface page-surface">
+          <header><div><p class="eyebrow">ARCHIVE</p><h2>消息与对话</h2><p>默认按 turn 列出最近的模型对话，每页 {{ CONVERSATION_PAGE_SIZE }} 次；搜索走全库归档（中文三字以上 FTS5 trigram，短词回退 LIKE）。</p></div></header>
+          <div class="search-row">
+            <label class="search grow"><i class="pi pi-search" /><input v-model="query" placeholder="输入关键词搜索中文或英文消息" @keyup.enter="searchArchive"></label>
+            <UiButton label="搜索归档" icon="pi pi-search" :loading="searching" @click="searchArchive" />
+            <UiButton v-if="searchHits" variant="outlined" label="返回最近对话" icon="pi pi-arrow-left" @click="clearSearch" />
+          </div>
+          <template v-if="searchHits">
+            <div class="registry-heading"><div><h3>归档检索结果</h3><p class="section-note">「{{ searchTerm }}」命中 {{ searchHits.length }} 条（跨会话，最多 50 条）。正文一律纯文本渲染。</p></div></div>
+            <DataGrid :rows="searchHits" :columns="COLUMNS.hits" data-key="id" paginate empty="没有命中任何消息">
+              <template #tgDate="{ data }">{{ new Date(data.tgDate).toLocaleString() }}</template>
+              <template #from="{ data }"><UiTag :value="data.direction === 'out' ? 'bot' : 'user'" :severity="data.direction === 'out' ? 'info' : 'secondary'" /> {{ data.fromName ?? data.fromUsername ?? '—' }}</template>
+              <template #text="{ data }"><span class="hit-text">{{ data.text ?? `[${data.kind}]` }}</span></template>
+            </DataGrid>
+          </template>
+          <template v-else>
+            <ol class="conversation-list">
+              <li v-for="turn in conversations" :key="turn.id" :class="['conversation', turn.state]">
+                <button type="button" @click="toggleTurn(turn.id)">
+                  <div class="conversation-head">
+                    <UiTag :value="turnState(turn.state).label" :severity="turnState(turn.state).severity" />
+                    <code>{{ turn.chatId }}</code>
+                    <span class="conversation-who">{{ turn.fromName ?? turn.fromUsername ?? turn.userId }}</span>
+                    <UiTag v-if="turn.triggerReason" :value="String(turn.triggerReason)" severity="secondary" />
+                    <UiTag v-if="turn.rebased" value="REBASED" severity="danger" />
+                    <time>{{ turn.startedAt ? new Date(turn.startedAt).toLocaleString() : '—' }}</time>
+                  </div>
+                  <p class="conversation-prompt"><i class="pi pi-user" aria-hidden="true" /><span>{{ turn.prompt || `[${turn.promptKind ?? '无正文'}]` }}</span></p>
+                  <p class="conversation-reply"><i class="pi pi-sparkles" aria-hidden="true" /><span>{{ turn.reply || (turn.error ? `（失败：${turn.error}）` : '（没有回复落盘）') }}</span></p>
+                  <small class="conversation-meta">{{ turn.steps }} 步 · {{ turn.toolCalls }} 次工具 · {{ turn.inputTokens }}/{{ turn.outputTokens }} tok · ${{ Number(turn.costUsd || 0).toFixed(4) }}</small>
+                </button>
+                <div v-if="expandedTurns.has(turn.id)" class="conversation-full">
+                  <p class="field-title">提问<small>{{ turn.key }}</small></p><pre v-text="turn.prompt ?? ''" />
+                  <p class="field-title">回复</p><pre v-text="turn.reply || turn.error || ''" />
+                  <UiButton size="small" variant="outlined" icon="pi pi-sitemap" label="查看该轮 trace" @click.stop="active = 'logs'; inspectTrace(turn.id)" />
+                </div>
+              </li>
+              <li v-if="conversationLoading" class="empty"><i class="pi pi-spin pi-spinner" aria-hidden="true" /> 加载中…</li>
+              <li v-else-if="!conversations.length" class="empty">还没有任何模型对话。bot 收到第一条触发消息后会出现在这里。</li>
+            </ol>
+            <footer v-if="conversationTotal" class="grid-pager">
+              <span>共 {{ conversationTotal }} 次对话 · 第 {{ conversationPage }} / {{ conversationPages }} 页</span>
+              <button type="button" aria-label="上一页" :disabled="conversationPage <= 1 || conversationLoading" @click="loadConversations(conversationPage - 1)"><i class="pi pi-chevron-left" aria-hidden="true" /></button>
+              <button type="button" aria-label="下一页" :disabled="conversationPage >= conversationPages || conversationLoading" @click="loadConversations(conversationPage + 1)"><i class="pi pi-chevron-right" aria-hidden="true" /></button>
+            </footer>
+          </template>
+        </section>
+        <section v-else-if="active === 'tools'" class="surface page-surface"><header><div><p class="eyebrow">TOOL POLICY</p><h2>工具与权限</h2><p>单一策略源决定角色、审批和作用域。点任一行查看详情并启停。</p></div><UiTag :value="`${toolRows.filter((row) => row.enabled).length} / ${toolRows.length} 启用`" :severity="toolRows.every((row) => row.enabled) ? 'secondary' : 'warn'" /></header>
+          <DataGrid :rows="toolRows" :columns="COLUMNS.tools" data-key="name" paginate :page-size="15" clickable @row-click="editTool">
+            <template #name="{ data }"><code>{{ data.name }}</code></template>
+            <template #source="{ data }">{{ TOOL_SOURCE_LABEL[data.source] ?? data.source }}</template>
+            <template #minRole="{ data }"><UiTag :value="data.minRole" :severity="roleSeverity(data.minRole)" /></template>
+            <template #approval="{ data }">{{ APPROVAL_LABEL[data.approval] ?? data.approval }}</template>
+            <template #scope="{ data }">{{ SCOPE_LABEL[data.scope] ?? data.scope }}</template>
+            <template #enabled="{ data }"><UiTag :value="data.enabled ? '启用' : '已停用'" :severity="data.enabled ? 'success' : 'danger'" /></template>
+          </DataGrid>
+        </section>
         <section v-else-if="active === 'extensions'" class="surface page-surface"><header><div><p class="eyebrow">EXTENSIONS</p><h2>Skills / Plugins / MCP</h2><p>Skill 渐进式披露；Plugin 全信任运行；MCP 工具动态发现。</p></div></header><div class="provider-grid"><article v-for="item in [...skills, ...plugins, ...mcp]" :key="item.name"><UiTag :value="item.load_error ? '错误' : item.enabled === 0 ? '停用' : '可用'" :severity="item.load_error ? 'danger' : item.enabled === 0 ? 'secondary' : 'success'" /><h3>{{ item.name }}</h3><p>{{ item.description ?? item.min_role ?? 'extension' }}</p><code v-if="item.load_error">{{ item.load_error }}</code></article><article v-if="!skills.length && !plugins.length && !mcp.length" class="empty-card"><i class="pi pi-box" /><h3>暂无扩展</h3><p>把 Skill、Plugin 或 MCP server 加入配置后重载。</p></article></div></section>
-        <section v-else-if="active === 'agents'" class="surface page-surface"><header><div><p class="eyebrow">AGENT TOPOLOGY</p><h2>子 Agent</h2><p>独立上下文、权限不高于父 Agent，结果全文独立落盘。</p></div></header><DataGrid :rows="agents" :columns="COLUMNS.agents" data-key="name" empty="没有配置子 Agent" /></section>
+        <section v-else-if="active === 'agents'" class="surface page-surface"><header><div><p class="eyebrow">AGENT TOPOLOGY</p><h2>子 Agent</h2><p>独立上下文、权限不高于父 Agent，结果全文独立落盘。点任一行编辑，保存即热更新。</p></div><UiButton label="新建 Agent" icon="pi pi-plus" @click="editAgent()" /></header>
+          <DataGrid :rows="agents" :columns="COLUMNS.agents" data-key="name" clickable empty="没有配置子 Agent。模型只有在这里配了 agent 才能用 spawn_agent 派发。" @row-click="editAgent">
+            <template #name="{ data }"><code>{{ data.name }}</code></template>
+            <template #minRole="{ data }"><UiTag :value="data.minRole" :severity="roleSeverity(data.minRole)" /></template>
+            <template #modelAlias="{ data }"><code>{{ data.modelAlias }}</code></template>
+            <template #tools="{ data }"><span v-if="data.tools.length" class="agent-tools">{{ data.tools.join(' · ') }}</span><small v-else class="alias-empty">未限定，继承父 agent 的可用工具</small></template>
+          </DataGrid>
+        </section>
         <section v-else-if="active === 'usage'" class="surface page-surface"><header><div><p class="eyebrow">USAGE LEDGER</p><h2>用量与成本</h2><p>输入、输出、缓存读写分别计价。</p></div></header>
           <DataGrid :rows="usage" :columns="COLUMNS.usage" data-key="id" paginate empty="还没有产生用量">
             <template #ts="{ data }">{{ new Date(data.ts).toLocaleString() }}</template>
@@ -391,8 +601,14 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
           </DataGrid>
         </section>
 
-        <section v-else-if="active === 'principals'" class="surface page-surface"><header><div><p class="eyebrow">ACCESS CONTROL</p><h2>主体与权限</h2><p>effectiveRole 始终取用户与会话角色的较低者。</p></div><UiButton label="批量导入" icon="pi pi-upload" /></header>
-          <DataGrid :rows="principals" :columns="COLUMNS.principals" data-key="id" paginate :page-size="12">
+        <section v-else-if="active === 'principals'" class="surface page-surface"><header><div><p class="eyebrow">ACCESS CONTROL</p><h2>主体与权限</h2><p>effectiveRole 始终取用户与会话角色的较低者。点任一行改角色。</p></div><UiButton label="批量导入" icon="pi pi-upload" @click="openBulk" /></header>
+          <nav class="subtabs" aria-label="主体类型">
+            <button v-for="[key, label] in PRINCIPAL_KINDS" :key="key" type="button" :class="{ active: principalKind === key }" @click="principalKind = key">{{ label }}<span>{{ principalCount(key) }}</span></button>
+          </nav>
+          <DataGrid :rows="visiblePrincipals" :columns="COLUMNS.principals" data-key="id" paginate :page-size="12" clickable :empty="principalKind === 'chat' ? '还没有见过任何群聊' : principalKind === 'user' ? '还没有见过任何用户' : '还没有任何主体'" @row-click="editPrincipal">
+            <template #kind="{ data }"><UiTag :value="data.kind === 'chat' ? '群聊' : '用户'" :severity="data.kind === 'chat' ? 'info' : 'secondary'" /></template>
+            <template #displayName="{ data }">{{ data.displayName ?? '—' }}</template>
+            <template #username="{ data }">{{ data.username ? `@${data.username}` : '—' }}</template>
             <template #role="{ data }"><UiTag :value="data.role" :severity="roleSeverity(data.role)" /></template>
           </DataGrid>
         </section>
@@ -513,6 +729,65 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
         <label class="wide">说明（只给运维看）<input v-model="aliasForm.description"></label>
       </div>
       <template #footer><UiButton variant="text" label="取消" @click="aliasDialog = false" /><UiButton :label="aliasForm.isNew ? '创建别名' : '保存别名'" @click="saveAlias" /></template>
+    </UiModal>
+    <UiModal v-model:visible="principalDialog" :title="`${principalForm.kind === 'chat' ? '群聊' : '用户'} ${principalForm.displayName || principalForm.tgId}`">
+      <div class="form-grid">
+        <label>类型<input :value="principalForm.kind === 'chat' ? '群聊' : '用户'" disabled></label>
+        <label>Telegram ID<input :value="principalForm.tgId" disabled></label>
+        <label>显示名<input :value="principalForm.displayName ?? '—'" disabled></label>
+        <label>用户名<input :value="principalForm.username ? `@${principalForm.username}` : '—'" disabled></label>
+        <label class="wide">角色<UiSelect v-model="principalForm.role" :options="ROLES" /></label>
+        <p class="wide field-note">{{ ROLE_HINTS[principalForm.role] }}</p>
+        <p v-if="principalForm.kind === 'chat'" class="wide field-note">会话角色只是上限：群里某个人的有效角色 = min(他自己的角色, 这个群的角色)。私聊会话不看这一行。</p>
+        <p v-if="principalForm.role === 'owner' && principalForm.originalRole !== 'owner'" class="wide callout warn"><i class="pi pi-exclamation-triangle" aria-hidden="true" />owner 跳过审批与沙箱（<code>sandbox.bypassRoles</code>），可以在会话里直接执行宿主命令。</p>
+      </div>
+      <template #footer><UiButton variant="text" label="取消" @click="principalDialog = false" /><UiButton label="保存角色" :loading="principalSaving" :disabled="principalForm.role === principalForm.originalRole" @click="savePrincipal" /></template>
+    </UiModal>
+    <UiModal v-model:visible="bulkDialog" title="批量导入主体">
+      <div class="form-grid">
+        <p class="wide field-note">把一批 Telegram <b>数字 ID</b> 一次性登记成主体并统一设角色：还没跟 bot 说过话的人也能提前放行或拉黑。已存在的主体只改角色，不动显示名。</p>
+        <label>类型<UiSelect v-model="bulkForm.kind" :options="[{ value: 'user', label: '用户' }, { value: 'chat', label: '群聊' }]" /></label>
+        <label>角色<UiSelect v-model="bulkForm.role" :options="ROLES" /></label>
+        <p class="wide field-note">{{ ROLE_HINTS[bulkForm.role] }}</p>
+        <label class="wide">ID 列表<textarea v-model="bulkForm.ids" rows="7" placeholder="每行一个，或用空格/逗号分隔：&#10;123456789&#10;-1001234567890" /></label>
+        <p v-if="bulkBadIds.length" class="wide callout error"><i class="pi pi-times-circle" aria-hidden="true" />不是合法的 Telegram 数字 ID：{{ bulkBadIds.slice(0, 5).join('、') }}{{ bulkBadIds.length > 5 ? ` 等 ${bulkBadIds.length} 个` : '' }}。群/频道 ID 以 <code>-100</code> 开头，@用户名不行。</p>
+        <p v-else-if="bulkIds.length" class="wide field-note">已解析 {{ bulkIds.length }} 个 ID。</p>
+      </div>
+      <template #footer><UiButton variant="text" label="取消" @click="bulkDialog = false" /><UiButton label="导入并设角色" icon="pi pi-upload" :loading="bulkSaving" :disabled="!bulkIds.length || bulkBadIds.length > 0" @click="saveBulk" /></template>
+    </UiModal>
+    <UiModal v-model:visible="toolDialog" :title="`工具 ${toolForm.name}`">
+      <div class="form-grid">
+        <label>来源<input :value="TOOL_SOURCE_LABEL[toolForm.source] ?? toolForm.source" disabled></label>
+        <label>最低角色<input :value="toolForm.minRole" disabled></label>
+        <label>审批策略<input :value="APPROVAL_LABEL[toolForm.approval] ?? toolForm.approval" disabled></label>
+        <label>作用域<input :value="SCOPE_LABEL[toolForm.scope] ?? toolForm.scope" disabled></label>
+        <p class="wide field-note">上面四项是代码里的单一策略源（<code>TOOL_POLICY</code>），注册期就 fail-closed，不在这里改 —— 能从界面调低某个工具的最低角色，等于把权限矩阵变成两份会漂移的真相。</p>
+        <label class="switch-line"><input v-model="toolForm.enabled" type="checkbox">对所有会话启用</label>
+        <p class="wide field-note">停用是硬边界：工具既不进模型的工具目录，<code>execute()</code> 也会二次拦截并返回 <code>tool_disabled_by_operator</code>（模型可能沿用上一步的工具名）。</p>
+      </div>
+      <template #footer><UiButton variant="text" label="取消" @click="toolDialog = false" /><UiButton :label="toolForm.enabled ? '启用' : '停用'" :severity="toolForm.enabled ? 'primary' : 'danger'" :loading="toolSaving" :disabled="toolForm.enabled === toolForm.original" @click="saveTool" /></template>
+    </UiModal>
+    <UiModal v-model:visible="agentDialog" :title="agentForm.isNew ? '新建子 Agent' : `子 Agent ${agentForm.originalName}`" width="min(860px, 94vw)">
+      <div class="form-grid">
+        <label>名称<input v-model="agentForm.name" :disabled="!agentForm.isNew" placeholder="模型用这个名字调 spawn_agent"></label>
+        <label>模型别名<UiSelect v-model="agentForm.modelAlias" :options="aliasRows.map((row) => row.alias)" /></label>
+        <p v-if="agentNameTaken" class="wide callout error"><i class="pi pi-times-circle" aria-hidden="true" />已存在同名 Agent。</p>
+        <label class="wide">职责描述<input v-model="agentForm.description" placeholder="写给模型看：什么时候该派这个 agent"></label>
+        <label>最低角色<UiSelect v-model="agentForm.minRole" :options="ROLES" /></label>
+        <label>步数上限<UiNumber v-model="agentForm.maxSteps" :min="1" :max="64" /></label>
+        <label>结果最大字符<UiNumber v-model="agentForm.resultMaxChars" :min="200" :step="500" /></label>
+        <label class="switch-line"><input v-model="agentForm.injectMemory" type="checkbox">注入记忆文档（PUBMEMORY / PRIMEMORY）</label>
+        <p class="wide field-note">子 agent 的有效角色 = min(父 agent 角色, 这里的最低角色)，永远不会比派发它的人权限更高。</p>
+        <div class="wide">
+          <p class="field-title">可用工具<small>全不勾 = 不额外限制，沿用父 agent 在当前角色下的工具目录</small></p>
+          <div class="tool-picker"><label v-for="row in toolRows" :key="row.name" :class="{ off: !row.enabled }"><input type="checkbox" :checked="agentForm.tools.includes(row.name)" @change="toggleAgentTool(row.name)"><code>{{ row.name }}</code><small v-if="!row.enabled">已停用</small></label></div>
+        </div>
+        <label class="wide">instructions<textarea v-model="agentForm.instructions" rows="9" placeholder="这个子 agent 的系统提示词" /></label>
+      </div>
+      <template #footer>
+        <UiButton v-if="!agentForm.isNew" variant="outlined" severity="danger" icon="pi pi-trash" label="删除" @click="removeAgent(agentForm.originalName)" />
+        <UiButton variant="text" label="取消" @click="agentDialog = false" /><UiButton :label="agentForm.isNew ? '创建 Agent' : '保存 Agent'" :loading="agentSaving" @click="saveAgent" />
+      </template>
     </UiModal>
     <UiDrawer v-model:visible="mobileMenu" title="LuoLiCore"><nav class="mobile-nav"><button v-for="item in navigation" :key="item[0]" type="button" @click="active = item[0]; mobileMenu = false"><i :class="item[1]" />{{ item[2] }}</button></nav></UiDrawer>
   </main>
