@@ -8,38 +8,33 @@ COPY scripts ./scripts
 RUN pnpm install --frozen-lockfile=false && pnpm build
 
 FROM node:22-bookworm-slim
-RUN corepack enable && groupadd -r luoli && useradd -r -g luoli luoli
+RUN corepack enable
+# sandbox.mode=docker 时 Sandbox 直接 spawn `docker`（先 `docker version` 探活）。容器形态下挂了
+# /var/run/docker.sock 还不够，镜像里得有客户端 —— 缺了它 probe 报 ENOENT，执行类工具全部 fail-closed
+# 消失。只装 docker-ce-cli，不装 daemon；用官方源而不是 docker.io，才能跟着宿主 arch 走。
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+ && install -m 0755 -d /etc/apt/keyrings \
+ && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
+ && chmod a+r /etc/apt/keyrings/docker.asc \
+ && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" > /etc/apt/sources.list.d/docker.list \
+ && apt-get update && apt-get install -y --no-install-recommends docker-ce-cli \
+ && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-COPY --from=build /app/package.json /app/pnpm-lock.yaml* ./
-COPY --from=build /app/apps/bot/package.json ./apps/bot/package.json
-COPY --from=build /app/packages/shared/package.json ./packages/shared/package.json
-COPY --from=build /app/packages/db/package.json ./packages/db/package.json
-COPY --from=build /app/packages/core/package.json ./packages/core/package.json
-COPY --from=build /app/packages/server/package.json ./packages/server/package.json
-COPY --from=build /app/packages/telegram/package.json ./packages/telegram/package.json
-COPY --from=build /app/packages/plugin-sdk/package.json ./packages/plugin-sdk/package.json
+# scripts/postbuild.ts 已经把产物放到各包 exports 声明的 packages/<name>/dist/，
+# 根 node_modules/@luoli/* 由 pnpm 按根 package.json 的 workspace 依赖生成 ——
+# 宿主 `pnpm start` 和容器共用同一套布局，这里整目录搬过来即可。
+COPY --from=build /app/package.json /app/pnpm-lock.yaml* /app/pnpm-workspace.yaml ./
 COPY --from=build /app/node_modules ./node_modules
-COPY --from=build /app/apps/bot/node_modules ./apps/bot/node_modules
+COPY --from=build /app/packages ./packages
+COPY --from=build /app/apps ./apps
 COPY --from=build /app/dist ./dist
-COPY --from=build /app/packages/db/migrations ./packages/db/migrations
-RUN mkdir -p packages/shared/dist packages/db/dist packages/core/dist packages/server/dist packages/telegram/dist packages/plugin-sdk/dist \
- && cp -r dist/packages/shared/src/* packages/shared/dist/ \
- && cp -r dist/packages/db/src/* packages/db/dist/ \
- && cp -r dist/packages/core/src/* packages/core/dist/ \
- && cp -r dist/packages/server/src/* packages/server/dist/ \
- && cp -r dist/packages/telegram/src/* packages/telegram/dist/ \
- && cp -r dist/packages/plugin-sdk/src/* packages/plugin-sdk/dist/ \
- && mkdir -p node_modules/@luoli \
- && ln -s /app/packages/shared node_modules/@luoli/shared \
- && ln -s /app/packages/db node_modules/@luoli/db \
- && ln -s /app/packages/core node_modules/@luoli/core \
- && ln -s /app/packages/server node_modules/@luoli/server \
- && ln -s /app/packages/telegram node_modules/@luoli/telegram \
- && ln -s /app/packages/plugin-sdk node_modules/@luoli/plugin-sdk
-COPY --from=build /app/packages/webui/dist ./packages/webui/dist
 COPY config ./config
 COPY memory ./memory
-RUN mkdir -p data logs skills plugins && chown -R luoli:luoli /app
-USER luoli
+# 用基础镜像自带的 node 用户（uid/gid 1000）而不是新建系统用户：./data 等目录是宿主 bind mount，
+# 属主是宿主用户（通常 1000），uid 对不上就是启动即 EACCES mkdir /app/data/workspace；而且沙箱容器
+# 固定跑 --user=1000:1000，uid 一致才不会出现「bash 写的文件应用改不动」。宿主用户不是 1000 时，
+# 在 docker-compose.yml 里用 user: "${UID}:${GID}" 覆盖。
+RUN mkdir -p data logs skills plugins && chown -R node:node /app
+USER node
 EXPOSE 8787
 CMD ["node", "dist/apps/bot/src/main.js"]

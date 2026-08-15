@@ -1,0 +1,15 @@
+# 构建上下文只需要源码 + 清单。宿主的 node_modules 里有为本机编译的原生模块
+# （better-sqlite3 / argon2 / sharp），漏进镜像会覆盖 build 阶段装的那份。
+node_modules
+**/node_modules
+dist
+**/dist
+data
+logs
+.env
+*.db
+*.db-wal
+*.db-shm
+.git
+coverage
+*.tsbuildinfo

@@ -16,11 +16,18 @@ pnpm smoke                    # 端到端冒烟：20 update / 10 turn，跑通�
 pnpm db:migrate               # 单独执行迁移
 pnpm config:schema            # 从 zod schema 重新生成 config/config.schema.json
 pnpm webui:passwd <password>  # 生成 argon2id 口令哈希
-pnpm build                    # WebUI + tsc -p tsconfig.build.json → dist/
+pnpm build                    # WebUI + tsc -p tsconfig.build.json → dist/ + scripts/postbuild.ts
+pnpm start                    # 跑 dist 产物（生产）
 ```
 
 **不要直接跑 `tsc -p tsconfig.json` 或 `tsc --build`。** 根 tsconfig 没有 `noEmit`，会把编译产物 `.js`
 散落到 `packages/`、`apps/`、`tests/` 的源码目录里。类型检查一律用 `pnpm typecheck`。
+
+`tsc` emit 到 `dist/packages/<name>/src/`，而各包 `package.json` 的 `exports` 指向
+`packages/<name>/dist/` —— `scripts/postbuild.ts` 负责把产物搬过去，宿主与容器共用这一套布局。
+**改 `tsconfig.build.json` 的 `outDir`/`rootDir`、包的 `exports`、或根 `package.json` 里的
+`@luoli/*` workspace 依赖时，这三处要一起看**；对不上的表现是 `pnpm start` 报
+`ERR_MODULE_NOT_FOUND: @luoli/db`（`pnpm dev` 走 tsx + tsconfig paths，发现不了）。
 
 环境变量（见 `.env.example`）：`LUOLI_OWNER_ID` 必需，缺失时 `loadConfig` 直接拒绝启动；
 `BOT_TOKEN` 缺失时 Telegram 入口禁用但 WebUI 仍可跑；`LUOLI_MASTER_KEY` 用于加密 provider API key。

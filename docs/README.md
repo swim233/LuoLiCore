@@ -141,6 +141,31 @@ pnpm build && pnpm start      # 生产
 
 必需环境变量见 [11 §1](./11-config-reference.md#1-环境变量env)。
 
+### 4.1 两种生产部署形态
+
+| | 容器（`docker compose up`） | 宿主（`pnpm build && pnpm start`） |
+|---|---|---|
+| 应用进程 | 容器内 | 宿主，建议挂 systemd |
+| 沙箱 | 挂 `/var/run/docker.sock`，由容器调宿主 docker | 直接调宿主 `docker` CLI，**不需要挂 socket** |
+| 沙箱镜像 | `docker compose --profile build-only build sandbox` | 同左 |
+| 额外前置 | `.env` 里给 `DOCKER_GID`（socket 权限）；`LUOLI_HOST_WORKSPACE_DIR`（`-v` 路径映射，compose 已默认给出） | 无 |
+
+容器形态要跑 docker 沙箱，三件事缺一不可，缺哪件都是**执行类工具直接消失**而不是报错降级：
+镜像里有 `docker` 客户端（`docker/Dockerfile` 装了 `docker-ce-cli`，不装 daemon）、进程能读到 socket
+（`group_add: ${DOCKER_GID}`）、`-v` 的宿主路径映射（`sandbox.hostWorkspaceDir`，见
+[05 §5.3](./05-tools-and-permissions.md)）。注意挂 socket 等于把宿主 docker 的完全控制权交给容器，
+其安全边界等同 root —— 这是本设计的既有取舍，不要再往这个容器里塞不受信任的东西。
+
+两种形态共用一套产物布局：`tsc` emit 到 `dist/packages/<name>/src/`，`scripts/postbuild.ts`
+把它搬到各包 `package.json` 的 `exports` 声明的 `packages/<name>/dist/`；根 `node_modules/@luoli/*`
+由 pnpm 按根 `package.json` 的 workspace 依赖生成。**改 `tsconfig.build.json` 的 `outDir` / `rootDir`
+或包的 `exports` 时，这三处要一起看** —— 对不上的表现是 `pnpm start` 报 `ERR_MODULE_NOT_FOUND: @luoli/db`。
+
+不装 docker 也能跑，但执行类工具（`bash` 等）只剩 `sandbox.mode: none | jail` 两个选项，
+且 `jail` 不是安全边界（[05 §5.4](./05-tools-and-permissions.md)）。注意 `bypassRoles` 在
+`Sandbox.plan()` 里先于 `mode` 判断 —— 即使 `mode: none`，owner 触发的命令仍在宿主直跑，
+要彻底关掉得同时清空 `sandbox.bypassRoles`。
+
 ---
 
 ## 5. 术语表
