@@ -54,7 +54,7 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
 
 ## 3. 页面清单
 
-全站共用 §6 的自建组件与 `styles.css` 的设计变量，视觉基准是总览页：左侧固定深色导航 + 顶栏（状态灯：bot 连接 / provider 健康 / 在途 turn 数 / 今日花费），内容区一律是 `.surface` 卡片。
+全站共用 §6 的自建组件与 `styles.css` 的设计变量，视觉基准是总览页：左侧固定深色导航 + 顶栏（状态灯：bot 连接 / provider 健康 / 在途 turn 数 / 今日花费；右上角是引导 owner 的真实显示名与 `@username`），内容区一律是 `.surface` 卡片。
 
 ### 3.1 Dashboard
 - 实时卡片：在途 turn、今日 turn 数、今日花费/额度环形图、消息量趋势（折线图，近 7 天）。
@@ -78,11 +78,25 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
 - 搜索框与 `[搜索归档]` **在同一行**（`.search-row`），回车等价于点按钮；检索走 `GET /api/messages?q=`
   （owner 跨会话，中文三字以上 FTS5 trigram，短词回退 LIKE），结果切换成表格视图，
   `[返回最近对话]` 切回。正文一律纯文本渲染。
+- **每条对话卡片右侧有 `[查看详情]`**：打开 `UiModal` 展示这一轮**实际发给上游的 JSON**（`GET /api/turns/:id/detail`）——
+  顶部一行是状态/会话/发起人/步数/token/花费/耗时，下面按「模型调用 / 工具与沙箱 / 轮次与上下文 / 全部」分组
+  列出该轮的全部 span，展开任一条看格式化后的载荷。`model.call` 的载荷里带 `request.body`，
+  也就是真正发出去的请求体 —— turns 表只有统计、messages 表只有最终文本，**排查「模型到底收到了什么」只有这一份**。
+  打开时默认落在模型调用并展开第一条。
+- **长文本处理**：单条 span 的请求体动辄几十 KB，服务端按 120k 字符截断（置 `truncated`），载荷区固定高度自行滚动；
+  `[复制 JSON]` 与 `[下载完整 JSON]` 都走 `GET /api/logs/:id/data` 取完整那一份（截断过的内容复制出去不是合法 JSON）。
+  `logs.captureBodies` 关闭时详情里只有用量与耗时，页面顶部明说这一点，而不是显示一个空壳。
+- 搜索结果表格多一列 `[详情]`，命中消息所属的那一轮同样能直接点开（服务端按 `turns.trigger_message_id` 回填 `turnId`）。
 - 单条操作：`[定位到上下文]`（若已被认领）、`[查看所属 turn 的 trace]`、`[软删除]`。
 
 ### 3.4 提示词（Prompts）
-- 左侧文档树（树形控件）：`CHARACTER.md`、`CHARACTER.<chat>.md`、`ASSIST.md`、`PUBMEMORY.md`、`private/<userId>/PRIMEMORY.md`。
-- 右侧编辑器（文本域 + 行号；或按需换 CodeMirror）：实时 token 计数、字节数、保存（`Ctrl+S`）。
+- 左侧是**文档卡片网格**（不是 id/scope/bytes 的四列表格）：每张卡片一份文档，显示图标 + 中文名
+  （人格 / 助理守则 / 公共记忆 / 私有记忆）、`全局` 或所属会话/用户、**这份文档进的是 prompt 的第几个 block 及其用途**、
+  文档 id、字节数 / token 数 / 更新时间。选中的卡片高亮。
+  —— `character:global` 这种 id 认不出是干什么的，用途必须写在卡片上，而不是让运维回去读 [06](./06-prompt-and-memory.md)。
+  覆盖的文档集合仍是：`CHARACTER.md`、`CHARACTER.<chat>.md`、`ASSIST.md`、`PUBMEMORY.md`、`private/<userId>/PRIMEMORY.md`。
+- 右侧编辑器（文本域 + 行号；或按需换 CodeMirror）：实时 token 计数、字节数、保存（`Ctrl+S`）；
+  标题下写明文档类型与磁盘路径。没选中任何一份时右侧是提示卡片，而不是一片空白。
 - `[预览组装]`：选一个会话 + 角色 → 展示完整 block 0–6 与各块 token 占比（堆叠进度条）。
 - `[历史]`：`memory_revisions` 列表 + unified diff 展示（`UiModal`）+ `[回滚到此版本]`。
 - PRIMEMORY 页顶部醒目提示「查看他人私有记忆会被记录」（对应 [06 §5.3](./06-prompt-and-memory.md#53-隐私细节)）。
@@ -112,11 +126,21 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
 - 点任一行打开二级菜单（`UiModal`）：只读展示 kind / tg_id / 显示名 / username，
   角色下拉可改并写明该角色意味着什么；升到 `owner` 时额外警示「跳过审批与沙箱」。
   保存走 `PATCH /api/principals/:id`，下一轮生效并写审计日志。
+- **表格每行带勾选框**，选中若干行后表格上方出现批量条（已勾选数 + `[清空勾选]` + `[批量改角色]`）：
+  对话框里选目标角色、列出被选中的主体（类型 / 名字 / 当前角色）、写明该角色意味着什么，
+  保存走 `POST /api/principals/roles`。一次新进十几个人时逐行点开改角色是纯粹的重复劳动。
+  切换「全部 / 用户 / 群聊」子导航会清空勾选（跨 kind 的批量在语义上是两回事）。
+- 引导 owner（`access.bootstrapOwnerId` 指向的那一行）在表里带 `引导 OWNER` 徽标，
+  批量改角色时若选中了它且目标不是 owner，对话框里红色提示「降级之后 Telegram 那边没人能管 bot」。
+  另外**引导 owner 的显示名与用户名只能由 Telegram 那边写**：启动时的 `ensureOwner` 只在行不存在时插入占位的 `Owner`，
+  已存在的行一个字段都不动 —— 早先它走 `upsertSeen`，每次重启都把真名冲回 `Owner` / 空用户名。
+  顶栏右上角显示的也是这一行的真实显示名与 `@username`（不再是写死的 `OW`），点一下跳到主体页。
 - `[批量导入]`：粘贴 Telegram **数字 ID** 列表（换行/空格/逗号分隔，去重）+ 类型 + 目标角色，
   一次性登记还没跟 bot 说过话的人。前端先标出非法 ID（`@username`、非数字），
   服务端再校验一次；**已存在的主体必须真的改角色** —— `upsertSeen` 的 `ON CONFLICT` 分支
   刻意不动 `role`（避免每条消息把手工设的角色冲掉），只调它会「导入成功」却什么都没变，
-  所以写入端对已存在的行补一次 `setRole`，返回 `{count, created, updated}`。
+  所以写入端对已存在的行**改为只调 `setRole`**（连 `upsertSeen` 都不再调：它的 `ON CONFLICT`
+  会把这里仅有的 `null` 写进 `display_name`/`username`，把真名清空），返回 `{count, created, updated}`。
 - 权限矩阵只读视图：把 `TOOL_POLICY` 渲染成 [05 §4](./05-tools-and-permissions.md#4-权限矩阵权威表) 那张表，便于核对；可切「以某角色视角」预览可用工具集。
 
 ### 3.7 工具与沙箱
@@ -210,8 +234,10 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
 | `GET /api/chats/:key/commits` | commit 时间线 |
 | `POST /api/chats/:key/commits/:id/checkout` | 回滚 done 指针 |
 | `POST /api/chats/:key/reset` `POST /api/chats/:key/undo` | 等价 `/new` `/undo` |
-| `GET /api/messages` `GET /api/messages/:id` `DELETE /api/messages/:id` | 消息检索（`?q=` 走 FTS） |
+| `GET /api/messages` `GET /api/messages/:id` `DELETE /api/messages/:id` | 消息检索（`?q=` 走 FTS）。列表结果里 `turnId` 会回填：触发消息自己不带 `turn_id`（只有回复落盘才写那一列），但检索命中后最想点开的正是它那一轮，所以按 `turns.trigger_message_id` 反查补上 |
 | `GET /api/turns` | 最近的模型对话，按 turn 聚合：`?page=1&size=20`（size 上限 100）→ `{items, total, page, size}`。每项带触发消息正文（`prompt`）与该轮 bot 回复（`reply`，按内容去重）、状态、步数/工具数/token/花费。分页走 SQL `LIMIT/OFFSET` |
+| `GET /api/turns/:id/detail` | 一次对话的**实际调用载荷**：`{turn, captureBodies, events:[{id, ts, level, kind, summary, spanId, parentSpanId, durationMs, text, bytes, truncated, fileRef}]}`。`events` 是 `log_events` 里 `trace_id = turn id` 的全部 span（上限 500 条，按时间序）；`text` 是格式化后的 `data_json`，单条超过 120k 字符截断并置 `truncated`。超过 `logs.bodyMaxBytes` 的载荷已被 `LogSink` 挪进 `logs/<day>/blobs/*.json`，这里**解引用后再返回**（不然详情里只剩一行 `{"fileRef":…}`）；blob 已被保留策略清掉时 `text=null` 且保留 `fileRef`。turn 不存在返回 404 |
+| `GET /api/logs/:id/data` | 单条日志事件的完整载荷（`application/json` 附件下载），blob 同样解引用。详情视图里的 JSON 会被截断，复制与下载必须拿到完整那一份 |
 | `GET /api/files/:attachmentId` | 附件下载（校验 session） |
 | `GET /api/prompts` `GET /api/prompts/:id` `PUT /api/prompts/:id` | 提示词/记忆文档 |
 | `GET /api/prompts/:id/revisions` `POST /api/prompts/:id/rollback` | 版本 |
@@ -223,7 +249,8 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
 | `POST /api/models/import` | 从上游目录批量落库：`{providerId, models:[{modelId, displayName?, contextWindow?, maxOutput?}], contextWindow?, maxOutput?}`，单次上限 200 条。已存在的 `(provider_id, model_id)` 跳过而不是覆盖（不能把已调好的定价冲掉），返回 `{inserted, skipped, ids}` |
 | `GET/PUT/DELETE /api/aliases[/:alias]` | 别名、fallback 链与采样参数。`PUT` 校验别名名（`^[a-z][a-z0-9_-]{0,31}$`）、链非空且模型存在、`settings` 过 `aliasSettingsSchema`（[04 §5.2.1](./04-agents-and-providers.md#521-别名参数settings_json)），任一不过返回 `alias_invalid` + 具体路径 |
 | `GET/PATCH /api/principals[/:id]` | 主体与角色 |
-| `POST /api/principals/bulk` | 批量登记主体：`{ids:[…], kind: user\|chat, role}`，单次上限 500。ID 必须是 Telegram 数字 ID（`^-?\d{1,20}$`），非法 ID 或非法角色返回 400。已存在的主体补一次 `setRole`（`upsertSeen` 的 `ON CONFLICT` 不动 role），返回 `{count, created, updated}` |
+| `POST /api/principals/bulk` | 批量登记主体：`{ids:[…], kind: user\|chat, role}`，单次上限 500。ID 必须是 Telegram 数字 ID（`^-?\d{1,20}$`），非法 ID 或非法角色返回 400。已存在的主体**只补一次 `setRole`，不再走 `upsertSeen`**（`ON CONFLICT` 分支不动 role 但会照写 `display_name`/`username`，而这里手上只有 `null`，等于把 Telegram 同步来的真名清空），返回 `{count, created, updated}` |
+| `POST /api/principals/roles` | 勾选批量改角色：`{ids:[主体 id…], role}`，单次上限 500。**只改已存在的行，不新建**（新建走 `/api/principals/bulk`，那边收的是 Telegram 数字 ID）；库里找不到的 id 原样回报而不是静默跳过，返回 `{count, changed, missing}` |
 | `GET /api/tools` `PATCH /api/tools/:name` | 工具启停。`GET` 在静态策略之外一并返回当前 `enabled`（来自 `tools.overrides`）。`PATCH` 写入 `tools.overrides.<name>.enabled`；被禁用的工具从工具目录消失，且 `ToolRegistry.execute` 会二次拦截并返回 `tool_disabled_by_operator`。未知工具名返回 404 |
 | `GET/PUT /api/sandbox` `POST /api/sandbox/probe` | 沙箱配置与探测 |
 | `GET/POST/PATCH/DELETE /api/skills[/:name]` | Skill（含正文读写） |

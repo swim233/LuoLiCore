@@ -372,12 +372,24 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     dependencies.rebuildModels?.();
     return ctx.json({ ok: true });
   });
+  // 触发消息自己不带 turn_id（只有回复落盘时才写那一列），可「这条消息触发的那一轮到底发了什么」
+  // 恰恰是检索结果里最想点开的东西 —— 回填一次，让搜索命中也能跳到对话详情。
+  const attachTurnIds = (rows: unknown[]): unknown[] => {
+    const items = rows as Array<Record<string, unknown>>;
+    const pending = items.filter((row) => !row.turnId).map((row) => Number(row.id));
+    if (!pending.length) return items;
+    const owners = new Map((dependencies.db.prepare(`SELECT trigger_message_id AS messageId,id FROM turns WHERE trigger_message_id IN (${pending.map(() => '?').join(',')})`)
+      .all(...pending) as Array<{ messageId: number; id: string }>).map((row) => [row.messageId, row.id]));
+    for (const row of items) if (!row.turnId) row.turnId = owners.get(Number(row.id)) ?? null;
+    return items;
+  };
   app.get('/api/messages', (ctx) => {
     const query = ctx.req.query('q') ?? '';
     const pageNumber = Math.max(1, Number(ctx.req.query('page') ?? 1));
     const size = Math.min(200, Math.max(1, Number(ctx.req.query('size') ?? 50)));
     const items = query ? dependencies.archive.adminSearchAll(query, pageNumber * size) : dependencies.db.prepare('SELECT id,chat_id AS chatId,message_thread_id AS threadId,tg_message_id AS tgMessageId,direction,from_kind AS fromKind,from_user_id AS fromUserId,from_name AS fromName,from_username AS fromUsername,kind,text,tg_date AS tgDate,triggered,trigger_reason AS triggerReason,turn_id AS turnId,revision,deleted_at AS deletedAt FROM messages WHERE deleted_at IS NULL ORDER BY tg_date DESC LIMIT 1000').all();
-    return ctx.json({ ok: true, data: page(items, pageNumber, size) });
+    const paged = page(items, pageNumber, size);
+    return ctx.json({ ok: true, data: { ...paged, items: attachTurnIds(paged.items) } });
   });
   // 消息页默认看的是「最近几次模型对话」而不是逐条消息流：一次 turn 的提问与回答分散在多行里，
   // 按行翻页读不出对话的样子。分页走 SQL 的 LIMIT/OFFSET，turns 表可能很大，不整表拉回来再切。
@@ -405,6 +417,36 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     }
     return ctx.json({ ok: true, data: { items, total, page: pageNumber, size } });
   });
+  // 「这一轮到底往上游发了什么」只有日志里那一份：turns 表存的是统计，messages 表存的是最终文本。
+  // trace_id 就是 turn id，把该轮的 span 连同 data 一起读出来即可；超过 logs.bodyMaxBytes 的 data
+  // 已经被 LogSink 挪进 logs/<day>/blobs/*.json，不跟着解引用的话详情里只剩一行 {"fileRef":…}。
+  const DETAIL_MAX_CHARS = 120_000;
+  interface DetailPayload { text: string | null; bytes: number; truncated: boolean; fileRef: string | null }
+  const blobRef = (value: unknown): string | null => (value && typeof value === 'object' && !Array.isArray(value) && typeof (value as { fileRef?: unknown }).fileRef === 'string' ? (value as { fileRef: string }).fileRef : null);
+  const readBlob = (reference: string): unknown => JSON.parse(readFileSync(safeRef(currentConfig().logs.dir, reference), 'utf8'));
+  const detailPayload = (raw: string | null): DetailPayload => {
+    if (!raw) return { text: null, bytes: 0, truncated: false, fileRef: null };
+    let parsed: unknown;
+    try { parsed = JSON.parse(raw); } catch { return { text: raw.slice(0, DETAIL_MAX_CHARS), bytes: Buffer.byteLength(raw), truncated: raw.length > DETAIL_MAX_CHARS, fileRef: null }; }
+    const reference = blobRef(parsed);
+    let value = parsed;
+    // 保留期一过 blobs/ 就被清掉，行还在。返回 text=null + fileRef，让界面说「载荷已清理」而不是显示那个占位对象。
+    if (reference) { try { value = readBlob(reference); } catch { return { text: null, bytes: Number((parsed as { bytes?: unknown }).bytes ?? 0), truncated: false, fileRef: reference }; } }
+    const text = JSON.stringify(value, null, 2) ?? '';
+    return { text: text.slice(0, DETAIL_MAX_CHARS), bytes: Buffer.byteLength(text), truncated: text.length > DETAIL_MAX_CHARS, fileRef: reference };
+  };
+  app.get('/api/turns/:id/detail', (ctx) => {
+    const id = ctx.req.param('id');
+    const turn = dependencies.db.prepare(`SELECT t.id,t.key,t.chat_id AS chatId,t.initiator_user_id AS userId,t.effective_role AS role,t.state,t.trigger_reason AS triggerReason,
+      COALESCE(t.started_at,t.queued_at) AS startedAt,t.finished_at AS finishedAt,t.steps,t.model_calls AS modelCalls,t.tool_calls AS toolCalls,t.input_tokens AS inputTokens,
+      t.output_tokens AS outputTokens,t.cost_usd AS costUsd,t.error,t.rebased,m.text AS prompt,m.kind AS promptKind,m.from_name AS fromName,m.from_username AS fromUsername
+      FROM turns t LEFT JOIN messages m ON m.id=t.trigger_message_id WHERE t.id=?`).get(id) as Record<string, unknown> | undefined;
+    if (!turn) return ctx.json(apiError('not_found', '这一轮不存在（可能已被日志/数据清理）', 404).body, 404);
+    const rows = dependencies.db.prepare(`SELECT id,ts,level,kind,summary,span_id AS spanId,parent_span_id AS parentSpanId,duration_ms AS durationMs,data_json AS data
+      FROM log_events WHERE trace_id=? ORDER BY ts,id LIMIT 500`).all(id) as Array<Record<string, unknown> & { data: string | null }>;
+    const events = rows.map(({ data, ...row }) => ({ ...row, ...detailPayload(data) }));
+    return ctx.json({ ok: true, data: { turn, captureBodies: currentConfig().logs.captureBodies, events } });
+  });
   app.get('/api/messages/:id', (ctx) => { const row = dependencies.db.prepare('SELECT id,chat_id AS chatId,message_thread_id AS threadId,tg_message_id AS tgMessageId,direction,from_kind AS fromKind,from_user_id AS fromUserId,from_name AS fromName,from_username AS fromUsername,kind,text,tg_date AS tgDate,triggered,trigger_reason AS triggerReason,turn_id AS turnId,revision,deleted_at AS deletedAt FROM messages WHERE id=?').get(Number(ctx.req.param('id'))); return row ? ctx.json({ ok: true, data: row }) : ctx.json(apiError('not_found', '消息不存在', 404).body, 404); });
   app.delete('/api/messages/:id', (ctx) => { const changes = dependencies.db.prepare('UPDATE messages SET deleted_at=? WHERE id=? AND deleted_at IS NULL').run(Date.now(), Number(ctx.req.param('id'))).changes; return ctx.json({ ok: true, data: { changes } }); });
   app.get('/api/files/:attachmentId', (ctx) => { const row = dependencies.db.prepare('SELECT local_path AS path,mime,file_name AS name FROM attachments WHERE id=?').get(ctx.req.param('attachmentId')) as { path: string | null; mime: string | null; name: string | null } | undefined; if (!row?.path || !existsSync(row.path)) return ctx.json(apiError('not_found', '附件不存在', 404).body, 404); return new Response(readFileSync(row.path), { headers: { 'content-type': row.mime ?? 'application/octet-stream', 'content-disposition': contentDisposition(row.name ?? ctx.req.param('attachmentId')) } }); });
@@ -430,17 +472,39 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     if (malformed.length) return ctx.json(apiError('invalid_ids', `不是合法的 Telegram 数字 ID：${malformed.slice(0, 5).join('、')}${malformed.length > 5 ? ` 等 ${malformed.length} 个` : ''}`).body, 400);
     // upsertSeen 的 ON CONFLICT 分支刻意不动 role（避免每条消息把手工设的角色冲掉），
     // 所以只调它的话已存在的主体会「导入成功」却什么都没变 —— 角色必须再走一次 setRole。
+    // 已存在的行也不能再走一次 upsertSeen：这里的 displayName/username 只有 null，
+    // 而 ON CONFLICT 分支会照写，等于把 Telegram 那边同步来的真名清空。
     let created = 0; let updated = 0;
     dependencies.db.transaction(() => {
       for (const tgId of ids) {
         const id = `${kind}:${tgId}`;
-        const existed = Boolean(dependencies.db.prepare('SELECT 1 FROM principals WHERE id=?').get(id));
+        if (dependencies.principals.has(id)) { if (dependencies.principals.setRole(id, role, 'webui')) updated += 1; continue; }
         dependencies.principals.upsertSeen({ id, kind, tgId, role, displayName: null, username: null, chatType: null }, 'webui');
-        if (existed) { if (dependencies.principals.setRole(id, role, 'webui')) updated += 1; } else created += 1;
+        created += 1;
       }
     })();
     dependencies.log.event({ level: 'info', kind: 'webui.action', summary: 'principals bulk import', data: { kind, role, created, updated } });
     return ctx.json({ ok: true, data: { count: ids.length, created, updated } });
+  });
+  // 表格里勾一批人改角色：只动已存在的主体，不建新行 —— 新建走 /api/principals/bulk（那边收的是 Telegram 数字 ID）。
+  app.post('/api/principals/roles', async (ctx) => {
+    const body = await ctx.req.json<{ ids?: unknown; role?: unknown }>();
+    const role = body.role;
+    if (role !== 'owner' && role !== 'trusted' && role !== 'limited' && role !== 'blocked') return ctx.json(apiError('invalid_role', 'role 必须是 owner / trusted / limited / blocked 之一').body, 400);
+    const ids = [...new Set((Array.isArray(body.ids) ? body.ids : []).filter((entry): entry is string => typeof entry === 'string').map((entry) => entry.trim()).filter(Boolean))];
+    if (!ids.length) return ctx.json(apiError('invalid_ids', 'ids 至少要有一个主体 id').body, 400);
+    if (ids.length > 500) return ctx.json(apiError('invalid_ids', '单次最多改 500 个主体').body, 400);
+    // 不存在的 id 单独报回去而不是静默跳过：勾选来自表格，出现缺失说明这一批和库里对不上了。
+    const missing: string[] = [];
+    let changed = 0;
+    dependencies.db.transaction(() => {
+      for (const id of ids) {
+        if (!dependencies.principals.has(id)) { missing.push(id); continue; }
+        if (dependencies.principals.setRole(id, role, 'webui')) changed += 1;
+      }
+    })();
+    dependencies.log.event({ level: 'info', kind: 'webui.action', summary: 'principal roles changed', data: { role, changed, missing: missing.length, ids: ids.slice(0, 50) } });
+    return ctx.json({ ok: true, data: { count: ids.length, changed, missing } });
   });
   app.patch('/api/tools/:name', async (ctx) => {
     const name = ctx.req.param('name');
@@ -500,6 +564,16 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
   app.get('/api/logs', (ctx) => ctx.json({ ok: true, data: dependencies.operations.logs(Math.min(1000, Number(ctx.req.query('size') ?? 200)), ctx.req.query('traceId')) }));
   app.get('/api/logs/trace/:traceId', (ctx) => ctx.json({ ok: true, data: dependencies.operations.logs(2000, ctx.req.param('traceId')) }));
   app.get('/api/logs/blob', (ctx) => { try { const path = safeRef(currentConfig().logs.dir, ctx.req.query('ref') ?? ''); return existsSync(path) ? ctx.text(readFileSync(path, 'utf8')) : ctx.json(apiError('not_found', '日志载荷不存在', 404).body, 404); } catch { return ctx.json(apiError('invalid_ref', '非法日志引用', 403).body, 403); } });
+  // 对话详情里的 JSON 按 DETAIL_MAX_CHARS 截断（单个 span 的请求体能到几百 KB），排查时要能拿到完整的那一份。
+  app.get('/api/logs/:id/data', (ctx) => {
+    const row = dependencies.db.prepare('SELECT kind,data_json AS data FROM log_events WHERE id=?').get(Number(ctx.req.param('id'))) as { kind: string; data: string | null } | undefined;
+    if (!row?.data) return ctx.json(apiError('not_found', '该事件没有载荷', 404).body, 404);
+    let value: unknown;
+    try { value = JSON.parse(row.data); } catch { value = row.data; }
+    const reference = blobRef(value);
+    if (reference) { try { value = readBlob(reference); } catch { return ctx.json(apiError('not_found', '载荷文件已被日志清理删除', 404).body, 404); } }
+    return new Response(JSON.stringify(value, null, 2), { headers: { 'content-type': 'application/json; charset=utf-8', 'content-disposition': contentDisposition(`${row.kind}-${ctx.req.param('id')}.json`) } });
+  });
   app.get('/api/usage', (ctx) => ctx.json({ ok: true, data: dependencies.db.prepare('SELECT * FROM usage_ledger ORDER BY ts DESC LIMIT 1000').all() }));
   app.put('/api/quota', (ctx) => ctx.json(apiError('not_implemented', '配额配置端点尚不可用', 500).body, 500));
   app.post('/api/quota/reset', (ctx) => { const changes = dependencies.db.prepare('DELETE FROM quota_counters').run().changes; return ctx.json({ ok: true, data: { changes } }); });

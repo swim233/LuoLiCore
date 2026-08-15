@@ -55,9 +55,11 @@ role(chat):
 
 - 「白名单」= `principals` 中 `role != 'blocked'` 的行。
 - 入口：
-  - WebUI 「主体」页（增删改角色、批量导入）。
+  - WebUI 「主体」页（增删改角色、勾选批量改角色、批量导入）。
   - Telegram 命令（仅 `owner`）：`/grant <user|chat> <id> <role>`、`/revoke <id>`、`/whois <id>`、`/whoami`。
   - 引导：首次启动时 `access.bootstrapOwnerId`（env `LUOLI_OWNER_ID`）写入一条 owner 记录；**若未配置则 bot 拒绝启动**（避免出现无主 bot）。
+    这条记录**只在不存在时插入**（`PrincipalRepository.ensureOwner`）：显示名与 username 归 Telegram 那边同步，
+    每次启动覆盖一遍等于把真名冲成占位符。
 - 未登记主体首次出现时自动插入默认角色行（`updated_by='bootstrap'`），便于在 WebUI 一键提权。
 - `blocked` 判定发生在**归档之前**（见 [01 §2](./01-architecture.md#2-请求全链路时序) 步骤 2 与 5 的顺序）：被拉黑者的消息**不入库**。
   - 例外：`access.archiveBlocked`（默认 `false`）为 true 时入库但永不进上下文。

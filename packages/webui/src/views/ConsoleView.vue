@@ -145,13 +145,12 @@ const COLUMNS = {
   chats: [{ key: 'key', header: 'Context Key' }, { key: 'scope', header: '范围' }, { key: 'messages', header: '消息' }, { key: 'tokens', header: 'Token' }],
   tools: [{ key: 'name', header: '工具' }, { key: 'source', header: '来源', width: '7rem' }, { key: 'minRole', header: '最低角色', width: '7rem' }, { key: 'approval', header: '审批', width: '7rem' }, { key: 'scope', header: '作用域', width: '8rem' }, { key: 'enabled', header: '状态', width: '6rem' }],
   agents: [{ key: 'name', header: '名称' }, { key: 'description', header: '职责' }, { key: 'minRole', header: '最低角色', width: '7rem' }, { key: 'modelAlias', header: '模型别名', width: '8rem' }, { key: 'tools', header: '可用工具' }, { key: 'maxSteps', header: '步数上限', width: '6rem' }],
-  hits: [{ key: 'tgDate', header: '时间', width: '12rem' }, { key: 'chatId', header: '会话', width: '9rem' }, { key: 'from', header: '发言人', width: '10rem' }, { key: 'text', header: '内容' }],
+  hits: [{ key: 'tgDate', header: '时间', width: '12rem' }, { key: 'chatId', header: '会话', width: '9rem' }, { key: 'from', header: '发言人', width: '10rem' }, { key: 'text', header: '内容' }, { key: 'detail', header: '详情', width: '5rem' }],
   usage: [{ key: 'ts', header: '时间', width: '13rem' }, { key: 'model_alias', header: '别名' }, { key: 'input_tokens', header: '输入' }, { key: 'output_tokens', header: '输出' }, { key: 'cost_usd', header: '成本' }],
   principals: [{ key: 'kind', header: '类型' }, { key: 'displayName', header: '显示名' }, { key: 'tgId', header: 'Telegram ID' }, { key: 'role', header: '角色', width: '8rem' }, { key: 'username', header: '用户名' }],
   models: [{ key: 'model_id', header: '模型 ID' }, { key: 'provider_id', header: 'Provider' }, { key: 'context_window', header: '窗口' }, { key: 'price_in', header: '输入价格' }, { key: 'price_out', header: '输出价格' }, { key: 'enabled', header: '启用', width: '6rem' }],
   aliases: [{ key: 'alias', header: '别名', width: '12%' }, { key: 'purpose', header: '用途', width: '27%' }, { key: 'chain', header: 'Fallback 链', width: '31%' }, { key: 'settings', header: '采样参数', width: '20%' }, { key: 'actions', header: '', width: '10%' }],
   logs: [{ key: 'ts', header: '时间', width: '13rem' }, { key: 'level', header: '级别', width: '7rem' }, { key: 'kind', header: '事件' }, { key: 'summary', header: '摘要' }, { key: 'trace_id', header: 'Trace' }],
-  prompts: [{ key: 'id', header: '文档' }, { key: 'scope', header: '范围' }, { key: 'bytes', header: '字节' }, { key: 'updated_at', header: '更新时间' }],
   tasks: [{ key: 'title', header: '标题' }, { key: 'state', header: '状态' }, { key: 'updated_at', header: '更新时间' }],
   approvals: [{ key: 'tool_name', header: '工具' }, { key: 'risk', header: '风险' }, { key: 'state', header: '状态' }],
   catalog: [{ key: 'modelId', header: '模型 ID' }, { key: 'displayName', header: '显示名' }, { key: 'limits', header: '窗口 / 最大输出' }, { key: 'status', header: '状态', width: '8rem' }],
@@ -209,6 +208,18 @@ async function saveTrigger(): Promise<void> {
 }
 async function inspectChat(chat: Chat): Promise<void> { selectedChat.value = chat; const detail = await api<Record<string, unknown>>(`/api/chats/${encodeURIComponent(chat.key)}`); contextDetail.value = await api<Record<string, unknown>>(`/api/chats/${encodeURIComponent(chat.key)}/context`); commits.value = (detail.commits as Array<Record<string, unknown>> | undefined) ?? []; contextMessages.value = (detail.messages as Array<Record<string, unknown>> | undefined) ?? []; inspectedSnapshot.value = null; }
 async function inspectTrace(traceId: string | null): Promise<void> { if (!traceId) return; traceDetail.value = await api<LogRow[]>(`/api/logs/trace/${encodeURIComponent(traceId)}`); }
+// 提示词文档以前是一张 id/scope/bytes/updated_at 的四列表格：光看 `character:global` 这种 id
+// 认不出哪块是人格、哪块是助理守则，也看不出它进的是 prompt 的第几个 block。改成卡片，把用途写在脸上。
+interface PromptMeta { label: string; icon: string; purpose: string; severity: TagSeverity }
+const PROMPT_SCOPES: Record<string, PromptMeta> = {
+  character: { label: '人格', icon: 'pi pi-user', purpose: 'block 1 · 人格设定，决定说话的样子；带会话后缀的是该会话专属覆盖', severity: 'info' },
+  assist: { label: '助理守则', icon: 'pi pi-book', purpose: 'block 2 · 回答风格与业务约束，所有会话共用', severity: 'secondary' },
+  pubmemory: { label: '公共记忆', icon: 'pi pi-globe', purpose: 'block 4 · 所有人可见的长期记忆，模型可用 memory_write 写', severity: 'success' },
+  primemory: { label: '私有记忆', icon: 'pi pi-lock', purpose: 'block 5 · 某个用户私有；查看他人的这份会被记录', severity: 'warn' },
+};
+const promptMeta = (scope: unknown): PromptMeta => PROMPT_SCOPES[String(scope)] ?? { label: String(scope ?? '未知'), icon: 'pi pi-file', purpose: '未归类的文档', severity: 'secondary' };
+const promptRank = (scope: unknown): number => { const index = Object.keys(PROMPT_SCOPES).indexOf(String(scope)); return index === -1 ? Object.keys(PROMPT_SCOPES).length : index; };
+const promptCards = computed(() => [...prompts.value].sort((left, right) => promptRank(left.scope) - promptRank(right.scope) || String(left.id).localeCompare(String(right.id))));
 async function inspectPrompt(row: Record<string, unknown>): Promise<void> { selectedPrompt.value = await api<Record<string, unknown>>(`/api/prompts/${encodeURIComponent(String(row.id))}`); promptContent.value = String(selectedPrompt.value.content ?? ''); promptRevisions.value = await api<Array<Record<string, unknown>>>(`/api/prompts/${encodeURIComponent(String(row.id))}/revisions`); }
 // 下面这组上下文/提示词操作以前用顶栏静态横幅报成功、失败则什么都不显示；现在统一走同一个通知通道（AC-WEB-023）。
 async function savePrompt(): Promise<void> {
@@ -365,12 +376,62 @@ async function searchArchive(): Promise<void> {
 }
 function clearSearch(): void { searchHits.value = null; searchTerm.value = ''; }
 
+// ── 对话详情：这一轮实际发给上游的 JSON ──────────────────────────────────────
+// 只有日志里那一份是真的：turns 表存统计、messages 表存最终文本，两者都看不出请求体长什么样。
+interface DetailEvent { id: number; ts: number; level: string; kind: string; summary: string; spanId: string | null; parentSpanId: string | null; durationMs: number | null;
+  text: string | null; bytes: number; truncated: boolean; fileRef: string | null }
+interface TurnDetail { turn: Record<string, unknown>; captureBodies: boolean; events: DetailEvent[] }
+const DETAIL_GROUPS = [['model', '模型调用'], ['tool', '工具与沙箱'], ['other', '轮次与上下文'], ['all', '全部']] as const;
+type DetailGroup = typeof DETAIL_GROUPS[number][0];
+const detailDialog = ref(false);
+const detailLoading = ref(false);
+const detailTurnId = ref('');
+const detail = ref<TurnDetail | null>(null);
+const detailGroup = ref<DetailGroup>('model');
+const expandedEvents = ref(new Set<number>());
+function eventGroup(kind: string): Exclude<DetailGroup, 'all'> {
+  if (kind.startsWith('model.') || kind.startsWith('provider.')) return 'model';
+  if (kind.startsWith('tool.') || kind.startsWith('sandbox.') || kind.startsWith('approval.') || kind.startsWith('agent.')) return 'tool';
+  return 'other';
+}
+const detailEvents = computed(() => (detail.value?.events ?? []).filter((entry) => detailGroup.value === 'all' || eventGroup(entry.kind) === detailGroup.value));
+const detailCount = (group: DetailGroup): number => (detail.value?.events ?? []).filter((entry) => group === 'all' || eventGroup(entry.kind) === group).length;
+function formatBytes(bytes: number): string { return bytes >= 1_048_576 ? `${(bytes / 1_048_576).toFixed(1)} MB` : bytes >= 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${bytes} B`; }
+async function openDetail(turnId: string): Promise<void> {
+  detailTurnId.value = turnId; detailDialog.value = true; detailLoading.value = true; detail.value = null; expandedEvents.value = new Set(); detailGroup.value = 'model';
+  try {
+    const result = await api<TurnDetail>(`/api/turns/${encodeURIComponent(turnId)}/detail`);
+    detail.value = result;
+    // 点开就想看「这一轮实际发了什么」：默认落在模型调用上并展开第一条，工具与系统事件按需点开。
+    if (!result.events.some((entry) => eventGroup(entry.kind) === 'model')) detailGroup.value = 'all';
+    const first = result.events.find((entry) => eventGroup(entry.kind) === 'model') ?? result.events[0];
+    if (first) expandedEvents.value = new Set([first.id]);
+  } catch (error) { toastError('加载对话详情失败', error); detailDialog.value = false; }
+  finally { detailLoading.value = false; }
+}
+function toggleEvent(id: number): void { const next = new Set(expandedEvents.value); if (next.has(id)) next.delete(id); else next.add(id); expandedEvents.value = next; }
+/** 复制的必须是完整那份：界面上显示的可能被 DETAIL_MAX_CHARS 截过，粘出去就不是合法 JSON 了。 */
+async function copyEvent(event: DetailEvent): Promise<void> {
+  try {
+    let text = event.text ?? '';
+    if (event.truncated) { const response = await fetch(`/api/logs/${event.id}/data`); if (!response.ok) throw new Error(`取完整载荷失败：HTTP ${response.status}`); text = await response.text(); }
+    await navigator.clipboard.writeText(text);
+    pushToast({ severity: 'success', summary: '已复制完整 JSON', detail: `${event.kind} · ${formatBytes(event.bytes)}` });
+  } catch (error) { toastError('复制失败', error); }
+}
+
 // ── 主体：群聊与用户分开看，角色改动走二级菜单 ────────────────────────────────
 const PRINCIPAL_KINDS = [['all', '全部'], ['user', '用户'], ['chat', '群聊']] as const;
 const ROLES = ['owner', 'trusted', 'limited', 'blocked'];
 const ROLE_HINTS: Record<string, string> = { owner: '不受审批与沙箱限制，可读写所有配置', trusted: '可用写文件、执行代码等高风险工具（按审批策略）', limited: '只读类工具，日常对话', blocked: '消息不触发轮次；archiveBlocked 关闭时连归档都不做' };
 const principalKind = ref<'all' | 'user' | 'chat'>('all');
 const visiblePrincipals = computed(() => principalKind.value === 'all' ? principals.value : principals.value.filter((entry) => entry.kind === principalKind.value));
+// 引导 owner（access.bootstrapOwnerId）是 bot 的实际主人：这一行改成 blocked 就没人能在 Telegram 里管它了。
+const ownerPrincipalId = computed(() => { const tgId = String((config.value.access as Record<string, unknown> | undefined)?.bootstrapOwnerId ?? ''); return tgId ? `user:${tgId}` : ''; });
+const ownerPrincipal = computed(() => principals.value.find((entry) => entry.id === ownerPrincipalId.value) ?? null);
+const ownerLabel = computed(() => ownerPrincipal.value?.displayName || (ownerPrincipal.value ? `#${ownerPrincipal.value.tgId}` : 'Owner'));
+const ownerHandle = computed(() => ownerPrincipal.value?.username ? `@${ownerPrincipal.value.username}` : ownerPrincipal.value ? `ID ${ownerPrincipal.value.tgId}` : '未登记');
+const ownerInitials = computed(() => [...ownerLabel.value.replace(/\s+/gu, '')].slice(0, 2).join('').toUpperCase() || 'OW');
 const principalCount = (kind: string): number => kind === 'all' ? principals.value.length : principals.value.filter((entry) => entry.kind === kind).length;
 const principalDialog = ref(false);
 const principalSaving = ref(false);
@@ -387,6 +448,27 @@ async function savePrincipal(): Promise<void> {
     await load();
   } catch (error) { toastError('更新角色失败', error); }
   finally { principalSaving.value = false; }
+}
+// 勾选批量改角色：一次点开一个对话框改一个人，处理一批新进群的人要点几十次。
+const principalSelection = ref<Principal[]>([]);
+const roleDialog = ref(false);
+const roleSaving = ref(false);
+const roleBulkForm = ref({ role: 'limited' });
+const selectionHitsOwnerSeat = computed(() => principalSelection.value.some((entry) => entry.id === ownerPrincipalId.value));
+watch(principalKind, () => { principalSelection.value = []; });
+function openRoleBulk(): void { roleBulkForm.value = { role: 'limited' }; roleDialog.value = true; }
+async function saveRoleBulk(): Promise<void> {
+  const ids = principalSelection.value.map((entry) => entry.id);
+  roleSaving.value = true;
+  try {
+    const result = await api<{ count: number; changed: number; missing: string[] }>('/api/principals/roles', { method: 'POST', body: JSON.stringify({ ids, role: roleBulkForm.value.role }) });
+    roleDialog.value = false;
+    principalSelection.value = [];
+    pushToast({ severity: result.missing.length ? 'warn' : 'success', summary: `${result.changed} 个主体已改为 ${roleBulkForm.value.role}`,
+      detail: result.missing.length ? `${result.missing.length} 个 id 在库里找不到，已跳过` : '下一轮生效，已写审计日志', life: 7000 });
+    await load();
+  } catch (error) { toastError('批量改角色失败', error); }
+  finally { roleSaving.value = false; }
 }
 const bulkDialog = ref(false);
 const bulkSaving = ref(false);
@@ -497,7 +579,11 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
       <header class="topbar">
         <UiButton class="mobile-only" variant="text" icon="pi pi-bars" aria-label="打开导航" @click="mobileMenu = true" />
         <div><p class="eyebrow">OPERATIONS</p><h1>{{ currentLabel }}</h1></div>
-        <div class="top-actions"><label class="search"><i class="pi pi-search" /><input v-model="query" placeholder="搜索 trace、会话或主体"></label><UiButton variant="outlined" icon="pi pi-bell" aria-label="通知" /><div class="avatar">OW</div></div>
+        <div class="top-actions"><label class="search"><i class="pi pi-search" /><input v-model="query" placeholder="搜索 trace、会话或主体"></label><UiButton variant="outlined" icon="pi pi-bell" aria-label="通知" />
+          <button type="button" class="owner-chip" :title="`bot owner · ${ownerLabel} ${ownerHandle}`" @click="active = 'principals'">
+            <span class="avatar">{{ ownerInitials }}</span><span class="who"><b>{{ ownerLabel }}</b><small>{{ ownerHandle }}</small></span>
+          </button>
+        </div>
       </header>
 
       <div class="content">
@@ -541,24 +627,28 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
               <template #tgDate="{ data }">{{ new Date(data.tgDate).toLocaleString() }}</template>
               <template #from="{ data }"><UiTag :value="data.direction === 'out' ? 'bot' : 'user'" :severity="data.direction === 'out' ? 'info' : 'secondary'" /> {{ data.fromName ?? data.fromUsername ?? '—' }}</template>
               <template #text="{ data }"><span class="hit-text">{{ data.text ?? `[${data.kind}]` }}</span></template>
+              <template #detail="{ data }"><UiButton v-if="data.turnId" size="small" variant="text" icon="pi pi-code" aria-label="查看这条消息所在轮次的实际调用" @click="openDetail(data.turnId)" /><small v-else class="alias-empty" title="这条消息没有触发轮次，只是背景发言">—</small></template>
             </DataGrid>
           </template>
           <template v-else>
             <ol class="conversation-list">
               <li v-for="turn in conversations" :key="turn.id" :class="['conversation', turn.state]">
-                <button type="button" @click="toggleTurn(turn.id)">
-                  <div class="conversation-head">
-                    <UiTag :value="turnState(turn.state).label" :severity="turnState(turn.state).severity" />
-                    <code>{{ turn.chatId }}</code>
-                    <span class="conversation-who">{{ turn.fromName ?? turn.fromUsername ?? turn.userId }}</span>
-                    <UiTag v-if="turn.triggerReason" :value="String(turn.triggerReason)" severity="secondary" />
-                    <UiTag v-if="turn.rebased" value="REBASED" severity="danger" />
-                    <time>{{ turn.startedAt ? new Date(turn.startedAt).toLocaleString() : '—' }}</time>
-                  </div>
-                  <p class="conversation-prompt"><i class="pi pi-user" aria-hidden="true" /><span>{{ turn.prompt || `[${turn.promptKind ?? '无正文'}]` }}</span></p>
-                  <p class="conversation-reply"><i class="pi pi-sparkles" aria-hidden="true" /><span>{{ turn.reply || (turn.error ? `（失败：${turn.error}）` : '（没有回复落盘）') }}</span></p>
-                  <small class="conversation-meta">{{ turn.steps }} 步 · {{ turn.toolCalls }} 次工具 · {{ turn.inputTokens }}/{{ turn.outputTokens }} tok · ${{ Number(turn.costUsd || 0).toFixed(4) }}</small>
-                </button>
+                <div class="conversation-body">
+                  <button type="button" @click="toggleTurn(turn.id)">
+                    <div class="conversation-head">
+                      <UiTag :value="turnState(turn.state).label" :severity="turnState(turn.state).severity" />
+                      <code>{{ turn.chatId }}</code>
+                      <span class="conversation-who">{{ turn.fromName ?? turn.fromUsername ?? turn.userId }}</span>
+                      <UiTag v-if="turn.triggerReason" :value="String(turn.triggerReason)" severity="secondary" />
+                      <UiTag v-if="turn.rebased" value="REBASED" severity="danger" />
+                      <time>{{ turn.startedAt ? new Date(turn.startedAt).toLocaleString() : '—' }}</time>
+                    </div>
+                    <p class="conversation-prompt"><i class="pi pi-user" aria-hidden="true" /><span>{{ turn.prompt || `[${turn.promptKind ?? '无正文'}]` }}</span></p>
+                    <p class="conversation-reply"><i class="pi pi-sparkles" aria-hidden="true" /><span>{{ turn.reply || (turn.error ? `（失败：${turn.error}）` : '（没有回复落盘）') }}</span></p>
+                    <small class="conversation-meta">{{ turn.steps }} 步 · {{ turn.toolCalls }} 次工具 · {{ turn.inputTokens }}/{{ turn.outputTokens }} tok · ${{ Number(turn.costUsd || 0).toFixed(4) }}</small>
+                  </button>
+                  <div class="conversation-side"><UiButton size="small" variant="outlined" icon="pi pi-code" label="查看详情" @click="openDetail(turn.id)" /></div>
+                </div>
                 <div v-if="expandedTurns.has(turn.id)" class="conversation-full">
                   <p class="field-title">提问<small>{{ turn.key }}</small></p><pre v-text="turn.prompt ?? ''" />
                   <p class="field-title">回复</p><pre v-text="turn.reply || turn.error || ''" />
@@ -605,9 +695,14 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
           <nav class="subtabs" aria-label="主体类型">
             <button v-for="[key, label] in PRINCIPAL_KINDS" :key="key" type="button" :class="{ active: principalKind === key }" @click="principalKind = key">{{ label }}<span>{{ principalCount(key) }}</span></button>
           </nav>
-          <DataGrid :rows="visiblePrincipals" :columns="COLUMNS.principals" data-key="id" paginate :page-size="12" clickable :empty="principalKind === 'chat' ? '还没有见过任何群聊' : principalKind === 'user' ? '还没有见过任何用户' : '还没有任何主体'" @row-click="editPrincipal">
+          <div v-if="principalSelection.length" class="bulk-bar">
+            <i class="pi pi-check-square" aria-hidden="true" /><span>已勾选 <b>{{ principalSelection.length }}</b> 个主体</span>
+            <UiButton size="small" variant="text" label="清空勾选" @click="principalSelection = []" />
+            <UiButton size="small" icon="pi pi-user-edit" label="批量改角色" @click="openRoleBulk" />
+          </div>
+          <DataGrid v-model:selection="principalSelection" :rows="visiblePrincipals" :columns="COLUMNS.principals" data-key="id" paginate :page-size="12" clickable :empty="principalKind === 'chat' ? '还没有见过任何群聊' : principalKind === 'user' ? '还没有见过任何用户' : '还没有任何主体'" @row-click="editPrincipal">
             <template #kind="{ data }"><UiTag :value="data.kind === 'chat' ? '群聊' : '用户'" :severity="data.kind === 'chat' ? 'info' : 'secondary'" /></template>
-            <template #displayName="{ data }">{{ data.displayName ?? '—' }}</template>
+            <template #displayName="{ data }"><span class="alias-name">{{ data.displayName ?? '—' }}<UiTag v-if="data.id === ownerPrincipalId" value="引导 OWNER" severity="success" title="access.bootstrapOwnerId 指向的这一行；改掉它的角色，Telegram 那边就没人能管 bot 了" /></span></template>
             <template #username="{ data }">{{ data.username ? `@${data.username}` : '—' }}</template>
             <template #role="{ data }"><UiTag :value="data.role" :severity="roleSeverity(data.role)" /></template>
           </DataGrid>
@@ -639,8 +734,25 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
         </section>
         <section v-else-if="active === 'prompts'" class="surface page-surface"><header><div><p class="eyebrow">PROMPT WORKSPACE</p><h2>提示词编辑与版本</h2><p>每次保存落盘 unified diff；可回滚任意当前可应用的 revision。</p></div></header>
           <div class="prompt-workbench">
-            <DataGrid :rows="prompts" :columns="COLUMNS.prompts" data-key="id" clickable empty="没有可编辑的提示词文档" @row-click="inspectPrompt" />
-            <article v-if="selectedPrompt" class="editor-panel"><header><b>{{ selectedPrompt.id }}</b><UiButton label="保存版本" icon="pi pi-save" @click="savePrompt" /></header><textarea v-model="promptContent" spellcheck="false" aria-label="提示词内容" /><h3>版本记录</h3><ol class="revision-list"><li v-for="revision in promptRevisions" :key="String(revision.id)"><div><code>{{ String(revision.id).slice(0, 12) }}</code><small>{{ revision.actor }} · {{ new Date(Number(revision.ts)).toLocaleString() }}</small></div><UiButton size="small" variant="text" label="回滚" @click="rollbackPrompt(revision.id)" /></li></ol></article>
+            <div class="prompt-cards">
+              <button v-for="doc in promptCards" :key="String(doc.id)" type="button" :class="['prompt-card', { active: String(selectedPrompt?.id ?? '') === String(doc.id) }]" @click="inspectPrompt(doc)">
+                <span class="prompt-icon"><i :class="promptMeta(doc.scope).icon" aria-hidden="true" /></span>
+                <b>{{ promptMeta(doc.scope).label }}</b>
+                <UiTag :value="doc.subject ? String(doc.subject) : '全局'" :severity="promptMeta(doc.scope).severity" />
+                <p>{{ promptMeta(doc.scope).purpose }}</p>
+                <code>{{ doc.id }}</code>
+                <small>{{ Number(doc.bytes ?? 0).toLocaleString() }} 字节 · {{ Number(doc.tokens ?? 0).toLocaleString() }} tok · {{ doc.updated_at ? new Date(Number(doc.updated_at)).toLocaleString() : '未落盘' }}</small>
+              </button>
+              <p v-if="!promptCards.length" class="empty">没有可编辑的提示词文档。首次启动会从 <code>memory/</code> 目录扫出 CHARACTER / ASSIST / PUBMEMORY。</p>
+            </div>
+            <article v-if="selectedPrompt" class="editor-panel">
+              <header><div><b>{{ selectedPrompt.id }}</b><small>{{ promptMeta(selectedPrompt.scope).label }} · {{ selectedPrompt.path }}</small></div><UiButton label="保存版本" icon="pi pi-save" @click="savePrompt" /></header>
+              <p v-if="selectedPrompt.scope === 'primemory'" class="callout warn"><i class="pi pi-lock" aria-hidden="true" />这是某个用户的私有记忆，查看与修改都会写进 <code>memory_revisions</code> 审计（docs/06 §5.3）。</p>
+              <textarea v-model="promptContent" spellcheck="false" aria-label="提示词内容" />
+              <h3>版本记录</h3>
+              <ol class="revision-list"><li v-for="revision in promptRevisions" :key="String(revision.id)"><div><code>{{ String(revision.id).slice(0, 12) }}</code><small>{{ revision.actor }} · {{ new Date(Number(revision.ts)).toLocaleString() }}</small></div><UiButton size="small" variant="text" label="回滚" @click="rollbackPrompt(revision.id)" /></li><li v-if="!promptRevisions.length" class="empty">还没有保存过任何版本。</li></ol>
+            </article>
+            <article v-else class="editor-panel empty-card"><i class="pi pi-align-left" aria-hidden="true" /><h3>选一份文档开始编辑</h3><p>每次保存都会落一条 unified diff 版本，可随时回滚。</p></article>
           </div>
         </section>
         <section v-else-if="active === 'tasks'" class="surface page-surface"><header><div><p class="eyebrow">WORK QUEUE</p><h2>任务与审批</h2><p>在途任务、历史状态与高风险工具批准队列。</p></div></header><div class="dashboard-grid"><article class="surface"><h3>任务</h3><DataGrid :rows="tasks" :columns="COLUMNS.tasks" empty="没有在途或历史任务" /></article><article class="surface"><h3>审批</h3><DataGrid :rows="approvals" :columns="COLUMNS.approvals" empty="没有待审批的调用" /></article></div></section>
@@ -742,6 +854,63 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
         <p v-if="principalForm.role === 'owner' && principalForm.originalRole !== 'owner'" class="wide callout warn"><i class="pi pi-exclamation-triangle" aria-hidden="true" />owner 跳过审批与沙箱（<code>sandbox.bypassRoles</code>），可以在会话里直接执行宿主命令。</p>
       </div>
       <template #footer><UiButton variant="text" label="取消" @click="principalDialog = false" /><UiButton label="保存角色" :loading="principalSaving" :disabled="principalForm.role === principalForm.originalRole" @click="savePrincipal" /></template>
+    </UiModal>
+    <UiModal v-model:visible="roleDialog" title="批量修改角色">
+      <div class="form-grid">
+        <p class="wide field-note">对勾选的 <b>{{ principalSelection.length }}</b> 个主体统一设角色。只改已存在的行，不会新建 —— 还没跟 bot 说过话的人走「批量导入」。</p>
+        <label>目标角色<UiSelect v-model="roleBulkForm.role" :options="ROLES" /></label>
+        <p class="wide field-note">{{ ROLE_HINTS[roleBulkForm.role] }}</p>
+        <div class="wide selection-preview">
+          <span v-for="entry in principalSelection.slice(0, 24)" :key="entry.id" class="wake-chip"><UiTag :value="entry.kind === 'chat' ? '群' : '人'" :severity="entry.kind === 'chat' ? 'info' : 'secondary'" /><code>{{ entry.displayName || entry.username || entry.tgId }}</code><UiTag :value="entry.role" :severity="roleSeverity(entry.role)" /></span>
+          <small v-if="principalSelection.length > 24" class="alias-empty">…等 {{ principalSelection.length }} 个</small>
+        </div>
+        <p v-if="roleBulkForm.role === 'owner'" class="wide callout warn"><i class="pi pi-exclamation-triangle" aria-hidden="true" />owner 跳过审批与沙箱（<code>sandbox.bypassRoles</code>），可以在会话里直接执行宿主命令。一次给这么多人不是常规操作。</p>
+        <p v-if="selectionHitsOwnerSeat && roleBulkForm.role !== 'owner'" class="wide callout error"><i class="pi pi-times-circle" aria-hidden="true" />这批里包含 <code>access.bootstrapOwnerId</code> 指向的引导 owner。降级之后 Telegram 那边就没人能管 bot 了，只能改配置再重启。</p>
+      </div>
+      <template #footer><UiButton variant="text" label="取消" @click="roleDialog = false" /><UiButton label="改这些人的角色" icon="pi pi-user-edit" :loading="roleSaving" :disabled="!principalSelection.length" @click="saveRoleBulk" /></template>
+    </UiModal>
+    <UiModal v-model:visible="detailDialog" :title="`对话详情 ${detailTurnId.slice(0, 12)}`" width="min(1120px, 96vw)">
+      <p v-if="detailLoading" class="empty"><i class="pi pi-spin pi-spinner" aria-hidden="true" /> 读取该轮日志…</p>
+      <template v-else-if="detail">
+        <div class="detail-summary">
+          <span><small>状态</small><UiTag :value="turnState(String(detail.turn.state)).label" :severity="turnState(String(detail.turn.state)).severity" /></span>
+          <span><small>会话</small><code>{{ detail.turn.key }}</code></span>
+          <span><small>发起人</small><b>{{ detail.turn.fromName ?? detail.turn.fromUsername ?? detail.turn.userId }}</b></span>
+          <span><small>步数 / 工具</small><b>{{ detail.turn.steps }} · {{ detail.turn.toolCalls }}</b></span>
+          <span><small>token</small><b>{{ detail.turn.inputTokens }}/{{ detail.turn.outputTokens }}</b></span>
+          <span><small>花费</small><b>${{ Number(detail.turn.costUsd || 0).toFixed(4) }}</b></span>
+          <span><small>耗时</small><b>{{ detail.turn.finishedAt && detail.turn.startedAt ? `${Number(detail.turn.finishedAt) - Number(detail.turn.startedAt)} ms` : '—' }}</b></span>
+        </div>
+        <p v-if="detail.turn.error" class="callout error"><i class="pi pi-times-circle" aria-hidden="true" />{{ detail.turn.error }}</p>
+        <p v-if="!detail.captureBodies" class="callout warn"><i class="pi pi-exclamation-triangle" aria-hidden="true" /><code>logs.captureBodies</code> 是关的：这一轮的 span 里不会有请求体与响应体，只剩用量与耗时。</p>
+        <nav class="subtabs" aria-label="事件分组">
+          <button v-for="[key, label] in DETAIL_GROUPS" :key="key" type="button" :class="{ active: detailGroup === key }" @click="detailGroup = key">{{ label }}<span>{{ detailCount(key) }}</span></button>
+        </nav>
+        <ol class="detail-events">
+          <li v-for="event in detailEvents" :key="event.id">
+            <button type="button" @click="toggleEvent(event.id)">
+              <i :class="expandedEvents.has(event.id) ? 'pi pi-chevron-down' : 'pi pi-chevron-right'" aria-hidden="true" />
+              <span :class="['level', event.level]">{{ event.level }}</span>
+              <code>{{ event.kind }}</code>
+              <span class="detail-summary-text">{{ event.summary }}</span>
+              <small>{{ event.bytes ? formatBytes(event.bytes) : '无载荷' }}{{ event.durationMs === null ? '' : ` · ${event.durationMs} ms` }}</small>
+              <time>{{ new Date(event.ts).toLocaleTimeString() }}</time>
+            </button>
+            <div v-if="expandedEvents.has(event.id)" class="detail-payload">
+              <div class="detail-actions">
+                <UiButton size="small" variant="text" icon="pi pi-copy" label="复制 JSON" :disabled="!event.bytes" @click="copyEvent(event)" />
+                <a v-if="event.bytes" class="ui-btn text small" :href="`/api/logs/${event.id}/data`" :download="`${event.kind}-${event.id}.json`"><i class="pi pi-download" aria-hidden="true" />下载完整 JSON</a>
+                <small v-if="event.truncated" class="detail-truncated">下面只渲染前 120k 字符；完整载荷 {{ formatBytes(event.bytes) }}，用上面的复制或下载取。</small>
+              </div>
+              <pre v-if="event.text" v-text="event.text" />
+              <p v-else-if="event.fileRef" class="empty">载荷文件 <code>{{ event.fileRef }}</code> 已被日志保留策略清理。</p>
+              <p v-else class="empty">这条事件没有载荷。</p>
+            </div>
+          </li>
+          <li v-if="!detailEvents.length" class="empty">这一组没有事件。日志按 <code>logs.retentionDays</code> 清理，旧轮次的 span 可能已经不在了。</li>
+        </ol>
+      </template>
+      <template #footer><span class="catalog-count">trace <code>{{ detailTurnId }}</code></span><UiButton variant="outlined" icon="pi pi-sitemap" label="在日志页看这条 trace" @click="detailDialog = false; active = 'logs'; inspectTrace(detailTurnId)" /><UiButton variant="text" label="关闭" @click="detailDialog = false" /></template>
     </UiModal>
     <UiModal v-model:visible="bulkDialog" title="批量导入主体">
       <div class="form-grid">
