@@ -163,6 +163,7 @@
 | [ ] AC-SBX-008 (自动) ★ | `mode=docker` 但 docker 不可用，`trusted` 请求 `bash` | 拒绝 + WebUI 显红 + owner 告警；owner 自己仍可 bypass |
 | [ ] AC-SBX-009 (自动) ★ | jail 模式检查子进程 env | 不含 `BOT_TOKEN`/`LUOLI_MASTER_KEY`/任何 `*_KEY`/`*_TOKEN` |
 | [ ] AC-SBX-010 (自动) | jail 模式 `sleep 300 &` 后超时 | 整个进程组被杀（无残留孤儿进程） |
+| [ ] AC-SBX-011 (自动) ★ | 应用自己跑在容器里、`mode=docker` 且 `sandbox.hostWorkspaceDir` 为空 | 拒绝执行并报 `sandbox.unavailable`（不挂一个宿主上不存在的目录上去）；配好映射后 `-v` 左半边是宿主路径；workspace 越出 `workspaceDir` 同样拒绝 |
 | [ ] AC-APV-001 | `trusted` 执行 `rm -rf build` | Telegram 出现审批消息（含命令全文、发起人、风险 high、时限） |
 | [ ] AC-APV-002 | 非 owner 点击批准按钮 | `answerCallbackQuery` 提示无权限；`approvals` 未变更 |
 | [ ] AC-APV-003 | owner 点击批准 | 命令执行；`approvals.state='approved'`，含 `decided_by`/`channel` |
@@ -340,7 +341,7 @@
 | **上下文引擎** | | / 28 | | | |
 | Telegram 与准入 | | / 26 | | | |
 | Agent 与 Provider | | / 23 | | | |
-| 工具/沙箱/审批 | | / 37 | | | |
+| 工具/沙箱/审批 | | / 38 | | | |
 | Subagent 与任务 | | / 21 | | | |
 | 记忆 | | / 13 | | | |
 | 日志与成本 | | / 23 | | | |
@@ -348,6 +349,6 @@
 | WebUI | | / 21 | | | |
 | 安全 | | / 12 | | | |
 | 运维 | | / 8 | | | |
-| **合计** | | **/ 253** | | | |
+| **合计** | | **/ 254** | | | |
 
 **整体通过条件**：全部 ★ 项通过 + 非 ★ 项通过率 ≥ 95% + 所有豁免项经需求方书面确认。

@@ -8,6 +8,9 @@
 
 ## 1. 环境变量（`.env`）
 
+`.env` 由 `pnpm dev` / `pnpm start` / `pnpm db:migrate` 经 node 的 `--env-file-if-exists=.env` 加载，
+生产走 `docker-compose.yml` 的 `env_file`。**已存在于 shell 里的同名变量优先**，`.env` 不会覆盖它们。
+
 | 变量 | 必需 | 说明 |
 |---|---|---|
 | `BOT_TOKEN` | ✓ | Telegram Bot token |
@@ -16,6 +19,7 @@
 | `WEBUI_PASSWORD` | ✗ | 首次启动时用它生成 `webui.passwordHash`（之后可删除该变量） |
 | `LUOLI_CONFIG` | ✗ | 配置文件路径，默认 `./config/config.yaml` |
 | `LUOLI_DATA_DIR` | ✗ | 数据目录，默认 `./data` |
+| `LUOLI_HOST_WORKSPACE_DIR` | ✗ | 映射到 `sandbox.hostWorkspaceDir`。**应用跑在容器里且 `sandbox.mode: docker` 时必填**，见 [§2 sandbox](#sandbox) |
 | `TZ` | ✗ | 建议显式设置，如 `Asia/Shanghai` |
 | `NODE_ENV` | ✗ | `production` 时关闭 pretty 日志与 dev 代理 |
 | 其他 `${env:X}` 引用 | ✗ | 配置里的 `${env:NAME}` 会在加载时替换（用于 MCP headers 等） |
@@ -254,9 +258,21 @@ sandbox:
   pidsLimit: 128
   readOnlyRoot: true
   tmpfsMb: 64
-  workspaceDir: ./data/workspace  # 需重启
+  workspaceDir: ./data/workspace  # 需重启 · 本进程视角
+  hostWorkspaceDir: ''            # 需重启 · 同一目录的宿主视角路径；本进程也在宿主上跑时留空
   dockerBin: docker
+```
 
+**`hostWorkspaceDir` 只在「应用自己跑在容器里 + `mode: docker`」时需要。** `docker run -v` 的左半边
+由**宿主** daemon 解析，而 `run()` 拿到的是本进程视角的路径（容器里是 `/app/data/workspace/<chatId>`）。
+两者不一致时 docker 不报错，只是在宿主上默默建一个空目录 —— 结果 `bash` 写的文件 `read_file` 读不到，
+反过来也一样。因此 `Sandbox` 在检测到自己位于容器内（`/.dockerenv` 或 `/run/.containerenv`）
+且该项为空时**直接禁用执行类工具**并报 `sandbox.unavailable`，而不是挂一个错的目录上去。
+
+`docker-compose.yml` 已通过 `LUOLI_HOST_WORKSPACE_DIR: ${PWD}/data/workspace` 提供该值。
+换算越界（传入的 workspace 不在 `workspaceDir` 之下）同样拒绝执行，不做兜底。
+
+```yaml
 # ============================================================ approval
 approval:
   enabled: true                   # 热更新

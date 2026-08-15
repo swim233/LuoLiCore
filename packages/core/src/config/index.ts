@@ -91,6 +91,7 @@ export async function loadConfig(options: ConfigLoadOptions = {}): Promise<Reado
   const envLayer: Record<string, unknown> = {};
   if (process.env.LUOLI_DATA_DIR) envLayer.db = { path: resolve(process.env.LUOLI_DATA_DIR, 'luoli.db') };
   if (process.env.LUOLI_OWNER_ID) envLayer.access = { bootstrapOwnerId: process.env.LUOLI_OWNER_ID };
+  if (process.env.LUOLI_HOST_WORKSPACE_DIR) envLayer.sandbox = { hostWorkspaceDir: process.env.LUOLI_HOST_WORKSPACE_DIR };
   const overrides = structuredClone(options.overrides ?? {});
   const compose = (): unknown => substituteEnvironment(deepMerge(deepMerge(file, overrides), envLayer));
   // 持久化覆盖层来自 WebUI / 命令写入，可能带着历史遗留的非法路径。整层丢弃太粗暴、直接抛出会让

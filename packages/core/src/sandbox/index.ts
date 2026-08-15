@@ -1,11 +1,21 @@
 import { spawn } from 'node:child_process';
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import type { Role } from '@luoli/shared';
+
+/** 本进程是否跑在容器里。docker 和 podman 各自留的标记文件。 */
+function detectContainer(): boolean {
+  return existsSync('/.dockerenv') || existsSync('/run/.containerenv');
+}
 
 export interface SandboxConfig {
   mode: 'none' | 'jail' | 'docker';
   bypassRoles: Role[];
   dockerBin: string;
+  /** 本进程视角的 workspace 根，用来把 run() 收到的绝对路径换算成相对路径。 */
+  workspaceDir: string;
+  /** 宿主视角的同一个目录；本进程也在宿主上跑时留空。见 #hostPath。 */
+  hostWorkspaceDir: string;
   image: string;
   network: 'none' | 'bridge';
   memoryMb: number;
@@ -39,16 +49,39 @@ function clipped(buffer: string, max: number): { value: string; truncated: boole
 
 export class Sandbox {
   #dockerAvailable: boolean | null = null;
+  readonly #inContainer: boolean;
 
-  constructor(private readonly config: SandboxConfig, dockerAvailable?: boolean) {
+  constructor(private readonly config: SandboxConfig, dockerAvailable?: boolean, inContainer?: boolean) {
     this.#dockerAvailable = dockerAvailable ?? null;
+    this.#inContainer = inContainer ?? detectContainer();
   }
 
   setDockerAvailable(available: boolean): void {
     this.#dockerAvailable = available;
   }
+
+  /**
+   * `docker run -v` 里的路径由**宿主** daemon 解析，而 run() 拿到的是本进程视角的路径。
+   * 本进程也在宿主上时两者相同；本进程在容器里时不同，且 docker 对不存在的宿主路径不会报错——
+   * 它会默默建一个空目录，于是 bash 写的文件 read_file 读不到。所以这里要么映射，要么拒绝。
+   */
+  #hostPath(workspace: string): string | null {
+    if (!this.config.hostWorkspaceDir) return workspace;
+    const rel = relative(resolve(this.config.workspaceDir), workspace);
+    if (rel.startsWith('..') || isAbsolute(rel)) return null;
+    return join(this.config.hostWorkspaceDir, rel);
+  }
+
+  /** docker 模式下路径映射本身不成立的情况；plan() 与 probe() 共用同一句话。 */
+  #mappingError(): string | null {
+    if (this.config.mode !== 'docker' || !this.#inContainer || this.config.hostWorkspaceDir) return null;
+    return '本进程在容器内且未配置 sandbox.hostWorkspaceDir：-v 会挂到宿主上不存在的路径，沙箱与文件工具将看到两个不同的目录';
+  }
+
   async probe(): Promise<{ available: boolean; mode: SandboxConfig['mode']; error?: string }> {
     if (this.config.mode !== 'docker') return { available: this.config.mode === 'jail', mode: this.config.mode };
+    const mapping = this.#mappingError();
+    if (mapping) return { available: false, mode: 'docker', error: mapping };
     const result = await new Promise<{ available: boolean; error?: string }>((resolve) => {
       const child = spawn(this.config.dockerBin, ['version', '--format', '{{.Server.Version}}'], { stdio: ['ignore', 'ignore', 'pipe'] });
       let settled = false;
@@ -67,17 +100,23 @@ export class Sandbox {
     if (this.config.bypassRoles.includes(role)) return { allowed: true, mode: 'host' };
     if (this.config.mode === 'none') return { allowed: false, mode: 'jail', reason: '沙箱未启用，执行类工具已禁用' };
     if (this.config.mode === 'docker' && this.#dockerAvailable === false) return { allowed: false, mode: 'docker', reason: 'Docker 沙箱不可用，执行类工具已禁用' };
+    const mapping = this.#mappingError();
+    if (mapping) return { allowed: false, mode: 'docker', reason: `${mapping}，执行类工具已禁用` };
     return { allowed: true, mode: this.config.mode };
   }
 
   async run(command: string, role: Role, workspace: string, abortSignal: AbortSignal, timeoutMs = this.config.defaultTimeoutMs): Promise<SandboxResult> {
     if (abortSignal.aborted) return { ok: false, exitCode: null, stdout: '', stderr: 'cancelled', truncated: false, durationMs: 0, killed: true, oom: false };
-    mkdirSync(workspace, { recursive: true, mode: 0o700 });
     const plan = this.plan(role, workspace);
     if (!plan.allowed) return { ok: false, exitCode: null, stdout: '', stderr: plan.reason ?? 'denied', truncated: false, durationMs: 0, killed: false, oom: false };
+    const mounted = plan.mode === 'docker' ? this.#hostPath(workspace) : workspace;
+    if (mounted === null) return { ok: false, exitCode: null, stdout: '', stderr: `workspace 不在 sandbox.workspaceDir 之下，无法换算成宿主路径：${workspace}`, truncated: false, durationMs: 0, killed: false, oom: false };
+    // 建目录放在放行之后：被拒的调用不该在盘上留下痕迹。容器内建的目录经 ./data 绑定挂载
+    // 同步到宿主，所以 #hostPath 换算出来的路径此刻在宿主上也已存在。
+    mkdirSync(workspace, { recursive: true, mode: 0o700 });
     const timeout = Math.min(timeoutMs, this.config.maxTimeoutMs);
     const name = `luoli-sbx-${Date.now()}`;
-    const dockerArgs = ['run', '--rm', '--name', name, `--network=${this.config.network}`, `--memory=${this.config.memoryMb}m`, `--memory-swap=${this.config.memoryMb}m`, `--cpus=${this.config.cpus}`, `--pids-limit=${this.config.pidsLimit}`, '--cap-drop=ALL', '--security-opt=no-new-privileges', '--user=1000:1000', `--tmpfs=/tmp:rw,size=${this.config.tmpfsMb}m,noexec`, '-v', `${workspace}:/workspace:rw`, '-w', '/workspace', '-e', 'HOME=/workspace', '-e', 'LANG=C.UTF-8'];
+    const dockerArgs = ['run', '--rm', '--name', name, `--network=${this.config.network}`, `--memory=${this.config.memoryMb}m`, `--memory-swap=${this.config.memoryMb}m`, `--cpus=${this.config.cpus}`, `--pids-limit=${this.config.pidsLimit}`, '--cap-drop=ALL', '--security-opt=no-new-privileges', '--user=1000:1000', `--tmpfs=/tmp:rw,size=${this.config.tmpfsMb}m,noexec`, '-v', `${mounted}:/workspace:rw`, '-w', '/workspace', '-e', 'HOME=/workspace', '-e', 'LANG=C.UTF-8'];
     if (this.config.readOnlyRoot) dockerArgs.push('--read-only');
     dockerArgs.push(this.config.image, 'timeout', '-s', 'KILL', String(Math.ceil(timeout / 1000)), 'sh', '-c', command);
     const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => ['PATH', 'LANG', 'TZ'].includes(key) && !/(TOKEN|KEY|SECRET|LUOLI|BOT_TOKEN)/i.test(key)));
