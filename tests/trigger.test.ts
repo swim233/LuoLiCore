@@ -12,6 +12,8 @@ describe('Telegram trigger matching', () => {
     expect(matchTrigger(context('/new@mybot'), { ...trigger, strictCommandSuffix: true }, 1, 'mybot')).toBe('command');
     expect(matchTrigger(context('/new@other'), { ...trigger, strictCommandSuffix: true }, 1, 'mybot')).toBeNull();
     expect(matchTrigger(context('/unknown@mybot'), { ...trigger, strictCommandSuffix: true }, 1, 'mybot')).toBeNull();
+    // 没有 handler 的名字不能留在白名单里，否则用户发出去只会石沉大海。
+    expect(matchTrigger(context('/wake list'), { ...trigger, strictCommandSuffix: true }, 1, 'mybot')).toBeNull();
   });
   it('rejects channels by default and ignores too-short wakewords', () => {
     expect(matchTrigger(context('洛璃', 'channel'), trigger, 1, 'mybot')).toBeNull();

@@ -155,7 +155,14 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
 - 桌面通知（`Notification API`，需用户授权）+ 页面标题角标。
 
 ### 3.13 配置（Settings）
-- 由 `config.schema.json`（zod → JSON Schema）**自动生成**表单：分组折叠面板（`Accordion`），每项含描述、默认值、当前值、是否需要重启（`Tag: 热更新 / 需重启`）。
+- **触发与唤醒词**卡片（已实现）：`private` / `mention` / `reply` / `command` / `channels` 五个开关、
+  唤醒词增删（每条标注「包含 / 正则」，不会生效的标红并写明原因）、`wakewordMinLength`、
+  `requireTextAfterMention`、`ignoreEditedAsTrigger`。可用性判定打 `POST /api/config/wakewords/check`，
+  与运行时匹配共用 `checkWakeword`（[08 §4](./08-telegram-adapter.md#4-触发判定)）；保存走 `PUT /api/config` 的点分键，
+  热更新即时生效。列表里有不可用模式时保存会被服务端拒绝（`invalid_wakeword`）并把原因回显在 Toast 上。
+  日志 SSE 会不断触发页面刷新，表单在有未保存改动时不被回写覆盖。
+- 会话级覆盖（`perChat.<contextKey>.trigger`）优先于全局值，目前只有 `PATCH /api/chats/:key` 这一个入口，设置页不提供。
+- 由 `config.schema.json`（zod → JSON Schema）**自动生成**表单：分组折叠面板（`Accordion`），每项含描述、默认值、当前值、是否需要重启（`Tag: 热更新 / 需重启`）。🚧 未实现，当前只在卡片下方展示只读的合并配置 JSON。
 - `[原始 YAML]` 模式：直接编辑，保存前跑 zod 校验，错误定位到行。
 - 保存 → 写 `config_kv` + `config_revisions` → 广播热更新事件；需重启项标注并提供 `[重启进程]`（若在 systemd/docker 下由外部 supervisor 拉起）。
 - `[导出配置]` / `[导入配置]`（密钥字段自动排除）。
@@ -171,7 +178,7 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
 |---|---|
 | `POST /api/auth/login` `POST /api/auth/logout` `GET /api/auth/me` | 鉴权 |
 | `GET /api/dashboard` | 概览聚合 |
-| `GET /api/chats` `GET /api/chats/:key` `PATCH /api/chats/:key` | 会话（PATCH 改 scope/唤醒词/覆盖项）。PATCH body 必须通过 `configSchema` 与 [11 §2.1](./11-config-reference.md) 的 `perChat` 白名单，越界返回 400 |
+| `GET /api/chats` `GET /api/chats/:key` `PATCH /api/chats/:key` | 会话（PATCH 改 scope/唤醒词/覆盖项）。PATCH body 必须通过 `configSchema` 与 [11 §2.1](./11-config-reference.md) 的 `perChat` 白名单，越界返回 400；带 `trigger` 时唤醒词还要过 `checkWakeword`，不可用返回 `invalid_wakeword` |
 | `GET /api/chats/:key/context` | 当前窗口消息（分页） |
 | `GET /api/chats/:key/commits` | commit 时间线 |
 | `POST /api/chats/:key/commits/:id/checkout` | 回滚 done 指针 |
@@ -198,7 +205,8 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
 | `GET /api/usage` `GET/PUT /api/quota` `POST /api/quota/reset` | 用量与配额 |
 | `GET /api/tasks` `POST /api/tasks/:id/cancel` | 任务 |
 | `GET /api/approvals` `POST /api/approvals/:id/decide` | 审批 |
-| `GET /api/config` `PUT /api/config` `GET /api/config/schema` `GET /api/config/revisions` | 配置 |
+| `GET /api/config` `PUT /api/config` `GET /api/config/schema` `GET /api/config/revisions` | 配置。`PUT` body 为点分键；动到 `trigger.*` 时唤醒词要过 `checkWakeword`，不可用返回 400 `invalid_wakeword` |
+| `POST /api/config/wakewords/check` | 逐条返回唤醒词的 `{ kind: contains\|regex, ok, reason }`，供面板即时提示；判定与运行时匹配同源 |
 | `POST /api/maintenance/{backup,vacuum,cleanup-logs,rebuild-fts,gc-files}` | 维护 |
 | `GET /api/events` | SSE |
 

@@ -7,6 +7,7 @@ export * from './agent/runtime.js';
 export * from './access.js';
 export * from './config/index.js';
 export * from './config/schema.js';
+export * from './config/wakeword.js';
 export * from './context/engine.js';
 export * from './events.js';
 export * from './log/sink.js';

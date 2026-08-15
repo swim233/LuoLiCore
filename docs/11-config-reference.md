@@ -94,11 +94,18 @@ trigger:
   reply: true
   command: true
   channels: false                 # 热更新 · 是否响应 channel_post
-  wakewords: ['洛璃']              # 热更新 · 字符串=包含匹配；以 ^ 开头=正则
+  wakewords: ['洛璃']              # 热更新 · 字符串=包含匹配；以 ^ 开头=正则（见下方可用性规则）
   wakewordMinLength: 2
   requireTextAfterMention: false
   ignoreEditedAsTrigger: true
   cooldownMsPerUser: 0
+
+# 唤醒词可用性（checkWakeword，运行时匹配与 WebUI 写入端共用一份）：
+#   · 去掉前导 ^ 后短于 wakewordMinLength → 整条跳过
+#   · 以 ^ 开头按正则处理（u 标志，只扫描消息前 4096 字符）；正则超 128 字符、含嵌套量词
+#     / 反向引用 / lookahead / lookbehind 的一律不求值直接跳过（ReDoS 防线）
+#   · 被跳过是静默的，因此启动时以 config.invalid 告警列出；WebUI 与 API 写入时直接 400 拒绝
+#   · 会话级 trigger 覆盖整体替换全局同名字段，且在触发判定时就已生效（[08 §4]）
 
 # ============================================================ context（D1–D4, D6, D8）
 context:
@@ -422,7 +429,7 @@ perChat:
   'chat:-1001234567':
     output: { mode: once }
     context: { limit: { tokens: 16000 }, background: { maxPerTurn: 10 } }
-    trigger: { wakewords: ['洛璃', '^璃'] }
+    trigger: { wakewords: ['洛璃', '^璃酱[，,、 ]'] }   # '^璃' 会因短于 wakewordMinLength 被跳过
     agent: { main: { modelAlias: low } }
     character: CHARACTER.-1001234567.md
 ```
@@ -441,6 +448,8 @@ memory.pubWriteMinRole（只允许比全局更严格）
 ```
 
 覆盖在 `openTurn` 时由 `perChatConfig(config, key)` 合并进本轮配置，`onTurn` 用的是 `turn.config` 而不是全局快照，因此 agent 运行时看到的也是合并后的值。
+`trigger.*` 还要更早一步：`matchTrigger` 在 `openTurn` 之前就跑，所以触发判定处（`bot.ts` 的消息与
+`edited_message` 两条路径）各自先算一次 `perChatConfig`——否则会话唤醒词能存住却永远匹配不上。
 
 #### 谁可以写 `perChat`
 
@@ -486,5 +495,6 @@ config.onChange(keys => {
 | `model_aliases` 缺 `main` | 拒绝启动 |
 | `memory.softLimitTokens` < `memory.hardLimitTokens` | 拒绝启动 |
 | `perChat` 出现白名单外的路径 | 拒绝启动，指出具体路径 |
-| `trigger` 全部为 false 且 `wakewords` 为空 | 警告（bot 永不会被触发） |
+| `trigger` 全部为 false 且没有可用唤醒词 | 警告（bot 永不会被触发） |
+| `trigger.wakewords` 里有不可用的模式（过短 / 正则过长 / 有回溯风险） | 警告并列出被跳过的模式；经 WebUI 与 API 写入时直接拒绝（400 `invalid_wakeword`） |
 | `logs.captureBodies=true` 且 `logs.dir` 不可写 | 拒绝启动 |

@@ -6,7 +6,7 @@ import argon2 from 'argon2';
 import { Hono } from 'hono';
 import { serveStatic } from '@hono/node-server/serve-static';
 import type { AgentManager, Config, ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceService, McpManager, MemoryStore, PluginManager, PromptDocuments, ProviderStore, Sandbox, SkillLoader, TurnRegistry } from '@luoli/core';
-import { ALIAS_NAME_PATTERN, TOOL_POLICY, aliasSettingsSchema, configSchema as runtimeConfigSchema, probeProvider } from '@luoli/core';
+import { ALIAS_NAME_PATTERN, TOOL_POLICY, aliasSettingsSchema, checkWakeword, configSchema as runtimeConfigSchema, perChatConfig, probeProvider, rejectedWakewords } from '@luoli/core';
 import type { ProviderProbe } from '@luoli/core';
 import type { ArchiveRepository, OperationsRepository, PrincipalRepository, Sqlite } from '@luoli/db';
 
@@ -194,10 +194,22 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     cc.head_ordinal AS headOrdinal,cc.tokens_total AS tokens,cc.msg_count AS messages FROM contexts c LEFT JOIN refs r ON r.key=c.key AND r.name='done' LEFT JOIN context_commits cc ON cc.id=r.commit_id ORDER BY c.updated_at DESC`).all() }));
   app.get('/api/config', (ctx) => ctx.json({ ok: true, data: publicConfig(currentConfig()) }));
   app.get('/api/config/schema', (ctx) => ctx.json({ ok: true, data: dependencies.configSchema }));
+  // 不安全或过短的唤醒词在匹配时被静默跳过（trigger.ts）。收下这种模式等于让运维以为配好了，
+  // 实际表现是「bot 不理我」，所以写入端直接挡回去；只在这次写操作真的动了唤醒词时校验。
+  app.post('/api/config/wakewords/check', async (ctx) => {
+    const body = await ctx.req.json<{ wakewords?: unknown; minLength?: unknown }>();
+    const patterns = Array.isArray(body.wakewords) ? body.wakewords.filter((entry): entry is string => typeof entry === 'string') : [];
+    const minLength = typeof body.minLength === 'number' ? body.minLength : currentConfig().trigger.wakewordMinLength;
+    return ctx.json({ ok: true, data: patterns.map((pattern) => { const checked = checkWakeword(pattern, minLength); return { pattern, kind: checked.kind, ok: checked.ok, reason: checked.ok ? null : checked.reason }; }) });
+  });
   app.put('/api/config', async (ctx) => {
     const body = await ctx.req.json<Record<string, unknown>>();
     const parsed = runtimeConfigSchema.safeParse(mergeDotted(currentConfig(), body));
     if (!parsed.success) return ctx.json({ ok: false, error: { code: 'invalid_config', message: '配置校验失败', details: parsed.error.issues.map((issue) => ({ path: issue.path.join('.'), message: issue.message })) } }, 400);
+    if (Object.keys(body).some((key) => key === 'trigger' || key.startsWith('trigger.'))) {
+      const rejected = rejectedWakewords(parsed.data.trigger.wakewords, parsed.data.trigger.wakewordMinLength);
+      if (rejected.length) return ctx.json(apiError('invalid_wakeword', `唤醒词不会生效：${rejected.join('；')}`).body, 400);
+    }
     const now = Date.now();
     const write = dependencies.db.prepare(`INSERT INTO config_kv(key,value_json,updated_at,updated_by) VALUES (?,?,?,'webui') ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at,updated_by=excluded.updated_by`);
     const revision = dependencies.db.prepare('INSERT INTO config_revisions(id,ts,actor,key,old_json,new_json) VALUES (?,?,?,?,?,?)');
@@ -218,6 +230,11 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     // 又会让下次启动时的配置校验失败（docs/19-review-round4.md · R-CFG-02）。
     const parsed = runtimeConfigSchema.safeParse(mergeDotted(currentConfig(), { [key]: body }));
     if (!parsed.success) return ctx.json({ ok: false, error: { code: 'invalid_config', message: '会话覆盖校验失败', details: parsed.error.issues.map((issue) => ({ path: issue.path.join('.'), message: issue.message })) } }, 400);
+    if (body.trigger) {
+      const merged = perChatConfig(parsed.data, ctx.req.param('key')).trigger;
+      const rejected = rejectedWakewords(merged.wakewords, merged.wakewordMinLength);
+      if (rejected.length) return ctx.json(apiError('invalid_wakeword', `唤醒词不会生效：${rejected.join('；')}`).body, 400);
+    }
     dependencies.db.prepare("INSERT INTO config_kv(key,value_json,updated_at,updated_by) VALUES (?,?,?,'webui') ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at,updated_by='webui'").run(key, JSON.stringify(body), now);
     dependencies.db.prepare('INSERT INTO config_revisions(id,ts,actor,key,old_json,new_json) VALUES (?,?,?,?,?,?)').run(randomBytes(16).toString('hex'), now, 'webui', key, null, JSON.stringify(body));
     dependencies.events.emit('config.changed', { keys: [key] }); return ctx.json({ ok: true, data: body });

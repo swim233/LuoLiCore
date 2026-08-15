@@ -114,8 +114,9 @@ function matchTrigger(ctx, cfg): TriggerReason | null {
   // 3) bot 命令（entities type='bot_command' 且在 offset 0，命令属于我们且 @后缀匹配或缺省）
   if (cfg.trigger.command && isOurCommand(ctx.message, bot.botInfo)) return 'command';
 
-  // 4) 唤醒词 / 正则（会话级覆盖 > 全局）
-  const pats = cfg.perChat[key]?.wakewords ?? cfg.trigger.wakewords;   // string[] | /re/
+  // 4) 唤醒词 / 正则。整个 cfg 先经 perChatConfig(cfg, key) 合并，会话级 trigger 覆盖整体替换
+  //    同名的全局值（不是并集），所以上面三步用的也是合并后的开关。
+  const pats = cfg.trigger.wakewords;   // string[]，以 ^ 开头的条目按正则处理
   if (pats?.length && matchAny(text, pats)) return 'wakeword';
 
   return null;
@@ -137,6 +138,11 @@ trigger:
   cooldownMsPerUser: 0             # >0 时同用户在冷却期内的触发被忽略（回一个 reaction 表示已收到）
 ```
 
+- **唤醒词的可用性**由 `checkWakeword`（`packages/core/src/config/wakeword.ts`）统一判定，运行时匹配与
+  WebUI 写入端共用这一份：去掉前导 `^` 后短于 `wakewordMinLength`、正则超过 128 字符、或含回溯风险结构
+  （嵌套量词、反向引用、lookahead/lookbehind）的模式**整条跳过且不求值**（ReDoS 防线），正则只扫描消息前 4096 字符。
+  跳过是静默的，所以启动时会以 `config.invalid` 告警列出这些模式，写入端（`PUT /api/config`、
+  `PATCH /api/chats/:key`）直接返回 400 并说明原因——收下一个永远匹配不上的模式等于让运维以为配好了。
 - **频道消息**（`chat.type='channel'`）：默认不参与（`trigger.channels=false`）。
 - 匿名管理员发言（`sender_chat` 存在，`from` 为群本身）：`from_user_id` 记为 `chat:<id>`，角色取该 chat 的角色，`from_name` = 群名 + `(匿名管理员)`。
 - **反循环**：`from.is_bot === true` 一律不触发（即使 @了我们），除非 `telegram.allowBots` 里显式列出该 bot 的 username。
@@ -301,7 +307,6 @@ media:
 | `/whois <id>` | all | owner | 查某主体的角色 |
 | `/grant <user\|chat> <id> <role>` | all | owner | 授权 |
 | `/revoke <id>` | all | owner | 降为 blocked |
-| `/wake [add\|del\|list] [pattern]` | group | trusted | 管理本会话唤醒词 |
 | `/usage [today\|month]` | all | limited | 本会话/本人用量；owner 看全局 |
 | `/webui` | private | owner | 返回带一次性 token 的 WebUI 登录链接（可选，见 [09 §2.3](./09-webui.md#23-可选telegram-一次性登录链接)） |
 | `/ping` | all | limited | 健康检查：版本、上线时长、模型别名、DB 大小 |
@@ -309,6 +314,9 @@ media:
 - 命令**不进 AI 流程**（除 `/ask`），直接由 handler 处理并回复；命令消息仍归档（`kind='text'`, `triggered=1`, `trigger_reason='command'`），但**不进上下文**（`commands.archiveToContext=false`，避免污染对话）。
 - `/new`、`/undo`、`/model` 等改变状态的命令回复里附当前状态摘要，便于确认。
 - 群里带 `@botusername` 后缀的命令（`/new@mybot`）正确解析；不带后缀且群内有多个 bot 时按 Telegram 惯例仍处理（可用 `telegram.strictCommandSuffix` 关掉）。
+- 命令归属白名单（`trigger.ts` 的 `ours`）里**只放已注册 handler 的名字**：判成 `command` 的消息不进 AI 流程，
+  名字在白名单里却没有 handler，用户发出去就石沉大海。会话唤醒词管理原本设计为 `/wake`，现已摘除，
+  改在 WebUI 设置页配置全局唤醒词、用 `PATCH /api/chats/:key` 配置会话级覆盖（「摘除比伪造安全」，[16 §5](./16-remediation-plan.md)）。
 
 ---
 

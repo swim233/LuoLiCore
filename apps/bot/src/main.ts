@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import { serve } from '@hono/node-server';
 import { zodToJsonSchema } from 'zod-to-json-schema';
 import { ArchiveRepository, OperationsRepository, PrincipalRepository, TurnRepository, closeDatabase, migrateDatabase, modelAliasKey, openDatabase, readAppKv, readPersistedConfig, recoverAfterCrash } from '@luoli/db';
-import { AgentManager, AgentResultStore, ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, FileTools, LogSink, MaintenanceService, McpManager, MemoryStore, ModelRegistry, PathJail, PluginManager, PromptAssembler, PromptDocuments, ProviderStore, QuotaGuard, Sandbox, Scheduler, Secrets, SkillLoader, TOOL_POLICY, ToolRegistry, TurnConcurrency, TurnRegistry, UsageLedger, configSchema, loadConfig, perChatConfig, registerBuiltins, streamMainAgent } from '@luoli/core';
+import { AgentManager, AgentResultStore, ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, FileTools, LogSink, MaintenanceService, McpManager, MemoryStore, ModelRegistry, PathJail, PluginManager, PromptAssembler, PromptDocuments, ProviderStore, QuotaGuard, Sandbox, Scheduler, Secrets, SkillLoader, TOOL_POLICY, ToolRegistry, TurnConcurrency, TurnRegistry, UsageLedger, configSchema, loadConfig, perChatConfig, registerBuiltins, rejectedWakewords, streamMainAgent } from '@luoli/core';
 import { createServer, setupToken } from '@luoli/server';
 import { createTelegramBot } from '@luoli/telegram';
 
@@ -75,6 +75,12 @@ const promptDocuments = new PromptDocuments(db, config.memory.dir);
 promptDocuments.ensure();
 const approval = new DatabaseApprovalBroker(db, config, events, log);
 if (!config.approval.enabled) log.event({ level: 'warn', kind: 'approval.disabled', summary: 'Approval flow disabled; dangerous tools execute without review' });
+// 唤醒词在匹配时被静默跳过、或四个开关全关，表现都只是「bot 不理我」——启动时先把它说出来（docs/11 §启动校验）。
+const unusableWakewords = rejectedWakewords(config.trigger.wakewords, config.trigger.wakewordMinLength);
+if (unusableWakewords.length) log.event({ level: 'warn', kind: 'config.invalid', summary: `${unusableWakewords.length} 条唤醒词不会生效`, data: { rejected: unusableWakewords } });
+if (!config.trigger.private && !config.trigger.mention && !config.trigger.reply && !config.trigger.command && config.trigger.wakewords.length === unusableWakewords.length) {
+  log.event({ level: 'warn', kind: 'config.invalid', summary: 'No trigger source is enabled; the bot will never respond' });
+}
 const toolRegistry = new ToolRegistry(log, approval, { maxRegistered: config.tools.maxRegistered, maxCallsPerTurn: config.tools.maxCallsPerTurn, maxConsecutiveErrors: config.tools.maxConsecutiveErrors, maxOutputBytes: config.tools.exec.maxOutputBytes }, config.approval.rules);
 toolRegistry.bindOverrides(() => configStore.snapshot().tools.overrides);
 const sandbox = new Sandbox({ mode: config.sandbox.mode, bypassRoles: config.sandbox.bypassRoles, dockerBin: config.sandbox.dockerBin,
