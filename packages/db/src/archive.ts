@@ -35,6 +35,23 @@ export interface AppendMessageInput extends Omit<ArchivedMessage, 'id' | 'trigge
   replyToTgMessageId?: number | null;
 }
 
+/**
+ * FTS5 的 MATCH 串是一门查询语言：`|` `"` `*` `:` `-` `^` `(` `)` 和 AND/OR/NOT/NEAR 都是语法。
+ * 查询词来自模型和 WebUI 使用者，原样塞进去 —— 模型写一句 `名字|我是|叫|谁` 就把整次工具调用
+ * 打成 `fts5: syntax error near "|"`，它只能瞎改参数重试。这里先切成词，再决定怎么查：
+ * - 有 ≥3 字的词：逐个加引号 OR 起来走 FTS（trigram 匹配不了更短的词），bm25 负责排序；
+ * - 一个都没有（中文两字词几乎全在这一档）：退回 LIKE，且用最长的那个词而不是原串 ——
+ *   原串里还带着 `|`，`LIKE '%名字|我是%'` 永远匹配不到任何东西。
+ * 多词之间取 OR 而不是 FTS 默认的隐式 AND：这个工具的调用方是模型，它写多个词就是在列同义词。
+ */
+export function archiveQuery(raw: string): { fts: string } | { like: string } {
+  const tokens = [...new Set(raw.split(/[^\p{L}\p{N}_]+/u).filter(Boolean))];
+  const matchable = tokens.filter((token) => [...token].length >= 3);
+  if (matchable.length) return { fts: matchable.map((token) => `"${token.replaceAll('"', '""')}"`).join(' OR ') };
+  const longest = [...tokens].sort((left, right) => [...right].length - [...left].length)[0];
+  return { like: `%${longest ?? raw}%` };
+}
+
 const MESSAGE_COLUMNS = `m.id,m.chat_id AS chatId,m.message_thread_id AS messageThreadId,m.tg_message_id AS tgMessageId,m.direction,
   m.from_kind AS fromKind,m.from_user_id AS fromUserId,m.from_name AS fromName,m.from_username AS fromUsername,m.kind,m.text,m.tg_date AS tgDate,
   m.triggered,m.trigger_reason AS triggerReason`;
@@ -54,9 +71,10 @@ export class ArchiveRepository {
   }
 
   adminSearchAll(query: string, limit = 50): ArchivedMessage[] {
-    const rows = [...query].length < 3
-      ? this.db.prepare(`SELECT ${messageQuery()},media_parts_json AS mediaPartsJson FROM messages WHERE deleted_at IS NULL AND text LIKE ? ORDER BY tg_date DESC LIMIT ?`).all(`%${query}%`, limit) as ArchivedMessage[]
-      : this.db.prepare(`SELECT ${messageQuery('m')},m.media_parts_json AS mediaPartsJson FROM messages_fts f JOIN messages m ON m.id=f.rowid WHERE messages_fts MATCH ? AND m.deleted_at IS NULL ORDER BY bm25(messages_fts),m.tg_date DESC LIMIT ?`).all(query, limit) as ArchivedMessage[];
+    const parsed = archiveQuery(query);
+    const rows = 'like' in parsed
+      ? this.db.prepare(`SELECT ${messageQuery()},media_parts_json AS mediaPartsJson FROM messages WHERE deleted_at IS NULL AND text LIKE ? ORDER BY tg_date DESC LIMIT ?`).all(parsed.like, limit) as ArchivedMessage[]
+      : this.db.prepare(`SELECT ${messageQuery('m')},m.media_parts_json AS mediaPartsJson FROM messages_fts f JOIN messages m ON m.id=f.rowid WHERE messages_fts MATCH ? AND m.deleted_at IS NULL ORDER BY bm25(messages_fts),m.tg_date DESC LIMIT ?`).all(parsed.fts, limit) as ArchivedMessage[];
     return rows.map((row) => withMedia(row)!);
   }
 }
@@ -85,8 +103,9 @@ export class ScopedArchiveRepository {
     const thread = this.threadId === null ? '' : ' AND message_thread_id = @threadId';
     const columns = `id,chat_id AS chatId,message_thread_id AS messageThreadId,tg_message_id AS tgMessageId,direction,
       from_kind AS fromKind,from_user_id AS fromUserId,from_name AS fromName,from_username AS fromUsername,kind,text,tg_date AS tgDate,triggered,trigger_reason AS triggerReason`;
-    const rows = [...query].length < 3 ? this.db.prepare(`SELECT ${columns},media_parts_json AS mediaPartsJson FROM messages WHERE chat_id = @chatId${thread} AND deleted_at IS NULL AND text LIKE @query ORDER BY tg_date DESC LIMIT @limit`).all({ chatId: this.chatId, threadId: this.threadId, query: `%${query}%`, limit }) as ArchivedMessage[]
-      : this.db.prepare(`SELECT ${messageQuery('m')},m.media_parts_json AS mediaPartsJson FROM messages_fts f JOIN messages m ON m.id=f.rowid WHERE m.chat_id = @chatId${thread ? ' AND m.message_thread_id = @threadId' : ''} AND messages_fts MATCH @query AND m.deleted_at IS NULL ORDER BY bm25(messages_fts),m.tg_date DESC LIMIT @limit`).all({ chatId: this.chatId, threadId: this.threadId, query, limit }) as ArchivedMessage[];
+    const parsed = archiveQuery(query);
+    const rows = 'like' in parsed ? this.db.prepare(`SELECT ${columns},media_parts_json AS mediaPartsJson FROM messages WHERE chat_id = @chatId${thread} AND deleted_at IS NULL AND text LIKE @query ORDER BY tg_date DESC LIMIT @limit`).all({ chatId: this.chatId, threadId: this.threadId, query: parsed.like, limit }) as ArchivedMessage[]
+      : this.db.prepare(`SELECT ${messageQuery('m')},m.media_parts_json AS mediaPartsJson FROM messages_fts f JOIN messages m ON m.id=f.rowid WHERE m.chat_id = @chatId${thread ? ' AND m.message_thread_id = @threadId' : ''} AND messages_fts MATCH @query AND m.deleted_at IS NULL ORDER BY bm25(messages_fts),m.tg_date DESC LIMIT @limit`).all({ chatId: this.chatId, threadId: this.threadId, query: parsed.fts, limit }) as ArchivedMessage[];
     return rows.map((row) => withMedia(row)!);
   }
 

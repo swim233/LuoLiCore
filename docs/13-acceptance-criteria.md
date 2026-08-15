@@ -68,6 +68,7 @@
 | [ ] AC-CTX-026 (自动) | token 估算校准 | 真实 usage 返回后 `contexts.token_ratio` 按 EMA 更新；偏差 >20% 有 warn 日志 |
 | [ ] AC-CTX-027 | `/ctx` | 显示 commit seq、窗口区间、消息数、token/上限、最近 rebase/prune、claim 水位，数值与 DB 一致 |
 | [ ] AC-CTX-028 (自动) | `concurrency.mode='serial'` 下并发 3 个 turn | 严格 FIFO 串行，`rebased` 全为 0 |
+| [ ] AC-CTX-029 (自动) ★ | 一轮里模型调用任意工具，下一轮再对话 | tool-result 的 `output` 落库即为 `{type:'json',value}`；整段上下文能过 SDK 的 `ModelMessage` 校验；第二轮正常回复且**进程不退出**。历史上写成裸对象的会话在读出侧被补齐，不需要 `/new` |
 
 ## 3. Telegram 与准入（AC-TG / AC-ACL / AC-OUT）
 
@@ -102,6 +103,7 @@
 | [ ] AC-OUT-006 | `output.mode='once'` | 全程 typing，仅在结束时发一条（仍分片） |
 | [ ] AC-OUT-007 | 编辑触发 429 | 跳过本次增量，不堆积，最终定稿正确 |
 | [ ] AC-OUT-008 (自动) | 出站消息 | 入 `messages`（direction='out'）且带 `turn_id`；进上下文为 assistant 消息 |
+| [ ] AC-OUT-009 (自动) | 模型这轮一个字都没吐 | 用户收到「模型这轮没吐出任何正文」+ ref，而不是彻底的沉默；上下文里不留空的 assistant 消息；`turn.end` 记 failed。流里已发出内容而 `final` 为空时，以已发出的为准 |
 
 ## 4. Agent 与 Provider（AC-AGENT / AC-PROV / AC-PROMPT）
 
@@ -157,6 +159,7 @@
 | [ ] AC-TOOL-018 (自动) | `tools.maxCallsPerTurn=5`，模型试图调 10 次 | 第 6 次起被拒并告知模型 |
 | [ ] AC-TOOL-019 | `web_fetch` 返回内容 | 被 `<untrusted-content source="web:…">` 包裹 |
 | [ ] AC-TOOL-020 (自动) | 注册工具数超 `maxRegistered` | 按优先级截断（内建>agent>plugin>skill>MCP），RUNTIME 块告知，有 warn 日志 |
+| [ ] AC-TOOL-021 (自动) | `search_messages` 依次传 `名字\|我是\|叫\|谁`、`NEAR(a b)`、`"unclosed`、`***` | 一律正常返回（命中或空），不出现 `fts5: syntax error`；≥3 字的词走 FTS，两字中文词退回 LIKE 且用最长的词而非原串 |
 | [ ] AC-SBX-001 (自动) ★ | `mode=none`，`trusted` 请求 `bash` | 工具**不存在**（fail-closed），不是「执行后被拒」 |
 | [ ] AC-SBX-002 (自动) ★ | `mode=none`，`owner` 请求 `bash` | 可执行（bypassRoles），cwd = workspace |
 | [ ] AC-SBX-003 (自动) ★ | `mode=docker`，`trusted` 执行 `bash` | 容器内执行；`--network=none`；`/workspace` 可写；宿主 `/etc` 不可见 |
@@ -342,6 +345,7 @@
 | [ ] AC-OPS-006 | `pnpm smoke` | 模拟 20 个 update 走完全链路并断言 DB 状态，全绿 |
 | [ ] AC-OPS-007 | 磁盘写满（模拟） | DB 写失败被捕获；回复「内部错误(ref)」；owner 收告警；进程不崩 |
 | [ ] AC-OPS-008 | 时区设为 UTC 后重启 | 配额 bucket 与时间渲染一致切换，无跨日重复计费 |
+| [ ] AC-OPS-009 | 人为制造一次 uncaught 异常 / unhandled rejection | 退出前写入 `system.crash`（含 event 与 stack）到日志与 stderr；下次启动 `recoverAfterCrash` 照常收尾。崩溃不允许在日志里不留痕迹 |
 
 ---
 
@@ -350,17 +354,17 @@
 | 模块 | 负责人 | 通过 AC 数 / 总数 | 豁免项及理由 | 日期 | 签署 |
 |---|---|---|---|---|---|
 | 配置与 DB | | / 17 | | | |
-| **上下文引擎** | | / 28 | | | |
-| Telegram 与准入 | | / 29 | | | |
+| **上下文引擎** | | / 29 | | | |
+| Telegram 与准入 | | / 30 | | | |
 | Agent 与 Provider | | / 24 | | | |
-| 工具/沙箱/审批 | | / 38 | | | |
+| 工具/沙箱/审批 | | / 39 | | | |
 | Subagent 与任务 | | / 21 | | | |
 | 记忆 | | / 13 | | | |
 | 日志与成本 | | / 23 | | | |
 | 扩展生态 | | / 24 | | | |
 | WebUI | | / 29 | | | |
 | 安全 | | / 12 | | | |
-| 运维 | | / 8 | | | |
-| **合计** | | **/ 266** | | | |
+| 运维 | | / 9 | | | |
+| **合计** | | **/ 270** | | | |
 
 **整体通过条件**：全部 ★ 项通过 + 非 ★ 项通过率 ≥ 95% + 所有豁免项经需求方书面确认。

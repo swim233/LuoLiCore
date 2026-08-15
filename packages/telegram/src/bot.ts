@@ -42,6 +42,7 @@ function failureText(error: unknown, reference: string): string {
   const message = error instanceof Error ? error.message : String(error);
   if (message.startsWith('model alias unavailable')) return `模型还没配置好，得管理员在 WebUI 里配上 provider 和 main 别名。(ref: ${reference})`;
   if (message === 'model_pricing_required') return `当前模型没配价格，管理员补上定价才能用。(ref: ${reference})`;
+  if (message === 'model_returned_empty') return `模型这轮没吐出任何正文，我不知道该回你什么。再说一次试试？(ref: ${reference})`;
   return `出了点问题，已记录。(ref: ${reference})`;
 }
 interface TelegramIngress {
@@ -323,10 +324,16 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
           (error) => dependencies.log.event({ level: 'warn', kind: 'tg.error', summary: 'Streaming delivery failed', traceId: turn.turnId, chatId, data: { error: error instanceof Error ? error.message : String(error) } }), receivedAt);
         const consumed = await output.consume(generated.stream, message.message_id);
         if (consumed.interrupted) { generated.interrupt(); void generated.final.catch(() => undefined); answer = consumed.text; }
-        else answer = await generated.final;
+        // final 为空、但流里已经发出去了内容时以发出去的为准：否则用户盯着屏幕上的回复，
+        // 却又收到一句「这轮没成」，上下文里还少了这段话。
+        else { const final = await generated.final; answer = final.trim() ? final : consumed.text; }
         for (const messageId of consumed.messageIds) scoped.append({ chatId, messageThreadId: message.message_thread_id ?? null, tgMessageId: messageId, direction: 'out', fromKind: 'bot', fromUserId: String(bot.botInfo.id), fromName: bot.botInfo.first_name, fromUsername: bot.botInfo.username,
           kind: 'text', text: answer, tgDate: Date.now(), raw: { streamed: true, interrupted: consumed.interrupted }, triggered: false, turnId: turn.turnId });
       }
+      // 空正文既发不出去（splitTelegramText('') 是空数组，用户看到的是彻底的沉默），
+      // 又会把一条空的 assistant 消息留进上下文。当成失败处理：至少用户知道这轮没成，
+      // 而且下一轮的 prompt 里不会多一条谁都解释不了的空消息（docs/16 §5「摘除比伪造安全」）。
+      if (!answer.trim()) throw new Error('model_returned_empty');
       dependencies.context.appendDelta(turn, { id: turn.turnId, role: 'assistant', origin: 'assistant', parts: [{ type: 'text', text: answer }], textPreview: answer.slice(0, 240), pruneLevel: 0 });
       const committed = await dependencies.context.commitTurn(turn);
       dependencies.turns.finish(turn.turnId, { state: 'committed', commitId: committed.commit.id, rebased: committed.rebased });
