@@ -116,7 +116,7 @@ describe('documented API surface', () => {
   it('previews the runtime prompt and streams an isolated Agent dry-run', async () => {
     const { app, db, headers } = harness(() => ({
       previewPrompt: async (key, role) => ({
-        key, role, instructions: 'assembled prompt', blocks: [{ name: 'kernel', tokens: 5, content: 'abcde', truncated: false }],
+        key, role, instructions: 'assembled prompt', blocks: [{ name: 'kernel', tokens: 5, content: 'abcde', truncated: false, cached: true }],
         totalTokens: 5, context: { messages: 2, tokens: 4 },
       }),
       dryRunAgent: async (_name, task, _signal, emit) => {

@@ -76,7 +76,7 @@ CREATE TABLE messages (
   from_user_id       TEXT,
   from_name          TEXT,
   from_username      TEXT,
-  reply_to_tg_message_id INTEGER,
+  reply_to_tg_message_id INTEGER,                   -- 触发消息与被回复消息两条路径都写（[08 §7.4](./08-telegram-adapter.md)）
   forward_origin_json TEXT,
   media_group_id     TEXT,
   kind               TEXT    NOT NULL,              -- text|photo|document|voice|video|video_note|
@@ -110,6 +110,10 @@ CREATE INDEX ix_messages_mediagroup ON messages(media_group_id) WHERE media_grou
 **编辑消息**：Telegram 的 `edited_message` 不覆盖原行；写入 `revision = revision+1` 的新行，旧行保留（`edited_at` 打在旧行上）。`UNIQUE(chat_id, tg_message_id, revision)` 保证可共存。上下文只引用最初被认领的那个 revision（`source_message_id` 指向具体行），**已提交的上下文不会因编辑而变化**。
 
 **删除消息**：Bot API 不推送删除事件 ⇒ 无法感知。`deleted_at` 仅用于 owner 在 WebUI 手动标记/清理。写入文档以免误解。
+
+**引用注入写入的行**：被回复的消息若不在库里，会由适配层用 update 自带的副本补写一行
+（`triggered=0`、`claimed_at` 非空而 `claimed_by_turn` 为空 = 已消费但不属于任何在途轮次）。
+它的 `id` 大于触发消息的 `id`，`claimed_at` 是它不被下一轮重复认领的唯一屏障（[08 §7.4](./08-telegram-adapter.md)）。
 
 ### 2.3 全文检索（中文）
 

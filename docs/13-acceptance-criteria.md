@@ -75,6 +75,8 @@
 | [ ] AC-CTX-030 (自动) ★ | 把引擎产出的上下文交给真的 `ToolLoopAgent`：纯文本 / 工具轮次 / `load_skill` 之后 / 背景消息被省略 / 在途轮次期间 `/new` / rebase 说明 / 分级裁剪后 / 带图片的硬截断 | 八个场景全部被 AI SDK 收下，不出现 `AI_InvalidPromptError`（docs/20 · W-CTX-01；[02 §9 红线 16]） |
 | [ ] AC-CTX-031 (自动) ★ | 任何路径试图写入 `role='system'` 的上下文消息 | `assertValidShape` 在产生它的那一轮就抛 `invalid_context_shape`；库里的历史存量由迁移 `0006` 改回 `user`；`contextMessages()` 对漏网的历史行降级成 `user` 而不是让整轮被拒 |
 | [ ] AC-CTX-032 (自动) ★ | 在一个已有多次提交的会话上执行 `/undo`，随后依次做：WebUI「回滚到此」、再发一条消息 | 两者都成功。`context_commits.seq` 按 `MAX(seq)+1` 分配，撤销之后不复用已占号 —— 按 HEAD 递推会撞 `ux_commits_key_seq`，表现是撤销过的会话下一条消息直接失败（[02 §7]） |
+| [ ] AC-CTX-033 (自动) ★ | 回复一条**从未归档过**的图片消息并唤醒 bot（群里发送者是 blocked，即最常见的那种情形） | 被回复消息被现场归档、图片下载归一化，连同 `{type:'image'}` part 进入本轮 delta 并被提交；模型看得到那张图。被回复消息已在窗口里、本轮刚被认领、或是 bot 自己那一轮的产出时**不重复注入**（[02 §4.1.1]、[08 §7.4](./08-telegram-adapter.md)） |
+| [ ] AC-CTX-034 (自动) ★ | 连续多轮对话后检查 `contexts.token_ratio` 与 `context_messages.tokens` | 校准两端量纲一致（真实 usage ↔ **整个请求体**的估算，而不是「窗口内消息的估算」），系数收敛在 `[0.5, 2]`；一张图不会被按 base64 字符估成几万 token；RUNTIME 里的「上下文水位」与真实输入同量级。首启跑一次性修复，把校准失控期间落库的 tokens 按新估算器重算（[02 §5.5]） |
 
 ## 3. Telegram 与准入（AC-TG / AC-ACL / AC-OUT）
 
@@ -155,9 +157,11 @@
 | [ ] AC-PROMPT-002 (自动) ★ | 组装群聊系统提示词 | **不含** PRIMEMORY；断言其内容字符串不出现在结果中 |
 | [ ] AC-PROMPT-003 (自动) | RUNTIME 块的工具列表 | 与本 step 的 `activeTools` 完全一致（无多、无少） |
 | [ ] AC-PROMPT-004 (自动) | 记忆超大导致总量超 `prompt.maxTokens` | 按 5→4→1 顺序截断并加提示；KERNEL/ASSIST/CATALOG/RUNTIME 完整；有 warn 日志 |
-| [ ] AC-PROMPT-005 | Anthropic provider | 请求中缓存断点打在 PRIMEMORY 之后；第二轮 `cache_read_tokens > 0` 并单独计价 |
+| [ ] AC-PROMPT-005 | Anthropic provider | 请求中缓存断点打在 TOOL CATALOG 之后（稳定段末尾）；第二轮 `cache_read_tokens > 0` 并单独计价 |
 | [ ] AC-PROMPT-006 | WebUI `[预览组装]` | 输出与实际发送的 `instructions` 一致（可用日志中的 `instructionsHash` 比对） |
 | [ ] AC-PROMPT-007 | 把 `prompt.maxTokens` 压到 catalog + runtime 就吃满的程度 | `CHARACTER.md` 被截断时日志有一条 `prompt.truncated` warn（含被截块名），人格不再静默消失（docs/20 · W-PROMPT-01） |
+| [ ] AC-PROMPT-008 (自动) ★ | 抓两轮之间的真实请求体逐字节比对 | 第一处分叉必须落在**易变段**（system 消息 #2）之内；稳定段（KERNEL/CHARACTER/ASSIST/CATALOG）一个字节都不变。此前 RUNTIME 的分钟时钟在稳定区里，跨轮缓存命中从 12,672 token 掉到 128（[06 §1]、[04 §2.1](./04-agents-and-providers.md#21-prompt-缓存)） |
+| [ ] AC-PROMPT-009 (自动) | `instructions` 传两条 system 消息 | AI SDK 按序、连同 `providerOptions` 一起递给 provider：Anthropic 转成两个 system text block 且 `cache_control` 只在第一个上；其余 provider 转成两条 system 消息 |
 
 ## 5. 工具 / 沙箱 / 审批（AC-TOOL / AC-SBX / AC-APV）
 
@@ -432,9 +436,9 @@
 | 模块 | 负责人 | 通过 AC 数 / 总数 | 豁免项及理由 | 日期 | 签署 |
 |---|---|---|---|---|---|
 | 配置与 DB | | / 20 | | | |
-| **上下文引擎** | | / 32 | | | |
+| **上下文引擎** | | / 34 | | | |
 | Telegram 与准入 | | / 38 | | | |
-| Agent 与 Provider | | / 35 | | | |
+| Agent 与 Provider | | / 37 | | | |
 | 工具/沙箱/审批 | | / 49 | | | |
 | Subagent 与任务 | | / 22 | | | |
 | 记忆 | | / 13 | | | |
@@ -443,6 +447,6 @@
 | WebUI | | / 66 | | | |
 | 安全 | | / 15 | | | |
 | 运维 | | / 9 | | | |
-| **合计** | | **/ 349** | | | |
+| **合计** | | **/ 353** | | | |
 
 **整体通过条件**：全部 ★ 项通过 + 非 ★ 项通过率 ≥ 95% + 所有豁免项经需求方书面确认。

@@ -21,7 +21,11 @@ export interface ArchivedMessage {
   tgDate: number;
   triggered: number;
   triggerReason: string | null;
+  turnId?: string | null;
+  replyToTgMessageId?: number | null;
   mediaParts?: unknown[];
+  /** 被回复者的显示名。只在适配层现场构造的消息上出现（Telegram update 里带着），不落库。 */
+  replyToName?: string;
 }
 
 export interface AppendMessageInput extends Omit<ArchivedMessage, 'id' | 'triggered' | 'triggerReason'> {
@@ -29,10 +33,10 @@ export interface AppendMessageInput extends Omit<ArchivedMessage, 'id' | 'trigge
   raw: unknown;
   triggered?: boolean;
   triggerReason?: string | null;
-  turnId?: string | null;
   revision?: number;
   mediaGroupId?: string | null;
-  replyToTgMessageId?: number | null;
+  /** 立刻标成「已消费」。用于引用注入：那条消息本轮就已经进上下文了，不能下一轮再被当背景认领一次。 */
+  claimed?: boolean;
 }
 
 /**
@@ -54,7 +58,7 @@ export function archiveQuery(raw: string): { fts: string } | { like: string } {
 
 const MESSAGE_COLUMNS = `m.id,m.chat_id AS chatId,m.message_thread_id AS messageThreadId,m.tg_message_id AS tgMessageId,m.direction,
   m.from_kind AS fromKind,m.from_user_id AS fromUserId,m.from_name AS fromName,m.from_username AS fromUsername,m.kind,m.text,m.tg_date AS tgDate,
-  m.triggered,m.trigger_reason AS triggerReason`;
+  m.triggered,m.trigger_reason AS triggerReason,m.turn_id AS turnId,m.reply_to_tg_message_id AS replyToTgMessageId`;
 const messageQuery = (prefix = '') => prefix ? MESSAGE_COLUMNS : MESSAGE_COLUMNS.replaceAll('m.', '');
 const withMedia = (row: ArchivedMessage | null): ArchivedMessage | null => {
   if (!row) return null;
@@ -93,14 +97,26 @@ export class ScopedArchiveRepository {
   append(input: AppendMessageInput): ArchivedMessage {
     const info = this.db.prepare(`INSERT OR IGNORE INTO messages(chat_id,message_thread_id,tg_message_id,tg_update_id,direction,from_kind,
       from_user_id,from_name,from_username,reply_to_tg_message_id,media_group_id,kind,text,raw_json,media_parts_json,tg_date,received_at,
-      triggered,trigger_reason,turn_id,revision) VALUES (@chatId,@messageThreadId,@tgMessageId,@tgUpdateId,@direction,@fromKind,
+      triggered,trigger_reason,turn_id,revision,claimed_at) VALUES (@chatId,@messageThreadId,@tgMessageId,@tgUpdateId,@direction,@fromKind,
       @fromUserId,@fromName,@fromUsername,@replyToTgMessageId,@mediaGroupId,@kind,@text,@rawJson,@mediaPartsJson,@tgDate,@receivedAt,
-      @triggered,@triggerReason,@turnId,@revision)`).run({ ...input, tgUpdateId: input.tgUpdateId ?? null,
+      @triggered,@triggerReason,@turnId,@revision,@claimedAt)`).run({ ...input, tgUpdateId: input.tgUpdateId ?? null,
         replyToTgMessageId: input.replyToTgMessageId ?? null, mediaGroupId: input.mediaGroupId ?? null,
         rawJson: JSON.stringify(redactArchivePayload(input.raw)), mediaPartsJson: input.mediaParts ? JSON.stringify(input.mediaParts) : null, receivedAt: Date.now(), triggered: input.triggered ? 1 : 0,
-        triggerReason: input.triggerReason ?? null, turnId: input.turnId ?? null, revision: input.revision ?? 0 });
+        triggerReason: input.triggerReason ?? null, turnId: input.turnId ?? null, revision: input.revision ?? 0,
+        // claimed_by_turn 留空：这条消息已经被消费掉了，但不属于任何在途轮次，abortTurn 的 releaseClaims 不该把它放回去。
+        claimedAt: input.claimed ? Date.now() : null });
     if (info.changes) return this.byId(Number(info.lastInsertRowid))!;
     return withMedia(this.db.prepare(`SELECT ${messageQuery()},media_parts_json AS mediaPartsJson FROM messages WHERE chat_id=? AND tg_message_id=? AND revision=?`).get(this.chatId, input.tgMessageId, input.revision ?? 0) as ArchivedMessage) !;
+  }
+
+  /** 最新 revision 的那一行：编辑过的消息会有多行，引用时要拿用户此刻看到的那一版。 */
+  byTgMessageId(tgMessageId: number): ArchivedMessage | null {
+    return withMedia(this.db.prepare(`SELECT ${messageQuery()},media_parts_json AS mediaPartsJson FROM messages
+      WHERE chat_id=? AND tg_message_id=? AND deleted_at IS NULL ORDER BY revision DESC LIMIT 1`).get(this.chatId, tgMessageId) as ArchivedMessage | undefined ?? null);
+  }
+
+  attachMedia(id: number, parts: unknown[]): void {
+    this.db.prepare('UPDATE messages SET media_parts_json=? WHERE id=?').run(JSON.stringify(parts), id);
   }
 
   byId(id: number): ArchivedMessage | null {

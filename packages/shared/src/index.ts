@@ -93,7 +93,72 @@ export interface RuntimeTurnContext {
    * 子 agent 必须把花费提交进同一份预留，否则日/月配额永远看不到它们（docs/20 · W-QUOTA-01）。
    */
   reservation?: { amount: number; committed: number; rows: unknown[] } | null;
+  /** openTurn 时快照下来的 `contexts.token_ratio`，让 appendDelta 与 buildTurn 用同一个系数。 */
+  tokenRatio?: number;
   config: Readonly<Record<string, unknown>>;
+}
+
+/**
+ * 全局唯一的 token 估算入口。此前是 `chars * 0.6 + 4`，对中文偏低、对英文/JSON 高出一倍以上 ——
+ * 拿 2026-08-16 的真实请求体回归（grok，六次调用）：`0.6 × 全部字符` 平均高估 65%，
+ * 而按字符类分档后落在真实值的 ±1%~6% 内。系数不是拍的，是拟合出来的：
+ *   tok=12991 → 12891 | tok=13113 → 13073 | tok=9644 → 9087
+ * 分档而不是单一系数是关键：同一个 0.6 没法同时描述「一个汉字≈0.8 token」和「一个 ASCII 字符≈0.3 token」，
+ * 而残余的分词器差异交给 `contexts.token_ratio` 校准（docs/02 §6）。
+ */
+const CJK = /[⺀-鿿豈-﫿︰-﹏＀-￯]/gu;
+function rawTextTokens(text: string): number {
+  const total = [...text].length;
+  const cjk = (text.match(CJK) ?? []).length;
+  return Math.ceil(0.8 * cjk + 0.3 * (total - cjk));
+}
+/**
+ * `+4` 是「一条消息」的框架开销（role、分隔符）。遍历 JSON 结构时**不能**逐字符串都加这一项 ——
+ * 工具 schema 里全是三五个字符的键名，每个都 +4 能把整段请求高估三成。而校准系数正是拿
+ * 「整段请求的估算」除出来的：估算器自带的常数偏差会被原样吸收进系数，再乘回到消息级估算上，
+ * 于是消息反过来被低估。所以结构遍历走 `rawTextTokens`，两个估算器共用同一把尺子。
+ */
+export function estimateTextTokens(text: string): number {
+  return rawTextTokens(text) + 4;
+}
+
+/** 图片没有尺寸信息时的兜底估值：1568px 长边、JPEG q85 归一化之后的典型量级。 */
+export const IMAGE_TOKEN_ESTIMATE = 1500;
+const OPAQUE_PAYLOAD_TYPES = new Set(['image', 'image_url', 'input_image', 'file', 'input_file']);
+/** base64 载荷不能按字符估：一张图 40 万字符，`chars × 系数` 会算出几十万 token 的假水位。 */
+function opaquePayload(value: string): boolean {
+  return value.length > 2048 && (value.startsWith('data:') || /^[A-Za-z0-9+/\s]+={0,2}$/.test(value.slice(0, 4096)));
+}
+export function estimatePartTokens(part: unknown): number {
+  if (!part || typeof part !== 'object') return estimateTextTokens(String(part ?? ''));
+  const value = part as Record<string, unknown>;
+  if (typeof value.text === 'string') return estimateTextTokens(value.text);
+  if (typeof value.type === 'string' && OPAQUE_PAYLOAD_TYPES.has(value.type)) {
+    const width = typeof value.width === 'number' ? value.width : 0;
+    const height = typeof value.height === 'number' ? value.height : 0;
+    return width && height ? Math.max(256, Math.ceil(width * height / 750)) : IMAGE_TOKEN_ESTIMATE;
+  }
+  return estimateStructureTokens(part);
+}
+export function estimateMessageTokens(parts: readonly unknown[]): number {
+  return parts.reduce<number>((sum, part) => sum + estimatePartTokens(part), 0);
+}
+/**
+ * 任意 JSON 结构（请求体、工具 schema、tool-result）的估值。遍历而不是 `JSON.stringify(...).length`：
+ * 序列化会把 base64 图片也算进去，而这正是 `estimateModelMessages` 曾经把一张图算成几万 token、
+ * 每一步都白白触发 in-flight 裁剪的成因。
+ */
+export function estimateStructureTokens(value: unknown, depth = 0): number {
+  if (value === null || value === undefined) return 1;
+  if (typeof value === 'string') return opaquePayload(value) ? IMAGE_TOKEN_ESTIMATE : rawTextTokens(value) + 1;
+  if (typeof value === 'number' || typeof value === 'boolean') return 1;
+  if (depth > 12) return 2;
+  if (Array.isArray(value)) return 1 + value.reduce<number>((sum, entry) => sum + estimateStructureTokens(entry, depth + 1), 0);
+  if (typeof value === 'object') {
+    return 1 + Object.entries(value as Record<string, unknown>).reduce<number>(
+      (sum, [key, entry]) => sum + rawTextTokens(key) + 1 + estimateStructureTokens(entry, depth + 1), 0);
+  }
+  return 2;
 }
 
 export const untrusted = (source: string, text: string, nonce = randomBytes(6).toString('hex')): string => {

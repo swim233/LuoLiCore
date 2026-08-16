@@ -4,7 +4,7 @@ import { dirname, join, resolve } from 'node:path';
 import { createTwoFilesPatch } from 'diff';
 import { ulid } from 'ulid';
 import type { Role } from '@luoli/shared';
-import { roleRank } from '@luoli/shared';
+import { estimateTextTokens, roleRank } from '@luoli/shared';
 import type { Sqlite } from '@luoli/db';
 
 interface MemoryDocument {
@@ -26,9 +26,9 @@ interface PendingWrite {
   userId: string;
 }
 
-function estimateTokens(content: string): number {
-  return Math.ceil([...content].length * 0.6) + 4;
-}
+// 与上下文、提示词共用同一把尺子：记忆的软/硬上限是按 token 写的配置，估算器不一致时
+// 「还剩多少额度」在两个页面上会给出两个数（docs/06 §3）。
+const estimateTokens = estimateTextTokens;
 
 function normalized(content: string): string {
   return content.toLocaleLowerCase().replace(/[\s\p{P}\p{S}]/gu, '');

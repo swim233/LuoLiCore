@@ -8,7 +8,7 @@ type V4LanguageModel = Exclude<LanguageModel, string> & { specificationVersion: 
 import type { Config } from '../config/schema.js';
 import type { Sqlite } from '@luoli/db';
 import { modelAliasKey, readAppKv } from '@luoli/db';
-import type { RuntimeTurnContext } from '@luoli/shared';
+import { estimateStructureTokens, type RuntimeTurnContext } from '@luoli/shared';
 import type { PromptAssembler, PromptDocuments } from '../index.js';
 import { runtimeBlock, type PromptBuildResult } from '../prompt/assembler.js';
 import type { ToolExecutionContext, ToolRegistry } from '../tools/registry.js';
@@ -242,13 +242,22 @@ export function assembleMainPrompt(turn: RuntimeTurnContext, dependencies: Promp
   return { ...dependencies.prompts.build(promptInput), activeTools, catalog, runtime };
 }
 
-function cachedInstructions(text: string, providerKind: string): Instructions {
-  if (providerKind !== 'anthropic') return text;
-  return { role: 'system', content: text, providerOptions: { anthropic: { cacheControl: { type: 'ephemeral' } } } };
+/**
+ * 系统提示词拆成两条：稳定段（KERNEL/CHARACTER/ASSIST/TOOL CATALOG）与易变段（记忆 + RUNTIME）。
+ * 缓存断点只打在稳定段上 —— 之前整段带着分钟精度的时钟一起进缓存，等于每分钟作废一次
+ * （实测跨轮只命中 128 token，同一轮内前缀不变时命中 12,672，docs/06 §1）。
+ * AI SDK 的 `Instructions` 支持 SystemModelMessage 数组：Anthropic 会转成两个带独立 cache_control
+ * 的 system text block，其余 provider 转成两条 system 消息，顺序保持不变。
+ */
+function splitInstructions(prompt: { stable: string; volatile: string }, providerKind: string): Instructions {
+  const stable = providerKind === 'anthropic'
+    ? { role: 'system' as const, content: prompt.stable, providerOptions: { anthropic: { cacheControl: { type: 'ephemeral' } } } }
+    : { role: 'system' as const, content: prompt.stable };
+  return [stable, { role: 'system' as const, content: prompt.volatile }];
 }
 
 function estimateModelMessages(messages: ModelMessage[]): number {
-  return Math.ceil([...JSON.stringify(messages)].length * 0.6) + 4;
+  return estimateStructureTokens(messages);
 }
 
 function bodyForLog(value: unknown, enabled: boolean): unknown {
@@ -277,7 +286,6 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
   // 预算被 catalog + runtime 吃满时 CHARACTER.md 会被整段截成一句「（记忆已截断…）」——
   // 人格静默消失，而日志里一个字都没有（docs/20 · W-PROMPT-01）。
   if (prompt.truncated.length) dependencies.log.event({ level: 'warn', kind: 'prompt.truncated', summary: `Prompt blocks truncated: ${prompt.truncated.join(', ')}`, traceId: turn.turnId, key: turn.key, data: { truncated: prompt.truncated, blocks: prompt.blocks, maxTokens: dependencies.config.prompt.maxTokens } });
-  const instructionText = prompt.instructions;
   const toolSet: ToolSet = {};
   for (const registered of dependencies.tools.active(turn.effectiveRole, toolContext)) {
     toolSet[registered.name] = tool({ description: registered.description, inputSchema: registered.inputSchema, execute: (input) => dependencies.tools.execute(registered.name, input, toolContext) });
@@ -322,7 +330,7 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
     return built;
   };
   const model = wrappedFor(alias);
-  const instructions = cachedInstructions(instructionText, dependencies.db.prepare('SELECT kind FROM providers WHERE id=?').pluck().get(initialInfo.providerId) as string ?? '');
+  const instructions = splitInstructions(prompt, dependencies.db.prepare('SELECT kind FROM providers WHERE id=?').pluck().get(initialInfo.providerId) as string ?? '');
   const stepSpans = new Map<number, { id: string; end: (data?: unknown, error?: unknown) => void }>();
   const stepAlias = new Map<number, string>();
   const agent = new ToolLoopAgent({ model, instructions, tools: toolSet, activeTools: activeNames,
@@ -379,9 +387,19 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
       stepSpans.get(step.stepNumber)?.end({ model: step.model, usage: step.usage, cost, request: bodyForLog(step.request, dependencies.config.logs.captureBodies), response: bodyForLog(step.response, dependencies.config.logs.captureBodies) });
       for (const call of step.toolCalls) dependencies.context.appendDelta(turn, { id: `call:${call.toolCallId}`, role: 'assistant', origin: 'tool_call', parts: [{ type: 'tool-call', toolCallId: call.toolCallId, toolName: call.toolName, input: call.input }], textPreview: `${call.toolName}(${JSON.stringify(call.input).slice(0, 180)})`, pruneLevel: 2 });
       for (const result of step.toolResults) dependencies.context.appendDelta(turn, { id: `result:${result.toolCallId}`, role: 'tool', origin: 'tool_result', parts: [toolResultPart(result.toolCallId, result.toolName, result.output)], textPreview: `${result.toolName}: ${JSON.stringify(result.output).slice(0, 180)}`, pruneLevel: 1 });
-      const estimatedInput = Math.max(1, turn.snapshot.tokens + turn.delta.reduce((sum, message) => sum + (message.tokens ?? 0), 0));
-      const ratio = dependencies.context.calibrate(turn.key, step.usage.inputTokens ?? 0, estimatedInput, dependencies.config.context.tokenRatioAlpha);
-      if (Math.abs((step.usage.inputTokens ?? 0) / estimatedInput - 1) > 0.2) dependencies.log.event({ level: 'warn', kind: 'ctx.token_calibration', summary: `token ratio ${ratio.toFixed(3)}`, traceId: turn.turnId, key: turn.key, data: { estimatedInput, realInput: step.usage.inputTokens ?? 0, ratio } });
+      // 校准的两端必须是同一个东西。此前左边是「窗口内消息的估算」、右边是 `usage.inputTokens`
+      // ——后者还含着系统提示词与全部工具 schema（本机实测约 12,000 token 里有 9,500 是这两样）。
+      // 首轮空上下文时左边只有几十，一次采样就把 ratio 推到 26，此后每条消息按 26 倍存进库
+      // （logs/2026-08-16 的 ctx.token_calibration 记录了这条曲线）。改成拿真正发出去的整个
+      // 请求体来估：同一把尺子量同一段内容，得到的才是分词器差异本身。
+      const requestBody = (step.request as { body?: unknown } | undefined)?.body;
+      const estimatedInput = requestBody === undefined ? 0 : estimateStructureTokens(requestBody);
+      const realInput = step.usage.inputTokens ?? 0;
+      // 小样本的相对误差被常数项主导，校准它只会引入噪声。
+      if (estimatedInput >= 200 && realInput > 0) {
+        const ratio = dependencies.context.calibrate(turn.key, realInput, estimatedInput, dependencies.config.context.tokenRatioAlpha);
+        if (Math.abs(realInput / estimatedInput - 1) > 0.2) dependencies.log.event({ level: 'warn', kind: 'ctx.token_calibration', summary: `token ratio ${ratio.toFixed(3)}`, traceId: turn.turnId, key: turn.key, data: { estimatedInput, realInput, ratio } });
+      }
     },
   });
   try {

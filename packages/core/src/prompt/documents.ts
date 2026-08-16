@@ -4,6 +4,7 @@ import { dirname, join, resolve } from 'node:path';
 import { ulid } from 'ulid';
 import { applyPatch, createTwoFilesPatch, parsePatch, reversePatch } from 'diff';
 import type { Sqlite } from '@luoli/db';
+import { estimateTextTokens } from '@luoli/shared';
 
 interface PromptPaths {
   character: string;
@@ -23,7 +24,7 @@ export class PromptDocuments {
       const now = Date.now();
       this.db.prepare(`INSERT INTO memory_docs(id,scope,subject,path,bytes,tokens,content_hash,updated_at) VALUES (?,?,?,?,?,?,?,?)
         ON CONFLICT(id) DO UPDATE SET path=excluded.path,bytes=excluded.bytes,tokens=excluded.tokens,content_hash=excluded.content_hash,updated_at=excluded.updated_at`).run(
-        id, scope, null, path, Buffer.byteLength(content), Math.ceil([...content].length * 0.6) + 4, createHash('sha256').update(content).digest('hex'), now);
+        id, scope, null, path, Buffer.byteLength(content), estimateTextTokens(content), createHash('sha256').update(content).digest('hex'), now);
     }
   }
 
@@ -56,7 +57,7 @@ export class PromptDocuments {
     renameSync(temporary, path);
     const id = `${scope}:${userId ?? 'global'}`;
     const now = Date.now();
-    const tokens = Math.ceil([...content].length * 0.6) + 4;
+    const tokens = estimateTextTokens(content);
     const hash = createHash('sha256').update(content).digest('hex');
     this.db.prepare(`INSERT INTO memory_docs(id,scope,subject,path,bytes,tokens,content_hash,updated_at) VALUES (?,?,?,?,?,?,?,?)
       ON CONFLICT(id) DO UPDATE SET bytes=excluded.bytes,tokens=excluded.tokens,content_hash=excluded.content_hash,updated_at=excluded.updated_at`).run(id, scope, userId, path, Buffer.byteLength(content), tokens, hash, now);

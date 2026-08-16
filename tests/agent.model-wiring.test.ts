@@ -68,6 +68,25 @@ function harness(name: string, patch: Partial<Config> = {}) {
 }
 
 describe('model wiring through prepareStep', () => {
+  // 缓存边界的端到端断言：走完整条 runMainAgent，看真正递到模型那一层的是什么。
+  // 只断言 PromptAssembler 的输出不够 —— 中间还隔着 `Instructions` 数组、AI SDK 的 standardizePrompt
+  // 和 prepareStep 的每步重设，任何一环把两段合回一条，改动就白做了（docs/06 §1）。
+  it('sends the volatile block as a separate system message so the cached prefix stays byte-identical', async () => {
+    const { db, turn, dependencies } = harness('wiring-prompt-cache');
+    const prompts: Array<Array<{ role: string; content: unknown }>> = [];
+    const registry = registryFor({ main: [{ model: { ...candidate('first', () => ok),
+      doGenerate: async (options: { prompt: Array<{ role: string; content: unknown }> }) => { prompts.push(options.prompt); return ok as never; } } as ReturnType<typeof candidate>, info: info('first') }] });
+    await runMainAgent(turn, { ...dependencies, registry });
+    const system = prompts[0]!.filter((message) => message.role === 'system').map((message) => String(message.content));
+    expect(system).toHaveLength(2);
+    expect(system[0]).toContain('=== KERNEL ===');
+    // 每轮都变的那三块一个字都不能落在缓存段里 —— 分钟精度的时钟就够让整段前缀作废。
+    for (const header of ['=== RUNTIME ===', '=== PUBMEMORY ===', '=== PRIMEMORY ===']) expect(system[0]).not.toContain(header);
+    expect(system[1]).toContain('=== RUNTIME ===');
+    expect(system[1]).toContain('现在：');
+    closeDatabase(db);
+  });
+
   it('still falls back to the next candidate even though prepareStep resets the model', async () => {
     const { db, turn, dependencies } = harness('wiring-fallback');
     let firstCalls = 0;

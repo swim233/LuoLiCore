@@ -159,6 +159,28 @@ describe('context → AI SDK contract', () => {
     closeDatabase(db);
   });
 
+  // 缓存边界靠「两条 system 消息」实现（稳定段带 cacheControl，易变段不带）。这条契约同样在
+  // AI SDK 那一侧：`Instructions` 允许数组，但只有它真的把两段按序、连同 providerOptions 一起
+  // 递给 provider，断点才落在我们以为的位置上 —— 否则改完只是把 RUNTIME 换了个地方拼。
+  it('passes both system blocks through in order with per-block provider options', async () => {
+    const seen: Array<{ role: string; content: unknown; providerOptions?: unknown }> = [];
+    const capturing = new MockLanguageModelV4({
+      doGenerate: async (options) => {
+        for (const message of options.prompt) if (message.role === 'system') seen.push(message as unknown as { role: string; content: unknown });
+        return { content: [{ type: 'text', text: 'ok' }], finishReason: { unified: 'stop', raw: 'stop' },
+          usage: { inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 1, text: 1, reasoning: 0 } }, warnings: [] };
+      },
+    });
+    const agent = new ToolLoopAgent({ model: capturing, instructions: [
+      { role: 'system', content: '稳定段', providerOptions: { anthropic: { cacheControl: { type: 'ephemeral' } } } },
+      { role: 'system', content: '易变段' },
+    ] });
+    await agent.generate({ messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }] });
+    expect(seen.map((message) => message.content)).toEqual(['稳定段', '易变段']);
+    expect(seen[0]!.providerOptions).toMatchObject({ anthropic: { cacheControl: { type: 'ephemeral' } } });
+    expect(seen[1]!.providerOptions).toBeUndefined();
+  });
+
   // 兜底那一层：库里已经有 role='system' 的历史行时（0006 迁移之前写入的），读出侧仍要能发出去。
   it('downgrades legacy system rows instead of letting the provider reject the turn', async () => {
     const { db, archive, engine } = harness('contract-legacy');

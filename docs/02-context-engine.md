@@ -227,6 +227,25 @@ t=3s  A commit: REBASE → ordinals 7,8, parent=c002
 - `from_kind = 'user'`（bot 消息不认领；`triggered=1` 的消息即触发消息本身，单独处理）
 - 发送者 `effective role ≠ blocked`（被拉黑者的发言不进上下文，但仍归档）
 
+### 4.1.1 被回复的消息（引用注入）
+
+背景认领**够不着被回复的那条消息**：它的范围只有 `(claim_watermark, trigger.id]`，而被回复的消息
+通常更早、可能已被认领过、也可能从未归档（发送者是 blocked、是别的 bot、或发在 bot 入群之前）。
+所以「回复一张图 + 唤醒词」这个最常见的多模态用法，模型此前看到的只有那句话，没有图。
+
+因此 `openTurn` 接受一个可选的 `quoted: ArchivedMessage`（适配层负责取到它，见
+[08 §7.4](./08-telegram-adapter.md)）。引擎的职责是**去重**与**渲染**：
+
+- 已经看得见就不注入。三种「已经看得见」：窗口里有 `sourceMessageId === quoted.id` 的消息；
+  本轮刚认领了它；它是 bot 某一轮的产出而那一轮的消息还在窗口里（bot 消息不带 `source_message_id`，
+  只能靠 `turn_id` 反查 —— 判错的代价是每次「回复 bot」都把它上一句原样再贴一遍）。
+- 注入位置在背景消息之后、触发消息之前：它是这一句话的直接语境。
+- 渲染成 `origin='background'`，前缀 `[↩︎ 被回复的消息 <名字> HH:mm]`。**私聊也带前缀**——
+  私聊没有 `[名字 时间]`，不标的话模型看到的是「用户连发了两条」，而不是「用户指着上面那条问」。
+  半角方括号是有意的：`escapeForgedSpeakerPrefixes` 会把正文里形如 `[… H:MM]` 的串改写成全角，
+  这个前缀因此与 `[名字 时间]` 共用同一条防伪规则（用全角写反而会与「已被转义」的形态撞上）。
+- 它连同自己的 media part 一起进 delta，因此会被提交进上下文：之后几轮里模型仍看得见那张图。
+
 ### 4.2 条数上限与丢弃
 
 `cfg.context.background.maxPerTurn`（默认 20，D6 需求方明确要求可配置）。超出时**丢最旧**，并在 delta 首部插入一条 `origin='note'`：
@@ -249,7 +268,7 @@ t=3s  A commit: REBASE → ordinals 7,8, parent=c002
 - 显示名优先级：`first_name last_name` → `@username` → `user:<id>`。
 - `background.showUsername`（默认 `true`）决定是否附 `@username`。
 - `background.showTime`（默认 `true`）：`HH:mm`，时区取 `general.timezone`。
-- 引用回复：附 `↩︎回复 <被回复者显示名>`；若被回复消息也在当前窗口内，附其 ordinal：`↩︎回复 #3`。
+- 引用回复：附 `↩︎回复 <被回复者显示名>`；若被回复消息也在当前窗口内，附其 ordinal：`↩︎回复 #3` 🚧（ordinal 形式未实现）。
 - 非文本消息渲染为占位符：`[图片]`（附 caption）、`[文档 report.pdf 1.2MB]`、`[语音 12s]`、`[贴纸 😄]`、`[视频 0:34]`。图片/文档若被解析（[08 §7](./08-telegram-adapter.md#7-多模态)）则同时携带真正的 multimodal part。
 - **相邻的同类背景消息合并进同一个 `user` message 的多个 text part**？→ **不合并**。每条原始消息一行 `context_messages`，便于精确裁剪与溯源（`source_message_id`）。
 
@@ -347,9 +366,41 @@ prepareStep: async ({ messages, model }) => {
 
 ### 5.5 Token 估算与校准
 
-- 估算器：`tokenizer.ts` 用 `gpt-tokenizer`/`js-tiktoken` 的 `o200k_base` 作通用近似；CJK 按 `chars * 0.6 + 4` 的经验式作为兜底（无 tokenizer 时）。
-- **校准**：每次真实 API 返回 `usage.inputTokens` 后，与本地估算比对，把 `ratio = real/estimated` 以指数移动平均（α=0.2）存入 `contexts.token_ratio`，后续估算乘以该系数。日志记录偏差 >20% 的情况。
+估算器与校准是同一件事的两半，写在一起是因为**它们的量纲必须对齐**——这条对齐关系断过一次，
+把整条裁剪链路推高了一个数量级（见下方「已修复的失效模式」）。
+
+**估算器**（`@luoli/shared` 的 `estimateTextTokens`，全局唯一入口）：
+
+- 按字符类分档：`ceil(0.8 × CJK字符数 + 0.3 × 其他字符数) + 4`。系数由真实请求体回归得出
+  （2026-08-16，grok，六次调用：真实 12,991 / 13,113 / 9,644 token，估算落在 ±1%~6%）。
+- **单一系数做不到**：同一个 `chars × 0.6` 没法同时描述「一个汉字≈0.8 token」与「一个 ASCII 字符≈0.3 token」，
+  对混合内容整体高估约 65%。
+- 非文本 part 走 `estimatePartTokens`：图片按 `w*h/750`，无尺寸时固定 1500；其余结构按 JSON 遍历估。
+  **base64 载荷绝不按字符估**——一张图 40 万字符，按字符算是几十万 token 的假水位。
+- 记忆文档（`memory_docs.tokens`）、提示词块预算、上下文水位共用这一个函数：不一致的话
+  「还剩多少额度」在两个页面上会给出两个数。
+- `estimateTextTokens` 的 `+4` 是**一条消息**的框架开销；`estimateStructureTokens` 遍历 JSON 时
+  走不带这一项的内部版本。两者必须同尺 —— 校准系数是拿「整段请求的估算」除出来的，估算器自带的
+  常数偏差会被原样吸收进系数、再乘回消息级估算。实测：逐字符串 +4 让工具 schema（全是三五个字符的
+  键名）整体高估三成，系数跌到 0.74，消息因此被反向低估四分之一；同尺之后系数是 0.89~0.94。
+
+**校准**（`contexts.token_ratio`，α = `context.tokenRatioAlpha`，默认 0.2）：
+
+- 两端必须是**同一段内容**：右边取 `usage.inputTokens`，左边就必须取**整个请求体**的估算
+  （`estimateStructureTokens(step.request.body)`），而不是「窗口内消息的估算」。
+- `estimated < 200` 时跳过采样：小样本的相对误差被常数项主导，校准它只会引入噪声。
+- 系数被夹在 `[0.5, 2]`，单次采样值先夹在 `[0.25, 4]`。它只用来吸收分词器差异，不该有更大的量级。
+- 系数在 `openTurn` 时快照到 `turn.tokenRatio`，`buildTurn` 与 `appendDelta` 共用它 ——
+  只缩放其中一半，窗口里就会同时存在两种量纲的 tokens。
 - `context.limit.tokens` 的判定使用**校准后**的估算值。
+
+**已修复的失效模式**（logs/2026-08-16 实测，回归见 `tests/tokens.estimate.test.ts`）：
+左边曾是「窗口内消息的估算」、右边是含系统提示词与工具 schema 的真实用量（本机约 12,000 token
+里有 9,500 是这两样）。首轮空上下文时左边只有几十，一次采样把 ratio 推到约 26，而 `tokens` 是
+持久化的 —— 此后每条消息按 26 倍存库，水位虚高一个数量级，裁剪提前触发，RUNTIME 里报给模型的
+「上下文水位」也跟着错。修复同时附带一次性数据修复（`recomputeMessageTokens`，`app_kv` 标记只跑一次）：
+按新估算器重算 `context_messages.tokens` 并把所有 `token_ratio` 归 1。`context_commits` 不动
+（不可变），其 `tokens_total` 只用于展示，下一次提交按 `effectiveStats` 自然重算。
 
 ---
 
@@ -464,3 +515,14 @@ export interface CommitResult {
     `contextMessages()` 再对历史坏数据兜一层降级（迁移 `0006` 已把库里的存量改回 `user`）。
     **不变量要从下游契约推导，而不是自己定义**：`tests/context.contract.test.ts` 把引擎产出的上下文
     真的交给 `ToolLoopAgent`，这类「本地自洽、交出去被拒」的缺陷只有跨过那一跳才抓得住。
+17. ✅ **token 估算与校准的两端必须是同一段内容。** 右边是 `usage.inputTokens`（含系统提示词与
+    全部工具 schema），左边就必须是**整个请求体**的估算，不能是「窗口内消息的估算」。这条断过一次：
+    首轮空上下文时左边只有几十、右边上万，一次采样把 `token_ratio` 推到约 26，而 `tokens` 是持久化的
+    —— 此后每条消息按 26 倍存库，水位虚高一个数量级、裁剪提前触发、RUNTIME 报给模型的水位也跟着错。
+    另有三条配套：base64 载荷绝不按字符估（一张图 40 万字符）；系数夹在 `[0.5, 2]`；同一轮里
+    `buildTurn` 与 `appendDelta` 用同一个系数（只缩放其中一半，窗口里就会有两种量纲）。见 §5.5。
+18. ✅ **被回复的消息要么已经在模型眼前，要么被注入，不能两者都不是、也不能重复。** 背景认领只覆盖
+    `(claim_watermark, trigger.id]`，够不着被回复的消息；而它可能从未归档（发送者 blocked / 别的 bot /
+    bot 入群之前）。去重的三种「已经看得见」见 §4.1.1 —— 其中 bot 自己的产出只能靠 `turn_id` 反查，
+    漏判的表现是每次「回复 bot」都把它上一句原样再贴一遍。补写进归档的那一行必须带 `claimed_at`，
+    否则下一轮会把它当成新的背景发言再认领一次。

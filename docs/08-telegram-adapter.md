@@ -310,6 +310,30 @@ media:
 - 期间同组消息合并；
 - 超时后作为**一条逻辑消息**继续管线（`messages` 仍逐条入库，触发判定用带 caption 的那条，上下文里合并为一条 `user` 消息含多个 image part）。
 
+### 7.4 回复中的媒体（被回复消息的取回）
+
+「回复一张图 + 唤醒词」是多模态最常见的用法，而它以前 100% 拿不到图：上下文只有窗口 + 背景认领，
+被回复的那条消息**两条路都够不着**（[02 §4.1.1](./02-context-engine.md)）。实测更极端 ——
+`access.defaultUserRole=blocked` 的群里，别人发的图从来不进归档（logs/2026-08-16：被回复的
+183757 / 183862 / 183865 三条图，`messages` 表里一条都没有）。
+
+关键事实：Telegram 的 update **自带被回复消息的完整副本**（含 `file_id`），所以「库里没有」
+不等于「拿不到」。触发消息归档之后（且触发原因不是 `command`）：
+
+1. `reply_to_message.chat.id` 与当前 chat 不同（关联频道、`external_reply`）→ 不取，拉进来只会污染这个 context key。
+2. 库里已有该 `tg_message_id`（取最新 revision）→ 直接复用；已有 media part 就不重复下载。
+3. 库里没有 → 用 update 里那份副本现场归档，再跑一遍 `TelegramMedia.process` 下载并归一化它的媒体。
+   这一行落库时直接标 `claimed_at`（`claimed_by_turn` 留空）：本轮就把它送进上下文了，
+   下一轮 `claimBackground` 不能再把它当新的背景发言认领一次，而 `abortTurn` 的 `releaseClaims` 也不该把它放回去。
+4. 被回复者的显示名挂到触发消息上（`replyToName`，不落库），渲染成群聊前缀里的 `↩︎回复 <名字>`。
+
+> 这条路径会把 blocked 用户发的图片落进 `attachments` —— 与 `access.archiveBlocked=false` 的取向
+> 相反，但触发它的是 owner 自己「回复这条消息并唤醒 bot」的动作，是显式的、单条的引用，
+> 而不是持续归档。
+
+`messages.reply_to_tg_message_id` / `media_group_id` 两列建表时就有，此前从未写入；现在两条路径
+（触发消息与被回复消息）都写。
+
 ---
 
 ## 8. 命令
