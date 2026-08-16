@@ -10,6 +10,7 @@ import { roleRank } from '@luoli/shared';
 import { contextKey, modelAliasKey, readAppKv, writeAppKv } from '@luoli/db';
 import { matchTrigger } from './trigger.js';
 import { holdReply, sendWithFallback, splitTelegramText } from './output.js';
+import { attachMedia, messageKind, resolveQuotedMessage } from './reply.js';
 
 export interface TelegramDependencies {
   config: Readonly<Config> | ConfigStore;
@@ -32,10 +33,6 @@ export interface TelegramDependencies {
   botInfo?: UserFromGetMe;
 }
 
-function messageKind(message: Record<string, unknown>): string {
-  const ordered = ['text', 'photo', 'document', 'voice', 'video', 'video_note', 'sticker', 'animation', 'audio', 'location', 'poll'];
-  return ordered.find((key) => key in message) ?? 'other';
-}
 // 运维态失败（模型没配、缺定价）不能并进「出了点问题」：用户重试多少次都不会好，
 // 得说清楚该由谁去做什么（docs/08 §9）。其余错误仍不暴露内部细节，只给 ref。
 function failureText(error: unknown, reference: string): string {
@@ -50,6 +47,7 @@ function failureText(error: unknown, reference: string): string {
 }
 interface TelegramIngress {
   archived: ArchivedMessage;
+  quoted: ArchivedMessage | null;
   effectiveRole: Role;
   userId: string;
   chatId: string;
@@ -98,24 +96,26 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
     const triggerReason = matchTrigger(ctx, { ...triggerConfig, strictCommandSuffix: config.telegram.strictCommandSuffix }, bot.botInfo.id, bot.botInfo.username);
     dependencies.log.event({ level: 'debug', kind: triggerReason ? 'trigger.matched' : 'trigger.skipped', summary: triggerReason ?? 'not triggered', chatId, userId, data: { reason: triggerReason } });
     let archived: ArchivedMessage | null = null;
+    let quoted: ArchivedMessage | null = null;
     if (effectiveRole !== 'blocked' || config.access.archiveBlocked) {
-      archived = dependencies.archive.scope(chatId, message.message_thread_id ?? null).append({ chatId, messageThreadId: message.message_thread_id ?? null, tgMessageId: message.message_id,
+      const scoped = dependencies.archive.scope(chatId, message.message_thread_id ?? null);
+      archived = scoped.append({ chatId, messageThreadId: message.message_thread_id ?? null, tgMessageId: message.message_id,
         tgUpdateId: ctx.update.update_id, direction: 'in', fromKind: 'user', fromUserId: userId,
         fromName: [from.first_name, from.last_name].filter(Boolean).join(' '), fromUsername: from.username ?? null,
         kind: messageKind(message as unknown as Record<string, unknown>), text: message.text ?? message.caption ?? null,
+        // reply_to / media_group 的列建表时就有，但一直没人往里写 —— 「回复了谁」是这条消息语义的一部分，
+        // 丢了它，事后无论从库里还是从上下文里都看不出用户当时在指着哪一条说话。
+        replyToTgMessageId: message.reply_to_message?.message_id ?? null, mediaGroupId: message.media_group_id ?? null,
         tgDate: message.date * 1000, raw: message, triggered: triggerReason !== null, triggerReason });
-      const mediaParts = await media.process(message as unknown as Record<string, unknown>, archived);
-      if (mediaParts.length) {
-        archived.mediaParts = mediaParts;
-        dependencies.db.prepare('UPDATE messages SET media_parts_json=? WHERE id=?').run(JSON.stringify(mediaParts), archived.id);
-      }
+      await attachMedia(media, scoped, message, archived);
+      if (triggerReason !== null && triggerReason !== 'command') quoted = await resolveQuotedMessage({ media, botId: bot.botInfo.id }, scoped, message, archived);
     }
     if (effectiveRole === 'blocked') {
       dependencies.log.event({ level: 'info', kind: 'access.denied', summary: 'blocked principal', chatId, userId, data: { userRole, chatRole: storedChatRole } });
       return;
     }
     if (!archived) return;
-    ingress.set(ctx.update.update_id, { archived, effectiveRole, userId, chatId, isPrivate, triggerReason });
+    ingress.set(ctx.update.update_id, { archived, quoted, effectiveRole, userId, chatId, isPrivate, triggerReason });
     try { await next(); } finally { ingress.delete(ctx.update.update_id); }
   });
   const requireRole = async (updateId: number, minimum: Role, reply: (text: string) => Promise<unknown>): Promise<TelegramIngress | null> => {
@@ -312,7 +312,7 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
     const from = ctx.from;
     const chat = ctx.chat;
     if (!from || !chat) return;
-    const { userId, chatId, effectiveRole, archived, triggerReason } = access;
+    const { userId, chatId, effectiveRole, archived, quoted, triggerReason } = access;
     const message = ctx.message;
     if (!triggerReason || triggerReason === 'command') return;
     if (!dependencies.quota.canStart({ chatId, userId, turnsPerUserPerHour: config.quota.rateLimit.turnsPerUserPerHour,
@@ -324,7 +324,9 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
 
     const key = contextKey({ chatId, messageThreadId: message.message_thread_id ?? null }, config.context.scope);
     const roleLimits = config.quota.perUser.byRole[effectiveRole];
-    const estimatedTokens = Math.max(config.context.limit.tokens / 4, 1000);
+    // 预留额按「这一轮大概会发出去多少」估：窗口现有水位 + 系统提示词的预算上限。
+    // 之前是 `limit.tokens / 4` 这个与本会话无关的常数，空会话高估、长会话严重低估（docs/17 · N-QUOTA-01）。
+    const estimatedTokens = Math.max(dependencies.context.windowTokens(key) + config.prompt.maxTokens, 1000);
     const modelEstimate = dependencies.estimateTurnCost?.(estimatedTokens, key) ?? null;
     if (config.quota.enabled && config.quota.requirePricing && effectiveRole !== 'owner' && modelEstimate === null) { await ctx.reply('当前模型缺少定价，无法开始对话。'); return; }
     const reservation = config.quota.enabled ? dependencies.quota.reserve({ chatId, userId,
@@ -352,7 +354,8 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
     let turn: RuntimeTurnContext;
     try {
       turn = await dependencies.context.openTurn({ chatId, threadId: message.message_thread_id ?? null, key, initiatorUserId: userId,
-        effectiveRole, isPrivate: chat.type === 'private', trigger: archived, abortSignal: pending.controller.signal, config: perChatConfig(currentConfig(), key) });
+        effectiveRole, isPrivate: chat.type === 'private', trigger: archived, ...(quoted ? { quoted } : {}),
+        abortSignal: pending.controller.signal, config: perChatConfig(currentConfig(), key) });
       dependencies.registry.finish(pendingId);
       const tracked = dependencies.registry.register({ id: turn.turnId, key, chatId, userId, role: effectiveRole }, config.concurrency.turnTimeoutMs);
       Object.assign(turn, { abortSignal: tracked.controller.signal });

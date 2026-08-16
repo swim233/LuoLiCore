@@ -4,13 +4,14 @@ import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { serve } from '@hono/node-server';
 import { zodToJsonSchema } from 'zod-to-json-schema';
-import { ArchiveRepository, OperationsRepository, PrincipalRepository, TurnRepository, closeDatabase, migrateDatabase, modelAliasKey, openDatabase, readAppKv, readPersistedConfig, recoverAfterCrash } from '@luoli/db';
-import { AgentManager, AgentResultStore, ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, FileTools, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, ModelRegistry, PathJail, PluginManager, PromptAssembler, PromptDocuments, ProviderStore, QuotaGuard, Sandbox, Scheduler, Secrets, SkillLoader, TOOL_POLICY, ToolRegistry, TurnConcurrency, TurnRegistry, UsageLedger, assembleMainPrompt, configSchema, loadConfig, perChatConfig, registerBuiltins, rejectedWakewords, runSubAgent, streamMainAgent, type SubAgentRuntimeEvent } from '@luoli/core';
+import { ArchiveRepository, OperationsRepository, PrincipalRepository, TurnRepository, closeDatabase, migrateDatabase, modelAliasKey, openDatabase, readAppKv, readPersistedConfig, recomputeMessageTokens, recoverAfterCrash, writeAppKv } from '@luoli/db';
+import { AgentManager, AgentResultStore, ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, FileTools, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, ModelRegistry, PathJail, PluginManager, PromptAssembler, PromptDocuments, ProviderStore, QuotaGuard, Sandbox, Scheduler, Secrets, SkillLoader, STABLE_PROMPT_BLOCKS, TOOL_POLICY, ToolRegistry, TurnConcurrency, TurnRegistry, UsageLedger, assembleMainPrompt, configSchema, loadConfig, perChatConfig, registerBuiltins, rejectedWakewords, runSubAgent, streamMainAgent, type SubAgentRuntimeEvent } from '@luoli/core';
 import { createServer, setupToken, type PromptPreviewResult } from '@luoli/server';
 import type { RuntimeTurnContext } from '@luoli/shared';
 import { createTelegramBot } from '@luoli/telegram';
 
 const startedAt = Date.now();
+const TOKEN_REPAIR_KEY = 'repair:context-tokens:v1';
 const startupDatabasePath = process.env.LUOLI_DATA_DIR ? resolve(process.env.LUOLI_DATA_DIR, 'luoli.db') : './data/luoli.db';
 // env 叠加抽成一个函数，启动与热重载共用：只在启动时叠的话，host 存在 DB 而口令只来自 env 的部署，
 // 热重载会撞上 webui.passwordHash 的 superRefine 而整体失败（removeOverridePath 也删不掉它，
@@ -41,6 +42,13 @@ for (const path of [resolve('data'), resolve('logs'), resolve('skills'), resolve
 const db = openDatabase(config.db.path);
 migrateDatabase(db);
 recoverAfterCrash(db);
+// 一次性数据修复而不是迁移：迁移文件提交后不可修改，而这件事要用 TS 侧的估算器重算 parts。
+// 修的是 token 校准失控期间落库的 tokens（实测系数最高约 26 倍，logs/2026-08-16）。
+if (!readAppKv<boolean>(db, TOKEN_REPAIR_KEY)) {
+  const repaired = recomputeMessageTokens(db);
+  writeAppKv(db, TOKEN_REPAIR_KEY, true, 'startup');
+  if (repaired.messages || repaired.contexts) process.stdout.write(`[context] 已按新估算器重算 ${repaired.messages} 条上下文消息的 tokens，并重置 ${repaired.contexts} 个会话的校准系数。\n`);
+}
 const principals = new PrincipalRepository(db);
 principals.ensureOwner(config.access.bootstrapOwnerId);
 const archive = new ArchiveRepository(db);
@@ -146,7 +154,8 @@ const previewPrompt = (key: string, role: RuntimeTurnContext['effectiveRole']): 
     workspace: resolve(live.sandbox.workspaceDir, contextRow.chatId), skills, agents });
   const order = ['kernel', 'character', 'assist', 'catalog', 'pubmemory', 'primemory', 'runtime'];
   const blocks = order.filter((name) => name !== 'primemory' || built.instructions.includes('=== PRIMEMORY ==='))
-    .map((name) => ({ name, tokens: built.blocks[name] ?? 0, content: built.contents[name] ?? '', truncated: built.truncated.includes(name) }));
+    .map((name) => ({ name, tokens: built.blocks[name] ?? 0, content: built.contents[name] ?? '', truncated: built.truncated.includes(name),
+      cached: (STABLE_PROMPT_BLOCKS as readonly string[]).includes(name) }));
   return { key, role, instructions: built.instructions, blocks, totalTokens: blocks.reduce((sum, block) => sum + block.tokens, 0),
     context: { messages: snapshot.messages.length, tokens: snapshot.tokens } };
 };

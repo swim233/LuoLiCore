@@ -16,7 +16,8 @@ export interface PromptPreviewResult {
   key: string;
   role: Role;
   instructions: string;
-  blocks: Array<{ name: string; tokens: number; content: string; truncated: boolean }>;
+  /** `cached=false` 的块在缓存断点之后，每轮都要重新计费（docs/06 §1）。 */
+  blocks: Array<{ name: string; tokens: number; content: string; truncated: boolean; cached: boolean }>;
   totalTokens: number;
   context: { messages: number; tokens: number };
 }

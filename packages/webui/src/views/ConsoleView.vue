@@ -320,7 +320,7 @@ interface PromptPreview {
   key: string;
   role: string;
   instructions: string;
-  blocks: Array<{ name: string; tokens: number; content: string; truncated: boolean }>;
+  blocks: Array<{ name: string; tokens: number; content: string; truncated: boolean; cached: boolean }>;
   totalTokens: number;
   context: { messages: number; tokens: number };
 }
@@ -2117,7 +2117,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
         <ol class="prompt-preview-blocks">
           <li v-for="block in promptPreview.blocks" :key="block.name">
             <details>
-              <summary><code>{{ BLOCK_LABELS[block.name] ?? block.name }}</code><UiTag :value="`${block.tokens} tokens`" :severity="block.truncated ? 'warn' : 'secondary'" /><UiTag v-if="block.truncated" value="已截断" severity="danger" /></summary>
+              <summary><code>{{ BLOCK_LABELS[block.name] ?? block.name }}</code><UiTag :value="`${block.tokens} tokens`" :severity="block.truncated ? 'warn' : 'secondary'" /><UiTag :value="block.cached ? '缓存段' : '每轮重算'" :severity="block.cached ? 'success' : 'secondary'" /><UiTag v-if="block.truncated" value="已截断" severity="danger" /></summary>
               <pre v-text="block.content" />
             </details>
           </li>

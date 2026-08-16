@@ -1,3 +1,5 @@
+import { estimateTextTokens } from '@luoli/shared';
+
 export const KERNEL_PROMPT = `你是运行在 Telegram 上的 AI 助手，内核代号 LuoLiCore。
 
 【权限】
@@ -30,20 +32,41 @@ export interface PromptBuildInput {
 }
 
 export interface PromptBuildResult {
+  /** 两段拼在一起的完整文本，只用于展示（WebUI 预览、日志）。真正发出去的是 `stable` + `volatile` 两条 system。 */
   instructions: string;
+  /** 每轮逐字节不变的那一段，缓存断点落在它之后。 */
+  stable: string;
+  /** 每轮都会变的那一段（记忆 + 运行时），不进缓存。 */
+  volatile: string;
   blocks: Record<string, number>;
   contents: Record<string, string>;
   truncated: string[];
 }
 
-function tokens(text: string): number {
-  return Math.ceil([...text].length * 0.6) + 4;
-}
+/**
+ * 稳定区 / 易变区的划分是**缓存边界**，不是排版偏好：把时钟（分钟精度）留在缓存段里，
+ * 意味着每过一分钟整段前缀就作废一次。实测（logs/2026-08-16，grok）：同一轮内前缀逐字节
+ * 相同的连续步骤命中 12,672 token，跨轮只差一个分钟数时只命中 128 —— 等于完全没有缓存。
+ * 记忆两块也归易变：memory_write 是模型工具，对话中途随时会改。
+ */
+export const STABLE_PROMPT_BLOCKS = ['kernel', 'character', 'assist', 'catalog'] as const;
+export const VOLATILE_PROMPT_BLOCKS = ['pubmemory', 'primemory', 'runtime'] as const;
+
+const tokens = estimateTextTokens;
 
 function truncateToTokens(text: string, budget: number, note: string): string {
   if (tokens(text) <= budget) return text;
-  const chars = Math.max(0, Math.floor((budget - tokens(note) - 4) / 0.6));
-  return `${[...text].slice(0, chars).join('')}\n${note}`;
+  // 按实际字符构成反推能留多少字：估算器对中文与 ASCII 是两档系数，用单一系数反推会在纯中文
+  // 文档上留得过长、纯英文文档上留得过短。逐步逼近比解方程简单，也不依赖估算器的内部形状。
+  const characters = [...text];
+  let low = 0;
+  let high = characters.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (tokens(characters.slice(0, middle).join('')) + tokens(note) <= budget) low = middle;
+    else high = middle - 1;
+  }
+  return `${characters.slice(0, low).join('')}\n${note}`;
 }
 
 export class PromptAssembler {
@@ -73,10 +96,12 @@ export class PromptAssembler {
       mutableBudget = 0;
     }
     const names: Record<string, string> = { kernel: 'KERNEL', character: 'CHARACTER', assist: 'ASSIST', catalog: 'TOOL CATALOG', pubmemory: 'PUBMEMORY', primemory: 'PRIMEMORY', runtime: 'RUNTIME' };
-    const instructions = ['kernel', 'character', 'assist', 'catalog', 'pubmemory', ...(input.privateMemory === undefined ? [] : ['primemory']), 'runtime']
-      .map((key) => `=== ${names[key]} ===\n${blockText[key]}`)
-      .join('\n\n');
-    return { instructions, blocks: Object.fromEntries(Object.entries(blockText).map(([key, value]) => [key, tokens(value)])), contents: blockText, truncated };
+    const render = (keys: readonly string[]): string => keys.filter((key) => key !== 'primemory' || input.privateMemory !== undefined)
+      .map((key) => `=== ${names[key]} ===\n${blockText[key]}`).join('\n\n');
+    const stable = render(STABLE_PROMPT_BLOCKS);
+    const volatileText = render(VOLATILE_PROMPT_BLOCKS);
+    return { instructions: `${stable}\n\n${volatileText}`, stable, volatile: volatileText,
+      blocks: Object.fromEntries(Object.entries(blockText).map(([key, value]) => [key, tokens(value)])), contents: blockText, truncated };
   }
 }
 

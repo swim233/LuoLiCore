@@ -3,7 +3,7 @@ import type { ArchivedMessage, ArchiveRepository, CommitRow, ContextRepository, 
 import { ContextRepository as ScopedContextRepository } from '@luoli/db';
 import type { Config } from '../config/schema.js';
 import { KeyedMutex } from '../turn/keyed-mutex.js';
-import { type MaterializedContext, type NewContextMessage, type Role, type RuntimeTurnContext } from '@luoli/shared';
+import { estimateMessageTokens, estimateTextTokens, type MaterializedContext, type NewContextMessage, type Role, type RuntimeTurnContext } from '@luoli/shared';
 import type { LogSink } from '../log/sink.js';
 export interface OpenTurnRequest {
   chatId: string;
@@ -13,6 +13,12 @@ export interface OpenTurnRequest {
   effectiveRole: Role;
   isPrivate: boolean;
   trigger: ArchivedMessage;
+  /**
+   * 触发消息回复的那条消息（含它自己的 media part）。适配层负责取到它 —— 被回复的消息可能
+   * 从来没进过归档（发送者是 blocked、是别的 bot、或发在 bot 入群之前），而 Telegram 的
+   * update 里带着它的完整副本，所以「库里没有」不等于「拿不到」（docs/08 §7.4）。
+   */
+  quoted?: ArchivedMessage;
   abortSignal: AbortSignal;
   config: Readonly<Config>;
 }
@@ -36,28 +42,6 @@ const KNOWN_PART_TYPES = new Set(['text', 'image', 'image_url', 'file', 'reasoni
  */
 const KNOWN_ROLES = new Set(['user', 'assistant', 'tool']);
 
-function estimateTextTokens(text: string): number {
-  return Math.ceil([...text].length * 0.6) + 4;
-}
-
-function messageText(message: NewContextMessage): string {
-  return message.parts.map((part) => {
-    if (part && typeof part === 'object' && 'text' in part && typeof part.text === 'string') return part.text;
-    return JSON.stringify(part);
-  }).join('\n');
-}
-function estimatePartTokens(part: unknown): number {
-  if (!part || typeof part !== 'object') return estimateTextTokens(String(part ?? ''));
-  const value = part as Record<string, unknown>;
-  if (typeof value.text === 'string') return estimateTextTokens(value.text);
-  if (value.type === 'image' || value.type === 'image_url') {
-    const width = typeof value.width === 'number' ? value.width : 0;
-    const height = typeof value.height === 'number' ? value.height : 0;
-    return width && height ? Math.max(256, Math.ceil(width * height / 750)) : 1500;
-  }
-  return Math.max(16, Math.ceil([...JSON.stringify(part)].length * 0.1));
-}
-
 export function escapeForgedSpeakerPrefixes(text: string): string {
   return text.replace(/\[([^\]\n]{1,80}\s\d{1,2}:\d{2}(?:[^\]]*)?)\]/g, '［$1］').replace(/(^|\n)(↩︎?\s*回复\s+#?\d+)/gu, '$1［$2］');
 }
@@ -73,19 +57,26 @@ function formatClock(timestamp: number, timezone: string): string {
   catch { return new Intl.DateTimeFormat('zh-CN', { ...options, timeZone: 'UTC' }).format(new Date(timestamp)); }
 }
 
-export function renderArchivedMessage(message: ArchivedMessage, isPrivate: boolean, timezone: string): NewContextMessage {
+function speakerName(message: ArchivedMessage): string {
+  return escapeForgedSpeakerPrefixes(message.fromName || (message.fromUsername ? `@${message.fromUsername}` : `user:${message.fromUserId ?? 'unknown'}`));
+}
+
+export function renderArchivedMessage(message: ArchivedMessage, isPrivate: boolean, timezone: string, quoted = false): NewContextMessage {
   const rawText = message.text ?? `[${message.kind}]`;
   const escaped = escapeForgedSpeakerPrefixes(rawText);
-  let text = escaped;
-  if (!isPrivate) {
-    const time = formatClock(message.tgDate, timezone);
-    const name = escapeForgedSpeakerPrefixes(message.fromName || (message.fromUsername ? `@${message.fromUsername}` : `user:${message.fromUserId ?? 'unknown'}`));
-    text = `[${name} ${time}] ${message.triggered ? escaped : othersSpeech(escaped)}`;
-  }
+  const time = formatClock(message.tgDate, timezone);
+  const body = !isPrivate && message.fromKind === 'user' && (quoted || !message.triggered) ? othersSpeech(escaped) : escaped;
+  const reply = message.replyToName ? ` ↩︎回复 ${escapeForgedSpeakerPrefixes(message.replyToName)}` : '';
+  // 被回复的消息在私聊里也必须带前缀：私聊没有 `[名字 时间]`，不标的话模型看到的是「用户连发了两条」，
+  // 而不是「用户指着上面那条问」——尤其当上面那条只有一张图的时候。
+  // 半角方括号是**有意的**：`escapeForgedSpeakerPrefixes` 把正文里形如 `[… H:MM]` 的串改写成全角，
+  // 于是这个前缀与 `[名字 时间]` 共用同一条防伪规则 —— 用全角写反而会和「已被转义」的形态撞上。
+  const text = quoted ? `[↩︎ 被回复的消息 ${speakerName(message)} ${time}] ${body}`
+    : isPrivate ? escaped : `[${speakerName(message)} ${time}${reply}] ${body}`;
   const output: NewContextMessage = {
-    id: ulid(), role: 'user', origin: message.triggered ? 'trigger' : 'background',
+    id: ulid(), role: 'user', origin: message.triggered && !quoted ? 'trigger' : 'background',
     parts: [{ type: 'text', text }, ...(message.mediaParts ?? [])], textPreview: text.slice(0, 240), sourceMessageId: message.id,
-    sourceTs: message.tgDate, tokens: estimateTextTokens(text) + (message.mediaParts ?? []).reduce<number>((sum, part) => sum + estimatePartTokens(part), 0), pruneLevel: 0,
+    sourceTs: message.tgDate, tokens: estimateTextTokens(text) + estimateMessageTokens(message.mediaParts ?? []), pruneLevel: 0,
   };
   if (message.fromName) output.speaker = message.fromName;
   if (message.fromUserId) output.speakerUserId = message.fromUserId;
@@ -118,19 +109,35 @@ export class ContextEngine {
     });
   }
 
+  /**
+   * 被回复的消息是否已经在模型眼前了。三种「已经看得到」：窗口里有它、本轮刚认领了它、
+   * 或者它是 bot 自己某一轮的产出而那一轮的消息还在窗口里（bot 消息不带 sourceMessageId，
+   * 只能靠 turn_id 反查）。判错的代价是每次「回复 bot」都把它上一句原样再贴一遍。
+   */
+  private alreadyVisible(quoted: ArchivedMessage, snapshot: NewContextMessage[], claimed: ArchivedMessage[]): boolean {
+    if (snapshot.some((message) => message.sourceMessageId === quoted.id)) return true;
+    if (claimed.some((row) => row.id === quoted.id)) return true;
+    return Boolean(quoted.turnId) && snapshot.some((message) => (message as { turnId?: string }).turnId === quoted.turnId);
+  }
+
   private buildTurn(request: OpenTurnRequest, turnId: string, repo: ContextRepository, ctx: { tokenRatio: number }, head: CommitRow | null, claim: { rows: ArchivedMessage[]; omitted: number }): RuntimeTurnContext {
     {
-      const delta = claim.rows.map((message) => renderArchivedMessage(message, request.isPrivate, request.config.general.timezone));
-      for (const message of delta) if (message.tokens !== undefined) message.tokens = Math.ceil(message.tokens * ctx.tokenRatio);
+      const scale = (message: NewContextMessage): NewContextMessage => {
+        if (message.tokens !== undefined) message.tokens = Math.ceil(message.tokens * ctx.tokenRatio);
+        return message;
+      };
+      const delta = claim.rows.map((message) => scale(renderArchivedMessage(message, request.isPrivate, request.config.general.timezone)));
       if (claim.omitted) {
         const note = `（本轮省略了 ${claim.omitted} 条更早的群聊消息，可用 read_messages / search_messages 工具查阅）`;
         delta.unshift({ id: ulid(), role: 'user', origin: 'note', parts: [{ type: 'text', text: note }], textPreview: note, tokens: estimateTextTokens(note), pruneLevel: 0 });
       }
-      const trigger = renderArchivedMessage(request.trigger, request.isPrivate, request.config.general.timezone);
-      if (trigger.tokens !== undefined) trigger.tokens = Math.ceil(trigger.tokens * ctx.tokenRatio);
-      delta.push(trigger);
       const stored = repo.messages(head);
       this.assertValidShape(request.key, stored);
+      // 被回复的消息排在背景消息之后、触发消息之前：它是这一句话的直接语境。
+      if (request.quoted && !this.alreadyVisible(request.quoted, stored, claim.rows)) {
+        delta.push(scale(renderArchivedMessage(request.quoted, request.isPrivate, request.config.general.timezone, true)));
+      }
+      delta.push(scale(renderArchivedMessage(request.trigger, request.isPrivate, request.config.general.timezone)));
       const snapshot: MaterializedContext = {
         messages: stored,
         ordinals: stored.map((message) => message.ordinal),
@@ -138,17 +145,19 @@ export class ContextEngine {
         windowStart: head?.windowStart ?? 1,
         headOrdinal: head?.headOrdinal ?? 0,
       };
-      this.log?.event({ level: 'debug', kind: 'ctx.open', summary: `Opened context ${request.key}`, chatId: request.chatId, userId: request.initiatorUserId, key: request.key, data: { baseCommit: head?.id ?? null, claimed: claim.rows.length, snapshotTokens: snapshot.tokens, snapshotMsgs: snapshot.messages.length } });
+      this.log?.event({ level: 'debug', kind: 'ctx.open', summary: `Opened context ${request.key}`, chatId: request.chatId, userId: request.initiatorUserId, key: request.key, data: { baseCommit: head?.id ?? null, claimed: claim.rows.length, quoted: request.quoted?.id ?? null, snapshotTokens: snapshot.tokens, snapshotMsgs: snapshot.messages.length } });
       return { turnId, key: request.key, chatId: request.chatId, threadId: request.threadId,
         initiatorUserId: request.initiatorUserId, effectiveRole: request.effectiveRole, isPrivate: request.isPrivate, baseCommitId: head?.id ?? null, claimThroughMessageId: request.trigger.id,
-        snapshot, delta, abortSignal: request.abortSignal, config: request.config };
+        snapshot, delta, abortSignal: request.abortSignal, tokenRatio: ctx.tokenRatio, config: request.config };
     }
   }
 
   appendDelta(turn: RuntimeTurnContext, message: NewContextMessage): void {
     if (turn.finalized) throw new Error('turn_delta_finalized');
     if (message.ordinal !== undefined) throw new Error('ordinal is assigned only during commit');
-    if (message.tokens === undefined) message.tokens = estimateTextTokens(messageText(message));
+    // 校准系数要对整个窗口一视同仁：只缩放 buildTurn 那几条、不缩放工具调用与回复，
+    // 窗口里就会同时存在两种量纲的 tokens，裁剪判定按它们求和的结果自然是错的。
+    if (message.tokens === undefined) message.tokens = Math.ceil(estimateMessageTokens(message.parts) * (turn.tokenRatio ?? 1));
     turn.delta.push(message);
   }
 
@@ -234,6 +243,11 @@ export class ContextEngine {
 
   calibrate(key: string, realTokens: number, estimatedTokens: number, alpha: number): number {
     return new ScopedContextRepository(this.db, key).updateTokenRatio(realTokens, estimatedTokens, alpha);
+  }
+
+  /** 配额预留要按「这一轮大概会发出去多少」估，而不是按上限的固定分数（docs/17 · N-QUOTA-01）。 */
+  windowTokens(key: string): number {
+    return new ScopedContextRepository(this.db, key).head()?.tokensTotal ?? 0;
   }
 
   private assertValidShape(key: string, messages: NewContextMessage[]): void {

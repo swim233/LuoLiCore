@@ -1,4 +1,4 @@
-import type { NewContextMessage, Role } from '@luoli/shared';
+import { estimateMessageTokens, type NewContextMessage, type Role } from '@luoli/shared';
 import { ulid } from 'ulid';
 import type { ArchivedMessage } from './archive.js';
 import type { Sqlite } from './database.js';
@@ -254,13 +254,40 @@ export class ContextRepository {
     this.db.prepare('UPDATE context_messages SET prune_applied=1 WHERE key=? AND ordinal BETWEEN ? AND ? AND prune_level=?').run(this.key, from, to, level);
   }
 
+  /**
+   * 校准系数只用来吸收分词器差异，量级必须被夹住。曾经没有夹：首轮空上下文时 estimated 只有几十
+   * （真实输入还含着上万 token 的系统提示词与工具 schema），一次采样就把 ratio 推到 26 —— 之后
+   * 每条消息都按 26 倍存 tokens，窗口水位虚高一个数量级，裁剪提前触发（实测 logs/2026-08-16）。
+   * 上游必须传可比的两个量（见 `runtime.ts` 的整请求体估算）；这里是最后一道闸。
+   */
   updateTokenRatio(real: number, estimated: number, alpha: number): number {
     const context = this.context();
-    if (!context || estimated <= 0) return context?.tokenRatio ?? 1;
-    const next = alpha * (real / estimated) + (1 - alpha) * context.tokenRatio;
+    if (!context || estimated <= 0 || real <= 0) return context?.tokenRatio ?? 1;
+    const sample = Math.min(4, Math.max(0.25, real / estimated));
+    const next = Math.min(2, Math.max(0.5, alpha * sample + (1 - alpha) * context.tokenRatio));
     this.db.prepare('UPDATE contexts SET token_ratio=?,updated_at=? WHERE key=?').run(next, Date.now(), this.key);
     return next;
   }
+}
+
+/**
+ * 一次性修复：把 `context_messages.tokens` 按当前估算器重算，并把所有 `contexts.token_ratio` 归 1。
+ * 旧数据是按当时失控的校准系数（实测最高约 26 倍）存下来的，而 tokens 是持久化的 ——
+ * 不重算的话，已经在窗口里的消息会一直按虚高的数字参与裁剪判定，直到 `/new` 或自然滚出窗口为止。
+ * `context_commits` 不动（不可变）：它的 `tokens_total` 只用于展示，下一次提交会按 `effectiveStats` 重算。
+ */
+export function recomputeMessageTokens(db: Sqlite): { messages: number; contexts: number } {
+  return db.transaction(() => {
+    const rows = db.prepare('SELECT key,ordinal,parts_json AS parts FROM context_messages').all() as Array<{ key: string; ordinal: number; parts: string }>;
+    const update = db.prepare('UPDATE context_messages SET tokens=? WHERE key=? AND ordinal=?');
+    for (const row of rows) {
+      let parts: unknown[] = [];
+      try { parts = JSON.parse(row.parts) as unknown[]; } catch { continue; }
+      update.run(estimateMessageTokens(Array.isArray(parts) ? parts : []), row.key, row.ordinal);
+    }
+    const contexts = db.prepare('UPDATE contexts SET token_ratio=1,updated_at=? WHERE token_ratio<>1').run(Date.now()).changes;
+    return { messages: rows.length, contexts };
+  })();
 }
 
 export function contextKey(input: { chatId: string; messageThreadId: number | null }, scope: 'chat' | 'thread'): string {

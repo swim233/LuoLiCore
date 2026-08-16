@@ -6,15 +6,24 @@
 
 ```
 ┌─ block 0  KERNEL          内核指令（代码内置，不可通过 WebUI 修改）        ─┐
-│  block 1  CHARACTER.md    人设                                            │ 稳定区
-│  block 2  ASSIST.md       工作指导（如何使用工具）                          │ ← prompt cache
-│  block 3  TOOL CATALOG    可用工具/子agent/Skill 目录（按角色动态生成）      │   断点在此之后
-│  block 4  PUBMEMORY.md    公开长期记忆（全局单份）                          │
-│  block 5  PRIMEMORY.md    私有长期记忆（仅私聊，当前用户那份）              ─┘
-   block 6  RUNTIME         运行时环境块（时间/会话/角色/预算/上下文水位）  ← 易变，不缓存
+│  block 1  CHARACTER.md    人设                                            │ 稳定段
+│  block 2  ASSIST.md       工作指导（如何使用工具）                          │ = system 消息 #1
+└─ block 3  TOOL CATALOG    可用工具/子agent/Skill 目录（按角色动态生成）    ─┘ ← 缓存断点在此之后
+┌─ block 4  PUBMEMORY.md    公开长期记忆（全局单份）                        ─┐
+│  block 5  PRIMEMORY.md    私有长期记忆（仅私聊，当前用户那份）              │ 易变段
+└─ block 6  RUNTIME         运行时环境块（时间/会话/角色/预算/上下文水位）  ─┘ = system 消息 #2，不缓存
 ```
 
 - **顺序固定，不可配置**。block 3 的内容随角色变化，但对同一 (角色, 启用集) 是稳定的，因此仍可缓存。
+- `instructions` 传的是 **`SystemModelMessage` 数组**（AI SDK v7 支持），两段按序各一条：
+  Anthropic 侧转成两个 system text block，`cache_control` 只打在第一条上；其余 provider 转成
+  两条 system 消息，顺序不变。跨边界断言见 `tests/context.contract.test.ts`。
+- **划分依据是缓存命中率，不是排版**。实测（logs/2026-08-16，grok）：同一轮内前缀逐字节相同的
+  连续步骤命中 12,672 token；跨轮时请求体第一处分叉在第 11,503 字符（RUNTIME 里那个分钟精度的
+  时钟），命中直接掉到 128 token —— 等于完全没有缓存。把时钟留在缓存段里，就是每过一分钟
+  作废一次整段前缀。
+- 记忆两块归易变段：`memory_write` 是模型工具，对话中途随时会改。代价是这 ~200 token 每轮
+  重新计费，换来稳定段逐字节不变。
 - block 6 里放所有每轮都变的东西，保证前缀命中缓存（[04 §2.1](./04-agents-and-providers.md#21-prompt-缓存)）。
 - 总大小护栏：`prompt.maxTokens`（默认 12000）。超限时按 **block 5 → 4 → 1** 的顺序尾部截断并追加 `（记忆已截断，可用 memory_read 读取全文）`；block 0/2/3/6 **永不截断**（截断它们会破坏工具协议）。超限事件记 `warn` 日志并在 WebUI 告警。
 
