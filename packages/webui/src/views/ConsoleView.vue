@@ -13,7 +13,7 @@ import type { GridColumn, TagSeverity } from '../ui/types';
 import { api, hydrateSession } from '../api/client';
 
 interface Dashboard { turns: { total: number; running: number; failed: number; cost: number }; messages: { total: number }; providers: { total: number; enabled: number } }
-interface Principal { id: string; kind: string; tgId: string; role: string; displayName: string | null; username: string | null }
+interface Principal { id: string; kind: string; tgId: string; role: string; displayName: string | null; username: string | null; chatType: string | null }
 interface Provider { id: string; name: string; kind: string; baseUrl?: string | null; apiKeyHint: string | null; enabled: number; healthState: string | null; healthError?: string | null }
 interface ProviderTest { reachable: boolean; code: string; message: string; status: number | null; latencyMs: number; models: number }
 interface CatalogMeta { match: 'provider' | 'official' | 'third-party' | 'none'; catalogProviderId: string | null; catalogProviderName: string | null; catalogModelId: string | null; normalized: boolean; priceRange: { min: number; max: number; providers: number } | null; capabilities: Record<string, boolean>; reasoningControl: string | null; reasoningEfforts: string[]; modalities: { input: string[]; output: string[] }; knowledge: string | null; releaseDate: string | null }
@@ -21,7 +21,7 @@ interface CatalogModel { modelId: string; displayName: string | null; contextWin
 interface CatalogStatus { enabled: boolean; available: boolean; stale: boolean; ageMs: number | null; ttlHours: number; models?: number; providers?: number; fetchedAt?: number; error?: string | null; outcome?: string }
 interface LogRow { id: number; ts: number; level: string; kind: string; summary: string; trace_id: string | null }
 
-interface Chat { key: string; chatId: string; scope: string; tokens: number | null; messages: number | null }
+interface Chat { key: string; chatId: string; threadId: number | null; scope: string; tokens: number | null; messages: number | null }
 interface Usage { id: number; ts: number; model_alias: string; input_tokens: number; output_tokens: number; cost_usd: number; ok: number }
 interface Extension { name: string; description?: string; min_role?: string; enabled?: number; load_error?: string | null }
 interface Paged<T> { items: T[]; total: number; page: number; size: number }
@@ -60,6 +60,7 @@ const outputDirty = ref(false);
 const outputSaving = ref(false);
 const selectedChat = ref<Chat | null>(null);
 const contextDetail = ref<Record<string, unknown> | null>(null);
+const contextHead = ref<Record<string, unknown> | null>(null);
 const traceDetail = ref<LogRow[]>([]);
 const commits = ref<Array<Record<string, unknown>>>([]);
 const contextMessages = ref<Array<Record<string, unknown>>>([]);
@@ -198,7 +199,6 @@ const navigation = [
 ] as const;
 const currentLabel = computed(() => navigation.find(([key]) => key === active.value)?.[2] ?? '总览');
 const COLUMNS = {
-  chats: [{ key: 'key', header: 'Context Key' }, { key: 'scope', header: '范围' }, { key: 'messages', header: '消息' }, { key: 'tokens', header: 'Token' }],
   tools: [{ key: 'name', header: '工具' }, { key: 'source', header: '来源', width: '7rem' }, { key: 'minRole', header: '最低角色', width: '7rem' }, { key: 'approval', header: '审批', width: '7rem' }, { key: 'scope', header: '作用域', width: '8rem' }, { key: 'enabled', header: '状态', width: '6rem' }],
   agents: [{ key: 'name', header: '名称' }, { key: 'description', header: '职责' }, { key: 'minRole', header: '最低角色', width: '7rem' }, { key: 'modelAlias', header: '模型别名', width: '8rem' }, { key: 'tools', header: '可用工具' }, { key: 'maxSteps', header: '步数上限', width: '6rem' }],
   hits: [{ key: 'tgDate', header: '时间', width: '12rem' }, { key: 'chatId', header: '会话', width: '9rem' }, { key: 'from', header: '发言人', width: '10rem' }, { key: 'text', header: '内容' }, { key: 'detail', header: '详情', width: '5rem' }],
@@ -288,7 +288,43 @@ async function saveOutput(): Promise<void> {
   } catch (error) { toastError('保存输出节奏失败', error); }
   finally { outputSaving.value = false; }
 }
-async function inspectChat(chat: Chat): Promise<void> { selectedChat.value = chat; const detail = await api<Record<string, unknown>>(`/api/chats/${encodeURIComponent(chat.key)}`); contextDetail.value = await api<Record<string, unknown>>(`/api/chats/${encodeURIComponent(chat.key)}/context`); commits.value = (detail.commits as Array<Record<string, unknown>> | undefined) ?? []; contextMessages.value = (detail.messages as Array<Record<string, unknown>> | undefined) ?? []; inspectedSnapshot.value = null; }
+// ── 会话：contexts 表只有 chat_id，「这是哪个群 / 谁的私聊」在 principals 里 ──────────
+const CHAT_TYPE_LABELS: Record<string, string> = { private: '私聊', group: '普通群', supergroup: '超级群', channel: '频道' };
+interface ChatIdentity { name: string; handle: string; isPrivate: boolean; icon: string }
+/** 群聊取 chat:<id> 那行的 title；私聊优先取 user:<id> 的全名 —— chat:<id> 对私聊只存了 first_name。 */
+function chatIdentity(chat: Chat): ChatIdentity {
+  const asChat = principals.value.find((entry) => entry.kind === 'chat' && entry.tgId === chat.chatId);
+  const asUser = principals.value.find((entry) => entry.kind === 'user' && entry.tgId === chat.chatId);
+  // 没登记过的会话（库里只有 contexts 行）也要能认：Telegram 的群/频道 id 一律是负数。
+  const isPrivate = asChat?.chatType ? asChat.chatType === 'private' : !chat.chatId.startsWith('-');
+  const source = (isPrivate ? asUser ?? asChat : asChat) ?? null;
+  return { name: source?.displayName || (isPrivate ? `未登记用户 ${chat.chatId}` : `未登记群聊 ${chat.chatId}`),
+    // 没有用户名的群不重复一遍下面那行 contextKey，改写 Telegram 那边的会话类型
+    handle: source?.username ? `@${source.username}` : CHAT_TYPE_LABELS[String(asChat?.chatType)] ?? '未登记主体',
+    isPrivate, icon: isPrivate ? 'pi pi-user' : 'pi pi-users' };
+}
+const chatCards = computed(() => chats.value.map((chat) => ({ chat, ...chatIdentity(chat) })));
+const selectedChatIdentity = computed(() => selectedChat.value ? chatIdentity(selectedChat.value) : null);
+const inWindowCount = computed(() => contextMessages.value.filter((entry) => entry.inWindow).length);
+// 上下文窗口按时间倒序：最新的一条在最上面，跟消息页与 commit 时间线一致。ordinal 在提交时
+// 单调分配，倒排 ordinal 就是倒排时间。
+const orderedContextMessages = computed(() => [...contextMessages.value].reverse());
+const canUndoContext = computed(() => Boolean(contextHead.value?.parentId));
+const ROLE_LABELS: Record<string, string> = { user: '用户', assistant: '助手', tool: '工具', system: '系统' };
+const ORIGIN_LABELS: Record<string, string> = { background: '背景发言', trigger: '触发消息', assistant: '模型回复', tool_call: '工具调用', tool_result: '工具结果', note: '系统注记' };
+function messageTime(message: Record<string, unknown>): string {
+  const ts = Number(message.sourceTs ?? message.createdAt ?? 0);
+  return ts ? new Date(ts).toLocaleString([], { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—';
+}
+async function inspectChat(chat: Chat): Promise<void> {
+  selectedChat.value = chat;
+  const detail = await api<Record<string, unknown>>(`/api/chats/${encodeURIComponent(chat.key)}`);
+  contextDetail.value = await api<Record<string, unknown>>(`/api/chats/${encodeURIComponent(chat.key)}/context`);
+  contextHead.value = (detail.commit as Record<string, unknown> | null) ?? null;
+  commits.value = (detail.commits as Array<Record<string, unknown>> | undefined) ?? [];
+  contextMessages.value = (detail.messages as Array<Record<string, unknown>> | undefined) ?? [];
+  inspectedSnapshot.value = null;
+}
 async function inspectTrace(traceId: string | null): Promise<void> { if (!traceId) return; traceDetail.value = await api<LogRow[]>(`/api/logs/trace/${encodeURIComponent(traceId)}`); }
 // 提示词文档以前是一张 id/scope/bytes/updated_at 的四列表格：光看 `character:global` 这种 id
 // 认不出哪块是人格、哪块是助理守则，也看不出它进的是 prompt 的第几个 block。改成卡片，把用途写在脸上。
@@ -321,15 +357,25 @@ async function checkoutCommit(id: unknown): Promise<void> {
   catch (error) { toastError('切换 commit 失败', error); }
 }
 async function inspectCommit(id: unknown): Promise<void> { if (!selectedChat.value) return; inspectedSnapshot.value = await api<Record<string, unknown>>(`/api/chats/${encodeURIComponent(selectedChat.value.key)}/context?commit=${encodeURIComponent(String(id))}`); }
+/** 等同 Telegram 的 /new：插一条 reset commit 把窗口起点推到最新 ordinal 之后，消息一条不删。 */
 async function resetContext(): Promise<void> {
-  if (!selectedChat.value) return;
-  try { await api(`/api/chats/${encodeURIComponent(selectedChat.value.key)}/reset`, { method: 'POST' }); pushToast({ severity: 'success', summary: '上下文已重置', detail: selectedChat.value.key }); await inspectChat(selectedChat.value); }
-  catch (error) { toastError('重置上下文失败', error); }
+  const chat = selectedChat.value;
+  if (!chat) return;
+  if (!confirm(`清空「${chatIdentity(chat).name}」的上下文窗口？下一轮起模型看不到之前的对话；消息与提交历史都还在，可以用「回滚到此」走回来。`)) return;
+  try { await api(`/api/chats/${encodeURIComponent(chat.key)}/reset`, { method: 'POST' }); pushToast({ severity: 'success', summary: '上下文窗口已清空', detail: `${chatIdentity(chat).name} · 下一轮从零开始` }); await inspectChat(chat); await load(); }
+  catch (error) { toastError('清空上下文窗口失败', error); }
 }
+/** 等同 /undo：done 指针退回父 commit。被跳过的 commit 仍留在时间线上，可以再「回滚到此」走回去。 */
 async function undoContext(): Promise<void> {
-  if (!selectedChat.value) return;
-  try { await api(`/api/chats/${encodeURIComponent(selectedChat.value.key)}/undo`, { method: 'POST' }); pushToast({ severity: 'success', summary: '已撤销最近 commit', detail: selectedChat.value.key }); await inspectChat(selectedChat.value); }
-  catch (error) { toastError('撤销失败', error); }
+  const chat = selectedChat.value;
+  if (!chat) return;
+  try {
+    const moved = await api<Record<string, unknown> | null>(`/api/chats/${encodeURIComponent(chat.key)}/undo`, { method: 'POST' });
+    if (!moved) { pushToast({ severity: 'warn', summary: '没有可撤回的提交', detail: '当前 HEAD 已经是这个会话的第一个 commit' }); return; }
+    pushToast({ severity: 'success', summary: '已撤回上一次提交', detail: `HEAD → ${String(moved.id).slice(0, 12)}` });
+    await inspectChat(chat);
+    await load();
+  } catch (error) { toastError('撤回提交失败', error); }
 }
 function toggleMessage(id: unknown): void { const next = new Set(expandedMessages.value); const key = String(id); if (next.has(key)) next.delete(key); else next.add(key); expandedMessages.value = next; }
 function editProvider(provider?: Provider): void { providerForm.value = provider ? { id: provider.id, name: provider.name, kind: provider.kind, baseUrl: String((provider as Provider & { baseUrl?: string }).baseUrl ?? ''), apiKey: '', enabled: Boolean(provider.enabled) } : { id: '', name: '', kind: 'openai', baseUrl: '', apiKey: '', enabled: true }; providerDialog.value = true; }
@@ -694,7 +740,9 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
       </header>
 
       <div class="content">
-        <template v-if="active === 'dashboard'">
+        <!-- 每个分支必须带 key：两个相邻页面都是 <section>，没有 key 时 Vue 认成同一个节点，只换内容不走过渡 -->
+        <Transition name="page" mode="out-in">
+        <div v-if="active === 'dashboard'" key="dashboard">
           <section class="hero-row">
             <div><p class="eyebrow">LIVE OVERVIEW</p><h2>早上好，系统状态<span>稳定。</span></h2><p>所有关键路径集中在一个 trace 中。异常先看证据，再处理。</p></div>
             <UiButton label="打开实时日志" icon="pi pi-wave-pulse" @click="active = 'logs'" />
@@ -711,17 +759,76 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             </article>
             <article class="surface health"><header><div><p class="eyebrow">HEALTH</p><h3>依赖健康</h3></div></header><div class="health-row"><span>SQLite / WAL</span><UiTag value="在线" severity="success" /></div><div class="health-row"><span>Telegram</span><UiTag :value="connected ? '在线' : '等待'" :severity="connected ? 'success' : 'warn'" /></div><div class="health-row"><span>模型注册表</span><UiTag :value="`${dashboard.providers.enabled} 可用`" :severity="dashboard.providers.enabled ? 'success' : 'warn'" /></div><div class="health-row"><span>沙箱</span><UiTag value="Docker" severity="info" /></div></article>
           </section>
-        </template>
+        </div>
 
-        <section v-else-if="active === 'chats'" class="surface page-surface">
-          <header><div><p class="eyebrow">CONTEXTS</p><h2>会话上下文</h2><p>不可变 commit、窗口 token、rebase 标记与消息水位。</p></div><div class="section-actions"><UiButton :disabled="!selectedChat" variant="outlined" label="撤销" icon="pi pi-undo" @click="undoContext" /><UiButton :disabled="!selectedChat" severity="danger" variant="outlined" label="重置" icon="pi pi-refresh" @click="resetContext" /></div></header>
-          <DataGrid :rows="chats" :columns="COLUMNS.chats" data-key="key" paginate clickable empty="还没有任何会话" @row-click="inspectChat" />
+        <section v-else-if="active === 'chats'" key="chats" class="surface page-surface">
+          <header><div><p class="eyebrow">CONTEXTS</p><h2>会话上下文</h2><p>每个会话一张卡片，点开看它的消息窗口与提交历史。</p></div><UiTag :value="`${chats.length} 个会话`" severity="secondary" /></header>
+          <div class="chat-cards">
+            <button v-for="(entry, index) in chatCards" :key="entry.chat.key" type="button" :style="{ animationDelay: `${Math.min(index, 11) * 40}ms` }"
+              :class="['chat-card', entry.isPrivate ? 'private' : 'group', { active: selectedChat?.key === entry.chat.key }]" @click="inspectChat(entry.chat)">
+              <span class="chat-avatar"><i :class="entry.icon" aria-hidden="true" /></span>
+              <b class="chat-name" :title="entry.name">{{ entry.name }}</b>
+              <UiTag :value="entry.isPrivate ? '私聊' : '群聊'" :severity="entry.isPrivate ? 'secondary' : 'info'" />
+              <small class="chat-handle">{{ entry.handle }}</small>
+              <code>{{ entry.chat.key }}</code>
+              <small class="chat-stats">
+                <span><b>{{ entry.chat.messages ?? 0 }}</b>条消息</span>
+                <span><b>{{ Number(entry.chat.tokens ?? 0).toLocaleString() }}</b>token</span>
+                <UiTag v-if="entry.chat.scope === 'thread'" :value="`话题 ${entry.chat.threadId}`" severity="secondary" />
+              </small>
+            </button>
+            <p v-if="!chats.length" class="empty-card">还没有任何会话。bot 收到第一条消息后会在这里出现。</p>
+          </div>
           <div v-if="selectedChat" class="context-workbench">
-            <article class="context-viewer"><header><div><p class="eyebrow">MESSAGE WINDOW</p><h3>{{ selectedChat.key }}</h3></div><UiTag :value="`${contextMessages.filter((entry) => entry.inWindow).length} in window`" severity="info" /></header><ol><li v-for="message in contextMessages" :key="String(message.id)" :class="['context-message', { outside: !message.inWindow, degraded: Number(message.pruneApplied) > 0, rebased: messageMeta(message).rebased === true }]"><button type="button" @click="toggleMessage(message.id)"><span class="ordinal">#{{ message.ordinal }}</span><UiTag :value="String(message.role)" /><UiTag :value="String(message.origin)" severity="secondary" /><UiTag v-if="messageMeta(message).rebased === true" value="REBASED" severity="danger" /><UiTag v-if="!message.inWindow" value="PRUNED FROM WINDOW" severity="warn" /><span>{{ message.textPreview || '[structured content]' }}</span><small>{{ message.tokens }} tok · L{{ message.pruneLevel }}</small></button><pre v-if="expandedMessages.has(String(message.id))" v-text="JSON.stringify(message, null, 2)" /><small v-if="messageMeta(message).unseenOrdinals">未见 ordinal {{ messageMeta(message).unseenOrdinals }}</small></li></ol></article>
-            <article class="commit-timeline"><header><div><p class="eyebrow">COMMIT GRAPH</p><h3>Prune / Rebase 时间线</h3></div></header><ol><li v-for="commit in commits" :key="String(commit.id)" :class="['commit-node', String(commit.kind)]"><span class="commit-rail" /><div><b>{{ commit.kind }}</b><code>{{ String(commit.id).slice(0, 12) }}</code><small>窗口 {{ commit.windowStart }} → {{ commit.headOrdinal }} · {{ commit.tokensTotal }} tokens</small><small v-if="commit.rebased">Rebased over {{ commit.rebaseOver }}</small><small v-if="commit.meta">{{ commit.meta }}</small></div><div class="commit-actions"><UiButton size="small" variant="text" label="快照" @click="inspectCommit(commit.id)" /><UiButton size="small" variant="outlined" label="回滚到此" @click="checkoutCommit(commit.id)" /></div></li></ol><pre v-if="inspectedSnapshot" class="snapshot-preview" v-text="JSON.stringify(inspectedSnapshot, null, 2)" /></article>
+            <article class="context-viewer">
+              <header>
+                <div><p class="eyebrow">MESSAGE WINDOW</p><h3>{{ selectedChatIdentity?.name }}</h3><p class="section-note">按时间倒序，最新的一条在最上面。灰显的条目已被移出窗口：它们还在库里，但下一轮不会发给模型。</p></div>
+                <UiTag :value="`窗口内 ${inWindowCount} / ${contextMessages.length}`" severity="info" />
+              </header>
+              <ol>
+                <li v-for="message in orderedContextMessages" :key="String(message.id)" :class="['context-message', { outside: !message.inWindow, degraded: Number(message.pruneApplied) > 0, rebased: messageMeta(message).rebased === true }]">
+                  <button type="button" @click="toggleMessage(message.id)">
+                    <div class="context-msg-head">
+                      <i :class="['caret', 'pi', expandedMessages.has(String(message.id)) ? 'pi-chevron-down' : 'pi-chevron-right']" aria-hidden="true" />
+                      <span class="ordinal">#{{ message.ordinal }}</span>
+                      <UiTag :value="ROLE_LABELS[String(message.role)] ?? String(message.role)" />
+                      <UiTag :value="ORIGIN_LABELS[String(message.origin)] ?? String(message.origin)" severity="secondary" />
+                      <UiTag v-if="messageMeta(message).rebased === true" value="REBASED" severity="danger" />
+                      <UiTag v-if="!message.inWindow" value="已移出窗口" severity="warn" />
+                      <span v-if="message.speaker" class="who">{{ message.speaker }}</span>
+                      <small class="context-msg-meta">{{ messageTime(message) }} · {{ message.tokens }} tok · L{{ message.pruneLevel }}</small>
+                    </div>
+                    <span :class="['context-msg-text', { structured: !message.textPreview }]">{{ message.textPreview || '[图片 / 文件等非文本内容，展开看完整 parts]' }}</span>
+                  </button>
+                  <pre v-if="expandedMessages.has(String(message.id))" v-text="JSON.stringify(message, null, 2)" />
+                  <small v-if="messageMeta(message).unseenOrdinals">未见 ordinal {{ messageMeta(message).unseenOrdinals }}</small>
+                </li>
+                <li v-if="!contextMessages.length" class="empty">这个会话还没有落过消息。</li>
+              </ol>
+            </article>
+            <article class="commit-timeline">
+              <header><div><p class="eyebrow">COMMIT GRAPH</p><h3>提交与 HEAD</h3></div><UiTag v-if="contextHead" :value="`HEAD ${String(contextHead.id).slice(0, 8)}`" severity="secondary" /></header>
+              <div class="head-actions">
+                <p class="field-title">改这个会话的 HEAD</p>
+                <p>两个动作都不删消息，只挪 <code>done</code> 指针：撤回上一次提交等同 Telegram 的 <code>/undo</code>，清空上下文窗口等同 <code>/new</code>。走错了用下面时间线上的「回滚到此」再走回来。</p>
+                <div class="row">
+                  <UiButton variant="outlined" icon="pi pi-undo" label="撤回上一次提交" :disabled="!canUndoContext" @click="undoContext" />
+                  <UiButton variant="outlined" severity="danger" icon="pi pi-refresh" label="清空上下文窗口" @click="resetContext" />
+                </div>
+              </div>
+              <ol>
+                <li v-for="commit in commits" :key="String(commit.id)" :class="['commit-node', String(commit.kind)]">
+                  <span class="commit-rail" />
+                  <div><b>{{ commit.kind }}<UiTag v-if="contextHead && commit.id === contextHead.id" value="当前 HEAD" severity="success" /></b><code>{{ String(commit.id).slice(0, 12) }}</code><small>窗口 {{ commit.windowStart }} → {{ commit.headOrdinal }} · {{ commit.tokensTotal }} tokens</small><small v-if="commit.rebased">Rebased over {{ commit.rebaseOver }}</small><small v-if="commit.meta">{{ commit.meta }}</small></div>
+                  <div class="commit-actions"><UiButton size="small" variant="text" label="快照" @click="inspectCommit(commit.id)" /><UiButton size="small" variant="outlined" label="回滚到此" :disabled="Boolean(contextHead && commit.id === contextHead.id)" @click="checkoutCommit(commit.id)" /></div>
+                </li>
+                <li v-if="!commits.length" class="empty">还没有提交过任何 commit。</li>
+              </ol>
+              <pre v-if="inspectedSnapshot" class="snapshot-preview" v-text="JSON.stringify(inspectedSnapshot, null, 2)" />
+            </article>
           </div>
         </section>
-        <section v-else-if="active === 'messages'" class="surface page-surface">
+        <section v-else-if="active === 'messages'" key="messages" class="surface page-surface">
           <header><div><p class="eyebrow">ARCHIVE</p><h2>消息与对话</h2><p>默认按 turn 列出最近的模型对话，每页 {{ CONVERSATION_PAGE_SIZE }} 次；搜索走全库归档（中文三字以上 FTS5 trigram，短词回退 LIKE）。</p></div></header>
           <div class="search-row">
             <label class="search grow"><i class="pi pi-search" /><input v-model="query" placeholder="输入关键词搜索中文或英文消息" @keyup.enter="searchArchive"></label>
@@ -772,7 +879,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             </footer>
           </template>
         </section>
-        <section v-else-if="active === 'tools'" class="surface page-surface"><header><div><p class="eyebrow">TOOL POLICY</p><h2>工具与权限</h2><p>单一策略源决定角色、审批和作用域。点任一行查看详情并启停。</p></div><UiTag :value="`${toolRows.filter((row) => row.enabled).length} / ${toolRows.length} 启用`" :severity="toolRows.every((row) => row.enabled) ? 'secondary' : 'warn'" /></header>
+        <section v-else-if="active === 'tools'" key="tools" class="surface page-surface"><header><div><p class="eyebrow">TOOL POLICY</p><h2>工具与权限</h2><p>单一策略源决定角色、审批和作用域。点任一行查看详情并启停。</p></div><UiTag :value="`${toolRows.filter((row) => row.enabled).length} / ${toolRows.length} 启用`" :severity="toolRows.every((row) => row.enabled) ? 'secondary' : 'warn'" /></header>
           <DataGrid :rows="toolRows" :columns="COLUMNS.tools" data-key="name" paginate :page-size="15" clickable @row-click="editTool">
             <template #name="{ data }"><code>{{ data.name }}</code></template>
             <template #source="{ data }">{{ TOOL_SOURCE_LABEL[data.source] ?? data.source }}</template>
@@ -782,8 +889,8 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             <template #enabled="{ data }"><UiTag :value="data.enabled ? '启用' : '已停用'" :severity="data.enabled ? 'success' : 'danger'" /></template>
           </DataGrid>
         </section>
-        <section v-else-if="active === 'extensions'" class="surface page-surface"><header><div><p class="eyebrow">EXTENSIONS</p><h2>Skills / Plugins / MCP</h2><p>Skill 渐进式披露；Plugin 全信任运行；MCP 工具动态发现。</p></div></header><div class="provider-grid"><article v-for="item in [...skills, ...plugins, ...mcp]" :key="item.name"><UiTag :value="item.load_error ? '错误' : item.enabled === 0 ? '停用' : '可用'" :severity="item.load_error ? 'danger' : item.enabled === 0 ? 'secondary' : 'success'" /><h3>{{ item.name }}</h3><p>{{ item.description ?? item.min_role ?? 'extension' }}</p><code v-if="item.load_error">{{ item.load_error }}</code></article><article v-if="!skills.length && !plugins.length && !mcp.length" class="empty-card"><i class="pi pi-box" /><h3>暂无扩展</h3><p>把 Skill、Plugin 或 MCP server 加入配置后重载。</p></article></div></section>
-        <section v-else-if="active === 'agents'" class="surface page-surface"><header><div><p class="eyebrow">AGENT TOPOLOGY</p><h2>子 Agent</h2><p>独立上下文、权限不高于父 Agent，结果全文独立落盘。点任一行编辑，保存即热更新。</p></div><UiButton label="新建 Agent" icon="pi pi-plus" @click="editAgent()" /></header>
+        <section v-else-if="active === 'extensions'" key="extensions" class="surface page-surface"><header><div><p class="eyebrow">EXTENSIONS</p><h2>Skills / Plugins / MCP</h2><p>Skill 渐进式披露；Plugin 全信任运行；MCP 工具动态发现。</p></div></header><div class="provider-grid"><article v-for="item in [...skills, ...plugins, ...mcp]" :key="item.name"><UiTag :value="item.load_error ? '错误' : item.enabled === 0 ? '停用' : '可用'" :severity="item.load_error ? 'danger' : item.enabled === 0 ? 'secondary' : 'success'" /><h3>{{ item.name }}</h3><p>{{ item.description ?? item.min_role ?? 'extension' }}</p><code v-if="item.load_error">{{ item.load_error }}</code></article><article v-if="!skills.length && !plugins.length && !mcp.length" class="empty-card"><i class="pi pi-box" /><h3>暂无扩展</h3><p>把 Skill、Plugin 或 MCP server 加入配置后重载。</p></article></div></section>
+        <section v-else-if="active === 'agents'" key="agents" class="surface page-surface"><header><div><p class="eyebrow">AGENT TOPOLOGY</p><h2>子 Agent</h2><p>独立上下文、权限不高于父 Agent，结果全文独立落盘。点任一行编辑，保存即热更新。</p></div><UiButton label="新建 Agent" icon="pi pi-plus" @click="editAgent()" /></header>
           <DataGrid :rows="agents" :columns="COLUMNS.agents" data-key="name" clickable empty="没有配置子 Agent。模型只有在这里配了 agent 才能用 spawn_agent 派发。" @row-click="editAgent">
             <template #name="{ data }"><code>{{ data.name }}</code></template>
             <template #minRole="{ data }"><UiTag :value="data.minRole" :severity="roleSeverity(data.minRole)" /></template>
@@ -791,14 +898,14 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             <template #tools="{ data }"><span v-if="data.tools.length" class="agent-tools">{{ data.tools.join(' · ') }}</span><small v-else class="alias-empty">未限定，继承父 agent 的可用工具</small></template>
           </DataGrid>
         </section>
-        <section v-else-if="active === 'usage'" class="surface page-surface"><header><div><p class="eyebrow">USAGE LEDGER</p><h2>用量与成本</h2><p>输入、输出、缓存读写分别计价。</p></div></header>
+        <section v-else-if="active === 'usage'" key="usage" class="surface page-surface"><header><div><p class="eyebrow">USAGE LEDGER</p><h2>用量与成本</h2><p>输入、输出、缓存读写分别计价。</p></div></header>
           <DataGrid :rows="usage" :columns="COLUMNS.usage" data-key="id" paginate empty="还没有产生用量">
             <template #ts="{ data }">{{ new Date(data.ts).toLocaleString() }}</template>
             <template #cost_usd="{ data }">${{ Number(data.cost_usd).toFixed(4) }}</template>
           </DataGrid>
         </section>
 
-        <section v-else-if="active === 'principals'" class="surface page-surface"><header><div><p class="eyebrow">ACCESS CONTROL</p><h2>主体与权限</h2><p>effectiveRole 始终取用户与会话角色的较低者。点任一行改角色。</p></div><UiButton label="批量导入" icon="pi pi-upload" @click="openBulk" /></header>
+        <section v-else-if="active === 'principals'" key="principals" class="surface page-surface"><header><div><p class="eyebrow">ACCESS CONTROL</p><h2>主体与权限</h2><p>effectiveRole 始终取用户与会话角色的较低者。点任一行改角色。</p></div><UiButton label="批量导入" icon="pi pi-upload" @click="openBulk" /></header>
           <nav class="subtabs" aria-label="主体类型">
             <button v-for="[key, label] in PRINCIPAL_KINDS" :key="key" type="button" :class="{ active: principalKind === key }" @click="principalKind = key">{{ label }}<span>{{ principalCount(key) }}</span></button>
           </nav>
@@ -814,7 +921,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             <template #role="{ data }"><UiTag :value="data.role" :severity="roleSeverity(data.role)" /></template>
           </DataGrid>
         </section>
-        <section v-else-if="active === 'providers'" class="surface page-surface">
+        <section v-else-if="active === 'providers'" key="providers" class="surface page-surface">
           <header><div><p class="eyebrow">MODEL REGISTRY</p><h2>Provider、模型与别名</h2><p>写入后服务端重建运行时 registry；API Key 只显示 hint。</p></div><UiButton label="添加 Provider" icon="pi pi-plus" @click="editProvider()" /></header>
           <div v-if="modelMissingMain" class="danger-banner"><i class="pi pi-exclamation-triangle" />没有可用的 <code>main</code> 别名（未配置、链为空或链里的模型都不可用），所有轮次都会失败。见下方「别名路由」。</div>
           <div class="provider-grid"><article v-for="provider in providers" :key="provider.id"><div class="provider-head"><div class="provider-tags"><UiTag :value="provider.enabled ? '启用' : '停用'" :severity="provider.enabled ? 'success' : 'secondary'" /><UiTag v-if="provider.healthState" :value="provider.healthState === 'up' ? '连通' : '不可用'" :severity="provider.healthState === 'up' ? 'success' : 'danger'" /></div><div class="card-actions"><UiButton variant="text" size="small" icon="pi pi-bolt" aria-label="测试连接" :loading="testingProvider === provider.id" @click="testProvider(provider)" /><UiButton variant="text" size="small" icon="pi pi-cloud-download" aria-label="从该 Provider 拉取模型" @click="openCatalog(provider.id)" /><UiButton variant="text" size="small" icon="pi pi-pencil" aria-label="编辑 Provider" @click="editProvider(provider)" /><UiButton variant="text" size="small" severity="danger" icon="pi pi-trash" aria-label="删除 Provider" @click="removeProvider(provider.id)" /></div></div><h3>{{ provider.name }}</h3><p>{{ provider.kind }}</p><code>{{ provider.apiKeyHint ?? '未设置密钥' }}</code><small v-if="provider.healthError" class="provider-error">{{ provider.healthError }}</small></article></div>
@@ -834,14 +941,14 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             <template #actions="{ data }"><div class="card-actions"><UiButton variant="text" size="small" :icon="data.state === 'absent' ? 'pi pi-plus' : 'pi pi-pencil'" :aria-label="data.state === 'absent' ? '配置别名' : '编辑别名'" @click="editAlias(data)" /><UiButton v-if="data.state !== 'absent'" variant="text" size="small" severity="danger" icon="pi pi-trash" aria-label="删除别名" @click="removeAlias(data.alias)" /></div></template>
           </DataGrid>
         </section>
-        <section v-else-if="active === 'logs'" class="surface page-surface"><header><div><p class="eyebrow">OBSERVABILITY</p><h2>日志与 Trace</h2><p>点击任一 trace 节点，重建完整调用树并查看 payload。</p></div><UiTag :value="connected ? '实时' : '重连中'" :severity="connected ? 'success' : 'warn'" /></header>
+        <section v-else-if="active === 'logs'" key="logs" class="surface page-surface"><header><div><p class="eyebrow">OBSERVABILITY</p><h2>日志与 Trace</h2><p>点击任一 trace 节点，重建完整调用树并查看 payload。</p></div><UiTag :value="connected ? '实时' : '重连中'" :severity="connected ? 'success' : 'warn'" /></header>
           <DataGrid :rows="logs" :columns="COLUMNS.logs" data-key="id" paginate clickable empty="暂无日志" @row-click="inspectTrace($event.trace_id)">
             <template #ts="{ data }">{{ new Date(data.ts).toLocaleString() }}</template>
             <template #level="{ data }"><span :class="['level', data.level]">{{ data.level }}</span></template>
           </DataGrid>
           <article v-if="traceDetail.length" class="inspector"><header><b>Trace {{ traceDetail[0]?.trace_id }}</b><UiTag :value="`${traceDetail.length} spans`" /></header><ol><li v-for="node in traceDetail" :key="node.id" :style="{ marginLeft: node.parentSpanId ? '24px' : '0' }"><code>{{ node.kind }}</code><span>{{ node.summary }}</span><small>{{ node.durationMs ?? 0 }} ms</small></li></ol></article>
         </section>
-        <section v-else-if="active === 'prompts'" class="surface page-surface"><header><div><p class="eyebrow">PROMPT WORKSPACE</p><h2>提示词编辑与版本</h2><p>每次保存落盘 unified diff；可回滚任意当前可应用的 revision。</p></div></header>
+        <section v-else-if="active === 'prompts'" key="prompts" class="surface page-surface"><header><div><p class="eyebrow">PROMPT WORKSPACE</p><h2>提示词编辑与版本</h2><p>每次保存落盘 unified diff；可回滚任意当前可应用的 revision。</p></div></header>
           <div class="prompt-workbench">
             <div class="prompt-cards">
               <button v-for="doc in promptCards" :key="String(doc.id)" type="button" :class="['prompt-card', { active: String(selectedPrompt?.id ?? '') === String(doc.id) }]" @click="inspectPrompt(doc)">
@@ -864,8 +971,8 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             <article v-else class="editor-panel empty-card"><i class="pi pi-align-left" aria-hidden="true" /><h3>选一份文档开始编辑</h3><p>每次保存都会落一条 unified diff 版本，可随时回滚。</p></article>
           </div>
         </section>
-        <section v-else-if="active === 'tasks'" class="surface page-surface"><header><div><p class="eyebrow">WORK QUEUE</p><h2>任务与审批</h2><p>在途任务、历史状态与高风险工具批准队列。</p></div></header><div class="dashboard-grid"><article class="surface"><h3>任务</h3><DataGrid :rows="tasks" :columns="COLUMNS.tasks" empty="没有在途或历史任务" /></article><article class="surface"><h3>审批</h3><DataGrid :rows="approvals" :columns="COLUMNS.approvals" empty="没有待审批的调用" /></article></div></section>
-        <section v-else-if="active === 'settings'" class="surface page-surface">
+        <section v-else-if="active === 'tasks'" key="tasks" class="surface page-surface"><header><div><p class="eyebrow">WORK QUEUE</p><h2>任务与审批</h2><p>在途任务、历史状态与高风险工具批准队列。</p></div></header><div class="dashboard-grid"><article class="surface"><h3>任务</h3><DataGrid :rows="tasks" :columns="COLUMNS.tasks" empty="没有在途或历史任务" /></article><article class="surface"><h3>审批</h3><DataGrid :rows="approvals" :columns="COLUMNS.approvals" empty="没有待审批的调用" /></article></div></section>
+        <section v-else-if="active === 'settings'" key="settings" class="surface page-surface">
           <header><div><p class="eyebrow">CONFIGURATION</p><h2>配置与维护</h2><p>完整合并配置已通过 zod 校验；密钥字段不会回显。</p></div></header>
           <div class="registry-heading">
             <div><h3>触发与唤醒词</h3><p class="section-note">决定哪条消息会开轮次。五个来源取并集，命中任一条就触发；群里没有任何一条命中时，消息只作为背景发言存档。保存后热更新，下一条消息即生效。</p></div>
@@ -915,7 +1022,8 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
           <div class="registry-heading"><div><h3>合并后的完整配置</h3><p class="section-note">config.yaml → DB 覆盖层 → 环境变量三层合并的结果，只读。</p></div></div>
           <pre class="config-preview" v-text="JSON.stringify(config, null, 2)" />
         </section>
-        <section v-else class="surface page-surface"><header><div><p class="eyebrow">{{ currentLabel.toUpperCase() }}</p><h2>{{ currentLabel }}</h2><p>该页读取统一安全 API；写操作必须携带 Session 与 CSRF token，并记录 webui.action 审计。</p></div></header><DataGrid :rows="logs.slice(0, 12)" :columns="COLUMNS.fallback" data-key="id" empty="暂无事件" /></section>
+        <section v-else key="fallback" class="surface page-surface"><header><div><p class="eyebrow">{{ currentLabel.toUpperCase() }}</p><h2>{{ currentLabel }}</h2><p>该页读取统一安全 API；写操作必须携带 Session 与 CSRF token，并记录 webui.action 审计。</p></div></header><DataGrid :rows="logs.slice(0, 12)" :columns="COLUMNS.fallback" data-key="id" empty="暂无事件" /></section>
+        </Transition>
       </div>
     </section>
 

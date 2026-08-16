@@ -149,7 +149,7 @@ async function commitTurn(t: TurnCtx): Promise<CommitResult> {
     const commit = await repo.insertCommit({
       key: t.key,
       parent_id: headCommit?.id ?? null,          // ← 永远挂在当前 HEAD 之后（线性历史）
-      seq: (headCommit?.seq ?? 0) + 1,
+      seq: await repo.nextSeq(t.key),             // ← MAX(seq)+1，不按 HEAD 递推（见下）
       kind: 'turn',
       turn_id: t.turnId,
       base_commit_id: t.baseCommitId,
@@ -312,7 +312,7 @@ async function prune(key: string, commit: Commit): Promise<Commit | null> {
   }
 
   return repo.insertCommit({          // 裁剪本身也是一个 commit，可审计、可 /undo
-    key, parent_id: commit.id, seq: commit.seq + 1, kind: 'prune',
+    key, parent_id: commit.id, seq: await repo.nextSeq(key), kind: 'prune',
     window_start: windowStart, head_ordinal: commit.head_ordinal,
     tokens_total: tokens, msg_count: count,
     meta: { reason: 'over_limit', from: commit.window_start, to: windowStart },
@@ -376,7 +376,7 @@ type MaterializeResult = {
 | 命令 | 语义 | 实现 |
 |---|---|---|
 | `/new` | 开新话题：不删历史，仅把窗口收缩到空 | 写 `kind='reset'` commit，`window_start = head_ordinal + 1` |
-| `/undo` | 撤销上一轮：done 指针回退一个 commit | `setRef(key,'done', head.parent_id)`；`context_messages` 不删（后续新 turn 的 ordinal 仍从当前最大值继续，不复用）|
+| `/undo` | 撤销上一轮：done 指针回退一个 commit | `setRef(key,'done', head.parent_id)`；`context_messages` 不删（后续新 turn 的 ordinal 仍从当前最大值继续，不复用）。**`seq` 同理按 `MAX(seq)+1` 分配**：`ux_commits_key_seq` 是唯一索引，按 `head.seq+1` 递推会让撤销之后的下一次写入撞唯一约束 —— 表现是「撤销过的会话，下一条消息直接失败」，且 WebUI 的「回滚到此」一并 500 |
 | `/ctx` | 显示上下文状态 | commit seq、窗口 `[start,head]`、消息数、token 数/上限、最近一次 rebase/prune、claim 水位 |
 | `/ctx export` | 导出当前窗口为 `.md`（仅 owner） | 走 `sendDocument` |
 | WebUI「回滚到此 commit」 | 任意 commit 设为 done（owner） | `setRef` + 写 `kind='manual'` 审计 commit |

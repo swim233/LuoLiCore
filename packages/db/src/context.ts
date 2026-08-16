@@ -167,7 +167,7 @@ export class ContextRepository {
           tokens: tokenCount, meta: meta ? JSON.stringify(meta) : null, createdAt: Date.now() });
       }
       const id = ulid();
-      const seq = (head?.seq ?? 0) + 1;
+      const seq = this.nextSeq();
       const windowStart = head?.windowStart ?? start;
       const totals = this.effectiveStats(windowStart, ordinal);
       this.db.prepare(`INSERT INTO context_commits(id,key,seq,parent_id,kind,turn_id,base_commit_id,rebased,rebase_over_json,
@@ -183,12 +183,22 @@ export class ContextRepository {
     })();
   }
 
+  /**
+   * seq 是这张表的插入序号，只能按 MAX(seq) 递推。按 HEAD 递推的话，`/undo` 把 HEAD 退回上一个
+   * commit 之后，下一次写入就会撞 `ux_commits_key_seq` —— 撤销过的会话下一条消息直接失败，
+   * WebUI 的「回滚到此」也一并 500（docs/02 §7）。commitsAfter / hasResetAfter 要的都是
+   * 「插入得比它晚」，与 HEAD 位置无关，因此这个语义对它们也是对的。
+   */
+  nextSeq(): number {
+    return ((this.db.prepare('SELECT COALESCE(MAX(seq),0) AS value FROM context_commits WHERE key=?').get(this.key) as { value: number }).value) + 1;
+  }
+
   insertControl(kind: 'reset' | 'manual' | 'revert' | 'prune', input: { windowStart: number; headOrdinal: number; parentId?: string | null; meta?: unknown; createdBy: string }): CommitRow {
     const head = this.head();
     const id = ulid();
     const totals = this.effectiveStats(input.windowStart, input.headOrdinal);
     this.db.prepare(`INSERT INTO context_commits(id,key,seq,parent_id,kind,window_start,head_ordinal,tokens_total,msg_count,meta_json,created_at,created_by)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, this.key, (head?.seq ?? 0) + 1, input.parentId ?? head?.id ?? null, kind,
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, this.key, this.nextSeq(), input.parentId ?? head?.id ?? null, kind,
       input.windowStart, input.headOrdinal, totals.tokens, totals.count, input.meta ? JSON.stringify(input.meta) : null, Date.now(), input.createdBy);
     this.setHead(id);
     return this.commit(id)!;
