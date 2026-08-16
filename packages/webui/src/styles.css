@@ -44,6 +44,49 @@ body.modal-open { overflow: hidden; }
 button, input, select, textarea { font: inherit; }
 button { cursor: pointer; }
 code { font-family: var(--font-mono); font-size: .82rem; }
+
+/* ── 滚动条：原生那条 15px 灰槽跟这套 12–20px 圆角卡片是两种年代的东西，而页面里有七八处
+   独立滚动区（消息窗口、载荷 pre、工具多选、模型链），每一处都会露出来。统一成透明轨道 +
+   圆角滑块：靠 3px 透明边框 + background-clip 做出内缩，hover 才升到主色。 ── */
+::-webkit-scrollbar { width: 12px; height: 12px; }
+::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+::-webkit-scrollbar-thumb { border: 3px solid transparent; border-radius: 999px; background-clip: padding-box; background-color: color-mix(in srgb, var(--muted), transparent 58%); transition: background-color 160ms ease; }
+::-webkit-scrollbar-thumb:hover { background-color: color-mix(in srgb, var(--primary), transparent 28%); }
+::-webkit-scrollbar-thumb:active { background-color: var(--primary); }
+/* 载荷 pre 与侧栏在两套主题下都是固定深色，滑块得跟着它们走，不能跟着页面主题走 */
+:is(pre, .config-preview, .sidebar nav)::-webkit-scrollbar-thumb { background-color: rgba(217, 224, 238, .26); }
+:is(pre, .config-preview, .sidebar nav)::-webkit-scrollbar-thumb:hover { background-color: rgba(154, 124, 244, .8); }
+/* Chrome 121 起只要元素上出现 scrollbar-width，整套 ::-webkit-scrollbar-* 就被忽略。
+   标准属性因此只发给不认 webkit 伪元素的浏览器（Firefox），那边拿到的是同色系的细滚动条。 */
+@supports not selector(::-webkit-scrollbar) {
+  * { scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--muted), transparent 45%) transparent; }
+  :is(pre, .config-preview, .sidebar nav) { scrollbar-color: rgba(217, 224, 238, .3) transparent; }
+}
+
+/* ── 动效：页面切换整块淡入上移；点击一律有按下反馈。左侧导航常驻不动，所以不做横向滑动
+   —— 横移会读成「整页被推走了」。所有时长都收在 300ms 内，翻页不等动画。 ── */
+.page-enter-active { transition: opacity 240ms cubic-bezier(.22, .61, .36, 1), transform 240ms cubic-bezier(.22, .61, .36, 1); }
+.page-leave-active { transition: opacity 120ms ease-in, transform 120ms ease-in; }
+.page-enter-from { opacity: 0; transform: translateY(10px); }
+.page-leave-to { opacity: 0; transform: translateY(-6px); }
+@keyframes rise-in { from { opacity: 0; transform: translateY(12px); } }
+@keyframes reveal-down { from { opacity: 0; transform: translateY(-5px); } }
+.page-enter-active .metric-grid article { animation: rise-in 420ms cubic-bezier(.22, .61, .36, 1) backwards; }
+.page-enter-active .metric-grid article:nth-child(2) { animation-delay: 50ms; }
+.page-enter-active .metric-grid article:nth-child(3) { animation-delay: 100ms; }
+.page-enter-active .metric-grid article:nth-child(4) { animation-delay: 150ms; }
+:is(.context-message pre, .detail-payload, .conversation-full) { animation: reveal-down 200ms ease backwards; }
+.ui-btn:active:not(:disabled) { transform: translateY(0) scale(.97); box-shadow: none; transition-duration: 80ms; }
+.icon-btn:active:not(:disabled) { transform: scale(.88); }
+.subtabs button:active, .grid-pager button:active:not(:disabled) { transform: scale(.94); }
+.theme-toggle { transition: 160ms ease; }
+.theme-toggle:hover { color: var(--primary); border-color: color-mix(in srgb, var(--primary), transparent 55%); }
+.theme-toggle:active { transform: scale(.92); }
+:is(.ui-btn, .icon-btn, .subtabs button, .sidebar nav button, .prompt-card, .chat-card, .theme-toggle):focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.overlay-enter-active .ui-modal, .overlay-leave-active .ui-modal { transition: transform 220ms cubic-bezier(.22, .61, .36, 1), opacity 200ms ease; }
+.overlay-enter-from .ui-modal { opacity: 0; transform: translateY(14px) scale(.97); }
+.overlay-leave-to .ui-modal { opacity: 0; transform: scale(.985); }
+
 .theme-toggle { position: fixed; z-index: 20; right: 18px; bottom: 18px; width: 46px; height: 46px; border-radius: 14px; border: 1px solid var(--border); background: var(--surface); color: var(--ink); box-shadow: var(--shadow); }
 .eyebrow { color: var(--primary); font-family: var(--font-mono); font-weight: 600; font-size: .68rem; letter-spacing: .16em; margin: 0 0 8px; }
 .brand-mark { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 13px; background: #5630b9; color: #fff; font: 600 1.1rem var(--font-mono); box-shadow: 0 10px 24px color-mix(in srgb, var(--primary), transparent 68%); }
@@ -104,6 +147,7 @@ select { appearance: none; padding-right: 30px; background-image: url("data:imag
 .data-grid td { padding: 11px 12px; border-top: 1px solid var(--border); vertical-align: middle; overflow-wrap: break-word; }
 .data-grid tbody tr:nth-child(even) { background: color-mix(in srgb, var(--surface-2), transparent 45%); }
 .data-grid.clickable tbody tr:not(.grid-note) { cursor: pointer; }
+.data-grid tbody tr { transition: background-color 140ms ease; }
 .data-grid tbody tr:not(.grid-note):hover { background: var(--primary-soft); }
 .data-grid tr.picked { background: var(--primary-soft) !important; }
 .data-grid tr.unpickable { opacity: .55; }
@@ -177,9 +221,13 @@ select { appearance: none; padding-right: 30px; background-image: url("data:imag
 .brand b { display: block; letter-spacing: -.02em; }
 .brand span { display: block; color: #7d8493; font: 500 .58rem var(--font-mono); letter-spacing: .12em; margin-top: 3px; }
 .sidebar nav { display: grid; gap: 3px; overflow-y: auto; }
-.sidebar nav button { min-height: 42px; display: flex; align-items: center; gap: 13px; padding: 0 13px; border: 0; border-radius: 10px; color: #959dac; background: transparent; text-align: left; transition: 180ms ease; }
+.sidebar nav button { position: relative; min-height: 42px; display: flex; align-items: center; gap: 13px; padding: 0 13px; border: 0; border-radius: 10px; color: #959dac; background: transparent; text-align: left; transition: 180ms ease; }
 .sidebar nav button:hover { color: white; background: #1b1e27; }
-.sidebar nav button.active { color: white; background: #272035; box-shadow: inset 3px 0 #8f6deb; }
+.sidebar nav button:active { transform: scale(.98); }
+.sidebar nav button.active { color: white; background: #272035; }
+/* 选中标记从中间长出来而不是整条闪现：切页时视线正好落在这一条上 */
+.sidebar nav button::before { content: ''; position: absolute; left: 0; top: 50%; width: 3px; height: 0; border-radius: 0 3px 3px 0; background: #8f6deb; transform: translateY(-50%); transition: height 220ms cubic-bezier(.22, .61, .36, 1); }
+.sidebar nav button.active::before { height: 22px; }
 .sidebar nav i { width: 18px; color: #777f90; }
 .sidebar nav button.active i { color: #aa8cff; }
 .system-pill { margin-top: auto; border: 1px solid #292d37; background: #191c24; border-radius: 13px; padding: 12px; display: flex; align-items: center; gap: 10px; }
@@ -268,29 +316,71 @@ select { appearance: none; padding-right: 30px; background-image: url("data:imag
 .mobile-nav button { min-height: 46px; border: 0; border-radius: 10px; text-align: left; padding: 0 14px; display: flex; gap: 12px; align-items: center; background: transparent; color: inherit; }
 .mobile-nav button:hover { background: var(--primary-soft); color: var(--primary); }
 
+/* ── 会话卡片：表格那四列里最靠左的是 `chat:-1002492583774`，运维认不出这是哪个群。
+   卡片把「这是谁」放在第一位，contextKey 退到第二行。 ── */
+.chat-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(266px, 1fr)); align-content: start; gap: 12px; }
+.chat-card { display: grid; grid-template-columns: 44px minmax(0, 1fr) auto; gap: 2px 13px; padding: 15px; border: 1px solid var(--border); border-radius: 16px; background: var(--surface); color: inherit; text-align: left; transition: 160ms ease; animation: rise-in 380ms cubic-bezier(.22, .61, .36, 1) backwards; }
+.chat-card:hover { border-color: color-mix(in srgb, var(--primary), transparent 55%); box-shadow: 0 8px 22px rgba(37, 27, 73, .06); transform: translateY(-1px); }
+.chat-card:active { transform: translateY(0) scale(.99); box-shadow: none; transition-duration: 80ms; }
+.chat-card.active { border-color: var(--primary); background: var(--primary-soft); }
+.chat-avatar { grid-row: span 2; align-self: center; display: grid; place-items: center; width: 44px; height: 44px; border-radius: 14px; background: var(--surface-2); color: var(--cyan); font-size: 1.05rem; }
+.chat-card.private .chat-avatar { color: var(--primary); }
+.chat-card.active .chat-avatar { background: var(--surface); }
+.chat-name { align-self: end; min-width: 0; font-size: .95rem; letter-spacing: -.01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-card > .ui-tag { grid-column: 3; grid-row: 1; align-self: end; justify-self: end; }
+.chat-handle { grid-column: 2 / -1; align-self: start; color: var(--muted); font: .7rem/1.6 var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-card > code { grid-column: 1 / -1; margin-top: 9px; color: var(--primary); overflow-wrap: anywhere; }
+.chat-stats { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; margin-top: 11px; padding-top: 11px; border-top: 1px solid var(--border); color: var(--muted); font-size: .7rem; }
+.chat-card.active .chat-stats { border-top-color: color-mix(in srgb, var(--primary), transparent 72%); }
+.chat-stats b { color: var(--ink); font: 600 .8rem var(--font-mono); margin-right: 4px; }
+.chat-cards .empty-card { grid-column: 1 / -1; margin: 0; border: 1px dashed var(--border); border-radius: 16px; }
+
 .context-workbench, .prompt-workbench { display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, .9fr); gap: 18px; margin-top: 20px; }
 .commit-timeline, .editor-panel { padding: 18px; border: 1px solid var(--border); border-radius: 18px; background: var(--surface-2); }
 .commit-timeline ol, .revision-list { list-style: none; padding: 0; margin: 14px 0 0; }
 .commit-node { position: relative; display: grid; grid-template-columns: 16px 1fr auto; gap: 10px; align-items: start; padding: 0 0 18px; }
 .commit-node div { display: grid; gap: 4px; }
+.commit-node b { display: flex; align-items: center; gap: 8px; }
 .commit-node code { color: var(--primary); }
 .commit-node small, .revision-list small { color: var(--muted); }
 .commit-rail { width: 10px; height: 10px; margin-top: 5px; border-radius: 50%; background: var(--primary); box-shadow: 0 0 0 4px var(--primary-soft); }
 .commit-node:not(:last-child) .commit-rail::after { content: ''; position: absolute; left: 4px; top: 15px; width: 2px; height: calc(100% - 12px); background: var(--border); }
 .commit-node.prune .commit-rail { background: var(--amber); }
 .commit-node.reset .commit-rail { background: var(--rose); }
+.commit-timeline > ol { max-height: 560px; overflow: auto; padding-right: 4px; }
+/* 这两个动作改的是 HEAD 指针，只对「当前选中的会话」有意义 —— 放在页头时既看不出改的是谁，
+   也看不出改的是什么。挪到 commit 图这张卡片里，跟它下面那条时间线是同一件事。 */
+.head-actions { display: grid; gap: 10px; margin-top: 14px; padding: 13px 14px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); }
+.head-actions > p { margin: 0; color: var(--muted); font-size: .74rem; line-height: 1.6; }
+.head-actions .field-title { display: block; margin: 0; font-size: .78rem; font-weight: 600; }
+.head-actions .row { display: flex; flex-wrap: wrap; gap: 8px; }
+.head-actions .row .ui-btn { flex: 1 1 auto; }
 .editor-panel header, .revision-list li { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 .editor-panel textarea { width: 100%; min-height: 420px; margin-top: 14px; resize: vertical; padding: 16px; border: 1px solid var(--border); border-radius: 12px; background: var(--canvas); color: var(--ink); font: .88rem/1.6 var(--font-mono); }
 .revision-list li { padding: 10px 0; border-bottom: 1px solid var(--border); }
 .revision-list div { display: grid; gap: 3px; }
 .section-actions, .commit-actions { display: flex; align-items: center; gap: 8px; }
 .context-viewer { min-width: 0; padding: 18px; border: 1px solid var(--border); border-radius: 18px; background: var(--surface-2); }
-.context-viewer > header { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
-.context-viewer ol { list-style: none; padding: 0; margin: 14px 0 0; display: grid; gap: 8px; max-height: 720px; overflow: auto; }
+.context-viewer > header, .commit-timeline > header { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+:is(.context-viewer, .commit-timeline) > header > div { flex: 1 1 auto; min-width: 0; }
+:is(.context-viewer, .commit-timeline) > header > .ui-tag { flex: none; margin-top: 2px; }
+.context-viewer > header .section-note { margin: 6px 0 0; font-size: .76rem; line-height: 1.55; }
+.context-viewer ol { list-style: none; padding: 0 4px 0 0; margin: 14px 0 0; display: grid; gap: 8px; max-height: 720px; overflow: auto; }
 .context-message { border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: var(--surface); }
-.context-message > button { width: 100%; display: grid; grid-template-columns: auto auto auto auto minmax(140px, 1fr) auto; gap: 8px; align-items: center; border: 0; padding: 11px; text-align: left; background: transparent; color: inherit; }
+/* 徽标数量是可变的（REBASED / 已移出窗口按需出现），原来那套六列固定网格对不上：正文会掉进
+   一个 auto 列里缩成 min-content，一句话被切成竖排。改成「一行徽标 + 一行正文」的纵向布局，
+   徽标多几个只会换行，正文永远占满整行宽。 */
+.context-message > button { width: 100%; display: flex; flex-direction: column; align-items: stretch; gap: 7px; border: 0; padding: 11px 13px; text-align: left; background: transparent; color: inherit; transition: background-color 140ms ease; }
+.context-message > button:hover { background: color-mix(in srgb, var(--primary-soft), transparent 45%); }
+.context-msg-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+.context-msg-head > .caret { color: var(--muted); font-size: .68rem; }
+.context-msg-head .who { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .78rem; font-weight: 600; }
+.context-msg-head .context-msg-meta { margin-left: auto; flex: none; color: var(--muted); font: .68rem var(--font-mono); }
+.context-msg-text { display: -webkit-box; -webkit-line-clamp: 3; line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; font-size: .82rem; line-height: 1.6; }
+.context-msg-text.structured { color: var(--muted); font-style: italic; }
 .context-message .ordinal { color: var(--primary); font: 600 .72rem var(--font-mono); }
 .context-message small { color: var(--muted); }
+.context-message > small { display: block; padding: 0 13px 10px; }
 .context-message pre, .snapshot-preview { margin: 0; padding: 14px; overflow: auto; background: #10131a; color: #d9e0ee; font: .72rem/1.55 var(--font-mono); }
 .context-message.outside { opacity: .58; border-style: dashed; }
 .context-message.degraded { background: color-mix(in srgb, var(--amber), transparent 92%); }
@@ -392,6 +482,7 @@ select { appearance: none; padding-right: 30px; background-image: url("data:imag
 .prompt-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(232px, 1fr)); align-content: start; gap: 12px; }
 .prompt-card { display: grid; grid-template-columns: 38px 1fr auto; gap: 4px 11px; padding: 15px; border: 1px solid var(--border); border-radius: 16px; background: var(--surface); color: inherit; text-align: left; transition: 160ms ease; }
 .prompt-card:hover { border-color: color-mix(in srgb, var(--primary), transparent 55%); box-shadow: 0 8px 22px rgba(37, 27, 73, .06); transform: translateY(-1px); }
+.prompt-card:active { transform: translateY(0) scale(.99); box-shadow: none; transition-duration: 80ms; }
 .prompt-card.active { border-color: var(--primary); background: var(--primary-soft); }
 .prompt-icon { grid-row: span 2; display: grid; place-items: center; width: 38px; height: 38px; border-radius: 12px; background: var(--surface-2); color: var(--primary); }
 .prompt-card.active .prompt-icon { background: var(--surface); }
@@ -435,7 +526,6 @@ select { appearance: none; padding-right: 30px; background-image: url("data:imag
 }
 @media (max-width: 1000px) { .chain-picker { grid-template-columns: 1fr; } }
 @media (max-width: 900px) { .context-workbench, .prompt-workbench { grid-template-columns: 1fr; } }
-@media (max-width: 1100px) { .context-message > button { grid-template-columns: auto auto auto 1fr; } .context-message > button > :nth-child(4) { grid-column: span 1; } }
 @media (max-width: 800px) {
   .console-shell { grid-template-columns: 1fr; }
   .sidebar { display: none; }

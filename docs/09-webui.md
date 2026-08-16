@@ -67,11 +67,24 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
 - 系统信息：版本、上线时长、DB 大小、WAL 大小、workspace 占用、沙箱可用性、MCP 状态摘要。
 
 ### 3.2 会话（Chats）
-- 会话列表（`DataGrid`，可搜索/排序）：chat、类型、角色、消息数、上下文 token/上限、最后活跃、今日花费、`contextScope`。
-- 详情三个 Tab：
-  1. **上下文查看器**：当前窗口的消息序列（时间线或虚拟滚动列表）。每条显示 ordinal、role、origin、speaker、tokens、`prune_level`；被裁剪/降级的条目灰显并可展开原文；`rebased` 消息打红色徽标（`UiTag`）并显示「未见 ordinal 5–6」。
-  2. **Commit 时间线**：`DataGrid` 列出 commits（seq、kind、window、head、tokens、rebased、base≠parent 时的对比）。操作：`[查看快照]` `[回滚到此]`（二次确认）。
-  3. **设置**：`contextScope` 切换、唤醒词、`output.mode` 覆盖、模型别名固定、`background.maxPerTurn` 覆盖、`[/new]` `[/undo]` 按钮。
+- **会话列表是卡片而不是表格**：表格里最靠左的一列是 `chat:-1002492583774`，运维认不出这是哪个群。
+  每个会话一张卡片，第一行就是**这是谁** —— 群聊显示群组名、私聊显示对方昵称。名字来自 `principals`
+  （群走 `chat:<id>` 的 title；私聊优先取 `user:<id>` 的全名，`chat:<id>` 对私聊只存了 first_name），
+  没登记过的会话退回 `未登记群聊/用户 <id>`，并按 Telegram 的「群/频道 id 一律为负」判断类型。
+  第二行是 `@username`，没有用户名时改写会话类型（超级群 / 频道 / 私聊）—— 不重复下面那行 contextKey。
+  卡片底部是 contextKey、消息数与窗口 token；`contextScope='thread'` 的会话多一个「话题 N」徽标。
+- 选中一张卡片后，下面是并排的两块工作台：
+  1. **上下文查看器**：当前窗口的消息序列，**按时间倒序 —— 最新的一条在最上面**（与消息页、commit
+     时间线一致；ordinal 在提交时单调分配，倒排 ordinal 即倒排时间）。每条是一行徽标（ordinal、role、
+     origin、speaker、时间、tokens、`prune_level`）+ 一行正文，正文永远占满整行：徽标数量是可变的
+     （REBASED / 已移出窗口按需出现），用固定列数的网格排会把正文挤成 min-content 的竖排。
+     被裁剪/降级的条目灰显并可展开原文；`rebased` 消息打红色徽标（`UiTag`）并显示「未见 ordinal 5–6」。
+  2. **Commit 时间线**：列出 commits（seq、kind、window、head、tokens、rebased、base≠parent 时的对比）。
+     操作：`[查看快照]` `[回滚到此]`（当前 HEAD 那一行禁用）。
+     卡片顶部是**「改这个会话的 HEAD」**：`[撤回上一次提交]`（= `/undo`，HEAD 已是首个 commit 时禁用）与
+     `[清空上下文窗口]`（= `/new`，二次确认）。这两个动作只对「当前选中的会话」有意义，放在页头时既看不出
+     改的是谁也看不出改的是什么，因此跟它们操作的那张 commit 图放在一起，并在按钮上方写明二者都不删消息、
+     走错了可以用同一张卡片里的 `[回滚到此]` 走回来。
 
 ### 3.3 消息与对话（Messages）
 - **默认视图是「最近的模型对话」而不是消息流**：一次 turn 的提问与回答分散在多行 `messages` 里，
@@ -345,6 +358,18 @@ packages/webui/
   直接用 `styles.css` 的 `--surface` / `--border` / `--primary` 等变量，深浅色跟随 `<html class="dark">` 一处切换。
 - **通知只有一种**：任何写操作的成败反馈都走 `pushToast()`（[§3.5](#35-provider-与模型) 的 `[测试连接]` 是基准样式），
   不再有第二套「顶栏静态横幅」。页内校验类提示（登录失败、别名链有失效模型）仍用 `.callout` 内联块，因为它们要跟着表单走。
+- **滚动条也在设计系统里**。页面上有七八处独立滚动区（消息窗口、commit 时间线、载荷 `pre`、工具多选、
+  模型链、侧栏导航），原生滚动条那条灰槽跟这套 12–20 px 圆角卡片是两种年代的东西，每一处都会露出来。
+  统一成透明轨道 + 圆角滑块（3 px 透明边框 + `background-clip: padding-box` 做内缩），hover 升到主色。
+  **`scrollbar-width` / `scrollbar-color` 只能发给 Firefox**：Chrome 121 起，元素上一旦出现 `scrollbar-width`，
+  整套 `::-webkit-scrollbar-*` 就被忽略，两者同时写等于自己把圆角滑块关掉 —— 用
+  `@supports not selector(::-webkit-scrollbar)` 把标准属性圈起来。固定深色的 `pre` 与侧栏另给一套浅色滑块。
+- **动效有统一的三档**，全部收在 300 ms 内，且 `prefers-reduced-motion` 一处关掉：
+  页面切换是内容区整块淡入上移（`<Transition name="page" mode="out-in">`，每个分支必须带 `key` ——
+  相邻页面都是 `<section>`，没有 key 时 Vue 认成同一个节点，只换内容不走过渡）；
+  列表入场是 `rise-in` 逐项错开（会话卡片、总览指标卡）；点击一律有按下反馈（按钮 `scale(.97)`、
+  图标按钮 `scale(.88)`、对话框 `scale(.97)` 弹入）。左侧导航常驻不动，所以页面切换不做横向滑动 ——
+  横移会读成「整页被推走了」。
 - 表格统一虚拟滚动 + 服务端分页/排序/筛选（日志与消息量可能很大）。
 - 所有金额显示 4 位小数 + hover 显示完整值；token 显示千分位。
 - **只读渲染安全**：消息内容、日志 payload 一律作为纯文本渲染（`v-text` / `<pre>`），**禁止 `v-html`**（消息内容来自不可信用户）。
