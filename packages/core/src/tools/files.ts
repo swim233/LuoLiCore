@@ -15,6 +15,15 @@ export class FileTools {
     return existsSync(this.jail.resolve(path));
   }
 
+  /**
+   * jail 内的绝对路径。给「把文件交出去而不是读进来」的调用方用（`send_file` / `send_photo`
+   * 要把路径递给 grammy 的 InputFile）—— 50MB 的附件不该先进内存再发一遍。
+   * 解析失败照旧抛 `path_outside_workspace` / `path_denied`：越界必须在拿到路径之前就断掉。
+   */
+  resolve(path: string): string {
+    return this.jail.resolve(path);
+  }
+
   read(path: string, offset = 0, limit = this.maxReadBytes): Record<string, unknown> {
     const target = this.jail.resolve(path);
     const buffer = readFileSync(target);

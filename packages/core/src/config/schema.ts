@@ -34,7 +34,7 @@ export const HOT_RELOADABLE_CONFIG_KEYS = [
   'prompt.maxTokens',
   'agent.main', 'agent.agents',
   'provider.maxRetries', 'provider.retryBaseMs', 'provider.retryMaxMs', 'provider.catalog',
-  'tools.maxRegistered', 'tools.maxCallsPerTurn', 'tools.maxConsecutiveErrors', 'tools.overrides', 'tools.exec',
+  'tools.maxRegistered', 'tools.maxCallsPerTurn', 'tools.maxConsecutiveErrors', 'tools.overrides', 'tools.exec', 'tools.tg',
   'approval.enabled', 'approval.ttlMs', 'approval.rules', 'approval.skipForOwner', 'approval.rememberWithinTurn',
   // captureBodies 是每轮从 turn.config 现读的（runtime.ts 的 bodyForLog、/api/turns/:id/detail），
   // 改完下一轮就生效。漏在白名单外时 WebUI 会对着排障时最常翻的这个开关说「需重启」。
@@ -81,8 +81,6 @@ export const KNOWN_UNIMPLEMENTED_CONFIG_KEYS = [
   'tools.archive.maxSearchLimit',
   'tools.archive.defaultReadLimit',
   'tools.archive.maxReadLimit',
-  'tools.tg.maxExtraMessagesPerTurn',
-  'tools.tg.maxFileSendMb',
   'tools.web.summarizeWithAlias',
   'tools.web.allowlist',
   'tools.web.denylist',

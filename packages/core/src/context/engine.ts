@@ -165,6 +165,7 @@ export class ContextEngine {
       return { turnId, key: request.key, chatId: request.chatId, threadId: request.threadId,
         initiatorUserId: request.initiatorUserId, effectiveRole: request.effectiveRole, isPrivate: request.isPrivate, baseCommitId: head?.id ?? null, claimThroughMessageId: request.trigger.id,
         initiator: { name: request.trigger.fromName ?? null, username: request.trigger.fromUsername ?? null },
+        triggerTgMessageId: request.trigger.tgMessageId,
         snapshot, delta, abortSignal: request.abortSignal, tokenRatio: ctx.tokenRatio, config: request.config };
     }
   }

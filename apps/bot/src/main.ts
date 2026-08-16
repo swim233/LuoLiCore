@@ -8,7 +8,7 @@ import { ArchiveRepository, OperationsRepository, PrincipalRepository, TurnRepos
 import { AgentManager, AgentResultStore, ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, FileTools, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, ModelRegistry, PathJail, PluginManager, PromptAssembler, PromptDocuments, ProviderStore, QuotaGuard, Sandbox, Scheduler, Secrets, SkillLoader, STABLE_PROMPT_BLOCKS, TOOL_POLICY, ToolRegistry, TurnConcurrency, TurnRegistry, UsageLedger, assembleMainPrompt, configSchema, loadConfig, perChatConfig, registerBuiltins, rejectedWakewords, runSubAgent, streamMainAgent, type SubAgentRuntimeEvent } from '@luoli/core';
 import { createServer, setupToken, type PromptPreviewResult } from '@luoli/server';
 import type { RuntimeTurnContext } from '@luoli/shared';
-import { createTelegramBot } from '@luoli/telegram';
+import { TelegramTools, createTelegramBot } from '@luoli/telegram';
 
 const startedAt = Date.now();
 const TOKEN_REPAIR_KEY = 'repair:context-tokens:v1';
@@ -121,11 +121,19 @@ const sandbox = new Sandbox(() => {
 }, undefined, undefined, (message) => log.event({ level: 'warn', kind: 'sandbox.weak_isolation', summary: message }));
 const sandboxProbe = await sandbox.probe();
 if (!sandboxProbe.available && config.sandbox.mode === 'docker') log.event({ level: 'error', kind: 'sandbox.unavailable', summary: sandboxProbe.error ?? 'Docker sandbox unavailable' });
+// bot 要到最后才建得起来，而工具在这里就得注册完，所以桥拿的是 getter。**presence 即开关**：
+// `available()` 判的就是 `telegram` 在不在，没有 BOT_TOKEN 时这一族工具必须整体不进目录，
+// 而不是进了目录再在调用时失败。
+let bot: Bot | null = null;
+const telegramTools = process.env.BOT_TOKEN
+  ? new TelegramTools({ bot: () => bot, archive, maxMessageChars: () => configStore.snapshot().output.maxMessageChars })
+  : null;
 registerBuiltins(toolRegistry, {
   db, filesFor: (workspace) => new FileTools(new PathJail(workspace, config.tools.fs.denyGlobs), config.tools.fs.maxReadBytes, config.tools.fs.maxWriteBytes, { showHidden: config.tools.fs.showHidden, trashDir: config.tools.fs.trashDir, backupDir: config.tools.fs.backupDir }),
   sandbox, archive, context, memory, skills, agents, models: modelRegistry, ledger, log, quota, pubWriteMinRole: config.memory.pubWriteMinRole,
   maxWebBytes: config.tools.web.maxResponseBytes, maxAsksPerRun: config.agent.maxAsksPerRun, askTimeoutMs: config.agent.askTimeoutMs,
   webSearch: { provider: config.tools.web.searchProvider, apiKey: config.tools.web.searchApiKey },
+  telegram: telegramTools,
 });
 plugins.bindRegistry(toolRegistry);
 mcp.bindRegistry(toolRegistry);
@@ -215,8 +223,6 @@ events.subscribe((event) => {
   }).catch((error) => log.event({ level: 'error', kind: 'config.invalid', summary: error instanceof Error ? error.message : String(error) }));
 });
 log.event({ level: 'info', kind: 'system.start', summary: 'LuoLiCore started', data: { webui: `${config.webui.host}:${config.webui.port}`, providerSecrets: secrets.available } });
-let bot: Bot | null = null;
-
 if (process.env.BOT_TOKEN) {
   bot = await createTelegramBot(process.env.BOT_TOKEN, { config: configStore, db, principals, archive, operations, context, turns, quota, memory, plugins, tools: toolRegistry, approvals: approval,
     registry: turnRegistry, concurrency: turnConcurrency, log,
