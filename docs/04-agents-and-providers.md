@@ -479,9 +479,44 @@ fallbackModel(chain, cfg) 语义：
   错误按 `unauthorized / not_found / upstream_error / timeout / network / invalid_response / missing_base_url / no_master_key` 归类，
   上游响应体只截前 300 字符做摘要（**先过一遍日志脱敏正则**，网关会把请求头回显进错误体）。健康状态写入规则见 [09 §4](./09-webui.md#4-rest-api)。
 
+### 5.4.1 模型元数据目录（models.dev）
+
+上游的模型目录接口只回模型名 —— Google 额外给 `inputTokenLimit`/`outputTokenLimit`，OpenAI 与
+Anthropic 连这个都没有，定价、输入模态、可用思考档位没有任何一家给。这些事实来自
+[models.dev](https://models.dev) 的公共目录（`api.json`：185 家 provider、6586 条模型），
+实现在 `packages/core/src/provider/model-catalog.ts`。
+
+- **不实时拉**：缓存在 `provider.catalog.cacheFile`（默认 `./data/cache/models.dev.json`），
+  ETag 与拉取时间写 `app_kv` 的 `catalog:models.dev`（**不能写 `config_kv`** —— 那张表的每一行都会被
+  `loadConfig` 当配置覆盖层解析，见 [11 §2](./11-config-reference.md)）。
+- **触发点只有两个**：WebUI 点「从 Provider 拉取模型」，或点「刷新目录」。启动、定时任务、
+  聊天链路都不碰它 —— 一个聊天机器人不该因为元数据目录抖动而受影响。
+- **续期走条件请求**：缓存年龄超过 `ttlHours`（默认 168 h）时才出网，且带 `If-None-Match`；
+  内容没变时上游回 304（几百字节），只把 `fetchedAt` 往前推一格。全量是 3.7 MB / gzip 380 KB。
+- **降级而不是失败**：出网失败但盘上有旧缓存 → 用旧的并在界面标「已过期」；没有缓存 → 元数据整块为空，
+  窗口与价格回到手填。缓存文件写坏（写到一半被 kill）时下次直接重拉；写入走临时文件 + rename。
+- 并发的两次拉取共享同一个在途请求，不会各下一次 3.7 MB。
+
+匹配规则（`ModelCatalog.lookup`），按顺序：
+
+| 顺序 | 条件 | 取谁的数据 | `match` |
+|---|---|---|---|
+| 1 | 我们这个 provider 在 models.dev 里有条目（按 `baseUrl` 的 host+路径最长前缀匹配它的 `api` 字段；`openai`/`anthropic`/`google` 三种 kind 另按 kind 兜底） | **该 provider 自己的报价** —— 这才是实际被扣的钱 | `provider` |
+| 2 | 对不上（自建中转网关）；模型能定位到厂商 | **厂商自家条目的官方价**。厂商归属靠社区共识推出来：网关一律把第三方模型写成 `anthropic/claude-opus-5`，前缀多数投票即归属 | `official` |
+| 3 | 厂商侧查不到（旧型号已从厂商目录下架、或开源权重模型本来就只有第三方托管） | 窗口/能力/模态取「最多家认同」的那一条，**价格一律留空**，另附第三方报价区间供人工判断 | `third-party` |
+| 4 | 目录里根本没有 | 什么都不填 | `none` |
+
+第 3 条不是保守，是必需：990 个跨 provider 同名模型里 **649 个输入价不同、479 个上下文窗口不同**
+（`deepseek/deepseek-v4-pro` 在 16 家网关的输入价从 $0.435 到 $1.75）。随便挑一家的价填上去，
+配额就按一个与账单无关的数字算 —— 「摘除比伪造安全」（[16 §5](./16-remediation-plan.md)）。
+匹配前会剥掉 `:free` / `@版本` / `-latest` / 日期后缀再试一次，命中时 `normalized=true`，
+界面显示实际匹配到的那个 key。
+
 ### 5.5 定价与 token 计费
 
-- `models.price_*` 单位 USD / 1M tokens，由 owner 在 WebUI 维护（不自动抓取，避免依赖外部数据源）。
+- `models.price_*` 单位 USD / 1M tokens。导入模型时按 §5.4.1 的规则自动带入 `provider` / `official`
+  两档来源的价格，其余情况留空由 owner 在 WebUI 填。**出处记在 `capabilities_json.catalog.priceSource`**，
+  owner 手改过价格后翻成 `manual` —— 改完还挂着「官方价」徽标就是在骗人。
 - `cost = (in*price_in + out*price_out + cache_read*price_cache_read + cache_write*price_cache_write) / 1e6`
 - 缺定价的模型：`cost=0` 但记 `usage_ledger.error_kind='no_pricing'`，WebUI 在用量页显式告警（否则配额会被绕过）。
 - 若 `quota.requirePricing = true`（默认 `true`），**无定价的模型不允许被非 owner 使用**（fail-closed，防止配额形同虚设）。

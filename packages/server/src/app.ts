@@ -5,9 +5,9 @@ import { fileURLToPath } from 'node:url';
 import argon2 from 'argon2';
 import { Hono } from 'hono';
 import { serveStatic } from '@hono/node-server/serve-static';
-import type { AgentManager, Config, ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceService, McpManager, MemoryStore, PluginManager, PromptDocuments, ProviderStore, Sandbox, SkillLoader, TurnRegistry } from '@luoli/core';
+import type { AgentManager, Config, ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, PluginManager, PromptDocuments, ProviderStore, Sandbox, SkillLoader, TurnRegistry } from '@luoli/core';
 import { ALIAS_NAME_PATTERN, HOT_RELOADABLE_CONFIG_KEYS, KNOWN_UNIMPLEMENTED_CONFIG_KEYS, TOOL_POLICY, aliasSettingsSchema, checkWakeword, configSchema as runtimeConfigSchema, perChatConfig, probeProvider, rejectedWakewords } from '@luoli/core';
-import type { ProviderProbe } from '@luoli/core';
+import type { CatalogIndex, ModelMetadata, ProviderProbe } from '@luoli/core';
 import type { ArchiveRepository, OperationsRepository, PrincipalRepository, Sqlite } from '@luoli/db';
 import { assignDotted } from '@luoli/shared';
 
@@ -19,6 +19,7 @@ export interface ServerDependencies {
   archive: ArchiveRepository;
   context: ContextEngine;
   providers: ProviderStore;
+  modelCatalog?: ModelCatalog;
   approvals: DatabaseApprovalBroker;
   rebuildModels?: () => void;
   maintenance: MaintenanceService;
@@ -321,46 +322,129 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
       data: { provider: row.name, code: result.code, status: result.status, latencyMs: result.latencyMs, models: result.models.length, adhoc } });
     return ctx.json({ ok: true, data: { reachable: result.reachable, code: result.code, message: result.message, status: result.status, latencyMs: result.latencyMs, models: result.models.length } });
   });
+  // 上游的 /models 只给模型名（Google 额外给窗口/输出）。窗口、最大输出、定价、输入模态、
+  // 可用思考档位来自 models.dev 的本地缓存目录（docs/04 §5.4.1）；缓存缺失或过期时才出网一次。
+  const catalogMeta = async (force = false): Promise<{ index: CatalogIndex | null; status: Record<string, unknown> }> => {
+    if (!dependencies.modelCatalog) return { index: null, status: { enabled: false, available: false, outcome: 'disabled' } };
+    const load = await dependencies.modelCatalog.ensure(force);
+    return { index: load.index, status: { ...dependencies.modelCatalog.status(), outcome: load.outcome, error: load.error } };
+  };
+  /** capabilities_json 里那份元数据快照：能力布尔值 + 思考档位 + 模态 + 这次匹配的来龙去脉。
+   *  `priceSource` 记的是「这一行的价格是谁给的」，owner 手改价格后会翻成 manual —— 界面上的
+   *  「官方价」徽标必须能被推翻，否则改完价还显示官方价就是在骗人。 */
+  const capabilityBlock = (meta: ModelMetadata, fetchedAt: number | null, priceSource: string | null): string => JSON.stringify({
+    ...meta.capabilities, reasoningControl: meta.reasoningControl, reasoningEfforts: meta.reasoningEfforts,
+    modalities: meta.modalities, knowledge: meta.knowledge, releaseDate: meta.releaseDate,
+    catalog: { source: 'models.dev', match: meta.match, providerId: meta.catalogProviderId, modelId: meta.catalogModelId, normalized: meta.normalized, priceRange: meta.priceRange, priceSource, fetchedAt },
+  });
   app.get('/api/providers/:id/models', async (ctx) => {
     const probe = await providerProbe(ctx.req.param('id'));
     if (!probe) return ctx.json(apiError('not_found', 'Provider 不存在', 404).body, 404);
-    const { result } = probe;
+    const { row, result } = probe;
     if (!result.reachable) {
       const status = result.code === 'unauthorized' ? 403 : result.code === 'missing_base_url' || result.code === 'no_master_key' ? 400 : 502;
       return ctx.json(apiError(result.code, result.message, status).body, status);
     }
-    return ctx.json({ ok: true, data: { models: result.models, latencyMs: result.latencyMs } });
+    const catalog = await catalogMeta();
+    const models = result.models.map((entry) => {
+      const meta = dependencies.modelCatalog?.lookup(catalog.index, { kind: row.kind, baseUrl: row.baseUrl }, entry.modelId) ?? null;
+      return {
+        ...entry,
+        // 上游自己报的窗口/输出是它这台机器上的事实，比目录更权威；只有上游没给才用目录补。
+        contextWindow: entry.contextWindow ?? meta?.contextWindow ?? null,
+        maxOutput: entry.maxOutput ?? meta?.maxOutput ?? null,
+        limitSource: entry.contextWindow !== null || entry.maxOutput !== null ? 'upstream' : meta?.contextWindow ? 'models.dev' : null,
+        displayName: entry.displayName ?? meta?.displayName ?? null,
+        priceIn: meta?.priceIn ?? null, priceOut: meta?.priceOut ?? null, priceCacheRead: meta?.priceCacheRead ?? null, priceCacheWrite: meta?.priceCacheWrite ?? null,
+        meta: meta ?? null,
+      };
+    });
+    return ctx.json({ ok: true, data: { models, latencyMs: result.latencyMs, catalog: catalog.status } });
+  });
+  app.get('/api/models/catalog', async (ctx) => ctx.json({ ok: true, data: dependencies.modelCatalog?.status() ?? { enabled: false, available: false } }));
+  app.post('/api/models/catalog/refresh', async (ctx) => {
+    if (!dependencies.modelCatalog) return ctx.json(apiError('catalog_disabled', '模型元数据目录未启用').body, 400);
+    const load = await dependencies.modelCatalog.ensure(true);
+    dependencies.log.event({ level: load.error ? 'warn' : 'info', kind: 'provider.catalog', summary: `models.dev ${load.outcome}`, data: { outcome: load.outcome, error: load.error, models: load.state?.models ?? 0 } });
+    // 出网失败但盘上还有旧缓存时返回 200 + error：目录是降级可用的，硬报错会让界面以为一条都没有。
+    if (load.outcome === 'unavailable') return ctx.json(apiError('catalog_unavailable', load.error ?? '无法拉取模型元数据目录', 502).body, 502);
+    return ctx.json({ ok: true, data: { ...dependencies.modelCatalog.status(), outcome: load.outcome, error: load.error } });
   });
   app.post('/api/models/import', async (ctx) => {
     const body = await ctx.req.json<{ providerId?: unknown; models?: unknown; contextWindow?: unknown; maxOutput?: unknown }>();
     const providerId = typeof body.providerId === 'string' ? body.providerId : '';
-    if (!providerId || !dependencies.db.prepare('SELECT 1 FROM providers WHERE id=?').get(providerId)) return ctx.json(apiError('not_found', 'providerId 不存在', 404).body, 404);
+    const provider = dependencies.db.prepare('SELECT kind,base_url AS baseUrl FROM providers WHERE id=?').get(providerId) as { kind: string; baseUrl: string | null } | undefined;
+    if (!providerId || !provider) return ctx.json(apiError('not_found', 'providerId 不存在', 404).body, 404);
     if (!Array.isArray(body.models) || body.models.length === 0) return ctx.json(apiError('model_invalid', 'models 必须是非空数组').body, 400);
     if (body.models.length > 200) return ctx.json(apiError('model_invalid', '单次最多导入 200 个模型').body, 400);
     const int = (value: unknown): number | null => (Number.isInteger(Number(value)) && Number(value) > 0 ? Number(value) : null);
+    const price = (value: unknown): number | null => (value === null || value === undefined || value === '' ? null : Number.isFinite(Number(value)) && Number(value) >= 0 ? Number(value) : null);
     const fallbackWindow = int(body.contextWindow) ?? 128_000;
     const fallbackOutput = int(body.maxOutput) ?? 8192;
-    const entries: Array<{ modelId: string; displayName: string | null; contextWindow: number; maxOutput: number }> = [];
+    const entries: Array<{ modelId: string; displayName: string | null; contextWindow: number; maxOutput: number; prices: Array<number | null> }> = [];
     for (const raw of body.models) {
       const entry = raw && typeof raw === 'object' ? raw as Record<string, unknown> : null;
       const modelId = entry && typeof entry.modelId === 'string' ? entry.modelId.trim() : '';
       if (!modelId) return ctx.json(apiError('model_invalid', '每一项都必须带非空的 modelId').body, 400);
       entries.push({ modelId, displayName: typeof entry?.displayName === 'string' && entry.displayName ? entry.displayName : null,
-        contextWindow: int(entry?.contextWindow) ?? fallbackWindow, maxOutput: int(entry?.maxOutput) ?? fallbackOutput });
+        contextWindow: int(entry?.contextWindow) ?? fallbackWindow, maxOutput: int(entry?.maxOutput) ?? fallbackOutput,
+        prices: [price(entry?.priceIn), price(entry?.priceOut), price(entry?.priceCacheRead), price(entry?.priceCacheWrite)] });
     }
-    // 定价一律留空由 owner 手填（docs/04 §5.5：不自动抓取），已存在的 (provider,model) 跳过而不是覆盖 —— 覆盖会把调好的定价冲掉。
+    // 能力与定价出处一律在服务端重新解析：请求体里的 capabilities 是客户端说的，落库的必须是目录里实际有的那条。
+    const catalog = await catalogMeta();
+    // 已存在的 (provider,model) 跳过而不是覆盖 —— 覆盖会把调好的定价冲掉；补齐已有行走 /api/models/enrich。
     const insert = dependencies.db.prepare(`INSERT INTO models(id,provider_id,model_id,display_name,context_window,max_output,capabilities_json,price_in,price_out,price_cache_read,price_cache_write,enabled,sort,created_at,updated_at)
-      VALUES (?,?,?,?,?,?,'{}',NULL,NULL,NULL,NULL,1,0,?,?) ON CONFLICT(provider_id,model_id) DO NOTHING`);
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,1,0,?,?) ON CONFLICT(provider_id,model_id) DO NOTHING`);
     const ids: string[] = [];
     const now = Date.now();
+    const fetchedAt = typeof catalog.status.fetchedAt === 'number' ? catalog.status.fetchedAt : null;
+    let priced = 0;
     dependencies.db.transaction(() => {
       for (const entry of entries) {
         const id = randomBytes(16).toString('hex');
-        if (insert.run(id, providerId, entry.modelId, entry.displayName, entry.contextWindow, entry.maxOutput, now, now).changes > 0) ids.push(id);
+        const meta = dependencies.modelCatalog?.lookup(catalog.index, provider, entry.modelId) ?? null;
+        const capabilities = meta ? capabilityBlock(meta, fetchedAt, entry.prices[0] !== null ? meta.match : null) : '{}';
+        if (insert.run(id, providerId, entry.modelId, entry.displayName, entry.contextWindow, entry.maxOutput, capabilities, ...entry.prices, now, now).changes > 0) { ids.push(id); if (entry.prices[0] !== null) priced += 1; }
       }
     })();
     dependencies.rebuildModels?.();
-    return ctx.json({ ok: true, data: { inserted: ids.length, skipped: entries.length - ids.length, ids } });
+    return ctx.json({ ok: true, data: { inserted: ids.length, skipped: entries.length - ids.length, priced, ids } });
+  });
+  /** 已经导入过的模型行补元数据：能力块照写（纯信息），定价只填空着的那几个，
+   *  窗口/最大输出默认不动 —— 运维可能按自己的预算调小过，覆盖要显式 overwrite。 */
+  app.post('/api/models/enrich', async (ctx) => {
+    const body = await ctx.req.json<{ ids?: unknown; overwrite?: unknown }>().catch((): { ids?: unknown; overwrite?: unknown } => ({}));
+    const wanted = Array.isArray(body.ids) ? new Set(body.ids.filter((entry): entry is string => typeof entry === 'string')) : null;
+    const overwrite = body.overwrite === true;
+    const rows = dependencies.db.prepare(`SELECT m.id,m.model_id AS modelId,m.context_window AS contextWindow,m.max_output AS maxOutput,m.price_in AS priceIn,m.price_out AS priceOut,
+      m.price_cache_read AS priceCacheRead,m.price_cache_write AS priceCacheWrite,p.kind,p.base_url AS baseUrl FROM models m JOIN providers p ON p.id=m.provider_id`).all() as Array<Record<string, unknown>>;
+    const targets = rows.filter((row) => !wanted || wanted.has(String(row.id)));
+    if (!targets.length) return ctx.json({ ok: true, data: { updated: 0, priced: 0, unmatched: 0, scanned: 0 } });
+    const catalog = await catalogMeta();
+    if (!catalog.index) return ctx.json(apiError('catalog_unavailable', String(catalog.status.error ?? '模型元数据目录不可用，无法补齐'), 502).body, 502);
+    const fetchedAt = typeof catalog.status.fetchedAt === 'number' ? catalog.status.fetchedAt : null;
+    const update = dependencies.db.prepare(`UPDATE models SET capabilities_json=?,context_window=?,max_output=?,price_in=?,price_out=?,price_cache_read=?,price_cache_write=?,updated_at=? WHERE id=?`);
+    let updated = 0; let priced = 0; let unmatched = 0;
+    const now = Date.now();
+    dependencies.db.transaction(() => {
+      for (const row of targets) {
+        const meta = dependencies.modelCatalog!.lookup(catalog.index, { kind: String(row.kind), baseUrl: row.baseUrl as string | null }, String(row.modelId));
+        if (meta.match === 'none') { unmatched += 1; continue; }
+        const keep = (current: unknown, next: number | null): number | null => (current !== null && current !== undefined ? Number(current) : next);
+        const nextPrices = [keep(row.priceIn, meta.priceIn), keep(row.priceOut, meta.priceOut), keep(row.priceCacheRead, meta.priceCacheRead), keep(row.priceCacheWrite, meta.priceCacheWrite)];
+        const filled = row.priceIn === null && nextPrices[0] !== null;
+        const priceSource = row.priceIn !== null ? 'manual' : nextPrices[0] !== null ? meta.match : null;
+        update.run(capabilityBlock(meta, fetchedAt, priceSource),
+          overwrite ? meta.contextWindow ?? Number(row.contextWindow) : Number(row.contextWindow),
+          overwrite ? meta.maxOutput ?? Number(row.maxOutput) : Number(row.maxOutput),
+          ...nextPrices, now, row.id);
+        updated += 1;
+        if (filled) priced += 1;
+      }
+    })();
+    dependencies.rebuildModels?.();
+    dependencies.log.event({ level: 'info', kind: 'webui.action', summary: 'model metadata enriched', data: { scanned: targets.length, updated, priced, unmatched, overwrite } });
+    return ctx.json({ ok: true, data: { scanned: targets.length, updated, priced, unmatched } });
   });
   app.get('/api/aliases', (ctx) => ctx.json({ ok: true, data: dependencies.db.prepare('SELECT * FROM model_aliases ORDER BY alias').all() }));
   app.put('/api/aliases/:alias', async (ctx) => {
@@ -472,7 +556,26 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
   app.post('/api/chats/:key/commits/:id/checkout', (ctx) => ctx.json({ ok: true, data: dependencies.context.setHead(ctx.req.param('key'), ctx.req.param('id'), 'webui') }));
   app.post('/api/chats/:key/reset', (ctx) => ctx.json({ ok: true, data: dependencies.context.reset(ctx.req.param('key'), 'webui') }));
   app.post('/api/chats/:key/undo', (ctx) => ctx.json({ ok: true, data: dependencies.context.undo(ctx.req.param('key')) }));
-  app.patch('/api/models/:id', async (ctx) => { const body = await ctx.req.json<Record<string, unknown>>(); const map: Record<string, string> = { displayName: 'display_name', contextWindow: 'context_window', maxOutput: 'max_output', priceIn: 'price_in', priceOut: 'price_out', priceCacheRead: 'price_cache_read', priceCacheWrite: 'price_cache_write', enabled: 'enabled', sort: 'sort' }; const entries = Object.entries(body).filter(([key]) => map[key]); if (!entries.length) return ctx.json({ ok: true, data: { changes: 0 } }); const sql = entries.map(([key]) => `${map[key]}=?`).join(','); const values = entries.map(([key, value]) => key === 'enabled' ? (value ? 1 : 0) : value); const changes = dependencies.db.prepare(`UPDATE models SET ${sql},updated_at=? WHERE id=?`).run(...values, Date.now(), ctx.req.param('id')).changes; dependencies.rebuildModels?.(); return ctx.json({ ok: true, data: { changes } }); });
+  app.patch('/api/models/:id', async (ctx) => {
+    const body = await ctx.req.json<Record<string, unknown>>();
+    const map: Record<string, string> = { displayName: 'display_name', contextWindow: 'context_window', maxOutput: 'max_output', priceIn: 'price_in', priceOut: 'price_out', priceCacheRead: 'price_cache_read', priceCacheWrite: 'price_cache_write', enabled: 'enabled', sort: 'sort' };
+    const entries = Object.entries(body).filter(([key]) => map[key]);
+    if (!entries.length) return ctx.json({ ok: true, data: { changes: 0 } });
+    const sql = entries.map(([key]) => `${map[key]}=?`).join(',');
+    const values = entries.map(([key, value]) => key === 'enabled' ? (value ? 1 : 0) : value);
+    const changes = dependencies.db.prepare(`UPDATE models SET ${sql},updated_at=? WHERE id=?`).run(...values, Date.now(), ctx.req.param('id')).changes;
+    // 手改过价格之后还挂着「官方价」徽标就是在骗人：把出处翻成 manual，界面据此改标。
+    if (changes && entries.some(([key]) => key.startsWith('price'))) {
+      const row = dependencies.db.prepare('SELECT capabilities_json AS capabilities FROM models WHERE id=?').get(ctx.req.param('id')) as { capabilities: string | null } | undefined;
+      try {
+        const parsed = row?.capabilities ? JSON.parse(row.capabilities) as Record<string, unknown> : {};
+        const catalog = parsed.catalog && typeof parsed.catalog === 'object' ? parsed.catalog as Record<string, unknown> : null;
+        if (catalog) { catalog.priceSource = 'manual'; dependencies.db.prepare('UPDATE models SET capabilities_json=? WHERE id=?').run(JSON.stringify(parsed), ctx.req.param('id')); }
+      } catch { /* 历史行里可能是坏 JSON，改价不该因此失败 */ }
+    }
+    dependencies.rebuildModels?.();
+    return ctx.json({ ok: true, data: { changes } });
+  });
   app.delete('/api/models/:id', (ctx) => { const changes = dependencies.db.prepare('DELETE FROM models WHERE id=?').run(ctx.req.param('id')).changes; dependencies.rebuildModels?.(); return ctx.json({ ok: true, data: { changes } }); });
   app.post('/api/principals/bulk', async (ctx) => {
     const body = await ctx.req.json<{ ids?: unknown; role?: unknown; kind?: unknown }>();

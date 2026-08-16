@@ -595,6 +595,36 @@
               "type": "integer",
               "exclusiveMinimum": 0,
               "default": 60000
+            },
+            "catalog": {
+              "type": "object",
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "default": true
+                },
+                "url": {
+                  "type": "string",
+                  "format": "uri",
+                  "default": "https://models.dev/api.json"
+                },
+                "cacheFile": {
+                  "type": "string",
+                  "default": "./data/cache/models.dev.json"
+                },
+                "ttlHours": {
+                  "type": "number",
+                  "exclusiveMinimum": 0,
+                  "default": 168
+                },
+                "timeoutMs": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 30000
+                }
+              },
+              "additionalProperties": false,
+              "default": {}
             }
           },
           "additionalProperties": false,

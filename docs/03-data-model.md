@@ -361,7 +361,7 @@ CREATE TABLE models (
   display_name    TEXT,
   context_window  INTEGER NOT NULL,
   max_output      INTEGER NOT NULL,
-  capabilities_json TEXT NOT NULL,         -- { vision, tools, reasoning, cache, json }
+  capabilities_json TEXT NOT NULL,         -- 能力与元数据快照，见下方说明；由 models.dev 目录填充
   price_in         REAL, price_out REAL,   -- USD / 1M tokens
   price_cache_read REAL, price_cache_write REAL,
   enabled         INTEGER NOT NULL DEFAULT 1,
@@ -369,6 +369,21 @@ CREATE TABLE models (
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
 );
 CREATE UNIQUE INDEX ux_models_provider_model ON models(provider_id, model_id);
+-- capabilities_json 的形状（导入与「补齐元数据」两条路径写入，见 04 §5.5）：
+-- {
+--   "vision": true, "tools": true, "reasoning": true, "structuredOutput": true,
+--   "temperature": true, "attachment": true,
+--   "reasoningControl": "effort" | "toggle" | "budget_tokens" | null,
+--   "reasoningEfforts": ["low","medium","high"],          -- reasoningControl=effort 时才非空
+--   "modalities": { "input": ["text","image","pdf"], "output": ["text"] },
+--   "knowledge": "2025-07-31", "releaseDate": "2025-09-29",
+--   "catalog": { "source": "models.dev", "match": "provider|official|third-party|none",
+--                "providerId": "anthropic", "modelId": "claude-opus-5", "normalized": false,
+--                "priceRange": { "min": 0.2, "max": 0.4, "providers": 2 } | null,
+--                "priceSource": "provider|official|manual" | null, "fetchedAt": 1739000000000 }
+-- }
+-- 运行时不读这一列（vision 自动切别名尚未实现），它服务于 WebUI 的展示与人工判断。
+-- priceSource=manual 由 `PATCH /api/models/:id` 改动任一价格字段时写入：手填过的价不能再挂官方价徽标。
 
 -- 别名 → 有序 fallback 链
 CREATE TABLE model_aliases (
@@ -581,5 +596,6 @@ CREATE TABLE processed_updates (        -- update_id 去重（重启后仍有效
 | `sessions` | 过期即删 | 每小时 |
 | `approvals` | 90 天 | pending 超 `expires_at` 标 `expired` |
 | `data/files` | 永久 | owner 手动；孤儿文件（无 attachments 行）由周任务清理 |
+| `data/cache/models.dev.json` | 永久 | 纯派生数据，删掉即可（下次拉取模型时自动重下）。年龄记在 `app_kv` 的 `catalog:models.dev`，超 `provider.catalog.ttlHours` 时用 ETag 条件请求续期 |
 
 清理任务在 `general.maintenanceCron`（默认每日 04:00 本地时间）执行，并在完成后 `PRAGMA wal_checkpoint(TRUNCATE)` + 每周一次 `VACUUM`。

@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import { serve } from '@hono/node-server';
 import { zodToJsonSchema } from 'zod-to-json-schema';
 import { ArchiveRepository, OperationsRepository, PrincipalRepository, TurnRepository, closeDatabase, migrateDatabase, modelAliasKey, openDatabase, readAppKv, readPersistedConfig, recoverAfterCrash } from '@luoli/db';
-import { AgentManager, AgentResultStore, ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, FileTools, LogSink, MaintenanceService, McpManager, MemoryStore, ModelRegistry, PathJail, PluginManager, PromptAssembler, PromptDocuments, ProviderStore, QuotaGuard, Sandbox, Scheduler, Secrets, SkillLoader, TOOL_POLICY, ToolRegistry, TurnConcurrency, TurnRegistry, UsageLedger, configSchema, loadConfig, perChatConfig, registerBuiltins, rejectedWakewords, streamMainAgent } from '@luoli/core';
+import { AgentManager, AgentResultStore, ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, FileTools, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, ModelRegistry, PathJail, PluginManager, PromptAssembler, PromptDocuments, ProviderStore, QuotaGuard, Sandbox, Scheduler, Secrets, SkillLoader, TOOL_POLICY, ToolRegistry, TurnConcurrency, TurnRegistry, UsageLedger, configSchema, loadConfig, perChatConfig, registerBuiltins, rejectedWakewords, streamMainAgent } from '@luoli/core';
 import { createServer, setupToken } from '@luoli/server';
 import { createTelegramBot } from '@luoli/telegram';
 
@@ -50,6 +50,8 @@ const secrets = new Secrets(process.env.LUOLI_MASTER_KEY);
 // scrypt 抬高了离线爆破成本，但抬不动一个短口令（docs/20 · W-SEC-02）。
 if (secrets.weak) process.stderr.write('[secrets] LUOLI_MASTER_KEY 短于 32 字符：provider key 的加密强度取决于它，建议换成 32 字节随机值。\n');
 const providers = new ProviderStore(db, secrets);
+// 只在 WebUI 主动拉取模型时才可能出网；缓存命中的路径不碰网络（docs/04 §5.4.1）。
+const modelCatalog = new ModelCatalog(db, () => configStore.snapshot().provider.catalog);
 const events = new EventBus();
 const ledger = new UsageLedger(db);
 const turnRegistry = new TurnRegistry();
@@ -124,7 +126,7 @@ if (!config.webui.passwordHash) {
   setup = setupToken();
   process.stdout.write(`LuoLiCore setup token: ${setup.token}\nOpen http://${config.webui.host}:${config.webui.port}/setup\n`);
 }
-const server = createServer({ config: configStore, db, operations, principals, archive, context, providers, approvals: approval, rebuildModels: () => modelRegistry.rebuild(), maintenance, events, log,
+const server = createServer({ config: configStore, db, operations, principals, archive, context, providers, modelCatalog, approvals: approval, rebuildModels: () => modelRegistry.rebuild(), maintenance, events, log,
   memory, promptDocuments, skills, plugins, mcp, agents, turnRegistry, sandbox, configSchema: zodToJsonSchema(configSchema, 'LuoLiConfig'), startedAt, setup });
 const http = serve({ fetch: server.fetch, hostname: config.webui.host, port: config.webui.port });
 events.subscribe((event) => {
