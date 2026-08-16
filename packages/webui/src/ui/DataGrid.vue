@@ -10,7 +10,7 @@ const emit = defineEmits<{ 'row-click': [any]; 'update:selection': [any[]] }>();
 
 const page = ref(0);
 const pageCount = computed(() => props.paginate ? Math.max(1, Math.ceil(props.rows.length / props.pageSize)) : 1);
-// 日志 SSE 每来一条事件就重拉列表，这里只把页码夹回合法区间；直接重置会让人翻到第 3 页就被心跳弹回第 1 页。
+// SSE 事件会让列表在原地重拉，这里只把页码夹回合法区间；直接重置会让人翻到第 3 页就被弹回第 1 页。
 watch(pageCount, (count) => { if (page.value >= count) page.value = count - 1; });
 const pageRows = computed(() => props.paginate ? props.rows.slice(page.value * props.pageSize, (page.value + 1) * props.pageSize) : props.rows);
 const span = computed(() => props.columns.length + (props.selection ? 1 : 0));

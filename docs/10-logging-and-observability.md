@@ -133,6 +133,18 @@ logs:
 
 **DB 索引行 vs 文件全文**：`log_events` 只存摘要字段（可检索、可聚合），完整 payload 只在文件里。这样 DB 不会被大 payload 撑爆，同时 WebUI 仍能按需拉全文（`GET /api/logs/blob?ref=`）。
 
+**实时广播（`LogSink` → `EventBus` → SSE）**：落库之后同一条事件还会以**摘要形式**推给 WebUI
+（`{id, ts, level, kind, traceId, summary}`，见 [09 §5](./09-webui.md#5-sse-事件)）。三条硬约束：
+
+- **只发摘要，不发 `data`** —— 单条载荷能到几百 KB，全量广播会把每个开着的控制台连接一起打爆；
+  要正文走 `GET /api/logs/:id/data`。
+- **`debug` 不广播**（阈值是广播侧的，与 `logs.level` 无关：debug 照常落库，只是不推）。
+- **同一 `kind` 在 200 ms 内合并成一条**，尾包带 `merged: n`。一次工具风暴能在几十毫秒里产生上百条
+  `tool.call`，不合并的话「每来一条事件前端刷新一次」就是自我 DDoS。
+
+阈值与窗口刻意不做成配置项：调松它们的唯一效果是把 SSE 连接和前端一起打爆。
+`LogSink` 没拿到 `EventBus` 时这一整段是空操作（测试与 CLI 场景），日志行为完全不变。
+
 **读出侧必须解引用**：超过 `logs.bodyMaxBytes` 的 `data` 在库里只剩 `{fileRef, bytes}`。任何展示载荷的地方
 （`GET /api/turns/:id/detail`、`GET /api/logs/:id/data`，见 [09 §4](./09-webui.md#4-rest-api)）都要顺着 `fileRef`
 把 `logs/<day>/blobs/*.json` 读回来 —— 否则「查看这一轮实际发了什么」看到的是一行占位对象，

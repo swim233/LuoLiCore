@@ -63,7 +63,15 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
 
 ### 3.1 Dashboard
 - 实时卡片：在途 turn、今日 turn 数、今日花费/额度环形图、消息量趋势（折线图，近 7 天）。🚧 部分实现（四张指标卡是累计值，没有趋势图与额度环形图）。
-- 在途 turn 表（`DataGrid`，SSE 增量更新）：turn id、会话、发起人、状态、步数、已用时长、花费、`[取消]`。🚧 未实现 —— 既没有 `POST /api/tasks/:id/cancel`，SSE 也不发 `turn.*`（docs/21 · G-SRV-01、G-SSE-01）。
+- **在途 turn 表**（`DataGrid`，SSE 增量更新，已实现）：发起人（按 `principals` 反查显示名）+ 角色、
+  contextKey、当前动作（`turn.progress` 给的「第 N 步 · 模型 / 工具 · 载荷摘要」）、步数与花费、
+  已用时长（每秒走字）、`[取消]`。首屏走 `GET /api/turns/active`，之后靠 `turn.started` /
+  `turn.progress` / `turn.finished` 增量更新。
+  **数据来自进程内的 `TurnRegistry`，不是 `turns` 表** —— 崩溃残留的 `running` 行要等下次启动的
+  `recoverAfterCrash` 才归零，只读表会把它们也画成「正在跑」。
+  `[取消]` 打 `POST /api/turns/:id/cancel`：那是 abort 信号不是删除，该轮走 `abortTurn` 落成
+  `cancelled`，上下文与已发出的消息都还在；二次确认里写明这一点。轮次已经结束时返回
+  `{cancelled:false}`，界面说「这一轮已经结束了」而不是假装成功。
 - 最近错误（`DataGrid`，level≥warn，10 条，点击跳日志 trace）。🚧 当前是不分级别的最近 6 条事件。
 - **依赖健康卡片**（已实现）：DB 读写、SSE 连接、模型注册表可用数、在途 turn 数、MCP 就绪 / 异常数、
   沙箱 `mode` 与可用性（`plan.reason` 挂在 title 上），外加版本与运行时长。
@@ -78,7 +86,16 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
   没登记过的会话退回 `未登记群聊/用户 <id>`，并按 Telegram 的「群/频道 id 一律为负」判断类型。
   第二行是 `@username`，没有用户名时改写会话类型（超级群 / 频道 / 私聊）—— 不重复下面那行 contextKey。
   卡片底部是 contextKey、消息数与窗口 token；`contextScope='thread'` 的会话多一个「话题 N」徽标。
-- 选中一张卡片后，下面是并排的两块工作台：
+- 选中一张卡片后，先是**「只对这个会话生效的设置」**卡片（已实现，`PATCH /api/chats/:key`）：
+  当前覆盖以 chip 逐条列出（点分路径 + 值 + `[✕]` 取消覆盖，取消后空掉的中间层一并收掉），
+  `[编辑覆盖项]` 展开的是同一套 schema 生成表单，但**只渲染 [11 §2.1](./11-config-reference.md) 白名单内的子树**
+  （`trigger.*` / `output.*` / `context.scope` / `context.limit.*` / `context.background.*` /
+  `agent.main.*` / `memory.pubWriteMinRole`）—— 白名单是安全边界，越界的路径服务端直接 400。
+  控件里显示的是这个会话**实际生效**的值（全局 + 覆盖），改动才写进覆盖层；覆盖在下一轮生效。
+  `PATCH` 是**整体替换**而不是合并，所以界面每次都把完整的覆盖对象发回去。
+  `context.scope` 这一项带警告：改成 `thread` 之后该会话的后续消息落到新的 contextKey 上，
+  而覆盖是按 key 存的 —— 等于这条覆盖把自己作废了。
+- 再往下是并排的两块工作台：
   1. **上下文查看器**：当前窗口的消息序列，**按时间倒序 —— 最新的一条在最上面**（与消息页、commit
      时间线一致；ordinal 在提交时单调分配，倒排 ordinal 即倒排时间）。每条是一行徽标（ordinal、role、
      origin、speaker、时间、tokens、`prune_level`）+ 一行正文，正文永远占满整行：徽标数量是可变的
@@ -109,20 +126,26 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
   `[复制 JSON]` 与 `[下载完整 JSON]` 都走 `GET /api/logs/:id/data` 取完整那一份（截断过的内容复制出去不是合法 JSON）。
   `logs.captureBodies` 关闭时详情里只有用量与耗时，页面顶部明说这一点，而不是显示一个空壳。
 - 搜索结果表格多一列 `[详情]`，命中消息所属的那一轮同样能直接点开（服务端按 `turns.trigger_message_id` 回填 `turnId`）。
-- 单条操作：`[定位到上下文]`（若已被认领）、`[查看所属 turn 的 trace]`、`[软删除]`。
+- **附件（已实现）**：对话卡片与检索结果行下面挂一条附件带子 —— 光栅图直接出缩略图，点开是大图
+  （`GET /api/files/:id?inline=1`，白名单只有 png/jpeg/gif/webp，理由见 §4）；其余按类型出 chip，
+  显示文件名 / mime / 大小 / 尺寸 / 时长，提取过正文的文档标「已提取正文」（模型当时读到的是正文）。
+  `download_state` 不是 `done` 的行打「下载失败 / 超限未下载」徽标并**不给下载链接** ——
+  点开必然 404，给一个必然报错的入口比没有更糟。
+- **单条操作**：有 `turnId` 的消息可打开该轮实际调用；`[软删除]` 二次确认后调用
+  `DELETE /api/messages/:id`，只设置 `deleted_at`，上下文提交、turn 与附件不级联删除；消息检索、
+  turn 列表与详情均不再回显已删正文。
 
 ### 3.4 提示词（Prompts）
-- 左侧是**文档卡片网格**（不是 id/scope/bytes 的四列表格）：每张卡片一份文档，显示图标 + 中文名
-  （人格 / 助理守则 / 公共记忆 / 私有记忆）、`全局` 或所属会话/用户、**这份文档进的是 prompt 的第几个 block 及其用途**、
-  文档 id、字节数 / token 数 / 更新时间。选中的卡片高亮。
-  —— `character:global` 这种 id 认不出是干什么的，用途必须写在卡片上，而不是让运维回去读 [06](./06-prompt-and-memory.md)。
-  覆盖的文档集合仍是：`CHARACTER.md`、`CHARACTER.<chat>.md`、`ASSIST.md`、`PUBMEMORY.md`、`private/<userId>/PRIMEMORY.md`。
-- 右侧编辑器（文本域 + 行号；或按需换 CodeMirror）：实时 token 计数、字节数、保存（`Ctrl+S`）；
-  标题下写明文档类型与磁盘路径。没选中任何一份时右侧是提示卡片，而不是一片空白。
-- `[预览组装]`：选一个会话 + 角色 → 展示完整 block 0–6 与各块 token 占比（堆叠进度条）。
-- `[历史]`：`memory_revisions` 列表 + unified diff 展示（`UiModal`）+ `[回滚到此版本]`。
-- PRIMEMORY 页顶部醒目提示「查看他人私有记忆会被记录」（对应 [06 §5.3](./06-prompt-and-memory.md#53-隐私细节)）。
-- 待审压缩 diff（`memory/.pending/`）在此显示 `[应用] [丢弃]`。
+
+- 左侧是**文档卡片网格**：每张卡片显示用途、scope、字节数 / token 数、更新时间；文档 id、字符数、
+  token 数与 scope 只作辅助信息，正文类型和磁盘路径用于区分实际 prompt block。
+- `[预览组装]`：选择会话与角色后调用 `POST /api/prompts/preview`。后端与真实轮次共用
+  `assembleMainPrompt`，返回 kernel / character / assist / catalog / public/private memory / runtime
+  各 block 的完整正文、token 数与截断状态，并带该会话上下文消息数和 token 数。界面用分段条显示
+  占比，逐块展开正文；这不是 `context.materialize()` 的近似值。
+- 右侧编辑器显示正文、行号、估算 token、字节数；保存走 `PUT /api/prompts/:id`（Ctrl+S）。
+- 标题下写明文档类型与磁盘路径。版本时间线来自 `GET /api/prompts/:id/revisions`，展示 unified diff，
+  `[回滚到此版本]` 调 `POST /api/prompts/:id/rollback`。
 
 ### 3.5 Provider 与模型
 - Provider 表：名称、类型、base_url、key hint、启用、健康状态（`UiTag`）、`[测试连接]` `[拉取模型]` `[编辑]` `[删除]`。
@@ -192,36 +215,39 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
     却没配 `hostWorkspaceDir`）页面顶部出红条并写出 `reason`，否则运维只会看到工具莫名失败。
   - 镜像 `[拉取/构建]` 🚧 未实现（没有对应端点）。`allowHostFsForOwner` 在
     `KNOWN_UNIMPLEMENTED_CONFIG_KEYS` 里，因此不给控件。
-- 审批规则编辑器（`DataGrid` 行内编辑）：tool 匹配、正则、风险级别、`[测试正则]`（输入样例命令看是否命中）。
-  🚧 未实现；`approval.rules` 目前只能改 `config.yaml`（docs/21 §1.1）。
+- 审批规则可在「全部配置」里编辑 `approval.rules` JSON；专用的逐行正则测试编辑器仍未实现。
 
 ### 3.8 扩展（Skills / Plugins / MCP）
-三类扩展共用一张卡片网格，每张卡带 kind 徽标、状态徽标与操作按钮。
 
-- **Skills**（部分实现）：name、description、min-role、状态、`[启停]`（`PATCH /api/skills/:name`）、
-  `[删除]`（`DELETE`，只删库里的行，磁盘上的 `SKILL.md` 不动，下次扫描还会被重新发现）。
-  🚧 `[编辑]`（frontmatter 表单 + 正文编辑器）、`[新建]`、`[查看附属文件]` 未实现 —— 缺
-  `POST /api/skills` 与 `PUT /api/skills/:name`。
-- **Plugins**（部分实现）：name、version、minRole、`load_error`、`[启停]`、`[重载]`。
-  **启用时弹「plugin 以全信任方式在 bot 进程里运行任意代码，没有沙箱」二次确认**。
-  🚧 `configSchema` 生成的配置表单与 provides 概览未实现。
-- **MCP**（部分实现）：server 列表 + 状态 + 最近错误 + `[重连]`。
-  **状态取 `state` 而不是 `load_error`** —— `mcp_servers` 的错误列叫 `last_error`，只看 `load_error`
-  会把连不上的 server 显示成「可用」。
-  🚧 transport 配置表单、启停、发现到的工具清单未实现 —— 服务端只有 `GET` 与 `reconnect`，
-  没有 `POST/PATCH/DELETE /api/mcp[/:name]`，增删改只能改 `mcp.servers`。
+三类扩展继续共用卡片网格，但操作按各自真实生命周期区分：
+
+- **Skills**：name、description、min-role、状态、允许工具、模型建议与附属文件；可 `[新建]`、
+  `[编辑]` 正文/frontmatter、启停和删除。`GET /api/skills/:name` 返回正文与文件清单；
+  `POST /api/skills`、`PUT /api/skills/:name`、`DELETE /api/skills/:name` 直接安全写入或删除
+  `SKILL.md`，随后重扫并同步数据库。新建时未指定 `min-role` 则热读 `skills.defaultMinRole`。
+- **Plugins**：name、version、minRole、load_error；启用 plugin 会执行全信任代码，因此二次确认。
+  启停与重载继续走 `PATCH /api/plugins/:name` / `POST /api/plugins/:name/reload`。
+- **MCP**：卡片显示 transport、连接状态、失败原因、最小角色与发现到的工具名；可新建、编辑、启停、
+  删除和重连。表单按 stdio / Streamable HTTP 切换 command、args、env 或 url、headers，并覆盖
+  minRole、toolAllow、toolDeny、timeoutMs。CRUD 写入 `mcp.servers` 配置覆盖与 revision，发
+  `config.changed` 后立即 `McpManager.reconcile()`；不是直接改运行时缓存。重名返回 409。
+  **`mcp.enabled` 是总开关且出厂为 `false`**（`reconcile` 一上来就对它 early-return）：关着的时候
+  页面顶部与新建对话框都给一条横幅加 `[打开总开关]`，保存后的 Toast 也说明「存下了但不会连」——
+  否则运维拿到的是 `ok:true` 加一条永远停在「等待连接」的行，正是「保存成功但运行时没变」
+  那类反馈（docs/20 · W-CFG-02）。
 
 ### 3.9 子 Agent（Agents）
-- 表格：name、description、modelAlias、maxSteps、tools、minRole；`[新建 Agent]` 在页头。
-- 点任一行打开二级菜单（`UiModal`）：名称（新建时可填，之后只读 —— 模型用它调 `spawn_agent`）、
-  职责描述、模型别名（下拉取自别名路由表）、minRole、步数上限、结果最大字符、`injectMemory`、
-  可用工具多选（全不勾 = 不额外限制，沿用父 agent 在当前角色下的工具目录）、`instructions` 编辑器。
-  对话框里同时提供 `[删除]`。
-- 保存写的是**整张 `agent.agents` 数组**（`PUT /api/config`，点分键 `agent.agents`）：
-  没有单条 PATCH 端点，而这个数组本身就是一个 schema 叶子，写入时整体过 `configSchema` 校验。
-- `AgentManager` 的定义表只在构造时读一次，因此 `config.changed` 里带 `agent.agents` 时
-  必须 `replaceDefinitions()`；否则运维看到的是「保存成功但派发的还是旧的」。
-- `[试跑]`：给定 task 文本，直接派发一次并在 `UiModal` 里流式展示步骤/工具/结果与花费（不进任何会话上下文）。
+
+- 表格：name、description、modelAlias、maxSteps、tools、minRole、resultMaxChars、injectMemory。
+- `[新建 Agent]` / 行点击编辑整份 `agent.agents` 配置数组；保存后 `config.changed` 触发
+  `AgentManager.replaceDefinitions()`，删除也走同一条干净切换路径。
+- `[试跑]` 打开隔离面板：输入 task 后调用 `POST /api/agents/:name/dryrun`。服务端创建可审计的
+  `agent_run`，复用 `runSubAgent`，以 NDJSON 逐行推送 step（正文、工具输入输出）、usage、
+  final 或 error。关闭请求或点 `[取消试跑]` 会 abort 该试跑，不影响 Telegram turn。
+  **试跑与正常轮次共用同一份配额**：开跑前 `quota.reserve`，每步 `commit`，结束后 `release` 剩余
+  预留；额度不足直接拒绝开跑。只记 `usage_ledger` 不进 `quota_counters` 的话，`global.daily`
+  对试跑一概无效（docs/20 · W-QUOTA-01）。chat / user 两级计数落在合成 subject `webui-dryrun` 上，
+  不吃真实会话与用户的额度。
 
 ### 3.10 日志（Logs）
 - 过滤器：时间范围、level、kind（多选）、trace_id、chat、user、关键词。
@@ -276,9 +302,19 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
   限额再准也拦不住它。告警条列出前 20 个并给出跳转到模型页的入口。
 
 ### 3.12 任务与审批
-- 任务表：在途 + 历史，进度、耗时、花费、`[取消]`、`[查看 trace]`。
-- 审批队列：待审列表（工具、输入代码块、发起人、会话、风险、剩余时限）+ `[批准] [拒绝]`；历史审批记录可查。
-- 桌面通知（`Notification API`，需用户授权）+ 页面标题角标。
+
+- 任务表：在途 + 历史（`tasks` 表，由 `spawn_agent` 派发），标题、状态、更新时间、`[取消]`。
+  子 agent 没有独立取消句柄；按钮调用 `POST /api/turns/:id/cancel`，二次确认明确会取消整轮及
+  同轮其他子 agent。
+- 审批队列：工具、风险、状态、请求时间、过期时间、发起人、输入摘要与操作。命中审批规则后
+  `DatabaseApprovalBroker` 插入 pending 行并发 `approval.pending`；owner 可 `[拒绝]` /
+  `[批准]`，调用 `POST /api/approvals/:id/decide`。批准后原工具调用才继续；拒绝、TTL 到期或
+  轮次取消均不执行。历史行只显示裁决人，不能重复裁决。
+  **待审数挂在左侧导航的角标上**，不只在这一页：一条 pending 意味着某个真实轮次正卡在工具调用上
+  最多 `approval.ttlMs`，只在任务页刷新等于「运维不切过来就永远不知道有人在等」。
+  `approval.pending` / `approval.decided` 因此单独成一个全页面可见的刷新组（事件本身很稀疏，
+  只有命中规则才发），而不是跟着任务表一起走 §5 的页面过滤。
+- 桌面通知仍未实现。
 
 ### 3.13 配置（Settings）
 - **触发与唤醒词**卡片（已实现）：`private` / `mention` / `reply` / `command` / `channels` 五个开关、
@@ -292,11 +328,23 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
   两个锚点的区别写在字段说明里 —— 只调 `replyDelayMs` 治不了「第一条消息只有一个字」
   （[08 §5.2](./08-telegram-adapter.md#52-流式算法)）。保存同样走 `PUT /api/config` 的点分键，
   下一轮回复生效；在途那一轮沿用开轮时的值。同样有未保存改动时不被 SSE 刷新回写。
-- 会话级覆盖（`perChat.<contextKey>.trigger`）优先于全局值，目前只有 `PATCH /api/chats/:key` 这一个入口，设置页不提供。
-  `perChat.<contextKey>.output` 同理（投递侧读的就是本轮合并后的那份配置）。
-- 由 `config.schema.json`（zod → JSON Schema）**自动生成**表单：分组折叠面板（折叠面板），每项含描述、默认值、当前值、是否需要重启（`Tag: 热更新 / 需重启`）。🚧 未实现，当前只在卡片下方展示只读的合并配置 JSON。
-  这是 §1.1 里那 107 个「已接线但改不了」配置项的正路 —— `GET /api/config/schema` 已经把
-  `{schema, hotReloadable, unimplemented}` 三件套备齐了，缺的只是消费它的表单（docs/21 §1.1）。
+- 会话级覆盖（`perChat.<contextKey>.*`）优先于全局值。**入口在会话页**（§3.2），不在这里 ——
+  它只对选中的那个会话有意义，放在全局设置页既看不出改的是谁也看不出改的是什么。
+- **「全部配置」表单**（已实现）：由 `config.schema.json`（zod → JSON Schema）**自动生成**，
+  分组折叠面板，每项显示键路径、当前值、默认值、取值范围与 `Tag: 热更新 / 需重启 / 未接线`。
+  这是 [21 §1.1](./21-webui-coverage-gaps.md) 里那 109 个「已接线但改不了」配置项的正路 ——
+  手写控件必然与 schema 漂移，所以前端**不维护第二份清单**，控件形态一律从 schema 推：
+  布尔 → 勾选框，`enum` → 下拉，`integer`/`number` → 数字框（`anyOf[number,null]` 留空即「不限」），
+  字符串数组 → 一行一条的文本域，对象与对象数组（`tools.overrides`、`approval.rules`、
+  `agent.agents`、`mcp.servers`）→ JSON 文本域（保存前本地校验，敲错了不发请求）。
+  schema 本身不带描述，字段说明留在 [11](./11-config-reference.md) —— 在前端再抄一份必然与文档漂移。
+  - **未接线的键默认隐藏**且控件禁用（可用「显示未接线项」翻出来看）：能点但运行时不读就是假控件。
+  - **密钥字段只读**：`GET /api/config` 里它们已经是 `«redacted»`，把这个字面量写回去等于覆盖真值。
+    界面上写明该去哪儿改（Provider key 在模型页、WebUI 口令用 `pnpm webui:passwd`、其余走环境变量）。
+  - 保存只发**真正改过的那几项**（点分键 → `PUT /api/config`）；保存后按 `hotReloadable` 分类回报，
+    **需重启的键在 Toast 里点名** —— 「保存成功但运行时没变」是最误导的一类反馈（docs/20 · W-CFG-02）。
+  - 有专用面板的键（触发 / 输出 / 配额 / 沙箱 / 工具开关 / Agent）在这里照样能改，但标注
+    「另有专用面板」，那边有额外的校验与实时数据。
 - `[原始 YAML]` 模式：直接编辑，保存前跑 zod 校验，错误定位到行。🚧 未实现。
 - 保存 → 写 `config_kv` + `config_revisions` → 广播热更新事件；需重启项标注并提供 `[重启进程]`（若在 systemd/docker 下由外部 supervisor 拉起）。🚧 `[重启进程]` 未实现。
 - **`[变更历史]`**（已实现）：读 `GET /api/config/revisions`，列出最近 500 条覆盖写入的键、
@@ -312,7 +360,8 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
 
 ## 4. REST API
 
-统一响应：`{ ok: true, data }` / `{ ok: false, error: { code, message, details? } }`。分页统一 `?page=1&size=50` → `{ items, total, page, size }`。
+统一响应：普通 JSON 端点使用 `{ ok:true, data }` / `{ ok:false, error:{ code,message,details? } }`；
+`GET /api/events` 使用 SSE，`POST /api/agents/:name/dryrun` 使用逐行 NDJSON，不套普通响应信封。
 
 | Method & Path | 说明 |
 |---|---|
@@ -323,14 +372,14 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
 | `GET /api/chats/:key/commits` | commit 时间线 |
 | `POST /api/chats/:key/commits/:id/checkout` | 回滚 done 指针 |
 | `POST /api/chats/:key/reset` `POST /api/chats/:key/undo` | 等价 `/new` `/undo` |
-| `GET /api/messages` `GET /api/messages/:id` `DELETE /api/messages/:id` | 消息检索（`?q=` 走 FTS）。列表结果里 `turnId` 会回填：触发消息自己不带 `turn_id`（只有回复落盘才写那一列），但检索命中后最想点开的正是它那一轮，所以按 `turns.trigger_message_id` 反查补上 |
-| `GET /api/turns` | 最近的模型对话，按 turn 聚合：`?page=1&size=20`（size 上限 100）→ `{items, total, page, size}`。每项带触发消息正文（`prompt`）与该轮 bot 回复（`reply`，按内容去重）、状态、步数/工具数/token/花费。分页走 SQL `LIMIT/OFFSET` |
+| `GET /api/messages` `GET /api/messages/:id` `DELETE /api/messages/:id` | 消息检索（`?q=` 走 FTS）。列表结果里 `turnId` 会回填：触发消息自己不带 `turn_id`（只有回复落盘才写那一列），但检索命中后最想点开的正是它那一轮，所以按 `turns.trigger_message_id` 反查补上。每条还带 `attachments:[{id, kind, mime, fileName, sizeBytes, width, height, durationSec, downloadState, downloadError, extractState, hasLocal}]`（按 `message_id` 一次 IN 查询归组）—— **不返回 `local_path`**：磁盘路径对界面没用，泄漏出去只是白送一份部署布局 |
+| `GET /api/turns` | 最近的模型对话，按 turn 聚合：`?page=1&size=20`（size 上限 100）→ `{items, total, page, size}`。每项带触发消息正文（`prompt`）与该轮 bot 回复（`reply`，按内容去重）、状态、步数/工具数/token/花费，以及触发消息上的 `attachments`（形状同 `GET /api/messages`，另带 `promptMessageId`）。分页走 SQL `LIMIT/OFFSET` |
 | `GET /api/turns/:id/detail` | 一次对话的**实际调用载荷**：`{turn, captureBodies, events:[{id, ts, level, kind, summary, spanId, parentSpanId, durationMs, text, bytes, truncated, fileRef}]}`。`events` 是 `log_events` 里 `trace_id = turn id` 的全部 span（上限 500 条，按时间序）；`text` 是格式化后的 `data_json`，单条超过 120k 字符截断并置 `truncated`。超过 `logs.bodyMaxBytes` 的载荷已被 `LogSink` 挪进 `logs/<day>/blobs/*.json`，这里**解引用后再返回**（不然详情里只剩一行 `{"fileRef":…}`）；blob 已被保留策略清掉时 `text=null` 且保留 `fileRef`。turn 不存在返回 404 |
 | `GET /api/logs/:id/data` | 单条日志事件的完整载荷（`application/json` 附件下载），blob 同样解引用。详情视图里的 JSON 会被截断，复制与下载必须拿到完整那一份 |
-| `GET /api/files/:attachmentId` | 附件下载（校验 session） |
-| `GET /api/prompts` `GET /api/prompts/:id` `PUT /api/prompts/:id` | 提示词/记忆文档 |
+| `GET /api/files/:attachmentId` | 附件下载（校验 session）。默认 `content-disposition: attachment`；`?inline=1` 只对**光栅图**（`image/png` `image/jpeg` `image/gif` `image/webp`）放行内联渲染 —— 附件的 mime 来自 Telegram、是发送方可控的，同源内联 SVG/HTML 等于把用户上传的内容变成本站脚本，白名单之外一律照旧当附件下载 |
+| `GET /api/prompts` `GET /api/prompts/:id` `PUT /api/prompts/:id` | 提示词（body 读写） |
 | `GET /api/prompts/:id/revisions` `POST /api/prompts/:id/rollback` | 版本 |
-| `POST /api/prompts/preview` | 组装预览（body: `{key, role}`） |
+| `POST /api/prompts/preview` | 按会话与角色走真实运行时路径组装完整 prompt blocks |
 | `GET/POST/PATCH/DELETE /api/providers[/:id]` | Provider |
 | `POST /api/providers/:id/test` | 测试连接：按 kind 向上游模型目录接口发一次 GET（15s 超时），返回 `{reachable, code, message, status, latencyMs, models}`（`models` 是数量，不是列表）。body 可选 `{apiKey, baseUrl, kind}` 覆盖库里的值，用于测试尚未保存的配置。**只有不带覆盖的测试写健康状态**：成功写 `health_state='up'` 并清空 `health_error`（这是 `down` 的唯一人工恢复路径），401/403 写 `down`，其余失败只更新 `health_checked_at` —— 网关缺 `/models` 不等于对话不可用，不能因此把可用的 provider 摘掉 |
 | `GET /api/providers/:id/models` | 拉取上游模型目录并用 models.dev 的本地缓存补齐元数据，返回 `{models:[{modelId, displayName, contextWindow, maxOutput, limitSource, priceIn, priceOut, priceCacheRead, priceCacheWrite, meta}], latencyMs, catalog}`。`meta` 是匹配结果（`match`/`catalogProviderId`/`catalogModelId`/`normalized`/`capabilities`/`reasoningControl`/`reasoningEfforts`/`modalities`/`priceRange`，见 [04 §5.4.1](./04-agents-and-providers.md#541-模型元数据目录modelsdev)），目录不可用时整块为 `match:'none'` 的空值而不是编造。上游不可达时返回 `502` + 错误 code |
@@ -345,18 +394,20 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
 | `POST /api/principals/roles` | 勾选批量改角色：`{ids:[主体 id…], role}`，单次上限 500。**只改已存在的行，不新建**（新建走 `/api/principals/bulk`，那边收的是 Telegram 数字 ID）；库里找不到的 id 原样回报而不是静默跳过，返回 `{count, changed, missing}` |
 | `GET /api/tools` `PATCH /api/tools/:name` | 工具启停。`GET` 在静态策略之外一并返回当前 `enabled`（来自 `tools.overrides`）。`PATCH` 写入 `tools.overrides.<name>.enabled`；被禁用的工具从工具目录消失，且 `ToolRegistry.execute` 会二次拦截并返回 `tool_disabled_by_operator`。未知工具名返回 404 |
 | `GET/PUT /api/sandbox` `POST /api/sandbox/probe` | 沙箱配置与探测 |
-| `GET/POST/PATCH/DELETE /api/skills[/:name]` | Skill（含正文读写） |
+| `GET/POST /api/skills` `GET/PUT/PATCH/DELETE /api/skills/:name` | Skill 列表、正文/frontmatter CRUD、启停 |
 | `GET/PATCH /api/plugins[/:name]` `POST /api/plugins/:name/reload` | Plugin |
-| `GET/POST/PATCH/DELETE /api/mcp[/:name]` `POST /api/mcp/:name/reconnect` | MCP |
-| `GET /api/agents` `POST /api/agents/:name/dryrun` | 子 agent。**写不走单条端点**：定义存在配置里，新增/编辑/删除都是把整张 `agent.agents` 数组经 `PUT /api/config` 写进覆盖层，由 `configSchema` 统一校验 |
+| `GET/POST /api/mcp` `PATCH/DELETE /api/mcp/:name` `POST /api/mcp/:name/reconnect` | MCP transport CRUD、热重连 |
+| `GET /api/agents` `POST /api/agents/:name/dryrun` | 子 agent 定义与 NDJSON 隔离试跑（定义增删改走 `agent.agents` 配置） |
 | `GET /api/logs` `GET /api/logs/trace/:traceId` `GET /api/logs/blob?ref=` | 日志 |
 | `GET /api/usage` | 用量明细（`usage_ledger`，最近 1000 条） |
 | `GET /api/quota` | 配额页的全部数据：`{quota, timezone, buckets:{day,month}, counters:[…], unpriced:[…], unpricedTotal, unimplemented:[…]}`。`counters` 是 `quota_counters` 全表（上限 500 行）**加上服务端合成的 `limit`**：`(scope, window)` 到配置的取值规则含 `perUser.byRole` 覆盖，让前端自己拼等于把 `bot.ts` 的规则实现两遍。`current` 标记该行是否落在当前 bucket；chat/user 行按 `principals` 反查 `role`/`label`/`username`；配了 `byRole` 时 user 行带 `limitApprox`（有效角色取 `min(用户, 会话)`，服务端只看得到前者）。`unimplemented` 转发 `KNOWN_UNIMPLEMENTED_CONFIG_KEYS` 里 `quota.` 开头的那几项，界面据此不给控件 |
 | `PUT /api/quota` | body 是**相对 `quota` 的点分键**（`{"global.daily": 5}` → `quota.global.daily`），与 `PUT /api/sandbox` 一致。展开走 `assignDotted`、整体过 `configSchema`，落 `config_kv` + `config_revisions` 并广播 `config.changed`（与 `PUT /api/config` 同一套校验与审计）。非法键 400 `invalid_config_key`，校验失败 400 `invalid_config` + 逐条 `details` |
 | `POST /api/quota/reset` | 重置计数器。不带 body = 全表清零；带 `{scope, subject?, window?, bucket?}` 只删匹配的行（**给了任一过滤条件就必须给 `scope`**，否则 400 `invalid_filter` —— 只按 `bucket` 删会跨 scope 误伤）。返回 `{changes}` |
-| `GET /api/tasks` `POST /api/tasks/:id/cancel` | 任务 |
-| `GET /api/approvals` `POST /api/approvals/:id/decide` | 审批。🚧 当前没有可用的审批通道，命中规则的调用当场被拒（[05 §6](./05-tools-and-permissions.md)）：列表是审计视图（谁在什么时候被挡了），`decide` 对非 pending 行返回 `changed:false` |
-| `GET /api/config` `PUT /api/config` `GET /api/config/schema` `GET /api/config/revisions` | 配置。`PUT` body 为点分键；含 `__proto__`/`constructor`/`prototype` 段的键一律 400 `invalid_config_key`（原型污染发生在校验之前，一次请求就能让此后所有配置写入失败，docs/20 · W-CFG-01）；动到 `trigger.*` 时唤醒词要过 `checkWakeword`，不可用返回 400 `invalid_wakeword`。`/schema` 另带 `hotReloadable` 与 `unimplemented` 两个键名前缀表：不在 `hotReloadable` 里的键保存后需要重启才生效，WebUI 据此显示待重启徽标（[11](./11-config-reference.md)） |
+| `GET /api/tasks` | 任务列表（`tasks` 表，最近 500 条）。**没有 `POST /api/tasks/:id/cancel`**：子 agent 跑在父轮次的 abort 信号下，没有独立的取消句柄，界面上的任务 `[取消]` 打的是下面那条轮次取消 —— 造一个只能取消整轮的 task 端点等于起个会误导人的名字 |
+| `GET /api/turns/active` | 在途轮次：`[{id, key, chatId, userId, role, startedAt, steps, toolCalls, costUsd, inputTokens, outputTokens}]`。**来源是进程内的 `TurnRegistry`**（`turns` 表里可能有上次崩溃残留的 `running` 行），步数与花费仍从表里按 `id IN (…)` 一次取回；表里没有对应行时补零。进程内的 `AbortController` / 定时器不出现在响应里 |
+| `POST /api/turns/:id/cancel` | 取消一个在途轮次：向该轮的 `AbortController` 发 abort，轮次走 `abortTurn` 落成 `cancelled`，**不删任何消息或上下文**。WebUI 是单角色 owner，可取消任何人的轮次。轮次不在注册表里（已经结束）时返回 `{cancelled:false}` 而不是 404 —— 这不是错误，是「没有作用对象」。写 `webui.action` 与 `turn.cancel` 审计 |
+| `GET /api/approvals` `POST /api/approvals/:id/decide` | pending 与历史审批；owner 裁决 |
+| `GET /api/config` `PUT /api/config` `GET /api/config/schema` `GET /api/config/revisions` | 配置。`/schema` 的三件套 `{schema, hotReloadable, unimplemented}` **都在 `data` 信封里**（统一客户端只解 `data`，挂在顶层的兄弟键会被静默丢掉，自动生成的表单就是靠这两份前缀表打「热更新 / 需重启 / 未接线」徽标的）。`PUT` body 为点分键；含 `__proto__`/`constructor`/`prototype` 段的键一律 400 `invalid_config_key`（原型污染发生在校验之前，一次请求就能让此后所有配置写入失败，docs/20 · W-CFG-01）；动到 `trigger.*` 时唤醒词要过 `checkWakeword`，不可用返回 400 `invalid_wakeword`。`/schema` 另带 `hotReloadable` 与 `unimplemented` 两个键名前缀表：不在 `hotReloadable` 里的键保存后需要重启才生效，WebUI 据此显示待重启徽标（[11](./11-config-reference.md)） |
 | `POST /api/config/wakewords/check` | 逐条返回唤醒词的 `{ kind: contains\|regex, ok, reason }`，供面板即时提示；判定与运行时匹配同源 |
 | `POST /api/maintenance/{backup,vacuum,cleanup-logs,rebuild-fts,gc-files}` | 维护 |
 | `GET /api/events` | SSE |
@@ -367,29 +418,34 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
 
 ## 5. SSE 事件
 
-> **现状**：下表里 **只有 `config.changed` 会真的发出**（另有一个未列在表里的 `approval.decided`）。
-> 其余八种一次都不会发 —— 包括 WebUI 唯一监听的 `log`：`LogSink` 的构造函数没有 `EventBus` 参数
-> （`apps/bot/src/main.ts`），日志写入路径上没有 emit。**后果是首屏之后界面不会自行刷新**，
-> 顶栏那个「实时」徽标只表示 EventSource 连上了，不表示有数据在流动。
-> 完整分析与修法见 [21 §3 · G-SSE-01](./21-webui-coverage-gaps.md)；接线时必须同时做 level 阈值与节流，
-> 否则「每条事件重跑一次 `load()`」会变成自我 DDoS。
-
 ```
-event: turn.started      data: {turnId, key, chatId, user, at}
-event: turn.progress     data: {turnId, phase, step, note}
-event: turn.finished     data: {turnId, state, steps, costUsd, rebased, durationMs}
-event: log               data: {id, ts, level, kind, traceId, summary}
-event: usage             data: {turnId, model, in, out, costUsd}
-event: quota             data: {scope, subject, bucket, spent, limit}
-event: approval.pending  data: {id, tool, risk, chatId, expiresAt}
-event: task.updated      data: {id, state, progress}
-event: health            data: {providers:[...], mcp:[...], sandbox:{ok}, bot:{ok}}
+event: turn.started      data: {turnId, key, chatId, user, role, triggerReason, at}
+event: turn.progress     data: {turnId, phase: model|tools, step, note}
+event: turn.finished     data: {turnId, key, chatId, state, steps, toolCalls, costUsd, rebased, durationMs}
+event: log               data: {id, ts, level, kind, traceId, summary, merged?}
+event: usage             data: {turnId, model, alias, in, out, costUsd}
+event: quota             data: {scope, subject, window, bucket, spent, limit}
+event: task.updated      data: {id, turnId, title?, runId?, state, progress}
+event: health            data: {source: provider|mcp, name, ok, code}
 event: config.changed    data: {keys:[...]}
+event: approval.pending  data: {id, turnId, agentRunId, tool, input, risk, chatId, requesterUserId, requestedAt, expiresAt}
+event: approval.decided  data: {id, tool, risk, chatId, approved, actor, channel, state?}
 ```
 
-- 单连接多主题；前端按 `event` 分发到 Pinia store。
-- 心跳注释 `: ping` 每 20s，防中间代理断连；断线前端指数退避重连（1s→30s）。
-- 背压：`log` 事件在服务端按 200 条/秒截流，超出发 `{dropped: n}`。
+发送点（都在已有的日志点旁边）：`turn.started` / `turn.finished` 在 `packages/telegram/src/bot.ts`，
+`turn.progress` / `usage` 在 `packages/core/src/agent/runtime.ts` 的 `onStepStart` / `onStepEnd`，
+`quota` 在 `QuotaGuard.commit`（结算事务提交之后才发，先发会让订阅方读到旧值），
+`task.updated` 在 `spawn_agent` 与 `report_progress`，`health` 在 `POST /api/providers/:id/test`
+与 `POST /api/mcp/:name/reconnect`（这两处是健康状态**真的会变**的地方；没有独立的健康轮询器，
+所以它不是周期心跳）。`log` 由 `LogSink` 自己发。
+
+- 单连接多主题。心跳注释 `: ping` 每 20s，防中间代理断连；断线由浏览器 `EventSource` 自动重连。
+- **`log` 事件只带摘要**（不含 `data`），`debug` 不广播，同一 `kind` 在 200 ms 内合并成一条并带
+  `merged: n` —— 细节与理由见 [10 §3](./10-logging-and-observability.md#3-落盘格式)。
+- **前端按事件类型定向刷新**，不是收到任何事件就重跑一次全量 `load()`（那是一次 18 个端点）：
+  每种事件映射到固定的几组数据，且只刷当前页面看得见的那几组，同组 400 ms 内合并一次；
+  切换页面时 `watch(active)` 补拉。`turn.progress` 直接用载荷更新在途表，不回查。
+- 正在编辑的表单（触发、输出节奏、配额、沙箱）有 dirty 标记，`config.changed` 触发的重载不会回写覆盖。
 - SSE 连接需 session cookie；未鉴权直接 401。
 
 ---

@@ -4,12 +4,26 @@ import { resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import argon2 from 'argon2';
 import { Hono } from 'hono';
+import type { Context } from 'hono';
 import { serveStatic } from '@hono/node-server/serve-static';
-import type { AgentManager, Config, ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, PluginManager, PromptDocuments, ProviderStore, Sandbox, SkillLoader, TurnRegistry } from '@luoli/core';
+import type { AgentManager, Config, ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, PluginManager, PromptDocuments, ProviderStore, Sandbox, SkillLoader, SkillWriteInput, SubAgentRuntimeEvent, TurnRegistry } from '@luoli/core';
 import { ALIAS_NAME_PATTERN, HOT_RELOADABLE_CONFIG_KEYS, KNOWN_UNIMPLEMENTED_CONFIG_KEYS, TOOL_POLICY, aliasSettingsSchema, checkWakeword, configSchema as runtimeConfigSchema, perChatConfig, probeProvider, quotaBucket, rejectedWakewords } from '@luoli/core';
 import type { CatalogIndex, ModelMetadata, ProviderProbe } from '@luoli/core';
 import type { ArchiveRepository, OperationsRepository, PrincipalRepository, Sqlite } from '@luoli/db';
-import { assignDotted } from '@luoli/shared';
+import { assignDotted, type Role } from '@luoli/shared';
+
+export interface PromptPreviewResult {
+  key: string;
+  role: Role;
+  instructions: string;
+  blocks: Array<{ name: string; tokens: number; content: string; truncated: boolean }>;
+  totalTokens: number;
+  context: { messages: number; tokens: number };
+}
+
+export type AgentDryRunEvent = SubAgentRuntimeEvent
+  | { type: 'final'; summary: string; fullRef: string; truncated: boolean }
+  | { type: 'error'; message: string };
 
 export interface ServerDependencies {
   config: Readonly<Config> | ConfigStore;
@@ -32,6 +46,8 @@ export interface ServerDependencies {
   agents?: AgentManager;
   turnRegistry?: TurnRegistry;
   sandbox?: Sandbox;
+  previewPrompt?: (key: string, role: Role) => PromptPreviewResult | Promise<PromptPreviewResult>;
+  dryRunAgent?: (name: string, task: string, signal: AbortSignal, emit: (event: SubAgentRuntimeEvent) => void | Promise<void>) => Promise<{ summary: string; fullRef: string; truncated: boolean }>;
   log: LogSink;
   configSchema: unknown;
   startedAt: number;
@@ -54,7 +70,7 @@ function cookie(header: string | undefined, name: string): string | null {
   return null;
 }
 
-const apiError = (code: string, message: string, status: 400 | 401 | 403 | 404 | 429 | 500 | 502 = 400) => ({ body: { ok: false as const, error: { code, message } }, status });
+const apiError = (code: string, message: string, status: 400 | 401 | 403 | 404 | 409 | 429 | 500 | 502 = 400) => ({ body: { ok: false as const, error: { code, message } }, status });
 
 /**
  * 展开一律走 `assignDotted`：裸的 `cursor[part]` 遇到 `__proto__` 会在**校验之前**污染 `Object.prototype`，
@@ -70,6 +86,9 @@ const invalidKey = (result: { ok: false; key: string }) => apiError('invalid_con
 function page<T>(items: T[], pageNumber: number, size: number): { items: T[]; total: number; page: number; size: number } {
   return { items: items.slice((pageNumber - 1) * size, pageNumber * size), total: items.length, page: pageNumber, size };
 }
+
+/** 可以内联渲染的 mime：只有光栅图，刻意不含 image/svg+xml（SVG 能带脚本）。 */
+const INLINE_MIME = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 
 /** 文件名来自 Telegram，是攻击者可控的：引号会破坏参数解析，CR/LF 会让 Response 构造直接抛错。 */
 function contentDisposition(name: string): string {
@@ -105,6 +124,25 @@ function allowedOrigin(ctx: { req: { header(name: string): string | undefined; u
 export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> {
   const app = new Hono<ServerEnv>();
   const currentConfig = (): Readonly<Config> => 'snapshot' in dependencies.config ? dependencies.config.snapshot() : dependencies.config;
+  const validRoles: Record<Role, true> = { owner: true, trusted: true, limited: true, blocked: true };
+  const persistMcpServers = (servers: unknown[]): { ok: true; servers: Readonly<Config['mcp']['servers']> } | { ok: false; details: unknown } => {
+    const merged = mergeDotted(currentConfig(), { 'mcp.servers': servers });
+    if (!merged.ok) return { ok: false, details: [{ path: merged.key, message: '非法配置键' }] };
+    const parsed = runtimeConfigSchema.safeParse(merged.value);
+    if (!parsed.success) return { ok: false, details: parsed.error.issues.map((issue) => ({ path: issue.path.join('.'), message: issue.message })) };
+    const key = 'mcp.servers';
+    const now = Date.now();
+    const previous = dependencies.db.prepare('SELECT value_json AS value FROM config_kv WHERE key=?').get(key) as { value: string } | undefined;
+    dependencies.db.transaction(() => {
+      dependencies.db.prepare("INSERT INTO config_kv(key,value_json,updated_at,updated_by) VALUES (?,?,?,'webui') ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at,updated_by=excluded.updated_by")
+        .run(key, JSON.stringify(parsed.data.mcp.servers), now);
+      dependencies.db.prepare('INSERT INTO config_revisions(id,ts,actor,key,old_json,new_json) VALUES (?,?,?,?,?,?)')
+        .run(randomBytes(16).toString('hex'), now, 'webui', key, previous?.value ?? null, JSON.stringify(parsed.data.mcp.servers));
+    })();
+    if ('replace' in dependencies.config) dependencies.config.replace(parsed.data, [key]);
+    dependencies.events.emit('config.changed', { keys: [key] });
+    return { ok: true, servers: parsed.data.mcp.servers };
+  };
   let passwordHash = currentConfig().webui.passwordHash;
   const failures = new Map<string, { count: number; lockedUntil: number }>();
 
@@ -205,7 +243,9 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
   app.get('/api/config', (ctx) => ctx.json({ ok: true, data: publicConfig(currentConfig()) }));
   // 带上热更新前缀：不在 hotReloadable 里的键保存后需要重启才生效，WebUI 据此显示待重启徽标
   // ——「保存成功」但运行时没变，是 docs/20 · W-CFG-02 里最误导的一类。
-  app.get('/api/config/schema', (ctx) => ctx.json({ ok: true, data: dependencies.configSchema, hotReloadable: HOT_RELOADABLE_CONFIG_KEYS, unimplemented: KNOWN_UNIMPLEMENTED_CONFIG_KEYS }));
+  // 三件套一律放进 `data`：统一信封的客户端只解 `data`，挂在信封顶层的兄弟键会被静默丢掉 ——
+  // 自动生成的表单正是靠这两份前缀表判断「热更新 / 需重启」与「未接线」的。
+  app.get('/api/config/schema', (ctx) => ctx.json({ ok: true, data: { schema: dependencies.configSchema, hotReloadable: HOT_RELOADABLE_CONFIG_KEYS, unimplemented: KNOWN_UNIMPLEMENTED_CONFIG_KEYS } }));
   // 不安全或过短的唤醒词在匹配时被静默跳过（trigger.ts）。收下这种模式等于让运维以为配好了，
   // 实际表现是「bot 不理我」，所以写入端直接挡回去；只在这次写操作真的动了唤醒词时校验。
   app.post('/api/config/wakewords/check', async (ctx) => {
@@ -320,6 +360,7 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     }
     dependencies.log.event({ level: result.reachable ? 'info' : 'warn', kind: 'provider.health', summary: `provider test ${result.code}`,
       data: { provider: row.name, code: result.code, status: result.status, latencyMs: result.latencyMs, models: result.models.length, adhoc } });
+    if (!adhoc) dependencies.events.emit('health', { source: 'provider', name: row.name, ok: result.reachable, code: result.code });
     return ctx.json({ ok: true, data: { reachable: result.reachable, code: result.code, message: result.message, status: result.status, latencyMs: result.latencyMs, models: result.models.length } });
   });
   // 上游的 /models 只给模型名（Google 额外给窗口/输出）。窗口、最大输出、定价、输入模态、
@@ -482,6 +523,24 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     for (const row of items) if (!row.turnId) row.turnId = owners.get(Number(row.id)) ?? null;
     return items;
   };
+  // 图片与文件此前在管理端完全不可见：消息行不带 attachment id，界面上也就没有任何地方能点开
+  // （docs/21 · G-API-08）。一次 IN 查询按 message_id 归组，不返回 local_path ——
+  // 磁盘路径对界面没用，泄漏出去只是白送一份部署布局。
+  const withAttachments = (rows: unknown[]): unknown[] => {
+    const items = rows as Array<Record<string, unknown>>;
+    const ids = [...new Set(items.map((row) => Number(row.id)).filter((id) => Number.isInteger(id)))];
+    if (!ids.length) return items;
+    const grouped = new Map<number, Array<Record<string, unknown>>>();
+    for (const row of dependencies.db.prepare(`SELECT id,message_id AS messageId,kind,mime,file_name AS fileName,size_bytes AS sizeBytes,width,height,
+      duration_sec AS durationSec,download_state AS downloadState,download_error AS downloadError,extract_state AS extractState,
+      local_path IS NOT NULL AS hasLocal FROM attachments WHERE message_id IN (${ids.map(() => '?').join(',')}) ORDER BY id`).all(...ids) as Array<Record<string, unknown>>) {
+      const list = grouped.get(Number(row.messageId)) ?? [];
+      list.push(row);
+      grouped.set(Number(row.messageId), list);
+    }
+    for (const row of items) row.attachments = grouped.get(Number(row.id)) ?? [];
+    return items;
+  };
   app.get('/api/messages', (ctx) => {
     const query = ctx.req.query('q') ?? '';
     const pageNumber = Math.max(1, Number(ctx.req.query('page') ?? 1));
@@ -490,7 +549,7 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     const paged = page(items, pageNumber, size);
     // 搜索分支只取回了 page*size 条，`items.length` 不是命中总数 —— total 必须单独数（docs/20 · W-API-03）。
     const total = query ? dependencies.archive.adminSearchCount(query) : paged.total;
-    return ctx.json({ ok: true, data: { ...paged, total, items: attachTurnIds(paged.items) } });
+    return ctx.json({ ok: true, data: { ...paged, total, items: withAttachments(attachTurnIds(paged.items)) } });
   });
   // 消息页默认看的是「最近几次模型对话」而不是逐条消息流：一次 turn 的提问与回答分散在多行里，
   // 按行翻页读不出对话的样子。分页走 SQL 的 LIMIT/OFFSET，turns 表可能很大，不整表拉回来再切。
@@ -500,8 +559,8 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     const total = Number(dependencies.db.prepare('SELECT COUNT(*) FROM turns').pluck().get());
     const items = dependencies.db.prepare(`SELECT t.id,t.key,t.chat_id AS chatId,t.initiator_user_id AS userId,t.effective_role AS role,t.state,t.trigger_reason AS triggerReason,
       COALESCE(t.started_at,t.queued_at) AS startedAt,t.finished_at AS finishedAt,t.steps,t.tool_calls AS toolCalls,t.input_tokens AS inputTokens,t.output_tokens AS outputTokens,t.cost_usd AS costUsd,t.error,t.rebased,
-      m.text AS prompt,m.kind AS promptKind,m.from_name AS fromName,m.from_username AS fromUsername
-      FROM turns t LEFT JOIN messages m ON m.id=t.trigger_message_id
+      m.id AS promptMessageId,m.text AS prompt,m.kind AS promptKind,m.from_name AS fromName,m.from_username AS fromUsername
+      FROM turns t LEFT JOIN messages m ON m.id=t.trigger_message_id AND m.deleted_at IS NULL
       ORDER BY COALESCE(t.started_at,t.queued_at) DESC,t.rowid DESC LIMIT ? OFFSET ?`).all(size, (pageNumber - 1) * size) as Array<Record<string, unknown>>;
     if (items.length) {
       const placeholders = items.map(() => '?').join(',');
@@ -515,8 +574,34 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
         if (row.text && !previous.includes(row.text)) grouped.set(row.turnId, [...previous, row.text]);
       }
       for (const item of items) item.reply = (grouped.get(String(item.id)) ?? []).join('\n\n');
+      // 附件挂在触发消息上，不是 turn 上：借 promptMessageId 走同一条归组逻辑，再搬回 turn 行。
+      const carriers: Array<Record<string, unknown>> = items.filter((item) => item.promptMessageId !== null).map((item) => ({ id: item.promptMessageId }));
+      withAttachments(carriers);
+      const byMessage = new Map(carriers.map((row) => [Number(row.id), row.attachments]));
+      for (const item of items) item.attachments = byMessage.get(Number(item.promptMessageId)) ?? [];
     }
     return ctx.json({ ok: true, data: { items, total, page: pageNumber, size } });
+  });
+  // 在途 turn 的权威来源是进程内的 TurnRegistry，不是 turns 表：崩溃残留的 running 行要等
+  // 下次启动的 recoverAfterCrash 才归零，只读表会把它们也画成「正在跑」。步数与花费仍来自表
+  // （记账侧一直在写），一次 IN 查询取回。
+  app.get('/api/turns/active', (ctx) => {
+    const active = dependencies.turnRegistry?.list() ?? [];
+    if (!active.length) return ctx.json({ ok: true, data: [] });
+    const stats = new Map((dependencies.db.prepare(`SELECT id,steps,tool_calls AS toolCalls,cost_usd AS costUsd,input_tokens AS inputTokens,output_tokens AS outputTokens
+      FROM turns WHERE id IN (${active.map(() => '?').join(',')})`).all(...active.map((turn) => turn.id)) as Array<Record<string, unknown>>).map((row) => [String(row.id), row]));
+    return ctx.json({ ok: true, data: active.map((turn) => ({ id: turn.id, key: turn.key, chatId: turn.chatId, userId: turn.userId, role: turn.role, startedAt: turn.startedAt,
+      steps: 0, toolCalls: 0, costUsd: 0, inputTokens: 0, outputTokens: 0, ...stats.get(turn.id) })) });
+  });
+  // WebUI 此前没有任何取消通道：Telegram 侧有 /cancel 与流式消息上的取消按钮，管理端只能干等
+  // 到 concurrency.turnTimeoutMs（docs/21 · G-SRV-01）。取消是 abort 信号，不是删除：
+  // 该轮走 abortTurn 落成 cancelled，上下文与已发出的消息都还在。
+  app.post('/api/turns/:id/cancel', (ctx) => {
+    if (!dependencies.turnRegistry) return ctx.json(apiError('not_implemented', '这个部署没有装配 TurnRegistry，无法取消', 500).body, 500);
+    // WebUI 是单角色 owner（GET /api/auth/me），owner 可以取消任何人的轮次。
+    const cancelled = dependencies.turnRegistry.cancel(ctx.req.param('id'), 'webui', 'owner');
+    dependencies.log.event({ level: 'info', kind: 'turn.cancel', summary: cancelled ? 'turn cancelled from webui' : 'turn already finished', traceId: ctx.req.param('id'), data: { cancelled } });
+    return ctx.json({ ok: true, data: { cancelled } });
   });
   // 「这一轮到底往上游发了什么」只有日志里那一份：turns 表存的是统计，messages 表存的是最终文本。
   // trace_id 就是 turn id，把该轮的 span 连同 data 一起读出来即可；超过 logs.bodyMaxBytes 的 data
@@ -541,7 +626,7 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     const turn = dependencies.db.prepare(`SELECT t.id,t.key,t.chat_id AS chatId,t.initiator_user_id AS userId,t.effective_role AS role,t.state,t.trigger_reason AS triggerReason,
       COALESCE(t.started_at,t.queued_at) AS startedAt,t.finished_at AS finishedAt,t.steps,t.model_calls AS modelCalls,t.tool_calls AS toolCalls,t.input_tokens AS inputTokens,
       t.output_tokens AS outputTokens,t.cost_usd AS costUsd,t.error,t.rebased,m.text AS prompt,m.kind AS promptKind,m.from_name AS fromName,m.from_username AS fromUsername
-      FROM turns t LEFT JOIN messages m ON m.id=t.trigger_message_id WHERE t.id=?`).get(id) as Record<string, unknown> | undefined;
+      FROM turns t LEFT JOIN messages m ON m.id=t.trigger_message_id AND m.deleted_at IS NULL WHERE t.id=?`).get(id) as Record<string, unknown> | undefined;
     if (!turn) return ctx.json(apiError('not_found', '这一轮不存在（可能已被日志/数据清理）', 404).body, 404);
     const rows = dependencies.db.prepare(`SELECT id,ts,level,kind,summary,span_id AS spanId,parent_span_id AS parentSpanId,duration_ms AS durationMs,data_json AS data
       FROM log_events WHERE trace_id=? ORDER BY ts,id LIMIT 500`).all(id) as Array<Record<string, unknown> & { data: string | null }>;
@@ -549,8 +634,22 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     return ctx.json({ ok: true, data: { turn, captureBodies: currentConfig().logs.captureBodies, events } });
   });
   app.get('/api/messages/:id', (ctx) => { const row = dependencies.db.prepare('SELECT id,chat_id AS chatId,message_thread_id AS threadId,tg_message_id AS tgMessageId,direction,from_kind AS fromKind,from_user_id AS fromUserId,from_name AS fromName,from_username AS fromUsername,kind,text,tg_date AS tgDate,triggered,trigger_reason AS triggerReason,turn_id AS turnId,revision,deleted_at AS deletedAt FROM messages WHERE id=?').get(Number(ctx.req.param('id'))); return row ? ctx.json({ ok: true, data: row }) : ctx.json(apiError('not_found', '消息不存在', 404).body, 404); });
-  app.delete('/api/messages/:id', (ctx) => { const changes = dependencies.db.prepare('UPDATE messages SET deleted_at=? WHERE id=? AND deleted_at IS NULL').run(Date.now(), Number(ctx.req.param('id'))).changes; return ctx.json({ ok: true, data: { changes } }); });
-  app.get('/api/files/:attachmentId', (ctx) => { const row = dependencies.db.prepare('SELECT local_path AS path,mime,file_name AS name FROM attachments WHERE id=?').get(ctx.req.param('attachmentId')) as { path: string | null; mime: string | null; name: string | null } | undefined; if (!row?.path || !existsSync(row.path)) return ctx.json(apiError('not_found', '附件不存在', 404).body, 404); return new Response(readFileSync(row.path), { headers: { 'content-type': row.mime ?? 'application/octet-stream', 'content-disposition': contentDisposition(row.name ?? ctx.req.param('attachmentId')) } }); });
+  app.delete('/api/messages/:id', (ctx) => {
+    const id = Number(ctx.req.param('id'));
+    if (!Number.isSafeInteger(id) || id <= 0) return ctx.json(apiError('invalid_message_id', '消息 id 无效').body, 400);
+    const changes = dependencies.db.prepare('UPDATE messages SET deleted_at=? WHERE id=? AND deleted_at IS NULL').run(Date.now(), id).changes;
+    dependencies.log.event({ level: 'info', kind: 'webui.action', summary: changes ? 'archive message soft-deleted' : 'archive message already absent', data: { id, changes } });
+    return ctx.json({ ok: true, data: { id, changes } });
+  });
+  app.get('/api/files/:attachmentId', (ctx) => {
+    const row = dependencies.db.prepare('SELECT local_path AS path,mime,file_name AS name FROM attachments WHERE id=?').get(ctx.req.param('attachmentId')) as { path: string | null; mime: string | null; name: string | null } | undefined;
+    if (!row?.path || !existsSync(row.path)) return ctx.json(apiError('not_found', '附件不存在', 404).body, 404);
+    // `?inline=1` 只对光栅图放行。同源内联渲染 SVG/HTML 等于把用户上传的内容变成本站脚本，
+    // 而附件的 mime 来自 Telegram、是发送方可控的 —— 白名单之外一律照旧当附件下载。
+    const inline = ctx.req.query('inline') === '1' && INLINE_MIME.has(row.mime ?? '');
+    return new Response(readFileSync(row.path), { headers: { 'content-type': row.mime ?? 'application/octet-stream',
+      'content-disposition': inline ? 'inline' : contentDisposition(row.name ?? ctx.req.param('attachmentId')) } });
+  });
   app.get('/api/chats/:key/context', (ctx) => ctx.json({ ok: true, data: dependencies.context.materialize(ctx.req.param('key'), ctx.req.query('commit') ?? null) }));
   app.get('/api/chats/:key/commits', (ctx) => ctx.json({ ok: true, data: dependencies.context.stats(ctx.req.param('key')) }));
   app.post('/api/chats/:key/commits/:id/checkout', (ctx) => ctx.json({ ok: true, data: dependencies.context.setHead(ctx.req.param('key'), ctx.req.param('id'), 'webui') }));
@@ -672,18 +771,152 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     try { return ctx.json({ ok: true, data: dependencies.promptDocuments.rollback(ctx.req.param('id'), body.revisionId, 'webui') }); }
     catch (error) { return ctx.json(apiError('rollback_failed', error instanceof Error ? error.message : '回滚失败', 500).body, 500); }
   });
-  app.post('/api/prompts/preview', async (ctx) => { const body = await ctx.req.json<{ key?: string; role?: string }>(); return ctx.json({ ok: true, data: { ...body, context: body.key ? dependencies.context.materialize(body.key, null) : null } }); });
-  app.get('/api/approvals', (ctx) => ctx.json({ ok: true, data: dependencies.db.prepare('SELECT * FROM approvals ORDER BY requested_at DESC LIMIT 200').all() }));
-  app.post('/api/approvals/:id/decide', async (ctx) => { const body = await ctx.req.json<{ approved: boolean }>(); return ctx.json({ ok: true, data: { changed: dependencies.approvals.decide(ctx.req.param('id'), body.approved, 'owner', 'webui') } }); });
+  app.post('/api/prompts/preview', async (ctx) => {
+    const body = await ctx.req.json<{ key?: unknown; role?: unknown }>().catch((): { key?: unknown; role?: unknown } => ({}));
+    if (typeof body.key !== 'string' || !body.key) return ctx.json(apiError('invalid_key', 'key 必填').body, 400);
+    if (typeof body.role !== 'string' || !(body.role in validRoles)) return ctx.json(apiError('invalid_role', 'role 必须是 owner / trusted / limited / blocked').body, 400);
+    if (!dependencies.previewPrompt) return ctx.json(apiError('not_implemented', '提示词预览未接入运行时', 500).body, 500);
+    try { return ctx.json({ ok: true, data: await dependencies.previewPrompt(body.key, body.role as Role) }); }
+    catch (error) { return ctx.json(apiError('preview_failed', error instanceof Error ? error.message : '提示词组装失败', 404).body, 404); }
+  });
+  app.get('/api/approvals', (ctx) => {
+    const now = Date.now();
+    dependencies.db.prepare("UPDATE approvals SET state='expired',decided_by='system',decided_at=?,decision_channel='system' WHERE state='pending' AND expires_at<=?").run(now, now);
+    return ctx.json({ ok: true, data: dependencies.db.prepare('SELECT * FROM approvals ORDER BY requested_at DESC LIMIT 200').all() });
+  });
+  app.post('/api/approvals/:id/decide', async (ctx) => {
+    const body = await ctx.req.json<{ approved?: unknown }>().catch((): { approved?: unknown } => ({}));
+    if (typeof body.approved !== 'boolean') return ctx.json(apiError('invalid_decision', 'approved 必须是布尔值').body, 400);
+    return ctx.json({ ok: true, data: { changed: dependencies.approvals.decide(ctx.req.param('id'), body.approved, 'owner', 'webui') } });
+  });
   app.get('/api/skills', (ctx) => ctx.json({ ok: true, data: dependencies.db.prepare('SELECT * FROM skills ORDER BY name').all() }));
-  app.patch('/api/skills/:name', async (ctx) => { const body = await ctx.req.json<{ enabled: boolean }>(); const changes = dependencies.db.prepare('UPDATE skills SET enabled=?,updated_at=? WHERE name=?').run(body.enabled ? 1 : 0, Date.now(), ctx.req.param('name')).changes; dependencies.skills?.scan(); return ctx.json({ ok: true, data: { changes } }); });
-  app.delete('/api/skills/:name', (ctx) => ctx.json({ ok: true, data: { changes: dependencies.db.prepare('DELETE FROM skills WHERE name=?').run(ctx.req.param('name')).changes } }));
+  app.get('/api/skills/:name', (ctx) => {
+    const skill = dependencies.skills?.read(ctx.req.param('name'));
+    return skill ? ctx.json({ ok: true, data: skill }) : ctx.json(apiError('not_found', 'Skill 不存在', 404).body, 404);
+  });
+  // PUT 与 PATCH 走同一条路：SkillLoader.update 本来就是「只覆盖给到的字段」，
+  // 两个动词分别抄一份 body 映射，改 frontmatter 字段时必然漏掉其中一个。
+  const skillWriteInput = (body: Record<string, unknown>): SkillWriteInput => ({ description: body.description as string | undefined, body: body.body as string | undefined,
+    allowedTools: body.allowedTools as string[] | undefined, minRole: body.minRole as Role | undefined, model: body.model as string | null | undefined, enabled: body.enabled as boolean | undefined });
+  const updateSkill = async (ctx: Context<ServerEnv>): Promise<Response> => {
+    if (!dependencies.skills) return ctx.json(apiError('not_implemented', 'SkillLoader 未配置', 500).body, 500);
+    const body = await ctx.req.json<Record<string, unknown>>().catch((): Record<string, unknown> => ({}));
+    try { return ctx.json({ ok: true, data: dependencies.skills.update(ctx.req.param('name') ?? '', skillWriteInput(body)) }); }
+    catch (error) {
+      const message = error instanceof Error ? error.message : 'Skill 更新失败';
+      return message === 'skill_not_found'
+        ? ctx.json(apiError('not_found', 'Skill 不存在', 404).body, 404)
+        : ctx.json(apiError('skill_update_failed', message, 400).body, 400);
+    }
+  };
+  app.post('/api/skills', async (ctx) => {
+    if (!dependencies.skills) return ctx.json(apiError('not_implemented', 'SkillLoader 未配置', 500).body, 500);
+    const body = await ctx.req.json<Record<string, unknown>>().catch((): Record<string, unknown> => ({}));
+    if (typeof body.name !== 'string') return ctx.json(apiError('invalid_skill_name', 'name 必填').body, 400);
+    try {
+      return ctx.json({ ok: true, data: dependencies.skills.create(body.name, skillWriteInput(body)) }, 201);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Skill 新建失败';
+      // 重名是「这个名字已经被占了」而不是「你发的东西不合法」：409 让前端能把它和校验错误分开提示。
+      return message === 'skill_already_exists'
+        ? ctx.json(apiError('conflict', `Skill ${body.name} 已存在`, 409).body, 409)
+        : ctx.json(apiError('invalid_skill', message, 400).body, 400);
+    }
+  });
+  app.put('/api/skills/:name', updateSkill);
+  app.patch('/api/skills/:name', updateSkill);
+  app.delete('/api/skills/:name', (ctx) => {
+    if (!dependencies.skills) return ctx.json(apiError('not_implemented', 'SkillLoader 未配置', 500).body, 500);
+    try { return ctx.json({ ok: true, data: { removed: dependencies.skills.remove(ctx.req.param('name')) } }); }
+    catch (error) { return ctx.json(apiError('skill_delete_failed', error instanceof Error ? error.message : 'Skill 删除失败', 400).body, 400); }
+  });
   app.get('/api/plugins', (ctx) => ctx.json({ ok: true, data: dependencies.db.prepare('SELECT * FROM plugins ORDER BY name').all() }));
   app.patch('/api/plugins/:name', async (ctx) => { const body = await ctx.req.json<{ enabled?: boolean; config?: unknown }>(); const changes = dependencies.db.prepare('UPDATE plugins SET enabled=COALESCE(?,enabled),config_json=COALESCE(?,config_json),updated_at=? WHERE name=?').run(body.enabled === undefined ? null : body.enabled ? 1 : 0, body.config === undefined ? null : JSON.stringify(body.config), Date.now(), ctx.req.param('name')).changes; await dependencies.plugins?.reconcile(); return ctx.json({ ok: true, data: { changes } }); });
   app.post('/api/plugins/:name/reload', async (ctx) => { await dependencies.plugins?.reconcile(); return ctx.json({ ok: true, data: { name: ctx.req.param('name') } }); });
-  app.get('/api/mcp', (ctx) => ctx.json({ ok: true, data: dependencies.db.prepare('SELECT * FROM mcp_servers ORDER BY name').all() }));
-  app.post('/api/mcp/:name/reconnect', async (ctx) => { await dependencies.mcp?.reconcile(); return ctx.json({ ok: true, data: { name: ctx.req.param('name') } }); });
+  app.get('/api/mcp', (ctx) => {
+    const persisted = dependencies.db.prepare('SELECT * FROM mcp_servers ORDER BY name').all() as Array<Record<string, unknown>>;
+    const byName = new Map(persisted.map((row) => [String(row.name), row]));
+    const data = currentConfig().mcp.servers.map((server) => {
+      const row = byName.get(server.name) ?? {};
+      let tools: unknown[] = [];
+      try { tools = row.tools_json ? JSON.parse(String(row.tools_json)) as unknown[] : []; } catch { tools = []; }
+      return { ...row, ...server, min_role: server.minRole ?? currentConfig().mcp.defaultMinRole, enabled: server.enabled === false ? 0 : 1,
+        state: server.enabled === false ? 'disabled' : row.state ?? 'pending', last_error: row.last_error ?? null, tools };
+    });
+    return ctx.json({ ok: true, data });
+  });
+  app.post('/api/mcp', async (ctx) => {
+    const body = await ctx.req.json<Record<string, unknown>>().catch((): Record<string, unknown> => ({}));
+    const existing = [...currentConfig().mcp.servers];
+    if (typeof body.name !== 'string') return ctx.json(apiError('invalid_mcp_name', 'name 必填').body, 400);
+    if (existing.some((server) => server.name === body.name)) return ctx.json(apiError('conflict', '同名 MCP server 已存在').body, 400);
+    const saved = persistMcpServers([...existing, body]);
+    if (!saved.ok) return ctx.json({ ok: false, error: { code: 'invalid_mcp', message: 'MCP 配置校验失败', details: saved.details } }, 400);
+    await dependencies.mcp?.reconcile();
+    return ctx.json({ ok: true, data: saved.servers.find((server) => server.name === body.name) }, 201);
+  });
+  app.patch('/api/mcp/:name', async (ctx) => {
+    const name = ctx.req.param('name');
+    const body = await ctx.req.json<Record<string, unknown>>().catch((): Record<string, unknown> => ({}));
+    const existing = [...currentConfig().mcp.servers];
+    const index = existing.findIndex((server) => server.name === name);
+    if (index < 0) return ctx.json(apiError('not_found', 'MCP server 不存在', 404).body, 404);
+    existing[index] = { ...existing[index]!, ...body, name } as Config['mcp']['servers'][number];
+    const saved = persistMcpServers(existing);
+    if (!saved.ok) return ctx.json({ ok: false, error: { code: 'invalid_mcp', message: 'MCP 配置校验失败', details: saved.details } }, 400);
+    await dependencies.mcp?.reconcile();
+    return ctx.json({ ok: true, data: saved.servers[index] });
+  });
+  app.delete('/api/mcp/:name', async (ctx) => {
+    const name = ctx.req.param('name');
+    const existing = [...currentConfig().mcp.servers];
+    if (!existing.some((server) => server.name === name)) return ctx.json({ ok: true, data: { removed: false } });
+    const saved = persistMcpServers(existing.filter((server) => server.name !== name));
+    if (!saved.ok) return ctx.json({ ok: false, error: { code: 'invalid_mcp', message: 'MCP 配置校验失败', details: saved.details } }, 400);
+    await dependencies.mcp?.reconcile();
+    dependencies.db.prepare('DELETE FROM mcp_servers WHERE name=?').run(name);
+    return ctx.json({ ok: true, data: { removed: true } });
+  });
+  app.post('/api/mcp/:name/reconnect', async (ctx) => {
+    await dependencies.mcp?.reconcile();
+    const row = dependencies.db.prepare('SELECT state,last_error AS error FROM mcp_servers WHERE name=?').get(ctx.req.param('name')) as { state: string; error: string | null } | undefined;
+    dependencies.events.emit('health', { source: 'mcp', name: ctx.req.param('name'), ok: row?.state === 'up', code: row?.state ?? 'unknown' });
+    return ctx.json({ ok: true, data: { name: ctx.req.param('name'), state: row?.state ?? null, error: row?.error ?? null } });
+  });
   app.get('/api/agents', (ctx) => ctx.json({ ok: true, data: currentConfig().agent.agents }));
+  app.post('/api/agents/:name/dryrun', async (ctx) => {
+    if (!dependencies.dryRunAgent) return ctx.json(apiError('not_implemented', 'Agent 试跑未接入运行时', 500).body, 500);
+    const body = await ctx.req.json<{ task?: unknown }>().catch((): { task?: unknown } => ({}));
+    if (typeof body.task !== 'string' || !body.task.trim()) return ctx.json(apiError('invalid_task', 'task 必填').body, 400);
+    if (body.task.length > 20_000) return ctx.json(apiError('task_too_large', 'task 最多 20000 字符').body, 400);
+    const task = body.task.trim();
+    const abort = new AbortController();
+    const requestSignal = ctx.req.raw.signal;
+    const onRequestAbort = (): void => abort.abort();
+    requestSignal.addEventListener('abort', onRequestAbort, { once: true });
+    const encoder = new TextEncoder();
+    let closed = false;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const send = (event: AgentDryRunEvent): void => {
+          if (!closed) controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
+        };
+        void dependencies.dryRunAgent!(ctx.req.param('name'), task, abort.signal, send)
+          .then((result) => send({ type: 'final', ...result }))
+          .catch((error) => send({ type: 'error', message: error instanceof Error ? error.message : String(error) }))
+          .finally(() => {
+            requestSignal.removeEventListener('abort', onRequestAbort);
+            if (!closed) { closed = true; controller.close(); }
+          });
+      },
+      cancel() {
+        closed = true;
+        abort.abort();
+        requestSignal.removeEventListener('abort', onRequestAbort);
+      },
+    });
+    return new Response(stream, { headers: { 'content-type': 'application/x-ndjson; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' } });
+  });
   app.get('/api/logs', (ctx) => ctx.json({ ok: true, data: dependencies.operations.logs(Math.min(1000, Number(ctx.req.query('size') ?? 200)), ctx.req.query('traceId')) }));
   app.get('/api/logs/trace/:traceId', (ctx) => ctx.json({ ok: true, data: dependencies.operations.logs(2000, ctx.req.param('traceId')) }));
   app.get('/api/logs/blob', (ctx) => { try { const path = safeRef(currentConfig().logs.dir, ctx.req.query('ref') ?? ''); return existsSync(path) ? ctx.text(readFileSync(path, 'utf8')) : ctx.json(apiError('not_found', '日志载荷不存在', 404).body, 404); } catch { return ctx.json(apiError('invalid_ref', '非法日志引用', 403).body, 403); } });

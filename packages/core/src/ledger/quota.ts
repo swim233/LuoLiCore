@@ -1,4 +1,5 @@
 import type { Sqlite } from '@luoli/db';
+import type { EventBus } from '../events.js';
 
 export interface QuotaLimits {
   globalDaily: number | null;
@@ -11,7 +12,8 @@ export interface QuotaLimits {
 
 export interface QuotaReservation {
   amount: number;
-  rows: Array<{ scope: 'global' | 'chat' | 'user'; subject: string; window: 'day' | 'month'; bucket: string }>;
+  /** `limit` 跟着行走：结算时要发 `quota` 事件（docs/09 §5），而那时已经拿不到本轮的限额了。 */
+  rows: Array<{ scope: 'global' | 'chat' | 'user'; subject: string; window: 'day' | 'month'; bucket: string; limit: number }>;
   committed: number;
 }
 
@@ -24,7 +26,7 @@ export function quotaBucket(now: Date, timezone: string, window: 'day' | 'month'
 const bucket = quotaBucket;
 
 export class QuotaGuard {
-  constructor(private readonly db: Sqlite, private readonly timezone: string) {}
+  constructor(private readonly db: Sqlite, private readonly timezone: string, private readonly events?: EventBus) {}
 
   reserve(input: { chatId: string; userId: string; estimateUsd: number; limits: QuotaLimits }): QuotaReservation | null {
     const now = new Date();
@@ -42,7 +44,7 @@ export class QuotaGuard {
           const currentBucket = bucket(now, this.timezone, window);
           const current = this.db.prepare('SELECT cost_usd AS cost,reserved_usd AS reserved FROM quota_counters WHERE scope=? AND subject=? AND window=? AND bucket=?').get(entry.scope, entry.subject, window, currentBucket) as { cost: number; reserved: number } | undefined;
           if ((current?.cost ?? 0) + (current?.reserved ?? 0) + input.estimateUsd > limit) return null;
-          rows.push({ scope: entry.scope, subject: entry.subject, window, bucket: currentBucket });
+          rows.push({ scope: entry.scope, subject: entry.subject, window, bucket: currentBucket, limit });
         }
       }
       for (const row of rows) this.db.prepare(`INSERT INTO quota_counters(scope,subject,window,bucket,reserved_usd,updated_at) VALUES (?,?,?,?,?,?)
@@ -54,12 +56,21 @@ export class QuotaGuard {
   commit(reservation: QuotaReservation, actualUsd: number): void {
     if (actualUsd <= 0) return;
     const release = Math.min(reservation.amount, actualUsd);
+    // RETURNING 而不是 run() 之后再查一遍：结算发生在每一步模型调用之后，这里多一条 SELECT
+    // 就是每轮多几十次。已花掉的额度是「配额」事件唯一有意义的载荷，顺手带回来。
+    const settled: Array<{ scope: string; subject: string; window: string; bucket: string; spent: number; limit: number }> = [];
     this.db.transaction(() => {
-      for (const row of reservation.rows) this.db.prepare(`UPDATE quota_counters SET cost_usd=cost_usd+?,reserved_usd=MAX(0,reserved_usd-?),turns=turns+1,updated_at=?
-        WHERE scope=? AND subject=? AND window=? AND bucket=?`).run(actualUsd, release, Date.now(), row.scope, row.subject, row.window, row.bucket);
+      for (const row of reservation.rows) {
+        const after = this.db.prepare(`UPDATE quota_counters SET cost_usd=cost_usd+?,reserved_usd=MAX(0,reserved_usd-?),turns=turns+1,updated_at=?
+          WHERE scope=? AND subject=? AND window=? AND bucket=? RETURNING cost_usd AS cost,reserved_usd AS reserved`)
+          .get(actualUsd, release, Date.now(), row.scope, row.subject, row.window, row.bucket) as { cost: number; reserved: number } | undefined;
+        if (after) settled.push({ scope: row.scope, subject: row.subject, window: row.window, bucket: row.bucket, spent: after.cost + after.reserved, limit: row.limit });
+      }
       reservation.amount = Math.max(0, reservation.amount - release);
       reservation.committed += actualUsd;
     })();
+    // 事务提交之后再广播：订阅方（WebUI）收到事件就会回来读这几行，先发会读到旧值。
+    for (const row of settled) this.events?.emit('quota', row);
   }
 
   release(reservation: QuotaReservation): void {

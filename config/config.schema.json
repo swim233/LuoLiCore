@@ -1167,8 +1167,114 @@
             "servers": {
               "type": "array",
               "items": {
-                "type": "object",
-                "additionalProperties": {}
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "name": {
+                        "type": "string",
+                        "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+                      },
+                      "enabled": {
+                        "type": "boolean",
+                        "default": true
+                      },
+                      "minRole": {
+                        "$ref": "#/definitions/LuoLiConfig/properties/access/properties/defaultUserRole"
+                      },
+                      "toolAllow": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        },
+                        "default": []
+                      },
+                      "toolDeny": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        },
+                        "default": []
+                      },
+                      "timeoutMs": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0
+                      },
+                      "transport": {
+                        "type": "string",
+                        "const": "stdio"
+                      },
+                      "command": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "args": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        },
+                        "default": []
+                      },
+                      "env": {
+                        "type": "object",
+                        "additionalProperties": {
+                          "type": "string"
+                        },
+                        "default": {}
+                      }
+                    },
+                    "required": [
+                      "name",
+                      "transport",
+                      "command"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "name": {
+                        "$ref": "#/definitions/LuoLiConfig/properties/mcp/properties/servers/items/anyOf/0/properties/name"
+                      },
+                      "enabled": {
+                        "$ref": "#/definitions/LuoLiConfig/properties/mcp/properties/servers/items/anyOf/0/properties/enabled"
+                      },
+                      "minRole": {
+                        "$ref": "#/definitions/LuoLiConfig/properties/mcp/properties/servers/items/anyOf/0/properties/minRole"
+                      },
+                      "toolAllow": {
+                        "$ref": "#/definitions/LuoLiConfig/properties/mcp/properties/servers/items/anyOf/0/properties/toolAllow"
+                      },
+                      "toolDeny": {
+                        "$ref": "#/definitions/LuoLiConfig/properties/mcp/properties/servers/items/anyOf/0/properties/toolDeny"
+                      },
+                      "timeoutMs": {
+                        "$ref": "#/definitions/LuoLiConfig/properties/mcp/properties/servers/items/anyOf/0/properties/timeoutMs"
+                      },
+                      "transport": {
+                        "type": "string",
+                        "const": "http"
+                      },
+                      "url": {
+                        "type": "string",
+                        "format": "uri"
+                      },
+                      "headers": {
+                        "type": "object",
+                        "additionalProperties": {
+                          "type": "string"
+                        },
+                        "default": {}
+                      }
+                    },
+                    "required": [
+                      "name",
+                      "transport",
+                      "url"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
               },
               "default": []
             }

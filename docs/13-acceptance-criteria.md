@@ -208,7 +208,9 @@
 | [ ] AC-APV-005 | WebUI 审批队列批准 | 与 Telegram 路径等效；`decision_channel='webui'` |
 | [ ] AC-APV-006 (自动) ★ | 子 agent 内调用 `delete_file` | 同样触发审批（不依赖 AI SDK 的 toolApproval），批准后才执行 |
 | [ ] AC-APV-007 (自动) | `skipForOwner=true`，owner 执行 `delete_file` | 直接执行，日志记 `auto_approved` |
-| [ ] AC-APV-008 (自动) ★ | trusted 用户在 Telegram 里触发一个需审批的工具 | **当场**返回 `ok:false, error:'未获批准'` 并带 hint（模型据此用自己的话解释），不再挂满 `ttlMs` 才拒；`approvals` 留一行 `state=denied, decided_by=system, decision_channel=none` 供审计（docs/20 · W-APPR-01） |
+| [ ] AC-APV-008 (自动) ★ | trusted 用户触发一个需审批的工具，然后无人裁决直到 `ttlMs` 到期 | 调用**挂起等待**而不是当场伪拒绝：先写一行 `state=pending` 并广播 `approval.pending`；到期后原子改成 `state=expired, decided_by=system`，工具返回 `ok:false, error:'未获批准'` 且 hint 说的是「审批已超时」而不是「管理员已拒绝」。轮次在等待中被取消时落 `state=denied, decided_by=system` 并给「轮次已取消」的 hint —— 三条路径都 fail-closed，工具一次都不执行（docs/21 · G-API-12） |
+| [ ] AC-APV-010 (自动) ★ | 命中规则后 owner 在 WebUI 点 `[批准执行]` | `decide` 用 `UPDATE … WHERE state='pending' AND expires_at>?` 抢裁决权，只有真改到一行才唤醒等待者；**批准之后原工具调用才继续执行**，落 `state=approved, decided_by=owner, decision_channel=webui`。对已裁决/已过期的行重复裁决返回 `changed:false`，不重复唤醒 |
+| [ ] AC-APV-011 (自动) | `rememberWithinTurn=true` 时同轮重试一个刚过期的调用 | 复用上次结论不再挂第二个 `ttlMs`，但 hint 仍是「审批已超时」—— 只记布尔会让模型把超时说成「管理员已拒绝」 |
 | [ ] AC-APV-009 (自动) | 运行中把 `approval.enabled` 改成 false，或增删 `approval.rules` | 下一次工具调用即生效，无需重启（docs/20 · W-CFG-02） |
 
 ## 6. Subagent 与任务（AC-SUB / AC-TASK）
@@ -327,7 +329,7 @@
 | [ ] AC-WEB-003 (自动) ★ | 已登录但缺 `X-CSRF-Token` 的 PATCH | 403 |
 | [ ] AC-WEB-004 (自动) | 连续 5 次密码错误 | 锁 15 分钟；有 warn 日志 |
 | [ ] AC-WEB-005 | 登出 | session 行删除；后续请求 401 |
-| [ ] AC-WEB-006 | Dashboard | 在途 turn 实时出现/消失（SSE）；`[取消]` 生效 |
+| [ ] AC-WEB-006 | Dashboard 在途 turn 表 | 一轮开始时行实时出现、结束时消失（`turn.started` / `turn.finished`），中途显示「第 N 步 · 模型/工具」（`turn.progress`）与逐秒走字的已用时长；行来自进程内 `TurnRegistry`，`turns` 表里崩溃残留的 `running` 行不会出现；`[取消]` 让该轮落成 `cancelled`（上下文与已发消息不动），对已结束的轮次回 `{cancelled:false}` 并提示「这一轮已经结束了」 |
 | [ ] AC-WEB-007 | 断开网络 10s 再恢复 | SSE 自动重连，数据补齐，无重复渲染 |
 | [ ] AC-WEB-008 ★ | 上下文查看器 | **按时间倒序**（最新一条在最上面）；每条一行徽标一行正文，徽标数量变化不会把正文挤成竖排；能看出某条消息是 rebase 产生（红色徽标 + unseen 区间）、被裁剪出窗口、被降级（灰显可展开原文） |
 | [ ] AC-WEB-009 ★ | Commit 时间线 | 列出 kind/window/head/rebased；`[回滚到此]` 生效并写 `kind='manual'` 审计 commit |
@@ -351,7 +353,12 @@
 | [ ] AC-WEB-016b (自动) | 工具页点某个工具 | 弹出二级菜单：来源/minRole/审批/作用域只读并注明来自 `TOOL_POLICY`，唯一可写的是启停；`GET /api/tools` 返回的 `enabled` 与 `tools.overrides` 一致；停用后该工具从工具目录消失且 `execute` 二次拦截 |
 | [ ] AC-WEB-016c (自动) | Agent 页点某个 Agent | 弹出二级菜单可改 description/modelAlias/minRole/maxSteps/工具多选/instructions；保存写 `agent.agents` 整张数组并过 `configSchema`（缺必填字段 400）；热更新后 `spawn_agent` 用的是新定义，无需重启 |
 | [ ] AC-WEB-017 | 沙箱页 | 显示 docker 可用性；开 `allowHostFsForOwner` 有红色二次确认 |
-| [ ] AC-WEB-018 | 配置页 | 由 schema 自动生成；热更新项即时生效；需重启项有徽标；原始 YAML 模式校验报错定位到行 |
+| [ ] AC-WEB-018 | 配置页「全部配置」 | 由 `config.schema.json` 自动生成：控件形态、默认值、取值范围全部来自 schema（布尔/枚举/数字/字符串/字符串数组/JSON 各有其控件，`anyOf[number,null]` 留空即「不限」）；热更新项即时生效、需重启项在保存后的 Toast 里被点名；未接线的键默认隐藏且控件禁用；值为 `«redacted»` 或名字像密钥的字段只读并写明该去哪儿改；只发真正改过的那几项。原始 YAML 模式 🚧 未实现 |
+| [ ] AC-WEB-044 (自动) | `GET /api/config/schema` | `{schema, hotReloadable, unimplemented}` 三件套都在 `data` 信封里 —— 挂在顶层的兄弟键会被只解 `data` 的客户端丢掉，表单会把每一项都当成需重启 |
+| [ ] AC-WEB-045 | 会话页「只对这个会话生效的设置」 | 只渲染 [11 §2.1](./11-config-reference.md) 白名单内的子树，控件显示的是该会话**实际生效**的值（全局 + 覆盖）；保存后 chip 列表出现对应点分项，`[✕]` 取消覆盖后该项回到全局值、空掉的中间层一并收掉；越界路径（如 `sandbox.mode`）返回 400；`context.scope` 那一项带「改了等于把这条覆盖作废」的警告 |
+| [ ] AC-WEB-046 (自动) | `PATCH /api/chats/:key` 连发两次，第二次只带一半的键 | 覆盖对象被**整体替换**而不是合并（界面的「取消覆盖」正是靠这条语义）；`{}` 也接受且仍过得了 `configSchema` |
+| [ ] AC-WEB-047 | 消息页含图片/文件的对话 | 卡片下方出现附件带子：光栅图出缩略图、点开是大图并可下载；其余出 chip（文件名 / mime / 大小 / 尺寸 / 时长 / 「已提取正文」）；`download_state` 不是 `done` 的行打徽标且**不给下载链接**；检索结果行同样带附件 |
+| [ ] AC-WEB-048 (自动) ★ | `GET /api/files/:id?inline=1` 对 png 与对 svg | png 回 `content-disposition: inline`，`image/svg+xml` 仍回 `attachment` —— mime 来自 Telegram、是发送方可控的，同源内联 SVG 等于自造 XSS。响应体与 `/api/messages` 的 JSON 里都不出现 `local_path` |
 | [ ] AC-WEB-019 | 审批队列 | 待审出现（SSE）；批准/拒绝生效；历史可查 |
 | [ ] AC-WEB-020 (自动) ★ | 构造含 `<img onerror=…>` 的消息 | WebUI 以纯文本渲染（无 `v-html`），无脚本执行；CSP 响应头存在 |
 | [ ] AC-WEB-021 | 维护操作按钮 | 备份/VACUUM/清日志/重建 FTS/清孤儿文件 均可执行并有结果反馈与日志 |
@@ -373,7 +380,16 @@
 | [ ] AC-WEB-037 | 设置页 | 四个维护操作（备份 / VACUUM / 清理日志 / 重建 FTS）可执行并回显结果；`gc-files` 后端未实现，界面上**不提供按钮**；「变更历史」列出 `config_revisions` 的键、操作者、时间与新旧值 |
 | [ ] AC-WEB-038 | 顶栏 `[退出登录]` | 打 `POST /api/auth/logout`，session 失效、cookie 清空并跳回 `/login`；此后带旧 cookie 访问 `/api/*` 返回 401 |
 | [ ] AC-WEB-039 (自动) ★ | 契约测试遍历文档里的读端点 | 除 200 外还断言 `content-type: application/json` 与信封 `ok:true` —— 未注册的 `/api/*` 会掉进 SPA fallback 拿到 200 + `index.html`，只看状态码是假绿灯（`GET /api/quota` 曾以此「通过」而端点并不存在，docs/21 §2.3） |
-| [ ] AC-WEB-040 | 打开控制台后在另一进程改库/改配置 | 🚧 已知不满足：`LogSink` 拿不到 `EventBus`，`event: log` 从不发出，首屏之后界面不会自行刷新（docs/21 · G-SSE-01）。当前只有 `config.changed` 与 `approval.decided` 会触发重载 |
+| [ ] AC-WEB-040 | 打开控制台后在另一进程写日志 / 跑一轮 / 改配置 | 界面自行刷新，无需手动重载：`log` 让日志页与总览的事件流走字，`turn.*` 更新在途表，`usage` / `quota` / `task.updated` / `config.changed` / `health` 各自刷新对应页面。**只刷当前页面看得见的那几组**（不是每条事件重跑 18 个端点），同组 400 ms 内合并；切换页面时补拉 |
+| [ ] AC-WEB-041 (自动) ★ | 连上 `GET /api/events` 后写一条 `info` 日志、一条 `debug` 日志、以及同一 `kind` 的三条连发 | 流上收到 `event: log`，载荷只有 `{id, ts, level, kind, traceId, summary}` —— **不含 `data`**；`debug` 那条不出现（照常落库）；同 kind 的连发在 200 ms 窗口内合并成一条并带 `merged: n`，不同 kind 互不阻塞 |
+| [ ] AC-WEB-042 (自动) | `GET /api/turns/active` 与 `POST /api/turns/:id/cancel` | 前者列出 `TurnRegistry` 里的轮次（`turns` 表缺行时步数/花费补零，`AbortController` 不出现在响应里）；后者对在途轮次触发 abort 并回 `{cancelled:true}`，对已结束的回 `{cancelled:false}`，两次都写 `webui.action` 审计 |
+| [ ] AC-WEB-043 | 任务页对一条 running 任务点 `[取消]` | 二次确认里写明「子 agent 没有独立取消句柄，取消的是整轮，同轮其他子 agent 也会一起停」；确认后该轮落成 `cancelled`，任务行随之变为 failed/cancelled |
+| [ ] AC-WEB-049 | 任何页面上出现一条待审批 | 左侧导航「任务与审批」出现红色角标并计数，**不必切到任务页**就看得见 —— 一条 pending 意味着某个真实轮次正卡在工具调用上；点进去可 `[批准执行]` / `[拒绝]`，裁决后角标即时消失（`approval.decided`） |
+| [ ] AC-WEB-050 | 会话页选一个会话 → 提示词预览 | `POST /api/prompts/preview` 走的是**真实轮次那条 `assembleMainPrompt`**（同一份工具目录、Skill 目录、Agent 目录、PromptDocuments 与 per-chat 配置）；逐 block 显示正文、token 占比与是否被截断；不存在的会话 404，非法 role 400 |
+| [ ] AC-WEB-051 | 检索结果或会话卡片点软删 | 二次确认写明「归档正文从检索与对话列表隐藏，上下文提交、turn 与附件不动」；删后 `GET /api/messages?q=` 搜不到，`GET /api/turns` 与 turn detail 的 prompt join 也不再回显（`m.deleted_at IS NULL`）—— 否则删了还能从轮次视图看回来 |
+| [ ] AC-WEB-052 | 扩展页新建 / 编辑 / 删除一个 MCP server | 表单按 transport 分支（stdio 要 command，http 要 url），保存过 `mcp.servers` 的判别联合 schema，写 `config_kv` + `config_revisions` + `config.changed` 后热 reconcile；重名 409；删除同时清掉 `mcp_servers` 行。**`mcp.enabled` 关着时** 保存后给的是告警 Toast 而不是「已连接」，扩展页顶部有横幅与 `[打开总开关]` —— 存得下但一个都不会连 |
+| [ ] AC-WEB-053 | 扩展页新建 / 编辑 / 删除一个 Skill | 正文与 frontmatter 一起写回 `SKILL.md`（先写临时文件再 rename），随后重扫并同步 `skills` 表；名字不合 `^[a-z0-9]+(-[a-z0-9]+)*$` 一律拒绝（目录名即 skill 名，越界路径进不来）；新建未选角色时取 `skills.defaultMinRole` 的**当前**快照；删除二次确认写明会连附属文件一起永久移除 |
+| [ ] AC-WEB-054 ★ | Agent 页点 `[试跑]` | 服务端建一条可审计的隔离 `agent_run`（`kind='sub'`、`turn_id` 前缀 `dryrun:`），复用 `runSubAgent`，NDJSON 逐行推 step / usage / final / error；关闭请求或点 `[取消试跑]` 立即 abort。**试跑与正常轮次共用同一份配额**：先 `quota.reserve` 再逐步 `commit`，额度不足时直接拒绝开跑（chat/user 计数落在合成 subject `webui-dryrun` 上，不吃真实会话与用户的额度）；结束后剩余预留必须 `release` |
 
 ## 11. 安全 AC-SEC
 
@@ -419,14 +435,14 @@
 | **上下文引擎** | | / 32 | | | |
 | Telegram 与准入 | | / 38 | | | |
 | Agent 与 Provider | | / 35 | | | |
-| 工具/沙箱/审批 | | / 47 | | | |
+| 工具/沙箱/审批 | | / 49 | | | |
 | Subagent 与任务 | | / 22 | | | |
 | 记忆 | | / 13 | | | |
 | 日志与成本 | | / 23 | | | |
 | 扩展生态 | | / 27 | | | |
-| WebUI | | / 52 | | | |
+| WebUI | | / 66 | | | |
 | 安全 | | / 15 | | | |
 | 运维 | | / 9 | | | |
-| **合计** | | **/ 333** | | | |
+| **合计** | | **/ 349** | | | |
 
 **整体通过条件**：全部 ★ 项通过 + 非 ★ 项通过率 ≥ 95% + 所有豁免项经需求方书面确认。

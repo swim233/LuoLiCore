@@ -367,6 +367,8 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
       return;
     }
     dependencies.log.event({ level: 'info', kind: 'turn.start', summary: `Turn ${turn.turnId} started`, traceId: turn.turnId, chatId, userId, key, data: { role: effectiveRole, triggerReason } });
+    // 总览页的在途 turn 表只有这一个数据来源：`GET /api/turns/active` 给首屏，之后靠这三种事件增量更新。
+    dependencies.log.publish('turn.started', { turnId: turn.turnId, key, chatId, user: userId, role: effectiveRole, triggerReason, at: Date.now() });
     try {
       const generated = dependencies.onTurn ? await dependencies.onTurn(turn, reservation) : '尚未配置可用模型。请在 WebUI 中添加 Provider、模型和 main 别名。';
       let answer: string;
@@ -399,15 +401,17 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
       if (!answer.trim()) throw new Error('model_returned_empty');
       dependencies.context.appendDelta(turn, { id: turn.turnId, role: 'assistant', origin: 'assistant', parts: [{ type: 'text', text: answer }], textPreview: answer.slice(0, 240), pruneLevel: 0 });
       const committed = await dependencies.context.commitTurn(turn);
-      dependencies.turns.finish(turn.turnId, { state: 'committed', commitId: committed.commit.id, rebased: committed.rebased });
+      const settled = dependencies.turns.finish(turn.turnId, { state: 'committed', commitId: committed.commit.id, rebased: committed.rebased });
       await dependencies.plugins?.hook('afterCommit', { turn, committed });
       dependencies.log.event({ level: 'info', kind: 'turn.end', summary: 'turn committed', traceId: turn.turnId, chatId, userId, key, data: { state: 'committed', rebased: committed.rebased } });
+      dependencies.log.publish('turn.finished', { turnId: turn.turnId, key, chatId, state: 'committed', steps: settled?.steps ?? 0, toolCalls: settled?.toolCalls ?? 0, costUsd: settled?.costUsd ?? 0, rebased: committed.rebased, durationMs: settled?.durationMs ?? 0 });
       dependencies.memory.flush(turn.turnId);
     } catch (error) {
       const cancelled = turn.abortSignal.aborted;
       await dependencies.context.abortTurn(turn, cancelled ? 'cancelled' : 'failed', error);
-      dependencies.turns.finish(turn.turnId, cancelled ? { state: 'cancelled', cancelReason: String(turn.abortSignal.reason ?? 'cancelled') } : { state: 'failed', error: error instanceof Error ? error.message : String(error) });
+      const settled = dependencies.turns.finish(turn.turnId, cancelled ? { state: 'cancelled', cancelReason: String(turn.abortSignal.reason ?? 'cancelled') } : { state: 'failed', error: error instanceof Error ? error.message : String(error) });
       dependencies.log.event({ level: cancelled ? 'warn' : 'error', kind: 'turn.end', summary: cancelled ? 'turn cancelled' : error instanceof Error ? error.message : 'turn failed', traceId: turn.turnId, chatId, userId, key });
+      dependencies.log.publish('turn.finished', { turnId: turn.turnId, key, chatId, state: cancelled ? 'cancelled' : 'failed', steps: settled?.steps ?? 0, toolCalls: settled?.toolCalls ?? 0, costUsd: settled?.costUsd ?? 0, rebased: false, durationMs: settled?.durationMs ?? 0 });
       await ctx.reply(cancelled ? '⛔ 已取消' : failureText(error, turn.turnId.slice(0, 12)));
     } finally {
       dependencies.tools?.releaseTurn(turn.turnId);

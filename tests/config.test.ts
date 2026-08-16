@@ -58,17 +58,24 @@ describe('config schema', () => {
   // doc 11 开头立的契约是「标 热更新 的项保存后立即生效」。上一轮有十组键标着热更新而实际冻在
   // 启动时，其中 sandbox.mode / approval.enabled / approval.rules 三组是「出事时运维会去点的那个
   // 开关」——点了没用而界面还说成功（docs/20 · W-CFG-02）。这条断言让标注只能跟着白名单走。
+  // WebUI 的自动生成表单直接按白名单给每一项打「热更新 / 需重启」徽标（docs/21 §1.1），
+  // 文档与白名单一旦对不上，界面就会照着错的那份说话。
   it('only labels genuinely hot-reloadable keys as 热更新 in doc 11', () => {
-    const block = readFileSync('docs/11-config-reference.md', 'utf8').split('```yaml')[1]!.split('```')[0]!;
+    // 每一段 yaml 都要查：只查第一段时 logs / skills / plugins 那几块整段漏在断言外，
+    // 里面三个键标着热更新而实际冻在启动时。
+    const blocks = readFileSync('docs/11-config-reference.md', 'utf8').split('```yaml').slice(1).map((part) => part.split('```')[0]!);
+    expect(blocks.length).toBeGreaterThan(1);
     const unimplemented = new Set<string>(KNOWN_UNIMPLEMENTED_CONFIG_KEYS as readonly string[]);
-    const stack: string[] = [];
     const labelled: string[] = [];
-    for (const line of block.split('\n')) {
-      const match = /^(\s*)([a-zA-Z][\w]*):/.exec(line);
-      if (!match) continue;
-      stack.length = match[1]!.length / 2;
-      stack.push(match[2]!);
-      if (line.includes('热更新')) labelled.push(stack.join('.'));
+    for (const block of blocks) {
+      const stack: string[] = [];
+      for (const line of block.split('\n')) {
+        const match = /^(\s*)([a-zA-Z][\w]*):/.exec(line);
+        if (!match) continue;
+        stack.length = match[1]!.length / 2;
+        stack.push(match[2]!);
+        if (line.includes('热更新')) labelled.push(stack.join('.'));
+      }
     }
     expect(labelled.length).toBeGreaterThan(20);
     const covered = (key: string): boolean => unimplemented.has(key)

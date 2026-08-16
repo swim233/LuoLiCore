@@ -10,7 +10,7 @@ import type { Sqlite } from '@luoli/db';
 import { modelAliasKey, readAppKv } from '@luoli/db';
 import type { RuntimeTurnContext } from '@luoli/shared';
 import type { PromptAssembler, PromptDocuments } from '../index.js';
-import { runtimeBlock } from '../prompt/assembler.js';
+import { runtimeBlock, type PromptBuildResult } from '../prompt/assembler.js';
 import type { ToolExecutionContext, ToolRegistry } from '../tools/registry.js';
 import type { ProviderStore } from '../provider/store.js';
 import { type FallbackOptions, fallbackLanguageModel } from './fallback-model.js';
@@ -217,6 +217,30 @@ export interface MainAgentDependencies {
   context: ContextEngine;
   agents?: AgentManager;
 }
+export interface MainPromptAssembly extends PromptBuildResult {
+  activeTools: string[];
+  catalog: string;
+  runtime: string;
+}
+
+type PromptAssemblyDependencies = Pick<MainAgentDependencies, 'config' | 'tools' | 'prompts' | 'documents' | 'workspace' | 'skills' | 'agents'>;
+
+/** Runtime 与 WebUI 预览共用这一条组装路径；预览出来的 block 必须就是下一轮会发给模型的 block。 */
+export function assembleMainPrompt(turn: RuntimeTurnContext, dependencies: PromptAssemblyDependencies, executionContext?: ToolExecutionContext): MainPromptAssembly {
+  const toolContext = executionContext ?? { turn, workspace: dependencies.workspace, agentKind: 'main' };
+  const activeTools = dependencies.tools.activeNames(turn.effectiveRole, toolContext);
+  const documents = dependencies.documents.readForPrompt({ userId: turn.initiatorUserId, isPrivate: turn.isPrivate });
+  const skillCatalog = dependencies.skills?.catalog(turn.effectiveRole).map((skill) => `- skill:${skill.name}: ${skill.description}`).join('\n') ?? '';
+  const catalog = [...dependencies.tools.catalog(turn.effectiveRole, toolContext).map((entry) => `- ${entry.name}: ${entry.description}`), skillCatalog].filter(Boolean).join('\n');
+  const runtime = runtimeBlock({ now: new Date(), timezone: dependencies.config.general.timezone,
+    chatDescription: `${turn.chatId} / ${turn.key}`, triggerDescription: `user ${turn.initiatorUserId}`, role: turn.effectiveRole,
+    tools: activeTools, agents: dependencies.config.agent.agents.filter((agent) => ['blocked', 'limited', 'trusted', 'owner'].indexOf(turn.effectiveRole) >= ['blocked', 'limited', 'trusted', 'owner'].indexOf(agent.minRole)).map((agent) => `${agent.name}(${agent.description})`),
+    contextMessages: turn.snapshot.messages.length, contextTokens: turn.snapshot.tokens, maxMessages: dependencies.config.context.limit.maxMessages,
+    maxTokens: dependencies.config.context.limit.tokens, workspace: dependencies.workspace, sandbox: dependencies.config.sandbox.mode });
+  const promptInput = { character: documents.character, assist: documents.assist, catalog, publicMemory: documents.publicMemory, runtime, maxTokens: dependencies.config.prompt.maxTokens };
+  if (documents.privateMemory !== undefined) Object.assign(promptInput, { privateMemory: documents.privateMemory });
+  return { ...dependencies.prompts.build(promptInput), activeTools, catalog, runtime };
+}
 
 function cachedInstructions(text: string, providerKind: string): Instructions {
   if (providerKind !== 'anthropic') return text;
@@ -248,18 +272,8 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
   // 子 agent 从 turn 上取同一份预留：spawn_agent 在工具层执行，拿不到这里的 dependencies。
   turn.reservation = dependencies.reservation ?? null;
   await dependencies.plugins?.hook('beforeTurn', { turn });
-  const activeNames = dependencies.tools.activeNames(turn.effectiveRole, toolContext);
-  const documents = dependencies.documents.readForPrompt({ userId: turn.initiatorUserId, isPrivate: turn.isPrivate });
-  const skillCatalog = dependencies.skills?.catalog(turn.effectiveRole).map((skill) => `- skill:${skill.name}: ${skill.description}`).join('\n') ?? '';
-  const catalog = [...dependencies.tools.catalog(turn.effectiveRole, toolContext).map((entry) => `- ${entry.name}: ${entry.description}`), skillCatalog].filter(Boolean).join('\n');
-  const runtime = runtimeBlock({ now: new Date(), timezone: dependencies.config.general.timezone,
-    chatDescription: `${turn.chatId} / ${turn.key}`, triggerDescription: `user ${turn.initiatorUserId}`, role: turn.effectiveRole,
-    tools: activeNames, agents: dependencies.config.agent.agents.filter((agent) => ['blocked', 'limited', 'trusted', 'owner'].indexOf(turn.effectiveRole) >= ['blocked', 'limited', 'trusted', 'owner'].indexOf(agent.minRole)).map((agent) => `${agent.name}(${agent.description})`),
-    contextMessages: turn.snapshot.messages.length, contextTokens: turn.snapshot.tokens, maxMessages: dependencies.config.context.limit.maxMessages,
-    maxTokens: dependencies.config.context.limit.tokens, workspace: dependencies.workspace, sandbox: dependencies.config.sandbox.mode });
-  const promptInput = { character: documents.character, assist: documents.assist, catalog, publicMemory: documents.publicMemory, runtime, maxTokens: dependencies.config.prompt.maxTokens };
-  if (documents.privateMemory !== undefined) Object.assign(promptInput, { privateMemory: documents.privateMemory });
-  const prompt = dependencies.prompts.build(promptInput);
+  const prompt = assembleMainPrompt(turn, dependencies, toolContext);
+  const activeNames = prompt.activeTools;
   // 预算被 catalog + runtime 吃满时 CHARACTER.md 会被整段截成一句「（记忆已截断…）」——
   // 人格静默消失，而日志里一个字都没有（docs/20 · W-PROMPT-01）。
   if (prompt.truncated.length) dependencies.log.event({ level: 'warn', kind: 'prompt.truncated', summary: `Prompt blocks truncated: ${prompt.truncated.join(', ')}`, traceId: turn.turnId, key: turn.key, data: { truncated: prompt.truncated, blocks: prompt.blocks, maxTokens: dependencies.config.prompt.maxTokens } });
@@ -345,6 +359,7 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
     onStepStart: (event) => {
       stepSpans.set(event.stepNumber, dependencies.log.span({ level: 'info', kind: 'model.call', summary: `${event.provider}/${event.modelId}`, traceId: turn.turnId, key: turn.key,
         data: { stepNumber: event.stepNumber, modelId: event.modelId, provider: event.provider, messages: bodyForLog(event.messages, dependencies.config.logs.captureBodies), instructions: bodyForLog(event.instructions, dependencies.config.logs.captureBodies) } }));
+      dependencies.log.publish('turn.progress', { turnId: turn.turnId, phase: 'model', step: event.stepNumber, note: `${event.provider}/${event.modelId}` });
     },
     onStepEnd: (step) => {
       const servedId = servedModelId ?? step.model.modelId;
@@ -359,6 +374,8 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
         priceCacheRead: info.priceCacheRead, priceCacheWrite: info.priceCacheWrite, latencyMs: step.performance.responseTimeMs,
         finishReason: step.finishReason, ok: true });
       if (dependencies.quota && dependencies.reservation) dependencies.quota.commit(dependencies.reservation, cost);
+      dependencies.log.publish('usage', { turnId: turn.turnId, model: info.modelId, alias: stepAlias.get(step.stepNumber) ?? alias, in: step.usage.inputTokens ?? 0, out: step.usage.outputTokens ?? 0, costUsd: cost });
+      if (step.toolCalls.length) dependencies.log.publish('turn.progress', { turnId: turn.turnId, phase: 'tools', step: step.stepNumber, note: step.toolCalls.map((call) => call.toolName).join(', ') });
       stepSpans.get(step.stepNumber)?.end({ model: step.model, usage: step.usage, cost, request: bodyForLog(step.request, dependencies.config.logs.captureBodies), response: bodyForLog(step.response, dependencies.config.logs.captureBodies) });
       for (const call of step.toolCalls) dependencies.context.appendDelta(turn, { id: `call:${call.toolCallId}`, role: 'assistant', origin: 'tool_call', parts: [{ type: 'tool-call', toolCallId: call.toolCallId, toolName: call.toolName, input: call.input }], textPreview: `${call.toolName}(${JSON.stringify(call.input).slice(0, 180)})`, pruneLevel: 2 });
       for (const result of step.toolResults) dependencies.context.appendDelta(turn, { id: `result:${result.toolCallId}`, role: 'tool', origin: 'tool_result', parts: [toolResultPart(result.toolCallId, result.toolName, result.output)], textPreview: `${result.toolName}: ${JSON.stringify(result.output).slice(0, 180)}`, pruneLevel: 1 });

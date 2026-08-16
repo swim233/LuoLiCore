@@ -8,9 +8,11 @@ import UiModal from '../ui/UiModal.vue';
 import UiDrawer from '../ui/UiDrawer.vue';
 import DataGrid from '../ui/DataGrid.vue';
 import ChainPicker from '../ui/ChainPicker.vue';
+import AttachmentStrip from '../ui/AttachmentStrip.vue';
+import SchemaForm from '../ui/SchemaForm.vue';
 import { pushToast, toastError } from '../ui/toast';
-import type { GridColumn, TagSeverity } from '../ui/types';
-import { api, hydrateSession } from '../api/client';
+import type { Attachment, GridColumn, TagSeverity } from '../ui/types';
+import { api, apiStream, hydrateSession } from '../api/client';
 
 interface Dashboard { turns: { total: number; running: number; failed: number; cost: number }; messages: { total: number }; providers: { total: number; enabled: number } }
 interface Principal { id: string; kind: string; tgId: string; role: string; displayName: string | null; username: string | null; chatType: string | null }
@@ -26,12 +28,13 @@ interface Usage { id: number; ts: number; model_alias: string; input_tokens: num
 // mcp_servers 的错误列叫 last_error、状态列叫 state；skills/plugins 用的是 load_error。
 // 只看 load_error 的话，连不上的 MCS server 会被显示成「可用」。
 interface Extension { name: string; description?: string; min_role?: string; enabled?: number; load_error?: string | null;
-  state?: string | null; last_error?: string | null; transport?: string; version?: string | null }
+  state?: string | null; last_error?: string | null; transport?: string; version?: string | null; command?: string; args?: string[]; env?: Record<string, string>;
+  url?: string; headers?: Record<string, string>; minRole?: string; toolAllow?: string[]; toolDeny?: string[]; timeoutMs?: number; tools?: Array<Record<string, unknown>> }
 interface Paged<T> { items: T[]; total: number; page: number; size: number }
 interface Conversation { id: string; key: string; chatId: string; userId: string; role: string; state: string; triggerReason: string | null; startedAt: number | null; finishedAt: number | null;
-  steps: number; toolCalls: number; inputTokens: number; outputTokens: number; costUsd: number; error: string | null; rebased: number;
-  prompt: string | null; promptKind: string | null; fromName: string | null; fromUsername: string | null; reply: string }
-interface MessageHit { id: number; chatId: string; direction: string; fromName: string | null; fromUsername: string | null; kind: string; text: string | null; tgDate: number; turnId: string | null }
+  steps: number; toolCalls: number; inputTokens: number; outputTokens: number; costUsd: number; error: string | null; rebased: number; promptMessageId: number | null;
+  prompt: string | null; promptKind: string | null; fromName: string | null; fromUsername: string | null; reply: string; attachments: Attachment[] }
+interface MessageHit { id: number; chatId: string; direction: string; fromName: string | null; fromUsername: string | null; kind: string; text: string | null; tgDate: number; turnId: string | null; attachments: Attachment[] }
 interface ToolPolicy { minRole: string; approval: string; scope: string; source: string; enabled: boolean }
 interface AgentDefinition { name: string; description: string; modelAlias: string; maxSteps: number; minRole: string; tools: string[]; resultMaxChars: number; instructions: string; injectMemory: boolean }
 const active = ref('dashboard');
@@ -202,17 +205,20 @@ const navigation = [
   ['tasks', 'pi pi-check-square', '任务与审批'], ['settings', 'pi pi-cog', '设置'],
 ] as const;
 const currentLabel = computed(() => navigation.find(([key]) => key === active.value)?.[2] ?? '总览');
+/** 每一条 pending 都对应一个正卡在工具调用上的真实轮次，所以角标挂在导航上而不是只在任务页里。 */
+const pendingApprovals = computed(() => approvals.value.filter((row) => row.state === 'pending').length);
 const COLUMNS = {
   tools: [{ key: 'name', header: '工具' }, { key: 'source', header: '来源', width: '7rem' }, { key: 'minRole', header: '最低角色', width: '7rem' }, { key: 'approval', header: '审批', width: '7rem' }, { key: 'scope', header: '作用域', width: '8rem' }, { key: 'enabled', header: '状态', width: '6rem' }],
-  agents: [{ key: 'name', header: '名称' }, { key: 'description', header: '职责' }, { key: 'minRole', header: '最低角色', width: '7rem' }, { key: 'modelAlias', header: '模型别名', width: '8rem' }, { key: 'tools', header: '可用工具' }, { key: 'maxSteps', header: '步数上限', width: '6rem' }],
-  hits: [{ key: 'tgDate', header: '时间', width: '12rem' }, { key: 'chatId', header: '会话', width: '9rem' }, { key: 'from', header: '发言人', width: '10rem' }, { key: 'text', header: '内容' }, { key: 'detail', header: '详情', width: '5rem' }],
+  agents: [{ key: 'name', header: '名称' }, { key: 'description', header: '职责' }, { key: 'minRole', header: '最低角色', width: '7rem' }, { key: 'modelAlias', header: '模型别名', width: '8rem' }, { key: 'tools', header: '可用工具' }, { key: 'maxSteps', header: '步数上限', width: '6rem' }, { key: 'actions', header: '', width: '6rem' }],
+  hits: [{ key: 'tgDate', header: '时间', width: '12rem' }, { key: 'chatId', header: '会话', width: '9rem' }, { key: 'from', header: '发言人', width: '10rem' }, { key: 'text', header: '内容' }, { key: 'detail', header: '操作', width: '8rem' }],
   usage: [{ key: 'ts', header: '时间', width: '13rem' }, { key: 'model_alias', header: '别名' }, { key: 'input_tokens', header: '输入' }, { key: 'output_tokens', header: '输出' }, { key: 'cost_usd', header: '成本' }],
   principals: [{ key: 'kind', header: '类型' }, { key: 'displayName', header: '显示名' }, { key: 'tgId', header: 'Telegram ID' }, { key: 'role', header: '角色', width: '8rem' }, { key: 'username', header: '用户名' }],
   models: [{ key: 'model_id', header: '模型 ID' }, { key: 'provider_id', header: 'Provider' }, { key: 'context_window', header: '窗口' }, { key: 'capabilities', header: '能力' }, { key: 'price_in', header: '输入价格' }, { key: 'price_out', header: '输出价格' }, { key: 'enabled', header: '启用', width: '6rem' }],
   aliases: [{ key: 'alias', header: '别名', width: '12%' }, { key: 'purpose', header: '用途', width: '27%' }, { key: 'chain', header: 'Fallback 链', width: '31%' }, { key: 'settings', header: '采样参数', width: '20%' }, { key: 'actions', header: '', width: '10%' }],
   logs: [{ key: 'ts', header: '时间', width: '13rem' }, { key: 'level', header: '级别', width: '7rem' }, { key: 'kind', header: '事件' }, { key: 'summary', header: '摘要' }, { key: 'trace_id', header: 'Trace' }],
-  tasks: [{ key: 'title', header: '标题' }, { key: 'state', header: '状态' }, { key: 'updated_at', header: '更新时间' }],
-  approvals: [{ key: 'tool_name', header: '工具' }, { key: 'risk', header: '风险' }, { key: 'state', header: '状态' }],
+  tasks: [{ key: 'title', header: '标题' }, { key: 'state', header: '状态', width: '7rem' }, { key: 'updated_at', header: '更新时间', width: '13rem' }, { key: 'actions', header: '', width: '7rem' }],
+  activeTurns: [{ key: 'who', header: '发起人' }, { key: 'chat', header: '会话' }, { key: 'progress', header: '当前动作' }, { key: 'stats', header: '步数 / 花费', width: '11rem' }, { key: 'elapsed', header: '已用时长', width: '8rem' }, { key: 'actions', header: '', width: '6rem' }],
+  approvals: [{ key: 'tool_name', header: '工具' }, { key: 'risk', header: '风险', width: '7rem' }, { key: 'state', header: '状态', width: '7rem' }, { key: 'requested_at', header: '请求时间', width: '12rem' }, { key: 'actions', header: '', width: '12rem' }],
   catalog: [{ key: 'modelId', header: '模型 ID' }, { key: 'limits', header: '窗口 / 最大输出', width: '11rem' }, { key: 'price', header: '价格 / M token', width: '13rem' }, { key: 'capabilities', header: '能力' }, { key: 'status', header: '状态', width: '7rem' }],
   fallback: [{ key: 'kind', header: '关联事件' }, { key: 'summary', header: '最近状态' }, { key: 'level', header: '级别' }],
 } satisfies Record<string, GridColumn[]>;
@@ -227,7 +233,8 @@ async function load(): Promise<void> {
   syncTrigger();
   syncOutput();
 }
-/** 每条日志事件都会重跑 load()，正在编辑的触发表单不能被这条心跳冲掉。 */
+/** `config.changed` 会把配置重新拉回来（另一个标签页或 Telegram 侧改了配置就会发），
+ *  正在编辑的触发表单不能被它冲掉。 */
 function syncTrigger(): void {
   if (triggerDirty.value) return;
   const trigger = (config.value.trigger ?? {}) as Partial<TriggerForm>;
@@ -268,7 +275,7 @@ async function saveTrigger(): Promise<void> {
   } catch (error) { toastError('保存触发设置失败', error); }
   finally { triggerSaving.value = false; }
 }
-/** 同 syncTrigger：日志心跳会重跑 load()，正在编辑的节奏表单不能被冲掉。 */
+/** 同 syncTrigger：`config.changed` 会重新拉配置，正在编辑的节奏表单不能被冲掉。 */
 function syncOutput(): void {
   if (outputDirty.value) return;
   const output = (config.value.output ?? {}) as Record<string, unknown>;
@@ -309,6 +316,33 @@ function chatIdentity(chat: Chat): ChatIdentity {
     isPrivate, icon: isPrivate ? 'pi pi-user' : 'pi pi-users' };
 }
 const chatCards = computed(() => chats.value.map((chat) => ({ chat, ...chatIdentity(chat) })));
+interface PromptPreview {
+  key: string;
+  role: string;
+  instructions: string;
+  blocks: Array<{ name: string; tokens: number; content: string; truncated: boolean }>;
+  totalTokens: number;
+  context: { messages: number; tokens: number };
+}
+const BLOCK_LABELS: Record<string, string> = { kernel: 'KERNEL', character: 'CHARACTER', assist: 'ASSIST', catalog: 'TOOL CATALOG', pubmemory: 'PUBMEMORY', primemory: 'PRIMEMORY', runtime: 'RUNTIME' };
+const promptPreviewDialog = ref(false);
+const promptPreviewLoading = ref(false);
+const promptPreview = ref<PromptPreview | null>(null);
+const promptPreviewForm = ref<{ key: string | null; role: string | null }>({ key: null, role: 'owner' });
+const promptPreviewChats = computed(() => chatCards.value.map((entry) => ({ value: entry.chat.key, label: `${entry.name} · ${entry.chat.key}` })));
+function openPromptPreview(): void {
+  promptPreviewForm.value = { key: selectedChat.value?.key ?? chats.value[0]?.key ?? null, role: promptPreviewForm.value.role ?? 'owner' };
+  promptPreview.value = null;
+  promptPreviewDialog.value = true;
+}
+async function runPromptPreview(): Promise<void> {
+  const { key, role } = promptPreviewForm.value;
+  if (!key || !role) { pushToast({ severity: 'warn', summary: '请选择会话与角色' }); return; }
+  promptPreviewLoading.value = true;
+  try { promptPreview.value = await api<PromptPreview>('/api/prompts/preview', { method: 'POST', body: JSON.stringify({ key, role }) }); }
+  catch (error) { toastError('组装提示词失败', error); }
+  finally { promptPreviewLoading.value = false; }
+}
 const selectedChatIdentity = computed(() => selectedChat.value ? chatIdentity(selectedChat.value) : null);
 const inWindowCount = computed(() => contextMessages.value.filter((entry) => entry.inWindow).length);
 // 上下文窗口按时间倒序：最新的一条在最上面，跟消息页与 commit 时间线一致。ordinal 在提交时
@@ -323,6 +357,8 @@ function messageTime(message: Record<string, unknown>): string {
 }
 async function inspectChat(chat: Chat): Promise<void> {
   selectedChat.value = chat;
+  // 覆盖面板要按 schema 生成控件，换会话时先把 schema 备好（只拉一次）。
+  void loadConfigSchema();
   const detail = await api<Record<string, unknown>>(`/api/chats/${encodeURIComponent(chat.key)}`);
   contextDetail.value = await api<Record<string, unknown>>(`/api/chats/${encodeURIComponent(chat.key)}/context`);
   contextHead.value = (detail.commit as Record<string, unknown> | null) ?? null;
@@ -510,7 +546,7 @@ const searchHits = ref<MessageHit[] | null>(null);
 const searchTerm = ref('');
 const searching = ref(false);
 const conversationPages = computed(() => Math.max(1, Math.ceil(conversationTotal.value / CONVERSATION_PAGE_SIZE)));
-// 这份数据不进 load()：日志 SSE 每来一条事件就重跑 load()，跟着刷新会把运维翻到的页码打回第一页。
+// 这份数据不进 load()，也不挂在任何 SSE 事件上：跟着刷新会把运维翻到的页码打回第一页。
 async function loadConversations(target = conversationPage.value): Promise<void> {
   conversationLoading.value = true;
   try {
@@ -533,6 +569,17 @@ async function searchArchive(): Promise<void> {
   finally { searching.value = false; }
 }
 function clearSearch(): void { searchHits.value = null; searchTerm.value = ''; }
+async function softDeleteMessage(id: number, label: string): Promise<void> {
+  if (!confirm(`软删除${label}？归档正文会从检索与对话列表隐藏；上下文提交、turn 与附件不会被删除。`)) return;
+  try {
+    const result = await api<{ changes: number }>(`/api/messages/${id}`, { method: 'DELETE' });
+    if (searchHits.value) searchHits.value = searchHits.value.filter((entry) => entry.id !== id);
+    await loadConversations();
+    pushToast(result.changes
+      ? { severity: 'success', summary: '归档消息已软删除', detail: `message #${id}` }
+      : { severity: 'warn', summary: '消息已经被删除', detail: `message #${id}` });
+  } catch (error) { toastError('软删除失败', error); }
+}
 
 // ── 对话详情：这一轮实际发给上游的 JSON ──────────────────────────────────────
 // 只有日志里那一份是真的：turns 表存统计、messages 表存最终文本，两者都看不出请求体长什么样。
@@ -707,6 +754,46 @@ async function removeAgent(name: string): Promise<void> {
   try { await writeAgents(agents.value.filter((entry) => entry.name !== name), `Agent ${name} 已删除`, '写入 agent.agents 覆盖层'); agentDialog.value = false; }
   catch (error) { toastError('删除 Agent 失败', error); }
 }
+type AgentDryRunEvent =
+  | { type: 'step'; step: number; finishReason: string; text: string; toolCalls: unknown[]; toolResults: unknown[] }
+  | { type: 'usage'; step: number; inputTokens: number; outputTokens: number; costUsd: number }
+  | { type: 'final'; summary: string; fullRef: string; truncated: boolean }
+  | { type: 'error'; message: string };
+const agentDryRunDialog = ref(false);
+const agentDryRunName = ref('');
+const agentDryRunTask = ref('');
+const agentDryRunEvents = ref<AgentDryRunEvent[]>([]);
+const agentDryRunRunning = ref(false);
+const agentDryRunAbort = ref<AbortController | null>(null);
+const agentDryRunCost = computed(() => agentDryRunEvents.value.reduce((sum, event) => sum + (event.type === 'usage' ? event.costUsd : 0), 0));
+function openAgentDryRun(agent: AgentDefinition): void {
+  agentDryRunName.value = agent.name;
+  agentDryRunTask.value = '';
+  agentDryRunEvents.value = [];
+  agentDryRunDialog.value = true;
+}
+async function runAgentDryRun(): Promise<void> {
+  const task = agentDryRunTask.value.trim();
+  if (!task) { pushToast({ severity: 'warn', summary: '请填写试跑任务' }); return; }
+  agentDryRunAbort.value?.abort();
+  const controller = new AbortController();
+  agentDryRunAbort.value = controller;
+  agentDryRunEvents.value = [];
+  agentDryRunRunning.value = true;
+  try {
+    await apiStream<AgentDryRunEvent>(`/api/agents/${encodeURIComponent(agentDryRunName.value)}/dryrun`,
+      { method: 'POST', body: JSON.stringify({ task }), signal: controller.signal },
+      (event) => { agentDryRunEvents.value = [...agentDryRunEvents.value, event]; });
+    const error = agentDryRunEvents.value.find((event) => event.type === 'error');
+    if (error?.type === 'error') pushToast({ severity: 'error', summary: 'Agent 试跑失败', detail: error.message, life: 9000 });
+  } catch (error) {
+    if (!controller.signal.aborted) toastError('Agent 试跑失败', error);
+  } finally {
+    if (agentDryRunAbort.value === controller) agentDryRunAbort.value = null;
+    agentDryRunRunning.value = false;
+  }
+}
+function cancelAgentDryRun(): void { agentDryRunAbort.value?.abort(); }
 
 // ── 配额：限额在配置里、计数器在 quota_counters 里，GET /api/quota 已经把两边对齐好 ────────
 interface QuotaPair { daily: number | null; monthly: number | null }
@@ -873,8 +960,8 @@ const EXTENSION_META: Record<ExtensionKind, { label: string; icon: string }> = {
   skill: { label: 'Skill', icon: 'pi pi-book' }, plugin: { label: 'Plugin', icon: 'pi pi-box' }, mcp: { label: 'MCP', icon: 'pi pi-server' },
 };
 const MCP_STATE_LABELS: Record<string, { label: string; severity: TagSeverity }> = {
-  ready: { label: '已连接', severity: 'success' }, connecting: { label: '连接中', severity: 'warn' },
-  error: { label: '连不上', severity: 'danger' }, disabled: { label: '停用', severity: 'secondary' },
+  up: { label: '已连接', severity: 'success' }, pending: { label: '等待连接', severity: 'warn' },
+  down: { label: '连不上', severity: 'danger' }, disabled: { label: '停用', severity: 'secondary' },
 };
 type ExtensionRow = Extension & { kind: ExtensionKind };
 const extensionError = (row: ExtensionRow): string | null => row.load_error ?? row.last_error ?? null;
@@ -891,31 +978,125 @@ const extensionRows = computed(() => [
   ...plugins.value.map((item) => ({ ...item, kind: 'plugin' as ExtensionKind })),
   ...mcp.value.map((item) => ({ ...item, kind: 'mcp' as ExtensionKind })),
 ]);
-async function toggleExtension(row: Extension & { kind: ExtensionKind }): Promise<void> {
+async function toggleExtension(row: ExtensionRow): Promise<void> {
   const next = row.enabled === 0;
   // Plugin 是全信任执行任意代码的，开启这一步必须是有意识的动作（docs/07 §3）。
   if (row.kind === 'plugin' && next && !confirm(`启用 Plugin ${row.name}？Plugin 以全信任方式在 bot 进程里运行任意代码，没有沙箱。`)) return;
   extensionBusy.value = `${row.kind}:${row.name}`;
+  const resource = row.kind === 'skill' ? 'skills' : row.kind === 'mcp' ? 'mcp' : 'plugins';
   try {
-    await api(`/api/${row.kind === 'skill' ? 'skills' : 'plugins'}/${encodeURIComponent(row.name)}`, { method: 'PATCH', body: JSON.stringify({ enabled: next }) });
+    await api(`/api/${resource}/${encodeURIComponent(row.name)}`, { method: 'PATCH', body: JSON.stringify({ enabled: next }) });
     pushToast({ severity: 'success', summary: `${row.name} 已${next ? '启用' : '停用'}`, detail: EXTENSION_META[row.kind].label });
     await load();
   } catch (error) { toastError('切换扩展状态失败', error); }
   finally { extensionBusy.value = ''; }
 }
-async function reloadExtension(row: Extension & { kind: ExtensionKind }): Promise<void> {
+async function reloadExtension(row: ExtensionRow): Promise<void> {
   extensionBusy.value = `${row.kind}:${row.name}`;
   try {
     await api(row.kind === 'mcp' ? `/api/mcp/${encodeURIComponent(row.name)}/reconnect` : `/api/plugins/${encodeURIComponent(row.name)}/reload`, { method: 'POST', body: '{}' });
-    pushToast({ severity: 'success', summary: `${row.name} 已${row.kind === 'mcp' ? '重连' : '重载'}`, detail: '结果看下方状态与 load_error' });
+    pushToast({ severity: 'success', summary: `${row.name} 已${row.kind === 'mcp' ? '重连' : '重载'}`, detail: '结果看下方状态与错误信息' });
     await load();
   } catch (error) { toastError('重载失败', error); }
   finally { extensionBusy.value = ''; }
 }
+
+interface SkillDetail { name: string; description: string; body: string; allowedTools?: string[]; minRole: string; model?: string; enabled: boolean; files: string[] }
+const skillDialog = ref(false);
+const skillSaving = ref(false);
+const skillForm = ref({ name: '', description: '', body: '', allowedTools: '', minRole: 'trusted', model: '', enabled: true, files: [] as string[], isNew: true });
+function skillDefaultMinRole(): string {
+  const skillConfig = config.value.skills;
+  if (!skillConfig || typeof skillConfig !== 'object' || !('defaultMinRole' in skillConfig)) return 'trusted';
+  const role = skillConfig.defaultMinRole;
+  return typeof role === 'string' && ROLES.includes(role) ? role : 'trusted';
+}
+
+async function editSkill(row?: ExtensionRow): Promise<void> {
+  if (!row) {
+    skillForm.value = { name: '', description: '', body: '', allowedTools: '', minRole: skillDefaultMinRole(), model: '', enabled: true, files: [], isNew: true };
+    skillDialog.value = true;
+    return;
+  }
+  try {
+    const skill = await api<SkillDetail>(`/api/skills/${encodeURIComponent(row.name)}`);
+    skillForm.value = { name: skill.name, description: skill.description, body: skill.body, allowedTools: (skill.allowedTools ?? []).join('\n'),
+      minRole: skill.minRole, model: skill.model ?? '', enabled: skill.enabled, files: skill.files, isNew: false };
+    skillDialog.value = true;
+  } catch (error) { toastError('读取 Skill 失败', error); }
+}
+async function saveSkill(): Promise<void> {
+  const form = skillForm.value;
+  const name = form.name.trim();
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name)) { pushToast({ severity: 'warn', summary: 'Skill 名称无效', detail: '只能用小写字母、数字和中划线' }); return; }
+  if (!form.description.trim() || !form.body.trim()) { pushToast({ severity: 'warn', summary: '描述与正文必填' }); return; }
+  skillSaving.value = true;
+  try {
+    await api(form.isNew ? '/api/skills' : `/api/skills/${encodeURIComponent(name)}`, { method: form.isNew ? 'POST' : 'PUT',
+      body: JSON.stringify({ name, description: form.description, body: form.body, allowedTools: form.allowedTools.split('\n').map((entry) => entry.trim()).filter(Boolean),
+        minRole: form.minRole, model: form.model || null, enabled: form.enabled }) });
+    skillDialog.value = false;
+    pushToast({ severity: 'success', summary: `Skill ${name} 已${form.isNew ? '创建' : '保存'}`, detail: 'SKILL.md 已写入并重新扫描' });
+    await load();
+  } catch (error) { toastError('保存 Skill 失败', error); }
+  finally { skillSaving.value = false; }
+}
 async function removeSkill(name: string): Promise<void> {
-  if (!confirm(`从库里删除 Skill ${name}？磁盘上的 SKILL.md 不动，下次扫描还会被重新发现 —— 要永久移除得删文件。`)) return;
-  try { await api(`/api/skills/${encodeURIComponent(name)}`, { method: 'DELETE' }); pushToast({ severity: 'success', summary: `Skill ${name} 已删除` }); await load(); }
+  if (!confirm(`永久删除 Skill ${name}？会删除它的整个目录（SKILL.md 与附属文件），无法从 WebUI 恢复。`)) return;
+  try { await api(`/api/skills/${encodeURIComponent(name)}`, { method: 'DELETE' }); pushToast({ severity: 'success', summary: `Skill ${name} 已永久删除` }); skillDialog.value = false; await load(); }
   catch (error) { toastError('删除 Skill 失败', error); }
+}
+
+// mcp.enabled 是总开关，出厂就是 false，而 McpManager.reconcile 一上来就对它 early-return。
+// 不把它摆出来的话，新建 server 会拿到一个 ok:true 加一条永远停在「等待连接」的行 ——
+// 「保存成功但运行时没变」正是这份文档反复点名的那类反馈（docs/20 · W-CFG-02）。
+const mcpMasterOff = computed(() => (config.value.mcp as { enabled?: boolean } | undefined)?.enabled === false);
+async function enableMcpMaster(): Promise<void> {
+  try {
+    await api('/api/config', { method: 'PUT', body: JSON.stringify({ 'mcp.enabled': true }) });
+    pushToast({ severity: 'success', summary: 'MCP 总开关已打开', detail: '热更新，已配置的 server 会在下一次 reconcile 时连接' });
+    await load();
+  } catch (error) { toastError('打开 MCP 总开关失败', error); }
+}
+const mcpDialog = ref(false);
+const mcpSaving = ref(false);
+const mcpForm = ref({ originalName: '', name: '', transport: 'stdio', command: '', args: '', env: '{}', url: '', headers: '{}',
+  minRole: 'trusted', enabled: true, toolAllow: '', toolDeny: '', timeoutMs: 30000, isNew: true });
+function editMcp(row?: ExtensionRow): void {
+  mcpForm.value = row ? { originalName: row.name, name: row.name, transport: row.transport ?? 'stdio', command: row.command ?? '', args: (row.args ?? []).join('\n'),
+    env: JSON.stringify(row.env ?? {}, null, 2), url: row.url ?? '', headers: JSON.stringify(row.headers ?? {}, null, 2), minRole: row.minRole ?? row.min_role ?? 'trusted',
+    enabled: row.enabled !== 0, toolAllow: (row.toolAllow ?? []).join('\n'), toolDeny: (row.toolDeny ?? []).join('\n'), timeoutMs: row.timeoutMs ?? 30000, isNew: false }
+    : { originalName: '', name: '', transport: 'stdio', command: '', args: '', env: '{}', url: '', headers: '{}', minRole: 'trusted', enabled: true, toolAllow: '', toolDeny: '', timeoutMs: 30000, isNew: true };
+  mcpDialog.value = true;
+}
+function parseStringMap(text: string, label: string): Record<string, string> {
+  const parsed = JSON.parse(text || '{}') as unknown;
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || Object.values(parsed).some((value) => typeof value !== 'string')) throw new Error(`${label} 必须是字符串键值 JSON 对象`);
+  return parsed as Record<string, string>;
+}
+async function saveMcp(): Promise<void> {
+  const form = mcpForm.value;
+  if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(form.name)) { pushToast({ severity: 'warn', summary: 'MCP 名称无效', detail: '只能用小写字母、数字、下划线和中划线' }); return; }
+  mcpSaving.value = true;
+  try {
+    const common = { name: form.name, transport: form.transport, enabled: form.enabled, minRole: form.minRole, timeoutMs: form.timeoutMs,
+      toolAllow: form.toolAllow.split('\n').map((entry) => entry.trim()).filter(Boolean), toolDeny: form.toolDeny.split('\n').map((entry) => entry.trim()).filter(Boolean) };
+    const body = form.transport === 'stdio'
+      ? { ...common, command: form.command, args: form.args.split('\n').map((entry) => entry.trim()).filter(Boolean), env: parseStringMap(form.env, '环境变量') }
+      : { ...common, url: form.url, headers: parseStringMap(form.headers, 'HTTP Headers') };
+    await api(form.isNew ? '/api/mcp' : `/api/mcp/${encodeURIComponent(form.originalName)}`, { method: form.isNew ? 'POST' : 'PATCH', body: JSON.stringify(body) });
+    mcpDialog.value = false;
+    pushToast(mcpMasterOff.value
+      ? { severity: 'warn', summary: `MCP ${form.name} 已保存，但没有连接`, detail: '总开关 mcp.enabled 是关的，reconcile 会直接跳过所有 server。到扩展页顶部打开它。', life: 12_000 }
+      : { severity: 'success', summary: `MCP ${form.name} 已保存`, detail: '配置已热更新并重新发现工具' });
+    await load();
+  } catch (error) { toastError('保存 MCP 失败', error); }
+  finally { mcpSaving.value = false; }
+}
+async function removeMcp(name: string): Promise<void> {
+  if (!confirm(`删除 MCP server ${name}？连接会关闭，发现到的工具会立即从模型工具目录移除。`)) return;
+  try { await api(`/api/mcp/${encodeURIComponent(name)}`, { method: 'DELETE' }); pushToast({ severity: 'success', summary: `MCP ${name} 已删除` }); mcpDialog.value = false; await load(); }
+  catch (error) { toastError('删除 MCP 失败', error); }
 }
 
 // ── 维护：备份 / VACUUM / 清日志 / 重建 FTS。gc-files 后端是 not_implemented，不给按钮 ────
@@ -945,7 +1126,230 @@ const uptimeText = computed(() => {
   const hours = ms / 3_600_000;
   return hours < 1 ? `${Math.round(ms / 60_000)} 分钟` : hours < 48 ? `${hours.toFixed(1)} 小时` : `${(hours / 24).toFixed(1)} 天`;
 });
-const mcpDown = computed(() => (health.value?.mcp ?? []).filter((entry) => entry.state !== 'ready').length);
+const mcpDown = computed(() => (health.value?.mcp ?? []).filter((entry) => entry.state !== 'up').length);
+
+// ── 在途 turn：权威来源是进程内的 TurnRegistry，不是 turns 表（崩溃残留的 running 行要等
+//    下次启动才归零）。首屏拉一次，之后靠 turn.started / turn.progress / turn.finished 增量更新 ──
+interface ActiveTurn { id: string; key: string; chatId: string; userId: string; role: string; startedAt: number; steps: number; toolCalls: number; costUsd: number; inputTokens: number; outputTokens: number }
+const activeTurns = ref<ActiveTurn[]>([]);
+const turnProgress = ref<Record<string, { phase: string; step: number; note: string }>>({});
+const cancellingTurn = ref('');
+const nowTick = ref(Date.now());
+setInterval(() => { nowTick.value = Date.now(); }, 1000);
+const elapsed = (since: number): string => {
+  const seconds = Math.max(0, Math.round((nowTick.value - since) / 1000));
+  return seconds < 60 ? `${seconds} 秒` : `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`;
+};
+function turnWho(turn: ActiveTurn): string {
+  const principal = principals.value.find((entry) => entry.kind === 'user' && entry.tgId === turn.userId);
+  return principal?.displayName || (principal?.username ? `@${principal.username}` : `用户 ${turn.userId}`);
+}
+async function loadActiveTurns(): Promise<void> {
+  try { activeTurns.value = await api<ActiveTurn[]>('/api/turns/active'); }
+  catch { activeTurns.value = []; }
+}
+/** 取消是 abort 信号不是删除：该轮会落成 cancelled，已发出的消息与上下文都还在。 */
+async function cancelTurn(turn: ActiveTurn): Promise<void> {
+  if (!confirm(`取消 ${turnWho(turn)} 的这一轮？模型调用会被中断，该轮记成 cancelled；已经发出去的消息不会撤回。`)) return;
+  cancellingTurn.value = turn.id;
+  try {
+    const result = await api<{ cancelled: boolean }>(`/api/turns/${encodeURIComponent(turn.id)}/cancel`, { method: 'POST', body: '{}' });
+    pushToast(result.cancelled ? { severity: 'success', summary: '已发出取消信号', detail: `${turn.id.slice(0, 12)} · 该轮会记成 cancelled` }
+      : { severity: 'warn', summary: '这一轮已经结束了', detail: '取消信号没有作用对象，界面稍后会自己刷新' });
+    await loadActiveTurns();
+  } catch (error) { toastError('取消失败', error); }
+  finally { cancellingTurn.value = ''; }
+}
+
+/** 任务没有独立的取消句柄：`spawn_agent` 的子 agent 跑在父轮次的 abort 信号下，
+ *  取消一条任务只能取消它所属的整轮 —— 说清楚再动手，别让人以为只停了这一个子 agent。 */
+async function cancelTaskTurn(task: Record<string, unknown>): Promise<void> {
+  const turnId = String(task.turn_id ?? '');
+  if (!turnId) { pushToast({ severity: 'warn', summary: '这条任务没有关联轮次', detail: '没有可取消的对象' }); return; }
+  if (!confirm(`取消任务「${String(task.title ?? turnId)}」？它没有独立的取消句柄，实际取消的是所属的整轮 ${turnId.slice(0, 12)} —— 同一轮里的其他子 agent 也会一起停。`)) return;
+  cancellingTurn.value = turnId;
+  try {
+    const result = await api<{ cancelled: boolean }>(`/api/turns/${encodeURIComponent(turnId)}/cancel`, { method: 'POST', body: '{}' });
+    pushToast(result.cancelled ? { severity: 'success', summary: '已发出取消信号', detail: `轮次 ${turnId.slice(0, 12)}` }
+      : { severity: 'warn', summary: '这一轮已经结束了', detail: '任务状态会在下次刷新时归位' });
+    await REFRESH_LOADERS.tasks();
+  } catch (error) { toastError('取消失败', error); }
+  finally { cancellingTurn.value = ''; }
+}
+
+const decidingApproval = ref('');
+async function decideApproval(approval: Record<string, unknown>, approved: boolean): Promise<void> {
+  const id = String(approval.id);
+  decidingApproval.value = id;
+  try {
+    const result = await api<{ changed: boolean }>(`/api/approvals/${encodeURIComponent(id)}/decide`, { method: 'POST', body: JSON.stringify({ approved }) });
+    pushToast(result.changed
+      ? { severity: approved ? 'success' : 'warn', summary: approved ? '已批准，工具继续执行' : '已拒绝，工具不会执行', detail: String(approval.tool_name ?? id) }
+      : { severity: 'warn', summary: '审批已经失效', detail: '可能已被处理、过期或所属轮次已取消' });
+    await REFRESH_LOADERS.tasks();
+  } catch (error) { toastError('提交审批决定失败', error); }
+  finally { decidingApproval.value = ''; }
+}
+
+// ── SSE：首屏之后界面的数据新鲜度全靠这里（docs/21 · G-SSE-01）───────────────────
+// 事件到达**不再无脑重跑 `load()`**（那是一次 18 个端点）：按事件类型只刷相关的那几组，
+// 且只刷当前页面看得见的。服务端已按 kind 合并过一轮，这一层挡的是「多个 kind 同时来」。
+type RefreshGroup = 'dashboard' | 'logs' | 'chats' | 'usage' | 'quota' | 'tasks' | 'approvals' | 'extensions' | 'config' | 'activeTurns';
+const REFRESH_DEBOUNCE_MS = 400;
+const lastEventAt = ref(0);
+const REFRESH_LOADERS: Record<RefreshGroup, () => Promise<void>> = {
+  dashboard: async () => { [dashboard.value, health.value] = await Promise.all([api<Dashboard>('/api/dashboard'), api<HealthDetail>('/api/health/detail')]); },
+  logs: async () => { logs.value = await api<LogRow[]>('/api/logs'); },
+  chats: async () => { chats.value = await api<Chat[]>('/api/chats'); },
+  usage: async () => { usage.value = await api<Usage[]>('/api/usage'); },
+  quota: loadQuota,
+  tasks: async () => { tasks.value = await api<Array<Record<string, unknown>>>('/api/tasks'); },
+  approvals: async () => { approvals.value = await api<Array<Record<string, unknown>>>('/api/approvals'); },
+  extensions: async () => { [skills.value, plugins.value, mcp.value] = await Promise.all([api<Extension[]>('/api/skills'), api<Extension[]>('/api/plugins'), api<Extension[]>('/api/mcp')]); },
+  config: async () => { [config.value, tools.value, agents.value] = await Promise.all([api<Record<string, unknown>>('/api/config'), api<Record<string, ToolPolicy>>('/api/tools'), api<AgentDefinition[]>('/api/agents')]); syncTrigger(); syncOutput(); },
+  activeTurns: loadActiveTurns,
+};
+// 哪些页面看得见这一组。看不见就不刷 —— 切过去时 watch(active) 会补一次。
+const REFRESH_VISIBILITY: Record<RefreshGroup, readonly string[]> = {
+  dashboard: ['dashboard'], logs: ['dashboard', 'logs'], chats: ['chats'], usage: ['usage'], quota: ['quota'],
+  tasks: ['tasks'], extensions: ['extensions', 'dashboard'], activeTurns: ['dashboard'],
+  // 待审批不做页面过滤：一条 pending 会把某个真实轮次卡住最多 approval.ttlMs，
+  // 只在任务页刷新等于「运维不切到那一页就永远不知道有人在等」。事件本身很稀疏（命中规则才发）。
+  approvals: ['dashboard', 'chats', 'messages', 'prompts', 'providers', 'principals', 'tools', 'extensions', 'agents', 'logs', 'usage', 'quota', 'tasks', 'settings'],
+  // 配置变了影响设置页、工具页、Agent 页，也影响会话页的覆盖显示；这个事件本身很稀疏，不做页面过滤。
+  config: ['dashboard', 'chats', 'messages', 'prompts', 'providers', 'principals', 'tools', 'extensions', 'agents', 'logs', 'usage', 'quota', 'tasks', 'settings'],
+};
+const EVENT_REFRESH: Record<string, readonly RefreshGroup[]> = {
+  log: ['logs', 'dashboard'],
+  'turn.started': ['activeTurns', 'dashboard'],
+  'turn.progress': ['activeTurns'],
+  'turn.finished': ['activeTurns', 'dashboard', 'chats'],
+  usage: ['usage', 'dashboard'],
+  quota: ['quota'],
+  'task.updated': ['tasks'],
+  'approval.pending': ['approvals'], 'approval.decided': ['approvals'],
+  'config.changed': ['config'],
+  health: ['dashboard', 'extensions'],
+};
+const sinceLastEvent = computed(() => {
+  const seconds = Math.max(0, Math.round((nowTick.value - lastEventAt.value) / 1000));
+  return seconds < 60 ? `${seconds} 秒前` : seconds < 3600 ? `${Math.floor(seconds / 60)} 分钟前` : `${Math.floor(seconds / 3600)} 小时前`;
+});
+const refreshTimers = new Map<RefreshGroup, ReturnType<typeof setTimeout>>();
+function scheduleRefresh(groups: readonly RefreshGroup[]): void {
+  for (const group of groups) {
+    if (refreshTimers.has(group) || !REFRESH_VISIBILITY[group].includes(active.value)) continue;
+    refreshTimers.set(group, setTimeout(() => { refreshTimers.delete(group); void REFRESH_LOADERS[group]().catch(() => undefined); }, REFRESH_DEBOUNCE_MS));
+  }
+}
+
+// ── 全量配置表单：由 config.schema.json 自动生成（docs/09 §3.13、docs/21 §1.1）──────────
+// 153 个已接线叶子里此前只有 15 个能在界面上改。手写 100 多个控件必然与 schema 漂移，
+// 所以这里只取 `GET /api/config/schema` 的三件套喂给 SchemaForm，控件形态全从 schema 推。
+interface ConfigSchemaPayload { schema: Record<string, unknown>; hotReloadable: string[]; unimplemented: string[] }
+const configSchema = ref<ConfigSchemaPayload | null>(null);
+const schemaSaving = ref(false);
+const schemaForm = ref<{ commit(paths: string[]): void } | null>(null);
+async function loadConfigSchema(): Promise<void> {
+  if (configSchema.value) return;
+  try { configSchema.value = await api<ConfigSchemaPayload>('/api/config/schema'); }
+  catch (error) { toastError('加载配置 schema 失败', error); }
+}
+// ── 会话级覆盖：`perChat.<contextKey>` 此前只能用 curl 打（docs/21 · G-API-09）────────────
+// 白名单是安全边界（docs/11 §2.1）：服务端 superRefine 会拒掉不在里面的路径，这里只是把同一份
+// 名单摆到界面上，少一项等于运维够不着，多一项等于让人白填一遍再吃 400。
+const PER_CHAT_ALLOWLIST = ['trigger', 'output', 'context.scope', 'context.limit', 'context.background', 'agent.main', 'memory.pubWriteMinRole'] as const;
+const PER_CHAT_NOTES: Record<string, string> = {
+  'context.scope': '⚠️ 改成 thread 之后，这个会话的后续消息会落到 thread:<chat>:<topic> 这个新 key 上 —— 而覆盖是按 key 存的，等于这条覆盖把自己作废了',
+  'agent.main.modelAlias': '只换这个会话的主模型；Telegram 侧的 /model 写的是另一份（app_kv 的会话别名），两者都在时以 /model 为准',
+};
+const chatOverrides = computed<Record<string, unknown>>(() => {
+  const key = selectedChat.value?.key;
+  const all = (config.value.perChat ?? {}) as Record<string, unknown>;
+  const entry = key ? all[key] : null;
+  return entry && typeof entry === 'object' && !Array.isArray(entry) ? entry as Record<string, unknown> : {};
+});
+/** 覆盖对象拍平成点分行，界面上要一眼看出「这个会话到底改了哪几项」。 */
+function flattenOverrides(node: unknown, prefix = ''): Array<{ path: string; value: unknown }> {
+  if (!node || typeof node !== 'object' || Array.isArray(node)) return prefix ? [{ path: prefix, value: node }] : [];
+  return Object.entries(node).flatMap(([key, child]) => flattenOverrides(child, prefix ? `${prefix}.${key}` : key));
+}
+const chatOverrideRows = computed(() => flattenOverrides(chatOverrides.value));
+/** 表单里显示的是这个会话**实际生效**的值（全局 + 覆盖），跟 `perChatConfig` 在运行时做的合并一致。 */
+function deepMerge(base: unknown, patch: unknown): unknown {
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return patch;
+  if (!base || typeof base !== 'object' || Array.isArray(base)) return structuredClone(patch);
+  const out = { ...base as Record<string, unknown> };
+  for (const [key, value] of Object.entries(patch)) out[key] = deepMerge(out[key], value);
+  return out;
+}
+const chatEffectiveConfig = computed(() => deepMerge(config.value, chatOverrides.value) as Record<string, unknown>);
+const chatOverrideSaving = ref(false);
+const chatOverrideForm = ref<{ commit(paths: string[]): void } | null>(null);
+const chatOverrideOpen = ref(false);
+/** `config` 是深响应式的 ref，读出来的嵌套对象是 Proxy —— `structuredClone` 对 Proxy 直接抛
+ *  DataCloneError（表现是点了没反应、连报错都没有）。配置本来就是 JSON 安全的，走一遍序列化即可。 */
+const plain = <T,>(value: T): T => JSON.parse(JSON.stringify(value ?? null)) as T;
+/** PATCH 是整体替换而不是合并：只发这次改的那几项会把已有的覆盖一起抹掉。 */
+function writeChatOverrides(next: Record<string, unknown>): Promise<unknown> {
+  const chat = selectedChat.value;
+  if (!chat) return Promise.resolve(null);
+  return api(`/api/chats/${encodeURIComponent(chat.key)}`, { method: 'PATCH', body: JSON.stringify(next) });
+}
+async function saveChatOverrides(changes: Record<string, unknown>): Promise<void> {
+  const chat = selectedChat.value;
+  if (!chat) return;
+  chatOverrideSaving.value = true;
+  try {
+    const next = plain(chatOverrides.value);
+    for (const [path, value] of Object.entries(changes)) {
+      const parts = path.split('.');
+      let cursor = next;
+      for (const part of parts.slice(0, -1)) cursor = (cursor[part] && typeof cursor[part] === 'object' ? cursor[part] : (cursor[part] = {})) as Record<string, unknown>;
+      cursor[parts.at(-1)!] = value;
+    }
+    await writeChatOverrides(next);
+    chatOverrideForm.value?.commit(Object.keys(changes));
+    pushToast({ severity: 'success', summary: `已为「${chatIdentity(chat).name}」保存 ${Object.keys(changes).length} 项覆盖`, detail: '下一轮开始生效；全局值不受影响' });
+    await REFRESH_LOADERS.config();
+  } catch (error) { toastError('保存会话级覆盖失败', error); }
+  finally { chatOverrideSaving.value = false; }
+}
+async function dropChatOverride(path: string): Promise<void> {
+  const chat = selectedChat.value;
+  if (!chat) return;
+  try {
+    const next = plain(chatOverrides.value);
+    const parts = path.split('.');
+    let cursor: Record<string, unknown> | null = next;
+    const trail: Array<[Record<string, unknown>, string]> = [];
+    for (const part of parts.slice(0, -1)) { if (!cursor || typeof cursor[part] !== 'object') { cursor = null; break; } trail.push([cursor, part]); cursor = cursor[part] as Record<string, unknown>; }
+    if (!cursor) return;
+    delete cursor[parts.at(-1)!];
+    // 空掉的中间层要一起收掉，否则覆盖对象里会留下一串 `{}`，看起来还配着什么。
+    for (const [parent, part] of trail.reverse()) if (!Object.keys(parent[part] as Record<string, unknown>).length) delete parent[part];
+    await writeChatOverrides(next);
+    pushToast({ severity: 'success', summary: `已取消覆盖 ${path}`, detail: '这一项回到全局值，下一轮生效' });
+    await REFRESH_LOADERS.config();
+  } catch (error) { toastError('取消覆盖失败', error); }
+}
+
+async function saveSchemaConfig(changes: Record<string, unknown>): Promise<void> {
+  const keys = Object.keys(changes);
+  const cold = keys.filter((key) => !(configSchema.value?.hotReloadable ?? []).some((prefix) => key === prefix || key.startsWith(`${prefix}.`)));
+  schemaSaving.value = true;
+  try {
+    await api('/api/config', { method: 'PUT', body: JSON.stringify(changes) });
+    // 落库是同步的，但 bot 进程要等 `config.changed` 才 loadConfig()：下面那次 GET 可能还是旧值，
+    // 不把表单基线推上去的话，保存完按钮还挂着「保存 N 项改动」。
+    schemaForm.value?.commit(keys);
+    // 「保存成功但运行时没变」是最误导的一类反馈（docs/20 · W-CFG-02）：需重启的键要说出来。
+    pushToast({ severity: cold.length ? 'warn' : 'success', summary: `已保存 ${keys.length} 项配置`,
+      detail: cold.length ? `其中 ${cold.length} 项要重启进程才生效：${cold.slice(0, 4).join('、')}${cold.length > 4 ? ' 等' : ''}` : '全部是热更新项，已即时生效', life: cold.length ? 9000 : 5000 });
+    await REFRESH_LOADERS.config();
+  } catch (error) { toastError('保存配置失败', error); }
+  finally { schemaSaving.value = false; }
+}
 
 // ── 配置变更历史：config_revisions 记了每一次写入的前后值，但界面上一直没有入口 ──────────
 interface ConfigRevision { id: string; ts: number; actor: string; key: string; old_json: string | null; new_json: string | null }
@@ -970,17 +1374,30 @@ watch(active, (value) => {
   if (value === 'messages') void loadConversations();
   if (value === 'quota') void loadQuota();
   if (value === 'tools') void loadSandbox();
+  if (value === 'settings') void loadConfigSchema();
+  // 切回来时补一次：不可见的分组在事件到达时被跳过了，直接显示会是离开那一刻的快照。
+  if (value === 'dashboard') void loadActiveTurns();
 });
 onMounted(async () => {
   await hydrateSession();
   await load();
+  void loadActiveTurns();
   const events = new EventSource('/api/events');
   events.onopen = () => { connected.value = true; };
   events.onerror = () => { connected.value = false; };
-  // `log` 目前永远不会到达：LogSink 拿不到 EventBus，运行时只 emit config.changed 与
-  // approval.decided 两种（docs/21 · G-SSE-01）。留着这个监听是为了接线之后不用再改一次；
-  // 下面两条是真的会来的，至少让「另一个标签页改了配置 / 审批被裁决」能反映到这一份界面上。
-  for (const type of ['log', 'config.changed', 'approval.decided']) events.addEventListener(type, () => void load());
+  for (const [type, groups] of Object.entries(EVENT_REFRESH)) {
+    events.addEventListener(type, (message) => {
+      lastEventAt.value = Date.now();
+      // 步骤进度只有事件里那一份（turns 表要等这一步结束才写），直接用载荷更新，不回查。
+      if (type === 'turn.progress') {
+        try {
+          const data = JSON.parse((message as MessageEvent<string>).data) as { turnId?: string; phase?: string; step?: number; note?: string };
+          if (data.turnId) turnProgress.value = { ...turnProgress.value, [data.turnId]: { phase: String(data.phase ?? ''), step: Number(data.step ?? 0), note: String(data.note ?? '') } };
+        } catch { /* 载荷坏了不该让刷新一起失效 */ }
+      }
+      scheduleRefresh(groups);
+    });
+  }
 });
 
 const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted: 'info', limited: 'warn', blocked: 'danger' }[role] as TagSeverity);
@@ -993,6 +1410,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
       <nav aria-label="主导航">
         <button v-for="item in navigation" :key="item[0]" type="button" :class="{ active: active === item[0] }" @click="active = item[0]">
           <i :class="item[1]" aria-hidden="true" /><span>{{ item[2] }}</span>
+          <span v-if="item[0] === 'tasks' && pendingApprovals" class="nav-badge" :title="`${pendingApprovals} 个调用正等待裁决`">{{ pendingApprovals }}</span>
         </button>
       </nav>
       <div class="system-pill"><span :class="['status-dot', { live: connected }]" /><div><b>{{ connected ? '系统在线' : '正在连接' }}</b><small>127.0.0.1:8787</small></div></div>
@@ -1024,6 +1442,23 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             <article><div class="metric-icon rose"><i class="pi pi-wallet" /></div><span>累计花费</span><b>${{ Number(dashboard.turns.cost || 0).toFixed(4) }}</b><small>失败 {{ dashboard.turns.failed }} 次</small></article>
             <article><div class="metric-icon amber"><i class="pi pi-sparkles" /></div><span>可用 Provider</span><b>{{ dashboard.providers.enabled }}</b><small>共配置 {{ dashboard.providers.total }} 个</small></article>
           </section>
+          <!-- 在途 turn 表（docs/09 §3.1）：数据来自进程内的 TurnRegistry，首屏拉一次，
+               之后 turn.started / turn.progress / turn.finished 三种事件增量更新。 -->
+          <section class="surface in-flight">
+            <header><div><p class="eyebrow">IN FLIGHT</p><h3>在途 turn</h3><p class="section-note">这里有几行，就有几轮真的在跑（进程内的 TurnRegistry，不是 turns 表里可能残留的 running 行）。取消会中断模型调用、把该轮记成 cancelled，已经发出去的消息不撤回。</p></div>
+              <UiTag :value="activeTurns.length ? `${activeTurns.length} 轮进行中` : '空闲'" :severity="activeTurns.length ? 'info' : 'secondary'" /></header>
+            <DataGrid :rows="activeTurns" :columns="COLUMNS.activeTurns" data-key="id" empty="当前没有正在跑的轮次。">
+              <template #who="{ data }"><b>{{ turnWho(data) }}</b><UiTag :value="data.role" :severity="roleSeverity(data.role)" /></template>
+              <template #chat="{ data }"><code>{{ data.key }}</code></template>
+              <template #progress="{ data }">
+                <span v-if="turnProgress[data.id]">第 {{ turnProgress[data.id].step }} 步 · {{ turnProgress[data.id].phase === 'tools' ? '工具' : '模型' }} <small>{{ turnProgress[data.id].note }}</small></span>
+                <small v-else class="alias-empty">刚开始，还没有步骤事件</small>
+              </template>
+              <template #stats="{ data }">{{ data.steps }} 步 · ${{ Number(data.costUsd || 0).toFixed(4) }}</template>
+              <template #elapsed="{ data }">{{ elapsed(data.startedAt) }}</template>
+              <template #actions="{ data }"><UiButton size="small" variant="outlined" severity="danger" label="取消" :loading="cancellingTurn === data.id" @click="cancelTurn(data)" /></template>
+            </DataGrid>
+          </section>
           <section class="dashboard-grid">
             <article class="surface span-2"><header><div><p class="eyebrow">TRACE ACTIVITY</p><h3>最近运行事件</h3></div><UiButton variant="text" label="查看全部" icon="pi pi-arrow-right" icon-pos="right" @click="active = 'logs'" /></header>
               <div class="log-list"><div v-for="row in logs.slice(0, 6)" :key="row.id"><span :class="['level', row.level]">{{ row.level }}</span><code>{{ row.kind }}</code><p>{{ row.summary }}</p><time>{{ new Date(row.ts).toLocaleTimeString() }}</time></div><div v-if="!logs.length" class="empty">暂无事件。完成首次启动后会在此显示 trace。</div></div>
@@ -1031,7 +1466,9 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             <!-- 这四行以前是写死的字（沙箱恒显示「Docker」，与 sandbox.mode 无关）。数据一律来自 /api/health/detail。 -->
             <article class="surface health"><header><div><p class="eyebrow">HEALTH</p><h3>依赖健康</h3><p class="section-note">v{{ health?.version ?? 'dev' }} · 已运行 {{ uptimeText }}</p></div></header>
               <div class="health-row"><span>SQLite / WAL</span><UiTag :value="health?.db.ok === false ? '读写失败' : '在线'" :severity="health?.db.ok === false ? 'danger' : 'success'" /></div>
-              <div class="health-row"><span>SSE 推送</span><UiTag :value="connected ? '在线' : '重连中'" :severity="connected ? 'success' : 'warn'" /></div>
+              <!-- 「连上了」和「有数据在流动」是两回事：G-SSE-01 之前那根管子里一个字节都没有，
+                   徽标却一直显示「在线」。收到过事件才敢说实时。 -->
+              <div class="health-row"><span>SSE 推送</span><UiTag :value="!connected ? '重连中' : lastEventAt ? `实时 · ${sinceLastEvent}` : '已连接，暂无事件'" :severity="!connected ? 'warn' : lastEventAt ? 'success' : 'secondary'" /></div>
               <div class="health-row"><span>模型注册表</span><UiTag :value="`${dashboard.providers.enabled} / ${dashboard.providers.total} 可用`" :severity="dashboard.providers.enabled ? 'success' : 'warn'" /></div>
               <div class="health-row"><span>在途 turn</span><UiTag :value="String(health?.inFlightTurns ?? 0)" severity="secondary" /></div>
               <div class="health-row"><span>MCP</span><UiTag v-if="!health?.mcp.length" value="未配置" severity="secondary" /><UiTag v-else :value="mcpDown ? `${mcpDown} 个异常` : `${health.mcp.length} 个就绪`" :severity="mcpDown ? 'danger' : 'success'" /></div>
@@ -1058,6 +1495,26 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             </button>
             <p v-if="!chats.length" class="empty-card">还没有任何会话。bot 收到第一条消息后会在这里出现。</p>
           </div>
+          <!-- 会话级覆盖：`PATCH /api/chats/:key` 此前只能用 curl 打（docs/21 · G-API-09） -->
+          <article v-if="selectedChat" class="surface chat-overrides">
+            <header>
+              <div><p class="eyebrow">PER-CHAT OVERRIDE</p><h3>只对「{{ selectedChatIdentity?.name }}」生效的设置</h3>
+                <p class="section-note">覆盖优先于设置页的全局值，<b>下一轮开始生效</b>。可改的范围是 <code>docs/11 §2.1</code> 的白名单（触发 / 输出 / 上下文窗口 / 主 Agent / 公共记忆写入角色）—— 白名单是安全边界，越界的路径服务端会直接 400。</p></div>
+              <UiTag :value="chatOverrideRows.length ? `${chatOverrideRows.length} 项覆盖中` : '全部继承全局'" :severity="chatOverrideRows.length ? 'info' : 'secondary'" />
+            </header>
+            <div v-if="chatOverrideRows.length" class="override-list">
+              <span v-for="row in chatOverrideRows" :key="row.path" class="override-chip">
+                <code>{{ row.path }}</code><b>{{ typeof row.value === 'object' ? JSON.stringify(row.value) : String(row.value) }}</b>
+                <button type="button" aria-label="取消这一项覆盖" title="取消覆盖，回到全局值" @click="dropChatOverride(row.path)"><i class="pi pi-times" /></button>
+              </span>
+            </div>
+            <UiButton variant="text" :icon="chatOverrideOpen ? 'pi pi-chevron-up' : 'pi pi-chevron-down'" :label="chatOverrideOpen ? '收起' : '编辑覆盖项'" @click="chatOverrideOpen = !chatOverrideOpen" />
+            <!-- 控件里显示的是这个会话实际生效的值（全局 + 覆盖）；改动才会写进覆盖层 -->
+            <SchemaForm v-if="chatOverrideOpen && configSchema" ref="chatOverrideForm" :schema="configSchema.schema" :value="chatEffectiveConfig"
+              :hot-reloadable="PER_CHAT_ALLOWLIST" :unimplemented="configSchema.unimplemented" :include="PER_CHAT_ALLOWLIST" :notes="PER_CHAT_NOTES"
+              :saving="chatOverrideSaving" save-label="写入覆盖" @save="saveChatOverrides" />
+            <p v-else-if="chatOverrideOpen" class="empty-card"><i class="pi pi-spin pi-spinner" aria-hidden="true" /> 正在加载配置 schema…</p>
+          </article>
           <div v-if="selectedChat" class="context-workbench">
             <article class="context-viewer">
               <header>
@@ -1119,8 +1576,8 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             <DataGrid :rows="searchHits" :columns="COLUMNS.hits" data-key="id" paginate empty="没有命中任何消息">
               <template #tgDate="{ data }">{{ new Date(data.tgDate).toLocaleString() }}</template>
               <template #from="{ data }"><UiTag :value="data.direction === 'out' ? 'bot' : 'user'" :severity="data.direction === 'out' ? 'info' : 'secondary'" /> {{ data.fromName ?? data.fromUsername ?? '—' }}</template>
-              <template #text="{ data }"><span class="hit-text">{{ data.text ?? `[${data.kind}]` }}</span></template>
-              <template #detail="{ data }"><UiButton v-if="data.turnId" size="small" variant="text" icon="pi pi-code" aria-label="查看这条消息所在轮次的实际调用" @click="openDetail(data.turnId)" /><small v-else class="alias-empty" title="这条消息没有触发轮次，只是背景发言">—</small></template>
+              <template #text="{ data }"><span class="hit-text">{{ data.text ?? `[${data.kind}]` }}</span><AttachmentStrip :items="data.attachments ?? []" /></template>
+              <template #detail="{ data }"><div class="section-actions"><UiButton v-if="data.turnId" size="small" variant="text" icon="pi pi-code" aria-label="查看这条消息所在轮次的实际调用" @click="openDetail(data.turnId)" /><UiButton size="small" variant="text" severity="danger" icon="pi pi-trash" aria-label="软删除这条归档消息" @click="softDeleteMessage(data.id, '这条归档消息')" /></div></template>
             </DataGrid>
           </template>
           <template v-else>
@@ -1137,10 +1594,12 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
                       <time>{{ turn.startedAt ? new Date(turn.startedAt).toLocaleString() : '—' }}</time>
                     </div>
                     <p class="conversation-prompt"><i class="pi pi-user" aria-hidden="true" /><span>{{ turn.prompt || `[${turn.promptKind ?? '无正文'}]` }}</span></p>
+                    <!-- 触发消息带的图片 / 文件：不显示的话「[photo]」这类卡片看不出用户到底发了什么 -->
+                    <AttachmentStrip :items="turn.attachments ?? []" />
                     <p class="conversation-reply"><i class="pi pi-sparkles" aria-hidden="true" /><span>{{ turn.reply || (turn.error ? `（失败：${turn.error}）` : '（没有回复落盘）') }}</span></p>
                     <small class="conversation-meta">{{ turn.steps }} 步 · {{ turn.toolCalls }} 次工具 · {{ turn.inputTokens }}/{{ turn.outputTokens }} tok · ${{ Number(turn.costUsd || 0).toFixed(4) }}</small>
                   </button>
-                  <div class="conversation-side"><UiButton size="small" variant="outlined" icon="pi pi-code" label="查看详情" @click="openDetail(turn.id)" /></div>
+                  <div class="conversation-side"><UiButton size="small" variant="outlined" icon="pi pi-code" label="查看详情" @click="openDetail(turn.id)" /><UiButton v-if="turn.promptMessageId" size="small" variant="text" severity="danger" icon="pi pi-trash" aria-label="软删除本轮提问" @click="softDeleteMessage(turn.promptMessageId, '本轮提问')" /></div>
                 </div>
                 <div v-if="expandedTurns.has(turn.id)" class="conversation-full">
                   <p class="field-title">提问<small>{{ turn.key }}</small></p><pre v-text="turn.prompt ?? ''" />
@@ -1199,7 +1658,8 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
           </div>
         </section>
         <section v-else-if="active === 'extensions'" key="extensions" class="surface page-surface">
-          <header><div><p class="eyebrow">EXTENSIONS</p><h2>Skills / Plugins / MCP</h2><p>Skill 渐进式披露；Plugin 在 bot 进程里<b>全信任</b>运行，没有沙箱；MCP 工具动态发现。启停即时写库并重扫。</p></div><UiTag :value="`${extensionRows.filter((row) => row.enabled !== 0).length} / ${extensionRows.length} 启用`" :severity="extensionRows.some((row) => row.load_error) ? 'danger' : 'secondary'" /></header>
+          <header><div><p class="eyebrow">EXTENSIONS</p><h2>Skills / Plugins / MCP</h2><p>Skill 渐进式披露；Plugin 在 bot 进程里<b>全信任</b>运行，没有沙箱；MCP 工具动态发现。保存后即时重扫或重连。</p></div><div class="section-actions"><UiButton variant="outlined" label="新建 Skill" icon="pi pi-plus" @click="editSkill()" /><UiButton label="新建 MCP" icon="pi pi-plus" @click="editMcp()" /><UiTag :value="`${extensionRows.filter((row) => row.enabled !== 0).length} / ${extensionRows.length} 启用`" :severity="extensionRows.some((row) => extensionError(row)) ? 'danger' : 'secondary'" /></div></header>
+          <p v-if="mcpMasterOff" class="callout warn"><i class="pi pi-power-off" />MCP 总开关 <code>mcp.enabled</code> 是关的（出厂默认）：下面的 MCP server 存得下也能编辑，但一个都不会连接，工具目录里也不会出现它们的工具。<UiButton size="small" variant="outlined" label="打开总开关" @click="enableMcpMaster" /></p>
           <div class="provider-grid">
             <article v-for="item in extensionRows" :key="`${item.kind}:${item.name}`">
               <div class="provider-head">
@@ -1208,18 +1668,22 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
                   <UiTag :value="extensionStatus(item).label" :severity="extensionStatus(item).severity" />
                 </div>
                 <div class="card-actions">
-                  <UiButton v-if="item.kind !== 'mcp'" variant="text" size="small" :icon="item.enabled === 0 ? 'pi pi-play' : 'pi pi-pause'" :aria-label="item.enabled === 0 ? '启用' : '停用'" :loading="extensionBusy === `${item.kind}:${item.name}`" @click="toggleExtension(item)" />
+                  <UiButton variant="text" size="small" :icon="item.enabled === 0 ? 'pi pi-play' : 'pi pi-pause'" :aria-label="item.enabled === 0 ? '启用' : '停用'" :loading="extensionBusy === `${item.kind}:${item.name}`" @click="toggleExtension(item)" />
                   <UiButton v-if="item.kind !== 'skill'" variant="text" size="small" icon="pi pi-refresh" :aria-label="item.kind === 'mcp' ? '重连' : '重载'" :loading="extensionBusy === `${item.kind}:${item.name}`" @click="reloadExtension(item)" />
+                  <UiButton v-if="item.kind === 'skill'" variant="text" size="small" icon="pi pi-pencil" aria-label="编辑 Skill" @click="editSkill(item)" />
+                  <UiButton v-if="item.kind === 'mcp'" variant="text" size="small" icon="pi pi-pencil" aria-label="编辑 MCP" @click="editMcp(item)" />
                   <UiButton v-if="item.kind === 'skill'" variant="text" size="small" severity="danger" icon="pi pi-trash" aria-label="删除 Skill" @click="removeSkill(item.name)" />
+                  <UiButton v-if="item.kind === 'mcp'" variant="text" size="small" severity="danger" icon="pi pi-trash" aria-label="删除 MCP" @click="removeMcp(item.name)" />
                 </div>
               </div>
               <h3><i :class="EXTENSION_META[item.kind].icon" aria-hidden="true" /> {{ item.name }}</h3>
               <p>{{ extensionSubtitle(item) }}</p>
               <code v-if="extensionError(item)">{{ extensionError(item) }}</code>
+              <div v-if="item.kind === 'mcp' && item.tools?.length" class="cap-tags"><UiTag v-for="entry in item.tools" :key="String(entry.name)" :value="String(entry.name)" severity="info" /></div>
             </article>
             <article v-if="!extensionRows.length" class="empty-card"><i class="pi pi-box" /><h3>暂无扩展</h3><p>把 Skill、Plugin 或 MCP server 加入配置后重载。</p></article>
           </div>
-          <p class="field-note"><i class="pi pi-info-circle" />MCP server 的增删、启停与 transport 配置只在 <code>mcp.servers</code> 里（服务端没有 <code>PATCH /api/mcp/:name</code>），这一页只能重连；Skill 停用后磁盘上的 <code>SKILL.md</code> 仍在，下次扫描不会自动重新启用。</p>
+          <p class="field-note"><i class="pi pi-info-circle" />Skill 的正文与 frontmatter 直接写回 <code>SKILL.md</code>；删除会连附属文件一起永久移除。MCP 的 transport、启停与工具过滤保存到 <code>mcp.servers</code>，随后热重连并刷新工具注册表。</p>
         </section>
         <section v-else-if="active === 'agents'" key="agents" class="surface page-surface"><header><div><p class="eyebrow">AGENT TOPOLOGY</p><h2>子 Agent</h2><p>独立上下文、权限不高于父 Agent，结果全文独立落盘。点任一行编辑，保存即热更新。</p></div><UiButton label="新建 Agent" icon="pi pi-plus" @click="editAgent()" /></header>
           <DataGrid :rows="agents" :columns="COLUMNS.agents" data-key="name" clickable empty="没有配置子 Agent。模型只有在这里配了 agent 才能用 spawn_agent 派发。" @row-click="editAgent">
@@ -1227,6 +1691,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             <template #minRole="{ data }"><UiTag :value="data.minRole" :severity="roleSeverity(data.minRole)" /></template>
             <template #modelAlias="{ data }"><code>{{ data.modelAlias }}</code></template>
             <template #tools="{ data }"><span v-if="data.tools.length" class="agent-tools">{{ data.tools.join(' · ') }}</span><small v-else class="alias-empty">未限定，继承父 agent 的可用工具</small></template>
+            <template #actions="{ data }"><UiButton size="small" variant="outlined" icon="pi pi-play" label="试跑" @click.stop="openAgentDryRun(data)" /></template>
           </DataGrid>
         </section>
         <section v-else-if="active === 'usage'" key="usage" class="surface page-surface"><header><div><p class="eyebrow">USAGE LEDGER</p><h2>用量与成本</h2><p>输入、输出、缓存读写分别计价。</p></div></header>
@@ -1357,7 +1822,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
           </DataGrid>
           <article v-if="traceDetail.length" class="inspector"><header><b>Trace {{ traceDetail[0]?.trace_id }}</b><UiTag :value="`${traceDetail.length} spans`" /></header><ol><li v-for="node in traceDetail" :key="node.id" :style="{ marginLeft: node.parentSpanId ? '24px' : '0' }"><code>{{ node.kind }}</code><span>{{ node.summary }}</span><small>{{ node.durationMs ?? 0 }} ms</small></li></ol></article>
         </section>
-        <section v-else-if="active === 'prompts'" key="prompts" class="surface page-surface"><header><div><p class="eyebrow">PROMPT WORKSPACE</p><h2>提示词编辑与版本</h2><p>每次保存落盘 unified diff；可回滚任意当前可应用的 revision。</p></div></header>
+        <section v-else-if="active === 'prompts'" key="prompts" class="surface page-surface"><header><div><p class="eyebrow">PROMPT WORKSPACE</p><h2>提示词编辑与版本</h2><p>每次保存落盘 unified diff；预览与真实轮次共用同一条 PromptAssembler 路径。</p></div><UiButton label="预览组装" icon="pi pi-eye" @click="openPromptPreview" /></header>
           <div class="prompt-workbench">
             <div class="prompt-cards">
               <button v-for="doc in promptCards" :key="String(doc.id)" type="button" :class="['prompt-card', { active: String(selectedPrompt?.id ?? '') === String(doc.id) }]" @click="inspectPrompt(doc)">
@@ -1380,7 +1845,22 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             <article v-else class="editor-panel empty-card"><i class="pi pi-align-left" aria-hidden="true" /><h3>选一份文档开始编辑</h3><p>每次保存都会落一条 unified diff 版本，可随时回滚。</p></article>
           </div>
         </section>
-        <section v-else-if="active === 'tasks'" key="tasks" class="surface page-surface"><header><div><p class="eyebrow">WORK QUEUE</p><h2>任务与审批</h2><p>在途任务、历史状态与高风险工具批准队列。</p></div></header><div class="dashboard-grid"><article class="surface"><h3>任务</h3><DataGrid :rows="tasks" :columns="COLUMNS.tasks" empty="没有在途或历史任务" /></article><article class="surface"><h3>审批</h3><DataGrid :rows="approvals" :columns="COLUMNS.approvals" empty="没有待审批的调用" /></article></div></section>
+        <section v-else-if="active === 'tasks'" key="tasks" class="surface page-surface"><header><div><p class="eyebrow">WORK QUEUE</p><h2>任务与审批</h2><p>在途任务、历史状态与高风险工具批准队列。</p></div></header><div class="dashboard-grid">
+          <article class="surface"><h3>任务</h3><p class="section-note">任务由 <code>spawn_agent</code> 派发，跟着它所属的那一轮活着。子 agent 没有独立的取消句柄，<b>「取消」取消的是整轮</b> —— 同一轮里的其他子 agent 也会一起停。</p>
+            <DataGrid :rows="tasks" :columns="COLUMNS.tasks" data-key="id" empty="没有在途或历史任务">
+              <template #updated_at="{ data }">{{ new Date(Number(data.updated_at)).toLocaleString() }}</template>
+              <template #actions="{ data }"><UiButton v-if="data.state === 'running'" size="small" variant="outlined" severity="danger" label="取消" :loading="cancellingTurn === data.turn_id" @click="cancelTaskTurn(data)" /></template>
+            </DataGrid></article>
+          <article class="surface"><h3>审批</h3><p class="section-note">命中审批规则的工具会暂停到 <code>approval.ttlMs</code>；批准后原调用继续，拒绝、过期或取消后不会执行。</p>
+            <DataGrid :rows="approvals" :columns="COLUMNS.approvals" data-key="id" empty="没有审批记录">
+              <template #tool_name="{ data }"><code>{{ data.tool_name }}</code><small class="hit-text">{{ data.input_json }}</small></template>
+              <template #risk="{ data }"><UiTag :value="String(data.risk)" :severity="data.risk === 'high' ? 'danger' : data.risk === 'medium' ? 'warn' : 'secondary'" /></template>
+              <template #state="{ data }"><UiTag :value="String(data.state)" :severity="data.state === 'pending' ? 'warn' : data.state === 'approved' ? 'success' : data.state === 'denied' ? 'danger' : 'secondary'" /></template>
+              <template #requested_at="{ data }">{{ new Date(Number(data.requested_at)).toLocaleString() }}</template>
+              <template #actions="{ data }"><div v-if="data.state === 'pending'" class="section-actions"><UiButton size="small" severity="danger" variant="outlined" label="拒绝" :loading="decidingApproval === data.id" @click="decideApproval(data, false)" /><UiButton size="small" label="批准执行" :loading="decidingApproval === data.id" @click="decideApproval(data, true)" /></div><small v-else class="alias-empty">{{ data.decided_by ?? 'system' }}</small></template>
+            </DataGrid>
+          </article>
+        </div></section>
         <section v-else-if="active === 'settings'" key="settings" class="surface page-surface">
           <header><div><p class="eyebrow">CONFIGURATION</p><h2>配置与维护</h2><p>完整合并配置已通过 zod 校验；密钥字段不会回显。</p></div></header>
           <div class="registry-heading">
@@ -1437,7 +1917,13 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
               <UiButton size="small" variant="outlined" label="执行" :loading="maintenanceBusy === item.action" :disabled="Boolean(maintenanceBusy)" @click="runMaintenance(item.action, item.label)" />
             </article>
           </div>
-          <div class="registry-heading"><div><h3>合并后的完整配置</h3><p class="section-note">config.yaml → DB 覆盖层 → 环境变量三层合并的结果，只读。本页与「触发 / 输出 / 配额 / 沙箱 / 工具 / Agent」之外的配置项目前只能改 <code>config/config.yaml</code>（见 <code>docs/21</code> 的缺口清单）。</p></div><UiButton size="small" variant="text" icon="pi pi-history" label="变更历史" @click="openConfigRevisions" /></div>
+          <div class="registry-heading">
+            <div><h3>全部配置</h3><p class="section-note">由 <code>config/config.schema.json</code> 自动生成 —— 控件形态、默认值、取值范围全部取自 schema，不在前端维护第二份清单。热更新项保存即生效，需重启项会在保存后的提示里点名。密钥字段只读（已脱敏）。</p></div>
+            <UiButton size="small" variant="text" icon="pi pi-history" label="变更历史" @click="openConfigRevisions" />
+          </div>
+          <SchemaForm v-if="configSchema" ref="schemaForm" :schema="configSchema.schema" :value="config" :hot-reloadable="configSchema.hotReloadable" :unimplemented="configSchema.unimplemented" :saving="schemaSaving" @save="saveSchemaConfig" />
+          <p v-else class="empty-card"><i class="pi pi-spin pi-spinner" aria-hidden="true" /> 正在加载配置 schema…</p>
+          <div class="registry-heading"><div><h3>合并后的完整配置</h3><p class="section-note">config.yaml → DB 覆盖层 → 环境变量三层合并的结果，只读；上面那张表单改的就是这份 JSON 里的值。</p></div></div>
           <pre class="config-preview" v-text="JSON.stringify(config, null, 2)" />
         </section>
         <section v-else key="fallback" class="surface page-surface"><header><div><p class="eyebrow">{{ currentLabel.toUpperCase() }}</p><h2>{{ currentLabel }}</h2><p>该页读取统一安全 API；写操作必须携带 Session 与 CSRF token，并记录 webui.action 审计。</p></div></header><DataGrid :rows="logs.slice(0, 12)" :columns="COLUMNS.fallback" data-key="id" empty="暂无事件" /></section>
@@ -1617,6 +2103,76 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
         <UiButton variant="text" label="取消" @click="agentDialog = false" /><UiButton :label="agentForm.isNew ? '创建 Agent' : '保存 Agent'" :loading="agentSaving" @click="saveAgent" />
       </template>
     </UiModal>
+    <UiModal v-model:visible="promptPreviewDialog" title="预览完整提示词组装" width="min(1080px, 96vw)">
+      <div class="form-grid">
+        <label class="wide">会话<UiSelect v-model="promptPreviewForm.key" :options="promptPreviewChats" placeholder="选择会话" /></label>
+        <label>有效角色<UiSelect v-model="promptPreviewForm.role" :options="ROLES" /></label>
+        <p class="field-note">工具、Skill、子 Agent 与私有记忆会按这份角色和会话实时筛选。</p>
+      </div>
+      <template v-if="promptPreview">
+        <div class="preview-summary"><b>{{ promptPreview.totalTokens.toLocaleString() }} tokens</b><span>上下文 {{ promptPreview.context.messages }} 条 / {{ promptPreview.context.tokens.toLocaleString() }} tokens</span></div>
+        <div class="prompt-token-bar" :aria-label="`提示词总计 ${promptPreview.totalTokens} tokens`">
+          <span v-for="block in promptPreview.blocks" :key="block.name" :class="{ truncated: block.truncated }" :style="{ flexGrow: Math.max(1, block.tokens) }" :title="`${BLOCK_LABELS[block.name] ?? block.name}: ${block.tokens} tokens`" />
+        </div>
+        <ol class="prompt-preview-blocks">
+          <li v-for="block in promptPreview.blocks" :key="block.name">
+            <details>
+              <summary><code>{{ BLOCK_LABELS[block.name] ?? block.name }}</code><UiTag :value="`${block.tokens} tokens`" :severity="block.truncated ? 'warn' : 'secondary'" /><UiTag v-if="block.truncated" value="已截断" severity="danger" /></summary>
+              <pre v-text="block.content" />
+            </details>
+          </li>
+        </ol>
+      </template>
+      <p v-else class="empty">选择会话和角色后运行组装。这里与真实轮次共用 <code>assembleMainPrompt()</code>，不是上下文占位数据。</p>
+      <template #footer><UiButton variant="text" label="关闭" @click="promptPreviewDialog = false" /><UiButton label="运行组装" icon="pi pi-play" :loading="promptPreviewLoading" @click="runPromptPreview" /></template>
+    </UiModal>
+    <UiModal v-model:visible="skillDialog" :title="skillForm.isNew ? '新建 Skill' : `编辑 Skill ${skillForm.name}`" width="min(900px, 96vw)">
+      <div class="form-grid">
+        <label>名称<input v-model="skillForm.name" :disabled="!skillForm.isNew" placeholder="lowercase-kebab-case"></label>
+        <label>最低角色<UiSelect v-model="skillForm.minRole" :options="ROLES" /></label>
+        <label class="wide">描述<input v-model="skillForm.description" maxlength="500" placeholder="模型在目录里看到的职责摘要"></label>
+        <label>建议模型别名<input v-model="skillForm.model" placeholder="可留空"></label>
+        <label class="switch-line"><input v-model="skillForm.enabled" type="checkbox">启用</label>
+        <label class="wide">允许工具（每行一个）<textarea v-model="skillForm.allowedTools" rows="4" placeholder="留空 = 沿用当前角色全部可用工具" /></label>
+        <label class="wide">SKILL.md 正文<textarea v-model="skillForm.body" rows="14" placeholder="加载 Skill 后注入给模型的完整说明" /></label>
+        <div v-if="!skillForm.isNew" class="wide"><p class="field-title">附属文件</p><div class="cap-tags"><UiTag v-for="file in skillForm.files" :key="file" :value="file" severity="secondary" /><small v-if="!skillForm.files.length" class="alias-empty">无</small></div></div>
+      </div>
+      <template #footer><UiButton v-if="!skillForm.isNew" variant="outlined" severity="danger" icon="pi pi-trash" label="永久删除" @click="removeSkill(skillForm.name)" /><UiButton variant="text" label="取消" @click="skillDialog = false" /><UiButton :label="skillForm.isNew ? '创建 Skill' : '保存 Skill'" :loading="skillSaving" @click="saveSkill" /></template>
+    </UiModal>
+    <UiModal v-model:visible="mcpDialog" :title="mcpForm.isNew ? '新建 MCP server' : `编辑 MCP ${mcpForm.originalName}`" width="min(900px, 96vw)">
+      <div class="form-grid">
+        <label>名称<input v-model="mcpForm.name" :disabled="!mcpForm.isNew" placeholder="server-name"></label>
+        <label>Transport<UiSelect v-model="mcpForm.transport" :options="[{ value: 'stdio', label: 'stdio · 本地进程' }, { value: 'http', label: 'Streamable HTTP' }]" /></label>
+        <label v-if="mcpForm.transport === 'stdio'" class="wide">命令<input v-model="mcpForm.command" placeholder="npx / absolute/path/server"></label>
+        <label v-if="mcpForm.transport === 'stdio'" class="wide">参数（每行一个）<textarea v-model="mcpForm.args" rows="4" /></label>
+        <label v-if="mcpForm.transport === 'stdio'" class="wide">环境变量 JSON<textarea v-model="mcpForm.env" rows="5" placeholder="{ &quot;TOKEN&quot;: &quot;...&quot; }" /></label>
+        <label v-if="mcpForm.transport === 'http'" class="wide">URL<input v-model="mcpForm.url" type="url" placeholder="https://mcp.example.com/mcp"></label>
+        <label v-if="mcpForm.transport === 'http'" class="wide">HTTP Headers JSON<textarea v-model="mcpForm.headers" rows="5" placeholder="{ &quot;Authorization&quot;: &quot;Bearer ...&quot; }" /></label>
+        <label>最低角色<UiSelect v-model="mcpForm.minRole" :options="ROLES" /></label>
+        <label>工具调用超时（ms）<UiNumber v-model="mcpForm.timeoutMs" :min="100" :step="1000" /></label>
+        <label class="wide">工具允许 glob（每行一个）<textarea v-model="mcpForm.toolAllow" rows="3" placeholder="留空 = 全部允许" /></label>
+        <label class="wide">工具拒绝 glob（每行一个）<textarea v-model="mcpForm.toolDeny" rows="3" /></label>
+        <label class="switch-line"><input v-model="mcpForm.enabled" type="checkbox">启用并连接</label>
+      </div>
+      <p v-if="mcpMasterOff" class="callout warn"><i class="pi pi-power-off" />总开关 <code>mcp.enabled</code> 当前是关的：这份配置存得下，但 <code>reconcile</code> 会跳过所有 server，不会真的连接。<UiButton size="small" variant="outlined" label="打开总开关" @click="enableMcpMaster" /></p>
+      <p class="callout warn"><i class="pi pi-exclamation-triangle" />stdio 命令与 HTTP server 都是外部信任边界；只连接你审核过的 server，并用工具 allow/deny 缩小暴露面。</p>
+      <template #footer><UiButton v-if="!mcpForm.isNew" variant="outlined" severity="danger" icon="pi pi-trash" label="删除" @click="removeMcp(mcpForm.originalName)" /><UiButton variant="text" label="取消" @click="mcpDialog = false" /><UiButton label="保存并重连" :loading="mcpSaving" @click="saveMcp" /></template>
+    </UiModal>
+    <UiModal v-model:visible="agentDryRunDialog" :title="`试跑 Agent ${agentDryRunName}`" width="min(980px, 96vw)">
+      <div class="form-grid"><label class="wide">任务<textarea v-model="agentDryRunTask" rows="5" :disabled="agentDryRunRunning" placeholder="这次试跑要完成的具体任务；不会写入任何会话上下文" /></label></div>
+      <p class="callout warn"><i class="pi pi-exclamation-triangle" />试跑会调用真实模型与该 Agent 可用的真实工具，产生实际费用和工具副作用；结果只写 agent_runs / usage ledger，不进入会话上下文。</p>
+      <div v-if="agentDryRunEvents.length" class="dryrun-summary"><b>${{ agentDryRunCost.toFixed(4) }}</b><span>{{ agentDryRunEvents.filter((event) => event.type === 'step').length }} 步</span></div>
+      <ol class="dryrun-events">
+        <li v-for="(event, index) in agentDryRunEvents" :key="index" :class="event.type">
+          <template v-if="event.type === 'step'"><header><UiTag :value="`步骤 ${event.step}`" severity="info" /><code>{{ event.finishReason }}</code></header><pre v-if="event.text" v-text="event.text" /><pre v-if="event.toolCalls.length" v-text="JSON.stringify({ toolCalls: event.toolCalls, toolResults: event.toolResults }, null, 2)" /></template>
+          <template v-else-if="event.type === 'usage'"><header><UiTag :value="`用量 ${event.step}`" severity="secondary" /><span>{{ event.inputTokens }}/{{ event.outputTokens }} tok · ${{ event.costUsd.toFixed(4) }}</span></header></template>
+          <template v-else-if="event.type === 'final'"><header><UiTag value="完成" severity="success" /><code>{{ event.fullRef }}</code></header><pre v-text="event.summary" /></template>
+          <template v-else><header><UiTag value="失败" severity="danger" /><span>{{ event.message }}</span></header></template>
+        </li>
+        <li v-if="agentDryRunRunning" class="empty"><i class="pi pi-spin pi-spinner" /> Agent 正在运行，步骤会持续追加…</li>
+      </ol>
+      <template #footer><UiButton v-if="agentDryRunRunning" severity="danger" variant="outlined" label="取消试跑" @click="cancelAgentDryRun" /><UiButton variant="text" label="关闭" :disabled="agentDryRunRunning" @click="agentDryRunDialog = false" /><UiButton label="开始试跑" icon="pi pi-play" :loading="agentDryRunRunning" :disabled="!agentDryRunTask.trim()" @click="runAgentDryRun" /></template>
+    </UiModal>
     <UiModal v-model:visible="revisionsDialog" title="配置变更历史" width="min(960px, 96vw)">
       <p class="callout"><i class="pi pi-info-circle" />每一次经 WebUI 写入的配置覆盖都记在 <code>config_revisions</code> 里（最近 500 条）。密钥类字段在写入时就已存成 <code>«redacted»</code>。</p>
       <ol class="revision-list wide-list">
@@ -1629,6 +2185,6 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
         <li v-if="!configRevisions.length && !revisionsLoading" class="empty">还没有经 WebUI 写过任何配置覆盖。</li>
       </ol>
     </UiModal>
-    <UiDrawer v-model:visible="mobileMenu" title="LuoLiCore"><nav class="mobile-nav"><button v-for="item in navigation" :key="item[0]" type="button" @click="active = item[0]; mobileMenu = false"><i :class="item[1]" />{{ item[2] }}</button></nav></UiDrawer>
+    <UiDrawer v-model:visible="mobileMenu" title="LuoLiCore"><nav class="mobile-nav"><button v-for="item in navigation" :key="item[0]" type="button" @click="active = item[0]; mobileMenu = false"><i :class="item[1]" />{{ item[2] }}<span v-if="item[0] === 'tasks' && pendingApprovals" class="nav-badge">{{ pendingApprovals }}</span></button></nav></UiDrawer>
   </main>
 </template>

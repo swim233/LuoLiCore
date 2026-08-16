@@ -58,6 +58,17 @@ export class AgentManager {
     this.db.prepare(`INSERT INTO agent_runs(id,turn_id,depth,kind,agent_name,model_alias,effective_role,state,started_at) VALUES (?,?,?,?,?,?,?,?,?)`).run(run.id, turnId, 0, 'main', 'main', modelAlias, role, 'running', Date.now());
     return run;
   }
+  /** WebUI 试跑不创建 turns/context 行，只留一条可审计的 agent_run。 */
+  createDryRun(name: string, task: string, role: Role = 'owner'): { run: AgentRun; definition: AgentDefinition } {
+    const definition = this.#definitions.get(name);
+    if (!definition) throw new Error(`未知子 agent: ${name}`);
+    if (roleRank(role) < roleRank(definition.minRole)) throw new Error('当前用户权限不足以试跑该子 agent');
+    const turnId = `dryrun:${ulid()}`;
+    const run: AgentRun = { id: ulid(), turnId, parentRunId: null, depth: 0, agentName: name, effectiveRole: minRole(role, definition.minRole) };
+    this.db.prepare(`INSERT INTO agent_runs(id,turn_id,depth,kind,agent_name,model_alias,effective_role,task_input,state,started_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?)`).run(run.id, turnId, 0, 'sub', name, definition.modelAlias, run.effectiveRole, task, 'running', Date.now());
+    return { run, definition };
+  }
 
   byId(id: string): AgentRun | null {
     return this.db.prepare('SELECT id,turn_id AS turnId,parent_run_id AS parentRunId,depth,agent_name AS agentName,effective_role AS effectiveRole FROM agent_runs WHERE id=?').get(id) as AgentRun | undefined ?? null;
