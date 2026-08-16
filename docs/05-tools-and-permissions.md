@@ -174,11 +174,25 @@ bash: tool({
 
 | 工具 | minRole | 说明 |
 |---|---|---|
-| `send_message` | limited | 主动追发一条消息（用于分段长回复、发中间产物）；受 `tools.tg.maxExtraMessagesPerTurn`（默认 3）限制 |
-| `send_file` | trusted | 把 workspace 内文件作为文档发出；大小 ≤ 50MB；路径走 jail |
+| `send_message` | limited | 主动追发一条消息（用于分段长回复、发中间产物）；超长按 `output.maxMessageChars` 切分 |
+| `send_file` | trusted | 把 workspace 内文件作为文档发出；路径走 jail；大小 ≤ `tools.tg.maxFileSendMb`（默认 50MB） |
 | `send_photo` | limited | 同上，图片 |
-| `react` | limited | 给消息加 emoji reaction |
-| `pin_message` | trusted | 置顶（需 bot 有权限） |
+| `react` | limited | 给消息加 emoji reaction；**不传 `messageId` 就点触发本轮的那条**（上下文里没有 message id，必填等于每次都要先跑一趟 `read_messages`） |
+| `pin_message` | trusted | 置顶（需 bot 有权限）；`messageId` 同样可省 |
+
+- **三个发送类工具共用一份每轮预算** `tools.tg.maxExtraMessagesPerTurn`（默认 3）。按**调用次数**扣、
+  成功与否都算：上限防的是刷屏，而失败重试同样在刷屏。参数校验失败（越界路径、超大文件、
+  非法 emoji）在扣预算之前就返回，不消耗额度。
+- `react` 的 emoji 先过本地白名单（Bot API 的 `ReactionTypeEmoji` 固定集合），比较前抹掉变体
+  选择符 U+FE0F —— `❤️` 与 Telegram 认的 `❤` 是两个字符串。不在集合里直接返回 `unsupported_emoji`
+  **并附上可选集合**：内核提示词让模型「工具报错只修正参数、最多重试两次」，没有候选它只能瞎猜。
+- 发出去的消息一律回写归档（`direction='out'`、带 `turn_id`）。不写的话模型自己追发的内容
+  在 `read_messages`、WebUI 会话页和下一轮上下文里都不存在。`direction='out'` 让它天然不会被
+  `claimBackground` 当成群背景发言再认领一次。
+- **接线本身是这一族的边界**：`registerBuiltins` 的 `telegram` 依赖（`TelegramToolBridge`，实现在
+  `packages/telegram/src/tools.ts`）不传就等于五个工具全部不进模型的工具目录。它曾经真的没传，
+  而 `TOOL_POLICY ↔ 注册表` 的启动断言只看「注册没注册」，一个字都没报 —— 见 AC-TOOL-024。
+  没有 `BOT_TOKEN` 时必须保持不传：工具进了目录再在调用时失败，比压根不存在更糟。
 
 ### 3.8 Skill / Plugin / MCP 工具
 

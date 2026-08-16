@@ -120,6 +120,10 @@ export interface RuntimeTurnContext {
    * 私聊上下文按红线 10 不带发言人前缀，模型此前连问话人的昵称都看不到。
    */
   initiator?: { name: string | null; username: string | null };
+  /** 触发消息的 Telegram message_id：`react` / `pin_message` 不传 messageId 时就点它。 */
+  triggerTgMessageId?: number;
+  /** 本轮已经追发出去几条消息（`tools.tg.maxExtraMessagesPerTurn` 的计数器，见 05 §3.7）。 */
+  extraMessages?: number;
   /**
    * 本轮的配额预留（`QuotaGuard.reserve` 的返回值，结构化声明是为了不让 shared 反向依赖 core）。
    * 子 agent 必须把花费提交进同一份预留，否则日/月配额永远看不到它们（docs/20 · W-QUOTA-01）。

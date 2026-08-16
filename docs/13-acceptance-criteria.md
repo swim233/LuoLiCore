@@ -191,6 +191,8 @@
 | [ ] AC-TOOL-021 (自动) | `search_messages` 依次传 `名字\|我是\|叫\|谁`、`NEAR(a b)`、`"unclosed`、`***` | 一律正常返回（命中或空），不出现 `fts5: syntax error`；≥3 字的词走 FTS，两字中文词退回 LIKE 且用最长的词而非原串 |
 | [ ] AC-TOOL-022 (自动) | 直接调用 `execute()` 绕过目录：子 agent 调 `memory_write`、或调一个 `available()` 返回 false 的工具 | 一律 `ok:false` 拒绝；`execute()` 的复查集合与 `active()` 的过滤集合一致（docs/20 · W-TOOL-01） |
 | [ ] AC-TOOL-023 | workspace 里建一个指向祖先目录的软链后跑 `glob` / `grep` | 正常返回，不无限递归（已访问目录按 realpath 去重，docs/20 · W-FS-01） |
+| [ ] AC-TOOL-024 (自动) ★ | 依赖齐全时取 owner 的 `activeNames()` | 等于 `TOOL_POLICY` 全集减去子 agent 专用的 `ask_parent`/`report_progress`。**AC-TOOL-001b 只看「注册没注册」**，而 `send_message`/`send_photo`/`send_file`/`react`/`pin_message` 曾经注册着、启动断言全过、却因为 `main.ts` 没传 `telegram` 依赖而永远不进模型的工具目录 —— 模型答「我没有这个功能」是对的。断言必须落在可见性上 |
+| [ ] AC-TOOL-025 (自动) | `react` 不传 messageId；传 `❤️`；传 `🍕`；`send_file` 传 `../../etc/passwd` / 超 `maxFileSendMb` 的文件；一轮内第 4 次 `send_message` | 依次：点触发消息；归一化成 Telegram 认的 `❤` 后发出；`unsupported_emoji` 且**不调用 API**、返回可选集合；`path_outside_workspace`；`file_too_large`；`extra_message_limit_exceeded`。发出去的消息回写归档（`direction='out'`、带 `turn_id`），否则模型自己追发的内容下一轮就从上下文里消失 |
 | [ ] AC-SBX-001 (自动) ★ | `mode=none`，`trusted` 请求 `bash` | 工具**不存在**（fail-closed），不是「执行后被拒」 |
 | [ ] AC-SBX-002 (自动) ★ | `mode=none`，`owner` 请求 `bash` | 可执行（bypassRoles），cwd = workspace |
 | [ ] AC-SBX-003 (自动) ★ | `mode=docker`，`trusted` 执行 `bash` | 容器内执行；`--network=none`；`/workspace` 可写；宿主 `/etc` 不可见 |
@@ -439,7 +441,7 @@
 | **上下文引擎** | | / 34 | | | |
 | Telegram 与准入 | | / 38 | | | |
 | Agent 与 Provider | | / 37 | | | |
-| 工具/沙箱/审批 | | / 49 | | | |
+| 工具/沙箱/审批 | | / 51 | | | |
 | Subagent 与任务 | | / 22 | | | |
 | 记忆 | | / 13 | | | |
 | 日志与成本 | | / 23 | | | |
@@ -447,6 +449,6 @@
 | WebUI | | / 66 | | | |
 | 安全 | | / 15 | | | |
 | 运维 | | / 9 | | | |
-| **合计** | | **/ 353** | | | |
+| **合计** | | **/ 355** | | | |
 
 **整体通过条件**：全部 ★ 项通过 + 非 ★ 项通过率 ≥ 95% + 所有豁免项经需求方书面确认。

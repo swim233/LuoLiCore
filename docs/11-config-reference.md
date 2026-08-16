@@ -54,7 +54,7 @@ NODE_ENV=production
 - 🚧 context / concurrency / cancel：`context.background.showTime` · `context.background.includeNonText` · `context.rebase.markMeta` · `context.cacheCommits` · `concurrency.coalesceSameUserMs` · `cancel.commitPartial`
 - 🚧 prompt / memory：`prompt.includeToolCatalog` · `prompt.runtimeBlock.showQuota` · `prompt.runtimeBlock.showContextWatermark` · `prompt.runtimeBlock.showWorkspace` · `memory.pubWriteRequiresApproval` · `memory.autoApplyCompaction` · `memory.requireSourceTag`
 - 🚧 agent / provider：`agent.maxConcurrentSubagents` · `agent.askArbiter` · `agent.askEscalateToUser` · `agent.progressThrottleMs` · `provider.healthDownCooldownMinutes` · `provider.requestTimeoutMs` · `provider.streamIdleTimeoutMs`
-- 🚧 tools / approval：`tools.fs.allowHostFsForOwner` · `tools.archive.defaultSearchLimit` · `tools.archive.maxSearchLimit` · `tools.archive.defaultReadLimit` · `tools.archive.maxReadLimit` · `tools.tg.maxExtraMessagesPerTurn` · `tools.tg.maxFileSendMb` · `tools.web.summarizeWithAlias` · `tools.web.allowlist` · `tools.web.denylist` · `approval.allowInitiator`（WebUI 是单角色 owner，裁决权下放不到发起人）
+- 🚧 tools / approval：`tools.fs.allowHostFsForOwner` · `tools.archive.defaultSearchLimit` · `tools.archive.maxSearchLimit` · `tools.archive.defaultReadLimit` · `tools.archive.maxReadLimit` · `tools.web.summarizeWithAlias` · `tools.web.allowlist` · `tools.web.denylist` · `approval.allowInitiator`（WebUI 是单角色 owner，裁决权下放不到发起人）
 - 🚧 output / media：`output.flushOnSentence` · `output.parseMode` · `output.typingWhileWorking` · `output.placeholderAfterMs` · `output.maxMentions` · `media.maxImagesPerTurn` · `media.groupDebounceMs` · `media.stickerAsImage` · `media.downloadVoice` · `media.extract.codeExtensions`
 - 🚧 extensions / persistence / logs：`skills.enabled` · `plugins.enabled` · `plugins.watch` · `mcp.connectTimeoutMs` · `db.ftsTokenizer` · `logs.gzipAfterDays` · `logs.redactPatterns`
 - 🚧 quota / WebUI / alerts：`quota.perTurn.maxToolCalls` · `quota.perTurn.maxSubagents` · `quota.perTurn.maxDurationMs` · `quota.onExceeded.notifyOwner` · `quota.warnAtRatio` · `webui.enabled` · `webui.basePath` · `webui.publicUrl` · `alerts.notifyOwner` · `alerts.dedupeMinutes` · `alerts.webhookUrl` · `alerts.on`
@@ -257,8 +257,8 @@ tools:
     defaultReadLimit: 50
     maxReadLimit: 200
   tg:
-    maxExtraMessagesPerTurn: 3
-    maxFileSendMb: 50
+    maxExtraMessagesPerTurn: 3    # 热更新 · 一轮内 send_message/send_photo/send_file 的调用上限
+    maxFileSendMb: 50             # 热更新 · send_file/send_photo 的单文件上限
   web:
     maxResponseBytes: 2097152
     summarizeWithAlias: low       # 热更新 · web_fetch 的 prompt 摘要用哪个别名

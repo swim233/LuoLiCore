@@ -1,10 +1,65 @@
 import { z } from 'zod';
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import type { AgentManager, Config, ContextEngine, FileTools, MemoryStore, ModelRegistry, QuotaGuard, QuotaReservation, Sandbox, SkillLoader, ToolRegistry, UsageLedger, LogSink } from '@luoli/core';
 import { builtinPolicy, runSubAgent, webFetch, webSearch } from '@luoli/core';
 import type { ArchiveRepository } from '@luoli/db';
+import type { ToolExecutionContext } from './registry.js';
 
-export function registerBuiltins(registry: ToolRegistry, dependencies: { db: import('@luoli/db').Sqlite; filesFor: (workspace: string) => FileTools; sandbox: Sandbox; archive: ArchiveRepository; context: ContextEngine; memory: MemoryStore; skills: SkillLoader; agents: AgentManager; models: ModelRegistry; ledger: UsageLedger; log: LogSink; quota?: QuotaGuard; telegram?: { sendMessage(chatId: string, text: string): Promise<unknown>; sendPhoto(chatId: string, photo: string, caption?: string): Promise<unknown>; sendFile(chatId: string, file: string, caption?: string): Promise<unknown>; react(chatId: string, messageId: number, emoji: string): Promise<unknown>; pin(chatId: string, messageId: number): Promise<unknown> }; pubWriteMinRole: 'blocked' | 'limited' | 'trusted' | 'owner'; maxWebBytes: number; maxAsksPerRun?: number; askTimeoutMs?: number; webSearch?: { provider: '' | 'brave' | 'serper' | 'tavily'; apiKey: string } }): void {
+/** 一次投递的落点。thread 必须跟着走，否则话题群里的追发会掉到「General」去。 */
+export interface TelegramTarget {
+  chatId: string;
+  threadId: number | null;
+  turnId: string;
+}
+
+/**
+ * Telegram 侧工具的适配层契约（实现在 `packages/telegram/src/tools.ts`）。core 只负责本轮语义
+ * ——jail 解析、大小与条数上限、messageId 缺省——真正的 API 调用、emoji 白名单、发出去之后
+ * 写回归档都在适配层。
+ *
+ * 依赖里这一项**故意是必填的**（没有 Telegram 入口就显式传 `null`）：它曾经是可选的，于是
+ * `main.ts` 少传一个 key 就让五个工具永久消失 —— `available()` 判的就是它在不在，而
+ * `TOOL_POLICY ↔ 注册表` 的启动断言只看「注册没注册」，一个字都没报，模型答「我没有这个功能」。
+ * 写成必填之后，同样的遗漏是一个编译错误。
+ */
+export interface TelegramToolBridge {
+  sendMessage(target: TelegramTarget, text: string): Promise<object>;
+  sendPhoto(target: TelegramTarget, absolutePath: string, caption?: string): Promise<object>;
+  sendFile(target: TelegramTarget, absolutePath: string, caption?: string): Promise<object>;
+  react(target: TelegramTarget, messageId: number, emoji: string): Promise<object>;
+  pin(target: TelegramTarget, messageId: number): Promise<object>;
+}
+
+const target = (context: ToolExecutionContext): TelegramTarget =>
+  ({ chatId: context.turn.chatId, threadId: context.turn.threadId, turnId: context.turn.turnId });
+/** 取本轮那份合并后的配置：运维在 WebUI 改了上限，下一轮就该生效（`tools.tg` 在热更新白名单里）。 */
+const tgLimits = (context: ToolExecutionContext): Config['tools']['tg'] => (context.turn.config as Readonly<Config>).tools.tg;
+
+/**
+ * 追发预算按**调用次数**扣，成功与否都算：上限防的是刷屏，而失败重试同样在刷屏。
+ * 计数挂在 turn 上而不是模块级 Map —— 轮次对象随轮次消亡，不需要谁去清理。
+ */
+function claimExtraMessage(context: ToolExecutionContext): { ok: false; error: string; hint: string } | null {
+  const max = tgLimits(context).maxExtraMessagesPerTurn;
+  const used = context.turn.extraMessages ?? 0;
+  if (used >= max) return { ok: false, error: 'extra_message_limit_exceeded', hint: `本轮最多追发 ${max} 条（tools.tg.maxExtraMessagesPerTurn）；正文请直接写进回复。` };
+  Object.assign(context.turn, { extraMessages: used + 1 });
+  return null;
+}
+
+/** workspace 内的绝对路径 + 大小闸门。越界、不存在、超限三种都要在调 API 之前变成 `ok:false`。 */
+function resolveOutgoingFile(context: ToolExecutionContext, files: FileTools, path: string): { ok: false; error: string; hint?: string } | { ok: true; absolute: string } {
+  let absolute: string;
+  try { absolute = files.resolve(path); }
+  catch (error) { return { ok: false, error: error instanceof Error ? error.message : 'path_invalid', hint: '只能发工作目录内的文件。' }; }
+  if (!files.exists(path)) return { ok: false, error: 'file_not_found', hint: path };
+  const bytes = statSync(absolute).size;
+  const limit = tgLimits(context).maxFileSendMb * 1024 * 1024;
+  if (bytes > limit) return { ok: false, error: 'file_too_large', hint: `${(bytes / 1024 / 1024).toFixed(1)}MB 超过 ${tgLimits(context).maxFileSendMb}MB 上限（tools.tg.maxFileSendMb）` };
+  return { ok: true, absolute };
+}
+
+export function registerBuiltins(registry: ToolRegistry, dependencies: { db: import('@luoli/db').Sqlite; filesFor: (workspace: string) => FileTools; sandbox: Sandbox; archive: ArchiveRepository; context: ContextEngine; memory: MemoryStore; skills: SkillLoader; agents: AgentManager; models: ModelRegistry; ledger: UsageLedger; log: LogSink; quota?: QuotaGuard; telegram: TelegramToolBridge | null; pubWriteMinRole: 'blocked' | 'limited' | 'trusted' | 'owner'; maxWebBytes: number; maxAsksPerRun?: number; askTimeoutMs?: number; webSearch?: { provider: '' | 'brave' | 'serper' | 'tavily'; apiKey: string } }): void {
   registry.register({ name: 'read_file', description: '读取工作目录或 skill:// 资源，支持 offset/limit 分页。', inputSchema: z.object({ path: z.string(), offset: z.number().int().nonnegative().optional(), limit: z.number().int().positive().optional() }), policy: builtinPolicy('read_file'), sourcePriority: 100, untrustedOutput: true,
     execute: (input, context) => {
       if (!input.path.startsWith('skill://')) return dependencies.filesFor(context.workspace).read(input.path, input.offset, input.limit);
@@ -129,16 +184,32 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
     execute: (input, context) => { Object.assign(context.turn, { modelAliasOverride: input.alias }); return { ok: true, alias: input.alias }; } });
   registry.register({ name: 'web_search', description: '搜索公开网络。', inputSchema: z.object({ query: z.string(), limit: z.number().int().min(1).max(10).default(5) }), policy: builtinPolicy('web_search'), sourcePriority: 100, untrustedOutput: true,
     available: () => Boolean(dependencies.webSearch?.provider && dependencies.webSearch.apiKey), execute: (input, context) => webSearch(dependencies.webSearch!.provider as 'brave' | 'serper' | 'tavily', dependencies.webSearch!.apiKey, input.query, input.limit ?? 5, context.turn.abortSignal) });
-  registry.register({ name: 'send_message', description: '向当前会话发送附加消息。', inputSchema: z.object({ text: z.string() }), policy: builtinPolicy('send_message'), sourcePriority: 100,
-    available: () => Boolean(dependencies.telegram), execute: async (input, context) => { await dependencies.telegram!.sendMessage(context.turn.chatId, input.text); return { ok: true }; } });
-  registry.register({ name: 'send_photo', description: '向当前会话发送图片。', inputSchema: z.object({ photo: z.string(), caption: z.string().optional() }), policy: builtinPolicy('send_photo'), sourcePriority: 100,
-    available: () => Boolean(dependencies.telegram), execute: async (input, context) => { await dependencies.telegram!.sendPhoto(context.turn.chatId, input.photo, input.caption); return { ok: true }; } });
-  registry.register({ name: 'react', description: '为当前会话消息添加 reaction。', inputSchema: z.object({ messageId: z.number().int().positive(), emoji: z.string() }), policy: builtinPolicy('react'), sourcePriority: 100,
-    available: () => Boolean(dependencies.telegram), execute: async (input, context) => { await dependencies.telegram!.react(context.turn.chatId, input.messageId, input.emoji); return { ok: true }; } });
-  registry.register({ name: 'send_file', description: '向当前会话发送文件。', inputSchema: z.object({ file: z.string(), caption: z.string().optional() }), policy: builtinPolicy('send_file'), sourcePriority: 100,
-    available: () => Boolean(dependencies.telegram), execute: async (input, context) => { await dependencies.telegram!.sendFile(context.turn.chatId, input.file, input.caption); return { ok: true }; } });
-  registry.register({ name: 'pin_message', description: '置顶当前会话消息。', inputSchema: z.object({ messageId: z.number().int().positive() }), policy: builtinPolicy('pin_message'), sourcePriority: 100,
-    available: () => Boolean(dependencies.telegram), execute: async (input, context) => { await dependencies.telegram!.pin(context.turn.chatId, input.messageId); return { ok: true }; } });
+  registry.register({ name: 'send_message', description: '向当前会话追发一条消息（正文请直接写进回复，这个工具用于分段或中间产物）。', inputSchema: z.object({ text: z.string().min(1) }), policy: builtinPolicy('send_message'), sourcePriority: 100,
+    available: () => Boolean(dependencies.telegram), execute: async (input, context) => claimExtraMessage(context) ?? dependencies.telegram!.sendMessage(target(context), input.text) });
+  registry.register({ name: 'send_photo', description: '把工作目录内的图片发到当前会话。', inputSchema: z.object({ photo: z.string(), caption: z.string().optional() }), policy: builtinPolicy('send_photo'), sourcePriority: 100,
+    available: () => Boolean(dependencies.telegram), execute: async (input, context) => {
+      const file = resolveOutgoingFile(context, dependencies.filesFor(context.workspace), input.photo);
+      if (!file.ok) return file;
+      return claimExtraMessage(context) ?? dependencies.telegram!.sendPhoto(target(context), file.absolute, input.caption);
+    } });
+  registry.register({ name: 'react', description: '给消息加 emoji reaction；不填 messageId 就点触发本轮的那条消息。', inputSchema: z.object({ messageId: z.number().int().positive().optional(), emoji: z.string() }), policy: builtinPolicy('react'), sourcePriority: 100,
+    available: () => Boolean(dependencies.telegram), execute: async (input, context) => {
+      const messageId = input.messageId ?? context.turn.triggerTgMessageId;
+      if (!messageId) return { ok: false, error: 'message_id_required', hint: '本轮没有触发消息，请先用 read_messages 取到 tgMessageId。' };
+      return dependencies.telegram!.react(target(context), messageId, input.emoji);
+    } });
+  registry.register({ name: 'send_file', description: '把工作目录内的文件作为文档发到当前会话。', inputSchema: z.object({ file: z.string(), caption: z.string().optional() }), policy: builtinPolicy('send_file'), sourcePriority: 100,
+    available: () => Boolean(dependencies.telegram), execute: async (input, context) => {
+      const file = resolveOutgoingFile(context, dependencies.filesFor(context.workspace), input.file);
+      if (!file.ok) return file;
+      return claimExtraMessage(context) ?? dependencies.telegram!.sendFile(target(context), file.absolute, input.caption);
+    } });
+  registry.register({ name: 'pin_message', description: '置顶当前会话的消息；不填 messageId 就置顶触发本轮的那条。', inputSchema: z.object({ messageId: z.number().int().positive().optional() }), policy: builtinPolicy('pin_message'), sourcePriority: 100,
+    available: () => Boolean(dependencies.telegram), execute: async (input, context) => {
+      const messageId = input.messageId ?? context.turn.triggerTgMessageId;
+      if (!messageId) return { ok: false, error: 'message_id_required', hint: '本轮没有触发消息，请先用 read_messages 取到 tgMessageId。' };
+      return dependencies.telegram!.pin(target(context), messageId);
+    } });
   registry.register({ name: 'web_fetch', description: '获取公开 HTTP/HTTPS 页面；拒绝私网和元数据地址。', inputSchema: z.object({ url: z.string().url() }), policy: builtinPolicy('web_fetch'), sourcePriority: 100, untrustedOutput: true,
     execute: (input, context) => webFetch(input.url, dependencies.maxWebBytes, context.turn.abortSignal) });
 }
