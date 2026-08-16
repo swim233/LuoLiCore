@@ -6,7 +6,7 @@ import argon2 from 'argon2';
 import { Hono } from 'hono';
 import { serveStatic } from '@hono/node-server/serve-static';
 import type { AgentManager, Config, ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, PluginManager, PromptDocuments, ProviderStore, Sandbox, SkillLoader, TurnRegistry } from '@luoli/core';
-import { ALIAS_NAME_PATTERN, HOT_RELOADABLE_CONFIG_KEYS, KNOWN_UNIMPLEMENTED_CONFIG_KEYS, TOOL_POLICY, aliasSettingsSchema, checkWakeword, configSchema as runtimeConfigSchema, perChatConfig, probeProvider, rejectedWakewords } from '@luoli/core';
+import { ALIAS_NAME_PATTERN, HOT_RELOADABLE_CONFIG_KEYS, KNOWN_UNIMPLEMENTED_CONFIG_KEYS, TOOL_POLICY, aliasSettingsSchema, checkWakeword, configSchema as runtimeConfigSchema, perChatConfig, probeProvider, quotaBucket, rejectedWakewords } from '@luoli/core';
 import type { CatalogIndex, ModelMetadata, ProviderProbe } from '@luoli/core';
 import type { ArchiveRepository, OperationsRepository, PrincipalRepository, Sqlite } from '@luoli/db';
 import { assignDotted } from '@luoli/shared';
@@ -698,8 +698,71 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     return new Response(JSON.stringify(value, null, 2), { headers: { 'content-type': 'application/json; charset=utf-8', 'content-disposition': contentDisposition(`${row.kind}-${ctx.req.param('id')}.json`) } });
   });
   app.get('/api/usage', (ctx) => ctx.json({ ok: true, data: dependencies.db.prepare('SELECT * FROM usage_ledger ORDER BY ts DESC LIMIT 1000').all() }));
-  app.put('/api/quota', (ctx) => ctx.json(apiError('not_implemented', '配额配置端点尚不可用', 500).body, 500));
-  app.post('/api/quota/reset', (ctx) => { const changes = dependencies.db.prepare('DELETE FROM quota_counters').run().changes; return ctx.json({ ok: true, data: { changes } }); });
+  const QUOTA_UNIMPLEMENTED = KNOWN_UNIMPLEMENTED_CONFIG_KEYS.filter((key) => key.startsWith('quota.'));
+  interface CounterRow { scope: 'global' | 'chat' | 'user'; subject: string; window: 'day' | 'month'; bucket: string; costUsd: number; reservedUsd: number; turns: number; updatedAt: number }
+  /** 「花了多少」在 quota_counters 里，「上限是多少」在配置里，两边只有 (scope,window) 能对上。
+   *  分开返回等于让界面自己再实现一遍 bot.ts 的取值规则（含 byRole 覆盖），所以在这里就合成好。 */
+  app.get('/api/quota', (ctx) => {
+    const config = currentConfig();
+    const now = new Date();
+    const buckets = { day: quotaBucket(now, config.general.timezone, 'day'), month: quotaBucket(now, config.general.timezone, 'month') };
+    const rows = dependencies.db.prepare(`SELECT scope,subject,window,bucket,cost_usd AS costUsd,reserved_usd AS reservedUsd,turns,updated_at AS updatedAt
+      FROM quota_counters ORDER BY bucket DESC,scope,subject LIMIT 500`).all() as CounterRow[];
+    const byRole = config.quota.perUser.byRole;
+    const scopedRoles = Object.keys(byRole).length > 0;
+    // 一次取回而不是逐行点查：这一页会被反复刷新，500 行 × 一条 SELECT 是白烧的 IO。
+    const principals = new Map((dependencies.db.prepare('SELECT kind,tg_id AS tgId,role,display_name AS displayName,username FROM principals')
+      .all() as Array<{ kind: string; tgId: string; role: string; displayName: string | null; username: string | null }>).map((entry) => [`${entry.kind}:${entry.tgId}`, entry]));
+    const counters = rows.map((row) => {
+      const principal = row.scope === 'global' ? null : principals.get(`${row.scope}:${row.subject}`) ?? null;
+      const base = row.scope === 'global' ? config.quota.global : row.scope === 'chat' ? config.quota.perChat : config.quota.perUser;
+      const override = row.scope === 'user' && principal ? byRole[principal.role] : undefined;
+      const limit = (row.scope === 'user' ? override?.[row.window === 'day' ? 'daily' : 'monthly'] : undefined) ?? base[row.window === 'day' ? 'daily' : 'monthly'];
+      // 有效角色是 min(用户角色, 会话角色)：这里只看得到用户自己那一档，配了 byRole 时实际生效的可能更低。
+      return { ...row, current: buckets[row.window] === row.bucket, limit, limitApprox: row.scope === 'user' && scopedRoles,
+        role: principal?.role ?? null, label: principal?.displayName ?? null, username: principal?.username ?? null };
+    });
+    // 缺定价的模型花费按 0 记账 —— 配额页把限额说得再准，这些轮次也不会被计进去。
+    const unpriced = dependencies.db.prepare('SELECT provider_id AS providerId,model_id AS modelId FROM models WHERE enabled=1 AND (price_in IS NULL OR price_out IS NULL) ORDER BY provider_id,model_id LIMIT 20').all() as Array<{ providerId: string; modelId: string }>;
+    return ctx.json({ ok: true, data: { quota: config.quota, timezone: config.general.timezone, buckets, counters,
+      unpriced, unpricedTotal: Number(dependencies.db.prepare('SELECT COUNT(*) FROM models WHERE enabled=1 AND (price_in IS NULL OR price_out IS NULL)').pluck().get()),
+      unimplemented: QUOTA_UNIMPLEMENTED } });
+  });
+  // body 是相对 quota 的点分键（`global.daily`），与 PUT /api/sandbox 一致；校验与审计同 PUT /api/config。
+  app.put('/api/quota', async (ctx) => {
+    const body = await ctx.req.json<Record<string, unknown>>().catch(() => null);
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return ctx.json(apiError('invalid_body', 'body 必须是点分键对象').body, 400);
+    const dotted = Object.fromEntries(Object.entries(body).map(([key, value]) => [`quota.${key}`, value]));
+    if (!Object.keys(dotted).length) return ctx.json({ ok: true, data: { keys: [] } });
+    const merged = mergeDotted(currentConfig(), dotted);
+    if (!merged.ok) return ctx.json(invalidKey(merged).body, 400);
+    const parsed = runtimeConfigSchema.safeParse(merged.value);
+    if (!parsed.success) return ctx.json({ ok: false, error: { code: 'invalid_config', message: '配额配置校验失败', details: parsed.error.issues.map((issue) => ({ path: issue.path.join('.'), message: issue.message })) } }, 400);
+    const now = Date.now();
+    const write = dependencies.db.prepare("INSERT INTO config_kv(key,value_json,updated_at,updated_by) VALUES (?,?,?,'webui') ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at,updated_by=excluded.updated_by");
+    const revision = dependencies.db.prepare('INSERT INTO config_revisions(id,ts,actor,key,old_json,new_json) VALUES (?,?,?,?,?,?)');
+    dependencies.db.transaction(() => {
+      for (const [key, value] of Object.entries(dotted)) {
+        const previous = dependencies.db.prepare('SELECT value_json AS value FROM config_kv WHERE key=?').get(key) as { value: string } | undefined;
+        write.run(key, JSON.stringify(value), now);
+        revision.run(randomBytes(16).toString('hex'), now, 'webui', key, previous?.value ?? null, JSON.stringify(value));
+      }
+    })();
+    dependencies.events.emit('config.changed', { keys: Object.keys(dotted) });
+    return ctx.json({ ok: true, data: { keys: Object.keys(dotted) } });
+  });
+  // 不带 body 仍然是「全部清零」（旧行为）；带 scope/subject/window/bucket 时只删那一行 ——
+  // 一个人撞满了当日额度，没有理由把全局与其他所有人的当月计数一起抹掉。
+  app.post('/api/quota/reset', async (ctx) => {
+    const body = await ctx.req.json<Record<string, unknown>>().catch((): Record<string, unknown> => ({}));
+    const filters: Array<[string, string]> = [];
+    for (const field of ['scope', 'subject', 'window', 'bucket'] as const) { const value = body[field]; if (typeof value === 'string' && value) filters.push([field, value]); }
+    if (filters.length && !filters.some(([field]) => field === 'scope')) return ctx.json(apiError('invalid_filter', '按条件重置时必须给出 scope').body, 400);
+    const where = filters.length ? ` WHERE ${filters.map(([field]) => `${field}=?`).join(' AND ')}` : '';
+    const changes = dependencies.db.prepare(`DELETE FROM quota_counters${where}`).run(...filters.map(([, value]) => value)).changes;
+    dependencies.log.event({ level: 'info', kind: 'webui.action', summary: 'quota counters reset', data: { filters: Object.fromEntries(filters), changes } });
+    return ctx.json({ ok: true, data: { changes } });
+  });
   app.get('/api/tasks', (ctx) => ctx.json({ ok: true, data: dependencies.db.prepare('SELECT * FROM tasks ORDER BY updated_at DESC LIMIT 500').all() }));
   app.post('/api/maintenance/:action', (ctx) => { const action = ctx.req.param('action'); if (action === 'gc-files') return ctx.json(apiError('not_implemented', '孤儿文件清理尚不可用', 500).body, 500); const result = action === 'backup' ? dependencies.maintenance.backup() : action === 'vacuum' ? (dependencies.maintenance.vacuum(), 'ok') : action === 'cleanup-logs' ? dependencies.maintenance.cleanup() : action === 'rebuild-fts' ? (dependencies.maintenance.rebuildFts(), 'ok') : null; return result === null ? ctx.json(apiError('unknown_action', '未知维护操作', 404).body, 404) : ctx.json({ ok: true, data: result }); });
   app.get('/api/events', (ctx) => { const stream = new ReadableStream({ start(controller) { const encoder = new TextEncoder(); controller.enqueue(encoder.encode(': connected\n\n')); const unsubscribe = dependencies.events.subscribe((event) => controller.enqueue(encoder.encode(`event: ${event.type}\ndata: ${JSON.stringify(event.data)}\n\n`))); const heartbeat = setInterval(() => controller.enqueue(encoder.encode(': ping\n\n')), 20_000); ctx.req.raw.signal.addEventListener('abort', () => { clearInterval(heartbeat); unsubscribe(); controller.close(); }, { once: true }); } }); return new Response(stream, { headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' } }); });

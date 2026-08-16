@@ -16,7 +16,14 @@ function harness() {
 describe('documented API surface', () => {
   it('serves read endpoints and audits every authenticated write', async () => {
     const { app, db, headers } = harness(); const cookie = { cookie: headers.cookie };
-    for (const path of ['/api/dashboard','/api/chats','/api/messages','/api/providers','/api/models','/api/aliases','/api/principals','/api/tools','/api/sandbox','/api/skills','/api/plugins','/api/mcp','/api/agents','/api/logs','/api/usage','/api/quota','/api/tasks','/api/approvals','/api/config','/api/config/schema','/api/config/revisions']) expect((await app.request(path, { headers: cookie })).status, path).toBe(200);
+    // 只断言 200 是条假绿灯：没有注册的 /api/* 会掉进 SPA fallback，拿到 200 + index.html。
+    // `GET /api/quota` 就这样「通过」了很久，实际上端点根本不存在。必须连 JSON 信封一起断言。
+    for (const path of ['/api/dashboard','/api/chats','/api/messages','/api/providers','/api/models','/api/aliases','/api/principals','/api/tools','/api/sandbox','/api/skills','/api/plugins','/api/mcp','/api/agents','/api/logs','/api/usage','/api/quota','/api/tasks','/api/approvals','/api/config','/api/config/schema','/api/config/revisions']) {
+      const read = await app.request(path, { headers: cookie });
+      expect(read.status, path).toBe(200);
+      expect(read.headers.get('content-type'), path).toMatch(/application\/json/);
+      expect((await read.json() as { ok: boolean }).ok, path).toBe(true);
+    }
     const response = await app.request('/api/quota/reset', { method: 'POST', headers }); expect(response.status).toBe(200);
     expect(db.prepare("SELECT COUNT(*) FROM log_events WHERE kind='webui.action' AND summary='POST /api/quota/reset'").pluck().get()).toBe(1);
     closeDatabase(db);
