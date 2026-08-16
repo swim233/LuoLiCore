@@ -6,7 +6,30 @@ const nullableMoney = z.number().nonnegative().nullable();
 const ianaTimezone = z.string().refine((zone) => {
   try { new Intl.DateTimeFormat('en-US', { timeZone: zone }); return true; } catch { return false; }
 }, { message: '不是合法的 IANA 时区名' });
+/**
+ * 真正会跟着 `config.changed` 生效的键（前缀匹配）。判据只有一个：**运行时读的是 getter
+ * （`configStore.snapshot()` / `turn.config` / bot.ts 的 config Proxy），而不是启动时那份快照**。
+ * doc 11 里标 `热更新` 的键必须落在这个白名单里，`tests/config.test.ts` 逐条断言 ——
+ * 上一轮有十组键标着热更新而实际冻在启动时，其中三组还是「出事时运维会去点的那个开关」
+ * （docs/20 · W-CFG-02）。往这里加键之前，先确认那条读取路径真的每次都取新值。
+ */
+export const HOT_RELOADABLE_CONFIG_KEYS = [
+  'telegram.allowBots', 'telegram.strictCommandSuffix',
+  'access.defaultUserRole', 'access.defaultChatRole', 'access.archiveBlocked',
+  'trigger',
+  'context.limit', 'context.hardCapRatio', 'context.background', 'context.rebase.injectNotice', 'context.tokenRatioAlpha',
+  'concurrency.turnTimeoutMs',
+  'prompt.maxTokens',
+  'agent.main', 'agent.agents',
+  'provider.maxRetries', 'provider.retryBaseMs', 'provider.retryMaxMs',
+  'tools.maxRegistered', 'tools.maxCallsPerTurn', 'tools.maxConsecutiveErrors', 'tools.overrides', 'tools.exec',
+  'approval.enabled', 'approval.rules', 'approval.skipForOwner', 'approval.rememberWithinTurn',
+  'sandbox', 'mcp', 'quota', 'logs.level',
+] as const;
+
 export const KNOWN_UNIMPLEMENTED_CONFIG_KEYS = [
+  // 运行时从来没有读过它：doc 11 说「仅用于日志与 WebUI 标题」，但两处都没接线（docs/20 · W-CFG-02）。
+  'general.name',
   'general.locale',
   'telegram.dropPendingOnStart',
   'telegram.webhook.url',
@@ -14,6 +37,8 @@ export const KNOWN_UNIMPLEMENTED_CONFIG_KEYS = [
   'telegram.webhook.secretToken',
   'telegram.notifyEdits',
   'trigger.cooldownMsPerUser',
+  // 编辑消息永远不开新轮次（docs/20 · W-TG-05）。开关留着是为了未来兼容，但当前一律按背景消息归档。
+  'trigger.ignoreEditedAsTrigger',
   'context.background.showUsername',
   'context.background.showTime',
   'context.background.includeNonText',
@@ -46,6 +71,9 @@ export const KNOWN_UNIMPLEMENTED_CONFIG_KEYS = [
   'tools.web.allowlist',
   'tools.web.denylist',
   'approval.allowInitiator',
+  // 审批没有可用的交互通道（Telegram 那半从未实现），命中规则的调用当场被拒，
+  // 因此没有等待窗口、也没有 TTL 可言（docs/20 · W-APPR-01）。
+  'approval.ttlMs',
   'output.flushOnSentence',
   'output.parseMode',
   'output.typingWhileWorking',
@@ -134,7 +162,7 @@ export const configSchema = z.object({
     exec: z.object({ defaultTimeoutMs: z.number().int().positive().default(60_000), maxTimeoutMs: z.number().int().positive().default(300_000), maxOutputBytes: z.number().int().positive().default(65_536) }).default({}),
     archive: z.object({ defaultSearchLimit: z.number().int().positive().default(20), maxSearchLimit: z.number().int().positive().default(100), defaultReadLimit: z.number().int().positive().default(50), maxReadLimit: z.number().int().positive().default(200) }).default({}),
     tg: z.object({ maxExtraMessagesPerTurn: z.number().int().nonnegative().default(3), maxFileSendMb: z.number().positive().default(50) }).default({}),
-    web: z.object({ maxResponseBytes: z.number().int().positive().default(2_097_152), summarizeWithAlias: z.string().default('low'), allowlist: z.array(z.string()).default([]), denylist: z.array(z.string()).default(['*.local', '*.internal']), searchProvider: z.enum(['', 'brave', 'serper', 'tavily']).default(''), searchApiKeyRef: z.string().default('') }).default({}),
+    web: z.object({ maxResponseBytes: z.number().int().positive().default(2_097_152), summarizeWithAlias: z.string().default('low'), allowlist: z.array(z.string()).default([]), denylist: z.array(z.string()).default(['*.local', '*.internal']), searchProvider: z.enum(['', 'brave', 'serper', 'tavily']).default(''), searchApiKey: z.string().default('') }).default({}),
   }).default({}),
   sandbox: z.object({ mode: z.enum(['none', 'jail', 'docker']).default('docker'), bypassRoles: z.array(role).default(['owner']), image: z.string().default('luoli-sandbox:latest'), network: z.enum(['none', 'bridge']).default('none'), memoryMb: z.number().positive().default(512), cpus: z.number().positive().default(1), pidsLimit: z.number().int().positive().default(128), readOnlyRoot: z.boolean().default(true), tmpfsMb: z.number().positive().default(64), workspaceDir: z.string().default('./data/workspace'), hostWorkspaceDir: z.string().default(''), dockerBin: z.string().default('docker') }).default({}),
   approval: z.object({ enabled: z.boolean().default(true), ttlMs: z.number().int().positive().default(180_000), skipForOwner: z.boolean().default(true), allowInitiator: z.boolean().default(false), rememberWithinTurn: z.boolean().default(true), rules: z.array(z.record(z.unknown())).default([]) }).default({}),

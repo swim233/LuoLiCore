@@ -99,9 +99,15 @@ ctx.access = { userId, chatId, userRole: uRole, chatRole: cRole,
 > 对应决策 D5。
 
 ```ts
-type TriggerReason = 'private' | 'mention' | 'reply' | 'command' | 'wakeword';
+type TriggerReason = 'private' | 'mention' | 'reply' | 'command' | 'wakeword' | 'ask';
 
 function matchTrigger(ctx, cfg): TriggerReason | null {
+  // 0) 命令要先判：私聊分支排在它前面的话，/new 会被当成普通对话（既开一轮，又跑 handler）。
+  //    只认 entities type='bot_command' 且 offset=0、名字在 HANDLED_COMMANDS 里、@后缀匹配或缺省。
+  const name = commandNameOf(ctx.message, bot.botInfo, cfg.telegram.strictCommandSuffix);
+  if (cfg.trigger.command && name === 'ask') return 'ask';            // 唯一进 AI 流程的命令
+  if (name && HANDLED_COMMANDS.has(name)) return cfg.trigger.command ? 'command' : null;
+
   if (ctx.access.isPrivate) return cfg.trigger.private ? 'private' : null;
 
   // 1) @提及：entities 中 type='mention' 且值 === '@'+botUsername
@@ -110,9 +116,6 @@ function matchTrigger(ctx, cfg): TriggerReason | null {
 
   // 2) 回复 bot 的消息
   if (cfg.trigger.reply && ctx.message?.reply_to_message?.from?.id === bot.botInfo.id) return 'reply';
-
-  // 3) bot 命令（entities type='bot_command' 且在 offset 0，命令属于我们且 @后缀匹配或缺省）
-  if (cfg.trigger.command && isOurCommand(ctx.message, bot.botInfo)) return 'command';
 
   // 4) 唤醒词 / 正则。整个 cfg 先经 perChatConfig(cfg, key) 合并，会话级 trigger 覆盖整体替换
   //    同名的全局值（不是并集），所以上面三步用的也是合并后的开关。
@@ -303,9 +306,9 @@ media:
 
 | 命令 | Scope | minRole | 行为 |
 |---|---|---|---|
-| `/start` | private | limited | 欢迎语 + 能力简介 + 当前权限 |
+| `/start` | all | limited | 欢迎语 + 能力简介 + 当前权限 |
 | `/help` | all | limited | 命令列表（按角色过滤） |
-| `/ask <text>` | group | limited | 显式触发（等价 @bot） |
+| `/ask <text>` | all | limited | 显式触发（等价 @bot）。**唯一进 AI 流程的命令**，`matchTrigger` 为它返回 `'ask'` 而不是 `'command'`，因此不在 `HANDLED_COMMANDS` 里 |
 | `/new` | all | limited | 开新话题（窗口清零，历史保留） |
 | `/undo` | all | limited | 撤销上一轮（done 回退一个 commit） |
 | `/ctx` | all | limited | 上下文状态；`/ctx export` 导出（owner） |
@@ -319,15 +322,25 @@ media:
 | `/grant <user\|chat> <id> <role>` | all | owner | 授权 |
 | `/revoke <id>` | all | owner | 降为 blocked |
 | `/usage [today\|month]` | all | limited | 本会话/本人用量；owner 看全局 |
-| `/webui` | private | owner | 返回带一次性 token 的 WebUI 登录链接（可选，见 [09 §2.3](./09-webui.md#23-可选telegram-一次性登录链接)） |
+| ~~`/webui`~~ | — | — | 🚧 **未实现，已从白名单摘除**：一次性登录 token 的服务端（[09 §2.3](./09-webui.md#23-可选telegram-一次性登录链接)）本来就标着「可选」，也没写。留在白名单里只会让 `/webui` 石沉大海（docs/20 · W-TG-01） |
 | `/ping` | all | limited | 健康检查：版本、上线时长、模型别名、DB 大小 |
 
 - 命令**不进 AI 流程**（除 `/ask`），直接由 handler 处理并回复；命令消息仍归档（`kind='text'`, `triggered=1`, `trigger_reason='command'`），但**不进上下文**（`commands.archiveToContext=false`，避免污染对话）。
 - `/new`、`/undo`、`/model` 等改变状态的命令回复里附当前状态摘要，便于确认。
 - 群里带 `@botusername` 后缀的命令（`/new@mybot`）正确解析；不带后缀且群内有多个 bot 时按 Telegram 惯例仍处理（可用 `telegram.strictCommandSuffix` 关掉）。
-- 命令归属白名单（`trigger.ts` 的 `ours`）里**只放已注册 handler 的名字**：判成 `command` 的消息不进 AI 流程，
-  名字在白名单里却没有 handler，用户发出去就石沉大海。会话唤醒词管理原本设计为 `/wake`，现已摘除，
-  改在 WebUI 设置页配置全局唤醒词、用 `PATCH /api/chats/:key` 配置会话级覆盖（「摘除比伪造安全」，[16 §5](./16-remediation-plan.md)）。
+- 命令归属白名单（`trigger.ts` 的 `HANDLED_COMMANDS`）里**只放已注册 handler 的名字**：判成 `command`
+  的消息不进 AI 流程，名字在白名单里却没有 handler，用户发出去就石沉大海。`tests/trigger.test.ts`
+  断言「白名单 == `bot.command(...)` 注册集合 == `/help` 命令表」三者一一对应 —— 分成两份就会漂移，
+  这正是 `/start` `/help` `/ask` `/whois` `/webui` 五个命令曾经集体静默的原因（docs/20 · W-TG-01）。
+  会话唤醒词管理原本设计为 `/wake`、一次性登录链接设计为 `/webui`，两者均已摘除，改在 WebUI 做
+  （「摘除比伪造安全」，[16 §5](./16-remediation-plan.md)）。
+- **命令判定只认 `bot_command` 实体 + 白名单**，不认裸 `/` 前缀：把「任何以 `/` 开头的文本」都当成命令，
+  会绕开白名单与 `trigger.command` 开关，私聊里一句「/home/app 这个目录满了」将得不到任何回应。
+- 已注册命令在私聊里同样判成 `command`（不开轮次），否则 `/new` 会既重置上下文又开一轮对话；
+  `trigger.command=false` 时这些消息判成 `null`（不触发，但也不当成聊天）。
+- **编辑消息永远不开新轮次**，一律按背景消息归档（`triggered=0`）。判成 `triggered=1` 却没人开轮次的话，
+  `claimBackground` 的 `triggered=0` 过滤会把它排除 —— 既不触发也不进背景上下文，等于凭空消失
+  （docs/20 · W-TG-05）；`trigger.ignoreEditedAsTrigger` 因此标 🚧。
 
 ---
 

@@ -1,7 +1,7 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { KNOWN_UNIMPLEMENTED_CONFIG_KEYS, configSchema } from '@luoli/core';
+import { HOT_RELOADABLE_CONFIG_KEYS, KNOWN_UNIMPLEMENTED_CONFIG_KEYS, configSchema } from '@luoli/core';
 
 function sourceFiles(directory: string): string[] {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
@@ -52,6 +52,32 @@ describe('config schema', () => {
       expect(schema, key).toContain(`'${key}'`);
       // 光"文档里出现过这个键"是空断言——doc 11 是配置手册，每个键本来就都在。必须真的标了 🚧。
       expect(docLines.filter((line) => line.includes(`\`${key}\``) && line.includes('🚧')), `${key} 需要在 docs/11 标注 🚧`).not.toHaveLength(0);
+    }
+  });
+
+  // doc 11 开头立的契约是「标 热更新 的项保存后立即生效」。上一轮有十组键标着热更新而实际冻在
+  // 启动时，其中 sandbox.mode / approval.enabled / approval.rules 三组是「出事时运维会去点的那个
+  // 开关」——点了没用而界面还说成功（docs/20 · W-CFG-02）。这条断言让标注只能跟着白名单走。
+  it('only labels genuinely hot-reloadable keys as 热更新 in doc 11', () => {
+    const block = readFileSync('docs/11-config-reference.md', 'utf8').split('```yaml')[1]!.split('```')[0]!;
+    const unimplemented = new Set<string>(KNOWN_UNIMPLEMENTED_CONFIG_KEYS as readonly string[]);
+    const stack: string[] = [];
+    const labelled: string[] = [];
+    for (const line of block.split('\n')) {
+      const match = /^(\s*)([a-zA-Z][\w]*):/.exec(line);
+      if (!match) continue;
+      stack.length = match[1]!.length / 2;
+      stack.push(match[2]!);
+      if (line.includes('热更新')) labelled.push(stack.join('.'));
+    }
+    expect(labelled.length).toBeGreaterThan(20);
+    const covered = (key: string): boolean => unimplemented.has(key)
+      || HOT_RELOADABLE_CONFIG_KEYS.some((prefix) => key === prefix || key.startsWith(`${prefix}.`));
+    expect(labelled.filter((key) => !covered(key))).toEqual([]);
+    // 白名单里的每一项也必须真的是 schema 里的路径，否则改名之后这条断言会静默变松。
+    const leaves = new Set(configLeafPaths(configSchema.parse({})));
+    for (const prefix of HOT_RELOADABLE_CONFIG_KEYS) {
+      expect([...leaves].some((leaf) => leaf === prefix || leaf.startsWith(`${prefix}.`)), `${prefix} 不在 schema 里`).toBe(true);
     }
   });
 

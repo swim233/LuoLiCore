@@ -13,3 +13,5 @@ coverage/
 .luoli-*
 .claude/settings.local.json
 *.tsbuildinfo
+# 每用户一份的私有记忆是运行时数据（0700），不进版本库
+memory/private/

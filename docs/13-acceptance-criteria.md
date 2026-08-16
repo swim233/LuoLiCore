@@ -27,6 +27,9 @@
 | [ ] AC-CFG-009 | WebUI 改 `output.streamIntervalMs` | 下一轮生效，无需重启；`config_revisions` 有记录 |
 | [ ] AC-CFG-010 | WebUI 改 `telegram.mode` | 显示「需重启」徽标，重启后生效 |
 | [ ] AC-CFG-011 (自动) | 一个 turn 进行中修改 `context.limit.tokens` | 该 turn 使用旧快照值，下一轮用新值 |
+| [ ] AC-CFG-012 (自动) | `PUT /api/config` body 里带 `__proto__.x` / `constructor.y` | 400 `invalid_config_key`；`({}).x` 未被污染；随后一个完全无关的合法配置写入仍然成功（docs/20 · W-CFG-01） |
+| [ ] AC-CFG-013 (自动) | doc 11 里每个标 `热更新` 的键 | 都能在 `HOT_RELOADABLE_CONFIG_KEYS` 里找到（或已标 🚧）；白名单里的每一项都是 schema 里真实存在的路径（docs/20 · W-CFG-02） |
+| [ ] AC-CFG-014 | host 存在 DB、口令只来自 `WEBUI_PASSWORD` 时改一次配置触发热重载 | 重载成功，不因 `webui.passwordHash` 的 superRefine 失败；env 叠加在启动与热重载走同一个 `envOverlay()`（docs/20 · W-CFG-03） |
 | [ ] AC-DB-001 (自动) | 空库启动 | 全部表/索引/FTS/触发器创建成功；PRAGMA journal_mode=wal |
 | [ ] AC-DB-002 (自动) | 对已迁移库再次启动 | 迁移幂等，无报错，无重复表 |
 | [ ] AC-DB-003 (自动) ★ | 遍历所有 Repository 导出方法 | 非 `admin*`/`report*` 白名单方法的 SQL 均含 `chat_id = ?` 或 `key = ?` |
@@ -69,6 +72,8 @@
 | [ ] AC-CTX-027 | `/ctx` | 显示 commit seq、窗口区间、消息数、token/上限、最近 rebase/prune、claim 水位，数值与 DB 一致 |
 | [ ] AC-CTX-028 (自动) | `concurrency.mode='serial'` 下并发 3 个 turn | 严格 FIFO 串行，`rebased` 全为 0 |
 | [ ] AC-CTX-029 (自动) ★ | 一轮里模型调用任意工具，下一轮再对话 | tool-result 的 `output` 落库即为 `{type:'json',value}`；整段上下文能过 SDK 的 `ModelMessage` 校验；第二轮正常回复且**进程不退出**。历史上写成裸对象的会话在读出侧被补齐，不需要 `/new` |
+| [ ] AC-CTX-030 (自动) ★ | 把引擎产出的上下文交给真的 `ToolLoopAgent`：纯文本 / 工具轮次 / `load_skill` 之后 / 背景消息被省略 / 在途轮次期间 `/new` / rebase 说明 / 分级裁剪后 / 带图片的硬截断 | 八个场景全部被 AI SDK 收下，不出现 `AI_InvalidPromptError`（docs/20 · W-CTX-01；[02 §9 红线 16]） |
+| [ ] AC-CTX-031 (自动) ★ | 任何路径试图写入 `role='system'` 的上下文消息 | `assertValidShape` 在产生它的那一轮就抛 `invalid_context_shape`；库里的历史存量由迁移 `0006` 改回 `user`；`contextMessages()` 对漏网的历史行降级成 `user` 而不是让整轮被拒 |
 
 ## 3. Telegram 与准入（AC-TG / AC-ACL / AC-OUT）
 
@@ -88,6 +93,12 @@
 | [ ] AC-TG-012 (自动) | 给某群写 `perChat.<key>.trigger.wakewords`，在该群发会话唤醒词与全局唤醒词 | 会话唤醒词 `trigger_reason='wakeword'`；全局唤醒词在该群不再触发（会话级覆盖整体替换全局） |
 | [ ] AC-TG-013 | 配置里放入过短或含回溯风险结构的唤醒词 | 匹配时整条跳过（不求值、无 ReDoS）；启动日志出现 `config.invalid` 告警列出被跳过的模式；写入端拒绝并说明原因 |
 | [ ] AC-TG-014 (自动) | `output.replyDelayMs=2000`，发一条能秒答的消息 | 第一条回复不早于用户消息后 2s；窗口内产出的文本不丢失，随首条一起发出；期间持续 `typing`；模型本身耗时已超过 2s 时不再额外延迟 |
+| [ ] AC-TG-015 (自动) | `HANDLED_COMMANDS` / `bot.command(...)` 注册集合 / `/help` 命令表 | 三者一一对应（CI 断言）；`/start` `/help` `/whois` 有回应，不再静默（docs/20 · W-TG-01） |
+| [ ] AC-TG-016 (自动) | 私聊发「/home/app 这个目录满了」 | 照常触发对话；而 `/new` 在私聊仍判成 `command`（重置上下文且不开轮次） |
+| [ ] AC-TG-017 (自动) | 群里发 `/ask 今天几号` | 判成 `ask` 并进入 AI 流程（等价 @bot），不被当成命令丢弃 |
+| [ ] AC-TG-018 | 编辑一条会命中触发条件的消息 | 不开新轮次，且以 `triggered=0` 归档（能被后续轮次当背景消息认领），日志留一条 `trigger.skipped`（docs/20 · W-TG-05） |
+| [ ] AC-TG-019 ★ (自动) | 发一张真实照片 | 上下文里拿到 `{type:'image'}` part，`attachments.download_state='done'`，最长边不超过 `media.maxImageEdge`；不再是「[photo 处理失败]」（docs/20 · W-MEDIA-01） |
+| [ ] AC-TG-020 | 活跃会话里发 `/ctx`、`/tasks` | 回摘要（commit / 窗口 / token / 条数、任务 id 与状态），不再把整份 JSON 塞进消息而超 4096 字符被 API 拒（docs/20 · W-TG-02） |
 | [ ] AC-ACL-001 (自动) ★ | `BLOCKED` 用户私聊 | 无回复、**不入库**、无 token 消耗；只有一条 `access.denied` 日志 |
 | [ ] AC-ACL-002 (自动) ★ | `OWNER` 在群 `G_LIMITED` @bot | `effective=limited`：写/执行类工具不在 `activeTools` 中 |
 | [ ] AC-ACL-003 (自动) ★ | `LIMITED` 用户在群 `G_TRUSTED` @bot | `effective=limited` |
@@ -129,12 +140,17 @@
 | [ ] AC-PROV-010 (自动) | 给 `main` 配 `settings_json`，再写一个白名单外的键 | 白名单键随每步调用下发（降档到 `low` 后用 `low` 的参数）；白名单外的键 `PUT` 返回 `alias_invalid` + 路径，不落库 |
 | [ ] AC-PROV-011 ★ | 接第三方 OpenAI 兼容网关，让模型在一轮里调用工具 | 带工具结果的后续请求里**不含** `item_reference`，该步返回 200，模型给出最终回复。回归的是「一调工具就再也不说话」 |
 | [ ] AC-PROV-012 (自动) | fallback 链整条耗尽 | `onExhausted` 交出最后一个错误；`result.text` 为空时轮次以该错误记 failed，用户收到「模型服务暂时连不上」而不是「没吐出正文」；日志有 `model.error` |
+| [ ] AC-PROV-013 (自动) ★ | 主别名链首返回 503，链上还有第二个模型 | `prepareStep` 存在时重试与 fallback 仍然生效（`provider.maxRetries` 真的被用到），最终由第二个候选出结果；整条链都挂时抛出真正的上游错误而不是「模型没吐出正文」（docs/20 · W-AGENT-01） |
+| [ ] AC-PROV-014 (自动) | 链首 401、第二个候选健康 | 不重试、不 fallback，`markProviderDown` 标掉该 provider |
+| [ ] AC-PROV-015 (自动) | 走 fallback 由第二个候选出结果 | `usage_ledger` 记的是**实际服务**的那个 modelId 与它真正的别名，不再一律记成 `low`（docs/20 · W-LEDGER-01） |
+| [ ] AC-PROV-016 | 并发多次触发重试 | 退避带真随机抖动（不再是 `sha256(attempt)` 这种对同一 attempt 恒定的常量，docs/20 · W-PROV-01） |
 | [ ] AC-PROMPT-001 (自动) ★ | 组装私聊系统提示词 | block 顺序为 KERNEL→CHARACTER→ASSIST→CATALOG→PUBMEMORY→PRIMEMORY→RUNTIME |
 | [ ] AC-PROMPT-002 (自动) ★ | 组装群聊系统提示词 | **不含** PRIMEMORY；断言其内容字符串不出现在结果中 |
 | [ ] AC-PROMPT-003 (自动) | RUNTIME 块的工具列表 | 与本 step 的 `activeTools` 完全一致（无多、无少） |
 | [ ] AC-PROMPT-004 (自动) | 记忆超大导致总量超 `prompt.maxTokens` | 按 5→4→1 顺序截断并加提示；KERNEL/ASSIST/CATALOG/RUNTIME 完整；有 warn 日志 |
 | [ ] AC-PROMPT-005 | Anthropic provider | 请求中缓存断点打在 PRIMEMORY 之后；第二轮 `cache_read_tokens > 0` 并单独计价 |
 | [ ] AC-PROMPT-006 | WebUI `[预览组装]` | 输出与实际发送的 `instructions` 一致（可用日志中的 `instructionsHash` 比对） |
+| [ ] AC-PROMPT-007 | 把 `prompt.maxTokens` 压到 catalog + runtime 就吃满的程度 | `CHARACTER.md` 被截断时日志有一条 `prompt.truncated` warn（含被截块名），人格不再静默消失（docs/20 · W-PROMPT-01） |
 
 ## 5. 工具 / 沙箱 / 审批（AC-TOOL / AC-SBX / AC-APV）
 
@@ -162,6 +178,8 @@
 | [ ] AC-TOOL-019 | `web_fetch` 返回内容 | 被 `<untrusted-content source="web:…">` 包裹 |
 | [ ] AC-TOOL-020 (自动) | 注册工具数超 `maxRegistered` | 按优先级截断（内建>agent>plugin>skill>MCP），RUNTIME 块告知，有 warn 日志 |
 | [ ] AC-TOOL-021 (自动) | `search_messages` 依次传 `名字\|我是\|叫\|谁`、`NEAR(a b)`、`"unclosed`、`***` | 一律正常返回（命中或空），不出现 `fts5: syntax error`；≥3 字的词走 FTS，两字中文词退回 LIKE 且用最长的词而非原串 |
+| [ ] AC-TOOL-022 (自动) | 直接调用 `execute()` 绕过目录：子 agent 调 `memory_write`、或调一个 `available()` 返回 false 的工具 | 一律 `ok:false` 拒绝；`execute()` 的复查集合与 `active()` 的过滤集合一致（docs/20 · W-TOOL-01） |
+| [ ] AC-TOOL-023 | workspace 里建一个指向祖先目录的软链后跑 `glob` / `grep` | 正常返回，不无限递归（已访问目录按 realpath 去重，docs/20 · W-FS-01） |
 | [ ] AC-SBX-001 (自动) ★ | `mode=none`，`trusted` 请求 `bash` | 工具**不存在**（fail-closed），不是「执行后被拒」 |
 | [ ] AC-SBX-002 (自动) ★ | `mode=none`，`owner` 请求 `bash` | 可执行（bypassRoles），cwd = workspace |
 | [ ] AC-SBX-003 (自动) ★ | `mode=docker`，`trusted` 执行 `bash` | 容器内执行；`--network=none`；`/workspace` 可写；宿主 `/etc` 不可见 |
@@ -173,6 +191,9 @@
 | [ ] AC-SBX-009 (自动) ★ | jail 模式检查子进程 env | 不含 `BOT_TOKEN`/`LUOLI_MASTER_KEY`/任何 `*_KEY`/`*_TOKEN` |
 | [ ] AC-SBX-010 (自动) | jail 模式 `sleep 300 &` 后超时 | 整个进程组被杀（无残留孤儿进程） |
 | [ ] AC-SBX-011 (自动) ★ | 应用自己跑在容器里、`mode=docker` 且 `sandbox.hostWorkspaceDir` 为空 | 拒绝执行并报 `sandbox.unavailable`（不挂一个宿主上不存在的目录上去）；配好映射后 `-v` 左半边是宿主路径；workspace 越出 `workspaceDir` 同样拒绝 |
+| [ ] AC-SBX-012 (自动) ★ | 运行中把 `sandbox.mode` 从 `docker` 改成 `none` | 下一轮 `plan()` 立即拒绝，执行类工具从目录中消失 —— 不再是「界面说保存成功、bash 照跑」（docs/20 · W-CFG-02） |
+| [ ] AC-SBX-013 | `mode=jail` 时第一次 `plan()` | 日志有一条 warn 说明 jail 不是安全边界（[05 §5.2]；docs/20 · W-SBX-02） |
+| [ ] AC-SBX-014 | 同一毫秒并发起两个容器 | 容器名是 `luoli-sbx-<turnId>-<n>`，不撞名（[05 §5.3]；docs/20 · W-SBX-01） |
 | [ ] AC-APV-001 | `trusted` 执行 `rm -rf build` | Telegram 出现审批消息（含命令全文、发起人、风险 high、时限） |
 | [ ] AC-APV-002 | 非 owner 点击批准按钮 | `answerCallbackQuery` 提示无权限；`approvals` 未变更 |
 | [ ] AC-APV-003 | owner 点击批准 | 命令执行；`approvals.state='approved'`，含 `decided_by`/`channel` |
@@ -180,6 +201,8 @@
 | [ ] AC-APV-005 | WebUI 审批队列批准 | 与 Telegram 路径等效；`decision_channel='webui'` |
 | [ ] AC-APV-006 (自动) ★ | 子 agent 内调用 `delete_file` | 同样触发审批（不依赖 AI SDK 的 toolApproval），批准后才执行 |
 | [ ] AC-APV-007 (自动) | `skipForOwner=true`，owner 执行 `delete_file` | 直接执行，日志记 `auto_approved` |
+| [ ] AC-APV-008 (自动) ★ | trusted 用户在 Telegram 里触发一个需审批的工具 | **当场**返回 `ok:false, error:'未获批准'` 并带 hint（模型据此用自己的话解释），不再挂满 `ttlMs` 才拒；`approvals` 留一行 `state=denied, decided_by=system, decision_channel=none` 供审计（docs/20 · W-APPR-01） |
+| [ ] AC-APV-009 (自动) | 运行中把 `approval.enabled` 改成 false，或增删 `approval.rules` | 下一次工具调用即生效，无需重启（docs/20 · W-CFG-02） |
 
 ## 6. Subagent 与任务（AC-SUB / AC-TASK）
 
@@ -198,6 +221,7 @@
 | [ ] AC-SUB-011 (自动) | 子 agent 失败 | 主 agent 收到 `{ok:false,error}`；主 agent 组织回复告知用户，turn 不整体失败 |
 | [ ] AC-SUB-012 (自动) ★ | 子 agent 无 `memory_write` | 该工具不在子 agent 工具集；`injectMemory=false` 时其 instructions 不含记忆内容 |
 | [ ] AC-SUB-013 (自动) | 子 agent 返回 20 万字 | 按 `resultMaxChars` 截断 + `fullRef`；`read_agent_result` 可分页读全文 |
+| [ ] AC-SUB-014 (自动) ★ | 一轮里派发子 agent 并让它跑若干步 | `quota_counters.cost_usd` 的增量等于 `usage_ledger` 里该 turn 的总和；单轮成本闸门读 `ledger.turnCost`，子 agent 的花费也受 `quota.perTurn.maxCostUsd` 约束（docs/20 · W-QUOTA-01） |
 | [ ] AC-TASK-001 | 触发一个 >4s 的任务 | 出现占位消息「⏳ 已接收…」+ 取消按钮 |
 | [ ] AC-TASK-002 | 日常聊天（<4s） | **不出现**占位消息 |
 | [ ] AC-TASK-003 | 子 agent 多次 `report_progress` | 占位消息按 3s 节流更新，内容为最新进度 |
@@ -283,6 +307,9 @@
 | [ ] AC-MCP-006 (自动) | MCP 工具超 `timeoutMs` | 返回结构化超时错误，turn 继续 |
 | [ ] AC-MCP-007 | WebUI 查看 server | 显示状态、发现的工具清单与 schema 预览；`[重连]` 可用 |
 | [ ] AC-MCP-008 | 退出进程 | 所有 MCP client 正常 close，无残留子进程 |
+| [ ] AC-MCP-009 (自动) ★ | 一个入参为 `{text: string, required:[text]}` 的 MCP 工具 | 注册后 `execute()` 用错误参数调用返回 `invalid_input`，用正确参数才通过；模型拿到的是真实参数定义而不是「任意对象」（docs/20 · W-MCP-01） |
+| [ ] AC-MCP-010 (自动) | 把某个 server 从配置里移除或置 `enabled:false` 后触发一次 reconcile | 工具从注册表消失、client 断开、`mcp_servers.state='disabled'`；新增 server 无需重启即可连上 |
+| [ ] AC-MCP-011 | 一个故意卡住的 MCP server | `callTool` 在 `timeoutMs` 后失败，不把整轮拖到轮次超时 |
 
 ## 10. WebUI（AC-WEB）
 
@@ -321,6 +348,8 @@
 | [ ] AC-WEB-021 | 维护操作按钮 | 备份/VACUUM/清日志/重建 FTS/清孤儿文件 均可执行并有结果反馈与日志 |
 | [ ] AC-WEB-022 | 设置页「触发与唤醒词」卡片 | 五个开关、唤醒词增删、最短长度可编辑；每条唤醒词标注「包含/正则」，不会生效的标红并给出原因；保存后热更新（无需重启），含不可用模式时保存被拒并弹出具体原因 |
 | [ ] AC-WEB-023 | 依次做：保存提示词、回滚版本、切换/重置上下文、保存 Provider、`[测试连接]`、导入模型、保存/删除别名、保存触发设置 | 每次反馈都是右上角同一种通知（成功绿 / 警告黄 / 失败红，可手动关闭、到点自动消失），页面上不出现第二种提示样式；失败时通知里带上游错误原因 |
+| [ ] AC-WEB-024 (自动) | 未登录访问 `GET /api/health` 与 `GET /api/health/detail` | 前者只回 `{ok, uptimeMs}`；后者 401。provider 列表 / MCP / 沙箱 plan / 在途轮次数不再无鉴权暴露（docs/20 · W-API-01） |
+| [ ] AC-WEB-025 | 搜索归档并翻到后面几页 | `total` 是命中总数（单独 COUNT），页码不漂（docs/20 · W-API-03） |
 
 ## 11. 安全 AC-SEC
 
@@ -338,6 +367,9 @@
 | [ ] AC-SEC-010 | 用 `curl` 从局域网另一台机器访问 WebUI（默认配置） | 连接被拒（仅监听 127.0.0.1） |
 | [ ] AC-SEC-011 | 备份文件权限 | `data/`、`memory/private/` 目录 0700；备份文件 0600 |
 | [ ] AC-SEC-012 ★ | 沙箱内尝试访问宿主 docker socket | 不可见（未挂载） |
+| [ ] AC-SEC-013 (自动) | 库里存在 v1（`sha256(masterKey)`）加密的 provider key | 仍能解密；读到之后就地重写成 v2（scrypt + 随机 salt，salt 随密文存），无需迁移脚本（docs/20 · W-SEC-02） |
+| [ ] AC-SEC-014 | `LUOLI_MASTER_KEY` 短于 32 字符 | 启动时 stderr 有明确告警（scrypt 抬不动一个短口令） |
+| [ ] AC-SEC-015 | `tools.web.searchApiKey` | 键名不再叫 `Ref`（它本来就不是引用）；doc 11 写明是明文存储、建议用 `${env:...}`；`GET /api/config` 与日志里脱敏（docs/20 · W-SEC-01） |
 
 ## 12. 运维与稳定性（AC-OPS）
 
@@ -359,18 +391,18 @@
 
 | 模块 | 负责人 | 通过 AC 数 / 总数 | 豁免项及理由 | 日期 | 签署 |
 |---|---|---|---|---|---|
-| 配置与 DB | | / 17 | | | |
-| **上下文引擎** | | / 29 | | | |
-| Telegram 与准入 | | / 30 | | | |
-| Agent 与 Provider | | / 26 | | | |
-| 工具/沙箱/审批 | | / 39 | | | |
-| Subagent 与任务 | | / 21 | | | |
+| 配置与 DB | | / 20 | | | |
+| **上下文引擎** | | / 31 | | | |
+| Telegram 与准入 | | / 36 | | | |
+| Agent 与 Provider | | / 31 | | | |
+| 工具/沙箱/审批 | | / 47 | | | |
+| Subagent 与任务 | | / 22 | | | |
 | 记忆 | | / 13 | | | |
 | 日志与成本 | | / 23 | | | |
-| 扩展生态 | | / 24 | | | |
-| WebUI | | / 33 | | | |
-| 安全 | | / 12 | | | |
+| 扩展生态 | | / 27 | | | |
+| WebUI | | / 35 | | | |
+| 安全 | | / 15 | | | |
 | 运维 | | / 9 | | | |
-| **合计** | | **/ 276** | | | |
+| **合计** | | **/ 309** | | | |
 
 **整体通过条件**：全部 ★ 项通过 + 非 ★ 项通过率 ≥ 95% + 所有豁免项经需求方书面确认。

@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { extname, join } from 'node:path';
 import { ulid } from 'ulid';
 import sharp from 'sharp';
@@ -52,7 +52,10 @@ export class TelegramMedia {
       const extension = extname(file.name ?? remote.file_path ?? '') || (file.kind === 'photo' ? '.jpg' : '.bin');
       const directory = join(this.config.dir, archived.chatId);
       mkdirSync(directory, { recursive: true, mode: 0o700 });
-      const path = join(directory, `${file.uniqueId}${extension}`);
+      // photo 的 extension 恒为 .jpg（file.name 是 undefined，remote.file_path 固定是 photos/file_N.jpg），
+      // 归一化输出也是 .jpg —— 两者同名时 sharp 直接抛 "Cannot use same file for input and output"，
+      // catch 把它记成「处理失败」，多模态输入 100% 不可用（docs/20 · W-MEDIA-01）。
+      const path = join(directory, file.kind === 'photo' ? `${file.uniqueId}.orig${extension}` : `${file.uniqueId}${extension}`);
       const response = await fetch(`https://api.telegram.org/file/bot${this.token}/${remote.file_path}`);
       if (!response.ok) throw new Error(`download_http_${response.status}`);
       writeFileSync(path, Buffer.from(await response.arrayBuffer()), { mode: 0o600 });
@@ -60,6 +63,7 @@ export class TelegramMedia {
       if (file.kind === 'photo') {
         localPath = join(directory, `${file.uniqueId}.jpg`);
         await sharp(path).rotate().resize({ width: this.config.maxImageEdge, height: this.config.maxImageEdge, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 85 }).toFile(localPath);
+        rmSync(path, { force: true });
       }
       const extracted = await this.extract(localPath, file);
       this.insert(id, archived, file, localPath, 'done', null, extracted, extracted === null ? 'skipped' : 'done');

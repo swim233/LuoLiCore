@@ -13,7 +13,7 @@ import type { PromptAssembler, PromptDocuments } from '../index.js';
 import { runtimeBlock } from '../prompt/assembler.js';
 import type { ToolExecutionContext, ToolRegistry } from '../tools/registry.js';
 import type { ProviderStore } from '../provider/store.js';
-import { fallbackLanguageModel } from './fallback-model.js';
+import { type FallbackOptions, fallbackLanguageModel } from './fallback-model.js';
 import { type AliasSettings, parseAliasSettings } from '../provider/alias-settings.js';
 import type { UsageLedger } from '../ledger/usage.js';
 import type { QuotaGuard, QuotaReservation } from '../ledger/quota.js';
@@ -119,8 +119,17 @@ export class ModelRegistry {
   info(alias: string): ModelRow | null {
     return this.#info.get(alias) ?? null;
   }
+  /** 链上的每一个候选都要能反查到：只扫 `#info`（每个别名的链首）会让 fallback 到第二个模型之后的
+   *  计价、`markProviderDown` 全部落空（docs/20 · W-AGENT-01 / W-LEDGER-01）。 */
   infoByModelId(modelId: string): ModelRow | null {
     for (const info of this.#info.values()) if (info.modelId === modelId) return info;
+    for (const chain of this.#chains.values()) for (const candidate of chain) if (candidate.info.modelId === modelId) return candidate.info;
+    return null;
+  }
+  /** modelId → 别名。`prefer` 命中时优先返回它：链内 fallback 换的是模型，别名没变。 */
+  aliasOf(modelId: string, prefer?: string): string | null {
+    if (prefer && this.#chains.get(prefer)?.some((candidate) => candidate.info.modelId === modelId)) return prefer;
+    for (const [alias, chain] of this.#chains) if (chain.some((candidate) => candidate.info.modelId === modelId)) return alias;
     return null;
   }
   markProviderDown(modelId: string, error: string): void {
@@ -162,11 +171,33 @@ export function normalizeToolOutput(output: unknown): { type: string; value: unk
 export function toolResultPart(toolCallId: string, toolName: string, output: unknown): { type: 'tool-result'; toolCallId: string; toolName: string; output: { type: string; value: unknown } } {
   return { type: 'tool-result', toolCallId, toolName, output: normalizeToolOutput(output) };
 }
+/**
+ * 按别名构造带 fallback / 重试包装的模型。包装必须做在「按别名解析」这一层：`prepareStep` 每一步
+ * 都会重设 model，只包构造时那一个等于整条链从第 0 步起就没被用过（docs/20 · W-AGENT-01）。
+ * 别名没有链（registry 只认识它的回退目标）时退回裸模型，行为与 `resolve()` 一致。
+ */
+export function aliasModel(registry: ModelRegistry, alias: string, options: FallbackOptions): LanguageModel {
+  const candidates = registry.chain(alias);
+  return candidates.length
+    ? fallbackLanguageModel(candidates.map((candidate) => ({ model: candidate.model, id: candidate.info.modelId })), options)
+    : registry.resolve(alias);
+}
+
+const SENDABLE_ROLES = new Set(['user', 'assistant', 'tool']);
+const NOTE_PREFIX = '（系统提示）';
+/**
+ * system 只能出现在 instructions 里：AI SDK v7 的 `standardizePrompt` 在 `allowSystemInMessages`
+ * 未开启时直接拒收 messages 里的 system 消息，整轮请求当场 InvalidPromptError（docs/20 · W-CTX-01）。
+ * 写入侧已经不再产生这种消息（`assertValidShape` 的 role 白名单挡着），这里兜的是 0006 之前
+ * 写进库、又没跑迁移的历史数据 —— parts 是持久化的，读出侧不兜就是会话级永久损坏。
+ */
 export function contextMessages(turn: RuntimeTurnContext): ModelMessage[] {
-  return [...turn.snapshot.messages, ...turn.delta].map((message) => ({
-    role: message.role,
-    content: (message.parts as Array<Record<string, unknown>>).map((part) => part?.type === 'tool-result' ? { ...part, output: normalizeToolOutput(part.output) } : part),
-  } as ModelMessage));
+  return [...turn.snapshot.messages, ...turn.delta].map((message) => {
+    const content = (message.parts as Array<Record<string, unknown>>).map((part) => part?.type === 'tool-result' ? { ...part, output: normalizeToolOutput(part.output) } : part);
+    if (SENDABLE_ROLES.has(message.role)) return { role: message.role, content } as ModelMessage;
+    const text = content.map((part) => typeof part?.text === 'string' ? part.text : '').filter(Boolean).join('\n');
+    return { role: 'user', content: [{ type: 'text', text: `${NOTE_PREFIX}${text}` }] } as ModelMessage;
+  });
 }
 
 export interface MainAgentDependencies {
@@ -214,6 +245,8 @@ export async function runMainAgent(turn: RuntimeTurnContext, dependencies: MainA
 
 async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: MainAgentDependencies, streaming: boolean): Promise<string | MainAgentStreamResult> {
   const toolContext: ToolExecutionContext = { turn, workspace: dependencies.workspace, agentKind: 'main' };
+  // 子 agent 从 turn 上取同一份预留：spawn_agent 在工具层执行，拿不到这里的 dependencies。
+  turn.reservation = dependencies.reservation ?? null;
   await dependencies.plugins?.hook('beforeTurn', { turn });
   const activeNames = dependencies.tools.activeNames(turn.effectiveRole, toolContext);
   const documents = dependencies.documents.readForPrompt({ userId: turn.initiatorUserId, isPrivate: turn.isPrivate });
@@ -226,7 +259,11 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
     maxTokens: dependencies.config.context.limit.tokens, workspace: dependencies.workspace, sandbox: dependencies.config.sandbox.mode });
   const promptInput = { character: documents.character, assist: documents.assist, catalog, publicMemory: documents.publicMemory, runtime, maxTokens: dependencies.config.prompt.maxTokens };
   if (documents.privateMemory !== undefined) Object.assign(promptInput, { privateMemory: documents.privateMemory });
-  const instructionText = dependencies.prompts.build(promptInput).instructions;
+  const prompt = dependencies.prompts.build(promptInput);
+  // 预算被 catalog + runtime 吃满时 CHARACTER.md 会被整段截成一句「（记忆已截断…）」——
+  // 人格静默消失，而日志里一个字都没有（docs/20 · W-PROMPT-01）。
+  if (prompt.truncated.length) dependencies.log.event({ level: 'warn', kind: 'prompt.truncated', summary: `Prompt blocks truncated: ${prompt.truncated.join(', ')}`, traceId: turn.turnId, key: turn.key, data: { truncated: prompt.truncated, blocks: prompt.blocks, maxTokens: dependencies.config.prompt.maxTokens } });
+  const instructionText = prompt.instructions;
   const toolSet: ToolSet = {};
   for (const registered of dependencies.tools.active(turn.effectiveRole, toolContext)) {
     toolSet[registered.name] = tool({ description: registered.description, inputSchema: registered.inputSchema, execute: (input) => dependencies.tools.execute(registered.name, input, toolContext) });
@@ -241,23 +278,39 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
   // 让 result.text 安静地解析成空串。不抓住这一份，一次彻底的上游故障和「模型没话说」
   // 在调用方眼里长得一模一样 —— 上一次就是这样变成「不回复」的。
   let streamFailure: unknown = null;
-  const model = fallbackLanguageModel(chain.map((candidate) => ({ model: candidate.model, id: candidate.info.modelId })), {
-    maxRetries: dependencies.config.provider.maxRetries, retryBaseMs: dependencies.config.provider.retryBaseMs,
-    retryMaxMs: dependencies.config.provider.retryMaxMs, abortSignal: turn.abortSignal,
-    onFallback: (from, to) => dependencies.log.event({ level: 'warn', kind: 'provider.fallback', summary: `${from.id} → ${to.id}`, traceId: turn.turnId, data: { from: from.id, to: to.id } }),
-    onUnavailable: (candidate, error) => {
-      dependencies.registry.markProviderDown(candidate.id, error instanceof Error ? error.message : 'authentication_failed');
-      dependencies.log.event({ level: 'error', kind: 'provider.health', summary: `${candidate.id} credentials rejected`, traceId: turn.turnId, data: { modelId: candidate.id } });
-    },
-    onExhausted: (error) => {
-      streamFailure ??= error;
-      dependencies.log.event({ level: 'error', kind: 'model.error', summary: error instanceof Error ? `${error.name}: ${error.message}`.slice(0, 300) : String(error).slice(0, 300),
-        traceId: turn.turnId, key: turn.key, data: { alias, modelId: initialInfo.modelId, cause: error instanceof Error && error.cause instanceof Error ? error.cause.message.slice(0, 300) : undefined } });
-    },
-  });
   const initialInfo = chain[0]!.info;
+  // 包装必须做在「按别名解析」这一层：`prepareStep` 每一步都无条件设置 model，只包装构造时那一个的话，
+  // 整条 fallback / 重试链从第 0 步起就再没被用过 —— 重试次数、别名 fallback、markProviderDown、
+  // 以及区分「上游挂了」和「模型没话说」所依赖的 onExhausted，全都是死代码（docs/20 · W-AGENT-01）。
+  const wrapped = new Map<string, LanguageModel>();
+  // 包装之后 `step.model.modelId` 恒等于链首，看不出这一步实际是谁服务的。中间件报一份，
+  // 记账才能落到真正出力的那个模型上（计价、别名、markProviderDown 都靠它）。
+  let servedModelId: string | null = null;
+  const wrappedFor = (aliasName: string): LanguageModel => {
+    const cached = wrapped.get(aliasName);
+    if (cached) return cached;
+    const built = aliasModel(dependencies.registry, aliasName, {
+      maxRetries: dependencies.config.provider.maxRetries, retryBaseMs: dependencies.config.provider.retryBaseMs,
+      retryMaxMs: dependencies.config.provider.retryMaxMs, abortSignal: turn.abortSignal,
+      onServed: (served) => { servedModelId = served.id; },
+      onFallback: (from, to) => dependencies.log.event({ level: 'warn', kind: 'provider.fallback', summary: `${from.id} → ${to.id}`, traceId: turn.turnId, data: { alias: aliasName, from: from.id, to: to.id } }),
+      onUnavailable: (candidate, error) => {
+        dependencies.registry.markProviderDown(candidate.id, error instanceof Error ? error.message : 'authentication_failed');
+        dependencies.log.event({ level: 'error', kind: 'provider.health', summary: `${candidate.id} credentials rejected`, traceId: turn.turnId, data: { modelId: candidate.id } });
+      },
+      onExhausted: (error) => {
+        streamFailure ??= error;
+        dependencies.log.event({ level: 'error', kind: 'model.error', summary: error instanceof Error ? `${error.name}: ${error.message}`.slice(0, 300) : String(error).slice(0, 300),
+          traceId: turn.turnId, key: turn.key, data: { alias: aliasName, modelId: dependencies.registry.info(aliasName)?.modelId ?? initialInfo.modelId, cause: error instanceof Error && error.cause instanceof Error ? error.cause.message.slice(0, 300) : undefined } });
+      },
+    });
+    wrapped.set(aliasName, built);
+    return built;
+  };
+  const model = wrappedFor(alias);
   const instructions = cachedInstructions(instructionText, dependencies.db.prepare('SELECT kind FROM providers WHERE id=?').pluck().get(initialInfo.providerId) as string ?? '');
   const stepSpans = new Map<number, { id: string; end: (data?: unknown, error?: unknown) => void }>();
+  const stepAlias = new Map<number, string>();
   const agent = new ToolLoopAgent({ model, instructions, tools: toolSet, activeTools: activeNames,
     stopWhen: stepCountIs(Math.min(dependencies.config.agent.main.maxSteps, dependencies.config.quota.perTurn.maxSteps)),
     include: { requestMessages: true, requestBody: true, responseBody: true },
@@ -269,8 +322,11 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
       const downgrade = stepNumber >= dependencies.config.agent.main.downgradeAfterStep && dependencies.registry.aliases().includes('low');
       const selectedAlias = downgrade ? 'low' : requestedAlias;
       // 采样参数按「当步实际选中的别名」取：降档到 low 之后就该用 low 的参数（04 §5.2.1）。
-      const patch: { activeTools?: string[]; model?: LanguageModel; messages?: ModelMessage[]; toolChoice?: 'none' } & AliasSettings = { activeTools: activeForStep, model: dependencies.registry.resolve(selectedAlias), ...dependencies.registry.settings(selectedAlias) };
-      const cost = dependencies.reservation?.committed ?? ((dependencies.db.prepare('SELECT cost_usd FROM turns WHERE id=?').pluck().get(turn.turnId) as number | undefined) ?? 0);
+      stepAlias.set(stepNumber, selectedAlias);
+      const patch: { activeTools?: string[]; model?: LanguageModel; messages?: ModelMessage[]; toolChoice?: 'none' } & AliasSettings = { activeTools: activeForStep, model: wrappedFor(selectedAlias), ...dependencies.registry.settings(selectedAlias) };
+      // 单轮成本闸门读 ledger：`reservation.committed` 只含主 agent 的花费，子 agent 全部漏在外面
+      // （docs/20 · W-QUOTA-01）。`turnCost` 把主 agent 与该轮所有子 agent 的花费都算进去了。
+      const cost = dependencies.ledger.turnCost(turn.turnId);
       if (cost >= dependencies.config.quota.perTurn.maxCostUsd || (dependencies.quota && dependencies.reservation && !dependencies.quota.canSpend(dependencies.reservation, dependencies.config.quota.perTurn.maxCostUsd))) { patch.activeTools = []; patch.toolChoice = 'none'; }
       // 推理条目一律不回传。openai responses provider 会把上一步的 reasoning 写成
       // `{type:'item_reference', id:'rs_…'}` —— 那份内容存在 OpenAI 服务端，第三方兼容网关
@@ -291,9 +347,12 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
         data: { stepNumber: event.stepNumber, modelId: event.modelId, provider: event.provider, messages: bodyForLog(event.messages, dependencies.config.logs.captureBodies), instructions: bodyForLog(event.instructions, dependencies.config.logs.captureBodies) } }));
     },
     onStepEnd: (step) => {
-      const info = dependencies.registry.infoByModelId(step.model.modelId) ?? initialInfo;
+      const servedId = servedModelId ?? step.model.modelId;
+      const info = dependencies.registry.infoByModelId(servedId) ?? initialInfo;
       const cost = dependencies.ledger.record({ turnId: turn.turnId, chatId: turn.chatId, userId: turn.initiatorUserId,
-        providerId: info.providerId, modelId: info.modelId, modelAlias: step.model.modelId === initialInfo.modelId ? alias : 'low',
+        // 链内 fallback 换的是模型不是别名：按「是不是链首」判会把第二个候选记成 low，
+        // 而它可能根本不是降档，按别名分组的用量报表因此失真（docs/20 · W-LEDGER-01）。
+        providerId: info.providerId, modelId: info.modelId, modelAlias: dependencies.registry.aliasOf(servedId, stepAlias.get(step.stepNumber) ?? alias) ?? 'unknown',
         inputTokens: step.usage.inputTokens ?? 0, outputTokens: step.usage.outputTokens ?? 0,
         cacheReadTokens: step.usage.inputTokenDetails.cacheReadTokens ?? 0, cacheWriteTokens: step.usage.inputTokenDetails.cacheWriteTokens ?? 0,
         reasoningTokens: step.usage.outputTokenDetails.reasoningTokens ?? 0, priceIn: info.priceIn, priceOut: info.priceOut,

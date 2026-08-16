@@ -6,9 +6,10 @@ import argon2 from 'argon2';
 import { Hono } from 'hono';
 import { serveStatic } from '@hono/node-server/serve-static';
 import type { AgentManager, Config, ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceService, McpManager, MemoryStore, PluginManager, PromptDocuments, ProviderStore, Sandbox, SkillLoader, TurnRegistry } from '@luoli/core';
-import { ALIAS_NAME_PATTERN, TOOL_POLICY, aliasSettingsSchema, checkWakeword, configSchema as runtimeConfigSchema, perChatConfig, probeProvider, rejectedWakewords } from '@luoli/core';
+import { ALIAS_NAME_PATTERN, HOT_RELOADABLE_CONFIG_KEYS, KNOWN_UNIMPLEMENTED_CONFIG_KEYS, TOOL_POLICY, aliasSettingsSchema, checkWakeword, configSchema as runtimeConfigSchema, perChatConfig, probeProvider, rejectedWakewords } from '@luoli/core';
 import type { ProviderProbe } from '@luoli/core';
 import type { ArchiveRepository, OperationsRepository, PrincipalRepository, Sqlite } from '@luoli/db';
+import { assignDotted } from '@luoli/shared';
 
 export interface ServerDependencies {
   config: Readonly<Config> | ConfigStore;
@@ -54,17 +55,17 @@ function cookie(header: string | undefined, name: string): string | null {
 
 const apiError = (code: string, message: string, status: 400 | 401 | 403 | 404 | 429 | 500 | 502 = 400) => ({ body: { ok: false as const, error: { code, message } }, status });
 
-function mergeDotted(base: unknown, updates: Record<string, unknown>): unknown {
+/**
+ * 展开一律走 `assignDotted`：裸的 `cursor[part]` 遇到 `__proto__` 会在**校验之前**污染 `Object.prototype`，
+ * 之后每一次 `safeParse` 都会失败，一次合法登录态的请求就能把配置面板永久打死（docs/20 · W-CFG-01）。
+ * 被拒的键必须 400，不能跳过后当成功 —— 写入端是这条路径的最后一道闸。
+ */
+function mergeDotted(base: unknown, updates: Record<string, unknown>): { ok: true; value: unknown } | { ok: false; key: string } {
   const clone = structuredClone(base) as Record<string, unknown>;
-  for (const [key, value] of Object.entries(updates)) {
-    const parts = key.split('.'); let cursor = clone;
-    for (const [index, part] of parts.entries()) {
-      if (index === parts.length - 1) cursor[part] = value;
-      else { const current = cursor[part]; if (!current || typeof current !== 'object' || Array.isArray(current)) cursor[part] = {}; cursor = cursor[part] as Record<string, unknown>; }
-    }
-  }
-  return clone;
+  for (const [key, value] of Object.entries(updates)) if (!assignDotted(clone, key, value)) return { ok: false, key };
+  return { ok: true, value: clone };
 }
+const invalidKey = (result: { ok: false; key: string }) => apiError('invalid_config_key', `非法配置键：${result.key}`);
 function page<T>(items: T[], pageNumber: number, size: number): { items: T[]; total: number; page: number; size: number } {
   return { items: items.slice((pageNumber - 1) * size, pageNumber * size), total: items.length, page: pageNumber, size };
 }
@@ -85,7 +86,7 @@ function safeRef(root: string, reference: string): string {
 function publicConfig(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(publicConfig);
   if (!value || typeof value !== 'object') return value;
-  return Object.fromEntries(Object.entries(value).map(([key, nested]) => [/key|secret|token|password/i.test(key) ? key : key, /key|secret|token|password/i.test(key) && typeof nested === 'string' && nested ? '«redacted»' : publicConfig(nested)]));
+  return Object.fromEntries(Object.entries(value).map(([key, nested]) => [key, /key|secret|token|password/i.test(key) && typeof nested === 'string' && nested ? '«redacted»' : publicConfig(nested)]));
 }
 function requestIp(ctx: { req: { header(name: string): string | undefined } }, config: Readonly<Config>): string {
   if (!config.webui.trustProxy) return 'local';
@@ -118,13 +119,13 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     await next();
   });
 
+  // 无鉴权的那份只回存活状态。provider 列表（含 baseUrl）、MCP 服务器、沙箱 plan、在途轮次数
+  // 都是内部拓扑：默认绑 127.0.0.1 时影响有限，但 `webui.host` 一放开就是无鉴权信息泄露
+  // （docs/20 · W-API-01）。详细信息移到鉴权后的 /api/health/detail。
   app.get('/api/health', (ctx) => {
     let dbOk = true;
     try { dependencies.db.prepare('SELECT 1').get(); } catch { dbOk = false; }
-    const providers = dependencies.providers.list() as Array<{ enabled?: number; healthState?: string | null }>;
-    const mcp = dependencies.db.prepare('SELECT name,state,last_error AS error FROM mcp_servers ORDER BY name').all();
-    return ctx.json({ ok: dbOk, version: process.env.npm_package_version ?? 'dev', uptimeMs: Date.now() - dependencies.startedAt,
-      db: { ok: dbOk }, providers, mcp, sandbox: dependencies.sandbox?.plan('trusted') ?? { allowed: false }, inFlightTurns: dependencies.turnRegistry?.size ?? 0 });
+    return ctx.json({ ok: dbOk, uptimeMs: Date.now() - dependencies.startedAt });
   });
 
   app.post('/api/setup', async (ctx) => {
@@ -181,6 +182,14 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     await next();
     if (!['GET', 'HEAD', 'OPTIONS'].includes(ctx.req.method)) dependencies.log.event({ level: 'info', kind: 'webui.action', summary: `${ctx.req.method} ${ctx.req.path}`, data: { method: ctx.req.method, path: ctx.req.path } });
   });
+  app.get('/api/health/detail', (ctx) => {
+    let dbOk = true;
+    try { dependencies.db.prepare('SELECT 1').get(); } catch { dbOk = false; }
+    const providers = dependencies.providers.list() as Array<{ enabled?: number; healthState?: string | null }>;
+    const mcp = dependencies.db.prepare('SELECT name,state,last_error AS error FROM mcp_servers ORDER BY name').all();
+    return ctx.json({ ok: dbOk, data: { ok: dbOk, version: process.env.npm_package_version ?? 'dev', uptimeMs: Date.now() - dependencies.startedAt,
+      db: { ok: dbOk }, providers, mcp, sandbox: dependencies.sandbox?.plan('trusted') ?? { allowed: false }, inFlightTurns: dependencies.turnRegistry?.size ?? 0 } });
+  });
   app.post('/api/auth/logout', (ctx) => {
     dependencies.operations.deleteSession(ctx.get('sessionId'));
     ctx.header('Set-Cookie', 'luoli_sid=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0');
@@ -193,7 +202,9 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
   app.get('/api/chats', (ctx) => ctx.json({ ok: true, data: dependencies.db.prepare(`SELECT c.key,c.chat_id AS chatId,c.thread_id AS threadId,c.scope,c.claim_watermark AS claimWatermark,
     cc.head_ordinal AS headOrdinal,cc.tokens_total AS tokens,cc.msg_count AS messages FROM contexts c LEFT JOIN refs r ON r.key=c.key AND r.name='done' LEFT JOIN context_commits cc ON cc.id=r.commit_id ORDER BY c.updated_at DESC`).all() }));
   app.get('/api/config', (ctx) => ctx.json({ ok: true, data: publicConfig(currentConfig()) }));
-  app.get('/api/config/schema', (ctx) => ctx.json({ ok: true, data: dependencies.configSchema }));
+  // 带上热更新前缀：不在 hotReloadable 里的键保存后需要重启才生效，WebUI 据此显示待重启徽标
+  // ——「保存成功」但运行时没变，是 docs/20 · W-CFG-02 里最误导的一类。
+  app.get('/api/config/schema', (ctx) => ctx.json({ ok: true, data: dependencies.configSchema, hotReloadable: HOT_RELOADABLE_CONFIG_KEYS, unimplemented: KNOWN_UNIMPLEMENTED_CONFIG_KEYS }));
   // 不安全或过短的唤醒词在匹配时被静默跳过（trigger.ts）。收下这种模式等于让运维以为配好了，
   // 实际表现是「bot 不理我」，所以写入端直接挡回去；只在这次写操作真的动了唤醒词时校验。
   app.post('/api/config/wakewords/check', async (ctx) => {
@@ -204,7 +215,9 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
   });
   app.put('/api/config', async (ctx) => {
     const body = await ctx.req.json<Record<string, unknown>>();
-    const parsed = runtimeConfigSchema.safeParse(mergeDotted(currentConfig(), body));
+    const merged = mergeDotted(currentConfig(), body);
+    if (!merged.ok) return ctx.json(invalidKey(merged).body, 400);
+    const parsed = runtimeConfigSchema.safeParse(merged.value);
     if (!parsed.success) return ctx.json({ ok: false, error: { code: 'invalid_config', message: '配置校验失败', details: parsed.error.issues.map((issue) => ({ path: issue.path.join('.'), message: issue.message })) } }, 400);
     if (Object.keys(body).some((key) => key === 'trigger' || key.startsWith('trigger.'))) {
       const rejected = rejectedWakewords(parsed.data.trigger.wakewords, parsed.data.trigger.wakewordMinLength);
@@ -228,7 +241,9 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     const body = await ctx.req.json<Record<string, unknown>>(); const key = `perChat.${ctx.req.param('key')}`; const now = Date.now();
     // 必须走 schema：perChat 覆盖白名单是安全边界（[11 §2.1]），绕过它既能给单个群关掉权限检查，
     // 又会让下次启动时的配置校验失败（docs/19-review-round4.md · R-CFG-02）。
-    const parsed = runtimeConfigSchema.safeParse(mergeDotted(currentConfig(), { [key]: body }));
+    const merged = mergeDotted(currentConfig(), { [key]: body });
+    if (!merged.ok) return ctx.json(invalidKey(merged).body, 400);
+    const parsed = runtimeConfigSchema.safeParse(merged.value);
     if (!parsed.success) return ctx.json({ ok: false, error: { code: 'invalid_config', message: '会话覆盖校验失败', details: parsed.error.issues.map((issue) => ({ path: issue.path.join('.'), message: issue.message })) } }, 400);
     if (body.trigger) {
       const merged = perChatConfig(parsed.data, ctx.req.param('key')).trigger;
@@ -389,7 +404,9 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     const size = Math.min(200, Math.max(1, Number(ctx.req.query('size') ?? 50)));
     const items = query ? dependencies.archive.adminSearchAll(query, pageNumber * size) : dependencies.db.prepare('SELECT id,chat_id AS chatId,message_thread_id AS threadId,tg_message_id AS tgMessageId,direction,from_kind AS fromKind,from_user_id AS fromUserId,from_name AS fromName,from_username AS fromUsername,kind,text,tg_date AS tgDate,triggered,trigger_reason AS triggerReason,turn_id AS turnId,revision,deleted_at AS deletedAt FROM messages WHERE deleted_at IS NULL ORDER BY tg_date DESC LIMIT 1000').all();
     const paged = page(items, pageNumber, size);
-    return ctx.json({ ok: true, data: { ...paged, items: attachTurnIds(paged.items) } });
+    // 搜索分支只取回了 page*size 条，`items.length` 不是命中总数 —— total 必须单独数（docs/20 · W-API-03）。
+    const total = query ? dependencies.archive.adminSearchCount(query) : paged.total;
+    return ctx.json({ ok: true, data: { ...paged, total, items: attachTurnIds(paged.items) } });
   });
   // 消息页默认看的是「最近几次模型对话」而不是逐条消息流：一次 turn 的提问与回答分散在多行里，
   // 按行翻页读不出对话的样子。分页走 SQL 的 LIMIT/OFFSET，turns 表可能很大，不整表拉回来再切。
@@ -457,7 +474,6 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
   app.post('/api/chats/:key/undo', (ctx) => ctx.json({ ok: true, data: dependencies.context.undo(ctx.req.param('key')) }));
   app.patch('/api/models/:id', async (ctx) => { const body = await ctx.req.json<Record<string, unknown>>(); const map: Record<string, string> = { displayName: 'display_name', contextWindow: 'context_window', maxOutput: 'max_output', priceIn: 'price_in', priceOut: 'price_out', priceCacheRead: 'price_cache_read', priceCacheWrite: 'price_cache_write', enabled: 'enabled', sort: 'sort' }; const entries = Object.entries(body).filter(([key]) => map[key]); if (!entries.length) return ctx.json({ ok: true, data: { changes: 0 } }); const sql = entries.map(([key]) => `${map[key]}=?`).join(','); const values = entries.map(([key, value]) => key === 'enabled' ? (value ? 1 : 0) : value); const changes = dependencies.db.prepare(`UPDATE models SET ${sql},updated_at=? WHERE id=?`).run(...values, Date.now(), ctx.req.param('id')).changes; dependencies.rebuildModels?.(); return ctx.json({ ok: true, data: { changes } }); });
   app.delete('/api/models/:id', (ctx) => { const changes = dependencies.db.prepare('DELETE FROM models WHERE id=?').run(ctx.req.param('id')).changes; dependencies.rebuildModels?.(); return ctx.json({ ok: true, data: { changes } }); });
-  app.delete('/api/aliases/:alias', (ctx) => { const changes = dependencies.db.prepare('DELETE FROM model_aliases WHERE alias=?').run(ctx.req.param('alias')).changes; dependencies.rebuildModels?.(); return ctx.json({ ok: true, data: { changes } }); });
   app.post('/api/principals/bulk', async (ctx) => {
     const body = await ctx.req.json<{ ids?: unknown; role?: unknown; kind?: unknown }>();
     const kind = body.kind === 'chat' ? 'chat' : 'user';
@@ -512,7 +528,9 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     if (typeof body.enabled !== 'boolean') return ctx.json(apiError('invalid_tool_override', 'enabled 必须是布尔值').body, 400);
     if (!Object.hasOwn(TOOL_POLICY, name)) return ctx.json(apiError('not_found', '工具不存在', 404).body, 404);
     const key = `tools.overrides.${name}`; const now = Date.now();
-    const parsed = runtimeConfigSchema.safeParse(mergeDotted(currentConfig(), { [key]: { enabled: body.enabled } }));
+    const merged = mergeDotted(currentConfig(), { [key]: { enabled: body.enabled } });
+    if (!merged.ok) return ctx.json(invalidKey(merged).body, 400);
+    const parsed = runtimeConfigSchema.safeParse(merged.value);
     if (!parsed.success) return ctx.json({ ok: false, error: { code: 'invalid_config', message: '工具开关校验失败', details: parsed.error.issues.map((issue) => ({ path: issue.path.join('.'), message: issue.message })) } }, 400);
     dependencies.db.prepare("INSERT INTO config_kv(key,value_json,updated_at,updated_by) VALUES (?,?,?,'webui') ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at,updated_by=excluded.updated_by").run(key, JSON.stringify({ enabled: body.enabled }), now);
     dependencies.db.prepare('INSERT INTO config_revisions(id,ts,actor,key,old_json,new_json) VALUES (?,?,?,?,?,?)').run(randomBytes(16).toString('hex'), now, 'webui', key, null, JSON.stringify({ enabled: body.enabled }));
@@ -523,7 +541,9 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
   app.put('/api/sandbox', async (ctx) => {
     const body = await ctx.req.json<Record<string, unknown>>();
     const dotted = Object.fromEntries(Object.entries(body).map(([key, value]) => [`sandbox.${key}`, value]));
-    const parsed = runtimeConfigSchema.safeParse(mergeDotted(currentConfig(), dotted));
+    const merged = mergeDotted(currentConfig(), dotted);
+    if (!merged.ok) return ctx.json(invalidKey(merged).body, 400);
+    const parsed = runtimeConfigSchema.safeParse(merged.value);
     if (!parsed.success) return ctx.json({ ok: false, error: { code: 'invalid_config', message: '沙箱配置校验失败', details: parsed.error.issues } }, 400);
     const now = Date.now();
     const write = dependencies.db.prepare("INSERT INTO config_kv(key,value_json,updated_at,updated_by) VALUES (?,?,?,'webui') ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at,updated_by=excluded.updated_by");

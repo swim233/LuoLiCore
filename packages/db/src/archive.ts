@@ -77,6 +77,14 @@ export class ArchiveRepository {
       : this.db.prepare(`SELECT ${messageQuery('m')},m.media_parts_json AS mediaPartsJson FROM messages_fts f JOIN messages m ON m.id=f.rowid WHERE messages_fts MATCH ? AND m.deleted_at IS NULL ORDER BY bm25(messages_fts),m.tg_date DESC LIMIT ?`).all(parsed.fts, limit) as ArchivedMessage[];
     return rows.map((row) => withMedia(row)!);
   }
+
+  /** 命中总数。分页页码依赖它：拿「已取回条数」当 total 的话，翻到后面页数会漂（docs/20 · W-API-03）。 */
+  adminSearchCount(query: string): number {
+    const parsed = archiveQuery(query);
+    return 'like' in parsed
+      ? this.db.prepare('SELECT COUNT(*) FROM messages WHERE deleted_at IS NULL AND text LIKE ?').pluck().get(parsed.like) as number
+      : this.db.prepare('SELECT COUNT(*) FROM messages_fts f JOIN messages m ON m.id=f.rowid WHERE messages_fts MATCH ? AND m.deleted_at IS NULL').pluck().get(parsed.fts) as number;
+  }
 }
 
 export class ScopedArchiveRepository {

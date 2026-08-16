@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import YAML from 'yaml';
+import { assignDotted } from '@luoli/shared';
 import { configSchema, type Config } from './schema.js';
 
 function deepMerge(base: unknown, override: unknown): unknown {
@@ -62,21 +63,9 @@ export function perChatConfig(config: Readonly<Config>, key: string): Readonly<C
   return deepFreeze(deepMerge(config, override) as Config);
 }
 
-export function dottedOverrides(rows: Array<{ key: string; valueJson: string }>): Record<string, unknown> {
+export function dottedOverrides(rows: Array<{ key: string; valueJson: string }>, onRejected?: (key: string) => void): Record<string, unknown> {
   const root: Record<string, unknown> = {};
-  for (const row of rows) {
-    const parts = row.key.split('.').filter(Boolean);
-    let cursor = root;
-    for (const [index, part] of parts.entries()) {
-      if (index === parts.length - 1) {
-        cursor[part] = JSON.parse(row.valueJson) as unknown;
-        continue;
-      }
-      const existing = cursor[part];
-      if (!existing || typeof existing !== 'object' || Array.isArray(existing)) cursor[part] = {};
-      cursor = cursor[part] as Record<string, unknown>;
-    }
-  }
+  for (const row of rows) if (!assignDotted(root, row.key, JSON.parse(row.valueJson) as unknown)) onRejected?.(row.key);
   return root;
 }
 

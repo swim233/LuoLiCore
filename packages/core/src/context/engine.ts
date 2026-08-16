@@ -29,6 +29,13 @@ export interface CommitResult {
  */
 const KNOWN_PART_TYPES = new Set(['text', 'image', 'image_url', 'file', 'reasoning', 'tool-call', 'tool-result']);
 
+/**
+ * 能发给 provider 的 role 只有这三个。AI SDK v7 的 `standardizePrompt` 在 `allowSystemInMessages`
+ * 未开启时直接拒收 messages 里的任何 system 消息 —— 这条规则不是我们定的，是下游契约
+ * （docs/02 不变量 15）。系统旁白用 `origin:'note'` 区分，role 仍是 user。
+ */
+const KNOWN_ROLES = new Set(['user', 'assistant', 'tool']);
+
 function estimateTextTokens(text: string): number {
   return Math.ceil([...text].length * 0.6) + 4;
 }
@@ -117,7 +124,7 @@ export class ContextEngine {
       for (const message of delta) if (message.tokens !== undefined) message.tokens = Math.ceil(message.tokens * ctx.tokenRatio);
       if (claim.omitted) {
         const note = `（本轮省略了 ${claim.omitted} 条更早的群聊消息，可用 read_messages / search_messages 工具查阅）`;
-        delta.unshift({ id: ulid(), role: 'system', origin: 'note', parts: [{ type: 'text', text: note }], textPreview: note, tokens: estimateTextTokens(note), pruneLevel: 0 });
+        delta.unshift({ id: ulid(), role: 'user', origin: 'note', parts: [{ type: 'text', text: note }], textPreview: note, tokens: estimateTextTokens(note), pruneLevel: 0 });
       }
       const trigger = renderArchivedMessage(request.trigger, request.isPrivate, request.config.general.timezone);
       if (trigger.tokens !== undefined) trigger.tokens = Math.ceil(trigger.tokens * ctx.tokenRatio);
@@ -233,6 +240,7 @@ export class ContextEngine {
     const calls = new Set<string>();
     for (const message of messages) {
       const parts = message.parts as Array<{ type?: string; toolCallId?: string }>;
+      if (!KNOWN_ROLES.has(message.role)) this.invalidShape(key, `role ${JSON.stringify(message.role)} cannot be sent to the provider`);
       if (message.role === 'tool' && !parts.some((part) => part?.type === 'tool-result')) this.invalidShape(key, 'tool message lacks tool-result part');
       for (const part of parts) {
         if (part?.type !== undefined && !KNOWN_PART_TYPES.has(part.type)) this.invalidShape(key, `unknown part type ${JSON.stringify(part.type)}`);

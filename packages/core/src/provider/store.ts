@@ -1,6 +1,6 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { randomBytes, randomInt } from 'node:crypto';
 import type { Sqlite } from '@luoli/db';
-import type { Secrets } from '../secrets.js';
+import { Secrets } from '../secrets.js';
 
 export interface ProviderInput {
   id?: string;
@@ -40,7 +40,11 @@ export class ProviderStore {
   /** `includeDisabled` 只给「测试连接」用：停用的 provider 也要能在启用前先探一次。 */
   key(id: string, includeDisabled = false): string | null {
     const row = this.db.prepare(`SELECT api_key_enc AS encrypted FROM providers WHERE id=?${includeDisabled ? '' : ' AND enabled=1'}`).get(id) as { encrypted: string | null } | undefined;
-    return row?.encrypted ? this.secrets.decrypt(row.encrypted) : null;
+    if (!row?.encrypted) return null;
+    const plaintext = this.secrets.decrypt(row.encrypted);
+    // 读到弱派生的历史密文就地升级到 v2（docs/20 · W-SEC-02）。不需要迁移脚本，也不影响本次调用。
+    if (Secrets.isLegacy(row.encrypted)) this.db.prepare('UPDATE providers SET api_key_enc=? WHERE id=?').run(this.secrets.encrypt(plaintext), id);
+    return plaintext;
   }
 
   get secretsAvailable(): boolean {
@@ -52,8 +56,12 @@ export function fallbackOrder<T>(chain: T[], health: (entry: T) => boolean): T[]
   return [...chain.filter(health), ...chain.filter((entry) => !health(entry))];
 }
 
+/**
+ * 抖动必须是真随机：`sha256(attempt)` 对同一个 attempt 是常量，所有并发请求会退避到同一时刻
+ * 再一起打过去，等于没有抖动（docs/20 · W-PROV-01）。
+ */
 export function retryDelay(attempt: number, retryAfterMs: number | null, baseMs: number, maxMs: number): number {
   if (retryAfterMs !== null) return Math.min(retryAfterMs, maxMs);
-  const jitter = Number.parseInt(createHash('sha256').update(String(attempt)).digest('hex').slice(0, 4), 16) / 0xffff;
+  const jitter = randomInt(0, 10_000) / 10_000;
   return Math.min(baseMs * 2 ** attempt * (0.8 + jitter * 0.4), maxMs);
 }

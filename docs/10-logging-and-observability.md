@@ -249,16 +249,21 @@ release(turn):                                   # turn 结束（含失败）
 ## 6. 健康检查与告警
 
 ```
-GET /api/health（无需鉴权，仅返回布尔与计数，不含敏感信息）
+GET /api/health（无需鉴权）—— 只回存活状态，不透露任何内部拓扑
+{ ok, uptimeMs }
+
+GET /api/health/detail（需登录）—— 详细状态
 { ok, version, uptimeMs,
-  bot: { mode, connected, lastUpdateAt },
-  db: { ok, sizeMb, walMb },
-  providers: [{ name, state }],
-  mcp: [{ name, state }],
-  sandbox: { mode, available },
-  inFlightTurns, queueLength,
-  quota: { globalDaySpent, globalDayLimit } }
+  db: { ok },
+  providers: [{ id, name, kind, baseUrl, healthState }],
+  mcp: [{ name, state, error }],
+  sandbox: { allowed, mode },
+  inFlightTurns }
 ```
+
+> 拆成两个是因为「无需鉴权」和「provider 列表（含 baseUrl）+ MCP 服务器 + 沙箱 plan + 在途轮次数」
+> 不能同时成立：默认绑 `127.0.0.1` 时影响有限，但 `webui.host` 一放开就是无鉴权信息泄露
+> （docs/20 · W-API-01）。外部探针只需要 `/api/health`。
 
 告警渠道（`alerts`）：
 - **私聊 owner**（默认开）：global 配额超限、provider 全部不可用、DB 写失败、plugin 自动禁用、沙箱不可用而有非 owner 请求执行、连续 5 个 turn 失败。
