@@ -15,10 +15,13 @@ export interface QuotaReservation {
   committed: number;
 }
 
-function bucket(now: Date, timezone: string, window: 'day' | 'month'): string {
+/** 导出而不是留成模块私有：WebUI 要判断一行计数器是不是「当前这个窗口」，
+ *  在服务端重写一遍 Intl 调用只会在时区/格式上和记账侧漂移开。 */
+export function quotaBucket(now: Date, timezone: string, window: 'day' | 'month'): string {
   const parts = new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
   return window === 'day' ? parts : parts.slice(0, 7);
 }
+const bucket = quotaBucket;
 
 export class QuotaGuard {
   constructor(private readonly db: Sqlite, private readonly timezone: string) {}

@@ -23,7 +23,10 @@ interface LogRow { id: number; ts: number; level: string; kind: string; summary:
 
 interface Chat { key: string; chatId: string; threadId: number | null; scope: string; tokens: number | null; messages: number | null }
 interface Usage { id: number; ts: number; model_alias: string; input_tokens: number; output_tokens: number; cost_usd: number; ok: number }
-interface Extension { name: string; description?: string; min_role?: string; enabled?: number; load_error?: string | null }
+// mcp_servers 的错误列叫 last_error、状态列叫 state；skills/plugins 用的是 load_error。
+// 只看 load_error 的话，连不上的 MCS server 会被显示成「可用」。
+interface Extension { name: string; description?: string; min_role?: string; enabled?: number; load_error?: string | null;
+  state?: string | null; last_error?: string | null; transport?: string; version?: string | null }
 interface Paged<T> { items: T[]; total: number; page: number; size: number }
 interface Conversation { id: string; key: string; chatId: string; userId: string; role: string; state: string; triggerReason: string | null; startedAt: number | null; finishedAt: number | null;
   steps: number; toolCalls: number; inputTokens: number; outputTokens: number; costUsd: number; error: string | null; rebased: number;
@@ -195,7 +198,8 @@ const navigation = [
   ['dashboard', 'pi pi-chart-bar', '总览'], ['chats', 'pi pi-comments', '会话'], ['messages', 'pi pi-search', '消息'],
   ['prompts', 'pi pi-align-left', '提示词'], ['providers', 'pi pi-sparkles', '模型'], ['principals', 'pi pi-users', '主体'],
   ['tools', 'pi pi-wrench', '工具'], ['extensions', 'pi pi-box', '扩展'], ['agents', 'pi pi-sitemap', 'Agent'],
-  ['logs', 'pi pi-list', '日志'], ['usage', 'pi pi-wallet', '用量'], ['tasks', 'pi pi-check-square', '任务与审批'], ['settings', 'pi pi-cog', '设置'],
+  ['logs', 'pi pi-list', '日志'], ['usage', 'pi pi-wallet', '用量'], ['quota', 'pi pi-gauge', '配额'],
+  ['tasks', 'pi pi-check-square', '任务与审批'], ['settings', 'pi pi-cog', '设置'],
 ] as const;
 const currentLabel = computed(() => navigation.find(([key]) => key === active.value)?.[2] ?? '总览');
 const COLUMNS = {
@@ -214,10 +218,11 @@ const COLUMNS = {
 } satisfies Record<string, GridColumn[]>;
 
 async function load(): Promise<void> {
-  [dashboard.value, principals.value, providers.value, logs.value, chats.value, usage.value, skills.value, plugins.value, mcp.value, agents.value, tools.value, approvals.value, tasks.value, prompts.value, config.value, models.value, aliases.value] = await Promise.all([
+  [dashboard.value, principals.value, providers.value, logs.value, chats.value, usage.value, skills.value, plugins.value, mcp.value, agents.value, tools.value, approvals.value, tasks.value, prompts.value, config.value, models.value, aliases.value, health.value] = await Promise.all([
     api<Dashboard>('/api/dashboard'), api<Principal[]>('/api/principals'), api<Provider[]>('/api/providers'), api<LogRow[]>('/api/logs'),
     api<Chat[]>('/api/chats'), api<Usage[]>('/api/usage'), api<Extension[]>('/api/skills'), api<Extension[]>('/api/plugins'), api<Extension[]>('/api/mcp'), api<AgentDefinition[]>('/api/agents'), api<Record<string, ToolPolicy>>('/api/tools'),
     api<Array<Record<string, unknown>>>('/api/approvals'), api<Array<Record<string, unknown>>>('/api/tasks'), api<Array<Record<string, unknown>>>('/api/prompts'), api<Record<string, unknown>>('/api/config'), api<Array<Record<string, unknown>>>('/api/models'), api<Array<Record<string, unknown>>>('/api/aliases'),
+    api<HealthDetail>('/api/health/detail'),
   ]);
   syncTrigger();
   syncOutput();
@@ -703,14 +708,279 @@ async function removeAgent(name: string): Promise<void> {
   catch (error) { toastError('删除 Agent 失败', error); }
 }
 
-watch(active, (value) => { if (value === 'messages') void loadConversations(); });
+// ── 配额：限额在配置里、计数器在 quota_counters 里，GET /api/quota 已经把两边对齐好 ────────
+interface QuotaPair { daily: number | null; monthly: number | null }
+interface QuotaCounter { scope: 'global' | 'chat' | 'user'; subject: string; window: 'day' | 'month'; bucket: string; costUsd: number; reservedUsd: number;
+  turns: number; updatedAt: number; current: boolean; limit: number | null; limitApprox: boolean; role: string | null; label: string | null; username: string | null }
+interface QuotaPayload {
+  quota: { enabled: boolean; requirePricing: boolean; minReserveUsd: number; global: QuotaPair; perChat: QuotaPair;
+    perUser: QuotaPair & { byRole: Record<string, { daily?: number | null; monthly?: number | null }> };
+    perTurn: { maxCostUsd: number; maxSteps: number }; rateLimit: { turnsPerUserPerHour: number; turnsPerChatPerHour: number; concurrentPerUser: number };
+    onExceeded: { reply: boolean; message: string } };
+  timezone: string; buckets: { day: string; month: string }; counters: QuotaCounter[];
+  unpriced: Array<{ providerId: string; modelId: string }>; unpricedTotal: number; unimplemented: string[];
+}
+interface QuotaForm { enabled: boolean; requirePricing: boolean; minReserveUsd: number | null; globalDaily: number | null; globalMonthly: number | null;
+  chatDaily: number | null; chatMonthly: number | null; userDaily: number | null; userMonthly: number | null; byRole: Record<string, QuotaPair>;
+  maxCostUsd: number | null; maxSteps: number | null; turnsPerUserPerHour: number | null; turnsPerChatPerHour: number | null;
+  concurrentPerUser: number | null; reply: boolean; message: string }
+const emptyQuotaForm = (): QuotaForm => ({ enabled: true, requirePricing: true, minReserveUsd: 0.02, globalDaily: null, globalMonthly: null,
+  chatDaily: null, chatMonthly: null, userDaily: null, userMonthly: null, byRole: Object.fromEntries(ROLES.map((role) => [role, { daily: null, monthly: null }])),
+  maxCostUsd: 0.5, maxSteps: 12, turnsPerUserPerHour: 30, turnsPerChatPerHour: 100, concurrentPerUser: 2, reply: true, message: '' });
+/** 这几项在 schema 上是必填正数，没有「不限」这个取值：留空发过去只会拿回一条 zod 报错，在本地就指出是哪一格。 */
+const QUOTA_REQUIRED: Array<[keyof QuotaForm, string]> = [['minReserveUsd', '最小预留'], ['maxCostUsd', '单轮成本上限'], ['maxSteps', '单轮步数上限'],
+  ['turnsPerUserPerHour', '每人每小时轮次'], ['turnsPerChatPerHour', '每会话每小时轮次'], ['concurrentPerUser', '单用户并发']];
+// 未接线的键不给控件，但要说清楚「现在真正管这件事的是谁」——否则运维会去 config.yaml 里改一个没人读的值。
+const QUOTA_UNIMPLEMENTED_HINTS: Record<string, string> = {
+  'quota.perTurn.maxToolCalls': '单轮工具调用数上限；当前真正生效的是 tools.maxCallsPerTurn',
+  'quota.perTurn.maxSubagents': '单轮子 agent 数上限；当前真正生效的是 agent.maxSubagentsPerTurn',
+  'quota.perTurn.maxDurationMs': '单轮墙钟上限；当前真正生效的是 concurrency.turnTimeoutMs',
+  'quota.onExceeded.notifyOwner': '超限时私信 owner；没有任何代码路径读它',
+  'quota.warnAtRatio': '用量到达比例时预警；没有任何代码路径读它',
+};
+const QUOTA_SCOPE_LABELS: Record<string, string> = { global: '全局', chat: '会话', user: '用户' };
+const quota = ref<QuotaPayload | null>(null);
+const quotaForm = ref<QuotaForm>(emptyQuotaForm());
+const quotaDirty = ref(false);
+const quotaSaving = ref(false);
+const quotaLoading = ref(false);
+const quotaResetting = ref('');
+const quotaShowHistory = ref(false);
+const counterKey = (row: QuotaCounter): string => `${row.scope}:${row.subject}:${row.window}:${row.bucket}`;
+const visibleCounters = computed(() => (quota.value?.counters ?? []).filter((row) => quotaShowHistory.value || row.current));
+const staleCounters = computed(() => (quota.value?.counters ?? []).filter((row) => !row.current).length);
+function counterTitle(row: QuotaCounter): string {
+  if (row.scope === 'global') return '全局';
+  return row.label || `未登记${row.scope === 'chat' ? '会话' : '用户'} ${row.subject}`;
+}
+const spent = (row: QuotaCounter): number => row.costUsd + row.reservedUsd;
+/** 分母是 cost + reserved：在途那一轮已经把额度占住了，只画已结算的会让「明明还有钱却被拒」看起来像 bug。 */
+const counterRatio = (row: QuotaCounter): number => (row.limit ? Math.min(1, spent(row) / row.limit) : 0);
+const money = (value: number): string => `$${value.toFixed(4)}`;
+function markQuotaDirty(): void { quotaDirty.value = true; }
+function syncQuota(payload: QuotaPayload): void {
+  const config = payload.quota;
+  quotaForm.value = { enabled: config.enabled, requirePricing: config.requirePricing, minReserveUsd: config.minReserveUsd,
+    globalDaily: config.global.daily, globalMonthly: config.global.monthly, chatDaily: config.perChat.daily, chatMonthly: config.perChat.monthly,
+    userDaily: config.perUser.daily, userMonthly: config.perUser.monthly,
+    byRole: Object.fromEntries(ROLES.map((role) => [role, { daily: config.perUser.byRole[role]?.daily ?? null, monthly: config.perUser.byRole[role]?.monthly ?? null }])),
+    maxCostUsd: config.perTurn.maxCostUsd, maxSteps: config.perTurn.maxSteps, turnsPerUserPerHour: config.rateLimit.turnsPerUserPerHour,
+    turnsPerChatPerHour: config.rateLimit.turnsPerChatPerHour, concurrentPerUser: config.rateLimit.concurrentPerUser,
+    reply: config.onExceeded.reply, message: config.onExceeded.message };
+}
+/** 不进 load()：计数器要拉 quota_counters 全表 + principals，挂在每条日志事件上是白烧的查询。 */
+async function loadQuota(): Promise<void> {
+  quotaLoading.value = true;
+  try { const payload = await api<QuotaPayload>('/api/quota'); quota.value = payload; if (!quotaDirty.value) syncQuota(payload); }
+  catch (error) { toastError('加载配额失败', error); }
+  finally { quotaLoading.value = false; }
+}
+async function saveQuota(): Promise<void> {
+  const form = quotaForm.value;
+  const missing = QUOTA_REQUIRED.filter(([key]) => form[key] === null).map(([, label]) => label);
+  if (missing.length) { pushToast({ severity: 'warn', summary: '这些项不能留空', detail: `${missing.join('、')} 没有「不限」这个取值`, life: 7000 }); return; }
+  // 只写真正填了值的角色：`roleLimits?.daily ?? perUser.daily` 对 null 同样回落，
+  // 写一条 {daily:null} 与不写这一项在运行时完全等价，留着只会让覆盖表看起来配了其实没配。
+  const byRole: Record<string, Record<string, number>> = {};
+  for (const [role, pair] of Object.entries(form.byRole)) {
+    const entry: Record<string, number> = {};
+    if (pair.daily !== null) entry.daily = pair.daily;
+    if (pair.monthly !== null) entry.monthly = pair.monthly;
+    if (Object.keys(entry).length) byRole[role] = entry;
+  }
+  quotaSaving.value = true;
+  try {
+    await api('/api/quota', { method: 'PUT', body: JSON.stringify({ enabled: form.enabled, requirePricing: form.requirePricing, minReserveUsd: form.minReserveUsd,
+      'global.daily': form.globalDaily, 'global.monthly': form.globalMonthly, 'perChat.daily': form.chatDaily, 'perChat.monthly': form.chatMonthly,
+      'perUser.daily': form.userDaily, 'perUser.monthly': form.userMonthly, 'perUser.byRole': byRole,
+      'perTurn.maxCostUsd': form.maxCostUsd, 'perTurn.maxSteps': form.maxSteps,
+      'rateLimit.turnsPerUserPerHour': form.turnsPerUserPerHour, 'rateLimit.turnsPerChatPerHour': form.turnsPerChatPerHour,
+      'rateLimit.concurrentPerUser': form.concurrentPerUser, 'onExceeded.reply': form.reply, 'onExceeded.message': form.message }) });
+    quotaDirty.value = false;
+    pushToast({ severity: 'success', summary: '配额已保存', detail: '热更新已生效，下一条消息即按新限额判定' });
+    await loadQuota();
+    await load();
+  } catch (error) { toastError('保存配额失败', error); }
+  finally { quotaSaving.value = false; }
+}
+async function resetQuota(row?: QuotaCounter): Promise<void> {
+  const target = row ? `${counterTitle(row)} · ${row.bucket}` : '全部计数器';
+  if (!confirm(`重置${target}？已经花掉的钱不会退回，只是这个窗口的计数从零开始 —— 之前被挡住的人立刻又能发起对话。`)) return;
+  quotaResetting.value = row ? counterKey(row) : 'all';
+  try {
+    const result = await api<{ changes: number }>('/api/quota/reset', { method: 'POST', body: row ? JSON.stringify({ scope: row.scope, subject: row.subject, window: row.window, bucket: row.bucket }) : '{}' });
+    pushToast({ severity: 'success', summary: `已重置 ${result.changes} 行计数`, detail: `${target} · 已写审计日志` });
+    await loadQuota();
+  } catch (error) { toastError('重置计数器失败', error); }
+  finally { quotaResetting.value = ''; }
+}
+
+// ── 沙箱：mode 决定 exec 类工具跑在哪儿，配错了要么全落空要么直接跑在宿主上 ──────────────
+interface SandboxForm { mode: string; network: string; image: string; dockerBin: string; workspaceDir: string; hostWorkspaceDir: string;
+  memoryMb: number | null; cpus: number | null; pidsLimit: number | null; tmpfsMb: number | null; readOnlyRoot: boolean; bypassRoles: string[] }
+interface SandboxPayload { config: Record<string, unknown>; plan?: { allowed: boolean; mode: string; reason?: string } }
+const sandbox = ref<SandboxPayload | null>(null);
+const sandboxForm = ref<SandboxForm>({ mode: 'docker', network: 'none', image: '', dockerBin: 'docker', workspaceDir: '', hostWorkspaceDir: '',
+  memoryMb: 512, cpus: 1, pidsLimit: 128, tmpfsMb: 64, readOnlyRoot: true, bypassRoles: ['owner'] });
+const sandboxDirty = ref(false);
+const sandboxSaving = ref(false);
+const sandboxProbing = ref(false);
+const sandboxProbe = ref<{ available: boolean; mode?: string; error?: string } | null>(null);
+const SANDBOX_MODES = [{ value: 'docker', label: 'docker · 每次调用起一个一次性容器' }, { value: 'jail', label: 'jail · 仅限制工作目录，同进程执行' }, { value: 'none', label: 'none · 不隔离，直接在宿主上跑' }];
+function markSandboxDirty(): void { sandboxDirty.value = true; }
+function syncSandbox(payload: SandboxPayload): void {
+  if (sandboxDirty.value) return;
+  const config = payload.config as Partial<SandboxForm>;
+  sandboxForm.value = { ...sandboxForm.value, ...config, bypassRoles: [...(config.bypassRoles ?? [])] };
+}
+async function loadSandbox(): Promise<void> {
+  try { const payload = await api<SandboxPayload>('/api/sandbox'); sandbox.value = payload; syncSandbox(payload); }
+  catch (error) { toastError('加载沙箱配置失败', error); }
+}
+function toggleBypassRole(role: string): void {
+  const current = sandboxForm.value.bypassRoles;
+  sandboxForm.value.bypassRoles = current.includes(role) ? current.filter((entry) => entry !== role) : [...current, role];
+  markSandboxDirty();
+}
+async function saveSandbox(): Promise<void> {
+  const form = sandboxForm.value;
+  if (form.mode === 'none' && !confirm('mode = none 之后，exec 类工具直接在宿主进程的权限下执行任意命令，沙箱那一层完全消失。确定？')) return;
+  sandboxSaving.value = true;
+  try {
+    await api('/api/sandbox', { method: 'PUT', body: JSON.stringify({ mode: form.mode, network: form.network, image: form.image, dockerBin: form.dockerBin,
+      workspaceDir: form.workspaceDir, hostWorkspaceDir: form.hostWorkspaceDir, memoryMb: form.memoryMb, cpus: form.cpus, pidsLimit: form.pidsLimit,
+      tmpfsMb: form.tmpfsMb, readOnlyRoot: form.readOnlyRoot, bypassRoles: form.bypassRoles }) });
+    sandboxDirty.value = false;
+    pushToast({ severity: 'success', summary: '沙箱配置已保存', detail: '热更新已生效，下一次工具调用即按新配置执行' });
+    await loadSandbox();
+  } catch (error) { toastError('保存沙箱配置失败', error); }
+  finally { sandboxSaving.value = false; }
+}
+/** 探测打的是**库里已保存的那份**配置：表单里改了还没存，探出来的仍是旧 mode。 */
+async function probeSandbox(): Promise<void> {
+  sandboxProbing.value = true;
+  try {
+    const result = await api<{ available: boolean; mode?: string; error?: string }>('/api/sandbox/probe', { method: 'POST', body: '{}' });
+    sandboxProbe.value = result;
+    pushToast({ severity: result.available ? 'success' : 'error', summary: result.available ? `沙箱可用（${result.mode ?? sandboxForm.value.mode}）` : '沙箱不可用', detail: result.error ?? '', life: result.available ? 4000 : 9000 });
+  } catch (error) { toastError('沙箱探测失败', error); }
+  finally { sandboxProbing.value = false; }
+}
+
+// ── 扩展：Skill / Plugin / MCP 三张表的启停与重载 ────────────────────────────────
+type ExtensionKind = 'skill' | 'plugin' | 'mcp';
+const EXTENSION_META: Record<ExtensionKind, { label: string; icon: string }> = {
+  skill: { label: 'Skill', icon: 'pi pi-book' }, plugin: { label: 'Plugin', icon: 'pi pi-box' }, mcp: { label: 'MCP', icon: 'pi pi-server' },
+};
+const MCP_STATE_LABELS: Record<string, { label: string; severity: TagSeverity }> = {
+  ready: { label: '已连接', severity: 'success' }, connecting: { label: '连接中', severity: 'warn' },
+  error: { label: '连不上', severity: 'danger' }, disabled: { label: '停用', severity: 'secondary' },
+};
+type ExtensionRow = Extension & { kind: ExtensionKind };
+const extensionError = (row: ExtensionRow): string | null => row.load_error ?? row.last_error ?? null;
+function extensionStatus(row: ExtensionRow): { label: string; severity: TagSeverity } {
+  if (row.enabled === 0) return { label: '停用', severity: 'secondary' };
+  if (row.kind === 'mcp') return MCP_STATE_LABELS[String(row.state)] ?? { label: row.state ? String(row.state) : '未连接', severity: 'warn' };
+  return extensionError(row) ? { label: '错误', severity: 'danger' } : { label: '可用', severity: 'success' };
+}
+const extensionSubtitle = (row: ExtensionRow): string => (row.kind === 'mcp' ? `${row.transport ?? '未知 transport'} · 最低角色 ${row.min_role ?? '未标注'}`
+  : row.description || `${row.version ? `v${row.version} · ` : ''}最低角色 ${row.min_role ?? '未标注'}`);
+const extensionBusy = ref('');
+const extensionRows = computed(() => [
+  ...skills.value.map((item) => ({ ...item, kind: 'skill' as ExtensionKind })),
+  ...plugins.value.map((item) => ({ ...item, kind: 'plugin' as ExtensionKind })),
+  ...mcp.value.map((item) => ({ ...item, kind: 'mcp' as ExtensionKind })),
+]);
+async function toggleExtension(row: Extension & { kind: ExtensionKind }): Promise<void> {
+  const next = row.enabled === 0;
+  // Plugin 是全信任执行任意代码的，开启这一步必须是有意识的动作（docs/07 §3）。
+  if (row.kind === 'plugin' && next && !confirm(`启用 Plugin ${row.name}？Plugin 以全信任方式在 bot 进程里运行任意代码，没有沙箱。`)) return;
+  extensionBusy.value = `${row.kind}:${row.name}`;
+  try {
+    await api(`/api/${row.kind === 'skill' ? 'skills' : 'plugins'}/${encodeURIComponent(row.name)}`, { method: 'PATCH', body: JSON.stringify({ enabled: next }) });
+    pushToast({ severity: 'success', summary: `${row.name} 已${next ? '启用' : '停用'}`, detail: EXTENSION_META[row.kind].label });
+    await load();
+  } catch (error) { toastError('切换扩展状态失败', error); }
+  finally { extensionBusy.value = ''; }
+}
+async function reloadExtension(row: Extension & { kind: ExtensionKind }): Promise<void> {
+  extensionBusy.value = `${row.kind}:${row.name}`;
+  try {
+    await api(row.kind === 'mcp' ? `/api/mcp/${encodeURIComponent(row.name)}/reconnect` : `/api/plugins/${encodeURIComponent(row.name)}/reload`, { method: 'POST', body: '{}' });
+    pushToast({ severity: 'success', summary: `${row.name} 已${row.kind === 'mcp' ? '重连' : '重载'}`, detail: '结果看下方状态与 load_error' });
+    await load();
+  } catch (error) { toastError('重载失败', error); }
+  finally { extensionBusy.value = ''; }
+}
+async function removeSkill(name: string): Promise<void> {
+  if (!confirm(`从库里删除 Skill ${name}？磁盘上的 SKILL.md 不动，下次扫描还会被重新发现 —— 要永久移除得删文件。`)) return;
+  try { await api(`/api/skills/${encodeURIComponent(name)}`, { method: 'DELETE' }); pushToast({ severity: 'success', summary: `Skill ${name} 已删除` }); await load(); }
+  catch (error) { toastError('删除 Skill 失败', error); }
+}
+
+// ── 维护：备份 / VACUUM / 清日志 / 重建 FTS。gc-files 后端是 not_implemented，不给按钮 ────
+const MAINTENANCE_ACTIONS = [
+  { action: 'backup', label: '立即备份 DB', icon: 'pi pi-database', hint: '走 VACUUM INTO 写一份完整快照到 db.path 旁边，保留 db.backupKeep 份' },
+  { action: 'vacuum', label: 'VACUUM', icon: 'pi pi-compress', hint: '整理页面碎片、回收空间。库大时会阻塞写入' },
+  { action: 'cleanup-logs', label: '清理过期日志', icon: 'pi pi-eraser', hint: '按 logs.retentionDays 删掉过期的 log_events 与 blobs/' },
+  { action: 'rebuild-fts', label: '重建 FTS 索引', icon: 'pi pi-sync', hint: '消息检索结果不对（漏命中/命中已删消息）时重建' },
+] as const;
+const maintenanceBusy = ref('');
+async function runMaintenance(action: string, label: string): Promise<void> {
+  if (!confirm(`执行「${label}」？大库上可能耗时较久，期间写入会被阻塞。`)) return;
+  maintenanceBusy.value = action;
+  try {
+    const result = await api<unknown>(`/api/maintenance/${action}`, { method: 'POST', body: '{}' });
+    pushToast({ severity: 'success', summary: `${label} 完成`, detail: typeof result === 'string' ? result : JSON.stringify(result), life: 8000 });
+  } catch (error) { toastError(`${label} 失败`, error); }
+  finally { maintenanceBusy.value = ''; }
+}
+
+// ── 依赖健康：总览页那张卡以前是四行写死的字，与运行时无关 ──────────────────────────
+interface HealthDetail { ok: boolean; version: string; uptimeMs: number; db: { ok: boolean };
+  mcp: Array<{ name: string; state: string; error: string | null }>; sandbox: { allowed: boolean; mode?: string; reason?: string }; inFlightTurns: number }
+const health = ref<HealthDetail | null>(null);
+const uptimeText = computed(() => {
+  const ms = health.value?.uptimeMs ?? 0;
+  const hours = ms / 3_600_000;
+  return hours < 1 ? `${Math.round(ms / 60_000)} 分钟` : hours < 48 ? `${hours.toFixed(1)} 小时` : `${(hours / 24).toFixed(1)} 天`;
+});
+const mcpDown = computed(() => (health.value?.mcp ?? []).filter((entry) => entry.state !== 'ready').length);
+
+// ── 配置变更历史：config_revisions 记了每一次写入的前后值，但界面上一直没有入口 ──────────
+interface ConfigRevision { id: string; ts: number; actor: string; key: string; old_json: string | null; new_json: string | null }
+const revisionsDialog = ref(false);
+const configRevisions = ref<ConfigRevision[]>([]);
+const revisionsLoading = ref(false);
+async function openConfigRevisions(): Promise<void> {
+  revisionsDialog.value = true; revisionsLoading.value = true;
+  try { configRevisions.value = await api<ConfigRevision[]>('/api/config/revisions'); }
+  catch (error) { toastError('加载配置变更历史失败', error); }
+  finally { revisionsLoading.value = false; }
+}
+/** 值可能很长（agent.agents 是整张数组），列表里只给一行；密钥类的键在写入时就已经存成 «redacted»。 */
+const revisionValue = (raw: string | null): string => (raw === null ? '（此前没有覆盖）' : raw.length > 160 ? `${raw.slice(0, 160)}…` : raw);
+
+async function logout(): Promise<void> {
+  try { await api('/api/auth/logout', { method: 'POST', body: '{}' }); } catch { /* 会话可能已经过期，照样跳登录页 */ }
+  location.assign('/login');
+}
+
+watch(active, (value) => {
+  if (value === 'messages') void loadConversations();
+  if (value === 'quota') void loadQuota();
+  if (value === 'tools') void loadSandbox();
+});
 onMounted(async () => {
   await hydrateSession();
   await load();
   const events = new EventSource('/api/events');
   events.onopen = () => { connected.value = true; };
   events.onerror = () => { connected.value = false; };
-  events.addEventListener('log', () => void load());
+  // `log` 目前永远不会到达：LogSink 拿不到 EventBus，运行时只 emit config.changed 与
+  // approval.decided 两种（docs/21 · G-SSE-01）。留着这个监听是为了接线之后不用再改一次；
+  // 下面两条是真的会来的，至少让「另一个标签页改了配置 / 审批被裁决」能反映到这一份界面上。
+  for (const type of ['log', 'config.changed', 'approval.decided']) events.addEventListener(type, () => void load());
 });
 
 const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted: 'info', limited: 'warn', blocked: 'danger' }[role] as TagSeverity);
@@ -736,6 +1006,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
           <button type="button" class="owner-chip" :title="`bot owner · ${ownerLabel} ${ownerHandle}`" @click="active = 'principals'">
             <span class="avatar">{{ ownerInitials }}</span><span class="who"><b>{{ ownerLabel }}</b><small>{{ ownerHandle }}</small></span>
           </button>
+          <UiButton variant="text" icon="pi pi-sign-out" aria-label="退出登录" title="退出登录" @click="logout" />
         </div>
       </header>
 
@@ -757,7 +1028,15 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             <article class="surface span-2"><header><div><p class="eyebrow">TRACE ACTIVITY</p><h3>最近运行事件</h3></div><UiButton variant="text" label="查看全部" icon="pi pi-arrow-right" icon-pos="right" @click="active = 'logs'" /></header>
               <div class="log-list"><div v-for="row in logs.slice(0, 6)" :key="row.id"><span :class="['level', row.level]">{{ row.level }}</span><code>{{ row.kind }}</code><p>{{ row.summary }}</p><time>{{ new Date(row.ts).toLocaleTimeString() }}</time></div><div v-if="!logs.length" class="empty">暂无事件。完成首次启动后会在此显示 trace。</div></div>
             </article>
-            <article class="surface health"><header><div><p class="eyebrow">HEALTH</p><h3>依赖健康</h3></div></header><div class="health-row"><span>SQLite / WAL</span><UiTag value="在线" severity="success" /></div><div class="health-row"><span>Telegram</span><UiTag :value="connected ? '在线' : '等待'" :severity="connected ? 'success' : 'warn'" /></div><div class="health-row"><span>模型注册表</span><UiTag :value="`${dashboard.providers.enabled} 可用`" :severity="dashboard.providers.enabled ? 'success' : 'warn'" /></div><div class="health-row"><span>沙箱</span><UiTag value="Docker" severity="info" /></div></article>
+            <!-- 这四行以前是写死的字（沙箱恒显示「Docker」，与 sandbox.mode 无关）。数据一律来自 /api/health/detail。 -->
+            <article class="surface health"><header><div><p class="eyebrow">HEALTH</p><h3>依赖健康</h3><p class="section-note">v{{ health?.version ?? 'dev' }} · 已运行 {{ uptimeText }}</p></div></header>
+              <div class="health-row"><span>SQLite / WAL</span><UiTag :value="health?.db.ok === false ? '读写失败' : '在线'" :severity="health?.db.ok === false ? 'danger' : 'success'" /></div>
+              <div class="health-row"><span>SSE 推送</span><UiTag :value="connected ? '在线' : '重连中'" :severity="connected ? 'success' : 'warn'" /></div>
+              <div class="health-row"><span>模型注册表</span><UiTag :value="`${dashboard.providers.enabled} / ${dashboard.providers.total} 可用`" :severity="dashboard.providers.enabled ? 'success' : 'warn'" /></div>
+              <div class="health-row"><span>在途 turn</span><UiTag :value="String(health?.inFlightTurns ?? 0)" severity="secondary" /></div>
+              <div class="health-row"><span>MCP</span><UiTag v-if="!health?.mcp.length" value="未配置" severity="secondary" /><UiTag v-else :value="mcpDown ? `${mcpDown} 个异常` : `${health.mcp.length} 个就绪`" :severity="mcpDown ? 'danger' : 'success'" /></div>
+              <div class="health-row"><span>沙箱</span><UiTag :value="health?.sandbox ? `${health.sandbox.mode ?? '未知'}${health.sandbox.allowed ? '' : ' · 不可用'}` : '未装配'" :severity="!health?.sandbox ? 'secondary' : health.sandbox.allowed ? 'info' : 'danger'" :title="health?.sandbox?.reason ?? ''" /></div>
+            </article>
           </section>
         </div>
 
@@ -888,8 +1167,60 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             <template #scope="{ data }">{{ SCOPE_LABEL[data.scope] ?? data.scope }}</template>
             <template #enabled="{ data }"><UiTag :value="data.enabled ? '启用' : '已停用'" :severity="data.enabled ? 'success' : 'danger'" /></template>
           </DataGrid>
+          <div class="registry-heading">
+            <div><h3>沙箱</h3><p class="section-note">决定 <code>exec</code> 类工具跑在哪儿。<code>bypassRoles</code> 里的角色<b>完全绕过</b>沙箱，直接在宿主上执行 —— 这是整套权限模型里最锋利的一格。保存后热更新，下一次工具调用即生效。</p></div>
+            <div class="section-actions">
+              <UiButton size="small" variant="outlined" icon="pi pi-bolt" label="探测可用性" :loading="sandboxProbing" @click="probeSandbox" />
+              <UiButton size="small" icon="pi pi-save" label="保存沙箱" :loading="sandboxSaving" :disabled="!sandboxDirty" @click="saveSandbox" />
+            </div>
+          </div>
+          <div v-if="sandboxForm.mode === 'none'" class="danger-banner"><i class="pi pi-exclamation-triangle" /><code>mode = none</code>：exec 类工具不做任何隔离，以 bot 进程的权限直接在宿主上执行模型给出的命令。</div>
+          <div v-if="sandbox?.plan && !sandbox.plan.allowed" class="danger-banner"><i class="pi pi-exclamation-triangle" />当前配置下沙箱对 owner 都不可用：{{ sandbox.plan.reason ?? '未知原因' }} —— 需要沙箱的工具会直接失败。</div>
+          <p v-if="sandboxProbe" :class="['callout', sandboxProbe.available ? '' : 'warn']"><i :class="sandboxProbe.available ? 'pi pi-check-circle' : 'pi pi-times-circle'" />探测结果（打的是<b>已保存</b>的那份配置）：{{ sandboxProbe.available ? `可用 · ${sandboxProbe.mode ?? sandboxForm.mode}` : sandboxProbe.error ?? '不可用' }}</p>
+          <div class="form-grid">
+            <label>模式<UiSelect v-model="sandboxForm.mode" :options="SANDBOX_MODES" @change="markSandboxDirty" /><small class="field-note">docker 之外的两档不读下面的镜像与资源限制。</small></label>
+            <label>容器网络<UiSelect v-model="sandboxForm.network" :options="[{ value: 'none', label: 'none · 断网' }, { value: 'bridge', label: 'bridge · 可出网' }]" :disabled="sandboxForm.mode !== 'docker'" @change="markSandboxDirty" /><small class="field-note">改成 bridge 等于允许模型生成的代码访问网络与内网。</small></label>
+            <label>镜像<input v-model="sandboxForm.image" :disabled="sandboxForm.mode !== 'docker'" @input="markSandboxDirty"></label>
+            <label>docker 可执行文件<input v-model="sandboxForm.dockerBin" :disabled="sandboxForm.mode !== 'docker'" @input="markSandboxDirty"></label>
+            <label>工作目录<input v-model="sandboxForm.workspaceDir" @input="markSandboxDirty"><small class="field-note">本进程看到的路径，文件工具也用它。</small></label>
+            <label>宿主工作目录<input v-model="sandboxForm.hostWorkspaceDir" placeholder="非容器部署留空" :disabled="sandboxForm.mode !== 'docker'" @input="markSandboxDirty"><small class="field-note">bot 自己跑在容器里时必填：<code>-v</code> 用的是<b>宿主</b>路径，留空会挂到一个不存在的目录上，沙箱与文件工具从此看到两个世界。</small></label>
+            <label>内存上限（MB）<UiNumber :model-value="sandboxForm.memoryMb" :min="16" :step="64" :disabled="sandboxForm.mode !== 'docker'" @update:model-value="sandboxForm.memoryMb = $event; markSandboxDirty()" /></label>
+            <label>CPU 核数<UiNumber :model-value="sandboxForm.cpus" :min="0.1" :step="0.5" :disabled="sandboxForm.mode !== 'docker'" @update:model-value="sandboxForm.cpus = $event; markSandboxDirty()" /></label>
+            <label>进程数上限<UiNumber :model-value="sandboxForm.pidsLimit" :min="1" :disabled="sandboxForm.mode !== 'docker'" @update:model-value="sandboxForm.pidsLimit = $event; markSandboxDirty()" /></label>
+            <label>tmpfs（MB）<UiNumber :model-value="sandboxForm.tmpfsMb" :min="1" :step="16" :disabled="sandboxForm.mode !== 'docker'" @update:model-value="sandboxForm.tmpfsMb = $event; markSandboxDirty()" /></label>
+            <label class="switch-line"><input v-model="sandboxForm.readOnlyRoot" type="checkbox" :disabled="sandboxForm.mode !== 'docker'" @change="markSandboxDirty">根文件系统只读（只有工作目录与 tmpfs 可写）</label>
+            <div class="wide">
+              <p class="field-title">绕过沙箱的角色<small>勾中的角色，exec 类工具直接在宿主上跑。</small></p>
+              <div class="trigger-switches">
+                <label v-for="role in ROLES" :key="role"><input type="checkbox" :checked="sandboxForm.bypassRoles.includes(role)" @change="toggleBypassRole(role)">{{ role }}</label>
+              </div>
+              <p v-if="sandboxForm.bypassRoles.some((role) => role !== 'owner')" class="field-note wake-issue"><i class="pi pi-exclamation-triangle" />owner 之外的角色也在绕过名单里：这些人能让模型在宿主上执行任意命令。</p>
+            </div>
+          </div>
         </section>
-        <section v-else-if="active === 'extensions'" key="extensions" class="surface page-surface"><header><div><p class="eyebrow">EXTENSIONS</p><h2>Skills / Plugins / MCP</h2><p>Skill 渐进式披露；Plugin 全信任运行；MCP 工具动态发现。</p></div></header><div class="provider-grid"><article v-for="item in [...skills, ...plugins, ...mcp]" :key="item.name"><UiTag :value="item.load_error ? '错误' : item.enabled === 0 ? '停用' : '可用'" :severity="item.load_error ? 'danger' : item.enabled === 0 ? 'secondary' : 'success'" /><h3>{{ item.name }}</h3><p>{{ item.description ?? item.min_role ?? 'extension' }}</p><code v-if="item.load_error">{{ item.load_error }}</code></article><article v-if="!skills.length && !plugins.length && !mcp.length" class="empty-card"><i class="pi pi-box" /><h3>暂无扩展</h3><p>把 Skill、Plugin 或 MCP server 加入配置后重载。</p></article></div></section>
+        <section v-else-if="active === 'extensions'" key="extensions" class="surface page-surface">
+          <header><div><p class="eyebrow">EXTENSIONS</p><h2>Skills / Plugins / MCP</h2><p>Skill 渐进式披露；Plugin 在 bot 进程里<b>全信任</b>运行，没有沙箱；MCP 工具动态发现。启停即时写库并重扫。</p></div><UiTag :value="`${extensionRows.filter((row) => row.enabled !== 0).length} / ${extensionRows.length} 启用`" :severity="extensionRows.some((row) => row.load_error) ? 'danger' : 'secondary'" /></header>
+          <div class="provider-grid">
+            <article v-for="item in extensionRows" :key="`${item.kind}:${item.name}`">
+              <div class="provider-head">
+                <div class="provider-tags">
+                  <UiTag :value="EXTENSION_META[item.kind].label" severity="secondary" />
+                  <UiTag :value="extensionStatus(item).label" :severity="extensionStatus(item).severity" />
+                </div>
+                <div class="card-actions">
+                  <UiButton v-if="item.kind !== 'mcp'" variant="text" size="small" :icon="item.enabled === 0 ? 'pi pi-play' : 'pi pi-pause'" :aria-label="item.enabled === 0 ? '启用' : '停用'" :loading="extensionBusy === `${item.kind}:${item.name}`" @click="toggleExtension(item)" />
+                  <UiButton v-if="item.kind !== 'skill'" variant="text" size="small" icon="pi pi-refresh" :aria-label="item.kind === 'mcp' ? '重连' : '重载'" :loading="extensionBusy === `${item.kind}:${item.name}`" @click="reloadExtension(item)" />
+                  <UiButton v-if="item.kind === 'skill'" variant="text" size="small" severity="danger" icon="pi pi-trash" aria-label="删除 Skill" @click="removeSkill(item.name)" />
+                </div>
+              </div>
+              <h3><i :class="EXTENSION_META[item.kind].icon" aria-hidden="true" /> {{ item.name }}</h3>
+              <p>{{ extensionSubtitle(item) }}</p>
+              <code v-if="extensionError(item)">{{ extensionError(item) }}</code>
+            </article>
+            <article v-if="!extensionRows.length" class="empty-card"><i class="pi pi-box" /><h3>暂无扩展</h3><p>把 Skill、Plugin 或 MCP server 加入配置后重载。</p></article>
+          </div>
+          <p class="field-note"><i class="pi pi-info-circle" />MCP server 的增删、启停与 transport 配置只在 <code>mcp.servers</code> 里（服务端没有 <code>PATCH /api/mcp/:name</code>），这一页只能重连；Skill 停用后磁盘上的 <code>SKILL.md</code> 仍在，下次扫描不会自动重新启用。</p>
+        </section>
         <section v-else-if="active === 'agents'" key="agents" class="surface page-surface"><header><div><p class="eyebrow">AGENT TOPOLOGY</p><h2>子 Agent</h2><p>独立上下文、权限不高于父 Agent，结果全文独立落盘。点任一行编辑，保存即热更新。</p></div><UiButton label="新建 Agent" icon="pi pi-plus" @click="editAgent()" /></header>
           <DataGrid :rows="agents" :columns="COLUMNS.agents" data-key="name" clickable empty="没有配置子 Agent。模型只有在这里配了 agent 才能用 spawn_agent 派发。" @row-click="editAgent">
             <template #name="{ data }"><code>{{ data.name }}</code></template>
@@ -905,6 +1236,84 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
           </DataGrid>
         </section>
 
+        <section v-else-if="active === 'quota'" key="quota" class="surface page-surface">
+          <header><div><p class="eyebrow">SPEND LIMITS</p><h2>配额</h2><p>限额是配置项（热更新，下一条消息即生效）；计数器是 <code>quota_counters</code> 里的实时值。开轮次时先按估算预留，结束后按实际花费结算。</p></div><UiTag :value="quotaForm.enabled ? '配额生效中' : '配额已关闭'" :severity="quotaForm.enabled ? 'success' : 'danger'" /></header>
+          <div v-if="!quotaForm.enabled" class="danger-banner"><i class="pi pi-exclamation-triangle" /><code>quota.enabled</code> 已关闭：所有金额限额都不再判定，任何人都能一直发起对话把钱花完。频率限制（下面那组）不受这个开关影响，仍然生效。</div>
+          <div v-if="quota && quota.unpricedTotal" class="danger-banner"><i class="pi pi-exclamation-triangle" />有 <b>{{ quota.unpricedTotal }}</b> 个启用中的模型没有定价，走它们的轮次<b>花费按 0 记账</b>，限额配得再准也拦不住 —— <code>{{ quota.unpriced.map((entry) => entry.modelId).join('、') }}</code><UiButton size="small" variant="text" label="去补定价" @click="active = 'providers'" /></div>
+
+          <div class="registry-heading">
+            <div><h3>限额</h3><p class="section-note">金额留空 = 不限。三层同时判定，任一层超了就拒：全局 → 会话 → 用户。预留在轮次结束后按实际花费结算，进程被 kill 时残留的预留量由启动清理归零。</p></div>
+            <UiButton size="small" icon="pi pi-save" label="保存配额" :loading="quotaSaving" :disabled="!quotaDirty" @click="saveQuota" />
+          </div>
+          <div class="form-grid">
+            <div class="trigger-switches">
+              <label><input v-model="quotaForm.enabled" type="checkbox" @change="markQuotaDirty">启用金额配额</label>
+              <label><input v-model="quotaForm.requirePricing" type="checkbox" @change="markQuotaDirty">模型缺定价时拒绝开轮次</label>
+            </div>
+            <label>最小预留（美元）<UiNumber :model-value="quotaForm.minReserveUsd" :min="0" :step="0.01" @update:model-value="quotaForm.minReserveUsd = $event; markQuotaDirty()" /><small class="field-note">开轮次时至少占住这么多额度。估算值比它低时按它算，免得一堆小轮次并发挤穿限额。</small></label>
+            <p class="field-note wide"><code>requirePricing</code> 对 owner 不生效：owner 的轮次即便模型没定价也照常开，只是那一轮记 0 美元。</p>
+            <p class="field-title wide">按范围的金额上限<small>bucket 按 <code>{{ quota?.timezone ?? 'general.timezone' }}</code> 切换：日 = 当地自然日，月 = 当地自然月。</small></p>
+            <label>全局 · 每日<UiNumber :model-value="quotaForm.globalDaily" :min="0" :step="0.5" placeholder="不限" @update:model-value="quotaForm.globalDaily = $event; markQuotaDirty()" /></label>
+            <label>全局 · 每月<UiNumber :model-value="quotaForm.globalMonthly" :min="0" :step="5" placeholder="不限" @update:model-value="quotaForm.globalMonthly = $event; markQuotaDirty()" /></label>
+            <label>单会话 · 每日<UiNumber :model-value="quotaForm.chatDaily" :min="0" :step="0.5" placeholder="不限" @update:model-value="quotaForm.chatDaily = $event; markQuotaDirty()" /></label>
+            <label>单会话 · 每月<UiNumber :model-value="quotaForm.chatMonthly" :min="0" :step="5" placeholder="不限" @update:model-value="quotaForm.chatMonthly = $event; markQuotaDirty()" /></label>
+            <label>单用户 · 每日<UiNumber :model-value="quotaForm.userDaily" :min="0" :step="0.5" placeholder="不限" @update:model-value="quotaForm.userDaily = $event; markQuotaDirty()" /></label>
+            <label>单用户 · 每月<UiNumber :model-value="quotaForm.userMonthly" :min="0" :step="5" placeholder="不限" @update:model-value="quotaForm.userMonthly = $event; markQuotaDirty()" /></label>
+            <p class="field-note wide">推荐 <code>单用户 ≤ 单会话 ≤ 全局</code>（[11 §约束]）。反过来配不会被拒，只是内层那道闸永远先撞上。</p>
+            <p class="field-title wide">按角色覆盖单用户额度<small>留空 = 用上面那组单用户的值。</small></p>
+            <div class="wide quota-roles">
+              <div v-for="role in ROLES" :key="role" class="quota-role">
+                <UiTag :value="role" :severity="roleSeverity(role)" />
+                <label>每日<UiNumber :model-value="quotaForm.byRole[role].daily" :min="0" :step="0.5" placeholder="继承" @update:model-value="quotaForm.byRole[role].daily = $event; markQuotaDirty()" /></label>
+                <label>每月<UiNumber :model-value="quotaForm.byRole[role].monthly" :min="0" :step="5" placeholder="继承" @update:model-value="quotaForm.byRole[role].monthly = $event; markQuotaDirty()" /></label>
+              </div>
+            </div>
+            <p class="field-note wide"><i class="pi pi-info-circle" />覆盖只能填<b>具体金额</b>，填不出「这个角色不限」：运行时取的是 <code>byRole[role].daily ?? perUser.daily</code>，<code>null</code> 同样回落到上面那格。要让某个角色不限，得把单用户那格也清空。判定用的是<b>有效角色</b>（min(用户角色, 会话角色)），所以同一个人在不同群里可能落到不同档。</p>
+            <p class="field-title wide">单轮上限<small>一轮之内的硬闸，与上面按天/按月的额度是两回事。</small></p>
+            <label>单轮成本上限（美元）<UiNumber :model-value="quotaForm.maxCostUsd" :min="0.001" :step="0.1" @update:model-value="quotaForm.maxCostUsd = $event; markQuotaDirty()" /><small class="field-note">撞上之后不是直接掐断，而是把工具目录清空、强制模型收尾输出 —— 半截答复比没有答复好。子 agent 的花费一并计入。</small></label>
+            <label>单轮步数上限<UiNumber :model-value="quotaForm.maxSteps" :min="1" :max="200" @update:model-value="quotaForm.maxSteps = $event; markQuotaDirty()" /><small class="field-note">与 <code>agent.main.maxSteps</code> 取较小者生效。</small></label>
+            <p class="field-title wide">频率限制<small>按最近 1 小时的 turns 表统计，<b>不受上面的「启用金额配额」开关影响</b>。</small></p>
+            <label>每人每小时轮次<UiNumber :model-value="quotaForm.turnsPerUserPerHour" :min="1" @update:model-value="quotaForm.turnsPerUserPerHour = $event; markQuotaDirty()" /></label>
+            <label>每会话每小时轮次<UiNumber :model-value="quotaForm.turnsPerChatPerHour" :min="1" @update:model-value="quotaForm.turnsPerChatPerHour = $event; markQuotaDirty()" /></label>
+            <label>单用户并发轮次<UiNumber :model-value="quotaForm.concurrentPerUser" :min="1" @update:model-value="quotaForm.concurrentPerUser = $event; markQuotaDirty()" /></label>
+            <p class="field-title wide">超限时</p>
+            <label class="switch-line"><input v-model="quotaForm.reply" type="checkbox" @change="markQuotaDirty">在群里回一条说明<small class="field-note">关掉的话被拒的人什么都收不到，只有日志里有一条 <code>quota.exceeded</code>。</small></label>
+            <label class="wide">提示文案<textarea v-model="quotaForm.message" rows="2" spellcheck="false" @input="markQuotaDirty" /><small class="field-note"><i class="pi pi-exclamation-triangle" /><code>{spent}</code> / <code>{limit}</code> 会被替换成 <code>—</code>，<code>{resetAt}</code> 被替换成「下个额度窗口」—— 占位符目前拿不到真实数字，别把话写成「已用 {spent}」那样依赖它们。</small></label>
+            <div v-if="quota?.unimplemented.length" class="wide quota-unimplemented">
+              <p class="field-title"><i class="pi pi-ban" />下面这些配额项在 schema 里有，但<b>运行时没有任何代码读它们</b>，所以这里不给控件</p>
+              <ul><li v-for="key in quota.unimplemented" :key="key"><code>{{ key }}</code><span>{{ QUOTA_UNIMPLEMENTED_HINTS[key] ?? '未接线' }}</span></li></ul>
+            </div>
+          </div>
+
+          <div class="registry-heading">
+            <div><h3>当前计数器</h3><p class="section-note">当前 bucket：日 <code>{{ quota?.buckets.day ?? '—' }}</code> · 月 <code>{{ quota?.buckets.month ?? '—' }}</code>。<b>已用</b>是已结算花费 + 在途预留，判定用的就是这个和。</p></div>
+            <div class="section-actions">
+              <label v-if="staleCounters" class="switch-line"><input v-model="quotaShowHistory" type="checkbox">连历史 bucket 一起看（{{ staleCounters }} 行）</label>
+              <UiButton size="small" variant="outlined" icon="pi pi-refresh" aria-label="刷新计数器" :loading="quotaLoading" @click="loadQuota" />
+              <UiButton size="small" variant="outlined" severity="danger" icon="pi pi-trash" label="全部清零" :loading="quotaResetting === 'all'" :disabled="!quota?.counters.length" @click="resetQuota()" />
+            </div>
+          </div>
+          <div class="quota-counters">
+            <article v-for="row in visibleCounters" :key="counterKey(row)" :class="['quota-counter', { over: row.limit !== null && counterRatio(row) >= 1, stale: !row.current }]">
+              <div class="quota-counter-head">
+                <UiTag :value="QUOTA_SCOPE_LABELS[row.scope]" :severity="row.scope === 'global' ? 'info' : row.scope === 'chat' ? 'secondary' : 'primary'" />
+                <b>{{ counterTitle(row) }}</b>
+                <UiTag v-if="row.role" :value="row.role" :severity="roleSeverity(row.role)" />
+                <UiTag v-if="!row.current" value="历史窗口" severity="secondary" title="这一行不属于当前 bucket，不参与判定，留着只是账" />
+                <code>{{ row.window === 'day' ? '日' : '月' }} {{ row.bucket }}</code>
+                <UiButton variant="text" size="small" severity="danger" icon="pi pi-trash" aria-label="重置这一行" :loading="quotaResetting === counterKey(row)" @click="resetQuota(row)" />
+              </div>
+              <div class="quota-meter"><span :style="{ width: `${counterRatio(row) * 100}%` }" /></div>
+              <div class="quota-counter-foot">
+                <span>已用 <b>{{ money(spent(row)) }}</b> / {{ row.limit === null ? '不限' : `${row.limitApprox ? '≈' : ''}${money(row.limit)}` }}</span>
+                <small v-if="row.reservedUsd > 0">其中在途预留 {{ money(row.reservedUsd) }}</small>
+                <small>{{ row.turns }} 轮 · {{ new Date(row.updatedAt).toLocaleString() }}</small>
+              </div>
+              <small v-if="row.limitApprox" class="field-note">这一档取自该用户自己的角色；实际判定用有效角色（min(用户, 会话)），在低权限会话里上限可能更低。</small>
+            </article>
+            <article v-if="!visibleCounters.length" class="empty-card"><i class="pi pi-gauge" /><h3>{{ quota?.counters.length ? '当前窗口还没有产生花费' : '还没有任何计数' }}</h3><p>{{ quota?.counters.length ? `有 ${staleCounters} 行属于历史 bucket，勾上上面那个开关可以看到。` : '有轮次跑起来之后，这里按 全局 / 会话 / 用户 × 日 / 月 六个维度记账。' }}</p></article>
+          </div>
+        </section>
         <section v-else-if="active === 'principals'" key="principals" class="surface page-surface"><header><div><p class="eyebrow">ACCESS CONTROL</p><h2>主体与权限</h2><p>effectiveRole 始终取用户与会话角色的较低者。点任一行改角色。</p></div><UiButton label="批量导入" icon="pi pi-upload" @click="openBulk" /></header>
           <nav class="subtabs" aria-label="主体类型">
             <button v-for="[key, label] in PRINCIPAL_KINDS" :key="key" type="button" :class="{ active: principalKind === key }" @click="principalKind = key">{{ label }}<span>{{ principalCount(key) }}</span></button>
@@ -1003,7 +1412,9 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             <label>唤醒词最短长度<UiNumber :model-value="triggerForm.wakewordMinLength" :min="1" :max="32" @update:model-value="changeWakewordMinLength" /><small class="field-note">短于这个长度的唤醒词整条忽略（按 ^ 之后的字符数算），避免单字误触发。</small></label>
             <div class="switch-column">
               <label class="switch-line"><input v-model="triggerForm.requireTextAfterMention" type="checkbox" @change="markTriggerDirty">只 @ 不说话时不触发</label>
-              <label class="switch-line"><input v-model="triggerForm.ignoreEditedAsTrigger" type="checkbox" @change="markTriggerDirty">编辑旧消息不重新触发</label>
+              <!-- 这一格在 KNOWN_UNIMPLEMENTED_CONFIG_KEYS 里：编辑消息一律按背景消息归档，
+                   开关存得下但运行时没人读（docs/20 · W-TG-05）。不能让它看起来像个能用的开关。 -->
+              <label class="switch-line"><input v-model="triggerForm.ignoreEditedAsTrigger" type="checkbox" disabled>编辑旧消息不重新触发<UiTag value="未接线" severity="secondary" title="编辑消息当前一律按背景消息归档，这个开关运行时没有任何代码读它" /></label>
             </div>
             <p class="field-note wide">会话级覆盖（<code>perChat.&lt;contextKey&gt;.trigger</code>）优先于这里的全局值，目前只能通过 <code>PATCH /api/chats/:key</code> 写入。</p>
           </div>
@@ -1019,7 +1430,14 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             <label>最小增量（字）<UiNumber :model-value="outputForm.streamMinDeltaChars" :min="1" :max="2000" @update:model-value="changeOutputNumber('streamMinDeltaChars', $event)" /><small class="field-note">和上一项是<b>同时满足</b>才编辑：到点了但只多出两三个字就先不动，免得撞 Telegram 的编辑频率限制。收尾那次编辑不受这两项约束。</small></label>
             <p class="field-note wide">会话级覆盖（<code>perChat.&lt;contextKey&gt;.output</code>）优先于这里的全局值。</p>
           </div>
-          <div class="registry-heading"><div><h3>合并后的完整配置</h3><p class="section-note">config.yaml → DB 覆盖层 → 环境变量三层合并的结果，只读。</p></div></div>
+          <div class="registry-heading"><div><h3>维护操作</h3><p class="section-note">都是同步执行的：大库上会阻塞写入，跑的时候 bot 那边的消息会排队。孤儿文件清理（<code>gc-files</code>）后端尚未实现，所以这里不给按钮 —— 给一个必然报错的按钮比没有更糟。</p></div></div>
+          <div class="maintenance-grid">
+            <article v-for="item in MAINTENANCE_ACTIONS" :key="item.action">
+              <div><b><i :class="item.icon" aria-hidden="true" /> {{ item.label }}</b><small>{{ item.hint }}</small></div>
+              <UiButton size="small" variant="outlined" label="执行" :loading="maintenanceBusy === item.action" :disabled="Boolean(maintenanceBusy)" @click="runMaintenance(item.action, item.label)" />
+            </article>
+          </div>
+          <div class="registry-heading"><div><h3>合并后的完整配置</h3><p class="section-note">config.yaml → DB 覆盖层 → 环境变量三层合并的结果，只读。本页与「触发 / 输出 / 配额 / 沙箱 / 工具 / Agent」之外的配置项目前只能改 <code>config/config.yaml</code>（见 <code>docs/21</code> 的缺口清单）。</p></div><UiButton size="small" variant="text" icon="pi pi-history" label="变更历史" @click="openConfigRevisions" /></div>
           <pre class="config-preview" v-text="JSON.stringify(config, null, 2)" />
         </section>
         <section v-else key="fallback" class="surface page-surface"><header><div><p class="eyebrow">{{ currentLabel.toUpperCase() }}</p><h2>{{ currentLabel }}</h2><p>该页读取统一安全 API；写操作必须携带 Session 与 CSRF token，并记录 webui.action 审计。</p></div></header><DataGrid :rows="logs.slice(0, 12)" :columns="COLUMNS.fallback" data-key="id" empty="暂无事件" /></section>
@@ -1198,6 +1616,18 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
         <UiButton v-if="!agentForm.isNew" variant="outlined" severity="danger" icon="pi pi-trash" label="删除" @click="removeAgent(agentForm.originalName)" />
         <UiButton variant="text" label="取消" @click="agentDialog = false" /><UiButton :label="agentForm.isNew ? '创建 Agent' : '保存 Agent'" :loading="agentSaving" @click="saveAgent" />
       </template>
+    </UiModal>
+    <UiModal v-model:visible="revisionsDialog" title="配置变更历史" width="min(960px, 96vw)">
+      <p class="callout"><i class="pi pi-info-circle" />每一次经 WebUI 写入的配置覆盖都记在 <code>config_revisions</code> 里（最近 500 条）。密钥类字段在写入时就已存成 <code>«redacted»</code>。</p>
+      <ol class="revision-list wide-list">
+        <li v-for="row in configRevisions" :key="row.id">
+          <div><code>{{ row.key }}</code><small>{{ row.actor }} · {{ new Date(row.ts).toLocaleString() }}</small>
+            <small class="revision-diff"><b>旧</b> {{ revisionValue(row.old_json) }}</small>
+            <small class="revision-diff"><b>新</b> {{ revisionValue(row.new_json) }}</small>
+          </div>
+        </li>
+        <li v-if="!configRevisions.length && !revisionsLoading" class="empty">还没有经 WebUI 写过任何配置覆盖。</li>
+      </ol>
     </UiModal>
     <UiDrawer v-model:visible="mobileMenu" title="LuoLiCore"><nav class="mobile-nav"><button v-for="item in navigation" :key="item[0]" type="button" @click="active = item[0]; mobileMenu = false"><i :class="item[1]" />{{ item[2] }}</button></nav></UiDrawer>
   </main>

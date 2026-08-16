@@ -39,7 +39,8 @@ webui:
 - `POST /api/auth/login {password}` → 校验 → 生成 32 字节随机 session id → 写 `sessions` 表 → `Set-Cookie: luoli_sid=…; HttpOnly; SameSite=Lax; Path=/; Secure(当 https)`。
 - 同时返回 `csrf` token（存 `sessions.csrf`）；前端放内存，所有非 GET 请求带 `X-CSRF-Token`。
 - 失败限流：同 IP 连续失败 5 次 → 锁 15 分钟（内存计数 + 日志 `warn`）。
-- 登出删除 session 行；`GET /api/auth/me` 返回登录态、到期时间**与本 session 的 `csrf`** —— 前端只把 token 放在内存里，刷新页面后必须靠这个端点补回来，否则刷新之后所有写操作都会 403。跨站拿不到它：既过不了 Origin 中间件，也读不到响应体。
+- 登出删除 session 行，入口是顶栏最右侧的 `[退出登录]` 图标按钮（打 `POST /api/auth/logout` 后跳 `/login`；
+  端点早就有，界面上一直没有入口，只能等 session 过期或手删 cookie）。`GET /api/auth/me` 返回登录态、到期时间**与本 session 的 `csrf`** —— 前端只把 token 放在内存里，刷新页面后必须靠这个端点补回来，否则刷新之后所有写操作都会 403。跨站拿不到它：既过不了 Origin 中间件，也读不到响应体。
 - Session 滑动续期：每次请求更新 `last_seen_at`，超过 `sessionTtlHours` 未活动则失效。
 
 ### 2.2 单角色
@@ -61,10 +62,14 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
 全站共用 §6 的自建组件与 `styles.css` 的设计变量，视觉基准是总览页：左侧固定深色导航 + 顶栏（状态灯：bot 连接 / provider 健康 / 在途 turn 数 / 今日花费；右上角是引导 owner 的真实显示名与 `@username`），内容区一律是 `.surface` 卡片。
 
 ### 3.1 Dashboard
-- 实时卡片：在途 turn、今日 turn 数、今日花费/额度环形图、消息量趋势（折线图，近 7 天）。
-- 在途 turn 表（`DataGrid`，SSE 增量更新）：turn id、会话、发起人、状态、步数、已用时长、花费、`[取消]`。
-- 最近错误（`DataGrid`，level≥warn，10 条，点击跳日志 trace）。
-- 系统信息：版本、上线时长、DB 大小、WAL 大小、workspace 占用、沙箱可用性、MCP 状态摘要。
+- 实时卡片：在途 turn、今日 turn 数、今日花费/额度环形图、消息量趋势（折线图，近 7 天）。🚧 部分实现（四张指标卡是累计值，没有趋势图与额度环形图）。
+- 在途 turn 表（`DataGrid`，SSE 增量更新）：turn id、会话、发起人、状态、步数、已用时长、花费、`[取消]`。🚧 未实现 —— 既没有 `POST /api/tasks/:id/cancel`，SSE 也不发 `turn.*`（docs/21 · G-SRV-01、G-SSE-01）。
+- 最近错误（`DataGrid`，level≥warn，10 条，点击跳日志 trace）。🚧 当前是不分级别的最近 6 条事件。
+- **依赖健康卡片**（已实现）：DB 读写、SSE 连接、模型注册表可用数、在途 turn 数、MCP 就绪 / 异常数、
+  沙箱 `mode` 与可用性（`plan.reason` 挂在 title 上），外加版本与运行时长。
+  数据一律取 `GET /api/health/detail` —— **这几行以前是写死的文本**（沙箱恒显示「Docker」，
+  与 `sandbox.mode` 无关），显示的东西与运行时无关比不显示更糟。
+- 系统信息里的 DB 大小、WAL 大小、workspace 占用 🚧 未实现。
 
 ### 3.2 会话（Chats）
 - **会话列表是卡片而不是表格**：表格里最靠左的一列是 `chat:-1002492583774`，运维认不出这是哪个群。
@@ -176,14 +181,35 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
   单一策略源 `TOOL_POLICY`（注册期 fail-closed）；**能从界面调低某个工具的最低角色等于把权限矩阵
   变成两份会漂移的真相**，所以这里唯一可写的是启停。停用是硬边界：既从工具目录移除，
   `ToolRegistry.execute` 也二次拦截返回 `tool_disabled_by_operator`。
-- 沙箱设置：`mode` 单选（含 docker 可用性探测结果）、镜像名 + `[拉取/构建]`、资源限制、网络、`bypassRoles`（多选）、超时。
-- `allowHostFsForOwner` 开关带红色确认对话框。
+- 沙箱设置（已实现，在工具表下方）：`mode` 单选、容器网络、镜像、`dockerBin`、工作目录与
+  **宿主工作目录**、内存 / CPU / 进程数 / tmpfs、`readOnlyRoot`、`bypassRoles`（多选）。
+  写走 `PUT /api/sandbox`（点分键相对 `sandbox`），`sandbox` 在热更新白名单里，下一次工具调用即生效。
+  - `[探测可用性]` 打 `POST /api/sandbox/probe`，**探的是库里已保存的那份配置** —— 表单里改了还没存，
+    探出来的仍是旧 `mode`，所以结果行里要写明这一点。
+  - `mode=none` 保存前二次确认（exec 类工具将以 bot 进程的权限直接在宿主上执行模型给出的命令）；
+    `bypassRoles` 里出现 owner 之外的角色时给出警示。
+  - `GET /api/sandbox` 一并返回 `plan('owner')`：连 owner 都 `allowed:false` 时（例如进程在容器内
+    却没配 `hostWorkspaceDir`）页面顶部出红条并写出 `reason`，否则运维只会看到工具莫名失败。
+  - 镜像 `[拉取/构建]` 🚧 未实现（没有对应端点）。`allowHostFsForOwner` 在
+    `KNOWN_UNIMPLEMENTED_CONFIG_KEYS` 里，因此不给控件。
 - 审批规则编辑器（`DataGrid` 行内编辑）：tool 匹配、正则、风险级别、`[测试正则]`（输入样例命令看是否命中）。
+  🚧 未实现；`approval.rules` 目前只能改 `config.yaml`（docs/21 §1.1）。
 
 ### 3.8 扩展（Skills / Plugins / MCP）
-- **Skills**：卡片/表格列出 name、description、min-role、allowed-tools、token 占用、状态（解析错误显红）。`[编辑]` 打开 frontmatter 表单 + 正文编辑器；`[新建]`；`[启停]`；`[查看附属文件]`。
-- **Plugins**：name、version、minRole、启用（默认关，开启时弹「plugin 以全信任方式运行任意代码」确认）、`configSchema` 生成的表单、provides 概览（工具/钩子/命令/agent）、`load_error`、`[重载]`。
-- **MCP**：server 列表 + 状态、transport 配置表单、发现到的工具清单（含 inputSchema 预览 `UiModal`）、allow/deny glob、`[重连]`、最近错误。
+三类扩展共用一张卡片网格，每张卡带 kind 徽标、状态徽标与操作按钮。
+
+- **Skills**（部分实现）：name、description、min-role、状态、`[启停]`（`PATCH /api/skills/:name`）、
+  `[删除]`（`DELETE`，只删库里的行，磁盘上的 `SKILL.md` 不动，下次扫描还会被重新发现）。
+  🚧 `[编辑]`（frontmatter 表单 + 正文编辑器）、`[新建]`、`[查看附属文件]` 未实现 —— 缺
+  `POST /api/skills` 与 `PUT /api/skills/:name`。
+- **Plugins**（部分实现）：name、version、minRole、`load_error`、`[启停]`、`[重载]`。
+  **启用时弹「plugin 以全信任方式在 bot 进程里运行任意代码，没有沙箱」二次确认**。
+  🚧 `configSchema` 生成的配置表单与 provides 概览未实现。
+- **MCP**（部分实现）：server 列表 + 状态 + 最近错误 + `[重连]`。
+  **状态取 `state` 而不是 `load_error`** —— `mcp_servers` 的错误列叫 `last_error`，只看 `load_error`
+  会把连不上的 server 显示成「可用」。
+  🚧 transport 配置表单、启停、发现到的工具清单未实现 —— 服务端只有 `GET` 与 `reconnect`，
+  没有 `POST/PATCH/DELETE /api/mcp[/:name]`，增删改只能改 `mcp.servers`。
 
 ### 3.9 子 Agent（Agents）
 - 表格：name、description、modelAlias、maxSteps、tools、minRole；`[新建 Agent]` 在页头。
@@ -217,13 +243,37 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
   每个节点可展开看完整 payload（请求 messages、工具输入输出、响应），大 payload 从 `logs/*.jsonl` 按 `file_ref` 懒加载。
 - `[导出 trace]` → JSON 下载，便于贴 issue。
 
-### 3.11 用量与配额（Usage）
-- 时间范围选择 + 维度切换（按天/按会话/按用户/按模型/按 agent）。
-- 图表：花费堆叠柱（按模型）、token 折线（in/out/cache）、成功率。
-- 明细表（`usage_ledger` 分页）。
-- 配额设置表单：global/chat/user × day/month 金额、按角色覆盖、turn 级上限（cost / steps / tools / subagents）、`requirePricing` 开关。
-- 当前计数器实时展示（`quota_counters`，含 `reserved_usd`）+ `[重置某计数器]`（owner，写审计日志）。
-- 无定价模型告警条。
+### 3.11 用量（Usage）
+- 时间范围选择 + 维度切换（按天/按会话/按用户/按模型/按 agent）。🚧 未实现，当前是不分维度的明细表。
+- 图表：花费堆叠柱（按模型）、token 折线（in/out/cache）、成功率。🚧 未实现。
+- 明细表（`usage_ledger` 分页）（已实现）。
+- 配额是**独立一页**，见 §3.11a —— 限额、实时计数器与重置按钮都在那里。
+
+### 3.11a 配额（Quota）
+导航里的独立页面，数据一次 `GET /api/quota` 取齐（限额 + 计数器 + 未接线键名 + 缺定价模型），
+写入走 `PUT /api/quota`（body 是相对 `quota` 的点分键）。
+
+- **限额表单**（已实现）：`enabled` / `requirePricing` / `minReserveUsd`、global / perChat / perUser × day / month 金额、
+  `perUser.byRole` 按角色覆盖（四个角色各一组 day/month，留空 = 继承 perUser 的值）、
+  单轮上限（`perTurn.maxCostUsd` / `maxSteps`）、频率限制（`rateLimit.turnsPerUserPerHour` /
+  `turnsPerChatPerHour` / `concurrentPerUser`）、超限行为（`onExceeded.reply` + `onExceeded.message`）。
+  金额留空 = `null` = 不限。保存后热更新（`quota` 在 `HOT_RELOADABLE_CONFIG_KEYS` 里），下一条消息即生效。
+- **未接线的键不给控件**，只在表单末尾以灰条列出 `GET /api/quota` 返回的 `unimplemented`
+  （`perTurn.maxToolCalls` / `maxSubagents` / `maxDurationMs` / `onExceeded.notifyOwner` / `warnAtRatio`，
+  来自 `KNOWN_UNIMPLEMENTED_CONFIG_KEYS`，不在前端硬编码第二份）。
+  **给一个存得下但运行时不读的开关，比没有这个开关更糟**（docs/20 · W-CFG-02）；
+  这几项要设只能改 `config.yaml`，接线之后从白名单里摘掉，控件才随之出现。
+- **当前计数器**（已实现）：`quota_counters` 全表（上限 500 行，按 bucket 倒序），
+  每行给出 `cost_usd` / `reserved_usd` / `turns`、所属 bucket 是否是**当前窗口**、以及**合成好的上限**。
+  上限不由前端拼：`(scope, window)` 到配置的取值规则（含 `perUser.byRole` 覆盖）与 `bot.ts` 同源，
+  在服务端算完再返回。chat / user 行按 `principals` 反查显示名与角色 —— 只显示裸 Telegram ID 认不出是谁。
+  有效角色是 `min(用户角色, 会话角色)`，服务端只看得到用户自己那一档，因此配了 `byRole` 时
+  user 行的上限标 `limitApprox`，界面上以「≈」提示实际生效的可能更低。
+- **`[重置]`**（已实现）：`POST /api/quota/reset`。不带 body 是全表清零；行内按钮带
+  `{scope, subject, window, bucket}` 只删那一行 —— 一个人撞满当日额度，没有理由把全局与其他所有人的
+  当月计数一起抹掉。两种都写 `webui.action` 审计。
+- **无定价模型告警条**（已实现）：启用中但 `price_in`/`price_out` 为空的模型会让该轮花费**按 0 记账**，
+  限额再准也拦不住它。告警条列出前 20 个并给出跳转到模型页的入口。
 
 ### 3.12 任务与审批
 - 任务表：在途 + 历史，进度、耗时、花费、`[取消]`、`[查看 trace]`。
@@ -245,10 +295,18 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
 - 会话级覆盖（`perChat.<contextKey>.trigger`）优先于全局值，目前只有 `PATCH /api/chats/:key` 这一个入口，设置页不提供。
   `perChat.<contextKey>.output` 同理（投递侧读的就是本轮合并后的那份配置）。
 - 由 `config.schema.json`（zod → JSON Schema）**自动生成**表单：分组折叠面板（折叠面板），每项含描述、默认值、当前值、是否需要重启（`Tag: 热更新 / 需重启`）。🚧 未实现，当前只在卡片下方展示只读的合并配置 JSON。
-- `[原始 YAML]` 模式：直接编辑，保存前跑 zod 校验，错误定位到行。
-- 保存 → 写 `config_kv` + `config_revisions` → 广播热更新事件；需重启项标注并提供 `[重启进程]`（若在 systemd/docker 下由外部 supervisor 拉起）。
-- `[导出配置]` / `[导入配置]`（密钥字段自动排除）。
-- 维护操作：`[立即备份 DB]`、`[VACUUM]`、`[清理过期日志]`、`[重建 FTS 索引]`、`[清理孤儿文件]`。
+  这是 §1.1 里那 107 个「已接线但改不了」配置项的正路 —— `GET /api/config/schema` 已经把
+  `{schema, hotReloadable, unimplemented}` 三件套备齐了，缺的只是消费它的表单（docs/21 §1.1）。
+- `[原始 YAML]` 模式：直接编辑，保存前跑 zod 校验，错误定位到行。🚧 未实现。
+- 保存 → 写 `config_kv` + `config_revisions` → 广播热更新事件；需重启项标注并提供 `[重启进程]`（若在 systemd/docker 下由外部 supervisor 拉起）。🚧 `[重启进程]` 未实现。
+- **`[变更历史]`**（已实现）：读 `GET /api/config/revisions`，列出最近 500 条覆盖写入的键、
+  操作者、时间与新旧值。密钥类字段在写入时就已存成 `«redacted»`。
+- `[导出配置]` / `[导入配置]`（密钥字段自动排除）。🚧 未实现。
+- **维护操作**（已实现）：`[立即备份 DB]`、`[VACUUM]`、`[清理过期日志]`、`[重建 FTS 索引]` 四个按钮，
+  都走 `POST /api/maintenance/:action`，执行前二次确认（同步执行，大库上会阻塞写入），
+  结果回显在 Toast 里（备份返回文件路径）。
+  `[清理孤儿文件]`（`gc-files`）后端返回 `not_implemented`，**因此界面上不给这个按钮** ——
+  给一个必然报错的按钮比没有更糟。
 
 ---
 
@@ -292,7 +350,10 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
 | `GET/POST/PATCH/DELETE /api/mcp[/:name]` `POST /api/mcp/:name/reconnect` | MCP |
 | `GET /api/agents` `POST /api/agents/:name/dryrun` | 子 agent。**写不走单条端点**：定义存在配置里，新增/编辑/删除都是把整张 `agent.agents` 数组经 `PUT /api/config` 写进覆盖层，由 `configSchema` 统一校验 |
 | `GET /api/logs` `GET /api/logs/trace/:traceId` `GET /api/logs/blob?ref=` | 日志 |
-| `GET /api/usage` `GET/PUT /api/quota` `POST /api/quota/reset` | 用量与配额 |
+| `GET /api/usage` | 用量明细（`usage_ledger`，最近 1000 条） |
+| `GET /api/quota` | 配额页的全部数据：`{quota, timezone, buckets:{day,month}, counters:[…], unpriced:[…], unpricedTotal, unimplemented:[…]}`。`counters` 是 `quota_counters` 全表（上限 500 行）**加上服务端合成的 `limit`**：`(scope, window)` 到配置的取值规则含 `perUser.byRole` 覆盖，让前端自己拼等于把 `bot.ts` 的规则实现两遍。`current` 标记该行是否落在当前 bucket；chat/user 行按 `principals` 反查 `role`/`label`/`username`；配了 `byRole` 时 user 行带 `limitApprox`（有效角色取 `min(用户, 会话)`，服务端只看得到前者）。`unimplemented` 转发 `KNOWN_UNIMPLEMENTED_CONFIG_KEYS` 里 `quota.` 开头的那几项，界面据此不给控件 |
+| `PUT /api/quota` | body 是**相对 `quota` 的点分键**（`{"global.daily": 5}` → `quota.global.daily`），与 `PUT /api/sandbox` 一致。展开走 `assignDotted`、整体过 `configSchema`，落 `config_kv` + `config_revisions` 并广播 `config.changed`（与 `PUT /api/config` 同一套校验与审计）。非法键 400 `invalid_config_key`，校验失败 400 `invalid_config` + 逐条 `details` |
+| `POST /api/quota/reset` | 重置计数器。不带 body = 全表清零；带 `{scope, subject?, window?, bucket?}` 只删匹配的行（**给了任一过滤条件就必须给 `scope`**，否则 400 `invalid_filter` —— 只按 `bucket` 删会跨 scope 误伤）。返回 `{changes}` |
 | `GET /api/tasks` `POST /api/tasks/:id/cancel` | 任务 |
 | `GET /api/approvals` `POST /api/approvals/:id/decide` | 审批。🚧 当前没有可用的审批通道，命中规则的调用当场被拒（[05 §6](./05-tools-and-permissions.md)）：列表是审计视图（谁在什么时候被挡了），`decide` 对非 pending 行返回 `changed:false` |
 | `GET /api/config` `PUT /api/config` `GET /api/config/schema` `GET /api/config/revisions` | 配置。`PUT` body 为点分键；含 `__proto__`/`constructor`/`prototype` 段的键一律 400 `invalid_config_key`（原型污染发生在校验之前，一次请求就能让此后所有配置写入失败，docs/20 · W-CFG-01）；动到 `trigger.*` 时唤醒词要过 `checkWakeword`，不可用返回 400 `invalid_wakeword`。`/schema` 另带 `hotReloadable` 与 `unimplemented` 两个键名前缀表：不在 `hotReloadable` 里的键保存后需要重启才生效，WebUI 据此显示待重启徽标（[11](./11-config-reference.md)） |
@@ -305,6 +366,13 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
 ---
 
 ## 5. SSE 事件
+
+> **现状**：下表里 **只有 `config.changed` 会真的发出**（另有一个未列在表里的 `approval.decided`）。
+> 其余八种一次都不会发 —— 包括 WebUI 唯一监听的 `log`：`LogSink` 的构造函数没有 `EventBus` 参数
+> （`apps/bot/src/main.ts`），日志写入路径上没有 emit。**后果是首屏之后界面不会自行刷新**，
+> 顶栏那个「实时」徽标只表示 EventSource 连上了，不表示有数据在流动。
+> 完整分析与修法见 [21 §3 · G-SSE-01](./21-webui-coverage-gaps.md)；接线时必须同时做 level 阈值与节流，
+> 否则「每条事件重跑一次 `load()`」会变成自我 DDoS。
 
 ```
 event: turn.started      data: {turnId, key, chatId, user, at}

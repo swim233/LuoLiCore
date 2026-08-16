@@ -362,6 +362,18 @@
 | [ ] AC-WEB-026 | 设置 → 输出节奏里改 `streamBufferMs` / `streamIntervalMs` 并保存 | 写 `config_kv` + `config_revisions`，下一轮回复按新节奏发；两个字段的锚点差异在界面上写明；日志 SSE 刷新不冲掉未保存的表单 |
 | [ ] AC-WEB-027 | 会话页会话列表 | 每个会话一张卡片：群聊显示群组名、私聊显示对方昵称（取自 `principals`，未登记时退回 `未登记群聊/用户 <id>`），第二行是 `@username` 或会话类型，卡片上仍能看到 contextKey、消息数与窗口 token |
 | [ ] AC-WEB-028 | 会话页「改这个会话的 HEAD」 | `[撤回上一次提交]` `[清空上下文窗口]` 只在选中会话后的 commit 卡片里出现，各自写明等价于 `/undo` 与 `/new`；HEAD 已是首个 commit 时撤回按钮禁用；清空前二次确认；两者都不删消息，可用同卡片的 `[回滚到此]` 走回来 |
+| [ ] AC-WEB-029 | 配额页改「全局 · 每日」并保存 | 写 `config_kv` + `config_revisions` 并广播 `config.changed`；热更新即时生效（下一条消息按新限额判定）；非法值（负数、非整数的步数/并发）返回 `invalid_config` 且逐条给出 path，不落库 |
+| [ ] AC-WEB-030 (自动) ★ | `GET /api/quota` | 返回的每行计数器带**服务端合成**的 `limit`：user 行套用 `perUser.byRole[该主体角色]` 覆盖，配了 `byRole` 时置 `limitApprox`（有效角色取 min(用户, 会话)，服务端只看得到前者）；`current` 正确区分当前 bucket 与历史 bucket；chat/user 行按 `principals` 反查显示名与角色 |
+| [ ] AC-WEB-031 | 配额页计数器行内 `[重置]` | 只删这一行（`{scope, subject, window, bucket}`），其余计数不动；「全部清零」不带 body 清全表；只给 `bucket` 不给 `scope` 返回 400 `invalid_filter`；两者都写 `webui.action` 审计 |
+| [ ] AC-WEB-032 ★ | 配额页表单 | `KNOWN_UNIMPLEMENTED_CONFIG_KEYS` 里 `quota.` 开头的 5 项**没有控件**，只在灰条里列出键名并写明「现在真正生效的是谁」；键名来自 `GET /api/quota` 的 `unimplemented`，前端不维护第二份清单。同理，设置页的 `trigger.ignoreEditedAsTrigger` 勾选框禁用并标「未接线」 |
+| [ ] AC-WEB-033 | 配额页 | 存在启用中但缺定价的模型时顶部出现告警条并列出模型（这些轮次花费按 0 记账）；`quota.enabled` 关闭时出现「金额限额不再判定、频率限制仍生效」的红条 |
+| [ ] AC-WEB-034 | 工具页沙箱卡片 | `mode` / 网络 / 镜像 / 资源限制 / `bypassRoles` 可改并热更新；`[探测可用性]` 打的是**已保存**的那份配置并回显结果；`mode=none` 保存前二次确认；owner 之外的角色进 `bypassRoles` 时给出警示 |
+| [ ] AC-WEB-035 | 总览页「依赖健康」 | 六行全部来自 `GET /api/health/detail`（DB 读写、SSE、模型注册表、在途 turn、MCP、沙箱 mode 与可用性），沙箱一行随 `sandbox.mode` 变化 —— 不再是恒显示「Docker」的写死文本 |
+| [ ] AC-WEB-036 | 扩展页 | Skill/Plugin 可启停、Plugin 可重载、MCP 可重连；启用 Plugin 前有「全信任运行任意代码」二次确认；MCP 行的状态与错误取自 `state` / `last_error`（连不上的 server 显示「连不上」+ 错误原文，而不是「可用」） |
+| [ ] AC-WEB-037 | 设置页 | 四个维护操作（备份 / VACUUM / 清理日志 / 重建 FTS）可执行并回显结果；`gc-files` 后端未实现，界面上**不提供按钮**；「变更历史」列出 `config_revisions` 的键、操作者、时间与新旧值 |
+| [ ] AC-WEB-038 | 顶栏 `[退出登录]` | 打 `POST /api/auth/logout`，session 失效、cookie 清空并跳回 `/login`；此后带旧 cookie 访问 `/api/*` 返回 401 |
+| [ ] AC-WEB-039 (自动) ★ | 契约测试遍历文档里的读端点 | 除 200 外还断言 `content-type: application/json` 与信封 `ok:true` —— 未注册的 `/api/*` 会掉进 SPA fallback 拿到 200 + `index.html`，只看状态码是假绿灯（`GET /api/quota` 曾以此「通过」而端点并不存在，docs/21 §2.3） |
+| [ ] AC-WEB-040 | 打开控制台后在另一进程改库/改配置 | 🚧 已知不满足：`LogSink` 拿不到 `EventBus`，`event: log` 从不发出，首屏之后界面不会自行刷新（docs/21 · G-SSE-01）。当前只有 `config.changed` 与 `approval.decided` 会触发重载 |
 
 ## 11. 安全 AC-SEC
 
@@ -412,9 +424,9 @@
 | 记忆 | | / 13 | | | |
 | 日志与成本 | | / 23 | | | |
 | 扩展生态 | | / 27 | | | |
-| WebUI | | / 40 | | | |
+| WebUI | | / 52 | | | |
 | 安全 | | / 15 | | | |
 | 运维 | | / 9 | | | |
-| **合计** | | **/ 321** | | | |
+| **合计** | | **/ 333** | | | |
 
 **整体通过条件**：全部 ★ 项通过 + 非 ★ 项通过率 ≥ 95% + 所有豁免项经需求方书面确认。
