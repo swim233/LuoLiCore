@@ -80,7 +80,9 @@ approval:
 output:
   mode: stream
   replyDelayMs: 2000
+  streamBufferMs: 2000
   streamIntervalMs: 2000
+  streamMinDeltaChars: 24
   maxMessageChars: 3900
 media:
   dir: ./data/files

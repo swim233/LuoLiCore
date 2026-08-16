@@ -52,6 +52,10 @@ const wakewordStatus = ref<Array<{ pattern: string; kind: string; ok: boolean; r
 const newWakeword = ref('');
 const triggerDirty = ref(false);
 const triggerSaving = ref(false);
+interface OutputForm { mode: string; replyDelayMs: number; streamBufferMs: number; streamIntervalMs: number; streamMinDeltaChars: number }
+const outputForm = ref<OutputForm>({ mode: 'stream', replyDelayMs: 2000, streamBufferMs: 2000, streamIntervalMs: 2000, streamMinDeltaChars: 24 });
+const outputDirty = ref(false);
+const outputSaving = ref(false);
 const selectedChat = ref<Chat | null>(null);
 const contextDetail = ref<Record<string, unknown> | null>(null);
 const traceDetail = ref<LogRow[]>([]);
@@ -164,6 +168,7 @@ async function load(): Promise<void> {
     api<Array<Record<string, unknown>>>('/api/approvals'), api<Array<Record<string, unknown>>>('/api/tasks'), api<Array<Record<string, unknown>>>('/api/prompts'), api<Record<string, unknown>>('/api/config'), api<Array<Record<string, unknown>>>('/api/models'), api<Array<Record<string, unknown>>>('/api/aliases'),
   ]);
   syncTrigger();
+  syncOutput();
 }
 /** 每条日志事件都会重跑 load()，正在编辑的触发表单不能被这条心跳冲掉。 */
 function syncTrigger(): void {
@@ -205,6 +210,31 @@ async function saveTrigger(): Promise<void> {
     await load();
   } catch (error) { toastError('保存触发设置失败', error); }
   finally { triggerSaving.value = false; }
+}
+/** 同 syncTrigger：日志心跳会重跑 load()，正在编辑的节奏表单不能被冲掉。 */
+function syncOutput(): void {
+  if (outputDirty.value) return;
+  const output = (config.value.output ?? {}) as Record<string, unknown>;
+  const current = outputForm.value;
+  // 逐项取而不是整体展开：output 下还有七个不归这张表管的键（parseMode、maxMessageChars…），
+  // 展开进来只会在保存时被悄悄丢掉。
+  outputForm.value = { mode: String(output.mode ?? current.mode), replyDelayMs: Number(output.replyDelayMs ?? current.replyDelayMs),
+    streamBufferMs: Number(output.streamBufferMs ?? current.streamBufferMs), streamIntervalMs: Number(output.streamIntervalMs ?? current.streamIntervalMs),
+    streamMinDeltaChars: Number(output.streamMinDeltaChars ?? current.streamMinDeltaChars) };
+}
+function markOutputDirty(): void { outputDirty.value = true; }
+function changeOutputNumber(field: keyof Omit<OutputForm, 'mode'>, value: number | null): void { outputForm.value[field] = value ?? 0; markOutputDirty(); }
+async function saveOutput(): Promise<void> {
+  const form = outputForm.value;
+  outputSaving.value = true;
+  try {
+    await api('/api/config', { method: 'PUT', body: JSON.stringify({ 'output.mode': form.mode, 'output.replyDelayMs': form.replyDelayMs,
+      'output.streamBufferMs': form.streamBufferMs, 'output.streamIntervalMs': form.streamIntervalMs, 'output.streamMinDeltaChars': form.streamMinDeltaChars }) });
+    outputDirty.value = false;
+    pushToast({ severity: 'success', summary: '输出节奏已保存', detail: '下一轮回复生效；在途那一轮沿用开轮时的值' });
+    await load();
+  } catch (error) { toastError('保存输出节奏失败', error); }
+  finally { outputSaving.value = false; }
 }
 async function inspectChat(chat: Chat): Promise<void> { selectedChat.value = chat; const detail = await api<Record<string, unknown>>(`/api/chats/${encodeURIComponent(chat.key)}`); contextDetail.value = await api<Record<string, unknown>>(`/api/chats/${encodeURIComponent(chat.key)}/context`); commits.value = (detail.commits as Array<Record<string, unknown>> | undefined) ?? []; contextMessages.value = (detail.messages as Array<Record<string, unknown>> | undefined) ?? []; inspectedSnapshot.value = null; }
 async function inspectTrace(traceId: string | null): Promise<void> { if (!traceId) return; traceDetail.value = await api<LogRow[]>(`/api/logs/trace/${encodeURIComponent(traceId)}`); }
@@ -790,6 +820,18 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
               <label class="switch-line"><input v-model="triggerForm.ignoreEditedAsTrigger" type="checkbox" @change="markTriggerDirty">编辑旧消息不重新触发</label>
             </div>
             <p class="field-note wide">会话级覆盖（<code>perChat.&lt;contextKey&gt;.trigger</code>）优先于这里的全局值，目前只能通过 <code>PATCH /api/chats/:key</code> 写入。</p>
+          </div>
+          <div class="registry-heading">
+            <div><h3>输出节奏</h3><p class="section-note">决定一条回复怎么送出去。流式模式下先攒一段再发第一条，之后按固定节拍编辑同一条消息 —— 攒的时长设成 0 就会退回「先发一个字、剩下靠编辑补」的观感。保存后下一轮生效。</p></div>
+            <UiButton size="small" icon="pi pi-save" label="保存输出节奏" :loading="outputSaving" :disabled="!outputDirty" @click="saveOutput" />
+          </div>
+          <div class="form-grid">
+            <label>模式<UiSelect v-model="outputForm.mode" :options="[{ value: 'stream', label: 'stream · 边生成边编辑' }, { value: 'once', label: 'once · 生成完一次性发出' }]" @change="markOutputDirty" /><small class="field-note">once 模式下面三项编辑相关的设置不起作用。</small></label>
+            <label>防秒回等待（毫秒）<UiNumber :model-value="outputForm.replyDelayMs" :min="0" :max="30000" :step="500" @update:model-value="changeOutputNumber('replyDelayMs', $event)" /><small class="field-note">从<b>用户那条消息到达</b>算起。模型本来就想了这么久时不再额外压时间。0 = 立刻回。</small></label>
+            <label>首帧缓冲（毫秒）<UiNumber :model-value="outputForm.streamBufferMs" :min="0" :max="30000" :step="500" @update:model-value="changeOutputNumber('streamBufferMs', $event)" /><small class="field-note">从<b>上游第一个 chunk 到达</b>算起，攒够这么久再发第一条。窗口内的文本只攒不发不会丢；流在窗口内就结束则立刻发出。</small></label>
+            <label>编辑间隔（毫秒）<UiNumber :model-value="outputForm.streamIntervalMs" :min="200" :max="30000" :step="500" @update:model-value="changeOutputNumber('streamIntervalMs', $event)" /><small class="field-note">两次 editMessageText 之间的最小间隔。首条发出也算一次刷新，下一次编辑同样要等满。</small></label>
+            <label>最小增量（字）<UiNumber :model-value="outputForm.streamMinDeltaChars" :min="1" :max="2000" @update:model-value="changeOutputNumber('streamMinDeltaChars', $event)" /><small class="field-note">和上一项是<b>同时满足</b>才编辑：到点了但只多出两三个字就先不动，免得撞 Telegram 的编辑频率限制。收尾那次编辑不受这两项约束。</small></label>
+            <p class="field-note wide">会话级覆盖（<code>perChat.&lt;contextKey&gt;.output</code>）优先于这里的全局值。</p>
           </div>
           <div class="registry-heading"><div><h3>合并后的完整配置</h3><p class="section-note">config.yaml → DB 覆盖层 → 环境变量三层合并的结果，只读。</p></div></div>
           <pre class="config-preview" v-text="JSON.stringify(config, null, 2)" />

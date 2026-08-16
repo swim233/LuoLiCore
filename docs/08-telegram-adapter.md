@@ -162,6 +162,7 @@ trigger:
 output:
   mode: stream                # stream | once   （可 perChat 覆盖）
   replyDelayMs: 2000          # 第一条回复的最早发出时刻（相对用户那条消息），0 = 立刻回
+  streamBufferMs: 2000        # 第一条回复的最早发出时刻（相对上游第一个 chunk），0 = 首个 chunk 到就发
   streamIntervalMs: 2000      # 编辑节流
   streamMinDeltaChars: 24     # 增量太小不编辑
   flushOnSentence: true       # 遇到 。！？\n 提前 flush（更自然）
@@ -175,8 +176,8 @@ output:
 
 ```
 sendChatAction('typing')  → 每 4s 续期，直到首次消息发出
-起算点 = 用户那条消息的到达时刻（不是流开始的时刻）
-首个 chunk 到达 且 已过 replyDelayMs → sendMessage(首段) → 记 messageId
+首条发出时刻 = max(用户消息到达 + replyDelayMs, 上游首个 chunk 到达 + streamBufferMs)
+到点后的第一个 chunk → sendMessage(此刻攒到的全部文本) → 记 messageId → 计入一次刷新
 循环：
   累积 buffer
   若 (now - lastEdit ≥ streamIntervalMs) 且 (Δchars ≥ streamMinDeltaChars 或 命中句末)
@@ -189,10 +190,19 @@ sendChatAction('typing')  → 每 4s 续期，直到首次消息发出
   移除「⏳」类标记
 ```
 
-- **回复节奏**：`replyDelayMs` 的窗口内产出的 chunk **只攒不发**（不是丢弃），窗口一到连同已攒的文本
-  一起作为第一条消息发出；`typing` 动作照常，看起来是在打字而不是卡住。起算点是用户消息的到达时刻，
-  所以模型本来就想了 3 秒时不会再多压 2 秒。流在窗口内就跑完时，走结尾的一次性 `send`，它自己也会等满
-  —— 短回答同样不会秒回。非流式（`mode='once'` 与 agent 直接返回字符串）走同一条规则。
+- **回复节奏**：两道窗口，锚点不同，取晚的那个；窗口内产出的 chunk **只攒不发**（不是丢弃），
+  到点后连同已攒的文本一起作为第一条消息发出；`typing` 动作照常，看起来是在打字而不是卡住。
+  - `replyDelayMs` 锚在**用户消息的到达时刻**：防秒回。模型本来就想了 3 秒时不会再多压 2 秒。
+  - `streamBufferMs` 锚在**上游第一个 chunk 的到达时刻**：攒够首帧。只有前一道时，模型思考一旦超过
+    `replyDelayMs`（几乎总是如此）窗口就已经过期，首个 chunk 会被原样发出去 —— 用户先收到一条
+    只有一个字的消息，剩下的全靠编辑补出来。这是这条规则存在的唯一原因。
+  - 流在窗口内就跑完时走结尾的一次性 `send`：不再等 `streamBufferMs`（已经没有东西可攒了），
+    但仍受 `replyDelayMs` 约束 —— 短回答同样不会秒回。非流式（`mode='once'` 与 agent 直接返回
+    字符串）只走 `replyDelayMs` 这一道。
+- **编辑节奏**：`streamIntervalMs` 与 `streamMinDeltaChars` 是**同时满足**才编辑。首条消息发出
+  （以及超长切分出的每条后续消息）本身算一次刷新，因此紧随其后的那个 chunk 不会立刻触发一次编辑
+  —— 那条消息里已经是同一段文本，多出来的两三个字不值一次 `editMessageText`。收尾的最后一次编辑
+  不受这两项约束。四项都可在 WebUI「设置 → 输出节奏」里改，保存后下一轮生效；在途那一轮沿用开轮时的值。
 - **模型这轮一个字都没吐**（`final` 与流式累积都为空）→ 按失败处理：不提交空的 assistant 消息，
   回一句 `model_returned_empty` 对应的说明 + ref。空正文发不出去（`splitTelegramText('')` 是空数组），
   照旧提交等于让用户面对彻底的沉默，还在上下文里留一条谁都解释不了的空消息，下一轮照样带给模型

@@ -216,7 +216,13 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
   与运行时匹配共用 `checkWakeword`（[08 §4](./08-telegram-adapter.md#4-触发判定)）；保存走 `PUT /api/config` 的点分键，
   热更新即时生效。列表里有不可用模式时保存会被服务端拒绝（`invalid_wakeword`）并把原因回显在 Toast 上。
   日志 SSE 会不断触发页面刷新，表单在有未保存改动时不被回写覆盖。
+- **输出节奏**卡片（已实现）：`output.mode`、`replyDelayMs`（防秒回，锚点是用户那条消息）、
+  `streamBufferMs`（首帧缓冲，锚点是上游第一个 chunk）、`streamIntervalMs`、`streamMinDeltaChars`。
+  两个锚点的区别写在字段说明里 —— 只调 `replyDelayMs` 治不了「第一条消息只有一个字」
+  （[08 §5.2](./08-telegram-adapter.md#52-流式算法)）。保存同样走 `PUT /api/config` 的点分键，
+  下一轮回复生效；在途那一轮沿用开轮时的值。同样有未保存改动时不被 SSE 刷新回写。
 - 会话级覆盖（`perChat.<contextKey>.trigger`）优先于全局值，目前只有 `PATCH /api/chats/:key` 这一个入口，设置页不提供。
+  `perChat.<contextKey>.output` 同理（投递侧读的就是本轮合并后的那份配置）。
 - 由 `config.schema.json`（zod → JSON Schema）**自动生成**表单：分组折叠面板（折叠面板），每项含描述、默认值、当前值、是否需要重启（`Tag: 热更新 / 需重启`）。🚧 未实现，当前只在卡片下方展示只读的合并配置 JSON。
 - `[原始 YAML]` 模式：直接编辑，保存前跑 zod 校验，错误定位到行。
 - 保存 → 写 `config_kv` + `config_revisions` → 广播热更新事件；需重启项标注并提供 `[重启进程]`（若在 systemd/docker 下由外部 supervisor 拉起）。

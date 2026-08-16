@@ -99,6 +99,8 @@
 | [ ] AC-TG-018 | 编辑一条会命中触发条件的消息 | 不开新轮次，且以 `triggered=0` 归档（能被后续轮次当背景消息认领），日志留一条 `trigger.skipped`（docs/20 · W-TG-05） |
 | [ ] AC-TG-019 ★ (自动) | 发一张真实照片 | 上下文里拿到 `{type:'image'}` part，`attachments.download_state='done'`，最长边不超过 `media.maxImageEdge`；不再是「[photo 处理失败]」（docs/20 · W-MEDIA-01） |
 | [ ] AC-TG-020 | 活跃会话里发 `/ctx`、`/tasks` | 回摘要（commit / 窗口 / token / 条数、任务 id 与状态），不再把整份 JSON 塞进消息而超 4096 字符被 API 拒（docs/20 · W-TG-02） |
+| [ ] AC-TG-021 (自动) | `output.streamBufferMs=2000`，模型想满 5s（`replyDelayMs` 早已过期）才吐第一个 chunk | 第一条消息不早于首个 chunk 之后 2s 发出，且带着这 2s 内攒到的全部文本 —— 不再是「只有一个字，剩下靠编辑补」；流在缓冲窗口内就结束时立刻发出（只受 `replyDelayMs` 约束） |
+| [ ] AC-TG-022 (自动) | 流式回复持续输出，`streamIntervalMs=2000` | 首条消息发出本身算一次刷新，紧随其后的 chunk 不触发编辑；两次 `editMessageText` 之间同时满足 ≥ `streamIntervalMs` 与 ≥ `streamMinDeltaChars`；收尾那次编辑不受这两项约束 |
 | [ ] AC-ACL-001 (自动) ★ | `BLOCKED` 用户私聊 | 无回复、**不入库**、无 token 消耗；只有一条 `access.denied` 日志 |
 | [ ] AC-ACL-002 (自动) ★ | `OWNER` 在群 `G_LIMITED` @bot | `effective=limited`：写/执行类工具不在 `activeTools` 中 |
 | [ ] AC-ACL-003 (自动) ★ | `LIMITED` 用户在群 `G_TRUSTED` @bot | `effective=limited` |
@@ -350,6 +352,7 @@
 | [ ] AC-WEB-023 | 依次做：保存提示词、回滚版本、切换/重置上下文、保存 Provider、`[测试连接]`、导入模型、保存/删除别名、保存触发设置 | 每次反馈都是右上角同一种通知（成功绿 / 警告黄 / 失败红，可手动关闭、到点自动消失），页面上不出现第二种提示样式；失败时通知里带上游错误原因 |
 | [ ] AC-WEB-024 (自动) | 未登录访问 `GET /api/health` 与 `GET /api/health/detail` | 前者只回 `{ok, uptimeMs}`；后者 401。provider 列表 / MCP / 沙箱 plan / 在途轮次数不再无鉴权暴露（docs/20 · W-API-01） |
 | [ ] AC-WEB-025 | 搜索归档并翻到后面几页 | `total` 是命中总数（单独 COUNT），页码不漂（docs/20 · W-API-03） |
+| [ ] AC-WEB-026 | 设置 → 输出节奏里改 `streamBufferMs` / `streamIntervalMs` 并保存 | 写 `config_kv` + `config_revisions`，下一轮回复按新节奏发；两个字段的锚点差异在界面上写明；日志 SSE 刷新不冲掉未保存的表单 |
 
 ## 11. 安全 AC-SEC
 
@@ -393,16 +396,16 @@
 |---|---|---|---|---|---|
 | 配置与 DB | | / 20 | | | |
 | **上下文引擎** | | / 31 | | | |
-| Telegram 与准入 | | / 36 | | | |
+| Telegram 与准入 | | / 38 | | | |
 | Agent 与 Provider | | / 31 | | | |
 | 工具/沙箱/审批 | | / 47 | | | |
 | Subagent 与任务 | | / 22 | | | |
 | 记忆 | | / 13 | | | |
 | 日志与成本 | | / 23 | | | |
 | 扩展生态 | | / 27 | | | |
-| WebUI | | / 35 | | | |
+| WebUI | | / 36 | | | |
 | 安全 | | / 15 | | | |
 | 运维 | | / 9 | | | |
-| **合计** | | **/ 309** | | | |
+| **合计** | | **/ 312** | | | |
 
 **整体通过条件**：全部 ★ 项通过 + 非 ★ 项通过率 ≥ 95% + 所有豁免项经需求方书面确认。

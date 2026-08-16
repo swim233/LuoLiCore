@@ -315,10 +315,12 @@ approval:
 # ============================================================ output（D18）
 output:
   mode: stream                    # 热更新 · stream | once（可 perChat 覆盖）
-  replyDelayMs: 2000              # 距离用户那条消息至少等这么久才发第一条回复（0 = 立刻回）；
+  replyDelayMs: 2000              # 热更新 · 距离用户那条消息至少等这么久才发第一条回复（0 = 立刻回）；
                                   # 窗口内流式产出的文本只攒不发，typing 动作照常
-  streamIntervalMs: 2000          # 两次消息编辑之间的最小间隔
-  streamMinDeltaChars: 24
+  streamBufferMs: 2000            # 热更新 · 收到上游第一个 chunk 后再攒这么久才发第一条（0 = 首个
+                                  # chunk 到就发）。锚点与 replyDelayMs 不同，两者取晚的那个
+  streamIntervalMs: 2000          # 热更新 · 两次消息编辑之间的最小间隔
+  streamMinDeltaChars: 24         # 热更新 · 与上一项同时满足才编辑
   flushOnSentence: true
   maxMessageChars: 3900
   parseMode: MarkdownV2           # MarkdownV2 | HTML | none

@@ -40,9 +40,12 @@ export function safeRender(markdown: string): string {
  * 秒回读起来像自动应答机，流式模式下第一帧还几乎是空的。距离用户那条消息不足
  * `output.replyDelayMs` 就先压住不发；期间 typing 动作照常，所以看起来是在打字而不是卡住。
  */
-export function holdReply(since: number, delayMs: number): Promise<void> {
-  const remaining = delayMs - (Date.now() - since);
-  return remaining > 0 ? new Promise((resolve) => setTimeout(resolve, remaining)) : Promise.resolve();
+export async function holdReply(since: number, delayMs: number): Promise<void> {
+  // setTimeout 可以比 Date.now() 的读数早醒 1ms，单次 sleep 会让「至少等这么久」这条下限偶发地
+  // 差一毫秒不成立（tests/output.pacing.test.ts 因此约 8% 概率变红）。补睡到真的过线为止。
+  for (let remaining = delayMs - (Date.now() - since); remaining > 0; remaining = delayMs - (Date.now() - since)) {
+    await new Promise((resolve) => setTimeout(resolve, remaining));
+  }
 }
 
 /**

@@ -370,9 +370,12 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
     try {
       const generated = dependencies.onTurn ? await dependencies.onTurn(turn, reservation) : '尚未配置可用模型。请在 WebUI 中添加 Provider、模型和 main 别名。';
       let answer: string;
+      // doc 11 §2.1 把 output.* 列进 perChat 白名单，投递侧却一直读的是全局快照 —— 会话级
+      // 的 mode/节奏覆盖存得住、也过了校验，就是永远不生效。取本轮那份合并后的配置。
+      const outputConfig = perChatConfig(currentConfig(), key).output;
       if (typeof generated === 'string') {
-        await holdReply(receivedAt, config.output.replyDelayMs);
-        for (const part of splitTelegramText(generated, config.output.maxMessageChars)) {
+        await holdReply(receivedAt, outputConfig.replyDelayMs);
+        for (const part of splitTelegramText(generated, outputConfig.maxMessageChars)) {
           // 与流式分支共用一份降级逻辑：裸 MarkdownV2 发送失败会把整轮打成 failed（docs/20 · W-TG-03）。
           const sent = await sendWithFallback(bot.api, chatId, part);
           scoped.append({ chatId, messageThreadId: message.message_thread_id ?? null, tgMessageId: sent.message_id, direction: 'out', fromKind: 'bot', fromUserId: String(bot.botInfo.id), fromName: bot.botInfo.first_name, fromUsername: bot.botInfo.username,
@@ -380,7 +383,7 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
         }
         answer = generated;
       } else {
-        const output = new (await import('./stream-output.js')).TelegramOutput(bot, chatId, { mode: config.output.mode, replyDelayMs: config.output.replyDelayMs, intervalMs: config.output.streamIntervalMs, minDeltaChars: config.output.streamMinDeltaChars, maxChars: config.output.maxMessageChars },
+        const output = new (await import('./stream-output.js')).TelegramOutput(bot, chatId, { mode: outputConfig.mode, replyDelayMs: outputConfig.replyDelayMs, bufferMs: outputConfig.streamBufferMs, intervalMs: outputConfig.streamIntervalMs, minDeltaChars: outputConfig.streamMinDeltaChars, maxChars: outputConfig.maxMessageChars },
           (error) => dependencies.log.event({ level: 'warn', kind: 'tg.error', summary: 'Streaming delivery failed', traceId: turn.turnId, chatId, data: { error: error instanceof Error ? error.message : String(error) } }), receivedAt);
         const consumed = await output.consume(generated.stream, message.message_id);
         if (consumed.interrupted) { generated.interrupt(); void generated.final.catch(() => undefined); answer = consumed.text; }
