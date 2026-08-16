@@ -25,4 +25,23 @@ describe('skill runtime', () => {
     expect(() => skills.resolveResource('skill://safe-skill/../../secret')).toThrow('path_outside_skill');
     closeDatabase(db);
   });
+
+  it('creates, edits, rescans, and removes SKILL.md through the loader', () => {
+    const { db } = setup();
+    const skills = new SkillLoader(db, './data/skill-runtime-skills', () => 'limited');
+    skills.scan();
+    expect(skills.create('new-skill', { description: 'Created', body: 'First body', allowedTools: ['read_file'] })).toMatchObject({
+      name: 'new-skill', description: 'Created', body: 'First body', minRole: 'limited', allowedTools: ['read_file'], enabled: true,
+    });
+    expect(skills.update('new-skill', { description: 'Edited', body: 'Second body', minRole: 'trusted', enabled: false })).toMatchObject({
+      description: 'Edited', body: 'Second body', minRole: 'trusted', enabled: false,
+    });
+    const reloaded = new SkillLoader(db, './data/skill-runtime-skills');
+    reloaded.scan();
+    expect(reloaded.read('new-skill')).toMatchObject({ description: 'Edited', minRole: 'trusted', enabled: false });
+    expect(reloaded.remove('new-skill')).toBe(true);
+    expect(reloaded.read('new-skill')).toBeNull();
+    expect(reloaded.remove('new-skill')).toBe(false);
+    closeDatabase(db);
+  });
 });

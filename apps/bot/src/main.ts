@@ -5,8 +5,9 @@ import { resolve } from 'node:path';
 import { serve } from '@hono/node-server';
 import { zodToJsonSchema } from 'zod-to-json-schema';
 import { ArchiveRepository, OperationsRepository, PrincipalRepository, TurnRepository, closeDatabase, migrateDatabase, modelAliasKey, openDatabase, readAppKv, readPersistedConfig, recoverAfterCrash } from '@luoli/db';
-import { AgentManager, AgentResultStore, ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, FileTools, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, ModelRegistry, PathJail, PluginManager, PromptAssembler, PromptDocuments, ProviderStore, QuotaGuard, Sandbox, Scheduler, Secrets, SkillLoader, TOOL_POLICY, ToolRegistry, TurnConcurrency, TurnRegistry, UsageLedger, configSchema, loadConfig, perChatConfig, registerBuiltins, rejectedWakewords, streamMainAgent } from '@luoli/core';
-import { createServer, setupToken } from '@luoli/server';
+import { AgentManager, AgentResultStore, ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, FileTools, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, ModelRegistry, PathJail, PluginManager, PromptAssembler, PromptDocuments, ProviderStore, QuotaGuard, Sandbox, Scheduler, Secrets, SkillLoader, TOOL_POLICY, ToolRegistry, TurnConcurrency, TurnRegistry, UsageLedger, assembleMainPrompt, configSchema, loadConfig, perChatConfig, registerBuiltins, rejectedWakewords, runSubAgent, streamMainAgent, type SubAgentRuntimeEvent } from '@luoli/core';
+import { createServer, setupToken, type PromptPreviewResult } from '@luoli/server';
+import type { RuntimeTurnContext } from '@luoli/shared';
 import { createTelegramBot } from '@luoli/telegram';
 
 const startedAt = Date.now();
@@ -45,18 +46,20 @@ principals.ensureOwner(config.access.bootstrapOwnerId);
 const archive = new ArchiveRepository(db);
 const operations = new OperationsRepository(db);
 const turns = new TurnRepository(db);
-const quota = new QuotaGuard(db, config.general.timezone);
+// EventBus 要早于 quota / log 建：这两个是 SSE 上 `quota` 与 `log` 事件的发源地，
+// 少给一个的表现就是那一类事件永远不到（docs/21 · G-SSE-01）。
+const events = new EventBus();
+const quota = new QuotaGuard(db, config.general.timezone, events);
 const secrets = new Secrets(process.env.LUOLI_MASTER_KEY);
 // scrypt 抬高了离线爆破成本，但抬不动一个短口令（docs/20 · W-SEC-02）。
 if (secrets.weak) process.stderr.write('[secrets] LUOLI_MASTER_KEY 短于 32 字符：provider key 的加密强度取决于它，建议换成 32 字节随机值。\n');
 const providers = new ProviderStore(db, secrets);
 // 只在 WebUI 主动拉取模型时才可能出网；缓存命中的路径不碰网络（docs/04 §5.4.1）。
 const modelCatalog = new ModelCatalog(db, () => configStore.snapshot().provider.catalog);
-const events = new EventBus();
 const ledger = new UsageLedger(db);
 const turnRegistry = new TurnRegistry();
 const turnConcurrency = new TurnConcurrency(config.concurrency);
-const log = new LogSink(operations, config.logs.dir, [process.env.BOT_TOKEN ?? '', process.env.LUOLI_MASTER_KEY ?? ''], { level: config.logs.level, maxFileMb: config.logs.maxFileMb, bodyMaxBytes: config.logs.bodyMaxBytes, console: config.logs.console });
+const log = new LogSink(operations, config.logs.dir, [process.env.BOT_TOKEN ?? '', process.env.LUOLI_MASTER_KEY ?? ''], { level: config.logs.level, maxFileMb: config.logs.maxFileMb, bodyMaxBytes: config.logs.bodyMaxBytes, console: config.logs.console, events });
 const context = new ContextEngine(db, archive, log);
 const modelRegistry = new ModelRegistry(db, providers);
 modelRegistry.rebuild();
@@ -68,7 +71,7 @@ if (!modelRegistry.aliases().includes('main')) {
     + `[config] 去 WebUI（http://${config.webui.host}:${config.webui.port} → Provider 页）配置 provider / 模型 / main 别名，保存后即时生效，无需重启。\n`);
 }
 const memory = new MemoryStore(db, config.memory.dir, config.memory.softLimitTokens, config.memory.hardLimitTokens, config.memory.maxSections, config.memory.forgetMeRetentionDays, log);
-const skills = new SkillLoader(db, config.skills.dir);
+const skills = new SkillLoader(db, config.skills.dir, () => configStore.snapshot().skills.defaultMinRole);
 skills.scan();
 const agents = new AgentManager(db, new AgentResultStore(resolve('data/agent-results')), config.agent.agents, config.agent.maxDepth, config.agent.maxSubagentsPerTurn);
 if (config.skills.watch) skills.startWatching();
@@ -126,8 +129,65 @@ if (!config.webui.passwordHash) {
   setup = setupToken();
   process.stdout.write(`LuoLiCore setup token: ${setup.token}\nOpen http://${config.webui.host}:${config.webui.port}/setup\n`);
 }
+const previewPrompt = (key: string, role: RuntimeTurnContext['effectiveRole']): PromptPreviewResult => {
+  const contextRow = db.prepare('SELECT chat_id AS chatId,thread_id AS threadId FROM contexts WHERE key=?').get(key) as { chatId: string; threadId: number | null } | undefined;
+  if (!contextRow) throw new Error('会话不存在');
+  const latest = db.prepare('SELECT initiator_user_id AS userId FROM turns WHERE key=? ORDER BY COALESCE(started_at,queued_at) DESC,rowid DESC LIMIT 1').get(key) as { userId: string } | undefined;
+  const principal = db.prepare("SELECT chat_type AS chatType FROM principals WHERE kind='chat' AND tg_id=?").get(contextRow.chatId) as { chatType: string | null } | undefined;
+  const live = perChatConfig(configStore.snapshot(), key);
+  const snapshot = context.materialize(key, null);
+  const turn = {
+    turnId: 'webui:prompt-preview', key, chatId: contextRow.chatId, threadId: contextRow.threadId,
+    initiatorUserId: latest?.userId ?? contextRow.chatId, effectiveRole: role,
+    isPrivate: principal?.chatType ? principal.chatType === 'private' : !contextRow.chatId.startsWith('-'),
+    baseCommitId: null, snapshot, delta: [], abortSignal: new AbortController().signal, config: live,
+  } satisfies RuntimeTurnContext;
+  const built = assembleMainPrompt(turn, { config: live, tools: toolRegistry, prompts: promptAssembler, documents: promptDocuments,
+    workspace: resolve(live.sandbox.workspaceDir, contextRow.chatId), skills, agents });
+  const order = ['kernel', 'character', 'assist', 'catalog', 'pubmemory', 'primemory', 'runtime'];
+  const blocks = order.filter((name) => name !== 'primemory' || built.instructions.includes('=== PRIMEMORY ==='))
+    .map((name) => ({ name, tokens: built.blocks[name] ?? 0, content: built.contents[name] ?? '', truncated: built.truncated.includes(name) }));
+  return { key, role, instructions: built.instructions, blocks, totalTokens: blocks.reduce((sum, block) => sum + block.tokens, 0),
+    context: { messages: snapshot.messages.length, tokens: snapshot.tokens } };
+};
+
+/** 试跑的 chat/user 计数落在这个合成 subject 上：它花的是真钱，但不该记到某个真实会话头上。 */
+const DRY_RUN_SUBJECT = 'webui-dryrun';
+
+async function dryRunAgent(name: string, task: string, signal: AbortSignal, emit: (event: SubAgentRuntimeEvent) => void | Promise<void>): Promise<{ summary: string; fullRef: string; truncated: boolean }> {
+  const { run, definition } = agents.createDryRun(name, task, 'owner');
+  const live = configStore.snapshot();
+  const workspace = resolve(live.sandbox.workspaceDir, DRY_RUN_SUBJECT);
+  mkdirSync(workspace, { recursive: true, mode: 0o700 });
+  // 试跑跑的是真实模型调用。不接配额的话 usage_ledger 看得见这笔花费、quota_counters 却不涨，
+  // global.daily 对试跑一概无效 —— 和 docs/20 · W-QUOTA-01 是同一个成因（subagent.ts 的注释）。
+  const roleLimits = live.quota.perUser.byRole[run.effectiveRole];
+  const estimate = modelRegistry.estimate(definition.modelAlias, Math.max(live.context.limit.tokens / 4, 1000));
+  if (live.quota.enabled && live.quota.requirePricing && estimate === null) throw new Error(`别名 ${definition.modelAlias} 缺少定价，无法预估试跑花费（quota.requirePricing=true）`);
+  const reservation = live.quota.enabled ? quota.reserve({ chatId: DRY_RUN_SUBJECT, userId: DRY_RUN_SUBJECT,
+    estimateUsd: Math.max(live.quota.minReserveUsd, estimate ?? live.quota.minReserveUsd),
+    limits: { globalDaily: live.quota.global.daily, globalMonthly: live.quota.global.monthly,
+      chatDaily: live.quota.perChat.daily, chatMonthly: live.quota.perChat.monthly,
+      userDaily: roleLimits?.daily ?? live.quota.perUser.daily, userMonthly: roleLimits?.monthly ?? live.quota.perUser.monthly } }) : null;
+  if (live.quota.enabled && !reservation) {
+    agents.fail(run, 'quota_exceeded');
+    throw new Error('额度不足：试跑与正常轮次共用同一份全局额度，当前窗口已经用满');
+  }
+  const turn = { turnId: run.turnId, key: run.turnId, chatId: DRY_RUN_SUBJECT, threadId: null, initiatorUserId: 'webui',
+    effectiveRole: run.effectiveRole, isPrivate: false, baseCommitId: null,
+    snapshot: { messages: [], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 0 }, delta: [], abortSignal: signal, config: live } satisfies RuntimeTurnContext;
+  try {
+    return await runSubAgent(run, definition, task, undefined, turn, { db, agents, registry: modelRegistry, tools: toolRegistry, ledger, log, workspace,
+      provider: { maxRetries: live.provider.maxRetries, retryBaseMs: live.provider.retryBaseMs, retryMaxMs: live.provider.retryMaxMs },
+      quota, reservation, onEvent: emit });
+  } finally {
+    // commit 只退掉已结算的那部分，剩下的预留必须还回去，否则一次试跑就永久占住一份额度。
+    if (reservation) quota.release(reservation);
+  }
+}
+
 const server = createServer({ config: configStore, db, operations, principals, archive, context, providers, modelCatalog, approvals: approval, rebuildModels: () => modelRegistry.rebuild(), maintenance, events, log,
-  memory, promptDocuments, skills, plugins, mcp, agents, turnRegistry, sandbox, configSchema: zodToJsonSchema(configSchema, 'LuoLiConfig'), startedAt, setup });
+  memory, promptDocuments, skills, plugins, mcp, agents, turnRegistry, sandbox, previewPrompt, dryRunAgent, configSchema: zodToJsonSchema(configSchema, 'LuoLiConfig'), startedAt, setup });
 const http = serve({ fetch: server.fetch, hostname: config.webui.host, port: config.webui.port });
 events.subscribe((event) => {
   if (event.type !== 'config.changed') return;
@@ -177,6 +237,7 @@ const shutdown = async (signal: string): Promise<void> => {
   await mcp.close();
   await plugins.close();
   await skills.close();
+  log.close();
   maintenance.checkpoint();
   closeDatabase(db);
   process.exitCode = 0;

@@ -32,6 +32,7 @@ export interface PromptBuildInput {
 export interface PromptBuildResult {
   instructions: string;
   blocks: Record<string, number>;
+  contents: Record<string, string>;
   truncated: string[];
 }
 
@@ -75,7 +76,7 @@ export class PromptAssembler {
     const instructions = ['kernel', 'character', 'assist', 'catalog', 'pubmemory', ...(input.privateMemory === undefined ? [] : ['primemory']), 'runtime']
       .map((key) => `=== ${names[key]} ===\n${blockText[key]}`)
       .join('\n\n');
-    return { instructions, blocks: Object.fromEntries(Object.entries(blockText).map(([key, value]) => [key, tokens(value)])), truncated };
+    return { instructions, blocks: Object.fromEntries(Object.entries(blockText).map(([key, value]) => [key, tokens(value)])), contents: blockText, truncated };
   }
 }
 

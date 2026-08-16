@@ -67,6 +67,36 @@ describe('config API validation', () => {
     closeDatabase(db);
   });
 
+  // 会话页的覆盖面板依赖这条语义：PATCH 是**整体替换**而不是合并，所以界面每次都要把「要保留的
+  // 那几项」一起发回来，取消覆盖也是靠发一份不含它的对象（docs/21 · G-API-09）。
+  it('replaces the whole per-chat override object instead of merging', async () => {
+    const { app, db, headers } = harness();
+    const key = 'chat%3A-100';
+    expect((await app.request(`/api/chats/${key}`, { method: 'PATCH', headers, body: JSON.stringify({ output: { mode: 'once' }, trigger: { mention: false } }) })).status).toBe(200);
+    expect(JSON.parse(db.prepare("SELECT value_json FROM config_kv WHERE key='perChat.chat:-100'").pluck().get() as string))
+      .toEqual({ output: { mode: 'once' }, trigger: { mention: false } });
+    // 只发 output 那一半：trigger 那一半会被整体替换掉，而不是留在库里。
+    expect((await app.request(`/api/chats/${key}`, { method: 'PATCH', headers, body: JSON.stringify({ output: { mode: 'once' } }) })).status).toBe(200);
+    expect(JSON.parse(db.prepare("SELECT value_json FROM config_kv WHERE key='perChat.chat:-100'").pluck().get() as string)).toEqual({ output: { mode: 'once' } });
+    // 空对象 = 这个会话什么都不覆盖，且仍然过得了 configSchema（下次启动不会因此拒绝加载）。
+    expect((await app.request(`/api/chats/${key}`, { method: 'PATCH', headers, body: '{}' })).status).toBe(200);
+    expect(configSchema.parse({ perChat: { 'chat:-100': {} } }).perChat).toEqual({ 'chat:-100': {} });
+    closeDatabase(db);
+  });
+
+  // 自动生成的表单靠这三件套决定控件形态与「热更新 / 需重启 / 未接线」徽标：挂在信封顶层的
+  // 兄弟键会被只解 `data` 的客户端静默丢掉，那样表单会把每一项都当成需重启（docs/21 §1.1）。
+  it('serves schema, hot-reload prefixes, and unimplemented keys inside one data envelope', async () => {
+    const { app, db, headers } = harness();
+    const response = await app.request('/api/config/schema', { headers: { cookie: headers.cookie } });
+    const payload = await response.json() as { ok: boolean; data: { schema: unknown; hotReloadable: string[]; unimplemented: string[] } };
+    expect(payload.ok).toBe(true);
+    expect(payload.data.schema).toBeDefined();
+    expect(payload.data.hotReloadable).toContain('logs.level');
+    expect(payload.data.unimplemented).toContain('trigger.ignoreEditedAsTrigger');
+    closeDatabase(db);
+  });
+
   it('persists prompt edits with a unified diff revision', async () => {
     const { app, db, headers } = harness();
     const response = await app.request('/api/prompts/assist:global', { method: 'PUT', headers, body: JSON.stringify({ content: '# Assist\n\nupdated\n' }) });

@@ -314,25 +314,25 @@ docker run --rm \
   │
   ├─ policy.approval === 'never'                  → 直接执行
   ├─ approval.enabled === false                   → 直接执行
-  ├─ policy.approval === 'always' 或 命中风险规则  → 走审批
+  ├─ policy.approval === 'always' 或命中风险规则   → 走审批
   │     │
   │     ├─ role=owner ∧ approval.skipForOwner     → 直接执行（记日志 auto_approved）
-  │     └─ 其它情况 → 🚧 当前没有可用的审批通道：当场拒绝
-  │           ├─ 写一行 approvals (state=denied, decided_by=system, decision_channel=none) 供审计
-  │           ├─ 事件 approval.decided(approved=false) + 日志 approval.denied
-  │           └─ 返回 {ok:false, error:'未获批准', hint:'…'}；hint 交给模型，让它用自己的话
-  │               告诉用户这一步没做、并给出不需要审批的替代做法
+  │     └─ 其它情况 → 写 approvals(state=pending) + 广播 approval.pending
+  │           ├─ WebUI owner 批准 → 原工具调用继续，落 state=approved
+  │           ├─ WebUI owner 拒绝 → 不执行，落 state=denied
+  │           ├─ ttlMs 到期       → 不执行，落 state=expired
+  │           └─ 轮次 abort       → 不执行，落 state=denied / system
 ```
 
-> **🚧 Telegram 审批交互未实现。** 原设计是「发消息 + inline `[✓ 批准][✗ 拒绝]`（仅 owner 与
-> `approval.allowInitiator` 时的发起人可点）+ WebUI 待办 + SSE，等待 `ttlMs`（默认 180s）」。
-> Telegram 那半一行没写，而绝大多数轮次都从 Telegram 发起：旧实现每 500ms 轮询数据库、
-> 整整等满 180 秒，其间轮次挂着不动、占着并发槽和配额预留，最后仍然返回「未获批准」，
-> 全过程发起人看不到任何提示（docs/20 · W-APPR-01）。按「摘除比伪造安全」（[16 §5](./16-remediation-plan.md)）
-> 改成当场拒绝：不再有等待窗口，`approval.ttlMs` 与 `approval.allowInitiator` 因此标 🚧（[11](./11-config-reference.md)）。
-> `POST /api/approvals/:id/decide` 与 `GET /api/approvals` 保留：前者对非 pending 行返回 `changed:false`，
-> 后者是审计视图（能看到什么被挡了、挡了多少次）。**要恢复审批能力，先补一条真正能送达人的通道**，
-> 再把等待逻辑加回 `DatabaseApprovalBroker.request`。
+`DatabaseApprovalBroker.request` 在进程内保存等待中的 Promise；`decide` 用
+`UPDATE ... WHERE state='pending' AND expires_at>?` 原子抢裁决权，只有实际改到一行才唤醒等待者。
+拒绝、过期与取消返回 `{ok:false, error:'未获批准', hint:'…'}`，由模型向用户解释未执行原因。
+`approval.rememberWithinTurn` 只在同一 turn、同一工具与同一输入上复用裁决。
+
+**当前可用通道是 WebUI。** 任务与审批页通过 SSE 收到 `approval.pending`，owner 调
+`POST /api/approvals/:id/decide` 批准或拒绝。Telegram inline keyboard 仍未实现，因此用户若只看
+Telegram 不会看到按钮；但调用会按 `ttlMs` 等待 WebUI，而不是像旧实现那样当场伪拒绝或轮询数据库。
+`approval.allowInitiator` 仍未接线：WebUI 是单角色 owner，不能把裁决权下放给发起人。
 
 风险规则（`approval.rules`，正则匹配后触发审批，可在 WebUI 编辑）：
 

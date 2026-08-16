@@ -81,8 +81,10 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
       if (!parent) return { ok: false, error: 'parent_agent_unavailable' };
       const { run, definition } = dependencies.agents.spawn(parent, input.agent, input.task, input.modelAlias);
       const taskId = crypto.randomUUID();
+      const title = input.label ?? definition.name;
       dependencies.db.prepare("INSERT INTO tasks(id,turn_id,agent_run_id,chat_id,user_id,title,state,created_at,updated_at) VALUES (?,?,?,?,?,?,'running',?,?)")
-        .run(taskId, context.turn.turnId, run.id, context.turn.chatId, context.turn.initiatorUserId, input.label ?? definition.name, Date.now(), Date.now());
+        .run(taskId, context.turn.turnId, run.id, context.turn.chatId, context.turn.initiatorUserId, title, Date.now(), Date.now());
+      dependencies.log.publish('task.updated', { id: taskId, turnId: context.turn.turnId, title, state: 'running', progress: null });
       try {
         // provider 重试设置与配额预留都从本轮取：子 agent 的花费必须落进主 agent 那份预留，
         // 否则配额只看得见主 agent（docs/20 · W-QUOTA-01）。
@@ -91,9 +93,11 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
           provider: { maxRetries: live.provider.maxRetries, retryBaseMs: live.provider.retryBaseMs, retryMaxMs: live.provider.retryMaxMs },
           ...(dependencies.quota ? { quota: dependencies.quota } : {}), reservation: (context.turn.reservation as QuotaReservation | undefined) ?? null }, input.modelAlias);
         dependencies.db.prepare("UPDATE tasks SET state='done',result_summary=?,updated_at=?,finished_at=? WHERE id=?").run(result.summary, Date.now(), Date.now(), taskId);
+        dependencies.log.publish('task.updated', { id: taskId, turnId: context.turn.turnId, title, state: 'done', progress: null });
         return { ok: true, taskId, runId: run.id, agent: definition.name, ...result };
       } catch (error) {
         dependencies.db.prepare("UPDATE tasks SET state='failed',result_summary=?,updated_at=?,finished_at=? WHERE id=?").run(error instanceof Error ? error.message : String(error), Date.now(), Date.now(), taskId);
+        dependencies.log.publish('task.updated', { id: taskId, turnId: context.turn.turnId, title, state: 'failed', progress: null });
         return { ok: false, error: error instanceof Error ? error.message : 'subagent_failed', taskId, runId: run.id };
       }
     } });
@@ -118,6 +122,7 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
       const run = context.agentRunId ? dependencies.agents.byId(context.agentRunId) : null;
       if (!run) return { ok: false, error: 'agent_run_unavailable' };
       dependencies.agents.progress(run, input);
+      dependencies.log.publish('task.updated', { id: null, runId: run.id, turnId: context.turn.turnId, state: 'running', progress: input });
       return { ok: true };
     } });
   registry.register({ name: 'set_model', description: '切换当前轮模型别名。', inputSchema: z.object({ alias: z.enum(['main', 'high', 'low', 'vision']) }), policy: builtinPolicy('set_model'), sourcePriority: 90,

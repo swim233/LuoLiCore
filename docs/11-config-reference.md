@@ -54,9 +54,9 @@ NODE_ENV=production
 - 🚧 context / concurrency / cancel：`context.background.showUsername` · `context.background.showTime` · `context.background.includeNonText` · `context.rebase.markMeta` · `context.cacheCommits` · `concurrency.coalesceSameUserMs` · `cancel.commitPartial`
 - 🚧 prompt / memory：`prompt.includeToolCatalog` · `prompt.runtimeBlock.showQuota` · `prompt.runtimeBlock.showContextWatermark` · `prompt.runtimeBlock.showWorkspace` · `memory.pubWriteRequiresApproval` · `memory.autoApplyCompaction` · `memory.requireSourceTag`
 - 🚧 agent / provider：`agent.maxConcurrentSubagents` · `agent.askArbiter` · `agent.askEscalateToUser` · `agent.progressThrottleMs` · `provider.healthDownCooldownMinutes` · `provider.requestTimeoutMs` · `provider.streamIdleTimeoutMs`
-- 🚧 tools / approval：`tools.fs.allowHostFsForOwner` · `tools.archive.defaultSearchLimit` · `tools.archive.maxSearchLimit` · `tools.archive.defaultReadLimit` · `tools.archive.maxReadLimit` · `tools.tg.maxExtraMessagesPerTurn` · `tools.tg.maxFileSendMb` · `tools.web.summarizeWithAlias` · `tools.web.allowlist` · `tools.web.denylist` · `approval.allowInitiator` · `approval.ttlMs`（没有可用审批通道，命中规则当场拒绝，不存在等待窗口）
+- 🚧 tools / approval：`tools.fs.allowHostFsForOwner` · `tools.archive.defaultSearchLimit` · `tools.archive.maxSearchLimit` · `tools.archive.defaultReadLimit` · `tools.archive.maxReadLimit` · `tools.tg.maxExtraMessagesPerTurn` · `tools.tg.maxFileSendMb` · `tools.web.summarizeWithAlias` · `tools.web.allowlist` · `tools.web.denylist` · `approval.allowInitiator`（WebUI 是单角色 owner，裁决权下放不到发起人）
 - 🚧 output / media：`output.flushOnSentence` · `output.parseMode` · `output.typingWhileWorking` · `output.placeholderAfterMs` · `output.maxMentions` · `media.maxImagesPerTurn` · `media.groupDebounceMs` · `media.stickerAsImage` · `media.downloadVoice` · `media.extract.codeExtensions`
-- 🚧 extensions / persistence / logs：`skills.enabled` · `plugins.enabled` · `plugins.watch` · `mcp.enabled` · `mcp.connectTimeoutMs` · `db.ftsTokenizer` · `logs.gzipAfterDays` · `logs.redactPatterns`
+- 🚧 extensions / persistence / logs：`skills.enabled` · `plugins.enabled` · `plugins.watch` · `mcp.connectTimeoutMs` · `db.ftsTokenizer` · `logs.gzipAfterDays` · `logs.redactPatterns`
 - 🚧 quota / WebUI / alerts：`quota.perTurn.maxToolCalls` · `quota.perTurn.maxSubagents` · `quota.perTurn.maxDurationMs` · `quota.onExceeded.notifyOwner` · `quota.warnAtRatio` · `webui.enabled` · `webui.basePath` · `webui.publicUrl` · `alerts.notifyOwner` · `alerts.dedupeMinutes` · `alerts.webhookUrl` · `alerts.on`
 
 ```yaml
@@ -298,10 +298,11 @@ sandbox:
 # ============================================================ approval
 approval:
   enabled: true                   # 热更新
-  ttlMs: 180000
-  skipForOwner: true
-  allowInitiator: false
-  rememberWithinTurn: true
+  # 命中规则的调用挂起等待 WebUI 裁决的上限；到点落 expired 并把「未获批准」还给模型
+  ttlMs: 180000                   # 热更新
+  skipForOwner: true              # 热更新
+  allowInitiator: false           # 🚧 未实现
+  rememberWithinTurn: true        # 热更新
   rules:                          # 热更新（WebUI 可编辑）
     - tool: bash
       pattern: '(?i)\b(rm\s+-rf|mkfs|dd\s+if=|shutdown|reboot|:\(\)\{|chmod\s+777\s+/)'
@@ -356,15 +357,18 @@ skills:
   enabled: true                   # 热更新
   dir: ./skills                   # 需重启
   watch: true                     # 需重启
+  # WebUI 新建 Skill 未显式选择角色时使用；SkillLoader 每次创建都读当前快照
   defaultMinRole: trusted         # 热更新
 plugins:
   enabled: true                   # 热更新
   dir: ./plugins                  # 需重启
   watch: false
   hookTimeoutMs: 5000
-  order: []                       # 热更新 · plugin 名顺序，决定 hook 执行序
+  order: []                       # 需重启 · plugin 名顺序，决定 hook 执行序（PluginManager 在构造时就把它拿走了，reconcile 读的还是旧值）
   autoDisableAfterErrors: 3
 mcp:
+  # 总开关，出厂就是 false：`McpManager.reconcile` 一上来就对它 early-return，关着的时候
+  # `servers` 里配了多少个都不会连。WebUI 扩展页在它关着时给一条横幅（docs/09 §3.8）。
   enabled: false                  # 热更新
   connectTimeoutMs: 15000
   healthCheckCron: '*/5 * * * *'
@@ -461,9 +465,14 @@ output.*
 context.limit.*        context.background.*      context.scope
 trigger.*
 agent.main.*
-character（指向 memory/ 下的替代人设文件）
+character（指向 memory/ 下的替代人设文件）🚧 未接线
 memory.pubWriteMinRole（只允许比全局更严格）
 ```
+
+> `character` **运行时没有任何代码读它**：会话专属人设走的是 `memory/CHARACTER.<chat>.md` 文件
+> （`PromptDocuments.readForPrompt`），不是这个配置键。它留在白名单里只是「写进去不会被拒」，
+> 因此 WebUI 的会话级覆盖面板**不提供这一项** —— 给一个存得下但没人读的控件就是假控件。
+> 白名单本身不动：摘掉它会让已经这么配过的部署在下次启动时校验失败。
 
 覆盖在 `openTurn` 时由 `perChatConfig(config, key)` 合并进本轮配置，`onTurn` 用的是 `turn.config` 而不是全局快照，因此 agent 运行时看到的也是合并后的值。
 `trigger.*` 还要更早一步：`matchTrigger` 在 `openTurn` 之前就跑，所以触发判定处（`bot.ts` 的消息与

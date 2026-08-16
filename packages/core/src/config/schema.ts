@@ -2,6 +2,18 @@ import { z } from 'zod';
 
 const role = z.enum(['owner', 'trusted', 'limited', 'blocked']);
 const nullableMoney = z.number().nonnegative().nullable();
+const mcpServerBase = z.object({
+  name: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/),
+  enabled: z.boolean().default(true),
+  minRole: role.optional(),
+  toolAllow: z.array(z.string()).default([]),
+  toolDeny: z.array(z.string()).default([]),
+  timeoutMs: z.number().int().positive().optional(),
+});
+const mcpServerSchema = z.discriminatedUnion('transport', [
+  mcpServerBase.extend({ transport: z.literal('stdio'), command: z.string().min(1), args: z.array(z.string()).default([]), env: z.record(z.string()).default({}) }),
+  mcpServerBase.extend({ transport: z.literal('http'), url: z.string().url(), headers: z.record(z.string()).default({}) }),
+]);
 /** 拼错的时区只在群聊分支炸（私聊不走 Intl），漏到运行时会让整个群会话开不了轮次。 */
 const ianaTimezone = z.string().refine((zone) => {
   try { new Intl.DateTimeFormat('en-US', { timeZone: zone }); return true; } catch { return false; }
@@ -23,8 +35,10 @@ export const HOT_RELOADABLE_CONFIG_KEYS = [
   'agent.main', 'agent.agents',
   'provider.maxRetries', 'provider.retryBaseMs', 'provider.retryMaxMs', 'provider.catalog',
   'tools.maxRegistered', 'tools.maxCallsPerTurn', 'tools.maxConsecutiveErrors', 'tools.overrides', 'tools.exec',
-  'approval.enabled', 'approval.rules', 'approval.skipForOwner', 'approval.rememberWithinTurn',
-  'sandbox', 'mcp', 'quota', 'logs.level',
+  'approval.enabled', 'approval.ttlMs', 'approval.rules', 'approval.skipForOwner', 'approval.rememberWithinTurn',
+  // captureBodies 是每轮从 turn.config 现读的（runtime.ts 的 bodyForLog、/api/turns/:id/detail），
+  // 改完下一轮就生效。漏在白名单外时 WebUI 会对着排障时最常翻的这个开关说「需重启」。
+  'sandbox', 'skills.defaultMinRole', 'mcp', 'quota', 'logs.level', 'logs.captureBodies',
   // bot.ts 的 config Proxy 每次访问都取新快照，输出节奏是在每轮开始时读的：改了下一轮生效，
   // 在途那一轮沿用开轮时的值（编辑节流的定时器已经在跑，中途换节拍只会让这条消息的刷新变乱）。
   'output',
@@ -74,9 +88,6 @@ export const KNOWN_UNIMPLEMENTED_CONFIG_KEYS = [
   'tools.web.allowlist',
   'tools.web.denylist',
   'approval.allowInitiator',
-  // 审批没有可用的交互通道（Telegram 那半从未实现），命中规则的调用当场被拒，
-  // 因此没有等待窗口、也没有 TTL 可言（docs/20 · W-APPR-01）。
-  'approval.ttlMs',
   'output.flushOnSentence',
   'output.parseMode',
   'output.typingWhileWorking',
@@ -90,7 +101,6 @@ export const KNOWN_UNIMPLEMENTED_CONFIG_KEYS = [
   'skills.enabled',
   'plugins.enabled',
   'plugins.watch',
-  'mcp.enabled',
   'mcp.connectTimeoutMs',
   'db.ftsTokenizer',
   'logs.gzipAfterDays',
@@ -177,7 +187,7 @@ export const configSchema = z.object({
   media: z.object({ dir: z.string().default('./data/files'), maxImageBytes: z.number().int().positive().default(8_388_608), maxDocBytes: z.number().int().positive().default(20_971_520), maxImageEdge: z.number().int().positive().default(1568), maxImagesPerTurn: z.number().int().positive().default(4), groupDebounceMs: z.number().int().positive().default(1500), stickerAsImage: z.boolean().default(false), downloadVoice: z.boolean().default(true), extract: z.object({ enabled: z.boolean().default(true), maxChars: z.number().int().positive().default(40_000), inlineChars: z.number().int().positive().default(4000), codeExtensions: z.array(z.string()).default([]) }).default({}) }).default({}),
   skills: z.object({ enabled: z.boolean().default(true), dir: z.string().default('./skills'), watch: z.boolean().default(true), defaultMinRole: role.default('trusted') }).default({}),
   plugins: z.object({ enabled: z.boolean().default(true), dir: z.string().default('./plugins'), watch: z.boolean().default(false), hookTimeoutMs: z.number().int().positive().default(5000), order: z.array(z.string()).default([]), autoDisableAfterErrors: z.number().int().positive().default(3) }).default({}),
-  mcp: z.object({ enabled: z.boolean().default(false), connectTimeoutMs: z.number().int().positive().default(15_000), healthCheckCron: z.string().default('*/5 * * * *'), defaultMinRole: role.default('trusted'), servers: z.array(z.record(z.unknown())).default([]) }).default({}),
+  mcp: z.object({ enabled: z.boolean().default(false), connectTimeoutMs: z.number().int().positive().default(15_000), healthCheckCron: z.string().default('*/5 * * * *'), defaultMinRole: role.default('trusted'), servers: z.array(mcpServerSchema).default([]) }).default({}),
   db: z.object({ path: z.string().default('./data/luoli.db'), backupKeep: z.number().int().nonnegative().default(5), vacuumCron: z.string().default('0 5 * * 0'), ftsTokenizer: z.enum(['trigram', 'unicode61']).default('trigram') }).default({}),
   logs: z.object({ level: z.enum(['debug', 'info', 'warn', 'error']).default('info'), dir: z.string().default('./logs'), captureBodies: z.boolean().default(true), bodyMaxBytes: z.number().int().positive().default(262_144), maxFileMb: z.number().positive().default(128), retentionDays: z.number().int().nonnegative().default(30), gzipAfterDays: z.number().int().nonnegative().default(3), console: z.enum(['pretty', 'json', 'off']).default('pretty'), redactPatterns: z.array(z.string()).default([]) }).default({}),
   quota: z.object({ enabled: z.boolean().default(true), requirePricing: z.boolean().default(true), minReserveUsd: z.number().nonnegative().default(0.02), global: z.object({ daily: nullableMoney.default(5), monthly: nullableMoney.default(100) }).default({}), perChat: z.object({ daily: nullableMoney.default(1), monthly: nullableMoney.default(null) }).default({}), perUser: z.object({ daily: nullableMoney.default(0.5), monthly: nullableMoney.default(null), byRole: z.record(z.object({ daily: nullableMoney.optional(), monthly: nullableMoney.optional() })).default({}) }).default({}), perTurn: z.object({ maxCostUsd: z.number().positive().default(0.5), maxSteps: z.number().int().positive().default(12), maxToolCalls: z.number().int().positive().default(40), maxSubagents: z.number().int().positive().default(10), maxDurationMs: z.number().int().positive().default(600_000) }).default({}), rateLimit: z.object({ turnsPerUserPerHour: z.number().int().positive().default(30), turnsPerChatPerHour: z.number().int().positive().default(100), concurrentPerUser: z.number().int().positive().default(2) }).default({}), onExceeded: z.object({ reply: z.boolean().default(true), message: z.string().default('今天的额度用完了（已用 {spent}/{limit}），{resetAt} 重置。'), notifyOwner: z.boolean().default(true) }).default({}), warnAtRatio: z.number().gt(0).lte(1).default(0.8) }).default({}),

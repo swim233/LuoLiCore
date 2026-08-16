@@ -52,6 +52,8 @@ export class OperationsRepository {
   }
 }
 
+export interface TurnSummary { state: string; steps: number; toolCalls: number; costUsd: number; rebased: number; durationMs: number }
+
 export class TurnRepository {
   constructor(private readonly db: Sqlite) {}
 
@@ -61,9 +63,13 @@ export class TurnRepository {
       VALUES (?,?,?,?,?,?,?,?,?,'running',?)`).run(input.id, input.key, input.chatId, input.threadId, input.userId, input.role, input.triggerMessageId, input.triggerReason, input.baseCommitId, now);
   }
 
-  finish(id: string, input: { state: 'committed' | 'failed' | 'cancelled'; commitId?: string; rebased?: boolean; error?: string; cancelReason?: string }): void {
-    this.db.prepare(`UPDATE turns SET state=?,commit_id=?,rebased=?,error=?,cancel_reason=?,finished_at=? WHERE id=?`).run(input.state,
-      input.commitId ?? null, input.rebased ? 1 : 0, input.error ?? null, input.cancelReason ?? null, Date.now(), id);
+  /** 回一份结算后的统计：`turn.finished` 事件要的 steps/花费/耗时都在这一行上，
+   *  调用方再查一次等于每轮多一条 SELECT，而 RETURNING 是白送的。 */
+  finish(id: string, input: { state: 'committed' | 'failed' | 'cancelled'; commitId?: string; rebased?: boolean; error?: string; cancelReason?: string }): TurnSummary | null {
+    const row = this.db.prepare(`UPDATE turns SET state=?,commit_id=?,rebased=?,error=?,cancel_reason=?,finished_at=? WHERE id=?
+      RETURNING state,steps,tool_calls AS toolCalls,cost_usd AS costUsd,rebased,finished_at-COALESCE(started_at,queued_at,finished_at) AS durationMs`).get(input.state,
+      input.commitId ?? null, input.rebased ? 1 : 0, input.error ?? null, input.cancelReason ?? null, Date.now(), id) as TurnSummary | undefined;
+    return row ?? null;
   }
 
   active(chatId: string): unknown[] {

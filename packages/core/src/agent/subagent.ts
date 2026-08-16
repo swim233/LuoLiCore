@@ -8,6 +8,10 @@ import type { QuotaGuard, QuotaReservation } from '../ledger/quota.js';
 import type { ToolExecutionContext, ToolRegistry } from '../tools/registry.js';
 import type { UsageLedger } from '../ledger/usage.js';
 import type { LogSink } from '../log/sink.js';
+export type SubAgentRuntimeEvent =
+  | { type: 'step'; step: number; finishReason: string; text: string; toolCalls: unknown[]; toolResults: unknown[] }
+  | { type: 'usage'; step: number; inputTokens: number; outputTokens: number; costUsd: number };
+
 
 export interface SubAgentDependencies {
   db: Sqlite;
@@ -21,6 +25,7 @@ export interface SubAgentDependencies {
   provider?: { maxRetries: number; retryBaseMs: number; retryMaxMs: number };
   quota?: QuotaGuard;
   reservation?: QuotaReservation | null;
+  onEvent?: (event: SubAgentRuntimeEvent) => void | Promise<void>;
 }
 
 export async function runSubAgent(run: AgentRun, definition: AgentDefinition, task: string, context: string | undefined, turn: RuntimeTurnContext, dependencies: SubAgentDependencies, modelAlias?: string): Promise<{ summary: string; fullRef: string; truncated: boolean }> {
@@ -37,8 +42,12 @@ export async function runSubAgent(run: AgentRun, definition: AgentDefinition, ta
   for (const registered of dependencies.tools.active(run.effectiveRole, toolContext, definition.tools)) {
     toolSet[registered.name] = tool({ description: registered.description, inputSchema: registered.inputSchema, execute: (input) => dependencies.tools.execute(registered.name, input, toolContext) });
   }
+  let stepNumber = 0;
   const agent = new ToolLoopAgent({ model, ...dependencies.registry.settings(alias), instructions: definition.instructions, tools: toolSet, activeTools: Object.keys(toolSet), stopWhen: stepCountIs(definition.maxSteps),
-    onStepEnd: (step) => {
+    onStepEnd: async (step) => {
+      const currentStep = ++stepNumber;
+      await dependencies.onEvent?.({ type: 'step', step: currentStep, finishReason: step.finishReason, text: step.text,
+        toolCalls: step.toolCalls as unknown[], toolResults: step.toolResults as unknown[] });
       const info = dependencies.registry.infoByModelId(step.model.modelId) ?? dependencies.registry.info(alias);
       if (!info) return;
       const cost = dependencies.ledger.record({ turnId: turn.turnId, agentRunId: run.id, chatId: turn.chatId, userId: turn.initiatorUserId,
@@ -50,7 +59,9 @@ export async function runSubAgent(run: AgentRun, definition: AgentDefinition, ta
       // 只 record 不 commit 的话，用量报表看得见这笔花费、配额却拦不住它：日/月计数器只在
       // commit() 里递增，一轮十个子 agent 可以在账本上「免费」跑掉（docs/20 · W-QUOTA-01）。
       if (dependencies.quota && dependencies.reservation) dependencies.quota.commit(dependencies.reservation, cost);
-      dependencies.db.prepare('UPDATE agent_runs SET steps=steps+1,input_tokens=input_tokens+?,output_tokens=output_tokens+? WHERE id=?').run(step.usage.inputTokens ?? 0, step.usage.outputTokens ?? 0, run.id);
+      dependencies.db.prepare('UPDATE agent_runs SET steps=steps+1,input_tokens=input_tokens+?,output_tokens=output_tokens+?,cost_usd=cost_usd+? WHERE id=?')
+        .run(step.usage.inputTokens ?? 0, step.usage.outputTokens ?? 0, cost, run.id);
+      await dependencies.onEvent?.({ type: 'usage', step: currentStep, inputTokens: step.usage.inputTokens ?? 0, outputTokens: step.usage.outputTokens ?? 0, costUsd: cost });
     },
   });
   const content = context ? `${task}\n\n---\n参考资料:\n${context}` : task;

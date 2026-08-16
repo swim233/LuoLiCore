@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { watch } from 'chokidar';
-import { readFileSync, readdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import matter from 'gray-matter';
 import { z } from 'zod';
@@ -8,11 +8,12 @@ import type { Role } from '@luoli/shared';
 import { roleRank } from '@luoli/shared';
 import type { Sqlite } from '@luoli/db';
 
+const VALID_ROLES: Record<Role, true> = { blocked: true, limited: true, trusted: true, owner: true };
 const frontmatterSchema = z.object({
   name: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
   description: z.string().max(500),
   'allowed-tools': z.array(z.string()).optional(),
-  'min-role': z.enum(['blocked', 'limited', 'trusted', 'owner']).default('trusted'),
+  'min-role': z.enum(['blocked', 'limited', 'trusted', 'owner']).optional(),
   model: z.string().optional(),
   version: z.union([z.string(), z.number()]).optional(),
   enabled: z.boolean().default(true),
@@ -30,11 +31,30 @@ export interface SkillDefinition {
   files: string[];
   loadError?: string;
 }
+export interface SkillWriteInput {
+  description?: string | undefined;
+  body?: string | undefined;
+  allowedTools?: string[] | undefined;
+  minRole?: Role | undefined;
+  model?: string | null | undefined;
+  enabled?: boolean | undefined;
+}
+interface NormalizedSkillWriteInput {
+  description: string;
+  body: string;
+  allowedTools: string[];
+  minRole: Role;
+  model: string | null;
+  enabled: boolean;
+}
 
 export class SkillLoader {
   readonly #skills = new Map<string, SkillDefinition>();
 
-  constructor(private readonly db: Sqlite, readonly directory: string) {}
+  readonly #defaultMinRole: () => Role;
+  constructor(private readonly db: Sqlite, readonly directory: string, defaultMinRole: Role | (() => Role) = 'trusted') {
+    this.#defaultMinRole = typeof defaultMinRole === 'function' ? defaultMinRole : () => defaultMinRole;
+  }
   #watcher: ReturnType<typeof watch> | null = null;
 
   scan(): SkillDefinition[] {
@@ -50,7 +70,7 @@ export class SkillLoader {
         if (meta.name !== directory) throw new Error('skill name must equal directory name');
         const files = readdirSync(join(this.directory, directory), { recursive: true, withFileTypes: true })
           .filter((entry) => entry.isFile()).map((entry) => relative(join(this.directory, directory), join(entry.parentPath, entry.name)));
-        const skill: SkillDefinition = { name: meta.name, description: meta.description, body: parsed.content.trim(), dir: join(this.directory, directory), minRole: meta['min-role'], enabled: meta.enabled, files };
+        const skill: SkillDefinition = { name: meta.name, description: meta.description, body: parsed.content.trim(), dir: join(this.directory, directory), minRole: meta['min-role'] ?? this.#defaultMinRole(), enabled: meta.enabled, files };
         if (meta['allowed-tools']) skill.allowedTools = meta['allowed-tools'];
         if (meta.model) skill.model = meta.model;
         this.#skills.set(skill.name, skill);
@@ -73,6 +93,85 @@ export class SkillLoader {
   async close(): Promise<void> {
     await this.#watcher?.close();
     this.#watcher = null;
+  }
+  read(name: string): SkillDefinition | null {
+    const skill = this.#skills.get(name);
+    return skill ? { ...skill, files: [...skill.files], ...(skill.allowedTools ? { allowedTools: [...skill.allowedTools] } : {}) } : null;
+  }
+
+  create(name: string, input: SkillWriteInput): SkillDefinition {
+    this.validateInput(input);
+    this.assertName(name);
+    if (this.#skills.has(name) || existsSync(join(this.directory, name))) throw new Error('skill_already_exists');
+    if (typeof input.description !== 'string' || typeof input.body !== 'string') throw new Error('skill_description_and_body_required');
+    return this.write(name, {
+      description: input.description,
+      body: input.body,
+      allowedTools: input.allowedTools ?? [],
+      minRole: input.minRole ?? this.#defaultMinRole(),
+      model: input.model ?? null,
+      enabled: input.enabled ?? true,
+    });
+  }
+
+  update(name: string, input: SkillWriteInput): SkillDefinition {
+    this.validateInput(input);
+    this.assertName(name);
+    const current = this.#skills.get(name);
+    if (!current || current.loadError) throw new Error('skill_not_found');
+    return this.write(name, {
+      description: input.description ?? current.description,
+      body: input.body ?? current.body,
+      allowedTools: input.allowedTools ?? current.allowedTools ?? [],
+      minRole: input.minRole ?? current.minRole,
+      model: input.model === undefined ? current.model ?? null : input.model,
+      enabled: input.enabled ?? current.enabled,
+    });
+  }
+
+  remove(name: string): boolean {
+    this.assertName(name);
+    const path = join(this.directory, name);
+    if (!existsSync(path) && !this.#skills.has(name)) return false;
+    if (existsSync(path)) rmSync(path, { recursive: true });
+    this.#skills.delete(name);
+    this.db.prepare('DELETE FROM skills WHERE name=?').run(name);
+    return true;
+  }
+
+  private assertName(name: string): void {
+    if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name)) throw new Error('invalid_skill_name');
+  }
+
+  private validateInput(input: SkillWriteInput): void {
+    if (input.description !== undefined && typeof input.description !== 'string') throw new Error('invalid_skill_description');
+    if (input.body !== undefined && typeof input.body !== 'string') throw new Error('invalid_skill_body');
+    if (input.allowedTools !== undefined && (!Array.isArray(input.allowedTools) || input.allowedTools.some((entry) => typeof entry !== 'string'))) throw new Error('invalid_skill_allowed_tools');
+    if (input.minRole !== undefined && !(input.minRole in VALID_ROLES)) throw new Error('invalid_skill_min_role');
+    if (input.model !== undefined && input.model !== null && typeof input.model !== 'string') throw new Error('invalid_skill_model');
+    if (input.enabled !== undefined && typeof input.enabled !== 'boolean') throw new Error('invalid_skill_enabled');
+  }
+
+  private write(name: string, input: NormalizedSkillWriteInput): SkillDefinition {
+    const directory = join(this.directory, name);
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const path = join(directory, 'SKILL.md');
+    const data: Record<string, unknown> = {
+      name,
+      description: input.description,
+      'allowed-tools': input.allowedTools,
+      'min-role': input.minRole,
+      enabled: input.enabled,
+    };
+    if (input.model) data.model = input.model;
+    const raw = matter.stringify(`${input.body.trim()}\n`, data);
+    const temporary = join(directory, `.SKILL.md.${process.pid}.tmp`);
+    writeFileSync(temporary, raw, { encoding: 'utf8', mode: 0o600 });
+    renameSync(temporary, path);
+    this.scan();
+    const written = this.#skills.get(name);
+    if (!written || written.loadError) throw new Error(written?.loadError ?? 'skill_write_failed');
+    return this.read(name)!;
   }
 
   catalog(role: Role): Array<{ name: string; description: string }> {
