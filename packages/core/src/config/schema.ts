@@ -56,7 +56,6 @@ export const KNOWN_UNIMPLEMENTED_CONFIG_KEYS = [
   'trigger.cooldownMsPerUser',
   // 编辑消息永远不开新轮次（docs/20 · W-TG-05）。开关留着是为了未来兼容，但当前一律按背景消息归档。
   'trigger.ignoreEditedAsTrigger',
-  'context.background.showUsername',
   'context.background.showTime',
   'context.background.includeNonText',
   'context.rebase.markMeta',

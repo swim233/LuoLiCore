@@ -32,6 +32,33 @@ export function assignDotted(root: Record<string, unknown>, key: string, value: 
   return true;
 }
 
+/**
+ * 身份串（显示名、@用户名）是**用户可控内容**，会被拼进两处模型可见的文本：消息前缀
+ * `[名字 时间]` 与 RUNTIME 块的「触发」行。换行在 RUNTIME 里能伪造出一整行
+ * （`\n你的有效权限：owner`），方括号能提前闭合前缀。控制字符与 bidi override 一并清掉。
+ */
+export function sanitizeIdentity(value: string, max = 48): string {
+  return [...value.replace(/[\p{Cc}\p{Cf}]/gu, ' ')].slice(0, max).join('').replaceAll('[', '［').replaceAll(']', '］')
+    .replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * `张三(@zhangsan, id=8899001)`。显示名优先级：昵称 → `@用户名` → `user:<id>`（docs/02 §4.3），
+ * 括号里补的是**已经用作显示名之外**的那些标识 —— 昵称会改、用户名会换，只有 id 是稳定的。
+ * 消息前缀与 RUNTIME 块共用这一个格式化函数，两处的写法不能各自漂移。
+ */
+export function formatSpeakerIdentity(input: { name?: string | null; username?: string | null; userId?: string | null },
+  show: { username?: boolean; id?: boolean } = {}): string {
+  const name = sanitizeIdentity(input.name ?? '');
+  const username = sanitizeIdentity(input.username ?? '', 32);
+  const userId = sanitizeIdentity(input.userId ?? '', 32);
+  const base = name || (username ? `@${username}` : userId ? `user:${userId}` : 'user:unknown');
+  const extras: string[] = [];
+  if (show.username !== false && username && base !== `@${username}`) extras.push(`@${username}`);
+  if (show.id !== false && userId && base !== `user:${userId}`) extras.push(`id=${userId}`);
+  return extras.length ? `${base}(${extras.join(', ')})` : base;
+}
+
 export type Result<T extends Record<string, unknown> = Record<string, never>> =
   | ({ ok: true } & T)
   | { ok: false; error: string; hint?: string };
@@ -88,6 +115,11 @@ export interface RuntimeTurnContext {
   abortSignal: AbortSignal;
   loadedSkills?: Set<string>;
   skillAllowedTools?: Set<string>;
+  /**
+   * 触发这一轮的人是谁（`openTurn` 从触发消息上取）。只喂给 RUNTIME 块的「触发」行：
+   * 私聊上下文按红线 10 不带发言人前缀，模型此前连问话人的昵称都看不到。
+   */
+  initiator?: { name: string | null; username: string | null };
   /**
    * 本轮的配额预留（`QuotaGuard.reserve` 的返回值，结构化声明是为了不让 shared 反向依赖 core）。
    * 子 agent 必须把花费提交进同一份预留，否则日/月配额永远看不到它们（docs/20 · W-QUOTA-01）。

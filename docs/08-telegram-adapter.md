@@ -258,7 +258,7 @@ bot:  ⏳ 已接收，正在处理…                      [取消]        ← �
 | 类型 | 归档 | 下载 | 进上下文 |
 |---|---|---|---|
 | 文本 | ✓ | — | 正文 |
-| 图片 photo | ✓ | ✓（取最大尺寸，`media.maxImageBytes` 默认 8MB） | `image` part（模型需 vision，否则降级 `[图片: caption]`） |
+| 图片 photo | ✓ | ✓（取最大尺寸，`media.maxImageBytes` 默认 8MB） | `file` part + `mediaType:'image/*'`（模型需 vision，否则降级 `[图片: caption]`） |
 | 文档 document | ✓ | ✓（`media.maxDocBytes` 默认 20MB） | 见下 |
 | 贴纸 sticker | ✓ | 仅静态 webp | `[贴纸 😄]`（`emoji` 字段）；`media.stickerAsImage`（默认 false）时作为图片 |
 | 动图 animation | ✓ | ✗ | `[动图]` |
@@ -299,7 +299,10 @@ media:
 ### 7.2 图片处理
 
 - 下载后用 `sharp` 归一化：最长边 ≤ `media.maxImageEdge`（默认 1568，与主流 vision 模型的最优输入吻合），转 JPEG q85，写 `data/files/`。
-- 进上下文：`{ type:'image', image: <base64 或 file://>, mediaType:'image/jpeg' }`。
+- 进上下文：`{ type:'file', data: <base64 或 file://>, mediaType:'image/jpeg' }`。
+  **不是 `image` part**：AI SDK v7 起 `image` 已废弃，SDK 内部照样把它转成 `file` 再发给 provider，
+  只是顺带对每一张图打一条 DeprecationWarning。库里的历史 `image` part 由读出侧
+  （`runtime.ts` 的 `contextMessages`）就地转换 —— parts 是持久化的，不兜就得等图片滚出窗口。
 - 一轮内图片数上限 `media.maxImagesPerTurn`（默认 4），超出丢最旧并注明。
 - 若当前别名模型 `capabilities.vision=false` → `prepareStep` 切 `vision` 别名；无 `vision` 别名则降级为占位符 + 回复末尾提示「当前模型不支持看图」。
 
@@ -308,7 +311,7 @@ media:
 同 `media_group_id` 的多条消息会被 Telegram 分成多个 update。`mediaGroupDebounce`：
 - 首条到达时建一个 buffer，等 `media.groupDebounceMs`（默认 1500）；
 - 期间同组消息合并；
-- 超时后作为**一条逻辑消息**继续管线（`messages` 仍逐条入库，触发判定用带 caption 的那条，上下文里合并为一条 `user` 消息含多个 image part）。
+- 超时后作为**一条逻辑消息**继续管线（`messages` 仍逐条入库，触发判定用带 caption 的那条，上下文里合并为一条 `user` 消息含多个图片 part）。
 
 ### 7.4 回复中的媒体（被回复消息的取回）
 

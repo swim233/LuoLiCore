@@ -67,7 +67,9 @@ export class TelegramMedia {
       }
       const extracted = await this.extract(localPath, file);
       this.insert(id, archived, file, localPath, 'done', null, extracted, extracted === null ? 'skipped' : 'done');
-      if (file.kind === 'photo') return [{ type: 'image', image: readFileSync(localPath).toString('base64'), mediaType: 'image/jpeg' }];
+      // `image` part 在 AI SDK v7 已废弃（SDK 内部就是转成 file 再发，顺带每张图打一条
+      // DeprecationWarning）。读出侧 `contextMessages` 兜历史 part，写入侧从这里就产出新形状。
+      if (file.kind === 'photo') return [{ type: 'file', data: readFileSync(localPath).toString('base64'), mediaType: 'image/jpeg' }];
       if (extracted) return [{ type: 'text', text: `[文档 ${file.name ?? file.uniqueId}]\n${untrusted(`file:${file.name ?? file.uniqueId}`, [...extracted].slice(0, this.config.extract.inlineChars).join(''))}` }];
       return [{ type: 'text', text: `[${file.kind} ${file.name ?? ''}${file.duration ? ` ${file.duration}s` : ''}]` }];
     } catch (error) {
