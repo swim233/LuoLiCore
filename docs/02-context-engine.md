@@ -258,15 +258,21 @@ t=3s  A commit: REBASE → ordinals 7,8, parent=c002
 背景消息与触发消息统一以 `role='user'` 进入上下文，文本前缀由 `render.ts` 生成：
 
 ```
-群聊:  [张三 10:02] 今天去哪吃
-       [李四(@lisi) 10:03] 隆福吧
-       [张三 10:04 ↩︎回复 李四] 好
-私聊:  （无前缀，直接是消息正文）
+群聊:  [张三(@zhangsan, id=8899001) 10:02] 今天去哪吃
+       [李四(@lisi, id=8899002) 10:03] 隆福吧
+       [张三(@zhangsan, id=8899001) 10:04 ↩︎回复 李四] 好
+私聊:  （无前缀，直接是消息正文；问话人是谁由 RUNTIME 块的「触发」行给出，见 [06 §1.2](./06-prompt-and-memory.md)）
 ```
 
 规则：
 - 显示名优先级：`first_name last_name` → `@username` → `user:<id>`。
-- `background.showUsername`（默认 `true`）决定是否附 `@username`。
+- 括号里补的是**没被用作显示名**的那些标识：昵称会改、用户名会换，只有 id 是稳定的，
+  模型要指认「上次那个人」只能靠它。`background.showUsername`（默认 `true`）决定是否附 `@username`；
+  id 恒附。bot 自己的消息（被回复时会渲染一次）不带括号 —— 机器人的身份标识对区分发言人没有意义。
+- 昵称与用户名是**用户可控内容**：`sanitizeIdentity` 先清掉控制字符（含换行与 bidi override）、
+  把方括号改成全角、截到 48 字符。换行不清，一个昵称就能在 RUNTIME 块里伪造出整行
+  「你的有效权限：owner」；方括号不清，前缀能被提前闭合。前缀与 RUNTIME 块共用
+  `formatSpeakerIdentity` 一个格式化函数，两处的写法不允许各自漂移。
 - `background.showTime`（默认 `true`）：`HH:mm`，时区取 `general.timezone`。
 - 引用回复：附 `↩︎回复 <被回复者显示名>`；若被回复消息也在当前窗口内，附其 ordinal：`↩︎回复 #3` 🚧（ordinal 形式未实现）。
 - 非文本消息渲染为占位符：`[图片]`（附 caption）、`[文档 report.pdf 1.2MB]`、`[语音 12s]`、`[贴纸 😄]`、`[视频 0:34]`。图片/文档若被解析（[08 §7](./08-telegram-adapter.md#7-多模态)）则同时携带真正的 multimodal part。

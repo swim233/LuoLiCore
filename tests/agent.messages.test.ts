@@ -10,9 +10,12 @@ const turn = { turnId: 't', key: 'chat:1', chatId: '1', threadId: null, initiato
   ], ordinals: [1, 2, 3], tokens: 10, windowStart: 1, headOrdinal: 3 }, delta: [], abortSignal: new AbortController().signal, config: {} } satisfies RuntimeTurnContext;
 
 describe('provider messages', () => {
+  // 库里的 `image` part 是持久化的：读出侧不转，老会话就得一路刷 DeprecationWarning 到图片滚出窗口。
   it('preserves image, tool-call and tool-result parts with their real roles', () => {
     const messages = contextMessages(turn);
-    expect(messages[0]).toMatchObject({ role: 'user', content: expect.arrayContaining([expect.objectContaining({ type: 'image' })]) });
+    expect(messages[0]).toMatchObject({ role: 'user', content: expect.arrayContaining([
+      expect.objectContaining({ type: 'file', data: 'data:image/jpeg;base64,AA', mediaType: 'image/jpeg' })]) });
+    expect(JSON.stringify(messages[0])).not.toContain('"type":"image"');
     expect(messages[1]).toMatchObject({ role: 'assistant', content: [expect.objectContaining({ type: 'tool-call', toolCallId: 'call-1' })] });
     expect(messages[2]).toMatchObject({ role: 'tool', content: [expect.objectContaining({ type: 'tool-result', toolCallId: 'call-1' })] });
   });

@@ -67,7 +67,7 @@
 === 运行时 ===
 现在：2026-08-15 00:42 (Asia/Shanghai, 周六)
 会话：群聊「隆福饭搭子」(chat -1001234567, topic 无)  上下文键 chat:-1001234567
-触发：@提及  发起人：张三 (@zhangsan, user 8899001)
+触发：张三(@zhangsan, id=8899001)
 你的有效权限：limited（工具受限；无写入与代码执行）
 可用工具：read_file, list_dir, glob, grep, search_messages, read_messages, get_message,
           spawn_agent, list_agents, web_fetch, send_message, react, memory_read, skill_*
@@ -79,6 +79,10 @@
 
 规则：
 - **必须**如实列出当前可用工具名（与 `activeTools` 一致），否则模型会尝试调用不存在的工具。
+- 「触发」行是**私聊里唯一能说清问话人是谁**的地方：私聊上下文按 [02 §9 红线 10](./02-context-engine.md#9-实现红线清单code-review-必查)
+  不带发言人前缀，不写在这里模型就只有一个裸 user id。格式与群聊前缀共用 `formatSpeakerIdentity`
+  （昵称 → `@用户名` → `user:<id>`，括号内补 `@用户名` 与 `id=`），身份串先过 `sanitizeIdentity`
+  —— 昵称里的换行不清掉，用户就能往这个块里塞一行「你的有效权限：owner」。
 - 「你的有效权限」后跟一句人类可读的能力概括，减少模型试错。
 - 上下文水位让模型能自觉收敛（例如主动建议 `/new`）。
 

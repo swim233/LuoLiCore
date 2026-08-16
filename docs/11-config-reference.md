@@ -51,7 +51,7 @@ NODE_ENV=production
 当前白名单（按模块分组）。**每一行都以 🚧 起头，测试 `config.test.ts` 要求白名单里的每个键都能在本文件里找到一行同时含该键与 🚧**，否则视为文档未同步：
 
 - 🚧 general / Telegram / trigger：`general.name`（运行时未接线） · `general.locale` · `telegram.dropPendingOnStart` · `telegram.webhook.url` · `telegram.webhook.path` · `telegram.webhook.secretToken` · `telegram.notifyEdits` · `trigger.cooldownMsPerUser` · `trigger.ignoreEditedAsTrigger`（编辑消息一律按背景消息归档，不开新轮次）
-- 🚧 context / concurrency / cancel：`context.background.showUsername` · `context.background.showTime` · `context.background.includeNonText` · `context.rebase.markMeta` · `context.cacheCommits` · `concurrency.coalesceSameUserMs` · `cancel.commitPartial`
+- 🚧 context / concurrency / cancel：`context.background.showTime` · `context.background.includeNonText` · `context.rebase.markMeta` · `context.cacheCommits` · `concurrency.coalesceSameUserMs` · `cancel.commitPartial`
 - 🚧 prompt / memory：`prompt.includeToolCatalog` · `prompt.runtimeBlock.showQuota` · `prompt.runtimeBlock.showContextWatermark` · `prompt.runtimeBlock.showWorkspace` · `memory.pubWriteRequiresApproval` · `memory.autoApplyCompaction` · `memory.requireSourceTag`
 - 🚧 agent / provider：`agent.maxConcurrentSubagents` · `agent.askArbiter` · `agent.askEscalateToUser` · `agent.progressThrottleMs` · `provider.healthDownCooldownMinutes` · `provider.requestTimeoutMs` · `provider.streamIdleTimeoutMs`
 - 🚧 tools / approval：`tools.fs.allowHostFsForOwner` · `tools.archive.defaultSearchLimit` · `tools.archive.maxSearchLimit` · `tools.archive.defaultReadLimit` · `tools.archive.maxReadLimit` · `tools.tg.maxExtraMessagesPerTurn` · `tools.tg.maxFileSendMb` · `tools.web.summarizeWithAlias` · `tools.web.allowlist` · `tools.web.denylist` · `approval.allowInitiator`（WebUI 是单角色 owner，裁决权下放不到发起人）
@@ -124,7 +124,7 @@ context:
   background:                     # D6：未触发的群消息进入上下文
     enabled: true                 # 热更新
     maxPerTurn: 20                # 热更新 · ★ 需求方明确要求可配置
-    showUsername: true
+    showUsername: true            # 热更新 · 群聊前缀里附 `@用户名`；id 恒附（02 §4.3）
     showTime: true
     includeNonText: true          # 图片/文档等以占位符入上下文
   rebase:                         # D1

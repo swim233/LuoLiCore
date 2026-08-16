@@ -3,7 +3,7 @@ import type { ArchivedMessage, ArchiveRepository, CommitRow, ContextRepository, 
 import { ContextRepository as ScopedContextRepository } from '@luoli/db';
 import type { Config } from '../config/schema.js';
 import { KeyedMutex } from '../turn/keyed-mutex.js';
-import { estimateMessageTokens, estimateTextTokens, type MaterializedContext, type NewContextMessage, type Role, type RuntimeTurnContext } from '@luoli/shared';
+import { estimateMessageTokens, estimateTextTokens, formatSpeakerIdentity, type MaterializedContext, type NewContextMessage, type Role, type RuntimeTurnContext } from '@luoli/shared';
 import type { LogSink } from '../log/sink.js';
 export interface OpenTurnRequest {
   chatId: string;
@@ -57,11 +57,26 @@ function formatClock(timestamp: number, timezone: string): string {
   catch { return new Intl.DateTimeFormat('zh-CN', { ...options, timeZone: 'UTC' }).format(new Date(timestamp)); }
 }
 
-function speakerName(message: ArchivedMessage): string {
-  return escapeForgedSpeakerPrefixes(message.fromName || (message.fromUsername ? `@${message.fromUsername}` : `user:${message.fromUserId ?? 'unknown'}`));
+/**
+ * 群聊前缀里的发言人。身份标识只给真人发言者：bot 自己的消息（被回复时会渲染一次）挂上
+ * `@用户名, id=…` 只是噪音，而模型区分发言人靠的就是这一段。
+ */
+function speakerName(message: ArchivedMessage, showUsername: boolean): string {
+  return message.fromKind === 'user'
+    ? formatSpeakerIdentity({ name: message.fromName, username: message.fromUsername, userId: message.fromUserId }, { username: showUsername })
+    : formatSpeakerIdentity({ name: message.fromName, username: message.fromUsername, userId: message.fromUserId }, { username: false, id: false });
 }
 
-export function renderArchivedMessage(message: ArchivedMessage, isPrivate: boolean, timezone: string, quoted = false): NewContextMessage {
+export interface RenderOptions {
+  isPrivate: boolean;
+  timezone: string;
+  /** `context.background.showUsername`：只管前缀里**附带**的 `@用户名`，不影响它作为显示名的兜底位。 */
+  showUsername?: boolean;
+  quoted?: boolean;
+}
+
+export function renderArchivedMessage(message: ArchivedMessage, options: RenderOptions): NewContextMessage {
+  const { isPrivate, timezone, showUsername = true, quoted = false } = options;
   const rawText = message.text ?? `[${message.kind}]`;
   const escaped = escapeForgedSpeakerPrefixes(rawText);
   const time = formatClock(message.tgDate, timezone);
@@ -71,8 +86,8 @@ export function renderArchivedMessage(message: ArchivedMessage, isPrivate: boole
   // 而不是「用户指着上面那条问」——尤其当上面那条只有一张图的时候。
   // 半角方括号是**有意的**：`escapeForgedSpeakerPrefixes` 把正文里形如 `[… H:MM]` 的串改写成全角，
   // 于是这个前缀与 `[名字 时间]` 共用同一条防伪规则 —— 用全角写反而会和「已被转义」的形态撞上。
-  const text = quoted ? `[↩︎ 被回复的消息 ${speakerName(message)} ${time}] ${body}`
-    : isPrivate ? escaped : `[${speakerName(message)} ${time}${reply}] ${body}`;
+  const text = quoted ? `[↩︎ 被回复的消息 ${speakerName(message, showUsername)} ${time}] ${body}`
+    : isPrivate ? escaped : `[${speakerName(message, showUsername)} ${time}${reply}] ${body}`;
   const output: NewContextMessage = {
     id: ulid(), role: 'user', origin: message.triggered && !quoted ? 'trigger' : 'background',
     parts: [{ type: 'text', text }, ...(message.mediaParts ?? [])], textPreview: text.slice(0, 240), sourceMessageId: message.id,
@@ -126,7 +141,8 @@ export class ContextEngine {
         if (message.tokens !== undefined) message.tokens = Math.ceil(message.tokens * ctx.tokenRatio);
         return message;
       };
-      const delta = claim.rows.map((message) => scale(renderArchivedMessage(message, request.isPrivate, request.config.general.timezone)));
+      const render = { isPrivate: request.isPrivate, timezone: request.config.general.timezone, showUsername: request.config.context.background.showUsername };
+      const delta = claim.rows.map((message) => scale(renderArchivedMessage(message, render)));
       if (claim.omitted) {
         const note = `（本轮省略了 ${claim.omitted} 条更早的群聊消息，可用 read_messages / search_messages 工具查阅）`;
         delta.unshift({ id: ulid(), role: 'user', origin: 'note', parts: [{ type: 'text', text: note }], textPreview: note, tokens: estimateTextTokens(note), pruneLevel: 0 });
@@ -135,9 +151,9 @@ export class ContextEngine {
       this.assertValidShape(request.key, stored);
       // 被回复的消息排在背景消息之后、触发消息之前：它是这一句话的直接语境。
       if (request.quoted && !this.alreadyVisible(request.quoted, stored, claim.rows)) {
-        delta.push(scale(renderArchivedMessage(request.quoted, request.isPrivate, request.config.general.timezone, true)));
+        delta.push(scale(renderArchivedMessage(request.quoted, { ...render, quoted: true })));
       }
-      delta.push(scale(renderArchivedMessage(request.trigger, request.isPrivate, request.config.general.timezone)));
+      delta.push(scale(renderArchivedMessage(request.trigger, render)));
       const snapshot: MaterializedContext = {
         messages: stored,
         ordinals: stored.map((message) => message.ordinal),
@@ -148,6 +164,7 @@ export class ContextEngine {
       this.log?.event({ level: 'debug', kind: 'ctx.open', summary: `Opened context ${request.key}`, chatId: request.chatId, userId: request.initiatorUserId, key: request.key, data: { baseCommit: head?.id ?? null, claimed: claim.rows.length, quoted: request.quoted?.id ?? null, snapshotTokens: snapshot.tokens, snapshotMsgs: snapshot.messages.length } });
       return { turnId, key: request.key, chatId: request.chatId, threadId: request.threadId,
         initiatorUserId: request.initiatorUserId, effectiveRole: request.effectiveRole, isPrivate: request.isPrivate, baseCommitId: head?.id ?? null, claimThroughMessageId: request.trigger.id,
+        initiator: { name: request.trigger.fromName ?? null, username: request.trigger.fromUsername ?? null },
         snapshot, delta, abortSignal: request.abortSignal, tokenRatio: ctx.tokenRatio, config: request.config };
     }
   }

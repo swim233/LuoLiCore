@@ -30,7 +30,9 @@ describe('R-CTX-01 硬截断保持 part 形状', () => {
     const engine = new ContextEngine(db, archive, log); const config = contextConfig(100); const scoped = archive.scope('chat');
     const trigger = scoped.append({ chatId: 'chat', messageThreadId: null, tgMessageId: 1, direction: 'in', fromKind: 'user', fromUserId: 'u', fromName: 'U', fromUsername: null,
       kind: 'photo', text: 'z'.repeat(4000), tgDate: Date.now(), raw: {}, triggered: true, triggerReason: 'mention',
-      mediaParts: [{ type: 'image', image: 'data:image/png;base64,AAAA', mediaType: 'image/png', width: 640, height: 480 }] });
+      // 两种形态都要挡：`file` 是现在写入的形状，`image` 是库里那些历史 part（AI SDK v7 已废弃它）。
+      mediaParts: [{ type: 'file', data: 'data:image/png;base64,AAAA', mediaType: 'image/png', width: 640, height: 480 },
+        { type: 'image', image: 'data:image/png;base64,AAAA', mediaType: 'image/png', width: 640, height: 480 }] });
     const turn = await engine.openTurn({ chatId: 'chat', threadId: null, key: 'chat:chat', initiatorUserId: 'u', effectiveRole: 'trusted', isPrivate: true, trigger, abortSignal: new AbortController().signal, config });
     engine.appendDelta(turn, { id: 'a1', role: 'assistant', origin: 'assistant', parts: [{ type: 'text', text: 'y'.repeat(4000) }], tokens: 2404, pruneLevel: 0 });
     await engine.commitTurn(turn);
@@ -41,10 +43,11 @@ describe('R-CTX-01 硬截断保持 part 形状', () => {
     expect(db.prepare("SELECT MIN(json_extract(meta_json,'$.truncated.chars')) FROM context_messages WHERE meta_json IS NOT NULL").pluck().get()).toBe(1);
 
     const known = new Set(['text', 'image', 'image_url', 'file', 'reasoning', 'tool-call', 'tool-result']);
-    const parts = engine.materialize('chat:chat', null).messages.flatMap((message) => message.parts as Array<{ type?: string; image?: string }>);
+    const parts = engine.materialize('chat:chat', null).messages.flatMap((message) => message.parts as Array<{ type?: string; image?: string; data?: string }>);
     expect(parts.map((part) => part.type).filter((type) => type !== undefined && !known.has(type))).toEqual([]);
     // 图片要么完整保留，要么整体换成占位文本；绝不能留下截半的 data URI。
     for (const part of parts) if (part.type === 'image') expect(part.image).toBe('data:image/png;base64,AAAA');
+    for (const part of parts) if (part.type === 'file') expect(part.data).toBe('data:image/png;base64,AAAA');
     // 物化本身会跑形状断言，这里再确认它不会因为截断而抛。
     expect(() => engine.materialize('chat:chat', null)).not.toThrow();
     closeDatabase(db);

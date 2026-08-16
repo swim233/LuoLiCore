@@ -35,7 +35,9 @@ describe('Telegram media processing', () => {
       fromUserId: 'user', fromName: 'User', fromUsername: null, kind: 'photo', text: null, tgDate: Date.now(), raw: {}, triggered: true, triggerReason: 'private' });
     const parts = await media.process({ photo: [{ file_id: 'f1', file_unique_id: 'u1', width: 2400, height: 1200, file_size: jpeg.length }] }, archived);
     expect(parts).toHaveLength(1);
-    expect(parts[0]).toMatchObject({ type: 'image', mediaType: 'image/jpeg' });
+    // `image` part 在 AI SDK v7 已废弃（每张图一条 DeprecationWarning），写入侧直接产出 file。
+    expect(parts[0]).toMatchObject({ type: 'file', mediaType: 'image/jpeg' });
+    expect(parts[0]).not.toHaveProperty('image');
     const row = db.prepare('SELECT download_state AS state,local_path AS path,download_error AS error FROM attachments').get() as { state: string; path: string; error: string | null };
     expect(row).toMatchObject({ state: 'done', error: null });
     // 归一化真的跑了：最长边被压到 maxImageEdge 以内。

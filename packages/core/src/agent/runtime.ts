@@ -8,7 +8,7 @@ type V4LanguageModel = Exclude<LanguageModel, string> & { specificationVersion: 
 import type { Config } from '../config/schema.js';
 import type { Sqlite } from '@luoli/db';
 import { modelAliasKey, readAppKv } from '@luoli/db';
-import { estimateStructureTokens, type RuntimeTurnContext } from '@luoli/shared';
+import { estimateStructureTokens, formatSpeakerIdentity, type RuntimeTurnContext } from '@luoli/shared';
 import type { PromptAssembler, PromptDocuments } from '../index.js';
 import { runtimeBlock, type PromptBuildResult } from '../prompt/assembler.js';
 import type { ToolExecutionContext, ToolRegistry } from '../tools/registry.js';
@@ -186,6 +186,16 @@ export function aliasModel(registry: ModelRegistry, alias: string, options: Fall
 const SENDABLE_ROLES = new Set(['user', 'assistant', 'tool']);
 const NOTE_PREFIX = '（系统提示）';
 /**
+ * AI SDK v7 起 `image` part 已废弃：`convertToLanguageModelPrompt` 每遇到一个就打一条
+ * DeprecationWarning，然后原样转成 `{type:'file', data, mediaType}` 再发出去。写入侧
+ * （`telegram/media.ts`）已经直接产出 `file`，这里兜的是库里那些历史 part —— parts 是持久化的，
+ * 不在读出侧转，老会话就得一直刷警告到图片滚出窗口为止。
+ */
+function imageToFilePart(part: Record<string, unknown>): Record<string, unknown> {
+  const { image, type: _type, ...rest } = part;
+  return { ...rest, type: 'file', data: image, mediaType: typeof part.mediaType === 'string' ? part.mediaType : 'image' };
+}
+/**
  * system 只能出现在 instructions 里：AI SDK v7 的 `standardizePrompt` 在 `allowSystemInMessages`
  * 未开启时直接拒收 messages 里的 system 消息，整轮请求当场 InvalidPromptError（docs/20 · W-CTX-01）。
  * 写入侧已经不再产生这种消息（`assertValidShape` 的 role 白名单挡着），这里兜的是 0006 之前
@@ -193,7 +203,10 @@ const NOTE_PREFIX = '（系统提示）';
  */
 export function contextMessages(turn: RuntimeTurnContext): ModelMessage[] {
   return [...turn.snapshot.messages, ...turn.delta].map((message) => {
-    const content = (message.parts as Array<Record<string, unknown>>).map((part) => part?.type === 'tool-result' ? { ...part, output: normalizeToolOutput(part.output) } : part);
+    const content = (message.parts as Array<Record<string, unknown>>).map((part) => {
+      if (part?.type === 'tool-result') return { ...part, output: normalizeToolOutput(part.output) };
+      return part?.type === 'image' ? imageToFilePart(part) : part;
+    });
     if (SENDABLE_ROLES.has(message.role)) return { role: message.role, content } as ModelMessage;
     const text = content.map((part) => typeof part?.text === 'string' ? part.text : '').filter(Boolean).join('\n');
     return { role: 'user', content: [{ type: 'text', text: `${NOTE_PREFIX}${text}` }] } as ModelMessage;
@@ -225,6 +238,14 @@ export interface MainPromptAssembly extends PromptBuildResult {
 
 type PromptAssemblyDependencies = Pick<MainAgentDependencies, 'config' | 'tools' | 'prompts' | 'documents' | 'workspace' | 'skills' | 'agents'>;
 
+/**
+ * RUNTIME 块里的发起人。昵称与用户名是用户可控内容，`formatSpeakerIdentity` 已经清掉换行与
+ * 方括号 —— 一个带换行的昵称在这里等于能往 RUNTIME 块里塞一整行「你的有效权限：owner」。
+ */
+function initiatorDescription(turn: RuntimeTurnContext): string {
+  return formatSpeakerIdentity({ name: turn.initiator?.name ?? null, username: turn.initiator?.username ?? null, userId: turn.initiatorUserId });
+}
+
 /** Runtime 与 WebUI 预览共用这一条组装路径；预览出来的 block 必须就是下一轮会发给模型的 block。 */
 export function assembleMainPrompt(turn: RuntimeTurnContext, dependencies: PromptAssemblyDependencies, executionContext?: ToolExecutionContext): MainPromptAssembly {
   const toolContext = executionContext ?? { turn, workspace: dependencies.workspace, agentKind: 'main' };
@@ -233,7 +254,7 @@ export function assembleMainPrompt(turn: RuntimeTurnContext, dependencies: Promp
   const skillCatalog = dependencies.skills?.catalog(turn.effectiveRole).map((skill) => `- skill:${skill.name}: ${skill.description}`).join('\n') ?? '';
   const catalog = [...dependencies.tools.catalog(turn.effectiveRole, toolContext).map((entry) => `- ${entry.name}: ${entry.description}`), skillCatalog].filter(Boolean).join('\n');
   const runtime = runtimeBlock({ now: new Date(), timezone: dependencies.config.general.timezone,
-    chatDescription: `${turn.chatId} / ${turn.key}`, triggerDescription: `user ${turn.initiatorUserId}`, role: turn.effectiveRole,
+    chatDescription: `${turn.chatId} / ${turn.key}`, triggerDescription: initiatorDescription(turn), role: turn.effectiveRole,
     tools: activeTools, agents: dependencies.config.agent.agents.filter((agent) => ['blocked', 'limited', 'trusted', 'owner'].indexOf(turn.effectiveRole) >= ['blocked', 'limited', 'trusted', 'owner'].indexOf(agent.minRole)).map((agent) => `${agent.name}(${agent.description})`),
     contextMessages: turn.snapshot.messages.length, contextTokens: turn.snapshot.tokens, maxMessages: dependencies.config.context.limit.maxMessages,
     maxTokens: dependencies.config.context.limit.tokens, workspace: dependencies.workspace, sandbox: dependencies.config.sandbox.mode });
