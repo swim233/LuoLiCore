@@ -242,6 +242,12 @@ select { appearance: none; padding-right: 30px; background-image: url("data:imag
 .catalog-toolbar label { display: grid; gap: 7px; flex: 1 1 170px; font-size: .8rem; font-weight: 600; color: var(--muted); }
 .catalog-hint { margin: 12px 0 0; color: var(--muted); font-size: .78rem; }
 .catalog-count { margin-right: auto; color: var(--muted); font-size: .8rem; }
+.catalog-status { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; padding: 9px 12px; border: 1px solid var(--border); border-radius: 11px; background: var(--surface-2); color: var(--muted); font-size: .78rem; }
+.catalog-status code { font-size: .74rem; }
+.catalog-sub { display: block; margin-top: 2px; color: var(--muted); font-size: .7rem; line-height: 1.35; }
+.catalog-sub.match-provider { color: var(--green); }
+.catalog-sub.match-third-party, .catalog-sub.match-none { color: var(--amber); }
+.cap-tags { display: flex; flex-wrap: wrap; gap: 4px; }
 .provider-grid h3, .provider-grid p { margin: 0; }
 .provider-grid p { color: var(--muted); }
 .provider-grid code { padding: 8px; background: var(--surface-2); border-radius: 7px; }

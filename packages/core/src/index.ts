@@ -23,6 +23,7 @@ export * from './secrets.js';
 export * from './plugins/manager.js';
 export * from './provider/alias-settings.js';
 export * from './provider/catalog.js';
+export * from './provider/model-catalog.js';
 export * from './provider/store.js';
 export * from './scheduler.js';
 export * from './skills/loader.js';

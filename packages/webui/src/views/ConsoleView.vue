@@ -16,7 +16,9 @@ interface Dashboard { turns: { total: number; running: number; failed: number; c
 interface Principal { id: string; kind: string; tgId: string; role: string; displayName: string | null; username: string | null }
 interface Provider { id: string; name: string; kind: string; baseUrl?: string | null; apiKeyHint: string | null; enabled: number; healthState: string | null; healthError?: string | null }
 interface ProviderTest { reachable: boolean; code: string; message: string; status: number | null; latencyMs: number; models: number }
-interface CatalogModel { modelId: string; displayName: string | null; contextWindow: number | null; maxOutput: number | null }
+interface CatalogMeta { match: 'provider' | 'official' | 'third-party' | 'none'; catalogProviderId: string | null; catalogProviderName: string | null; catalogModelId: string | null; normalized: boolean; priceRange: { min: number; max: number; providers: number } | null; capabilities: Record<string, boolean>; reasoningControl: string | null; reasoningEfforts: string[]; modalities: { input: string[]; output: string[] }; knowledge: string | null; releaseDate: string | null }
+interface CatalogModel { modelId: string; displayName: string | null; contextWindow: number | null; maxOutput: number | null; limitSource: string | null; priceIn: number | null; priceOut: number | null; priceCacheRead: number | null; priceCacheWrite: number | null; meta: CatalogMeta | null }
+interface CatalogStatus { enabled: boolean; available: boolean; stale: boolean; ageMs: number | null; ttlHours: number; models?: number; providers?: number; fetchedAt?: number; error?: string | null; outcome?: string }
 interface LogRow { id: number; ts: number; level: string; kind: string; summary: string; trace_id: string | null }
 
 interface Chat { key: string; chatId: string; scope: string; tokens: number | null; messages: number | null }
@@ -133,6 +135,56 @@ const catalogSelection = ref<CatalogModel[]>([]);
 const catalogQuery = ref('');
 const catalogError = ref('');
 const catalogDefaults = ref({ contextWindow: 128000, maxOutput: 8192 });
+const catalogStatus = ref<CatalogStatus | null>(null);
+const catalogRefreshing = ref(false);
+const enriching = ref(false);
+// 价格出处必须写在行上：同一个模型在不同网关的价差可以到几倍，看不到出处就没法判断该不该信这个数字。
+const MATCH_LABELS: Record<string, { label: string; severity: string; hint: string }> = {
+  provider: { label: 'provider 自报价', severity: 'success', hint: '这个 provider 在 models.dev 里有条目，价格取自它自己公布的报价 —— 也就是你实际被扣的钱' },
+  official: { label: '厂商官方价', severity: 'info', hint: '这个 provider 在 models.dev 里没有条目（自建中转），价格取自模型厂商自家的官方定价' },
+  'third-party': { label: '无官方价', severity: 'warn', hint: '厂商侧查不到这个模型（已下架或开源权重模型），只有第三方托管报价 —— 价格不落库，需要手填' },
+  none: { label: '目录里没有', severity: 'secondary', hint: 'models.dev 上没有这个模型，窗口与价格都要手填' },
+};
+const catalogAge = computed(() => {
+  const status = catalogStatus.value;
+  if (!status?.available || status.ageMs === null || status.ageMs === undefined) return '';
+  const hours = status.ageMs / 3_600_000;
+  return hours < 1 ? '刚刚更新' : hours < 48 ? `${Math.round(hours)} 小时前更新` : `${Math.round(hours / 24)} 天前更新`;
+});
+const capabilityTags = (meta: CatalogMeta | null): string[] => {
+  if (!meta || meta.match === 'none') return [];
+  const tags: string[] = [];
+  if (meta.capabilities.vision) tags.push('看图');
+  if (meta.modalities.input.includes('pdf')) tags.push('读 PDF');
+  if (meta.modalities.input.includes('audio')) tags.push('听音频');
+  if (meta.capabilities.tools) tags.push('工具');
+  if (meta.capabilities.structuredOutput) tags.push('结构化输出');
+  if (meta.reasoningControl === 'effort' && meta.reasoningEfforts.length) tags.push(`思考 ${meta.reasoningEfforts.join('/')}`);
+  else if (meta.reasoningControl === 'toggle') tags.push('思考 开关');
+  else if (meta.reasoningControl === 'budget_tokens') tags.push('思考 预算');
+  else if (meta.capabilities.reasoning) tags.push('思考');
+  return tags;
+};
+const priceText = (row: CatalogModel): string => (row.priceIn === null && row.priceOut === null ? '—' : `$${row.priceIn ?? '?'} / $${row.priceOut ?? '?'}`);
+// 各家报价一致时给出区间只是噪音，但「几家一致」本身是有用的判断依据，要留着。
+const rangeText = (range: { min: number; max: number; providers: number }): string => (range.min === range.max
+  ? `第三方输入价 $${range.min}（${range.providers} 家一致）`
+  : `第三方输入价 $${range.min}–$${range.max}（${range.providers} 家）`);
+/** 已入库的模型行：能力块存在 capabilities_json 里，形状与拉取时那份一致。 */
+const storedMeta = (model: Record<string, unknown>): CatalogMeta | null => {
+  try {
+    const parsed = JSON.parse(String(model.capabilities_json ?? '{}')) as Record<string, unknown>;
+    const catalog = parsed.catalog as Record<string, unknown> | undefined;
+    if (!catalog) return null;
+    return { match: String(catalog.match ?? 'none') as CatalogMeta['match'], catalogProviderId: (catalog.providerId as string) ?? null, catalogProviderName: null,
+      catalogModelId: (catalog.modelId as string) ?? null, normalized: catalog.normalized === true, priceRange: (catalog.priceRange as CatalogMeta['priceRange']) ?? null,
+      capabilities: parsed as Record<string, boolean>, reasoningControl: (parsed.reasoningControl as string) ?? null, reasoningEfforts: (parsed.reasoningEfforts as string[]) ?? [],
+      modalities: (parsed.modalities as CatalogMeta['modalities']) ?? { input: [], output: [] }, knowledge: (parsed.knowledge as string) ?? null, releaseDate: (parsed.releaseDate as string) ?? null };
+  } catch { return null; }
+};
+const storedPriceSource = (model: Record<string, unknown>): string | null => {
+  try { return ((JSON.parse(String(model.capabilities_json ?? '{}')) as { catalog?: { priceSource?: string } }).catalog?.priceSource) ?? null; } catch { return null; }
+};
 const importedModelKeys = computed(() => new Set(models.value.map((model) => `${String(model.provider_id)}::${String(model.model_id)}`)));
 const catalogExists = (entry: CatalogModel): boolean => importedModelKeys.value.has(`${catalogProviderId.value}::${entry.modelId}`);
 const catalogRows = computed(() => { const needle = catalogQuery.value.trim().toLowerCase(); return needle ? catalogModels.value.filter((entry) => entry.modelId.toLowerCase().includes(needle) || (entry.displayName ?? '').toLowerCase().includes(needle)) : catalogModels.value; });
@@ -152,12 +204,12 @@ const COLUMNS = {
   hits: [{ key: 'tgDate', header: '时间', width: '12rem' }, { key: 'chatId', header: '会话', width: '9rem' }, { key: 'from', header: '发言人', width: '10rem' }, { key: 'text', header: '内容' }, { key: 'detail', header: '详情', width: '5rem' }],
   usage: [{ key: 'ts', header: '时间', width: '13rem' }, { key: 'model_alias', header: '别名' }, { key: 'input_tokens', header: '输入' }, { key: 'output_tokens', header: '输出' }, { key: 'cost_usd', header: '成本' }],
   principals: [{ key: 'kind', header: '类型' }, { key: 'displayName', header: '显示名' }, { key: 'tgId', header: 'Telegram ID' }, { key: 'role', header: '角色', width: '8rem' }, { key: 'username', header: '用户名' }],
-  models: [{ key: 'model_id', header: '模型 ID' }, { key: 'provider_id', header: 'Provider' }, { key: 'context_window', header: '窗口' }, { key: 'price_in', header: '输入价格' }, { key: 'price_out', header: '输出价格' }, { key: 'enabled', header: '启用', width: '6rem' }],
+  models: [{ key: 'model_id', header: '模型 ID' }, { key: 'provider_id', header: 'Provider' }, { key: 'context_window', header: '窗口' }, { key: 'capabilities', header: '能力' }, { key: 'price_in', header: '输入价格' }, { key: 'price_out', header: '输出价格' }, { key: 'enabled', header: '启用', width: '6rem' }],
   aliases: [{ key: 'alias', header: '别名', width: '12%' }, { key: 'purpose', header: '用途', width: '27%' }, { key: 'chain', header: 'Fallback 链', width: '31%' }, { key: 'settings', header: '采样参数', width: '20%' }, { key: 'actions', header: '', width: '10%' }],
   logs: [{ key: 'ts', header: '时间', width: '13rem' }, { key: 'level', header: '级别', width: '7rem' }, { key: 'kind', header: '事件' }, { key: 'summary', header: '摘要' }, { key: 'trace_id', header: 'Trace' }],
   tasks: [{ key: 'title', header: '标题' }, { key: 'state', header: '状态' }, { key: 'updated_at', header: '更新时间' }],
   approvals: [{ key: 'tool_name', header: '工具' }, { key: 'risk', header: '风险' }, { key: 'state', header: '状态' }],
-  catalog: [{ key: 'modelId', header: '模型 ID' }, { key: 'displayName', header: '显示名' }, { key: 'limits', header: '窗口 / 最大输出' }, { key: 'status', header: '状态', width: '8rem' }],
+  catalog: [{ key: 'modelId', header: '模型 ID' }, { key: 'limits', header: '窗口 / 最大输出', width: '11rem' }, { key: 'price', header: '价格 / M token', width: '13rem' }, { key: 'capabilities', header: '能力' }, { key: 'status', header: '状态', width: '7rem' }],
   fallback: [{ key: 'kind', header: '关联事件' }, { key: 'summary', header: '最近状态' }, { key: 'level', header: '级别' }],
 } satisfies Record<string, GridColumn[]>;
 
@@ -316,18 +368,43 @@ async function loadCatalog(): Promise<void> {
   if (!catalogProviderId.value) { catalogModels.value = []; catalogError.value = '还没有配置任何 Provider'; return; }
   catalogLoading.value = true;
   try {
-    catalogModels.value = (await api<{ models: CatalogModel[] }>(`/api/providers/${encodeURIComponent(catalogProviderId.value)}/models`)).models;
+    const result = await api<{ models: CatalogModel[]; catalog: CatalogStatus }>(`/api/providers/${encodeURIComponent(catalogProviderId.value)}/models`);
+    catalogModels.value = result.models; catalogStatus.value = result.catalog;
     if (!catalogModels.value.length) catalogError.value = '上游返回了空的模型列表';
   } catch (error) { catalogModels.value = []; catalogError.value = error instanceof Error ? error.message : '拉取失败'; toastError('拉取模型列表失败', error); }
   finally { catalogLoading.value = false; }
+}
+/** 元数据目录本身的刷新：平时按 TTL 走条件请求，这个按钮是「我知道上游刚上新模型」时的手动通道。 */
+async function refreshCatalog(): Promise<void> {
+  catalogRefreshing.value = true;
+  try {
+    const status = await api<CatalogStatus>('/api/models/catalog/refresh', { method: 'POST', body: '{}' });
+    catalogStatus.value = status;
+    if (status.outcome === 'stale') pushToast({ severity: 'warn', summary: '刷新失败，继续用本地缓存', detail: status.error ?? '', life: 7000 });
+    else pushToast({ severity: 'success', summary: status.outcome === 'not-modified' ? 'models.dev 上没有更新' : `目录已更新：${status.models ?? 0} 个模型`, detail: `${status.providers ?? 0} 家 provider` });
+    if (catalogDialog.value) await loadCatalog();
+  } catch (error) { toastError('刷新模型目录失败', error); }
+  finally { catalogRefreshing.value = false; }
+}
+/** 已经在库里的模型行补元数据：能力照写，价格只填空着的，窗口不动（可能被按预算调小过）。 */
+async function enrichModels(): Promise<void> {
+  enriching.value = true;
+  try {
+    const result = await api<{ scanned: number; updated: number; priced: number; unmatched: number }>('/api/models/enrich', { method: 'POST', body: '{}' });
+    pushToast({ severity: result.updated ? 'success' : 'warn', summary: `补齐了 ${result.updated} / ${result.scanned} 个模型`,
+      detail: `新填价格 ${result.priced} 个${result.unmatched ? `，${result.unmatched} 个在 models.dev 上查不到，需要手填` : ''}。已有价格不会被覆盖。`, life: 8000 });
+    await load();
+  } catch (error) { toastError('补齐模型元数据失败', error); }
+  finally { enriching.value = false; }
 }
 async function importCatalog(): Promise<void> {
   const chosen = catalogSelection.value.filter((entry) => !catalogExists(entry));
   if (!chosen.length) return;
   try {
-    const result = await api<{ inserted: number; skipped: number }>('/api/models/import', { method: 'POST', body: JSON.stringify({ providerId: catalogProviderId.value, models: chosen, contextWindow: catalogDefaults.value.contextWindow, maxOutput: catalogDefaults.value.maxOutput }) });
+    const result = await api<{ inserted: number; skipped: number; priced: number }>('/api/models/import', { method: 'POST', body: JSON.stringify({ providerId: catalogProviderId.value, models: chosen, contextWindow: catalogDefaults.value.contextWindow, maxOutput: catalogDefaults.value.maxOutput }) });
+    const blank = result.inserted - result.priced;
     pushToast({ severity: result.inserted ? 'success' : 'warn', summary: `已导入 ${result.inserted} 个模型`,
-      detail: `${result.skipped ? `${result.skipped} 个已存在，已跳过。` : ''}价格字段留空，需要在模型表里手工补齐，否则配额按 0 计。`, life: 7000 });
+      detail: `${result.skipped ? `${result.skipped} 个已存在，已跳过。` : ''}${result.priced} 个带上了价格${blank ? `，${blank} 个没有可信的官方价、价格留空 —— 不补齐的话这些模型的花费按 0 记账` : ''}。`, life: 8000 });
     catalogSelection.value = [];
     await load();
   } catch (error) { toastError('导入模型失败', error); }
@@ -741,9 +818,11 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
           <header><div><p class="eyebrow">MODEL REGISTRY</p><h2>Provider、模型与别名</h2><p>写入后服务端重建运行时 registry；API Key 只显示 hint。</p></div><UiButton label="添加 Provider" icon="pi pi-plus" @click="editProvider()" /></header>
           <div v-if="modelMissingMain" class="danger-banner"><i class="pi pi-exclamation-triangle" />没有可用的 <code>main</code> 别名（未配置、链为空或链里的模型都不可用），所有轮次都会失败。见下方「别名路由」。</div>
           <div class="provider-grid"><article v-for="provider in providers" :key="provider.id"><div class="provider-head"><div class="provider-tags"><UiTag :value="provider.enabled ? '启用' : '停用'" :severity="provider.enabled ? 'success' : 'secondary'" /><UiTag v-if="provider.healthState" :value="provider.healthState === 'up' ? '连通' : '不可用'" :severity="provider.healthState === 'up' ? 'success' : 'danger'" /></div><div class="card-actions"><UiButton variant="text" size="small" icon="pi pi-bolt" aria-label="测试连接" :loading="testingProvider === provider.id" @click="testProvider(provider)" /><UiButton variant="text" size="small" icon="pi pi-cloud-download" aria-label="从该 Provider 拉取模型" @click="openCatalog(provider.id)" /><UiButton variant="text" size="small" icon="pi pi-pencil" aria-label="编辑 Provider" @click="editProvider(provider)" /><UiButton variant="text" size="small" severity="danger" icon="pi pi-trash" aria-label="删除 Provider" @click="removeProvider(provider.id)" /></div></div><h3>{{ provider.name }}</h3><p>{{ provider.kind }}</p><code>{{ provider.apiKeyHint ?? '未设置密钥' }}</code><small v-if="provider.healthError" class="provider-error">{{ provider.healthError }}</small></article></div>
-          <div class="registry-heading"><h3>模型</h3><div class="section-actions"><UiButton size="small" variant="outlined" icon="pi pi-cloud-download" label="从 Provider 拉取" :disabled="!providers.length" @click="openCatalog()" /><UiButton size="small" variant="outlined" label="添加模型" @click="editModel()" /></div></div>
+          <div class="registry-heading"><div><h3>模型</h3><p class="section-note">窗口、最大输出、能力与定价来自 models.dev 的本地缓存目录，导入时自动带入；<code>补齐元数据</code>只填空着的价格，已填的不会被覆盖。</p></div><div class="section-actions"><UiButton size="small" variant="outlined" icon="pi pi-cloud-download" label="从 Provider 拉取" :disabled="!providers.length" @click="openCatalog()" /><UiButton size="small" variant="outlined" icon="pi pi-sparkles" label="补齐元数据" :disabled="!models.length" :loading="enriching" @click="enrichModels" /><UiButton size="small" variant="outlined" label="添加模型" @click="editModel()" /></div></div>
           <DataGrid :rows="models" :columns="COLUMNS.models" data-key="id" clickable empty="还没有导入任何模型" @row-click="editModel">
             <template #provider_id="{ data }">{{ providerLabel(String(data.provider_id)) }}</template>
+            <template #capabilities="{ data }"><span v-if="capabilityTags(storedMeta(data)).length" class="cap-tags"><UiTag v-for="tag in capabilityTags(storedMeta(data))" :key="tag" :value="tag" severity="secondary" /></span><small v-else class="catalog-sub">未知</small></template>
+            <template #price_in="{ data }"><span>{{ data.price_in ?? '—' }}</span><small v-if="storedPriceSource(data)" class="catalog-sub">{{ storedPriceSource(data) === 'manual' ? '手工填写' : MATCH_LABELS[String(storedPriceSource(data))]?.label ?? '' }}</small><small v-else-if="data.price_in === null" class="catalog-sub match-third-party">缺定价 · 花费按 0 记账</small></template>
             <template #enabled="{ data }"><UiTag :value="data.enabled ? '启用' : '停用'" :severity="data.enabled ? 'success' : 'secondary'" /></template>
           </DataGrid>
           <div class="registry-heading"><div><h3>别名路由</h3><p class="section-note">代码里只出现别名，不出现具体模型 id。每个别名指向一条有序的 fallback 链：前一个模型不可用就顺延到下一个。下面六个是内建别名，<code>main</code> 必须配。</p></div><UiButton size="small" variant="outlined" label="添加自定义别名" @click="editAlias()" /></div>
@@ -853,12 +932,24 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
         <UiButton variant="outlined" icon="pi pi-refresh" label="重新拉取" :loading="catalogLoading" @click="loadCatalog" />
       </div>
       <div v-if="catalogError" class="danger-banner"><i class="pi pi-exclamation-triangle" />{{ catalogError }}</div>
+      <div class="catalog-status">
+        <template v-if="catalogStatus && !catalogStatus.enabled"><i class="pi pi-info-circle" />模型元数据目录已关闭（<code>provider.catalog.enabled</code>），只能拿到上游 <code>/models</code> 给的那点信息。</template>
+        <template v-else-if="catalogStatus?.available"><i class="pi pi-database" />元数据来自 models.dev 本地缓存：{{ catalogStatus.models }} 个模型 / {{ catalogStatus.providers }} 家 provider · {{ catalogAge }}<span v-if="catalogStatus.stale"> · 已过期，下次拉取时会自动续期</span></template>
+        <template v-else><i class="pi pi-exclamation-triangle" />还没有本地元数据缓存{{ catalogStatus?.error ? `（${catalogStatus.error}）` : '' }}，窗口与价格都需要手填。</template>
+        <UiButton variant="text" size="small" icon="pi pi-sync" label="刷新目录" :loading="catalogRefreshing" @click="refreshCatalog" />
+      </div>
       <DataGrid v-model:selection="catalogSelection" :rows="catalogRows" :columns="COLUMNS.catalog" data-key="modelId" :loading="catalogLoading" :selectable="(row) => !catalogExists(row)" scroll-height="46vh" empty="上游没有返回可导入的模型">
-        <template #displayName="{ data }">{{ data.displayName ?? '—' }}</template>
-        <template #limits="{ data }">{{ data.contextWindow ?? catalogDefaults.contextWindow }} / {{ data.maxOutput ?? catalogDefaults.maxOutput }}<small v-if="!data.contextWindow"> （上游未提供，用默认值）</small></template>
+        <template #modelId="{ data }"><code>{{ data.modelId }}</code><small v-if="data.displayName" class="catalog-sub">{{ data.displayName }}</small></template>
+        <template #limits="{ data }">{{ data.contextWindow ?? catalogDefaults.contextWindow }} / {{ data.maxOutput ?? catalogDefaults.maxOutput }}<small v-if="!data.contextWindow" class="catalog-sub">上游与目录都没给，用默认值</small><small v-else-if="data.limitSource === 'models.dev'" class="catalog-sub">来自 models.dev</small></template>
+        <template #price="{ data }">
+          <span>{{ priceText(data) }}</span>
+          <small v-if="data.meta" :class="['catalog-sub', `match-${data.meta.match}`]" :title="MATCH_LABELS[data.meta.match].hint">{{ MATCH_LABELS[data.meta.match].label }}<template v-if="data.meta.catalogProviderId && data.meta.match !== 'third-party'"> · {{ data.meta.catalogProviderId }}</template></small>
+          <small v-if="data.meta?.priceRange" class="catalog-sub">{{ rangeText(data.meta.priceRange) }}，需手填</small>
+        </template>
+        <template #capabilities="{ data }"><span v-if="capabilityTags(data.meta).length" class="cap-tags"><UiTag v-for="tag in capabilityTags(data.meta)" :key="tag" :value="tag" severity="secondary" /></span><small v-else class="catalog-sub">目录里没有这个模型</small></template>
         <template #status="{ data }"><UiTag v-if="catalogExists(data)" value="已在库" severity="secondary" /><UiTag v-else value="可导入" severity="info" /></template>
       </DataGrid>
-      <p class="catalog-hint">价格不会从上游拉取（<code>docs/04 §5.5</code>：定价由 owner 维护），导入后需要在模型表里补齐，否则该模型的花费按 0 记账。</p>
+      <p class="catalog-hint">窗口、能力与思考档位来自 models.dev；价格只在能确定出处时才带入 —— <b>provider 自报价</b>（这家网关自己公布的价）优先，其次是<b>厂商官方价</b>；只有第三方托管报价的模型价格一律留空（<code>docs/04 §5.4.1</code>），不补齐的话这些模型的花费按 0 记账。</p>
       <template #footer><span class="catalog-count">已选 {{ catalogSelection.length }} · 列出 {{ catalogRows.length }} / 共 {{ catalogModels.length }}</span><UiButton variant="text" label="关闭" @click="catalogDialog = false" /><UiButton label="导入所选" icon="pi pi-download" :disabled="!catalogSelection.length" @click="importCatalog" /></template>
     </UiModal>
     <UiModal v-model:visible="modelDialog" title="模型配置" width="min(680px, 94vw)">

@@ -28,7 +28,7 @@
 | A14 | 图片长边归一化到 **1568px** | 主流 vision 模型的性价比拐点 | `media.maxImageEdge` |
 | A15 | WebUI 只有**单一 owner 身份**，无多用户 RBAC | 你选了单密码方案 | 见 §2 Q7 |
 | A16 | WebUI 默认只监听 **127.0.0.1** | 单密码 + owner 全权限，公网暴露风险太高 | `webui.host` + 自行前置 TLS |
-| A17 | 定价表由 **owner 手工维护**，不自动抓取 | 避免依赖会变的外部数据源 | 加一个定期同步 plugin |
+| A17 | ~~定价表由 owner 手工维护，不自动抓取~~ → **已推翻**：定价与窗口/能力/思考档位从 models.dev 拉取并缓存到本地（[04 §5.4.1](./04-agents-and-providers.md#541-模型元数据目录modelsdev)）。外部数据源的依赖靠三点收敛：只在运维点「拉取模型」时才可能出网、拉不到就降级用旧缓存、出处不确定时**价格留空而不是猜** | 上游只给模型名，不给价格与能力，全手填在 6000+ 模型面前不现实 | `provider.catalog.enabled=false` 退回全手填 |
 | A18 | 配额单位为 **USD**，无汇率转换 | 所有 provider 定价都是 USD | 加 `quota.fxRate` |
 | A19 | FTS 用 **trigram** tokenizer | SQLite 内置、对中文可用、零依赖 | `db.ftsTokenizer` 或改 jieba 预分词（见 §2 Q3） |
 | A20 | **单进程单实例**部署 | SQLite + 进程内锁的直接推论 | 见 §2 Q1 |

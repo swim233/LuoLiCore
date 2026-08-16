@@ -21,7 +21,7 @@ export const HOT_RELOADABLE_CONFIG_KEYS = [
   'concurrency.turnTimeoutMs',
   'prompt.maxTokens',
   'agent.main', 'agent.agents',
-  'provider.maxRetries', 'provider.retryBaseMs', 'provider.retryMaxMs',
+  'provider.maxRetries', 'provider.retryBaseMs', 'provider.retryMaxMs', 'provider.catalog',
   'tools.maxRegistered', 'tools.maxCallsPerTurn', 'tools.maxConsecutiveErrors', 'tools.overrides', 'tools.exec',
   'approval.enabled', 'approval.rules', 'approval.skipForOwner', 'approval.rememberWithinTurn',
   'sandbox', 'mcp', 'quota', 'logs.level',
@@ -157,7 +157,11 @@ export const configSchema = z.object({
     maxDepth: z.number().int().positive().default(3), maxConcurrentSubagents: z.number().int().positive().default(3), maxSubagentsPerTurn: z.number().int().positive().default(10), askTimeoutMs: z.number().int().positive().default(120_000), maxAsksPerRun: z.number().int().positive().default(5), askArbiter: z.boolean().default(true), askEscalateToUser: z.boolean().default(false), progressThrottleMs: z.number().int().positive().default(3000),
     agents: z.array(z.object({ name: z.string(), description: z.string(), modelAlias: z.string(), maxSteps: z.number().int().positive(), minRole: role.default('limited'), tools: z.array(z.string()).default([]), resultMaxChars: z.number().int().positive().default(4000), instructions: z.string(), injectMemory: z.boolean().default(false) })).default([]),
   }).default({}),
-  provider: z.object({ maxRetries: z.number().int().nonnegative().default(2), retryBaseMs: z.number().int().positive().default(1000), retryMaxMs: z.number().int().positive().default(30_000), healthCheckCron: z.string().default('*/10 * * * *'), healthDownCooldownMinutes: z.number().positive().default(30), requestTimeoutMs: z.number().int().positive().default(120_000), streamIdleTimeoutMs: z.number().int().positive().default(60_000) }).default({}),
+  provider: z.object({ maxRetries: z.number().int().nonnegative().default(2), retryBaseMs: z.number().int().positive().default(1000), retryMaxMs: z.number().int().positive().default(30_000), healthCheckCron: z.string().default('*/10 * * * *'), healthDownCooldownMinutes: z.number().positive().default(30), requestTimeoutMs: z.number().int().positive().default(120_000), streamIdleTimeoutMs: z.number().int().positive().default(60_000),
+    // 模型元数据目录（models.dev）。只在 WebUI 主动拉取时出网，缓存到 cacheFile 后按 ttlHours 用
+    // ETag 条件请求续期；关掉之后拉取模型只剩上游 /models 给的那点信息（docs/04 §5.4.1）。
+    catalog: z.object({ enabled: z.boolean().default(true), url: z.string().url().default('https://models.dev/api.json'), cacheFile: z.string().default('./data/cache/models.dev.json'), ttlHours: z.number().positive().default(168), timeoutMs: z.number().int().positive().default(30_000) }).default({}),
+  }).default({}),
   tools: z.object({
     maxRegistered: z.number().int().positive().default(80), maxCallsPerTurn: z.number().int().positive().default(40), maxConsecutiveErrors: z.number().int().positive().default(3), defaultTimeoutMs: z.number().int().positive().default(60_000),
     overrides: z.record(z.object({ enabled: z.boolean().default(true) })).default({}),

@@ -217,6 +217,12 @@ provider:
   healthDownCooldownMinutes: 30
   requestTimeoutMs: 120000        # 热更新
   streamIdleTimeoutMs: 60000      # 热更新 · 流式无数据超时
+  catalog:                        # 热更新 · 模型元数据目录（models.dev），见 04 §5.4.1
+    enabled: true                 # 热更新 · 关掉之后拉取模型只剩上游 /models 给的那点信息
+    url: https://models.dev/api.json
+    cacheFile: ./data/cache/models.dev.json   # 热更新 · 缓存文件；etag 与拉取时间在 app_kv
+    ttlHours: 168                 # 热更新 · 超过这个年龄才出网，且带 If-None-Match（304 只有几百字节）
+    timeoutMs: 30000              # 热更新 · 单次拉取超时；失败时降级用旧缓存
 
 # ============================================================ tools（D10）
 tools:
