@@ -146,8 +146,10 @@ export class ContextRepository {
       const skipped = rebased ? this.commitsAfter(baseCommitId) : [];
       const delta = [...messages];
       const baseInvalid = Boolean(head && (!this.isAncestor(baseCommitId, head.id) || this.hasResetAfter(baseCommitId, head.seq)));
-      if (baseInvalid) delta.unshift({ id: ulid(), role: 'system', origin: 'note', parts: [{ type: 'text', text: '（上下文已被重置；本轮基于旧快照产生）' }], textPreview: '上下文已被重置', tokens: 28, pruneLevel: 0 });
-      if (rebased && !baseInvalid && injectRebaseNotice) delta.unshift({ id: ulid(), role: 'system', origin: 'note', parts: [{ type: 'text', text: '（以下回复由并发轮次产生，作者未看到上方最新消息）' }], textPreview: '并发轮次说明', tokens: 22, pruneLevel: 0 });
+      // 旁白一律 role:'user'：provider 只接受 user/assistant/tool，system 消息会让整个 prompt 被拒收，
+      // 而这条 note 是持久化的 —— 写坏一次，该会话在 /new 之前每轮都失败（docs/20 · W-CTX-01）。
+      if (baseInvalid) delta.unshift({ id: ulid(), role: 'user', origin: 'note', parts: [{ type: 'text', text: '（上下文已被重置；本轮基于旧快照产生）' }], textPreview: '上下文已被重置', tokens: 28, pruneLevel: 0 });
+      if (rebased && !baseInvalid && injectRebaseNotice) delta.unshift({ id: ulid(), role: 'user', origin: 'note', parts: [{ type: 'text', text: '（以下回复由并发轮次产生，作者未看到上方最新消息）' }], textPreview: '并发轮次说明', tokens: 22, pruneLevel: 0 });
       const unseen: [number, number] | null = rebased && head ? [(base?.headOrdinal ?? 0) + 1, head.headOrdinal] : null;
       const insert = this.db.prepare(`INSERT INTO context_messages(key,ordinal,id,turn_id,role,origin,prune_level,parts_json,
         text_preview,speaker,speaker_user_id,source_message_id,source_ts,tokens,meta_json,created_at)

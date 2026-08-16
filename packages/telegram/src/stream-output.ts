@@ -1,5 +1,5 @@
 import type { Bot } from 'grammy';
-import { holdReply, splitTelegramText } from './output.js';
+import { holdReply, sendWithFallback, splitTelegramText } from './output.js';
 
 export interface StreamOutputOptions {
   mode: 'stream' | 'once';
@@ -19,17 +19,8 @@ export class TelegramOutput {
     const parts = splitTelegramText(text, this.options.maxChars);
     const ids: number[] = [];
     for (const part of parts) {
-      try {
-        const options = replyToMessageId ? { parse_mode: 'MarkdownV2' as const, reply_parameters: { message_id: replyToMessageId } } : { parse_mode: 'MarkdownV2' as const };
-        const message = await this.bot.api.sendMessage(this.chatId, part, options);
-        ids.push(message.message_id);
-      } catch (error) {
-        const description = error instanceof Error ? error.message : String(error);
-        if (!/parse entities/i.test(description)) throw error;
-        const options = replyToMessageId ? { reply_parameters: { message_id: replyToMessageId } } : {};
-        const message = await this.bot.api.sendMessage(this.chatId, part, options);
-        ids.push(message.message_id);
-      }
+      const message = await sendWithFallback(this.bot.api, this.chatId, part, replyToMessageId ? { reply_parameters: { message_id: replyToMessageId } } : {});
+      ids.push(message.message_id);
     }
     return ids;
   }
@@ -71,8 +62,7 @@ export class TelegramOutput {
         const rendered = splitTelegramText(text, this.options.maxChars);
         while (messageIds.length < rendered.length) {
           const index = messageIds.length;
-          const options = index === 0 && replyToMessageId ? { parse_mode: 'MarkdownV2' as const, reply_parameters: { message_id: replyToMessageId } } : { parse_mode: 'MarkdownV2' as const };
-          const sent = await deliver(() => this.bot.api.sendMessage(this.chatId, rendered[index]!, options));
+          const sent = await deliver(() => sendWithFallback(this.bot.api, this.chatId, rendered[index]!, index === 0 && replyToMessageId ? { reply_parameters: { message_id: replyToMessageId } } : {}));
           if (!sent) break;
           messageIds.push(sent.message_id);
         }
@@ -88,12 +78,12 @@ export class TelegramOutput {
     }
     if (this.options.mode === 'once' || !messageIds.length) return { text, interrupted, messageIds: await this.send(text + (interrupted ? '\n\n（生成中断）' : ''), replyToMessageId) };
     const rendered = splitTelegramText(text + (interrupted ? '\n\n（生成中断）' : ''), this.options.maxChars);
+    // 收尾也要走 deliver + 降级：这里抛出去会把一轮已经发出大半的回复整个记成 failed（docs/20 · W-TG-04）。
     for (let index = 0; index < rendered.length; index += 1) {
-      if (index < messageIds.length) await edit(messageIds[index]!, rendered[index]!);
-      else {
-        const sent = await this.bot.api.sendMessage(this.chatId, rendered[index]!, { parse_mode: 'MarkdownV2' });
-        messageIds.push(sent.message_id);
-      }
+      if (index < messageIds.length) { await deliver(() => edit(messageIds[index]!, rendered[index]!)); continue; }
+      const sent = await deliver(() => sendWithFallback(this.bot.api, this.chatId, rendered[index]!));
+      if (!sent) break;
+      messageIds.push(sent.message_id);
     }
     return { text: text + (interrupted ? '\n\n（生成中断）' : ''), interrupted, messageIds };
   }

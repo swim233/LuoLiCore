@@ -1,3 +1,6 @@
+import type { Api } from 'grammy';
+import type { Message } from 'grammy/types';
+
 const SPECIAL = /[_*\[\]()~`>#+\-=|{}.!]/g;
 
 export function escapeMarkdownV2(text: string): string {
@@ -40,6 +43,19 @@ export function safeRender(markdown: string): string {
 export function holdReply(since: number, delayMs: number): Promise<void> {
   const remaining = delayMs - (Date.now() - since);
   return remaining > 0 ? new Promise((resolve) => setTimeout(resolve, remaining)) : Promise.resolve();
+}
+
+/**
+ * MarkdownV2 渲染失败时退回纯文本重发一次。所有投递路径共用它：`safeRender` 已经很细，但按字符数
+ * 切分仍可能把 `*bold*` 的配对切开，而裸调 `sendMessage` 抛出去会把整轮打成 failed —— 用户明明
+ * 已经看到前半段回复，却又收到一句「出了点问题」（docs/20 · W-TG-03 / W-TG-04）。
+ */
+export async function sendWithFallback(api: Api, chatId: string, text: string, extra: Record<string, unknown> = {}): Promise<Message> {
+  try { return await api.sendMessage(chatId, text, { parse_mode: 'MarkdownV2', ...extra }); }
+  catch (error) {
+    if (!/parse entities/i.test(error instanceof Error ? error.message : String(error))) throw error;
+    return api.sendMessage(chatId, text, extra);
+  }
 }
 
 export function splitTelegramText(text: string, max = 3900): string[] {

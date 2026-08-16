@@ -48,7 +48,11 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
 
 ### 2.3 可选：Telegram 一次性登录链接
 
-`/webui`（owner 私聊）→ 生成 5 分钟有效的一次性 token → 返回 `http://<webui.publicUrl>/login?t=<token>` → 访问即换取 session。用于「不想记密码」的场景，与密码登录并存。token 单次使用、存内存、进程重启即失效。
+🚧 **未实现（已从命令白名单摘除）。** 原设计：`/webui`（owner 私聊）→ 生成 5 分钟有效的一次性 token
+→ 返回 `http://<webui.publicUrl>/login?t=<token>` → 访问即换取 session；token 单次使用、存内存、
+进程重启即失效。服务端与 handler 都没写，而名字留在 `trigger.ts` 的白名单里只会让 `/webui`
+石沉大海，所以先摘除（docs/20 · W-TG-01；[08 §8](./08-telegram-adapter.md)）。要实现时**两侧一起加**：
+`/login` 端点 + `bot.command('webui')` + `HANDLED_COMMANDS`，三者有 CI 断言互相锁死。
 
 ---
 
@@ -260,8 +264,8 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
 | `GET /api/logs` `GET /api/logs/trace/:traceId` `GET /api/logs/blob?ref=` | 日志 |
 | `GET /api/usage` `GET/PUT /api/quota` `POST /api/quota/reset` | 用量与配额 |
 | `GET /api/tasks` `POST /api/tasks/:id/cancel` | 任务 |
-| `GET /api/approvals` `POST /api/approvals/:id/decide` | 审批 |
-| `GET /api/config` `PUT /api/config` `GET /api/config/schema` `GET /api/config/revisions` | 配置。`PUT` body 为点分键；动到 `trigger.*` 时唤醒词要过 `checkWakeword`，不可用返回 400 `invalid_wakeword` |
+| `GET /api/approvals` `POST /api/approvals/:id/decide` | 审批。🚧 当前没有可用的审批通道，命中规则的调用当场被拒（[05 §6](./05-tools-and-permissions.md)）：列表是审计视图（谁在什么时候被挡了），`decide` 对非 pending 行返回 `changed:false` |
+| `GET /api/config` `PUT /api/config` `GET /api/config/schema` `GET /api/config/revisions` | 配置。`PUT` body 为点分键；含 `__proto__`/`constructor`/`prototype` 段的键一律 400 `invalid_config_key`（原型污染发生在校验之前，一次请求就能让此后所有配置写入失败，docs/20 · W-CFG-01）；动到 `trigger.*` 时唤醒词要过 `checkWakeword`，不可用返回 400 `invalid_wakeword`。`/schema` 另带 `hotReloadable` 与 `unimplemented` 两个键名前缀表：不在 `hotReloadable` 里的键保存后需要重启才生效，WebUI 据此显示待重启徽标（[11](./11-config-reference.md)） |
 | `POST /api/config/wakewords/check` | 逐条返回唤醒词的 `{ kind: contains\|regex, ok, reason }`，供面板即时提示；判定与运行时匹配同源 |
 | `POST /api/maintenance/{backup,vacuum,cleanup-logs,rebuild-fts,gc-files}` | 维护 |
 | `GET /api/events` | SSE |

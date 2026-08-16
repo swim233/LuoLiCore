@@ -8,7 +8,7 @@ export interface FallbackCandidate {
   id: string;
 }
 
-interface FallbackOptions {
+export interface FallbackOptions {
   maxRetries: number;
   retryBaseMs: number;
   retryMaxMs: number;
@@ -21,6 +21,11 @@ interface FallbackOptions {
    * 和「模型没话说」在调用方眼里就长得一模一样。
    */
   onExhausted?: (error: unknown) => void;
+  /**
+   * 实际服务了这一次调用的候选。包装之后 `step.model.modelId` 恒等于链首，
+   * 不报一份的话，fallback 到第二个模型的那些步会被按链首的价格与别名记账（docs/20 · W-LEDGER-01）。
+   */
+  onServed?: (candidate: FallbackCandidate) => void;
 }
 
 function statusCode(error: unknown): number | null {
@@ -66,7 +71,7 @@ export function fallbackLanguageModel(candidates: FallbackCandidate[], options: 
         const candidate = candidates[index]!;
         const model = candidate.model;
         for (let attempt = 0; attempt <= options.maxRetries; attempt += 1) {
-          try { return await model.doGenerate(params) as Awaited<ReturnType<V4LanguageModel['doGenerate']>>; }
+          try { const result = await model.doGenerate(params) as Awaited<ReturnType<V4LanguageModel['doGenerate']>>; options.onServed?.(candidate); return result; }
           catch (error) {
             last = error;
             const status = statusCode(error);
@@ -86,7 +91,7 @@ export function fallbackLanguageModel(candidates: FallbackCandidate[], options: 
         const candidate = candidates[index]!;
         const model = candidate.model;
         for (let attempt = 0; attempt <= options.maxRetries; attempt += 1) {
-          try { return await model.doStream(params) as Awaited<ReturnType<V4LanguageModel['doStream']>>; }
+          try { const result = await model.doStream(params) as Awaited<ReturnType<V4LanguageModel['doStream']>>; options.onServed?.(candidate); return result; }
           catch (error) {
             last = error;
             const status = statusCode(error);

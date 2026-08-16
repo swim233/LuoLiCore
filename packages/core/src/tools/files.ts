@@ -1,4 +1,4 @@
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { minimatch } from 'minimatch';
 import { basename, dirname, relative } from 'node:path';
 import { ulid } from 'ulid';
@@ -25,6 +25,15 @@ export class FileTools {
       truncated: offset + effective < buffer.length, nextOffset: offset + effective < buffer.length ? offset + effective : null };
   }
 
+  /** 目录去重按 realpath 记：软链自指时同一个真实目录会被再次进入，条数上限拦不住无限递归。 */
+  #enter(directory: string, visited: Set<string>): boolean {
+    let real: string;
+    try { real = realpathSync(directory); } catch { return false; }
+    if (visited.has(real)) return false;
+    visited.add(real);
+    return true;
+  }
+
   list(path = '.', depth = 1): Record<string, unknown> {
     const root = this.jail.resolve(path);
     const entries: Array<{ path: string; type: string; bytes: number }> = [];
@@ -44,7 +53,11 @@ export class FileTools {
   glob(pattern: string, path = '.'): Record<string, unknown> {
     const root = this.jail.resolve(path);
     const matches: string[] = [];
+    // 已访问目录集合：workspace 里一个指向自身祖先的软链（`ln -s . loop`，bash 就能建）会让递归
+    // 无限下去，而条数上限只在**命中**时才起作用（docs/20 · W-FS-01）。
+    const visited = new Set<string>();
     const walk = (directory: string): void => {
+      if (!this.#enter(directory, visited)) return;
       for (const name of readdirSync(directory)) {
         if (!this.options.showHidden && name.startsWith('.')) continue;
         const child = this.jail.resolve(relative(this.jail.root, `${directory}/${name}`));
@@ -64,9 +77,10 @@ export class FileTools {
     const regex = safeRegex(pattern, ignoreCase);
     if (!regex) return { ok: false, error: 'invalid_pattern' };
     const matches: Array<{ path: string; line: number; text: string }> = [];
+    const visited = new Set<string>();
     const walk = (target: string): void => {
       const stat = statSync(target);
-      if (stat.isDirectory()) { for (const name of readdirSync(target)) { if (!this.options.showHidden && name.startsWith('.')) continue; if (matches.length >= 200) break; walk(this.jail.resolve(relative(this.jail.root, `${target}/${name}`))); } return; }
+      if (stat.isDirectory()) { if (!this.#enter(target, visited)) return; for (const name of readdirSync(target)) { if (!this.options.showHidden && name.startsWith('.')) continue; if (matches.length >= 200) break; walk(this.jail.resolve(relative(this.jail.root, `${target}/${name}`))); } return; }
       if (stat.size > this.maxReadBytes * 4) return;
       let content: string;
       try { content = readFileSync(target, 'utf8'); } catch { return; }

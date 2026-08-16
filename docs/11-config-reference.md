@@ -5,6 +5,12 @@
 - 全部配置由 `packages/core/config` 的 zod schema 定义，`config.schema.json` 由它生成，WebUI 表单也由它生成 —— **单一数据源**。
 - 启动时校验；校验失败**拒绝启动**并打印具体路径与原因。
 - 热更新：标 `热更新` 的项保存后立即生效（下一个 turn）；标 `需重启` 的项保存后 WebUI 显示待重启徽标。
+  判据是**运行时读的是 getter（`configStore.snapshot()` / `turn.config` / bot 的 config Proxy）而不是启动时那份快照**；
+  白名单是 `HOT_RELOADABLE_CONFIG_KEYS`（`packages/core/src/config/schema.ts`），`GET /api/config/schema`
+  以 `hotReloadable` 一并返回，`tests/config.test.ts` 断言本文件里标 `热更新` 的每个键都在白名单内。
+  上一轮有十组键标着热更新而实际冻在启动时，其中 `sandbox.mode`、`approval.enabled`、`approval.rules`
+  三组是「出事时运维会去点的那个开关」—— 点了没用而界面还说成功（[20 · W-CFG-02](./20-review-round5.md)）。
+  当前 WebUI 只编辑热更新键，因此暂时没有待重启徽标的实际用例；新增可编辑项时按 `hotReloadable` 判定。
 
 ## 1. 环境变量（`.env`）
 
@@ -44,11 +50,11 @@ NODE_ENV=production
 
 当前白名单（按模块分组）。**每一行都以 🚧 起头，测试 `config.test.ts` 要求白名单里的每个键都能在本文件里找到一行同时含该键与 🚧**，否则视为文档未同步：
 
-- 🚧 general / Telegram / trigger：`general.locale` · `telegram.dropPendingOnStart` · `telegram.webhook.url` · `telegram.webhook.path` · `telegram.webhook.secretToken` · `telegram.notifyEdits` · `trigger.cooldownMsPerUser`
+- 🚧 general / Telegram / trigger：`general.name`（运行时未接线） · `general.locale` · `telegram.dropPendingOnStart` · `telegram.webhook.url` · `telegram.webhook.path` · `telegram.webhook.secretToken` · `telegram.notifyEdits` · `trigger.cooldownMsPerUser` · `trigger.ignoreEditedAsTrigger`（编辑消息一律按背景消息归档，不开新轮次）
 - 🚧 context / concurrency / cancel：`context.background.showUsername` · `context.background.showTime` · `context.background.includeNonText` · `context.rebase.markMeta` · `context.cacheCommits` · `concurrency.coalesceSameUserMs` · `cancel.commitPartial`
 - 🚧 prompt / memory：`prompt.includeToolCatalog` · `prompt.runtimeBlock.showQuota` · `prompt.runtimeBlock.showContextWatermark` · `prompt.runtimeBlock.showWorkspace` · `memory.pubWriteRequiresApproval` · `memory.autoApplyCompaction` · `memory.requireSourceTag`
 - 🚧 agent / provider：`agent.maxConcurrentSubagents` · `agent.askArbiter` · `agent.askEscalateToUser` · `agent.progressThrottleMs` · `provider.healthDownCooldownMinutes` · `provider.requestTimeoutMs` · `provider.streamIdleTimeoutMs`
-- 🚧 tools / approval：`tools.fs.allowHostFsForOwner` · `tools.archive.defaultSearchLimit` · `tools.archive.maxSearchLimit` · `tools.archive.defaultReadLimit` · `tools.archive.maxReadLimit` · `tools.tg.maxExtraMessagesPerTurn` · `tools.tg.maxFileSendMb` · `tools.web.summarizeWithAlias` · `tools.web.allowlist` · `tools.web.denylist` · `approval.allowInitiator`
+- 🚧 tools / approval：`tools.fs.allowHostFsForOwner` · `tools.archive.defaultSearchLimit` · `tools.archive.maxSearchLimit` · `tools.archive.defaultReadLimit` · `tools.archive.maxReadLimit` · `tools.tg.maxExtraMessagesPerTurn` · `tools.tg.maxFileSendMb` · `tools.web.summarizeWithAlias` · `tools.web.allowlist` · `tools.web.denylist` · `approval.allowInitiator` · `approval.ttlMs`（没有可用审批通道，命中规则当场拒绝，不存在等待窗口）
 - 🚧 output / media：`output.flushOnSentence` · `output.parseMode` · `output.typingWhileWorking` · `output.placeholderAfterMs` · `output.maxMentions` · `media.maxImagesPerTurn` · `media.groupDebounceMs` · `media.stickerAsImage` · `media.downloadVoice` · `media.extract.codeExtensions`
 - 🚧 extensions / persistence / logs：`skills.enabled` · `plugins.enabled` · `plugins.watch` · `mcp.enabled` · `mcp.connectTimeoutMs` · `db.ftsTokenizer` · `logs.gzipAfterDays` · `logs.redactPatterns`
 - 🚧 quota / WebUI / alerts：`quota.perTurn.maxToolCalls` · `quota.perTurn.maxSubagents` · `quota.perTurn.maxDurationMs` · `quota.onExceeded.notifyOwner` · `quota.warnAtRatio` · `webui.enabled` · `webui.basePath` · `webui.publicUrl` · `alerts.notifyOwner` · `alerts.dedupeMinutes` · `alerts.webhookUrl` · `alerts.on`
@@ -56,7 +62,7 @@ NODE_ENV=production
 ```yaml
 # ============================================================ general
 general:
-  name: 洛璃                      # 热更新 · bot 自称（仅用于日志与 WebUI 标题）
+  name: 洛璃                      # 🚧 未实现 · 运行时不读它（日志与 WebUI 标题都没接线）
   timezone: Asia/Shanghai         # 需重启 · 影响配额 bucket 与时间渲染
   locale: zh-CN                   # 热更新
   maintenanceCron: '0 4 * * *'    # 需重启 · 每日维护任务
@@ -129,10 +135,10 @@ context:
 
 # ============================================================ concurrency
 concurrency:
-  mode: parallel                  # 热更新 · parallel（D1）| serial（逃生舱）
-  perKey: 3                       # 热更新
-  global: 8                       # 热更新
-  queueMax: 20                    # 热更新
+  mode: parallel                  # 需重启 · parallel（D1）| serial（逃生舱）
+  perKey: 3                       # 需重启 · 信号量在启动时建好，改了要重启才换（docs/20 · W-CFG-02）
+  global: 8                       # 需重启
+  queueMax: 20                    # 需重启
   coalesceSameUserMs: 0           # 热更新 · >0 时合并同用户连续触发
   turnTimeoutMs: 600000           # 热更新
 cancel:
@@ -148,11 +154,11 @@ prompt:
     showWorkspace: true
 memory:
   dir: ./memory                   # 需重启
-  pubWriteMinRole: trusted        # 热更新 · ★ D12 安全阀
+  pubWriteMinRole: trusted        # 需重启 · ★ D12 安全阀（registerBuiltins 在启动时取值，docs/20 · W-CFG-02）
   pubWriteRequiresApproval: false # 热更新 · 多群部署建议 true
-  softLimitTokens: 1500           # 热更新 · 超出触发异步压缩
-  hardLimitTokens: 3000           # 热更新 · 超出拒绝写入
-  maxSections: 12
+  softLimitTokens: 1500           # 需重启 · 超出触发异步压缩（MemoryStore 构造时吃的是快照）
+  hardLimitTokens: 3000           # 需重启 · 超出拒绝写入
+  maxSections: 12                 # 需重启
   compactCron: '0 3 * * 0'        # 需重启
   autoApplyCompaction: false      # 热更新 · false 时压缩结果需 owner 审阅
   requireSourceTag: true          # 热更新 · 强制写入来源标注
@@ -164,9 +170,9 @@ agent:
     modelAlias: main              # 热更新
     maxSteps: 12                  # 热更新
     downgradeAfterStep: 8         # 热更新 · 超过该步数自动降到 low 档
-  maxDepth: 3                     # 热更新
+  maxDepth: 3                     # 需重启 · AgentManager 构造时吃的是快照（docs/20 · W-CFG-02）
   maxConcurrentSubagents: 3
-  maxSubagentsPerTurn: 10
+  maxSubagentsPerTurn: 10         # 需重启 · 同上
   askTimeoutMs: 120000
   maxAsksPerRun: 5
   askArbiter: true                # 热更新 · 用 low 档模型仲裁 ask_parent
@@ -253,7 +259,9 @@ tools:
     allowlist: []                 # 热更新 · 空则 limited 角色不可用 web_fetch
     denylist: ['*.local', '*.internal']
     searchProvider: ''            # brave | serper | tavily | ''（空则不注册 web_search）
-    searchApiKeyRef: ''           # ${env:...}
+    searchApiKey: ''              # 需重启 · **明文**存在 config.yaml / config_kv 里（不是引用，
+                                  #   与 provider key 的 Secrets 加密不同）。建议写 ${env:BRAVE_API_KEY}
+                                  #   之类的 env 引用，别直接落库；日志与 GET /api/config 会脱敏
 
 # ============================================================ sandbox（D10）
 sandbox:

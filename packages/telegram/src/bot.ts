@@ -9,7 +9,7 @@ import type { Role, RuntimeTurnContext } from '@luoli/shared';
 import { roleRank } from '@luoli/shared';
 import { contextKey, modelAliasKey, readAppKv, writeAppKv } from '@luoli/db';
 import { matchTrigger } from './trigger.js';
-import { holdReply, splitTelegramText } from './output.js';
+import { holdReply, sendWithFallback, splitTelegramText } from './output.js';
 
 export interface TelegramDependencies {
   config: Readonly<Config> | ConfigStore;
@@ -93,7 +93,9 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
     // 触发判定要看会话级覆盖（docs/08 §4）：唤醒词是 perChat 白名单里的键，只读全局快照的话
     // WebUI/API 写进去的会话唤醒词能存住却永远匹配不上。key 用全局 scope 算，与 openTurn 保持一致。
     const triggerConfig = perChatConfig(currentConfig(), contextKey({ chatId, messageThreadId: message.message_thread_id ?? null }, config.context.scope)).trigger;
-    const triggerReason = message.text?.startsWith('/') ? 'command' : matchTrigger(ctx, { ...triggerConfig, strictCommandSuffix: config.telegram.strictCommandSuffix }, bot.botInfo.id, bot.botInfo.username);
+    // 判定整个交给 matchTrigger：裸 `/` 前缀一律当命令的话，白名单和 `trigger.command` 开关都被绕开，
+    // 私聊里一句「/home/app 这个目录满了」会石沉大海（docs/20 · W-TG-01）。
+    const triggerReason = matchTrigger(ctx, { ...triggerConfig, strictCommandSuffix: config.telegram.strictCommandSuffix }, bot.botInfo.id, bot.botInfo.username);
     dependencies.log.event({ level: 'debug', kind: triggerReason ? 'trigger.matched' : 'trigger.skipped', summary: triggerReason ?? 'not triggered', chatId, userId, data: { reason: triggerReason } });
     let archived: ArchivedMessage | null = null;
     if (effectiveRole !== 'blocked' || config.access.archiveBlocked) {
@@ -125,6 +127,48 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
     return access;
   };
 
+  // 命令表就是 /help 的内容，也是 HANDLED_COMMANDS 的对照物（tests/trigger.test.ts 断言三者一致）。
+  const COMMANDS: Array<{ name: string; minRole: Role; usage: string; description: string }> = [
+    { name: 'start', minRole: 'limited', usage: '/start', description: '自我介绍与你当前的权限' },
+    { name: 'help', minRole: 'limited', usage: '/help', description: '可用命令列表' },
+    { name: 'ping', minRole: 'limited', usage: '/ping', description: '健康检查' },
+    { name: 'new', minRole: 'limited', usage: '/new', description: '开新话题（窗口清零，历史保留）' },
+    { name: 'undo', minRole: 'limited', usage: '/undo', description: '撤销上一条上下文提交' },
+    { name: 'ctx', minRole: 'limited', usage: '/ctx', description: '上下文窗口与提交状态' },
+    { name: 'cancel', minRole: 'limited', usage: '/cancel [id]', description: '取消在途任务' },
+    { name: 'tasks', minRole: 'limited', usage: '/tasks', description: '在途任务列表' },
+    { name: 'memory', minRole: 'limited', usage: '/memory', description: '查看自己的私有记忆（仅私聊）' },
+    { name: 'forgetme', minRole: 'limited', usage: '/forgetme', description: '清空自己的私有记忆（仅私聊）' },
+    { name: 'whoami', minRole: 'limited', usage: '/whoami', description: '自己的角色与有效权限' },
+    { name: 'usage', minRole: 'owner', usage: '/usage', description: '累计用量' },
+    { name: 'model', minRole: 'trusted', usage: '/model [alias]', description: '查看/固定本会话模型别名' },
+    { name: 'whois', minRole: 'owner', usage: '/whois <id>', description: '查某个主体的角色' },
+    { name: 'grant', minRole: 'owner', usage: '/grant <user|chat> <id> <role>', description: '授权' },
+    { name: 'revoke', minRole: 'owner', usage: '/revoke <id>', description: '降为 blocked' },
+  ];
+  bot.command('start', async (ctx) => {
+    const access = await requireRole(ctx.update.update_id, 'limited', (text) => ctx.reply(text));
+    if (!access) return;
+    await ctx.reply(`我是 ${bot.botInfo.first_name}。直接说话就行；群里 @我、回复我、或用唤醒词都能叫我。\n`
+      + `你当前的权限：${access.effectiveRole}。\n发 /help 看可用命令。`);
+  });
+  bot.command('help', async (ctx) => {
+    const access = await requireRole(ctx.update.update_id, 'limited', (text) => ctx.reply(text));
+    if (!access) return;
+    const lines = COMMANDS.filter((entry) => roleRank(access.effectiveRole) >= roleRank(entry.minRole)).map((entry) => `${entry.usage} — ${entry.description}`);
+    await ctx.reply(`可用命令（按你当前权限 ${access.effectiveRole} 过滤）：\n${lines.join('\n')}`);
+  });
+  bot.command('whois', async (ctx) => {
+    const actor = dependencies.principals.roleOf('user', String(ctx.from?.id ?? ''));
+    if (actor !== 'owner') { await ctx.reply('权限不足。'); return; }
+    const raw = ctx.match.trim();
+    if (!raw) { await ctx.reply('用法：/whois <id>，或 /whois <user|chat> <id>'); return; }
+    const [first, second] = raw.split(/\s+/);
+    const kinds = second && ['user', 'chat'].includes(first!) ? [first as 'user' | 'chat'] : ['user', 'chat'] as const;
+    const id = second ?? first!;
+    const found = kinds.map((kind) => ({ kind, role: dependencies.principals.roleOf(kind, id) })).filter((entry) => entry.role !== null);
+    await ctx.reply(found.length ? found.map((entry) => `${entry.kind}:${id} = ${entry.role}`).join('\n') : `没有 ${id} 的记录（未见过的主体按默认角色处理）。`);
+  });
   bot.command('ping', async (ctx) => {
     if (!await requireRole(ctx.update.update_id, 'limited', (text) => ctx.reply(text))) return;
     await ctx.reply(`LuoLiCore ${process.env.npm_package_version ?? 'dev'}\n运行正常\n${JSON.stringify(dependencies.operations.dashboard())}`);
@@ -140,15 +184,23 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
     if (!await requireRole(ctx.update.update_id, 'limited', (text) => ctx.reply(text))) return;
     await ctx.reply(dependencies.context.undo(key) ? '已撤销上一条上下文提交。' : '没有可撤销的提交。');
   });
+  // 摘要而不是整份 JSON：stats() 带着窗口内全部消息及其 parts，活跃会话轻松越过 Telegram 的
+  // 4096 字符上限，API 400 之后用户看到的是彻底的沉默（docs/20 · W-TG-02）。完整数据看 WebUI。
   bot.command('ctx', async (ctx) => {
     const key = contextKey({ chatId: String(ctx.chat.id), messageThreadId: ctx.message?.message_thread_id ?? null }, config.context.scope);
     if (!await requireRole(ctx.update.update_id, 'limited', (text) => ctx.reply(text))) return;
-    await ctx.reply(`\`\`\`json\n${JSON.stringify(dependencies.context.stats(key), null, 2)}\n\`\`\``, { parse_mode: 'MarkdownV2' });
+    const stats = dependencies.context.stats(key) as { commit: { id: string; seq: number; windowStart: number; headOrdinal: number } | null; messageCount: number; tokens: number; claimWatermark: number };
+    const commit = stats.commit;
+    await ctx.reply(commit
+      ? `上下文 ${key}\ncommit ${commit.id.slice(0, 12)}（第 ${commit.seq} 次）\n窗口 ordinal ${commit.windowStart}–${commit.headOrdinal}\n${stats.messageCount} 条消息 / 约 ${stats.tokens} tokens（上限 ${config.context.limit.maxMessages} 条 / ${config.context.limit.tokens} tokens）\n完整时间线见 WebUI：http://${config.webui.host}:${config.webui.port}/chats/${encodeURIComponent(key)}`
+      : `上下文 ${key} 还是空的，还没有提交过任何一轮。`);
   });
   bot.command('tasks', async (ctx) => {
-    const tasks = dependencies.turns.active(String(ctx.chat.id));
+    const tasks = dependencies.turns.active(String(ctx.chat.id)) as Array<{ id: string; state: string; started_at?: number }>;
     if (!await requireRole(ctx.update.update_id, 'limited', (text) => ctx.reply(text))) return;
-    await ctx.reply(tasks.length ? `\`\`\`json\n${JSON.stringify(tasks, null, 2)}\n\`\`\`` : '当前没有在途任务。', { parse_mode: 'MarkdownV2' });
+    await ctx.reply(tasks.length
+      ? `在途任务 ${tasks.length} 个：\n${tasks.slice(0, 20).map((task) => `${task.id.slice(0, 12)} ${task.state}${task.started_at ? ` 已运行 ${Math.round((Date.now() - task.started_at) / 1000)}s` : ''}`).join('\n')}`
+      : '当前没有在途任务。');
   });
   bot.command('model', async (ctx) => {
     const access = await requireRole(ctx.update.update_id, 'trusted', (text) => ctx.reply(text));
@@ -220,12 +272,16 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
     const effectiveRole = resolveEffectiveRole({ userRole, ...(storedChatRole ? { chatRole: storedChatRole } : {}), isPrivate, defaultChatRole: config.access.defaultChatRole });
     if (effectiveRole === 'blocked' && !config.access.archiveBlocked) return;
     const row = dependencies.db.prepare('SELECT COALESCE(MAX(revision),-1)+1 AS revision FROM messages WHERE chat_id=? AND tg_message_id=?').get(chatId, message.message_id) as { revision: number };
+    // 编辑永远不开新轮次（`trigger.ignoreEditedAsTrigger` 因此标 🚧）。但也绝不能记成 triggered=1：
+    // claimBackground 只认领 triggered=0 的消息，被判成触发却没人开轮次的编辑等于凭空消失
+    // ——既不回应、也不进背景上下文（docs/20 · W-TG-05）。统一按背景消息归档。
     const editedTrigger = perChatConfig(currentConfig(), contextKey({ chatId, messageThreadId: message.message_thread_id ?? null }, config.context.scope)).trigger;
-    const triggerReason = editedTrigger.ignoreEditedAsTrigger ? null : matchTrigger(ctx, { ...editedTrigger, strictCommandSuffix: config.telegram.strictCommandSuffix }, bot.botInfo.id, bot.botInfo.username);
+    const wouldTrigger = matchTrigger(ctx, { ...editedTrigger, strictCommandSuffix: config.telegram.strictCommandSuffix }, bot.botInfo.id, bot.botInfo.username);
+    if (wouldTrigger) dependencies.log.event({ level: 'info', kind: 'trigger.skipped', summary: 'edited message would trigger but edits never open a turn', chatId, userId, data: { reason: wouldTrigger, tgMessageId: message.message_id } });
     dependencies.archive.scope(chatId, message.message_thread_id ?? null).append({ chatId, messageThreadId: message.message_thread_id ?? null, tgMessageId: message.message_id, tgUpdateId: ctx.update.update_id,
       direction: 'in', fromKind: 'user', fromUserId: userId, fromName: [from.first_name, from.last_name].filter(Boolean).join(' '), fromUsername: from.username ?? null,
       kind: messageKind(message as unknown as Record<string, unknown>), text: message.text ?? message.caption ?? null, tgDate: message.edit_date ? message.edit_date * 1000 : Date.now(), raw: message,
-      triggered: triggerReason !== null, triggerReason, revision: row.revision });
+      triggered: false, triggerReason: null, revision: row.revision });
   });
   bot.on('my_chat_member', async (ctx) => {
     const member = ctx.myChatMember;
@@ -317,7 +373,8 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
       if (typeof generated === 'string') {
         await holdReply(receivedAt, config.output.replyDelayMs);
         for (const part of splitTelegramText(generated, config.output.maxMessageChars)) {
-          const sent = await ctx.reply(part, { parse_mode: 'MarkdownV2' });
+          // 与流式分支共用一份降级逻辑：裸 MarkdownV2 发送失败会把整轮打成 failed（docs/20 · W-TG-03）。
+          const sent = await sendWithFallback(bot.api, chatId, part);
           scoped.append({ chatId, messageThreadId: message.message_thread_id ?? null, tgMessageId: sent.message_id, direction: 'out', fromKind: 'bot', fromUserId: String(bot.botInfo.id), fromName: bot.botInfo.first_name, fromUsername: bot.botInfo.username,
             kind: 'text', text: part, tgDate: sent.date * 1000, raw: sent, triggered: false, turnId: turn.turnId });
         }

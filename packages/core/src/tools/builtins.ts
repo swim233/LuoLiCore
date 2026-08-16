@@ -1,10 +1,10 @@
 import { z } from 'zod';
 import { readFileSync } from 'node:fs';
-import type { AgentManager, ContextEngine, FileTools, MemoryStore, ModelRegistry, Sandbox, SkillLoader, ToolRegistry, UsageLedger, LogSink } from '@luoli/core';
+import type { AgentManager, Config, ContextEngine, FileTools, MemoryStore, ModelRegistry, QuotaGuard, QuotaReservation, Sandbox, SkillLoader, ToolRegistry, UsageLedger, LogSink } from '@luoli/core';
 import { builtinPolicy, runSubAgent, webFetch, webSearch } from '@luoli/core';
 import type { ArchiveRepository } from '@luoli/db';
 
-export function registerBuiltins(registry: ToolRegistry, dependencies: { db: import('@luoli/db').Sqlite; filesFor: (workspace: string) => FileTools; sandbox: Sandbox; archive: ArchiveRepository; context: ContextEngine; memory: MemoryStore; skills: SkillLoader; agents: AgentManager; models: ModelRegistry; ledger: UsageLedger; log: LogSink; telegram?: { sendMessage(chatId: string, text: string): Promise<unknown>; sendPhoto(chatId: string, photo: string, caption?: string): Promise<unknown>; sendFile(chatId: string, file: string, caption?: string): Promise<unknown>; react(chatId: string, messageId: number, emoji: string): Promise<unknown>; pin(chatId: string, messageId: number): Promise<unknown> }; pubWriteMinRole: 'blocked' | 'limited' | 'trusted' | 'owner'; maxWebBytes: number; maxAsksPerRun?: number; askTimeoutMs?: number; webSearch?: { provider: '' | 'brave' | 'serper' | 'tavily'; apiKey: string } }): void {
+export function registerBuiltins(registry: ToolRegistry, dependencies: { db: import('@luoli/db').Sqlite; filesFor: (workspace: string) => FileTools; sandbox: Sandbox; archive: ArchiveRepository; context: ContextEngine; memory: MemoryStore; skills: SkillLoader; agents: AgentManager; models: ModelRegistry; ledger: UsageLedger; log: LogSink; quota?: QuotaGuard; telegram?: { sendMessage(chatId: string, text: string): Promise<unknown>; sendPhoto(chatId: string, photo: string, caption?: string): Promise<unknown>; sendFile(chatId: string, file: string, caption?: string): Promise<unknown>; react(chatId: string, messageId: number, emoji: string): Promise<unknown>; pin(chatId: string, messageId: number): Promise<unknown> }; pubWriteMinRole: 'blocked' | 'limited' | 'trusted' | 'owner'; maxWebBytes: number; maxAsksPerRun?: number; askTimeoutMs?: number; webSearch?: { provider: '' | 'brave' | 'serper' | 'tavily'; apiKey: string } }): void {
   registry.register({ name: 'read_file', description: '读取工作目录或 skill:// 资源，支持 offset/limit 分页。', inputSchema: z.object({ path: z.string(), offset: z.number().int().nonnegative().optional(), limit: z.number().int().positive().optional() }), policy: builtinPolicy('read_file'), sourcePriority: 100, untrustedOutput: true,
     execute: (input, context) => {
       if (!input.path.startsWith('skill://')) return dependencies.filesFor(context.workspace).read(input.path, input.offset, input.limit);
@@ -33,10 +33,10 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
     execute: (input, context) => dependencies.filesFor(context.workspace).move(input.from, input.to) });
   registry.register({ name: 'bash', description: '在工作目录执行命令；非 owner 必须使用可用沙箱。', inputSchema: z.object({ command: z.string(), timeoutMs: z.number().int().positive().optional(), description: z.string() }), policy: builtinPolicy('bash'), sourcePriority: 100,
     available: (role, context) => dependencies.sandbox.plan(role, context.workspace).allowed,
-    execute: async (input, context) => dependencies.sandbox.run(input.command, context.turn.effectiveRole, context.workspace, context.turn.abortSignal, input.timeoutMs) });
+    execute: async (input, context) => dependencies.sandbox.run(input.command, context.turn.effectiveRole, context.workspace, context.turn.abortSignal, input.timeoutMs, context.turn.turnId) });
   registry.register({ name: 'python', description: '在工作目录执行 Python 代码；非 owner 必须使用可用沙箱。', inputSchema: z.object({ code: z.string(), timeoutMs: z.number().int().positive().optional(), description: z.string() }), policy: builtinPolicy('python'), sourcePriority: 100,
     available: (role, context) => dependencies.sandbox.plan(role, context.workspace).allowed,
-    execute: async (input, context) => dependencies.sandbox.run(`python3 - <<'PY'\n${input.code}\nPY`, context.turn.effectiveRole, context.workspace, context.turn.abortSignal, input.timeoutMs) });
+    execute: async (input, context) => dependencies.sandbox.run(`python3 - <<'PY'\n${input.code}\nPY`, context.turn.effectiveRole, context.workspace, context.turn.abortSignal, input.timeoutMs, context.turn.turnId) });
   registry.register({ name: 'search_messages', description: '在当前会话内搜索聊天记录。', inputSchema: z.object({ query: z.string(), limit: z.number().int().min(1).max(100).default(20) }), policy: builtinPolicy('search_messages'), sourcePriority: 100, untrustedOutput: true,
     execute: (input, context) => ({ ok: true, messages: dependencies.archive.scope(context.turn.chatId, context.turn.threadId).search(input.query, input.limit) }) });
   registry.register({ name: 'read_messages', description: '按时间读取当前会话聊天记录。', inputSchema: z.object({ limit: z.number().int().min(1).max(200).default(50) }), policy: builtinPolicy('read_messages'), sourcePriority: 100, untrustedOutput: true,
@@ -67,7 +67,7 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
         const allowed = Array.isArray(result.allowedTools) ? result.allowedTools.filter((name): name is string => typeof name === 'string') : [];
         const set = (context.turn.skillAllowedTools ??= new Set());
         for (const name of allowed) set.add(name);
-        dependencies.context.appendDelta(context.turn, { id: crypto.randomUUID(), role: 'system', origin: 'note', parts: [{ type: 'text', text: String(result.body ?? '') }], textPreview: `Skill ${input.name}`, pruneLevel: 2 });
+        dependencies.context.appendDelta(context.turn, { id: crypto.randomUUID(), role: 'user', origin: 'note', parts: [{ type: 'text', text: String(result.body ?? '') }], textPreview: `Skill ${input.name}`, pruneLevel: 2 });
       }
       return result;
     } });
@@ -84,7 +84,12 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
       dependencies.db.prepare("INSERT INTO tasks(id,turn_id,agent_run_id,chat_id,user_id,title,state,created_at,updated_at) VALUES (?,?,?,?,?,?,'running',?,?)")
         .run(taskId, context.turn.turnId, run.id, context.turn.chatId, context.turn.initiatorUserId, input.label ?? definition.name, Date.now(), Date.now());
       try {
-        const result = await runSubAgent(run, definition, input.task, input.context, context.turn, { db: dependencies.db, agents: dependencies.agents, registry: dependencies.models, tools: registry, ledger: dependencies.ledger, log: dependencies.log, workspace: context.workspace }, input.modelAlias);
+        // provider 重试设置与配额预留都从本轮取：子 agent 的花费必须落进主 agent 那份预留，
+        // 否则配额只看得见主 agent（docs/20 · W-QUOTA-01）。
+        const live = context.turn.config as Readonly<Config>;
+        const result = await runSubAgent(run, definition, input.task, input.context, context.turn, { db: dependencies.db, agents: dependencies.agents, registry: dependencies.models, tools: registry, ledger: dependencies.ledger, log: dependencies.log, workspace: context.workspace,
+          provider: { maxRetries: live.provider.maxRetries, retryBaseMs: live.provider.retryBaseMs, retryMaxMs: live.provider.retryMaxMs },
+          ...(dependencies.quota ? { quota: dependencies.quota } : {}), reservation: (context.turn.reservation as QuotaReservation | undefined) ?? null }, input.modelAlias);
         dependencies.db.prepare("UPDATE tasks SET state='done',result_summary=?,updated_at=?,finished_at=? WHERE id=?").run(result.summary, Date.now(), Date.now(), taskId);
         return { ok: true, taskId, runId: run.id, agent: definition.name, ...result };
       } catch (error) {

@@ -219,6 +219,11 @@ bash: tool({
 
 矩阵在代码中是**单一数据源**：`packages/core/tools/policy.ts` 导出 `TOOL_POLICY: Record<ToolName, {minRole, approval, scope}>`，`ToolRegistry` 与 WebUI 权限页都读它。新增工具必须同时更新该表与本文档（CI 有一致性测试，AC-TOOL-001）。
 
+**目录过滤不是边界，`execute()` 才是。** `ToolRegistry.active()` 的每一条过滤在 `execute()` 里都要
+再判一次：`minRole`、运维禁用、本轮熔断、`available()`、以及「子 agent 不给 `memory_write`」。
+模型完全可以沿用上一步的工具名直接调过来，「目录里没有」拦不住它 —— 曾经每个相关工具恰好各自
+fail-closed，但那是巧合不是设计（docs/20 · W-TOOL-01）。
+
 ---
 
 ## 5. 沙箱
@@ -308,15 +313,26 @@ docker run --rm \
 工具调用
   │
   ├─ policy.approval === 'never'                  → 直接执行
+  ├─ approval.enabled === false                   → 直接执行
   ├─ policy.approval === 'always' 或 命中风险规则  → 走审批
   │     │
   │     ├─ role=owner ∧ approval.skipForOwner     → 直接执行（记日志 auto_approved）
-  │     ├─ 创建 approvals 行 (state=pending, expires_at=now+ttl)
-  │     ├─ Telegram: 发消息 + inline [✓ 批准][✗ 拒绝]（仅 owner 与 approval.allowInitiator 时的发起人可点）
-  │     ├─ WebUI: /api/approvals 出现待办 + SSE 推送 + 可选桌面通知
-  │     ├─ 等待（Promise + EventBus），超时 ttlMs（默认 180s）→ state=expired
-  │     └─ 结果：approved → 执行；denied/expired → 返回 {ok:false,error:'未获批准'}
+  │     └─ 其它情况 → 🚧 当前没有可用的审批通道：当场拒绝
+  │           ├─ 写一行 approvals (state=denied, decided_by=system, decision_channel=none) 供审计
+  │           ├─ 事件 approval.decided(approved=false) + 日志 approval.denied
+  │           └─ 返回 {ok:false, error:'未获批准', hint:'…'}；hint 交给模型，让它用自己的话
+  │               告诉用户这一步没做、并给出不需要审批的替代做法
 ```
+
+> **🚧 Telegram 审批交互未实现。** 原设计是「发消息 + inline `[✓ 批准][✗ 拒绝]`（仅 owner 与
+> `approval.allowInitiator` 时的发起人可点）+ WebUI 待办 + SSE，等待 `ttlMs`（默认 180s）」。
+> Telegram 那半一行没写，而绝大多数轮次都从 Telegram 发起：旧实现每 500ms 轮询数据库、
+> 整整等满 180 秒，其间轮次挂着不动、占着并发槽和配额预留，最后仍然返回「未获批准」，
+> 全过程发起人看不到任何提示（docs/20 · W-APPR-01）。按「摘除比伪造安全」（[16 §5](./16-remediation-plan.md)）
+> 改成当场拒绝：不再有等待窗口，`approval.ttlMs` 与 `approval.allowInitiator` 因此标 🚧（[11](./11-config-reference.md)）。
+> `POST /api/approvals/:id/decide` 与 `GET /api/approvals` 保留：前者对非 pending 行返回 `changed:false`，
+> 后者是审计视图（能看到什么被挡了、挡了多少次）。**要恢复审批能力，先补一条真正能送达人的通道**，
+> 再把等待逻辑加回 `DatabaseApprovalBroker.request`。
 
 风险规则（`approval.rules`，正则匹配后触发审批，可在 WebUI 编辑）：
 

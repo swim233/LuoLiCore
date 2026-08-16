@@ -792,7 +792,7 @@
                   ],
                   "default": ""
                 },
-                "searchApiKeyRef": {
+                "searchApiKey": {
                   "type": "string",
                   "default": ""
                 }

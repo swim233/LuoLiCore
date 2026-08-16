@@ -199,6 +199,10 @@ CREATE TABLE context_messages (
   turn_id             TEXT    NOT NULL,
   agent_run_id        TEXT,
   role                TEXT    NOT NULL CHECK (role IN ('user','assistant','tool','system')),
+  -- ⚠️ CHECK 里的 'system' 只是历史列定义（迁移一旦提交不可修改）。**写入端与读出端都不允许它**：
+  -- AI SDK v7 的 standardizePrompt 直接拒收 messages 里的 system 消息，而 parts 是持久化的
+  -- ——写坏一条，该会话在 /new 之前每轮都失败（[02 §9 红线 16]；docs/20 · W-CTX-01）。
+  -- 系统旁白一律 role='user' + origin='note'；迁移 0006 已把库里的存量改回 'user'。
   origin              TEXT    NOT NULL CHECK (origin IN
                         ('background','trigger','assistant','tool_call','tool_result','note')),
   prune_level         INTEGER NOT NULL DEFAULT 0,   -- 0 永不省略 / 1 tool_result / 2 reasoning·tool_call
@@ -514,7 +518,9 @@ CREATE TABLE approvals (
   state        TEXT NOT NULL CHECK (state IN ('pending','approved','denied','expired')),
   tg_message_id INTEGER,
   requested_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
-  decided_by TEXT, decided_at INTEGER, decision_channel TEXT   -- telegram|webui
+  decided_by TEXT, decided_at INTEGER, decision_channel TEXT   -- telegram|webui|none
+  -- 🚧 当前没有可用的审批通道：命中规则的调用当场写成 state='denied', decided_by='system',
+  -- decision_channel='none'，不再产生 pending 行（[05 §6]；docs/20 · W-APPR-01）。表保留为审计视图。
 );
 CREATE INDEX ix_approvals_state ON approvals(state, requested_at);
 

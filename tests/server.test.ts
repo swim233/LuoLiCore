@@ -47,8 +47,11 @@ describe('server security', () => {
     const { app, db } = appHarness();
     const response = await app.request('/api/health');
     expect(response.headers.get('content-security-policy')).toContain("default-src 'self'");
-    const health = await response.json() as { db: { ok: boolean }; inFlightTurns: number; providers: unknown[] };
-    expect(health).toMatchObject({ db: { ok: true }, inFlightTurns: 0 });
+    // 无鉴权的 /api/health 只说存活；provider / MCP / 沙箱拓扑必须留在鉴权后（docs/20 · W-API-01）。
+    const health = await response.json() as Record<string, unknown>;
+    expect(health).toMatchObject({ ok: true });
+    expect(Object.keys(health).sort()).toEqual(['ok', 'uptimeMs']);
+    expect((await app.request('/api/health/detail')).status).toBe(401);
     closeDatabase(db);
   });
 

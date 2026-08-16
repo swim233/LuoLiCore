@@ -253,9 +253,18 @@ const tools = raw.tools.filter((tool) => matchAllow(tool.name, srv.toolAllow, sr
 
 > AI SDK v7 当前不导出 MCP client。本项目直接使用 `@modelcontextprotocol/sdk`；若后续 AI SDK 恢复稳定 MCP client，可在保持 `wrapMcpTool` 语义不变的前提下切换。
 
+**入参 schema 必须接上。** MCP 的 `inputSchema` 是标准 JSON Schema，registry 只认 zod，
+`packages/core/src/mcp/schema.ts` 的 `jsonSchemaToZod` 负责转换（覆盖 MCP 实际会产出的子集：
+object/array/string/number/integer/boolean/enum/required/default/nullable；遇到 `$ref`/`oneOf`
+这类表达不了的结构就把**那一个节点**退回 `z.unknown()` 宽松放行，而不是把整个工具打回通配）。
+此前注册时整份换成 `z.record(z.unknown())`，模型拿到的工具定义是「一个任意对象」：只能靠工具名
+猜参数名，猜错了 `execute()` 的 `safeParse` 也不拦，错误参数直接送到 MCP server —— MCP 工具在实践中
+不可用，而注册是「成功」的（docs/20 · W-MCP-01）。
+
 `wrapMcpTool` 统一施加：
 - 角色检查（`srv.minRole`）；
-- 超时 `srv.timeoutMs`；
+- 超时 `srv.timeoutMs`（作为 `client.callTool` 的 `RequestOptions.timeout`；不接线的话一台卡住的
+  server 能把整轮拖到轮次超时）；
 - 输出裁剪 + `<untrusted-content source="mcp:<server>">` 包裹（[05 §7](./05-tools-and-permissions.md#7-提示注入防护)）；
 - 日志 span（`kind='tool.mcp'`，记 server 名与耗时）；
 - 审批规则（默认 `mcp__*` risk=medium ⇒ 命中 `approval.rules` 时需批准）。
@@ -265,6 +274,10 @@ const tools = raw.tools.filter((tool) => matchAllow(tool.name, srv.toolAllow, sr
 - **懒连接**：首次有角色 ≥ `minRole` 的 turn 需要该 server 时才连接；连接结果缓存。
 - 健康：每 `mcp.healthCheckCron`（默认 5 分钟）`list_tools` 探活；失败标 `state='down'`，工具从注册表移除并在 RUNTIME 块中消失（模型不会调用不存在的工具）。
 - stdio server 崩溃 → 自动重启，指数退避，最多 5 次后标 `down` 并告警。
+- **配置里被移除或停用的 server 在下一次 `reconcile()` 就断开**（`state='disabled'`），连接参数
+  （url/command/args/env/headers）变了也会先断旧连接再重连：只把工具从注册表摘掉的话，stdio 子进程
+  会一直挂着，而缓存的 client 又会被当成「已连接」复用。`McpManager` 按 getter 读配置，
+  `config.changed` 命中 `mcp.` 前缀时重跑 `reconcile()`，新增 server 不再需要重启（docs/20 · W-MCP-01）。
 - 退出时统一 `client.close()`。
 - WebUI：server 列表、状态、发现到的工具清单（含 schema 预览）、启停、`toolAllow/Deny` 编辑、手动重连、最近错误。
 

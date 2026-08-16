@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { Sandbox, ToolRegistry } from '@luoli/core';
-import type { ApprovalBroker, LogSink } from '@luoli/core';
+import type { ApprovalBroker, LogSink, SandboxConfig } from '@luoli/core';
 import type { RuntimeTurnContext } from '@luoli/shared';
 
 const broker: ApprovalBroker = { request: async () => true };
@@ -19,6 +19,25 @@ describe('sandbox fail-closed visibility', () => {
     const context = { turn, workspace: '.', agentKind: 'main' as const };
     expect(registry.activeNames('trusted', context)).not.toContain('bash');
     expect(registry.activeNames('owner', { ...context, turn: { ...turn, effectiveRole: 'owner' } })).toContain('bash');
+  });
+
+  // 事故中在 WebUI 把 docker 改成 none 想切断执行类工具，返回 200、GET /api/sandbox 显示已改，
+  // 而 bash/python 照跑不误 —— 吃启动快照的后果（docs/20 · W-CFG-02）。
+  it('follows sandbox.mode and bypassRoles through a hot reload', () => {
+    let live: SandboxConfig = { ...sandboxConfig, mode: 'jail', bypassRoles: ['owner'] };
+    const warnings: string[] = [];
+    const sandbox = new Sandbox(() => live, true, false, (message) => warnings.push(message));
+    const registry = new ToolRegistry(log, broker, { maxRegistered: 10, maxCallsPerTurn: 10, maxConsecutiveErrors: 3 });
+    registry.register({ name: 'bash', description: '', inputSchema: z.object({ command: z.string() }), policy: { minRole: 'trusted', approval: 'never', scope: 'sandbox', source: 'builtin' }, sourcePriority: 1, available: (role, context) => sandbox.plan(role, context.workspace).allowed, execute: () => ({ ok: true }) });
+    const context = { turn, workspace: '.', agentKind: 'main' as const };
+    expect(registry.activeNames('trusted', context)).toContain('bash');
+    // jail 不是安全边界，plan() 要说出来（docs/05 §5.2 · W-SBX-02）。
+    expect(warnings.join('\n')).toContain('jail');
+    live = { ...live, mode: 'none' as const };
+    expect(registry.activeNames('trusted', context)).not.toContain('bash');
+    expect(sandbox.plan('trusted').allowed).toBe(false);
+    live = { ...live, mode: 'jail' as const, bypassRoles: [] };
+    expect(sandbox.plan('owner').allowed).toBe(true);
   });
 
   it('hides Docker execution tools when Docker is known unavailable', () => {

@@ -213,6 +213,9 @@ importers:
       '@luoli/db':
         specifier: workspace:*
         version: link:../db
+      '@luoli/shared':
+        specifier: workspace:*
+        version: link:../shared
 
   packages/shared: {}
 

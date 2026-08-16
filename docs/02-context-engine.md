@@ -454,3 +454,13 @@ export interface CommitResult {
     写入端（`runtime.ts` 的 `toolResultPart`）与读出端（`contextMessages`）都做归一化：只改 `output`，
     判别字段一个不碰；读出端兜底是为了让已经写坏的历史会话不必 `/new` 就能恢复。降级路径
     （`packages/db/src/context.ts` 的 `elidePart`）本来就写的是 `{type:'text', value:'[已省略工具结果]'}`，与此一致。
+16. ✅ **可发送给 provider 的消息 role 只能是 `user` / `assistant` / `tool`；`system` 只存在于 `instructions`。**
+    系统旁白（`load_skill` 正文、「省略了 N 条群聊消息」、「上下文已被重置」、并发轮次说明）一律
+    `role:'user'` + `origin:'note'`，靠 `origin` 而不是 role 区分——WebUI 与裁剪逻辑本来就按 `origin` 走。
+    这条规则**不是我们定的**：AI SDK v7 的 `standardizePrompt` 在 `allowSystemInMessages` 未开启时
+    直接拒收 messages 里的任何 system 消息（`AI_InvalidPromptError`），而上下文是持久化的 ——
+    一次 `load_skill`、一次群聊积压、一次在途轮次期间的 `/new`，都会让该会话在 `/new` 之前每轮都失败。
+    `assertValidShape` 的 role 白名单在 `openTurn` / `materialize` / `commitTurn` 三处都断言，
+    `contextMessages()` 再对历史坏数据兜一层降级（迁移 `0006` 已把库里的存量改回 `user`）。
+    **不变量要从下游契约推导，而不是自己定义**：`tests/context.contract.test.ts` 把引擎产出的上下文
+    真的交给 `ToolLoopAgent`，这类「本地自洽、交出去被拒」的缺陷只有跨过那一跳才抓得住。
