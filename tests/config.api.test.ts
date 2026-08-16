@@ -54,6 +54,19 @@ describe('config API validation', () => {
     closeDatabase(db);
   });
 
+  it('persists the output pacing form and refuses a zero edit interval', async () => {
+    const { app, db, headers } = harness();
+    const ok = await app.request('/api/config', { method: 'PUT', headers, body: JSON.stringify({ 'output.streamBufferMs': 3000, 'output.streamIntervalMs': 1500, 'output.streamMinDeltaChars': 12 }) });
+    expect(ok.status).toBe(200);
+    expect(db.prepare("SELECT value_json FROM config_kv WHERE key='output.streamBufferMs'").pluck().get()).toBe('3000');
+    // config_kv 的每一行都会成为下次启动的覆盖层：设置页写进去的键必须仍然过得了 configSchema。
+    expect(configSchema.parse({ output: { streamBufferMs: 3000 } }).output.streamBufferMs).toBe(3000);
+    const invalid = await app.request('/api/config', { method: 'PUT', headers, body: JSON.stringify({ 'output.streamIntervalMs': 0 }) });
+    expect(invalid.status).toBe(400);
+    expect(db.prepare("SELECT value_json FROM config_kv WHERE key='output.streamIntervalMs'").pluck().get()).toBe('1500');
+    closeDatabase(db);
+  });
+
   it('persists prompt edits with a unified diff revision', async () => {
     const { app, db, headers } = harness();
     const response = await app.request('/api/prompts/assist:global', { method: 'PUT', headers, body: JSON.stringify({ content: '# Assist\n\nupdated\n' }) });

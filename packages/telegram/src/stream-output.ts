@@ -4,6 +4,8 @@ import { holdReply, sendWithFallback, splitTelegramText } from './output.js';
 export interface StreamOutputOptions {
   mode: 'stream' | 'once';
   replyDelayMs: number;
+  /** 首个 chunk 到达后再攒这么久才发第一条，见下面 `consume` 里两道窗口的注释。 */
+  bufferMs: number;
   intervalMs: number;
   minDeltaChars: number;
   maxChars: number;
@@ -31,6 +33,7 @@ export class TelegramOutput {
     let interrupted = false;
     let lastEdit = 0;
     let lastRenderedLength = 0;
+    let firstChunkAt = 0;
     const typing = setInterval(() => void this.bot.api.sendChatAction(this.chatId, 'typing').catch(() => undefined), 4000);
     const edit = async (messageId: number, rendered: string): Promise<void> => {
       try { await this.bot.api.editMessageText(this.chatId, messageId, rendered, { parse_mode: 'MarkdownV2' }); }
@@ -57,9 +60,14 @@ export class TelegramOutput {
         if (step.done) break;
         text += step.value;
         if (this.options.mode === 'once') continue;
-        // 延迟窗口内只攒不发。攒到的文本不会丢：流在窗口内就结束时下面走 send()，它自己也会等满。
-        if (Date.now() - this.since < this.options.replyDelayMs) continue;
+        if (!firstChunkAt) firstChunkAt = Date.now();
+        // 两道窗口，都只攒不发：replyDelayMs 防秒回，锚点是用户那条消息；bufferMs 攒首帧，
+        // 锚点是上游第一个 chunk。只看前者时，模型思考一旦超过 replyDelayMs（几乎总是如此），
+        // 首个 chunk 就会被原样发出去 —— 用户先收到一条只有一个字的消息，剩下的全靠编辑补，
+        // 这正是「先发一个字再编辑」的来源。攒到的文本不会丢：流在窗口内就结束时下面走 send()。
+        if (Date.now() < Math.max(this.since + this.options.replyDelayMs, firstChunkAt + this.options.bufferMs)) continue;
         const rendered = splitTelegramText(text, this.options.maxChars);
+        const before = messageIds.length;
         while (messageIds.length < rendered.length) {
           const index = messageIds.length;
           const sent = await deliver(() => sendWithFallback(this.bot.api, this.chatId, rendered[index]!, index === 0 && replyToMessageId ? { reply_parameters: { message_id: replyToMessageId } } : {}));
@@ -67,6 +75,12 @@ export class TelegramOutput {
           messageIds.push(sent.message_id);
         }
         const current = rendered.at(-1)!;
+        // 刚发出去的那条消息已经带着全文，紧接着再编辑一次是纯粹的抖动（还白占一次编辑配额）：
+        // 把它算作一次「刷新」，下一次编辑照样要等满 intervalMs。
+        if (messageIds.length > before) { lastRenderedLength = [...current].length; lastEdit = Date.now(); continue; }
+        // 首条压根没发出去（限流、被拉黑）时没有可编辑的目标：下一个 chunk 重试发送，而不是拿
+        // undefined 当 message_id 去调 editMessageText。
+        if (!messageIds.length) continue;
         if (Date.now() - lastEdit >= this.options.intervalMs && [...current].length - lastRenderedLength >= this.options.minDeltaChars) {
           await deliver(() => edit(messageIds.at(-1)!, current));
           lastRenderedLength = [...current].length;

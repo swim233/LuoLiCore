@@ -930,6 +930,12 @@
               "maximum": 30000,
               "default": 2000
             },
+            "streamBufferMs": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 30000,
+              "default": 2000
+            },
             "streamIntervalMs": {
               "type": "integer",
               "exclusiveMinimum": 0,
