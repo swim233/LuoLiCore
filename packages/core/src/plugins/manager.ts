@@ -26,7 +26,8 @@ export class PluginManager {
   #reconciling = false;
   #pendingRescan = false;
 
-  constructor(private readonly db: Sqlite, readonly directory: string, private readonly timeoutMs: number, private readonly disableAfter: number, private readonly order: readonly string[] = [], private registry?: ToolRegistry) {}
+  constructor(private readonly db: Sqlite, readonly directory: string, private readonly timeoutMs: number, private readonly disableAfter: number, private readonly order: readonly string[] = [], private registry?: ToolRegistry,
+    private readonly onAutoDisable?: (name: string, error: string) => void) {}
   bindRegistry(registry: ToolRegistry): void { this.registry = registry; }
 
   async reconcile(): Promise<void> {
@@ -98,7 +99,11 @@ export class PluginManager {
         plugin.errors += 1;
         if (plugin.errors >= this.disableAfter) {
           plugin.enabled = false;
-          this.db.prepare('UPDATE plugins SET enabled=0,load_error=?,updated_at=? WHERE name=?').run(error instanceof Error ? error.message : String(error), Date.now(), plugin.name);
+          const message = error instanceof Error ? error.message : String(error);
+          this.db.prepare('UPDATE plugins SET enabled=0,load_error=?,updated_at=? WHERE name=?').run(message, Date.now(), plugin.name);
+          // 自动禁用是「运维不点就永远不会恢复」的状态：不告警的话，一个 plugin 悄悄下线，
+          // 用户只看到某个能力没了（`alerts.on` 的 plugin_auto_disabled）。
+          this.onAutoDisable?.(plugin.name, message);
         }
       }
     }

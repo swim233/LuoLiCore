@@ -72,10 +72,31 @@ const BUILTIN_REDACTIONS = [
 const STRUCTURAL_FIELDS = new Set(['key', 'kind', 'traceId', 'spanId', 'parentSpanId', 'chatId', 'userId']);
 const SENSITIVE_FIELD = /(^|_|\b)(api[_-]?key|apikey|secret|token|password|passwd|credential)s?($|_|\b)/i;
 
-export function redact<T>(value: T, secrets: string[] = []): T {
+/**
+ * @param extra `logs.redactPatterns`：**追加**到内置规则上的正则源串，不替换。写坏的正则整条跳过
+ *              而不是让脱敏整体失效 —— 一条打错的规则不该把 bot token 放出去。
+ */
+/** 编译结果按源串缓存：脱敏在每条日志上跑，每次重新 new RegExp 是纯浪费。 */
+const patternCache = new Map<string, RegExp | null>();
+function compilePatterns(sources: readonly string[]): RegExp[] {
+  const compiled: RegExp[] = [];
+  for (const source of sources) {
+    if (!patternCache.has(source)) {
+      try { patternCache.set(source, new RegExp(source, 'g')); }
+      catch { patternCache.set(source, null); }
+    }
+    const pattern = patternCache.get(source);
+    if (pattern) compiled.push(pattern);
+  }
+  return compiled;
+}
+
+export function redact<T>(value: T, secrets: string[] = [], extra: readonly string[] = []): T {
+  const extraPatterns = compilePatterns(extra);
   const sanitizeString = (input: string): string => {
     let output = input;
     for (const pattern of BUILTIN_REDACTIONS) output = output.replace(pattern, '«redacted»');
+    for (const pattern of extraPatterns) output = output.replace(pattern, '«redacted»');
     for (const secret of secrets.filter(Boolean)) output = output.replaceAll(secret, '«redacted»');
     return output;
   };

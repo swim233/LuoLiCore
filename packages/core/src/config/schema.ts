@@ -51,7 +51,7 @@ export const HOT_RELOADABLE_CONFIG_KEYS = [
   'telegram.allowBots', 'telegram.strictCommandSuffix',
   'access.defaultUserRole', 'access.defaultChatRole', 'access.archiveBlocked',
   'trigger',
-  'context.limit', 'context.hardCapRatio', 'context.background', 'context.rebase.injectNotice', 'context.tokenRatioAlpha',
+  'context.limit', 'context.hardCapRatio', 'context.background', 'context.rebase', 'context.tokenRatioAlpha', 'context.cacheCommits',
   // 合并窗口是 bot.ts 的 config Proxy 每条消息现读的，改完下一条消息就按新值走。
   'concurrency.turnTimeoutMs', 'concurrency.coalesceSameUserMs',
   // 提示词装配拿的是 `turn.config`（每轮 perChatConfig 重算一次），改完下一轮生效。
@@ -59,6 +59,8 @@ export const HOT_RELOADABLE_CONFIG_KEYS = [
   // 名字只在两处露面：WebUI 的品牌位（每次 config.changed 重拉即变）与启动日志那一行
   // （那行是启动时盖的章，不会追溯改写）。
   'general.name',
+  // 取消时是否提交半截产出，`abortTurn` 从本轮 `turn.config` 读。
+  'cancel.commitPartial',
   'agent.main', 'agent.agents', 'agent.maxConcurrentSubagents', 'agent.progressThrottleMs',
   // 四项都是每轮从 `turn.config` 现读的（runtime.ts 的 wrappedFor / subagent 的 provider 块），
   // 改完下一轮生效；在途那一轮沿用开轮时的值。
@@ -68,15 +70,19 @@ export const HOT_RELOADABLE_CONFIG_KEYS = [
   // 出网放行开关每次探测现读（app.ts 的 probeProvider 调用点、ModelCatalog 的 options getter）。
   // 它是「出事时运维会去点的那个开关」那一类，冻住等于界面说改成功了、下一次探测照样打私网。
   'provider.allowPrivateBaseUrl',
-  // memory_write 读的是本轮那份 turn.config（perChatConfig 每轮重算），不再是启动快照（docs/22 · D-CFG-01）。
-  'memory.pubWriteMinRole',
+  // 三项都是 memory_write 从本轮 `turn.config` 读的（`approvalFor` 与 queueWrite 各一次）。
+  'memory.pubWriteMinRole', 'memory.pubWriteRequiresApproval', 'memory.requireSourceTag',
   // archive 的四个 limit 走 `inputSchemaFor(context)`，每轮从 `turn.config` 取一次 —— 改完下一轮
   // 模型看到的 schema 就是新的上限。
   'tools.maxRegistered', 'tools.maxCallsPerTurn', 'tools.maxConsecutiveErrors', 'tools.defaultTimeoutMs', 'tools.overrides', 'tools.exec', 'tools.tg', 'tools.archive',
+  // 这三项各自现读：宿主 fs 放行在 `filesFor` 里取 snapshot，域名策略在 web_fetch 里取 turn.config。
+  // `tools.fs` / `tools.web` 的其余键仍是启动快照，所以只列这三条而不是整段。
+  'tools.fs.allowHostFsForOwner', 'tools.web.allowlist', 'tools.web.denylist',
   'approval.enabled', 'approval.ttlMs', 'approval.rules', 'approval.skipForOwner', 'approval.rememberWithinTurn',
   // captureBodies 是每轮从 turn.config 现读的（runtime.ts 的 bodyForLog、/api/turns/:id/detail），
   // 改完下一轮就生效。漏在白名单外时 WebUI 会对着排障时最常翻的这个开关说「需重启」。
-  'sandbox', 'skills.defaultMinRole', 'quota', 'logs.level', 'logs.captureBodies',
+  // AlertDispatcher 每次 raise() 都现读 `alerts` 整段（开关、去重窗口、webhook、事件白名单）。
+  'sandbox', 'skills.defaultMinRole', 'quota', 'alerts', 'logs.level', 'logs.captureBodies', 'logs.redactPatterns',
   // mcp 整段曾在这里，但 `mcp.healthCheckCron` 是 `scheduler.add(config.mcp.healthCheckCron, …)`
   // 在启动时拿走的，Scheduler 也没有重配入口 —— 整段标热更新等于对着那一项说谎（docs/20 · W-CFG-02）。
   // 这三项才是真的按 getter 读（`McpManager` 的 config getter + config.changed 后的 reconcile）。
@@ -90,44 +96,44 @@ export const HOT_RELOADABLE_CONFIG_KEYS = [
   'output',
 ] as const;
 
+/**
+ * 仍然「存得下但没人读」的键。第五轮把这张表从 65 条压到 13 条：25 条接线、5 条从 schema 摘除、
+ * 22 条随告警/出网/输出/记忆/日志几组功能接线。**剩下的每一条都写明为什么留着**——
+ * 「暂时没做」和「做不了 / 不该在这一层做」是两回事，后者得说出来，否则下一轮又要重新判一次。
+ */
 export const KNOWN_UNIMPLEMENTED_CONFIG_KEYS = [
-  // 运行时从来没有读过它：doc 11 说「仅用于日志与 WebUI 标题」，但两处都没接线（docs/20 · W-CFG-02）。
+  // webhook 模式整体没实现。`main.ts` 在 `mode !== 'polling'` 时**显式抛错**，所以不会出现
+  // 「配成 webhook 之后静默收不到消息」那种形态（docs/19 · R-CFG-03）。这三个键跟着那个模式走。
   'telegram.webhook.url',
   'telegram.webhook.path',
   'telegram.webhook.secretToken',
+  // 「消息被编辑时在下一轮 RUNTIME 提示」要把「上一轮之后有哪些编辑」一路带进提示词装配，
+  // 而 RUNTIME 块的输入现在只有 turn 与 config。接它得先给 RuntimeTurnContext 加一块会话级
+  // 的瞬时状态 —— 那是上下文引擎的表面，不该为一条提示语顺手改。
   'telegram.notifyEdits',
-  // 编辑消息永远不开新轮次（docs/20 · W-TG-05）。开关留着是为了未来兼容，但当前一律按背景消息归档。
+  // 编辑消息永远不开新轮次（docs/20 · W-TG-05）。真要实现得先定「编辑触发的那一轮跟原轮次
+  // 什么关系」——重开一轮？改写历史？两种语义都会动到 rebase 与认领水位。
   'trigger.ignoreEditedAsTrigger',
-  'context.rebase.markMeta',
-  'context.cacheCommits',
-  'cancel.commitPartial',
-  'memory.pubWriteRequiresApproval',
+  // 记忆压缩**本身**没实现：`memory.compactCron` 那个定时任务只统计超过软上限的文档数，
+  // 没有任何地方产出「压缩结果」。给一个不存在的产物配「是否自动应用」是假开关。
   'memory.autoApplyCompaction',
-  'memory.requireSourceTag',
+  // `ask_parent` 的父 agent 仲裁没实现（`builtins.ts` 返回 `ask_parent_not_implemented`，
+  // 按「摘除比伪造安全」不拿默认值伪造答复）。这两个键是那件事的配置面，docs/14 A7 也还没确认。
   'agent.askArbiter',
   'agent.askEscalateToUser',
-  'tools.fs.allowHostFsForOwner',
+  // 「抓回来的网页先用某个别名摘要再进上下文」要在 web_fetch 里插一次模型调用：计费、配额、
+  // 取消信号、失败降级都得跟着走一遍。那是一个特性，不是一行读取。
   'tools.web.summarizeWithAlias',
-  'tools.web.allowlist',
-  'tools.web.denylist',
-  'output.flushOnSentence',
-  'output.parseMode',
-  'output.typingWhileWorking',
-  'output.placeholderAfterMs',
-  'output.maxMentions',
+  // 相册合并要在触发路径上按 `media_group_id` 缓冲 update 再统一开轮次，与并发、认领水位、
+  // 去重都有交互。`concurrency.coalesceSameUserMs` 做的是按人合并，这个是按相册合并。
   'media.groupDebounceMs',
+  // 换 FTS tokenizer 要追加迁移重建 `messages_fts`（迁移文件提交后不可修改），而「trigram 还是
+  // jieba」本身是 docs/14 §2 Q3 的未决问题 —— 先定方案再动表。
   'db.ftsTokenizer',
-  'logs.gzipAfterDays',
-  'logs.redactPatterns',
-  'quota.onExceeded.notifyOwner',
-  'quota.warnAtRatio',
-  'webui.enabled',
+  // 这两个是 WebUI 部署形态的键（子路径挂载、对外可见 URL）。`publicUrl` 的唯一消费者是
+  // 尚未实现的 `/webui` 一次性登录链接（docs/09 §2.3），两者要一起做。
   'webui.basePath',
   'webui.publicUrl',
-  'alerts.notifyOwner',
-  'alerts.dedupeMinutes',
-  'alerts.webhookUrl',
-  'alerts.on',
 ] as const;
 
 

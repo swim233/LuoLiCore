@@ -40,8 +40,10 @@ describe('GET /api/quota', () => {
     const user = body.data.counters.find((row) => row.scope === 'user' && row.current)!;
     expect(user).toMatchObject({ limit: 2, limitApprox: true, role: 'trusted', label: '小明' });
     expect(body.data.counters.filter((row) => !row.current)).toHaveLength(1);
-    // 未接线的键名由服务端转发，界面不再维护第二份清单。
-    expect(body.data.unimplemented).toContain('quota.warnAtRatio');
+    // 未接线的键名由服务端转发，界面不再维护第二份清单。第五轮把 quota 那几个键全接了
+    // （`warnAtRatio` 与 `onExceeded.notifyOwner` 各有告警链路上的落点），所以这里现在是空的 ——
+    // 断言的是**这份清单仍然由服务端算**，不是「它永远非空」。
+    expect(body.data.unimplemented).toEqual([]);
     expect(body.data.unimplemented.every((key) => key.startsWith('quota.'))).toBe(true);
     closeDatabase(db);
   });

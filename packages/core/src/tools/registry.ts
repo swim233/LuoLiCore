@@ -28,6 +28,8 @@ export interface RegisteredTool<I = unknown> {
   timeoutMs?: number | null;
   available?(role: Role, context: ToolExecutionContext): boolean;
   approvalTargetExists?(input: unknown, context: ToolExecutionContext): boolean;
+  /** 按本轮配置把自己抬进审批。只能抬高不能放低，见 `execute` 里的合并规则。 */
+  approvalFor?(input: I, context: ToolExecutionContext): ApprovalPolicy | null;
   execute(input: I, context: ToolExecutionContext): Promise<object> | object;
 }
 
@@ -168,9 +170,14 @@ export class ToolRegistry {
     if (state.calls >= this.#limits().maxCallsPerTurn) return { ok: false, error: 'tool_call_limit_exceeded' };
     const parsed = (tool.inputSchemaFor?.(context) ?? tool.inputSchema).safeParse(rawInput);
     if (!parsed.success) return { ok: false, error: 'invalid_input', hint: parsed.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ') };
-    const decision = tool.policy.approval === 'always'
+    // `approvalFor` 让工具按**本轮配置**把自己抬进审批（`memory.pubWriteRequiresApproval` 就是
+    // 这么接的）。它只能抬高，不能放低 —— 否则一个工具就能把自己从注册期定死的审批档位里摘出去。
+    const escalated = tool.approvalFor?.(parsed.data, context);
+    const effective = escalated === 'always' || tool.policy.approval === 'always' ? 'always'
+      : escalated === 'conditional' || tool.policy.approval === 'conditional' ? 'conditional' : tool.policy.approval;
+    const decision = effective === 'always'
       ? { needed: true, risk: 'high' as const }
-      : tool.policy.approval === 'conditional'
+      : effective === 'conditional'
         ? this.#approvalRules().evaluate(tool, parsed.data, context)
         : { needed: false, risk: 'low' as const };
     if (decision.needed) {

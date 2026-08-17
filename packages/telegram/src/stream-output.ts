@@ -9,7 +9,18 @@ export interface StreamOutputOptions {
   intervalMs: number;
   minDeltaChars: number;
   maxChars: number;
+  /** `output.parseMode`：编辑与发送时用的解析模式。`none` 时一律发纯文本。 */
+  parseMode?: 'MarkdownV2' | 'HTML' | 'none';
+  /** `output.flushOnSentence`：攒到句末标点就提前刷一次，不等满 `intervalMs`。 */
+  flushOnSentence?: boolean;
+  /** `output.typingWhileWorking`：生成期间是否持续发 typing。 */
+  typingWhileWorking?: boolean;
+  /** `output.placeholderAfterMs`：>0 且这么久还没有第一个 chunk 时，先发一条占位消息顶住。 */
+  placeholderAfterMs?: number;
 }
+
+/** 句末：中英文的句号问号叹号与换行。判据故意保守 —— 逗号也刷会让编辑次数回到没有节流的水平。 */
+const SENTENCE_END = /[。！？!?…\n]\s*$|[.](\s|$)/;
 
 export class TelegramOutput {
   constructor(private readonly bot: Bot, private readonly chatId: string, private readonly options: StreamOutputOptions, private readonly onDeliveryError?: (error: unknown) => void,
@@ -35,10 +46,16 @@ export class TelegramOutput {
     let lastEdit = 0;
     let lastRenderedLength = 0;
     let firstChunkAt = 0;
-    const typing = setInterval(() => void this.bot.api.sendChatAction(this.chatId, 'typing').catch(() => undefined), 4000);
+    // `output.typingWhileWorking`：关掉之后整轮一次 typing 都不发。默认开 —— 没有它，一次
+    // 三十秒的工具调用在用户那边和「bot 死了」完全一样。
+    const typing = this.options.typingWhileWorking === false ? null
+      : setInterval(() => void this.bot.api.sendChatAction(this.chatId, 'typing').catch(() => undefined), 4000);
+    const parseMode = this.options.parseMode ?? 'MarkdownV2';
     const edit = async (messageId: number, rendered: string): Promise<void> => {
-      try { await this.bot.api.editMessageText(this.chatId, messageId, rendered, { parse_mode: 'MarkdownV2' }); }
-      catch (error) {
+      try {
+        if (parseMode === 'none') { await this.bot.api.editMessageText(this.chatId, messageId, rendered); return; }
+        await this.bot.api.editMessageText(this.chatId, messageId, rendered, { parse_mode: parseMode });
+      } catch (error) {
         const description = error instanceof Error ? error.message : String(error);
         if (/message is not modified|429/i.test(description)) return;
         if (/parse entities/i.test(description)) { await this.bot.api.editMessageText(this.chatId, messageId, rendered); return; }
@@ -51,8 +68,20 @@ export class TelegramOutput {
       try { return await action(); }
       catch (error) { this.onDeliveryError?.(error); return null; }
     };
+    // `output.placeholderAfterMs`：上游迟迟不吐第一个 chunk 时先占个位。这条消息就是后面被
+    // 编辑的那一条 —— 另发一条会让用户先看到「正在想…」再看到答案分两条躺在那里。
+    let placeholder: ReturnType<typeof setTimeout> | null = null;
+    const placeholderAfterMs = this.options.placeholderAfterMs ?? 0;
+    if (this.options.mode === 'stream' && placeholderAfterMs > 0) {
+      placeholder = setTimeout(() => void (async () => {
+        if (messageIds.length || text) return;
+        const sent = await deliver(() => sendWithFallback(this.bot.api, this.chatId, '…', replyToMessageId ? { reply_parameters: { message_id: replyToMessageId } } : {}));
+        if (sent) { messageIds.push(sent.message_id); lastRenderedLength = 1; lastEdit = Date.now(); }
+      })(), placeholderAfterMs);
+      placeholder.unref?.();
+    }
     try {
-      await deliver(() => this.bot.api.sendChatAction(this.chatId, 'typing'));
+      if (this.options.typingWhileWorking !== false) await deliver(() => this.bot.api.sendChatAction(this.chatId, 'typing'));
       const iterator = stream[Symbol.asyncIterator]();
       for (;;) {
         let step: IteratorResult<string>;
@@ -67,7 +96,10 @@ export class TelegramOutput {
         // 首个 chunk 就会被原样发出去 —— 用户先收到一条只有一个字的消息，剩下的全靠编辑补，
         // 这正是「先发一个字再编辑」的来源。攒到的文本不会丢：流在窗口内就结束时下面走 send()。
         if (Date.now() < Math.max(this.since + this.options.replyDelayMs, firstChunkAt + this.options.bufferMs)) continue;
-        if (messageIds.length && Date.now() - lastEdit < this.options.intervalMs) continue;
+        // `output.flushOnSentence`：一句话说完就刷，不等满 intervalMs。代价是编辑次数上升
+        // （docs/14 T10），收益是长回复读起来是一句一句出来的，而不是一段一段跳。
+        const atSentenceEnd = this.options.flushOnSentence === true && SENTENCE_END.test(text);
+        if (messageIds.length && !atSentenceEnd && Date.now() - lastEdit < this.options.intervalMs) continue;
         const rendered = splitTelegramText(text, this.options.maxChars);
         const before = messageIds.length;
         while (messageIds.length < rendered.length) {
@@ -83,14 +115,15 @@ export class TelegramOutput {
         // 首条压根没发出去（限流、被拉黑）时没有可编辑的目标：下一个 chunk 重试发送，而不是拿
         // undefined 当 message_id 去调 editMessageText。
         if (!messageIds.length) continue;
-        if (Date.now() - lastEdit >= this.options.intervalMs && [...current].length - lastRenderedLength >= this.options.minDeltaChars) {
+        if ((atSentenceEnd || Date.now() - lastEdit >= this.options.intervalMs) && [...current].length - lastRenderedLength >= this.options.minDeltaChars) {
           await deliver(() => edit(messageIds.at(-1)!, current));
           lastRenderedLength = [...current].length;
           lastEdit = Date.now();
         }
       }
     } finally {
-      clearInterval(typing);
+      if (typing) clearInterval(typing);
+      if (placeholder) clearTimeout(placeholder);
     }
     if (this.options.mode === 'once' || !messageIds.length) return { text, interrupted, messageIds: await this.send(text + (interrupted ? '\n\n（生成中断）' : ''), replyToMessageId) };
     const rendered = splitTelegramText(text + (interrupted ? '\n\n（生成中断）' : ''), this.options.maxChars);

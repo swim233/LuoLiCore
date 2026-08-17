@@ -86,7 +86,8 @@ export class Sandbox {
    * 想切断执行类工具，接口返回 200、`GET /api/sandbox` 也显示已改，而 bash/python 照跑不误
    * （docs/20 · W-CFG-02）。
    */
-  constructor(config: SandboxConfig | (() => SandboxConfig), dockerAvailable?: boolean, inContainer?: boolean, onWarn?: (message: string) => void) {
+  constructor(config: SandboxConfig | (() => SandboxConfig), dockerAvailable?: boolean, inContainer?: boolean, onWarn?: (message: string) => void,
+    private readonly onUnavailable?: (reason: string, role: Role) => void) {
     this.#cfg = typeof config === 'function' ? config : () => config;
     this.#dockerAvailable = dockerAvailable ?? null;
     this.#inContainer = inContainer ?? detectContainer();
@@ -162,7 +163,12 @@ export class Sandbox {
   async run(command: string, role: Role, workspace: string, abortSignal: AbortSignal, timeoutMs = this.#cfg().defaultTimeoutMs, turnId = 'adhoc'): Promise<SandboxResult> {
     if (abortSignal.aborted) return { ok: false, exitCode: null, stdout: '', stderr: 'cancelled', truncated: false, durationMs: 0, killed: true, oom: false };
     const plan = this.plan(role, workspace);
-    if (!plan.allowed) return { ok: false, exitCode: null, stdout: '', stderr: plan.reason ?? 'denied', truncated: false, durationMs: 0, killed: false, oom: false };
+    if (!plan.allowed) {
+      // 「沙箱不可用而有非 owner 请求执行」是 docs/10 §6 那六类告警之一：对用户表现为工具莫名
+      // 失败，而运维那边没有任何信号。owner 走 bypass 不算 —— 那是配置本来就允许的形态。
+      if (role !== 'owner') this.onUnavailable?.(plan.reason ?? 'denied', role);
+      return { ok: false, exitCode: null, stdout: '', stderr: plan.reason ?? 'denied', truncated: false, durationMs: 0, killed: false, oom: false };
+    }
     const mounted = plan.mode === 'docker' ? this.#hostPath(workspace) : workspace;
     if (mounted === null) return { ok: false, exitCode: null, stdout: '', stderr: `workspace 不在 sandbox.workspaceDir 之下，无法换算成宿主路径：${workspace}`, truncated: false, durationMs: 0, killed: false, oom: false };
     // 建目录放在放行之后：被拒的调用不该在盘上留下痕迹。容器内建的目录经 ./data 绑定挂载

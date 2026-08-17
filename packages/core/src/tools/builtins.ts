@@ -3,6 +3,7 @@ import { readFileSync, statSync } from 'node:fs';
 import type { AgentManager, Config, ContextEngine, FileTools, MemoryStore, ModelRegistry, QuotaGuard, QuotaReservation, Sandbox, SkillLoader, ToolRegistry, UsageLedger, LogSink } from '@luoli/core';
 import { DEFAULT_WEB_RETRY, builtinPolicy, runSubAgent, webFetch, webSearch, type WebRetryOptions } from '@luoli/core';
 import type { ArchiveRepository } from '@luoli/db';
+import type { Role } from '@luoli/shared';
 import type { ToolExecutionContext } from './registry.js';
 
 /** 一次投递的落点。thread 必须跟着走，否则话题群里的追发会掉到「General」去。 */
@@ -66,7 +67,7 @@ function resolveOutgoingFile(context: ToolExecutionContext, files: FileTools, pa
   return { ok: true, absolute };
 }
 
-export function registerBuiltins(registry: ToolRegistry, dependencies: { db: import('@luoli/db').Sqlite; filesFor: (workspace: string) => FileTools; sandbox: Sandbox; archive: ArchiveRepository; context: ContextEngine; memory: MemoryStore; skills: SkillLoader; agents: AgentManager; models: ModelRegistry; ledger: UsageLedger; log: LogSink; quota?: QuotaGuard; telegram: TelegramToolBridge | null; maxWebBytes: number; maxAsksPerRun?: number; askTimeoutMs?: number; web?: WebRetryOptions; webSearch?: { provider: '' | 'brave' | 'serper' | 'tavily'; apiKey: string } }): void {
+export function registerBuiltins(registry: ToolRegistry, dependencies: { db: import('@luoli/db').Sqlite; filesFor: (workspace: string, role: Role) => FileTools; sandbox: Sandbox; archive: ArchiveRepository; context: ContextEngine; memory: MemoryStore; skills: SkillLoader; agents: AgentManager; models: ModelRegistry; ledger: UsageLedger; log: LogSink; quota?: QuotaGuard; telegram: TelegramToolBridge | null; maxWebBytes: number; maxAsksPerRun?: number; askTimeoutMs?: number; web?: WebRetryOptions; webSearch?: { provider: '' | 'brave' | 'serper' | 'tavily'; apiKey: string } }): void {
   const web = dependencies.web ?? DEFAULT_WEB_RETRY;
   /** 每个 agent_run 上一次向 SSE 广播进度的时刻（`agent.progressThrottleMs`）。 */
   const progressBroadcast = new Map<string, number>();
@@ -94,7 +95,7 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
   const webBudgetMs = (web.retries + 1) * web.timeoutMs + 5000;
   registry.register({ name: 'read_file', description: '读取工作目录或 skill:// 资源，支持 offset/limit 分页。', inputSchema: z.object({ path: z.string(), offset: z.number().int().nonnegative().optional(), limit: z.number().int().positive().optional() }), policy: builtinPolicy('read_file'), sourcePriority: 100, untrustedOutput: true,
     execute: (input, context) => {
-      if (!input.path.startsWith('skill://')) return dependencies.filesFor(context.workspace).read(input.path, input.offset, input.limit);
+      if (!input.path.startsWith('skill://')) return dependencies.filesFor(context.workspace, context.turn.effectiveRole).read(input.path, input.offset, input.limit);
       const path = dependencies.skills.resolveResource(input.path, context.turn.effectiveRole);
       const buffer = readFileSync(path);
       const offset = input.offset ?? 0;
@@ -103,21 +104,21 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
       return { ok: true, path: input.path, content, offset, bytes: Buffer.byteLength(content), truncated: offset + limit < buffer.length, nextOffset: offset + limit < buffer.length ? offset + limit : null };
     } });
   registry.register({ name: 'list_dir', description: '列出工作目录。', inputSchema: z.object({ path: z.string().default('.'), depth: z.number().int().min(1).max(5).default(1) }), policy: builtinPolicy('list_dir'), sourcePriority: 100,
-    execute: (input, context) => dependencies.filesFor(context.workspace).list(input.path, input.depth) });
+    execute: (input, context) => dependencies.filesFor(context.workspace, context.turn.effectiveRole).list(input.path, input.depth) });
   registry.register({ name: 'glob', description: '按 glob 模式查找工作目录文件。', inputSchema: z.object({ pattern: z.string(), path: z.string().default('.') }), policy: builtinPolicy('glob'), sourcePriority: 100, untrustedOutput: true,
-    execute: (input, context) => dependencies.filesFor(context.workspace).glob(input.pattern, input.path) });
+    execute: (input, context) => dependencies.filesFor(context.workspace, context.turn.effectiveRole).glob(input.pattern, input.path) });
   registry.register({ name: 'grep', description: '以正则搜索工作目录文本。', inputSchema: z.object({ pattern: z.string(), path: z.string().default('.'), ignoreCase: z.boolean().default(false) }), policy: builtinPolicy('grep'), sourcePriority: 100, untrustedOutput: true,
-    execute: (input, context) => dependencies.filesFor(context.workspace).grep(input.pattern, input.path, input.ignoreCase) });
+    execute: (input, context) => dependencies.filesFor(context.workspace, context.turn.effectiveRole).grep(input.pattern, input.path, input.ignoreCase) });
   registry.register({ name: 'write_file', description: '原子写入工作目录文件，覆盖前自动备份。', inputSchema: z.object({ path: z.string(), content: z.string() }), policy: builtinPolicy('write_file'), sourcePriority: 100,
-    approvalTargetExists: (input, context) => dependencies.filesFor(context.workspace).exists((input as { path: string }).path),
-    execute: (input, context) => dependencies.filesFor(context.workspace).write(input.path, input.content) });
+    approvalTargetExists: (input, context) => dependencies.filesFor(context.workspace, context.turn.effectiveRole).exists((input as { path: string }).path),
+    execute: (input, context) => dependencies.filesFor(context.workspace, context.turn.effectiveRole).write(input.path, input.content) });
   registry.register({ name: 'edit_file', description: '以唯一 oldString 修改文件。', inputSchema: z.object({ path: z.string(), oldString: z.string(), newString: z.string(), replaceAll: z.boolean().default(false) }), policy: builtinPolicy('edit_file'), sourcePriority: 100,
-    execute: (input, context) => dependencies.filesFor(context.workspace).edit(input.path, input.oldString, input.newString, input.replaceAll) });
+    execute: (input, context) => dependencies.filesFor(context.workspace, context.turn.effectiveRole).edit(input.path, input.oldString, input.newString, input.replaceAll) });
   registry.register({ name: 'delete_file', description: '将文件移入回收站，不物理删除。', inputSchema: z.object({ path: z.string() }), policy: builtinPolicy('delete_file'), sourcePriority: 100,
-    execute: (input, context) => dependencies.filesFor(context.workspace).remove(input.path) });
+    execute: (input, context) => dependencies.filesFor(context.workspace, context.turn.effectiveRole).remove(input.path) });
   registry.register({ name: 'move_file', description: '移动工作目录文件，不覆盖目标。', inputSchema: z.object({ from: z.string(), to: z.string() }), policy: builtinPolicy('move_file'), sourcePriority: 100,
-    approvalTargetExists: (input, context) => dependencies.filesFor(context.workspace).exists((input as { to: string }).to),
-    execute: (input, context) => dependencies.filesFor(context.workspace).move(input.from, input.to) });
+    approvalTargetExists: (input, context) => dependencies.filesFor(context.workspace, context.turn.effectiveRole).exists((input as { to: string }).to),
+    execute: (input, context) => dependencies.filesFor(context.workspace, context.turn.effectiveRole).move(input.from, input.to) });
   // `timeoutMs: null` = 这个工具自己管超时。sandbox.run 会按 `tools.exec.maxTimeoutMs`（默认 300s）
   // kill 进程，比 `tools.defaultTimeoutMs` 长得多；套上兜底那道 race 只会把正常的长命令砍成
   // `tool_timeout`，而进程还在后台跑着。
@@ -154,9 +155,16 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
   const memoryWriteSchema = (isPrivate: boolean) => z.object({ scope: isPrivate ? z.enum(['pubmemory', 'primemory']) : z.enum(['pubmemory']), section: z.string(), content: z.string().max(2000), reason: z.string() });
   registry.register({ name: 'memory_write', description: '把长期有效事实写入公开或当前用户私有记忆，一轮结束时批量落盘。', inputSchema: memoryWriteSchema(true),
     inputSchemaFor: (context) => memoryWriteSchema(context.turn.isPrivate), policy: builtinPolicy('memory_write'), sourcePriority: 100,
-    execute: (input, context) => dependencies.memory.queueWrite({ scope: input.scope, subject: input.scope === 'primemory' ? context.turn.initiatorUserId : null,
-      section: input.section, lines: input.content.split('\n').filter(Boolean), actor: 'model', turnId: context.turn.turnId,
-      chatId: context.turn.chatId, userId: context.turn.initiatorUserId }, context.turn.effectiveRole, context.turn.isPrivate, (context.turn.config as Readonly<Config>).memory.pubWriteMinRole) });
+    // `memory.pubWriteRequiresApproval`：全局单份 PUBMEMORY 会流到所有会话与所有私聊（docs/14 T4），
+    // 开了它之后每一次公开记忆写入都要 owner 点头。私有记忆不受管 —— 那是写给用户自己的。
+    approvalFor: (input, context) => input.scope === 'pubmemory' && (context.turn.config as Readonly<Config>).memory.pubWriteRequiresApproval ? 'always' : null,
+    execute: (input, context) => {
+      const memory = (context.turn.config as Readonly<Config>).memory;
+      return dependencies.memory.queueWrite({ scope: input.scope, subject: input.scope === 'primemory' ? context.turn.initiatorUserId : null,
+        section: input.section, lines: input.content.split('\n').filter(Boolean), actor: 'model', turnId: context.turn.turnId,
+        chatId: context.turn.chatId, userId: context.turn.initiatorUserId, requireSourceTag: memory.requireSourceTag },
+      context.turn.effectiveRole, context.turn.isPrivate, memory.pubWriteMinRole);
+    } });
   registry.register({ name: 'load_skill', description: '渐进式载入 Skill 正文与资源清单。', inputSchema: z.object({ name: z.string() }), policy: builtinPolicy('load_skill'), sourcePriority: 80,
     execute: (input, context) => {
       const loaded = (context.turn.loadedSkills ??= new Set());
@@ -250,7 +258,7 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
     available: () => Boolean(dependencies.telegram), execute: async (input, context) => claimExtraMessage(context) ?? dependencies.telegram!.sendMessage(target(context), input.text) });
   registry.register({ name: 'send_photo', description: '把工作目录内的图片发到当前会话。', inputSchema: z.object({ photo: z.string(), caption: z.string().optional() }), policy: builtinPolicy('send_photo'), sourcePriority: 100, timeoutMs: UPLOAD_TIMEOUT_MS,
     available: () => Boolean(dependencies.telegram), execute: async (input, context) => {
-      const file = resolveOutgoingFile(context, dependencies.filesFor(context.workspace), input.photo);
+      const file = resolveOutgoingFile(context, dependencies.filesFor(context.workspace, context.turn.effectiveRole), input.photo);
       if (!file.ok) return file;
       return claimExtraMessage(context) ?? dependencies.telegram!.sendPhoto(target(context), file.absolute, input.caption);
     } });
@@ -262,7 +270,7 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
     } });
   registry.register({ name: 'send_file', description: '把工作目录内的文件作为文档发到当前会话。', inputSchema: z.object({ file: z.string(), caption: z.string().optional() }), policy: builtinPolicy('send_file'), sourcePriority: 100, timeoutMs: UPLOAD_TIMEOUT_MS,
     available: () => Boolean(dependencies.telegram), execute: async (input, context) => {
-      const file = resolveOutgoingFile(context, dependencies.filesFor(context.workspace), input.file);
+      const file = resolveOutgoingFile(context, dependencies.filesFor(context.workspace, context.turn.effectiveRole), input.file);
       if (!file.ok) return file;
       return claimExtraMessage(context) ?? dependencies.telegram!.sendFile(target(context), file.absolute, input.caption);
     } });
@@ -273,5 +281,14 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
       return dependencies.telegram!.pin(target(context), messageId);
     } });
   registry.register({ name: 'web_fetch', description: '获取公开 HTTP/HTTPS 页面；拒绝私网和元数据地址。瞬时失败（超时/5xx/429）会自动重试。', inputSchema: z.object({ url: z.string().url() }), policy: builtinPolicy('web_fetch'), sourcePriority: 100, untrustedOutput: true,
-    timeoutMs: webBudgetMs, execute: (input, context) => webFetch(input.url, dependencies.maxWebBytes, context.turn.abortSignal, web) });
+    // `limited` 只在配了 allowlist 时才有 web_fetch（docs/05 §4）：没有白名单就等于把整个互联网
+    // 交给权限最低的那档人，而这个工具的输出会直接进上下文。fail-closed 走 `available()`，
+    // 所以工具**根本不进目录**，模型不会去试一个必然被拒的调用。
+    available: (role, context) => role !== 'limited' || (context.turn.config as Readonly<Config>).tools.web.allowlist.length > 0,
+    // 域名白/黑名单从本轮配置取（`tools.web` 在 perChat 白名单里不在，所以就是全局那份，
+    // 但仍然走 turn.config —— 热更新后下一轮生效，不用重启）。
+    timeoutMs: webBudgetMs, execute: (input, context) => {
+      const live = (context.turn.config as Readonly<Config>).tools.web;
+      return webFetch(input.url, dependencies.maxWebBytes, context.turn.abortSignal, web, { allowlist: live.allowlist, denylist: live.denylist });
+    } });
 }

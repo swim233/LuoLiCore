@@ -4,7 +4,7 @@ import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { serve } from '@hono/node-server';
 import { ArchiveRepository, OperationsRepository, PrincipalRepository, TurnRepository, closeDatabase, migrateDatabase, modelAliasKey, openDatabase, readAppKv, readPersistedConfig, recomputeMessageTokens, recoverAfterCrash, writeAppKv } from '@luoli/db';
-import { AgentManager, AgentResultStore, ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, FileTools, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, ModelRegistry, PathJail, PluginManager, PromptAssembler, PromptDocuments, ProviderStore, QuotaGuard, Sandbox, Scheduler, Secrets, SkillLoader, STABLE_PROMPT_BLOCKS, TOOL_POLICY, ToolRegistry, TurnConcurrency, TurnRegistry, UsageLedger, assembleMainPrompt, configJsonSchema, loadConfig, perChatConfig, registerBuiltins, rejectedWakewords, runSubAgent, streamMainAgent, type SubAgentRuntimeEvent } from '@luoli/core';
+import { AgentManager, AgentResultStore, AlertDispatcher, ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, FileTools, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, ModelRegistry, PathJail, PluginManager, PromptAssembler, PromptDocuments, ProviderStore, QuotaGuard, Sandbox, Scheduler, Secrets, SkillLoader, STABLE_PROMPT_BLOCKS, TOOL_POLICY, ToolRegistry, TurnConcurrency, TurnRegistry, UsageLedger, assembleMainPrompt, configJsonSchema, loadConfig, perChatConfig, registerBuiltins, rejectedWakewords, runSubAgent, streamMainAgent, type SubAgentRuntimeEvent } from '@luoli/core';
 import { createServer, EventStreamRegistry, setupToken, type PromptPreviewResult } from '@luoli/server';
 import type { RuntimeTurnContext } from '@luoli/shared';
 import { TelegramTools, createTelegramBot } from '@luoli/telegram';
@@ -67,6 +67,14 @@ const ledger = new UsageLedger(db);
 const turnRegistry = new TurnRegistry();
 const turnConcurrency = new TurnConcurrency(config.concurrency);
 const log = new LogSink(operations, config.logs.dir, [process.env.BOT_TOKEN ?? '', process.env.LUOLI_MASTER_KEY ?? ''], { level: config.logs.level, maxFileMb: config.logs.maxFileMb, bodyMaxBytes: config.logs.bodyMaxBytes, console: config.logs.console, events });
+log.redactPatterns = config.logs.redactPatterns;
+// 告警要早于沙箱、plugin、模型注册表建起来：那三处的构造参数里就挂着告警回调。
+// owner 私聊在 bot 建好之后再补（`alerts.bindOwner`），此前只走 webhook 与日志。
+let notifyOwner: ((text: string) => Promise<unknown>) | null = null;
+const alerts = new AlertDispatcher(() => configStore.snapshot().alerts, log,
+  { owner: async (text: string) => { await notifyOwner?.(text); } }, () => configStore.snapshot().provider.allowPrivateBaseUrl);
+// 日志自己写不进去时也要有人知道 —— 只写 stderr 的话运维通常永远看不到（docs/10 §6 db_write_failed）。
+log.onWriteFailure = (error) => alerts.fire('db_write_failed', '日志写入失败', { error: error instanceof Error ? error.message : String(error) });
 const context = new ContextEngine(db, archive, log);
 const modelRegistry = new ModelRegistry(db, providers);
 modelRegistry.rebuild(config.provider.healthDownCooldownMinutes);
@@ -89,7 +97,8 @@ else log.event({ level: 'info', kind: 'skills.disabled', summary: 'Skills disabl
 const agentResultsDir = resolve('data/agent-results');
 const agents = new AgentManager(db, new AgentResultStore(agentResultsDir), config.agent.agents, config.agent.maxDepth, config.agent.maxSubagentsPerTurn);
 if (config.skills.enabled && config.skills.watch) skills.startWatching();
-const plugins = new PluginManager(db, config.plugins.dir, config.plugins.hookTimeoutMs, config.plugins.autoDisableAfterErrors, config.plugins.order);
+const plugins = new PluginManager(db, config.plugins.dir, config.plugins.hookTimeoutMs, config.plugins.autoDisableAfterErrors, config.plugins.order, undefined,
+  (name, error) => alerts.fire('plugin_auto_disabled', `plugin ${name} 连续出错已被自动禁用`, { plugin: name, error }, name));
 // `plugins.enabled=false` 时不 reconcile：一个 plugin 都不加载，钩子链是空的。
 // 「进程内全信任」（docs/14 A27）意味着这个开关是安全边界，不是性能开关。
 if (config.plugins.enabled) {
@@ -101,7 +110,7 @@ if (config.plugins.enabled) {
 const mcp = new McpManager(db, () => configStore.snapshot().mcp, log);
 await mcp.reconcile();
 const maintenance = new MaintenanceService(db, config.db.path, config.db.backupKeep, config.logs.retentionDays, config.logs.dir,
-  { files: config.media.dir, agentResults: agentResultsDir });
+  { files: config.media.dir, agentResults: agentResultsDir }, config.logs.gzipAfterDays);
 const scheduler = new Scheduler((name, error) => log.event({ level: 'error', kind: 'scheduler.failed', summary: `${name} failed`, data: { error: error instanceof Error ? error.message : String(error) } }));
 scheduler.add(config.general.maintenanceCron, () => { const result = maintenance.cleanup(); log.event({ level: 'info', kind: 'maintenance.cleanup', summary: 'Scheduled cleanup complete', data: result }); }, 'maintenance');
 scheduler.add(config.db.vacuumCron, () => { maintenance.vacuum(); log.event({ level: 'info', kind: 'maintenance.vacuum', summary: 'Scheduled VACUUM complete' }); }, 'vacuum');
@@ -132,7 +141,8 @@ const sandbox = new Sandbox(() => {
     pidsLimit: live.sandbox.pidsLimit, readOnlyRoot: live.sandbox.readOnlyRoot, tmpfsMb: live.sandbox.tmpfsMb,
     workspaceDir: live.sandbox.workspaceDir, hostWorkspaceDir: live.sandbox.hostWorkspaceDir,
     defaultTimeoutMs: live.tools.exec.defaultTimeoutMs, maxTimeoutMs: live.tools.exec.maxTimeoutMs, maxOutputBytes: live.tools.exec.maxOutputBytes };
-}, undefined, undefined, (message) => log.event({ level: 'warn', kind: 'sandbox.weak_isolation', summary: message }));
+}, undefined, undefined, (message) => log.event({ level: 'warn', kind: 'sandbox.weak_isolation', summary: message }),
+  (reason, role) => alerts.fire('sandbox_unavailable', `沙箱不可用，${role} 的执行请求被拒`, { reason, role }, role));
 const sandboxProbe = await sandbox.probe();
 if (!sandboxProbe.available && config.sandbox.mode === 'docker') log.event({ level: 'error', kind: 'sandbox.unavailable', summary: sandboxProbe.error ?? 'Docker sandbox unavailable' });
 // bot 要到最后才建得起来，而工具在这里就得注册完，所以桥拿的是 getter。**presence 即开关**：
@@ -143,7 +153,14 @@ const telegramTools = process.env.BOT_TOKEN
   ? new TelegramTools({ bot: () => bot, archive, maxMessageChars: () => configStore.snapshot().output.maxMessageChars })
   : null;
 registerBuiltins(toolRegistry, {
-  db, filesFor: (workspace) => new FileTools(new PathJail(workspace, config.tools.fs.denyGlobs), config.tools.fs.maxReadBytes, config.tools.fs.maxWriteBytes, { showHidden: config.tools.fs.showHidden, trashDir: config.tools.fs.trashDir, backupDir: config.tools.fs.backupDir }),
+  // `tools.fs.allowHostFsForOwner`：owner 的 fs 工具 jail 到 `/` 而不是本会话 workspace。
+  // 这是 docs/14 T8 那条取舍的**显式**开关：开了之后任何能让 owner 的轮次执行工具的注入路径
+  // 都是完整的机器读写权限。默认关，`denyGlobs` 照样生效（它是绝对路径 glob，不依赖 root）。
+  // 判据用工具执行上下文里的有效角色 —— owner 在非受信群里已经被抿平成群角色（D9），
+  // 所以「owner 在陌生群里被诱导读 /etc/shadow」走不到这条路。
+  db, filesFor: (workspace, role) => new FileTools(
+    new PathJail(role === 'owner' && configStore.snapshot().tools.fs.allowHostFsForOwner ? '/' : workspace, config.tools.fs.denyGlobs),
+    config.tools.fs.maxReadBytes, config.tools.fs.maxWriteBytes, { showHidden: config.tools.fs.showHidden, trashDir: config.tools.fs.trashDir, backupDir: config.tools.fs.backupDir }),
   sandbox, archive, context, memory, skills, agents, models: modelRegistry, ledger, log, quota,
   maxWebBytes: config.tools.web.maxResponseBytes, maxAsksPerRun: config.agent.maxAsksPerRun, askTimeoutMs: config.agent.askTimeoutMs,
   web: { timeoutMs: config.tools.web.timeoutMs, retries: config.tools.web.retries },
@@ -166,7 +183,7 @@ const previewPrompt = (key: string, role: RuntimeTurnContext['effectiveRole']): 
   const latest = db.prepare('SELECT initiator_user_id AS userId FROM turns WHERE key=? ORDER BY COALESCE(started_at,queued_at) DESC,rowid DESC LIMIT 1').get(key) as { userId: string } | undefined;
   const principal = db.prepare("SELECT chat_type AS chatType FROM principals WHERE kind='chat' AND tg_id=?").get(contextRow.chatId) as { chatType: string | null } | undefined;
   const live = perChatConfig(configStore.snapshot(), key);
-  const snapshot = context.materialize(key, null);
+  const snapshot = context.materialize(key, null, live.context.cacheCommits);
   const turn = {
     turnId: 'webui:prompt-preview', key, chatId: contextRow.chatId, threadId: contextRow.threadId,
     initiatorUserId: latest?.userId ?? contextRow.chatId, effectiveRole: role,
@@ -229,17 +246,26 @@ async function dryRunAgent(name: string, task: string, signal: AbortSignal, emit
   }
 }
 
-const rebuildModels = (): void => { const live = configStore.snapshot(); modelRegistry.rebuild(live.provider.healthDownCooldownMinutes); log.setSecrets([process.env.BOT_TOKEN ?? '', process.env.LUOLI_MASTER_KEY ?? '', live.tools.web.searchApiKey, ...providers.allDecryptedKeys()]); };
+const rebuildModels = (): void => { const live = configStore.snapshot(); modelRegistry.rebuild(live.provider.healthDownCooldownMinutes);
+  // 一个可用别名都不剩 = 所有 provider 都下线了（docs/10 §6 all_providers_down）。用户侧的表现
+  // 是每一轮都以 model alias unavailable 失败，而运维那边只有一条 config.invalid 躺在日志里。
+  if (!modelRegistry.aliases().length) alerts.fire('all_providers_down', '没有任何可用的模型别名：所有 provider 都不可用或未配置'); log.setSecrets([process.env.BOT_TOKEN ?? '', process.env.LUOLI_MASTER_KEY ?? '', live.tools.web.searchApiKey, ...providers.allDecryptedKeys()]); };
 const eventStreams = new EventStreamRegistry();
 const server = createServer({ config: configStore, db, operations, principals, archive, context, providers, modelCatalog, approvals: approval, rebuildModels, maintenance, events, log,
   memory, promptDocuments, skills, plugins, mcp, agents, turnRegistry, sandbox, eventStreams, previewPrompt, dryRunAgent, configSchema: configJsonSchema(), startedAt, setup });
-const http = serve({ fetch: server.fetch, hostname: config.webui.host, port: config.webui.port });
+// `webui.enabled=false`：整个 HTTP 面不监听。这不只是省一个端口 —— 单口令 + owner 全权限的
+// 控制台是这个部署最大的攻击面，只跑 Telegram 的场景该能把它整个关掉。
+// 代价要说清楚：**没有 WebUI 就没有审批裁决通道**，命中审批规则的调用会被当场拒绝
+// （`EventBus.channelCount === 0`，docs/24 · R-APPR-01）。
+const http = config.webui.enabled ? serve({ fetch: server.fetch, hostname: config.webui.host, port: config.webui.port }) : null;
+if (!config.webui.enabled) log.event({ level: 'warn', kind: 'webui.disabled', summary: 'WebUI disabled by config; approvals will be rejected outright' });
 events.subscribe((event) => {
   if (event.type !== 'config.changed') return;
   const keys = (event.data as { keys?: string[] }).keys ?? [];
   void loadConfig({ overrides: envOverlay(readPersistedConfig(config.db.path, reportRejectedKey)), onInvalidOverride: (dropped, reasons) => log.event({ level: 'error', kind: 'config.invalid', summary: `已忽略 ${dropped.length} 条非法覆盖`, data: { dropped, reasons } }) }).then((next) => {
     configStore.replace(next, keys);
     if (keys.some((key) => key.startsWith('logs.level'))) log.setLevel(next.logs.level);
+    if (keys.some((key) => key.startsWith('logs.redactPatterns'))) log.redactPatterns = next.logs.redactPatterns;
     if (keys.some((key) => key.startsWith('provider.') || key.startsWith('model') || key === 'tools.web.searchApiKey')) rebuildModels();
     if (keys.some((key) => key.startsWith('agent.agents'))) agents.replaceDefinitions(next.agent.agents);
     if (keys.some((key) => key.startsWith('skills.'))) skills.scan();
@@ -253,7 +279,7 @@ events.subscribe((event) => {
 log.event({ level: 'info', kind: 'system.start', summary: `${config.general.name} started`, data: { name: config.general.name, webui: `${config.webui.host}:${config.webui.port}`, providerSecrets: secrets.available } });
 if (process.env.BOT_TOKEN) {
   bot = await createTelegramBot(process.env.BOT_TOKEN, { config: configStore, db, principals, archive, operations, context, turns, quota, memory, plugins, tools: toolRegistry, approvals: approval,
-    registry: turnRegistry, concurrency: turnConcurrency, log,
+    registry: turnRegistry, concurrency: turnConcurrency, log, alerts,
     estimateTurnCost: (inputTokens, key) => modelRegistry.estimate(readAppKv<string>(db, modelAliasKey(key)) ?? perChatConfig(configStore.snapshot(), key).agent.main.modelAlias, inputTokens),
     // 用 turn.config 而不是全局快照：本轮的 perChat 覆盖已经在 openTurn 时合并进去了。
     onTurn: (turn, reservation) => { const live = turn.config as Readonly<typeof config>; return streamMainAgent(turn, { config: live, db, registry: modelRegistry, tools: toolRegistry,
@@ -263,6 +289,10 @@ if (process.env.BOT_TOKEN) {
   if (config.telegram.mode === 'polling') void bot.start({ allowed_updates: config.telegram.allowedUpdates as never[], drop_pending_updates: config.telegram.dropPendingOnStart });
   // webhook 模式没有实现：既不 start 也不注册路由，静默不收任何消息比直接报错危险得多。
   else throw new Error(`telegram.mode=${config.telegram.mode} is not implemented; only polling is supported`);
+  // owner 私聊通道到这里才具备。`sendMessage` 失败由 AlertDispatcher 自己吞掉并记一条
+  // `alert.deliver_failed` —— owner 没跟 bot 说过话时 Telegram 会拒发，那不该把告警链路带崩。
+  const ownerChatId = configStore.snapshot().access.bootstrapOwnerId;
+  if (ownerChatId) notifyOwner = (text) => bot!.api.sendMessage(ownerChatId, text);
 } else {
   log.event({ level: 'warn', kind: 'system.start', summary: 'BOT_TOKEN missing; Telegram ingress disabled' });
 }
@@ -273,8 +303,11 @@ const shutdown = async (signal: string): Promise<void> => {
   scheduler.stop();
   eventStreams.closeAll();
   const { promise: closed, resolve: markClosed } = Promise.withResolvers<void>();
-  http.close(() => markClosed());
-  const force = setTimeout(() => { if ('closeAllConnections' in http) http.closeAllConnections(); markClosed(); }, config.general.shutdown.graceMs); force.unref?.();
+  let force: ReturnType<typeof setTimeout> | null = null;
+  if (http) {
+    http.close(() => markClosed());
+    force = setTimeout(() => { if ('closeAllConnections' in http) http.closeAllConnections(); markClosed(); }, config.general.shutdown.graceMs); force.unref?.();
+  } else markClosed();
   if (bot) await bot.stop();
   // 宽限期内没排空就主动中断：drain 只是等，等不来的轮次必须被 abort，否则它们要么把进程
   // 拖到 systemd 的 SIGKILL，要么在退出后留下 running 行等下次 recoverAfterCrash 认领（docs/24 · R-OPS-01）。
@@ -282,7 +315,7 @@ const shutdown = async (signal: string): Promise<void> => {
     turnRegistry.abortAll('shutdown');
     await turnRegistry.drain(Math.min(1000, config.general.shutdown.graceMs));
   }
-  await closed; clearTimeout(force);
+  await closed; if (force) clearTimeout(force);
   await plugins.close();
   await mcp.close();
   await skills.close();
