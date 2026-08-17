@@ -90,7 +90,7 @@ export const HOT_RELOADABLE_CONFIG_KEYS = [
   // WebUI 自己那几项是每请求从 currentConfig() 现读的（app.ts 的 requestIp / allowedOrigin /
   // 登录限流 / createSession / activePasswordHash），改完下一次请求就按新值走。只有 host / port
   // 例外：它们在 `serve()` 时就绑定了，必须重启。
-  'webui.sessionTtlHours', 'webui.passwordHash', 'webui.trustProxy', 'webui.trustedProxyHops', 'webui.allowOrigins', 'webui.loginRateLimit',
+  'webui.publicUrl', 'webui.sessionTtlHours', 'webui.passwordHash', 'webui.trustProxy', 'webui.trustedProxyHops', 'webui.allowOrigins', 'webui.loginRateLimit',
   // bot.ts 的 config Proxy 每次访问都取新快照，输出节奏是在每轮开始时读的：改了下一轮生效，
   // 在途那一轮沿用开轮时的值（编辑节流的定时器已经在跑，中途换节拍只会让这条消息的刷新变乱）。
   'output',
@@ -130,10 +130,9 @@ export const KNOWN_UNIMPLEMENTED_CONFIG_KEYS = [
   // 换 FTS tokenizer 要追加迁移重建 `messages_fts`（迁移文件提交后不可修改），而「trigram 还是
   // jieba」本身是 docs/14 §2 Q3 的未决问题 —— 先定方案再动表。
   'db.ftsTokenizer',
-  // 这两个是 WebUI 部署形态的键（子路径挂载、对外可见 URL）。`publicUrl` 的唯一消费者是
-  // 尚未实现的 `/webui` 一次性登录链接（docs/09 §2.3），两者要一起做。
+  // 子路径挂载：要给所有路由加前缀、改静态资源的 base、改 SPA 的 router base，三处一起动。
+  // `publicUrl` 已随 `/webui` 一次性登录链接接线（第五轮）。
   'webui.basePath',
-  'webui.publicUrl',
 ] as const;
 
 

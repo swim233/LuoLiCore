@@ -1,13 +1,14 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import argon2 from 'argon2';
 import { Hono } from 'hono';
+import YAML from 'yaml';
 import type { Context } from 'hono';
 import { serveStatic } from '@hono/node-server/serve-static';
 import type { AgentManager, Config, ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, PluginManager, PromptDocuments, ProviderStore, Sandbox, SkillLoader, SkillWriteInput, SubAgentRuntimeEvent, TurnRegistry } from '@luoli/core';
-import { ALIAS_NAME_PATTERN, HOT_RELOADABLE_CONFIG_KEYS, KNOWN_UNIMPLEMENTED_CONFIG_KEYS, TOOL_POLICY, aliasSettingsSchema, checkWakeword, configSchema as runtimeConfigSchema, envPinnedConfigKeys, perChatConfig, probeProvider, quotaBucket, rejectedWakewords } from '@luoli/core';
+import { ALIAS_NAME_PATTERN, HOT_RELOADABLE_CONFIG_KEYS, testApprovalRules, KNOWN_UNIMPLEMENTED_CONFIG_KEYS, TOOL_POLICY, aliasSettingsSchema, checkWakeword, configSchema as runtimeConfigSchema, envPinnedConfigKeys, perChatConfig, probeProvider, quotaBucket, rejectedWakewords } from '@luoli/core';
 import type { CatalogIndex, ModelMetadata, ProviderProbe } from '@luoli/core';
 import type { ArchiveRepository, OperationsRepository, PrincipalRepository, Sqlite } from '@luoli/db';
 import { deleteAppKv, modelAliasKey, readAppKv } from '@luoli/db';
@@ -40,6 +41,10 @@ export interface ServerDependencies {
   approvals: DatabaseApprovalBroker;
   rebuildModels?: () => void;
   maintenance: MaintenanceService;
+  /** 用量聚合（`GET /api/usage/report`）。缺它时那个端点回空数组而不是 500 —— 明细表照常。 */
+  ledger?: { report(from: number, to: number, groupBy: 'day' | 'chat' | 'user' | 'model' | 'alias' | 'agent'): unknown[] };
+  /** `POST /api/restart` 的落点。优雅关闭那套在 apps/bot，服务器包只负责把请求转过去。 */
+  restart?: (reason: string) => Promise<void> | void;
   events: EventBus;
   memory?: MemoryStore;
   promptDocuments?: PromptDocuments;
@@ -100,6 +105,43 @@ function contentDisposition(name: string): string {
   return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}`;
 }
 
+/**
+ * 系统信息里的三个占用（docs/09 §3.1）：DB 本体、WAL、workspace。**只统计不清理** ——
+ * 这张卡片是「该不该去点维护操作」的判据，自己动手会让它变成一个有副作用的读端点。
+ * 目录递归有深度上界：workspace 里放着模型自己造的目录树，一个软链自指就能让这次请求不返回。
+ */
+function directorySize(root: string, depth = 0): number {
+  if (depth > 8) return 0;
+  let total = 0;
+  let entries;
+  try { entries = readdirSync(root, { withFileTypes: true }); } catch { return 0; }
+  for (const entry of entries) {
+    const path = resolve(root, entry.name);
+    if (entry.isDirectory()) total += directorySize(path, depth + 1);
+    else if (entry.isFile()) { try { total += statSync(path).size; } catch { /* 竞态删除 */ } }
+  }
+  return total;
+}
+
+function fileSize(path: string): number {
+  try { return statSync(path).size; } catch { return 0; }
+}
+
+/**
+ * 用量聚合按 chat / user 分组时 bucket 是裸 id，运维认不出 `-1002492583774` 是哪个群。
+ * 反查规则与会话页那份一致：登记过就用显示名，没登记过就说清楚是「未登记」而不是留空。
+ */
+function principalLabel(db: Sqlite, kind: 'chat' | 'user', tgId: string | null): string | null {
+  if (!tgId) return null;
+  const row = db.prepare('SELECT display_name AS name,username FROM principals WHERE kind=? AND tg_id=?').get(kind, tgId) as { name: string | null; username: string | null } | undefined;
+  if (row?.name) return row.username ? `${row.name} (@${row.username})` : row.name;
+  return `未登记${kind === 'chat' ? '会话' : '用户'} ${tgId}`;
+}
+
+function diskUsage(config: Readonly<Config>): { bytes: number; walBytes: number; workspaceBytes: number } {
+  return { bytes: fileSize(config.db.path), walBytes: fileSize(`${config.db.path}-wal`), workspaceBytes: directorySize(resolve(config.sandbox.workspaceDir)) };
+}
+
 function safeRef(root: string, reference: string): string {
   const absolute = resolve(root, reference);
   const base = resolve(root);
@@ -108,6 +150,15 @@ function safeRef(root: string, reference: string): string {
 }
 
 const SECRET_KEY_SEGMENT = /key|secret|token|password/i;
+/**
+ * 导出 / YAML 渲染时判断「这一行是不是密钥」。判据是**叶子段 + 值是非空字符串**，与
+ * `publicConfig` / `revisionJson` 同一套口径 —— 拿整条点分路径去 test 会把
+ * `context.limit.tokens` 也当成密钥（`/token/i` 匹配到 "tokens"），于是一份导出里
+ * 静静地少了几项真配置。值不是字符串的行由 `publicConfig` 的 `«redacted»` 检查兜住。
+ */
+function looksSecret(key: string, value: unknown): boolean {
+  return SECRET_KEY_SEGMENT.test(key.split('.').at(-1) ?? key) && typeof value === 'string' && value.length > 0;
+}
 function publicConfig(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(publicConfig);
   if (!value || typeof value !== 'object') return value;
@@ -300,8 +351,35 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     return ctx.json({ ok: true, data: { csrf: session.csrf, expiresAt: session.expiresAt } });
   });
 
+  /**
+   * Telegram `/webui` 发来的一次性登录（docs/09 §2.3）。token **存在内存里**：进程重启即失效，
+   * 而且它就该是这个语义 —— 一条能换取 owner 全权限 session 的链接落进数据库或日志，
+   * 泄露面比口令本身还大。所以这里也**不记 token 本身**，只记用掉/失败这件事。
+   *
+   * 三道闸：单次使用（取出即删）、5 分钟过期、常量时间比较。
+   */
+  app.post('/api/auth/token', async (ctx) => {
+    const body = await ctx.req.json<{ token?: string }>().catch((): { token?: string } => ({}));
+    const now = Date.now();
+    for (const [value, entry] of loginTokens) if (entry.expiresAt <= now) loginTokens.delete(value);
+    const supplied = typeof body.token === 'string' ? body.token : '';
+    // 先删再判：一个错误的 token 不该让攻击者反复试同一个值。
+    const entry = supplied ? loginTokens.get(supplied) : undefined;
+    if (entry) loginTokens.delete(supplied);
+    if (!entry || entry.expiresAt <= now) {
+      dependencies.log.event({ level: 'warn', kind: 'webui.action', summary: 'one-time login token rejected', data: { ip: requestIp(ctx, currentConfig()) } });
+      return ctx.json(apiError('invalid_token', '登录链接无效或已过期', 401).body, 401);
+    }
+    const webui = currentConfig().webui;
+    const session = dependencies.operations.createSession(webui.sessionTtlHours, requestIp(ctx, currentConfig()), ctx.req.header('user-agent'));
+    const secure = requestIsSecure(ctx, currentConfig()) ? '; Secure' : '';
+    ctx.header('Set-Cookie', `luoli_sid=${encodeURIComponent(session.id)}; HttpOnly; SameSite=Strict; Path=/${secure}`);
+    dependencies.log.event({ level: 'info', kind: 'webui.action', summary: 'logged in via one-time token' });
+    return ctx.json({ ok: true, data: { csrf: session.csrf, expiresAt: session.expiresAt } });
+  });
+
   app.use('/api/*', async (ctx, next) => {
-    if (ctx.req.path === '/api/health' || ctx.req.path === '/api/auth/login' || ctx.req.path === '/api/setup') return next();
+    if (ctx.req.path === '/api/health' || ctx.req.path === '/api/auth/login' || ctx.req.path === '/api/auth/token' || ctx.req.path === '/api/setup') return next();
     const id = cookie(ctx.req.header('cookie'), 'luoli_sid');
     const session = id ? dependencies.operations.session(id) : null;
     if (!session) return ctx.json(apiError('unauthorized', '未登录', 401).body, 401);
@@ -345,7 +423,7 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     const providers = dependencies.providers.list() as Array<{ enabled?: number; healthState?: string | null }>;
     const mcp = dependencies.db.prepare('SELECT name,state,last_error AS error FROM mcp_servers ORDER BY name').all();
     return ctx.json({ ok: dbOk, data: { ok: dbOk, version: process.env.npm_package_version ?? 'dev', uptimeMs: Date.now() - dependencies.startedAt,
-      db: { ok: dbOk }, providers, mcp, sandbox: dependencies.sandbox?.plan('trusted') ?? { allowed: false }, inFlightTurns: dependencies.turnRegistry?.size ?? 0 } });
+      db: { ok: dbOk, ...diskUsage(currentConfig()) }, providers, mcp, sandbox: dependencies.sandbox?.plan('trusted') ?? { allowed: false }, inFlightTurns: dependencies.turnRegistry?.size ?? 0 } });
   });
   app.post('/api/auth/logout', (ctx) => {
     dependencies.operations.deleteSession(ctx.get('sessionId'));
@@ -355,7 +433,7 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
   // SPA 只把 csrf 放在内存里，刷新页面就丢了；不在这里发回去，刷新之后每个写操作都是 403。
   // 这不削弱 CSRF 防护：跨站请求既读不到响应（无 CORS 放行），也过不了上面的 Origin 中间件。
   app.get('/api/auth/me', (ctx) => ctx.json({ ok: true, data: { role: 'owner', csrf: ctx.get('csrf'), expiresAt: dependencies.operations.session(ctx.get('sessionId'))?.expiresAt ?? null } }));
-  app.get('/api/dashboard', (ctx) => ctx.json({ ok: true, data: dependencies.operations.dashboard() }));
+  app.get('/api/dashboard', (ctx) => ctx.json({ ok: true, data: dependencies.operations.dashboard(currentConfig().general.timezone) }));
   app.get('/api/chats', (ctx) => ctx.json({ ok: true, data: dependencies.db.prepare(`SELECT c.key,c.chat_id AS chatId,c.thread_id AS threadId,c.scope,c.claim_watermark AS claimWatermark,
     cc.head_ordinal AS headOrdinal,cc.tokens_total AS tokens,cc.msg_count AS messages FROM contexts c LEFT JOIN refs r ON r.key=c.key AND r.name='done' LEFT JOIN context_commits cc ON cc.id=r.commit_id ORDER BY c.updated_at DESC`).all() }));
   app.get('/api/config', (ctx) => ctx.json({ ok: true, data: publicConfig(currentConfig()) }));
@@ -433,6 +511,97 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     dependencies.events.emit('config.changed', { keys: [key] }); return ctx.json({ ok: true, data: body });
   });
   app.get('/api/config/revisions', (ctx) => ctx.json({ ok: true, data: dependencies.db.prepare('SELECT * FROM config_revisions ORDER BY ts DESC LIMIT 500').all() }));
+  /**
+   * 配置导出（docs/09 §3.13）。导的是 **`config_kv` 里的覆盖层**，不是合并后的全量配置 ——
+   * 全量里绝大多数是代码默认值，导进另一个部署等于把那一刻的默认值全部钉死，此后升级
+   * 再也拿不到新默认。密钥类键（`publicConfig` 那套判据）直接**不导出**而不是导成
+   * `«redacted»`：导成占位符的话，导入端会把真密钥覆盖成一个字面量。
+   */
+  app.get('/api/config/export', (ctx) => {
+    const rows = dependencies.db.prepare('SELECT key,value_json AS value FROM config_kv ORDER BY key').all() as Array<{ key: string; value: string }>;
+    const overrides: Record<string, unknown> = {};
+    const skipped: string[] = [];
+    for (const row of rows) {
+      const value = JSON.parse(row.value) as unknown;
+      if (looksSecret(row.key, value)) { skipped.push(row.key); continue; }
+      const cleaned = publicConfig(value);
+      // 整块写入（`mcp.servers`）里也可能埋着密钥字段，`publicConfig` 会把它们变成占位符 ——
+      // 那种块同样不能导。
+      if (JSON.stringify(cleaned).includes('«redacted»')) { skipped.push(row.key); continue; }
+      overrides[row.key] = value;
+    }
+    return ctx.json({ ok: true, data: { exportedAt: Date.now(), overrides, skipped } });
+  });
+  /**
+   * `[原始 YAML]` 模式（docs/09 §3.13）。**解析在服务端**：`loadConfig` 用的就是这个 YAML
+   * 解析器，放到前端等于让两处方言各自漂移（缩进 tab、锚点、`yes/no` 当布尔这些边角都有差异），
+   * 而「界面上过了、启动时炸了」是最难查的一类。顺带省掉前端 40KB 的 yaml bundle。
+   *
+   * GET 渲染的是**覆盖层**而不是合并后的全量 —— 与导出同一个理由：全量里绝大多数是代码默认值。
+   */
+  app.get('/api/config/yaml', (ctx) => {
+    const rows = dependencies.db.prepare('SELECT key,value_json AS value FROM config_kv ORDER BY key').all() as Array<{ key: string; value: string }>;
+    const tree: Record<string, unknown> = {};
+    const skipped: string[] = [];
+    for (const row of rows) {
+      const value = JSON.parse(row.value) as unknown;
+      if (looksSecret(row.key, value) || JSON.stringify(publicConfig(value)).includes('«redacted»')) { skipped.push(row.key); continue; }
+      assignDotted(tree, row.key, value);
+    }
+    return ctx.json({ ok: true, data: { yaml: YAML.stringify(tree, { indent: 2 }), skipped } });
+  });
+  app.put('/api/config/yaml', async (ctx) => {
+    const body = await ctx.req.json<{ yaml?: string }>().catch(() => null);
+    if (typeof body?.yaml !== 'string') return ctx.json(apiError('invalid_body', 'body 需要 { yaml: "…" }').body, 400);
+    let tree: unknown;
+    try { tree = YAML.parse(body.yaml) ?? {}; }
+    catch (error) {
+      // yaml 的错误自带 linePos —— 把行号交回去，界面才能「错误定位到行」。
+      const cause = error as { message?: string; linePos?: Array<{ line: number; col: number }> };
+      const at = cause.linePos?.[0];
+      return ctx.json({ ok: false, error: { code: 'invalid_yaml', message: cause.message ?? 'YAML 解析失败', ...(at ? { line: at.line, column: at.col } : {}) } }, 400);
+    }
+    if (!tree || typeof tree !== 'object' || Array.isArray(tree)) return ctx.json(apiError('invalid_yaml', '顶层必须是一个映射（key: value），不是数组或标量').body, 400);
+    const parsed = runtimeConfigSchema.safeParse(tree);
+    if (!parsed.success) return ctx.json({ ok: false, error: { code: 'invalid_config', message: '配置校验失败', details: parsed.error.issues.map((issue) => ({ path: issue.path.join('.'), message: issue.message })) } }, 400);
+    // 落库仍是**顶层段**的逐段覆盖，而不是一整棵树写成一行：`config_kv` 的粒度是点分键，
+    // 写成一行 `''` 会让工具页那种更细的覆盖全部被作废（G-CFG-02 的整块吞并问题）。
+    const sections = Object.keys(tree as Record<string, unknown>);
+    const pinnedConflicts = envConflicts(sections);
+    const applicable = sections.filter((key) => !pinnedConflicts.some((entry) => key === entry.key || entry.key.startsWith(`${key}.`)));
+    const rows: Array<[string, unknown]> = applicable.map((key) => [key, readDotted(parsed.data, key)]);
+    const unknownSections = rows.filter(([, value]) => value === undefined).map(([key]) => key);
+    if (unknownSections.length) return ctx.json(apiError('unknown_config_key', `${unknownSections.join('、')} 不是 schema 里的配置段`).body, 400);
+    const subsumed = writeConfigRows(rows, 'webui:yaml');
+    dependencies.events.emit('config.changed', { keys: applicable });
+    return ctx.json({ ok: true, data: { keys: applicable, skipped: pinnedConflicts.map((entry) => entry.key), subsumed } });
+  });
+  /**
+   * 配置导入：走和 `PUT /api/config` 完全一样的校验与落库路径（点分键 → mergeDotted →
+   * `runtimeConfigSchema` → `writeConfigRows`），只是一次多条。**不是恢复快照** ——
+   * 导入不删除现有覆盖行，只按键覆盖；要清空得自己去改那几项。
+   */
+  app.post('/api/config/import', async (ctx) => {
+    const body = await ctx.req.json<{ overrides?: Record<string, unknown> }>().catch(() => null);
+    const overrides = body?.overrides;
+    if (!overrides || typeof overrides !== 'object' || Array.isArray(overrides)) return ctx.json(apiError('invalid_body', 'body 需要 { overrides: { 点分键: 值 } }').body, 400);
+    const keys = Object.keys(overrides);
+    if (!keys.length) return ctx.json({ ok: true, data: { keys: [], skipped: [] } });
+    // 被 env 钉住的键不该让整次导入失败：跳过并点名，比让人先去删环境变量再导一次好。
+    const conflicts = envConflicts(keys);
+    const pinned = new Set(conflicts.map((entry) => entry.key));
+    const applicable = keys.filter((key) => !conflicts.some((entry) => key === entry.key || key.startsWith(`${entry.key}.`) || entry.key.startsWith(`${key}.`)));
+    const merged = mergeDotted(currentConfig(), Object.fromEntries(applicable.map((key) => [key, overrides[key]])));
+    if (!merged.ok) return ctx.json(invalidKey(merged).body, 400);
+    const parsed = runtimeConfigSchema.safeParse(merged.value);
+    if (!parsed.success) return ctx.json({ ok: false, error: { code: 'invalid_config', message: '导入的配置校验失败', details: parsed.error.issues.map((issue) => ({ path: issue.path.join('.'), message: issue.message })) } }, 400);
+    const rows: Array<[string, unknown]> = applicable.map((key) => [key, readDotted(parsed.data, key)]);
+    const unknownKeys = rows.filter(([, value]) => value === undefined).map(([key]) => key);
+    if (unknownKeys.length) return ctx.json(apiError('unknown_config_key', `${unknownKeys.join('、')} 不是 schema 里的配置路径`).body, 400);
+    const subsumed = writeConfigRows(rows, 'webui:import');
+    dependencies.events.emit('config.changed', { keys: applicable });
+    return ctx.json({ ok: true, data: { keys: applicable, skipped: [...pinned], subsumed } });
+  });
   // 策略本身是代码里的单一来源（TOOL_POLICY），但「现在这台机器上开着没有」只在 tools.overrides 里，
   // 不一起返回的话工具页只能显示一份与运行时无关的静态表。
   app.get('/api/tools', (ctx) => {
@@ -899,6 +1068,36 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     return ctx.json({ ok: true, data: body });
   });
   app.post('/api/sandbox/probe', async (ctx) => ctx.json({ ok: true, data: await dependencies.sandbox?.probe() ?? { available: false, error: 'sandbox_unconfigured' } }));
+  /**
+   * 拉取沙箱镜像（docs/09 §3.7）。**只做 pull，不做 build** —— build 要有 Dockerfile 上下文、
+   * 会跑任意构建指令、耗时以分钟计，那是部署动作不是控制台按钮。镜像名取自当前配置，
+   * 不收请求体里的名字：让 owner 从界面上指定任意镜像等于绕开 `sandbox.image` 这道配置。
+   */
+  app.post('/api/sandbox/image', async (ctx) => {
+    if (!dependencies.sandbox) return ctx.json(apiError('not_implemented', '这个部署没有装配 Sandbox', 500).body, 500);
+    const config = currentConfig().sandbox;
+    if (config.mode !== 'docker') return ctx.json(apiError('sandbox_not_docker', `当前 sandbox.mode=${config.mode}，没有镜像可拉`).body, 400);
+    const result = await dependencies.sandbox.pullImage();
+    return result.ok ? ctx.json({ ok: true, data: result }) : ctx.json(apiError('image_pull_failed', result.error ?? '拉取失败').body, 502);
+  });
+  /**
+   * 审批规则的逐行试跑（docs/09 §3.7）：拿一条样例输入过一遍**运行时那份** `ApprovalRules`，
+   * 回报哪几条命中、最终风险档位。在界面上自己再实现一遍匹配必然与运行时漂移 —— 而「以为配了
+   * 审批其实永不命中」正是这条规则最容易出的错。
+   */
+  app.post('/api/approvals/test', async (ctx) => {
+    const body = await ctx.req.json<{ rules?: unknown[]; tool?: string; input?: unknown }>().catch(() => null);
+    if (!body?.tool) return ctx.json(apiError('invalid_body', 'body 需要 { tool, input?, rules? }').body, 400);
+    // 规则先过一遍完整 schema（`approval.rules` 的那条 superRefine 会拦下编译不了的正则），
+    // 再交给运行时那份匹配器 —— 试跑一个自己都不合法的规则表毫无意义。
+    const rules = body.rules ?? currentConfig().approval.rules;
+    const merged = mergeDotted(currentConfig(), { 'approval.rules': rules });
+    if (!merged.ok) return ctx.json(invalidKey(merged).body, 400);
+    const parsed = runtimeConfigSchema.safeParse(merged.value);
+    if (!parsed.success) return ctx.json({ ok: false, error: { code: 'invalid_config', message: '规则校验失败', details: parsed.error.issues.map((issue) => ({ path: issue.path.join('.'), message: issue.message })) } }, 400);
+    const matched = testApprovalRules(parsed.data.approval.rules, body.tool, body.input ?? {});
+    return ctx.json({ ok: true, data: matched });
+  });
   app.get('/api/prompts', (ctx) => ctx.json({ ok: true, data: dependencies.db.prepare('SELECT * FROM memory_docs ORDER BY scope,subject').all() }));
   app.get('/api/prompts/:id', (ctx) => { const row = dependencies.db.prepare('SELECT * FROM memory_docs WHERE id=?').get(ctx.req.param('id')) as { path?: string } | undefined; if (!row?.path) return ctx.json(apiError('not_found', '文档不存在', 404).body, 404); return ctx.json({ ok: true, data: { ...row, content: readFileSync(row.path, 'utf8') } }); });
   app.get('/api/prompts/:id/revisions', (ctx) => ctx.json({ ok: true, data: dependencies.db.prepare('SELECT id,doc_id AS docId,ts,actor,turn_id AS turnId,chat_id AS chatId,user_id AS userId,op,diff,bytes_after AS bytesAfter FROM memory_revisions WHERE doc_id=? ORDER BY ts DESC,id DESC LIMIT 200').all(ctx.req.param('id')) }));
@@ -1070,7 +1269,12 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     });
     return new Response(stream, { headers: { 'content-type': 'application/x-ndjson; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' } });
   });
-  app.get('/api/logs', (ctx) => ctx.json({ ok: true, data: dependencies.operations.logs(Math.min(1000, Number(ctx.req.query('size') ?? 200)), ctx.req.query('traceId')) }));
+  // `minLevel` 让总览页的「最近错误」卡片真的只看 warn 以上（docs/09 §3.1）。
+  app.get('/api/logs', (ctx) => {
+    const minLevel = ctx.req.query('minLevel');
+    const level = minLevel && ['debug', 'info', 'warn', 'error'].includes(minLevel) ? minLevel as 'debug' | 'info' | 'warn' | 'error' : undefined;
+    return ctx.json({ ok: true, data: dependencies.operations.logs(Math.min(1000, Number(ctx.req.query('size') ?? 200)), ctx.req.query('traceId'), level) });
+  });
   app.get('/api/logs/trace/:traceId', (ctx) => ctx.json({ ok: true, data: dependencies.operations.logs(2000, ctx.req.param('traceId')) }));
   app.get('/api/logs/blob', (ctx) => { try { const path = safeRef(currentConfig().logs.dir, ctx.req.query('ref') ?? ''); return existsSync(path) ? ctx.text(readFileSync(path, 'utf8')) : ctx.json(apiError('not_found', '日志载荷不存在', 404).body, 404); } catch { return ctx.json(apiError('invalid_ref', '非法日志引用', 403).body, 403); } });
   // 对话详情里的 JSON 按 DETAIL_MAX_CHARS 截断（单个 span 的请求体能到几百 KB），排查时要能拿到完整的那一份。
@@ -1084,6 +1288,26 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     return new Response(JSON.stringify(value, null, 2), { headers: { 'content-type': 'application/json; charset=utf-8', 'content-disposition': contentDisposition(`${row.kind}-${ctx.req.param('id')}.json`) } });
   });
   app.get('/api/usage', (ctx) => ctx.json({ ok: true, data: dependencies.db.prepare('SELECT * FROM usage_ledger ORDER BY ts DESC LIMIT 1000').all() }));
+  /**
+   * 用量的时间范围 + 维度聚合（docs/09 §3.11）。**聚合逻辑早就写好了**——
+   * `UsageLedger.report(from,to,groupBy)` 六个维度一个不少，只是从来没有端点调过它，
+   * 界面上因此只有一张不分维度的明细表。这里就是把那条路接上。
+   */
+  app.get('/api/usage/report', (ctx) => {
+    const groupBy = ctx.req.query('groupBy') ?? 'day';
+    if (!['day', 'chat', 'user', 'model', 'alias', 'agent'].includes(groupBy)) return ctx.json(apiError('invalid_group_by', `维度只能是 day|chat|user|model|alias|agent，收到 ${groupBy}`).body, 400);
+    const now = Date.now();
+    const from = Number(ctx.req.query('from') ?? now - 30 * 86_400_000);
+    const to = Number(ctx.req.query('to') ?? now);
+    if (!Number.isFinite(from) || !Number.isFinite(to) || from > to) return ctx.json(apiError('invalid_range', 'from/to 必须是毫秒时间戳且 from ≤ to').body, 400);
+    const rows = dependencies.ledger?.report(from, to, groupBy as 'day') ?? [];
+    // chat / user 维度的 bucket 是裸 id，界面上认不出是谁。在这里补显示名，别让前端再实现一遍
+    // `principals` 的反查规则（会话页已经有一份，两份必然漂移）。
+    const labelled = ['chat', 'user'].includes(groupBy)
+      ? (rows as Array<{ bucket: string | null }>).map((row) => ({ ...row, label: principalLabel(dependencies.db, groupBy === 'chat' ? 'chat' : 'user', row.bucket) }))
+      : rows;
+    return ctx.json({ ok: true, data: { groupBy, from, to, rows: labelled } });
+  });
   const QUOTA_UNIMPLEMENTED = KNOWN_UNIMPLEMENTED_CONFIG_KEYS.filter((key) => key.startsWith('quota.'));
   interface CounterRow { scope: 'global' | 'chat' | 'user'; subject: string; window: 'day' | 'month'; bucket: string; costUsd: number; reservedUsd: number; turns: number; updatedAt: number }
   /** 「花了多少」在 quota_counters 里，「上限是多少」在配置里，两边只有 (scope,window) 能对上。
@@ -1142,6 +1366,19 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
   });
   app.get('/api/tasks', (ctx) => ctx.json({ ok: true, data: dependencies.db.prepare('SELECT * FROM tasks ORDER BY updated_at DESC LIMIT 500').all() }));
   app.post('/api/maintenance/:action', (ctx) => { const action = ctx.req.param('action'); const result = action === 'backup' ? dependencies.maintenance.backup() : action === 'vacuum' ? (dependencies.maintenance.vacuum(), 'ok') : action === 'cleanup-logs' ? dependencies.maintenance.cleanup() : action === 'gc-files' ? dependencies.maintenance.gcFiles() : action === 'rebuild-fts' ? (dependencies.maintenance.rebuildFts(), 'ok') : null; return result === null ? ctx.json(apiError('unknown_action', '未知维护操作', 404).body, 404) : ctx.json({ ok: true, data: result }); });
+  /**
+   * `[重启进程]`（docs/09 §3.13）。**先回响应再退出** —— 在同一个 tick 里 `process.exit` 会让
+   * 这次请求连响应都收不到，界面上表现成「点了没反应」。走 `dependencies.restart` 而不是
+   * 直接 `process.exit`：优雅关闭的那套（排空轮次、刷日志、WAL checkpoint）在 `main.ts` 里，
+   * 服务器包不该也不能重实现一遍。
+   *
+   * **没有 supervisor 时进程不会自己回来** —— 界面上的二次确认必须写明这一点。
+   */
+  app.post('/api/restart', (ctx) => {
+    if (!dependencies.restart) return ctx.json(apiError('not_implemented', '这个部署没有装配重启入口', 500).body, 500);
+    setTimeout(() => { void dependencies.restart?.('webui'); }, 100).unref?.();
+    return ctx.json({ ok: true, data: { restarting: true, note: '没有 systemd / docker 这类 supervisor 时进程不会自动拉起' } });
+  });
   app.get('/api/events', (ctx) => {
     let cleanup = (): void => undefined;
     const stream = new ReadableStream({
@@ -1169,6 +1406,24 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
   app.use('/*', serveStatic({ root: webRoot }));
   app.get('*', (ctx) => existsSync(resolve(webRoot, 'index.html')) ? ctx.html(readFileSync(resolve(webRoot, 'index.html'), 'utf8')) : ctx.text('LuoLiCore WebUI 尚未构建', 503));
   return app;
+}
+
+/**
+ * 一次性登录 token 的内存表。**导出的是签发函数而不是这张表** —— 让装配方直接往里塞
+ * 等于多一个能凭空造 owner session 的入口。
+ */
+const loginTokens = new Map<string, { expiresAt: number }>();
+
+/** 由 Telegram 的 `/webui` 命令调用（owner 私聊）。返回明文 token，调用方负责只发给 owner 本人。 */
+export function issueLoginToken(ttlMs = 5 * 60_000): { token: string; expiresAt: number } {
+  const now = Date.now();
+  for (const [value, entry] of loginTokens) if (entry.expiresAt <= now) loginTokens.delete(value);
+  // 有界：`/webui` 被连点时不该让这张表无限涨。最多留 16 个未用的。
+  while (loginTokens.size >= 16) loginTokens.delete(loginTokens.keys().next().value!);
+  const token = randomBytes(32).toString('base64url');
+  const expiresAt = now + ttlMs;
+  loginTokens.set(token, { expiresAt });
+  return { token, expiresAt };
 }
 
 export function setupToken(): { token: string; expiresAt: number } {

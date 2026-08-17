@@ -95,7 +95,7 @@ NODE_ENV=production
 | 🚧 `tools.web.summarizeWithAlias` | 要在 `web_fetch` 里插一次模型调用：计费、配额、取消、失败降级都得跟着走一遍 |
 | 🚧 `media.groupDebounceMs` | 相册合并要按 `media_group_id` 在触发路径上缓冲 update，与并发和认领水位有交互（`concurrency.coalesceSameUserMs` 做的是按人合并） |
 | 🚧 `db.ftsTokenizer` | 换 tokenizer 要追加迁移重建 `messages_fts`，而「trigram 还是 jieba」是 [14 §2](./14-open-questions.md) Q3 的未决问题 |
-| 🚧 `webui.basePath` · `webui.publicUrl` | 部署形态的键。`publicUrl` 的唯一消费者是尚未实现的 `/webui` 一次性登录链接（[09 §2.3](./09-webui.md)），两者要一起做 |
+| 🚧 `webui.basePath` | 子路径挂载：要给所有路由加前缀、改静态资源 base、改 SPA 的 router base，三处一起动 |
 
 ```yaml
 # ============================================================ general
@@ -489,7 +489,7 @@ webui:
   host: 127.0.0.1                 # 需重启 · ★ 默认回环
   port: 8787                      # 需重启
   basePath: /
-  publicUrl: ''                   # 用于 /webui 一次性登录链接
+  publicUrl: ''                   # 热更新 · /webui 生成登录链接时的前缀；没填就明说生成不出来，而不是发一条打不开的链接
   # 下面这几项都是**每请求**从 `currentConfig()` 现读的（`requestIp` / `allowedOrigin` / 登录限流 /
   # `createSession` / `activePasswordHash`），改完下一个请求就按新值走 —— 只有 host / port 例外，
   # 它们在 `serve()` 时就绑定了。WebUI 一度把这几项标成「需重启」，让人白重启一次（docs/21 · G-CFG-05）。

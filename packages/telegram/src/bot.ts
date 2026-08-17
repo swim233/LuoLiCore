@@ -30,6 +30,8 @@ export interface TelegramDependencies {
   concurrency: TurnConcurrency;
   onTurn?: (turn: RuntimeTurnContext, reservation: QuotaReservation | null) => Promise<string | MainAgentStreamResult>;
   estimateTurnCost?: (inputTokens: number, key: string) => number | null;
+  /** 签发一次性登录 token（`@luoli/server` 的 `issueLoginToken`）。缺它时 `/webui` 明说不可用。 */
+  issueLoginToken?: () => { token: string; expiresAt: number };
   /** 告警分发。缺它时这几条只落日志 —— 别让「装配方没给」变成静默崩溃。 */
   alerts?: { fire(kind: 'quota_global_exceeded' | 'consecutive_turn_failures', summary: string, data?: Record<string, unknown>, key?: string): void };
   log: LogSink;
@@ -162,6 +164,7 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
     { name: 'forgetme', minRole: 'limited', usage: '/forgetme', description: '清空自己的私有记忆（仅私聊）' },
     { name: 'whoami', minRole: 'limited', usage: '/whoami', description: '自己的角色与有效权限' },
     { name: 'usage', minRole: 'owner', usage: '/usage', description: '累计用量' },
+    { name: 'webui', minRole: 'owner', usage: '/webui', description: '生成一次性控制台登录链接（仅私聊，5 分钟有效）' },
     { name: 'model', minRole: 'trusted', usage: '/model [alias]', description: '查看/固定本会话模型别名' },
     { name: 'whois', minRole: 'owner', usage: '/whois <id>', description: '查某个主体的角色' },
     { name: 'grant', minRole: 'owner', usage: '/grant <user|chat> <id> <role>', description: '授权' },
@@ -194,6 +197,25 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
     if (!access) return;
     const detail = access.effectiveRole === 'owner' ? `\n${JSON.stringify(dependencies.operations.dashboard())}` : '';
     await ctx.reply(`LuoLiCore ${process.env.npm_package_version ?? 'dev'}\n运行正常\n有效权限：${access.effectiveRole}${detail}`);
+  });
+  /**
+   * 一次性登录链接（docs/09 §2.3）。**只在 owner 私聊里给** —— 群里发出来等于把 owner 全权限
+   * 递给屏幕前的所有人，而这条链接换的是一个不需要口令的 session。
+   *
+   * 链接自己不进归档：`/webui` 是 `HANDLED_COMMANDS`，命令消息本来就不进上下文（docs/14 A6），
+   * 但回复是 bot 发的，所以这里显式不走 `scoped.append` —— 一个能登录的 URL 落进消息表，
+   * 泄露面比口令还大。
+   */
+  bot.command('webui', async (ctx) => {
+    const access = await requireRole(ctx.update.update_id, 'owner', (text) => ctx.reply(text));
+    if (!access) return;
+    if (!access.isPrivate) { await ctx.reply('这个命令只在私聊里用 —— 登录链接不该出现在群里。'); return; }
+    const base = currentConfig().webui.publicUrl.trim().replace(/\/$/, '');
+    if (!base) { await ctx.reply('还没配 `webui.publicUrl`，生成不出可点的链接。去设置页填上对外可访问的地址（例如 https://luoli.example.com）。'); return; }
+    const issued = dependencies.issueLoginToken?.();
+    if (!issued) { await ctx.reply('这个部署没装配 WebUI，登录链接不可用。'); return; }
+    dependencies.log.event({ level: 'warn', kind: 'webui.action', summary: 'one-time login link issued via /webui', userId: access.userId });
+    await ctx.reply(`${base}/login?t=${issued.token}\n\n5 分钟内有效、只能用一次，进程重启即失效。别转发。`, { link_preview_options: { is_disabled: true } });
   });
   bot.command('new', async (ctx) => {
     const key = contextKey({ chatId: String(ctx.chat.id), messageThreadId: ctx.message?.message_thread_id ?? null }, config.context.scope);

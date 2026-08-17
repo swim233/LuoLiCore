@@ -25,6 +25,23 @@ describe('Telegram trigger matching', () => {
     expect([...registered].sort()).toEqual([...HANDLED_COMMANDS].sort());
     expect([...documented].sort()).toEqual([...HANDLED_COMMANDS].sort());
   });
+
+  /**
+   * `/webui` 的三条腿必须同时在（docs/09 §2.3 明写了要有这条断言）：命令白名单、bot 侧的
+   * handler、服务端换取 session 的端点与签发函数。少任何一条，用户发出的 `/webui` 都会石沉大海
+   * ——上一轮就是因为「名字留在白名单里但服务端没写」才把它整个摘掉的（docs/20 · W-TG-01）。
+   */
+  it('keeps /webui wired on both sides', () => {
+    const bot = readFileSync('packages/telegram/src/bot.ts', 'utf8');
+    const server = readFileSync('packages/server/src/app.ts', 'utf8');
+    expect(HANDLED_COMMANDS.has('webui')).toBe(true);
+    expect(bot).toContain("bot.command('webui'");
+    expect(bot).toContain('issueLoginToken');
+    expect(server).toContain("app.post('/api/auth/token'");
+    expect(server).toContain('export function issueLoginToken');
+    // 换 session 的端点必须在鉴权中间件的放行名单里，否则它自己就要求先登录。
+    expect(server).toContain("ctx.req.path === '/api/auth/token'");
+  });
   it('routes /ask into the AI flow and leaves unknown slash text alone', () => {
     // doc 08 §8：/ask 等价 @bot，是唯一进 AI 流程的命令。
     expect(matchTrigger(context('/ask 今天几号'), trigger, 1, 'mybot')).toBe('ask');

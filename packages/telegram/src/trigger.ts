@@ -24,6 +24,9 @@ export interface TriggerConfig {
  */
 export const HANDLED_COMMANDS: ReadonlySet<string> = new Set([
   'start', 'help', 'new', 'undo', 'ctx', 'cancel', 'tasks', 'model', 'memory', 'forgetme', 'whoami', 'whois', 'grant', 'revoke', 'usage', 'ping',
+  // `/webui` 与 `POST /api/auth/token` + `issueLoginToken` 三者绑死：少任何一个，命令都会石沉大海
+  // （docs/20 · W-TG-01 就是这么来的）。`tests/api.contract.test.ts` 有一条断言把三者锁在一起。
+  'webui',
 ]);
 
 /** offset 0 的 `bot_command` 实体解析出的命令名（小写、去掉 `@suffix`）。不是命令、或后缀不匹配时返回 null。 */

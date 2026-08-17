@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import { serve } from '@hono/node-server';
 import { ArchiveRepository, OperationsRepository, PrincipalRepository, TurnRepository, closeDatabase, migrateDatabase, modelAliasKey, openDatabase, readAppKv, readPersistedConfig, recomputeMessageTokens, recoverAfterCrash, writeAppKv } from '@luoli/db';
 import { AgentManager, AgentResultStore, AlertDispatcher, ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, FileTools, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, ModelRegistry, PathJail, PluginManager, PromptAssembler, PromptDocuments, ProviderStore, QuotaGuard, Sandbox, Scheduler, Secrets, SkillLoader, STABLE_PROMPT_BLOCKS, TOOL_POLICY, ToolRegistry, TurnConcurrency, TurnRegistry, UsageLedger, assembleMainPrompt, configJsonSchema, loadConfig, perChatConfig, registerBuiltins, rejectedWakewords, runSubAgent, streamMainAgent, type SubAgentRuntimeEvent } from '@luoli/core';
-import { createServer, EventStreamRegistry, setupToken, type PromptPreviewResult } from '@luoli/server';
+import { createServer, EventStreamRegistry, issueLoginToken, setupToken, type PromptPreviewResult } from '@luoli/server';
 import type { RuntimeTurnContext } from '@luoli/shared';
 import { TelegramTools, createTelegramBot } from '@luoli/telegram';
 
@@ -251,7 +251,7 @@ const rebuildModels = (): void => { const live = configStore.snapshot(); modelRe
   // 是每一轮都以 model alias unavailable 失败，而运维那边只有一条 config.invalid 躺在日志里。
   if (!modelRegistry.aliases().length) alerts.fire('all_providers_down', '没有任何可用的模型别名：所有 provider 都不可用或未配置'); log.setSecrets([process.env.BOT_TOKEN ?? '', process.env.LUOLI_MASTER_KEY ?? '', live.tools.web.searchApiKey, ...providers.allDecryptedKeys()]); };
 const eventStreams = new EventStreamRegistry();
-const server = createServer({ config: configStore, db, operations, principals, archive, context, providers, modelCatalog, approvals: approval, rebuildModels, maintenance, events, log,
+const server = createServer({ config: configStore, db, operations, principals, archive, context, providers, modelCatalog, approvals: approval, rebuildModels, maintenance, ledger, restart: (reason) => restart(reason), events, log,
   memory, promptDocuments, skills, plugins, mcp, agents, turnRegistry, sandbox, eventStreams, previewPrompt, dryRunAgent, configSchema: configJsonSchema(), startedAt, setup });
 // `webui.enabled=false`：整个 HTTP 面不监听。这不只是省一个端口 —— 单口令 + owner 全权限的
 // 控制台是这个部署最大的攻击面，只跑 Telegram 的场景该能把它整个关掉。
@@ -279,7 +279,7 @@ events.subscribe((event) => {
 log.event({ level: 'info', kind: 'system.start', summary: `${config.general.name} started`, data: { name: config.general.name, webui: `${config.webui.host}:${config.webui.port}`, providerSecrets: secrets.available } });
 if (process.env.BOT_TOKEN) {
   bot = await createTelegramBot(process.env.BOT_TOKEN, { config: configStore, db, principals, archive, operations, context, turns, quota, memory, plugins, tools: toolRegistry, approvals: approval,
-    registry: turnRegistry, concurrency: turnConcurrency, log, alerts,
+    registry: turnRegistry, concurrency: turnConcurrency, log, alerts, issueLoginToken: () => issueLoginToken(),
     estimateTurnCost: (inputTokens, key) => modelRegistry.estimate(readAppKv<string>(db, modelAliasKey(key)) ?? perChatConfig(configStore.snapshot(), key).agent.main.modelAlias, inputTokens),
     // 用 turn.config 而不是全局快照：本轮的 perChat 覆盖已经在 openTurn 时合并进去了。
     onTurn: (turn, reservation) => { const live = turn.config as Readonly<typeof config>; return streamMainAgent(turn, { config: live, db, registry: modelRegistry, tools: toolRegistry,
@@ -297,6 +297,16 @@ if (process.env.BOT_TOKEN) {
   log.event({ level: 'warn', kind: 'system.start', summary: 'BOT_TOKEN missing; Telegram ingress disabled' });
 }
 let shuttingDown = false;
+/**
+ * WebUI 的 `[重启进程]`：走同一条优雅关闭路径，只是把退出码设成 `SIGTERM` 之外的一档，
+ * 好让 supervisor 明确区分「运维要求重启」与「系统在停机」。**没有 supervisor 时进程不会
+ * 自己回来** —— 端点的响应里写着这句话，界面的二次确认也要写。
+ */
+const restart = async (reason: string): Promise<void> => {
+  log.event({ level: 'warn', kind: 'system.restart', summary: `Restart requested by ${reason}` });
+  await shutdown(`restart:${reason}`);
+  process.exitCode = 0;
+};
 const shutdown = async (signal: string): Promise<void> => {
   if (shuttingDown) return; shuttingDown = true;
   log.event({ level: 'info', kind: 'system.stop', summary: `Stopping on ${signal}` });

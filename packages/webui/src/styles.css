@@ -18,6 +18,12 @@
   --amber: #bc7610;
   --green: #17915f;
   --shadow: 0 18px 50px rgba(39, 28, 75, .08);
+  /* 图表色板复用既有语义色：新造一套必然与页面上其余部分互相打架。四色够用 —— 系列超过四条
+     的图本来就该换成条形排行（UiBarChart），而不是在折线上叠更多颜色。 */
+  --chart-0: #6d45d6;
+  --chart-1: #0f93b5;
+  --chart-2: #bc7610;
+  --chart-3: #c64c7f;
 }
 
 .dark {
@@ -30,6 +36,10 @@
   --surface-2: #202631;
   --border: #2a3140;
   --primary: #9a7cf4;
+  --chart-0: #9a7cf4;
+  --chart-1: #3fb6d4;
+  --chart-2: #e0a03a;
+  --chart-3: #e0779f;
   --primary-soft: #2d2450;
   --cyan: #56c6df;
   --rose: #ed8eb6;
@@ -754,3 +764,63 @@ code { font-family: var(--font-mono); font-size: .82rem; }
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; }
   .ui-btn:hover:not(:disabled) { transform: none; }
 }
+
+
+/* ── 图表原语（自建 SVG，不引图表库；CSP 也不允许从 CDN 取）───────────────────────── */
+.ui-chart { display: grid; gap: 8px; }
+.ui-chart svg { width: 100%; height: auto; overflow: visible; }
+.chart-grid { stroke: var(--border); stroke-width: 1; }
+.chart-axis { fill: var(--muted); font-family: var(--font-mono); font-size: 9px; }
+.chart-line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+/* 面积只是给折线一点重量感，不是主要编码通道 —— 两条线叠起来时透明度要低到互相看得见。 */
+.chart-area { opacity: .1; }
+.chart-legend { display: flex; flex-wrap: wrap; gap: 14px; margin: 0; padding: 0; list-style: none; color: var(--muted); font-size: .72rem; }
+.chart-legend li { display: flex; align-items: center; gap: 6px; }
+.chart-legend i { width: 10px; height: 10px; border-radius: 3px; }
+
+.ui-bars { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.ui-bars li { display: grid; grid-template-columns: minmax(90px, 30%) 1fr auto; align-items: center; gap: 10px; font-size: .78rem; }
+.ui-bars li.rest { color: var(--muted); font-style: italic; }
+.bar-label { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.bar-track { height: 8px; border-radius: 99px; background: var(--surface-2); overflow: hidden; }
+.bar-track i { display: block; height: 100%; border-radius: 99px; transition: width .25s ease; }
+.bar-value { font-family: var(--font-mono); font-size: .72rem; }
+.ui-bars li.empty { display: block; text-align: center; }
+
+.ring-row { display: flex; flex-wrap: wrap; gap: 18px; align-items: center; }
+.ui-ring { display: flex; align-items: center; gap: 10px; }
+.ui-ring svg { width: 68px; height: 68px; flex: none; }
+.ring-track { fill: none; stroke: var(--surface-2); stroke-width: 8; }
+.ring-value { fill: none; stroke-width: 8; stroke-linecap: round; transition: stroke-dasharray .3s ease; }
+.ui-ring.ok .ring-value { stroke: var(--green); }
+.ui-ring.warn .ring-value { stroke: var(--amber); }
+.ui-ring.danger .ring-value { stroke: var(--rose); }
+.ring-text { display: grid; gap: 1px; }
+.ring-text b { font-size: 1.05rem; }
+.ring-text small { color: var(--muted); font-size: .7rem; }
+.ring-detail { font-family: var(--font-mono); }
+
+/* ── 用量页的两张图并排；窄屏叠起来 ───────────────────────────────────────────── */
+.usage-charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; margin-bottom: 18px; }
+.usage-detail-title { margin: 6px 0 10px; font-size: .9rem; }
+.surface.inner { padding: 16px; box-shadow: none; }
+
+/* 最近错误那张卡片的行现在是按钮（点了跳 trace），按钮的默认样式要压掉。 */
+.log-list > .log-row { display: grid; grid-template-columns: 58px 130px 1fr auto; align-items: center; gap: 12px; min-height: 48px;
+  border: 0; border-top: 1px solid var(--border); background: none; color: inherit; font: inherit; font-size: .78rem; text-align: left; cursor: pointer; padding: 0; }
+.log-list > .log-row:hover { background: var(--surface-2); }
+.log-list > .log-row:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+
+/* ── 审批规则试跑 ────────────────────────────────────────────────────────── */
+.rule-test-result { display: grid; gap: 10px; margin-bottom: 18px; }
+.rule-report { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.rule-report li { display: grid; grid-template-columns: auto auto 1fr; align-items: center; gap: 10px; font-size: .78rem; color: var(--muted); }
+.rule-report li.matched { color: var(--ink); }
+
+/* ── 原始 YAML 编辑器 ─────────────────────────────────────────────────────── */
+.yaml-editor { width: 100%; font-family: var(--font-mono); font-size: .76rem; line-height: 1.55; tab-size: 2;
+  padding: 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-2); color: var(--ink); resize: vertical; }
+.yaml-editor:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+
+/* 重启是唯一一个能让整个部署下线的维护按钮，要看得出来它跟别的不一样。 */
+.maintenance-grid > article.danger { border-color: color-mix(in srgb, var(--rose) 45%, var(--border)); }

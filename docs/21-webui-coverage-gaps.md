@@ -342,6 +342,27 @@ G-API-10/11/12 与 G-SRV-02/03/04 均已完成；按本文「运行时已有、W
 
 - `health` 事件仍只在 provider 测试与 MCP 重连后发送，没有周期心跳；顶栏的新鲜度依据业务事件，
   不把连接状态伪装成周期健康检查。
+
+### 6.2 第五轮：docs/09 的 11 处 🚧 已清零
+
+按需求方「全面推进」的决定，`docs/09` 里那 11 处 `🚧` 全部补上（doc 09 的 🚧 计数现在是 **0**）：
+
+| 项 | 落点 |
+|---|---|
+| 一次性登录链接 | `/webui` 命令 + `issueLoginToken()` + `POST /api/auth/token`，三者由 CI 断言锁死 |
+| Dashboard 趋势折线 + 额度环 | `/api/dashboard` 带回 7 天 trend（本地日分桶、缺的天补 0）；环只画 global 档 |
+| 最近错误分级 | `GET /api/logs?minLevel=warn&size=10`，过滤在服务端 |
+| 系统信息占用 | `/api/health/detail` 的 DB / WAL / workspace 字节数，只统计不清理 |
+| 沙箱拉取镜像 | `POST /api/sandbox/image`（只 pull 不 build） |
+| 审批规则试跑 | `POST /api/approvals/test`，用运行时那份 `ApprovalRules` |
+| 用量维度 + 图表 | `GET /api/usage/report`（聚合本来就实现好了，只是没人调过）+ 自建 SVG 图表原语 |
+| 原始 YAML | `GET/PUT /api/config/yaml`，解析在服务端 |
+| 重启进程 | `POST /api/restart`，先回响应再走优雅关闭 |
+| 配置导出 / 导入 | `GET /api/config/export` + `POST /api/config/import` |
+
+**顺带修掉一个会静默丢配置的判据**：导出侧原本拿整条点分路径去测 `/key|secret|token|password/i`，
+于是 `context.limit.tokens`（叶子是 "tokens"）会被当成密钥跳过 —— 一份导出里静静地少几项真配置。
+改成「叶子段 + 值是非空字符串」，与 `publicConfig` / `revisionJson` 同一套口径。
 - `perChat` 白名单里的 `character` 仍是兼容性保留项；会话专属人设继续走
   `memory/CHARACTER.<chat>.md`，覆盖面板不展示这项。
 
