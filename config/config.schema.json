@@ -210,7 +210,7 @@
               "default": [
                 "洛璃"
               ],
-              "description": "群聊唤醒词，一行一条。普通字符串按「包含」匹配；以 ^ 开头按正则处理（只扫消息前 4096 字符，过长或有回溯风险的正则会被静默跳过）。"
+              "description": "群聊唤醒词，一行一条。普通字符串按「包含」匹配且忽略大小写（nori 同时匹配 Nori）；以 ^ 开头按正则处理，按你写的大小写求值，要忽略就写 ^(?i)nori（只扫消息前 4096 字符，过长或有回溯风险的正则会被静默跳过）。"
             },
             "wakewordMinLength": {
               "type": "integer",
@@ -1021,7 +1021,7 @@
               "type": "integer",
               "exclusiveMinimum": 0,
               "default": 128,
-              "description": "沙箱容器的进程数上限，用来挡 fork 炸弹。"
+              "description": "沙箱能额外开多少进程，用来挡 fork 炸弹。docker 模式是容器的 --pids-limit；jail 模式按「当前系统占用 + 这个数」折算成 ulimit -u。owner 等 bypassRoles 角色不受它约束。"
             },
             "readOnlyRoot": {
               "type": "boolean",

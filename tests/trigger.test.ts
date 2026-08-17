@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { HANDLED_COMMANDS, matchTrigger } from '@luoli/telegram';
-import { configSchema } from '@luoli/core';
+import { checkWakeword, configSchema } from '@luoli/core';
 
 function context(text: string, chatType: 'group' | 'channel' = 'group') {
   return { chat: { id: 1, type: chatType }, message: { text, entities: text.startsWith('/') ? [{ type: 'bot_command', offset: 0, length: text.split(' ')[0]!.length }] : [] } } as never;
@@ -38,6 +38,24 @@ describe('Telegram trigger matching', () => {
   it('rejects channels by default and ignores too-short wakewords', () => {
     expect(matchTrigger(context('洛璃', 'channel'), trigger, 1, 'mybot')).toBeNull();
     expect(matchTrigger(context('x'), { ...trigger, private: false, mention: false, reply: false, command: false, wakewords: ['x'], wakewordMinLength: 2 }, 1, 'mybot')).toBeNull();
+  });
+  // 手机输入法把句首自动大写，所以「配了 nori，发 Nori 不理我」是唤醒词最常见的失效方式：
+  // 用户看到的只是 bot 时灵时不灵，日志里连一条记录都没有（根本没进 turn）。
+  it('matches contains-style wakewords regardless of case, and leaves regex case to the author', () => {
+    const off = { ...trigger, private: false, mention: false, reply: false, command: false };
+    for (const text of ['nori 帮我查一下', 'Nori 帮我查一下', 'NORI 帮我查一下', '喂 Nori']) {
+      expect(matchTrigger(context(text), { ...off, wakewords: ['nori'] }, 1, 'mybot')).toBe('wakeword');
+    }
+    // 配的是大写也一样：折叠发生在匹配时，不是写入时。
+    expect(matchTrigger(context('nori 在吗'), { ...off, wakewords: ['Nori'] }, 1, 'mybot')).toBe('wakeword');
+    // 正则按作者写的大小写求值……
+    expect(matchTrigger(context('Nori 在吗'), { ...off, wakewords: ['^nori'] }, 1, 'mybot')).toBeNull();
+    // ……要忽略大小写就自己写内联标志，两种拼法都得当成正则，否则用户拿到的是一个
+    // 永远匹配不上、面板还标着「包含」的模式。
+    for (const pattern of ['^(?i)nori', '(?i)^nori']) {
+      expect(checkWakeword(pattern, 2).kind).toBe('regex');
+      expect(matchTrigger(context('Nori 在吗'), { ...off, wakewords: [pattern] }, 1, 'mybot')).toBe('wakeword');
+    }
   });
   it('matches nested quantifiers through the linear engine without blocking', () => {
     const started = performance.now();

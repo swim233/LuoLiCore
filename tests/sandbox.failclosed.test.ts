@@ -1,6 +1,6 @@
 import { rmSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { Sandbox, ToolRegistry } from '@luoli/core';
 import type { ApprovalBroker, LogSink, SandboxConfig } from '@luoli/core';
@@ -51,6 +51,38 @@ describe('sandbox fail-closed visibility', () => {
     const result = await sandbox.probe();
     expect(result.available).toBe(false);
     expect(sandbox.plan('trusted').allowed).toBe(false);
+  });
+});
+
+// bypassRoles 命中时 plan 给的是 'host' —— 「不受沙箱约束」。run() 曾经只分 docker / 非 docker
+// 两支，于是 owner 也吃了 jail 的 ulimit 前缀，私聊里每条 bash 都回 `fork: 资源暂时不可用`。
+// 这两条都必须让命令真的 fork（管道），否则 bash 会把末条命令直接 exec 掉，根本测不到。
+describe('sandbox host execution bypasses the jail limits', () => {
+  const workspace = resolve('./data/sandbox-host.test');
+  // pidsLimit 取默认的 128 而不是 fixture 里的 8：基线是 spawn 前采样一次的，可用余量就是 pidsLimit
+  // 本身，而 vitest 自己在不停起停线程 —— 设 8 的话这条用例会真的 fork 失败（docs/05 §5.4）。
+  const jailable = { ...sandboxConfig, mode: 'jail' as const, workspaceDir: './data/sandbox-host.test', memoryMb: 1024, pidsLimit: 128, maxOutputBytes: 65_536, defaultTimeoutMs: 20_000, maxTimeoutMs: 20_000 };
+  afterAll(() => rmSync(workspace, { recursive: true, force: true }));
+
+  it('runs an owner pipeline on the host without a ulimit prologue', async () => {
+    const sandbox = new Sandbox(jailable);
+    expect(sandbox.plan('owner').mode).toBe('host');
+    const result = await sandbox.run('/bin/echo a | /bin/cat', 'owner', workspace, new AbortController().signal);
+    expect(result.stderr).not.toMatch(/fork/);
+    expect(result.stdout.trim()).toBe('a');
+    expect(result.ok).toBe(true);
+  });
+
+  // ulimit -u 是 RLIMIT_NPROC，按 UID 全局的**任务数**算（线程，不是进程，也不是当前进程树）。
+  // 直接取 pidsLimit 的话宿主上早就超了，子 shell 一次 fork 都做不成。
+  it('raises the jail nproc ceiling above the host baseline instead of using pidsLimit verbatim', async () => {
+    const sandbox = new Sandbox(jailable);
+    expect(sandbox.plan('trusted').mode).toBe('jail');
+    const limit = await sandbox.run('ulimit -u', 'trusted', workspace, new AbortController().signal);
+    expect(Number(limit.stdout.trim())).toBeGreaterThan(jailable.pidsLimit);
+    const piped = await sandbox.run('/bin/echo a | /bin/cat', 'trusted', workspace, new AbortController().signal);
+    expect(piped.stderr).not.toMatch(/fork/);
+    expect(piped.stdout.trim()).toBe('a');
   });
 });
 

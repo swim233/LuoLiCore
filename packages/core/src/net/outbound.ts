@@ -70,7 +70,14 @@ function requestOnce(target: SafeTarget, init: RequestInit, maxBytes: number): P
   const { promise, resolve, reject } = Promise.withResolvers<GuardedResponse>();
   const headers = Object.fromEntries(new Headers(init.headers).entries());
   headers.host = target.url.host;
-  const lookupPinned: LookupFunction = (_hostname, _options, callback) => callback(null, target.address, target.family);
+  // Node ≥20 的 autoSelectFamily 默认开，net.connect 用 `{ all: true }` 调 lookup，此时回调要的是
+  // 数组；回传字符串会让它读到 `addresses[0].address === undefined`，抛 `Invalid IP address: undefined`。
+  // 表现是 web_fetch 在现代 Node 上 100% 失败，而 tests/web.test.ts 只覆盖了 SSRF 拒绝路径，
+  // 放行路径一次都没真正跑过，所以这条一直没被发现。
+  const lookupPinned: LookupFunction = (_hostname, options, callback) => {
+    if (options.all) callback(null, [{ address: target.address, family: target.family }]);
+    else callback(null, target.address, target.family);
+  };
   const request = (target.url.protocol === 'https:' ? httpsRequest : httpRequest)(target.url, {
     method: init.method ?? 'GET', headers, lookup: lookupPinned,
     ...(target.url.protocol === 'https:' ? { servername: target.url.hostname } : {}),

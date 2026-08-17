@@ -1,12 +1,37 @@
 import { spawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, statSync } from 'node:fs';
+import { userInfo } from 'node:os';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import type { Role } from '@luoli/shared';
 
 /** 本进程是否跑在容器里。docker 和 podman 各自留的标记文件。 */
 function detectContainer(): boolean {
   return existsSync('/.dockerenv') || existsSync('/run/.containerenv');
+}
+
+/**
+ * `ulimit -u` 对应 RLIMIT_NPROC，内核按 **UID 全局的任务数**计数 —— 而且数的是**线程**不是进程，
+ * 也不是当前进程树。直接设成 `pidsLimit` 的后果是宿主上该用户的线程数早就远超它（一个桌面会话
+ * 轻松四千多），于是子 shell 连一次 fork 都做不成：bash 打五行
+ * `fork: retry: Resource temporarily unavailable`，重试约 15 秒后以 254 退出。
+ * 所以按「当前占用 + pidsLimit」设：fork 炸弹最多再撑 pidsLimit 个任务，正常命令照跑。
+ * 计数与 spawn 之间必然有窗口，但 jail 本就不是安全边界（§5.4），松一点好过必然失败。
+ * 读不到 /proc（非 Linux）时返回 null —— 宁可不设这一条，也不要设成一个注定 fork 失败的值。
+ */
+function nprocCeiling(pidsLimit: number): number | null {
+  try {
+    const uid = userInfo().uid;
+    let tasks = 0;
+    for (const entry of readdirSync('/proc')) {
+      if (!/^\d+$/.test(entry)) continue;
+      try {
+        if (statSync(`/proc/${entry}`).uid !== uid) continue;
+        tasks += readdirSync(`/proc/${entry}/task`).length;
+      } catch { /* 进程在遍历途中退出 */ }
+    }
+    return tasks + pidsLimit;
+  } catch { return null; }
 }
 
 export interface SandboxConfig {
@@ -121,6 +146,19 @@ export class Sandbox {
     return { allowed: true, mode };
   }
 
+  /**
+   * jail 的 ulimit 前缀。**只有 `plan.mode === 'jail'` 能套上**：bypassRoles 命中时 plan 给的是
+   * `'host'`，意思就是「这个角色不受沙箱约束」（§5.2）。曾经 run() 只分 docker / 非 docker 两支，
+   * 于是 owner 的每条命令都吃了这段 ulimit —— 表现是私聊里 bash 一律
+   * `fork: 资源暂时不可用`，看起来像「沙箱坏了」，实际上 owner 压根不该进沙箱。
+   */
+  #jailed(command: string, timeoutMs: number): string {
+    const limits = [`-v ${Math.ceil(this.#cfg().memoryMb * 1024)}`, `-t ${Math.ceil(timeoutMs / 1000)}`, `-f ${Math.ceil(this.#cfg().maxOutputBytes / 512)}`];
+    const nproc = nprocCeiling(this.#cfg().pidsLimit);
+    if (nproc !== null) limits.push(`-u ${nproc}`);
+    return `ulimit ${limits.join(' ')}; exec /bin/sh -c ${JSON.stringify(command)}`;
+  }
+
   async run(command: string, role: Role, workspace: string, abortSignal: AbortSignal, timeoutMs = this.#cfg().defaultTimeoutMs, turnId = 'adhoc'): Promise<SandboxResult> {
     if (abortSignal.aborted) return { ok: false, exitCode: null, stdout: '', stderr: 'cancelled', truncated: false, durationMs: 0, killed: true, oom: false };
     const plan = this.plan(role, workspace);
@@ -139,10 +177,9 @@ export class Sandbox {
     if (this.#cfg().readOnlyRoot) dockerArgs.push('--read-only');
     dockerArgs.push(this.#cfg().image, 'timeout', '-s', 'KILL', String(Math.ceil(timeout / 1000)), 'sh', '-c', command);
     const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => ['PATH', 'LANG', 'TZ'].includes(key) && !/(TOKEN|KEY|SECRET|LUOLI|BOT_TOKEN)/i.test(key)));
-    const limitedCommand = `ulimit -v ${Math.ceil(this.#cfg().memoryMb * 1024)} -t ${Math.ceil(timeout / 1000)} -f ${Math.ceil(this.#cfg().maxOutputBytes / 512)} -u ${this.#cfg().pidsLimit}; exec /bin/sh -c ${JSON.stringify(command)}`;
     const child = plan.mode === 'docker'
       ? spawn(this.#cfg().dockerBin, dockerArgs, { stdio: ['ignore', 'pipe', 'pipe'] })
-      : spawn('/bin/sh', ['-c', limitedCommand], { cwd: workspace, env: { ...env, HOME: workspace }, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+      : spawn('/bin/sh', ['-c', plan.mode === 'jail' ? this.#jailed(command, timeout) : command], { cwd: workspace, env: { ...env, HOME: workspace }, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
     const started = performance.now();
     const cap = this.#cfg().maxOutputBytes;
     const stdoutDecoder = new StringDecoder('utf8');

@@ -117,7 +117,7 @@ trigger:
   reply: true
   command: true
   channels: false                 # 热更新 · 是否响应 channel_post
-  wakewords: ['洛璃']              # 热更新 · 字符串=包含匹配；以 ^ 开头=正则（见下方可用性规则）
+  wakewords: ['洛璃']              # 热更新 · 字符串=包含匹配（忽略大小写）；以 ^ 开头=正则（见下方可用性规则）
   wakewordMinLength: 2
   requireTextAfterMention: false
   ignoreEditedAsTrigger: true
@@ -125,6 +125,11 @@ trigger:
 
 # 唤醒词可用性（checkWakeword，运行时匹配与 WebUI 写入端共用一份）：
 #   · 去掉前导 ^ 后短于 wakewordMinLength → 整条跳过
+#   · 包含型（不以 ^ 开头）忽略大小写：'nori' 同时匹配 Nori / NORI —— 手机输入法会自动大写句首，
+#     大小写敏感等于让唤醒词只在特定拼写下生效，用户只看到「bot 时灵时不灵」
+#   · 正则型按作者写的大小写求值，要忽略大小写自己写 '^(?i)nori'（RE2 支持内联标志）
+#   · 判成正则的前缀有两种：'^' 与 '(?i)' 这类内联标志组 —— 后者是写「不敏感正则」最自然的拼法，
+#     当成包含匹配的话用户拿到的是一个永远匹配不上、面板还标着「包含」的模式
 #   · 以 ^ 开头按正则处理（u 标志，只扫描消息前 4096 字符）；正则超 128 字符、含嵌套量词
 #     / 反向引用 / lookahead / lookbehind 的一律不求值直接跳过（ReDoS 防线）
 #   · 被跳过是静默的，因此启动时以 config.invalid 告警列出；WebUI 与 API 写入时直接 400 拒绝
