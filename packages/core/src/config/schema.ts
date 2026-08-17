@@ -52,18 +52,27 @@ export const HOT_RELOADABLE_CONFIG_KEYS = [
   'access.defaultUserRole', 'access.defaultChatRole', 'access.archiveBlocked',
   'trigger',
   'context.limit', 'context.hardCapRatio', 'context.background', 'context.rebase.injectNotice', 'context.tokenRatioAlpha',
-  'concurrency.turnTimeoutMs',
-  'prompt.maxTokens',
-  'agent.main', 'agent.agents',
+  // 合并窗口是 bot.ts 的 config Proxy 每条消息现读的，改完下一条消息就按新值走。
+  'concurrency.turnTimeoutMs', 'concurrency.coalesceSameUserMs',
+  // 提示词装配拿的是 `turn.config`（每轮 perChatConfig 重算一次），改完下一轮生效。
+  'prompt.maxTokens', 'prompt.includeToolCatalog', 'prompt.runtimeBlock',
+  // 名字只在两处露面：WebUI 的品牌位（每次 config.changed 重拉即变）与启动日志那一行
+  // （那行是启动时盖的章，不会追溯改写）。
+  'general.name',
+  'agent.main', 'agent.agents', 'agent.maxConcurrentSubagents', 'agent.progressThrottleMs',
   // 四项都是每轮从 `turn.config` 现读的（runtime.ts 的 wrappedFor / subagent 的 provider 块），
   // 改完下一轮生效；在途那一轮沿用开轮时的值。
   'provider.maxRetries', 'provider.retryBaseMs', 'provider.retryMaxMs', 'provider.requestTimeoutMs', 'provider.streamIdleTimeoutMs', 'provider.catalog',
+  // 冷却期在每次 `rebuild()` 时读，而 `provider.*` 的任何改动都会触发 rebuildModels。
+  'provider.healthDownCooldownMinutes',
   // 出网放行开关每次探测现读（app.ts 的 probeProvider 调用点、ModelCatalog 的 options getter）。
   // 它是「出事时运维会去点的那个开关」那一类，冻住等于界面说改成功了、下一次探测照样打私网。
   'provider.allowPrivateBaseUrl',
   // memory_write 读的是本轮那份 turn.config（perChatConfig 每轮重算），不再是启动快照（docs/22 · D-CFG-01）。
   'memory.pubWriteMinRole',
-  'tools.maxRegistered', 'tools.maxCallsPerTurn', 'tools.maxConsecutiveErrors', 'tools.defaultTimeoutMs', 'tools.overrides', 'tools.exec', 'tools.tg',
+  // archive 的四个 limit 走 `inputSchemaFor(context)`，每轮从 `turn.config` 取一次 —— 改完下一轮
+  // 模型看到的 schema 就是新的上限。
+  'tools.maxRegistered', 'tools.maxCallsPerTurn', 'tools.maxConsecutiveErrors', 'tools.defaultTimeoutMs', 'tools.overrides', 'tools.exec', 'tools.tg', 'tools.archive',
   'approval.enabled', 'approval.ttlMs', 'approval.rules', 'approval.skipForOwner', 'approval.rememberWithinTurn',
   // captureBodies 是每轮从 turn.config 现读的（runtime.ts 的 bodyForLog、/api/turns/:id/detail），
   // 改完下一轮就生效。漏在白名单外时 WebUI 会对着排障时最常翻的这个开关说「需重启」。
@@ -83,63 +92,33 @@ export const HOT_RELOADABLE_CONFIG_KEYS = [
 
 export const KNOWN_UNIMPLEMENTED_CONFIG_KEYS = [
   // 运行时从来没有读过它：doc 11 说「仅用于日志与 WebUI 标题」，但两处都没接线（docs/20 · W-CFG-02）。
-  'general.name',
-  'general.locale',
-  'telegram.dropPendingOnStart',
   'telegram.webhook.url',
   'telegram.webhook.path',
   'telegram.webhook.secretToken',
   'telegram.notifyEdits',
-  'trigger.cooldownMsPerUser',
   // 编辑消息永远不开新轮次（docs/20 · W-TG-05）。开关留着是为了未来兼容，但当前一律按背景消息归档。
   'trigger.ignoreEditedAsTrigger',
-  'context.background.showTime',
-  'context.background.includeNonText',
   'context.rebase.markMeta',
   'context.cacheCommits',
-  'concurrency.coalesceSameUserMs',
   'cancel.commitPartial',
-  'prompt.includeToolCatalog',
-  'prompt.runtimeBlock.showQuota',
-  'prompt.runtimeBlock.showContextWatermark',
-  'prompt.runtimeBlock.showWorkspace',
   'memory.pubWriteRequiresApproval',
   'memory.autoApplyCompaction',
   'memory.requireSourceTag',
-  'agent.maxConcurrentSubagents',
   'agent.askArbiter',
   'agent.askEscalateToUser',
-  'agent.progressThrottleMs',
-  'provider.healthDownCooldownMinutes',
   'tools.fs.allowHostFsForOwner',
-  'tools.archive.defaultSearchLimit',
-  'tools.archive.maxSearchLimit',
-  'tools.archive.defaultReadLimit',
-  'tools.archive.maxReadLimit',
   'tools.web.summarizeWithAlias',
   'tools.web.allowlist',
   'tools.web.denylist',
-  'approval.allowInitiator',
   'output.flushOnSentence',
   'output.parseMode',
   'output.typingWhileWorking',
   'output.placeholderAfterMs',
   'output.maxMentions',
-  'media.maxImagesPerTurn',
   'media.groupDebounceMs',
-  'media.stickerAsImage',
-  'media.downloadVoice',
-  'media.extract.codeExtensions',
-  'skills.enabled',
-  'plugins.enabled',
-  'plugins.watch',
-  'mcp.connectTimeoutMs',
   'db.ftsTokenizer',
   'logs.gzipAfterDays',
   'logs.redactPatterns',
-  'quota.perTurn.maxToolCalls',
-  'quota.perTurn.maxSubagents',
-  'quota.perTurn.maxDurationMs',
   'quota.onExceeded.notifyOwner',
   'quota.warnAtRatio',
   'webui.enabled',
@@ -157,7 +136,8 @@ export const configSchema = z.object({
   general: z.object({
     name: z.string().default('洛璃'),
     timezone: ianaTimezone.default('Asia/Shanghai'),
-    locale: z.string().default('zh-CN'),
+    // `general.locale` 已从 schema 摘除：i18n 在 docs/14 §4 明确「第一版不做」，留一个运行时
+    // 从不读的语言开关只会让运维以为改了就能换界面语言。真做 i18n 时和 `webui/src/i18n` 一起加回来。
     maintenanceCron: z.string().default('0 4 * * *'),
     shutdown: z.object({ graceMs: z.number().int().positive().default(30_000) }).default({}),
   }).default({}),
@@ -214,7 +194,9 @@ export const configSchema = z.object({
     web: z.object({ maxResponseBytes: z.number().int().positive().default(2_097_152), timeoutMs: z.number().int().positive().default(15_000), retries: z.number().int().nonnegative().max(5).default(2), summarizeWithAlias: z.string().default('low'), allowlist: z.array(z.string()).default([]), denylist: z.array(z.string()).default(['*.local', '*.internal']), searchProvider: z.enum(['', 'brave', 'serper', 'tavily']).default(''), searchApiKey: z.string().default('') }).default({}),
   }).default({}),
   sandbox: z.object({ mode: z.enum(['none', 'jail', 'docker']).default('docker'), bypassRoles: z.array(role).default(['owner']), image: z.string().default('luoli-sandbox:latest'), network: z.enum(['none', 'bridge']).default('none'), memoryMb: z.number().positive().default(512), cpus: z.number().positive().default(1), pidsLimit: z.number().int().positive().default(128), readOnlyRoot: z.boolean().default(true), tmpfsMb: z.number().positive().default(64), workspaceDir: z.string().default('./data/workspace'), hostWorkspaceDir: z.string().default(''), dockerBin: z.string().default('docker') }).default({}),
-  approval: z.object({ enabled: z.boolean().default(true), ttlMs: z.number().int().positive().default(180_000), skipForOwner: z.boolean().default(true), allowInitiator: z.boolean().default(false), rememberWithinTurn: z.boolean().default(true), rules: z.array(approvalRuleSchema).default([]) }).default({}),
+  // `allowInitiator` 已摘除：WebUI 只有一个 owner 身份（docs/14 A15），裁决权下放不到发起人，
+  // 这个开关在当前架构里没有能实现它的落点（docs/21 §6）。
+  approval: z.object({ enabled: z.boolean().default(true), ttlMs: z.number().int().positive().default(180_000), skipForOwner: z.boolean().default(true), rememberWithinTurn: z.boolean().default(true), rules: z.array(approvalRuleSchema).default([]) }).default({}),
   output: z.object({ mode: z.enum(['stream', 'once']).default('stream'), replyDelayMs: z.number().int().nonnegative().max(30_000).default(2000), streamBufferMs: z.number().int().nonnegative().max(30_000).default(2000), streamIntervalMs: z.number().int().positive().default(2000), streamMinDeltaChars: z.number().int().positive().default(24), flushOnSentence: z.boolean().default(true), maxMessageChars: z.number().int().min(100).max(4000).default(3900), parseMode: z.enum(['MarkdownV2', 'HTML', 'none']).default('MarkdownV2'), typingWhileWorking: z.boolean().default(true), placeholderAfterMs: z.number().int().positive().default(4000), maxMentions: z.number().int().nonnegative().default(3) }).default({}),
   media: z.object({ dir: z.string().default('./data/files'), maxImageBytes: z.number().int().positive().default(8_388_608), maxDocBytes: z.number().int().positive().default(20_971_520), maxImageEdge: z.number().int().positive().default(1568), maxImagesPerTurn: z.number().int().positive().default(4), groupDebounceMs: z.number().int().positive().default(1500), stickerAsImage: z.boolean().default(false), downloadVoice: z.boolean().default(true), extract: z.object({ enabled: z.boolean().default(true), maxChars: z.number().int().positive().default(40_000), inlineChars: z.number().int().positive().default(4000), codeExtensions: z.array(z.string()).default([]) }).default({}) }).default({}),
   skills: z.object({ enabled: z.boolean().default(true), dir: z.string().default('./skills'), watch: z.boolean().default(true), defaultMinRole: role.default('trusted') }).default({}),
@@ -222,7 +204,10 @@ export const configSchema = z.object({
   mcp: z.object({ enabled: z.boolean().default(false), connectTimeoutMs: z.number().int().positive().default(15_000), healthCheckCron: z.string().default('*/5 * * * *'), defaultMinRole: role.default('trusted'), servers: z.array(mcpServerSchema).default([]) }).default({}),
   db: z.object({ path: z.string().default('./data/luoli.db'), backupKeep: z.number().int().nonnegative().default(5), vacuumCron: z.string().default('0 5 * * 0'), ftsTokenizer: z.enum(['trigram', 'unicode61']).default('trigram') }).default({}),
   logs: z.object({ level: z.enum(['debug', 'info', 'warn', 'error']).default('info'), dir: z.string().default('./logs'), captureBodies: z.boolean().default(true), bodyMaxBytes: z.number().int().positive().default(262_144), maxFileMb: z.number().positive().default(128), retentionDays: z.number().int().nonnegative().default(30), gzipAfterDays: z.number().int().nonnegative().default(3), console: z.enum(['pretty', 'json', 'off']).default('pretty'), redactPatterns: z.array(z.string()).default([]) }).default({}),
-  quota: z.object({ enabled: z.boolean().default(true), requirePricing: z.boolean().default(true), minReserveUsd: z.number().nonnegative().default(0.02), global: z.object({ daily: nullableMoney.default(5), monthly: nullableMoney.default(100) }).default({}), perChat: z.object({ daily: nullableMoney.default(1), monthly: nullableMoney.default(null) }).default({}), perUser: z.object({ daily: nullableMoney.default(0.5), monthly: nullableMoney.default(null), byRole: z.record(z.object({ daily: nullableMoney.optional(), monthly: nullableMoney.optional() })).default({}) }).default({}), perTurn: z.object({ maxCostUsd: z.number().positive().default(0.5), maxSteps: z.number().int().positive().default(12), maxToolCalls: z.number().int().positive().default(40), maxSubagents: z.number().int().positive().default(10), maxDurationMs: z.number().int().positive().default(600_000) }).default({}), rateLimit: z.object({ turnsPerUserPerHour: z.number().int().positive().default(30), turnsPerChatPerHour: z.number().int().positive().default(100), concurrentPerUser: z.number().int().positive().default(2) }).default({}), onExceeded: z.object({ reply: z.boolean().default(true), message: z.string().default('今天的额度用完了（已用 {spent}/{limit}），{resetAt} 重置。'), notifyOwner: z.boolean().default(true) }).default({}), warnAtRatio: z.number().gt(0).lte(1).default(0.8) }).default({}),
+  quota: z.object({ enabled: z.boolean().default(true), requirePricing: z.boolean().default(true), minReserveUsd: z.number().nonnegative().default(0.02), global: z.object({ daily: nullableMoney.default(5), monthly: nullableMoney.default(100) }).default({}), perChat: z.object({ daily: nullableMoney.default(1), monthly: nullableMoney.default(null) }).default({}), perUser: z.object({ daily: nullableMoney.default(0.5), monthly: nullableMoney.default(null), byRole: z.record(z.object({ daily: nullableMoney.optional(), monthly: nullableMoney.optional() })).default({}) }).default({}), // perTurn 只留真正生效的两项。maxToolCalls / maxSubagents / maxDurationMs 已摘除：
+  // 它们各有一个真正在管这件事的同名键（`tools.maxCallsPerTurn` / `agent.maxSubagentsPerTurn` /
+  // `concurrency.turnTimeoutMs`），并存等于让运维在错的那个格子里改（docs/22 · N-CFG-02 一脉）。
+  perTurn: z.object({ maxCostUsd: z.number().positive().default(0.5), maxSteps: z.number().int().positive().default(12) }).default({}), rateLimit: z.object({ turnsPerUserPerHour: z.number().int().positive().default(30), turnsPerChatPerHour: z.number().int().positive().default(100), concurrentPerUser: z.number().int().positive().default(2) }).default({}), onExceeded: z.object({ reply: z.boolean().default(true), message: z.string().default('今天的额度用完了（已用 {spent}/{limit}），{resetAt} 重置。'), notifyOwner: z.boolean().default(true) }).default({}), warnAtRatio: z.number().gt(0).lte(1).default(0.8) }).default({}),
   webui: z.object({ enabled: z.boolean().default(true), host: z.string().default('127.0.0.1'), port: z.number().int().positive().default(8787), basePath: z.string().default('/'), publicUrl: z.string().default(''), sessionTtlHours: z.number().positive().default(168), passwordHash: z.string().default(''), trustProxy: z.boolean().default(false), trustedProxyHops: z.number().int().min(1).max(16).default(1), allowOrigins: z.array(z.string()).default([]), loginRateLimit: z.object({ attempts: z.number().int().positive().default(5), windowMinutes: z.number().int().positive().default(15) }).default({}) }).default({}),
   alerts: z.object({ notifyOwner: z.boolean().default(true), dedupeMinutes: z.number().positive().default(30), webhookUrl: z.string().default(''), on: z.array(z.string()).default([]) }).default({}),
   perChat: z.record(z.unknown()).default({}),

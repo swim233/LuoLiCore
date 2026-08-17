@@ -1,10 +1,9 @@
 import { rmSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { ArchiveRepository, ContextRepository, closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
-import { ContextEngine } from '@luoli/core';
-import type { Config } from '@luoli/core';
+import { ContextEngine, configSchema } from '@luoli/core';
 
-const config = { general: { timezone: 'UTC' }, context: { scope: 'chat', background: { enabled: false, maxPerTurn: 20 }, rebase: { injectNotice: false }, limit: { tokens: 32_000, maxMessages: 200, minKeepTurns: 1 }, cacheCommits: 64, tokenRatioAlpha: 0.2 } } as Config;
+const config = configSchema.parse({ general: { timezone: 'UTC' }, context: { scope: 'chat', background: { enabled: false, maxPerTurn: 20 }, rebase: { injectNotice: false }, limit: { tokens: 32_000, maxMessages: 200, minKeepTurns: 1 }, cacheCommits: 64, tokenRatioAlpha: 0.2 } });
 
 describe('context reset races and token accounting', () => {
   it('inserts a reset note for a turn whose base was reset while running', async () => {

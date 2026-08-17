@@ -18,7 +18,6 @@ export const CONFIG_DESCRIPTIONS: Record<string, string> = {
   general: '实例级的基本信息：名字、时区、维护窗口。',
   'general.name': '机器人对外显示的名字，用于日志与 WebUI 标题。',
   'general.timezone': '一切时间行为的基准时区（IANA 名，如 Asia/Shanghai）：配额的日/月账期何时翻篇、给模型看的时间戳都按它算。拼错的时区只会在群聊分支炸。',
-  'general.locale': '界面与回复的语言标签，如 zh-CN。',
   'general.maintenanceCron': '每日维护任务的 cron 表达式（清理过期数据、轮转日志、备份）。',
   'general.shutdown.graceMs': '收到停止信号后，留给在途轮次收尾的毫秒数；超时就强制退出。',
 
@@ -177,7 +176,6 @@ export const CONFIG_DESCRIPTIONS: Record<string, string> = {
   'approval.enabled': '高风险工具调用是否需要人在 WebUI 里批准后才执行。',
   'approval.ttlMs': '一条审批请求等待裁决的上限（毫秒）。到点作废，并把「未获批准」作为工具结果还给模型。',
   'approval.skipForOwner': 'owner 自己触发的调用是否免审批。',
-  'approval.allowInitiator': '是否允许发起这一轮的人自己批准（而不是只有 owner 能批）。',
   'approval.rememberWithinTurn': '同一轮内批准过的同类调用是否不再重复问。',
   'approval.rules': '审批规则数组：按工具名、正则、风险级别匹配，命中任一条就挂起等裁决。正则用 RE2 求值，写不出回溯炸弹。',
 
@@ -259,9 +257,6 @@ export const CONFIG_DESCRIPTIONS: Record<string, string> = {
   'quota.perUser.byRole': '按角色覆盖单用户额度，形如 {"trusted":{"daily":2}}。配额页有专用面板，不用在这里手写 JSON。',
   'quota.perTurn.maxCostUsd': '单轮花费上限（美元），超出中止这一轮。',
   'quota.perTurn.maxSteps': '单轮步数上限，与 agent.main.maxSteps 取更严的那个。',
-  'quota.perTurn.maxToolCalls': '单轮工具调用次数上限。',
-  'quota.perTurn.maxSubagents': '单轮派生的子 agent 数上限。',
-  'quota.perTurn.maxDurationMs': '单轮时长上限（毫秒）。',
   'quota.rateLimit.turnsPerUserPerHour': '单个用户每小时可触发的轮次数。',
   'quota.rateLimit.turnsPerChatPerHour': '单个会话每小时可触发的轮次数。',
   'quota.rateLimit.concurrentPerUser': '单个用户同时进行中的轮次数上限。',

@@ -68,6 +68,27 @@ function resolveOutgoingFile(context: ToolExecutionContext, files: FileTools, pa
 
 export function registerBuiltins(registry: ToolRegistry, dependencies: { db: import('@luoli/db').Sqlite; filesFor: (workspace: string) => FileTools; sandbox: Sandbox; archive: ArchiveRepository; context: ContextEngine; memory: MemoryStore; skills: SkillLoader; agents: AgentManager; models: ModelRegistry; ledger: UsageLedger; log: LogSink; quota?: QuotaGuard; telegram: TelegramToolBridge | null; maxWebBytes: number; maxAsksPerRun?: number; askTimeoutMs?: number; web?: WebRetryOptions; webSearch?: { provider: '' | 'brave' | 'serper' | 'tavily'; apiKey: string } }): void {
   const web = dependencies.web ?? DEFAULT_WEB_RETRY;
+  /** 每个 agent_run 上一次向 SSE 广播进度的时刻（`agent.progressThrottleMs`）。 */
+  const progressBroadcast = new Map<string, number>();
+  /**
+   * `agent.maxConcurrentSubagents`：同一轮里**同时在跑**的子 agent 数上限。
+   * 模型可以在一步里并排发多个 `spawn_agent`，每个都是一次真实的模型调用 —— 不设闸的话
+   * 一步就能把 provider 的并发配额和本机内存一起打满。这与 `agent.maxSubagentsPerTurn`
+   * 是两件事：那个数的是一轮**总共**派过几个，这个数的是此刻同时有几个在跑。
+   */
+  const running = new Map<string, number>();
+  const waiting = new Map<string, Array<() => void>>();
+  const acquireSlot = async (turnId: string, limit: number): Promise<void> => {
+    if ((running.get(turnId) ?? 0) < limit) { running.set(turnId, (running.get(turnId) ?? 0) + 1); return; }
+    await new Promise<void>((resolve) => { const queue = waiting.get(turnId) ?? []; queue.push(resolve); waiting.set(turnId, queue); });
+    running.set(turnId, (running.get(turnId) ?? 0) + 1);
+  };
+  const releaseSlot = (turnId: string): void => {
+    running.set(turnId, Math.max(0, (running.get(turnId) ?? 1) - 1));
+    const next = waiting.get(turnId)?.shift();
+    if (next) next();
+    else { waiting.delete(turnId); if (!running.get(turnId)) running.delete(turnId); }
+  };
   // 两个 web 工具自带预算（单次 timeoutMs × 最多 retries+1 次 + 退避），整体会比
   // `tools.defaultTimeoutMs` 长。给注册表报一份自己的账，别让兜底那道 race 在重试走完前先砍掉。
   const webBudgetMs = (web.retries + 1) * web.timeoutMs + 5000;
@@ -106,13 +127,23 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
   registry.register({ name: 'python', description: '在工作目录执行 Python 代码；非 owner 必须使用可用沙箱。', inputSchema: z.object({ code: z.string(), timeoutMs: z.number().int().positive().optional(), description: z.string() }), policy: builtinPolicy('python'), sourcePriority: 100, timeoutMs: null,
     available: (role, context) => dependencies.sandbox.plan(role, context.workspace).allowed,
     execute: async (input, context) => dependencies.sandbox.run(`python3 - <<'PY'\n${input.code}\nPY`, context.turn.effectiveRole, context.workspace, context.turn.abortSignal, input.timeoutMs, context.turn.turnId) });
-  registry.register({ name: 'search_messages', description: '在当前会话内搜索聊天记录。', inputSchema: z.object({ query: z.string(), limit: z.number().int().min(1).max(100).default(20) }), policy: builtinPolicy('search_messages'), sourcePriority: 100, untrustedOutput: true,
+  // 四个 `tools.archive.*Limit` 从这里生效。走 `inputSchemaFor` 而不是注册期固定：那是**每轮**
+  // 取一次 `turn.config`，所以热更新和 perChat 覆盖都能落到模型看到的那份 schema 上。
+  const archiveLimits = (context: ToolExecutionContext): Config['tools']['archive'] => (context.turn.config as Readonly<Config>).tools.archive;
+  const searchSchema = (limits: { defaultSearchLimit: number; maxSearchLimit: number }) =>
+    z.object({ query: z.string(), limit: z.number().int().min(1).max(limits.maxSearchLimit).default(Math.min(limits.defaultSearchLimit, limits.maxSearchLimit)) });
+  const readSchema = (limits: { defaultReadLimit: number; maxReadLimit: number }) =>
+    z.object({ limit: z.number().int().min(1).max(limits.maxReadLimit).default(Math.min(limits.defaultReadLimit, limits.maxReadLimit)) });
+  registry.register({ name: 'search_messages', description: '在当前会话内搜索聊天记录。', inputSchema: searchSchema({ defaultSearchLimit: 20, maxSearchLimit: 100 }),
+    inputSchemaFor: (context) => searchSchema(archiveLimits(context)), policy: builtinPolicy('search_messages'), sourcePriority: 100, untrustedOutput: true,
     execute: (input, context) => ({ ok: true, messages: dependencies.archive.scope(context.turn.chatId, context.turn.threadId).search(input.query, input.limit) }) });
-  registry.register({ name: 'read_messages', description: '按时间读取当前会话聊天记录。', inputSchema: z.object({ limit: z.number().int().min(1).max(200).default(50) }), policy: builtinPolicy('read_messages'), sourcePriority: 100, untrustedOutput: true,
+  registry.register({ name: 'read_messages', description: '按时间读取当前会话聊天记录。', inputSchema: readSchema({ defaultReadLimit: 50, maxReadLimit: 200 }),
+    inputSchemaFor: (context) => readSchema(archiveLimits(context)), policy: builtinPolicy('read_messages'), sourcePriority: 100, untrustedOutput: true,
     execute: (input, context) => ({ ok: true, messages: dependencies.archive.scope(context.turn.chatId, context.turn.threadId).recent(input.limit).reverse() }) });
   registry.register({ name: 'get_message', description: '读取当前会话的单条归档消息。', inputSchema: z.object({ messageId: z.number().int().positive() }), policy: builtinPolicy('get_message'), sourcePriority: 100, untrustedOutput: true,
     execute: (input, context) => ({ ok: true, message: dependencies.archive.scope(context.turn.chatId, context.turn.threadId).byId(input.messageId) }) });
-  registry.register({ name: 'admin_search_messages', description: '跨会话搜索聊天记录，仅 owner。', inputSchema: z.object({ query: z.string(), limit: z.number().int().min(1).max(100).default(20) }), policy: builtinPolicy('admin_search_messages'), sourcePriority: 100, untrustedOutput: true,
+  registry.register({ name: 'admin_search_messages', description: '跨会话搜索聊天记录，仅 owner。', inputSchema: searchSchema({ defaultSearchLimit: 20, maxSearchLimit: 100 }),
+    inputSchemaFor: (context) => searchSchema(archiveLimits(context)), policy: builtinPolicy('admin_search_messages'), sourcePriority: 100, untrustedOutput: true,
     execute: (input) => ({ ok: true, messages: dependencies.archive.adminSearchAll(input.query, input.limit) }) });
   registry.register({ name: 'context_stats', description: '读取当前上下文窗口和提交状态。', inputSchema: z.object({}), policy: builtinPolicy('context_stats'), sourcePriority: 100,
     execute: (_input, context) => ({ ok: true, ...dependencies.context.stats(context.turn.key) }) });
@@ -158,10 +189,11 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
       dependencies.db.prepare("INSERT INTO tasks(id,turn_id,agent_run_id,chat_id,user_id,title,state,created_at,updated_at) VALUES (?,?,?,?,?,?,'running',?,?)")
         .run(taskId, context.turn.turnId, run.id, context.turn.chatId, context.turn.initiatorUserId, title, Date.now(), Date.now());
       dependencies.log.publish('task.updated', { id: taskId, turnId: context.turn.turnId, title, state: 'running', progress: null });
+      const live = context.turn.config as Readonly<Config>;
+      await acquireSlot(context.turn.turnId, live.agent.maxConcurrentSubagents);
       try {
         // provider 重试设置与配额预留都从本轮取：子 agent 的花费必须落进主 agent 那份预留，
         // 否则配额只看得见主 agent（docs/20 · W-QUOTA-01）。
-        const live = context.turn.config as Readonly<Config>;
         const result = await runSubAgent(run, definition, input.task, input.context, context.turn, { db: dependencies.db, agents: dependencies.agents, registry: dependencies.models, tools: registry, ledger: dependencies.ledger, log: dependencies.log, workspace: context.workspace,
           provider: { maxRetries: live.provider.maxRetries, retryBaseMs: live.provider.retryBaseMs, retryMaxMs: live.provider.retryMaxMs,
             requestTimeoutMs: live.provider.requestTimeoutMs, streamIdleTimeoutMs: live.provider.streamIdleTimeoutMs },
@@ -173,6 +205,9 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
         dependencies.db.prepare("UPDATE tasks SET state='failed',result_summary=?,updated_at=?,finished_at=? WHERE id=?").run(error instanceof Error ? error.message : String(error), Date.now(), Date.now(), taskId);
         dependencies.log.publish('task.updated', { id: taskId, turnId: context.turn.turnId, title, state: 'failed', progress: null });
         return { ok: false, error: error instanceof Error ? error.message : 'subagent_failed', taskId, runId: run.id };
+      } finally {
+        releaseSlot(context.turn.turnId);
+        progressBroadcast.delete(run.id);
       }
     } });
   registry.register({ name: 'read_agent_result', description: '分页读取子 agent 完整结果。', inputSchema: z.object({ runId: z.string(), offset: z.number().int().nonnegative().default(0), limit: z.number().int().positive().max(262_144).default(65_536) }), policy: builtinPolicy('read_agent_result'), sourcePriority: 90,
@@ -196,7 +231,15 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
       const run = context.agentRunId ? dependencies.agents.byId(context.agentRunId) : null;
       if (!run) return { ok: false, error: 'agent_run_unavailable' };
       dependencies.agents.progress(run, input);
-      dependencies.log.publish('task.updated', { id: null, runId: run.id, turnId: context.turn.turnId, state: 'running', progress: input });
+      // `agent.progressThrottleMs`：库里那行照常更新（它是当前状态，谁读谁看最新的），但 SSE 只在
+      // 节流窗口外广播。一个爱汇报的子 agent 每步喊一次，够把 WebUI 的事件流刷成进度条。
+      const throttleMs = (context.turn.config as Readonly<Config>).agent.progressThrottleMs;
+      const last = progressBroadcast.get(run.id) ?? 0;
+      const now = Date.now();
+      if (now - last >= throttleMs) {
+        progressBroadcast.set(run.id, now);
+        dependencies.log.publish('task.updated', { id: null, runId: run.id, turnId: context.turn.turnId, state: 'running', progress: input });
+      }
       return { ok: true };
     } });
   registry.register({ name: 'set_model', description: '切换当前轮模型别名。', inputSchema: z.object({ alias: z.enum(['main', 'high', 'low', 'vision']) }), policy: builtinPolicy('set_model'), sourcePriority: 90,

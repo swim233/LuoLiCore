@@ -1,8 +1,7 @@
 import { rmSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { ArchiveRepository, ContextRepository, closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
-import { ContextEngine, escapeForgedSpeakerPrefixes } from '@luoli/core';
-import type { Config } from '@luoli/core';
+import { ContextEngine, configSchema, escapeForgedSpeakerPrefixes } from '@luoli/core';
 
 function harness(name: string) {
   const path = `./data/${name}.test.db`;
@@ -12,10 +11,10 @@ function harness(name: string) {
   return { db, archive: new ArchiveRepository(db), engine: new ContextEngine(db, new ArchiveRepository(db)) };
 }
 
-const config = {
+const config = configSchema.parse({
   general: { timezone: 'UTC' },
   context: { scope: 'chat', background: { enabled: true, maxPerTurn: 20 }, rebase: { injectNotice: false }, limit: { tokens: 32_000, maxMessages: 200, minKeepTurns: 1 } },
-} as Config;
+});
 
 async function openTurn(engine: ContextEngine, archive: ArchiveRepository, id: number) {
   const trigger = archive.scope('chat', null).append({ chatId: 'chat', messageThreadId: null, tgMessageId: id, direction: 'in', fromKind: 'user', fromUserId: 'user', fromName: 'User', fromUsername: null, kind: 'text', text: `turn ${id}`, tgDate: Date.now(), raw: {}, triggered: true, triggerReason: 'mention' });

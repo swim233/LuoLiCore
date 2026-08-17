@@ -1,8 +1,7 @@
 import { rmSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { ArchiveRepository, PrincipalRepository, closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
-import { ContextEngine } from '@luoli/core';
-import type { Config } from '@luoli/core';
+import { ContextEngine, configSchema } from '@luoli/core';
 
 function harness(name: string) {
   const path = `./data/${name}.test.db`;
@@ -10,7 +9,7 @@ function harness(name: string) {
   const db = openDatabase(path);
   migrateDatabase(db);
   const archive = new ArchiveRepository(db);
-  const config = { general: { timezone: 'UTC' }, context: { scope: 'chat', background: { enabled: true, maxPerTurn: 3 }, rebase: { injectNotice: false }, limit: { tokens: 32_000, maxMessages: 200, minKeepTurns: 1 }, cacheCommits: 64, tokenRatioAlpha: 0.2 } } as Config;
+  const config = configSchema.parse({ general: { timezone: 'UTC' }, context: { scope: 'chat', background: { enabled: true, maxPerTurn: 3 }, rebase: { injectNotice: false }, limit: { tokens: 32_000, maxMessages: 200, minKeepTurns: 1 }, cacheCommits: 64, tokenRatioAlpha: 0.2 } });
   return { db, archive, engine: new ContextEngine(db, archive), config };
 }
 

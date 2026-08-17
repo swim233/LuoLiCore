@@ -57,12 +57,20 @@ export class ModelRegistry {
 
   constructor(private readonly db: Sqlite, private readonly providers: ProviderStore) {}
 
-  rebuild(): void {
+  /**
+   * `provider.healthDownCooldownMinutes`：判成 `down` 的 provider 只在冷却期内被排除，过期后
+   * 下一次 `rebuild()` 放它回来再试一次。此前 `down` 是**永久**的 —— 一次网络抖动就能让一个
+   * provider 从模型链里消失，直到有人去 WebUI 手工点「测试连通性」。
+   * `provider.healthCheckCron` 定期调 `rebuild()`，冷却因此是自愈的。
+   */
+  rebuild(cooldownMinutes = 30): void {
     this.#models.clear();
     this.#info.clear();
     this.#chains.clear();
     this.#settings.clear();
-    const providerRows = this.db.prepare("SELECT id,name,kind,base_url AS baseUrl,headers_json AS headers FROM providers WHERE enabled=1 AND COALESCE(health_state,'up') <> 'down'").all() as ProviderRow[];
+    const providerRows = this.db.prepare(`SELECT id,name,kind,base_url AS baseUrl,headers_json AS headers FROM providers
+      WHERE enabled=1 AND (COALESCE(health_state,'up') <> 'down' OR COALESCE(health_checked_at,0) < ?)`)
+      .all(Date.now() - cooldownMinutes * 60_000) as ProviderRow[];
     const providerInstances = new Map<string, Provider>();
     for (const provider of providerRows) {
       const apiKey = this.providers.key(provider.id);
@@ -254,7 +262,7 @@ export interface MainPromptAssembly extends PromptBuildResult {
   runtime: string;
 }
 
-type PromptAssemblyDependencies = Pick<MainAgentDependencies, 'config' | 'tools' | 'prompts' | 'documents' | 'workspace' | 'skills' | 'agents'>;
+type PromptAssemblyDependencies = Pick<MainAgentDependencies, 'config' | 'tools' | 'prompts' | 'documents' | 'workspace' | 'skills' | 'agents' | 'quota' | 'reservation'>;
 
 /**
  * RUNTIME 块里的发起人。昵称与用户名是用户可控内容，`formatSpeakerIdentity` 已经清掉换行与
@@ -270,13 +278,23 @@ export function assembleMainPrompt(turn: RuntimeTurnContext, dependencies: Promp
   const activeTools = dependencies.tools.activeNames(turn.effectiveRole, toolContext);
   const documents = dependencies.documents.readForPrompt({ userId: turn.initiatorUserId, isPrivate: turn.isPrivate });
   const skillCatalog = dependencies.skills?.catalog(turn.effectiveRole).map((skill) => `- skill:${skill.name}: ${skill.description}`).join('\n') ?? '';
-  const catalog = [...dependencies.tools.catalog(turn.effectiveRole, toolContext).map((entry) => `- ${entry.name}: ${entry.description}`), skillCatalog].filter(Boolean).join('\n');
+  // `prompt.includeToolCatalog=false` 时只发工具名（RUNTIME 里那一行），不发描述。省的是每轮
+  // 几百到几千 token，代价是模型少了参数用法的提示 —— 所以默认开着。
+  const catalog = dependencies.config.prompt.includeToolCatalog
+    ? [...dependencies.tools.catalog(turn.effectiveRole, toolContext).map((entry) => `- ${entry.name}: ${entry.description}`), skillCatalog].filter(Boolean).join('\n')
+    : '';
+  const runtimeShow = dependencies.config.prompt.runtimeBlock;
+  const spent = dependencies.quota && dependencies.reservation ? dependencies.quota.status(dependencies.reservation) : null;
   const runtime = runtimeBlock({ now: new Date(), timezone: dependencies.config.general.timezone,
     chatDescription: `${turn.chatId} / ${turn.key}`, triggerDescription: initiatorDescription(turn), role: turn.effectiveRole,
     tools: activeTools, agents: dependencies.config.agent.agents.filter((agent) => ['blocked', 'limited', 'trusted', 'owner'].indexOf(turn.effectiveRole) >= ['blocked', 'limited', 'trusted', 'owner'].indexOf(agent.minRole)).map((agent) => `${agent.name}(${agent.description})`),
     contextMessages: turn.snapshot.messages.length, contextTokens: turn.snapshot.tokens, maxMessages: dependencies.config.context.limit.maxMessages,
-    maxTokens: dependencies.config.context.limit.tokens, workspace: dependencies.workspace, sandbox: dependencies.config.sandbox.mode });
-  const promptInput = { character: documents.character, assist: documents.assist, catalog, publicMemory: documents.publicMemory, runtime, maxTokens: dependencies.config.prompt.maxTokens };
+    maxTokens: dependencies.config.context.limit.tokens, workspace: dependencies.workspace, sandbox: dependencies.config.sandbox.mode,
+    // 只在真有本轮预留时才给得出额度；WebUI 的提示词预览没有预留，那一行本来就不该出现。
+    ...(spent ? { quota: `本轮已用 $${spent.committed.toFixed(4)} / 上限 $${dependencies.config.quota.perTurn.maxCostUsd.toFixed(2)}` } : {}),
+    show: { quota: runtimeShow.showQuota, contextWatermark: runtimeShow.showContextWatermark, workspace: runtimeShow.showWorkspace } });
+  const promptInput = { character: documents.character, assist: documents.assist, catalog, publicMemory: documents.publicMemory, runtime,
+    maxTokens: dependencies.config.prompt.maxTokens, includeCatalog: dependencies.config.prompt.includeToolCatalog };
   if (documents.privateMemory !== undefined) Object.assign(promptInput, { privateMemory: documents.privateMemory });
   return { ...dependencies.prompts.build(promptInput), activeTools, catalog, runtime };
 }

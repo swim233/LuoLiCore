@@ -17,11 +17,6 @@
               "default": "Asia/Shanghai",
               "description": "一切时间行为的基准时区（IANA 名，如 Asia/Shanghai）：配额的日/月账期何时翻篇、给模型看的时间戳都按它算。拼错的时区只会在群聊分支炸。"
             },
-            "locale": {
-              "type": "string",
-              "default": "zh-CN",
-              "description": "界面与回复的语言标签，如 zh-CN。"
-            },
             "maintenanceCron": {
               "type": "string",
               "default": "0 4 * * *",
@@ -1086,11 +1081,6 @@
               "default": true,
               "description": "owner 自己触发的调用是否免审批。"
             },
-            "allowInitiator": {
-              "type": "boolean",
-              "default": false,
-              "description": "是否允许发起这一轮的人自己批准（而不是只有 owner 能批）。"
-            },
             "rememberWithinTurn": {
               "type": "boolean",
               "default": true,
@@ -1746,24 +1736,6 @@
                   "exclusiveMinimum": 0,
                   "default": 12,
                   "description": "单轮步数上限，与 agent.main.maxSteps 取更严的那个。"
-                },
-                "maxToolCalls": {
-                  "type": "integer",
-                  "exclusiveMinimum": 0,
-                  "default": 40,
-                  "description": "单轮工具调用次数上限。"
-                },
-                "maxSubagents": {
-                  "type": "integer",
-                  "exclusiveMinimum": 0,
-                  "default": 10,
-                  "description": "单轮派生的子 agent 数上限。"
-                },
-                "maxDurationMs": {
-                  "type": "integer",
-                  "exclusiveMinimum": 0,
-                  "default": 600000,
-                  "description": "单轮时长上限（毫秒）。"
                 }
               },
               "additionalProperties": false,

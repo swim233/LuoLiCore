@@ -3,7 +3,7 @@ import type { ArchivedMessage, ArchiveRepository, CommitRow, ContextRepository, 
 import { ContextRepository as ScopedContextRepository } from '@luoli/db';
 import type { Config } from '../config/schema.js';
 import { KeyedMutex } from '../turn/keyed-mutex.js';
-import { estimateMessageTokens, estimateTextTokens, formatSpeakerIdentity, type MaterializedContext, type NewContextMessage, type Role, type RuntimeTurnContext } from '@luoli/shared';
+import { IMAGE_TOKEN_ESTIMATE, estimateMessageTokens, estimateTextTokens, formatSpeakerIdentity, type MaterializedContext, type NewContextMessage, type Role, type RuntimeTurnContext } from '@luoli/shared';
 import type { LogSink } from '../log/sink.js';
 export interface OpenTurnRequest {
   chatId: string;
@@ -72,22 +72,25 @@ export interface RenderOptions {
   timezone: string;
   /** `context.background.showUsername`：只管前缀里**附带**的 `@用户名`，不影响它作为显示名的兜底位。 */
   showUsername?: boolean;
+  /** `context.background.showTime`：关掉时前缀里不出现 `HH:mm`。发言人与回复标记照旧。 */
+  showTime?: boolean;
   quoted?: boolean;
 }
 
 export function renderArchivedMessage(message: ArchivedMessage, options: RenderOptions): NewContextMessage {
-  const { isPrivate, timezone, showUsername = true, quoted = false } = options;
+  const { isPrivate, timezone, showUsername = true, showTime = true, quoted = false } = options;
   const rawText = message.text ?? `[${message.kind}]`;
   const escaped = escapeForgedSpeakerPrefixes(rawText);
-  const time = formatClock(message.tgDate, timezone);
+  // 关掉时间时前缀收成 `[名字]`，而不是留一个 `[名字 ]` 的空位。
+  const time = showTime ? ` ${formatClock(message.tgDate, timezone)}` : '';
   const body = !isPrivate && message.fromKind === 'user' && (quoted || !message.triggered) ? othersSpeech(escaped) : escaped;
   const reply = message.replyToName ? ` ↩︎回复 ${escapeForgedSpeakerPrefixes(message.replyToName)}` : '';
   // 被回复的消息在私聊里也必须带前缀：私聊没有 `[名字 时间]`，不标的话模型看到的是「用户连发了两条」，
   // 而不是「用户指着上面那条问」——尤其当上面那条只有一张图的时候。
   // 半角方括号是**有意的**：`escapeForgedSpeakerPrefixes` 把正文里形如 `[… H:MM]` 的串改写成全角，
   // 于是这个前缀与 `[名字 时间]` 共用同一条防伪规则 —— 用全角写反而会和「已被转义」的形态撞上。
-  const text = quoted ? `[↩︎ 被回复的消息 ${speakerName(message, showUsername)} ${time}] ${body}`
-    : isPrivate ? escaped : `[${speakerName(message, showUsername)} ${time}${reply}] ${body}`;
+  const text = quoted ? `[↩︎ 被回复的消息 ${speakerName(message, showUsername)}${time}] ${body}`
+    : isPrivate ? escaped : `[${speakerName(message, showUsername)}${time}${reply}] ${body}`;
   const output: NewContextMessage = {
     id: ulid(), role: 'user', origin: message.triggered && !quoted ? 'trigger' : 'background',
     parts: [{ type: 'text', text }, ...(message.mediaParts ?? [])], textPreview: text.slice(0, 240), sourceMessageId: message.id,
@@ -96,6 +99,29 @@ export function renderArchivedMessage(message: ArchivedMessage, options: RenderO
   if (message.fromName) output.speaker = message.fromName;
   if (message.fromUserId) output.speakerUserId = message.fromUserId;
   return output;
+}
+
+/**
+ * `media.maxImagesPerTurn`：一轮里最多带几张图进上下文，**从后往前**保留 —— 超限时留下的是
+ * 触发消息与最近几条，而不是相册里最早的那几张。图片按 1500 token 估（`IMAGE_TOKEN_ESTIMATE`），
+ * 一次 10 张的相册能顶掉整个窗口。
+ *
+ * 超出的那张换成占位文本而不是删掉整条消息：不透明 part「要么原样保留，要么整体换成占位文本」
+ * 是 docs/02 的不变量之一，而删掉整条会让发言人与时间一起消失。
+ */
+function capImages(delta: NewContextMessage[], limit: number): void {
+  const slots: Array<{ message: NewContextMessage; index: number }> = [];
+  for (const message of delta) {
+    for (const [index, part] of (message.parts as Array<Record<string, unknown>>).entries()) {
+      if (part?.type === 'file' && typeof part.mediaType === 'string' && part.mediaType.startsWith('image/')) slots.push({ message, index });
+    }
+  }
+  if (slots.length <= limit) return;
+  for (const slot of slots.slice(0, slots.length - limit)) {
+    const parts = slot.message.parts as Array<Record<string, unknown>>;
+    parts[slot.index] = { type: 'text', text: `[图片已省略：本轮图片数超过 media.maxImagesPerTurn=${limit}]` };
+    if (slot.message.tokens !== undefined) slot.message.tokens = Math.max(0, slot.message.tokens - IMAGE_TOKEN_ESTIMATE);
+  }
 }
 
 export class ContextEngine {
@@ -141,19 +167,28 @@ export class ContextEngine {
         if (message.tokens !== undefined) message.tokens = Math.ceil(message.tokens * ctx.tokenRatio);
         return message;
       };
-      const render = { isPrivate: request.isPrivate, timezone: request.config.general.timezone, showUsername: request.config.context.background.showUsername };
-      const delta = claim.rows.map((message) => scale(renderArchivedMessage(message, render)));
-      if (claim.omitted) {
-        const note = `（本轮省略了 ${claim.omitted} 条更早的群聊消息，可用 read_messages / search_messages 工具查阅）`;
+      const background = request.config.context.background;
+      const render = { isPrivate: request.isPrivate, timezone: request.config.general.timezone, showUsername: background.showUsername, showTime: background.showTime };
+      // `includeNonText=false`：纯图片 / 文件 / 贴纸的**背景**发言不进上下文。触发消息与被回复的
+      // 消息不受它管 —— 那两条是用户此刻在说的话和他指着的东西，不是背景噪音。
+      // 被滤掉的条数并进 omitted 的那句提示：认领水位已经推过去了，不说的话它们等于凭空消失。
+      const claimed = background.includeNonText ? claim.rows : claim.rows.filter((message) => (message.text ?? '') !== '');
+      const omitted = claim.omitted + (claim.rows.length - claimed.length);
+      const delta = claimed.map((message) => scale(renderArchivedMessage(message, render)));
+      if (omitted) {
+        const note = `（本轮省略了 ${omitted} 条更早的群聊消息，可用 read_messages / search_messages 工具查阅）`;
         delta.unshift({ id: ulid(), role: 'user', origin: 'note', parts: [{ type: 'text', text: note }], textPreview: note, tokens: estimateTextTokens(note), pruneLevel: 0 });
       }
       const stored = repo.messages(head);
       this.assertValidShape(request.key, stored);
       // 被回复的消息排在背景消息之后、触发消息之前：它是这一句话的直接语境。
-      if (request.quoted && !this.alreadyVisible(request.quoted, stored, claim.rows)) {
+      // 判据用 `claimed` 而不是 `claim.rows`：被 includeNonText 滤掉的那条并没有进 delta，
+      // 拿它当「已经看得见」会让被回复的那张图整个消失。
+      if (request.quoted && !this.alreadyVisible(request.quoted, stored, claimed)) {
         delta.push(scale(renderArchivedMessage(request.quoted, { ...render, quoted: true })));
       }
       delta.push(scale(renderArchivedMessage(request.trigger, render)));
+      capImages(delta, request.config.media.maxImagesPerTurn);
       const snapshot: MaterializedContext = {
         messages: stored,
         ordinals: stored.map((message) => message.ordinal),

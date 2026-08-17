@@ -55,6 +55,7 @@ const approvals = ref<Array<Record<string, unknown>>>([]);
 const tasks = ref<Array<Record<string, unknown>>>([]);
 const prompts = ref<Array<Record<string, unknown>>>([]);
 const config = ref<Record<string, unknown>>({});
+const botName = ref('LuoLiCore');
 const tools = ref<Record<string, ToolPolicy>>({});
 interface TriggerForm { private: boolean; mention: boolean; reply: boolean; command: boolean; channels: boolean; wakewords: string[]; wakewordMinLength: number; requireTextAfterMention: boolean; ignoreEditedAsTrigger: boolean }
 const triggerForm = ref<TriggerForm>({ private: true, mention: true, reply: true, command: true, channels: false, wakewords: [], wakewordMinLength: 2, requireTextAfterMention: false, ignoreEditedAsTrigger: true });
@@ -234,6 +235,14 @@ async function load(): Promise<void> {
   ]);
   syncTrigger();
   syncOutput();
+  syncBotName();
+}
+/** `general.name` 从这里生效：侧栏品牌名与浏览器标签都跟着改。运维给 bot 起了名字却在控制台
+ *  上看到「LuoLiCore」，那这个键就还是没接线（docs/20 · W-CFG-02 点名的正是它）。 */
+function syncBotName(): void {
+  const name = ((config.value.general as { name?: string } | undefined)?.name ?? '').trim();
+  botName.value = name || 'LuoLiCore';
+  document.title = `${botName.value} 控制台`;
 }
 /** `config.changed` 会把配置重新拉回来（另一个标签页或 Telegram 侧改了配置就会发），
  *  正在编辑的触发表单不能被它冲掉。 */
@@ -838,9 +847,6 @@ const QUOTA_REQUIRED: Array<[keyof QuotaForm, string]> = [['minReserveUsd', '最
   ['turnsPerUserPerHour', '每人每小时轮次'], ['turnsPerChatPerHour', '每会话每小时轮次'], ['concurrentPerUser', '单用户并发']];
 // 未接线的键不给控件，但要说清楚「现在真正管这件事的是谁」——否则运维会去 config.yaml 里改一个没人读的值。
 const QUOTA_UNIMPLEMENTED_HINTS: Record<string, string> = {
-  'quota.perTurn.maxToolCalls': '单轮工具调用数上限；当前真正生效的是 tools.maxCallsPerTurn',
-  'quota.perTurn.maxSubagents': '单轮子 agent 数上限；当前真正生效的是 agent.maxSubagentsPerTurn',
-  'quota.perTurn.maxDurationMs': '单轮墙钟上限；当前真正生效的是 concurrency.turnTimeoutMs',
   'quota.onExceeded.notifyOwner': '超限时私信 owner；没有任何代码路径读它',
   'quota.warnAtRatio': '用量到达比例时预警；没有任何代码路径读它',
 };
@@ -1475,7 +1481,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
 <template>
   <main class="console-shell">
     <aside class="sidebar">
-      <div class="brand"><div class="brand-mark">L</div><div><b>LuoLiCore</b><span>CONTROL PLANE</span></div></div>
+      <div class="brand"><div class="brand-mark">{{ botName.slice(0, 1).toUpperCase() }}</div><div><b>{{ botName }}</b><span>CONTROL PLANE</span></div></div>
       <nav aria-label="主导航">
         <button v-for="item in navigation" :key="item[0]" type="button" :class="{ active: active === item[0] }" @click="active = item[0]">
           <i :class="item[1]" aria-hidden="true" /><span>{{ item[2] }}</span>
@@ -2295,6 +2301,6 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
         <li v-if="!configRevisions.length && !revisionsLoading" class="empty">还没有经 WebUI 写过任何配置覆盖。</li>
       </ol>
     </UiModal>
-    <UiDrawer v-model:visible="mobileMenu" title="LuoLiCore"><nav class="mobile-nav"><button v-for="item in navigation" :key="item[0]" type="button" @click="active = item[0]; mobileMenu = false"><i :class="item[1]" />{{ item[2] }}<span v-if="item[0] === 'tasks' && pendingApprovals" class="nav-badge">{{ pendingApprovals }}</span></button></nav></UiDrawer>
+    <UiDrawer v-model:visible="mobileMenu" :title="botName"><nav class="mobile-nav"><button v-for="item in navigation" :key="item[0]" type="button" @click="active = item[0]; mobileMenu = false"><i :class="item[1]" />{{ item[2] }}<span v-if="item[0] === 'tasks' && pendingApprovals" class="nav-badge">{{ pendingApprovals }}</span></button></nav></UiDrawer>
   </main>
 </template>

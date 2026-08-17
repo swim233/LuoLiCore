@@ -7,8 +7,14 @@ import type { Config, LogSink as LogSinkType } from '@luoli/core';
 import type { RuntimeTurnContext } from '@luoli/shared';
 import { createServer } from '@luoli/server';
 
+/**
+ * 先 parse 一份合法配置再按需覆盖那一个字段：这两条用例**故意**用 schema 不接受的值
+ * （`tokens: 1` 压硬截断、拼错的时区压渲染回退），问的正是「这种值真的漏到运行时会怎样」。
+ * 直接手搓整份 config 会让后来新增的配置读取路径在这里炸成 undefined，与用例本身无关。
+ */
 function contextConfig(tokens: number): Config {
-  return { general: { timezone: 'UTC' }, context: { scope: 'chat', background: { enabled: true, maxPerTurn: 4 }, rebase: { injectNotice: false }, limit: { tokens, maxMessages: 80, minKeepTurns: 1 }, cacheCommits: 64, tokenRatioAlpha: 0.2 } } as Config;
+  const base = configSchema.parse({ general: { timezone: 'UTC' }, context: { scope: 'chat', background: { enabled: true, maxPerTurn: 4 }, rebase: { injectNotice: false }, limit: { tokens: 4000, maxMessages: 80, minKeepTurns: 1 }, cacheCommits: 64, tokenRatioAlpha: 0.2 } });
+  return { ...base, context: { ...base.context, limit: { ...base.context.limit, tokens } } };
 }
 
 function harness(name: string) {
@@ -72,7 +78,8 @@ describe('R-TG-01 时区', () => {
     for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
     const db = openDatabase(path); migrateDatabase(db);
     const archive = new ArchiveRepository(db); const engine = new ContextEngine(db, archive);
-    const config = { ...contextConfig(32_000), general: { timezone: 'Asia/Shangahi' } } as Config;
+    const valid = contextConfig(32_000);
+    const config: Config = { ...valid, general: { ...valid.general, timezone: 'Asia/Shangahi' } };
     const trigger = archive.scope('chat').append({ chatId: 'chat', messageThreadId: null, tgMessageId: 1, direction: 'in', fromKind: 'user', fromUserId: 'u', fromName: 'U', fromUsername: null, kind: 'text', text: '你好', tgDate: Date.now(), raw: {}, triggered: true, triggerReason: 'mention' });
     await expect(engine.openTurn({ chatId: 'chat', threadId: null, key: 'chat:chat', initiatorUserId: 'u', effectiveRole: 'trusted', isPrivate: false, trigger, abortSignal: new AbortController().signal, config })).resolves.toBeDefined();
     closeDatabase(db);

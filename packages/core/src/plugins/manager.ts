@@ -1,5 +1,6 @@
 import { pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
+import { type FSWatcher, watch } from 'chokidar';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Sqlite } from '@luoli/db';
@@ -21,6 +22,9 @@ export interface LoadedPlugin {
 
 export class PluginManager {
   readonly #plugins = new Map<string, LoadedPlugin>();
+  #watcher: FSWatcher | null = null;
+  #reconciling = false;
+  #pendingRescan = false;
 
   constructor(private readonly db: Sqlite, readonly directory: string, private readonly timeoutMs: number, private readonly disableAfter: number, private readonly order: readonly string[] = [], private registry?: ToolRegistry) {}
   bindRegistry(registry: ToolRegistry): void { this.registry = registry; }
@@ -112,7 +116,37 @@ export class PluginManager {
     return this.list().flatMap((plugin) => Object.entries(plugin.tools).map(([name, tool]) => ({ plugin: plugin.name, name: `${plugin.name}_${name}`, tool })));
   }
 
+  /**
+   * `plugins.watch`：目录变动后重跑 `reconcile()`。**默认关，而且应该保持关**——
+   * plugin 是进程内全信任运行的（docs/14 A27），热加载等于让磁盘上的一次写入直接拿到 root。
+   * 开它的唯一场景是自己在本机写 plugin。
+   *
+   * 与 `SkillLoader.startWatching` 同一形状：100ms 去抖（编辑器保存会连发好几个事件），
+   * 重入由 `#reconciling` 挡住 —— `reconcile()` 是 async，去抖只能挡住「连发」，挡不住
+   * 「上一轮还没跑完」。两轮叠着跑会让同一个 plugin 的 `onUnload` 和新实例的加载交错。
+   */
+  startWatching(): void {
+    if (this.#watcher) return;
+    this.#watcher = watch(this.directory, { ignoreInitial: true });
+    let pending: ReturnType<typeof setTimeout> | null = null;
+    this.#watcher.on('all', () => {
+      if (pending) clearTimeout(pending);
+      pending = setTimeout(() => { void this.#rescan(); }, 100);
+    });
+  }
+
+  async #rescan(): Promise<void> {
+    if (this.#reconciling) { this.#pendingRescan = true; return; }
+    this.#reconciling = true;
+    try {
+      do { this.#pendingRescan = false; await this.reconcile(); } while (this.#pendingRescan);
+    } catch { /* reconcile 自己已经把逐个 plugin 的错误记进库了；这里兜的是遍历本身失败 */ }
+    finally { this.#reconciling = false; }
+  }
+
   async close(): Promise<void> {
+    await this.#watcher?.close();
+    this.#watcher = null;
     await Promise.all([...this.#plugins.values()].map((plugin) => plugin.onUnload?.()));
     this.#plugins.clear();
   }

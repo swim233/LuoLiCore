@@ -119,6 +119,15 @@ export class ScopedArchiveRepository {
     this.db.prepare('UPDATE messages SET media_parts_json=? WHERE id=?').run(JSON.stringify(parts), id);
   }
 
+  /**
+   * 判成触发、但最终没人为它开轮次的消息改记成背景消息（`trigger.cooldownMsPerUser` 压住的那些）。
+   * `claimBackground` 只认领 `triggered=0`，留着 `triggered=1` 的话这条消息**既不触发也不进上下文**，
+   * 等于凭空消失 —— 编辑消息踩过同一个坑（docs/20 · W-TG-05）。
+   */
+  demoteToBackground(id: number): void {
+    this.db.prepare("UPDATE messages SET triggered=0,trigger_reason=NULL WHERE id=? AND chat_id=? AND turn_id IS NULL").run(id, this.chatId);
+  }
+
   byId(id: number): ArchivedMessage | null {
     return withMedia(this.db.prepare(`SELECT ${messageQuery()},media_parts_json AS mediaPartsJson FROM messages WHERE chat_id = ? AND id = ?`).get(this.chatId, id) as ArchivedMessage | undefined ?? null);
   }
