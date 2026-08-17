@@ -30,6 +30,9 @@
 | [19-review-round4.md](./19-review-round4.md) | **复审报告（第四轮）**：第三轮 12 项关闭 11 项半，上下文连环模式被打断；新增 3 P0 / 4 P1 / 5 P2，全部集中在配置持久化层 + R0–R1 批次 | 全体 / QA |
 | [20-review-round5.md](./20-review-round5.md) | **复审报告（第五轮）**：第四轮 12 项全部关闭；新增 3 P0 / 6 P1 / 15 P2，集中在「本地对象交给外部依赖」的交接点 + W0–W1 批次与跨边界契约测试建议 | 全体 / QA |
 | [21-webui-coverage-gaps.md](./21-webui-coverage-gaps.md) | **WebUI 控制面覆盖缺口**：三轮整改后已清零（153/153 个已接线配置项可写、12 条端点缺口 + 后端 5 条 + `G-SSE-01` 全部完成）。动 WebUI 或从 `KNOWN_UNIMPLEMENTED_CONFIG_KEYS` 摘键之前先扫一眼 §1 的复算方法与 §5 的「不是缺口」清单 | 全体 / 运维 |
+| [22-review-round6.md](./22-review-round6.md) | **复审报告（第六轮）**：第五轮 24 项关闭 23 项；按需求方要求**分三段**列出 10 项漏洞（2 P0 实测）、13 项设计缺陷、14 项可改进条目 + X0–X2 批次。主题是「资源上界」——`grep` 的正则回溯、沙箱 stdout、流式渲染、日志文件、定时任务异常五处都能拖垮单线程进程 | 全体 / QA / 安全 |
+| [23-review-round6-remediation-report.md](./23-review-round6-remediation-report.md) | 第六轮整改的完成报告（由整改方提交）。**编号与 22 有错位，核对时以 22 的原始编号为准**，见 [24](./24-review-round6-verification.md) §1.2 | 全体 / QA |
+| [24-review-round6-verification.md](./24-review-round6-verification.md) | **第六轮整改的复核与返修**：24 项里 19 项是根因修复；`D-UI-01` 的拆分让 14 个控制台页面全部空白（已回退）、`D-APPR-01` 修在了永远走不到的分支上，另有 3 处新引入的回归 —— 7 项返修 `R-*` 及其回归用例。改渲染层/改「没有 X 时怎么办」之前先看 §0 | 全体 / QA |
 
 ---
 

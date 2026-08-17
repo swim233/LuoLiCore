@@ -1,15 +1,17 @@
 import { rmSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { ArchiveRepository, OperationsRepository, PrincipalRepository, closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
-import { ContextEngine, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceService, ProviderStore, Secrets, configSchema } from '@luoli/core';
+import { ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceService, ProviderStore, Secrets, configSchema } from '@luoli/core';
 import { createServer } from '@luoli/server';
+import argon2 from 'argon2';
 
-function appHarness() {
+async function appHarness(overrides: Record<string, unknown> = {}) {
   const path = './data/server.test.db';
   for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
   const db = openDatabase(path);
   migrateDatabase(db);
-  const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, webui: { passwordHash: '$argon2id$v=19$m=65536,t=3,p=4$invalid$invalid' } });
+  const validHash = await argon2.hash('current-password', { type: argon2.argon2id, memoryCost: 19_456, timeCost: 2, parallelism: 1 });
+  const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, webui: { passwordHash: validHash }, ...overrides });
   const operations = new OperationsRepository(db);
   const events = new EventBus();
   const log = new LogSink(operations, './data/server-logs');
@@ -19,12 +21,12 @@ function appHarness() {
   const app = createServer({ config, db, operations, principals: new PrincipalRepository(db), archive, context,
     providers: new ProviderStore(db, new Secrets('x'.repeat(32))), approvals,
     maintenance: new MaintenanceService(db, path, 2, 30), events, log, configSchema: {}, startedAt: Date.now(), setup: undefined });
-  return { app, db };
+  return { app, db, operations };
 }
 
 describe('server security', () => {
   it('requires authentication and CSRF for writes', async () => {
-    const { app, db } = appHarness();
+    const { app, db } = await appHarness();
     expect((await app.request('/api/chats')).status).toBe(401);
     const session = new OperationsRepository(db).createSession(1);
     const cookie = `luoli_sid=${session.id}`;
@@ -34,7 +36,7 @@ describe('server security', () => {
   });
 
   it('hands the session csrf back to an authenticated same-origin caller but not across origins', async () => {
-    const { app, db } = appHarness();
+    const { app, db } = await appHarness();
     const session = new OperationsRepository(db).createSession(1);
     const me = await app.request('/api/auth/me', { headers: { cookie: `luoli_sid=${session.id}` } });
     expect((await me.json() as { data: { csrf: string; expiresAt: number } }).data).toMatchObject({ csrf: session.csrf, expiresAt: session.expiresAt });
@@ -44,7 +46,7 @@ describe('server security', () => {
   });
 
   it('adds documented security headers', async () => {
-    const { app, db } = appHarness();
+    const { app, db } = await appHarness();
     const response = await app.request('/api/health');
     expect(response.headers.get('content-security-policy')).toContain("default-src 'self'");
     // 无鉴权的 /api/health 只说存活；provider / MCP / 沙箱拓扑必须留在鉴权后（docs/20 · W-API-01）。
@@ -56,8 +58,60 @@ describe('server security', () => {
   });
 
   it('rejects cross-origin browser requests', async () => {
-    const { app, db } = appHarness();
+    const { app, db } = await appHarness();
     expect((await app.request('/api/auth/login', { method: 'POST', headers: { origin: 'https://evil.example', 'content-type': 'application/json' }, body: JSON.stringify({ password: 'wrong' }) })).status).toBe(403);
+    closeDatabase(db);
+  });
+
+  it('rotates the active password and revokes other sessions', async () => {
+    const { app, db, operations } = await appHarness();
+    const current = operations.createSession(1); const other = operations.createSession(1);
+    const response = await app.request('/api/auth/password', { method: 'POST', headers: { cookie: `luoli_sid=${current.id}`, 'x-csrf-token': current.csrf, 'content-type': 'application/json' }, body: JSON.stringify({ current: 'current-password', next: 'next-password-123' }) });
+    expect(response.status).toBe(200);
+    expect(operations.session(other.id)).toBeNull();
+    expect((await app.request('/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: 'current-password' }) })).status).toBe(401);
+    expect((await app.request('/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: 'next-password-123' }) })).status).toBe(200);
+    closeDatabase(db);
+  });
+
+  // 热重载落地之后不能再认那份闭包里的口令：`/api/auth/password` 写完到 configStore 换上新值
+  // 之间有个窗口，覆盖位只能覆盖这个窗口。无条件缓存 = V-AUTH-02 原样复发，只是换了个入口
+  // （PUT /api/config 写 passwordHash 返回 200、落库、登录还认旧的，docs/24 · R-AUTH-01）。
+  it('hands the password back to the config layer once the hot reload lands', async () => {
+    const path = './data/server-passwd.test.db';
+    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    const db = openDatabase(path); migrateDatabase(db);
+    const hashOf = (value: string) => argon2.hash(value, { type: argon2.argon2id, memoryCost: 19_456, timeCost: 2, parallelism: 1 });
+    const withHash = async (value: string) => configSchema.parse({ access: { bootstrapOwnerId: '1' }, webui: { passwordHash: await hashOf(value) } });
+    const store = new ConfigStore(await withHash('first-password'));
+    const operations = new OperationsRepository(db); const events = new EventBus(); const log = new LogSink(operations, './data/server-logs');
+    const archive = new ArchiveRepository(db); const context = new ContextEngine(db, archive);
+    const app = createServer({ config: store, db, operations, principals: new PrincipalRepository(db), archive, context,
+      providers: new ProviderStore(db, new Secrets('x'.repeat(32))), approvals: new DatabaseApprovalBroker(db, store.snapshot(), events, log),
+      maintenance: new MaintenanceService(db, path, 2, 30), events, log, configSchema: {}, startedAt: Date.now(), setup: undefined });
+    const login = (password: string) => app.request('/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password }) });
+    const session = operations.createSession(1);
+    expect((await app.request('/api/auth/password', { method: 'POST', headers: { cookie: `luoli_sid=${session.id}`, 'x-csrf-token': session.csrf, 'content-type': 'application/json' },
+      body: JSON.stringify({ current: 'first-password', next: 'second-password' }) })).status).toBe(200);
+    // 窗口内：configStore 还是旧值，覆盖位顶上。
+    expect((await login('second-password')).status).toBe(200);
+    expect((await login('first-password')).status).toBe(401);
+    // 热重载落地：覆盖位与配置一致，交回配置层。
+    store.replace(await withHash('second-password'), ['webui.passwordHash']);
+    expect((await login('second-password')).status).toBe(200);
+    // 之后有人从别的入口（PUT /api/config）又改了一次：必须认新的那份，不能继续认覆盖位。
+    store.replace(await withHash('third-password'), ['webui.passwordHash']);
+    expect((await login('third-password')).status).toBe(200);
+    expect((await login('second-password')).status).toBe(401);
+    closeDatabase(db);
+  });
+
+  it('uses the trusted proxy hop from the right and bounds attacker-controlled buckets', async () => {
+    const { app, db } = await appHarness({ webui: { passwordHash: await argon2.hash('current-password'), trustProxy: true, trustedProxyHops: 1, loginRateLimit: { attempts: 2, windowMinutes: 15 } } });
+    const request = (xff: string) => app.request('/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json', 'x-forwarded-for': xff }, body: JSON.stringify({ password: 'wrong' }) });
+    expect((await request('spoof-a, 198.51.100.8')).status).toBe(401);
+    expect((await request('spoof-b, 198.51.100.8')).status).toBe(401);
+    expect((await request('spoof-c, 198.51.100.8')).status).toBe(429);
     closeDatabase(db);
   });
 });

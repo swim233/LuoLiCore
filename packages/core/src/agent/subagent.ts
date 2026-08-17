@@ -37,13 +37,16 @@ export async function runSubAgent(run: AgentRun, definition: AgentDefinition, ta
       onUnavailable: (candidate, error) => dependencies.registry.markProviderDown(candidate.id, error instanceof Error ? error.message : 'authentication_failed'),
       onExhausted: (error) => dependencies.log.event({ level: 'error', kind: 'model.error', summary: error instanceof Error ? `${error.name}: ${error.message}`.slice(0, 300) : String(error).slice(0, 300), traceId: turn.turnId, data: { alias, agentRunId: run.id } }) })
     : dependencies.registry.resolve(alias);
-  const toolContext: ToolExecutionContext = { turn, workspace: dependencies.workspace, agentKind: 'sub', agentRunId: run.id };
+  const allow = new Set(definition.tools);
+  const toolContext: ToolExecutionContext = { turn, workspace: dependencies.workspace, agentKind: 'sub', agentRunId: run.id, allow };
   const toolSet: ToolSet = {};
   for (const registered of dependencies.tools.active(run.effectiveRole, toolContext, definition.tools)) {
     toolSet[registered.name] = tool({ description: registered.description, inputSchema: registered.inputSchema, execute: (input) => dependencies.tools.execute(registered.name, input, toolContext) });
   }
+  const perTurn = (turn.config as { quota: { perTurn: { maxSteps: number; maxCostUsd: number } } }).quota.perTurn;
   let stepNumber = 0;
-  const agent = new ToolLoopAgent({ model, ...dependencies.registry.settings(alias), instructions: definition.instructions, tools: toolSet, activeTools: Object.keys(toolSet), stopWhen: stepCountIs(definition.maxSteps),
+  const agent = new ToolLoopAgent({ model, ...dependencies.registry.settings(alias), instructions: definition.instructions, tools: toolSet, activeTools: Object.keys(toolSet), stopWhen: stepCountIs(Math.min(definition.maxSteps, perTurn.maxSteps)),
+    prepareStep: async () => dependencies.ledger.turnCost(turn.turnId) >= perTurn.maxCostUsd ? { activeTools: [], toolChoice: 'none' as const } : {},
     onStepEnd: async (step) => {
       const currentStep = ++stepNumber;
       await dependencies.onEvent?.({ type: 'step', step: currentStep, finishReason: step.finishReason, text: step.text,

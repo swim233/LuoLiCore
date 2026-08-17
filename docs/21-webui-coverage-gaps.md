@@ -297,7 +297,14 @@ G-API-10/11/12 与 G-SRV-02/03/04 均已完成；按本文「运行时已有、W
 - Telegram inline keyboard 审批仍未实现；WebUI 已是可用审批通道，命中规则的调用会等待 WebUI
   裁决、TTL 或轮次取消，不再当场伪拒绝。**代价是从 Telegram 发起的那一轮会静默停住最多
   `approval.ttlMs`**（默认 180s），发起人侧没有任何提示 —— 所以待审角标现在挂在导航上（§4.6），
-  但真正的解法仍是补一条能送达发起人的通道。
+  但真正的解法仍是补一条能送达发起人的通道。一个 SSE 连接都没有时不再等待，当场拒绝并把原因
+  交给模型（[22](./22-review-round6.md) · `D-APPR-01`）。
+
+### 6.1 新增缺口（第六轮整改后）
+
+| 编号 | 运行时已有 | 界面缺什么 |
+|---|---|---|
+| **G-API-13** | `POST /api/auth/password {current, next}`：校验旧口令、写 `config_kv` + `config_revisions`、吊销其余 session、即时生效（[22](./22-review-round6.md) · `V-AUTH-02`） | 设置页没有改口令表单。泄露口令后的应急处置目前只能打 API 或线下 `pnpm webui:passwd` + 重启，而这正是 `V-AUTH-02` 要消灭的形态的另一半 |
 - `health` 事件仍只在 provider 测试与 MCP 重连后发送，没有周期心跳；顶栏的新鲜度依据业务事件，
   不把连接状态伪装成周期健康检查。
 - `perChat` 白名单里的 `character` 仍是兼容性保留项；会话专属人设继续走

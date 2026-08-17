@@ -34,7 +34,7 @@ afterAll(async () => { await new Promise<void>((resolve) => { upstream.close(() 
 
 function harness() {
   const path = './data/provider-catalog.test.db'; for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
-  const db = openDatabase(path); migrateDatabase(db); const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, webui: { passwordHash: 'hash' } });
+  const db = openDatabase(path); migrateDatabase(db); const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, webui: { passwordHash: 'hash' }, provider: { allowPrivateBaseUrl: true } });
   const operations = new OperationsRepository(db); const events = new EventBus(); const log = new LogSink(operations, './data/provider-catalog-logs'); const archive = new ArchiveRepository(db);
   const app = createServer({ config, db, operations, principals: new PrincipalRepository(db), archive, context: new ContextEngine(db, archive), providers: new ProviderStore(db, new Secrets('x'.repeat(32))), approvals: new DatabaseApprovalBroker(db, config, events, log), maintenance: new MaintenanceService(db, path, 2, 30), events, log, configSchema: {}, startedAt: Date.now(), setup: undefined });
   const session = operations.createSession(1); const headers = { cookie: `luoli_sid=${session.id}`, 'x-csrf-token': session.csrf, 'content-type': 'application/json' };
@@ -128,11 +128,11 @@ describe('model catalog import', () => {
 
 describe('probe normalization', () => {
   it('reads anthropic display names and google token limits', async () => {
-    const anthropic = await probeProvider({ name: 'anthropic', kind: 'anthropic', baseUrl: `${base}/anthropic/v1` }, GOOD_KEY);
+    const anthropic = await probeProvider({ name: 'anthropic', kind: 'anthropic', baseUrl: `${base}/anthropic/v1` }, GOOD_KEY, 15_000, true);
     expect(anthropic.models).toEqual([{ modelId: 'claude-opus-5', displayName: 'Claude Opus 5', contextWindow: null, maxOutput: null }]);
-    const google = await probeProvider({ name: 'google', kind: 'google', baseUrl: `${base}/google/v1beta` }, GOOD_KEY);
+    const google = await probeProvider({ name: 'google', kind: 'google', baseUrl: `${base}/google/v1beta` }, GOOD_KEY, 15_000, true);
     expect(google.models).toEqual([{ modelId: 'gemini-2.5-pro', displayName: 'Gemini 2.5 Pro', contextWindow: 1_048_576, maxOutput: 65_536 }]);
-    const wrongHeader = await probeProvider({ name: 'google', kind: 'google', baseUrl: `${base}/google/v1beta` }, 'sk-nope-0123456789abcdef');
+    const wrongHeader = await probeProvider({ name: 'google', kind: 'google', baseUrl: `${base}/google/v1beta` }, 'sk-nope-0123456789abcdef', 15_000, true);
     expect(wrongHeader).toMatchObject({ reachable: false, code: 'unauthorized', status: 403 });
   });
 

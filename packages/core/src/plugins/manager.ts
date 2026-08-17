@@ -26,6 +26,11 @@ export class PluginManager {
   bindRegistry(registry: ToolRegistry): void { this.registry = registry; }
 
   async reconcile(): Promise<void> {
+    if (existsSync(this.directory)) for (const name of readdirSync(this.directory)) {
+      const path = join(this.directory, name, 'plugin.js');
+      if (!existsSync(path)) continue;
+      this.db.prepare("INSERT INTO plugins(name,path,min_role,enabled,updated_at) VALUES (?,?,'trusted',0,?) ON CONFLICT(name) DO UPDATE SET path=excluded.path,updated_at=excluded.updated_at").run(name, path, Date.now());
+    }
     const enabled = new Map((this.db.prepare('SELECT name,enabled,config_json AS config FROM plugins').all() as Array<{ name: string; enabled: number; config: string | null }>).map((row) => [row.name, row]));
     const desired = new Map<string, { path: string; row: { name: string; enabled: number; config: string | null }; signature: string }>();
     if (existsSync(this.directory)) for (const name of readdirSync(this.directory)) {
@@ -53,6 +58,9 @@ export class PluginManager {
           tools: rawTools && typeof rawTools === 'object' ? rawTools as Record<string, unknown> : {}, enabled: true, errors: 0 };
         if (typeof definition.version === 'string') plugin.version = definition.version;
         if (typeof definition.onUnload === 'function') plugin.onUnload = definition.onUnload as () => Promise<void> | void;
+        if (typeof definition.onLoad === 'function') await (definition.onLoad as (ctx: unknown) => Promise<void> | void)(context);
+        const definitionRole = ['blocked', 'limited', 'trusted', 'owner'].includes(String(definition.minRole)) ? String(definition.minRole) : null;
+        if (definitionRole) this.db.prepare("UPDATE plugins SET min_role=CASE WHEN min_role='trusted' THEN ? ELSE min_role END WHERE name=?").run(definitionRole, name);
         this.#plugins.set(name, plugin);
         this.db.prepare('UPDATE plugins SET load_error=NULL,updated_at=? WHERE name=?').run(Date.now(), name);
       } catch (error) {

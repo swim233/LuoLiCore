@@ -39,9 +39,9 @@ describe('Telegram trigger matching', () => {
     expect(matchTrigger(context('洛璃', 'channel'), trigger, 1, 'mybot')).toBeNull();
     expect(matchTrigger(context('x'), { ...trigger, private: false, mention: false, reply: false, command: false, wakewords: ['x'], wakewordMinLength: 2 }, 1, 'mybot')).toBeNull();
   });
-  it('rejects nested-quantifier wake regexes without evaluating them', () => {
+  it('matches nested quantifiers through the linear engine without blocking', () => {
     const started = performance.now();
-    expect(matchTrigger(context(`${'a'.repeat(20_000)}!`), { ...trigger, private: false, mention: false, reply: false, command: false, wakewords: ['^(a+)+$'] }, 1, 'mybot')).toBeNull();
+    expect(matchTrigger(context(`${'a'.repeat(4095)}!`), { ...trigger, private: false, mention: false, reply: false, command: false, wakewords: ['^(a+)+$'] }, 1, 'mybot')).toBeNull();
     expect(performance.now() - started).toBeLessThan(100);
   });
 });

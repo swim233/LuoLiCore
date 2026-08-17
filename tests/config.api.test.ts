@@ -27,25 +27,26 @@ describe('config API validation', () => {
     closeDatabase(db);
   });
 
-  it('refuses wakewords that would never match and reports why', async () => {
+  it('accepts backtracking shapes under the linear regex engine and reports incompatible syntax', async () => {
     const { app, db, headers } = harness();
-    const unsafe = await app.request('/api/config', { method: 'PUT', headers, body: JSON.stringify({ 'trigger.wakewords': ['洛璃', '^(a+)+$'] }) });
-    expect(unsafe.status).toBe(400);
-    expect((await unsafe.json() as { error: { code: string; message: string } }).error).toMatchObject({ code: 'invalid_wakeword' });
+    const linear = await app.request('/api/config', { method: 'PUT', headers, body: JSON.stringify({ 'trigger.wakewords': ['洛璃', '^(a+)+$'] }) });
+    expect(linear.status).toBe(200);
+    const incompatible = await app.request('/api/config', { method: 'PUT', headers, body: JSON.stringify({ 'trigger.wakewords': ['洛璃', '^(?=璃)'] }) });
+    expect(incompatible.status).toBe(400);
+    expect((await incompatible.json() as { error: { code: string; message: string } }).error).toMatchObject({ code: 'invalid_wakeword' });
     const tooShort = await app.request('/api/config', { method: 'PUT', headers, body: JSON.stringify({ 'trigger.wakewords': ['璃'] }) });
     expect(tooShort.status).toBe(400);
-    expect(db.prepare("SELECT COUNT(*) FROM config_kv WHERE key='trigger.wakewords'").pluck().get()).toBe(0);
     const ok = await app.request('/api/config', { method: 'PUT', headers, body: JSON.stringify({ 'trigger.wakewords': ['洛璃', '^璃酱[，,、 ]'] }) });
     expect(ok.status).toBe(200);
     expect(db.prepare("SELECT value_json FROM config_kv WHERE key='trigger.wakewords'").pluck().get()).toBe('["洛璃","^璃酱[，,、 ]"]');
-    const checked = await app.request('/api/config/wakewords/check', { method: 'POST', headers, body: JSON.stringify({ wakewords: ['洛璃', '^璃酱', '璃', '^(a+)+$'], minLength: 2 }) });
+    const checked = await app.request('/api/config/wakewords/check', { method: 'POST', headers, body: JSON.stringify({ wakewords: ['洛璃', '^璃酱', '璃', '^(?=璃)'], minLength: 2 }) });
     expect((await checked.json() as { data: Array<{ kind: string; ok: boolean }> }).data).toMatchObject([{ kind: 'contains', ok: true }, { kind: 'regex', ok: true }, { ok: false }, { ok: false }]);
     closeDatabase(db);
   });
 
   it('validates per-chat wakeword overrides through the same rule', async () => {
     const { app, db, headers } = harness();
-    const rejected = await app.request('/api/chats/chat:-100', { method: 'PATCH', headers, body: JSON.stringify({ trigger: { wakewords: ['^(a+)+$'] } }) });
+    const rejected = await app.request('/api/chats/chat:-100', { method: 'PATCH', headers, body: JSON.stringify({ trigger: { wakewords: ['^(?=璃)'] } }) });
     expect(rejected.status).toBe(400);
     expect(db.prepare("SELECT COUNT(*) FROM config_kv WHERE key='perChat.chat:-100'").pluck().get()).toBe(0);
     const accepted = await app.request('/api/chats/chat:-100', { method: 'PATCH', headers, body: JSON.stringify({ trigger: { wakewords: ['璃酱'] } }) });

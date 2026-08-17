@@ -1,4 +1,5 @@
 import { createAnthropic } from '@ai-sdk/anthropic';
+import { readFileSync } from 'node:fs';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { createOpenAI } from '@ai-sdk/openai';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
@@ -201,11 +202,28 @@ function imageToFilePart(part: Record<string, unknown>): Record<string, unknown>
  * 写入侧已经不再产生这种消息（`assertValidShape` 的 role 白名单挡着），这里兜的是 0006 之前
  * 写进库、又没跑迁移的历史数据 —— parts 是持久化的，读出侧不兜就是会话级永久损坏。
  */
-export function contextMessages(turn: RuntimeTurnContext): ModelMessage[] {
+/**
+ * `attachment://<id>` 换回 base64。文件丢了就整体降级成一句占位文本，**不能抛** ——
+ * parts 是持久化的，这里抛一次等于该会话在 `/new` 之前每轮都失败；而「不透明 part 要么原样保留、
+ * 要么整体换成占位文本」正是 docs/02 的不变量（docs/24 · R-MEDIA-01）。
+ */
+function hydrateAttachment(part: Record<string, unknown>, attachments?: Sqlite): Record<string, unknown> {
+  const missing = { type: 'text', text: '[图片已不可用：附件文件已丢失]' };
+  if (!attachments) return missing;
+  const id = (part.ref as string).slice('attachment://'.length);
+  const path = attachments.prepare("SELECT local_path FROM attachments WHERE id=? AND download_state='done'").pluck().get(id) as string | undefined;
+  if (!path) return missing;
+  const { ref: _ref, ...rest } = part;
+  try { return { ...rest, data: readFileSync(path).toString('base64') }; } catch { return missing; }
+}
+
+export function contextMessages(turn: RuntimeTurnContext, attachments?: Sqlite): ModelMessage[] {
   return [...turn.snapshot.messages, ...turn.delta].map((message) => {
     const content = (message.parts as Array<Record<string, unknown>>).map((part) => {
       if (part?.type === 'tool-result') return { ...part, output: normalizeToolOutput(part.output) };
-      return part?.type === 'image' ? imageToFilePart(part) : part;
+      if (part?.type === 'image') return imageToFilePart(part);
+      if (part?.type === 'file' && typeof part.ref === 'string' && part.ref.startsWith('attachment://')) return hydrateAttachment(part, attachments);
+      return part;
     });
     if (SENDABLE_ROLES.has(message.role)) return { role: message.role, content } as ModelMessage;
     const text = content.map((part) => typeof part?.text === 'string' ? part.text : '').filter(Boolean).join('\n');
@@ -425,7 +443,7 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
   });
   try {
     if (streaming) {
-      const result = await agent.stream({ messages: contextMessages(turn), abortSignal: turn.abortSignal });
+      const result = await agent.stream({ messages: contextMessages(turn, dependencies.db), abortSignal: turn.abortSignal });
       let settled = false;
       const finish = (text: string): string => { if (!settled && mainRun) dependencies.agents?.finish(mainRun, text); settled = true; return text; };
       const fail = (error: unknown): never => { if (!settled && mainRun) dependencies.agents?.fail(mainRun, error instanceof Error ? error.message : String(error)); settled = true; throw error; };
@@ -434,7 +452,7 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
       const final = Promise.resolve(result.text).then((text) => { if (!text.trim() && streamFailure) throw streamFailure; return text; }).then(finish, fail);
       return { stream: result.textStream, final, interrupt: () => { if (!settled && mainRun) dependencies.agents?.fail(mainRun, 'stream_interrupted'); settled = true; } };
     }
-    const result = await agent.generate({ messages: contextMessages(turn), abortSignal: turn.abortSignal });
+    const result = await agent.generate({ messages: contextMessages(turn, dependencies.db), abortSignal: turn.abortSignal });
     if (!result.text.trim() && streamFailure) throw streamFailure;
     if (mainRun) dependencies.agents?.finish(mainRun, result.text);
     return result.text;

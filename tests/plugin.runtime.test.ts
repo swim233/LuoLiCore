@@ -38,4 +38,18 @@ describe('plugin runtime', () => {
     expect((await manager.hook('ping')).map((entry) => entry.result)).toEqual(['beta', 'alpha-v2']);
     await manager.close(); closeDatabase(db);
   });
+
+  it('discovers files as disabled rows before any database seed', async () => {
+    const database = './data/plugin-discovery.test.db'; const directory = './data/plugin-discovery-plugins';
+    for (const suffix of ['', '-wal', '-shm']) rmSync(`${database}${suffix}`, { force: true });
+    rmSync(directory, { recursive: true, force: true }); mkdirSync(`${directory}/new-plugin`, { recursive: true });
+    writeFileSync(`${directory}/new-plugin/plugin.js`, "export default { name:'new-plugin', minRole:'owner', tools:() => ({}) };");
+    const db = openDatabase(database); migrateDatabase(db); const manager = new PluginManager(db, directory, 1000, 3);
+    await manager.reconcile();
+    expect(db.prepare('SELECT name,path,min_role AS minRole,enabled FROM plugins').get()).toMatchObject({ name: 'new-plugin', minRole: 'trusted', enabled: 0 });
+    db.prepare('UPDATE plugins SET enabled=1 WHERE name=?').run('new-plugin'); await manager.reconcile();
+    expect(manager.list().map((plugin) => plugin.name)).toEqual(['new-plugin']);
+    expect(db.prepare('SELECT min_role AS minRole FROM plugins WHERE name=?').get('new-plugin')).toEqual({ minRole: 'owner' });
+    await manager.close(); closeDatabase(db);
+  });
 });

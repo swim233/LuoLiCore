@@ -13,6 +13,9 @@ function harness(enabled = true, rules: unknown[] = [{ tool: 'bash', pattern: '(
   const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, approval: { enabled, ttlMs, skipForOwner: true, rules } });
   const log = new LogSink(new OperationsRepository(db), './data/approval-logs');
   const events = new EventBus();
+  // 这些用例都在问「有人能裁决时怎么走」，所以 harness 必须真的挂一条裁决通道（WebUI 的 SSE）。
+  // 挂成普通订阅者的话，走的是「没有通道 → 当场拒绝」那条分支，测的就不是这些用例想测的东西了。
+  events.subscribe(() => undefined, { channel: true });
   const broker = new DatabaseApprovalBroker(db, config, events, log);
   const registry = new ToolRegistry(log, broker, { maxRegistered: 10, maxCallsPerTurn: 10, maxConsecutiveErrors: 3 }, config.approval.rules);
   const abort = new AbortController();
@@ -34,6 +37,45 @@ describe('approval rules', () => {
     expect(executed).toBe(1);
     const count = db.prepare('SELECT COUNT(*) AS count FROM approvals').get() as { count: number };
     expect(count.count).toBe(0);
+    closeDatabase(db);
+  });
+
+  it('rejects immediately when no approval channel is connected', async () => {
+    const path = './data/approval-unavailable.test.db';
+    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    const db = openDatabase(path); migrateDatabase(db);
+    const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, approval: { enabled: true, skipForOwner: true } });
+    const events = new EventBus(); const log = new LogSink(new OperationsRepository(db), './data/approval-logs');
+    const broker = new DatabaseApprovalBroker(db, config, events, log);
+    const registry = new ToolRegistry(log, broker, { maxRegistered: 10, maxCallsPerTurn: 10, maxConsecutiveErrors: 3 });
+    const abort = new AbortController(); const turn = { turnId: 'turn-no-channel', key: 'chat:1', chatId: '1', threadId: null, initiatorUserId: '2', effectiveRole: 'trusted', isPrivate: false, baseCommitId: null, snapshot: { messages: [], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 0 }, delta: [], abortSignal: abort.signal, config } satisfies RuntimeTurnContext;
+    registry.register({ name: 'delete_file', description: '', inputSchema: z.object({}), policy: { minRole: 'trusted', approval: 'always', scope: 'workspace', source: 'builtin' }, sourcePriority: 1, execute: () => ({ ok: true }) });
+    // main.ts 里那个常驻的 config.changed 订阅者：它在，但它不会替谁点「批准」。判据数错对象
+    // （subscriberCount 而不是 channelCount）的话，这一行就让当场拒绝变成死代码（docs/24 · R-APPR-01）。
+    events.subscribe(() => undefined);
+    const started = performance.now();
+    expect(await registry.execute('delete_file', {}, { turn, workspace: '.', agentKind: 'main' })).toMatchObject({ ok: false, hint: expect.stringContaining('没有可用的审批通道') });
+    expect(performance.now() - started).toBeLessThan(100);
+    expect(db.prepare('SELECT COUNT(*) AS count FROM approvals').get()).toMatchObject({ count: 0 });
+    closeDatabase(db);
+  });
+
+  it('waits for a decision once a real channel is connected', async () => {
+    const path = './data/approval-channel.test.db';
+    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    const db = openDatabase(path); migrateDatabase(db);
+    const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, approval: { enabled: true, skipForOwner: true } });
+    const events = new EventBus(); const log = new LogSink(new OperationsRepository(db), './data/approval-logs');
+    const broker = new DatabaseApprovalBroker(db, config, events, log);
+    const registry = new ToolRegistry(log, broker, { maxRegistered: 10, maxCallsPerTurn: 10, maxConsecutiveErrors: 3 });
+    const abort = new AbortController(); const turn = { turnId: 'turn-with-channel', key: 'chat:1', chatId: '1', threadId: null, initiatorUserId: '2', effectiveRole: 'trusted', isPrivate: false, baseCommitId: null, snapshot: { messages: [], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 0 }, delta: [], abortSignal: abort.signal, config } satisfies RuntimeTurnContext;
+    registry.register({ name: 'delete_file', description: '', inputSchema: z.object({}), policy: { minRole: 'trusted', approval: 'always', scope: 'workspace', source: 'builtin' }, sourcePriority: 1, execute: () => ({ ok: true }) });
+    events.subscribe(() => undefined, { channel: true });
+    const pending = registry.execute('delete_file', {}, { turn, workspace: '.', agentKind: 'main' });
+    const row = db.prepare("SELECT id FROM approvals WHERE state='pending'").get() as { id: string };
+    expect(row).toBeTruthy();
+    expect(broker.decide(row.id, true, 'owner', 'webui')).toBe(true);
+    expect(await pending).toEqual({ ok: true });
     closeDatabase(db);
   });
 
@@ -93,6 +135,15 @@ describe('approval rules', () => {
     closeDatabase(db);
   });
 
+  it('rechecks subagent and skill allowlists during execution', async () => {
+    const { db, registry, context } = harness(false);
+    registry.register({ name: 'write_file', description: '', inputSchema: z.object({}), policy: { minRole: 'trusted', approval: 'never', scope: 'workspace', source: 'builtin' }, sourcePriority: 1, execute: () => ({ ok: true }) });
+    expect(await registry.execute('write_file', {}, { ...context, agentKind: 'sub', allow: new Set(['read_file']) })).toMatchObject({ ok: false, error: 'tool_not_in_allowlist' });
+    (context.turn as RuntimeTurnContext).skillAllowedTools = new Set(['read_file']);
+    expect(await registry.execute('write_file', {}, context)).toMatchObject({ ok: false, error: 'tool_not_in_allowlist' });
+    closeDatabase(db);
+  });
+
   it('denies unconditional wildcard approvals through the decision channel', async () => {
     const { db, broker, registry, context } = harness(true);
     let executed = 0;
@@ -128,7 +179,8 @@ describe('approval rules', () => {
     migrateDatabase(db);
     const log = new LogSink(new OperationsRepository(db), './data/approval-logs');
     let config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, approval: { enabled: true, skipForOwner: true, rules: [{ tool: 'bash', risk: 'high' }] } });
-    const broker = new DatabaseApprovalBroker(db, () => config, new EventBus(), log);
+    const events = new EventBus(); events.subscribe(() => undefined, { channel: true });
+    const broker = new DatabaseApprovalBroker(db, () => config, events, log);
     const registry = new ToolRegistry(log, broker, () => ({ maxRegistered: 10, maxCallsPerTurn: 50, maxConsecutiveErrors: 3 }), () => config.approval.rules);
     const turn = { turnId: 'turn-hot', key: 'chat:1', chatId: '1', threadId: null, initiatorUserId: '2', effectiveRole: 'trusted', isPrivate: false, baseCommitId: null, snapshot: { messages: [], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 0 }, delta: [], abortSignal: new AbortController().signal, config } satisfies RuntimeTurnContext;
     const context = { turn, workspace: './data', agentKind: 'main' as const };

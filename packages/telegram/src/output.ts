@@ -61,24 +61,33 @@ export async function sendWithFallback(api: Api, chatId: string, text: string, e
   }
 }
 
+/** 码点数组上的 `lastIndexOf('\n\n')`。见下方 splitTelegramText 里为什么不能用 String 版。 */
+function lastIndexOfPair(haystack: readonly string[], first: string, second: string): number {
+  for (let start = haystack.length - 2; start >= 0; start -= 1) if (haystack[start] === first && haystack[start + 1] === second) return start;
+  return -1;
+}
+
 export function splitTelegramText(text: string, max = 3900): string[] {
-  const rendered = safeRender(text);
   const parts: string[] = [];
-  let remaining = rendered;
+  let remaining = [...safeRender(text)];
   let reopenFence = false;
-  while ([...remaining].length > max) {
+  while (remaining.length > max) {
     const prefix: string = reopenFence ? '```\n' : '';
     const budget = max - [...prefix].length - 4;
-    const chars = [...remaining];
-    const slice = chars.slice(0, budget).join('');
-    const candidates = [slice.lastIndexOf('\n\n'), slice.lastIndexOf('\n'), Math.max(slice.lastIndexOf('。'), slice.lastIndexOf('！'), slice.lastIndexOf('？')), slice.lastIndexOf(' ')];
+    const window = remaining.slice(0, budget);
+    // 断点只在码点数组上找。String#lastIndexOf 给的是 UTF-16 下标，一条 emoji 就让它比码点下标大 1；
+    // 拿它去切码点数组，body 取不满而 remaining 多跳，中间那段直接消失（实测 5001 码点丢 1105 个，
+    // docs/24 · R-TG-01）。boundary 由此恒 ≤ budget，也就不会切出超长的 part。
+    const candidates = [lastIndexOfPair(window, '\n', '\n'), window.lastIndexOf('\n'),
+      Math.max(window.lastIndexOf('。'), window.lastIndexOf('！'), window.lastIndexOf('？')), window.lastIndexOf(' ')];
     const boundary = candidates.find((value) => value >= Math.floor(budget * 0.5)) ?? budget;
-    const body = slice.slice(0, boundary).trimEnd();
+    const body = window.slice(0, boundary).join('').trimEnd();
     const open: boolean = ((prefix + body).match(/```/g) ?? []).length % 2 === 1;
     parts.push(`${prefix}${body}${open ? '\n```' : ''}`);
-    remaining = `${slice.slice(boundary)}${chars.slice(budget).join('')}`.trimStart();
+    remaining = remaining.slice(boundary);
+    while (remaining[0]?.trim() === '') remaining.shift();
     reopenFence = open;
   }
-  if (remaining) parts.push(`${reopenFence ? '```\n' : ''}${remaining}`);
+  if (remaining.length) parts.push(`${reopenFence ? '```\n' : ''}${remaining.join('')}`);
   return parts;
 }

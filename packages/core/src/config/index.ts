@@ -65,7 +65,7 @@ export function perChatConfig(config: Readonly<Config>, key: string): Readonly<C
 
 export function dottedOverrides(rows: Array<{ key: string; valueJson: string }>, onRejected?: (key: string) => void): Record<string, unknown> {
   const root: Record<string, unknown> = {};
-  for (const row of rows) if (!assignDotted(root, row.key, JSON.parse(row.valueJson) as unknown)) onRejected?.(row.key);
+  for (const row of rows) if (!assignDotted(root, row.key, JSON.parse(row.valueJson, (key, value: unknown) => key === '__proto__' ? undefined : value) as unknown)) onRejected?.(row.key);
   return root;
 }
 

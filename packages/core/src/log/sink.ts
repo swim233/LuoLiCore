@@ -57,8 +57,10 @@ export class LogSink {
   readonly #events: EventBus | null;
   readonly #pending = new Map<string, { timer: ReturnType<typeof setTimeout>; event: LogBroadcast; merged: number }>();
   readonly #lastBroadcast = new Map<string, number>();
-
-  constructor(private readonly repository: OperationsRepository, private readonly directory: string, private readonly secrets: string[] = [], options: LogSinkOptions = {}) {
+  readonly #files = new Map<string, { bytes: number; buffer: string; timer: ReturnType<typeof setTimeout> | null }>();
+  private secrets: string[];
+  constructor(private readonly repository: OperationsRepository, private readonly directory: string, secrets: string[] = [], options: LogSinkOptions = {}) {
+    this.secrets = secrets;
     this.#level = options.level ?? 'debug';
     this.#maxFileBytes = (options.maxFileMb ?? 128) * 1024 * 1024;
     this.#bodyMaxBytes = options.bodyMaxBytes ?? 262_144;
@@ -68,6 +70,50 @@ export class LogSink {
 
   setLevel(level: LogEvent['level']): void {
     this.#level = level;
+  }
+  setSecrets(secrets: readonly string[]): void {
+    this.secrets = [...new Set(secrets.filter(Boolean))];
+  }
+  #reportWriteFailure(error: unknown): void {
+    try { process.stderr.write(`[log] 写入失败：${error instanceof Error ? error.message : String(error)}\n`); } catch { /* stderr 也不可用 */ }
+  }
+
+  #file(path: string): { bytes: number; buffer: string; timer: ReturnType<typeof setTimeout> | null } {
+    let state = this.#files.get(path);
+    if (!state) {
+      let bytes = 0;
+      try { bytes = existsSync(path) ? statSync(path).size : 0; } catch { /* 首次写时重试 */ }
+      state = { bytes, buffer: '', timer: null };
+      this.#files.set(path, state);
+    }
+    return state;
+  }
+
+  #flushFile(path: string, synchronous = false): void {
+    const state = this.#files.get(path);
+    if (!state?.buffer) return;
+    if (state.timer) { clearTimeout(state.timer); state.timer = null; }
+    const content = state.buffer; state.buffer = '';
+    try { appendFileSync(path, content, { mode: 0o600 }); state.bytes += Buffer.byteLength(content); }
+    catch (error) { this.#reportWriteFailure(error); }
+    void synchronous;
+  }
+
+  #writeLine(path: string, line: string, urgent: boolean): void {
+    try {
+      mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+      let state = this.#file(path);
+      const bytes = Buffer.byteLength(line);
+      if (state.bytes + Buffer.byteLength(state.buffer) + bytes >= this.#maxFileBytes) {
+        this.#flushFile(path, true);
+        let suffix = 1; while (existsSync(`${path}.${suffix}`)) suffix += 1;
+        if (existsSync(path)) renameSync(path, `${path}.${suffix}`);
+        state = { bytes: 0, buffer: '', timer: null }; this.#files.set(path, state);
+      }
+      state.buffer += line;
+      if (urgent || Buffer.byteLength(state.buffer) >= 65_536) this.#flushFile(path, true);
+      else if (!state.timer) { state.timer = setTimeout(() => this.#flushFile(path), 200); state.timer.unref?.(); }
+    } catch (error) { this.#reportWriteFailure(error); }
   }
 
   /** 结构化事件（`turn.*` / `usage` / `quota` / `task.updated`）与日志是同一条观测流，
@@ -97,10 +143,11 @@ export class LogSink {
     this.#pending.set(event.kind, { timer, event, merged: 1 });
   }
 
-  /** 关停时丢掉尚未发出的尾包。事件只在内存里，丢掉不影响已经落库的那份日志。 */
+  /** 关停时刷新文件缓冲，并丢掉尚未发出的 SSE 尾包。 */
   close(): void {
     for (const entry of this.#pending.values()) clearTimeout(entry.timer);
     this.#pending.clear();
+    for (const path of this.#files.keys()) this.#flushFile(path, true);
   }
 
   event(input: LogEvent): number {
@@ -116,22 +163,16 @@ export class LogSink {
       if (Buffer.byteLength(serialized) > this.#bodyMaxBytes) {
         fileRef = join(day, 'blobs', `${Date.now()}-${ulid()}.json`);
         const blobPath = resolve(this.directory, fileRef);
-        mkdirSync(dirname(blobPath), { recursive: true, mode: 0o700 });
-        writeFileSync(blobPath, serialized, { mode: 0o600 });
-        data = { fileRef, bytes: Buffer.byteLength(serialized) };
+        try { mkdirSync(dirname(blobPath), { recursive: true, mode: 0o700 }); writeFileSync(blobPath, serialized, { mode: 0o600 }); }
+        catch (error) { this.#reportWriteFailure(error); fileRef = undefined; }
+        data = fileRef ? { fileRef, bytes: Buffer.byteLength(serialized) } : { omitted: true, bytes: Buffer.byteLength(serialized) };
       }
     }
     const path = join(this.directory, day, `${category}.jsonl`);
-    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    if (existsSync(path) && statSync(path).size >= this.#maxFileBytes) {
-      let suffix = 1;
-      while (existsSync(`${path}.${suffix}`)) suffix += 1;
-      renameSync(path, `${path}.${suffix}`);
-    }
     const stored = { ...safe, data };
     const ts = Date.now();
     const line = JSON.stringify({ ts, ...stored, ...(fileRef ? { fileRef } : {}) });
-    appendFileSync(path, `${line}\n`, { mode: 0o600 });
+    this.#writeLine(path, `${line}\n`, input.level === 'error' || input.kind === 'system.crash');
     if (this.#console === 'json') process.stdout.write(`${line}\n`);
     else if (this.#console === 'pretty') process.stdout.write(`${new Date().toISOString()} ${input.level.toUpperCase()} ${input.kind} ${input.summary}\n`);
     const id = this.repository.insertLog(stored);

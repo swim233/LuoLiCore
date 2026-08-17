@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { readAppKv, writeAppKv } from '@luoli/db';
+import { guardedFetch, type GuardedResponse } from '../net/outbound.js';
 import type { Sqlite } from '@luoli/db';
 
 /**
@@ -187,7 +188,7 @@ export interface CatalogState { fetchedAt: number; etag: string | null; url: str
 export interface CatalogStatus extends Partial<CatalogState> {
   enabled: boolean; available: boolean; stale: boolean; ageMs: number | null; ttlHours: number; path: string; error: string | null;
 }
-export interface CatalogOptions { enabled: boolean; url: string; cacheFile: string; ttlHours: number; timeoutMs: number }
+export interface CatalogOptions { enabled: boolean; url: string; cacheFile: string; ttlHours: number; timeoutMs: number; allowPrivate?: boolean }
 export type CatalogOutcome = 'hit' | 'fetched' | 'not-modified' | 'stale' | 'disabled' | 'unavailable';
 export interface CatalogLoad { index: CatalogIndex | null; outcome: CatalogOutcome; state: CatalogState | null; error: string | null }
 
@@ -200,7 +201,7 @@ export class ModelCatalog {
   #inflight: Promise<CatalogLoad> | null = null;
   #lastError: string | null = null;
 
-  constructor(private readonly db: Sqlite, private readonly options: () => CatalogOptions, private readonly fetcher: typeof fetch = fetch) {}
+  constructor(private readonly db: Sqlite, private readonly options: () => CatalogOptions, private readonly fetcher?: typeof fetch) {}
 
   #state(): CatalogState | null {
     const state = readAppKv<CatalogState>(this.db, STATE_KEY);
@@ -273,12 +274,12 @@ export class ModelCatalog {
   }
 
   async #fetch(options: CatalogOptions, etag: string | null): Promise<{ notModified: boolean; etag: string | null; body?: string; payload?: Record<string, RawProvider> }> {
-    let response: Response;
+    let response: GuardedResponse | Response;
     try {
-      response = await this.fetcher(options.url, {
-        headers: { accept: 'application/json', 'user-agent': 'LuoLiCore/0.1', ...(etag ? { 'if-none-match': etag } : {}) },
-        signal: AbortSignal.timeout(options.timeoutMs), redirect: 'follow',
-      });
+      const init = { headers: { accept: 'application/json', 'user-agent': 'LuoLiCore/0.1', ...(etag ? { 'if-none-match': etag } : {}) }, signal: AbortSignal.timeout(options.timeoutMs) };
+      response = this.fetcher
+        ? await this.fetcher(options.url, init)
+        : await guardedFetch(options.url, init, { allowPrivate: options.allowPrivate ?? false, maxBytes: MAX_BYTES });
     } catch (error) {
       const name = error instanceof Error ? error.name : '';
       if (name === 'TimeoutError' || name === 'AbortError') throw new Error(`models.dev ${options.timeoutMs} ms 内未响应`);
@@ -286,12 +287,13 @@ export class ModelCatalog {
     }
     if (response.status === 304) return { notModified: true, etag };
     if (!response.ok) throw new Error(`models.dev 返回 ${response.status}`);
-    const body = await response.text();
-    if (Buffer.byteLength(body) > MAX_BYTES) throw new Error('models.dev 返回体超过 32MB，拒绝载入');
+    const body = 'body' in response && Buffer.isBuffer(response.body) ? response.body.toString('utf8') : await (response as Response).text();
+    if (Buffer.byteLength(body) > MAX_BYTES || ('truncated' in response && response.truncated)) throw new Error('models.dev 返回体超过 32MB，拒绝载入');
     let payload: unknown;
     try { payload = JSON.parse(body); } catch { throw new Error('models.dev 返回的不是 JSON'); }
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('models.dev 返回的不是 provider 字典');
-    return { notModified: false, etag: response.headers.get('etag'), body, payload: payload as Record<string, RawProvider> };
+    const header = response.headers instanceof Headers ? response.headers.get('etag') : response.headers.etag;
+    return { notModified: false, etag: Array.isArray(header) ? header[0] ?? null : header ?? null, body, payload: payload as Record<string, RawProvider> };
   }
 
   #write(path: string, body: string): void {

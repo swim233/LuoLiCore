@@ -46,6 +46,11 @@ export class ProviderStore {
     if (Secrets.isLegacy(row.encrypted)) this.db.prepare('UPDATE providers SET api_key_enc=? WHERE id=?').run(this.secrets.encrypt(plaintext), id);
     return plaintext;
   }
+  allDecryptedKeys(): string[] {
+    if (!this.secrets.available) return [];
+    const rows = this.db.prepare('SELECT api_key_enc AS encrypted FROM providers WHERE api_key_enc IS NOT NULL').all() as Array<{ encrypted: string }>;
+    return rows.flatMap((row) => { try { return [this.secrets.decrypt(row.encrypted)]; } catch { return []; } });
+  }
 
   get secretsAvailable(): boolean {
     return this.secrets.available;

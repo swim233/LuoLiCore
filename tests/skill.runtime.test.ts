@@ -21,8 +21,8 @@ describe('skill runtime', () => {
     const { db, skills } = setup();
     expect(skills.catalog('limited')).toEqual([{ name: 'safe-skill', description: 'Safe skill' }]);
     expect(skills.load('safe-skill', 'limited', ['read_file', 'bash'])).toMatchObject({ ok: true, allowedTools: ['read_file'] });
-    expect(skills.resolveResource('skill://safe-skill/reference.txt')).toContain('reference.txt');
-    expect(() => skills.resolveResource('skill://safe-skill/../../secret')).toThrow('path_outside_skill');
+    expect(skills.resolveResource('skill://safe-skill/reference.txt', 'limited')).toContain('reference.txt');
+    expect(() => skills.resolveResource('skill://safe-skill/../../secret', 'limited')).toThrow('path_outside_skill');
     closeDatabase(db);
   });
 

@@ -31,6 +31,18 @@ const collect = (events: EventBus, type: string): Array<Record<string, unknown>>
   return seen;
 };
 
+describe('EventBus 隔离', () => {
+  it('does not let one subscriber break later subscribers', () => {
+    const failures: unknown[] = []; const events = new EventBus((error) => failures.push(error)); const seen: string[] = [];
+    events.subscribe(() => { throw new Error('closed stream'); });
+    events.subscribe((event) => seen.push(event.type));
+    expect(() => events.emit('usage', { value: 1 })).not.toThrow();
+    expect(seen).toEqual(['usage']);
+    expect(failures).toHaveLength(1);
+    expect(events.subscriberCount).toBe(2);
+  });
+});
+
 describe('SSE 事件接线', () => {
   it('日志广播只发摘要、跳过 debug，并按 kind 合并窗口内的连发', async () => {
     const { db, log, events } = harness();

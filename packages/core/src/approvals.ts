@@ -8,6 +8,7 @@ import type { Sqlite } from '@luoli/db';
 const DENIED_HINT = '该操作需要人工批准，但管理员已拒绝，因此没有执行。请说明操作未获批准，并给出不需要该操作的替代做法。';
 const EXPIRED_HINT = '该操作需要人工批准，但审批窗口已过期，因此没有执行。请说明审批已超时，并让用户在仍需执行时重新发起。';
 const CANCELLED_HINT = '该操作等待审批时所属轮次已取消，因此没有执行。';
+const UNAVAILABLE_HINT = '该操作需要 owner 批准，但当前没有可用的审批通道，因此没有执行。请说明审批通道不可用，并给出不需要该操作的替代做法。';
 
 interface PendingApproval {
   finish(approved: boolean, hint?: string): void;
@@ -43,6 +44,13 @@ export class DatabaseApprovalBroker implements ApprovalBroker {
       this.log.event({ level: 'info', kind: 'approval.decided', summary: `${tool.name} auto-approved`, traceId: context.turn.turnId, data: { channel: 'auto', role: 'owner', risk } });
       if (config.approval.rememberWithinTurn) this.#remembered.set(rememberedKey, { approved: true });
       return { approved: true };
+    }
+    // 数的是裁决通道，不是订阅者：main.ts 的 config.changed 订阅者常驻，用 subscriberCount
+    // 判断等于这段永远走不到，非 owner 照旧静默干等满 ttlMs（docs/24 · R-APPR-01）。
+    if (this.events.channelCount === 0) {
+      this.log.event({ level: 'warn', kind: 'approval.unavailable', summary: `${tool.name} approval channel unavailable`, traceId: context.turn.turnId, data: { risk } });
+      if (config.approval.rememberWithinTurn) this.#remembered.set(rememberedKey, { approved: false, hint: UNAVAILABLE_HINT });
+      return { approved: false, hint: UNAVAILABLE_HINT };
     }
 
     const id = ulid();
