@@ -272,6 +272,32 @@
               "additionalProperties": false,
               "default": {}
             },
+            "active": {
+              "type": "object",
+              "properties": {
+                "windowMs": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "default": 0,
+                  "description": "活跃期长度：距上一轮提交多久之内算「对话还在进行」，期间即使超过上面的上限也不裁剪，让前缀缓存一直命中。每一轮都会顺延，安静满这么久之后的第一轮才裁。0 = 关闭。建议与 provider 的缓存有效期同量级（多数是 5 分钟 = 300000）。"
+                },
+                "tokens": {
+                  "type": "integer",
+                  "minimum": 4000,
+                  "maximum": 2000000,
+                  "default": 128000,
+                  "description": "活跃期内允许涨到的 token 天花板。撞到它照样裁剪，且一次裁回上面的 context.limit.tokens —— 只裁到天花板的话此后每一轮都要再裁一次，等于白推迟。"
+                },
+                "maxMessages": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 1000,
+                  "description": "活跃期内允许涨到的消息条数天花板，与 token 天花板先撞上哪个算哪个。"
+                }
+              },
+              "additionalProperties": false,
+              "default": {}
+            },
             "hardCapRatio": {
               "type": "number",
               "exclusiveMinimum": 0.3,

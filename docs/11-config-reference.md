@@ -162,6 +162,10 @@ context:
     tokens: 32000                 # 热更新 · 单轮次上下文上限（轮后裁剪判定，D3/D4）
     maxMessages: 200              # 热更新 · 消息条数上限（副阈值）
     minKeepTurns: 1               # 热更新 · 裁剪时至少保留的最近轮次数
+  active:                         # 活跃期：把裁剪推迟到缓存本来就已过期的时刻（02 §5.1.1）
+    windowMs: 0                   # 热更新 · 距上一轮提交多久之内算「仍在活跃期」；0 = 关闭（滑动窗口，每轮顺延）
+    tokens: 128000                # 热更新 · 活跃期内允许涨到的 token 天花板（撞到就裁回 limit.tokens）
+    maxMessages: 1000             # 热更新 · 活跃期内允许涨到的条数天花板（撞到就裁回 limit.maxMessages）
   hardCapRatio: 0.85              # 热更新 · 轮内硬天花板 = 模型窗口 × 该比例
   background:                     # D6：未触发的群消息进入上下文
     enabled: true                 # 热更新
@@ -532,7 +536,7 @@ perChat:
 
 ```
 output.*
-context.limit.*        context.background.*      context.scope
+context.limit.*        context.background.*      context.scope        context.active.*
 trigger.*
 agent.main.*
 character（指向 memory/ 下的替代人设文件）🚧 未接线

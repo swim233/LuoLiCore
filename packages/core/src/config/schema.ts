@@ -51,7 +51,7 @@ export const HOT_RELOADABLE_CONFIG_KEYS = [
   'telegram.allowBots', 'telegram.strictCommandSuffix',
   'access.defaultUserRole', 'access.defaultChatRole', 'access.archiveBlocked',
   'trigger',
-  'context.limit', 'context.hardCapRatio', 'context.background', 'context.rebase', 'context.tokenRatioAlpha', 'context.cacheCommits',
+  'context.limit', 'context.active', 'context.hardCapRatio', 'context.background', 'context.rebase', 'context.tokenRatioAlpha', 'context.cacheCommits',
   // 合并窗口是 bot.ts 的 config Proxy 每条消息现读的，改完下一条消息就按新值走。
   'concurrency.turnTimeoutMs', 'concurrency.coalesceSameUserMs',
   // 提示词装配拿的是 `turn.config`（每轮 perChatConfig 重算一次），改完下一轮生效。
@@ -170,6 +170,11 @@ export const configSchema = z.object({
   context: z.object({
     scope: z.enum(['chat', 'thread']).default('chat'),
     limit: z.object({ tokens: z.number().int().min(4000).max(500_000).default(32_000), maxMessages: z.number().int().positive().default(200), minKeepTurns: z.number().int().positive().default(1) }).default({}),
+    // 活跃期：裁剪一次 = 前缀缓存全灭，所以别在对话正热的时候裁。`windowMs` 是滑动的空闲间隔
+    // （每轮提交顺延一次），安静满这么久之后的第一轮才裁 —— 那时缓存本来就已过期，代价为零。
+    // `tokens` / `maxMessages` 是推迟期间的天花板：推迟不是取消，撞到天花板照裁，且**裁回
+    // `limit.*` 而不是天花板**（裁到天花板等于此后每轮都要再裁一次，docs/02 §5.1.1）。
+    active: z.object({ windowMs: z.number().int().nonnegative().default(0), tokens: z.number().int().min(4000).max(2_000_000).default(128_000), maxMessages: z.number().int().positive().default(1000) }).default({}),
     hardCapRatio: z.number().gt(0.3).max(0.95).default(0.85),
     background: z.object({ enabled: z.boolean().default(true), maxPerTurn: z.number().int().nonnegative().default(20), showUsername: z.boolean().default(true), showTime: z.boolean().default(true), includeNonText: z.boolean().default(true) }).default({}),
     rebase: z.object({ injectNotice: z.boolean().default(false), markMeta: z.boolean().default(true) }).default({}),
@@ -220,7 +225,7 @@ export const configSchema = z.object({
   if (cfg.concurrency.perKey > cfg.concurrency.global) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['concurrency', 'perKey'], message: 'perKey must be <= global' });
   if (cfg.memory.softLimitTokens >= cfg.memory.hardLimitTokens) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['memory', 'softLimitTokens'], message: 'softLimitTokens must be < hardLimitTokens' });
   if (cfg.webui.host !== '127.0.0.1' && cfg.webui.host !== '::1' && !cfg.webui.passwordHash) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['webui', 'passwordHash'], message: 'password is required when binding beyond loopback' });
-  const allowed = [/^output\./, /^context\.(limit|background)\./, /^context\.scope$/, /^trigger\./, /^agent\.main\./, /^character$/, /^memory\.pubWriteMinRole$/];
+  const allowed = [/^output\./, /^context\.(limit|background|active)\./, /^context\.scope$/, /^trigger\./, /^agent\.main\./, /^character$/, /^memory\.pubWriteMinRole$/];
   for (const [key, value] of Object.entries(cfg.perChat)) {
     const walk = (node: unknown, prefix = ''): void => {
       if (!node || typeof node !== 'object' || Array.isArray(node)) {

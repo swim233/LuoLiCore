@@ -99,7 +99,7 @@ better-sqlite3 + 原生 SQL，无 ORM 查询层。WAL 模式。迁移是 `packag
 ## 项目约定
 
 - **文档是权威来源。实现与文档不一致时，先改文档再改代码**（`docs/README.md` 开头即声明）。
-  `docs/13-acceptance-criteria.md` 是 374 条可逐条勾选的验收条目（改动条数时同步该文件末尾的签署表）。
+  `docs/13-acceptance-criteria.md` 是 380 条可逐条勾选的验收条目（改动条数时同步该文件末尾的签署表）。
   `docs/21-webui-coverage-gaps.md` 记录 WebUI 控制面还够不着哪些已实现的能力，动 WebUI 前先扫一眼。
 - 修不了的东西不要假装修好。已确立的先例：`PUT /api/quota` 返回 `not_implemented` 而不是假成功；
   `ask_parent` 在父 agent 仲裁未实现时返回 `ask_parent_not_implemented` 而不是拿默认值伪造答复。

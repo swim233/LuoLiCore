@@ -9,7 +9,7 @@ type V4LanguageModel = Exclude<LanguageModel, string> & { specificationVersion: 
 import type { Config } from '../config/schema.js';
 import type { Sqlite } from '@luoli/db';
 import { modelAliasKey, readAppKv } from '@luoli/db';
-import { estimateStructureTokens, formatSpeakerIdentity, type RuntimeTurnContext } from '@luoli/shared';
+import { escapeSystemInstructions, estimateStructureTokens, formatSpeakerIdentity, systemInstructions, type RuntimeTurnContext } from '@luoli/shared';
 import type { PromptAssembler, PromptDocuments } from '../index.js';
 import { runtimeBlock, type PromptBuildResult } from '../prompt/assembler.js';
 import type { ToolExecutionContext, ToolRegistry } from '../tools/registry.js';
@@ -225,18 +225,38 @@ function hydrateAttachment(part: Record<string, unknown>, attachments?: Sqlite):
   try { return { ...rest, data: readFileSync(path).toString('base64') }; } catch { return missing; }
 }
 
-export function contextMessages(turn: RuntimeTurnContext, attachments?: Sqlite): ModelMessage[] {
-  return [...turn.snapshot.messages, ...turn.delta].map((message) => {
+export interface ContextMessageOptions {
+  /**
+   * 易变段正文（TOOL CATALOG + 记忆 + RUNTIME）。给了就带 nonce 信封追加成请求体**最后一条**
+   * user 消息；不给就一条都不追加。它是每轮现算的渲染产物，**绝不入库、不进 delta** ——
+   * 持久化它等于把上一轮的时钟腌成历史事实。
+   */
+  volatile?: string;
+  /** Anthropic 专用：在已提交历史的最后一条消息上打移动缓存断点（其余 provider 是隐式前缀缓存，不需要）。 */
+  cacheBreakpoint?: boolean;
+}
+
+export function contextMessages(turn: RuntimeTurnContext, attachments?: Sqlite, options?: ContextMessageOptions): ModelMessage[] {
+  const messages = [...turn.snapshot.messages, ...turn.delta].map((message) => {
     const content = (message.parts as Array<Record<string, unknown>>).map((part) => {
       if (part?.type === 'tool-result') return { ...part, output: normalizeToolOutput(part.output) };
       if (part?.type === 'image') return imageToFilePart(part);
       if (part?.type === 'file' && typeof part.ref === 'string' && part.ref.startsWith('attachment://')) return hydrateAttachment(part, attachments);
+      // 易变段现在和用户正文同处 user role，正文里能写出 `<system-instructions` 就等于能伪造它。
+      // 只改 text 字符串，判别字段一个不碰（docs/02 红线 14）。
+      if (typeof part?.text === 'string') return { ...part, text: escapeSystemInstructions(part.text) };
       return part;
     });
     if (SENDABLE_ROLES.has(message.role)) return { role: message.role, content } as ModelMessage;
     const text = content.map((part) => typeof part?.text === 'string' ? part.text : '').filter(Boolean).join('\n');
     return { role: 'user', content: [{ type: 'text', text: `${NOTE_PREFIX}${text}` }] } as ModelMessage;
   });
+  // 断点打在「已提交历史的最后一条」而不是整个数组的最后一条：本轮 delta 与工具循环的产出都排在
+  // 它之后，所以这段前缀下一轮原样还在，能整段命中。跟着最后一条走的话每步都换位置，等于没打。
+  const stored = turn.snapshot.messages.length;
+  if (options?.cacheBreakpoint && stored > 0) messages[stored - 1] = { ...messages[stored - 1]!, providerOptions: { anthropic: { cacheControl: { type: 'ephemeral' } } } } as ModelMessage;
+  if (options?.volatile) messages.push({ role: 'user', content: [{ type: 'text', text: systemInstructions(options.volatile) }] } as ModelMessage);
+  return messages;
 }
 
 export interface MainAgentDependencies {
@@ -300,18 +320,18 @@ export function assembleMainPrompt(turn: RuntimeTurnContext, dependencies: Promp
 }
 
 /**
- * 系统提示词拆成两条：稳定段（KERNEL/CHARACTER/ASSIST）与易变段（TOOL CATALOG + 记忆 + RUNTIME）。
- * 缓存断点只打在稳定段上 —— 之前整段带着分钟精度的时钟一起进缓存，等于每分钟作废一次
- * （实测跨轮只命中 128 token，同一轮内前缀不变时命中 12,672，docs/06 §1）。工具目录同理：
- * 它随角色与会话变，留在稳定段就是给每个 (角色, 会话) 各存一份前缀，且开关一个工具即全段作废。
- * AI SDK 的 `Instructions` 支持 SystemModelMessage 数组：Anthropic 会转成两个带独立 cache_control
- * 的 system text block，其余 provider 转成两条 system 消息，顺序保持不变。
+ * `instructions` 里只放稳定段（KERNEL/CHARACTER/ASSIST）。易变段（TOOL CATALOG + 记忆 + RUNTIME）
+ * 走 `contextMessages` 追加到请求体**最后**，因为前缀缓存的判据是请求体的物理顺序：易变段留在
+ * system #2 时，它每轮都变的那几个字节位于整个历史之前，后面几万 token 的对话一条都缓存不到
+ * （实测跨轮只命中 128 token，同一轮内前缀不变时命中 12,672，docs/06 §1）。挪到末尾之后
+ * 「稳定段 + 全部历史」才凑成一条逐轮只增不改的前缀。
+ *
+ * 仍传数组而不是裸字符串：Anthropic 的 `cache_control` 要挂在消息对象上。
  */
-function splitInstructions(prompt: { stable: string; volatile: string }, providerKind: string): Instructions {
-  const stable = providerKind === 'anthropic'
+function stableInstructions(prompt: { stable: string }, providerKind: string): Instructions {
+  return [providerKind === 'anthropic'
     ? { role: 'system' as const, content: prompt.stable, providerOptions: { anthropic: { cacheControl: { type: 'ephemeral' } } } }
-    : { role: 'system' as const, content: prompt.stable };
-  return [stable, { role: 'system' as const, content: prompt.volatile }];
+    : { role: 'system' as const, content: prompt.stable }];
 }
 
 function estimateModelMessages(messages: ModelMessage[]): number {
@@ -389,7 +409,9 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
     return built;
   };
   const model = wrappedFor(alias);
-  const instructions = splitInstructions(prompt, dependencies.db.prepare('SELECT kind FROM providers WHERE id=?').pluck().get(initialInfo.providerId) as string ?? '');
+  const providerKind = dependencies.db.prepare('SELECT kind FROM providers WHERE id=?').pluck().get(initialInfo.providerId) as string ?? '';
+  const instructions = stableInstructions(prompt, providerKind);
+  const messageOptions: ContextMessageOptions = { volatile: prompt.volatile, cacheBreakpoint: providerKind === 'anthropic' };
   const stepSpans = new Map<number, { id: string; end: (data?: unknown, error?: unknown) => void }>();
   const stepAlias = new Map<number, string>();
   const agent = new ToolLoopAgent({ model, instructions, tools: toolSet, activeTools: activeNames,
@@ -468,7 +490,7 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
   });
   try {
     if (streaming) {
-      const result = await agent.stream({ messages: contextMessages(turn, dependencies.db), abortSignal: turn.abortSignal });
+      const result = await agent.stream({ messages: contextMessages(turn, dependencies.db, messageOptions), abortSignal: turn.abortSignal });
       let settled = false;
       const finish = (text: string): string => { if (!settled && mainRun) dependencies.agents?.finish(mainRun, text); settled = true; return text; };
       const fail = (error: unknown): never => { if (!settled && mainRun) dependencies.agents?.fail(mainRun, error instanceof Error ? error.message : String(error)); settled = true; throw error; };
@@ -477,7 +499,7 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
       const final = Promise.resolve(result.text).then((text) => { if (!text.trim() && streamFailure) throw streamFailure; return text; }).then(finish, fail);
       return { stream: result.textStream, final, interrupt: () => { if (!settled && mainRun) dependencies.agents?.fail(mainRun, 'stream_interrupted'); settled = true; } };
     }
-    const result = await agent.generate({ messages: contextMessages(turn, dependencies.db), abortSignal: turn.abortSignal });
+    const result = await agent.generate({ messages: contextMessages(turn, dependencies.db, messageOptions), abortSignal: turn.abortSignal });
     if (!result.text.trim() && streamFailure) throw streamFailure;
     if (mainRun) dependencies.agents?.finish(mainRun, result.text);
     return result.text;

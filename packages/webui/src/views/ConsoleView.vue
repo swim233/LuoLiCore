@@ -1469,7 +1469,7 @@ async function loadConfigSchema(): Promise<void> {
 // ── 会话级覆盖：`perChat.<contextKey>` 此前只能用 curl 打（docs/21 · G-API-09）────────────
 // 白名单是安全边界（docs/11 §2.1）：服务端 superRefine 会拒掉不在里面的路径，这里只是把同一份
 // 名单摆到界面上，少一项等于运维够不着，多一项等于让人白填一遍再吃 400。
-const PER_CHAT_ALLOWLIST = ['trigger', 'output', 'context.scope', 'context.limit', 'context.background', 'agent.main', 'memory.pubWriteMinRole'] as const;
+const PER_CHAT_ALLOWLIST = ['trigger', 'output', 'context.scope', 'context.limit', 'context.active', 'context.background', 'agent.main', 'memory.pubWriteMinRole'] as const;
 const PER_CHAT_NOTES: Record<string, string> = {
   'context.scope': '⚠️ 改成 thread 之后，这个会话的后续消息会落到 thread:<chat>:<topic> 这个新 key 上 —— 而覆盖是按 key 存的，等于这条覆盖把自己作废了',
   'agent.main.modelAlias': '只换这个会话的主模型；Telegram 侧的 /model 写的是另一份（app_kv 的会话别名），两者都在时以 /model 为准 —— 上面那条黄色提示就是它，可以直接清掉',
