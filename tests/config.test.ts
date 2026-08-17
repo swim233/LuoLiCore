@@ -1,7 +1,7 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { HOT_RELOADABLE_CONFIG_KEYS, KNOWN_UNIMPLEMENTED_CONFIG_KEYS, configSchema } from '@luoli/core';
+import { CONFIG_DESCRIPTIONS, HOT_RELOADABLE_CONFIG_KEYS, KNOWN_UNIMPLEMENTED_CONFIG_KEYS, configJsonSchema, configSchemaLeafPaths, configSchema } from '@luoli/core';
 
 function sourceFiles(directory: string): string[] {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
@@ -86,6 +86,34 @@ describe('config schema', () => {
     for (const prefix of HOT_RELOADABLE_CONFIG_KEYS) {
       expect([...leaves].some((leaf) => leaf === prefix || leaf.startsWith(`${prefix}.`)), `${prefix} 不在 schema 里`).toBe(true);
     }
+  });
+
+  // WebUI 的「全部配置」表单逐格渲染 schema 里的 `description`（docs/09 §3.13）。没有说明的格子
+  // 只剩一个点分键名，运维得回去翻 doc 11 才知道自己在改什么 —— 而那正是「界面上改得动但不敢改」
+  // 的来源。这两条断言让说明与 schema 严格一一对应：加配置项时必须顺手写一句，删配置项时残留的
+  // 说明也会被点名（悄悄留着的话，下一个人会以为那个键还在）。
+  it('describes every configuration leaf and every top-level section', () => {
+    const document_ = configJsonSchema();
+    const leaves = configSchemaLeafPaths(document_);
+    expect(leaves.length).toBeGreaterThan(200);
+    const definitions = document_.definitions as Record<string, { properties?: Record<string, unknown> } | undefined>;
+    const sections = Object.keys(definitions.LuoLiConfig?.properties ?? {});
+    expect(sections.length).toBeGreaterThan(20);
+    const required = new Set([...leaves, ...sections]);
+    expect([...required].filter((path) => !CONFIG_DESCRIPTIONS[path]?.trim()), '这些配置项还没有作用说明').toEqual([]);
+    expect(Object.keys(CONFIG_DESCRIPTIONS).filter((path) => !required.has(path)), '这些说明对应的配置项已经不存在了').toEqual([]);
+  });
+
+  // 说明必须真的进到 `GET /api/config/schema` 的返回里，而不是只躺在那张表里。zodToJsonSchema
+  // 对复用的 zod 实例发 $ref（quota 那几个金额键指的是同一个 nullableMoney），说明只能挂成 $ref
+  // 的兄弟键 —— 写进被指向的节点会让互指的键共用同一句话。
+  it('carries per-path descriptions into the generated JSON schema, including behind $ref', () => {
+    const document_ = configJsonSchema() as Record<string, any>;
+    const quota = document_.definitions.LuoLiConfig.properties.quota.properties;
+    expect(quota.global.properties.daily.description).toBe(CONFIG_DESCRIPTIONS['quota.global.daily']);
+    expect(quota.perUser.properties.monthly.$ref).toContain('quota/properties/global');
+    expect(quota.perUser.properties.monthly.description).toBe(CONFIG_DESCRIPTIONS['quota.perUser.monthly']);
+    expect(quota.global.properties.daily.description).not.toBe(quota.perUser.properties.monthly.description);
   });
 
   it('requires every config leaf to be referenced by full path or explicitly classified', () => {

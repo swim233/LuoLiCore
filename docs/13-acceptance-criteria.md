@@ -360,6 +360,7 @@
 | [ ] AC-WEB-016c (自动) | Agent 页点某个 Agent | 弹出二级菜单可改 description/modelAlias/minRole/maxSteps/工具多选/instructions；保存写 `agent.agents` 整张数组并过 `configSchema`（缺必填字段 400）；热更新后 `spawn_agent` 用的是新定义，无需重启 |
 | [ ] AC-WEB-017 | 沙箱页 | 显示 docker 可用性；开 `allowHostFsForOwner` 有红色二次确认 |
 | [ ] AC-WEB-018 | 配置页「全部配置」 | 由 `config.schema.json` 自动生成：控件形态、默认值、取值范围全部来自 schema（布尔/枚举/数字/字符串/字符串数组/JSON 各有其控件，`anyOf[number,null]` 留空即「不限」）；热更新项即时生效、需重启项在保存后的 Toast 里被点名；未接线的键默认隐藏且控件禁用；值为 `«redacted»` 或名字像密钥的字段只读并写明该去哪儿改；只发真正改过的那几项。原始 YAML 模式 🚧 未实现 |
+| [ ] AC-WEB-018b (自动) | 「全部配置」的每一项说明 | **每个 schema 叶子与每个顶层分组都有一句作用说明**，来源是 `CONFIG_DESCRIPTIONS` → `configJsonSchema()` 注入的 `description`（`tests/config.test.ts` 断言严格一一对应，多一条少一条都不给过）；界面上说明显示在键名与控件之间，搜索框同时匹配键名与说明；默认值与说明读的是**原始节点**而不是 `$ref` 指过去的那个（否则 `quota.perChat.daily` 显示成「默认 5」、`memory.pubWriteMinRole` 显示成「默认 blocked」，说明也会串成同一句）|
 | [ ] AC-WEB-044 (自动) | `GET /api/config/schema` | `{schema, hotReloadable, unimplemented}` 三件套都在 `data` 信封里 —— 挂在顶层的兄弟键会被只解 `data` 的客户端丢掉，表单会把每一项都当成需重启 |
 | [ ] AC-WEB-045 | 会话页「只对这个会话生效的设置」 | 只渲染 [11 §2.1](./11-config-reference.md) 白名单内的子树，控件显示的是该会话**实际生效**的值（全局 + 覆盖）；保存后 chip 列表出现对应点分项，`[✕]` 取消覆盖后该项回到全局值、空掉的中间层一并收掉；越界路径（如 `sandbox.mode`）返回 400；`context.scope` 那一项带「改了等于把这条覆盖作废」的警告 |
 | [ ] AC-WEB-046 (自动) | `PATCH /api/chats/:key` 连发两次，第二次只带一半的键 | 覆盖对象被**整体替换**而不是合并（界面的「取消覆盖」正是靠这条语义）；`{}` 也接受且仍过得了 `configSchema` |
@@ -446,9 +447,9 @@
 | 记忆 | | / 13 | | | |
 | 日志与成本 | | / 23 | | | |
 | 扩展生态 | | / 27 | | | |
-| WebUI | | / 66 | | | |
+| WebUI | | / 67 | | | |
 | 安全 | | / 15 | | | |
 | 运维 | | / 9 | | | |
-| **合计** | | **/ 355** | | | |
+| **合计** | | **/ 356** | | | |
 
 **整体通过条件**：全部 ★ 项通过 + 非 ★ 项通过率 ≥ 95% + 所有豁免项经需求方书面确认。

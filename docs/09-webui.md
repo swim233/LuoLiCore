@@ -342,13 +342,25 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
 - 会话级覆盖（`perChat.<contextKey>.*`）优先于全局值。**入口在会话页**（§3.2），不在这里 ——
   它只对选中的那个会话有意义，放在全局设置页既看不出改的是谁也看不出改的是什么。
 - **「全部配置」表单**（已实现）：由 `config.schema.json`（zod → JSON Schema）**自动生成**，
-  分组折叠面板，每项显示键路径、当前值、默认值、取值范围与 `Tag: 热更新 / 需重启 / 未接线`。
+  分组折叠面板，每项一张卡片，显示键路径、**这一项的作用说明**、当前值、默认值、取值范围与
+  `Tag: 热更新 / 需重启 / 未接线`。
   这是 [21 §1.1](./21-webui-coverage-gaps.md) 里那 109 个「已接线但改不了」配置项的正路 ——
   手写控件必然与 schema 漂移，所以前端**不维护第二份清单**，控件形态一律从 schema 推：
-  布尔 → 勾选框，`enum` → 下拉，`integer`/`number` → 数字框（`anyOf[number,null]` 留空即「不限」），
+  布尔 → 开关药丸（写着「已开启 / 已关闭」，不是一个孤零零的勾选框），`enum` → 下拉，
+  `integer`/`number` → 数字框（`anyOf[number,null]` 留空即「不限」），
   字符串数组 → 一行一条的文本域，对象与对象数组（`tools.overrides`、`approval.rules`、
   `agent.agents`、`mcp.servers`）→ JSON 文本域（保存前本地校验，敲错了不发请求）。
-  schema 本身不带描述，字段说明留在 [11](./11-config-reference.md) —— 在前端再抄一份必然与文档漂移。
+  - **作用说明同样来自 schema 的 `description`**：唯一来源是 `packages/core/src/config/descriptions.ts`
+    的 `CONFIG_DESCRIPTIONS`（点分路径 → 一句话），由 `configJsonSchema()` 注入
+    —— `GET /api/config/schema` 与 `pnpm config:schema` 生成的文件走的是同一个函数。
+    `tests/config.test.ts` 断言它与 schema 叶子**严格一一对应**：少一条、多一条都不给过。
+    没有说明的格子只剩一个点分键名，运维得回头翻 [11](./11-config-reference.md) 才知道自己在改什么。
+    顶层分组（`general` / `telegram` / …）的那一句写在分组抬头上，搜索框同时匹配键名与说明。
+  - 说明里**不写「热更新 / 未接线」**：那两件事由徽标表达，抄进正文只会多一处会漂的副本。
+  - 读默认值与说明时认的是**原始节点**而不是 `$ref` 指过去的那个：zodToJsonSchema 对复用的 zod 实例
+    （`role`、`nullableMoney`）发 `$ref`，把 `default` 放在 `$ref` 的兄弟位置。跟着 `$ref` 走再读，
+    `quota.perChat.daily` 会显示成「默认 5」（真值 1）、`memory.pubWriteMinRole` 显示成
+    「默认 blocked」（真值 trusted），说明也会串成同一句。
   - **未接线的键默认隐藏**且控件禁用（可用「显示未接线项」翻出来看）：能点但运行时不读就是假控件。
   - **密钥字段只读**：`GET /api/config` 里它们已经是 `«redacted»`，把这个字面量写回去等于覆盖真值。
     界面上写明该去哪儿改（Provider key 在模型页、WebUI 口令用 `pnpm webui:passwd`、其余走环境变量）。
@@ -504,7 +516,13 @@ packages/webui/
   相邻页面都是 `<section>`，没有 key 时 Vue 认成同一个节点，只换内容不走过渡）；
   列表入场是 `rise-in` 逐项错开（会话卡片、总览指标卡）；点击一律有按下反馈（按钮 `scale(.97)`、
   图标按钮 `scale(.88)`、对话框 `scale(.97)` 弹入）。左侧导航常驻不动，所以页面切换不做横向滑动 ——
-  横移会读成「整页被推走了」。
+  横移会读成「整页被推走了」。**折叠区一律是「箭头旋转 90° + 内容 `reveal-down`」**（`.ui-fieldset`、
+  对话详情的载荷、「全部配置」的分组）：换图标类名而不转箭头会读成闪烁，内容直接蹦出来则看不出它从哪儿来。
+- **公共类名要么写在自己的作用域里，要么别用**。`.field-note`、`.switch-line`、`.search.grow`
+  当初都只定义在 `.form-grid` / `.search-row` 的后代选择器下，「全部配置」表单照抄了类名却拿不到样式：
+  说明文字是满黑正文色、搜索框卡在 290 px 不跟着伸、分组抬头那个 `<button>` 连 `border: 0` 都没有，
+  深色主题下露出浏览器默认的亮边框（`button` 全局只设了 `cursor`）。新加区块要么复用
+  `.callout` / `.ui-tag` 这类无前缀原语，要么在 `styles.css` 里给自己那一段写全。
 - 表格统一虚拟滚动 + 服务端分页/排序/筛选（日志与消息量可能很大）。
 - 所有金额显示 4 位小数 + hover 显示完整值；token 显示千分位。
 - **只读渲染安全**：消息内容、日志 payload 一律作为纯文本渲染（`v-text` / `<pre>`），**禁止 `v-html`**（消息内容来自不可信用户）。

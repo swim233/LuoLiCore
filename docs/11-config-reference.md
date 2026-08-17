@@ -3,6 +3,15 @@
 配置有三个来源，优先级 **环境变量 > `config_kv`(WebUI 写入) > `config/config.yaml` > 代码内默认值**。
 
 - 全部配置由 `packages/core/config` 的 zod schema 定义，`config.schema.json` 由它生成，WebUI 表单也由它生成 —— **单一数据源**。
+- **每一项的作用说明**（WebUI「全部配置」逐格显示的那句话）住在
+  `packages/core/src/config/descriptions.ts` 的 `CONFIG_DESCRIPTIONS`：点分路径 → 一句话，
+  由 `configJsonSchema()` 注入生成出的 JSON Schema 的 `description`。`GET /api/config/schema` 与
+  `pnpm config:schema` 走同一个函数，所以界面上看到的和仓库里那份文件永远是同一批说明。
+  没有逐个写 `.describe()` 是因为 `role`、`nullableMoney` 这些 zod 实例被多处复用，挂上去会让
+  `quota.global.daily` 和 `quota.perUser.monthly` 共用同一句话。`tests/config.test.ts` 断言这张表与
+  schema 叶子**严格一一对应**：新增配置项时必须顺手写一句，删配置项时残留的说明也会被点名。
+  本文件仍是唯一的完整参考（含热更新判定、校验规则、`perChat` 白名单）；`CONFIG_DESCRIPTIONS`
+  是它在界面上的一句话摘要，两者的分工是「手册 vs. 控件旁边的提示」，不是两份清单。
 - 启动时校验；校验失败**拒绝启动**并打印具体路径与原因。
 - 热更新：标 `热更新` 的项保存后立即生效（下一个 turn）；标 `需重启` 的项保存后 WebUI 显示待重启徽标。
   判据是**运行时读的是 getter（`configStore.snapshot()` / `turn.config` / bot 的 config Proxy）而不是启动时那份快照**；
@@ -520,7 +529,10 @@ config.onChange(keys => {
 ```
 
 - **配置快照**：每个 turn 在 `openTurn` 时抓一次不可变快照（`Object.freeze` 深冻结），整轮使用同一份，避免中途配置变更导致行为不一致。
-- 需重启项的判定写在 zod schema 的 `.describe()` 元数据里（`{ hot: false }`），WebUI 与文档同源。
+- 需重启项的判定**不在 schema 里**，而是 `HOT_RELOADABLE_CONFIG_KEYS` 这张前缀白名单
+  （`packages/core/src/config/schema.ts`）：`GET /api/config/schema` 以 `hotReloadable` 一并返回，
+  WebUI 据此给每一项打「热更新 / 需重启」徽标，本文件里标 `热更新` 的键由 `tests/config.test.ts`
+  逐条对表。schema 的 `description` 只承载作用说明，不重复这件事 —— 抄进正文只会多一处会漂的副本。
 
 ## 4. 配置校验规则（超出类型之外的约束）
 

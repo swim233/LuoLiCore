@@ -1918,7 +1918,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             </article>
           </div>
           <div class="registry-heading">
-            <div><h3>全部配置</h3><p class="section-note">由 <code>config/config.schema.json</code> 自动生成 —— 控件形态、默认值、取值范围全部取自 schema，不在前端维护第二份清单。热更新项保存即生效，需重启项会在保存后的提示里点名。密钥字段只读（已脱敏）。</p></div>
+            <div><h3>全部配置</h3><p class="section-note">由 <code>config/config.schema.json</code> 自动生成 —— 控件形态、默认值、取值范围与每一项的作用说明全部取自 schema，不在前端维护第二份清单。搜索框同时匹配键名与说明。热更新项保存即生效，需重启项会在保存后的提示里点名。密钥字段只读（已脱敏）。</p></div>
             <UiButton size="small" variant="text" icon="pi pi-history" label="变更历史" @click="openConfigRevisions" />
           </div>
           <SchemaForm v-if="configSchema" ref="schemaForm" :schema="configSchema.schema" :value="config" :hot-reloadable="configSchema.hotReloadable" :unimplemented="configSchema.unimplemented" :saving="schemaSaving" @save="saveSchemaConfig" />
