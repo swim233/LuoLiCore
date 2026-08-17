@@ -4,6 +4,8 @@ import UiButton from '../ui/UiButton.vue';
 import UiTag from '../ui/UiTag.vue';
 import UiSelect from '../ui/UiSelect.vue';
 import UiNumber from '../ui/UiNumber.vue';
+import UiCheckbox from '../ui/UiCheckbox.vue';
+import UiSwitch from '../ui/UiSwitch.vue';
 import UiModal from '../ui/UiModal.vue';
 import UiDrawer from '../ui/UiDrawer.vue';
 import DataGrid from '../ui/DataGrid.vue';
@@ -288,6 +290,11 @@ function syncOutput(): void {
 }
 function markOutputDirty(): void { outputDirty.value = true; }
 function changeOutputNumber(field: keyof Omit<OutputForm, 'mode'>, value: number | null): void { outputForm.value[field] = value ?? 0; markOutputDirty(); }
+/** 模型元数据没有「留空 = 不设置」这一档（窗口、价格都是必填的 number）：清空按 0 收，让服务端那道
+ *  zod 去判这值合不合法 —— 比把 null 塞进 JSON body 强，那边只会回一条对不上界面的路径报错。 */
+type ModelNumber = 'contextWindow' | 'maxOutput' | 'sort' | 'priceIn' | 'priceOut' | 'priceCacheRead' | 'priceCacheWrite';
+function changeModelNumber(field: ModelNumber, value: number | null): void { modelForm.value[field] = value ?? 0; }
+function changeCatalogDefault(field: 'contextWindow' | 'maxOutput', value: number | null): void { catalogDefaults.value[field] = value ?? 0; }
 async function saveOutput(): Promise<void> {
   const form = outputForm.value;
   outputSaving.value = true;
@@ -1647,11 +1654,11 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             <label>CPU 核数<UiNumber :model-value="sandboxForm.cpus" :min="0.1" :step="0.5" :disabled="sandboxForm.mode !== 'docker'" @update:model-value="sandboxForm.cpus = $event; markSandboxDirty()" /></label>
             <label>进程数上限<UiNumber :model-value="sandboxForm.pidsLimit" :min="1" :disabled="sandboxForm.mode !== 'docker'" @update:model-value="sandboxForm.pidsLimit = $event; markSandboxDirty()" /></label>
             <label>tmpfs（MB）<UiNumber :model-value="sandboxForm.tmpfsMb" :min="1" :step="16" :disabled="sandboxForm.mode !== 'docker'" @update:model-value="sandboxForm.tmpfsMb = $event; markSandboxDirty()" /></label>
-            <label class="switch-line"><input v-model="sandboxForm.readOnlyRoot" type="checkbox" :disabled="sandboxForm.mode !== 'docker'" @change="markSandboxDirty">根文件系统只读（只有工作目录与 tmpfs 可写）</label>
+            <UiSwitch v-model="sandboxForm.readOnlyRoot" class="wide" label="根文件系统只读（只有工作目录与 tmpfs 可写）" :disabled="sandboxForm.mode !== 'docker'" @change="markSandboxDirty" />
             <div class="wide">
               <p class="field-title">绕过沙箱的角色<small>勾中的角色，exec 类工具直接在宿主上跑。</small></p>
               <div class="trigger-switches">
-                <label v-for="role in ROLES" :key="role"><input type="checkbox" :checked="sandboxForm.bypassRoles.includes(role)" @change="toggleBypassRole(role)">{{ role }}</label>
+                <UiCheckbox v-for="role in ROLES" :key="role" :model-value="sandboxForm.bypassRoles.includes(role)" :label="role" @change="toggleBypassRole(role)" />
               </div>
               <p v-if="sandboxForm.bypassRoles.some((role) => role !== 'owner')" class="field-note wake-issue"><i class="pi pi-exclamation-triangle" />owner 之外的角色也在绕过名单里：这些人能让模型在宿主上执行任意命令。</p>
             </div>
@@ -1712,8 +1719,8 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
           </div>
           <div class="form-grid">
             <div class="trigger-switches">
-              <label><input v-model="quotaForm.enabled" type="checkbox" @change="markQuotaDirty">启用金额配额</label>
-              <label><input v-model="quotaForm.requirePricing" type="checkbox" @change="markQuotaDirty">模型缺定价时拒绝开轮次</label>
+              <UiSwitch v-model="quotaForm.enabled" label="启用金额配额" @change="markQuotaDirty" />
+              <UiSwitch v-model="quotaForm.requirePricing" label="模型缺定价时拒绝开轮次" @change="markQuotaDirty" />
             </div>
             <label>最小预留（美元）<UiNumber :model-value="quotaForm.minReserveUsd" :min="0" :step="0.01" @update:model-value="quotaForm.minReserveUsd = $event; markQuotaDirty()" /><small class="field-note">开轮次时至少占住这么多额度。估算值比它低时按它算，免得一堆小轮次并发挤穿限额。</small></label>
             <p class="field-note wide"><code>requirePricing</code> 对 owner 不生效：owner 的轮次即便模型没定价也照常开，只是那一轮记 0 美元。</p>
@@ -1742,7 +1749,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             <label>每会话每小时轮次<UiNumber :model-value="quotaForm.turnsPerChatPerHour" :min="1" @update:model-value="quotaForm.turnsPerChatPerHour = $event; markQuotaDirty()" /></label>
             <label>单用户并发轮次<UiNumber :model-value="quotaForm.concurrentPerUser" :min="1" @update:model-value="quotaForm.concurrentPerUser = $event; markQuotaDirty()" /></label>
             <p class="field-title wide">超限时</p>
-            <label class="switch-line"><input v-model="quotaForm.reply" type="checkbox" @change="markQuotaDirty">在群里回一条说明<small class="field-note">关掉的话被拒的人什么都收不到，只有日志里有一条 <code>quota.exceeded</code>。</small></label>
+            <UiSwitch v-model="quotaForm.reply" class="wide" @change="markQuotaDirty">在群里回一条说明<small class="field-note">关掉的话被拒的人什么都收不到，只有日志里有一条 <code>quota.exceeded</code>。</small></UiSwitch>
             <label class="wide">提示文案<textarea v-model="quotaForm.message" rows="2" spellcheck="false" @input="markQuotaDirty" /><small class="field-note"><i class="pi pi-exclamation-triangle" /><code>{spent}</code> / <code>{limit}</code> 会被替换成 <code>—</code>，<code>{resetAt}</code> 被替换成「下个额度窗口」—— 占位符目前拿不到真实数字，别把话写成「已用 {spent}」那样依赖它们。</small></label>
             <div v-if="quota?.unimplemented.length" class="wide quota-unimplemented">
               <p class="field-title"><i class="pi pi-ban" />下面这些配额项在 schema 里有，但<b>运行时没有任何代码读它们</b>，所以这里不给控件</p>
@@ -1753,7 +1760,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
           <div class="registry-heading">
             <div><h3>当前计数器</h3><p class="section-note">当前 bucket：日 <code>{{ quota?.buckets.day ?? '—' }}</code> · 月 <code>{{ quota?.buckets.month ?? '—' }}</code>。<b>已用</b>是已结算花费 + 在途预留，判定用的就是这个和。</p></div>
             <div class="section-actions">
-              <label v-if="staleCounters" class="switch-line"><input v-model="quotaShowHistory" type="checkbox">连历史 bucket 一起看（{{ staleCounters }} 行）</label>
+              <UiCheckbox v-if="staleCounters" v-model="quotaShowHistory" :label="`连历史 bucket 一起看（${staleCounters} 行）`" />
               <UiButton size="small" variant="outlined" icon="pi pi-refresh" aria-label="刷新计数器" :loading="quotaLoading" @click="loadQuota" />
               <UiButton size="small" variant="outlined" severity="danger" icon="pi pi-trash" label="全部清零" :loading="quotaResetting === 'all'" :disabled="!quota?.counters.length" @click="resetQuota()" />
             </div>
@@ -1868,12 +1875,13 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             <UiButton size="small" icon="pi pi-save" label="保存触发设置" :loading="triggerSaving" :disabled="!triggerDirty" @click="saveTrigger" />
           </div>
           <div class="form-grid">
+            <!-- 五个来源取并集，是「哪些消息算触发」这一个集合的成员，不是五个独立开关 —— 用勾选框。 -->
             <div class="trigger-switches">
-              <label><input v-model="triggerForm.private" type="checkbox" @change="markTriggerDirty">私聊消息</label>
-              <label><input v-model="triggerForm.mention" type="checkbox" @change="markTriggerDirty">@ 提及</label>
-              <label><input v-model="triggerForm.reply" type="checkbox" @change="markTriggerDirty">回复 bot</label>
-              <label><input v-model="triggerForm.command" type="checkbox" @change="markTriggerDirty">bot 命令</label>
-              <label><input v-model="triggerForm.channels" type="checkbox" @change="markTriggerDirty">频道消息</label>
+              <UiCheckbox v-model="triggerForm.private" label="私聊消息" @change="markTriggerDirty" />
+              <UiCheckbox v-model="triggerForm.mention" label="@ 提及" @change="markTriggerDirty" />
+              <UiCheckbox v-model="triggerForm.reply" label="回复 bot" @change="markTriggerDirty" />
+              <UiCheckbox v-model="triggerForm.command" label="bot 命令" @change="markTriggerDirty" />
+              <UiCheckbox v-model="triggerForm.channels" label="频道消息" @change="markTriggerDirty" />
             </div>
             <div class="wide">
               <p class="field-title">唤醒词<small>不以 ^ 开头 = 包含匹配；以 ^ 开头 = 正则（u 标志，只扫描消息前 4096 字符）。私聊不看唤醒词。</small></p>
@@ -1891,10 +1899,10 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             </div>
             <label>唤醒词最短长度<UiNumber :model-value="triggerForm.wakewordMinLength" :min="1" :max="32" @update:model-value="changeWakewordMinLength" /><small class="field-note">短于这个长度的唤醒词整条忽略（按 ^ 之后的字符数算），避免单字误触发。</small></label>
             <div class="switch-column">
-              <label class="switch-line"><input v-model="triggerForm.requireTextAfterMention" type="checkbox" @change="markTriggerDirty">只 @ 不说话时不触发</label>
+              <UiSwitch v-model="triggerForm.requireTextAfterMention" label="只 @ 不说话时不触发" @change="markTriggerDirty" />
               <!-- 这一格在 KNOWN_UNIMPLEMENTED_CONFIG_KEYS 里：编辑消息一律按背景消息归档，
                    开关存得下但运行时没人读（docs/20 · W-TG-05）。不能让它看起来像个能用的开关。 -->
-              <label class="switch-line"><input v-model="triggerForm.ignoreEditedAsTrigger" type="checkbox" disabled>编辑旧消息不重新触发<UiTag value="未接线" severity="secondary" title="编辑消息当前一律按背景消息归档，这个开关运行时没有任何代码读它" /></label>
+              <UiSwitch v-model="triggerForm.ignoreEditedAsTrigger" disabled>编辑旧消息不重新触发<UiTag value="未接线" severity="secondary" title="编辑消息当前一律按背景消息归档，这个开关运行时没有任何代码读它" /></UiSwitch>
             </div>
             <p class="field-note wide">会话级覆盖（<code>perChat.&lt;contextKey&gt;.trigger</code>）优先于这里的全局值，目前只能通过 <code>PATCH /api/chats/:key</code> 写入。</p>
           </div>
@@ -1932,15 +1940,15 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
     </section>
 
     <UiModal v-model:visible="providerDialog" title="Provider 配置">
-      <div class="form-grid"><label>名称<input v-model="providerForm.name"></label><label>类型<UiSelect v-model="providerForm.kind" :options="['openai', 'anthropic', 'google', 'openai-compatible']" /></label><label class="wide">Base URL<input v-model="providerForm.baseUrl" placeholder="使用 provider 默认地址"></label><label class="wide">API Key<input v-model="providerForm.apiKey" type="password" placeholder="保持不变" autocomplete="new-password"></label><label class="switch-line"><input v-model="providerForm.enabled" type="checkbox">启用</label></div>
+      <div class="form-grid"><label>名称<input v-model="providerForm.name"></label><label>类型<UiSelect v-model="providerForm.kind" :options="['openai', 'anthropic', 'google', 'openai-compatible']" /></label><label class="wide">Base URL<input v-model="providerForm.baseUrl" placeholder="使用 provider 默认地址"></label><label class="wide">API Key<input v-model="providerForm.apiKey" type="password" placeholder="保持不变" autocomplete="new-password"></label><UiSwitch v-model="providerForm.enabled" class="wide" label="启用" /></div>
       <template #footer><UiButton variant="text" label="取消" @click="providerDialog = false" /><UiButton variant="outlined" icon="pi pi-bolt" label="测试连接" :loading="Boolean(providerForm.id) && testingProvider === providerForm.id" @click="testProviderDraft" /><UiButton label="保存 Provider" @click="saveProvider" /></template>
     </UiModal>
     <UiModal v-model:visible="catalogDialog" title="从 Provider 拉取模型" width="min(900px, 96vw)">
       <div class="catalog-toolbar">
         <label>Provider<UiSelect v-model="catalogProviderId" :options="providers" option-label="name" option-value="id" @change="loadCatalog" /></label>
         <label>搜索<input v-model="catalogQuery" placeholder="按模型 ID 或显示名过滤"></label>
-        <label>默认 Context Window<input v-model.number="catalogDefaults.contextWindow" type="number"></label>
-        <label>默认最大输出<input v-model.number="catalogDefaults.maxOutput" type="number"></label>
+        <label>默认 Context Window<UiNumber :model-value="catalogDefaults.contextWindow" :min="1" :step="1000" @update:model-value="changeCatalogDefault('contextWindow', $event)" /></label>
+        <label>默认最大输出<UiNumber :model-value="catalogDefaults.maxOutput" :min="1" :step="256" @update:model-value="changeCatalogDefault('maxOutput', $event)" /></label>
         <UiButton variant="outlined" icon="pi pi-refresh" label="重新拉取" :loading="catalogLoading" @click="loadCatalog" />
       </div>
       <div v-if="catalogError" class="danger-banner"><i class="pi pi-exclamation-triangle" />{{ catalogError }}</div>
@@ -1965,7 +1973,19 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
       <template #footer><span class="catalog-count">已选 {{ catalogSelection.length }} · 列出 {{ catalogRows.length }} / 共 {{ catalogModels.length }}</span><UiButton variant="text" label="关闭" @click="catalogDialog = false" /><UiButton label="导入所选" icon="pi pi-download" :disabled="!catalogSelection.length" @click="importCatalog" /></template>
     </UiModal>
     <UiModal v-model:visible="modelDialog" title="模型配置" width="min(680px, 94vw)">
-      <div class="form-grid"><label>Provider<UiSelect v-model="modelForm.providerId" :options="providers" option-label="name" option-value="id" /></label><label>模型 ID<input v-model="modelForm.modelId" :disabled="Boolean(modelForm.id)"></label><label>显示名<input v-model="modelForm.displayName"></label><label>Context Window<input v-model.number="modelForm.contextWindow" type="number"></label><label>最大输出<input v-model.number="modelForm.maxOutput" type="number"></label><label>排序<input v-model.number="modelForm.sort" type="number"></label><label>输入价格 / M token<input v-model.number="modelForm.priceIn" type="number"></label><label>输出价格 / M token<input v-model.number="modelForm.priceOut" type="number"></label><label>缓存读取价格<input v-model.number="modelForm.priceCacheRead" type="number"></label><label>缓存写入价格<input v-model.number="modelForm.priceCacheWrite" type="number"></label><label class="switch-line"><input v-model="modelForm.enabled" type="checkbox">启用</label></div>
+      <div class="form-grid">
+        <label>Provider<UiSelect v-model="modelForm.providerId" :options="providers" option-label="name" option-value="id" /></label>
+        <label>模型 ID<input v-model="modelForm.modelId" :disabled="Boolean(modelForm.id)"></label>
+        <label>显示名<input v-model="modelForm.displayName"></label>
+        <label>排序<UiNumber :model-value="modelForm.sort" :min="0" @update:model-value="changeModelNumber('sort', $event)" /></label>
+        <label>Context Window<UiNumber :model-value="modelForm.contextWindow" :min="1" :step="1000" @update:model-value="changeModelNumber('contextWindow', $event)" /></label>
+        <label>最大输出<UiNumber :model-value="modelForm.maxOutput" :min="1" :step="256" @update:model-value="changeModelNumber('maxOutput', $event)" /></label>
+        <label>输入价格 / M token<UiNumber :model-value="modelForm.priceIn" :min="0" :step="0.1" @update:model-value="changeModelNumber('priceIn', $event)" /></label>
+        <label>输出价格 / M token<UiNumber :model-value="modelForm.priceOut" :min="0" :step="0.1" @update:model-value="changeModelNumber('priceOut', $event)" /></label>
+        <label>缓存读取价格<UiNumber :model-value="modelForm.priceCacheRead" :min="0" :step="0.01" @update:model-value="changeModelNumber('priceCacheRead', $event)" /></label>
+        <label>缓存写入价格<UiNumber :model-value="modelForm.priceCacheWrite" :min="0" :step="0.01" @update:model-value="changeModelNumber('priceCacheWrite', $event)" /></label>
+        <UiSwitch v-model="modelForm.enabled" class="wide" label="启用" />
+      </div>
       <template #footer><UiButton variant="text" label="取消" @click="modelDialog = false" /><UiButton label="保存模型" @click="saveModel" /></template>
     </UiModal>
     <UiModal v-model:visible="aliasDialog" :title="`别名 ${aliasName || '（未命名）'}`" width="min(860px, 94vw)">
@@ -2076,7 +2096,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
         <label>审批策略<input :value="APPROVAL_LABEL[toolForm.approval] ?? toolForm.approval" disabled></label>
         <label>作用域<input :value="SCOPE_LABEL[toolForm.scope] ?? toolForm.scope" disabled></label>
         <p class="wide field-note">上面四项是代码里的单一策略源（<code>TOOL_POLICY</code>），注册期就 fail-closed，不在这里改 —— 能从界面调低某个工具的最低角色，等于把权限矩阵变成两份会漂移的真相。</p>
-        <label class="switch-line"><input v-model="toolForm.enabled" type="checkbox">对所有会话启用</label>
+        <UiSwitch v-model="toolForm.enabled" class="wide" label="对所有会话启用" />
         <p class="wide field-note">停用是硬边界：工具既不进模型的工具目录，<code>execute()</code> 也会二次拦截并返回 <code>tool_disabled_by_operator</code>（模型可能沿用上一步的工具名）。</p>
       </div>
       <template #footer><UiButton variant="text" label="取消" @click="toolDialog = false" /><UiButton :label="toolForm.enabled ? '启用' : '停用'" :severity="toolForm.enabled ? 'primary' : 'danger'" :loading="toolSaving" :disabled="toolForm.enabled === toolForm.original" @click="saveTool" /></template>
@@ -2090,11 +2110,15 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
         <label>最低角色<UiSelect v-model="agentForm.minRole" :options="ROLES" /></label>
         <label>步数上限<UiNumber v-model="agentForm.maxSteps" :min="1" :max="64" /></label>
         <label>结果最大字符<UiNumber v-model="agentForm.resultMaxChars" :min="200" :step="500" /></label>
-        <label class="switch-line"><input v-model="agentForm.injectMemory" type="checkbox">注入记忆文档（PUBMEMORY / PRIMEMORY）</label>
+        <UiSwitch v-model="agentForm.injectMemory" class="wide" label="注入记忆文档（PUBMEMORY / PRIMEMORY）" />
         <p class="wide field-note">子 agent 的有效角色 = min(父 agent 角色, 这里的最低角色)，永远不会比派发它的人权限更高。</p>
         <div class="wide">
           <p class="field-title">可用工具<small>全不勾 = 不额外限制，沿用父 agent 在当前角色下的工具目录</small></p>
-          <div class="tool-picker"><label v-for="row in toolRows" :key="row.name" :class="{ off: !row.enabled }"><input type="checkbox" :checked="agentForm.tools.includes(row.name)" @change="toggleAgentTool(row.name)"><code>{{ row.name }}</code><small v-if="!row.enabled">已停用</small></label></div>
+          <div class="tool-picker">
+            <UiCheckbox v-for="row in toolRows" :key="row.name" :class="{ off: !row.enabled }" :model-value="agentForm.tools.includes(row.name)" @change="toggleAgentTool(row.name)">
+              <code>{{ row.name }}</code><small v-if="!row.enabled">已停用</small>
+            </UiCheckbox>
+          </div>
         </div>
         <label class="wide">instructions<textarea v-model="agentForm.instructions" rows="9" placeholder="这个子 agent 的系统提示词" /></label>
       </div>
@@ -2132,7 +2156,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
         <label>最低角色<UiSelect v-model="skillForm.minRole" :options="ROLES" /></label>
         <label class="wide">描述<input v-model="skillForm.description" maxlength="500" placeholder="模型在目录里看到的职责摘要"></label>
         <label>建议模型别名<input v-model="skillForm.model" placeholder="可留空"></label>
-        <label class="switch-line"><input v-model="skillForm.enabled" type="checkbox">启用</label>
+        <UiSwitch v-model="skillForm.enabled" class="wide" label="启用" />
         <label class="wide">允许工具（每行一个）<textarea v-model="skillForm.allowedTools" rows="4" placeholder="留空 = 沿用当前角色全部可用工具" /></label>
         <label class="wide">SKILL.md 正文<textarea v-model="skillForm.body" rows="14" placeholder="加载 Skill 后注入给模型的完整说明" /></label>
         <div v-if="!skillForm.isNew" class="wide"><p class="field-title">附属文件</p><div class="cap-tags"><UiTag v-for="file in skillForm.files" :key="file" :value="file" severity="secondary" /><small v-if="!skillForm.files.length" class="alias-empty">无</small></div></div>
@@ -2152,7 +2176,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
         <label>工具调用超时（ms）<UiNumber v-model="mcpForm.timeoutMs" :min="100" :step="1000" /></label>
         <label class="wide">工具允许 glob（每行一个）<textarea v-model="mcpForm.toolAllow" rows="3" placeholder="留空 = 全部允许" /></label>
         <label class="wide">工具拒绝 glob（每行一个）<textarea v-model="mcpForm.toolDeny" rows="3" /></label>
-        <label class="switch-line"><input v-model="mcpForm.enabled" type="checkbox">启用并连接</label>
+        <UiSwitch v-model="mcpForm.enabled" class="wide" label="启用并连接" />
       </div>
       <p v-if="mcpMasterOff" class="callout warn"><i class="pi pi-power-off" />总开关 <code>mcp.enabled</code> 当前是关的：这份配置存得下，但 <code>reconcile</code> 会跳过所有 server，不会真的连接。<UiButton size="small" variant="outlined" label="打开总开关" @click="enableMcpMaster" /></p>
       <p class="callout warn"><i class="pi pi-exclamation-triangle" />stdio 命令与 HTTP server 都是外部信任边界；只连接你审核过的 server，并用工具 allow/deny 缩小暴露面。</p>

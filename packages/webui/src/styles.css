@@ -92,13 +92,75 @@ code { font-family: var(--font-mono); font-size: .82rem; }
 .brand-mark { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 13px; background: #5630b9; color: #fff; font: 600 1.1rem var(--font-mono); box-shadow: 0 10px 24px color-mix(in srgb, var(--primary), transparent 68%); }
 
 /* ── 表单原语：以前这层由 PrimeVue 的主题提供，现在直接落在原生元素上（docs/09 §6） ── */
-:where(input:not([type='checkbox']), select, textarea) { width: 100%; padding: 9px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); color: var(--ink); font-size: .86rem; transition: border-color 150ms ease, box-shadow 150ms ease; }
-:where(input, select, textarea):focus-visible { outline: 0; border-color: var(--primary); box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary), transparent 84%); }
-:where(input, select, textarea):disabled { opacity: .55; cursor: not-allowed; }
+:where(input, textarea) { width: 100%; padding: 9px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); color: var(--ink); font-size: .86rem; transition: border-color 150ms ease, box-shadow 150ms ease; }
+:where(input, textarea):focus-visible { outline: 0; border-color: var(--primary); box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary), transparent 84%); }
+:where(input, textarea):disabled { opacity: .55; cursor: not-allowed; }
 ::placeholder { color: color-mix(in srgb, var(--muted), transparent 30%); }
-input[type='checkbox'] { width: 16px; height: 16px; accent-color: var(--primary); }
-select { appearance: none; padding-right: 30px; background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23667085' stroke-width='1.6'%3E%3Cpath d='M4 6.5 8 10.5 12 6.5'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 9px center; background-size: 15px; }
-.dark select { background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%2398a2b3' stroke-width='1.6'%3E%3Cpath d='M4 6.5 8 10.5 12 6.5'/%3E%3C/svg%3E"); }
+
+/* ── 点选与步进控件：勾选框 / 开关 / 数字步进 / 下拉（docs/09 §6）──
+   原生 checkbox、`<select>` 的弹层、number 的上下箭头都由操作系统绘制：`accent-color` 只够染中间
+   那块填充，圆角、边框粗细、箭头形状仍跟着 Windows/GNOME 的控件主题走，跟这套 10–20 px 圆角卡片
+   摆在一起是两个年代的东西，深色主题下还会露出亮色的系统弹层。四个原语一律「原生元素留在 DOM 里
+   管语义、外观自己画」：键盘、`<label>` 关联、`:checked` / `:indeterminate` / 表单校验都还是浏览器的，
+   只是把那个元素挪出视野。**勾选框 = 从一组里挑几个或筛选视图；开关 = 开/关某一项能力**，
+   两者不混用 —— 混用之后「勾上了」和「开着」在同一页里读不出区别。 ── */
+.ui-check, .ui-switch { position: relative; display: inline-flex; align-items: center; gap: 9px; min-width: 0; color: var(--ink); font-size: .8rem; font-weight: 400; line-height: 1.5; cursor: pointer; }
+.ui-check > input, .ui-switch > input { position: absolute; width: 1px; height: 1px; margin: 0; padding: 0; opacity: 0; pointer-events: none; }
+.ui-check-label, .ui-switch-label { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; min-width: 0; overflow-wrap: anywhere; }
+.ui-check:has(input:disabled), .ui-switch:has(input:disabled) { opacity: .5; cursor: not-allowed; }
+.ui-check:active > input:not(:disabled) + .ui-check-box, .ui-switch:active > input:not(:disabled) + .ui-switch-track { transform: scale(.93); }
+.ui-check-box { flex: none; display: grid; place-items: center; width: 17px; height: 17px; border: 1.5px solid var(--border); border-radius: 6px; background: var(--surface); color: transparent; font-size: .56rem; transition: 150ms ease; }
+/* 勾从 40% 弹到满：不做这一下，勾上只是「方块换了个颜色」，扫过去看不出状态变了 */
+.ui-check-box > i { transform: scale(.4); transition: transform 170ms cubic-bezier(.22, .61, .36, 1); }
+.ui-check:hover > input:not(:disabled) + .ui-check-box { border-color: color-mix(in srgb, var(--primary), transparent 45%); }
+.ui-check > input:is(:checked, :indeterminate) + .ui-check-box { border-color: var(--primary); background: var(--primary); color: #fff; }
+.ui-check > input:is(:checked, :indeterminate) + .ui-check-box > i { transform: scale(1); }
+.ui-check > input:focus-visible + .ui-check-box { border-color: var(--primary); box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary), transparent 78%); }
+.ui-switch-track { flex: none; display: flex; align-items: center; width: 34px; height: 20px; padding: 2px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-2); transition: 180ms cubic-bezier(.22, .61, .36, 1); }
+.ui-switch-knob { width: 14px; height: 14px; border-radius: 50%; background: var(--muted); box-shadow: 0 1px 2px rgba(16, 19, 26, .25); transition: 180ms cubic-bezier(.22, .61, .36, 1); }
+.ui-switch:hover > input:not(:disabled) + .ui-switch-track { border-color: color-mix(in srgb, var(--primary), transparent 45%); }
+.ui-switch > input:checked + .ui-switch-track { border-color: var(--primary); background: var(--primary); }
+.ui-switch > input:checked + .ui-switch-track > .ui-switch-knob { background: #fff; transform: translateX(14px); }
+.ui-switch > input:focus-visible + .ui-switch-track { box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary), transparent 78%); }
+
+.ui-number { display: flex; align-items: stretch; width: 100%; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); overflow: hidden; transition: border-color 150ms ease, box-shadow 150ms ease; }
+.ui-number:focus-within { border-color: var(--primary); box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary), transparent 84%); }
+.ui-number > input { flex: 1 1 auto; min-width: 0; padding: 9px 2px; border: 0; border-radius: 0; background: transparent; font: 600 .84rem var(--font-mono); text-align: center; }
+.ui-number > input:focus-visible { outline: 0; box-shadow: none; }
+/* 外框已经整体压暗了，input 自己那层 :disabled 的 .55 再叠一次会暗到看不清数字 */
+.ui-number > input:disabled { opacity: 1; }
+/* 原生上下箭头：Chrome 只在 hover 时露出来、Firefox 常驻，宽度与配色都调不动 */
+.ui-number > input::-webkit-outer-spin-button, .ui-number > input::-webkit-inner-spin-button { appearance: none; margin: 0; }
+.ui-number > input[type='number'] { appearance: textfield; }
+.ui-number .step { flex: none; display: grid; place-items: center; width: 34px; color: var(--muted); font-size: .68rem; cursor: pointer; user-select: none; transition: 140ms ease; }
+.ui-number .step:hover { color: var(--primary); background: var(--primary-soft); }
+.ui-number .step:active > i { transform: scale(.82); }
+.ui-number .step.off { opacity: .28; pointer-events: none; }
+.ui-number.off { opacity: .55; }
+.ui-number.off .step { pointer-events: none; }
+
+.ui-select { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 38px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); color: var(--ink); font-size: .86rem; font-weight: 400; text-align: left; transition: border-color 150ms ease, box-shadow 150ms ease; }
+.ui-select:hover:not(:disabled) { border-color: color-mix(in srgb, var(--primary), transparent 55%); }
+.ui-select:is(:focus-visible, .open) { outline: 0; border-color: var(--primary); box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary), transparent 84%); }
+.ui-select:disabled { opacity: .55; cursor: not-allowed; }
+.ui-select > span { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ui-select > span.blank { color: color-mix(in srgb, var(--muted), transparent 30%); }
+.ui-select > i { flex: none; color: var(--muted); font-size: .68rem; transition: transform 220ms cubic-bezier(.22, .61, .36, 1); }
+.ui-select.open > i { color: var(--primary); transform: rotate(180deg); }
+/* 面板 Teleport 到 body 后是 fixed 的：宿主（对话框正文、配置分组）都是 overflow: auto 的滚动区，
+   留在原地会被裁掉。层级压在 toast（60）之下、对话框（40）之上。 */
+.ui-options { position: fixed; z-index: 50; list-style: none; display: grid; align-content: start; gap: 2px; margin: 0; padding: 5px; overflow: auto; overscroll-behavior: contain; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow); transform-origin: top center; }
+.ui-options.up { transform-origin: bottom center; }
+.ui-options > li { display: flex; align-items: center; gap: 9px; padding: 8px 10px; border-radius: 8px; font-size: .82rem; line-height: 1.5; cursor: pointer; }
+.ui-options > li > span { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.ui-options > li > i { flex: none; color: var(--primary); font-size: .66rem; opacity: 0; }
+.ui-options > li.blank { color: var(--muted); }
+.ui-options > li.at { background: var(--surface-2); }
+.ui-options > li.on { color: var(--primary); font-weight: 600; }
+.ui-options > li.on.at { background: var(--primary-soft); }
+.ui-options > li.on > i { opacity: 1; }
+.select-enter-active, .select-leave-active { transition: opacity 130ms ease, transform 130ms cubic-bezier(.22, .61, .36, 1); }
+.select-enter-from, .select-leave-to { opacity: 0; transform: scale(.97); }
 .ui-btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 38px; padding: 0 16px; border: 1px solid transparent; border-radius: 11px; background: var(--primary); color: #fff; font-size: .84rem; font-weight: 600; line-height: 1; white-space: nowrap; transition: 160ms ease; }
 .ui-btn:hover:not(:disabled) { box-shadow: 0 8px 20px color-mix(in srgb, var(--primary), transparent 74%); transform: translateY(-1px); }
 .ui-btn:disabled { opacity: .45; cursor: not-allowed; }
@@ -395,19 +457,18 @@ select { appearance: none; padding-right: 30px; background-image: url("data:imag
 .card-actions { display: flex; align-items: center; }
 .danger-banner { display: flex; gap: 10px; align-items: center; margin-bottom: 16px; padding: 12px 15px; border: 1px solid var(--rose); border-radius: 12px; color: var(--rose); background: color-mix(in srgb, var(--rose), transparent 92%); }
 .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
-.form-grid label { display: grid; gap: 7px; font-size: .8rem; font-weight: 600; color: var(--muted); }
+/* `:not()` 挡的是 UiCheckbox / UiSwitch：它们的根就是 <label>，被这条按到会变成 grid + 600 字重 +
+   muted 色，勾选框跟它的文字之间会横插一道 7px 的行距。控件自带全套外观，这里一格都别碰。 */
+.form-grid label:not(.ui-check, .ui-switch) { display: grid; gap: 7px; font-size: .8rem; font-weight: 600; color: var(--muted); }
+.form-grid > :is(.ui-check, .ui-switch) { justify-self: start; }
 .form-grid textarea { resize: vertical; padding: 11px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--ink); font: .8rem/1.5 var(--font-mono); }
 .form-grid .wide { grid-column: 1 / -1; }
-.form-grid .switch-line { display: flex; grid-column: 1 / -1; flex-direction: row; align-items: center; gap: 9px; }
-.form-grid .switch-line input { width: auto; }
 .form-grid .field-title { margin: 0 0 6px; font-size: .8rem; font-weight: 600; color: var(--ink); display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
 .form-grid .field-title small, .form-grid .field-note { font-weight: 400; color: var(--muted); }
 .form-grid .field-note { margin: 0; font-size: .78rem; line-height: 1.5; }
 .ui-fieldset .form-grid { gap: 14px; }
 .trigger-switches { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 10px 22px; }
-.form-grid .trigger-switches label { display: flex; align-items: center; gap: 8px; color: var(--ink); }
-.form-grid .trigger-switches input { width: auto; }
-.switch-column { display: grid; gap: 10px; align-content: center; }
+.switch-column { display: grid; gap: 10px; align-content: center; justify-items: start; }
 .wake-list { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .wake-chip { display: inline-flex; align-items: center; gap: 7px; padding: 5px 6px 5px 10px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface-2); }
 .wake-chip code { font: .8rem/1.4 var(--font-mono); word-break: break-all; }
@@ -471,7 +532,7 @@ select { appearance: none; padding-right: 30px; background-image: url("data:imag
 
 /* ── 由 config.schema.json 自动生成的配置表单（docs/21 §1.1） ──
    这块以前只写了骨架，几乎每个类名都落在别处的后代选择器里（`.form-grid .field-note`、
-   `.search-row .search.grow input`、`.form-grid .switch-line`），搬到这儿一条都不命中：
+   `.search-row .search.grow input`、当时那条 `.form-grid .switch-line`），搬到这儿一条都不命中：
    说明文字是满黑的正文色、搜索框卡在 290px 不跟着伸、分组抬头那个 <button> 连 `border: 0`
    都没有，深色主题下露出浏览器默认的亮边框。样式一律写在这里，不再蹭别人的作用域。 ── */
 .schema-form { display: grid; gap: 12px; }
@@ -479,9 +540,8 @@ select { appearance: none; padding-right: 30px; background-image: url("data:imag
 .schema-toolbar { position: sticky; top: 82px; z-index: 6; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 14px; background: color-mix(in srgb, var(--surface-2), transparent 8%); backdrop-filter: blur(12px); }
 .schema-toolbar .search { flex: 1 1 240px; }
 .schema-toolbar .search input { width: 100%; background: var(--surface); }
-.schema-toolbar .switch-line { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: .8rem; white-space: nowrap; transition: color 140ms ease; }
-.schema-toolbar .switch-line:hover { color: var(--ink); }
-.schema-toolbar .switch-line input { width: auto; }
+.schema-toolbar .ui-check { color: var(--muted); white-space: nowrap; transition: color 140ms ease; }
+.schema-toolbar .ui-check:hover { color: var(--ink); }
 .schema-form > .section-note { max-width: 96ch; }
 .schema-form > .empty-card { display: grid; gap: 8px; border: 1px dashed var(--border); border-radius: 16px; }
 
@@ -506,7 +566,7 @@ select { appearance: none; padding-right: 30px; background-image: url("data:imag
 .schema-field.off { opacity: .6; }
 .schema-field.dirty { border-color: var(--primary); background: color-mix(in srgb, var(--primary-soft), transparent 45%); }
 .schema-field.dirty .schema-key code { color: var(--primary); font-weight: 600; }
-.schema-field :is(input:not([type='checkbox']), select, textarea) { background: var(--surface); }
+.schema-field > :is(input, textarea) { background: var(--surface); }
 .schema-field textarea { min-height: 64px; resize: vertical; font: 400 .74rem/1.55 var(--font-mono); }
 .schema-key { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
 .schema-key code { font-size: .79rem; font-weight: 600; overflow-wrap: anywhere; }
@@ -516,11 +576,11 @@ select { appearance: none; padding-right: 30px; background-image: url("data:imag
 .schema-desc { margin: 0; color: color-mix(in srgb, var(--ink), var(--muted) 30%); font-size: .76rem; line-height: 1.62; }
 .schema-field .field-note { margin: 0; color: var(--muted); font-size: .71rem; line-height: 1.55; overflow-wrap: anywhere; }
 .schema-field .field-note code { font-size: .69rem; }
-.schema-switch { display: inline-flex; align-items: center; gap: 9px; justify-self: start; padding: 5px 11px 5px 9px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--muted); font-size: .78rem; cursor: pointer; transition: 150ms ease; }
-.schema-switch input { width: 16px; height: 16px; }
-.schema-switch:hover { border-color: color-mix(in srgb, var(--primary), transparent 55%); }
-.schema-switch.on { border-color: color-mix(in srgb, var(--green), transparent 55%); color: var(--green); }
-.schema-switch:has(input:disabled) { cursor: not-allowed; opacity: .7; }
+/* 布尔项以前是「胶囊 + 原生方框 + 已开启/已关闭」三件套，方框和文字说的是同一件事。
+   换成开关后状态由拨钮本身表达，文字降级成注解，胶囊那层壳也就不需要了。 */
+.schema-field > .ui-switch { justify-self: start; margin: 1px 0 2px; }
+.schema-field > .ui-switch .ui-switch-label { color: var(--muted); font-size: .78rem; }
+.schema-field > .ui-switch.on .ui-switch-label { color: var(--green); }
 
 /* ── 附件：消息卡片与检索结果下面那条带子（docs/21 · G-API-08） ── */
 .attachment-strip { display: flex; flex-wrap: wrap; align-items: stretch; gap: 8px; margin: 2px 0 0; }
@@ -599,9 +659,7 @@ select { appearance: none; padding-right: 30px; background-image: url("data:imag
 /* ── 子 Agent 的工具多选 ── */
 .agent-tools { font: .76rem/1.6 var(--font-mono); overflow-wrap: anywhere; }
 .tool-picker { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 4px 12px; max-height: 240px; overflow: auto; padding: 10px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
-.form-grid .tool-picker label { display: flex; flex-direction: row; align-items: center; gap: 8px; font-weight: 400; color: var(--ink); }
-.form-grid .tool-picker input { width: auto; }
-.tool-picker label.off code { color: var(--muted); text-decoration: line-through; }
+.tool-picker .ui-check.off code { color: var(--muted); text-decoration: line-through; }
 .tool-picker small { color: var(--amber); }
 
 /* ── 维护操作 + 配置变更历史 ── */

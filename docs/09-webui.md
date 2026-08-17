@@ -490,7 +490,8 @@ packages/webui/
     ├── ui/                    自建原语，全部只用 styles.css 的变量
     │   ├── toast.ts           pushToast()：全站唯一的通知通道
     │   ├── ToastHost.vue      右上角通知栈（success/info/warn/error）
-    │   ├── UiButton.vue  UiTag.vue  UiSelect.vue  UiNumber.vue
+    │   ├── UiButton.vue  UiTag.vue
+    │   ├── UiCheckbox.vue  UiSwitch.vue  UiNumber.vue  UiSelect.vue   ← 点选与步进控件，见下
     │   ├── DataGrid.vue       表格：列定义 + 具名插槽 + 分页 + 单/多选
     │   ├── UiModal.vue  UiDrawer.vue  ChainPicker.vue
     ├── components/
@@ -503,6 +504,27 @@ packages/webui/
 - **不引入第三方 UI 框架**。组件框架自带的主题（此前是 PrimeVue + Aura）与总览页那套手写卡片是两套并行的视觉系统，
   同一个页面上会同时出现两种圆角、两种输入框、两种阴影；调它的 CSS 变量只能逼近、不能对齐。`src/ui/` 下的原语
   直接用 `styles.css` 的 `--surface` / `--border` / `--primary` 等变量，深浅色跟随 `<html class="dark">` 一处切换。
+- **点选与步进控件也在设计系统里**（`UiCheckbox` / `UiSwitch` / `UiNumber` / `UiSelect`）。不引入 UI 框架之后，
+  这四类控件一度直接落在原生元素上，而它们恰恰是**唯一由操作系统绘制**的一层：`accent-color` 只够染
+  checkbox 中间那块填充，圆角、边框粗细改不动；`<select>` 展开的弹层完全不受页面控制（深色主题下会露出
+  亮色的系统面板）；`<input type=number>` 的上下箭头在 Chrome 只有 hover 才出现、Firefox 常驻，宽度与配色
+  都调不了。表现是设置页与对话框里成片的控件跟这套 10–20 px 圆角卡片对不上。四个原语一律
+  **「原生元素留在 DOM 里管语义，外观自己画」**：键盘、`<label>` 关联、`:checked` / `:indeterminate`、
+  `min`/`max`/`step` 校验都还是浏览器的，只把那个元素挪出视野（`opacity: 0` + 1 px 见方，不是 `display: none`
+  —— 后者连焦点和表单语义一起丢）。三个约束是踩出来的，不是风格偏好：
+  - **勾选框 = 从一组里挑几个或筛选视图；开关 = 开/关某一项能力**，不混用。触发来源那五格是「哪些消息算触发」
+    这一个集合的成员，用勾选框；`quota.enabled`、工具启停、Skill 启用是能力开关，用开关。混着用之后
+    「勾上了」和「开着」在同一页里读不出区别。「全部配置」里所有 boolean 叶子都走开关（状态由拨钮表达，
+    旁边的「已开启 / 已关闭」降级成注解）。
+  - **`UiNumber` 的加减用 `<span>` 而不是 `<button>`。** 调用方普遍写成 `<label>内存上限<UiNumber/></label>`，
+    而 `<button>` 是 labelable 元素 —— 点标题文字会被浏览器转发成「点了第一个 labelable 后代」，也就是**静悄悄
+    减一格**。换成 `<span>` 后转发落到中间那个 `input` 上，点标题 = 聚焦输入框；键盘用户走 `input` 自己的上下键
+    （原生 spinbutton 语义本来就在那儿）。步进值按 `step` 与当前值里较长的那个小数位收一次，否则温度点两下
+    就成了 `0.30000000000000004`。
+  - **`UiSelect` 的面板 Teleport 到 body + `position: fixed`**：它的宿主格子（对话框正文、「全部配置」的分组、
+    表格）都是 `overflow: auto` 的滚动区，留在原地会被裁掉。层级取 50，压在 toast（60）之下、对话框（40）之上；
+    滚动与缩放时重新贴合（`scroll` 不冒泡，必须用捕获监听）。**面板打开时 Esc 要 `stopPropagation`** ——
+    `UiModal` 的 Esc 监听挂在 `window` 上，不拦下来会连对话框一起关掉。
 - **通知只有一种**：任何写操作的成败反馈都走 `pushToast()`（[§3.5](#35-provider-与模型) 的 `[测试连接]` 是基准样式），
   不再有第二套「顶栏静态横幅」。页内校验类提示（登录失败、别名链有失效模型）仍用 `.callout` 内联块，因为它们要跟着表单走。
 - **滚动条也在设计系统里**。页面上有七八处独立滚动区（消息窗口、commit 时间线、载荷 `pre`、工具多选、

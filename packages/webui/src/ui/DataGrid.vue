@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
+import UiCheckbox from './UiCheckbox.vue';
 import type { GridColumn } from './types';
 
 const props = withDefaults(defineProps<{
@@ -20,6 +21,8 @@ const cell = (row: any, column: GridColumn): unknown => row[column.field ?? colu
 const pickable = computed(() => props.rows.filter((row) => !props.selectable || props.selectable(row)));
 const isPicked = (row: any): boolean => (props.selection ?? []).some((entry) => props.dataKey ? entry[props.dataKey] === row[props.dataKey] : entry === row);
 const allPicked = computed(() => pickable.value.length > 0 && pickable.value.every((row) => isPicked(row)));
+// 选了一部分时表头给横杠而不是空框：模型目录一页 20 行、勾了 3 行，空框读起来像「一个都没选」。
+const somePicked = computed(() => !allPicked.value && pickable.value.some((row) => isPicked(row)));
 function togglePick(row: any): void {
   emit('update:selection', isPicked(row) ? (props.selection ?? []).filter((entry) => props.dataKey ? entry[props.dataKey] !== row[props.dataKey] : entry !== row) : [...(props.selection ?? []), row]);
 }
@@ -32,14 +35,14 @@ function toggleAll(): void { emit('update:selection', allPicked.value ? [] : [..
       <table>
         <thead>
           <tr>
-            <th v-if="selection" class="pick"><input type="checkbox" aria-label="全选" :checked="allPicked" :disabled="!pickable.length" @change="toggleAll"></th>
+            <th v-if="selection" class="pick"><UiCheckbox aria-label="全选" :model-value="allPicked" :indeterminate="somePicked" :disabled="!pickable.length" @change="toggleAll" /></th>
             <th v-for="column in columns" :key="column.key" :style="column.width ? { width: column.width } : undefined">{{ column.header }}</th>
           </tr>
         </thead>
         <tbody>
           <tr v-for="(row, index) in pageRows" :key="rowKey(row, index)" :class="{ picked: selection && isPicked(row), unpickable: selection && selectable && !selectable(row) }" @click="emit('row-click', row)">
             <td v-if="selection" class="pick" @click.stop>
-              <input type="checkbox" :aria-label="`选择第 ${index + 1} 行`" :checked="isPicked(row)" :disabled="selectable ? !selectable(row) : false" @change="togglePick(row)">
+              <UiCheckbox :aria-label="`选择第 ${index + 1} 行`" :model-value="isPicked(row)" :disabled="selectable ? !selectable(row) : false" @change="togglePick(row)" />
             </td>
             <td v-for="column in columns" :key="column.key"><slot :name="column.key" :data="row">{{ cell(row, column) }}</slot></td>
           </tr>

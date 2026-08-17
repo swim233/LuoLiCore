@@ -8,6 +8,8 @@ import UiButton from './UiButton.vue';
 import UiTag from './UiTag.vue';
 import UiSelect from './UiSelect.vue';
 import UiNumber from './UiNumber.vue';
+import UiCheckbox from './UiCheckbox.vue';
+import UiSwitch from './UiSwitch.vue';
 import type { TagSeverity } from './types';
 
 const props = withDefaults(defineProps<{
@@ -228,8 +230,8 @@ defineExpose({ commit });
   <div class="schema-form">
     <div class="schema-toolbar">
       <label class="search grow"><i class="pi pi-search" /><input v-model="search" placeholder="搜键名或说明，例如 沙箱、防秒回、logs."></label>
-      <label class="switch-line"><input v-model="hotOnly" type="checkbox">只看热更新项</label>
-      <label class="switch-line"><input v-model="showUnwired" type="checkbox">显示未接线项</label>
+      <UiCheckbox v-model="hotOnly" label="只看热更新项" />
+      <UiCheckbox v-model="showUnwired" label="显示未接线项" />
       <UiButton variant="text" size="small" :icon="allOpen ? 'pi pi-chevron-up' : 'pi pi-chevron-down'" :label="allOpen ? '全部收起' : '全部展开'" :disabled="!groups.length" @click="toggleAll" />
       <UiButton variant="text" size="small" label="放弃改动" :disabled="!changed.length || saving" @click="reset" />
       <UiButton icon="pi pi-save" :label="changed.length ? `${saveLabel} ${changed.length} 项` : '没有改动'" :disabled="!changed.length || Boolean(problems.length)" :loading="saving" @click="save" />
@@ -258,10 +260,8 @@ defineExpose({ commit });
             <small class="field-note">密钥字段不在这里改：Provider 的 key 在模型页、WebUI 口令用 <code>pnpm webui:passwd</code>、其余走环境变量。</small>
           </template>
           <textarea v-else-if="field.kind === 'json' || field.kind === 'stringList'" :value="asText(field.path)" :disabled="!field.wired" :rows="field.kind === 'json' ? 6 : 3" spellcheck="false" @input="update(field, ($event.target as HTMLTextAreaElement).value)" />
-          <label v-else-if="field.kind === 'boolean'" class="schema-switch" :class="{ on: draft[field.path] === true }">
-            <input type="checkbox" :checked="draft[field.path] === true" :disabled="!field.wired" @change="update(field, ($event.target as HTMLInputElement).checked)">
-            <span>{{ draft[field.path] === true ? '已开启' : '已关闭' }}</span>
-          </label>
+          <UiSwitch v-else-if="field.kind === 'boolean'" :model-value="draft[field.path] === true" :disabled="!field.wired"
+            on-label="已开启" off-label="已关闭" @update:model-value="update(field, $event)" />
           <UiSelect v-else-if="field.kind === 'enum'" :model-value="asOption(field.path)" :options="field.enumValues" :disabled="!field.wired" @update:model-value="update(field, $event)" />
           <UiNumber v-else-if="field.kind === 'number'" :model-value="asNumber(field.path)" :disabled="!field.wired" :step="field.integer ? 1 : 0.01" @update:model-value="update(field, $event)" />
           <input v-else :value="asText(field.path)" :disabled="!field.wired" @input="update(field, ($event.target as HTMLInputElement).value)">
