@@ -223,7 +223,7 @@ export class ContextEngine {
     return this.#mutex.run(turn.key, async () => {
       const config = turn.config as Readonly<Config>;
       const repo = new ScopedContextRepository(this.db, turn.key);
-      const inserted = repo.insertTurn(turn.turnId, turn.baseCommitId, delta, config.context.rebase.injectNotice, turn.claimThroughMessageId);
+      const inserted = repo.insertTurn(turn.turnId, turn.baseCommitId, delta, config.context.rebase.injectNotice, turn.claimThroughMessageId, config.context.rebase.markMeta);
       this.invalidate(turn.key);
       const pruned = this.prune(repo, inserted.commit, config);
       this.invalidate(turn.key);
@@ -234,25 +234,49 @@ export class ContextEngine {
     });
   }
 
+  /**
+   * `cancel.commitPartial`：取消时把已经生成的那部分也提交进历史（默认 false —— 取消通常意味着
+   * 「这轮不算」，docs/14 A24）。开着时**只对 `cancelled` 生效**：`failed` 提交半截产出会把一段
+   * 模型自己都没说完的话变成历史事实，下一轮还得在它上面接着编。
+   *
+   * 提交走的是正常的 `commitTurn` 路径，所以 rebase / 裁剪 / 形状断言一条都不少；提交失败时
+   * 退回原来的「释放认领」，不让一次取消把整轮的背景消息也一起卡住。
+   */
   async abortTurn(turn: RuntimeTurnContext, reason: 'failed' | 'cancelled', _error?: unknown): Promise<void> {
+    const config = turn.config as Readonly<Config>;
+    if (reason === 'cancelled' && config.cancel?.commitPartial && turn.delta.length && !turn.finalized) {
+      try {
+        await this.commitTurn(turn);
+        this.log?.event({ level: 'warn', kind: 'ctx.abort', summary: 'Committed partial delta on cancel', traceId: turn.turnId, key: turn.key, data: { messages: turn.delta.length } });
+        return;
+      } catch (error) {
+        this.log?.event({ level: 'error', kind: 'ctx.abort', summary: 'Partial commit failed; releasing claims instead', traceId: turn.turnId, key: turn.key, data: { error: error instanceof Error ? error.message : String(error) } });
+      }
+    }
     turn.finalized = true;
     const released = this.archive.scope(turn.chatId, turn.threadId).releaseClaims(turn.turnId);
     this.log?.event({ level: 'warn', kind: 'ctx.abort', summary: `Released ${released} background claims (${reason})`, traceId: turn.turnId, key: turn.key });
   }
 
-  materialize(key: string, commitId: string | null): MaterializedContext {
+  /**
+   * @param cacheCommits `context.cacheCommits`：物化结果最多缓存多少个 commit。0 表示不缓存
+   *   （排查「读出来的窗口和库里对不上」时用得着）。此前这个上界是写死的 64，配置项从没接线。
+   */
+  materialize(key: string, commitId: string | null, cacheCommits = 64): MaterializedContext {
     const repo = new ScopedContextRepository(this.db, key);
     const commit = commitId ? repo.commit(commitId) : repo.head();
     const cacheKey = `${key}:${commit?.id ?? 'empty'}`;
-    const cached = this.#cache.get(cacheKey);
+    const cached = cacheCommits > 0 ? this.#cache.get(cacheKey) : undefined;
     if (cached) return structuredClone(cached);
     const messages = repo.messages(commit);
     this.assertValidShape(key, messages);
     const materialized = { messages, ordinals: messages.map((message) => message.ordinal),
       tokens: messages.reduce((sum, message) => sum + (message.tokens ?? 0), 0),
       windowStart: commit?.windowStart ?? 1, headOrdinal: commit?.headOrdinal ?? 0 };
-    this.#cache.set(cacheKey, structuredClone(materialized));
-    while (this.#cache.size > 64) this.#cache.delete(this.#cache.keys().next().value!);
+    if (cacheCommits > 0) {
+      this.#cache.set(cacheKey, structuredClone(materialized));
+      while (this.#cache.size > cacheCommits) this.#cache.delete(this.#cache.keys().next().value!);
+    }
     return materialized;
   }
 

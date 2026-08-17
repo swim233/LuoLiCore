@@ -137,7 +137,7 @@ export class ContextRepository {
     return true;
   }
 
-  insertTurn(turnId: string, baseCommitId: string | null, messages: NewContextMessage[], injectRebaseNotice: boolean, claimThroughMessageId?: number): { commit: CommitRow; rebased: boolean; from: number; to: number } {
+  insertTurn(turnId: string, baseCommitId: string | null, messages: NewContextMessage[], injectRebaseNotice: boolean, claimThroughMessageId?: number, markMeta = true): { commit: CommitRow; rebased: boolean; from: number; to: number } {
     return this.db.transaction(() => {
       const head = this.head();
       const rebased = (head?.id ?? null) !== baseCommitId;
@@ -158,7 +158,10 @@ export class ContextRepository {
       let ordinal = start - 1;
       for (const message of delta) {
         ordinal += 1;
-        const meta = message.role === 'assistant' && unseen ? { ...message.meta, rebased: true, unseenOrdinals: unseen } : message.meta;
+        // `context.rebase.markMeta`：关掉之后 rebase 过的 assistant 消息不再带 `meta.rebased`。
+        // 影响面不只是好看 —— WebUI 的上下文视图与 `docs/13` 的 AC 都按这个标记判断「这一条是
+        // 并发轮次产出的」，关掉等于把那条线索从库里抹掉，只剩日志里的 ctx.rebase。
+        const meta = markMeta && message.role === 'assistant' && unseen ? { ...message.meta, rebased: true, unseenOrdinals: unseen } : message.meta;
         const tokenCount = message.tokens ?? 0;
         insert.run({ key: this.key, ordinal, id: message.id, turnId, role: message.role, origin: message.origin,
           pruneLevel: message.pruneLevel ?? 0, parts: JSON.stringify(message.parts), textPreview: message.textPreview ?? null,

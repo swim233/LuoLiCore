@@ -846,10 +846,9 @@ const emptyQuotaForm = (): QuotaForm => ({ enabled: true, requirePricing: true, 
 const QUOTA_REQUIRED: Array<[keyof QuotaForm, string]> = [['minReserveUsd', '最小预留'], ['maxCostUsd', '单轮成本上限'], ['maxSteps', '单轮步数上限'],
   ['turnsPerUserPerHour', '每人每小时轮次'], ['turnsPerChatPerHour', '每会话每小时轮次'], ['concurrentPerUser', '单用户并发']];
 // 未接线的键不给控件，但要说清楚「现在真正管这件事的是谁」——否则运维会去 config.yaml 里改一个没人读的值。
-const QUOTA_UNIMPLEMENTED_HINTS: Record<string, string> = {
-  'quota.onExceeded.notifyOwner': '超限时私信 owner；没有任何代码路径读它',
-  'quota.warnAtRatio': '用量到达比例时预警；没有任何代码路径读它',
-};
+// 第五轮之后 quota 段一个未接线的键都没有了，这张表随之为空；留着结构是因为清单由服务端算，
+// 将来再有新键时这里就该重新有内容（别把「现在是空的」写死成「不会再有」）。
+const QUOTA_UNIMPLEMENTED_HINTS: Record<string, string> = {};
 const QUOTA_SCOPE_LABELS: Record<string, string> = { global: '全局', chat: '会话', user: '用户' };
 const quota = ref<QuotaPayload | null>(null);
 const quotaForm = ref<QuotaForm>(emptyQuotaForm());

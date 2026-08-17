@@ -1,4 +1,5 @@
-import { mkdirSync, readdirSync, rmSync, statSync, unlinkSync } from 'node:fs';
+import { gzipSync } from 'node:zlib';
+import { mkdirSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import type { Sqlite } from '@luoli/db';
 
@@ -11,7 +12,8 @@ export interface BlobDirectories {
 }
 
 export class MaintenanceService {
-  constructor(private readonly db: Sqlite, private readonly databasePath: string, private readonly backupKeep: number, private readonly retentionDays: number, private readonly logsDir = './logs', private readonly blobs: BlobDirectories = {}) {}
+  constructor(private readonly db: Sqlite, private readonly databasePath: string, private readonly backupKeep: number, private readonly retentionDays: number, private readonly logsDir = './logs', private readonly blobs: BlobDirectories = {},
+    private readonly gzipAfterDays = 0) {}
 
   backup(label = 'manual'): string {
     const directory = resolve(dirname(this.databasePath), 'backup');
@@ -29,6 +31,33 @@ export class MaintenanceService {
 
   checkpoint(): void {
     this.db.pragma('wal_checkpoint(TRUNCATE)');
+  }
+
+  /**
+   * `logs.gzipAfterDays`：比这个天数更早、且还没压过的 `.jsonl` 就地压成 `.jsonl.gz`。
+   * 0 表示不压。压缩发生在删除之前 —— 保留期内的老日志占的盘能小一个数量级，而 `blobs/`
+   * 那些单独的 JSON 载荷不动（按 `file_ref` 懒加载的路径不认 `.gz`，压了就读不出来）。
+   */
+  #gzipOldLogs(cutoffDay: string): number {
+    let compressed = 0;
+    let days: string[];
+    try { days = readdirSync(this.logsDir, { withFileTypes: true }).filter((entry) => entry.isDirectory() && /^\d{4}-\d{2}-\d{2}$/.test(entry.name) && entry.name < cutoffDay).map((entry) => entry.name); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0; throw error; }
+    for (const day of days) {
+      const directory = join(this.logsDir, day);
+      let entries: string[];
+      try { entries = readdirSync(directory); } catch { continue; }
+      for (const name of entries) {
+        if (!name.endsWith('.jsonl') && !/\.jsonl\.\d+$/.test(name)) continue;
+        const path = join(directory, name);
+        try {
+          writeFileSync(`${path}.gz`, gzipSync(readFileSync(path)), { mode: 0o600 });
+          unlinkSync(path);
+          compressed += 1;
+        } catch { /* 读不到或写不进就跳过：压缩是省盘，不是正确性 */ }
+      }
+    }
+    return compressed;
   }
 
   cleanup(now = Date.now()): Record<string, number> {
@@ -59,8 +88,10 @@ export class MaintenanceService {
       this.db.prepare('UPDATE agent_runs SET result_full_ref=NULL WHERE id=?').run(row.id);
       agentResults += 1;
     }
+    // 压缩在删除之后：已经过保留期的目录整个没了，没必要先压再删。
+    const compressed = this.gzipAfterDays > 0 ? this.#gzipOldLogs(new Date(now - this.gzipAfterDays * 86_400_000).toISOString().slice(0, 10)) : 0;
     this.checkpoint();
-    return { logs, logDirectories, updates, sessions, approvals, agentResults };
+    return { logs, logDirectories, updates, sessions, approvals, agentResults, compressed };
   }
 
   /**

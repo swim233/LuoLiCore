@@ -53,12 +53,28 @@ export async function holdReply(since: number, delayMs: number): Promise<void> {
  * 切分仍可能把 `*bold*` 的配对切开，而裸调 `sendMessage` 抛出去会把整轮打成 failed —— 用户明明
  * 已经看到前半段回复，却又收到一句「出了点问题」（docs/20 · W-TG-03 / W-TG-04）。
  */
-export async function sendWithFallback(api: Api, chatId: string, text: string, extra: Record<string, unknown> = {}): Promise<Message> {
-  try { return await api.sendMessage(chatId, text, { parse_mode: 'MarkdownV2', ...extra }); }
+/** `output.parseMode`：`none` 时直接发纯文本（不试 Markdown 也就不会有回退那一跳）。 */
+export async function sendWithFallback(api: Api, chatId: string, text: string, extra: Record<string, unknown> = {}, parseMode: 'MarkdownV2' | 'HTML' | 'none' = 'MarkdownV2'): Promise<Message> {
+  if (parseMode === 'none') return api.sendMessage(chatId, text, extra);
+  try { return await api.sendMessage(chatId, text, { parse_mode: parseMode, ...extra }); }
   catch (error) {
     if (!/parse entities/i.test(error instanceof Error ? error.message : String(error))) throw error;
     return api.sendMessage(chatId, text, extra);
   }
+}
+
+/**
+ * `output.maxMentions`：一条消息里最多保留几个 `@用户名`，多出来的去掉 `@` 只留名字。
+ * 这是防「模型被诱导 @全群」的护栏 —— 提示词里说好不要这么做，但那不是边界，投递侧才是。
+ * 0 表示不限。
+ */
+export function capMentions(text: string, max: number): string {
+  if (max <= 0) return text;
+  let seen = 0;
+  return text.replace(/(^|[\s(（])@([A-Za-z][\w]{4,31})\b/g, (whole, lead: string, name: string) => {
+    seen += 1;
+    return seen <= max ? whole : `${lead}${name}`;
+  });
 }
 
 /** 码点数组上的 `lastIndexOf('\n\n')`。见下方 splitTelegramText 里为什么不能用 String 版。 */

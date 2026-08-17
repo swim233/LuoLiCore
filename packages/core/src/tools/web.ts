@@ -86,10 +86,12 @@ export async function webSearch(provider: 'brave' | 'serper' | 'tavily', apiKey:
  * 拒绝类错误照旧抛给注册表（它统一转成 `ok:false`）—— SSRF 那组断言依赖「不合法的目标一律抛」，
  * 而重试耗尽走的是结构化失败：一个是「不许去」，另一个是「去了三次没通」。
  */
-export async function webFetch(raw: string, maxBytes: number, abortSignal: AbortSignal, options: WebRetryOptions = DEFAULT_WEB_RETRY): Promise<Record<string, unknown>> {
+export async function webFetch(raw: string, maxBytes: number, abortSignal: AbortSignal, options: WebRetryOptions = DEFAULT_WEB_RETRY,
+  hosts: { allowlist?: readonly string[]; denylist?: readonly string[] } = {}): Promise<Record<string, unknown>> {
   return await withWebRetries<Record<string, unknown>>(options, abortSignal, async (attempt) => {
     let response;
-    try { response = await guardedFetch(raw, { method: 'GET', signal: abortSignal, headers: { 'user-agent': 'LuoLiCore/0.1' } }, { allowPrivate: false, maxBytes, timeoutMs: options.timeoutMs }); }
+    try { response = await guardedFetch(raw, { method: 'GET', signal: abortSignal, headers: { 'user-agent': 'LuoLiCore/0.1' } }, { allowPrivate: false, maxBytes, timeoutMs: options.timeoutMs,
+      ...(hosts.allowlist?.length ? { allowHosts: hosts.allowlist } : {}), ...(hosts.denylist?.length ? { denyHosts: hosts.denylist } : {}) }); }
     catch (error) {
       // 用户取消或整轮超时：这不是「上游抖了一下」，重试只会拖着一个已经没人等的轮次。
       if (abortSignal.aborted || fatal(error)) throw error;

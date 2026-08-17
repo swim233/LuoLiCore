@@ -24,6 +24,9 @@ interface PendingWrite {
   turnId: string;
   chatId: string;
   userId: string;
+  /** `memory.requireSourceTag`（默认 true）：每条写入是否带 `<!-- src: … -->` 来源标注。
+   *  关掉它省 token，代价是「这条是谁在哪说的」再也查不回来（docs/14 A10）。 */
+  requireSourceTag?: boolean;
 }
 
 // 与上下文、提示词共用同一把尺子：记忆的软/硬上限是按 token 写的配置，估算器不一致时
@@ -88,8 +91,8 @@ export class MemoryStore {
     const existing = document.content.split('\n').filter((line) => line.startsWith('- ')).map(stripSource);
     const unique = input.lines.filter((line) => !existing.some((candidate) => jaccard(candidate, stripSource(line)) > 0.85));
     if (!unique.length) return { ok: true, skipped: true, reason: '已存在相似条目' };
-    const source = `<!-- src: chat ${input.chatId} by ${input.userId} at ${new Date().toISOString()} -->`;
-    const annotated = unique.map((line) => `- ${line.replace(/^\s*-\s*/, '')}  ${source}`);
+    const source = input.requireSourceTag === false ? '' : `  <!-- src: chat ${input.chatId} by ${input.userId} at ${new Date().toISOString()} -->`;
+    const annotated = unique.map((line) => `- ${line.replace(/^\s*-\s*/, '')}${source}`);
     const projected = `${document.content}\n\n## ${input.section}\n${annotated.join('\n')}\n`;
     if (estimateTokens(projected) > this.hardLimit) return { ok: false, error: 'memory_hard_limit', hint: '请先整理现有记忆' };
     const list = this.#pending.get(input.turnId) ?? [];

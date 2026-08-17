@@ -9,7 +9,7 @@ import type { Role, RuntimeTurnContext } from '@luoli/shared';
 import { roleRank } from '@luoli/shared';
 import { contextKey, modelAliasKey, readAppKv, writeAppKv } from '@luoli/db';
 import { matchTrigger } from './trigger.js';
-import { holdReply, sendWithFallback, splitTelegramText } from './output.js';
+import { capMentions, holdReply, sendWithFallback, splitTelegramText } from './output.js';
 import { attachMedia, messageKind, resolveQuotedMessage } from './reply.js';
 import { TelegramOutput } from './stream-output.js';
 
@@ -30,9 +30,14 @@ export interface TelegramDependencies {
   concurrency: TurnConcurrency;
   onTurn?: (turn: RuntimeTurnContext, reservation: QuotaReservation | null) => Promise<string | MainAgentStreamResult>;
   estimateTurnCost?: (inputTokens: number, key: string) => number | null;
+  /** 告警分发。缺它时这几条只落日志 —— 别让「装配方没给」变成静默崩溃。 */
+  alerts?: { fire(kind: 'quota_global_exceeded' | 'consecutive_turn_failures', summary: string, data?: Record<string, unknown>, key?: string): void };
   log: LogSink;
   botInfo?: UserFromGetMe;
 }
+
+/** docs/10 §6 写的就是「连续 5 个 turn 失败」。 */
+const CONSECUTIVE_FAILURE_ALERT = 5;
 
 // 运维态失败（模型没配、缺定价）不能并进「出了点问题」：用户重试多少次都不会好，
 // 得说清楚该由谁去做什么（docs/08 §9）。其余错误仍不暴露内部细节，只给 ref。
@@ -84,6 +89,8 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
   const triggerCooldown = new Map<string, number>();
   /** `concurrency.coalesceSameUserMs` 的在等窗口，键是 `${chatId}:${userId}`。同一个键最多一个。 */
   const coalescing = new Map<string, { supersede: () => void }>();
+  /** 跨会话计数：连续失败说明的是「这个部署坏了」，不是「这个群坏了」（docs/10 §6）。 */
+  let consecutiveFailures = 0;
   bot.use(async (ctx, next) => {
     if (!dependencies.operations.claimUpdate(ctx.update.update_id)) return;
     const from = ctx.from;
@@ -389,7 +396,18 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
         userDaily: roleLimits?.daily ?? config.quota.perUser.daily, userMonthly: roleLimits?.monthly ?? config.quota.perUser.monthly } }) : null;
     dependencies.log.event({ level: reservation ? 'info' : 'warn', kind: reservation ? 'quota.check' : 'quota.exceeded', summary: reservation ? 'Quota reservation accepted' : 'Quota reservation rejected', chatId, userId, data: { estimatedTokens, estimateUsd: modelEstimate } });
     if (config.quota.enabled && !reservation) {
-      await ctx.reply(config.quota.onExceeded.message.replace('{spent}', '—').replace('{limit}', '—').replace('{resetAt}', '下个额度窗口'));
+      // 拒绝的原因分档：global 超限是「整个部署停摆」，必须让 owner 知道；chat / user 超限只是
+      // 这个人/这个群用完了（docs/10 §6 的 quota_global_exceeded）。
+      const rejection = dependencies.quota.lastRejection;
+      const money = (value: number): string => `$${value.toFixed(2)}`;
+      if (rejection?.scope === 'global' && config.quota.onExceeded.notifyOwner) {
+        dependencies.alerts?.fire('quota_global_exceeded', `全局额度用尽：${rejection.window} 窗口已用 ${money(rejection.spent)} / ${money(rejection.limit)}`,
+          { window: rejection.window, spent: rejection.spent, limit: rejection.limit }, rejection.window);
+      }
+      await ctx.reply(config.quota.onExceeded.message
+        .replace('{spent}', rejection ? money(rejection.spent) : '—')
+        .replace('{limit}', rejection ? money(rejection.limit) : '—')
+        .replace('{resetAt}', rejection?.window === 'month' ? '下月初' : '明天'));
       return;
     }
     const pendingId = crypto.randomUUID();
@@ -432,18 +450,21 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
       // 的 mode/节奏覆盖存得住、也过了校验，就是永远不生效。取本轮那份合并后的配置。
       const outputConfig = perChatConfig(currentConfig(), key).output;
       if (typeof generated === 'string') {
-        const outgoing = dependencies.plugins ? pluginText(await dependencies.plugins.hook('beforeSend', { turn, text: generated }), generated) : generated;
+        const hooked = dependencies.plugins ? pluginText(await dependencies.plugins.hook('beforeSend', { turn, text: generated }), generated) : generated;
+        // `output.maxMentions` 在**投递侧**收口：提示词里说好不要 @全群不是边界，这里才是。
+        const outgoing = capMentions(hooked, outputConfig.maxMentions);
         await holdReply(receivedAt, outputConfig.replyDelayMs);
         for (const part of splitTelegramText(outgoing, outputConfig.maxMessageChars)) {
-          const sent = await sendWithFallback(bot.api, chatId, part);
+          const sent = await sendWithFallback(bot.api, chatId, part, {}, outputConfig.parseMode);
           scoped.append({ chatId, messageThreadId: message.message_thread_id ?? null, tgMessageId: sent.message_id, direction: 'out', fromKind: 'bot', fromUserId: String(bot.botInfo.id), fromName: bot.botInfo.first_name, fromUsername: bot.botInfo.username,
             kind: 'text', text: part, tgDate: sent.date * 1000, raw: sent, triggered: false, turnId: turn.turnId });
         }
         answer = outgoing;
       } else {
-        const output = new TelegramOutput(bot, chatId, { mode: outputConfig.mode, replyDelayMs: outputConfig.replyDelayMs, bufferMs: outputConfig.streamBufferMs, intervalMs: outputConfig.streamIntervalMs, minDeltaChars: outputConfig.streamMinDeltaChars, maxChars: outputConfig.maxMessageChars },
+        const output = new TelegramOutput(bot, chatId, { mode: outputConfig.mode, replyDelayMs: outputConfig.replyDelayMs, bufferMs: outputConfig.streamBufferMs, intervalMs: outputConfig.streamIntervalMs, minDeltaChars: outputConfig.streamMinDeltaChars, maxChars: outputConfig.maxMessageChars,
+          parseMode: outputConfig.parseMode, flushOnSentence: outputConfig.flushOnSentence, typingWhileWorking: outputConfig.typingWhileWorking, placeholderAfterMs: outputConfig.placeholderAfterMs },
           (error) => dependencies.log.event({ level: 'warn', kind: 'tg.error', summary: 'Streaming delivery failed', traceId: turn.turnId, chatId, data: { error: error instanceof Error ? error.message : String(error) } }), receivedAt,
-          dependencies.plugins ? async (text) => pluginText(await dependencies.plugins!.hook('beforeSend', { turn, text }), text) : undefined);
+          async (text) => capMentions(dependencies.plugins ? pluginText(await dependencies.plugins.hook('beforeSend', { turn, text }), text) : text, outputConfig.maxMentions));
         const consumed = await output.consume(generated.stream, message.message_id);
         if (consumed.interrupted) { generated.interrupt(); void generated.final.catch(() => undefined); answer = consumed.text; }
         // final 为空、但流里已经发出去了内容时以发出去的为准：否则用户盯着屏幕上的回复，
@@ -463,12 +484,27 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
       dependencies.log.event({ level: 'info', kind: 'turn.end', summary: 'turn committed', traceId: turn.turnId, chatId, userId, key, data: { state: 'committed', rebased: committed.rebased } });
       dependencies.log.publish('turn.finished', { turnId: turn.turnId, key, chatId, state: 'committed', steps: settled?.steps ?? 0, toolCalls: settled?.toolCalls ?? 0, costUsd: settled?.costUsd ?? 0, rebased: committed.rebased, durationMs: settled?.durationMs ?? 0 });
       dependencies.memory.flush(turn.turnId);
+      consecutiveFailures = 0;
+      // `quota.warnAtRatio`：跨过预警线时在回复后补一句，每个 bucket 只提示一次（docs/10 §5.4）。
+      // 提示挂在成功那一轮的后面而不是单独发一条：多一条消息在群里是噪音。
+      if (reservation) {
+        const warning = dependencies.quota.warning(reservation, config.quota.warnAtRatio);
+        if (warning) await ctx.reply(`（${warning.window === 'month' ? '本月' : '今日'}额度已用 ${Math.round(warning.spent / warning.limit * 100)}%）`).catch(() => undefined);
+      }
     } catch (error) {
       const cancelled = turn.abortSignal.aborted;
       await dependencies.context.abortTurn(turn, cancelled ? 'cancelled' : 'failed', error);
       const settled = dependencies.turns.finish(turn.turnId, cancelled ? { state: 'cancelled', cancelReason: String(turn.abortSignal.reason ?? 'cancelled') } : { state: 'failed', error: error instanceof Error ? error.message : String(error) });
       dependencies.log.event({ level: cancelled ? 'warn' : 'error', kind: 'turn.end', summary: cancelled ? 'turn cancelled' : error instanceof Error ? error.message : 'turn failed', traceId: turn.turnId, chatId, userId, key });
       dependencies.log.publish('turn.finished', { turnId: turn.turnId, key, chatId, state: cancelled ? 'cancelled' : 'failed', steps: settled?.steps ?? 0, toolCalls: settled?.toolCalls ?? 0, costUsd: settled?.costUsd ?? 0, rebased: false, durationMs: settled?.durationMs ?? 0 });
+      // 连续 5 轮失败是「整个部署坏了」的信号（docs/10 §6）。取消不算 —— 用户点了取消不是故障。
+      if (!cancelled) {
+        consecutiveFailures += 1;
+        if (consecutiveFailures >= CONSECUTIVE_FAILURE_ALERT) {
+          dependencies.alerts?.fire('consecutive_turn_failures', `连续 ${consecutiveFailures} 个轮次失败`,
+            { count: consecutiveFailures, lastError: error instanceof Error ? error.message : String(error) });
+        }
+      }
       // 轮次超时和用户主动取消都走 abort，但对用户是两回事：没点过取消的人收到「已取消」
       // 只会以为自己误触了，而真实情况是这一轮卡在某处直到 `concurrency.turnTimeoutMs`。
       await ctx.reply(cancelled

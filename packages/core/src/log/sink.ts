@@ -71,11 +71,19 @@ export class LogSink {
   setLevel(level: LogEvent['level']): void {
     this.#level = level;
   }
+  /** `logs.redactPatterns`：追加到内置脱敏规则上的正则源串。热更新时整份换掉。 */
+  redactPatterns: readonly string[] = [];
+
   setSecrets(secrets: readonly string[]): void {
     this.secrets = [...new Set(secrets.filter(Boolean))];
   }
+  /** 装配方在这里挂告警（`alerts.on` 的 db_write_failed）。落盘/落库失败是「日志本身也不可信了」
+   *  的状态，只写 stderr 的话运维通常永远看不到。设置它的调用方必须保证回调自己不抛。 */
+  onWriteFailure?: (error: unknown) => void;
+
   #reportWriteFailure(error: unknown): void {
     try { process.stderr.write(`[log] 写入失败：${error instanceof Error ? error.message : String(error)}\n`); } catch { /* stderr 也不可用 */ }
+    try { this.onWriteFailure?.(error); } catch { /* 告警链路自己坏了也不能再炸一次 */ }
   }
 
   #file(path: string): { bytes: number; buffer: string; timer: ReturnType<typeof setTimeout> | null } {
@@ -152,7 +160,7 @@ export class LogSink {
 
   event(input: LogEvent): number {
     if (LEVEL_RANK[input.level] < LEVEL_RANK[this.#level]) return 0;
-    const safe = redact(input, this.secrets);
+    const safe = redact(input, this.secrets, this.redactPatterns);
     const prefix = input.kind.split('.')[0] ?? 'turn';
     const category = CATEGORY_BY_PREFIX[prefix] ?? 'turn';
     const day = new Date().toISOString().slice(0, 10);

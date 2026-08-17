@@ -1,3 +1,4 @@
+export * from './alerts.js';
 export * from './approval/rules.js';
 export * from './approvals.js';
 export * from './agent/manager.js';

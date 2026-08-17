@@ -794,7 +794,7 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     return new Response(readFileSync(row.path), { headers: { 'content-type': row.mime ?? 'application/octet-stream',
       'content-disposition': inline ? 'inline' : contentDisposition(row.name ?? ctx.req.param('attachmentId')) } });
   });
-  app.get('/api/chats/:key/context', (ctx) => ctx.json({ ok: true, data: dependencies.context.materialize(ctx.req.param('key'), ctx.req.query('commit') ?? null) }));
+  app.get('/api/chats/:key/context', (ctx) => ctx.json({ ok: true, data: dependencies.context.materialize(ctx.req.param('key'), ctx.req.query('commit') ?? null, currentConfig().context.cacheCommits) }));
   app.get('/api/chats/:key/commits', (ctx) => ctx.json({ ok: true, data: dependencies.context.stats(ctx.req.param('key')) }));
   app.post('/api/chats/:key/commits/:id/checkout', (ctx) => ctx.json({ ok: true, data: dependencies.context.setHead(ctx.req.param('key'), ctx.req.param('id'), 'webui') }));
   app.post('/api/chats/:key/reset', (ctx) => ctx.json({ ok: true, data: dependencies.context.reset(ctx.req.param('key'), 'webui') }));

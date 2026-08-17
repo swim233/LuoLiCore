@@ -173,7 +173,12 @@ bash: tool({
 | `web_fetch` | limited | `{url, prompt?}`；SSRF 防护：解析后拒绝 私有网段/回环/link-local/元数据地址（169.254.169.254）；只允许 http/https；跟随重定向 ≤3 次且每跳重新校验；响应上限 2MB → 转 markdown → 可选交给 `low` 模型按 prompt 摘要。单次尝试 `tools.web.timeoutMs`（含 DNS 与全部跳），瞬时失败按 `tools.web.retries` 重试，见 §8.1 |
 | `web_search` | limited | 需配置搜索 provider（Brave/Serper/Tavily 之一）；未配置则不注册该工具。超时与重试同 `web_fetch` |
 
-`network.allowlist` / `network.denylist`（域名 glob）在 WebUI 可配；`limited` 角色默认只允许 `allowlist`（若 allowlist 为空则 `web_fetch` 对 limited 不注册）。
+`tools.web.allowlist` / `tools.web.denylist`（域名 glob，`*.x.com` 只匹配子域、不含裸域）在 WebUI 可配。
+判据在 `net/outbound.ts` 的 `safeTarget` 里，**每一跳重定向都复验**：只挡第一跳的话，一个放行域名的
+302 就能把请求带去任何地方。denylist 优先于 allowlist。
+`limited` 角色只在 allowlist 非空时才有 `web_fetch` —— 没有白名单等于把整个互联网交给权限最低的
+那一档人，而这个工具的输出会直接进上下文。fail-closed 走 `available()`，所以工具**根本不进目录**，
+模型不会去试一个必然被拒的调用。
 
 ### 3.7 Telegram 侧工具
 

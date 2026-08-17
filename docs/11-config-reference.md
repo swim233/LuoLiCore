@@ -83,16 +83,19 @@ NODE_ENV=production
 
 ### 2.0.1 未实现键白名单
 
-当前白名单（按模块分组）。**每一行都以 🚧 起头，测试 `config.test.ts` 要求白名单里的每个键都能在本文件里找到一行同时含该键与 🚧**，否则视为文档未同步：
+当前白名单。**每一行都以 🚧 起头，测试 `config.test.ts` 要求白名单里的每个键都能在本文件里找到一行同时含该键与 🚧**，否则视为文档未同步。第五轮把这张表从 65 条压到 13 条，**剩下的每一条都写明为什么留着** —— 「暂时没做」和「做不了 / 不该在这一层做」是两回事：
 
-- 🚧 general / Telegram / trigger：`telegram.webhook.url` · `telegram.webhook.path` · `telegram.webhook.secretToken` · `telegram.notifyEdits` · `trigger.ignoreEditedAsTrigger`（编辑消息一律按背景消息归档，不开新轮次）
-- 🚧 context / cancel：`context.rebase.markMeta` · `context.cacheCommits` · `cancel.commitPartial`
-- 🚧 memory：`memory.pubWriteRequiresApproval` · `memory.autoApplyCompaction` · `memory.requireSourceTag`
-- 🚧 agent：`agent.askArbiter` · `agent.askEscalateToUser`
-- 🚧 tools：`tools.fs.allowHostFsForOwner` · `tools.web.summarizeWithAlias` · `tools.web.allowlist` · `tools.web.denylist`
-- 🚧 output / media：`output.flushOnSentence` · `output.parseMode` · `output.typingWhileWorking` · `output.placeholderAfterMs` · `output.maxMentions` · `media.groupDebounceMs`
-- 🚧 persistence / logs：`db.ftsTokenizer` · `logs.gzipAfterDays` · `logs.redactPatterns`
-- 🚧 quota / WebUI / alerts：`quota.onExceeded.notifyOwner` · `quota.warnAtRatio` · `webui.enabled` · `webui.basePath` · `webui.publicUrl` · `alerts.notifyOwner` · `alerts.dedupeMinutes` · `alerts.webhookUrl` · `alerts.on`
+| 🚧 键 | 为什么还没接 |
+|---|---|
+| 🚧 `telegram.webhook.url` · `telegram.webhook.path` · `telegram.webhook.secretToken` | webhook 模式整体没实现。`main.ts` 在 `mode !== 'polling'` 时**显式抛错**，不会出现「配成 webhook 后静默收不到消息」 |
+| 🚧 `telegram.notifyEdits` | 要把「上一轮之后有哪些编辑」带进 RUNTIME 块，得给 `RuntimeTurnContext` 加一块会话级瞬时状态 —— 那是上下文引擎的表面 |
+| 🚧 `trigger.ignoreEditedAsTrigger` | 先要定「编辑触发的那一轮与原轮次什么关系」：重开一轮还是改写历史，两种都会动到 rebase 与认领水位 |
+| 🚧 `memory.autoApplyCompaction` | **记忆压缩本身没实现**（`compactCron` 只统计超过软上限的文档数）。给一个不存在的产物配「是否自动应用」是假开关 |
+| 🚧 `agent.askArbiter` · `agent.askEscalateToUser` | `ask_parent` 的父 agent 仲裁没实现（返回 `ask_parent_not_implemented`，不伪造答复）。[14](./14-open-questions.md) A7 也未确认 |
+| 🚧 `tools.web.summarizeWithAlias` | 要在 `web_fetch` 里插一次模型调用：计费、配额、取消、失败降级都得跟着走一遍 |
+| 🚧 `media.groupDebounceMs` | 相册合并要按 `media_group_id` 在触发路径上缓冲 update，与并发和认领水位有交互（`concurrency.coalesceSameUserMs` 做的是按人合并） |
+| 🚧 `db.ftsTokenizer` | 换 tokenizer 要追加迁移重建 `messages_fts`，而「trigram 还是 jieba」是 [14 §2](./14-open-questions.md) Q3 的未决问题 |
+| 🚧 `webui.basePath` · `webui.publicUrl` | 部署形态的键。`publicUrl` 的唯一消费者是尚未实现的 `/webui` 一次性登录链接（[09 §2.3](./09-webui.md)），两者要一起做 |
 
 ```yaml
 # ============================================================ general
@@ -169,7 +172,7 @@ context:
   rebase:                         # D1
     injectNotice: false           # 热更新 · rebase 时是否插入可见的说明消息
     markMeta: true                # 热更新 · 是否在消息 meta 标记 rebased（建议保持 true）
-  cacheCommits: 64                # 需重启 · 物化结果 LRU 容量
+  cacheCommits: 64                # 热更新 · 物化结果 LRU 容量；0 = 不缓存（排查「读出来的窗口和库里对不上」时用）
   tokenRatioAlpha: 0.2            # 热更新 · 估算校准 EMA 系数
 
 # ============================================================ concurrency
@@ -318,8 +321,8 @@ tools:
                                   #   耗尽后交回 `{ok:false, error, attempts, hint}`，由模型决定换 URL 还是
                                   #   如实告诉用户；语义性拒绝（SSRF、端口、404）一次都不重试（05 §8.1）
     summarizeWithAlias: low       # 热更新 · web_fetch 的 prompt 摘要用哪个别名
-    allowlist: []                 # 热更新 · 空则 limited 角色不可用 web_fetch
-    denylist: ['*.local', '*.internal']
+    allowlist: []                 # 热更新 · 域名 glob（`*.x.com` 只配子域）；非空时只放行命中的。空则 limited 角色不注册 web_fetch
+    denylist: ['*.local', '*.internal']  # 热更新 · 命中即拒，优先于 allowlist；每一跳重定向都复验
     searchProvider: ''            # brave | serper | tavily | ''（空则不注册 web_search）
     searchApiKey: ''              # 需重启 · **明文**存在 config.yaml / config_kv 里（不是引用，
                                   #   与 provider key 的 Secrets 加密不同）。建议写 ${env:BRAVE_API_KEY}
@@ -383,12 +386,12 @@ output:
                                   # chunk 到就发）。锚点与 replyDelayMs 不同，两者取晚的那个
   streamIntervalMs: 2000          # 热更新 · 两次消息编辑之间的最小间隔
   streamMinDeltaChars: 24         # 热更新 · 与上一项同时满足才编辑
-  flushOnSentence: true
+  flushOnSentence: true           # 热更新 · 一句话说完就刷，不等满 streamIntervalMs（编辑次数会上升）
   maxMessageChars: 3900
-  parseMode: MarkdownV2           # MarkdownV2 | HTML | none
-  typingWhileWorking: true
-  placeholderAfterMs: 4000
-  maxMentions: 3
+  parseMode: MarkdownV2           # 热更新 · MarkdownV2 | HTML | none；none 时不试 Markdown 也就没有回退那一跳
+  typingWhileWorking: true        # 热更新 · 关掉后整轮一次 typing 都不发
+  placeholderAfterMs: 4000        # 热更新 · 上游这么久还没吐第一个 chunk 就先发一条占位（就是后面被编辑的那条）
+  maxMentions: 3                  # 热更新 · 一条消息最多几个 @用户名，多的去掉 @ 只留名字；0 = 不限
 
 # ============================================================ media（D16）
 media:
@@ -447,9 +450,9 @@ logs:
   bodyMaxBytes: 262144
   maxFileMb: 128
   retentionDays: 30
-  gzipAfterDays: 3
+  gzipAfterDays: 3                # 需重启 · 比这么多天更早的 jsonl 压成 .gz（blobs/ 不动）；0 = 不压
   console: pretty                 # pretty | json | off
-  redactPatterns: []
+  redactPatterns: []              # 热更新 · 追加到内置脱敏规则上的正则；写坏的那条整条跳过
 
 # ============================================================ quota（D19）
 quota:
@@ -475,11 +478,13 @@ quota:
   onExceeded:
     reply: true
     message: '今天的额度用完了（已用 {spent}/{limit}），{resetAt} 重置。'
-    notifyOwner: true
-  warnAtRatio: 0.8
+    notifyOwner: true             # 热更新 · 只有 global 档超限才私聊 owner；chat/user 超限只回发起人
+  warnAtRatio: 0.8                # 热更新 · 跨线时在成功那一轮的回复后补一句，每个 bucket 只提示一次
 
 # ============================================================ webui（D15）
 webui:
+  # 关掉之后整个 HTTP 面不监听。代价要说清楚：**没有 WebUI 就没有审批裁决通道**，
+  # 命中审批规则的调用会被当场拒绝（`EventBus.channelCount === 0`，docs/24 · R-APPR-01）。
   enabled: true                   # 需重启
   host: 127.0.0.1                 # 需重启 · ★ 默认回环
   port: 8787                      # 需重启
@@ -503,9 +508,10 @@ webui:
 
 # ============================================================ alerts
 alerts:
-  notifyOwner: true               # 热更新
-  dedupeMinutes: 30
-  webhookUrl: ''
+  notifyOwner: true               # 热更新 · 私聊 bootstrapOwnerId；BOT_TOKEN 缺失时这条通道不存在
+  dedupeMinutes: 30               # 热更新 · 同一个 (类型, 对象) 在窗口内只发一次
+  webhookUrl: ''                  # 热更新 · POST JSON，走 net/outbound.ts（不另开出网路径）
+  # 只有这六个字符串是有效值；写别的进去不报错，但永远匹配不上。
   on: [quota_global_exceeded, all_providers_down, db_write_failed,
        plugin_auto_disabled, sandbox_unavailable, consecutive_turn_failures]
 

@@ -62,6 +62,10 @@ async function safeTarget(raw: string, policy: OutboundPolicy, signal?: AbortSig
   const port = url.port ? Number(url.port) : url.protocol === 'https:' ? 443 : 80;
   if (!policy.allowPrivate && !(policy.allowedPorts ?? DEFAULT_PORTS).has(port)) throw new Error('port_blocked');
   const hostname = url.hostname.replace(/^\[|\]$/g, '');
+  // 域名策略在 DNS 之前判，而且**每一跳重定向都会再走一遍这里** —— 否则 allowlist 只挡得住
+  // 第一跳，一个放行域名的 302 就能把请求带去任何地方（docs/22 · V-SSRF-01 同一处教训）。
+  if (policy.denyHosts?.length && hostMatches(hostname, policy.denyHosts)) throw new Error('host_denied');
+  if (policy.allowHosts?.length && !hostMatches(hostname, policy.allowHosts)) throw new Error('host_not_allowed');
   if (isIP(hostname)) {
     if (!policy.allowPrivate && privateAddress(hostname)) throw new Error('ssrf_blocked');
     return { url, address: hostname, family: isIP(hostname) as 4 | 6 };
@@ -81,7 +85,31 @@ export interface GuardedResponse {
   body: Buffer;
   truncated: boolean;
 }
-export interface OutboundPolicy { allowPrivate: boolean; allowedPorts?: ReadonlySet<number>; maxRedirects?: number; maxBytes?: number; timeoutMs?: number }
+export interface OutboundPolicy {
+  allowPrivate: boolean;
+  allowedPorts?: ReadonlySet<number>;
+  maxRedirects?: number;
+  maxBytes?: number;
+  timeoutMs?: number;
+  /** `tools.web.allowlist`：非空时**只有**命中的域名放行（白名单语义）。 */
+  allowHosts?: readonly string[];
+  /** `tools.web.denylist`：命中即拒，**优先于** allowlist。 */
+  denyHosts?: readonly string[];
+}
+
+/**
+ * 域名 glob 匹配：`example.com` 精确匹配，`*.example.com` 匹配任意子域（不含裸域）。
+ * 大小写不敏感，尾点归一化 —— `EXAMPLE.COM.` 和 `example.com` 是同一个主机。
+ */
+export function hostMatches(hostname: string, patterns: readonly string[]): boolean {
+  const host = hostname.toLowerCase().replace(/\.$/, '');
+  return patterns.some((raw) => {
+    const pattern = raw.trim().toLowerCase().replace(/\.$/, '');
+    if (!pattern) return false;
+    if (pattern.startsWith('*.')) return host.endsWith(pattern.slice(1)) && host.length > pattern.length - 1;
+    return host === pattern;
+  });
+}
 
 function requestOnce(target: SafeTarget, init: RequestInit, maxBytes: number): Promise<GuardedResponse> {
   const { promise, resolve, reject } = Promise.withResolvers<GuardedResponse>();
