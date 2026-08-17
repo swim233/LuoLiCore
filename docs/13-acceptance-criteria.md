@@ -12,7 +12,7 @@
 > 签署表 12 行全空（docs/24 §4）；光把框勾上没有意义，下一轮谁也分不清那个 `[x]` 背后
 > 是真有用例还是有人手快。
 >
-> **第七轮（2026-08-17）的状态：93 / 372 已勾**，全部是标 `(自动)` 且能点名到具体 vitest 用例的。
+> **第七轮（2026-08-17）的状态：95 / 374 已勾**（AC-TG-024/025 随入口并发一起补上），全部是标 `(自动)` 且能点名到具体 vitest 用例的。
 > 剩下的 `(自动)` 条目里还有约 120 条**没有对应用例**（不是没核对，是真的没有）——
 > 那是下一轮该补的测试，而不是该勾的框。人工条目一律保持 `[ ]`。
 
@@ -123,6 +123,8 @@
 | [ ] AC-TG-020 | 活跃会话里发 `/ctx`、`/tasks` | 回摘要（commit / 窗口 / token / 条数、任务 id 与状态），不再把整份 JSON 塞进消息而超 4096 字符被 API 拒（docs/20 · W-TG-02） |
 | [x] AC-TG-021 (自动) | `output.streamBufferMs=2000`，模型想满 5s（`replyDelayMs` 早已过期）才吐第一个 chunk | 第一条消息不早于首个 chunk 之后 2s 发出，且带着这 2s 内攒到的全部文本 —— 不再是「只有一个字，剩下靠编辑补」；流在缓冲窗口内就结束时立刻发出（只受 `replyDelayMs` 约束） | 〔output.pacing.test.ts〕
 | [x] AC-TG-022 (自动) | 流式回复持续输出，`streamIntervalMs=2000` | 首条消息发出本身算一次刷新，紧随其后的 chunk 不触发编辑；两次 `editMessageText` 之间同时满足 ≥ `streamIntervalMs` 与 ≥ `streamMinDeltaChars`；收尾那次编辑不受这两项约束 | 〔output.pacing.test.ts〕
+| [x] AC-TG-024 (自动) ★ | 同一会话连发 3 条都会触发的消息（`perKey=3`） | 三轮**同时**在跑（`turns` 里 3 行 `running`），不是排队等前一轮说完；`perKey=1` 时后两条进队列并最终各自跑完，一条都不丢 | 〔telegram.concurrency.test.ts〕
+| [x] AC-TG-025 (自动) ★ | 一批 update 同时到达，其中一条的入口段（媒体下载 / `onMessage` 钩子）很慢 | update 并发派发且在途数不超过 `global + queueMax`（到顶不再 `getUpdates`）；同一个 chat 的归档顺序仍等于用户说话顺序；单条 handler 抛错只上报不中断轮询 | 〔telegram.concurrency.test.ts〕
 | [x] AC-ACL-001 (自动) ★ | `BLOCKED` 用户私聊 | 无回复、**不入库**、无 token 消耗；只有一条 `access.denied` 日志 | 〔access.commands.test.ts、security.test.ts〕
 | [x] AC-ACL-002 (自动) ★ | `OWNER` 在群 `G_LIMITED` @bot | `effective=limited`：写/执行类工具不在 `activeTools` 中 | 〔security.test.ts〕
 | [x] AC-ACL-003 (自动) ★ | `LIMITED` 用户在群 `G_TRUSTED` @bot | `effective=limited` | 〔security.test.ts〕
@@ -470,7 +472,7 @@
 |---|---|---|---|---|---|
 | 配置与 DB | | 14 / 24 | | | |
 | **上下文引擎** | | 25 / 34 | | | |
-| Telegram 与准入 | | 15 / 39 | | | |
+| Telegram 与准入 | | 17 / 41 | | | |
 | Agent 与 Provider | | 18 / 40 | | | |
 | 工具/沙箱/审批 | | 11 / 54 | | | |
 | Subagent 与任务 | | 2 / 22 | | | |
@@ -480,6 +482,6 @@
 | WebUI | | 1 / 72 | | | |
 | 安全 | | 0 / 15 | | | |
 | 运维 | | 1 / 9 | | | |
-| **合计** | | **93 / 372** | | | |
+| **合计** | | **95 / 374** | | | |
 
 **整体通过条件**：全部 ★ 项通过 + 非 ★ 项通过率 ≥ 95% + 所有豁免项经需求方书面确认。

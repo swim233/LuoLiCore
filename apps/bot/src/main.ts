@@ -7,7 +7,7 @@ import { ArchiveRepository, OperationsRepository, PrincipalRepository, TurnRepos
 import { AgentManager, AgentResultStore, AlertDispatcher, ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, FileTools, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, ModelRegistry, PathJail, PluginManager, PromptAssembler, PromptDocuments, ProviderStore, QuotaGuard, Sandbox, Scheduler, Secrets, SkillLoader, STABLE_PROMPT_BLOCKS, TOOL_POLICY, ToolRegistry, TurnConcurrency, TurnRegistry, UsageLedger, assembleMainPrompt, configJsonSchema, loadConfig, perChatConfig, registerBuiltins, rejectedWakewords, runSubAgent, streamMainAgent, type SubAgentRuntimeEvent } from '@luoli/core';
 import { createServer, EventStreamRegistry, issueLoginToken, setupToken, type PromptPreviewResult } from '@luoli/server';
 import type { RuntimeTurnContext } from '@luoli/shared';
-import { TelegramTools, createTelegramBot } from '@luoli/telegram';
+import { TelegramTools, UpdatePoller, createTelegramBot } from '@luoli/telegram';
 
 const startedAt = Date.now();
 const TOKEN_REPAIR_KEY = 'repair:context-tokens:v1';
@@ -161,6 +161,7 @@ if (!sandboxProbe.available && config.sandbox.mode === 'docker') log.event({ lev
 // `available()` 判的就是 `telegram` 在不在，没有 BOT_TOKEN 时这一族工具必须整体不进目录，
 // 而不是进了目录再在调用时失败。
 let bot: Bot | null = null;
+let poller: UpdatePoller | null = null;
 const telegramTools = process.env.BOT_TOKEN
   ? new TelegramTools({ bot: () => bot, archive, maxMessageChars: () => configStore.snapshot().output.maxMessageChars })
   : null;
@@ -298,9 +299,31 @@ if (process.env.BOT_TOKEN) {
       prompts: promptAssembler, documents: promptDocuments, skills, plugins, agents, ledger, context, quota, reservation, log, workspace: resolve(live.sandbox.workspaceDir, turn.chatId) }); } });
   // `dropPendingOnStart`：停机期间积压的 update 直接丢掉，不补跑。默认关 —— 丢的是真实用户
   // 发过的消息。开它的场景是长时间停机后重启，不想让 bot 对着一小时前的话题连开几十轮。
-  if (config.telegram.mode === 'polling') void bot.start({ allowed_updates: config.telegram.allowedUpdates as never[], drop_pending_updates: config.telegram.dropPendingOnStart });
-  // webhook 模式没有实现：既不 start 也不注册路由，静默不收任何消息比直接报错危险得多。
-  else throw new Error(`telegram.mode=${config.telegram.mode} is not implemented; only polling is supported`);
+  //
+  // 不用 grammY 的 `bot.start()`：它逐条串行处理 update，`TurnConcurrency` 因此永远争用不到
+  // （第二个人得等第一个人整轮跑完，docs/01 §3 的 global / perKey / queueMax 形同虚设）。
+  // 在途上限取 `global + queueMax`：超出这个数再拉进来的轮次也只会被 `acquire` 顶回去。
+  if (config.telegram.mode === 'polling') {
+    poller = new UpdatePoller(bot, {
+      allowedUpdates: config.telegram.allowedUpdates,
+      dropPendingUpdates: config.telegram.dropPendingOnStart,
+      maxInFlight: config.concurrency.global + config.concurrency.queueMax,
+      onError: (error, phase) => log.event({ level: phase === 'fetch' ? 'warn' : 'error', kind: 'tg.error',
+        summary: error instanceof Error ? error.message : String(error), data: { phase } }),
+      // 401 / 409 说明这个 token 不该由本进程轮询（撤销了，或者另一个实例正在拉）。原先
+      // `void bot.start()` 在这两种错误上 rethrow，经 unhandledRejection 变成 exit(1)；
+      // 保留「死掉让 supervisor 重启」这一半，但走优雅关闭，别把 WAL 和日志留在半截状态。
+      onFatal: (error) => {
+        log.event({ level: 'error', kind: 'tg.error', summary: `polling aborted: ${error instanceof Error ? error.message : String(error)}`, data: { fatal: true } });
+        process.stderr.write(`[telegram] 轮询被 Telegram 拒绝（token 失效或另有实例在拉同一个 bot）：${error instanceof Error ? error.message : String(error)}\n`);
+        void shutdown('telegram:fatal').then(() => { process.exitCode = 1; });
+      },
+    });
+    poller.start();
+  } else {
+    // webhook 模式没有实现：既不 start 也不注册路由，静默不收任何消息比直接报错危险得多。
+    throw new Error(`telegram.mode=${config.telegram.mode} is not implemented; only polling is supported`);
+  }
   // owner 私聊通道到这里才具备。`sendMessage` 失败由 AlertDispatcher 自己吞掉并记一条
   // `alert.deliver_failed` —— owner 没跟 bot 说过话时 Telegram 会拒发，那不该把告警链路带崩。
   const ownerChatId = configStore.snapshot().access.bootstrapOwnerId;
@@ -330,6 +353,8 @@ const shutdown = async (signal: string): Promise<void> => {
     http.close(() => markClosed());
     force = setTimeout(() => { if ('closeAllConnections' in http) http.closeAllConnections(); markClosed(); }, config.general.shutdown.graceMs); force.unref?.();
   } else markClosed();
+  // 先停拉取（`stop()` 顺手把 offset 交回 Telegram），在途的 update 交给下面的 drain。
+  if (poller) await poller.stop();
   if (bot) await bot.stop();
   // 宽限期内没排空就主动中断：drain 只是等，等不来的轮次必须被 abort，否则它们要么把进程
   // 拖到 systemd 的 SIGKILL，要么在退出后留下 running 行等下次 recoverAfterCrash 认领（docs/24 · R-OPS-01）。
@@ -337,6 +362,9 @@ const shutdown = async (signal: string): Promise<void> => {
     turnRegistry.abortAll('shutdown');
     await turnRegistry.drain(Math.min(1000, config.general.shutdown.graceMs));
   }
+  // 还没开成轮次的那些 update（正在归档、正在下载媒体）不在 turnRegistry 里。不等它们收尾就
+  // `closeDatabase`，那几条写会撞上「database is not open」，消息凭空消失且只留一行 tg.error。
+  if (poller) await poller.drain(Math.min(2000, config.general.shutdown.graceMs));
   await closed; if (force) clearTimeout(force);
   await plugins.close();
   await mcp.close();

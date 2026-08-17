@@ -383,6 +383,9 @@ media:
 - **编辑消息永远不开新轮次**，一律按背景消息归档（`triggered=0`）。判成 `triggered=1` 却没人开轮次的话，
   `claimBackground` 的 `triggered=0` 过滤会把它排除 —— 既不触发也不进背景上下文，等于凭空消失
   （docs/20 · W-TG-05）；`trigger.ignoreEditedAsTrigger` 因此标 🚧。
+- 同一条规则适用于**所有「判成触发但没开成轮次」的路径**：`cooldownMsPerUser`、`coalesceSameUserMs`、
+  `quota.rateLimit`（含 `concurrentPerUser`）、并发队列已满/被取消，都要把这条消息降级成背景消息。
+  否则用户那句话既没被回答、也不在下一轮的上下文里。入口并发之后后两条路径才真正可达。
 
 ---
 
@@ -397,6 +400,7 @@ media:
 | 模型缺定价（`quota.requirePricing`） | `当前模型没配价格，管理员补上定价才能用。(ref: 01J8…)` |
 | 配额超限 | `今天的额度用完了（$1.00/$1.00），明天 00:00 重置。` |
 | 排队已满 | `我这边排队满了，等会儿再叫我。` |
+| 在途轮次达 `quota.rateLimit.concurrentPerUser` | `我同时最多接 2 件事，你手上的还没说完。等它收尾再说这条。`（这一句不受 `quota.onExceeded.reply` 管：它不是额度，等手上那轮说完就能继续） |
 | 权限不足（用户显式要求高危操作） | `这个操作需要更高权限，找管理员吧。` |
 | 上下文过大中止 | `这轮内容太多，我先停下。用 /new 开个新话题，或把任务拆小些。` |
 | 未捕获异常 | `出了点问题，已记录。(ref: 01J8…)` |

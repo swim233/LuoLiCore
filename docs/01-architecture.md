@@ -99,6 +99,14 @@ Telegram Update
 
 - **单进程**：`apps/bot` 同时拉起 grammY 与 Hono（D15）。
 - **并发单位是 turn**。全局并发上限 `concurrency.global`（默认 8），每 context key 上限 `concurrency.perKey`（默认 3），超出进入 FIFO 等待队列（`concurrency.queueMax`，默认 20；再超则回复「排队已满」）。
+- **入口也必须是并发的**。update 由 `UpdatePoller`（`packages/telegram/src/polling.ts`）自己拉、自己派发，
+  **不走 grammY 的 `bot.start()`** —— 那个逐条串行喂 update（源码里那句注释就是 `handle updates sequentially (!)`），
+  于是上面那三个上限永远争用不到：第二个人得等第一个人的整轮（含模型流式输出与工具执行）跑完，
+  `concurrency.coalesceSameUserMs` 也永远等不到后一条消息。在途 update 上限 = `global + queueMax`，
+  到顶就不再 `getUpdates`（backpressure 留在 Telegram 侧，而不是在进程里堆一批待下载的媒体）。
+  handler 的异常在派发处收口：grammY 只在自家轮询里把它路由到 `bot.catch`，漏接就是 unhandledRejection。
+- **同一个 chat 的入口段串行**（`KeyedMutex`，`bot.ts`）：认领 update → 归档 → 挂媒体这一段里有真实的
+  异步等待，而归档顺序就是上下文顺序（`claimBackground` 按 `messages.id` 排）。锁只盖入口段，轮次在锁外并行。
 - **锁**：`KeyedMutex`（进程内 `Map<string, Promise>`）保护 `openTurn` / `commitTurn` 的临界区。临界区内**禁止任何网络/模型调用**。
 - **多实例**（非第一版目标）：SQLite WAL 模式下多进程写会争锁。若未来横向扩展，需把 `KeyedMutex` 换成 DB 行级 advisory lock（`context_locks` 表 + `INSERT OR FAIL`）并迁移 Postgres。已在 [14](./14-open-questions.md) 记录。
 - **优雅退出**：收到 `SIGTERM` 后停止拉取新 update，等待在途 turn 至 `shutdown.graceMs`（默认 30s），超时则取消并标记 `turns.state='cancelled'`，最后 flush 日志与 WAL checkpoint。
@@ -140,7 +148,8 @@ LuoLiCore/
 │   │   ├── migrations/             SQL 迁移（顺序编号）
 │   │   └── repo/                   ArchiveRepo · ContextRepo · ... （强制 chat 作用域）
 │   ├── telegram/
-│   │   ├── bot.ts                  grammY 实例 · transformer(限流)
+│   │   ├── bot.ts                  grammY 实例 · transformer(限流) · 入口段按 chat 串行
+│   │   ├── polling.ts              并发有界的 long polling 驱动（替代 bot.start 的串行循环）
 │   │   ├── middleware/             dedup · principals · media · archive · trigger
 │   │   ├── output.ts               流式 editMessageText · 分片 · MarkdownV2 降级
 │   │   ├── commands/               /new /undo /ctx /cancel /tasks /model ...
