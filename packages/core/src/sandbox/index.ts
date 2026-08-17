@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { StringDecoder } from 'node:string_decoder';
 import { existsSync, mkdirSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import type { Role } from '@luoli/shared';
@@ -143,24 +144,41 @@ export class Sandbox {
       ? spawn(this.#cfg().dockerBin, dockerArgs, { stdio: ['ignore', 'pipe', 'pipe'] })
       : spawn('/bin/sh', ['-c', limitedCommand], { cwd: workspace, env: { ...env, HOME: workspace }, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
     const started = performance.now();
+    const cap = this.#cfg().maxOutputBytes;
+    const stdoutDecoder = new StringDecoder('utf8');
+    const stderrDecoder = new StringDecoder('utf8');
     let stdout = '';
     let stderr = '';
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let truncatedByCap = false;
     let killed = false;
-    child.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString(); });
-    child.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
     const kill = (): void => {
+      if (killed) return;
       killed = true;
       if (plan.mode === 'docker') spawn(this.#cfg().dockerBin, ['kill', name], { stdio: 'ignore' });
-      else if (child.pid) process.kill(-child.pid, 'SIGKILL');
+      else if (child.pid) try { process.kill(-child.pid, 'SIGKILL'); } catch { /* 已退出 */ }
     };
+    const collect = (chunk: Buffer, stream: 'stdout' | 'stderr'): void => {
+      const current = stream === 'stdout' ? stdoutBytes : stderrBytes;
+      const remaining = Math.max(0, cap * 2 - current);
+      const kept = chunk.subarray(0, remaining);
+      if (stream === 'stdout') { stdoutBytes += kept.length; stdout += stdoutDecoder.write(kept); }
+      else { stderrBytes += kept.length; stderr += stderrDecoder.write(kept); }
+      if (kept.length < chunk.length) { truncatedByCap = true; kill(); }
+    };
+    child.stdout.on('data', (chunk: Buffer) => collect(chunk, 'stdout'));
+    child.stderr.on('data', (chunk: Buffer) => collect(chunk, 'stderr'));
     const timer = setTimeout(kill, timeout);
     abortSignal.addEventListener('abort', kill, { once: true });
-    const exitCode = await new Promise<number | null>((resolve) => child.once('close', resolve));
+    const exitCode = await new Promise<number | null>((resolve, reject) => { child.once('error', reject); child.once('close', resolve); });
     clearTimeout(timer);
     abortSignal.removeEventListener('abort', kill);
-    const out = clipped(stdout, this.#cfg().maxOutputBytes);
-    const err = clipped(stderr, this.#cfg().maxOutputBytes);
+    stdout += stdoutDecoder.end();
+    stderr += stderrDecoder.end();
+    const out = clipped(stdout, cap);
+    const err = clipped(stderr, cap);
     const oom = exitCode === 137 || /out of memory|oom/i.test(stderr);
-    return { ok: exitCode === 0, exitCode, stdout: out.value, stderr: err.value, truncated: out.truncated || err.truncated, durationMs: Math.round(performance.now() - started), killed, oom };
+    return { ok: exitCode === 0 && !truncatedByCap, exitCode, stdout: out.value, stderr: err.value, truncated: truncatedByCap || out.truncated || err.truncated, durationMs: Math.round(performance.now() - started), killed, oom };
   }
 }

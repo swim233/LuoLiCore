@@ -59,11 +59,11 @@ function resolveOutgoingFile(context: ToolExecutionContext, files: FileTools, pa
   return { ok: true, absolute };
 }
 
-export function registerBuiltins(registry: ToolRegistry, dependencies: { db: import('@luoli/db').Sqlite; filesFor: (workspace: string) => FileTools; sandbox: Sandbox; archive: ArchiveRepository; context: ContextEngine; memory: MemoryStore; skills: SkillLoader; agents: AgentManager; models: ModelRegistry; ledger: UsageLedger; log: LogSink; quota?: QuotaGuard; telegram: TelegramToolBridge | null; pubWriteMinRole: 'blocked' | 'limited' | 'trusted' | 'owner'; maxWebBytes: number; maxAsksPerRun?: number; askTimeoutMs?: number; webSearch?: { provider: '' | 'brave' | 'serper' | 'tavily'; apiKey: string } }): void {
+export function registerBuiltins(registry: ToolRegistry, dependencies: { db: import('@luoli/db').Sqlite; filesFor: (workspace: string) => FileTools; sandbox: Sandbox; archive: ArchiveRepository; context: ContextEngine; memory: MemoryStore; skills: SkillLoader; agents: AgentManager; models: ModelRegistry; ledger: UsageLedger; log: LogSink; quota?: QuotaGuard; telegram: TelegramToolBridge | null; maxWebBytes: number; maxAsksPerRun?: number; askTimeoutMs?: number; webSearch?: { provider: '' | 'brave' | 'serper' | 'tavily'; apiKey: string } }): void {
   registry.register({ name: 'read_file', description: '读取工作目录或 skill:// 资源，支持 offset/limit 分页。', inputSchema: z.object({ path: z.string(), offset: z.number().int().nonnegative().optional(), limit: z.number().int().positive().optional() }), policy: builtinPolicy('read_file'), sourcePriority: 100, untrustedOutput: true,
     execute: (input, context) => {
       if (!input.path.startsWith('skill://')) return dependencies.filesFor(context.workspace).read(input.path, input.offset, input.limit);
-      const path = dependencies.skills.resolveResource(input.path);
+      const path = dependencies.skills.resolveResource(input.path, context.turn.effectiveRole);
       const buffer = readFileSync(path);
       const offset = input.offset ?? 0;
       const limit = input.limit ?? Math.min(buffer.length, 262_144);
@@ -111,7 +111,7 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
     inputSchemaFor: (context) => memoryWriteSchema(context.turn.isPrivate), policy: builtinPolicy('memory_write'), sourcePriority: 100,
     execute: (input, context) => dependencies.memory.queueWrite({ scope: input.scope, subject: input.scope === 'primemory' ? context.turn.initiatorUserId : null,
       section: input.section, lines: input.content.split('\n').filter(Boolean), actor: 'model', turnId: context.turn.turnId,
-      chatId: context.turn.chatId, userId: context.turn.initiatorUserId }, context.turn.effectiveRole, context.turn.isPrivate, dependencies.pubWriteMinRole) });
+      chatId: context.turn.chatId, userId: context.turn.initiatorUserId }, context.turn.effectiveRole, context.turn.isPrivate, (context.turn.config as Readonly<Config>).memory.pubWriteMinRole) });
   registry.register({ name: 'load_skill', description: '渐进式载入 Skill 正文与资源清单。', inputSchema: z.object({ name: z.string() }), policy: builtinPolicy('load_skill'), sourcePriority: 80,
     execute: (input, context) => {
       const loaded = (context.turn.loadedSkills ??= new Set());
@@ -132,6 +132,8 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
     execute: (_input, context) => ({ ok: true, agents: dependencies.agents.available(context.turn.effectiveRole).map(({ name, description }) => ({ name, description })) }) });
   registry.register({ name: 'spawn_agent', description: '派发独立上下文子 agent；task 必须自包含。', inputSchema: z.object({ agent: z.string(), task: z.string().min(10), context: z.string().optional(), modelAlias: z.string().optional(), label: z.string().optional() }), policy: builtinPolicy('spawn_agent'), sourcePriority: 90,
     execute: async (input, context) => {
+      const perTurn = (context.turn.config as Readonly<Config>).quota.perTurn;
+      if (dependencies.ledger.turnCost(context.turn.turnId) >= perTurn.maxCostUsd) return { ok: false, error: 'turn_budget_exhausted' };
       const parent = context.agentRunId ? dependencies.agents.byId(context.agentRunId) : dependencies.agents.createMain(context.turn.turnId, context.turn.effectiveRole, 'main');
       if (!parent) return { ok: false, error: 'parent_agent_unavailable' };
       const { run, definition } = dependencies.agents.spawn(parent, input.agent, input.task, input.modelAlias);

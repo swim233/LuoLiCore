@@ -2,10 +2,11 @@ import { Cron } from 'croner';
 
 export class Scheduler {
   readonly #jobs: Array<{ name: string; stop(): void; trigger(): Promise<void> }> = [];
+  constructor(private readonly onError?: (name: string, error: unknown) => void) {}
 
   add(expression: string, task: () => void | Promise<void>, name = expression): void {
-    const invoke = async (): Promise<void> => { await task(); };
-    const cron = new Cron(expression, { protect: true }, invoke);
+    const invoke = async (): Promise<void> => { try { await task(); } catch (error) { this.onError?.(name, error); } };
+    const cron = new Cron(expression, { protect: true, catch: true }, invoke);
     this.#jobs.push({ name, stop: () => cron.stop(), trigger: invoke });
   }
 

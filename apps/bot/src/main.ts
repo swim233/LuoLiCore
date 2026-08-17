@@ -6,7 +6,7 @@ import { serve } from '@hono/node-server';
 import { zodToJsonSchema } from 'zod-to-json-schema';
 import { ArchiveRepository, OperationsRepository, PrincipalRepository, TurnRepository, closeDatabase, migrateDatabase, modelAliasKey, openDatabase, readAppKv, readPersistedConfig, recomputeMessageTokens, recoverAfterCrash, writeAppKv } from '@luoli/db';
 import { AgentManager, AgentResultStore, ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, FileTools, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, ModelRegistry, PathJail, PluginManager, PromptAssembler, PromptDocuments, ProviderStore, QuotaGuard, Sandbox, Scheduler, Secrets, SkillLoader, STABLE_PROMPT_BLOCKS, TOOL_POLICY, ToolRegistry, TurnConcurrency, TurnRegistry, UsageLedger, assembleMainPrompt, configSchema, loadConfig, perChatConfig, registerBuiltins, rejectedWakewords, runSubAgent, streamMainAgent, type SubAgentRuntimeEvent } from '@luoli/core';
-import { createServer, setupToken, type PromptPreviewResult } from '@luoli/server';
+import { createServer, EventStreamRegistry, setupToken, type PromptPreviewResult } from '@luoli/server';
 import type { RuntimeTurnContext } from '@luoli/shared';
 import { TelegramTools, createTelegramBot } from '@luoli/telegram';
 
@@ -63,7 +63,7 @@ const secrets = new Secrets(process.env.LUOLI_MASTER_KEY);
 if (secrets.weak) process.stderr.write('[secrets] LUOLI_MASTER_KEY 短于 32 字符：provider key 的加密强度取决于它，建议换成 32 字节随机值。\n');
 const providers = new ProviderStore(db, secrets);
 // 只在 WebUI 主动拉取模型时才可能出网；缓存命中的路径不碰网络（docs/04 §5.4.1）。
-const modelCatalog = new ModelCatalog(db, () => configStore.snapshot().provider.catalog);
+const modelCatalog = new ModelCatalog(db, () => ({ ...configStore.snapshot().provider.catalog, allowPrivate: configStore.snapshot().provider.allowPrivateBaseUrl }));
 const ledger = new UsageLedger(db);
 const turnRegistry = new TurnRegistry();
 const turnConcurrency = new TurnConcurrency(config.concurrency);
@@ -71,6 +71,7 @@ const log = new LogSink(operations, config.logs.dir, [process.env.BOT_TOKEN ?? '
 const context = new ContextEngine(db, archive, log);
 const modelRegistry = new ModelRegistry(db, providers);
 modelRegistry.rebuild();
+log.setSecrets([process.env.BOT_TOKEN ?? '', process.env.LUOLI_MASTER_KEY ?? '', config.tools.web.searchApiKey, ...providers.allDecryptedKeys()]);
 // 零配置首启本来就没有 main 别名，拒绝启动会把补配置用的 WebUI 一起带走（docs/04 §5.2）。
 // 缺 main 只告警：轮次会在 streamMainAgent 里失败，WebUI 写入别名后 rebuildModels() 即时生效。
 if (!modelRegistry.aliases().includes('main')) {
@@ -87,8 +88,8 @@ const plugins = new PluginManager(db, config.plugins.dir, config.plugins.hookTim
 await plugins.reconcile();
 const mcp = new McpManager(db, () => configStore.snapshot().mcp, log);
 await mcp.reconcile();
-const maintenance = new MaintenanceService(db, config.db.path, config.db.backupKeep, config.logs.retentionDays);
-const scheduler = new Scheduler();
+const maintenance = new MaintenanceService(db, config.db.path, config.db.backupKeep, config.logs.retentionDays, config.logs.dir);
+const scheduler = new Scheduler((name, error) => log.event({ level: 'error', kind: 'scheduler.failed', summary: `${name} failed`, data: { error: error instanceof Error ? error.message : String(error) } }));
 scheduler.add(config.general.maintenanceCron, () => { const result = maintenance.cleanup(); log.event({ level: 'info', kind: 'maintenance.cleanup', summary: 'Scheduled cleanup complete', data: result }); }, 'maintenance');
 scheduler.add(config.db.vacuumCron, () => { maintenance.vacuum(); log.event({ level: 'info', kind: 'maintenance.vacuum', summary: 'Scheduled VACUUM complete' }); }, 'vacuum');
 scheduler.add(config.memory.compactCron, () => { log.event({ level: 'info', kind: 'memory.compact', summary: 'Memory compaction review scheduled', data: { pending: memory.list().filter((entry) => entry.tokens > config.memory.softLimitTokens).length } }); }, 'memory-compact');
@@ -107,7 +108,7 @@ if (!config.trigger.private && !config.trigger.mention && !config.trigger.reply 
 }
 const toolRegistry = new ToolRegistry(log, approval,
   () => { const live = configStore.snapshot(); return { maxRegistered: live.tools.maxRegistered, maxCallsPerTurn: live.tools.maxCallsPerTurn, maxConsecutiveErrors: live.tools.maxConsecutiveErrors, maxOutputBytes: live.tools.exec.maxOutputBytes }; },
-  () => configStore.snapshot().approval.rules);
+  () => configStore.snapshot().approval.rules, plugins);
 toolRegistry.bindOverrides(() => configStore.snapshot().tools.overrides);
 // 吃 getter 而不是启动快照：sandbox.mode 是「出事时运维会去点的那个开关」，冻住它等于
 // 界面说改成功了、bash 照跑（docs/20 · W-CFG-02）。
@@ -130,7 +131,7 @@ const telegramTools = process.env.BOT_TOKEN
   : null;
 registerBuiltins(toolRegistry, {
   db, filesFor: (workspace) => new FileTools(new PathJail(workspace, config.tools.fs.denyGlobs), config.tools.fs.maxReadBytes, config.tools.fs.maxWriteBytes, { showHidden: config.tools.fs.showHidden, trashDir: config.tools.fs.trashDir, backupDir: config.tools.fs.backupDir }),
-  sandbox, archive, context, memory, skills, agents, models: modelRegistry, ledger, log, quota, pubWriteMinRole: config.memory.pubWriteMinRole,
+  sandbox, archive, context, memory, skills, agents, models: modelRegistry, ledger, log, quota,
   maxWebBytes: config.tools.web.maxResponseBytes, maxAsksPerRun: config.agent.maxAsksPerRun, askTimeoutMs: config.agent.askTimeoutMs,
   webSearch: { provider: config.tools.web.searchProvider, apiKey: config.tools.web.searchApiKey },
   telegram: telegramTools,
@@ -203,8 +204,10 @@ async function dryRunAgent(name: string, task: string, signal: AbortSignal, emit
   }
 }
 
-const server = createServer({ config: configStore, db, operations, principals, archive, context, providers, modelCatalog, approvals: approval, rebuildModels: () => modelRegistry.rebuild(), maintenance, events, log,
-  memory, promptDocuments, skills, plugins, mcp, agents, turnRegistry, sandbox, previewPrompt, dryRunAgent, configSchema: zodToJsonSchema(configSchema, 'LuoLiConfig'), startedAt, setup });
+const rebuildModels = (): void => { modelRegistry.rebuild(); const live = configStore.snapshot(); log.setSecrets([process.env.BOT_TOKEN ?? '', process.env.LUOLI_MASTER_KEY ?? '', live.tools.web.searchApiKey, ...providers.allDecryptedKeys()]); };
+const eventStreams = new EventStreamRegistry();
+const server = createServer({ config: configStore, db, operations, principals, archive, context, providers, modelCatalog, approvals: approval, rebuildModels, maintenance, events, log,
+  memory, promptDocuments, skills, plugins, mcp, agents, turnRegistry, sandbox, eventStreams, previewPrompt, dryRunAgent, configSchema: zodToJsonSchema(configSchema, 'LuoLiConfig'), startedAt, setup });
 const http = serve({ fetch: server.fetch, hostname: config.webui.host, port: config.webui.port });
 events.subscribe((event) => {
   if (event.type !== 'config.changed') return;
@@ -212,7 +215,7 @@ events.subscribe((event) => {
   void loadConfig({ overrides: envOverlay(readPersistedConfig(config.db.path, reportRejectedKey)), onInvalidOverride: (dropped, reasons) => log.event({ level: 'error', kind: 'config.invalid', summary: `已忽略 ${dropped.length} 条非法覆盖`, data: { dropped, reasons } }) }).then((next) => {
     configStore.replace(next, keys);
     if (keys.some((key) => key.startsWith('logs.level'))) log.setLevel(next.logs.level);
-    if (keys.some((key) => key.startsWith('provider.') || key.startsWith('model'))) modelRegistry.rebuild();
+    if (keys.some((key) => key.startsWith('provider.') || key.startsWith('model') || key === 'tools.web.searchApiKey')) rebuildModels();
     if (keys.some((key) => key.startsWith('agent.agents'))) agents.replaceDefinitions(next.agent.agents);
     if (keys.some((key) => key.startsWith('skills.'))) skills.scan();
     if (keys.some((key) => key.startsWith('plugins.'))) void plugins.reconcile();
@@ -236,24 +239,27 @@ if (process.env.BOT_TOKEN) {
 } else {
   log.event({ level: 'warn', kind: 'system.start', summary: 'BOT_TOKEN missing; Telegram ingress disabled' });
 }
-
 let shuttingDown = false;
 const shutdown = async (signal: string): Promise<void> => {
-  if (shuttingDown) return;
-  shuttingDown = true;
+  if (shuttingDown) return; shuttingDown = true;
   log.event({ level: 'info', kind: 'system.stop', summary: `Stopping on ${signal}` });
-  bot?.stop();
   scheduler.stop();
-  http.close();
+  eventStreams.closeAll();
+  const { promise: closed, resolve: markClosed } = Promise.withResolvers<void>();
+  http.close(() => markClosed());
+  const force = setTimeout(() => { if ('closeAllConnections' in http) http.closeAllConnections(); markClosed(); }, config.general.shutdown.graceMs); force.unref?.();
+  if (bot) await bot.stop();
+  // 宽限期内没排空就主动中断：drain 只是等，等不来的轮次必须被 abort，否则它们要么把进程
+  // 拖到 systemd 的 SIGKILL，要么在退出后留下 running 行等下次 recoverAfterCrash 认领（docs/24 · R-OPS-01）。
   if (!(await turnRegistry.drain(config.general.shutdown.graceMs))) {
     turnRegistry.abortAll('shutdown');
     await turnRegistry.drain(Math.min(1000, config.general.shutdown.graceMs));
   }
-  await mcp.close();
+  await closed; clearTimeout(force);
   await plugins.close();
+  await mcp.close();
   await skills.close();
   log.close();
-  maintenance.checkpoint();
   closeDatabase(db);
   process.exitCode = 0;
 };

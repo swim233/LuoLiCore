@@ -57,7 +57,7 @@ function harness(over: Record<string, unknown> = {}) {
   const db = openDatabase(path); migrateDatabase(db);
   const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, webui: { passwordHash: 'hash' },
     provider: { catalog: { url: `${base}/api.json`, cacheFile: CACHE, ttlHours: 24, timeoutMs: 5000, ...over } } });
-  const catalog = new ModelCatalog(db, () => config.provider.catalog);
+  const catalog = new ModelCatalog(db, () => ({ ...config.provider.catalog, allowPrivate: true }));
   return { db, config, catalog };
 }
 

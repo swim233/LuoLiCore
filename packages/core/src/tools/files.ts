@@ -2,10 +2,11 @@ import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync,
 import { minimatch } from 'minimatch';
 import { basename, dirname, relative } from 'node:path';
 import { ulid } from 'ulid';
+import { RE2 } from 're2-wasm';
 import { PathJail } from './jail.js';
-function safeRegex(source: string, ignoreCase: boolean): RegExp | null {
-  if ([...source].length > 128 || /\\[1-9]|\(\?[=!<]|(\([^)]*[+*][^)]*\))[+*]|\{\d+,\d*\}\s*[+*{]/.test(source)) return null;
-  try { return new RegExp(source, ignoreCase ? 'giu' : 'gu'); } catch { return null; }
+function safeRegex(source: string, ignoreCase: boolean): RE2 | null {
+  if ([...source].length > 128) return null;
+  try { return new RE2(source, ignoreCase ? 'giu' : 'gu'); } catch { return null; }
 }
 
 

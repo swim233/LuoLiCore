@@ -13,6 +13,7 @@ export interface ToolExecutionContext {
   workspace: string;
   agentKind: 'main' | 'sub';
   agentRunId?: string;
+  allow?: ReadonlySet<string>;
 }
 
 export interface RegisteredTool<I = unknown> {
@@ -61,7 +62,7 @@ export class ToolRegistry {
   #overrides: () => Readonly<Record<string, { enabled?: boolean }>> = () => ({});
   /** limits 与 approvalRules 同样接受 getter：两者在 doc 11 都标着热更新，吃快照就是冻住
    *  （新增的高危命令规则要重启才生效，docs/20 · W-CFG-02）。 */
-  constructor(private readonly log: LogSink, private readonly approval: ApprovalBroker, limits: ToolLimits | (() => ToolLimits), approvalRules: readonly unknown[] | (() => readonly unknown[]) = []) {
+  constructor(private readonly log: LogSink, private readonly approval: ApprovalBroker, limits: ToolLimits | (() => ToolLimits), approvalRules: readonly unknown[] | (() => readonly unknown[]) = [], private readonly hooks?: { hook(name: string, ...arguments_: unknown[]): Promise<unknown[]> }) {
     this.#limits = typeof limits === 'function' ? limits : () => limits;
     this.#rulesSource = typeof approvalRules === 'function' ? approvalRules : () => approvalRules;
   }
@@ -140,6 +141,8 @@ export class ToolRegistry {
     // （docs/20 · W-TOOL-01；docs/05 §220「单一数据源」）。
     if (context.agentKind === 'sub' && name === 'memory_write') return { ok: false, error: 'tool_unavailable_for_subagent' };
     if (tool.available?.(context.turn.effectiveRole, context) === false) return { ok: false, error: 'tool_unavailable' };
+    if (context.allow && !context.allow.has(name)) return { ok: false, error: 'tool_not_in_allowlist' };
+    if (context.turn.skillAllowedTools?.size && name !== 'load_skill' && !context.turn.skillAllowedTools.has(name)) return { ok: false, error: 'tool_not_in_allowlist' };
     if (state.calls >= this.#limits().maxCallsPerTurn) return { ok: false, error: 'tool_call_limit_exceeded' };
     const parsed = (tool.inputSchemaFor?.(context) ?? tool.inputSchema).safeParse(rawInput);
     if (!parsed.success) return { ok: false, error: 'invalid_input', hint: parsed.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ') };
@@ -155,10 +158,12 @@ export class ToolRegistry {
       if (!approved) return { ok: false, error: '未获批准', ...(hint ? { hint } : {}) };
     }
     state.calls += 1;
+    await this.hooks?.hook('onToolCall', { name, input: parsed.data, context });
     const span = this.log.span({ level: 'info', kind: 'tool.call', summary: name, traceId: context.turn.turnId, chatId: context.turn.chatId, userId: context.turn.initiatorUserId, key: context.turn.key, data: { input: parsed.data } });
     try {
       const rawOutput = await tool.execute(parsed.data, context);
       const output = this.#normalizeOutput(name, rawOutput, tool.untrustedOutput === true);
+      await this.hooks?.hook('onToolResult', { name, input: parsed.data, output, context });
       if ('ok' in output && output.ok === false) {
         state.failures[name] = (state.failures[name] ?? 0) + 1;
         if (state.failures[name] >= this.#limits().maxConsecutiveErrors) state.disabled.add(name);

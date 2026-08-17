@@ -345,8 +345,16 @@ docker run --rm \
 
 **当前可用通道是 WebUI。** 任务与审批页通过 SSE 收到 `approval.pending`，owner 调
 `POST /api/approvals/:id/decide` 批准或拒绝。Telegram inline keyboard 仍未实现，因此用户若只看
-Telegram 不会看到按钮；但调用会按 `ttlMs` 等待 WebUI，而不是像旧实现那样当场伪拒绝或轮询数据库。
+Telegram 不会看到按钮；有 WebUI 连着时调用按 `ttlMs` 等待，而不是像旧实现那样当场伪拒绝或轮询数据库。
 `approval.allowInitiator` 仍未接线：WebUI 是单角色 owner，不能把裁决权下放给发起人。
+
+**没有裁决通道时当场拒绝，不等。** `request()` 先看 `EventBus.channelCount`——即当前挂着的 SSE 连接数。
+为零就直接返回 `{approved:false, hint:'…当前没有可用的审批通道…'}` 并记一条 `approval.unavailable`，
+**不插 pending 行、不 await**。否则这一轮会白占 `concurrency` 槽、配额预留和 `turnTimeoutMs` 预算干等满
+`ttlMs`（默认 180 秒），而 Telegram 侧一个字都没有 —— 这正是 [20](./20-review-round5.md) §0.0 裁决要消灭的形态。
+判据必须是「裁决通道」而不是「订阅者」：进程自己的 `config.changed` 订阅者常驻，拿 `subscriberCount`
+判断会让这段永远走不到（[22](./22-review-round6.md) · `D-APPR-01`、[24](./24-review-round6-verification.md) · `R-APPR-01`）。
+🚧 **仍缺**：有通道时，发起人在等待期间收不到任何提示，只能看到 bot 沉默——补 Telegram 回执或 inline keyboard 之前，这条不算闭合。
 
 风险规则（`approval.rules`，正则匹配后触发审批，可在 WebUI 编辑）：
 

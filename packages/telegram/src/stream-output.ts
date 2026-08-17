@@ -14,11 +14,12 @@ export interface StreamOutputOptions {
 export class TelegramOutput {
   constructor(private readonly bot: Bot, private readonly chatId: string, private readonly options: StreamOutputOptions, private readonly onDeliveryError?: (error: unknown) => void,
     /** 起算点是用户那条消息的到达时刻，不是这个对象被构造的时刻：模型本来就想了 3 秒时不该再压 2 秒。 */
-    private readonly since: number = Date.now()) {}
+    private readonly since: number = Date.now(), private readonly beforeSend?: (text: string) => Promise<string>) {}
 
   async send(text: string, replyToMessageId?: number): Promise<number[]> {
     await holdReply(this.since, this.options.replyDelayMs);
-    const parts = splitTelegramText(text, this.options.maxChars);
+    const finalText = this.beforeSend ? await this.beforeSend(text) : text;
+    const parts = splitTelegramText(finalText, this.options.maxChars);
     const ids: number[] = [];
     for (const part of parts) {
       const message = await sendWithFallback(this.bot.api, this.chatId, part, replyToMessageId ? { reply_parameters: { message_id: replyToMessageId } } : {});
@@ -66,6 +67,7 @@ export class TelegramOutput {
         // 首个 chunk 就会被原样发出去 —— 用户先收到一条只有一个字的消息，剩下的全靠编辑补，
         // 这正是「先发一个字再编辑」的来源。攒到的文本不会丢：流在窗口内就结束时下面走 send()。
         if (Date.now() < Math.max(this.since + this.options.replyDelayMs, firstChunkAt + this.options.bufferMs)) continue;
+        if (messageIds.length && Date.now() - lastEdit < this.options.intervalMs) continue;
         const rendered = splitTelegramText(text, this.options.maxChars);
         const before = messageIds.length;
         while (messageIds.length < rendered.length) {

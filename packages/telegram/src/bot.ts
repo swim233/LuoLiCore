@@ -11,6 +11,7 @@ import { contextKey, modelAliasKey, readAppKv, writeAppKv } from '@luoli/db';
 import { matchTrigger } from './trigger.js';
 import { holdReply, sendWithFallback, splitTelegramText } from './output.js';
 import { attachMedia, messageKind, resolveQuotedMessage } from './reply.js';
+import { TelegramOutput } from './stream-output.js';
 
 export interface TelegramDependencies {
   config: Readonly<Config> | ConfigStore;
@@ -55,6 +56,15 @@ interface TelegramIngress {
   triggerReason: string | null;
 }
 
+function pluginText(result: unknown[], original: string): string {
+  let text = original;
+  for (const entry of result) {
+    const value = entry && typeof entry === 'object' && 'result' in entry ? (entry as { result?: unknown }).result : null;
+    if (typeof value === 'string') text = value;
+    else if (value && typeof value === 'object' && 'text' in value && typeof (value as { text?: unknown }).text === 'string') text = (value as { text: string }).text;
+  }
+  return text;
+}
 export async function createTelegramBot(token: string, dependencies: TelegramDependencies): Promise<Bot> {
   const currentConfig = (): Readonly<Config> => 'snapshot' in dependencies.config ? dependencies.config.snapshot() : dependencies.config;
   const config = new Proxy({} as Readonly<Config>, { get: (_target, property) => currentConfig()[property as keyof Config] });
@@ -159,8 +169,7 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
     await ctx.reply(`可用命令（按你当前权限 ${access.effectiveRole} 过滤）：\n${lines.join('\n')}`);
   });
   bot.command('whois', async (ctx) => {
-    const actor = dependencies.principals.roleOf('user', String(ctx.from?.id ?? ''));
-    if (actor !== 'owner') { await ctx.reply('权限不足。'); return; }
+    if (!await requireRole(ctx.update.update_id, 'owner', (text) => ctx.reply(text))) return;
     const raw = ctx.match.trim();
     if (!raw) { await ctx.reply('用法：/whois <id>，或 /whois <user|chat> <id>'); return; }
     const [first, second] = raw.split(/\s+/);
@@ -170,8 +179,10 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
     await ctx.reply(found.length ? found.map((entry) => `${entry.kind}:${id} = ${entry.role}`).join('\n') : `没有 ${id} 的记录（未见过的主体按默认角色处理）。`);
   });
   bot.command('ping', async (ctx) => {
-    if (!await requireRole(ctx.update.update_id, 'limited', (text) => ctx.reply(text))) return;
-    await ctx.reply(`LuoLiCore ${process.env.npm_package_version ?? 'dev'}\n运行正常\n${JSON.stringify(dependencies.operations.dashboard())}`);
+    const access = await requireRole(ctx.update.update_id, 'limited', (text) => ctx.reply(text));
+    if (!access) return;
+    const detail = access.effectiveRole === 'owner' ? `\n${JSON.stringify(dependencies.operations.dashboard())}` : '';
+    await ctx.reply(`LuoLiCore ${process.env.npm_package_version ?? 'dev'}\n运行正常\n有效权限：${access.effectiveRole}${detail}`);
   });
   bot.command('new', async (ctx) => {
     const key = contextKey({ chatId: String(ctx.chat.id), messageThreadId: ctx.message?.message_thread_id ?? null }, config.context.scope);
@@ -225,8 +236,7 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
     await ctx.reply(`user=${user} chat=${chat} effective=${resolveEffectiveRole({ userRole: user, chatRole: chat, isPrivate: ctx.chat.type === 'private', defaultChatRole: config.access.defaultChatRole })}`);
   });
   bot.command('grant', async (ctx) => {
-    const actor = dependencies.principals.roleOf('user', String(ctx.from?.id ?? ''));
-    if (actor !== 'owner') { await ctx.reply('权限不足。'); return; }
+    if (!await requireRole(ctx.update.update_id, 'owner', (text) => ctx.reply(text))) return;
     const [kind, id, role] = ctx.match.trim().split(/\s+/);
     if (!kind || !id || !['owner', 'trusted', 'limited', 'blocked'].includes(role ?? '') || !['user', 'chat'].includes(kind)) { await ctx.reply('用法：/grant <user|chat> <id> <role>'); return; }
     dependencies.principals.upsertSeen({ id: `${kind}:${id}`, kind: kind as 'user' | 'chat', tgId: id, role: role as 'owner' | 'trusted' | 'limited' | 'blocked', displayName: null, username: null, chatType: null }, `command:${ctx.from?.id}`);
@@ -234,8 +244,7 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
     await ctx.reply(`已设置 ${kind}:${id} = ${role}`);
   });
   bot.command('revoke', async (ctx) => {
-    const actor = dependencies.principals.roleOf('user', String(ctx.from?.id ?? ''));
-    if (actor !== 'owner') { await ctx.reply('权限不足。'); return; }
+    if (!await requireRole(ctx.update.update_id, 'owner', (text) => ctx.reply(text))) return;
     const id = ctx.match.trim();
     const changed = dependencies.principals.setRole(id, 'blocked', `command:${ctx.from?.id}`);
     await ctx.reply(changed ? `已撤销 ${id}` : '主体不存在。');
@@ -379,17 +388,18 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
       // 的 mode/节奏覆盖存得住、也过了校验，就是永远不生效。取本轮那份合并后的配置。
       const outputConfig = perChatConfig(currentConfig(), key).output;
       if (typeof generated === 'string') {
+        const outgoing = dependencies.plugins ? pluginText(await dependencies.plugins.hook('beforeSend', { turn, text: generated }), generated) : generated;
         await holdReply(receivedAt, outputConfig.replyDelayMs);
-        for (const part of splitTelegramText(generated, outputConfig.maxMessageChars)) {
-          // 与流式分支共用一份降级逻辑：裸 MarkdownV2 发送失败会把整轮打成 failed（docs/20 · W-TG-03）。
+        for (const part of splitTelegramText(outgoing, outputConfig.maxMessageChars)) {
           const sent = await sendWithFallback(bot.api, chatId, part);
           scoped.append({ chatId, messageThreadId: message.message_thread_id ?? null, tgMessageId: sent.message_id, direction: 'out', fromKind: 'bot', fromUserId: String(bot.botInfo.id), fromName: bot.botInfo.first_name, fromUsername: bot.botInfo.username,
             kind: 'text', text: part, tgDate: sent.date * 1000, raw: sent, triggered: false, turnId: turn.turnId });
         }
-        answer = generated;
+        answer = outgoing;
       } else {
-        const output = new (await import('./stream-output.js')).TelegramOutput(bot, chatId, { mode: outputConfig.mode, replyDelayMs: outputConfig.replyDelayMs, bufferMs: outputConfig.streamBufferMs, intervalMs: outputConfig.streamIntervalMs, minDeltaChars: outputConfig.streamMinDeltaChars, maxChars: outputConfig.maxMessageChars },
-          (error) => dependencies.log.event({ level: 'warn', kind: 'tg.error', summary: 'Streaming delivery failed', traceId: turn.turnId, chatId, data: { error: error instanceof Error ? error.message : String(error) } }), receivedAt);
+        const output = new TelegramOutput(bot, chatId, { mode: outputConfig.mode, replyDelayMs: outputConfig.replyDelayMs, bufferMs: outputConfig.streamBufferMs, intervalMs: outputConfig.streamIntervalMs, minDeltaChars: outputConfig.streamMinDeltaChars, maxChars: outputConfig.maxMessageChars },
+          (error) => dependencies.log.event({ level: 'warn', kind: 'tg.error', summary: 'Streaming delivery failed', traceId: turn.turnId, chatId, data: { error: error instanceof Error ? error.message : String(error) } }), receivedAt,
+          dependencies.plugins ? async (text) => pluginText(await dependencies.plugins!.hook('beforeSend', { turn, text }), text) : undefined);
         const consumed = await output.consume(generated.stream, message.message_id);
         if (consumed.interrupted) { generated.interrupt(); void generated.final.catch(() => undefined); answer = consumed.text; }
         // final 为空、但流里已经发出去了内容时以发出去的为准：否则用户盯着屏幕上的回复，

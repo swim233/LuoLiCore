@@ -38,7 +38,15 @@ webui:
 - 密码用 **argon2id**（`memoryCost=19456, timeCost=2, parallelism=1`）哈希存配置。
 - `POST /api/auth/login {password}` → 校验 → 生成 32 字节随机 session id → 写 `sessions` 表 → `Set-Cookie: luoli_sid=…; HttpOnly; SameSite=Lax; Path=/; Secure(当 https)`。
 - 同时返回 `csrf` token（存 `sessions.csrf`）；前端放内存，所有非 GET 请求带 `X-CSRF-Token`。
-- 失败限流：同 IP 连续失败 5 次 → 锁 15 分钟（内存计数 + 日志 `warn`）。
+- 失败限流：同 IP 连续失败 `webui.loginRateLimit.attempts` 次 → 锁 `windowMinutes` 分钟（内存计数 + 日志 `warn`）。
+  IP 取自 `X-Forwarded-For` 按 `webui.trustedProxyHops` **从右往左**数的那一跳（最左一跳由客户端自己填，
+  取它等于没有限速）；`trustProxy: false` 时读 `X-Real-IP`，都没有则记为 `direct`。单 IP 桶之外还有一个
+  全局失败窗口，触发后所有登录请求先延迟 250ms 再校验 —— 换 IP 绕过要付出代价，而不是把 owner 一起锁死。
+  失败表上限 1024 条。`login` 与 `setup` 在进 argon2 之前先拒绝超过 1024 字符的口令。
+- **改口令**：`POST /api/auth/password {current, next}` → 校验旧口令 → argon2id → 写 `config_kv` +
+  `config_revisions` → **吊销除当前会话外的全部 session**（`DELETE FROM sessions WHERE id<>?`）→ 发
+  `config.changed`。校验一律现读配置，热重载落地后不再认任何进程内缓存；不重启也生效。
+  `pnpm webui:passwd` 仍可用于线下生成哈希。**界面上暂时还没有这个表单**，当前只能打 API（见 [21](./21-webui-coverage-gaps.md)）。
 - 登出删除 session 行，入口是顶栏最右侧的 `[退出登录]` 图标按钮（打 `POST /api/auth/logout` 后跳 `/login`；
   端点早就有，界面上一直没有入口，只能等 session 过期或手删 cookie）。`GET /api/auth/me` 返回登录态、到期时间**与本 session 的 `csrf`** —— 前端只把 token 放在内存里，刷新页面后必须靠这个端点补回来，否则刷新之后所有写操作都会 403。跨站拿不到它：既过不了 Origin 中间件，也读不到响应体。
 - Session 滑动续期：每次请求更新 `last_seen_at`，超过 `sessionTtlHours` 未活动则失效。

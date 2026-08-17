@@ -32,12 +32,20 @@ describe('security boundaries', () => {
     expect(() => jail.resolve('.env')).toThrow('path_denied');
   });
 
-  it('rejects expensive file-search regular expressions', () => {
+  // 断言的是「grep 有 CPU 上界」，不是「守卫认得这几种坏形状」——后者验证的是守卫自己的公理
+  // （docs/22 §0.1）。语料必须够长：4 个 'a' 对 `(a|a)*$` 连回溯引擎都是秒过，那样这条断言
+  // 挡不住任何回归。64 个 'a' 下退回 JavaScript RegExp 就是指数级，这条会红（docs/24 · R-SEC-01）。
+  it('bounds file-search CPU for every pattern it accepts', () => {
     const root = resolve('data/file-grep-security');
-    rmSync(root, { recursive: true, force: true }); mkdirSync(root, { recursive: true }); writeFileSync(`${root}/text.txt`, 'aaaa');
+    rmSync(root, { recursive: true, force: true }); mkdirSync(root, { recursive: true }); writeFileSync(`${root}/text.txt`, `${'a'.repeat(64)}b`);
     const files = new FileTools(new PathJail(root, []), 1024, 1024);
-    expect(files.grep('(a+)+$', '.')).toEqual({ ok: false, error: 'invalid_pattern' });
+    for (const pattern of ['(a|a)*$', '(a|ab)*c', '(.|.)*$', '(a|a|a)+$']) {
+      const started = performance.now();
+      expect(files.grep(pattern, '.')).toMatchObject({ ok: true });
+      expect(performance.now() - started).toBeLessThan(1000);
+    }
     expect(files.grep('a'.repeat(129), '.')).toEqual({ ok: false, error: 'invalid_pattern' });
+    expect(files.grep('(?=a)', '.')).toEqual({ ok: false, error: 'invalid_pattern' });
     expect(files.grep('aa', '.')).toMatchObject({ ok: true });
   });
 

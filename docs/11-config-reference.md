@@ -154,7 +154,9 @@ prompt:
     showWorkspace: true
 memory:
   dir: ./memory                   # 需重启
-  pubWriteMinRole: trusted        # 需重启 · ★ D12 安全阀（registerBuiltins 在启动时取值，docs/20 · W-CFG-02）
+  pubWriteMinRole: trusted        # 热更新 · ★ D12 安全阀。memory_write 读的是本轮那份合并配置
+                                  #   （turn.config），所以 perChat 覆盖真的生效；而 configSchema 只放行
+                                  #   比全局**更严格**的值，往松了改会被校验器挡下（22 · D-CFG-01）
   pubWriteRequiresApproval: false # 热更新 · 多群部署建议 true
   softLimitTokens: 1500           # 需重启 · 超出触发异步压缩（MemoryStore 构造时吃的是快照）
   hardLimitTokens: 3000           # 需重启 · 超出拒绝写入
@@ -217,6 +219,10 @@ provider:
   healthDownCooldownMinutes: 30
   requestTimeoutMs: 120000        # 热更新
   streamIdleTimeoutMs: 60000      # 热更新 · 流式无数据超时
+  allowPrivateBaseUrl: false      # 热更新 · ★ 允许 provider 探测 / 模型目录打到私网地址与非常规端口。
+                                  #   默认关：`POST /api/providers/:id/test` 收请求体里的 baseUrl，
+                                  #   开着等于把管理端变成一个带鉴权的 SSRF 代理（22 · V-SSRF-01）。
+                                  #   自建网关跑在内网是合理场景，但必须运维显式打开。
   catalog:                        # 热更新 · 模型元数据目录（models.dev），见 04 §5.4.1
     enabled: true                 # 热更新 · 关掉之后拉取模型只剩上游 /models 给的那点信息
     url: https://models.dev/api.json
@@ -434,8 +440,15 @@ webui:
   sessionTtlHours: 168
   passwordHash: ''                # 由首次启动向导或 `pnpm webui:passwd` 写入
   trustProxy: false
+  trustedProxyHops: 1             # 反代自己追加的跳数。XFF 按这个数**从右往左**取：
+                                  #   最左那一跳是客户端自己写的，取它等于限速形同虚设
+                                  #   （每次换一个 X-Forwarded-For 就是一个新桶，22 · V-AUTH-01）。
+                                  #   直连或 trustProxy=false 时读 X-Real-IP，再没有就记为 direct。
   allowOrigins: []
   loginRateLimit: { attempts: 5, windowMinutes: 15 }
+                                  # 单 IP 桶之外还有一个全局失败窗口：达到 attempts×20 之后所有登录
+                                  # 请求延迟 250ms 再校验 —— 换 IP 绕过的成本被拉高，而不是把 owner
+                                  # 一起锁在门外。失败表上限 1024 条，超出按最久未命中淘汰。
 
 # ============================================================ alerts
 alerts:

@@ -1,4 +1,5 @@
 import { redact } from '../secrets.js';
+import { guardedFetch } from '../net/outbound.js';
 
 export interface CatalogModel {
   modelId: string;
@@ -78,27 +79,24 @@ function normalize(kind: string, payload: unknown): CatalogModel[] {
  * 一次最小出网调用，同时服务「测试连接」与「拉取模型列表」（docs/04 §5.4）。
  * 上游错误体会把请求头原样回显（不少网关如此），所以摘要必须过 `redact` 并带上本次用的 key。
  */
-export async function probeProvider(target: ProbeTarget, apiKey: string | null, timeoutMs = 15_000): Promise<ProviderProbe> {
+export async function probeProvider(target: ProbeTarget, apiKey: string | null, timeoutMs = 15_000, allowPrivate = false): Promise<ProviderProbe> {
   const baseUrl = target.baseUrl?.trim() || DEFAULT_BASE_URL[target.kind] || '';
   const started = Date.now();
   const fail = (code: ProbeCode, message: string, status: number | null = null): ProviderProbe => ({ reachable: false, code, message, status, latencyMs: Date.now() - started, models: [] });
   if (!baseUrl) return fail('missing_base_url', `${target.kind} 未配置 base_url，无法定位模型目录接口`);
   const clean = (value: string): string => redact(value.replace(/\s+/g, ' ').trim(), apiKey ? [apiKey] : []).slice(0, 300);
-  let response: Response;
+  let response: Awaited<ReturnType<typeof guardedFetch>>;
+  const signal = AbortSignal.timeout(timeoutMs);
   try {
-    response = await fetch(catalogUrl(target.kind, baseUrl), {
-      method: 'GET',
-      headers: { accept: 'application/json', ...target.headers ?? {}, ...authHeaders(target.kind, apiKey) },
-      signal: AbortSignal.timeout(timeoutMs),
-      redirect: 'follow',
-    });
+    response = await guardedFetch(catalogUrl(target.kind, baseUrl), {
+      method: 'GET', headers: { accept: 'application/json', ...target.headers ?? {}, ...authHeaders(target.kind, apiKey) }, signal,
+    }, { allowPrivate, maxBytes: 8_388_608 });
   } catch (error) {
     const name = error instanceof Error ? error.name : '';
     if (name === 'TimeoutError' || name === 'AbortError') return fail('timeout', `上游 ${timeoutMs} ms 内未响应`);
-    const cause = error instanceof Error && error.cause instanceof Error ? `：${error.cause.message}` : '';
-    return fail('network', `无法连接上游${clean(cause)}`);
+    return fail('network', `无法连接上游：${clean(error instanceof Error ? error.message : String(error))}`);
   }
-  const body = await response.text().catch(() => '');
+  const body = response.body.toString('utf8');
   if (!response.ok) {
     const summary = clean(body) || response.statusText || '无响应体';
     if (response.status === 401 || response.status === 403) return fail('unauthorized', `API Key 被拒绝（${response.status}）：${summary}`, response.status);

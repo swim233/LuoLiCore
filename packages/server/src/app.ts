@@ -11,6 +11,7 @@ import { ALIAS_NAME_PATTERN, HOT_RELOADABLE_CONFIG_KEYS, KNOWN_UNIMPLEMENTED_CON
 import type { CatalogIndex, ModelMetadata, ProviderProbe } from '@luoli/core';
 import type { ArchiveRepository, OperationsRepository, PrincipalRepository, Sqlite } from '@luoli/db';
 import { assignDotted, type Role } from '@luoli/shared';
+import type { EventStreamRegistry } from './events.js';
 
 export interface PromptPreviewResult {
   key: string;
@@ -47,6 +48,7 @@ export interface ServerDependencies {
   agents?: AgentManager;
   turnRegistry?: TurnRegistry;
   sandbox?: Sandbox;
+  eventStreams?: EventStreamRegistry;
   previewPrompt?: (key: string, role: Role) => PromptPreviewResult | Promise<PromptPreviewResult>;
   dryRunAgent?: (name: string, task: string, signal: AbortSignal, emit: (event: SubAgentRuntimeEvent) => void | Promise<void>) => Promise<{ summary: string; fullRef: string; truncated: boolean }>;
   log: LogSink;
@@ -110,8 +112,9 @@ function publicConfig(value: unknown): unknown {
   return Object.fromEntries(Object.entries(value).map(([key, nested]) => [key, /key|secret|token|password/i.test(key) && typeof nested === 'string' && nested ? '«redacted»' : publicConfig(nested)]));
 }
 function requestIp(ctx: { req: { header(name: string): string | undefined } }, config: Readonly<Config>): string {
-  if (!config.webui.trustProxy) return 'local';
-  return ctx.req.header('x-forwarded-for')?.split(',')[0]?.trim() || 'local';
+  if (!config.webui.trustProxy) return ctx.req.header('x-real-ip')?.trim() || 'direct';
+  const chain = ctx.req.header('x-forwarded-for')?.split(',').map((entry) => entry.trim()).filter(Boolean) ?? [];
+  return chain.at(-config.webui.trustedProxyHops) ?? 'direct';
 }
 function requestIsSecure(ctx: { req: { header(name: string): string | undefined; url: string } }, config: Readonly<Config>): boolean {
   return ctx.req.url.startsWith('https:') || (config.webui.trustProxy && ctx.req.header('x-forwarded-proto')?.split(',')[0]?.trim() === 'https');
@@ -144,8 +147,24 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     dependencies.events.emit('config.changed', { keys: [key] });
     return { ok: true, servers: parsed.data.mcp.servers };
   };
-  let passwordHash = currentConfig().webui.passwordHash;
-  const failures = new Map<string, { count: number; lockedUntil: number }>();
+  // 刚写进 config_kv、但 config.changed 的重载还没落到 configStore 的那一份口令。只在「快照仍是
+  // 写入前那个值」时顶上；快照一旦变成别的（比如 PUT /api/config 又改了一次），立刻交回配置——
+  // 无条件缓存就是 V-AUTH-02 换个位置复发：写入返回 200，登录还认旧的（docs/24 · R-AUTH-01）。
+  let pendingHash: { next: string; previous: string } | null = null;
+  const activePasswordHash = (): string => {
+    const stored = currentConfig().webui.passwordHash;
+    if (!pendingHash) return stored;
+    if (stored === pendingHash.previous) return pendingHash.next;
+    pendingHash = null;
+    return stored;
+  };
+  const failures = new Map<string, { count: number; lockedUntil: number; touchedAt: number }>();
+  let globalFailures: number[] = [];
+  const pruneFailures = (now: number, windowMs: number): void => {
+    globalFailures = globalFailures.filter((at) => now - at < windowMs);
+    for (const [key, entry] of failures) if (entry.lockedUntil <= now && now - entry.touchedAt >= windowMs) failures.delete(key);
+    while (failures.size > 1024) failures.delete(failures.keys().next().value!);
+  };
 
   app.use('*', async (ctx, next) => {
     ctx.header('Content-Security-Policy', "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; connect-src 'self'");
@@ -169,17 +188,19 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
   });
 
   app.post('/api/setup', async (ctx) => {
-    const body = await ctx.req.json<{ token?: string; password?: string }>();
+    const body = await ctx.req.json<{ token?: string; password?: string }>().catch((): { token?: string; password?: string } => ({}));
     const expected = dependencies.setup?.token ?? '';
     const validToken = Boolean(dependencies.setup && Date.now() <= dependencies.setup.expiresAt && body.token && body.token.length === expected.length && timingSafeEqual(Buffer.from(body.token), Buffer.from(expected)));
     if (!validToken) return ctx.json(apiError('invalid_setup', 'Setup token is invalid', 403).body, 403);
-    if (!body.password || body.password.length < 12) return ctx.json(apiError('weak_password', 'Password must have at least 12 characters').body, 400);
-    passwordHash = await argon2.hash(body.password, { type: argon2.argon2id, memoryCost: 19_456, timeCost: 2, parallelism: 1 });
+    if (!body.password || body.password.length < 12 || body.password.length > 1024) return ctx.json(apiError('weak_password', 'Password must contain 12–1024 characters').body, 400);
+    const hash = await argon2.hash(body.password, { type: argon2.argon2id, memoryCost: 19_456, timeCost: 2, parallelism: 1 });
+    pendingHash = { next: hash, previous: currentConfig().webui.passwordHash };
     const now = Date.now();
     dependencies.db.prepare(`INSERT INTO config_kv(key,value_json,updated_at,updated_by) VALUES ('webui.passwordHash',?,?,?)
-      ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at,updated_by=excluded.updated_by`).run(JSON.stringify(passwordHash), now, 'setup');
+      ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at,updated_by=excluded.updated_by`).run(JSON.stringify(hash), now, 'setup');
     dependencies.db.prepare('INSERT INTO config_revisions(id,ts,actor,key,old_json,new_json) VALUES (?,?,?,?,?,?)').run(randomBytes(16).toString('hex'), now, 'setup', 'webui.passwordHash', JSON.stringify(''), JSON.stringify('«redacted»'));
     dependencies.setup = undefined;
+    dependencies.events.emit('config.changed', { keys: ['webui.passwordHash'] });
     const session = dependencies.operations.createSession(currentConfig().webui.sessionTtlHours, requestIp(ctx, currentConfig()), ctx.req.header('user-agent'));
     const secure = requestIsSecure(ctx, currentConfig()) ? '; Secure' : '';
     ctx.header('Set-Cookie', `luoli_sid=${encodeURIComponent(session.id)}; HttpOnly; SameSite=Strict; Path=/${secure}`);
@@ -187,21 +208,32 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
   });
 
   app.post('/api/auth/login', async (ctx) => {
+    const now = Date.now();
+    const webui = currentConfig().webui;
+    const windowMs = webui.loginRateLimit.windowMinutes * 60_000;
+    pruneFailures(now, windowMs);
     const ip = requestIp(ctx, currentConfig());
     const failure = failures.get(ip);
-    if (failure && failure.lockedUntil > Date.now()) return ctx.json(apiError('locked', '登录失败次数过多，请稍后再试', 429).body, 429);
-    const body = await ctx.req.json<{ password?: string }>();
+    if (failure && failure.lockedUntil > now) return ctx.json(apiError('locked', '登录失败次数过多，请稍后再试', 429).body, 429);
+    if (globalFailures.length >= webui.loginRateLimit.attempts * 20) {
+      const { promise, resolve } = Promise.withResolvers<void>();
+      setTimeout(resolve, 250);
+      await promise;
+    }
+    const body = await ctx.req.json<{ password?: string }>().catch((): { password?: string } => ({}));
+    if (!body.password || body.password.length > 1024) return ctx.json(apiError('invalid_credentials', '密码错误', 401).body, 401);
     let valid = false;
-    try { valid = Boolean(body.password && passwordHash && await argon2.verify(passwordHash, body.password)); } catch { valid = false; }
+    try { const hash = activePasswordHash(); valid = Boolean(hash && await argon2.verify(hash, body.password)); } catch { valid = false; }
     if (!valid) {
       const count = (failure?.count ?? 0) + 1;
-      const webui = currentConfig().webui;
-      failures.set(ip, { count, lockedUntil: count >= webui.loginRateLimit.attempts ? Date.now() + webui.loginRateLimit.windowMinutes * 60_000 : 0 });
+      failures.delete(ip);
+      failures.set(ip, { count, lockedUntil: count >= webui.loginRateLimit.attempts ? now + windowMs : 0, touchedAt: now });
+      globalFailures.push(now);
       dependencies.log.event({ level: 'warn', kind: 'webui.action', summary: 'login failed', data: { ip } });
       return ctx.json(apiError('invalid_credentials', '密码错误', 401).body, 401);
     }
     failures.delete(ip);
-    const session = dependencies.operations.createSession(currentConfig().webui.sessionTtlHours, ip, ctx.req.header('user-agent'));
+    const session = dependencies.operations.createSession(webui.sessionTtlHours, ip, ctx.req.header('user-agent'));
     const secure = requestIsSecure(ctx, currentConfig()) ? '; Secure' : '';
     ctx.header('Set-Cookie', `luoli_sid=${encodeURIComponent(session.id)}; HttpOnly; SameSite=Strict; Path=/${secure}`);
     return ctx.json({ ok: true, data: { csrf: session.csrf, expiresAt: session.expiresAt } });
@@ -221,6 +253,26 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
   app.use('/api/*', async (ctx, next) => {
     await next();
     if (!['GET', 'HEAD', 'OPTIONS'].includes(ctx.req.method)) dependencies.log.event({ level: 'info', kind: 'webui.action', summary: `${ctx.req.method} ${ctx.req.path}`, data: { method: ctx.req.method, path: ctx.req.path } });
+  });
+  app.post('/api/auth/password', async (ctx) => {
+    const body = await ctx.req.json<{ current?: string; next?: string }>().catch((): { current?: string; next?: string } => ({}));
+    if (!body.current || body.current.length > 1024 || !body.next || body.next.length < 12 || body.next.length > 1024) return ctx.json(apiError('invalid_password', '新口令必须为 12–1024 个字符').body, 400);
+    let valid = false;
+    try { const hash = activePasswordHash(); valid = Boolean(hash && await argon2.verify(hash, body.current)); } catch { valid = false; }
+    if (!valid) return ctx.json(apiError('invalid_credentials', '当前口令错误', 401).body, 401);
+    const nextHash = await argon2.hash(body.next, { type: argon2.argon2id, memoryCost: 19_456, timeCost: 2, parallelism: 1 });
+    const now = Date.now();
+    const staleHash = currentConfig().webui.passwordHash;
+    const currentSession = ctx.get('sessionId');
+    const previous = dependencies.db.prepare('SELECT value_json AS value FROM config_kv WHERE key=?').get('webui.passwordHash') as { value: string } | undefined;
+    dependencies.db.transaction(() => {
+      dependencies.db.prepare("INSERT INTO config_kv(key,value_json,updated_at,updated_by) VALUES ('webui.passwordHash',?,?,'webui') ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at,updated_by=excluded.updated_by").run(JSON.stringify(nextHash), now);
+      dependencies.db.prepare('INSERT INTO config_revisions(id,ts,actor,key,old_json,new_json) VALUES (?,?,?,?,?,?)').run(randomBytes(16).toString('hex'), now, 'webui', 'webui.passwordHash', previous?.value ? JSON.stringify('«redacted»') : null, JSON.stringify('«redacted»'));
+      dependencies.db.prepare('DELETE FROM sessions WHERE id<>?').run(currentSession);
+    })();
+    pendingHash = { next: nextHash, previous: staleHash };
+    dependencies.events.emit('config.changed', { keys: ['webui.passwordHash'] });
+    return ctx.json({ ok: true, data: { sessionsRevoked: true } });
   });
   app.get('/api/health/detail', (ctx) => {
     let dbOk = true;
@@ -325,7 +377,7 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     try { headers = row.headers ? JSON.parse(row.headers) as Record<string, string> : null; } catch { headers = null; }
     const kind = typeof overrides.kind === 'string' && overrides.kind ? overrides.kind : row.kind;
     const baseUrl = typeof overrides.baseUrl === 'string' ? overrides.baseUrl : row.baseUrl;
-    return { row, adhoc, result: await probeProvider({ name: row.name, kind, baseUrl, headers }, apiKey) };
+    return { row, adhoc, result: await probeProvider({ name: row.name, kind, baseUrl, headers }, apiKey, 15_000, currentConfig().provider.allowPrivateBaseUrl) };
   };
   app.get('/api/providers', (ctx) => ctx.json({ ok: true, data: dependencies.providers.list() }));
   app.post('/api/providers', async (ctx) => { try { const id = dependencies.providers.save(await ctx.req.json()); dependencies.rebuildModels?.(); return ctx.json({ ok: true, data: { id } }); } catch (error) { return ctx.json(apiError('provider_invalid', error instanceof Error ? error.message : 'Provider 配置无效').body, 400); } });
@@ -832,7 +884,13 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     catch (error) { return ctx.json(apiError('skill_delete_failed', error instanceof Error ? error.message : 'Skill 删除失败', 400).body, 400); }
   });
   app.get('/api/plugins', (ctx) => ctx.json({ ok: true, data: dependencies.db.prepare('SELECT * FROM plugins ORDER BY name').all() }));
-  app.patch('/api/plugins/:name', async (ctx) => { const body = await ctx.req.json<{ enabled?: boolean; config?: unknown }>(); const changes = dependencies.db.prepare('UPDATE plugins SET enabled=COALESCE(?,enabled),config_json=COALESCE(?,config_json),updated_at=? WHERE name=?').run(body.enabled === undefined ? null : body.enabled ? 1 : 0, body.config === undefined ? null : JSON.stringify(body.config), Date.now(), ctx.req.param('name')).changes; await dependencies.plugins?.reconcile(); return ctx.json({ ok: true, data: { changes } }); });
+  app.patch('/api/plugins/:name', async (ctx) => {
+    const body = await ctx.req.json<{ enabled?: boolean; config?: unknown }>();
+    const changes = dependencies.db.prepare('UPDATE plugins SET enabled=COALESCE(?,enabled),config_json=COALESCE(?,config_json),updated_at=? WHERE name=?').run(body.enabled === undefined ? null : body.enabled ? 1 : 0, body.config === undefined ? null : JSON.stringify(body.config), Date.now(), ctx.req.param('name')).changes;
+    if (!changes) return ctx.json(apiError('not_found', 'Plugin 不存在', 404).body, 404);
+    await dependencies.plugins?.reconcile();
+    return ctx.json({ ok: true, data: { changes } });
+  });
   app.post('/api/plugins/:name/reload', async (ctx) => { await dependencies.plugins?.reconcile(); return ctx.json({ ok: true, data: { name: ctx.req.param('name') } }); });
   app.get('/api/mcp', (ctx) => {
     const persisted = dependencies.db.prepare('SELECT * FROM mcp_servers ORDER BY name').all() as Array<Record<string, unknown>>;
@@ -999,7 +1057,26 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
   });
   app.get('/api/tasks', (ctx) => ctx.json({ ok: true, data: dependencies.db.prepare('SELECT * FROM tasks ORDER BY updated_at DESC LIMIT 500').all() }));
   app.post('/api/maintenance/:action', (ctx) => { const action = ctx.req.param('action'); if (action === 'gc-files') return ctx.json(apiError('not_implemented', '孤儿文件清理尚不可用', 500).body, 500); const result = action === 'backup' ? dependencies.maintenance.backup() : action === 'vacuum' ? (dependencies.maintenance.vacuum(), 'ok') : action === 'cleanup-logs' ? dependencies.maintenance.cleanup() : action === 'rebuild-fts' ? (dependencies.maintenance.rebuildFts(), 'ok') : null; return result === null ? ctx.json(apiError('unknown_action', '未知维护操作', 404).body, 404) : ctx.json({ ok: true, data: result }); });
-  app.get('/api/events', (ctx) => { const stream = new ReadableStream({ start(controller) { const encoder = new TextEncoder(); controller.enqueue(encoder.encode(': connected\n\n')); const unsubscribe = dependencies.events.subscribe((event) => controller.enqueue(encoder.encode(`event: ${event.type}\ndata: ${JSON.stringify(event.data)}\n\n`))); const heartbeat = setInterval(() => controller.enqueue(encoder.encode(': ping\n\n')), 20_000); ctx.req.raw.signal.addEventListener('abort', () => { clearInterval(heartbeat); unsubscribe(); controller.close(); }, { once: true }); } }); return new Response(stream, { headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' } }); });
+  app.get('/api/events', (ctx) => {
+    let cleanup = (): void => undefined;
+    const stream = new ReadableStream({
+      start(controller) {
+        const encoder = new TextEncoder(); let closed = false;
+        let unsubscribe = (): void => undefined;
+        let unregister = (): void => undefined;
+        controller.enqueue(encoder.encode(': connected\n\n'));
+        // channel:true —— 这根管子对面坐着能点「批准」的人，审批据此判断有没有裁决通道（docs/24 · R-APPR-01）。
+        unsubscribe = dependencies.events.subscribe((event) => { if (!closed) controller.enqueue(encoder.encode(`event: ${event.type}\ndata: ${JSON.stringify(event.data)}\n\n`)); }, { channel: true });
+        const heartbeat = setInterval(() => { if (!closed) controller.enqueue(encoder.encode(': ping\n\n')); }, 20_000); heartbeat.unref?.();
+        const close = (): void => { if (closed) return; closed = true; clearInterval(heartbeat); unsubscribe(); unregister(); try { controller.close(); } catch { /* already closed */ } };
+        unregister = dependencies.eventStreams?.add({ close }) ?? (() => undefined);
+        cleanup = close;
+        ctx.req.raw.signal.addEventListener('abort', close, { once: true });
+      },
+      cancel() { cleanup(); },
+    });
+    return new Response(stream, { headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' } });
+  });
   const webRoot = fileURLToPath(new URL('../../webui/dist', import.meta.url));
   app.use('/*', serveStatic({ root: webRoot }));
   app.get('*', (ctx) => existsSync(resolve(webRoot, 'index.html')) ? ctx.html(readFileSync(resolve(webRoot, 'index.html'), 'utf8')) : ctx.text('LuoLiCore WebUI 尚未构建', 503));

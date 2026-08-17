@@ -186,12 +186,13 @@ export class SkillLoader {
     return { ok: true, name, body: skill.body, dir: skill.dir, files: skill.files, allowedTools, modelSuggestion: skill.model ?? null };
   }
 
-  resolveResource(uri: string): string {
+  resolveResource(uri: string, role: Role): string {
     const match = /^skill:\/\/([^/]+)\/(.+)$/.exec(uri);
     if (!match) throw new Error('invalid_skill_uri');
     const [, name, relativePath] = match;
     const skill = this.#skills.get(name!);
-    if (!skill || !skill.enabled) throw new Error('skill_unavailable');
+    if (!skill || !skill.enabled || skill.loadError) throw new Error('skill_unavailable');
+    if (roleRank(role) < roleRank(skill.minRole)) throw new Error('skill_forbidden');
     const path = resolve(skill.dir, relativePath!);
     const root = resolve(skill.dir);
     if (path !== root && !path.startsWith(`${root}${sep}`)) throw new Error('path_outside_skill');

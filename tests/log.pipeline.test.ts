@@ -13,6 +13,7 @@ describe('structured log pipeline', () => {
     expect(log.event({ level: 'debug', kind: 'debug.hidden', summary: 'hidden' })).toBe(0);
     log.event({ level: 'info', kind: 'system.test', summary: 'large', data: { value: 'x'.repeat(100) } });
     log.event({ level: 'info', kind: 'system.test', summary: 'rotate', data: { value: 'y'.repeat(100) } });
+    log.close();
     const day = new Date().toISOString().slice(0, 10); const entries = readdirSync(resolve(directory, day));
     expect(entries.some((name) => name.startsWith('system.jsonl.'))).toBe(true);
     const latest = readFileSync(resolve(directory, day, 'system.jsonl'), 'utf8'); expect(latest).toContain('fileRef');

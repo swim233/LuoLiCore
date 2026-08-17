@@ -34,7 +34,7 @@ export function readPersistedConfig(path: string, onRejected?: (key: string) => 
     if (!hasTable) return {};
     const rows = db.prepare('SELECT key,value_json AS valueJson FROM config_kv').all() as Array<{ key: string; valueJson: string }>;
     const root: Record<string, unknown> = {};
-    for (const row of rows) if (!assignDotted(root, row.key, JSON.parse(row.valueJson) as unknown)) onRejected?.(row.key);
+    for (const row of rows) if (!assignDotted(root, row.key, JSON.parse(row.valueJson, (key, value: unknown) => key === '__proto__' ? undefined : value) as unknown)) onRejected?.(row.key);
     return root;
   } finally {
     db.close();
