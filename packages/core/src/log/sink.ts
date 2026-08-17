@@ -183,7 +183,7 @@ export class LogSink {
     this.#writeLine(path, `${line}\n`, input.level === 'error' || input.kind === 'system.crash');
     if (this.#console === 'json') process.stdout.write(`${line}\n`);
     else if (this.#console === 'pretty') process.stdout.write(`${new Date().toISOString()} ${input.level.toUpperCase()} ${input.kind} ${input.summary}\n`);
-    const id = this.repository.insertLog(stored);
+    const id = this.repository.insertLog({ ...stored, ...(fileRef ? { fileRef } : {}) });
     this.#broadcast({ id, ts, level: input.level, kind: input.kind, traceId: input.traceId ?? null, summary: safe.summary });
     return id;
   }
