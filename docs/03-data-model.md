@@ -537,9 +537,12 @@ CREATE TABLE approvals (
   state        TEXT NOT NULL CHECK (state IN ('pending','approved','denied','expired')),
   tg_message_id INTEGER,
   requested_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
-  decided_by TEXT, decided_at INTEGER, decision_channel TEXT   -- telegram|webui|none
-  -- 🚧 当前没有可用的审批通道：命中规则的调用当场写成 state='denied', decided_by='system',
-  -- decision_channel='none'，不再产生 pending 行（[05 §6]；docs/20 · W-APPR-01）。表保留为审计视图。
+  decided_by TEXT, decided_at INTEGER, decision_channel TEXT   -- telegram|webui|system
+  -- 有裁决通道时才写 pending 行：判据是 `EventBus.channelCount > 0`，而 WebUI 的 SSE 订阅是目前
+  -- 唯一带 `{channel:true}` 标记的订阅者。命中规则的调用落成 pending 后等裁决 / TTL / 轮次取消
+  -- （docs/24 · R-APPR-01）。一个裁决通道都没有时不写 pending，当场 state='denied',
+  -- decided_by='system', decision_channel='system' —— 让模型立刻知道审批不可用，而不是干等满
+  -- approval.ttlMs（[05 §6]）。Telegram inline keyboard 尚未实现，发起人在等待期间收不到提示。
 );
 CREATE INDEX ix_approvals_state ON approvals(state, requested_at);
 
