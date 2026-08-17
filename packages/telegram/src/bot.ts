@@ -3,7 +3,7 @@ import { autoRetry } from '@grammyjs/auto-retry';
 import { apiThrottler } from '@grammyjs/transformer-throttler';
 import type { UserFromGetMe } from 'grammy/types';
 import type { Config, ConfigStore, ContextEngine, LogSink, MainAgentStreamResult, MemoryStore, QuotaGuard, QuotaReservation, TurnConcurrency, TurnRegistry } from '@luoli/core';
-import { perChatConfig, resolveEffectiveRole } from '@luoli/core';
+import { KeyedMutex, perChatConfig, resolveEffectiveRole } from '@luoli/core';
 import type { ArchivedMessage, ArchiveRepository, OperationsRepository, PrincipalRepository, Sqlite, TurnRepository } from '@luoli/db';
 import type { Role, RuntimeTurnContext } from '@luoli/shared';
 import { roleRank } from '@luoli/shared';
@@ -93,52 +93,70 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
   const coalescing = new Map<string, { supersede: () => void }>();
   /** 跨会话计数：连续失败说明的是「这个部署坏了」，不是「这个群坏了」（docs/10 §6）。 */
   let consecutiveFailures = 0;
+  /**
+   * 入口段（认领 update → 归档 → 挂媒体）按 chat 串行。
+   *
+   * update 现在是**并发**派发的（`UpdatePoller`），而归档顺序就是上下文顺序 ——
+   * `claimBackground` 与 `recent` 都按 `messages.id` 排。这一段里有真实的异步等待
+   * （`onMessage` 钩子、媒体下载），两条同 chat 的消息一起进来就可能在库里倒序，
+   * 表现是模型看到的对话顺序和用户打字的顺序不一样。
+   *
+   * 非 message 的 update 连 `next()` 一起锁在里面：编辑走的 `MAX(revision)+1` 是
+   * 读-改-写，同一条消息的两次编辑并发跑会算出同一个 revision。
+   *
+   * 锁只盖入口段，**轮次在锁外跑** —— 那才是要并行的部分（`concurrency.perKey`）。
+   */
+  const ingressOrder = new KeyedMutex();
   bot.use(async (ctx, next) => {
-    if (!dependencies.operations.claimUpdate(ctx.update.update_id)) return;
     const from = ctx.from;
     const chat = ctx.chat;
     const message = ctx.message;
-    if (!from || !chat || !message) { await next(); return; }
-    const pluginMessages = await dependencies.plugins?.hook('onMessage', ctx);
-    if (pluginMessages?.some((entry) => entry && typeof entry === 'object' && 'result' in entry && (entry as { result?: { drop?: boolean } }).result?.drop)) return;
-    const userId = String(from.id);
-    const chatId = String(chat.id);
-    const isPrivate = chat.type === 'private';
-    const userRole = dependencies.principals.roleOf('user', userId) ?? config.access.defaultUserRole;
-    const storedChatRole = dependencies.principals.roleOf('chat', chatId);
-    const effectiveRole = resolveEffectiveRole({ userRole, ...(storedChatRole ? { chatRole: storedChatRole } : {}), isPrivate, defaultChatRole: config.access.defaultChatRole });
-    dependencies.principals.upsertSeen({ id: `user:${userId}`, kind: 'user', tgId: userId, role: userRole, displayName: [from.first_name, from.last_name].filter(Boolean).join(' '), username: from.username ?? null, chatType: null });
-    dependencies.principals.upsertSeen({ id: `chat:${chatId}`, kind: 'chat', tgId: chatId, role: storedChatRole ?? (isPrivate ? userRole : config.access.defaultChatRole), displayName: ('title' in chat ? chat.title : from.first_name) ?? null, username: 'username' in chat ? chat.username ?? null : null, chatType: chat.type });
-    if (from.is_bot && !config.telegram.allowBots.includes(from.username ?? '')) return;
-    dependencies.log.event({ level: 'debug', kind: 'tg.update', summary: `Update ${ctx.update.update_id}`, chatId, userId, data: { updateId: ctx.update.update_id, type: 'message' } });
-    // 触发判定要看会话级覆盖（docs/08 §4）：唤醒词是 perChat 白名单里的键，只读全局快照的话
-    // WebUI/API 写进去的会话唤醒词能存住却永远匹配不上。key 用全局 scope 算，与 openTurn 保持一致。
-    const triggerConfig = perChatConfig(currentConfig(), contextKey({ chatId, messageThreadId: message.message_thread_id ?? null }, config.context.scope)).trigger;
-    // 判定整个交给 matchTrigger：裸 `/` 前缀一律当命令的话，白名单和 `trigger.command` 开关都被绕开，
-    // 私聊里一句「/home/app 这个目录满了」会石沉大海（docs/20 · W-TG-01）。
-    const triggerReason = matchTrigger(ctx, { ...triggerConfig, strictCommandSuffix: config.telegram.strictCommandSuffix }, bot.botInfo.id, bot.botInfo.username);
-    dependencies.log.event({ level: 'debug', kind: triggerReason ? 'trigger.matched' : 'trigger.skipped', summary: triggerReason ?? 'not triggered', chatId, userId, data: { reason: triggerReason } });
-    let archived: ArchivedMessage | null = null;
-    let quoted: ArchivedMessage | null = null;
-    if (effectiveRole !== 'blocked' || config.access.archiveBlocked) {
-      const scoped = dependencies.archive.scope(chatId, message.message_thread_id ?? null);
-      archived = scoped.append({ chatId, messageThreadId: message.message_thread_id ?? null, tgMessageId: message.message_id,
-        tgUpdateId: ctx.update.update_id, direction: 'in', fromKind: 'user', fromUserId: userId,
-        fromName: [from.first_name, from.last_name].filter(Boolean).join(' '), fromUsername: from.username ?? null,
-        kind: messageKind(message as unknown as Record<string, unknown>), text: message.text ?? message.caption ?? null,
-        // reply_to / media_group 的列建表时就有，但一直没人往里写 —— 「回复了谁」是这条消息语义的一部分，
-        // 丢了它，事后无论从库里还是从上下文里都看不出用户当时在指着哪一条说话。
-        replyToTgMessageId: message.reply_to_message?.message_id ?? null, mediaGroupId: message.media_group_id ?? null,
-        tgDate: message.date * 1000, raw: message, triggered: triggerReason !== null, triggerReason });
-      await attachMedia(media, scoped, message, archived);
-      if (triggerReason !== null && triggerReason !== 'command') quoted = await resolveQuotedMessage({ media, botId: bot.botInfo.id }, scoped, message, archived);
-    }
-    if (effectiveRole === 'blocked') {
-      dependencies.log.event({ level: 'info', kind: 'access.denied', summary: 'blocked principal', chatId, userId, data: { userRole, chatRole: storedChatRole } });
-      return;
-    }
-    if (!archived) return;
-    ingress.set(ctx.update.update_id, { archived, quoted, effectiveRole, userId, chatId, isPrivate, triggerReason });
+    const admitted = await ingressOrder.run(chat ? String(chat.id) : 'global', async (): Promise<TelegramIngress | null> => {
+      if (!dependencies.operations.claimUpdate(ctx.update.update_id)) return null;
+      if (!from || !chat || !message) { await next(); return null; }
+      const pluginMessages = await dependencies.plugins?.hook('onMessage', ctx);
+      if (pluginMessages?.some((entry) => entry && typeof entry === 'object' && 'result' in entry && (entry as { result?: { drop?: boolean } }).result?.drop)) return null;
+      const userId = String(from.id);
+      const chatId = String(chat.id);
+      const isPrivate = chat.type === 'private';
+      const userRole = dependencies.principals.roleOf('user', userId) ?? config.access.defaultUserRole;
+      const storedChatRole = dependencies.principals.roleOf('chat', chatId);
+      const effectiveRole = resolveEffectiveRole({ userRole, ...(storedChatRole ? { chatRole: storedChatRole } : {}), isPrivate, defaultChatRole: config.access.defaultChatRole });
+      dependencies.principals.upsertSeen({ id: `user:${userId}`, kind: 'user', tgId: userId, role: userRole, displayName: [from.first_name, from.last_name].filter(Boolean).join(' '), username: from.username ?? null, chatType: null });
+      dependencies.principals.upsertSeen({ id: `chat:${chatId}`, kind: 'chat', tgId: chatId, role: storedChatRole ?? (isPrivate ? userRole : config.access.defaultChatRole), displayName: ('title' in chat ? chat.title : from.first_name) ?? null, username: 'username' in chat ? chat.username ?? null : null, chatType: chat.type });
+      if (from.is_bot && !config.telegram.allowBots.includes(from.username ?? '')) return null;
+      dependencies.log.event({ level: 'debug', kind: 'tg.update', summary: `Update ${ctx.update.update_id}`, chatId, userId, data: { updateId: ctx.update.update_id, type: 'message' } });
+      // 触发判定要看会话级覆盖（docs/08 §4）：唤醒词是 perChat 白名单里的键，只读全局快照的话
+      // WebUI/API 写进去的会话唤醒词能存住却永远匹配不上。key 用全局 scope 算，与 openTurn 保持一致。
+      const triggerConfig = perChatConfig(currentConfig(), contextKey({ chatId, messageThreadId: message.message_thread_id ?? null }, config.context.scope)).trigger;
+      // 判定整个交给 matchTrigger：裸 `/` 前缀一律当命令的话，白名单和 `trigger.command` 开关都被绕开，
+      // 私聊里一句「/home/app 这个目录满了」会石沉大海（docs/20 · W-TG-01）。
+      const triggerReason = matchTrigger(ctx, { ...triggerConfig, strictCommandSuffix: config.telegram.strictCommandSuffix }, bot.botInfo.id, bot.botInfo.username);
+      dependencies.log.event({ level: 'debug', kind: triggerReason ? 'trigger.matched' : 'trigger.skipped', summary: triggerReason ?? 'not triggered', chatId, userId, data: { reason: triggerReason } });
+      let archived: ArchivedMessage | null = null;
+      let quoted: ArchivedMessage | null = null;
+      if (effectiveRole !== 'blocked' || config.access.archiveBlocked) {
+        const scoped = dependencies.archive.scope(chatId, message.message_thread_id ?? null);
+        archived = scoped.append({ chatId, messageThreadId: message.message_thread_id ?? null, tgMessageId: message.message_id,
+          tgUpdateId: ctx.update.update_id, direction: 'in', fromKind: 'user', fromUserId: userId,
+          fromName: [from.first_name, from.last_name].filter(Boolean).join(' '), fromUsername: from.username ?? null,
+          kind: messageKind(message as unknown as Record<string, unknown>), text: message.text ?? message.caption ?? null,
+          // reply_to / media_group 的列建表时就有，但一直没人往里写 —— 「回复了谁」是这条消息语义的一部分，
+          // 丢了它，事后无论从库里还是从上下文里都看不出用户当时在指着哪一条说话。
+          replyToTgMessageId: message.reply_to_message?.message_id ?? null, mediaGroupId: message.media_group_id ?? null,
+          tgDate: message.date * 1000, raw: message, triggered: triggerReason !== null, triggerReason });
+        await attachMedia(media, scoped, message, archived);
+        if (triggerReason !== null && triggerReason !== 'command') quoted = await resolveQuotedMessage({ media, botId: bot.botInfo.id }, scoped, message, archived);
+      }
+      if (effectiveRole === 'blocked') {
+        dependencies.log.event({ level: 'info', kind: 'access.denied', summary: 'blocked principal', chatId, userId, data: { userRole, chatRole: storedChatRole } });
+        return null;
+      }
+      if (!archived) return null;
+      return { archived, quoted, effectiveRole, userId, chatId, isPrivate, triggerReason };
+    });
+    if (!admitted) return;
+    ingress.set(ctx.update.update_id, admitted);
     try { await next(); } finally { ingress.delete(ctx.update.update_id); }
   });
   const requireRole = async (updateId: number, minimum: Role, reply: (text: string) => Promise<unknown>): Promise<TelegramIngress | null> => {
@@ -399,7 +417,16 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
     }
     if (!dependencies.quota.canStart({ chatId, userId, turnsPerUserPerHour: config.quota.rateLimit.turnsPerUserPerHour,
       turnsPerChatPerHour: config.quota.rateLimit.turnsPerChatPerHour, concurrentPerUser: config.quota.rateLimit.concurrentPerUser })) {
-      if (config.quota.onExceeded.reply) await ctx.reply(config.quota.onExceeded.message.replace('{spent}', '—').replace('{limit}', '—').replace('{resetAt}', '下个额度窗口'));
+      // 判成触发却没人开轮次的消息必须降级成背景（同 `cooldownMsPerUser` 那一路，docs/20 · W-TG-05）：
+      // `claimBackground` 只认领 `triggered=0`，留着 1 的话这条消息既没被回答、也进不了下一轮的上下文。
+      dependencies.archive.scope(chatId, message.message_thread_id ?? null).demoteToBackground(archived.id);
+      // `concurrentPerUser` 挡下来的不是额度：这个人手上还有轮次在跑，说完就能接着说。入口串行的
+      // 年代这一档碰不到，所以一直和额度共用同一句文案 —— 而「今天的额度用完了」会让人当天不再尝试。
+      // 这句不受 `onExceeded.reply` 管：那个开关是给「额度用光」用的，而这里沉默等于 bot 装没看见。
+      if (dependencies.quota.lastStartRejection === 'concurrent') {
+        dependencies.log.event({ level: 'info', kind: 'quota.check', summary: 'concurrent turn limit reached', chatId, userId, data: { concurrentPerUser: config.quota.rateLimit.concurrentPerUser } });
+        await ctx.reply(`我同时最多接 ${config.quota.rateLimit.concurrentPerUser} 件事，你手上的还没说完。等它收尾再说这条。`);
+      } else if (config.quota.onExceeded.reply) await ctx.reply(config.quota.onExceeded.message.replace('{spent}', '—').replace('{limit}', '—').replace('{resetAt}', '下个额度窗口'));
       return;
     }
     const scoped = dependencies.archive.scope(chatId, message.message_thread_id ?? null);
@@ -439,6 +466,10 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
     catch (error) {
       dependencies.registry.finish(pendingId);
       if (reservation) dependencies.quota.release(reservation);
+      // 同上：队列满/被取消也是「触发了但没轮次」，不降级这条消息就彻底丢了。
+      dependencies.archive.scope(chatId, message.message_thread_id ?? null).demoteToBackground(archived.id);
+      dependencies.log.event({ level: 'warn', kind: 'turn.end', summary: error instanceof Error ? error.message : 'turn queue rejected', chatId, userId, key,
+        data: { state: 'rejected', active: dependencies.concurrency.active, queued: dependencies.concurrency.queued } });
       await ctx.reply(error instanceof Error && error.message === 'turn_queue_cancelled' ? '⛔ 已取消' : '当前排队已满，请稍后');
       return;
     }
