@@ -330,6 +330,22 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
   （见 §4 的 `GET /api/logs`）。
 - `[导出 trace]` → JSON 下载，便于贴 issue。
 
+### 3.10.1 定时任务（在「任务与审批」页；docs/21 · `G-API-16`）
+
+第三张卡片，**跨会话**列出全部任务：任务名 + 正文 / 会话（带创建者）/ 模式 / 触发（cron 或绝对时间 +
+时区）/ 下一次 / 上一次（结果标签 + 时刻 + 累计次数 + 错误原文）/ 状态 / 操作。
+
+- `[新建定时任务]` → `UiModal`：会话下拉（只列已有上下文的会话）、任务名、模式、触发方式
+  （cron / 一次性）、正文。正文的标签跟着模式变（agent 是「任务描述（给模型看）」，notify 是
+  「要发出的正文」）。**一个会话都没有时按钮禁用并给一条说明** —— 空下拉配「填完才报错」
+  是最难受的那种表单。
+- `[立即触发]`：二次确认里**写清代价** —— agent 模式点一下就是一次真实模型调用（花钱），
+  而且真的会往那个会话发一条消息。不等结果，提示语指向该行的「上一次」。
+- `[停掉]`：二次确认说明停掉后不再触发、任务行按 `schedule.retentionDays` 保留、同名任务之后可重建。
+- `schedule.enabled` 关着时整卡一条横幅（任务留在库里但不触发）；没装配运行时时明说「读不到」，
+  不显示零条。
+- 定时轮次跑完会改「上一次」与「下一次」，所以这一组跟着 `turn.finished` 事件刷新。
+
 ### 3.11 用量（Usage）
 - **时间范围（7/30/90 天）+ 维度切换**（按天/会话/用户/模型/别名/agent）：走
   `GET /api/usage/report?groupBy&from&to`。聚合本来就实现好了（`UsageLedger.report` 六个维度一个不少），
@@ -503,6 +519,10 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
 | `GET /api/tools` `PATCH /api/tools/:name` | 工具启停。`GET` 在静态策略之外一并返回当前 `enabled`（来自 `tools.overrides`）。`PATCH` 写入 `tools.overrides.<name>.enabled`；被禁用的工具从工具目录消失，且 `ToolRegistry.execute` 会二次拦截并返回 `tool_disabled_by_operator`。未知工具名返回 404 |
 | `GET/PUT /api/sandbox` `POST /api/sandbox/probe` `POST /api/sandbox/image` | 沙箱配置、探测、拉取镜像（只 pull 不 build；镜像名取自已保存的配置） |
 | `POST /api/approvals/test` | 审批规则试跑：`{tool, input?, rules?}` → 逐条命中报告 + 最终风险档位。用的是运行时那份匹配器 |
+| `GET /api/schedules` | 定时任务面板的数据：`{available, enabled, timezone, settings:{maxPerChat, minIntervalMinutes, maxPayloadChars}, jobs:[{id, key, chatId, threadId, createdBy, chatLabel, creatorLabel, name, mode, state, cron\|at, timezone, payload, runCount, nextRun?, lastRunAt?, lastState?, lastError?, createdAt, updatedAt}]}`。**跨会话**（WebUI 只有 owner 一个身份，[14](./14-open-questions.md) A15），`nextRun` 来自进程内的 `Scheduler`。没装配运行时时 `available:false` + 空数组 —— 界面据此说「读不到」，而不是「一条都没有」 |
+| `POST /api/schedules` | 建一个定时任务。body `{key, name, mode, text, cron\|at}`。**落点从 `contexts` 按 `key` 反查**，不收客户端给的 `chatId`/`threadId`（同 [05 §8](./05-tools-and-permissions.md) 对工具的要求）；归属身份取 `access.bootstrapOwnerId`，没配则 `owner_unset` 400。校验与 `schedule_create` 工具**共用 `createScheduledJob`** —— 两边各写一遍的话 WebUI 迟早能建出工具建不出来的任务 |
+| `DELETE /api/schedules/:id` | 停用一条任务：置 `cancelled` 并从 `Scheduler` 摘掉。已经结束的行回 `{cancelled:false}` 而不是假成功 |
+| `POST /api/schedules/:id/trigger` | 立即触发一次。**不等它跑完**（`mode='agent'` 的一次触发是一整轮真实模型调用，同步等会把请求挂到 `concurrency.turnTimeoutMs`），先回 `{started:true}`，结果落在该行的 `lastState`/`lastError` 与日志里。非 `active` 的任务回 409；不影响 cron 的下一次 |
 | `GET/POST /api/skills` `GET/PUT/PATCH/DELETE /api/skills/:name` | Skill 列表、正文/frontmatter CRUD、启停 |
 | `GET/PATCH /api/plugins[/:name]` `POST /api/plugins/:name/reload` | Plugin |
 | `GET/POST /api/mcp` `PATCH/DELETE /api/mcp/:name` `POST /api/mcp/:name/reconnect` | MCP transport CRUD、热重连 |

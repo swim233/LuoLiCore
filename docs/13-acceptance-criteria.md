@@ -393,6 +393,13 @@
 | [ ] AC-WEB-011c (自动) | 对某一轮点 `[查看详情]` | 弹出该轮实际调用：`model.call` 的载荷里能看到 `request.body`（真正发给上游的请求体）；超过 `logs.bodyMaxBytes` 被挪进 `blobs/` 的载荷同样解引用出来，而不是显示 `{"fileRef":…}`；超长 JSON 截断并置 `truncated`，`[复制 JSON]` / `[下载完整 JSON]` 取到的是完整那一份；`logs.captureBodies` 关闭时页面明说「没有请求体」；turn 不存在返回 404 |
 | [x] AC-WEB-011d (自动) ★ | 对一轮点 `[查看详情]`，切到「工具输入输出」组 | 列出该轮的 `tool_call` / `tool_result`，**能看到工具调用的原始参数**；被裁剪降级过的行（`prune_applied=1`）也给出库里保留的原文并标注「模型现在看到的是占位符」；这一组读 `context_messages.parts_json` 而不是日志，所以对 `LogSink.span` 修好之前的历史轮次同样有效，也不受 `logs.retentionDays` / `captureBodies` 影响；别的会话里同 `turn_id` 的 parts 不会串进来 | 〔webui.console.test.ts〕
 | [x] AC-WEB-011e (自动) ★ | 日志页点一行（分别点有 trace 的、没有 trace 的、载荷被挪进 `blobs/` 的） | 三种都打开详情：元信息（trace/span/parent/chat/user/key/耗时）+ 格式化载荷；blob 解引用；无载荷的行如实说「没有载荷」而不是空白。`GET /api/logs/:id` 对不存在的 id 与非数字 id 都是 404，且 `/api/logs/blob`、`/api/logs/trace/:traceId` 仍然可达（`:id` 注册在它们之后）。列表响应里**不含 `data_json`**，只带 `data_bytes` | 〔webui.console.test.ts〕
+| [x] AC-WEB-030 (自动) ★ | 定时任务面板：两个会话各排一个任务后打开「任务与审批」页 | 跨会话都列出来，每行带会话名、创建者、模式、cron/绝对时间 + 时区、下一次触发（来自进程内 `Scheduler`）、上一次结果与累计次数 | 〔schedule.api.test.ts〕
+| [x] AC-WEB-031 (自动) ★ | 在面板里建任务时给非法 cron / 间隔过密 / 已过去的 `at` / 超过 `maxPerChat` / 重名 / 非法 mode / 空正文 / 不存在的会话 | 八种全部 400 且一条都不落库；判定与 `schedule_create` 工具**共用 `createScheduledJob`**，所以两边必然一致 | 〔schedule.api.test.ts〕
+| [x] AC-WEB-032 (自动) | 面板里建一次性任务，`general.timezone='Asia/Shanghai'`，填 `2030-06-01T15:00` | 存成 `07:00Z` —— 按配置时区解释，不是浏览器/宿主时区 | 〔schedule.api.test.ts〕
+| [x] AC-WEB-033 (自动) ★ | 点「停掉」，再点一次 | 第一次 `cancelled:true` 且**从调度器里也摘掉**；第二次如实回 `cancelled:false` 而不是假成功；不存在的 id 404 | 〔schedule.api.test.ts〕
+| [x] AC-WEB-034 (自动) ★ | 点「立即触发」 | 立刻回 `{started:true}`（不等一整轮跑完），落一条带 `actor:'webui'` / `manual:true` 的 `schedule.fired`；已结束的任务回 409 且不会被触发 | 〔schedule.api.test.ts〕
+| [x] AC-WEB-035 (自动) ★ | 部署没有装配定时任务运行时 | `GET /api/schedules` 回 `available:false` + 空数组，界面说「读不到」而不是「一条都没有」；三个写端点回 `not_implemented`。另断言 `main.ts` 真的把运行时传给了 `createServer`（依赖是可选的，漏传不会编译报错） | 〔schedule.api.test.ts〕
+| [x] AC-WEB-036 (自动) | 没配 `access.bootstrapOwnerId` 时在面板里建任务 | `owner_unset` 400 —— 任务需要一个归属身份，否则触发时无从重算权限 | 〔schedule.api.test.ts〕
 | [ ] AC-WEB-012 | 提示词编辑 | token 实时计数；保存生成 diff 版本；`[回滚]` 生效；`[预览组装]` 与实际一致 |
 | [ ] AC-WEB-012b | 提示词页文档列表 | 卡片网格而非四列表格：每张卡写明文档类型（人格/助理守则/公共记忆/私有记忆）、进哪个 block 及用途、`全局` 或所属会话/用户、字节 / token / 更新时间；选中高亮，未选中时右侧是提示卡片；PRIMEMORY 打开时有「查看会被记录」的醒目提示 |
 | [ ] AC-WEB-013 | Provider 页 | key 永不回显；`[测试连接]` 可用；`[从 Provider 拉取模型]` 列出上游全部模型、支持搜索与多选批量导入、已存在的行不可重复导入；模型定价可编辑；别名 fallback 链可拖拽排序 |
@@ -502,9 +509,9 @@
 | 记忆 | | 1 / 13 | | | |
 | 日志与成本 | | 4 / 25 | | | |
 | 扩展生态 | | 3 / 27 | | | |
-| WebUI | | 3 / 74 | | | |
+| WebUI | | 10 / 81 | | | |
 | 安全 | | 0 / 15 | | | |
 | 运维 | | 1 / 9 | | | |
-| **合计** | | **122 / 397** | | | |
+| **合计** | | **129 / 404** | | | |
 
 **整体通过条件**：全部 ★ 项通过 + 非 ★ 项通过率 ≥ 95% + 所有豁免项经需求方书面确认。

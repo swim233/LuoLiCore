@@ -105,6 +105,10 @@ WebUI 的写端点必须走 `runtimeConfigSchema.safeParse(mergeDotted(...))` �
 `Scheduler` 现在有 `remove` / `has` / `nextRun` 与时区参数。**用户任务按行上记的 timezone 触发，
 而五个 `*Cron` 维护任务仍跑在进程本地时区** —— 这是既有行为，`docs/11` 的 `schedule` 段写明了。
 
+WebUI 在「任务与审批」页有管理面（列 / 建 / 停 / 立即触发，`docs/09 §3.10.1`）。
+**建任务的校验只有一份**：`packages/core/src/schedule/create.ts` 的 `createScheduledJob`，
+工具与 `POST /api/schedules` 共用 —— 端点自己抄一遍的话，WebUI 迟早能建出工具建不出来的任务。
+
 ### 数据库（`packages/db/`）
 
 better-sqlite3 + 原生 SQL，无 ORM 查询层。WAL 模式。迁移是 `packages/db/migrations/NNNN_*.sql`，
@@ -114,7 +118,7 @@ better-sqlite3 + 原生 SQL，无 ORM 查询层。WAL 模式。迁移是 `packag
 ## 项目约定
 
 - **文档是权威来源。实现与文档不一致时，先改文档再改代码**（`docs/README.md` 开头即声明）。
-  `docs/13-acceptance-criteria.md` 是 397 条可逐条勾选的验收条目（改动条数时同步该文件末尾的签署表）。
+  `docs/13-acceptance-criteria.md` 是 404 条可逐条勾选的验收条目（改动条数时同步该文件末尾的签署表）。
   `docs/21-webui-coverage-gaps.md` 记录 WebUI 控制面还够不着哪些已实现的能力，动 WebUI 前先扫一眼。
 - 修不了的东西不要假装修好。已确立的先例：`PUT /api/quota` 返回 `not_implemented` 而不是假成功；
   `ask_parent` 在父 agent 仲裁未实现时返回 `ask_parent_not_implemented` 而不是拿默认值伪造答复。
