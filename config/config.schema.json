@@ -1087,7 +1087,48 @@
               "type": "array",
               "items": {
                 "type": "object",
-                "additionalProperties": {}
+                "properties": {
+                  "tool": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "minItems": 1
+                      }
+                    ]
+                  },
+                  "pattern": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "when": {
+                    "type": "string",
+                    "const": "target_exists"
+                  },
+                  "always": {
+                    "type": "boolean",
+                    "const": true
+                  },
+                  "risk": {
+                    "type": "string",
+                    "enum": [
+                      "low",
+                      "medium",
+                      "high"
+                    ]
+                  }
+                },
+                "required": [
+                  "tool"
+                ],
+                "additionalProperties": false
               },
               "default": [],
               "description": "审批规则数组：按工具名、正则、风险级别匹配，命中任一条就挂起等裁决。正则用 RE2 求值，写不出回溯炸弹。"

@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import YAML from 'yaml';
-import { assignDotted } from '@luoli/shared';
+import { assignDotted, sortOverrideKeys } from '@luoli/shared';
 import { configSchema, type Config } from './schema.js';
 
 function deepMerge(base: unknown, override: unknown): unknown {
@@ -24,6 +24,27 @@ function deepFreeze<T>(value: T): Readonly<T> {
     for (const nested of Object.values(value as Record<string, unknown>)) deepFreeze(nested);
   }
   return value;
+}
+
+/**
+ * 被环境变量**最终决定**的配置键。env 层在持久化覆盖层之后合并，所以这些键的 `config_kv` 行
+ * 一律无效：WebUI 写得进去、`config_revisions` 也记下了，下一次 `loadConfig` 照旧交回 env 的值。
+ * 表单据此把它们禁掉并点名该改哪个环境变量（`GET /api/config/schema` 的 `envPinned`），写入端直接 400
+ * —— 「保存成功但运行时没变」是 docs/20 · W-CFG-02 里最误导的一类，不能再新造一批。
+ * `appliedIn: 'bot'` 的两条由 `apps/bot/src/main.ts` 的 `envOverlay` 叠（口令要先过 argon2），
+ * 钉住配置的效果与这里的一样；`tests/config.persistence.test.ts` 逐条断言 env 真的压过覆盖层。
+ */
+export const ENV_PINNED_CONFIG_KEYS = [
+  { key: 'db.path', env: 'LUOLI_DATA_DIR', appliedIn: 'loadConfig' },
+  { key: 'access.bootstrapOwnerId', env: 'LUOLI_OWNER_ID', appliedIn: 'loadConfig' },
+  { key: 'sandbox.hostWorkspaceDir', env: 'LUOLI_HOST_WORKSPACE_DIR', appliedIn: 'loadConfig' },
+  { key: 'webui.host', env: 'LUOLI_WEBUI_HOST', appliedIn: 'bot' },
+  { key: 'webui.passwordHash', env: 'WEBUI_PASSWORD', appliedIn: 'bot' },
+] as const satisfies ReadonlyArray<{ key: string; env: string; appliedIn: 'loadConfig' | 'bot' }>;
+
+/** 当前进程里真的被钉住的那几条（环境变量为空/未设时不算）。 */
+export function envPinnedConfigKeys(environment: NodeJS.ProcessEnv = process.env): Array<{ key: string; env: string }> {
+  return ENV_PINNED_CONFIG_KEYS.filter((entry) => environment[entry.env]).map(({ key, env }) => ({ key, env }));
 }
 
 export interface ConfigLoadOptions {
@@ -65,7 +86,8 @@ export function perChatConfig(config: Readonly<Config>, key: string): Readonly<C
 
 export function dottedOverrides(rows: Array<{ key: string; valueJson: string }>, onRejected?: (key: string) => void): Record<string, unknown> {
   const root: Record<string, unknown> = {};
-  for (const row of rows) if (!assignDotted(root, row.key, JSON.parse(row.valueJson, (key, value: unknown) => key === '__proto__' ? undefined : value) as unknown)) onRejected?.(row.key);
+  // 与 `readPersistedConfig` 同一套顺序：先浅后深，更具体的路径赢（见 `sortOverrideKeys`）。
+  for (const row of sortOverrideKeys(rows)) if (!assignDotted(root, row.key, JSON.parse(row.valueJson, (key, value: unknown) => key === '__proto__' ? undefined : value) as unknown)) onRejected?.(row.key);
   return root;
 }
 
@@ -77,6 +99,7 @@ export async function loadConfig(options: ConfigLoadOptions = {}): Promise<Reado
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
   }
+  // 这三条与 `ENV_PINNED_CONFIG_KEYS` 里 appliedIn:'loadConfig' 的三条一一对应，改一处要改两处。
   const envLayer: Record<string, unknown> = {};
   if (process.env.LUOLI_DATA_DIR) envLayer.db = { path: resolve(process.env.LUOLI_DATA_DIR, 'luoli.db') };
   if (process.env.LUOLI_OWNER_ID) envLayer.access = { bootstrapOwnerId: process.env.LUOLI_OWNER_ID };

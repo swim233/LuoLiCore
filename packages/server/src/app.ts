@@ -7,9 +7,10 @@ import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { serveStatic } from '@hono/node-server/serve-static';
 import type { AgentManager, Config, ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, PluginManager, PromptDocuments, ProviderStore, Sandbox, SkillLoader, SkillWriteInput, SubAgentRuntimeEvent, TurnRegistry } from '@luoli/core';
-import { ALIAS_NAME_PATTERN, HOT_RELOADABLE_CONFIG_KEYS, KNOWN_UNIMPLEMENTED_CONFIG_KEYS, TOOL_POLICY, aliasSettingsSchema, checkWakeword, configSchema as runtimeConfigSchema, perChatConfig, probeProvider, quotaBucket, rejectedWakewords } from '@luoli/core';
+import { ALIAS_NAME_PATTERN, HOT_RELOADABLE_CONFIG_KEYS, KNOWN_UNIMPLEMENTED_CONFIG_KEYS, TOOL_POLICY, aliasSettingsSchema, checkWakeword, configSchema as runtimeConfigSchema, envPinnedConfigKeys, perChatConfig, probeProvider, quotaBucket, rejectedWakewords } from '@luoli/core';
 import type { CatalogIndex, ModelMetadata, ProviderProbe } from '@luoli/core';
 import type { ArchiveRepository, OperationsRepository, PrincipalRepository, Sqlite } from '@luoli/db';
+import { deleteAppKv, modelAliasKey, readAppKv } from '@luoli/db';
 import { assignDotted, type Role } from '@luoli/shared';
 import type { EventStreamRegistry } from './events.js';
 
@@ -106,10 +107,26 @@ function safeRef(root: string, reference: string): string {
   return absolute;
 }
 
+const SECRET_KEY_SEGMENT = /key|secret|token|password/i;
 function publicConfig(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(publicConfig);
   if (!value || typeof value !== 'object') return value;
-  return Object.fromEntries(Object.entries(value).map(([key, nested]) => [key, /key|secret|token|password/i.test(key) && typeof nested === 'string' && nested ? '«redacted»' : publicConfig(nested)]));
+  return Object.fromEntries(Object.entries(value).map(([key, nested]) => [key, SECRET_KEY_SEGMENT.test(key) && typeof nested === 'string' && nested ? '«redacted»' : publicConfig(nested)]));
+}
+/**
+ * 进 `config_revisions` 的那份值。`config_kv` 存真值，历史只存脱敏后的 ——
+ * docs/09 §3.13 承诺「密钥类字段在写入时就已存成 «redacted»」，而按点分键写入时
+ * `publicConfig` 拿不到键名（值是个裸字符串），于是密钥会明文躺在变更历史里。
+ */
+function revisionJson(key: string, value: unknown): string {
+  const leaf = key.split('.').at(-1) ?? key;
+  if (SECRET_KEY_SEGMENT.test(leaf) && typeof value === 'string' && value) return JSON.stringify('«redacted»');
+  return JSON.stringify(publicConfig(value));
+}
+/** 旧值同样脱敏：它是从 `config_kv` 里读出来的真值。 */
+function previousJson(key: string, previous: { value: string } | undefined): string | null {
+  if (!previous?.value) return null;
+  try { return revisionJson(key, JSON.parse(previous.value) as unknown); } catch { return null; }
 }
 function requestIp(ctx: { req: { header(name: string): string | undefined } }, config: Readonly<Config>): string {
   if (!config.webui.trustProxy) return ctx.req.header('x-real-ip')?.trim() || 'direct';
@@ -129,20 +146,61 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
   const app = new Hono<ServerEnv>();
   const currentConfig = (): Readonly<Config> => 'snapshot' in dependencies.config ? dependencies.config.snapshot() : dependencies.config;
   const validRoles: Record<Role, true> = { owner: true, trusted: true, limited: true, blocked: true };
+  /**
+   * 配置写入的唯一出口：落 `config_kv` + `config_revisions`，并**删掉被这次写入吞掉的后代行**。
+   * 覆盖层按点分深度应用（`sortOverrideKeys`：更具体的路径赢），所以写 `tools.overrides` 整块时若
+   * 库里还留着此前逐项写下的 `tools.overrides.<name>`，那一项会把整块的对应位置局部否掉 ——
+   * 界面上表现为「JSON 里明明写着开着，刷新回来还是关的」。祖先键代表整棵子树，后代行因此作废；
+   * 作废也要进变更历史，否则历史会瞒下「你那条逐项覆盖是谁弄掉的」。
+   * 顺带把六个写入点的四条重复语句收成一处：`PUT /api/sandbox` 此前只写 `config_kv` 不写
+   * `config_revisions`，沙箱 mode / bypassRoles 这种安全相关改动压根不进「变更历史」。
+   */
+  const writeConfigRows = (entries: Array<[string, unknown]>, actor: string): string[] => {
+    const now = Date.now();
+    const keys = entries.map(([key]) => key);
+    const stale = (dependencies.db.prepare('SELECT key FROM config_kv').pluck().all() as string[])
+      .filter((row) => keys.some((key) => row.startsWith(`${key}.`)));
+    const read = dependencies.db.prepare('SELECT value_json AS value FROM config_kv WHERE key=?');
+    const write = dependencies.db.prepare(`INSERT INTO config_kv(key,value_json,updated_at,updated_by) VALUES (?,?,?,?)
+      ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at,updated_by=excluded.updated_by`);
+    const drop = dependencies.db.prepare('DELETE FROM config_kv WHERE key=?');
+    const revision = dependencies.db.prepare('INSERT INTO config_revisions(id,ts,actor,key,old_json,new_json) VALUES (?,?,?,?,?,?)');
+    dependencies.db.transaction(() => {
+      for (const key of stale) {
+        const previous = read.get(key) as { value: string } | undefined;
+        drop.run(key);
+        revision.run(randomBytes(16).toString('hex'), now, actor, key, previousJson(key, previous), null);
+      }
+      for (const [key, value] of entries) {
+        const previous = read.get(key) as { value: string } | undefined;
+        write.run(key, JSON.stringify(value), now, actor);
+        revision.run(randomBytes(16).toString('hex'), now, actor, key, previousJson(key, previous), revisionJson(key, value));
+      }
+    })();
+    return stale;
+  };
+  /**
+   * 被环境变量钉住的键一律拒收，而不是写库之后让 `loadConfig` 悄悄交回 env 的值。
+   * 祖先写入（`webui` 整块）同样命中：它对那个叶子照样不会生效。
+   */
+  const envConflicts = (keys: string[]): Array<{ key: string; env: string }> => envPinnedConfigKeys()
+    .filter((pinned) => keys.some((key) => key === pinned.key || pinned.key.startsWith(`${key}.`) || key.startsWith(`${pinned.key}.`)));
+  const envPinnedError = (conflicts: Array<{ key: string; env: string }>) => apiError('config_pinned_by_env',
+    `${conflicts.map((entry) => `${entry.key} 由环境变量 ${entry.env} 决定`).join('；')} —— 改这里不会生效，请改环境变量后重启`);
+  /**
+   * `«redacted»` 是 `GET /api/config` 的脱敏占位符，不是任何配置项的合法值。原样发回来只可能是
+   * 界面把读出来的脱敏值当真值又提交了一遍（`mcp.servers` 那种整块 JSON 里就嵌着它）——
+   * 收下就等于把真密钥替换成这五个字，且 `config_kv` 里那行会一直赢。
+   */
+  const redactedKeys = (body: Record<string, unknown>): string[] => Object.entries(body)
+    .filter(([, value]) => JSON.stringify(value ?? null).includes('«redacted»')).map(([key]) => key);
   const persistMcpServers = (servers: unknown[]): { ok: true; servers: Readonly<Config['mcp']['servers']> } | { ok: false; details: unknown } => {
     const merged = mergeDotted(currentConfig(), { 'mcp.servers': servers });
     if (!merged.ok) return { ok: false, details: [{ path: merged.key, message: '非法配置键' }] };
     const parsed = runtimeConfigSchema.safeParse(merged.value);
     if (!parsed.success) return { ok: false, details: parsed.error.issues.map((issue) => ({ path: issue.path.join('.'), message: issue.message })) };
     const key = 'mcp.servers';
-    const now = Date.now();
-    const previous = dependencies.db.prepare('SELECT value_json AS value FROM config_kv WHERE key=?').get(key) as { value: string } | undefined;
-    dependencies.db.transaction(() => {
-      dependencies.db.prepare("INSERT INTO config_kv(key,value_json,updated_at,updated_by) VALUES (?,?,?,'webui') ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at,updated_by=excluded.updated_by")
-        .run(key, JSON.stringify(parsed.data.mcp.servers), now);
-      dependencies.db.prepare('INSERT INTO config_revisions(id,ts,actor,key,old_json,new_json) VALUES (?,?,?,?,?,?)')
-        .run(randomBytes(16).toString('hex'), now, 'webui', key, previous?.value ?? null, JSON.stringify(parsed.data.mcp.servers));
-    })();
+    writeConfigRows([[key, parsed.data.mcp.servers]], 'webui');
     if ('replace' in dependencies.config) dependencies.config.replace(parsed.data, [key]);
     dependencies.events.emit('config.changed', { keys: [key] });
     return { ok: true, servers: parsed.data.mcp.servers };
@@ -256,6 +314,10 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
   });
   app.post('/api/auth/password', async (ctx) => {
     const body = await ctx.req.json<{ current?: string; next?: string }>().catch((): { current?: string; next?: string } => ({}));
+    // WEBUI_PASSWORD 在环境里时，改口令写得进 config_kv、当前进程也认新口令，但重启后 envOverlay
+    // 会把 env 那份哈希再盖回来 —— 那是「改了口令以为安全了」的最坏形态，宁可当场拒绝（摘除比伪造安全）。
+    const pinned = envConflicts(['webui.passwordHash']);
+    if (pinned.length) return ctx.json(apiError('password_pinned_by_env', '口令由环境变量 WEBUI_PASSWORD 固定：在这里改，重启后会被环境变量盖回去。请改环境变量（或清掉它后再用这里）。', 409).body, 409);
     if (!body.current || body.current.length > 1024 || !body.next || body.next.length < 12 || body.next.length > 1024) return ctx.json(apiError('invalid_password', '新口令必须为 12–1024 个字符').body, 400);
     let valid = false;
     try { const hash = activePasswordHash(); valid = Boolean(hash && await argon2.verify(hash, body.current)); } catch { valid = false; }
@@ -298,7 +360,8 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
   // ——「保存成功」但运行时没变，是 docs/20 · W-CFG-02 里最误导的一类。
   // 三件套一律放进 `data`：统一信封的客户端只解 `data`，挂在信封顶层的兄弟键会被静默丢掉 ——
   // 自动生成的表单正是靠这两份前缀表判断「热更新 / 需重启」与「未接线」的。
-  app.get('/api/config/schema', (ctx) => ctx.json({ ok: true, data: { schema: dependencies.configSchema, hotReloadable: HOT_RELOADABLE_CONFIG_KEYS, unimplemented: KNOWN_UNIMPLEMENTED_CONFIG_KEYS } }));
+  // `envPinned` 是第三份前缀表：这些键的 config_kv 行会被 env 层压掉，表单据此禁控件并点名环境变量。
+  app.get('/api/config/schema', (ctx) => ctx.json({ ok: true, data: { schema: dependencies.configSchema, hotReloadable: HOT_RELOADABLE_CONFIG_KEYS, unimplemented: KNOWN_UNIMPLEMENTED_CONFIG_KEYS, envPinned: envPinnedConfigKeys() } }));
   // 不安全或过短的唤醒词在匹配时被静默跳过（trigger.ts）。收下这种模式等于让运维以为配好了，
   // 实际表现是「bot 不理我」，所以写入端直接挡回去；只在这次写操作真的动了唤醒词时校验。
   app.post('/api/config/wakewords/check', async (ctx) => {
@@ -309,6 +372,10 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
   });
   app.put('/api/config', async (ctx) => {
     const body = await ctx.req.json<Record<string, unknown>>();
+    const pinned = envConflicts(Object.keys(body));
+    if (pinned.length) return ctx.json(envPinnedError(pinned).body, 400);
+    const redacted = redactedKeys(body);
+    if (redacted.length) return ctx.json(apiError('redacted_placeholder', `${redacted.join('、')} 的值里含脱敏占位符 «redacted» —— 那不是真值，写进去会把真密钥覆盖掉`).body, 400);
     const merged = mergeDotted(currentConfig(), body);
     if (!merged.ok) return ctx.json(invalidKey(merged).body, 400);
     const parsed = runtimeConfigSchema.safeParse(merged.value);
@@ -317,22 +384,28 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
       const rejected = rejectedWakewords(parsed.data.trigger.wakewords, parsed.data.trigger.wakewordMinLength);
       if (rejected.length) return ctx.json(apiError('invalid_wakeword', `唤醒词不会生效：${rejected.join('；')}`).body, 400);
     }
-    const now = Date.now();
-    const write = dependencies.db.prepare(`INSERT INTO config_kv(key,value_json,updated_at,updated_by) VALUES (?,?,?,'webui') ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at,updated_by=excluded.updated_by`);
-    const revision = dependencies.db.prepare('INSERT INTO config_revisions(id,ts,actor,key,old_json,new_json) VALUES (?,?,?,?,?,?)');
-    dependencies.db.transaction(() => {
-      for (const [key, value] of Object.entries(body)) {
-        const previous = dependencies.db.prepare('SELECT value_json AS value FROM config_kv WHERE key=?').get(key) as { value: string } | undefined;
-        write.run(key, JSON.stringify(value), now);
-        revision.run(randomBytes(16).toString('hex'), now, 'webui', key, previous?.value ?? null, JSON.stringify(value));
-      }
-    })();
+    const subsumed = writeConfigRows(Object.entries(body), 'webui');
     dependencies.events.emit('config.changed', { keys: Object.keys(body) });
-    return ctx.json({ ok: true, data: { keys: Object.keys(body) } });
+    // `subsumed` 交回前端点名：整块写入作废掉的逐项覆盖必须说出来，否则运维只会看到「保存成功」，
+    // 而工具页上某个开关的状态被这次保存悄悄改掉了。
+    return ctx.json({ ok: true, data: { keys: Object.keys(body), subsumed } });
   });
-  app.get('/api/chats/:key', (ctx) => ctx.json({ ok: true, data: dependencies.context.stats(ctx.req.param('key')) }));
+  /**
+   * `modelAlias` 是 Telegram `/model` 写进 `app_kv` 的那份会话别名，它**压过** WebUI 能改的
+   * `perChat.<key>.agent.main.modelAlias` 与全局 `agent.main.modelAlias`（`runtime.ts` 先读它）。
+   * 界面上此前只有一行小字提到这件事，运维改了全局别名却不生效时无从下手 —— 现在能看见也能清掉。
+   */
+  app.get('/api/chats/:key', (ctx) => {
+    const key = ctx.req.param('key');
+    return ctx.json({ ok: true, data: { ...dependencies.context.stats(key), modelAlias: readAppKv<string>(dependencies.db, modelAliasKey(key)) ?? null } });
+  });
+  app.delete('/api/chats/:key/model-alias', (ctx) => {
+    const key = ctx.req.param('key');
+    const changes = deleteAppKv(dependencies.db, modelAliasKey(key));
+    return ctx.json({ ok: true, data: { cleared: changes > 0 } });
+  });
   app.patch('/api/chats/:key', async (ctx) => {
-    const body = await ctx.req.json<Record<string, unknown>>(); const key = `perChat.${ctx.req.param('key')}`; const now = Date.now();
+    const body = await ctx.req.json<Record<string, unknown>>(); const key = `perChat.${ctx.req.param('key')}`;
     // 必须走 schema：perChat 覆盖白名单是安全边界（[11 §2.1]），绕过它既能给单个群关掉权限检查，
     // 又会让下次启动时的配置校验失败（docs/19-review-round4.md · R-CFG-02）。
     const merged = mergeDotted(currentConfig(), { [key]: body });
@@ -344,8 +417,7 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
       const rejected = rejectedWakewords(merged.wakewords, merged.wakewordMinLength);
       if (rejected.length) return ctx.json(apiError('invalid_wakeword', `唤醒词不会生效：${rejected.join('；')}`).body, 400);
     }
-    dependencies.db.prepare("INSERT INTO config_kv(key,value_json,updated_at,updated_by) VALUES (?,?,?,'webui') ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at,updated_by='webui'").run(key, JSON.stringify(body), now);
-    dependencies.db.prepare('INSERT INTO config_revisions(id,ts,actor,key,old_json,new_json) VALUES (?,?,?,?,?,?)').run(randomBytes(16).toString('hex'), now, 'webui', key, null, JSON.stringify(body));
+    writeConfigRows([[key, body]], 'webui');
     dependencies.events.emit('config.changed', { keys: [key] }); return ctx.json({ ok: true, data: body });
   });
   app.get('/api/config/revisions', (ctx) => ctx.json({ ok: true, data: dependencies.db.prepare('SELECT * FROM config_revisions ORDER BY ts DESC LIMIT 500').all() }));
@@ -782,13 +854,12 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     const body = await ctx.req.json<{ enabled?: boolean }>();
     if (typeof body.enabled !== 'boolean') return ctx.json(apiError('invalid_tool_override', 'enabled 必须是布尔值').body, 400);
     if (!Object.hasOwn(TOOL_POLICY, name)) return ctx.json(apiError('not_found', '工具不存在', 404).body, 404);
-    const key = `tools.overrides.${name}`; const now = Date.now();
+    const key = `tools.overrides.${name}`;
     const merged = mergeDotted(currentConfig(), { [key]: { enabled: body.enabled } });
     if (!merged.ok) return ctx.json(invalidKey(merged).body, 400);
     const parsed = runtimeConfigSchema.safeParse(merged.value);
     if (!parsed.success) return ctx.json({ ok: false, error: { code: 'invalid_config', message: '工具开关校验失败', details: parsed.error.issues.map((issue) => ({ path: issue.path.join('.'), message: issue.message })) } }, 400);
-    dependencies.db.prepare("INSERT INTO config_kv(key,value_json,updated_at,updated_by) VALUES (?,?,?,'webui') ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at,updated_by=excluded.updated_by").run(key, JSON.stringify({ enabled: body.enabled }), now);
-    dependencies.db.prepare('INSERT INTO config_revisions(id,ts,actor,key,old_json,new_json) VALUES (?,?,?,?,?,?)').run(randomBytes(16).toString('hex'), now, 'webui', key, null, JSON.stringify({ enabled: body.enabled }));
+    writeConfigRows([[key, { enabled: body.enabled }]], 'webui');
     dependencies.events.emit('config.changed', { keys: [key] });
     return ctx.json({ ok: true, data: { name, enabled: body.enabled } });
   });
@@ -796,13 +867,15 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
   app.put('/api/sandbox', async (ctx) => {
     const body = await ctx.req.json<Record<string, unknown>>();
     const dotted = Object.fromEntries(Object.entries(body).map(([key, value]) => [`sandbox.${key}`, value]));
+    const pinned = envConflicts(Object.keys(dotted));
+    if (pinned.length) return ctx.json(envPinnedError(pinned).body, 400);
+    const redacted = redactedKeys(dotted);
+    if (redacted.length) return ctx.json(apiError('redacted_placeholder', `${redacted.join('、')} 的值里含脱敏占位符 «redacted»`).body, 400);
     const merged = mergeDotted(currentConfig(), dotted);
     if (!merged.ok) return ctx.json(invalidKey(merged).body, 400);
     const parsed = runtimeConfigSchema.safeParse(merged.value);
     if (!parsed.success) return ctx.json({ ok: false, error: { code: 'invalid_config', message: '沙箱配置校验失败', details: parsed.error.issues } }, 400);
-    const now = Date.now();
-    const write = dependencies.db.prepare("INSERT INTO config_kv(key,value_json,updated_at,updated_by) VALUES (?,?,?,'webui') ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at,updated_by=excluded.updated_by");
-    dependencies.db.transaction(() => { for (const [key, value] of Object.entries(dotted)) write.run(key, JSON.stringify(value), now); })();
+    writeConfigRows(Object.entries(dotted), 'webui');
     dependencies.events.emit('config.changed', { keys: Object.keys(dotted) });
     return ctx.json({ ok: true, data: body });
   });
@@ -909,6 +982,7 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     const existing = [...currentConfig().mcp.servers];
     if (typeof body.name !== 'string') return ctx.json(apiError('invalid_mcp_name', 'name 必填').body, 400);
     if (existing.some((server) => server.name === body.name)) return ctx.json(apiError('conflict', '同名 MCP server 已存在').body, 400);
+    if (redactedKeys({ server: body }).length) return ctx.json(apiError('redacted_placeholder', 'env / headers 里含脱敏占位符 «redacted»，那不是真值').body, 400);
     const saved = persistMcpServers([...existing, body]);
     if (!saved.ok) return ctx.json({ ok: false, error: { code: 'invalid_mcp', message: 'MCP 配置校验失败', details: saved.details } }, 400);
     await dependencies.mcp?.reconcile();
@@ -920,6 +994,7 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     const existing = [...currentConfig().mcp.servers];
     const index = existing.findIndex((server) => server.name === name);
     if (index < 0) return ctx.json(apiError('not_found', 'MCP server 不存在', 404).body, 404);
+    if (redactedKeys({ server: body }).length) return ctx.json(apiError('redacted_placeholder', 'env / headers 里含脱敏占位符 «redacted»，那不是真值').body, 400);
     existing[index] = { ...existing[index]!, ...body, name } as Config['mcp']['servers'][number];
     const saved = persistMcpServers(existing);
     if (!saved.ok) return ctx.json({ ok: false, error: { code: 'invalid_mcp', message: 'MCP 配置校验失败', details: saved.details } }, 400);
@@ -1030,16 +1105,7 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     if (!merged.ok) return ctx.json(invalidKey(merged).body, 400);
     const parsed = runtimeConfigSchema.safeParse(merged.value);
     if (!parsed.success) return ctx.json({ ok: false, error: { code: 'invalid_config', message: '配额配置校验失败', details: parsed.error.issues.map((issue) => ({ path: issue.path.join('.'), message: issue.message })) } }, 400);
-    const now = Date.now();
-    const write = dependencies.db.prepare("INSERT INTO config_kv(key,value_json,updated_at,updated_by) VALUES (?,?,?,'webui') ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at,updated_by=excluded.updated_by");
-    const revision = dependencies.db.prepare('INSERT INTO config_revisions(id,ts,actor,key,old_json,new_json) VALUES (?,?,?,?,?,?)');
-    dependencies.db.transaction(() => {
-      for (const [key, value] of Object.entries(dotted)) {
-        const previous = dependencies.db.prepare('SELECT value_json AS value FROM config_kv WHERE key=?').get(key) as { value: string } | undefined;
-        write.run(key, JSON.stringify(value), now);
-        revision.run(randomBytes(16).toString('hex'), now, 'webui', key, previous?.value ?? null, JSON.stringify(value));
-      }
-    })();
+    writeConfigRows(Object.entries(dotted), 'webui');
     dependencies.events.emit('config.changed', { keys: Object.keys(dotted) });
     return ctx.json({ ok: true, data: { keys: Object.keys(dotted) } });
   });

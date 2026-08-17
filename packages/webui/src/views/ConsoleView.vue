@@ -362,6 +362,8 @@ function messageTime(message: Record<string, unknown>): string {
   const ts = Number(message.sourceTs ?? message.createdAt ?? 0);
   return ts ? new Date(ts).toLocaleString([], { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—';
 }
+/** Telegram `/model` 写进 app_kv 的会话别名：它压过下面覆盖面板里的 `agent.main.modelAlias`。 */
+const chatModelAlias = ref<string | null>(null);
 async function inspectChat(chat: Chat): Promise<void> {
   selectedChat.value = chat;
   // 覆盖面板要按 schema 生成控件，换会话时先把 schema 备好（只拉一次）。
@@ -371,7 +373,17 @@ async function inspectChat(chat: Chat): Promise<void> {
   contextHead.value = (detail.commit as Record<string, unknown> | null) ?? null;
   commits.value = (detail.commits as Array<Record<string, unknown>> | undefined) ?? [];
   contextMessages.value = (detail.messages as Array<Record<string, unknown>> | undefined) ?? [];
+  chatModelAlias.value = typeof detail.modelAlias === 'string' ? detail.modelAlias : null;
   inspectedSnapshot.value = null;
+}
+async function clearChatModelAlias(): Promise<void> {
+  const chat = selectedChat.value;
+  if (!chat) return;
+  try {
+    await api(`/api/chats/${encodeURIComponent(chat.key)}/model-alias`, { method: 'DELETE' });
+    chatModelAlias.value = null;
+    pushToast({ severity: 'success', summary: '已清除会话模型别名', detail: '这个会话回到覆盖层 / 全局的 agent.main.modelAlias，下一轮生效' });
+  } catch (error) { toastError('清除会话模型别名失败', error); }
 }
 async function inspectTrace(traceId: string | null): Promise<void> { if (!traceId) return; traceDetail.value = await api<LogRow[]>(`/api/logs/trace/${encodeURIComponent(traceId)}`); }
 // 提示词文档以前是一张 id/scope/bytes/updated_at 的四列表格：光看 `character:global` 这种 id
@@ -1253,7 +1265,7 @@ function scheduleRefresh(groups: readonly RefreshGroup[]): void {
 // ── 全量配置表单：由 config.schema.json 自动生成（docs/09 §3.13、docs/21 §1.1）──────────
 // 153 个已接线叶子里此前只有 15 个能在界面上改。手写 100 多个控件必然与 schema 漂移，
 // 所以这里只取 `GET /api/config/schema` 的三件套喂给 SchemaForm，控件形态全从 schema 推。
-interface ConfigSchemaPayload { schema: Record<string, unknown>; hotReloadable: string[]; unimplemented: string[] }
+interface ConfigSchemaPayload { schema: Record<string, unknown>; hotReloadable: string[]; unimplemented: string[]; envPinned: Array<{ key: string; env: string }> }
 const configSchema = ref<ConfigSchemaPayload | null>(null);
 const schemaSaving = ref(false);
 const schemaForm = ref<{ commit(paths: string[]): void } | null>(null);
@@ -1268,7 +1280,7 @@ async function loadConfigSchema(): Promise<void> {
 const PER_CHAT_ALLOWLIST = ['trigger', 'output', 'context.scope', 'context.limit', 'context.background', 'agent.main', 'memory.pubWriteMinRole'] as const;
 const PER_CHAT_NOTES: Record<string, string> = {
   'context.scope': '⚠️ 改成 thread 之后，这个会话的后续消息会落到 thread:<chat>:<topic> 这个新 key 上 —— 而覆盖是按 key 存的，等于这条覆盖把自己作废了',
-  'agent.main.modelAlias': '只换这个会话的主模型；Telegram 侧的 /model 写的是另一份（app_kv 的会话别名），两者都在时以 /model 为准',
+  'agent.main.modelAlias': '只换这个会话的主模型；Telegram 侧的 /model 写的是另一份（app_kv 的会话别名），两者都在时以 /model 为准 —— 上面那条黄色提示就是它，可以直接清掉',
 };
 const chatOverrides = computed<Record<string, unknown>>(() => {
   const key = selectedChat.value?.key;
@@ -1346,16 +1358,49 @@ async function saveSchemaConfig(changes: Record<string, unknown>): Promise<void>
   const cold = keys.filter((key) => !(configSchema.value?.hotReloadable ?? []).some((prefix) => key === prefix || key.startsWith(`${prefix}.`)));
   schemaSaving.value = true;
   try {
-    await api('/api/config', { method: 'PUT', body: JSON.stringify(changes) });
+    const result = await api<{ keys: string[]; subsumed: string[] }>('/api/config', { method: 'PUT', body: JSON.stringify(changes) });
     // 落库是同步的，但 bot 进程要等 `config.changed` 才 loadConfig()：下面那次 GET 可能还是旧值，
     // 不把表单基线推上去的话，保存完按钮还挂着「保存 N 项改动」。
     schemaForm.value?.commit(keys);
     // 「保存成功但运行时没变」是最误导的一类反馈（docs/20 · W-CFG-02）：需重启的键要说出来。
     pushToast({ severity: cold.length ? 'warn' : 'success', summary: `已保存 ${keys.length} 项配置`,
       detail: cold.length ? `其中 ${cold.length} 项要重启进程才生效：${cold.slice(0, 4).join('、')}${cold.length > 4 ? ' 等' : ''}` : '全部是热更新项，已即时生效', life: cold.length ? 9000 : 5000 });
+    // 整块写入会作废同一子树下更细的那些覆盖行（例如工具页逐个点出来的 tools.overrides.<name>）。
+    // 不说出来的话，运维只会看到「保存成功」，而某个工具的开关被这次保存顺手改掉了。
+    const subsumed = result?.subsumed ?? [];
+    if (subsumed.length) {
+      pushToast({ severity: 'warn', summary: `顺带作废了 ${subsumed.length} 条更细的覆盖`,
+        detail: `${subsumed.slice(0, 4).join('、')}${subsumed.length > 4 ? ' 等' : ''} —— 它们已被这次的整块写入取代，请确认工具页上的开关状态`, life: 12000 });
+    }
     await REFRESH_LOADERS.config();
   } catch (error) { toastError('保存配置失败', error); }
   finally { schemaSaving.value = false; }
+}
+
+// ── 修改登录口令（docs/21 · G-API-13）───────────────────────────────────────────────
+// 端点一直有，界面上没有入口：泄露口令后的应急处置只能打 API 或线下 `pnpm webui:passwd` + 重启，
+// 而那正是 docs/22 · V-AUTH-02 要消灭的形态。WEBUI_PASSWORD 在环境里时服务端会 409 ——
+// 那种情况下改这里重启就回退了，所以直接把表单换成一句说明。
+const passwordForm = ref({ current: '', next: '', confirm: '' });
+const passwordSaving = ref(false);
+const passwordPinnedEnv = computed(() => configSchema.value?.envPinned.find((entry) => entry.key === 'webui.passwordHash')?.env ?? null);
+const passwordProblem = computed(() => {
+  const form = passwordForm.value;
+  if (!form.current) return '要先验证当前口令';
+  if (form.next.length < 12) return '新口令至少 12 个字符';
+  if (form.next !== form.confirm) return '两次输入的新口令不一致';
+  if (form.next === form.current) return '新口令和当前口令一样';
+  return '';
+});
+async function savePassword(): Promise<void> {
+  if (passwordProblem.value) return;
+  passwordSaving.value = true;
+  try {
+    await api('/api/auth/password', { method: 'POST', body: JSON.stringify({ current: passwordForm.value.current, next: passwordForm.value.next }) });
+    passwordForm.value = { current: '', next: '', confirm: '' };
+    pushToast({ severity: 'success', summary: '登录口令已更新', detail: '其余会话已全部吊销（当前这个还在）；新口令即时生效，不用重启', life: 9000 });
+  } catch (error) { toastError('修改口令失败', error); }
+  finally { passwordSaving.value = false; }
 }
 
 // ── 配置变更历史：config_revisions 记了每一次写入的前后值，但界面上一直没有入口 ──────────
@@ -1369,8 +1414,20 @@ async function openConfigRevisions(): Promise<void> {
   catch (error) { toastError('加载配置变更历史失败', error); }
   finally { revisionsLoading.value = false; }
 }
-/** 值可能很长（agent.agents 是整张数组），列表里只给一行；密钥类的键在写入时就已经存成 «redacted»。 */
-const revisionValue = (raw: string | null): string => (raw === null ? '（此前没有覆盖）' : raw.length > 160 ? `${raw.slice(0, 160)}…` : raw);
+/**
+ * 值可能很长（agent.agents 是整张数组），列表里只给一行；密钥类的键在写入时就已经存成 «redacted»。
+ * 两侧的 null 意思不同：旧值为空 = 此前没有覆盖，新值为空 = 这条覆盖行被删掉了
+ * （写更粗的祖先键时，被它取代的后代行会一并作废）。
+ */
+const revisionValue = (raw: string | null, side: 'old' | 'new'): string => (raw === null
+  ? (side === 'old' ? '（此前没有覆盖）' : '（这条覆盖已被删除）')
+  : raw.length > 160 ? `${raw.slice(0, 160)}…` : raw);
+
+/** 侧栏那行监听地址：来自合并后的配置，不是写死的默认值。 */
+const listenAddress = computed(() => {
+  const webui = (config.value.webui ?? {}) as { host?: string; port?: number };
+  return webui.host && webui.port ? `${webui.host}:${webui.port}` : location.host;
+});
 
 async function logout(): Promise<void> {
   try { await api('/api/auth/logout', { method: 'POST', body: '{}' }); } catch { /* 会话可能已经过期，照样跳登录页 */ }
@@ -1420,7 +1477,8 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
           <span v-if="item[0] === 'tasks' && pendingApprovals" class="nav-badge" :title="`${pendingApprovals} 个调用正等待裁决`">{{ pendingApprovals }}</span>
         </button>
       </nav>
-      <div class="system-pill"><span :class="['status-dot', { live: connected }]" /><div><b>{{ connected ? '系统在线' : '正在连接' }}</b><small>127.0.0.1:8787</small></div></div>
+      <!-- 监听地址读配置：写死成 127.0.0.1:8787 的话，改过 host/port 的部署会看到一个假地址 -->
+      <div class="system-pill"><span :class="['status-dot', { live: connected }]" /><div><b>{{ connected ? '系统在线' : '正在连接' }}</b><small>{{ listenAddress }}</small></div></div>
     </aside>
 
     <section class="main-panel">
@@ -1515,10 +1573,17 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
                 <button type="button" aria-label="取消这一项覆盖" title="取消覆盖，回到全局值" @click="dropChatOverride(row.path)"><i class="pi pi-times" /></button>
               </span>
             </div>
+            <!-- /model 写的是 app_kv 而不是配置覆盖层，却压过下面的 agent.main.modelAlias：
+                 不摆出来的话，「改了模型别名不生效」在界面上完全无迹可寻。 -->
+            <p v-if="chatModelAlias" class="callout warn">
+              <i class="pi pi-exclamation-triangle" aria-hidden="true" />
+              这个会话被 Telegram 的 <code>/model</code> 钉在别名 <b>{{ chatModelAlias }}</b> 上（存在 <code>app_kv</code>，不是配置覆盖层）。它<b>压过</b>下面的 <code>agent.main.modelAlias</code> 与全局值。
+              <UiButton size="small" variant="text" severity="danger" label="清除会话别名" @click="clearChatModelAlias" />
+            </p>
             <UiButton variant="text" :icon="chatOverrideOpen ? 'pi pi-chevron-up' : 'pi pi-chevron-down'" :label="chatOverrideOpen ? '收起' : '编辑覆盖项'" @click="chatOverrideOpen = !chatOverrideOpen" />
             <!-- 控件里显示的是这个会话实际生效的值（全局 + 覆盖）；改动才会写进覆盖层 -->
             <SchemaForm v-if="chatOverrideOpen && configSchema" ref="chatOverrideForm" :schema="configSchema.schema" :value="chatEffectiveConfig"
-              :hot-reloadable="PER_CHAT_ALLOWLIST" :unimplemented="configSchema.unimplemented" :include="PER_CHAT_ALLOWLIST" :notes="PER_CHAT_NOTES"
+              :hot-reloadable="PER_CHAT_ALLOWLIST" :unimplemented="configSchema.unimplemented" :env-pinned="configSchema.envPinned" :include="PER_CHAT_ALLOWLIST" :notes="PER_CHAT_NOTES"
               :saving="chatOverrideSaving" save-label="写入覆盖" @save="saveChatOverrides" />
             <p v-else-if="chatOverrideOpen" class="empty-card"><i class="pi pi-spin pi-spinner" aria-hidden="true" /> 正在加载配置 schema…</p>
           </article>
@@ -1871,6 +1936,22 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
         <section v-else-if="active === 'settings'" key="settings" class="surface page-surface">
           <header><div><p class="eyebrow">CONFIGURATION</p><h2>配置与维护</h2><p>完整合并配置已通过 zod 校验；密钥字段不会回显。</p></div></header>
           <div class="registry-heading">
+            <div><h3>修改登录口令</h3><p class="section-note">WebUI 只有一个身份（owner）。改完<b>立即生效、其余会话全部吊销</b>，不用重启进程。忘了当前口令只能线下 <code>pnpm webui:passwd</code> 生成哈希写进 <code>config.yaml</code>。</p></div>
+          </div>
+          <p v-if="passwordPinnedEnv" class="callout warn">
+            <i class="pi pi-lock" aria-hidden="true" />
+            口令由环境变量 <code>{{ passwordPinnedEnv }}</code> 固定：在这里改能改到当前进程，但重启后会被环境变量盖回去。要真正换口令，请改这个环境变量（或清掉它，让口令回到 <code>config_kv</code> 管）。
+          </p>
+          <div v-else class="form-grid">
+            <label>当前口令<input v-model="passwordForm.current" type="password" autocomplete="current-password" placeholder="用于确认是你本人"></label>
+            <label>新口令<input v-model="passwordForm.next" type="password" autocomplete="new-password" placeholder="至少 12 个字符"></label>
+            <label>再输一次<input v-model="passwordForm.confirm" type="password" autocomplete="new-password" placeholder="两次要一致"></label>
+            <div class="wide password-actions">
+              <UiButton icon="pi pi-key" label="更新口令" :loading="passwordSaving" :disabled="Boolean(passwordProblem)" @click="savePassword" />
+              <small class="field-note">{{ passwordProblem || '会吊销除当前会话之外的所有登录态。' }}</small>
+            </div>
+          </div>
+          <div class="registry-heading">
             <div><h3>触发与唤醒词</h3><p class="section-note">决定哪条消息会开轮次。五个来源取并集，命中任一条就触发；群里没有任何一条命中时，消息只作为背景发言存档。保存后热更新，下一条消息即生效。</p></div>
             <UiButton size="small" icon="pi pi-save" label="保存触发设置" :loading="triggerSaving" :disabled="!triggerDirty" @click="saveTrigger" />
           </div>
@@ -1904,7 +1985,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
                    开关存得下但运行时没人读（docs/20 · W-TG-05）。不能让它看起来像个能用的开关。 -->
               <UiSwitch v-model="triggerForm.ignoreEditedAsTrigger" disabled>编辑旧消息不重新触发<UiTag value="未接线" severity="secondary" title="编辑消息当前一律按背景消息归档，这个开关运行时没有任何代码读它" /></UiSwitch>
             </div>
-            <p class="field-note wide">会话级覆盖（<code>perChat.&lt;contextKey&gt;.trigger</code>）优先于这里的全局值，目前只能通过 <code>PATCH /api/chats/:key</code> 写入。</p>
+            <p class="field-note wide">会话级覆盖（<code>perChat.&lt;contextKey&gt;.trigger</code>）优先于这里的全局值，入口在<b>会话页</b>选中某个会话之后的「只对这个会话生效的设置」。</p>
           </div>
           <div class="registry-heading">
             <div><h3>输出节奏</h3><p class="section-note">决定一条回复怎么送出去。流式模式下先攒一段再发第一条，之后按固定节拍编辑同一条消息 —— 攒的时长设成 0 就会退回「先发一个字、剩下靠编辑补」的观感。保存后下一轮生效。</p></div>
@@ -1926,10 +2007,10 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             </article>
           </div>
           <div class="registry-heading">
-            <div><h3>全部配置</h3><p class="section-note">由 <code>config/config.schema.json</code> 自动生成 —— 控件形态、默认值、取值范围与每一项的作用说明全部取自 schema，不在前端维护第二份清单。搜索框同时匹配键名与说明。热更新项保存即生效，需重启项会在保存后的提示里点名。密钥字段只读（已脱敏）。</p></div>
+            <div><h3>全部配置</h3><p class="section-note">由 <code>config/config.schema.json</code> 自动生成 —— 控件形态、默认值、取值范围与每一项的作用说明全部取自 schema，不在前端维护第二份清单。搜索框同时匹配键名与说明。热更新项保存即生效，需重启项会在保存后的提示里点名。密钥字段是<b>只写</b>的（不回显，留空表示不改）；标「环境变量锁定」的键由环境变量最终决定，写进来也会被盖回去，所以不给改。</p></div>
             <UiButton size="small" variant="text" icon="pi pi-history" label="变更历史" @click="openConfigRevisions" />
           </div>
-          <SchemaForm v-if="configSchema" ref="schemaForm" :schema="configSchema.schema" :value="config" :hot-reloadable="configSchema.hotReloadable" :unimplemented="configSchema.unimplemented" :saving="schemaSaving" @save="saveSchemaConfig" />
+          <SchemaForm v-if="configSchema" ref="schemaForm" :schema="configSchema.schema" :value="config" :hot-reloadable="configSchema.hotReloadable" :unimplemented="configSchema.unimplemented" :env-pinned="configSchema.envPinned" :saving="schemaSaving" @save="saveSchemaConfig" />
           <p v-else class="empty-card"><i class="pi pi-spin pi-spinner" aria-hidden="true" /> 正在加载配置 schema…</p>
           <div class="registry-heading"><div><h3>合并后的完整配置</h3><p class="section-note">config.yaml → DB 覆盖层 → 环境变量三层合并的结果，只读；上面那张表单改的就是这份 JSON 里的值。</p></div></div>
           <pre class="config-preview" v-text="JSON.stringify(config, null, 2)" />
@@ -2202,8 +2283,8 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
       <ol class="revision-list wide-list">
         <li v-for="row in configRevisions" :key="row.id">
           <div><code>{{ row.key }}</code><small>{{ row.actor }} · {{ new Date(row.ts).toLocaleString() }}</small>
-            <small class="revision-diff"><b>旧</b> {{ revisionValue(row.old_json) }}</small>
-            <small class="revision-diff"><b>新</b> {{ revisionValue(row.new_json) }}</small>
+            <small class="revision-diff"><b>旧</b> {{ revisionValue(row.old_json, 'old') }}</small>
+            <small class="revision-diff"><b>新</b> {{ revisionValue(row.new_json, 'new') }}</small>
           </div>
         </li>
         <li v-if="!configRevisions.length && !revisionsLoading" class="empty">还没有经 WebUI 写过任何配置覆盖。</li>
