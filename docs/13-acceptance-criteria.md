@@ -369,7 +369,7 @@
 | [ ] AC-WEB-019 | 审批队列 | 待审出现（SSE）；批准/拒绝生效；历史可查 |
 | [ ] AC-WEB-020 (自动) ★ | 构造含 `<img onerror=…>` 的消息 | WebUI 以纯文本渲染（无 `v-html`），无脚本执行；CSP 响应头存在 |
 | [ ] AC-WEB-021 | 维护操作按钮 | 备份/VACUUM/清日志/重建 FTS/清孤儿文件 均可执行并有结果反馈与日志 |
-| [ ] AC-WEB-022 | 设置页「触发与唤醒词」卡片 | 五个开关、唤醒词增删、最短长度可编辑；每条唤醒词标注「包含/正则」，不会生效的标红并给出原因；保存后热更新（无需重启），含不可用模式时保存被拒并弹出具体原因 |
+| [ ] AC-WEB-022 | 设置页「触发与唤醒词」卡片 | 五个来源勾选框、唤醒词增删、最短长度可编辑；每条唤醒词标注「包含/正则」，不会生效的标红并给出原因；保存后热更新（无需重启），含不可用模式时保存被拒并弹出具体原因 |
 | [ ] AC-WEB-023 | 依次做：保存提示词、回滚版本、切换/重置上下文、保存 Provider、`[测试连接]`、导入模型、保存/删除别名、保存触发设置 | 每次反馈都是右上角同一种通知（成功绿 / 警告黄 / 失败红，可手动关闭、到点自动消失），页面上不出现第二种提示样式；失败时通知里带上游错误原因 |
 | [ ] AC-WEB-024 (自动) | 未登录访问 `GET /api/health` 与 `GET /api/health/detail` | 前者只回 `{ok, uptimeMs}`；后者 401。provider 列表 / MCP / 沙箱 plan / 在途轮次数不再无鉴权暴露（docs/20 · W-API-01） |
 | [ ] AC-WEB-025 | 搜索归档并翻到后面几页 | `total` 是命中总数（单独 COUNT），页码不漂（docs/20 · W-API-03） |
@@ -379,7 +379,7 @@
 | [ ] AC-WEB-029 | 配额页改「全局 · 每日」并保存 | 写 `config_kv` + `config_revisions` 并广播 `config.changed`；热更新即时生效（下一条消息按新限额判定）；非法值（负数、非整数的步数/并发）返回 `invalid_config` 且逐条给出 path，不落库 |
 | [ ] AC-WEB-030 (自动) ★ | `GET /api/quota` | 返回的每行计数器带**服务端合成**的 `limit`：user 行套用 `perUser.byRole[该主体角色]` 覆盖，配了 `byRole` 时置 `limitApprox`（有效角色取 min(用户, 会话)，服务端只看得到前者）；`current` 正确区分当前 bucket 与历史 bucket；chat/user 行按 `principals` 反查显示名与角色 |
 | [ ] AC-WEB-031 | 配额页计数器行内 `[重置]` | 只删这一行（`{scope, subject, window, bucket}`），其余计数不动；「全部清零」不带 body 清全表；只给 `bucket` 不给 `scope` 返回 400 `invalid_filter`；两者都写 `webui.action` 审计 |
-| [ ] AC-WEB-032 ★ | 配额页表单 | `KNOWN_UNIMPLEMENTED_CONFIG_KEYS` 里 `quota.` 开头的 5 项**没有控件**，只在灰条里列出键名并写明「现在真正生效的是谁」；键名来自 `GET /api/quota` 的 `unimplemented`，前端不维护第二份清单。同理，设置页的 `trigger.ignoreEditedAsTrigger` 勾选框禁用并标「未接线」 |
+| [ ] AC-WEB-032 ★ | 配额页表单 | `KNOWN_UNIMPLEMENTED_CONFIG_KEYS` 里 `quota.` 开头的 5 项**没有控件**，只在灰条里列出键名并写明「现在真正生效的是谁」；键名来自 `GET /api/quota` 的 `unimplemented`，前端不维护第二份清单。同理，设置页的 `trigger.ignoreEditedAsTrigger` 开关禁用并标「未接线」 |
 | [ ] AC-WEB-033 | 配额页 | 存在启用中但缺定价的模型时顶部出现告警条并列出模型（这些轮次花费按 0 记账）；`quota.enabled` 关闭时出现「金额限额不再判定、频率限制仍生效」的红条 |
 | [ ] AC-WEB-034 | 工具页沙箱卡片 | `mode` / 网络 / 镜像 / 资源限制 / `bypassRoles` 可改并热更新；`[探测可用性]` 打的是**已保存**的那份配置并回显结果；`mode=none` 保存前二次确认；owner 之外的角色进 `bypassRoles` 时给出警示 |
 | [ ] AC-WEB-035 | 总览页「依赖健康」 | 六行全部来自 `GET /api/health/detail`（DB 读写、SSE、模型注册表、在途 turn、MCP、沙箱 mode 与可用性），沙箱一行随 `sandbox.mode` 变化 —— 不再是恒显示「Docker」的写死文本 |
@@ -397,6 +397,7 @@
 | [ ] AC-WEB-052 | 扩展页新建 / 编辑 / 删除一个 MCP server | 表单按 transport 分支（stdio 要 command，http 要 url），保存过 `mcp.servers` 的判别联合 schema，写 `config_kv` + `config_revisions` + `config.changed` 后热 reconcile；重名 409；删除同时清掉 `mcp_servers` 行。**`mcp.enabled` 关着时** 保存后给的是告警 Toast 而不是「已连接」，扩展页顶部有横幅与 `[打开总开关]` —— 存得下但一个都不会连 |
 | [ ] AC-WEB-053 | 扩展页新建 / 编辑 / 删除一个 Skill | 正文与 frontmatter 一起写回 `SKILL.md`（先写临时文件再 rename），随后重扫并同步 `skills` 表；名字不合 `^[a-z0-9]+(-[a-z0-9]+)*$` 一律拒绝（目录名即 skill 名，越界路径进不来）；新建未选角色时取 `skills.defaultMinRole` 的**当前**快照；删除二次确认写明会连附属文件一起永久移除 |
 | [ ] AC-WEB-054 ★ | Agent 页点 `[试跑]` | 服务端建一条可审计的隔离 `agent_run`（`kind='sub'`、`turn_id` 前缀 `dryrun:`），复用 `runSubAgent`，NDJSON 逐行推 step / usage / final / error；关闭请求或点 `[取消试跑]` 立即 abort。**试跑与正常轮次共用同一份配额**：先 `quota.reserve` 再逐步 `commit`，额度不足时直接拒绝开跑（chat/user 计数落在合成 subject `webui-dryrun` 上，不吃真实会话与用户的额度）；结束后剩余预留必须 `release` |
+| [ ] AC-WEB-055 | 深浅两套主题下扫一遍设置页、配额页、模型 / Agent / MCP 对话框 | 页面上不出现任何操作系统绘制的控件：勾选框与开关是自绘的（勾选框 = 从一组里挑几个或筛选视图，开关 = 开/关某一项能力，两者不混用），数字格是「减 / 值 / 加」的步进器且没有原生上下箭头，下拉展开的是页面自己的面板（对话框里也压在遮罩之上，Esc 只收面板不关对话框）。点数字格的**标题文字**只聚焦输入框，不会把值改掉；小数步进不产生 `0.30000000000000004`；表格表头在部分选中时显示横杠而不是空框 |
 
 ## 11. 安全 AC-SEC
 
@@ -447,9 +448,9 @@
 | 记忆 | | / 13 | | | |
 | 日志与成本 | | / 23 | | | |
 | 扩展生态 | | / 27 | | | |
-| WebUI | | / 67 | | | |
+| WebUI | | / 68 | | | |
 | 安全 | | / 15 | | | |
 | 运维 | | / 9 | | | |
-| **合计** | | **/ 356** | | | |
+| **合计** | | **/ 357** | | | |
 
 **整体通过条件**：全部 ★ 项通过 + 非 ★ 项通过率 ≥ 95% + 所有豁免项经需求方书面确认。
