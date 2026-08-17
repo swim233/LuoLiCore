@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { ulid } from 'ulid';
 import { applyPatch, createTwoFilesPatch, parsePatch, reversePatch } from 'diff';
@@ -96,7 +96,10 @@ export class AgentResultStore {
     return path;
   }
 
+  /** 文件可能已被 `MaintenanceService` 按 `logs.retentionDays` 清掉，或在读之前被 gc 扫走。
+   *  抛出去只会变成一句与原因无关的 ENOENT —— 直说它过期了。 */
   read(path: string, offset: number, limit: number): { content: string; nextOffset: number | null } {
+    if (!existsSync(path)) return { content: '[子 agent 的完整结果已按日志保留期清理，只剩摘要]', nextOffset: null };
     const buffer = readFileSync(path);
     const content = buffer.subarray(offset, offset + limit).toString('utf8');
     return { content, nextOffset: offset + limit < buffer.length ? offset + limit : null };

@@ -1,4 +1,4 @@
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { type Stats, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { minimatch } from 'minimatch';
 import { basename, dirname, relative } from 'node:path';
 import { ulid } from 'ulid';
@@ -44,42 +44,59 @@ export class FileTools {
     return true;
   }
 
+  /**
+   * 读不到的条目跳过而不是让整次调用失败。一个断链软链（`ln -s /nowhere x`，下载失败也会留）
+   * 让 `statSync` 抛 ENOENT，此前整个 list/glob/grep 就返回 `ok:false` —— 目录里另外几百个
+   * 好文件一并看不见了（docs/22 · I-03）。跳过的条数交回给模型，别让它以为自己看全了。
+   */
+  #stat(target: string, skipped: { n: number }): Stats | null {
+    try { return statSync(target); } catch { skipped.n += 1; return null; }
+  }
+
+  #readdir(directory: string, skipped: { n: number }): string[] {
+    try { return readdirSync(directory); } catch { skipped.n += 1; return []; }
+  }
+
   list(path = '.', depth = 1): Record<string, unknown> {
     const root = this.jail.resolve(path);
     const entries: Array<{ path: string; type: string; bytes: number }> = [];
+    const skipped = { n: 0 };
     const walk = (directory: string, level: number): void => {
-      for (const name of readdirSync(directory)) {
+      for (const name of this.#readdir(directory, skipped)) {
         if (!this.options.showHidden && name.startsWith('.')) continue;
         const child = this.jail.resolve(relative(this.jail.root, `${directory}/${name}`));
-        const stat = statSync(child);
+        const stat = this.#stat(child, skipped);
+        if (!stat) continue;
         entries.push({ path: relative(this.jail.root, child), type: stat.isDirectory() ? 'directory' : 'file', bytes: stat.size });
         if (stat.isDirectory() && level < depth) walk(child, level + 1);
       }
     };
     walk(root, 1);
-    return { ok: true, entries: entries.slice(0, 500), truncated: entries.length > 500 };
+    return { ok: true, entries: entries.slice(0, 500), truncated: entries.length > 500, skipped: skipped.n };
   }
 
   glob(pattern: string, path = '.'): Record<string, unknown> {
     const root = this.jail.resolve(path);
     const matches: string[] = [];
+    const skipped = { n: 0 };
     // 已访问目录集合：workspace 里一个指向自身祖先的软链（`ln -s . loop`，bash 就能建）会让递归
     // 无限下去，而条数上限只在**命中**时才起作用（docs/20 · W-FS-01）。
     const visited = new Set<string>();
     const walk = (directory: string): void => {
       if (!this.#enter(directory, visited)) return;
-      for (const name of readdirSync(directory)) {
+      for (const name of this.#readdir(directory, skipped)) {
         if (!this.options.showHidden && name.startsWith('.')) continue;
         const child = this.jail.resolve(relative(this.jail.root, `${directory}/${name}`));
         const relativePath = relative(root, child).replaceAll('\\', '/');
-        const stat = statSync(child);
+        const stat = this.#stat(child, skipped);
+        if (!stat) continue;
         if (minimatch(relativePath, pattern, { dot: true })) matches.push(relative(this.jail.root, child));
         if (stat.isDirectory() && matches.length < 500) walk(child);
         if (matches.length >= 500) return;
       }
     };
     walk(root);
-    return { ok: true, matches, truncated: matches.length >= 500 };
+    return { ok: true, matches, truncated: matches.length >= 500, skipped: skipped.n };
   }
 
   grep(pattern: string, path = '.', ignoreCase = false): Record<string, unknown> {
@@ -87,17 +104,19 @@ export class FileTools {
     const regex = safeRegex(pattern, ignoreCase);
     if (!regex) return { ok: false, error: 'invalid_pattern' };
     const matches: Array<{ path: string; line: number; text: string }> = [];
+    const skipped = { n: 0 };
     const visited = new Set<string>();
     const walk = (target: string): void => {
-      const stat = statSync(target);
-      if (stat.isDirectory()) { if (!this.#enter(target, visited)) return; for (const name of readdirSync(target)) { if (!this.options.showHidden && name.startsWith('.')) continue; if (matches.length >= 200) break; walk(this.jail.resolve(relative(this.jail.root, `${target}/${name}`))); } return; }
+      const stat = this.#stat(target, skipped);
+      if (!stat) return;
+      if (stat.isDirectory()) { if (!this.#enter(target, visited)) return; for (const name of this.#readdir(target, skipped)) { if (!this.options.showHidden && name.startsWith('.')) continue; if (matches.length >= 200) break; walk(this.jail.resolve(relative(this.jail.root, `${target}/${name}`))); } return; }
       if (stat.size > this.maxReadBytes * 4) return;
       let content: string;
       try { content = readFileSync(target, 'utf8'); } catch { return; }
       for (const [index, line] of content.split('\n').entries()) { regex.lastIndex = 0; if (regex.test(line)) matches.push({ path: relative(this.jail.root, target), line: index + 1, text: line }); if (matches.length >= 200) break; }
     };
     walk(root);
-    return { ok: true, matches, truncated: matches.length >= 200 };
+    return { ok: true, matches, truncated: matches.length >= 200, skipped: skipped.n };
   }
 
   write(path: string, content: string): Record<string, unknown> {

@@ -2,8 +2,16 @@ import { mkdirSync, readdirSync, rmSync, statSync, unlinkSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import type { Sqlite } from '@luoli/db';
 
+/** 落在磁盘上、由 DB 行指路的两棵 blob 目录。给不出路径的那一棵就不扫（测试里常只给一棵）。 */
+export interface BlobDirectories {
+  /** `attachments.local_path` 指向的媒体目录（`media.dir`）。 */
+  files?: string;
+  /** `agent_runs.result_full_ref` 指向的子 agent 全文目录。 */
+  agentResults?: string;
+}
+
 export class MaintenanceService {
-  constructor(private readonly db: Sqlite, private readonly databasePath: string, private readonly backupKeep: number, private readonly retentionDays: number, private readonly logsDir = './logs') {}
+  constructor(private readonly db: Sqlite, private readonly databasePath: string, private readonly backupKeep: number, private readonly retentionDays: number, private readonly logsDir = './logs', private readonly blobs: BlobDirectories = {}) {}
 
   backup(label = 'manual'): string {
     const directory = resolve(dirname(this.databasePath), 'backup');
@@ -40,8 +48,51 @@ export class MaintenanceService {
         rmSync(join(this.logsDir, day.name), { recursive: true, force: true }); logDirectories += 1;
       }
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    // 子 agent 的全文结果是调试产物，和日志同龄同命：按 `logs.retentionDays` 过期。
+    // 只清文件、把 `result_full_ref` 置空，`result_summary` 留着 —— 摘要是上下文里已经引用过的
+    // 东西，删了会让历史轮次的引述变成悬空（docs/22 · I-09）。
+    // **媒体附件不在这里过期**：`data/files/**` 是用户数据，自动过期策略是 docs/14 §2 Q9 的
+    // 未决问题，替需求方决定不合适。gcFiles() 只扫没有任何 DB 行指向的孤儿。
+    let agentResults = 0;
+    for (const row of this.db.prepare("SELECT id,result_full_ref AS path FROM agent_runs WHERE result_full_ref IS NOT NULL AND finished_at IS NOT NULL AND finished_at<?").all(logCutoff) as Array<{ id: string; path: string }>) {
+      try { rmSync(row.path, { force: true }); } catch { continue; }
+      this.db.prepare('UPDATE agent_runs SET result_full_ref=NULL WHERE id=?').run(row.id);
+      agentResults += 1;
+    }
     this.checkpoint();
-    return { logs, logDirectories, updates, sessions, approvals };
+    return { logs, logDirectories, updates, sessions, approvals, agentResults };
+  }
+
+  /**
+   * 孤儿 blob 清理：磁盘上有、但没有任何 DB 行指向的文件。这不是过期策略 —— 这些文件已经
+   * 谁都取不到了（下载中途崩溃、`INSERT OR REPLACE` 换掉了 `local_path`、手工删过库行）。
+   * 此前这个端点直接返回 `not_implemented`，两棵目录因此只涨不落（docs/22 · I-09）。
+   */
+  gcFiles(): Record<string, number> {
+    const sweep = (directory: string | undefined, referenced: Set<string>): { removed: number; bytes: number } => {
+      const result = { removed: 0, bytes: 0 };
+      if (!directory) return result;
+      const root = resolve(directory);
+      const walk = (current: string): void => {
+        let entries;
+        try { entries = readdirSync(current, { withFileTypes: true }); } catch { return; }
+        for (const entry of entries) {
+          const path = join(current, entry.name);
+          if (entry.isDirectory()) { walk(path); continue; }
+          if (!entry.isFile() || referenced.has(path)) continue;
+          try { result.bytes += statSync(path).size; unlinkSync(path); result.removed += 1; } catch { /* 竞态删除或无权限，跳过 */ }
+        }
+      };
+      walk(root);
+      return result;
+    };
+    // 路径按 resolve 后比对：DB 里存的可能是相对路径（`./data/files/...`），磁盘遍历给的是
+    // 绝对路径，不归一化的话每个文件都会被判成孤儿——那是把整棵媒体目录删空。
+    const referenced = (column: string, table: string): Set<string> =>
+      new Set((this.db.prepare(`SELECT ${column} FROM ${table} WHERE ${column} IS NOT NULL`).pluck().all() as string[]).map((path) => resolve(path)));
+    const files = sweep(this.blobs.files, referenced('local_path', 'attachments'));
+    const results = sweep(this.blobs.agentResults, referenced('result_full_ref', 'agent_runs'));
+    return { files: files.removed, fileBytes: files.bytes, agentResults: results.removed, agentResultBytes: results.bytes };
   }
 
   rebuildFts(): void {

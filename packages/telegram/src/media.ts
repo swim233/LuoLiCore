@@ -1,11 +1,22 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, mkdirSync, openSync, readFileSync, readSync, rmSync, writeFileSync } from 'node:fs';
 import { extname, join } from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 import { ulid } from 'ulid';
 import sharp from 'sharp';
 import type { Api } from 'grammy';
 import type { Config } from '@luoli/core';
 import type { ArchivedMessage, Sqlite } from '@luoli/db';
 import { untrusted } from '@luoli/shared';
+
+/**
+ * 按**码点**截断，但先按 UTF-16 下标粗截一刀：一个码点最多占 2 个 UTF-16 单元，所以前
+ * `maxChars` 个码点必然落在前 `maxChars*2` 个单元里。粗截可能切开一对代理对，而随后按码点
+ * 取满 `maxChars` 时那个落单的半字符必然被丢掉 —— 粗截只在原串更长时才发生。
+ */
+function truncateCodePoints(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  return [...text.slice(0, maxChars * 2)].slice(0, maxChars).join('');
+}
 
 interface TelegramFile {
   fileId: string;
@@ -78,17 +89,33 @@ export class TelegramMedia {
     }
   }
 
+  /**
+   * 文本文件不整份读进内存再展开：`media.maxDocBytes` 默认 20 MB，而 `maxChars` 默认 40 000 ——
+   * 此前 `[...readFileSync(path,'utf8')]` 为了取 4 万个码点先造两千万元素的数组（docs/22 · I-07）。
+   * 每个码点最多 4 字节，所以前 `maxChars` 个码点必然落在前 `maxChars*4` 字节里。
+   * `StringDecoder` 负责末尾那个被字节边界切开的字符：它会攒着不吐，不会留下 U+FFFD。
+   */
+  private readHead(path: string, maxChars: number): string {
+    const handle = openSync(path, 'r');
+    try {
+      const buffer = Buffer.allocUnsafe(maxChars * 4);
+      const read = readSync(handle, buffer, 0, buffer.length, 0);
+      return truncateCodePoints(new StringDecoder('utf8').write(buffer.subarray(0, read)), maxChars);
+    } finally { closeSync(handle); }
+  }
+
   private async extract(path: string, file: TelegramFile): Promise<string | null> {
     if (!this.config.extract.enabled) return null;
-    if (file.mime?.startsWith('text/') || ['.json', '.csv', '.md', '.ts', '.js', '.py', '.yaml', '.yml'].includes(extname(path).toLocaleLowerCase())) return [...readFileSync(path, 'utf8')].slice(0, this.config.extract.maxChars).join('');
+    const maxChars = this.config.extract.maxChars;
+    if (file.mime?.startsWith('text/') || ['.json', '.csv', '.md', '.ts', '.js', '.py', '.yaml', '.yml'].includes(extname(path).toLocaleLowerCase())) return this.readHead(path, maxChars);
     if (file.mime === 'application/pdf') {
       const { PDFParse } = await import('pdf-parse');
       const parser = new PDFParse({ data: readFileSync(path) });
-      try { return [...(await parser.getText()).text].slice(0, this.config.extract.maxChars).join(''); } finally { await parser.destroy(); }
+      try { return truncateCodePoints((await parser.getText()).text, maxChars); } finally { await parser.destroy(); }
     }
     if (file.mime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
       const mammoth = await import('mammoth');
-      return [...(await mammoth.extractRawText({ path })).value].slice(0, this.config.extract.maxChars).join('');
+      return truncateCodePoints((await mammoth.extractRawText({ path })).value, maxChars);
     }
     return null;
   }

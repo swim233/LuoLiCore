@@ -81,13 +81,17 @@ if (!modelRegistry.aliases().includes('main')) {
 const memory = new MemoryStore(db, config.memory.dir, config.memory.softLimitTokens, config.memory.hardLimitTokens, config.memory.maxSections, config.memory.forgetMeRetentionDays, log);
 const skills = new SkillLoader(db, config.skills.dir, () => configStore.snapshot().skills.defaultMinRole);
 skills.scan();
-const agents = new AgentManager(db, new AgentResultStore(resolve('data/agent-results')), config.agent.agents, config.agent.maxDepth, config.agent.maxSubagentsPerTurn);
+// 一份常量供两处用：写入方（AgentResultStore）与清理方（MaintenanceService.gcFiles）指向
+// 不同目录时，gc 会把整棵结果目录当成孤儿删空。
+const agentResultsDir = resolve('data/agent-results');
+const agents = new AgentManager(db, new AgentResultStore(agentResultsDir), config.agent.agents, config.agent.maxDepth, config.agent.maxSubagentsPerTurn);
 if (config.skills.watch) skills.startWatching();
 const plugins = new PluginManager(db, config.plugins.dir, config.plugins.hookTimeoutMs, config.plugins.autoDisableAfterErrors, config.plugins.order);
 await plugins.reconcile();
 const mcp = new McpManager(db, () => configStore.snapshot().mcp, log);
 await mcp.reconcile();
-const maintenance = new MaintenanceService(db, config.db.path, config.db.backupKeep, config.logs.retentionDays, config.logs.dir);
+const maintenance = new MaintenanceService(db, config.db.path, config.db.backupKeep, config.logs.retentionDays, config.logs.dir,
+  { files: config.media.dir, agentResults: agentResultsDir });
 const scheduler = new Scheduler((name, error) => log.event({ level: 'error', kind: 'scheduler.failed', summary: `${name} failed`, data: { error: error instanceof Error ? error.message : String(error) } }));
 scheduler.add(config.general.maintenanceCron, () => { const result = maintenance.cleanup(); log.event({ level: 'info', kind: 'maintenance.cleanup', summary: 'Scheduled cleanup complete', data: result }); }, 'maintenance');
 scheduler.add(config.db.vacuumCron, () => { maintenance.vacuum(); log.event({ level: 'info', kind: 'maintenance.vacuum', summary: 'Scheduled VACUUM complete' }); }, 'vacuum');
@@ -159,8 +163,14 @@ const previewPrompt = (key: string, role: RuntimeTurnContext['effectiveRole']): 
     isPrivate: principal?.chatType ? principal.chatType === 'private' : !contextRow.chatId.startsWith('-'),
     baseCommitId: null, snapshot, delta: [], abortSignal: new AbortController().signal, config: live,
   } satisfies RuntimeTurnContext;
-  const built = assembleMainPrompt(turn, { config: live, tools: toolRegistry, prompts: promptAssembler, documents: promptDocuments,
-    workspace: resolve(live.sandbox.workspaceDir, contextRow.chatId), skills, agents });
+  // 预览也会在 `toolRegistry` 里落一条按 turnId 挂的状态。turnId 是个常量所以不会堆积，
+  // 但留着等于让下一次预览沿用上一次的工具调用计数 —— 顺手清掉（docs/22 · I-10）。
+  const built = ((): ReturnType<typeof assembleMainPrompt> => {
+    try {
+      return assembleMainPrompt(turn, { config: live, tools: toolRegistry, prompts: promptAssembler, documents: promptDocuments,
+        workspace: resolve(live.sandbox.workspaceDir, contextRow.chatId), skills, agents });
+    } finally { toolRegistry.releaseTurn(turn.turnId); }
+  })();
   const order = ['kernel', 'character', 'assist', 'catalog', 'pubmemory', 'primemory', 'runtime'];
   const blocks = order.filter((name) => name !== 'primemory' || built.instructions.includes('=== PRIMEMORY ==='))
     .map((name) => ({ name, tokens: built.blocks[name] ?? 0, content: built.contents[name] ?? '', truncated: built.truncated.includes(name),
@@ -201,6 +211,11 @@ async function dryRunAgent(name: string, task: string, signal: AbortSignal, emit
   } finally {
     // commit 只退掉已结算的那部分，剩下的预留必须还回去，否则一次试跑就永久占住一份额度。
     if (reservation) quota.release(reservation);
+    // 试跑的 turnId 每次都是新的，而工具调用计数与审批记忆都按 turnId 挂在两张 Map 上。
+    // `releaseTurn` 此前只在 `bot.ts` 的正常轮次收尾里调 —— 每跑一次试跑就永久多两条记录
+    // （docs/22 · I-10）。
+    toolRegistry.releaseTurn(run.turnId);
+    approval.releaseTurn(run.turnId);
   }
 }
 

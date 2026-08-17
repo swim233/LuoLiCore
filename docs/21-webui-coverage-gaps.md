@@ -160,13 +160,17 @@ schema 自动表单，可写覆盖率达到 151/151（第三轮接线两项后�
 | G-SRV-02 | `POST /api/agents/:name/dryrun` | docs §3.9 的 `[试跑]` | P3 | ✅ 第三轮补（NDJSON 流式 step / usage / final / error；断开请求即 abort） |
 | G-SRV-03 | `POST/PATCH/DELETE /api/mcp[/:name]` | docs §3.8 的 MCP transport 配置表单与启停 | P2 | ✅ 第三轮补（transport-aware schema 校验，写 `config_kv` / revision 并立即 reconcile） |
 | G-SRV-04 | `POST /api/skills` `PUT /api/skills/:name` | docs §3.8 的 Skill 新建与正文编辑（含正文读写） | P3 | ✅ 第三轮补（安全写 `SKILL.md`、重扫并同步数据库；另有详情与删除端点） |
-| G-SRV-05 | `POST /api/maintenance/gc-files` | 孤儿文件清理。显式返回 `not_implemented`（按项目先例这是对的，界面上因此不给按钮） | P3 | 有意不做 |
+| G-SRV-05 | `POST /api/maintenance/gc-files` | 孤儿文件清理 | P3 | ✅ 第五轮实现（`MaintenanceService.gcFiles()` 扫 `data/files/**` 与 `data/agent-results/**` 里没有 DB 行指向的文件；设置页补按钮。**不含**媒体过期策略，那是 docs/14 Q9） |
 
 ### 2.3 契约测试的假绿灯（已修）
 
 `tests/api.contract.test.ts` 对当时那 21 条读端点只断言 `status === 200`（现在是 23 条）。未注册的 `/api/*` 会掉进
 SPA fallback（`app.get('*')` 返回 `index.html`，200），所以 **`GET /api/quota` 这条断言在端点
 根本不存在的情况下绿了很久**。第一轮改成同时断言 `content-type: application/json` 与信封的 `ok:true`。
+
+**成因本身也已经堵掉**：静态兜底之前加了 `app.all('/api/*', …)` → 404 JSON。此前未匹配的 API 路径
+会拿到 200 + `index.html`，前端 `api()` 在 `response.json()` 处抛 SyntaxError，报错信息与真实原因
+（路径写错了）毫无关系（docs/22 · I-13）。
 
 ---
 
@@ -321,7 +325,8 @@ SPA fallback（`app.get('*')` 返回 `index.html`，200），所以 **`GET /api/
 G-API-10/11/12 与 G-SRV-02/03/04 均已完成；按本文「运行时已有、WebUI 够不着」的口径，
 当前没有剩余项。仍存在但**不属于本清单缺口**的边界：
 
-- `POST /api/maintenance/gc-files` 仍显式返回 `not_implemented`，界面继续不提供按钮。
+- ~~`POST /api/maintenance/gc-files` 仍显式返回 `not_implemented`，界面继续不提供按钮。~~
+  → 第五轮已实现并补上按钮（`G-SRV-05`）。
 - Telegram inline keyboard 审批仍未实现；WebUI 已是可用审批通道，命中规则的调用会等待 WebUI
   裁决、TTL 或轮次取消，不再当场伪拒绝。**代价是从 Telegram 发起的那一轮会静默停住最多
   `approval.ttlMs`**（默认 180s），发起人侧没有任何提示 —— 所以待审角标现在挂在导航上（§4.6），
