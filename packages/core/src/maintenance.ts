@@ -99,10 +99,37 @@ export class MaintenanceService {
    * 谁都取不到了（下载中途崩溃、`INSERT OR REPLACE` 换掉了 `local_path`、手工删过库行）。
    * 此前这个端点直接返回 `not_implemented`，两棵目录因此只涨不落（docs/22 · I-09）。
    */
-  gcFiles(): Record<string, number> {
-    const sweep = (directory: string | undefined, referenced: Set<string>): { removed: number; bytes: number } => {
-      const result = { removed: 0, bytes: 0 };
+  gcFiles(): Record<string, number | string[]> {
+    const sweep = (directory: string | undefined, referenced: Set<string>, table: string): { removed: number; bytes: number; refused?: string } => {
+      const result: { removed: number; bytes: number; refused?: string } = { removed: 0, bytes: 0 };
       if (!directory) return result;
+      /**
+       * **fail-closed 的错配保护**：`referenced` 是空的、而目录里有文件，几乎只有一个成因 ——
+       * 这个 DB 和这棵目录属于**两套部署**（最常见的是 `LUOLI_DATA_DIR` 指到别处，而
+       * `media.dir` 仍是 cwd 相对路径）。此时「没有行指向它」不代表它是孤儿，而代表我们在拿
+       * 错的库问问题，照着删就是把另一套部署的用户数据清空。
+       *
+       * 这不是假设出来的风险：第七轮的验证过程里就是这么删掉了 76 个真实附件和 90 份子 agent
+       * 全文（`docs/25 §10`）。真·空部署的目录本来就是空的，所以拒绝不会误伤它。
+       */
+      if (!referenced.size) {
+        let hasFiles = false;
+        const probe = (current: string): void => {
+          if (hasFiles) return;
+          let entries;
+          try { entries = readdirSync(current, { withFileTypes: true }); } catch { return; }
+          for (const entry of entries) {
+            if (hasFiles) return;
+            if (entry.isDirectory()) probe(join(current, entry.name));
+            else if (entry.isFile()) hasFiles = true;
+          }
+        };
+        probe(resolve(directory));
+        if (hasFiles) {
+          result.refused = `${table} 里一条带路径的行都没有，而 ${directory} 下有文件 —— 这通常意味着库与目录来自两套部署（检查 LUOLI_DATA_DIR 与 media.dir 是否指向同一处）。拒绝清理。`;
+          return result;
+        }
+      }
       const root = resolve(directory);
       const walk = (current: string): void => {
         let entries;
@@ -121,9 +148,12 @@ export class MaintenanceService {
     // 绝对路径，不归一化的话每个文件都会被判成孤儿——那是把整棵媒体目录删空。
     const referenced = (column: string, table: string): Set<string> =>
       new Set((this.db.prepare(`SELECT ${column} FROM ${table} WHERE ${column} IS NOT NULL`).pluck().all() as string[]).map((path) => resolve(path)));
-    const files = sweep(this.blobs.files, referenced('local_path', 'attachments'));
-    const results = sweep(this.blobs.agentResults, referenced('result_full_ref', 'agent_runs'));
-    return { files: files.removed, fileBytes: files.bytes, agentResults: results.removed, agentResultBytes: results.bytes };
+    const files = sweep(this.blobs.files, referenced('local_path', 'attachments'), 'attachments');
+    const results = sweep(this.blobs.agentResults, referenced('result_full_ref', 'agent_runs'), 'agent_runs');
+    const refused = [files.refused, results.refused].filter((reason): reason is string => Boolean(reason));
+    // 拒绝的理由必须交回给调用方：静静地「删了 0 个」会让运维以为目录本来就是干净的。
+    return { files: files.removed, fileBytes: files.bytes, agentResults: results.removed, agentResultBytes: results.bytes,
+      ...(refused.length ? { refused } : {}) };
   }
 
   rebuildFts(): void {

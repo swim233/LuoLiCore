@@ -36,6 +36,8 @@ function deepFreeze<T>(value: T): Readonly<T> {
  */
 export const ENV_PINNED_CONFIG_KEYS = [
   { key: 'db.path', env: 'LUOLI_DATA_DIR', appliedIn: 'loadConfig' },
+  // 媒体目录跟着数据目录走，否则库与附件会分属两套部署，而 `gcFiles()` 判孤儿只看库（docs/25 §10）。
+  { key: 'media.dir', env: 'LUOLI_DATA_DIR', appliedIn: 'loadConfig' },
   { key: 'access.bootstrapOwnerId', env: 'LUOLI_OWNER_ID', appliedIn: 'loadConfig' },
   { key: 'sandbox.hostWorkspaceDir', env: 'LUOLI_HOST_WORKSPACE_DIR', appliedIn: 'loadConfig' },
   { key: 'webui.host', env: 'LUOLI_WEBUI_HOST', appliedIn: 'bot' },
@@ -99,9 +101,16 @@ export async function loadConfig(options: ConfigLoadOptions = {}): Promise<Reado
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
   }
-  // 这三条与 `ENV_PINNED_CONFIG_KEYS` 里 appliedIn:'loadConfig' 的三条一一对应，改一处要改两处。
+  // 这几条与 `ENV_PINNED_CONFIG_KEYS` 里 appliedIn:'loadConfig' 的那几条一一对应，改一处要改两处。
   const envLayer: Record<string, unknown> = {};
-  if (process.env.LUOLI_DATA_DIR) envLayer.db = { path: resolve(process.env.LUOLI_DATA_DIR, 'luoli.db') };
+  if (process.env.LUOLI_DATA_DIR) {
+    envLayer.db = { path: resolve(process.env.LUOLI_DATA_DIR, 'luoli.db') };
+    // **媒体目录必须跟着库走。** 只搬 `db.path` 而让 `media.dir` 留在 cwd 相对的默认值上，
+    // 就会出现「库在 A、附件在 B」这种两套部署混在一起的状态 —— 而 `gcFiles()` 判孤儿的依据
+    // 正是「库里有没有行指向它」，于是它会把 B 里的用户数据全当孤儿删掉。
+    // 第七轮的验证过程里真的这么删掉过 76 个附件和 90 份子 agent 全文（docs/25 §10）。
+    envLayer.media = { dir: resolve(process.env.LUOLI_DATA_DIR, 'files') };
+  }
   if (process.env.LUOLI_OWNER_ID) envLayer.access = { bootstrapOwnerId: process.env.LUOLI_OWNER_ID };
   if (process.env.LUOLI_HOST_WORKSPACE_DIR) envLayer.sandbox = { hostWorkspaceDir: process.env.LUOLI_HOST_WORKSPACE_DIR };
   const overrides = structuredClone(options.overrides ?? {});

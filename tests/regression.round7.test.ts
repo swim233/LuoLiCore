@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { ArchiveRepository, OperationsRepository, PrincipalRepository, closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
@@ -214,6 +214,35 @@ describe('I-09 · 孤儿 blob 真的被清理', () => {
     expect(maintenance.cleanup()).toMatchObject({ agentResults: 1 });
     expect(db.prepare("SELECT result_full_ref FROM agent_runs WHERE id='r1'").pluck().get()).toBeNull();
     expect(db.prepare("SELECT local_path FROM attachments WHERE id='a1'").pluck().get()).toBe(kept);
+    closeDatabase(db);
+  });
+
+  /**
+   * 库与目录来自**两套部署**时必须拒绝清理，而不是把整棵目录当孤儿删空。
+   *
+   * 这不是假想的风险：第七轮验证时就是这么删掉了 76 个真实附件和 90 份子 agent 全文 ——
+   * `LUOLI_DATA_DIR` 指到一个临时目录（于是 `db.path` 换了），而 `media.dir` 仍是 cwd 相对的
+   * 默认值 `./data/files`，于是一个空库对着一棵满的目录跑了孤儿清理（docs/25 §10）。
+   * 两道防线：`media.dir` 现在跟着 `LUOLI_DATA_DIR` 走；而即使还是配错了，这里也拒绝执行。
+   */
+  it('库里一条带路径的行都没有、而目录里有文件时拒绝清理', () => {
+    const path = './data/round7-gc-mismatch.test.db';
+    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    const filesDir = resolve('./data/round7-gc-mismatch-files');
+    rmSync(filesDir, { recursive: true, force: true });
+    mkdirSync(filesDir, { recursive: true });
+    writeFileSync(resolve(filesDir, 'someone-elses.jpg'), 'x'.repeat(64));
+    const db = openDatabase(path); migrateDatabase(db);
+    const maintenance = new MaintenanceService(db, path, 2, 30, './data/round7-gc-mismatch-logs', { files: filesDir });
+    const result = maintenance.gcFiles();
+    expect(result.files).toBe(0);
+    expect(result.refused).toHaveLength(1);
+    expect(String((result.refused as string[])[0])).toContain('LUOLI_DATA_DIR');
+    // 文件必须还在 —— 这条断言才是这个用例的全部意义。
+    expect(existsSync(resolve(filesDir, 'someone-elses.jpg'))).toBe(true);
+    // 反面：真·空部署（库空、目录也空）照常放行，不该被这道保护误伤。
+    rmSync(resolve(filesDir, 'someone-elses.jpg'));
+    expect(maintenance.gcFiles().refused).toBeUndefined();
     closeDatabase(db);
   });
 });

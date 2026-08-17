@@ -219,3 +219,35 @@ PUBMEMORY 会丢更新」，建议复用 `KeyedMutex`。
 - 8 个测试文件里手搓的 `{...} as Config` 换成 `configSchema.parse(...)`：手搓的那份每新增一处
   配置读取都会在无关用例里炸成 undefined。两条**故意**用 schema 外的值的用例（`tokens: 1` 压硬截断、
   拼错的时区压渲染回退）改成先 parse 再覆盖那一个字段。
+
+
+---
+
+## 10. 验证过程中我删掉了真实数据 —— 以及它暴露的那个真 bug
+
+**发生了什么**：§9 的「起真实进程」环节里，我用 `LUOLI_DATA_DIR=<临时目录>` 起了生产构建，
+然后对它调了一次 `POST /api/maintenance/gc-files`。结果它删掉了**仓库真实 `data/` 下**的
+**76 个附件文件**与 **90 份子 agent 全文**（合计约 5.6MB）。
+
+**为什么**：`LUOLI_DATA_DIR` 只搬 `db.path`，**不搬 `media.dir`**（默认 `./data/files`，cwd 相对）
+也不搬 agent-results 目录（`resolve('data/agent-results')`）。于是那个进程是「**空库 + 真实媒体目录**」
+的组合，而 `gcFiles()` 判孤儿的唯一依据是「库里有没有行指向它」—— 按它自己的逻辑，那 166 个文件
+全是孤儿。它做的事和它被要求做的事完全一致，错的是我把两套部署拼在了一起。
+
+**损失与残留**：`attachments` / `agent_runs` 的**行都还在**，`tg_file_id`（79 条）与
+`result_summary`（90 条）也都在，所以附件原则上还能从 Telegram 重新下载（没有现成的重下入口），
+而子 agent 全文只剩摘要。`data/` 在 `.gitignore` 里、`data/backup/` 只备份 DB 不备份文件，
+**这些文件恢复不了**。运行时不会因此崩：`hydrateAttachment` 与 `AgentResultStore.read` 都会降级成
+一句占位文本（前者是 `R-MEDIA-01` 修的，后者是本轮 §2 的 `I-09` 顺手加的）。
+
+**这暴露的是一个会同样咬到用户的真 bug**，两道防线都补上了：
+
+1. **`media.dir` 与 agent-results 目录现在跟着 `LUOLI_DATA_DIR` 走**（`config/index.ts` 的 envLayer
+   与 `main.ts`），`media.dir` 也进了 `ENV_PINNED_CONFIG_KEYS` —— 库和附件不可能再分属两处。
+2. **`gcFiles()` fail-closed**：库里一条带路径的行都没有、而目录里有文件时**拒绝清理**并把理由交回
+   （提示去检查 `LUOLI_DATA_DIR` 与 `media.dir`）。真·空部署的目录本来就是空的，所以这道保护不会
+   误伤它。回归用例断言的正是「文件必须还在」。
+
+> 教训与 `docs/24 §0` 那条同源，只是换了个方向：**「改了什么就在什么上验证」也包括「在什么上
+> 验证」本身要选对**。拿一个空库去验一个「按库判断该删什么」的功能，等于把它指向别人的数据。
+> 破坏性操作的验证必须在**一次性、自带数据**的环境里做，而不是在开发仓库里。

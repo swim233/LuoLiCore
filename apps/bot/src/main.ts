@@ -94,7 +94,9 @@ if (config.skills.enabled) skills.scan();
 else log.event({ level: 'info', kind: 'skills.disabled', summary: 'Skills disabled by config' });
 // 一份常量供两处用：写入方（AgentResultStore）与清理方（MaintenanceService.gcFiles）指向
 // 不同目录时，gc 会把整棵结果目录当成孤儿删空。
-const agentResultsDir = resolve('data/agent-results');
+// 跟着 `LUOLI_DATA_DIR` 走，和 `db.path` / `media.dir` 同一处（config/index.ts 的 envLayer）。
+// 三者指向不同部署时 `gcFiles()` 会把别人的数据当孤儿删掉（docs/25 §10）。
+const agentResultsDir = process.env.LUOLI_DATA_DIR ? resolve(process.env.LUOLI_DATA_DIR, 'agent-results') : resolve('data/agent-results');
 const agents = new AgentManager(db, new AgentResultStore(agentResultsDir), config.agent.agents, config.agent.maxDepth, config.agent.maxSubagentsPerTurn);
 if (config.skills.enabled && config.skills.watch) skills.startWatching();
 const plugins = new PluginManager(db, config.plugins.dir, config.plugins.hookTimeoutMs, config.plugins.autoDisableAfterErrors, config.plugins.order, undefined,
