@@ -36,6 +36,8 @@ export * from './tools/files.js';
 export * from './tools/jail.js';
 export * from './tools/policy.js';
 export * from './tools/registry.js';
+export * from './tools/schedule.js';
+export * from './schedule/runner.js';
 export * from './tools/web.js';
 export * from './turn/concurrency.js';
 export * from './turn/registry.js';

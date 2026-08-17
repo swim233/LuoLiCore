@@ -57,9 +57,21 @@
 trigram 能用，但对长句召回精度不如分词。jieba 方案：写入时分词存影子列，FTS 索引影子列。代价：多一个 native 依赖 + 索引重建。
 → *建议先上 trigram，实测不满意再加（数据可重建索引，不阻塞）。*
 
-**Q4. 是否需要「定时/主动发言」能力？**
-现设计**完全被动**（只在被触发时发言）。若要「每天早上推送摘要」「检测到关键词主动提醒」，需要一个 scheduler + 主动发言的上下文归属规则（主动发言算哪一轮？如何进上下文？）。
-→ *这会引入新的上下文语义，需要单独设计一节。*
+**Q4. 是否需要「定时/主动发言」能力？** → **已答复：要做。** 见下方四条决策与
+[02 §9](./02-context-engine.md#10-定时轮次的上下文归属)。
+
+原问题：现设计**完全被动**（只在被触发时发言）。若要「每天早上推送摘要」「检测到关键词主动提醒」，
+需要一个 scheduler + 主动发言的上下文归属规则（主动发言算哪一轮？如何进上下文？）。
+
+| # | 决策点 | 选定方案 |
+|---|---|---|
+| Q4-a | 触发时做什么 | **两种模式都支持**：`mode='agent'` 起一轮完整 agent 轮次（模型带该会话上下文执行任务描述）；`mode='notify'` 只把预写文本原样发出，**不调模型**。纯提醒不该被迫烧一次模型调用 |
+| Q4-b | 上下文归属 | **照常进上下文**：任务描述作为一条 `user` 消息（`[定时任务 <名字>] <正文>`、`from_kind='system'`）落进 delta，产出照常 `commitTurn`。历史里就是一次正常对话，用户能直接接着这条回话。`notify` 也开轮提交 —— 否则模型下一轮不知道自己刚提醒过什么 |
+| Q4-c | 停机补跑 | **不补跑**。一次性任务过期置 `done`，周期任务照排下一次，每条错过的记一条 `schedule.missed` warn。9 点补发一条 4 点的早报比不发更让人困惑，与 `telegram.dropPendingOnStart` 同一取舍 |
+| Q4-d | 权限 | `schedule_create` / `schedule_list` / `schedule_cancel` 都是 `minRole=trusted`、`approval=never`、`scope=chat`。**工具参数里没有 chatId** —— 落点绑死本会话（[05 §8](./05-tools-and-permissions.md)）。触发时**重算有效角色**：降级到 trusted 以下跳过这一次，`blocked` 则整条停用 |
+
+未做的部分照旧记在 §4：**关键词触发的主动提醒**（「检测到 X 就主动说」）不在本次范围内 ——
+它要的是消息流上的常驻匹配器，跟定时器是两套机制。
 
 **Q5. 子 agent 是否要支持 markdown 文件定义（`agents/<name>.md`）？**
 你在选项里选了「SKILL.md + JS plugin」，所以我把子 agent 做成了配置数据。但 md 文件定义（frontmatter 写 model/tools/minRole，正文是 instructions）对「不写代码就加子 agent」更友好，且与 Claude Code 生态一致。加它约 0.5 天。
@@ -128,7 +140,8 @@ AI SDK v7 提供了这个抽象。接进来意味着「在 Telegram 里让 Claud
 | 多实例 / 分布式 | A20；SQLite + 进程内锁 |
 | Postgres 支持 | 第一版 SQLite 足够；schema 设计已尽量兼容 |
 | 向量语义检索 | §2 Q2 待定 |
-| 主动发言 / 定时任务 | §2 Q4 待定（会引入新的上下文语义） |
+| ~~主动发言 / 定时任务~~ | **已实现**：§2 Q4 已答复，见 [02 §9](./02-context-engine.md#10-定时轮次的上下文归属) 与 [05 §3.8](./05-tools-and-permissions.md) |
+| 关键词触发的主动提醒 | §2 Q4 只覆盖了定时那一半。「检测到 X 就主动说」要在消息流上挂常驻匹配器，跟定时器不是一套机制 |
 | WebUI 多用户 RBAC | §2 Q7 待定 |
 | `WorkflowAgent` | 编排在自己的 `TurnRunner` 里，语义更强（[04 §6](./04-agents-and-providers.md#6-workflowagent-harnessagent-的取舍)） |
 | `HarnessAgent`（Claude Code 子 agent） | §2 Q8 待定 |

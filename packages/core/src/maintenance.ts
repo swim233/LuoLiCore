@@ -13,7 +13,7 @@ export interface BlobDirectories {
 
 export class MaintenanceService {
   constructor(private readonly db: Sqlite, private readonly databasePath: string, private readonly backupKeep: number, private readonly retentionDays: number, private readonly logsDir = './logs', private readonly blobs: BlobDirectories = {},
-    private readonly gzipAfterDays = 0) {}
+    private readonly gzipAfterDays = 0, private readonly scheduleRetentionDays = 30) {}
 
   backup(label = 'manual'): string {
     const directory = resolve(dirname(this.databasePath), 'backup');
@@ -88,10 +88,14 @@ export class MaintenanceService {
       this.db.prepare('UPDATE agent_runs SET result_full_ref=NULL WHERE id=?').run(row.id);
       agentResults += 1;
     }
+    // 已结束的定时任务行（完成 / 取消）按 `schedule.retentionDays` 清。**活跃的永不删** ——
+    // 一条还在排的任务被清掉的表现是「bot 突然不再提醒了」，而库里什么痕迹都没有。
+    const schedules = this.db.prepare("DELETE FROM scheduled_jobs WHERE state<>'active' AND updated_at<?")
+      .run(now - this.scheduleRetentionDays * 86_400_000).changes;
     // 压缩在删除之后：已经过保留期的目录整个没了，没必要先压再删。
     const compressed = this.gzipAfterDays > 0 ? this.#gzipOldLogs(new Date(now - this.gzipAfterDays * 86_400_000).toISOString().slice(0, 10)) : 0;
     this.checkpoint();
-    return { logs, logDirectories, updates, sessions, approvals, agentResults, compressed };
+    return { logs, logDirectories, updates, sessions, approvals, agentResults, schedules, compressed };
   }
 
   /**

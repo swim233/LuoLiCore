@@ -395,3 +395,26 @@ G-API-10/11/12 与 G-SRV-02/03/04 均已完成；按本文「运行时已有、W
   与反向引用，直接换会让现存规则失效。**这不是「WebUI 控制不了」，所以留给下一轮单独决定**。
 - `GET /api/mcp` 不脱敏（`GET /api/config` 会），MCP 表单因此能改 env / headers 里的密钥。
   两个端点都在鉴权之后，属于有意的分工，不当缺口；`SchemaForm` 那一格已经指路过去。
+
+---
+
+## 8. 定时任务这一轮（新增能力带来的一个新缺口）
+
+定时任务（[14 §2 Q4](./14-open-questions.md)、[02 §10](./02-context-engine.md#10-定时轮次的上下文归属)）
+接进来之后，按本文的口径复算一次：
+
+### 8.1 已闭合
+
+| 编号 | 运行时已有 | 界面缺什么 | 状态 |
+|---|---|---|---|
+| **G-API-15** | `log_events.data_json`（含 blob 解引用）—— 列表把 15 列里的 10 列连同整份载荷都传给了浏览器，而界面只用 5 列 | 日志页点一行只会去重建 trace，`trace_id` 为空的那些（`system.start`、`config.changed`、`maintenance.*`、`webui.action`）**点了什么都不发生**；有 trace 的也只得到一串 kind/summary，载荷从没露过面。docs/09 §3.10 那句「每个节点可展开看完整 payload」一直没实现 | ✅ 本轮：新增 `GET /api/logs/:id`（复用 `detailPayload`），日志行点开进详情弹窗；列表 SELECT 同时收窄成不带 `data_json`（原先每次刷新最坏推 ~50 MB） |
+| — | `context_messages.parts_json` 里工具调用的原始参数 | 消息→查看详情只有工具**输出**没有**输入**。根因在 `LogSink.span` 而不是界面（见 [10 §2](./10-logging-and-observability.md) 的 `tool.call` 行），但历史轮次的日志补不回来 | ✅ 本轮：`GET /api/turns/:id/detail` 增 `contextMessages`（直读列、绕开 `elidePart`），详情弹窗多一组「工具输入输出」，对老轮次同样有效 |
+
+### 8.2 新增缺口（未做，本轮明确留下）
+
+| 编号 | 运行时已有 | 界面缺什么 | 优先级 |
+|---|---|---|---|
+| **G-API-16** | `scheduled_jobs` 全表 + `ScheduledJobRunner`（`nextRun` / `unregister` 都在进程内） | **WebUI 没有定时任务面**：运维看不到「这个部署里现在有哪些任务在排、下一次什么时候、上一次是成是败」，也不能停掉某一条。止损路径目前有两条 —— 在 Telegram 里让 bot 跑 `schedule_list` / `schedule_cancel`，或在工具页把 `schedule_create` 关掉（那只能阻止新建，不影响已有任务）。真正对称的做法是 `GET /api/schedules` + `DELETE /api/schedules/:id` + 一个列表页 | P2 |
+
+没有先加端点再补页面：一个没有界面调用的端点正是 [25](./25-round7-remediation.md) 花了一整轮清掉的形态。
+要么两头一起做，要么如实记在这里。

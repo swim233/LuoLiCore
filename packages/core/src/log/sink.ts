@@ -188,6 +188,15 @@ export class LogSink {
     return id;
   }
 
+  /**
+   * 一个 span 只落一行，所以开始时的 `data` 与结束时的载荷必须**合并**而不是相互覆盖。
+   *
+   * 此前 `end()` 里 `data:` 排在 `...input` 之后，开始那份被无条件顶掉：`tool.call` 传进来的
+   * `{input}` 从来没有一次落到库里（30/30 条只有 `{output}`），`model.call` 的
+   * `stepNumber` / `provider` / `instructions` 同样丢掉，而失败路径 `end(undefined, error)`
+   * 更是把输入输出一起丢 —— 排障时只剩「某个工具报错了」。`docs/10 §2` 的字段集和
+   * `docs/09 §3.10` 的「可展开看工具输入输出」写的一直是合并后的那份。
+   */
   span(input: Omit<LogEvent, 'spanId'>): { id: string; end: (data?: unknown, error?: unknown) => void } {
     const id = ulid();
     const started = performance.now();
@@ -198,8 +207,23 @@ export class LogSink {
         if (ended) return;
         ended = true;
         const level = error ? 'error' : input.level;
-        this.event({ ...input, level, spanId: id, data: error ? { error: error instanceof Error ? error.message : String(error), data } : data, durationMs: Math.round(performance.now() - started) });
+        const merged = mergeSpanData(input.data, data, error);
+        this.event({ ...input, level, spanId: id, data: merged, durationMs: Math.round(performance.now() - started) });
       },
     };
   }
+}
+
+const plain = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/**
+ * 非对象的结束值挂在 `result` 下而不是顶掉开始那份：调用方给的是字符串/数组时，
+ * 合并没有意义，但开始时的上下文（工具参数、step 号）仍然是排障要看的东西。
+ */
+function mergeSpanData(open: unknown, close: unknown, error: unknown): unknown {
+  const head = open === undefined ? undefined : plain(open) ? open : { context: open };
+  const tail = close === undefined ? undefined : plain(close) ? close : { result: close };
+  const failure = error === undefined ? undefined : { error: error instanceof Error ? error.message : String(error) };
+  if (!head && !tail && !failure) return undefined;
+  return { ...(head ?? {}), ...(tail ?? {}), ...(failure ?? {}) };
 }

@@ -100,6 +100,10 @@ plugins:
   dir: ./plugins
 mcp:
   enabled: false
+schedule:
+  enabled: true
+  maxPerChat: 20
+  minIntervalMinutes: 5
 db:
   path: ./data/luoli.db
 logs:

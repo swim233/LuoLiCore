@@ -5,6 +5,7 @@ import type { AgentManager, Config, ContextEngine, FileTools, MemoryStore, Model
 import { DEFAULT_WEB_RETRY, builtinPolicy, lineAtOffset, numberLines, runSubAgent, webFetch, webSearch, type WebRetryOptions } from '@luoli/core';
 import type { ArchiveRepository, ArchivedMessage, ScopedArchiveRepository } from '@luoli/db';
 import { citeArchivedMessages } from './cite.js';
+import { registerScheduleTools, type ScheduleToolDependencies } from './schedule.js';
 import type { Role } from '@luoli/shared';
 import type { ToolExecutionContext } from './registry.js';
 
@@ -98,8 +99,11 @@ function resolveOutgoingFile(context: ToolExecutionContext, files: FileTools, pa
   return { ok: true, absolute };
 }
 
-export function registerBuiltins(registry: ToolRegistry, dependencies: { db: import('@luoli/db').Sqlite; filesFor: (workspace: string, role: Role) => FileTools; sandbox: Sandbox; archive: ArchiveRepository; context: ContextEngine; memory: MemoryStore; skills: SkillLoader; agents: AgentManager; models: ModelRegistry; ledger: UsageLedger; log: LogSink; quota?: QuotaGuard; telegram: TelegramToolBridge | null; maxWebBytes: number; maxAsksPerRun?: number; web?: WebRetryOptions; webSearch?: { provider: '' | 'brave' | 'serper' | 'tavily'; apiKey: string } }): void {
+export function registerBuiltins(registry: ToolRegistry, dependencies: { db: import('@luoli/db').Sqlite; filesFor: (workspace: string, role: Role) => FileTools; sandbox: Sandbox; archive: ArchiveRepository; context: ContextEngine; memory: MemoryStore; skills: SkillLoader; agents: AgentManager; models: ModelRegistry; ledger: UsageLedger; log: LogSink; quota?: QuotaGuard; telegram: TelegramToolBridge | null; schedule: ScheduleToolDependencies; maxWebBytes: number; maxAsksPerRun?: number; web?: WebRetryOptions; webSearch?: { provider: '' | 'brave' | 'serper' | 'tavily'; apiKey: string } }): void {
   const web = dependencies.web ?? DEFAULT_WEB_RETRY;
+  // 跟 `telegram` 同样是必填：漏传一个 key 就让三个工具永久消失，而
+  // 「TOOL_POLICY ↔ 注册表」的启动断言只看注册没注册，一个字都不会报。
+  registerScheduleTools(registry, dependencies.schedule);
   /** 每个 agent_run 上一次向 SSE 广播进度的时刻（`agent.progressThrottleMs`）。 */
   const progressBroadcast = new Map<string, number>();
   /**

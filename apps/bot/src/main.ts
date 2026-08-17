@@ -3,8 +3,8 @@ import argon2 from 'argon2';
 import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { serve } from '@hono/node-server';
-import { ArchiveRepository, OperationsRepository, PrincipalRepository, TurnRepository, closeDatabase, migrateDatabase, modelAliasKey, openDatabase, readAppKv, readPersistedConfig, recomputeMessageTokens, recoverAfterCrash, writeAppKv } from '@luoli/db';
-import { AgentManager, AgentResultStore, AlertDispatcher, ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, FileTools, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, ModelRegistry, PathJail, PluginManager, PromptAssembler, PromptDocuments, ProviderStore, QuotaGuard, Sandbox, Scheduler, Secrets, SkillLoader, STABLE_PROMPT_BLOCKS, TOOL_POLICY, ToolRegistry, TurnConcurrency, TurnRegistry, UsageLedger, assembleMainPrompt, configJsonSchema, loadConfig, perChatConfig, registerBuiltins, rejectedWakewords, runSubAgent, streamMainAgent, type SubAgentRuntimeEvent } from '@luoli/core';
+import { ArchiveRepository, OperationsRepository, PrincipalRepository, ScheduleRepository, TurnRepository, closeDatabase, migrateDatabase, modelAliasKey, openDatabase, readAppKv, readPersistedConfig, recomputeMessageTokens, recoverAfterCrash, writeAppKv } from '@luoli/db';
+import { AgentManager, AgentResultStore, AlertDispatcher, ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, FileTools, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, ModelRegistry, PathJail, PluginManager, PromptAssembler, PromptDocuments, ProviderStore, QuotaGuard, Sandbox, ScheduledJobRunner, Scheduler, Secrets, SkillLoader, STABLE_PROMPT_BLOCKS, TOOL_POLICY, ToolRegistry, TurnConcurrency, TurnRegistry, UsageLedger, assembleMainPrompt, configJsonSchema, loadConfig, perChatConfig, registerBuiltins, rejectedWakewords, runMainAgent, runSubAgent, streamMainAgent, type SubAgentRuntimeEvent } from '@luoli/core';
 import { createServer, EventStreamRegistry, issueLoginToken, setupToken, type PromptPreviewResult } from '@luoli/server';
 import type { RuntimeTurnContext } from '@luoli/shared';
 import { TelegramTools, UpdatePoller, createTelegramBot } from '@luoli/telegram';
@@ -112,7 +112,7 @@ if (config.plugins.enabled) {
 const mcp = new McpManager(db, () => configStore.snapshot().mcp, log);
 await mcp.reconcile();
 const maintenance = new MaintenanceService(db, config.db.path, config.db.backupKeep, config.logs.retentionDays, config.logs.dir,
-  { files: config.media.dir, agentResults: agentResultsDir }, config.logs.gzipAfterDays);
+  { files: config.media.dir, agentResults: agentResultsDir }, config.logs.gzipAfterDays, config.schedule.retentionDays);
 const scheduler = new Scheduler((name, error) => log.event({ level: 'error', kind: 'scheduler.failed', summary: `${name} failed`, data: { error: error instanceof Error ? error.message : String(error) } }));
 scheduler.add(config.general.maintenanceCron, () => { const result = maintenance.cleanup(); log.event({ level: 'info', kind: 'maintenance.cleanup', summary: 'Scheduled cleanup complete', data: result }); }, 'maintenance');
 scheduler.add(config.db.vacuumCron, () => { maintenance.vacuum(); log.event({ level: 'info', kind: 'maintenance.vacuum', summary: 'Scheduled VACUUM complete' }); }, 'vacuum');
@@ -165,6 +165,20 @@ let poller: UpdatePoller | null = null;
 const telegramTools = process.env.BOT_TOKEN
   ? new TelegramTools({ bot: () => bot, archive, maxMessageChars: () => configStore.snapshot().output.maxMessageChars })
   : null;
+// 定时任务（docs/14 §2 Q4）。这里只**建**不**装**：`load()` 要等 bot 起来，否则第一批任务触发时
+// `telegram()` 还是 null，只会往日志里写一串 skipped。工具反过来在这里就得拿到 runner。
+const scheduledJobs = new ScheduleRepository(db);
+const scheduleRunner = new ScheduledJobRunner({
+  db, jobs: scheduledJobs, scheduler, context, archive, turns, registry: turnRegistry, concurrency: turnConcurrency,
+  quota, memory, tools: toolRegistry, log, plugins, approvals: approval,
+  config: () => configStore.snapshot(),
+  telegram: () => telegramTools,
+  roleOf: (kind, tgId) => principals.roleOf(kind, tgId),
+  estimateTurnCost: (inputTokens, key) => modelRegistry.estimate(readAppKv<string>(db, modelAliasKey(key)) ?? perChatConfig(configStore.snapshot(), key).agent.main.modelAlias, inputTokens),
+  // 非流式：定时轮次没有 Telegram 流消费者，也没人盯着屏幕等增量。其余依赖与 `onTurn` 完全一致。
+  runAgent: (turn, reservation) => { const live = turn.config as Readonly<typeof config>; return runMainAgent(turn, { config: live, db, registry: modelRegistry, tools: toolRegistry,
+    prompts: promptAssembler, documents: promptDocuments, skills, plugins, agents, ledger, context, quota, reservation, log, workspace: resolve(live.sandbox.workspaceDir, turn.chatId) }); },
+});
 registerBuiltins(toolRegistry, {
   // `tools.fs.allowHostFsForOwner`：owner 的 fs 工具 jail 到 `/` 而不是本会话 workspace。
   // 这是 docs/14 T8 那条取舍的**显式**开关：开了之后任何能让 owner 的轮次执行工具的注入路径
@@ -179,6 +193,8 @@ registerBuiltins(toolRegistry, {
   web: { timeoutMs: config.tools.web.timeoutMs, retries: config.tools.web.retries },
   webSearch: { provider: config.tools.web.searchProvider, apiKey: config.tools.web.searchApiKey },
   telegram: telegramTools,
+  // 没有投递通道时这三个工具整体不进目录：排一个到点发不出去的任务是纯粹的假承诺。
+  schedule: { jobs: scheduledJobs, runner: scheduleRunner, deliverable: () => telegramTools !== null },
 });
 plugins.bindRegistry(toolRegistry);
 mcp.bindRegistry(toolRegistry);
@@ -328,8 +344,16 @@ if (process.env.BOT_TOKEN) {
   // `alert.deliver_failed` —— owner 没跟 bot 说过话时 Telegram 会拒发，那不该把告警链路带崩。
   const ownerChatId = configStore.snapshot().access.bootstrapOwnerId;
   if (ownerChatId) notifyOwner = (text) => bot!.api.sendMessage(ownerChatId, text);
+  // 到这里投递通道才具备，定时任务可以装回 cron 了。停机期间错过的不补跑，只在日志里说出来
+  // （需求方决策；`load()` 每条错过的任务记一条 schedule.missed）。
+  const loaded = scheduleRunner.load();
+  log.event({ level: 'info', kind: 'schedule.loaded', summary: `装载 ${loaded.registered} 个定时任务`, data: { ...loaded, enabled: config.schedule.enabled } });
 } else {
   log.event({ level: 'warn', kind: 'system.start', summary: 'BOT_TOKEN missing; Telegram ingress disabled' });
+  // 没有 Telegram 就没有投递通道。不装载而不是装载后每次触发失败：库里的任务原样留着，
+  // 配上 token 重启就会继续跑。
+  const pending = scheduledJobs.listActive().length;
+  if (pending) log.event({ level: 'warn', kind: 'schedule.skipped', summary: `${pending} 个定时任务未装载：没有 Telegram 投递通道`, data: { reason: 'telegram_unavailable', pending } });
 }
 let shuttingDown = false;
 /**

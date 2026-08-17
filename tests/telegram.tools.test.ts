@@ -1,7 +1,7 @@
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { ArchiveRepository, closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
+import { ArchiveRepository, ScheduleRepository, closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
 import { FileTools, PathJail, TOOL_POLICY, ToolRegistry, configSchema, registerBuiltins, type Config, type LogSink } from '@luoli/core';
 import { TelegramTools } from '@luoli/telegram';
 import type { Bot } from 'grammy';
@@ -37,9 +37,12 @@ function harness(name: string, options: { wired?: boolean; fail?: string; config
   const bot = fakeBot(calls, options.fail);
   const telegram = new TelegramTools({ bot: () => bot, archive, maxMessageChars: () => 3900 });
   const registry = new ToolRegistry(log, { request: async () => true }, { maxRegistered: 200, maxCallsPerTurn: 50, maxConsecutiveErrors: 10 });
+  // 定时任务的投递也靠 Telegram，所以它跟 telegram 一族同生共死：`deliverable` 跟着 `wired` 走。
+  const schedule = { jobs: new ScheduleRepository(db), deliverable: () => options.wired !== false,
+    runner: { register: () => true, unregister: () => true, nextRun: () => null } };
   registerBuiltins(registry, { archive, sandbox: { plan: () => ({ allowed: true }) },
     filesFor: (root: string) => new FileTools(new PathJail(root, []), 1000, 1000),
-    pubWriteMinRole: 'trusted', maxWebBytes: 1000, webSearch: { provider: 'brave', apiKey: 'k' },
+    pubWriteMinRole: 'trusted', maxWebBytes: 1000, webSearch: { provider: 'brave', apiKey: 'k' }, schedule,
     ...(options.wired === false ? {} : { telegram }) } as never);
   const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, tools: { tg: options.config ?? {} } });
   const turn = { turnId: 't1', key: 'chat:1', chatId: '1', threadId: null, initiatorUserId: '2', effectiveRole: 'owner',

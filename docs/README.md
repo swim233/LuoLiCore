@@ -29,7 +29,7 @@
 | [18-review-round3.md](./18-review-round3.md) | **复审报告（第三轮）**：第二轮 4 项 P0 全部修复；新增 4 P0 / 4 P1 / 4 P2 + T0–T1 批次与形状断言建议 | 全体 / QA |
 | [19-review-round4.md](./19-review-round4.md) | **复审报告（第四轮）**：第三轮 12 项关闭 11 项半，上下文连环模式被打断；新增 3 P0 / 4 P1 / 5 P2，全部集中在配置持久化层 + R0–R1 批次 | 全体 / QA |
 | [20-review-round5.md](./20-review-round5.md) | **复审报告（第五轮）**：第四轮 12 项全部关闭；新增 3 P0 / 6 P1 / 15 P2，集中在「本地对象交给外部依赖」的交接点 + W0–W1 批次与跨边界契约测试建议 | 全体 / QA |
-| [21-webui-coverage-gaps.md](./21-webui-coverage-gaps.md) | **WebUI 控制面覆盖缺口**：三轮整改后已清零（153/153 个已接线配置项可写、12 条端点缺口 + 后端 5 条 + `G-SSE-01` 全部完成）。动 WebUI 或从 `KNOWN_UNIMPLEMENTED_CONFIG_KEYS` 摘键之前先扫一眼 §1 的复算方法与 §5 的「不是缺口」清单 | 全体 / 运维 |
+| [21-webui-coverage-gaps.md](./21-webui-coverage-gaps.md) | **WebUI 控制面覆盖缺口**：三轮整改后已清零（153/153 个已接线配置项可写、12 条端点缺口 + 后端 5 条 + `G-SSE-01` 全部完成）。§8 是定时任务这一轮的复算：日志载荷（`G-API-15`）与工具输入两项已闭合，**新增一项未做的 `G-API-16`（没有定时任务管理面）**。动 WebUI 或从 `KNOWN_UNIMPLEMENTED_CONFIG_KEYS` 摘键之前先扫一眼 §1 的复算方法与 §5 的「不是缺口」清单 | 全体 / 运维 |
 | [22-review-round6.md](./22-review-round6.md) | **复审报告（第六轮）**：第五轮 24 项关闭 23 项；按需求方要求**分三段**列出 10 项漏洞（2 P0 实测）、13 项设计缺陷、14 项可改进条目 + X0–X2 批次。主题是「资源上界」——`grep` 的正则回溯、沙箱 stdout、流式渲染、日志文件、定时任务异常五处都能拖垮单线程进程 | 全体 / QA / 安全 |
 | [23-review-round6-remediation-report.md](./23-review-round6-remediation-report.md) | 第六轮整改的完成报告（由整改方提交）。**编号与 22 有错位，核对时以 22 的原始编号为准**，见 [24](./24-review-round6-verification.md) §1.2 | 全体 / QA |
 | [25-round7-remediation.md](./25-round7-remediation.md) | **第七轮：把 25 份文档里所有 🚧 / 「未实现」标记逐条查干净**。不是再审一遍，而是核对既有标记：1 条是文档滞后、约 50 条真没做、5 条留着只会误导。结果是 `docs/09` 的 🚧 从 11 到 0、未接线配置键从 65 到 12、`docs/22 §4` 的 11 项未处理改进全部收口、`docs/13` 从 0/372 到 93/372 且勾选由断言约束。含一条**误报纠正**（`I-05`）—— 复审报告也会错，按错的诊断改出来的东西看起来同样像「已修复」 | 全体 / QA |
@@ -87,6 +87,7 @@ Telegram ──► 准入(白名单/角色) ──► 归档(DB, 按 chat 隔离
 | D18 | 输出方式 | **可配置，默认流式 `editMessageText`** | [08](./08-telegram-adapter.md#5-输出与流式) |
 | D19 | 配额 | **记账 + 多级配额硬限**（global/chat/user，日/月，按角色覆盖），超额拒绝并提示 | [10](./10-logging-and-observability.md#5-配额) |
 | D20 | 技术栈 | TypeScript / Node 22 / pnpm workspace / **AI SDK v7** / **grammY** / **Drizzle + better-sqlite3** / Hono / Vite + Vue 3（自建 UI 层）/ vitest | [01](./01-architecture.md#5-技术栈) |
+| D21 | 定时 / 主动发言 | **做**（[14 §2 Q4](./14-open-questions.md) 已答复）：`mode='agent'` 起完整轮次、`mode='notify'` 只发预写文本；产出**照常进上下文**；停机错过**不补跑**；`minRole=trusted` 且落点绑死本会话 | [02 §10](./02-context-engine.md#10-定时轮次的上下文归属) |
 
 ---
 

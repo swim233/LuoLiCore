@@ -278,6 +278,19 @@
 | [ ] AC-TASK-006 | owner 点他人任务的取消 | 允许 |
 | [ ] AC-TASK-007 | `/tasks` | 列出在途任务（id、标题、时长、进度） |
 | [ ] AC-TASK-008 | 任务超 `turnTimeoutMs` | 「⛔ 超时中止」；`turns.state='cancelled'`，`cancel_reason='timeout'` |
+| [x] AC-TASK-020 (自动) ★ | `schedule_create` 排一个 `mode='notify'` 的任务并触发一次 | 预写文本原样发出；**触发消息与助手回复都进了 `context_messages` 且属于同一轮**（`trigger_reason='schedule'`、`turns.state='committed'`），触发消息 `from_kind='system'` 且 `tg_message_id ≥ 2_000_000_000`（[02 §10](./02-context-engine.md#10-定时轮次的上下文归属)） | 〔schedule.test.ts〕
+| [x] AC-TASK-021 (自动) ★ | `mode='agent'` 的任务触发一次 | 走真实 agent 路径（拿到的是带该会话上下文的轮次），产出发出去并提交 | 〔schedule.test.ts〕
+| [x] AC-TASK-022 (自动) | 连续触发同一个周期任务两次 | 两次各自分到一个新的合成 `tg_message_id`；撞号会让 `INSERT OR IGNORE` 静静复用上一轮那条触发消息（[02 §10.2](./02-context-engine.md#102-合成触发消息的-id-分配)） | 〔schedule.test.ts〕
+| [x] AC-TASK-023 (自动) ★ | 建任务时给非法 cron / 间隔小于 `minIntervalMinutes` / 已过去的 `at` / 超过 `maxPerChat` / 同会话重名 | 五种全部返回 `{ok:false,error,hint}`，一条都不落库 | 〔schedule.test.ts〕
+| [x] AC-TASK-024 (自动) ★ | 在会话 B 里 `schedule_cancel` 一个与会话 A 同名的任务 | 只取消 B 自己那个，A 的还在；`schedule_list` 也只看得见本会话（工具参数里没有 chatId，也不收任务 id，[05 §8](./05-tools-and-permissions.md)） | 〔schedule.test.ts〕
+| [x] AC-TASK-025 (自动) ★ | 任务创建者被降级到 `limited`，再恢复 `trusted`，再设为 `blocked` | 降级时**跳过这一次**（`schedule.skipped` / `role_downgraded`）且任务留着、恢复后照跑；`blocked` 时整条置 `cancelled` 并从调度器摘掉 | 〔schedule.test.ts〕
+| [x] AC-TASK-026 (自动) ★ | 停机期间错过触发点后启动 | 一次性任务置 `state='done'`、`last_state='missed'`；周期任务照排下一次；**都不补跑**，每条记一条 `schedule.missed` warn | 〔schedule.test.ts〕
+| [x] AC-TASK-027 (自动) | `at` 写 `2030-06-01T15:00` 且 `general.timezone='Asia/Shanghai'` | 存成 `07:00Z`，与宿主时区无关 | 〔schedule.test.ts〕
+| [x] AC-TASK-028 (自动) | 一次性任务触发完成 | `state='done'` 且从 `Scheduler` 里摘掉，不再占用任务名 | 〔schedule.test.ts〕
+| [x] AC-TASK-029 (自动) | `schedule.enabled=false` 后触发 | 只记 `schedule.skipped`，任务仍是 `active`，不被删 | 〔schedule.test.ts〕
+| [x] AC-TASK-030 (自动) | 库里某行的 cron 表达式坏掉（手改 / 跨版本残留）后启动 | 那一条置 `cancelled` + `schedule.failed`，其余任务照常装载 | 〔schedule.test.ts〕
+| [x] AC-TASK-031 (自动) | 结束的任务行超过 `schedule.retentionDays` | 被清掉；**活跃任务即使很久没动也不清** | 〔schedule.test.ts〕
+| [x] AC-TASK-032 (自动) | `Scheduler` 重名注册 / `remove` 一个不存在的名字 / 给绝对时间 / 给两个不同时区的同一表达式 | 重名抛错；`remove` 返回 false；一次性任务的 `nextRun` 等于给定时刻；两个时区的 `nextRun` 不同 | 〔scheduler.test.ts〕
 
 ## 7. 记忆（AC-MEM）
 
@@ -305,6 +318,8 @@
 |---|---|---|
 | [ ] AC-LOG-001 ★ | 完成一次含子 agent 的 turn，用 `turn_id` 查 trace | 完整调用树：ctx.open → prompt.build → model.call ×N → tool.call（含 spawn_agent）→ 子 agent 的 model.call/tool.call/ask → tg.send → ctx.commit |
 | [ ] AC-LOG-002 ★ | 展开任一 `model.call` | 含完整请求 messages、tools 列表、settings、响应文本/toolCalls、四类 token、费用、延迟、finishReason |
+| [x] AC-LOG-020 (自动) ★ | 一次成功的工具调用与一次失败的工具调用，各查它的 `tool.call` 行 | **同一行里既有 `input` 又有 `output`**；失败那行是 `input` + `error`。一个 span 只落一行，开始时的载荷与结束时的载荷是合并的 —— 此前 `end()` 用结束载荷整体顶掉开始那份，于是 `input` 一次都没进过库，WebUI 详情因此只有工具输出 | 〔log.span.test.ts〕
+| [x] AC-LOG-021 (自动) | `span.end()` 不给载荷 / 给一个非对象值 / 调两次 | 不给：开始那份原样保留；非对象：挂在 `result` 下而不顶掉开始那份；两次：只落一行 | 〔log.span.test.ts〕
 | [ ] AC-LOG-003 ★ | 展开任一 `tool.call` | 含完整输入、输出（或截断标记+全文引用）、耗时、是否沙箱、是否经审批 |
 | [ ] AC-LOG-004 (自动) ★ | 求和校验 | 该 turn 所有 `usage_ledger.cost_usd` 之和 == `turns.cost_usd`（误差 <1e-9） |
 | [ ] AC-LOG-005 (自动) | 子 agent 的 span | `parent_span_id` = 派发它的 `tool.call` span；费用计入同一 `turn_id` |
@@ -376,6 +391,8 @@
 | [ ] AC-WEB-011 | 消息检索 | FTS 中文命中；跨会话检索仅 owner 可用；`raw_json` 与附件可查看/下载 |
 | [ ] AC-WEB-011b (自动) | 消息页默认视图（库里有 25 次对话） | 按 turn 列出最近 20 次，提问与回答成对显示；翻到第 2 页得到剩下 5 次；流式切成多条消息的回复不重复显示；搜索框与 `[搜索归档]` 在同一行，回车等价点按钮 |
 | [ ] AC-WEB-011c (自动) | 对某一轮点 `[查看详情]` | 弹出该轮实际调用：`model.call` 的载荷里能看到 `request.body`（真正发给上游的请求体）；超过 `logs.bodyMaxBytes` 被挪进 `blobs/` 的载荷同样解引用出来，而不是显示 `{"fileRef":…}`；超长 JSON 截断并置 `truncated`，`[复制 JSON]` / `[下载完整 JSON]` 取到的是完整那一份；`logs.captureBodies` 关闭时页面明说「没有请求体」；turn 不存在返回 404 |
+| [x] AC-WEB-011d (自动) ★ | 对一轮点 `[查看详情]`，切到「工具输入输出」组 | 列出该轮的 `tool_call` / `tool_result`，**能看到工具调用的原始参数**；被裁剪降级过的行（`prune_applied=1`）也给出库里保留的原文并标注「模型现在看到的是占位符」；这一组读 `context_messages.parts_json` 而不是日志，所以对 `LogSink.span` 修好之前的历史轮次同样有效，也不受 `logs.retentionDays` / `captureBodies` 影响；别的会话里同 `turn_id` 的 parts 不会串进来 | 〔webui.console.test.ts〕
+| [x] AC-WEB-011e (自动) ★ | 日志页点一行（分别点有 trace 的、没有 trace 的、载荷被挪进 `blobs/` 的） | 三种都打开详情：元信息（trace/span/parent/chat/user/key/耗时）+ 格式化载荷；blob 解引用；无载荷的行如实说「没有载荷」而不是空白。`GET /api/logs/:id` 对不存在的 id 与非数字 id 都是 404，且 `/api/logs/blob`、`/api/logs/trace/:traceId` 仍然可达（`:id` 注册在它们之后）。列表响应里**不含 `data_json`**，只带 `data_bytes` | 〔webui.console.test.ts〕
 | [ ] AC-WEB-012 | 提示词编辑 | token 实时计数；保存生成 diff 版本；`[回滚]` 生效；`[预览组装]` 与实际一致 |
 | [ ] AC-WEB-012b | 提示词页文档列表 | 卡片网格而非四列表格：每张卡写明文档类型（人格/助理守则/公共记忆/私有记忆）、进哪个 block 及用途、`全局` 或所属会话/用户、字节 / token / 更新时间；选中高亮，未选中时右侧是提示卡片；PRIMEMORY 打开时有「查看会被记录」的醒目提示 |
 | [ ] AC-WEB-013 | Provider 页 | key 永不回显；`[测试连接]` 可用；`[从 Provider 拉取模型]` 列出上游全部模型、支持搜索与多选批量导入、已存在的行不可重复导入；模型定价可编辑；别名 fallback 链可拖拽排序 |
@@ -481,13 +498,13 @@
 | Telegram 与准入 | | 17 / 41 | | | |
 | Agent 与 Provider | | 20 / 42 | | | |
 | 工具/沙箱/审批 | | 15 / 54 | | | |
-| Subagent 与任务 | | 2 / 22 | | | |
+| Subagent 与任务 | | 15 / 35 | | | |
 | 记忆 | | 1 / 13 | | | |
-| 日志与成本 | | 2 / 23 | | | |
+| 日志与成本 | | 4 / 25 | | | |
 | 扩展生态 | | 3 / 27 | | | |
-| WebUI | | 1 / 72 | | | |
+| WebUI | | 3 / 74 | | | |
 | 安全 | | 0 / 15 | | | |
 | 运维 | | 1 / 9 | | | |
-| **合计** | | **105 / 380** | | | |
+| **合计** | | **122 / 397** | | | |
 
 **整体通过条件**：全部 ★ 项通过 + 非 ★ 项通过率 ≥ 95% + 所有豁免项经需求方书面确认。

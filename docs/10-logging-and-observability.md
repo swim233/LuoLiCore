@@ -6,6 +6,8 @@
 
 ```
 trace_id = turn_id                        （命令类操作用 cmd_<ulid>；定时任务用 job_<ulid>）
+                                          定时任务一旦开出轮次，trace_id 就是那一轮的 turn_id；
+                                          `job_<ulid>` 只用在开轮之前（跳过、错过、装载）
 span_id  = ULID
 parent_span_id = 上级 span
 
@@ -51,7 +53,7 @@ turn 01J8…                                     kind=turn.start / turn.end
 | `model.error` | error/warn | alias, modelId, errorKind, status, retryAttempt, willFallback |
 | `provider.fallback` | warn | from, to, reason |
 | `provider.health` | info/warn | provider, state, ms |
-| `tool.call` | info | tool, source, inputRef, ms, ok, outputBytes, truncated |
+| `tool.call` | info | **input**（工具参数）, output, ms, ok；失败时 input + error。一个 span 只落一行，所以开始时的 `input` 与结束时的 `output` 是**合并**进同一行的 —— `LogSink.span().end()` 曾经用结束载荷整体顶掉开始那份，于是这一行只有 `output`，WebUI 的对话详情因此永远看不到工具输入（`tests/log.span.test.ts`） |
 | `tool.denied` | warn | tool, reason(role/rate/approval), role |
 | `tool.error` | warn | tool, errorKind, message |
 | `tool.disabled` | warn | tool —— 运维在 WebUI 关掉的工具被调用（目录之外的第二道硬拦截） |
@@ -73,6 +75,12 @@ turn 01J8…                                     kind=turn.start / turn.end
 | `webui.action` | info | method, path, bodyDigest, ip |
 | `config.changed` | info | keys[], actor |
 | `maintenance.*` | info | job, ms, affected |
+| `schedule.fired` | info | job, name, mode, role, runCount —— 定时任务开始一轮（trace_id 是那一轮的 turn_id） |
+| `schedule.skipped` | warn | job, name, reason（`schedule.disabled` \| `role_downgraded` \| `quota_exceeded` \| `turn_queue_rejected` \| `telegram_unavailable`）—— 任务留着，只跳过这一次 |
+| `schedule.missed` | warn | job, name, expected, catchUp:false —— 停机期间错过了触发点。**不补跑**（[02 §10.3](./02-context-engine.md#103-不补跑)），所以这一条是「今天早报没发」的唯一凭据 |
+| `schedule.failed` | error | job, name, error —— 这一次触发失败；一次性任务不重试 |
+| `schedule.cancelled` | warn | job, role —— 创建者被封禁，整条任务停用 |
+| `schedule.loaded` | info | registered, missed, enabled —— 启动时装载了多少条 |
 | `system.start` / `system.stop` | info | version, mode, uptime |
 | `model.error` | error | alias, modelId, cause —— fallback 链整条耗尽时的最后一个错误 |
 | `system.crash` | error | event（`uncaughtException` \| `unhandledRejection`）, detail（stack） |

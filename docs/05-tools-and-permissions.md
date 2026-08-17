@@ -252,7 +252,31 @@ bash: tool({
   而 `TOOL_POLICY ↔ 注册表` 的启动断言只看「注册没注册」，一个字都没报 —— 见 AC-TOOL-024。
   没有 `BOT_TOKEN` 时必须保持不传：工具进了目录再在调用时失败，比压根不存在更糟。
 
-### 3.8 Skill / Plugin / MCP 工具
+### 3.8 定时任务
+
+> 语义与上下文归属见 [02 §10](./02-context-engine.md#10-定时轮次的上下文归属)；决策见 [14 §2 Q4](./14-open-questions.md)。
+
+| 工具 | minRole | 说明 |
+|---|---|---|
+| `schedule_create` | trusted | 排一个定时任务。`cron`（五段式，周期）与 `at`（本地时间，一次性）二者给一个；`mode='agent'` 到点起一轮完整对话执行 `text`，`mode='notify'` 到点原样发出 `text`（不调模型） |
+| `schedule_list` | trusted | 列出**本会话**的任务：活跃的在前，带 `nextRun` 与上一次的结果 |
+| `schedule_cancel` | trusted | 按名字取消本会话的一个活跃任务 |
+
+- **起点是 trusted 而不是 limited**：定时任务是唯一能让 bot 在没人说话时主动花钱的能力。
+- **参数里没有 `chatId` / `userId`**（§8）：落点一律取自 `context.turn`。收一个 chatId 参数就等于
+  给任何 trusted 群成员一个跨会话写原语 —— 他能让 bot 每小时往别的群发东西，而那个群里没人
+  解释得清这消息哪来的。`list` / `cancel` 同样按 `context.turn.key` 过滤、**不接受任务 id**。
+- 建之前挡四件事，每条都返回 `{ok:false,error,hint}`：cron 非法、两次触发间隔 <
+  `schedule.minIntervalMinutes`（默认 5 分钟 —— `* * * * *` 在 agent 模式下就是每分钟一次模型调用）、
+  `at` 已经过去（不补跑，所以过去的时间毫无意义）、本会话活跃任务数 ≥ `schedule.maxPerChat`。
+- `at` 按 `general.timezone` 解析而不是宿主时区：`new Date('2026-08-18T15:00')` 在 UTC 宿主上
+  会把「下午三点」变成晚上十一点。
+- **触发时重算有效角色**（[02 §10.4](./02-context-engine.md#104-触发时重算权限)）：降级到 trusted
+  以下跳过这一次，`blocked` 整条停用。任务是在创建那一刻的角色下被允许的，而它此后每天都触发。
+- 接线是这一族的边界，同 §3.7：没有 `TelegramToolBridge`（缺 `BOT_TOKEN`）时三个工具整体
+  不进目录 —— 排一个到点发不出去的任务是纯粹的假承诺。
+
+### 3.9 Skill / Plugin / MCP 工具
 
 见 [07](./07-skills-plugins-mcp.md)。统一由 `ToolRegistry` 注入，命名空间：
 - Skill：`skill_<name>`（+ `load_skill`）
@@ -280,6 +304,7 @@ bash: tool({
 | `web_fetch` | ✗ | ✓ allowlist | ✓ | ✓ |
 | `web_search` | ✗ | ✓ | ✓ | ✓ |
 | `send_message` `send_photo` `react` | ✗ | ✓ | ✓ | ✓ |
+| `schedule_create` `schedule_list` `schedule_cancel` | ✗ | ✗ | ✓ 本会话 | ✓ 本会话 |
 | `send_file` `pin_message` | ✗ | ✗ | ✓ | ✓ |
 | Skill | ✗ | 按 `min-role` | 按 `min-role` | ✓ |
 | Plugin 工具 | ✗ | 按 `minRole` | 按 `minRole` | ✓ |

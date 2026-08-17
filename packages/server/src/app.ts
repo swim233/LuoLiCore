@@ -944,7 +944,16 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     const rows = dependencies.db.prepare(`SELECT id,ts,level,kind,summary,span_id AS spanId,parent_span_id AS parentSpanId,duration_ms AS durationMs,data_json AS data
       FROM log_events WHERE trace_id=? ORDER BY ts,id LIMIT 500`).all(id) as Array<Record<string, unknown> & { data: string | null }>;
     const events = rows.map(({ data, ...row }) => ({ ...row, ...detailPayload(data) }));
-    return ctx.json({ ok: true, data: { turn, captureBodies: currentConfig().logs.captureBodies, events } });
+    // 工具输入的第二个来源，也是**唯一对历史轮次有效**的那个：`log_events` 按 logs.retentionDays 清，
+    // 且 `logs.captureBodies=false` 时压根不带请求体，而 `context_messages.parts_json` 永久保留。
+    // 刻意不走 `ContextRepository.messages()` —— 那条路会跑 elidePart，把降级过的行改写成
+    // `{elided:true}`。分级降级只翻 prune_applied 标志位、原始 parts 一直在（docs/02 §裁剪）,
+    // 所以这里直读列，并把 prune 状态一起送出去：界面要能说「模型已经看不到这段参数，但它长这样」。
+    const contextRows = dependencies.db.prepare(`SELECT ordinal,id,role,origin,prune_level AS pruneLevel,prune_applied AS pruneApplied,
+      parts_json AS parts,text_preview AS textPreview,tokens,created_at AS createdAt
+      FROM context_messages WHERE key=? AND turn_id=? ORDER BY ordinal LIMIT 500`).all(turn.key, id) as Array<Record<string, unknown> & { parts: string }>;
+    const contextMessages = contextRows.map(({ parts, ...row }) => ({ ...row, pruneApplied: Boolean(row.pruneApplied), ...detailPayload(parts) }));
+    return ctx.json({ ok: true, data: { turn, captureBodies: currentConfig().logs.captureBodies, events, contextMessages } });
   });
   app.get('/api/messages/:id', (ctx) => { const row = dependencies.db.prepare('SELECT id,chat_id AS chatId,message_thread_id AS threadId,tg_message_id AS tgMessageId,direction,from_kind AS fromKind,from_user_id AS fromUserId,from_name AS fromName,from_username AS fromUsername,kind,text,tg_date AS tgDate,triggered,trigger_reason AS triggerReason,turn_id AS turnId,revision,deleted_at AS deletedAt FROM messages WHERE id=?').get(Number(ctx.req.param('id'))); return row ? ctx.json({ ok: true, data: row }) : ctx.json(apiError('not_found', '消息不存在', 404).body, 404); });
   app.delete('/api/messages/:id', (ctx) => {
@@ -1277,6 +1286,25 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
   });
   app.get('/api/logs/trace/:traceId', (ctx) => ctx.json({ ok: true, data: dependencies.operations.logs(2000, ctx.req.param('traceId')) }));
   app.get('/api/logs/blob', (ctx) => { try { const path = safeRef(currentConfig().logs.dir, ctx.req.query('ref') ?? ''); return existsSync(path) ? ctx.text(readFileSync(path, 'utf8')) : ctx.json(apiError('not_found', '日志载荷不存在', 404).body, 404); } catch { return ctx.json(apiError('invalid_ref', '非法日志引用', 403).body, 403); } });
+  /**
+   * 单条日志事件的详情（日志页点开一行）。**必须注册在 `/api/logs/blob` 与
+   * `/api/logs/trace/:traceId` 之后** —— Hono 按注册序匹配，`:id` 放前面会把那两条整个吃掉。
+   * 非数字 id 直接 404，别让 `blob` / `trace` 这种字符串走进 `Number()` 变成 NaN 查询。
+   *
+   * 列表刻意不带载荷（`OperationsRepository.logs` 的注释），所以正文只有这条路能拿到，
+   * 并且跟对话详情共用 `detailPayload`：同一套 blob 解引用与截断语义（docs/10 §读出侧必须解引用）。
+   */
+  app.get('/api/logs/:id', (ctx) => {
+    const raw = ctx.req.param('id');
+    if (!/^\d+$/.test(raw)) return ctx.json(apiError('not_found', '日志 id 无效', 404).body, 404);
+    const row = dependencies.db.prepare(`SELECT id,ts,level,kind,trace_id AS traceId,span_id AS spanId,parent_span_id AS parentSpanId,
+      chat_id AS chatId,user_id AS userId,key,summary,file_ref AS fileRefColumn,duration_ms AS durationMs,data_json AS data
+      FROM log_events WHERE id=?`).get(Number(raw)) as (Record<string, unknown> & { data: string | null }) | undefined;
+    if (!row) return ctx.json(apiError('not_found', '这条日志不存在（可能已被保留策略清理）', 404).body, 404);
+    const { data, fileRefColumn, ...rest } = row;
+    const payload = detailPayload(data);
+    return ctx.json({ ok: true, data: { ...rest, ...payload, fileRef: payload.fileRef ?? (fileRefColumn as string | null) } });
+  });
   // 对话详情里的 JSON 按 DETAIL_MAX_CHARS 截断（单个 span 的请求体能到几百 KB），排查时要能拿到完整的那一份。
   app.get('/api/logs/:id/data', (ctx) => {
     const row = dependencies.db.prepare('SELECT kind,data_json AS data FROM log_events WHERE id=?').get(Number(ctx.req.param('id'))) as { kind: string; data: string | null } | undefined;

@@ -27,7 +27,12 @@ interface ProviderTest { reachable: boolean; code: string; message: string; stat
 interface CatalogMeta { match: 'provider' | 'official' | 'third-party' | 'none'; catalogProviderId: string | null; catalogProviderName: string | null; catalogModelId: string | null; normalized: boolean; priceRange: { min: number; max: number; providers: number } | null; capabilities: Record<string, boolean>; reasoningControl: string | null; reasoningEfforts: string[]; modalities: { input: string[]; output: string[] }; knowledge: string | null; releaseDate: string | null }
 interface CatalogModel { modelId: string; displayName: string | null; contextWindow: number | null; maxOutput: number | null; limitSource: string | null; priceIn: number | null; priceOut: number | null; priceCacheRead: number | null; priceCacheWrite: number | null; meta: CatalogMeta | null }
 interface CatalogStatus { enabled: boolean; available: boolean; stale: boolean; ageMs: number | null; ttlHours: number; models?: number; providers?: number; fetchedAt?: number; error?: string | null; outcome?: string }
-interface LogRow { id: number; ts: number; level: string; kind: string; summary: string; trace_id: string | null }
+/** `/api/logs` 直出 `log_events` 的列名，所以这里是 snake_case。曾经只声明了前 6 个，
+ *  于是 trace 视图读 `node.parentSpanId` / `node.durationMs` 永远是 undefined ——
+ *  树不缩进、每个节点都显示 0 ms，而 .vue 模板不进 `tsc --noEmit`，没人挡得住。 */
+interface LogRow { id: number; ts: number; level: string; kind: string; summary: string; trace_id: string | null;
+  span_id: string | null; parent_span_id: string | null; chat_id: string | null; user_id: string | null; key: string | null;
+  duration_ms: number | null; file_ref: string | null; data_bytes: number | null }
 
 interface Chat { key: string; chatId: string; threadId: number | null; scope: string; tokens: number | null; messages: number | null }
 interface Usage { id: number; ts: number; model_alias: string; input_tokens: number; output_tokens: number; cost_usd: number; ok: number }
@@ -222,7 +227,7 @@ const COLUMNS = {
   principals: [{ key: 'kind', header: '类型' }, { key: 'displayName', header: '显示名' }, { key: 'tgId', header: 'Telegram ID' }, { key: 'role', header: '角色', width: '8rem' }, { key: 'username', header: '用户名' }],
   models: [{ key: 'model_id', header: '模型 ID' }, { key: 'provider_id', header: 'Provider' }, { key: 'context_window', header: '窗口' }, { key: 'capabilities', header: '能力' }, { key: 'price_in', header: '输入价格' }, { key: 'price_out', header: '输出价格' }, { key: 'enabled', header: '启用', width: '6rem' }],
   aliases: [{ key: 'alias', header: '别名', width: '12%' }, { key: 'purpose', header: '用途', width: '27%' }, { key: 'chain', header: 'Fallback 链', width: '31%' }, { key: 'settings', header: '采样参数', width: '20%' }, { key: 'actions', header: '', width: '10%' }],
-  logs: [{ key: 'ts', header: '时间', width: '13rem' }, { key: 'level', header: '级别', width: '7rem' }, { key: 'kind', header: '事件' }, { key: 'summary', header: '摘要' }, { key: 'trace_id', header: 'Trace' }],
+  logs: [{ key: 'ts', header: '时间', width: '13rem' }, { key: 'level', header: '级别', width: '7rem' }, { key: 'kind', header: '事件' }, { key: 'summary', header: '摘要' }, { key: 'data_bytes', header: '载荷', width: '6rem' }, { key: 'trace_id', header: 'Trace' }],
   tasks: [{ key: 'title', header: '标题' }, { key: 'state', header: '状态', width: '7rem' }, { key: 'updated_at', header: '更新时间', width: '13rem' }, { key: 'actions', header: '', width: '7rem' }],
   activeTurns: [{ key: 'who', header: '发起人' }, { key: 'chat', header: '会话' }, { key: 'progress', header: '当前动作' }, { key: 'stats', header: '步数 / 花费', width: '11rem' }, { key: 'elapsed', header: '已用时长', width: '8rem' }, { key: 'actions', header: '', width: '6rem' }],
   approvals: [{ key: 'tool_name', header: '工具' }, { key: 'risk', header: '风险', width: '7rem' }, { key: 'state', header: '状态', width: '7rem' }, { key: 'requested_at', header: '请求时间', width: '12rem' }, { key: 'actions', header: '', width: '12rem' }],
@@ -404,6 +409,33 @@ async function clearChatModelAlias(): Promise<void> {
   } catch (error) { toastError('清除会话模型别名失败', error); }
 }
 async function inspectTrace(traceId: string | null): Promise<void> { if (!traceId) return; traceDetail.value = await api<LogRow[]>(`/api/logs/trace/${encodeURIComponent(traceId)}`); }
+/**
+ * 日志行的详情。此前点一行只会去重建 trace，`trace_id` 为空的那些（`system.start`、
+ * `config.changed`、`maintenance.*`、`webui.action`）点了**什么都不发生**；有 trace 的也只得到
+ * 一串 kind/summary，`data_json` 从没露过面。载荷单取一次而不是从列表行里拿 —— 列表已经不带它了。
+ */
+interface LogDetail { id: number; ts: number; level: string; kind: string; summary: string; traceId: string | null; spanId: string | null;
+  parentSpanId: string | null; chatId: string | null; userId: string | null; key: string | null; durationMs: number | null;
+  text: string | null; bytes: number; truncated: boolean; fileRef: string | null }
+const logDialog = ref(false);
+const logLoading = ref(false);
+const logDetail = ref<LogDetail | null>(null);
+async function openLogDetail(row: LogRow): Promise<void> {
+  logDialog.value = true; logLoading.value = true; logDetail.value = null;
+  try { logDetail.value = await api<LogDetail>(`/api/logs/${row.id}`); }
+  catch (error) { toastError('加载日志详情失败', error); logDialog.value = false; }
+  finally { logLoading.value = false; }
+}
+async function copyLogDetail(): Promise<void> {
+  const entry = logDetail.value;
+  if (!entry) return;
+  try {
+    let text = entry.text ?? '';
+    if (entry.truncated) { const response = await fetch(`/api/logs/${entry.id}/data`); if (!response.ok) throw new Error(`取完整载荷失败：HTTP ${response.status}`); text = await response.text(); }
+    await navigator.clipboard.writeText(text);
+    pushToast({ severity: 'success', summary: '已复制完整 JSON', detail: `${entry.kind} · ${formatBytes(entry.bytes)}` });
+  } catch (error) { toastError('复制失败', error); }
+}
 // 提示词文档以前是一张 id/scope/bytes/updated_at 的四列表格：光看 `character:global` 这种 id
 // 认不出哪块是人格、哪块是助理守则，也看不出它进的是 prompt 的第几个 block。改成卡片，把用途写在脸上。
 interface PromptMeta { label: string; icon: string; purpose: string; severity: TagSeverity }
@@ -622,8 +654,13 @@ async function softDeleteMessage(id: number, label: string): Promise<void> {
 // 只有日志里那一份是真的：turns 表存统计、messages 表存最终文本，两者都看不出请求体长什么样。
 interface DetailEvent { id: number; ts: number; level: string; kind: string; summary: string; spanId: string | null; parentSpanId: string | null; durationMs: number | null;
   text: string | null; bytes: number; truncated: boolean; fileRef: string | null }
-interface TurnDetail { turn: Record<string, unknown>; captureBodies: boolean; events: DetailEvent[] }
-const DETAIL_GROUPS = [['model', '模型调用'], ['tool', '工具与沙箱'], ['other', '轮次与上下文'], ['all', '全部']] as const;
+/** 这一轮写进上下文的消息，`parts` 是**原始** parts_json（没跑过 elidePart）。 */
+interface DetailContextMessage { ordinal: number; id: string; role: string; origin: string; pruneLevel: number; pruneApplied: boolean;
+  textPreview: string | null; tokens: number; createdAt: number; text: string | null; bytes: number; truncated: boolean; fileRef: string | null }
+interface TurnDetail { turn: Record<string, unknown>; captureBodies: boolean; events: DetailEvent[]; contextMessages: DetailContextMessage[] }
+// `parts` 单列一组而不是混进 events：它的来源是 context_messages 而不是 log_events —— 日志按
+// retentionDays 清掉之后、或 captureBodies 关掉时，这一组是工具输入唯一还看得见的地方。
+const DETAIL_GROUPS = [['model', '模型调用'], ['tool', '工具与沙箱'], ['parts', '工具输入输出'], ['other', '轮次与上下文'], ['all', '全部']] as const;
 type DetailGroup = typeof DETAIL_GROUPS[number][0];
 const detailDialog = ref(false);
 const detailLoading = ref(false);
@@ -631,13 +668,17 @@ const detailTurnId = ref('');
 const detail = ref<TurnDetail | null>(null);
 const detailGroup = ref<DetailGroup>('model');
 const expandedEvents = ref(new Set<number>());
-function eventGroup(kind: string): Exclude<DetailGroup, 'all'> {
+const expandedParts = ref(new Set<number>());
+function eventGroup(kind: string): Exclude<DetailGroup, 'all' | 'parts'> {
   if (kind.startsWith('model.') || kind.startsWith('provider.')) return 'model';
   if (kind.startsWith('tool.') || kind.startsWith('sandbox.') || kind.startsWith('approval.') || kind.startsWith('agent.')) return 'tool';
   return 'other';
 }
-const detailEvents = computed(() => (detail.value?.events ?? []).filter((entry) => detailGroup.value === 'all' || eventGroup(entry.kind) === detailGroup.value));
-const detailCount = (group: DetailGroup): number => (detail.value?.events ?? []).filter((entry) => group === 'all' || eventGroup(entry.kind) === group).length;
+const detailEvents = computed(() => detailGroup.value === 'parts' ? []
+  : (detail.value?.events ?? []).filter((entry) => detailGroup.value === 'all' || eventGroup(entry.kind) === detailGroup.value));
+const detailParts = computed(() => (detail.value?.contextMessages ?? []).filter((entry) => entry.origin === 'tool_call' || entry.origin === 'tool_result'));
+const detailCount = (group: DetailGroup): number => group === 'parts' ? detailParts.value.length
+  : (detail.value?.events ?? []).filter((entry) => group === 'all' || eventGroup(entry.kind) === group).length;
 /** 1024 进制。原来只到 MB，而系统信息里的 DB 与 workspace 占用都能到 GB —— 停在 MB 会出现
  *  「12800.0 MB」这种读不出量级的数字。undefined 显示成 —（端点没给，不是 0 字节）。 */
 function formatBytes(bytes: number | undefined): string {
@@ -648,7 +689,8 @@ function formatBytes(bytes: number | undefined): string {
   return `${unit && value < 100 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
 }
 async function openDetail(turnId: string): Promise<void> {
-  detailTurnId.value = turnId; detailDialog.value = true; detailLoading.value = true; detail.value = null; expandedEvents.value = new Set(); detailGroup.value = 'model';
+  detailTurnId.value = turnId; detailDialog.value = true; detailLoading.value = true; detail.value = null;
+  expandedEvents.value = new Set(); expandedParts.value = new Set(); detailGroup.value = 'model';
   try {
     const result = await api<TurnDetail>(`/api/turns/${encodeURIComponent(turnId)}/detail`);
     detail.value = result;
@@ -660,6 +702,7 @@ async function openDetail(turnId: string): Promise<void> {
   finally { detailLoading.value = false; }
 }
 function toggleEvent(id: number): void { const next = new Set(expandedEvents.value); if (next.has(id)) next.delete(id); else next.add(id); expandedEvents.value = next; }
+function togglePart(ordinal: number): void { const next = new Set(expandedParts.value); if (next.has(ordinal)) next.delete(ordinal); else next.add(ordinal); expandedParts.value = next; }
 /** 复制的必须是完整那份：界面上显示的可能被 DETAIL_MAX_CHARS 截过，粘出去就不是合法 JSON 了。 */
 async function copyEvent(event: DetailEvent): Promise<void> {
   try {
@@ -2139,12 +2182,13 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             <template #actions="{ data }"><div class="card-actions"><UiButton variant="text" size="small" :icon="data.state === 'absent' ? 'pi pi-plus' : 'pi pi-pencil'" :aria-label="data.state === 'absent' ? '配置别名' : '编辑别名'" @click="editAlias(data)" /><UiButton v-if="data.state !== 'absent'" variant="text" size="small" severity="danger" icon="pi pi-trash" aria-label="删除别名" @click="removeAlias(data.alias)" /></div></template>
           </DataGrid>
         </section>
-        <section v-else-if="active === 'logs'" key="logs" class="surface page-surface"><header><div><p class="eyebrow">OBSERVABILITY</p><h2>日志与 Trace</h2><p>点击任一 trace 节点，重建完整调用树并查看 payload。</p></div><UiTag :value="connected ? '实时' : '重连中'" :severity="connected ? 'success' : 'warn'" /></header>
-          <DataGrid :rows="logs" :columns="COLUMNS.logs" data-key="id" paginate clickable empty="暂无日志" @row-click="inspectTrace($event.trace_id)">
+        <section v-else-if="active === 'logs'" key="logs" class="surface page-surface"><header><div><p class="eyebrow">OBSERVABILITY</p><h2>日志与 Trace</h2><p>点击任一行看这条事件的完整载荷；详情里可以再展开它所属的整条 trace。</p></div><UiTag :value="connected ? '实时' : '重连中'" :severity="connected ? 'success' : 'warn'" /></header>
+          <DataGrid :rows="logs" :columns="COLUMNS.logs" data-key="id" paginate clickable empty="暂无日志" @row-click="openLogDetail($event)">
             <template #ts="{ data }">{{ new Date(data.ts).toLocaleString() }}</template>
             <template #level="{ data }"><span :class="['level', data.level]">{{ data.level }}</span></template>
+            <template #data_bytes="{ data }"><small>{{ data.data_bytes ? formatBytes(data.data_bytes) : '—' }}</small></template>
           </DataGrid>
-          <article v-if="traceDetail.length" class="inspector"><header><b>Trace {{ traceDetail[0]?.trace_id }}</b><UiTag :value="`${traceDetail.length} spans`" /></header><ol><li v-for="node in traceDetail" :key="node.id" :style="{ marginLeft: node.parentSpanId ? '24px' : '0' }"><code>{{ node.kind }}</code><span>{{ node.summary }}</span><small>{{ node.durationMs ?? 0 }} ms</small></li></ol></article>
+          <article v-if="traceDetail.length" class="inspector"><header><b>Trace {{ traceDetail[0]?.trace_id }}</b><UiTag :value="`${traceDetail.length} spans`" /></header><ol><li v-for="node in traceDetail" :key="node.id" :style="{ marginLeft: node.parent_span_id ? '24px' : '0' }"><code>{{ node.kind }}</code><span>{{ node.summary }}</span><small>{{ node.duration_ms ?? 0 }} ms</small></li></ol></article>
         </section>
         <section v-else-if="active === 'prompts'" key="prompts" class="surface page-surface"><header><div><p class="eyebrow">PROMPT WORKSPACE</p><h2>提示词编辑与版本</h2><p>每次保存落盘 unified diff；预览与真实轮次共用同一条 PromptAssembler 路径。</p></div><UiButton label="预览组装" icon="pi pi-eye" @click="openPromptPreview" /></header>
           <div class="prompt-workbench">
@@ -2401,7 +2445,26 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
         <nav class="subtabs" aria-label="事件分组">
           <button v-for="[key, label] in DETAIL_GROUPS" :key="key" type="button" :class="{ active: detailGroup === key }" @click="detailGroup = key">{{ label }}<span>{{ detailCount(key) }}</span></button>
         </nav>
-        <ol class="detail-events">
+        <ol v-if="detailGroup === 'parts'" class="detail-events">
+          <li v-for="part in detailParts" :key="part.ordinal">
+            <button type="button" @click="togglePart(part.ordinal)">
+              <i :class="expandedParts.has(part.ordinal) ? 'pi pi-chevron-down' : 'pi pi-chevron-right'" aria-hidden="true" />
+              <span :class="['level', part.origin === 'tool_call' ? 'info' : 'debug']">{{ ORIGIN_LABELS[part.origin] ?? part.origin }}</span>
+              <code>#{{ part.ordinal }}</code>
+              <span class="detail-summary-text">{{ part.textPreview ?? part.id }}</span>
+              <small>{{ formatBytes(part.bytes) }} · {{ part.tokens }} tok</small>
+              <time>{{ new Date(part.createdAt).toLocaleTimeString() }}</time>
+            </button>
+            <div v-if="expandedParts.has(part.ordinal)" class="detail-payload">
+              <!-- 降级过的行必须说清：库里参数还在，但模型这一轮看到的是 {elided:true}。 -->
+              <p v-if="part.pruneApplied" class="callout warn"><i class="pi pi-exclamation-triangle" aria-hidden="true" />这条已被裁剪降级（level {{ part.pruneLevel }}）：模型现在看到的是占位符，下面是库里保留的原始 parts。</p>
+              <pre v-if="part.text" v-text="part.text" />
+              <p v-else class="empty">这条消息没有 parts。</p>
+            </div>
+          </li>
+          <li v-if="!detailParts.length" class="empty">这一轮没有工具调用。这一组读的是 <code>context_messages</code> 的原始 parts，不受 <code>logs.retentionDays</code> 与 <code>logs.captureBodies</code> 影响。</li>
+        </ol>
+        <ol v-else class="detail-events">
           <li v-for="event in detailEvents" :key="event.id">
             <button type="button" @click="toggleEvent(event.id)">
               <i :class="expandedEvents.has(event.id) ? 'pi pi-chevron-down' : 'pi pi-chevron-right'" aria-hidden="true" />
@@ -2426,6 +2489,42 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
         </ol>
       </template>
       <template #footer><span class="catalog-count">trace <code>{{ detailTurnId }}</code></span><UiButton variant="outlined" icon="pi pi-sitemap" label="在日志页看这条 trace" @click="detailDialog = false; active = 'logs'; inspectTrace(detailTurnId)" /><UiButton variant="text" label="关闭" @click="detailDialog = false" /></template>
+    </UiModal>
+    <UiModal v-model:visible="logDialog" :title="logDetail ? `日志详情 ${logDetail.kind}` : '日志详情'" width="min(1120px, 96vw)">
+      <p v-if="logLoading" class="empty"><i class="pi pi-spin pi-spinner" aria-hidden="true" /> 读取这条事件…</p>
+      <template v-else-if="logDetail">
+        <div class="detail-summary">
+          <span><small>级别</small><span :class="['level', logDetail.level]">{{ logDetail.level }}</span></span>
+          <span><small>时间</small><b>{{ new Date(logDetail.ts).toLocaleString() }}</b></span>
+          <span><small>事件</small><code>{{ logDetail.kind }}</code></span>
+          <span><small>耗时</small><b>{{ logDetail.durationMs === null ? '—' : `${logDetail.durationMs} ms` }}</b></span>
+          <span><small>载荷</small><b>{{ logDetail.bytes ? formatBytes(logDetail.bytes) : '无' }}</b></span>
+          <span v-if="logDetail.key"><small>会话</small><code>{{ logDetail.key }}</code></span>
+          <span v-if="logDetail.chatId"><small>chat</small><code>{{ logDetail.chatId }}</code></span>
+          <span v-if="logDetail.userId"><small>user</small><code>{{ logDetail.userId }}</code></span>
+          <span v-if="logDetail.spanId"><small>span</small><code>{{ logDetail.spanId }}</code></span>
+          <span v-if="logDetail.parentSpanId"><small>parent span</small><code>{{ logDetail.parentSpanId }}</code></span>
+        </div>
+        <p class="detail-summary-text">{{ logDetail.summary }}</p>
+        <div class="detail-payload">
+          <div class="detail-actions">
+            <UiButton size="small" variant="text" icon="pi pi-copy" label="复制 JSON" :disabled="!logDetail.bytes" @click="copyLogDetail()" />
+            <a v-if="logDetail.bytes" class="ui-btn text small" :href="`/api/logs/${logDetail.id}/data`" :download="`${logDetail.kind}-${logDetail.id}.json`"><i class="pi pi-download" aria-hidden="true" />下载完整 JSON</a>
+            <small v-if="logDetail.truncated" class="detail-truncated">下面只渲染前 120k 字符；完整载荷 {{ formatBytes(logDetail.bytes) }}，用上面的复制或下载取。</small>
+          </div>
+          <pre v-if="logDetail.text" v-text="logDetail.text" />
+          <p v-else-if="logDetail.fileRef" class="empty">载荷文件 <code>{{ logDetail.fileRef }}</code> 已被日志保留策略清理。</p>
+          <p v-else class="empty">这条事件没有载荷。</p>
+        </div>
+      </template>
+      <template #footer>
+        <span v-if="logDetail?.traceId" class="catalog-count">trace <code>{{ logDetail.traceId }}</code></span>
+        <span v-else class="catalog-count">这条事件不属于任何 trace</span>
+        <UiButton v-if="logDetail?.traceId" variant="outlined" icon="pi pi-sitemap" label="展开整条 trace" @click="inspectTrace(logDetail!.traceId); logDialog = false" />
+        <!-- `cmd_*` / `job_*` 的 trace 不是轮次（docs/10 §1），点过去只会 404。 -->
+        <UiButton v-if="logDetail?.traceId && !/^(cmd|job)_/.test(logDetail.traceId)" variant="text" icon="pi pi-comments" label="看这一轮详情" @click="logDialog = false; openDetail(logDetail!.traceId!)" />
+        <UiButton variant="text" label="关闭" @click="logDialog = false" />
+      </template>
     </UiModal>
     <UiModal v-model:visible="bulkDialog" title="批量导入主体">
       <div class="form-grid">
