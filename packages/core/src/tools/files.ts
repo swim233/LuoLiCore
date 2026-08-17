@@ -8,7 +8,27 @@ function safeRegex(source: string, ignoreCase: boolean): RE2 | null {
   if ([...source].length > 128) return null;
   try { return new RE2(source, ignoreCase ? 'giu' : 'gu'); } catch { return null; }
 }
+const LIST_LIMIT = 500;
+const GREP_LIMIT = 200;
 
+/**
+ * 行号是 `edit_file` 的对照坐标（docs/05 §3.1）：没有它，模型只能靠「第几个 foo」描述位置。
+ * 分隔符用制表符 —— 正文里出现竖线的概率比制表符高得多，而模型把分隔符连着行号一起抄进
+ * `oldString` 就是一次必然失败的编辑，所以 `read_file` 的 description 里另有一句明说。
+ */
+export function numberLines(content: string, firstLine: number): string {
+  const lines = content.split('\n');
+  if (lines.length > 1 && lines.at(-1) === '') lines.pop();
+  return lines.map((line, index) => `${firstLine + index}\t${line}`).join('\n');
+}
+/** 分页读的第二页行号要接着第一页往下数，所以起点按 offset 之前的换行数算，而不是从 1 重来。 */
+export function lineAtOffset(buffer: Buffer, offset: number): number {
+  let lines = 1;
+  for (let index = 0; index < Math.min(offset, buffer.length); index += 1) if (buffer[index] === 0x0A) lines += 1;
+  return lines;
+}
+
+interface Child { real: string; logical: string; stat: Stats }
 
 export class FileTools {
   constructor(private readonly jail: PathJail, private readonly maxReadBytes: number, private readonly maxWriteBytes: number, private readonly options: { showHidden?: boolean; trashDir?: string; backupDir?: string } = {}) {}
@@ -31,7 +51,8 @@ export class FileTools {
     const effective = Math.min(limit, this.maxReadBytes);
     const decoder = new TextDecoder('utf-8', { fatal: false });
     const content = decoder.decode(buffer.subarray(offset, offset + effective));
-    return { ok: true, path: relative(this.jail.root, target), content, offset, bytes: Buffer.byteLength(content),
+    const firstLine = lineAtOffset(buffer, offset);
+    return { ok: true, path: relative(this.jail.root, target), content: numberLines(content, firstLine), firstLine, offset, bytes: Buffer.byteLength(content),
       truncated: offset + effective < buffer.length, nextOffset: offset + effective < buffer.length ? offset + effective : null };
   }
 
@@ -57,66 +78,112 @@ export class FileTools {
     try { return readdirSync(directory); } catch { skipped.n += 1; return []; }
   }
 
+  /**
+   * 一层目录里可用的条目。`jail.resolve` 抛错的条目和 `statSync` 抛错的条目一样跳过并记数 ——
+   * 一个**越界软链**（`ln -s /etc x`，`bash` 一行就能建）让它抛 `path_outside_workspace`，
+   * 而此前那一抛没人接，整次 list/glob/grep 返回 `ok:false`，同目录里另外几百个好条目一并
+   * 看不见。这与 docs/22 · I-03 是同一类，只是那一轮只修了断链那半边。
+   *
+   * `logical` 是软链名那一侧的路径，跟 `real` 分开带：`jail.resolve` 交回的是 realpath，
+   * 拿它当显示路径会把 `loop -> .` 报成空串，而模型拿空串去 `read_file` 就读到了目录本身。
+   */
+  #children(real: string, logical: string, skipped: { n: number }): Child[] {
+    const values: Child[] = [];
+    for (const name of this.#readdir(real, skipped)) {
+      if (!this.options.showHidden && name.startsWith('.')) continue;
+      const childLogical = `${logical}/${name}`;
+      let resolved: string;
+      try { resolved = this.jail.resolve(relative(this.jail.root, childLogical)); } catch { skipped.n += 1; continue; }
+      const stat = this.#stat(resolved, skipped);
+      if (stat) values.push({ real: resolved, logical: childLogical, stat });
+    }
+    return values;
+  }
+
+  /**
+   * `depth` 只挡递归层数，挡不住同一棵树被反复走进去：`ln -s . loop` 之下一棵三条目的树能列出
+   * 十七条，重复项还会把 500 条的预算占满，而模型看到的是一份自相矛盾的目录。所以这里和
+   * `glob`/`grep` 用同一套 realpath 去重（那两个在 docs/20 · W-FS-01 修过，`list` 当时漏了）。
+   */
   list(path = '.', depth = 1): Record<string, unknown> {
     const root = this.jail.resolve(path);
     const entries: Array<{ path: string; type: string; bytes: number }> = [];
     const skipped = { n: 0 };
-    const walk = (directory: string, level: number): void => {
-      for (const name of this.#readdir(directory, skipped)) {
-        if (!this.options.showHidden && name.startsWith('.')) continue;
-        const child = this.jail.resolve(relative(this.jail.root, `${directory}/${name}`));
-        const stat = this.#stat(child, skipped);
-        if (!stat) continue;
-        entries.push({ path: relative(this.jail.root, child), type: stat.isDirectory() ? 'directory' : 'file', bytes: stat.size });
-        if (stat.isDirectory() && level < depth) walk(child, level + 1);
+    const visited = new Set<string>();
+    let truncated = false;
+    const walk = (real: string, logical: string, level: number): void => {
+      if (!this.#enter(real, visited)) return;
+      for (const child of this.#children(real, logical, skipped)) {
+        if (entries.length >= LIST_LIMIT) { truncated = true; return; }
+        entries.push({ path: relative(this.jail.root, child.logical), type: child.stat.isDirectory() ? 'directory' : 'file', bytes: child.stat.size });
+        if (child.stat.isDirectory() && level < depth) walk(child.real, child.logical, level + 1);
+        if (truncated) return;
       }
     };
-    walk(root, 1);
-    return { ok: true, entries: entries.slice(0, 500), truncated: entries.length > 500, skipped: skipped.n };
+    walk(root, root, 1);
+    return { ok: true, entries, truncated, skipped: skipped.n };
   }
 
   glob(pattern: string, path = '.'): Record<string, unknown> {
     const root = this.jail.resolve(path);
     const matches: string[] = [];
     const skipped = { n: 0 };
-    // 已访问目录集合：workspace 里一个指向自身祖先的软链（`ln -s . loop`，bash 就能建）会让递归
-    // 无限下去，而条数上限只在**命中**时才起作用（docs/20 · W-FS-01）。
     const visited = new Set<string>();
-    const walk = (directory: string): void => {
-      if (!this.#enter(directory, visited)) return;
-      for (const name of this.#readdir(directory, skipped)) {
-        if (!this.options.showHidden && name.startsWith('.')) continue;
-        const child = this.jail.resolve(relative(this.jail.root, `${directory}/${name}`));
-        const relativePath = relative(root, child).replaceAll('\\', '/');
-        const stat = this.#stat(child, skipped);
-        if (!stat) continue;
-        if (minimatch(relativePath, pattern, { dot: true })) matches.push(relative(this.jail.root, child));
-        if (stat.isDirectory() && matches.length < 500) walk(child);
-        if (matches.length >= 500) return;
+    let truncated = false;
+    const walk = (real: string, logical: string): void => {
+      if (!this.#enter(real, visited)) return;
+      for (const child of this.#children(real, logical, skipped)) {
+        if (minimatch(relative(root, child.logical).replaceAll('\\', '/'), pattern, { dot: true })) {
+          // 「还想再放一条却放不下」才算截断。恰好 500 条而后面本来就没有了报成截断，
+          // 模型会去缩范围重查一次已经完整的结果 —— 白跑一步，且它会以为自己没看全。
+          if (matches.length >= LIST_LIMIT) { truncated = true; return; }
+          matches.push(relative(this.jail.root, child.logical));
+        }
+        if (child.stat.isDirectory()) walk(child.real, child.logical);
+        if (truncated) return;
       }
     };
-    walk(root);
-    return { ok: true, matches, truncated: matches.length >= 500, skipped: skipped.n };
+    walk(root, root);
+    return { ok: true, matches, truncated, skipped: skipped.n };
   }
 
-  grep(pattern: string, path = '.', ignoreCase = false): Record<string, unknown> {
+  grep(pattern: string, path = '.', ignoreCase = false, include?: string, contextLines = 0): Record<string, unknown> {
     const root = this.jail.resolve(path);
     const regex = safeRegex(pattern, ignoreCase);
     if (!regex) return { ok: false, error: 'invalid_pattern' };
-    const matches: Array<{ path: string; line: number; text: string }> = [];
+    const matches: Array<{ path: string; line: number; text: string; before?: string[]; after?: string[] }> = [];
     const skipped = { n: 0 };
     const visited = new Set<string>();
-    const walk = (target: string): void => {
-      const stat = this.#stat(target, skipped);
-      if (!stat) return;
-      if (stat.isDirectory()) { if (!this.#enter(target, visited)) return; for (const name of this.#readdir(target, skipped)) { if (!this.options.showHidden && name.startsWith('.')) continue; if (matches.length >= 200) break; walk(this.jail.resolve(relative(this.jail.root, `${target}/${name}`))); } return; }
-      if (stat.size > this.maxReadBytes * 4) return;
+    let truncated = false;
+    const scan = (real: string, logical: string, stat: Stats): void => {
+      if (include && !minimatch(relative(root, logical).replaceAll('\\', '/'), include, { dot: true })) return;
+      // 超预算的文件和读不出来的文件都要记进 skipped：那个数字是模型判断「我是不是看全了」的
+      // 唯一依据（§3.1），静静跳过等于告诉它「这就是全部命中」。
+      if (stat.size > this.maxReadBytes * 4) { skipped.n += 1; return; }
       let content: string;
-      try { content = readFileSync(target, 'utf8'); } catch { return; }
-      for (const [index, line] of content.split('\n').entries()) { regex.lastIndex = 0; if (regex.test(line)) matches.push({ path: relative(this.jail.root, target), line: index + 1, text: line }); if (matches.length >= 200) break; }
+      try { content = readFileSync(real, 'utf8'); } catch { skipped.n += 1; return; }
+      const display = relative(this.jail.root, logical);
+      const lines = content.split('\n');
+      for (const [index, line] of lines.entries()) {
+        regex.lastIndex = 0;
+        if (!regex.test(line)) continue;
+        if (matches.length >= GREP_LIMIT) { truncated = true; return; }
+        matches.push({ path: display, line: index + 1, text: line,
+          ...(contextLines ? { before: lines.slice(Math.max(0, index - contextLines), index), after: lines.slice(index + 1, index + 1 + contextLines) } : {}) });
+      }
     };
-    walk(root);
-    return { ok: true, matches, truncated: matches.length >= 200, skipped: skipped.n };
+    const walk = (real: string, logical: string): void => {
+      if (!this.#enter(real, visited)) return;
+      for (const child of this.#children(real, logical, skipped)) {
+        if (child.stat.isDirectory()) walk(child.real, child.logical);
+        else scan(child.real, child.logical, child.stat);
+        if (truncated) return;
+      }
+    };
+    const start = this.#stat(root, skipped);
+    if (start?.isDirectory()) walk(root, root);
+    else if (start) scan(root, root, start);
+    return { ok: true, matches, truncated, skipped: skipped.n };
   }
 
   write(path: string, content: string): Record<string, unknown> {
@@ -125,7 +192,9 @@ export class FileTools {
     const target = this.jail.resolve(path);
     mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
     if (existsSync(target)) {
-      const backup = this.jail.resolve(`${this.options.backupDir ?? '.luoli-bak'}/${Date.now()}-${basename(target)}`);
+      // 备份名带 ulid：只按毫秒命名时同一毫秒里的两次写入会互相覆盖，而备份存在的意义
+      // 恰恰是「上一版还在」——`edit_file` 连续改同一个文件正好落在这个窗口里。
+      const backup = this.jail.resolve(`${this.options.backupDir ?? '.luoli-bak'}/${Date.now()}-${ulid()}-${basename(target)}`);
       mkdirSync(dirname(backup), { recursive: true, mode: 0o700 });
       cpSync(target, backup);
     }
@@ -139,18 +208,33 @@ export class FileTools {
     const target = this.jail.resolve(path);
     const content = readFileSync(target, 'utf8');
     const occurrences = content.split(oldString).length - 1;
-    if (!occurrences) return { ok: false, error: 'old_string_not_found' };
+    // 行号前缀被一起抄进 oldString 是这个工具最常见的失败方式（`read_file` 交回的正文带行号）。
+    // 报 `old_string_not_found` 时模型通常只会换一段文字再试一次，说清楚它才会去掉前缀。
+    if (!occurrences) return { ok: false, error: 'old_string_not_found',
+      ...(/^\s*\d+\t/m.test(oldString) ? { hint: 'oldString 里带着 read_file 的行号前缀（`12\\t…`），要去掉行号和制表符，只留文件里真正的正文' } : {}) };
     if (occurrences > 1 && !replaceAll) return { ok: false, error: 'old_string_not_unique', hint: `matched ${occurrences} times` };
     return this.write(path, replaceAll ? content.replaceAll(oldString, newString) : content.replace(oldString, newString));
   }
 
-  remove(path: string): Record<string, unknown> {
+  /**
+   * 目录整棵搬进回收站等价于 `rm -r`，所以按 docs/05 §3.1 加两道闸：要显式 `recursive`，
+   * 且路径深度 ≥2。审批弹窗上只有一个路径，owner 分不出这一下删的是一个文件还是半个工作
+   * 目录，而 `delete_file` 是 `approval: 'always'` —— 点下去就真的搬走了。
+   */
+  remove(path: string, recursive = false): Record<string, unknown> {
     const target = this.jail.resolve(path);
     if (!existsSync(target)) return { ok: false, error: 'path_not_found' };
+    const inside = relative(this.jail.root, target);
+    const directory = statSync(target).isDirectory();
+    if (directory) {
+      if (!recursive) return { ok: false, error: 'path_is_directory', hint: `${inside || '.'} 是目录；要连里面的内容一起删就显式传 recursive: true` };
+      const depth = inside.split('/').filter(Boolean).length;
+      if (depth < 2) return { ok: false, error: 'recursive_delete_too_shallow', hint: `${inside || '.'} 的深度是 ${depth}，递归删除只允许作用在工作目录的二级及更深路径上` };
+    }
     const trash = this.jail.resolve(`${this.options.trashDir ?? '.luoli-trash'}/${Date.now()}-${ulid()}/${basename(target)}`);
     mkdirSync(dirname(trash), { recursive: true, mode: 0o700 });
     renameSync(target, trash);
-    return { ok: true, trashedTo: relative(this.jail.root, trash) };
+    return { ok: true, trashedTo: relative(this.jail.root, trash), recursive: directory };
   }
 
   move(from: string, to: string): Record<string, unknown> {
@@ -159,6 +243,6 @@ export class FileTools {
     if (existsSync(target)) return { ok: false, error: 'target_exists' };
     mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
     renameSync(source, target);
-    return { ok: true, from, to };
+    return { ok: true, from: relative(this.jail.root, source), to: relative(this.jail.root, target) };
   }
 }

@@ -1,8 +1,8 @@
 import { z } from 'zod';
 import type { Role, RuntimeTurnContext } from '@luoli/shared';
 import { roleRank, untrusted } from '@luoli/shared';
-import type { ToolPolicyEntry } from './policy.js';
-import { TOOL_POLICY } from './policy.js';
+import type { ToolPolicyEntry, ToolName } from './policy.js';
+import { SKILL_NARROWING_EXEMPT, TOOL_POLICY } from './policy.js';
 import type { LogSink } from '../log/sink.js';
 import { ApprovalRules, type ApprovalRisk } from '../approval/rules.js';
 export type { ApprovalRisk } from '../approval/rules.js';
@@ -166,10 +166,13 @@ export class ToolRegistry {
     if (context.agentKind === 'sub' && name === 'memory_write') return { ok: false, error: 'tool_unavailable_for_subagent' };
     if (tool.available?.(context.turn.effectiveRole, context) === false) return { ok: false, error: 'tool_unavailable' };
     if (context.allow && !context.allow.has(name)) return { ok: false, error: 'tool_not_in_allowlist' };
-    if (context.turn.skillAllowedTools?.size && name !== 'load_skill' && !context.turn.skillAllowedTools.has(name)) return { ok: false, error: 'tool_not_in_allowlist' };
+    if (context.turn.skillAllowedTools?.size && !SKILL_NARROWING_EXEMPT.includes(name as ToolName) && !context.turn.skillAllowedTools.has(name)) return { ok: false, error: 'tool_not_in_allowlist' };
     if (state.calls >= this.#limits().maxCallsPerTurn) return { ok: false, error: 'tool_call_limit_exceeded' };
     const parsed = (tool.inputSchemaFor?.(context) ?? tool.inputSchema).safeParse(rawInput);
-    if (!parsed.success) return { ok: false, error: 'invalid_input', hint: parsed.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ') };
+    // 参数不合法算一次失败。`maxConsecutiveErrors` 是「模型别原地重试到步数耗尽」的**唯一**硬
+    // 边界，而它此前只数 execute 的失败 —— 参数写错和审批被拒这两种最常见的失败一次都不计，
+    // 于是同一个错误的调用可以无限次重来（实测 6 次全部照收）。
+    if (!parsed.success) { this.#failed(state, name, context); return { ok: false, error: 'invalid_input', hint: parsed.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ') }; }
     // `approvalFor` 让工具按**本轮配置**把自己抬进审批（`memory.pubWriteRequiresApproval` 就是
     // 这么接的）。它只能抬高，不能放低 —— 否则一个工具就能把自己从注册期定死的审批档位里摘出去。
     const escalated = tool.approvalFor?.(parsed.data, context);
@@ -184,7 +187,9 @@ export class ToolRegistry {
       const verdict = await this.approval.request(tool, parsed.data, context, decision.risk);
       const approved = typeof verdict === 'boolean' ? verdict : verdict.approved;
       const hint = typeof verdict === 'boolean' ? undefined : verdict.hint;
-      if (!approved) return { ok: false, error: '未获批准', ...(hint ? { hint } : {}) };
+      // 被拒同样计一次失败：owner 连着拒两次之后模型该换个做法，而不是把同一个高危调用
+      // 改个字再递上来 —— 每一次都是一条推给 owner 的审批通知。
+      if (!approved) { this.#failed(state, name, context); return { ok: false, error: '未获批准', ...(hint ? { hint } : {}) }; }
     }
     state.calls += 1;
     await this.hooks?.hook('onToolCall', { name, input: parsed.data, context });

@@ -203,12 +203,12 @@
 | [x] AC-TOOL-003 (自动) ★ | 路径 `../../etc/passwd` | 拒绝 `path_outside_workspace` | 〔security.test.ts〕
 | [x] AC-TOOL-004 (自动) ★ | workspace 内 symlink 指向 `/etc` | realpath 解析后拒绝 | 〔security.test.ts〕
 | [x] AC-TOOL-005 (自动) ★ | 读 `<root>/config/config.yaml`、`memory/PUBMEMORY.md`、`.env` | 全部命中 `denyGlobs` 拒绝 | 〔security.test.ts〕
-| [ ] AC-TOOL-006 (自动) | `delete_file` | 文件进入 `.luoli-trash/<ts>/`，未真删 |
-| [ ] AC-TOOL-007 (自动) | `edit_file` 的 `oldString` 出现 2 次 | 返回错误要求提供唯一上下文，不做修改 |
+| [x] AC-TOOL-006 (自动) | `delete_file` 删一个文件；删一个目录；给目录加 `recursive:true` 但路径只有一级；二级目录加 `recursive:true` | 依次：进 `.luoli-trash/<ts>/` 未真删；`path_is_directory`（`rename` 一个目录就是把整棵树搬走，等价 `rm -r`）；`recursive_delete_too_shallow`；成功且回 `recursive:true` | 〔tools.round8.test.ts〕
+| [x] AC-TOOL-007 (自动) | `edit_file` 的 `oldString` 出现 2 次；`oldString` 带着 `read_file` 的行号前缀 | 依次：`old_string_not_unique` 且文件未改动，`replaceAll` 才动手；`old_string_not_found` 并明说要去掉行号前缀（只报「没找到」模型通常只会换段文字再试一次） | 〔tools.round8.test.ts〕
 | [ ] AC-TOOL-008 (自动) | 读 1MB 文件（超 `maxReadBytes`） | 返回前 N 字节 + 明确的分页提示（offset/limit 用法） |
 | [x] AC-TOOL-009 (自动) ★ | `search_messages` 在群 A 触发 | SQL 带 `chat_id=A`；构造群 B 的同关键词消息，结果中不出现 | 〔db.isolation.test.ts〕
 | [ ] AC-TOOL-010 (自动) | `admin_search_messages` 由 trusted 调用 | 工具不存在（owner-only） |
-| [ ] AC-TOOL-011 (自动) | `read_messages` `{anchor:'#123', direction:'around', limit:10}` | 返回按时间序的 10 条，格式含 `#id [时间] 发言人: 正文` |
+| [x] AC-TOOL-011 (自动) | `read_messages` `{anchor:'#123', direction:'around', limit:10}`；`before` / `after`；ISO 时间锚点；不给 anchor | 返回按时间序（id 升序）的 10 条，格式是 `#id [时间] 发言人: 正文` 一行一条，`↩︎#` 后面是**归档 id** 而不是 Telegram 编号（换不过来就不渲染这个标记）；ISO 锚点落到该时刻起的第一条；不给 anchor 等于最近若干条 | 〔tools.round8.test.ts〕
 | [x] AC-TOOL-012 (自动) | `web_fetch` 目标 `http://169.254.169.254/` | 拒绝（SSRF 防护）；`http://127.0.0.1:8787` 同样拒绝 | 〔web.test.ts〕
 | [x] AC-TOOL-013 (自动) | `web_fetch` 跳转到私有地址 | 每跳重新校验并拒绝 | 〔web.test.ts〕
 | [x] AC-TOOL-014 (自动) | 工具返回 3MB 输出 | 按 `maxOutputBytes` 截断（保留头尾）并标注省略字节数 | 〔resource-bounds.test.ts〕
@@ -220,7 +220,7 @@
 | [ ] AC-TOOL-020 (自动) | 注册工具数超 `maxRegistered` | 按优先级截断（内建>agent>plugin>skill>MCP），RUNTIME 块告知，有 warn 日志 |
 | [x] AC-TOOL-021 (自动) | `search_messages` 依次传 `名字\|我是\|叫\|谁`、`NEAR(a b)`、`"unclosed`、`***` | 一律正常返回（命中或空），不出现 `fts5: syntax error`；≥3 字的词走 FTS，两字中文词退回 LIKE 且用最长的词而非原串 | 〔toolcall.regression.test.ts〕
 | [ ] AC-TOOL-022 (自动) | 直接调用 `execute()` 绕过目录：子 agent 调 `memory_write`、或调一个 `available()` 返回 false 的工具 | 一律 `ok:false` 拒绝；`execute()` 的复查集合与 `active()` 的过滤集合一致（docs/20 · W-TOOL-01） |
-| [ ] AC-TOOL-023 | workspace 里建一个指向祖先目录的软链后跑 `glob` / `grep` | 正常返回，不无限递归（已访问目录按 realpath 去重，docs/20 · W-FS-01） |
+| [x] AC-TOOL-023 (自动) | workspace 里建一个指向祖先目录的软链后跑 `list_dir` / `glob` / `grep`；再建一个指向 workspace 外的软链和一个断链 | 正常返回，不无限递归也不重复列（已访问目录按 realpath 去重，docs/20 · W-FS-01 当时漏了 `list_dir`）；显示路径取软链名那一侧而不是 realpath（`loop -> .` 的 realpath 就是搜索根，报出来是空串）；越界软链与断链各自只让自己被跳过并计入 `skipped`，不让整次调用返回 `ok:false` | 〔tools.round8.test.ts〕
 | [ ] AC-TOOL-024 (自动) ★ | 依赖齐全时取 owner 的 `activeNames()` | 等于 `TOOL_POLICY` 全集减去子 agent 专用的 `ask_parent`/`report_progress`。**AC-TOOL-001b 只看「注册没注册」**，而 `send_message`/`send_photo`/`send_file`/`react`/`pin_message` 曾经注册着、启动断言全过、却因为 `main.ts` 没传 `telegram` 依赖而永远不进模型的工具目录 —— 模型答「我没有这个功能」是对的。断言必须落在可见性上 |
 | [ ] AC-TOOL-025 (自动) | `react` 不传 messageId；传 `❤️`；传 `🍕`；`send_file` 传 `../../etc/passwd` / 超 `maxFileSendMb` 的文件；一轮内第 4 次 `send_message` | 依次：点触发消息；归一化成 Telegram 认的 `❤` 后发出；`unsupported_emoji` 且**不调用 API**、返回可选集合；`path_outside_workspace`；`file_too_large`；`extra_message_limit_exceeded`。发出去的消息回写归档（`direction='out'`、带 `turn_id`），否则模型自己追发的内容下一轮就从上下文里消失 |
 | [x] AC-SBX-001 (自动) ★ | `mode=none`，`trusted` 请求 `bash` | 工具**不存在**（fail-closed），不是「执行后被拒」 | 〔sandbox.failclosed.test.ts〕
@@ -480,7 +480,7 @@
 | **上下文引擎** | | 29 / 38 | | | |
 | Telegram 与准入 | | 17 / 41 | | | |
 | Agent 与 Provider | | 20 / 42 | | | |
-| 工具/沙箱/审批 | | 11 / 54 | | | |
+| 工具/沙箱/审批 | | 15 / 54 | | | |
 | Subagent 与任务 | | 2 / 22 | | | |
 | 记忆 | | 1 / 13 | | | |
 | 日志与成本 | | 2 / 23 | | | |
@@ -488,6 +488,6 @@
 | WebUI | | 1 / 72 | | | |
 | 安全 | | 0 / 15 | | | |
 | 运维 | | 1 / 9 | | | |
-| **合计** | | **101 / 380** | | | |
+| **合计** | | **105 / 380** | | | |
 
 **整体通过条件**：全部 ★ 项通过 + 非 ★ 项通过率 ≥ 95% + 所有豁免项经需求方书面确认。

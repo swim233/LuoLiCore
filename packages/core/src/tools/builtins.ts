@@ -1,8 +1,10 @@
 import { z } from 'zod';
-import { readFileSync, statSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { AgentManager, Config, ContextEngine, FileTools, MemoryStore, ModelRegistry, QuotaGuard, QuotaReservation, Sandbox, SkillLoader, ToolRegistry, UsageLedger, LogSink } from '@luoli/core';
-import { DEFAULT_WEB_RETRY, builtinPolicy, runSubAgent, webFetch, webSearch, type WebRetryOptions } from '@luoli/core';
-import type { ArchiveRepository } from '@luoli/db';
+import { DEFAULT_WEB_RETRY, builtinPolicy, lineAtOffset, numberLines, runSubAgent, webFetch, webSearch, type WebRetryOptions } from '@luoli/core';
+import type { ArchiveRepository, ArchivedMessage, ScopedArchiveRepository } from '@luoli/db';
+import { citeArchivedMessages } from './cite.js';
 import type { Role } from '@luoli/shared';
 import type { ToolExecutionContext } from './registry.js';
 
@@ -37,6 +39,8 @@ export interface TelegramToolBridge {
  * 「没有上限」在这条链上就是卡死一整轮。
  */
 const UPLOAD_TIMEOUT_MS = 300_000;
+/** `python` 的脚本落点（doc §3.3）。带前导点，所以默认不会出现在 `list_dir` / `glob` 里。 */
+const PYTHON_TMP_DIR = '.luoli-tmp';
 
 const target = (context: ToolExecutionContext): TelegramTarget =>
   ({ chatId: context.turn.chatId, threadId: context.turn.threadId, turnId: context.turn.turnId });
@@ -55,6 +59,33 @@ function claimExtraMessage(context: ToolExecutionContext): { ok: false; error: s
   return null;
 }
 
+/**
+ * `read_messages` 的 `anchor`：消息 id 或 ISO 时间（docs/05 §3.2）。数字串一律按 id 认 ——
+ * 模型十有八九把上下文里 `#12841` 的数字当字符串递过来，而 `Date.parse('12841')` 在某些运行时
+ * 会解析成一个年份，于是它读到一段完全不相干的记录，还以为那就是自己要的位置。
+ * 解析失败交回 `false`，让调用方给出一句能照着改的错误，而不是悄悄退回「最近 N 条」。
+ */
+function resolveAnchor(anchor: number | string | undefined): { anchorId?: number; anchorDate?: number } | false {
+  if (anchor === undefined) return {};
+  if (typeof anchor === 'number') return { anchorId: anchor };
+  const trimmed = anchor.trim().replace(/^#/, '');
+  if (/^\d+$/.test(trimmed)) return { anchorId: Number(trimmed) };
+  const parsed = Date.parse(trimmed);
+  return Number.isNaN(parsed) ? false : { anchorDate: parsed };
+}
+/** `search_messages` 的 after / before。`undefined`（没传）与解析失败必须分开，后者要报错。 */
+function parseMoment(value: string | undefined): number | null | false {
+  if (value === undefined) return null;
+  const parsed = Date.parse(value.trim());
+  return Number.isNaN(parsed) ? false : parsed;
+}
+
+/** 三个列表型检索工具共用的渲染（doc §3.2 的 `#id [时间] 发言人: 正文` 一行一条）。 */
+function cite(messages: readonly ArchivedMessage[], context: ToolExecutionContext, scope: ScopedArchiveRepository): string[] {
+  return citeArchivedMessages(messages, { timezone: (context.turn.config as Readonly<Config>).general.timezone,
+    resolveReplies: (ids) => scope.archiveIdsByTgMessageIds(ids) });
+}
+
 /** workspace 内的绝对路径 + 大小闸门。越界、不存在、超限三种都要在调 API 之前变成 `ok:false`。 */
 function resolveOutgoingFile(context: ToolExecutionContext, files: FileTools, path: string): { ok: false; error: string; hint?: string } | { ok: true; absolute: string } {
   let absolute: string;
@@ -67,7 +98,7 @@ function resolveOutgoingFile(context: ToolExecutionContext, files: FileTools, pa
   return { ok: true, absolute };
 }
 
-export function registerBuiltins(registry: ToolRegistry, dependencies: { db: import('@luoli/db').Sqlite; filesFor: (workspace: string, role: Role) => FileTools; sandbox: Sandbox; archive: ArchiveRepository; context: ContextEngine; memory: MemoryStore; skills: SkillLoader; agents: AgentManager; models: ModelRegistry; ledger: UsageLedger; log: LogSink; quota?: QuotaGuard; telegram: TelegramToolBridge | null; maxWebBytes: number; maxAsksPerRun?: number; askTimeoutMs?: number; web?: WebRetryOptions; webSearch?: { provider: '' | 'brave' | 'serper' | 'tavily'; apiKey: string } }): void {
+export function registerBuiltins(registry: ToolRegistry, dependencies: { db: import('@luoli/db').Sqlite; filesFor: (workspace: string, role: Role) => FileTools; sandbox: Sandbox; archive: ArchiveRepository; context: ContextEngine; memory: MemoryStore; skills: SkillLoader; agents: AgentManager; models: ModelRegistry; ledger: UsageLedger; log: LogSink; quota?: QuotaGuard; telegram: TelegramToolBridge | null; maxWebBytes: number; maxAsksPerRun?: number; web?: WebRetryOptions; webSearch?: { provider: '' | 'brave' | 'serper' | 'tavily'; apiKey: string } }): void {
   const web = dependencies.web ?? DEFAULT_WEB_RETRY;
   /** 每个 agent_run 上一次向 SSE 广播进度的时刻（`agent.progressThrottleMs`）。 */
   const progressBroadcast = new Map<string, number>();
@@ -79,10 +110,28 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
    */
   const running = new Map<string, number>();
   const waiting = new Map<string, Array<() => void>>();
-  const acquireSlot = async (turnId: string, limit: number): Promise<void> => {
-    if ((running.get(turnId) ?? 0) < limit) { running.set(turnId, (running.get(turnId) ?? 0) + 1); return; }
-    await new Promise<void>((resolve) => { const queue = waiting.get(turnId) ?? []; queue.push(resolve); waiting.set(turnId, queue); });
+  /**
+   * 拿到槽位返回 true。排队时**必须认 abortSignal**：这个 promise 原本只由 `releaseSlot` 唤醒，
+   * 于是 `/cancel` 之后排在后面的 `spawn_agent` 照样会醒过来、照样真的去派一个子 agent —— 一轮
+   * 已经取消的对话继续烧 token，而没有任何人还在等它的结果（`timeoutMs: null`，注册表那道兜底
+   * 的 race 也不会砍它）。
+   */
+  const acquireSlot = async (turnId: string, limit: number, abortSignal: AbortSignal): Promise<boolean> => {
+    if (abortSignal.aborted) return false;
+    if ((running.get(turnId) ?? 0) < limit) { running.set(turnId, (running.get(turnId) ?? 0) + 1); return true; }
+    const queue = waiting.get(turnId) ?? [];
+    waiting.set(turnId, queue);
+    const admitted = await new Promise<boolean>((resolve) => {
+      const admit = (): void => { abortSignal.removeEventListener('abort', drop); resolve(true); };
+      // 出队时把自己从队列里摘掉，否则 releaseSlot 会把一个已经放弃的等待者当成「唤醒了一个」，
+      // 而真正在排队的那个继续等 —— 槽位就这么漏掉一个。
+      const drop = (): void => { const at = queue.indexOf(admit); if (at >= 0) queue.splice(at, 1); resolve(false); };
+      queue.push(admit);
+      abortSignal.addEventListener('abort', drop, { once: true });
+    });
+    if (!admitted) return false;
     running.set(turnId, (running.get(turnId) ?? 0) + 1);
+    return true;
   };
   const releaseSlot = (turnId: string): void => {
     running.set(turnId, Math.max(0, (running.get(turnId) ?? 1) - 1));
@@ -93,59 +142,104 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
   // 两个 web 工具自带预算（单次 timeoutMs × 最多 retries+1 次 + 退避），整体会比
   // `tools.defaultTimeoutMs` 长。给注册表报一份自己的账，别让兜底那道 race 在重试走完前先砍掉。
   const webBudgetMs = (web.retries + 1) * web.timeoutMs + 5000;
-  registry.register({ name: 'read_file', description: '读取工作目录或 skill:// 资源，支持 offset/limit 分页。', inputSchema: z.object({ path: z.string(), offset: z.number().int().nonnegative().optional(), limit: z.number().int().positive().optional() }), policy: builtinPolicy('read_file'), sourcePriority: 100, untrustedOutput: true,
+  registry.register({ name: 'read_file', description: '读取工作目录或 skill:// 资源，支持 offset/limit 分页。正文每行带 `行号<TAB>` 前缀，那只是给你定位用的坐标，不是文件内容：写回文件时（edit_file 的 oldString/newString、write_file 的 content）一律不能带它。', inputSchema: z.object({ path: z.string(), offset: z.number().int().nonnegative().optional(), limit: z.number().int().positive().optional() }), policy: builtinPolicy('read_file'), sourcePriority: 100, untrustedOutput: true,
     execute: (input, context) => {
       if (!input.path.startsWith('skill://')) return dependencies.filesFor(context.workspace, context.turn.effectiveRole).read(input.path, input.offset, input.limit);
       const path = dependencies.skills.resolveResource(input.path, context.turn.effectiveRole);
       const buffer = readFileSync(path);
       const offset = input.offset ?? 0;
-      const limit = input.limit ?? Math.min(buffer.length, 262_144);
+      // skill 资源同样受 `tools.fs.maxReadBytes` 管。此前这一支写死 256KB 且照收模型传的任意
+      // `limit`，于是 skill 目录里一个大文件能整份读进来 —— 两条读路径的预算必须是同一份。
+      const budget = (context.turn.config as Readonly<Config>).tools.fs.maxReadBytes;
+      const limit = Math.min(input.limit ?? budget, budget);
       const content = buffer.subarray(offset, offset + limit).toString('utf8');
-      return { ok: true, path: input.path, content, offset, bytes: Buffer.byteLength(content), truncated: offset + limit < buffer.length, nextOffset: offset + limit < buffer.length ? offset + limit : null };
+      const more = offset + limit < buffer.length;
+      return { ok: true, path: input.path, content: numberLines(content, lineAtOffset(buffer, offset)), offset, bytes: Buffer.byteLength(content), truncated: more, nextOffset: more ? offset + limit : null };
     } });
   registry.register({ name: 'list_dir', description: '列出工作目录。', inputSchema: z.object({ path: z.string().default('.'), depth: z.number().int().min(1).max(5).default(1) }), policy: builtinPolicy('list_dir'), sourcePriority: 100,
     execute: (input, context) => dependencies.filesFor(context.workspace, context.turn.effectiveRole).list(input.path, input.depth) });
   registry.register({ name: 'glob', description: '按 glob 模式查找工作目录文件。', inputSchema: z.object({ pattern: z.string(), path: z.string().default('.') }), policy: builtinPolicy('glob'), sourcePriority: 100, untrustedOutput: true,
     execute: (input, context) => dependencies.filesFor(context.workspace, context.turn.effectiveRole).glob(input.pattern, input.path) });
-  registry.register({ name: 'grep', description: '以正则搜索工作目录文本。', inputSchema: z.object({ pattern: z.string(), path: z.string().default('.'), ignoreCase: z.boolean().default(false) }), policy: builtinPolicy('grep'), sourcePriority: 100, untrustedOutput: true,
-    execute: (input, context) => dependencies.filesFor(context.workspace, context.turn.effectiveRole).grep(input.pattern, input.path, input.ignoreCase) });
+  registry.register({ name: 'grep', description: '以正则搜索工作目录文本；glob 限定文件名，contextLines 附带命中行前后各若干行。', inputSchema: z.object({ pattern: z.string(), path: z.string().default('.'), glob: z.string().optional(), contextLines: z.number().int().min(0).max(10).default(0), ignoreCase: z.boolean().default(false) }), policy: builtinPolicy('grep'), sourcePriority: 100, untrustedOutput: true,
+    execute: (input, context) => dependencies.filesFor(context.workspace, context.turn.effectiveRole).grep(input.pattern, input.path, input.ignoreCase, input.glob, input.contextLines) });
   registry.register({ name: 'write_file', description: '原子写入工作目录文件，覆盖前自动备份。', inputSchema: z.object({ path: z.string(), content: z.string() }), policy: builtinPolicy('write_file'), sourcePriority: 100,
     approvalTargetExists: (input, context) => dependencies.filesFor(context.workspace, context.turn.effectiveRole).exists((input as { path: string }).path),
     execute: (input, context) => dependencies.filesFor(context.workspace, context.turn.effectiveRole).write(input.path, input.content) });
   registry.register({ name: 'edit_file', description: '以唯一 oldString 修改文件。', inputSchema: z.object({ path: z.string(), oldString: z.string(), newString: z.string(), replaceAll: z.boolean().default(false) }), policy: builtinPolicy('edit_file'), sourcePriority: 100,
     execute: (input, context) => dependencies.filesFor(context.workspace, context.turn.effectiveRole).edit(input.path, input.oldString, input.newString, input.replaceAll) });
-  registry.register({ name: 'delete_file', description: '将文件移入回收站，不物理删除。', inputSchema: z.object({ path: z.string() }), policy: builtinPolicy('delete_file'), sourcePriority: 100,
-    execute: (input, context) => dependencies.filesFor(context.workspace, context.turn.effectiveRole).remove(input.path) });
+  registry.register({ name: 'delete_file', description: '将文件移入回收站，不物理删除。删目录要显式 recursive:true，且只允许作用在二级及更深的路径。', inputSchema: z.object({ path: z.string(), recursive: z.boolean().default(false) }), policy: builtinPolicy('delete_file'), sourcePriority: 100,
+    execute: (input, context) => dependencies.filesFor(context.workspace, context.turn.effectiveRole).remove(input.path, input.recursive) });
   registry.register({ name: 'move_file', description: '移动工作目录文件，不覆盖目标。', inputSchema: z.object({ from: z.string(), to: z.string() }), policy: builtinPolicy('move_file'), sourcePriority: 100,
     approvalTargetExists: (input, context) => dependencies.filesFor(context.workspace, context.turn.effectiveRole).exists((input as { to: string }).to),
     execute: (input, context) => dependencies.filesFor(context.workspace, context.turn.effectiveRole).move(input.from, input.to) });
   // `timeoutMs: null` = 这个工具自己管超时。sandbox.run 会按 `tools.exec.maxTimeoutMs`（默认 300s）
   // kill 进程，比 `tools.defaultTimeoutMs` 长得多；套上兜底那道 race 只会把正常的长命令砍成
   // `tool_timeout`，而进程还在后台跑着。
-  registry.register({ name: 'bash', description: '在工作目录执行命令；非 owner 必须使用可用沙箱。', inputSchema: z.object({ command: z.string(), timeoutMs: z.number().int().positive().optional(), description: z.string() }), policy: builtinPolicy('bash'), sourcePriority: 100, timeoutMs: null,
+  // `timeoutMs` 的上界写进 schema（doc §3.3）：`sandbox.run` 反正会按 `maxTimeoutMs` 夹一次，
+  // 但夹在里面模型就永远不知道自己要的 30 分钟被改成了 5 分钟，然后据此去解释「命令没跑完」。
+  const bashSchema = (max: number) => z.object({ command: z.string(), timeoutMs: z.number().int().positive().max(max).optional(), description: z.string() });
+  const pythonSchema = (max: number) => z.object({ code: z.string(), timeoutMs: z.number().int().positive().max(max).optional(), description: z.string() });
+  const execMax = (context: ToolExecutionContext): number => (context.turn.config as Readonly<Config>).tools.exec.maxTimeoutMs;
+  registry.register({ name: 'bash', description: '在工作目录执行命令；非 owner 必须使用可用沙箱。', inputSchema: bashSchema(300_000), inputSchemaFor: (context) => bashSchema(execMax(context)), policy: builtinPolicy('bash'), sourcePriority: 100, timeoutMs: null,
     available: (role, context) => dependencies.sandbox.plan(role, context.workspace).allowed,
     execute: async (input, context) => dependencies.sandbox.run(input.command, context.turn.effectiveRole, context.workspace, context.turn.abortSignal, input.timeoutMs, context.turn.turnId) });
-  registry.register({ name: 'python', description: '在工作目录执行 Python 代码；非 owner 必须使用可用沙箱。', inputSchema: z.object({ code: z.string(), timeoutMs: z.number().int().positive().optional(), description: z.string() }), policy: builtinPolicy('python'), sourcePriority: 100, timeoutMs: null,
+  registry.register({ name: 'python', description: '在工作目录执行 Python 代码；非 owner 必须使用可用沙箱。', inputSchema: pythonSchema(300_000), inputSchemaFor: (context) => pythonSchema(execMax(context)), policy: builtinPolicy('python'), sourcePriority: 100, timeoutMs: null,
     available: (role, context) => dependencies.sandbox.plan(role, context.workspace).allowed,
-    execute: async (input, context) => dependencies.sandbox.run(`python3 - <<'PY'\n${input.code}\nPY`, context.turn.effectiveRole, context.workspace, context.turn.abortSignal, input.timeoutMs, context.turn.turnId) });
+    execute: async (input, context) => {
+      // 落成临时文件再跑（doc §3.3），不用 heredoc：`python3 - <<'PY'` 里正文只要出现一行 `PY`
+      // 就把脚本从那里截断，而 stdin 整条被 heredoc 占着 —— 脚本里的 `input()` 读到的是自己
+      // 的后半截，`sys.argv[0]` 是 `-`，traceback 里的文件名是 `<stdin>` 且没有源码行。
+      //
+      // 路径按 **workspace** 拼，不走 `filesFor`：`tools.fs.allowHostFsForOwner` 打开时 owner 的
+      // jail 根是 `/`，`.luoli-tmp/x.py` 会落到 `/.luoli-tmp/` 去，而沙箱的 cwd 仍是 workspace ——
+      // 写得进去也跑不到（还大概率因为 `/` 不可写直接失败）。这个路径是本工具自己生成的，
+      // 不经模型的手，所以不需要那层 jail；交给沙箱的则是 workspace 内的相对路径，宿主与容器
+      // （cwd=/workspace）两种形态下都指同一个文件。
+      const directory = join(context.workspace, PYTHON_TMP_DIR);
+      const name = `${crypto.randomUUID()}.py`;
+      mkdirSync(directory, { recursive: true, mode: 0o700 });
+      writeFileSync(join(directory, name), input.code, { mode: 0o600 });
+      try { return await dependencies.sandbox.run(`python3 ${JSON.stringify(`${PYTHON_TMP_DIR}/${name}`)}`, context.turn.effectiveRole, context.workspace, context.turn.abortSignal, input.timeoutMs, context.turn.turnId); }
+      finally { try { rmSync(join(directory, name)); } catch { /* 沙箱里删掉了、或整个 workspace 被清了 */ } }
+    } });
   // 四个 `tools.archive.*Limit` 从这里生效。走 `inputSchemaFor` 而不是注册期固定：那是**每轮**
   // 取一次 `turn.config`，所以热更新和 perChat 覆盖都能落到模型看到的那份 schema 上。
   const archiveLimits = (context: ToolExecutionContext): Config['tools']['archive'] => (context.turn.config as Readonly<Config>).tools.archive;
+  const limitField = (fallback: number, max: number) => z.number().int().min(1).max(max).default(Math.min(fallback, max));
   const searchSchema = (limits: { defaultSearchLimit: number; maxSearchLimit: number }) =>
-    z.object({ query: z.string(), limit: z.number().int().min(1).max(limits.maxSearchLimit).default(Math.min(limits.defaultSearchLimit, limits.maxSearchLimit)) });
+    z.object({ query: z.string(), from: z.string().optional(), after: z.string().optional(), before: z.string().optional(), kind: z.string().optional(),
+      limit: limitField(limits.defaultSearchLimit, limits.maxSearchLimit) });
+  const adminSearchSchema = (limits: { defaultSearchLimit: number; maxSearchLimit: number }) =>
+    z.object({ query: z.string(), limit: limitField(limits.defaultSearchLimit, limits.maxSearchLimit) });
   const readSchema = (limits: { defaultReadLimit: number; maxReadLimit: number }) =>
-    z.object({ limit: z.number().int().min(1).max(limits.maxReadLimit).default(Math.min(limits.defaultReadLimit, limits.maxReadLimit)) });
-  registry.register({ name: 'search_messages', description: '在当前会话内搜索聊天记录。', inputSchema: searchSchema({ defaultSearchLimit: 20, maxSearchLimit: 100 }),
+    z.object({ anchor: z.union([z.number().int().positive(), z.string().min(1)]).optional(), direction: z.enum(['before', 'after', 'around']).default('before'),
+      limit: limitField(limits.defaultReadLimit, limits.maxReadLimit) });
+  registry.register({ name: 'search_messages', description: '在当前会话内搜索聊天记录；可按发言人、时间区间、消息类型过滤。', inputSchema: searchSchema({ defaultSearchLimit: 20, maxSearchLimit: 100 }),
     inputSchemaFor: (context) => searchSchema(archiveLimits(context)), policy: builtinPolicy('search_messages'), sourcePriority: 100, untrustedOutput: true,
-    execute: (input, context) => ({ ok: true, messages: dependencies.archive.scope(context.turn.chatId, context.turn.threadId).search(input.query, input.limit) }) });
-  registry.register({ name: 'read_messages', description: '按时间读取当前会话聊天记录。', inputSchema: readSchema({ defaultReadLimit: 50, maxReadLimit: 200 }),
+    execute: (input, context) => {
+      const after = parseMoment(input.after);
+      const before = parseMoment(input.before);
+      if (after === false || before === false) return { ok: false, error: 'invalid_time_filter', hint: 'after / before 要写成 ISO 时间，例如 2026-08-14 或 2026-08-14T10:02:00Z' };
+      const scope = dependencies.archive.scope(context.turn.chatId, context.turn.threadId);
+      return { ok: true, messages: cite(scope.search(input.query, input.limit, { from: input.from ?? null, after, before, kind: input.kind ?? null }), context, scope) };
+    } });
+  registry.register({ name: 'read_messages', description: '按顺序读取当前会话聊天记录。anchor 可以是消息 id 或 ISO 时间，direction 决定往哪边读；不给 anchor 就是最近若干条。', inputSchema: readSchema({ defaultReadLimit: 50, maxReadLimit: 200 }),
     inputSchemaFor: (context) => readSchema(archiveLimits(context)), policy: builtinPolicy('read_messages'), sourcePriority: 100, untrustedOutput: true,
-    execute: (input, context) => ({ ok: true, messages: dependencies.archive.scope(context.turn.chatId, context.turn.threadId).recent(input.limit).reverse() }) });
+    execute: (input, context) => {
+      const anchor = resolveAnchor(input.anchor);
+      if (anchor === false) return { ok: false, error: 'invalid_anchor', hint: 'anchor 要么是消息 id（如 12841 或 #12841），要么是 ISO 时间（如 2026-08-14T10:02:00Z）' };
+      const scope = dependencies.archive.scope(context.turn.chatId, context.turn.threadId);
+      return { ok: true, messages: cite(scope.window({ ...anchor, direction: input.direction, limit: input.limit }), context, scope) };
+    } });
   registry.register({ name: 'get_message', description: '读取当前会话的单条归档消息。', inputSchema: z.object({ messageId: z.number().int().positive() }), policy: builtinPolicy('get_message'), sourcePriority: 100, untrustedOutput: true,
     execute: (input, context) => ({ ok: true, message: dependencies.archive.scope(context.turn.chatId, context.turn.threadId).byId(input.messageId) }) });
-  registry.register({ name: 'admin_search_messages', description: '跨会话搜索聊天记录，仅 owner。', inputSchema: searchSchema({ defaultSearchLimit: 20, maxSearchLimit: 100 }),
-    inputSchemaFor: (context) => searchSchema(archiveLimits(context)), policy: builtinPolicy('admin_search_messages'), sourcePriority: 100, untrustedOutput: true,
-    execute: (input) => ({ ok: true, messages: dependencies.archive.adminSearchAll(input.query, input.limit) }) });
+  // 跨会话检索**不给**过滤参数：`adminSearchAll` 不认它们，而收下一个参数再默默忽略比没有这个
+  // 参数更糟 —— 模型会以为自己已经按人过滤过了（「摘除比伪造安全」，docs/16 §5）。
+  registry.register({ name: 'admin_search_messages', description: '跨会话搜索聊天记录，仅 owner。', inputSchema: adminSearchSchema({ defaultSearchLimit: 20, maxSearchLimit: 100 }),
+    inputSchemaFor: (context) => adminSearchSchema(archiveLimits(context)), policy: builtinPolicy('admin_search_messages'), sourcePriority: 100, untrustedOutput: true,
+    // 跨会话的行不带 thread 作用域，回复标记换不出归档 id，所以只带 `[chat:<id>]` 不带 `↩︎`。
+    execute: (input, context) => ({ ok: true, messages: citeArchivedMessages(dependencies.archive.adminSearchAll(input.query, input.limit),
+      { timezone: (context.turn.config as Readonly<Config>).general.timezone, withChat: true }) }) });
   registry.register({ name: 'context_stats', description: '读取当前上下文窗口和提交状态。', inputSchema: z.object({}), policy: builtinPolicy('context_stats'), sourcePriority: 100,
     execute: (_input, context) => ({ ok: true, ...dependencies.context.stats(context.turn.key) }) });
   const memoryScopeSchema = (isPrivate: boolean) => z.object({ scope: isPrivate ? z.enum(['pubmemory', 'primemory']) : z.enum(['pubmemory']) });
@@ -172,9 +266,15 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
       const result = dependencies.skills.load(input.name, context.turn.effectiveRole, registry.activeNames(context.turn.effectiveRole, context));
       if (result.ok !== false) {
         loaded.add(input.name);
-        const allowed = Array.isArray(result.allowedTools) ? result.allowedTools.filter((name): name is string => typeof name === 'string') : [];
-        const set = (context.turn.skillAllowedTools ??= new Set());
-        for (const name of allowed) set.add(name);
+        // 只有**声明了** `allowed-tools` 的 skill 才动允许集（docs/07 §4：未声明则不收窄）。
+        // 此前这里无条件并入 loader 交回的 `allowedTools`，而那一档等于「当前全部可用工具」——
+        // 于是先载入一个 `allowed-tools: [read_file]` 的 skill、再载入一个不声明的，前一个的
+        // 收窄就被整个抹掉了。
+        if (result.narrows === true) {
+          const allowed = Array.isArray(result.allowedTools) ? result.allowedTools.filter((name): name is string => typeof name === 'string') : [];
+          const set = (context.turn.skillAllowedTools ??= new Set());
+          for (const name of allowed) set.add(name);
+        }
         dependencies.context.appendDelta(context.turn, { id: crypto.randomUUID(), role: 'user', origin: 'note', parts: [{ type: 'text', text: String(result.body ?? '') }], textPreview: `Skill ${input.name}`, pruneLevel: 2 });
       }
       return result;
@@ -198,7 +298,12 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
         .run(taskId, context.turn.turnId, run.id, context.turn.chatId, context.turn.initiatorUserId, title, Date.now(), Date.now());
       dependencies.log.publish('task.updated', { id: taskId, turnId: context.turn.turnId, title, state: 'running', progress: null });
       const live = context.turn.config as Readonly<Config>;
-      await acquireSlot(context.turn.turnId, live.agent.maxConcurrentSubagents);
+      if (!await acquireSlot(context.turn.turnId, live.agent.maxConcurrentSubagents, context.turn.abortSignal)) {
+        dependencies.agents.fail(run, 'turn_cancelled');
+        dependencies.db.prepare("UPDATE tasks SET state='failed',result_summary=?,updated_at=?,finished_at=? WHERE id=?").run('turn_cancelled', Date.now(), Date.now(), taskId);
+        dependencies.log.publish('task.updated', { id: taskId, turnId: context.turn.turnId, title, state: 'failed', progress: null });
+        return { ok: false, error: 'turn_cancelled', taskId, runId: run.id };
+      }
       try {
         // provider 重试设置与配额预留都从本轮取：子 agent 的花费必须落进主 agent 那份预留，
         // 否则配额只看得见主 agent（docs/20 · W-QUOTA-01）。

@@ -31,6 +31,7 @@ export * from './provider/store.js';
 export * from './scheduler.js';
 export * from './skills/loader.js';
 export * from './tools/builtins.js';
+export * from './tools/cite.js';
 export * from './tools/files.js';
 export * from './tools/jail.js';
 export * from './tools/policy.js';

@@ -364,7 +364,7 @@ report_progress: tool({
 | 护栏 | 默认 | 说明 |
 |---|---|---|
 | `agent.maxDepth` | 3 | `depth > maxDepth` 时 `spawn_agent` 不注册 |
-| `agent.maxConcurrentSubagents` | 3 | 同 turn 在途子 agent 上限；超出排队 |
+| `agent.maxConcurrentSubagents` | 3 | 同 turn 在途子 agent 上限；超出排队。**排队要认 `abortSignal`**：那个等待原本只由前一个子 agent 释放槽位来唤醒，于是 `/cancel` 之后排在后面的 `spawn_agent` 照样会醒过来、照样真的去派一个子 agent —— 一轮已经取消的对话继续烧 token，而没有任何人还在等它的结果（这个工具是 `timeoutMs: null`，注册表那道兜底的 race 也不会砍它）。取消时交回 `{ok:false, error:'turn_cancelled'}`，对应的 task 行落 `failed` |
 | `agent.maxSubagentsPerTurn` | 10 | 同 turn 累计派发上限（防无限派发） |
 | `agent.askTimeoutMs` | 120000 | ask 阻塞超时 |
 | `agent.maxAsksPerRun` | 5 | 单个子 agent 的提问次数上限，超出直接返回超时错误 |

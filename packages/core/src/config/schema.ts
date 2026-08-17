@@ -121,6 +121,10 @@ export const KNOWN_UNIMPLEMENTED_CONFIG_KEYS = [
   // 按「摘除比伪造安全」不拿默认值伪造答复）。这两个键是那件事的配置面，docs/14 A7 也还没确认。
   'agent.askArbiter',
   'agent.askEscalateToUser',
+  // 同一件事的第三个键：`ask_parent` 从来不等答复（当场返回 `ask_parent_not_implemented` 或
+  // 调用方自带的 `default`），所以「等多久」无处可用。它此前一路传进 `registerBuiltins` 却
+  // 没有任何地方读，配置手册里也没标 —— 运维改它、以为改了什么。
+  'agent.askTimeoutMs',
   // 「抓回来的网页先用某个别名摘要再进上下文」要在 web_fetch 里插一次模型调用：计费、配额、
   // 取消信号、失败降级都得跟着走一遍。那是一个特性，不是一行读取。
   'tools.web.summarizeWithAlias',
