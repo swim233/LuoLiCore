@@ -41,6 +41,11 @@ const RESPONSES: Record<string, unknown> = {
   '/api/usage/report': { groupBy: 'day', from: 0, to: Date.now(), rows: [] },
   // 唤醒词可用性是个数组端点，但路径不长得像列表 —— 显式列出来。
   '/api/config/wakewords/check': [{ pattern: '洛璃', kind: 'contains', ok: true, reason: null }],
+  '/api/schedules': { available: true, enabled: true, timezone: 'UTC', settings: { maxPerChat: 20, minIntervalMinutes: 5, maxPayloadChars: 2000 },
+    jobs: [{ id: 'j1', key: 'chat:c1', chatId: 'c1', threadId: null, createdBy: '1', name: '每日早报', mode: 'agent', state: 'active',
+      chatLabel: '阿离', creatorLabel: '阿离', cron: '0 8 * * *', timezone: 'UTC', payload: '汇总昨天群里聊了什么', runCount: 2,
+      nextRun: new Date(Date.now() + 3_600_000).toISOString(), lastRunAt: Date.now() - 3_600_000, lastState: 'committed',
+      createdAt: Date.now() - 86_400_000, updatedAt: Date.now() - 3_600_000 }] },
 };
 
 /** 没显式列出的端点：按路径形状猜一个空值。数组端点回 `[]`，其余回 `{}`。 */

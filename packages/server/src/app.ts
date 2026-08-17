@@ -8,9 +8,9 @@ import YAML from 'yaml';
 import type { Context } from 'hono';
 import { serveStatic } from '@hono/node-server/serve-static';
 import type { AgentManager, Config, ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, PluginManager, PromptDocuments, ProviderStore, Sandbox, SkillLoader, SkillWriteInput, SubAgentRuntimeEvent, TurnRegistry } from '@luoli/core';
-import { ALIAS_NAME_PATTERN, HOT_RELOADABLE_CONFIG_KEYS, testApprovalRules, KNOWN_UNIMPLEMENTED_CONFIG_KEYS, TOOL_POLICY, aliasSettingsSchema, checkWakeword, configSchema as runtimeConfigSchema, envPinnedConfigKeys, perChatConfig, probeProvider, quotaBucket, rejectedWakewords } from '@luoli/core';
+import { ALIAS_NAME_PATTERN, HOT_RELOADABLE_CONFIG_KEYS, createScheduledJob, scheduledJobView, testApprovalRules, KNOWN_UNIMPLEMENTED_CONFIG_KEYS, TOOL_POLICY, aliasSettingsSchema, checkWakeword, configSchema as runtimeConfigSchema, envPinnedConfigKeys, perChatConfig, probeProvider, quotaBucket, rejectedWakewords } from '@luoli/core';
 import type { CatalogIndex, ModelMetadata, ProviderProbe } from '@luoli/core';
-import type { ArchiveRepository, OperationsRepository, PrincipalRepository, Sqlite } from '@luoli/db';
+import type { ArchiveRepository, OperationsRepository, PrincipalRepository, ScheduleRepository, ScheduledJob, Sqlite } from '@luoli/db';
 import { deleteAppKv, modelAliasKey, readAppKv } from '@luoli/db';
 import { assignDotted, readDotted, type Role } from '@luoli/shared';
 import type { EventStreamRegistry } from './events.js';
@@ -45,6 +45,15 @@ export interface ServerDependencies {
   ledger?: { report(from: number, to: number, groupBy: 'day' | 'chat' | 'user' | 'model' | 'alias' | 'agent'): unknown[] };
   /** `POST /api/restart` 的落点。优雅关闭那套在 apps/bot，服务器包只负责把请求转过去。 */
   restart?: (reason: string) => Promise<void> | void;
+  /**
+   * 定时任务的运行时（`ScheduleRepository` + `ScheduledJobRunner`）。缺它时那四个端点回
+   * `schedule_unavailable`，界面据此说「这个部署没接定时任务运行时」——**不是显示零条任务**：
+   * 空列表和「读不到」在运维眼里是两回事（docs/16 §5「摘除比伪造安全」）。
+   */
+  schedules?: {
+    jobs: ScheduleRepository;
+    runner: { register(job: ScheduledJob): boolean; unregister(id: string): boolean; nextRun(id: string): Date | null; fire(id: string): Promise<void> };
+  };
   events: EventBus;
   memory?: MemoryStore;
   promptDocuments?: PromptDocuments;
@@ -1141,6 +1150,87 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     const body = await ctx.req.json<{ approved?: unknown }>().catch((): { approved?: unknown } => ({}));
     if (typeof body.approved !== 'boolean') return ctx.json(apiError('invalid_decision', 'approved 必须是布尔值').body, 400);
     return ctx.json({ ok: true, data: { changed: dependencies.approvals.decide(ctx.req.param('id'), body.approved, 'owner', 'webui') } });
+  });
+  /**
+   * 定时任务面板（docs/21 · `G-API-16`）。此前运维在 WebUI 里既看不到这个部署有哪些任务在排、
+   * 也停不掉任何一条 —— 止损只能去 Telegram 让 bot 跑 `schedule_cancel`。
+   *
+   * **建任务与工具共用 `createScheduledJob`**：两边各写一遍校验的话，WebUI 迟早能建出工具
+   * 建不出来的任务（比如每分钟一次的 agent 轮次）。
+   */
+  const scheduleRuntime = (): NonNullable<ServerDependencies['schedules']> | null => dependencies.schedules ?? null;
+  const scheduleRow = (job: ScheduledJob): Record<string, unknown> => ({
+    id: job.id, key: job.key, chatId: job.chatId, threadId: job.threadId, createdBy: job.createdBy,
+    chatLabel: principalLabel(dependencies.db, 'chat', job.chatId),
+    creatorLabel: principalLabel(dependencies.db, 'user', job.createdBy),
+    createdAt: job.createdAt, updatedAt: job.updatedAt,
+    ...scheduledJobView(job, job.state === 'active' ? (scheduleRuntime()?.runner.nextRun(job.id) ?? null) : null),
+  });
+  app.get('/api/schedules', (ctx) => {
+    const runtime = scheduleRuntime();
+    const live = currentConfig();
+    if (!runtime) return ctx.json({ ok: true, data: { available: false, enabled: live.schedule.enabled, timezone: live.general.timezone, jobs: [] } });
+    return ctx.json({ ok: true, data: { available: true, enabled: live.schedule.enabled, timezone: live.general.timezone,
+      settings: { maxPerChat: live.schedule.maxPerChat, minIntervalMinutes: live.schedule.minIntervalMinutes, maxPayloadChars: live.schedule.maxPayloadChars },
+      jobs: runtime.jobs.listAll().map(scheduleRow) } });
+  });
+  app.post('/api/schedules', async (ctx) => {
+    const runtime = scheduleRuntime();
+    if (!runtime) return ctx.json(apiError('not_implemented', '这个部署没有装配定时任务运行时', 500).body, 500);
+    const body = await ctx.req.json<Record<string, unknown>>().catch((): Record<string, unknown> => ({}));
+    const key = typeof body.key === 'string' ? body.key : '';
+    // 落点从 `contexts` 反查，不收客户端给的 chatId/threadId：那一对是会话隔离的锚点，
+    // 让调用方自己拼等于凭一个字段就能把任务塞进任意会话（同 docs/05 §8 对工具的要求）。
+    const target = dependencies.db.prepare('SELECT chat_id AS chatId,thread_id AS threadId FROM contexts WHERE key=?').get(key) as { chatId: string; threadId: number | null } | undefined;
+    if (!target) return ctx.json(apiError('chat_not_found', '会话不存在：只能给已经有上下文的会话排任务').body, 400);
+    const mode = body.mode === 'agent' || body.mode === 'notify' ? body.mode : null;
+    if (!mode) return ctx.json(apiError('invalid_mode', 'mode 只能是 agent 或 notify').body, 400);
+    const live = currentConfig();
+    // WebUI 只有 owner 一个身份（docs/14 A15），所以任务归属 `access.bootstrapOwnerId`。
+    // 它仍然要过 D9：触发时按 min(用户角色, 会话角色) 重算，在不受信的群里不会因为「owner 建的」而提权。
+    const createdBy = live.access.bootstrapOwnerId;
+    if (!createdBy) return ctx.json(apiError('owner_unset', '没有配 access.bootstrapOwnerId：任务需要一个归属身份才能在触发时重算权限').body, 400);
+    const result = createScheduledJob(runtime.jobs, runtime.runner,
+      { name: String(body.name ?? ''), mode, text: String(body.text ?? ''), ...(typeof body.cron === 'string' && body.cron ? { cron: body.cron } : {}), ...(typeof body.at === 'string' && body.at ? { at: body.at } : {}) },
+      { key, chatId: target.chatId, threadId: target.threadId, createdBy, timezone: live.general.timezone, settings: live.schedule });
+    if (!result.ok) return ctx.json(apiError(result.error, result.hint).body, 400);
+    dependencies.log.event({ level: 'info', kind: 'schedule.created', summary: `WebUI 新建定时任务 ${result.job.name}`, chatId: result.job.chatId, key: result.job.key,
+      data: { job: result.job.id, name: result.job.name, mode: result.job.mode, cron: result.job.cron, runAt: result.job.runAt, actor: 'webui' } });
+    return ctx.json({ ok: true, data: scheduleRow(result.job) });
+  });
+  app.delete('/api/schedules/:id', (ctx) => {
+    const runtime = scheduleRuntime();
+    if (!runtime) return ctx.json(apiError('not_implemented', '这个部署没有装配定时任务运行时', 500).body, 500);
+    const id = ctx.req.param('id');
+    const job = runtime.jobs.byId(id);
+    if (!job) return ctx.json(apiError('not_found', '任务不存在（可能已被保留策略清理）', 404).body, 404);
+    // 已结束的行返回 `cancelled:false` 而不是假成功：界面据此说「这条本来就已经停了」。
+    const changed = runtime.jobs.finish(id, 'cancelled');
+    runtime.runner.unregister(id);
+    if (changed) {
+      dependencies.log.event({ level: 'warn', kind: 'schedule.cancelled', summary: `WebUI 停用定时任务 ${job.name}`, chatId: job.chatId, key: job.key,
+        data: { job: id, name: job.name, actor: 'webui' } });
+    }
+    return ctx.json({ ok: true, data: { cancelled: changed, name: job.name } });
+  });
+  /**
+   * 立即触发一次。**不等它跑完**：`mode='agent'` 的一次触发是一整轮真实模型调用，
+   * 同步等下去会把这个请求挂到 `concurrency.turnTimeoutMs`。所以先回响应（同
+   * `POST /api/restart` 的做法），结果落在这一行的 `lastState` / `lastError` 与日志里。
+   * 不影响下一次的正常触发 —— cron 那边的计时器没被动过。
+   */
+  app.post('/api/schedules/:id/trigger', (ctx) => {
+    const runtime = scheduleRuntime();
+    if (!runtime) return ctx.json(apiError('not_implemented', '这个部署没有装配定时任务运行时', 500).body, 500);
+    const id = ctx.req.param('id');
+    const job = runtime.jobs.byId(id);
+    if (!job) return ctx.json(apiError('not_found', '任务不存在', 404).body, 404);
+    if (job.state !== 'active') return ctx.json(apiError('not_active', `这条任务是 ${job.state}，不会再触发`, 409).body, 409);
+    dependencies.log.event({ level: 'info', kind: 'schedule.fired', summary: `WebUI 手动触发定时任务 ${job.name}`, chatId: job.chatId, key: job.key,
+      data: { job: id, name: job.name, mode: job.mode, actor: 'webui', manual: true } });
+    void runtime.runner.fire(id).catch((error: unknown) => dependencies.log.event({ level: 'error', kind: 'schedule.failed',
+      summary: `手动触发 ${job.name} 失败`, chatId: job.chatId, key: job.key, data: { job: id, error: error instanceof Error ? error.message : String(error) } }));
+    return ctx.json({ ok: true, data: { started: true, name: job.name, mode: job.mode } });
   });
   app.get('/api/skills', (ctx) => ctx.json({ ok: true, data: dependencies.db.prepare('SELECT * FROM skills ORDER BY name').all() }));
   app.get('/api/skills/:name', (ctx) => {

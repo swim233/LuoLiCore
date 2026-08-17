@@ -410,11 +410,21 @@ G-API-10/11/12 与 G-SRV-02/03/04 均已完成；按本文「运行时已有、W
 | **G-API-15** | `log_events.data_json`（含 blob 解引用）—— 列表把 15 列里的 10 列连同整份载荷都传给了浏览器，而界面只用 5 列 | 日志页点一行只会去重建 trace，`trace_id` 为空的那些（`system.start`、`config.changed`、`maintenance.*`、`webui.action`）**点了什么都不发生**；有 trace 的也只得到一串 kind/summary，载荷从没露过面。docs/09 §3.10 那句「每个节点可展开看完整 payload」一直没实现 | ✅ 本轮：新增 `GET /api/logs/:id`（复用 `detailPayload`），日志行点开进详情弹窗；列表 SELECT 同时收窄成不带 `data_json`（原先每次刷新最坏推 ~50 MB） |
 | — | `context_messages.parts_json` 里工具调用的原始参数 | 消息→查看详情只有工具**输出**没有**输入**。根因在 `LogSink.span` 而不是界面（见 [10 §2](./10-logging-and-observability.md) 的 `tool.call` 行），但历史轮次的日志补不回来 | ✅ 本轮：`GET /api/turns/:id/detail` 增 `contextMessages`（直读列、绕开 `elidePart`），详情弹窗多一组「工具输入输出」，对老轮次同样有效 |
 
-### 8.2 新增缺口（未做，本轮明确留下）
+### 8.2 `G-API-16` —— 已闭合（定时任务管理面）
 
-| 编号 | 运行时已有 | 界面缺什么 | 优先级 |
+| 编号 | 运行时已有 | 界面缺什么 | 状态 |
 |---|---|---|---|
-| **G-API-16** | `scheduled_jobs` 全表 + `ScheduledJobRunner`（`nextRun` / `unregister` 都在进程内） | **WebUI 没有定时任务面**：运维看不到「这个部署里现在有哪些任务在排、下一次什么时候、上一次是成是败」，也不能停掉某一条。止损路径目前有两条 —— 在 Telegram 里让 bot 跑 `schedule_list` / `schedule_cancel`，或在工具页把 `schedule_create` 关掉（那只能阻止新建，不影响已有任务）。真正对称的做法是 `GET /api/schedules` + `DELETE /api/schedules/:id` + 一个列表页 | P2 |
+| **G-API-16** | `scheduled_jobs` 全表 + `ScheduledJobRunner`（`nextRun` / `unregister` / `fire` 都在进程内） | **WebUI 没有定时任务面**：运维看不到「这个部署里现在有哪些任务在排、下一次什么时候、上一次是成是败」，也不能停掉某一条。止损只能去 Telegram 让 bot 跑 `schedule_list` / `schedule_cancel`，或在工具页关掉 `schedule_create`（那只阻止新建，不影响已有任务） | ✅ 已补：「任务与审批」页第三张卡片 + 四个端点（`GET/POST /api/schedules`、`DELETE /api/schedules/:id`、`POST /api/schedules/:id/trigger`），见 [09 §3.10.1](./09-webui.md) |
 
-没有先加端点再补页面：一个没有界面调用的端点正是 [25](./25-round7-remediation.md) 花了一整轮清掉的形态。
-要么两头一起做，要么如实记在这里。
+两处值得记下来的取舍：
+
+- **建任务与工具共用 `createScheduledJob`**（`packages/core/src/schedule/create.ts`）。端点自己抄一遍
+  校验的话，WebUI 迟早能建出工具建不出来的任务 —— 这正是 [26](./26-round8-tool-review.md) §1
+  「同一道闸修过一次但漏了另一侧」的形态。落点也不收客户端给的 `chatId`：按 `key` 从 `contexts`
+  反查，与 [05 §8](./05-tools-and-permissions.md) 对工具参数的要求同源。
+- **没装配运行时时 `available:false` 而不是空数组**。「一条都没有」和「读不到」在运维眼里是两回事
+  （[16](./16-remediation-plan.md) §5「摘除比伪造安全」）。前端也按这个归一化：形状对不上的响应
+  不该让整页崩在 `DataGrid` 的 `rows` 上（[24](./24-review-round6-verification.md) · `R-UI-01`）。
+
+**新增缺口：无。** 定时任务的运行时能力（列、建、停、手动触发）现在都够得着；
+`schedule.*` 五个配置键走通用配置表单。

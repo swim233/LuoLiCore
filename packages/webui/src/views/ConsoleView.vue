@@ -229,6 +229,7 @@ const COLUMNS = {
   aliases: [{ key: 'alias', header: '别名', width: '12%' }, { key: 'purpose', header: '用途', width: '27%' }, { key: 'chain', header: 'Fallback 链', width: '31%' }, { key: 'settings', header: '采样参数', width: '20%' }, { key: 'actions', header: '', width: '10%' }],
   logs: [{ key: 'ts', header: '时间', width: '13rem' }, { key: 'level', header: '级别', width: '7rem' }, { key: 'kind', header: '事件' }, { key: 'summary', header: '摘要' }, { key: 'data_bytes', header: '载荷', width: '6rem' }, { key: 'trace_id', header: 'Trace' }],
   tasks: [{ key: 'title', header: '标题' }, { key: 'state', header: '状态', width: '7rem' }, { key: 'updated_at', header: '更新时间', width: '13rem' }, { key: 'actions', header: '', width: '7rem' }],
+  schedules: [{ key: 'name', header: '任务' }, { key: 'chatLabel', header: '会话' }, { key: 'mode', header: '模式', width: '6rem' }, { key: 'trigger', header: '触发', width: '11rem' }, { key: 'nextRun', header: '下一次', width: '12rem' }, { key: 'last', header: '上一次', width: '12rem' }, { key: 'state', header: '状态', width: '6rem' }, { key: 'actions', header: '', width: '11rem' }],
   activeTurns: [{ key: 'who', header: '发起人' }, { key: 'chat', header: '会话' }, { key: 'progress', header: '当前动作' }, { key: 'stats', header: '步数 / 花费', width: '11rem' }, { key: 'elapsed', header: '已用时长', width: '8rem' }, { key: 'actions', header: '', width: '6rem' }],
   approvals: [{ key: 'tool_name', header: '工具' }, { key: 'risk', header: '风险', width: '7rem' }, { key: 'state', header: '状态', width: '7rem' }, { key: 'requested_at', header: '请求时间', width: '12rem' }, { key: 'actions', header: '', width: '12rem' }],
   catalog: [{ key: 'modelId', header: '模型 ID' }, { key: 'limits', header: '窗口 / 最大输出', width: '11rem' }, { key: 'price', header: '价格 / M token', width: '13rem' }, { key: 'capabilities', header: '能力' }, { key: 'status', header: '状态', width: '7rem' }],
@@ -247,6 +248,8 @@ async function load(): Promise<void> {
   recentErrors.value = await api<LogRow[]>('/api/logs?minLevel=warn&size=10');
   // 总览的额度环和配额页读的是同一个端点。失败不该把整个总览页带下去 —— 配额关掉时它本来就是空的。
   await Promise.all([loadQuota().catch(() => undefined), loadUsageReport()]);
+  // 定时任务面板：没装配运行时的部署会回 available:false，界面据此说明白，而不是显示零条任务。
+  await REFRESH_LOADERS.schedules().catch(() => undefined);
   syncTrigger();
   syncOutput();
   syncBotName();
@@ -1442,10 +1445,74 @@ async function decideApproval(approval: Record<string, unknown>, approved: boole
   finally { decidingApproval.value = ''; }
 }
 
+// ── 定时任务（docs/21 · G-API-16）──────────────────────────────────────────────
+// 此前这个部署有哪些任务在排、下一次什么时候、上一次是成是败，运维在界面上一个都看不到，
+// 停一条也只能去 Telegram 让 bot 跑 `schedule_cancel`。
+interface ScheduleJob { id: string; key: string; chatId: string; name: string; mode: 'agent' | 'notify'; state: string;
+  chatLabel: string | null; creatorLabel: string | null; cron?: string; at?: string; timezone: string; payload: string;
+  runCount: number; nextRun?: string; lastRunAt?: string; lastState?: string | null; lastError?: string }
+interface ScheduleList { available: boolean; enabled: boolean; timezone: string; jobs: ScheduleJob[];
+  settings?: { maxPerChat: number; minIntervalMinutes: number; maxPayloadChars: number } }
+const schedules = ref<ScheduleList>({ available: true, enabled: true, timezone: '', jobs: [] });
+const scheduleBusy = ref('');
+const scheduleDialog = ref(false);
+const scheduleSaving = ref(false);
+const scheduleForm = ref({ key: '', name: '', mode: 'notify' as 'agent' | 'notify', trigger: 'cron' as 'cron' | 'at', cron: '0 8 * * *', at: '', text: '' });
+const SCHEDULE_STATES: Record<string, { label: string; severity: 'success' | 'warn' | 'danger' | 'secondary' }> = {
+  active: { label: '在排', severity: 'success' }, done: { label: '已完成', severity: 'secondary' }, cancelled: { label: '已停用', severity: 'warn' },
+};
+/** 上一次触发的结果。`skipped` 的原因是排障的关键 —— 它意味着任务响了但什么都没发生。 */
+const SCHEDULE_RUN_STATES: Record<string, { label: string; severity: 'success' | 'warn' | 'danger' | 'secondary' }> = {
+  committed: { label: '成功', severity: 'success' }, failed: { label: '失败', severity: 'danger' },
+  skipped: { label: '跳过', severity: 'warn' }, missed: { label: '错过', severity: 'warn' }, cancelled: { label: '停用', severity: 'secondary' },
+};
+function openScheduleDialog(): void {
+  scheduleForm.value = { key: chats.value[0]?.key ?? '', name: '', mode: 'notify', trigger: 'cron', cron: '0 8 * * *', at: '', text: '' };
+  scheduleDialog.value = true;
+}
+async function submitSchedule(): Promise<void> {
+  const form = scheduleForm.value;
+  if (!form.key) { pushToast({ severity: 'warn', summary: '先选一个会话', detail: '只能给已经有上下文的会话排任务' }); return; }
+  scheduleSaving.value = true;
+  try {
+    const created = await api<ScheduleJob>('/api/schedules', { method: 'POST', body: JSON.stringify({ key: form.key, name: form.name, mode: form.mode,
+      text: form.text, ...(form.trigger === 'cron' ? { cron: form.cron } : { at: form.at }) }) });
+    pushToast({ severity: 'success', summary: `已排上「${created.name}」`,
+      detail: created.nextRun ? `下一次：${new Date(created.nextRun).toLocaleString()}` : '已建立' });
+    scheduleDialog.value = false;
+    await REFRESH_LOADERS.schedules();
+  } catch (error) { toastError('建定时任务失败', error); }
+  finally { scheduleSaving.value = false; }
+}
+async function cancelSchedule(job: ScheduleJob): Promise<void> {
+  if (!confirm(`停掉「${job.name}」？停掉后不再触发；任务行按 schedule.retentionDays 保留，之后同名任务可以重建。`)) return;
+  scheduleBusy.value = job.id;
+  try {
+    const result = await api<{ cancelled: boolean }>(`/api/schedules/${encodeURIComponent(job.id)}`, { method: 'DELETE' });
+    pushToast(result.cancelled ? { severity: 'success', summary: `已停用「${job.name}」`, detail: '调度器里也摘掉了' }
+      : { severity: 'warn', summary: '这条本来就已经停了', detail: '状态会在下次刷新时归位' });
+    await REFRESH_LOADERS.schedules();
+  } catch (error) { toastError('停用失败', error); }
+  finally { scheduleBusy.value = ''; }
+}
+/** 立即触发。代价必须写在确认框里：agent 模式点一下就是一次真实模型调用，而且真的会发消息出去。 */
+async function triggerSchedule(job: ScheduleJob): Promise<void> {
+  const cost = job.mode === 'agent' ? '这会真的跑一轮模型调用（花钱）' : '这会真的发一条消息';
+  if (!confirm(`立即触发「${job.name}」？${cost}，落点是「${job.chatLabel ?? job.chatId}」。不影响下一次的正常触发。`)) return;
+  scheduleBusy.value = job.id;
+  try {
+    await api<{ started: boolean }>(`/api/schedules/${encodeURIComponent(job.id)}/trigger`, { method: 'POST', body: '{}' });
+    // 不等它跑完：agent 模式一次触发是一整轮。结果落在这一行的「上一次」上。
+    pushToast({ severity: 'success', summary: `已触发「${job.name}」`, detail: '不等它跑完；结果看这一行的「上一次」，或去日志页看这一轮' });
+    await REFRESH_LOADERS.schedules();
+  } catch (error) { toastError('触发失败', error); }
+  finally { scheduleBusy.value = ''; }
+}
+
 // ── SSE：首屏之后界面的数据新鲜度全靠这里（docs/21 · G-SSE-01）───────────────────
 // 事件到达**不再无脑重跑 `load()`**（那是一次 18 个端点）：按事件类型只刷相关的那几组，
 // 且只刷当前页面看得见的。服务端已按 kind 合并过一轮，这一层挡的是「多个 kind 同时来」。
-type RefreshGroup = 'dashboard' | 'logs' | 'chats' | 'usage' | 'quota' | 'tasks' | 'approvals' | 'extensions' | 'config' | 'activeTurns';
+type RefreshGroup = 'dashboard' | 'logs' | 'chats' | 'usage' | 'quota' | 'tasks' | 'approvals' | 'extensions' | 'config' | 'activeTurns' | 'schedules';
 const REFRESH_DEBOUNCE_MS = 400;
 const lastEventAt = ref(0);
 const REFRESH_LOADERS: Record<RefreshGroup, () => Promise<void>> = {
@@ -1459,6 +1526,13 @@ const REFRESH_LOADERS: Record<RefreshGroup, () => Promise<void>> = {
   quota: loadQuota,
   tasks: async () => { tasks.value = await api<Array<Record<string, unknown>>>('/api/tasks'); },
   approvals: async () => { approvals.value = await api<Array<Record<string, unknown>>>('/api/approvals'); },
+  // 归一化而不是直接塞：形状对不上的响应（老版本服务端、代理截断）不该让整页崩在
+  // DataGrid 的 rows 上。渲染防线就是为这类事建的（docs/24 · R-UI-01）。
+  schedules: async () => {
+    const next = await api<Partial<ScheduleList>>('/api/schedules');
+    schedules.value = { available: Boolean(next?.available) && Array.isArray(next?.jobs), enabled: Boolean(next?.enabled),
+      timezone: next?.timezone ?? '', jobs: Array.isArray(next?.jobs) ? next.jobs : [], ...(next?.settings ? { settings: next.settings } : {}) };
+  },
   extensions: async () => { [skills.value, plugins.value, mcp.value] = await Promise.all([api<Extension[]>('/api/skills'), api<Extension[]>('/api/plugins'), api<Extension[]>('/api/mcp')]); },
   config: async () => { [config.value, tools.value, agents.value] = await Promise.all([api<Record<string, unknown>>('/api/config'), api<Record<string, ToolPolicy>>('/api/tools'), api<AgentDefinition[]>('/api/agents')]); syncTrigger(); syncOutput(); },
   activeTurns: loadActiveTurns,
@@ -1466,7 +1540,7 @@ const REFRESH_LOADERS: Record<RefreshGroup, () => Promise<void>> = {
 // 哪些页面看得见这一组。看不见就不刷 —— 切过去时 watch(active) 会补一次。
 const REFRESH_VISIBILITY: Record<RefreshGroup, readonly string[]> = {
   dashboard: ['dashboard'], logs: ['dashboard', 'logs'], chats: ['chats'], usage: ['usage'], quota: ['quota'],
-  tasks: ['tasks'], extensions: ['extensions', 'dashboard'], activeTurns: ['dashboard'],
+  tasks: ['tasks'], extensions: ['extensions', 'dashboard'], activeTurns: ['dashboard'], schedules: ['tasks'],
   // 待审批不做页面过滤：一条 pending 会把某个真实轮次卡住最多 approval.ttlMs，
   // 只在任务页刷新等于「运维不切到那一页就永远不知道有人在等」。事件本身很稀疏（命中规则才发）。
   approvals: ['dashboard', 'chats', 'messages', 'prompts', 'providers', 'principals', 'tools', 'extensions', 'agents', 'logs', 'usage', 'quota', 'tasks', 'settings'],
@@ -1477,7 +1551,7 @@ const EVENT_REFRESH: Record<string, readonly RefreshGroup[]> = {
   log: ['logs', 'dashboard'],
   'turn.started': ['activeTurns', 'dashboard'],
   'turn.progress': ['activeTurns'],
-  'turn.finished': ['activeTurns', 'dashboard', 'chats'],
+  'turn.finished': ['activeTurns', 'dashboard', 'chats', 'schedules'],
   usage: ['usage', 'dashboard'],
   quota: ['quota'],
   'task.updated': ['tasks'],
@@ -2228,6 +2302,32 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
               <template #actions="{ data }"><div v-if="data.state === 'pending'" class="section-actions"><UiButton size="small" severity="danger" variant="outlined" label="拒绝" :loading="decidingApproval === data.id" @click="decideApproval(data, false)" /><UiButton size="small" label="批准执行" :loading="decidingApproval === data.id" @click="decideApproval(data, true)" /></div><small v-else class="alias-empty">{{ data.decided_by ?? 'system' }}</small></template>
             </DataGrid>
           </article>
+          <article class="surface wide">
+            <div class="registry-heading">
+              <div><h3>定时任务</h3><p class="section-note">模型用 <code>schedule_create</code> 排的、或在这里建的周期 / 一次性任务。到点<b>起一条完整轮次</b>并提交，所以产出照常进那个会话的上下文；<code>notify</code> 模式只发预写文本、不调模型。停机期间错过的<b>不补跑</b>，只在日志里留一条 <code>schedule.missed</code>。</p></div>
+              <UiButton icon="pi pi-plus" label="新建定时任务" :disabled="!schedules.available || !schedules.enabled || !chats.length" :title="chats.length ? '' : '还没有任何会话上下文'" @click="openScheduleDialog()" />
+            </div>
+            <p v-if="!schedules.available" class="callout warn"><i class="pi pi-exclamation-triangle" aria-hidden="true" />这个部署没有装配定时任务运行时，这里读不到任何任务（<b>不是「一条都没有」</b>）。</p>
+            <p v-else-if="!schedules.enabled" class="callout warn"><i class="pi pi-pause" aria-hidden="true" /><code>schedule.enabled</code> 是关的：下面的任务都留在库里但不会触发，每次跳过记一条 <code>schedule.skipped</code>。</p>
+            <p v-else-if="!chats.length" class="callout warn"><i class="pi pi-info-circle" aria-hidden="true" />还没有任何会话上下文，建不了任务 —— 任务要挂在一个真实会话上（先让 bot 在某个会话里说过一次话）。</p>
+            <DataGrid :rows="schedules.jobs" :columns="COLUMNS.schedules" data-key="id" paginate empty="还没有定时任务">
+              <template #name="{ data }"><div class="alias-name"><b>{{ data.name }}</b></div><small class="hit-text">{{ data.payload }}</small></template>
+              <template #chatLabel="{ data }"><span>{{ data.chatLabel ?? data.chatId }}</span><small class="alias-empty">建于 {{ data.creatorLabel ?? data.createdBy }}</small></template>
+              <template #mode="{ data }"><UiTag :value="data.mode" :severity="data.mode === 'agent' ? 'warn' : 'secondary'" :title="data.mode === 'agent' ? '每次触发都是一轮真实模型调用' : '只发预写文本，不调模型'" /></template>
+              <template #trigger="{ data }"><code v-if="data.cron">{{ data.cron }}</code><span v-else>{{ new Date(data.at).toLocaleString() }}</span><small class="alias-empty">{{ data.timezone }}{{ data.cron ? '' : ' · 一次性' }}</small></template>
+              <template #nextRun="{ data }"><span v-if="data.nextRun">{{ new Date(data.nextRun).toLocaleString() }}</span><small v-else class="alias-empty">不再触发</small></template>
+              <template #last="{ data }">
+                <template v-if="data.lastRunAt">
+                  <UiTag :value="(SCHEDULE_RUN_STATES[data.lastState ?? ''] ?? { label: data.lastState ?? '—' }).label" :severity="(SCHEDULE_RUN_STATES[data.lastState ?? ''] ?? { severity: 'secondary' }).severity" />
+                  <small class="alias-empty">{{ new Date(data.lastRunAt).toLocaleString() }} · 共 {{ data.runCount }} 次</small>
+                  <small v-if="data.lastError" class="detail-truncated">{{ data.lastError }}</small>
+                </template>
+                <small v-else class="alias-empty">还没跑过</small>
+              </template>
+              <template #state="{ data }"><UiTag :value="(SCHEDULE_STATES[data.state] ?? { label: data.state }).label" :severity="(SCHEDULE_STATES[data.state] ?? { severity: 'secondary' }).severity" /></template>
+              <template #actions="{ data }"><div v-if="data.state === 'active'" class="section-actions"><UiButton size="small" variant="outlined" icon="pi pi-play" label="立即触发" :loading="scheduleBusy === data.id" @click="triggerSchedule(data)" /><UiButton size="small" variant="outlined" severity="danger" label="停掉" :loading="scheduleBusy === data.id" @click="cancelSchedule(data)" /></div></template>
+            </DataGrid>
+          </article>
         </div></section>
         <section v-else-if="active === 'settings'" key="settings" class="surface page-surface">
           <header><div><p class="eyebrow">CONFIGURATION</p><h2>配置与维护</h2><p>完整合并配置已通过 zod 校验；密钥字段不会回显。</p></div></header>
@@ -2525,6 +2625,24 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
         <UiButton v-if="logDetail?.traceId && !/^(cmd|job)_/.test(logDetail.traceId)" variant="text" icon="pi pi-comments" label="看这一轮详情" @click="logDialog = false; openDetail(logDetail!.traceId!)" />
         <UiButton variant="text" label="关闭" @click="logDialog = false" />
       </template>
+    </UiModal>
+    <UiModal v-model:visible="scheduleDialog" title="新建定时任务" width="min(680px, 94vw)">
+      <div class="form-grid">
+        <p class="wide field-note">任务归属 <b>owner</b>（<code>access.bootstrapOwnerId</code>）—— WebUI 只有这一个身份。触发时仍按 <code>min(用户角色, 会话角色)</code> 重算，所以在不受信的群里不会因为「是 owner 建的」而提权。</p>
+        <label>会话<UiSelect v-model="scheduleForm.key" :options="chats.map((chat) => ({ value: chat.key, label: chat.key }))" /></label>
+        <label>任务名<input v-model="scheduleForm.name" maxlength="64" placeholder="同一会话内唯一，取消时用它"></label>
+        <label>模式<UiSelect v-model="scheduleForm.mode" :options="[{ value: 'notify', label: 'notify · 只发预写文本，不调模型' }, { value: 'agent', label: 'agent · 起一轮完整对话（花钱）' }]" /></label>
+        <label>触发方式<UiSelect v-model="scheduleForm.trigger" :options="[{ value: 'cron', label: '周期（cron）' }, { value: 'at', label: '一次性（绝对时间）' }]" /></label>
+        <label v-if="scheduleForm.trigger === 'cron'">cron 表达式<input v-model="scheduleForm.cron" placeholder="0 8 * * * = 每天早八点"></label>
+        <label v-else>时间<input v-model="scheduleForm.at" placeholder="2026-08-19T08:00"></label>
+        <p class="wide field-note">
+          时间按 <code>general.timezone</code>（<b>{{ schedules.timezone || '未知' }}</b>）解释，不是浏览器时区。
+          <template v-if="schedules.settings">两次触发间隔不能小于 {{ schedules.settings.minIntervalMinutes }} 分钟，单会话最多 {{ schedules.settings.maxPerChat }} 个活跃任务。</template>
+          一次性任务的时间必须在将来 —— 错过的触发点不会补跑。
+        </p>
+        <label class="wide">{{ scheduleForm.mode === 'agent' ? '任务描述（给模型看）' : '要发出的正文' }}<textarea v-model="scheduleForm.text" rows="4" :maxlength="schedules.settings?.maxPayloadChars ?? 2000" :placeholder="scheduleForm.mode === 'agent' ? '汇总昨天群里聊了什么，300 字以内' : '该喝水了'" /></label>
+      </div>
+      <template #footer><UiButton variant="text" label="取消" @click="scheduleDialog = false" /><UiButton :loading="scheduleSaving" icon="pi pi-check" label="排上" @click="submitSchedule()" /></template>
     </UiModal>
     <UiModal v-model:visible="bulkDialog" title="批量导入主体">
       <div class="form-grid">

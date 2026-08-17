@@ -65,6 +65,15 @@ export class ScheduleRepository {
     return this.db.prepare(`SELECT ${COLUMNS} FROM scheduled_jobs WHERE state='active' ORDER BY created_at`).all() as ScheduledJob[];
   }
 
+  /**
+   * **跨会话**取全部任务，活跃的在前。只给 WebUI 的运维面板用（单 owner 身份，docs/14 A15）——
+   * 工具侧一律走 `listByKey`，会话隔离在那一层是硬边界。
+   */
+  listAll(limit = 500): ScheduledJob[] {
+    return this.db.prepare(`SELECT ${COLUMNS} FROM scheduled_jobs
+      ORDER BY (state='active') DESC,COALESCE(last_run_at,created_at) DESC LIMIT ?`).all(limit) as ScheduledJob[];
+  }
+
   /** 本会话的任务：活跃的在前，结束的按最近排，供 `schedule_list` 与 WebUI 用。 */
   listByKey(key: string, limit = 50): ScheduledJob[] {
     return this.db.prepare(`SELECT ${COLUMNS} FROM scheduled_jobs WHERE key=?
