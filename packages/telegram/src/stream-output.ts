@@ -17,10 +17,28 @@ export interface StreamOutputOptions {
   typingWhileWorking?: boolean;
   /** `output.placeholderAfterMs`：>0 且这么久还没有第一个 chunk 时，先发一条占位消息顶住。 */
   placeholderAfterMs?: number;
+  /** `output.placeholderTexts`：占位消息的备选文案。空数组（或全是空白行）= 不发占位消息。 */
+  placeholderTexts?: readonly string[];
+  /** `output.placeholderPick` / `output.placeholderIndex`：随机挑一条，还是恒用下标指的那条。 */
+  placeholderPick?: 'random' | 'fixed';
+  placeholderIndex?: number;
 }
 
 /** 句末：中英文的句号问号叹号与换行。判据故意保守 —— 逗号也刷会让编辑次数回到没有节流的水平。 */
 const SENTENCE_END = /[。！？!?…\n]\s*$|[.](\s|$)/;
+
+/**
+ * 挑一条占位文案。空白行在这里滤掉而不是在 schema 里拦：schema 拦下来的表现是整个进程起不来
+ * （`config_kv` 里多敲一个空行就够），在这里滤掉只是少一条备选。全空 → `null` = 不发占位消息，
+ * 这也是关掉占位消息的唯一途径（`placeholderAfterMs` 是 positive，填不了 0）。
+ * `fixed` 的下标越界回落到第一条 —— 改短了列表不该让占位消息整个消失。
+ */
+export function pickPlaceholder(texts: readonly string[] | undefined, pick: 'random' | 'fixed' | undefined, index: number | undefined): string | null {
+  const candidates = (texts ?? []).map((entry) => entry.trim()).filter(Boolean);
+  if (!candidates.length) return null;
+  if (pick === 'fixed') return candidates[index ?? 0] ?? candidates[0]!;
+  return candidates[Math.floor(Math.random() * candidates.length)]!;
+}
 
 export class TelegramOutput {
   constructor(private readonly bot: Bot, private readonly chatId: string, private readonly options: StreamOutputOptions, private readonly onDeliveryError?: (error: unknown) => void,
@@ -72,11 +90,18 @@ export class TelegramOutput {
     // 编辑的那一条 —— 另发一条会让用户先看到「正在想…」再看到答案分两条躺在那里。
     let placeholder: ReturnType<typeof setTimeout> | null = null;
     const placeholderAfterMs = this.options.placeholderAfterMs ?? 0;
-    if (this.options.mode === 'stream' && placeholderAfterMs > 0) {
+    // 文案在定时器**外面**挑好：随机档要是挑在回调里，这条消息的内容就和后面的 lastRenderedLength
+    // 分处两个时刻，而且没法在挑不出文案时省掉整个 setTimeout。
+    const placeholderText = pickPlaceholder(this.options.placeholderTexts, this.options.placeholderPick, this.options.placeholderIndex);
+    if (this.options.mode === 'stream' && placeholderAfterMs > 0 && placeholderText) {
       placeholder = setTimeout(() => void (async () => {
         if (messageIds.length || text) return;
-        const sent = await deliver(() => sendWithFallback(this.bot.api, this.chatId, '…', replyToMessageId ? { reply_parameters: { message_id: replyToMessageId } } : {}));
-        if (sent) { messageIds.push(sent.message_id); lastRenderedLength = 1; lastEdit = Date.now(); }
+        const sent = await deliver(() => sendWithFallback(this.bot.api, this.chatId, placeholderText, replyToMessageId ? { reply_parameters: { message_id: replyToMessageId } } : {}));
+        // 基线归 0 而不是占位文案的长度：`lastRenderedLength` 量的是「答复已经渲染了多少字」，
+        // 占位消息里一个字都不是答复。记成文案长度的话，一句十来个字的文案会让第一次编辑多等
+        // 十来个字才够 minDeltaChars —— 占位消息挂着的时间反倒随文案变长。原先写死的 1 是它
+        // 还只能是「…」时两种读法恰好重合的产物。
+        if (sent) { messageIds.push(sent.message_id); lastRenderedLength = 0; lastEdit = Date.now(); }
       })(), placeholderAfterMs);
       placeholder.unref?.();
     }

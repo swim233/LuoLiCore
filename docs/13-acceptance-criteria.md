@@ -145,6 +145,9 @@
 | [ ] AC-OUT-007 | 编辑触发 429 | 跳过本次增量，不堆积，最终定稿正确 |
 | [ ] AC-OUT-008 (自动) | 出站消息 | 入 `messages`（direction='out'）且带 `turn_id`；进上下文为 assistant 消息 |
 | [ ] AC-OUT-009 (自动) | 模型这轮一个字都没吐 | 用户收到「模型这轮没吐出任何正文」+ ref，而不是彻底的沉默；上下文里不留空的 assistant 消息；`turn.end` 记 failed。流里已发出内容而 `final` 为空时，以已发出的为准 |
+| [x] AC-OUT-010 (自动) | `output.placeholderTexts` 配三条，分别试 `placeholderPick` 的 `random` / `fixed` | 等待文案不再是写死的 `…`：random 档挑得到全部三条；fixed 档恒为 `placeholderIndex` 指的那条，下标越界**回落到第一条而不是 clamp 到末条**（把列表改短的人要的是「还有得发」，不是悄悄换成另一条） | 〔output.pacing.test.ts〕
+| [x] AC-OUT-011 (自动) | `output.placeholderTexts: []`（或整列都是空白行） | 完全不发占位消息 —— `placeholderAfterMs` 的 schema 是 `positive()`、填不了 0，清空列表是关掉占位消息的唯一途径。空白行在挑选时滤掉，不算一条备选，也不会发出一条空消息 | 〔output.pacing.test.ts〕
+| [x] AC-OUT-012 (自动) | 把占位文案换成十来个字的长句 | 占位消息仍是后来被编辑成答复的**那一条**（不另发一条并排躺着）；第一次真编辑不因文案变长而推后 —— 渲染基线归 0 而不是文案长度，否则 `streamMinDeltaChars` 会连文案那十几个字一起算进增量 | 〔output.pacing.test.ts〕
 
 ## 4. Agent 与 Provider（AC-AGENT / AC-PROV / AC-PROMPT）
 
@@ -502,7 +505,7 @@
 |---|---|---|---|---|---|
 | 配置与 DB | | 14 / 24 | | | |
 | **上下文引擎** | | 29 / 38 | | | |
-| Telegram 与准入 | | 17 / 41 | | | |
+| Telegram 与准入 | | 20 / 44 | | | |
 | Agent 与 Provider | | 20 / 42 | | | |
 | 工具/沙箱/审批 | | 15 / 54 | | | |
 | Subagent 与任务 | | 15 / 35 | | | |
@@ -512,6 +515,6 @@
 | WebUI | | 10 / 81 | | | |
 | 安全 | | 0 / 15 | | | |
 | 运维 | | 1 / 9 | | | |
-| **合计** | | **129 / 404** | | | |
+| **合计** | | **132 / 407** | | | |
 
 **整体通过条件**：全部 ★ 项通过 + 非 ★ 项通过率 ≥ 95% + 所有豁免项经需求方书面确认。

@@ -193,6 +193,9 @@ export const CONFIG_DESCRIPTIONS: Record<string, string> = {
   'output.parseMode': '发送时按哪种格式解析：MarkdownV2 / HTML / none。',
   'output.typingWhileWorking': '生成期间是否持续发送「正在输入」状态。',
   'output.placeholderAfterMs': '超过这么久还没有内容可发时，先发一条占位消息，免得看起来像没反应。',
+  'output.placeholderTexts': '占位消息的备选文案，一行一条。**留空 = 不发占位消息** —— placeholderAfterMs 填不了 0，这是关掉它的唯一途径。',
+  'output.placeholderPick': 'random = 每次从备选里随机挑一条；fixed = 恒用 placeholderIndex 指的那条。备选只有一条时两者没区别。',
+  'output.placeholderIndex': 'fixed 模式下用第几条，0 起，按**去掉空行后**的列表算。越界时回落到第一条。',
   'output.maxMentions': '单条回复里最多 @ 几个人，防止模型把整群都点一遍。',
 
   media: '图片与文件的下载、缩放与文本抽取。',

@@ -246,6 +246,12 @@ bot:  ⏳ 已接收，正在处理…                      [取消]        ← �
 ```
 
 - **何时出现占位消息**：`spawn_agent` 被调用，或首个 chunk 迟于 `output.placeholderAfterMs`（默认 4000ms）。日常聊天不会看到它。
+- **占位消息说什么**：`output.placeholderTexts` 里的备选文案（默认只有一条 `…`），按 `output.placeholderPick`
+  随机挑或恒用 `output.placeholderIndex` 那条；三项都能 `perChat` 覆盖，WebUI 在设置页「输出节奏」卡片里
+  （[09 §3.13](./09-webui.md)）。**列表清空 = 不发占位消息**，这是关掉它的唯一途径。文案在开轮时就挑定，
+  不是在定时器回调里挑 —— 随机档挑在回调里的话，消息内容和渲染基线会分处两个时刻。
+  占位消息发出后渲染基线记 0 而不是文案长度：`lastRenderedLength` 量的是「答复渲染了多少字」，
+  占位消息里一个字都不是答复；记成文案长度会让长文案把第一次编辑推后十几个字。
 - 进度来源：`report_progress` 工具、`spawn_agent` 的 `yield`、内部阶段事件（快照、模型调用、工具执行）。节流 `agent.progressThrottleMs`（默认 3000）。
 - 取消按钮：`callback_data = 'c:<turnId>'`（≤64 字节）。点击后：
   - 校验点击者 = turn 发起人 或 owner，否则 `answerCallbackQuery({text:'只有发起人或管理员可以取消', show_alert:true})`；
