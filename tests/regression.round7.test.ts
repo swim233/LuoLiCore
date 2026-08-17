@@ -84,6 +84,22 @@ describe('I-06 · PUT /api/config 落库的是校验后的值', () => {
     expect(db.prepare("SELECT COUNT(*) FROM config_kv WHERE key='general.nosuchkey'").pluck().get()).toBe(0);
     closeDatabase(db);
   });
+
+  // AC-CFG-012 此前**没有对应用例**：`/api/quota` 那条原型污染断言在，而 AC 点名的
+  // `PUT /api/config` 那条没有。同一个 `mergeDotted`，但断言要落在 AC 说的那个端点上。
+  it('AC-CFG-012 · __proto__ / constructor 键当场 400，且不污染 Object.prototype', async () => {
+    const { app, db, headers } = server('round7-proto');
+    for (const key of ['__proto__.polluted', 'constructor.polluted', 'general.__proto__.x', 'a.prototype.b']) {
+      const response = await app.request('/api/config', { method: 'PUT', headers, body: JSON.stringify({ [key]: 'x' }) });
+      expect(response.status, key).toBe(400);
+      expect((await response.json() as { error: { code: string } }).error.code, key).toBe('invalid_config_key');
+    }
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+    // 污染发生在**校验之前**，一次请求就能让此后所有配置写入失败（docs/20 · W-CFG-01）——
+    // 所以还要断言随后一个完全无关的合法写入仍然成功。
+    expect((await app.request('/api/config', { method: 'PUT', headers, body: JSON.stringify({ 'context.limit.maxMessages': 180 }) })).status).toBe(200);
+    closeDatabase(db);
+  });
 });
 
 describe('I-03 · 读不到的条目跳过而不是整次失败', () => {

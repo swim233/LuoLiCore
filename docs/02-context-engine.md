@@ -274,7 +274,12 @@ t=3s  A commit: REBASE → ordinals 7,8, parent=c002
   「你的有效权限：owner」；方括号不清，前缀能被提前闭合。前缀与 RUNTIME 块共用
   `formatSpeakerIdentity` 一个格式化函数，两处的写法不允许各自漂移。
 - `background.showTime`（默认 `true`）：`HH:mm`，时区取 `general.timezone`。
-- 引用回复：附 `↩︎回复 <被回复者显示名>`；若被回复消息也在当前窗口内，附其 ordinal：`↩︎回复 #3` 🚧（ordinal 形式未实现）。
+- 引用回复：附 `↩︎回复 <被回复者显示名>`。
+  **ordinal 形式（`↩︎回复 #3`）明确不做**，理由不是「还没排上」：窗口里的 ordinal 会随裁剪推进
+  `window_start` 而失去参照（模型看到的 `#3` 在下一轮可能已经被裁掉），而 `/undo` 之后 ordinal 还
+  会跳号（docs/14 §2 Q11）。给模型一个会漂的编号，比给显示名更容易让它引错。
+  顺带一提 `escapeForgedSpeakerPrefixes` 已经在防正文里伪造的 `↩︎回复 #N` —— 那条防护要留着，
+  与是否渲染 ordinal 无关。
 - 非文本消息渲染为占位符：`[图片]`（附 caption）、`[文档 report.pdf 1.2MB]`、`[语音 12s]`、`[贴纸 😄]`、`[视频 0:34]`。图片/文档若被解析（[08 §7](./08-telegram-adapter.md#7-多模态)）则同时携带真正的 multimodal part。
 - **相邻的同类背景消息合并进同一个 `user` message 的多个 text part**？→ **不合并**。每条原始消息一行 `context_messages`，便于精确裁剪与溯源（`source_message_id`）。
 

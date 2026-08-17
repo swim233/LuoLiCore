@@ -327,11 +327,12 @@ G-API-10/11/12 与 G-SRV-02/03/04 均已完成；按本文「运行时已有、W
 
 - ~~`POST /api/maintenance/gc-files` 仍显式返回 `not_implemented`，界面继续不提供按钮。~~
   → 第五轮已实现并补上按钮（`G-SRV-05`）。
-- Telegram inline keyboard 审批仍未实现；WebUI 已是可用审批通道，命中规则的调用会等待 WebUI
-  裁决、TTL 或轮次取消，不再当场伪拒绝。**代价是从 Telegram 发起的那一轮会静默停住最多
-  `approval.ttlMs`**（默认 180s），发起人侧没有任何提示 —— 所以待审角标现在挂在导航上（§4.6），
-  但真正的解法仍是补一条能送达发起人的通道。一个 SSE 连接都没有时不再等待，当场拒绝并把原因
-  交给模型（[22](./22-review-round6.md) · `D-APPR-01`）。
+- Telegram inline keyboard 审批仍未实现（裁决只能在 WebUI 做），但**发起人回执已补上**（第七轮）：
+  挂起 pending 行之后立刻往发起人所在会话发一句「需要 owner 在 WebUI 里批准，N 秒内没人处理就
+  自动拒绝」。此前那一轮会静默停住最多 `approval.ttlMs`（默认 180s）而 Telegram 一个字都没有 ——
+  发起人现在至少知道自己在等什么、等多久。待审角标照旧挂在导航上（§4.6）。
+  一个裁决通道都没有时不等待，当场拒绝并把原因交给模型（[22](./22-review-round6.md) · `D-APPR-01`、
+  [24](./24-review-round6-verification.md) · `R-APPR-01`）。
 
 ### 6.1 新增缺口（第六轮整改后）
 

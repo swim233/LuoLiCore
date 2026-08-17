@@ -21,8 +21,15 @@ export class DatabaseApprovalBroker implements ApprovalBroker {
   readonly #remembered = new Map<string, { approved: boolean; hint?: string }>();
   readonly #pending = new Map<string, PendingApproval>();
 
-  /** 传 getter时每次读都取最新值：approval.enabled / ttlMs 热更新后下一次请求立即生效。 */
-  constructor(private readonly db: Sqlite, config: Readonly<Config> | (() => Readonly<Config>), private readonly events: EventBus, private readonly log: LogSink) {
+  /**
+   * 传 getter时每次读都取最新值：approval.enabled / ttlMs 热更新后下一次请求立即生效。
+   *
+   * @param notifyInitiator 给**发起人**的回执（`docs/22 · D-APPR-01`）。有裁决通道时这一轮会
+   *   静静挂满 `ttlMs`（默认 180 秒），而 Telegram 那边一个字都没有 —— 用户看到的就是 bot 收了
+   *   消息然后沉默三分钟。回执发不出去不影响审批本身，所以这里吞掉它的异常。
+   */
+  constructor(private readonly db: Sqlite, config: Readonly<Config> | (() => Readonly<Config>), private readonly events: EventBus, private readonly log: LogSink,
+    private readonly notifyInitiator?: (input: { chatId: string; threadId: number | null; tool: string; risk: ApprovalRisk; ttlMs: number }) => Promise<unknown> | unknown) {
     this.#config = typeof config === 'function' ? config : () => config;
     this.db.prepare("UPDATE approvals SET state='expired',decided_by='system',decided_at=?,decision_channel='system' WHERE state='pending' AND expires_at<=?").run(Date.now(), Date.now());
   }
@@ -59,6 +66,11 @@ export class DatabaseApprovalBroker implements ApprovalBroker {
     this.db.prepare(`INSERT INTO approvals(id,turn_id,agent_run_id,chat_id,requester_user_id,tool_name,input_json,risk,state,requested_at,expires_at)
       VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(id, context.turn.turnId, context.agentRunId ?? null, context.turn.chatId, context.turn.initiatorUserId, tool.name, JSON.stringify(input), risk, 'pending', now, expiresAt);
 
+    // 回执在**插入 pending 行之后**发：先落库再通知，通知失败也不会留下一个没人知道的等待。
+    try {
+      void Promise.resolve(this.notifyInitiator?.({ chatId: context.turn.chatId, threadId: context.turn.threadId, tool: tool.name, risk, ttlMs: config.approval.ttlMs }))
+        .catch((error: unknown) => this.log.event({ level: 'warn', kind: 'approval.receipt_failed', summary: 'initiator receipt failed', traceId: context.turn.turnId, data: { error: error instanceof Error ? error.message : String(error) } }));
+    } catch { /* 同步抛也不能影响审批 */ }
     return new Promise<ApprovalVerdict>((resolve) => {
       let settled = false;
       const abort = (): void => {
