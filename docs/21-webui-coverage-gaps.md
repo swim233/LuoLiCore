@@ -11,6 +11,10 @@
 > G-SRV-02/03/04；本文口径内的 WebUI 控制面缺口已清零，注册 API 端点从 82 条增至 **89 条**。
 > 第三轮顺带把 `approval.ttlMs` 与 `mcp.enabled` 接了线（从 `KNOWN_UNIMPLEMENTED_CONFIG_KEYS` 摘掉），
 > 分母因此从 151 变成 **153**，覆盖率仍是满的。
+>
+> **第四轮（2026-08-17）**：口径从「有没有控件」推进到「**这个控件真的说话算数吗**」——
+> 前三轮把覆盖率做满之后，剩下的缺口全是「界面上改得动、运行时不认」那一类。查出七条
+> （G-CFG-02 ~ G-CFG-07、G-API-14）并全部修掉，见 [§7](#7-第四轮改了什么)。§1 的三个数字同时复算。
 
 ---
 
@@ -25,6 +29,10 @@ schema 自动表单，可写覆盖率达到 151/151（第三轮接线两项后�
 归档消息软删、可等待且可裁决的审批流、MCP transport CRUD、Skill 正文 CRUD 与 Agent 隔离试跑。
 除 §5 明确列出的重复端点、只读策略和未接线运行时配置外，**没有剩余控制面覆盖缺口**。
 
+第四轮换了个问法：控件都有了，但**它说话算数吗**。答案是七处不算数 —— 工具开关会被整块 JSON
+永久吞掉、五个键被环境变量压着还照样回报「已保存」、密钥只读把 `web_search` 变成空开关、
+两处热更新徽标说反了、沙箱改动不进变更历史、审批规则写错静默不生效。都在 §1.2 与 §7。
+
 ---
 
 ## 1. 配置项覆盖
@@ -33,21 +41,29 @@ schema 自动表单，可写覆盖率达到 151/151（第三轮接线两项后�
 扣掉 `KNOWN_UNIMPLEMENTED_CONFIG_KEYS` 与 `perChat`（它是覆盖层容器不是配置项），
 再和页面上实际能写的键取差集。
 
-| | 数量 |
+| | 数量（2026-08-17 复算） |
 |---|---|
-| schema 叶子总数 | 224 |
-| 运行时从不读（`KNOWN_UNIMPLEMENTED_CONFIG_KEYS`） | 70 |
+| schema 叶子总数 | 226（+2：`provider.allowPrivateBaseUrl`、`webui.trustedProxyHops`） |
+| 运行时从不读（`KNOWN_UNIMPLEMENTED_CONFIG_KEYS`） | 67（−5，见下） |
 | `perChat`（覆盖层容器，不是配置项） | 1 |
-| **已接线** | **153** |
+| **已接线** | **158** |
 | ├ 第一轮之前 WebUI 可写 | 15 |
 | ├ 第一轮新增可写 | 29（配额 17 + 沙箱 12） |
 | ├ 第二轮新增可写 | 107（自动生成的表单一次覆盖剩下全部，§4.3） |
-| ├ 第三轮新增接线 | 2（`approval.ttlMs`、`mcp.enabled`，表单自动跟着多两项） |
+| ├ 此后新增接线 | 5（见下）＋ 2 个新叶子，表单自动跟着长 |
+| ├ 其中环境变量钉住、界面刻意不给改 | 5（G-CFG-03；`envPinned`） |
+| ├ 其中只读（要 argon2 哈希，走改口令表单） | 1（`webui.passwordHash`） |
 | └ **仍然只能改 `config.yaml`** | **0** |
 
-第三轮从白名单里摘掉的那两项：`approval.ttlMs` 随可等待审批一起真正被 `DatabaseApprovalBroker.request`
-读起来（G-API-12），`mcp.enabled` 本来就一直是 `McpManager.reconcile` 的总开关 —— 它当初进白名单是
-错判。摘的时候要同步三处：`schema.ts` 的两张表、`docs/11` 的 🚧 清单、以及本节这几个数字。
+五项已从白名单摘掉（真接了线）：`approval.ttlMs` 随可等待审批被 `DatabaseApprovalBroker.request`
+读起来（G-API-12）；`mcp.enabled` 本来就是 `McpManager.reconcile` 的总开关（当初进白名单是错判）；
+`context.background.showUsername`、`tools.tg.maxExtraMessagesPerTurn`、`tools.tg.maxFileSendMb`
+在后续几轮接线。摘的时候要同步四处：`schema.ts` 的两张表、`docs/11` 的 🚧 清单、本节这几个数字，
+以及 `docs/13` 的相关验收条目。
+
+> 上一版这三个数字（224 / 70 / 153）与当时的代码已经差了两项 —— 表格里的数不像断言那样会自己响，
+> 所以复算方法写在本节开头：改过 schema 或白名单之后重跑一遍再改这张表。密钥字段那一行也变了：
+> 曾经是「2 项只读」，现在密钥是**只写**（不回显、留空表示不改），只剩 `webui.passwordHash` 只读。
 
 ### 1.1 曾经「已接线但 WebUI 改不了」的那 109 项 —— ✅ 第二 / 三轮全部接上
 
@@ -99,16 +115,23 @@ schema 自动表单，可写覆盖率达到 151/151（第三轮接线两项后�
 | ID | 位置 | 说明 | 状态 |
 |---|---|---|---|
 | G-CFG-01 | 设置 › 触发与唤醒词 › `编辑旧消息不重新触发` | `trigger.ignoreEditedAsTrigger` 在 `KNOWN_UNIMPLEMENTED_CONFIG_KEYS` 里：编辑消息一律按背景消息归档（docs/20 · W-TG-05）。这个勾选框存得下、运行时没人读 | ✅ 第一轮改成禁用 + 「未接线」徽标 |
+| **G-CFG-02** | 工具页的每一个启停开关 | 覆盖层按 `config_kv` 的 rowid（插入序）应用，而 `assignDotted` 是整叶覆盖 —— **先**点过工具页的 `tools.overrides.<name>`、**后**在「全部配置」里编辑过 `tools.overrides` 整块，那一行 rowid 更小、永远先被应用：此后每次点开关都是 200 OK，刷新回来还是原样。工具禁用是硬边界（CLAUDE.md），不能这么失效 | ✅ 第四轮：载入侧按点分深度排序（更具体的赢，`sortOverrideKeys`），写入侧写祖先键时删掉后代行并记进变更历史 |
+| **G-CFG-03** | 5 个被环境变量钉住的键 | env 层在覆盖层**之后**合并（`config/index.ts`、`main.ts` 的 `envOverlay`），所以 `access.bootstrapOwnerId`（`LUOLI_OWNER_ID` 必填 → 恒被钉住）、`webui.host`、`webui.passwordHash`、`db.path`、`sandbox.hostWorkspaceDir` 的写入注定无效：表单给可编辑控件、Toast 说已保存、`config_revisions` 也记了一笔，下次加载照旧交回 env 的值。`sandbox.hostWorkspaceDir` 还挂着「热更新」徽标 | ✅ 第四轮：`ENV_PINNED_CONFIG_KEYS` + `GET /api/config/schema` 的 `envPinned`，表单禁用并点名该改哪个变量，写入端 400 `config_pinned_by_env`，改口令端点在 `WEBUI_PASSWORD` 存在时 409 |
+| **G-CFG-04** | `tools.web.searchProvider` | 密钥字段一律只读，于是 `tools.web.searchApiKey` 在 WebUI 里压根配不了；而 `web_search` 的 `available()` 要求 provider 与 key **同时**有值 —— 那个可写的下拉框选了也不会有工具进目录，纯 WebUI 部署永远开不出 web_search | ✅ 第四轮：密钥改成**只写**字段（不回显、留空表示不改、另给清空），同时前后端都拒收把 `«redacted»` 原样提交回来的值 |
+| **G-CFG-05** | `mcp.healthCheckCron` 的「热更新」徽标；7 个 `webui.*` 的「需重启」徽标 | 热更新白名单里写的是整段 `mcp`，但那个 cron 是 `scheduler.add()` 在启动时拿走的、`Scheduler` 也没有重配入口 —— 界面对它说谎（docs/20 · W-CFG-02 同一形态）。反方向同样错：`webui.sessionTtlHours` / `passwordHash` / `trustProxy` / `trustedProxyHops` / `allowOrigins` / `loginRateLimit.*` 都是每请求从 `currentConfig()` 现读的，标「需重启」等于让人白重启一次 | ✅ 第四轮：白名单精确到 `mcp.enabled`/`defaultMinRole`/`servers`，补上那 7 个 `webui.*`，`docs/11` 同步标注 |
+| **G-CFG-06** | 沙箱卡片的每一次保存 | `PUT /api/sandbox` 只写 `config_kv`、**不写 `config_revisions`** —— `sandbox.mode`、`bypassRoles` 这种安全相关改动在「变更历史」里完全查不到 | ✅ 第四轮：六个写入点统一走 `writeConfigRows`，审计与作废都在一处 |
+| **G-CFG-07** | 「全部配置」里的 `approval.rules` | schema 是 `z.array(z.record(z.unknown()))`：字段名写错（`toolName`）、正则编译不了、`risk` 写成 `huge`、`always: false` 一律 200 收下，而运行时 `ApprovalRules` 会把这些规则静默丢掉或永不命中 —— 一道「静默不生效」的审批门等于门开着 | ✅ 第四轮：换成真 schema（`.strict()` + 正则编译校验 + `always` 只收 `true`），写错当场 400 |
 
-全表扫过一遍，**除此之外没有第二个假控件** —— 配额页新增的 5 个未接线键刻意不给控件，只列名字。
+除上述之外没有别的假控件 —— 配额页新增的 5 个未接线键刻意不给控件，只列名字。
 
 ---
 
 ## 2. API 端点覆盖
 
-服务端现注册 89 条 `/api/*` 路由：第二轮增加 2 条 turn 取消路由，第三轮再增加 7 条
-（MCP CRUD 3、Skill 详情/新建/完整更新 3、Agent 试跑 1；prompt preview、消息软删与审批裁决原本已有端点）。
-逐条比对 WebUI 的调用点后：
+服务端现注册 **91** 条 `/api/*` 路由：第二轮增加 2 条 turn 取消路由，第三轮再增加 7 条
+（MCP CRUD 3、Skill 详情/新建/完整更新 3、Agent 试跑 1；prompt preview、消息软删与审批裁决原本已有端点），
+第六轮补 `POST /api/auth/password`（当时漏改这个数），第四轮补
+`DELETE /api/chats/:key/model-alias`（G-API-14）。逐条比对 WebUI 的调用点后：
 
 ### 2.1 后端有、前端没有入口（真缺口）
 
@@ -307,10 +330,41 @@ G-API-10/11/12 与 G-SRV-02/03/04 均已完成；按本文「运行时已有、W
 
 ### 6.1 新增缺口（第六轮整改后）
 
-| 编号 | 运行时已有 | 界面缺什么 |
-|---|---|---|
-| **G-API-13** | `POST /api/auth/password {current, next}`：校验旧口令、写 `config_kv` + `config_revisions`、吊销其余 session、即时生效（[22](./22-review-round6.md) · `V-AUTH-02`） | 设置页没有改口令表单。泄露口令后的应急处置目前只能打 API 或线下 `pnpm webui:passwd` + 重启，而这正是 `V-AUTH-02` 要消灭的形态的另一半 |
+| 编号 | 运行时已有 | 界面缺什么 | 状态 |
+|---|---|---|---|
+| **G-API-13** | `POST /api/auth/password {current, next}`：校验旧口令、写 `config_kv` + `config_revisions`、吊销其余 session、即时生效（[22](./22-review-round6.md) · `V-AUTH-02`） | 设置页没有改口令表单。泄露口令后的应急处置目前只能打 API 或线下 `pnpm webui:passwd` + 重启，而这正是 `V-AUTH-02` 要消灭的形态的另一半 | ✅ 第四轮：设置页首屏就是「修改登录口令」；`WEBUI_PASSWORD` 钉住口令时换成一条告警（改了重启就回退，见 G-CFG-03） |
+| **G-API-14** | `app_kv` 的 `modelAlias:<contextKey>`（Telegram `/model` 写入）**压过** WebUI 能改的 `perChat.<key>.agent.main.modelAlias` 与全局 `agent.main.modelAlias`（`runtime.ts` 先读它） | 界面上只有覆盖面板里一行小字提到这件事：改了模型别名不生效时，运维在 WebUI 里既看不到那份别名、也清不掉 | ✅ 第四轮：`GET /api/chats/:key` 带回 `modelAlias`，会话页出黄色提示 + `[清除会话别名]`（`DELETE /api/chats/:key/model-alias`） |
+
 - `health` 事件仍只在 provider 测试与 MCP 重连后发送，没有周期心跳；顶栏的新鲜度依据业务事件，
   不把连接状态伪装成周期健康检查。
 - `perChat` 白名单里的 `character` 仍是兼容性保留项；会话专属人设继续走
   `memory/CHARACTER.<chat>.md`，覆盖面板不展示这项。
+
+---
+
+## 7. 第四轮改了什么
+
+口径推进：前三轮问「有没有控件」，这一轮问「**这个控件说话算数吗**」。查法是拿 `configJsonSchema()`
+的 226 个叶子 × `SchemaForm` 的真实渲染规则（`$ref` 解析、secret 正则、未接线过滤）× 六个写入端点
+× 运行时真实读取路径逐条对齐，再单独复核 67 个未接线键有没有误判（**没有**：逐个全链路 grep 过）。
+
+| 改动 | 文件 |
+|---|---|
+| `sortOverrideKeys`：点分覆盖层按深度排序应用（先浅后深），`readPersistedConfig` 与 `dottedOverrides` 共用 —— 更具体的路径总是赢，与两行谁先落库无关 | `packages/shared/src/index.ts`、`packages/db/src/config.ts`、`packages/core/src/config/index.ts` |
+| `writeConfigRows`：配置写入的唯一出口。落 `config_kv` + `config_revisions`，写祖先键时删掉被它取代的后代行（作废也记一条 `new_json` 为空的 revision）。六个写入点（`PUT /api/config`、`PUT /api/sandbox`、`PUT /api/quota`、`PATCH /api/tools/:name`、`PATCH /api/chats/:key`、MCP CRUD）收成一处，`PUT /api/sandbox` 因此第一次有了审计 | `packages/server/src/app.ts` |
+| `ENV_PINNED_CONFIG_KEYS` + `envPinnedConfigKeys()`：env→键 的映射表，`loadConfig` 与 `apps/bot` 的 `envOverlay` 共用一份声明；`GET /api/config/schema` 增 `envPinned`，写入端 `config_pinned_by_env` 400，`POST /api/auth/password` 在 `WEBUI_PASSWORD` 下 409 | `packages/core/src/config/index.ts`、`packages/server/src/app.ts` |
+| `SchemaForm`：密钥字段从只读改成**只写**（不回显、留空表示不改、另给「清空 / 撤销清空」）；env 锁定项禁用并点名变量；含 `«redacted»` 的整块 JSON 拒绝提交；`mcp.servers` / `approval.rules` 补专用面板指引 | `packages/webui/src/ui/SchemaForm.vue`、`packages/webui/src/styles.css` |
+| 服务端也拒收 `«redacted»`（`PUT /api/config`、`PUT /api/sandbox`、MCP `POST`/`PATCH`）：读出来的脱敏值原样提交回来只会把真密钥换成那五个字，而那一行还会一直赢 | `packages/server/src/app.ts` |
+| `HOT_RELOADABLE_CONFIG_KEYS`：整段 `mcp` → `mcp.enabled`/`defaultMinRole`/`servers`（`healthCheckCron` 冻在启动时）；补 6 条 `webui.*` 前缀（每请求现读，只有 host/port 要重启） | `packages/core/src/config/schema.ts`、`docs/11` |
+| `approval.rules` 换成真 schema：`tool: string \| string[]`、`pattern` 编译校验（与 `compilePattern` 同一套 `(?i)` 解析）、`when: 'target_exists'`、`always` 只收 `true`、`risk` 三档，`.strict()` 让字段名写错当场 400 | `packages/core/src/config/schema.ts`、`config/config.schema.json` |
+| 设置页新增「修改登录口令」；会话页新增会话模型别名提示与 `[清除会话别名]`；保存配置时把被整块写入作废掉的更细覆盖点名报出；变更历史区分「此前没有覆盖」与「这条覆盖已被删除」 | `packages/webui/src/views/ConsoleView.vue`、`packages/server/src/app.ts`、`packages/db/src/config.ts` |
+| 新增 9 条用例：深度优先的覆盖应用（两种插入顺序）、env 钉住的键真的压过覆盖层、祖先写入作废后代行并留审计、沙箱写入进变更历史、env 锁定键与改口令端点被拒、`«redacted»` 被拒而真值写得进、审批规则四种写错方式当场 400、会话别名可见可清 | `tests/config.persistence.test.ts`、`tests/config.api.test.ts` |
+
+### 7.1 查出来但没动的
+
+- **审批规则的正则跑在回溯引擎上**：`ApprovalRules.evaluate` 用 `new RegExp` 去测
+  `JSON.stringify(input)`，而 input 是模型可控内容 —— 一条写歪的 `pattern` 加上模型挑的输入
+  就能把整轮卡住。唤醒词那条路径已经换成 RE2（`checkWakeword`），这里没换：RE2 不收 lookahead
+  与反向引用，直接换会让现存规则失效。**这不是「WebUI 控制不了」，所以留给下一轮单独决定**。
+- `GET /api/mcp` 不脱敏（`GET /api/config` 会），MCP 表单因此能改 env / headers 里的密钥。
+  两个端点都在鉴权之后，属于有意的分工，不当缺口；`SchemaForm` 那一格已经指路过去。

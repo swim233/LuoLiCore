@@ -30,6 +30,10 @@
 | [ ] AC-CFG-012 (自动) | `PUT /api/config` body 里带 `__proto__.x` / `constructor.y` | 400 `invalid_config_key`；`({}).x` 未被污染；随后一个完全无关的合法配置写入仍然成功（docs/20 · W-CFG-01） |
 | [ ] AC-CFG-013 (自动) | doc 11 里每个标 `热更新` 的键 | 都能在 `HOT_RELOADABLE_CONFIG_KEYS` 里找到（或已标 🚧）；白名单里的每一项都是 schema 里真实存在的路径（docs/20 · W-CFG-02） |
 | [ ] AC-CFG-014 | host 存在 DB、口令只来自 `WEBUI_PASSWORD` 时改一次配置触发热重载 | 重载成功，不因 `webui.passwordHash` 的 superRefine 失败；env 叠加在启动与热重载走同一个 `envOverlay()`（docs/20 · W-CFG-03） |
+| [ ] AC-CFG-015 (自动) ★ | 先在工具页禁用 `web_fetch`（写 `tools.overrides.web_fetch`），再在「全部配置」里编辑 `tools.overrides` 整块 | 覆盖层按点分深度应用，**更具体的路径赢**，与两行谁先落库无关（此前按 rowid 序，这个顺序下工具页此后每次点开关都是 200 OK + 刷新回弹，而禁用是硬边界）；写祖先键时它的后代行被删除并各留一条 `new_json` 为空的 `config_revisions`；响应的 `subsumed` 列出这些键，界面据此告警（docs/21 · G-CFG-02） |
+| [ ] AC-CFG-016 (自动) ★ | 设 `LUOLI_WEBUI_HOST` 后写 `webui.host`；设 `WEBUI_PASSWORD` 后调 `POST /api/auth/password` | 前者 400 `config_pinned_by_env` 且 `config_kv` 无新行（祖先写入 `{webui:{host}}` 同样挡回去），后者 409 `password_pinned_by_env`；`GET /api/config/schema` 的 `envPinned` 列出该键与变量名，表单据此禁用控件。env 层在覆盖层之后合并，写进去必然被盖回 —— 「保存成功但运行时没变」不许再新造（docs/21 · G-CFG-03） |
+| [ ] AC-CFG-017 | 不重启改 `webui.sessionTtlHours` / `webui.loginRateLimit.attempts`；再改 `mcp.healthCheckCron` | 前两项徽标是「热更新」且下一次请求即按新值走（每请求从 `currentConfig()` 现读）；`mcp.healthCheckCron` 徽标是「需重启」—— 它由 `scheduler.add()` 在启动时拿走，`Scheduler` 没有重配入口。徽标与真实读取路径一致，两个方向都不许说反（docs/21 · G-CFG-05） |
+| [ ] AC-CFG-018 (自动) | `PUT /api/config` 写 `approval.rules`：字段名写成 `toolName`、`pattern: '('`、`risk: 'huge'`、`always: false` | 四种都 400；`{tool: ['delete_file','move_file'], pattern: '(?i)\\.env', risk: 'high'}` 200。运行时 `ApprovalRules` 会把写歪的规则静默丢掉或永不命中 —— 一道静默不生效的审批门等于门开着（docs/21 · G-CFG-07） |
 | [ ] AC-DB-001 (自动) | 空库启动 | 全部表/索引/FTS/触发器创建成功；PRAGMA journal_mode=wal |
 | [ ] AC-DB-002 (自动) | 对已迁移库再次启动 | 迁移幂等，无报错，无重复表 |
 | [ ] AC-DB-003 (自动) ★ | 遍历所有 Repository 导出方法 | 非 `admin*`/`report*` 白名单方法的 SQL 均含 `chat_id = ?` 或 `key = ?` |
@@ -397,6 +401,10 @@
 | [ ] AC-WEB-052 | 扩展页新建 / 编辑 / 删除一个 MCP server | 表单按 transport 分支（stdio 要 command，http 要 url），保存过 `mcp.servers` 的判别联合 schema，写 `config_kv` + `config_revisions` + `config.changed` 后热 reconcile；重名 409；删除同时清掉 `mcp_servers` 行。**`mcp.enabled` 关着时** 保存后给的是告警 Toast 而不是「已连接」，扩展页顶部有横幅与 `[打开总开关]` —— 存得下但一个都不会连 |
 | [ ] AC-WEB-053 | 扩展页新建 / 编辑 / 删除一个 Skill | 正文与 frontmatter 一起写回 `SKILL.md`（先写临时文件再 rename），随后重扫并同步 `skills` 表；名字不合 `^[a-z0-9]+(-[a-z0-9]+)*$` 一律拒绝（目录名即 skill 名，越界路径进不来）；新建未选角色时取 `skills.defaultMinRole` 的**当前**快照；删除二次确认写明会连附属文件一起永久移除 |
 | [ ] AC-WEB-054 ★ | Agent 页点 `[试跑]` | 服务端建一条可审计的隔离 `agent_run`（`kind='sub'`、`turn_id` 前缀 `dryrun:`），复用 `runSubAgent`，NDJSON 逐行推 step / usage / final / error；关闭请求或点 `[取消试跑]` 立即 abort。**试跑与正常轮次共用同一份配额**：先 `quota.reserve` 再逐步 `commit`，额度不足时直接拒绝开跑（chat/user 计数落在合成 subject `webui-dryrun` 上，不吃真实会话与用户的额度）；结束后剩余预留必须 `release` |
+| [ ] AC-WEB-056 | 设置页首屏「修改登录口令」：填错当前口令 / 两次新口令不一致 / 新口令短于 12 字符 / 正确改一次 | 前三种在前端就挡住并给出原因；正确改完后其余 session 全部吊销、当前 session 仍在、**不用重启**即可用新口令登录，`config_revisions` 里两侧都是 `«redacted»`。`WEBUI_PASSWORD` 在环境里时整个表单换成一条告警（改了重启就回退，见 AC-CFG-016）（docs/21 · G-API-13） |
+| [ ] AC-WEB-057 | 「全部配置」里的 `tools.web.searchApiKey`：不填保存别的项、填一个值保存、点「清空」保存 | 密钥字段是**只写**的：不回显（占位显示「已设置，留空表示不改」）、留空时不进提交、填了才写、点清空才写空串。填上 key 且 `searchProvider` 非空后 `web_search` 真的进工具目录（`available()` 要求两者同时有值）。把读出来的 `«redacted»` 原样提交（含 `mcp.servers` 那种整块 JSON）前后端都拒绝：那不是真值（docs/21 · G-CFG-04） |
+| [ ] AC-WEB-058 | Telegram 里对某会话 `/model high`，再去 WebUI 会话页 | 覆盖面板上方出现黄色提示，写明这个会话被 `/model` 钉在 `high`（存在 `app_kv`，**压过** `agent.main.modelAlias` 的会话级与全局值）；点 `[清除会话别名]` 后 `app_kv` 行消失、提示不再出现，本来就没有别名时不谎报清除（docs/21 · G-API-14） |
+| [ ] AC-WEB-059 | 工具页改沙箱 mode，再打开「变更历史」 | `sandbox.mode` 出现在历史里（此前 `PUT /api/sandbox` 只写 `config_kv` 不写 revision，安全相关改动完全查不到谁改的）；历史里 old 为空显示「此前没有覆盖」、new 为空显示「这条覆盖已被删除」，两者不再是同一句话（docs/21 · G-CFG-06） |
 | [ ] AC-WEB-055 | 深浅两套主题下扫一遍设置页、配额页、模型 / Agent / MCP 对话框 | 页面上不出现任何操作系统绘制的控件：勾选框与开关是自绘的（勾选框 = 从一组里挑几个或筛选视图，开关 = 开/关某一项能力，两者不混用），数字格是「减 / 值 / 加」的步进器且没有原生上下箭头，下拉展开的是页面自己的面板（对话框里也压在遮罩之上，Esc 只收面板不关对话框）。点数字格的**标题文字**只聚焦输入框，不会把值改掉；小数步进不产生 `0.30000000000000004`；表格表头在部分选中时显示横杠而不是空框 |
 
 ## 11. 安全 AC-SEC
@@ -439,7 +447,7 @@
 
 | 模块 | 负责人 | 通过 AC 数 / 总数 | 豁免项及理由 | 日期 | 签署 |
 |---|---|---|---|---|---|
-| 配置与 DB | | / 20 | | | |
+| 配置与 DB | | / 24 | | | |
 | **上下文引擎** | | / 34 | | | |
 | Telegram 与准入 | | / 38 | | | |
 | Agent 与 Provider | | / 37 | | | |
@@ -448,9 +456,9 @@
 | 记忆 | | / 13 | | | |
 | 日志与成本 | | / 23 | | | |
 | 扩展生态 | | / 27 | | | |
-| WebUI | | / 68 | | | |
+| WebUI | | / 72 | | | |
 | 安全 | | / 15 | | | |
 | 运维 | | / 9 | | | |
-| **合计** | | **/ 357** | | | |
+| **合计** | | **/ 365** | | | |
 
 **整体通过条件**：全部 ★ 项通过 + 非 ★ 项通过率 ≥ 95% + 所有豁免项经需求方书面确认。

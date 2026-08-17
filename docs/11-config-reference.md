@@ -19,7 +19,15 @@
   以 `hotReloadable` 一并返回，`tests/config.test.ts` 断言本文件里标 `热更新` 的每个键都在白名单内。
   上一轮有十组键标着热更新而实际冻在启动时，其中 `sandbox.mode`、`approval.enabled`、`approval.rules`
   三组是「出事时运维会去点的那个开关」—— 点了没用而界面还说成功（[20 · W-CFG-02](./20-review-round5.md)）。
-  当前 WebUI 只编辑热更新键，因此暂时没有待重启徽标的实际用例；新增可编辑项时按 `hotReloadable` 判定。
+  设置页的「全部配置」表单覆盖全部已接线叶子（热更新与需重启都能改），徽标直接照 `hotReloadable`
+  打，保存后的 Toast 会点名其中需重启的那几项；新增可编辑项时按 `hotReloadable` 判定。
+- **被环境变量钉住的键**（`ENV_PINNED_CONFIG_KEYS`）：env 层在 `config_kv` 之后合并，所以这些键的
+  覆盖行注定无效。`GET /api/config/schema` 以 `envPinned` 返回当前真的被钉住的那几条，表单据此
+  禁用控件并点名该改哪个变量，写入端一律 400（`config_pinned_by_env`）——「保存成功但运行时没变」
+  是最误导的一类反馈（[21 · G-CFG-03](./21-webui-coverage-gaps.md)）。清单：
+  `db.path`←`LUOLI_DATA_DIR` · `access.bootstrapOwnerId`←`LUOLI_OWNER_ID`（必填，所以恒被钉住）
+  · `sandbox.hostWorkspaceDir`←`LUOLI_HOST_WORKSPACE_DIR` · `webui.host`←`LUOLI_WEBUI_HOST`
+  · `webui.passwordHash`←`WEBUI_PASSWORD`。后两条由 `apps/bot` 的 `envOverlay` 叠（口令要先过 argon2）。
 
 ## 1. 环境变量（`.env`）
 
@@ -31,7 +39,7 @@
 | `BOT_TOKEN` | ✓ | Telegram Bot token |
 | `LUOLI_OWNER_ID` | ✓ | owner 的 Telegram user id（首次启动写入 `principals`）。缺失则拒绝启动 |
 | `LUOLI_MASTER_KEY` | ✓ | 32+ 字节随机串，用于加密 provider API key。缺失则 provider 功能禁用 |
-| `WEBUI_PASSWORD` | ✗ | 首次启动时用它生成 `webui.passwordHash`（之后可删除该变量） |
+| `WEBUI_PASSWORD` | ✗ | 用它生成 `webui.passwordHash`。**不只是首次启动**：`envOverlay` 每次启动都会叠一遍，所以只要它还在环境里，口令就由它钉住 —— 设置页的改口令表单会直接 409（改了重启就回退），要换口令得改这个变量。配好之后删掉它，口令才回到 `config_kv` 管 |
 | `LUOLI_CONFIG` | ✗ | 配置文件路径，默认 `./config/config.yaml` |
 | `LUOLI_DATA_DIR` | ✗ | 数据目录，默认 `./data` |
 | `LUOLI_HOST_WORKSPACE_DIR` | ✗ | 映射到 `sandbox.hostWorkspaceDir`。**应用跑在容器里且 `sandbox.mode: docker` 时必填**，见 [§2 sandbox](#sandbox) |
@@ -386,9 +394,11 @@ mcp:
   # `servers` 里配了多少个都不会连。WebUI 扩展页在它关着时给一条横幅（docs/09 §3.8）。
   enabled: false                  # 热更新
   connectTimeoutMs: 15000
-  healthCheckCron: '*/5 * * * *'
-  defaultMinRole: trusted
-  servers: []                     # 见 07 §4.1
+  # 需重启：`scheduler.add(config.mcp.healthCheckCron, …)` 在启动时就把表达式拿走了，Scheduler
+  # 没有重配入口。这一项曾因为白名单里写的是整段 `mcp` 而被 WebUI 标成「热更新」（docs/21 · G-CFG-05）。
+  healthCheckCron: '*/5 * * * *'  # 需重启
+  defaultMinRole: trusted         # 热更新
+  servers: []                     # 热更新 · 见 07 §4.1（改完立刻 reconcile）
 
 # ============================================================ db
 db:
@@ -446,15 +456,18 @@ webui:
   port: 8787                      # 需重启
   basePath: /
   publicUrl: ''                   # 用于 /webui 一次性登录链接
-  sessionTtlHours: 168
-  passwordHash: ''                # 由首次启动向导或 `pnpm webui:passwd` 写入
-  trustProxy: false
-  trustedProxyHops: 1             # 反代自己追加的跳数。XFF 按这个数**从右往左**取：
+  # 下面这几项都是**每请求**从 `currentConfig()` 现读的（`requestIp` / `allowedOrigin` / 登录限流 /
+  # `createSession` / `activePasswordHash`），改完下一个请求就按新值走 —— 只有 host / port 例外，
+  # 它们在 `serve()` 时就绑定了。WebUI 一度把这几项标成「需重启」，让人白重启一次（docs/21 · G-CFG-05）。
+  sessionTtlHours: 168            # 热更新 · 只影响此后新建的会话，已签发的不变
+  passwordHash: ''                # 热更新 · 由首次启动向导、设置页的改口令表单或 `pnpm webui:passwd` 写入
+  trustProxy: false               # 热更新
+  trustedProxyHops: 1             # 热更新 · 反代自己追加的跳数。XFF 按这个数**从右往左**取：
                                   #   最左那一跳是客户端自己写的，取它等于限速形同虚设
                                   #   （每次换一个 X-Forwarded-For 就是一个新桶，22 · V-AUTH-01）。
                                   #   直连或 trustProxy=false 时读 X-Real-IP，再没有就记为 direct。
-  allowOrigins: []
-  loginRateLimit: { attempts: 5, windowMinutes: 15 }
+  allowOrigins: []                # 热更新
+  loginRateLimit: { attempts: 5, windowMinutes: 15 }   # 热更新
                                   # 单 IP 桶之外还有一个全局失败窗口：达到 attempts×20 之后所有登录
                                   # 请求延迟 250ms 再校验 —— 换 IP 绕过的成本被拉高，而不是把 owner
                                   # 一起锁在门外。失败表上限 1024 条，超出按最久未命中淘汰。

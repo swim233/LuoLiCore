@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { openDatabase } from '@luoli/db';
-import { assignDotted } from '@luoli/shared';
+import { assignDotted, sortOverrideKeys } from '@luoli/shared';
 import type { Sqlite } from './database.js';
 
 /**
@@ -19,6 +19,11 @@ export function writeAppKv(db: Sqlite, key: string, value: unknown, updatedBy: s
     .run(key, JSON.stringify(value), Date.now(), updatedBy);
 }
 
+/** 返回删掉的行数：调用方要能区分「清掉了一份别名」和「本来就没有」。 */
+export function deleteAppKv(db: Sqlite, key: string): number {
+  return db.prepare('DELETE FROM app_kv WHERE key=?').run(key).changes;
+}
+
 export const modelAliasKey = (contextKey: string): string => `modelAlias:${contextKey}`;
 
 /**
@@ -34,7 +39,7 @@ export function readPersistedConfig(path: string, onRejected?: (key: string) => 
     if (!hasTable) return {};
     const rows = db.prepare('SELECT key,value_json AS valueJson FROM config_kv').all() as Array<{ key: string; valueJson: string }>;
     const root: Record<string, unknown> = {};
-    for (const row of rows) if (!assignDotted(root, row.key, JSON.parse(row.valueJson, (key, value: unknown) => key === '__proto__' ? undefined : value) as unknown)) onRejected?.(row.key);
+    for (const row of sortOverrideKeys(rows)) if (!assignDotted(root, row.key, JSON.parse(row.valueJson, (key, value: unknown) => key === '__proto__' ? undefined : value) as unknown)) onRejected?.(row.key);
     return root;
   } finally {
     db.close();

@@ -103,6 +103,10 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
   `PATCH` 是**整体替换**而不是合并，所以界面每次都把完整的覆盖对象发回去。
   `context.scope` 这一项带警告：改成 `thread` 之后该会话的后续消息落到新的 contextKey 上，
   而覆盖是按 key 存的 —— 等于这条覆盖把自己作废了。
+  覆盖 chip 上方还有一条**会话模型别名**提示（已实现）：Telegram 的 `/model` 写的是 `app_kv` 的
+  `modelAlias:<contextKey>`，它**压过**这里的 `agent.main.modelAlias` 与全局值（`runtime.ts` 先读它）。
+  它存在时给黄色提示 + `[清除会话别名]`（`DELETE /api/chats/:key/model-alias`）—— 否则「改了模型别名
+  不生效」在界面上完全无迹可寻（[21 · G-API-14](./21-webui-coverage-gaps.md)）。
 - 再往下是并排的两块工作台：
   1. **上下文查看器**：当前窗口的消息序列，**按时间倒序 —— 最新的一条在最上面**（与消息页、commit
      时间线一致；ordinal 在提交时单调分配，倒排 ordinal 即倒排时间）。每条是一行徽标（ordinal、role、
@@ -363,8 +367,21 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
     `quota.perChat.daily` 会显示成「默认 5」（真值 1）、`memory.pubWriteMinRole` 显示成
     「默认 blocked」（真值 trusted），说明也会串成同一句。
   - **未接线的键默认隐藏**且控件禁用（可用「显示未接线项」翻出来看）：能点但运行时不读就是假控件。
-  - **密钥字段只读**：`GET /api/config` 里它们已经是 `«redacted»`，把这个字面量写回去等于覆盖真值。
-    界面上写明该去哪儿改（Provider key 在模型页、WebUI 口令用 `pnpm webui:passwd`、其余走环境变量）。
+  - **密钥字段只写**：不回显（`GET /api/config` 里它们已经是 `«redacted»`），占位符写明「已设置，
+    留空表示不改」，另给 `[清空]` / `[撤销清空]`。曾经是整体只读，代价是 `tools.web.searchApiKey`
+    在 WebUI 里压根配不了，而 `web_search` 的 `available()` 要求 provider 与 key 同时有值 ——
+    那个可写的下拉框于是成了空开关（[21 · G-CFG-04](./21-webui-coverage-gaps.md)）。
+    也可以填 `${env:NAME}` 引用，加载时替换。唯一仍然只读的是 `webui.passwordHash`：它要的是
+    argon2 哈希而不是口令，改口令走本页的「修改登录口令」表单。
+    含 `«redacted»` 的值（`mcp.servers` 那种整块 JSON 最容易）**前后端都拒收**：那不是真值。
+  - **被环境变量钉住的键禁用**并点名该改哪个变量：`GET /api/config/schema` 的 `envPinned` 给出当前
+    真的被钉住的那几条（`db.path`、`access.bootstrapOwnerId`、`sandbox.hostWorkspaceDir`、
+    `webui.host`、`webui.passwordHash`）。env 层在覆盖层之后合并，写进去只会在下次加载时被盖回，
+    所以写入端也直接 400（[21 · G-CFG-03](./21-webui-coverage-gaps.md)）。
+  - **整块写入会作废同一子树下更细的覆盖**（例如工具页逐个点出来的 `tools.overrides.<name>`）：
+    响应里的 `subsumed` 列出它们，Toast 点名提醒去核对工具页的开关状态。
+  - **修改登录口令**（设置页首屏）：`POST /api/auth/password`，改完其余 session 全部吊销、
+    不用重启即时生效。`WEBUI_PASSWORD` 在环境里时整个表单换成告警 —— 那种情况下改了重启就回退。
   - 保存只发**真正改过的那几项**（点分键 → `PUT /api/config`）；保存后按 `hotReloadable` 分类回报，
     **需重启的键在 Toast 里点名** —— 「保存成功但运行时没变」是最误导的一类反馈（docs/20 · W-CFG-02）。
   - 有专用面板的键（触发 / 输出 / 配额 / 沙箱 / 工具开关 / Agent）在这里照样能改，但标注

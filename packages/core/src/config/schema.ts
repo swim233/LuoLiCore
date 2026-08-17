@@ -15,6 +15,27 @@ const mcpServerSchema = z.discriminatedUnion('transport', [
   mcpServerBase.extend({ transport: z.literal('stdio'), command: z.string().min(1), args: z.array(z.string()).default([]), env: z.record(z.string()).default({}) }),
   mcpServerBase.extend({ transport: z.literal('http'), url: z.string().url(), headers: z.record(z.string()).default({}) }),
 ]);
+/**
+ * 审批规则此前是 `z.record(z.unknown())`：写入端什么都收，运行时 `ApprovalRules` 却会把没有 `tool`
+ * 的规则整条丢掉、`pattern` 编译不了的规则永不命中、`risk` 写错时当 medium ——「静默不生效」的
+ * 审批门等于门开着，而界面上一路 200 OK。收严之后写错当场 400。
+ * `always` 只收 `true`：运行时没有「命中但不需要审批」这个语义，收下 `false` 等于再造一个假开关。
+ */
+const approvalRuleSchema = z.object({
+  tool: z.union([z.string().min(1), z.array(z.string().min(1)).min(1)]),
+  pattern: z.string().min(1).optional(),
+  when: z.literal('target_exists').optional(),
+  always: z.literal(true).optional(),
+  risk: z.enum(['low', 'medium', 'high']).optional(),
+}).strict().superRefine((rule, ctx) => {
+  if (rule.pattern === undefined) return;
+  // 与 `compilePattern`（approval/rules.ts）同一套解析：`(?i)` 前缀 + JS 正则。
+  const insensitive = rule.pattern.startsWith('(?i)');
+  try { new RegExp(insensitive ? rule.pattern.slice(4) : rule.pattern, insensitive ? 'i' : undefined); }
+  catch (error) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['pattern'], message: `不是合法正则，这条规则在运行时永不命中：${error instanceof Error ? error.message : String(error)}` });
+  }
+});
 /** 拼错的时区只在群聊分支炸（私聊不走 Intl），漏到运行时会让整个群会话开不了轮次。 */
 const ianaTimezone = z.string().refine((zone) => {
   try { new Intl.DateTimeFormat('en-US', { timeZone: zone }); return true; } catch { return false; }
@@ -44,7 +65,15 @@ export const HOT_RELOADABLE_CONFIG_KEYS = [
   'approval.enabled', 'approval.ttlMs', 'approval.rules', 'approval.skipForOwner', 'approval.rememberWithinTurn',
   // captureBodies 是每轮从 turn.config 现读的（runtime.ts 的 bodyForLog、/api/turns/:id/detail），
   // 改完下一轮就生效。漏在白名单外时 WebUI 会对着排障时最常翻的这个开关说「需重启」。
-  'sandbox', 'skills.defaultMinRole', 'mcp', 'quota', 'logs.level', 'logs.captureBodies',
+  'sandbox', 'skills.defaultMinRole', 'quota', 'logs.level', 'logs.captureBodies',
+  // mcp 整段曾在这里，但 `mcp.healthCheckCron` 是 `scheduler.add(config.mcp.healthCheckCron, …)`
+  // 在启动时拿走的，Scheduler 也没有重配入口 —— 整段标热更新等于对着那一项说谎（docs/20 · W-CFG-02）。
+  // 这三项才是真的按 getter 读（`McpManager` 的 config getter + config.changed 后的 reconcile）。
+  'mcp.enabled', 'mcp.defaultMinRole', 'mcp.servers',
+  // WebUI 自己那几项是每请求从 currentConfig() 现读的（app.ts 的 requestIp / allowedOrigin /
+  // 登录限流 / createSession / activePasswordHash），改完下一次请求就按新值走。只有 host / port
+  // 例外：它们在 `serve()` 时就绑定了，必须重启。
+  'webui.sessionTtlHours', 'webui.passwordHash', 'webui.trustProxy', 'webui.trustedProxyHops', 'webui.allowOrigins', 'webui.loginRateLimit',
   // bot.ts 的 config Proxy 每次访问都取新快照，输出节奏是在每轮开始时读的：改了下一轮生效，
   // 在途那一轮沿用开轮时的值（编辑节流的定时器已经在跑，中途换节拍只会让这条消息的刷新变乱）。
   'output',
@@ -185,7 +214,7 @@ export const configSchema = z.object({
     web: z.object({ maxResponseBytes: z.number().int().positive().default(2_097_152), summarizeWithAlias: z.string().default('low'), allowlist: z.array(z.string()).default([]), denylist: z.array(z.string()).default(['*.local', '*.internal']), searchProvider: z.enum(['', 'brave', 'serper', 'tavily']).default(''), searchApiKey: z.string().default('') }).default({}),
   }).default({}),
   sandbox: z.object({ mode: z.enum(['none', 'jail', 'docker']).default('docker'), bypassRoles: z.array(role).default(['owner']), image: z.string().default('luoli-sandbox:latest'), network: z.enum(['none', 'bridge']).default('none'), memoryMb: z.number().positive().default(512), cpus: z.number().positive().default(1), pidsLimit: z.number().int().positive().default(128), readOnlyRoot: z.boolean().default(true), tmpfsMb: z.number().positive().default(64), workspaceDir: z.string().default('./data/workspace'), hostWorkspaceDir: z.string().default(''), dockerBin: z.string().default('docker') }).default({}),
-  approval: z.object({ enabled: z.boolean().default(true), ttlMs: z.number().int().positive().default(180_000), skipForOwner: z.boolean().default(true), allowInitiator: z.boolean().default(false), rememberWithinTurn: z.boolean().default(true), rules: z.array(z.record(z.unknown())).default([]) }).default({}),
+  approval: z.object({ enabled: z.boolean().default(true), ttlMs: z.number().int().positive().default(180_000), skipForOwner: z.boolean().default(true), allowInitiator: z.boolean().default(false), rememberWithinTurn: z.boolean().default(true), rules: z.array(approvalRuleSchema).default([]) }).default({}),
   output: z.object({ mode: z.enum(['stream', 'once']).default('stream'), replyDelayMs: z.number().int().nonnegative().max(30_000).default(2000), streamBufferMs: z.number().int().nonnegative().max(30_000).default(2000), streamIntervalMs: z.number().int().positive().default(2000), streamMinDeltaChars: z.number().int().positive().default(24), flushOnSentence: z.boolean().default(true), maxMessageChars: z.number().int().min(100).max(4000).default(3900), parseMode: z.enum(['MarkdownV2', 'HTML', 'none']).default('MarkdownV2'), typingWhileWorking: z.boolean().default(true), placeholderAfterMs: z.number().int().positive().default(4000), maxMentions: z.number().int().nonnegative().default(3) }).default({}),
   media: z.object({ dir: z.string().default('./data/files'), maxImageBytes: z.number().int().positive().default(8_388_608), maxDocBytes: z.number().int().positive().default(20_971_520), maxImageEdge: z.number().int().positive().default(1568), maxImagesPerTurn: z.number().int().positive().default(4), groupDebounceMs: z.number().int().positive().default(1500), stickerAsImage: z.boolean().default(false), downloadVoice: z.boolean().default(true), extract: z.object({ enabled: z.boolean().default(true), maxChars: z.number().int().positive().default(40_000), inlineChars: z.number().int().positive().default(4000), codeExtensions: z.array(z.string()).default([]) }).default({}) }).default({}),
   skills: z.object({ enabled: z.boolean().default(true), dir: z.string().default('./skills'), watch: z.boolean().default(true), defaultMinRole: role.default('trusted') }).default({}),

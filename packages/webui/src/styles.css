@@ -581,6 +581,12 @@ code { font-family: var(--font-mono); font-size: .82rem; }
 .schema-field > .ui-switch { justify-self: start; margin: 1px 0 2px; }
 .schema-field > .ui-switch .ui-switch-label { color: var(--muted); font-size: .78rem; }
 .schema-field > .ui-switch.on .ui-switch-label { color: var(--green); }
+/* 改口令表单（docs/21 · G-API-13）：按钮与那行提示同排，提示既当校验反馈也当后果说明。 */
+.password-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+/* 密钥是只写字段：输入框旁边挂「清空 / 撤销清空」，留空的语义是不改（docs/21 · G-CFG-04）。 */
+.secret-row { display: flex; align-items: center; gap: 6px; }
+.secret-row input { flex: 1 1 auto; min-width: 0; background: var(--surface); }
+.secret-row .ui-btn { flex: 0 0 auto; }
 
 /* ── 附件：消息卡片与检索结果下面那条带子（docs/21 · G-API-08） ── */
 .attachment-strip { display: flex; flex-wrap: wrap; align-items: stretch; gap: 8px; margin: 2px 0 0; }

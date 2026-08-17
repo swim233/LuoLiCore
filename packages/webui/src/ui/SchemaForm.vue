@@ -17,16 +17,19 @@ const props = withDefaults(defineProps<{
   /** 只渲染这些前缀下的叶子（会话级覆盖白名单）。**不裁剪 schema 文档本身** —— 裁掉 `access`
    *  之类的分支会让 `memory.pubWriteMinRole` 那种指过去的 `$ref` 解析不到。 */
   include?: readonly string[];
+  /** 被环境变量钉住的键：写得进 config_kv，但 env 层会在加载时盖回去，所以这里只展示不给改。 */
+  envPinned?: ReadonlyArray<{ key: string; env: string }>;
   notes?: Record<string, string>;
   saveLabel?: string;
-}>(), { include: undefined, notes: () => ({}), saveLabel: '保存' });
+}>(), { include: undefined, envPinned: () => [], notes: () => ({}), saveLabel: '保存' });
 const emit = defineEmits<{ save: [Record<string, unknown>] }>();
 
 type FieldKind = 'boolean' | 'number' | 'enum' | 'string' | 'stringList' | 'json';
 interface Field {
   path: string; group: string; label: string; kind: FieldKind; enumValues: string[]; itemHint: string;
   min: number | null; exclusiveMin: boolean; max: number | null; integer: boolean; nullable: boolean;
-  defaultValue: unknown; hot: boolean; wired: boolean; readOnly: boolean; description: string; note: string;
+  defaultValue: unknown; hot: boolean; wired: boolean; readOnly: boolean; secret: boolean; pinnedEnv: string | null;
+  description: string; note: string;
 }
 type Node = Record<string, unknown>;
 
@@ -36,10 +39,21 @@ const SKIP_PATHS = new Set(['perChat']);
 const DEDICATED: Record<string, string> = {
   trigger: '设置页上方有专用面板（带唤醒词可用性校验）', output: '设置页上方有专用面板',
   quota: '「配额」页有专用面板，还能看实时计数器', sandbox: '工具页有沙箱卡片，还能探测可用性',
-  'tools.overrides': '工具页可逐个启停', 'agent.agents': 'Agent 页有专用编辑器',
+  'tools.overrides': '工具页可逐个启停 —— 在这里整块写会取代那边逐项点出来的开关',
+  'agent.agents': 'Agent 页有专用编辑器',
+  'mcp.servers': '扩展页有 MCP 表单：那里不脱敏，能改 env / headers 里的密钥',
+  'approval.rules': '字段与正则在写入时就校验（写错的规则运行时永不命中，等于这道门没关）',
 };
 const SECRET_SEGMENT = /key|secret|token|password/i;
 const REDACTED = '«redacted»';
+/**
+ * 真正只读的密钥字段。密钥整体一度全是只读的，代价是 `tools.web.searchApiKey` 在 WebUI 里
+ * **压根配不了** —— 而 `web_search` 的 `available()` 要求 provider 与 key 同时有值，于是可写的
+ * `tools.web.searchProvider` 成了个空开关（选了也不会有工具进目录）。现在密钥改成「只写」：
+ * 不回显、留空表示不改。只有这一个例外留着只读 —— 它要的是 argon2 哈希而不是口令，
+ * 在这里敲明文等于把自己锁在门外，改口令走设置页那个表单。
+ */
+const READ_ONLY_PATHS = new Set(['webui.passwordHash']);
 
 function resolve(document_: Node, node: Node): Node {
   const reference = node.$ref;
@@ -71,7 +85,6 @@ function classify(document_: Node, raw: Node, path: string): Field {
       : type === 'integer' || type === 'number' ? 'number'
         : type === 'array' ? (items?.type === 'string' ? 'stringList' : 'json')
           : type === 'string' ? 'string' : 'json';
-  const current = dotted(props.value, path);
   const segments = path.split('.');
   return {
     path, group: segments[0] ?? path, label: segments.slice(1).join('.') || path, kind, enumValues,
@@ -83,8 +96,10 @@ function classify(document_: Node, raw: Node, path: string): Field {
     defaultValue: 'default' in raw ? raw.default : node.default,
     hot: props.hotReloadable.some((prefix) => path === prefix || path.startsWith(`${prefix}.`)),
     wired: !props.unimplemented.includes(path),
-    // 密钥字段在 `GET /api/config` 里已经是 «redacted»，把它写回去等于用字面量覆盖真值。
-    readOnly: current === REDACTED || (kind === 'string' && segments.some((segment) => SECRET_SEGMENT.test(segment))),
+    readOnly: READ_ONLY_PATHS.has(path),
+    // 密钥字段在 `GET /api/config` 里已经是 «redacted»：不回显、只写，避免用字面量覆盖真值。
+    secret: kind === 'string' && !READ_ONLY_PATHS.has(path) && segments.some((segment) => SECRET_SEGMENT.test(segment)),
+    pinnedEnv: props.envPinned.find((entry) => entry.key === path)?.env ?? null,
     description: text(raw.description) || text(node.description),
     note: props.notes[path] ?? DEDICATED[path] ?? '',
   };
@@ -116,6 +131,8 @@ const groupNote = (name: string): string => text((((root.value.properties as Nod
 
 /** 控件里显示的文本：JSON 与字符串数组都以文本编辑，避免每敲一个字就得是合法 JSON。 */
 function display(field: Field, value: unknown): unknown {
+  // 密钥一律不回显（服务端给的本来就是 «redacted»）：空 = 不改，输入了才提交。
+  if (field.secret) return '';
   if (field.kind === 'stringList') return (Array.isArray(value) ? value : []).join('\n');
   if (field.kind === 'json') return JSON.stringify(value ?? (field.defaultValue ?? null), null, 2);
   if (field.kind === 'boolean') return value === true;
@@ -124,6 +141,8 @@ function display(field: Field, value: unknown): unknown {
 }
 const draft = ref<Record<string, unknown>>({});
 const pristine = ref<Record<string, unknown>>({});
+/** 显式「清空这个密钥」：密钥字段留空的语义是不改，所以清空得单独记一笔。 */
+const cleared = ref(new Set<string>());
 const openGroups = ref(new Set<string>());
 const search = ref('');
 const hotOnly = ref(false);
@@ -142,7 +161,14 @@ function sync(): void {
 }
 watch(() => [props.schema, props.value] as const, sync, { immediate: true, deep: true });
 
-const changed = computed(() => fields.value.filter((field) => field.path in draft.value && draft.value[field.path] !== pristine.value[field.path]));
+const changed = computed(() => fields.value.filter((field) => cleared.value.has(field.path)
+  || (field.path in draft.value && draft.value[field.path] !== pristine.value[field.path])));
+const secretSet = (field: Field): boolean => { const value = dotted(props.value, field.path); return value === REDACTED || (typeof value === 'string' && value.length > 0); };
+function clearSecret(field: Field): void {
+  const next = new Set(cleared.value); next.add(field.path); cleared.value = next;
+  draft.value = { ...draft.value, [field.path]: '' };
+}
+function keepSecret(field: Field): void { const next = new Set(cleared.value); next.delete(field.path); cleared.value = next; }
 const changedPaths = computed(() => new Set(changed.value.map((field) => field.path)));
 const matches = (field: Field): boolean => {
   const needle = search.value.trim().toLowerCase();
@@ -169,17 +195,22 @@ function toggleGroup(name: string): void {
 }
 const allOpen = computed(() => Boolean(groups.value.length) && groups.value.every((group) => openGroups.value.has(group.name)));
 function toggleAll(): void { openGroups.value = allOpen.value ? new Set() : new Set(groups.value.map((group) => group.name)); }
-function update(field: Field, value: unknown): void { draft.value = { ...draft.value, [field.path]: value }; }
+function update(field: Field, value: unknown): void {
+  if (field.secret && String(value)) keepSecret(field);
+  draft.value = { ...draft.value, [field.path]: value };
+}
 // 模板里不能写 `as string | null`：编译器把那个 `|` 当成 Vue 2 的 filter 管道（vue/no-deprecated-filter）。
 const asText = (path: string): string => String(draft.value[path] ?? '');
 const asOption = (path: string): string | null => { const value = draft.value[path]; return value === null || value === undefined ? null : String(value); };
 const asNumber = (path: string): number | null => { const value = draft.value[path]; return typeof value === 'number' ? value : null; };
-function reset(): void { draft.value = { ...pristine.value }; }
+function reset(): void { draft.value = { ...pristine.value }; cleared.value = new Set(); }
 
-const badge = (field: Field): { label: string; severity: TagSeverity; hint: string } => (!field.wired
-  ? { label: '未接线', severity: 'secondary', hint: '在 KNOWN_UNIMPLEMENTED_CONFIG_KEYS 里：存得下，运行时没有任何代码读它' }
-  : field.hot ? { label: '热更新', severity: 'success', hint: '保存即生效，无需重启' }
-    : { label: '需重启', severity: 'warn', hint: '写进 config_kv 了，但运行时要重启才会读到新值' });
+const badge = (field: Field): { label: string; severity: TagSeverity; hint: string } => (field.pinnedEnv
+  ? { label: '环境变量锁定', severity: 'info', hint: `由 ${field.pinnedEnv} 决定：写进 config_kv 也会在下次加载时被 env 层盖回去，所以这里不给改` }
+  : !field.wired
+      ? { label: '未接线', severity: 'secondary', hint: '在 KNOWN_UNIMPLEMENTED_CONFIG_KEYS 里：存得下，运行时没有任何代码读它' }
+      : field.hot ? { label: '热更新', severity: 'success', hint: '保存即生效，无需重启' }
+        : { label: '需重启', severity: 'warn', hint: '写进 config_kv 了，但运行时要重启才会读到新值' });
 /** 默认值只是一行脚注：`tools.fs.denyGlobs` 那种九条 glob 的数组原样铺出来会盖过说明本身。 */
 function defaultText(field: Field): string {
   if (field.defaultValue === undefined) return '无默认值';
@@ -201,11 +232,15 @@ function rangeText(field: Field): string {
  *  而报错里的 path 未必对得上界面上是哪一格。 */
 const problems = computed(() => changed.value.flatMap((field) => {
   const value = draft.value[field.path];
+  // 整块 JSON 里可能嵌着 «redacted»（`mcp.servers` 的 env / headers），原样发回去等于把真密钥
+  // 换成这五个字。这种字段只能去专用面板改。
+  if ((field.kind === 'json' || field.kind === 'stringList') && String(value).includes(REDACTED)) return [`${field.path}：含 «redacted» 占位符，改这里会把真值覆盖成字面量`];
   if (field.kind === 'json') { try { JSON.parse(String(value)); return []; } catch { return [`${field.path}：不是合法 JSON`]; } }
   if (field.kind === 'number' && value === null && !field.nullable) return [`${field.path}：这一项不能留空`];
   return [];
 }));
 function toValue(field: Field, value: unknown): unknown {
+  if (field.secret) return cleared.value.has(field.path) ? '' : String(value);
   if (field.kind === 'stringList') return String(value).split('\n').map((line) => line.trim()).filter(Boolean);
   if (field.kind === 'json') return JSON.parse(String(value));
   if (field.kind === 'number') return value === null ? null : Number(value);
@@ -220,7 +255,15 @@ function save(): void {
  *  紧接着的那次 `GET /api/config` 可能还是旧值 —— 不把基线推上去，保存完按钮还挂着「保存 1 项改动」。 */
 function commit(paths: string[]): void {
   const next = { ...pristine.value };
-  for (const path of paths) if (path in draft.value) next[path] = draft.value[path];
+  const stillCleared = new Set(cleared.value);
+  const secrets = new Set(fields.value.filter((field) => field.secret).map((field) => field.path));
+  for (const path of paths) {
+    stillCleared.delete(path);
+    // 密钥字段的基线恒为空（不回显），提交完把输入框清掉，否则密钥会一直挂在 DOM 里。
+    if (secrets.has(path)) { next[path] = ''; draft.value = { ...draft.value, [path]: '' }; continue; }
+    if (path in draft.value) next[path] = draft.value[path];
+  }
+  cleared.value = stillCleared;
   pristine.value = next;
 }
 defineExpose({ commit });
@@ -255,9 +298,23 @@ defineExpose({ commit });
           :class="['schema-field', { dirty: changedPaths.has(field.path), off: !field.wired, wide: field.kind === 'json' || field.kind === 'stringList' }]">
           <span class="schema-key"><code><span v-if="field.label !== field.path" class="prefix">{{ field.group }}.</span>{{ field.label }}</code><UiTag :value="badge(field).label" :severity="badge(field).severity" :title="badge(field).hint" /></span>
           <p v-if="field.description" class="schema-desc">{{ field.description }}</p>
-          <template v-if="field.readOnly">
+          <template v-if="field.pinnedEnv">
             <input :value="String(display(field, dotted(value, field.path)))" disabled>
-            <small class="field-note">密钥字段不在这里改：Provider 的 key 在模型页、WebUI 口令用 <code>pnpm webui:passwd</code>、其余走环境变量。</small>
+            <small class="field-note">当前值由环境变量 <code>{{ field.pinnedEnv }}</code> 决定：写进 <code>config_kv</code> 也会在下次加载时被盖回去，所以这里不给改 —— 要改就改环境变量后重启。</small>
+          </template>
+          <template v-else-if="field.readOnly">
+            <input :value="String(dotted(value, field.path) ? '«已设置»' : '«未设置»')" disabled>
+            <small class="field-note">这一格要的是 argon2 哈希而不是口令：改口令用本页上方的「修改登录口令」，或 <code>pnpm webui:passwd</code> 后写进 <code>config.yaml</code>。</small>
+          </template>
+          <template v-else-if="field.secret">
+            <span class="secret-row">
+              <input :value="asText(field.path)" type="password" autocomplete="off" spellcheck="false"
+                :placeholder="cleared.has(field.path) ? '保存后清空' : secretSet(field) ? '已设置，留空表示不改' : '未设置'"
+                :disabled="!field.wired" @input="update(field, ($event.target as HTMLInputElement).value)">
+              <UiButton v-if="secretSet(field) && !cleared.has(field.path)" variant="text" size="small" severity="danger" label="清空" :disabled="!field.wired" @click="clearSecret(field)" />
+              <UiButton v-else-if="cleared.has(field.path)" variant="text" size="small" label="撤销清空" @click="keepSecret(field)" />
+            </span>
+            <small class="field-note">只写字段：不回显、留空表示不改。也可以填 <code>${env:NAME}</code> 形式的引用，加载时替换成该环境变量的值。</small>
           </template>
           <textarea v-else-if="field.kind === 'json' || field.kind === 'stringList'" :value="asText(field.path)" :disabled="!field.wired" :rows="field.kind === 'json' ? 6 : 3" spellcheck="false" @input="update(field, ($event.target as HTMLTextAreaElement).value)" />
           <UiSwitch v-else-if="field.kind === 'boolean'" :model-value="draft[field.path] === true" :disabled="!field.wired"
