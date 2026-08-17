@@ -54,6 +54,8 @@ turn 01J8…                                     kind=turn.start / turn.end
 | `tool.call` | info | tool, source, inputRef, ms, ok, outputBytes, truncated |
 | `tool.denied` | warn | tool, reason(role/rate/approval), role |
 | `tool.error` | warn | tool, errorKind, message |
+| `tool.disabled` | warn | tool —— 运维在 WebUI 关掉的工具被调用（目录之外的第二道硬拦截） |
+| `tool.disabled_after_errors` | warn | tool, failures —— 同一工具连续失败到 `tools.maxConsecutiveErrors`，本轮停用。这条是排障时区分「模型没试」和「试了被拦」的唯一凭据 |
 | `sandbox.run` | info | mode, image, exitCode, ms, oom, killed |
 | `approval.requested` / `approval.decided` | info | tool, risk, decidedBy, channel, ms |
 | `agent.spawn` / `agent.end` | info | name, depth, modelAlias, steps, costUsd |

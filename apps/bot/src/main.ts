@@ -106,7 +106,7 @@ if (!config.trigger.private && !config.trigger.mention && !config.trigger.reply 
   log.event({ level: 'warn', kind: 'config.invalid', summary: 'No trigger source is enabled; the bot will never respond' });
 }
 const toolRegistry = new ToolRegistry(log, approval,
-  () => { const live = configStore.snapshot(); return { maxRegistered: live.tools.maxRegistered, maxCallsPerTurn: live.tools.maxCallsPerTurn, maxConsecutiveErrors: live.tools.maxConsecutiveErrors, maxOutputBytes: live.tools.exec.maxOutputBytes }; },
+  () => { const live = configStore.snapshot(); return { maxRegistered: live.tools.maxRegistered, maxCallsPerTurn: live.tools.maxCallsPerTurn, maxConsecutiveErrors: live.tools.maxConsecutiveErrors, maxOutputBytes: live.tools.exec.maxOutputBytes, defaultTimeoutMs: live.tools.defaultTimeoutMs }; },
   () => configStore.snapshot().approval.rules, plugins);
 toolRegistry.bindOverrides(() => configStore.snapshot().tools.overrides);
 // 吃 getter 而不是启动快照：sandbox.mode 是「出事时运维会去点的那个开关」，冻住它等于
@@ -132,6 +132,7 @@ registerBuiltins(toolRegistry, {
   db, filesFor: (workspace) => new FileTools(new PathJail(workspace, config.tools.fs.denyGlobs), config.tools.fs.maxReadBytes, config.tools.fs.maxWriteBytes, { showHidden: config.tools.fs.showHidden, trashDir: config.tools.fs.trashDir, backupDir: config.tools.fs.backupDir }),
   sandbox, archive, context, memory, skills, agents, models: modelRegistry, ledger, log, quota,
   maxWebBytes: config.tools.web.maxResponseBytes, maxAsksPerRun: config.agent.maxAsksPerRun, askTimeoutMs: config.agent.askTimeoutMs,
+  web: { timeoutMs: config.tools.web.timeoutMs, retries: config.tools.web.retries },
   webSearch: { provider: config.tools.web.searchProvider, apiKey: config.tools.web.searchApiKey },
   telegram: telegramTools,
 });

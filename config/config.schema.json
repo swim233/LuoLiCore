@@ -683,7 +683,7 @@
               "type": "integer",
               "exclusiveMinimum": 0,
               "default": 120000,
-              "description": "单次上游请求的整体超时（毫秒）。"
+              "description": "单次上游尝试从发出请求到拿到响应头的超时（毫秒）。到点后只中止这一次尝试，重试与别名 fallback 照常走。"
             },
             "streamIdleTimeoutMs": {
               "type": "integer",
@@ -761,7 +761,7 @@
               "type": "integer",
               "exclusiveMinimum": 0,
               "default": 60000,
-              "description": "没有单独指定超时的工具用的默认超时（毫秒）。"
+              "description": "单次工具调用的默认墙钟上限（毫秒）。到点后把 tool_timeout 交回模型，让它换个做法，而不是让整轮对话挂在一个不返回的工具上。bash/python/spawn_agent 与两个 web 工具自己管超时，不受这一项约束。"
             },
             "overrides": {
               "type": "object",
@@ -918,6 +918,19 @@
                   "exclusiveMinimum": 0,
                   "default": 2097152,
                   "description": "web_fetch 单次抓取的响应字节上限。"
+                },
+                "timeoutMs": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 15000,
+                  "description": "web_fetch / web_search 单次尝试的超时（毫秒）。没有它时黑洞地址会一直挂着，整轮对话跟着卡死。"
+                },
+                "retries": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 5,
+                  "default": 2,
+                  "description": "web_fetch / web_search 遇到瞬时失败（超时、5xx、429）时的重试次数。耗尽后把失败结果交给模型，由它决定换 URL 还是如实告诉用户。"
                 },
                 "summarizeWithAlias": {
                   "type": "string",

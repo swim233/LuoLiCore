@@ -466,6 +466,18 @@ fallbackModel(chain, cfg) 语义：
 ```
 
 - `backoff(i, retryAfter) = retryAfter ?? min(1000 * 2^i * (1±0.2), 30000)`
+- **重试只有这一层**：`ToolLoopAgent` 一律传 `maxRetries: 0`。SDK 自己那层默认还会重试 2 次，两层
+  相乘等于同一次故障要熬 3×(候选数×尝试数) 次上游超时才收场 —— 而这一层才是认 `Retry-After`、
+  带真随机抖动、401/403 短路、链内换模型的那一层。
+- **每次尝试都有墙钟上限**，否则「连上了但不返回」会一直挂着：`provider.requestTimeoutMs`（默认 120s）
+  管「发出请求 → 拿到响应头」，`provider.streamIdleTimeoutMs`（默认 60s）管流开着但不吐字。
+  到点后**既 abort 底层请求也停止等待** —— 只 abort 是不够的，provider 实现（第三方网关、自定义 fetch）
+  不认那个 signal 时那个 promise 永远不 settle。超时算可重试，所以重试与 fallback 照常走；
+  调用方的信号（`/cancel`、`turnTimeoutMs`）已经断掉时一次都不再试。
+  流式的空闲计时只覆盖「已经在等下一个 chunk」的时间：本轮正在执行工具、或投递侧在节流都不算，
+  这也是不能直接用 AI SDK 的 `timeout.chunkMs` 的原因（它的窗口一直开到工具执行结束）。
+  少了这两条时的表现见 `logs/2026-08-17`：7 个轮次只有 `turn.start` 没有 `turn.end`，最后一条日志
+  都停在工具调用之后那一步 model 调用上，用户等到自己去重启进程。
 - **流式已输出部分内容后失败**：不切模型（避免重复内容），直接把已有内容作为最终回复 + 追加「(生成中断)」，turn 记 `failed` 但 delta **照常提交**（用户已经看到内容了，上下文必须与用户所见一致）。这是 §1 「delta 不提交」规则的唯一例外，必须在实现中显式处理。
 - 健康检查：每 `provider.healthCheckCron`（默认 10 分钟）对启用的 provider 发一次 1-token 探测；连续失败 3 次标 `health_state='down'`，WebUI 显示并从 fallback 链临时跳过（`down` 状态 30 分钟后自动重试）。
 

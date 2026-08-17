@@ -21,8 +21,8 @@ export interface SubAgentDependencies {
   ledger: UsageLedger;
   log: LogSink;
   workspace: string;
-  /** 缺省时退回裸模型（无重试、无 fallback）—— 调用方应当传，主 agent 路径已经传了。 */
-  provider?: { maxRetries: number; retryBaseMs: number; retryMaxMs: number };
+  /** 缺省时退回裸模型（无重试、无 fallback、无上游超时）—— 调用方应当传，主 agent 路径已经传了。 */
+  provider?: { maxRetries: number; retryBaseMs: number; retryMaxMs: number; requestTimeoutMs?: number; streamIdleTimeoutMs?: number };
   quota?: QuotaGuard;
   reservation?: QuotaReservation | null;
   onEvent?: (event: SubAgentRuntimeEvent) => void | Promise<void>;
@@ -33,6 +33,8 @@ export async function runSubAgent(run: AgentRun, definition: AgentDefinition, ta
   // 与主 agent 同一套包装：直接 resolve() 拿到的是裸模型，重试与 fallback 链一次都不会走。
   const model = dependencies.provider
     ? aliasModel(dependencies.registry, alias, { maxRetries: dependencies.provider.maxRetries, retryBaseMs: dependencies.provider.retryBaseMs, retryMaxMs: dependencies.provider.retryMaxMs, abortSignal: turn.abortSignal,
+      ...(dependencies.provider.requestTimeoutMs === undefined ? {} : { requestTimeoutMs: dependencies.provider.requestTimeoutMs }),
+      ...(dependencies.provider.streamIdleTimeoutMs === undefined ? {} : { streamIdleTimeoutMs: dependencies.provider.streamIdleTimeoutMs }),
       onFallback: (from, to) => dependencies.log.event({ level: 'warn', kind: 'provider.fallback', summary: `${from.id} → ${to.id}`, traceId: turn.turnId, data: { alias, agentRunId: run.id, from: from.id, to: to.id } }),
       onUnavailable: (candidate, error) => dependencies.registry.markProviderDown(candidate.id, error instanceof Error ? error.message : 'authentication_failed'),
       onExhausted: (error) => dependencies.log.event({ level: 'error', kind: 'model.error', summary: error instanceof Error ? `${error.name}: ${error.message}`.slice(0, 300) : String(error).slice(0, 300), traceId: turn.turnId, data: { alias, agentRunId: run.id } }) })
@@ -45,7 +47,8 @@ export async function runSubAgent(run: AgentRun, definition: AgentDefinition, ta
   }
   const perTurn = (turn.config as { quota: { perTurn: { maxSteps: number; maxCostUsd: number } } }).quota.perTurn;
   let stepNumber = 0;
-  const agent = new ToolLoopAgent({ model, ...dependencies.registry.settings(alias), instructions: definition.instructions, tools: toolSet, activeTools: Object.keys(toolSet), stopWhen: stepCountIs(Math.min(definition.maxSteps, perTurn.maxSteps)),
+  // 与主 agent 同理：重试归 fallbackLanguageModel，SDK 那层再叠一遍等于把一次故障的墙钟乘三。
+  const agent = new ToolLoopAgent({ model, ...dependencies.registry.settings(alias), maxRetries: 0, instructions: definition.instructions, tools: toolSet, activeTools: Object.keys(toolSet), stopWhen: stepCountIs(Math.min(definition.maxSteps, perTurn.maxSteps)),
     prepareStep: async () => dependencies.ledger.turnCost(turn.turnId) >= perTurn.maxCostUsd ? { activeTools: [], toolChoice: 'none' as const } : {},
     onStepEnd: async (step) => {
       const currentStep = ++stepNumber;

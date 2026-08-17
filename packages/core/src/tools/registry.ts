@@ -24,6 +24,8 @@ export interface RegisteredTool<I = unknown> {
   policy: ToolPolicyEntry;
   sourcePriority: number;
   untrustedOutput?: boolean;
+  /** 单次调用的墙钟上限；缺省用 `tools.defaultTimeoutMs`，`null` 表示这个工具自己管超时。 */
+  timeoutMs?: number | null;
   available?(role: Role, context: ToolExecutionContext): boolean;
   approvalTargetExists?(input: unknown, context: ToolExecutionContext): boolean;
   execute(input: I, context: ToolExecutionContext): Promise<object> | object;
@@ -44,6 +46,23 @@ interface ToolLimits {
   maxCallsPerTurn: number;
   maxConsecutiveErrors: number;
   maxOutputBytes?: number;
+  defaultTimeoutMs?: number;
+}
+
+const FALLBACK_TOOL_TIMEOUT_MS = 60_000;
+class ToolTimeout extends Error {
+  constructor(readonly ms: number) { super('tool_timeout'); }
+}
+/**
+ * 超时之后只能「不再等」：没有办法真正取消一个任意工具的执行（沙箱有自己的 kill，MCP 有自己的
+ * timeout，插件什么都没有）。丢掉这个 promise 让本轮继续往下走 —— `Promise.race` 已经给它挂了
+ * 处理器，晚到的拒绝不会变成 unhandledRejection 打崩进程。
+ */
+async function withTimeout<T>(work: Promise<T> | T, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([Promise.resolve(work), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new ToolTimeout(ms)), ms); })]);
+  } finally { clearTimeout(timer); }
 }
 
 interface TurnToolState {
@@ -132,7 +151,10 @@ export class ToolRegistry {
   async execute(name: string, rawInput: unknown, context: ToolExecutionContext): Promise<object> {
     const state = this.#state(context.turn.turnId);
     const tool = this.#tools.get(name);
-    if (!tool || state.disabled.has(name)) return { ok: false, error: 'tool_unavailable' };
+    if (!tool) return { ok: false, error: 'tool_unavailable' };
+    // 「本轮已经连续失败到被停用」和「这个工具根本不存在」对模型是两回事：前者要让它换个办法，
+    // 后者要让它别再猜工具名。混成一句 tool_unavailable 时模型通常继续原地重试到步数耗尽。
+    if (state.disabled.has(name)) return { ok: false, error: 'tool_disabled_after_errors', hint: `本轮连续失败 ${this.#limits().maxConsecutiveErrors} 次后已停用，换个办法或如实告诉用户。` };
     // 目录过滤之外再挡一次：模型可能沿用上一步的工具名，运维的禁用必须是硬边界。
     if (this.disabledByOperator(name)) { this.log.event({ level: 'warn', kind: 'tool.disabled', summary: `Blocked disabled tool ${name}`, traceId: context.turn.turnId, data: { tool: name } }); return { ok: false, error: 'tool_disabled_by_operator' }; }
     if (roleRank(context.turn.effectiveRole) < roleRank(tool.policy.minRole)) return { ok: false, error: '权限不足' };
@@ -160,26 +182,35 @@ export class ToolRegistry {
     state.calls += 1;
     await this.hooks?.hook('onToolCall', { name, input: parsed.data, context });
     const span = this.log.span({ level: 'info', kind: 'tool.call', summary: name, traceId: context.turn.turnId, chatId: context.turn.chatId, userId: context.turn.initiatorUserId, key: context.turn.key, data: { input: parsed.data } });
+    // 挂住的工具调用会挂住整轮：AI SDK 的 toolMs 只是把一个信号递给 execute()，工具不认它就等于
+    // 没有超时。这里改成硬 race —— 到点就把失败交回模型，让它换个做法，而不是让用户对着沉默
+    // 一直等到 `turnTimeoutMs`（logs/2026-08-17 有 7 轮只有 turn.start 没有 turn.end）。
+    const budget = tool.timeoutMs === null ? null : tool.timeoutMs ?? this.#limits().defaultTimeoutMs ?? FALLBACK_TOOL_TIMEOUT_MS;
     try {
-      const rawOutput = await tool.execute(parsed.data, context);
+      const called = tool.execute(parsed.data, context);
+      const rawOutput = budget === null ? await called : await withTimeout(called, budget);
       const output = this.#normalizeOutput(name, rawOutput, tool.untrustedOutput === true);
       await this.hooks?.hook('onToolResult', { name, input: parsed.data, output, context });
-      if ('ok' in output && output.ok === false) {
-        state.failures[name] = (state.failures[name] ?? 0) + 1;
-        if (state.failures[name] >= this.#limits().maxConsecutiveErrors) state.disabled.add(name);
-      } else {
-        state.failures[name] = 0;
-      }
+      if ('ok' in output && output.ok === false) this.#failed(state, name, context);
+      else state.failures[name] = 0;
       span.end({ output });
       return output;
     } catch (error) {
-      state.failures[name] = (state.failures[name] ?? 0) + 1;
-      if (state.failures[name] >= this.#limits().maxConsecutiveErrors) state.disabled.add(name);
+      this.#failed(state, name, context);
       span.end(undefined, error);
-      return { ok: false, error: error instanceof Error ? error.message : 'tool_error' };
+      return { ok: false, error: error instanceof Error ? error.message : 'tool_error',
+        ...(error instanceof ToolTimeout ? { hint: `${error.ms}ms 内没有返回，本次调用已放弃；换个参数或换个办法，别原样重试。` } : {}) };
     }
   }
   releaseTurn(turnId: string): void { this.#turns.delete(turnId); }
+
+  /** 连续失败到上限就在本轮停用，并留一条 warn：排障时要看得见「模型不是没试，是被拦下了」。 */
+  #failed(state: TurnToolState, name: string, context: ToolExecutionContext): void {
+    state.failures[name] = (state.failures[name] ?? 0) + 1;
+    if (state.failures[name]! < this.#limits().maxConsecutiveErrors || state.disabled.has(name)) return;
+    state.disabled.add(name);
+    this.log.event({ level: 'warn', kind: 'tool.disabled_after_errors', summary: `Disabled ${name} after ${state.failures[name]} failures`, traceId: context.turn.turnId, key: context.turn.key, data: { tool: name, failures: state.failures[name] } });
+  }
 
   catalog(role: Role, context: ToolExecutionContext): Array<{ name: string; description: string; policy: ToolPolicyEntry }> {
     return this.active(role, context).map(({ name, description, policy }) => ({ name, description, policy }));

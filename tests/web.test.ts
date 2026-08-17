@@ -1,7 +1,7 @@
 import { lookup } from 'node:dns/promises';
 import { createServer, type Server } from 'node:http';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { guardedFetch, webFetch } from '@luoli/core';
+import { guardedFetch, webFetch, withWebRetries } from '@luoli/core';
 
 describe('web fetch SSRF guard', () => {
   it('rejects private, reserved, tunneled, and non-HTTP ports before fetching', async () => {
@@ -35,5 +35,70 @@ describe('guarded fetch allow path', () => {
     const response = await guardedFetch(`http://localhost:${port}/`, {}, { allowPrivate: true, maxBytes: 1024 });
     expect(response.status).toBe(200);
     expect(response.body.toString('utf8')).toBe('pinned-ok');
+  });
+});
+
+// http.request 默认没有任何超时。连上之后一个字节都不发的服务器（限流网关、被墙的站点、
+// 半开连接）会让这个 promise 永远不 settle —— 卡住的是整轮对话，唯一兜底是 10 分钟的
+// turnTimeoutMs，用户看到的就是 bot 收了消息然后再也不说话。
+describe('guarded fetch deadline', () => {
+  let server: Server;
+  let port = 0;
+  const sockets: Array<{ destroy: () => void }> = [];
+  beforeAll(async () => {
+    server = createServer((request) => { sockets.push(request.socket); });
+    const [first] = await lookup('localhost', { all: true });
+    await new Promise<void>((resolve) => server.listen(0, first!.address, resolve));
+    port = (server.address() as { port: number }).port;
+  });
+  afterAll(async () => {
+    for (const socket of sockets) socket.destroy();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  it('gives up on a server that accepts the connection and never answers', async () => {
+    const started = Date.now();
+    await expect(guardedFetch(`http://localhost:${port}/`, {}, { allowPrivate: true, maxBytes: 1024, timeoutMs: 300 })).rejects.toThrow();
+    expect(Date.now() - started).toBeLessThan(5000);
+  });
+});
+
+describe('web tool retries', () => {
+  const signal = (): AbortSignal => new AbortController().signal;
+  const fast = { timeoutMs: 50, retries: 2 };
+
+  it('retries transient failures and reports how many attempts it took', async () => {
+    let calls = 0;
+    const result = await withWebRetries<Record<string, unknown>>(fast, signal(), async (attempt) => {
+      calls += 1;
+      return calls < 3 ? { retry: 'web_http_503', afterMs: 1 } : { done: { ok: true, attempts: attempt + 1 } };
+    }, (failure, attempts) => ({ ok: false, error: failure, attempts }));
+    expect(result).toEqual({ ok: true, attempts: 3 });
+    expect(calls).toBe(3);
+  });
+
+  // 耗尽之后必须是**结果**而不是异常：模型看得见「试了 3 次、卡在 web_timeout」才会换个 URL，
+  // 而不是把同一个地址原样再调一遍（或者干脆停在那里等）。
+  it('hands the model a structured failure once the retries are spent', async () => {
+    let calls = 0;
+    const result = await withWebRetries<Record<string, unknown>>(fast, signal(), async () => { calls += 1; return { retry: 'web_timeout', afterMs: 1 }; },
+      (failure, attempts) => ({ ok: false, error: failure, attempts }));
+    expect(result).toEqual({ ok: false, error: 'web_timeout', attempts: 3 });
+    expect(calls).toBe(3);
+  });
+
+  it('stops immediately when the turn is cancelled mid-backoff', async () => {
+    const controller = new AbortController();
+    let calls = 0;
+    const pending = withWebRetries<string>({ timeoutMs: 50, retries: 3 }, controller.signal, async () => { calls += 1; return { retry: 'web_http_502', afterMs: 5000 }; }, () => 'exhausted');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    controller.abort(new Error('cancelled'));
+    await expect(pending).rejects.toThrow('cancelled');
+    expect(calls).toBe(1);
+  });
+
+  // 站点自己答的 404 是答案，不是「这一次没打通」：重试它只是白等三倍时间。
+  it('does not retry a target that refuses on policy grounds', async () => {
+    await expect(webFetch('http://169.254.169.254/latest/meta-data', 1024, signal(), fast)).rejects.toThrow('ssrf_blocked');
   });
 });
