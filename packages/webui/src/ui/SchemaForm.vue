@@ -2,6 +2,7 @@
 // 由 `config.schema.json` 自动生成的配置表单（docs/09 §3.13、docs/21 §1.1）。
 // 153 个已接线叶子里此前只有 15 个能在界面上改，其余只能停机改 YAML；手写上百个控件必然漂移，
 // 正路是消费 `GET /api/config/schema` 已经备好的 `{schema, hotReloadable, unimplemented}` 三件套。
+// 每一项的作用说明也走 schema 的 `description`（core 的 `CONFIG_DESCRIPTIONS` 注入），同样不在这里抄第二份。
 import { computed, ref, watch } from 'vue';
 import UiButton from './UiButton.vue';
 import UiTag from './UiTag.vue';
@@ -21,9 +22,9 @@ const emit = defineEmits<{ save: [Record<string, unknown>] }>();
 
 type FieldKind = 'boolean' | 'number' | 'enum' | 'string' | 'stringList' | 'json';
 interface Field {
-  path: string; group: string; kind: FieldKind; enumValues: string[]; itemHint: string;
+  path: string; group: string; label: string; kind: FieldKind; enumValues: string[]; itemHint: string;
   min: number | null; exclusiveMin: boolean; max: number | null; integer: boolean; nullable: boolean;
-  defaultValue: unknown; hot: boolean; wired: boolean; readOnly: boolean; note: string;
+  defaultValue: unknown; hot: boolean; wired: boolean; readOnly: boolean; description: string; note: string;
 }
 type Node = Record<string, unknown>;
 
@@ -46,7 +47,14 @@ function resolve(document_: Node, node: Node): Node {
   return resolve(document_, (cursor ?? {}) as Node);
 }
 const dotted = (value: unknown, path: string): unknown => path.split('.').reduce<unknown>((cursor, key) => (cursor && typeof cursor === 'object' ? (cursor as Node)[key] : undefined), value);
+const text = (value: unknown): string => (typeof value === 'string' ? value : '');
 
+/**
+ * `raw` 必须是**未解析**的那个节点：zodToJsonSchema 对复用的 zod 实例发 `$ref`，并把 `default`
+ * 与（我们注入的）`description` 放在 `$ref` 的兄弟位置。跟着 `$ref` 走再读，拿到的是被指向的那个键
+ * 的值 —— `quota.perChat.daily` 会显示成「默认 5」（真值 1），`memory.pubWriteMinRole` 显示成
+ * 「默认 blocked」（真值 trusted），说明文字也会串成同一句。
+ */
 function classify(document_: Node, raw: Node, path: string): Field {
   const node = resolve(document_, raw);
   const anyOf = Array.isArray(node.anyOf) ? node.anyOf.map((entry) => resolve(document_, entry as Node)) : null;
@@ -64,25 +72,26 @@ function classify(document_: Node, raw: Node, path: string): Field {
   const current = dotted(props.value, path);
   const segments = path.split('.');
   return {
-    path, group: segments[0] ?? path, kind, enumValues,
+    path, group: segments[0] ?? path, label: segments.slice(1).join('.') || path, kind, enumValues,
     itemHint: itemEnum.length ? `可选值：${itemEnum.join(' / ')}` : '',
     min: typeof primary.minimum === 'number' ? primary.minimum : typeof primary.exclusiveMinimum === 'number' ? primary.exclusiveMinimum : null,
     exclusiveMin: typeof primary.minimum !== 'number' && typeof primary.exclusiveMinimum === 'number',
     max: typeof primary.maximum === 'number' ? primary.maximum : null,
     integer: type === 'integer', nullable: Boolean(anyOf?.some((entry) => entry.type === 'null')),
-    defaultValue: node.default,
+    defaultValue: 'default' in raw ? raw.default : node.default,
     hot: props.hotReloadable.some((prefix) => path === prefix || path.startsWith(`${prefix}.`)),
     wired: !props.unimplemented.includes(path),
     // 密钥字段在 `GET /api/config` 里已经是 «redacted»，把它写回去等于用字面量覆盖真值。
     readOnly: current === REDACTED || (kind === 'string' && segments.some((segment) => SECRET_SEGMENT.test(segment))),
+    description: text(raw.description) || text(node.description),
     note: props.notes[path] ?? DEDICATED[path] ?? '',
   };
 }
 
+const root = computed<Node>(() => (props.schema ? resolve(props.schema, props.schema) : {}));
 const fields = computed<Field[]>(() => {
   const document_ = props.schema;
   if (!document_) return [];
-  const root = resolve(document_, document_);
   const out: Field[] = [];
   const walk = (node: Node, path: string): void => {
     const resolved = resolve(document_, node);
@@ -95,11 +104,13 @@ const fields = computed<Field[]>(() => {
     }
     if (!path) return;
     if (props.include && !props.include.some((prefix) => path === prefix || path.startsWith(`${prefix}.`))) return;
-    out.push(classify(document_, resolved, path));
+    out.push(classify(document_, node, path));
   };
-  walk(root, '');
+  walk(root.value, '');
   return out;
 });
+/** 分组抬头那句话来自顶层节点自己的 `description`，跟每一格的说明同源。 */
+const groupNote = (name: string): string => text((((root.value.properties as Node | undefined)?.[name]) as Node | undefined)?.description);
 
 /** 控件里显示的文本：JSON 与字符串数组都以文本编辑，避免每敲一个字就得是合法 JSON。 */
 function display(field: Field, value: unknown): unknown {
@@ -133,7 +144,8 @@ const changed = computed(() => fields.value.filter((field) => field.path in draf
 const changedPaths = computed(() => new Set(changed.value.map((field) => field.path)));
 const matches = (field: Field): boolean => {
   const needle = search.value.trim().toLowerCase();
-  if (needle && !field.path.toLowerCase().includes(needle)) return false;
+  // 说明文字一并参与匹配：运维记得住「沙箱」「防秒回」，记不住 sandbox.pidsLimit 这种键名。
+  if (needle && !field.path.toLowerCase().includes(needle) && !field.description.toLowerCase().includes(needle)) return false;
   if (hotOnly.value && !field.hot) return false;
   // 未接线的键默认藏起来：它们连控件都是禁用的，混在里面只会让人以为改得动。
   return field.wired || showUnwired.value;
@@ -144,7 +156,7 @@ const groups = computed(() => {
     if (!matches(field)) continue;
     grouped.set(field.group, [...(grouped.get(field.group) ?? []), field]);
   }
-  return [...grouped].map(([name, entries]) => ({ name, entries, dirty: entries.filter((field) => changedPaths.value.has(field.path)).length }));
+  return [...grouped].map(([name, entries]) => ({ name, entries, note: groupNote(name), dirty: entries.filter((field) => changedPaths.value.has(field.path)).length }));
 });
 const hidden = computed(() => fields.value.length - groups.value.reduce((sum, group) => sum + group.entries.length, 0));
 watch(search, (needle) => { if (needle.trim()) openGroups.value = new Set(groups.value.map((group) => group.name)); });
@@ -153,6 +165,8 @@ function toggleGroup(name: string): void {
   if (next.has(name)) next.delete(name); else next.add(name);
   openGroups.value = next;
 }
+const allOpen = computed(() => Boolean(groups.value.length) && groups.value.every((group) => openGroups.value.has(group.name)));
+function toggleAll(): void { openGroups.value = allOpen.value ? new Set() : new Set(groups.value.map((group) => group.name)); }
 function update(field: Field, value: unknown): void { draft.value = { ...draft.value, [field.path]: value }; }
 // 模板里不能写 `as string | null`：编译器把那个 `|` 当成 Vue 2 的 filter 管道（vue/no-deprecated-filter）。
 const asText = (path: string): string => String(draft.value[path] ?? '');
@@ -164,7 +178,14 @@ const badge = (field: Field): { label: string; severity: TagSeverity; hint: stri
   ? { label: '未接线', severity: 'secondary', hint: '在 KNOWN_UNIMPLEMENTED_CONFIG_KEYS 里：存得下，运行时没有任何代码读它' }
   : field.hot ? { label: '热更新', severity: 'success', hint: '保存即生效，无需重启' }
     : { label: '需重启', severity: 'warn', hint: '写进 config_kv 了，但运行时要重启才会读到新值' });
-const defaultText = (field: Field): string => (field.defaultValue === undefined ? '无默认值' : `默认 ${typeof field.defaultValue === 'object' ? JSON.stringify(field.defaultValue) : String(field.defaultValue)}`);
+/** 默认值只是一行脚注：`tools.fs.denyGlobs` 那种九条 glob 的数组原样铺出来会盖过说明本身。 */
+function defaultText(field: Field): string {
+  if (field.defaultValue === undefined) return '无默认值';
+  if (field.defaultValue === null) return field.nullable ? '默认不限' : '默认 null';
+  if (field.kind === 'stringList') { const count = Array.isArray(field.defaultValue) ? field.defaultValue.length : 0; return count ? `默认 ${count} 条` : '默认为空'; }
+  const literal = typeof field.defaultValue === 'object' ? JSON.stringify(field.defaultValue) : String(field.defaultValue);
+  return `默认 ${literal.length > 48 ? `${literal.slice(0, 48)}…` : literal}`;
+}
 function rangeText(field: Field): string {
   if (field.kind !== 'number') return '';
   const parts = [field.integer ? '整数' : '小数'];
@@ -206,34 +227,41 @@ defineExpose({ commit });
 <template>
   <div class="schema-form">
     <div class="schema-toolbar">
-      <label class="search grow"><i class="pi pi-search" /><input v-model="search" placeholder="按键名过滤，例如 logs. 或 maxSteps"></label>
+      <label class="search grow"><i class="pi pi-search" /><input v-model="search" placeholder="搜键名或说明，例如 沙箱、防秒回、logs."></label>
       <label class="switch-line"><input v-model="hotOnly" type="checkbox">只看热更新项</label>
       <label class="switch-line"><input v-model="showUnwired" type="checkbox">显示未接线项</label>
-      <UiButton variant="text" label="放弃改动" :disabled="!changed.length || saving" @click="reset" />
+      <UiButton variant="text" size="small" :icon="allOpen ? 'pi pi-chevron-up' : 'pi pi-chevron-down'" :label="allOpen ? '全部收起' : '全部展开'" :disabled="!groups.length" @click="toggleAll" />
+      <UiButton variant="text" size="small" label="放弃改动" :disabled="!changed.length || saving" @click="reset" />
       <UiButton icon="pi pi-save" :label="changed.length ? `${saveLabel} ${changed.length} 项` : '没有改动'" :disabled="!changed.length || Boolean(problems.length)" :loading="saving" @click="save" />
     </div>
-    <p v-if="problems.length" class="field-note wake-issue"><i class="pi pi-exclamation-triangle" />{{ problems.join('；') }}</p>
+    <p v-if="problems.length" class="callout error"><i class="pi pi-exclamation-triangle" />{{ problems.join('；') }}</p>
     <p class="section-note">
-      共 {{ fields.length }} 个 schema 叶子<span v-if="hidden">，当前筛掉 {{ hidden }} 个</span>。写入走 <code>PUT /api/config</code> 的点分键，
-      整体过一次 <code>configSchema</code> 校验后落 <code>config_kv</code> + <code>config_revisions</code>；
-      <b>只发真正改过的那几项</b>。字段说明见 <code>docs/11-config-reference.md</code>（schema 本身不带描述，
-      在这里再抄一份必然与文档漂移）。
+      共 {{ fields.length }} 个 schema 叶子<span v-if="hidden">，当前筛掉 {{ hidden }} 个</span>；每格的说明来自 schema 的 <code>description</code>
+      （唯一来源是 core 的 <code>CONFIG_DESCRIPTIONS</code>）。写入走 <code>PUT /api/config</code> 的点分键，整体过一次
+      <code>configSchema</code> 校验后落 <code>config_kv</code> + <code>config_revisions</code>；<b>只发真正改过的那几项</b>。
     </p>
-    <section v-for="group in groups" :key="group.name" class="schema-group">
-      <button type="button" class="schema-group-head" @click="toggleGroup(group.name)">
-        <i :class="['pi', openGroups.has(group.name) ? 'pi-chevron-down' : 'pi-chevron-right']" aria-hidden="true" />
-        <b>{{ group.name }}</b><span>{{ group.entries.length }} 项</span>
+    <section v-for="group in groups" :key="group.name" class="schema-group" :class="{ open: openGroups.has(group.name) }">
+      <button type="button" class="schema-group-head" :aria-expanded="openGroups.has(group.name)" @click="toggleGroup(group.name)">
+        <i class="pi pi-chevron-right caret" aria-hidden="true" />
+        <b>{{ group.name }}</b>
+        <small v-if="group.note">{{ group.note }}</small>
         <UiTag v-if="group.dirty" :value="`${group.dirty} 项待保存`" severity="warn" />
+        <span class="count">{{ group.entries.length }} 项</span>
       </button>
       <div v-if="openGroups.has(group.name)" class="schema-fields">
-        <label v-for="field in group.entries" :key="field.path" :class="['schema-field', { dirty: changedPaths.has(field.path), wide: field.kind === 'json' || field.kind === 'stringList' }]">
-          <span class="schema-key"><code>{{ field.path }}</code><UiTag :value="badge(field).label" :severity="badge(field).severity" :title="badge(field).hint" /></span>
+        <component :is="field.kind === 'boolean' ? 'div' : 'label'" v-for="field in group.entries" :key="field.path"
+          :class="['schema-field', { dirty: changedPaths.has(field.path), off: !field.wired, wide: field.kind === 'json' || field.kind === 'stringList' }]">
+          <span class="schema-key"><code><span v-if="field.label !== field.path" class="prefix">{{ field.group }}.</span>{{ field.label }}</code><UiTag :value="badge(field).label" :severity="badge(field).severity" :title="badge(field).hint" /></span>
+          <p v-if="field.description" class="schema-desc">{{ field.description }}</p>
           <template v-if="field.readOnly">
             <input :value="String(display(field, dotted(value, field.path)))" disabled>
             <small class="field-note">密钥字段不在这里改：Provider 的 key 在模型页、WebUI 口令用 <code>pnpm webui:passwd</code>、其余走环境变量。</small>
           </template>
           <textarea v-else-if="field.kind === 'json' || field.kind === 'stringList'" :value="asText(field.path)" :disabled="!field.wired" :rows="field.kind === 'json' ? 6 : 3" spellcheck="false" @input="update(field, ($event.target as HTMLTextAreaElement).value)" />
-          <input v-else-if="field.kind === 'boolean'" type="checkbox" :checked="draft[field.path] === true" :disabled="!field.wired" @change="update(field, ($event.target as HTMLInputElement).checked)">
+          <label v-else-if="field.kind === 'boolean'" class="schema-switch" :class="{ on: draft[field.path] === true }">
+            <input type="checkbox" :checked="draft[field.path] === true" :disabled="!field.wired" @change="update(field, ($event.target as HTMLInputElement).checked)">
+            <span>{{ draft[field.path] === true ? '已开启' : '已关闭' }}</span>
+          </label>
           <UiSelect v-else-if="field.kind === 'enum'" :model-value="asOption(field.path)" :options="field.enumValues" :disabled="!field.wired" @update:model-value="update(field, $event)" />
           <UiNumber v-else-if="field.kind === 'number'" :model-value="asNumber(field.path)" :disabled="!field.wired" :step="field.integer ? 1 : 0.01" @update:model-value="update(field, $event)" />
           <input v-else :value="asText(field.path)" :disabled="!field.wired" @input="update(field, ($event.target as HTMLInputElement).value)">
@@ -242,9 +270,9 @@ defineExpose({ commit });
             <template v-if="field.kind === 'stringList'"> · 一行一条</template>
             <template v-if="field.note"> · {{ field.note }}</template>
           </small>
-        </label>
+        </component>
       </div>
     </section>
-    <p v-if="!groups.length" class="empty-card">没有匹配的配置项。</p>
+    <p v-if="!groups.length" class="empty-card"><i class="pi pi-filter-slash" aria-hidden="true" /> 没有匹配的配置项。</p>
   </div>
 </template>

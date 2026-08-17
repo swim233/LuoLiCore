@@ -5,6 +5,7 @@ export * from './agent/fallback-model.js';
 export * from './agent/subagent.js';
 export * from './agent/runtime.js';
 export * from './access.js';
+export * from './config/descriptions.js';
 export * from './config/index.js';
 export * from './config/schema.js';
 export * from './config/wakeword.js';

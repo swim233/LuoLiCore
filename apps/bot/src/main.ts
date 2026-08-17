@@ -3,9 +3,8 @@ import argon2 from 'argon2';
 import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { serve } from '@hono/node-server';
-import { zodToJsonSchema } from 'zod-to-json-schema';
 import { ArchiveRepository, OperationsRepository, PrincipalRepository, TurnRepository, closeDatabase, migrateDatabase, modelAliasKey, openDatabase, readAppKv, readPersistedConfig, recomputeMessageTokens, recoverAfterCrash, writeAppKv } from '@luoli/db';
-import { AgentManager, AgentResultStore, ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, FileTools, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, ModelRegistry, PathJail, PluginManager, PromptAssembler, PromptDocuments, ProviderStore, QuotaGuard, Sandbox, Scheduler, Secrets, SkillLoader, STABLE_PROMPT_BLOCKS, TOOL_POLICY, ToolRegistry, TurnConcurrency, TurnRegistry, UsageLedger, assembleMainPrompt, configSchema, loadConfig, perChatConfig, registerBuiltins, rejectedWakewords, runSubAgent, streamMainAgent, type SubAgentRuntimeEvent } from '@luoli/core';
+import { AgentManager, AgentResultStore, ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, FileTools, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, ModelRegistry, PathJail, PluginManager, PromptAssembler, PromptDocuments, ProviderStore, QuotaGuard, Sandbox, Scheduler, Secrets, SkillLoader, STABLE_PROMPT_BLOCKS, TOOL_POLICY, ToolRegistry, TurnConcurrency, TurnRegistry, UsageLedger, assembleMainPrompt, configJsonSchema, loadConfig, perChatConfig, registerBuiltins, rejectedWakewords, runSubAgent, streamMainAgent, type SubAgentRuntimeEvent } from '@luoli/core';
 import { createServer, EventStreamRegistry, setupToken, type PromptPreviewResult } from '@luoli/server';
 import type { RuntimeTurnContext } from '@luoli/shared';
 import { TelegramTools, createTelegramBot } from '@luoli/telegram';
@@ -207,7 +206,7 @@ async function dryRunAgent(name: string, task: string, signal: AbortSignal, emit
 const rebuildModels = (): void => { modelRegistry.rebuild(); const live = configStore.snapshot(); log.setSecrets([process.env.BOT_TOKEN ?? '', process.env.LUOLI_MASTER_KEY ?? '', live.tools.web.searchApiKey, ...providers.allDecryptedKeys()]); };
 const eventStreams = new EventStreamRegistry();
 const server = createServer({ config: configStore, db, operations, principals, archive, context, providers, modelCatalog, approvals: approval, rebuildModels, maintenance, events, log,
-  memory, promptDocuments, skills, plugins, mcp, agents, turnRegistry, sandbox, eventStreams, previewPrompt, dryRunAgent, configSchema: zodToJsonSchema(configSchema, 'LuoLiConfig'), startedAt, setup });
+  memory, promptDocuments, skills, plugins, mcp, agents, turnRegistry, sandbox, eventStreams, previewPrompt, dryRunAgent, configSchema: configJsonSchema(), startedAt, setup });
 const http = serve({ fetch: server.fetch, hostname: config.webui.host, port: config.webui.port });
 events.subscribe((event) => {
   if (event.type !== 'config.changed') return;

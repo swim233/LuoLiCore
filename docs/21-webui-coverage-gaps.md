@@ -55,6 +55,11 @@ schema 自动表单，可写覆盖率达到 151/151（第三轮接线两项后�
 下面每一项都能在界面上改（§4.3）。留着这张分组表是为了下次复算时对得上号 ——
 **表里每一项都是运行时真的会读的值**。
 
+> 「改得动」之后剩下的那半个缺口是「敢不敢改」：表单一度只给点分键名，键名认不出来就只能回去翻
+> `docs/11`。现在每一格都带一句作用说明，来源是 `CONFIG_DESCRIPTIONS` 注入 schema 的 `description`
+> （[09 §3.13](./09-webui.md)），`tests/config.test.ts` 断言它与 schema 叶子一一对应 ——
+> 新增配置项时不写说明就过不了 CI。
+
 | 分组 | 数量 | 键 |
 |---|---|---|
 | `tools` | 16 | `maxRegistered` `maxCallsPerTurn` `maxConsecutiveErrors` `defaultTimeoutMs` `fs.maxReadBytes` `fs.maxWriteBytes` `fs.showHidden` `fs.denyGlobs` `fs.trashDir` `fs.backupDir` `exec.defaultTimeoutMs` `exec.maxTimeoutMs` `exec.maxOutputBytes` `web.maxResponseBytes` `web.searchProvider` `web.searchApiKey` |

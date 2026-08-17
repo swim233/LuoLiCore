@@ -469,22 +469,58 @@ select { appearance: none; padding-right: 30px; background-image: url("data:imag
 .override-chip button:hover { color: var(--rose); background: var(--surface); }
 .chat-overrides .schema-form { width: 100%; }
 
-/* ── 由 config.schema.json 自动生成的配置表单（docs/21 §1.1） ── */
+/* ── 由 config.schema.json 自动生成的配置表单（docs/21 §1.1） ──
+   这块以前只写了骨架，几乎每个类名都落在别处的后代选择器里（`.form-grid .field-note`、
+   `.search-row .search.grow input`、`.form-grid .switch-line`），搬到这儿一条都不命中：
+   说明文字是满黑的正文色、搜索框卡在 290px 不跟着伸、分组抬头那个 <button> 连 `border: 0`
+   都没有，深色主题下露出浏览器默认的亮边框。样式一律写在这里，不再蹭别人的作用域。 ── */
 .schema-form { display: grid; gap: 12px; }
-.schema-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+/* 200 多格要滚很久，工具栏（搜索 + 保存）跟着滚上去就等于没有。粘在顶栏下沿。 */
+.schema-toolbar { position: sticky; top: 82px; z-index: 6; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 14px; background: color-mix(in srgb, var(--surface-2), transparent 8%); backdrop-filter: blur(12px); }
 .schema-toolbar .search { flex: 1 1 240px; }
-.schema-group { border: 1px solid var(--border); border-radius: 13px; overflow: hidden; background: var(--surface); }
-.schema-group-head { width: 100%; display: flex; align-items: center; gap: 10px; padding: 12px 15px; background: var(--surface-2); font-size: .84rem; text-align: left; }
-.schema-group-head b { font-family: var(--font-mono); }
-.schema-group-head span { color: var(--muted); font-size: .72rem; margin-right: auto; }
-.schema-fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(310px, 1fr)); gap: 14px; padding: 15px; border-top: 1px solid var(--border); }
-.schema-field { display: grid; align-content: start; gap: 6px; font-size: .8rem; }
+.schema-toolbar .search input { width: 100%; background: var(--surface); }
+.schema-toolbar .switch-line { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: .8rem; white-space: nowrap; transition: color 140ms ease; }
+.schema-toolbar .switch-line:hover { color: var(--ink); }
+.schema-toolbar .switch-line input { width: auto; }
+.schema-form > .section-note { max-width: 96ch; }
+.schema-form > .empty-card { display: grid; gap: 8px; border: 1px dashed var(--border); border-radius: 16px; }
+
+.schema-group { border: 1px solid var(--border); border-radius: 14px; overflow: hidden; background: var(--surface); transition: border-color 180ms ease, box-shadow 180ms ease; }
+.schema-group.open { border-color: color-mix(in srgb, var(--primary), transparent 62%); box-shadow: 0 8px 22px rgba(37, 27, 73, .05); }
+.schema-group-head { width: 100%; display: flex; align-items: center; gap: 10px; padding: 12px 15px; border: 0; background: var(--surface-2); color: inherit; font-size: .84rem; text-align: left; transition: background-color 150ms ease; }
+.schema-group-head:hover { background: color-mix(in srgb, var(--primary-soft), var(--surface-2) 30%); }
+.schema-group-head b { flex: none; font-family: var(--font-mono); }
+/* 抬头那句话来自 schema 的 description，宽度富余时才出现，挤不下就省略号 —— 它是导航线索，
+   不是必须读完的正文，换行会把每一条抬头撑成两行，22 个分组一起变成一堵墙。 */
+.schema-group-head small { flex: 0 1 auto; min-width: 0; color: var(--muted); font-size: .74rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.schema-group-head .count { flex: none; margin-left: auto; color: var(--muted); font: .72rem var(--font-mono); }
+.schema-group-head .caret { flex: none; color: var(--muted); font-size: .68rem; transition: transform 220ms cubic-bezier(.22, .61, .36, 1); }
+.schema-group.open .schema-group-head .caret { transform: rotate(90deg); color: var(--primary); }
+/* `min(320px, 100%)` 而不是裸的 320px：窄屏上轨道宽度不会缩到容器以下，一格就把整页撑出横向滚动。 */
+.schema-fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr)); gap: 12px; padding: 14px; border-top: 1px solid var(--border); animation: reveal-down 220ms cubic-bezier(.22, .61, .36, 1) backwards; }
+/* 每一格自己是张卡片：一格里现在是「键名 + 徽标 / 说明 / 控件 / 默认值与取值范围」四行，
+   不圈起来的话相邻两格的说明和控件会读成同一格的。 */
+.schema-field { display: grid; align-content: start; gap: 7px; padding: 12px 13px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-2); font-size: .8rem; transition: border-color 160ms ease, background-color 160ms ease; }
+.schema-field:hover, .schema-field:focus-within { border-color: color-mix(in srgb, var(--primary), transparent 58%); }
 .schema-field.wide { grid-column: 1 / -1; }
+.schema-field.off { opacity: .6; }
+.schema-field.dirty { border-color: var(--primary); background: color-mix(in srgb, var(--primary-soft), transparent 45%); }
 .schema-field.dirty .schema-key code { color: var(--primary); font-weight: 600; }
+.schema-field :is(input:not([type='checkbox']), select, textarea) { background: var(--surface); }
 .schema-field textarea { min-height: 64px; resize: vertical; font: 400 .74rem/1.55 var(--font-mono); }
-.schema-field input[type="checkbox"] { justify-self: start; width: 18px; height: 18px; }
 .schema-key { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
-.schema-key code { overflow-wrap: anywhere; }
+.schema-key code { font-size: .79rem; font-weight: 600; overflow-wrap: anywhere; }
+/* 分组抬头已经写了 general，每格再重复一遍只是噪声；但完整点分路径是照着 doc / API 找键的凭据，
+   所以留着、压暗，让视线落在最后一段上。 */
+.schema-key .prefix { color: var(--muted); font-weight: 400; }
+.schema-desc { margin: 0; color: color-mix(in srgb, var(--ink), var(--muted) 30%); font-size: .76rem; line-height: 1.62; }
+.schema-field .field-note { margin: 0; color: var(--muted); font-size: .71rem; line-height: 1.55; overflow-wrap: anywhere; }
+.schema-field .field-note code { font-size: .69rem; }
+.schema-switch { display: inline-flex; align-items: center; gap: 9px; justify-self: start; padding: 5px 11px 5px 9px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--muted); font-size: .78rem; cursor: pointer; transition: 150ms ease; }
+.schema-switch input { width: 16px; height: 16px; }
+.schema-switch:hover { border-color: color-mix(in srgb, var(--primary), transparent 55%); }
+.schema-switch.on { border-color: color-mix(in srgb, var(--green), transparent 55%); color: var(--green); }
+.schema-switch:has(input:disabled) { cursor: not-allowed; opacity: .7; }
 
 /* ── 附件：消息卡片与检索结果下面那条带子（docs/21 · G-API-08） ── */
 .attachment-strip { display: flex; flex-wrap: wrap; align-items: stretch; gap: 8px; margin: 2px 0 0; }
