@@ -80,8 +80,10 @@ describe('model wiring through prepareStep', () => {
     const system = prompts[0]!.filter((message) => message.role === 'system').map((message) => String(message.content));
     expect(system).toHaveLength(2);
     expect(system[0]).toContain('=== KERNEL ===');
-    // 每轮都变的那三块一个字都不能落在缓存段里 —— 分钟精度的时钟就够让整段前缀作废。
-    for (const header of ['=== RUNTIME ===', '=== PUBMEMORY ===', '=== PRIMEMORY ===']) expect(system[0]).not.toContain(header);
+    // 易变的那四块一个字都不能落在缓存段里 —— 分钟精度的时钟就够让整段前缀作废，
+    // 工具目录则是按会话把前缀切碎（一个 (角色, 会话) 一份）。
+    for (const header of ['=== TOOL CATALOG ===', '=== RUNTIME ===', '=== PUBMEMORY ===', '=== PRIMEMORY ===']) expect(system[0]).not.toContain(header);
+    expect(system[1]).toContain('=== TOOL CATALOG ===');
     expect(system[1]).toContain('=== RUNTIME ===');
     expect(system[1]).toContain('现在：');
     closeDatabase(db);

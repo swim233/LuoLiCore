@@ -80,12 +80,15 @@ describe('系统提示词的缓存边界', () => {
 
   it('每轮都变的块不落在缓存段里', () => {
     // 断点之后才是易变区。时钟留在缓存段里，等于每过一分钟整段前缀作废一次（实测跨轮只命中 128 token）。
-    for (const header of ['=== KERNEL ===', '=== CHARACTER ===', '=== ASSIST ===', '=== TOOL CATALOG ===']) expect(built.stable).toContain(header);
-    for (const header of ['=== PUBMEMORY ===', '=== PRIMEMORY ===', '=== RUNTIME ===']) {
+    for (const header of ['=== KERNEL ===', '=== CHARACTER ===', '=== ASSIST ===']) expect(built.stable).toContain(header);
+    for (const header of ['=== TOOL CATALOG ===', '=== PUBMEMORY ===', '=== PRIMEMORY ===', '=== RUNTIME ===']) {
       expect(built.stable).not.toContain(header);
       expect(built.volatile).toContain(header);
     }
     expect(STABLE_PROMPT_BLOCKS).not.toContain('runtime');
+    // 工具目录随 (角色, 会话, 启用集) 变：留在缓存段就是每个会话各存一份前缀，开关一个工具即全段作废。
+    expect(STABLE_PROMPT_BLOCKS).not.toContain('catalog');
+    expect(built.volatile.indexOf('=== TOOL CATALOG ===')).toBe(0);
   });
 
   it('两段拼起来仍是文档规定的固定顺序', () => {
