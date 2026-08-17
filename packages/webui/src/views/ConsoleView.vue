@@ -1965,7 +1965,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
               <UiCheckbox v-model="triggerForm.channels" label="频道消息" @change="markTriggerDirty" />
             </div>
             <div class="wide">
-              <p class="field-title">唤醒词<small>不以 ^ 开头 = 包含匹配；以 ^ 开头 = 正则（u 标志，只扫描消息前 4096 字符）。私聊不看唤醒词。</small></p>
+              <p class="field-title">唤醒词<small>不以 ^ 开头 = 包含匹配，忽略大小写（nori 同时匹配 Nori）；以 ^ 开头 = 正则（u 标志，只扫描消息前 4096 字符），按你写的大小写求值，要忽略就写 ^(?i)nori。私聊不看唤醒词。</small></p>
               <div class="wake-list">
                 <span v-for="entry in wakewordStatus" :key="entry.pattern" :class="['wake-chip', { bad: !entry.ok }]" :title="entry.reason ?? ''">
                   <code>{{ entry.pattern }}</code>

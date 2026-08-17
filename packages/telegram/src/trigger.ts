@@ -1,5 +1,5 @@
 import type { Context } from 'grammy';
-import { WAKEWORD_SCAN_LIMIT, checkWakeword } from '@luoli/core';
+import { checkWakeword, matchesWakeword } from '@luoli/core';
 
 export type TriggerReason = 'private' | 'mention' | 'reply' | 'command' | 'wakeword' | 'ask';
 
@@ -61,10 +61,7 @@ export function matchTrigger(ctx: Context, config: TriggerConfig, botId: number,
   }
   if (config.reply && message.reply_to_message?.from?.id === botId) return 'reply';
   for (const wakeword of config.wakewords) {
-    const checked = checkWakeword(wakeword, config.wakewordMinLength);
-    if (!checked.ok) continue;
-    if (checked.kind === 'regex') { if (checked.regex.test(text.slice(0, WAKEWORD_SCAN_LIMIT))) return 'wakeword'; }
-    else if (text.includes(wakeword)) return 'wakeword';
+    if (matchesWakeword(checkWakeword(wakeword, config.wakewordMinLength), text)) return 'wakeword';
   }
   return null;
 }

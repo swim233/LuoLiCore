@@ -278,6 +278,12 @@ mode='docker' ∧ 本进程在容器内 ∧ 未配 hostWorkspaceDir → ✗ 拒�
 
 > **这是 D10 的精确落地**：沙箱可开关；owner 直跑；非 owner 在无沙箱时**工具消失而非降级**。
 
+**`host` 不是「弱一点的 jail」，是「不进沙箱」。** `run()` 必须按 `plan.mode` 三分支，
+`host` 一支只有 `cwd` + env 白名单，**不套 §5.4 的 ulimit 前缀**。曾经这里只分
+「docker / 非 docker」两支，于是 bypassRoles 命中的 owner 也吃了 jail 的 `ulimit -u`，
+私聊里每条 `bash` 都回 `fork: 资源暂时不可用`（见下方 `-u` 的坑），看起来像沙箱坏了，
+实际上 owner 压根不该进沙箱。
+
 ### 5.3 Docker 执行细节
 
 ```bash
@@ -315,6 +321,18 @@ docker run --rm \
 - `spawn(cmd, { cwd: workspace, shell: '/bin/sh', detached: true })`，超时 `process.kill(-pid, 'SIGKILL')` 杀整个进程组。
 - `env` 只透传白名单：`PATH LANG HOME TZ`，且 `HOME=workspace`；**移除**所有 `*_TOKEN` `*_KEY` `*_SECRET` `LUOLI_*` `BOT_TOKEN`。
 - `ulimit -v`（虚拟内存）、`-t`（CPU 秒）、`-f`（文件大小）、`-u`（进程数）通过包一层 `sh -c 'ulimit ...; exec ...'` 设置。
+  **只有 `mode='jail'` 套这一层**；`role ∈ bypassRoles` 走的 `host` 一支不套（见 §5.2）。
+- **`-u` 不能直接取 `pidsLimit`。** 它对应 RLIMIT_NPROC，内核按 **UID 全局的任务数**计数——数的是
+  **线程**不是进程，也不是当前进程树。宿主上一个桌面会话轻松四千多个线程，设成 128 的后果是子 shell
+  连一次 fork 都做不成：bash 打五行 `fork: retry: Resource temporarily unavailable`，重试约 15 秒后以
+  254 退出。所以按「当前 `/proc` 里该 UID 的任务数 + `pidsLimit`」设：fork 炸弹最多再撑 `pidsLimit` 个，
+  正常命令照跑。读不到 `/proc`（非 Linux）时**不设这一条**，而不是退回一个注定 fork 失败的值。
+- **jail 模式下 `pidsLimit` 不要设得很小。** 基线是 spawn 前采样一次的，采样到 fork 之间系统自己的
+  线程数也在动，可用余量就是 `pidsLimit` 本身：设 128（默认）很稳，设 8 则机器一忙就退化成上面那种
+  必然 fork 失败。要真正精确的进程数上限用 `mode='docker'` 的 `--pids-limit`，那是 cgroup 记账、
+  只算容器内的进程。
+  > 这条坑在测试里很难自己冒出来：`ulimit -u 1; /bin/echo hi` 是**通过**的——脚本最后一条命令被
+  > bash 直接 `exec` 掉，根本没 fork。要复现必须让它真的 fork（管道、后台任务、非末条命令）。
 - 明确记录在文档与 WebUI：**jail 不是安全边界**，仅适合「只有你自己和完全可信的人用」的部署。
 
 ---

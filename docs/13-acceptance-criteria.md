@@ -99,6 +99,7 @@
 | [ ] AC-TG-011 | bot 被拉进新群 | `principals` 新增 blocked 行；owner 收到私聊通知带授权按钮；点击后角色更新 |
 | [ ] AC-TG-012 (自动) | 给某群写 `perChat.<key>.trigger.wakewords`，在该群发会话唤醒词与全局唤醒词 | 会话唤醒词 `trigger_reason='wakeword'`；全局唤醒词在该群不再触发（会话级覆盖整体替换全局） |
 | [ ] AC-TG-013 | 配置里放入过短或含回溯风险结构的唤醒词 | 匹配时整条跳过（不求值、无 ReDoS）；启动日志出现 `config.invalid` 告警列出被跳过的模式；写入端拒绝并说明原因 |
+| [ ] AC-TG-014 (自动) | 配唤醒词 `nori`，群里分别发 `nori`、`Nori`、`NORI`；再配 `^nori` 发 `Nori` | 前三条都触发（包含型忽略大小写）；`^nori` 不触发（正则按作者写的大小写求值），`^(?i)nori` 与 `(?i)^nori` 都触发且都判成「正则」 |
 | [ ] AC-TG-014 (自动) | `output.replyDelayMs=2000`，发一条能秒答的消息 | 第一条回复不早于用户消息后 2s；窗口内产出的文本不丢失，随首条一起发出；期间持续 `typing`；模型本身耗时已超过 2s 时不再额外延迟 |
 | [ ] AC-TG-015 (自动) | `HANDLED_COMMANDS` / `bot.command(...)` 注册集合 / `/help` 命令表 | 三者一一对应（CI 断言）；`/start` `/help` `/whois` 有回应，不再静默（docs/20 · W-TG-01） |
 | [ ] AC-TG-016 (自动) | 私聊发「/home/app 这个目录满了」 | 照常触发对话；而 `/new` 在私聊仍判成 `command`（重置上下文且不开轮次） |
@@ -190,7 +191,7 @@
 | [ ] AC-TOOL-016 (自动) | 工具输入不符合 schema | 返回结构化错误 + 期望 schema 摘要；模型可自我修正 |
 | [ ] AC-TOOL-017 (自动) ★ | 模型尝试在工具输入里传 `chatId`/`role` | schema 中不存在这些字段 → 校验失败；实际作用域由 `TurnCtx` 注入 |
 | [ ] AC-TOOL-018 (自动) | `tools.maxCallsPerTurn=5`，模型试图调 10 次 | 第 6 次起被拒并告知模型 |
-| [ ] AC-TOOL-019 | `web_fetch` 返回内容 | 被 `<untrusted-content source="web:…">` 包裹 |
+| [ ] AC-TOOL-019 | `web_fetch` 抓一个**放行**的公网页面 | 真的取回正文（不是异常）并被 `<untrusted-content source="web:…">` 包裹。放行路径必须被断言：只测 SSRF 拒绝路径的话，钉死 DNS 的 lookup 回调不认 `{all:true}` 这类 bug 会让 `web_fetch` 全线失败而测试全绿 |
 | [ ] AC-TOOL-020 (自动) | 注册工具数超 `maxRegistered` | 按优先级截断（内建>agent>plugin>skill>MCP），RUNTIME 块告知，有 warn 日志 |
 | [ ] AC-TOOL-021 (自动) | `search_messages` 依次传 `名字\|我是\|叫\|谁`、`NEAR(a b)`、`"unclosed`、`***` | 一律正常返回（命中或空），不出现 `fts5: syntax error`；≥3 字的词走 FTS，两字中文词退回 LIKE 且用最长的词而非原串 |
 | [ ] AC-TOOL-022 (自动) | 直接调用 `execute()` 绕过目录：子 agent 调 `memory_write`、或调一个 `available()` 返回 false 的工具 | 一律 `ok:false` 拒绝；`execute()` 的复查集合与 `active()` 的过滤集合一致（docs/20 · W-TOOL-01） |
@@ -198,7 +199,7 @@
 | [ ] AC-TOOL-024 (自动) ★ | 依赖齐全时取 owner 的 `activeNames()` | 等于 `TOOL_POLICY` 全集减去子 agent 专用的 `ask_parent`/`report_progress`。**AC-TOOL-001b 只看「注册没注册」**，而 `send_message`/`send_photo`/`send_file`/`react`/`pin_message` 曾经注册着、启动断言全过、却因为 `main.ts` 没传 `telegram` 依赖而永远不进模型的工具目录 —— 模型答「我没有这个功能」是对的。断言必须落在可见性上 |
 | [ ] AC-TOOL-025 (自动) | `react` 不传 messageId；传 `❤️`；传 `🍕`；`send_file` 传 `../../etc/passwd` / 超 `maxFileSendMb` 的文件；一轮内第 4 次 `send_message` | 依次：点触发消息；归一化成 Telegram 认的 `❤` 后发出；`unsupported_emoji` 且**不调用 API**、返回可选集合；`path_outside_workspace`；`file_too_large`；`extra_message_limit_exceeded`。发出去的消息回写归档（`direction='out'`、带 `turn_id`），否则模型自己追发的内容下一轮就从上下文里消失 |
 | [ ] AC-SBX-001 (自动) ★ | `mode=none`，`trusted` 请求 `bash` | 工具**不存在**（fail-closed），不是「执行后被拒」 |
-| [ ] AC-SBX-002 (自动) ★ | `mode=none`，`owner` 请求 `bash` | 可执行（bypassRoles），cwd = workspace |
+| [ ] AC-SBX-002 (自动) ★ | `mode=none`，`owner` 请求 `bash` | 可执行（bypassRoles），cwd = workspace，且**不套 jail 的 ulimit 前缀**——命令真的 fork（管道、后台任务）时不出现 `fork: 资源暂时不可用` |
 | [ ] AC-SBX-003 (自动) ★ | `mode=docker`，`trusted` 执行 `bash` | 容器内执行；`--network=none`；`/workspace` 可写；宿主 `/etc` 不可见 |
 | [ ] AC-SBX-004 (自动) | 容器内 `curl https://example.com` | 失败（无网络） |
 | [ ] AC-SBX-005 (自动) | 容器内 `dd if=/dev/zero of=/x bs=1M count=1000` | 因 `--read-only` 或 tmpfs 限额失败，不影响宿主 |
@@ -449,7 +450,7 @@
 |---|---|---|---|---|---|
 | 配置与 DB | | / 24 | | | |
 | **上下文引擎** | | / 34 | | | |
-| Telegram 与准入 | | / 38 | | | |
+| Telegram 与准入 | | / 39 | | | |
 | Agent 与 Provider | | / 37 | | | |
 | 工具/沙箱/审批 | | / 51 | | | |
 | Subagent 与任务 | | / 22 | | | |
@@ -459,6 +460,6 @@
 | WebUI | | / 72 | | | |
 | 安全 | | / 15 | | | |
 | 运维 | | / 9 | | | |
-| **合计** | | **/ 365** | | | |
+| **合计** | | **/ 366** | | | |
 
 **整体通过条件**：全部 ★ 项通过 + 非 ★ 项通过率 ≥ 95% + 所有豁免项经需求方书面确认。

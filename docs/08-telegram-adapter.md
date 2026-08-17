@@ -134,7 +134,7 @@ trigger:
   mention: true
   reply: true
   command: true
-  wakewords: ['洛璃', '^小助手[，,、 ]']     # 字符串按「包含」匹配；以 ^ 开头则视为正则
+  wakewords: ['洛璃', '^小助手[，,、 ]']     # 字符串按「包含」匹配（忽略大小写）；以 ^ 开头则视为正则
   wakewordMinLength: 2
   requireTextAfterMention: false   # true 时「只 @ 不说话」不触发
   ignoreEditedAsTrigger: true      # 编辑消息不作为新触发
@@ -146,6 +146,11 @@ trigger:
   （嵌套量词、反向引用、lookahead/lookbehind）的模式**整条跳过且不求值**（ReDoS 防线），正则只扫描消息前 4096 字符。
   跳过是静默的，所以启动时会以 `config.invalid` 告警列出这些模式，写入端（`PUT /api/config`、
   `PATCH /api/chats/:key`）直接返回 400 并说明原因——收下一个永远匹配不上的模式等于让运维以为配好了。
+- **包含型唤醒词忽略大小写**（`matchesWakeword`，与 `checkWakeword` 同文件）：`nori` 同时匹配
+  `Nori` / `NORI`。手机输入法会把句首自动大写，大小写敏感的话唤醒词就成了「只在特定拼写下生效」的
+  暗规则，用户侧只表现为 bot 时灵时不灵。**正则型不改**：按作者写的大小写求值，要忽略大小写就写
+  `^(?i)nori`（RE2 支持内联标志）——不替作者改语义，也保住「我就是要区分大小写」这个表达能力。
+  判成正则的前缀有两种：`^` 与 `(?i)` 这类内联标志组，两种拼法都认（`(?:` 不会被误判）。
 - **频道消息**（`chat.type='channel'`）：默认不参与（`trigger.channels=false`）。
 - 匿名管理员发言（`sender_chat` 存在，`from` 为群本身）：`from_user_id` 记为 `chat:<id>`，角色取该 chat 的角色，`from_name` = 群名 + `(匿名管理员)`。
 - **反循环**：`from.is_bot === true` 一律不触发（即使 @了我们），除非 `telegram.allowBots` 里显式列出该 bot 的 username。
