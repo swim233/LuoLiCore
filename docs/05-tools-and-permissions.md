@@ -165,8 +165,8 @@ bash: tool({
 
 | 工具 | minRole | 说明 |
 |---|---|---|
-| `web_fetch` | limited | `{url, prompt?}`；SSRF 防护：解析后拒绝 私有网段/回环/link-local/元数据地址（169.254.169.254）；只允许 http/https；跟随重定向 ≤3 次且每跳重新校验；响应上限 2MB → 转 markdown → 可选交给 `low` 模型按 prompt 摘要 |
-| `web_search` | limited | 需配置搜索 provider（Brave/Serper/Tavily 之一）；未配置则不注册该工具 |
+| `web_fetch` | limited | `{url, prompt?}`；SSRF 防护：解析后拒绝 私有网段/回环/link-local/元数据地址（169.254.169.254）；只允许 http/https；跟随重定向 ≤3 次且每跳重新校验；响应上限 2MB → 转 markdown → 可选交给 `low` 模型按 prompt 摘要。单次尝试 `tools.web.timeoutMs`（含 DNS 与全部跳），瞬时失败按 `tools.web.retries` 重试，见 §8.1 |
+| `web_search` | limited | 需配置搜索 provider（Brave/Serper/Tavily 之一）；未配置则不注册该工具。超时与重试同 `web_fetch` |
 
 `network.allowlist` / `network.denylist`（域名 glob）在 WebUI 可配；`limited` 角色默认只允许 `allowlist`（若 allowlist 为空则 `web_fetch` 对 limited 不注册）。
 
@@ -440,3 +440,27 @@ approval:
 ```
 
 第 3 步是关键安全设计：**工具的 `inputSchema` 里没有 `chatId`、`userId`、`role`、`root` 这类字段**，它们从 `TurnCtx` 注入，模型无从伪造。
+
+### 8.1 超时、重试与连续失败
+
+一次工具调用是整轮对话同步等着的一步：**它挂住，这一轮就挂住**。唯一的兜底是
+`concurrency.turnTimeoutMs`（默认 10 分钟），而那个兜底对用户来说就是「bot 收了消息然后再也不说话」，
+日志里连一行都没有（span 只在结束时写）。所以三条边界都必须落在工具层：
+
+- **单次调用超时**：`tools.defaultTimeoutMs`（默认 60s）。到点返回 `{ok:false, error:'tool_timeout', hint}`，
+  本轮继续。放弃等待**不等于取消执行** —— 任意工具（插件、MCP、上传）都没法真正取消，被丢下的那次
+  调用照旧跑完，它晚到的拒绝必须已经被接住，否则一次工具超时就是一个 unhandledRejection。
+  AI SDK 的 `timeout.toolMs` 不能替代这一条：它只是把一个 `AbortSignal` 递给 `execute()`，
+  工具不认那个信号就等于没有超时。
+- **自己管超时的工具**（注册时写 `timeoutMs`）：`bash` / `python` 按 `tools.exec.maxTimeoutMs`（300s）
+  kill 进程；`spawn_agent` 的边界是子 agent 的 `maxSteps` 与配额；`send_photo` / `send_file` 的耗时跟
+  文件大小走（`tools.tg.maxFileSendMb`）；`web_fetch` / `web_search` 自带下面那份预算。拿 60s 去卡它们
+  只会把正常的长任务砍成 `tool_timeout`，而后台那件事还在继续。
+- **瞬时失败重试**：只有 `web_fetch` / `web_search` 开（`tools.web.retries`，默认 2 次，退避带真随机抖动，
+  认 `Retry-After`）。判据是**幂等**：写类工具重试等于重复副作用。可重试的只有「这一次没打通」——
+  超时、TCP 重置、5xx、429、408/425；站点自己答的 4xx 是答案，SSRF / 端口 / 协议 / 重定向环是拒绝，
+  两类都一次都不重试。重试耗尽后交回 `{ok:false, error, attempts, hint}` 而**不是抛异常**：模型要看得见
+  「试了几次、卡在哪一步」才会换个 URL 或如实告诉用户，否则它通常把同一个地址原样再调一遍。
+- **连续失败**：同一工具连续失败 `tools.maxConsecutiveErrors` 次后在本轮停用，之后再调返回
+  `tool_disabled_after_errors` + hint（而不是含糊的 `tool_unavailable`，那会让模型继续原地重试到步数
+  耗尽），并留一条 `tool.disabled_after_errors` warn 日志。成功一次即清零 —— 门槛是**连续**失败，不是本轮失败总数。

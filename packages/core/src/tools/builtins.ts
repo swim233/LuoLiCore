@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { readFileSync, statSync } from 'node:fs';
 import type { AgentManager, Config, ContextEngine, FileTools, MemoryStore, ModelRegistry, QuotaGuard, QuotaReservation, Sandbox, SkillLoader, ToolRegistry, UsageLedger, LogSink } from '@luoli/core';
-import { builtinPolicy, runSubAgent, webFetch, webSearch } from '@luoli/core';
+import { DEFAULT_WEB_RETRY, builtinPolicy, runSubAgent, webFetch, webSearch, type WebRetryOptions } from '@luoli/core';
 import type { ArchiveRepository } from '@luoli/db';
 import type { ToolExecutionContext } from './registry.js';
 
@@ -29,6 +29,13 @@ export interface TelegramToolBridge {
   react(target: TelegramTarget, messageId: number, emoji: string): Promise<object>;
   pin(target: TelegramTarget, messageId: number): Promise<object>;
 }
+
+/**
+ * 上传的耗时跟文件大小走（`tools.tg.maxFileSendMb` 默认 50MB），拿 `tools.defaultTimeoutMs`
+ * 的 60s 去卡它等于把正常的大文件上传砍成 `tool_timeout`。给一个够宽但仍然有限的预算 ——
+ * 「没有上限」在这条链上就是卡死一整轮。
+ */
+const UPLOAD_TIMEOUT_MS = 300_000;
 
 const target = (context: ToolExecutionContext): TelegramTarget =>
   ({ chatId: context.turn.chatId, threadId: context.turn.threadId, turnId: context.turn.turnId });
@@ -59,7 +66,11 @@ function resolveOutgoingFile(context: ToolExecutionContext, files: FileTools, pa
   return { ok: true, absolute };
 }
 
-export function registerBuiltins(registry: ToolRegistry, dependencies: { db: import('@luoli/db').Sqlite; filesFor: (workspace: string) => FileTools; sandbox: Sandbox; archive: ArchiveRepository; context: ContextEngine; memory: MemoryStore; skills: SkillLoader; agents: AgentManager; models: ModelRegistry; ledger: UsageLedger; log: LogSink; quota?: QuotaGuard; telegram: TelegramToolBridge | null; maxWebBytes: number; maxAsksPerRun?: number; askTimeoutMs?: number; webSearch?: { provider: '' | 'brave' | 'serper' | 'tavily'; apiKey: string } }): void {
+export function registerBuiltins(registry: ToolRegistry, dependencies: { db: import('@luoli/db').Sqlite; filesFor: (workspace: string) => FileTools; sandbox: Sandbox; archive: ArchiveRepository; context: ContextEngine; memory: MemoryStore; skills: SkillLoader; agents: AgentManager; models: ModelRegistry; ledger: UsageLedger; log: LogSink; quota?: QuotaGuard; telegram: TelegramToolBridge | null; maxWebBytes: number; maxAsksPerRun?: number; askTimeoutMs?: number; web?: WebRetryOptions; webSearch?: { provider: '' | 'brave' | 'serper' | 'tavily'; apiKey: string } }): void {
+  const web = dependencies.web ?? DEFAULT_WEB_RETRY;
+  // 两个 web 工具自带预算（单次 timeoutMs × 最多 retries+1 次 + 退避），整体会比
+  // `tools.defaultTimeoutMs` 长。给注册表报一份自己的账，别让兜底那道 race 在重试走完前先砍掉。
+  const webBudgetMs = (web.retries + 1) * web.timeoutMs + 5000;
   registry.register({ name: 'read_file', description: '读取工作目录或 skill:// 资源，支持 offset/limit 分页。', inputSchema: z.object({ path: z.string(), offset: z.number().int().nonnegative().optional(), limit: z.number().int().positive().optional() }), policy: builtinPolicy('read_file'), sourcePriority: 100, untrustedOutput: true,
     execute: (input, context) => {
       if (!input.path.startsWith('skill://')) return dependencies.filesFor(context.workspace).read(input.path, input.offset, input.limit);
@@ -86,10 +97,13 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
   registry.register({ name: 'move_file', description: '移动工作目录文件，不覆盖目标。', inputSchema: z.object({ from: z.string(), to: z.string() }), policy: builtinPolicy('move_file'), sourcePriority: 100,
     approvalTargetExists: (input, context) => dependencies.filesFor(context.workspace).exists((input as { to: string }).to),
     execute: (input, context) => dependencies.filesFor(context.workspace).move(input.from, input.to) });
-  registry.register({ name: 'bash', description: '在工作目录执行命令；非 owner 必须使用可用沙箱。', inputSchema: z.object({ command: z.string(), timeoutMs: z.number().int().positive().optional(), description: z.string() }), policy: builtinPolicy('bash'), sourcePriority: 100,
+  // `timeoutMs: null` = 这个工具自己管超时。sandbox.run 会按 `tools.exec.maxTimeoutMs`（默认 300s）
+  // kill 进程，比 `tools.defaultTimeoutMs` 长得多；套上兜底那道 race 只会把正常的长命令砍成
+  // `tool_timeout`，而进程还在后台跑着。
+  registry.register({ name: 'bash', description: '在工作目录执行命令；非 owner 必须使用可用沙箱。', inputSchema: z.object({ command: z.string(), timeoutMs: z.number().int().positive().optional(), description: z.string() }), policy: builtinPolicy('bash'), sourcePriority: 100, timeoutMs: null,
     available: (role, context) => dependencies.sandbox.plan(role, context.workspace).allowed,
     execute: async (input, context) => dependencies.sandbox.run(input.command, context.turn.effectiveRole, context.workspace, context.turn.abortSignal, input.timeoutMs, context.turn.turnId) });
-  registry.register({ name: 'python', description: '在工作目录执行 Python 代码；非 owner 必须使用可用沙箱。', inputSchema: z.object({ code: z.string(), timeoutMs: z.number().int().positive().optional(), description: z.string() }), policy: builtinPolicy('python'), sourcePriority: 100,
+  registry.register({ name: 'python', description: '在工作目录执行 Python 代码；非 owner 必须使用可用沙箱。', inputSchema: z.object({ code: z.string(), timeoutMs: z.number().int().positive().optional(), description: z.string() }), policy: builtinPolicy('python'), sourcePriority: 100, timeoutMs: null,
     available: (role, context) => dependencies.sandbox.plan(role, context.workspace).allowed,
     execute: async (input, context) => dependencies.sandbox.run(`python3 - <<'PY'\n${input.code}\nPY`, context.turn.effectiveRole, context.workspace, context.turn.abortSignal, input.timeoutMs, context.turn.turnId) });
   registry.register({ name: 'search_messages', description: '在当前会话内搜索聊天记录。', inputSchema: z.object({ query: z.string(), limit: z.number().int().min(1).max(100).default(20) }), policy: builtinPolicy('search_messages'), sourcePriority: 100, untrustedOutput: true,
@@ -130,7 +144,9 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
     execute: () => ({ ok: true, documents: dependencies.memory.list() }) });
   registry.register({ name: 'list_agents', description: '列出当前权限可派发的子 agent。', inputSchema: z.object({}), policy: builtinPolicy('list_agents'), sourcePriority: 90,
     execute: (_input, context) => ({ ok: true, agents: dependencies.agents.available(context.turn.effectiveRole).map(({ name, description }) => ({ name, description })) }) });
-  registry.register({ name: 'spawn_agent', description: '派发独立上下文子 agent；task 必须自包含。', inputSchema: z.object({ agent: z.string(), task: z.string().min(10), context: z.string().optional(), modelAlias: z.string().optional(), label: z.string().optional() }), policy: builtinPolicy('spawn_agent'), sourcePriority: 90,
+  // 子 agent 是完整的一条 agent 循环（自己的步数上限、自己的模型超时），墙钟按分钟算：兜底那道
+  // race 会在它跑到一半时返回 tool_timeout，而子 agent 还在继续花钱。它的边界是 quota 与 maxSteps。
+  registry.register({ name: 'spawn_agent', description: '派发独立上下文子 agent；task 必须自包含。', inputSchema: z.object({ agent: z.string(), task: z.string().min(10), context: z.string().optional(), modelAlias: z.string().optional(), label: z.string().optional() }), policy: builtinPolicy('spawn_agent'), sourcePriority: 90, timeoutMs: null,
     execute: async (input, context) => {
       const perTurn = (context.turn.config as Readonly<Config>).quota.perTurn;
       if (dependencies.ledger.turnCost(context.turn.turnId) >= perTurn.maxCostUsd) return { ok: false, error: 'turn_budget_exhausted' };
@@ -147,7 +163,8 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
         // 否则配额只看得见主 agent（docs/20 · W-QUOTA-01）。
         const live = context.turn.config as Readonly<Config>;
         const result = await runSubAgent(run, definition, input.task, input.context, context.turn, { db: dependencies.db, agents: dependencies.agents, registry: dependencies.models, tools: registry, ledger: dependencies.ledger, log: dependencies.log, workspace: context.workspace,
-          provider: { maxRetries: live.provider.maxRetries, retryBaseMs: live.provider.retryBaseMs, retryMaxMs: live.provider.retryMaxMs },
+          provider: { maxRetries: live.provider.maxRetries, retryBaseMs: live.provider.retryBaseMs, retryMaxMs: live.provider.retryMaxMs,
+            requestTimeoutMs: live.provider.requestTimeoutMs, streamIdleTimeoutMs: live.provider.streamIdleTimeoutMs },
           ...(dependencies.quota ? { quota: dependencies.quota } : {}), reservation: (context.turn.reservation as QuotaReservation | undefined) ?? null }, input.modelAlias);
         dependencies.db.prepare("UPDATE tasks SET state='done',result_summary=?,updated_at=?,finished_at=? WHERE id=?").run(result.summary, Date.now(), Date.now(), taskId);
         dependencies.log.publish('task.updated', { id: taskId, turnId: context.turn.turnId, title, state: 'done', progress: null });
@@ -184,11 +201,11 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
     } });
   registry.register({ name: 'set_model', description: '切换当前轮模型别名。', inputSchema: z.object({ alias: z.enum(['main', 'high', 'low', 'vision']) }), policy: builtinPolicy('set_model'), sourcePriority: 90,
     execute: (input, context) => { Object.assign(context.turn, { modelAliasOverride: input.alias }); return { ok: true, alias: input.alias }; } });
-  registry.register({ name: 'web_search', description: '搜索公开网络。', inputSchema: z.object({ query: z.string(), limit: z.number().int().min(1).max(10).default(5) }), policy: builtinPolicy('web_search'), sourcePriority: 100, untrustedOutput: true,
-    available: () => Boolean(dependencies.webSearch?.provider && dependencies.webSearch.apiKey), execute: (input, context) => webSearch(dependencies.webSearch!.provider as 'brave' | 'serper' | 'tavily', dependencies.webSearch!.apiKey, input.query, input.limit ?? 5, context.turn.abortSignal) });
+  registry.register({ name: 'web_search', description: '搜索公开网络；瞬时失败（超时/5xx/429）会自动重试。', inputSchema: z.object({ query: z.string(), limit: z.number().int().min(1).max(10).default(5) }), policy: builtinPolicy('web_search'), sourcePriority: 100, untrustedOutput: true, timeoutMs: webBudgetMs,
+    available: () => Boolean(dependencies.webSearch?.provider && dependencies.webSearch.apiKey), execute: (input, context) => webSearch(dependencies.webSearch!.provider as 'brave' | 'serper' | 'tavily', dependencies.webSearch!.apiKey, input.query, input.limit ?? 5, context.turn.abortSignal, web) });
   registry.register({ name: 'send_message', description: '向当前会话追发一条消息（正文请直接写进回复，这个工具用于分段或中间产物）。', inputSchema: z.object({ text: z.string().min(1) }), policy: builtinPolicy('send_message'), sourcePriority: 100,
     available: () => Boolean(dependencies.telegram), execute: async (input, context) => claimExtraMessage(context) ?? dependencies.telegram!.sendMessage(target(context), input.text) });
-  registry.register({ name: 'send_photo', description: '把工作目录内的图片发到当前会话。', inputSchema: z.object({ photo: z.string(), caption: z.string().optional() }), policy: builtinPolicy('send_photo'), sourcePriority: 100,
+  registry.register({ name: 'send_photo', description: '把工作目录内的图片发到当前会话。', inputSchema: z.object({ photo: z.string(), caption: z.string().optional() }), policy: builtinPolicy('send_photo'), sourcePriority: 100, timeoutMs: UPLOAD_TIMEOUT_MS,
     available: () => Boolean(dependencies.telegram), execute: async (input, context) => {
       const file = resolveOutgoingFile(context, dependencies.filesFor(context.workspace), input.photo);
       if (!file.ok) return file;
@@ -200,7 +217,7 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
       if (!messageId) return { ok: false, error: 'message_id_required', hint: '本轮没有触发消息，请先用 read_messages 取到 tgMessageId。' };
       return dependencies.telegram!.react(target(context), messageId, input.emoji);
     } });
-  registry.register({ name: 'send_file', description: '把工作目录内的文件作为文档发到当前会话。', inputSchema: z.object({ file: z.string(), caption: z.string().optional() }), policy: builtinPolicy('send_file'), sourcePriority: 100,
+  registry.register({ name: 'send_file', description: '把工作目录内的文件作为文档发到当前会话。', inputSchema: z.object({ file: z.string(), caption: z.string().optional() }), policy: builtinPolicy('send_file'), sourcePriority: 100, timeoutMs: UPLOAD_TIMEOUT_MS,
     available: () => Boolean(dependencies.telegram), execute: async (input, context) => {
       const file = resolveOutgoingFile(context, dependencies.filesFor(context.workspace), input.file);
       if (!file.ok) return file;
@@ -212,6 +229,6 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
       if (!messageId) return { ok: false, error: 'message_id_required', hint: '本轮没有触发消息，请先用 read_messages 取到 tgMessageId。' };
       return dependencies.telegram!.pin(target(context), messageId);
     } });
-  registry.register({ name: 'web_fetch', description: '获取公开 HTTP/HTTPS 页面；拒绝私网和元数据地址。', inputSchema: z.object({ url: z.string().url() }), policy: builtinPolicy('web_fetch'), sourcePriority: 100, untrustedOutput: true,
-    execute: (input, context) => webFetch(input.url, dependencies.maxWebBytes, context.turn.abortSignal) });
+  registry.register({ name: 'web_fetch', description: '获取公开 HTTP/HTTPS 页面；拒绝私网和元数据地址。瞬时失败（超时/5xx/429）会自动重试。', inputSchema: z.object({ url: z.string().url() }), policy: builtinPolicy('web_fetch'), sourcePriority: 100, untrustedOutput: true,
+    timeoutMs: webBudgetMs, execute: (input, context) => webFetch(input.url, dependencies.maxWebBytes, context.turn.abortSignal, web) });
 }

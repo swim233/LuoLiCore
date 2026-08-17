@@ -38,8 +38,25 @@ export function privateAddress(address: string): boolean {
   return normalized.startsWith('fc') || normalized.startsWith('fd') || /^fe[89ab]/.test(normalized);
 }
 
+/**
+ * `dns.lookup` 不认 AbortSignal（getaddrinfo 取消不了）。不在这里拦一道，解析不动的域名会把
+ * 预算全耗在 DNS 上 —— 对调用方来说和「连上之后不吐字」是同一种卡死。剩下那次查询自己跑完后
+ * 结果被丢掉即可。
+ */
+async function abortable<T>(work: Promise<T>, signal: AbortSignal | null | undefined): Promise<T> {
+  if (!signal) return await work;
+  const reason = (): Error => signal.reason instanceof Error ? signal.reason : new Error('aborted');
+  if (signal.aborted) throw reason();
+  let onAbort!: () => void;
+  // 监听器必须收回：不带 timeoutMs 的调用方传进来的往往是**整轮**那个信号，一次调用留一个
+  // 永不触发的监听器，一轮里几十次抓取就是几十个。
+  const aborted = new Promise<never>((_, reject) => { onAbort = (): void => reject(reason()); signal.addEventListener('abort', onAbort, { once: true }); });
+  try { return await Promise.race([work, aborted]); }
+  finally { signal.removeEventListener('abort', onAbort); }
+}
+
 interface SafeTarget { url: URL; address: string; family: 4 | 6 }
-async function safeTarget(raw: string, policy: OutboundPolicy): Promise<SafeTarget> {
+async function safeTarget(raw: string, policy: OutboundPolicy, signal?: AbortSignal | null): Promise<SafeTarget> {
   const url = new URL(raw);
   if (!['http:', 'https:'].includes(url.protocol)) throw new Error('unsupported_protocol');
   const port = url.port ? Number(url.port) : url.protocol === 'https:' ? 443 : 80;
@@ -49,7 +66,7 @@ async function safeTarget(raw: string, policy: OutboundPolicy): Promise<SafeTarg
     if (!policy.allowPrivate && privateAddress(hostname)) throw new Error('ssrf_blocked');
     return { url, address: hostname, family: isIP(hostname) as 4 | 6 };
   }
-  const addresses = await lookup(hostname, { all: true });
+  const addresses = await abortable(lookup(hostname, { all: true }), signal);
   if (!addresses.length || (!policy.allowPrivate && addresses.some((entry) => privateAddress(entry.address)))) throw new Error('ssrf_blocked');
   const selected = addresses[0]!;
   return { url, address: selected.address, family: selected.family as 4 | 6 };
@@ -64,7 +81,7 @@ export interface GuardedResponse {
   body: Buffer;
   truncated: boolean;
 }
-export interface OutboundPolicy { allowPrivate: boolean; allowedPorts?: ReadonlySet<number>; maxRedirects?: number; maxBytes?: number }
+export interface OutboundPolicy { allowPrivate: boolean; allowedPorts?: ReadonlySet<number>; maxRedirects?: number; maxBytes?: number; timeoutMs?: number }
 
 function requestOnce(target: SafeTarget, init: RequestInit, maxBytes: number): Promise<GuardedResponse> {
   const { promise, resolve, reject } = Promise.withResolvers<GuardedResponse>();
@@ -109,17 +126,25 @@ function requestOnce(target: SafeTarget, init: RequestInit, maxBytes: number): P
   return promise.finally(() => signal?.removeEventListener('abort', abort));
 }
 
+/**
+ * `timeoutMs` 覆盖整次抓取（DNS + 全部重定向跳），因为 `http.request` 默认**没有任何超时**：
+ * 目标主机不回 SYN、或者连上之后一个字节都不发时，这个 promise 永远不 settle。调用它的
+ * `web_fetch` 又是在一轮对话里同步等着的，唯一兜底是 10 分钟的 `concurrency.turnTimeoutMs`
+ * —— 用户看到的就是 bot 收了消息然后再也不说话（logs/2026-08-17 有多轮死在这一类等待上）。
+ */
 export async function guardedFetch(raw: string, init: RequestInit = {}, policy: OutboundPolicy): Promise<GuardedResponse> {
-  let target = await safeTarget(raw, policy);
+  const deadline = policy.timeoutMs ? AbortSignal.timeout(policy.timeoutMs) : null;
+  const signal = deadline ? (init.signal ? AbortSignal.any([init.signal, deadline]) : deadline) : init.signal;
+  let target = await safeTarget(raw, policy, signal);
   let headers = new Headers(init.headers);
   const maxRedirects = policy.maxRedirects ?? 3;
   for (let redirects = 0; redirects <= maxRedirects; redirects += 1) {
-    const response = await requestOnce(target, { ...init, headers }, policy.maxBytes ?? 2_097_152);
+    const response = await requestOnce(target, { ...init, headers, signal: signal ?? null }, policy.maxBytes ?? 2_097_152);
     if (!REDIRECT_STATUS.has(response.status)) return response;
     const locationValue = response.headers.location;
     const location = Array.isArray(locationValue) ? locationValue[0] : locationValue;
     if (!location || redirects === maxRedirects) throw new Error('too_many_redirects');
-    const next = await safeTarget(new URL(location, target.url).href, policy);
+    const next = await safeTarget(new URL(location, target.url).href, policy, signal);
     if (next.url.origin !== target.url.origin) headers = new Headers([...headers].filter(([key]) => !AUTH_HEADER.test(key)));
     target = next;
   }

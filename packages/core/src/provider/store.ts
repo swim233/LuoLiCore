@@ -70,3 +70,12 @@ export function retryDelay(attempt: number, retryAfterMs: number | null, baseMs:
   const jitter = randomInt(0, 10_000) / 10_000;
   return Math.min(baseMs * 2 ** attempt * (0.8 + jitter * 0.4), maxMs);
 }
+
+/** 退避必须可中断：轮次被取消或整轮超时之后还躺在 setTimeout 里，等于替一个没人等的轮次占着槽位。 */
+export async function abortablePause(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('aborted');
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener('abort', () => { clearTimeout(timer); reject(signal.reason instanceof Error ? signal.reason : new Error('aborted')); }, { once: true });
+  });
+}

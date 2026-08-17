@@ -425,7 +425,11 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
       const settled = dependencies.turns.finish(turn.turnId, cancelled ? { state: 'cancelled', cancelReason: String(turn.abortSignal.reason ?? 'cancelled') } : { state: 'failed', error: error instanceof Error ? error.message : String(error) });
       dependencies.log.event({ level: cancelled ? 'warn' : 'error', kind: 'turn.end', summary: cancelled ? 'turn cancelled' : error instanceof Error ? error.message : 'turn failed', traceId: turn.turnId, chatId, userId, key });
       dependencies.log.publish('turn.finished', { turnId: turn.turnId, key, chatId, state: cancelled ? 'cancelled' : 'failed', steps: settled?.steps ?? 0, toolCalls: settled?.toolCalls ?? 0, costUsd: settled?.costUsd ?? 0, rebased: false, durationMs: settled?.durationMs ?? 0 });
-      await ctx.reply(cancelled ? '⛔ 已取消' : failureText(error, turn.turnId.slice(0, 12)));
+      // 轮次超时和用户主动取消都走 abort，但对用户是两回事：没点过取消的人收到「已取消」
+      // 只会以为自己误触了，而真实情况是这一轮卡在某处直到 `concurrency.turnTimeoutMs`。
+      await ctx.reply(cancelled
+        ? turn.abortSignal.reason === 'timeout' ? `这一轮太久没有进展，已经停下了。(ref: ${turn.turnId.slice(0, 12)})` : '⛔ 已取消'
+        : failureText(error, turn.turnId.slice(0, 12)));
     } finally {
       dependencies.tools?.releaseTurn(turn.turnId);
       dependencies.approvals?.releaseTurn(turn.turnId);

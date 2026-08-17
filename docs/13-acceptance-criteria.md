@@ -158,6 +158,9 @@
 | [ ] AC-PROV-018 (自动) | 断网后再拉取模型 / 缓存文件被写坏 / `provider.catalog.enabled=false` | 有旧缓存时降级用旧的并标「已过期」，不让整个拉取失败；缓存坏了下次直接重拉；关掉时既不出网也不返回元数据（界面明说只剩上游 `/models` 那点信息） |
 | [ ] AC-PROV-019 (自动) ★ | 分别用「provider 在 models.dev 里有条目」（如 openrouter）、「自建中转网关 + 裸模型 id」、「厂商已下架的旧型号」三种情况拉取模型 | 依次得到 `provider` 自报价 / 厂商 `official` 官方价 / `third-party`（**价格留空** + 第三方报价区间）；`match` 与匹配到的目录 key 逐行可见。同名模型在不同网关价差可达数倍，猜一个价等于让配额按与账单无关的数字算 |
 | [ ] AC-PROV-020 (自动) | 导入模型后再点 `[补齐元数据]`，然后手工改一次价格 | 导入时能力块与价格出处由**服务端**重新解析后落 `capabilities_json`；补齐只填空着的价、不覆盖已填的，窗口不动（除非 `overwrite`）；手改价格后 `catalog.priceSource` 变成 `manual`，界面不再显示官方价徽标 |
+| [ ] AC-PROV-021 (自动) ★ | 让链首「连上之后永不返回」（既不 resolve 也不认 abortSignal），链上还有第二个候选 | 每次尝试在 `provider.requestTimeoutMs` 到点后中止并计一次可重试失败，链内重试/fallback 照常走，最终由第二个候选出结果。**不能只 abort 就接着等**：provider 实现不认 signal 时那个 promise 永远不 settle，表现就是「工具调完之后 bot 再也不说话」，而日志里一行都没有（`logs/2026-08-17` 有 7 轮死在这里） |
+| [ ] AC-PROV-022 (自动) ★ | 上游把流建立起来后一个 token 都不发；另一路让流正常连续吐字 | 前者在 `provider.streamIdleTimeoutMs` 到点后让这条流报错（`stream_idle_timeout_*`）、abort 底层请求、经 `onExhausted` 记一条 `model.error`，轮次以真实原因记 failed；后者原样透传每个 chunk。空闲计时**只覆盖「在等下一个 chunk」**，本轮正在执行工具不算 |
+| [ ] AC-PROV-023 | 用户在重试退避中途 `/cancel`；另一路让轮次撞上 `concurrency.turnTimeoutMs` | 前者不再发起下一次尝试、不切换候选，抛出原始错误（自动断言这一半）；后者给用户的话不能是「⛔ 已取消」——他没点过取消，真实情况是这一轮卡住了 |
 | [ ] AC-PROMPT-001 (自动) ★ | 组装私聊系统提示词 | block 顺序为 KERNEL→CHARACTER→ASSIST→CATALOG→PUBMEMORY→PRIMEMORY→RUNTIME |
 | [ ] AC-PROMPT-002 (自动) ★ | 组装群聊系统提示词 | **不含** PRIMEMORY；断言其内容字符串不出现在结果中 |
 | [ ] AC-PROMPT-003 (自动) | RUNTIME 块的工具列表 | 与本 step 的 `activeTools` 完全一致（无多、无少） |
@@ -219,6 +222,9 @@
 | [ ] AC-APV-005 | WebUI 审批队列批准 | 与 Telegram 路径等效；`decision_channel='webui'` |
 | [ ] AC-APV-006 (自动) ★ | 子 agent 内调用 `delete_file` | 同样触发审批（不依赖 AI SDK 的 toolApproval），批准后才执行 |
 | [ ] AC-APV-007 (自动) | `skipForOwner=true`，owner 执行 `delete_file` | 直接执行，日志记 `auto_approved` |
+| [ ] AC-TOOL-026 (自动) ★ | 注册一个永不 resolve 的工具并调用它 | 在 `tools.defaultTimeoutMs` 到点后返回 `{ok:false, error:'tool_timeout', hint}`，本轮继续往下走；被丢下的那次调用之后无论 resolve 还是 reject 都不能变成 unhandledRejection（一次工具超时打崩进程）。`bash`/`python`/`spawn_agent`/`send_file` 与两个 web 工具自己管超时，不受这一项约束（[05 §8.1](./05-tools-and-permissions.md#81-超时重试与连续失败)） |
+| [ ] AC-TOOL-027 (自动) ★ | `web_fetch` 目标：①连上之后永不响应 ②连续 503 后转 200 ③404 ④`ssrf_blocked` | 依次：单次尝试在 `tools.web.timeoutMs` 到点后失败、按 `tools.web.retries` 重试、耗尽后交回 `{ok:false, error:'web_timeout', attempts, hint}`；②重试后成功并带 `attempts`；③④**一次都不重试**（站点自己答的 4xx 是答案，拒绝是拒绝）。全程有界，不能靠 `turnTimeoutMs` 兜底。自动化分三处落：单次超时用本机「连上不答」的服务器打 `guardedFetch`，重试与耗尽形状用注入尝试函数打 `withWebRetries`，拒绝分类用 SSRF 目标打 `webFetch` —— `webFetch` 自己不许打私网，所以这三处合起来才是整条路径 |
+| [ ] AC-TOOL-028 (自动) | 同一工具连续失败到 `maxConsecutiveErrors`，之后再调一次；中间夹一次成功再失败 | 停用后返回 `tool_disabled_after_errors` + hint（不是含糊的 `tool_unavailable`，那会让模型原地重试到步数耗尽），并有一条 `tool.disabled_after_errors` warn；成功一次即清零 —— 门槛是**连续**失败，不是本轮失败总数 |
 | [ ] AC-APV-008 (自动) ★ | trusted 用户触发一个需审批的工具，然后无人裁决直到 `ttlMs` 到期 | 调用**挂起等待**而不是当场伪拒绝：先写一行 `state=pending` 并广播 `approval.pending`；到期后原子改成 `state=expired, decided_by=system`，工具返回 `ok:false, error:'未获批准'` 且 hint 说的是「审批已超时」而不是「管理员已拒绝」。轮次在等待中被取消时落 `state=denied, decided_by=system` 并给「轮次已取消」的 hint —— 三条路径都 fail-closed，工具一次都不执行（docs/21 · G-API-12） |
 | [ ] AC-APV-010 (自动) ★ | 命中规则后 owner 在 WebUI 点 `[批准执行]` | `decide` 用 `UPDATE … WHERE state='pending' AND expires_at>?` 抢裁决权，只有真改到一行才唤醒等待者；**批准之后原工具调用才继续执行**，落 `state=approved, decided_by=owner, decision_channel=webui`。对已裁决/已过期的行重复裁决返回 `changed:false`，不重复唤醒 |
 | [ ] AC-APV-011 (自动) | `rememberWithinTurn=true` 时同轮重试一个刚过期的调用 | 复用上次结论不再挂第二个 `ttlMs`，但 hint 仍是「审批已超时」—— 只记布尔会让模型把超时说成「管理员已拒绝」 |
@@ -451,8 +457,8 @@
 | 配置与 DB | | / 24 | | | |
 | **上下文引擎** | | / 34 | | | |
 | Telegram 与准入 | | / 39 | | | |
-| Agent 与 Provider | | / 37 | | | |
-| 工具/沙箱/审批 | | / 51 | | | |
+| Agent 与 Provider | | / 40 | | | |
+| 工具/沙箱/审批 | | / 54 | | | |
 | Subagent 与任务 | | / 22 | | | |
 | 记忆 | | / 13 | | | |
 | 日志与成本 | | / 23 | | | |
@@ -460,6 +466,6 @@
 | WebUI | | / 72 | | | |
 | 安全 | | / 15 | | | |
 | 运维 | | / 9 | | | |
-| **合计** | | **/ 366** | | | |
+| **合计** | | **/ 372** | | | |
 
 **整体通过条件**：全部 ★ 项通过 + 非 ★ 项通过率 ≥ 95% + 所有豁免项经需求方书面确认。

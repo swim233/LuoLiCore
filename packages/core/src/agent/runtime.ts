@@ -354,6 +354,7 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
     const built = aliasModel(dependencies.registry, aliasName, {
       maxRetries: dependencies.config.provider.maxRetries, retryBaseMs: dependencies.config.provider.retryBaseMs,
       retryMaxMs: dependencies.config.provider.retryMaxMs, abortSignal: turn.abortSignal,
+      requestTimeoutMs: dependencies.config.provider.requestTimeoutMs, streamIdleTimeoutMs: dependencies.config.provider.streamIdleTimeoutMs,
       onServed: (served) => { servedModelId = served.id; },
       onFallback: (from, to) => dependencies.log.event({ level: 'warn', kind: 'provider.fallback', summary: `${from.id} → ${to.id}`, traceId: turn.turnId, data: { alias: aliasName, from: from.id, to: to.id } }),
       onUnavailable: (candidate, error) => {
@@ -374,6 +375,11 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
   const stepSpans = new Map<number, { id: string; end: (data?: unknown, error?: unknown) => void }>();
   const stepAlias = new Map<number, string>();
   const agent = new ToolLoopAgent({ model, instructions, tools: toolSet, activeTools: activeNames,
+    // 重试与 fallback 归 `fallbackLanguageModel` 管（它认 Retry-After、带真随机抖动、401 短路、
+    // 链内换模型）。SDK 默认还会自己再重试 2 次，两层相乘 = 同一次故障要熬 3×(候选数×尝试数) 次
+    // 上游超时才收场 —— logs/2026-08-17 那几轮卡死就是这么来的：fallback→model.error 的 62 秒
+    // 节拍整整走了两遍，第三遍还在等的时候用户已经去重启进程了。
+    maxRetries: 0,
     stopWhen: stepCountIs(Math.min(dependencies.config.agent.main.maxSteps, dependencies.config.quota.perTurn.maxSteps)),
     include: { requestMessages: true, requestBody: true, responseBody: true },
     prepareStep: async ({ stepNumber, messages }) => {

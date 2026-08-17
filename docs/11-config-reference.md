@@ -70,7 +70,7 @@ NODE_ENV=production
 - 🚧 general / Telegram / trigger：`general.name`（运行时未接线） · `general.locale` · `telegram.dropPendingOnStart` · `telegram.webhook.url` · `telegram.webhook.path` · `telegram.webhook.secretToken` · `telegram.notifyEdits` · `trigger.cooldownMsPerUser` · `trigger.ignoreEditedAsTrigger`（编辑消息一律按背景消息归档，不开新轮次）
 - 🚧 context / concurrency / cancel：`context.background.showTime` · `context.background.includeNonText` · `context.rebase.markMeta` · `context.cacheCommits` · `concurrency.coalesceSameUserMs` · `cancel.commitPartial`
 - 🚧 prompt / memory：`prompt.includeToolCatalog` · `prompt.runtimeBlock.showQuota` · `prompt.runtimeBlock.showContextWatermark` · `prompt.runtimeBlock.showWorkspace` · `memory.pubWriteRequiresApproval` · `memory.autoApplyCompaction` · `memory.requireSourceTag`
-- 🚧 agent / provider：`agent.maxConcurrentSubagents` · `agent.askArbiter` · `agent.askEscalateToUser` · `agent.progressThrottleMs` · `provider.healthDownCooldownMinutes` · `provider.requestTimeoutMs` · `provider.streamIdleTimeoutMs`
+- 🚧 agent / provider：`agent.maxConcurrentSubagents` · `agent.askArbiter` · `agent.askEscalateToUser` · `agent.progressThrottleMs` · `provider.healthDownCooldownMinutes`
 - 🚧 tools / approval：`tools.fs.allowHostFsForOwner` · `tools.archive.defaultSearchLimit` · `tools.archive.maxSearchLimit` · `tools.archive.defaultReadLimit` · `tools.archive.maxReadLimit` · `tools.web.summarizeWithAlias` · `tools.web.allowlist` · `tools.web.denylist` · `approval.allowInitiator`（WebUI 是单角色 owner，裁决权下放不到发起人）
 - 🚧 output / media：`output.flushOnSentence` · `output.parseMode` · `output.typingWhileWorking` · `output.placeholderAfterMs` · `output.maxMentions` · `media.maxImagesPerTurn` · `media.groupDebounceMs` · `media.stickerAsImage` · `media.downloadVoice` · `media.extract.codeExtensions`
 - 🚧 extensions / persistence / logs：`skills.enabled` · `plugins.enabled` · `plugins.watch` · `mcp.connectTimeoutMs` · `db.ftsTokenizer` · `logs.gzipAfterDays` · `logs.redactPatterns`
@@ -239,8 +239,12 @@ provider:
   retryMaxMs: 30000
   healthCheckCron: '*/10 * * * *' # 需重启
   healthDownCooldownMinutes: 30
-  requestTimeoutMs: 120000        # 热更新
-  streamIdleTimeoutMs: 60000      # 热更新 · 流式无数据超时
+  requestTimeoutMs: 120000        # 热更新 · 单次尝试「发出请求 → 拿到响应头」的上限。到点后只中止
+                                  #   这一次尝试（重试与别名 fallback 照常走），并且**不再等** ——
+                                  #   provider 实现不认 abort 时光中止是没用的（04 §5.3）
+  streamIdleTimeoutMs: 60000      # 热更新 · 流开着但不吐字的上限。整体超时管不了这种情况：连接是活的，
+                                  #   只是一个 token 都不来。只计「在等下一个 chunk」的时间，本轮正在
+                                  #   跑工具不算。中途断掉不重试（正文可能已经发出去一半）
   allowPrivateBaseUrl: false      # 热更新 · ★ 允许 provider 探测 / 模型目录打到私网地址与非常规端口。
                                   #   默认关：`POST /api/providers/:id/test` 收请求体里的 baseUrl，
                                   #   开着等于把管理端变成一个带鉴权的 SSRF 代理（22 · V-SSRF-01）。
@@ -256,8 +260,10 @@ provider:
 tools:
   maxRegistered: 80               # 热更新
   maxCallsPerTurn: 40             # 热更新
-  maxConsecutiveErrors: 3         # 热更新
-  defaultTimeoutMs: 60000
+  maxConsecutiveErrors: 3         # 热更新 · 同一工具连续失败到这个数就在本轮停用；之后再调返回
+                                  #   `tool_disabled_after_errors`（成功一次即清零，见 05 §8.1）
+  defaultTimeoutMs: 60000         # 热更新 · 单次工具调用的默认墙钟上限，到点返回 `tool_timeout` 给模型。
+                                  #   bash/python/spawn_agent 与两个 web 工具自己管超时，不受这一项约束
   fs:
     maxReadBytes: 262144
     maxWriteBytes: 5242880
@@ -289,6 +295,11 @@ tools:
     maxFileSendMb: 50             # 热更新 · send_file/send_photo 的单文件上限
   web:
     maxResponseBytes: 2097152
+    timeoutMs: 15000              # 需重启 · web_fetch / web_search 单次尝试的上限（含 DNS 与全部重定向跳）。
+                                  #   `http.request` 默认没有任何超时：黑洞地址会一直挂着，卡住的是整轮对话
+    retries: 2                    # 需重启 · 瞬时失败（超时 / 5xx / 429 / TCP 重置）的重试次数，退避带抖动。
+                                  #   耗尽后交回 `{ok:false, error, attempts, hint}`，由模型决定换 URL 还是
+                                  #   如实告诉用户；语义性拒绝（SSRF、端口、404）一次都不重试（05 §8.1）
     summarizeWithAlias: low       # 热更新 · web_fetch 的 prompt 摘要用哪个别名
     allowlist: []                 # 热更新 · 空则 limited 角色不可用 web_fetch
     denylist: ['*.local', '*.internal']

@@ -47,6 +47,55 @@ describe('model-level provider fallback', () => {
     expect(seen).toHaveLength(0);
   });
 
+  // 上游不设超时时这一步可以永远不返回，而 AI SDK 不管、fetch 默认也不管：唯一兜底是 10 分钟的
+  // turnTimeoutMs。日志里那 7 轮「只有 turn.start 没有 turn.end」的最后一条都停在这里
+  // （fallback → model.error 的 62 秒节拍走完两遍，第三遍再没回来）。
+  it('bounds a single attempt and keeps retrying the rest of the chain', async () => {
+    let stalledCalls = 0;
+    const wrapped = fallbackLanguageModel([
+      { id: 'stalled', model: model('stalled', () => new Promise(() => undefined)) },
+      { id: 'healthy', model: model('healthy', () => { stalledCalls += 1; return {}; }) },
+    ], { maxRetries: 1, retryBaseMs: 1, retryMaxMs: 1, requestTimeoutMs: 60 });
+    const started = Date.now();
+    await (wrapped as Exclude<LanguageModel, string>).doGenerate(params);
+    // 两次尝试 × 60ms 之后换第二个候选，而不是挂在第一个上面等到轮次超时。
+    expect(Date.now() - started).toBeLessThan(3000);
+    expect(stalledCalls).toBe(1);
+  });
+
+  it('reports a stream that connects and then never speaks, instead of hanging', async () => {
+    const seen: unknown[] = [];
+    const wrapped = fallbackLanguageModel([
+      { id: 'silent', model: model('silent', () => ({ stream: new ReadableStream({ start: () => undefined }) })) },
+    ], { maxRetries: 0, retryBaseMs: 1, retryMaxMs: 1, streamIdleTimeoutMs: 60, onExhausted: (error) => seen.push(error) });
+    const result = await (wrapped as Exclude<LanguageModel, string>).doStream(params);
+    await expect(result.stream.getReader().read()).rejects.toThrow('stream_idle_timeout_60ms');
+    expect((seen[0] as Error).message).toBe('stream_idle_timeout_60ms');
+  });
+
+  it('passes chunks through untouched while the provider keeps talking', async () => {
+    const parts = [{ type: 'text-delta', id: '1', delta: 'a' }, { type: 'text-delta', id: '1', delta: 'b' }];
+    const wrapped = fallbackLanguageModel([
+      { id: 'chatty', model: model('chatty', () => ({ stream: new ReadableStream({ start: (controller) => { for (const part of parts) controller.enqueue(part); controller.close(); } }) })) },
+    ], { maxRetries: 0, retryBaseMs: 1, retryMaxMs: 1, streamIdleTimeoutMs: 60 });
+    const result = await (wrapped as Exclude<LanguageModel, string>).doStream(params);
+    const seen: unknown[] = [];
+    for await (const part of result.stream as unknown as AsyncIterable<unknown>) seen.push(part);
+    expect(seen).toEqual(parts);
+  });
+
+  // 轮次被取消（/cancel、turnTimeoutMs）之后重试就是替一个没人等的轮次占着并发槽与配额。
+  it('does not retry or fall back once the caller aborted', async () => {
+    let calls = 0;
+    const controller = new AbortController();
+    const wrapped = fallbackLanguageModel([
+      { id: 'first', model: model('first', () => { calls += 1; controller.abort(new Error('cancelled')); throw Object.assign(new Error('busy'), { statusCode: 503 }); }) },
+      { id: 'second', model: model('second', () => { calls += 1; return {}; }) },
+    ], { maxRetries: 3, retryBaseMs: 1, retryMaxMs: 1 });
+    await expect((wrapped as Exclude<LanguageModel, string>).doGenerate({ ...params as object, abortSignal: controller.signal } as never)).rejects.toThrow('busy');
+    expect(calls).toBe(1);
+  });
+
   it('degrades invalid credentials without retrying or falling back', async () => {
     let invalidCalls = 0;
     let healthyCalls = 0;
