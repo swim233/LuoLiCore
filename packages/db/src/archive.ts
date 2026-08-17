@@ -56,6 +56,22 @@ export function archiveQuery(raw: string): { fts: string } | { like: string } {
   return { like: `%${longest ?? raw}%` };
 }
 
+/** `search_messages` 的过滤参数（docs/05 §3.2）。`from` 同时认 tg 用户 id 与 `@username`。 */
+export interface SearchFilters { from?: string | null; after?: number | null; before?: number | null; kind?: string | null }
+/**
+ * 过滤条件一律写成 `@x IS NULL OR …` 的常量 SQL，而不是按传了哪几个参数拼串：语句文本固定
+ * 才能吃到 better-sqlite3 的预编译缓存，而「没传的参数不出现在 SQL 里」还得在绑定侧同步剔掉
+ * ——漏一处就是一个运行时的 `missing named parameter`。这也是本文件 `recent()` 已有的写法。
+ */
+function filterClause(prefix: string): string {
+  return ` AND (@from IS NULL OR ${prefix}from_user_id = @from OR ${prefix}from_username = @from)
+    AND (@after IS NULL OR ${prefix}tg_date >= @after) AND (@before IS NULL OR ${prefix}tg_date <= @before)
+    AND (@kind IS NULL OR ${prefix}kind = @kind)`;
+}
+function filterParameters(filters: SearchFilters): Required<SearchFilters> {
+  return { from: filters.from?.replace(/^@/, '') ?? null, after: filters.after ?? null, before: filters.before ?? null, kind: filters.kind ?? null };
+}
+
 const MESSAGE_COLUMNS = `m.id,m.chat_id AS chatId,m.message_thread_id AS messageThreadId,m.tg_message_id AS tgMessageId,m.direction,
   m.from_kind AS fromKind,m.from_user_id AS fromUserId,m.from_name AS fromName,m.from_username AS fromUsername,m.kind,m.text,m.tg_date AS tgDate,
   m.triggered,m.trigger_reason AS triggerReason,m.turn_id AS turnId,m.reply_to_tg_message_id AS replyToTgMessageId`;
@@ -132,13 +148,14 @@ export class ScopedArchiveRepository {
     return withMedia(this.db.prepare(`SELECT ${messageQuery()},media_parts_json AS mediaPartsJson FROM messages WHERE chat_id = ? AND id = ?`).get(this.chatId, id) as ArchivedMessage | undefined ?? null);
   }
 
-  search(query: string, limit = 20): ArchivedMessage[] {
+  search(query: string, limit = 20, filters: SearchFilters = {}): ArchivedMessage[] {
     const thread = this.threadId === null ? '' : ' AND message_thread_id = @threadId';
     const columns = `id,chat_id AS chatId,message_thread_id AS messageThreadId,tg_message_id AS tgMessageId,direction,
       from_kind AS fromKind,from_user_id AS fromUserId,from_name AS fromName,from_username AS fromUsername,kind,text,tg_date AS tgDate,triggered,trigger_reason AS triggerReason`;
     const parsed = archiveQuery(query);
-    const rows = 'like' in parsed ? this.db.prepare(`SELECT ${columns},media_parts_json AS mediaPartsJson FROM messages WHERE chat_id = @chatId${thread} AND deleted_at IS NULL AND text LIKE @query ORDER BY tg_date DESC LIMIT @limit`).all({ chatId: this.chatId, threadId: this.threadId, query: parsed.like, limit }) as ArchivedMessage[]
-      : this.db.prepare(`SELECT ${messageQuery('m')},m.media_parts_json AS mediaPartsJson FROM messages_fts f JOIN messages m ON m.id=f.rowid WHERE m.chat_id = @chatId${thread ? ' AND m.message_thread_id = @threadId' : ''} AND messages_fts MATCH @query AND m.deleted_at IS NULL ORDER BY bm25(messages_fts),m.tg_date DESC LIMIT @limit`).all({ chatId: this.chatId, threadId: this.threadId, query: parsed.fts, limit }) as ArchivedMessage[];
+    const bound = { chatId: this.chatId, threadId: this.threadId, limit, ...filterParameters(filters) };
+    const rows = 'like' in parsed ? this.db.prepare(`SELECT ${columns},media_parts_json AS mediaPartsJson FROM messages WHERE chat_id = @chatId${thread} AND deleted_at IS NULL AND text LIKE @query${filterClause('')} ORDER BY tg_date DESC LIMIT @limit`).all({ ...bound, query: parsed.like }) as ArchivedMessage[]
+      : this.db.prepare(`SELECT ${messageQuery('m')},m.media_parts_json AS mediaPartsJson FROM messages_fts f JOIN messages m ON m.id=f.rowid WHERE m.chat_id = @chatId${thread ? ' AND m.message_thread_id = @threadId' : ''} AND messages_fts MATCH @query AND m.deleted_at IS NULL${filterClause('m.')} ORDER BY bm25(messages_fts),m.tg_date DESC LIMIT @limit`).all({ ...bound, query: parsed.fts }) as ArchivedMessage[];
     return rows.map((row) => withMedia(row)!);
   }
 
@@ -146,6 +163,57 @@ export class ScopedArchiveRepository {
     const rows = this.db.prepare(`SELECT ${messageQuery()},media_parts_json AS mediaPartsJson FROM messages WHERE chat_id = ?
       AND (? IS NULL OR message_thread_id = ?) AND deleted_at IS NULL ORDER BY id DESC LIMIT ?`).all(this.chatId, this.threadId, this.threadId, limit) as ArchivedMessage[];
     return rows.map((row) => withMedia(row)!);
+  }
+
+  /**
+   * 「按顺序读取聊天记录」（docs/05 §3.2）：`anchor` 之前 / 之后 / 两侧各一半。此前这个工具
+   * 只有 `{limit}`，模型除了「最近 N 条」没有任何往前翻的手段 —— 要找一句三天前的话只能
+   * 把 limit 一路加到上限，而那正是把上下文吃满的做法。
+   *
+   * 一律按 id 升序交回：`recent()` 那种「最新在最前」在 `direction:'after'` 上会让读出来的
+   * 一段反着念，而模型是照顺序理解对话的。
+   */
+  window(input: { anchorId?: number | null | undefined; anchorDate?: number | null | undefined; direction?: 'before' | 'after' | 'around' | undefined; limit?: number | undefined }): ArchivedMessage[] {
+    const limit = input.limit ?? 50;
+    const anchor = input.anchorId ?? (input.anchorDate === null || input.anchorDate === undefined ? null : this.#anchorAt(input.anchorDate));
+    if (anchor === null) return this.recent(limit).reverse();
+    if (input.direction === 'after') return this.#slice('id >= @anchor', 'ASC', limit, anchor);
+    if (input.direction !== 'around') return this.#slice('id <= @anchor', 'DESC', limit, anchor).reverse();
+    const before = Math.floor((limit - 1) / 2);
+    return [...this.#slice('id < @anchor', 'DESC', before, anchor).reverse(), ...this.#slice('id >= @anchor', 'ASC', limit - before, anchor)];
+  }
+
+  /**
+   * ISO 时间锚点先落到一条真实消息上（该时刻起的第一条，之后没有了就取最后一条），后面一律按 id 走。
+   * 两条 SQL 把会话过滤写全而不是抽成变量：`db.isolation.test.ts` 的扫描器读的是源码里的字符串
+   * 字面量，藏在 `${scope}` 后面它看不见 —— 那条断言存在的意义就是没人能这么绕过去。
+   */
+  #anchorAt(date: number): number | null {
+    const bound = { chatId: this.chatId, threadId: this.threadId, date };
+    return (this.db.prepare('SELECT id FROM messages WHERE chat_id = @chatId AND (@threadId IS NULL OR message_thread_id = @threadId) AND deleted_at IS NULL AND tg_date >= @date ORDER BY tg_date, id LIMIT 1').pluck().get(bound)
+      ?? this.db.prepare('SELECT id FROM messages WHERE chat_id = @chatId AND (@threadId IS NULL OR message_thread_id = @threadId) AND deleted_at IS NULL ORDER BY id DESC LIMIT 1').pluck().get(bound) ?? null) as number | null;
+  }
+
+  #slice(comparison: string, order: 'ASC' | 'DESC', limit: number, anchor: number): ArchivedMessage[] {
+    if (limit <= 0) return [];
+    const rows = this.db.prepare(`SELECT ${messageQuery()},media_parts_json AS mediaPartsJson FROM messages
+      WHERE chat_id = @chatId AND (@threadId IS NULL OR message_thread_id = @threadId) AND deleted_at IS NULL AND ${comparison}
+      ORDER BY id ${order} LIMIT @limit`).all({ chatId: this.chatId, threadId: this.threadId, anchor, limit }) as ArchivedMessage[];
+    return rows.map((row) => withMedia(row)!);
+  }
+
+  /**
+   * 一批 Telegram 消息编号 → 归档 id（取最新 revision）。渲染回复标记要用它换一次：两套编号
+   * 不通用，把 Telegram 那个当 `#id` 交给模型，它照着 `get_message` 回查会取到另一条消息。
+   * 一次查完整批而不是逐条查 —— 一页 50 条就是 50 次查询。
+   */
+  archiveIdsByTgMessageIds(tgMessageIds: readonly number[]): Map<number, number> {
+    if (!tgMessageIds.length) return new Map();
+    const placeholders = tgMessageIds.map(() => '?').join(',');
+    const rows = this.db.prepare(`SELECT tg_message_id AS tg, MAX(id) AS id FROM messages WHERE chat_id = ?
+      AND (? IS NULL OR message_thread_id = ?) AND tg_message_id IN (${placeholders}) AND deleted_at IS NULL
+      GROUP BY tg_message_id`).all(this.chatId, this.threadId, this.threadId, ...tgMessageIds) as Array<{ tg: number; id: number }>;
+    return new Map(rows.map((row) => [row.tg, row.id]));
   }
 
   claimBackground(afterId: number, throughId: number, max: number, turnId: string): { rows: ArchivedMessage[]; omitted: number } {

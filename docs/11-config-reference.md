@@ -91,7 +91,7 @@ NODE_ENV=production
 | 🚧 `telegram.notifyEdits` | 要把「上一轮之后有哪些编辑」带进 RUNTIME 块，得给 `RuntimeTurnContext` 加一块会话级瞬时状态 —— 那是上下文引擎的表面 |
 | 🚧 `trigger.ignoreEditedAsTrigger` | 先要定「编辑触发的那一轮与原轮次什么关系」：重开一轮还是改写历史，两种都会动到 rebase 与认领水位 |
 | 🚧 `memory.autoApplyCompaction` | **记忆压缩本身没实现**（`compactCron` 只统计超过软上限的文档数）。给一个不存在的产物配「是否自动应用」是假开关 |
-| 🚧 `agent.askArbiter` · `agent.askEscalateToUser` | `ask_parent` 的父 agent 仲裁没实现（返回 `ask_parent_not_implemented`，不伪造答复）。[14](./14-open-questions.md) A7 也未确认 |
+| 🚧 `agent.askArbiter` · `agent.askEscalateToUser` · `agent.askTimeoutMs` | `ask_parent` 的父 agent 仲裁没实现（返回 `ask_parent_not_implemented`，不伪造答复）。[14](./14-open-questions.md) A7 也未确认。`askTimeoutMs` 同属这件事：这个工具从来不等答复，「等多久」无处可用 —— 它此前一路传进 `registerBuiltins` 却没有任何地方读它 |
 | 🚧 `tools.web.summarizeWithAlias` | 要在 `web_fetch` 里插一次模型调用：计费、配额、取消、失败降级都得跟着走一遍 |
 | 🚧 `media.groupDebounceMs` | 相册合并要按 `media_group_id` 在触发路径上缓冲 update，与并发和认领水位有交互（`concurrency.coalesceSameUserMs` 做的是按人合并） |
 | 🚧 `db.ftsTokenizer` | 换 tokenizer 要追加迁移重建 `messages_fts`，而「trigram 还是 jieba」是 [14 §2](./14-open-questions.md) Q3 的未决问题 |
@@ -221,8 +221,8 @@ agent:
   maxDepth: 3                     # 需重启 · AgentManager 构造时吃的是快照（docs/20 · W-CFG-02）
   maxConcurrentSubagents: 3       # 热更新 · 同一轮里同时在跑的子 agent 数上限
   maxSubagentsPerTurn: 10         # 需重启 · 同上
-  askTimeoutMs: 120000
-  maxAsksPerRun: 5
+  askTimeoutMs: 120000            # 🚧 `ask_parent` 不等答复，这个值没有任何地方读
+  maxAsksPerRun: 5                # 需重启 · registerBuiltins 构造时吃的是快照
   askArbiter: true                # 热更新 · 用 low 档模型仲裁 ask_parent
   askEscalateToUser: false        # 热更新 · 仲裁失败时是否转人工
   progressThrottleMs: 3000        # 热更新 · report_progress 广播到 SSE 的节流窗口（库里那行照常更新）
@@ -327,7 +327,9 @@ tools:
     summarizeWithAlias: low       # 热更新 · web_fetch 的 prompt 摘要用哪个别名
     allowlist: []                 # 热更新 · 域名 glob（`*.x.com` 只配子域）；非空时只放行命中的。空则 limited 角色不注册 web_fetch
     denylist: ['*.local', '*.internal']  # 热更新 · 命中即拒，优先于 allowlist；每一跳重定向都复验
-    searchProvider: ''            # brave | serper | tavily | ''（空则不注册 web_search）
+    searchProvider: ''            # 需重启 · brave | serper | tavily | ''（空则不注册 web_search）。
+                                  #   与 searchApiKey 一起在启动时读进 registerBuiltins 的依赖，
+                                  #   `web_search` 的 available() 判的就是那份快照
     searchApiKey: ''              # 需重启 · **明文**存在 config.yaml / config_kv 里（不是引用，
                                   #   与 provider key 的 Secrets 加密不同）。建议写 ${env:BRAVE_API_KEY}
                                   #   之类的 env 引用，别直接落库；日志与 GET /api/config 会脱敏

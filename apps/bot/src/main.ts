@@ -175,7 +175,7 @@ registerBuiltins(toolRegistry, {
     new PathJail(role === 'owner' && configStore.snapshot().tools.fs.allowHostFsForOwner ? '/' : workspace, config.tools.fs.denyGlobs),
     config.tools.fs.maxReadBytes, config.tools.fs.maxWriteBytes, { showHidden: config.tools.fs.showHidden, trashDir: config.tools.fs.trashDir, backupDir: config.tools.fs.backupDir }),
   sandbox, archive, context, memory, skills, agents, models: modelRegistry, ledger, log, quota,
-  maxWebBytes: config.tools.web.maxResponseBytes, maxAsksPerRun: config.agent.maxAsksPerRun, askTimeoutMs: config.agent.askTimeoutMs,
+  maxWebBytes: config.tools.web.maxResponseBytes, maxAsksPerRun: config.agent.maxAsksPerRun,
   web: { timeoutMs: config.tools.web.timeoutMs, retries: config.tools.web.retries },
   webSearch: { provider: config.tools.web.searchProvider, apiKey: config.tools.web.searchApiKey },
   telegram: telegramTools,

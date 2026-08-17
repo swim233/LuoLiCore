@@ -36,6 +36,60 @@ function retryAfterMs(headers: Record<string, string | string[] | undefined>): n
   return Number.isFinite(seconds) && seconds > 0 ? Math.min(seconds * 1000, RETRY_MAX_MS) : null;
 }
 
+const DROP_TAGS = new Set(['script', 'style', 'noscript', 'template', 'svg', 'head', 'iframe', 'object', 'canvas', 'audio', 'video']);
+const BLOCK_TAGS = new Set(['p', 'div', 'li', 'tr', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'section', 'article', 'header', 'footer',
+  'blockquote', 'pre', 'table', 'thead', 'tbody', 'ul', 'ol', 'dl', 'dd', 'dt', 'main', 'nav', 'aside', 'form', 'figure', 'figcaption', 'hr']);
+const ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', ndash: '–', mdash: '—', hellip: '…', middot: '·' };
+function decodeEntities(value: string): string {
+  return value.replace(/&(#x[0-9a-fA-F]+|#\d+|[a-zA-Z][a-zA-Z0-9]{1,10});/g, (all, body: string) => {
+    if (!body.startsWith('#')) return ENTITIES[body.toLowerCase()] ?? all;
+    const hex = body.startsWith('#x') || body.startsWith('#X');
+    const code = Number.parseInt(body.slice(hex ? 2 : 1), hex ? 16 : 10);
+    return Number.isFinite(code) && code > 0 && code <= 0x10_FF_FF ? String.fromCodePoint(code) : all;
+  });
+}
+/**
+ * HTML → 纯文本。此前 `web_fetch` 把整份 HTML 原样交给模型，而一个普通页面九成是 script /
+ * style / 导航 —— 按 `tools.maxOutputBytes`（64KB）截断之后经常连正文的第一段都没进去，
+ * 模型于是「取回来了但什么也没读到」（docs/05 §3.6 要的是「转 markdown」这一步）。
+ *
+ * 刻意不用正则拼这件事：输入是最多 `maxResponseBytes`（2MB）的不可信文本，而
+ * `<script[^>]*>[\s\S]*?<\/script>` 这类形状在「一堆开标签、没有闭标签」的输入上是 O(n²)
+ * 回溯 —— 与 docs/24 · R-SEC-01（grep 换 RE2）同一条教训：接受任意输入就必须有线性上界。
+ * 单趟扫描没有这个问题，代价是它不是 DOM，只是「取标签之间的字，块级标签处换行」。
+ */
+export function htmlToText(html: string): string {
+  const out: string[] = [];
+  let index = 0;
+  let dropping: string | null = null;
+  while (index < html.length) {
+    const next = html.indexOf('<', index);
+    if (next < 0) { if (!dropping) out.push(html.slice(index)); break; }
+    if (!dropping && next > index) out.push(html.slice(index, next));
+    if (html.startsWith('<!--', next)) { const close = html.indexOf('-->', next + 4); index = close < 0 ? html.length : close + 3; continue; }
+    const end = html.indexOf('>', next);
+    // 未闭合的 `<`：后面整段都不是可信的标签结构，停在这里比把半个页面的属性倒出来好。
+    if (end < 0) break;
+    const tag = html.slice(next + 1, end);
+    index = end + 1;
+    const name = /^\/?\s*([a-zA-Z][a-zA-Z0-9-]*)/.exec(tag)?.[1]?.toLowerCase();
+    if (!name) continue;
+    const closing = tag.startsWith('/');
+    if (dropping) { if (closing && name === dropping) dropping = null; continue; }
+    if (!closing && DROP_TAGS.has(name)) { if (!tag.trimEnd().endsWith('/')) dropping = name; continue; }
+    if (name === 'br') out.push('\n');
+    else if (name === 'li' && !closing) out.push('\n- ');
+    else if (BLOCK_TAGS.has(name)) out.push('\n\n');
+  }
+  return decodeEntities(out.join('')).replaceAll('\r', '').replace(/[^\S\n]+/g, ' ')
+    .split('\n').map((line) => line.trim()).join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+/** `content-type` 缺失或撒谎的站点不少，所以类型头之外再看正文开头长什么样。 */
+function looksLikeHtml(contentType: string, body: string): boolean {
+  if (/^\s*(text\/html|application\/xhtml\+xml)/i.test(contentType)) return true;
+  return !contentType && /^\s*<(!doctype\s+html|html[\s>])/i.test(body);
+}
+
 export type WebAttempt<T> = { done: T } | { retry: string; afterMs?: number };
 /**
  * 重试骨架。「这一次算不算值得再试」由调用方判（错误分类是每个工具自己的事），退避、可中断的
@@ -101,6 +155,11 @@ export async function webFetch(raw: string, maxBytes: number, abortSignal: Abort
       const advertised = retryAfterMs(response.headers);
       return { retry: `web_http_${response.status}`, ...(advertised === null ? {} : { afterMs: advertised }) };
     }
-    return { done: { ok: response.ok, status: response.status, url: response.url, ...(attempt ? { attempts: attempt + 1 } : {}), content: untrusted(`web:${new URL(response.url).hostname}`, response.body.toString('utf8')), truncated: response.truncated } };
+    const body = response.body.toString('utf8');
+    const html = looksLikeHtml(String(response.headers['content-type'] ?? ''), body);
+    return { done: { ok: response.ok, status: response.status, url: response.url, ...(attempt ? { attempts: attempt + 1 } : {}),
+      // `extracted` 要交出去：模型看到的是抽取后的正文，不知道这一点它会以为页面上就没有那些
+      // 表格和脚本里的数据，而不是「这里只给了正文」。
+      ...(html ? { extracted: 'text' as const } : {}), content: untrusted(`web:${new URL(response.url).hostname}`, html ? htmlToText(body) : body), truncated: response.truncated } };
   }, (failure, attempts) => ({ ok: false, error: failure, attempts, hint: `已重试 ${options.retries} 次仍未取回内容（${failure}）；换个 URL 或稍后再试，不要立刻重复调用同一个地址。` }));
 }

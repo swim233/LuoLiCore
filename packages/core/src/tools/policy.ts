@@ -46,3 +46,15 @@ export const TOOL_POLICY = {
 } as const satisfies Record<string, ToolPolicyEntry>;
 
 export type ToolName = keyof typeof TOOL_POLICY;
+
+/**
+ * docs/07 §4 收窄公式里的「核心工具集」：skill 的 `allowed-tools` 收窄不到这几个。
+ *
+ * `allowed-tools` 表达的是「这件事要用哪些工具」，不是「这一轮不许再干别的」。一个
+ * `allowed-tools: [bash]` 的 skill 曾经把 `send_message` / `report_progress` / `context_stats`
+ * 一起关掉，于是模型跑完 skill 连一句话都追发不出去、子 agent 连进度都报不了。
+ *
+ * 这不是放权：skill 的 `allowed-tools` 只能是角色白名单的子集（docs/07 §2），豁免这几个
+ * 交回去的仍然是该角色本来就有的东西。
+ */
+export const SKILL_NARROWING_EXEMPT: readonly ToolName[] = ['load_skill', 'send_message', 'report_progress', 'context_stats'];

@@ -74,19 +74,42 @@ role(chat):
 
 | 工具 | minRole | 审批 | 说明 |
 |---|---|---|---|
-| `read_file` | limited | — | `{path, offset?, limit?}`；返回带行号内容；单次上限 `tools.fs.maxReadBytes`（默认 256KB），超出要求分页 |
-| `list_dir` | limited | — | `{path, depth?}`；隐藏 dotfile 除非 `showHidden` |
+| `read_file` | limited | — | `{path, offset?, limit?}`；返回带行号内容（`行号<TAB>正文`，另见下）；单次上限 `tools.fs.maxReadBytes`（默认 256KB），超出要求分页。`skill://` 资源走同一份预算 |
+| `list_dir` | limited | — | `{path, depth?}`；隐藏 dotfile 除非 `showHidden`；上限 500 条 |
 | `glob` | limited | — | `{pattern, path?}`；上限 500 条 |
-| `grep` | limited | — | `{pattern, path?, glob?, contextLines?, ignoreCase?}`；基于 ripgrep（若不可用则 JS 实现）；上限 200 命中 |
-| `write_file` | trusted | 覆盖已存在文件时需审批 | `{path, content}`；自动建父目录；写前备份到 `.luoli-bak/` |
+| `grep` | limited | — | `{pattern, path?, glob?, contextLines?, ignoreCase?}`；JS 实现（正则走 RE2，见 docs/24 · R-SEC-01）；`glob` 按相对搜索根的路径筛文件，`contextLines` ≤10 附带命中行前后各若干行；上限 200 命中 |
+| `write_file` | trusted | 覆盖已存在文件时需审批 | `{path, content}`；自动建父目录；写前备份到 `.luoli-bak/<ts>-<ulid>-<name>` |
 | `edit_file` | trusted | — | `{path, oldString, newString, replaceAll?}`；`oldString` 必须唯一，否则报错（照抄 Claude Code 语义，模型最熟悉） |
 | `delete_file` | trusted | **必需** | `{path, recursive?}`；`recursive` 时必须审批且路径深度 ≥2；实现为移入 `.luoli-trash/<ts>/`（不真删） |
 | `move_file` | trusted | 覆盖时需审批 | `{from, to}` |
 
-**读不到的条目跳过，不让整次调用失败。** `list_dir` / `glob` / `grep` 的目录遍历对每个条目 `statSync`，
-而一个**断链软链**（`ln -s /nowhere x`，下载失败也会留下）会抛 ENOENT —— 此前那让整次调用返回
-`ok:false`，同目录里另外几百个好文件一并看不见（docs/22 · I-03）。现在跳过读不到的条目，
-并在结果里回 `skipped: n`：条数必须交出去，否则模型会以为自己看全了。
+**行号是 `edit_file` 的对照坐标，也是它最常见的失败来源。** `read_file` 交回的正文每行带
+`行号<TAB>` 前缀（没有它，模型只能靠「第几个 foo」描述位置）；分页读的第二页行号接着第一页往下数，
+而不是从 1 重来。代价是模型容易把前缀连着行号一起抄进 `oldString` —— 所以 `read_file` 的
+description 里明说一句，且 `edit_file` 在 `oldString` 形如 `12\t…` 时把 `old_string_not_found`
+补上一句「去掉行号前缀」：只报「没找到」的话模型通常只会换一段文字再试一次。
+
+**目录整棵删要显式 `recursive`。** `delete_file` 的实现是 `rename` 进回收站，而 `rename` 一个目录
+就是把整棵树搬走 —— 等价于 `rm -r`。所以：目录必须显式传 `recursive: true`（否则 `path_is_directory`），
+且路径深度 ≥2（否则 `recursive_delete_too_shallow`）。审批弹窗上只有一个路径，owner 分不出这一下
+删的是一个文件还是半个工作目录，而这个工具是 `approval: 'always'` —— 点下去就真的搬走了。
+
+**读不到的条目跳过，不让整次调用失败。** `list_dir` / `glob` / `grep` 的目录遍历对每个条目先过
+jail 再 `statSync`，两步都会抛：**断链软链**（`ln -s /nowhere x`，下载失败也会留下）抛 ENOENT，
+**越界软链**（`ln -s /etc x`，`bash` 一行就能建）抛 `path_outside_workspace`。此前任意一种都让
+整次调用返回 `ok:false`，同目录里另外几百个好文件一并看不见（docs/22 · I-03 只修了前一种）。
+现在两种都跳过，并在结果里回 `skipped: n`：条数必须交出去，否则模型会以为自己看全了。
+`grep` 里**超过读取预算的文件和读不出来的文件同样计入 `skipped`** —— 静静跳过等于告诉模型
+「这就是全部命中」。
+
+**软链成环靠 realpath 去重，三个遍历工具共用。** `ln -s . loop` 让同一棵树被反复走进去；
+`list_dir` 的 `depth` 只挡递归层数、挡不住重复（一棵三条目的树能列出十七条，重复项还会把 500 条的
+预算占满，而模型看到的是一份自相矛盾的目录）。`glob`/`grep` 在 docs/20 · W-FS-01 修过这件事，
+`list_dir` 当时漏了。另外**显示路径取软链名那一侧**，不取 realpath：`loop -> .` 的 realpath 就是
+搜索根，报出来是个空串，而模型拿空串去 `read_file` 就读到了目录本身。
+
+**`truncated` 只在「还想再放一条却放不下」时为真。** 恰好命中 500 / 200 条而后面本来就没有了
+不算截断 —— 报成截断模型会去缩范围重查一次已经完整的结果，白跑一步且它会以为自己没看全。
 
 **路径 jail（所有 fs 工具共用）**：
 
@@ -110,18 +133,30 @@ function resolveJailed(p: string, root: string): string {
 
 | 工具 | minRole | 说明 |
 |---|---|---|
-| `search_messages` | limited | `{query, from?, after?, before?, kind?, limit?}` — FTS5 检索。**强制**限定当前 context key 的 chat。`query` 由模型写，绝不能原样进 `MATCH`：FTS5 的 `\|` `"` `*` `:` `-` `^` `()` 和 AND/OR/NOT/NEAR 都是语法，模型写一句 `名字\|我是\|叫\|谁` 就把整次调用打成 `fts5: syntax error`，它只能瞎改参数重试。`archiveQuery()` 先切词：有 ≥3 字的词就逐个加引号 OR 起来走 FTS（trigram 匹配不了更短的词），一个都没有（中文两字词几乎全在这一档）就退回 LIKE，且用最长的那个词而不是原串 —— 原串里还带着运算符，`LIKE '%名字\|我是%'` 永远匹配不到东西 |
-| `read_messages` | limited | 「按顺序读取聊天记录」：`{anchor?, direction?, limit?}`。`anchor` 可为 message id / ordinal / ISO 时间；`direction: 'before'\|'after'\|'around'`；默认 limit 50、上限 200 |
+| `search_messages` | limited | `{query, from?, after?, before?, kind?, limit?}` — FTS5 检索。`from` 同时认 tg 用户 id 与 `@username`（前导 `@` 会被抹掉）；`after`/`before` 是 ISO 时间，解析不出来交回 `invalid_time_filter` 而不是当没传；`kind` 精确匹配消息类型。四个过滤条件都写成 `@x IS NULL OR …` 的常量 SQL 而不是按传了哪几个拼串：语句文本固定才吃得到预编译缓存，而「没传的参数不出现在 SQL 里」还得在绑定侧同步剔掉，漏一处就是一个运行时的 `missing named parameter`。**强制**限定当前 context key 的 chat。`query` 由模型写，绝不能原样进 `MATCH`：FTS5 的 `\|` `"` `*` `:` `-` `^` `()` 和 AND/OR/NOT/NEAR 都是语法，模型写一句 `名字\|我是\|叫\|谁` 就把整次调用打成 `fts5: syntax error`，它只能瞎改参数重试。`archiveQuery()` 先切词：有 ≥3 字的词就逐个加引号 OR 起来走 FTS（trigram 匹配不了更短的词），一个都没有（中文两字词几乎全在这一档）就退回 LIKE，且用最长的那个词而不是原串 —— 原串里还带着运算符，`LIKE '%名字\|我是%'` 永远匹配不到东西 |
+| `read_messages` | limited | 「按顺序读取聊天记录」：`{anchor?, direction?, limit?}`。`anchor` 可为 message id（`12841` 或 `#12841`）或 ISO 时间；`direction: 'before'\|'after'\|'around'`（默认 `before`，`around` 两侧各一半）；不给 `anchor` 就是最近若干条；默认 limit 50、上限 200。**一律按 id 升序交回** —— `recent()` 那种「最新在最前」会让 `direction:'after'` 读出来的一段反着念。数字串一律按 id 认而不是当日期：模型十有八九把 `#12841` 里的数字当字符串递过来，而 `Date.parse('12841')` 在某些运行时会解析成一个年份，于是它读到一段完全不相干的记录还以为那就是自己要的位置。解析不出来交回 `invalid_anchor`，**不悄悄退回「最近 N 条」** |
 | `get_message` | limited | `{messageId}` — 单条详情（含附件元数据、回复链） |
-| `admin_search_messages` | **owner** | 跨全部 chat 检索；返回结果附 `chat_id` 与 chat 名 |
+| `admin_search_messages` | **owner** | 跨全部 chat 检索；返回结果附 `chat_id`。**不给** `search_messages` 那组过滤参数：`adminSearchAll` 不认它们，而收下一个参数再默默忽略比没有这个参数更糟 —— 模型会以为自己已经按人过滤过了（「摘除比伪造安全」，[16 §5](./16-remediation-plan.md)） |
 | `context_stats` | limited | 当前上下文窗口统计（等价 `/ctx`），供模型自我判断是否该收敛 |
 
-返回格式（统一，便于模型引用）：
+返回格式（`search_messages` / `read_messages` / `admin_search_messages` 统一，便于模型引用）：
 ```
 #12841 [2026-08-14 10:02] 张三(@zhangsan): 今天去哪吃
 #12842 [2026-08-14 10:03] 李四: 隆福吧   ↩︎#12841
 ```
 模型引用时使用 `#<messageId>`，`get_message` 可回查。
+
+- **交回渲染好的行，不是原始行对象。** `read_messages` 默认取 50 条，用行对象要多花两千多 token
+  在 `chatId` / `direction` / `fromKind` / `triggered` / `triggerReason` 这些每条都一样、或者对模型
+  压根没用的字段上。附件元数据与完整回复链留给 `get_message` —— 那才是「放大看一条」的工具，
+  它照旧交回结构化的一条。
+- **`↩︎#` 后面是归档 id，不是 Telegram 编号。** `reply_to_tg_message_id` 与模型引用用的 `#id`
+  是两套编号；原样当 `#` 渲染出去，模型照着 `get_message` 回查会取到另一条消息或者什么都取不到，
+  而它没有办法知道自己拿错了。换算一次查完整批（`archiveIdsByTgMessageIds`），换不到就不渲染
+  这个标记 —— 宁可少一条线索。`admin_search_messages` 跨会话、不带 thread 作用域，所以只带
+  `[chat:<id>]` 不带 `↩︎`。
+- 正文里的换行折成 `⏎`：这个格式一条消息一行，而多行正文能在结果里伪造出好几条别人的发言。
+  整份结果另外还在 `<untrusted-content>` 边界里，这一层管的是格式本身不被撬开。
 
 ### 3.3 代码执行
 
@@ -154,8 +189,13 @@ bash: tool({
 })
 ```
 
+- `timeoutMs` 的上界写进 schema（`tools.exec.maxTimeoutMs`）。`sandbox.run` 反正会夹一次，
+  但只夹在里面模型永远不知道自己要的 30 分钟被改成了 5 分钟，然后据此去解释「命令没跑完」。
 - 输出上限 `maxOutputBytes`（默认 64KB），超出保留头尾各半并标注省略字节数。
-- `python` = `bash` 的特化：把 `code` 写入 `workspace/.luoli-tmp/<id>.py` 再执行 `python3`，便于多行与语法高亮展示。
+- `python` = `bash` 的特化：把 `code` 写入 `workspace/.luoli-tmp/<id>.py` 再执行 `python3 <path>`，
+  跑完删掉。**不用 heredoc**（`python3 - <<'PY'`）：正文里只要出现一行 `PY` 就把脚本从那里截断，
+  而 stdin 整条被 heredoc 占着 —— 脚本里的 `input()` 读到的是自己的后半截，`sys.argv[0]` 是 `-`，
+  traceback 里的文件名是 `<stdin>` 且没有源码行。落成文件还顺带让审批弹窗能展示真正要跑的东西。
 - **绝不做命令字符串黑名单过滤作为主要防线**（`rm -rf` 可以写成 `r''m -rf`）。黑名单只用于**触发审批**，隔离靠沙箱。
 
 ### 3.4 记忆
@@ -170,8 +210,16 @@ bash: tool({
 
 | 工具 | minRole | 说明 |
 |---|---|---|
-| `web_fetch` | limited | `{url, prompt?}`；SSRF 防护：解析后拒绝 私有网段/回环/link-local/元数据地址（169.254.169.254）；只允许 http/https；跟随重定向 ≤3 次且每跳重新校验；响应上限 2MB → 转 markdown → 可选交给 `low` 模型按 prompt 摘要。单次尝试 `tools.web.timeoutMs`（含 DNS 与全部跳），瞬时失败按 `tools.web.retries` 重试，见 §8.1 |
+| `web_fetch` | limited | `{url}`；SSRF 防护：解析后拒绝 私有网段/回环/link-local/元数据地址（169.254.169.254）；只允许 http/https；跟随重定向 ≤3 次且每跳重新校验；响应上限 2MB → HTML 抽成纯文本（见下）→ 🚧 可选交给 `low` 模型按 `prompt` 摘要（`tools.web.summarizeWithAlias`，未实现，所以 schema 里**没有** `prompt` 这个参数）。单次尝试 `tools.web.timeoutMs`（含 DNS 与全部跳），瞬时失败按 `tools.web.retries` 重试，见 §8.1 |
 | `web_search` | limited | 需配置搜索 provider（Brave/Serper/Tavily 之一）；未配置则不注册该工具。超时与重试同 `web_fetch` |
+
+**HTML 要抽成正文才交给模型。** 一个普通页面九成是 script / style / 导航，原样交出去按
+`tools.maxOutputBytes`（64KB）截断之后经常连正文的第一段都没进去 —— 模型「取回来了但什么也没读到」。
+抽取用**单趟扫描**而不是正则：输入是最多 `maxResponseBytes`（2MB）的不可信文本，而
+`<script[^>]*>[\s\S]*?</script>` 这类形状在「一堆开标签、没有闭标签」的输入上是 O(n²) 回溯，
+与 docs/24 · R-SEC-01（grep 换 RE2）同一条教训 —— 接受任意输入就必须有线性上界。判据是
+`content-type`，缺失时再看正文开头像不像 HTML（撒谎的站点不少）。抽过的响应带 `extracted: 'text'`：
+这一点要交出去，否则模型会以为页面上本来就没有那些表格和脚本里的数据。
 
 `tools.web.allowlist` / `tools.web.denylist`（域名 glob，`*.x.com` 只匹配子域、不含裸域）在 WebUI 可配。
 判据在 `net/outbound.ts` 的 `safeTarget` 里，**每一跳重定向都复验**：只挡第一跳的话，一个放行域名的
@@ -484,3 +532,8 @@ approval:
 - **连续失败**：同一工具连续失败 `tools.maxConsecutiveErrors` 次后在本轮停用，之后再调返回
   `tool_disabled_after_errors` + hint（而不是含糊的 `tool_unavailable`，那会让模型继续原地重试到步数
   耗尽），并留一条 `tool.disabled_after_errors` warn 日志。成功一次即清零 —— 门槛是**连续**失败，不是本轮失败总数。
+  **`invalid_input` 与「未获批准」都算失败。** 这个计数器是「模型别原地重试到步数耗尽」的唯一硬
+  边界，而它此前只数 `execute()` 的失败 —— 参数写错和审批被拒这两种最常见的失败一次都不计，于是
+  同一个错误的调用可以在一轮里无限次重来（实测连发 6 次全部照收，既不计次也不熔断）。审批那一侧
+  尤其要计：每一次被拒的重试都是一条推给 owner 的通知，owner 连拒两次之后模型该换个做法，而不是
+  把同一个高危调用改个字再递上来。

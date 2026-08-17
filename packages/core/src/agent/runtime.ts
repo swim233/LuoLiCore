@@ -13,6 +13,7 @@ import { escapeSystemInstructions, estimateStructureTokens, formatSpeakerIdentit
 import type { PromptAssembler, PromptDocuments } from '../index.js';
 import { runtimeBlock, type PromptBuildResult } from '../prompt/assembler.js';
 import type { ToolExecutionContext, ToolRegistry } from '../tools/registry.js';
+import { SKILL_NARROWING_EXEMPT } from '../tools/policy.js';
 import type { ProviderStore } from '../provider/store.js';
 import { type FallbackOptions, fallbackLanguageModel } from './fallback-model.js';
 import { type AliasSettings, parseAliasSettings } from '../provider/alias-settings.js';
@@ -424,7 +425,7 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
     include: { requestMessages: true, requestBody: true, responseBody: true },
     prepareStep: async ({ stepNumber, messages }) => {
       await dependencies.plugins?.hook('beforeModelCall', { turn, step: stepNumber });
-      const skillAllow = turn.skillAllowedTools?.size ? new Set([...turn.skillAllowedTools, 'load_skill']) : null;
+      const skillAllow = turn.skillAllowedTools?.size ? new Set<string>([...turn.skillAllowedTools, ...SKILL_NARROWING_EXEMPT]) : null;
       const activeForStep = dependencies.tools.activeNames(turn.effectiveRole, toolContext).filter((name) => !skillAllow || skillAllow.has(name));
       const requestedAlias = turn.modelAliasOverride ?? alias;
       const downgrade = stepNumber >= dependencies.config.agent.main.downgradeAfterStep && dependencies.registry.aliases().includes('low');

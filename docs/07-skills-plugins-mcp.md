@@ -91,6 +91,19 @@ load_skill: tool({
 
 载入后的效果（在 `prepareStep` 里实现）：
 - `activeTools = 角色白名单 ∩ (⋃ 已载入 skill 的 allowed-tools ∪ 核心工具集)`；若某 skill 未声明 `allowed-tools`，则不收窄。
+
+  **「未声明则不收窄」= 它对这个并集贡献空集**，不是「贡献当前全部可用工具」。这一点曾经反了：
+  `SkillLoader.load()` 在未声明那一档交回的 `allowedTools` 等于「此刻全部可用工具」，而调用方
+  无条件把它并进本轮允许集 —— 于是先载入一个 `allowed-tools: [read_file]` 的 skill、再载入一个
+  不声明的，前一个的收窄就被整个抹掉了。所以 `load()` 另外交回一个 `narrows` 标志，只有它为真
+  才动允许集：调用方分不清「收窄到这些」和「没收窄，这些是全部」，就必然会犯这个错。
+
+  **核心工具集 = `load_skill` · `send_message` · `report_progress` · `context_stats`**
+  （单一数据源：`packages/core/tools/policy.ts` 的 `SKILL_NARROWING_EXEMPT`，`prepareStep` 与
+  `ToolRegistry.execute` 两处都读它）。`allowed-tools` 表达的是「这件事要用哪些工具」，不是
+  「这一轮不许再干别的」—— 一个 `allowed-tools: [bash]` 的 skill 此前把这四个一起关掉，于是模型
+  跑完 skill 连一句话都追发不出去、子 agent 连进度都报不了。豁免它们不是放权：`allowed-tools`
+  只能是角色白名单的子集（见上表），交回去的仍然是该角色本来就有的东西。
 - skill 正文作为一条 `role='system'`、`origin='note'`、`prune_level=2` 的消息进入 **delta**（因此可审计、会被裁剪、不占 `instructions`）。
 - 同一轮多次载入同一 skill → 幂等，返回 `{ok:true, alreadyLoaded:true}` 不重复注入。
 

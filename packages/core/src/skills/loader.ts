@@ -182,8 +182,11 @@ export class SkillLoader {
     const skill = this.#skills.get(name);
     if (!skill || !skill.enabled || skill.loadError) return { ok: false, error: `Skill 不存在或已禁用: ${name}` };
     if (roleRank(role) < roleRank(skill.minRole)) return { ok: false, error: '权限不足' };
-    const allowedTools = skill.allowedTools ? roleTools.filter((tool) => skill.allowedTools!.includes(tool)) : roleTools;
-    return { ok: true, name, body: skill.body, dir: skill.dir, files: skill.files, allowedTools, modelSuggestion: skill.model ?? null };
+    const narrowed = skill.allowedTools ? roleTools.filter((tool) => skill.allowedTools!.includes(tool)) : null;
+    // `narrows` 必须单独交出去：未声明 `allowed-tools` 的 skill **不收窄**（docs/07 §4），而
+    // `allowedTools` 在这一档等于「当前全部可用工具」。调用方分不清这两件事，就会把它并进
+    // 本轮允许集 —— 于是后载入一个不声明的 skill 正好抹掉前一个 skill 的收窄。
+    return { ok: true, name, body: skill.body, dir: skill.dir, files: skill.files, allowedTools: narrowed ?? roleTools, narrows: narrowed !== null, modelSuggestion: skill.model ?? null };
   }
 
   resolveResource(uri: string, role: Role): string {
