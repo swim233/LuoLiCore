@@ -221,11 +221,15 @@ if (!(await turnRegistry.drain(graceMs))) { turnRegistry.abortAll('shutdown'); a
 
 ## 4. 仍然开着的
 
+> **第七轮（2026-08-17）更新**：下面这张表里除 `D-UI-01` 的拆分本身之外都已闭合，见
+> [25-round7-remediation.md](./25-round7-remediation.md)。组件测试层已经补上（`tests/webui/`
+> + happy-dom + `@vitejs/plugin-vue`），SIGTERM 与资源上界两组测试也建了。
+
 | 项 | 状态 |
 |---|---|
-| `D-UI-01` | 已回退，未关闭。重做的前置条件是先有组件级测试 |
-| `D-APPR-01` 的「发起人回执」 | 未实现，已在 `docs/05` 与 `docs/21 §6` 标 🚧 |
-| `G-API-13`（改口令没有界面入口） | 新增缺口，见 `docs/21 §6.1` |
-| `docs/22 §4` 的 `I-01`…`I-14` | 除 `I-08`（顺手做了，引入 `R-TG-01`）与 `I-11`（随 `V-DOS-02`）外未处理 |
-| `docs/13-acceptance-criteria.md` | 自第二轮起未更新；`W-*` / `V-*` / `D-*` / `R-*` 对应的 AC 与末尾签署表都欠着 |
-| 资源上界测试组 | `docs/22 §6` 建议的 `tests/resource-bounds.test.ts`（沙箱输出 / 流式渲染 / 文档提取）仍未建，目前只有 `grep` 一条 |
+| `D-UI-01` | 拆分仍未做（回退状态保持），但**前置条件已满足**：`tests/webui/console.render.test.ts` 逐个切过 14 个导航页、断言内容区非空且无 Vue 警告。它在第七轮上线的第一次运行就抓到了一处新引入的 prop 类型错配 —— 这层防线是活的 |
+| `D-APPR-01` 的「发起人回执」 | 未实现，已在 `docs/05` 与 `docs/21 §6` 标 🚧。第七轮仍未做 —— 补它要把 EventBus 接进 telegram 包 |
+| `G-API-13`（改口令没有界面入口） | ✅ 第四轮已补（`docs/21 §6.1`） |
+| `docs/22 §4` 的 `I-01`…`I-14` | ✅ 第七轮做掉 9 项（`I-05` 判定为误报并修了同一处的真问题），见 `docs/25` |
+| `docs/13-acceptance-criteria.md` | ✅ 第七轮：标 `(自动)` 的条目按真实 vitest 覆盖逐条核对并勾选，签署表复算 |
+| 资源上界测试组 | ✅ 第七轮：`tests/resource-bounds.test.ts`（沙箱 stdout / 多字节解码 / 文档提取 / 日志轮转 / blob 外置）+ `tests/shutdown.test.ts` |

@@ -8,13 +8,19 @@ export class OperationsRepository {
     return this.db.prepare('INSERT OR IGNORE INTO processed_updates(update_id,ts) VALUES (?,?)').run(updateId, Date.now()).changes === 1;
   }
 
-  insertLog(input: { level: string; kind: string; summary: string; traceId?: string; spanId?: string; parentSpanId?: string; chatId?: string; userId?: string; key?: string; data?: unknown; durationMs?: number }): number {
-    const info = this.db.prepare(`INSERT INTO log_events(ts,level,kind,trace_id,span_id,parent_span_id,chat_id,user_id,key,summary,data_json,duration_ms)
-      VALUES (@ts,@level,@kind,@traceId,@spanId,@parentSpanId,@chatId,@userId,@key,@summary,@data,@durationMs)`).run({
+  /**
+   * `fileRef`：超过 `logs.bodyMaxBytes` 的载荷被挪进 `logs/<day>/blobs/*.json` 之后的引用。
+   * 它此前只藏在 `data_json` 里，`log_events.file_ref` 这一列**从来没被写过** —— 而 doc 03 的
+   * DDL 里就有它，按那份 DDL 去查库的人会以为「没有 file_ref 就是没有大载荷」。
+   * 两处都写：`data_json` 保持原样（解引用的路径认的是它），列也填上，让 DDL 说话算数。
+   */
+  insertLog(input: { level: string; kind: string; summary: string; traceId?: string; spanId?: string; parentSpanId?: string; chatId?: string; userId?: string; key?: string; data?: unknown; durationMs?: number; fileRef?: string }): number {
+    const info = this.db.prepare(`INSERT INTO log_events(ts,level,kind,trace_id,span_id,parent_span_id,chat_id,user_id,key,summary,data_json,file_ref,duration_ms)
+      VALUES (@ts,@level,@kind,@traceId,@spanId,@parentSpanId,@chatId,@userId,@key,@summary,@data,@fileRef,@durationMs)`).run({
       ts: Date.now(), level: input.level, kind: input.kind, summary: input.summary, traceId: input.traceId ?? null,
       spanId: input.spanId ?? null, parentSpanId: input.parentSpanId ?? null, chatId: input.chatId ?? null,
       userId: input.userId ?? null, key: input.key ?? null, data: input.data ? JSON.stringify(input.data) : null,
-      durationMs: input.durationMs ?? null,
+      fileRef: input.fileRef ?? null, durationMs: input.durationMs ?? null,
     });
     return Number(info.lastInsertRowid);
   }
