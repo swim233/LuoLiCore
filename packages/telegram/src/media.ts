@@ -49,10 +49,21 @@ function fileFrom(message: Record<string, unknown>): TelegramFile | null {
 export class TelegramMedia {
   constructor(private readonly api: Api, private readonly token: string, private readonly db: Sqlite, private readonly config: Readonly<Config['media']>) {}
 
+  /** 贴纸是不是当图片看。默认否 —— 贴纸多半是表情噪音，每张按 1500 token 记会把群聊上下文吃穿。 */
+  #asImage(file: TelegramFile): boolean {
+    return file.kind === 'photo' || (file.kind === 'sticker' && this.config.stickerAsImage);
+  }
+
   async process(message: Record<string, unknown>, archived: ArchivedMessage): Promise<unknown[]> {
     const file = fileFrom(message);
     if (!file) return [];
-    const limit = file.kind === 'photo' ? this.config.maxImageBytes : this.config.maxDocBytes;
+    // `downloadVoice=false`：语音一律不下载（第一版不做 STT，见 docs/14 A13，下下来也只是占磁盘）。
+    // 仍然落一条 attachments 行，好让「这里有条语音」在归档与界面上看得见。
+    if (file.kind === 'voice' && !this.config.downloadVoice) {
+      this.insert(ulid(), archived, file, null, 'skipped', 'download_voice_disabled', null, 'skipped');
+      return [{ type: 'text', text: `[语音${file.duration ? ` ${file.duration}s` : ''}]` }];
+    }
+    const limit = this.#asImage(file) ? this.config.maxImageBytes : this.config.maxDocBytes;
     const id = ulid();
     if ((file.size ?? 0) > limit) {
       this.insert(id, archived, file, null, 'skipped', 'size_limit', null, 'skipped');
@@ -66,12 +77,12 @@ export class TelegramMedia {
       // photo 的 extension 恒为 .jpg（file.name 是 undefined，remote.file_path 固定是 photos/file_N.jpg），
       // 归一化输出也是 .jpg —— 两者同名时 sharp 直接抛 "Cannot use same file for input and output"，
       // catch 把它记成「处理失败」，多模态输入 100% 不可用（docs/20 · W-MEDIA-01）。
-      const path = join(directory, file.kind === 'photo' ? `${file.uniqueId}.orig${extension}` : `${file.uniqueId}${extension}`);
+      const path = join(directory, this.#asImage(file) ? `${file.uniqueId}.orig${extension}` : `${file.uniqueId}${extension}`);
       const response = await fetch(`https://api.telegram.org/file/bot${this.token}/${remote.file_path}`);
       if (!response.ok) throw new Error(`download_http_${response.status}`);
       writeFileSync(path, Buffer.from(await response.arrayBuffer()), { mode: 0o600 });
       let localPath = path;
-      if (file.kind === 'photo') {
+      if (this.#asImage(file)) {
         localPath = join(directory, `${file.uniqueId}.jpg`);
         await sharp(path).rotate().resize({ width: this.config.maxImageEdge, height: this.config.maxImageEdge, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 85 }).toFile(localPath);
         rmSync(path, { force: true });
@@ -80,7 +91,7 @@ export class TelegramMedia {
       this.insert(id, archived, file, localPath, 'done', null, extracted, extracted === null ? 'skipped' : 'done');
       // `image` part 在 AI SDK v7 已废弃（SDK 内部就是转成 file 再发，顺带每张图打一条
       // DeprecationWarning）。读出侧 `contextMessages` 兜历史 part，写入侧从这里就产出新形状。
-      if (file.kind === 'photo') return [{ type: 'file', ref: `attachment://${id}`, mediaType: 'image/jpeg' }];
+      if (this.#asImage(file)) return [{ type: 'file', ref: `attachment://${id}`, mediaType: 'image/jpeg' }];
       if (extracted) return [{ type: 'text', text: `[文档 ${file.name ?? file.uniqueId}]\n${untrusted(`file:${file.name ?? file.uniqueId}`, [...extracted].slice(0, this.config.extract.inlineChars).join(''))}` }];
       return [{ type: 'text', text: `[${file.kind} ${file.name ?? ''}${file.duration ? ` ${file.duration}s` : ''}]` }];
     } catch (error) {
@@ -107,7 +118,11 @@ export class TelegramMedia {
   private async extract(path: string, file: TelegramFile): Promise<string | null> {
     if (!this.config.extract.enabled) return null;
     const maxChars = this.config.extract.maxChars;
-    if (file.mime?.startsWith('text/') || ['.json', '.csv', '.md', '.ts', '.js', '.py', '.yaml', '.yml'].includes(extname(path).toLocaleLowerCase())) return this.readHead(path, maxChars);
+    // 内置这批是「肯定是纯文本」的最小集；`media.extract.codeExtensions` 往上加，不替换 ——
+    // 配错一个扩展名就把 .md 的提取关掉，那种失败运维要过很久才会发现。
+    const textExtensions = new Set(['.json', '.csv', '.md', '.ts', '.js', '.py', '.yaml', '.yml',
+      ...this.config.extract.codeExtensions.map((value) => (value.startsWith('.') ? value : `.${value}`).toLocaleLowerCase())]);
+    if (file.mime?.startsWith('text/') || textExtensions.has(extname(path).toLocaleLowerCase())) return this.readHead(path, maxChars);
     if (file.mime === 'application/pdf') {
       const { PDFParse } = await import('pdf-parse');
       const parser = new PDFParse({ data: readFileSync(path) });

@@ -13,7 +13,7 @@
 | # | 假设 | 依据 / 影响面 | 若要改动 |
 |---|---|---|---|
 | A1 | Telegram 接入默认**长轮询**，Webhook 作为配置项 | 长轮询无需公网 HTTPS，开发与自托管最省事 | `telegram.mode` |
-| A2 | 文档与 WebUI 界面语言为**中文**，代码标识符与日志字段为英文 | 你全程用中文沟通 | `general.locale` + `webui/src/i18n` |
+| A2 | 文档与 WebUI 界面语言为**中文**，代码标识符与日志字段为英文 | 你全程用中文沟通 | 要改得先做 i18n（§4 里明确不做）：`webui/src/i18n` + 重新引入 `general.locale`。那个键已从 schema 摘除 —— 留一个运行时不读的语言开关只会让人以为改了有用 |
 | A3 | 默认角色为 **blocked**（纯白名单准入） | 需求写「用户/来源白名单」，白名单语义即默认拒绝 | `access.defaultUserRole/defaultChatRole` |
 | A4 | `blocked` 主体的消息**不入库** | 避免为陌生人存储数据；也省磁盘 | `access.archiveBlocked=true` 可改为入库不响应 |
 | A5 | 论坛 topic 默认**不隔离**（`scope='chat'`） | 你说「同一群聊共享一个上下文」 | `context.scope='thread'` |
@@ -37,7 +37,7 @@
 | A23 | 「重任务」判定交给**模型自己**（提示词 + 步数护栏），不做前置分类器 | 分类器错判的体验代价高于收益 | 加一个 `low` 档前置分类步骤 |
 | A24 | 取消时**丢弃**已生成内容（`commitPartial=false`） | 取消通常意味着「这轮不算」 | `cancel.commitPartial=true` |
 | A25 | 流式输出已发出内容后失败，**仍提交** delta | 上下文必须与用户看到的一致 | 不建议改 |
-| A26 | 审批只有 **owner** 能批（`allowInitiator=false`） | 否则 trusted 用户可自批自己的高危命令 | `approval.allowInitiator=true` |
+| A26 | 审批只有 **owner** 能批 | 否则 trusted 用户可自批自己的高危命令；且 WebUI 只有一个 owner 身份（A15），裁决权没有能下放到发起人的落点 | 先答 §2 Q7（WebUI 多用户），再重新引入 `approval.allowInitiator`。该键已从 schema 摘除 |
 | A27 | Plugin **进程内全信任**运行，无沙箱 | Node 内做可靠的 JS 沙箱代价极高且不可靠 | 见 §2 Q6 |
 | A28 | MCP 默认全部**关闭**且 `minRole=trusted` | 第三方工具不可控 | `mcp.enabled` + 每 server 配置 |
 

@@ -65,23 +65,40 @@ NODE_ENV=production
 
 > `🚧 未实现` 表示该键仍由 schema 接受，便于未来兼容，但当前运行时不会读取；WebUI 必须置灰，不能宣称保存后生效。显式白名单由 `KNOWN_UNIMPLEMENTED_CONFIG_KEYS` 维护，测试要求这里逐项列出。
 
+### 2.0 第五轮摘除的键
+
+以下 5 个键已**从 schema 删除**，不再是「未实现」而是「不存在」。留着它们的代价是运维在一个
+永远不生效的格子里改东西，或者在两个同义键里改错那一个：
+
+| 键 | 摘除理由 | 想要这件事的话改哪儿 |
+|---|---|---|
+| `general.locale` | i18n 在 [14 §4](./14-open-questions.md) 明确「第一版不做」，运行时从不读它 | 真做 i18n 时与 `webui/src/i18n` 一起加回来 |
+| `approval.allowInitiator` | WebUI 只有一个 owner 身份（[14](./14-open-questions.md) A15），裁决权下放不到发起人，当前架构里没有能实现它的落点 | 先答 [14 §2](./14-open-questions.md) Q7（WebUI 多用户） |
+| `quota.perTurn.maxToolCalls` | 真正生效的是 `tools.maxCallsPerTurn` | `tools.maxCallsPerTurn` |
+| `quota.perTurn.maxSubagents` | 真正生效的是 `agent.maxSubagentsPerTurn` | `agent.maxSubagentsPerTurn` |
+| `quota.perTurn.maxDurationMs` | 真正生效的是 `concurrency.turnTimeoutMs` | `concurrency.turnTimeoutMs` |
+
+**升级不会卡住**：顶层 config schema 不带 `.strict()`，老 `config.yaml` 里残留这些键会被 zod
+静默剥掉；`config_kv` 里的残留行由 `loadConfig` 的 `onInvalidOverride` 逐条剔除并告警。
+
+### 2.0.1 未实现键白名单
+
 当前白名单（按模块分组）。**每一行都以 🚧 起头，测试 `config.test.ts` 要求白名单里的每个键都能在本文件里找到一行同时含该键与 🚧**，否则视为文档未同步：
 
-- 🚧 general / Telegram / trigger：`general.name`（运行时未接线） · `general.locale` · `telegram.dropPendingOnStart` · `telegram.webhook.url` · `telegram.webhook.path` · `telegram.webhook.secretToken` · `telegram.notifyEdits` · `trigger.cooldownMsPerUser` · `trigger.ignoreEditedAsTrigger`（编辑消息一律按背景消息归档，不开新轮次）
-- 🚧 context / concurrency / cancel：`context.background.showTime` · `context.background.includeNonText` · `context.rebase.markMeta` · `context.cacheCommits` · `concurrency.coalesceSameUserMs` · `cancel.commitPartial`
-- 🚧 prompt / memory：`prompt.includeToolCatalog` · `prompt.runtimeBlock.showQuota` · `prompt.runtimeBlock.showContextWatermark` · `prompt.runtimeBlock.showWorkspace` · `memory.pubWriteRequiresApproval` · `memory.autoApplyCompaction` · `memory.requireSourceTag`
-- 🚧 agent / provider：`agent.maxConcurrentSubagents` · `agent.askArbiter` · `agent.askEscalateToUser` · `agent.progressThrottleMs` · `provider.healthDownCooldownMinutes`
-- 🚧 tools / approval：`tools.fs.allowHostFsForOwner` · `tools.archive.defaultSearchLimit` · `tools.archive.maxSearchLimit` · `tools.archive.defaultReadLimit` · `tools.archive.maxReadLimit` · `tools.web.summarizeWithAlias` · `tools.web.allowlist` · `tools.web.denylist` · `approval.allowInitiator`（WebUI 是单角色 owner，裁决权下放不到发起人）
-- 🚧 output / media：`output.flushOnSentence` · `output.parseMode` · `output.typingWhileWorking` · `output.placeholderAfterMs` · `output.maxMentions` · `media.maxImagesPerTurn` · `media.groupDebounceMs` · `media.stickerAsImage` · `media.downloadVoice` · `media.extract.codeExtensions`
-- 🚧 extensions / persistence / logs：`skills.enabled` · `plugins.enabled` · `plugins.watch` · `mcp.connectTimeoutMs` · `db.ftsTokenizer` · `logs.gzipAfterDays` · `logs.redactPatterns`
-- 🚧 quota / WebUI / alerts：`quota.perTurn.maxToolCalls` · `quota.perTurn.maxSubagents` · `quota.perTurn.maxDurationMs` · `quota.onExceeded.notifyOwner` · `quota.warnAtRatio` · `webui.enabled` · `webui.basePath` · `webui.publicUrl` · `alerts.notifyOwner` · `alerts.dedupeMinutes` · `alerts.webhookUrl` · `alerts.on`
+- 🚧 general / Telegram / trigger：`telegram.webhook.url` · `telegram.webhook.path` · `telegram.webhook.secretToken` · `telegram.notifyEdits` · `trigger.ignoreEditedAsTrigger`（编辑消息一律按背景消息归档，不开新轮次）
+- 🚧 context / cancel：`context.rebase.markMeta` · `context.cacheCommits` · `cancel.commitPartial`
+- 🚧 memory：`memory.pubWriteRequiresApproval` · `memory.autoApplyCompaction` · `memory.requireSourceTag`
+- 🚧 agent：`agent.askArbiter` · `agent.askEscalateToUser`
+- 🚧 tools：`tools.fs.allowHostFsForOwner` · `tools.web.summarizeWithAlias` · `tools.web.allowlist` · `tools.web.denylist`
+- 🚧 output / media：`output.flushOnSentence` · `output.parseMode` · `output.typingWhileWorking` · `output.placeholderAfterMs` · `output.maxMentions` · `media.groupDebounceMs`
+- 🚧 persistence / logs：`db.ftsTokenizer` · `logs.gzipAfterDays` · `logs.redactPatterns`
+- 🚧 quota / WebUI / alerts：`quota.onExceeded.notifyOwner` · `quota.warnAtRatio` · `webui.enabled` · `webui.basePath` · `webui.publicUrl` · `alerts.notifyOwner` · `alerts.dedupeMinutes` · `alerts.webhookUrl` · `alerts.on`
 
 ```yaml
 # ============================================================ general
 general:
-  name: 洛璃                      # 🚧 未实现 · 运行时不读它（日志与 WebUI 标题都没接线）
+  name: 洛璃                      # 热更新 · WebUI 品牌位与标签页标题；启动日志那一行是启动时盖的章
   timezone: Asia/Shanghai         # 需重启 · 影响配额 bucket 与时间渲染
-  locale: zh-CN                   # 热更新
   maintenanceCron: '0 4 * * *'    # 需重启 · 每日维护任务
   shutdown:
     graceMs: 30000                # 需重启
@@ -121,7 +138,7 @@ trigger:
   wakewordMinLength: 2
   requireTextAfterMention: false
   ignoreEditedAsTrigger: true
-  cooldownMsPerUser: 0
+  cooldownMsPerUser: 0            # 热更新 · >0 时同一个人在窗口内只开第一轮，其余降级成背景消息
 
 # 唤醒词可用性（checkWakeword，运行时匹配与 WebUI 写入端共用一份）：
 #   · 去掉前导 ^ 后短于 wakewordMinLength → 整条跳过
@@ -147,8 +164,8 @@ context:
     enabled: true                 # 热更新
     maxPerTurn: 20                # 热更新 · ★ 需求方明确要求可配置
     showUsername: true            # 热更新 · 群聊前缀里附 `@用户名`；id 恒附（02 §4.3）
-    showTime: true
-    includeNonText: true          # 图片/文档等以占位符入上下文
+    showTime: true                # 热更新 · 关掉后前缀收成 [名字]
+    includeNonText: true          # 热更新 · 关掉后纯图片/文件的背景发言不进上下文（触发与被回复的不受管）
   rebase:                         # D1
     injectNotice: false           # 热更新 · rebase 时是否插入可见的说明消息
     markMeta: true                # 热更新 · 是否在消息 meta 标记 rebased（建议保持 true）
@@ -161,7 +178,7 @@ concurrency:
   perKey: 3                       # 需重启 · 信号量在启动时建好，改了要重启才换（docs/20 · W-CFG-02）
   global: 8                       # 需重启
   queueMax: 20                    # 需重启
-  coalesceSameUserMs: 0           # 热更新 · >0 时合并同用户连续触发
+  coalesceSameUserMs: 0           # 热更新 · >0 时只为窗口内最后一条开轮次，先到的降级成背景消息
   turnTimeoutMs: 600000           # 热更新
 cancel:
   commitPartial: false            # 热更新 · 取消时是否提交已生成部分
@@ -171,9 +188,9 @@ prompt:
   maxTokens: 12000                # 热更新 · block 0–6 总上限
   includeToolCatalog: true        # 热更新
   runtimeBlock:
-    showQuota: true
-    showContextWatermark: true
-    showWorkspace: true
+    showQuota: true               # 热更新 · 有本轮预留时才有这一行
+    showContextWatermark: true    # 热更新
+    showWorkspace: true           # 热更新
 memory:
   dir: ./memory                   # 需重启
   pubWriteMinRole: trusted        # 热更新 · ★ D12 安全阀。memory_write 读的是本轮那份合并配置
@@ -195,13 +212,13 @@ agent:
     maxSteps: 12                  # 热更新
     downgradeAfterStep: 8         # 热更新 · 超过该步数自动降到 low 档
   maxDepth: 3                     # 需重启 · AgentManager 构造时吃的是快照（docs/20 · W-CFG-02）
-  maxConcurrentSubagents: 3
+  maxConcurrentSubagents: 3       # 热更新 · 同一轮里同时在跑的子 agent 数上限
   maxSubagentsPerTurn: 10         # 需重启 · 同上
   askTimeoutMs: 120000
   maxAsksPerRun: 5
   askArbiter: true                # 热更新 · 用 low 档模型仲裁 ask_parent
   askEscalateToUser: false        # 热更新 · 仲裁失败时是否转人工
-  progressThrottleMs: 3000
+  progressThrottleMs: 3000        # 热更新 · report_progress 广播到 SSE 的节流窗口（库里那行照常更新）
   agents:                         # 子 agent 定义（WebUI 可编辑，见 04 §3.1）
     - name: researcher
       description: 在聊天记录/文件/网络中检索资料并给出带引用的结论
@@ -238,7 +255,7 @@ provider:
   retryBaseMs: 1000
   retryMaxMs: 30000
   healthCheckCron: '*/10 * * * *' # 需重启
-  healthDownCooldownMinutes: 30
+  healthDownCooldownMinutes: 30   # 热更新 · 判成 down 的 provider 冷却这么久后重新参与模型链
   requestTimeoutMs: 120000        # 热更新 · 单次尝试「发出请求 → 拿到响应头」的上限。到点后只中止
                                   #   这一次尝试（重试与别名 fallback 照常走），并且**不再等** ——
                                   #   provider 实现不认 abort 时光中止是没用的（04 §5.3）
@@ -286,10 +303,10 @@ tools:
     maxTimeoutMs: 300000
     maxOutputBytes: 65536
   archive:
-    defaultSearchLimit: 20
-    maxSearchLimit: 100
-    defaultReadLimit: 50
-    maxReadLimit: 200
+    defaultSearchLimit: 20        # 热更新
+    maxSearchLimit: 100           # 热更新
+    defaultReadLimit: 50          # 热更新
+    maxReadLimit: 200             # 热更新
   tg:
     maxExtraMessagesPerTurn: 3    # 热更新 · 一轮内 send_message/send_photo/send_file 的调用上限
     maxFileSendMb: 50             # 热更新 · send_file/send_photo 的单文件上限
@@ -340,7 +357,6 @@ approval:
   # 命中规则的调用挂起等待 WebUI 裁决的上限；到点落 expired 并把「未获批准」还给模型
   ttlMs: 180000                   # 热更新
   skipForOwner: true              # 热更新
-  allowInitiator: false           # 🚧 未实现
   rememberWithinTurn: true        # 热更新
   rules:                          # 热更新（WebUI 可编辑）
     - tool: bash
@@ -380,10 +396,10 @@ media:
   maxImageBytes: 8388608
   maxDocBytes: 20971520
   maxImageEdge: 1568
-  maxImagesPerTurn: 4
+  maxImagesPerTurn: 4             # 需重启 · 超出的图片在装配时换成占位文本
   groupDebounceMs: 1500
-  stickerAsImage: false
-  downloadVoice: true             # 存盘但不解析（不做 STT）
+  stickerAsImage: false           # 需重启 · 开了之后贴纸按图片下载并归一化
+  downloadVoice: true             # 需重启 · 存盘但不解析（不做 STT）；关掉后语音一律不下载
   extract:
     enabled: true
     maxChars: 40000
@@ -393,15 +409,15 @@ media:
 
 # ============================================================ skills / plugins / mcp（D14）
 skills:
-  enabled: true                   # 热更新
+  enabled: true                   # 需重启 · 关掉后不扫盘、不监听，SKILL.md 一个都不进工具目录
   dir: ./skills                   # 需重启
   watch: true                     # 需重启
   # WebUI 新建 Skill 未显式选择角色时使用；SkillLoader 每次创建都读当前快照
   defaultMinRole: trusted         # 热更新
 plugins:
-  enabled: true                   # 热更新
+  enabled: true                   # 需重启 · 关掉后不 reconcile，钩子链为空
   dir: ./plugins                  # 需重启
-  watch: false
+  watch: false                    # 需重启 · 开了等于让磁盘写入直接热加载一份全信任 JS
   hookTimeoutMs: 5000
   order: []                       # 需重启 · plugin 名顺序，决定 hook 执行序（PluginManager 在构造时就把它拿走了，reconcile 读的还是旧值）
   autoDisableAfterErrors: 3
@@ -409,7 +425,7 @@ mcp:
   # 总开关，出厂就是 false：`McpManager.reconcile` 一上来就对它 early-return，关着的时候
   # `servers` 里配了多少个都不会连。WebUI 扩展页在它关着时给一条横幅（docs/09 §3.8）。
   enabled: false                  # 热更新
-  connectTimeoutMs: 15000
+  connectTimeoutMs: 15000         # 需重启 · 握手与 listTools 的上界，卡住的 server 不会拖住启动
   # 需重启：`scheduler.add(config.mcp.healthCheckCron, …)` 在启动时就把表达式拿走了，Scheduler
   # 没有重配入口。这一项曾因为白名单里写的是整段 `mcp` 而被 WebUI 标成「热更新」（docs/21 · G-CFG-05）。
   healthCheckCron: '*/5 * * * *'  # 需重启
@@ -452,9 +468,6 @@ quota:
   perTurn:
     maxCostUsd: 0.50
     maxSteps: 12
-    maxToolCalls: 40
-    maxSubagents: 10
-    maxDurationMs: 600000
   rateLimit:
     turnsPerUserPerHour: 30
     turnsPerChatPerHour: 100

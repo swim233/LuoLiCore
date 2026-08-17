@@ -1,13 +1,13 @@
 import { rmSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { ArchiveRepository, ContextRepository, OperationsRepository, closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
-import { ContextEngine, LogSink } from '@luoli/core';
+import { ContextEngine, LogSink, configSchema } from '@luoli/core';
 import type { Config } from '@luoli/core';
 
 const seeds = [11, 29, 47, 83, 131, 197];
 
 function config(tokens: number): Config {
-  return { general: { timezone: 'UTC' }, context: { scope: 'chat', background: { enabled: true, maxPerTurn: 4 }, rebase: { injectNotice: false }, limit: { tokens, maxMessages: 80, minKeepTurns: 1 }, cacheCommits: 64, tokenRatioAlpha: 0.2 } } as Config;
+  return configSchema.parse({ general: { timezone: 'UTC' }, context: { scope: 'chat', background: { enabled: true, maxPerTurn: 4 }, rebase: { injectNotice: false }, limit: { tokens, maxMessages: 80, minKeepTurns: 1 }, cacheCommits: 64, tokenRatioAlpha: 0.2 } });
 }
 
 describe('context output invariants', () => {

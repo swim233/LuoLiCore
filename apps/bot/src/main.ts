@@ -69,7 +69,7 @@ const turnConcurrency = new TurnConcurrency(config.concurrency);
 const log = new LogSink(operations, config.logs.dir, [process.env.BOT_TOKEN ?? '', process.env.LUOLI_MASTER_KEY ?? ''], { level: config.logs.level, maxFileMb: config.logs.maxFileMb, bodyMaxBytes: config.logs.bodyMaxBytes, console: config.logs.console, events });
 const context = new ContextEngine(db, archive, log);
 const modelRegistry = new ModelRegistry(db, providers);
-modelRegistry.rebuild();
+modelRegistry.rebuild(config.provider.healthDownCooldownMinutes);
 log.setSecrets([process.env.BOT_TOKEN ?? '', process.env.LUOLI_MASTER_KEY ?? '', config.tools.web.searchApiKey, ...providers.allDecryptedKeys()]);
 // 零配置首启本来就没有 main 别名，拒绝启动会把补配置用的 WebUI 一起带走（docs/04 §5.2）。
 // 缺 main 只告警：轮次会在 streamMainAgent 里失败，WebUI 写入别名后 rebuildModels() 即时生效。
@@ -80,14 +80,24 @@ if (!modelRegistry.aliases().includes('main')) {
 }
 const memory = new MemoryStore(db, config.memory.dir, config.memory.softLimitTokens, config.memory.hardLimitTokens, config.memory.maxSections, config.memory.forgetMeRetentionDays, log);
 const skills = new SkillLoader(db, config.skills.dir, () => configStore.snapshot().skills.defaultMinRole);
-skills.scan();
+// `skills.enabled=false` 时不扫盘也不监听：目录里的 SKILL.md 一个都不进工具目录。
+// 关掉是整块关掉，而不是「扫出来但不给用」—— 后者会让工具目录里多出一批点不动的名字。
+if (config.skills.enabled) skills.scan();
+else log.event({ level: 'info', kind: 'skills.disabled', summary: 'Skills disabled by config' });
 // 一份常量供两处用：写入方（AgentResultStore）与清理方（MaintenanceService.gcFiles）指向
 // 不同目录时，gc 会把整棵结果目录当成孤儿删空。
 const agentResultsDir = resolve('data/agent-results');
 const agents = new AgentManager(db, new AgentResultStore(agentResultsDir), config.agent.agents, config.agent.maxDepth, config.agent.maxSubagentsPerTurn);
-if (config.skills.watch) skills.startWatching();
+if (config.skills.enabled && config.skills.watch) skills.startWatching();
 const plugins = new PluginManager(db, config.plugins.dir, config.plugins.hookTimeoutMs, config.plugins.autoDisableAfterErrors, config.plugins.order);
-await plugins.reconcile();
+// `plugins.enabled=false` 时不 reconcile：一个 plugin 都不加载，钩子链是空的。
+// 「进程内全信任」（docs/14 A27）意味着这个开关是安全边界，不是性能开关。
+if (config.plugins.enabled) {
+  await plugins.reconcile();
+  // `plugins.watch`：目录变动后重新 reconcile。默认关 —— 热加载一个全信任的 JS 文件，
+  // 风险面比省一次重启大得多，开它要自己清楚这一点。
+  if (config.plugins.watch) plugins.startWatching();
+} else log.event({ level: 'info', kind: 'plugins.disabled', summary: 'Plugins disabled by config' });
 const mcp = new McpManager(db, () => configStore.snapshot().mcp, log);
 await mcp.reconcile();
 const maintenance = new MaintenanceService(db, config.db.path, config.db.backupKeep, config.logs.retentionDays, config.logs.dir,
@@ -96,7 +106,7 @@ const scheduler = new Scheduler((name, error) => log.event({ level: 'error', kin
 scheduler.add(config.general.maintenanceCron, () => { const result = maintenance.cleanup(); log.event({ level: 'info', kind: 'maintenance.cleanup', summary: 'Scheduled cleanup complete', data: result }); }, 'maintenance');
 scheduler.add(config.db.vacuumCron, () => { maintenance.vacuum(); log.event({ level: 'info', kind: 'maintenance.vacuum', summary: 'Scheduled VACUUM complete' }); }, 'vacuum');
 scheduler.add(config.memory.compactCron, () => { log.event({ level: 'info', kind: 'memory.compact', summary: 'Memory compaction review scheduled', data: { pending: memory.list().filter((entry) => entry.tokens > config.memory.softLimitTokens).length } }); }, 'memory-compact');
-scheduler.add(config.provider.healthCheckCron, () => { modelRegistry.rebuild(); log.event({ level: 'info', kind: 'provider.health', summary: 'Provider registry health refreshed', data: { aliases: modelRegistry.aliases() } }); }, 'provider-health');
+scheduler.add(config.provider.healthCheckCron, () => { modelRegistry.rebuild(configStore.snapshot().provider.healthDownCooldownMinutes); log.event({ level: 'info', kind: 'provider.health', summary: 'Provider registry health refreshed', data: { aliases: modelRegistry.aliases() } }); }, 'provider-health');
 scheduler.add(config.mcp.healthCheckCron, () => mcp.reconcile(), 'mcp-health');
 const promptAssembler = new PromptAssembler();
 const promptDocuments = new PromptDocuments(db, config.memory.dir);
@@ -219,7 +229,7 @@ async function dryRunAgent(name: string, task: string, signal: AbortSignal, emit
   }
 }
 
-const rebuildModels = (): void => { modelRegistry.rebuild(); const live = configStore.snapshot(); log.setSecrets([process.env.BOT_TOKEN ?? '', process.env.LUOLI_MASTER_KEY ?? '', live.tools.web.searchApiKey, ...providers.allDecryptedKeys()]); };
+const rebuildModels = (): void => { const live = configStore.snapshot(); modelRegistry.rebuild(live.provider.healthDownCooldownMinutes); log.setSecrets([process.env.BOT_TOKEN ?? '', process.env.LUOLI_MASTER_KEY ?? '', live.tools.web.searchApiKey, ...providers.allDecryptedKeys()]); };
 const eventStreams = new EventStreamRegistry();
 const server = createServer({ config: configStore, db, operations, principals, archive, context, providers, modelCatalog, approvals: approval, rebuildModels, maintenance, events, log,
   memory, promptDocuments, skills, plugins, mcp, agents, turnRegistry, sandbox, eventStreams, previewPrompt, dryRunAgent, configSchema: configJsonSchema(), startedAt, setup });
@@ -240,7 +250,7 @@ events.subscribe((event) => {
     log.event({ level: 'info', kind: 'config.changed', summary: 'Runtime configuration reloaded', data: { keys } });
   }).catch((error) => log.event({ level: 'error', kind: 'config.invalid', summary: error instanceof Error ? error.message : String(error) }));
 });
-log.event({ level: 'info', kind: 'system.start', summary: 'LuoLiCore started', data: { webui: `${config.webui.host}:${config.webui.port}`, providerSecrets: secrets.available } });
+log.event({ level: 'info', kind: 'system.start', summary: `${config.general.name} started`, data: { name: config.general.name, webui: `${config.webui.host}:${config.webui.port}`, providerSecrets: secrets.available } });
 if (process.env.BOT_TOKEN) {
   bot = await createTelegramBot(process.env.BOT_TOKEN, { config: configStore, db, principals, archive, operations, context, turns, quota, memory, plugins, tools: toolRegistry, approvals: approval,
     registry: turnRegistry, concurrency: turnConcurrency, log,
@@ -248,7 +258,9 @@ if (process.env.BOT_TOKEN) {
     // 用 turn.config 而不是全局快照：本轮的 perChat 覆盖已经在 openTurn 时合并进去了。
     onTurn: (turn, reservation) => { const live = turn.config as Readonly<typeof config>; return streamMainAgent(turn, { config: live, db, registry: modelRegistry, tools: toolRegistry,
       prompts: promptAssembler, documents: promptDocuments, skills, plugins, agents, ledger, context, quota, reservation, log, workspace: resolve(live.sandbox.workspaceDir, turn.chatId) }); } });
-  if (config.telegram.mode === 'polling') void bot.start({ allowed_updates: config.telegram.allowedUpdates as never[] });
+  // `dropPendingOnStart`：停机期间积压的 update 直接丢掉，不补跑。默认关 —— 丢的是真实用户
+  // 发过的消息。开它的场景是长时间停机后重启，不想让 bot 对着一小时前的话题连开几十轮。
+  if (config.telegram.mode === 'polling') void bot.start({ allowed_updates: config.telegram.allowedUpdates as never[], drop_pending_updates: config.telegram.dropPendingOnStart });
   // webhook 模式没有实现：既不 start 也不注册路由，静默不收任何消息比直接报错危险得多。
   else throw new Error(`telegram.mode=${config.telegram.mode} is not implemented; only polling is supported`);
 } else {

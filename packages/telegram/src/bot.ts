@@ -80,6 +80,10 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
   });
   const media = new (await import('./media.js')).TelegramMedia(bot.api, token, dependencies.db, config.media);
   const ingress = new Map<number, TelegramIngress>();
+  /** `trigger.cooldownMsPerUser` 的按人时间戳。有界淘汰见使用处。 */
+  const triggerCooldown = new Map<string, number>();
+  /** `concurrency.coalesceSameUserMs` 的在等窗口，键是 `${chatId}:${userId}`。同一个键最多一个。 */
+  const coalescing = new Map<string, { supersede: () => void }>();
   bot.use(async (ctx, next) => {
     if (!dependencies.operations.claimUpdate(ctx.update.update_id)) return;
     const from = ctx.from;
@@ -324,6 +328,46 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
     const { userId, chatId, effectiveRole, archived, quoted, triggerReason } = access;
     const message = ctx.message;
     if (!triggerReason || triggerReason === 'command') return;
+    // `trigger.cooldownMsPerUser`：同一个人连着 @ 好几句时，只开第一轮。**被压住的那条不会消失**
+    // ——它已经以 triggered=0 落库（下面这行改的就是这个），所以下一轮的背景认领会把它带进上下文。
+    // 与 `quota.rateLimit` 是两件事：那个按小时算配额，这个按秒防连点。
+    const cooldownMs = config.trigger.cooldownMsPerUser;
+    if (cooldownMs > 0) {
+      const last = triggerCooldown.get(userId) ?? 0;
+      if (receivedAt - last < cooldownMs) {
+        dependencies.archive.scope(chatId, message.message_thread_id ?? null).demoteToBackground(archived.id);
+        dependencies.log.event({ level: 'debug', kind: 'trigger.cooldown', summary: 'trigger suppressed by per-user cooldown', chatId, userId, data: { cooldownMs, sinceMs: receivedAt - last } });
+        return;
+      }
+      triggerCooldown.set(userId, receivedAt);
+      // 有界：一个群里换一批人说话就是一批新键，不清的话这张表只涨不落。
+      if (triggerCooldown.size > 4096) for (const [key, at] of triggerCooldown) { if (receivedAt - at >= cooldownMs) triggerCooldown.delete(key); }
+    }
+    // `concurrency.coalesceSameUserMs`：同一个人在窗口内连着说，只为**最后一条**开轮次。
+    // 先到的那几条降级成背景消息 —— 它们的正文照样进这一轮的上下文（`claimBackground` 认领），
+    // 只是渲染成 `[名字 时间] …` 而不是触发消息。这与 docs/02 §215 早先设想的「追加进同一份
+    // delta」不是一回事：往**已经在跑**的轮次里塞新的 user 消息会撞上 `finalized` 后禁止
+    // `appendDelta` 的不变量，那是上下文引擎的红线。默认 0（关）。
+    const coalesceMs = config.concurrency.coalesceSameUserMs;
+    if (coalesceMs > 0) {
+      const coalesceKey = `${chatId}:${userId}`;
+      coalescing.get(coalesceKey)?.supersede();
+      let superseded = false;
+      let wake: () => void = () => undefined;
+      const waiter = { supersede: () => { superseded = true; wake(); } };
+      coalescing.set(coalesceKey, waiter);
+      await new Promise<void>((resolve) => {
+        wake = resolve;
+        const timer = setTimeout(resolve, coalesceMs);
+        timer.unref?.();
+      });
+      if (coalescing.get(coalesceKey) === waiter) coalescing.delete(coalesceKey);
+      if (superseded) {
+        dependencies.archive.scope(chatId, message.message_thread_id ?? null).demoteToBackground(archived.id);
+        dependencies.log.event({ level: 'debug', kind: 'trigger.coalesced', summary: 'superseded by a later message from the same user', chatId, userId, data: { coalesceMs } });
+        return;
+      }
+    }
     if (!dependencies.quota.canStart({ chatId, userId, turnsPerUserPerHour: config.quota.rateLimit.turnsPerUserPerHour,
       turnsPerChatPerHour: config.quota.rateLimit.turnsPerChatPerHour, concurrentPerUser: config.quota.rateLimit.concurrentPerUser })) {
       if (config.quota.onExceeded.reply) await ctx.reply(config.quota.onExceeded.message.replace('{spent}', '—').replace('{limit}', '—').replace('{resetAt}', '下个额度窗口'));

@@ -2,8 +2,7 @@ import { rmSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { ArchiveRepository, ContextRepository, closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
 import type { ArchivedMessage } from '@luoli/db';
-import { ContextEngine } from '@luoli/core';
-import type { Config } from '@luoli/core';
+import { ContextEngine, configSchema } from '@luoli/core';
 
 /**
  * 「回复一张图唤醒 bot，模型看不到那张图」的回归防线。
@@ -22,10 +21,10 @@ function harness(name: string) {
   return { db, archive, engine: new ContextEngine(db, archive) };
 }
 
-const config = {
+const config = configSchema.parse({
   general: { timezone: 'UTC' },
   context: { scope: 'chat', background: { enabled: true, maxPerTurn: 20 }, rebase: { injectNotice: false }, limit: { tokens: 32_000, maxMessages: 200, minKeepTurns: 1 } },
-} as Config;
+});
 
 function append(archive: ArchiveRepository, id: number, text: string | null, triggered: boolean, extra: Partial<Parameters<ReturnType<ArchiveRepository['scope']>['append']>[0]> = {}): ArchivedMessage {
   return archive.scope('chat', null).append({ chatId: 'chat', messageThreadId: null, tgMessageId: id, direction: 'in', fromKind: 'user',

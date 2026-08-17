@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { ToolLoopAgent } from 'ai';
 import { MockLanguageModelV4 } from 'ai/test';
 import { ArchiveRepository, ContextRepository, closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
-import { ContextEngine, contextMessages } from '@luoli/core';
+import { ContextEngine, configSchema, contextMessages } from '@luoli/core';
 import type { Config } from '@luoli/core';
 import type { RuntimeTurnContext } from '@luoli/shared';
 
@@ -24,13 +24,13 @@ function harness(name: string) {
   return { db, archive, engine: new ContextEngine(db, archive) };
 }
 
-const baseConfig = {
+const baseConfig = configSchema.parse({
   general: { timezone: 'UTC' },
   context: { scope: 'chat', background: { enabled: true, maxPerTurn: 20 }, rebase: { injectNotice: false }, limit: { tokens: 32_000, maxMessages: 200, minKeepTurns: 1 } },
-} as Config;
+});
 
 function withConfig(patch: Partial<Config['context']>): Config {
-  return { ...baseConfig, context: { ...baseConfig.context, ...patch } } as Config;
+  return configSchema.parse({ ...baseConfig, context: { ...baseConfig.context, ...patch } });
 }
 
 function append(archive: ArchiveRepository, id: number, text: string, triggered: boolean) {

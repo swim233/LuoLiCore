@@ -28,6 +28,18 @@ function fingerprint(server: ServerConfig): string {
   return JSON.stringify([server.transport, server.command ?? null, server.args ?? [], server.env ?? {}, server.url ?? null, server.headers ?? {}]);
 }
 
+/** 超时后拒绝，但不取消底层操作 —— MCP SDK 的 connect 没有 abort 入口。调用方随即把这台
+ *  server 记成 down 并丢掉 client 引用，挂着的握手最终自己失败或被 close 收掉。 */
+async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([promise, new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+      timer.unref?.();
+    })]);
+  } finally { if (timer) clearTimeout(timer); }
+}
+
 export class McpManager {
   readonly #clients = new Map<string, { client: Client; fingerprint: string }>();
   readonly #tools = new Map<string, { name: string; description: string; inputSchema: Record<string, unknown>; minRole: Role; call: (input: unknown) => Promise<unknown> }>();
@@ -49,9 +61,13 @@ export class McpManager {
     const transport = server.transport === 'stdio'
       ? new StdioClientTransport({ command: server.command!, args: server.args ?? [], ...(server.env ? { env: server.env } : {}) })
       : new StreamableHTTPClientTransport(new URL(server.url!), server.headers ? { requestInit: { headers: server.headers } } : undefined);
-    await client.connect(transport as Parameters<Client['connect']>[0]);
+    // `mcp.connectTimeoutMs`：握手本身也要有上界。一台 stdio server 卡在启动里（等一个不存在的
+    // 凭据、DNS 打不通）会让 `reconcile()` 永远回不来，而 reconcile 在启动路径上 —— 整个进程起不来。
+    // `server.timeoutMs` 管的是 callTool，两者不是一回事。
+    const connectTimeoutMs = this.#config().connectTimeoutMs;
+    await withTimeout(client.connect(transport as Parameters<Client['connect']>[0]), connectTimeoutMs, `${server.name} connect`);
     this.#clients.set(server.name, { client, fingerprint: print });
-    const tools = await client.listTools();
+    const tools = await withTimeout(client.listTools(), connectTimeoutMs, `${server.name} listTools`);
     this.db.prepare(`INSERT INTO mcp_servers(name,transport,command,args_json,env_json,url,headers_json,min_role,enabled,tool_allow_json,tool_deny_json,timeout_ms,state,tools_json,connected_at,updated_at)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET state='up',tools_json=excluded.tools_json,connected_at=excluded.connected_at,updated_at=excluded.updated_at,last_error=NULL`)
       .run(server.name, server.transport, server.command ?? null, JSON.stringify(server.args ?? []), JSON.stringify(server.env ?? {}), server.url ?? null, JSON.stringify(server.headers ?? {}), server.minRole ?? this.#config().defaultMinRole,
