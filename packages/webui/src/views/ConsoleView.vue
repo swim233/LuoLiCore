@@ -1118,16 +1118,21 @@ async function removeMcp(name: string): Promise<void> {
   catch (error) { toastError('删除 MCP 失败', error); }
 }
 
-// ── 维护：备份 / VACUUM / 清日志 / 重建 FTS。gc-files 后端是 not_implemented，不给按钮 ────
+// ── 维护：备份 / VACUUM / 清日志 / 清孤儿 / 重建 FTS ───────────────────────────────────
 const MAINTENANCE_ACTIONS = [
   { action: 'backup', label: '立即备份 DB', icon: 'pi pi-database', hint: '走 VACUUM INTO 写一份完整快照到 db.path 旁边，保留 db.backupKeep 份' },
   { action: 'vacuum', label: 'VACUUM', icon: 'pi pi-compress', hint: '整理页面碎片、回收空间。库大时会阻塞写入' },
-  { action: 'cleanup-logs', label: '清理过期日志', icon: 'pi pi-eraser', hint: '按 logs.retentionDays 删掉过期的 log_events 与 blobs/' },
+  { action: 'cleanup-logs', label: '清理过期日志', icon: 'pi pi-eraser', hint: '按 logs.retentionDays 删掉过期的 log_events、blobs/ 与子 agent 全文结果' },
+  { action: 'gc-files', label: '清理孤儿文件', icon: 'pi pi-trash', hint: '只删没有任何 DB 行指向的文件（下载中途崩溃、local_path 被换掉留下的）。不是过期策略：在用的媒体一个都不动' },
   { action: 'rebuild-fts', label: '重建 FTS 索引', icon: 'pi pi-sync', hint: '消息检索结果不对（漏命中/命中已删消息）时重建' },
 ] as const;
 const maintenanceBusy = ref('');
 async function runMaintenance(action: string, label: string): Promise<void> {
-  if (!confirm(`执行「${label}」？大库上可能耗时较久，期间写入会被阻塞。`)) return;
+  // gc-files 是**删文件**，别和「整理一下」混在同一句确认语里：运维需要知道它删什么、不删什么。
+  const warning = action === 'gc-files'
+    ? '只删没有任何数据库行指向的孤儿文件；在用的媒体与子 agent 结果一个都不动。这不是保留策略，不会让在用的附件变少。'
+    : '大库上可能耗时较久，期间写入会被阻塞。';
+  if (!confirm(`执行「${label}」？${warning}`)) return;
   maintenanceBusy.value = action;
   try {
     const result = await api<unknown>(`/api/maintenance/${action}`, { method: 'POST', body: '{}' });

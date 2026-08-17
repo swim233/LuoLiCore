@@ -11,7 +11,7 @@ import { ALIAS_NAME_PATTERN, HOT_RELOADABLE_CONFIG_KEYS, KNOWN_UNIMPLEMENTED_CON
 import type { CatalogIndex, ModelMetadata, ProviderProbe } from '@luoli/core';
 import type { ArchiveRepository, OperationsRepository, PrincipalRepository, Sqlite } from '@luoli/db';
 import { deleteAppKv, modelAliasKey, readAppKv } from '@luoli/db';
-import { assignDotted, type Role } from '@luoli/shared';
+import { assignDotted, readDotted, type Role } from '@luoli/shared';
 import type { EventStreamRegistry } from './events.js';
 
 export interface PromptPreviewResult {
@@ -225,7 +225,10 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
   };
 
   app.use('*', async (ctx, next) => {
-    ctx.header('Content-Security-Policy', "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; connect-src 'self'");
+    // `frame-ancestors` 写进 CSP 而不是只靠 `X-Frame-Options`（后者已过时，且不覆盖嵌套框架）；
+    // `object-src` 挡 <embed>/<object>，`base-uri` 挡注入 <base> 改写所有相对 URL，
+    // `form-action` 挡把表单 POST 到外站（docs/22 · I-12）。X-Frame-Options 保留给老浏览器。
+    ctx.header('Content-Security-Policy', "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'");
     ctx.header('X-Frame-Options', 'DENY');
     ctx.header('X-Content-Type-Options', 'nosniff');
     ctx.header('Referrer-Policy', 'no-referrer');
@@ -384,7 +387,16 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
       const rejected = rejectedWakewords(parsed.data.trigger.wakewords, parsed.data.trigger.wakewordMinLength);
       if (rejected.length) return ctx.json(apiError('invalid_wakeword', `唤醒词不会生效：${rejected.join('；')}`).body, 400);
     }
-    const subsumed = writeConfigRows(Object.entries(body), 'webui');
+    // 落库的是**校验后**的值，不是请求体原值：zod 的默认值与强制转换否则不会进 `config_kv`，
+    // 下次启动重放覆盖层拿到的就是另一份东西（docs/22 · I-06）。键仍以请求体为准 ——
+    // 「只发真正改过的那几项」是这个端点的契约，不能顺手把整棵树写下去。
+    const rows: Array<[string, unknown]> = Object.keys(body).map((key) => [key, readDotted(parsed.data, key)]);
+    // JSON 里表达不出 undefined，所以校验后取不到值只有一个原因：这个路径不在 schema 里，被 zod
+    // 整段剥掉了。此前这种键会照样落进 `config_kv`，`loadConfig` 下次启动再逐条剔除并告警 ——
+    // 那是兜底不是许可（CLAUDE.md）。当场拒掉，别让「保存成功」把垃圾键留在库里。
+    const unknownKeys = rows.filter(([, value]) => value === undefined).map(([key]) => key);
+    if (unknownKeys.length) return ctx.json(apiError('unknown_config_key', `${unknownKeys.join('、')} 不是 schema 里的配置路径`).body, 400);
+    const subsumed = writeConfigRows(rows, 'webui');
     dependencies.events.emit('config.changed', { keys: Object.keys(body) });
     // `subsumed` 交回前端点名：整块写入作废掉的逐项覆盖必须说出来，否则运维只会看到「保存成功」，
     // 而工具页上某个开关的状态被这次保存悄悄改掉了。
@@ -670,11 +682,18 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     const query = ctx.req.query('q') ?? '';
     const pageNumber = Math.max(1, Number(ctx.req.query('page') ?? 1));
     const size = Math.min(200, Math.max(1, Number(ctx.req.query('size') ?? 50)));
-    const items = query ? dependencies.archive.adminSearchAll(query, pageNumber * size) : dependencies.db.prepare('SELECT id,chat_id AS chatId,message_thread_id AS threadId,tg_message_id AS tgMessageId,direction,from_kind AS fromKind,from_user_id AS fromUserId,from_name AS fromName,from_username AS fromUsername,kind,text,tg_date AS tgDate,triggered,trigger_reason AS triggerReason,turn_id AS turnId,revision,deleted_at AS deletedAt FROM messages WHERE deleted_at IS NULL ORDER BY tg_date DESC LIMIT 1000').all();
-    const paged = page(items, pageNumber, size);
+    // 非搜索分支此前是 `LIMIT 1000` 拉回来再在内存里切：`size=50` 时第 21 页起永远是空的，
+    // `total` 也封顶在 1000，界面上的页码是假的（docs/22 · I-01）。改成和 /api/turns 一样
+    // 走 SQL 的 LIMIT/OFFSET + 单独 COUNT(*)。搜索分支仍走 FTS，它自己有命中上限。
+    if (!query) {
+      const total = Number(dependencies.db.prepare('SELECT COUNT(*) FROM messages WHERE deleted_at IS NULL').pluck().get());
+      const items = dependencies.db.prepare(`SELECT id,chat_id AS chatId,message_thread_id AS threadId,tg_message_id AS tgMessageId,direction,from_kind AS fromKind,from_user_id AS fromUserId,from_name AS fromName,from_username AS fromUsername,kind,text,tg_date AS tgDate,triggered,trigger_reason AS triggerReason,turn_id AS turnId,revision,deleted_at AS deletedAt
+        FROM messages WHERE deleted_at IS NULL ORDER BY tg_date DESC,id DESC LIMIT ? OFFSET ?`).all(size, (pageNumber - 1) * size);
+      return ctx.json({ ok: true, data: { page: pageNumber, size, total, items: withAttachments(attachTurnIds(items)) } });
+    }
+    const paged = page(dependencies.archive.adminSearchAll(query, pageNumber * size), pageNumber, size);
     // 搜索分支只取回了 page*size 条，`items.length` 不是命中总数 —— total 必须单独数（docs/20 · W-API-03）。
-    const total = query ? dependencies.archive.adminSearchCount(query) : paged.total;
-    return ctx.json({ ok: true, data: { ...paged, total, items: withAttachments(attachTurnIds(paged.items)) } });
+    return ctx.json({ ok: true, data: { ...paged, total: dependencies.archive.adminSearchCount(query), items: withAttachments(attachTurnIds(paged.items)) } });
   });
   // 消息页默认看的是「最近几次模型对话」而不是逐条消息流：一次 turn 的提问与回答分散在多行里，
   // 按行翻页读不出对话的样子。分页走 SQL 的 LIMIT/OFFSET，turns 表可能很大，不整表拉回来再切。
@@ -1122,7 +1141,7 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     return ctx.json({ ok: true, data: { changes } });
   });
   app.get('/api/tasks', (ctx) => ctx.json({ ok: true, data: dependencies.db.prepare('SELECT * FROM tasks ORDER BY updated_at DESC LIMIT 500').all() }));
-  app.post('/api/maintenance/:action', (ctx) => { const action = ctx.req.param('action'); if (action === 'gc-files') return ctx.json(apiError('not_implemented', '孤儿文件清理尚不可用', 500).body, 500); const result = action === 'backup' ? dependencies.maintenance.backup() : action === 'vacuum' ? (dependencies.maintenance.vacuum(), 'ok') : action === 'cleanup-logs' ? dependencies.maintenance.cleanup() : action === 'rebuild-fts' ? (dependencies.maintenance.rebuildFts(), 'ok') : null; return result === null ? ctx.json(apiError('unknown_action', '未知维护操作', 404).body, 404) : ctx.json({ ok: true, data: result }); });
+  app.post('/api/maintenance/:action', (ctx) => { const action = ctx.req.param('action'); const result = action === 'backup' ? dependencies.maintenance.backup() : action === 'vacuum' ? (dependencies.maintenance.vacuum(), 'ok') : action === 'cleanup-logs' ? dependencies.maintenance.cleanup() : action === 'gc-files' ? dependencies.maintenance.gcFiles() : action === 'rebuild-fts' ? (dependencies.maintenance.rebuildFts(), 'ok') : null; return result === null ? ctx.json(apiError('unknown_action', '未知维护操作', 404).body, 404) : ctx.json({ ok: true, data: result }); });
   app.get('/api/events', (ctx) => {
     let cleanup = (): void => undefined;
     const stream = new ReadableStream({
@@ -1144,6 +1163,9 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     return new Response(stream, { headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' } });
   });
   const webRoot = fileURLToPath(new URL('../../webui/dist', import.meta.url));
+  // 未匹配的 /api/* 必须在静态兜底**之前**拦下来：否则它们拿到 200 + index.html，前端的 `api()`
+  // 在 `response.json()` 处抛 SyntaxError，报错信息与真实原因（路径写错了）毫无关系（docs/22 · I-13）。
+  app.all('/api/*', (ctx) => ctx.json(apiError('not_found', `没有这个端点：${ctx.req.method} ${new URL(ctx.req.url).pathname}`, 404).body, 404));
   app.use('/*', serveStatic({ root: webRoot }));
   app.get('*', (ctx) => existsSync(resolve(webRoot, 'index.html')) ? ctx.html(readFileSync(resolve(webRoot, 'index.html'), 'utf8')) : ctx.text('LuoLiCore WebUI 尚未构建', 503));
   return app;

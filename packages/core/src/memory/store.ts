@@ -34,6 +34,12 @@ function normalized(content: string): string {
   return content.toLocaleLowerCase().replace(/[\s\p{P}\p{S}]/gu, '');
 }
 
+/** 来源标注不参与相似度：`jaccard` 数的是字符集合，`<!-- src: chat … -->` 里那串
+ *  字母数字会把并集撑大，让「同一条」看起来只有六七成像。 */
+function stripSource(line: string): string {
+  return line.replace(/<!--[^]*?-->/g, '').trim();
+}
+
 function jaccard(a: string, b: string): number {
   const left = new Set([...normalized(a)]);
   const right = new Set([...normalized(b)]);
@@ -79,8 +85,8 @@ export class MemoryStore {
     if (input.scope === 'primemory' && (!isPrivate || input.subject !== input.userId)) return { ok: false, error: 'primemory_scope_forbidden' };
     if (input.scope === 'pubmemory' && roleRank(role) < roleRank(pubWriteMinRole)) return { ok: false, error: '权限不足' };
     const document = this.read(input.scope, input.subject, role, input.userId, isPrivate);
-    const existing = document.content.split('\n').filter((line) => line.startsWith('- '));
-    const unique = input.lines.filter((line) => !existing.some((candidate) => jaccard(candidate, line) > 0.85));
+    const existing = document.content.split('\n').filter((line) => line.startsWith('- ')).map(stripSource);
+    const unique = input.lines.filter((line) => !existing.some((candidate) => jaccard(candidate, stripSource(line)) > 0.85));
     if (!unique.length) return { ok: true, skipped: true, reason: '已存在相似条目' };
     const source = `<!-- src: chat ${input.chatId} by ${input.userId} at ${new Date().toISOString()} -->`;
     const annotated = unique.map((line) => `- ${line.replace(/^\s*-\s*/, '')}  ${source}`);
@@ -92,6 +98,13 @@ export class MemoryStore {
     return { ok: true, pending: true, softLimitExceeded: estimateTokens(projected) > this.softLimit };
   }
 
+  /**
+   * `queueWrite` 的去重与硬上限判据取的是**工具调用那一刻**的快照，而落盘发生在轮末：这中间
+   * 别的轮次完全可能已经把同一条写进同一份文档（PUBMEMORY 是全局单份）。`flush` 本身是同步的
+   * ——`readRaw` → 改 → `persist` 之间没有 await，事件循环插不进来，所以**不会丢更新**
+   * （`docs/22 · I-05` 说的锁不是这里需要的东西）。真正会漏的是那两条判据：重复条目照样落盘，
+   * 硬上限也会被越过。两条都在这里按新读到的内容再走一遍。
+   */
   flush(turnId: string): Record<string, unknown> {
     const writes = this.#pending.get(turnId) ?? [];
     const grouped = new Map<string, PendingWrite[]>();
@@ -101,13 +114,20 @@ export class MemoryStore {
       list.push(write);
       grouped.set(key, list);
     }
+    let written = 0; let duplicates = 0; let rejected = 0;
     for (const group of grouped.values()) {
       const first = group[0]!;
       const document = this.readRaw(first.scope, first.subject);
       const parsed = parseSections(document.content || (first.scope === 'pubmemory' ? '# 公开记忆\n' : '# 私有记忆\n'));
+      const landed = document.content.split('\n').filter((line) => line.startsWith('- ')).map(stripSource);
       for (const write of group) {
+        const fresh = write.lines.filter((line) => {
+          if (!landed.some((candidate) => jaccard(candidate, stripSource(line)) > 0.85)) { landed.push(stripSource(line)); return true; }
+          duplicates += 1; return false;
+        });
+        if (!fresh.length) continue;
         const lines = parsed.sections.get(write.section) ?? [];
-        lines.push(...write.lines);
+        lines.push(...fresh);
         parsed.sections.delete(write.section);
         parsed.sections.set(write.section, lines);
       }
@@ -121,7 +141,16 @@ export class MemoryStore {
         parsed.sections.set('其他', merged);
       }
       const content = serializeSections(parsed.title, parsed.sections);
+      if (content === document.content) continue;
+      // 硬上限是最后一道闸：`queueWrite` 放行时文档还小，落盘时可能已经被别的轮次写胖了。
+      // 越过它去写等于让这份文档从此再也裁不回来。
+      if (estimateTokens(content) > this.hardLimit) {
+        rejected += 1;
+        this.log?.event({ level: 'warn', kind: 'memory.hard_limit', summary: `Skipped ${first.scope} at hard limit`, data: { scope: first.scope, subject: first.subject, tokens: estimateTokens(content), hardLimit: this.hardLimit } });
+        continue;
+      }
       this.persist(document, content, first);
+      written += 1;
       if (estimateTokens(content) > this.softLimit) {
         const pending = resolve(this.directory, '.pending', `${first.scope}-${first.subject ?? 'global'}.md`);
         mkdirSync(dirname(pending), { recursive: true, mode: 0o700 });
@@ -129,7 +158,9 @@ export class MemoryStore {
       }
     }
     this.#pending.delete(turnId);
-    return { ok: true, documents: grouped.size };
+    // 只在真有话说时挂字段：`documents: 0` 那条断言（tests/memory.operations.test.ts）问的是
+    // 「abort 之后什么都没写」，恒定多两个 0 会让它变成在核对计数器而不是核对这件事。
+    return { ok: true, documents: written, ...(duplicates ? { duplicates } : {}), ...(rejected ? { rejected } : {}) };
   }
   discard(turnId: string): number {
     const count = this.#pending.get(turnId)?.length ?? 0;

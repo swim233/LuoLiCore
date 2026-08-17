@@ -83,6 +83,11 @@ role(chat):
 | `delete_file` | trusted | **必需** | `{path, recursive?}`；`recursive` 时必须审批且路径深度 ≥2；实现为移入 `.luoli-trash/<ts>/`（不真删） |
 | `move_file` | trusted | 覆盖时需审批 | `{from, to}` |
 
+**读不到的条目跳过，不让整次调用失败。** `list_dir` / `glob` / `grep` 的目录遍历对每个条目 `statSync`，
+而一个**断链软链**（`ln -s /nowhere x`，下载失败也会留下）会抛 ENOENT —— 此前那让整次调用返回
+`ok:false`，同目录里另外几百个好文件一并看不见（docs/22 · I-03）。现在跳过读不到的条目，
+并在结果里回 `skipped: n`：条数必须交出去，否则模型会以为自己看全了。
+
 **路径 jail（所有 fs 工具共用）**：
 
 ```ts

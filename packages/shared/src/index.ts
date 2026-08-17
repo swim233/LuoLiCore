@@ -33,6 +33,20 @@ export function assignDotted(root: Record<string, unknown>, key: string, value: 
 }
 
 /**
+ * `assignDotted` 的读侧对偶。写端点用它把**校验后**的值取出来落库：直接存请求体原值时，
+ * zod 的默认值与强制转换（`"30000"` → `30000`、缺省的兄弟键）都不会进 `config_kv`，
+ * 下次启动重放覆盖层拿到的是另一份东西（docs/22 · I-06）。路径不存在时返回 undefined。
+ */
+export function readDotted(root: unknown, key: string): unknown {
+  let cursor: unknown = root;
+  for (const part of key.split('.').filter(Boolean)) {
+    if (!cursor || typeof cursor !== 'object') return undefined;
+    cursor = (cursor as Record<string, unknown>)[part];
+  }
+  return cursor;
+}
+
+/**
  * 点分覆盖层的应用顺序：**先浅后深**，同深度按键名。`assignDotted` 是整叶覆盖，谁最后写谁赢，
  * 而 `config_kv` 的 `SELECT` 不带 `ORDER BY` 时给的是 rowid 序（插入序）—— 于是「先点过工具页的
  * `tools.overrides.web_fetch`、后在表单里编辑过 `tools.overrides` 整块」这个顺序下，整块行 rowid

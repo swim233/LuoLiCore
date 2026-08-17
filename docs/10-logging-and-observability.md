@@ -135,6 +135,14 @@ logs:
 
 **DB 索引行 vs 文件全文**：`log_events` 只存摘要字段（可检索、可聚合），完整 payload 只在文件里。这样 DB 不会被大 payload 撑爆，同时 WebUI 仍能按需拉全文（`GET /api/logs/blob?ref=`）。
 
+**`retentionDays` 同时管子 agent 的全文结果。** `data/agent-results/<runId>.txt` 是和日志同性质的调试产物，
+`MaintenanceService.cleanup()` 按 `agent_runs.finished_at` 一并过期：删文件、把 `result_full_ref` 置空，
+`result_summary` 留着（摘要是上下文里已经引用过的东西，删了会让历史轮次的引述悬空）。之后
+`read_agent_result` 回一句「已按日志保留期清理，只剩摘要」而不是抛 ENOENT（docs/22 · I-09）。
+**媒体附件不在这里过期** —— `data/files/**` 是用户数据，自动过期策略是 [14 §2](./14-open-questions.md) Q9
+的未决问题。`POST /api/maintenance/gc-files` 扫的是**孤儿**：磁盘上有、但没有任何 DB 行指向的文件
+（下载中途崩溃、`local_path` 被换掉、手工删过库行留下的），那不是保留策略。
+
 **实时广播（`LogSink` → `EventBus` → SSE）**：落库之后同一条事件还会以**摘要形式**推给 WebUI
 （`{id, ts, level, kind, traceId, summary}`，见 [09 §5](./09-webui.md#5-sse-事件)）。三条硬约束：
 
@@ -241,7 +249,7 @@ precheck(turn):
   est = 估算本轮成本  = (snapshotTokens + 预估输出) × 当前别名单价 × perTurn 安全系数(默认 1.5)
   for scope in [global, chat, user]:
       if spent + reserved + est > limit  → 拒绝
-  reserve(scope, est)                            # quota_counters.reserved_usd += est
+  reserve(scope, est)                            # quota_counters.reserved_usd += est; turns += 1
   turn.reservation = est
 
 commit(actualCost):                              # 每次模型调用后
@@ -251,6 +259,11 @@ release(turn):                                   # turn 结束（含失败）
   reserved -= 剩余未消耗的预留（下限 0）
 ```
 
+- **`turns` 在 `reserve()` 里 +1，一轮只加一次。** 它此前在 `commit()` 里，而 commit 是每一步模型调用之后
+  都调的 —— 那样 `quota_counters.turns` 统计的是**步数**，而配额页把它标成「轮次」（docs/22 · I-02）。
+  预留被拒时提前返回，不留计数；WebUI 的试跑与正常轮次共用同一份计数。
+- `commit()` 的六行（3 scope × 2 window）是**一条** `UPDATE … WHERE (scope,subject,window,bucket) IN (VALUES …)
+  RETURNING …`，不是六条单行 UPDATE —— 它每步都要跑一次（docs/22 · I-04）。
 - `reserved_usd` 由维护任务兜底清零（进程崩溃可能残留）：启动时把所有 `reserved_usd` 归零（因为不存在跨进程的在途 turn）。
 - 轮内超 `perTurn.maxCostUsd` → `prepareStep` 置 `toolChoice:'none'` + 清空 `activeTools`，让模型用现有信息收尾（[04 §2](./04-agents-and-providers.md#2-主-agent-装配)）。
 
