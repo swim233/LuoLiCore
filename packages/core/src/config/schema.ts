@@ -87,6 +87,10 @@ export const HOT_RELOADABLE_CONFIG_KEYS = [
   // 在启动时拿走的，Scheduler 也没有重配入口 —— 整段标热更新等于对着那一项说谎（docs/20 · W-CFG-02）。
   // 这三项才是真的按 getter 读（`McpManager` 的 config getter + config.changed 后的 reconcile）。
   'mcp.enabled', 'mcp.defaultMinRole', 'mcp.servers',
+  // 前四项都是现读的：`enabled` 在每次触发时查（关掉之后在途不受影响、下一次触发就跳过），
+  // 另三项在 `schedule_create` 里从 `turn.config` 取。`schedule.retentionDays` **不在这里** ——
+  // 它跟 `logs.retentionDays` 一样是 MaintenanceService 的构造参数，改完要重启才生效。
+  'schedule.enabled', 'schedule.maxPerChat', 'schedule.minIntervalMinutes', 'schedule.maxPayloadChars',
   // WebUI 自己那几项是每请求从 currentConfig() 现读的（app.ts 的 requestIp / allowedOrigin /
   // 登录限流 / createSession / activePasswordHash），改完下一次请求就按新值走。只有 host / port
   // 例外：它们在 `serve()` 时就绑定了，必须重启。
@@ -216,6 +220,12 @@ export const configSchema = z.object({
   skills: z.object({ enabled: z.boolean().default(true), dir: z.string().default('./skills'), watch: z.boolean().default(true), defaultMinRole: role.default('trusted') }).default({}),
   plugins: z.object({ enabled: z.boolean().default(true), dir: z.string().default('./plugins'), watch: z.boolean().default(false), hookTimeoutMs: z.number().int().positive().default(5000), order: z.array(z.string()).default([]), autoDisableAfterErrors: z.number().int().positive().default(3) }).default({}),
   mcp: z.object({ enabled: z.boolean().default(false), connectTimeoutMs: z.number().int().positive().default(15_000), healthCheckCron: z.string().default('*/5 * * * *'), defaultMinRole: role.default('trusted'), servers: z.array(mcpServerSchema).default([]) }).default({}),
+  // 定时任务（docs/14 §2 Q4 已拍板）。上界写进 schema 而不只写在工具描述里：模型看得见 schema，
+  // 看不见我们的文档（docs/26 §5）。`minIntervalMinutes` 卡的是 cron 两次触发之间的间隔 ——
+  // `* * * * *` 在 agent 模式下就是每分钟一次真实模型调用。
+  schedule: z.object({ enabled: z.boolean().default(true), maxPerChat: z.number().int().positive().max(200).default(20),
+    minIntervalMinutes: z.number().int().positive().default(5), maxPayloadChars: z.number().int().positive().max(20_000).default(2000),
+    retentionDays: z.number().int().nonnegative().default(30) }).default({}),
   db: z.object({ path: z.string().default('./data/luoli.db'), backupKeep: z.number().int().nonnegative().default(5), vacuumCron: z.string().default('0 5 * * 0'), ftsTokenizer: z.enum(['trigram', 'unicode61']).default('trigram') }).default({}),
   logs: z.object({ level: z.enum(['debug', 'info', 'warn', 'error']).default('info'), dir: z.string().default('./logs'), captureBodies: z.boolean().default(true), bodyMaxBytes: z.number().int().positive().default(262_144), maxFileMb: z.number().positive().default(128), retentionDays: z.number().int().nonnegative().default(30), gzipAfterDays: z.number().int().nonnegative().default(3), console: z.enum(['pretty', 'json', 'off']).default('pretty'), redactPatterns: z.array(z.string()).default([]) }).default({}),
   quota: z.object({ enabled: z.boolean().default(true), requirePricing: z.boolean().default(true), minReserveUsd: z.number().nonnegative().default(0.02), global: z.object({ daily: nullableMoney.default(5), monthly: nullableMoney.default(100) }).default({}), perChat: z.object({ daily: nullableMoney.default(1), monthly: nullableMoney.default(null) }).default({}), perUser: z.object({ daily: nullableMoney.default(0.5), monthly: nullableMoney.default(null), byRole: z.record(z.object({ daily: nullableMoney.optional(), monthly: nullableMoney.optional() })).default({}) }).default({}), // perTurn 只留真正生效的两项。maxToolCalls / maxSubagents / maxDurationMs 已摘除：

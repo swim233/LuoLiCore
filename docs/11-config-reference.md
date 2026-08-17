@@ -441,6 +441,24 @@ mcp:
   defaultMinRole: trusted         # 热更新
   servers: []                     # 热更新 · 见 07 §4.1（改完立刻 reconcile）
 
+# ============================================================ schedule（见 02 §10、05 §3.8）
+# 定时任务：模型用 schedule_create 自己排的周期 / 一次性任务（14 §2 Q4 已拍板）。
+# 注意这一段管的是**用户任务**，不是上面那些 *Cron 维护任务：
+#   · 用户任务按任务行上记的 timezone 触发（创建时取 general.timezone 存进 scheduled_jobs.timezone）；
+#   · `general.maintenanceCron` / `db.vacuumCron` / `memory.compactCron` / 两个 healthCheckCron
+#     仍按**进程本地时区**触发 —— 宿主是 UTC 时 `0 4 * * *` 的清理实际发生在北京时间正午。
+#     这是既有行为，没有跟着改：挪动线上备份 / VACUUM 的时间点不该是加一个工具的副作用。
+schedule:
+  # 总开关。关掉之后已有任务留在库里但不再触发（每次跳过记一条 schedule.skipped），不会被删。
+  enabled: true                   # 热更新 · 每次触发时现读
+  maxPerChat: 20                  # 热更新 · 单会话活跃任务上限，超了 schedule_create 直接拒绝
+  # cron 两次触发之间的最小间隔。cron 最细能到每分钟，而 agent 模式下那就是每分钟一次真实模型调用。
+  minIntervalMinutes: 5           # 热更新
+  maxPayloadChars: 2000           # 热更新 · 任务正文上限，同时写进模型看到的 inputSchema
+  # 已结束（done / cancelled）的任务行保留多久。活跃任务永不清理（见 03 §4）。
+  # 需重启：跟 logs.retentionDays 一样在启动时交给 MaintenanceService。
+  retentionDays: 30               # 需重启
+
 # ============================================================ db
 db:
   path: ./data/luoli.db           # 需重启

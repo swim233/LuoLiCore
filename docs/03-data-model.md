@@ -581,6 +581,42 @@ CREATE TABLE processed_updates (        -- update_id 去重（重启后仍有效
 );
 ```
 
+### 2.12 定时任务
+
+> [14 §2 Q4](./14-open-questions.md) 已拍板；轮次语义见 [02 §10](./02-context-engine.md#10-定时轮次的上下文归属)（迁移 0007）。
+
+```sql
+-- 为什么是一张表而不是 app_kv：装载时要的是「全部活跃任务」，而 app_kv 没有前缀扫描入口、
+-- 没有二级索引；单键存整个数组则会在并发轮次下丢更新（两个人同时让 bot 加任务，后写覆盖前写）。
+CREATE TABLE scheduled_jobs (
+  id          TEXT PRIMARY KEY,          -- ULID
+  key         TEXT NOT NULL,             -- context key，会话隔离边界
+  chat_id     TEXT NOT NULL,
+  thread_id   INTEGER,
+  created_by  TEXT NOT NULL,             -- 创建者 tg user id；每次触发按它重算有效角色
+  name        TEXT NOT NULL,             -- 同会话内活跃唯一：取消时给的是名字
+  mode        TEXT NOT NULL CHECK (mode IN ('agent','notify')),
+  cron        TEXT,                      -- 与 run_at 二者其一
+  run_at      INTEGER,                   -- 一次性任务的绝对时间（epoch ms）
+  timezone    TEXT NOT NULL,             -- 落在行上：事后改 general.timezone 不该改变已有任务的含义
+  payload     TEXT NOT NULL,             -- agent=任务描述；notify=原文
+  state       TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active','done','cancelled')),
+  run_count   INTEGER NOT NULL DEFAULT 0,
+  last_run_at INTEGER, last_state TEXT, last_error TEXT,
+  created_at  INTEGER NOT NULL,
+  updated_at  INTEGER NOT NULL,
+  CHECK ((cron IS NULL) + (run_at IS NULL) = 1)
+);
+CREATE INDEX ix_sched_key ON scheduled_jobs(key, state);
+CREATE INDEX ix_sched_state ON scheduled_jobs(state) WHERE state = 'active';
+CREATE UNIQUE INDEX ux_sched_name ON scheduled_jobs(key, name) WHERE state = 'active';
+```
+
+**`messages.tg_message_id ≥ 2_000_000_000` 是合成消息的保留段。** 定时轮次的触发消息没有真实
+Telegram 消息号，从这个高位段按会话取 `MAX+1`。别在这个区间里写别的东西 —— 撞号时
+`append` 的 `INSERT OR IGNORE` 会静静返回既有行，而那正是「一条真实用户消息凭空消失」的成因
+（[02 §10.2](./02-context-engine.md#102-合成触发消息的-id-分配)）。
+
 ---
 
 ## 3. 迁移策略
@@ -602,6 +638,7 @@ CREATE TABLE processed_updates (        -- update_id 去重（重启后仍有效
 | `processed_updates` | 7 天 | 定期删 |
 | `sessions` | 过期即删 | 每小时 |
 | `approvals` | 90 天 | pending 超 `expires_at` 标 `expired` |
+| `scheduled_jobs` | `schedule.retentionDays` = 30 | 只删**已结束**（`done` / `cancelled`）且 `updated_at` 超期的行。**活跃任务永不清** —— 清掉一条还在排的任务，表现是「bot 突然不再提醒了」而库里毫无痕迹 |
 | `data/files` | 永久 | owner 手动；孤儿文件（无 attachments 行）由周任务清理 |
 | `data/cache/models.dev.json` | 永久 | 纯派生数据，删掉即可（下次拉取模型时自动重下）。年龄记在 `app_kv` 的 `catalog:models.dev`，超 `provider.catalog.ttlHours` 时用 ETag 条件请求续期 |
 

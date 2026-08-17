@@ -230,6 +230,13 @@ export const CONFIG_DESCRIPTIONS: Record<string, string> = {
   'mcp.defaultMinRole': 'MCP 工具在没单独指定时的最低可用角色。',
   'mcp.servers': 'MCP server 定义数组：stdio（命令 + 参数 + 环境变量）或 http（地址 + 请求头）传输，各带工具黑白名单。扩展页有专用编辑器。',
 
+  schedule: '定时任务：模型自己用 schedule_create 排的周期/一次性任务。触发时按 mode 起一轮完整对话（agent）或只发一句预写文本（notify），产出照常进这个会话的上下文。',
+  'schedule.enabled': '定时任务总开关。关掉之后已有任务留在库里但不再触发（每次跳过记一条 schedule.skipped），不会被删。',
+  'schedule.maxPerChat': '单个会话最多同时有多少个活跃任务。超了 schedule_create 直接拒绝 —— 一个会话攒上几十个 agent 模式的任务等于让 bot 自己刷屏并烧钱。',
+  'schedule.minIntervalMinutes': 'cron 任务两次触发之间的最小间隔（分钟）。cron 最细能到每分钟，而 agent 模式下那就是每分钟一次真实模型调用。',
+  'schedule.maxPayloadChars': '任务正文（agent 的任务描述 / notify 的原文）的字数上限。',
+  'schedule.retentionDays': '已结束（完成/取消）的任务行保留多少天。活跃任务永不清理。需重启：跟 logs.retentionDays 一样在启动时交给 MaintenanceService。',
+
   db: 'SQLite 数据库的位置、备份与整理。',
   'db.path': 'SQLite 数据库文件路径。',
   'db.backupKeep': '执行迁移前自动备份，保留最近几份。',

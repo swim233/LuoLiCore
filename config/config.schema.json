@@ -1549,6 +1549,45 @@
           "default": {},
           "description": "MCP：把外部 MCP server 的工具接进工具表。具体 server 在扩展页编辑。"
         },
+        "schedule": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true,
+              "description": "定时任务总开关。关掉之后已有任务留在库里但不再触发（每次跳过记一条 schedule.skipped），不会被删。"
+            },
+            "maxPerChat": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 200,
+              "default": 20,
+              "description": "单个会话最多同时有多少个活跃任务。超了 schedule_create 直接拒绝 —— 一个会话攒上几十个 agent 模式的任务等于让 bot 自己刷屏并烧钱。"
+            },
+            "minIntervalMinutes": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "default": 5,
+              "description": "cron 任务两次触发之间的最小间隔（分钟）。cron 最细能到每分钟，而 agent 模式下那就是每分钟一次真实模型调用。"
+            },
+            "maxPayloadChars": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 20000,
+              "default": 2000,
+              "description": "任务正文（agent 的任务描述 / notify 的原文）的字数上限。"
+            },
+            "retentionDays": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 30,
+              "description": "已结束（完成/取消）的任务行保留多少天。活跃任务永不清理。需重启：跟 logs.retentionDays 一样在启动时交给 MaintenanceService。"
+            }
+          },
+          "additionalProperties": false,
+          "default": {},
+          "description": "定时任务：模型自己用 schedule_create 排的周期/一次性任务。触发时按 mode 起一轮完整对话（agent）或只发一句预写文本（notify），产出照常进这个会话的上下文。"
+        },
         "db": {
           "type": "object",
           "properties": {

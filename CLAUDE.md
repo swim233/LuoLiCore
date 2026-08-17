@@ -90,6 +90,21 @@ WebUI 的写端点必须走 `runtimeConfigSchema.safeParse(mergeDotted(...))` �
 带随机 nonce 边界并转义闭合标记。**用户自己的触发消息不包裹** —— 包裹它等于告诉模型
 "忽略这个人的请求"。群聊背景发言用语义较弱的 `<group-message>`。
 
+### 定时任务（`packages/core/src/schedule/runner.ts` + `packages/db/src/schedule.ts`）
+
+`docs/14 §2 Q4` 拍板后加的。触发时**开一条完整轮次**（照 `bot.ts` 那条路：配额 → 并发闸 →
+`openTurn` → `commitTurn`），产出照常进上下文；`mode='notify'` 也开轮，否则模型下一轮不知道
+自己刚提醒过什么。改这块前先读 `docs/02 §10` 的四条规则。两个容易踩的地方：
+
+- **合成触发消息的 `tg_message_id` 取自保留高位段 `2_000_000_000`**，且 `append` 之后必须核对
+  返回值。`ScopedArchiveRepository.append` 是 `INSERT OR IGNORE` —— 撞号会静静返回既有那一行，
+  表现是一条真实用户消息凭空消失。用负数同样不行（会把背景认领窗口算空）。
+- **每次触发都重算有效角色**，不能信创建时那个：降级到 `trusted` 以下跳过这一次、`blocked`
+  整条停用。任务是在创建那一刻的角色下被允许的，而它此后每天都触发。
+
+`Scheduler` 现在有 `remove` / `has` / `nextRun` 与时区参数。**用户任务按行上记的 timezone 触发，
+而五个 `*Cron` 维护任务仍跑在进程本地时区** —— 这是既有行为，`docs/11` 的 `schedule` 段写明了。
+
 ### 数据库（`packages/db/`）
 
 better-sqlite3 + 原生 SQL，无 ORM 查询层。WAL 模式。迁移是 `packages/db/migrations/NNNN_*.sql`，
@@ -99,7 +114,7 @@ better-sqlite3 + 原生 SQL，无 ORM 查询层。WAL 模式。迁移是 `packag
 ## 项目约定
 
 - **文档是权威来源。实现与文档不一致时，先改文档再改代码**（`docs/README.md` 开头即声明）。
-  `docs/13-acceptance-criteria.md` 是 380 条可逐条勾选的验收条目（改动条数时同步该文件末尾的签署表）。
+  `docs/13-acceptance-criteria.md` 是 397 条可逐条勾选的验收条目（改动条数时同步该文件末尾的签署表）。
   `docs/21-webui-coverage-gaps.md` 记录 WebUI 控制面还够不着哪些已实现的能力，动 WebUI 前先扫一眼。
 - 修不了的东西不要假装修好。已确立的先例：`PUT /api/quota` 返回 `not_implemented` 而不是假成功；
   `ask_parent` 在父 agent 仲裁未实现时返回 `ask_parent_not_implemented` 而不是拿默认值伪造答复。

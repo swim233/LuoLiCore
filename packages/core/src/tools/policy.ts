@@ -43,6 +43,12 @@ export const TOOL_POLICY = {
   send_file: { minRole: 'trusted', approval: 'never', scope: 'telegram', source: 'builtin' },
   pin_message: { minRole: 'trusted', approval: 'never', scope: 'telegram', source: 'builtin' },
   load_skill: { minRole: 'limited', approval: 'never', scope: 'chat', source: 'builtin' },
+  // 定时任务是唯一能让 bot 在没人说话时主动花钱的能力，所以起点是 trusted 而不是 limited；
+  // 作用域是 chat 而不是 global —— 落点绑死本会话，工具参数里没有 chatId（docs/05 §8）。
+  // list / cancel 同样收在 trusted：能看见任务名就能看见别人排了什么。
+  schedule_create: { minRole: 'trusted', approval: 'never', scope: 'chat', source: 'builtin' },
+  schedule_list: { minRole: 'trusted', approval: 'never', scope: 'chat', source: 'builtin' },
+  schedule_cancel: { minRole: 'trusted', approval: 'never', scope: 'chat', source: 'builtin' },
 } as const satisfies Record<string, ToolPolicyEntry>;
 
 export type ToolName = keyof typeof TOOL_POLICY;

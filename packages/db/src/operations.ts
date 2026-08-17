@@ -1,6 +1,10 @@
 import { randomBytes } from 'node:crypto';
 import type { Sqlite } from './database.js';
 
+/** `log_events` 的全部列减去 `data_json`，外加它的字节数 —— 列表要的是摘要，不是载荷。 */
+const LOG_COLUMNS = `id,ts,level,kind,trace_id,span_id,parent_span_id,chat_id,user_id,key,agent_run_id,summary,file_ref,duration_ms,
+  COALESCE(length(data_json),0) AS data_bytes`;
+
 export class OperationsRepository {
   constructor(private readonly db: Sqlite) {}
 
@@ -28,13 +32,17 @@ export class OperationsRepository {
   /**
    * @param minLevel 只取这个级别及以上。总览页的「最近错误」卡片要的是 `warn` 以上
    *   （docs/09 §3.1）—— 不分级别地取最近几条，结果几乎总是被 info 刷满，那张卡片就白挂了。
+   *
+   * **不返回 `data_json`，只给它的字节数。** 这里原本是 `SELECT *`：一条 `model.call` 的载荷能到
+   * `logs.bodyMaxBytes`（默认 256 KB），列表一次最多 1000 行 —— 日志页每次刷新都在往浏览器推
+   * 几十 MB，而界面只用得上摘要那几列。要正文走 `GET /api/logs/:id`（带 blob 解引用与截断）。
    */
   logs(limit = 100, traceId?: string, minLevel?: 'debug' | 'info' | 'warn' | 'error'): unknown[] {
     const ranked = ['debug', 'info', 'warn', 'error'];
     const allowed = minLevel ? ranked.slice(ranked.indexOf(minLevel)) : null;
     const levelClause = allowed ? ` AND level IN (${allowed.map(() => '?').join(',')})` : '';
-    if (traceId) return this.db.prepare(`SELECT * FROM log_events WHERE trace_id=?${levelClause} ORDER BY ts,id LIMIT ?`).all(traceId, ...(allowed ?? []), limit);
-    return this.db.prepare(`SELECT * FROM log_events${allowed ? ` WHERE level IN (${allowed.map(() => '?').join(',')})` : ''} ORDER BY ts DESC,id DESC LIMIT ?`).all(...(allowed ?? []), limit);
+    if (traceId) return this.db.prepare(`SELECT ${LOG_COLUMNS} FROM log_events WHERE trace_id=?${levelClause} ORDER BY ts,id LIMIT ?`).all(traceId, ...(allowed ?? []), limit);
+    return this.db.prepare(`SELECT ${LOG_COLUMNS} FROM log_events${allowed ? ` WHERE level IN (${allowed.map(() => '?').join(',')})` : ''} ORDER BY ts DESC,id DESC LIMIT ?`).all(...(allowed ?? []), limit);
   }
 
   createSession(ttlHours: number, ip?: string, ua?: string): { id: string; csrf: string; expiresAt: number } {

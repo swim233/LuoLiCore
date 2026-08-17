@@ -580,3 +580,84 @@ export interface CommitResult {
     等于把「每轮作废一次缓存」原样搬到了更高的水位上。推迟的方向永远是多留，因此所有形状不变式
     （turn 边界、tool 配对、`minKeepTurns`）自动继续成立；`tests/context.active.test.ts` 断言
     「活跃期内 `window_start` 一动不动」与「撞天花板后裁回常规上限」两侧。
+
+---
+
+## 10. 定时轮次的上下文归属
+
+> [14 §2 Q4](./14-open-questions.md) 要求的「单独设计一节」。需求方已拍板：**照常进上下文**。
+> 实现在 `packages/core/src/schedule/runner.ts`，工具在 [05 §3.8](./05-tools-and-permissions.md)。
+
+### 10.1 归属规则
+
+定时任务触发时**开一条完整轮次**，走的是和用户消息一样的那条路：
+
+```
+cron 到点 ──► 重算有效角色 ──► 合成触发消息（落归档）──► openTurn
+                                                          │
+                              mode='agent' ──► runMainAgent ──┤
+                              mode='notify' ─► 预写文本 ──────┤
+                                                          ▼
+                                        投递 ──► appendDelta ──► commitTurn
+```
+
+- 触发消息是一条**真实的归档行**：`direction='in'`、`from_kind='system'`、
+  `from_user_id` = 任务创建者、`triggered=1`、`trigger_reason='schedule'`，
+  正文是 `[定时任务 <名字>] <正文>`。它在上下文里是一条 `role='user'` / `origin='trigger'` 的消息。
+- 产出照常 `appendDelta`（`role='assistant'` / `origin='assistant'`）并 `commitTurn`。
+  历史里因此就是一次正常对话，**用户可以直接接着 bot 那句话往下说**。
+- 背景消息认领照常发生（`claim_watermark` 正常推进），所以「汇总一下昨天群里聊了什么」这类任务
+  拿得到未进上下文的那批发言。
+- 这条轮次照常进 `turns` 表、照常注册进 `TurnRegistry`（可 `/cancel`、出现在
+  `GET /api/turns/active`）、照常记账与占配额。
+
+**`notify` 也开轮提交。** 只发不提交更省事，但那条消息只会进 `messages` 归档
+（`claimBackground` 不认领 `direction='out'`），于是模型下一轮不知道自己刚提醒过什么 ——
+用户回「知道了」时它一脸茫然。省下的是一次 commit，代价是一次说不清的失忆。
+
+**`mode='agent'` 用 `runMainAgent` 而不是 `streamMainAgent`。** 没有人盯着屏幕，也没有
+Telegram 流消费者；流式的占位消息与进度编辑在这条路上只是白花 Bot API 调用。
+
+### 10.2 合成触发消息的 id 分配
+
+`messages.tg_message_id` 是 `NOT NULL` 且有 `UNIQUE(chat_id, tg_message_id, revision)`，
+而定时轮次没有真实的 Telegram 消息号。分配规则：**保留高位段**
+`SYNTHETIC_TG_MESSAGE_ID_BASE = 2_000_000_000` 起，按会话取 `MAX(tg_message_id)+1`。
+
+两条被否掉的做法，理由要留着：
+
+- **负数**（`-1` 递减）：负号会让它排在该会话全部真实消息之前，
+  `claimThroughMessageId` 的认领窗口 `(claim_watermark, trigger.id]` 因此恒为空区间 ——
+  定时轮次永远认领不到背景消息，而表现只是「摘要里什么都没有」。
+- **`MAX(tg_message_id)+1`（不限高位段）**：可能正好等于下一条真实消息的号。
+  `ScopedArchiveRepository.append` 是 `INSERT OR IGNORE`，撞号时**静静返回既有那一行** ——
+  一条真实用户消息凭空消失，且日志里一个字都没有。
+
+所以分配之后必须**核对 `append` 的返回值**：`tgMessageId` 与分配值不等就抛
+`schedule_trigger_conflict` 让这次触发失败。静默走下去比失败难查一个数量级。
+
+### 10.3 不补跑
+
+进程启动时 `ScheduledJobRunner.load()` 把活跃任务装回 cron，并对每条判一次「上次触发之后
+是否有已经过去的触发点」：
+
+| 任务类型 | 错过时的处理 |
+|---|---|
+| 一次性（`run_at`） | 置 `state='done'`、`last_state='missed'`，记一条 `schedule.missed` warn |
+| 周期（`cron`） | 记一条 `schedule.missed` warn，然后照常排下一次 |
+
+**一次都不补。** 9 点补发一条 4 点的早报比不发更让人困惑，跟 `telegram.dropPendingOnStart`
+是同一个取舍。但错过必须**说出来** —— 否则「今天早报没发」查无实据。
+
+### 10.4 触发时重算权限
+
+任务是在创建那一刻的角色下被允许的，而它会在此后每天触发。所以每次触发都重算
+`resolveEffectiveRole`（用户角色 ∩ 会话角色）：
+
+| 触发时的有效角色 | 处理 |
+|---|---|
+| ≥ `trusted` | 正常执行 |
+| `limited`（低于 `schedule_create` 的 `minRole`） | **跳过这一次**，记 `schedule.skipped`；任务留着，权限恢复后照跑 |
+| `blocked` | **整条停用**（`state='cancelled'`）并从调度器摘掉 |
+
+降级只跳过、封禁才停用：临时降权不该销毁用户排了很久的任务，而封禁是永久判定。

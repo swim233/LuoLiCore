@@ -106,6 +106,69 @@ describe('console endpoints', () => {
     closeDatabase(db);
   });
 
+  /**
+   * 工具调用的**输入**此前在详情里根本不存在：`LogSink.span` 把开始时的 `{input}` 用结束时的
+   * `{output}` 顶掉了（见 tests/log.span.test.ts）。那条修完之后新轮次有了，但老轮次的日志
+   * 补不回来 —— 所以详情还要读 `context_messages` 的原始 parts，这条路不受
+   * `logs.retentionDays` / `logs.captureBodies` 影响，且**降级过的行里参数也还在**。
+   */
+  it('recovers tool inputs from the raw context parts, elision flag and all', async () => {
+    const { app, db, headers } = harness('turn-detail-parts');
+    db.prepare(`INSERT INTO turns(id,key,chat_id,initiator_user_id,effective_role,trigger_reason,state,started_at,steps,model_calls,tool_calls,cost_usd)
+      VALUES ('turn-p','chat:c1','c1','7','trusted','wakeword','committed',1000,1,1,1,0)`).run();
+    const insert = db.prepare(`INSERT INTO context_messages(key,ordinal,id,turn_id,role,origin,prune_level,prune_applied,parts_json,text_preview,tokens,created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`);
+    insert.run('chat:c1', 1, 'trigger:1', 'turn-p', 'user', 'trigger', 0, 0, JSON.stringify([{ type: 'text', text: '看下 a.md' }]), '看下 a.md', 5, 1000);
+    insert.run('chat:c1', 2, 'call:c-1', 'turn-p', 'assistant', 'tool_call', 2, 0,
+      JSON.stringify([{ type: 'tool-call', toolCallId: 'c-1', toolName: 'read_file', input: { path: 'a.md' } }]), 'read_file({"path":"a.md"})', 9, 1001);
+    insert.run('chat:c1', 3, 'result:c-1', 'turn-p', 'tool', 'tool_result', 1, 1,
+      JSON.stringify([{ type: 'tool-result', toolCallId: 'c-1', toolName: 'read_file', output: { type: 'json', value: { ok: true } } }]), 'read_file: {"ok":true}', 7, 1002);
+    insert.run('chat:other', 9, 'call:x', 'turn-p', 'assistant', 'tool_call', 2, 0, JSON.stringify([{ type: 'tool-call', toolCallId: 'x', toolName: 'bash', input: {} }]), 'bash({})', 3, 1003);
+    interface Part { ordinal: number; origin: string; pruneApplied: boolean; pruneLevel: number; text: string | null; textPreview: string | null }
+    const detail = await body<{ contextMessages: Part[] }>(await app.request('/api/turns/turn-p/detail', { headers }));
+    // 只取本轮本会话的：`key` 也进了 where，否则同名 turn_id 会把别的会话的 parts 带进来。
+    expect(detail.contextMessages.map((entry) => entry.ordinal)).toEqual([1, 2, 3]);
+    const call = detail.contextMessages.find((entry) => entry.origin === 'tool_call')!;
+    expect(JSON.parse(call.text!)).toEqual([{ type: 'tool-call', toolCallId: 'c-1', toolName: 'read_file', input: { path: 'a.md' } }]);
+    expect(call.textPreview).toBe('read_file({"path":"a.md"})');
+    // prune_applied 的那条：模型看到的是占位符，但库里的原文必须原样出来（这是走列而不走
+    // ContextRepository.messages() 的全部理由 —— 后者会跑 elidePart）。
+    const result = detail.contextMessages.find((entry) => entry.pruneApplied)!;
+    expect(result).toMatchObject({ origin: 'tool_result', pruneLevel: 1, pruneApplied: true });
+    expect(JSON.parse(result.text!)).toEqual([{ type: 'tool-result', toolCallId: 'c-1', toolName: 'read_file', output: { type: 'json', value: { ok: true } } }]);
+    closeDatabase(db);
+  });
+
+  it('serves one log event with its payload, and keeps the sibling log routes reachable', async () => {
+    const { app, db, log, headers } = harness('log-detail', { logs: { dir: './data/log-detail-logs', bodyMaxBytes: 512 } });
+    log.event({ level: 'warn', kind: 'tool.call', summary: 'bash', traceId: 'turn-z', chatId: 'c1', userId: '7', key: 'chat:c1', durationMs: 42,
+      data: { input: { command: 'ls' }, error: 'exit 1' } });
+    const plainId = log.event({ level: 'info', kind: 'system.start', summary: '启动' });
+    const bigId = log.event({ level: 'info', kind: 'model.call', summary: 'big', data: { body: 'x'.repeat(4000) } });
+    interface Detail { id: number; kind: string; level: string; traceId: string | null; chatId: string | null; key: string | null; durationMs: number | null; text: string | null; bytes: number; fileRef: string | null }
+    const first = await body<Detail>(await app.request('/api/logs/1', { headers }));
+    expect(first).toMatchObject({ kind: 'tool.call', level: 'warn', traceId: 'turn-z', chatId: 'c1', key: 'chat:c1', durationMs: 42 });
+    expect(JSON.parse(first.text!)).toEqual({ input: { command: 'ls' }, error: 'exit 1' });
+    // 没有 trace、没有载荷的那些行以前点了什么都不发生；现在也要能取回来。
+    const bare = await body<Detail>(await app.request(`/api/logs/${plainId}`, { headers }));
+    expect(bare).toMatchObject({ kind: 'system.start', traceId: null, text: null, bytes: 0 });
+    // blob 解引用跟对话详情共用同一套语义。
+    const big = await body<Detail>(await app.request(`/api/logs/${bigId}`, { headers }));
+    expect(big.fileRef).toMatch(/blobs\//);
+    expect((JSON.parse(big.text!) as { body: string }).body).toHaveLength(4000);
+    expect((await app.request('/api/logs/999999', { headers })).status).toBe(404);
+    // `:id` 注册在 blob / trace 之后，且非数字直接 404 —— 否则这两条会被 Number('blob')=NaN 吃掉。
+    expect((await app.request('/api/logs/nope', { headers })).status).toBe(404);
+    expect((await app.request('/api/logs/blob?ref=missing.json', { headers })).status).toBe(404);
+    expect((await app.request('/api/logs/trace/turn-z', { headers })).status).toBe(200);
+    // 列表只给摘要与载荷字节数：一条 model.call 的 data 能到 bodyMaxBytes，列表一次上千行。
+    const list = await body<Array<Record<string, unknown>>>(await app.request('/api/logs', { headers }));
+    expect(list.every((row) => !('data_json' in row))).toBe(true);
+    expect(list.find((row) => row.id === bigId)!.data_bytes).toBeGreaterThan(0);
+    expect(list.find((row) => row.id === plainId)!.data_bytes).toBe(0);
+    closeDatabase(db);
+  });
+
   it('changes the role of every checked principal and reports the ones it could not find', async () => {
     const { app, db, principals, headers } = harness('roles');
     principals.upsertSeen({ id: 'user:10', kind: 'user', tgId: '10', role: 'limited', displayName: '甲', username: 'jia', chatType: null });
