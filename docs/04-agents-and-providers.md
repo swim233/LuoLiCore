@@ -145,10 +145,11 @@ for await (const chunk of res.textStream) out.push(chunk);   // → Telegram 流
 
 ### 2.1 Prompt 缓存
 
-- `instructions` 传 `SystemModelMessage` 数组，两条：稳定段（KERNEL + CHARACTER + ASSIST + TOOL CATALOG）与易变段（PUBMEMORY + PRIMEMORY + RUNTIME）。
+- `instructions` 传 `SystemModelMessage` 数组，两条：稳定段（KERNEL + CHARACTER + ASSIST）与易变段（TOOL CATALOG + PUBMEMORY + PRIMEMORY + RUNTIME）。
 - Anthropic：`cache_control: {type:'ephemeral'}` 只打在第一条上（通过 `providerOptions.anthropic`），断点因此落在稳定段末尾；第二条不带，不参与缓存 key。
 - OpenAI / 兼容网关：自动前缀缓存，只需保证前缀稳定 —— 稳定段是逐字节不变的那一段。
 - **易变内容一个字都不能混进稳定段**。实测（logs/2026-08-16，grok）：请求体第一处分叉在第 11,503 字符（RUNTIME 的分钟时钟），缓存命中从 12,672 token 掉到 128。这条边界靠 `PromptAssembler` 的 `STABLE_PROMPT_BLOCKS` / `VOLATILE_PROMPT_BLOCKS` 两个常量保证，回归见 `tests/tokens.estimate.test.ts`。
+- TOOL CATALOG 归易变段（[06 §1](./06-prompt-and-memory.md#1-系统提示词的固定结构)）：它随角色、会话与启用集变，留在稳定段就是按 (角色, 会话) 各存一份前缀，且任何一次工具开关或 SKILL.md 改动都把整段作废。移出去之后所有角色与会话共用同一份前缀。
 - 每次记账时把 `cache_read_tokens` / `cache_write_tokens` 单独入 `usage_ledger`，并按 `models.price_cache_*` 单独计价。
 - 若 `PUBMEMORY`/`PRIMEMORY` 被写入，缓存自然失效 —— 这是可接受的；但**记忆写入工具必须在轮末批量落盘**，避免一轮内多次写导致缓存反复失效。
 

@@ -157,10 +157,10 @@
 | [ ] AC-PROMPT-002 (自动) ★ | 组装群聊系统提示词 | **不含** PRIMEMORY；断言其内容字符串不出现在结果中 |
 | [ ] AC-PROMPT-003 (自动) | RUNTIME 块的工具列表 | 与本 step 的 `activeTools` 完全一致（无多、无少） |
 | [ ] AC-PROMPT-004 (自动) | 记忆超大导致总量超 `prompt.maxTokens` | 按 5→4→1 顺序截断并加提示；KERNEL/ASSIST/CATALOG/RUNTIME 完整；有 warn 日志 |
-| [ ] AC-PROMPT-005 | Anthropic provider | 请求中缓存断点打在 TOOL CATALOG 之后（稳定段末尾）；第二轮 `cache_read_tokens > 0` 并单独计价 |
+| [ ] AC-PROMPT-005 | Anthropic provider | 请求中缓存断点打在 ASSIST 之后（稳定段末尾，TOOL CATALOG 已在断点之后）；第二轮 `cache_read_tokens > 0` 并单独计价 |
 | [ ] AC-PROMPT-006 | WebUI `[预览组装]` | 输出与实际发送的 `instructions` 一致（可用日志中的 `instructionsHash` 比对） |
 | [ ] AC-PROMPT-007 | 把 `prompt.maxTokens` 压到 catalog + runtime 就吃满的程度 | `CHARACTER.md` 被截断时日志有一条 `prompt.truncated` warn（含被截块名），人格不再静默消失（docs/20 · W-PROMPT-01） |
-| [ ] AC-PROMPT-008 (自动) ★ | 抓两轮之间的真实请求体逐字节比对 | 第一处分叉必须落在**易变段**（system 消息 #2）之内；稳定段（KERNEL/CHARACTER/ASSIST/CATALOG）一个字节都不变。此前 RUNTIME 的分钟时钟在稳定区里，跨轮缓存命中从 12,672 token 掉到 128（[06 §1]、[04 §2.1](./04-agents-and-providers.md#21-prompt-缓存)） |
+| [ ] AC-PROMPT-008 (自动) ★ | 抓两轮之间的真实请求体逐字节比对，其中一轮先在 WebUI 关掉一个工具 | 第一处分叉必须落在**易变段**（system 消息 #2）之内；稳定段（KERNEL/CHARACTER/ASSIST）一个字节都不变 —— 换角色、换会话、改工具目录都不动它。此前 RUNTIME 的分钟时钟在稳定区里，跨轮缓存命中从 12,672 token 掉到 128（[06 §1]、[04 §2.1](./04-agents-and-providers.md#21-prompt-缓存)） |
 | [ ] AC-PROMPT-009 (自动) | `instructions` 传两条 system 消息 | AI SDK 按序、连同 `providerOptions` 一起递给 provider：Anthropic 转成两个 system text block 且 `cache_control` 只在第一个上；其余 provider 转成两条 system 消息 |
 
 ## 5. 工具 / 沙箱 / 审批（AC-TOOL / AC-SBX / AC-APV）

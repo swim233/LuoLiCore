@@ -282,9 +282,10 @@ export function assembleMainPrompt(turn: RuntimeTurnContext, dependencies: Promp
 }
 
 /**
- * 系统提示词拆成两条：稳定段（KERNEL/CHARACTER/ASSIST/TOOL CATALOG）与易变段（记忆 + RUNTIME）。
+ * 系统提示词拆成两条：稳定段（KERNEL/CHARACTER/ASSIST）与易变段（TOOL CATALOG + 记忆 + RUNTIME）。
  * 缓存断点只打在稳定段上 —— 之前整段带着分钟精度的时钟一起进缓存，等于每分钟作废一次
- * （实测跨轮只命中 128 token，同一轮内前缀不变时命中 12,672，docs/06 §1）。
+ * （实测跨轮只命中 128 token，同一轮内前缀不变时命中 12,672，docs/06 §1）。工具目录同理：
+ * 它随角色与会话变，留在稳定段就是给每个 (角色, 会话) 各存一份前缀，且开关一个工具即全段作废。
  * AI SDK 的 `Instructions` 支持 SystemModelMessage 数组：Anthropic 会转成两个带独立 cache_control
  * 的 system text block，其余 provider 转成两条 system 消息，顺序保持不变。
  */

@@ -5,16 +5,20 @@
 需求原文：「每一次调用 api 的时候，头部消息固定为系统提示词」。落地为 AI SDK 的 `instructions` 字段（**不放进 `messages`**，因此永不被上下文裁剪影响）。
 
 ```
-┌─ block 0  KERNEL          内核指令（代码内置，不可通过 WebUI 修改）        ─┐
-│  block 1  CHARACTER.md    人设                                            │ 稳定段
-│  block 2  ASSIST.md       工作指导（如何使用工具）                          │ = system 消息 #1
-└─ block 3  TOOL CATALOG    可用工具/子agent/Skill 目录（按角色动态生成）    ─┘ ← 缓存断点在此之后
-┌─ block 4  PUBMEMORY.md    公开长期记忆（全局单份）                        ─┐
-│  block 5  PRIMEMORY.md    私有长期记忆（仅私聊，当前用户那份）              │ 易变段
-└─ block 6  RUNTIME         运行时环境块（时间/会话/角色/预算/上下文水位）  ─┘ = system 消息 #2，不缓存
+┌─ block 0  KERNEL          内核指令（代码内置，不可通过 WebUI 修改）        ─┐ 稳定段
+│  block 1  CHARACTER.md    人设                                              │ = system 消息 #1
+└─ block 2  ASSIST.md       工作指导（如何使用工具）                         ─┘ ← 缓存断点在此之后
+┌─ block 3  TOOL CATALOG    可用工具/子agent/Skill 目录（按角色动态生成）    ─┐
+│  block 4  PUBMEMORY.md    公开长期记忆（全局单份）                          │ 易变段
+│  block 5  PRIMEMORY.md    私有长期记忆（仅私聊，当前用户那份）              │ = system 消息 #2，不缓存
+└─ block 6  RUNTIME         运行时环境块（时间/会话/角色/预算/上下文水位）   ─┘
 ```
 
-- **顺序固定，不可配置**。block 3 的内容随角色变化，但对同一 (角色, 启用集) 是稳定的，因此仍可缓存。
+- **顺序固定，不可配置**。block 3 排在易变段第一块 —— 它对**同一** (角色, 会话, 启用集) 才稳定，
+  放进缓存段等于按 (角色, 会话) 把前缀缓存切成多份（每份各付一次 cache write，各自 5 分钟过期），
+  而 WebUI 关掉一个工具、或改一个 SKILL.md（`skills.changed` → 下一轮重建目录，
+  [07 §2.3](./07-skills-plugins-mcp.md#23-加载与热更新)）就会把 KERNEL/CHARACTER/ASSIST 一起作废。
+  移出去之后稳定段对所有角色与会话共用同一份前缀，代价是目录那 ~1k token 每轮重新计费。
 - `instructions` 传的是 **`SystemModelMessage` 数组**（AI SDK v7 支持），两段按序各一条：
   Anthropic 侧转成两个 system text block，`cache_control` 只打在第一条上；其余 provider 转成
   两条 system 消息，顺序不变。跨边界断言见 `tests/context.contract.test.ts`。

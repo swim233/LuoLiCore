@@ -48,9 +48,12 @@ export interface PromptBuildResult {
  * 意味着每过一分钟整段前缀就作废一次。实测（logs/2026-08-16，grok）：同一轮内前缀逐字节
  * 相同的连续步骤命中 12,672 token，跨轮只差一个分钟数时只命中 128 —— 等于完全没有缓存。
  * 记忆两块也归易变：memory_write 是模型工具，对话中途随时会改。
+ * catalog 归易变的理由不同：它对同一 (角色, 会话, 启用集) 才逐字节稳定，留在缓存段等于按
+ * (角色, 会话) 把前缀切成多份各存一次，而且 WebUI 关一个工具、改一个 SKILL.md 就连带把
+ * KERNEL/CHARACTER/ASSIST 一起作废。它排在易变段第一块，两段拼起来的 block 顺序不变。
  */
-export const STABLE_PROMPT_BLOCKS = ['kernel', 'character', 'assist', 'catalog'] as const;
-export const VOLATILE_PROMPT_BLOCKS = ['pubmemory', 'primemory', 'runtime'] as const;
+export const STABLE_PROMPT_BLOCKS = ['kernel', 'character', 'assist'] as const;
+export const VOLATILE_PROMPT_BLOCKS = ['catalog', 'pubmemory', 'primemory', 'runtime'] as const;
 
 const tokens = estimateTextTokens;
 

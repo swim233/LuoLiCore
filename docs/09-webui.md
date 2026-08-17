@@ -151,9 +151,10 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
   `assembleMainPrompt`，返回 kernel / character / assist / catalog / public/private memory / runtime
   各 block 的完整正文、token 数与截断状态，并带该会话上下文消息数和 token 数。界面用分段条显示
   占比，逐块展开正文；这不是 `context.materialize()` 的近似值。
-- 每块另标「缓存段 / 每轮重算」：稳定段（KERNEL/CHARACTER/ASSIST/TOOL CATALOG）走 system 消息 #1
-  并带缓存断点，易变段（PUBMEMORY/PRIMEMORY/RUNTIME）走 #2 不缓存（[06 §1](./06-prompt-and-memory.md)）。
-  改人设或工具目录会让缓存段整体作废一次，这个标记是让运维在动手前看得见这件事。
+- 每块另标「缓存段 / 每轮重算」：稳定段（KERNEL/CHARACTER/ASSIST）走 system 消息 #1 并带缓存断点，
+  易变段（TOOL CATALOG/PUBMEMORY/PRIMEMORY/RUNTIME）走 #2 不缓存（[06 §1](./06-prompt-and-memory.md)）。
+  改人设会让缓存段整体作废一次，这个标记是让运维在动手前看得见这件事；开关工具或改 SKILL.md
+  只动 TOOL CATALOG，已经不再牵连缓存段。
 - 右侧编辑器显示正文、行号、估算 token、字节数；保存走 `PUT /api/prompts/:id`（Ctrl+S）。
 - 标题下写明文档类型与磁盘路径。版本时间线来自 `GET /api/prompts/:id/revisions`，展示 unified diff，
   `[回滚到此版本]` 调 `POST /api/prompts/:id/rollback`。
