@@ -291,10 +291,40 @@ t=3s  A commit: REBASE → ordinals 7,8, parent=c002
 
 ### 5.1 语义（D2 + D3 + D4）
 
-- **时机**：每个 turn `commit` 成功后立即执行一次；**turn 进行中不执行**。
+- **时机**：每个 turn `commit` 成功后执行一次，外加 `openTurn` 里的空闲超期补裁（见 5.1.1）；**turn 进行中不执行**。
 - **方向**：丢弃**最旧**的内容。
 - **度量**：`tokens` 与 `msgCount` 双阈值，任一超限即触发。
 - **不可裁剪**：系统提示词、ASSIST/CHARACTER/MEMORY（它们根本不在 `context_messages` 里）。
+
+### 5.1.1 活跃期（推迟裁剪，`context.active.*`）
+
+**裁剪一次 = 缓存全灭。** 前移 `window_start` 改的是请求体最前面那几条消息，而所有 provider 的
+前缀缓存都是「从第一个字节开始逐字节比对」——掉一条最旧的消息，后面**整个**历史的缓存一起作废。
+在一场正在进行的对话里这是最糟的时机：命中率本来最高的那一刻，被一次省几百 token 的裁剪打掉了
+几万 token 的缓存读。算术是压倒性的：缓存读按 0.1 倍计价，裁掉 2k token 省下的钱，抵不上重新
+写入 30k token 前缀的零头。
+
+活跃期把裁剪推迟到**缓存本来就已经凉了**的时刻：
+
+- **判据是滑动的空闲间隔，不是固定截止时刻**：`now - HEAD.created_at <= context.active.windowMs`
+  即为「仍在活跃期」。每一轮提交都把它顺延一次，所以只要对话在继续就永远不裁剪；安静满
+  `windowMs` 之后的第一轮才裁。固定截止（首次唤醒起算）会在一场长对话的正中间作废热缓存 ——
+  恰好是最不该裁的时刻，因此明确不采用。
+- **默认 `windowMs` 应与 provider 的缓存 TTL 同量级**（Anthropic ephemeral 5 分钟；OpenAI 系隐式
+  前缀缓存的保留期也在这个量级）。取这个值时「推迟裁剪」的代价精确为零：等到真的裁的时候，
+  那份缓存早已过期，作废它不损失任何东西。
+- **推迟不是取消，必须有天花板**：`context.active.tokens` / `context.active.maxMessages` 是活跃期内
+  允许涨到的上限。**撞到天花板时裁剪的目标仍是 `context.limit.*`**，不是天花板本身 ——
+  裁到天花板等于此后每一轮都要裁一次、每一轮都作废一次缓存，正是这个特性要消灭的东西。
+  一次裁到常规上限，换来接下来许多轮的免裁剪增长，这是有意的摊还。
+- **空闲超期补裁在 `openTurn`**：久别重逢的那一轮，上下文可能已经是常规上限的数倍。在开轮前就把
+  窗口裁回 `context.limit.*`，这一轮发出去的就已经是小请求。此时缓存已过期，裁剪不损失任何命中，
+  而少发的那几万 token 是实打实按全价省下来的。
+- `windowMs = 0`（schema 默认）关闭整个特性，裁剪行为与本节其余部分完全一致。
+
+**活跃期不改变任何形状不变式**：它只决定「这一轮要不要推进 `window_start`」，推进时走的仍是
+5.2 / 5.3 那一套（turn 边界、分级降级、硬截断、收敛告警）。推迟的方向永远是**多留**，
+所以孤儿 `tool-result`、`minKeepTurns`、认领水位这些约束不可能因为它被破坏。
 
 ### 5.2 裁剪单位：exchange（一个 turn 的 delta）
 
@@ -303,11 +333,16 @@ t=3s  A commit: REBASE → ordinals 7,8, parent=c002
 ### 5.3 算法
 
 ```ts
-async function prune(key: string, commit: Commit): Promise<Commit | null> {
+async function prune(key: string, commit: Commit, deferrable: boolean): Promise<Commit | null> {
   const lim = cfg.context.limit;                      // { tokens, maxMessages }
   let msgs = await materialize(commit);
   let tokens = sum(msgs, m => m.tokens);
-  if (tokens <= lim.tokens && msgs.length <= lim.maxMessages) return null;   // 无需裁剪
+  // 触发阈值与裁剪目标是两个数：活跃期内按放宽后的天花板决定「要不要裁」，
+  // 一旦决定要裁，目标恒为 lim ——裁到天花板等于每轮都裁、每轮都作废缓存（5.1.1）。
+  const gate = deferrable && cfg.context.active.windowMs > 0
+    ? { tokens: max(cfg.context.active.tokens, lim.tokens), count: max(cfg.context.active.maxMessages, lim.maxMessages) }
+    : { tokens: lim.tokens, count: lim.maxMessages };
+  if (tokens <= gate.tokens && msgs.length <= gate.count) return null;       // 无需裁剪
 
   let windowStart = commit.window_start;
   const turnBoundaries = await repo.turnStartOrdinals(key, windowStart, commit.head_ordinal);
@@ -537,3 +572,11 @@ export interface CommitResult {
     bot 入群之前）。去重的三种「已经看得见」见 §4.1.1 —— 其中 bot 自己的产出只能靠 `turn_id` 反查，
     漏判的表现是每次「回复 bot」都把它上一句原样再贴一遍。补写进归档的那一行必须带 `claimed_at`，
     否则下一轮会把它当成新的背景发言再认领一次。
+19. ✅ **活跃期只推迟裁剪，永不取消裁剪。** `context.active.*` 必须同时给出天花板
+    （`tokens` / `maxMessages`），且撞到天花板时裁剪目标仍是 `context.limit.*`。少了天花板，
+    一场不结束的对话就是一条没有上界的增长曲线：先撞 `context.hardCapRatio` 的轮内应急裁剪
+    （在内存里挖掉中间的工具调用 —— 那**同样**会打掉前缀缓存，还额外丢内容），再撞模型窗口被
+    provider 整个拒收。裁剪目标若取天花板而不是常规上限，则此后每一轮都恰好在天花板上再裁一次，
+    等于把「每轮作废一次缓存」原样搬到了更高的水位上。推迟的方向永远是多留，因此所有形状不变式
+    （turn 边界、tool 配对、`minKeepTurns`）自动继续成立；`tests/context.active.test.ts` 断言
+    「活跃期内 `window_start` 一动不动」与「撞天花板后裁回常规上限」两侧。

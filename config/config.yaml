@@ -18,6 +18,12 @@ context:
     tokens: 32000
     maxMessages: 200
     minKeepTurns: 1
+  # 活跃期：对话进行中不裁剪，让前缀缓存一直命中；安静满 5 分钟（≈ provider 缓存有效期）
+  # 之后的第一轮才裁回上面的 limit。schema 默认是 0（关闭），这里显式开启。docs/02 §5.1.1
+  active:
+    windowMs: 300000
+    tokens: 128000
+    maxMessages: 1000
   background:
     enabled: true
     maxPerTurn: 20

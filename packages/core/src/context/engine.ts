@@ -135,13 +135,29 @@ export class ContextEngine {
       const turnId = ulid();
       const repo = new ScopedContextRepository(this.db, request.key);
       const ctx = repo.ensure(request.chatId, request.threadId, request.config.context.scope);
-      const head = repo.head();
+      let head = repo.head();
+      // 活跃期是**滑动的空闲间隔**，不是从首次唤醒起算的固定截止：每一轮提交都把它顺延一次，
+      // 所以只要对话在继续就永远不裁剪。固定截止会在一场长对话正中间作废热缓存，恰好是最不该裁
+      // 的时刻（docs/02 §5.1.1）。空上下文视同活跃期 —— 本来就没有可裁的东西。
+      const active = request.config.context.active;
+      const idleMs = head ? Date.now() - head.createdAt : 0;
+      const inActivePeriod = active.windowMs > 0 && (head === null || idleMs <= active.windowMs);
+      if (active.windowMs > 0 && !inActivePeriod && head) {
+        // 空闲超期补裁。久别重逢的那一轮上下文可能已经是常规上限的数倍，等到 commitTurn 再裁的话
+        // 这一轮要按全价发一次超大请求；在开轮前裁回去，此时缓存早已过期，裁剪不损失任何命中。
+        const caught = this.prune(repo, head, request.config);
+        if (caught) {
+          head = caught.commit;
+          this.invalidate(request.key);
+          this.log?.event({ level: 'info', kind: 'ctx.prune', summary: `Pruned ${request.key} after idle`, key: request.key, data: { ...caught.result, idleMs, reason: 'idle_expired' } });
+        }
+      }
       const scopedArchive = this.archive.scope(request.chatId, request.threadId);
       const claim = request.config.context.background.enabled
         ? scopedArchive.claimBackground(ctx.claimWatermark, request.trigger.id, request.config.context.background.maxPerTurn, turnId)
         : { rows: [], omitted: 0 };
       try {
-        return this.buildTurn(request, turnId, repo, ctx, head, claim);
+        return this.buildTurn(request, turnId, repo, ctx, head, claim, inActivePeriod);
       } catch (error) {
         // 认领已经落库；这里不放行就等于把这批背景消息永久吞掉（水位还没推进，但 claimed_at 已非空）。
         if (claim.rows.length) scopedArchive.releaseClaims(turnId);
@@ -161,7 +177,7 @@ export class ContextEngine {
     return Boolean(quoted.turnId) && snapshot.some((message) => (message as { turnId?: string }).turnId === quoted.turnId);
   }
 
-  private buildTurn(request: OpenTurnRequest, turnId: string, repo: ContextRepository, ctx: { tokenRatio: number }, head: CommitRow | null, claim: { rows: ArchivedMessage[]; omitted: number }): RuntimeTurnContext {
+  private buildTurn(request: OpenTurnRequest, turnId: string, repo: ContextRepository, ctx: { tokenRatio: number }, head: CommitRow | null, claim: { rows: ArchivedMessage[]; omitted: number }, deferPrune: boolean): RuntimeTurnContext {
     {
       const scale = (message: NewContextMessage): NewContextMessage => {
         if (message.tokens !== undefined) message.tokens = Math.ceil(message.tokens * ctx.tokenRatio);
@@ -201,7 +217,7 @@ export class ContextEngine {
         initiatorUserId: request.initiatorUserId, effectiveRole: request.effectiveRole, isPrivate: request.isPrivate, baseCommitId: head?.id ?? null, claimThroughMessageId: request.trigger.id,
         initiator: { name: request.trigger.fromName ?? null, username: request.trigger.fromUsername ?? null },
         triggerTgMessageId: request.trigger.tgMessageId,
-        snapshot, delta, abortSignal: request.abortSignal, tokenRatio: ctx.tokenRatio, config: request.config };
+        snapshot, delta, abortSignal: request.abortSignal, tokenRatio: ctx.tokenRatio, deferPrune, config: request.config };
     }
   }
 
@@ -225,7 +241,7 @@ export class ContextEngine {
       const repo = new ScopedContextRepository(this.db, turn.key);
       const inserted = repo.insertTurn(turn.turnId, turn.baseCommitId, delta, config.context.rebase.injectNotice, turn.claimThroughMessageId, config.context.rebase.markMeta);
       this.invalidate(turn.key);
-      const pruned = this.prune(repo, inserted.commit, config);
+      const pruned = this.prune(repo, inserted.commit, config, turn.deferPrune === true);
       this.invalidate(turn.key);
       this.log?.event({ level: 'info', kind: 'ctx.commit', summary: `Committed ${turn.turnId}`, traceId: turn.turnId, chatId: turn.chatId, userId: turn.initiatorUserId, key: turn.key, data: { commitId: (pruned?.commit ?? inserted.commit).id, rebased: inserted.rebased } });
       if (inserted.rebased) this.log?.event({ level: 'warn', kind: 'ctx.rebase', summary: `Rebased ${turn.turnId}`, traceId: turn.turnId, key: turn.key, data: { base: turn.baseCommitId, onto: inserted.commit.parentId } });
@@ -350,7 +366,23 @@ export class ContextEngine {
     for (const cacheKey of this.#cache.keys()) if (cacheKey.startsWith(`${key}:`)) this.#cache.delete(cacheKey);
   }
 
-  private prune(repo: ContextRepository, commit: CommitRow, config: Readonly<Config>): { commit: CommitRow; result: { fromOrdinal: number; toOrdinal: number; levels: number[] } } | null {
+  /**
+   * `deferrable`：这一轮落在活跃期内吗（`openTurn` 按距上一轮提交的间隔算好后快照进 `turn.deferPrune`）。
+   * 活跃期内把**触发阈值**抬到 `context.active.*`，但**裁剪目标**恒为 `context.limit.*` ——
+   * 裁到天花板等于此后每一轮都要在天花板上再裁一次，每次都作废整段前缀缓存，正是这个特性
+   * 要消灭的东西（docs/02 §5.1.1 与红线 19）。推迟的方向永远是多留，所以 turn 边界、tool 配对、
+   * `minKeepTurns` 这些形状不变式不可能因为它被破坏。
+   */
+  private prune(repo: ContextRepository, commit: CommitRow, config: Readonly<Config>, deferrable = false): { commit: CommitRow; result: { fromOrdinal: number; toOrdinal: number; levels: number[] } } | null {
+    const active = config.context.active;
+    if (deferrable && active.windowMs > 0) {
+      // 早退在 `repo.messages()` 之前：活跃期内绝大多数轮次都走这条路，没必要为了一个不会用到的
+      // 判断把整个窗口物化一遍。天花板取 max(active, limit)：把 active 配得比 limit 还小是无意义
+      // 配置，但不该因此变成「比不开活跃期裁得还狠」。
+      const stats = repo.effectiveStats(commit.windowStart, commit.headOrdinal);
+      if (stats.tokens <= Math.max(active.tokens, config.context.limit.tokens)
+        && stats.count <= Math.max(active.maxMessages, config.context.limit.maxMessages)) return null;
+    }
     const messages = repo.messages(commit);
     let windowStart = commit.windowStart;
     const starts = repo.turnStartOrdinals(commit.windowStart, commit.headOrdinal);
