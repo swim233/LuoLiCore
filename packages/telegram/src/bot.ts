@@ -515,7 +515,8 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
         answer = outgoing;
       } else {
         const output = new TelegramOutput(bot, chatId, { mode: outputConfig.mode, replyDelayMs: outputConfig.replyDelayMs, bufferMs: outputConfig.streamBufferMs, intervalMs: outputConfig.streamIntervalMs, minDeltaChars: outputConfig.streamMinDeltaChars, maxChars: outputConfig.maxMessageChars,
-          parseMode: outputConfig.parseMode, flushOnSentence: outputConfig.flushOnSentence, typingWhileWorking: outputConfig.typingWhileWorking, placeholderAfterMs: outputConfig.placeholderAfterMs },
+          parseMode: outputConfig.parseMode, flushOnSentence: outputConfig.flushOnSentence, typingWhileWorking: outputConfig.typingWhileWorking, placeholderAfterMs: outputConfig.placeholderAfterMs,
+          placeholderTexts: outputConfig.placeholderTexts, placeholderPick: outputConfig.placeholderPick, placeholderIndex: outputConfig.placeholderIndex },
           (error) => dependencies.log.event({ level: 'warn', kind: 'tg.error', summary: 'Streaming delivery failed', traceId: turn.turnId, chatId, data: { error: error instanceof Error ? error.message : String(error) } }), receivedAt,
           async (text) => capMentions(dependencies.plugins ? pluginText(await dependencies.plugins.hook('beforeSend', { turn, text }), text) : text, outputConfig.maxMentions));
         const consumed = await output.consume(generated.stream, message.message_id);

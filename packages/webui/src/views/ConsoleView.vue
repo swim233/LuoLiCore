@@ -72,8 +72,10 @@ const wakewordStatus = ref<Array<{ pattern: string; kind: string; ok: boolean; r
 const newWakeword = ref('');
 const triggerDirty = ref(false);
 const triggerSaving = ref(false);
-interface OutputForm { mode: string; replyDelayMs: number; streamBufferMs: number; streamIntervalMs: number; streamMinDeltaChars: number }
-const outputForm = ref<OutputForm>({ mode: 'stream', replyDelayMs: 2000, streamBufferMs: 2000, streamIntervalMs: 2000, streamMinDeltaChars: 24 });
+/** `placeholderTexts` 在表单里是「一行一条」的文本域，不是数组：每敲一个字都要求它是合法数组
+ *  的话，删到只剩半行就没法继续编辑了。进出各转一次，落库的仍是数组。 */
+interface OutputForm { mode: string; replyDelayMs: number; streamBufferMs: number; streamIntervalMs: number; streamMinDeltaChars: number; placeholderAfterMs: number; placeholderTexts: string; placeholderPick: string; placeholderIndex: number }
+const outputForm = ref<OutputForm>({ mode: 'stream', replyDelayMs: 2000, streamBufferMs: 2000, streamIntervalMs: 2000, streamMinDeltaChars: 24, placeholderAfterMs: 4000, placeholderTexts: '…', placeholderPick: 'random', placeholderIndex: 0 });
 const outputDirty = ref(false);
 const outputSaving = ref(false);
 const selectedChat = ref<Chat | null>(null);
@@ -308,14 +310,32 @@ function syncOutput(): void {
   if (outputDirty.value) return;
   const output = (config.value.output ?? {}) as Record<string, unknown>;
   const current = outputForm.value;
-  // 逐项取而不是整体展开：output 下还有七个不归这张表管的键（parseMode、maxMessageChars…），
+  // 逐项取而不是整体展开：output 下还有五个不归这张表管的键（parseMode、maxMessageChars…），
   // 展开进来只会在保存时被悄悄丢掉。
   outputForm.value = { mode: String(output.mode ?? current.mode), replyDelayMs: Number(output.replyDelayMs ?? current.replyDelayMs),
     streamBufferMs: Number(output.streamBufferMs ?? current.streamBufferMs), streamIntervalMs: Number(output.streamIntervalMs ?? current.streamIntervalMs),
-    streamMinDeltaChars: Number(output.streamMinDeltaChars ?? current.streamMinDeltaChars) };
+    streamMinDeltaChars: Number(output.streamMinDeltaChars ?? current.streamMinDeltaChars),
+    placeholderAfterMs: Number(output.placeholderAfterMs ?? current.placeholderAfterMs),
+    // 空数组要如实变成空文本域（那正是「不发占位消息」），所以判的是 isArray 而不是 `?? current`。
+    placeholderTexts: Array.isArray(output.placeholderTexts) ? (output.placeholderTexts as unknown[]).map(String).join('\n') : current.placeholderTexts,
+    placeholderPick: String(output.placeholderPick ?? current.placeholderPick), placeholderIndex: Number(output.placeholderIndex ?? current.placeholderIndex) };
 }
 function markOutputDirty(): void { outputDirty.value = true; }
-function changeOutputNumber(field: keyof Omit<OutputForm, 'mode'>, value: number | null): void { outputForm.value[field] = value ?? 0; markOutputDirty(); }
+type OutputNumber = 'replyDelayMs' | 'streamBufferMs' | 'streamIntervalMs' | 'streamMinDeltaChars' | 'placeholderAfterMs' | 'placeholderIndex';
+function changeOutputNumber(field: OutputNumber, value: number | null): void { outputForm.value[field] = value ?? 0; markOutputDirty(); }
+/** 保存时就滤掉空行，落库的数组因此没有空洞 —— placeholderIndex 数的是「去掉空行后的第几条」，
+ *  两边对不上的话界面上数出来的那一条和实际发出去的会差一位。 */
+const placeholderList = computed(() => outputForm.value.placeholderTexts.split('\n').map((line) => line.trim()).filter(Boolean));
+const placeholderPreview = computed(() => {
+  const list = placeholderList.value;
+  if (!list.length) return '列表为空：不发占位消息 —— 这也是关掉它的唯一途径，「等待多久发」填不了 0。';
+  if (outputForm.value.placeholderPick !== 'fixed') return `随机：每轮从这 ${list.length} 条里挑一条。`;
+  // 越界回落到**第一条**，跟 pickPlaceholder 一致 —— 这里写成 clamp 到末条的话，界面预告的和
+  // 实际发出去的会是两条不同的文案。
+  const raw = outputForm.value.placeholderIndex;
+  const index = raw >= 0 && raw < list.length ? raw : 0;
+  return `固定：恒发「${list[index]}」${index === raw ? '' : `（下标 ${raw} 越界，回落到第一条）`}`;
+});
 /** 模型元数据没有「留空 = 不设置」这一档（窗口、价格都是必填的 number）：清空按 0 收，让服务端那道
  *  zod 去判这值合不合法 —— 比把 null 塞进 JSON body 强，那边只会回一条对不上界面的路径报错。 */
 type ModelNumber = 'contextWindow' | 'maxOutput' | 'sort' | 'priceIn' | 'priceOut' | 'priceCacheRead' | 'priceCacheWrite';
@@ -326,7 +346,9 @@ async function saveOutput(): Promise<void> {
   outputSaving.value = true;
   try {
     await api('/api/config', { method: 'PUT', body: JSON.stringify({ 'output.mode': form.mode, 'output.replyDelayMs': form.replyDelayMs,
-      'output.streamBufferMs': form.streamBufferMs, 'output.streamIntervalMs': form.streamIntervalMs, 'output.streamMinDeltaChars': form.streamMinDeltaChars }) });
+      'output.streamBufferMs': form.streamBufferMs, 'output.streamIntervalMs': form.streamIntervalMs, 'output.streamMinDeltaChars': form.streamMinDeltaChars,
+      'output.placeholderAfterMs': form.placeholderAfterMs, 'output.placeholderTexts': placeholderList.value,
+      'output.placeholderPick': form.placeholderPick, 'output.placeholderIndex': form.placeholderIndex }) });
     outputDirty.value = false;
     pushToast({ severity: 'success', summary: '输出节奏已保存', detail: '下一轮回复生效；在途那一轮沿用开轮时的值' });
     await load();
@@ -2384,7 +2406,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             <p class="field-note wide">会话级覆盖（<code>perChat.&lt;contextKey&gt;.trigger</code>）优先于这里的全局值，入口在<b>会话页</b>选中某个会话之后的「只对这个会话生效的设置」。</p>
           </div>
           <div class="registry-heading">
-            <div><h3>输出节奏</h3><p class="section-note">决定一条回复怎么送出去。流式模式下先攒一段再发第一条，之后按固定节拍编辑同一条消息 —— 攒的时长设成 0 就会退回「先发一个字、剩下靠编辑补」的观感。保存后下一轮生效。</p></div>
+            <div><h3>输出节奏</h3><p class="section-note">决定一条回复怎么送出去。流式模式下先攒一段再发第一条，之后按固定节拍编辑同一条消息 —— 攒的时长设成 0 就会退回「先发一个字、剩下靠编辑补」的观感。模型迟迟不开口时先顶上去的<b>等待文案</b>也在这里配。保存后下一轮生效。</p></div>
             <UiButton size="small" icon="pi pi-save" label="保存输出节奏" :loading="outputSaving" :disabled="!outputDirty" @click="saveOutput" />
           </div>
           <div class="form-grid">
@@ -2393,6 +2415,11 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             <label>首帧缓冲（毫秒）<UiNumber :model-value="outputForm.streamBufferMs" :min="0" :max="30000" :step="500" @update:model-value="changeOutputNumber('streamBufferMs', $event)" /><small class="field-note">从<b>上游第一个 chunk 到达</b>算起，攒够这么久再发第一条。窗口内的文本只攒不发不会丢；流在窗口内就结束则立刻发出。</small></label>
             <label>编辑间隔（毫秒）<UiNumber :model-value="outputForm.streamIntervalMs" :min="200" :max="30000" :step="500" @update:model-value="changeOutputNumber('streamIntervalMs', $event)" /><small class="field-note">两次 editMessageText 之间的最小间隔。首条发出也算一次刷新，下一次编辑同样要等满。</small></label>
             <label>最小增量（字）<UiNumber :model-value="outputForm.streamMinDeltaChars" :min="1" :max="2000" @update:model-value="changeOutputNumber('streamMinDeltaChars', $event)" /><small class="field-note">和上一项是<b>同时满足</b>才编辑：到点了但只多出两三个字就先不动，免得撞 Telegram 的编辑频率限制。收尾那次编辑不受这两项约束。</small></label>
+            <label class="wide">等待文案<textarea v-model="outputForm.placeholderTexts" rows="4" spellcheck="false" placeholder="一行一条，例如：&#10;让我想想…&#10;稍等，正在查" @input="markOutputDirty" /><small class="field-note">模型迟迟不吐第一个字时先发出去顶住的那条消息 —— <b>它就是后面被编辑成答复的那一条</b>，不会多出一条躺在那里。一行一条；空行会在保存时滤掉。只在 stream 模式下发。</small></label>
+            <label>挑选方式<UiSelect v-model="outputForm.placeholderPick" :options="[{ value: 'random', label: '随机 · 每轮从备选里挑一条' }, { value: 'fixed', label: '固定 · 恒用下标指的那条' }]" @change="markOutputDirty" /><small class="field-note">备选只有一条时两者没区别。</small></label>
+            <label>固定用第几条<UiNumber :model-value="outputForm.placeholderIndex" :min="0" :disabled="outputForm.placeholderPick !== 'fixed'" @update:model-value="changeOutputNumber('placeholderIndex', $event)" /><small class="field-note">0 起，数的是上面文本域里<b>去掉空行后</b>的第几行。越界回落到第一条。</small></label>
+            <label>等待多久发（毫秒）<UiNumber :model-value="outputForm.placeholderAfterMs" :min="1" :step="500" @update:model-value="changeOutputNumber('placeholderAfterMs', $event)" /><small class="field-note">从开始生成算起。这么久还没有内容可发才发占位消息 —— 日常几秒就答完的对话压根不会出现它。</small></label>
+            <p class="wide" :class="placeholderList.length ? 'field-note' : 'callout warn'"><i v-if="!placeholderList.length" class="pi pi-info-circle" aria-hidden="true" />{{ placeholderPreview }}</p>
             <p class="field-note wide">会话级覆盖（<code>perChat.&lt;contextKey&gt;.output</code>）优先于这里的全局值。</p>
           </div>
           <div class="registry-heading"><div><h3>维护操作</h3><p class="section-note">都是同步执行的：大库上会阻塞写入，跑的时候 bot 那边的消息会排队。</p></div></div>

@@ -410,6 +410,13 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
   两个锚点的区别写在字段说明里 —— 只调 `replyDelayMs` 治不了「第一条消息只有一个字」
   （[08 §5.2](./08-telegram-adapter.md#52-流式算法)）。保存同样走 `PUT /api/config` 的点分键，
   下一轮回复生效；在途那一轮沿用开轮时的值。同样有未保存改动时不被 SSE 刷新回写。
+  同一张卡片下半截是**等待文案**：`placeholderTexts`（一行一条的文本域，保存时滤掉空行后落成数组）、
+  `placeholderPick`（随机 / 固定）、`placeholderIndex`（固定用第几条，`pick != fixed` 时禁用）与
+  `placeholderAfterMs`。下面一行实时预告「这一轮会发哪条」，因为随机档看不出配的对不对；
+  **文本域清空时那行换成 warn callout**，说明占位消息已经关掉 —— `placeholderAfterMs` 的 schema 是
+  `positive()`，填不了 0，清空列表是唯一的关闭途径（[11 output](./11-config-reference.md)）。
+  越界下标在预告里和 `pickPlaceholder` 一样回落到第一条，不是 clamp 到末条：两边不一致的话，
+  界面预告的和实际发出去的会是两条不同的文案。
 - 会话级覆盖（`perChat.<contextKey>.*`）优先于全局值。**入口在会话页**（§3.2），不在这里 ——
   它只对选中的那个会话有意义，放在全局设置页既看不出改的是谁也看不出改的是什么。
 - **「全部配置」表单**（已实现）：由 `config.schema.json`（zod → JSON Schema）**自动生成**，

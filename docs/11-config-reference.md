@@ -397,6 +397,11 @@ output:
   parseMode: MarkdownV2           # 热更新 · MarkdownV2 | HTML | none；none 时不试 Markdown 也就没有回退那一跳
   typingWhileWorking: true        # 热更新 · 关掉后整轮一次 typing 都不发
   placeholderAfterMs: 4000        # 热更新 · 上游这么久还没吐第一个 chunk 就先发一条占位（就是后面被编辑的那条）
+  placeholderTexts: ['…']         # 热更新 · 占位消息的备选文案，可多条（可 perChat 覆盖）。
+                                  # **空数组 = 不发占位消息** —— placeholderAfterMs 是 positive，
+                                  # 填不了 0，这是关掉它的唯一途径。空白行在挑选时滤掉
+  placeholderPick: random         # 热更新 · random = 每轮随机挑一条；fixed = 恒用 placeholderIndex 那条
+  placeholderIndex: 0             # 热更新 · fixed 用第几条，0 起，按去掉空行后的列表算；越界回落到第一条
   maxMentions: 3                  # 热更新 · 一条消息最多几个 @用户名，多的去掉 @ 只留名字；0 = 不限
 
 # ============================================================ media（D16）
