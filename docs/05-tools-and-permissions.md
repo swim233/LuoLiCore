@@ -382,7 +382,17 @@ Telegram 不会看到按钮；有 WebUI 连着时调用按 `ttlMs` 等待，而�
 `ttlMs`（默认 180 秒），而 Telegram 侧一个字都没有 —— 这正是 [20](./20-review-round5.md) §0.0 裁决要消灭的形态。
 判据必须是「裁决通道」而不是「订阅者」：进程自己的 `config.changed` 订阅者常驻，拿 `subscriberCount`
 判断会让这段永远走不到（[22](./22-review-round6.md) · `D-APPR-01`、[24](./24-review-round6-verification.md) · `R-APPR-01`）。
-🚧 **仍缺**：有通道时，发起人在等待期间收不到任何提示，只能看到 bot 沉默——补 Telegram 回执或 inline keyboard 之前，这条不算闭合。
+**发起人回执**（第七轮补上）：挂起 pending 行之后，立刻往**发起人所在的会话**发一句
+「`<工具>` 是<风险>操作，需要 owner 在 WebUI 里批准，N 秒内没人处理就会自动拒绝」。此前有通道时
+这一轮会静静挂满 `ttlMs`（默认 180 秒），Telegram 那边一个字都没有 —— 用户看到的是 bot 收了消息
+然后沉默三分钟（[22](./22-review-round6.md) · `D-APPR-01`）。
+
+三条约束：**先落库再通知**（通知失败也不会留下一个没人知道的等待）；**回执失败不影响审批本身**
+（Telegram 拒发不该把一次高危调用从「等人批」变成「整轮失败」）；**没有裁决通道时不发回执**
+（那一条本来就当场拒绝，再发一句「等 owner 批」是骗人）。
+
+仍然没有的是 Telegram inline keyboard：裁决只能在 WebUI 做。发起人现在至少知道自己在等什么、
+等多久，而不是对着沉默猜。
 
 风险规则（`approval.rules`，正则匹配后触发审批，可在 WebUI 编辑）：
 

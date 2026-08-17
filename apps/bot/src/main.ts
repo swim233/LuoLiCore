@@ -120,7 +120,17 @@ scheduler.add(config.mcp.healthCheckCron, () => mcp.reconcile(), 'mcp-health');
 const promptAssembler = new PromptAssembler();
 const promptDocuments = new PromptDocuments(db, config.memory.dir);
 promptDocuments.ensure();
-const approval = new DatabaseApprovalBroker(db, () => configStore.snapshot(), events, log);
+// 审批回执发给**发起人所在的会话**（`docs/22 · D-APPR-01`）：有裁决通道时这一轮会静静挂满
+// ttlMs，用户看到的是 bot 收了消息然后沉默三分钟。bot 要到最后才建得起来，所以这里吃 getter。
+const approval = new DatabaseApprovalBroker(db, () => configStore.snapshot(), events, log, async (pending) => {
+  if (!bot) return;
+  const risk = pending.risk === 'high' ? '高风险' : pending.risk === 'medium' ? '中风险' : '低风险';
+  await bot.api.sendMessage(pending.chatId,
+    `⏳ \`${pending.tool}\` 是${risk}操作，需要 owner 在 WebUI 里批准。${Math.round(pending.ttlMs / 1000)} 秒内没人处理就会自动拒绝，我会接着往下说。`,
+    { parse_mode: 'MarkdownV2', ...(pending.threadId ? { message_thread_id: pending.threadId } : {}) })
+    .catch(() => bot!.api.sendMessage(pending.chatId, `⏳ ${pending.tool} 是${risk}操作，需要 owner 在 WebUI 里批准。${Math.round(pending.ttlMs / 1000)} 秒内没人处理就会自动拒绝。`,
+      pending.threadId ? { message_thread_id: pending.threadId } : {}));
+});
 if (!config.approval.enabled) log.event({ level: 'warn', kind: 'approval.disabled', summary: 'Approval flow disabled; dangerous tools execute without review' });
 // 唤醒词在匹配时被静默跳过、或四个开关全关，表现都只是「bot 不理我」——启动时先把它说出来（docs/11 §启动校验）。
 const unusableWakewords = rejectedWakewords(config.trigger.wakewords, config.trigger.wakewordMinLength);

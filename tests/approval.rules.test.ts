@@ -5,7 +5,8 @@ import { DatabaseApprovalBroker, EventBus, LogSink, ToolRegistry, configSchema }
 import type { RuntimeTurnContext } from '@luoli/shared';
 import { z } from 'zod';
 
-function harness(enabled = true, rules: unknown[] = [{ tool: 'bash', pattern: '(?i)\\brm\\s+-rf\\b', risk: 'high' }, { tool: 'mcp__*', risk: 'medium' }], ttlMs = 10_000) {
+function harness(enabled = true, rules: unknown[] = [{ tool: 'bash', pattern: '(?i)\\brm\\s+-rf\\b', risk: 'high' }, { tool: 'mcp__*', risk: 'medium' }], ttlMs = 10_000,
+  receipts: Array<{ chatId: string; tool: string; risk: string; ttlMs: number }> = []) {
   const path = `./data/approval-${enabled}.test.db`;
   for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
   const db = openDatabase(path);
@@ -16,11 +17,11 @@ function harness(enabled = true, rules: unknown[] = [{ tool: 'bash', pattern: '(
   // 这些用例都在问「有人能裁决时怎么走」，所以 harness 必须真的挂一条裁决通道（WebUI 的 SSE）。
   // 挂成普通订阅者的话，走的是「没有通道 → 当场拒绝」那条分支，测的就不是这些用例想测的东西了。
   events.subscribe(() => undefined, { channel: true });
-  const broker = new DatabaseApprovalBroker(db, config, events, log);
+  const broker = new DatabaseApprovalBroker(db, config, events, log, (pending) => { receipts.push({ chatId: pending.chatId, tool: pending.tool, risk: pending.risk, ttlMs: pending.ttlMs }); });
   const registry = new ToolRegistry(log, broker, { maxRegistered: 10, maxCallsPerTurn: 10, maxConsecutiveErrors: 3 }, config.approval.rules);
   const abort = new AbortController();
   const turn = { turnId: 'turn-1', key: 'chat:1', chatId: '1', threadId: null, initiatorUserId: '2', effectiveRole: 'trusted', isPrivate: false, baseCommitId: null, snapshot: { messages: [], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 0 }, delta: [], abortSignal: abort.signal, config } satisfies RuntimeTurnContext;
-  return { db, broker, events, registry, abort, context: { turn, workspace: './data', agentKind: 'main' as const } };
+  return { db, broker, events, registry, abort, receipts, context: { turn, workspace: './data', agentKind: 'main' as const } };
 }
 function pendingApprovalId(db: ReturnType<typeof openDatabase>): string {
   const row: unknown = db.prepare("SELECT id FROM approvals WHERE state='pending'").get();
@@ -46,7 +47,8 @@ describe('approval rules', () => {
     const db = openDatabase(path); migrateDatabase(db);
     const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, approval: { enabled: true, skipForOwner: true } });
     const events = new EventBus(); const log = new LogSink(new OperationsRepository(db), './data/approval-logs');
-    const broker = new DatabaseApprovalBroker(db, config, events, log);
+    const sent: string[] = [];
+    const broker = new DatabaseApprovalBroker(db, config, events, log, (pending) => { sent.push(pending.tool); });
     const registry = new ToolRegistry(log, broker, { maxRegistered: 10, maxCallsPerTurn: 10, maxConsecutiveErrors: 3 });
     const abort = new AbortController(); const turn = { turnId: 'turn-no-channel', key: 'chat:1', chatId: '1', threadId: null, initiatorUserId: '2', effectiveRole: 'trusted', isPrivate: false, baseCommitId: null, snapshot: { messages: [], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 0 }, delta: [], abortSignal: abort.signal, config } satisfies RuntimeTurnContext;
     registry.register({ name: 'delete_file', description: '', inputSchema: z.object({}), policy: { minRole: 'trusted', approval: 'always', scope: 'workspace', source: 'builtin' }, sourcePriority: 1, execute: () => ({ ok: true }) });
@@ -57,6 +59,8 @@ describe('approval rules', () => {
     expect(await registry.execute('delete_file', {}, { turn, workspace: '.', agentKind: 'main' })).toMatchObject({ ok: false, hint: expect.stringContaining('没有可用的审批通道') });
     expect(performance.now() - started).toBeLessThan(100);
     expect(db.prepare('SELECT COUNT(*) AS count FROM approvals').get()).toMatchObject({ count: 0 });
+    // 没有裁决通道时也**不该发回执**：那一条本来就当场拒绝，再发一句「等 owner 批」是骗人。
+    expect(sent).toEqual([]);
     closeDatabase(db);
   });
 
@@ -66,7 +70,8 @@ describe('approval rules', () => {
     const db = openDatabase(path); migrateDatabase(db);
     const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, approval: { enabled: true, skipForOwner: true } });
     const events = new EventBus(); const log = new LogSink(new OperationsRepository(db), './data/approval-logs');
-    const broker = new DatabaseApprovalBroker(db, config, events, log);
+    const sent: string[] = [];
+    const broker = new DatabaseApprovalBroker(db, config, events, log, (pending) => { sent.push(pending.tool); });
     const registry = new ToolRegistry(log, broker, { maxRegistered: 10, maxCallsPerTurn: 10, maxConsecutiveErrors: 3 });
     const abort = new AbortController(); const turn = { turnId: 'turn-with-channel', key: 'chat:1', chatId: '1', threadId: null, initiatorUserId: '2', effectiveRole: 'trusted', isPrivate: false, baseCommitId: null, snapshot: { messages: [], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 0 }, delta: [], abortSignal: abort.signal, config } satisfies RuntimeTurnContext;
     registry.register({ name: 'delete_file', description: '', inputSchema: z.object({}), policy: { minRole: 'trusted', approval: 'always', scope: 'workspace', source: 'builtin' }, sourcePriority: 1, execute: () => ({ ok: true }) });
@@ -195,6 +200,52 @@ describe('approval rules', () => {
     config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, approval: { enabled: true, rules: [] } });
     registry.releaseTurn(turn.turnId);
     expect(await registry.execute('bash', {}, context)).toEqual({ ok: true });
+    closeDatabase(db);
+  });
+
+  /**
+   * `docs/22 · D-APPR-01` 的最后一半：有裁决通道时这一轮会**静静挂满 `ttlMs`**（默认 180 秒），
+   * 而 Telegram 那边一个字都没有 —— 用户看到的是 bot 收了消息然后沉默三分钟。
+   * 回执必须在**插入 pending 行之后**发（先落库再通知，通知失败也不会留下一个没人知道的等待）。
+   */
+  it('挂起时给发起人发一条回执，且回执失败不影响审批本身', async () => {
+    const { db, broker, registry, receipts, context } = harness();
+    registry.register({ name: 'bash', description: 'x', inputSchema: z.object({ command: z.string() }),
+      policy: { minRole: 'trusted', approval: 'conditional', scope: 'global', source: 'builtin' }, sourcePriority: 1, execute: () => ({ ok: true }) });
+    const running = registry.execute('bash', { command: 'rm -rf /tmp/x' }, context);
+    // 等 pending 行落库 —— 回执是紧跟着它发的。
+    for (let round = 0; round < 20 && !receipts.length; round += 1) await new Promise((settle) => setTimeout(settle, 5));
+    expect(receipts).toHaveLength(1);
+    expect(receipts[0]).toMatchObject({ chatId: '1', tool: 'bash', risk: 'high' });
+    expect(receipts[0]!.ttlMs).toBeGreaterThan(0);
+    // 回执发出去的时候 pending 行已经在库里了。
+    expect(db.prepare("SELECT COUNT(*) FROM approvals WHERE state='pending'").pluck().get()).toBe(1);
+    broker.decide(pendingApprovalId(db), false, 'owner', 'webui');
+    await running;
+    closeDatabase(db);
+  });
+
+  it('回执回调抛异常时审批照常走完', async () => {
+    const path = './data/approval-receipt-throws.test.db';
+    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    const db = openDatabase(path); migrateDatabase(db);
+    const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, approval: { enabled: true, ttlMs: 10_000, skipForOwner: true, rules: [{ tool: 'bash', always: true, risk: 'high' }] } });
+    const log = new LogSink(new OperationsRepository(db), './data/approval-logs');
+    const events = new EventBus();
+    events.subscribe(() => undefined, { channel: true });
+    // 回执通道坏了（Telegram 拒发、bot 还没建起来）不该把审批带崩 —— 那会让一次高危调用
+    // 从「等人批」变成「整轮失败」。
+    const broker = new DatabaseApprovalBroker(db, config, events, log, () => { throw new Error('telegram 拒发'); });
+    const registry = new ToolRegistry(log, broker, { maxRegistered: 10, maxCallsPerTurn: 10, maxConsecutiveErrors: 3 }, config.approval.rules);
+    registry.register({ name: 'bash', description: 'x', inputSchema: z.object({ command: z.string() }),
+      policy: { minRole: 'trusted', approval: 'conditional', scope: 'global', source: 'builtin' }, sourcePriority: 1, execute: () => ({ ok: true }) });
+    const abort = new AbortController();
+    const turn = { turnId: 't', key: 'chat:1', chatId: '1', threadId: null, initiatorUserId: '2', effectiveRole: 'trusted', isPrivate: false,
+      baseCommitId: null, snapshot: { messages: [], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 0 }, delta: [], abortSignal: abort.signal, config } satisfies RuntimeTurnContext;
+    const running = registry.execute('bash', { command: 'anything' }, { turn, workspace: './data', agentKind: 'main' });
+    for (let round = 0; round < 40 && !db.prepare("SELECT COUNT(*) FROM approvals WHERE state='pending'").pluck().get(); round += 1) await new Promise((settle) => setTimeout(settle, 5));
+    broker.decide(pendingApprovalId(db), true, 'owner', 'webui');
+    expect(await running).toMatchObject({ ok: true });
     closeDatabase(db);
   });
 });
