@@ -12,11 +12,15 @@ import DataGrid from '../ui/DataGrid.vue';
 import ChainPicker from '../ui/ChainPicker.vue';
 import AttachmentStrip from '../ui/AttachmentStrip.vue';
 import SchemaForm from '../ui/SchemaForm.vue';
+import UiLineChart from '../ui/UiLineChart.vue';
+import UiBarChart from '../ui/UiBarChart.vue';
+import UiRing from '../ui/UiRing.vue';
 import { pushToast, toastError } from '../ui/toast';
 import type { Attachment, GridColumn, TagSeverity } from '../ui/types';
 import { api, apiStream, hydrateSession } from '../api/client';
 
-interface Dashboard { turns: { total: number; running: number; failed: number; cost: number }; messages: { total: number }; providers: { total: number; enabled: number } }
+interface TrendPoint { day: string; messages: number; turns: number; costUsd: number }
+interface Dashboard { turns: { total: number; running: number; failed: number; cost: number }; messages: { total: number }; providers: { total: number; enabled: number }; trend?: TrendPoint[] }
 interface Principal { id: string; kind: string; tgId: string; role: string; displayName: string | null; username: string | null; chatType: string | null }
 interface Provider { id: string; name: string; kind: string; baseUrl?: string | null; apiKeyHint: string | null; enabled: number; healthState: string | null; healthError?: string | null }
 interface ProviderTest { reachable: boolean; code: string; message: string; status: number | null; latencyMs: number; models: number }
@@ -233,6 +237,11 @@ async function load(): Promise<void> {
     api<Array<Record<string, unknown>>>('/api/approvals'), api<Array<Record<string, unknown>>>('/api/tasks'), api<Array<Record<string, unknown>>>('/api/prompts'), api<Record<string, unknown>>('/api/config'), api<Array<Record<string, unknown>>>('/api/models'), api<Array<Record<string, unknown>>>('/api/aliases'),
     api<HealthDetail>('/api/health/detail'),
   ]);
+  // 总览页那张「最近错误」卡片走单独一次请求：日志页要的是全量流，卡片要的是 warn 以上的十条，
+  // 在前端过滤会因为日志页只取了最近 200 条而漏掉更早的错误。
+  recentErrors.value = await api<LogRow[]>('/api/logs?minLevel=warn&size=10');
+  // 总览的额度环和配额页读的是同一个端点。失败不该把整个总览页带下去 —— 配额关掉时它本来就是空的。
+  await Promise.all([loadQuota().catch(() => undefined), loadUsageReport()]);
   syncTrigger();
   syncOutput();
   syncBotName();
@@ -629,7 +638,15 @@ function eventGroup(kind: string): Exclude<DetailGroup, 'all'> {
 }
 const detailEvents = computed(() => (detail.value?.events ?? []).filter((entry) => detailGroup.value === 'all' || eventGroup(entry.kind) === detailGroup.value));
 const detailCount = (group: DetailGroup): number => (detail.value?.events ?? []).filter((entry) => group === 'all' || eventGroup(entry.kind) === group).length;
-function formatBytes(bytes: number): string { return bytes >= 1_048_576 ? `${(bytes / 1_048_576).toFixed(1)} MB` : bytes >= 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${bytes} B`; }
+/** 1024 进制。原来只到 MB，而系统信息里的 DB 与 workspace 占用都能到 GB —— 停在 MB 会出现
+ *  「12800.0 MB」这种读不出量级的数字。undefined 显示成 —（端点没给，不是 0 字节）。 */
+function formatBytes(bytes: number | undefined): string {
+  if (bytes === undefined) return '—';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let value = bytes; let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit += 1; }
+  return `${unit && value < 100 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
+}
 async function openDetail(turnId: string): Promise<void> {
   detailTurnId.value = turnId; detailDialog.value = true; detailLoading.value = true; detail.value = null; expandedEvents.value = new Set(); detailGroup.value = 'model';
   try {
@@ -851,6 +868,40 @@ const QUOTA_REQUIRED: Array<[keyof QuotaForm, string]> = [['minReserveUsd', '最
 const QUOTA_UNIMPLEMENTED_HINTS: Record<string, string> = {};
 const QUOTA_SCOPE_LABELS: Record<string, string> = { global: '全局', chat: '会话', user: '用户' };
 const quota = ref<QuotaPayload | null>(null);
+/**
+ * 总览页那两个环：**只画 global 档的当前 day / month**。chat / user 是按主体分的很多行，
+ * 挤在总览上读不出任何东西 —— 那是配额页的表要干的事。
+ * `limit === null` 时环不画，只写「不限」（见 UiRing）。
+ */
+// ── 用量聚合：时间范围 + 维度（docs/09 §3.11）────────────────────────────────────
+interface UsageReportRow { bucket: string | null; costUsd: number; inputTokens: number; outputTokens: number; calls: number; successes: number; label?: string | null }
+const USAGE_RANGES = [{ label: '近 7 天', value: 7 }, { label: '近 30 天', value: 30 }, { label: '近 90 天', value: 90 }];
+const USAGE_DIMENSIONS = [{ label: '按天', value: 'day' }, { label: '按会话', value: 'chat' }, { label: '按用户', value: 'user' },
+  { label: '按模型', value: 'model' }, { label: '按别名', value: 'alias' }, { label: '按 agent', value: 'agent' }];
+const usageRange = ref(7);
+const usageGroupBy = ref('day');
+const usageReport = ref<UsageReportRow[]>([]);
+const usageDimensionLabel = computed(() => USAGE_DIMENSIONS.find((entry) => entry.value === usageGroupBy.value)?.label ?? '按天');
+const usageTotals = computed(() => {
+  const rows = usageReport.value;
+  const calls = rows.reduce((sum, row) => sum + row.calls, 0);
+  const successes = rows.reduce((sum, row) => sum + row.successes, 0);
+  return { cost: rows.reduce((sum, row) => sum + row.costUsd, 0), calls, successRate: calls ? `${Math.round((successes / calls) * 100)}%` : '—' };
+});
+async function loadUsageReport(): Promise<void> {
+  const to = Date.now();
+  const from = to - usageRange.value * 86_400_000;
+  try { usageReport.value = (await api<{ rows: UsageReportRow[] }>(`/api/usage/report?groupBy=${usageGroupBy.value}&from=${from}&to=${to}`)).rows; }
+  catch (error) { usageReport.value = []; toastError('用量聚合读取失败', error); }
+}
+
+const quotaRings = computed(() => {
+  const payload = quota.value;
+  if (!payload?.quota.enabled) return [];
+  return payload.counters
+    .filter((row) => row.scope === 'global' && row.current)
+    .map((row) => ({ label: row.window === 'day' ? '今日' : '本月', spent: row.costUsd + row.reservedUsd, limit: row.limit, warnAtRatio: 0.8 }));
+});
 const quotaForm = ref<QuotaForm>(emptyQuotaForm());
 const quotaDirty = ref(false);
 const quotaSaving = ref(false);
@@ -937,6 +988,37 @@ const sandboxDirty = ref(false);
 const sandboxSaving = ref(false);
 const sandboxProbing = ref(false);
 const sandboxProbe = ref<{ available: boolean; mode?: string; error?: string } | null>(null);
+const pullingImage = ref(false);
+// ── 审批规则试跑（docs/09 §3.7）──────────────────────────────────────────────────
+interface RuleTestResult { needed: boolean; risk: string; runtimeDependent: boolean; rules: Array<{ index: number; matched: boolean; reason: string }> }
+const ruleTestTool = ref('bash');
+const ruleTestInput = ref('{"command":"rm -rf /tmp/x"}');
+const ruleTesting = ref(false);
+const ruleTestResult = ref<RuleTestResult | null>(null);
+async function testApprovalRule(): Promise<void> {
+  let input: unknown;
+  try { input = JSON.parse(ruleTestInput.value || '{}'); }
+  catch (error) { toastError('样例输入不是合法 JSON', error); return; }
+  ruleTesting.value = true;
+  try { ruleTestResult.value = await api<RuleTestResult>('/api/approvals/test', { method: 'POST', body: JSON.stringify({ tool: ruleTestTool.value, input }) }); }
+  catch (error) { ruleTestResult.value = null; toastError('试跑失败', error); }
+  finally { ruleTesting.value = false; }
+}
+/**
+ * `docker pull <sandbox.image>`。**镜像名取自已保存的那份配置**，不是表单里的值 —— 与
+ * 「探测可用性」同一个口径，所以按钮旁边的说明要写清楚这一点。
+ * 只 pull 不 build（build 是部署动作，不是控制台按钮）。
+ */
+async function pullSandboxImage(): Promise<void> {
+  if (!confirm('拉取沙箱镜像？镜像名取自**已保存**的 sandbox.image；几百 MB 的镜像可能要几分钟，这期间这个请求一直挂着。')) return;
+  pullingImage.value = true;
+  try {
+    const result = await api<{ image: string }>('/api/sandbox/image', { method: 'POST', body: '{}' });
+    pushToast({ severity: 'success', summary: '镜像已拉取', detail: result.image, life: 8000 });
+    await probeSandbox();
+  } catch (error) { toastError('拉取镜像失败', error); }
+  finally { pullingImage.value = false; }
+}
 const SANDBOX_MODES = [{ value: 'docker', label: 'docker · 每次调用起一个一次性容器' }, { value: 'jail', label: 'jail · 仅限制工作目录，同进程执行' }, { value: 'none', label: 'none · 不隔离，直接在宿主上跑' }];
 function markSandboxDirty(): void { sandboxDirty.value = true; }
 function syncSandbox(payload: SandboxPayload): void {
@@ -1132,6 +1214,93 @@ const MAINTENANCE_ACTIONS = [
   { action: 'rebuild-fts', label: '重建 FTS 索引', icon: 'pi pi-sync', hint: '消息检索结果不对（漏命中/命中已删消息）时重建' },
 ] as const;
 const maintenanceBusy = ref('');
+const restarting = ref(false);
+const exportBusy = ref(false);
+// ── 原始 YAML 模式（docs/09 §3.13）───────────────────────────────────────────────
+const yamlMode = ref(false);
+const yamlText = ref('');
+const yamlSkipped = ref<string[]>([]);
+const yamlError = ref('');
+const yamlSaving = ref(false);
+async function toggleYamlMode(): Promise<void> {
+  if (yamlMode.value) { yamlMode.value = false; return; }
+  try {
+    const payload = await api<{ yaml: string; skipped: string[] }>('/api/config/yaml');
+    yamlText.value = payload.yaml;
+    yamlSkipped.value = payload.skipped;
+    yamlError.value = '';
+    yamlMode.value = true;
+  } catch (error) { toastError('读取 YAML 覆盖层失败', error); }
+}
+async function saveYaml(): Promise<void> {
+  yamlSaving.value = true;
+  yamlError.value = '';
+  try {
+    const result = await api<{ keys: string[]; skipped: string[]; subsumed: string[] }>('/api/config/yaml', { method: 'PUT', body: JSON.stringify({ yaml: yamlText.value }) });
+    await REFRESH_LOADERS.config();
+    pushToast({ severity: 'success', summary: `已保存 ${result.keys.length} 个配置段`,
+      detail: [result.skipped.length ? `${result.skipped.length} 项被环境变量锁定，已跳过` : '', result.subsumed.length ? `${result.subsumed.length} 条更细的覆盖被整段写入作废：${result.subsumed.join('、')}` : ''].filter(Boolean).join('\n') || '全部生效', life: 12_000 });
+  } catch (error) {
+    // 语法错误带行号、校验错误带路径：把它们留在编辑器旁边，而不是让 Toast 一闪而过。
+    const detail = error as { body?: { error?: { message?: string; line?: number; column?: number; details?: Array<{ path: string; message: string }> } } };
+    const info = detail.body?.error;
+    yamlError.value = info?.line
+      ? `第 ${info.line} 行第 ${info.column} 列：${info.message}`
+      : info?.details?.length ? info.details.map((entry) => `${entry.path}: ${entry.message}`).join('；') : info?.message ?? '保存失败';
+    toastError('YAML 未保存', error);
+  } finally { yamlSaving.value = false; }
+}
+const importFile = ref<HTMLInputElement | null>(null);
+/**
+ * `[重启进程]`。二次确认里必须写明「没有 supervisor 就不会自己回来」—— 这是一个可能让整个
+ * 部署下线的按钮，措辞含糊比不给按钮更糟。
+ */
+async function restartProcess(): Promise<void> {
+  if (!confirm('重启进程？在途轮次会被排空或中断。\n\n如果这个部署没有 systemd / docker 这类 supervisor，进程不会自动拉起——你需要手工把它启回来。')) return;
+  restarting.value = true;
+  try {
+    await api('/api/restart', { method: 'POST', body: '{}' });
+    pushToast({ severity: 'warn', summary: '已请求重启', detail: '控制台会断开；由 supervisor 拉起后刷新页面即可。', life: 12_000 });
+  } catch (error) { toastError('重启失败', error); }
+  finally { restarting.value = false; }
+}
+/** 导出下载成 JSON 文件。内容由服务端脱敏，前端只负责存盘。 */
+async function exportConfig(): Promise<void> {
+  exportBusy.value = true;
+  try {
+    const payload = await api<{ exportedAt: number; overrides: Record<string, unknown>; skipped: string[] }>('/api/config/export');
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `luoli-config-${new Date(payload.exportedAt).toISOString().slice(0, 10)}.json`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    // 被跳过的密钥键要点名：导入端拿到这份文件时不会有它们，得知道哪几项要手工重配。
+    pushToast({ severity: 'success', summary: `已导出 ${Object.keys(payload.overrides).length} 条覆盖`,
+      detail: payload.skipped.length ? `${payload.skipped.length} 个密钥类键未导出：${payload.skipped.join('、')}` : '没有密钥类键被跳过', life: 12_000 });
+  } catch (error) { toastError('导出失败', error); }
+  finally { exportBusy.value = false; }
+}
+async function importConfig(event: Event): Promise<void> {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = '';
+  if (!file) return;
+  let parsed: { overrides?: Record<string, unknown> };
+  try { parsed = JSON.parse(await file.text()) as { overrides?: Record<string, unknown> }; }
+  catch (error) { toastError('这个文件不是合法 JSON', error); return; }
+  const keys = Object.keys(parsed.overrides ?? {});
+  if (!keys.length) { pushToast({ severity: 'warn', summary: '文件里没有 overrides', detail: '导出文件的结构是 { overrides: { 点分键: 值 } }' }); return; }
+  if (!confirm(`导入 ${keys.length} 条配置覆盖？\n\n按键覆盖现有值，不会删除文件里没有的那些。校验不过则整批不写。`)) return;
+  try {
+    const result = await api<{ keys: string[]; skipped: string[]; subsumed: string[] }>('/api/config/import', { method: 'POST', body: JSON.stringify(parsed) });
+    await REFRESH_LOADERS.config();
+    pushToast({ severity: 'success', summary: `已导入 ${result.keys.length} 项`,
+      detail: [result.skipped.length ? `${result.skipped.length} 项被环境变量锁定，已跳过：${result.skipped.join('、')}` : '',
+        result.subsumed.length ? `${result.subsumed.length} 条更细的覆盖被整块写入作废：${result.subsumed.join('、')}` : ''].filter(Boolean).join('\n') || '全部生效', life: 12_000 });
+  } catch (error) { toastError('导入失败', error); }
+}
 async function runMaintenance(action: string, label: string): Promise<void> {
   // gc-files 是**删文件**，别和「整理一下」混在同一句确认语里：运维需要知道它删什么、不删什么。
   const warning = action === 'gc-files'
@@ -1147,7 +1316,7 @@ async function runMaintenance(action: string, label: string): Promise<void> {
 }
 
 // ── 依赖健康：总览页那张卡以前是四行写死的字，与运行时无关 ──────────────────────────
-interface HealthDetail { ok: boolean; version: string; uptimeMs: number; db: { ok: boolean };
+interface HealthDetail { ok: boolean; version: string; uptimeMs: number; db: { ok: boolean; bytes?: number; walBytes?: number; workspaceBytes?: number };
   mcp: Array<{ name: string; state: string; error: string | null }>; sandbox: { allowed: boolean; mode?: string; reason?: string }; inFlightTurns: number }
 const health = ref<HealthDetail | null>(null);
 const uptimeText = computed(() => {
@@ -1156,6 +1325,13 @@ const uptimeText = computed(() => {
   return hours < 1 ? `${Math.round(ms / 60_000)} 分钟` : hours < 48 ? `${hours.toFixed(1)} 小时` : `${(hours / 24).toFixed(1)} 天`;
 });
 const mcpDown = computed(() => (health.value?.mcp ?? []).filter((entry) => entry.state !== 'up').length);
+/** 总览页那张卡片只看 warn 以上，最多 10 条：服务端已经按 `minLevel` 过滤过一遍，这里只截条数。 */
+const recentErrors = ref<LogRow[]>([]);
+/** 点一行跳到日志页并展开那条 trace。没有 traceId 的事件（启动、配置变更）只切页。 */
+function openTrace(traceId: string | null): void {
+  active.value = 'logs';
+  if (traceId) inspectTrace(traceId);
+}
 
 // ── 在途 turn：权威来源是进程内的 TurnRegistry，不是 turns 表（崩溃残留的 running 行要等
 //    下次启动才归零）。首屏拉一次，之后靠 turn.started / turn.progress / turn.finished 增量更新 ──
@@ -1227,10 +1403,13 @@ type RefreshGroup = 'dashboard' | 'logs' | 'chats' | 'usage' | 'quota' | 'tasks'
 const REFRESH_DEBOUNCE_MS = 400;
 const lastEventAt = ref(0);
 const REFRESH_LOADERS: Record<RefreshGroup, () => Promise<void>> = {
-  dashboard: async () => { [dashboard.value, health.value] = await Promise.all([api<Dashboard>('/api/dashboard'), api<HealthDetail>('/api/health/detail')]); },
+  dashboard: async () => {
+    [dashboard.value, health.value, recentErrors.value] = await Promise.all([api<Dashboard>('/api/dashboard'), api<HealthDetail>('/api/health/detail'), api<LogRow[]>('/api/logs?minLevel=warn&size=10')]);
+    await loadQuota().catch(() => undefined);
+  },
   logs: async () => { logs.value = await api<LogRow[]>('/api/logs'); },
   chats: async () => { chats.value = await api<Chat[]>('/api/chats'); },
-  usage: async () => { usage.value = await api<Usage[]>('/api/usage'); },
+  usage: async () => { [usage.value] = await Promise.all([api<Usage[]>('/api/usage'), loadUsageReport()]); },
   quota: loadQuota,
   tasks: async () => { tasks.value = await api<Array<Record<string, unknown>>>('/api/tasks'); },
   approvals: async () => { approvals.value = await api<Array<Record<string, unknown>>>('/api/approvals'); },
@@ -1535,8 +1714,15 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             </DataGrid>
           </section>
           <section class="dashboard-grid">
-            <article class="surface span-2"><header><div><p class="eyebrow">TRACE ACTIVITY</p><h3>最近运行事件</h3></div><UiButton variant="text" label="查看全部" icon="pi pi-arrow-right" icon-pos="right" @click="active = 'logs'" /></header>
-              <div class="log-list"><div v-for="row in logs.slice(0, 6)" :key="row.id"><span :class="['level', row.level]">{{ row.level }}</span><code>{{ row.kind }}</code><p>{{ row.summary }}</p><time>{{ new Date(row.ts).toLocaleTimeString() }}</time></div><div v-if="!logs.length" class="empty">暂无事件。完成首次启动后会在此显示 trace。</div></div>
+            <!-- 最近**错误**（level≥warn，10 条），点一行直接跳到那条 trace。此前这里是不分级别
+                 的最近 6 条，实际上永远被 info 刷满 —— 一张「最近错误」卡片看不到错误（docs/09 §3.1）。 -->
+            <article class="surface span-2"><header><div><p class="eyebrow">RECENT ERRORS</p><h3>最近错误</h3><p class="section-note">level ≥ warn · 点一行跳到该 trace</p></div><UiButton variant="text" label="查看全部" icon="pi pi-arrow-right" icon-pos="right" @click="active = 'logs'" /></header>
+              <div class="log-list">
+                <button v-for="row in recentErrors" :key="row.id" type="button" class="log-row" @click="openTrace(row.trace_id)">
+                  <span :class="['level', row.level]">{{ row.level }}</span><code>{{ row.kind }}</code><p>{{ row.summary }}</p><time>{{ new Date(row.ts).toLocaleTimeString() }}</time>
+                </button>
+                <div v-if="!recentErrors.length" class="empty">最近没有 warn 以上的事件。</div>
+              </div>
             </article>
             <!-- 这四行以前是写死的字（沙箱恒显示「Docker」，与 sandbox.mode 无关）。数据一律来自 /api/health/detail。 -->
             <article class="surface health"><header><div><p class="eyebrow">HEALTH</p><h3>依赖健康</h3><p class="section-note">v{{ health?.version ?? 'dev' }} · 已运行 {{ uptimeText }}</p></div></header>
@@ -1548,6 +1734,22 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
               <div class="health-row"><span>在途 turn</span><UiTag :value="String(health?.inFlightTurns ?? 0)" severity="secondary" /></div>
               <div class="health-row"><span>MCP</span><UiTag v-if="!health?.mcp.length" value="未配置" severity="secondary" /><UiTag v-else :value="mcpDown ? `${mcpDown} 个异常` : `${health.mcp.length} 个就绪`" :severity="mcpDown ? 'danger' : 'success'" /></div>
               <div class="health-row"><span>沙箱</span><UiTag :value="health?.sandbox ? `${health.sandbox.mode ?? '未知'}${health.sandbox.allowed ? '' : ' · 不可用'}` : '未装配'" :severity="!health?.sandbox ? 'secondary' : health.sandbox.allowed ? 'info' : 'danger'" :title="health?.sandbox?.reason ?? ''" /></div>
+              <!-- 占用只统计不清理：这三行是「该不该去点维护操作」的判据（docs/09 §3.1）。 -->
+              <div class="health-row"><span>DB / WAL</span><UiTag :value="`${formatBytes(health?.db.bytes)} / ${formatBytes(health?.db.walBytes)}`" severity="secondary" title="WAL 明显偏大时点一次 VACUUM 或等下次维护任务的 checkpoint" /></div>
+              <div class="health-row"><span>workspace 占用</span><UiTag :value="formatBytes(health?.db.workspaceBytes)" severity="secondary" title="模型在会话工作目录里造的文件；清理走「清理孤儿文件」或手工删" /></div>
+            </article>
+          </section>
+          <section class="dashboard-grid">
+            <article class="surface span-2"><header><div><p class="eyebrow">TREND</p><h3>近 7 天</h3><p class="section-note">按 general.timezone 的本地日分桶；没有数据的那天是 0，不是断点</p></div></header>
+              <UiLineChart v-if="dashboard.trend?.length" :labels="dashboard.trend.map((point) => point.day.slice(5))"
+                :series="[{ name: '消息', values: dashboard.trend.map((point) => point.messages) }, { name: '轮次', values: dashboard.trend.map((point) => point.turns) }]" />
+              <div v-else class="empty">还没有数据。</div>
+            </article>
+            <article class="surface"><header><div><p class="eyebrow">QUOTA</p><h3>额度</h3><p class="section-note">当前 bucket · 详见配额页</p></div></header>
+              <div class="ring-row">
+                <UiRing v-for="ring in quotaRings" :key="ring.label" :spent="ring.spent" :limit="ring.limit" :label="ring.label" :warn-at-ratio="ring.warnAtRatio" />
+                <div v-if="!quotaRings.length" class="empty">配额已关闭或还没有计数。</div>
+              </div>
             </article>
           </section>
         </div>
@@ -1709,9 +1911,27 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             <template #enabled="{ data }"><UiTag :value="data.enabled ? '启用' : '已停用'" :severity="data.enabled ? 'success' : 'danger'" /></template>
           </DataGrid>
           <div class="registry-heading">
+            <div><h3>审批规则试跑</h3><p class="section-note">拿一条样例输入过一遍<b>运行时那份</b> <code>ApprovalRules</code>：哪几条命中、为什么没命中、最终风险档位。规则本身在「全部配置」的 <code>approval.rules</code> 里编辑 —— 在这里再实现一遍匹配必然与运行时漂移，而「以为配了审批其实永不命中」正是这条配置最容易出的错。</p></div>
+            <UiButton size="small" variant="outlined" icon="pi pi-play" label="试跑" :loading="ruleTesting" :disabled="!ruleTestTool" @click="testApprovalRule" />
+          </div>
+          <div class="form-grid">
+            <label>工具名<UiSelect v-model="ruleTestTool" :options="Object.keys(tools).map((name) => ({ value: name, label: name }))" filter aria-label="工具名" /></label>
+            <label>样例输入（JSON）<textarea v-model="ruleTestInput" rows="3" spellcheck="false" placeholder='{"command":"rm -rf /"}' /><small class="field-note">规则里的 <code>pattern</code> 匹配的是这份输入的 JSON 序列化结果，所以键名也在匹配范围内。</small></label>
+          </div>
+          <div v-if="ruleTestResult" class="rule-test-result">
+            <p :class="['callout', ruleTestResult.needed ? 'warn' : '']">
+              <i :class="ruleTestResult.needed ? 'pi pi-shield' : 'pi pi-check-circle'" />
+              {{ ruleTestResult.needed ? `需要审批 · 风险 ${ruleTestResult.risk}` : '不需要审批（没有规则命中）' }}
+              <span v-if="ruleTestResult.runtimeDependent">。其中有规则用了 <code>when: target_exists</code>，最终是否需要审批取决于运行时「目标是否存在」——试跑给不出这个答案。</span>
+            </p>
+            <ol class="rule-report"><li v-for="entry in ruleTestResult.rules" :key="entry.index" :class="{ matched: entry.matched }"><UiTag :value="entry.matched ? '命中' : '未命中'" :severity="entry.matched ? 'warn' : 'secondary'" /><code>#{{ entry.index }}</code><span>{{ entry.reason }}</span></li></ol>
+            <p v-if="!ruleTestResult.rules.length" class="empty">还没有配置任何审批规则。</p>
+          </div>
+          <div class="registry-heading">
             <div><h3>沙箱</h3><p class="section-note">决定 <code>exec</code> 类工具跑在哪儿。<code>bypassRoles</code> 里的角色<b>完全绕过</b>沙箱，直接在宿主上执行 —— 这是整套权限模型里最锋利的一格。保存后热更新，下一次工具调用即生效。</p></div>
             <div class="section-actions">
               <UiButton size="small" variant="outlined" icon="pi pi-bolt" label="探测可用性" :loading="sandboxProbing" @click="probeSandbox" />
+              <UiButton size="small" variant="outlined" icon="pi pi-cloud-download" label="拉取镜像" :loading="pullingImage" :disabled="sandboxForm.mode !== 'docker'" @click="pullSandboxImage" />
               <UiButton size="small" icon="pi pi-save" label="保存沙箱" :loading="sandboxSaving" :disabled="!sandboxDirty" @click="saveSandbox" />
             </div>
           </div>
@@ -1776,7 +1996,26 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             <template #actions="{ data }"><UiButton size="small" variant="outlined" icon="pi pi-play" label="试跑" @click.stop="openAgentDryRun(data)" /></template>
           </DataGrid>
         </section>
-        <section v-else-if="active === 'usage'" key="usage" class="surface page-surface"><header><div><p class="eyebrow">USAGE LEDGER</p><h2>用量与成本</h2><p>输入、输出、缓存读写分别计价。</p></div></header>
+        <section v-else-if="active === 'usage'" key="usage" class="surface page-surface"><header><div><p class="eyebrow">USAGE LEDGER</p><h2>用量与成本</h2><p>输入、输出、缓存读写分别计价。</p></div>
+            <div class="section-actions">
+              <UiSelect v-model="usageRange" :options="USAGE_RANGES" option-label="label" option-value="value" aria-label="时间范围" @change="loadUsageReport" />
+              <UiSelect v-model="usageGroupBy" :options="USAGE_DIMENSIONS" option-label="label" option-value="value" aria-label="维度" @change="loadUsageReport" />
+            </div></header>
+          <!-- 聚合走 `GET /api/usage/report`，六个维度都是服务端 SQL 算的。此前这一页只有下面那张
+               不分维度的明细表 —— 「这个月钱花在哪个群」得靠人肉翻 1000 行（docs/09 §3.11）。 -->
+          <div class="usage-charts">
+            <article class="surface inner"><header><div><h3>花费</h3><p class="section-note">{{ usageDimensionLabel }} · 单位 USD</p></div><UiTag :value="`合计 $${usageTotals.cost.toFixed(2)}`" severity="secondary" /></header>
+              <UiLineChart v-if="usageGroupBy === 'day' && usageReport.length" :labels="usageReport.map((row) => String(row.bucket).slice(5))"
+                :series="[{ name: '花费 (USD)', values: usageReport.map((row) => row.costUsd) }]" :format="(value) => `$${value.toFixed(2)}`" />
+              <UiBarChart v-else :rows="usageReport.map((row) => ({ label: row.label ?? String(row.bucket ?? '—'), value: row.costUsd }))" :format="(value) => `$${value.toFixed(4)}`" />
+            </article>
+            <article class="surface inner"><header><div><h3>token</h3><p class="section-note">输入 / 输出</p></div><UiTag :value="`${usageTotals.calls} 次调用 · 成功率 ${usageTotals.successRate}`" severity="secondary" /></header>
+              <UiLineChart v-if="usageGroupBy === 'day' && usageReport.length" :labels="usageReport.map((row) => String(row.bucket).slice(5))"
+                :series="[{ name: '输入', values: usageReport.map((row) => row.inputTokens) }, { name: '输出', values: usageReport.map((row) => row.outputTokens) }]" />
+              <UiBarChart v-else :rows="usageReport.map((row) => ({ label: row.label ?? String(row.bucket ?? '—'), value: row.inputTokens + row.outputTokens }))" />
+            </article>
+          </div>
+          <h3 class="usage-detail-title">明细</h3>
           <DataGrid :rows="usage" :columns="COLUMNS.usage" data-key="id" paginate empty="还没有产生用量">
             <template #ts="{ data }">{{ new Date(data.ts).toLocaleString() }}</template>
             <template #cost_usd="{ data }">${{ Number(data.cost_usd).toFixed(4) }}</template>
@@ -2009,19 +2248,36 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             <label>最小增量（字）<UiNumber :model-value="outputForm.streamMinDeltaChars" :min="1" :max="2000" @update:model-value="changeOutputNumber('streamMinDeltaChars', $event)" /><small class="field-note">和上一项是<b>同时满足</b>才编辑：到点了但只多出两三个字就先不动，免得撞 Telegram 的编辑频率限制。收尾那次编辑不受这两项约束。</small></label>
             <p class="field-note wide">会话级覆盖（<code>perChat.&lt;contextKey&gt;.output</code>）优先于这里的全局值。</p>
           </div>
-          <div class="registry-heading"><div><h3>维护操作</h3><p class="section-note">都是同步执行的：大库上会阻塞写入，跑的时候 bot 那边的消息会排队。孤儿文件清理（<code>gc-files</code>）后端尚未实现，所以这里不给按钮 —— 给一个必然报错的按钮比没有更糟。</p></div></div>
+          <div class="registry-heading"><div><h3>维护操作</h3><p class="section-note">都是同步执行的：大库上会阻塞写入，跑的时候 bot 那边的消息会排队。</p></div></div>
           <div class="maintenance-grid">
             <article v-for="item in MAINTENANCE_ACTIONS" :key="item.action">
               <div><b><i :class="item.icon" aria-hidden="true" /> {{ item.label }}</b><small>{{ item.hint }}</small></div>
               <UiButton size="small" variant="outlined" label="执行" :loading="maintenanceBusy === item.action" :disabled="Boolean(maintenanceBusy)" @click="runMaintenance(item.action, item.label)" />
             </article>
+            <article class="danger">
+              <div><b><i class="pi pi-refresh" aria-hidden="true" /> 重启进程</b><small>走和 SIGTERM 一样的优雅关闭（排空在途轮次、刷日志、WAL checkpoint）。<b>没有 systemd / docker 这类 supervisor 时进程不会自己回来</b></small></div>
+              <UiButton size="small" variant="outlined" severity="danger" label="重启" :loading="restarting" :disabled="Boolean(maintenanceBusy)" @click="restartProcess" />
+            </article>
           </div>
+          <div class="registry-heading"><div><h3>导出 / 导入配置</h3><p class="section-note">导的是 <code>config_kv</code> 里的<b>覆盖层</b>，不是合并后的全量 —— 全量里绝大多数是代码默认值，导进另一个部署等于把那一刻的默认值钉死。密钥类键直接不导出（不是导成 <code>«redacted»</code>：那样导入端会把真密钥覆盖成一个字面量）。导入按键覆盖，<b>不删除</b>现有覆盖行。</p></div>
+            <div class="section-actions"><UiButton size="small" variant="outlined" icon="pi pi-download" label="导出" :loading="exportBusy" @click="exportConfig" /><UiButton size="small" variant="outlined" icon="pi pi-upload" label="导入" @click="importFile?.click()" /></div>
+          </div>
+          <input ref="importFile" type="file" accept="application/json,.json" hidden @change="importConfig">
           <div class="registry-heading">
             <div><h3>全部配置</h3><p class="section-note">由 <code>config/config.schema.json</code> 自动生成 —— 控件形态、默认值、取值范围与每一项的作用说明全部取自 schema，不在前端维护第二份清单。搜索框同时匹配键名与说明。热更新项保存即生效，需重启项会在保存后的提示里点名。密钥字段是<b>只写</b>的（不回显，留空表示不改）；标「环境变量锁定」的键由环境变量最终决定，写进来也会被盖回去，所以不给改。</p></div>
             <UiButton size="small" variant="text" icon="pi pi-history" label="变更历史" @click="openConfigRevisions" />
           </div>
           <SchemaForm v-if="configSchema" ref="schemaForm" :schema="configSchema.schema" :value="config" :hot-reloadable="configSchema.hotReloadable" :unimplemented="configSchema.unimplemented" :env-pinned="configSchema.envPinned" :saving="schemaSaving" @save="saveSchemaConfig" />
           <p v-else class="empty-card"><i class="pi pi-spin pi-spinner" aria-hidden="true" /> 正在加载配置 schema…</p>
+          <div class="registry-heading">
+            <div><h3>原始 YAML</h3><p class="section-note">直接编辑<b>覆盖层</b>（<code>config_kv</code>），不是合并后的全量 —— 全量里绝大多数是代码默认值。解析与校验都在服务端（和启动时那份 <code>loadConfig</code> 用同一个解析器，不会「界面上过了、启动时炸了」），语法错误会给出行号。落库按顶层段覆盖。</p></div>
+            <div class="section-actions"><UiButton size="small" variant="text" :icon="yamlMode ? 'pi pi-times' : 'pi pi-code'" :label="yamlMode ? '收起' : '编辑 YAML'" @click="toggleYamlMode" /><UiButton v-if="yamlMode" size="small" icon="pi pi-save" label="保存 YAML" :loading="yamlSaving" @click="saveYaml" /></div>
+          </div>
+          <template v-if="yamlMode">
+            <p v-if="yamlSkipped.length" class="callout warn"><i class="pi pi-key" />{{ yamlSkipped.length }} 个密钥类键没有出现在下面（不回显也不会被这次保存清掉）：<code>{{ yamlSkipped.join('、') }}</code></p>
+            <p v-if="yamlError" class="callout warn"><i class="pi pi-exclamation-triangle" />{{ yamlError }}</p>
+            <textarea v-model="yamlText" class="yaml-editor" rows="24" spellcheck="false" aria-label="原始 YAML 覆盖层" />
+          </template>
           <div class="registry-heading"><div><h3>合并后的完整配置</h3><p class="section-note">config.yaml → DB 覆盖层 → 环境变量三层合并的结果，只读；上面那张表单改的就是这份 JSON 里的值。</p></div></div>
           <pre class="config-preview" v-text="JSON.stringify(config, null, 2)" />
         </section>

@@ -55,13 +55,21 @@ webui:
 
 WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-open-questions.md)）。所有 API 都以 owner 权限执行，因此**必须**默认绑回环。
 
-### 2.3 可选：Telegram 一次性登录链接
+### 2.3 Telegram 一次性登录链接
 
-🚧 **未实现（已从命令白名单摘除）。** 原设计：`/webui`（owner 私聊）→ 生成 5 分钟有效的一次性 token
-→ 返回 `http://<webui.publicUrl>/login?t=<token>` → 访问即换取 session；token 单次使用、存内存、
-进程重启即失效。服务端与 handler 都没写，而名字留在 `trigger.ts` 的白名单里只会让 `/webui`
-石沉大海，所以先摘除（docs/20 · W-TG-01；[08 §8](./08-telegram-adapter.md)）。要实现时**两侧一起加**：
-`/login` 端点 + `bot.command('webui')` + `HANDLED_COMMANDS`，三者有 CI 断言互相锁死。
+**已实现（第五轮）。** `/webui`（**仅 owner 私聊**）→ `issueLoginToken()` 签发 5 分钟有效的一次性
+token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POST /api/auth/token` 换 session。
+
+- token **存内存**，进程重启即失效，而且这就是它该有的语义：一条能换取 owner 全权限 session 的
+  链接落进数据库或日志，泄露面比口令本身还大。所以服务端**不记 token 本身**，只记「用掉/失败」。
+- 三道闸：单次使用（取出即删，错的 token 也不留给人反复试）、5 分钟过期、签发表有界（最多 16 个未用）。
+- 群里不给：`/webui` 在非私聊里直接回「这个命令只在私聊里用」——登录链接出现在群里等于把 owner
+  权限递给屏幕前所有人。
+- `webui.publicUrl` 没配时**明说生成不出来**，而不是发一条打不开的链接。
+- **三者由 CI 断言锁死**（`tests/trigger.test.ts` 的 `keeps /webui wired on both sides`）：
+  `HANDLED_COMMANDS` + `bot.command('webui')` + `issueLoginToken` + `POST /api/auth/token` +
+  该端点在鉴权中间件的放行名单里。上一轮就是因为「名字留在白名单里但服务端没写」才把它整个摘掉的
+  （docs/20 · W-TG-01）。
 
 ---
 
@@ -70,7 +78,13 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
 全站共用 §6 的自建组件与 `styles.css` 的设计变量，视觉基准是总览页：左侧固定深色导航 + 顶栏（状态灯：bot 连接 / provider 健康 / 在途 turn 数 / 今日花费；右上角是引导 owner 的真实显示名与 `@username`），内容区一律是 `.surface` 卡片。
 
 ### 3.1 Dashboard
-- 实时卡片：在途 turn、今日 turn 数、今日花费/额度环形图、消息量趋势（折线图，近 7 天）。🚧 部分实现（四张指标卡是累计值，没有趋势图与额度环形图）。
+- 实时卡片：在途 turn、今日 turn 数、今日花费（四张指标卡是**累计值**）。
+- **近 7 天趋势**（已实现）：消息量与轮次数的折线图，按 `general.timezone` 的**本地日**分桶
+  （与配额 bucket 同一个时区口径，否则东八区会看到每天的量在早上八点断开）。没有数据的那天
+  补 0 而不是跳过 —— 折线图上「那天没有点」和「那天是 0」是两回事。
+- **额度环形图**（已实现）：只画 `global` 档的当前 day / month 两个环。chat / user 是按主体分的
+  很多行，挤在总览上读不出东西 —— 那是配额页的表要干的事。`limit === null` 时**不画环**只写
+  「不限」：一个永远填不满的圈让人分不清是快用完了还是还早。
 - **在途 turn 表**（`DataGrid`，SSE 增量更新，已实现）：发起人（按 `principals` 反查显示名）+ 角色、
   contextKey、当前动作（`turn.progress` 给的「第 N 步 · 模型 / 工具 · 载荷摘要」）、步数与花费、
   已用时长（每秒走字）、`[取消]`。首屏走 `GET /api/turns/active`，之后靠 `turn.started` /
@@ -80,12 +94,16 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
   `[取消]` 打 `POST /api/turns/:id/cancel`：那是 abort 信号不是删除，该轮走 `abortTurn` 落成
   `cancelled`，上下文与已发出的消息都还在；二次确认里写明这一点。轮次已经结束时返回
   `{cancelled:false}`，界面说「这一轮已经结束了」而不是假装成功。
-- 最近错误（`DataGrid`，level≥warn，10 条，点击跳日志 trace）。🚧 当前是不分级别的最近 6 条事件。
+- **最近错误**（已实现）：`GET /api/logs?minLevel=warn&size=10`，点一行跳到日志页并展开那条 trace。
+  过滤在**服务端**：在前端过滤会因为日志页只取了最近 200 条而漏掉更早的错误。此前这里是不分级别
+  的最近 6 条，实际上永远被 info 刷满 —— 一张「最近错误」卡片看不到错误。
 - **依赖健康卡片**（已实现）：DB 读写、SSE 连接、模型注册表可用数、在途 turn 数、MCP 就绪 / 异常数、
   沙箱 `mode` 与可用性（`plan.reason` 挂在 title 上），外加版本与运行时长。
   数据一律取 `GET /api/health/detail` —— **这几行以前是写死的文本**（沙箱恒显示「Docker」，
   与 `sandbox.mode` 无关），显示的东西与运行时无关比不显示更糟。
-- 系统信息里的 DB 大小、WAL 大小、workspace 占用 🚧 未实现。
+- **系统信息里的 DB / WAL / workspace 占用**（已实现，走 `/api/health/detail`）：**只统计不清理**
+  —— 这三行是「该不该去点维护操作」的判据，自己动手会让一个读端点带上副作用。目录递归有深度上界
+  （8 层）：workspace 里放着模型自己造的目录树，一个软链自指就能让这次请求不返回。
 
 ### 3.2 会话（Chats）
 - **会话列表是卡片而不是表格**：表格里最靠左的一列是 `chat:-1002492583774`，运维认不出这是哪个群。
@@ -229,9 +247,19 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
     `bypassRoles` 里出现 owner 之外的角色时给出警示。
   - `GET /api/sandbox` 一并返回 `plan('owner')`：连 owner 都 `allowed:false` 时（例如进程在容器内
     却没配 `hostWorkspaceDir`）页面顶部出红条并写出 `reason`，否则运维只会看到工具莫名失败。
-  - 镜像 `[拉取/构建]` 🚧 未实现（没有对应端点）。`allowHostFsForOwner` 在
-    `KNOWN_UNIMPLEMENTED_CONFIG_KEYS` 里，因此不给控件。
-- 审批规则可在「全部配置」里编辑 `approval.rules` JSON；专用的逐行正则测试编辑器仍未实现。
+  - `[拉取镜像]`（`POST /api/sandbox/image`，已实现）：**只 pull 不 build**。build 要有 Dockerfile
+    上下文、会跑任意构建指令、耗时以分钟计，那是部署动作不是控制台按钮。镜像名取自**已保存的配置**
+    而不是请求体 —— 让人从界面上指定任意镜像等于绕开 `sandbox.image` 那道配置，而沙箱镜像决定了
+    模型能在里面用什么。拉取有 10 分钟上界（这是一个同步等着的 HTTP 请求）。
+  - `tools.fs.allowHostFsForOwner` 已接线（第五轮）：owner 的 fs 工具 jail 到 `/` 而不是会话
+    workspace，`denyGlobs` 照样生效。**开关旁边必须有红色警示** —— 这是 [14](./14-open-questions.md) T8
+    那条取舍的显式入口。
+- **审批规则试跑**（`POST /api/approvals/test`，已实现）：给一个工具名 + 一条样例输入，逐条回报
+  哪些规则命中、**为什么没命中**（工具名不匹配 / 正则不匹配 / 正则编译失败）、最终风险档位。
+  判定用的是**运行时那份** `ApprovalRules`（共用 `compiled` 的编译结果）—— 在前端再实现一遍匹配
+  必然漂移，而「以为配了审批其实永不命中」正是这条配置最容易出的错。`when: 'target_exists'`
+  一律记成「取决于运行时」：试跑没有真实执行上下文，含糊其辞比编一个答案好。
+  规则本身仍在「全部配置」的 `approval.rules` 里编辑。
 
 ### 3.8 扩展（Skills / Plugins / MCP）
 
@@ -286,8 +314,13 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
 - `[导出 trace]` → JSON 下载，便于贴 issue。
 
 ### 3.11 用量（Usage）
-- 时间范围选择 + 维度切换（按天/按会话/按用户/按模型/按 agent）。🚧 未实现，当前是不分维度的明细表。
-- 图表：花费堆叠柱（按模型）、token 折线（in/out/cache）、成功率。🚧 未实现。
+- **时间范围（7/30/90 天）+ 维度切换**（按天/会话/用户/模型/别名/agent）：走
+  `GET /api/usage/report?groupBy&from&to`。聚合本来就实现好了（`UsageLedger.report` 六个维度一个不少），
+  只是从来没有端点调过它 —— 这一页因此长期只有一张不分维度的明细表。
+  `chat` / `user` 维度的 bucket 是裸 id，显示名在**服务端**补（前端不再实现第二份 `principals` 反查规则）。
+- **图表**：按天时是折线（花费、输入/输出 token），按其他维度时是水平条形排行 —— 维度值是群名/模型名，
+  竖着放会把标签压成竖排。条形图只画前 10 并把余下的合成一条「其余 N 项」，**不静默截断**。
+  自建 SVG（`UiLineChart` / `UiBarChart` / `UiRing`），不引图表库：全站已摘掉 PrimeVue，而 CSP 也不允许从 CDN 取。
 - 明细表（`usage_ledger` 分页）（已实现）。
 - 配额是**独立一页**，见 §3.11a —— 限额、实时计数器与重置按钮都在那里。
 
@@ -386,11 +419,25 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
     **需重启的键在 Toast 里点名** —— 「保存成功但运行时没变」是最误导的一类反馈（docs/20 · W-CFG-02）。
   - 有专用面板的键（触发 / 输出 / 配额 / 沙箱 / 工具开关 / Agent）在这里照样能改，但标注
     「另有专用面板」，那边有额外的校验与实时数据。
-- `[原始 YAML]` 模式：直接编辑，保存前跑 zod 校验，错误定位到行。🚧 未实现。
-- 保存 → 写 `config_kv` + `config_revisions` → 广播热更新事件；需重启项标注并提供 `[重启进程]`（若在 systemd/docker 下由外部 supervisor 拉起）。🚧 `[重启进程]` 未实现。
+- **`[原始 YAML]` 模式**（已实现）：编辑的是**覆盖层**（`config_kv`）而不是合并后的全量 ——
+  全量里绝大多数是代码默认值，导进另一个部署等于把那一刻的默认值钉死。
+  **解析与校验都在服务端**，用的就是 `loadConfig` 那个 YAML 解析器：放到前端等于让两处方言各自漂移
+  （缩进 tab、锚点、`yes/no` 当布尔这些边角都有差异），而「界面上过了、启动时炸了」是最难查的一类。
+  语法错误回 `{ line, column }`，校验错误回 zod 的路径，两者都显示在编辑器旁边而不是让 Toast 一闪而过。
+  落库按**顶层段**逐段覆盖，不是把整棵树写成一行 —— 后者会把工具页那种更细的覆盖全部作废（G-CFG-02）。
+- 保存 → 写 `config_kv` + `config_revisions` → 广播热更新事件；需重启项标注。
+- **`[重启进程]`**（`POST /api/restart`，已实现）：走和 SIGTERM 完全一样的优雅关闭路径（排空在途
+  轮次、刷日志、WAL checkpoint），落点在 `apps/bot` —— 服务器包不重实现一遍。**先回响应再退出**：
+  同一个 tick 里 `process.exit` 会让这次请求连响应都收不到，界面上表现成「点了没反应」。
+  二次确认里必须写明**没有 systemd / docker 这类 supervisor 时进程不会自己回来**。
 - **`[变更历史]`**（已实现）：读 `GET /api/config/revisions`，列出最近 500 条覆盖写入的键、
   操作者、时间与新旧值。密钥类字段在写入时就已存成 `«redacted»`。
-- `[导出配置]` / `[导入配置]`（密钥字段自动排除）。🚧 未实现。
+- **`[导出配置]` / `[导入配置]`**（已实现）：导的是 `config_kv` 的**覆盖层**。密钥类键
+  **直接不导出**而不是导成 `«redacted»` —— 导成占位符的话，导入端会把真密钥覆盖成一个字面量。
+  判据是「叶子段像密钥 + 值是非空字符串」，与 `publicConfig` 同一套口径：拿整条点分路径去匹配会把
+  `context.limit.tokens` 也当成密钥（`/token/i` 命中 "tokens"），于是一份导出里静静地少几项真配置。
+  导入走和 `PUT /api/config` 完全一样的校验与落库路径，**按键覆盖、不删除**文件里没有的那些；
+  被环境变量锁定的键跳过并点名（比让人先去删环境变量再导一次好）。
 - **维护操作**（已实现）：`[立即备份 DB]`、`[VACUUM]`、`[清理过期日志]`、`[清理孤儿文件]`、`[重建 FTS 索引]`
   五个按钮，都走 `POST /api/maintenance/:action`，执行前二次确认（同步执行，大库上会阻塞写入），
   结果回显在 Toast 里（备份返回文件路径）。
@@ -436,13 +483,15 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
 | `POST /api/principals/bulk` | 批量登记主体：`{ids:[…], kind: user\|chat, role}`，单次上限 500。ID 必须是 Telegram 数字 ID（`^-?\d{1,20}$`），非法 ID 或非法角色返回 400。已存在的主体**只补一次 `setRole`，不再走 `upsertSeen`**（`ON CONFLICT` 分支不动 role 但会照写 `display_name`/`username`，而这里手上只有 `null`，等于把 Telegram 同步来的真名清空），返回 `{count, created, updated}` |
 | `POST /api/principals/roles` | 勾选批量改角色：`{ids:[主体 id…], role}`，单次上限 500。**只改已存在的行，不新建**（新建走 `/api/principals/bulk`，那边收的是 Telegram 数字 ID）；库里找不到的 id 原样回报而不是静默跳过，返回 `{count, changed, missing}` |
 | `GET /api/tools` `PATCH /api/tools/:name` | 工具启停。`GET` 在静态策略之外一并返回当前 `enabled`（来自 `tools.overrides`）。`PATCH` 写入 `tools.overrides.<name>.enabled`；被禁用的工具从工具目录消失，且 `ToolRegistry.execute` 会二次拦截并返回 `tool_disabled_by_operator`。未知工具名返回 404 |
-| `GET/PUT /api/sandbox` `POST /api/sandbox/probe` | 沙箱配置与探测 |
+| `GET/PUT /api/sandbox` `POST /api/sandbox/probe` `POST /api/sandbox/image` | 沙箱配置、探测、拉取镜像（只 pull 不 build；镜像名取自已保存的配置） |
+| `POST /api/approvals/test` | 审批规则试跑：`{tool, input?, rules?}` → 逐条命中报告 + 最终风险档位。用的是运行时那份匹配器 |
 | `GET/POST /api/skills` `GET/PUT/PATCH/DELETE /api/skills/:name` | Skill 列表、正文/frontmatter CRUD、启停 |
 | `GET/PATCH /api/plugins[/:name]` `POST /api/plugins/:name/reload` | Plugin |
 | `GET/POST /api/mcp` `PATCH/DELETE /api/mcp/:name` `POST /api/mcp/:name/reconnect` | MCP transport CRUD、热重连 |
 | `GET /api/agents` `POST /api/agents/:name/dryrun` | 子 agent 定义与 NDJSON 隔离试跑（定义增删改走 `agent.agents` 配置） |
 | `GET /api/logs` `GET /api/logs/trace/:traceId` `GET /api/logs/blob?ref=` | 日志 |
 | `GET /api/usage` | 用量明细（`usage_ledger`，最近 1000 条） |
+| `GET /api/usage/report?groupBy&from&to` | 用量聚合。`groupBy` ∈ `day\|chat\|user\|model\|alias\|agent`，非法值 400；`chat`/`user` 的行带回 `label`（服务端反查 `principals`） |
 | `GET /api/quota` | 配额页的全部数据：`{quota, timezone, buckets:{day,month}, counters:[…], unpriced:[…], unpricedTotal, unimplemented:[…]}`。`counters` 是 `quota_counters` 全表（上限 500 行）**加上服务端合成的 `limit`**：`(scope, window)` 到配置的取值规则含 `perUser.byRole` 覆盖，让前端自己拼等于把 `bot.ts` 的规则实现两遍。`current` 标记该行是否落在当前 bucket；chat/user 行按 `principals` 反查 `role`/`label`/`username`；配了 `byRole` 时 user 行带 `limitApprox`（有效角色取 `min(用户, 会话)`，服务端只看得到前者）。`unimplemented` 转发 `KNOWN_UNIMPLEMENTED_CONFIG_KEYS` 里 `quota.` 开头的那几项，界面据此不给控件 |
 | `PUT /api/quota` | body 是**相对 `quota` 的点分键**（`{"global.daily": 5}` → `quota.global.daily`），与 `PUT /api/sandbox` 一致。展开走 `assignDotted`、整体过 `configSchema`，落 `config_kv` + `config_revisions` 并广播 `config.changed`（与 `PUT /api/config` 同一套校验与审计）。非法键 400 `invalid_config_key`，校验失败 400 `invalid_config` + 逐条 `details` |
 | `POST /api/quota/reset` | 重置计数器。不带 body = 全表清零；带 `{scope, subject?, window?, bucket?}` 只删匹配的行（**给了任一过滤条件就必须给 `scope`**，否则 400 `invalid_filter` —— 只按 `bucket` 删会跨 scope 误伤）。返回 `{changes}` |
@@ -452,7 +501,12 @@ WebUI 只有一个身份 = **owner**。不做多用户/RBAC（记入 [14](./14-o
 | `GET /api/approvals` `POST /api/approvals/:id/decide` | pending 与历史审批；owner 裁决 |
 | `GET /api/config` `PUT /api/config` `GET /api/config/schema` `GET /api/config/revisions` | 配置。`/schema` 的三件套 `{schema, hotReloadable, unimplemented}` **都在 `data` 信封里**（统一客户端只解 `data`，挂在顶层的兄弟键会被静默丢掉，自动生成的表单就是靠这两份前缀表打「热更新 / 需重启 / 未接线」徽标的）。`PUT` body 为点分键；含 `__proto__`/`constructor`/`prototype` 段的键一律 400 `invalid_config_key`（原型污染发生在校验之前，一次请求就能让此后所有配置写入失败，docs/20 · W-CFG-01）；动到 `trigger.*` 时唤醒词要过 `checkWakeword`，不可用返回 400 `invalid_wakeword`。`/schema` 另带 `hotReloadable` 与 `unimplemented` 两个键名前缀表：不在 `hotReloadable` 里的键保存后需要重启才生效，WebUI 据此显示待重启徽标（[11](./11-config-reference.md)） |
 | `POST /api/config/wakewords/check` | 逐条返回唤醒词的 `{ kind: contains\|regex, ok, reason }`，供面板即时提示；判定与运行时匹配同源 |
-| `POST /api/maintenance/{backup,vacuum,cleanup-logs,rebuild-fts,gc-files}` | 维护 |
+| `POST /api/maintenance/{backup,vacuum,cleanup-logs,gc-files,rebuild-fts}` | 维护。`gc-files` 只删没有任何 DB 行指向的孤儿，**不是过期策略** |
+| `POST /api/restart` | 重启进程：走和 SIGTERM 一样的优雅关闭。**先回响应再退出**；没有 supervisor 时进程不会自己回来 |
+| `GET /api/config/export` `POST /api/config/import` | 配置覆盖层的导出 / 导入。密钥类键不导出（不是导成 `«redacted»`）；导入按键覆盖、不删除 |
+| `GET/PUT /api/config/yaml` | 原始 YAML 模式。解析在服务端（与 `loadConfig` 同一个解析器）；语法错误回 `{line, column}`，校验错误回 zod 路径 |
+| `POST /api/auth/token` | 用 `/webui` 发的一次性 token 换 session。单次使用、5 分钟过期；**在鉴权中间件的放行名单里**（否则它自己就要求先登录） |
+| `GET /api/logs?minLevel=` | 日志。`minLevel` ∈ `debug\|info\|warn\|error`，总览页的「最近错误」卡片用 `warn` |
 | `GET /api/events` | SSE |
 
 审计：所有非 GET 请求写 `log_events(kind='webui.action')`，含路径、body 摘要（脱敏）、session ip。

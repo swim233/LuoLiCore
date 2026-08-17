@@ -364,7 +364,7 @@ media:
 | `/grant <user\|chat> <id> <role>` | all | owner | 授权 |
 | `/revoke <id>` | all | owner | 降为 blocked |
 | `/usage [today\|month]` | all | limited | 本会话/本人用量；owner 看全局 |
-| ~~`/webui`~~ | — | — | 🚧 **未实现，已从白名单摘除**：一次性登录 token 的服务端（[09 §2.3](./09-webui.md#23-可选telegram-一次性登录链接)）本来就标着「可选」，也没写。留在白名单里只会让 `/webui` 石沉大海（docs/20 · W-TG-01） |
+| `/webui` | owner | 私聊 | 生成一次性控制台登录链接（5 分钟有效、单次使用、进程重启失效）。**群里直接拒绝** —— 登录链接出现在群里等于把 owner 权限递给屏幕前所有人。没配 `webui.publicUrl` 时明说生成不出来，而不是发一条打不开的链接。命令 / handler / 服务端端点三者由 CI 断言锁死（[09 §2.3](./09-webui.md#23-telegram-一次性登录链接)） |
 | `/ping` | all | limited | 健康检查：版本、上线时长、模型别名、DB 大小 |
 
 - 命令**不进 AI 流程**（除 `/ask`），直接由 handler 处理并回复；命令消息仍归档（`kind='text'`, `triggered=1`, `trigger_reason='command'`），但**不进上下文**（`commands.archiveToContext=false`，避免污染对话）。

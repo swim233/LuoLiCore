@@ -116,6 +116,28 @@ export class Sandbox {
     return '本进程在容器内且未配置 sandbox.hostWorkspaceDir：-v 会挂到宿主上不存在的路径，沙箱与文件工具将看到两个不同的目录';
   }
 
+  /**
+   * `docker pull <sandbox.image>`。镜像名取自配置而不是请求体：让人从界面上指定任意镜像
+   * 等于绕开 `sandbox.image` 那道配置，而沙箱镜像决定了模型能在里面用什么。
+   * **只 pull 不 build** —— build 要有 Dockerfile 上下文、会跑任意构建指令、耗时以分钟计，
+   * 那是部署动作不是控制台按钮（docs/09 §3.7）。
+   */
+  async pullImage(): Promise<{ ok: boolean; image: string; error?: string }> {
+    const image = this.#cfg().image;
+    return new Promise((resolve) => {
+      const child = spawn(this.#cfg().dockerBin, ['pull', image], { stdio: ['ignore', 'ignore', 'pipe'] });
+      let settled = false;
+      let error = '';
+      const finish = (value: { ok: boolean; image: string; error?: string }): void => { if (!settled) { settled = true; resolve(value); } };
+      child.stderr.on('data', (chunk: Buffer) => { error += chunk.toString(); });
+      // 拉一个几百 MB 的镜像可能要几分钟，但不能没有上界：这是一个同步等待的 HTTP 请求。
+      const timer = setTimeout(() => { child.kill('SIGKILL'); finish({ ok: false, image, error: 'pull_timeout' }); }, 600_000);
+      timer.unref?.();
+      child.once('error', (cause) => { clearTimeout(timer); finish({ ok: false, image, error: cause.message }); });
+      child.once('close', (code) => { clearTimeout(timer); finish(code === 0 ? { ok: true, image } : { ok: false, image, error: error.trim().slice(0, 500) || `exit_${code}` }); });
+    });
+  }
+
   async probe(): Promise<{ available: boolean; mode: SandboxConfig['mode']; error?: string }> {
     if (this.#cfg().mode !== 'docker') return { available: this.#cfg().mode === 'jail', mode: this.#cfg().mode };
     const mapping = this.#mappingError();

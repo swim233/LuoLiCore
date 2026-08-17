@@ -19,9 +19,16 @@ export class OperationsRepository {
     return Number(info.lastInsertRowid);
   }
 
-  logs(limit = 100, traceId?: string): unknown[] {
-    if (traceId) return this.db.prepare('SELECT * FROM log_events WHERE trace_id=? ORDER BY ts,id LIMIT ?').all(traceId, limit);
-    return this.db.prepare('SELECT * FROM log_events ORDER BY ts DESC,id DESC LIMIT ?').all(limit);
+  /**
+   * @param minLevel 只取这个级别及以上。总览页的「最近错误」卡片要的是 `warn` 以上
+   *   （docs/09 §3.1）—— 不分级别地取最近几条，结果几乎总是被 info 刷满，那张卡片就白挂了。
+   */
+  logs(limit = 100, traceId?: string, minLevel?: 'debug' | 'info' | 'warn' | 'error'): unknown[] {
+    const ranked = ['debug', 'info', 'warn', 'error'];
+    const allowed = minLevel ? ranked.slice(ranked.indexOf(minLevel)) : null;
+    const levelClause = allowed ? ` AND level IN (${allowed.map(() => '?').join(',')})` : '';
+    if (traceId) return this.db.prepare(`SELECT * FROM log_events WHERE trace_id=?${levelClause} ORDER BY ts,id LIMIT ?`).all(traceId, ...(allowed ?? []), limit);
+    return this.db.prepare(`SELECT * FROM log_events${allowed ? ` WHERE level IN (${allowed.map(() => '?').join(',')})` : ''} ORDER BY ts DESC,id DESC LIMIT ?`).all(...(allowed ?? []), limit);
   }
 
   createSession(ttlHours: number, ip?: string, ua?: string): { id: string; csrf: string; expiresAt: number } {
@@ -44,11 +51,33 @@ export class OperationsRepository {
     this.db.prepare('DELETE FROM sessions WHERE id=?').run(id);
   }
 
-  dashboard(): Record<string, unknown> {
+  /**
+   * @param timezone 趋势按**本地日**分桶。用 UTC 分桶的话，东八区的运维会看到每天的量在
+   *   早上八点断开 —— 与配额 bucket（`quotaBucket`）用同一个时区口径。
+   *
+   * 四张指标卡是累计值，趋势是近 `days` 天的逐日量（docs/09 §3.1）。缺的那些天补 0 而不是跳过：
+   * 折线图上「那天没有点」和「那天是 0」看起来是两回事。
+   */
+  dashboard(timezone = 'UTC', days = 7): Record<string, unknown> {
     const turns = this.db.prepare(`SELECT COUNT(*) AS total,SUM(state='running') AS running,SUM(state='failed') AS failed,COALESCE(SUM(cost_usd),0) AS cost FROM turns`).get();
     const messages = this.db.prepare('SELECT COUNT(*) AS total FROM messages').get();
     const providers = this.db.prepare('SELECT COUNT(*) AS total,COALESCE(SUM(enabled),0) AS enabled FROM providers').get();
-    return { turns, messages, providers };
+    const since = Date.now() - days * 86_400_000;
+    const day = (ts: number): string => new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(ts));
+    const buckets = new Map<string, { day: string; messages: number; turns: number; costUsd: number }>();
+    for (let index = days - 1; index >= 0; index -= 1) {
+      const name = day(Date.now() - index * 86_400_000);
+      buckets.set(name, { day: name, messages: 0, turns: 0, costUsd: 0 });
+    }
+    for (const row of this.db.prepare('SELECT tg_date AS ts FROM messages WHERE tg_date>=?').all(since) as Array<{ ts: number }>) {
+      const bucket = buckets.get(day(row.ts));
+      if (bucket) bucket.messages += 1;
+    }
+    for (const row of this.db.prepare('SELECT COALESCE(started_at,queued_at) AS ts,COALESCE(cost_usd,0) AS cost FROM turns WHERE COALESCE(started_at,queued_at)>=?').all(since) as Array<{ ts: number; cost: number }>) {
+      const bucket = buckets.get(day(row.ts));
+      if (bucket) { bucket.turns += 1; bucket.costUsd += row.cost; }
+    }
+    return { turns, messages, providers, trend: [...buckets.values()] };
   }
 }
 
