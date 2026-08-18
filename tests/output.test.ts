@@ -1,9 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { splitTelegramText } from '@luoli/telegram';
+import { safeRender, splitTelegramText } from '@luoli/telegram';
 
 describe('Telegram rendered splitting', () => {
   it('keeps every MarkdownV2 chunk below the configured rendered limit', () => {
-    const text = '_'.repeat(3000);
+    // 前提是「渲染会让正文变长」：3000 个 `.` 全要转义，渲染后 6000 码点。这条前提单独断言 ——
+    // 原来用的 `_`×3000 现在渲染成 `——————`（连成一行的下划线在 Markdown 里就是 hr，
+    // docs/08 §5.3 第 3 条），前提一失效，下面那句 `>1` 就悄悄变成了空断言。
+    const text = '.'.repeat(3000);
+    expect([...safeRender(text)].length).toBeGreaterThan(3900);
     const parts = splitTelegramText(text, 3900);
     expect(parts.length).toBeGreaterThan(1);
     expect(parts.every((part) => [...part].length <= 3900)).toBe(true);

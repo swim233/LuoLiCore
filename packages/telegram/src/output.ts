@@ -1,42 +1,139 @@
 import type { Api } from 'grammy';
 import type { Message } from 'grammy/types';
+import { marked, type MarkedOptions, type Token, type Tokens } from 'marked';
 
-const SPECIAL = /[_*\[\]()~`>#+\-=|{}.!]/g;
+/**
+ * 普通文本里要转义的全集。**`\` 必须在内** —— 漏掉它时 `C:\x` 会被 Telegram 当成「转义 x」，
+ * 反斜杠静静消失（docs/08 §5.3 第 4 条）。
+ */
+const SPECIAL = /[\\_*\[\]()~`>#+\-=|{}.!]/g;
+/** `pre` / `code` 实体内部只有这两个要转义，别的字符按字面走。 */
+const CODE_SPECIAL = /[\\`]/g;
+/** `[…](url)` 的 URL 部分只有这两个要转义。 */
+const LINK_SPECIAL = /[\\)]/g;
+/** 可点链接的 scheme 白名单。回复正文里可能带被注入的内容，这里必须是白名单而不是黑名单。 */
+const LINK_SCHEME = /^(?:https?|tg|mailto):/i;
+/** 显式传全套开关：`marked.lexer` 不带 options 时吃的是全局 `marked.use()` 的残留。 */
+const LEXER_OPTIONS: MarkedOptions = { gfm: true, breaks: false, pedantic: false };
 
 export function escapeMarkdownV2(text: string): string {
   return text.replace(SPECIAL, '\\$&');
 }
 
+/**
+ * 把通用 Markdown 渲染成 Telegram MarkdownV2（docs/08 §5.3）。
+ *
+ * **转义只发生在文本节点上**，这是这一节的红线。旧实现走的是反过来那条路 —— 逐行全量转义之后
+ * 只把 `\*\*x\*\*` 反解回 `*x*` —— 于是每个不在反解白名单里的构造都降级成字面转义符：行内代码
+ * 从来没被反解过（用户看到的是两个反引号），`heading` 生成的 `*粗体*` 因为在转义之前生成、又只有
+ * 双星号那一条反解规则，同样被自己的转义吃掉。这类漏洞不会报错，只会看起来朴素，所以补白名单
+ * 修不完 —— 只有「先解析、再逐节点输出」能一次性关掉整类。
+ */
 export function safeRender(markdown: string): string {
-  // 代码块被换成 `\u0000<n>\u0000` 占位符，最后再换回来 —— 而 `SPECIAL` 里没有 NUL，所以正文里
-  // 自带 `\u0000 0 \u0000` 的消息会被替换成别的代码块、或者（下标越界时）整段吞掉（docs/27 · C-07）。
-  // NUL 在 Telegram 正文里没有任何显示意义，进门就摘掉，占位符从此不可能被伪造。
-  let text = markdown.replaceAll('\u0000', '');
-  const fences = (text.match(/```/g) ?? []).length;
-  if (fences % 2) text += '\n```';
-  const protectedBlocks: string[] = [];
-  text = text.replace(/```([\s\S]*?)```/g, (_, body: string) => {
-    const marker = `\u0000${protectedBlocks.length}\u0000`;
-    protectedBlocks.push(`\`\`\`${body.replace(/[\\`]/g, '\\$&')}\`\`\``);
-    return marker;
-  });
-  text = text.replace(/^#{1,6}\s+(.+)$/gm, '*$1*');
-  const lines = text.split('\n');
-  const output: string[] = [];
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index]!;
-    if (line.includes('|') && index + 1 < lines.length && /^\s*\|?\s*:?-+/.test(lines[index + 1]!)) {
-      const table: string[] = [line, lines[index + 1]!];
-      index += 2;
-      while (index < lines.length && lines[index]!.includes('|')) { table.push(lines[index]!); index += 1; }
-      index -= 1;
-      output.push(`\`\`\`\n${table.join('\n').replace(/[\\`]/g, '\\$&')}\n\`\`\``);
-      continue;
-    }
-    output.push(line.replace(SPECIAL, '\\$&').replace(/\\\*\\\*([^*]+)\\\*\\\*/g, '*$1*'));
+  // NUL 在 Telegram 正文里没有任何显示意义，进门就摘掉。占位符方案（docs/27 · C-07）已经不用了，
+  // 但「正文里的 NUL 不该出去」这条仍然成立。
+  const text = markdown.replaceAll('\u0000', '');
+  // 渲染器不许成为投递失败的新来源：lexer 对任何输入都该有结果，真抛了就退回全文字面转义 ——
+  // 格式丢掉，消息还在。
+  try { return renderBlocks(marked.lexer(text, LEXER_OPTIONS)); }
+  catch { return escapeMarkdownV2(text); }
+}
+
+/** 块级节点的尾随换行照 `raw` 原样带出去：段落间的空行数量因此和模型写的一模一样。 */
+function trailingNewlines(raw: string | undefined): string {
+  return /\n*$/.exec(raw ?? '')![0];
+}
+
+function renderBlocks(tokens: readonly Token[], depth = 0): string {
+  // `def`（`[a]: url` 那种链接定义）不是正文，连它占的那几个换行一起丢掉。
+  return tokens.filter((token) => token.type !== 'def')
+    .map((token) => renderBlock(token, depth) + trailingNewlines(token.raw)).join('');
+}
+
+function renderBlock(token: Token, depth: number): string {
+  switch (token.type) {
+    case 'space': return '';
+    case 'paragraph': return renderInline(token.tokens, token.text);
+    // 降级：Telegram 没有标题实体（docs/08 §5.3 第 3 条）。整段已经是粗体，所以带着 `strong`
+    // 进去 —— `### **小标题**` 否则会渲染成 `**小标题**`，那是两个空粗体夹着文字，Telegram 判解析失败。
+    case 'heading': return `*${renderInline(token.tokens, token.text, ['strong'])}*`;
+    case 'code': return fence(token.text, token.lang);
+    // 表格按 raw 原样进等宽块：按码点补齐列宽在中英混排下只会更歪（CJK 是双宽）。
+    case 'table': return fence(token.raw.replace(/\n+$/, ''), '');
+    case 'hr': return '——————';
+    // `Token` 这个联合里带一个 `Tokens.Generic`（`type: string` + 索引签名），switch 收窄不掉它 ——
+    // 这两处因此要自己兜一下，而不是靠收窄。
+    case 'blockquote': return quote(renderBlocks(token.tokens ?? [], depth));
+    case 'list': return renderList(token as Tokens.List, depth);
+    case 'text': return token.tokens?.length ? renderInline(token.tokens, token.text) : escapeMarkdownV2(token.text);
+    // 块级 HTML 与任何未知节点：按字面显示。尾随换行由 trailingNewlines 补，这里先摘掉免得算两遍。
+    default: return escapeMarkdownV2((token.raw ?? '').replace(/\n+$/, ''));
   }
-  text = output.join('\n');
-  return text.replace(/\u0000(\d+)\u0000/g, (_, raw: string) => protectedBlocks[Number(raw)] ?? '');
+}
+
+/** `open` 记的是「此刻已经张着哪几种强调实体」，用途见 `emphasis`。 */
+type Emphasis = 'strong' | 'em' | 'del';
+
+function renderInline(tokens: readonly Token[] | undefined, fallback: string, open: readonly Emphasis[] = []): string {
+  if (!tokens?.length) return escapeMarkdownV2(fallback);
+  return tokens.map((token): string => {
+    switch (token.type) {
+      case 'text': return token.tokens?.length ? renderInline(token.tokens, token.text, open) : escapeMarkdownV2(token.text);
+      // lexer 已经把 `\*` 拆成 escape 节点、text 是还原后的 `*`：再转义一次就无损转回去了。
+      case 'escape': return escapeMarkdownV2(token.text);
+      case 'codespan': return `\`${token.text.replace(CODE_SPECIAL, '\\$&')}\``;
+      case 'strong': return emphasis('strong', '*', token, open);
+      case 'em': return emphasis('em', '_', token, open);
+      case 'del': return emphasis('del', '~', token, open);
+      case 'br': return '\n';
+      case 'link': return link(token.href, renderInline(token.tokens, token.text, open), token.raw);
+      case 'image': return link(token.href, escapeMarkdownV2(token.text?.trim() || '图片'), token.raw);
+      default: return escapeMarkdownV2(token.raw ?? '');
+    }
+  }).join('');
+}
+
+/**
+ * 同一种强调实体在 MarkdownV2 里不能自嵌套（`*a *b* c*` 直接解析失败）：已经张着就只渲染内容。
+ * 形参收成最小结构而不是 `Tokens.Strong | …`：`Token` 联合里那个 `Tokens.Generic` 收窄不掉。
+ */
+function emphasis(kind: Emphasis, mark: string, token: { tokens?: readonly Token[]; text?: string }, open: readonly Emphasis[]): string {
+  if (open.includes(kind)) return renderInline(token.tokens, token.text ?? '', open);
+  return `${mark}${renderInline(token.tokens, token.text ?? '', [...open, kind])}${mark}`;
+}
+
+/** scheme 不在白名单里就退回字面 raw —— 丢掉可点性，但一个字符都不隐藏。 */
+function link(href: string | undefined, label: string, raw: string): string {
+  if (!href || !LINK_SCHEME.test(href)) return escapeMarkdownV2(raw);
+  return `[${label}](${href.replace(LINK_SPECIAL, '\\$&')})`;
+}
+
+function fence(body: string, lang: string | undefined): string {
+  const tag = (lang ?? '').trim().split(/\s+/)[0] ?? '';
+  return `\`\`\`${tag.replace(CODE_SPECIAL, '\\$&')}\n${body.replace(CODE_SPECIAL, '\\$&')}\n\`\`\``;
+}
+
+/**
+ * 引用块 = 每行一个不转义的 `>`。**内含围栏时整段退掉前缀**：`>` 逐行前缀会把 `pre` 实体拆开，
+ * Telegram 判解析失败 —— 宁可丢引用样式，不要让整条消息掉回纯文本。
+ */
+function quote(inner: string): string {
+  if (inner.includes('```')) return inner;
+  return inner.split('\n').map((line) => `>${line}`).join('\n');
+}
+
+function renderList(token: Tokens.List, depth: number): string {
+  const indent = '  '.repeat(depth);
+  const start = Number(token.start || 1);
+  return token.items.map((item, index) => {
+    // 无序项用 `•` 而不是 `-`：`-` 在 MarkdownV2 里要转义，`\-` 打头是一串纯噪音。
+    const marker = token.ordered ? `${start + index}\\.` : '•';
+    const box = item.task ? (item.checked ? '☑ ' : '☐ ') : '';
+    // 子块用 `\n` 拼而不是照 raw 的尾随换行拼：列表项的 raw 尾随换行属于列表布局，
+    // 嵌套列表自己已经按 depth+1 缩进了，再叠一层就成了阶梯。
+    const inner = item.tokens.map((child) => renderBlock(child, depth + 1)).filter(Boolean).join('\n');
+    return `${indent}${marker} ${box}${inner}`.trimEnd();
+  }).join('\n');
 }
 
 /**
