@@ -4,7 +4,7 @@ import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { serve } from '@hono/node-server';
 import { ArchiveRepository, CustomToolRepository, OperationsRepository, PrincipalRepository, ScheduleRepository, TurnRepository, closeDatabase, migrateDatabase, modelAliasKey, openDatabase, readAppKv, readPersistedConfig, recomputeMessageTokens, recoverAfterCrash, writeAppKv } from '@luoli/db';
-import { AgentManager, AgentResultStore, AlertDispatcher, BUNDLED_SKILLS, ConfigStore, CustomToolManager, mergeAgentDefinitions, scanAgentFiles, ContextEngine, DatabaseApprovalBroker, EventBus, FileTools, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, ModelRegistry, PathJail, PluginManager, selfAuthoringDenyGlobs, PromptAssembler, PromptDocuments, ProviderStore, QuotaGuard, Sandbox, ScheduledJobRunner, Scheduler, Secrets, SkillLoader, STABLE_PROMPT_BLOCKS, TOOL_POLICY, ToolRegistry, TurnConcurrency, TurnRegistry, UsageLedger, assembleMainPrompt, configJsonSchema, loadConfig, perChatConfig, registerAuthoringTools, registerBuiltins, rejectedWakewords, runMainAgent, runSubAgent, streamMainAgent, type SubAgentRuntimeEvent } from '@luoli/core';
+import { AgentManager, AgentResultStore, AlertDispatcher, BUNDLED_SKILLS, ConfigStore, CustomToolManager, mergeAgentDefinitions, scanAgentFiles, ContextEngine, DatabaseApprovalBroker, EventBus, FileTools, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, ModelRegistry, PathJail, PluginManager, selfAuthoringDenyGlobs, PromptAssembler, PromptDocuments, ProviderStore, PROVIDER_FAILURES_TO_DOWN, PROVIDER_PROBE_TIMEOUT_MS, QuotaGuard, runProviderHealthCheck, Sandbox, ScheduledJobRunner, Scheduler, Secrets, SkillLoader, STABLE_PROMPT_BLOCKS, TOOL_POLICY, ToolRegistry, TurnConcurrency, TurnRegistry, UsageLedger, assembleMainPrompt, configJsonSchema, loadConfig, perChatConfig, registerAuthoringTools, registerBuiltins, rejectedWakewords, runMainAgent, runSubAgent, streamMainAgent, type SubAgentRuntimeEvent } from '@luoli/core';
 import { createServer, EventStreamRegistry, issueLoginToken, setupToken, type PromptPreviewResult } from '@luoli/server';
 import type { RuntimeTurnContext } from '@luoli/shared';
 import { TelegramTools, UpdatePoller, createTelegramBot } from '@luoli/telegram';
@@ -138,8 +138,8 @@ const scheduler = new Scheduler((name, error) => log.event({ level: 'error', kin
 scheduler.add(config.general.maintenanceCron, () => { const result = maintenance.cleanup(); log.event({ level: 'info', kind: 'maintenance.cleanup', summary: 'Scheduled cleanup complete', data: result }); }, 'maintenance');
 scheduler.add(config.db.vacuumCron, () => { maintenance.vacuum(); log.event({ level: 'info', kind: 'maintenance.vacuum', summary: 'Scheduled VACUUM complete' }); }, 'vacuum');
 scheduler.add(config.memory.compactCron, () => { log.event({ level: 'info', kind: 'memory.compact', summary: 'Memory compaction review scheduled', data: { pending: memory.list().filter((entry) => entry.tokens > config.memory.softLimitTokens).length } }); }, 'memory-compact');
-scheduler.add(config.provider.healthCheckCron, () => { modelRegistry.rebuild(configStore.snapshot().provider.healthDownCooldownMinutes); log.event({ level: 'info', kind: 'provider.health', summary: 'Provider registry health refreshed', data: { aliases: modelRegistry.aliases() } }); }, 'provider-health');
 scheduler.add(config.mcp.healthCheckCron, () => mcp.reconcile(), 'mcp-health');
+// provider-health 不在这里注册，它要用 `rebuildModels`（见那一行）。
 const promptAssembler = new PromptAssembler();
 const promptDocuments = new PromptDocuments(db, config.memory.dir);
 promptDocuments.ensure();
@@ -325,6 +325,20 @@ const rebuildModels = (): void => { const live = configStore.snapshot(); modelRe
   // 一个可用别名都不剩 = 所有 provider 都下线了（docs/10 §6 all_providers_down）。用户侧的表现
   // 是每一轮都以 model alias unavailable 失败，而运维那边只有一条 config.invalid 躺在日志里。
   if (!modelRegistry.aliases().length) alerts.fire('all_providers_down', '没有任何可用的模型别名：所有 provider 都不可用或未配置'); log.setSecrets([process.env.BOT_TOKEN ?? '', process.env.LUOLI_MASTER_KEY ?? '', live.tools.web.searchApiKey, ...providers.allDecryptedKeys()]); };
+// 这个任务此前只调 `rebuild()`：一次探测都不发，于是「上游连上了但不返回」没有任何一处会记住，
+// 链首每一步都要重新熬满 `(maxRetries+1) × requestTimeoutMs`（logs/2026-08-18 的三轮各 363 秒，
+// 最后全部以「这一轮太久没有进展」收尾）。现在照 `docs/04 §5.3` 真的探一遍。
+// 走 `rebuildModels()` 而不是裸 `rebuild()`：那条尾巴还管 `all_providers_down` 与 `log.setSecrets`。
+// **注册点必须在 `rebuildModels` 之后**：cron 是构造即排期，而上面那几个 `await`（sandbox.probe
+// 要拉 docker）足够让它在 `const rebuildModels` 求值之前就到点 —— 那一次会以 TDZ 的
+// ReferenceError 收场，只在 `scheduler.failed` 里留一行，健康检查静静少跑一轮。
+scheduler.add(config.provider.healthCheckCron, async () => {
+  const outcomes = await runProviderHealthCheck({ db, models: modelRegistry, log, keyFor: (providerId) => { try { return providers.key(providerId); } catch { return null; } } },
+    { timeoutMs: PROVIDER_PROBE_TIMEOUT_MS, failuresToDown: PROVIDER_FAILURES_TO_DOWN });
+  rebuildModels();
+  log.event({ level: 'info', kind: 'provider.health', summary: 'Provider registry health refreshed',
+    data: { aliases: modelRegistry.aliases(), probed: outcomes.length, down: outcomes.filter((outcome) => outcome.state === 'down').map((outcome) => outcome.name) } });
+}, 'provider-health');
 const eventStreams = new EventStreamRegistry();
 const server = createServer({ config: configStore, db, operations, principals, archive, context, providers, modelCatalog, approvals: approval, rebuildModels, maintenance, ledger, restart: (reason) => restart(reason), events, log,
   memory, promptDocuments, skills, plugins, mcp, agents, tools: toolRegistry, customTools: customToolRepo, customToolManager: customTools, turnRegistry, sandbox, eventStreams, previewPrompt, dryRunAgent,

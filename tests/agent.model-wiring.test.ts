@@ -2,7 +2,7 @@ import { rmSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import type { LanguageModel } from 'ai';
 import { ArchiveRepository, OperationsRepository, closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
-import { AgentManager, AgentResultStore, ContextEngine, LogSink, PromptAssembler, PromptDocuments, QuotaGuard, ToolRegistry, UsageLedger, configSchema, runMainAgent, runSubAgent } from '@luoli/core';
+import { AgentManager, AgentResultStore, ContextEngine, LogSink, PromptAssembler, PromptDocuments, QuotaGuard, ToolRegistry, UsageLedger, configSchema, runMainAgent, runSubAgent, streamMainAgent } from '@luoli/core';
 import type { ApprovalBroker, Config, ModelRegistry } from '@luoli/core';
 import type { RuntimeTurnContext } from '@luoli/shared';
 
@@ -30,6 +30,9 @@ function info(modelId: string) {
 /** 只实现 runMainAgent 真正用到的那几个方法；其余留空，多用一个就会在类型上报出来。 */
 function registryFor(chains: Record<string, Array<{ model: ReturnType<typeof candidate>; info: ReturnType<typeof info> }>>): ModelRegistry {
   const down: string[] = [];
+  // 真注册表的这两个方法由 provider.health.test.ts 覆盖；这里只要行为一致：连续超时到阈值才标 down，
+  // 标了之后同一条链上的这个候选不再被尝试（`fallback-model` 的 `isDown`）。
+  const failures = new Map<string, number>();
   const fake = {
     chain: (alias: string) => chains[alias] ?? [],
     resolve: (alias: string) => (chains[alias] ?? chains.main!)[0]!.model as unknown as LanguageModel,
@@ -40,6 +43,14 @@ function registryFor(chains: Record<string, Array<{ model: ReturnType<typeof can
     aliasOf: (modelId: string, prefer?: string) => Object.entries(chains).find(([alias, chain]) => chain.some((entry) => entry.info.modelId === modelId) && (!prefer || alias === prefer))?.[0]
       ?? Object.entries(chains).find(([, chain]) => chain.some((entry) => entry.info.modelId === modelId))?.[0] ?? null,
     markProviderDown: (modelId: string) => { down.push(modelId); },
+    isDown: (entry: { id: string }) => down.includes(entry.id),
+    recordFailure: (entry: { id: string }, _reason: string, limit: number) => {
+      const count = (failures.get(entry.id) ?? 0) + 1;
+      failures.set(entry.id, count);
+      if (count < limit) return false;
+      down.push(entry.id);
+      return true;
+    },
     down,
   };
   return fake as unknown as ModelRegistry;
@@ -228,6 +239,38 @@ describe('model wiring through prepareStep', () => {
     await runMainAgent(turn, { ...dependencies, registry });
     const rows = db.prepare('SELECT model_id AS modelId,model_alias AS alias FROM usage_ledger').all() as Array<{ modelId: string; alias: string }>;
     expect(rows).toEqual([{ modelId: 'second', alias: 'main' }]);
+    closeDatabase(db);
+  });
+
+  /**
+   * 回归：**吐过内容之后被 abort，流必须抛。** AI SDK 把步骤级失败与 abort 吞进内部 onError，
+   * `result.stream` 照常正常结束、`result.text` 还是上一步的正文 —— 投递侧于是看不出这一轮是断的，
+   * `bot.ts` 会照 committed 收尾（logs/2026-08-18 · B8F92Z：600 秒到点 abort，3 分钟后
+   * `turn.end turn committed`）。这一条盯 runtime 这一侧：流耗尽时那次「这一轮是不是断的」检查
+   * 真的跑到了，而且已经吐出去的内容一个字不少。
+   */
+  it('turns an abort that arrived after some text into a real stream error', async () => {
+    const { db, turn, dependencies } = harness('agent-stream-abort');
+    const controller = new AbortController();
+    Object.assign(turn, { abortSignal: controller.signal });
+    const streaming = { model: { ...candidate('m1', () => ok), doStream: async () => ({ stream: new ReadableStream({
+      start(target) {
+        target.enqueue({ type: 'stream-start', warnings: [] });
+        target.enqueue({ type: 'text-start', id: '1' });
+        target.enqueue({ type: 'text-delta', id: '1', delta: '先查一下。' });
+        target.enqueue({ type: 'text-end', id: '1' });
+        target.enqueue({ type: 'finish', finishReason: ok.finishReason, usage: ok.usage });
+        target.close();
+      },
+    }) }) } as ReturnType<typeof candidate>, info: info('m1') };
+    const result = await streamMainAgent(turn, { ...dependencies, registry: registryFor({ main: [streaming] }) });
+    // 被 abort 的那一轮 `result.text` 自己也会拒绝，`final` 跟着拒绝 —— `bot.ts` 的中断分支
+    // 一定会挂一个 handler（`void generated.final.catch()`），这里照做，否则是一条无人接的 rejection。
+    void result.final.catch(() => undefined);
+    const chunks: string[] = [];
+    // 第一个 chunk 一到就 abort：这正是 `turnTimeoutMs` 那条 setTimeout 干的事（reason 恒为 'timeout'）。
+    await expect((async () => { for await (const chunk of result.stream) { chunks.push(chunk); controller.abort('timeout'); } })()).rejects.toThrow('timeout');
+    expect(chunks.join('')).toBe('先查一下。');
     closeDatabase(db);
   });
 });

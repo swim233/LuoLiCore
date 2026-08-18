@@ -74,6 +74,48 @@ describe('Telegram reply pacing', () => {
     expect(calls.filter((call) => call.kind === 'edit')).toHaveLength(1); // 只有收尾那一次
     expect(calls.at(-1)!.text).toBe('一二三四五六');
   });
+
+  /**
+   * 回归：typing 曾是 4 秒一发的 fire-and-forget，谁都不管上一次落地没有。而群聊的 API 预算是
+   * `telegram.throttle.perChatPerMinute`（默认 20/分钟），4 秒一次已经是 15/分钟 —— 同一个群里两轮
+   * 并行就超了预算，多出来的每一条都排在队里，**并且排在真正的消息前面**。实测 logs/2026-08-18：
+   * 19:13:03 起每分钟准点吐 20 条 sendChatAction，而这一轮的收尾编辑压在队尾，轮次早在 19:13:03
+   * 就被 `turnTimeoutMs` 掐了，用户又等了 3 分钟才看到最后一次编辑。
+   */
+  it('typing 排不起队：上一拍还没落地就跳过这一拍', async () => {
+    vi.useFakeTimers();
+    try {
+      const releases: Array<() => void> = [];
+      let ticks = 0;
+      let inFlight = 0;
+      let peak = 0;
+      let first = true;
+      const api = {
+        sendMessage: () => Promise.resolve({ message_id: 1, date: 0 }),
+        editMessageText: () => Promise.resolve(true),
+        // 第一次是 `consume` 自己 await 的那一发（进循环之前），让它当场落地；后面每一发都挂住，
+        // 模拟被 apiThrottler 压在队列里。
+        sendChatAction: () => {
+          if (first) { first = false; return Promise.resolve(true); }
+          ticks += 1;
+          inFlight += 1;
+          peak = Math.max(peak, inFlight);
+          return new Promise<boolean>((resolve) => releases.push(() => { inFlight -= 1; resolve(true); }));
+        },
+      };
+      const bot = { api } as unknown as Bot;
+      let open!: () => void;
+      const gate = new Promise<void>((resolve) => { open = resolve; });
+      const stream = (async function* () { yield '在查'; await gate; })();
+      const consuming = new TelegramOutput(bot, 'chat', { ...options, replyDelayMs: 0, bufferMs: 0 }, undefined, Date.now()).consume(stream);
+      await vi.advanceTimersByTimeAsync(21_000); // 5 拍
+      expect(ticks).toBe(1);
+      expect(peak).toBe(1);
+      for (const release of releases) release();
+      open();
+      await consuming;
+    } finally { vi.useRealTimers(); }
+  });
 });
 
 // `output.placeholderTexts` / `placeholderPick` / `placeholderIndex`：等待文案此前是写死的 `…`，

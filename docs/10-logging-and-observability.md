@@ -42,7 +42,7 @@ turn 01J8…                                     kind=turn.start / turn.end
 | `trigger.matched` / `trigger.skipped` | debug | reason |
 | `quota.check` | info | scope, spent, limit, decision |
 | `quota.exceeded` | warn | scope, subject, spent, limit |
-| `turn.queued` / `turn.start` / `turn.end` | info | key, initiator, role, steps, costUsd, state |
+| `turn.queued` / `turn.start` / `turn.end` | info（`turn.end` 断掉时 **warn**） | key, initiator, role, steps, costUsd, state。`turn cancelled/failed after partial delivery` = 已经吐过内容之后才断的那一路（[04 §5.3](./04-agents-and-providers.md)）：delta 提交了、状态不是 committed，`deliveredChars` 是留在屏幕上的字数 |
 | `turn.wrap_up` | **warn** | chars（最后一步没有正文，补跑了一次收尾；失败时带 error） |
 | `turn.no_final_text` | **warn** | streamedChars, messages（补跑也没救回来，回落到流里攒到的文本） |
 | `ctx.open` | debug | baseCommit, claimed, snapshotTokens, snapshotMsgs |
@@ -52,9 +52,9 @@ turn 01J8…                                     kind=turn.start / turn.end
 | `ctx.hardcap` | warn | step, tokensBefore/After |
 | `prompt.build` | debug | blockTokens{kernel,character,assist,catalog,pub,pri,runtime}, total |
 | `model.call` | info | alias, provider, modelId, in/out/cacheR/cacheW, ms, finishReason, costUsd, requestRef |
-| `model.error` | error/warn | alias, modelId, errorKind, status, retryAttempt, willFallback |
+| `model.error` | error/warn | alias, modelId, errorKind, status, retryAttempt, willRetry, willFallback。**每一次失败的尝试一行**（warn），整条链耗尽时再一行（error）。只落最后那一条时，「熬满三次超时再 fallback」在日志里就是一段什么都没有的空白 —— `logs/2026-08-18` 那 363 秒只有开头的 `turn.start` 与结尾的 `provider.fallback`，中间靠 `3 × requestTimeoutMs + 退避` 的算术反推 |
 | `provider.fallback` | warn | from, to, reason |
-| `provider.health` | info/warn | provider, state, ms |
+| `provider.health` | info/warn/**error** | provider, state, ms, failures, status。error = 这一次把 provider 判成了 `down`（[04 §5.3](./04-agents-and-providers.md)） |
 | `tool.call` | info | **input**（工具参数）, output, ms, ok；失败时 input + error。一个 span 只落一行，所以开始时的 `input` 与结束时的 `output` 是**合并**进同一行的 —— `LogSink.span().end()` 曾经用结束载荷整体顶掉开始那份，于是这一行只有 `output`，WebUI 的对话详情因此永远看不到工具输入（`tests/log.span.test.ts`） |
 | `tool.denied` | warn | tool, reason(role/rate/approval), role |
 | `tool.error` | warn | tool, errorKind, message |

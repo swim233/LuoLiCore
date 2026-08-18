@@ -4,6 +4,7 @@ import type { Sqlite } from '@luoli/db';
 import type { RuntimeTurnContext } from '@luoli/shared';
 import type { AgentDefinition, AgentManager, AgentRun } from './manager.js';
 import { type ModelRegistry, aliasModel } from './runtime.js';
+import { PROVIDER_FAILURES_TO_DOWN } from '../provider/health.js';
 import { SUBAGENT_KERNEL } from '../prompt/assembler.js';
 import type { QuotaGuard, QuotaReservation } from '../ledger/quota.js';
 import type { ToolExecutionContext, ToolRegistry } from '../tools/registry.js';
@@ -36,7 +37,15 @@ export async function runSubAgent(run: AgentRun, definition: AgentDefinition, ta
     ? aliasModel(dependencies.registry, alias, { maxRetries: dependencies.provider.maxRetries, retryBaseMs: dependencies.provider.retryBaseMs, retryMaxMs: dependencies.provider.retryMaxMs, abortSignal: turn.abortSignal,
       ...(dependencies.provider.requestTimeoutMs === undefined ? {} : { requestTimeoutMs: dependencies.provider.requestTimeoutMs }),
       ...(dependencies.provider.streamIdleTimeoutMs === undefined ? {} : { streamIdleTimeoutMs: dependencies.provider.streamIdleTimeoutMs }),
-      onFallback: (from, to) => dependencies.log.event({ level: 'warn', kind: 'provider.fallback', summary: `${from.id} → ${to.id}`, traceId: turn.turnId, data: { alias, agentRunId: run.id, from: from.id, to: to.id } }),
+      isDown: (candidate) => dependencies.registry.isDown(candidate),
+      // 与主 agent 同一条：每次失败落一行、只有超时计入连续失败（`docs/04 §5.3`）。子 agent 走的是
+      // 同一批 provider，漏在这里等于「主轮不再卡了，researcher 还在每一步熬满超时」。
+      onCandidateFailed: (candidate, failure) => {
+        dependencies.log.event({ level: 'warn', kind: 'model.error',
+          summary: `${candidate.id} 第 ${failure.attempt + 1} 次尝试失败：${failure.error instanceof Error ? failure.error.message : String(failure.error)}`.slice(0, 300),
+          traceId: turn.turnId, data: { alias, agentRunId: run.id, modelId: candidate.id, errorKind: failure.kind, status: failure.status, retryAttempt: failure.attempt, willRetry: failure.willRetry, willFallback: failure.willFallback, ms: failure.elapsedMs } });
+        if (failure.kind === 'timeout') dependencies.registry.recordFailure(candidate, failure.error instanceof Error ? failure.error.message : String(failure.error), PROVIDER_FAILURES_TO_DOWN);
+      },
       onUnavailable: (candidate, error) => dependencies.registry.markProviderDown(candidate.id, error instanceof Error ? error.message : 'authentication_failed'),
       onExhausted: (error) => dependencies.log.event({ level: 'error', kind: 'model.error', summary: error instanceof Error ? `${error.name}: ${error.message}`.slice(0, 300) : String(error).slice(0, 300), traceId: turn.turnId, data: { alias, agentRunId: run.id } }) })
     : dependencies.registry.resolve(alias);

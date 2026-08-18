@@ -224,3 +224,28 @@ describe('同一会话的多条消息并行成轮', () => {
     closeDatabase(db);
   });
 });
+
+/**
+ * 那个三元此前只看 `reservation` 是不是空，而额度关着时它恒为空 —— 于是每一轮都记一条
+ * `warn quota.exceeded`「Quota reservation rejected」而轮次照常开（logs/2026-08-18：31 轮里 30 条）。
+ * 排障时第一眼看到的就是它，而真正的故障在 363 秒后才落第一行。
+ */
+describe('额度这条警报只在真的被拒时响', () => {
+  it('quota.enabled=false 的一轮一条都不落', async () => {
+    const { bot, db } = await telegramFixture('tg-quota-off', {}, { onTurn: async () => '好' });
+    await bot.handleUpdate(privateUpdate(1, '你好'));
+    expect(db.prepare("SELECT COUNT(*) AS count FROM log_events WHERE kind IN ('quota.exceeded','quota.check')").pluck().get()).toBe(0);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM turns WHERE state='committed'").pluck().get()).toBe(1);
+    closeDatabase(db);
+  }, 20_000);
+
+  it('额度开着而预留被拒时照旧响，并且不开轮次', async () => {
+    const { bot, db } = await telegramFixture('tg-quota-rejected',
+      { quota: { enabled: true, requirePricing: false, minReserveUsd: 0.02, perUser: { daily: 0.001 } } },
+      { onTurn: async () => '好' });
+    await bot.handleUpdate(privateUpdate(1, '你好'));
+    expect(db.prepare("SELECT COUNT(*) AS count FROM log_events WHERE kind='quota.exceeded'").pluck().get()).toBe(1);
+    expect(db.prepare('SELECT COUNT(*) AS count FROM turns').pluck().get()).toBe(0);
+    closeDatabase(db);
+  }, 20_000);
+});

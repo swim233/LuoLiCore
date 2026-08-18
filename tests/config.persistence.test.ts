@@ -30,7 +30,10 @@ describe('配置持久化往返', () => {
     const db = openDatabase(path);
     // 先迁到 0004，写入旧格式，再迁到最新，模拟已在运行的实例升级。
     migrateDatabase(db, 'packages/db/migrations');
-    db.prepare('DELETE FROM __drizzle_migrations WHERE name >= ?').run('0005');
+    // **只回退 0005 这一条**：下面那行 `DROP TABLE app_kv` 回退的正是它的建表，而把 0005 之后的
+    // 记账一起删掉、schema 却不回退，等于让那些迁移在已经生效的库上重跑一次 —— 幂等的（`CREATE TABLE
+    // IF NOT EXISTS`）没事，`ALTER TABLE ADD COLUMN`（0009）会直接 duplicate column name。
+    db.prepare('DELETE FROM __drizzle_migrations WHERE name = ?').run('0005_app_kv.sql');
     db.exec('DROP TABLE IF EXISTS app_kv');
     const now = Date.now();
     for (const [key, value] of [['perChat.modelAlias.chat:-100', '"high"'], ['plugin.demo.counter', '7']] as const) {

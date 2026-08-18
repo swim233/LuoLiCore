@@ -565,7 +565,30 @@ fallbackModel(chain, cfg) 语义：
   少了这两条时的表现见 `logs/2026-08-17`：7 个轮次只有 `turn.start` 没有 `turn.end`，最后一条日志
   都停在工具调用之后那一步 model 调用上，用户等到自己去重启进程。
 - **流式已输出部分内容后失败**：不切模型（避免重复内容），直接把已有内容作为最终回复 + 追加「(生成中断)」，turn 记 `failed` 但 delta **照常提交**（用户已经看到内容了，上下文必须与用户所见一致）。这是 §1 「delta 不提交」规则的唯一例外，必须在实现中显式处理。
+  - 被 abort 的那一路（`/cancel`、`concurrency.turnTimeoutMs`）记 `cancelled` 而不是 `failed`：用户点的取消不是故障，记成 failed 会把它算进 `consecutive_turn_failures`。两者都要带上那次提交的 `commit_id`。
+  - **这一路必须由流自己抛出来。** 步骤级失败与轮次 abort 都不会让 AI SDK 的 `result.stream` 抛（它把错误吞进内部 onError，流照常正常结束，`result.text` 还是上一步的正文），所以 `streamMainAgent` 在流耗尽时显式检查一次「这一轮是不是断的」并抛出去 —— 不抛的话投递侧看不出区别，轮次会以 committed 收尾，用户既没有「(生成中断)」也没有超时提示（实测 `logs/2026-08-18` · B8F92Z：600 秒到点 abort，3 分钟后 `turn.end turn committed`）。
+  - 收尾那一条消息**仍然要发出去**，所以一轮的墙钟可以超出 `turnTimeoutMs` 一个 API 调用的时间（群聊里由 `telegram.throttle.perChatPerMinute` 的队列决定）。这是有意的：内容已经在屏幕上，标记必须跟上去。
 - 健康检查：每 `provider.healthCheckCron`（默认 10 分钟）对启用的 provider 发一次 1-token 探测；连续失败 3 次标 `health_state='down'`，WebUI 显示并从 fallback 链临时跳过（`down` 状态 30 分钟后自动重试）。
+  实现在 `packages/core/src/provider/health.ts`，计数落 `providers.health_fail_count`（0009）。三条补充：
+  - **判据是「上游还答不答」，不是「这个模型这次答得对不对」**：超时 / 网络错 / 5xx 计入连续失败；
+    401/403 当场标 `down`（与调用路径的 `onUnavailable`、WebUI「测试连接」一致）；**其余 4xx 不计**，
+    只记一条 warn —— 上游答了话就说明它活着，拿探测模型的参数问题（`max_tokens` 下界、模型名换了）
+    去把整个 provider 判死会误伤 —— 而且**答了话就把计数归零**（否则「探测常年 400 + 调用路径偶尔
+    攒一次超时」几天下来也能凑够三次）。到阈值之前只累计，不动 `health_state`：`health_checked_at`
+    是那 30 分钟冷却的起点，提前推它会让冷却算错。
+  - **调用路径上的请求超时喂同一个计数器**（`fallback-model` 的 `onCandidateFailed`），
+    因为 10 分钟一次的探测最坏还要放 10 分钟的轮次去踩坑。只有超时计入：5xx/429 是上游在说话，
+    链内 fallback 当场换人、代价是一次往返，而「连上了但不返回」每一步都要熬满
+    `(maxRetries+1) × requestTimeoutMs`。**调用方自己 abort 的那次不算**（`/cancel`、`turnTimeoutMs`
+    都是 abort，日志里也是一条 timeout —— 记上去等于把健康的 provider 一路推到 `down`）。
+  - 判成 `down` 的候选在**同一次调用**就被跳过（`isDown`），不等下一次 `rebuild()`；
+    但**最后一个候选永不跳过** —— 全链都 down 时宁可发一次注定失败的请求，也不能一个都不发，
+    那样调用方拿到的是「模型没话说」而不是一个能看懂的上游故障。
+  - 探测**要花钱、也依赖至少配了一个启用模型**（这两点与 §5.4「测试连接」刻意相反：那一个用模型目录
+    接口，不花钱、不管模型配没配）。一个启用模型都没有的 provider 不在任何链里，跳过不探。
+  少了这一条时的表现见 `logs/2026-08-18`：ksm-api 变成黑洞之后，链首每一步都要重新熬满
+  `3 × requestTimeoutMs`（实测 363 秒 × 每一步），而一轮只有 `concurrency.turnTimeoutMs`（600 秒）
+  —— 三个轮次全部以「这一轮太久没有进展」收尾，而库里那行 `health_state` 直到最后仍是 `up`。
 
 ### 5.4 密钥管理
 
