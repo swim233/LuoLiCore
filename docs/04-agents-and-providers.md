@@ -383,7 +383,7 @@ report_progress: tool({
 
 ### 4.3 父 agent 侧如何应答 `ask`
 
-父 agent 正处在 `spawn_agent` 的 `execute` 里（同一个 JS 事件循环），不可能「在工具执行中途再跑一次模型 step」。因此 `ask` 的应答按顺序降级 —— **任何一级都不伪造答复**（[16 §5](./16-remediation-plan.md)）：
+父 agent 正处在 `spawn_agent` 的 `execute` 里（同一个 JS 事件循环），不可能「在工具执行中途再跑一次模型 step」。因此 `ask` 的应答按顺序降级 —— **任何一级都不伪造答复**（[16 §5](./reviews/16-remediation-plan.md)）：
 
 1. **独立仲裁调用**（默认启用，`agent.askArbiter: true`）：用 `low` 档模型发起一次**独立的、无工具、只走一步**的调用（`packages/core/src/agent/ask-arbiter.ts`），输入 = 提问的子 agent 名 + 它的 task + 问题 + options，输出 = 答复文本。记 `answer.source='arbiter'`。
    - 硬期限 `agent.askTimeoutMs`，与本轮 `abortSignal` 合成一个信号：**取消与超时分开报**，否则用户按了 `/cancel` 却看到「仲裁超时」，会去调一个不相干的配置。
@@ -395,7 +395,7 @@ report_progress: tool({
 
 **没有「转人工」这一级。** `agent.askEscalateToUser` 仍在未接线白名单里：它要的是一条阻塞式人机通道
 （发 inline 选项 → 等人点 → 把结果回灌给正在等的子 agent），而那条通道整体不存在 —— 挡着它的
-缺口与 inline keyboard 审批是同一个（[25 §8](./25-round7-remediation.md)）。打开这个键时，仲裁失败
+缺口与 inline keyboard 审批是同一个（[25 §8](./reviews/25-round7-remediation.md)）。打开这个键时，仲裁失败
 会多记一条带 `escalationRequested: true` 的 `agent.ask_unarbitrated` warn，**不会真的去问人**。
 
 所有 `ask/answer` 都落 `agent_messages` 表并进日志（`kind='agent.ask'` / `'agent.answer'`）。
@@ -609,7 +609,7 @@ Anthropic 连这个都没有，定价、输入模态、可用思考档位没有�
 
 第 3 条不是保守，是必需：990 个跨 provider 同名模型里 **649 个输入价不同、479 个上下文窗口不同**
 （`deepseek/deepseek-v4-pro` 在 16 家网关的输入价从 $0.435 到 $1.75）。随便挑一家的价填上去，
-配额就按一个与账单无关的数字算 —— 「摘除比伪造安全」（[16 §5](./16-remediation-plan.md)）。
+配额就按一个与账单无关的数字算 —— 「摘除比伪造安全」（[16 §5](./reviews/16-remediation-plan.md)）。
 匹配前会剥掉 `:free` / `@版本` / `-latest` / 日期后缀再试一次，命中时 `normalized=true`，
 界面显示实际匹配到的那个 key。
 

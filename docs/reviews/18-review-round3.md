@@ -1,5 +1,10 @@
 # 18 · 复审报告（第三轮）
 
+> ❄️ **已冻结（2026-08-15 快照）** —— 本文只记录当轮的发现与整改，**不再更新**。文中所有
+> 「未实现 / 未接线 / 仍然开着的」都是**当时**的状态，不代表现在；当前状态见
+> [`00-state.md`](../00-state.md)。条目编号（`V-SSRF-01` 之类）是 240 处源码注释的溯源凭据，
+> **不得重编号、不得删除**。
+
 > 前置：[15-gap-review.md](./15-gap-review.md)（第一轮）、[16-remediation-plan.md](./16-remediation-plan.md)（R0–R6）、[17-followup-review.md](./17-followup-review.md)（第二轮，4 P0 / 13 P1 / 13 P2）。
 > 本轮范围：全量重读 `packages/` + `apps/`（6170 行 TypeScript，较上轮 +543），逐条复验第二轮 30 项发现，并做独立的新问题排查。
 > 基线：`tsc --noEmit` 零错误；`vitest run` **69 passed / 35 files**（上轮 52 / 35，首轮 20 / 11）。
@@ -102,7 +107,7 @@ for (const level of [2, 1]) {
 
 **缺陷 1 · `role='tool'` 的消息不再携带 `tool-result` part。** `contextMessages()`（`runtime.ts:134`）直接把 `{role, content: parts}` 交给 AI SDK。`{role:'tool', content:[{type:'text',…}]}` 不是合法的 `ModelMessage`——tool 角色的 content 必须是 `tool-result` 数组，Anthropic / OpenAI 都会 400。
 
-**缺陷 2 · 孤儿 `tool-result`。** level 2 应用而 level 1 未应用时，`tool_call` 被降级成纯文本（`toolCallId` 随之消失），配对的 `tool_result` 却原样保留 —— 这正是 [02 §5.3](./02-context-engine.md) 红线 #6 要防的情况，只是这次不是从窗口边界产生，而是从**分级降级**产生。
+**缺陷 2 · 孤儿 `tool-result`。** level 2 应用而 level 1 未应用时，`tool_call` 被降级成纯文本（`toolCallId` 随之消失），配对的 `tool_result` 却原样保留 —— 这正是 [02 §5.3](../02-context-engine.md) 红线 #6 要防的情况，只是这次不是从窗口边界产生，而是从**分级降级**产生。
 
 **实测**（临时用例，已删除）：4 轮对话、每轮 `tool_call` + `tool_result` + 回答，`limit.tokens = 5000`、`minKeepTurns = 3`：
 
@@ -165,7 +170,7 @@ for (const m of materialized.messages) {
 
 **位置**：`packages/core/src/context/engine.ts:83-86`（开门时认领）、`packages/db/src/context.ts:171`（提交时前移水位）、`packages/db/src/archive.ts:99-111`（`claimBackground`）
 
-第二轮把水位前移从 `openTurn` 移到了 `insertTurn` 事务内——这解决了「失败轮次吃掉背景消息」（N-CTX-04），但把 [02 §4](./02-context-engine.md) 承诺的另一半打破了：
+第二轮把水位前移从 `openTurn` 移到了 `insertTurn` 事务内——这解决了「失败轮次吃掉背景消息」（N-CTX-04），但把 [02 §4](../02-context-engine.md) 承诺的另一半打破了：
 
 > `claim_watermark` 是已折入上下文的最大原始 `messages.id`。并发场景下 A 先认领 1..10 并前移水位，B 随后只认领 11..12 —— **不会重复**。
 
@@ -227,7 +232,7 @@ export const untrusted = (source: string, text: string): string =>
   `<untrusted-content source="${source.replaceAll('"', '')}">\n${text}\n</untrusted-content>`;
 ```
 
-第二轮 §6 建议同步修改文档与代码，结果**只改了文档**。[05 §7](./05-tools-and-permissions.md) 第 344 行现在写着：
+第二轮 §6 建议同步修改文档与代码，结果**只改了文档**。[05 §7](../05-tools-and-permissions.md) 第 344 行现在写着：
 
 > 所有不可信内容使用**随机 nonce** 标识的边界注入；正文**必须先转义**任何 `</untrusted-content` 闭合片段，来源属性也必须转义，确保内容不能提前闭合边界。
 
@@ -285,7 +290,7 @@ PROBE-C 群聊触发消息渲染 = [{"type":"text","text":"[Alice 02:26] <untrus
 
 **影响**：群聊是本项目的主场景（设计目标里「同一群聊共享一个上下文」）。模型被明确指示忽略这段内容里的工具调用请求，合理的表现就是拒绝执行或降级成空谈。而且由于 T-SEC-01 未修，这个包裹**还是可以被用户一行 `</untrusted-content>` 打破的**——既挡住了正常使用，又挡不住攻击。
 
-另外 [08 §多模态](./08-telegram-adapter.md) 第 261 行只为**文件抽取内容**示范了这个包裹，普通聊天消息从来不在其中。
+另外 [08 §多模态](../08-telegram-adapter.md) 第 261 行只为**文件抽取内容**示范了这个包裹，普通聊天消息从来不在其中。
 
 **修复**：区分「不可信数据」和「他人发言」两种语义，触发消息绝不包裹。
 
@@ -305,7 +310,7 @@ if (!isPrivate) {
 
 | 编号 | 位置 | 问题 | 修复要点 |
 |---|---|---|---|
-| **T-CFG-01** | `config/schema.ts` 全域 | 第二轮 `N-CFG-02` 未推进：重新统计仍有 **47 个配置项从不被读取**（`dropPendingOnStart`、`cancel.commitPartial`、`agent.maxConcurrentSubagents`、`agent.askArbiter`、`agent.askEscalateToUser`、`alerts.*`、`telegram.notifyEdits`、`output.parseMode`、`output.flushOnSentence`、`output.typingWhileWorking`、`output.placeholderAfterMs`、`output.maxMentions`、`trigger.coalesceSameUserMs`、`trigger.cooldownMsPerUser`、`logs.gzipAfterDays`、`logs.redactPatterns`、`quota.warnAtRatio`、`quota.onExceeded.notifyOwner`、`quota.perTurn.maxToolCalls`、`quota.perTurn.maxDurationMs`、`memory.pubWriteRequiresApproval`、`memory.autoApplyCompaction`、`memory.requireSourceTag`、`tools.fs.allowHostFsForOwner`、`tools.web.summarizeWithAlias`、`tools.tg.maxExtraMessagesPerTurn`、`tools.tg.maxFileSendMb`、`tools.archive.defaultSearchLimit`、`prompt.includeToolCatalog`、`prompt.runtimeBlock.showQuota`、`context.cacheCommits`、`context.rebase.markMeta`、`context.background.showUsername`、`context.background.includeNonText`、`db.ftsTokenizer`、`provider.healthDownCooldownMinutes`、`provider.requestTimeoutMs`、`provider.streamIdleTimeoutMs`、`approval.allowInitiator`、`webui.publicUrl`、`webui.enabled`、`skills.enabled`、`plugins.enabled`、`plugins.watch`、`media.maxImagesPerTurn`、`media.groupDebounceMs`、`media.stickerAsImage`、`media.downloadVoice`）；`docs/11` 中 `🚧` 标注数为 **0** | 逐项决策：接线 / 从 schema 删除 / 保留并在 [11](./11-config-reference.md) 标 `🚧` 且 WebUI 置灰。**并加 CI 断言**：每个叶子键必须在 `packages/`、`apps/` 至少被引用一次，否则须列入显式 `KNOWN_UNIMPLEMENTED` 白名单。没有这条断言，这一项每轮都会原样留下 |
+| **T-CFG-01** | `config/schema.ts` 全域 | 第二轮 `N-CFG-02` 未推进：重新统计仍有 **47 个配置项从不被读取**（`dropPendingOnStart`、`cancel.commitPartial`、`agent.maxConcurrentSubagents`、`agent.askArbiter`、`agent.askEscalateToUser`、`alerts.*`、`telegram.notifyEdits`、`output.parseMode`、`output.flushOnSentence`、`output.typingWhileWorking`、`output.placeholderAfterMs`、`output.maxMentions`、`trigger.coalesceSameUserMs`、`trigger.cooldownMsPerUser`、`logs.gzipAfterDays`、`logs.redactPatterns`、`quota.warnAtRatio`、`quota.onExceeded.notifyOwner`、`quota.perTurn.maxToolCalls`、`quota.perTurn.maxDurationMs`、`memory.pubWriteRequiresApproval`、`memory.autoApplyCompaction`、`memory.requireSourceTag`、`tools.fs.allowHostFsForOwner`、`tools.web.summarizeWithAlias`、`tools.tg.maxExtraMessagesPerTurn`、`tools.tg.maxFileSendMb`、`tools.archive.defaultSearchLimit`、`prompt.includeToolCatalog`、`prompt.runtimeBlock.showQuota`、`context.cacheCommits`、`context.rebase.markMeta`、`context.background.showUsername`、`context.background.includeNonText`、`db.ftsTokenizer`、`provider.healthDownCooldownMinutes`、`provider.requestTimeoutMs`、`provider.streamIdleTimeoutMs`、`approval.allowInitiator`、`webui.publicUrl`、`webui.enabled`、`skills.enabled`、`plugins.enabled`、`plugins.watch`、`media.maxImagesPerTurn`、`media.groupDebounceMs`、`media.stickerAsImage`、`media.downloadVoice`）；`docs/11` 中 `🚧` 标注数为 **0** | 逐项决策：接线 / 从 schema 删除 / 保留并在 [11](../11-config-reference.md) 标 `🚧` 且 WebUI 置灰。**并加 CI 断言**：每个叶子键必须在 `packages/`、`apps/` 至少被引用一次，否则须列入显式 `KNOWN_UNIMPLEMENTED` 白名单。没有这条断言，这一项每轮都会原样留下 |
 | **T-MEM-01** | `memory/store.ts:61`、`bot.ts:309` | `MemoryStore.#pending` 只在成功路径 `flush()` 时清理（`bot.ts:309` 在 `try` 块内）。轮次失败/取消时该 turn 的待写记忆永久滞留在 Map 里 | 与 `N-MEM-02` 同款处理：新增 `discard(turnId)`，在 `bot.ts` 的 `finally` 里与 `releaseTurn` 并列调用 |
 | **T-AGENT-01** | `runtime.ts:265` | 流式路径把 `agents.finish(mainRun, text)` 挂在 `final.then()` 上；`bot.ts:299` 在 `consumed.interrupted` 时执行 `void generated.final.catch(…)` 并继续提交。此时 `mainRun` 既不会 `finish` 也不会 `fail`，`agent_runs` 行滞留在 `running` | 中断路径显式 `agents.fail(mainRun, 'stream_interrupted')`；或把收尾移到 `bot.ts` 的 `finally` |
 | **T-CTX-03** | `runtime.ts:255-256` vs `bot.ts:305` | `onStepEnd` 向 `turn.delta` 追加工具消息；流式中断后 `final` 仍在后台推进，可能在 `commitTurn()` 已经 `[...messages]` 取快照之后继续 `appendDelta`。这些消息不会报错，而是**被静默丢弃** | `commitTurn` 入口冻结 delta（置 `turn.committed = true`，`appendDelta` 检测到即抛错），与 `ordinal is assigned only during commit` 保持同一风格 |
@@ -362,16 +367,16 @@ if (!isPrivate) {
 
 ## 6. 文档侧
 
-第二轮 §6 列出的 8 项，已完成 6 项：[07](./07-skills-plugins-mcp.md) 的 MCP 示例已按 `@modelcontextprotocol/sdk` 改写（`experimental_createMCPClient` 出现次数归零）、[02 §5.3](./02-context-engine.md) 补了终止性不变式、[02 §4](./02-context-engine.md) 明确了水位时机、[05 §7](./05-tools-and-permissions.md) 补了 nonce 与转义要求、[09](./09-webui.md) 标注了只读页面、[05 §3.1](./05-tools-and-permissions.md) 补了 `edit_file` 风险说明。
+第二轮 §6 列出的 8 项，已完成 6 项：[07](../07-skills-plugins-mcp.md) 的 MCP 示例已按 `@modelcontextprotocol/sdk` 改写（`experimental_createMCPClient` 出现次数归零）、[02 §5.3](../02-context-engine.md) 补了终止性不变式、[02 §4](../02-context-engine.md) 明确了水位时机、[05 §7](../05-tools-and-permissions.md) 补了 nonce 与转义要求、[09](../09-webui.md) 标注了只读页面、[05 §3.1](../05-tools-and-permissions.md) 补了 `edit_file` 风险说明。
 
 仍需处理：
 
 | 文档 | 修改 | 原因 |
 |---|---|---|
-| [11](./11-config-reference.md) | 为 T-CFG-01 的 47 个键加 `🚧 未实现` | 唯一没动的一项 |
-| [02 §5.3](./02-context-engine.md) | 补分级裁剪的**结构不变式**：降级只清空载荷，必须保留 part 的 `type` 与 `toolCallId` | T-CTX-01 的根因同样是规格只描述了「替换为 `[已省略…]`」而没说明结构约束 |
-| [02 §4](./02-context-engine.md) | 明确认领的**独占性**与水位前移是两件事：认领在开门时独占，水位在提交时前移，失败时归还 | 现规格把两者混为一谈，导致修好一个就破坏另一个 |
-| [06](./06-prompt-and-memory.md) / [08](./08-telegram-adapter.md) | 明确普通聊天消息**不使用** `untrusted-content` 边界；如需标记他人发言，另立标记与内核措辞 | T-TG-01 源于实现自行扩大了该边界的适用范围 |
+| [11](../11-config-reference.md) | 为 T-CFG-01 的 47 个键加 `🚧 未实现` | 唯一没动的一项 |
+| [02 §5.3](../02-context-engine.md) | 补分级裁剪的**结构不变式**：降级只清空载荷，必须保留 part 的 `type` 与 `toolCallId` | T-CTX-01 的根因同样是规格只描述了「替换为 `[已省略…]`」而没说明结构约束 |
+| [02 §4](../02-context-engine.md) | 明确认领的**独占性**与水位前移是两件事：认领在开门时独占，水位在提交时前移，失败时归还 | 现规格把两者混为一谈，导致修好一个就破坏另一个 |
+| [06](../06-prompt-and-memory.md) / [08](../08-telegram-adapter.md) | 明确普通聊天消息**不使用** `untrusted-content` 边界；如需标记他人发言，另立标记与内核措辞 | T-TG-01 源于实现自行扩大了该边界的适用范围 |
 
 ---
 
@@ -439,7 +444,7 @@ if (!isPrivate) {
 | T1 | `T-CFG-01`、`T-MEM-01`、`T-AGENT-01`、`T-CTX-03` | `config.test.ts`、`memory.operations.test.ts`、`subagent.test.ts`、`context.test.ts` |
 | P2 | `T-SEC-02`、`T-TOOL-01`、`T-EXT-01`、`T-SEC-03` | `security.test.ts`、`plugin.runtime.test.ts`、`web.test.ts`、`approval.rules.test.ts` |
 
-`T-CFG-01` 采用显式分类而非假实现：`KNOWN_UNIMPLEMENTED_CONFIG_KEYS` 当前列出 66 个仍未接线的 schema 叶子；CI 会遍历默认配置的全部叶子，要求每项要么存在运行时源码引用，要么进入该白名单，并要求白名单与 [11](./11-config-reference.md) 逐项同步。
+`T-CFG-01` 采用显式分类而非假实现：`KNOWN_UNIMPLEMENTED_CONFIG_KEYS` 当前列出 66 个仍未接线的 schema 叶子；CI 会遍历默认配置的全部叶子，要求每项要么存在运行时源码引用，要么进入该白名单，并要求白名单与 [11](../11-config-reference.md) 逐项同步。
 
 最终验证：
 

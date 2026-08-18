@@ -146,7 +146,7 @@ function resolveJailed(p: string, root: string): string {
 | `search_messages` | limited | `{query, from?, after?, before?, kind?, limit?}` — FTS5 检索。`from` 同时认 tg 用户 id 与 `@username`（前导 `@` 会被抹掉）；`after`/`before` 是 ISO 时间，解析不出来交回 `invalid_time_filter` 而不是当没传；`kind` 精确匹配消息类型。四个过滤条件都写成 `@x IS NULL OR …` 的常量 SQL 而不是按传了哪几个拼串：语句文本固定才吃得到预编译缓存，而「没传的参数不出现在 SQL 里」还得在绑定侧同步剔掉，漏一处就是一个运行时的 `missing named parameter`。**强制**限定当前 context key 的 chat。`query` 由模型写，绝不能原样进 `MATCH`：FTS5 的 `\|` `"` `*` `:` `-` `^` `()` 和 AND/OR/NOT/NEAR 都是语法，模型写一句 `名字\|我是\|叫\|谁` 就把整次调用打成 `fts5: syntax error`，它只能瞎改参数重试。`archiveQuery()` 先切词：有 ≥3 字的词就逐个加引号 OR 起来走 FTS（trigram 匹配不了更短的词），一个都没有（中文两字词几乎全在这一档）就退回 LIKE，且用最长的那个词而不是原串 —— 原串里还带着运算符，`LIKE '%名字\|我是%'` 永远匹配不到东西 |
 | `read_messages` | limited | 「按顺序读取聊天记录」：`{anchor?, direction?, limit?}`。`anchor` 可为 message id（`12841` 或 `#12841`）或 ISO 时间；`direction: 'before'\|'after'\|'around'`（默认 `before`，`around` 两侧各一半）；不给 `anchor` 就是最近若干条；默认 limit 50、上限 200。**一律按 id 升序交回** —— `recent()` 那种「最新在最前」会让 `direction:'after'` 读出来的一段反着念。数字串一律按 id 认而不是当日期：模型十有八九把 `#12841` 里的数字当字符串递过来，而 `Date.parse('12841')` 在某些运行时会解析成一个年份，于是它读到一段完全不相干的记录还以为那就是自己要的位置。解析不出来交回 `invalid_anchor`，**不悄悄退回「最近 N 条」** |
 | `get_message` | limited | `{messageId}` — 单条详情（含附件元数据、回复链） |
-| `admin_search_messages` | **owner** | 跨全部 chat 检索；返回结果附 `chat_id`。**不给** `search_messages` 那组过滤参数：`adminSearchAll` 不认它们，而收下一个参数再默默忽略比没有这个参数更糟 —— 模型会以为自己已经按人过滤过了（「摘除比伪造安全」，[16 §5](./16-remediation-plan.md)） |
+| `admin_search_messages` | **owner** | 跨全部 chat 检索；返回结果附 `chat_id`。**不给** `search_messages` 那组过滤参数：`adminSearchAll` 不认它们，而收下一个参数再默默忽略比没有这个参数更糟 —— 模型会以为自己已经按人过滤过了（「摘除比伪造安全」，[16 §5](./reviews/16-remediation-plan.md)） |
 | `context_stats` | limited | 当前上下文窗口的**摘要**（窗口 ordinal 区间 / 消息数 / tokens / 背景认领水位，等价 `/ctx`），供模型自我判断是否该收敛。**不含逐条历史** —— 带上整份之后输出会被 `tools.exec.maxOutputBytes` 从中间截断，模型拿到的是一段掐断的 JSON（前半是最早的历史、后半是 commit 列表），既烧 token 又没有信息（docs/27 · R-03）。逐条时间线在 WebUI 的会话页 |
 
 返回格式（`search_messages` / `read_messages` / `admin_search_messages` 统一，便于模型引用）：
@@ -477,13 +477,13 @@ Telegram 不会看到按钮；有 WebUI 连着时调用按 `ttlMs` 等待，而�
 **没有裁决通道时当场拒绝，不等。** `request()` 先看 `EventBus.channelCount`——即当前挂着的 SSE 连接数。
 为零就直接返回 `{approved:false, hint:'…当前没有可用的审批通道…'}` 并记一条 `approval.unavailable`，
 **不插 pending 行、不 await**。否则这一轮会白占 `concurrency` 槽、配额预留和 `turnTimeoutMs` 预算干等满
-`ttlMs`（默认 180 秒），而 Telegram 侧一个字都没有 —— 这正是 [20](./20-review-round5.md) §0.0 裁决要消灭的形态。
+`ttlMs`（默认 180 秒），而 Telegram 侧一个字都没有 —— 这正是 [20](./reviews/20-review-round5.md) §0.0 裁决要消灭的形态。
 判据必须是「裁决通道」而不是「订阅者」：进程自己的 `config.changed` 订阅者常驻，拿 `subscriberCount`
-判断会让这段永远走不到（[22](./22-review-round6.md) · `D-APPR-01`、[24](./24-review-round6-verification.md) · `R-APPR-01`）。
+判断会让这段永远走不到（[22](./reviews/22-review-round6.md) · `D-APPR-01`、[24](./reviews/24-review-round6-verification.md) · `R-APPR-01`）。
 **发起人回执**（第七轮补上）：挂起 pending 行之后，立刻往**发起人所在的会话**发一句
 「`<工具>` 是<风险>操作，需要 owner 在 WebUI 里批准，N 秒内没人处理就会自动拒绝」。此前有通道时
 这一轮会静静挂满 `ttlMs`（默认 180 秒），Telegram 那边一个字都没有 —— 用户看到的是 bot 收了消息
-然后沉默三分钟（[22](./22-review-round6.md) · `D-APPR-01`）。
+然后沉默三分钟（[22](./reviews/22-review-round6.md) · `D-APPR-01`）。
 
 三条约束：**先落库再通知**（通知失败也不会留下一个没人知道的等待）；**回执失败不影响审批本身**
 （Telegram 拒发不该把一次高危调用从「等人批」变成「整轮失败」）；**没有裁决通道时不发回执**

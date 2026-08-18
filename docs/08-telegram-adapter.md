@@ -219,7 +219,7 @@ sendChatAction('typing')  → 每 4s 续期，直到首次消息发出
 - **模型这轮一个字都没吐**（`final` 与流式累积都为空）→ 按失败处理：不提交空的 assistant 消息，
   回一句 `model_returned_empty` 对应的说明 + ref。空正文发不出去（`splitTelegramText('')` 是空数组），
   照旧提交等于让用户面对彻底的沉默，还在上下文里留一条谁都解释不了的空消息，下一轮照样带给模型
-  （[16 §5](./16-remediation-plan.md) 「摘除比伪造安全」）。`final` 为空但流里已经发出去了内容时，
+  （[16 §5](./reviews/16-remediation-plan.md) 「摘除比伪造安全」）。`final` 为空但流里已经发出去了内容时，
   以已经发出去的为准 —— 否则用户盯着屏幕上的回复，却又收到一句「这轮没成」。
 - 编辑遇 `400 message is not modified` → 忽略。
 - 编辑遇 `429` → **跳过本次增量**（不排队），下次节流窗口再试。
@@ -389,7 +389,7 @@ media:
   断言「白名单 == `bot.command(...)` 注册集合 == `/help` 命令表」三者一一对应 —— 分成两份就会漂移，
   这正是 `/start` `/help` `/ask` `/whois` `/webui` 五个命令曾经集体静默的原因（docs/20 · W-TG-01）。
   会话唤醒词管理原本设计为 `/wake`、一次性登录链接设计为 `/webui`，两者均已摘除，改在 WebUI 做
-  （「摘除比伪造安全」，[16 §5](./16-remediation-plan.md)）。
+  （「摘除比伪造安全」，[16 §5](./reviews/16-remediation-plan.md)）。
 - **命令判定只认 `bot_command` 实体 + 白名单**，不认裸 `/` 前缀：把「任何以 `/` 开头的文本」都当成命令，
   会绕开白名单与 `trigger.command` 开关，私聊里一句「/home/app 这个目录满了」将得不到任何回应。
 - 已注册命令在私聊里同样判成 `command`（不开轮次），否则 `/new` 会既重置上下文又开一轮对话；

@@ -1,5 +1,10 @@
 # 19 · 复审报告（第四轮）
 
+> ❄️ **已冻结（2026-08-15 快照）** —— 本文只记录当轮的发现与整改，**不再更新**。文中所有
+> 「未实现 / 未接线 / 仍然开着的」都是**当时**的状态，不代表现在；当前状态见
+> [`00-state.md`](../00-state.md)。条目编号（`V-SSRF-01` 之类）是 240 处源码注释的溯源凭据，
+> **不得重编号、不得删除**。
+
 > 复审对象：`docs/18-review-round3.md` 第三轮整改后的实现
 > 基线：`pnpm typecheck` 通过；`pnpm test` **36 个文件 / 86 个用例全部通过**（上一轮 35 / 69）
 > 方法：全量重读源码 → 针对性实测探针（PROBE-G…N）→ 清理探针 → 复原绿基线
@@ -26,7 +31,7 @@
 
 `bot.ts:150` 把 `perChat.modelAlias.<key>` 写进 `config_kv`；`readPersistedConfig`（`packages/db/src/config.ts:14-25`）按 `.` 展开成 `perChat.modelAlias.<key>`；`configSchema` 的 `superRefine`（`schema.ts:149-158`）判定它不在 perChat 覆盖白名单里 → `loadConfig` 抛出 → `apps/bot/src/main.ts:22` **没有 catch** → 进程启动失败。热更新路径（`main.ts:98`）有 `.catch`，所以在下次重启之前完全无症状。
 
-这不是 schema 判错——[11 §2.1](./11-config-reference.md) 第 457 行明确写着「`perChat` 出现白名单外的路径 → 拒绝启动，指出具体路径」。**规格是对的，写入方没走校验。**
+这不是 schema 判错——[11 §2.1](../11-config-reference.md) 第 457 行明确写着「`perChat` 出现白名单外的路径 → 拒绝启动，指出具体路径」。**规格是对的，写入方没走校验。**
 
 ### 0.2 递归模式的变化
 
@@ -53,7 +58,7 @@
 |---|---|---|
 | **T-CTX-01** 分级裁剪产出非法消息 | ✅ 已修复 | `context.ts:49-55` 新增 `elidePart()`，保留 `type` 与 `toolCallId`/`toolName`，只清空载荷；`context.ts:210-211` 改为 `originalParts.map(elidePart)`；`engine.ts:205-215` 新增 `assertValidShape()`，在 `openTurn` 与 `materialize` 两个出口断言；`tests/context.invariants.test.ts` 用 6 个确定性种子覆盖 |
 | **T-CTX-02** 并发轮次重复折入背景消息 | ✅ 已修复 | `0004_claim_exclusive.sql` 加 `claimed_by_turn` 与两个部分索引；`archive.ts:102` 加 `claimed_at IS NULL` 过滤；`archive.ts:116-118` 新增 `releaseClaims()`；`engine.ts:141-145` 的 `abortTurn` 不再是空壳；`context.ts:178` 提交时释放归属；`database.ts:52` 崩溃恢复时清空全部在途认领 |
-| **T-SEC-01** `untrusted()` 未转义闭合标记 | ✅ 已修复 | `shared/index.ts:71-75` 实现了 [05 §344](./05-tools-and-permissions.md) 承诺的三件事：随机 nonce 边界、转义 `</untrusted-content`、转义 source 属性；`assembler.ts:8` 的内核提示词同步改成「只有携带相同 id 的闭合标记才结束边界」 |
+| **T-SEC-01** `untrusted()` 未转义闭合标记 | ✅ 已修复 | `shared/index.ts:71-75` 实现了 [05 §344](../05-tools-and-permissions.md) 承诺的三件事：随机 nonce 边界、转义 `</untrusted-content`、转义 source 属性；`assembler.ts:8` 的内核提示词同步改成「只有携带相同 id 的闭合标记才结束边界」 |
 | **T-TG-01** 群聊里用户自己的请求被标记为不可信 | ✅ 已修复 | `engine.ts:63` 改为 `message.triggered ? escaped : othersSpeech(escaped)`——触发消息不再被包裹；背景发言换成语义正确的 `<group-message>`；`assembler.ts:9` 内核提示词补了对应措辞。**额外加分**：`engine.ts:48-50` 新增 `escapeForgedSpeakerPrefixes()`，堵上了伪造 `[某人 12:34]` 说话人前缀这条本轮没提的路 |
 
 ### 1.2 P1（3/4 已修复，1 项部分完成）
@@ -101,7 +106,7 @@ PROBE-L 重启时             = 启动配置加载抛出 → perChat.modelAlias.
 
 **影响**：
 
-- 触发门槛极低：**任意 trusted 用户在任意会话执行一次 `/model high`**。这是 [08](./08-telegram-adapter.md) 里公开记录的命令。
+- 触发门槛极低：**任意 trusted 用户在任意会话执行一次 `/model high`**。这是 [08](../08-telegram-adapter.md) 里公开记录的命令。
 - 症状延迟且无关联：命令本身回复"当前会话模型已固定为 high"，热更新路径 `main.ts:98` 的 `.catch` 把校验失败降级成一条 `config.invalid` 日志，**当前进程一切正常**。直到下一次重启（部署、OOM、`SIGTERM`）才炸，此时故障现象是"启动即退出"，运维很难联想到几天前有人发过 `/model`。
 - 恢复只能手工进 SQLite 删行——而 WebUI 起不来，`/api/config` 也访问不到。
 - 在 supervisor / `docker-compose restart: always` 下这是**崩溃循环**。
@@ -153,9 +158,9 @@ PROBE-J2 重启时                          = 启动配置加载抛出 → perCh
 **影响**：
 
 - 同一份内容，走 `PUT /api/config` 是 400，走 `PATCH /api/chats/:key` 是 200。白名单这道防线在 WebUI 上有一个后门。
-- 这道白名单的存在理由 [11 §2.1](./11-config-reference.md) 写得很清楚：「避免出现『某个群单独关掉了权限检查』这类危险配置」。上面的探针写进去的正是 `access.defaultUserRole: owner` 和 `sandbox.mode: none`。
+- 这道白名单的存在理由 [11 §2.1](../11-config-reference.md) 写得很清楚：「避免出现『某个群单独关掉了权限检查』这类危险配置」。上面的探针写进去的正是 `access.defaultUserRole: owner` 和 `sandbox.mode: none`。
 - 和 `R-CFG-01` 同款后果：**下次启动直接失败**。
-- 另有一层：**当前没有任何代码读取 `config.perChat`**（全仓搜索 `perChat` 只命中 schema 定义、`quota.perChat.*` 和 `perChat.modelAlias.*` 这个另起炉灶的键）。所以这个端点写进去的覆盖项**既不生效、又会 brick 启动**。[09 §165](./09-webui.md) 把它记为「PATCH 改 scope/唤醒词/覆盖项」。
+- 另有一层：**当前没有任何代码读取 `config.perChat`**（全仓搜索 `perChat` 只命中 schema 定义、`quota.perChat.*` 和 `perChat.modelAlias.*` 这个另起炉灶的键）。所以这个端点写进去的覆盖项**既不生效、又会 brick 启动**。[09 §165](../09-webui.md) 把它记为「PATCH 改 scope/唤醒词/覆盖项」。
 
 **修复**：
 
@@ -239,7 +244,7 @@ for (const part of parts) if (part?.type !== undefined && !PART_TYPES.has(part.t
 |---|---|---|---|
 | **R-TG-01** ★实测 | `packages/core/src/context/engine.ts:61`、`config/schema.ts` 的 `general.timezone` | `configSchema` 只要求 `timezone` 是字符串，不校验它是合法 IANA 时区。`renderArchivedMessage` 在**群聊分支**用 `new Intl.DateTimeFormat('zh-CN', { timeZone: timezone })`，非法值会抛 `RangeError`。实测：`PROBE-M schema 是否接受拼错的时区 = Asia/Shangahi`；`isPrivate=true → openTurn 成功`，`isPrivate=false → openTurn 抛出：Invalid time zone specified: Asia/Shangahi`。**私聊完全正常、群聊全灭**，所以 owner 在私聊里怎么测都发现不了 | schema 改用 `z.string().refine((zone) => { try { new Intl.DateTimeFormat('en', { timeZone: zone }); return true; } catch { return false; } }, '不是合法的 IANA 时区')`；`renderArchivedMessage` 里对 `Intl` 调用兜一层 try/catch 回退到 UTC |
 | **R-BOT-01** ★实测（复刻） | `packages/telegram/src/bot.ts:271-285` | `concurrency.acquire()` 在 try/catch 里，但紧随其后的 `openTurn()`（第 278 行）、`turns.create()`（283）**在大 try 块（286 行）之外**。这几行抛出时：`release` 拿到了却永不调用、`reservation` 永不释放、`pendingId` 留在 registry 里。实测复刻这个顺序：`PROBE-N 复刻「openTurn 抛出且未 release」后 active = 1`，`第二轮 永久排队`。配合 `R-TG-01`（群聊每轮必抛）= **该会话在 `perKey` 次触发后永久卡死**，且额度被永久预留 | 把 278-285 行并入同一个 try，或改成 `try { ... } catch (error) { release?.(); if (reservation) quota.release(reservation); registry.finish(pendingId); throw error; }`。`openTurn` 内部也应在抛出前释放已经打上的背景消息认领（`archive.releaseClaims(turnId)`），否则那批消息同样丢失 |
-| **R-API-01** ★实测 | `packages/server/src/app.ts:269` | `PATCH /api/tools/:name` 写入 `tools.overrides.<name>`，但 **schema 里根本没有 `tools.overrides`**，zod 非严格对象会静默丢弃它，且没有任何代码读取它。实测：`PROBE-K PATCH 状态 = 200 {"ok":true,"data":{"enabled":false}}`；`config_kv = [{"key":"tools.overrides.bash",...}]`；`解析后是否存在 tools.overrides = false`。[09 §180](./09-webui.md) 把这个端点记作「工具启停」——**运维在事故中点"禁用 bash"会得到成功提示，而 bash 依然完全可用** | 与已经修好的 `PUT /api/quota` 同款处理：要么真正接线（在 schema 加 `tools.overrides: z.record(z.object({ enabled: z.boolean() })).default({})`，并在 `ToolRegistry.active()` 里过滤），要么返回 `not_implemented` 并在 WebUI 置灰。**不能保留假成功** |
+| **R-API-01** ★实测 | `packages/server/src/app.ts:269` | `PATCH /api/tools/:name` 写入 `tools.overrides.<name>`，但 **schema 里根本没有 `tools.overrides`**，zod 非严格对象会静默丢弃它，且没有任何代码读取它。实测：`PROBE-K PATCH 状态 = 200 {"ok":true,"data":{"enabled":false}}`；`config_kv = [{"key":"tools.overrides.bash",...}]`；`解析后是否存在 tools.overrides = false`。[09 §180](../09-webui.md) 把这个端点记作「工具启停」——**运维在事故中点"禁用 bash"会得到成功提示，而 bash 依然完全可用** | 与已经修好的 `PUT /api/quota` 同款处理：要么真正接线（在 schema 加 `tools.overrides: z.record(z.object({ enabled: z.boolean() })).default({})`，并在 `ToolRegistry.active()` 里过滤），要么返回 `not_implemented` 并在 WebUI 置灰。**不能保留假成功** |
 | **R-CFG-03** | `tests/config.test.ts:39-60` | `T-CFG-01` 的 CI 断言比看上去弱两层。**其一**，引用检测只按**叶子名**匹配（`config.test.ts:56-57` 的正则只取 `key.split('.').at(-1)`），任何叶子名与常见属性撞名的键都会被判为"已接线"。实测：215 个叶子里有 21 个仅靠撞名通过，其中 `telegram.webhook.url`、`telegram.webhook.path` 经人工确认**完全没有实现**——`main.ts:116` 只处理 `mode === 'polling'`，配成 `webhook` 的结果是 bot 建好了但既不 start 也不注册路由，**静默失联**（而 `telegram.webhook.secretToken` 反倒进了白名单，三个兄弟键的分类互相矛盾）。**其二**，文档同步断言 `expect(docs).toContain(\`\\\`${key}\\\`\`)` 是**空断言**——doc 11 是配置参考手册，每个键本来就都在里面。实测 `grep -c '🚧' docs/11-config-reference.md = 1`，唯一一处还是第 38 行解释这个标记的图例，**67 个键没有一个真的被标注** | 引用检测改成路径级（至少要求父段与叶子同时出现，或直接静态解析 `config.a.b.c` 成员访问链）；文档断言改成检查该键所在行必须含 `🚧`；`telegram.mode: 'webhook'` 在 `main.ts` 加显式 `throw new Error('webhook mode not implemented')`，不要静默不收消息 |
 
 ---
@@ -251,8 +256,8 @@ for (const part of parts) if (part?.type !== undefined && !PART_TYPES.has(part.t
 | **R-MEM-01** ★实测 | `packages/core/src/memory/store.ts:114-121` | 段数超限的合并循环取 `keys().next().value` 作为 `oldest`，但当 `oldest` 恰好就是 `'其他'` 时，`merged` 与 `sections.get('其他')` 是**同一个数组**，`merged.push(...merged)` 把它自我复制一份，随后 `delete` + `set` 又把它移到末尾。实测落盘结果里 `- 开头的裸条目` 出现了两次。循环本身能终止（'其他' 移到末尾后不再命中），但每次触发都会静默复制一遍该段 | `if (oldest === '其他') { const rest = [...parsed.sections.keys()].find((name) => name !== '其他'); if (!rest) break; oldest = rest; }`，或干脆 `const merged = [...(parsed.sections.get('其他') ?? [])]` 断开别名 |
 | **R-TG-02** | `packages/telegram/src/stream-output.ts:69-71` | 流式循环的 `catch { interrupted = true }` 吞掉**所有**异常，包括 `sendMessage` 的 Telegram API 错误（第 59 行那次发送没有 `send()`/`edit()` 那样的降级重试）。网络抖动会被呈现成「（生成中断）」，并让 `bot.ts:299` 调用 `generated.interrupt()` → `agents.fail(mainRun, 'stream_interrupted')`。**模型好好的，却被记成中断** | 区分来源：模型流的异常 → `interrupted = true`；Telegram 发送异常 → 记 `tg.error` 后继续消费流（内容仍会在第 76-83 行的收尾重发） |
 | **R-API-02** | `packages/server/src/app.ts:259` | `content-disposition: attachment; filename="${row.name}"` 直接拼接 Telegram 侧的原始文件名。文件名含 `"` 会破坏参数解析；含 CR/LF 时 undici 构造 `Response` 直接抛 TypeError → 500 | 用 RFC 5987 形式：`filename*=UTF-8''${encodeURIComponent(name)}`，并对 fallback 的 `filename` 做白名单过滤 |
-| **R-TOOL-01** | `packages/core/src/tools/builtins.ts:105-106` | `ask_parent` 里 `const answer = input.default ?? input.options?.[0];` —— 子 agent 只要给了 options，就会被**自己的第一个选项**回答，并返回 `{ ok: true, askId, answer, source: 'rule' }`。父 agent 从头到尾没参与。这与 `agent.askArbiter` / `agent.askEscalateToUser` 进白名单是自洽的，但**返回 `ok: true` 让子 agent 以为请示获批了** | 未实现期间返回 `{ ok: false, error: 'ask_parent_not_implemented' }`，与 `PUT /api/quota` 保持同一标准；或按 [04](./04-agents-and-providers.md) 真正实现父 agent 仲裁 |
-| **R-DOC-01** | `docs/03-data-model.md` | 数据模型文档落后于迁移：`media_parts_json`（`0002_remediation.sql`）与 `claimed_by_turn`（`0004_claim_exclusive.sql`）两列在 doc 03 里出现 **0 次**，而 doc 03 是给出 `messages` 建表 DDL 的权威文档 | 补两列及其索引；同时把「认领独占性」的新语义（`claimed_at IS NULL` 过滤 + 提交/中止/崩溃三条释放路径）写进 [02 §104](./02-context-engine.md) 附近 |
+| **R-TOOL-01** | `packages/core/src/tools/builtins.ts:105-106` | `ask_parent` 里 `const answer = input.default ?? input.options?.[0];` —— 子 agent 只要给了 options，就会被**自己的第一个选项**回答，并返回 `{ ok: true, askId, answer, source: 'rule' }`。父 agent 从头到尾没参与。这与 `agent.askArbiter` / `agent.askEscalateToUser` 进白名单是自洽的，但**返回 `ok: true` 让子 agent 以为请示获批了** | 未实现期间返回 `{ ok: false, error: 'ask_parent_not_implemented' }`，与 `PUT /api/quota` 保持同一标准；或按 [04](../04-agents-and-providers.md) 真正实现父 agent 仲裁 |
+| **R-DOC-01** | `docs/03-data-model.md` | 数据模型文档落后于迁移：`media_parts_json`（`0002_remediation.sql`）与 `claimed_by_turn`（`0004_claim_exclusive.sql`）两列在 doc 03 里出现 **0 次**，而 doc 03 是给出 `messages` 建表 DDL 的权威文档 | 补两列及其索引；同时把「认领独占性」的新语义（`claimed_at IS NULL` 过滤 + 提交/中止/崩溃三条释放路径）写进 [02 §104](../02-context-engine.md) 附近 |
 
 ---
 
@@ -311,14 +316,14 @@ it('config_kv 的任意子集都不会让 loadConfig 抛出', async () => { /* �
 
 | 项 | 状态 |
 |---|---|
-| [05 §344](./05-tools-and-permissions.md) 的 nonce 边界规格 | ✅ 代码已追上文档（上一轮是文档超前） |
-| [08](./08-telegram-adapter.md) 的群聊渲染 | ✅ 已同步 `<group-message>` |
-| [02](./02-context-engine.md) 的裁剪语义 | ✅ 已同步分级裁剪保留结构字段 |
-| [11 §2.1](./11-config-reference.md) perChat 白名单 | ⚠️ 文档正确，但**没有任何一处提醒 `/model` 与 `PATCH /api/chats` 会写进这个命名空间**——建议在 §2.1 补一段"谁可以写 perChat" |
-| [11](./11-config-reference.md) 的 `🚧` 标注 | ❌ 计数为 **1**，且是图例本身。67 个未接线键一个都没标 |
-| [03](./03-data-model.md) 数据模型 | ❌ 缺 `media_parts_json`、`claimed_by_turn` 两列 |
-| [09 §165 / §180](./09-webui.md) | ⚠️ 两个端点（`PATCH /api/chats/:key`、`PATCH /api/tools/:name`）记录的能力当前都不成立 |
-| [13](./13-acceptance-criteria.md) | 自第二轮起未更新，`R-*` 相关的 AC 需要补 |
+| [05 §344](../05-tools-and-permissions.md) 的 nonce 边界规格 | ✅ 代码已追上文档（上一轮是文档超前） |
+| [08](../08-telegram-adapter.md) 的群聊渲染 | ✅ 已同步 `<group-message>` |
+| [02](../02-context-engine.md) 的裁剪语义 | ✅ 已同步分级裁剪保留结构字段 |
+| [11 §2.1](../11-config-reference.md) perChat 白名单 | ⚠️ 文档正确，但**没有任何一处提醒 `/model` 与 `PATCH /api/chats` 会写进这个命名空间**——建议在 §2.1 补一段"谁可以写 perChat" |
+| [11](../11-config-reference.md) 的 `🚧` 标注 | ❌ 计数为 **1**，且是图例本身。67 个未接线键一个都没标 |
+| [03](../03-data-model.md) 数据模型 | ❌ 缺 `media_parts_json`、`claimed_by_turn` 两列 |
+| [09 §165 / §180](../09-webui.md) | ⚠️ 两个端点（`PATCH /api/chats/:key`、`PATCH /api/tools/:name`）记录的能力当前都不成立 |
+| [13](../13-acceptance-criteria.md) | 自第二轮起未更新，`R-*` 相关的 AC 需要补 |
 
 ---
 
@@ -341,7 +346,7 @@ it('config_kv 的任意子集都不会让 loadConfig 抛出', async () => { /* �
 
 ## 8. 验收状态快照（粗估）
 
-沿用前三轮的口径（[13](./13-acceptance-criteria.md) 的 253 条 AC，★ 为 62 条关键项）：
+沿用前三轮的口径（[13](../13-acceptance-criteria.md) 的 253 条 AC，★ 为 62 条关键项）：
 
 | 轮次 | 通过 | 比例 | ★ 关键项 |
 |---|---|---|---|
@@ -416,7 +421,7 @@ it('config_kv 的任意子集都不会让 loadConfig 抛出', async () => { /* �
 
 ### 文档同步
 
-- [02](./02-context-engine.md)：硬截断补形状不变式说明；不变量清单新增第 14 条（part type 白名单，读出侧与写入侧都断言）。
-- [03](./03-data-model.md)：`messages` 两列 + 索引、`app_kv` 表。
-- [09](./09-webui.md)：`PATCH /api/chats/:key` 与 `PATCH /api/tools/:name` 两行补上真实语义。
-- [11](./11-config-reference.md)：白名单块逐行加 `🚧`；§2.1 增加「谁可以写 perChat」与启动自愈说明。
+- [02](../02-context-engine.md)：硬截断补形状不变式说明；不变量清单新增第 14 条（part type 白名单，读出侧与写入侧都断言）。
+- [03](../03-data-model.md)：`messages` 两列 + 索引、`app_kv` 表。
+- [09](../09-webui.md)：`PATCH /api/chats/:key` 与 `PATCH /api/tools/:name` 两行补上真实语义。
+- [11](../11-config-reference.md)：白名单块逐行加 `🚧`；§2.1 增加「谁可以写 perChat」与启动自愈说明。

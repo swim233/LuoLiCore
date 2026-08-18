@@ -1,5 +1,10 @@
 # 22 · 复审报告（第六轮）：漏洞 / 设计缺陷 / 可改进条目
 
+> ❄️ **已冻结（2026-08-17 快照）** —— 本文只记录当轮的发现与整改，**不再更新**。文中所有
+> 「未实现 / 未接线 / 仍然开着的」都是**当时**的状态，不代表现在；当前状态见
+> [`00-state.md`](../00-state.md)。条目编号（`V-SSRF-01` 之类）是 240 处源码注释的溯源凭据，
+> **不得重编号、不得删除**。
+
 > 复审对象：`docs/20-review-round5.md` 第五轮整改后的实现（HEAD = `75b1942`）
 > 基线：`pnpm typecheck` 通过；`pnpm test` **53 个文件 / 222 个用例全部通过**（上一轮 46 / 156）
 > 方法：全量重读 8,022 行源码（`packages/` + `apps/`）→ 针对性可运行探针（PROBE-1…4）→ 与
@@ -1095,16 +1100,16 @@ describe('外部输入进入循环/递归的地方都有资源上界', () => {
 
 | 项 | 状态 |
 |---|---|
-| [02](./02-context-engine.md) 不变量清单（含第 15 条 role） | ✅ 第五轮已补，写入/读出两侧都在位 |
-| [05 §6](./05-tools-and-permissions.md) 审批流 | ⚠️ 文档已诚实标「Telegram 未实现」，但**没有描述 180 秒干等**这个实际行为（`D-APPR-01`） |
-| [03 §保留策略](./03-data-model.md) `logs/*.jsonl` 超期删除 | ❌ 未实现（`V-LOG-01`）。要么实现，要么把那两行改成 🚧 |
-| [10](./10-logging-and-observability.md) 「追加流 + 200ms/64KB flush」 | ❌ 实现是逐条 `appendFileSync`（`D-LOG-01`） |
-| [10](./10-logging-and-observability.md) 脱敏含「provider key 解密后的明文」 | ❌ 未接线（`V-LOG-02`） |
-| [07 §3.2/3.3](./07-skills-plugins-mcp.md) Plugin 安装与 hook 表 | ❌ 安装链路不存在；`onToolCall`/`onToolResult`/`beforeSend` 从未被调用（`D-PLUGIN-01`） |
-| [11 §2.1](./11-config-reference.md) `memory.pubWriteMinRole（只允许比全局更严格）` | ❌ 既不生效也没有「更严格」的校验（`D-CFG-01`）。同一份清单里 `character` 标了 🚧，这一条也该有归属 |
-| [09 §2.1](./09-webui.md) 口令管理 | ❌ 没有改口令的通路，且写进配置无效（`V-AUTH-02`）。文档也没说「改完要重启」 |
-| [13](./13-acceptance-criteria.md) 验收条目 | ⚠️ 自第二轮起未更新；`W-*` / 本轮 `V-*` `D-*` 对应的 AC 需要补 |
-| [21](./21-webui-coverage-gaps.md) WebUI 覆盖缺口 | ⚠️ 口径是「运行时有、界面够不着」，因此 `D-PLUGIN-01` 不在它的口径内（运行时也没有）。建议在 §5「不是缺口」里加一行指向本文 |
+| [02](../02-context-engine.md) 不变量清单（含第 15 条 role） | ✅ 第五轮已补，写入/读出两侧都在位 |
+| [05 §6](../05-tools-and-permissions.md) 审批流 | ⚠️ 文档已诚实标「Telegram 未实现」，但**没有描述 180 秒干等**这个实际行为（`D-APPR-01`） |
+| [03 §保留策略](../03-data-model.md) `logs/*.jsonl` 超期删除 | ❌ 未实现（`V-LOG-01`）。要么实现，要么把那两行改成 🚧 |
+| [10](../10-logging-and-observability.md) 「追加流 + 200ms/64KB flush」 | ❌ 实现是逐条 `appendFileSync`（`D-LOG-01`） |
+| [10](../10-logging-and-observability.md) 脱敏含「provider key 解密后的明文」 | ❌ 未接线（`V-LOG-02`） |
+| [07 §3.2/3.3](../07-skills-plugins-mcp.md) Plugin 安装与 hook 表 | ❌ 安装链路不存在；`onToolCall`/`onToolResult`/`beforeSend` 从未被调用（`D-PLUGIN-01`） |
+| [11 §2.1](../11-config-reference.md) `memory.pubWriteMinRole（只允许比全局更严格）` | ❌ 既不生效也没有「更严格」的校验（`D-CFG-01`）。同一份清单里 `character` 标了 🚧，这一条也该有归属 |
+| [09 §2.1](../09-webui.md) 口令管理 | ❌ 没有改口令的通路，且写进配置无效（`V-AUTH-02`）。文档也没说「改完要重启」 |
+| [13](../13-acceptance-criteria.md) 验收条目 | ⚠️ 自第二轮起未更新；`W-*` / 本轮 `V-*` `D-*` 对应的 AC 需要补 |
+| [21](../21-webui-coverage-gaps.md) WebUI 覆盖缺口 | ⚠️ 口径是「运行时有、界面够不着」，因此 `D-PLUGIN-01` 不在它的口径内（运行时也没有）。建议在 §5「不是缺口」里加一行指向本文 |
 
 ---
 

@@ -46,7 +46,6 @@
     "chokidar": "^4.0.3",
     "croner": "^10.0.1",
     "diff": "^9.0.0",
-    "drizzle-orm": "^0.44.5",
     "grammy": "^1.38.2",
     "gray-matter": "^4.0.3",
     "hono": "^4.9.2",

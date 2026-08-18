@@ -1,6 +1,6 @@
 # 03 · 数据模型
 
-技术选型：**单 SQLite 库 + `chat_id`/`key` 分区 + FTS5(trigram)**（D7）。ORM 用 Drizzle，迁移用 `drizzle-kit` 生成的顺序 SQL。
+技术选型：**单 SQLite 库 + `chat_id`/`key` 分区 + FTS5(trigram)**（D7）。**不用 ORM**：仓储层是 better-sqlite3 的手写 SQL（D20 记了为什么改），迁移是手写的顺序编号 SQL 文件。
 
 ## 1. 通用约定
 
@@ -622,7 +622,7 @@ Telegram 消息号，从这个高位段按会话取 `MAX+1`。别在这个区间
 ## 3. 迁移策略
 
 - 文件名 `NNNN_描述.sql`（如 `0001_init.sql`），只增不改。
-- 启动时自动执行未应用的迁移（`__drizzle_migrations` 表记录），失败则**拒绝启动**并打印待手动处理的 SQL。
+- 启动时自动执行未应用的迁移（账本表 `__drizzle_migrations`，名字是早期 Drizzle 方案留下的），失败则**拒绝启动**并打印待手动处理的 SQL。
 - 破坏性变更（改列类型、删列）走「新表 + 拷贝 + 改名」，且必须在 `docs/migrations/` 附回滚说明。
 - 每次迁移前自动备份：`data/backup/luoli-<ts>-pre-<NNNN>.db`（`VACUUM INTO`），保留最近 `db.backupKeep`（默认 5）份。
 

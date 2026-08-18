@@ -31,7 +31,7 @@
 │  LogSink         结构化 JSONL + DB 索引                                    │
 ├───────────────────────────────────────────────────────────────────────────┤
 │ L0  持久层 Persistence                                                    │
-│  packages/db     Drizzle schema · 迁移 · 强制 chat 作用域的 Repository     │
+│  packages/db     原生 SQL · 迁移 · 强制 chat 作用域的 Repository          │
 │  文件系统        data/files · data/workspace · memory/ · skills/ · logs/   │
 └───────────────────────────────────────────────────────────────────────────┘
 ```
@@ -139,68 +139,71 @@ Telegram Update
 ```
 LuoLiCore/
 ├── apps/
-│   └── bot/                        入口：装配所有模块、拉起 bot + http
-│       └── src/main.ts
+│   └── bot/src/main.ts             入口：装配所有模块、拉起 bot + http（生命周期与优雅关停）
 ├── packages/
-│   ├── core/
-│   │   ├── context/                ★ ContextEngine
-│   │   │   ├── engine.ts           openTurn / commitTurn / prune
-│   │   │   ├── materialize.ts      commit → ModelMessage[]
-│   │   │   ├── tokenizer.ts        token 估算（+ 真实 usage 校准）
-│   │   │   └── render.ts           背景消息 [发言人 时间] 前缀渲染
-│   │   ├── turn/                   TurnRunner · ConcurrencyGuard · KeyedMutex
-│   │   ├── agent/                  AgentFactory · AgentBus · subagent 定义
-│   │   ├── prompt/                 PromptAssembler
-│   │   ├── provider/               ProviderRegistry · 定价表 · fallback
-│   │   ├── tools/                  内建工具实现
-│   │   │   ├── fs.ts  exec.ts  archive.ts  memory.ts  agent.ts  web.ts
-│   │   │   └── registry.ts         注册 · 权限过滤 · 执行包装(日志/审批/超时)
-│   │   ├── sandbox/                none · jail · docker
-│   │   ├── memory/                 MemoryStore
-│   │   ├── skills/                 SKILL.md 解析与渐进式披露
-│   │   ├── plugins/                Plugin 加载器 · 钩子分发
-│   │   ├── mcp/                    MCP client 管理
-│   │   ├── ledger/                 usage 记账 · QuotaGuard
-│   │   ├── log/                    LogSink · trace/span · 脱敏
-│   │   ├── config/                 zod schema · 加载 · 热更新 · 校验
-│   │   └── events.ts               EventBus
+│   ├── core/src/                   绝大部分逻辑
+│   │   ├── context/engine.ts       ★ ContextEngine：openTurn / commitTurn / materialize / prune
+│   │   ├── turn/                   concurrency.ts · keyed-mutex.ts · registry.ts
+│   │   ├── agent/                  manager · runtime · subagent · harness · ask-arbiter ·
+│   │   │                           definitions · fallback-model · step-observers
+│   │   ├── prompt/                 assembler.ts · documents.ts
+│   │   ├── provider/               catalog · model-catalog · store（密钥加密）· alias-settings
+│   │   ├── tools/                  registry.ts（注册 · 权限过滤 · 执行包装）· policy.ts（审批档位）
+│   │   │                           builtins.ts（33 个内建工具）· files.ts · web.ts · schedule.ts
+│   │   │                           jail.ts（PathJail）· cite.ts
+│   │   ├── sandbox/index.ts        none · jail · docker
+│   │   ├── approval/rules.ts       审批规则匹配（`approvals.ts` 是 broker，在 src 根）
+│   │   ├── memory/store.ts         MemoryStore
+│   │   ├── skills/loader.ts        SKILL.md 解析与渐进式披露
+│   │   ├── plugins/manager.ts      Plugin 加载器 · 钩子分发
+│   │   ├── mcp/                    manager.ts · schema.ts
+│   │   ├── schedule/               create.ts（建任务的唯一校验）· runner.ts
+│   │   ├── ledger/                 usage.ts 记账 · quota.ts QuotaGuard
+│   │   ├── log/sink.ts             LogSink（JSONL）· trace/span · 脱敏
+│   │   ├── net/outbound.ts         全仓库唯一一条出网路径（SSRF 防护）
+│   │   ├── config/                 schema.ts（zod）· index.ts（三层合并）· descriptions · wakeword
+│   │   └── *.ts                    access · approvals · alerts · events · maintenance ·
+│   │                               scheduler · secrets
 │   ├── db/
-│   │   ├── schema/                 Drizzle 表定义（按 03 文档）
-│   │   ├── migrations/             SQL 迁移（顺序编号）
-│   │   └── repo/                   ArchiveRepo · ContextRepo · ... （强制 chat 作用域）
-│   ├── telegram/
-│   │   ├── bot.ts                  grammY 实例 · transformer(限流) · 入口段按 chat 串行
-│   │   ├── polling.ts              并发有界的 long polling 驱动（替代 bot.start 的串行循环）
-│   │   ├── middleware/             dedup · principals · media · archive · trigger
-│   │   ├── output.ts               流式 editMessageText · 分片 · MarkdownV2 降级
-│   │   ├── commands/               /new /undo /ctx /cancel /tasks /model ...
-│   │   └── callbacks.ts            inline 按钮（取消 / 审批）
-│   ├── server/
-│   │   ├── app.ts                  Hono · session · CSRF
-│   │   ├── routes/                 /api/*
-│   │   └── sse.ts                  /api/events
-│   ├── webui/                      Vite + Vue3 + 自建 ui/ 组件层（构建产物由 server 托管）
-│   └── shared/                     类型 · 常量 · 错误类 · zod 公共 schema
+│   │   ├── migrations/             手写 SQL，`NNNN_*.sql` 按文件名顺序执行（**提交后不可修改**）
+│   │   └── src/                    database.ts（连接 · PRAGMA · 迁移执行器）
+│   │                               archive · context · config · principals · schedule · operations
+│   │                               —— 强制 chat 作用域的 Repository，全部手写 SQL
+│   ├── telegram/src/               bot.ts（grammY · transformer 限流 · 入口按 chat 串行）
+│   │                               polling.ts（并发有界的 long polling 驱动）
+│   │                               trigger.ts · media.ts · reply.ts · tools.ts
+│   │                               output.ts · stream-output.ts（流式 · 分片 · MarkdownV2 降级）
+│   ├── server/src/                 app.ts（Hono · session · CSRF · 全部 105 条 /api 路由）
+│   │                               events.ts（SSE `/api/events`）
+│   ├── webui/src/                  Vite + Vue 3（构建产物由 server 托管）
+│   │   ├── views/                  ConsoleView.vue · LoginView.vue
+│   │   ├── ui/                     自建组件原语（无 UI 框架）+ SchemaForm 自动生成配置表单
+│   │   ├── api/client.ts           router/index.ts   styles.css
+│   ├── plugin-sdk/src/index.ts     Plugin 作者用的类型入口
+│   └── shared/src/                 errors.ts · index.ts（类型 · 常量 · 公共 zod schema）
 ├── config/
 │   ├── config.yaml                 主配置（可被 WebUI 写回）
-│   └── config.schema.json          由 zod 生成，供 WebUI 表单渲染
+│   └── config.schema.json          由 zod 生成（`pnpm config:schema`），供 WebUI 表单渲染
 ├── memory/
-│   ├── ASSIST.md
-│   ├── CHARACTER.md
-│   ├── PUBMEMORY.md
+│   ├── ASSIST.md  CHARACTER.md  PUBMEMORY.md
 │   └── private/<userId>/PRIMEMORY.md
 ├── skills/<name>/SKILL.md
 ├── plugins/<name>/plugin.ts
+├── agents/<name>.md                子 agent 的只读定义（D22）
 ├── data/
 │   ├── luoli.db  luoli.db-wal  luoli.db-shm
 │   ├── files/<chatId>/<fileUniqueId>.<ext>
-│   └── workspace/<chatId>/           工具的可写工作目录（沙箱挂载点）
+│   └── workspace/<chatId>/         工具的可写工作目录（沙箱挂载点）
 ├── logs/YYYY-MM-DD/{turn,model,tool,system}.jsonl
-├── docs/                           本目录
+├── docs/                           本目录（`reviews/` 是冻结的历史复审）
 └── docker/
     ├── Dockerfile                  应用镜像
     └── sandbox.Dockerfile          沙箱镜像（python + 常用 CLI，无网络）
 ```
+
+> 这棵树画的是**现状**，不是目标结构。两处正在改的：`server/src/app.ts` 一个文件装着全部 105 条
+> 路由与大量裸 SQL（`docs/00 §2.1` 的 `D-01` / `D-04`），`webui/src/views/ConsoleView.vue`
+> 单文件 2882 行（`D-02`）。它们**还没有**被拆成 `routes/` 与页面组件 —— 别照着想象中的结构找文件。
 
 ---
 
@@ -212,7 +215,7 @@ LuoLiCore/
 | 包管理 | pnpm workspace | `packages/*` + `apps/*` |
 | Agent | **AI SDK v7**（`ai`, `@ai-sdk/anthropic`, `@ai-sdk/openai`, `@ai-sdk/google`, `@ai-sdk/openai-compatible`） | `ToolLoopAgent` / `createProviderRegistry` / `prepareStep` |
 | Telegram | **grammY** + `@grammyjs/auto-retry` + `@grammyjs/transformer-throttler` | 长轮询默认，Webhook 可选 |
-| DB | **better-sqlite3** + **Drizzle ORM** + FTS5(trigram) | WAL 模式；`drizzle-kit` 生成迁移 |
+| DB | **better-sqlite3** + **原生 SQL**（无 ORM 查询层）+ FTS5(trigram) | WAL 模式；迁移是手写 `packages/db/migrations/NNNN_*.sql`，由 `migrateDatabase()` 按文件名顺序在事务里执行。**没有 drizzle-kit** |
 | HTTP | **Hono** + `@hono/node-server` | REST + SSE + 静态托管 |
 | 前端 | Vite + Vue 3 + Pinia + vue-router + PrimeIcons（**无 UI 组件框架**，`src/ui/` 自建原语） | 视觉基准是总览页，全站共用 `styles.css` 的设计变量；见 [09 §6](./09-webui.md#6-前端结构) |
 | 校验 | **zod** | 工具 `inputSchema`、配置 schema、API body |

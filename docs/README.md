@@ -7,8 +7,13 @@
 
 ## 0. 文档索引
 
+文档分两层：**规格层**（本节，活的，实现与它不一致时先改文档再改代码）与
+**复审层**（[§0.1](#01-复审层reviews已冻结)，历史快照，只读）。
+「现在还欠什么」不在任何一份复审报告里，在 [`00-state.md`](./00-state.md)。
+
 | 文档 | 内容 | 读者 |
 |---|---|---|
+| [00-state.md](./00-state.md) | **当前态**：还欠什么、哪些查过没问题、哪些 🚧 是有意留的。开工前先看这份 | 全体 |
 | [01-architecture.md](./01-architecture.md) | 总体架构、模块边界、请求全链路时序、目录结构 | 全体 |
 | [02-context-engine.md](./02-context-engine.md) | **核心**：快照 / rebase / 裁剪 / 并发语义的完整规格 | 后端 |
 | [03-data-model.md](./03-data-model.md) | 数据库 DDL、索引、迁移、中文全文检索 | 后端 |
@@ -23,19 +28,29 @@
 | [12-implementation-plan.md](./12-implementation-plan.md) | M0–M10 分阶段实施指导与出口条件 | 全体 |
 | [13-acceptance-criteria.md](./13-acceptance-criteria.md) | **验收文档**：可逐条勾选的验收用例 | QA / 验收 |
 | [14-open-questions.md](./14-open-questions.md) | 未确认项、默认假设、已知取舍。**§2 的 Q1–Q12 已于 2026-08-18 全部答复**（此前挂了九轮），开头那张表是结论速查 | 全体 |
-| [15-gap-review.md](./15-gap-review.md) | **实现与文档差异审阅**：13 项 P0 / 39 项 P1 / 19 项 P2 + 逐条修改指导 | 全体 |
-| [16-remediation-plan.md](./16-remediation-plan.md) | 修复批次 R0–R6、回归测试补充清单、验收状态快照 | 全体 / QA |
-| [17-followup-review.md](./17-followup-review.md) | **复审报告（修复后第二轮）**：13 项 P0 已修复 12 项；新增 4 P0 / 13 P1 / 13 P2 + F0–F3 批次 | 全体 / QA |
-| [18-review-round3.md](./18-review-round3.md) | **复审报告（第三轮）**：第二轮 4 项 P0 全部修复；新增 4 P0 / 4 P1 / 4 P2 + T0–T1 批次与形状断言建议 | 全体 / QA |
-| [19-review-round4.md](./19-review-round4.md) | **复审报告（第四轮）**：第三轮 12 项关闭 11 项半，上下文连环模式被打断；新增 3 P0 / 4 P1 / 5 P2，全部集中在配置持久化层 + R0–R1 批次 | 全体 / QA |
-| [20-review-round5.md](./20-review-round5.md) | **复审报告（第五轮）**：第四轮 12 项全部关闭；新增 3 P0 / 6 P1 / 15 P2，集中在「本地对象交给外部依赖」的交接点 + W0–W1 批次与跨边界契约测试建议 | 全体 / QA |
-| [21-webui-coverage-gaps.md](./21-webui-coverage-gaps.md) | **WebUI 控制面覆盖缺口**：三轮整改后已清零（153/153 个已接线配置项可写、12 条端点缺口 + 后端 5 条 + `G-SSE-01` 全部完成）。§8 是定时任务这一轮的复算：日志载荷（`G-API-15`）、工具输入、定时任务管理面（`G-API-16`）三项均已闭合，无新增缺口。动 WebUI 或从 `KNOWN_UNIMPLEMENTED_CONFIG_KEYS` 摘键之前先扫一眼 §1 的复算方法与 §5 的「不是缺口」清单 | 全体 / 运维 |
-| [22-review-round6.md](./22-review-round6.md) | **复审报告（第六轮）**：第五轮 24 项关闭 23 项；按需求方要求**分三段**列出 10 项漏洞（2 P0 实测）、13 项设计缺陷、14 项可改进条目 + X0–X2 批次。主题是「资源上界」——`grep` 的正则回溯、沙箱 stdout、流式渲染、日志文件、定时任务异常五处都能拖垮单线程进程 | 全体 / QA / 安全 |
-| [23-review-round6-remediation-report.md](./23-review-round6-remediation-report.md) | 第六轮整改的完成报告（由整改方提交）。**编号与 22 有错位，核对时以 22 的原始编号为准**，见 [24](./24-review-round6-verification.md) §1.2 | 全体 / QA |
-| [25-round7-remediation.md](./25-round7-remediation.md) | **第七轮：把 25 份文档里所有 🚧 / 「未实现」标记逐条查干净**。不是再审一遍，而是核对既有标记：1 条是文档滞后、约 50 条真没做、5 条留着只会误导。结果是 `docs/09` 的 🚧 从 11 到 0、未接线配置键从 65 到 12、`docs/22 §4` 的 11 项未处理改进全部收口、`docs/13` 从 0/372 到 93/372 且勾选由断言约束。含一条**误报纠正**（`I-05`）—— 复审报告也会错，按错的诊断改出来的东西看起来同样像「已修复」 | 全体 / QA |
-| [24-review-round6-verification.md](./24-review-round6-verification.md) | **第六轮整改的复核与返修**：24 项里 19 项是根因修复；`D-UI-01` 的拆分让 14 个控制台页面全部空白（已回退）、`D-APPR-01` 修在了永远走不到的分支上，另有 3 处新引入的回归 —— 7 项返修 `R-*` 及其回归用例。改渲染层/改「没有 X 时怎么办」之前先看 §0 | 全体 / QA |
-| [26-round8-tool-review.md](./26-round8-tool-review.md) | **第八轮：工具系统专项复审**。范围只有 `tools/` 加 31 个内建工具，逐个对着 [05](./05-tools-and-permissions.md) / [07](./07-skills-plugins-mcp.md) 过。12 个工具有问题：6 项实现错误、4 项能力缺口、2 项假开关。没有权限绕过。主题是「边界只写了一半」—— 越界软链、目录递归删、熔断计数、skill 收窄四处都是**同一道闸修过一次但漏了一侧**。§6 记了查过没问题的地方，免得下一轮重复查 | 全体 / QA |
-| [27-full-scope-review.md](./27-full-scope-review.md) | **第九轮：全维度源码复审 + 整改记录**。范围是全部 15,931 行源码，但**判据换成外部标准**（OWASP Top 10 / SOLID / JS·TS 实践）而不是需求文档。1 P0 + 9 P1 + 12 P2 + 12 P3：`S-01` 是 `docs/18 · N-WEB-02` 的回归（登录限流的桶键取自可伪造的请求头，实测可绕），四条带实测。主题是「同一件事有两套判据」—— 审批默认空规则、审批正则还是 JS 引擎（grep 与唤醒词早已换 RE2）、用量按 UTC 分日而配额按配置时区。没有权限绕过；§7 列了查过没问题的 13 个面，§8 是分批建议。**§10 是整改记录**：`Z0`–`Z3` + `Z6` 共 30 条已落地（逐条状态、落点与回归用例），`Z4`/`Z5` 的三条结构条目（`D-01` / `D-02` / `D-04`）按需求方决策留到下一轮 | 全体 / QA / 安全 |
+| [21-webui-coverage-gaps.md](./21-webui-coverage-gaps.md) | **WebUI 控制面覆盖缺口**：口径是「运行时有这个能力，但运维在 WebUI 里够不着」。动 WebUI 或从 `KNOWN_UNIMPLEMENTED_CONFIG_KEYS` 摘键之前先扫一眼 §1 的复算方法与 §5 的「不是缺口」清单 | 全体 / 运维 |
+
+### 0.1 复审层（`reviews/`，已冻结）
+
+这九轮复审记录**当轮**的发现与整改，写完即冻结、不再更新 —— 想知道**现在**还欠什么，看
+[`00-state.md`](./00-state.md)，不要读这里的结论。它们留着有两个理由：条目编号（`W-CFG-02`、
+`S-01` 之类）是源码注释的溯源凭据（`tests/docs.test.ts` 会数）；每条的复现方式与根因分析是下一轮不重复踩坑的依据。
+**这些文件不得重编号、不得删条目。**
+
+| 文档 | 那一轮做了什么 |
+|---|---|
+| [15-gap-review.md](./reviews/15-gap-review.md) | 第一轮：实现与 01–13 号文档的差异，13 P0 / 39 P1 / 19 P2 + 逐条修改指导 |
+| [16-remediation-plan.md](./reviews/16-remediation-plan.md) | 第一轮的修复批次 R0–R6 与回归测试清单 |
+| [17-followup-review.md](./reviews/17-followup-review.md) | 第二轮：复验第一轮 13 项 P0 + 独立新排查 |
+| [18-review-round3.md](./reviews/18-review-round3.md) | 第三轮：复验第二轮 + 形状断言建议 |
+| [19-review-round4.md](./reviews/19-review-round4.md) | 第四轮：新问题全部集中在配置持久化层。首次引入可运行探针（PROBE-*） |
+| [20-review-round5.md](./reviews/20-review-round5.md) | 第五轮：主题是「本地对象交给外部依赖」的交接点 |
+| [22-review-round6.md](./reviews/22-review-round6.md) | 第六轮：分漏洞 / 设计缺陷 / 可改进三段。主题是「资源上界」—— 五处都能拖垮单线程进程 |
+| [23-review-round6-remediation-report.md](./reviews/23-review-round6-remediation-report.md) | 第六轮整改方提交的完成报告。**编号与 22 有错位**，核对时以 22 的原始编号为准，见 [24](./reviews/24-review-round6-verification.md) §1.2 |
+| [24-review-round6-verification.md](./reviews/24-review-round6-verification.md) | 第六轮整改的复核与返修：24 项里 5 项没修对，含一次把 14 个控制台页面改空白。**改渲染层或改「没有 X 时怎么办」之前先看 §0** |
+| [25-round7-remediation.md](./reviews/25-round7-remediation.md) | 第七轮：把当时 25 份文档里的 🚧 / 「未实现」标记逐条回代码核对。含一条**误报纠正**（`I-05`）—— 复审报告也会错 |
+| [26-round8-tool-review.md](./reviews/26-round8-tool-review.md) | 第八轮：工具系统专项，`tools/` + 当时的 31 个内建工具（现为 33 个）。主题是「边界只写了一半」。**动 `packages/core/src/tools/` 之前先看 §6**（记了查过没问题的地方） |
+| [27-full-scope-review.md](./reviews/27-full-scope-review.md) | 第九轮：全量源码，但**判据换成外部标准**（OWASP Top 10 / SOLID / JS·TS 实践）而非需求文档。主题是「同一件事有两套判据」。§7 列了查过没问题的 13 个面 |
 
 ---
 
@@ -87,7 +102,7 @@ Telegram ──► 准入(白名单/角色) ──► 归档(DB, 按 chat 隔离
 | D17 | 长任务 | **占位消息 + 进度编辑 + inline `/cancel`** | [08](./08-telegram-adapter.md#6-长任务与进度) |
 | D18 | 输出方式 | **可配置，默认流式 `editMessageText`** | [08](./08-telegram-adapter.md#5-输出与流式) |
 | D19 | 配额 | **记账 + 多级配额硬限**（global/chat/user，日/月，按角色覆盖），超额拒绝并提示 | [10](./10-logging-and-observability.md#5-配额) |
-| D20 | 技术栈 | TypeScript / Node 22 / pnpm workspace / **AI SDK v7** / **grammY** / **Drizzle + better-sqlite3** / Hono / Vite + Vue 3（自建 UI 层）/ vitest | [01](./01-architecture.md#5-技术栈) |
+| D20 | 技术栈 | TypeScript / Node 22 / pnpm workspace / **AI SDK v7** / **grammY** / **better-sqlite3 + 原生 SQL（无 ORM 查询层）** / Hono / Vite + Vue 3（自建 UI 层）/ vitest。**原定 Drizzle ORM，实现阶段改为手写 SQL**：查询层要强制注入 chat 作用域过滤（D7），自己写比绕过 ORM 更直接；迁移相应改为手写 `NNNN_*.sql` + 自研执行器。账本表名 `__drizzle_migrations` 是那一版留下的名字，不代表还在用 | [01](./01-architecture.md#5-技术栈) |
 | D21 | 定时 / 主动发言 | **做**（[14 §2 Q4](./14-open-questions.md) 已答复）：`mode='agent'` 起完整轮次、`mode='notify'` 只发预写文本；产出**照常进上下文**；停机错过**不补跑**；`minRole=trusted` 且落点绑死本会话 | [02 §10](./02-context-engine.md#10-定时轮次的上下文归属) |
 | D22 | 子 agent 的 md 定义 | **做**（[14 §2 Q5](./14-open-questions.md)）：`agents/<name>.md` 是**只读**来源，DB / WebUI 同名定义覆盖它；加载失败报错而不是静默跳过 | [04](./04-agents-and-providers.md) |
 | D23 | `HarnessAgent` | **做，排 [M11](./12-implementation-plan.md)**（[14 §2 Q8](./14-open-questions.md)）：仅 owner 且仅私聊、目录限白名单（默认空 = 关闭）、起 harness 整体走一次审批。它内部的工具调用**不受本系统权限模型约束**（T17） | [12 · M11](./12-implementation-plan.md) |

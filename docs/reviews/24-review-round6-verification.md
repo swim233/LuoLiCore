@@ -1,5 +1,10 @@
 # 24 · 第六轮整改的复核与返修
 
+> ❄️ **已冻结（2026-08-17 快照）** —— 本文只记录当轮的发现与整改，**不再更新**。文中所有
+> 「未实现 / 未接线 / 仍然开着的」都是**当时**的状态，不代表现在；当前状态见
+> [`00-state.md`](../00-state.md)。条目编号（`V-SSRF-01` 之类）是 240 处源码注释的溯源凭据，
+> **不得重编号、不得删除**。
+
 > 复核对象：`docs/23-review-round6-remediation-report.md` 声称完成的 24 项（`docs/22` 的 §2 漏洞 + §3 设计缺陷）
 > 方法：逐条回到 `docs/22` 的原始编号读代码 → 对可疑项写可运行探针 → **把生产构建真的跑起来**（`pnpm build` +
 > `node dist/apps/bot/src/main.js`，owner 登录）→ 复跑 `typecheck` / `lint` / `test` / `build`
@@ -120,9 +125,9 @@ const Child = defineComponent({ setup: () => new Proxy({}, { get: (_t, k) => Ref
 回归用例钉的正是这条接线：`rejects immediately when no approval channel is connected` 里**先挂一个普通
 订阅者**（模拟 `main.ts` 那个），再断言当场拒绝；另加一条 `waits for a decision once a real channel is connected`。
 
-🚧 **未闭合**：有裁决通道时，发起人在等待期间仍然收不到任何提示（`docs/22 · D-APPR-01` 要求「发起人必须
+**本轮未闭合**：有裁决通道时，发起人在等待期间仍然收不到任何提示（`docs/22 · D-APPR-01` 要求「发起人必须
 在第一时间收到一句话」）。补 Telegram 回执需要把 EventBus 接进 telegram 包，留作独立一项，已在
-`docs/05` 与 `docs/21 §6` 标注。
+`docs/05` 与 `docs/21 §6` 标注。（第七轮已补上发起人回执，见 `docs/25 §8`；inline keyboard 审批仍缺。）
 
 ### R-TG-01 · P2 · `splitTelegramText` 静默丢字 —— 已修
 

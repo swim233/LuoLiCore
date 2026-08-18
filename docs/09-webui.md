@@ -141,7 +141,7 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
   （`perChat` 是 `z.record(z.unknown())`），schema 生成的表单渲染不出来，所以单独给一个控件。
   只收 `memory/` 下的纯文件名（`.md` 结尾、不含目录与 `..`）—— 那个值会被当成路径段用；
   不合格时服务端**静默退回全局 `CHARACTER.md`**，因为一个拼错的文件名不该让整个会话开不了轮次
-  （[27 · C-08](./27-full-scope-review.md)）。留空 = 取消这条覆盖。
+  （[27 · C-08](./reviews/27-full-scope-review.md)）。留空 = 取消这条覆盖。
 - 再往下是并排的两块工作台：
   1. **上下文查看器**：当前窗口的消息序列，**按时间倒序 —— 最新的一条在最上面**（与消息页、commit
      时间线一致；ordinal 在提交时单调分配，倒排 ordinal 即倒排时间）。每条是一行徽标（ordinal、role、
@@ -431,7 +431,7 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
   `approval.rules` 是空数组时，这一块顶上出现一条黄色提示并点名受影响的工具（从工具表里筛
   `approval === 'conditional'` 的那些）。`ApprovalRules.evaluate()` 在规则表为空时恒回
   「不需要审批」，于是**面板显示「审批已启用」而门是开着的** —— 而这正是出厂默认
-  （[27 · S-02](./27-full-scope-review.md)，需求方选定「明说门是开的」而不是塞一份默认规则）。
+  （[27 · S-02](./reviews/27-full-scope-review.md)，需求方选定「明说门是开的」而不是塞一份默认规则）。
   启动时另有一条 `approval.no_rules` 警告与 stderr 提示。
 - 桌面通知仍未实现。
 

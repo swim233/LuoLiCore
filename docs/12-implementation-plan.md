@@ -13,7 +13,7 @@
 - `packages/shared`（类型、错误类、ULID、Result 类型）。
 - `packages/core/config`：zod schema（[11](./11-config-reference.md) 全量）+ 加载（yaml + env + config_kv 三层合并）+ 校验 + `${env:}` 展开 + 冻结快照 + `onChange`。
 - `packages/core/log`：`LogSink`（JSONL 追加流 + 轮转 + 脱敏）+ span/trace 工具 + pino 控制台。
-- `packages/db`：Drizzle schema 全表（[03](./03-data-model.md)）+ `0001_init.sql` + 迁移执行器 + PRAGMA 设置 + `ScopedRepo` 基类。
+- `packages/db`：全表 DDL（[03](./03-data-model.md)）+ `0001_init.sql` + 迁移执行器 + PRAGMA 设置 + `ScopedRepo` 基类。**手写 SQL，不用 ORM**（D20）。
 - `apps/bot/src/main.ts`：启动 → 校验配置 → 迁移 DB → 打印健康摘要 → 优雅退出。
 
 **出口条件**
