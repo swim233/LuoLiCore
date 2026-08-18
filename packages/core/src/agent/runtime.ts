@@ -9,7 +9,7 @@ type V4LanguageModel = Exclude<LanguageModel, string> & { specificationVersion: 
 import type { Config } from '../config/schema.js';
 import type { Sqlite } from '@luoli/db';
 import { modelAliasKey, readAppKv } from '@luoli/db';
-import { escapeSystemInstructions, estimateStructureTokens, formatSpeakerIdentity, systemInstructions, type RuntimeTurnContext } from '@luoli/shared';
+import { escapeSystemInstructions, estimateStructureTokens, formatSpeakerIdentity, sanitizeIdentity, systemInstructions, type RuntimeTurnContext } from '@luoli/shared';
 import type { PromptAssembler, PromptDocuments } from '../index.js';
 import { runtimeBlock, type PromptBuildResult } from '../prompt/assembler.js';
 import type { ToolExecutionContext, ToolRegistry } from '../tools/registry.js';
@@ -212,7 +212,8 @@ export function aliasModel(registry: ModelRegistry, alias: string, options: Fall
 }
 
 const SENDABLE_ROLES = new Set(['user', 'assistant', 'tool']);
-const NOTE_PREFIX = '（系统提示）';
+/** 系统旁白的标记。`load_skill` 注入 skill 正文时也用它 —— 同一个 wire 标记只能有一份定义。 */
+export const NOTE_PREFIX = '（系统提示）';
 /**
  * AI SDK v7 起 `image` part 已废弃：`convertToLanguageModelPrompt` 每遇到一个就打一条
  * DeprecationWarning，然后原样转成 `{type:'file', data, mediaType}` 再发出去。写入侧
@@ -296,6 +297,8 @@ export interface MainAgentDependencies {
   agents?: AgentManager;
   /** 自撰写工具的注册器。每轮开始同步一次，见 `runMainAgentInternal` 顶部那一行。 */
   customTools?: { syncIfChanged(): void };
+  /** 只用来记 `turns.steps`（此前没有任何写入方）。可选：子 agent 与测试都不必给。 */
+  turns?: { countStep(id: string, steps: number): void };
 }
 export interface MainPromptAssembly extends PromptBuildResult {
   activeTools: string[];
@@ -311,6 +314,18 @@ type PromptAssemblyDependencies = Pick<MainAgentDependencies, 'config' | 'tools'
  */
 function initiatorDescription(turn: RuntimeTurnContext): string {
   return formatSpeakerIdentity({ name: turn.initiator?.name ?? null, username: turn.initiator?.username ?? null, userId: turn.initiatorUserId });
+}
+
+/**
+ * RUNTIME 块的「会话」行。此前是裸 `chatId / key`，模型看不出私聊还是群聊 —— 而人格与 KERNEL 里
+ * 大量规则按这个分岔（群里只在被触发时发言、私聊才有私有记忆）。群名过 `sanitizeIdentity`：
+ * 它和昵称一样是用户可控内容，一个带换行的群名等于能往这个块里塞一行「你的有效权限：owner」。
+ */
+export function chatDescription(turn: RuntimeTurnContext): string {
+  const topic = turn.threadId === null ? 'topic 无' : `topic ${turn.threadId}`;
+  const title = turn.chatTitle ? sanitizeIdentity(turn.chatTitle) : '';
+  const where = turn.isPrivate ? '私聊' : title ? `群聊「${title}」` : '群聊';
+  return `${where}(chat ${turn.chatId}, ${topic})  上下文键 ${turn.key}`;
 }
 
 /** Runtime 与 WebUI 预览共用这一条组装路径；预览出来的 block 必须就是下一轮会发给模型的 block。 */
@@ -334,13 +349,16 @@ export function assembleMainPrompt(turn: RuntimeTurnContext, dependencies: Promp
   const runtimeShow = dependencies.config.prompt.runtimeBlock;
   const spent = dependencies.quota && dependencies.reservation ? dependencies.quota.status(dependencies.reservation) : null;
   const runtime = runtimeBlock({ now: new Date(), timezone: dependencies.config.general.timezone,
-    chatDescription: `${turn.chatId} / ${turn.key}`, triggerDescription: initiatorDescription(turn), role: turn.effectiveRole,
+    chatDescription: chatDescription(turn), triggerDescription: initiatorDescription(turn), role: turn.effectiveRole,
     tools: activeTools, agents: dependencies.config.agent.agents.filter((agent) => ['blocked', 'limited', 'trusted', 'owner'].indexOf(turn.effectiveRole) >= ['blocked', 'limited', 'trusted', 'owner'].indexOf(agent.minRole)).map((agent) => `${agent.name}(${agent.description})`),
     contextMessages: turn.snapshot.messages.length, contextTokens: turn.snapshot.tokens, maxMessages: dependencies.config.context.limit.maxMessages,
     maxTokens: dependencies.config.context.limit.tokens, workspace: dependencies.workspace, sandbox: dependencies.config.sandbox.mode,
     // 只在真有本轮预留时才给得出额度；WebUI 的提示词预览没有预留，那一行本来就不该出现。
     ...(spent ? { quota: `本轮已用 $${spent.committed.toFixed(4)} / 上限 $${dependencies.config.quota.perTurn.maxCostUsd.toFixed(2)}` } : {}),
-    show: { quota: runtimeShow.showQuota, contextWatermark: runtimeShow.showContextWatermark, workspace: runtimeShow.showWorkspace } });
+    // 工具名只在目录关掉时才列进 RUNTIME：开着的时候 TOOL CATALOG 已经一行一个带描述地列过了，
+    // 两处同源（都是 `active(role, ctx)`），重复一遍等于每轮白付一份易变段的钱（docs/06 §1.2）。
+    show: { quota: runtimeShow.showQuota, contextWatermark: runtimeShow.showContextWatermark, workspace: runtimeShow.showWorkspace,
+      toolNames: !dependencies.config.prompt.includeToolCatalog } });
   const promptInput = { character: documents.character, assist: documents.assist, catalog, publicMemory: documents.publicMemory, runtime,
     maxTokens: dependencies.config.prompt.maxTokens, includeCatalog: dependencies.config.prompt.includeToolCatalog };
   if (documents.privateMemory !== undefined) Object.assign(promptInput, { privateMemory: documents.privateMemory });
@@ -374,6 +392,52 @@ export interface MainAgentStreamResult {
   final: Promise<string>;
   interrupt(): void;
 }
+
+/** `result.stream` 里我们只认 `text-delta` 与 `finish-step`；其余（reasoning、tool-call、错误部件）一概跳过。 */
+interface StreamPartLike { type: string; text?: string }
+
+/**
+ * 逐 step 之间补一个空行。
+ *
+ * `result.textStream` 走的是 `toTextStream`，它只把 `text-delta` 的裸字符串透出去，`finish-step`
+ * 之类的边界全丢了 —— 于是投递侧那一行 `text += step.value`（`TelegramOutput.consume`）把每一步的
+ * 旁白无缝粘成一段。实测一轮 10 步吐出六句一句话旁白，用户收到的是没有任何换行的六句话，
+ * 落库也是**单个** text part（logs/2026-08-18 · turn 01M09QBZVK…）。人格里那条「一句话一行」
+ * 只在单步内生效，跨步没有任何东西管得着。
+ *
+ * 上一段自己已经以换行收尾就不补：模型照 KERNEL 那条新规则换了行时，再补一个就是三连空行。
+ */
+export async function* stepSeparatedText(full: AsyncIterable<StreamPartLike>, trailing?: () => Promise<string>, onChunk?: (chunk: string) => void): AsyncGenerator<string> {
+  // 两个布尔而不是「保留末尾 N 个字符再正则」：末尾窗口只要被空白填满就看不见那个换行了，
+  // 一个 `…。\n     ` 结尾的 step 会照旧补一次空行，正好是这个判断本该挡住的三连空行。
+  let wrote = false;        // 这一轮到底产出过正文没有（决定要不要在**开头**补分隔）
+  let endedWithNewline = false;
+  let pendingBreak = false;
+  function* emit(text: string): Generator<string> { if (onChunk) onChunk(text); yield text; }
+  const separate = (): string => (wrote && !endedWithNewline ? '\n\n' : '');
+  const track = (text: string): void => {
+    wrote = true;
+    // 只有末尾的空白串里含换行才算「已经换过行」；非空白字符一出现就清零。
+    const trailingSpace = /\s*$/.exec(text)![0];
+    endedWithNewline = trailingSpace.includes('\n') || (trailingSpace.length === text.length && endedWithNewline);
+  };
+  for await (const part of full) {
+    if (part.type === 'finish-step') { if (wrote) pendingBreak = true; continue; }
+    if (part.type !== 'text-delta' || !part.text) continue;
+    if (pendingBreak) { const gap = separate(); if (gap) { yield* emit(gap); endedWithNewline = true; } pendingBreak = false; }
+    track(part.text);
+    yield* emit(part.text);
+  }
+  // 收尾补跑那一次（§2）也要走同一道分隔逻辑，否则它会直接贴在最后一句旁白后面。
+  if (!trailing) return;
+  const extra = await trailing();
+  if (!extra) return;
+  const gap = separate();
+  if (gap) yield* emit(gap);
+  yield* emit(extra);
+}
+
+const WRAP_UP_INSTRUCTION = '刚才的工具调用已经结束，但你还没有给出结论。把结果告诉用户：成了是什么，没成是卡在哪。不要再调用工具，不要复述过程。';
 
 export async function streamMainAgent(turn: RuntimeTurnContext, dependencies: MainAgentDependencies): Promise<MainAgentStreamResult> {
   return runMainAgentInternal(turn, dependencies, true) as Promise<MainAgentStreamResult>;
@@ -410,6 +474,12 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
   // 让 result.text 安静地解析成空串。不抓住这一份，一次彻底的上游故障和「模型没话说」
   // 在调用方眼里长得一模一样 —— 上一次就是这样变成「不回复」的。
   let streamFailure: unknown = null;
+  // 收尾补跑（§2）的三个状态：最后一步有没有正文、这一轮做过事没有、当前是不是正在补跑那一次。
+  let lastStepHadText = false;
+  let sawToolCall = false;
+  let wrapUpMode = false;
+  /** 主轮跑了几步。补跑那次 `agent.generate` 的 stepNumber 从 0 重新起，靠它换算成全轮编号。 */
+  let mainStepCount = 0;
   const initialInfo = chain[0]!.info;
   // 包装必须做在「按别名解析」这一层：`prepareStep` 每一步都无条件设置 model，只包装构造时那一个的话，
   // 整条 fallback / 重试链从第 0 步起就再没被用过 —— 重试次数、别名 fallback、markProviderDown、
@@ -458,7 +528,12 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
     maxRetries: 0,
     stopWhen: stepCountIs(Math.min(dependencies.config.agent.main.maxSteps, dependencies.config.quota.perTurn.maxSteps)),
     include: { requestMessages: true, requestBody: true, responseBody: true },
-    prepareStep: async ({ stepNumber, messages }) => {
+    prepareStep: async ({ stepNumber: rawStep, messages }) => {
+      // 收尾补跑是**另一次** `agent.generate`，它的 stepNumber 从 0 重新起。不换算的话：
+      // ① `stepSpans.set(0, …)` 会顶掉主轮 step 0 那条已经结束的 span（出错时还会被 end 第二次）；
+      // ② `stepAlias.set(0, …)` 会改写 step 0 实际用的别名，记账落到错的模型上；
+      // ③ `downgrade` 判据回到 0，一轮从 step 8 起就在跑 low 的会话，最后这句结论反而按主别名计价。
+      const stepNumber = wrapUpMode ? mainStepCount + rawStep : rawStep;
       await dependencies.plugins?.hook('beforeModelCall', { turn, step: stepNumber });
       const skillAllow = turn.skillAllowedTools?.size ? new Set<string>([...turn.skillAllowedTools, ...SKILL_NARROWING_EXEMPT]) : null;
       const activeForStep = dependencies.tools.activeNames(turn.effectiveRole, toolContext).filter((name) => !skillAllow || skillAllow.has(name));
@@ -472,6 +547,9 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
       // （docs/20 · W-QUOTA-01）。`turnCost` 把主 agent 与该轮所有子 agent 的花费都算进去了。
       const cost = dependencies.ledger.turnCost(turn.turnId);
       if (cost >= dependencies.config.quota.perTurn.maxCostUsd || (dependencies.quota && dependencies.reservation && !dependencies.quota.canSpend(dependencies.reservation, dependencies.config.quota.perTurn.maxCostUsd))) { patch.activeTools = []; patch.toolChoice = 'none'; }
+      // 收尾补跑（§2）走的是同一条禁工具的路，不另造一套：那一次只许说话，再调工具就又可能
+      // 以工具调用收尾，把同一个坑挖第二遍。
+      if (wrapUpMode) { patch.activeTools = []; patch.toolChoice = 'none'; }
       // 推理条目一律不回传。openai responses provider 会把上一步的 reasoning 写成
       // `{type:'item_reference', id:'rs_…'}` —— 那份内容存在 OpenAI 服务端，第三方兼容网关
       // 手上没有，解析不了就整个请求 502。表现是「模型一调工具就再也不说话」：后续那一步
@@ -487,15 +565,18 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
       return patch;
     },
     onStepStart: (event) => {
-      stepSpans.set(event.stepNumber, dependencies.log.span({ level: 'info', kind: 'model.call', summary: `${event.provider}/${event.modelId}`, traceId: turn.turnId, key: turn.key,
-        data: { stepNumber: event.stepNumber, modelId: event.modelId, provider: event.provider, messages: bodyForLog(event.messages, dependencies.config.logs.captureBodies), instructions: bodyForLog(event.instructions, dependencies.config.logs.captureBodies) } }));
-      dependencies.log.publish('turn.progress', { turnId: turn.turnId, phase: 'model', step: event.stepNumber, note: `${event.provider}/${event.modelId}` });
+      const stepNumber = wrapUpMode ? mainStepCount + event.stepNumber : event.stepNumber;
+      stepSpans.set(stepNumber, dependencies.log.span({ level: 'info', kind: 'model.call', summary: `${event.provider}/${event.modelId}`, traceId: turn.turnId, key: turn.key,
+        data: { stepNumber, wrapUp: wrapUpMode || undefined, modelId: event.modelId, provider: event.provider, messages: bodyForLog(event.messages, dependencies.config.logs.captureBodies), instructions: bodyForLog(event.instructions, dependencies.config.logs.captureBodies) } }));
+      dependencies.log.publish('turn.progress', { turnId: turn.turnId, phase: 'model', step: stepNumber, note: `${event.provider}/${event.modelId}` });
     },
     // 四件事拆成四个可单独喂假 step 的观察者（`step-observers.ts`，docs/27 · D-05）。
     // 这里只剩「把 AI SDK 的 step 映射成 StepFacts」这一层适配 —— 那个 step 类型没人能手搓，
     // 而记账 / 广播 / 上下文 / 校准真正需要的只有十来个字段。
     onStepEnd: (step) => {
-      const facts: StepFacts = { stepNumber: step.stepNumber, servedModelId: servedModelId ?? step.model.modelId,
+      const stepNumber = wrapUpMode ? mainStepCount + step.stepNumber : step.stepNumber;
+      if (!wrapUpMode) mainStepCount = Math.max(mainStepCount, step.stepNumber + 1);
+      const facts: StepFacts = { stepNumber, servedModelId: servedModelId ?? step.model.modelId,
         usage: { inputTokens: step.usage.inputTokens ?? 0, outputTokens: step.usage.outputTokens ?? 0,
           cacheReadTokens: step.usage.inputTokenDetails.cacheReadTokens ?? 0, cacheWriteTokens: step.usage.inputTokenDetails.cacheWriteTokens ?? 0,
           reasoningTokens: step.usage.outputTokenDetails.reasoningTokens ?? 0 },
@@ -504,25 +585,92 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
         toolResults: step.toolResults.map((result) => ({ toolCallId: result.toolCallId, toolName: result.toolName,
           part: toolResultPart(result.toolCallId, result.toolName, result.output), preview: `${result.toolName}: ${JSON.stringify(result.output).slice(0, 180)}` })),
         requestBody: (step.request as { body?: unknown } | undefined)?.body };
+      // 收尾判据取自**最后一步**，所以每步都覆写而不是累积。`sawToolCall` 反过来要累积：
+      // 判的是「这一轮到底做过事没有」，只有做过事才值得补一句结论。
+      lastStepHadText = step.text.trim() !== '';
+      if (step.toolCalls.length) sawToolCall = true;
+      // `turns.steps` 此前没有任何写入方（全库 steps>0 的行数为 0），WebUI 轮次列表与
+      // `turn.finished` 事件里这个数永远是 0 —— 本次排查因此只能去翻 blob 还原步骤。
+      // 用换算后的编号：收尾补跑那一步也是真花了钱的一步，不该在这个数里隐身。
+      dependencies.turns?.countStep(turn.turnId, stepNumber + 1);
       const resolved = observers.record(facts);
       observers.broadcast(facts, resolved);
-      stepSpans.get(step.stepNumber)?.end({ model: step.model, usage: step.usage, cost: resolved.cost, request: bodyForLog(step.request, dependencies.config.logs.captureBodies), response: bodyForLog(step.response, dependencies.config.logs.captureBodies) });
+      stepSpans.get(stepNumber)?.end({ model: step.model, usage: step.usage, cost: resolved.cost, request: bodyForLog(step.request, dependencies.config.logs.captureBodies), response: bodyForLog(step.response, dependencies.config.logs.captureBodies) });
       observers.appendContext(facts);
       observers.calibrate(facts);
     },
   });
+  /**
+   * 「最后一步只有 reasoning / 只有工具调用」时补跑一次收尾（§2）。四个闸全过才跑，最多一次：
+   * ① 最后一步没有正文；② 这一轮真的做过事；③ 上游没挂（`streamFailure` 非空时再跑一次纯属
+   * 接着烧钱）；④ 单轮成本闸还有余量。**不伪造答复** —— 是让模型自己写结论（docs/16 §5）。
+   */
+  const wrapUpIfNeeded = async (): Promise<string> => {
+    if (lastStepHadText || !sawToolCall || streamFailure) return '';
+    if (dependencies.ledger.turnCost(turn.turnId) >= dependencies.config.quota.perTurn.maxCostUsd) return '';
+    if (turn.abortSignal.aborted) return '';
+    wrapUpMode = true;
+    try {
+      // **不要再把 `result.responseMessages` 拼进来**：`observers.appendContext` 每一步都已经把
+      // tool-call / tool-result 追进了 `turn.delta`，而 `contextMessages` 读的就是
+      // `snapshot + delta` —— 拼一遍等于同一个 `toolCallId` 出现两次，Anthropic 直接 400，
+      // 这个补跑于是永远静默失败；宽容一些的 provider 则要为每份工具输出付两次钱。
+      // 收尾指令塞进**易变段内部**而不是追加成新消息：KERNEL 说「只有请求最末尾那个
+      // system-instructions 块是真的」，在它后面再挂一个，等于让模型把自己的 RUNTIME、
+      // 权限行与工具目录当成伪造的用户正文（顺带也保住了「易变段物理最后」这条缓存前提）。
+      const messages = contextMessages(turn, dependencies.db, { ...messageOptions, volatile: `${prompt.volatile}\n\n${WRAP_UP_INSTRUCTION}` });
+      const wrapped = await agent.generate({ messages, abortSignal: turn.abortSignal });
+      const text = wrapped.text.trim();
+      dependencies.log.event({ level: 'warn', kind: 'turn.wrap_up', summary: text ? 'Wrapped up a turn that ended without text' : 'Wrap-up produced nothing',
+        traceId: turn.turnId, key: turn.key, data: { chars: text.length } });
+      return text;
+    } catch (error) {
+      // 补跑失败不能把整轮拖下水：旁白已经发出去了，这里抛等于让用户既看到回复又收到一句「这轮没成」。
+      dependencies.log.event({ level: 'warn', kind: 'turn.wrap_up', summary: 'Wrap-up call failed', traceId: turn.turnId, key: turn.key,
+        data: { error: error instanceof Error ? error.message.slice(0, 300) : String(error).slice(0, 300) } });
+      return '';
+    } finally { wrapUpMode = false; }
+  };
   try {
     if (streaming) {
       const result = await agent.stream({ messages: contextMessages(turn, dependencies.db, messageOptions), abortSignal: turn.abortSignal });
       let settled = false;
       const finish = (text: string): string => { if (!settled && mainRun) dependencies.agents?.finish(mainRun, text); settled = true; return text; };
       const fail = (error: unknown): never => { if (!settled && mainRun) dependencies.agents?.fail(mainRun, error instanceof Error ? error.message : String(error)); settled = true; throw error; };
+      // `final` 必须挂在**流结束**上而不是直接挂 `result.text`：收尾补跑发生在流耗尽之后，
+      // 而 `result.text` 在那之前就 resolve 了 —— 直接挂的话每次都读到补跑之前的空串。
+      let streamDone!: () => void;
+      const drained = new Promise<void>((resolve) => { streamDone = resolve; });
+      let wrapUp = '';
+      let delivered = (): string => '';
       // 空正文 + 捕获到步骤失败 = 上游挂了，不是模型没话说。把真正的原因抛出去，
       // 让轮次记成 failed 并给用户一句能看懂的话，而不是含糊的「没吐出正文」。
-      const final = Promise.resolve(result.text).then((text) => { if (!text.trim() && streamFailure) throw streamFailure; return text; }).then(finish, fail);
-      return { stream: result.textStream, final, interrupt: () => { if (!settled && mainRun) dependencies.agents?.fail(mainRun, 'stream_interrupted'); settled = true; } };
+      const final = drained.then(() => result.text).then((text) => {
+        if (!text.trim() && streamFailure) throw streamFailure;
+        // `result.text` 是 AI SDK v7 的**最后一步**正文，不是全轮拼接。最后一步以工具调用收尾时
+        // 它就是空串，此前 `bot.ts` 于是回落到「把过程旁白当答复」（本次事故）。
+        // 补跑到了就用**整条发出去的文本**（旁白 + 分隔 + 结论），不是只用结论那一段：归档与
+        // 上下文存的必须是用户屏幕上那条消息，否则下一轮模型看不见自己的旁白，用户一句
+        // 「你上面第二段说的」就无从对应。
+        return text.trim() ? text : delivered();
+      }).then(finish, fail);
+      let emitted = '';
+      const stream = stepSeparatedText(result.stream as AsyncIterable<StreamPartLike>, async () => {
+        // `wrapUpIfNeeded` 自己吞掉所有异常，这里不会因为它而把流记成 interrupted。
+        try { wrapUp = await wrapUpIfNeeded(); return wrapUp; } finally { streamDone(); }
+      }, (chunk) => { emitted += chunk; });
+      delivered = () => (wrapUp ? emitted : '');
+      // `interrupt()` 也要放开 `drained`：被打断那条路（`bot.ts` 里的 `void generated.final.catch()`）
+      // 不会再去把生成器读完，不放的话那个 promise 永远悬着。
+      return { stream, final, interrupt: () => { streamDone(); if (!settled && mainRun) dependencies.agents?.fail(mainRun, 'stream_interrupted'); settled = true; } };
     }
     const result = await agent.generate({ messages: contextMessages(turn, dependencies.db, messageOptions), abortSignal: turn.abortSignal });
+    // 非流式（定时任务走这条）同样吃 `result.text` = 最后一步正文那条语义：以工具调用收尾的
+    // 定时任务此前会空正文 → `model_returned_empty`，整条任务静默失败。
+    if (!result.text.trim()) {
+      const wrapUp = await wrapUpIfNeeded();
+      if (wrapUp) { if (mainRun) dependencies.agents?.finish(mainRun, wrapUp); return wrapUp; }
+    }
     if (!result.text.trim() && streamFailure) throw streamFailure;
     if (mainRun) dependencies.agents?.finish(mainRun, result.text);
     return result.text;

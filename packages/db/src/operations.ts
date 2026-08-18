@@ -136,4 +136,11 @@ export class TurnRepository {
   incrementToolCall(id: string): void {
     this.db.prepare('UPDATE turns SET tool_calls=tool_calls+1 WHERE id=?').run(id);
   }
+  /**
+   * 主 agent 的步数。`MAX` 而不是赋值：收尾补跑（docs/06 · runtime `wrapUpIfNeeded`）会再走一次
+   * `onStepEnd`，而它的 `stepNumber` 从 0 重新起 —— 直接赋值会把已经数到 10 的轮次改回 1。
+   */
+  countStep(id: string, steps: number): void {
+    this.db.prepare('UPDATE turns SET steps=MAX(steps,?) WHERE id=?').run(steps, id);
+  }
 }

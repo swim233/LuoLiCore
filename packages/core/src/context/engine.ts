@@ -12,6 +12,8 @@ export interface OpenTurnRequest {
   initiatorUserId: string;
   effectiveRole: Role;
   isPrivate: boolean;
+  /** 群名 / 频道名，只用于 RUNTIME 块的「会话」行。可选：定时任务那条路没有 update 可取。 */
+  chatTitle?: string;
   trigger: ArchivedMessage;
   /**
    * 触发消息回复的那条消息（含它自己的 media part）。适配层负责取到它 —— 被回复的消息可能
@@ -214,7 +216,9 @@ export class ContextEngine {
       };
       this.log?.event({ level: 'debug', kind: 'ctx.open', summary: `Opened context ${request.key}`, chatId: request.chatId, userId: request.initiatorUserId, key: request.key, data: { baseCommit: head?.id ?? null, claimed: claim.rows.length, quoted: request.quoted?.id ?? null, snapshotTokens: snapshot.tokens, snapshotMsgs: snapshot.messages.length } });
       return { turnId, key: request.key, chatId: request.chatId, threadId: request.threadId,
-        initiatorUserId: request.initiatorUserId, effectiveRole: request.effectiveRole, isPrivate: request.isPrivate, baseCommitId: head?.id ?? null, claimThroughMessageId: request.trigger.id,
+        initiatorUserId: request.initiatorUserId, effectiveRole: request.effectiveRole, isPrivate: request.isPrivate,
+        ...(request.chatTitle ? { chatTitle: request.chatTitle } : {}),
+        baseCommitId: head?.id ?? null, claimThroughMessageId: request.trigger.id,
         initiator: { name: request.trigger.fromName ?? null, username: request.trigger.fromUsername ?? null },
         triggerTgMessageId: request.trigger.tgMessageId,
         snapshot, delta, abortSignal: request.abortSignal, tokenRatio: ctx.tokenRatio, deferPrune, config: request.config };

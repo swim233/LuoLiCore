@@ -35,7 +35,7 @@ function harness(name: string, options: { wired?: boolean; fail?: string; config
   const archive = new ArchiveRepository(db);
   const calls: ApiCall[] = [];
   const bot = fakeBot(calls, options.fail);
-  const telegram = new TelegramTools({ bot: () => bot, archive, maxMessageChars: () => 3900 });
+  const telegram = new TelegramTools({ bot: () => bot, archive, maxMessageChars: () => 3900, maxMentions: () => 5 });
   const registry = new ToolRegistry(log, { request: async () => true }, { maxRegistered: 200, maxCallsPerTurn: 50, maxConsecutiveErrors: 10 });
   // 定时任务的投递也靠 Telegram，所以它跟 telegram 一族同生共死：`deliverable` 跟着 `wired` 走。
   const schedule = { jobs: new ScheduleRepository(db), deliverable: () => options.wired !== false,

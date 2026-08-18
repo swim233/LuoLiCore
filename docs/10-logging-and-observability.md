@@ -43,6 +43,8 @@ turn 01J8…                                     kind=turn.start / turn.end
 | `quota.check` | info | scope, spent, limit, decision |
 | `quota.exceeded` | warn | scope, subject, spent, limit |
 | `turn.queued` / `turn.start` / `turn.end` | info | key, initiator, role, steps, costUsd, state |
+| `turn.wrap_up` | **warn** | chars（最后一步没有正文，补跑了一次收尾；失败时带 error） |
+| `turn.no_final_text` | **warn** | streamedChars, messages（补跑也没救回来，回落到流里攒到的文本） |
 | `ctx.open` | debug | baseCommit, claimed, snapshotTokens, snapshotMsgs |
 | `ctx.commit` | info | commitId, ordinals[from,to], fastForward |
 | `ctx.rebase` | **warn** | base, onto, skippedCommits[] |

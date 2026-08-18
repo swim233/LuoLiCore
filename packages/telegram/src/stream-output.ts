@@ -43,11 +43,28 @@ export function pickPlaceholder(texts: readonly string[] | undefined, pick: 'ran
 export class TelegramOutput {
   constructor(private readonly bot: Bot, private readonly chatId: string, private readonly options: StreamOutputOptions, private readonly onDeliveryError?: (error: unknown) => void,
     /** 起算点是用户那条消息的到达时刻，不是这个对象被构造的时刻：模型本来就想了 3 秒时不该再压 2 秒。 */
-    private readonly since: number = Date.now(), private readonly beforeSend?: (text: string) => Promise<string>) {}
+    private readonly since: number = Date.now(),
+    /**
+     * 插件的 `beforeSend` 钩子：**只在定稿时跑一次**。挂到每次流式编辑上会让它一轮触发十几次，
+     * 那是改语义不是修 bug。
+     */
+    private readonly beforeSend?: (text: string) => Promise<string>,
+    /**
+     * 同步、廉价的投递侧收口（当前是 `output.maxMentions`）：**每次刷新都跑**。
+     * 此前它和 `beforeSend` 合在一个 async 闭包里、只在 `send()` 里被调用，而流式那条路
+     * （下面两处 `splitTelegramText`）直接绕过去了 —— 于是「@ 全群上限」在每个流式轮次都没生效，
+     * 尽管 `bot.ts` 的注释写着它「在投递侧收口」。
+     */
+    private readonly sanitize?: (text: string) => string) {}
+
+  /** 每次刷新都要过的那一道。渲染前做，因为 `capMentions` 数的是正文里的 `@`，不是转义后的。 */
+  private guard(text: string): string {
+    return this.sanitize ? this.sanitize(text) : text;
+  }
 
   async send(text: string, replyToMessageId?: number): Promise<number[]> {
     await holdReply(this.since, this.options.replyDelayMs);
-    const finalText = this.beforeSend ? await this.beforeSend(text) : text;
+    const finalText = this.guard(this.beforeSend ? await this.beforeSend(text) : text);
     const parts = splitTelegramText(finalText, this.options.maxChars);
     const ids: number[] = [];
     // **只有第一条分片带引用**，与 `consume()` 的收尾分片一致：整份都带的话，一条被切成五段的
@@ -127,7 +144,7 @@ export class TelegramOutput {
         // （docs/14 T10），收益是长回复读起来是一句一句出来的，而不是一段一段跳。
         const atSentenceEnd = this.options.flushOnSentence === true && SENTENCE_END.test(text);
         if (messageIds.length && !atSentenceEnd && Date.now() - lastEdit < this.options.intervalMs) continue;
-        const rendered = splitTelegramText(text, this.options.maxChars);
+        const rendered = splitTelegramText(this.guard(text), this.options.maxChars);
         const before = messageIds.length;
         while (messageIds.length < rendered.length) {
           const index = messageIds.length;
@@ -153,7 +170,10 @@ export class TelegramOutput {
       if (placeholder) clearTimeout(placeholder);
     }
     if (this.options.mode === 'once' || !messageIds.length) return { text, interrupted, messageIds: await this.send(text + (interrupted ? '\n\n（生成中断）' : ''), replyToMessageId) };
-    const rendered = splitTelegramText(text + (interrupted ? '\n\n（生成中断）' : ''), this.options.maxChars);
+    // 定稿这一次才跑插件的 `beforeSend`（每帧都跑等于把钩子的语义从「一条消息一次」改成
+    // 「一次编辑一次」）。改写只影响发出去的文本，`text` 仍是模型的原话 —— 归档与上下文存原话。
+    const closing = text + (interrupted ? '\n\n（生成中断）' : '');
+    const rendered = splitTelegramText(this.guard(this.beforeSend ? await this.beforeSend(closing) : closing), this.options.maxChars);
     // 收尾也要走 deliver + 降级：这里抛出去会把一轮已经发出大半的回复整个记成 failed（docs/20 · W-TG-04）。
     for (let index = 0; index < rendered.length; index += 1) {
       if (index < messageIds.length) { await deliver(() => edit(messageIds[index]!, rendered[index]!)); continue; }

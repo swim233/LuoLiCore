@@ -160,8 +160,11 @@ export class ScheduledJobRunner {
       // **不包 untrusted()**：这条文本是 owner/trusted 自己排的任务，包起来等于告诉模型别理它。
       const trigger = this.#appendTrigger(job);
       triggerMessageId = trigger.id;
+      // 群名从库里读：这条路没有 Telegram update 可取，而 RUNTIME 的「会话」行要它。
+      // 权威副本是 `principals` 的 `chat:<id>`（`upsertSeen` 每条消息刷新一次 `display_name`）。
+      const chatTitle = this.dependencies.db.prepare("SELECT display_name FROM principals WHERE kind='chat' AND tg_id=?").pluck().get(job.chatId) as string | null;
       turn = await this.dependencies.context.openTurn({ chatId: job.chatId, threadId: job.threadId, key: job.key, initiatorUserId: job.createdBy,
-        effectiveRole: role, isPrivate, trigger, abortSignal: pending.controller.signal, config: chatConfig });
+        effectiveRole: role, isPrivate, trigger, ...(chatTitle ? { chatTitle } : {}), abortSignal: pending.controller.signal, config: chatConfig });
       this.dependencies.registry.finish(pendingId);
       const tracked = this.dependencies.registry.register({ id: turn.turnId, key: job.key, chatId: job.chatId, userId: job.createdBy, role }, live.concurrency.turnTimeoutMs);
       Object.assign(turn, { abortSignal: tracked.controller.signal });

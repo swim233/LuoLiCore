@@ -171,7 +171,7 @@ if (!config.trigger.private && !config.trigger.mention && !config.trigger.reply 
 }
 const toolRegistry = new ToolRegistry(log, approval,
   () => { const live = configStore.snapshot(); return { maxRegistered: live.tools.maxRegistered, maxCallsPerTurn: live.tools.maxCallsPerTurn, maxConsecutiveErrors: live.tools.maxConsecutiveErrors, maxOutputBytes: live.tools.exec.maxOutputBytes, defaultTimeoutMs: live.tools.defaultTimeoutMs }; },
-  () => configStore.snapshot().approval.rules, plugins);
+  () => configStore.snapshot().approval.rules, plugins, turns);
 toolRegistry.bindOverrides(() => configStore.snapshot().tools.overrides);
 // 吃 getter 而不是启动快照：sandbox.mode 是「出事时运维会去点的那个开关」，冻住它等于
 // 界面说改成功了、bash 照跑（docs/20 · W-CFG-02）。
@@ -197,7 +197,7 @@ if (!sandboxProbe.available && config.sandbox.mode === 'docker') log.event({ lev
 let bot: Bot | null = null;
 let poller: UpdatePoller | null = null;
 const telegramTools = process.env.BOT_TOKEN
-  ? new TelegramTools({ bot: () => bot, archive, maxMessageChars: () => configStore.snapshot().output.maxMessageChars })
+  ? new TelegramTools({ bot: () => bot, archive, maxMessageChars: () => configStore.snapshot().output.maxMessageChars, maxMentions: () => configStore.snapshot().output.maxMentions })
   : null;
 // 定时任务（docs/14 §2 Q4）。这里只**建**不**装**：`load()` 要等 bot 起来，否则第一批任务触发时
 // `telegram()` 还是 null，只会往日志里写一串 skipped。工具反过来在这里就得拿到 runner。
@@ -211,7 +211,7 @@ const scheduleRunner = new ScheduledJobRunner({
   estimateTurnCost: (inputTokens, key) => modelRegistry.estimate(readAppKv<string>(db, modelAliasKey(key)) ?? perChatConfig(configStore.snapshot(), key).agent.main.modelAlias, inputTokens),
   // 非流式：定时轮次没有 Telegram 流消费者，也没人盯着屏幕等增量。其余依赖与 `onTurn` 完全一致。
   runAgent: (turn, reservation) => { const live = turn.config as Readonly<typeof config>; return runMainAgent(turn, { config: live, db, registry: modelRegistry, tools: toolRegistry,
-    prompts: promptAssembler, documents: promptDocuments, skills, plugins, agents, customTools, ledger, context, quota, reservation, log, workspace: resolve(live.sandbox.workspaceDir, turn.chatId) }); },
+    prompts: promptAssembler, documents: promptDocuments, skills, plugins, agents, customTools, ledger, context, quota, reservation, log, turns, workspace: resolve(live.sandbox.workspaceDir, turn.chatId) }); },
 });
 registerBuiltins(toolRegistry, {
   // `tools.fs.allowHostFsForOwner`：owner 的 fs 工具 jail 到 `/` 而不是本会话 workspace。
@@ -251,7 +251,8 @@ const previewPrompt = (key: string, role: RuntimeTurnContext['effectiveRole']): 
   const contextRow = db.prepare('SELECT chat_id AS chatId,thread_id AS threadId FROM contexts WHERE key=?').get(key) as { chatId: string; threadId: number | null } | undefined;
   if (!contextRow) throw new Error('会话不存在');
   const latest = db.prepare('SELECT initiator_user_id AS userId FROM turns WHERE key=? ORDER BY COALESCE(started_at,queued_at) DESC,rowid DESC LIMIT 1').get(key) as { userId: string } | undefined;
-  const principal = db.prepare("SELECT chat_type AS chatType FROM principals WHERE kind='chat' AND tg_id=?").get(contextRow.chatId) as { chatType: string | null } | undefined;
+  // 群名也从这一行取：RUNTIME 的「会话」行要它，而预览必须逐字等于下一轮真正发出去的那一份。
+  const principal = db.prepare("SELECT chat_type AS chatType, display_name AS title FROM principals WHERE kind='chat' AND tg_id=?").get(contextRow.chatId) as { chatType: string | null; title: string | null } | undefined;
   const live = perChatConfig(configStore.snapshot(), key);
   const snapshot = context.materialize(key, null, live.context.cacheCommits);
   const turn = {
@@ -259,6 +260,7 @@ const previewPrompt = (key: string, role: RuntimeTurnContext['effectiveRole']): 
     initiatorUserId: latest?.userId ?? contextRow.chatId, effectiveRole: role,
     isPrivate: principal?.chatType ? principal.chatType === 'private' : !contextRow.chatId.startsWith('-'),
     baseCommitId: null, snapshot, delta: [], abortSignal: new AbortController().signal, config: live,
+    ...(principal?.title ? { chatTitle: principal.title } : {}),
   } satisfies RuntimeTurnContext;
   // 预览也会在 `toolRegistry` 里落一条按 turnId 挂的状态。turnId 是个常量所以不会堆积，
   // 但留着等于让下一次预览沿用上一次的工具调用计数 —— 顺手清掉（docs/22 · I-10）。
@@ -360,7 +362,7 @@ if (process.env.BOT_TOKEN) {
     estimateTurnCost: (inputTokens, key) => modelRegistry.estimate(readAppKv<string>(db, modelAliasKey(key)) ?? perChatConfig(configStore.snapshot(), key).agent.main.modelAlias, inputTokens),
     // 用 turn.config 而不是全局快照：本轮的 perChat 覆盖已经在 openTurn 时合并进去了。
     onTurn: (turn, reservation) => { const live = turn.config as Readonly<typeof config>; return streamMainAgent(turn, { config: live, db, registry: modelRegistry, tools: toolRegistry,
-      prompts: promptAssembler, documents: promptDocuments, skills, plugins, agents, customTools, ledger, context, quota, reservation, log, workspace: resolve(live.sandbox.workspaceDir, turn.chatId) }); } });
+      prompts: promptAssembler, documents: promptDocuments, skills, plugins, agents, customTools, ledger, context, quota, reservation, log, turns, workspace: resolve(live.sandbox.workspaceDir, turn.chatId) }); } });
   // `dropPendingOnStart`：停机期间积压的 update 直接丢掉，不补跑。默认关 —— 丢的是真实用户
   // 发过的消息。开它的场景是长时间停机后重启，不想让 bot 对着一小时前的话题连开几十轮。
   //

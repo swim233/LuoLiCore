@@ -99,7 +99,9 @@ describe('prompt.includeToolCatalog / prompt.runtimeBlock.*', () => {
     const assembler = new PromptAssembler();
     const input = { character: 'C', assist: 'A', catalog: '- read_file: 读文件', publicMemory: 'P', runtime: 'R', maxTokens: 12_000 };
     expect(assembler.build(input).instructions).toContain('=== TOOL CATALOG ===');
-    expect(assembler.build({ ...input, includeCatalog: false }).instructions).not.toContain('TOOL CATALOG');
+    // 判据是**块标记**而不是裸短语：KERNEL 正文里就提到「见 TOOL CATALOG」，按裸短语断言
+    // 会把那句话也算成「目录还在」。
+    expect(assembler.build({ ...input, includeCatalog: false }).instructions).not.toContain('=== TOOL CATALOG ===');
     // 一个工具都没有 ≠ 目录被关掉：前者那块空标题是有信息的，模型该知道自己没工具可用。
     expect(assembler.build({ ...input, catalog: '' }).instructions).toContain('=== TOOL CATALOG ===');
   });

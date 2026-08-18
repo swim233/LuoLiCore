@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AgentManager, Config, ContextEngine, FileTools, MemoryStore, ModelRegistry, QuotaGuard, QuotaReservation, Sandbox, SkillLoader, ToolRegistry, UsageLedger, LogSink } from '@luoli/core';
-import { DEFAULT_WEB_RETRY, arbitrateAsk, builtinPolicy, numberLines, readSlice, runHarness, runSubAgent, webFetch, webSearch, type WebRetryOptions } from '@luoli/core';
+import { DEFAULT_WEB_RETRY, NOTE_PREFIX, arbitrateAsk, builtinPolicy, numberLines, readSlice, runHarness, runSubAgent, webFetch, webSearch, type WebRetryOptions } from '@luoli/core';
 import type { ArchiveRepository, ArchivedMessage, ScopedArchiveRepository } from '@luoli/db';
 import { citeArchivedMessages } from './cite.js';
 import { registerScheduleTools, type ScheduleToolDependencies } from './schedule.js';
@@ -156,7 +156,7 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
   // 两个 web 工具自带预算（单次 timeoutMs × 最多 retries+1 次 + 退避），整体会比
   // `tools.defaultTimeoutMs` 长。给注册表报一份自己的账，别让兜底那道 race 在重试走完前先砍掉。
   const webBudgetMs = (web.retries + 1) * web.timeoutMs + 5000;
-  registry.register({ name: 'read_file', description: '读取工作目录或 skill:// 资源，支持 offset/limit 分页。正文每行带 `行号<TAB>` 前缀，那只是给你定位用的坐标，不是文件内容：写回文件时（edit_file 的 oldString/newString、write_file 的 content）一律不能带它。', inputSchema: z.object({ path: z.string(), offset: z.number().int().nonnegative().optional(), limit: z.number().int().positive().optional() }), policy: builtinPolicy('read_file'), sourcePriority: 100, untrustedOutput: true,
+  registry.register({ name: 'read_file', description: '读取工作目录或 skill:// 资源，支持 offset/limit 分页（知道路径要看内容时用它，不要为此起 bash 里的 cat/head）。正文每行带 `行号<TAB>` 前缀，那只是给你定位用的坐标，不是文件内容：写回文件时（edit_file 的 oldString/newString、write_file 的 content）一律不能带它。', inputSchema: z.object({ path: z.string(), offset: z.number().int().nonnegative().optional(), limit: z.number().int().positive().optional() }), policy: builtinPolicy('read_file'), sourcePriority: 100, untrustedOutput: true,
     execute: (input, context) => {
       if (!input.path.startsWith('skill://')) return dependencies.filesFor(context.workspace, context.turn.effectiveRole).read(input.path, input.offset, input.limit);
       const path = dependencies.skills.resolveResource(input.path, context.turn.effectiveRole);
@@ -169,11 +169,11 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
       const more = offset + slice.read < slice.size;
       return { ok: true, path: input.path, content: numberLines(slice.content, slice.firstLine), offset, bytes: Buffer.byteLength(slice.content), truncated: more, nextOffset: more ? offset + slice.read : null };
     } });
-  registry.register({ name: 'list_dir', description: '列出工作目录。', inputSchema: z.object({ path: z.string().default('.'), depth: z.number().int().min(1).max(5).default(1) }), policy: builtinPolicy('list_dir'), sourcePriority: 100,
+  registry.register({ name: 'list_dir', description: '列出工作目录下有什么（只想知道目录结构时用它，不要为此起 bash）。depth 默认 1，别一上来就摊开五层。', inputSchema: z.object({ path: z.string().default('.'), depth: z.number().int().min(1).max(5).default(1) }), policy: builtinPolicy('list_dir'), sourcePriority: 100,
     execute: (input, context) => dependencies.filesFor(context.workspace, context.turn.effectiveRole).list(input.path, input.depth) });
-  registry.register({ name: 'glob', description: '按 glob 模式查找工作目录文件。', inputSchema: z.object({ pattern: z.string(), path: z.string().default('.') }), policy: builtinPolicy('glob'), sourcePriority: 100, untrustedOutput: true,
+  registry.register({ name: 'glob', description: '按文件名形状找文件（知道名字或后缀、不知道在哪时用它；知道内容里有什么字就用 grep）。', inputSchema: z.object({ pattern: z.string(), path: z.string().default('.') }), policy: builtinPolicy('glob'), sourcePriority: 100, untrustedOutput: true,
     execute: (input, context) => dependencies.filesFor(context.workspace, context.turn.effectiveRole).glob(input.pattern, input.path) });
-  registry.register({ name: 'grep', description: '以正则搜索工作目录文本；glob 限定文件名，contextLines 附带命中行前后各若干行。', inputSchema: z.object({ pattern: z.string(), path: z.string().default('.'), glob: z.string().optional(), contextLines: z.number().int().min(0).max(10).default(0), ignoreCase: z.boolean().default(false) }), policy: builtinPolicy('grep'), sourcePriority: 100, untrustedOutput: true,
+  registry.register({ name: 'grep', description: '按内容搜工作目录里的文本（知道要找什么字、不知道在哪个文件时用它，不要为此起 bash 里的 rg/grep）。glob 限定文件名，contextLines 附带命中行前后各若干行。', inputSchema: z.object({ pattern: z.string(), path: z.string().default('.'), glob: z.string().optional(), contextLines: z.number().int().min(0).max(10).default(0), ignoreCase: z.boolean().default(false) }), policy: builtinPolicy('grep'), sourcePriority: 100, untrustedOutput: true,
     execute: (input, context) => dependencies.filesFor(context.workspace, context.turn.effectiveRole).grep(input.pattern, input.path, input.ignoreCase, input.glob, input.contextLines) });
   registry.register({ name: 'write_file', description: '原子写入工作目录文件，覆盖前自动备份。', inputSchema: z.object({ path: z.string(), content: z.string() }), policy: builtinPolicy('write_file'), sourcePriority: 100,
     approvalTargetExists: (input, context) => dependencies.filesFor(context.workspace, context.turn.effectiveRole).exists((input as { path: string }).path),
@@ -196,10 +196,10 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
   const bashSchema = (max: number) => z.object({ command: z.string(), timeoutMs: z.number().int().positive().max(max).optional(), description: z.string() });
   const pythonSchema = (max: number) => z.object({ code: z.string(), timeoutMs: z.number().int().positive().max(max).optional(), description: z.string() });
   const execMax = (context: ToolExecutionContext): number => (context.turn.config as Readonly<Config>).tools.exec.maxTimeoutMs;
-  registry.register({ name: 'bash', description: '在工作目录执行命令；非 owner 必须使用可用沙箱。', inputSchema: bashSchema(300_000), inputSchemaFor: (context) => bashSchema(execMax(context)), policy: builtinPolicy('bash'), sourcePriority: 100, timeoutMs: null,
+  registry.register({ name: 'bash', description: '在工作目录执行命令；非 owner 必须使用可用沙箱。留给真正需要执行的事（跑脚本、装依赖、处理数据）：读文件用 read_file、搜内容用 grep、找文件用 glob、看目录用 list_dir —— 那些工具带路径拦截、分页和统一的引用格式，用 cat/rg/ls 绕过去出错时也更难说清坏在哪一步。', inputSchema: bashSchema(300_000), inputSchemaFor: (context) => bashSchema(execMax(context)), policy: builtinPolicy('bash'), sourcePriority: 100, timeoutMs: null,
     available: (role, context) => dependencies.sandbox.plan(role, context.workspace).allowed,
     execute: async (input, context) => dependencies.sandbox.run(input.command, context.turn.effectiveRole, context.workspace, context.turn.abortSignal, input.timeoutMs, context.turn.turnId) });
-  registry.register({ name: 'python', description: '在工作目录执行 Python 代码；非 owner 必须使用可用沙箱。', inputSchema: pythonSchema(300_000), inputSchemaFor: (context) => pythonSchema(execMax(context)), policy: builtinPolicy('python'), sourcePriority: 100, timeoutMs: null,
+  registry.register({ name: 'python', description: '在工作目录执行 Python 代码；非 owner 必须使用可用沙箱。留给真正需要计算或处理数据的事：单纯读文件 / 搜内容 / 列目录一律走 read_file / grep / glob / list_dir。', inputSchema: pythonSchema(300_000), inputSchemaFor: (context) => pythonSchema(execMax(context)), policy: builtinPolicy('python'), sourcePriority: 100, timeoutMs: null,
     available: (role, context) => dependencies.sandbox.plan(role, context.workspace).allowed,
     execute: async (input, context) => {
       // 落成临时文件再跑（doc §3.3），不用 heredoc：`python3 - <<'PY'` 里正文只要出现一行 `PY`
@@ -294,7 +294,12 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
           const set = (context.turn.skillAllowedTools ??= new Set());
           for (const name of allowed) set.add(name);
         }
-        dependencies.context.appendDelta(context.turn, { id: crypto.randomUUID(), role: 'user', origin: 'note', parts: [{ type: 'text', text: String(result.body ?? '') }], textPreview: `Skill ${input.name}`, pruneLevel: 2 });
+        // 带来源标注：`role` 只能是 user/assistant/tool（provider 拒收 messages 里的 system，
+        // docs/02 不变量 15），而 `NOTE_PREFIX` 只对非 sendable role 生效 —— 够不着这一条。
+        // 不标的话模型看到的就是「用户发来一大段 skill 正文」，会把说明书当成用户的要求去执行。
+        // **不用 untrusted() 包**：skill 是本地可信资源，包起来等于告诉模型别照着做。
+        const body = `${NOTE_PREFIX}以下是 Skill「${input.name}」的正文，由系统按你的 load_skill 调用载入，不是用户发言。\n\n${String(result.body ?? '')}`;
+        dependencies.context.appendDelta(context.turn, { id: crypto.randomUUID(), role: 'user', origin: 'note', parts: [{ type: 'text', text: body }], textPreview: `Skill ${input.name}`, pruneLevel: 2 });
       }
       return result;
     } });

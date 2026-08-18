@@ -1,0 +1,95 @@
+import { describe, expect, it } from 'vitest';
+import { stepSeparatedText } from '@luoli/core';
+
+/**
+ * 回归：一轮 10 步里六步各吐一句旁白，用户收到的是**没有任何换行**的六句话，落库也是单个
+ * text part（logs/2026-08-18 · turn 01M09QBZVK…）。`result.textStream` 把 step 边界丢了，
+ * 投递侧那一行 `text +=`（`stream-output.ts`）于是无缝粘接。人格里「一句话一行」只管单步内。
+ */
+async function* parts(...items: Array<{ type: string; text?: string }>): AsyncGenerator<{ type: string; text?: string }> {
+  for (const item of items) yield item;
+}
+
+async function collect(stream: AsyncIterable<string>): Promise<string> {
+  let text = '';
+  for await (const chunk of stream) text += chunk;
+  return text;
+}
+
+describe('stepSeparatedText', () => {
+  it('inserts a blank line between two steps that both produced text', async () => {
+    const text = await collect(stepSeparatedText(parts(
+      { type: 'text-delta', text: '好呀，先看看怎么装 MCP。' },
+      { type: 'tool-call' }, { type: 'finish-step' },
+      { type: 'text-delta', text: '先确认这边有没有装 MCP 的入口。' },
+      { type: 'finish-step' },
+    )));
+    expect(text).toBe('好呀，先看看怎么装 MCP。\n\n先确认这边有没有装 MCP 的入口。');
+  });
+
+  it('does not double up when the model already ended its line', async () => {
+    const text = await collect(stepSeparatedText(parts(
+      { type: 'text-delta', text: '第一步说完了。\n' },
+      { type: 'finish-step' },
+      { type: 'text-delta', text: '第二步接着说。' },
+    )));
+    expect(text).toBe('第一步说完了。\n第二步接着说。');
+  });
+
+  it('keeps deltas inside one step glued together', async () => {
+    const text = await collect(stepSeparatedText(parts(
+      { type: 'text-delta', text: '同一' }, { type: 'text-delta', text: '步的' }, { type: 'text-delta', text: '增量' },
+    )));
+    expect(text).toBe('同一步的增量');
+  });
+
+  it('never leads with a separator when only later steps speak', async () => {
+    const text = await collect(stepSeparatedText(parts(
+      { type: 'reasoning', text: '想一想' }, { type: 'tool-call' }, { type: 'finish-step' },
+      { type: 'tool-call' }, { type: 'finish-step' },
+      { type: 'text-delta', text: '查完了，结果是这样。' },
+    )));
+    expect(text).toBe('查完了，结果是这样。');
+  });
+
+  it('separates the wrap-up retry from the last narration', async () => {
+    // 最后一步只有 reasoning、0 个 text token 时补跑的那一次（runtime 的 `wrapUpIfNeeded`）
+    // 必须同样带分隔，否则结论会直接贴在最后一句旁白后面。
+    const text = await collect(stepSeparatedText(
+      parts({ type: 'text-delta', text: '接下来改开关。' }, { type: 'finish-step' }),
+      async () => '开关都打开了，但 agent-browser 还是禁用状态。',
+    ));
+    expect(text).toBe('接下来改开关。\n\n开关都打开了，但 agent-browser 还是禁用状态。');
+  });
+
+  // 回归：判据曾是「保留末尾 4 个字符再跑 /\n\s*$/」。末尾窗口被空白填满时那个换行就看不见了，
+  // 于是照旧补一次空行 —— 正好是这个判断本该挡住的三连空行。
+  it('sees the newline even when trailing whitespace outruns a fixed window', async () => {
+    const text = await collect(stepSeparatedText(parts(
+      { type: 'text-delta', text: '接下来改开关。\n     ' },
+      { type: 'finish-step' },
+      { type: 'text-delta', text: '开关改好了。' },
+    )));
+    expect(text).toBe('接下来改开关。\n     开关改好了。');
+  });
+
+  it('reports every chunk it emitted, separators included', async () => {
+    // `final` 要解析成**整条发出去的文本**（旁白 + 分隔 + 结论），不是只用结论那一段：归档与
+    // 上下文存的必须是用户屏幕上那条消息。
+    const seen: string[] = [];
+    await collect(stepSeparatedText(
+      parts({ type: 'text-delta', text: '先看看。' }, { type: 'finish-step' }),
+      async () => '看完了。',
+      (chunk) => seen.push(chunk),
+    ));
+    expect(seen.join('')).toBe('先看看。\n\n看完了。');
+  });
+
+  it('emits nothing extra when the wrap-up produced nothing', async () => {
+    const text = await collect(stepSeparatedText(
+      parts({ type: 'text-delta', text: '就这样。' }, { type: 'finish-step' }),
+      async () => '',
+    ));
+    expect(text).toBe('就这样。');
+  });
+});
