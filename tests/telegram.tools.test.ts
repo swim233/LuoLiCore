@@ -68,10 +68,13 @@ describe('telegram side tools', () => {
     const active = new Set(wired.registry.activeNames('owner', wired.context));
     expect(family.filter((name) => !active.has(name))).toEqual([]);
     // 依赖齐全时，主 agent 能看到的应当就是策略表的全集减去：子 agent 专用的那两个，
-    // 以及 `spawn_harness` —— 这个 harness 是**默认关闭**的（`agent.harness.allowedDirs` 为空），
+    // `spawn_harness` —— 这个 harness 是**默认关闭**的（`agent.harness.allowedDirs` 为空），
     // 而且这条 turn 是群聊（`isPrivate: false`）。两个条件各自都足以把它挡在目录之外，
     // 这正是 docs/14 §2 Q8-a/b 要的：不进目录，而不是进了目录再报错。
-    expect(Object.keys(TOOL_POLICY).filter((name) => !active.has(name))).toEqual(['ask_parent', 'report_progress', 'spawn_harness']);
+    // 最后七个是自我扩展那一族：它们由 `registerAuthoringTools` 注册（这个 harness 只装了
+    // builtins），而且 `tools.selfExtend.enabled` 出厂就是关的 —— 两条各自都足以让它们缺席。
+    expect(Object.keys(TOOL_POLICY).filter((name) => !active.has(name))).toEqual(['ask_parent', 'report_progress', 'spawn_harness',
+      'define_tool', 'delete_tool', 'list_tools', 'write_skill', 'write_plugin', 'install_mcp', 'list_mcp']);
     closeDatabase(wired.db);
   });
 

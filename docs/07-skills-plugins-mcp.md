@@ -54,6 +54,7 @@ version: 1.0.0
 | `name` | ✓ | — | kebab-case，全局唯一，与目录名一致 |
 | `description` | ✓ | — | **决定模型何时加载它**。必须写清「做什么 + 什么时候用」。上限 500 字符 |
 | `allowed-tools` | ✗ | 继承角色白名单 | 载入后**收窄**可用工具（只能是角色白名单的子集，不能扩权） |
+| `requires-tools` | ✗ | — | 这份 skill 讲的是怎么用哪几个工具。**它们不在本轮可用集里时整份 skill 不进目录**，`load_skill` 也拒（`skill_requires_unavailable_tools`）。与 `allowed-tools` 方向相反：那个是「载入后只准用这些」，这个是「这些不在就别看我」 |
 | `min-role` | ✗ | `trusted` | 低于此角色的用户完全看不到该 skill |
 | `model` | ✗ | — | 载入后建议切换的模型别名（写入 RUNTIME 块建议，模型可用 `set_model` 采纳） |
 | `version` | ✗ | — | 展示用 |
@@ -312,8 +313,80 @@ const tools = {
   ...(cfg.skills.enabled ? { load_skill } : {}),    // skill 正文按需载入
   ...pluginTools(role, ctx),                        // <plugin>_<tool>
   ...(await mcpTools(role, ctx)),                   // mcp__<server>__<tool>
+  ...customTools(role, ctx),                        // custom_<name>（§6）
 };
 // 再按 activeTools 收窄（skill 的 allowed-tools ∩ 角色白名单）
 ```
 
-**总量护栏**：`tools.maxRegistered`（默认 80）。超出时按优先级截断（内建 > agent > plugin > skill > MCP），记 `warn` 日志并在 RUNTIME 块告知「部分扩展工具因数量上限未加载」。工具描述总 token 也计入 `prompt.maxTokens` 预算。
+**总量护栏**：`tools.maxRegistered`（默认 80）。超出时按优先级截断（内建 100 > agent 90 > `load_skill` 80 >
+plugin 60 > MCP 40 > 自定义 30），记 `warn` 日志并在 RUNTIME 块告知「部分扩展工具因数量上限未加载」。
+工具描述总 token 也计入 `prompt.maxTokens` 预算。自撰写的排在最后：模型可以一口气造二十个，
+让它先挤掉运维显式配的 MCP 是错的方向。
+
+**装配顺序上，自定义工具最后 reconcile**（`main.ts`）：`registerExternal` 拒绝跨来源覆盖，先注册的赢，
+于是重名时运维显式配的 plugin / MCP 压过模型自己造的那份 —— 方向是 fail-safe。
+
+---
+
+## 6. 自我扩展：模型给自己写工具 / skill / plugin / 装 MCP（M12）
+
+`docs/14 §2 Q13` 拍板后加的。四条通道复用的都是本文前面已有的运行时机制，模型侧只是多了七个工具
+（清单与权限档见 [05 §3.10](./05-tools-and-permissions.md)）。
+
+### 6.1 一条共同的纪律
+
+**模型能创建，但不能让自己创建的东西生效。**
+
+| 通道 | 落地状态 | 谁能让它生效 |
+|---|---|---|
+| `define_tool` → `custom_tools` 表 | `enabled=0` | owner 在扩展页点启用；或运维打开 `tools.selfExtend.customTools.autoEnable` |
+| `write_plugin` → `plugins/<name>/plugin.js` | 库里那行 `enabled=0` | 仅 owner（plugin 是进程内全信任 = root，§3.2 / [14 A27](./14-open-questions.md)） |
+| `install_mcp` → `mcp.servers` | `enabled: false` | 仅 owner |
+| `write_skill` → `SKILL.md` | 直接生效 | —— skill 是纯文本，不含可执行代码；约束是 `min-role` 有配置下限，且随包发的四份说明书不许覆写 |
+
+**改动正文会把前三者打回未启用。** 没有这条，「先定义无害的、拿到启用、再改成恶意的」直接走通。
+`write_plugin` 覆盖前还会把旧源码留一份 `plugin.js.bak-<ts>`（备份名不叫 `plugin.js`，`reconcile()`
+不会去加载它）：这个入口现在也给模型用，而被覆盖的可能是运维手写的那份，`plugin.js` 没有
+`write_file` 那样的回收站。
+`custom_tools` 靠 `definition_hash` 判，plugin 靠 `PluginManager.writeSource` 里的内容比对
+（那条不变量必须住在 manager 里：`reconcile()` 用 `sha256(文件+配置)` 当 ESM 的 cache-busting 签名，
+改一个**已启用** plugin 的文件之后下一次 reconcile 就把新代码 import 进本进程了）。
+
+### 6.2 自定义工具
+
+一个自定义工具 = `{名字, 描述, 参数 JSON Schema, runtime: bash|python, 脚本正文, minRole, scope}`，
+真相在 `custom_tools` 表（[03 §2.11](./03-data-model.md)），进程内那份是 `CustomToolManager` 的缓存、
+每次 `reconcile()` 都能从库里重建（[01 §3.1](./01-architecture.md) 单实例纪律）。
+
+- 注册：`jsonSchemaToZod`（与 MCP 共用）→ `registerExternal({source:'custom'})`，**逐行 try** ——
+  一份畸形的 params 不能带走其余工具，更不能从这里抛到启动路径上（同 `docs/27 · C-04`）。
+- 同步：每轮开始在 `runMainAgentInternal` 顶部调一次 `syncIfChanged()`，指纹是「条数 + max(updated_at)」。
+  **条数不能省**：删掉一行不会推高 max，只看时间戳的话一次删除永远同步不过去。
+  **只在主 agent 做** —— 子 agent 跑在父轮内部，在那里重扫会把父轮已冻结的 `toolSet` 弄脱节。
+- 执行与参数契约、以及那七道闸各自挡什么：[05 §3.10](./05-tools-and-permissions.md)。
+- `skills/` 与 `plugins/` 对 fs 工具一律关死，而且**由 `skills.dir` / `plugins.dir` 推出来**、
+  叠在运维那份 `tools.fs.denyGlobs` 之上（`selfAuthoringDenyGlobs()`）。写死在 schema 默认值里
+  的话，改过目录或自己写过一份 denyGlobs 的部署就一条都不生效 —— 而那正是最需要它的时候：
+  `allowHostFsForOwner` 打开时 `write_file` 能绕过 `writeSource` 直接改一个已启用 plugin 的源码。
+
+### 6.3 给模型的说明书
+
+四份说明书都带 `requires-tools`（[§2.1](#21-目录与格式anthropic-skillmd-兼容d14)），因为
+`min-role` 挡不住这件事：说明书讲的工具受 `tools.selfExtend.*` 控制、出厂是关的，而 skill 目录
+只按角色过滤。**实测代价**：模型在目录里读到「用 `install_mcp` 装 MCP」，去调却没有这个工具，
+于是花了八分钟用 `bash` 逆向代码库、从 `sessions` 表里取了一个 owner 会话去打 WebUI 的
+`PUT /api/config` + `POST /api/mcp` 把事办了。一份「教你用一个你没有的工具」的说明书，
+比没有这份说明书糟。
+
+四份随包提交在 `skills/` 的 skill：`writing-tools` / `writing-skills` / `writing-plugins` /
+`installing-mcp`，全部 `min-role: owner` + `requires-tools`。走的就是 §2.2 的渐进式披露 —— 平时只占目录里四行，
+正文靠 `load_skill` 拉。新工具的 `description` 结尾指路（「写之前先 `load_skill("writing-tools")`」）。
+
+`write_skill` 拒绝覆写这四个名字：模型把自己的说明书改坏之后，下一次它就是照着改坏的那份写的。
+
+### 6.4 WebUI
+
+扩展页第四类，与 Skill / Plugin / MCP 同一张卡片布局（[09 §3.10](./09-webui.md)）。
+两个动词分开：扩展页管「这个工具存不存在 / 审没审过」，工具页管「现在开着没有」。
+未审阅的行带独立徽标（不是「停用」——「没人看过」和「有人看过之后关掉了」是两回事），
+点开可以只读地看正文与参数；plugin 走 `GET /api/plugins/:name/source` 看源码。

@@ -612,6 +612,40 @@ CREATE INDEX ix_sched_state ON scheduled_jobs(state) WHERE state = 'active';
 CREATE UNIQUE INDEX ux_sched_name ON scheduled_jobs(key, name) WHERE state = 'active';
 ```
 
+### 2.13 自撰写工具
+
+> [14 §2 Q13](./14-open-questions.md) 拍板；语义见 [07 §6](./07-skills-plugins-mcp.md)（迁移 0008）。
+
+```sql
+-- 一条记录 = 一段参数化的 bash / python 脚本，注册进 ToolRegistry 时 source='custom'。
+-- 为什么是一张表：装载要的是「全部已启用的」，app_kv 没有前缀扫描也没有二级索引，单键存整个
+-- 数组会在并发轮次下丢更新；config_kv 更不行——每一行都会被 loadConfig 当成配置覆盖层解析。
+CREATE TABLE custom_tools (
+  name            TEXT PRIMARY KEY,      -- 不含 custom_ 前缀；注册名是 custom_<name>
+  description     TEXT NOT NULL,         -- ≤200 字符、单行：它进每一轮的 TOOL CATALOG
+  params_json     TEXT NOT NULL,         -- object 型 JSON Schema，注册时经 jsonSchemaToZod 转 zod
+  runtime         TEXT NOT NULL CHECK (runtime IN ('bash','python')),
+  body            TEXT NOT NULL,
+  min_role        TEXT NOT NULL DEFAULT 'owner' CHECK (min_role IN ('trusted','owner')),
+  scope           TEXT NOT NULL DEFAULT 'chat' CHECK (scope IN ('chat','global')),
+  owner_chat_id   TEXT,                  -- scope='chat' 时必填，见下面的 CHECK
+  timeout_ms      INTEGER,
+  enabled         INTEGER NOT NULL DEFAULT 0,   -- 落库即禁用；owner 在 WebUI 点开
+  definition_hash TEXT NOT NULL,         -- 覆盖 runtime/timeout/params/body；执行前比对，防轮内改写
+  created_by      TEXT NOT NULL,
+  created_turn    TEXT,
+  reviewed_at     INTEGER,               -- 「有人看过这段正文」的时间戳，改正文时清空
+  last_error      TEXT,
+  created_at      INTEGER NOT NULL,
+  updated_at      INTEGER NOT NULL,
+  CHECK ((scope = 'chat') = (owner_chat_id IS NOT NULL))
+);
+CREATE INDEX ix_custom_tools_enabled ON custom_tools(enabled) WHERE enabled = 1;
+```
+
+**`enabled` 与 `reviewed_at` 是两件事。** 前者是「现在跑不跑」，后者是「有没有人读过这段模型
+写下的正文」—— 界面靠这一对把「未审阅」和「审过之后被关掉」分开显示。
+
 **`messages.tg_message_id ≥ 2_000_000_000` 是合成消息的保留段。** 定时轮次的触发消息没有真实
 Telegram 消息号，从这个高位段按会话取 `MAX+1`。别在这个区间里写别的东西 —— 撞号时
 `append` 的 `INSERT OR IGNORE` 会静静返回既有行，而那正是「一条真实用户消息凭空消失」的成因

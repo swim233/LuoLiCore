@@ -8,7 +8,7 @@ export interface ToolPolicyEntry {
   minRole: Role;
   approval: ApprovalPolicy;
   scope: ToolScope;
-  source: 'builtin' | 'agent' | 'plugin' | 'mcp';
+  source: 'builtin' | 'agent' | 'plugin' | 'mcp' | 'custom';
 }
 
 export const TOOL_POLICY = {
@@ -59,6 +59,19 @@ export const TOOL_POLICY = {
   // 在 `available()` 里 —— 它们判的是本轮上下文与配置，不是角色。
   // **它内部的工具调用不受这套策略约束**（docs/14 T17）：本系统看不见 harness 的内部行为。
   spawn_harness: { minRole: 'owner', approval: 'always', scope: 'global', source: 'agent' },
+  // M12 · 自我扩展（docs/07 §6）。七条全部 `owner`，理由同 `spawn_harness`：`resolveEffectiveRole`
+  // 会把不受信群里的 owner 压平，所以这一档实际含义是「owner 且在 owner 信任的会话里」。
+  //
+  // 四个写工具是 `approval: 'always'`。owner 因 `approval.skipForOwner`（默认 true）通常无感，
+  // 但这一档在表里是诚实的，并且给了运维一个真实的杠杆：关掉 `skipForOwner` 之后每一次自撰写
+  // 都要点头。**它不是这套东西的主闸** —— 主闸是「落库即禁用，owner 在 WebUI 点开」。
+  define_tool: { minRole: 'owner', approval: 'always', scope: 'global', source: 'builtin' },
+  delete_tool: { minRole: 'owner', approval: 'always', scope: 'global', source: 'builtin' },
+  list_tools: { minRole: 'owner', approval: 'never', scope: 'global', source: 'builtin' },
+  write_skill: { minRole: 'owner', approval: 'always', scope: 'global', source: 'builtin' },
+  write_plugin: { minRole: 'owner', approval: 'always', scope: 'global', source: 'builtin' },
+  install_mcp: { minRole: 'owner', approval: 'always', scope: 'global', source: 'builtin' },
+  list_mcp: { minRole: 'owner', approval: 'never', scope: 'global', source: 'builtin' },
 } as const satisfies Record<string, ToolPolicyEntry>;
 
 export type ToolName = keyof typeof TOOL_POLICY;

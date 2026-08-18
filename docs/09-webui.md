@@ -258,7 +258,7 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
 - 权限矩阵只读视图：把 `TOOL_POLICY` 渲染成 [05 §4](./05-tools-and-permissions.md#4-权限矩阵权威表) 那张表，便于核对；可切「以某角色视角」预览可用工具集。
 
 ### 3.7 工具与沙箱
-- 工具表：名称、来源（builtin/plugin/skill/mcp）、minRole、审批策略、作用域、启停状态、近 7 天调用次数与失败率、平均耗时。
+- 工具表：名称、来源（builtin/agent/plugin/mcp/custom）、minRole、审批策略、作用域、启停状态、近 7 天调用次数与失败率、平均耗时。
   `GET /api/tools` 除策略外还返回每个工具当前的 `enabled`（来自 `tools.overrides`）——
   只给静态策略表的话，页面显示的东西与运行时无关。
 - 点任一行打开二级菜单（`UiModal`）。**来源与作用域只读**：`source` 由注册方式决定，`scope`
@@ -280,8 +280,15 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
   - **`approvalFor` 的抬档不受覆盖影响**：覆盖设的是**基准档**，`memory_write` 这类靠
     `approvalFor` 把自己抬进审批的工具，基准改成 `never` 也照样抬（`ToolRegistry` 取最严者）。
   - `timeoutMs` 只对声明了超时的工具有效。`bash` / `python` / `spawn_agent` / `spawn_harness` /
-    `ask_parent` 声明的是 `timeoutMs: null`（它们各自有自己的硬期限），界面对这几个置灰并注明
-    原因 —— 从外面给它们套一层 race 会在它们自己的超时之前把调用砍掉。
+    `ask_parent` 以及全部 `custom_*` 声明的是 `timeoutMs: null`（它们各自有自己的硬期限），界面对
+    这几个置灰并注明原因 —— 从外面给它们套一层 race 会在它们自己的超时之前把调用砍掉。
+    自定义工具自己的期限在 `custom_tools.timeout_ms` 上，由 `Sandbox.run` 钳在
+    `tools.exec.maxTimeoutMs` 内执行，与 `bash` 同构。
+  - **自定义工具（`custom_*`）的「代码默认」来自模型声明的那份**，因此「已放宽」红标在这里的含义是
+    「运维把它调得比模型声明的更松」。而无论怎么覆盖，它的角色地板都焊在 `available()` 里
+    （不低于 `bash` 的门槛）—— 这正是上面那条「覆盖绕不过 `available()`」的又一个实例
+    （[05 §3.10](./05-tools-and-permissions.md)）。它的存废与复审在扩展页，不在这里：
+    这一页管「现在开着没有」，那一页管「这个工具存不存在、审没审过」。
 - 沙箱设置（已实现，在工具表下方）：`mode` 单选、容器网络、镜像、`dockerBin`、工作目录与
   **宿主工作目录**、内存 / CPU / 进程数 / tmpfs、`readOnlyRoot`、`bypassRoles`（多选）。
   写走 `PUT /api/sandbox`（点分键相对 `sandbox`），`sandbox` 在热更新白名单里，下一次工具调用即生效。
@@ -305,9 +312,9 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
   一律记成「取决于运行时」：试跑没有真实执行上下文，含糊其辞比编一个答案好。
   规则本身仍在「全部配置」的 `approval.rules` 里编辑。
 
-### 3.8 扩展（Skills / Plugins / MCP）
+### 3.8 扩展（Skills / Plugins / MCP / 自定义工具）
 
-三类扩展继续共用卡片网格，但操作按各自真实生命周期区分：
+四类扩展继续共用卡片网格，但操作按各自真实生命周期区分：
 
 - **Skills**：name、description、min-role、状态、允许工具、模型建议与附属文件；可 `[新建]`、
   `[编辑]` 正文/frontmatter、启停和删除。`GET /api/skills/:name` 返回正文与文件清单；
@@ -315,6 +322,18 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
   `SKILL.md`，随后重扫并同步数据库。新建时未指定 `min-role` 则热读 `skills.defaultMinRole`。
 - **Plugins**：name、version、minRole、load_error；启用 plugin 会执行全信任代码，因此二次确认。
   启停与重载继续走 `PATCH /api/plugins/:name` / `POST /api/plugins/:name/reload`。
+  模型现在能写 `plugin.js`（[07 §6](./07-skills-plugins-mcp.md)），所以加了两个端点：
+  `GET /api/plugins/:name/source` 只读地摊开源码 —— 没有它，「启用前先看过源码」就只是句口号；
+  `DELETE /api/plugins/:name` 连目录带库里那行一起删。
+- **自定义工具**（模型自撰写的沙箱脚本）：卡片显示 `custom_<name>`、描述、runtime、最低角色与
+  作用域。**「未审阅」是独立于「停用」的一档** —— 「没人看过」和「有人看过之后关掉了」是两回事，
+  混成一个标签运维就分不清哪些在等自己。点 `[眼睛]` 只读地看参数 schema 与脚本正文，
+  确认后在同一个对话框里启用（`PATCH /api/custom-tools/:name`，顺手盖 `reviewed_at`，
+  随即 `reconcile()` —— 只改库不重扫的话，界面说启用了而模型下一轮还是看不见）。
+  启用一段模型写的脚本记 **warn** 级 `webui.action`，跟放宽工具权限同一档。
+  `DELETE /api/custom-tools/:name` 连注册一起摘掉。
+  **正文与参数在这里是只读的**：顺手改一行会让 `definition_hash` 与模型以为的那份定义脱节，
+  要改就让模型改，或者直接删。
 - **MCP**：卡片显示 transport、连接状态、失败原因、最小角色与发现到的工具名；可新建、编辑、启停、
   删除和重连。表单按 stdio / Streamable HTTP 切换 command、args、env 或 url、headers，并覆盖
   minRole、toolAllow、toolDeny、timeoutMs。CRUD 写入 `mcp.servers` 配置覆盖与 revision，发

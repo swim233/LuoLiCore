@@ -181,7 +181,13 @@ export class Sandbox {
     return `ulimit ${limits.join(' ')}; exec /bin/sh -c ${JSON.stringify(command)}`;
   }
 
-  async run(command: string, role: Role, workspace: string, abortSignal: AbortSignal, timeoutMs = this.#cfg().defaultTimeoutMs, turnId = 'adhoc'): Promise<SandboxResult> {
+  /**
+   * @param extraEnv 追加给子进程的环境变量。**两条路都不经过 shell 解析** —— docker 走
+   *   `-e k=v` 的 argv，宿主/jail 走 `spawn` 的 options —— 所以这是把模型给的值交进脚本时
+   *   唯一不需要做引号决策的通道。键名白名单在调用方（`CustomToolManager`）那一层，这里只负责
+   *   「叠加在既有三键白名单之上」：`BOT_TOKEN` / `LUOLI_MASTER_KEY` 仍然进不来。
+   */
+  async run(command: string, role: Role, workspace: string, abortSignal: AbortSignal, timeoutMs = this.#cfg().defaultTimeoutMs, turnId = 'adhoc', extraEnv?: Readonly<Record<string, string>>): Promise<SandboxResult> {
     if (abortSignal.aborted) return { ok: false, exitCode: null, stdout: '', stderr: 'cancelled', truncated: false, durationMs: 0, killed: true, oom: false };
     const plan = this.plan(role, workspace);
     if (!plan.allowed) {
@@ -201,6 +207,9 @@ export class Sandbox {
     this.#seq += 1;
     const name = `luoli-sbx-${turnId}-${this.#seq}`;
     const dockerArgs = ['run', '--rm', '--name', name, `--network=${this.#cfg().network}`, `--memory=${this.#cfg().memoryMb}m`, `--memory-swap=${this.#cfg().memoryMb}m`, `--cpus=${this.#cfg().cpus}`, `--pids-limit=${this.#cfg().pidsLimit}`, '--cap-drop=ALL', '--security-opt=no-new-privileges', '--user=1000:1000', `--tmpfs=/tmp:rw,size=${this.#cfg().tmpfsMb}m,noexec`, '-v', `${mounted}:/workspace:rw`, '-w', '/workspace', '-e', 'HOME=/workspace', '-e', 'LANG=C.UTF-8'];
+    // 追加 env 必须在 push image 之前：image 之后的 argv 是**容器里的命令**，`-e` 落到那边就成了
+    // 传给 `timeout` 的参数。
+    for (const [key, value] of Object.entries(extraEnv ?? {})) dockerArgs.push('-e', `${key}=${value}`);
     if (this.#cfg().readOnlyRoot) dockerArgs.push('--read-only');
     dockerArgs.push(this.#cfg().image, 'timeout', '-s', 'KILL', String(Math.ceil(timeout / 1000)), 'sh', '-c', command);
     // 子进程 env 白名单：只这三个字面量。此前后面还接着 `&& !/(TOKEN|KEY|SECRET|LUOLI)/i.test(key)`
@@ -209,7 +218,7 @@ export class Sandbox {
     const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => ['PATH', 'LANG', 'TZ'].includes(key)));
     const child = plan.mode === 'docker'
       ? spawn(this.#cfg().dockerBin, dockerArgs, { stdio: ['ignore', 'pipe', 'pipe'] })
-      : spawn('/bin/sh', ['-c', plan.mode === 'jail' ? this.#jailed(command, timeout) : command], { cwd: workspace, env: { ...env, HOME: workspace }, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+      : spawn('/bin/sh', ['-c', plan.mode === 'jail' ? this.#jailed(command, timeout) : command], { cwd: workspace, env: { ...env, HOME: workspace, ...extraEnv }, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
     const started = performance.now();
     const cap = this.#cfg().maxOutputBytes;
     const stdoutDecoder = new StringDecoder('utf8');

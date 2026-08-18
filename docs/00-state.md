@@ -7,7 +7,7 @@
 > 想知道现在的状态只看本文。反过来，本文**不重抄**别处已经由测试焊住的清单，只指过去：
 > 同一个事实有两份副本，迟早会漂。上一次漂的代价是「未接线配置键」在四个地方有三个数字。
 >
-> 核对时间：2026-08-18（第九轮整改后）。每一条都回代码查过，不采信文档自述。
+> 核对时间：2026-08-18（第九轮整改后 + M12 自我扩展落地）。每一条都回代码查过，不采信文档自述。
 
 ---
 
@@ -18,7 +18,7 @@
 | 问题 | 权威 | 由什么焊住 |
 |---|---|---|
 | 哪些配置键还没接线 | [11 §2.0.1](./11-config-reference.md)（当前 10 条，每条写明为什么留着） | `tests/config.test.ts` —— 白名单每条必须在 `docs/11` 标记，且标注要跟着 `HOT_RELOADABLE_CONFIG_KEYS` |
-| 验收条目的勾选状态 | [13](./13-acceptance-criteria.md)（当前 **147 / 426**） | `tests/acceptance.test.ts` —— 只有标 `(自动)` 且点名真实用例文件的能勾，签署表分子分母自动核对 |
+| 验收条目的勾选状态 | [13](./13-acceptance-criteria.md)（当前 **159 / 439**） | `tests/acceptance.test.ts` —— 只有标 `(自动)` 且点名真实用例文件的能勾，签署表分子分母自动核对 |
 | WebUI 控制面够不着什么 | [21](./21-webui-coverage-gaps.md) | 无自动约束（人工复算，方法见其 §1） |
 | 某行代码为什么长这样 | [`reviews/`](./reviews/) 里的条目编号 | `tests/docs.test.ts` —— 编号被源码注释大量引用，删了或改了会报错 |
 
@@ -34,7 +34,7 @@
 
 | 编号 | 欠什么 | 实测 | 前置 / 影响 |
 |---|---|---|---|
-| `D-01` | 裸 SQL 散在仓储层之外 | **165 条语句 / 16 个文件**（`app.ts` 一个就占 76 条）。`reviews/27` 记的是「40+」，已经涨了 | 先做这条。`tests/db.isolation.test.ts` 的按 chat 隔离断言只覆盖得到 `packages/db` 里的查询，仓储外的这 165 条**一条都没被那道断言覆盖** |
+| `D-01` | 裸 SQL 散在仓储层之外 | **165 条语句 / 16 个文件**（`app.ts` 一个就占 76 条）。`reviews/27` 记的是「40+」，已经涨了；M12 把 `writeConfigRows` 下沉进了 `packages/db`，`custom_tools` 也是从头就走 `CustomToolRepository`，这一条没有再被加高 | 先做这条。`tests/db.isolation.test.ts` 的按 chat 隔离断言只覆盖得到 `packages/db` 里的查询，仓储外的这 165 条**一条都没被那道断言覆盖** |
 | `D-04` | `composeRuntime` 没抽出来 | 函数不存在；`apps/bot/src/main.ts` 445 行全是装配 | 依赖 `D-01`。抽出来之后集成测试才装得起运行时 —— 现在 `I-10` 那条改动就是因此没有用例覆盖 |
 | `D-02` | `ConsoleView.vue` 拆分 | **2916 行**。`reviews/25 §8` 记的是「1700+」，**已经长了 1200 行** | 前置条件是 14 条渲染用例，目前 `tests/webui/console.render.test.ts` 有 4 条（逐个切 14 个导航页、导航项与分支一一对应，外加设置页四个二级 tab 的同两条）。**这是硬前置**：上一次没有用例就拆，14 个控制台页面全变空白（`reviews/24 · D-UI-01`）。设置页那两条是照着同一个形状写的，拆到哪个页面就先按那个形状补一条 |
 
@@ -58,6 +58,7 @@ Telegram 侧没有「发一条带选项的消息、等人点、把结果回灌�
 | 工具策略覆盖层刚落地，`TOOL_POLICY` 不再是唯一真相 | `tools.overrides.<name>` 现在收 `enabled` / `minRole` / `approval` / `timeoutMs`；合并只有一份（`effectiveToolPolicy`，`packages/core/src/tools/policy.ts`），registry 与 `GET /api/tools` 共用 | 这是对 [09 §3.7](./09-webui.md) 旧决定的**有意推翻**（原文见 [21 §5](./21-webui-coverage-gaps.md) 那条「已推翻」）。改工具权限相关代码前先看那三条不变量：覆盖绕不过 `available()`、`approvalFor` 抬档只升不降、`timeoutMs: null` 的工具不吃超时覆盖。**读 minRole/approval 一律走 `ToolRegistry.effectivePolicy()`**，直接读 `tool.policy` 就是绕过覆盖层 |
 | 验收条目 274 条未勾 | 其中人工条目一律保持未勾（要人签字，不是测试的事）；其余是没有对应 vitest 用例的 `(自动)` 条目 | 勾选形式由 `tests/acceptance.test.ts` 定死，勾之前先写用例 |
 | 10 条配置键未接线 | 见 [11 §2.0.1](./11-config-reference.md)，每条写明「暂时没做」还是「不该在这一层做」 | 摘键之前先看 [21 §1](./21-webui-coverage-gaps.md) 的复算方法 |
+| 自我扩展刚落地（M12），四条通道默认全关 | `tools.selfExtend.*` 出厂 `enabled: false`；打开之后模型能写自定义工具 / skill / plugin，能登记 MCP server | 主闸不是审批而是「落库即禁用，owner 在扩展页点开」。动这一块之前先读 [14 T18/T19](./14-open-questions.md)：**授权时点与执行时点是分离的**，而 `requireSandbox` 默认关时自定义工具就是调用者的 `bash`（因而能直接写 `data/luoli.db` 绕开启用闸）|
 
 ---
 

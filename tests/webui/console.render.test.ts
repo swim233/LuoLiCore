@@ -59,7 +59,7 @@ function responseFor(url: string): unknown {
   const path = url.split('?')[0]!;
   if (path in RESPONSES) return RESPONSES[path];
   const listLike = ['/api/principals', '/api/providers', '/api/logs', '/api/chats', '/api/usage', '/api/skills', '/api/plugins',
-    '/api/mcp', '/api/agents', '/api/approvals', '/api/tasks', '/api/prompts', '/api/models', '/api/aliases'];
+    '/api/mcp', '/api/custom-tools', '/api/agents', '/api/approvals', '/api/tasks', '/api/prompts', '/api/models', '/api/aliases'];
   return listLike.includes(path) ? [] : {};
 }
 

@@ -900,7 +900,9 @@
                     "**/.git/config",
                     "<root>/config/**",
                     "<root>/data/luoli.db*",
-                    "<root>/memory/**"
+                    "<root>/memory/**",
+                    "<root>/skills/**",
+                    "<root>/plugins/**"
                   ],
                   "description": "文件工具一律拒绝访问的 glob 列表，一行一条；<root> 指仓库根。密钥、私钥、数据库与配置目录默认在内，删条目等于放开对应的读写。"
                 },
@@ -1054,6 +1056,129 @@
                   "type": "string",
                   "default": "",
                   "description": "搜索 API 的密钥。★ 与 provider key 不同，它明文存在配置里，建议写成 ${env:BRAVE_API_KEY} 这样的环境变量引用而不是直接落库。"
+                }
+              },
+              "additionalProperties": false,
+              "default": {}
+            },
+            "selfExtend": {
+              "type": "object",
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "自我扩展总开关：模型能不能给自己写工具 / 写 skill / 写 plugin / 装 MCP。默认关。关掉之后那七个工具整体不进工具目录，已经启用的自定义工具也一并消失。"
+                },
+                "customTools": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean",
+                      "default": false,
+                      "description": "允许模型用 define_tool 把一段 bash / python 脚本注册成自己的工具（名字带 custom_ 前缀）。"
+                    },
+                    "autoEnable": {
+                      "type": "boolean",
+                      "default": false,
+                      "description": "模型新定义的工具是否立即可用。★ 默认关，也就是要 owner 在扩展页看过正文再点启用。打开它等于让「网页或群聊里的一段注入 → define_tool → 下一轮成为持久能力」这条链上没有人。"
+                    },
+                    "requireSandbox": {
+                      "type": "boolean",
+                      "default": false,
+                      "description": "打开后，沙箱不生效时（owner 命中 sandbox.bypassRoles，或 sandbox.mode=none）自定义工具一律不可用。此时它严格弱于 bash；关着则与 bash 一视同仁，正文可以在宿主上直接跑。"
+                    },
+                    "maxTools": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "default": 20,
+                      "description": "自定义工具的数量上限。撞上之后 define_tool 在定义期就报错，让模型先删一个。"
+                    },
+                    "maxBodyChars": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "default": 8000,
+                      "description": "单个自定义工具脚本正文的字符上限。"
+                    },
+                    "defaultMinRole": {
+                      "type": "string",
+                      "enum": [
+                        "trusted",
+                        "owner"
+                      ],
+                      "default": "owner",
+                      "description": "模型没指定时，新工具的最低调用角色。无论怎么配都不会低于 bash 的门槛 —— 一个自定义工具就是一段 shell。"
+                    },
+                    "timeoutMs": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "default": 60000,
+                      "description": "自定义工具没指定超时时用的默认值（毫秒），最终仍封顶在 tools.exec.maxTimeoutMs。"
+                    }
+                  },
+                  "additionalProperties": false,
+                  "default": {}
+                },
+                "skills": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean",
+                      "default": false,
+                      "description": "允许模型用 write_skill 给自己写 SKILL.md。skill 是纯文本说明书，不含可执行代码。"
+                    },
+                    "minRole": {
+                      "$ref": "#/definitions/LuoLiConfig/properties/access/properties/defaultUserRole",
+                      "default": "trusted",
+                      "description": "模型写出来的 skill 的 min-role 下限：它可以写得更严，不能写得更松。"
+                    }
+                  },
+                  "additionalProperties": false,
+                  "default": {}
+                },
+                "mcp": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean",
+                      "default": false,
+                      "description": "允许模型用 install_mcp 登记 MCP server。登记下来一律是禁用状态，要 owner 在扩展页确认后才会连接。"
+                    },
+                    "allowTransports": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "enum": [
+                          "stdio",
+                          "http"
+                        ]
+                      },
+                      "default": [
+                        "stdio",
+                        "http"
+                      ],
+                      "description": "允许模型登记哪几种 transport。★ stdio 是一条模型发明的命令行，启用后以 bot 进程的身份跑在沙箱之外 —— 只留 http 可以把这一类整体挡掉。"
+                    }
+                  },
+                  "additionalProperties": false,
+                  "default": {}
+                },
+                "plugins": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean",
+                      "default": false,
+                      "description": "允许模型用 write_plugin 写 plugins/<name>/plugin.js。★ plugin 在 bot 进程里全信任运行，等于 root；写下来的文件一律禁用，只有 owner 在扩展页读过源码才能启用。"
+                    },
+                    "maxBodyChars": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "default": 200000,
+                      "description": "单个 plugin.js 的字符上限。"
+                    }
+                  },
+                  "additionalProperties": false,
+                  "default": {}
                 }
               },
               "additionalProperties": false,
