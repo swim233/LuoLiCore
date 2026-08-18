@@ -137,4 +137,28 @@ describe('waiting placeholder text', () => {
     await new TelegramOutput(bot, 'chat', wordy, undefined, Date.now()).consume(ticker(['A', 'B', 'C', 'D', 'E', 'F'], 30));
     expect(calls.filter((call) => call.kind === 'edit').map((call) => call.text)).toContain('ABCDE');
   });
+
+  /**
+   * 回归：`beforeSend` 与 `capMentions` 此前合在一个 async 闭包里、只被 `send()` 调用，而流式
+   * 编辑路径直接调 `splitTelegramText` —— 于是 `output.maxMentions` 在**每个流式轮次**都没生效，
+   * 尽管 `bot.ts` 的注释写着它「在投递侧收口」。现在拆成两个回调：sanitize 每帧跑、beforeSend 定稿跑。
+   */
+  it('applies the sync guard on every flush and the plugin hook only once', async () => {
+    const calls: Call[] = [];
+    const { bot } = fakeBot(calls);
+    let hookCalls = 0;
+    const fast = { ...options, replyDelayMs: 0, bufferMs: 0, intervalMs: 1, minDeltaChars: 1 };
+    const result = await new TelegramOutput(bot, 'chat', fast, undefined, Date.now(),
+      async (text) => { hookCalls += 1; return `${text}已过钩子`; },
+      (text) => text.replaceAll('@everyone', '各位')).consume(ticker(['@everyone 甲', '。@everyone 乙', '。丙'], 30));
+    // 每一次投递出去的文本都过了同步那道，中途的编辑也不例外。
+    for (const call of calls) expect(call.text).not.toContain('@everyone');
+    expect(calls.some((call) => call.text.includes('各位'))).toBe(true);
+    expect(hookCalls).toBe(1);
+    expect(calls.at(-1)!.text).toContain('已过钩子');
+    // 中途的编辑不该带上钩子的产物：钩子只在定稿那一次跑。
+    expect(calls.slice(0, -1).every((call) => !call.text.includes('已过钩子'))).toBe(true);
+    // 归档与上下文存的是模型原话，不是改写后的文本。
+    expect(result.text).toBe('@everyone 甲。@everyone 乙。丙');
+  });
 });

@@ -1,7 +1,7 @@
 import { InputFile, type Api, type Bot } from 'grammy';
 import type { TelegramTarget, TelegramToolBridge } from '@luoli/core';
 import type { ArchiveRepository } from '@luoli/db';
-import { sendWithFallback, splitTelegramText } from './output.js';
+import { capMentions, sendWithFallback, splitTelegramText } from './output.js';
 
 /**
  * Telegram 只接受这一组固定的 reaction emoji（Bot API `ReactionTypeEmoji`）；别的一律 400
@@ -24,6 +24,11 @@ export interface TelegramToolsDependencies {
   bot(): Bot | null;
   archive: ArchiveRepository;
   maxMessageChars(): number;
+  /**
+   * `output.maxMentions`。这条路此前**不过**这道闸，于是「投递侧收口」只收住了两条出站路径中的
+   * 那两条：模型（或 `<untrusted-content>` 里被注入的一句话）调 `send_message` 就能绕开 @ 上限。
+   */
+  maxMentions(): number;
 }
 
 export class TelegramTools implements TelegramToolBridge {
@@ -31,7 +36,10 @@ export class TelegramTools implements TelegramToolBridge {
 
   async sendMessage(target: TelegramTarget, text: string): Promise<object> {
     return this.guard(async (api) => {
-      const parts = splitTelegramText(text, this.dependencies.maxMessageChars());
+      // 三条出站路径都要过 @ 上限这道闸，不然它不是边界只是建议。归档仍存收口前的 `text`
+      // （见下面那条注释），改写只影响真正发出去的那份。
+      const capped = capMentions(text, this.dependencies.maxMentions());
+      const parts = splitTelegramText(capped, this.dependencies.maxMessageChars());
       if (!parts.length) return { ok: false, error: 'empty_text' };
       const messageIds: number[] = [];
       for (const part of parts) {

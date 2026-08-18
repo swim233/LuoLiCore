@@ -4,6 +4,7 @@ import type { Sqlite } from '@luoli/db';
 import type { RuntimeTurnContext } from '@luoli/shared';
 import type { AgentDefinition, AgentManager, AgentRun } from './manager.js';
 import { type ModelRegistry, aliasModel } from './runtime.js';
+import { SUBAGENT_KERNEL } from '../prompt/assembler.js';
 import type { QuotaGuard, QuotaReservation } from '../ledger/quota.js';
 import type { ToolExecutionContext, ToolRegistry } from '../tools/registry.js';
 import type { UsageLedger } from '../ledger/usage.js';
@@ -48,7 +49,11 @@ export async function runSubAgent(run: AgentRun, definition: AgentDefinition, ta
   const perTurn = (turn.config as { quota: { perTurn: { maxSteps: number; maxCostUsd: number } } }).quota.perTurn;
   let stepNumber = 0;
   // 与主 agent 同理：重试归 fallbackLanguageModel，SDK 那层再叠一遍等于把一次故障的墙钟乘三。
-  const agent = new ToolLoopAgent({ model, ...dependencies.registry.settings(alias), maxRetries: 0, instructions: definition.instructions, tools: toolSet, activeTools: Object.keys(toolSet), stopWhen: stepCountIs(Math.min(definition.maxSteps, perTurn.maxSteps)),
+  // 子 agent 此前只拿到 `definition.instructions`（配置里通常是一句话），既不知道
+  // `<untrusted-content>` 的边界语义，也不知道工具报错该重试几次 —— 而它跑的是同一批工具、
+  // 读的是同一批网页。`docs/06 §3.1` 的注入矩阵早写着这里该有 `KERNEL(精简)`。
+  const instructions = `${SUBAGENT_KERNEL}\n\n${definition.instructions}`;
+  const agent = new ToolLoopAgent({ model, ...dependencies.registry.settings(alias), maxRetries: 0, instructions, tools: toolSet, activeTools: Object.keys(toolSet), stopWhen: stepCountIs(Math.min(definition.maxSteps, perTurn.maxSteps)),
     prepareStep: async () => dependencies.ledger.turnCost(turn.turnId) >= perTurn.maxCostUsd ? { activeTools: [], toolChoice: 'none' as const } : {},
     onStepEnd: async (step) => {
       const currentStep = ++stepNumber;

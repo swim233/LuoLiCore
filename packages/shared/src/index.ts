@@ -208,6 +208,16 @@ export interface RuntimeTurnContext {
   initiatorUserId: string;
   effectiveRole: Role;
   isPrivate: boolean;
+  /**
+   * 群名 / 频道名（私聊没有）。只喂给 RUNTIME 块的「会话」行：此前那行只有裸 chatId，
+   * 模型看不出这是私聊还是群聊 —— 而人格里大量规则按这个分岔。
+   *
+   * 权威副本在 `principals` 里那条 `chat:<id>`（`display_name`，`upsertSeen` 每条消息刷新一次），
+   * **不是**只能靠 update 带进来：Telegram 适配层就近取 `ctx.chat.title`，而没有 update 的两条路
+   * （定时任务、WebUI 提示词预览）从库里读。三条路都要给 —— 只给带 update 那条的话，预览出来的
+   * 「会话」行和真正发出去的那一行永远不一样，而这一行正是运维打开预览要核对的东西。
+   */
+  chatTitle?: string;
   baseCommitId: string | null;
   claimThroughMessageId?: number;
   finalized?: boolean;

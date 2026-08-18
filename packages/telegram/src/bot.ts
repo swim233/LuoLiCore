@@ -506,6 +506,7 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
     try {
       turn = await dependencies.context.openTurn({ chatId, threadId: message.message_thread_id ?? null, key, initiatorUserId: userId,
         effectiveRole, isPrivate: chat.type === 'private', trigger: archived, ...(quoted ? { quoted } : {}),
+        ...('title' in chat && chat.title ? { chatTitle: chat.title } : {}),
         abortSignal: pending.controller.signal, config: perChatConfig(currentConfig(), key) });
       dependencies.registry.finish(pendingId);
       const tracked = dependencies.registry.register({ id: turn.turnId, key, chatId, userId, role: effectiveRole }, config.concurrency.turnTimeoutMs);
@@ -552,12 +553,27 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
           parseMode: outputConfig.parseMode, flushOnSentence: outputConfig.flushOnSentence, typingWhileWorking: outputConfig.typingWhileWorking, placeholderAfterMs: outputConfig.placeholderAfterMs,
           placeholderTexts: outputConfig.placeholderTexts, placeholderPick: outputConfig.placeholderPick, placeholderIndex: outputConfig.placeholderIndex },
           (error) => dependencies.log.event({ level: 'warn', kind: 'tg.error', summary: 'Streaming delivery failed', traceId: turn.turnId, chatId, data: { error: error instanceof Error ? error.message : String(error) } }), receivedAt,
-          async (text) => capMentions(dependencies.plugins ? pluginText(await dependencies.plugins.hook('beforeSend', { turn, text }), text) : text, outputConfig.maxMentions));
+          // 插件钩子只在定稿时跑一次；`capMentions` 是每帧都要过的那一道 —— 拆成两个回调之前
+          // 它俩合在这个 async 闭包里，而流式编辑路径压根不调它，「@ 全群上限」于是形同虚设。
+          async (text) => (dependencies.plugins ? pluginText(await dependencies.plugins.hook('beforeSend', { turn, text }), text) : text),
+          (text) => capMentions(text, outputConfig.maxMentions));
         const consumed = await output.consume(generated.stream, message.message_id);
         if (consumed.interrupted) { generated.interrupt(); void generated.final.catch(() => undefined); answer = consumed.text; }
-        // final 为空、但流里已经发出去了内容时以发出去的为准：否则用户盯着屏幕上的回复，
-        // 却又收到一句「这轮没成」，上下文里还少了这段话。
-        else { const final = await generated.final; answer = final.trim() ? final : consumed.text; }
+        // **归档与上下文一律存「真正发出去的那份」**，也就是流里攒到的全文。
+        // `generated.final` 是 AI SDK 的 `result.text` = **最后一步**的正文，而多步轮次发给用户的是
+        // 「旁白段落 + 结论」整条消息 —— 拿 final 落库的话，屏幕上有三段、`read_messages` 与
+        // WebUI 会话页只有最后一段，下一轮模型也看不见自己的旁白，用户一句「你上面第二段说的」
+        // 就无从对应。实测两轮真实多步（logs/2026-08-18 验证轮）都是这个差异。
+        // final 仍然留着当**失败信号**：它为空意味着最后一步没吐正文，那条 warn 照记。
+        else {
+          const final = await generated.final;
+          answer = consumed.text.trim() ? consumed.text : final;
+          // 这条回落此前一个字都不落日志（docs/00 §2.3）。它意味着「最后一步没有正文」——
+          // 而流里攒到的很可能只是工具调用之间的过程旁白，被当成了答复提交进上下文（本次事故）。
+          // 收尾补跑（runtime 的 `wrapUpIfNeeded`）能救大多数，救不了的至少要在日志里留下痕迹。
+          if (!final.trim()) dependencies.log.event({ level: 'warn', kind: 'turn.no_final_text', summary: 'Last step produced no text; fell back to streamed narration',
+            traceId: turn.turnId, chatId, userId, key, data: { streamedChars: consumed.text.length, messages: consumed.messageIds.length } });
+        }
         for (const messageId of consumed.messageIds) scoped.append({ chatId, messageThreadId: message.message_thread_id ?? null, tgMessageId: messageId, direction: 'out', fromKind: 'bot', fromUserId: String(bot.botInfo.id), fromName: bot.botInfo.first_name, fromUsername: bot.botInfo.username,
           kind: 'text', text: answer, tgDate: Date.now(), raw: { streamed: true, interrupted: consumed.interrupted }, triggered: false, turnId: turn.turnId });
       }

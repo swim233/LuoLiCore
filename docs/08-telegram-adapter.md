@@ -219,8 +219,27 @@ sendChatAction('typing')  → 每 4s 续期，直到首次消息发出
 - **模型这轮一个字都没吐**（`final` 与流式累积都为空）→ 按失败处理：不提交空的 assistant 消息，
   回一句 `model_returned_empty` 对应的说明 + ref。空正文发不出去（`splitTelegramText('')` 是空数组），
   照旧提交等于让用户面对彻底的沉默，还在上下文里留一条谁都解释不了的空消息，下一轮照样带给模型
-  （[16 §5](./reviews/16-remediation-plan.md) 「摘除比伪造安全」）。`final` 为空但流里已经发出去了内容时，
-  以已经发出去的为准 —— 否则用户盯着屏幕上的回复，却又收到一句「这轮没成」。
+  （[16 §5](./reviews/16-remediation-plan.md) 「摘除比伪造安全」）。
+- **归档（`messages.text`）与上下文一律存「真正发出去的那份」，即流里攒到的全文**；
+  `generated.final` 只当失败信号用。它是 AI SDK 的 `result.text` = **最后一步**的正文，而多步轮次
+  发出去的是「旁白段落 + 结论」整条消息 —— 拿 `final` 落库的话，屏幕上有三段而 `read_messages`
+  与 WebUI 会话页只有最后一段，下一轮模型也看不见自己的旁白，用户一句「你上面第二段说的」就无从
+  对应（实测两轮真实多步都是这个差异）。只有流里一个字都没有时才回落到 `final`。
+- **两道投递侧改写的时机不同**：`output.maxMentions`（`capMentions`）是同步、廉价的一道，
+  **每次刷新都跑**；插件的 `beforeSend` 钩子**只在定稿时跑一次**。此前两者合在一个 async 闭包里、
+  只被 `send()` 调用，而流式编辑路径直接调 `splitTelegramText` —— 于是「@ 全群上限」在每个流式
+  轮次都没生效。反过来把插件钩子挂到每帧上是改语义（一条消息一次 → 一次编辑一次），不是修 bug。
+  归档与上下文存的仍是模型原话，不是改写后的文本。
+- **模型这一轮的最后一步没有正文**（以工具调用或纯 reasoning 收尾）时，`generated.final` 是空串
+  —— AI SDK v7 的 `result.text` 语义是「最后一步的正文」，不是全轮拼接。这时先由
+  `runMainAgentInternal` 的收尾补跑（`wrapUpIfNeeded`：禁工具、最多一次、上游故障与超预算都不跑）
+  让模型自己写一句结论；补不出来才回落到流里攒到的文本，并记一条 `turn.no_final_text` warn。
+  没有这一层时，用户收到的「回复」就是工具调用之间的过程旁白，而且它会被提交进上下文
+  （logs/2026-08-18 · turn `01M09QBZVK…`）。
+- **跨 step 的正文之间补一个空行**。`result.textStream` 只透出 `text-delta`，step 边界在
+  `toTextStream` 里就丢了，投递侧那一行 `text +=` 于是把每一步的旁白无缝粘成一段。改成从
+  `result.stream` 走并在 `finish-step` 后补 `\n\n`（上一段已以换行收尾则不补），
+  见 `stepSeparatedText` 与 `tests/agent.stream-separator.test.ts`。
 - 编辑遇 `400 message is not modified` → 忽略。
 - 编辑遇 `429` → **跳过本次增量**（不排队），下次节流窗口再试。
 - 编辑遇 `400 can't parse entities` → 用 `parse_mode: undefined` 重试一次；再失败则把内容作为 `.md` 文档发出并回复一句摘要。

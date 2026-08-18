@@ -92,7 +92,13 @@ export class ToolRegistry {
   #overrides: () => Readonly<Record<string, ToolOverride>> = () => ({});
   /** limits 与 approvalRules 同样接受 getter：两者在 doc 11 都标着热更新，吃快照就是冻住
    *  （新增的高危命令规则要重启才生效，docs/20 · W-CFG-02）。 */
-  constructor(private readonly log: LogSink, private readonly approval: ApprovalBroker, limits: ToolLimits | (() => ToolLimits), approvalRules: readonly unknown[] | (() => readonly unknown[]) = [], private readonly hooks?: { hook(name: string, ...arguments_: unknown[]): Promise<unknown[]> }) {
+  constructor(private readonly log: LogSink, private readonly approval: ApprovalBroker, limits: ToolLimits | (() => ToolLimits), approvalRules: readonly unknown[] | (() => readonly unknown[]) = [], private readonly hooks?: { hook(name: string, ...arguments_: unknown[]): Promise<unknown[]> },
+    /**
+     * 只用来记 `turns.tool_calls`。`TurnRepository.incrementToolCall` 从头就没有调用者，
+     * 全库这一列恒为 0 —— WebUI 轮次列表与 `turn.finished` 事件里的工具调用数一直是假的。
+     * 可选：测试与子 agent 的注册表都不必给。
+     */
+    private readonly turns?: { incrementToolCall(id: string): void }) {
     this.#limits = typeof limits === 'function' ? limits : () => limits;
     this.#rulesSource = typeof approvalRules === 'function' ? approvalRules : () => approvalRules;
   }
@@ -250,6 +256,10 @@ export class ToolRegistry {
       if (!approved) { this.#failed(state, name, context); return { ok: false, error: '未获批准', ...(hint ? { hint } : {}) }; }
     }
     state.calls += 1;
+    // 记在这里而不是 `admit()` 之后：被拒的参数、被拒的审批都不算「调用过工具」，
+    // 数进去的话轮次统计会比模型真正做过的事多出一截。子 agent 的调用也算在本轮账上
+    // （`context.turn.turnId` 对父子是同一个），与 `model_calls` 的口径一致。
+    this.turns?.incrementToolCall(context.turn.turnId);
     await this.hooks?.hook('onToolCall', { name, input: parsed.data, context });
     const span = this.log.span({ level: 'info', kind: 'tool.call', summary: name, traceId: context.turn.turnId, chatId: context.turn.chatId, userId: context.turn.initiatorUserId, key: context.turn.key, data: { input: parsed.data } });
     // 挂住的工具调用会挂住整轮：AI SDK 的 toolMs 只是把一个信号递给 execute()，工具不认它就等于
