@@ -58,7 +58,7 @@ pnpm workspace，依赖方向严格单向：`shared → db → core → {telegra
 - 一轮 = `openTurn` → 多次 `appendDelta` → `commitTurn` / `abortTurn`；
   `finalized` 置位后再 `appendDelta` 会抛错，而不是静默丢弃
 
-**改这块之前先读 `docs/02-context-engine.md` §9 的实现红线清单（19 条）。** 尤其是：
+**改这块之前先读 `docs/02-context-engine.md` §9 的实现红线清单（20 条）。** 尤其是：
 
 - 任何改写 parts 的逻辑（`elidePart`、`truncatePartStrings`）**绝不能碰判别字段**
   （`type` / `toolCallId` / `toolName` / `mediaType`）。改坏了 provider 会拒收整个请求，

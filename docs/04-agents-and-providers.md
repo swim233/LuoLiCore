@@ -504,8 +504,18 @@ shim 去翻译 Responses 语义，代价有两项，都是实测出来的：
   零配置首启（无 provider / 无模型 / 无别名）本来就没有 `main`，拒绝启动会把 WebUI 一起带走，
   运维反而没有地方去补配置。缺 `main` 时轮次在 `streamMainAgent` 里以 `model alias unavailable` 失败，
   WebUI 写入别名后 `rebuildModels()` 即时生效，无需重启。
-- 轮次包含图片且当前模型 `capabilities.vision=false` → `prepareStep` 自动切 `vision`；若 `vision` 未配置 → 图片降级为 `[图片: <caption>]` 文本占位并在回复末尾提示。
+- 轮次包含图片且当前模型 `capabilities.vision=false` → `prepareStep` 自动切 `vision`。判据在轮次级算
+  一次（图片在 `snapshot + delta` 里，判据是 `isImagePart`，与 `capImages` 共用一份），能力取自
+  `capabilities_json.vision`（`ModelRegistry.supportsVision`，别名不存在时恒为 false —— `info()` 走
+  `#pick` 会静默回落到 `main`）。
+  **优先级：vision 压过一切。** 既压过 `downgradeAfterStep`（`low` 大概也看不见图，为了省钱把眼睛
+  降掉是最不划算的一种省），也压过 `set_model` 的当轮指定；`vision` 别名不可用时退而选「降档前那个
+  别名自己就支持看图」。一个都没有才降级：图片整体换成文本占位，并在**回复末尾**追加一句提示
+  （走 `stepSeparatedText` 的收尾通道，与收尾补跑同一条路，不新开 core→telegram 的管子）。
+  切换与降级各记一条 `provider.fallback`（`reason: 'vision_required' | 'vision_unavailable'`）。
 - 模型可用 `set_model` 工具（`minRole=trusted`）为**当轮**指定别名，写入 `turn.runtime.modelAliasOverride`；不跨轮持久。
+  工具的 description 与返回值都写明这一点（返回 `scope: 'this_turn_only'`）：模型曾据此对用户说
+  「切好啦，现在是 vision 模型」，而下一轮（真正带图那一轮）早就回到默认别名了。
 - 用户可用 `/model <alias>` 为**当前会话**固定别名（`minRole=trusted`，存 `config_kv` 的 `perChat.modelAlias.<key>`）。
 
 ### 5.2.1 别名参数（`settings_json`）

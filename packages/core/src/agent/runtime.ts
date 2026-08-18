@@ -22,7 +22,7 @@ import { type AliasSettings, parseAliasSettings } from '../provider/alias-settin
 import type { UsageLedger } from '../ledger/usage.js';
 import type { QuotaGuard, QuotaReservation } from '../ledger/quota.js';
 import type { LogSink } from '../log/sink.js';
-import type { ContextEngine } from '../context/engine.js';
+import { isImagePart, type ContextEngine } from '../context/engine.js';
 import type { AgentManager } from './manager.js';
 import type { SkillLoader } from '../skills/loader.js';
 interface ProviderRow {
@@ -269,6 +269,22 @@ export class ModelRegistry {
     return [...this.#models.keys()];
   }
 
+  /**
+   * 这个别名**当前服务的那个模型**支不支持看图。`capabilities_json` 一直在库里、SELECT 也一直
+   * 在拉（`ModelRow.capabilities`），只是从来没人 `JSON.parse` 过 —— `docs/03:392` 那句
+   * 「运行时不读这一列」说的就是它，而 `docs/04 §5.2` / `docs/08 §7.2` / `AC-PROV-009`
+   * 三处都要求含图轮次自动切 `vision`。
+   *
+   * **必须先 `has`**：`info()` 走 `#pick`，别名不存在时会静默回落到 `main`，直接问
+   * `supportsVision('vision')` 于是永远得到 main 的答案 —— 「有没有 vision 别名」这个判断会恒为真。
+   */
+  supportsVision(alias: string): boolean {
+    if (!this.#models.has(alias)) return false;
+    const info = this.#info.get(alias);
+    if (!info) return false;
+    try { return (JSON.parse(info.capabilities) as { vision?: unknown }).vision === true; } catch { return false; }
+  }
+
   chain(alias: string): Array<{ model: V4LanguageModel; info: ModelRow }> {
     return this.#chains.get(alias) ?? [];
   }
@@ -288,6 +304,33 @@ export function normalizeToolOutput(output: unknown): { type: string; value: unk
 }
 export function toolResultPart(toolCallId: string, toolName: string, output: unknown): { type: 'tool-result'; toolCallId: string; toolName: string; output: { type: string; value: unknown } } {
   return { type: 'tool-result', toolCallId, toolName, output: normalizeToolOutput(output) };
+}
+/**
+ * 一步的工具结果，**`tool-error` 必须一起收**。
+ *
+ * AI SDK 的 `step.toolResults` 是 `content.filter(p => p.type === 'tool-result')`；工具抛错
+ * 或输入校验失败时产出的是 `tool-error` part，于是被整个滤掉 —— `appendContext` 只把
+ * tool-call 追进 delta，上下文里就留下一条**没有配对结果的 tool-call**。轮内看不出来
+ * （SDK 自己的 `responseMessages` 会把错误转成合法的 tool-result 发上线），下一轮起该会话
+ * 每次请求都是畸形的：provider 0 步返回 → `NoOutputGeneratedError` → 进程崩。实测
+ * logs/2026-08-18 22:17 与 23:19 两次，起因是 `get_message({messageId:0})` 撞上
+ * `z.number().int().positive()`。
+ *
+ * 形状照 SDK 真正发上线的那份来（`output: {type:'error-text', value}`），不另造一种。
+ */
+function stepToolResults(content: readonly unknown[]): StepFacts['toolResults'] {
+  const results: StepFacts['toolResults'] = [];
+  for (const raw of content) {
+    const part = raw as { type?: string; toolCallId?: string; toolName?: string; output?: unknown; error?: unknown };
+    if (part?.type !== 'tool-result' && part?.type !== 'tool-error') continue;
+    if (!part.toolCallId || !part.toolName) continue;
+    const output = part.type === 'tool-error'
+      ? { type: 'error-text', value: part.error instanceof Error ? `${part.error.name}: ${part.error.message}` : String(part.error) }
+      : part.output;
+    results.push({ toolCallId: part.toolCallId, toolName: part.toolName,
+      part: toolResultPart(part.toolCallId, part.toolName, output), preview: `${part.toolName}: ${JSON.stringify(output).slice(0, 180)}` });
+  }
+  return results;
 }
 /**
  * 按别名构造带 fallback / 重试包装的模型。包装必须做在「按别名解析」这一层：`prepareStep` 每一步
@@ -344,12 +387,44 @@ export interface ContextMessageOptions {
   volatile?: string;
   /** Anthropic 专用：在已提交历史的最后一条消息上打移动缓存断点（其余 provider 是隐式前缀缓存，不需要）。 */
   cacheBreakpoint?: boolean;
+  /** 读出侧自愈补了几条缺失的 tool-result。给了就能在日志里看见「这个会话的历史是坏的」。 */
+  onOrphanToolCalls?(toolCallIds: string[]): void;
+  /**
+   * 图片整体换成占位文本。含图轮次既没有 `vision` 别名、当前别名自己也不支持看图时才开
+   * （`docs/08 §7.2`）—— 把不透明 part 原样发给一个不认它的模型，宽容的 provider 静默忽略、
+   * 严格的直接 400，两种都比一句「我看不了图」糟。
+   */
+  degradeImages?: boolean;
 }
 
+/** 补出来的那条结果的正文。不伪造成功，只如实说结果没了（照 `hydrateAttachment` 的占位先例）。 */
+const ORPHAN_TOOL_RESULT = '[工具结果缺失：这次调用的结果没有被记录下来]';
+/** `degradeImages` 时替掉图片的占位文本，以及回复末尾那句提示（`docs/08 §7.2`）。 */
+const IMAGE_UNSUPPORTED = '[图片：当前模型不支持看图，本轮没能查看]';
+export const VISION_UNSUPPORTED_NOTICE = '（当前模型不支持看图，这张图我没能真的看到。）';
+
 export function contextMessages(turn: RuntimeTurnContext, attachments?: Sqlite, options?: ContextMessageOptions): ModelMessage[] {
-  const messages = [...turn.snapshot.messages, ...turn.delta].map((message) => {
+  const source = [...turn.snapshot.messages, ...turn.delta];
+  // **读出侧自愈：没有配对结果的 tool-call 现补一条。** provider 见到这种形状会拒收整个请求
+  // （中转站的表现是 200 + 0 步），而 parts 是持久化的 —— 不在读出侧兜，该会话在 `/new` 之前
+  // 每轮都失败，实测能一路崩到进程被带走。写入侧的 `assertPairedToolCalls` 只管「不再产生新的」，
+  // 库里已经有的那些只能在这里救。
+  const answered = new Set<string>();
+  for (const message of source) {
+    for (const part of message.parts as Array<Record<string, unknown>>) {
+      if (part?.type === 'tool-result' && typeof part.toolCallId === 'string') answered.add(part.toolCallId);
+    }
+  }
+  const messages: ModelMessage[] = [];
+  const repaired: string[] = [];
+  // 断点打在「已提交历史的最后一条」而不是整个数组的最后一条：本轮 delta 与工具循环的产出都排在
+  // 它之后，所以这段前缀下一轮原样还在，能整段命中。跟着最后一条走的话每步都换位置，等于没打。
+  // 补出来的结果会让下标漂移，所以 `stored` 数的是**产出侧**的条数，不是 snapshot 的条数。
+  let stored = 0;
+  for (const [index, message] of source.entries()) {
     const content = (message.parts as Array<Record<string, unknown>>).map((part) => {
       if (part?.type === 'tool-result') return { ...part, output: normalizeToolOutput(part.output) };
+      if (options?.degradeImages && isImagePart(part)) return { type: 'text', text: IMAGE_UNSUPPORTED };
       if (part?.type === 'image') return imageToFilePart(part);
       if (part?.type === 'file' && typeof part.ref === 'string' && part.ref.startsWith('attachment://')) return hydrateAttachment(part, attachments);
       // 易变段现在和用户正文同处 user role，正文里能写出 `<system-instructions` 就等于能伪造它。
@@ -357,13 +432,20 @@ export function contextMessages(turn: RuntimeTurnContext, attachments?: Sqlite, 
       if (typeof part?.text === 'string') return { ...part, text: escapeSystemInstructions(part.text) };
       return part;
     });
-    if (SENDABLE_ROLES.has(message.role)) return { role: message.role, content } as ModelMessage;
-    const text = content.map((part) => typeof part?.text === 'string' ? part.text : '').filter(Boolean).join('\n');
-    return { role: 'user', content: [{ type: 'text', text: `${NOTE_PREFIX}${text}` }] } as ModelMessage;
-  });
-  // 断点打在「已提交历史的最后一条」而不是整个数组的最后一条：本轮 delta 与工具循环的产出都排在
-  // 它之后，所以这段前缀下一轮原样还在，能整段命中。跟着最后一条走的话每步都换位置，等于没打。
-  const stored = turn.snapshot.messages.length;
+    if (SENDABLE_ROLES.has(message.role)) messages.push({ role: message.role, content } as ModelMessage);
+    else {
+      const text = content.map((part) => typeof part?.text === 'string' ? part.text : '').filter(Boolean).join('\n');
+      messages.push({ role: 'user', content: [{ type: 'text', text: `${NOTE_PREFIX}${text}` }] } as ModelMessage);
+    }
+    const orphans = content.filter((part) => part?.type === 'tool-call' && typeof part.toolCallId === 'string' && !answered.has(part.toolCallId));
+    if (orphans.length) {
+      repaired.push(...orphans.map((part) => part.toolCallId as string));
+      messages.push({ role: 'tool', content: orphans.map((part) => toolResultPart(part.toolCallId as string,
+        typeof part.toolName === 'string' ? part.toolName : 'unknown', { type: 'error-text', value: ORPHAN_TOOL_RESULT })) } as ModelMessage);
+    }
+    if (index < turn.snapshot.messages.length) stored = messages.length;
+  }
+  if (repaired.length) options?.onOrphanToolCalls?.(repaired);
   if (options?.cacheBreakpoint && stored > 0) messages[stored - 1] = { ...messages[stored - 1]!, providerOptions: { anthropic: { cacheControl: { type: 'ephemeral' } } } } as ModelMessage;
   if (options?.volatile) messages.push({ role: 'user', content: [{ type: 'text', text: systemInstructions(options.volatile) }] } as ModelMessage);
   return messages;
@@ -483,48 +565,58 @@ export interface MainAgentStreamResult {
   interrupt(): void;
 }
 
-/** `result.stream` 里我们只认 `text-delta` 与 `finish-step`；其余（reasoning、tool-call、错误部件）一概跳过。 */
-interface StreamPartLike { type: string; text?: string }
+/** `result.stream` 里我们只认 `text-delta`、`finish-step` 与 `error`；其余（reasoning、tool-call）一概跳过。 */
+interface StreamPartLike { type: string; text?: string; error?: unknown }
 
 /**
- * 逐 step 之间补一个空行。
+ * 把逐 step 的旁白拼成一条消息，**步边界恰好一个空行**。
  *
- * `result.textStream` 走的是 `toTextStream`，它只把 `text-delta` 的裸字符串透出去，`finish-step`
- * 之类的边界全丢了 —— 于是投递侧那一行 `text += step.value`（`TelegramOutput.consume`）把每一步的
- * 旁白无缝粘成一段。实测一轮 10 步吐出六句一句话旁白，用户收到的是没有任何换行的六句话，
- * 落库也是**单个** text part（logs/2026-08-18 · turn 01M09QBZVK…）。人格里那条「一句话一行」
- * 只在单步内生效，跨步没有任何东西管得着。
+ * 两个历史坑，这一版都在这里收口：
  *
- * 上一段自己已经以换行收尾就不补：模型照 KERNEL 那条新规则换了行时，再补一个就是三连空行。
+ * ① `result.textStream` 走的是 `toTextStream`，它只把 `text-delta` 的裸字符串透出去，
+ *    `finish-step` 之类的边界全丢了 —— 投递侧那一行 `text += step.value` 于是把每一步的旁白
+ *    无缝粘成一段（logs/2026-08-18 · turn 01M09QBZVK…）。
+ * ② 补上分隔之后反过来空行爆炸：KERNEL 那条「段间空一行」把模型教成**每一步的正文都以
+ *    `\n\n\n` 收尾**，而纯工具步的「正文」就是 `\n\n\n`。实测一条 11 步的回复
+ *    （logs/2026-08-18 · turn 01M0AKMXG4…）开头 10 个换行、中段 12 连换行，这些全是模型自己
+ *    写的空白被原样透传 —— 这个函数一个分隔符都没插。
+ *
+ * 所以判据从「条件补分隔」改成**扣住尾部空白 + 到点补齐**：
+ *
+ * - 一段正文的尾部空白先扣住不发（`held`），跨过 step 边界就直接丢掉，换成恰好一个 `\n\n`；
+ *   没跨过边界就原样发出去 —— 同一步内的增量、列表缩进、围栏代码块里的空行一个字都不动。
+ * - 纯空白的「正文」不算说过话：不置 `wrote`、不 arm 边界、不透传。
+ * - 第一段非空白正文之前什么都不发，流结束时扣住的尾部空白直接丢弃（首尾无空白）。
+ *
+ * `error` 部件也要透出去（`onError`）：AI SDK 把步骤级失败吞进内部 onError（默认实现只
+ * `console.error`），流照常正常结束 —— 此前这里明文跳过它，于是「上游挂了」这条路在日志里
+ * 是隐形的，0 步的那次连 `model.error` 都没留下。
  */
-export async function* stepSeparatedText(full: AsyncIterable<StreamPartLike>, trailing?: () => Promise<string>, onChunk?: (chunk: string) => void): AsyncGenerator<string> {
-  // 两个布尔而不是「保留末尾 N 个字符再正则」：末尾窗口只要被空白填满就看不见那个换行了，
-  // 一个 `…。\n     ` 结尾的 step 会照旧补一次空行，正好是这个判断本该挡住的三连空行。
-  let wrote = false;        // 这一轮到底产出过正文没有（决定要不要在**开头**补分隔）
-  let endedWithNewline = false;
-  let pendingBreak = false;
+export async function* stepSeparatedText(full: AsyncIterable<StreamPartLike>, trailing?: () => Promise<string>, onChunk?: (chunk: string) => void,
+  onError?: (error: unknown) => void): AsyncGenerator<string> {
+  let wrote = false;        // 这一轮到底产出过**非空白**正文没有
+  let pendingBreak = false; // 上次产出正文之后跨过了 step 边界
+  let held = '';            // 扣住不发的尾部空白
   function* emit(text: string): Generator<string> { if (onChunk) onChunk(text); yield text; }
-  const separate = (): string => (wrote && !endedWithNewline ? '\n\n' : '');
-  const track = (text: string): void => {
-    wrote = true;
-    // 只有末尾的空白串里含换行才算「已经换过行」；非空白字符一出现就清零。
-    const trailingSpace = /\s*$/.exec(text)![0];
-    endedWithNewline = trailingSpace.includes('\n') || (trailingSpace.length === text.length && endedWithNewline);
-  };
   for await (const part of full) {
-    if (part.type === 'finish-step') { if (wrote) pendingBreak = true; continue; }
+    if (part.type === 'error') { onError?.(part.error); continue; }
+    // 边界一到，上一步的尾部空白就作废：它要被换成恰好一个空行。连续多个空步只 arm 一次。
+    if (part.type === 'finish-step') { held = ''; if (wrote) pendingBreak = true; continue; }
     if (part.type !== 'text-delta' || !part.text) continue;
-    if (pendingBreak) { const gap = separate(); if (gap) { yield* emit(gap); endedWithNewline = true; } pendingBreak = false; }
-    track(part.text);
-    yield* emit(part.text);
+    const core = part.text.trim();
+    if (!core) { if (wrote && !pendingBreak) held += part.text; continue; }
+    const lead = /^\s*/.exec(part.text)![0];
+    const gap = wrote ? (pendingBreak ? '\n\n' : held + lead) : '';
+    yield* emit(gap + core);
+    held = /\s*$/.exec(part.text)![0];
+    wrote = true;
+    pendingBreak = false;
   }
   // 收尾补跑那一次（§2）也要走同一道分隔逻辑，否则它会直接贴在最后一句旁白后面。
   if (!trailing) return;
-  const extra = await trailing();
+  const extra = (await trailing()).trim();
   if (!extra) return;
-  const gap = separate();
-  if (gap) yield* emit(gap);
-  yield* emit(extra);
+  yield* emit(wrote ? `\n\n${extra}` : extra);
 }
 
 const WRAP_UP_INSTRUCTION = '刚才的工具调用已经结束，但你还没有给出结论。把结果告诉用户：成了是什么，没成是卡在哪。不要再调用工具，不要复述过程。';
@@ -560,6 +652,22 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
   const chain = dependencies.registry.chain(alias);
   if (!chain.length) throw new Error(`model alias unavailable: ${alias}`);
   if (dependencies.config.quota.requirePricing && turn.effectiveRole !== 'owner' && chain.some((candidate) => candidate.info.priceIn === null || candidate.info.priceOut === null)) throw new Error('model_pricing_required');
+  /**
+   * **含图轮次的 vision 自动切换**（`docs/04 §5.2`、`docs/08 §7.2`、`AC-PROV-009`）。
+   *
+   * 三处文档都写了、代码里此前一行都没有：`capabilities_json` 只有 WebUI 的徽章在读。表现是
+   * 用户发图给一个 `vision=false` 的模型，模型看不见图却又不知道自己看不见 —— 实测它去
+   * `cp` 文件、`python` 读尺寸、开本地 http 服务器、拿 `agent-browser` 截图，绕了 11 步
+   * （logs/2026-08-18 · turn `01M0AKMXG4…`）。它也试过自己 `set_model('vision')`，但那个
+   * 覆盖只在**当轮**生效（`docs/04 §5.2`），下一轮（真正带图那一轮）又回到了 `main`。
+   *
+   * 判据在轮次级算一次：图片在 `snapshot + delta` 里，`prepareStep` 每步重算纯属浪费。
+   */
+  const turnHasImages = [...turn.snapshot.messages, ...turn.delta].some((message) => (message.parts as unknown[]).some(isImagePart));
+  // 一张都看不了的时候才降级：`vision` 别名没配、当前别名自己也不支持。
+  const visionDegraded = turnHasImages && !dependencies.registry.supportsVision('vision') && !dependencies.registry.supportsVision(alias);
+  if (visionDegraded) dependencies.log.event({ level: 'warn', kind: 'provider.fallback', summary: `${alias} 不支持看图且无 vision 别名`,
+    traceId: turn.turnId, key: turn.key, data: { alias, reason: 'vision_unavailable' } });
   // 步骤级失败（上游 5xx、重试耗尽）不会从 textStream 抛出来：AI SDK 把它吞进内部的 onError，
   // 让 result.text 安静地解析成空串。不抓住这一份，一次彻底的上游故障和「模型没话说」
   // 在调用方眼里长得一模一样 —— 上一次就是这样变成「不回复」的。
@@ -570,6 +678,17 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
   let wrapUpMode = false;
   /** 主轮跑了几步。补跑那次 `agent.generate` 的 stepNumber 从 0 重新起，靠它换算成全轮编号。 */
   let mainStepCount = 0;
+  /**
+   * 记下第一份步骤级失败，**并且落一条 `model.error`**。`onExhausted` 那条路自己会记，剩下两条
+   * 此前一个字都不落：流里的 `error` 部件（SDK 默认 onError 只 `console.error`）、以及 0 步空流。
+   * 两次进程崩溃（logs/2026-08-18 22:17 / 23:19）在 `model.jsonl` 里因此完全隐形。
+   */
+  const noteStreamFailure = (error: unknown): void => {
+    if (streamFailure) return;
+    streamFailure = error;
+    dependencies.log.event({ level: 'error', kind: 'model.error', summary: error instanceof Error ? `${error.name}: ${error.message}`.slice(0, 300) : String(error).slice(0, 300),
+      traceId: turn.turnId, key: turn.key, data: { alias, modelId: dependencies.registry.info(alias)?.modelId ?? initialInfo.modelId, source: 'stream' } });
+  };
   const initialInfo = chain[0]!.info;
   // 包装必须做在「按别名解析」这一层：`prepareStep` 每一步都无条件设置 model，只包装构造时那一个的话，
   // 整条 fallback / 重试链从第 0 步起就再没被用过 —— 重试次数、别名 fallback、markProviderDown、
@@ -635,9 +754,19 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
   const model = wrappedFor(alias);
   const providerKind = dependencies.db.prepare('SELECT kind FROM providers WHERE id=?').pluck().get(initialInfo.providerId) as string ?? '';
   const instructions = stableInstructions(prompt, providerKind);
-  const messageOptions: ContextMessageOptions = { volatile: prompt.volatile, cacheBreakpoint: providerKind === 'anthropic' };
+  // 同一轮里 `contextMessages` 会被调最多三次（主流 / 收尾补跑 / 非流式），坏历史只报一次。
+  let reportedOrphans = false;
+  const messageOptions: ContextMessageOptions = { volatile: prompt.volatile, cacheBreakpoint: providerKind === 'anthropic', degradeImages: visionDegraded,
+    onOrphanToolCalls: (toolCallIds) => {
+      if (reportedOrphans) return;
+      reportedOrphans = true;
+      dependencies.log.event({ level: 'warn', kind: 'ctx.orphan_tool_call', summary: `Repaired ${toolCallIds.length} tool-call(s) with no result`,
+        traceId: turn.turnId, key: turn.key, data: { toolCallIds: toolCallIds.slice(0, 20) } });
+    } };
   const stepSpans = new Map<number, { id: string; end: (data?: unknown, error?: unknown) => void }>();
   const stepAlias = new Map<number, string>();
+  /** vision 切换每轮只记一条：`prepareStep` 每一步都会重算同一个结论。 */
+  let visionSwitchLogged = false;
   const observers = createStepObservers(turn, { ledger: dependencies.ledger, registry: dependencies.registry, context: dependencies.context,
     log: dependencies.log, quota: dependencies.quota, reservation: dependencies.reservation ?? null,
     tokenRatioAlpha: dependencies.config.context.tokenRatioAlpha, fallbackInfo: initialInfo,
@@ -661,7 +790,23 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
       const activeForStep = dependencies.tools.activeNames(turn.effectiveRole, toolContext).filter((name) => !skillAllow || skillAllow.has(name));
       const requestedAlias = turn.modelAliasOverride ?? alias;
       const downgrade = stepNumber >= dependencies.config.agent.main.downgradeAfterStep && dependencies.registry.aliases().includes('low');
-      const selectedAlias = downgrade ? 'low' : requestedAlias;
+      let selectedAlias = downgrade ? 'low' : requestedAlias;
+      // **vision 压过其它一切**（`docs/04 §5.2`）：`low` 大概也看不见图，`set_model` 指定的别名
+      // 同样可能看不见 —— 看不见图的模型拿到这一轮就只能瞎猜或者绕远路。`vision` 优先，退而用
+      // 「降档前那个别名自己就支持」这一条：为了省钱降档而把眼睛降掉是最不划算的一种省。
+      if (turnHasImages && !dependencies.registry.supportsVision(selectedAlias)) {
+        // 候选里带上 `alias`（本轮解析出来的那个）：`set_model('low')` 把 `requestedAlias` 换掉之后，
+        // 「降档前那个别名」就只剩它了。
+        const seeing = ['vision', requestedAlias, alias].find((name) => dependencies.registry.supportsVision(name));
+        if (seeing) {
+          if (!visionSwitchLogged) {
+            visionSwitchLogged = true;
+            dependencies.log.event({ level: 'info', kind: 'provider.fallback', summary: `${selectedAlias} → ${seeing}`,
+              traceId: turn.turnId, key: turn.key, data: { alias: selectedAlias, from: selectedAlias, to: seeing, reason: 'vision_required' } });
+          }
+          selectedAlias = seeing;
+        }
+      }
       // 采样参数按「当步实际选中的别名」取：降档到 low 之后就该用 low 的参数（04 §5.2.1）。
       stepAlias.set(stepNumber, selectedAlias);
       const patch: { activeTools?: string[]; model?: LanguageModel; messages?: ModelMessage[]; toolChoice?: 'none' } & AliasSettings = { activeTools: activeForStep, model: wrappedFor(selectedAlias), ...dependencies.registry.settings(selectedAlias) };
@@ -704,8 +849,7 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
           reasoningTokens: step.usage.outputTokenDetails.reasoningTokens ?? 0 },
         latencyMs: step.performance.responseTimeMs, finishReason: step.finishReason,
         toolCalls: step.toolCalls.map((call) => ({ toolCallId: call.toolCallId, toolName: call.toolName, input: call.input })),
-        toolResults: step.toolResults.map((result) => ({ toolCallId: result.toolCallId, toolName: result.toolName,
-          part: toolResultPart(result.toolCallId, result.toolName, result.output), preview: `${result.toolName}: ${JSON.stringify(result.output).slice(0, 180)}` })),
+        toolResults: stepToolResults(step.content),
         requestBody: (step.request as { body?: unknown } | undefined)?.body };
       // 收尾判据取自**最后一步**，所以每步都覆写而不是累积。`sawToolCall` 反过来要累积：
       // 判的是「这一轮到底做过事没有」，只有做过事才值得补一句结论。
@@ -776,8 +920,32 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
         // 「你上面第二段说的」就无从对应。
         return text.trim() ? text : delivered();
       }).then(finish, fail);
+      /**
+       * **`final` 必须在创建处就被认领。**
+       *
+       * `fail` 是 rethrow，所以这条链是会 reject 的；唯一的 catch 在 `bot.ts`，而它们全部排在
+       * `await output.consume(...)` 之后 —— `consume` 开头还卡在 `sendChatAction`（实测 561ms）。
+       * 中间这一段就是「无人认领」的窗口：0 步返回时 AI SDK 在 flush 里用
+       * `NoOutputGeneratedError` reject `result.text`（那是 `steps.then().then()` 的**派生** promise，
+       * SDK 只把基础 promise 标成 handled），`main.ts` 的 unhandledRejection 处理器于是先一步
+       * 把进程带走 —— `bot.ts` 那三处 catch 一次都没跑到，`model.error` 也来不及写。
+       * 实测 logs/2026-08-18 22:17:29 与 23:19:43，两次都是 `sendChatAction` 结束后 1ms。
+       *
+       * 认领之后语义不变：`bot.ts` 那边 `await generated.final` 照旧拿到这个 rejection
+       * （已被观测过的 promise 再 await 一样抛）。
+       */
+      void final.catch(() => undefined);
       let emitted = '';
       const stream = stepSeparatedText(result.stream as AsyncIterable<StreamPartLike>, async () => {
+        /**
+         * **一步都没跑完 = 上游给了个空流，不是模型没话说。** `fallback-model` 的 `reporting()`
+         * 只在 `doStream` **抛**的时候报 `onExhausted`；中转站 200 收下、流里 0 步就关闭那一路
+         * 既不抛也不触发 `idleGuarded`，于是 `streamFailure` 恒为 null、日志里一条 `model.error`
+         * 都没有，用户看到的只有沉默。补上这一条之后它走的是下面那条既有的 `broken` 路：
+         * 轮次记 failed、用户拿到能看懂的原因、日志有 `model.error`。
+         * 必须排在 `wrapUpIfNeeded` **之前** —— 那里第一道闸就在读 `streamFailure`。
+         */
+        if (mainStepCount === 0 && !turn.abortSignal.aborted) noteStreamFailure(new Error('upstream_no_output'));
         // `wrapUpIfNeeded` 自己吞掉所有异常，这里不会因为它而把流记成 interrupted。
         try { wrapUp = await wrapUpIfNeeded(); } finally { streamDone(); }
         /**
@@ -796,9 +964,14 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
          */
         const broken = turn.abortSignal.aborted ? turn.abortSignal.reason ?? 'aborted' : streamFailure;
         if (broken) fail(broken instanceof Error ? broken : new Error(String(broken)));
+        // 「图片降级了」那句提示走**同一条**收尾通道（`docs/08 §7.2` 要求它在回复末尾）：
+        // 另开一条 core→telegram 的管子只为了追加一行文本，两边都要多一个概念。
+        if (visionDegraded) return wrapUp ? `${wrapUp}\n\n${VISION_UNSUPPORTED_NOTICE}` : VISION_UNSUPPORTED_NOTICE;
         return wrapUp;
-      }, (chunk) => { emitted += chunk; });
-      delivered = () => (wrapUp ? emitted : '');
+      }, (chunk) => { emitted += chunk; }, noteStreamFailure);
+      // 尾部只要真的追加过东西（补跑的结论、或者那句看不了图的提示），`final` 就该是**整条发出去
+      // 的文本**而不是最后一步的正文 —— 归档与上下文存的必须和用户屏幕上一致。
+      delivered = () => (wrapUp || visionDegraded ? emitted : '');
       // `interrupt()` 也要放开 `drained`：被打断那条路（`bot.ts` 里的 `void generated.final.catch()`）
       // 不会再去把生成器读完，不放的话那个 promise 永远悬着。
       return { stream, final, interrupt: () => { streamDone(); if (!settled && mainRun) dependencies.agents?.fail(mainRun, 'stream_interrupted'); settled = true; } };
@@ -806,13 +979,16 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
     const result = await agent.generate({ messages: contextMessages(turn, dependencies.db, messageOptions), abortSignal: turn.abortSignal });
     // 非流式（定时任务走这条）同样吃 `result.text` = 最后一步正文那条语义：以工具调用收尾的
     // 定时任务此前会空正文 → `model_returned_empty`，整条任务静默失败。
+    // 非流式（定时任务）也要带那句提示：这条路同样可能收到图（被回复的那条消息里那张）。
+    const withVisionNotice = (text: string): string => (visionDegraded && text.trim() ? `${text}\n\n${VISION_UNSUPPORTED_NOTICE}` : text);
     if (!result.text.trim()) {
-      const wrapUp = await wrapUpIfNeeded();
+      const wrapUp = withVisionNotice(await wrapUpIfNeeded());
       if (wrapUp) { if (mainRun) dependencies.agents?.finish(mainRun, wrapUp); return wrapUp; }
     }
     if (!result.text.trim() && streamFailure) throw streamFailure;
-    if (mainRun) dependencies.agents?.finish(mainRun, result.text);
-    return result.text;
+    const answer = withVisionNotice(result.text);
+    if (mainRun) dependencies.agents?.finish(mainRun, answer);
+    return answer;
   } catch (error) {
     if (mainRun) dependencies.agents?.fail(mainRun, error instanceof Error ? error.message : String(error));
     for (const span of stepSpans.values()) span.end(undefined, error);

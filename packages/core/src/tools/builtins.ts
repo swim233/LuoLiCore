@@ -423,8 +423,12 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
       }
       return { ok: true };
     } });
-  registry.register({ name: 'set_model', description: '切换当前轮模型别名。', inputSchema: z.object({ alias: z.enum(['main', 'high', 'low', 'vision']) }), policy: builtinPolicy('set_model'), sourcePriority: 90,
-    execute: (input, context) => { Object.assign(context.turn, { modelAliasOverride: input.alias }); return { ok: true, alias: input.alias }; } });
+  // 措辞必须写明「只有本轮」：这个覆盖不跨轮持久（docs/04 §5.2、AC-AGENT-007），而模型据此对
+  // 用户说过「切好啦，现在是 vision 模型」——下一轮（真正带图那一轮）早就回到默认别名了
+  // （logs/2026-08-18 22:15）。含图轮次现在会自动切 vision，模型不需要自己动手。
+  registry.register({ name: 'set_model', description: '为**当前这一轮剩下的步骤**切换模型别名；本轮结束即失效，不跨轮保留，也不需要用它来看图（含图轮次系统会自动切到 vision）。',
+    inputSchema: z.object({ alias: z.enum(['main', 'high', 'low', 'vision']) }), policy: builtinPolicy('set_model'), sourcePriority: 90,
+    execute: (input, context) => { Object.assign(context.turn, { modelAliasOverride: input.alias }); return { ok: true, alias: input.alias, scope: 'this_turn_only', note: '本轮结束后自动回到默认别名，不要告诉用户已经永久切换。' }; } });
   registry.register({ name: 'web_search', description: '搜索公开网络；瞬时失败（超时/5xx/429）会自动重试。', inputSchema: z.object({ query: z.string(), limit: z.number().int().min(1).max(10).default(5) }), policy: builtinPolicy('web_search'), sourcePriority: 100, untrustedOutput: true, timeoutMs: webBudgetMs,
     available: () => Boolean(dependencies.webSearch?.provider && dependencies.webSearch.apiKey), execute: (input, context) => webSearch(dependencies.webSearch!.provider as 'brave' | 'serper' | 'tavily', dependencies.webSearch!.apiKey, input.query, input.limit ?? 5, context.turn.abortSignal, web, dependencies.maxWebBytes) });
   registry.register({ name: 'send_message', description: '向当前会话追发一条消息（正文请直接写进回复，这个工具用于分段或中间产物）。', inputSchema: z.object({ text: z.string().min(1) }), policy: builtinPolicy('send_message'), sourcePriority: 100,

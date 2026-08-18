@@ -21,7 +21,7 @@ describe('prompt assembler', () => {
     expect(KERNEL_PROMPT).toContain('不使用标题（#）、表格、脚注');
     expect(KERNEL_PROMPT).toContain('*粗体* _斜体_');
     expect(KERNEL_PROMPT).toContain('回复对象是触发你的那条消息的发送者');
-    expect(KERNEL_PROMPT).toContain('各自独占一段');
+    expect(KERNEL_PROMPT).toContain('不要自己加空行或空白收尾');
     expect(KERNEL_PROMPT).toContain('过程说明不能当作结论');
     expect(KERNEL_PROMPT).toContain('先判断是否可自行修正');
     expect(KERNEL_PROMPT).toContain('不要原样转发给用户');

@@ -89,16 +89,31 @@ turn 01J8…                                     kind=turn.start / turn.end
 | `schedule.cancelled` | warn | job, role —— 创建者被封禁，整条任务停用 |
 | `schedule.loaded` | info | registered, missed, enabled —— 启动时装载了多少条 |
 | `system.start` / `system.stop` | info | version, mode, uptime |
-| `model.error` | error | alias, modelId, cause —— fallback 链整条耗尽时的最后一个错误 |
-| `system.crash` | error | event（`uncaughtException` \| `unhandledRejection`）, detail（stack） |
+| `model.error` | error | alias, modelId, cause \| source —— fallback 链整条耗尽（`onExhausted`），或流里的 `error` 部件 / 0 步空流（`source:'stream'`） |
+| `ctx.orphan_tool_call` | warn | toolCallIds[] —— 读出侧给「没有配对结果的 tool-call」补了结果。**这条会话的历史是坏的** |
+| `system.crash` | error | event（`uncaughtException`）, detail（stack）—— 进程即将退出 |
+| `system.unhandled_rejection` | error | event（`unhandledRejection`）, detail（stack）—— 进程**不**退出 |
 
 `model.error` 补的是一个盲区：AI SDK 会把步骤级失败吞进内部的 `onError`，让 `result.text`
 解析成空串而不抛异常。没有这一行时，一次上游 502 在日志里只留下一条正常的 `model.call`，
 运维看到的只有「bot 不回复」（[04](./04-agents-and-providers.md#上游失败不能伪装成模型没话说)）。
+`onExhausted` 只覆盖「`doStream` 抛出来」那一路：中转站 200 收下、SSE 里 0 步就关闭那一路既不抛
+也不触发流级看门狗，两次进程崩溃（logs/2026-08-18 22:17 / 23:19）在 `model.jsonl` 里因此完全隐形。
+所以流里的 `error` 部件与「一步都没跑完」现在也各记一条（`source:'stream'`）。
 
 `system.crash` 是崩溃前的最后一行：进程照旧退出（恢复交给下次启动的 `recoverAfterCrash`），
 但必须留下原因。曾经有一次 uncaught 的流错误把进程直接带走、日志里一个字都没有，
 排查只能靠翻数据库猜「最后一条 `turn.start` 之后发生了什么」——这个钩子就是为了不再有第二次。
+
+**`unhandledRejection` 与 `uncaughtException` 不是一回事，处理也不一样。** 前者只记
+`system.unhandled_rejection` 并让进程继续跑。上一版两者共用一个处理器、一律 `exit(1)`，代价在
+2026-08-18 兑现了两次：`runtime.ts` 那条 `final` 链有一个「创建之后、`bot.ts` 挂上 catch 之前」的
+窗口（`TelegramOutput.consume` 开头要等 `sendChatAction`，实测 561ms），上游一次 0 步返回落在窗口
+里，一条私聊里泄漏的一个 promise 就把整个进程带走了 —— 连带杀掉当时所有并发轮次，`bot.ts` 那三处
+catch 一次都没跑到，`model.error` 也来不及写，事后只能靠 `turns` 表里两行 `process_restarted` 反推。
+那个窗口已经堵上了（`void final.catch(...)`），但「一个悬着的 promise = 整个进程」这条兑换率本身
+就不该存在：rejection 是**某一次调用**的失败，不是进程级不可恢复状态（那才是 `uncaughtException`
+的语义）。轮次侧该记 failed 的自有它自己的路。
 
 ## 3. 落盘格式
 

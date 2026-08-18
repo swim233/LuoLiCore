@@ -472,20 +472,37 @@ const shutdown = async (signal: string): Promise<void> => {
 process.once('SIGTERM', () => void shutdown('SIGTERM'));
 process.once('SIGINT', () => void shutdown('SIGINT'));
 // 一次 uncaught 的流错误可以直接带走进程，而日志里一个字都不留 —— 上一次排查只能靠翻数据库
-// 猜「最后一条 turn.start 之后发生了什么」。行为不变（照旧退出，恢复交给下次启动的
-// recoverAfterCrash），但崩之前必须留下原因。
+// 猜「最后一条 turn.start 之后发生了什么」。所以崩之前必须留下原因。
 //
 // **stderr 先写、`log.event` 后调、`process.exit` 最后。** 原先是反的，于是整个处理器
 // 依赖「log.event 不会抛」这条当时并不成立的假设：`insertLog` 曾是裸的，库满/被锁/已 close
 // 时它抛出来，这个处理器自己变成新的 uncaughtException —— 原因没留下，退出码也没设上。
 // sink 侧现在也不抛了（`LogSink.event` 入库失败返回 0），但顺序不该赌另一个文件的实现细节。
-for (const fatal of ['uncaughtException', 'unhandledRejection'] as const) {
-  process.on(fatal, (error: unknown) => {
-    const detail = error instanceof Error ? error.stack ?? error.message : String(error);
-    process.stderr.write(`[crash] ${fatal}: ${detail}\n`);
-    // `system.crash` 在 LogSink 里被标成 urgent（appendFileSync 立刻落盘），所以这一行在
-    // 下面那个 exit 之前是真的写完了的，不是靠 200ms 的缓冲定时器。
-    log.event({ level: 'error', kind: 'system.crash', summary: `${fatal}: ${error instanceof Error ? error.message : String(error)}`, data: { event: fatal, detail } });
-    process.exit(1);
-  });
-}
+const fatalDetail = (error: unknown): string => (error instanceof Error ? error.stack ?? error.message : String(error));
+const fatalSummary = (event: string, error: unknown): string => `${event}: ${error instanceof Error ? error.message : String(error)}`;
+process.on('uncaughtException', (error: unknown) => {
+  const detail = fatalDetail(error);
+  process.stderr.write(`[crash] uncaughtException: ${detail}\n`);
+  // `system.crash` 在 LogSink 里被标成 urgent（appendFileSync 立刻落盘），所以这一行在
+  // 下面那个 exit 之前是真的写完了的，不是靠 200ms 的缓冲定时器。
+  log.event({ level: 'error', kind: 'system.crash', summary: fatalSummary('uncaughtException', error), data: { event: 'uncaughtException', detail } });
+  process.exit(1);
+});
+/**
+ * **unhandledRejection 不退出。**
+ *
+ * 上一版这两个共用一个处理器、一律 `exit(1)`。代价在 2026-08-18 兑现了两次：`runtime.ts` 那条
+ * `final` 链有一个「创建之后、`bot.ts` 挂上 catch 之前」的窗口（`consume` 开头要等
+ * `sendChatAction`，实测 561ms），上游一次 0 步返回落在窗口里，**一条私聊里泄漏的一个 promise
+ * 就把整个进程带走了** —— 连带杀掉当时所有并发轮次，`bot.ts` 那三处 catch 一次都没跑到，
+ * `model.error` 也来不及写，事后只能靠 `turns` 表里两行 `process_restarted` 反推。
+ *
+ * 那个窗口已经堵上了（`void final.catch(...)`），但「一个悬着的 promise = 整个进程」这条兑换率
+ * 本身就不该存在：rejection 是**某一次调用**的失败，不是进程级不可恢复状态（那是
+ * `uncaughtException` 的语义）。所以这里只留证据、不退出；轮次侧该记 failed 的自有它自己的路。
+ */
+process.on('unhandledRejection', (error: unknown) => {
+  const detail = fatalDetail(error);
+  process.stderr.write(`[unhandled] unhandledRejection: ${detail}\n`);
+  log.event({ level: 'error', kind: 'system.unhandled_rejection', summary: fatalSummary('unhandledRejection', error), data: { event: 'unhandledRejection', detail } });
+});

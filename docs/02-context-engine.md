@@ -481,7 +481,7 @@ type MaterializeResult = {
 
 > **没有 `/ctx export`。** 这张表此前列过一行「导出当前窗口为 `.md`（仅 owner）」，但它从未实现过 ——
 > `/ctx` 只回统计摘要。[14 §2 Q12](./14-open-questions.md) 已拍板**不做**上下文导出/导入（导入等于给
-> 上下文引擎开一个不受信入口，§9 那 19 条红线多一个防守面，而「把会话搬到另一个部署」的收益几乎
+> 上下文引擎开一个不受信入口，§9 那 20 条红线多一个防守面，而「把会话搬到另一个部署」的收益几乎
 > 用不上），所以那行被删掉而不是补实现。完整时间线看 WebUI 的会话页。
 
 ---
@@ -584,6 +584,18 @@ export interface CommitResult {
     等于把「每轮作废一次缓存」原样搬到了更高的水位上。推迟的方向永远是多留，因此所有形状不变式
     （turn 边界、tool 配对、`minKeepTurns`）自动继续成立；`tests/context.active.test.ts` 断言
     「活跃期内 `window_start` 一动不动」与「撞天花板后裁回常规上限」两侧。
+20. ✅ **tool 配对是双向的：`tool-call` 也必须有配对的 `tool-result`。** 红线 13 与
+    `assertValidShape` 长期只查了 orphan tool-**result** 那一个方向（provider 会当场拒收），而反方向
+    同样致命，只是晚一轮才暴露：畸形请求体让上游 0 步返回 → AI SDK 在 flush 里用
+    `NoOutputGeneratedError` reject 结果 promise → 进程被带走（与红线 15 完全同一条下坡路，
+    实测 logs/2026-08-18 两次）。产生它的路径是 AI SDK 的 `step.toolResults` ——
+    那是 `content.filter(p => p.type === 'tool-result')`，**工具输入校验失败或工具抛错时产出的
+    `tool-error` part 被整个滤掉**，于是只有 call 进了 delta。轮内看不出来（SDK 自己的
+    `responseMessages` 会把错误转成合法的 tool-result 发上线），下一轮起该会话每次请求都是畸形的。
+    三处收口：`runtime.ts` 的 `stepToolResults` 同时收 `tool-result` 与 `tool-error`（后者映射成
+    `output: {type:'error-text', value}`，与上线那份一致）；`commitTurn` 的 `assertPairedToolCalls`
+    只查 **delta**（查 snapshot 会让已经损坏的会话彻底锁死，比现在更糟）；`contextMessages` 在读出侧
+    给孤儿补一条 `[工具结果缺失…]`，并记 `ctx.orphan_tool_call` —— 库里存量不必 `/new` 就能恢复。
 
 ---
 

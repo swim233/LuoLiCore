@@ -104,6 +104,19 @@ export function renderArchivedMessage(message: ArchivedMessage, options: RenderO
 }
 
 /**
+ * 「这个 part 是一张图」的**唯一**判据。`capImages` 与 `runtime.ts` 那条 vision 别名自动切换
+ * （docs/04 §5.2）共用它 —— 两处各写一遍的话，一边认得出、另一边认不出的 part 就是一次
+ * 「图片进了上下文但没切成 vision 模型」。
+ */
+export function isImagePart(part: unknown): boolean {
+  const typed = part as { type?: unknown; mediaType?: unknown } | null;
+  // 废弃的 `image` part 也算：写入侧早就只产 `file` 了，但 parts 是持久化的，库里那些历史 part
+  // 要到读出侧才被 `imageToFilePart` 转过来（`runtime.ts`）—— 判据在转换之前就要认得它。
+  if (typed?.type === 'image') return true;
+  return typed?.type === 'file' && typeof typed.mediaType === 'string' && typed.mediaType.startsWith('image/');
+}
+
+/**
  * `media.maxImagesPerTurn`：一轮里最多带几张图进上下文，**从后往前**保留 —— 超限时留下的是
  * 触发消息与最近几条，而不是相册里最早的那几张。图片按 1500 token 估（`IMAGE_TOKEN_ESTIMATE`），
  * 一次 10 张的相册能顶掉整个窗口。
@@ -115,7 +128,7 @@ function capImages(delta: NewContextMessage[], limit: number): void {
   const slots: Array<{ message: NewContextMessage; index: number }> = [];
   for (const message of delta) {
     for (const [index, part] of (message.parts as Array<Record<string, unknown>>).entries()) {
-      if (part?.type === 'file' && typeof part.mediaType === 'string' && part.mediaType.startsWith('image/')) slots.push({ message, index });
+      if (isImagePart(part)) slots.push({ message, index });
     }
   }
   if (slots.length <= limit) return;
@@ -240,6 +253,7 @@ export class ContextEngine {
     const delta = [...turn.delta];
     // 写入侧也断言一次：坏形状在产生它的那一轮就报错，而不是等到下一轮物化才暴露。
     this.assertValidShape(turn.key, [...turn.snapshot.messages, ...delta]);
+    this.assertPairedToolCalls(turn.key, delta);
     return this.#mutex.run(turn.key, async () => {
       const config = turn.config as Readonly<Config>;
       const repo = new ScopedContextRepository(this.db, turn.key);
@@ -365,6 +379,33 @@ export class ContextEngine {
         if (part?.type !== undefined && !KNOWN_PART_TYPES.has(part.type)) this.invalidShape(key, `unknown part type ${JSON.stringify(part.type)}`);
         if (part?.type === 'tool-call' && part.toolCallId) calls.add(part.toolCallId);
         if (part?.type === 'tool-result' && (!part.toolCallId || !calls.has(part.toolCallId))) this.invalidShape(key, `orphan tool-result ${part.toolCallId ?? '(missing id)'}`);
+      }
+    }
+  }
+
+  /**
+   * **反方向也要挡：没有配对 tool-result 的 tool-call。**
+   *
+   * `assertValidShape` 只查 orphan tool-**result** 那一个方向。反过来这一种同样致命，只是晚
+   * 一轮才暴露：畸形请求体让 provider 0 步返回，AI SDK 于是用 `NoOutputGeneratedError` reject
+   * 结果 promise，而 parts 是持久化的 —— 该会话在 `/new` 之前每轮都重演。实测
+   * logs/2026-08-18 22:17 / 23:19 两次进程崩溃，根因是 `tool-error` 部件没被追进 delta
+   * （`step.toolResults` 把它滤掉了，见 `runtime.ts` 的 `stepToolResults`）。
+   *
+   * **只查 `delta`，不查 snapshot。** 已经落库的历史里可能就带着这种孤儿（本次事故那条还在
+   * 库里），拿它去挡提交等于把整条会话彻底锁死，比现在更糟。读出侧的自愈在 `runtime.ts` 的
+   * `contextMessages` 里 —— 写入侧只负责「不再产生新的」，与 `hydrateAttachment` 同一分工。
+   */
+  private assertPairedToolCalls(key: string, delta: NewContextMessage[]): void {
+    const results = new Set<string>();
+    for (const message of delta) {
+      for (const part of message.parts as Array<{ type?: string; toolCallId?: string }>) {
+        if (part?.type === 'tool-result' && part.toolCallId) results.add(part.toolCallId);
+      }
+    }
+    for (const message of delta) {
+      for (const part of message.parts as Array<{ type?: string; toolCallId?: string }>) {
+        if (part?.type === 'tool-call' && !results.has(part.toolCallId ?? '')) this.invalidShape(key, `orphan tool-call ${part.toolCallId ?? '(missing id)'}`);
       }
     }
   }

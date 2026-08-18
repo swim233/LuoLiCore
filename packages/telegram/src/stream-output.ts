@@ -165,6 +165,12 @@ export class TelegramOutput {
         if (step.done) break;
         text += step.value;
         if (this.options.mode === 'once') continue;
+        // 纯空白的累积文本一次都不许发：`SENTENCE_END` 的白名单里有 `\n`，于是一段只有换行的
+        // 累积会命中「一句话说完了」被刷出去，而 `sendWithFallback` 只降级 `parse entities` 那一类
+        // —— Telegram 的 `400: text must be non-empty` 直接穿到 `onDeliveryError`
+        // （logs/2026-08-18 14:55:14）。上游的归一化（`stepSeparatedText`）已经不产出这种流了，
+        // 这一行是不信调用方的那道硬底。
+        if (!text.trim()) continue;
         if (!firstChunkAt) firstChunkAt = Date.now();
         // 两道窗口，都只攒不发：replyDelayMs 防秒回，锚点是用户那条消息；bufferMs 攒首帧，
         // 锚点是上游第一个 chunk。只看前者时，模型思考一旦超过 replyDelayMs（几乎总是如此），

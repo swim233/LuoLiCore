@@ -173,7 +173,7 @@
 | [ ] AC-PROV-006 | WebUI 编辑 provider 但 key 留空 | 原 key 保持不变 |
 | [ ] AC-PROV-007 | `[测试连接]` | 真的打一次上游模型目录接口；返回成功/失败与错误类型（`code`）、耗时、模型数；响应体内无 key；结果以右上角 Toast 呈现。成功把 `health_state` 写回 `up`，401/403 写 `down`，超时/404/5xx 不改 `health_state` |
 | [x] AC-PROV-008 (自动) | P1 连续健康检查失败 3 次 | 标 `down`，从 fallback 链跳过；30 分钟后自动重试。前两次只累计不动 `health_state`；非认证 4xx 不计入；调用路径上的请求超时喂同一个计数器（**一次调用一个候选只记一次**，重试不各记一次），**服务成功一次就归零**，判成 down 之后同一次调用就跳过它、跳过要落一条 `provider.fallback`；冷却到期时把库里那一行也改回 `up`/0（[04 §5.3](./04-agents-and-providers.md)） | 〔provider.health.test.ts〕
-| [ ] AC-PROV-009 (自动) | 含图片的轮次 + 当前模型无 vision | 自动切 `vision` 别名；若无该别名则降级占位符 + 回复末尾提示 |
+| [x] AC-PROV-009 (自动) | 含图片的轮次 + 当前模型无 vision | 自动切 `vision` 别名，**压过 `downgradeAfterStep` 与 `set_model` 的当轮指定**；`vision` 不可用时退而选「降档前那个别名自己支持」；一个都没有才降级为文本占位 + 回复末尾提示，两条路各记一条 `provider.fallback`。没有图片时一律不切（[04 §5.2](./04-agents-and-providers.md)） | 〔agent.model-wiring.test.ts〕
 | [x] AC-PROV-010 (自动) | 给 `main` 配 `settings_json`，再写一个白名单外的键 | 白名单键随每步调用下发（降档到 `low` 后用 `low` 的参数）；白名单外的键 `PUT` 返回 `alias_invalid` + 路径，不落库 | 〔provider.test.ts〕
 | [ ] AC-PROV-011 ★ | 接第三方 OpenAI 兼容网关，让模型在一轮里调用工具 | 带工具结果的后续请求里**不含** `item_reference`，该步返回 200，模型给出最终回复。回归的是「一调工具就再也不说话」 |
 | [ ] AC-PROV-012 (自动) | fallback 链整条耗尽 | `onExhausted` 交出最后一个错误；`result.text` 为空时轮次以该错误记 failed，用户收到「模型服务暂时连不上」而不是「没吐出正文」；日志有 `model.error` |
@@ -537,7 +537,7 @@
 | [ ] AC-OPS-006 | `pnpm smoke` | 模拟 20 个 update 走完全链路并断言 DB 状态，全绿 |
 | [ ] AC-OPS-007 | 磁盘写满（模拟） | DB 写失败被捕获；回复「内部错误(ref)」；owner 收告警；进程不崩 |
 | [ ] AC-OPS-008 | 时区设为 UTC 后重启 | 配额 bucket 与时间渲染一致切换，无跨日重复计费 |
-| [ ] AC-OPS-009 | 人为制造一次 uncaught 异常 / unhandled rejection | 退出前写入 `system.crash`（含 event 与 stack）到日志与 stderr；下次启动 `recoverAfterCrash` 照常收尾。崩溃不允许在日志里不留痕迹 |
+| [ ] AC-OPS-009 | 人为制造一次 uncaught 异常 / unhandled rejection | `uncaughtException`：退出前写入 `system.crash`（含 event 与 stack）到日志与 stderr，下次启动 `recoverAfterCrash` 照常收尾。`unhandledRejection`：写入 `system.unhandled_rejection` 并**继续运行**，其它并发轮次不受影响（[10 §2](./10-logging-and-observability.md)）。两种都不允许在日志里不留痕迹 |
 
 ---
 
@@ -548,7 +548,7 @@
 | 配置与 DB | | 15 / 25 | | | |
 | **上下文引擎** | | 30 / 39 | | | |
 | Telegram 与准入 | | 22 / 46 | | | |
-| Agent 与 Provider | | 21 / 42 | | | |
+| Agent 与 Provider | | 22 / 42 | | | |
 | 工具/沙箱/审批 | | 19 / 60 | | | |
 | Subagent 与任务 | | 20 / 38 | | | |
 | 记忆 | | 1 / 13 | | | |
@@ -557,6 +557,6 @@
 | WebUI | | 10 / 84 | | | |
 | 安全 | | 9 / 25 | | | |
 | 运维 | | 1 / 9 | | | |
-| **合计** | | **170 / 449** | | | |
+| **合计** | | **171 / 449** | | | |
 
 **整体通过条件**：全部 ★ 项通过 + 非 ★ 项通过率 ≥ 95% + 所有豁免项经需求方书面确认。
