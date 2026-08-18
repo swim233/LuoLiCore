@@ -51,7 +51,14 @@ function registryFor(chains: Record<string, Array<{ model: ReturnType<typeof can
       down.push(entry.id);
       return true;
     },
+    // 「连续」失败：服务成功一次就归零，也放开这个候选（真注册表里是 `recordProviderServed`）。
+    recordSuccess: (entry: { id: string }) => {
+      failures.delete(entry.id);
+      const at = down.indexOf(entry.id);
+      if (at >= 0) down.splice(at, 1);
+    },
     down,
+    failures,
   };
   return fake as unknown as ModelRegistry;
 }
@@ -182,6 +189,27 @@ describe('model wiring through prepareStep', () => {
     expect(secondCalls).toBe(1);
     closeDatabase(db);
   });
+
+  /**
+   * 「连续失败 3 次」的单位是**一次调用一个候选**，不是一次尝试。按尝试记的话 `maxRetries: 2` 时
+   * 一次请求就是三次增量 —— 一个合法地超过 `requestTimeoutMs` 的调用（定时任务、子 agent、收尾
+   * 补跑都走非流式，`deadline.guard` 罩的是整段生成）当场就把整个 provider 判死 30 分钟，
+   * 它托管的每个模型从每条别名链里一起消失。
+   */
+  it('feeds the provider health counter once per call, not once per retry', async () => {
+    const { db, turn, dependencies } = harness('wiring-health-counter', { provider: { maxRetries: 2, retryBaseMs: 1, retryMaxMs: 2, requestTimeoutMs: 30 } } as Partial<Config>);
+    const registry = registryFor({ main: [
+      { model: candidate('stalled', () => new Promise(() => undefined)), info: info('stalled') },
+      { model: candidate('second', () => ok), info: info('second') },
+    ] });
+    await expect(runMainAgent(turn, { ...dependencies, registry })).resolves.toBe('ok');
+    const counted = registry as unknown as { failures: Map<string, number>; down: string[] };
+    expect(counted.failures.get('stalled')).toBe(1);
+    expect(counted.down).toEqual([]);
+    // 服务成功的那个一点痕迹都不留（而且成功还要归零 —— 否则「连续」就是「累计」）。
+    expect(counted.failures.has('second')).toBe(false);
+    closeDatabase(db);
+  }, 20_000);
 
   it('surfaces the upstream failure instead of an empty answer when the whole chain is down', async () => {
     const { db, turn, dependencies } = harness('wiring-exhausted');

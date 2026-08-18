@@ -137,6 +137,29 @@ describe('model-level provider fallback', () => {
     expect(healthyCalls).toBe(1);
   });
 
+  /**
+   * 跳过要留痕，而且 `provider.fallback` 的 `to` 必须是**真正会被试的**那个：报数组里的下一个时
+   * 日志写着「A → B」而实际服务的是 C，比不报更误导人（docs/10 · provider.fallback）。
+   * 两个中间件分支的这段代码是同构的，测 `doGenerate` 这一路。
+   */
+  it('names the candidate that will actually be tried and reports the skipped one', async () => {
+    const skipped: Array<[string, string | undefined]> = [];
+    const fell: Array<[string, string]> = [];
+    let served = '';
+    const wrapped = fallbackLanguageModel([
+      { id: 'busy', rowId: 'r-busy', model: model('busy', () => { throw Object.assign(new Error('busy'), { statusCode: 503 }); }) },
+      { id: 'dead', rowId: 'r-dead', model: model('dead', () => { throw new Error('never reached'); }) },
+      { id: 'healthy', rowId: 'r-healthy', model: model('healthy', () => ({})) },
+    ], { maxRetries: 0, retryBaseMs: 1, retryMaxMs: 1, isDown: (candidate) => candidate.rowId === 'r-dead',
+      onSkipped: (candidate, next) => skipped.push([candidate.id, next?.id]),
+      onFallback: (from, to) => fell.push([from.id, to.id]),
+      onServed: (candidate) => { served = candidate.id; } });
+    await (wrapped as Exclude<LanguageModel, string>).doGenerate(params);
+    expect(fell).toEqual([['busy', 'healthy']]);
+    expect(skipped).toEqual([['dead', 'healthy']]);
+    expect(served).toBe('healthy');
+  });
+
   // 全链都 down 时宁可发一次注定失败的请求：一个都不发，调用方拿到的是「模型没话说」而不是故障。
   it('still calls the last candidate when the whole chain is marked down', async () => {
     let lastCalls = 0;

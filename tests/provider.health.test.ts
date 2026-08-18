@@ -32,13 +32,16 @@ function harness(name: string) {
   const log = new LogSink(new OperationsRepository(db), `./data/${name}-logs`);
   const registry = new ModelRegistry(db, providers);
   const now = Date.now();
+  /** 同一个 provider 挂第二个模型（一份凭据下多个模型是常态）。 */
+  const addModel = (providerId: string, modelId: string, rowId = `${providerId}:${modelId}`): string => {
+    db.prepare(`INSERT INTO models(id,provider_id,model_id,context_window,max_output,capabilities_json,price_in,price_out,enabled,sort,created_at,updated_at)
+      VALUES (?,?,?,128000,4096,'{}',1,2,1,0,?,?)`).run(rowId, providerId, modelId, now, now);
+    return rowId;
+  };
   /** 一个 provider + 一个模型；`modelId` 可以重复（同一个模型名挂在两个 provider 下是常态）。 */
   const add = (providerName: string, modelId: string): { providerId: string; rowId: string } => {
     const providerId = providers.save({ name: providerName, kind: 'openai-compatible', baseUrl: 'http://127.0.0.1:9/v1', apiKey: `sk-${providerName}-0123456789abcdef` });
-    const rowId = `${providerName}:${modelId}`;
-    db.prepare(`INSERT INTO models(id,provider_id,model_id,context_window,max_output,capabilities_json,price_in,price_out,enabled,sort,created_at,updated_at)
-      VALUES (?,?,?,128000,4096,'{}',1,2,1,0,?,?)`).run(rowId, providerId, modelId, now, now);
-    return { providerId, rowId };
+    return { providerId, rowId: addModel(providerId, modelId, `${providerName}:${modelId}`) };
   };
   const alias = (aliasName: string, rowIds: string[]): void => {
     db.prepare('INSERT INTO model_aliases(alias,model_ids_json,updated_at) VALUES (?,?,?)').run(aliasName, JSON.stringify(rowIds), now);
@@ -50,7 +53,7 @@ function harness(name: string) {
       models: { probeCandidate: (providerId) => (models[providerId] ? { model: probe(models[providerId]!), modelId: 'probe' } : null) } },
       { timeoutMs, failuresToDown: PROVIDER_FAILURES_TO_DOWN });
   };
-  return { db, providers, registry, add, alias, state, sweep, close: (): void => closeDatabase(db) };
+  return { db, providers, registry, add, addModel, alias, state, sweep, close: (): void => closeDatabase(db) };
 }
 
 const chainIds = (registry: ModelRegistry, alias: string): string[] => registry.chain(alias).map((candidate) => candidate.info.id);
@@ -123,14 +126,24 @@ describe('provider health check', () => {
     bed.close();
   });
 
-  it('冷却期过了自己回到链里（30 分钟）', () => {
+  it('冷却期过了自己回到链里（30 分钟），并且把库里那一行也改回 up', () => {
     const bed = harness('provider-health-cooldown');
     const dead = bed.add('dead', 'm1');
-    bed.db.prepare("UPDATE providers SET health_state='down',health_checked_at=?,health_fail_count=3 WHERE id=?").run(Date.now() - 31 * 60_000, dead.providerId);
+    bed.db.prepare("UPDATE providers SET health_state='down',health_checked_at=?,health_fail_count=3,health_error='request_timeout_15000ms' WHERE id=?").run(Date.now() - 31 * 60_000, dead.providerId);
     bed.alias('main', [dead.rowId]);
     bed.registry.rebuild(30);
     expect(chainIds(bed.registry, 'main')).toEqual([dead.rowId]);
     expect(bed.registry.isDown({ id: 'm1', rowId: dead.rowId })).toBe(false);
+    /**
+     * **放行这件事必须写回库。** 只在内存里放行的话它带着 `health_fail_count=3` 承接真实流量，
+     * 下一次超时（4 >= 3）当场再 down 30 分钟 —— 30 分 down / 一个 cron 间隔 up 地抖，而 WebUI
+     * 全程显示 down。`health_error` 留着当「上次失败原因」给界面看。
+     */
+    expect(bed.state(dead.providerId)).toEqual({ health_state: 'up', health_fail_count: 0 });
+    expect(bed.db.prepare('SELECT health_error FROM providers WHERE id=?').pluck().get(dead.providerId)).toBe('request_timeout_15000ms');
+    // 而且这一次 rebuild 之后它就有探测候选了 —— `main.ts` 的 `provider-health` 正是靠「先 rebuild
+    // 再探」才能在同一 tick 里探到刚放回来的这个（`#probes` 是上一次 rebuild 的产物）。
+    expect(bed.registry.probeCandidate(dead.providerId)?.modelId).toBe('m1');
     bed.close();
   });
 
@@ -162,6 +175,49 @@ describe('provider failures reported from the call path', () => {
     expect(chainIds(bed.registry, 'main')).toEqual([dead.rowId, alive.rowId]);
     expect(bed.registry.isDown(candidate)).toBe(true);
     expect(bed.registry.isDown({ id: 'grok-4.5', rowId: alive.rowId })).toBe(false);
+    bed.close();
+  });
+
+  /**
+   * 「**连续**失败」少了归零就是「累计失败」：计数在库里、重启也不清，跨轮次零散攒够三次同样能
+   * 判死一个一直在答话的 provider。归零的判据与探测那条一致 —— 上游服务成功一次就说明它活着。
+   */
+  it('服务成功一次就归零，并且当场放开这个 provider', () => {
+    const bed = harness('provider-failure-served');
+    const flaky = bed.add('flaky', 'm1');
+    bed.alias('main', [flaky.rowId]);
+    bed.registry.rebuild(30);
+    const candidate = { id: 'm1', rowId: flaky.rowId };
+    for (const _ of [1, 2]) bed.registry.recordFailure(candidate, 'request_timeout_15000ms', PROVIDER_FAILURES_TO_DOWN);
+    expect(bed.state(flaky.providerId).health_fail_count).toBe(2);
+    bed.registry.recordSuccess(candidate);
+    expect(bed.state(flaky.providerId)).toEqual({ health_state: 'up', health_fail_count: 0 });
+    // 归零之后再攒两次仍够不到阈值。
+    for (const _ of [1, 2]) expect(bed.registry.recordFailure(candidate, 'request_timeout_15000ms', PROVIDER_FAILURES_TO_DOWN)).toBe(false);
+    expect(bed.registry.isDown(candidate)).toBe(false);
+    // 已经判死之后又服务成功（冷却到期放回来的那一路）：`#down` 也要跟着放开，否则这一轮里
+    // 每一步都还在跳过一个已经好了的 provider。
+    expect(bed.registry.recordFailure(candidate, 'request_timeout_15000ms', PROVIDER_FAILURES_TO_DOWN)).toBe(true);
+    expect(bed.registry.isDown(candidate)).toBe(true);
+    bed.registry.recordSuccess(candidate);
+    expect(bed.registry.isDown(candidate)).toBe(false);
+    expect(bed.state(flaky.providerId)).toEqual({ health_state: 'up', health_fail_count: 0 });
+    bed.close();
+  });
+
+  // 401/403 与「计数到阈值」跳过的粒度必须一样：只标命中那一行的话，同一份凭据下的第二个模型
+  // 不被跳过 —— 而 401 在中间件里是短路 throw，这一轮白烧一次注定失败的往返还不会往下 fallback。
+  it('认证被拒时该 provider 名下每个模型都被跳过，不只是命中的那一行', () => {
+    const bed = harness('provider-failure-401-rows');
+    const gateway = bed.add('gateway', 'model-a');
+    const sibling = bed.addModel(gateway.providerId, 'model-b');
+    const other = bed.add('other', 'model-c');
+    bed.alias('main', [gateway.rowId, sibling, other.rowId]);
+    bed.registry.rebuild(30);
+    bed.registry.markProviderDown('model-a', 'unauthorized');
+    expect(bed.registry.isDown({ id: 'model-a', rowId: gateway.rowId })).toBe(true);
+    expect(bed.registry.isDown({ id: 'model-b', rowId: sibling })).toBe(true);
+    expect(bed.registry.isDown({ id: 'model-c', rowId: other.rowId })).toBe(false);
     bed.close();
   });
 

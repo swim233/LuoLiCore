@@ -77,10 +77,10 @@ export const CONFIG_DESCRIPTIONS: Record<string, string> = {
   'concurrency.global': '全进程最多同时跑几个轮次。',
   'concurrency.queueMax': '并发满了之后还能排多少个轮次等位，再多的直接拒绝而不是无限堆积。',
   'concurrency.coalesceSameUserMs': '大于 0 时，把同一用户在这段时间内连着发的几条消息合并成一轮处理。',
-  'concurrency.turnTimeoutMs': '单个轮次从开始到收尾的总超时（毫秒），到点强制取消。',
+  'concurrency.turnTimeoutMs': '单个轮次从开始到收尾的总超时（毫秒），到点强制停下（记「失败」而不是「已取消」）。',
 
   cancel: '轮次被取消（用户打断 / 超时）时怎么收场。',
-  'cancel.commitPartial': '取消时是否把已经生成的那半截回复提交进上下文。关着 = 当这一轮没发生过。',
+  'cancel.commitPartial': '取消时是否把还没发给用户的那半截回复提交进上下文。已经发到屏幕上的内容一律提交（上下文必须与用户所见一致），这个开关管不到它。',
 
   prompt: '系统提示词的组装预算。提示词页可以逐块预览实际产出。',
   'prompt.maxTokens': '系统提示词（人设、记忆、技能、运行时信息等 block 0–6）的总 token 上限，超出时按块的优先级裁。',

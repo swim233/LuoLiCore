@@ -62,6 +62,19 @@ export function recordProviderSuccess(db: Sqlite, providerId: string): void {
   db.prepare("UPDATE providers SET health_fail_count=0,health_state='up',health_checked_at=?,health_error=NULL WHERE id=?").run(Date.now(), providerId);
 }
 
+/**
+ * 调用路径上「这一次真的服务成功了」。**「连续失败」少了这一条就是「累计失败」** —— 计数在库里、
+ * 重启也不清，跨轮次零散攒够三次超时同样能判死一个一直在答话的 provider。
+ *
+ * 与探测那条（`recordProviderSuccess`）分开是因为守卫：这里每一步模型调用都会调一次，带上
+ * 「本来就是 up 且计数为 0 就别写」的条件之后常态命中 0 行，不给每一步加一次真实写入。
+ * 返回是否真的改过 —— 调用方拿它决定要不要动进程内那份 `#down`。
+ */
+export function recordProviderServed(db: Sqlite, providerId: string): boolean {
+  return db.prepare(`UPDATE providers SET health_fail_count=0,health_state='up',health_checked_at=?,health_error=NULL
+    WHERE id=? AND (health_fail_count<>0 OR COALESCE(health_state,'up')<>'up')`).run(Date.now(), providerId).changes > 0;
+}
+
 function errorStatus(error: unknown): number | null {
   // 与 `fallback-model.ts` 的同名判据一致。那边是私有的，为一个三行判据把中间件层反向导进
   // provider 层不值得（provider → agent → provider 的循环）。

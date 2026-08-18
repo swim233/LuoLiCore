@@ -187,7 +187,7 @@ concurrency:
   coalesceSameUserMs: 0           # 热更新 · >0 时只为窗口内最后一条开轮次，先到的降级成背景消息
   turnTimeoutMs: 600000           # 热更新
 cancel:
-  commitPartial: false            # 热更新 · 取消时是否提交已生成部分
+  commitPartial: false            # 热更新 · 取消时是否提交**没投递给用户**的那部分（已发到屏幕上的一律提交，见 04 §5.3）
 
 # ============================================================ prompt & memory（D11, D12）
 prompt:

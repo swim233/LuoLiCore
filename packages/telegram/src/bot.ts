@@ -627,20 +627,32 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
        * timeout` = 600 秒到点，19:16:04 `turn.end turn committed`）。「（生成中断）」那个后缀由
        * `TelegramOutput.consume` 在同一条 `interrupted` 上加。
        */
-      const cancelled = broken && turn.abortSignal.aborted;
+      /**
+       * **超时不是取消。** 两者都是 abort，可判据只看 `aborted` 的话，`turnTimeoutMs` 到点的轮次
+       * 会记 `cancelled` 并被下面的 `noteFailure` 跳过 —— 于是「每一轮都卡满十分钟」这种最该响的
+       * 故障一次告警都不响（`logs/2026-08-18`：三十来轮全记 cancelled，`consecutiveFailures`
+       * 一次没涨）。`docs/04 §5.3` 现在把收尾分三档：`/cancel` → cancelled；超时 → failed 且计入；
+       * 上游自己挂 → failed。用户可见文案仍按 `reason` 分（收到「已取消」的人会以为自己误触了）。
+       */
+      const timedOut = turn.abortSignal.reason === 'timeout';
+      const cancelled = broken && turn.abortSignal.aborted && !timedOut;
       const state = broken ? (cancelled ? 'cancelled' : 'failed') : 'committed';
       const settled = dependencies.turns.finish(turn.turnId, { state, commitId: committed.commit.id, rebased: committed.rebased,
-        ...(cancelled ? { cancelReason: String(turn.abortSignal.reason ?? 'cancelled') } : {}), ...(state === 'failed' ? { error: 'stream_interrupted' } : {}) });
+        // 超时那一档两个字段都带：`cancel_reason='timeout'` 说清是谁掐的，`error` 让它在失败列表里
+        // 与「上游中途挂了」分得开。
+        ...(cancelled || timedOut ? { cancelReason: String(turn.abortSignal.reason ?? 'cancelled') } : {}),
+        ...(state === 'failed' ? { error: timedOut ? 'turn_timeout' : 'stream_interrupted' } : {}) });
       await dependencies.plugins?.hook('afterCommit', { turn, committed });
       dependencies.log.event({ level: broken ? 'warn' : 'info', kind: 'turn.end',
-        summary: broken ? `${cancelled ? 'turn cancelled' : 'turn failed'} after partial delivery` : 'turn committed',
+        summary: broken ? `${cancelled ? 'turn cancelled' : timedOut ? 'turn timed out' : 'turn failed'} after partial delivery` : 'turn committed',
         traceId: turn.turnId, chatId, userId, key, data: { state, rebased: committed.rebased, ...(broken ? { deliveredChars: answer.length } : {}) } });
       dependencies.log.publish('turn.finished', { turnId: turn.turnId, key, chatId, state, steps: settled?.steps ?? 0, toolCalls: settled?.toolCalls ?? 0, costUsd: settled?.costUsd ?? 0, rebased: committed.rebased, durationMs: settled?.durationMs ?? 0 });
       // 工具真的跑过、结果也进了已提交的上下文：记忆写入跟着提交走，否则上下文说「写好了」而库里没有。
       dependencies.memory.flush(turn.turnId);
-      // 断掉的一轮不清零（它不是一次成功），但也只有 `failed` 才计入连续失败 —— 取消不算故障。
+      // 断掉的一轮不清零（它不是一次成功），但也只有 `failed` 才计入连续失败 —— 取消不算故障，
+      // 超时算（`docs/04 §5.3` 的三档）。
       if (!broken) consecutiveFailures = 0;
-      else if (!cancelled) noteFailure('stream_interrupted');
+      else if (!cancelled) noteFailure(timedOut ? 'turn_timeout' : 'stream_interrupted');
       // `quota.warnAtRatio`：跨过预警线时在回复后补一句，每个 bucket 只提示一次（docs/10 §5.4）。
       // 提示挂在成功那一轮的后面而不是单独发一条：多一条消息在群里是噪音。
       if (reservation) {
@@ -648,22 +660,28 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
         if (warning) await ctx.reply(`（${warning.window === 'month' ? '本月' : '今日'}额度已用 ${Math.round(warning.spent / warning.limit * 100)}%）`).catch(() => undefined);
       }
     } catch (error) {
-      const cancelled = turn.abortSignal.aborted;
+      // 与上面那一路同一份判据：超时是故障，不是取消（`docs/04 §5.3`）。这条路上的表现更直接 ——
+      // 一个字都没投递出去的超时轮次此前也记 cancelled，于是上游变黑洞时连续失败告警永不触发。
+      const timedOut = turn.abortSignal.reason === 'timeout';
+      const cancelled = turn.abortSignal.aborted && !timedOut;
       // `abortTurn` 也在写库（`releaseClaims`，`cancel.commitPartial` 开着时还会跑一整个
       // `commitTurn`）。它抛出去的话下面这行就不执行了，`turns` 那行会一直是 `state='running'`
       // —— `GET /api/turns/active` 与总览页的 running 计数在整个进程生命周期内都是错的，
       // 直到下次重启的 `recoverAfterCrash` 才收拾。清理是尽力而为，**记状态不是**。
       try { await dependencies.context.abortTurn(turn, cancelled ? 'cancelled' : 'failed', error); }
       catch (cleanup) { dependencies.log.event({ level: 'error', kind: 'ctx.abort', summary: 'abortTurn failed; turn still recorded as ended', traceId: turn.turnId, chatId, userId, key, data: { error: cleanup instanceof Error ? cleanup.message : String(cleanup) } }); }
-      const settled = dependencies.turns.finish(turn.turnId, cancelled ? { state: 'cancelled', cancelReason: String(turn.abortSignal.reason ?? 'cancelled') } : { state: 'failed', error: error instanceof Error ? error.message : String(error) });
-      dependencies.log.event({ level: cancelled ? 'warn' : 'error', kind: 'turn.end', summary: cancelled ? 'turn cancelled' : error instanceof Error ? error.message : 'turn failed', traceId: turn.turnId, chatId, userId, key });
+      const settled = dependencies.turns.finish(turn.turnId, cancelled
+        ? { state: 'cancelled', cancelReason: String(turn.abortSignal.reason ?? 'cancelled') }
+        : { state: 'failed', error: timedOut ? 'turn_timeout' : error instanceof Error ? error.message : String(error), ...(timedOut ? { cancelReason: 'timeout' } : {}) });
+      dependencies.log.event({ level: cancelled ? 'warn' : 'error', kind: 'turn.end', summary: cancelled ? 'turn cancelled' : timedOut ? 'turn timed out' : error instanceof Error ? error.message : 'turn failed', traceId: turn.turnId, chatId, userId, key });
       dependencies.log.publish('turn.finished', { turnId: turn.turnId, key, chatId, state: cancelled ? 'cancelled' : 'failed', steps: settled?.steps ?? 0, toolCalls: settled?.toolCalls ?? 0, costUsd: settled?.costUsd ?? 0, rebased: false, durationMs: settled?.durationMs ?? 0 });
-      // 连续 5 轮失败是「整个部署坏了」的信号（docs/10 §6）。取消不算 —— 用户点了取消不是故障。
-      if (!cancelled) noteFailure(error instanceof Error ? error.message : String(error));
-      // 轮次超时和用户主动取消都走 abort，但对用户是两回事：没点过取消的人收到「已取消」
-      // 只会以为自己误触了，而真实情况是这一轮卡在某处直到 `concurrency.turnTimeoutMs`。
-      await ctx.reply(cancelled
-        ? turn.abortSignal.reason === 'timeout' ? `这一轮太久没有进展，已经停下了。(ref: ${turn.turnId.slice(0, 12)})` : '⛔ 已取消'
+      // 连续 5 轮失败是「整个部署坏了」的信号（docs/10 §6）。取消不算 —— 用户点了取消不是故障；
+      // 超时算，而且它正是那个信号最该覆盖的场景（上游变黑洞时每一轮都走这条路）。
+      if (!cancelled) noteFailure(timedOut ? 'turn_timeout' : error instanceof Error ? error.message : String(error));
+      // 记账上超时算故障，**对用户仍是另一句话**：没点过取消的人收到「已取消」只会以为自己误触了，
+      // 而收到一句通用的失败提示也说不出「这一轮卡了十分钟」。
+      await ctx.reply(timedOut ? `这一轮太久没有进展，已经停下了。(ref: ${turn.turnId.slice(0, 12)})`
+        : cancelled ? '⛔ 已取消'
         : failureText(error, turn.turnId.slice(0, 12)));
     } finally {
       dependencies.tools?.releaseTurn(turn.turnId);

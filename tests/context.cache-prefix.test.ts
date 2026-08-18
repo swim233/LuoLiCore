@@ -53,7 +53,8 @@ function harness(name: string, active: { windowMs: number } = { windowMs: 600_00
     capabilities: '[]', priceIn: 1, priceOut: 2, priceCacheRead: 0, priceCacheWrite: 0 };
   const registry = { chain: () => [{ model, info }], resolve: () => model as unknown as LanguageModel, settings: () => ({}),
     aliases: () => ['main'], info: () => info, infoByModelId: () => info, aliasOf: () => 'main',
-    markProviderDown: () => {} } as unknown as ModelRegistry;
+    // 每次成功服务都会走一次（连续失败计数归零，`docs/04 §5.3`）；这条链上没有失败，所以是空实现。
+    recordSuccess: () => {}, markProviderDown: () => {} } as unknown as ModelRegistry;
   const dependencies = { config, db, registry, tools: new ToolRegistry(log, broker, { maxRegistered: 10, maxCallsPerTurn: 5, maxConsecutiveErrors: 3 }),
     prompts: new PromptAssembler(), documents, ledger: new UsageLedger(db), log, workspace: './data', context: engine };
   return { db, archive, engine, config, dependencies, captured };
