@@ -1,5 +1,8 @@
+import { existsSync, realpathSync } from 'node:fs';
+import { isAbsolute, join, resolve, sep } from 'node:path';
 import { z } from 'zod';
 import { roleRank, type Role } from '@luoli/shared';
+import { SkillPackageError, installSkillPackage } from '../skills/package.js';
 import type { Config } from '../config/schema.js';
 import type { McpPersistPorts } from '../mcp/persist.js';
 import { persistMcpServers } from '../mcp/persist.js';
@@ -8,13 +11,6 @@ import type { SkillLoader } from '../skills/loader.js';
 import type { CustomToolManager } from './custom.js';
 import { builtinPolicy, type ToolExecutionContext, type ToolRegistry } from './registry.js';
 
-/**
- * 随包提交在 `skills/` 里的四份说明书 —— 模型写 plugin / 定义工具 / 装 MCP 之前要读的那份文档。
- * 它们经 `load_skill` 渐进式取用，所以平时只占目录里四行。`write_skill` 拒绝覆写它们：
- * 模型把自己的说明书改掉之后，下一次它就是照着改坏的那份写的。
- */
-export const BUNDLED_SKILLS = ['writing-tools', 'writing-skills', 'writing-plugins', 'installing-mcp'] as const;
-
 export interface AuthoringToolDependencies {
   customTools: CustomToolManager;
   skills: SkillLoader;
@@ -22,6 +18,29 @@ export interface AuthoringToolDependencies {
   mcp: McpPersistPorts;
   /** 随包发的说明书 skill，模型不许覆写 —— 它们是它自己下一次要读的那份文档。 */
   reservedSkills: readonly string[];
+}
+
+/**
+ * `install_skill` 的 source 能指到哪儿。**只有两处**：本轮 workspace，以及本会话在附件库里的
+ * 那个子目录 —— 用户在聊天里丢的 zip 就落在后者（`packages/telegram/src/media.ts`）。
+ *
+ * `media.dir` 底下是**按 chatId 分目录存着所有会话的附件**，所以这里必须限定到本会话那一层：
+ * 不限定就等于凭一个 `install_skill` 把任意别的会话的文件读进来。
+ *
+ * 判据走 `realpath` 而不是 `resolve`：`resolve` 认不出中途的软链接，而 workspace 是模型自己
+ * 能往里写东西的目录 —— 它完全可以先 `ln -s / w` 再 `install_skill('w/etc/...')`。
+ */
+function resolveAuthoringSource(input: string, roots: readonly string[]): string | null {
+  if (!input || input.includes('\0')) return null;
+  for (const root of roots) {
+    if (!existsSync(root)) continue;
+    const realRoot = realpathSync(root);
+    const candidate = isAbsolute(input) ? resolve(input) : resolve(realRoot, input);
+    if (!existsSync(candidate)) continue;
+    const real = realpathSync(candidate);
+    if (real === realRoot || real.startsWith(`${realRoot}${sep}`)) return real;
+  }
+  return null;
 }
 
 const settings = (context: ToolExecutionContext): Config['tools']['selfExtend'] => (context.turn.config as Readonly<Config>).tools.selfExtend;
@@ -125,6 +144,45 @@ export function registerAuthoringTools(registry: ToolRegistry, dependencies: Aut
           hint: skill.enabled ? '下一轮就会出现在 skill 目录里，用 load_skill 取正文。' : '已保存但停用，不会出现在目录里。' };
       } catch (error) {
         return { ok: false, error: error instanceof Error ? error.message : 'skill_write_failed' };
+      }
+    },
+  });
+
+  registry.register({
+    name: 'install_skill',
+    description: '把一个 skill 包装进来：带 scripts/、bin/、references/ 的整棵目录，zip 或已解开的目录都行（用户在聊天里发的 zip 就用这个装）。'
+      + '**装完是停用状态**，要 owner 在 WebUI 看过附带的脚本与二进制再点启用 —— 包里可能带可执行文件，这一点和只写一段正文的 write_skill 不同。'
+      + 'source 只能指向你的工作目录或本会话收到的附件。写之前先 load_skill("writing-skills")。',
+    inputSchema: z.object({
+      source: z.string().min(1).describe('zip 或目录的路径：工作目录内的相对路径，或本会话附件的绝对路径'),
+      name: z.string().min(1).max(64).optional().describe('装成什么名字（kebab-case，同时是目录名）。不给则取包里 SKILL.md 声明的那个'),
+      subdir: z.string().min(1).optional().describe('包里有多份 SKILL.md 时用它指一个；报 skill_ambiguous_root 时会把候选列出来'),
+      overwrite: z.boolean().optional().describe('同名已存在时覆盖（旧的那棵会留档）'),
+    }),
+    policy: builtinPolicy('install_skill'), sourcePriority: 90,
+    available: (role, context) => gate(role, context, (config) => config.skills.enabled),
+    execute: async (input, context) => {
+      const config = context.turn.config as Readonly<Config>;
+      const source = resolveAuthoringSource(input.source, [context.workspace, join(config.media.dir, context.turn.chatId)]);
+      if (!source) {
+        return { ok: false, error: 'skill_source_forbidden',
+          hint: `${input.source} 不在你的工作目录里，也不是本会话收到的附件 —— 这两处之外的路径不给装。` };
+      }
+      try {
+        const installed = await installSkillPackage(dependencies.skills, source, {
+          limits: config.skills.package, minRoleFloor: settings(context).skills.minRole, origin: input.source,
+          ...(input.name ? { name: input.name } : {}), ...(input.subdir ? { subdir: input.subdir } : {}),
+          ...(input.overwrite === undefined ? {} : { overwrite: input.overwrite }),
+        });
+        return { ok: true, name: installed.name, enabled: false, files: installed.files, bytes: installed.bytes,
+          hint: `已装好但**停用**，所以现在还不在你的 skill 目录里。owner 要在 WebUI 的扩展页看过 SKILL.md 与这 ${installed.files.length} 个文件再点启用；`
+            + `启用之后用 load_skill("${installed.name}") 取正文，附属文件走 read_file("skill://${installed.name}/<相对路径>")。`
+            + (installed.backedUp ? '被覆盖的那棵已留档。' : '') };
+      } catch (error) {
+        if (error instanceof SkillPackageError) {
+          return { ok: false, error: error.code, ...(error.hint ? { hint: error.hint } : {}), ...(error.candidates ? { candidates: error.candidates } : {}) };
+        }
+        return { ok: false, error: 'skill_package_failed', hint: error instanceof Error ? error.message : String(error) };
       }
     },
   });

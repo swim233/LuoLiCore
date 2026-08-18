@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { ArchiveRepository, OperationsRepository, PrincipalRepository, closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
 import { ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceService, McpManager, ProviderStore, Secrets, SkillLoader, configSchema } from '@luoli/core';
 import { createServer, type ServerDependencies } from '@luoli/server';
+import { zipFixture } from './fixtures/zip.js';
 
 function harness(extend: (base: { db: ReturnType<typeof openDatabase>; config: ConfigStore; events: EventBus; log: LogSink }) => Partial<ServerDependencies> = () => ({})) {
   const path = './data/api-contract.test.db'; for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
@@ -190,6 +191,65 @@ describe('documented API surface', () => {
     expect((await app.request('/api/skills/web-skill', { method: 'DELETE', headers })).status).toBe(200);
     expect((await app.request('/api/skills/web-skill', { headers: { cookie: headers.cookie } })).status).toBe(404);
     await resources.mcp?.close();
+    rmSync(skillsDir, { recursive: true, force: true });
+    closeDatabase(db);
+  });
+
+  /**
+   * 列表端点的形状是个契约：`SELECT *` 会把 `path`（宿主文件系统路径）、`content_hash` 与整份
+   * `frontmatter_json` 一起发出去，而前端一个都不用。多发的字段没人会注意到，直到它变成
+   * 一条泄露 —— 所以把列集合焊在这里。
+   */
+  it('narrows the skill list payload and refuses to mutate bundled skills', async () => {
+    const skillsDir = './data/api-contract-skill-list';
+    rmSync(skillsDir, { recursive: true, force: true });
+    mkdirSync(`${skillsDir}/writing-tools`, { recursive: true });
+    writeFileSync(`${skillsDir}/writing-tools/SKILL.md`, '---\nname: writing-tools\ndescription: 随包说明书\nmin-role: owner\n---\n正文\n');
+    const { app, db, headers } = harness(({ db: database, config: liveConfig }) => {
+      const skills = new SkillLoader(database, skillsDir, () => liveConfig.snapshot().skills.defaultMinRole);
+      skills.scan();
+      return { skills };
+    });
+    const rows = (await (await app.request('/api/skills', { headers: { cookie: headers.cookie } })).json()) as { data: Array<Record<string, unknown>> };
+    expect(Object.keys(rows.data[0]!).sort()).toEqual(['description', 'enabled', 'load_error', 'min_role', 'name', 'source', 'updated_at']);
+    expect(rows.data[0]).toMatchObject({ name: 'writing-tools', source: 'bundled' });
+    // 随包说明书只放行启停：`write_skill` 一直拒改它们，这一侧此前能改能删。
+    expect((await app.request('/api/skills/writing-tools', { method: 'DELETE', headers })).status).toBe(403);
+    expect((await app.request('/api/skills/writing-tools', { method: 'PUT', headers, body: JSON.stringify({ body: '改坏它' }) })).status).toBe(403);
+    expect((await app.request('/api/skills/writing-tools', { method: 'PATCH', headers, body: JSON.stringify({ enabled: false }) })).status).toBe(200);
+    rmSync(skillsDir, { recursive: true, force: true });
+    closeDatabase(db);
+  });
+
+  it('installs a skill package through multipart upload and lands it disabled', async () => {
+    const skillsDir = './data/api-contract-skill-package';
+    rmSync(skillsDir, { recursive: true, force: true });
+    mkdirSync(skillsDir, { recursive: true });
+    const loaded: { skills?: SkillLoader } = {};
+    const { app, db, headers } = harness(({ db: database, config: liveConfig }) => {
+      loaded.skills = new SkillLoader(database, skillsDir, () => liveConfig.snapshot().skills.defaultMinRole);
+      loaded.skills.scan();
+      return { skills: loaded.skills };
+    });
+    const post = async (zip: Buffer, fields: Record<string, string> = {}): Promise<Response> => {
+      const form = new FormData();
+      form.append('file', new File([new Uint8Array(zip)], 'pack.zip', { type: 'application/zip' }));
+      for (const [key, value] of Object.entries(fields)) form.append(key, value);
+      // multipart 的 content-type 由 FormData 自己带（里面有 boundary），显式写死会解不出字段。
+      return app.request('/api/skills/package', { method: 'POST', headers: { cookie: headers.cookie, 'x-csrf-token': headers['x-csrf-token'] }, body: form });
+    };
+    const body = '---\nname: packaged\ndescription: 装进来的\n---\n照说明跑 scripts/invoke.sh\n';
+    const created = await post(zipFixture([{ name: 'packaged/SKILL.md', content: body }, { name: 'packaged/scripts/invoke.sh', content: 'echo hi', mode: 0o100755 }]));
+    expect(created.status).toBe(201);
+    expect(await created.json()).toMatchObject({ ok: true, data: { name: 'packaged', files: expect.arrayContaining(['scripts/invoke.sh']) } });
+    expect(loaded.skills?.read('packaged')).toMatchObject({ enabled: false });
+    // 重名是 409（前端据此提示「要覆盖吗」），不是「你发的东西不合法」。
+    expect((await post(zipFixture([{ name: 'packaged/SKILL.md', content: body }]))).status).toBe(409);
+    // 包根有歧义时必须把候选带回去 —— 只说「有歧义」等于让运维自己猜 subdir 填什么。
+    const ambiguous = await post(zipFixture([{ name: 'a/SKILL.md', content: body }, { name: 'b/SKILL.md', content: body }]));
+    expect(ambiguous.status).toBe(400);
+    expect(await ambiguous.json()).toMatchObject({ ok: false, error: { code: 'skill_ambiguous_root', details: { candidates: expect.arrayContaining(['a', 'b']) } } });
+    expect((await post(zipFixture([{ name: 'a/SKILL.md', content: body }, { name: 'b/SKILL.md', content: body }]), { subdir: 'a', name: 'picked' })).status).toBe(201);
     rmSync(skillsDir, { recursive: true, force: true });
     closeDatabase(db);
   });

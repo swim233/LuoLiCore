@@ -1,6 +1,6 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { createReadStream, existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
-import { resolve, sep } from 'node:path';
+import { createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { join, resolve, sep } from 'node:path';
 import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import argon2 from 'argon2';
@@ -12,7 +12,7 @@ import { getConnInfo } from '@hono/node-server/conninfo';
 import { serveStatic } from '@hono/node-server/serve-static';
 import type { AgentManager, Config, ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, PluginManager, PromptDocuments, ProviderStore, Sandbox, SkillLoader, SkillWriteInput, SubAgentRuntimeEvent, TurnRegistry } from '@luoli/core';
 import { ALIAS_NAME_PATTERN, HOT_RELOADABLE_CONFIG_KEYS, createScheduledJob, mergeAgentDefinitions, scanAgentFiles, scheduledJobView, testApprovalRules, KNOWN_UNIMPLEMENTED_CONFIG_KEYS, TOOL_POLICY, aliasSettingsSchema, checkWakeword, configSchema as runtimeConfigSchema, envPinnedConfigKeys, perChatConfig, probeProvider, quotaBucket, rejectedWakewords } from '@luoli/core';
-import { APPROVAL_POLICIES, effectiveToolPolicy, looksSecret, persistMcpServers as persistMcpServersShared, publicConfig, relaxedFields, revisionJson } from '@luoli/core';
+import { APPROVAL_POLICIES, BUNDLED_SKILLS, SkillPackageError, effectiveToolPolicy, installSkillPackage, looksSecret, persistMcpServers as persistMcpServersShared, publicConfig, relaxedFields, revisionJson } from '@luoli/core';
 import type { CatalogIndex, CustomToolManager, ModelMetadata, ProviderProbe, ToolOverride, ToolRegistry } from '@luoli/core';
 import type { ArchiveRepository, CustomToolRepository, OperationsRepository, PrincipalRepository, ScheduleRepository, ScheduledJob, Sqlite } from '@luoli/db';
 import { deleteAppKv, modelAliasKey, readAppKv, writeConfigRows as writeConfigRowsToDatabase } from '@luoli/db';
@@ -298,7 +298,16 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     bodyLimiters.set(max, created);
     return created;
   };
-  app.use('/api/*', (ctx, next) => limiterFor(WIDE_BODY_LIMITS.find(([pattern]) => pattern.test(ctx.req.path))?.[1] ?? DEFAULT_BODY_LIMIT)(ctx, next));
+  /**
+   * 装 skill 包这条走配置而不是常量：`skills.package.maxTotalBytes` 默认 64 MiB，而这里的默认
+   * 上界是 1 MiB —— 不接过来的话，一个 4.9 MB 的包在读到端点之前就被 413 掉了，而那条错误里
+   * 一个字都不会提到「去把上限调大」。多给 1 MiB 是 multipart 信封的余量，好让报错来自
+   * 端点里那句说得清楚的，而不是这道闸。
+   */
+  const bodyLimitFor = (path: string): number => (path === '/api/skills/package'
+    ? currentConfig().skills.package.maxTotalBytes + 1_048_576
+    : WIDE_BODY_LIMITS.find(([pattern]) => pattern.test(path))?.[1] ?? DEFAULT_BODY_LIMIT);
+  app.use('/api/*', (ctx, next) => limiterFor(bodyLimitFor(ctx.req.path))(ctx, next));
 
   // 无鉴权的那份只回存活状态。provider 列表（含 baseUrl）、MCP 服务器、沙箱 plan、在途轮次数
   // 都是内部拓扑：默认绑 127.0.0.1 时影响有限，但 `webui.host` 一放开就是无鉴权信息泄露
@@ -1308,11 +1317,25 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
       summary: `手动触发 ${job.name} 失败`, chatId: job.chatId, key: job.key, data: { job: id, error: error instanceof Error ? error.message : String(error) } }));
     return ctx.json({ ok: true, data: { started: true, name: job.name, mode: job.mode } });
   });
-  app.get('/api/skills', (ctx) => ctx.json({ ok: true, data: dependencies.db.prepare('SELECT * FROM skills ORDER BY name').all() }));
+  // **不是 `SELECT *`**：那会把 `path`（宿主文件系统路径）、`content_hash` 与整份
+  // `frontmatter_json` 一起发给前端，而扩展页只用得上这七列。
+  app.get('/api/skills', (ctx) => ctx.json({ ok: true, data: dependencies.db.prepare(
+    'SELECT name,description,min_role,enabled,source,load_error,updated_at FROM skills ORDER BY name').all() }));
   app.get('/api/skills/:name', (ctx) => {
     const skill = dependencies.skills?.read(ctx.req.param('name'));
     return skill ? ctx.json({ ok: true, data: skill }) : ctx.json(apiError('not_found', 'Skill 不存在', 404).body, 404);
   });
+  /**
+   * 随包发的四份说明书**只放行启停**。`write_skill` 从一开始就拒改它们（模型把自己的说明书
+   * 改坏之后，下一次它就是照着改坏的那份写的），而这一侧此前能改能删 —— 同一条不变量只焊住了一半。
+   * 停用是正当的运维动作，所以只挡「改 `enabled` 以外的字段」和删除。
+   */
+  const reservedSkill = (ctx: Context<ServerEnv>, body?: Record<string, unknown>): Response | null => {
+    const name = ctx.req.param('name') ?? '';
+    if (!(BUNDLED_SKILLS as readonly string[]).includes(name)) return null;
+    if (body && Object.keys(body).every((key) => key === 'enabled')) return null;
+    return ctx.json(apiError('skill_reserved', `${name} 是随包发的说明书，只能启停，不能改正文或删除`, 403).body, 403);
+  };
   // PUT 与 PATCH 走同一条路：SkillLoader.update 本来就是「只覆盖给到的字段」，
   // 两个动词分别抄一份 body 映射，改 frontmatter 字段时必然漏掉其中一个。
   const skillWriteInput = (body: Record<string, unknown>): SkillWriteInput => ({ description: body.description as string | undefined, body: body.body as string | undefined,
@@ -1320,6 +1343,8 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
   const updateSkill = async (ctx: Context<ServerEnv>): Promise<Response> => {
     if (!dependencies.skills) return ctx.json(apiError('not_implemented', 'SkillLoader 未配置', 500).body, 500);
     const body = await ctx.req.json<Record<string, unknown>>().catch((): Record<string, unknown> => ({}));
+    const reserved = reservedSkill(ctx, body);
+    if (reserved) return reserved;
     try { return ctx.json({ ok: true, data: dependencies.skills.update(ctx.req.param('name') ?? '', skillWriteInput(body)) }); }
     catch (error) {
       const message = error instanceof Error ? error.message : 'Skill 更新失败';
@@ -1342,10 +1367,48 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
         : ctx.json(apiError('invalid_skill', message, 400).body, 400);
     }
   });
+  /**
+   * 装一个 skill 包（docs/07 §2.5）。**与 `install_skill` 工具共用 `installSkillPackage`** ——
+   * 端点自己抄一遍解包逻辑的话，两条路迟早在校验上分叉，而那里的每一条都是安全判据。
+   *
+   * 上传的 zip 落在 `<skillsDir>/.uploads/` 而不是 `os.tmpdir()`：装的目标就在同一个卷上，
+   * 而且点号开头的目录 `SkillLoader.scan()` 不看。用完即删。
+   */
+  app.post('/api/skills/package', async (ctx) => {
+    if (!dependencies.skills) return ctx.json(apiError('not_implemented', 'SkillLoader 未配置', 500).body, 500);
+    const limits = currentConfig().skills.package;
+    const body = await ctx.req.parseBody().catch(() => null);
+    const file = body?.file;
+    if (!(file instanceof File)) return ctx.json(apiError('invalid_package', '需要 multipart 表单里的 file 字段').body, 400);
+    if (file.size > limits.maxTotalBytes) return ctx.json(apiError('skill_package_too_large', `压缩包超过 ${limits.maxTotalBytes} 字节`, 413).body, 413);
+    const uploads = join(dependencies.skills.directory, '.uploads');
+    mkdirSync(uploads, { recursive: true, mode: 0o700 });
+    const staged = join(uploads, `${Date.now()}-${randomBytes(8).toString('hex')}.zip`);
+    const text = (key: string): string | undefined => (typeof body?.[key] === 'string' && body[key] ? body[key] : undefined);
+    try {
+      writeFileSync(staged, Buffer.from(await file.arrayBuffer()), { mode: 0o600 });
+      const installed = await installSkillPackage(dependencies.skills, staged, {
+        limits, minRoleFloor: currentConfig().tools.selfExtend.skills.minRole, origin: file.name,
+        ...(text('name') ? { name: text('name') } : {}), ...(text('subdir') ? { subdir: text('subdir') } : {}),
+        ...(body?.overwrite === 'true' ? { overwrite: true } : {}),
+      });
+      return ctx.json({ ok: true, data: installed }, 201);
+    } catch (error) {
+      if (!(error instanceof SkillPackageError)) {
+        return ctx.json(apiError('skill_package_failed', error instanceof Error ? error.message : '装包失败').body, 400);
+      }
+      const status = error.code === 'skill_already_exists' ? 409 : error.code === 'skill_reserved' ? 403 : 400;
+      // 包根有歧义时**必须把候选带回去**：前端要拿它渲染一个「装哪一个」的选择，
+      // 只回一句「有歧义」等于让运维自己去猜 subdir 该填什么。
+      return ctx.json({ ok: false as const, error: { code: error.code, message: error.hint ?? error.code, ...(error.candidates ? { details: { candidates: error.candidates } } : {}) } }, status);
+    } finally { rmSync(staged, { force: true }); }
+  });
   app.put('/api/skills/:name', updateSkill);
   app.patch('/api/skills/:name', updateSkill);
   app.delete('/api/skills/:name', (ctx) => {
     if (!dependencies.skills) return ctx.json(apiError('not_implemented', 'SkillLoader 未配置', 500).body, 500);
+    const reserved = reservedSkill(ctx);
+    if (reserved) return reserved;
     try { return ctx.json({ ok: true, data: { removed: dependencies.skills.remove(ctx.req.param('name')) } }); }
     catch (error) { return ctx.json(apiError('skill_delete_failed', error instanceof Error ? error.message : 'Skill 删除失败', 400).body, 400); }
   });

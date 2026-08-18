@@ -38,7 +38,7 @@ interface Chat { key: string; chatId: string; threadId: number | null; scope: st
 interface Usage { id: number; ts: number; model_alias: string; input_tokens: number; output_tokens: number; cost_usd: number; ok: number }
 // mcp_servers 的错误列叫 last_error、状态列叫 state；skills/plugins 用的是 load_error。
 // 只看 load_error 的话，连不上的 MCS server 会被显示成「可用」。
-interface Extension { name: string; description?: string; min_role?: string; enabled?: number; load_error?: string | null;
+interface Extension { name: string; description?: string; min_role?: string; enabled?: number; load_error?: string | null; source?: string;
   state?: string | null; last_error?: string | null; transport?: string; version?: string | null; command?: string; args?: string[]; env?: Record<string, string>;
   url?: string; headers?: Record<string, string>; minRole?: string; toolAllow?: string[]; toolDeny?: string[]; timeoutMs?: number; tools?: Array<Record<string, unknown>>;
   /** 自定义工具专用：有人读过这段正文没有。见 `extensionStatus` 的「未审阅」档。 */
@@ -1239,10 +1239,18 @@ const MCP_STATE_LABELS: Record<string, { label: string; severity: TagSeverity }>
 };
 type ExtensionRow = Extension & { kind: ExtensionKind };
 const extensionError = (row: ExtensionRow): string | null => row.load_error ?? row.last_error ?? null;
+/** `skills.source`：随包发的四份说明书 / 装包装进来的 / 手写或 write_skill 写的。 */
+const SKILL_SOURCE_LABELS: Record<string, { label: string; severity: TagSeverity }> = {
+  bundled: { label: '随包', severity: 'secondary' }, package: { label: '安装包', severity: 'info' }, local: { label: '本地', severity: 'secondary' },
+};
+const extensionSource = (row: ExtensionRow): { label: string; severity: TagSeverity } | null =>
+  (row.kind === 'skill' ? SKILL_SOURCE_LABELS[row.source ?? 'local'] ?? null : null);
 function extensionStatus(row: ExtensionRow): { label: string; severity: TagSeverity } {
   // 「未审阅」和「停用」要分开：前者是模型刚写出来、还没有人读过那段正文，后者是有人读过之后
   // 关掉的。混成一个标签的话，运维分不清哪些在等自己。
   if (row.kind === 'tool' && row.enabled === 0 && !row.reviewed) return { label: '未审阅', severity: 'warn' };
+  // 装进来的包同理：它落地就是停用的，从没被启用过就等于「还没人看过里面那些脚本和二进制」。
+  if (row.kind === 'skill' && row.enabled === 0 && row.source === 'package') return { label: '未审阅', severity: 'warn' };
   if (row.enabled === 0) return { label: '停用', severity: 'secondary' };
   if (row.kind === 'mcp') return MCP_STATE_LABELS[String(row.state)] ?? { label: row.state ? String(row.state) : '未连接', severity: 'warn' };
   return extensionError(row) ? { label: '错误', severity: 'danger' } : { label: '可用', severity: 'success' };
@@ -1260,6 +1268,7 @@ const extensionRows = computed(() => [
     enabled: item.enabled, last_error: item.lastError, kind: 'tool' as ExtensionKind, reviewed: item.reviewedAt !== null })),
 ]);
 const pendingReviewCount = computed(() => customTools.value.filter((item) => item.enabled === 0 && item.reviewedAt === null).length);
+const pendingSkillPackages = computed(() => skills.value.filter((item) => item.enabled === 0 && item.source === 'package').length);
 async function toggleExtension(row: ExtensionRow): Promise<void> {
   const next = row.enabled === 0;
   // Plugin 是全信任执行任意代码的，开启这一步必须是有意识的动作（docs/07 §3）。
@@ -1339,7 +1348,10 @@ async function removePlugin(name: string): Promise<void> {
 interface SkillDetail { name: string; description: string; body: string; allowedTools?: string[]; minRole: string; model?: string; enabled: boolean; files: string[] }
 const skillDialog = ref(false);
 const skillSaving = ref(false);
-const skillForm = ref({ name: '', description: '', body: '', allowedTools: '', minRole: 'trusted', model: '', enabled: true, files: [] as string[], isNew: true });
+const skillForm = ref({ name: '', description: '', body: '', allowedTools: '', minRole: 'trusted', model: '', enabled: true, files: [] as string[], isNew: true, source: 'local' });
+// 随包发的四份说明书服务端只放行启停（改正文/删除回 403）。这里跟着灰掉，别摆一个点下去必然
+// 报错的按钮 —— 「界面上给了但后端拒绝」比一开始就不给更难排查。
+const skillReserved = computed(() => skillForm.value.source === 'bundled');
 function skillDefaultMinRole(): string {
   const skillConfig = config.value.skills;
   if (!skillConfig || typeof skillConfig !== 'object' || !('defaultMinRole' in skillConfig)) return 'trusted';
@@ -1349,14 +1361,14 @@ function skillDefaultMinRole(): string {
 
 async function editSkill(row?: ExtensionRow): Promise<void> {
   if (!row) {
-    skillForm.value = { name: '', description: '', body: '', allowedTools: '', minRole: skillDefaultMinRole(), model: '', enabled: true, files: [], isNew: true };
+    skillForm.value = { name: '', description: '', body: '', allowedTools: '', minRole: skillDefaultMinRole(), model: '', enabled: true, files: [], isNew: true, source: 'local' };
     skillDialog.value = true;
     return;
   }
   try {
     const skill = await api<SkillDetail>(`/api/skills/${encodeURIComponent(row.name)}`);
     skillForm.value = { name: skill.name, description: skill.description, body: skill.body, allowedTools: (skill.allowedTools ?? []).join('\n'),
-      minRole: skill.minRole, model: skill.model ?? '', enabled: skill.enabled, files: skill.files, isNew: false };
+      minRole: skill.minRole, model: skill.model ?? '', enabled: skill.enabled, files: skill.files, isNew: false, source: row.source ?? 'local' };
     skillDialog.value = true;
   } catch (error) { toastError('读取 Skill 失败', error); }
 }
@@ -1381,6 +1393,51 @@ async function removeSkill(name: string): Promise<void> {
   try { await api(`/api/skills/${encodeURIComponent(name)}`, { method: 'DELETE' }); pushToast({ severity: 'success', summary: `Skill ${name} 已永久删除` }); skillDialog.value = false; await load(); }
   catch (error) { toastError('删除 Skill 失败', error); }
 }
+
+/**
+ * 装一个 skill 包（docs/07 §2.5）。走 multipart 而不是 JSON：包里有二进制，base64 进 JSON
+ * 会把体积撑大三分之一，而这条路的上限本来就是按字节配的。
+ *
+ * 包根有歧义时服务端回 `skill_ambiguous_root` 并带上候选（同一个 zip 里常有 windows / linux
+ * 两套），这里就地问一句装哪个再重试 —— 只说「有歧义」等于让人自己去猜 subdir 填什么。
+ */
+const skillPackageInput = ref<HTMLInputElement | null>(null);
+const skillPackageBusy = ref(false);
+function pickSkillPackage(): void {
+  if (skillPackageInput.value) { skillPackageInput.value.value = ''; skillPackageInput.value.click(); }
+}
+async function uploadSkillPackage(event: Event): Promise<void> {
+  const file = (event.target as HTMLInputElement).files?.[0];
+  if (!file) return;
+  skillPackageBusy.value = true;
+  try {
+    let subdir: string | undefined;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const form = new FormData();
+      form.append('file', file);
+      if (subdir) form.append('subdir', subdir);
+      try {
+        const installed = await api<{ name: string; files: string[] }>('/api/skills/package', { method: 'POST', body: form });
+        pushToast({ severity: 'success', summary: `Skill ${installed.name} 已装入`, detail: `${installed.files.length} 个文件，处于停用状态 —— 点编辑看过内容再启用` });
+        await load();
+        return;
+      } catch (error) {
+        const candidates = (error as { details?: { candidates?: string[] } })?.details?.candidates;
+        if (!candidates?.length || attempt > 0) throw error;
+        const picked = prompt(`这个包里有 ${candidates.length} 份 SKILL.md，装哪一个？\n\n${candidates.join('\n')}`, candidates[0]);
+        if (!picked) return;
+        subdir = picked;
+      }
+    }
+  } catch (error) { toastError('装 Skill 包失败', error); }
+  finally { skillPackageBusy.value = false; }
+}
+const skillsMasterOff = computed(() => (config.value.skills as { enabled?: boolean } | undefined)?.enabled === false);
+// 模型侧那条通道的开关。它和 skills.enabled 是两件事：后者关掉是「谁都用不了 skill」，
+// 前者关掉只是「模型不能自己写/装」，而这一页照常能用 —— 分不清的话运维会去关错那个。
+const skillAuthoringOff = computed(() =>
+  ((config.value.tools as { selfExtend?: { enabled?: boolean; skills?: { enabled?: boolean } } } | undefined)?.selfExtend?.enabled === false
+    || (config.value.tools as { selfExtend?: { skills?: { enabled?: boolean } } } | undefined)?.selfExtend?.skills?.enabled === false));
 
 // mcp.enabled 是总开关，出厂就是 false，而 McpManager.reconcile 一上来就对它 early-return。
 // 不把它摆出来的话，新建 server 会拿到一个 ok:true 加一条永远停在「等待连接」的行 ——
@@ -1766,6 +1823,9 @@ const EVENT_REFRESH: Record<string, readonly RefreshGroup[]> = {
   'task.updated': ['tasks'],
   'approval.pending': ['approvals'], 'approval.decided': ['approvals'],
   'config.changed': ['config'],
+  // 扩展页此前只靠 `health` 顺带刷新，而那个事件只在 provider 测试与 MCP 重连后才发 ——
+  // 从 Telegram 装进来的 skill 要等下一次健康检查才出现（docs/21 §9 · G-EXT-05）。
+  'extensions.changed': ['extensions'],
   health: ['dashboard', 'extensions'],
 };
 const sinceLastEvent = computed(() => {
@@ -2313,14 +2373,19 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
           </div>
         </section>
         <section v-else-if="active === 'extensions'" key="extensions" class="surface page-surface">
-          <header><div><p class="eyebrow">EXTENSIONS</p><h2>Skills / Plugins / MCP / 自定义工具</h2><p>Skill 渐进式披露；Plugin 在 bot 进程里<b>全信任</b>运行，没有沙箱；MCP 工具动态发现；自定义工具是模型自己写的沙箱脚本。保存后即时重扫或重连。</p></div><div class="section-actions"><UiButton variant="outlined" label="新建 Skill" icon="pi pi-plus" @click="editSkill()" /><UiButton label="新建 MCP" icon="pi pi-plus" @click="editMcp()" /><UiTag :value="`${extensionRows.filter((row) => row.enabled !== 0).length} / ${extensionRows.length} 启用`" :severity="extensionRows.some((row) => extensionError(row)) ? 'danger' : 'secondary'" /></div></header>
+          <header><div><p class="eyebrow">EXTENSIONS</p><h2>Skills / Plugins / MCP / 自定义工具</h2><p>Skill 渐进式披露；Plugin 在 bot 进程里<b>全信任</b>运行，没有沙箱；MCP 工具动态发现；自定义工具是模型自己写的沙箱脚本。保存后即时重扫或重连。</p></div><div class="section-actions"><UiButton variant="outlined" label="新建 Skill" icon="pi pi-plus" @click="editSkill()" /><UiButton variant="outlined" label="安装 Skill 包" icon="pi pi-upload" :loading="skillPackageBusy" @click="pickSkillPackage" /><UiButton label="新建 MCP" icon="pi pi-plus" @click="editMcp()" /><UiTag :value="`${extensionRows.filter((row) => row.enabled !== 0).length} / ${extensionRows.length} 启用`" :severity="extensionRows.some((row) => extensionError(row)) ? 'danger' : 'secondary'" /></div></header>
+          <input ref="skillPackageInput" type="file" accept=".zip,application/zip" hidden @change="uploadSkillPackage">
           <p v-if="pendingReviewCount" class="callout warn"><i class="pi pi-eye" />有 {{ pendingReviewCount }} 个模型写下的工具在等复审：点卡片读过正文再启用。启用后它会以调用者的角色在沙箱里执行，而那时正文已经不在对话里了。</p>
+          <p v-if="pendingSkillPackages" class="callout warn"><i class="pi pi-eye" />有 {{ pendingSkillPackages }} 个装进来的 Skill 包在等复审：点<b>编辑</b>看过 SKILL.md 与它带的文件清单再启用。包里可能带脚本与二进制，而 skill 正文会指挥模型去跑它们。</p>
           <p v-if="mcpMasterOff" class="callout warn"><i class="pi pi-power-off" />MCP 总开关 <code>mcp.enabled</code> 是关的（出厂默认）：下面的 MCP server 存得下也能编辑，但一个都不会连接，工具目录里也不会出现它们的工具。<UiButton size="small" variant="outlined" label="打开总开关" @click="enableMcpMaster" /></p>
+          <p v-if="skillsMasterOff" class="callout warn"><i class="pi pi-power-off" />Skill 总开关 <code>skills.enabled</code> 是关的：下面的 Skill 一个都不会进模型的工具目录。</p>
+          <p v-else-if="skillAuthoringOff" class="callout"><i class="pi pi-info-circle" />模型侧的 <code>tools.selfExtend.skills.enabled</code> 是关的（出厂默认）：这一页照常能建、能装、能启停，但<b>模型自己</b>用不了 <code>write_skill</code> 与 <code>install_skill</code> —— 它拿不到这两个工具，也不会知道为什么。</p>
           <div class="provider-grid">
             <article v-for="item in extensionRows" :key="`${item.kind}:${item.name}`">
               <div class="provider-head">
                 <div class="provider-tags">
                   <UiTag :value="EXTENSION_META[item.kind].label" severity="secondary" />
+                  <UiTag v-if="extensionSource(item)" :value="extensionSource(item)!.label" :severity="extensionSource(item)!.severity" />
                   <UiTag :value="extensionStatus(item).label" :severity="extensionStatus(item).severity" />
                 </div>
                 <div class="card-actions">
@@ -2329,7 +2394,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
                   <UiButton v-if="item.kind === 'skill'" variant="text" size="small" icon="pi pi-pencil" aria-label="编辑 Skill" @click="editSkill(item)" />
                   <UiButton v-if="item.kind === 'mcp'" variant="text" size="small" icon="pi pi-pencil" aria-label="编辑 MCP" @click="editMcp(item)" />
                   <UiButton v-if="item.kind === 'tool' || item.kind === 'plugin'" variant="text" size="small" icon="pi pi-eye" aria-label="查看正文" @click="openReview(item)" />
-                  <UiButton v-if="item.kind === 'skill'" variant="text" size="small" severity="danger" icon="pi pi-trash" aria-label="删除 Skill" @click="removeSkill(item.name)" />
+                  <UiButton v-if="item.kind === 'skill' && item.source !== 'bundled'" variant="text" size="small" severity="danger" icon="pi pi-trash" aria-label="删除 Skill" @click="removeSkill(item.name)" />
                   <UiButton v-if="item.kind === 'mcp'" variant="text" size="small" severity="danger" icon="pi pi-trash" aria-label="删除 MCP" @click="removeMcp(item.name)" />
                   <UiButton v-if="item.kind === 'tool'" variant="text" size="small" severity="danger" icon="pi pi-trash" aria-label="删除自定义工具" @click="removeCustomTool(item.name)" />
                   <UiButton v-if="item.kind === 'plugin'" variant="text" size="small" severity="danger" icon="pi pi-trash" aria-label="删除 Plugin" @click="removePlugin(item.name)" />
@@ -3026,9 +3091,10 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
         <UiSwitch v-model="skillForm.enabled" class="wide" label="启用" />
         <label class="wide">允许工具（每行一个）<textarea v-model="skillForm.allowedTools" rows="4" placeholder="留空 = 沿用当前角色全部可用工具" /></label>
         <label class="wide">SKILL.md 正文<textarea v-model="skillForm.body" rows="14" placeholder="加载 Skill 后注入给模型的完整说明" /></label>
-        <div v-if="!skillForm.isNew" class="wide"><p class="field-title">附属文件</p><div class="cap-tags"><UiTag v-for="file in skillForm.files" :key="file" :value="file" severity="secondary" /><small v-if="!skillForm.files.length" class="alias-empty">无</small></div></div>
+        <div v-if="!skillForm.isNew" class="wide"><p class="field-title">附属文件<small v-if="skillForm.source === 'package'">这份是装包装进来的：启用之前该看的就是这份清单 —— 里面的脚本与二进制会被正文指挥着跑起来。</small></p><div class="cap-tags"><UiTag v-for="file in skillForm.files" :key="file" :value="file" severity="secondary" /><small v-if="!skillForm.files.length" class="alias-empty">无</small></div></div>
+        <p v-if="skillReserved" class="callout wide"><i class="pi pi-lock" />这是随包发的说明书（模型写工具 / 装 MCP 之前要读的那份文档）：只能启停，不能改正文或删除。</p>
       </div>
-      <template #footer><UiButton v-if="!skillForm.isNew" variant="outlined" severity="danger" icon="pi pi-trash" label="永久删除" @click="removeSkill(skillForm.name)" /><UiButton variant="text" label="取消" @click="skillDialog = false" /><UiButton :label="skillForm.isNew ? '创建 Skill' : '保存 Skill'" :loading="skillSaving" @click="saveSkill" /></template>
+      <template #footer><UiButton v-if="!skillForm.isNew" variant="outlined" severity="danger" icon="pi pi-trash" label="永久删除" :disabled="skillReserved" @click="removeSkill(skillForm.name)" /><UiButton variant="text" label="取消" @click="skillDialog = false" /><UiButton :label="skillForm.isNew ? '创建 Skill' : '保存 Skill'" :loading="skillSaving" :disabled="skillReserved" @click="saveSkill" /></template>
     </UiModal>
     <UiModal v-model:visible="mcpDialog" :title="mcpForm.isNew ? '新建 MCP server' : `编辑 MCP ${mcpForm.originalName}`" width="min(900px, 96vw)">
       <div class="form-grid">

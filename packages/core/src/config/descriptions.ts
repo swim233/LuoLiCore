@@ -238,6 +238,10 @@ export const CONFIG_DESCRIPTIONS: Record<string, string> = {
   'skills.dir': '技能文件所在目录。',
   'skills.watch': '是否监视技能目录，改完文件不重启就生效。',
   'skills.defaultMinRole': '在 WebUI 新建技能时没显式选角色则用它。',
+  'skills.package.maxEntries': '装技能包时，包里最多允许多少个文件与目录。',
+  'skills.package.maxTotalBytes': '技能包解开之后的总字节上限。按实际写出的字节数算，不信压缩包自己声明的大小。',
+  'skills.package.maxFileBytes': '技能包里单个文件的字节上限。同样按实际写出的字节数算。',
+  'skills.package.allowExecutable': '给技能包 scripts/ 与 bin/ 下原本就带执行位的文件保留执行权限。关掉之后包里的脚本与二进制装得进来但跑不了。',
 
   plugins: '插件：本地 JS 钩子，能在轮次生命周期上挂逻辑。',
   'plugins.enabled': '插件总开关。',

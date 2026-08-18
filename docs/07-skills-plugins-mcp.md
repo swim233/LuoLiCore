@@ -22,7 +22,22 @@ skills/
     scripts/build.sh
   weekly-digest/
     SKILL.md
+  music-download-cli/          # 装包装进来的（§2.5）
+    SKILL.md
+    scripts/invoke.sh
+    references/cli-reference.md
+    bin/music-download-cli
+    .package.json              # 安装留痕：来源、安装时间、原档 sha256
+  .staging-<pid>-<ulid>/       # 解包暂存，落位后即消失
+  .backups/<name>-<ts>/        # 覆盖安装时旧的那棵
 ```
+
+**点号开头的条目与非目录条目一律跳过**，不进 `skills` 表。`.staging-*` / `.backups/` 需要
+这一条才能住在 `skills/` 里（同分区 `renameSync` 落位），而它本身也是独立正确的：在这之前
+`skills/` 下一个 `.DS_Store` 会被扫成一行 `load_error` 假 skill。
+
+`skills.source` 列（[03 §2.12](./03-data-model.md)）三个取值：`bundled`（随包那四份说明书）/
+`package`（目录里有 `.package.json`）/ `local`（手写或 `write_skill` 写的）。
 
 ```markdown
 ---
@@ -113,15 +128,60 @@ load_skill: tool({
 ### 2.3 加载与热更新
 
 - 启动时扫描 `skills/*/SKILL.md`，解析 frontmatter（`gray-matter` + zod 校验），写 `skills` 表（`content_hash` 用于变更检测）。
-- 文件监听（`chokidar`，`skills.watch` 默认 `true`）：变更 → 重新解析 → 更新表 → 广播 `EventBus('skills.changed')` → 下一轮重建 TOOL CATALOG。
+- 文件监听（`chokidar`，`skills.watch` 默认 `true`）：变更 → 重新解析 → 更新表 → 广播 `EventBus('extensions.changed')` → 下一轮重建 TOOL CATALOG。
+  **只在 `name → content_hash` 映射真的变了时才广播**：watcher 的 100ms 去抖之外再挡一层，
+  否则一次装包过程中的每一次写盘都变成一次 SSE 推送 + 一次 WebUI 重新拉四个端点。
+- **扫描末尾清理陈行**：`DELETE FROM skills WHERE name NOT IN (盘上这一批)`。`persist()` 只
+  upsert，在这之前盘上删掉一个 skill 目录，那一行永远留在表里、永远显示在扩展页 ——
+  唯一会删行的是 `SkillLoader.remove()`。**目录读取抛 `ENOENT` 的那一支不清理**：
+  `skills.dir` 临时不在（换盘、挂载没起来）时清空整张表比留着陈行糟得多。
 - 解析失败：写 `skills.load_error`，该 skill 标记不可用，WebUI 显红，**不影响其他 skill 与启动**。
 - WebUI 可直接编辑 SKILL.md（带 frontmatter 表单 + 正文编辑器）、启停、查看解析结果与 token 占用。
+  **随包那四份说明书只放行启停**：改正文 / 描述 / 删除一律拒（`skill_reserved`）。
+  `write_skill` 从一开始就拒改它们（§6.3），而 WebUI 侧此前能改能删 —— 同一条不变量只焊住了一半。
 
 ### 2.4 Skill 目录的文件访问
 
 - Skill 目录在 fs jail 之外（`skills/` 与 `data/workspace/` 是不同的根）。
 - `load_skill` 返回 `dir` 后，`read_file` 允许以 `skill://<name>/<relPath>` 形式访问该 skill 目录（**只读**）。实现上在 `resolveJailed` 前拦截该 scheme，映射到 `skills/<name>/`，并禁止 `..`。
 - Skill 附属脚本要在沙箱里跑：`load_skill` 时自动把 `skills/<name>/` 以只读方式挂载到容器 `/skill`（docker 模式）或拷贝到 `workspace/.luoli-skill/<name>/`（jail 模式）。
+
+### 2.5 装一个 skill 包（zip / 目录）
+
+§2.1 的格式一开始就允许附属文件，但**在这之前没有任何途径把它们放进去**：`write_skill`
+的入参只有 `body: string`，`SkillLoader` 也只写一个 `SKILL.md`；`write_file` / `edit_file`
+被 `selfAuthoringDenyGlobs()` 对 `skills/**` 关死。实测代价见 [00 §2](./00-state.md)：
+用户在 Telegram 丢了一个带 `scripts/` + `bin/`（4.9 MB ELF）的音乐 skill 包，模型把它解到
+**工作目录**、一路 `bash scripts/invoke.sh` 用了起来 —— 能用，但它不是一个 skill：
+不进目录、不进 `skills` 表、扩展页看不见、`load_skill` 与 `skill://` 都够不着。
+
+`installSkillPackage()`（`packages/core/src/skills/package.ts`）是这条通道的唯一实现，
+模型侧的 `install_skill`（§6.5）与 WebUI 的 `POST /api/skills/package`（[09 §3.8](./09-webui.md)）
+共用它 —— 端点自己抄一遍的话，两条路迟早在校验上分叉。
+
+**流程**：解包到 `<skillsDir>/.staging-*/` → 逐条目校验 → 定位包根 → 改写 frontmatter →
+`renameSync` 落位 → `scan()` 复核。复核发现 `load_error` 就整棵回滚进 `.backups/failed-*`
+并报错：**「装了一半」不能留在目录里**，它在扩展页上和一个装好的坏 skill 长得一模一样。
+
+**逐条目的判据**（zip 与目录两条来源共用同一份）：
+
+| 挡什么 | 怎么挡 |
+|---|---|
+| zip-slip | 条目名含 `\0` / 绝对路径 / `..` 段一律拒；`resolve()` 之后再断言前缀包含。两道，因为第一道是形状判断而第二道是结果判断 |
+| 符号链接 | 高 16 位 `S_IFMT === 0xa000` 一律拒。链接本身无害，但它能让 `skill://` 读出目录之外的东西，而 `resolveResource()` 的包含判断走的是 `resolve()` 不是 `realpath` |
+| 条目数 | `skills.package.maxEntries` |
+| 单文件体积 | `skills.package.maxFileBytes`，**按实际写出的字节数判，不信头里的 `uncompressedSize`** —— 那个字段是攻击者填的 |
+| 总体积 / 压缩炸弹 | `skills.package.maxTotalBytes`，同样按实际写出的累计 |
+| 执行位 | 一律 `0o600`（目录 `0o700`）；**只有 `scripts/` 与 `bin/` 下、且原条目带执行位的**保留 `0o700`，受 `skills.package.allowExecutable` 管（关掉 = 包退化成纯文本） |
+
+**包根定位**：`SKILL.md` 常被套一层顶层目录，而一个包里可以有好几份（那个音乐包就同时带
+`music-download-cli/` 与 `music-download-cli-linux/` 两套）。深度 ≤2 内恰好一个 → 取它所在
+目录；多个 → 回 `skill_ambiguous_root` 并**把候选列出来**，让调用方带 `subdir` 重试。
+一个都没有 → `skill_md_not_found`。
+
+**落位前强制改写 frontmatter** 三件事：`name` 置为安装名（`scan()` 要求 `name === 目录名`，
+包里写的那个未必对得上）、`enabled: false`（见 §6.1）、`min-role` 抬到不低于
+`tools.selfExtend.skills.minRole`。包是别人写的，这三个字段不能由它自己说了算。
 
 ---
 
@@ -343,6 +403,12 @@ plugin 60 > MCP 40 > 自定义 30），记 `warn` 日志并在 RUNTIME 块告知
 | `write_plugin` → `plugins/<name>/plugin.js` | 库里那行 `enabled=0` | 仅 owner（plugin 是进程内全信任 = root，§3.2 / [14 A27](./14-open-questions.md)） |
 | `install_mcp` → `mcp.servers` | `enabled: false` | 仅 owner |
 | `write_skill` → `SKILL.md` | 直接生效 | —— skill 是纯文本，不含可执行代码；约束是 `min-role` 有配置下限，且随包发的四份说明书不许覆写 |
+| `install_skill` → `skills/<name>/` 一整棵 | `enabled=false` | 仅 owner（§6.5） |
+
+**`write_skill` 直接生效而 `install_skill` 不行，差别在「纯文本」这个前提**：`write_skill`
+写出去的就是一段 Markdown，最坏情况是一份误导性的说明书；而一个包带着 `scripts/` 与
+`bin/`（那个音乐包里是一个 4.9 MB 的 ELF），启用它等于让模型读到一份「去跑这个自带二进制」
+的说明书。那一步必须有人看过文件清单 —— 与 `write_plugin` / `install_mcp` 同一条理由。
 
 **改动正文会把前三者打回未启用。** 没有这条，「先定义无害的、拿到启用、再改成恶意的」直接走通。
 `write_plugin` 覆盖前还会把旧源码留一份 `plugin.js.bak-<ts>`（备份名不叫 `plugin.js`，`reconcile()`
@@ -382,7 +448,8 @@ plugin 60 > MCP 40 > 自定义 30），记 `warn` 日志并在 RUNTIME 块告知
 `installing-mcp`，全部 `min-role: owner` + `requires-tools`。走的就是 §2.2 的渐进式披露 —— 平时只占目录里四行，
 正文靠 `load_skill` 拉。新工具的 `description` 结尾指路（「写之前先 `load_skill("writing-tools")`」）。
 
-`write_skill` 拒绝覆写这四个名字：模型把自己的说明书改坏之后，下一次它就是照着改坏的那份写的。
+`write_skill` 与 `install_skill` 都拒绝覆写这四个名字：模型把自己的说明书改坏之后，
+下一次它就是照着改坏的那份写的。同一条现在也焊在 WebUI 侧（§2.3 末尾）。
 
 ### 6.4 WebUI
 
@@ -390,3 +457,22 @@ plugin 60 > MCP 40 > 自定义 30），记 `warn` 日志并在 RUNTIME 块告知
 两个动词分开：扩展页管「这个工具存不存在 / 审没审过」，工具页管「现在开着没有」。
 未审阅的行带独立徽标（不是「停用」——「没人看过」和「有人看过之后关掉了」是两回事），
 点开可以只读地看正文与参数；plugin 走 `GET /api/plugins/:name/source` 看源码。
+
+装包进来的 skill 用的是同一套徽标：`source='package'` 且从未被启用过 = 未审阅，
+详情里列出 `SKILL.md` 正文与附带文件清单（`SkillDefinition.files`）—— **要看的正是那份清单**，
+「这个包往我机器上放了什么」是启用它之前唯一需要回答的问题。
+
+### 6.5 装 skill 包（`install_skill`）
+
+`inputSchema: { source, name?, subdir?, overwrite? }`，落地即停用，实现见 §2.5。
+
+**`source` 只在两个地方解析**，别的一律 `skill_source_forbidden`：
+
+- 本轮 `context.workspace` 之内（与 fs 工具同一个 `PathJail` 包含判断）；
+- `<media.dir>/<本会话 chatId>/` 之下 —— 用户发来的附件就落在这里
+  （`packages/telegram/src/media.ts`），而**这正是装包的主场景**：用户在聊天里丢一个 zip。
+  限定到本会话的子目录，是因为 `media.dir` 底下按 chatId 分目录存着**所有**会话的附件，
+  不限定就等于给了一条跨会话读文件的路。
+
+`available()` 与 `write_skill` 共用 `tools.selfExtend.skills.enabled` 一个开关：两件事都是
+「往 `skills/` 里写东西」，分成两个开关只会多出一种「开了一半」的状态。

@@ -3,5 +3,9 @@
   "private": true,
   "type": "module",
   "exports": "./dist/index.js",
-  "dependencies": { "@luoli/shared": "workspace:*", "@luoli/db": "workspace:*" }
+  "dependencies": {
+    "@luoli/db": "workspace:*",
+    "@luoli/shared": "workspace:*",
+    "yauzl": "^3.4.0"
+  }
 }

@@ -373,7 +373,16 @@
 | [ ] AC-SKL-008 (自动) | `read_file('skill://pdf-report/template.tex')` | 只读成功；`skill://pdf-report/../../etc/passwd` 被拒 |
 | [x] AC-SKL-009 (自动) ★ | `write_skill` 写一份新 skill；再试 `min-role` 低于 `tools.selfExtend.skills.minRole`；再试覆写 `writing-tools` | 依次：写成功且下一轮出现在目录里；`min_role_too_low` 被拒（只能写得更严，不能更松）；`skill_reserved` 被拒 —— 随包发的四份说明书是模型下一次写工具时要读的那份文档，改坏了它就照着改坏的写 | 〔selfextend.author.test.ts〕
 | [x] AC-SKL-011 (自动) ★ | 一份带 `requires-tools: [install_mcp]` 的 skill，分别在该工具可用与不可用的轮次里取目录、并直接 `load_skill` 它 | 不可用时**整份 skill 不进目录**，直接载入也拒（`skill_requires_unavailable_tools`）。`min-role` 挡不住这件事：说明书讲的工具受功能开关控制，而目录只按角色过滤 —— 模型会读到一份「教你用一个你没有的工具」的说明书然后自己去想别的办法（实测：逆向代码库 + 拿 sessions 表里的会话打 WebUI API） | 〔skill.runtime.test.ts〕
-| [ ] AC-SKL-010 | 关掉 `tools.selfExtend.enabled` 之后看工具目录 | 七个自撰写工具仍然**注册着**（否则 `main.ts` 的 `TOOL_POLICY ↔ 注册表` 启动断言会抛），但一个都不进模型的工具目录 |
+| [ ] AC-SKL-010 | 关掉 `tools.selfExtend.enabled` 之后看工具目录 | 八个自撰写工具仍然**注册着**（否则 `main.ts` 的 `TOOL_POLICY ↔ 注册表` 启动断言会抛），但一个都不进模型的工具目录 |
+| [x] AC-SKL-012 (自动) ★ | 一个 zip 里塞 `../../etc/passwd`、一个绝对路径条目、一个指向 `/etc` 的符号链接，分别 `install_skill` | 三种都被拒且 `skills/` 之外一个字节都没写。zip-slip 两道判据（条目名形状 + `resolve()` 后的前缀包含）各自单独生效 | 〔skill.package.test.ts〕
+| [x] AC-SKL-013 (自动) ★ | 三个包分别踩单文件上限、总体积上限、条目数上限；再来一个声明 `uncompressedSize: 1` 而实际解出远超上限的压缩炸弹 | 四个都被拒且什么都不留。**体积判据是实际写出的字节数**，不是头里声明的那个（那个字段是打包方填的）；条目数在读中央目录时就挡住，一个字节都还没写 | 〔skill.package.test.ts〕
+| [x] AC-SKL-014 (自动) | 装一个带 `scripts/invoke.sh`、`bin/tool`、`references/x.md` 的包 | 前两个 `0700`、`references/x.md` 与 `SKILL.md` 是 `0600`；`skills.package.allowExecutable=false` 时 `scripts/` 与 `bin/` 也退成 `0600` | 〔skill.package.test.ts〕
+| [x] AC-SKL-015 (自动) ★ | 包里有两份 `SKILL.md`（`foo/` 与 `foo-linux/`）；再带 `subdir: 'foo-linux'` 重试 | 先回 `skill_ambiguous_root` 并**列出两个候选**，带 `subdir` 后装成功 —— 报错不列候选的话调用方只能猜 | 〔skill.package.test.ts〕
+| [x] AC-SKL-016 (自动) ★ | 包里 frontmatter 写 `enabled: true`、`min-role: limited`、`name: 别的名字` | 落地一律 `enabled=false`；`min-role` 被抬到 `tools.selfExtend.skills.minRole`；`name` 被改写成安装名（`scan()` 要求 `name === 目录名`）。包是别人写的，这三个字段不能由它说了算 | 〔skill.package.test.ts〕
+| [x] AC-SKL-017 (自动) ★ | 装一个解到一半会撞上体积上限的包：一次装到空目录，一次带 `overwrite` 盖一个已装好的 | 两次都不留半棵目录、不留表行；覆盖那次**旧的那棵原封不动**（装新的失败不该顺带把能用的那份弄没了）。落位后 `scan()` 复核仍报错的那一支是同一条回滚路径上的兜底，没有确定性的触发方式，未单独覆盖 | 〔skill.package.test.ts〕
+| [x] AC-SKL-018 (自动) | 盘上删掉一个 skill 目录后重扫；再让 `skills.dir` 整个不存在时重扫 | 前者那一行从 `skills` 表消失；后者（`ENOENT`）**不清理**，表原样保留 | 〔skill.runtime.test.ts〕
+| [x] AC-SKL-019 (自动) | `skills/` 下放一个 `.staging-x/` 与一个普通文件 | 两个都不进 `skills` 表，也不产生 `load_error` 行 | 〔skill.runtime.test.ts〕
+| [x] AC-SKL-020 (自动) | `DELETE /api/skills/writing-tools`；`PUT` 改它的正文；`PATCH` 只改 `enabled` | 前两个 403 `skill_reserved`，第三个放行 —— 停用是正当运维动作，改正文不是 | 〔api.contract.test.ts〕
 | [x] AC-PLG-001 (自动) | 放一个示例 plugin，未启用 | 其工具/命令/钩子均不生效 | 〔plugin.runtime.test.ts〕
 | [ ] AC-PLG-002 | WebUI 启用 plugin | 弹出「全信任运行任意代码」确认；确认后工具可用 |
 | [ ] AC-PLG-003 (自动) | plugin 的 `configSchema` | WebUI 生成对应表单；含密字段加密存储且前端只显示 hint |
@@ -544,10 +553,10 @@
 | Subagent 与任务 | | 20 / 38 | | | |
 | 记忆 | | 1 / 13 | | | |
 | 日志与成本 | | 5 / 26 | | | |
-| 扩展生态 | | 8 / 33 | | | |
+| 扩展生态 | | 17 / 42 | | | |
 | WebUI | | 10 / 84 | | | |
 | 安全 | | 9 / 25 | | | |
 | 运维 | | 1 / 9 | | | |
-| **合计** | | **160 / 440** | | | |
+| **合计** | | **169 / 449** | | | |
 
 **整体通过条件**：全部 ★ 项通过 + 非 ★ 项通过率 ≥ 95% + 所有豁免项经需求方书面确认。

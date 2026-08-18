@@ -88,7 +88,10 @@ if (!modelRegistry.aliases().includes('main')) {
     + `[config] 去 WebUI（http://${config.webui.host}:${config.webui.port} → Provider 页）配置 provider / 模型 / main 别名，保存后即时生效，无需重启。\n`);
 }
 const memory = new MemoryStore(db, config.memory.dir, config.memory.softLimitTokens, config.memory.hardLimitTokens, config.memory.maxSections, config.memory.forgetMeRetentionDays, log);
-const skills = new SkillLoader(db, config.skills.dir, () => configStore.snapshot().skills.defaultMinRole);
+// 第四个参数：扫描结果真的变了才广播。没有它，扩展页只能靠 `health` 事件顺带刷新 ——
+// 从 Telegram 装进来的东西要等下一次健康检查才出现（docs/21 §9 · G-EXT-05）。
+const skills = new SkillLoader(db, config.skills.dir, () => configStore.snapshot().skills.defaultMinRole,
+  () => events.emit('extensions.changed', { kind: 'skill' }));
 // `skills.enabled=false` 时不扫盘也不监听：目录里的 SKILL.md 一个都不进工具目录。
 // 关掉是整块关掉，而不是「扫出来但不给用」—— 后者会让工具目录里多出一批点不动的名字。
 if (config.skills.enabled) skills.scan();

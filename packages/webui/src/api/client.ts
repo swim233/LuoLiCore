@@ -13,7 +13,10 @@ export class ApiError extends Error {
 
 export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers);
-  if (options.body) headers.set('Content-Type', 'application/json');
+  // FormData 例外：multipart 的 Content-Type 里带一个浏览器生成的 boundary，自己写死
+  // `application/json` 之后服务端 `parseBody()` 解不出任何字段，而且**不会报错** ——
+  // 表现是「上传了但服务端说没收到 file」。
+  if (options.body && !(options.body instanceof FormData)) headers.set('Content-Type', 'application/json');
   if (!['GET', 'HEAD'].includes(options.method ?? 'GET') && auth.csrf) headers.set('X-CSRF-Token', auth.csrf);
   const response = await fetch(path, { ...options, headers });
   if (response.status === 401 && location.pathname !== '/login') location.assign('/login');
@@ -28,7 +31,10 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
 }
 export async function apiStream<T>(path: string, options: RequestInit, onEvent: (event: T) => void | Promise<void>): Promise<void> {
   const headers = new Headers(options.headers);
-  if (options.body) headers.set('Content-Type', 'application/json');
+  // FormData 例外：multipart 的 Content-Type 里带一个浏览器生成的 boundary，自己写死
+  // `application/json` 之后服务端 `parseBody()` 解不出任何字段，而且**不会报错** ——
+  // 表现是「上传了但服务端说没收到 file」。
+  if (options.body && !(options.body instanceof FormData)) headers.set('Content-Type', 'application/json');
   if (!['GET', 'HEAD'].includes(options.method ?? 'GET') && auth.csrf) headers.set('X-CSRF-Token', auth.csrf);
   const response = await fetch(path, { ...options, headers });
   if (response.status === 401 && location.pathname !== '/login') location.assign('/login');

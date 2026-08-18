@@ -1,8 +1,9 @@
-import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { CustomToolRepository, closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
 import { BUNDLED_SKILLS, CustomToolManager, PluginManager, Sandbox, SkillLoader, ToolRegistry, configSchema, registerAuthoringTools, type Config, type LogSink } from '@luoli/core';
+import { zipFixture } from './fixtures/zip.js';
 
 const log = { event: () => undefined, publish: () => undefined, span: () => ({ id: 's', end: () => undefined }) } as unknown as LogSink;
 
@@ -14,7 +15,9 @@ function harness(name: string, selfExtend: Record<string, unknown> = {}) {
   for (const dir of ['workspace', 'skills', 'plugins']) mkdirSync(`${root}/${dir}`, { recursive: true });
   const db = openDatabase(path);
   migrateDatabase(db);
-  let config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, sandbox: { mode: 'jail' },
+  // `media.dir` 必须指到用例自己的根下：默认是 `./data/files`，也就是**真实的附件库** ——
+  // `install_skill` 的 source 白名单里有它，用例往那儿写 fixture 等于污染真实数据。
+  let config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, sandbox: { mode: 'jail' }, media: { dir: `${root}/files` },
     tools: { selfExtend: { enabled: true, customTools: { enabled: true }, skills: { enabled: true }, plugins: { enabled: true }, mcp: { enabled: true }, ...selfExtend } } }) as Config;
   const registry = new ToolRegistry(log, { request: async () => true }, { maxRegistered: 200, maxCallsPerTurn: 50, maxConsecutiveErrors: 10 });
   const sandbox = new Sandbox(() => ({ mode: 'jail', bypassRoles: ['owner'], dockerBin: 'docker', image: 'x', network: 'none',
@@ -42,9 +45,9 @@ function harness(name: string, selfExtend: Record<string, unknown> = {}) {
 }
 
 describe('self-authoring tools', () => {
-  it('registers all seven regardless of config, and gates them with available()', () => {
+  it('registers all eight regardless of config, and gates them with available()', () => {
     const on = harness('author-on');
-    const family = ['define_tool', 'delete_tool', 'list_tools', 'write_skill', 'write_plugin', 'install_mcp', 'list_mcp'];
+    const family = ['define_tool', 'delete_tool', 'list_tools', 'write_skill', 'install_skill', 'write_plugin', 'install_mcp', 'list_mcp'];
     expect(family.filter((name) => on.registry.has(name))).toEqual(family);
     expect(family.filter((name) => on.registry.activeNames('owner', on.contextFor()).includes(name))).toEqual(family);
     closeDatabase(on.db);
@@ -131,5 +134,59 @@ describe('self-authoring tools', () => {
       .toMatchObject({ ok: true });
     expect(h.config().mcp.servers.map((server) => server.name)).toEqual(['docs', 'second']);
     closeDatabase(h.db);
+  });
+
+  /**
+   * `install_skill` 的 source 只认两处：本轮 workspace，与本会话在附件库里的那个子目录。
+   * `media.dir` 底下是**按 chatId 分目录存着所有会话的附件** —— 不限定到本会话，一个
+   * `install_skill` 就是一条跨会话读文件的路。
+   */
+  it('installs a skill package from the workspace or this chat’s attachments, and nowhere else', async () => {
+    const h = harness('author-install-skill');
+    const body = '---\nname: packaged\ndescription: 装进来的\n---\n照说明跑 scripts/invoke.sh\n';
+    const pack = zipFixture([{ name: 'packaged/SKILL.md', content: body }, { name: 'packaged/scripts/invoke.sh', content: 'echo hi', mode: 0o100755 }]);
+    writeFileSync(`${h.root}/workspace/pack.zip`, pack);
+
+    const installed = await h.registry.execute('install_skill', { source: 'pack.zip' }, h.contextFor());
+    // **落地即停用**，且提示里必须说清「现在还用不了、要去点启用」—— 不说的话模型会紧接着
+    // load_skill 然后报「skill 不存在」，而真实原因是它在等人审。
+    expect(installed).toMatchObject({ ok: true, name: 'packaged', enabled: false, files: expect.arrayContaining(['scripts/invoke.sh']) });
+    expect((installed as { hint: string }).hint).toContain('停用');
+    expect(h.skills.read('packaged')).toMatchObject({ enabled: false });
+    expect(h.skills.catalog('owner')).toEqual([]);
+
+    // 本会话的附件目录：chatId 是 '1'（见 harness 的 turn），走绝对路径。
+    const attachments = resolve(h.config().media.dir, '1');
+    mkdirSync(attachments, { recursive: true });
+    writeFileSync(`${attachments}/sent.zip`, zipFixture([{ name: 'from-chat/SKILL.md', content: body.replace('packaged', 'from-chat') }]));
+    expect(await h.registry.execute('install_skill', { source: `${attachments}/sent.zip` }, h.contextFor()))
+      .toMatchObject({ ok: true, name: 'from-chat', enabled: false });
+
+    // 别的会话的附件目录、以及 workspace 之外的任意路径：一律拒。
+    const other = resolve(h.config().media.dir, '999');
+    mkdirSync(other, { recursive: true });
+    writeFileSync(`${other}/secret.zip`, pack);
+    for (const source of [`${other}/secret.zip`, `${h.root}/skills`, '../skills', '/etc/hostname']) {
+      expect(await h.registry.execute('install_skill', { source }, h.contextFor()), source).toMatchObject({ ok: false, error: 'skill_source_forbidden' });
+    }
+    // workspace 里的软链接同样不算「在 workspace 里」：判据走 realpath，不是 resolve。
+    symlinkSync(other, `${h.root}/workspace/escape`);
+    expect(await h.registry.execute('install_skill', { source: 'escape/secret.zip' }, h.contextFor())).toMatchObject({ ok: false, error: 'skill_source_forbidden' });
+
+    // 解包器的错误码要原样交给模型（带 candidates），别压成一句「装失败了」。
+    writeFileSync(`${h.root}/workspace/two.zip`, zipFixture([{ name: 'a/SKILL.md', content: body }, { name: 'b/SKILL.md', content: body }]));
+    expect(await h.registry.execute('install_skill', { source: 'two.zip' }, h.contextFor()))
+      .toMatchObject({ ok: false, error: 'skill_ambiguous_root', candidates: expect.arrayContaining(['a', 'b']) });
+    closeDatabase(h.db);
+  });
+
+  it('hides install_skill when the skills channel is off', () => {
+    const off = harness('author-install-off', { skills: { enabled: false } } as Record<string, unknown>);
+    expect(off.registry.has('install_skill')).toBe(true);
+    expect(off.registry.activeNames('owner', off.contextFor())).not.toContain('install_skill');
+    // 与 write_skill 共用一个开关：两件事都是「往 skills/ 里写东西」，分成两个只会多出
+    // 一种「开了一半」的状态。
+    expect(off.registry.activeNames('owner', off.contextFor())).not.toContain('write_skill');
+    closeDatabase(off.db);
   });
 });

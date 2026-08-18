@@ -316,10 +316,19 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
 
 四类扩展继续共用卡片网格，但操作按各自真实生命周期区分：
 
-- **Skills**：name、description、min-role、状态、允许工具、模型建议与附属文件；可 `[新建]`、
+- **Skills**：name、description、min-role、状态、来源、允许工具、模型建议与附属文件；可 `[新建]`、
   `[编辑]` 正文/frontmatter、启停和删除。`GET /api/skills/:name` 返回正文与文件清单；
   `POST /api/skills`、`PUT /api/skills/:name`、`DELETE /api/skills/:name` 直接安全写入或删除
   `SKILL.md`，随后重扫并同步数据库。新建时未指定 `min-role` 则热读 `skills.defaultMinRole`。
+  卡片带**来源徽标**（随包 / 本地 / 安装包，来自 `skills.source`）。
+  `[安装 skill 包]` 选一个 zip → `POST /api/skills/package`，装的是带 `scripts/` / `bin/` /
+  `references/` 的整棵目录（[07 §2.5](./07-skills-plugins-mcp.md)）；**落地一律停用**，
+  且带独立的「未审阅」徽标，详情里摊开 `SKILL.md` 正文与附带文件清单 ——
+  「这个包往我机器上放了什么」是启用它之前唯一要回答的问题。
+  **随包那四份说明书只放行启停**：改正文 / 描述 / 删除回 403 `skill_reserved`
+  （`write_skill` 一直拒改它们，此前 WebUI 侧却能改能删）。
+  `skills.enabled` 或 `tools.selfExtend.skills.enabled` 关着时页顶给提示条，形状照 MCP 那条
+  总开关提示 —— 这次「为什么装不了」全靠人去翻 schema 默认值。
 - **Plugins**：name、version、minRole、load_error；启用 plugin 会执行全信任代码，因此二次确认。
   启停与重载继续走 `PATCH /api/plugins/:name` / `POST /api/plugins/:name/reload`。
   模型现在能写 `plugin.js`（[07 §6](./07-skills-plugins-mcp.md)），所以加了两个端点：
@@ -646,7 +655,8 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
 | `POST /api/schedules` | 建一个定时任务。body `{key, name, mode, text, cron\|at}`。**落点从 `contexts` 按 `key` 反查**，不收客户端给的 `chatId`/`threadId`（同 [05 §8](./05-tools-and-permissions.md) 对工具的要求）；归属身份取 `access.bootstrapOwnerId`，没配则 `owner_unset` 400。校验与 `schedule_create` 工具**共用 `createScheduledJob`** —— 两边各写一遍的话 WebUI 迟早能建出工具建不出来的任务 |
 | `DELETE /api/schedules/:id` | 停用一条任务：置 `cancelled` 并从 `Scheduler` 摘掉。已经结束的行回 `{cancelled:false}` 而不是假成功 |
 | `POST /api/schedules/:id/trigger` | 立即触发一次。**不等它跑完**（`mode='agent'` 的一次触发是一整轮真实模型调用，同步等会把请求挂到 `concurrency.turnTimeoutMs`），先回 `{started:true}`，结果落在该行的 `lastState`/`lastError` 与日志里。非 `active` 的任务回 409；不影响 cron 的下一次 |
-| `GET/POST /api/skills` `GET/PUT/PATCH/DELETE /api/skills/:name` | Skill 列表、正文/frontmatter CRUD、启停 |
+| `GET/POST /api/skills` `GET/PUT/PATCH/DELETE /api/skills/:name` | Skill 列表、正文/frontmatter CRUD、启停。列表回 `{name, description, min_role, enabled, source, load_error, updated_at}` —— **不是 `SELECT *`**：`path`（宿主文件系统路径）、`content_hash`、整份 `frontmatter_json` 前端一个都不用。随包 skill 的 `DELETE` 与「改 `enabled` 以外任何字段」回 403 `skill_reserved` |
+| `POST /api/skills/package` | 装一个 skill 包。multipart，字段 `file` 收 zip，可选 `name` / `subdir` / `overwrite`。与 `install_skill` 工具**共用 `installSkillPackage`**（端点自己抄一遍的话两条路迟早在校验上分叉）。落地即停用。包根有歧义时回 400 `skill_ambiguous_root` 并列出候选，重名回 409 |
 | `GET/PATCH /api/plugins[/:name]` `POST /api/plugins/:name/reload` | Plugin |
 | `GET/POST /api/mcp` `PATCH/DELETE /api/mcp/:name` `POST /api/mcp/:name/reconnect` | MCP transport CRUD、热重连 |
 | `GET /api/agents` `POST /api/agents/:name/dryrun` | 子 agent 定义与 NDJSON 隔离试跑（定义增删改走 `agent.agents` 配置） |
