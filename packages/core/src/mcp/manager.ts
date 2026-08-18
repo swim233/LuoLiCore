@@ -2,6 +2,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { minimatch } from 'minimatch';
+import { z } from 'zod';
 import { jsonSchemaToZod } from './schema.js';
 import type { Role } from '@luoli/shared';
 import type { ToolRegistry } from '../tools/registry.js';
@@ -110,7 +111,13 @@ export class McpManager {
       const server = raw as unknown as ServerConfig;
       if (server.enabled === false) continue;
       try {
-        for (const entry of await this.discover(server)) this.#tools.set(entry.name, entry);
+        const discovered = await this.discover(server);
+        for (const entry of discovered) this.#tools.set(entry.name, entry);
+        // **schema 转换也在这个 try 里。** 它此前在循环外统一做，于是一台 server 的畸形
+        // `inputSchema` 会让异常从 `reconcile()` 抛出去：`POST /api/mcp` 500，而
+        // `main.ts` 的 `await mcp.reconcile()` 在启动路径上 —— 整个进程起不来（docs/27 · C-04）。
+        // 单条工具转换失败就退回宽松放行那一个工具，别拖着同一台 server 的其余工具。
+        if (this.registry) for (const entry of discovered) this.#register(entry);
         this.log.event({ level: 'info', kind: 'mcp.connect', summary: `${server.name} connected`, data: { server: server.name, transport: server.transport } });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -118,8 +125,21 @@ export class McpManager {
         this.log.event({ level: 'warn', kind: 'mcp.error', summary: message, data: { server: server.name } });
       }
     }
-    // 入参 schema 要真的接上：换成通配之后模型只能猜参数名，猜错了 safeParse 也不拦（docs/20 · W-MCP-01）。
-    if (this.registry) for (const entry of this.#tools.values()) this.registry.registerExternal({ name: entry.name, description: entry.description, inputSchema: jsonSchemaToZod(entry.inputSchema), minRole: entry.minRole, source: 'mcp', execute: entry.call });
+  }
+
+  /**
+   * 入参 schema 要真的接上：换成通配之后模型只能猜参数名，猜错了 safeParse 也不拦
+   * （docs/20 · W-MCP-01）。而转换本身也可能抛（畸形 schema、zod 拒收的字面量），所以降级的
+   * 粒度是**一个工具** —— 整台 server 的其余工具照常带着精确 schema 进目录（docs/27 · C-04）。
+   */
+  #register(entry: { name: string; description: string; inputSchema: Record<string, unknown>; minRole: Role; call: (input: unknown) => Promise<unknown> }): void {
+    let inputSchema: z.ZodTypeAny;
+    try { inputSchema = jsonSchemaToZod(entry.inputSchema); }
+    catch (error) {
+      inputSchema = z.record(z.unknown());
+      this.log.event({ level: 'warn', kind: 'mcp.error', summary: `${entry.name} 的入参 schema 转换失败，已退回宽松放行`, data: { tool: entry.name, error: error instanceof Error ? error.message : String(error) } });
+    }
+    this.registry!.registerExternal({ name: entry.name, description: entry.description, inputSchema, minRole: entry.minRole, source: 'mcp', execute: entry.call });
   }
 
   toolEntries(): Array<{ name: string; description: string; inputSchema: Record<string, unknown>; minRole: Role; call: (input: unknown) => Promise<unknown> }> {

@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import { localDayName, sqliteTimezoneModifier, timezoneOffsetMinutes } from '@luoli/shared';
 import type { Sqlite } from './database.js';
 
 /** `log_events` 的全部列减去 `data_json`，外加它的字节数 —— 列表要的是摘要，不是载荷。 */
@@ -76,20 +77,28 @@ export class OperationsRepository {
     const turns = this.db.prepare(`SELECT COUNT(*) AS total,SUM(state='running') AS running,SUM(state='failed') AS failed,COALESCE(SUM(cost_usd),0) AS cost FROM turns`).get();
     const messages = this.db.prepare('SELECT COUNT(*) AS total FROM messages').get();
     const providers = this.db.prepare('SELECT COUNT(*) AS total,COALESCE(SUM(enabled),0) AS enabled FROM providers').get();
-    const since = Date.now() - days * 86_400_000;
-    const day = (ts: number): string => new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(ts));
+    const now = Date.now();
+    const since = now - days * 86_400_000;
+    // **分桶在 SQL 里做。** 这是总览页反复刷新的端点，此前把近 7 天的每一行（messages + turns）
+    // 都取回来在 JS 里数 —— 而它要的只是 7 个计数（docs/27 · R-06）。偏移与用量报表共用
+    // `sqliteTimezoneModifier`，两个页面的日界因此按构造一致（docs/27 · C-02）。
+    const modifier = sqliteTimezoneModifier(timezone, new Date(now));
+    const offset = timezoneOffsetMinutes(timezone, new Date(now));
     const buckets = new Map<string, { day: string; messages: number; turns: number; costUsd: number }>();
+    // 缺的那些天补 0 而不是跳过：折线图上「那天没有点」和「那天是 0」看起来是两回事。
     for (let index = days - 1; index >= 0; index -= 1) {
-      const name = day(Date.now() - index * 86_400_000);
+      const name = localDayName(now - index * 86_400_000, offset);
       buckets.set(name, { day: name, messages: 0, turns: 0, costUsd: 0 });
     }
-    for (const row of this.db.prepare('SELECT tg_date AS ts FROM messages WHERE tg_date>=?').all(since) as Array<{ ts: number }>) {
-      const bucket = buckets.get(day(row.ts));
-      if (bucket) bucket.messages += 1;
+    for (const row of this.db.prepare(`SELECT strftime('%Y-%m-%d', tg_date / 1000, 'unixepoch', ?) AS day,COUNT(*) AS count
+      FROM messages WHERE tg_date>=? GROUP BY day`).all(modifier, since) as Array<{ day: string; count: number }>) {
+      const bucket = buckets.get(row.day);
+      if (bucket) bucket.messages = row.count;
     }
-    for (const row of this.db.prepare('SELECT COALESCE(started_at,queued_at) AS ts,COALESCE(cost_usd,0) AS cost FROM turns WHERE COALESCE(started_at,queued_at)>=?').all(since) as Array<{ ts: number; cost: number }>) {
-      const bucket = buckets.get(day(row.ts));
-      if (bucket) { bucket.turns += 1; bucket.costUsd += row.cost; }
+    for (const row of this.db.prepare(`SELECT strftime('%Y-%m-%d', COALESCE(started_at,queued_at) / 1000, 'unixepoch', ?) AS day,COUNT(*) AS count,COALESCE(SUM(cost_usd),0) AS cost
+      FROM turns WHERE COALESCE(started_at,queued_at)>=? GROUP BY day`).all(modifier, since) as Array<{ day: string; count: number; cost: number }>) {
+      const bucket = buckets.get(row.day);
+      if (bucket) { bucket.turns = row.count; bucket.costUsd = row.cost; }
     }
     return { turns, messages, providers, trend: [...buckets.values()] };
   }

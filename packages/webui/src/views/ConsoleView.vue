@@ -1228,6 +1228,17 @@ async function removeSkill(name: string): Promise<void> {
 // 不把它摆出来的话，新建 server 会拿到一个 ok:true 加一条永远停在「等待连接」的行 ——
 // 「保存成功但运行时没变」正是这份文档反复点名的那类反馈（docs/20 · W-CFG-02）。
 const mcpMasterOff = computed(() => (config.value.mcp as { enabled?: boolean } | undefined)?.enabled === false);
+/**
+ * 「审批已启用」+ 空规则表 = 门开着。`ApprovalRules.evaluate()` 在规则表为空时恒回
+ * `needed:false`，于是 `conditional` 档的工具（bash / python / write_file / edit_file /
+ * move_file / memory_write）一个都不经审批 —— 而这一页此前只显示一个开着的开关，
+ * 工具页那张表还写着「条件审批」（docs/27 · S-02，启动时也有一条 warn）。
+ */
+const approvalRulesEmpty = computed(() => {
+  const approval = (config.value.approval ?? {}) as { enabled?: boolean; rules?: unknown[] };
+  return approval.enabled !== false && !(approval.rules ?? []).length;
+});
+const conditionalToolNames = computed(() => toolRows.value.filter((row) => row.approval === 'conditional').map((row) => row.name).join(' / '));
 async function enableMcpMaster(): Promise<void> {
   try {
     await api('/api/config', { method: 'PUT', body: JSON.stringify({ 'mcp.enabled': true }) });
@@ -1665,6 +1676,22 @@ async function saveChatOverrides(changes: Record<string, unknown>): Promise<void
   } catch (error) { toastError('保存会话级覆盖失败', error); }
   finally { chatOverrideSaving.value = false; }
 }
+/**
+ * `perChat.<key>.character`：会话级人格文件名。它在白名单里、也真的被运行时读了
+ * （`assembleMainPrompt` → `PromptDocuments.paths`），但**不是 schema 叶子键**
+ * （`perChat` 是 `z.record(z.unknown())`），所以 schema 驱动的 `SchemaForm` 渲染不出它
+ * —— 给一个单独的输入框，而不是让运维只能打 curl（docs/27 · C-08）。
+ * 服务端只认「纯文件名 + .md」，不合格时静默退回全局 `CHARACTER.md`，所以这里也照同一条说明。
+ */
+const chatCharacter = ref('');
+const chatCharacterSaving = ref(false);
+watch(chatOverrides, (overrides) => { chatCharacter.value = typeof overrides.character === 'string' ? overrides.character : ''; }, { immediate: true });
+async function saveChatCharacter(): Promise<void> {
+  const value = chatCharacter.value.trim();
+  chatCharacterSaving.value = true;
+  try { if (value) await saveChatOverrides({ character: value }); else await dropChatOverride('character'); }
+  finally { chatCharacterSaving.value = false; }
+}
 async function dropChatOverride(path: string): Promise<void> {
   const chat = selectedChat.value;
   if (!chat) return;
@@ -1934,6 +1961,14 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
               这个会话被 Telegram 的 <code>/model</code> 钉在别名 <b>{{ chatModelAlias }}</b> 上（存在 <code>app_kv</code>，不是配置覆盖层）。它<b>压过</b>下面的 <code>agent.main.modelAlias</code> 与全局值。
               <UiButton size="small" variant="text" severity="danger" label="清除会话别名" @click="clearChatModelAlias" />
             </p>
+            <!-- character 不是 schema 叶子键（perChat 是 z.record），SchemaForm 渲染不出它 -->
+            <div class="chat-character">
+              <label>会话人格文件
+                <input v-model="chatCharacter" placeholder="CHARACTER.md（留空 = 用全局人格）" spellcheck="false">
+              </label>
+              <UiButton size="small" variant="outlined" label="保存" :loading="chatCharacterSaving" @click="saveChatCharacter" />
+              <p class="field-note"><code>memory/</code> 下的替代人设文件名。只收纯文件名（<code>.md</code> 结尾、不含目录与 <code>..</code>）—— 它会被当成路径段用；写别的会**静默退回全局 <code>CHARACTER.md</code>** 而不是报错，免得一个拼错的文件名让整个会话开不了轮次。</p>
+            </div>
             <UiButton variant="text" :icon="chatOverrideOpen ? 'pi pi-chevron-up' : 'pi pi-chevron-down'" :label="chatOverrideOpen ? '收起' : '编辑覆盖项'" @click="chatOverrideOpen = !chatOverrideOpen" />
             <!-- 控件里显示的是这个会话实际生效的值（全局 + 覆盖）；改动才会写进覆盖层 -->
             <SchemaForm v-if="chatOverrideOpen && configSchema" ref="chatOverrideForm" :schema="configSchema.schema" :value="chatEffectiveConfig"
@@ -2316,6 +2351,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
               <template #actions="{ data }"><UiButton v-if="data.state === 'running'" size="small" variant="outlined" severity="danger" label="取消" :loading="cancellingTurn === data.turn_id" @click="cancelTaskTurn(data)" /></template>
             </DataGrid></article>
           <article class="surface"><h3>审批</h3><p class="section-note">命中审批规则的工具会暂停到 <code>approval.ttlMs</code>；批准后原调用继续，拒绝、过期或取消后不会执行。</p>
+            <p v-if="approvalRulesEmpty" class="callout warn"><i class="pi pi-exclamation-triangle" aria-hidden="true" /><b>0 条规则时 <code>conditional</code> 等于 <code>never</code>。</b><code>approval.enabled</code> 是开的，但 <code>approval.rules</code> 是空的 —— 规则表为空时判定恒为「不需要审批」，于是 <span v-if="conditionalToolNames"><code>{{ conditionalToolNames }}</code></span><span v-else>标着「条件审批」的工具</span> 全部直接执行。规则在「全部配置」的 <code>approval.rules</code> 里加，上面的试跑可以先验一遍。</p>
             <DataGrid :rows="approvals" :columns="COLUMNS.approvals" data-key="id" empty="没有审批记录">
               <template #tool_name="{ data }"><code>{{ data.tool_name }}</code><small class="hit-text">{{ data.input_json }}</small></template>
               <template #risk="{ data }"><UiTag :value="String(data.risk)" :severity="data.risk === 'high' ? 'danger' : data.risk === 'medium' ? 'warn' : 'secondary'" /></template>

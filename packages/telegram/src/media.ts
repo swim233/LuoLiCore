@@ -18,6 +18,22 @@ function truncateCodePoints(text: string, maxChars: number): string {
   return [...text.slice(0, maxChars * 2)].slice(0, maxChars).join('');
 }
 
+/**
+ * 文档解析的墙钟上限。`pdf-parse` / `mammoth` 对用户上传的文件都没有任何预算，而这一步曾经跑在
+ * 按 chat 串行的入口锁里：一个畸形 PDF（解析器活锁、压缩炸弹）让 `attachMedia` 永不返回，那个
+ * 会话之后的每条消息就既不归档也不触发，日志里连一条 `turn.start` 都没有（docs/27 · R-01）。
+ *
+ * **这道闸只挡「等」，不挡「算」**：解析器在 await 之间挂住时它有效；一个纯 CPU 的紧循环会把
+ * 事件循环整个占住，`Promise.race` 那一侧根本轮不到。算的那一半由字节闸门挡（见 `process`）。
+ */
+const EXTRACT_TIMEOUT_MS = 20_000;
+async function withDeadline<T>(work: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([work, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`${label}_timeout`)), ms); })]);
+  } finally { clearTimeout(timer); }
+}
+
 interface TelegramFile {
   fileId: string;
   uniqueId: string;
@@ -80,18 +96,39 @@ export class TelegramMedia {
       const path = join(directory, this.#asImage(file) ? `${file.uniqueId}.orig${extension}` : `${file.uniqueId}${extension}`);
       const response = await fetch(`https://api.telegram.org/file/bot${this.token}/${remote.file_path}`);
       if (!response.ok) throw new Error(`download_http_${response.status}`);
-      writeFileSync(path, Buffer.from(await response.arrayBuffer()), { mode: 0o600 });
+      const payload = Buffer.from(await response.arrayBuffer());
+      // 上面那道闸判的是 Telegram **声明**的 `file_size`，而它可以缺省（`?? 0` 一路放行）。
+      // 落盘前按真实字节数再判一次：解析器的 CPU 开销跟着字节走，而 `EXTRACT_TIMEOUT_MS`
+      // 挡不住纯 CPU 的紧循环（docs/27 · R-01）。
+      if (payload.length > limit) {
+        this.insert(id, archived, file, null, 'skipped', 'size_limit', null, 'skipped');
+        return [{ type: 'text', text: `[${file.kind} ${file.name ?? ''} 超出下载限制]` }];
+      }
+      writeFileSync(path, payload, { mode: 0o600 });
       let localPath = path;
       if (this.#asImage(file)) {
         localPath = join(directory, `${file.uniqueId}.jpg`);
         await sharp(path).rotate().resize({ width: this.config.maxImageEdge, height: this.config.maxImageEdge, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 85 }).toFile(localPath);
         rmSync(path, { force: true });
       }
-      const extracted = await this.extract(localPath, file);
-      this.insert(id, archived, file, localPath, 'done', null, extracted, extracted === null ? 'skipped' : 'done');
+      // 提取失败**不算**下载失败：文件已经在盘上了，记成 failed 会让 local_path 变成 NULL、
+      // 盘上那份变成 gcFiles 眼里的孤儿。`attachments` 没有 extract_error 列（迁移提交后不可
+      // 修改），所以原因带前缀写进唯一那个错误列 —— `download_state='done'` 已经说清了是哪一步。
+      let extracted: string | null = null;
+      let extractState = 'skipped';
+      let extractError: string | null = null;
+      try {
+        extracted = await withDeadline(this.extract(localPath, file), EXTRACT_TIMEOUT_MS, 'extract');
+        extractState = extracted === null ? 'skipped' : 'done';
+      } catch (error) {
+        extractState = 'failed';
+        extractError = `extract: ${error instanceof Error ? error.message : String(error)}`;
+      }
+      this.insert(id, archived, file, localPath, 'done', extractError, extracted, extractState);
       // `image` part 在 AI SDK v7 已废弃（SDK 内部就是转成 file 再发，顺带每张图打一条
       // DeprecationWarning）。读出侧 `contextMessages` 兜历史 part，写入侧从这里就产出新形状。
       if (this.#asImage(file)) return [{ type: 'file', ref: `attachment://${id}`, mediaType: 'image/jpeg' }];
+      if (extractState === 'failed') return [{ type: 'text', text: `[文档 ${file.name ?? file.uniqueId}：正文读不出来（${extractError}）]` }];
       if (extracted) return [{ type: 'text', text: `[文档 ${file.name ?? file.uniqueId}]\n${untrusted(`file:${file.name ?? file.uniqueId}`, [...extracted].slice(0, this.config.extract.inlineChars).join(''))}` }];
       return [{ type: 'text', text: `[${file.kind} ${file.name ?? ''}${file.duration ? ` ${file.duration}s` : ''}]` }];
     } catch (error) {

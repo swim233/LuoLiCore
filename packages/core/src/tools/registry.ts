@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { Role, RuntimeTurnContext } from '@luoli/shared';
-import { roleRank, untrusted } from '@luoli/shared';
+import { elideMiddleBytes, roleRank, untrusted } from '@luoli/shared';
 import type { ToolPolicyEntry, ToolName } from './policy.js';
 import { SKILL_NARROWING_EXEMPT, TOOL_POLICY } from './policy.js';
 import type { LogSink } from '../log/sink.js';
@@ -150,7 +150,16 @@ export class ToolRegistry {
     return this.#tools.has(name);
   }
 
-  async execute(name: string, rawInput: unknown, context: ToolExecutionContext): Promise<object> {
+  /**
+   * 准入判定：`execute()` 在跑工具之前要过的那一串闸，抽成一个**只读**判定（不写本轮状态、
+   * 不记日志、不调工具、不发审批）。抽出来的理由是可穷举地测「给定 (角色, 上下文) 这一次调用
+   * 该不该被放行」—— 闸门本身是对的（`active()` 的过滤集合必须在这里逐条复查，docs/20 ·
+   * W-TOOL-01），问题是它们此前和执行编排焊在同一个方法里，而这正是最需要穷举的部分
+   * （docs/27 · D-03）。`execute()` 因此只剩 admit → approve → run → normalize 四步。
+   *
+   * `warn` 标的是「这一次拒绝值得留一条日志」：运维禁用的工具被模型硬调过来是排障线索。
+   */
+  admit(name: string, context: ToolExecutionContext): { ok: true; tool: RegisteredTool } | { ok: false; error: string; hint?: string; warn?: boolean } {
     const state = this.#state(context.turn.turnId);
     const tool = this.#tools.get(name);
     if (!tool) return { ok: false, error: 'tool_unavailable' };
@@ -158,7 +167,7 @@ export class ToolRegistry {
     // 后者要让它别再猜工具名。混成一句 tool_unavailable 时模型通常继续原地重试到步数耗尽。
     if (state.disabled.has(name)) return { ok: false, error: 'tool_disabled_after_errors', hint: `本轮连续失败 ${this.#limits().maxConsecutiveErrors} 次后已停用，换个办法或如实告诉用户。` };
     // 目录过滤之外再挡一次：模型可能沿用上一步的工具名，运维的禁用必须是硬边界。
-    if (this.disabledByOperator(name)) { this.log.event({ level: 'warn', kind: 'tool.disabled', summary: `Blocked disabled tool ${name}`, traceId: context.turn.turnId, data: { tool: name } }); return { ok: false, error: 'tool_disabled_by_operator' }; }
+    if (this.disabledByOperator(name)) return { ok: false, error: 'tool_disabled_by_operator', warn: true };
     if (roleRank(context.turn.effectiveRole) < roleRank(tool.policy.minRole)) return { ok: false, error: '权限不足' };
     // active() 的过滤集合必须在这里逐条复查，否则「目录里没有」就成了唯一的边界，而模型完全可以
     // 凭上一步的工具名直接调过来。目前每个相关工具恰好各自 fail-closed，但那是巧合不是设计
@@ -168,21 +177,36 @@ export class ToolRegistry {
     if (context.allow && !context.allow.has(name)) return { ok: false, error: 'tool_not_in_allowlist' };
     if (context.turn.skillAllowedTools?.size && !SKILL_NARROWING_EXEMPT.includes(name as ToolName) && !context.turn.skillAllowedTools.has(name)) return { ok: false, error: 'tool_not_in_allowlist' };
     if (state.calls >= this.#limits().maxCallsPerTurn) return { ok: false, error: 'tool_call_limit_exceeded' };
+    return { ok: true, tool };
+  }
+
+  /**
+   * 审批档位合并。`approvalFor` 让工具按**本轮配置**把自己抬进审批（`memory.pubWriteRequiresApproval`
+   * 就是这么接的）。它只能抬高，不能放低 —— 否则一个工具就能把自己从注册期定死的档位里摘出去。
+   */
+  #approvalDecision(tool: RegisteredTool, input: unknown, context: ToolExecutionContext): { needed: boolean; risk: ApprovalRisk } {
+    const escalated = tool.approvalFor?.(input, context);
+    const effective = escalated === 'always' || tool.policy.approval === 'always' ? 'always'
+      : escalated === 'conditional' || tool.policy.approval === 'conditional' ? 'conditional' : tool.policy.approval;
+    if (effective === 'always') return { needed: true, risk: 'high' };
+    if (effective === 'conditional') return this.#approvalRules().evaluate(tool, input, context);
+    return { needed: false, risk: 'low' };
+  }
+
+  async execute(name: string, rawInput: unknown, context: ToolExecutionContext): Promise<object> {
+    const admitted = this.admit(name, context);
+    if (!admitted.ok) {
+      if (admitted.warn) this.log.event({ level: 'warn', kind: 'tool.disabled', summary: `Blocked disabled tool ${name}`, traceId: context.turn.turnId, data: { tool: name } });
+      return { ok: false, error: admitted.error, ...(admitted.hint ? { hint: admitted.hint } : {}) };
+    }
+    const tool = admitted.tool;
+    const state = this.#state(context.turn.turnId);
     const parsed = (tool.inputSchemaFor?.(context) ?? tool.inputSchema).safeParse(rawInput);
     // 参数不合法算一次失败。`maxConsecutiveErrors` 是「模型别原地重试到步数耗尽」的**唯一**硬
     // 边界，而它此前只数 execute 的失败 —— 参数写错和审批被拒这两种最常见的失败一次都不计，
     // 于是同一个错误的调用可以无限次重来（实测 6 次全部照收）。
     if (!parsed.success) { this.#failed(state, name, context); return { ok: false, error: 'invalid_input', hint: parsed.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ') }; }
-    // `approvalFor` 让工具按**本轮配置**把自己抬进审批（`memory.pubWriteRequiresApproval` 就是
-    // 这么接的）。它只能抬高，不能放低 —— 否则一个工具就能把自己从注册期定死的审批档位里摘出去。
-    const escalated = tool.approvalFor?.(parsed.data, context);
-    const effective = escalated === 'always' || tool.policy.approval === 'always' ? 'always'
-      : escalated === 'conditional' || tool.policy.approval === 'conditional' ? 'conditional' : tool.policy.approval;
-    const decision = effective === 'always'
-      ? { needed: true, risk: 'high' as const }
-      : effective === 'conditional'
-        ? this.#approvalRules().evaluate(tool, parsed.data, context)
-        : { needed: false, risk: 'low' as const };
+    const decision = this.#approvalDecision(tool, parsed.data, context);
     if (decision.needed) {
       const verdict = await this.approval.request(tool, parsed.data, context, decision.risk);
       const approved = typeof verdict === 'boolean' ? verdict : verdict.approved;
@@ -231,14 +255,9 @@ export class ToolRegistry {
   #normalizeOutput(name: string, output: object, wrap: boolean): object {
     const max = this.#limits().maxOutputBytes ?? 65_536;
     const serialized = JSON.stringify(output);
-    let value = serialized;
-    let truncated = false;
-    if (Buffer.byteLength(serialized) > max) {
-      const buffer = Buffer.from(serialized);
-      const half = Math.floor(max / 2);
-      value = `${buffer.subarray(0, half).toString('utf8')}\n…省略 ${buffer.length - max} bytes…\n${buffer.subarray(-half).toString('utf8')}`;
-      truncated = true;
-    }
+    // 按字符边界切（docs/27 · T-04）：裸 `subarray().toString('utf8')` 会把末尾那个多字节字符
+    // 切成半个，模型看到的是一串 U+FFFD。
+    const { value, truncated } = elideMiddleBytes(serialized, max, (omitted) => `\n…省略 ${omitted} bytes…\n`);
     if (!wrap && !truncated) return output;
     return { ok: !('ok' in output) || output.ok !== false, content: wrap ? untrusted(`tool:${name}`, value) : value, truncated };
   }

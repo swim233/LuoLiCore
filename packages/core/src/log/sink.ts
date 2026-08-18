@@ -97,14 +97,18 @@ export class LogSink {
     return state;
   }
 
-  #flushFile(path: string, synchronous = false): void {
+  /**
+   * 只有一条同步路径（`appendFileSync`）。此前还带一个 `synchronous` 参数，三处调用点都传 `true`、
+   * 函数体以 `void synchronous;` 结尾 —— 留着会让读者以为存在两条路径（docs/27 · T-02）。
+   * 真要加异步分支，那时再加参数。
+   */
+  #flushFile(path: string): void {
     const state = this.#files.get(path);
     if (!state?.buffer) return;
     if (state.timer) { clearTimeout(state.timer); state.timer = null; }
     const content = state.buffer; state.buffer = '';
     try { appendFileSync(path, content, { mode: 0o600 }); state.bytes += Buffer.byteLength(content); }
     catch (error) { this.#reportWriteFailure(error); }
-    void synchronous;
   }
 
   #writeLine(path: string, line: string, urgent: boolean): void {
@@ -113,13 +117,13 @@ export class LogSink {
       let state = this.#file(path);
       const bytes = Buffer.byteLength(line);
       if (state.bytes + Buffer.byteLength(state.buffer) + bytes >= this.#maxFileBytes) {
-        this.#flushFile(path, true);
+        this.#flushFile(path);
         let suffix = 1; while (existsSync(`${path}.${suffix}`)) suffix += 1;
         if (existsSync(path)) renameSync(path, `${path}.${suffix}`);
         state = { bytes: 0, buffer: '', timer: null }; this.#files.set(path, state);
       }
       state.buffer += line;
-      if (urgent || Buffer.byteLength(state.buffer) >= 65_536) this.#flushFile(path, true);
+      if (urgent || Buffer.byteLength(state.buffer) >= 65_536) this.#flushFile(path);
       else if (!state.timer) { state.timer = setTimeout(() => this.#flushFile(path), 200); state.timer.unref?.(); }
     } catch (error) { this.#reportWriteFailure(error); }
   }
@@ -155,7 +159,7 @@ export class LogSink {
   close(): void {
     for (const entry of this.#pending.values()) clearTimeout(entry.timer);
     this.#pending.clear();
-    for (const path of this.#files.keys()) this.#flushFile(path, true);
+    for (const path of this.#files.keys()) this.#flushFile(path);
   }
 
   event(input: LogEvent): number {

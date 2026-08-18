@@ -16,7 +16,11 @@ export const TOOL_POLICY = {
   glob: { minRole: 'limited', approval: 'never', scope: 'workspace', source: 'builtin' },
   grep: { minRole: 'limited', approval: 'never', scope: 'workspace', source: 'builtin' },
   write_file: { minRole: 'trusted', approval: 'conditional', scope: 'workspace', source: 'builtin' },
-  edit_file: { minRole: 'trusted', approval: 'never', scope: 'workspace', source: 'builtin' },
+  // `edit_file` 与 `write_file` **同档**。`FileTools.edit()` 最后一步就是 `return this.write(...)`，
+  // 而它可以把整份文件换掉（`oldString` 取全文、或 `replaceAll`）；`write_file` 带
+  // `approvalTargetExists` 说明「覆盖已存在的文件要审批」正是设计意图，而 `edit_file` 恰好**只**
+  // 作用于已存在的文件 —— 标成 never 等于给覆盖审批留了一条绕道（docs/27 · C-03）。
+  edit_file: { minRole: 'trusted', approval: 'conditional', scope: 'workspace', source: 'builtin' },
   move_file: { minRole: 'trusted', approval: 'conditional', scope: 'workspace', source: 'builtin' },
   delete_file: { minRole: 'trusted', approval: 'always', scope: 'workspace', source: 'builtin' },
   bash: { minRole: 'trusted', approval: 'conditional', scope: 'sandbox', source: 'builtin' },

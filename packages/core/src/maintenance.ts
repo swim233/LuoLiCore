@@ -11,15 +11,27 @@ export interface BlobDirectories {
   agentResults?: string;
 }
 
+/**
+ * `maintenance.retention.*`。**每一项 0 = 不清** —— 保留期是运维策略，缺省不能变成「悄悄删了」。
+ * 只有派生数据在这里：`turns` / `tasks` 是 trace 的骨架，不给它们保留期是刻意的（见 schema 注释）。
+ */
+export interface RetentionDays {
+  usage?: number;
+  quotaCounters?: number;
+  configRevisions?: number;
+  memoryRevisions?: number;
+}
+
 export class MaintenanceService {
   constructor(private readonly db: Sqlite, private readonly databasePath: string, private readonly backupKeep: number, private readonly retentionDays: number, private readonly logsDir = './logs', private readonly blobs: BlobDirectories = {},
-    private readonly gzipAfterDays = 0, private readonly scheduleRetentionDays = 30) {}
+    private readonly gzipAfterDays = 0, private readonly scheduleRetentionDays = 30, private readonly retention: RetentionDays = {}) {}
 
   backup(label = 'manual'): string {
     const directory = resolve(dirname(this.databasePath), 'backup');
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     const path = join(directory, `luoli-${Date.now()}-${label}.db`);
-    this.db.exec(`VACUUM INTO '${path.replaceAll("'", "''")}'`);
+    // 绑参数而不是自己转义引号：`VACUUM INTO` 收 SQL 表达式（同 `db/database.ts`，docs/27 · T-05）。
+    this.db.prepare('VACUUM INTO ?').run(path);
     const backups = readdirSync(directory).map((name) => join(directory, name)).sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs);
     for (const expired of backups.slice(this.backupKeep)) unlinkSync(expired);
     return path;
@@ -92,10 +104,20 @@ export class MaintenanceService {
     // 一条还在排的任务被清掉的表现是「bot 突然不再提醒了」，而库里什么痕迹都没有。
     const schedules = this.db.prepare("DELETE FROM scheduled_jobs WHERE state<>'active' AND updated_at<?")
       .run(now - this.scheduleRetentionDays * 86_400_000).changes;
+    // 四张派生数据表的保留期（`maintenance.retention.*`，docs/27 · R-05）。0 = 不清，所以
+    // `expire` 在天数为 0 / 未给时**一行都不动** —— 默认沉默地删数据比不删危险得多。
+    const expire = (days: number | undefined, sql: string): number =>
+      days && days > 0 ? this.db.prepare(sql).run(now - days * 86_400_000).changes : 0;
+    const usage = expire(this.retention.usage, 'DELETE FROM usage_ledger WHERE ts<?');
+    // `updated_at` 而不是 bucket 字符串：当前账期的行每轮都在更新，不可能落在保留期之外，
+    // 而按 bucket 解析日期得先知道它是日还是月账期 —— 那是两套格式。
+    const quotaCounters = expire(this.retention.quotaCounters, 'DELETE FROM quota_counters WHERE updated_at<?');
+    const configRevisions = expire(this.retention.configRevisions, 'DELETE FROM config_revisions WHERE ts<?');
+    const memoryRevisions = expire(this.retention.memoryRevisions, 'DELETE FROM memory_revisions WHERE ts<?');
     // 压缩在删除之后：已经过保留期的目录整个没了，没必要先压再删。
     const compressed = this.gzipAfterDays > 0 ? this.#gzipOldLogs(new Date(now - this.gzipAfterDays * 86_400_000).toISOString().slice(0, 10)) : 0;
     this.checkpoint();
-    return { logs, logDirectories, updates, sessions, approvals, agentResults, schedules, compressed };
+    return { logs, logDirectories, updates, sessions, approvals, agentResults, schedules, compressed, usage, quotaCounters, configRevisions, memoryRevisions };
   }
 
   /**

@@ -323,15 +323,23 @@ export class ContextEngine {
     return commit;
   }
 
-  stats(key: string): Record<string, unknown> {
+  /**
+   * @param options.timeline 是否带上「这个会话有史以来的每一条上下文消息及其 parts」加最近 100 个
+   *   commit。**默认不带** —— `context_stats` 工具此前拿的就是整份：随后 `#normalizeOutput` 按
+   *   `tools.exec.maxOutputBytes`（64 KiB）从中间截断，模型看到的是一段掐断的 JSON，前 32 KiB
+   *   是最早的历史、后 32 KiB 是 commit 列表，既烧 token 又没有信息（docs/27 · R-03）。
+   *   WebUI 的 `GET /api/chats/:key/commits` 要这份时间线，所以它显式传 true。
+   */
+  stats(key: string, options: { timeline?: boolean } = {}): Record<string, unknown> {
     const repo = new ScopedContextRepository(this.db, key);
     const head = repo.head();
     const context = repo.context();
+    const summary = { key, commit: head, claimWatermark: context?.claimWatermark ?? 0, messageCount: head?.msgCount ?? 0, tokens: head?.tokensTotal ?? 0 };
+    if (!options.timeline) return summary;
     const messages = repo.messagesThrough(head?.headOrdinal ?? repo.maxOrdinal()).map((message) => ({
       ...message, inWindow: Boolean(head && message.ordinal >= head.windowStart && message.ordinal <= head.headOrdinal),
     }));
-    return { key, commit: head, claimWatermark: context?.claimWatermark ?? 0, messageCount: head?.msgCount ?? 0,
-      tokens: head?.tokensTotal ?? 0, commits: repo.commits(100), messages };
+    return { ...summary, commits: repo.commits(100), messages };
   }
 
   calibrate(key: string, realTokens: number, estimatedTokens: number, alpha: number): number {

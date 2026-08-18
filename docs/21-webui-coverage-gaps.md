@@ -364,8 +364,13 @@ G-API-10/11/12 与 G-SRV-02/03/04 均已完成；按本文「运行时已有、W
 **顺带修掉一个会静默丢配置的判据**：导出侧原本拿整条点分路径去测 `/key|secret|token|password/i`，
 于是 `context.limit.tokens`（叶子是 "tokens"）会被当成密钥跳过 —— 一份导出里静静地少几项真配置。
 改成「叶子段 + 值是非空字符串」，与 `publicConfig` / `revisionJson` 同一套口径。
-- `perChat` 白名单里的 `character` 仍是兼容性保留项；会话专属人设继续走
-  `memory/CHARACTER.<chat>.md`，覆盖面板不展示这项。
+- ~~`perChat` 白名单里的 `character` 仍是兼容性保留项；会话专属人设继续走
+  `memory/CHARACTER.<chat>.md`，覆盖面板不展示这项。~~ **这条判断是错的，已作废**（docs/27 · C-08）：
+  `CHARACTER.<chat>.md` 那个机制并不存在（`PromptDocuments.paths` 从不按 chat 分文件），
+  所以 `character` 是当时唯一的落点，而它没接线 —— 于是「会话专属人设」这件事在两处各缺一半。
+  现在读侧已接线（`assembleMainPrompt` → `paths(userId, characterOverride)`，带一道文件名形态闸），
+  控制面也补上了：会话页的覆盖面板里有一个**独立的**「会话人格文件」输入行 —— 它不是 schema
+  叶子键（`perChat` 是 `z.record(z.unknown())`），`SchemaForm` 渲染不出它，所以只能单独给一个控件。
 
 ---
 

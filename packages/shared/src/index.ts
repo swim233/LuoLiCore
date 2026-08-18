@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import { StringDecoder } from 'node:string_decoder';
 
 export const ROLES = ['blocked', 'limited', 'trusted', 'owner'] as const;
 export type Role = (typeof ROLES)[number];
@@ -57,6 +58,80 @@ export function readDotted(root: unknown, key: string): unknown {
 export function sortOverrideKeys<T extends { key: string }>(rows: readonly T[]): T[] {
   return [...rows].sort((left, right) => (left.key.split('.').length - right.key.split('.').length)
     || (left.key < right.key ? -1 : left.key > right.key ? 1 : 0));
+}
+
+/**
+ * 中间省略式截断：**预算按字节算，切分按字符边界**，且结果保证不超过 `maxBytes`。
+ *
+ * 两处此前各自按字节切：`ToolRegistry.#normalizeOutput` 直接
+ * `buffer.subarray(0, half).toString('utf8')`，把末尾那个多字节字符切成半个（产出 U+FFFD）；
+ * 沙箱的 `clipped` 按字节算预算、按码点切，结果仍可能超过 `max` 字节（docs/27 · T-04）。
+ * 同一个仓库里 `truncatePartStrings`（`db/context.ts`）早就是正确写法，这里把它推广成一处。
+ *
+ * 头部交给 `StringDecoder`（不完整的序列它会攒着不吐，所以头永远不含半个字符）；尾部从
+ * `length - budget` 起往前跳过续字节（`10xxxxxx`），落在一个合法起始字节上。
+ */
+export function elideMiddleBytes(text: string, maxBytes: number, note: (omittedBytes: number) => string): { value: string; truncated: boolean } {
+  const buffer = Buffer.from(text, 'utf8');
+  if (buffer.length <= maxBytes) return { value: text, truncated: false };
+  const marker = note(buffer.length - maxBytes);
+  const half = Math.max(1, Math.floor(Math.max(2, maxBytes - Buffer.byteLength(marker)) / 2));
+  const head = new StringDecoder('utf8').write(buffer.subarray(0, half));
+  let start = Math.max(0, buffer.length - half);
+  while (start < buffer.length && (buffer[start]! & 0xC0) === 0x80) start += 1;
+  return { value: `${head}${marker}${buffer.subarray(start).toString('utf8')}`, truncated: true };
+}
+
+/**
+ * `general.timezone` 在某一刻的 UTC 偏移（分钟）。
+ *
+ * 用量报表与总览趋势都要按**本地日**分桶，而两处都不能把整表拉回 JS 里数
+ * （docs/27 · C-02 报表按 UTC 分日、`R-06` 总览把 7 天两张表全拉回来）。所以日界统一表达成
+ * 一个固定偏移：SQL 侧交给 `strftime(…, '±HH:MM')`、JS 侧交给 `ts + offset` —— 两处于是**按构造**
+ * 是同一个口径，而不是靠两份实现各自算对。
+ *
+ * **代价写在这里**：跨 DST 切换的范围里，切换后那半段的日界会差一小时。默认时区
+ * Asia/Shanghai 没有 DST；配额窗口仍走 `quotaBucket` 的 Intl 精确分桶 —— 它只按「现在」算当前
+ * bucket，不回溯历史，没有这个折中。
+ */
+export function timezoneOffsetMinutes(timezone: string, at: Date = new Date()): number {
+  try {
+    const parts = new Intl.DateTimeFormat('en-CA', { timeZone: timezone, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }).formatToParts(at);
+    const get = (type: string): number => Number(parts.find((part) => part.type === type)?.value ?? '0');
+    return Math.round((Date.UTC(get('year'), get('month') - 1, get('day'), get('hour'), get('minute'), get('second')) - at.getTime()) / 60_000);
+  } catch { return 0; }
+}
+/** SQLite `strftime` 的时区修饰符（`'+08:00'`），与 `localDayName` 严格等价。 */
+export function sqliteTimezoneModifier(timezone: string, at: Date = new Date()): string {
+  const minutes = timezoneOffsetMinutes(timezone, at);
+  const absolute = Math.abs(minutes);
+  return `${minutes < 0 ? '-' : '+'}${String(Math.floor(absolute / 60)).padStart(2, '0')}:${String(absolute % 60).padStart(2, '0')}`;
+}
+/** 与那个修饰符等价的 JS 侧日名：`ts` 加偏移后按 UTC 取 `YYYY-MM-DD`。 */
+export function localDayName(ts: number, offsetMinutes: number): string {
+  return new Date(ts + offsetMinutes * 60_000).toISOString().slice(0, 10);
+}
+
+/**
+ * Telegram 数字 id 的形态。整数，群/频道为负。**放行 `@username` 只会写出一条永远匹配不到任何
+ * 消息的主体行**，而命令/端点照样回「已设置」—— 授权看着生效了，其实没有。
+ */
+export const TG_ID_PATTERN = /^-?\d{1,20}$/;
+/**
+ * `<kind> <id>` / `<kind>:<id>` / 裸 id 三种写法的唯一解析入口。三个 Telegram 命令
+ * （`/grant`、`/revoke`、`/whois`）与 `POST /api/principals/bulk` 共用它 —— 此前只有 bulk 端点
+ * 校验 id 形态，`/grant user @alice owner` 一路通过并写出一条死主体行（docs/27 · C-05：
+ * 同一道闸修过一侧、漏了另一侧，与 docs/26 同主题）。
+ *
+ * `kind` 缺省时返回 null 的 kind，由调用方决定是「两种都查」（`/whois`）还是「必须写明」（`/grant`）。
+ */
+export function parsePrincipal(input: string): { id: string; kind: 'user' | 'chat' | null; tgId: string } | null {
+  const parts = input.trim().split(/[\s:]+/).filter(Boolean);
+  if (parts.length === 1) return TG_ID_PATTERN.test(parts[0]!) ? { id: parts[0]!, kind: null, tgId: parts[0]! } : null;
+  if (parts.length !== 2) return null;
+  const [kind, tgId] = parts as [string, string];
+  if (kind !== 'user' && kind !== 'chat') return null;
+  return TG_ID_PATTERN.test(tgId) ? { id: `${kind}:${tgId}`, kind, tgId } : null;
 }
 
 /**

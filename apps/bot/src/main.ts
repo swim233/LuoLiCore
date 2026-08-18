@@ -76,7 +76,8 @@ const alerts = new AlertDispatcher(() => configStore.snapshot().alerts, log,
 // 日志自己写不进去时也要有人知道 —— 只写 stderr 的话运维通常永远看不到（docs/10 §6 db_write_failed）。
 log.onWriteFailure = (error) => alerts.fire('db_write_failed', '日志写入失败', { error: error instanceof Error ? error.message : String(error) });
 const context = new ContextEngine(db, archive, log);
-const modelRegistry = new ModelRegistry(db, providers);
+const modelRegistry = new ModelRegistry(db, providers,
+  (providerId, reason) => log.event({ level: 'warn', kind: 'provider.health', summary: `provider ${providerId} 已跳过：${reason}`, data: { providerId, reason } }));
 modelRegistry.rebuild(config.provider.healthDownCooldownMinutes);
 log.setSecrets([process.env.BOT_TOKEN ?? '', process.env.LUOLI_MASTER_KEY ?? '', config.tools.web.searchApiKey, ...providers.allDecryptedKeys()]);
 // 零配置首启本来就没有 main 别名，拒绝启动会把补配置用的 WebUI 一起带走（docs/04 §5.2）。
@@ -112,7 +113,9 @@ if (config.plugins.enabled) {
 const mcp = new McpManager(db, () => configStore.snapshot().mcp, log);
 await mcp.reconcile();
 const maintenance = new MaintenanceService(db, config.db.path, config.db.backupKeep, config.logs.retentionDays, config.logs.dir,
-  { files: config.media.dir, agentResults: agentResultsDir }, config.logs.gzipAfterDays, config.schedule.retentionDays);
+  { files: config.media.dir, agentResults: agentResultsDir }, config.logs.gzipAfterDays, config.schedule.retentionDays,
+  { usage: config.maintenance.retention.usageDays, quotaCounters: config.maintenance.retention.quotaCounterDays,
+    configRevisions: config.maintenance.retention.configRevisionDays, memoryRevisions: config.maintenance.retention.memoryRevisionDays });
 const scheduler = new Scheduler((name, error) => log.event({ level: 'error', kind: 'scheduler.failed', summary: `${name} failed`, data: { error: error instanceof Error ? error.message : String(error) } }));
 scheduler.add(config.general.maintenanceCron, () => { const result = maintenance.cleanup(); log.event({ level: 'info', kind: 'maintenance.cleanup', summary: 'Scheduled cleanup complete', data: result }); }, 'maintenance');
 scheduler.add(config.db.vacuumCron, () => { maintenance.vacuum(); log.event({ level: 'info', kind: 'maintenance.vacuum', summary: 'Scheduled VACUUM complete' }); }, 'vacuum');
@@ -134,6 +137,17 @@ const approval = new DatabaseApprovalBroker(db, () => configStore.snapshot(), ev
       pending.threadId ? { message_thread_id: pending.threadId } : {}));
 });
 if (!config.approval.enabled) log.event({ level: 'warn', kind: 'approval.disabled', summary: 'Approval flow disabled; dangerous tools execute without review' });
+// **开着的开关 + 空规则表 = 门开着。** `approval.rules` 默认 `[]`，而 `ApprovalRules.evaluate()`
+// 在规则表为空时恒回 `{needed:false}` —— 于是 `TOOL_POLICY` 里标 `conditional` 的六个工具
+// （bash / python / write_file / edit_file / move_file / memory_write）在开箱配置下对 trusted
+// 用户完全不经审批，而面板显示「审批已启用」、docs/05 的工具表写着「条件审批」（docs/27 · S-02）。
+// 按 docs/16 §5「摘除比伪造安全」：宁可明说门是开的，也不替运维默认一份他没写过的高危规则。
+else if (!config.approval.rules.length) {
+  const conditional = Object.entries(TOOL_POLICY).filter(([, policy]) => policy.approval === 'conditional').map(([name]) => name);
+  log.event({ level: 'warn', kind: 'approval.no_rules', summary: `approval.enabled=true 但规则表是空的：${conditional.length} 个 conditional 工具等于 never`, data: { conditional } });
+  process.stderr.write(`[approval] 审批已启用但 approval.rules 是空的 —— 0 条规则时 conditional 等于 never，${conditional.join(' / ')} 全部不经审批直接执行。\n`
+    + '[approval] 去 WebUI（审批页）加规则，或在 config/config.yaml 的 approval.rules 里写（那里有注释示例）。\n');
+}
 // 唤醒词在匹配时被静默跳过、或四个开关全关，表现都只是「bot 不理我」——启动时先把它说出来（docs/11 §启动校验）。
 const unusableWakewords = rejectedWakewords(config.trigger.wakewords, config.trigger.wakewordMinLength);
 if (unusableWakewords.length) log.event({ level: 'warn', kind: 'config.invalid', summary: `${unusableWakewords.length} 条唤醒词不会生效`, data: { rejected: unusableWakewords } });

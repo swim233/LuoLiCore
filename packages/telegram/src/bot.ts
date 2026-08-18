@@ -1,16 +1,16 @@
 import { Bot } from 'grammy';
 import { autoRetry } from '@grammyjs/auto-retry';
 import { apiThrottler } from '@grammyjs/transformer-throttler';
-import type { UserFromGetMe } from 'grammy/types';
+import type { Message, UserFromGetMe } from 'grammy/types';
 import type { Config, ConfigStore, ContextEngine, LogSink, MainAgentStreamResult, MemoryStore, QuotaGuard, QuotaReservation, TurnConcurrency, TurnRegistry } from '@luoli/core';
 import { KeyedMutex, perChatConfig, resolveEffectiveRole } from '@luoli/core';
-import type { ArchivedMessage, ArchiveRepository, OperationsRepository, PrincipalRepository, Sqlite, TurnRepository } from '@luoli/db';
+import type { ArchivedMessage, ArchiveRepository, OperationsRepository, PrincipalRepository, ScopedArchiveRepository, Sqlite, TurnRepository } from '@luoli/db';
 import type { Role, RuntimeTurnContext } from '@luoli/shared';
-import { roleRank } from '@luoli/shared';
+import { parsePrincipal, roleRank } from '@luoli/shared';
 import { contextKey, modelAliasKey, readAppKv, writeAppKv } from '@luoli/db';
 import { matchTrigger } from './trigger.js';
 import { capMentions, holdReply, sendWithFallback, splitTelegramText } from './output.js';
-import { attachMedia, messageKind, resolveQuotedMessage } from './reply.js';
+import { archiveQuotedMessage, attachMedia, messageKind } from './reply.js';
 import { TelegramOutput } from './stream-output.js';
 
 export interface TelegramDependencies {
@@ -111,6 +111,11 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
     const from = ctx.from;
     const chat = ctx.chat;
     const message = ctx.message;
+    // 归档在锁内、挂媒体在锁外。前者定的是上下文顺序（`messages.id` 序），后者会去解析用户上传的
+    // 文件 —— 一个畸形 PDF 挂在锁里就是「这个会话之后的每条消息既不归档也不触发，日志里连一条
+    // turn.start 都没有」，而挂住不算抛错、`bot.catch` 也不会说话（docs/27 · R-01）。
+    const pending: Array<{ payload: Message; row: ArchivedMessage }> = [];
+    let scopedArchive: ScopedArchiveRepository | null = null;
     const admitted = await ingressOrder.run(chat ? String(chat.id) : 'global', async (): Promise<TelegramIngress | null> => {
       if (!dependencies.operations.claimUpdate(ctx.update.update_id)) return null;
       if (!from || !chat || !message) { await next(); return null; }
@@ -137,6 +142,7 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
       let quoted: ArchivedMessage | null = null;
       if (effectiveRole !== 'blocked' || config.access.archiveBlocked) {
         const scoped = dependencies.archive.scope(chatId, message.message_thread_id ?? null);
+        scopedArchive = scoped;
         archived = scoped.append({ chatId, messageThreadId: message.message_thread_id ?? null, tgMessageId: message.message_id,
           tgUpdateId: ctx.update.update_id, direction: 'in', fromKind: 'user', fromUserId: userId,
           fromName: [from.first_name, from.last_name].filter(Boolean).join(' '), fromUsername: from.username ?? null,
@@ -145,8 +151,11 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
           // 丢了它，事后无论从库里还是从上下文里都看不出用户当时在指着哪一条说话。
           replyToTgMessageId: message.reply_to_message?.message_id ?? null, mediaGroupId: message.media_group_id ?? null,
           tgDate: message.date * 1000, raw: message, triggered: triggerReason !== null, triggerReason });
-        await attachMedia(media, scoped, message, archived);
-        if (triggerReason !== null && triggerReason !== 'command') quoted = await resolveQuotedMessage({ media, botId: bot.botInfo.id }, scoped, message, archived);
+        pending.push({ payload: message, row: archived });
+        if (triggerReason !== null && triggerReason !== 'command') {
+          const found = archiveQuotedMessage(bot.botInfo.id, scoped, message, archived);
+          if (found) { quoted = found.row; pending.push(found); }
+        }
       }
       if (effectiveRole === 'blocked') {
         dependencies.log.event({ level: 'info', kind: 'access.denied', summary: 'blocked principal', chatId, userId, data: { userRole, chatRole: storedChatRole } });
@@ -155,6 +164,9 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
       if (!archived) return null;
       return { archived, quoted, effectiveRole, userId, chatId, isPrivate, triggerReason };
     });
+    // 锁外：`blocked` 主体（`archiveBlocked` 打开时也归档）同样要补媒体，所以这一步先于 `admitted` 判定。
+    // 仍在 `next()` 之前 —— openTurn 物化快照时 parts 必须已经挂上。
+    if (scopedArchive) for (const item of pending) await attachMedia(media, scopedArchive, item.payload, item.row);
     if (!admitted) return;
     ingress.set(ctx.update.update_id, admitted);
     try { await next(); } finally { ingress.delete(ctx.update.update_id); }
@@ -202,13 +214,11 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
   });
   bot.command('whois', async (ctx) => {
     if (!await requireRole(ctx.update.update_id, 'owner', (text) => ctx.reply(text))) return;
-    const raw = ctx.match.trim();
-    if (!raw) { await ctx.reply('用法：/whois <id>，或 /whois <user|chat> <id>'); return; }
-    const [first, second] = raw.split(/\s+/);
-    const kinds = second && ['user', 'chat'].includes(first!) ? [first as 'user' | 'chat'] : ['user', 'chat'] as const;
-    const id = second ?? first!;
-    const found = kinds.map((kind) => ({ kind, role: dependencies.principals.roleOf(kind, id) })).filter((entry) => entry.role !== null);
-    await ctx.reply(found.length ? found.map((entry) => `${entry.kind}:${id} = ${entry.role}`).join('\n') : `没有 ${id} 的记录（未见过的主体按默认角色处理）。`);
+    const parsed = parsePrincipal(ctx.match);
+    if (!parsed) { await ctx.reply('用法：/whois <id>，或 /whois <user|chat> <id> —— id 必须是 Telegram 数字 id。'); return; }
+    const kinds = parsed.kind ? [parsed.kind] : ['user', 'chat'] as const;
+    const found = kinds.map((kind) => ({ kind, role: dependencies.principals.roleOf(kind, parsed.tgId) })).filter((entry) => entry.role !== null);
+    await ctx.reply(found.length ? found.map((entry) => `${entry.kind}:${parsed.tgId} = ${entry.role}`).join('\n') : `没有 ${parsed.tgId} 的记录（未见过的主体按默认角色处理）。`);
   });
   bot.command('ping', async (ctx) => {
     const access = await requireRole(ctx.update.update_id, 'limited', (text) => ctx.reply(text));
@@ -288,17 +298,25 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
   });
   bot.command('grant', async (ctx) => {
     if (!await requireRole(ctx.update.update_id, 'owner', (text) => ctx.reply(text))) return;
-    const [kind, id, role] = ctx.match.trim().split(/\s+/);
-    if (!kind || !id || !['owner', 'trusted', 'limited', 'blocked'].includes(role ?? '') || !['user', 'chat'].includes(kind)) { await ctx.reply('用法：/grant <user|chat> <id> <role>'); return; }
-    dependencies.principals.upsertSeen({ id: `${kind}:${id}`, kind: kind as 'user' | 'chat', tgId: id, role: role as 'owner' | 'trusted' | 'limited' | 'blocked', displayName: null, username: null, chatType: null }, `command:${ctx.from?.id}`);
-    dependencies.principals.setRole(`${kind}:${id}`, role as 'owner' | 'trusted' | 'limited' | 'blocked', `command:${ctx.from?.id}`);
-    await ctx.reply(`已设置 ${kind}:${id} = ${role}`);
+    const parts = ctx.match.trim().split(/\s+/).filter(Boolean);
+    const role = parts.at(-1) ?? '';
+    // 主体串交给 `parsePrincipal`：此前 `/grant user @alice owner` 一路通过，写出一条
+    // `tg_id='@alice'` 的主体行 —— 永远匹配不到任何消息，命令还回「已设置」（docs/27 · C-05）。
+    const parsed = parts.length >= 2 ? parsePrincipal(parts.slice(0, -1).join(' ')) : null;
+    if (!parsed?.kind || !['owner', 'trusted', 'limited', 'blocked'].includes(role)) { await ctx.reply('用法：/grant <user|chat> <id> <role> —— id 必须是 Telegram 数字 id（群/频道为负数）。'); return; }
+    dependencies.principals.upsertSeen({ id: parsed.id, kind: parsed.kind, tgId: parsed.tgId, role: role as Role, displayName: null, username: null, chatType: null }, `command:${ctx.from?.id}`);
+    dependencies.principals.setRole(parsed.id, role as Role, `command:${ctx.from?.id}`);
+    await ctx.reply(`已设置 ${parsed.id} = ${role}`);
   });
   bot.command('revoke', async (ctx) => {
     if (!await requireRole(ctx.update.update_id, 'owner', (text) => ctx.reply(text))) return;
-    const id = ctx.match.trim();
-    const changed = dependencies.principals.setRole(id, 'blocked', `command:${ctx.from?.id}`);
-    await ctx.reply(changed ? `已撤销 ${id}` : '主体不存在。');
+    const parsed = parsePrincipal(ctx.match);
+    if (!parsed) { await ctx.reply('用法：/revoke <user|chat> <id>，或 /revoke <id>（两种主体都试）。'); return; }
+    // 裸 id 两种主体都试。`/grant` 收的是 `<kind> <id>`，而这里此前只收完整主体 id ——
+    // 于是 `/revoke 123456`（owner 最可能敲的写法）静默无效，只回一句「主体不存在」。
+    const targets = parsed.kind ? [parsed.id] : [`user:${parsed.tgId}`, `chat:${parsed.tgId}`];
+    const revoked = targets.filter((id) => dependencies.principals.setRole(id, 'blocked', `command:${ctx.from?.id}`));
+    await ctx.reply(revoked.length ? `已撤销 ${revoked.join('、')}` : '主体不存在。');
   });
   bot.command('memory', async (ctx) => {
     const access = await requireRole(ctx.update.update_id, 'limited', (text) => ctx.reply(text));
@@ -388,7 +406,13 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
       }
       triggerCooldown.set(userId, receivedAt);
       // 有界：一个群里换一批人说话就是一批新键，不清的话这张表只涨不落。
-      if (triggerCooldown.size > 4096) for (const [key, at] of triggerCooldown) { if (receivedAt - at >= cooldownMs) triggerCooldown.delete(key); }
+      // 只删过期项**挡不住上界**：`cooldownMsPerUser` 较大时，短时间内超过 4096 个不同发言人
+      // 一个都不过期，这张表照样越过上界继续涨（docs/27 · R-07）。所以清完还超的话按插入序
+      // （Map 的迭代序）再淘汰最旧的那些 —— 它们本来也是最接近过期的。
+      if (triggerCooldown.size > 4096) {
+        for (const [key, at] of triggerCooldown) if (receivedAt - at >= cooldownMs) triggerCooldown.delete(key);
+        while (triggerCooldown.size > 4096) triggerCooldown.delete(triggerCooldown.keys().next().value!);
+      }
     }
     // `concurrency.coalesceSameUserMs`：同一个人在窗口内连着说，只为**最后一条**开轮次。
     // 先到的那几条降级成背景消息 —— 它们的正文照样进这一轮的上下文（`claimBackground` 认领），
@@ -415,8 +439,11 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
         return;
       }
     }
+    // `inFlight` 走进程内的注册表而不是 `turns` 表：从这里到 `registry.register` 之间**没有 await**，
+    // 所以这个判据是真的能挡住同一个人两条并发消息的（docs/27 · R-04）。
     if (!dependencies.quota.canStart({ chatId, userId, turnsPerUserPerHour: config.quota.rateLimit.turnsPerUserPerHour,
-      turnsPerChatPerHour: config.quota.rateLimit.turnsPerChatPerHour, concurrentPerUser: config.quota.rateLimit.concurrentPerUser })) {
+      turnsPerChatPerHour: config.quota.rateLimit.turnsPerChatPerHour, concurrentPerUser: config.quota.rateLimit.concurrentPerUser,
+      inFlight: dependencies.registry.countForUser(userId) })) {
       // 判成触发却没人开轮次的消息必须降级成背景（同 `cooldownMsPerUser` 那一路，docs/20 · W-TG-05）：
       // `claimBackground` 只认领 `triggered=0`，留着 1 的话这条消息既没被回答、也进不了下一轮的上下文。
       dependencies.archive.scope(chatId, message.message_thread_id ?? null).demoteToBackground(archived.id);

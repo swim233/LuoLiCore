@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readdirSync, statSync } from 'node:fs';
 import { userInfo } from 'node:os';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import type { Role } from '@luoli/shared';
+import { elideMiddleBytes } from '@luoli/shared';
 
 /** 本进程是否跑在容器里。docker 和 podman 各自留的标记文件。 */
 function detectContainer(): boolean {
@@ -65,12 +66,10 @@ export interface SandboxResult {
   oom: boolean;
 }
 
+/** 按字节算预算、按字符边界切，且结果真的不超过 `max`（docs/27 · T-04：此前那个按比例估的
+ *  码点数会算出一个超预算的结果）。与工具输出归一化共用同一份实现。 */
 function clipped(buffer: string, max: number): { value: string; truncated: boolean } {
-  if (Buffer.byteLength(buffer) <= max) return { value: buffer, truncated: false };
-  const chars = [...buffer];
-  const half = Math.max(1, Math.floor(chars.length * (max / Buffer.byteLength(buffer)) / 2));
-  const omitted = Buffer.byteLength(buffer) - max;
-  return { value: `${chars.slice(0, half).join('')}\n…省略 ${omitted} bytes…\n${chars.slice(-half).join('')}`, truncated: true };
+  return elideMiddleBytes(buffer, max, (omitted) => `\n…省略 ${omitted} bytes…\n`);
 }
 
 export class Sandbox {
@@ -204,7 +203,10 @@ export class Sandbox {
     const dockerArgs = ['run', '--rm', '--name', name, `--network=${this.#cfg().network}`, `--memory=${this.#cfg().memoryMb}m`, `--memory-swap=${this.#cfg().memoryMb}m`, `--cpus=${this.#cfg().cpus}`, `--pids-limit=${this.#cfg().pidsLimit}`, '--cap-drop=ALL', '--security-opt=no-new-privileges', '--user=1000:1000', `--tmpfs=/tmp:rw,size=${this.#cfg().tmpfsMb}m,noexec`, '-v', `${mounted}:/workspace:rw`, '-w', '/workspace', '-e', 'HOME=/workspace', '-e', 'LANG=C.UTF-8'];
     if (this.#cfg().readOnlyRoot) dockerArgs.push('--read-only');
     dockerArgs.push(this.#cfg().image, 'timeout', '-s', 'KILL', String(Math.ceil(timeout / 1000)), 'sh', '-c', command);
-    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => ['PATH', 'LANG', 'TZ'].includes(key) && !/(TOKEN|KEY|SECRET|LUOLI|BOT_TOKEN)/i.test(key)));
+    // 子进程 env 白名单：只这三个字面量。此前后面还接着 `&& !/(TOKEN|KEY|SECRET|LUOLI)/i.test(key)`
+    // —— 前半段已经把 key 限死了，后半段恒为真（docs/27 · T-03）。白名单本身就是那道闸；
+    // 真要让它可配，那时再把过滤加回来。
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => ['PATH', 'LANG', 'TZ'].includes(key)));
     const child = plan.mode === 'docker'
       ? spawn(this.#cfg().dockerBin, dockerArgs, { stdio: ['ignore', 'pipe', 'pipe'] })
       : spawn('/bin/sh', ['-c', plan.mode === 'jail' ? this.#jailed(command, timeout) : command], { cwd: workspace, env: { ...env, HOME: workspace }, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });

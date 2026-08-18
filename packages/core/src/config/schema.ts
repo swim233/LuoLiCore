@@ -1,5 +1,6 @@
 import { z } from 'zod';
-import { roleRank } from '@luoli/shared';
+import { roleRank, TG_ID_PATTERN } from '@luoli/shared';
+import { checkApprovalPattern } from '../approval/rules.js';
 
 const role = z.enum(['owner', 'trusted', 'limited', 'blocked']);
 const nullableMoney = z.number().nonnegative().nullable();
@@ -29,12 +30,10 @@ const approvalRuleSchema = z.object({
   risk: z.enum(['low', 'medium', 'high']).optional(),
 }).strict().superRefine((rule, ctx) => {
   if (rule.pattern === undefined) return;
-  // 与 `compilePattern`（approval/rules.ts）同一套解析：`(?i)` 前缀 + JS 正则。
-  const insensitive = rule.pattern.startsWith('(?i)');
-  try { new RegExp(insensitive ? rule.pattern.slice(4) : rule.pattern, insensitive ? 'i' : undefined); }
-  catch (error) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['pattern'], message: `不是合法正则，这条规则在运行时永不命中：${error instanceof Error ? error.message : String(error)}` });
-  }
+  // 与 `compilePattern`（approval/rules.ts）同一份实现：RE2 + 128 字符上界。能编译但会指数回溯的
+  // 模式此前照样收 —— 而求值对象是模型给的工具参数，一次回溯卡死的是整个单线程进程（docs/27 · S-03）。
+  const checked = checkApprovalPattern(rule.pattern);
+  if (!checked.ok) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['pattern'], message: `这条规则在运行时永不命中：${checked.reason}` });
 });
 /** 拼错的时区只在群聊分支炸（私聊不走 Intl），漏到运行时会让整个群会话开不了轮次。 */
 const ianaTimezone = z.string().refine((zone) => {
@@ -145,6 +144,28 @@ export const KNOWN_UNIMPLEMENTED_CONFIG_KEYS = [
 
 
 
+/**
+ * `perChat.<key>.…` 能覆盖哪些路径。**这是一条安全边界**（docs/11 §2.1）：绕过它可以给单个会话
+ * 关掉权限检查，所以 WebUI 的写端点必须走 `runtimeConfigSchema.safeParse(mergeDotted(...))`。
+ *
+ * 导出出来是为了让 `tests/config.test.ts` 也能量它。`perChat` 是 `z.record(z.unknown())`，
+ * 所以白名单里的路径**不是** schema 叶子键 —— 「每个叶子要么被引用、要么进 KNOWN_UNIMPLEMENTED」
+ * 那条断言看不见它们，而 `character` 就这么在里面躺过一轮：能存进 `config_kv`、能过校验、
+ * `perChatConfig` 也会把它合进本轮配置，但没有任何代码读它（docs/27 · C-08）。
+ */
+export const PER_CHAT_OVERRIDE_ALLOWLIST = [
+  /^output\./, /^context\.(limit|background|active)\./, /^context\.scope$/, /^trigger\./, /^agent\.main\./, /^character$/, /^memory\.pubWriteMinRole$/,
+] as const;
+/**
+ * 白名单里**不对应任何 schema 叶子**的键。每一条都必须真的被代码读到（`tests/config.test.ts`
+ * 逐条断言），否则就是一个「存得下、过得了校验、什么都不做」的假格子。
+ *
+ * `character`：会话级人格文件名，由 `assembleMainPrompt` 读出来交给
+ * `PromptDocuments.paths(userId, characterOverride)`。它会被当成 `memory/` 下的路径段用，
+ * 所以那边有一道文件名形态闸（同 `S-08` 的教训）。
+ */
+export const PER_CHAT_NON_SCHEMA_KEYS = ['character'] as const;
+
 export const configSchema = z.object({
   general: z.object({
     name: z.string().default('洛璃'),
@@ -168,7 +189,15 @@ export const configSchema = z.object({
     defaultUserRole: role.default('blocked'),
     defaultChatRole: role.default('blocked'),
     archiveBlocked: z.boolean().default(false),
-    bootstrapOwnerId: z.string().default(''),
+    /**
+     * **形态要校验。** 这个值（来自 `LUOLI_OWNER_ID`，自由字符串环境变量）会被直接当成路径段用：
+     * `memory/private/<id>/PRIMEMORY.md`（`memory/store.ts`、`prompt/documents.ts`），
+     * 定时任务的 `createdBy` 也走这条路 —— `LUOLI_OWNER_ID=../../etc` 会让私有记忆落到目录外
+     * （自伤，但此前没有任何一道闸，docs/27 · S-08）。判据与 `TG_ID_PATTERN` 同一套：
+     * Telegram 数字 id。空串照旧放行（`loadConfig` 另有 requireOwner 那条更清楚的报错）。
+     */
+    bootstrapOwnerId: z.string().refine((value) => value === '' || TG_ID_PATTERN.test(value),
+      { message: '必须是 Telegram 数字 id（它会被当成私有记忆的目录名用）' }).default(''),
   }).default({}),
   trigger: z.object({
     private: z.boolean().default(true), mention: z.boolean().default(true), reply: z.boolean().default(true), command: z.boolean().default(true),
@@ -232,6 +261,24 @@ export const configSchema = z.object({
   schedule: z.object({ enabled: z.boolean().default(true), maxPerChat: z.number().int().positive().max(200).default(20),
     minIntervalMinutes: z.number().int().positive().default(5), maxPayloadChars: z.number().int().positive().max(20_000).default(2000),
     retentionDays: z.number().int().nonnegative().default(30) }).default({}),
+  /**
+   * 维护任务的保留期。`MaintenanceService.cleanup()` 此前只清 `log_events` / `processed_updates` /
+   * `sessions` / `approvals` / 子 agent 结果 / `scheduled_jobs`，而 `usage_ledger` /
+   * `config_revisions` / `memory_revisions` / `quota_counters` 只涨不落 —— 读端点都有 LIMIT，
+   * 所以症状不是慢查询而是**库文件只涨不落**，且 `VACUUM` 帮不上（数据还在，docs/27 · R-05）。
+   *
+   * 这里只给这四张**派生数据**表定保留期。`turns` 与 `tasks` 刻意不在其列：它们是 trace 的骨架
+   * （`/api/turns/:id/detail` 靠 turn 行把日志、用量与上下文串起来），删掉等于历史轮次凭空消失
+   * —— 那是 docs/14 §2 Q9 的未决问题，替需求方决定不合适。**每一项 0 = 不清。**
+   */
+  maintenance: z.object({
+    retention: z.object({
+      usageDays: z.number().int().nonnegative().default(400),
+      quotaCounterDays: z.number().int().nonnegative().default(400),
+      configRevisionDays: z.number().int().nonnegative().default(180),
+      memoryRevisionDays: z.number().int().nonnegative().default(180),
+    }).default({}),
+  }).default({}),
   db: z.object({ path: z.string().default('./data/luoli.db'), backupKeep: z.number().int().nonnegative().default(5), vacuumCron: z.string().default('0 5 * * 0'), ftsTokenizer: z.enum(['trigram', 'unicode61']).default('trigram') }).default({}),
   logs: z.object({ level: z.enum(['debug', 'info', 'warn', 'error']).default('info'), dir: z.string().default('./logs'), captureBodies: z.boolean().default(true), bodyMaxBytes: z.number().int().positive().default(262_144), maxFileMb: z.number().positive().default(128), retentionDays: z.number().int().nonnegative().default(30), gzipAfterDays: z.number().int().nonnegative().default(3), console: z.enum(['pretty', 'json', 'off']).default('pretty'), redactPatterns: z.array(z.string()).default([]) }).default({}),
   quota: z.object({ enabled: z.boolean().default(true), requirePricing: z.boolean().default(true), minReserveUsd: z.number().nonnegative().default(0.02), global: z.object({ daily: nullableMoney.default(5), monthly: nullableMoney.default(100) }).default({}), perChat: z.object({ daily: nullableMoney.default(1), monthly: nullableMoney.default(null) }).default({}), perUser: z.object({ daily: nullableMoney.default(0.5), monthly: nullableMoney.default(null), byRole: z.record(z.object({ daily: nullableMoney.optional(), monthly: nullableMoney.optional() })).default({}) }).default({}), // perTurn 只留真正生效的两项。maxToolCalls / maxSubagents / maxDurationMs 已摘除：
@@ -245,11 +292,10 @@ export const configSchema = z.object({
   if (cfg.concurrency.perKey > cfg.concurrency.global) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['concurrency', 'perKey'], message: 'perKey must be <= global' });
   if (cfg.memory.softLimitTokens >= cfg.memory.hardLimitTokens) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['memory', 'softLimitTokens'], message: 'softLimitTokens must be < hardLimitTokens' });
   if (cfg.webui.host !== '127.0.0.1' && cfg.webui.host !== '::1' && !cfg.webui.passwordHash) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['webui', 'passwordHash'], message: 'password is required when binding beyond loopback' });
-  const allowed = [/^output\./, /^context\.(limit|background|active)\./, /^context\.scope$/, /^trigger\./, /^agent\.main\./, /^character$/, /^memory\.pubWriteMinRole$/];
   for (const [key, value] of Object.entries(cfg.perChat)) {
     const walk = (node: unknown, prefix = ''): void => {
       if (!node || typeof node !== 'object' || Array.isArray(node)) {
-        if (!allowed.some((pattern) => pattern.test(prefix))) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['perChat', key, ...prefix.split('.')], message: 'path is not in perChat override allowlist' });
+        if (!PER_CHAT_OVERRIDE_ALLOWLIST.some((pattern) => pattern.test(prefix))) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['perChat', key, ...prefix.split('.')], message: 'path is not in perChat override allowlist' });
         return;
       }
       for (const [part, child] of Object.entries(node)) walk(child, prefix ? `${prefix}.${part}` : part);

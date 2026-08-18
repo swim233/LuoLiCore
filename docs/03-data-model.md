@@ -634,7 +634,11 @@ Telegram 消息号，从这个高位段按会话取 `MAX+1`。别在这个区间
 | `context_messages` | 永久 | 不清理（裁剪只移窗口） |
 | `log_events` | `logs.retentionDays` = 30 | 按 ts 删除 + `logs/` 目录同期归档删除 |
 | `logs/*.jsonl` | 同上 | 超期文件删除；可选先 gzip |
-| `usage_ledger` | 400 天 | 超期先聚合进 `usage_daily`（可选表）再删 |
+| `usage_ledger` | `maintenance.retention.usageDays` = 400 | 按 ts 直接删。**`usage_daily` 聚合表没有实现**，所以超期就是没有了 —— 要长期账目请在保留期内导出（docs/27 · R-05） |
+| `quota_counters` | `maintenance.retention.quotaCounterDays` = 400 | 按 `updated_at` 删过期账期的行；当前账期每轮都在更新，落不进保留期之外 |
+| `config_revisions` | `maintenance.retention.configRevisionDays` = 180 | 按 ts 删。删的是审计记录，不影响当前配置（`config_kv` 不动） |
+| `memory_revisions` | `maintenance.retention.memoryRevisionDays` = 180 | 按 ts 删。删掉之后回滚不到比它更早的版本 |
+| `turns` / `tasks` | 永久 | **刻意不给保留期**：它们是 trace 的骨架（`/api/turns/:id/detail` 靠 turn 行把日志、用量与上下文串起来），删掉等于历史轮次凭空消失。自动过期属 [14 §2 Q9](./14-open-questions.md) 的未决问题 |
 | `processed_updates` | 7 天 | 定期删 |
 | `sessions` | 过期即删 | 每小时 |
 | `approvals` | 90 天 | pending 超 `expires_at` 标 `expired` |
@@ -643,3 +647,7 @@ Telegram 消息号，从这个高位段按会话取 `MAX+1`。别在这个区间
 | `data/cache/models.dev.json` | 永久 | 纯派生数据，删掉即可（下次拉取模型时自动重下）。年龄记在 `app_kv` 的 `catalog:models.dev`，超 `provider.catalog.ttlHours` 时用 ETag 条件请求续期 |
 
 清理任务在 `general.maintenanceCron`（默认每日 04:00 本地时间）执行，并在完成后 `PRAGMA wal_checkpoint(TRUNCATE)` + 每周一次 `VACUUM`。
+
+**`maintenance.retention.*` 的每一项 0 = 不清**（缺省同样不清）。默认沉默地删数据比不删危险得多 ——
+而这四张表此前一条保留策略都没有：读端点都有 LIMIT，所以症状不是慢查询而是**库文件只涨不落**，
+且 `VACUUM` 帮不上（数据还在，docs/27 · R-05）。

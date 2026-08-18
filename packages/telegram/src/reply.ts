@@ -15,6 +15,11 @@ export function displayName(from: Message['from']): string | null {
   return from ? [from.first_name, from.last_name].filter(Boolean).join(' ') || (from.username ? `@${from.username}` : null) : null;
 }
 
+/**
+ * 挂媒体是**幂等的补写**：归档行已经落库，这一步只是把 parts 补上去。调用方据此把它放在
+ * 按 chat 串行的入口锁**外面** —— 它会调 pdf-parse / mammoth / sharp 解析用户上传的文件，
+ * 挂在锁里等于一个畸形 PDF 就能让那个会话之后的每条消息都不再归档（docs/27 · R-01）。
+ */
 export async function attachMedia(media: MediaProcessor, scoped: ScopedArchiveRepository, payload: Message, row: ArchivedMessage): Promise<void> {
   if (row.mediaParts?.length) return;
   const parts = await media.process(payload as unknown as Record<string, unknown>, row);
@@ -37,12 +42,29 @@ export async function resolveQuotedMessage(
   message: Message,
   trigger: ArchivedMessage,
 ): Promise<ArchivedMessage | null> {
+  const found = archiveQuotedMessage(dependencies.botId, scoped, message, trigger);
+  if (!found) return null;
+  await attachMedia(dependencies.media, scoped, found.payload, found.row);
+  return found.row;
+}
+
+/**
+ * 上面那件事的**同步一半**：归档行落库（含把被回复者的名字挂到触发消息上），不下载媒体。
+ * 拆开只为一件事 —— 归档顺序必须在入口锁内（`messages.id` 序就是上下文序），而下载/解析必须
+ * 在锁外（docs/27 · R-01）。`resolveQuotedMessage` 是这两半的组合，两条路径共用同一份实现。
+ */
+export function archiveQuotedMessage(
+  botId: number,
+  scoped: ScopedArchiveRepository,
+  message: Message,
+  trigger: ArchivedMessage,
+): { row: ArchivedMessage; payload: Message } | null {
   const replied = message.reply_to_message;
   // 跨会话引用（关联频道、external_reply）不属于这个 context key，拉进来只会污染上下文。
   if (!replied || replied.chat.id !== message.chat.id) return null;
   const repliedName = displayName(replied.from);
   if (repliedName) trigger.replyToName = repliedName;
-  const isBot = replied.from?.id === dependencies.botId;
+  const isBot = replied.from?.id === botId;
   const row = scoped.byTgMessageId(replied.message_id) ?? scoped.append({
     chatId: String(replied.chat.id), messageThreadId: replied.message_thread_id ?? null, tgMessageId: replied.message_id,
     tgUpdateId: null, direction: isBot ? 'out' : 'in', fromKind: isBot ? 'bot' : 'user',
@@ -54,6 +76,5 @@ export async function resolveQuotedMessage(
     // 本轮就把它送进上下文了；不标成已消费的话，下一轮 claimBackground 会把它当新的背景发言再认领一次。
     claimed: true,
   });
-  await attachMedia(dependencies.media, scoped, replied, row);
-  return row;
+  return { row, payload: replied };
 }

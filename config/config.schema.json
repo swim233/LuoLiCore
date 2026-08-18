@@ -1613,6 +1613,45 @@
           "default": {},
           "description": "定时任务：模型自己用 schedule_create 排的周期/一次性任务。触发时按 mode 起一轮完整对话（agent）或只发一句预写文本（notify），产出照常进这个会话的上下文。"
         },
+        "maintenance": {
+          "type": "object",
+          "properties": {
+            "retention": {
+              "type": "object",
+              "properties": {
+                "usageDays": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "default": 400,
+                  "description": "usage_ledger（每次模型调用一行）保留多少天。0 = 不清。这张表只涨不落，而 VACUUM 帮不上——数据还在。需重启：启动时交给 MaintenanceService。"
+                },
+                "quotaCounterDays": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "default": 400,
+                  "description": "quota_counters 里过期账期的行保留多少天（每个 scope×subject×窗口×账期一行，跨天跨月只增）。0 = 不清。当前账期的行永远不会被删。需重启。"
+                },
+                "configRevisionDays": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "default": 180,
+                  "description": "config_revisions（配置变更历史）保留多少天。0 = 不清。删掉的是审计记录，不影响当前配置。需重启。"
+                },
+                "memoryRevisionDays": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "default": 180,
+                  "description": "memory_revisions（记忆/提示词文档的完整 diff）保留多少天。0 = 不清。删掉之后回滚不到比它更早的版本。需重启。"
+                }
+              },
+              "additionalProperties": false,
+              "default": {}
+            }
+          },
+          "additionalProperties": false,
+          "default": {},
+          "description": "维护任务清理派生数据的保留期。每日 general.maintenanceCron 触发时按这几项删行。"
+        },
         "db": {
           "type": "object",
           "properties": {
@@ -1940,7 +1979,7 @@
               "minimum": 1,
               "maximum": 16,
               "default": 1,
-              "description": "反代自己追加的跳数。X-Forwarded-For 按这个数**从右往左**取 —— 取最左那一跳等于让客户端自己声明自己是谁。直连或 trustProxy 关着时读 X-Real-IP，再没有就记为 direct。"
+              "description": "反代自己追加的跳数。X-Forwarded-For 按这个数**从右往左**取 —— 取最左那一跳等于让客户端自己声明自己是谁。trustProxy 关着时一个请求头都不看，只认连接的远端地址（拿不到就记为 local）。"
             },
             "allowOrigins": {
               "type": "array",

@@ -13,6 +13,12 @@ interface PromptPaths {
   privateMemory: string;
 }
 
+/** 纯文件名、`.md` 结尾、不含路径分隔符与 `..`。不合格返回 null（调用方退回全局那份）。 */
+const CHARACTER_FILE = /^[\w.-]{1,96}\.md$/;
+function safeCharacterName(value: unknown): string | null {
+  return typeof value === 'string' && CHARACTER_FILE.test(value) && !value.includes('..') ? value : null;
+}
+
 export class PromptDocuments {
   constructor(private readonly db: Sqlite, private readonly directory: string) {}
   ensure(): void {
@@ -28,9 +34,16 @@ export class PromptDocuments {
     }
   }
 
+  /**
+   * @param characterOverride `perChat.<key>.character`：会话级人格文件名（`memory/` 下的相对
+   *   文件名，不含目录）。这是**用户可配的自由字符串会被当成路径段用**的地方，与 `S-08` 同一类：
+   *   `../../etc/passwd` 会让人格块读到目录外。所以只放行「纯文件名 + .md」，其余一律退回
+   *   `CHARACTER.md` —— 静默退回而不是抛错：一个拼错的文件名不该让整个会话开不了轮次，
+   *   而人格块用回全局那份是安全的默认（docs/27 · C-08）。
+   */
   paths(userId: string, characterOverride?: string): PromptPaths {
     return {
-      character: resolve(this.directory, characterOverride ?? 'CHARACTER.md'),
+      character: resolve(this.directory, safeCharacterName(characterOverride) ?? 'CHARACTER.md'),
       assist: resolve(this.directory, 'ASSIST.md'),
       publicMemory: resolve(this.directory, 'PUBMEMORY.md'),
       privateMemory: resolve(this.directory, 'private', userId, 'PRIMEMORY.md'),

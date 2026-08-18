@@ -71,11 +71,21 @@ export function retryDelay(attempt: number, retryAfterMs: number | null, baseMs:
   return Math.min(baseMs * 2 ** attempt * (0.8 + jitter * 0.4), maxMs);
 }
 
-/** 退避必须可中断：轮次被取消或整轮超时之后还躺在 setTimeout 里，等于替一个没人等的轮次占着槽位。 */
+/**
+ * 退避必须可中断：轮次被取消或整轮超时之后还躺在 setTimeout 里，等于替一个没人等的轮次占着槽位。
+ *
+ * **监听器要摘。** `{ once: true }` 只在真的 abort 时自摘，而正常退避走完（绝大多数情况）监听器
+ * 会留在**轮次**那个信号上 —— 一轮里几十次重试就是几十个永不触发的监听器，直到轮次结束
+ * （docs/27 · R-07）。同 `net/outbound.ts` 的 `abortable`。
+ */
 export async function abortablePause(ms: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('aborted');
-  await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(resolve, ms);
-    signal?.addEventListener('abort', () => { clearTimeout(timer); reject(signal.reason instanceof Error ? signal.reason : new Error('aborted')); }, { once: true });
-  });
+  let onAbort: (() => void) | undefined;
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(resolve, ms);
+      onAbort = (): void => { clearTimeout(timer); reject(signal!.reason instanceof Error ? signal!.reason : new Error('aborted')); };
+      signal?.addEventListener('abort', onAbort, { once: true });
+    });
+  } finally { if (onAbort) signal?.removeEventListener('abort', onAbort); }
 }

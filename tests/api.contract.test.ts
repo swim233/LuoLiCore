@@ -55,10 +55,10 @@ describe('documented API surface', () => {
   it('carries attachment metadata on message rows and only inlines raster images', async () => {
     const { app, db, headers } = harness();
     const cookie = { cookie: headers.cookie };
-    mkdirSync('./data/attachment-test', { recursive: true });
-    const png = './data/attachment-test/shot.png';
+    mkdirSync('./data/files/attachment-test', { recursive: true });
+    const png = './data/files/attachment-test/shot.png';
     writeFileSync(png, Buffer.from('89504e470d0a1a0a', 'hex'));
-    const svg = './data/attachment-test/logo.svg';
+    const svg = './data/files/attachment-test/logo.svg';
     writeFileSync(svg, '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>');
     const message = new ArchiveRepository(db).scope('chat').append({ chatId: 'chat', messageThreadId: null, tgMessageId: 7, direction: 'in', fromKind: 'user',
       fromUserId: 'user', fromName: 'User', fromUsername: null, kind: 'photo', text: null, tgDate: Date.now(), raw: {}, triggered: false, triggerReason: null });
@@ -79,7 +79,7 @@ describe('documented API surface', () => {
     // SVG 能带脚本：同源内联它等于把用户上传的内容变成本站脚本，白名单外一律照旧当附件下载。
     expect((await app.request('/api/files/att-svg?inline=1', { headers: cookie })).headers.get('content-disposition')).toContain('attachment');
     expect((await app.request('/api/files/missing', { headers: cookie })).status).toBe(404);
-    rmSync('./data/attachment-test', { recursive: true, force: true });
+    rmSync('./data/files/attachment-test', { recursive: true, force: true });
     closeDatabase(db);
   });
 

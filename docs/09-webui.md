@@ -39,10 +39,21 @@ webui:
 - `POST /api/auth/login {password}` → 校验 → 生成 32 字节随机 session id → 写 `sessions` 表 → `Set-Cookie: luoli_sid=…; HttpOnly; SameSite=Lax; Path=/; Secure(当 https)`。
 - 同时返回 `csrf` token（存 `sessions.csrf`）；前端放内存，所有非 GET 请求带 `X-CSRF-Token`。
 - 失败限流：同 IP 连续失败 `webui.loginRateLimit.attempts` 次 → 锁 `windowMinutes` 分钟（内存计数 + 日志 `warn`）。
-  IP 取自 `X-Forwarded-For` 按 `webui.trustedProxyHops` **从右往左**数的那一跳（最左一跳由客户端自己填，
-  取它等于没有限速）；`trustProxy: false` 时读 `X-Real-IP`，都没有则记为 `direct`。单 IP 桶之外还有一个
-  全局失败窗口，触发后所有登录请求先延迟 250ms 再校验 —— 换 IP 绕过要付出代价，而不是把 owner 一起锁死。
-  失败表上限 1024 条。`login` 与 `setup` 在进 argon2 之前先拒绝超过 1024 字符的口令。
+  IP 的来源分两种，判据只看 `webui.trustProxy`：
+  - `true`：取 `X-Forwarded-For` 按 `webui.trustedProxyHops` **从右往左**数的那一跳（最左一跳由客户端
+    自己填，取它等于没有限速），取不到时退回 `X-Real-IP`，再没有记 `direct`。
+  - `false`（默认，直连）：**一个请求头都不看**，只用连接的远端地址（`getConnInfo`）；拿不到就全落进
+    常量桶 `local`。桶键要是请求头，限流的代价就只是「再换一个头值」—— [18 · N-WEB-02] 修过一次并
+    写明「`trustProxy` 为假时恒返回 `local`」，后来丢了这一半，[27 · S-01] 实测 12 次轮换 `X-Real-IP`
+    全部 401、一次 429 都没有。回归用例在 `tests/server.test.ts`（`trustProxy=false` 那条）。
+
+  单 IP 桶之外还有一个全局失败窗口，触发后所有登录请求先延迟 250ms 再校验 —— 换 IP 绕过要付出代价，
+  而不是把 owner 一起锁死。失败表上限 1024 条。
+- **请求体上界**：`/api/*` 全局挂 hono 的 `bodyLimit`，默认 1 MiB；`PUT /api/config/yaml` 与
+  `POST /api/models/import` 放宽到 4 MiB、`PUT /api/prompts/:id` 到 2 MiB，超出回 `413 payload_too_large`。
+  它必须挂在**鉴权中间件之前**：`/api/setup` 与两条登录端点注册在鉴权之前，未登录就能推一个任意大的
+  请求体进来，而 `login` 那条 `password.length > 1024` 的检查发生在 `await ctx.req.json()` **之后**
+  （[27 · S-05]）。`login` / `setup` 仍在进 argon2 之前拒绝超过 1024 字符的口令。
 - **改口令**：`POST /api/auth/password {current, next}` → 校验旧口令 → argon2id → 写 `config_kv` +
   `config_revisions` → **吊销除当前会话外的全部 session**（`DELETE FROM sessions WHERE id<>?`）→ 发
   `config.changed`。校验一律现读配置，热重载落地后不再认任何进程内缓存；不重启也生效。
@@ -125,6 +136,12 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
   `modelAlias:<contextKey>`，它**压过**这里的 `agent.main.modelAlias` 与全局值（`runtime.ts` 先读它）。
   它存在时给黄色提示 + `[清除会话别名]`（`DELETE /api/chats/:key/model-alias`）—— 否则「改了模型别名
   不生效」在界面上完全无迹可寻（[21 · G-API-14](./21-webui-coverage-gaps.md)）。
+  另有一个**独立的「会话人格文件」输入行**（`perChat.<key>.character`）：它在白名单里、运行时也真的
+  读它（`assembleMainPrompt` → `PromptDocuments.paths`），但**不是 schema 叶子键**
+  （`perChat` 是 `z.record(z.unknown())`），schema 生成的表单渲染不出来，所以单独给一个控件。
+  只收 `memory/` 下的纯文件名（`.md` 结尾、不含目录与 `..`）—— 那个值会被当成路径段用；
+  不合格时服务端**静默退回全局 `CHARACTER.md`**，因为一个拼错的文件名不该让整个会话开不了轮次
+  （[27 · C-08](./27-full-scope-review.md)）。留空 = 取消这条覆盖。
 - 再往下是并排的两块工作台：
   1. **上下文查看器**：当前窗口的消息序列，**按时间倒序 —— 最新的一条在最上面**（与消息页、commit
      时间线一致；ordinal 在提交时单调分配，倒排 ordinal 即倒排时间）。每条是一行徽标（ordinal、role、
@@ -396,6 +413,12 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
   最多 `approval.ttlMs`，只在任务页刷新等于「运维不切过来就永远不知道有人在等」。
   `approval.pending` / `approval.decided` 因此单独成一个全页面可见的刷新组（事件本身很稀疏，
   只有命中规则才发），而不是跟着任务表一起走 §5 的页面过滤。
+- **「0 条规则时 conditional 等于 never」的 callout**（已实现）：`approval.enabled` 开着而
+  `approval.rules` 是空数组时，这一块顶上出现一条黄色提示并点名受影响的工具（从工具表里筛
+  `approval === 'conditional'` 的那些）。`ApprovalRules.evaluate()` 在规则表为空时恒回
+  「不需要审批」，于是**面板显示「审批已启用」而门是开着的** —— 而这正是出厂默认
+  （[27 · S-02](./27-full-scope-review.md)，需求方选定「明说门是开的」而不是塞一份默认规则）。
+  启动时另有一条 `approval.no_rules` 警告与 stderr 提示。
 - 桌面通知仍未实现。
 
 ### 3.13 配置（Settings）

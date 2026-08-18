@@ -1,4 +1,5 @@
 import { minimatch } from 'minimatch';
+import { RE2 } from 're2-wasm';
 import type { RegisteredTool, ToolExecutionContext } from '../tools/registry.js';
 
 export type ApprovalRisk = 'low' | 'medium' | 'high';
@@ -16,13 +17,30 @@ interface ApprovalRule {
   risk?: ApprovalRisk;
 }
 
-function compilePattern(source: string): RegExp | null {
-  try {
-    const insensitive = source.startsWith('(?i)');
-    return new RegExp(insensitive ? source.slice(4) : source, insensitive ? 'i' : undefined);
-  } catch {
-    return null;
-  }
+/**
+ * 上界与 `checkWakeword` 对齐（`config/wakeword.ts`）。求值对象是模型给的工具参数，
+ * 长模式在 RE2 下也要多花编译时间，而审批规则从来不需要一条 128 字符以上的正则。
+ */
+export const APPROVAL_PATTERN_MAX_CHARS = 128;
+/**
+ * **RE2 而不是 `new RegExp`。** `pattern` 来自配置（owner 面），但求值对象是模型/用户内容：
+ * 一条形状不巧的规则（`(a+)+`、`(\w+\s?)*$`）撞上一段合适的输入就是指数回溯，而这是单线程
+ * 进程 —— 卡住的是整个 bot（所有会话的轮次、WebUI、SSE 心跳）。同一条教训在 `grep`
+ * （docs/19 · T-TOOL-01）与唤醒词（`config/wakeword.ts`）两处都已经换成 RE2，这里是最后一处
+ * （docs/27 · S-03）。`(?i)` 前缀 RE2 原生支持，所以不再自己剥。
+ */
+export function compilePattern(source: string): RE2 | null {
+  if ([...source].length > APPROVAL_PATTERN_MAX_CHARS) return null;
+  try { return new RE2(source, 'u'); } catch { return null; }
+}
+/**
+ * 写入端校验（`configSchema` 的 `approvalRuleSchema`）用的判据，与 `compilePattern` 共用一份实现：
+ * 分成两份必然漂移，而漂移的表现是面板收下一条运行时永不命中的规则 —— 门看着是关的，其实开着。
+ */
+export function checkApprovalPattern(source: string): { ok: true } | { ok: false; reason: string } {
+  if ([...source].length > APPROVAL_PATTERN_MAX_CHARS) return { ok: false, reason: `超过 ${APPROVAL_PATTERN_MAX_CHARS} 个字符` };
+  try { new RE2(source, 'u'); return { ok: true }; }
+  catch (error) { return { ok: false, reason: `不是 RE2 兼容正则：${error instanceof Error ? error.message : String(error)}` }; }
 }
 
 function isRule(value: unknown): value is ApprovalRule {
@@ -32,9 +50,9 @@ function isRule(value: unknown): value is ApprovalRule {
 }
 
 export class ApprovalRules {
-  readonly #rules: Array<{ rule: ApprovalRule; pattern: RegExp | null }>;
+  readonly #rules: Array<{ rule: ApprovalRule; pattern: RE2 | null }>;
   /** 试跑要按同一份编译结果逐条报告命中原因；`evaluate` 只回最终判定，说不出「为什么没命中」。 */
-  get compiled(): ReadonlyArray<{ rule: ApprovalRule; pattern: RegExp | null }> { return this.#rules; }
+  get compiled(): ReadonlyArray<{ rule: ApprovalRule; pattern: RE2 | null }> { return this.#rules; }
 
   constructor(rules: readonly unknown[]) {
     this.#rules = rules.filter(isRule).map((rule) => ({ rule, pattern: rule.pattern ? compilePattern(rule.pattern) : null }));

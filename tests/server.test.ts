@@ -114,4 +114,26 @@ describe('server security', () => {
     expect((await request('spoof-c, 198.51.100.8')).status).toBe(429);
     closeDatabase(db);
   });
+
+  // `trustProxy=false`（默认）**这条路径此前一次都没被测过**，于是桶键取自 `X-Real-IP` 的回归
+  // 活了两轮：docs/18 · N-WEB-02 修过一次，docs/27 · S-01 实测 12 次轮换头值全部 401。
+  // 没有这条用例它会第三次回来。
+  it('ignores client headers for the login bucket when trustProxy is off', async () => {
+    const { app, db } = await appHarness({ webui: { passwordHash: await argon2.hash('current-password'), loginRateLimit: { attempts: 2, windowMinutes: 15 } } });
+    const request = (ip: string) => app.request('/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json', 'x-real-ip': ip, 'x-forwarded-for': ip }, body: JSON.stringify({ password: 'wrong' }) });
+    expect((await request('1.1.1.1')).status).toBe(401);
+    expect((await request('2.2.2.2')).status).toBe(401);
+    // 第三次换了第三个头值，仍然锁：桶键是连接的远端地址（`app.request()` 无 socket → 常量 local）。
+    expect((await request('3.3.3.3')).status).toBe(429);
+    closeDatabase(db);
+  });
+
+  // 未登录就能推的三条端点（/api/setup、两条登录）此前无请求体上界，`ctx.req.json()` 整份进内存。
+  it('rejects oversized request bodies before reading them', async () => {
+    const { app, db } = await appHarness();
+    const response = await app.request('/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: 'x'.repeat(2_000_000) }) });
+    expect(response.status).toBe(413);
+    expect((await response.json() as { error: { code: string } }).error.code).toBe('payload_too_large');
+    closeDatabase(db);
+  });
 });

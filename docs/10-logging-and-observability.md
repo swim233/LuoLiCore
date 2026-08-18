@@ -201,7 +201,21 @@ await turns.addCost(turnId, cost);
 
 ### 4.2 聚合视图
 
-`GET /api/usage?from&to&groupBy=day|chat|user|model|alias|agent` 直接 SQL 聚合（`usage_ledger` 有对应索引）。数据量超 400 天后由维护任务聚合进可选表 `usage_daily(bucket, dims…, cost, tokens)` 再删原始行。
+`GET /api/usage?from&to&groupBy=day|chat|user|model|alias|agent` 直接 SQL 聚合（`usage_ledger` 有对应索引）。
+
+`groupBy=day` **按 `general.timezone` 的本地日分桶**，与总览趋势（`OperationsRepository.dashboard`）
+和配额账期（`quotaBucket`）同一个口径。此前它是裸的 `strftime(…,'unixepoch')` —— UTC ——
+于是东八区部署里「用量报表的 8 月 18 日」是本地 18 日 08:00 到 19 日 08:00，用量页与总览页对
+同一天给出两个数字，而这正是运维核对账单时会撞上的地方（docs/27 · C-02）。
+实现是把时区表达成一个固定偏移（`sqliteTimezoneModifier`）交给 SQL 与 JS 两侧共用，两处因此**按构造**
+一致；代价是跨 DST 切换的范围里，切换后那半段的日界会差一小时（默认时区 Asia/Shanghai 没有 DST，
+配额账期仍走 Intl 精确分桶 —— 它只按「现在」算当前 bucket，不回溯历史）。
+
+**保留期**：`maintenance.retention.usageDays`（默认 400 天）由每日维护任务直接删原始行。
+早先设想的「先聚合进可选表 `usage_daily` 再删」**没有实现**，因此超过保留期的明细就是没有了 ——
+要长期账目请在保留期内自行导出。`quota_counters` 同理走 `maintenance.retention.quotaCounterDays`
+（当前账期的行永远不会被删）。此前这两张表一条保留策略都没有，只涨不落且 `VACUUM` 帮不上
+（数据还在，docs/27 · R-05）。
 
 ## 5. 配额
 

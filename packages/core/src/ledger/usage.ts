@@ -1,3 +1,4 @@
+import { sqliteTimezoneModifier } from '@luoli/shared';
 import type { Sqlite } from '@luoli/db';
 
 export interface UsageRecord {
@@ -49,11 +50,19 @@ export class UsageLedger {
     return row.value;
   }
 
-  report(from: number, to: number, groupBy: 'day' | 'chat' | 'user' | 'model' | 'alias' | 'agent'): unknown[] {
+  /**
+   * @param timezone 按**本地日**分桶。此前这里是裸的 `strftime('%Y-%m-%d', ts/1000, 'unixepoch')`
+   *   —— UTC —— 而总览趋势（`OperationsRepository.dashboard`）与配额窗口（`quotaBucket`）都按
+   *   `general.timezone` 分日：东八区部署里「用量报表的 8 月 18 日」是本地 18 日 08:00 到 19 日
+   *   08:00，两个页面对同一天给出两个数字，而这正是运维核对账单时会撞上的地方（docs/27 · C-02）。
+   *   偏移取 `to` 那一刻的值，与 `dashboard` 共用 `sqliteTimezoneModifier`（DST 折中见那里）。
+   */
+  report(from: number, to: number, groupBy: 'day' | 'chat' | 'user' | 'model' | 'alias' | 'agent', timezone = 'UTC'): unknown[] {
     const expressions: Record<typeof groupBy, string> = {
-      day: "strftime('%Y-%m-%d', ts / 1000, 'unixepoch')", chat: 'chat_id', user: 'user_id', model: 'model_id', alias: 'model_alias', agent: 'agent_run_id',
+      day: "strftime('%Y-%m-%d', ts / 1000, 'unixepoch', ?)", chat: 'chat_id', user: 'user_id', model: 'model_id', alias: 'model_alias', agent: 'agent_run_id',
     };
+    const parameters = groupBy === 'day' ? [sqliteTimezoneModifier(timezone, new Date(to)), from, to] : [from, to];
     return this.db.prepare(`SELECT ${expressions[groupBy]} AS bucket,SUM(cost_usd) AS costUsd,SUM(input_tokens) AS inputTokens,
-      SUM(output_tokens) AS outputTokens,COUNT(*) AS calls,SUM(ok) AS successes FROM usage_ledger WHERE ts BETWEEN ? AND ? GROUP BY bucket ORDER BY bucket`).all(from, to);
+      SUM(output_tokens) AS outputTokens,COUNT(*) AS calls,SUM(ok) AS successes FROM usage_ledger WHERE ts BETWEEN ? AND ? GROUP BY bucket ORDER BY bucket`).all(...parameters);
   }
 }

@@ -114,7 +114,16 @@ export async function loadConfig(options: ConfigLoadOptions = {}): Promise<Reado
   if (process.env.LUOLI_OWNER_ID) envLayer.access = { bootstrapOwnerId: process.env.LUOLI_OWNER_ID };
   if (process.env.LUOLI_HOST_WORKSPACE_DIR) envLayer.sandbox = { hostWorkspaceDir: process.env.LUOLI_HOST_WORKSPACE_DIR };
   const overrides = structuredClone(options.overrides ?? {});
-  const compose = (): unknown => substituteEnvironment(deepMerge(deepMerge(file, overrides), envLayer));
+  /**
+   * **`${env:NAME}` 只在文件层展开。** 此前展开发生在三层合并**之后**，于是 DB 覆盖层
+   * （`config_kv`，WebUI 可写）里的 `${env:LUOLI_MASTER_KEY}` 也会被展开 —— 而 `GET /api/config`
+   * 的脱敏是按**键名**判的，往 `general.timezone` 这类键里写它就能让主密钥明文出现在响应、
+   * 导出文件和 `config_revisions` 里（docs/27 · S-06）。这不是提权（能写配置的已经是 owner），
+   * 但它破掉了「主密钥只在进程内、只用于解密 provider key」这条性质。
+   * 覆盖层里的 `${env:…}` 从此原样保留 —— 一个字面量字符串什么也做不到。
+   */
+  const fileLayer = substituteEnvironment(file);
+  const compose = (): unknown => deepMerge(deepMerge(fileLayer, overrides), envLayer);
   // 持久化覆盖层来自 WebUI / 命令写入，可能带着历史遗留的非法路径。整层丢弃太粗暴、直接抛出会让
   // 进程再也起不来（docs/19-review-round4.md · R-CFG-01），所以逐条摘掉出问题的路径后重试。
   let parsed = configSchema.safeParse(compose());

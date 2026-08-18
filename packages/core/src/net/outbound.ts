@@ -5,7 +5,9 @@ const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308]);
 import { isIP, type LookupFunction } from 'node:net';
 
 const DEFAULT_PORTS = new Set([80, 443, 8080, 8443]);
-const AUTH_HEADER = /^(authorization|proxy-authorization|x-api-key|x-goog-api-key|api-key)$/i;
+// `x-subscription-token` 是 Brave 搜索 API 的 key 头（`tools/web.ts`）。跨源重定向摘认证头这件事
+// 只按名单判，名单漏一个头就等于那一个凭据能被 302 带走。
+const AUTH_HEADER = /^(authorization|proxy-authorization|x-api-key|x-goog-api-key|api-key|x-subscription-token)$/i;
 
 function ipv4Number(address: string): number | null {
   if (isIP(address) !== 4) return null;
