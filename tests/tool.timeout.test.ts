@@ -80,3 +80,34 @@ describe('tool call timeout', () => {
     expect(registry.activeNames('owner', context)).not.toContain('mixed');
   });
 });
+
+/**
+ * `execute()` 对模型的承诺是「一律交回 `{ok:false,error,hint}`」。审批段此前在那个 try
+ * **之外**，于是 `approval.request` 里的 `INSERT INTO approvals` 一失败（库满/被锁/已 close），
+ * 异常就穿过 `execute()` 抛进 AI SDK —— 形状不统一，而且 `#failed` 不计数，
+ * `maxConsecutiveErrors` 那道「模型别原地重试到步数耗尽」的唯一硬边界不推进。
+ */
+describe('审批段的异常也要交回判决', () => {
+  const conditional = { ...policy, approval: 'conditional' as const };
+
+  it('broker 抛出时返回 {ok:false} 而不是抛，且计入连续失败', async () => {
+    const broken: ApprovalBroker = { request: () => { throw new Error('SqliteError: database is locked'); } };
+    const registry = new ToolRegistry(log, broken, limits, () => [{ tool: 'risky', when: 'always', risk: 'high' }] as never);
+    registry.register({ name: 'risky', description: '', inputSchema: z.object({}), policy: conditional, sourcePriority: 1, execute: () => Promise.resolve({ ok: true }) });
+    const first = await registry.execute('risky', {}, context) as { ok: boolean; error: string };
+    expect(first.ok).toBe(false);
+    expect(first.error).toContain('database is locked');
+    // 第二次撞上 maxConsecutiveErrors(2)，工具本轮停用 —— 证明这次失败真的记进了账。
+    await registry.execute('risky', {}, context);
+    expect(events.some((event) => event.kind === 'tool.disabled_after_errors' && event.summary.includes('risky'))).toBe(true);
+  });
+
+  it('异步拒绝走同一条路', async () => {
+    const broken: ApprovalBroker = { request: () => Promise.reject(new Error('approval_store_down')) };
+    const registry = new ToolRegistry(log, broken, limits, () => [{ tool: 'risky2', when: 'always', risk: 'high' }] as never);
+    registry.register({ name: 'risky2', description: '', inputSchema: z.object({}), policy: conditional, sourcePriority: 1, execute: () => Promise.resolve({ ok: true }) });
+    const output = await registry.execute('risky2', {}, context) as { ok: boolean; error: string };
+    expect(output.ok).toBe(false);
+    expect(output.error).toContain('approval_store_down');
+  });
+});

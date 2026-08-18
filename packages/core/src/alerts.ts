@@ -44,11 +44,11 @@ export class AlertDispatcher {
     const last = this.#sent.get(dedupeKey) ?? 0;
     if (now - last < config.dedupeMinutes * 60_000) return;
     this.#remember(dedupeKey, now);
-    this.log.event({ level: 'error', kind: 'alert.raised', summary, data: { alert: kind, ...data } });
+    this.#log({ level: 'error', kind: 'alert.raised', summary, data: { alert: kind, ...data } });
     const text = `⚠️ ${summary}${data && Object.keys(data).length ? `\n${JSON.stringify(data)}` : ''}`;
     if (config.notifyOwner && this.delivery.owner) {
       try { await this.delivery.owner(text); }
-      catch (error) { this.log.event({ level: 'warn', kind: 'alert.deliver_failed', summary: 'owner notification failed', data: { alert: kind, error: error instanceof Error ? error.message : String(error) } }); }
+      catch (error) { this.#log({ level: 'warn', kind: 'alert.deliver_failed', summary: 'owner notification failed', data: { alert: kind, error: error instanceof Error ? error.message : String(error) } }); }
     }
     if (config.webhookUrl) {
       try {
@@ -56,8 +56,19 @@ export class AlertDispatcher {
         // `provider.allowPrivateBaseUrl` 那个开关走，由装配方传进来，而不是在这里写死。
         await guardedFetch(config.webhookUrl, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ kind, summary, data: data ?? {}, at: now }) },
           { allowPrivate: this.allowPrivateWebhook(), maxBytes: 64 * 1024, timeoutMs: 10_000 });
-      } catch (error) { this.log.event({ level: 'warn', kind: 'alert.deliver_failed', summary: 'webhook delivery failed', data: { alert: kind, error: error instanceof Error ? error.message : String(error) } }); }
+      } catch (error) { this.#log({ level: 'warn', kind: 'alert.deliver_failed', summary: 'webhook delivery failed', data: { alert: kind, error: error instanceof Error ? error.message : String(error) } }); }
     }
+  }
+
+  /**
+   * **记不下来也要发。** `db_write_failed` 这一条的触发源就是「库写不进去」
+   * （`LogSink.onWriteFailure` → `fire`），所以落库绝不能挡在投递前面：挡住的话，库坏了
+   * 唯一该响的那条告警一定不响，而 `fire()` 的 `.catch()` 会把它咽得无声无息。
+   * 另外两处调用点在 catch 块里，抛出去会让类头上那句「一律不抛」失效。
+   * `LogSink.event` 现在自己也不抛了，但这条不变量不该依赖那边的实现（docs/10 §6）。
+   */
+  #log(event: Parameters<LogSink['event']>[0]): void {
+    try { this.log.event(event); } catch { /* 见上 */ }
   }
 
   /** 同步版本：给不能 await 的调用点（事件回调、finally 块）。失败照样吞掉。 */

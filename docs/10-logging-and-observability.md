@@ -77,7 +77,9 @@ turn 01J8…                                     kind=turn.start / turn.end
 | `mcp.connect` / `mcp.error` | info/warn | server, transport, toolCount |
 | `tg.send` / `tg.edit` / `tg.action` | debug | chatId, messageId, chars, ms, editCount |
 | `tg.error` | warn | method, description, retryAfter |
+| `tg.parse_fallback` | **warn** | chars, error, phase(`send` \| `edit`) —— `parseMode` 渲染被 Telegram 拒收（`can't parse entities`），已降级成纯文本重发/重编辑一次。**这一跳此前一个字都不落**，于是行内代码那个 bug 只能靠翻下一次模型调用的 context blob 反推。第二级兜底（发 `.md` 文档）仍未实现，见 [00 §2.3](./00-state.md) |
 | `webui.action` | info | method, path, bodyDigest, ip |
+| `webui.error` | error | method, path, error —— 端点抛出了没有被自己接住的异常，由 `app.onError` 兜住。**回给前端的信封里只有这一行的 id**（`ref:`），异常消息不出网：它可能带库路径、SQL、密钥片段 |
 | `config.changed` | info | keys[], actor |
 | `maintenance.*` | info | job, ms, affected |
 | `schedule.fired` | info | job, name, mode, role, runCount —— 定时任务开始一轮（trace_id 是那一轮的 turn_id） |
@@ -323,6 +325,14 @@ GET /api/health/detail（需登录）—— 详细状态
 - **私聊 owner**（默认开）：global 配额超限、provider 全部不可用、DB 写失败、plugin 自动禁用、沙箱不可用而有非 owner 请求执行、连续 5 个 turn 失败。
 - 告警去重：同 `alertKey` 在 `alerts.dedupeMinutes`（默认 30）内只发一次。
 - 可选 webhook：`alerts.webhookUrl`（POST JSON），便于接自有监控。
+
+> **告警投递不得依赖库写成功。** `db_write_failed` 这一条的触发源就是「库写不进去」
+> （`LogSink.onWriteFailure` → `AlertDispatcher.fire`），所以 `raise()` 里那次
+> `alert.raised` 落库**不能挡在投递前面**：挡住的话，库坏了唯一该响的那条告警一定不响，
+> 而 `fire()` 的 `.catch()` 会把它咽得无声无息。同理 `LogSink.event()` **一律不抛** ——
+> 它的调用点全在 catch 块、`.catch()` 回调和进程的 crash handler 里，让它抛等于把
+> 「日志写不进去」升级成「轮次失败」，再升级成「crash handler 自己抛、`process.exit(1)`
+> 走不到」。入库失败时它返回 `0`（与「级别不够」同一个返回值）并只记 stderr + 告警。
 
 ## 7. 可观测性验收要点
 

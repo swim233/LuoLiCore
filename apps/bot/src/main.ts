@@ -197,7 +197,7 @@ if (!sandboxProbe.available && config.sandbox.mode === 'docker') log.event({ lev
 let bot: Bot | null = null;
 let poller: UpdatePoller | null = null;
 const telegramTools = process.env.BOT_TOKEN
-  ? new TelegramTools({ bot: () => bot, archive, maxMessageChars: () => configStore.snapshot().output.maxMessageChars, maxMentions: () => configStore.snapshot().output.maxMentions })
+  ? new TelegramTools({ bot: () => bot, archive, maxMessageChars: () => configStore.snapshot().output.maxMessageChars, maxMentions: () => configStore.snapshot().output.maxMentions, parseMode: () => configStore.snapshot().output.parseMode })
   : null;
 // 定时任务（docs/14 §2 Q4）。这里只**建**不**装**：`load()` 要等 bot 起来，否则第一批任务触发时
 // `telegram()` 还是 null，只会往日志里写一串 skipped。工具反过来在这里就得拿到 runner。
@@ -451,12 +451,19 @@ process.once('SIGTERM', () => void shutdown('SIGTERM'));
 process.once('SIGINT', () => void shutdown('SIGINT'));
 // 一次 uncaught 的流错误可以直接带走进程，而日志里一个字都不留 —— 上一次排查只能靠翻数据库
 // 猜「最后一条 turn.start 之后发生了什么」。行为不变（照旧退出，恢复交给下次启动的
-// recoverAfterCrash），但崩之前必须留下原因。LogSink 是 appendFileSync，写得完。
+// recoverAfterCrash），但崩之前必须留下原因。
+//
+// **stderr 先写、`log.event` 后调、`process.exit` 最后。** 原先是反的，于是整个处理器
+// 依赖「log.event 不会抛」这条当时并不成立的假设：`insertLog` 曾是裸的，库满/被锁/已 close
+// 时它抛出来，这个处理器自己变成新的 uncaughtException —— 原因没留下，退出码也没设上。
+// sink 侧现在也不抛了（`LogSink.event` 入库失败返回 0），但顺序不该赌另一个文件的实现细节。
 for (const fatal of ['uncaughtException', 'unhandledRejection'] as const) {
   process.on(fatal, (error: unknown) => {
     const detail = error instanceof Error ? error.stack ?? error.message : String(error);
-    log.event({ level: 'error', kind: 'system.crash', summary: `${fatal}: ${error instanceof Error ? error.message : String(error)}`, data: { event: fatal, detail } });
     process.stderr.write(`[crash] ${fatal}: ${detail}\n`);
+    // `system.crash` 在 LogSink 里被标成 urgent（appendFileSync 立刻落盘），所以这一行在
+    // 下面那个 exit 之前是真的写完了的，不是靠 200ms 的缓冲定时器。
+    log.event({ level: 'error', kind: 'system.crash', summary: `${fatal}: ${error instanceof Error ? error.message : String(error)}`, data: { event: fatal, detail } });
     process.exit(1);
   });
 }

@@ -597,6 +597,18 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
 统一响应：普通 JSON 端点使用 `{ ok:true, data }` / `{ ok:false, error:{ code,message,details? } }`；
 `GET /api/events` 使用 SSE，`POST /api/agents/:name/dryrun` 使用逐行 NDJSON，不套普通响应信封。
 
+**这个信封没有例外，失败路径也一样。** 客户端（`packages/webui/src/api/client.ts`）无条件
+`response.json()`，任何一条 `text/plain` 响应在它那儿都表现成 `SyntaxError: Unexpected token 'I'`
+—— 报错和真实原因毫无关系。两半都要焊住：
+
+- 未匹配的 `/api/*` → 404 `not_found`。**必须注册在静态兜底之前**，否则它们拿到 200 + `index.html`
+  （docs/22 · I-13）。
+- 端点里抛出来的异常 → `app.onError` 兜住。`HTTPException`（`bodyLimit` 之类）原样交回；
+  请求体不是合法 JSON（`SyntaxError`）→ 400 `invalid_json` —— 这一条同时给所有没有自己
+  `.catch()` 的 `ctx.req.json()` 站点收口；其余 → 500 `internal`，message 形如
+  `服务端出错，已记录（ref: <log_events.id>）`。**异常消息不进响应**：它可能带库路径、SQL、
+  密钥片段，全文只落 `webui.error` 那一行（[10](./10-logging-and-observability.md)）。
+
 | Method & Path | 说明 |
 |---|---|
 | `POST /api/auth/login` `POST /api/auth/logout` `GET /api/auth/me` | 鉴权 |

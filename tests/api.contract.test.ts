@@ -193,4 +193,46 @@ describe('documented API surface', () => {
     rmSync(skillsDir, { recursive: true, force: true });
     closeDatabase(db);
   });
+
+  /**
+   * **信封没有例外，失败路径也一样。** 前端 `api()` 里那句 `response.json()` 遇到一份
+   * `text/plain` 就抛 `SyntaxError: Unexpected token 'I'`，报错和真实原因毫无关系。
+   * 未匹配 `/api/*` 的 404 早就修过了（docs/22 · I-13），这两条焊的是同一个病在 500 上的那一半：
+   * Hono 的默认 onError 回的正是 `text/plain "Internal Server Error"`。
+   */
+  it('坏请求体回 400 invalid_json 而不是 text/plain 500', async () => {
+    const { app, db, headers } = harness();
+    // `PUT /api/config` 是那 17 个没有自己 `.catch()` 的 `ctx.req.json()` 站点之一 ——
+    // 这一条不是给它单独打的补丁，`app.onError` 里那个 SyntaxError 分支把整类都收了口。
+    const response = await app.request('/api/config', { method: 'PUT', headers, body: '{not json' });
+    expect(response.status).toBe(400);
+    expect(response.headers.get('content-type')).toMatch(/application\/json/);
+    expect(await response.json()).toMatchObject({ ok: false, error: { code: 'invalid_json' } });
+    closeDatabase(db);
+  });
+
+  it('端点里抛出的异常回 500 信封 + ref，异常原文只进 webui.error 那一行', async () => {
+    const path = './data/api-contract.test.db';
+    const { app, db, headers } = harness(({ db: database }) => ({
+      // `POST /api/maintenance/:action` 直接调依赖、没有自己的 try —— 拿它当真实的抛出点，
+      // 比塞一条假路由更能说明问题。
+      maintenance: Object.assign(new MaintenanceService(database, path, 2, 30),
+        { vacuum: () => { throw new Error('sqlite disk image is malformed at /srv/luoli/data/luoli.db'); } }),
+    }));
+    const response = await app.request('/api/maintenance/vacuum', { method: 'POST', headers });
+    expect(response.status).toBe(500);
+    expect(response.headers.get('content-type')).toMatch(/application\/json/);
+    const body = await response.json() as { ok: boolean; error: { code: string; message: string } };
+    expect(body.ok).toBe(false);
+    expect(body.error.code).toBe('internal');
+    // 异常原文里带着库的绝对路径，**不许出网**：回给前端的只有那一行日志的 id。
+    expect(body.error.message).not.toContain('/srv/luoli');
+    expect(body.error.message).toMatch(/ref: \d+/);
+    const logged = db.prepare("SELECT summary,data_json FROM log_events WHERE kind='webui.error'").get() as { summary: string; data_json: string };
+    expect(logged.summary).toContain('/api/maintenance/vacuum');
+    expect(logged.data_json).toContain('disk image is malformed');
+    // ref 指的就是那一行，否则运维照着它去日志页搜是搜不到的。
+    expect(body.error.message).toContain(String(db.prepare("SELECT id FROM log_events WHERE kind='webui.error'").pluck().get()));
+    closeDatabase(db);
+  });
 });

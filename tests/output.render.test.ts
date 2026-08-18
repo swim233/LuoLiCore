@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { safeRender, splitTelegramText } from '@luoli/telegram';
+import { safeRender, safeRenderHtml, splitTelegramText } from '@luoli/telegram';
 
 /**
  * `safeRender` 的构造级断言（docs/08 §5.3）。
@@ -126,5 +126,68 @@ describe('渲染与分片的接缝', () => {
     expect(parts.every((part) => ((part.match(/```/g) ?? []).length % 2) === 0)).toBe(true);
     expect(parts.join('')).toContain('*报告 Report*');
     expect(parts.join('')).toContain('• 第一项 with English');
+  });
+});
+
+/**
+ * `safeRenderHtml` 的构造级断言（docs/08 §5.3.2）。
+ *
+ * 存在理由与上面那份 MarkdownV2 的一样，但成因不同：HTML 这一档**压根没有实现过** ——
+ * `splitTelegramText` 无条件跑 MarkdownV2 渲染器，于是 `parseMode: HTML` 发出去的是
+ * MarkdownV2 文本挂 `parse_mode=HTML`：`\>` 之类原样显示，而 `<` 与 `&` 一个都没转成实体，
+ * Telegram 直接 `can't parse entities`。逐构造断言「该有的标签在、危险字符已成实体」。
+ */
+const HTML_CONSTRUCTS: Array<[name: string, input: string, want: string[], reject: string[]]> = [
+  ['行内代码', '用 `a<b` 比较', ['<code>a&lt;b</code>'], ['`']],
+  ['粗体', '这是 **加粗** 文本', ['<b>加粗</b>'], ['*']],
+  ['斜体', '这是 _斜体_ 文本', ['<i>斜体</i>'], ['_斜体_']],
+  ['删除线', '这是 ~~删除~~ 文本', ['<s>删除</s>'], ['~']],
+  ['链接', '见 [文档](https://a.com/b?x=1&y=2)', ['<a href="https://a.com/b?x=1&amp;y=2">文档</a>'], ['&y=2"']],
+  ['图片降级成链接', '![截图](https://a.com/x.png)', ['<a href="https://a.com/x.png">截图</a>'], []],
+  ['无序列表', '- 第一项\n- 第二项', ['• 第一项', '• 第二项'], []],
+  ['嵌套列表', '- a\n  - b\n- c', ['• a\n  • b\n• c'], []],
+  // 有序项的 `.` 在 HTML 里不用转义 —— MarkdownV2 那边是 `3\.`。
+  ['有序列表', '3. 三\n4. 四', ['3. 三', '4. 四'], ['3\\. 三']],
+  ['待办列表', '- [ ] 待办\n- [x] 完成', ['• ☐ 待办', '• ☑ 完成'], []],
+  // MarkdownV2 用逐行 `>` 前缀，HTML 有真的 blockquote 标签，所以不需要那条「内含围栏就退前缀」的妥协。
+  ['引用用真标签', '> 引用\n> 第二行', ['<blockquote>引用\n第二行</blockquote>'], ['\n>第二行']],
+  ['引用里可以有围栏', '> 看这个\n>\n> ```\n> a<b\n> ```', ['<blockquote>', '<pre>', 'a&lt;b'], []],
+  ['标题降级成粗体', '## 标题\n正文', ['<b>标题</b>'], ['<b><b>']],
+  ['标题里的粗体不重复嵌套', '### **小标题**', ['<b>小标题</b>'], ['<b><b>']],
+  ['分隔线降级', '上\n\n---\n\n下', ['——————'], []],
+  ['带语言的围栏', '```ts\nconst a = 1 < 2;\n```', ['<pre><code class="language-ts">const a = 1 &lt; 2;</code></pre>'], []],
+  ['不带语言的围栏', '```\nplain & text\n```', ['<pre>plain &amp; text</pre>'], ['<code']],
+  ['围栏语言名过滤非法字符', '```js"><script>\nx\n```', ['class="language-js"'], ['<script>']],
+  // 语言名过长时当没写语言。这不只是整洁：`<pre><code class="language-…">` 是一个不可切开的构造，
+  // 它加上自己的 `</code>` 一旦长过 maxMessageChars，这个元素就没有任何切法能既装进一片又保持
+  // 成对（6000 轮随机用例里实测：120 个字符的「语言名」配 max=150，标签被切成两半）。
+  ['语言名过长当没写', `\`\`\`${'x'.repeat(120)}\ncode\n\`\`\``, ['<pre>code</pre>'], ['class=']],
+  ['语言名不长就照写', '```objective-c\nx\n```', ['class="language-objective-c"'], []],
+  ['表格降级成等宽块', '| a | b |\n| --- | --- |\n| 1 | 2 |', ['<pre>', '| a | b |'], []],
+  ['文本里的三个危险字符', 'a < b & c > d', ['a &lt; b &amp; c &gt; d'], []],
+  // `&` 必须第一个替换，否则 `<` 产出的 `&lt;` 会被再转一遍成 `&amp;lt;`（用户看到字面的 &lt;）。
+  ['转义顺序不能把实体自己再转一遍', '<b>不是标签</b>', ['&lt;b&gt;'], ['&amp;lt;']],
+  ['非白名单 scheme 退回字面', '点 [这里](javascript:alert(1))', ['[这里](javascript:alert(1))'], ['<a href']],
+  ['裸 HTML 按字面显示', '<script>alert(1)</script>', ['&lt;script&gt;'], ['<script>']],
+];
+
+describe('safeRenderHtml 逐构造', () => {
+  for (const [name, input, want, reject] of HTML_CONSTRUCTS) {
+    it(name, () => {
+      const rendered = safeRenderHtml(input);
+      for (const fragment of want) expect(rendered, `应含 ${fragment}`).toContain(fragment);
+      for (const fragment of reject) expect(rendered, `不应含 ${fragment}`).not.toContain(fragment);
+    });
+  }
+
+  it('标签一律成对，且只用白名单里那几个', () => {
+    const rendered = safeRenderHtml('# 标\n\n**粗** _斜_ ~~删~~ `码`\n\n> 引 [链](https://a.com)\n\n```py\nx<y\n```\n\n- 项');
+    const opened: string[] = [];
+    for (const match of rendered.matchAll(/<(\/?)([a-z][a-z0-9-]*)(?:\s[^>]*)?>/g)) {
+      const name = match[2]!;
+      expect(['b', 'i', 'u', 's', 'tg-spoiler', 'a', 'code', 'pre', 'blockquote'], `白名单外的标签 ${name}`).toContain(name);
+      if (match[1]) expect(opened.pop()).toBe(name); else opened.push(name);
+    }
+    expect(opened).toEqual([]);
   });
 });

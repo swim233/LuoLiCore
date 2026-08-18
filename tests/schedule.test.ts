@@ -29,8 +29,9 @@ function harness(name: string, extra: Record<string, unknown> = {}) {
   const sent: Array<{ chatId: string; text: string }> = [];
   const agentCalls: RuntimeTurnContext[] = [];
   let live = config;
+  const context = new ContextEngine(db, archive);
   const runner = new ScheduledJobRunner({
-    db, jobs, scheduler, context: new ContextEngine(db, archive), archive, turns: new TurnRepository(db),
+    db, jobs, scheduler, context, archive, turns: new TurnRepository(db),
     registry: new TurnRegistry(), concurrency: new TurnConcurrency(config.concurrency),
     quota: new QuotaGuard(db, config.general.timezone, events), memory: new MemoryStore(db, memoryDir, 1500, 3000),
     tools: new ToolRegistry(log, { request: async () => true }, { maxRegistered: 200, maxCallsPerTurn: 50, maxConsecutiveErrors: 10 }), log,
@@ -49,7 +50,7 @@ function harness(name: string, extra: Record<string, unknown> = {}) {
     workspace: `./data/${name}-workspace`, agentKind: 'main',
   });
   principals.upsertSeen({ id: 'user:7', kind: 'user', tgId: '7', role: 'trusted', displayName: '阿离', username: null, chatType: null });
-  return { db, jobs, runner, registry, scheduler, principals, sent, agentCalls, contextFor,
+  return { db, jobs, runner, registry, scheduler, principals, sent, agentCalls, contextFor, context,
     setConfig: (patch: Record<string, unknown>) => { live = configSchema.parse({ access: { bootstrapOwnerId: '1' }, general: { timezone: 'UTC' }, quota: { enabled: false }, ...extra, ...patch }) as Config; },
     close: () => { scheduler.stop(); closeDatabase(db); } };
 }
@@ -140,6 +141,29 @@ describe('定时任务触发', () => {
     expect(trigger.kind).toBe('system');
     expect(trigger.id).toBeGreaterThanOrEqual(SYNTHETIC_TG_MESSAGE_ID_BASE);
     expect(h.jobs.byId(job.id)).toMatchObject({ state: 'active', runCount: 1, lastState: 'committed' });
+    h.close();
+  });
+
+  /**
+   * `abortTurn` 也在写库（`releaseClaims`，`cancel.commitPartial` 开着时还会跑一整个
+   * `commitTurn`）。它此前排在 `turns.finish` **前面**且没有自己的 try，抛出来那行就永久停在
+   * `state='running'` —— `GET /api/turns/active` 与总览页的 running 计数在整个进程生命周期内
+   * 都是错的，直到下次重启的 `recoverAfterCrash` 才收拾。清理是尽力而为，记状态不是。
+   */
+  it('abortTurn 抛出时轮次仍记成 failed，而不是永久卡在 running', async () => {
+    const h = harness('sched-abort-throws');
+    await call(h, 'schedule_create', { name: '早报', mode: 'notify', text: '早上好', cron: '0 * * * *' });
+    const job = h.jobs.byName('chat:c1', '早报')!;
+    Object.assign(h.context, {
+      commitTurn: () => Promise.reject(new Error('sqlite disk image is malformed')),
+      abortTurn: () => Promise.reject(new Error('releaseClaims 也写不进去')),
+    });
+    await h.runner.fire(job.id);
+    expect(h.db.prepare('SELECT state,error FROM turns').get()).toMatchObject({ state: 'failed', error: 'sqlite disk image is malformed' });
+    // 清理失败自己也要留痕，否则「认领没释放」是查不出来的。
+    expect(h.db.prepare("SELECT COUNT(*) FROM log_events WHERE kind='ctx.abort' AND level='error'").pluck().get()).toBe(1);
+    // 任务本身照旧记一次失败，下次还会跑。
+    expect(h.jobs.byId(job.id)).toMatchObject({ state: 'active', lastState: 'failed' });
     h.close();
   });
 

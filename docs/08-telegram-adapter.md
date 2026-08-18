@@ -245,7 +245,22 @@ sendChatAction('typing')  → 每 4s 续期，直到首次消息发出
 - 编辑遇 `400 can't parse entities` → 用 `parse_mode: undefined` 重试一次；再失败则把内容作为 `.md` 文档发出并回复一句摘要。
 - `output.mode='once'`：只在结束时 `sendMessage`（仍做分片），全程 `typing`。
 
-### 5.3 MarkdownV2 安全渲染
+### 5.3 安全渲染
+
+`output.parseMode` 有三档，**每一档都要有自己的渲染出口**。这不是可选的对称性：渲染出的文本与
+发出去时挂的 `parse_mode` 必须是同一种语言，否则用户看到的是转义符本身。曾经三档只实现了一个
+（`splitTelegramText` 无条件跑 MarkdownV2 渲染器），后果是：
+
+- `none` —— MarkdownV2 文本按纯文本发出去，`C:\temp - 见 issue #3 (1.5x)` 到用户那儿是
+  ``C:\\temp \- 见 issue \#3 \(1\.5x\)``；
+- `HTML` —— 同一份 MarkdownV2 文本挂 `parse_mode=HTML` 发出去，`\>` 之类原样显示，而 `<` 与 `&`
+  一个都没转成实体，Telegram 直接 `can't parse entities`。
+
+所以分档由 `splitTelegramText(text, max, parseMode)` 收口，渲染与分片一起分档 —— 分片必须在
+渲染**之后**做（转义会让长度翻倍，按源文本切没法保证渲染后不超 `maxMessageChars`），因此每一档
+的分片器都要认自己那套不可切开的构造。
+
+#### 5.3.1 MarkdownV2（默认）
 
 模型输出的是通用 Markdown，Telegram MarkdownV2 转义规则极严。实现 `safeRender(text)`：
 
@@ -277,6 +292,60 @@ sendChatAction('typing')  → 每 4s 续期，直到首次消息发出
 
 单测覆盖见 `tests/output.render.test.ts`：中英混排、嵌套列表、流式截断在代码块中间、
 链接内含特殊字符、行内代码与标题两条同源回归（AC-OUT-004 / AC-OUT-013）。
+
+#### 5.3.2 HTML
+
+`safeRenderHtml(text)`，走 §5.3.1 那棵同样的 AST（`marked` 的 lexer，同一份 `LEXER_OPTIONS`）。
+节点降级也与 MarkdownV2 一致（`heading` → 粗体、`table` → 等宽块、`hr` → `——————`、
+`image` → 带 alt 的链接、`html` 与未知节点按字面显示），差别只在输出的标签与转义规则：
+
+1. **标签只用 Telegram 认的那个子集**：`b` / `i` / `u` / `s` / `tg-spoiler` / `a` / `code` / `pre` /
+   `blockquote`。写别的进去 Telegram 一律 `can't parse entities` —— 这是白名单，不是「大概支持」。
+2. **转义只发生在文本节点上**（与 MarkdownV2 同一条红线）：`&` → `&amp;`、`<` → `&lt;`、
+   `>` → `&gt;`。**`&` 必须第一个替换**，否则后两条产出的 `&lt;` 会被自己再转一遍成 `&amp;lt;`。
+   `pre` / `code` 实体内部转的是同样这三个（Telegram 的 HTML 模式在代码实体里也解析实体）。
+3. 代码块是 `<pre>` 或带语言的 `<pre><code class="language-xxx">…</code></pre>`；行内代码是 `<code>`。
+   语言名按 `[A-Za-z0-9+#._-]` 过滤后才拼进 class —— 它来自模型写的围栏标记，是外部输入。
+4. **引用块用真的 `<blockquote>`**，不再有 MarkdownV2 那条「内含围栏就退掉前缀」的妥协：
+   那条妥协的起因是 `>` 逐行前缀会把 `pre` 实体拆开，而 HTML 的嵌套是显式的，`<pre>` 待在
+   `<blockquote>` 里没有问题。
+5. 强调实体不做「同种不自嵌套」的抑制（那是 MarkdownV2 的限制）；但 `heading` 仍按 §5.3.1 那样
+   把 `strong` 记成已张开，免得 `### **小标题**` 输出一层空的 `<b><b>`。
+6. 与 MarkdownV2 同款的两条兜底：整段渲染包在 `try` 里，lexer 抛了就退回「全文按字面转义」；
+   可点链接按同一份 scheme 白名单，`href` 里的 `"` 与 `&<>` 一并转义。
+
+#### 5.3.3 none
+
+不渲染、不转义，只摘掉 NUL（正文里的 NUL 没有任何显示意义），然后按 `maxMessageChars` 分片。
+发出去时不挂 `parse_mode`，因此**也不存在解析失败那一跳**（`sendWithFallback` 直接返回）。
+
+#### 5.3.4 分片器的三档约束
+
+分片在渲染之后做，所以每一档的切口都不能落在自己那套不可切开的构造里：
+
+| 档 | 不可切开的构造 | 跨片处理 |
+|---|---|---|
+| MarkdownV2 | ` ``` ` 围栏 | 切口在围栏内时本片补 `` \n``` `` 收口，下一片以 ` ```\n ` 重开 |
+| HTML | `<…>` 标签、`&…;` 实体 | 切口回退到标签/实体之外；本片按栈逆序补闭合标签，下一片原样重开这些开标签 |
+| none | 无 | 直接切 |
+
+HTML 那一档的切口回退是必需的，不是保险：`<a href="…">` 与 `<pre><code class="…">` 里都有空格，
+而断点候选里就有 `' '` —— 不回退就会切出一个 `<a` 加一个 `href="…">`。
+
+三条实现约束（都是 8000 轮随机用例逼出来的，`tests/output.test.ts` 各有一条焊住）：
+
+- **不给收尾预留固定余量。** 按最坏情况（白名单每个标签都张着 = 59 字符）悲观预留过一版，
+  结果 `maxMessageChars: 100` 时窗口只剩 41，一个 `<a href="…">` 都放不下，切口退无可退只能硬切
+  —— 预留量本身成了「把标签切开」的原因。收尾长度按**真实**的开标签栈算，超了再回退断点。
+- **重开前缀一旦决定要带就必须带到底。** 试过「装不下就放弃重开」：不重开的那一片是纯文本没错，
+  但流里后面**仍然会来那个 `</b>`**，它于是变成下一片开头一个没有配对的闭合标签。
+- **超上限比不成对更严重。** 前缀几乎占满一整片时宁可丢格式：超长会被 Telegram 以
+  `message is too long` 硬拒，而 `sendWithFallback` 只兜得住 `can't parse entities`。
+
+还有一条不可避免的：**单个元素连祖先的闭合标签一起就比整片长**（几千字符的 URL）时没有任何切法
+能既装进一片又保持成对，那时硬切，靠 §5.2 的纯文本降级把话说出去 —— `toPlainText` 因此**只剥完整
+标签**，被切开的半截标签故意留着，因为 `<a href="` 后面跟的就是那条 URL 本身。丢几个字面尖括号
+远不如「消息还在」重要。
 
 ---
 
