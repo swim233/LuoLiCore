@@ -654,8 +654,7 @@
                 }
               },
               "additionalProperties": false,
-              "default": {},
-              "description": "让模型起一个外部 coding harness（Claude Code / Codex）改宿主上的仓库。默认关闭 —— 它绕过本系统全部工具闸，开之前先读 docs/14 T17。"
+              "default": {}
             },
             "agents": {
               "type": "array",
@@ -840,12 +839,27 @@
                   "enabled": {
                     "type": "boolean",
                     "default": true
+                  },
+                  "minRole": {
+                    "$ref": "#/definitions/LuoLiConfig/properties/access/properties/defaultUserRole"
+                  },
+                  "approval": {
+                    "type": "string",
+                    "enum": [
+                      "never",
+                      "conditional",
+                      "always"
+                    ]
+                  },
+                  "timeoutMs": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0
                   }
                 },
                 "additionalProperties": false
               },
               "default": {},
-              "description": "逐个工具的启停开关（键为工具名）。工具页有更好的入口 —— 那里改完这里会同步，禁用是硬边界：目录里看不到，模型硬猜工具名也会在 execute() 被拦下。"
+              "description": "逐个工具的运维覆盖层（键为工具名），每个工具可写 enabled / minRole / approval / timeoutMs。工具页有更好的入口 —— 那里改完这里会同步，而且放宽权限时会二次确认。后三项缺席即沿用代码里的默认策略。禁用是硬边界：目录里看不到，模型硬猜工具名也会在 execute() 被拦下。"
             },
             "fs": {
               "type": "object",

@@ -1,6 +1,7 @@
-import type { Role } from '@luoli/shared';
+import { roleRank, type Role } from '@luoli/shared';
 
-export type ApprovalPolicy = 'never' | 'always' | 'conditional';
+export const APPROVAL_POLICIES = ['never', 'conditional', 'always'] as const;
+export type ApprovalPolicy = (typeof APPROVAL_POLICIES)[number];
 export type ToolScope = 'workspace' | 'chat' | 'private' | 'global' | 'sandbox' | 'telegram';
 
 export interface ToolPolicyEntry {
@@ -73,3 +74,40 @@ export type ToolName = keyof typeof TOOL_POLICY;
  * 交回去的仍然是该角色本来就有的东西。
  */
 export const SKILL_NARROWING_EXEMPT: readonly ToolName[] = ['load_skill', 'send_message', 'report_progress', 'context_stats'];
+
+/**
+ * 运维在工具页按下的那一份覆盖（`tools.overrides.<name>`，docs/09 §3.7）。
+ *
+ * 后三项都是可缺席的，**没有默认值**：字段不在 = 用代码里那份。给它们写死一个默认值等于把每一条
+ * 历史覆盖行钉在写它那天的策略上 —— 此后 `TOOL_POLICY` 怎么改都推不动这些工具，而覆盖层本来
+ * 只该表达「这台机器上我要偏离多少」。
+ */
+export interface ToolOverride { enabled?: boolean | undefined; minRole?: Role | undefined; approval?: ApprovalPolicy | undefined; timeoutMs?: number | undefined }
+
+/** `never < conditional < always`，数字越大越严。与 `APPROVAL_POLICIES` 的下标同序。 */
+export function approvalRank(policy: ApprovalPolicy): number { return APPROVAL_POLICIES.indexOf(policy); }
+
+/**
+ * 代码默认 + 运维覆盖 → 本次生效的策略。
+ *
+ * **只有这一份合并实现**，`ToolRegistry` 与 `GET /api/tools` 共用。分成两份必然漂移，而漂移的
+ * 表现是界面上显示的权限和运行时判的不是一回事 —— 运维照着面板以为自己关严了。
+ */
+export function effectiveToolPolicy(base: ToolPolicyEntry, override?: ToolOverride): ToolPolicyEntry {
+  if (!override) return base;
+  return { ...base, minRole: override.minRole ?? base.minRole, approval: override.approval ?? base.approval };
+}
+
+/**
+ * 覆盖里哪些字段**比代码默认更松**。空数组 = 纯收紧、或者根本没动。
+ *
+ * `timeoutMs` 不在其列：它是资源旋钮不是权限闸，照样进审计但不该拦着人改。`enabled` 同样不算 ——
+ * 启停一直是这个面板的既有能力，把「重新启用」也做成要确认只会让人对确认框脱敏。
+ */
+export function relaxedFields(base: ToolPolicyEntry, override?: ToolOverride): Array<'minRole' | 'approval'> {
+  const effective = effectiveToolPolicy(base, override);
+  const out: Array<'minRole' | 'approval'> = [];
+  if (roleRank(effective.minRole) < roleRank(base.minRole)) out.push('minRole');
+  if (approvalRank(effective.approval) < approvalRank(base.approval)) out.push('approval');
+  return out;
+}

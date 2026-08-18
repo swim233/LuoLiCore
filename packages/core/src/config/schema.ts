@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { roleRank, TG_ID_PATTERN } from '@luoli/shared';
 import { checkApprovalPattern } from '../approval/rules.js';
+import { APPROVAL_POLICIES } from '../tools/policy.js';
 
 const role = z.enum(['owner', 'trusted', 'limited', 'blocked']);
 const nullableMoney = z.number().nonnegative().nullable();
@@ -249,7 +250,11 @@ export const configSchema = z.object({
   }).default({}),
   tools: z.object({
     maxRegistered: z.number().int().positive().default(80), maxCallsPerTurn: z.number().int().positive().default(40), maxConsecutiveErrors: z.number().int().positive().default(3), defaultTimeoutMs: z.number().int().positive().default(60_000),
-    overrides: z.record(z.object({ enabled: z.boolean().default(true) })).default({}),
+    // 运维覆盖层（docs/09 §3.7）。后三项一律 optional 且**不给默认值** —— 字段缺席 = 沿用
+    // `TOOL_POLICY` / 工具自己声明的那份。写死默认值等于把每条历史覆盖行钉在写它那天的策略上。
+    // 「放宽要二次确认」是 `PATCH /api/tools/:name` 的端点行为而不是 schema 约束：schema 只管形状。
+    overrides: z.record(z.object({ enabled: z.boolean().default(true), minRole: role.optional(),
+      approval: z.enum(APPROVAL_POLICIES).optional(), timeoutMs: z.number().int().positive().optional() })).default({}),
     fs: z.object({ maxReadBytes: z.number().int().positive().default(262_144), maxWriteBytes: z.number().int().positive().default(5_242_880), showHidden: z.boolean().default(false), allowHostFsForOwner: z.boolean().default(false), denyGlobs: z.array(z.string()).default(['**/.env*', '**/*.pem', '**/*.key', '**/id_rsa*', '**/.ssh/**', '**/.git/config', '<root>/config/**', '<root>/data/luoli.db*', '<root>/memory/**']), trashDir: z.string().default('.luoli-trash'), backupDir: z.string().default('.luoli-bak') }).default({}),
     exec: z.object({ defaultTimeoutMs: z.number().int().positive().default(60_000), maxTimeoutMs: z.number().int().positive().default(300_000), maxOutputBytes: z.number().int().positive().default(65_536) }).default({}),
     archive: z.object({ defaultSearchLimit: z.number().int().positive().default(20), maxSearchLimit: z.number().int().positive().default(100), defaultReadLimit: z.number().int().positive().default(50), maxReadLimit: z.number().int().positive().default(200) }).default({}),

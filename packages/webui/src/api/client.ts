@@ -2,14 +2,23 @@ import { reactive } from 'vue';
 
 export const auth = reactive({ csrf: '', authenticated: false });
 
+/**
+ * 服务端的错误体带 `code` 与 `details`，而调用方此前只拿得到 `message` —— 想按错误种类分支
+ * （`relax_requires_confirmation` 要弹二次确认再重发）就只能去匹配文案。带上它们，`.message`
+ * 的既有用法一个都不受影响。
+ */
+export class ApiError extends Error {
+  constructor(message: string, readonly code: string, readonly details?: unknown) { super(message); this.name = 'ApiError'; }
+}
+
 export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers);
   if (options.body) headers.set('Content-Type', 'application/json');
   if (!['GET', 'HEAD'].includes(options.method ?? 'GET') && auth.csrf) headers.set('X-CSRF-Token', auth.csrf);
   const response = await fetch(path, { ...options, headers });
   if (response.status === 401 && location.pathname !== '/login') location.assign('/login');
-  const result = await response.json() as { ok: boolean; data?: T; error?: { message: string } };
-  if (!result.ok) throw new Error(result.error?.message ?? '请求失败');
+  const result = await response.json() as { ok: boolean; data?: T; error?: { message: string; code?: string; details?: unknown } };
+  if (!result.ok) throw new ApiError(result.error?.message ?? '请求失败', result.error?.code ?? 'unknown', result.error?.details);
   return result.data as T;
 }
 export async function apiStream<T>(path: string, options: RequestInit, onEvent: (event: T) => void | Promise<void>): Promise<void> {

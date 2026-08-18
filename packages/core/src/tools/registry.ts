@@ -1,8 +1,8 @@
 import { z } from 'zod';
 import type { Role, RuntimeTurnContext } from '@luoli/shared';
 import { elideMiddleBytes, roleRank, untrusted } from '@luoli/shared';
-import type { ToolPolicyEntry, ToolName } from './policy.js';
-import { SKILL_NARROWING_EXEMPT, TOOL_POLICY } from './policy.js';
+import type { ToolPolicyEntry, ToolName, ToolOverride } from './policy.js';
+import { SKILL_NARROWING_EXEMPT, TOOL_POLICY, effectiveToolPolicy, relaxedFields } from './policy.js';
 import type { LogSink } from '../log/sink.js';
 import { ApprovalRules, type ApprovalRisk } from '../approval/rules.js';
 export type { ApprovalRisk } from '../approval/rules.js';
@@ -79,8 +79,8 @@ export class ToolRegistry {
   readonly #limits: () => ToolLimits;
   readonly #rulesSource: () => readonly unknown[];
   #rulesCache: { source: readonly unknown[]; rules: ApprovalRules } | null = null;
-  /** 运维在 WebUI 上关掉的工具。用 getter 读取，保证配置热更新后立即生效。 */
-  #overrides: () => Readonly<Record<string, { enabled?: boolean }>> = () => ({});
+  /** 运维在 WebUI 上按下的那份覆盖（启停 + minRole/审批/超时）。用 getter 读取，保证配置热更新后立即生效。 */
+  #overrides: () => Readonly<Record<string, ToolOverride>> = () => ({});
   /** limits 与 approvalRules 同样接受 getter：两者在 doc 11 都标着热更新，吃快照就是冻住
    *  （新增的高危命令规则要重启才生效，docs/20 · W-CFG-02）。 */
   constructor(private readonly log: LogSink, private readonly approval: ApprovalBroker, limits: ToolLimits | (() => ToolLimits), approvalRules: readonly unknown[] | (() => readonly unknown[]) = [], private readonly hooks?: { hook(name: string, ...arguments_: unknown[]): Promise<unknown[]> }) {
@@ -95,12 +95,21 @@ export class ToolRegistry {
     return this.#rulesCache.rules;
   }
 
-  bindOverrides(overrides: () => Readonly<Record<string, { enabled?: boolean }>>): void {
+  bindOverrides(overrides: () => Readonly<Record<string, ToolOverride>>): void {
     this.#overrides = overrides;
   }
 
   disabledByOperator(name: string): boolean {
     return this.#overrides()[name]?.enabled === false;
+  }
+
+  /**
+   * 本次生效的策略 = 注册期那份 + 运维覆盖。**读 minRole / approval 一律走这里**，直接读
+   * `tool.policy` 就是绕过覆盖层 —— 而这两个字段各有两处消费点（目录过滤与准入复查、
+   * 审批基准与 `approvalFor` 抬档），漏掉任何一处的表现都是「界面上关严了，运行时没有」。
+   */
+  effectivePolicy(tool: RegisteredTool): ToolPolicyEntry {
+    return effectiveToolPolicy(tool.policy, this.#overrides()[tool.name]);
   }
 
   register<I>(tool: RegisteredTool<I>): void {
@@ -127,7 +136,7 @@ export class ToolRegistry {
   active(role: Role, context: ToolExecutionContext, allow?: string[]): RegisteredTool[] {
     const state = this.#state(context.turn.turnId);
     const tools = [...this.#tools.values()]
-      .filter((tool) => roleRank(role) >= roleRank(tool.policy.minRole))
+      .filter((tool) => roleRank(role) >= roleRank(this.effectivePolicy(tool).minRole))
       .filter((tool) => !this.disabledByOperator(tool.name))
       .filter((tool) => !state.disabled.has(tool.name))
       .filter((tool) => !allow || allow.includes(tool.name))
@@ -168,7 +177,7 @@ export class ToolRegistry {
     if (state.disabled.has(name)) return { ok: false, error: 'tool_disabled_after_errors', hint: `本轮连续失败 ${this.#limits().maxConsecutiveErrors} 次后已停用，换个办法或如实告诉用户。` };
     // 目录过滤之外再挡一次：模型可能沿用上一步的工具名，运维的禁用必须是硬边界。
     if (this.disabledByOperator(name)) return { ok: false, error: 'tool_disabled_by_operator', warn: true };
-    if (roleRank(context.turn.effectiveRole) < roleRank(tool.policy.minRole)) return { ok: false, error: '权限不足' };
+    if (roleRank(context.turn.effectiveRole) < roleRank(this.effectivePolicy(tool).minRole)) return { ok: false, error: '权限不足' };
     // active() 的过滤集合必须在这里逐条复查，否则「目录里没有」就成了唯一的边界，而模型完全可以
     // 凭上一步的工具名直接调过来。目前每个相关工具恰好各自 fail-closed，但那是巧合不是设计
     // （docs/20 · W-TOOL-01；docs/05 §220「单一数据源」）。
@@ -183,11 +192,15 @@ export class ToolRegistry {
   /**
    * 审批档位合并。`approvalFor` 让工具按**本轮配置**把自己抬进审批（`memory.pubWriteRequiresApproval`
    * 就是这么接的）。它只能抬高，不能放低 —— 否则一个工具就能把自己从注册期定死的档位里摘出去。
+   *
+   * 运维覆盖设的是**基准档**，同样只参与这次取最严：把 `memory_write` 的基准改成 `never`，
+   * `approvalFor` 该抬还是抬（docs/09 §3.7）。
    */
   #approvalDecision(tool: RegisteredTool, input: unknown, context: ToolExecutionContext): { needed: boolean; risk: ApprovalRisk } {
     const escalated = tool.approvalFor?.(input, context);
-    const effective = escalated === 'always' || tool.policy.approval === 'always' ? 'always'
-      : escalated === 'conditional' || tool.policy.approval === 'conditional' ? 'conditional' : tool.policy.approval;
+    const base = this.effectivePolicy(tool).approval;
+    const effective = escalated === 'always' || base === 'always' ? 'always'
+      : escalated === 'conditional' || base === 'conditional' ? 'conditional' : base;
     if (effective === 'always') return { needed: true, risk: 'high' };
     if (effective === 'conditional') return this.#approvalRules().evaluate(tool, input, context);
     return { needed: false, risk: 'low' };
@@ -221,7 +234,11 @@ export class ToolRegistry {
     // 挂住的工具调用会挂住整轮：AI SDK 的 toolMs 只是把一个信号递给 execute()，工具不认它就等于
     // 没有超时。这里改成硬 race —— 到点就把失败交回模型，让它换个做法，而不是让用户对着沉默
     // 一直等到 `turnTimeoutMs`（logs/2026-08-17 有 7 轮只有 turn.start 没有 turn.end）。
-    const budget = tool.timeoutMs === null ? null : tool.timeoutMs ?? this.#limits().defaultTimeoutMs ?? FALLBACK_TOOL_TIMEOUT_MS;
+    // `timeoutMs === null` 的分支必须在最前面：bash / python / spawn_agent / spawn_harness /
+    // ask_parent 各有自己的硬期限，运维从工具页给它们套一层外层 race 会在它们自己的超时之前
+    // 把调用砍掉（工具页对这几个置灰，这里是不信界面的那道兜底）。
+    const budget = tool.timeoutMs === null ? null
+      : this.#overrides()[name]?.timeoutMs ?? tool.timeoutMs ?? this.#limits().defaultTimeoutMs ?? FALLBACK_TOOL_TIMEOUT_MS;
     try {
       const called = tool.execute(parsed.data, context);
       const rawOutput = budget === null ? await called : await withTimeout(called, budget);
@@ -250,6 +267,27 @@ export class ToolRegistry {
 
   catalog(role: Role, context: ToolExecutionContext): Array<{ name: string; description: string; policy: ToolPolicyEntry }> {
     return this.active(role, context).map(({ name, description, policy }) => ({ name, description, policy }));
+  }
+
+  /**
+   * 工具页要的那张表：每个**已注册**工具的默认策略、当前生效策略、以及哪几项被放宽了。
+   *
+   * 由注册表来出这份数据而不是让服务端拿 `TOOL_POLICY` 自己再算一遍：合并逻辑只有一份才不会
+   * 出现「面板显示的权限和运行时判的不是一回事」。顺带 MCP / plugin 注册进来的工具也进了这张表
+   * —— 之前的 `GET /api/tools` 只枚举 `TOOL_POLICY`，那些工具在面板上根本不存在，而
+   * `disabledByOperator` 一直是认它们的。
+   */
+  describe(): Array<{ name: string; description: string; defaults: ToolPolicyEntry; effective: ToolPolicyEntry;
+    enabled: boolean; timeoutMs: number | null; defaultTimeoutMs: number | null; selfManagedTimeout: boolean; relaxed: Array<'minRole' | 'approval'> }> {
+    const overrides = this.#overrides();
+    return [...this.#tools.values()].sort((a, b) => a.name.localeCompare(b.name)).map((tool) => {
+      const override = overrides[tool.name];
+      const selfManaged = tool.timeoutMs === null;
+      const declared = selfManaged ? null : tool.timeoutMs ?? this.#limits().defaultTimeoutMs ?? FALLBACK_TOOL_TIMEOUT_MS;
+      return { name: tool.name, description: tool.description, defaults: tool.policy, effective: this.effectivePolicy(tool),
+        enabled: override?.enabled !== false, timeoutMs: selfManaged ? null : override?.timeoutMs ?? declared,
+        defaultTimeoutMs: declared, selfManagedTimeout: selfManaged, relaxed: relaxedFields(tool.policy, override) };
+    });
   }
 
   #normalizeOutput(name: string, output: object, wrap: boolean): object {

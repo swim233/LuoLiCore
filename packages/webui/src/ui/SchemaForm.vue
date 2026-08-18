@@ -147,6 +147,7 @@ const openGroups = ref(new Set<string>());
 const search = ref('');
 const hotOnly = ref(false);
 const showUnwired = ref(false);
+const nonDefaultOnly = ref(false);
 
 /** 外部刷新（`config.changed`）不能冲掉正在编辑的格子：只回写没动过的那些。 */
 function sync(): void {
@@ -170,11 +171,32 @@ function clearSecret(field: Field): void {
 }
 function keepSecret(field: Field): void { const next = new Set(cleared.value); next.delete(field.path); cleared.value = next; }
 const changedPaths = computed(() => new Set(changed.value.map((field) => field.path)));
+/**
+ * 「这个部署到底改过什么」：当前值 ≠ schema 的 `default`。实测一个真实部署 243 个叶子里只有 21 个
+ * 偏离默认值，而在此之前界面上答不出这一条 —— 「原始 YAML」给的是**覆盖层不是差异集**
+ * （专用面板保存时整组写回，`config_kv` 里大半行的值与默认值相同）。
+ *
+ * 两处「判不出来就不标」，都不是保守而是别撒谎：`defaultValue` 取的是 `classify` 里那个**未解析**
+ * 节点上的值（跟着 `$ref` 走会拿到被指向那个键的默认值，`memory.pubWriteMinRole` 会在没人动过它的
+ * 时候被标成非默认）；值本身缺失时同理 —— 那说明这份 value 不完整，不是有人改过。
+ * 与「待保存」是两件事：待保存 = 这次编辑还没提交，非默认 = 已经生效的值不是代码默认值。
+ */
+function isNonDefault(field: Field): boolean {
+  if (field.defaultValue === undefined) return false;
+  const current = dotted(props.value, field.path);
+  if (current === undefined) return false;
+  return JSON.stringify(current) !== JSON.stringify(field.defaultValue);
+}
+const nonDefaultPaths = computed(() => new Set(fields.value.filter(isNonDefault).map((field) => field.path)));
+const nonDefaultCount = computed(() => nonDefaultPaths.value.size);
 const matches = (field: Field): boolean => {
   const needle = search.value.trim().toLowerCase();
   // 说明文字一并参与匹配：运维记得住「沙箱」「防秒回」，记不住 sandbox.pidsLimit 这种键名。
   if (needle && !field.path.toLowerCase().includes(needle) && !field.description.toLowerCase().includes(needle)) return false;
   if (hotOnly.value && !field.hot) return false;
+  // 正在编辑的格子不能被这个筛选吞掉：改到一半勾上「只看非默认值」，那一格连同未保存的值一起消失，
+  // 而 `changed` 仍然算着它 —— 保存按钮说有 1 项改动，页面上却找不到是哪一项。
+  if (nonDefaultOnly.value && !nonDefaultPaths.value.has(field.path) && !changedPaths.value.has(field.path)) return false;
   // 未接线的键默认藏起来：它们连控件都是禁用的，混在里面只会让人以为改得动。
   return field.wired || showUnwired.value;
 };
@@ -184,10 +206,14 @@ const groups = computed(() => {
     if (!matches(field)) continue;
     grouped.set(field.group, [...(grouped.get(field.group) ?? []), field]);
   }
-  return [...grouped].map(([name, entries]) => ({ name, entries, note: groupNote(name), dirty: entries.filter((field) => changedPaths.value.has(field.path)).length }));
+  return [...grouped].map(([name, entries]) => ({ name, entries, note: groupNote(name),
+    dirty: entries.filter((field) => changedPaths.value.has(field.path)).length,
+    nonDefault: entries.filter((field) => nonDefaultPaths.value.has(field.path)).length }));
 });
 const hidden = computed(() => fields.value.length - groups.value.reduce((sum, group) => sum + group.entries.length, 0));
+// 筛完还要再点开八个分组才看得见结果，那这个筛选等于没做 —— 搜索与「只看非默认值」都自动展开。
 watch(search, (needle) => { if (needle.trim()) openGroups.value = new Set(groups.value.map((group) => group.name)); });
+watch(nonDefaultOnly, (on) => { if (on) openGroups.value = new Set(groups.value.map((group) => group.name)); });
 function toggleGroup(name: string): void {
   const next = new Set(openGroups.value);
   if (next.has(name)) next.delete(name); else next.add(name);
@@ -273,15 +299,20 @@ defineExpose({ commit });
   <div class="schema-form">
     <div class="schema-toolbar">
       <label class="search grow"><i class="pi pi-search" /><input v-model="search" placeholder="搜键名或说明，例如 沙箱、防秒回、logs."></label>
+      <UiCheckbox v-model="nonDefaultOnly" :label="`只看非默认值（${nonDefaultCount}）`" title="当前值和代码默认值不一样的那几项 —— 也就是这个部署真正改过的。没有默认值的叶子判不出来，不算在内" />
       <UiCheckbox v-model="hotOnly" label="只看热更新项" />
       <UiCheckbox v-model="showUnwired" label="显示未接线项" />
-      <UiButton variant="text" size="small" :icon="allOpen ? 'pi pi-chevron-up' : 'pi pi-chevron-down'" :label="allOpen ? '全部收起' : '全部展开'" :disabled="!groups.length" @click="toggleAll" />
-      <UiButton variant="text" size="small" label="放弃改动" :disabled="!changed.length || saving" @click="reset" />
-      <UiButton icon="pi pi-save" :label="changed.length ? `${saveLabel} ${changed.length} 项` : '没有改动'" :disabled="!changed.length || Boolean(problems.length)" :loading="saving" @click="save" />
+      <!-- 三个按钮收成一组：工具栏是 flex-wrap，散着放时窄屏上「保存」会自己掉到第二行最左边，
+           读成一个跟上面无关的孤立按钮。成组之后它们整体换行并仍然靠右。 -->
+      <span class="schema-toolbar-actions">
+        <UiButton variant="text" size="small" :icon="allOpen ? 'pi pi-chevron-up' : 'pi pi-chevron-down'" :label="allOpen ? '全部收起' : '全部展开'" :disabled="!groups.length" @click="toggleAll" />
+        <UiButton variant="text" size="small" label="放弃改动" :disabled="!changed.length || saving" @click="reset" />
+        <UiButton icon="pi pi-save" :label="changed.length ? `${saveLabel} ${changed.length} 项` : '没有改动'" :disabled="!changed.length || Boolean(problems.length)" :loading="saving" @click="save" />
+      </span>
     </div>
     <p v-if="problems.length" class="callout error"><i class="pi pi-exclamation-triangle" />{{ problems.join('；') }}</p>
     <p class="section-note">
-      共 {{ fields.length }} 个 schema 叶子<span v-if="hidden">，当前筛掉 {{ hidden }} 个</span>；每格的说明来自 schema 的 <code>description</code>
+      共 {{ fields.length }} 个 schema 叶子，其中 <b>{{ nonDefaultCount }}</b> 项的当前值不是代码默认值（左侧带色条）<span v-if="hidden">；当前筛掉 {{ hidden }} 个</span>。每格的说明来自 schema 的 <code>description</code>
       （唯一来源是 core 的 <code>CONFIG_DESCRIPTIONS</code>）。写入走 <code>PUT /api/config</code> 的点分键，整体过一次
       <code>configSchema</code> 校验后落 <code>config_kv</code> + <code>config_revisions</code>；<b>只发真正改过的那几项</b>。
     </p>
@@ -291,11 +322,12 @@ defineExpose({ commit });
         <b>{{ group.name }}</b>
         <small v-if="group.note">{{ group.note }}</small>
         <UiTag v-if="group.dirty" :value="`${group.dirty} 项待保存`" severity="warn" />
+        <span v-if="group.nonDefault" class="count nd" title="这一组里当前值和代码默认值不一样的项数">{{ group.nonDefault }} 项非默认</span>
         <span class="count">{{ group.entries.length }} 项</span>
       </button>
       <div v-if="openGroups.has(group.name)" class="schema-fields">
         <component :is="field.kind === 'boolean' ? 'div' : 'label'" v-for="field in group.entries" :key="field.path"
-          :class="['schema-field', { dirty: changedPaths.has(field.path), off: !field.wired, wide: field.kind === 'json' || field.kind === 'stringList' }]">
+          :class="['schema-field', { dirty: changedPaths.has(field.path), nondefault: nonDefaultPaths.has(field.path), off: !field.wired, wide: field.kind === 'json' || field.kind === 'stringList' }]">
           <span class="schema-key"><code><span v-if="field.label !== field.path" class="prefix">{{ field.group }}.</span>{{ field.label }}</code><UiTag :value="badge(field).label" :severity="badge(field).severity" :title="badge(field).hint" /></span>
           <p v-if="field.description" class="schema-desc">{{ field.description }}</p>
           <template v-if="field.pinnedEnv">

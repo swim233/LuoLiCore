@@ -17,7 +17,7 @@ import UiBarChart from '../ui/UiBarChart.vue';
 import UiRing from '../ui/UiRing.vue';
 import { pushToast, toastError } from '../ui/toast';
 import type { Attachment, GridColumn, TagSeverity } from '../ui/types';
-import { api, apiStream, hydrateSession } from '../api/client';
+import { api, ApiError, apiStream, hydrateSession } from '../api/client';
 
 interface TrendPoint { day: string; messages: number; turns: number; costUsd: number }
 interface Dashboard { turns: { total: number; running: number; failed: number; cost: number }; messages: { total: number }; providers: { total: number; enabled: number }; trend?: TrendPoint[] }
@@ -46,7 +46,10 @@ interface Conversation { id: string; key: string; chatId: string; userId: string
   steps: number; toolCalls: number; inputTokens: number; outputTokens: number; costUsd: number; error: string | null; rebased: number; promptMessageId: number | null;
   prompt: string | null; promptKind: string | null; fromName: string | null; fromUsername: string | null; reply: string; attachments: Attachment[] }
 interface MessageHit { id: number; chatId: string; direction: string; fromName: string | null; fromUsername: string | null; kind: string; text: string | null; tgDate: number; turnId: string | null; attachments: Attachment[] }
-interface ToolPolicy { minRole: string; approval: string; scope: string; source: string; enabled: boolean }
+// 扁平字段是**生效值**，`defaults` 是代码里 `TOOL_POLICY` 那份，`relaxed` 列出比默认更松的字段。
+// 两者都要显示：只给一个的话运维看不出自己偏离了多少（docs/09 §3.7）。
+interface ToolPolicy { minRole: string; approval: string; scope: string; source: string; enabled: boolean; timeoutMs: number | null;
+  selfManagedTimeout: boolean; defaults: { minRole: string; approval: string; timeoutMs: number | null }; relaxed: string[] }
 // `source`：config = 只在 agent.agents 里；file = 只在 agents/<name>.md 里；
 // file-overridden = 两边都有，运行时用的是配置那份（docs/14 §2 Q5-a：DB 赢）。
 interface AgentDefinition { name: string; description: string; modelAlias: string; maxSteps: number; minRole: string; tools: string[]; resultMaxChars: number; instructions: string; injectMemory: boolean; source?: 'config' | 'file' | 'file-overridden' }
@@ -224,7 +227,7 @@ const currentLabel = computed(() => navigation.find(([key]) => key === active.va
 /** 每一条 pending 都对应一个正卡在工具调用上的真实轮次，所以角标挂在导航上而不是只在任务页里。 */
 const pendingApprovals = computed(() => approvals.value.filter((row) => row.state === 'pending').length);
 const COLUMNS = {
-  tools: [{ key: 'name', header: '工具' }, { key: 'source', header: '来源', width: '7rem' }, { key: 'minRole', header: '最低角色', width: '7rem' }, { key: 'approval', header: '审批', width: '7rem' }, { key: 'scope', header: '作用域', width: '8rem' }, { key: 'enabled', header: '状态', width: '6rem' }],
+  tools: [{ key: 'name', header: '工具' }, { key: 'source', header: '来源', width: '7rem' }, { key: 'minRole', header: '最低角色', width: '8rem' }, { key: 'approval', header: '审批', width: '9rem' }, { key: 'scope', header: '作用域', width: '8rem' }, { key: 'enabled', header: '状态', width: '8rem' }],
   agents: [{ key: 'name', header: '名称' }, { key: 'description', header: '职责' }, { key: 'minRole', header: '最低角色', width: '7rem' }, { key: 'modelAlias', header: '模型别名', width: '8rem' }, { key: 'tools', header: '可用工具' }, { key: 'maxSteps', header: '步数上限', width: '6rem' }, { key: 'actions', header: '', width: '6rem' }],
   hits: [{ key: 'tgDate', header: '时间', width: '12rem' }, { key: 'chatId', header: '会话', width: '9rem' }, { key: 'from', header: '发言人', width: '10rem' }, { key: 'text', header: '内容' }, { key: 'detail', header: '操作', width: '8rem' }],
   usage: [{ key: 'ts', header: '时间', width: '13rem' }, { key: 'model_alias', header: '别名' }, { key: 'input_tokens', header: '输入' }, { key: 'output_tokens', header: '输出' }, { key: 'cost_usd', header: '成本' }],
@@ -807,25 +810,81 @@ async function saveBulk(): Promise<void> {
   finally { bulkSaving.value = false; }
 }
 
-// ── 工具：策略是代码里的常量，这里能改的只有启停 ──────────────────────────────
+// ── 工具：代码里的 TOOL_POLICY 是默认值，这里写的是覆盖层（docs/09 §3.7）────────
 const TOOL_SOURCE_LABEL: Record<string, string> = { builtin: '内建', agent: '子 Agent', plugin: 'Plugin', mcp: 'MCP' };
 const APPROVAL_LABEL: Record<string, string> = { never: '不需要', always: '每次都要', conditional: '按规则判定' };
 const SCOPE_LABEL: Record<string, string> = { workspace: '工作区文件', chat: '当前会话', private: '用户私有', global: '全局', sandbox: '沙箱执行', telegram: 'Telegram' };
+const ROLE_OPTIONS = ['blocked', 'limited', 'trusted', 'owner'].map((value) => ({ value, label: value }));
+const APPROVAL_OPTIONS = ['never', 'conditional', 'always'].map((value) => ({ value, label: `${value}（${APPROVAL_LABEL[value]}）` }));
 const toolRows = computed(() => Object.entries(tools.value).map(([name, policy]) => ({ name, ...policy })));
+const overriddenToolCount = computed(() => toolRows.value.filter((row) => row.minRole !== row.defaults?.minRole
+  || row.approval !== row.defaults?.approval || (row.timeoutMs ?? null) !== (row.defaults?.timeoutMs ?? null)).length);
 const toolDialog = ref(false);
 const toolSaving = ref(false);
-const toolForm = ref<{ name: string; minRole: string; approval: string; scope: string; source: string; enabled: boolean; original: boolean }>({ name: '', minRole: '', approval: '', scope: '', source: '', enabled: true, original: true });
-function editTool(row: { name: string } & ToolPolicy): void { toolForm.value = { ...row, original: row.enabled }; toolDialog.value = true; }
-async function saveTool(): Promise<void> {
+interface ToolForm { name: string; minRole: string; approval: string; scope: string; source: string; enabled: boolean; timeoutMs: number | null;
+  selfManagedTimeout: boolean; defaults: { minRole: string; approval: string; timeoutMs: number | null }; original: ToolPolicy }
+const toolForm = ref<ToolForm>({ name: '', minRole: 'limited', approval: 'never', scope: '', source: '', enabled: true, timeoutMs: null,
+  selfManagedTimeout: false, defaults: { minRole: 'limited', approval: 'never', timeoutMs: null }, original: {} as ToolPolicy });
+/** 「比代码默认更松」的判据在前端只是**提示**，真正拦截在服务端（409）—— 两处都判是因为界面要在点保存之前就把红条摆出来。 */
+const ROLE_RANK = ['blocked', 'limited', 'trusted', 'owner'];
+const APPROVAL_RANK = ['never', 'conditional', 'always'];
+const toolFormRelaxed = computed(() => {
   const form = toolForm.value;
-  if (form.enabled === form.original) { toolDialog.value = false; return; }
+  const out: string[] = [];
+  if (ROLE_RANK.indexOf(form.minRole) < ROLE_RANK.indexOf(form.defaults.minRole)) out.push('最低角色');
+  if (APPROVAL_RANK.indexOf(form.approval) < APPROVAL_RANK.indexOf(form.defaults.approval)) out.push('审批策略');
+  return out;
+});
+const toolFormDirty = computed(() => {
+  const { original: was, ...now } = toolForm.value;
+  return now.enabled !== was.enabled || now.minRole !== was.minRole || now.approval !== was.approval || (now.timeoutMs ?? null) !== (was.timeoutMs ?? null);
+});
+function editTool(row: { name: string } & ToolPolicy): void {
+  toolForm.value = { name: row.name, minRole: row.minRole, approval: row.approval, scope: row.scope, source: row.source,
+    enabled: row.enabled, timeoutMs: row.timeoutMs ?? null, selfManagedTimeout: row.selfManagedTimeout === true,
+    defaults: { minRole: row.defaults?.minRole ?? row.minRole, approval: row.defaults?.approval ?? row.approval, timeoutMs: row.defaults?.timeoutMs ?? null },
+    original: { ...row } };
+  toolDialog.value = true;
+}
+function resetToolField(field: 'minRole' | 'approval' | 'timeoutMs'): void {
+  const form = toolForm.value;
+  if (field === 'timeoutMs') form.timeoutMs = form.defaults.timeoutMs; else form[field] = form.defaults[field];
+}
+/** 覆盖值等于默认值时发 `null`（= 恢复默认，把字段从那条 JSON 里删掉），而不是把默认值抄一份存进去。 */
+function toolPatchBody(form: ToolForm, confirmRelax: boolean): string {
+  return JSON.stringify({ enabled: form.enabled,
+    minRole: form.minRole === form.defaults.minRole ? null : form.minRole,
+    approval: form.approval === form.defaults.approval ? null : form.approval,
+    timeoutMs: form.selfManagedTimeout || form.timeoutMs === null || form.timeoutMs === form.defaults.timeoutMs ? null : form.timeoutMs,
+    ...(confirmRelax ? { confirmRelax: true } : {}) });
+}
+const toolRelaxDialog = ref(false);
+const toolRelaxDetails = ref<Array<{ path: string; from: string; to: string }>>([]);
+async function saveTool(confirmRelax = false): Promise<void> {
+  const form = toolForm.value;
+  if (!toolFormDirty.value) { toolDialog.value = false; return; }
   toolSaving.value = true;
   try {
-    await api(`/api/tools/${encodeURIComponent(form.name)}`, { method: 'PATCH', body: JSON.stringify({ enabled: form.enabled }) });
+    const saved = await api<{ relaxed: string[]; effective: { minRole: string; approval: string } }>(`/api/tools/${encodeURIComponent(form.name)}`,
+      { method: 'PATCH', body: toolPatchBody(form, confirmRelax) });
+    toolRelaxDialog.value = false;
     toolDialog.value = false;
-    pushToast({ severity: 'success', summary: `${form.name} 已${form.enabled ? '启用' : '停用'}`, detail: form.enabled ? '下一轮起重新进入模型的工具目录' : '既从工具目录移除，execute() 也会二次拦截' });
+    const relaxed = toolFormRelaxed.value;
+    // 先按响应里的生效值就地更新那一行，再 load()。`config.changed` 之后的重载是异步的
+    // （`main.ts` 里 `void loadConfig(...).then(...)`），紧接着的 `GET /api/tools` 可能还读的是旧快照
+    // —— 那会表现成「保存成功，可表格里还是原样」，也就是 docs/21 · G-CFG-02 那种观感。
+    const row = tools.value[form.name];
+    if (row) tools.value[form.name] = { ...row, ...saved.effective, enabled: form.enabled, timeoutMs: form.timeoutMs, relaxed: saved.relaxed };
+    pushToast({ severity: relaxed.length ? 'warn' : 'success', summary: `${form.name} 的策略已更新`,
+      detail: relaxed.length ? `${relaxed.join(' 与 ')}比代码默认更松，这条改动已记进日志与配置变更历史` : '下一次工具调用即生效（tools.overrides 是热更新键）' });
     await load();
-  } catch (error) { toastError('保存工具开关失败', error); }
+  } catch (error) {
+    // 服务端在放宽时先回 409 且**一个字都没落库**，确认后带 confirmRelax 重发才写入。
+    if (error instanceof ApiError && error.code === 'relax_requires_confirmation') {
+      toolRelaxDetails.value = (error.details as Array<{ path: string; from: string; to: string }> | undefined) ?? [];
+      toolRelaxDialog.value = true;
+    } else toastError('保存工具设置失败', error);
+  }
   finally { toolSaving.value = false; }
 }
 
@@ -1315,6 +1374,23 @@ async function removeMcp(name: string): Promise<void> {
   try { await api(`/api/mcp/${encodeURIComponent(name)}`, { method: 'DELETE' }); pushToast({ severity: 'success', summary: `MCP ${name} 已删除` }); mcpDialog.value = false; await load(); }
   catch (error) { toastError('删除 MCP 失败', error); }
 }
+
+/**
+ * 设置页的四个二级 tab（docs/09 §3.13）。此前是一条长滚动：八个区块并排，分组全折叠时首屏 4430 px，
+ * 「全部配置」点一次全部展开是 28075 px —— 而这八块是四类访问频率差两三个数量级的东西
+ * （日常旋钮 / 全量表单 / 运维动作 / 逃生舱），在页面上却权重完全相同。
+ * 改这里时连同 `tests/webui/console.render.test.ts` 的 `SETTINGS_TABS` 一起改：那条用例逐个切过去
+ * 断言有内容，少一个分支等于那个 tab 从此没人渲染过。
+ */
+const SETTINGS_TABS = [
+  ['common', '常用', '触发与唤醒词、输出节奏'],
+  ['all', '全部配置', 'schema 自动生成的全量表单'],
+  ['maintenance', '维护', '登录口令、备份与清理、重启、导出 / 导入'],
+  ['advanced', '高级', '原始 YAML 覆盖层与合并结果'],
+] as const;
+const settingsTab = ref<(typeof SETTINGS_TABS)[number][0]>('common');
+/** 合并结果默认收起：它和「全部配置」是同一份数据的两种视图，常驻只会占掉一屏并让人以为那才是真正的配置源。 */
+const mergedConfigOpen = ref(false);
 
 // ── 维护：备份 / VACUUM / 清日志 / 清孤儿 / 重建 FTS ───────────────────────────────────
 const MAINTENANCE_ACTIONS = [
@@ -2107,14 +2183,14 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             </footer>
           </template>
         </section>
-        <section v-else-if="active === 'tools'" key="tools" class="surface page-surface"><header><div><p class="eyebrow">TOOL POLICY</p><h2>工具与权限</h2><p>单一策略源决定角色、审批和作用域。点任一行查看详情并启停。</p></div><UiTag :value="`${toolRows.filter((row) => row.enabled).length} / ${toolRows.length} 启用`" :severity="toolRows.every((row) => row.enabled) ? 'secondary' : 'warn'" /></header>
+        <section v-else-if="active === 'tools'" key="tools" class="surface page-surface"><header><div><p class="eyebrow">TOOL POLICY</p><h2>工具与权限</h2><p>代码里的 <code>TOOL_POLICY</code> 是默认值，这里改的是覆盖层。点任一行改启停 / 最低角色 / 审批 / 超时 —— 放宽会二次确认。</p></div><div class="header-tags"><UiTag v-if="overriddenToolCount" :value="`${overriddenToolCount} 项策略已覆盖`" severity="info" /><UiTag :value="`${toolRows.filter((row) => row.enabled).length} / ${toolRows.length} 启用`" :severity="toolRows.every((row) => row.enabled) ? 'secondary' : 'warn'" /></div></header>
           <DataGrid :rows="toolRows" :columns="COLUMNS.tools" data-key="name" paginate :page-size="15" clickable @row-click="editTool">
             <template #name="{ data }"><code>{{ data.name }}</code></template>
             <template #source="{ data }">{{ TOOL_SOURCE_LABEL[data.source] ?? data.source }}</template>
-            <template #minRole="{ data }"><UiTag :value="data.minRole" :severity="roleSeverity(data.minRole)" /></template>
-            <template #approval="{ data }">{{ APPROVAL_LABEL[data.approval] ?? data.approval }}</template>
+            <template #minRole="{ data }"><UiTag :value="data.minRole" :severity="roleSeverity(data.minRole)" /><i v-if="data.defaults && data.minRole !== data.defaults.minRole" class="pi pi-pencil overridden" :title="`代码默认 ${data.defaults.minRole}`" /></template>
+            <template #approval="{ data }">{{ APPROVAL_LABEL[data.approval] ?? data.approval }}<i v-if="data.defaults && data.approval !== data.defaults.approval" class="pi pi-pencil overridden" :title="`代码默认 ${data.defaults.approval}`" /></template>
             <template #scope="{ data }">{{ SCOPE_LABEL[data.scope] ?? data.scope }}</template>
-            <template #enabled="{ data }"><UiTag :value="data.enabled ? '启用' : '已停用'" :severity="data.enabled ? 'success' : 'danger'" /></template>
+            <template #enabled="{ data }"><UiTag :value="data.enabled ? '启用' : '已停用'" :severity="data.enabled ? 'success' : 'danger'" /><UiTag v-if="data.relaxed?.length" value="已放宽" severity="danger" :title="`${data.relaxed.join('、')} 比代码默认更松`" /></template>
           </DataGrid>
           <div class="registry-heading">
             <div><h3>审批规则试跑</h3><p class="section-note">拿一条样例输入过一遍<b>运行时那份</b> <code>ApprovalRules</code>：哪几条命中、为什么没命中、最终风险档位。规则本身在「全部配置」的 <code>approval.rules</code> 里编辑 —— 在这里再实现一遍匹配必然与运行时漂移，而「以为配了审批其实永不命中」正是这条配置最容易出的错。</p></div>
@@ -2427,22 +2503,13 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
         </div></section>
         <section v-else-if="active === 'settings'" key="settings" class="surface page-surface">
           <header><div><p class="eyebrow">CONFIGURATION</p><h2>配置与维护</h2><p>完整合并配置已通过 zod 校验；密钥字段不会回显。</p></div></header>
-          <div class="registry-heading">
-            <div><h3>修改登录口令</h3><p class="section-note">WebUI 只有一个身份（owner）。改完<b>立即生效、其余会话全部吊销</b>，不用重启进程。忘了当前口令只能线下 <code>pnpm webui:passwd</code> 生成哈希写进 <code>config.yaml</code>。</p></div>
-          </div>
-          <p v-if="passwordPinnedEnv" class="callout warn">
-            <i class="pi pi-lock" aria-hidden="true" />
-            口令由环境变量 <code>{{ passwordPinnedEnv }}</code> 固定：在这里改能改到当前进程，但重启后会被环境变量盖回去。要真正换口令，请改这个环境变量（或清掉它，让口令回到 <code>config_kv</code> 管）。
-          </p>
-          <div v-else class="form-grid">
-            <label>当前口令<input v-model="passwordForm.current" type="password" autocomplete="current-password" placeholder="用于确认是你本人"></label>
-            <label>新口令<input v-model="passwordForm.next" type="password" autocomplete="new-password" placeholder="至少 12 个字符"></label>
-            <label>再输一次<input v-model="passwordForm.confirm" type="password" autocomplete="new-password" placeholder="两次要一致"></label>
-            <div class="wide password-actions">
-              <UiButton icon="pi pi-key" label="更新口令" :loading="passwordSaving" :disabled="Boolean(passwordProblem)" @click="savePassword" />
-              <small class="field-note">{{ passwordProblem || '会吊销除当前会话之外的所有登录态。' }}</small>
-            </div>
-          </div>
+          <nav class="subtabs" aria-label="设置分区">
+            <button v-for="[key, label, hint] in SETTINGS_TABS" :key="key" type="button" :class="{ active: settingsTab === key }" :title="hint" @click="settingsTab = key">{{ label }}</button>
+          </nav>
+          <!-- 前三个 tab 是 v-show 而不是 v-if：触发 / 输出 / 全量表单各自握着未保存的草稿，v-if 会在切 tab 时
+               连同草稿一起销毁 —— 表现是「改了一半去看别的 tab，回来什么都没了、也没有任何提示」。
+               「高级」反过来必须 v-if：它要把整份合并配置 stringify 一遍（docs/09 §3.13）。 -->
+          <div v-show="settingsTab === 'common'" data-settings-tab="common">
           <div class="registry-heading">
             <div><h3>触发与唤醒词</h3><p class="section-note">决定哪条消息会开轮次。五个来源取并集，命中任一条就触发；群里没有任何一条命中时，消息只作为背景发言存档。保存后热更新，下一条消息即生效。</p></div>
             <UiButton size="small" icon="pi pi-save" label="保存触发设置" :loading="triggerSaving" :disabled="!triggerDirty" @click="saveTrigger" />
@@ -2496,6 +2563,24 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             <p class="wide" :class="placeholderList.length ? 'field-note' : 'callout warn'"><i v-if="!placeholderList.length" class="pi pi-info-circle" aria-hidden="true" />{{ placeholderPreview }}</p>
             <p class="field-note wide">会话级覆盖（<code>perChat.&lt;contextKey&gt;.output</code>）优先于这里的全局值。</p>
           </div>
+          </div>
+          <div v-show="settingsTab === 'maintenance'" data-settings-tab="maintenance">
+          <div class="registry-heading">
+            <div><h3>修改登录口令</h3><p class="section-note">WebUI 只有一个身份（owner）。改完<b>立即生效、其余会话全部吊销</b>，不用重启进程。忘了当前口令只能线下 <code>pnpm webui:passwd</code> 生成哈希写进 <code>config.yaml</code>。</p></div>
+          </div>
+          <p v-if="passwordPinnedEnv" class="callout warn">
+            <i class="pi pi-lock" aria-hidden="true" />
+            口令由环境变量 <code>{{ passwordPinnedEnv }}</code> 固定：在这里改能改到当前进程，但重启后会被环境变量盖回去。要真正换口令，请改这个环境变量（或清掉它，让口令回到 <code>config_kv</code> 管）。
+          </p>
+          <div v-else class="form-grid">
+            <label>当前口令<input v-model="passwordForm.current" type="password" autocomplete="current-password" placeholder="用于确认是你本人"></label>
+            <label>新口令<input v-model="passwordForm.next" type="password" autocomplete="new-password" placeholder="至少 12 个字符"></label>
+            <label>再输一次<input v-model="passwordForm.confirm" type="password" autocomplete="new-password" placeholder="两次要一致"></label>
+            <div class="wide password-actions">
+              <UiButton icon="pi pi-key" label="更新口令" :loading="passwordSaving" :disabled="Boolean(passwordProblem)" @click="savePassword" />
+              <small class="field-note">{{ passwordProblem || '会吊销除当前会话之外的所有登录态。' }}</small>
+            </div>
+          </div>
           <div class="registry-heading"><div><h3>维护操作</h3><p class="section-note">都是同步执行的：大库上会阻塞写入，跑的时候 bot 那边的消息会排队。</p></div></div>
           <div class="maintenance-grid">
             <article v-for="item in MAINTENANCE_ACTIONS" :key="item.action">
@@ -2511,12 +2596,16 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             <div class="section-actions"><UiButton size="small" variant="outlined" icon="pi pi-download" label="导出" :loading="exportBusy" @click="exportConfig" /><UiButton size="small" variant="outlined" icon="pi pi-upload" label="导入" @click="importFile?.click()" /></div>
           </div>
           <input ref="importFile" type="file" accept="application/json,.json" hidden @change="importConfig">
+          </div>
+          <div v-show="settingsTab === 'all'" data-settings-tab="all">
           <div class="registry-heading">
             <div><h3>全部配置</h3><p class="section-note">由 <code>config/config.schema.json</code> 自动生成 —— 控件形态、默认值、取值范围与每一项的作用说明全部取自 schema，不在前端维护第二份清单。搜索框同时匹配键名与说明。热更新项保存即生效，需重启项会在保存后的提示里点名。密钥字段是<b>只写</b>的（不回显，留空表示不改）；标「环境变量锁定」的键由环境变量最终决定，写进来也会被盖回去，所以不给改。</p></div>
             <UiButton size="small" variant="text" icon="pi pi-history" label="变更历史" @click="openConfigRevisions" />
           </div>
           <SchemaForm v-if="configSchema" ref="schemaForm" :schema="configSchema.schema" :value="config" :hot-reloadable="configSchema.hotReloadable" :unimplemented="configSchema.unimplemented" :env-pinned="configSchema.envPinned" :saving="schemaSaving" @save="saveSchemaConfig" />
           <p v-else class="empty-card"><i class="pi pi-spin pi-spinner" aria-hidden="true" /> 正在加载配置 schema…</p>
+          </div>
+          <div v-if="settingsTab === 'advanced'" data-settings-tab="advanced">
           <div class="registry-heading">
             <div><h3>原始 YAML</h3><p class="section-note">直接编辑<b>覆盖层</b>（<code>config_kv</code>），不是合并后的全量 —— 全量里绝大多数是代码默认值。解析与校验都在服务端（和启动时那份 <code>loadConfig</code> 用同一个解析器，不会「界面上过了、启动时炸了」），语法错误会给出行号。落库按顶层段覆盖。</p></div>
             <div class="section-actions"><UiButton size="small" variant="text" :icon="yamlMode ? 'pi pi-times' : 'pi pi-code'" :label="yamlMode ? '收起' : '编辑 YAML'" @click="toggleYamlMode" /><UiButton v-if="yamlMode" size="small" icon="pi pi-save" label="保存 YAML" :loading="yamlSaving" @click="saveYaml" /></div>
@@ -2526,8 +2615,12 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             <p v-if="yamlError" class="callout warn"><i class="pi pi-exclamation-triangle" />{{ yamlError }}</p>
             <textarea v-model="yamlText" class="yaml-editor" rows="24" spellcheck="false" aria-label="原始 YAML 覆盖层" />
           </template>
-          <div class="registry-heading"><div><h3>合并后的完整配置</h3><p class="section-note">config.yaml → DB 覆盖层 → 环境变量三层合并的结果，只读；上面那张表单改的就是这份 JSON 里的值。</p></div></div>
-          <pre class="config-preview" v-text="JSON.stringify(config, null, 2)" />
+          <div class="registry-heading">
+            <div><h3>合并后的完整配置</h3><p class="section-note"><code>config.yaml</code> → DB 覆盖层 → 环境变量三层合并的结果，只读 ——「全部配置」那张表单改的就是这份 JSON 里的值。<b>默认收起</b>：它和那张表单是同一份数据的两种视图，而能改的是表单那一份。</p></div>
+            <UiButton size="small" variant="text" :icon="mergedConfigOpen ? 'pi pi-chevron-up' : 'pi pi-chevron-down'" :label="mergedConfigOpen ? '收起' : '展开'" @click="mergedConfigOpen = !mergedConfigOpen" />
+          </div>
+          <pre v-if="mergedConfigOpen" class="config-preview" v-text="JSON.stringify(config, null, 2)" />
+          </div>
         </section>
         <section v-else key="fallback" class="surface page-surface"><header><div><p class="eyebrow">{{ currentLabel.toUpperCase() }}</p><h2>{{ currentLabel }}</h2><p>该页读取统一安全 API；写操作必须携带 Session 与 CSRF token，并记录 webui.action 审计。</p></div></header><DataGrid :rows="logs.slice(0, 12)" :columns="COLUMNS.fallback" data-key="id" empty="暂无事件" /></section>
         </Transition>
@@ -2760,14 +2853,36 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
     <UiModal v-model:visible="toolDialog" :title="`工具 ${toolForm.name}`">
       <div class="form-grid">
         <label>来源<input :value="TOOL_SOURCE_LABEL[toolForm.source] ?? toolForm.source" disabled></label>
-        <label>最低角色<input :value="toolForm.minRole" disabled></label>
-        <label>审批策略<input :value="APPROVAL_LABEL[toolForm.approval] ?? toolForm.approval" disabled></label>
         <label>作用域<input :value="SCOPE_LABEL[toolForm.scope] ?? toolForm.scope" disabled></label>
-        <p class="wide field-note">上面四项是代码里的单一策略源（<code>TOOL_POLICY</code>），注册期就 fail-closed，不在这里改 —— 能从界面调低某个工具的最低角色，等于把权限矩阵变成两份会漂移的真相。</p>
+        <p class="wide field-note">来源由注册方式决定；作用域在运行时不参与任何判定（它是给人看的标签），所以这两项只读 —— 做成可写等于放一个改了没效果的开关。</p>
+        <label>最低角色
+          <UiSelect v-model="toolForm.minRole" :options="ROLE_OPTIONS" aria-label="最低角色" />
+          <small class="field-note">代码默认 <code>{{ toolForm.defaults.minRole }}</code><UiButton v-if="toolForm.minRole !== toolForm.defaults.minRole" size="small" variant="text" label="恢复默认" @click="resetToolField('minRole')" /></small>
+        </label>
+        <label>审批策略
+          <UiSelect v-model="toolForm.approval" :options="APPROVAL_OPTIONS" aria-label="审批策略" />
+          <small class="field-note">代码默认 <code>{{ toolForm.defaults.approval }}</code><UiButton v-if="toolForm.approval !== toolForm.defaults.approval" size="small" variant="text" label="恢复默认" @click="resetToolField('approval')" /></small>
+        </label>
+        <label>单次超时（毫秒）
+          <UiNumber v-if="!toolForm.selfManagedTimeout" v-model="toolForm.timeoutMs" :min="1" :step="1000" placeholder="留空 = 用默认" aria-label="单次超时" />
+          <input v-else value="工具自管" disabled>
+          <small class="field-note">
+            <template v-if="toolForm.selfManagedTimeout">这个工具自己管超时（<code>timeoutMs: null</code>），从外面套一层会在它自己的期限之前把调用砍掉，所以不可覆盖。</template>
+            <template v-else>代码默认 <code>{{ toolForm.defaults.timeoutMs ?? '继承 tools.defaultTimeoutMs' }}</code><UiButton v-if="toolForm.timeoutMs !== toolForm.defaults.timeoutMs" size="small" variant="text" label="恢复默认" @click="resetToolField('timeoutMs')" /></template>
+          </small>
+        </label>
+        <p class="wide field-note">覆盖只动<b>角色闸</b>与<b>审批闸</b>这两道，<b>绕不过 <code>available()</code></b>：<code>spawn_harness</code> 仍然只有 owner 且只在私聊，<code>web_fetch</code> 对 <code>limited</code> 的 allowlist 判定同理。<code>approvalFor</code> 的抬档也不受影响 —— 覆盖设的是基准档，<code>memory_write</code> 这类工具把基准改成 <code>never</code> 也照样抬。</p>
+        <p v-if="toolFormRelaxed.length" class="wide callout warn"><i class="pi pi-exclamation-triangle" aria-hidden="true" /><b>{{ toolFormRelaxed.join(' 与 ') }}比代码默认更松。</b>保存时会要求二次确认，并在日志与配置变更历史里各留一条记录。</p>
         <UiSwitch v-model="toolForm.enabled" class="wide" label="对所有会话启用" />
         <p class="wide field-note">停用是硬边界：工具既不进模型的工具目录，<code>execute()</code> 也会二次拦截并返回 <code>tool_disabled_by_operator</code>（模型可能沿用上一步的工具名）。</p>
       </div>
-      <template #footer><UiButton variant="text" label="取消" @click="toolDialog = false" /><UiButton :label="toolForm.enabled ? '启用' : '停用'" :severity="toolForm.enabled ? 'primary' : 'danger'" :loading="toolSaving" :disabled="toolForm.enabled === toolForm.original" @click="saveTool" /></template>
+      <template #footer><UiButton variant="text" label="取消" @click="toolDialog = false" /><UiButton label="保存" :severity="toolFormRelaxed.length ? 'danger' : 'primary'" :loading="toolSaving" :disabled="!toolFormDirty" @click="saveTool(false)" /></template>
+    </UiModal>
+    <UiModal v-model:visible="toolRelaxDialog" title="确认放宽工具权限">
+      <p class="callout warn"><i class="pi pi-exclamation-triangle" aria-hidden="true" /><b><code>{{ toolForm.name }}</code> 的下列策略比代码里的默认更松。</b></p>
+      <ul class="relax-list"><li v-for="item in toolRelaxDetails" :key="item.path"><code>{{ item.path }}</code>：<b>{{ item.from }}</b> → <b>{{ item.to }}</b></li></ul>
+      <p class="field-note">确认之前一个字都没落库。放宽之后，这个工具对更低角色可见 / 更少地要求人点头 —— 但它仍然过 <code>available()</code> 那道闸。</p>
+      <template #footer><UiButton variant="text" label="取消" @click="toolRelaxDialog = false" /><UiButton label="我知道后果，仍然放宽" severity="danger" :loading="toolSaving" @click="saveTool(true)" /></template>
     </UiModal>
     <UiModal v-model:visible="agentDialog" :title="agentForm.isNew ? '新建子 Agent' : `子 Agent ${agentForm.originalName}`" width="min(860px, 94vw)">
       <div class="form-grid">

@@ -141,7 +141,7 @@ export const CONFIG_DESCRIPTIONS: Record<string, string> = {
   'tools.maxCallsPerTurn': '单轮内工具调用次数上限。',
   'tools.maxConsecutiveErrors': '连续多少次工具报错就中止这一轮，防止模型对着同一个错误反复重试烧钱。',
   'tools.defaultTimeoutMs': '单次工具调用的默认墙钟上限（毫秒）。到点后把 tool_timeout 交回模型，让它换个做法，而不是让整轮对话挂在一个不返回的工具上。bash/python/spawn_agent 与两个 web 工具自己管超时，不受这一项约束。',
-  'tools.overrides': '逐个工具的启停开关（键为工具名）。工具页有更好的入口 —— 那里改完这里会同步，禁用是硬边界：目录里看不到，模型硬猜工具名也会在 execute() 被拦下。',
+  'tools.overrides': '逐个工具的运维覆盖层（键为工具名），每个工具可写 enabled / minRole / approval / timeoutMs。工具页有更好的入口 —— 那里改完这里会同步，而且放宽权限时会二次确认。后三项缺席即沿用代码里的默认策略。禁用是硬边界：目录里看不到，模型硬猜工具名也会在 execute() 被拦下。',
   'tools.fs.maxReadBytes': 'read_file 单次读取的字节上限，超出截断。',
   'tools.fs.maxWriteBytes': 'write_file 单次写入的字节上限。',
   'tools.fs.showHidden': 'list_dir 是否列出以点开头的隐藏文件。',
