@@ -15,6 +15,7 @@ import { runtimeBlock, type PromptBuildResult } from '../prompt/assembler.js';
 import type { ToolExecutionContext, ToolRegistry } from '../tools/registry.js';
 import { SKILL_NARROWING_EXEMPT } from '../tools/policy.js';
 import type { ProviderStore } from '../provider/store.js';
+import { PROVIDER_FAILURES_TO_DOWN, recordProviderFailure } from '../provider/health.js';
 import { type FallbackOptions, fallbackLanguageModel } from './fallback-model.js';
 import { createStepObservers, type StepFacts } from './step-observers.js';
 import { type AliasSettings, parseAliasSettings } from '../provider/alias-settings.js';
@@ -56,6 +57,11 @@ export class ModelRegistry {
   readonly #info = new Map<string, ModelRow>();
   readonly #chains = new Map<string, Array<{ model: V4LanguageModel; info: ModelRow }>>();
   readonly #settings = new Map<string, AliasSettings>();
+  /** 每个 provider 一个裸候选，只给健康探测用（`provider/health.ts`）。 */
+  readonly #probes = new Map<string, { model: V4LanguageModel; info: ModelRow }>();
+  /** 当前处于 `down` 且还在冷却期内的 `models.id`。**派生自库**：`rebuild()` 从库里重算，
+   *  `recordFailure()` 写库的同一次调用里补一份 —— 进程内这份只是让调用路径不必每次查库。 */
+  readonly #down = new Set<string>();
 
   /** @param onProviderUnusable rebuild 时跳过某个 provider 的原因。装配方拿它记一条 warn。 */
   constructor(private readonly db: Sqlite, private readonly providers: ProviderStore, private readonly onProviderUnusable?: (providerId: string, reason: string) => void) {}
@@ -71,9 +77,16 @@ export class ModelRegistry {
     this.#info.clear();
     this.#chains.clear();
     this.#settings.clear();
+    this.#probes.clear();
+    this.#down.clear();
+    const cutoff = Date.now() - cooldownMinutes * 60_000;
     const providerRows = this.db.prepare(`SELECT id,name,kind,base_url AS baseUrl,headers_json AS headers FROM providers
       WHERE enabled=1 AND (COALESCE(health_state,'up') <> 'down' OR COALESCE(health_checked_at,0) < ?)`)
-      .all(Date.now() - cooldownMinutes * 60_000) as ProviderRow[];
+      .all(cutoff) as ProviderRow[];
+    // down 的 provider 被上面那句整条滤掉，它的模型也就不在任何链里 —— 所以「这个候选是不是
+    // down」必须单独查一次，不能反过来从链里推（`isDown` 判的正是已经不在链里的那些）。
+    for (const row of this.db.prepare(`SELECT m.id FROM models m JOIN providers p ON p.id=m.provider_id
+      WHERE p.health_state='down' AND COALESCE(p.health_checked_at,0) >= ?`).all(cutoff) as Array<{ id: string }>) this.#down.add(row.id);
     const providerInstances = new Map<string, Provider>();
     for (const provider of providerRows) {
       /**
@@ -111,6 +124,13 @@ export class ModelRegistry {
       max_output AS maxOutput,capabilities_json AS capabilities,price_in AS priceIn,price_out AS priceOut,
       price_cache_read AS priceCacheRead,price_cache_write AS priceCacheWrite FROM models WHERE enabled=1 ORDER BY sort`).all() as ModelRow[];
     const byId = new Map(modelRows.map((model) => [model.id, model]));
+    // 探测用的候选按 `sort` 取每个 provider 的第一个启用模型 —— 与它在哪个别名链里无关：
+    // 一个还没进任何别名的 provider 同样该被探（否则它永远是 `up`，直到有人手工点测试连接）。
+    for (const info of modelRows) {
+      if (this.#probes.has(info.providerId)) continue;
+      const probe = providerInstances.get(info.providerId)?.languageModel(info.modelId);
+      if (probe && typeof probe !== 'string' && probe.specificationVersion === 'v4') this.#probes.set(info.providerId, { model: probe as V4LanguageModel, info });
+    }
     const aliases = this.db.prepare('SELECT alias,model_ids_json AS modelIds,settings_json AS settings FROM model_aliases').all() as AliasRow[];
     for (const alias of aliases) {
       const chain = (JSON.parse(alias.modelIds) as string[]).map((id) => byId.get(id)).filter((row): row is ModelRow => Boolean(row))
@@ -162,7 +182,41 @@ export class ModelRegistry {
   }
   markProviderDown(modelId: string, error: string): void {
     const row = this.infoByModelId(modelId);
-    if (row) this.db.prepare("UPDATE providers SET health_state='down',health_checked_at=?,health_error=? WHERE id=?").run(Date.now(), error.slice(0, 500), row.providerId);
+    if (row) {
+      this.db.prepare("UPDATE providers SET health_state='down',health_checked_at=?,health_error=? WHERE id=?").run(Date.now(), error.slice(0, 500), row.providerId);
+      this.#down.add(row.id);
+    }
+  }
+
+  /** 健康探测用的裸候选（`provider/health.ts` 的 `ProbeSource`）。 */
+  probeCandidate(providerId: string): { model: V4LanguageModel; modelId: string } | null {
+    const probe = this.#probes.get(providerId);
+    return probe ? { model: probe.model, modelId: probe.info.modelId } : null;
+  }
+
+  isDown(candidate: { id: string; rowId?: string }): boolean {
+    if (candidate.rowId) return this.#down.has(candidate.rowId);
+    const info = this.infoByModelId(candidate.id);
+    return info ? this.#down.has(info.id) : false;
+  }
+
+  /**
+   * 调用路径上的失败计入同一个「连续失败」计数器（`docs/04 §5.3`）。**不在这里 `rebuild()`**：
+   * 轮次中途换掉 `#chains` 会让这一步的记账反查不到服务它的那一行，落到链首的价格上
+   * （`step-observers` 的 `fallbackInfo` 兜底）。跳过失效候选靠 `isDown`，链本身等下一次
+   * `rebuild()`（健康检查 cron 或任何配置改动）收拾。
+   *
+   * 代价是：如果这一次把最后一个 provider 标成了 down，`all_providers_down` 要等下一次 cron
+   * 才响（`rebuildModels` 那条尾巴在 `main.ts`）。
+   */
+  recordFailure(candidate: { id: string; rowId?: string }, reason: string, failuresToDown: number): boolean {
+    const rowId = candidate.rowId ?? this.infoByModelId(candidate.id)?.id;
+    if (!rowId) return false;
+    const providerId = this.db.prepare('SELECT provider_id FROM models WHERE id=?').pluck().get(rowId) as string | undefined;
+    if (!providerId) return false;
+    const { down } = recordProviderFailure(this.db, providerId, reason, failuresToDown);
+    if (down) for (const row of this.db.prepare('SELECT id FROM models WHERE provider_id=?').all(providerId) as Array<{ id: string }>) this.#down.add(row.id);
+    return down;
   }
 
   estimate(alias: string, inputTokens: number): number | null {
@@ -207,7 +261,7 @@ export function toolResultPart(toolCallId: string, toolName: string, output: unk
 export function aliasModel(registry: ModelRegistry, alias: string, options: FallbackOptions): LanguageModel {
   const candidates = registry.chain(alias);
   return candidates.length
-    ? fallbackLanguageModel(candidates.map((candidate) => ({ model: candidate.model, id: candidate.info.modelId })), options)
+    ? fallbackLanguageModel(candidates.map((candidate) => ({ model: candidate.model, id: candidate.info.modelId, rowId: candidate.info.id })), options)
     : registry.resolve(alias);
 }
 
@@ -496,7 +550,24 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
       retryMaxMs: dependencies.config.provider.retryMaxMs, abortSignal: turn.abortSignal,
       requestTimeoutMs: dependencies.config.provider.requestTimeoutMs, streamIdleTimeoutMs: dependencies.config.provider.streamIdleTimeoutMs,
       onServed: (served) => { servedModelId = served.id; },
-      onFallback: (from, to) => dependencies.log.event({ level: 'warn', kind: 'provider.fallback', summary: `${from.id} → ${to.id}`, traceId: turn.turnId, data: { alias: aliasName, from: from.id, to: to.id } }),
+      isDown: (candidate) => dependencies.registry.isDown(candidate),
+      // 每一次失败的尝试落一行（`docs/10` 给 `model.error` 定的 `retryAttempt` / `willFallback`）。
+      // 少了它，「熬满三次超时再 fallback」在日志里是一段空白：本次事故 363 秒里只有开头的
+      // `turn.start` 与结尾的 `provider.fallback`（docs/00 §2.3 同一类）。
+      onCandidateFailed: (candidate, failure) => {
+        dependencies.log.event({ level: 'warn', kind: 'model.error',
+          summary: `${candidate.id} 第 ${failure.attempt + 1} 次尝试失败：${failure.error instanceof Error ? failure.error.message : String(failure.error)}`.slice(0, 300),
+          traceId: turn.turnId, key: turn.key,
+          data: { alias: aliasName, modelId: candidate.id, errorKind: failure.kind, status: failure.status, retryAttempt: failure.attempt, willRetry: failure.willRetry, willFallback: failure.willFallback, ms: failure.elapsedMs } });
+        // **只有超时计入连续失败。** 5xx / 429 是上游在说话，链内 fallback 当场就换人、代价是一次
+        // 往返；真正贵的是「连上了但不返回」—— 每一步都要熬满 `(maxRetries+1) × requestTimeoutMs`。
+        if (failure.kind !== 'timeout') return;
+        const down = dependencies.registry.recordFailure(candidate, failure.error instanceof Error ? failure.error.message : String(failure.error), PROVIDER_FAILURES_TO_DOWN);
+        if (down) {
+          dependencies.log.event({ level: 'error', kind: 'provider.health', summary: `${candidate.id} 连续超时，已标 down 并从模型链跳过`,
+            traceId: turn.turnId, data: { modelId: candidate.id, state: 'down', reason: 'request_timeout' } });
+        }
+      },
       onUnavailable: (candidate, error) => {
         dependencies.registry.markProviderDown(candidate.id, error instanceof Error ? error.message : 'authentication_failed');
         dependencies.log.event({ level: 'error', kind: 'provider.health', summary: `${candidate.id} credentials rejected`, traceId: turn.turnId, data: { modelId: candidate.id } });
@@ -657,7 +728,24 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
       let emitted = '';
       const stream = stepSeparatedText(result.stream as AsyncIterable<StreamPartLike>, async () => {
         // `wrapUpIfNeeded` 自己吞掉所有异常，这里不会因为它而把流记成 interrupted。
-        try { wrapUp = await wrapUpIfNeeded(); return wrapUp; } finally { streamDone(); }
+        try { wrapUp = await wrapUpIfNeeded(); } finally { streamDone(); }
+        /**
+         * **断掉的轮次必须让投递侧看见。** 步骤级失败与轮次中止都不会让 `result.stream` 抛：
+         * AI SDK 把它们吞进内部 onError，流照常正常结束，而 `result.text` 还是**上一步**的正文
+         * —— 于是「已经吐过内容之后断掉」这一路在 `bot.ts` 眼里和正常收尾一模一样：用户既没有
+         * 「（生成中断）」也没有超时提示，`turns` 那行还记成 committed。实测
+         * logs/2026-08-18 · B8F92Z：600 秒到点 abort（`model.error timeout`），3 分钟后
+         * `turn.end turn committed`。这里抛出去 = `TelegramOutput.consume` 的 `interrupted`，
+         * 也就是 docs/04 §5.3 说的那条「已输出部分内容后失败」的路。
+         *
+         * 抛之前先走 `fail`：`streamDone()` 已经放开了 `drained`，`final` 那条链下一个微任务就要
+         * 用 `finish` 把 agent run 记成完成 —— 不在同一个同步块里把 `settled` 抢下来，
+         * `agent_runs` 会说这次子运行成功了。丢掉的 `wrapUp` 恒为空串（断掉时 `wrapUpIfNeeded`
+         * 第一道闸就返回了）。
+         */
+        const broken = turn.abortSignal.aborted ? turn.abortSignal.reason ?? 'aborted' : streamFailure;
+        if (broken) fail(broken instanceof Error ? broken : new Error(String(broken)));
+        return wrapUp;
       }, (chunk) => { emitted += chunk; });
       delivered = () => (wrapUp ? emitted : '');
       // `interrupt()` 也要放开 `drained`：被打断那条路（`bot.ts` 里的 `void generated.final.catch()`）

@@ -93,6 +93,13 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
   const coalescing = new Map<string, { supersede: () => void }>();
   /** 跨会话计数：连续失败说明的是「这个部署坏了」，不是「这个群坏了」（docs/10 §6）。 */
   let consecutiveFailures = 0;
+  /** 两个失败出口（抛出去的、以及「吐过内容之后断掉」的）共用同一条告警规则，免得两边阈值走岔。 */
+  const noteFailure = (lastError: string): void => {
+    consecutiveFailures += 1;
+    if (consecutiveFailures >= CONSECUTIVE_FAILURE_ALERT) {
+      dependencies.alerts?.fire('consecutive_turn_failures', `连续 ${consecutiveFailures} 个轮次失败`, { count: consecutiveFailures, lastError });
+    }
+  };
   /**
    * 入口段（认领 update → 归档 → 挂媒体）按 chat 串行。
    *
@@ -470,7 +477,13 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
       limits: { globalDaily: config.quota.global.daily, globalMonthly: config.quota.global.monthly,
         chatDaily: config.quota.perChat.daily, chatMonthly: config.quota.perChat.monthly,
         userDaily: roleLimits?.daily ?? config.quota.perUser.daily, userMonthly: roleLimits?.monthly ?? config.quota.perUser.monthly } }) : null;
-    dependencies.log.event({ level: reservation ? 'info' : 'warn', kind: reservation ? 'quota.check' : 'quota.exceeded', summary: reservation ? 'Quota reservation accepted' : 'Quota reservation rejected', chatId, userId, data: { estimatedTokens, estimateUsd: modelEstimate } });
+    // **额度关着的时候一条都不落。** 这个三元此前只看 `reservation` 是不是空，而
+    // `quota.enabled=false` 时它恒为空 —— 于是每一轮都记一条 `warn quota.exceeded`
+    // 「Quota reservation rejected」而轮次照常开（logs/2026-08-18：31 轮里 30 条）。`docs/10` 给这个 kind 定的
+    // 字段是 `scope/subject/spent/limit`，额度关着时四个都不存在；而排障时第一眼看到的就是它。
+    if (config.quota.enabled) {
+      dependencies.log.event({ level: reservation ? 'info' : 'warn', kind: reservation ? 'quota.check' : 'quota.exceeded', summary: reservation ? 'Quota reservation accepted' : 'Quota reservation rejected', chatId, userId, data: { estimatedTokens, estimateUsd: modelEstimate } });
+    }
     if (config.quota.enabled && !reservation) {
       // 拒绝的原因分档：global 超限是「整个部署停摆」，必须让 owner 知道；chat / user 超限只是
       // 这个人/这个群用完了（docs/10 §6 的 quota_global_exceeded）。
@@ -527,6 +540,8 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
     try {
       const generated = dependencies.onTurn ? await dependencies.onTurn(turn, reservation) : '尚未配置可用模型。请在 WebUI 中添加 Provider、模型和 main 别名。';
       let answer: string;
+      /** 流吐过内容之后才断掉（`/cancel`、`turnTimeoutMs`、上游中途挂）。见下面收尾那一段。 */
+      let broken = false;
       // doc 11 §2.1 把 output.* 列进 perChat 白名单，投递侧却一直读的是全局快照 —— 会话级
       // 的 mode/节奏覆盖存得住、也过了校验，就是永远不生效。取本轮那份合并后的配置。
       const outputConfig = perChatConfig(currentConfig(), key).output;
@@ -566,7 +581,17 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
           (text) => capMentions(text, outputConfig.maxMentions));
         output.onParseFallback = onParseFallback;
         const consumed = await output.consume(generated.stream, message.message_id);
-        if (consumed.interrupted) { generated.interrupt(); void generated.final.catch(() => undefined); answer = consumed.text; }
+        if (consumed.interrupted) {
+          broken = true;
+          // `interrupt()` 先放开 `drained`，否则下面那个 await 会永远悬着（流中途抛的时候
+          // `streamDone()` 所在的收尾回调压根没跑到）。
+          generated.interrupt();
+          // **一个字都没投出去时不能把原因吞掉。** 真正的错误在 `final` 那条链上（`streamFailure`）；
+          // 这里 `answer = ''` 会让整轮以含糊的 `model_returned_empty` 收尾，而那正是 runtime 那份
+          // `onExhausted` 要避免的事 —— 用户该看到「模型服务暂时连不上」而不是「没吐出正文」。
+          if (!consumed.text.trim()) answer = await generated.final;
+          else { void generated.final.catch(() => undefined); answer = consumed.text; }
+        }
         // **归档与上下文一律存「真正发出去的那份」**，也就是流里攒到的全文。
         // `generated.final` 是 AI SDK 的 `result.text` = **最后一步**的正文，而多步轮次发给用户的是
         // 「旁白段落 + 结论」整条消息 —— 拿 final 落库的话，屏幕上有三段、`read_messages` 与
@@ -591,12 +616,31 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
       if (!answer.trim()) throw new Error('model_returned_empty');
       dependencies.context.appendDelta(turn, { id: turn.turnId, role: 'assistant', origin: 'assistant', parts: [{ type: 'text', text: answer }], textPreview: answer.slice(0, 240), pruneLevel: 0 });
       const committed = await dependencies.context.commitTurn(turn);
-      const settled = dependencies.turns.finish(turn.turnId, { state: 'committed', commitId: committed.commit.id, rebased: committed.rebased });
+      /**
+       * **流吐过内容之后才断掉的轮次：delta 照常提交，但状态不许记成 committed。** 这正是
+       * docs/04 §5.3 点名要「在实现中显式处理」的那条 —— §1「delta 不提交」规则的唯一例外：
+       * 内容已经在用户屏幕上，上下文必须与用户所见一致，可这一轮确实没跑完。
+       *
+       * 此前这里只有一条 committed 分支，于是 `turnTimeoutMs` 到点被 abort、而前面某一步已经吐过
+       * 旁白的轮次，会以「成功」收尾：用户没有任何提示、`turns` 那行是 committed、
+       * `consecutiveFailures` 还被清零（实测 logs/2026-08-18 · B8F92Z：19:13:03 `model.error
+       * timeout` = 600 秒到点，19:16:04 `turn.end turn committed`）。「（生成中断）」那个后缀由
+       * `TelegramOutput.consume` 在同一条 `interrupted` 上加。
+       */
+      const cancelled = broken && turn.abortSignal.aborted;
+      const state = broken ? (cancelled ? 'cancelled' : 'failed') : 'committed';
+      const settled = dependencies.turns.finish(turn.turnId, { state, commitId: committed.commit.id, rebased: committed.rebased,
+        ...(cancelled ? { cancelReason: String(turn.abortSignal.reason ?? 'cancelled') } : {}), ...(state === 'failed' ? { error: 'stream_interrupted' } : {}) });
       await dependencies.plugins?.hook('afterCommit', { turn, committed });
-      dependencies.log.event({ level: 'info', kind: 'turn.end', summary: 'turn committed', traceId: turn.turnId, chatId, userId, key, data: { state: 'committed', rebased: committed.rebased } });
-      dependencies.log.publish('turn.finished', { turnId: turn.turnId, key, chatId, state: 'committed', steps: settled?.steps ?? 0, toolCalls: settled?.toolCalls ?? 0, costUsd: settled?.costUsd ?? 0, rebased: committed.rebased, durationMs: settled?.durationMs ?? 0 });
+      dependencies.log.event({ level: broken ? 'warn' : 'info', kind: 'turn.end',
+        summary: broken ? `${cancelled ? 'turn cancelled' : 'turn failed'} after partial delivery` : 'turn committed',
+        traceId: turn.turnId, chatId, userId, key, data: { state, rebased: committed.rebased, ...(broken ? { deliveredChars: answer.length } : {}) } });
+      dependencies.log.publish('turn.finished', { turnId: turn.turnId, key, chatId, state, steps: settled?.steps ?? 0, toolCalls: settled?.toolCalls ?? 0, costUsd: settled?.costUsd ?? 0, rebased: committed.rebased, durationMs: settled?.durationMs ?? 0 });
+      // 工具真的跑过、结果也进了已提交的上下文：记忆写入跟着提交走，否则上下文说「写好了」而库里没有。
       dependencies.memory.flush(turn.turnId);
-      consecutiveFailures = 0;
+      // 断掉的一轮不清零（它不是一次成功），但也只有 `failed` 才计入连续失败 —— 取消不算故障。
+      if (!broken) consecutiveFailures = 0;
+      else if (!cancelled) noteFailure('stream_interrupted');
       // `quota.warnAtRatio`：跨过预警线时在回复后补一句，每个 bucket 只提示一次（docs/10 §5.4）。
       // 提示挂在成功那一轮的后面而不是单独发一条：多一条消息在群里是噪音。
       if (reservation) {
@@ -615,13 +659,7 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
       dependencies.log.event({ level: cancelled ? 'warn' : 'error', kind: 'turn.end', summary: cancelled ? 'turn cancelled' : error instanceof Error ? error.message : 'turn failed', traceId: turn.turnId, chatId, userId, key });
       dependencies.log.publish('turn.finished', { turnId: turn.turnId, key, chatId, state: cancelled ? 'cancelled' : 'failed', steps: settled?.steps ?? 0, toolCalls: settled?.toolCalls ?? 0, costUsd: settled?.costUsd ?? 0, rebased: false, durationMs: settled?.durationMs ?? 0 });
       // 连续 5 轮失败是「整个部署坏了」的信号（docs/10 §6）。取消不算 —— 用户点了取消不是故障。
-      if (!cancelled) {
-        consecutiveFailures += 1;
-        if (consecutiveFailures >= CONSECUTIVE_FAILURE_ALERT) {
-          dependencies.alerts?.fire('consecutive_turn_failures', `连续 ${consecutiveFailures} 个轮次失败`,
-            { count: consecutiveFailures, lastError: error instanceof Error ? error.message : String(error) });
-        }
-      }
+      if (!cancelled) noteFailure(error instanceof Error ? error.message : String(error));
       // 轮次超时和用户主动取消都走 abort，但对用户是两回事：没点过取消的人收到「已取消」
       // 只会以为自己误触了，而真实情况是这一轮卡在某处直到 `concurrency.turnTimeoutMs`。
       await ctx.reply(cancelled

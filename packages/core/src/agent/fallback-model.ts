@@ -6,6 +6,37 @@ import { wrapLanguageModel } from 'ai';
 export interface FallbackCandidate {
   model: V4LanguageModel;
   id: string;
+  /**
+   * `models.id`（唯一）。**标 down 这种破坏性操作不能靠 `id`（= `model_id`）反查**：同一个
+   * `model_id` 可以挂在两个 provider 下（本部署 `deepseek-v4-flash` 就同时在 ksm-api 与
+   * deepseek-official 上），按名字反查会把健康的那一个判死。
+   */
+  rowId?: string;
+}
+
+/**
+ * 超时自己一个类型，而不是让调用方去认 message。`kind` 决定这次失败要不要往「连续失败」上记
+ * （docs/04 §5.3）：只有超时算「上游变黑洞」，429/5xx 是上游在说话、401/403 是配置问题。
+ * message 保持 `<label>_timeout_<ms>ms` 不变 —— 已有用例断在它上面，日志摘要也靠它区分两种超时。
+ */
+export class ProviderTimeoutError extends Error {
+  constructor(label: string, ms: number) {
+    super(`${label}_timeout_${ms}ms`);
+    this.name = 'ProviderTimeoutError';
+  }
+}
+
+export interface CandidateFailure {
+  /** 这一次是该候选的第几次尝试（0 起）。 */
+  attempt: number;
+  kind: 'timeout' | 'status' | 'network';
+  status: number | null;
+  /** 同一个候选还会再试一次。 */
+  willRetry: boolean;
+  /** 不再试这个候选，而链上还有下一个。两者都是 false = 这次失败会把整条链带走。 */
+  willFallback: boolean;
+  elapsedMs: number;
+  error: unknown;
 }
 
 export interface FallbackOptions {
@@ -25,8 +56,27 @@ export interface FallbackOptions {
    */
   streamIdleTimeoutMs?: number;
   abortSignal?: AbortSignal;
+  /**
+   * 已经被判成 `down` 的候选（`docs/04 §5.3`「从 fallback 链临时跳过」）。**每次调用现问一遍**，
+   * 所以同一轮里刚被记满三次的链首，下一步就不再被尝试 —— 等下一次 `rebuild()` 才生效的话，
+   * 一轮 12 步每步都要重新熬满 `(maxRetries+1) × requestTimeoutMs`（本次事故：363 秒 × 每一步）。
+   *
+   * **最后一个候选永不跳过**：全链都被标 down 时宁可发一次注定失败的请求，也不能一个都不发 ——
+   * 那样调用方拿到的是「模型没话说」，而不是一个能看懂的上游故障。
+   */
+  isDown?: (candidate: FallbackCandidate) => boolean;
   onFallback?: (from: FallbackCandidate, to: FallbackCandidate) => void;
   onUnavailable?: (candidate: FallbackCandidate, error: unknown) => void;
+  /**
+   * 每一次失败的尝试报一份（`docs/10` 给 `model.error` 定的 `retryAttempt` / `willFallback` 就是它）。
+   * 少了这一条，「三次尝试熬满超时再 fallback」在日志里是一段什么都没有的空白：本次事故的
+   * 363 秒里只有开头的 `turn.start` 和结尾的 `provider.fallback`，中间要靠
+   * `3 × requestTimeoutMs + 退避` 的算术反推。
+   *
+   * **调用方自己 abort 的那一次不报**（`/cancel`、`turnTimeoutMs`）：那不是 provider 的故障，
+   * 记上去会把健康的 provider 往 `down` 上推。
+   */
+  onCandidateFailed?: (candidate: FallbackCandidate, failure: CandidateFailure) => void;
   /**
    * 整条链都试完仍然失败、或流开到一半断掉时最后一次报告。AI SDK 会把步骤级失败吞进内部的
    * onError，让 `result.text` 安静地解析成空串 —— 不在这里抓一份，一次彻底的上游故障
@@ -61,11 +111,17 @@ function retriable(error: unknown): boolean {
   return status === null || status === 429 || status >= 500;
 }
 
+function describeFailure(error: unknown, attempt: number, startedAt: number, willRetry: boolean, willFallback: boolean): CandidateFailure {
+  const status = statusCode(error);
+  return { attempt, kind: error instanceof ProviderTimeoutError ? 'timeout' : status !== null ? 'status' : 'network',
+    status, willRetry, willFallback, elapsedMs: Date.now() - startedAt, error };
+}
+
 /**
  * 每次尝试自己的中止预算：调用方的信号（用户取消 / 轮次超时）与我们的超时合成一个，交给 provider。
  * 到点后 abort 的是**这一次尝试**，所以重试与链内 fallback 照常走；调用方的信号则是终点。
  */
-class AttemptDeadline {
+export class AttemptDeadline {
   readonly #controller = new AbortController();
   readonly signal: AbortSignal;
   #timer: ReturnType<typeof setTimeout> | undefined;
@@ -82,7 +138,7 @@ class AttemptDeadline {
     let expire!: (error: Error) => void;
     const expired = new Promise<never>((_, reject) => { expire = reject; });
     void expired.catch(() => undefined);
-    this.#timer = setTimeout(() => { const error = new Error(`${label}_timeout_${ms}ms`); this.abort(error); expire(error); }, ms);
+    this.#timer = setTimeout(() => { const error = new ProviderTimeoutError(label, ms); this.abort(error); expire(error); }, ms);
     try { return await Promise.race([Promise.resolve(work), expired]); } finally { this.disarm(); }
   }
   disarm(): void {
@@ -108,7 +164,7 @@ function idleGuarded<T>(stream: ReadableStream<T>, idleMs: number | undefined, d
     async pull(controller) {
       let timer: ReturnType<typeof setTimeout> | undefined;
       const stalled = new Promise<never>((_, reject) => {
-        timer = setTimeout(() => { const error = new Error(`stream_idle_timeout_${idleMs}ms`); deadline.abort(error); reject(error); }, idleMs);
+        timer = setTimeout(() => { const error = new ProviderTimeoutError('stream_idle', idleMs); deadline.abort(error); reject(error); }, idleMs);
       });
       try {
         const next = await Promise.race([reader.read(), stalled]);
@@ -138,15 +194,19 @@ export function fallbackLanguageModel(candidates: FallbackCandidate[], options: 
       let last: unknown;
       for (let index = 0; index < candidates.length; index += 1) {
         const candidate = candidates[index]!;
+        if (index < candidates.length - 1 && options.isDown?.(candidate)) continue;
         const model = candidate.model;
         for (let attempt = 0; attempt <= options.maxRetries; attempt += 1) {
           const deadline = new AttemptDeadline(params.abortSignal);
+          const startedAt = Date.now();
           try { const result = await deadline.guard(model.doGenerate({ ...params, abortSignal: deadline.signal }), options.requestTimeoutMs, 'request') as Awaited<ReturnType<V4LanguageModel['doGenerate']>>; options.onServed?.(candidate); return result; }
           catch (error) {
             last = error;
             // 调用方的信号已经断了（用户 /cancel、轮次超时）：再试就是替一个没人等的轮次占着槽位。
             if (params.abortSignal?.aborted) throw error;
             const status = statusCode(error);
+            const willRetry = retriable(error) && attempt < options.maxRetries;
+            options.onCandidateFailed?.(candidate, describeFailure(error, attempt, startedAt, willRetry, !willRetry && retriable(error) && Boolean(candidates[index + 1])));
             if (status === 401 || status === 403) { options.onUnavailable?.(candidate, error); throw error; }
             if (!retriable(error)) throw error;
             if (attempt < options.maxRetries) await abortablePause(retryDelay(attempt, retryAfter(error), options.retryBaseMs, options.retryMaxMs), options.abortSignal);
@@ -161,19 +221,27 @@ export function fallbackLanguageModel(candidates: FallbackCandidate[], options: 
       let last: unknown;
       for (let index = 0; index < candidates.length; index += 1) {
         const candidate = candidates[index]!;
+        if (index < candidates.length - 1 && options.isDown?.(candidate)) continue;
         const model = candidate.model;
         for (let attempt = 0; attempt <= options.maxRetries; attempt += 1) {
           const deadline = new AttemptDeadline(params.abortSignal);
+          const startedAt = Date.now();
           try {
             // guard 覆盖「发出请求到拿到响应头」；之后盯的是「有没有下一个 chunk」，换 idleGuarded。
             const result = await deadline.guard(model.doStream({ ...params, abortSignal: deadline.signal }), options.requestTimeoutMs, 'request') as Awaited<ReturnType<V4LanguageModel['doStream']>>;
             options.onServed?.(candidate);
-            return { ...result, stream: idleGuarded(result.stream, options.streamIdleTimeoutMs, deadline, params.abortSignal, options.onExhausted) };
+            // 流中途空转也是「上游变黑洞」，同样要记账 —— 但那时已经 return 了，报告只能从流里出来。
+            return { ...result, stream: idleGuarded(result.stream, options.streamIdleTimeoutMs, deadline, params.abortSignal, (error) => {
+              options.onCandidateFailed?.(candidate, describeFailure(error, attempt, startedAt, false, false));
+              options.onExhausted?.(error);
+            }) };
           }
           catch (error) {
             last = error;
             if (params.abortSignal?.aborted) throw error;
             const status = statusCode(error);
+            const willRetry = retriable(error) && attempt < options.maxRetries;
+            options.onCandidateFailed?.(candidate, describeFailure(error, attempt, startedAt, willRetry, !willRetry && retriable(error) && Boolean(candidates[index + 1])));
             if (status === 401 || status === 403) { options.onUnavailable?.(candidate, error); throw error; }
             if (!retriable(error)) throw error;
             if (attempt < options.maxRetries) await abortablePause(retryDelay(attempt, retryAfter(error), options.retryBaseMs, options.retryMaxMs), options.abortSignal);

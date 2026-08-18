@@ -355,6 +355,9 @@ CREATE TABLE providers (
   headers_json TEXT,
   enabled     INTEGER NOT NULL DEFAULT 1,
   health_state TEXT, health_checked_at INTEGER, health_error TEXT,
+  -- 连续失败次数（0009）。周期探测与真实调用的请求超时共用它，到 3 次才写 health_state='down'
+  -- （docs/04 §5.3）。成功一次归零。落库而不是进程内计数：否则重启等于把「上游还黑着」清零。
+  health_fail_count INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
 );
 

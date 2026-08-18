@@ -100,8 +100,19 @@ export class TelegramOutput {
     let firstChunkAt = 0;
     // `output.typingWhileWorking`：关掉之后整轮一次 typing 都不发。默认开 —— 没有它，一次
     // 三十秒的工具调用在用户那边和「bot 死了」完全一样。
+    // **上一次还没落地就不再发。** typing 只在「现在」有意义，而 `apiThrottler` 给群聊的预算是
+    // `telegram.throttle.perChatPerMinute`（默认 20/分钟）—— 4 秒一次是 15/分钟，同一个群里两轮
+    // 并行就已经超了预算，多出来的每一条都排在队里，并且**排在真正的消息前面**。实测
+    // logs/2026-08-18：19:13:03 到 19:16:04 每分钟准点吐 20 条 sendChatAction，而这一轮的收尾
+    // editMessageText 就压在队尾 —— 轮次早在 19:13:03 就被 `turnTimeoutMs` 掐了，用户又多等了
+    // 3 分钟才看到最后一次编辑。丢掉比排队正确：少一次 typing 没人看得出来。
+    let typingInFlight = false;
     const typing = this.options.typingWhileWorking === false ? null
-      : setInterval(() => void this.bot.api.sendChatAction(this.chatId, 'typing').catch(() => undefined), 4000);
+      : setInterval(() => {
+        if (typingInFlight) return;
+        typingInFlight = true;
+        void this.bot.api.sendChatAction(this.chatId, 'typing').catch(() => undefined).finally(() => { typingInFlight = false; });
+      }, 4000);
     const edit = async (messageId: number, rendered: string): Promise<void> => {
       try {
         if (this.parseMode === 'none') { await this.bot.api.editMessageText(this.chatId, messageId, rendered); return; }
@@ -189,10 +200,23 @@ export class TelegramOutput {
       if (typing) clearInterval(typing);
       if (placeholder) clearTimeout(placeholder);
     }
-    if (this.options.mode === 'once' || !messageIds.length) return { text, interrupted, messageIds: await this.send(text + (interrupted ? '\n\n（生成中断）' : ''), replyToMessageId) };
+    /**
+     * 收尾文本只算一次，两个 return 共用：
+     *
+     * - **返回的 `text` 与发出去的必须是同一份**（`bot.ts` 拿它去归档与提交上下文，注释写着「一律存
+     *   真正发出去的那份」）。此前 `once` 档、以及流式档首条压根没发出去的那次，后缀只加在发出去的
+     *   那份上 —— 用户看到「（生成中断）」而上下文里是一句看起来说完了的话，下一轮模型不知道自己
+     *   被打断过。流式那一档从来是带后缀的，两处不该有两种口径。
+     * - **一个字都没吐出来时不加后缀**：那个标记是给已经在屏幕上的半截内容用的。空内容加上它就是
+     *   一条只有「（生成中断）」的消息，用户看不出发生了什么，而 `bot.ts` 还会把这条空壳当成
+     *   「有内容的一轮」提交进上下文。这种情况该走失败那条路 —— 那里有能看懂的原因。
+     */
+    const closing = text + (interrupted && text.trim() ? '\n\n（生成中断）' : '');
+    if (this.options.mode === 'once' || !messageIds.length) {
+      return { text: closing, interrupted, messageIds: await this.send(closing, replyToMessageId) };
+    }
     // 定稿这一次才跑插件的 `beforeSend`（每帧都跑等于把钩子的语义从「一条消息一次」改成
     // 「一次编辑一次」）。改写只影响发出去的文本，`text` 仍是模型的原话 —— 归档与上下文存原话。
-    const closing = text + (interrupted ? '\n\n（生成中断）' : '');
     const rendered = splitTelegramText(this.guard(this.beforeSend ? await this.beforeSend(closing) : closing), this.options.maxChars, this.parseMode);
     // 收尾也要走 deliver + 降级：这里抛出去会把一轮已经发出大半的回复整个记成 failed（docs/20 · W-TG-04）。
     for (let index = 0; index < rendered.length; index += 1) {
@@ -201,6 +225,6 @@ export class TelegramOutput {
       if (!sent) break;
       messageIds.push(sent.message_id);
     }
-    return { text: text + (interrupted ? '\n\n（生成中断）' : ''), interrupted, messageIds };
+    return { text: closing, interrupted, messageIds };
   }
 }

@@ -92,4 +92,21 @@ describe('stepSeparatedText', () => {
     ));
     expect(text).toBe('就这样。');
   });
+
+  /**
+   * 已经吐出去的部分留着、收尾回调抛出去 —— `streamMainAgent` 用这一跳把「轮次被 abort / 步骤级
+   * 失败」告诉投递侧（`TelegramOutput.consume` 的 `interrupted`）。`result.stream` 自己是不抛的：
+   * AI SDK 把步骤级失败吞进内部 onError，流照常正常结束（logs/2026-08-18 · B8F92Z 就是这么以
+   * committed 收尾的）。
+   */
+  it('surfaces a throwing wrap-up to the consumer without losing what was already emitted', async () => {
+    const seen: string[] = [];
+    const stream = stepSeparatedText(
+      parts({ type: 'text-delta', text: '先查一下。' }, { type: 'finish-step' }),
+      async () => { throw new Error('timeout'); },
+      (chunk) => seen.push(chunk),
+    );
+    await expect(collect(stream)).rejects.toThrow('timeout');
+    expect(seen.join('')).toBe('先查一下。');
+  });
 });

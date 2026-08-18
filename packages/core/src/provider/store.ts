@@ -57,10 +57,6 @@ export class ProviderStore {
   }
 }
 
-export function fallbackOrder<T>(chain: T[], health: (entry: T) => boolean): T[] {
-  return [...chain.filter(health), ...chain.filter((entry) => !health(entry))];
-}
-
 /**
  * 抖动必须是真随机：`sha256(attempt)` 对同一个 attempt 是常量，所有并发请求会退避到同一时刻
  * 再一起打过去，等于没有抖动（docs/20 · W-PROV-01）。

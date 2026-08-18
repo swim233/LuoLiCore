@@ -168,11 +168,11 @@
 | [x] AC-PROV-001 (自动) | P1 返回 429 | 按 `retry_after` 退避重试；仍失败则 fallback 到 P2；日志有 `provider.fallback` | 〔provider.test.ts〕
 | [ ] AC-PROV-002 (自动) | P1 返回 401 | 不重试、不 fallback，直接失败并告警（认证错误） |
 | [ ] AC-PROV-003 (自动) ★ | 全部 provider 不可用 | 回复「模型暂时不可用(ref:…)」；`turns.state='failed'`；**delta 未提交** |
-| [ ] AC-PROV-004 (自动) ★ | 流式已输出 200 字后连接中断 | 已输出内容作为最终回复 + 「(生成中断)」；**delta 照常提交**（上下文与用户所见一致） |
+| [x] AC-PROV-004 (自动) ★ | 流式已输出 200 字后连接中断 | 已输出内容作为最终回复 + 「(生成中断)」；**delta 照常提交**（上下文与用户所见一致）；轮次状态**不许是 committed** —— 被 abort（`/cancel`、`turnTimeoutMs`）记 `cancelled`，上游自己挂的记 `failed`，两者都带上那次提交的 `commit_id` | 〔turn.partial-delivery.test.ts〕
 | [ ] AC-PROV-005 | WebUI 保存 provider（含新 key） | `api_key_enc` 为密文；`GET /api/providers` 只返回 hint；日志中无明文 |
 | [ ] AC-PROV-006 | WebUI 编辑 provider 但 key 留空 | 原 key 保持不变 |
 | [ ] AC-PROV-007 | `[测试连接]` | 真的打一次上游模型目录接口；返回成功/失败与错误类型（`code`）、耗时、模型数；响应体内无 key；结果以右上角 Toast 呈现。成功把 `health_state` 写回 `up`，401/403 写 `down`，超时/404/5xx 不改 `health_state` |
-| [x] AC-PROV-008 (自动) | P1 连续健康检查失败 3 次 | 标 `down`，从 fallback 链跳过；30 分钟后自动重试 | 〔provider.catalog.test.ts〕
+| [x] AC-PROV-008 (自动) | P1 连续健康检查失败 3 次 | 标 `down`，从 fallback 链跳过；30 分钟后自动重试。前两次只累计不动 `health_state`；非认证 4xx 不计入；调用路径上的请求超时喂同一个计数器，判成 down 之后同一次调用就跳过它（[04 §5.3](./04-agents-and-providers.md)） | 〔provider.health.test.ts〕
 | [ ] AC-PROV-009 (自动) | 含图片的轮次 + 当前模型无 vision | 自动切 `vision` 别名；若无该别名则降级占位符 + 回复末尾提示 |
 | [x] AC-PROV-010 (自动) | 给 `main` 配 `settings_json`，再写一个白名单外的键 | 白名单键随每步调用下发（降档到 `low` 后用 `low` 的参数）；白名单外的键 `PUT` 返回 `alias_invalid` + 路径，不落库 | 〔provider.test.ts〕
 | [ ] AC-PROV-011 ★ | 接第三方 OpenAI 兼容网关，让模型在一轮里调用工具 | 带工具结果的后续请求里**不含** `item_reference`，该步返回 200，模型给出最终回复。回归的是「一调工具就再也不说话」 |
@@ -548,7 +548,7 @@
 | 配置与 DB | | 15 / 25 | | | |
 | **上下文引擎** | | 30 / 39 | | | |
 | Telegram 与准入 | | 22 / 46 | | | |
-| Agent 与 Provider | | 20 / 42 | | | |
+| Agent 与 Provider | | 21 / 42 | | | |
 | 工具/沙箱/审批 | | 19 / 60 | | | |
 | Subagent 与任务 | | 20 / 38 | | | |
 | 记忆 | | 1 / 13 | | | |
@@ -557,6 +557,6 @@
 | WebUI | | 10 / 84 | | | |
 | 安全 | | 9 / 25 | | | |
 | 运维 | | 1 / 9 | | | |
-| **合计** | | **169 / 449** | | | |
+| **合计** | | **170 / 449** | | | |
 
 **整体通过条件**：全部 ★ 项通过 + 非 ★ 项通过率 ≥ 95% + 所有豁免项经需求方书面确认。

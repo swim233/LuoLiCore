@@ -96,6 +96,71 @@ describe('model-level provider fallback', () => {
     expect(calls).toBe(1);
   });
 
+  // 那 363 秒里日志一行都没有：只有开头的 turn.start 与结尾的 provider.fallback，中间要靠
+  // `3 × requestTimeoutMs + 退避` 的算术反推（docs/10 早就给 model.error 定了 retryAttempt /
+  // willFallback 两个字段）。也是「只有超时计入连续失败」那条判据的输入。
+  it('reports every failed attempt with the retry/fallback decision attached', async () => {
+    const seen: Array<{ id: string; kind: string; attempt: number; willRetry: boolean; willFallback: boolean }> = [];
+    const wrapped = fallbackLanguageModel([
+      { id: 'stalled', model: model('stalled', () => new Promise(() => undefined)) },
+      { id: 'healthy', model: model('healthy', () => ({})) },
+    ], { maxRetries: 1, retryBaseMs: 1, retryMaxMs: 1, requestTimeoutMs: 40,
+      onCandidateFailed: (candidate, failure) => seen.push({ id: candidate.id, kind: failure.kind, attempt: failure.attempt, willRetry: failure.willRetry, willFallback: failure.willFallback }) });
+    await (wrapped as Exclude<LanguageModel, string>).doGenerate(params);
+    expect(seen).toEqual([
+      { id: 'stalled', kind: 'timeout', attempt: 0, willRetry: true, willFallback: false },
+      { id: 'stalled', kind: 'timeout', attempt: 1, willRetry: false, willFallback: true },
+    ]);
+  });
+
+  it('separates a talking-but-broken upstream from a black hole', async () => {
+    const kinds: string[] = [];
+    const wrapped = fallbackLanguageModel([
+      { id: 'busy', model: model('busy', () => { throw Object.assign(new Error('busy'), { statusCode: 503 }); }) },
+      { id: 'healthy', model: model('healthy', () => ({})) },
+    ], { maxRetries: 0, retryBaseMs: 1, retryMaxMs: 1, onCandidateFailed: (_candidate, failure) => kinds.push(failure.kind) });
+    await (wrapped as Exclude<LanguageModel, string>).doGenerate(params);
+    expect(kinds).toEqual(['status']);
+  });
+
+  // 判成 down 的候选要在**这一次调用**就被跳过，不能等下一次 rebuild：一轮 12 步，每步重新熬满
+  // 一遍超时预算就是本次事故里那个「每轮只走得完一步」。
+  it('skips a candidate already marked down without spending an attempt on it', async () => {
+    let deadCalls = 0;
+    let healthyCalls = 0;
+    const wrapped = fallbackLanguageModel([
+      { id: 'dead', rowId: 'r-dead', model: model('dead', () => { deadCalls += 1; return {}; }) },
+      { id: 'healthy', rowId: 'r-healthy', model: model('healthy', () => { healthyCalls += 1; return {}; }) },
+    ], { maxRetries: 2, retryBaseMs: 1, retryMaxMs: 1, isDown: (candidate) => candidate.rowId === 'r-dead' });
+    await (wrapped as Exclude<LanguageModel, string>).doGenerate(params);
+    expect(deadCalls).toBe(0);
+    expect(healthyCalls).toBe(1);
+  });
+
+  // 全链都 down 时宁可发一次注定失败的请求：一个都不发，调用方拿到的是「模型没话说」而不是故障。
+  it('still calls the last candidate when the whole chain is marked down', async () => {
+    let lastCalls = 0;
+    const wrapped = fallbackLanguageModel([
+      { id: 'dead', model: model('dead', () => { throw new Error('never reached'); }) },
+      { id: 'also-dead', model: model('also-dead', () => { lastCalls += 1; return {}; }) },
+    ], { maxRetries: 0, retryBaseMs: 1, retryMaxMs: 1, isDown: () => true });
+    await (wrapped as Exclude<LanguageModel, string>).doGenerate(params);
+    expect(lastCalls).toBe(1);
+  });
+
+  // 轮次超时（`TurnRegistry` 的 `controller.abort('timeout')`）在日志里也是一条 timeout，但那不是
+  // provider 的故障 —— 报上去会把健康的 provider 一路推到 down。
+  it('does not blame the provider for the caller aborting', async () => {
+    const seen: unknown[] = [];
+    const controller = new AbortController();
+    const wrapped = fallbackLanguageModel([
+      { id: 'first', model: model('first', () => { controller.abort('timeout'); throw Object.assign(new Error('busy'), { statusCode: 503 }); }) },
+      { id: 'second', model: model('second', () => ({})) },
+    ], { maxRetries: 3, retryBaseMs: 1, retryMaxMs: 1, onCandidateFailed: (candidate) => seen.push(candidate.id) });
+    await expect((wrapped as Exclude<LanguageModel, string>).doGenerate({ ...params as object, abortSignal: controller.signal } as never)).rejects.toThrow('busy');
+    expect(seen).toEqual([]);
+  });
+
   it('degrades invalid credentials without retrying or falling back', async () => {
     let invalidCalls = 0;
     let healthyCalls = 0;
