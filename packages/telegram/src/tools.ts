@@ -36,7 +36,9 @@ export class TelegramTools implements TelegramToolBridge {
       const messageIds: number[] = [];
       for (const part of parts) {
         const sent = await sendWithFallback(api, target.chatId, part, this.thread(target));
-        this.archiveOutgoing(target, sent.message_id, sent.date, part, 'text', sent);
+        // 归档存渲染前的 `text` 而不是 `part`：三条出站路径（这里、`bot.ts` 的兜底、流式）
+        // 必须在 `messages.text` 里放同一种东西，否则同一张表里一半带 MarkdownV2 转义符。
+        this.archiveOutgoing(target, sent.message_id, sent.date, text, 'text', sent);
         messageIds.push(sent.message_id);
       }
       return { ok: true, messageIds };

@@ -18,7 +18,7 @@
 | 问题 | 权威 | 由什么焊住 |
 |---|---|---|
 | 哪些配置键还没接线 | [11 §2.0.1](./11-config-reference.md)（当前 10 条，每条写明为什么留着） | `tests/config.test.ts` —— 白名单每条必须在 `docs/11` 标记，且标注要跟着 `HOT_RELOADABLE_CONFIG_KEYS` |
-| 验收条目的勾选状态 | [13](./13-acceptance-criteria.md)（当前 **159 / 439**） | `tests/acceptance.test.ts` —— 只有标 `(自动)` 且点名真实用例文件的能勾，签署表分子分母自动核对 |
+| 验收条目的勾选状态 | [13](./13-acceptance-criteria.md)（当前 **160 / 440**） | `tests/acceptance.test.ts` —— 只有标 `(自动)` 且点名真实用例文件的能勾，签署表分子分母自动核对 |
 | WebUI 控制面够不着什么 | [21](./21-webui-coverage-gaps.md) | 无自动约束（人工复算，方法见其 §1） |
 | 某行代码为什么长这样 | [`reviews/`](./reviews/) 里的条目编号 | `tests/docs.test.ts` —— 编号被源码注释大量引用，删了或改了会报错 |
 
@@ -56,6 +56,7 @@ Telegram 侧没有「发一条带选项的消息、等人点、把结果回灌�
 |---|---|---|
 | `health` 事件没有周期心跳 | 只在 provider 测试与 MCP 重连后 emit（`app.ts:727` / `1400`） | **有意为之**：顶栏新鲜度依据业务事件，不把连接状态伪装成周期健康检查。要改先想清楚这一点 |
 | 工具策略覆盖层刚落地，`TOOL_POLICY` 不再是唯一真相 | `tools.overrides.<name>` 现在收 `enabled` / `minRole` / `approval` / `timeoutMs`；合并只有一份（`effectiveToolPolicy`，`packages/core/src/tools/policy.ts`），registry 与 `GET /api/tools` 共用 | 这是对 [09 §3.7](./09-webui.md) 旧决定的**有意推翻**（原文见 [21 §5](./21-webui-coverage-gaps.md) 那条「已推翻」）。改工具权限相关代码前先看那三条不变量：覆盖绕不过 `available()`、`approvalFor` 抬档只升不降、`timeoutMs: null` 的工具不吃超时覆盖。**读 minRole/approval 一律走 `ToolRegistry.effectivePolicy()`**，直接读 `tool.policy` 就是绕过覆盖层 |
+| 解析失败的第二级兜底（发 `.md` 文档）没实现 | `sendWithFallback` / `TelegramOutput.edit` 只做了第一级：`can't parse entities` 时以纯文本重发/重编辑一次（`output.ts:161`、`stream-output.ts:81`）。[08 §5.2](./08-telegram-adapter.md) 那条「再失败则把内容作为 `.md` 文档发出并回复一句摘要」压根没有实现，而 AC-OUT-005 一直挂着 `[x]`（**已改回 `[ ]`**） | 两级都不打日志，`turn.jsonl` 里只有 `turn.start` / `ctx.commit` / `turn.end`。**渲染后真正发出去的文本全链路没有一处落日志** —— 这次的行内代码 bug 只能靠翻下一次模型调用的上下文 blob 反推出来。要补兜底的话顺手把「降级了」记一条 warn |
 | 验收条目 274 条未勾 | 其中人工条目一律保持未勾（要人签字，不是测试的事）；其余是没有对应 vitest 用例的 `(自动)` 条目 | 勾选形式由 `tests/acceptance.test.ts` 定死，勾之前先写用例 |
 | 10 条配置键未接线 | 见 [11 §2.0.1](./11-config-reference.md)，每条写明「暂时没做」还是「不该在这一层做」 | 摘键之前先看 [21 §1](./21-webui-coverage-gaps.md) 的复算方法 |
 | 自我扩展刚落地（M12），四条通道默认全关 | `tools.selfExtend.*` 出厂 `enabled: false`；打开之后模型能写自定义工具 / skill / plugin，能登记 MCP server | 主闸不是审批而是「落库即禁用，owner 在扩展页点开」。动这一块之前先读 [14 T18/T19](./14-open-questions.md)：**授权时点与执行时点是分离的**，而 `requireSandbox` 默认关时自定义工具就是调用者的 `bash`（因而能直接写 `data/luoli.db` 绕开启用闸）|

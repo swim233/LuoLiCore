@@ -233,6 +233,9 @@ importers:
       '@luoli/shared':
         specifier: workspace:*
         version: link:../shared
+      marked:
+        specifier: ^16.2.1
+        version: 16.4.2
 
   packages/webui: {}
 

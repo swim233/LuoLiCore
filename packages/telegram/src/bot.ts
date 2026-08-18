@@ -539,8 +539,12 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
         // **只有第一条分片带**，否则一条长回复会在群里刷出一串引用块。
         for (const [index, part] of splitTelegramText(outgoing, outputConfig.maxMessageChars).entries()) {
           const sent = await sendWithFallback(bot.api, chatId, part, index === 0 ? { reply_parameters: { message_id: message.message_id } } : {}, outputConfig.parseMode);
+          // 归档存**渲染前**的正文，与流式那条路（下面存 `answer`）一致。存 `part` 的话
+          // `messages.text` 里躺的是 MarkdownV2 转义后的文本 —— WebUI 会话页和 `read_messages`
+          // 看到的 bot 发言带一串 `\-` `\.`，同一张表里两条路径两种内容。分片多于一条时这里会
+          // 重复存全文，这也是流式那条路一直以来的行为（每个 message_id 一条，text 都是 answer）。
           scoped.append({ chatId, messageThreadId: message.message_thread_id ?? null, tgMessageId: sent.message_id, direction: 'out', fromKind: 'bot', fromUserId: String(bot.botInfo.id), fromName: bot.botInfo.first_name, fromUsername: bot.botInfo.username,
-            kind: 'text', text: part, tgDate: sent.date * 1000, raw: sent, triggered: false, turnId: turn.turnId });
+            kind: 'text', text: outgoing, tgDate: sent.date * 1000, raw: sent, triggered: false, turnId: turn.turnId });
         }
         answer = outgoing;
       } else {

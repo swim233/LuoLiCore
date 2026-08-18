@@ -117,6 +117,17 @@ describe('telegram side tools', () => {
     closeDatabase(h.db);
   });
 
+  it('archives the pre-render text, not the MarkdownV2-escaped payload', async () => {
+    // 发出去的是渲染后的（行内代码要变成 code 实体），存下来的必须是渲染前的 —— 三条出站路径
+    // （这里、`bot.ts` 的非流式兜底、`TelegramOutput`）在 `messages.text` 里放的得是同一种东西，
+    // 否则 WebUI 会话页和 `read_messages` 看到的 bot 发言一半带着 `\-` `\.` 这类转义符。
+    const h = harness('tg-tools-archive-raw');
+    expect(await h.registry.execute('send_message', { text: '用 `pnpm i` 装 1.2-beta' }, h.context)).toMatchObject({ ok: true });
+    expect(h.calls[0]!.arguments_[1]).toBe('用 `pnpm i` 装 1\\.2\\-beta');
+    expect(h.archive.scope('1', null).recent(1)[0]!.text).toBe('用 `pnpm i` 装 1.2-beta');
+    closeDatabase(h.db);
+  });
+
   it('keeps send_file inside the workspace and under the size cap', async () => {
     const h = harness('tg-tools-file', { config: { maxFileSendMb: 0.001 } });
     writeFileSync(resolve(h.workspace, 'small.txt'), 'ok');
