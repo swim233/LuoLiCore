@@ -333,6 +333,11 @@ const rebuildModels = (): void => { const live = configStore.snapshot(); modelRe
 // 要拉 docker）足够让它在 `const rebuildModels` 求值之前就到点 —— 那一次会以 TDZ 的
 // ReferenceError 收场，只在 `scheduler.failed` 里留一行，健康检查静静少跑一轮。
 scheduler.add(config.provider.healthCheckCron, async () => {
+  // **先 rebuild 再探。** `#probes` 是上一次 rebuild 的产物：反过来的话，刚过完 30 分钟冷却、
+  // 这一轮才被放回链里的那个 provider 探不到（`probeCandidate` 返回 null → 整个跳过），它会带着
+  // 上一次的判定承接一整个 cron 间隔的真实流量。探完再 rebuild 一次是因为探测本身会改状态
+  // （新判死的要出链、探回 up 的要进链）—— 这一次也顺带管 `all_providers_down` 与 `log.setSecrets`。
+  rebuildModels();
   const outcomes = await runProviderHealthCheck({ db, models: modelRegistry, log, keyFor: (providerId) => { try { return providers.key(providerId); } catch { return null; } } },
     { timeoutMs: PROVIDER_PROBE_TIMEOUT_MS, failuresToDown: PROVIDER_FAILURES_TO_DOWN });
   rebuildModels();

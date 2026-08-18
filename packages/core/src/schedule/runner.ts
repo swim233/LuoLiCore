@@ -197,13 +197,18 @@ export class ScheduledJobRunner {
       this.dependencies.memory.flush(turn.turnId);
       this.dependencies.jobs.markRun(job.id, { state: 'committed' });
     } catch (error) {
-      const cancelled = turn.abortSignal.aborted;
+      // 超时不是取消（`docs/04 §5.3` 的三档，同 `bot.ts`）。定时任务这条路上尤其明显：**没有人会去
+      // 取消一个自己触发的任务**，记成 cancelled 等于「上游黑着的那几天里，每次触发都安静地算不了数」。
+      const timedOut = turn.abortSignal.reason === 'timeout';
+      const cancelled = turn.abortSignal.aborted && !timedOut;
       // 同 `bot.ts` 那条：`abortTurn` 抛出去会让下面的 `turns.finish` 不执行，那行永久卡在
       // `state='running'`。清理是尽力而为，**记状态不是**。
       try { await this.dependencies.context.abortTurn(turn, cancelled ? 'cancelled' : 'failed', error); }
       catch (cleanup) { this.dependencies.log.event({ level: 'error', kind: 'ctx.abort', summary: 'abortTurn failed; turn still recorded as ended', traceId: turn.turnId, chatId: job.chatId, key: job.key, data: { error: cleanup instanceof Error ? cleanup.message : String(cleanup), schedule: job.id } }); }
-      const settled = this.dependencies.turns.finish(turn.turnId, cancelled ? { state: 'cancelled', cancelReason: String(turn.abortSignal.reason ?? 'cancelled') } : { state: 'failed', error: error instanceof Error ? error.message : String(error) });
-      this.dependencies.log.event({ level: cancelled ? 'warn' : 'error', kind: 'turn.end', summary: cancelled ? 'turn cancelled' : error instanceof Error ? error.message : 'turn failed', traceId: turn.turnId, chatId: job.chatId, userId: job.createdBy, key: job.key, data: { schedule: job.id } });
+      const settled = this.dependencies.turns.finish(turn.turnId, cancelled
+        ? { state: 'cancelled', cancelReason: String(turn.abortSignal.reason ?? 'cancelled') }
+        : { state: 'failed', error: timedOut ? 'turn_timeout' : error instanceof Error ? error.message : String(error), ...(timedOut ? { cancelReason: 'timeout' } : {}) });
+      this.dependencies.log.event({ level: cancelled ? 'warn' : 'error', kind: 'turn.end', summary: cancelled ? 'turn cancelled' : timedOut ? 'turn timed out' : error instanceof Error ? error.message : 'turn failed', traceId: turn.turnId, chatId: job.chatId, userId: job.createdBy, key: job.key, data: { schedule: job.id } });
       this.dependencies.log.publish('turn.finished', { turnId: turn.turnId, key: job.key, chatId: job.chatId, state: cancelled ? 'cancelled' : 'failed', steps: settled?.steps ?? 0, toolCalls: settled?.toolCalls ?? 0, costUsd: settled?.costUsd ?? 0, rebased: false, durationMs: settled?.durationMs ?? 0 });
       this.#failed(job, error, turn.turnId);
     } finally {

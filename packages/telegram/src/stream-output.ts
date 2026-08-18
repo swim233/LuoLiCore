@@ -212,6 +212,18 @@ export class TelegramOutput {
      *   「有内容的一轮」提交进上下文。这种情况该走失败那条路 —— 那里有能看懂的原因。
      */
     const closing = text + (interrupted && text.trim() ? '\n\n（生成中断）' : '');
+    /**
+     * **一个字都没吐出来时，已经发出去的占位消息要摘掉。** 上面那个后缀不加，于是 `closing` 是空串、
+     * `splitTelegramText('')` 是空数组、下面那个收尾循环一次调用都不发 —— 「正在想…」就永久停在
+     * 屏幕上（`logs/2026-08-18` 的主路径正是这一条：占位 4 秒发出、600 秒到点 abort，一个 chunk
+     * 都没来）。占位消息不携带任何内容，摘掉它比留一条谁都解释不了的孤儿消息安全（docs/16 §5）；
+     * 能看懂的原因在失败那条路上（`bot.ts` 的超时提示 / `failureText`）。
+     * 返回空 `messageIds` 是同一件事的另一半：归档侧按它落 out 行，留着就是一行空正文的机器人消息。
+     */
+    if (interrupted && !closing.trim() && messageIds.length) {
+      for (const messageId of messageIds) await deliver(() => this.bot.api.deleteMessage(this.chatId, messageId));
+      return { text: closing, interrupted, messageIds: [] };
+    }
     if (this.options.mode === 'once' || !messageIds.length) {
       return { text: closing, interrupted, messageIds: await this.send(closing, replyToMessageId) };
     }

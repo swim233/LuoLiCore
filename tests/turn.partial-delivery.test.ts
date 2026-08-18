@@ -22,12 +22,13 @@ const botInfo = { id: 1, is_bot: true as const, first_name: 'Bot', username: 'my
 const privateUpdate = (id: number, text: string): never => ({ update_id: id, message: { message_id: id, date: Math.floor(Date.now() / 1000),
   chat: { id: 500, type: 'private', first_name: 'User' }, from: { id: 500, is_bot: false, first_name: 'User' }, text } }) as never;
 
-interface Fixture { bot: Bot; db: ReturnType<typeof openDatabase>; registry: TurnRegistry; sent: string[] }
+interface Fixture { bot: Bot; db: ReturnType<typeof openDatabase>; registry: TurnRegistry; sent: string[];
+  calls: Array<{ method: string; payload: Record<string, unknown> }>; alerts: Array<{ kind: string; count: unknown }> }
 
 /** `onTurn` 拿到 turn 之后由用例决定这条流怎么结束（`final` 缺省时按「最后一步没有正文」处理）。 */
 type StreamMaker = (turn: { turnId: string; abortSignal: AbortSignal }, registry: TurnRegistry) => { stream: AsyncIterable<string>; final?: Promise<string> };
 
-async function fixture(name: string, makeStream: StreamMaker): Promise<Fixture> {
+async function fixture(name: string, makeStream: StreamMaker, patch: Record<string, unknown> = {}): Promise<Fixture> {
   const path = `./data/${name}.test.db`;
   for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
   rmSync(`./data/${name}-memory`, { recursive: true, force: true });
@@ -36,16 +37,19 @@ async function fixture(name: string, makeStream: StreamMaker): Promise<Fixture> 
   migrateDatabase(db);
   // `once` 档：consume 不做流式编辑，收尾一次性 send —— 「（生成中断）」那个后缀两档共用一份代码。
   const config = configSchema.parse({ access: { defaultUserRole: 'trusted', defaultChatRole: 'trusted', bootstrapOwnerId: '1' },
-    quota: { enabled: false }, output: { mode: 'once', replyDelayMs: 0 } });
+    quota: { enabled: false }, output: { mode: 'once', replyDelayMs: 0 }, ...patch });
   const archive = new ArchiveRepository(db);
   const operations = new OperationsRepository(db);
   const registry = new TurnRegistry();
   const sent: string[] = [];
+  const calls: Array<{ method: string; payload: Record<string, unknown> }> = [];
+  const alerts: Array<{ kind: string; count: unknown }> = [];
   const bot = await createTelegramBot('12345678:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', {
     config, db, principals: new PrincipalRepository(db), archive, operations, context: new ContextEngine(db, archive), turns: new TurnRepository(db),
     quota: new QuotaGuard(db, 'UTC'), memory: new MemoryStore(db, `./data/${name}-memory`, 1500, 3000),
     registry, concurrency: new TurnConcurrency(config.concurrency),
     log: new LogSink(operations, `./data/${name}-logs`), botInfo,
+    alerts: { fire: (kind, _summary, data) => { alerts.push({ kind, count: (data as { count?: unknown } | undefined)?.count }); } },
     onTurn: async (turn) => {
       const made = makeStream(turn, registry);
       const final = made.final ?? Promise.resolve('');
@@ -54,11 +58,12 @@ async function fixture(name: string, makeStream: StreamMaker): Promise<Fixture> 
     },
   });
   bot.api.config.use((async (_prev: unknown, method: string, payload: Record<string, unknown>) => {
+    calls.push({ method, payload });
     if (method === 'sendMessage') sent.push(String(payload.text));
     return { ok: true, result: method === 'sendMessage' || method === 'editMessageText'
       ? { message_id: 900 + sent.length, date: 0, chat: { id: 500, type: 'private' }, text: String(payload.text ?? '') } : true };
   }) as never);
-  return { bot, db, registry, sent };
+  return { bot, db, registry, sent, calls, alerts };
 }
 
 const turnRow = (db: ReturnType<typeof openDatabase>): { state: string; cancel_reason: string | null; error: string | null; commit_id: string | null } =>
@@ -69,7 +74,12 @@ const turnEndLog = (db: ReturnType<typeof openDatabase>): { level: string; summa
   db.prepare("SELECT level,summary FROM log_events WHERE kind='turn.end'").get() as never;
 
 describe('吐过内容之后断掉的轮次', () => {
-  it('turnTimeoutMs 到点：内容留下、delta 照常提交，但轮次记 cancelled', async () => {
+  /**
+   * **超时不是取消**（docs/04 §5.3 的三档）。判据只看 `abortSignal.aborted` 的那一版把
+   * `turnTimeoutMs` 和 `/cancel` 归成一类，于是超时的轮次记 `cancelled` 并被 `noteFailure` 跳过
+   * —— 「每一轮都卡满十分钟」这种最该响的故障一次告警都不响（logs/2026-08-18：三十来轮全 cancelled）。
+   */
+  it('turnTimeoutMs 到点：内容留下、delta 照常提交，轮次记 failed', async () => {
     const bed = await fixture('partial-timeout', (turn, registry) => ({ stream: (async function* () {
       yield '先查一下数据库。';
       // `TurnRegistry` 那条 setTimeout 干的就是这件事（reason 恒为 'timeout'）。
@@ -78,13 +88,46 @@ describe('吐过内容之后断掉的轮次', () => {
     })() }));
     await bed.bot.handleUpdate(privateUpdate(1, '帮我查个东西'));
     expect(bed.sent).toEqual(['先查一下数据库。\n\n（生成中断）']);
-    expect(turnRow(bed.db)).toMatchObject({ state: 'cancelled', cancel_reason: 'timeout', error: null });
+    // `cancel_reason` 仍记 timeout（是谁掐的），但状态是 failed 且 error 与「上游中途挂」分得开。
+    expect(turnRow(bed.db)).toMatchObject({ state: 'failed', cancel_reason: 'timeout', error: 'turn_timeout' });
     // 提交照做（上下文必须与用户所见一致），而且那一行要指得着这次提交。
     expect(turnRow(bed.db).commit_id).toBeTruthy();
     expect(committedAssistantText(bed.db)).toEqual(['先查一下数据库。\n\n（生成中断）']);
+    expect(turnEndLog(bed.db)).toEqual({ level: 'warn', summary: 'turn timed out after partial delivery' });
+    closeDatabase(bed.db);
+  }, 20_000);
+
+  it('用户 /cancel：仍记 cancelled，且不计入连续失败', async () => {
+    const bed = await fixture('partial-cancel', (turn, registry) => ({ stream: (async function* () {
+      yield '在查了。';
+      registry.cancel(turn.turnId, '500', 'owner');
+      throw new Error(String(turn.abortSignal.reason));
+    })() }));
+    await bed.bot.handleUpdate(privateUpdate(1, '帮我查个东西'));
+    expect(turnRow(bed.db)).toMatchObject({ state: 'cancelled', cancel_reason: 'user', error: null });
     expect(turnEndLog(bed.db)).toEqual({ level: 'warn', summary: 'turn cancelled after partial delivery' });
     closeDatabase(bed.db);
   }, 20_000);
+
+  it('连续 5 轮超时会响 consecutive_turn_failures，连续 5 轮 /cancel 不会', async () => {
+    const timedOut = await fixture('partial-alert-timeout', (turn, registry) => ({ stream: (async function* () {
+      yield '在查。';
+      registry.cancel(turn.turnId, '500', 'owner', 'timeout');
+      throw new Error(String(turn.abortSignal.reason));
+    })() }));
+    for (let index = 1; index <= 5; index += 1) await timedOut.bot.handleUpdate(privateUpdate(index, '查一下'));
+    expect(timedOut.alerts).toEqual([{ kind: 'consecutive_turn_failures', count: 5 }]);
+    closeDatabase(timedOut.db);
+
+    const cancelled = await fixture('partial-alert-cancel', (turn, registry) => ({ stream: (async function* () {
+      yield '在查。';
+      registry.cancel(turn.turnId, '500', 'owner');
+      throw new Error(String(turn.abortSignal.reason));
+    })() }));
+    for (let index = 1; index <= 5; index += 1) await cancelled.bot.handleUpdate(privateUpdate(index, '查一下'));
+    expect(cancelled.alerts).toEqual([]);
+    closeDatabase(cancelled.db);
+  }, 40_000);
 
   it('上游中途挂（没人取消）：记 failed 而不是 cancelled', async () => {
     const bed = await fixture('partial-failed', () => ({ stream: (async function* () {
@@ -112,6 +155,30 @@ describe('吐过内容之后断掉的轮次', () => {
     // 什么都没投出去 → 不提交 delta（`abortTurn` 那条路），上下文里不留半截 assistant 消息。
     expect(committedAssistantText(bed.db)).toEqual([]);
     expect(bed.sent).toHaveLength(1);
+    closeDatabase(bed.db);
+  }, 20_000);
+
+  /**
+   * 一个 chunk 都没来时那条占位消息（`output.placeholderAfterMs`）**必须被摘掉**。「空正文不加
+   * （生成中断）后缀」那一版让收尾文本变成空串，而 `splitTelegramText('')` 是空数组 —— 收尾循环
+   * 一次调用都不发，占位消息于是永久停在「正在想…」。这正是 logs/2026-08-18 的主路径。
+   */
+  it('一个 chunk 都没来时，占位消息被删掉而不是永久停在「正在想…」', async () => {
+    const bed = await fixture('partial-placeholder', () => ({
+      stream: (async function* () {
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        throw new Error('request_timeout_15000ms');
+      })(),
+      final: Promise.reject(new Error('request_timeout_15000ms')),
+    }), { output: { mode: 'stream', replyDelayMs: 0, placeholderAfterMs: 5, placeholderTexts: ['正在想…'], placeholderPick: 'fixed', typingWhileWorking: false } });
+    await bed.bot.handleUpdate(privateUpdate(1, '帮我查个东西'));
+    const placeholder = bed.calls.find((call) => call.method === 'sendMessage' && call.payload.text === '正在想…');
+    expect(placeholder).toBeTruthy();
+    expect(bed.calls.filter((call) => call.method === 'deleteMessage').map((call) => call.payload.message_id)).toEqual([901]);
+    // 也不许留一条空正文的 out 归档行：归档跟着 `messageIds` 走，而那一份现在是空的。
+    expect(bed.db.prepare("SELECT COUNT(*) FROM messages WHERE direction='out'").pluck().get()).toBe(0);
+    expect(turnRow(bed.db)).toMatchObject({ state: 'failed', cancel_reason: null });
+    expect(turnRow(bed.db).error).toContain('request_timeout_15000ms');
     closeDatabase(bed.db);
   }, 20_000);
 

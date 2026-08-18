@@ -65,7 +65,14 @@ export interface FallbackOptions {
    * 那样调用方拿到的是「模型没话说」，而不是一个能看懂的上游故障。
    */
   isDown?: (candidate: FallbackCandidate) => boolean;
+  /** `to` 报的是**真正会被尝试的**下一个候选（跳过已 down 的），不是链数组里的下一个。 */
   onFallback?: (from: FallbackCandidate, to: FallbackCandidate) => void;
+  /**
+   * 某个候选因为已经被判成 `down` 而**压根没试**。少了这一条，链 A→B→C 而 B 已 down 时日志里
+   * 只有「A → C」（或者更糟：改之前是「A → B」而实际服务的是 C），跳过这件事没有任何痕迹，
+   * 而「哪个 provider 现在不在服务」正是排障第一眼要看的（docs/10 · `provider.fallback`）。
+   */
+  onSkipped?: (candidate: FallbackCandidate, next: FallbackCandidate | undefined) => void;
   onUnavailable?: (candidate: FallbackCandidate, error: unknown) => void;
   /**
    * 每一次失败的尝试报一份（`docs/10` 给 `model.error` 定的 `retryAttempt` / `willFallback` 就是它）。
@@ -189,12 +196,25 @@ export function fallbackLanguageModel(candidates: FallbackCandidate[], options: 
     try { return await run(); }
     catch (error) { options.onExhausted?.(error); throw error; }
   };
+  /**
+   * 跳过已 down 的之后**真正会被尝试的**下一个候选。`onFallback` 的 `to` 必须报这个：链 A→B→C
+   * 而 B 已 down 时报 B，日志就写着「A → B」而实际服务的是 C —— 这个中间件存在的一半理由就是
+   * 让那 363 秒的空白变得可读，报错的链路比不报更糟。跳过判据与下面两个循环共用一份，
+   * 包括「最后一个候选永不跳过」。
+   */
+  const nextServable = (index: number): FallbackCandidate | undefined => {
+    for (let next = index + 1; next < candidates.length; next += 1) {
+      if (next < candidates.length - 1 && options.isDown?.(candidates[next]!)) continue;
+      return candidates[next];
+    }
+    return undefined;
+  };
   const middleware: LanguageModelMiddleware = {
     wrapGenerate: ({ params }) => reporting(async () => {
       let last: unknown;
       for (let index = 0; index < candidates.length; index += 1) {
         const candidate = candidates[index]!;
-        if (index < candidates.length - 1 && options.isDown?.(candidate)) continue;
+        if (index < candidates.length - 1 && options.isDown?.(candidate)) { options.onSkipped?.(candidate, nextServable(index)); continue; }
         const model = candidate.model;
         for (let attempt = 0; attempt <= options.maxRetries; attempt += 1) {
           const deadline = new AttemptDeadline(params.abortSignal);
@@ -212,7 +232,7 @@ export function fallbackLanguageModel(candidates: FallbackCandidate[], options: 
             if (attempt < options.maxRetries) await abortablePause(retryDelay(attempt, retryAfter(error), options.retryBaseMs, options.retryMaxMs), options.abortSignal);
           }
         }
-        const next = candidates[index + 1];
+        const next = nextServable(index);
         if (next) options.onFallback?.(candidate, next);
       }
       throw last ?? new Error('all providers unavailable');
@@ -221,7 +241,7 @@ export function fallbackLanguageModel(candidates: FallbackCandidate[], options: 
       let last: unknown;
       for (let index = 0; index < candidates.length; index += 1) {
         const candidate = candidates[index]!;
-        if (index < candidates.length - 1 && options.isDown?.(candidate)) continue;
+        if (index < candidates.length - 1 && options.isDown?.(candidate)) { options.onSkipped?.(candidate, nextServable(index)); continue; }
         const model = candidate.model;
         for (let attempt = 0; attempt <= options.maxRetries; attempt += 1) {
           const deadline = new AttemptDeadline(params.abortSignal);
@@ -247,7 +267,7 @@ export function fallbackLanguageModel(candidates: FallbackCandidate[], options: 
             if (attempt < options.maxRetries) await abortablePause(retryDelay(attempt, retryAfter(error), options.retryBaseMs, options.retryMaxMs), options.abortSignal);
           }
         }
-        const next = candidates[index + 1];
+        const next = nextServable(index);
         if (next) options.onFallback?.(candidate, next);
       }
       throw last ?? new Error('all providers unavailable');

@@ -15,7 +15,7 @@ import { runtimeBlock, type PromptBuildResult } from '../prompt/assembler.js';
 import type { ToolExecutionContext, ToolRegistry } from '../tools/registry.js';
 import { SKILL_NARROWING_EXEMPT } from '../tools/policy.js';
 import type { ProviderStore } from '../provider/store.js';
-import { PROVIDER_FAILURES_TO_DOWN, recordProviderFailure } from '../provider/health.js';
+import { PROVIDER_FAILURES_TO_DOWN, recordProviderFailure, recordProviderServed } from '../provider/health.js';
 import { type FallbackOptions, fallbackLanguageModel } from './fallback-model.js';
 import { createStepObservers, type StepFacts } from './step-observers.js';
 import { type AliasSettings, parseAliasSettings } from '../provider/alias-settings.js';
@@ -80,13 +80,21 @@ export class ModelRegistry {
     this.#probes.clear();
     this.#down.clear();
     const cutoff = Date.now() - cooldownMinutes * 60_000;
+    /**
+     * **冷却到期要写回库，不能只在这里放行。** 此前判据只在这一句 SELECT 里：过了冷却的 provider
+     * 重新进链、也从 `#down` 消失，可库里那行仍是 `health_state='down'` 且 `health_fail_count>=3`
+     * —— 于是它带着满格计数承接真实流量，下一次超时（4 >= 3）当场再 down 30 分钟，成了
+     * 「30 分钟 down / 一个 cron 间隔 up」的抖动，而 WebUI 全程显示 down。`health_error` 留着
+     * 当「上次失败原因」给界面看，`health_checked_at` 不动（它是上次判定的时间）。
+     */
+    this.db.prepare("UPDATE providers SET health_state='up',health_fail_count=0 WHERE health_state='down' AND COALESCE(health_checked_at,0) < ?").run(cutoff);
     const providerRows = this.db.prepare(`SELECT id,name,kind,base_url AS baseUrl,headers_json AS headers FROM providers
-      WHERE enabled=1 AND (COALESCE(health_state,'up') <> 'down' OR COALESCE(health_checked_at,0) < ?)`)
-      .all(cutoff) as ProviderRow[];
+      WHERE enabled=1 AND COALESCE(health_state,'up') <> 'down'`).all() as ProviderRow[];
     // down 的 provider 被上面那句整条滤掉，它的模型也就不在任何链里 —— 所以「这个候选是不是
     // down」必须单独查一次，不能反过来从链里推（`isDown` 判的正是已经不在链里的那些）。
+    // 冷却判据不用在这里重复：过了期的行上面那句 UPDATE 已经改回 `up` 了。
     for (const row of this.db.prepare(`SELECT m.id FROM models m JOIN providers p ON p.id=m.provider_id
-      WHERE p.health_state='down' AND COALESCE(p.health_checked_at,0) >= ?`).all(cutoff) as Array<{ id: string }>) this.#down.add(row.id);
+      WHERE p.health_state='down'`).all() as Array<{ id: string }>) this.#down.add(row.id);
     const providerInstances = new Map<string, Provider>();
     for (const provider of providerRows) {
       /**
@@ -180,12 +188,29 @@ export class ModelRegistry {
     for (const [alias, chain] of this.#chains) if (chain.some((candidate) => candidate.info.modelId === modelId)) return alias;
     return null;
   }
+  /**
+   * `#down` 的粒度**只有这一份**：provider 名下所有模型行一起进、一起出。401/403 那条路
+   * （`markProviderDown`）曾经只加命中的那一行，而按计数判死那条路（`recordFailure`）加的是全部
+   * —— 同一个凭据被拒的 provider 在一条链上挂了两个模型时，第二个不被 `isDown` 跳过，而 401 在
+   * 中间件里是短路 `throw`：这一轮既白烧一次注定 401 的往返，也不会继续往下 fallback。
+   */
+  #downRows(providerId: string, down: boolean): void {
+    for (const row of this.db.prepare('SELECT id FROM models WHERE provider_id=?').all(providerId) as Array<{ id: string }>) {
+      if (down) this.#down.add(row.id); else this.#down.delete(row.id);
+    }
+  }
   markProviderDown(modelId: string, error: string): void {
     const row = this.infoByModelId(modelId);
     if (row) {
       this.db.prepare("UPDATE providers SET health_state='down',health_checked_at=?,health_error=? WHERE id=?").run(Date.now(), error.slice(0, 500), row.providerId);
-      this.#down.add(row.id);
+      this.#downRows(row.providerId, true);
     }
+  }
+  /** `models.id` → `provider_id`。`recordFailure` / `recordSuccess` 都按行反查，不认模型名。 */
+  #providerOf(candidate: { id: string; rowId?: string }): string | null {
+    const rowId = candidate.rowId ?? this.infoByModelId(candidate.id)?.id;
+    if (!rowId) return null;
+    return this.db.prepare('SELECT provider_id FROM models WHERE id=?').pluck().get(rowId) as string ?? null;
   }
 
   /** 健康探测用的裸候选（`provider/health.ts` 的 `ProbeSource`）。 */
@@ -208,15 +233,26 @@ export class ModelRegistry {
    *
    * 代价是：如果这一次把最后一个 provider 标成了 down，`all_providers_down` 要等下一次 cron
    * 才响（`rebuildModels` 那条尾巴在 `main.ts`）。
+   *
+   * **一次调用一个候选只记一次**，重试不各记一次 —— 那道闸在调用点（`onCandidateFailed` 的
+   * `willRetry`），因为「还会不会再试」只有中间件知道。
    */
   recordFailure(candidate: { id: string; rowId?: string }, reason: string, failuresToDown: number): boolean {
-    const rowId = candidate.rowId ?? this.infoByModelId(candidate.id)?.id;
-    if (!rowId) return false;
-    const providerId = this.db.prepare('SELECT provider_id FROM models WHERE id=?').pluck().get(rowId) as string | undefined;
+    const providerId = this.#providerOf(candidate);
     if (!providerId) return false;
     const { down } = recordProviderFailure(this.db, providerId, reason, failuresToDown);
-    if (down) for (const row of this.db.prepare('SELECT id FROM models WHERE provider_id=?').all(providerId) as Array<{ id: string }>) this.#down.add(row.id);
+    if (down) this.#downRows(providerId, true);
     return down;
+  }
+
+  /**
+   * 成功服务一次就把连续失败计数归零（`docs/04 §5.3`）。**少了这一条，「连续」就是「累计」**：
+   * 跨轮次零散攒够三次超时也能判死一个一直在服务的 provider，而计数在库里、重启也不清。
+   * 常态是 no-op（`recordProviderServed` 自己带守卫），所以每一步调一次不会多一次真实写入。
+   */
+  recordSuccess(candidate: { id: string; rowId?: string }): void {
+    const providerId = this.#providerOf(candidate);
+    if (providerId && recordProviderServed(this.db, providerId)) this.#downRows(providerId, false);
   }
 
   estimate(alias: string, inputTokens: number): number | null {
@@ -549,8 +585,14 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
       maxRetries: dependencies.config.provider.maxRetries, retryBaseMs: dependencies.config.provider.retryBaseMs,
       retryMaxMs: dependencies.config.provider.retryMaxMs, abortSignal: turn.abortSignal,
       requestTimeoutMs: dependencies.config.provider.requestTimeoutMs, streamIdleTimeoutMs: dependencies.config.provider.streamIdleTimeoutMs,
-      onServed: (served) => { servedModelId = served.id; },
+      // 服务成功 = 上游还答话，连续失败计数归零（`docs/04 §5.3`）。常态是一次 no-op 写。
+      onServed: (served) => { servedModelId = served.id; dependencies.registry.recordSuccess(served); },
       isDown: (candidate) => dependencies.registry.isDown(candidate),
+      // 跳过这件事必须有痕迹，而且 `to` 报的是真正会被试的那个（docs/10 · provider.fallback）。
+      onSkipped: (candidate, next) => {
+        dependencies.log.event({ level: 'warn', kind: 'provider.fallback', summary: `${candidate.id} 已判 down，跳过${next ? ` → ${next.id}` : ''}`,
+          traceId: turn.turnId, key: turn.key, data: { alias: aliasName, from: candidate.id, to: next?.id ?? null, reason: 'skipped_down' } });
+      },
       // 每一次失败的尝试落一行（`docs/10` 给 `model.error` 定的 `retryAttempt` / `willFallback`）。
       // 少了它，「熬满三次超时再 fallback」在日志里是一段空白：本次事故 363 秒里只有开头的
       // `turn.start` 与结尾的 `provider.fallback`（docs/00 §2.3 同一类）。
@@ -561,12 +603,21 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
           data: { alias: aliasName, modelId: candidate.id, errorKind: failure.kind, status: failure.status, retryAttempt: failure.attempt, willRetry: failure.willRetry, willFallback: failure.willFallback, ms: failure.elapsedMs } });
         // **只有超时计入连续失败。** 5xx / 429 是上游在说话，链内 fallback 当场就换人、代价是一次
         // 往返；真正贵的是「连上了但不返回」—— 每一步都要熬满 `(maxRetries+1) × requestTimeoutMs`。
-        if (failure.kind !== 'timeout') return;
+        // **而且一次调用一个候选只记一次**：还会再试就先不记。按尝试记的话 `maxRetries: 2` 时一次
+        // 请求就是三次增量，一个合法地超过 `requestTimeoutMs` 的调用（定时任务、子 agent、收尾
+        // 补跑都走非流式，`deadline.guard` 罩的是整段生成）当场就把整个 provider 判死 30 分钟。
+        if (failure.kind !== 'timeout' || failure.willRetry) return;
         const down = dependencies.registry.recordFailure(candidate, failure.error instanceof Error ? failure.error.message : String(failure.error), PROVIDER_FAILURES_TO_DOWN);
         if (down) {
           dependencies.log.event({ level: 'error', kind: 'provider.health', summary: `${candidate.id} 连续超时，已标 down 并从模型链跳过`,
             traceId: turn.turnId, data: { modelId: candidate.id, state: 'down', reason: 'request_timeout' } });
         }
+      },
+      // 这条以前一个消费方都没有 —— `provider.fallback` 是 `docs/10` 里有定义、生产侧却没有任何
+      // 产出的事件，于是「链首熬完之后换了谁」在日志里根本读不出来（本次事故靠算术反推的那一半）。
+      onFallback: (from, to) => {
+        dependencies.log.event({ level: 'warn', kind: 'provider.fallback', summary: `${from.id} 试完仍失败，换 ${to.id}`,
+          traceId: turn.turnId, key: turn.key, data: { alias: aliasName, from: from.id, to: to.id, reason: 'candidate_exhausted' } });
       },
       onUnavailable: (candidate, error) => {
         dependencies.registry.markProviderDown(candidate.id, error instanceof Error ? error.message : 'authentication_failed');

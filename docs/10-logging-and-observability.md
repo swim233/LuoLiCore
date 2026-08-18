@@ -42,7 +42,7 @@ turn 01J8…                                     kind=turn.start / turn.end
 | `trigger.matched` / `trigger.skipped` | debug | reason |
 | `quota.check` | info | scope, spent, limit, decision |
 | `quota.exceeded` | warn | scope, subject, spent, limit |
-| `turn.queued` / `turn.start` / `turn.end` | info（`turn.end` 断掉时 **warn**） | key, initiator, role, steps, costUsd, state。`turn cancelled/failed after partial delivery` = 已经吐过内容之后才断的那一路（[04 §5.3](./04-agents-and-providers.md)）：delta 提交了、状态不是 committed，`deliveredChars` 是留在屏幕上的字数 |
+| `turn.queued` / `turn.start` / `turn.end` | info（`turn.end` 断掉时 **warn**） | key, initiator, role, steps, costUsd, state。`turn cancelled/timed out/failed after partial delivery` = 已经吐过内容之后才断的那一路（[04 §5.3](./04-agents-and-providers.md) 的三档）：delta 提交了、状态不是 committed，`deliveredChars` 是留在屏幕上的字数。`turn timed out` = `turnTimeoutMs` 到点（`state='failed'`、`error='turn_timeout'`、`cancel_reason='timeout'`），与用户 `/cancel` 分开记 |
 | `turn.wrap_up` | **warn** | chars（最后一步没有正文，补跑了一次收尾；失败时带 error） |
 | `turn.no_final_text` | **warn** | streamedChars, messages（补跑也没救回来，回落到流里攒到的文本） |
 | `ctx.open` | debug | baseCommit, claimed, snapshotTokens, snapshotMsgs |
@@ -53,7 +53,7 @@ turn 01J8…                                     kind=turn.start / turn.end
 | `prompt.build` | debug | blockTokens{kernel,character,assist,catalog,pub,pri,runtime}, total |
 | `model.call` | info | alias, provider, modelId, in/out/cacheR/cacheW, ms, finishReason, costUsd, requestRef |
 | `model.error` | error/warn | alias, modelId, errorKind, status, retryAttempt, willRetry, willFallback。**每一次失败的尝试一行**（warn），整条链耗尽时再一行（error）。只落最后那一条时，「熬满三次超时再 fallback」在日志里就是一段什么都没有的空白 —— `logs/2026-08-18` 那 363 秒只有开头的 `turn.start` 与结尾的 `provider.fallback`，中间靠 `3 × requestTimeoutMs + 退避` 的算术反推 |
-| `provider.fallback` | warn | from, to, reason |
+| `provider.fallback` | warn | from, to, reason。`to` 是**真正会被尝试的下一个候选**（跳过已 down 的），不是链数组里的下一个；`reason='skipped_down'` 是「这个候选因为已 down 被跳过」那一路 —— 不落它的话，链 A→B→C 而 B 已 down 时日志写「A → B」而实际服务的是 C（[04 §5.3](./04-agents-and-providers.md)） |
 | `provider.health` | info/warn/**error** | provider, state, ms, failures, status。error = 这一次把 provider 判成了 `down`（[04 §5.3](./04-agents-and-providers.md)） |
 | `tool.call` | info | **input**（工具参数）, output, ms, ok；失败时 input + error。一个 span 只落一行，所以开始时的 `input` 与结束时的 `output` 是**合并**进同一行的 —— `LogSink.span().end()` 曾经用结束载荷整体顶掉开始那份，于是这一行只有 `output`，WebUI 的对话详情因此永远看不到工具输入（`tests/log.span.test.ts`） |
 | `tool.denied` | warn | tool, reason(role/rate/approval), role |
@@ -323,6 +323,10 @@ GET /api/health/detail（需登录）—— 详细状态
 
 告警渠道（`alerts`）：
 - **私聊 owner**（默认开）：global 配额超限、provider 全部不可用、DB 写失败、plugin 自动禁用、沙箱不可用而有非 owner 请求执行、连续 5 个 turn 失败。
+  - `consecutive_turn_failures` 数的是 `state='failed'`：`/cancel` 不算（用户点的取消不是故障），
+    而 **`concurrency.turnTimeoutMs` 到点算**（[04 §5.3](./04-agents-and-providers.md) 那三档）。
+    超时曾经和 `/cancel` 一样归进 `cancelled`，于是「每一轮都卡满十分钟」这种最该响的故障
+    一次都不响（`logs/2026-08-18`：三十来轮全记 `cancelled`）。
 - 告警去重：同 `alertKey` 在 `alerts.dedupeMinutes`（默认 30）内只发一次。
 - 可选 webhook：`alerts.webhookUrl`（POST JSON），便于接自有监控。
 
