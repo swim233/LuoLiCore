@@ -57,12 +57,16 @@ export class UsageLedger {
    *   08:00，两个页面对同一天给出两个数字，而这正是运维核对账单时会撞上的地方（docs/27 · C-02）。
    *   偏移取 `to` 那一刻的值，与 `dashboard` 共用 `sqliteTimezoneModifier`（DST 折中见那里）。
    */
-  report(from: number, to: number, groupBy: 'day' | 'chat' | 'user' | 'model' | 'alias' | 'agent', timezone = 'UTC'): unknown[] {
+  report(from: number, to: number, groupBy: 'day' | 'chat' | 'user' | 'model' | 'alias' | 'agent' | 'provider', timezone = 'UTC'): unknown[] {
     const expressions: Record<typeof groupBy, string> = {
-      day: "strftime('%Y-%m-%d', ts / 1000, 'unixepoch', ?)", chat: 'chat_id', user: 'user_id', model: 'model_id', alias: 'model_alias', agent: 'agent_run_id',
+      day: "strftime('%Y-%m-%d', ts / 1000, 'unixepoch', ?)", chat: 'chat_id', user: 'user_id', model: 'model_id', alias: 'model_alias', agent: 'agent_run_id', provider: 'provider_id',
     };
     const parameters = groupBy === 'day' ? [sqliteTimezoneModifier(timezone, new Date(to)), from, to] : [from, to];
+    // `cache_read_tokens` 一直在写，只是没人聚合过它 —— 而「这家上游的缓存到底是不是真的」
+    // 只有 `cacheReadTokens / inputTokens` 这一个数能回答。缺它的时候这件事得靠翻 JSONL 反推
+    // 请求体、逐轮对比前缀（那次翻了两小时），所以它和 provider 维度是一起加的。
     return this.db.prepare(`SELECT ${expressions[groupBy]} AS bucket,SUM(cost_usd) AS costUsd,SUM(input_tokens) AS inputTokens,
-      SUM(output_tokens) AS outputTokens,COUNT(*) AS calls,SUM(ok) AS successes FROM usage_ledger WHERE ts BETWEEN ? AND ? GROUP BY bucket ORDER BY bucket`).all(...parameters);
+      SUM(output_tokens) AS outputTokens,SUM(cache_read_tokens) AS cacheReadTokens,SUM(cache_write_tokens) AS cacheWriteTokens,
+      COUNT(*) AS calls,SUM(ok) AS successes FROM usage_ledger WHERE ts BETWEEN ? AND ? GROUP BY bucket ORDER BY bucket`).all(...parameters);
   }
 }

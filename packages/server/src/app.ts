@@ -1479,18 +1479,21 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
    */
   app.get('/api/usage/report', (ctx) => {
     const groupBy = ctx.req.query('groupBy') ?? 'day';
-    if (!['day', 'chat', 'user', 'model', 'alias', 'agent'].includes(groupBy)) return ctx.json(apiError('invalid_group_by', `维度只能是 day|chat|user|model|alias|agent，收到 ${groupBy}`).body, 400);
+    if (!['day', 'chat', 'user', 'model', 'alias', 'agent', 'provider'].includes(groupBy)) return ctx.json(apiError('invalid_group_by', `维度只能是 day|chat|user|model|alias|agent|provider，收到 ${groupBy}`).body, 400);
     const now = Date.now();
     const from = Number(ctx.req.query('from') ?? now - 30 * 86_400_000);
     const to = Number(ctx.req.query('to') ?? now);
     if (!Number.isFinite(from) || !Number.isFinite(to) || from > to) return ctx.json(apiError('invalid_range', 'from/to 必须是毫秒时间戳且 from ≤ to').body, 400);
     // 时区必须传：日界与总览趋势、配额窗口用同一个口径，否则同一天在两个页面上是两个数字（docs/27 · C-02）。
     const rows = dependencies.ledger?.report(from, to, groupBy as 'day', currentConfig().general.timezone) ?? [];
-    // chat / user 维度的 bucket 是裸 id，界面上认不出是谁。在这里补显示名，别让前端再实现一遍
+    // chat / user / provider 维度的 bucket 是裸 id，界面上认不出是谁。在这里补显示名，别让前端再实现一遍
     // `principals` 的反查规则（会话页已经有一份，两份必然漂移）。
     const labelled = ['chat', 'user'].includes(groupBy)
       ? (rows as Array<{ bucket: string | null }>).map((row) => ({ ...row, label: principalLabel(dependencies.db, groupBy === 'chat' ? 'chat' : 'user', row.bucket) }))
-      : rows;
+      : groupBy === 'provider'
+        ? (rows as Array<{ bucket: string | null }>).map((row) => ({ ...row,
+          label: (row.bucket ? dependencies.db.prepare('SELECT name FROM providers WHERE id=?').pluck().get(row.bucket) as string | undefined : undefined) ?? row.bucket }))
+        : rows;
     return ctx.json({ ok: true, data: { groupBy, from, to, rows: labelled } });
   });
   const QUOTA_UNIMPLEMENTED = KNOWN_UNIMPLEMENTED_CONFIG_KEYS.filter((key) => key.startsWith('quota.'));

@@ -426,6 +426,27 @@ registry.languageModel('main')          // 别名
 registry.languageModel('anthropic-main:claude-opus-5')   // 直指（WebUI 测试用）
 ```
 
+### 5.1.1 kind 的选法：第三方中转站一律用 `openai-compatible`
+
+`openai` 与 `openai-compatible` 的差别不只是「谁家的默认 baseUrl」——**它们打的是两个不同的端点**：
+`@ai-sdk/openai` 默认走 **Responses API**（`/responses`），`@ai-sdk/openai-compatible` 走
+**Chat Completions**（`/chat/completions`）。对着一个第三方中转站选 `openai`，等于让网关拿它自己的
+shim 去翻译 Responses 语义，代价有两项，都是实测出来的：
+
+- **多计 45% 的 input token。** 同一份内容（字符数差 125，只是 part 包装的差别）在本机主力网关上
+  `/chat/completions` 记 3,713 prompt token，`/responses` 记 5,398，比值 1.454。这笔钱按 input 价全额付，
+  与缓存命不命中无关。
+- **工具调用容易整请求 502。** 上面「为什么不回传 reasoning」那一节记的是同一类事故的一个具体成因
+  （`item_reference` 引用的状态不在网关手上）；把 reasoning 摘掉之后，带 tools 的 `/responses` 请求
+  仍会零星撞上网关自己的 502（实测复现，返回的是 Cloudflare 的错误页而不是 API 错误体）。
+
+`openai-compatible` 侧确认不丢东西：`prompt_tokens_details.cached_tokens` → `cacheReadTokens`、
+`completion_tokens_details.reasoning_tokens` → `reasoningTokens` 都有映射，流式与非流式都读
+`reasoning_content`，图片 / 音频 / PDF part 都能转成对应的 `image_url` / `input_audio` / `file`。
+
+**所以：只有直连官方 OpenAI 才用 `openai`；任何中转站、聚合网关、自建代理都用 `openai-compatible`。**
+这条同样适用于「官方模型但走第三方转发」的情形 —— 判据是**谁在提供那个端点**，不是模型是谁家的。
+
 ### 5.2 内建别名语义
 
 | 别名 | 用途 | 建议档位 |

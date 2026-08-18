@@ -56,11 +56,11 @@ describe('C7 · 用量维度聚合', () => {
   it('六个维度都能聚合，chat/user 带回显示名，非法维度 400', async () => {
     const { app, db, headers } = harness('gaps-usage');
     db.prepare("INSERT INTO principals(id,kind,tg_id,role,display_name,username,first_seen_at,updated_at,updated_by) VALUES ('chat:-100','chat','-100','trusted','研发群','devs',1,1,'test')").run();
-    const insert = db.prepare(`INSERT INTO usage_ledger(ts,turn_id,agent_run_id,chat_id,user_id,provider_id,model_id,model_alias,input_tokens,output_tokens,cost_usd,ok)
-      VALUES (?,?,?,?,?,'p','gpt','main',100,50,?,?)`);
-    insert.run(Date.now(), 't1', 'r1', '-100', 'u1', 0.5, 1);
-    insert.run(Date.now(), 't2', 'r1', '-100', 'u1', 0.25, 0);
-    for (const groupBy of ['day', 'chat', 'user', 'model', 'alias', 'agent']) {
+    const insert = db.prepare(`INSERT INTO usage_ledger(ts,turn_id,agent_run_id,chat_id,user_id,provider_id,model_id,model_alias,input_tokens,output_tokens,cache_read_tokens,cost_usd,ok)
+      VALUES (?,?,?,?,?,'p','gpt','main',100,50,?,?,?)`);
+    insert.run(Date.now(), 't1', 'r1', '-100', 'u1', 80, 0.5, 1);
+    insert.run(Date.now(), 't2', 'r1', '-100', 'u1', 0, 0.25, 0);
+    for (const groupBy of ['day', 'chat', 'user', 'model', 'alias', 'agent', 'provider']) {
       const report = await data<{ groupBy: string; rows: unknown[] }>(await app.request(`/api/usage/report?groupBy=${groupBy}`, { headers: { cookie: headers.cookie } }));
       expect(report.groupBy).toBe(groupBy);
       expect(report.rows.length).toBeGreaterThan(0);
@@ -69,6 +69,12 @@ describe('C7 · 用量维度聚合', () => {
     const byChat = await data<{ rows: Array<{ bucket: string; label: string; costUsd: number; calls: number; successes: number }> }>(await app.request('/api/usage/report?groupBy=chat', { headers: { cookie: headers.cookie } }));
     expect(byChat.rows[0]).toMatchObject({ bucket: '-100', label: '研发群 (@devs)', calls: 2, successes: 1 });
     expect(byChat.rows[0]!.costUsd).toBeCloseTo(0.75, 6);
+    // 缓存命中：`cache_read_tokens` 一直在写，聚合里缺了它就只能靠翻 JSONL 反推请求体来判断
+    // 某家上游的前缀缓存是不是真的（docs/04 §5.1.1）。provider 维度同样补回显示名。
+    db.prepare("INSERT INTO providers(id,name,kind,enabled,created_at,updated_at) VALUES ('p','小凤','openai-compatible',1,0,0)").run();
+    const byProvider = await data<{ rows: Array<{ bucket: string; label: string; inputTokens: number; cacheReadTokens: number }> }>(
+      await app.request('/api/usage/report?groupBy=provider', { headers: { cookie: headers.cookie } }));
+    expect(byProvider.rows[0]).toMatchObject({ bucket: 'p', label: '小凤', inputTokens: 200, cacheReadTokens: 80 });
     expect((await app.request('/api/usage/report?groupBy=nope', { headers: { cookie: headers.cookie } })).status).toBe(400);
     expect((await app.request('/api/usage/report?from=99&to=1', { headers: { cookie: headers.cookie } })).status).toBe(400);
     closeDatabase(db);
