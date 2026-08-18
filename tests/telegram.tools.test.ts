@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { ArchiveRepository, ScheduleRepository, closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
 import { FileTools, PathJail, TOOL_POLICY, ToolRegistry, configSchema, registerBuiltins, type Config, type LogSink } from '@luoli/core';
-import { TelegramTools } from '@luoli/telegram';
+import { TelegramTools, type ParseMode } from '@luoli/telegram';
 import type { Bot } from 'grammy';
 
 const log = { event: () => undefined, publish: () => undefined, span: () => ({ id: 's', end: () => undefined }) } as unknown as LogSink;
@@ -24,7 +24,7 @@ function fakeBot(calls: ApiCall[], fail?: string) {
       setMessageReaction: record('setMessageReaction', () => true), pinChatMessage: record('pinChatMessage', () => true) } } as unknown as Bot;
 }
 
-function harness(name: string, options: { wired?: boolean; fail?: string; config?: Partial<Config['tools']['tg']> } = {}) {
+function harness(name: string, options: { wired?: boolean; fail?: string; config?: Partial<Config['tools']['tg']>; parseMode?: ParseMode } = {}) {
   const path = `./data/${name}.test.db`;
   for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
   const workspace = resolve(`./data/${name}-workspace`);
@@ -35,7 +35,8 @@ function harness(name: string, options: { wired?: boolean; fail?: string; config
   const archive = new ArchiveRepository(db);
   const calls: ApiCall[] = [];
   const bot = fakeBot(calls, options.fail);
-  const telegram = new TelegramTools({ bot: () => bot, archive, maxMessageChars: () => 3900, maxMentions: () => 5 });
+  const telegram = new TelegramTools({ bot: () => bot, archive, maxMessageChars: () => 3900, maxMentions: () => 5,
+    parseMode: () => options.parseMode ?? 'MarkdownV2' });
   const registry = new ToolRegistry(log, { request: async () => true }, { maxRegistered: 200, maxCallsPerTurn: 50, maxConsecutiveErrors: 10 });
   // 定时任务的投递也靠 Telegram，所以它跟 telegram 一族同生共死：`deliverable` 跟着 `wired` 走。
   const schedule = { jobs: new ScheduleRepository(db), deliverable: () => options.wired !== false,

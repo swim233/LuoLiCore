@@ -465,7 +465,8 @@ output:
   streamMinDeltaChars: 24         # 热更新 · 与上一项同时满足才编辑
   flushOnSentence: true           # 热更新 · 一句话说完就刷，不等满 streamIntervalMs（编辑次数会上升）
   maxMessageChars: 3900
-  parseMode: MarkdownV2           # 热更新 · MarkdownV2 | HTML | none；none 时不试 Markdown 也就没有回退那一跳
+  parseMode: MarkdownV2           # 热更新 · 三档各有自己的渲染器与分片规则（08 §5.3）：MarkdownV2 转义 |
+                                  #   HTML 走 Telegram 标签子集 | none 原样发（因此也没有解析失败那一跳）
   typingWhileWorking: true        # 热更新 · 关掉后整轮一次 typing 都不发
   placeholderAfterMs: 4000        # 热更新 · 上游这么久还没吐第一个 chunk 就先发一条占位（就是后面被编辑的那条）
   placeholderTexts: ['…']         # 热更新 · 占位消息的备选文案，可多条（可 perChat 覆盖）。

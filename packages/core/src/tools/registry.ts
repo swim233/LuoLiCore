@@ -246,31 +246,38 @@ export class ToolRegistry {
     // 边界，而它此前只数 execute 的失败 —— 参数写错和审批被拒这两种最常见的失败一次都不计，
     // 于是同一个错误的调用可以无限次重来（实测 6 次全部照收）。
     if (!parsed.success) { this.#failed(state, name, context); return { ok: false, error: 'invalid_input', hint: parsed.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ') }; }
-    const decision = this.#approvalDecision(tool, parsed.data, context);
-    if (decision.needed) {
-      const verdict = await this.approval.request(tool, parsed.data, context, decision.risk);
-      const approved = typeof verdict === 'boolean' ? verdict : verdict.approved;
-      const hint = typeof verdict === 'boolean' ? undefined : verdict.hint;
-      // 被拒同样计一次失败：owner 连着拒两次之后模型该换个做法，而不是把同一个高危调用
-      // 改个字再递上来 —— 每一次都是一条推给 owner 的审批通知。
-      if (!approved) { this.#failed(state, name, context); return { ok: false, error: '未获批准', ...(hint ? { hint } : {}) }; }
-    }
-    state.calls += 1;
-    // 记在这里而不是 `admit()` 之后：被拒的参数、被拒的审批都不算「调用过工具」，
-    // 数进去的话轮次统计会比模型真正做过的事多出一截。子 agent 的调用也算在本轮账上
-    // （`context.turn.turnId` 对父子是同一个），与 `model_calls` 的口径一致。
-    this.turns?.incrementToolCall(context.turn.turnId);
-    await this.hooks?.hook('onToolCall', { name, input: parsed.data, context });
-    const span = this.log.span({ level: 'info', kind: 'tool.call', summary: name, traceId: context.turn.turnId, chatId: context.turn.chatId, userId: context.turn.initiatorUserId, key: context.turn.key, data: { input: parsed.data } });
-    // 挂住的工具调用会挂住整轮：AI SDK 的 toolMs 只是把一个信号递给 execute()，工具不认它就等于
-    // 没有超时。这里改成硬 race —— 到点就把失败交回模型，让它换个做法，而不是让用户对着沉默
-    // 一直等到 `turnTimeoutMs`（logs/2026-08-17 有 7 轮只有 turn.start 没有 turn.end）。
-    // `timeoutMs === null` 的分支必须在最前面：bash / python / spawn_agent / spawn_harness /
-    // ask_parent 各有自己的硬期限，运维从工具页给它们套一层外层 race 会在它们自己的超时之前
-    // 把调用砍掉（工具页对这几个置灰，这里是不信界面的那道兜底）。
-    const budget = tool.timeoutMs === null ? null
-      : this.#overrides()[name]?.timeoutMs ?? tool.timeoutMs ?? this.#limits().defaultTimeoutMs ?? FALLBACK_TOOL_TIMEOUT_MS;
+    // **审批段与钩子也在 try 里面。** 它们此前在外面，于是 `approval.request` 的
+    // `INSERT INTO approvals` 一旦失败（库满/被锁/已 close），异常就穿过 `execute()` 抛进
+    // AI SDK —— 绕开了这个方法对其他所有失败都保证的统一 `{ok:false,error,hint}` 形状，
+    // 而且 `#failed` 不计数，`tools.maxConsecutiveErrors` 那道「模型别原地重试到步数耗尽」
+    // 的唯一硬边界不推进。`#approvalDecision` 里的 RE2 编译、`onToolCall` 钩子同理。
+    // span 因此要提前声明：抛在建 span 之前时 catch 里 `span?.end` 才不会再抛一次。
+    let span: { id: string; end: (data?: unknown, error?: unknown) => void } | null = null;
     try {
+      const decision = this.#approvalDecision(tool, parsed.data, context);
+      if (decision.needed) {
+        const verdict = await this.approval.request(tool, parsed.data, context, decision.risk);
+        const approved = typeof verdict === 'boolean' ? verdict : verdict.approved;
+        const hint = typeof verdict === 'boolean' ? undefined : verdict.hint;
+        // 被拒同样计一次失败：owner 连着拒两次之后模型该换个做法，而不是把同一个高危调用
+        // 改个字再递上来 —— 每一次都是一条推给 owner 的审批通知。
+        if (!approved) { this.#failed(state, name, context); return { ok: false, error: '未获批准', ...(hint ? { hint } : {}) }; }
+      }
+      state.calls += 1;
+      // 记在这里而不是 `admit()` 之后：被拒的参数、被拒的审批都不算「调用过工具」，
+      // 数进去的话轮次统计会比模型真正做过的事多出一截。子 agent 的调用也算在本轮账上
+      // （`context.turn.turnId` 对父子是同一个），与 `model_calls` 的口径一致。
+      this.turns?.incrementToolCall(context.turn.turnId);
+      await this.hooks?.hook('onToolCall', { name, input: parsed.data, context });
+      span = this.log.span({ level: 'info', kind: 'tool.call', summary: name, traceId: context.turn.turnId, chatId: context.turn.chatId, userId: context.turn.initiatorUserId, key: context.turn.key, data: { input: parsed.data } });
+      // 挂住的工具调用会挂住整轮：AI SDK 的 toolMs 只是把一个信号递给 execute()，工具不认它就等于
+      // 没有超时。这里改成硬 race —— 到点就把失败交回模型，让它换个做法，而不是让用户对着沉默
+      // 一直等到 `turnTimeoutMs`（logs/2026-08-17 有 7 轮只有 turn.start 没有 turn.end）。
+      // `timeoutMs === null` 的分支必须在最前面：bash / python / spawn_agent / spawn_harness /
+      // ask_parent 各有自己的硬期限，运维从工具页给它们套一层外层 race 会在它们自己的超时之前
+      // 把调用砍掉（工具页对这几个置灰，这里是不信界面的那道兜底）。
+      const budget = tool.timeoutMs === null ? null
+        : this.#overrides()[name]?.timeoutMs ?? tool.timeoutMs ?? this.#limits().defaultTimeoutMs ?? FALLBACK_TOOL_TIMEOUT_MS;
       const called = tool.execute(parsed.data, context);
       const rawOutput = budget === null ? await called : await withTimeout(called, budget);
       const output = this.#normalizeOutput(name, rawOutput, tool.untrustedOutput === true);
@@ -281,7 +288,7 @@ export class ToolRegistry {
       return output;
     } catch (error) {
       this.#failed(state, name, context);
-      span.end(undefined, error);
+      span?.end(undefined, error);
       return { ok: false, error: error instanceof Error ? error.message : 'tool_error',
         ...(error instanceof ToolTimeout ? { hint: `${error.ms}ms 内没有返回，本次调用已放弃；换个参数或换个办法，别原样重试。` } : {}) };
     }

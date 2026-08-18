@@ -35,6 +35,25 @@ describe('AlertDispatcher', () => {
     closeDatabase(db);
   });
 
+  /**
+   * `db_write_failed` 的触发源就是「库写不进去」（`LogSink.onWriteFailure` → `fire`），
+   * 而 `raise()` 第一件事是记一行 `alert.raised`。那次落库挡在投递前面的话，库坏了唯一该响的
+   * 这条告警一定不响，而 `fire()` 的 `.catch()` 会把它咽得无声无息（docs/10 §6）。
+   */
+  it('记不下来也要发：log.event 抛出时 owner 照样收到告警', async () => {
+    const { db, log } = harness('alerts-logthrows');
+    const sent: string[] = [];
+    // LogSink 自己现在也不抛了（入库失败返回 0），所以这里直接把 event 换成会抛的版本 ——
+    // 这条不变量不该依赖 LogSink 的实现。
+    Object.assign(log, { event: () => { throw new Error('log_sink_down'); } });
+    const alerts = new AlertDispatcher(() => configSchema.parse({ alerts: { on: ['db_write_failed'] } }).alerts,
+      log, { owner: (text) => { sent.push(text); } });
+    await expect(alerts.raise('db_write_failed', '日志写入失败')).resolves.toBeUndefined();
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toContain('日志写入失败');
+    closeDatabase(db);
+  });
+
   it('投递失败不往外抛：告警链路自己坏了不能把调用方带崩', async () => {
     const { db, log } = harness('alerts-throw');
     const alerts = new AlertDispatcher(() => configSchema.parse({ alerts: { on: ['db_write_failed'] } }).alerts, log,

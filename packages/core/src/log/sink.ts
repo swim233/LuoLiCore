@@ -80,10 +80,17 @@ export class LogSink {
   /** 装配方在这里挂告警（`alerts.on` 的 db_write_failed）。落盘/落库失败是「日志本身也不可信了」
    *  的状态，只写 stderr 的话运维通常永远看不到。设置它的调用方必须保证回调自己不抛。 */
   onWriteFailure?: (error: unknown) => void;
+  /** `onWriteFailure` 挂的是 `alerts.fire('db_write_failed')`，而 `AlertDispatcher.raise()` 第一件事
+   *  就是往库里记一行 `alert.raised` —— 库坏了这一路会绕回这里。今天 `dedupeMinutes` 恰好也断得掉
+   *  （`#remember` 在那次 log.event 之前调），但「日志失败不会打转」不该靠告警的去重窗口成立。 */
+  #reporting = false;
 
   #reportWriteFailure(error: unknown): void {
     try { process.stderr.write(`[log] 写入失败：${error instanceof Error ? error.message : String(error)}\n`); } catch { /* stderr 也不可用 */ }
+    if (this.#reporting) return;
+    this.#reporting = true;
     try { this.onWriteFailure?.(error); } catch { /* 告警链路自己坏了也不能再炸一次 */ }
+    finally { this.#reporting = false; }
   }
 
   #file(path: string): { bytes: number; buffer: string; timer: ReturnType<typeof setTimeout> | null } {
@@ -187,7 +194,17 @@ export class LogSink {
     this.#writeLine(path, `${line}\n`, input.level === 'error' || input.kind === 'system.crash');
     if (this.#console === 'json') process.stdout.write(`${line}\n`);
     else if (this.#console === 'pretty') process.stdout.write(`${new Date().toISOString()} ${input.level.toUpperCase()} ${input.kind} ${input.summary}\n`);
-    const id = this.repository.insertLog({ ...stored, ...(fileRef ? { fileRef } : {}) });
+    // **入库失败一律不往外抛。** 这个方法的调用点全在 catch 块、`.catch()` 回调、以及
+    // `main.ts` 的 crash handler 里 —— 让它抛等于把「日志写不进去」升级成「轮次失败」，
+    // 再升级成「crash handler 自己抛，`process.exit(1)` 走不到」。关停竞态里这是必然发生的：
+    // `poller.drain()` 宽限期用完就返回，在途 handler 之后才 settle，那时 `closeDatabase`
+    // 已经跑过。同一个类里所有文件写早就走 `#reportWriteFailure` 了，只有这一行是裸的。
+    // 返回 0 与「级别不够」那条同一个约定（本方法开头），调用方本来就不该拿它当真 id。
+    let id: number;
+    try { id = this.repository.insertLog({ ...stored, ...(fileRef ? { fileRef } : {}) }); }
+    catch (error) { this.#reportWriteFailure(error); return 0; }
+    // 广播必须在入库成功之后：前端拿这个 id 去 `/api/logs/:id` 拉详情，播一个 0 等于
+    // 在日志页塞一条点不开的行。
     this.#broadcast({ id, ts, level: input.level, kind: input.kind, traceId: input.traceId ?? null, summary: safe.summary });
     return id;
   }

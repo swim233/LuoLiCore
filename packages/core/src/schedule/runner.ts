@@ -198,7 +198,10 @@ export class ScheduledJobRunner {
       this.dependencies.jobs.markRun(job.id, { state: 'committed' });
     } catch (error) {
       const cancelled = turn.abortSignal.aborted;
-      await this.dependencies.context.abortTurn(turn, cancelled ? 'cancelled' : 'failed', error);
+      // 同 `bot.ts` 那条：`abortTurn` 抛出去会让下面的 `turns.finish` 不执行，那行永久卡在
+      // `state='running'`。清理是尽力而为，**记状态不是**。
+      try { await this.dependencies.context.abortTurn(turn, cancelled ? 'cancelled' : 'failed', error); }
+      catch (cleanup) { this.dependencies.log.event({ level: 'error', kind: 'ctx.abort', summary: 'abortTurn failed; turn still recorded as ended', traceId: turn.turnId, chatId: job.chatId, key: job.key, data: { error: cleanup instanceof Error ? cleanup.message : String(cleanup), schedule: job.id } }); }
       const settled = this.dependencies.turns.finish(turn.turnId, cancelled ? { state: 'cancelled', cancelReason: String(turn.abortSignal.reason ?? 'cancelled') } : { state: 'failed', error: error instanceof Error ? error.message : String(error) });
       this.dependencies.log.event({ level: cancelled ? 'warn' : 'error', kind: 'turn.end', summary: cancelled ? 'turn cancelled' : error instanceof Error ? error.message : 'turn failed', traceId: turn.turnId, chatId: job.chatId, userId: job.createdBy, key: job.key, data: { schedule: job.id } });
       this.dependencies.log.publish('turn.finished', { turnId: turn.turnId, key: job.key, chatId: job.chatId, state: cancelled ? 'cancelled' : 'failed', steps: settled?.steps ?? 0, toolCalls: settled?.toolCalls ?? 0, costUsd: settled?.costUsd ?? 0, rebased: false, durationMs: settled?.durationMs ?? 0 });

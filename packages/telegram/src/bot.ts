@@ -9,7 +9,7 @@ import type { Role, RuntimeTurnContext } from '@luoli/shared';
 import { parsePrincipal, roleRank } from '@luoli/shared';
 import { contextKey, modelAliasKey, readAppKv, writeAppKv } from '@luoli/db';
 import { matchTrigger } from './trigger.js';
-import { capMentions, holdReply, sendWithFallback, splitTelegramText } from './output.js';
+import { capMentions, holdReply, sendWithFallback, splitTelegramText, type ParseFallbackInfo } from './output.js';
 import { archiveQuotedMessage, attachMedia, messageKind } from './reply.js';
 import { TelegramOutput } from './stream-output.js';
 
@@ -530,6 +530,11 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
       // doc 11 §2.1 把 output.* 列进 perChat 白名单，投递侧却一直读的是全局快照 —— 会话级
       // 的 mode/节奏覆盖存得住、也过了校验，就是永远不生效。取本轮那份合并后的配置。
       const outputConfig = perChatConfig(currentConfig(), key).output;
+      // 解析失败降级成纯文本这一跳此前一个字都不落，于是行内代码那个 bug 只能靠翻下一次模型调用的
+      // context blob 反推（docs/00 §2.3）。两条投递路径共用这一个回调。
+      const onParseFallback = (info: ParseFallbackInfo): void => void dependencies.log.event({ level: 'warn', kind: 'tg.parse_fallback',
+        summary: `${outputConfig.parseMode} 渲染被拒，已降级成纯文本${info.phase === 'edit' ? '重编辑' : '重发'}`,
+        traceId: turn.turnId, chatId, userId, key, data: { chars: info.chars, error: info.error, phase: info.phase } });
       if (typeof generated === 'string') {
         const hooked = dependencies.plugins ? pluginText(await dependencies.plugins.hook('beforeSend', { turn, text: generated }), generated) : generated;
         // `output.maxMentions` 在**投递侧**收口：提示词里说好不要 @全群不是边界，这里才是。
@@ -538,8 +543,10 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
         // 引用触发消息：与流式那条路（`TelegramOutput.consume`）必须一致。此前这条兜底路径不带
         // 引用，于是「尚未配置可用模型」这类提示在群里飘着，没人知道它在回谁（docs/14 §2 Q10）。
         // **只有第一条分片带**，否则一条长回复会在群里刷出一串引用块。
-        for (const [index, part] of splitTelegramText(outgoing, outputConfig.maxMessageChars).entries()) {
-          const sent = await sendWithFallback(bot.api, chatId, part, index === 0 ? { reply_parameters: { message_id: message.message_id } } : {}, outputConfig.parseMode);
+        // 分片要跟着 parseMode 走：三档各有自己的渲染器，按一档渲染再按另一档声明发出去，
+        // 用户看到的就是转义符本身（docs/08 §5.3）。
+        for (const [index, part] of splitTelegramText(outgoing, outputConfig.maxMessageChars, outputConfig.parseMode).entries()) {
+          const sent = await sendWithFallback(bot.api, chatId, part, index === 0 ? { reply_parameters: { message_id: message.message_id } } : {}, outputConfig.parseMode, onParseFallback);
           // 归档存**渲染前**的正文，与流式那条路（下面存 `answer`）一致。存 `part` 的话
           // `messages.text` 里躺的是 MarkdownV2 转义后的文本 —— WebUI 会话页和 `read_messages`
           // 看到的 bot 发言带一串 `\-` `\.`，同一张表里两条路径两种内容。分片多于一条时这里会
@@ -557,6 +564,7 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
           // 它俩合在这个 async 闭包里，而流式编辑路径压根不调它，「@ 全群上限」于是形同虚设。
           async (text) => (dependencies.plugins ? pluginText(await dependencies.plugins.hook('beforeSend', { turn, text }), text) : text),
           (text) => capMentions(text, outputConfig.maxMentions));
+        output.onParseFallback = onParseFallback;
         const consumed = await output.consume(generated.stream, message.message_id);
         if (consumed.interrupted) { generated.interrupt(); void generated.final.catch(() => undefined); answer = consumed.text; }
         // **归档与上下文一律存「真正发出去的那份」**，也就是流里攒到的全文。
@@ -597,7 +605,12 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
       }
     } catch (error) {
       const cancelled = turn.abortSignal.aborted;
-      await dependencies.context.abortTurn(turn, cancelled ? 'cancelled' : 'failed', error);
+      // `abortTurn` 也在写库（`releaseClaims`，`cancel.commitPartial` 开着时还会跑一整个
+      // `commitTurn`）。它抛出去的话下面这行就不执行了，`turns` 那行会一直是 `state='running'`
+      // —— `GET /api/turns/active` 与总览页的 running 计数在整个进程生命周期内都是错的，
+      // 直到下次重启的 `recoverAfterCrash` 才收拾。清理是尽力而为，**记状态不是**。
+      try { await dependencies.context.abortTurn(turn, cancelled ? 'cancelled' : 'failed', error); }
+      catch (cleanup) { dependencies.log.event({ level: 'error', kind: 'ctx.abort', summary: 'abortTurn failed; turn still recorded as ended', traceId: turn.turnId, chatId, userId, key, data: { error: cleanup instanceof Error ? cleanup.message : String(cleanup) } }); }
       const settled = dependencies.turns.finish(turn.turnId, cancelled ? { state: 'cancelled', cancelReason: String(turn.abortSignal.reason ?? 'cancelled') } : { state: 'failed', error: error instanceof Error ? error.message : String(error) });
       dependencies.log.event({ level: cancelled ? 'warn' : 'error', kind: 'turn.end', summary: cancelled ? 'turn cancelled' : error instanceof Error ? error.message : 'turn failed', traceId: turn.turnId, chatId, userId, key });
       dependencies.log.publish('turn.finished', { turnId: turn.turnId, key, chatId, state: cancelled ? 'cancelled' : 'failed', steps: settled?.steps ?? 0, toolCalls: settled?.toolCalls ?? 0, costUsd: settled?.costUsd ?? 0, rebased: false, durationMs: settled?.durationMs ?? 0 });

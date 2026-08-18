@@ -1,7 +1,7 @@
 import { InputFile, type Api, type Bot } from 'grammy';
 import type { TelegramTarget, TelegramToolBridge } from '@luoli/core';
 import type { ArchiveRepository } from '@luoli/db';
-import { capMentions, sendWithFallback, splitTelegramText } from './output.js';
+import { capMentions, sendWithFallback, splitTelegramText, type ParseMode } from './output.js';
 
 /**
  * Telegram 只接受这一组固定的 reaction emoji（Bot API `ReactionTypeEmoji`）；别的一律 400
@@ -29,6 +29,11 @@ export interface TelegramToolsDependencies {
    * 那两条：模型（或 `<untrusted-content>` 里被注入的一句话）调 `send_message` 就能绕开 @ 上限。
    */
   maxMentions(): number;
+  /**
+   * `output.parseMode`。这条路此前恒用默认的 MarkdownV2，于是运维把 `parseMode` 改成 `none`
+   * 之后，`send_message` 发出去的仍是转义过的 MarkdownV2 文本 —— 三条出站路径两种渲染。
+   */
+  parseMode(): ParseMode;
 }
 
 export class TelegramTools implements TelegramToolBridge {
@@ -39,11 +44,12 @@ export class TelegramTools implements TelegramToolBridge {
       // 三条出站路径都要过 @ 上限这道闸，不然它不是边界只是建议。归档仍存收口前的 `text`
       // （见下面那条注释），改写只影响真正发出去的那份。
       const capped = capMentions(text, this.dependencies.maxMentions());
-      const parts = splitTelegramText(capped, this.dependencies.maxMessageChars());
+      const parseMode = this.dependencies.parseMode();
+      const parts = splitTelegramText(capped, this.dependencies.maxMessageChars(), parseMode);
       if (!parts.length) return { ok: false, error: 'empty_text' };
       const messageIds: number[] = [];
       for (const part of parts) {
-        const sent = await sendWithFallback(api, target.chatId, part, this.thread(target));
+        const sent = await sendWithFallback(api, target.chatId, part, this.thread(target), parseMode);
         // 归档存渲染前的 `text` 而不是 `part`：三条出站路径（这里、`bot.ts` 的兜底、流式）
         // 必须在 `messages.text` 里放同一种东西，否则同一张表里一半带 MarkdownV2 转义符。
         this.archiveOutgoing(target, sent.message_id, sent.date, text, 'text', sent);

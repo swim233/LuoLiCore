@@ -1,5 +1,5 @@
 import type { Bot } from 'grammy';
-import { holdReply, sendWithFallback, splitTelegramText } from './output.js';
+import { holdReply, sendWithFallback, splitTelegramText, type ParseFallbackInfo, type ParseMode } from './output.js';
 
 export interface StreamOutputOptions {
   mode: 'stream' | 'once';
@@ -9,8 +9,8 @@ export interface StreamOutputOptions {
   intervalMs: number;
   minDeltaChars: number;
   maxChars: number;
-  /** `output.parseMode`：编辑与发送时用的解析模式。`none` 时一律发纯文本。 */
-  parseMode?: 'MarkdownV2' | 'HTML' | 'none';
+  /** `output.parseMode`：分片、发送、编辑三处共用它，见 `TelegramOutput.parseMode`。 */
+  parseMode?: ParseMode;
   /** `output.flushOnSentence`：攒到句末标点就提前刷一次，不等满 `intervalMs`。 */
   flushOnSentence?: boolean;
   /** `output.typingWhileWorking`：生成期间是否持续发 typing。 */
@@ -57,6 +57,21 @@ export class TelegramOutput {
      */
     private readonly sanitize?: (text: string) => string) {}
 
+  /**
+   * 解析失败降级成纯文本时回调一次（`tg.parse_fallback`）。做成可赋值字段而不是第八个构造参数：
+   * 构造签名已经有七个位置参数了，再加一个没人能记住顺序。装配方（`bot.ts`）在 new 之后挂上。
+   */
+  onParseFallback?: (info: ParseFallbackInfo) => void;
+
+  /**
+   * `output.parseMode`。**分片、发送、编辑三处必须读同一个值** —— 三档各有自己的渲染器，
+   * 分片按一档渲染、投递按另一档声明就是「用户看到转义符本身」那类 bug（docs/08 §5.3）。
+   * 此前四处 send 写死 MarkdownV2、而 `edit` 读 options，`none` 档于是满屏 `\-`。
+   */
+  private get parseMode(): ParseMode {
+    return this.options.parseMode ?? 'MarkdownV2';
+  }
+
   /** 每次刷新都要过的那一道。渲染前做，因为 `capMentions` 数的是正文里的 `@`，不是转义后的。 */
   private guard(text: string): string {
     return this.sanitize ? this.sanitize(text) : text;
@@ -65,12 +80,12 @@ export class TelegramOutput {
   async send(text: string, replyToMessageId?: number): Promise<number[]> {
     await holdReply(this.since, this.options.replyDelayMs);
     const finalText = this.guard(this.beforeSend ? await this.beforeSend(text) : text);
-    const parts = splitTelegramText(finalText, this.options.maxChars);
+    const parts = splitTelegramText(finalText, this.options.maxChars, this.parseMode);
     const ids: number[] = [];
     // **只有第一条分片带引用**，与 `consume()` 的收尾分片一致：整份都带的话，一条被切成五段的
     // 长回复会在群里刷出五个引用块（docs/14 §2 Q10）。
     for (const [index, part] of parts.entries()) {
-      const message = await sendWithFallback(this.bot.api, this.chatId, part, index === 0 && replyToMessageId ? { reply_parameters: { message_id: replyToMessageId } } : {});
+      const message = await sendWithFallback(this.bot.api, this.chatId, part, index === 0 && replyToMessageId ? { reply_parameters: { message_id: replyToMessageId } } : {}, this.parseMode, this.onParseFallback);
       ids.push(message.message_id);
     }
     return ids;
@@ -87,15 +102,20 @@ export class TelegramOutput {
     // 三十秒的工具调用在用户那边和「bot 死了」完全一样。
     const typing = this.options.typingWhileWorking === false ? null
       : setInterval(() => void this.bot.api.sendChatAction(this.chatId, 'typing').catch(() => undefined), 4000);
-    const parseMode = this.options.parseMode ?? 'MarkdownV2';
     const edit = async (messageId: number, rendered: string): Promise<void> => {
       try {
-        if (parseMode === 'none') { await this.bot.api.editMessageText(this.chatId, messageId, rendered); return; }
-        await this.bot.api.editMessageText(this.chatId, messageId, rendered, { parse_mode: parseMode });
+        if (this.parseMode === 'none') { await this.bot.api.editMessageText(this.chatId, messageId, rendered); return; }
+        await this.bot.api.editMessageText(this.chatId, messageId, rendered, { parse_mode: this.parseMode });
       } catch (error) {
         const description = error instanceof Error ? error.message : String(error);
         if (/message is not modified|429/i.test(description)) return;
-        if (/parse entities/i.test(description)) { await this.bot.api.editMessageText(this.chatId, messageId, rendered); return; }
+        // 与 `sendWithFallback` 同一跳，同一条 warn。这里不用给纯文本重编辑再包一层：
+        // 两个调用点（下面 163 / 179）都过 `deliver()`，第二次失败会走 `onDeliveryError`。
+        if (/parse entities/i.test(description)) {
+          await this.bot.api.editMessageText(this.chatId, messageId, rendered);
+          this.onParseFallback?.({ chars: rendered.length, error: description, phase: 'edit' });
+          return;
+        }
         throw error;
       }
     };
@@ -115,7 +135,7 @@ export class TelegramOutput {
     if (this.options.mode === 'stream' && placeholderAfterMs > 0 && placeholderText) {
       placeholder = setTimeout(() => void (async () => {
         if (messageIds.length || text) return;
-        const sent = await deliver(() => sendWithFallback(this.bot.api, this.chatId, placeholderText, replyToMessageId ? { reply_parameters: { message_id: replyToMessageId } } : {}));
+        const sent = await deliver(() => sendWithFallback(this.bot.api, this.chatId, placeholderText, replyToMessageId ? { reply_parameters: { message_id: replyToMessageId } } : {}, this.parseMode, this.onParseFallback));
         // 基线归 0 而不是占位文案的长度：`lastRenderedLength` 量的是「答复已经渲染了多少字」，
         // 占位消息里一个字都不是答复。记成文案长度的话，一句十来个字的文案会让第一次编辑多等
         // 十来个字才够 minDeltaChars —— 占位消息挂着的时间反倒随文案变长。原先写死的 1 是它
@@ -144,11 +164,11 @@ export class TelegramOutput {
         // （docs/14 T10），收益是长回复读起来是一句一句出来的，而不是一段一段跳。
         const atSentenceEnd = this.options.flushOnSentence === true && SENTENCE_END.test(text);
         if (messageIds.length && !atSentenceEnd && Date.now() - lastEdit < this.options.intervalMs) continue;
-        const rendered = splitTelegramText(this.guard(text), this.options.maxChars);
+        const rendered = splitTelegramText(this.guard(text), this.options.maxChars, this.parseMode);
         const before = messageIds.length;
         while (messageIds.length < rendered.length) {
           const index = messageIds.length;
-          const sent = await deliver(() => sendWithFallback(this.bot.api, this.chatId, rendered[index]!, index === 0 && replyToMessageId ? { reply_parameters: { message_id: replyToMessageId } } : {}));
+          const sent = await deliver(() => sendWithFallback(this.bot.api, this.chatId, rendered[index]!, index === 0 && replyToMessageId ? { reply_parameters: { message_id: replyToMessageId } } : {}, this.parseMode, this.onParseFallback));
           if (!sent) break;
           messageIds.push(sent.message_id);
         }
@@ -173,11 +193,11 @@ export class TelegramOutput {
     // 定稿这一次才跑插件的 `beforeSend`（每帧都跑等于把钩子的语义从「一条消息一次」改成
     // 「一次编辑一次」）。改写只影响发出去的文本，`text` 仍是模型的原话 —— 归档与上下文存原话。
     const closing = text + (interrupted ? '\n\n（生成中断）' : '');
-    const rendered = splitTelegramText(this.guard(this.beforeSend ? await this.beforeSend(closing) : closing), this.options.maxChars);
+    const rendered = splitTelegramText(this.guard(this.beforeSend ? await this.beforeSend(closing) : closing), this.options.maxChars, this.parseMode);
     // 收尾也要走 deliver + 降级：这里抛出去会把一轮已经发出大半的回复整个记成 failed（docs/20 · W-TG-04）。
     for (let index = 0; index < rendered.length; index += 1) {
       if (index < messageIds.length) { await deliver(() => edit(messageIds[index]!, rendered[index]!)); continue; }
-      const sent = await deliver(() => sendWithFallback(this.bot.api, this.chatId, rendered[index]!));
+      const sent = await deliver(() => sendWithFallback(this.bot.api, this.chatId, rendered[index]!, {}, this.parseMode, this.onParseFallback));
       if (!sent) break;
       messageIds.push(sent.message_id);
     }

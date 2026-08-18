@@ -1662,6 +1662,33 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     });
     return new Response(stream, { headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' } });
   });
+  /**
+   * I-13 的**另一半**。那一轮修的是「未匹配的 `/api/*` 拿到 200 + index.html，前端在
+   * `response.json()` 处抛 SyntaxError，报错与真实原因毫无关系」；下面那行 `app.all` 就是它。
+   * 但端点里**抛出来**的异常走的是 Hono 的默认处理器 —— 实测回的是
+   * `text/plain "Internal Server Error"`，同一个病在 500 上原样复发：界面上看到的是
+   * `Unexpected token 'I'`，而不是任何人话。这个部署里最常见的触发方式是坏请求体：
+   * 39 处 `ctx.req.json()` 有 17 处没有自己的 `.catch()`。
+   *
+   * 三个分支，顺序有意义：
+   * - `HTTPException`（`bodyLimit` 之类中间件扔的）原样交回，与 Hono 默认处理器一致 ——
+   *   它们自己已经带好了状态码和响应体。
+   * - `SyntaxError` = `ctx.req.json()` 里那次 `JSON.parse` 崩了。**这一条把那 17 个站点
+   *   一次性收口**，也不会在下一个新端点上重新漏一遍：逐个加 `.catch()` 修的是今天，
+   *   这里修的是这一类。
+   * - 其余一律 500，**异常消息不进响应** —— 它可能带库路径、SQL、密钥片段。全文只落
+   *   `webui.error` 那一行，回给前端的只有它的 id（`ref:`，与 `bot.ts` 给用户的形状一致）。
+   *
+   * 非 `/api/` 路径回纯文本：给静态资源套 JSON 信封只会让浏览器拿到一份它不认识的东西。
+   */
+  app.onError((error, ctx) => {
+    if (typeof error === 'object' && error !== null && 'getResponse' in error) return (error as { getResponse: () => Response }).getResponse();
+    if (!ctx.req.path.startsWith('/api/')) return ctx.text('Internal Server Error', 500);
+    if (error instanceof SyntaxError) return ctx.json(apiError('invalid_json', '请求体不是合法 JSON', 400).body, 400);
+    const id = dependencies.log.event({ level: 'error', kind: 'webui.error', summary: `${ctx.req.method} ${ctx.req.path} 未处理异常`,
+      data: { method: ctx.req.method, path: ctx.req.path, error: error instanceof Error ? error.stack ?? error.message : String(error) } });
+    return ctx.json(apiError('internal', `服务端出错，已记录（ref: ${id}）`, 500).body, 500);
+  });
   const webRoot = fileURLToPath(new URL('../../webui/dist', import.meta.url));
   // 未匹配的 /api/* 必须在静态兜底**之前**拦下来：否则它们拿到 200 + index.html，前端的 `api()`
   // 在 `response.json()` 处抛 SyntaxError，报错信息与真实原因（路径写错了）毫无关系（docs/22 · I-13）。

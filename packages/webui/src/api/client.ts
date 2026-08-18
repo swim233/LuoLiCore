@@ -17,7 +17,12 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   if (!['GET', 'HEAD'].includes(options.method ?? 'GET') && auth.csrf) headers.set('X-CSRF-Token', auth.csrf);
   const response = await fetch(path, { ...options, headers });
   if (response.status === 401 && location.pathname !== '/login') location.assign('/login');
-  const result = await response.json() as { ok: boolean; data?: T; error?: { message: string; code?: string; details?: unknown } };
+  // 服务端那边 `app.onError` + 未匹配 `/api/*` 的 404 已经保证了信封，但**非 JSON 响应不该
+  // 表现成 SyntaxError**：裸 `response.json()` 遇到一份 `text/plain` 会抛
+  // `Unexpected token 'I'`，界面上的报错和真实原因（端点崩了 / 反代插了一页 502）毫无关系。
+  // 下面 `apiStream` 一直是 `.catch(() => null)` 的 —— 这里补齐同一个文件里的另一半。
+  const result = await response.json().catch(() => null) as { ok: boolean; data?: T; error?: { message: string; code?: string; details?: unknown } } | null;
+  if (!result) throw new ApiError(`请求失败：HTTP ${response.status}`, 'non_json_response');
   if (!result.ok) throw new ApiError(result.error?.message ?? '请求失败', result.error?.code ?? 'unknown', result.error?.details);
   return result.data as T;
 }
