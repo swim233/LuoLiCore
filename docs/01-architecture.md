@@ -108,8 +108,29 @@ Telegram Update
 - **同一个 chat 的入口段串行**（`KeyedMutex`，`bot.ts`）：认领 update → 归档 → 挂媒体这一段里有真实的
   异步等待，而归档顺序就是上下文顺序（`claimBackground` 按 `messages.id` 排）。锁只盖入口段，轮次在锁外并行。
 - **锁**：`KeyedMutex`（进程内 `Map<string, Promise>`）保护 `openTurn` / `commitTurn` 的临界区。临界区内**禁止任何网络/模型调用**。
-- **多实例**（非第一版目标）：SQLite WAL 模式下多进程写会争锁。若未来横向扩展，需把 `KeyedMutex` 换成 DB 行级 advisory lock（`context_locks` 表 + `INSERT OR FAIL`）并迁移 Postgres。已在 [14](./14-open-questions.md) 记录。
+- **多实例**（非第一版目标）：SQLite WAL 模式下多进程写会争锁。若未来横向扩展，需把 `KeyedMutex` 换成 DB 行级 advisory lock（`context_locks` 表 + `INSERT OR FAIL`）并迁移 Postgres。[14 §2 Q1](./14-open-questions.md) 已拍板：**现在不实现，但保留将来迁移的可能性** —— 约束见 §3.1。
 - **优雅退出**：收到 `SIGTERM` 后停止拉取新 update，等待在途 turn 至 `shutdown.graceMs`（默认 30s），超时则取消并标记 `turns.state='cancelled'`，最后 flush 日志与 WAL checkpoint。
+
+### 3.1 单实例纪律
+
+[14 §2 Q1](./14-open-questions.md) 的决策有两半，第二半容易被忘掉：
+
+1. **不删**为多实例预留的抽象。主要就是 Repository 层那些 key 参数与 `KeyedMutex` 的键 —— 它们同时
+   是 [14](./14-open-questions.md) T7（「隔离靠代码纪律，不是物理边界」）的主要缓解手段。为了「反正
+   永远单机」把它们拆平，等于用安全面换观感。
+2. **新代码不得引入新的进程内状态假设**。
+
+第 2 条没有断言能挡住 —— 没有哪条 CI 检查看得出「这个 Map 只在本进程可见」。所以它是一份复审清单，
+改到下面任何一类时逐条对：
+
+| 形态 | 为什么是问题 | 该怎么写 |
+|---|---|---|
+| 新增进程内缓存（`Map` / `Set` / 模块级变量）且**它是唯一真相** | 第二个实例看不到，两边各自算各自的 | 真相落 DB，进程内那份只当缓存，且能从 DB 重建 |
+| 新增互斥/限流，锁只在进程内 | 两个实例各放行一次，配额与并发闸同时失效 | 用 `KeyedMutex` 现成那套（将来整体换成 advisory lock），别再造一个 |
+| 新增只在本进程可见的广播（EventEmitter / SSE 直发） | 另一个实例上的 WebUI 收不到 | 走现有的 `log.publish` 一条路，将来换成 DB 轮询或外部总线时只改一处 |
+| 新增「启动时扫一遍、之后只信内存」的表 | 另一个实例写的行永远看不见 | 每次读 DB，或者接受陈旧并**写明**可陈旧多久 |
+
+**不是问题的**：纯函数的记忆化、单次请求内的缓存、进程本地的指标计数（本来就是 per-instance 语义）。
 
 ---
 

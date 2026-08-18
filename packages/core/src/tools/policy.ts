@@ -53,6 +53,11 @@ export const TOOL_POLICY = {
   schedule_create: { minRole: 'trusted', approval: 'never', scope: 'chat', source: 'builtin' },
   schedule_list: { minRole: 'trusted', approval: 'never', scope: 'chat', source: 'builtin' },
   schedule_cancel: { minRole: 'trusted', approval: 'never', scope: 'chat', source: 'builtin' },
+  // M11 · 起一个外部 harness CLI（Claude Code / Codex）改宿主上的仓库（docs/14 §2 Q8）。
+  // `owner` + `approval: 'always'` 是这张表能表达的最严档位，另外两道门（仅私聊、目录白名单）
+  // 在 `available()` 里 —— 它们判的是本轮上下文与配置，不是角色。
+  // **它内部的工具调用不受这套策略约束**（docs/14 T17）：本系统看不见 harness 的内部行为。
+  spawn_harness: { minRole: 'owner', approval: 'always', scope: 'global', source: 'agent' },
 } as const satisfies Record<string, ToolPolicyEntry>;
 
 export type ToolName = keyof typeof TOOL_POLICY;

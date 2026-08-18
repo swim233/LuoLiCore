@@ -22,7 +22,7 @@
 | [11-config-reference.md](./11-config-reference.md) | 全量配置项参考（含默认值与热更新语义） | 全体 |
 | [12-implementation-plan.md](./12-implementation-plan.md) | M0–M10 分阶段实施指导与出口条件 | 全体 |
 | [13-acceptance-criteria.md](./13-acceptance-criteria.md) | **验收文档**：可逐条勾选的验收用例 | QA / 验收 |
-| [14-open-questions.md](./14-open-questions.md) | 未确认项、默认假设、已知取舍 | 全体 |
+| [14-open-questions.md](./14-open-questions.md) | 未确认项、默认假设、已知取舍。**§2 的 Q1–Q12 已于 2026-08-18 全部答复**（此前挂了九轮），开头那张表是结论速查 | 全体 |
 | [15-gap-review.md](./15-gap-review.md) | **实现与文档差异审阅**：13 项 P0 / 39 项 P1 / 19 项 P2 + 逐条修改指导 | 全体 |
 | [16-remediation-plan.md](./16-remediation-plan.md) | 修复批次 R0–R6、回归测试补充清单、验收状态快照 | 全体 / QA |
 | [17-followup-review.md](./17-followup-review.md) | **复审报告（修复后第二轮）**：13 项 P0 已修复 12 项；新增 4 P0 / 13 P1 / 13 P2 + F0–F3 批次 | 全体 / QA |
@@ -89,6 +89,10 @@ Telegram ──► 准入(白名单/角色) ──► 归档(DB, 按 chat 隔离
 | D19 | 配额 | **记账 + 多级配额硬限**（global/chat/user，日/月，按角色覆盖），超额拒绝并提示 | [10](./10-logging-and-observability.md#5-配额) |
 | D20 | 技术栈 | TypeScript / Node 22 / pnpm workspace / **AI SDK v7** / **grammY** / **Drizzle + better-sqlite3** / Hono / Vite + Vue 3（自建 UI 层）/ vitest | [01](./01-architecture.md#5-技术栈) |
 | D21 | 定时 / 主动发言 | **做**（[14 §2 Q4](./14-open-questions.md) 已答复）：`mode='agent'` 起完整轮次、`mode='notify'` 只发预写文本；产出**照常进上下文**；停机错过**不补跑**；`minRole=trusted` 且落点绑死本会话 | [02 §10](./02-context-engine.md#10-定时轮次的上下文归属) |
+| D22 | 子 agent 的 md 定义 | **做**（[14 §2 Q5](./14-open-questions.md)）：`agents/<name>.md` 是**只读**来源，DB / WebUI 同名定义覆盖它；加载失败报错而不是静默跳过 | [04](./04-agents-and-providers.md) |
+| D23 | `HarnessAgent` | **做，排 [M11](./12-implementation-plan.md)**（[14 §2 Q8](./14-open-questions.md)）：仅 owner 且仅私聊、目录限白名单（默认空 = 关闭）、起 harness 整体走一次审批。它内部的工具调用**不受本系统权限模型约束**（T17） | [12 · M11](./12-implementation-plan.md) |
+| D24 | 保留策略 | **媒体文件 90 天**（`media.retentionDays`，0 = 不清）删文件留元数据；`messages` / `context_messages` / `turns` / `tasks` **永久**（[14 §2 Q9](./14-open-questions.md)） | [03 §4](./03-data-model.md) |
+| D25 | `ask_parent` 应答 | **实现 low 档仲裁**（[14](./14-open-questions.md) A7）：`agent.askArbiter` / `askTimeoutMs` 接线，不再返回 `ask_parent_not_implemented`。降级顺序 仲裁 → `default` → `ask_parent_unanswered`。**转人工（`askEscalateToUser`）仍未实现** —— 缺一条阻塞式人机通道 | [04 §3.4](./04-agents-and-providers.md) |
 
 ---
 

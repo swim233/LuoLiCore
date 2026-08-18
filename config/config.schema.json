@@ -601,13 +601,61 @@
             "askEscalateToUser": {
               "type": "boolean",
               "default": false,
-              "description": "仲裁也答不上来时，是否把问题转给真人。"
+              "description": "🚧 未接线：仲裁答不上来时把问题转给真人，需要一条「发选项—等人点—回灌」的阻塞式通道，目前没有。打开它只会在仲裁失败时多记一条日志。"
             },
             "progressThrottleMs": {
               "type": "integer",
               "exclusiveMinimum": 0,
               "default": 3000,
               "description": "子 agent 向上回报进度的最小间隔（毫秒）。"
+            },
+            "agentsDir": {
+              "type": "string",
+              "default": "./agents",
+              "description": "子 agent 的 markdown 定义目录（agents/<名字>.md）。文件是只读来源，下面「子 Agent」页里的同名定义会覆盖它。改了 .md 之后要动一次配置或重启才会重扫。"
+            },
+            "harness": {
+              "type": "object",
+              "properties": {
+                "command": {
+                  "type": "string",
+                  "default": "claude",
+                  "description": "harness 的可执行名，例如 claude 或 codex。"
+                },
+                "args": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [
+                    "-p"
+                  ],
+                  "description": "固定参数；任务正文作为最后一个参数追加，不经 shell。"
+                },
+                "allowedDirs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [],
+                  "description": "harness 允许进入的仓库路径白名单。**留空 = 整个功能关闭**，工具连模型的工具目录都不进。"
+                },
+                "timeoutMs": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 900000,
+                  "description": "单次 harness 运行的时间上限，超时先 SIGTERM 再 SIGKILL。"
+                },
+                "maxOutputBytes": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 65536,
+                  "description": "交回给模型的 harness 输出上限，超出从中间截断。"
+                }
+              },
+              "additionalProperties": false,
+              "default": {},
+              "description": "让模型起一个外部 coding harness（Claude Code / Codex）改宿主上的仓库。默认关闭 —— 它绕过本系统全部工具闸，开之前先读 docs/14 T17。"
             },
             "agents": {
               "type": "array",
@@ -1282,6 +1330,12 @@
               "default": "./data/files",
               "description": "下载下来的图片与文件的存放目录。"
             },
+            "retentionDays": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 90,
+              "description": "媒体文件保留多少天，0 = 不清。到期只删磁盘上的文件，消息与附件元数据保留（界面上会标「已过期」且不给下载）。改了要重启。"
+            },
             "maxImageBytes": {
               "type": "integer",
               "exclusiveMinimum": 0,
@@ -1670,15 +1724,6 @@
               "type": "string",
               "default": "0 5 * * 0",
               "description": "VACUUM 整理任务的 cron 表达式。"
-            },
-            "ftsTokenizer": {
-              "type": "string",
-              "enum": [
-                "trigram",
-                "unicode61"
-              ],
-              "default": "trigram",
-              "description": "全文检索的分词器：trigram 对中文友好，unicode61 更省空间。改了要重建索引，已有数据不会自动迁移。"
             }
           },
           "additionalProperties": false,

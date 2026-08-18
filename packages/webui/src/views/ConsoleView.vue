@@ -47,7 +47,9 @@ interface Conversation { id: string; key: string; chatId: string; userId: string
   prompt: string | null; promptKind: string | null; fromName: string | null; fromUsername: string | null; reply: string; attachments: Attachment[] }
 interface MessageHit { id: number; chatId: string; direction: string; fromName: string | null; fromUsername: string | null; kind: string; text: string | null; tgDate: number; turnId: string | null; attachments: Attachment[] }
 interface ToolPolicy { minRole: string; approval: string; scope: string; source: string; enabled: boolean }
-interface AgentDefinition { name: string; description: string; modelAlias: string; maxSteps: number; minRole: string; tools: string[]; resultMaxChars: number; instructions: string; injectMemory: boolean }
+// `source`：config = 只在 agent.agents 里；file = 只在 agents/<name>.md 里；
+// file-overridden = 两边都有，运行时用的是配置那份（docs/14 §2 Q5-a：DB 赢）。
+interface AgentDefinition { name: string; description: string; modelAlias: string; maxSteps: number; minRole: string; tools: string[]; resultMaxChars: number; instructions: string; injectMemory: boolean; source?: 'config' | 'file' | 'file-overridden' }
 const active = ref('dashboard');
 const dashboard = ref<Dashboard>({ turns: { total: 0, running: 0, failed: 0, cost: 0 }, messages: { total: 0 }, providers: { total: 0, enabled: 0 } });
 const principals = ref<Principal[]>([]);
@@ -841,9 +843,16 @@ function toggleAgentTool(name: string): void {
   const current = agentForm.value.tools;
   agentForm.value.tools = current.includes(name) ? current.filter((entry) => entry !== name) : [...current, name];
 }
+/**
+ * 只有**配置来源**的那些条目才写回 `agent.agents`。`/api/agents` 交回的是文件与配置合并后的
+ * 名单，整张写回去等于把每一条 `agents/<name>.md` 悄悄复制进 DB 覆盖层 —— 从此改文件不再生效，
+ * 而界面上什么都看不出来（docs/14 §2 Q5-a：文件是只读来源）。
+ */
+const configAgents = (): AgentDefinition[] => agents.value.filter((entry) => entry.source !== 'file')
+  .map(({ source: _source, ...entry }) => entry);
 /** 写的是整张数组：单条 PATCH 端点不存在，而 agent.agents 本身就是一个 schema 叶子。 */
 async function writeAgents(next: AgentDefinition[], summary: string, detail: string): Promise<void> {
-  await api('/api/config', { method: 'PUT', body: JSON.stringify({ 'agent.agents': next }) });
+  await api('/api/config', { method: 'PUT', body: JSON.stringify({ 'agent.agents': next.map(({ source: _source, ...entry }) => entry) }) });
   pushToast({ severity: 'success', summary, detail });
   await load();
 }
@@ -855,16 +864,26 @@ async function saveAgent(): Promise<void> {
   if (!form.instructions.trim()) { pushToast({ severity: 'warn', summary: '请填 instructions', detail: '子 agent 的系统提示词为空时模型没有任何职责说明' }); return; }
   const entry: AgentDefinition = { name, description: form.description, modelAlias: form.modelAlias, maxSteps: form.maxSteps, minRole: form.minRole,
     tools: form.tools, resultMaxChars: form.resultMaxChars, instructions: form.instructions, injectMemory: form.injectMemory };
-  const next = agents.value.map((existing) => existing.name === form.originalName ? entry : existing);
-  if (form.isNew) next.push(entry);
+  const base = configAgents();
+  const next = base.map((existing) => existing.name === form.originalName ? entry : existing);
+  // 改一条来自文件的定义 = 在配置层建一份覆盖（它此后显示成 file-overridden）。这正是
+  // 「文件只读 / DB 赢」该有的入口 —— 把它禁掉的话，那条优先级规则在界面上根本用不上。
+  if (form.isNew || !base.some((existing) => existing.name === form.originalName)) next.push(entry);
   agentSaving.value = true;
   try { await writeAgents(next, form.isNew ? 'Agent 已创建' : 'Agent 已保存', `${name} · 热更新已生效`); agentDialog.value = false; }
   catch (error) { toastError('保存 Agent 失败', error); }
   finally { agentSaving.value = false; }
 }
 async function removeAgent(name: string): Promise<void> {
-  if (!confirm(`删除子 Agent ${name}？正在引用它的 spawn_agent 调用会直接报「未知子 agent」。`)) return;
-  try { await writeAgents(agents.value.filter((entry) => entry.name !== name), `Agent ${name} 已删除`, '写入 agent.agents 覆盖层'); agentDialog.value = false; }
+  const current = agents.value.find((entry) => entry.name === name);
+  // 纯文件定义在 WebUI 里删不掉：这个按钮能改的只有 `agent.agents` 覆盖层，写回去删不掉磁盘上
+  // 那个 .md。假装删掉、刷新后它又回来，比直接说清楚糟得多。
+  if (current?.source === 'file') { pushToast({ severity: 'warn', summary: `${name} 来自文件定义`, detail: '删除 agents/ 目录下对应的 .md 文件，或在这里编辑它建一份覆盖' }); return; }
+  const revert = current?.source === 'file-overridden';
+  if (!confirm(revert
+    ? `删除 ${name} 的配置覆盖？删掉之后回到 agents/${name}.md 里那份定义。`
+    : `删除子 Agent ${name}？正在引用它的 spawn_agent 调用会直接报「未知子 agent」。`)) return;
+  try { await writeAgents(configAgents().filter((entry) => entry.name !== name), revert ? `${name} 的覆盖已删除` : `Agent ${name} 已删除`, revert ? '回到文件里那份定义' : '写入 agent.agents 覆盖层'); agentDialog.value = false; }
   catch (error) { toastError('删除 Agent 失败', error); }
 }
 type AgentDryRunEvent =
@@ -2176,7 +2195,10 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
         </section>
         <section v-else-if="active === 'agents'" key="agents" class="surface page-surface"><header><div><p class="eyebrow">AGENT TOPOLOGY</p><h2>子 Agent</h2><p>独立上下文、权限不高于父 Agent，结果全文独立落盘。点任一行编辑，保存即热更新。</p></div><UiButton label="新建 Agent" icon="pi pi-plus" @click="editAgent()" /></header>
           <DataGrid :rows="agents" :columns="COLUMNS.agents" data-key="name" clickable empty="没有配置子 Agent。模型只有在这里配了 agent 才能用 spawn_agent 派发。" @row-click="editAgent">
-            <template #name="{ data }"><code>{{ data.name }}</code></template>
+            <template #name="{ data }"><code>{{ data.name }}</code>
+              <UiTag v-if="data.source === 'file'" value="来自文件" severity="info" :title="`定义在 agents/${data.name}.md；在这里编辑会建一份配置覆盖`" />
+              <UiTag v-else-if="data.source === 'file-overridden'" value="覆盖了文件" severity="warn" :title="`agents/${data.name}.md 里也有一份定义，运行时用的是这份配置`" />
+            </template>
             <template #minRole="{ data }"><UiTag :value="data.minRole" :severity="roleSeverity(data.minRole)" /></template>
             <template #modelAlias="{ data }"><code>{{ data.modelAlias }}</code></template>
             <template #tools="{ data }"><span v-if="data.tools.length" class="agent-tools">{{ data.tools.join(' · ') }}</span><small v-else class="alias-empty">未限定，继承父 agent 的可用工具</small></template>

@@ -61,7 +61,10 @@ turn 01J8…                                     kind=turn.start / turn.end
 | `sandbox.run` | info | mode, image, exitCode, ms, oom, killed |
 | `approval.requested` / `approval.decided` | info | tool, risk, decidedBy, channel, ms |
 | `agent.spawn` / `agent.end` | info | name, depth, modelAlias, steps, costUsd |
-| `agent.ask` / `agent.answer` | info | fromRun, toRun, source(rule/arbiter/user/timeout), ms |
+| `agent.ask` / `agent.answer` | info | fromRun, toRun, source(rule/arbiter/timeout), ms。**没有 `source='user'`** —— 转人工那一级没实现（[04 §4.3](./04-agents-and-providers.md)） |
+| `agent.ask_unarbitrated` | warn（取消时 info） | askId, agentRunId, reason(no_model/cancelled/timeout/failed/empty), detail, escalationRequested —— 仲裁没能给出答复，子 agent 接下来按「没人应答」走。`escalationRequested:true` 表示运维开了 `agent.askEscalateToUser` 但那个键仍未接线，**没有真的去问人** |
+| `agent.file_invalid` | error | file, error —— `agents/<name>.md` 解析失败。其余定义照常加载，所以这一行是「我加的那个 agent 为什么不存在」的唯一凭据（[04 §3.1](./04-agents-and-providers.md)） |
+| `agent.harness` | info/warn | dir, command, exitCode, timedOut, ms —— M11 起了一次外部 harness。**它内部干了什么不在这里**（也不在任何地方），本系统看不见（[14](./14-open-questions.md) T17） |
 | `agent.progress` | debug | phase, done/total |
 | `memory.read` / `memory.write` | info | scope, subject, op, section, bytesAfter, reason |
 | `memory.owner_read_private` | **warn** | targetUserId |
