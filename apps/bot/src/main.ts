@@ -3,8 +3,8 @@ import argon2 from 'argon2';
 import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { serve } from '@hono/node-server';
-import { ArchiveRepository, OperationsRepository, PrincipalRepository, ScheduleRepository, TurnRepository, closeDatabase, migrateDatabase, modelAliasKey, openDatabase, readAppKv, readPersistedConfig, recomputeMessageTokens, recoverAfterCrash, writeAppKv } from '@luoli/db';
-import { AgentManager, AgentResultStore, AlertDispatcher, ConfigStore, mergeAgentDefinitions, scanAgentFiles, ContextEngine, DatabaseApprovalBroker, EventBus, FileTools, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, ModelRegistry, PathJail, PluginManager, PromptAssembler, PromptDocuments, ProviderStore, QuotaGuard, Sandbox, ScheduledJobRunner, Scheduler, Secrets, SkillLoader, STABLE_PROMPT_BLOCKS, TOOL_POLICY, ToolRegistry, TurnConcurrency, TurnRegistry, UsageLedger, assembleMainPrompt, configJsonSchema, loadConfig, perChatConfig, registerBuiltins, rejectedWakewords, runMainAgent, runSubAgent, streamMainAgent, type SubAgentRuntimeEvent } from '@luoli/core';
+import { ArchiveRepository, CustomToolRepository, OperationsRepository, PrincipalRepository, ScheduleRepository, TurnRepository, closeDatabase, migrateDatabase, modelAliasKey, openDatabase, readAppKv, readPersistedConfig, recomputeMessageTokens, recoverAfterCrash, writeAppKv } from '@luoli/db';
+import { AgentManager, AgentResultStore, AlertDispatcher, BUNDLED_SKILLS, ConfigStore, CustomToolManager, mergeAgentDefinitions, scanAgentFiles, ContextEngine, DatabaseApprovalBroker, EventBus, FileTools, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, ModelRegistry, PathJail, PluginManager, selfAuthoringDenyGlobs, PromptAssembler, PromptDocuments, ProviderStore, QuotaGuard, Sandbox, ScheduledJobRunner, Scheduler, Secrets, SkillLoader, STABLE_PROMPT_BLOCKS, TOOL_POLICY, ToolRegistry, TurnConcurrency, TurnRegistry, UsageLedger, assembleMainPrompt, configJsonSchema, loadConfig, perChatConfig, registerAuthoringTools, registerBuiltins, rejectedWakewords, runMainAgent, runSubAgent, streamMainAgent, type SubAgentRuntimeEvent } from '@luoli/core';
 import { createServer, EventStreamRegistry, issueLoginToken, setupToken, type PromptPreviewResult } from '@luoli/server';
 import type { RuntimeTurnContext } from '@luoli/shared';
 import { TelegramTools, UpdatePoller, createTelegramBot } from '@luoli/telegram';
@@ -184,6 +184,11 @@ const sandbox = new Sandbox(() => {
     defaultTimeoutMs: live.tools.exec.defaultTimeoutMs, maxTimeoutMs: live.tools.exec.maxTimeoutMs, maxOutputBytes: live.tools.exec.maxOutputBytes };
 }, undefined, undefined, (message) => log.event({ level: 'warn', kind: 'sandbox.weak_isolation', summary: message }),
   (reason, role) => alerts.fire('sandbox_unavailable', `沙箱不可用，${role} 的执行请求被拒`, { reason, role }, role));
+// 自撰写工具的注册器。真相在 `custom_tools` 表，进程内那份每次 `reconcile()` 都能重建
+// （docs/01 §3.1）；`execMaxTimeoutMs` 单独传是因为它归 `tools.exec`，不在 selfExtend 那一段里。
+const customToolRepo = new CustomToolRepository(db);
+const customTools = new CustomToolManager(customToolRepo, () => configStore.snapshot().tools.selfExtend, sandbox, log,
+  () => configStore.snapshot().tools.exec.maxTimeoutMs);
 const sandboxProbe = await sandbox.probe();
 if (!sandboxProbe.available && config.sandbox.mode === 'docker') log.event({ level: 'error', kind: 'sandbox.unavailable', summary: sandboxProbe.error ?? 'Docker sandbox unavailable' });
 // bot 要到最后才建得起来，而工具在这里就得注册完，所以桥拿的是 getter。**presence 即开关**：
@@ -206,7 +211,7 @@ const scheduleRunner = new ScheduledJobRunner({
   estimateTurnCost: (inputTokens, key) => modelRegistry.estimate(readAppKv<string>(db, modelAliasKey(key)) ?? perChatConfig(configStore.snapshot(), key).agent.main.modelAlias, inputTokens),
   // 非流式：定时轮次没有 Telegram 流消费者，也没人盯着屏幕等增量。其余依赖与 `onTurn` 完全一致。
   runAgent: (turn, reservation) => { const live = turn.config as Readonly<typeof config>; return runMainAgent(turn, { config: live, db, registry: modelRegistry, tools: toolRegistry,
-    prompts: promptAssembler, documents: promptDocuments, skills, plugins, agents, ledger, context, quota, reservation, log, workspace: resolve(live.sandbox.workspaceDir, turn.chatId) }); },
+    prompts: promptAssembler, documents: promptDocuments, skills, plugins, agents, customTools, ledger, context, quota, reservation, log, workspace: resolve(live.sandbox.workspaceDir, turn.chatId) }); },
 });
 registerBuiltins(toolRegistry, {
   // `tools.fs.allowHostFsForOwner`：owner 的 fs 工具 jail 到 `/` 而不是本会话 workspace。
@@ -215,7 +220,8 @@ registerBuiltins(toolRegistry, {
   // 判据用工具执行上下文里的有效角色 —— owner 在非受信群里已经被抿平成群角色（D9），
   // 所以「owner 在陌生群里被诱导读 /etc/shadow」走不到这条路。
   db, filesFor: (workspace, role) => new FileTools(
-    new PathJail(role === 'owner' && configStore.snapshot().tools.fs.allowHostFsForOwner ? '/' : workspace, config.tools.fs.denyGlobs),
+    new PathJail(role === 'owner' && configStore.snapshot().tools.fs.allowHostFsForOwner ? '/' : workspace,
+      [...config.tools.fs.denyGlobs, ...selfAuthoringDenyGlobs({ skillsDir: config.skills.dir, pluginsDir: config.plugins.dir })]),
     config.tools.fs.maxReadBytes, config.tools.fs.maxWriteBytes, { showHidden: config.tools.fs.showHidden, trashDir: config.tools.fs.trashDir, backupDir: config.tools.fs.backupDir }),
   sandbox, archive, context, memory, skills, agents, models: modelRegistry, ledger, log, quota,
   maxWebBytes: config.tools.web.maxResponseBytes, maxAsksPerRun: config.agent.maxAsksPerRun,
@@ -225,10 +231,16 @@ registerBuiltins(toolRegistry, {
   // 没有投递通道时这三个工具整体不进目录：排一个到点发不出去的任务是纯粹的假承诺。
   schedule: { jobs: scheduledJobs, runner: scheduleRunner, deliverable: () => telegramTools !== null },
 });
+registerAuthoringTools(toolRegistry, { customTools, skills, plugins, reservedSkills: BUNDLED_SKILLS,
+  mcp: { db, config: () => configStore.snapshot(), apply: (next, keys) => configStore.replace(next, keys), emit: (keys) => events.emit('config.changed', { keys }) } });
 plugins.bindRegistry(toolRegistry);
 mcp.bindRegistry(toolRegistry);
+customTools.bindRegistry(toolRegistry);
 await plugins.reconcile();
 await mcp.reconcile();
+// 自撰写的工具**最后注册**：重名时先注册的赢（`registerExternal` 拒绝跨来源覆盖），让运维显式
+// 配的 plugin / MCP 压过模型自己造的那份，方向是 fail-safe。
+customTools.reconcile();
 for (const name of Object.keys(TOOL_POLICY)) if (!toolRegistry.has(name)) throw new Error(`tool policy is not registered: ${name}`);
 let setup: { token: string; expiresAt: number } | undefined;
 if (!config.webui.passwordHash) {
@@ -310,7 +322,7 @@ const rebuildModels = (): void => { const live = configStore.snapshot(); modelRe
   if (!modelRegistry.aliases().length) alerts.fire('all_providers_down', '没有任何可用的模型别名：所有 provider 都不可用或未配置'); log.setSecrets([process.env.BOT_TOKEN ?? '', process.env.LUOLI_MASTER_KEY ?? '', live.tools.web.searchApiKey, ...providers.allDecryptedKeys()]); };
 const eventStreams = new EventStreamRegistry();
 const server = createServer({ config: configStore, db, operations, principals, archive, context, providers, modelCatalog, approvals: approval, rebuildModels, maintenance, ledger, restart: (reason) => restart(reason), events, log,
-  memory, promptDocuments, skills, plugins, mcp, agents, tools: toolRegistry, turnRegistry, sandbox, eventStreams, previewPrompt, dryRunAgent,
+  memory, promptDocuments, skills, plugins, mcp, agents, tools: toolRegistry, customTools: customToolRepo, customToolManager: customTools, turnRegistry, sandbox, eventStreams, previewPrompt, dryRunAgent,
   schedules: { jobs: scheduledJobs, runner: scheduleRunner }, configSchema: configJsonSchema(), startedAt, setup });
 // `webui.enabled=false`：整个 HTTP 面不监听。这不只是省一个端口 —— 单口令 + owner 全权限的
 // 控制台是这个部署最大的攻击面，只跑 Telegram 的场景该能把它整个关掉。
@@ -335,6 +347,9 @@ events.subscribe((event) => {
     // McpManager 现在按 getter 读配置，但连接是有状态的：改了 servers 必须重跑一次 reconcile
     // 才会真的连上/断开（docs/20 · W-CFG-02）。
     if (keys.some((key) => key.startsWith('mcp.'))) void mcp.reconcile();
+    // `tools.selfExtend` 在 `HOT_RELOADABLE_CONFIG_KEYS` 里，靠的就是这一行：关掉
+    // `customTools.enabled` 之后下一轮那批工具要真的从目录里消失，而不是等重启（docs/20 · W-CFG-02）。
+    if (keys.some((key) => key.startsWith('tools.selfExtend'))) customTools.reconcile();
     log.event({ level: 'info', kind: 'config.changed', summary: 'Runtime configuration reloaded', data: { keys } });
   }).catch((error) => log.event({ level: 'error', kind: 'config.invalid', summary: error instanceof Error ? error.message : String(error) }));
 });
@@ -345,7 +360,7 @@ if (process.env.BOT_TOKEN) {
     estimateTurnCost: (inputTokens, key) => modelRegistry.estimate(readAppKv<string>(db, modelAliasKey(key)) ?? perChatConfig(configStore.snapshot(), key).agent.main.modelAlias, inputTokens),
     // 用 turn.config 而不是全局快照：本轮的 perChat 覆盖已经在 openTurn 时合并进去了。
     onTurn: (turn, reservation) => { const live = turn.config as Readonly<typeof config>; return streamMainAgent(turn, { config: live, db, registry: modelRegistry, tools: toolRegistry,
-      prompts: promptAssembler, documents: promptDocuments, skills, plugins, agents, ledger, context, quota, reservation, log, workspace: resolve(live.sandbox.workspaceDir, turn.chatId) }); } });
+      prompts: promptAssembler, documents: promptDocuments, skills, plugins, agents, customTools, ledger, context, quota, reservation, log, workspace: resolve(live.sandbox.workspaceDir, turn.chatId) }); } });
   // `dropPendingOnStart`：停机期间积压的 update 直接丢掉，不补跑。默认关 —— 丢的是真实用户
   // 发过的消息。开它的场景是长时间停机后重启，不想让 bot 对着一小时前的话题连开几十轮。
   //

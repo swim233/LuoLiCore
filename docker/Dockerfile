@@ -30,6 +30,10 @@ COPY --from=build /app/apps ./apps
 COPY --from=build /app/dist ./dist
 COPY config ./config
 COPY memory ./memory
+# 随包发的说明书 skill（`writing-tools` 等四份）。模型写工具 / 写 plugin 之前读的就是它们，
+# 不带进镜像的话自我扩展那几个工具在容器里等于没有文档。compose 把 ./skills 绑挂上来时以宿主
+# 那份为准 —— 从仓库起的部署本来就有这四个目录。
+COPY skills ./skills
 # 用基础镜像自带的 node 用户（uid/gid 1000）而不是新建系统用户：./data 等目录是宿主 bind mount，
 # 属主是宿主用户（通常 1000），uid 对不上就是启动即 EACCES mkdir /app/data/workspace；而且沙箱容器
 # 固定跑 --user=1000:1000，uid 一致才不会出现「bash 写的文件应用改不动」。宿主用户不是 1000 时，

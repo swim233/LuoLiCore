@@ -1,13 +1,18 @@
 import { pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
 import { type FSWatcher, watch } from 'chokidar';
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Sqlite } from '@luoli/db';
 import { readAppKv, writeAppKv } from '@luoli/db';
 import { z } from 'zod';
 import type { Role } from '@luoli/shared';
 import type { ToolRegistry } from '../tools/registry.js';
+
+/** 三个文件方法共用同一道校验：名字同时是目录段，漏一处就是一条穿越（`readSource` 曾经漏过）。 */
+function assertPluginName(name: string): void {
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name)) throw new Error('invalid_plugin_name');
+}
 
 export interface LoadedPlugin {
   name: string;
@@ -110,6 +115,64 @@ export class PluginManager {
       } finally { clearTimeout(timer); }
     }
     return output;
+  }
+
+  /**
+   * 写入一个 plugin 的源码（`write_plugin` 工具、将来的 WebUI 上传）。
+   *
+   * **内容变了就强制打回未启用。** 这条不变量必须住在这里而不是调用方：`reconcile()` 用
+   * `sha256(文件 + 配置)` 当 ESM 的 cache-busting 签名，改一个**已启用** plugin 的文件之后
+   * 下一次 reconcile 就会把新代码 import 进本进程 —— 那是不经复审直接拿到 root（docs/14 A27）。
+   *
+   * 落盘用 tmp + rename（照 `SkillLoader.write`）：chokidar 在 `plugins.watch` 打开时盯着这个
+   * 目录，写一半的文件会被它捡去 import。
+   */
+  async writeSource(name: string, source: string): Promise<{ name: string; path: string; created: boolean; reset: boolean; backup: string | null }> {
+    assertPluginName(name);
+    const directory = join(this.directory, name);
+    const path = join(directory, 'plugin.js');
+    const previous = existsSync(path) ? readFileSync(path, 'utf8') : null;
+    const changed = previous !== source;
+    const wasEnabled = (this.db.prepare('SELECT enabled FROM plugins WHERE name=?').pluck().get(name) as number | undefined) === 1;
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    // 覆盖前留一份。这个入口现在也给模型用（`write_plugin`），而被覆盖的可能是运维手写的那份 ——
+    // `plugin.js` 没有 `write_file` 那样的 backupDir / 回收站，不留档就是真的没了。
+    // 备份名不叫 `plugin.js`，所以 `reconcile()` 不会去加载它。
+    let backup: string | null = null;
+    if (previous !== null && changed) {
+      backup = join(directory, `plugin.js.bak-${Date.now()}`);
+      writeFileSync(backup, previous, { encoding: 'utf8', mode: 0o600 });
+    }
+    const temporary = join(directory, `.plugin.js.${process.pid}.tmp`);
+    writeFileSync(temporary, source, { encoding: 'utf8', mode: 0o600 });
+    renameSync(temporary, path);
+    if (changed && wasEnabled) this.db.prepare('UPDATE plugins SET enabled=0,load_error=NULL,updated_at=? WHERE name=?').run(Date.now(), name);
+    await this.reconcile();
+    return { name, path, created: previous === null, reset: changed && wasEnabled, backup };
+  }
+
+  /**
+   * owner 复审要看的那份正文。没有这个入口，「启用前先看过」就只是句口号。
+   *
+   * **名字照样要过正则。** 它是 `GET /api/plugins/:name/source` 的落点，而 Hono 的
+   * `ctx.req.param()` 会做百分号解码 —— 少这一道，`..%2F..%2Fetc` 就能把 `join()` 带出插件目录，
+   * 读到磁盘上任何一个叫 `plugin.js` 的文件，顺带拿到一个「这个目录存不存在」的探针。
+   */
+  readSource(name: string): string | null {
+    assertPluginName(name);
+    const path = join(this.directory, name, 'plugin.js');
+    return existsSync(path) ? readFileSync(path, 'utf8') : null;
+  }
+
+  /** 连目录带库里那一行一起删。返回是否真的删掉了东西 —— 目录或行，有一个算一个。 */
+  async remove(name: string): Promise<boolean> {
+    assertPluginName(name);
+    const directory = join(this.directory, name);
+    const hadDirectory = existsSync(directory);
+    if (hadDirectory) rmSync(directory, { recursive: true, force: true });
+    const changes = this.db.prepare('DELETE FROM plugins WHERE name=?').run(name).changes;
+    await this.reconcile();
+    return hadDirectory || changes === 1;
   }
 
   list(): LoadedPlugin[] {

@@ -85,6 +85,10 @@ export const HOT_RELOADABLE_CONFIG_KEYS = [
   // 这三项各自现读：宿主 fs 放行在 `filesFor` 里取 snapshot，域名策略在 web_fetch 里取 turn.config。
   // `tools.fs` / `tools.web` 的其余键仍是启动快照，所以只列这三条而不是整段。
   'tools.fs.allowHostFsForOwner', 'tools.web.allowlist', 'tools.web.denylist',
+  // 自我扩展整段：四个 `available()` 都从本轮 `turn.config` 现读，而 `main.ts` 的 config.changed
+  // 订阅在 `tools.selfExtend.` 变化时重跑 `customTools.reconcile()` —— 关掉 `customTools.enabled`
+  // 下一轮那批工具就从目录里消失。标热更新之前先确认那条 reconcile 分支还在（docs/20 · W-CFG-02）。
+  'tools.selfExtend',
   'approval.enabled', 'approval.ttlMs', 'approval.rules', 'approval.skipForOwner', 'approval.rememberWithinTurn',
   // captureBodies 是每轮从 turn.config 现读的（runtime.ts 的 bodyForLog、/api/turns/:id/detail），
   // 改完下一轮就生效。漏在白名单外时 WebUI 会对着排障时最常翻的这个开关说「需重启」。
@@ -255,11 +259,31 @@ export const configSchema = z.object({
     // 「放宽要二次确认」是 `PATCH /api/tools/:name` 的端点行为而不是 schema 约束：schema 只管形状。
     overrides: z.record(z.object({ enabled: z.boolean().default(true), minRole: role.optional(),
       approval: z.enum(APPROVAL_POLICIES).optional(), timeoutMs: z.number().int().positive().optional() })).default({}),
-    fs: z.object({ maxReadBytes: z.number().int().positive().default(262_144), maxWriteBytes: z.number().int().positive().default(5_242_880), showHidden: z.boolean().default(false), allowHostFsForOwner: z.boolean().default(false), denyGlobs: z.array(z.string()).default(['**/.env*', '**/*.pem', '**/*.key', '**/id_rsa*', '**/.ssh/**', '**/.git/config', '<root>/config/**', '<root>/data/luoli.db*', '<root>/memory/**']), trashDir: z.string().default('.luoli-trash'), backupDir: z.string().default('.luoli-bak') }).default({}),
+    fs: z.object({ maxReadBytes: z.number().int().positive().default(262_144), maxWriteBytes: z.number().int().positive().default(5_242_880), showHidden: z.boolean().default(false), allowHostFsForOwner: z.boolean().default(false), denyGlobs: z.array(z.string()).default(['**/.env*', '**/*.pem', '**/*.key', '**/id_rsa*', '**/.ssh/**', '**/.git/config', '<root>/config/**', '<root>/data/luoli.db*', '<root>/memory/**', '<root>/skills/**', '<root>/plugins/**']), trashDir: z.string().default('.luoli-trash'), backupDir: z.string().default('.luoli-bak') }).default({}),
     exec: z.object({ defaultTimeoutMs: z.number().int().positive().default(60_000), maxTimeoutMs: z.number().int().positive().default(300_000), maxOutputBytes: z.number().int().positive().default(65_536) }).default({}),
     archive: z.object({ defaultSearchLimit: z.number().int().positive().default(20), maxSearchLimit: z.number().int().positive().default(100), defaultReadLimit: z.number().int().positive().default(50), maxReadLimit: z.number().int().positive().default(200) }).default({}),
     tg: z.object({ maxExtraMessagesPerTurn: z.number().int().nonnegative().default(3), maxFileSendMb: z.number().positive().default(50) }).default({}),
     web: z.object({ maxResponseBytes: z.number().int().positive().default(2_097_152), timeoutMs: z.number().int().positive().default(15_000), retries: z.number().int().nonnegative().max(5).default(2), summarizeWithAlias: z.string().default('low'), allowlist: z.array(z.string()).default([]), denylist: z.array(z.string()).default(['*.local', '*.internal']), searchProvider: z.enum(['', 'brave', 'serper', 'tavily']).default(''), searchApiKey: z.string().default('') }).default({}),
+    // 自我扩展（docs/07 §6）：模型给自己写工具 / 写 skill / 写 plugin / 装 MCP。
+    // **整块默认关闭**，与 `mcp.enabled`、`agent.harness.allowedDirs` 同一个形态 —— 这几件事都是
+    // 「打开之后模型能改变自己下一轮的能力」，默认值必须是关。
+    selfExtend: z.object({
+      enabled: z.boolean().default(false),
+      // `autoEnable` 打开 = 定义完下一轮就能用。默认关着的理由：网页 / 群聊注入 → define_tool →
+      // owner 因 `approval.skipForOwner` 无感放行 → 立刻成为持久能力，中间没有人。
+      // `requireSandbox` 打开则连 owner 也必须走沙箱，此时自定义工具**严格弱于** bash；
+      // 默认关着是需求方拍的板（与 bash 一视同仁），代价见 docs/14 T19。
+      customTools: z.object({ enabled: z.boolean().default(false), autoEnable: z.boolean().default(false), requireSandbox: z.boolean().default(false),
+        maxTools: z.number().int().positive().default(20), maxBodyChars: z.number().int().positive().default(8000),
+        defaultMinRole: z.enum(['trusted', 'owner']).default('owner'), timeoutMs: z.number().int().positive().default(60_000) }).default({}),
+      // `minRole` 是模型写出来的 skill 的**下限**：它可以写得更严，不能写得更松。
+      skills: z.object({ enabled: z.boolean().default(false), minRole: role.default('trusted') }).default({}),
+      // stdio = 一条模型发明的 argv，以 bot 进程的身份跑在沙箱之外。落地即禁用（owner 在 WebUI
+      // 复审那条 argv 再开），想连这一步都不给就把 stdio 从这里去掉。
+      mcp: z.object({ enabled: z.boolean().default(false), allowTransports: z.array(z.enum(['stdio', 'http'])).default(['stdio', 'http']) }).default({}),
+      // plugin 是进程内全信任（docs/14 A27）。模型只能把文件写下来，启用永远是 owner 的动作。
+      plugins: z.object({ enabled: z.boolean().default(false), maxBodyChars: z.number().int().positive().default(200_000) }).default({}),
+    }).default({}),
   }).default({}),
   sandbox: z.object({ mode: z.enum(['none', 'jail', 'docker']).default('docker'), bypassRoles: z.array(role).default(['owner']), image: z.string().default('luoli-sandbox:latest'), network: z.enum(['none', 'bridge']).default('none'), memoryMb: z.number().positive().default(512), cpus: z.number().positive().default(1), pidsLimit: z.number().int().positive().default(128), readOnlyRoot: z.boolean().default(true), tmpfsMb: z.number().positive().default(64), workspaceDir: z.string().default('./data/workspace'), hostWorkspaceDir: z.string().default(''), dockerBin: z.string().default('docker') }).default({}),
   // `allowInitiator` 已摘除：WebUI 只有一个 owner 身份（docs/14 A15），裁决权下放不到发起人，

@@ -326,6 +326,12 @@ tools:
       - '<root>/config/**'
       - '<root>/data/luoli.db*'
       - '<root>/memory/**'
+      - '<root>/skills/**'          # 自撰写通道的落点：只能经 write_skill / write_plugin 写，
+      - '<root>/plugins/**'         #   它们各自带校验与「改了就重置 enabled」。不堵掉旁路，
+                                    #   改一个**已启用** plugin 的文件就是不经复审拿到 root。
+                                    #   ★ 这两条只是默认值里的字面量；真正生效的那道由
+                                    #   skills.dir / plugins.dir 推出来（selfAuthoringDenyGlobs），
+                                    #   **叠加**在你这份数组之上 —— 删掉它们也关不掉
     trashDir: .luoli-trash
     backupDir: .luoli-bak
   exec:
@@ -356,6 +362,36 @@ tools:
     searchApiKey: ''              # 需重启 · **明文**存在 config.yaml / config_kv 里（不是引用，
                                   #   与 provider key 的 Secrets 加密不同）。建议写 ${env:BRAVE_API_KEY}
                                   #   之类的 env 引用，别直接落库；日志与 GET /api/config 会脱敏
+  # 自我扩展（14 §2 Q13 / 07 §6）：模型给自己写工具 / 写 skill / 写 plugin / 装 MCP。
+  # 整块默认关，与 mcp.enabled、agent.harness.allowedDirs 同一形态 —— 这几件事都是「打开之后
+  # 模型能改变自己下一轮的能力」。整段热更新：main.ts 的 config.changed 订阅在 tools.selfExtend.*
+  # 变化时重跑 customTools.reconcile()，关掉之后下一轮那批工具就从目录里消失。
+  selfExtend:
+    enabled: false                # 热更新 · 总闸。关着时那七个工具仍然注册（否则启动断言会抛）但一个都不进目录
+    customTools:
+      enabled: false              # 热更新 · 允许 define_tool 把一段 bash/python 脚本注册成 custom_<name>
+      autoEnable: false           # 热更新 · ★ 打开 = 定义完下一轮就能用。默认关着的理由：网页 / 群聊里的
+                                  #   一段注入 → define_tool → owner 因 approval.skipForOwner 无感放行 →
+                                  #   立刻成为持久能力，这条链上本来没有人（14 T18）
+      requireSandbox: false       # 热更新 · 打开后沙箱不生效时（owner 命中 bypassRoles，或 mode=none）
+                                  #   自定义工具一律不可用，此时它**严格弱于** bash。默认关是 Q13-d 的
+                                  #   拍板（与 bash 一视同仁），代价见 14 T19
+      maxTools: 20                # 热更新 · 数量上限，撞上之后 define_tool 在定义期就报错
+      maxBodyChars: 8000          # 热更新 · 单个脚本正文的字符上限
+      defaultMinRole: owner       # 热更新 · 模型没指定时新工具的最低调用角色。无论怎么配都不低于 bash 的门槛
+      timeoutMs: 60000            # 热更新 · 没指定超时时的默认值，最终仍封顶在 tools.exec.maxTimeoutMs
+    skills:
+      enabled: false              # 热更新 · 允许 write_skill 写 SKILL.md（纯文本，不含可执行代码）
+      minRole: trusted            # 热更新 · 模型写出来的 skill 的 min-role **下限**：能写得更严，不能更松
+    mcp:
+      enabled: false              # 热更新 · 允许 install_mcp 登记 server。落地一律 enabled:false，要 owner 点开
+      allowTransports: [stdio, http]  # 热更新 · ★ stdio 是一条模型发明的命令行，启用后以 bot 进程的身份跑在
+                                  #   沙箱之外。只留 http 可以把这一类整体挡掉
+    plugins:
+      enabled: false              # 热更新 · ★ 允许 write_plugin 写 plugins/<name>/plugin.js。plugin 在 bot
+                                  #   进程里全信任运行 = root（14 A27）；写下来的文件一律禁用，
+                                  #   只有 owner 在扩展页读过源码才能启用
+      maxBodyChars: 200000        # 热更新 · 单个 plugin.js 的字符上限
 
 # ============================================================ sandbox（D10）
 sandbox:

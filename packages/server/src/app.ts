@@ -12,10 +12,10 @@ import { getConnInfo } from '@hono/node-server/conninfo';
 import { serveStatic } from '@hono/node-server/serve-static';
 import type { AgentManager, Config, ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, PluginManager, PromptDocuments, ProviderStore, Sandbox, SkillLoader, SkillWriteInput, SubAgentRuntimeEvent, TurnRegistry } from '@luoli/core';
 import { ALIAS_NAME_PATTERN, HOT_RELOADABLE_CONFIG_KEYS, createScheduledJob, mergeAgentDefinitions, scanAgentFiles, scheduledJobView, testApprovalRules, KNOWN_UNIMPLEMENTED_CONFIG_KEYS, TOOL_POLICY, aliasSettingsSchema, checkWakeword, configSchema as runtimeConfigSchema, envPinnedConfigKeys, perChatConfig, probeProvider, quotaBucket, rejectedWakewords } from '@luoli/core';
-import { APPROVAL_POLICIES, effectiveToolPolicy, relaxedFields } from '@luoli/core';
-import type { CatalogIndex, ModelMetadata, ProviderProbe, ToolOverride, ToolRegistry } from '@luoli/core';
-import type { ArchiveRepository, OperationsRepository, PrincipalRepository, ScheduleRepository, ScheduledJob, Sqlite } from '@luoli/db';
-import { deleteAppKv, modelAliasKey, readAppKv } from '@luoli/db';
+import { APPROVAL_POLICIES, effectiveToolPolicy, looksSecret, persistMcpServers as persistMcpServersShared, publicConfig, relaxedFields, revisionJson } from '@luoli/core';
+import type { CatalogIndex, CustomToolManager, ModelMetadata, ProviderProbe, ToolOverride, ToolRegistry } from '@luoli/core';
+import type { ArchiveRepository, CustomToolRepository, OperationsRepository, PrincipalRepository, ScheduleRepository, ScheduledJob, Sqlite } from '@luoli/db';
+import { deleteAppKv, modelAliasKey, readAppKv, writeConfigRows as writeConfigRowsToDatabase } from '@luoli/db';
 import { assignDotted, readDotted, ROLES, TG_ID_PATTERN, type Role } from '@luoli/shared';
 import type { EventStreamRegistry } from './events.js';
 
@@ -70,6 +70,10 @@ export interface ServerDependencies {
    * MCP / plugin 注册进来的工具和每个工具声明的超时，但策略与启停仍然是对的。
    */
   tools?: ToolRegistry;
+  /** 自撰写工具的库与注册器。缺它时 `/api/custom-tools` 一律 `not_implemented` —— 空列表和
+   *  「这个部署压根没装」在运维眼里是两回事（docs/16 §5「摘除比伪造安全」）。 */
+  customTools?: CustomToolRepository;
+  customToolManager?: CustomToolManager;
   turnRegistry?: TurnRegistry;
   sandbox?: Sandbox;
   eventStreams?: EventStreamRegistry;
@@ -181,36 +185,6 @@ function storedPathWithin(root: string, stored: string): string {
   return absolute;
 }
 
-const SECRET_KEY_SEGMENT = /key|secret|token|password/i;
-/**
- * 导出 / YAML 渲染时判断「这一行是不是密钥」。判据是**叶子段 + 值是非空字符串**，与
- * `publicConfig` / `revisionJson` 同一套口径 —— 拿整条点分路径去 test 会把
- * `context.limit.tokens` 也当成密钥（`/token/i` 匹配到 "tokens"），于是一份导出里
- * 静静地少了几项真配置。值不是字符串的行由 `publicConfig` 的 `«redacted»` 检查兜住。
- */
-function looksSecret(key: string, value: unknown): boolean {
-  return SECRET_KEY_SEGMENT.test(key.split('.').at(-1) ?? key) && typeof value === 'string' && value.length > 0;
-}
-function publicConfig(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(publicConfig);
-  if (!value || typeof value !== 'object') return value;
-  return Object.fromEntries(Object.entries(value).map(([key, nested]) => [key, SECRET_KEY_SEGMENT.test(key) && typeof nested === 'string' && nested ? '«redacted»' : publicConfig(nested)]));
-}
-/**
- * 进 `config_revisions` 的那份值。`config_kv` 存真值，历史只存脱敏后的 ——
- * docs/09 §3.13 承诺「密钥类字段在写入时就已存成 «redacted»」，而按点分键写入时
- * `publicConfig` 拿不到键名（值是个裸字符串），于是密钥会明文躺在变更历史里。
- */
-function revisionJson(key: string, value: unknown): string {
-  const leaf = key.split('.').at(-1) ?? key;
-  if (SECRET_KEY_SEGMENT.test(leaf) && typeof value === 'string' && value) return JSON.stringify('«redacted»');
-  return JSON.stringify(publicConfig(value));
-}
-/** 旧值同样脱敏：它是从 `config_kv` 里读出来的真值。 */
-function previousJson(key: string, previous: { value: string } | undefined): string | null {
-  if (!previous?.value) return null;
-  try { return revisionJson(key, JSON.parse(previous.value) as unknown); } catch { return null; }
-}
 /**
  * 登录限流的桶键与 `sessions.ip` 的来源。**`trustProxy` 为假时一个请求头都不看** ——
  * 桶键要是请求头，限流的代价就只是「再换一个头值」：docs/18 · N-WEB-02 那一轮的修复原文写的是
@@ -247,30 +221,8 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
    * 顺带把六个写入点的四条重复语句收成一处：`PUT /api/sandbox` 此前只写 `config_kv` 不写
    * `config_revisions`，沙箱 mode / bypassRoles 这种安全相关改动压根不进「变更历史」。
    */
-  const writeConfigRows = (entries: Array<[string, unknown]>, actor: string): string[] => {
-    const now = Date.now();
-    const keys = entries.map(([key]) => key);
-    const stale = (dependencies.db.prepare('SELECT key FROM config_kv').pluck().all() as string[])
-      .filter((row) => keys.some((key) => row.startsWith(`${key}.`)));
-    const read = dependencies.db.prepare('SELECT value_json AS value FROM config_kv WHERE key=?');
-    const write = dependencies.db.prepare(`INSERT INTO config_kv(key,value_json,updated_at,updated_by) VALUES (?,?,?,?)
-      ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at,updated_by=excluded.updated_by`);
-    const drop = dependencies.db.prepare('DELETE FROM config_kv WHERE key=?');
-    const revision = dependencies.db.prepare('INSERT INTO config_revisions(id,ts,actor,key,old_json,new_json) VALUES (?,?,?,?,?,?)');
-    dependencies.db.transaction(() => {
-      for (const key of stale) {
-        const previous = read.get(key) as { value: string } | undefined;
-        drop.run(key);
-        revision.run(randomBytes(16).toString('hex'), now, actor, key, previousJson(key, previous), null);
-      }
-      for (const [key, value] of entries) {
-        const previous = read.get(key) as { value: string } | undefined;
-        write.run(key, JSON.stringify(value), now, actor);
-        revision.run(randomBytes(16).toString('hex'), now, actor, key, previousJson(key, previous), revisionJson(key, value));
-      }
-    })();
-    return stale;
-  };
+  const writeConfigRows = (entries: Array<[string, unknown]>, actor: string): string[] =>
+    writeConfigRowsToDatabase(dependencies.db, entries, actor, revisionJson);
   /**
    * 被环境变量钉住的键一律拒收，而不是写库之后让 `loadConfig` 悄悄交回 env 的值。
    * 祖先写入（`webui` 整块）同样命中：它对那个叶子照样不会生效。
@@ -286,17 +238,12 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
    */
   const redactedKeys = (body: Record<string, unknown>): string[] => Object.entries(body)
     .filter(([, value]) => JSON.stringify(value ?? null).includes('«redacted»')).map(([key]) => key);
-  const persistMcpServers = (servers: unknown[]): { ok: true; servers: Readonly<Config['mcp']['servers']> } | { ok: false; details: unknown } => {
-    const merged = mergeDotted(currentConfig(), { 'mcp.servers': servers });
-    if (!merged.ok) return { ok: false, details: [{ path: merged.key, message: '非法配置键' }] };
-    const parsed = runtimeConfigSchema.safeParse(merged.value);
-    if (!parsed.success) return { ok: false, details: parsed.error.issues.map((issue) => ({ path: issue.path.join('.'), message: issue.message })) };
-    const key = 'mcp.servers';
-    writeConfigRows([[key, parsed.data.mcp.servers]], 'webui');
-    if ('replace' in dependencies.config) dependencies.config.replace(parsed.data, [key]);
-    dependencies.events.emit('config.changed', { keys: [key] });
-    return { ok: true, servers: parsed.data.mcp.servers };
-  };
+  // 与 `install_mcp` 工具共用同一份校验与写入（`persistMcpServers`，core）：抄两份的必然结果是
+  // WebUI 建得出来的 server 工具建不出来，或者反过来。
+  const persistMcpServers = (servers: unknown[]): { ok: true; servers: Readonly<Config['mcp']['servers']> } | { ok: false; details: unknown } =>
+    persistMcpServersShared({ db: dependencies.db, config: currentConfig,
+      apply: (next, keys) => { if ('replace' in dependencies.config) dependencies.config.replace(next, keys); },
+      emit: (keys) => dependencies.events.emit('config.changed', { keys }) }, servers, 'webui');
   // 刚写进 config_kv、但 config.changed 的重载还没落到 configStore 的那一份口令。只在「快照仍是
   // 写入前那个值」时顶上；快照一旦变成别的（比如 PUT /api/config 又改了一次），立刻交回配置——
   // 无条件缓存就是 V-AUTH-02 换个位置复发：写入返回 200，登录还认旧的（docs/24 · R-AUTH-01）。
@@ -1411,6 +1358,55 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     return ctx.json({ ok: true, data: { changes } });
   });
   app.post('/api/plugins/:name/reload', async (ctx) => { await dependencies.plugins?.reconcile(); return ctx.json({ ok: true, data: { name: ctx.req.param('name') } }); });
+  // 「启用前先看过源码」是 plugin 那道闸的**全部**内容（进程内全信任 = root，docs/14 A27），
+  // 而模型现在能往 `plugins/` 里写文件了 —— 没有这个读端点，那句话就只是口号。
+  app.get('/api/plugins/:name/source', (ctx) => {
+    if (!dependencies.plugins) return ctx.json(apiError('not_implemented', 'PluginManager 未配置', 500).body, 500);
+    try {
+      const source = dependencies.plugins.readSource(ctx.req.param('name'));
+      return source === null ? ctx.json(apiError('not_found', 'plugin.js 不存在', 404).body, 404) : ctx.json({ ok: true, data: { name: ctx.req.param('name'), source } });
+    } catch { return ctx.json(apiError('invalid_plugin_name', '名字要是 kebab-case').body, 400); }
+  });
+  app.delete('/api/plugins/:name', async (ctx) => {
+    if (!dependencies.plugins) return ctx.json(apiError('not_implemented', 'PluginManager 未配置', 500).body, 500);
+    try {
+      // 什么都没删掉时 404，与隔壁 `DELETE /api/custom-tools/:name` 同一口径 —— 回 200 的话
+      // 界面会对着一个拼错的名字弹「已删除」。
+      const removed = await dependencies.plugins.remove(ctx.req.param('name'));
+      return removed ? ctx.json({ ok: true, data: { removed } }) : ctx.json(apiError('not_found', 'Plugin 不存在', 404).body, 404);
+    } catch (error) { return ctx.json(apiError('plugin_delete_failed', error instanceof Error ? error.message : 'plugin 删除失败', 400).body, 400); }
+  });
+  /**
+   * 自撰写工具的复审面。与工具页那条 `PATCH /api/tools/:name` 是**两个动词**：这里管
+   * 「这个工具存不存在、审没审过」，那边管「现在开着没有」。合并的话，一次运维停用会看起来像
+   * 把复审记录也撤了。
+   */
+  app.get('/api/custom-tools', (ctx) => {
+    if (!dependencies.customTools) return ctx.json(apiError('not_implemented', '这个部署没有装配自撰写工具', 500).body, 500);
+    return ctx.json({ ok: true, data: dependencies.customTools.list() });
+  });
+  app.patch('/api/custom-tools/:name', async (ctx) => {
+    if (!dependencies.customTools || !dependencies.customToolManager) return ctx.json(apiError('not_implemented', '这个部署没有装配自撰写工具', 500).body, 500);
+    // 只收 `enabled`。`scope` / `minRole` 归模型那侧的定义（改了要重新复审），从这里改会让
+    // `definition_hash` 与模型以为的那份定义脱节 —— 声明一个读不到的字段比不声明更糟。
+    const body = await ctx.req.json<{ enabled?: boolean }>().catch(() => ({}) as { enabled?: boolean });
+    const name = ctx.req.param('name');
+    if (!dependencies.customTools.get(name)) return ctx.json(apiError('not_found', '自定义工具不存在', 404).body, 404);
+    if (typeof body.enabled !== 'boolean') return ctx.json(apiError('invalid_custom_tool', 'enabled 必须是布尔值').body, 400);
+    dependencies.customTools.setEnabled(name, body.enabled);
+    dependencies.customToolManager.reconcile();
+    // 启用一段模型写的脚本是最该在日志页一眼看见的运维动作，记 warn 而不是 info。
+    dependencies.log.event({ level: body.enabled ? 'warn' : 'info', kind: 'webui.action',
+      summary: `custom tool ${body.enabled ? 'enabled' : 'disabled'}: ${name}`, data: { tool: name, enabled: body.enabled } });
+    return ctx.json({ ok: true, data: dependencies.customTools.get(name) });
+  });
+  app.delete('/api/custom-tools/:name', (ctx) => {
+    if (!dependencies.customTools || !dependencies.customToolManager) return ctx.json(apiError('not_implemented', '这个部署没有装配自撰写工具', 500).body, 500);
+    const removed = dependencies.customTools.remove(ctx.req.param('name'));
+    if (!removed) return ctx.json(apiError('not_found', '自定义工具不存在', 404).body, 404);
+    dependencies.customToolManager.reconcile();
+    return ctx.json({ ok: true, data: { removed } });
+  });
   app.get('/api/mcp', (ctx) => {
     const persisted = dependencies.db.prepare('SELECT * FROM mcp_servers ORDER BY name').all() as Array<Record<string, unknown>>;
     const byName = new Map(persisted.map((row) => [String(row.name), row]));

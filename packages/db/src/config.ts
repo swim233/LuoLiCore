@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { openDatabase } from '@luoli/db';
@@ -31,6 +32,49 @@ export function deleteAppKv(db: Sqlite, key: string): number {
 }
 
 export const modelAliasKey = (contextKey: string): string => `modelAlias:${contextKey}`;
+
+/**
+ * 配置写入的唯一出口：落 `config_kv` + `config_revisions`，并**删掉被这次写入吞掉的后代行**。
+ * 覆盖层按点分深度应用（`sortOverrideKeys`：更具体的路径赢），所以写 `tools.overrides` 整块时若
+ * 库里还留着此前逐项写下的 `tools.overrides.<name>`，那一项会把整块的对应位置局部否掉 ——
+ * 界面上表现为「JSON 里明明写着开着，刷新回来还是关的」。祖先键代表整棵子树，后代行因此作废；
+ * 作废也要进变更历史，否则历史会瞒下「你那条逐项覆盖是谁弄掉的」。
+ *
+ * `revisionValue` 是脱敏口径（`@luoli/core` 的 `revisionJson`）：`config_kv` 存真值，历史只存脱敏后的。
+ * 它作为参数传进来而不是写死在这里 —— 「哪些键算密钥」是配置层的策略，不是存储层该知道的事。
+ * 写入端不止 WebUI 一个（`install_mcp` 走同一条路），两边必须共用同一份实现，否则密钥会明文
+ * 躺进其中一条路径的变更历史里。
+ */
+export function writeConfigRows(db: Sqlite, entries: Array<[string, unknown]>, actor: string,
+  revisionValue: (key: string, value: unknown) => string): string[] {
+  const now = Date.now();
+  const keys = entries.map(([key]) => key);
+  const stale = (db.prepare('SELECT key FROM config_kv').pluck().all() as string[])
+    .filter((row) => keys.some((key) => row.startsWith(`${key}.`)));
+  const read = db.prepare('SELECT value_json AS value FROM config_kv WHERE key=?');
+  const write = db.prepare(`INSERT INTO config_kv(key,value_json,updated_at,updated_by) VALUES (?,?,?,?)
+    ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at,updated_by=excluded.updated_by`);
+  const drop = db.prepare('DELETE FROM config_kv WHERE key=?');
+  const revision = db.prepare('INSERT INTO config_revisions(id,ts,actor,key,old_json,new_json) VALUES (?,?,?,?,?,?)');
+  /** 旧值同样脱敏：它是从 `config_kv` 里读出来的真值。 */
+  const previousJson = (key: string, previous: { value: string } | undefined): string | null => {
+    if (!previous?.value) return null;
+    try { return revisionValue(key, JSON.parse(previous.value) as unknown); } catch { return null; }
+  };
+  db.transaction(() => {
+    for (const key of stale) {
+      const previous = read.get(key) as { value: string } | undefined;
+      drop.run(key);
+      revision.run(randomBytes(16).toString('hex'), now, actor, key, previousJson(key, previous), null);
+    }
+    for (const [key, value] of entries) {
+      const previous = read.get(key) as { value: string } | undefined;
+      write.run(key, JSON.stringify(value), now, actor);
+      revision.run(randomBytes(16).toString('hex'), now, actor, key, previousJson(key, previous), revisionValue(key, value));
+    }
+  })();
+  return stale;
+}
 
 /**
  * `onRejected` 收到的键是被 `assignDotted` 拒掉的路径（`__proto__` 之类）。它们进不了返回值，

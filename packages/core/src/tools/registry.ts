@@ -51,6 +51,15 @@ interface ToolLimits {
   defaultTimeoutMs?: number;
 }
 
+/** 注册期之后才出现的工具来源。`builtin` / `agent` 是编译期的，不走 `registerExternal`。 */
+export type ExternalToolSource = 'plugin' | 'mcp' | 'custom';
+/**
+ * 目录溢出（`tools.maxRegistered`）时的截断优先级：内建 100 > agent 90 > load_skill 80 >
+ * plugin 60 > mcp 40 > custom 30。自撰写的排最后 —— 模型可以一口气造二十个，让它先挤掉
+ * 运维显式配的 MCP 是错的方向。
+ */
+const EXTERNAL_SOURCE_PRIORITY: Record<ExternalToolSource, number> = { plugin: 60, mcp: 40, custom: 30 };
+
 const FALLBACK_TOOL_TIMEOUT_MS = 60_000;
 class ToolTimeout extends Error {
   constructor(readonly ms: number) { super('tool_timeout'); }
@@ -116,7 +125,18 @@ export class ToolRegistry {
     if (this.#tools.has(tool.name)) throw new Error(`tool already registered: ${tool.name}`);
     this.#tools.set(tool.name, tool as RegisteredTool);
   }
-  registerExternal(input: { name: string; description: string; inputSchema: z.ZodType<unknown>; minRole: Role; approval?: ApprovalPolicy; scope?: ToolScope; source: 'plugin' | 'mcp'; execute: (input: unknown) => Promise<unknown> | unknown }): boolean {
+  /**
+   * `available` 与 `timeoutMs` 对自定义工具是必需的，不是顺手加的糖：
+   *
+   * - 运维覆盖能改 `effectivePolicy().minRole`，但绕不过 `available()`（docs/09 §3.7）。自定义工具
+   *   那道「不得低于 `bash` 的角色门槛」的地板因此只能写在 `available()` 里 —— 写在注册的
+   *   `minRole` 上，一次覆盖就把它放给 `limited` 了。
+   * - 不给 `timeoutMs: null` 的话它吃 `tools.defaultTimeoutMs`（60s），而 `Sandbox.run` 按
+   *   `tools.exec.maxTimeoutMs`（300s）才 kill —— 一个 120s 的脚本会「对模型报超时、进程接着跑」。
+   */
+  registerExternal(input: { name: string; description: string; inputSchema: z.ZodType<unknown>; minRole: Role; approval?: ApprovalPolicy; scope?: ToolScope; source: ExternalToolSource;
+    available?: (role: Role, context: ToolExecutionContext) => boolean; timeoutMs?: number | null;
+    execute: (input: unknown, context: ToolExecutionContext) => Promise<unknown> | unknown }): boolean {
     const existing = this.#tools.get(input.name);
     if (existing && existing.policy.source !== input.source) {
       this.log.event({ level: 'warn', kind: 'tool.external_conflict', summary: `External tool conflict: ${input.name}`, data: { source: input.source, existing: existing.policy.source } });
@@ -124,12 +144,13 @@ export class ToolRegistry {
     }
     this.#tools.set(input.name, { name: input.name, description: input.description, inputSchema: input.inputSchema,
       policy: { minRole: input.minRole, approval: input.approval ?? 'conditional', scope: input.scope ?? 'global', source: input.source },
-      sourcePriority: input.source === 'plugin' ? 60 : 40, untrustedOutput: true,
-      execute: async (value) => { const output = await input.execute(value); return output && typeof output === 'object' ? output as object : { value: output }; } });
+      sourcePriority: EXTERNAL_SOURCE_PRIORITY[input.source], untrustedOutput: true,
+      ...(input.available ? { available: input.available } : {}), ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
+      execute: async (value, context) => { const output = await input.execute(value, context); return output && typeof output === 'object' ? output as object : { value: output }; } });
     return true;
   }
 
-  unregisterBySource(source: 'plugin' | 'mcp'): void {
+  unregisterBySource(source: ExternalToolSource): void {
     for (const [name, tool] of this.#tools) if (tool.policy.source === source) this.#tools.delete(name);
   }
 

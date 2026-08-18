@@ -1,7 +1,7 @@
 import { mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { FileTools, PathJail, TOOL_POLICY, ToolRegistry, renderArchivedMessage, type LogSink } from '@luoli/core';
+import { FileTools, PathJail, TOOL_POLICY, ToolRegistry, configSchema, renderArchivedMessage, selfAuthoringDenyGlobs, type LogSink } from '@luoli/core';
 import { resolveEffectiveRole } from '@luoli/core';
 import { formatSpeakerIdentity, sanitizeIdentity, untrusted } from '@luoli/shared';
 
@@ -30,6 +30,33 @@ describe('security boundaries', () => {
     expect(() => jail.resolve('escape/passwd')).toThrow('path_outside_workspace');
     writeFileSync(`${root}/.env`, 'secret');
     expect(() => jail.resolve('.env')).toThrow('path_denied');
+  });
+
+  // `skills/` 与 `plugins/` 是自撰写通道的落点，只能经 `write_skill` / `write_plugin` 写（它们各自
+  // 带校验与「改了就重置 enabled」）。`allowHostFsForOwner` 打开时 owner 的 jail 根是 `/`，不把这
+  // 两个目录挡在 denyGlobs 里就等于留了一条不过校验的旁路 —— 改一个**已启用** plugin 的文件
+  // 就是不经复审拿到 root。
+  it('denies the self-authoring directories by default', () => {
+    const root = process.cwd();
+    const jail = new PathJail(root, configSchema.parse({}).tools.fs.denyGlobs);
+    expect(() => jail.resolve('skills/anything/SKILL.md')).toThrow('path_denied');
+    expect(() => jail.resolve('plugins/anything/plugin.js')).toThrow('path_denied');
+    expect(jail.resolve('package.json')).toBe(`${root}/package.json`);
+  });
+
+  // 默认值里那两条字面量只保护默认目录、而且运维自己写一份 denyGlobs 就整个失效 —— 而
+  // `main.ts` 是把 `selfAuthoringDenyGlobs()` 叠在运维那份**之上**的。这条测的是叠加那一份：
+  // 目录改过、denyGlobs 被清空，`skills/` 与 `plugins/` 照样进不去。
+  it('derives the self-authoring denies from the configured dirs, not from the defaults array', () => {
+    const root = resolve('data/jail-selfextend');
+    rmSync(root, { recursive: true, force: true });
+    mkdirSync(`${root}/custom-skills`, { recursive: true });
+    mkdirSync(`${root}/custom-plugins`, { recursive: true });
+    writeFileSync(`${root}/ok.txt`, 'ok');
+    const jail = new PathJail(root, [...selfAuthoringDenyGlobs({ skillsDir: `${root}/custom-skills`, pluginsDir: `${root}/custom-plugins` })]);
+    expect(() => jail.resolve('custom-skills/a/SKILL.md')).toThrow('path_denied');
+    expect(() => jail.resolve('custom-plugins/a/plugin.js')).toThrow('path_denied');
+    expect(jail.resolve('ok.txt')).toBe(`${root}/ok.txt`);
   });
 
   // 断言的是「grep 有 CPU 上界」，不是「守卫认得这几种坏形状」——后者验证的是守卫自己的公理

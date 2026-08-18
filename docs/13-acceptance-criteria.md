@@ -255,6 +255,10 @@
 | [ ] AC-TOOL-029 (自动) ★ | 给某工具写 `tools.overrides.<name>.minRole`，一次调高一次调低，然后取 `active()` 与 `admit()` | 两处判定**同时**跟着覆盖走：调高后该角色的工具目录里没有它 **且** `admit()` 拒绝；调低后两处同时放行。只改一处的表现是「目录里看得见但调不动」或反过来「目录里没有但硬猜工具名能调通」（docs/20 · W-TOOL-01）。覆盖绕不过 `available()`：把 `spawn_harness.minRole` 覆盖成 `limited`，非 owner / 非私聊仍然 `tool_unavailable` |
 | [ ] AC-TOOL-030 (自动) ★ | `tools.overrides` 里把某工具的 `approval` 基准改成 `never`，其中一个是靠 `approvalFor` 抬档的工具（`memory_write`）；再把另一个工具的基准改成 `always` | 覆盖设的是**基准档**：`approvalFor` 的抬档照样生效（取最严者），基准 `never` 抬不下去；基准 `always` 的工具每次都要审批。覆盖 `timeoutMs` 对声明了超时的工具生效，对 `timeoutMs: null` 的（bash/python/spawn_agent/spawn_harness/ask_parent）**不生效** —— 它们各有自己的硬期限，套外层 race 会提前砍断 |
 | [ ] AC-TOOL-028 (自动) | 同一工具连续失败到 `maxConsecutiveErrors`，之后再调一次；中间夹一次成功再失败 | 停用后返回 `tool_disabled_after_errors` + hint（不是含糊的 `tool_unavailable`，那会让模型原地重试到步数耗尽），并有一条 `tool.disabled_after_errors` warn；成功一次即清零 —— 门槛是**连续**失败，不是本轮失败总数 |
+| [x] AC-TOOL-031 (自动) ★ | `define_tool` 造一个正文是 `echo "$LUOLI_ARG_X"` 的工具，用 `{"x":"$(id)"}` 调它 | 参数**永远不进命令串**：正文与参数各落一个 `.luoli-tmp/<uuid>` 文件，命令串里只剩 uuid；`$(id)` 原样出现在输出里、没有被求值。两条取参通道（`$1` 参数文件 / `$LUOLI_ARG_*` 环境变量）都不经过 shell 解析（[05 §3.10](./05-tools-and-permissions.md)） | 〔selfextend.custom.test.ts〕
+| [x] AC-TOOL-032 (自动) ★ | 给一个 `custom_*` 工具写 `tools.overrides.<name>.minRole: limited`，然后取 `active()` 与 `admit()` | 两侧**同时**仍然拒绝：角色地板焊在 `available()` 里（不低于 `TOOL_POLICY.bash.minRole`），而覆盖只动 `effectivePolicy()`。一个自定义工具就是一段 shell，放给 `limited` 等于绕过 `bash` 的门槛 | 〔selfextend.custom.test.ts〕
+| [x] AC-TOOL-033 (自动) ★ | 定义一个工具但不启用；启用后再改一次正文；另起一个 `autoEnable: true` 的实例 | 落库即 `enabled=0` 且不进目录；owner 启用后下一轮出现；改正文后回到未启用且 `reviewed_at` 清空（否则「先定义无害的、拿到启用、再改成恶意的」直接走通）；`autoEnable` 打开时定义完即可用 | 〔selfextend.custom.test.ts〕
+| [x] AC-TOOL-034 (自动) | 注册后在轮内改掉定义再调用；名字非法 / params 不是 object / 与别的来源重名 / 超出 `maxTools` | 依次：`custom_tool_redefined`（注册在开轮、执行在若干步之后，模型看到的是旧 schema）；四类校验都在**定义期**返回错误码，而不是留到 `active()` 那条没人看的截断 warn | 〔selfextend.custom.test.ts〕
 | [ ] AC-APV-008 (自动) ★ | trusted 用户触发一个需审批的工具，然后无人裁决直到 `ttlMs` 到期 | 调用**挂起等待**而不是当场伪拒绝：先写一行 `state=pending` 并广播 `approval.pending`；到期后原子改成 `state=expired, decided_by=system`，工具返回 `ok:false, error:'未获批准'` 且 hint 说的是「审批已超时」而不是「管理员已拒绝」。轮次在等待中被取消时落 `state=denied, decided_by=system` 并给「轮次已取消」的 hint —— 三条路径都 fail-closed，工具一次都不执行（docs/21 · G-API-12） |
 | [ ] AC-APV-010 (自动) ★ | 命中规则后 owner 在 WebUI 点 `[批准执行]` | `decide` 用 `UPDATE … WHERE state='pending' AND expires_at>?` 抢裁决权，只有真改到一行才唤醒等待者；**批准之后原工具调用才继续执行**，落 `state=approved, decided_by=owner, decision_channel=webui`。对已裁决/已过期的行重复裁决返回 `changed:false`，不重复唤醒 |
 | [ ] AC-APV-011 (自动) | `rememberWithinTurn=true` 时同轮重试一个刚过期的调用 | 复用上次结论不再挂第二个 `ttlMs`，但 hint 仍是「审批已超时」—— 只记布尔会让模型把超时说成「管理员已拒绝」 |
@@ -366,10 +370,15 @@
 | [ ] AC-SKL-006 | 写坏一个 frontmatter | 该 skill 显红并不可用；其他 skill 与 bot 一切正常 |
 | [ ] AC-SKL-007 | 编辑 SKILL.md 保存 | chokidar 检测到变更，下一轮目录更新，无需重启 |
 | [ ] AC-SKL-008 (自动) | `read_file('skill://pdf-report/template.tex')` | 只读成功；`skill://pdf-report/../../etc/passwd` 被拒 |
+| [x] AC-SKL-009 (自动) ★ | `write_skill` 写一份新 skill；再试 `min-role` 低于 `tools.selfExtend.skills.minRole`；再试覆写 `writing-tools` | 依次：写成功且下一轮出现在目录里；`min_role_too_low` 被拒（只能写得更严，不能更松）；`skill_reserved` 被拒 —— 随包发的四份说明书是模型下一次写工具时要读的那份文档，改坏了它就照着改坏的写 | 〔selfextend.author.test.ts〕
+| [x] AC-SKL-011 (自动) ★ | 一份带 `requires-tools: [install_mcp]` 的 skill，分别在该工具可用与不可用的轮次里取目录、并直接 `load_skill` 它 | 不可用时**整份 skill 不进目录**，直接载入也拒（`skill_requires_unavailable_tools`）。`min-role` 挡不住这件事：说明书讲的工具受功能开关控制，而目录只按角色过滤 —— 模型会读到一份「教你用一个你没有的工具」的说明书然后自己去想别的办法（实测：逆向代码库 + 拿 sessions 表里的会话打 WebUI API） | 〔skill.runtime.test.ts〕
+| [ ] AC-SKL-010 | 关掉 `tools.selfExtend.enabled` 之后看工具目录 | 七个自撰写工具仍然**注册着**（否则 `main.ts` 的 `TOOL_POLICY ↔ 注册表` 启动断言会抛），但一个都不进模型的工具目录 |
 | [x] AC-PLG-001 (自动) | 放一个示例 plugin，未启用 | 其工具/命令/钩子均不生效 | 〔plugin.runtime.test.ts〕
 | [ ] AC-PLG-002 | WebUI 启用 plugin | 弹出「全信任运行任意代码」确认；确认后工具可用 |
 | [ ] AC-PLG-003 (自动) | plugin 的 `configSchema` | WebUI 生成对应表单；含密字段加密存储且前端只显示 hint |
 | [ ] AC-PLG-004 (自动) | plugin hook 抛异常 | 被 catch，只记 `plugin.error`，turn 正常完成 |
+| [x] AC-PLG-005 (自动) ★ | `write_plugin` 写一个 plugin；运维启用它；模型再改一次源码 | 写下来就是 `enabled=0`（模型不能让自己写的代码在本进程里跑起来）；启用后再改源码**自动打回未启用** —— `reconcile()` 用 `sha256(文件+配置)` 当 ESM 的 cache-busting 签名，不打回的话下一次 reconcile 就把新代码 import 进本进程了（[14 A27](./14-open-questions.md)） | 〔selfextend.author.test.ts〕
+| [x] AC-PLG-006 (自动) | `GET /api/plugins/:name/source` 与 `DELETE /api/plugins/:name` | 前者交回 plugin.js 全文（没有它，「启用前先看过源码」只是句口号），不存在时 404；后者连目录带库里那行一起删 | 〔selfextend.api.test.ts〕
 | [ ] AC-PLG-005 (自动) | 同一 hook 连续失败 3 次 | 自动禁用该 plugin + owner 告警 |
 | [ ] AC-PLG-006 (自动) | hook 执行超 5s | 超时中断，记日志，turn 继续 |
 | [ ] AC-PLG-007 (自动) | 两个 plugin 注册同名工具 | 后者加载失败并报明确错误（前缀隔离下应仅在同名 plugin 时发生） |
@@ -385,6 +394,7 @@
 | [ ] AC-MCP-009 (自动) ★ | 一个入参为 `{text: string, required:[text]}` 的 MCP 工具 | 注册后 `execute()` 用错误参数调用返回 `invalid_input`，用正确参数才通过；模型拿到的是真实参数定义而不是「任意对象」（docs/20 · W-MCP-01） |
 | [ ] AC-MCP-010 (自动) | 把某个 server 从配置里移除或置 `enabled:false` 后触发一次 reconcile | 工具从注册表消失、client 断开、`mcp_servers.state='disabled'`；新增 server 无需重启即可连上 |
 | [ ] AC-MCP-011 | 一个故意卡住的 MCP server | `callTool` 在 `timeoutMs` 后失败，不把整轮拖到轮次超时 |
+| [x] AC-MCP-012 (自动) ★ | `install_mcp` 登记一台 server；再试一种不在 `allowTransports` 里的 transport；再登记同名的 | 依次：写进 `mcp.servers` 且 `enabled: false`（模型登记的是一条会以 bot 进程身份长期运行的 argv / 一个能往系统提示词里塞工具描述的远端 —— 那一步必须有人看过），并发出 `config.changed`；`transport_not_allowed`；`already_exists`。校验与写入与 `POST /api/mcp` **共用同一份** `persistMcpServers` | 〔selfextend.author.test.ts〕
 
 ## 10. WebUI（AC-WEB）
 
@@ -500,6 +510,9 @@
 | [x] AC-SEC-019 (自动) | `LUOLI_OWNER_ID=../../etc` | `configSchema` 拒收：这个值会被当成 `memory/private/<id>/` 的目录名用（docs/27 · S-08） | 〔regression.round9.test.ts〕
 | [x] AC-SEC-020 (自动) | `/grant user @alice owner` | 拒收并给出用法；`@username` 写不进 `principals`（否则那一行永远匹配不到任何消息，而命令回「已设置」）。三个 Telegram 命令与 `POST /api/principals/bulk` 共用 `parsePrincipal`（docs/27 · C-05） | 〔regression.round9.test.ts〕
 | [x] AC-SEC-022 (自动) ★ | `spawn_harness` 的三道门 | 默认（`agent.harness.allowedDirs` 为空）**不进模型的工具目录**，群聊同样不进；白名单外的目录当场拒绝且 hint 点名允许的路径；`/srv/app-secrets` 不算 `/srv/app` 的子目录；任务正文**不经 shell**；超时与取消分开报；策略档位恒为 owner + `approval: 'always'`（docs/14 §2 Q8 / T17） | 〔regression.round10.test.ts〕
+| [x] AC-SEC-023 (自动) ★ | `PATCH /api/tools/write_plugin {minRole:'trusted'}` 与 `define_tool {minRole:'limited'}` 之后，用对应角色取 `active()` 与 `admit()` | 两侧**同时**仍然拒绝：七个自撰写工具的 `owner` 地板写在 `available()` 里，而运维覆盖只动 `effectivePolicy()`。少这一道的话，一次放宽就等于让任意受信会话里的成员往本进程里写全信任代码（[14 A27](./14-open-questions.md)） | 〔selfextend.author.test.ts〕
+| [x] AC-SEC-024 (自动) ★ | `GET /api/plugins/..%2F..%2Fetc/source` 一类的百分号编码名字 | 400 `invalid_plugin_name`。名字同时是目录段，而 Hono 的 `ctx.req.param()` 会解码 —— 三个文件方法（读 / 写 / 删）共用同一道正则，漏掉读那一处就是「磁盘上任何一个 plugin.js 都读得到」外加一个目录存在性探针 | 〔selfextend.api.test.ts〕
+| [x] AC-SEC-025 (自动) | `tools.fs.denyGlobs` 被运维改写、或 `skills.dir`/`plugins.dir` 指向别处时的 `PathJail` | 两个自撰写目录照样 `path_denied`：那道拒绝由目录配置推出来并**叠加**在运维那份数组之上，不是 schema 默认值里的两条字面量（后者在非默认部署上一条都不生效，而那正是 `allowHostFsForOwner` 打开时最需要它的时候） | 〔security.test.ts〕
 | [ ] AC-SEC-021 | 默认配置（`approval.rules` 为空）下让 `trusted` 用户触发 `bash` | 启动日志有一条 `approval.no_rules` 警告、stderr 有对应提示、WebUI 审批页顶上说明「0 条规则时 conditional 等于 never」—— 门是开的这件事必须说出来（docs/27 · S-02，选定方案②） |
 
 ## 12. 运维与稳定性（AC-OPS）
@@ -526,14 +539,14 @@
 | **上下文引擎** | | 30 / 39 | | | |
 | Telegram 与准入 | | 21 / 45 | | | |
 | Agent 与 Provider | | 20 / 42 | | | |
-| 工具/沙箱/审批 | | 15 / 56 | | | |
+| 工具/沙箱/审批 | | 19 / 60 | | | |
 | Subagent 与任务 | | 20 / 38 | | | |
 | 记忆 | | 1 / 13 | | | |
 | 日志与成本 | | 5 / 26 | | | |
-| 扩展生态 | | 3 / 27 | | | |
+| 扩展生态 | | 8 / 33 | | | |
 | WebUI | | 10 / 84 | | | |
-| 安全 | | 6 / 22 | | | |
+| 安全 | | 9 / 25 | | | |
 | 运维 | | 1 / 9 | | | |
-| **合计** | | **147 / 426** | | | |
+| **合计** | | **159 / 439** | | | |
 
 **整体通过条件**：全部 ★ 项通过 + 非 ★ 项通过率 ≥ 95% + 所有豁免项经需求方书面确认。

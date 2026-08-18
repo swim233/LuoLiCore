@@ -294,6 +294,8 @@ export interface MainAgentDependencies {
   plugins?: { hook(name: string, ...arguments_: unknown[]): Promise<unknown[]> };
   context: ContextEngine;
   agents?: AgentManager;
+  /** 自撰写工具的注册器。每轮开始同步一次，见 `runMainAgentInternal` 顶部那一行。 */
+  customTools?: { syncIfChanged(): void };
 }
 export interface MainPromptAssembly extends PromptBuildResult {
   activeTools: string[];
@@ -321,7 +323,9 @@ export function assembleMainPrompt(turn: RuntimeTurnContext, dependencies: Promp
   const characterOverride = (turn.config as Record<string, unknown>).character;
   const documents = dependencies.documents.readForPrompt({ userId: turn.initiatorUserId, isPrivate: turn.isPrivate,
     ...(typeof characterOverride === 'string' && characterOverride ? { characterOverride } : {}) });
-  const skillCatalog = dependencies.skills?.catalog(turn.effectiveRole).map((skill) => `- skill:${skill.name}: ${skill.description}`).join('\n') ?? '';
+  // 目录按**本轮真正可用的工具**过滤：一份讲 `install_mcp` 的说明书，在那个工具没开的时候
+  // 出现在目录里只会把模型带进死胡同（实测：它读完说明书找不到工具，转头用 bash 逆向代码库）。
+  const skillCatalog = dependencies.skills?.catalog(turn.effectiveRole, activeTools).map((skill) => `- skill:${skill.name}: ${skill.description}`).join('\n') ?? '';
   // `prompt.includeToolCatalog=false` 时只发工具名（RUNTIME 里那一行），不发描述。省的是每轮
   // 几百到几千 token，代价是模型少了参数用法的提示 —— 所以默认开着。
   const catalog = dependencies.config.prompt.includeToolCatalog
@@ -379,6 +383,10 @@ export async function runMainAgent(turn: RuntimeTurnContext, dependencies: MainA
 }
 
 async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: MainAgentDependencies, streaming: boolean): Promise<string | MainAgentStreamResult> {
+  // 自撰写的工具在**开轮前**同步进注册表：`toolSet` 下面就冻结了，轮内再注册只会让
+  // `prepareStep` 的 `activeTools` 报出一个 `toolSet` 里没有的名字。**只在主 agent 做** ——
+  // 子 agent 跑在父轮内部，在那里重扫会把父轮已经冻结的那份工具集弄脱节。
+  dependencies.customTools?.syncIfChanged();
   const toolContext: ToolExecutionContext = { turn, workspace: dependencies.workspace, agentKind: 'main' };
   // 子 agent 从 turn 上取同一份预留：spawn_agent 在工具层执行，拿不到这里的 dependencies。
   turn.reservation = dependencies.reservation ?? null;

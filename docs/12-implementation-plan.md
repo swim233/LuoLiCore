@@ -1,4 +1,4 @@
-# 12 · 实施指导（M0–M11）
+# 12 · 实施指导（M0–M12）
 
 原则：**每个里程碑都必须是可运行、可验收的**。不允许出现「写了三周代码但跑不起来」的阶段。每个 M 的出口条件对应 [13](./13-acceptance-criteria.md) 的具体 AC 编号。
 
@@ -238,6 +238,41 @@ Harness 抽象。所以这不是「接一个 SDK 类」，而是**起一个外�
 - 群聊里 owner 起它 → 拒绝，且回执说明原因。
 - 白名单外的路径 → 拒绝。
 - 起它的动作在审批列表里能看到、能拒、拒了之后不执行。
+
+## M12 · 自我扩展（2–3 天）
+
+[14 §2 Q13](./14-open-questions.md) 于 2026-08-18 拍板要做。四条通道让模型能改变自己下一轮的能力：
+`define_tool` 写沙箱脚本工具、`write_skill` 写 SKILL.md、`write_plugin` 写 plugin.js、`install_mcp`
+登记 MCP server。规格见 [07 §6](./07-skills-plugins-mcp.md)，权限与参数契约见
+[05 §3.10](./05-tools-and-permissions.md)。
+
+⚠️ **这不是新机制，是把已有机制接到模型手上。** 三条运行时通道（`SkillLoader.create/update`、
+`PluginManager.reconcile`、`McpManager.reconcile`）本来就实现好了、不需要重启，只是此前只有 WebUI
+够得着。真正新写的只有自定义工具那一条。
+
+**先读 [14](./14-open-questions.md) T18 与 T19。** T18 是这套东西全部风险的来源（授权时点与执行时点
+分离，审计面从转录挪进了 SQLite）；T19 说明 `requireSandbox` 默认关时自定义工具就是调用者的 `bash`。
+
+**做什么**
+- `custom_tools` 表（迁移 0008）+ `CustomToolRepository`；`CustomToolManager` 照 `McpManager` 的形状
+  做 `reconcile` / `syncIfChanged` / `validate` / `available` / `execute`。
+- `registerExternal` 扩容：`source` 加 `'custom'`，接受 `available?` 与 `timeoutMs`
+  —— 那几道闸（角色地板、沙箱判据、会话作用域）只能安放在 `available()` 里。
+- `Sandbox.run` 加可选 `extraEnv`：docker 走 `-e` 的 argv、宿主/jail 走 `spawn` options，
+  两条都不经过 shell 解析。参数因此永远不会被拼进命令串。
+- 七个工具在 `tools/authoring.ts` 注册，**无条件注册、靠 `available()` 关**。
+- 四份随包发的说明书 skill（`skills/writing-*`、`skills/installing-mcp`），走渐进式披露。
+- WebUI 扩展页第四类 + plugin 源码复审端点。
+
+**出口条件**
+- 默认配置（`tools.selfExtend.enabled=false`）下七个工具**不进模型的工具目录**，但仍然注册着
+  —— 否则 `main.ts` 那条 `TOOL_POLICY ↔ 注册表` 的启动断言会抛。
+- 新定义的工具默认不可用，owner 在扩展页启用后**下一轮**出现；改正文后回到未启用。
+- 参数里带 `$(id)` 之类的东西不会在脚本里被求值。
+- 运维把 `custom_*` 的 minRole 覆盖到 `limited`，目录与准入两侧都仍然拒绝。
+- `install_mcp` 落地的记录 `enabled: false`，且与 `POST /api/mcp` 共用同一份校验。
+
+---
 
 ---
 
