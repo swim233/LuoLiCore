@@ -389,7 +389,8 @@ CREATE UNIQUE INDEX ux_models_provider_model ON models(provider_id, model_id);
 --                "priceRange": { "min": 0.2, "max": 0.4, "providers": 2 } | null,
 --                "priceSource": "provider|official|manual" | null, "fetchedAt": 1739000000000 }
 -- }
--- 运行时不读这一列（vision 自动切别名尚未实现），它服务于 WebUI 的展示与人工判断。
+-- 运行时**只读 `vision` 这一个字段**：`ModelRegistry.supportsVision(alias)` 解析别名链首那一行，
+-- 含图轮次据此在 `prepareStep` 自动切 `vision`（04 §5.2）。其余字段服务于 WebUI 的展示与人工判断。
 -- priceSource=manual 由 `PATCH /api/models/:id` 改动任一价格字段时写入：手填过的价不能再挂官方价徽标。
 
 -- 别名 → 有序 fallback 链

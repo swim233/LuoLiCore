@@ -39,6 +39,57 @@ describe('tool-result 形状', () => {
     expect((toolMessage!.content as Array<Record<string, unknown>>)[0]!.output).toEqual({ type: 'text', value: '[已省略工具结果]' });
   });
 
+  /**
+   * 读出侧自愈：**没有配对结果的 tool-call 现补一条**。
+   *
+   * provider 见到这种形状会拒收整个请求（中转站的表现是 200 + 0 步 → AI SDK 在 flush 里用
+   * `NoOutputGeneratedError` reject `result.text`），而 parts 是持久化的 —— 不在读出侧兜，
+   * 该会话在 `/new` 之前每轮都失败。实测 logs/2026-08-18 两次进程崩溃：起因是一个
+   * `tool-error` 部件没被追进 delta，ordinal 508 那条孤儿至今还在库里。
+   * 写入侧的 `assertPairedToolCalls` 只管「不再产生新的」，已经落库的只能在这里救。
+   */
+  it('没有配对结果的 tool-call 在读出侧被补上一条 error-text 结果', () => {
+    const turn = { snapshot: { messages: [
+      { role: 'assistant', parts: [{ type: 'tool-call', toolCallId: 'orphan-1', toolName: 'get_message', input: { messageId: 0 } }] },
+      { role: 'assistant', parts: [{ type: 'text', text: '看看这个' }] },
+    ], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 2 }, delta: [] } as unknown as RuntimeTurnContext;
+    const reported: string[][] = [];
+    const messages = contextMessages(turn, undefined, { onOrphanToolCalls: (ids) => reported.push(ids) });
+    expect(reported).toEqual([['orphan-1']]);
+    // 补出来的那条紧跟在孤儿后面，整份 prompt 过得了 ModelMessage 校验。
+    expect(messages).toHaveLength(3);
+    expect(messages[1]!.role).toBe('tool');
+    for (const message of messages) expect(modelMessageSchema.safeParse(message).success).toBe(true);
+    const part = (messages[1]!.content as Array<Record<string, unknown>>)[0]!;
+    expect(part).toMatchObject({ type: 'tool-result', toolCallId: 'orphan-1', toolName: 'get_message' });
+    // 不伪造成功，只如实说结果没了（照 `hydrateAttachment` 的占位先例）。
+    expect(part.output).toEqual({ type: 'error-text', value: '[工具结果缺失：这次调用的结果没有被记录下来]' });
+  });
+
+  it('配对齐全时一条都不补，也不报', () => {
+    const turn = { snapshot: { messages: [
+      { role: 'assistant', parts: [{ type: 'tool-call', toolCallId: 'c-1', toolName: 'search_messages', input: { query: 'x' } }] },
+      { role: 'tool', parts: [{ type: 'tool-result', toolCallId: 'c-1', toolName: 'search_messages', output: { type: 'json', value: { ok: true } } }] },
+    ], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 2 }, delta: [] } as unknown as RuntimeTurnContext;
+    let reported = 0;
+    expect(contextMessages(turn, undefined, { onOrphanToolCalls: () => { reported += 1; } })).toHaveLength(2);
+    expect(reported).toBe(0);
+  });
+
+  // 补出来的那条会把下标顶开一位：Anthropic 的移动缓存断点必须跟着走，否则打在孤儿的补丁上
+  // （或者干脆越界），整段前缀缓存作废。
+  it('补出来的结果不会把移动缓存断点打错位置', () => {
+    const turn = { snapshot: { messages: [
+      { role: 'assistant', parts: [{ type: 'tool-call', toolCallId: 'orphan-1', toolName: 'x', input: {} }] },
+      { role: 'assistant', parts: [{ type: 'text', text: '上一轮回答' }] },
+    ], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 2 },
+    delta: [{ role: 'user', parts: [{ type: 'text', text: '本轮' }] }] } as unknown as RuntimeTurnContext;
+    const messages = contextMessages(turn, undefined, { cacheBreakpoint: true });
+    const marked = messages.filter((message) => JSON.stringify((message as { providerOptions?: unknown }).providerOptions ?? {}).includes('cacheControl'));
+    expect(marked).toHaveLength(1);
+    expect((marked[0]!.content as Array<{ text?: string }>)[0]!.text).toBe('上一轮回答');
+  });
+
   it('tool-call 与 text 部件不受影响', () => {
     const [userMessage] = contextMessages(turnWith([call]));
     expect(userMessage!.content).toEqual([{ type: 'text', text: '你知道我是谁嘛' }]);

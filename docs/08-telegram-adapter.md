@@ -236,10 +236,19 @@ sendChatAction('typing')  → 每 4s 续期，直到首次消息发出
   让模型自己写一句结论；补不出来才回落到流里攒到的文本，并记一条 `turn.no_final_text` warn。
   没有这一层时，用户收到的「回复」就是工具调用之间的过程旁白，而且它会被提交进上下文
   （logs/2026-08-18 · turn `01M09QBZVK…`）。
-- **跨 step 的正文之间补一个空行**。`result.textStream` 只透出 `text-delta`，step 边界在
-  `toTextStream` 里就丢了，投递侧那一行 `text +=` 于是把每一步的旁白无缝粘成一段。改成从
-  `result.stream` 走并在 `finish-step` 后补 `\n\n`（上一段已以换行收尾则不补），
-  见 `stepSeparatedText` 与 `tests/agent.stream-separator.test.ts`。
+- **跨 step 的正文之间恰好一个空行**，由 `stepSeparatedText` 归一化，不看模型自己写了什么。
+  `result.textStream` 只透出 `text-delta`，step 边界在 `toTextStream` 里就丢了，投递侧那一行
+  `text +=` 于是把每一步的旁白无缝粘成一段；改成从 `result.stream` 走之后，反过来又出现空行爆炸
+  —— 模型被提示词教成每一步都以 `\n\n\n` 收尾，纯工具步的「正文」就是 `\n\n\n`，一条 11 步的回复
+  开头 10 个换行、中段 12 连换行（logs/2026-08-18 · turn `01M0AKMXG4…`）。所以判据是**扣住尾部
+  空白 + 到点补齐**：
+  - 一段正文的尾部空白先扣住不发，跨过 step 边界就丢掉，换成恰好一个 `\n\n`；没跨过边界就原样
+    发出去 —— 同一步内的增量、列表缩进、围栏代码块里的空行一个字都不动。
+  - 纯空白的「正文」不算说过话：不透传、不触发分隔（连续多个纯工具步只补一个空行）。
+  - 第一段非空白正文之前什么都不发，流结束时扣住的尾部空白丢弃 —— 整条消息首尾无空白。
+  - 流里的 `error` 部件也从这里透出去（`onError` → `streamFailure`），不再被静默跳过。
+  见 `stepSeparatedText` 与 `tests/agent.stream-separator.test.ts`。渲染器侧**不做**收窄：
+  `safeRender` 的空行保真是既有契约（`tests/output.render.test.ts`）。
 - 编辑遇 `400 message is not modified` → 忽略。
 - 编辑遇 `429` → **跳过本次增量**（不排队），下次节流窗口再试。
 - 编辑遇 `400 can't parse entities` → 用 `parse_mode: undefined` 重试一次；再失败则把内容作为 `.md` 文档发出并回复一句摘要。
@@ -385,7 +394,7 @@ bot:  ⏳ 已接收，正在处理…                      [取消]        ← �
 | 类型 | 归档 | 下载 | 进上下文 |
 |---|---|---|---|
 | 文本 | ✓ | — | 正文 |
-| 图片 photo | ✓ | ✓（取最大尺寸，`media.maxImageBytes` 默认 8MB） | `file` part + `mediaType:'image/*'`（模型需 vision，否则降级 `[图片: caption]`） |
+| 图片 photo | ✓ | ✓（取最大尺寸，`media.maxImageBytes` 默认 8MB） | `file` part + `mediaType:'image/*'`（模型需 vision，否则自动切 `vision` 别名；一个都没有才换成文本占位） |
 | 文档 document | ✓ | ✓（`media.maxDocBytes` 默认 20MB） | 见下 |
 | 贴纸 sticker | ✓ | 仅静态 webp | `[贴纸 😄]`（`emoji` 字段）；`media.stickerAsImage`（默认 false）时作为图片 |
 | 动图 animation | ✓ | ✗ | `[动图]` |
@@ -431,7 +440,13 @@ media:
   只是顺带对每一张图打一条 DeprecationWarning。库里的历史 `image` part 由读出侧
   （`runtime.ts` 的 `contextMessages`）就地转换 —— parts 是持久化的，不兜就得等图片滚出窗口。
 - 一轮内图片数上限 `media.maxImagesPerTurn`（默认 4），超出丢最旧并注明。
-- 若当前别名模型 `capabilities.vision=false` → `prepareStep` 切 `vision` 别名；无 `vision` 别名则降级为占位符 + 回复末尾提示「当前模型不支持看图」。
+- 若当前别名模型 `capabilities.vision=false` → `prepareStep` 切 `vision` 别名（优先级见 [04 §5.2](./04-agents-and-providers.md#52-内建别名语义)：
+  vision 压过 `downgradeAfterStep` 与 `set_model`）。一个能看图的别名都没有时才降级：
+  图片整体换成 `[图片：当前模型不支持看图，本轮没能查看]`，并在回复末尾追加
+  「（当前模型不支持看图，这张图我没能真的看到。）」。
+  **不许把不透明 part 原样发给一个不认它的模型**：宽容的 provider 静默忽略、严格的直接 400，
+  而模型不知道自己没看见图 —— 实测它会去 cp 文件、python 读尺寸、开本地 http 服务器、
+  拿 agent-browser 截图，绕 11 步也没看到那张图（logs/2026-08-18 · turn `01M0AKMXG4…`）。
 
 ### 7.3 媒体组（相册）
 

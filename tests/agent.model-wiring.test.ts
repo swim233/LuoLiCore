@@ -1,5 +1,6 @@
 import { rmSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 import type { LanguageModel } from 'ai';
 import { ArchiveRepository, OperationsRepository, closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
 import { AgentManager, AgentResultStore, ContextEngine, LogSink, PromptAssembler, PromptDocuments, QuotaGuard, ToolRegistry, UsageLedger, configSchema, runMainAgent, runSubAgent, streamMainAgent } from '@luoli/core';
@@ -22,8 +23,8 @@ function candidate(id: string, run: () => unknown) {
 const ok = { content: [{ type: 'text', text: 'ok' }], finishReason: { unified: 'stop', raw: 'stop' },
   usage: { inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 1, text: 1, reasoning: 0 } }, warnings: [] };
 
-function info(modelId: string) {
-  return { id: modelId, providerId: 'p1', modelId, contextWindow: 128_000, maxOutput: 4096, capabilities: '[]',
+function info(modelId: string, vision = false) {
+  return { id: modelId, providerId: 'p1', modelId, contextWindow: 128_000, maxOutput: 4096, capabilities: JSON.stringify({ vision }),
     priceIn: 1, priceOut: 2, priceCacheRead: 0, priceCacheWrite: 0 };
 }
 
@@ -39,6 +40,11 @@ function registryFor(chains: Record<string, Array<{ model: ReturnType<typeof can
     settings: () => ({}),
     aliases: () => Object.keys(chains),
     info: (alias: string) => (chains[alias] ?? [])[0]?.info ?? null,
+    // 真注册表这里先 `#models.has(alias)` 再看链首那一行的 `capabilities_json`；别名不存在恒为 false。
+    supportsVision: (alias: string) => {
+      const row = chains[alias]?.[0]?.info;
+      return row ? (JSON.parse(row.capabilities) as { vision?: unknown }).vision === true : false;
+    },
     infoByModelId: (modelId: string) => Object.values(chains).flat().find((entry) => entry.info.modelId === modelId)?.info ?? null,
     aliasOf: (modelId: string, prefer?: string) => Object.entries(chains).find(([alias, chain]) => chain.some((entry) => entry.info.modelId === modelId) && (!prefer || alias === prefer))?.[0]
       ?? Object.entries(chains).find(([, chain]) => chain.some((entry) => entry.info.modelId === modelId))?.[0] ?? null,
@@ -299,6 +305,166 @@ describe('model wiring through prepareStep', () => {
     // 第一个 chunk 一到就 abort：这正是 `turnTimeoutMs` 那条 setTimeout 干的事（reason 恒为 'timeout'）。
     await expect((async () => { for await (const chunk of result.stream) { chunks.push(chunk); controller.abort('timeout'); } })()).rejects.toThrow('timeout');
     expect(chunks.join('')).toBe('先查一下。');
+    closeDatabase(db);
+  });
+
+  /**
+   * **0 步返回 = 上游给了个空流，不是模型没话说 —— 而且不许变成无人接管的 rejection。**
+   *
+   * 中转站 200 收下、SSE 里一个 step 都没有就关闭：`doStream` 不抛，`idleGuarded` 不触发，
+   * `onExhausted` 不跑。AI SDK 在 flush 里用 `NoOutputGeneratedError` reject `result.text`
+   * ——那是 `steps.then().then()` 的**派生** promise，SDK 不会把它标成 handled。此前 `final`
+   * 在创建处没有任何 catch，而唯一的 catch 排在 `bot.ts` 的 `await consume(...)` 之后
+   * （`consume` 开头还卡着 `sendChatAction`，实测 561ms）—— `main.ts` 的 unhandledRejection
+   * 处理器于是先一步 `process.exit(1)`。实测 logs/2026-08-18 22:17:29 与 23:19:43 两次。
+   */
+  it('reports an empty upstream stream as a turn failure without leaking a rejection', async () => {
+    const { db, turn, dependencies } = harness('agent-stream-empty');
+    const leaked: unknown[] = [];
+    const onLeak = (error: unknown): void => { leaked.push(error); };
+    process.on('unhandledRejection', onLeak);
+    try {
+      const empty = { model: { ...candidate('m1', () => ok), doStream: async () => ({ stream: new ReadableStream({
+        start(target) { target.enqueue({ type: 'stream-start', warnings: [] }); target.close(); },
+      }) }) } as ReturnType<typeof candidate>, info: info('m1') };
+      const result = await streamMainAgent(turn, { ...dependencies, registry: registryFor({ main: [empty] }) });
+      const chunks: string[] = [];
+      // 流自己抛 = `TelegramOutput.consume` 的 `interrupted`，也就是 docs/04 §5.3 那条路：
+      // 用户拿到一句能看懂的失败，轮次记 failed。此前这里是**静默**的：流正常结束、
+      // `result.text` 在背后 reject，没人接。
+      await expect((async () => { for await (const chunk of result.stream) chunks.push(chunk); })()).rejects.toThrow(/No output generated/);
+      expect(chunks).toEqual([]);
+      await expect(result.final).rejects.toThrow(/No output generated/);
+      // 泄漏检测要跨一个宏任务：Node 是在微任务队列排空之后才判「无人接管」。
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(leaked).toEqual([]);
+      // 隐形的失败是这次事故最贵的一半：`model.jsonl` 里两次崩溃一条 model.error 都没有 ——
+      // 流里的 `error` 部件此前被 `stepSeparatedText` 明文跳过，SDK 默认的 onError 只 console.error。
+      const errors = db.prepare("SELECT summary FROM log_events WHERE kind='model.error'").pluck().all() as string[];
+      expect(errors.some((summary) => summary.includes('NoOutputGeneratedError'))).toBe(true);
+    } finally {
+      process.off('unhandledRejection', onLeak);
+      closeDatabase(db);
+    }
+  });
+
+  /**
+   * **工具调用失败也要在上下文里留下配对的结果** —— 这是两次崩溃的根因。
+   *
+   * AI SDK 的 `step.toolResults` 是 `content.filter(p => p.type === 'tool-result')`，而输入校验
+   * 失败（这里）或工具抛错时产出的是 `tool-error` part，于是被整个滤掉：`appendContext` 只把
+   * tool-call 追进 delta，上下文里留下一条**没有配对结果的 tool-call**。轮内看不出来 ——
+   * SDK 自己的 `responseMessages` 会把错误转成合法的 tool-result 发上线，所以那一轮 11 步全成功；
+   * 下一轮起该会话每次请求都是畸形的（logs/2026-08-18，起因是 `get_message({messageId:0})`
+   * 撞上 `z.number().int().positive()`）。
+   */
+  it('appends a paired tool-result for a tool call the SDK rejected on input validation', async () => {
+    const { db, turn, dependencies } = harness('wiring-tool-error');
+    dependencies.tools.register({ name: 'look', description: '', inputSchema: z.object({ path: z.string() }),
+      policy: { minRole: 'trusted', approval: 'never', scope: 'chat', source: 'builtin' }, sourcePriority: 1, execute: () => ({ ok: true }) });
+    let step = 0;
+    const model = { model: { ...candidate('m1', () => ok), doGenerate: async () => {
+      step += 1;
+      // `path` 要 string 给了 number：AI SDK 在调 execute **之前**就判 InvalidToolInputError。
+      return (step === 1 ? { ...ok, content: [{ type: 'tool-call', toolCallId: 'c1', toolName: 'look', input: '{"path":123}' }] } : ok) as never;
+    } } as ReturnType<typeof candidate>, info: info('m1') };
+    await runMainAgent(turn, { ...dependencies, registry: registryFor({ main: [model] }) });
+    const parts = turn.delta.flatMap((message) => message.parts as Array<{ type?: string; toolCallId?: string; output?: { type?: string; value?: unknown } }>);
+    const call = parts.find((part) => part.type === 'tool-call' && part.toolCallId === 'c1');
+    const result = parts.find((part) => part.type === 'tool-result' && part.toolCallId === 'c1');
+    expect(call).toBeTruthy();
+    expect(result).toBeTruthy();
+    // 形状照 SDK 真正发上线的那一份来，不另造一种。
+    expect(result!.output!.type).toBe('error-text');
+    expect(String(result!.output!.value)).toContain('InvalidToolInputError');
+    // 写入侧那道断言（`assertPairedToolCalls`）因此放它过 —— 上一版这里会攒出一条永久孤儿。
+    await expect(dependencies.context.commitTurn(turn)).resolves.toBeDefined();
+    closeDatabase(db);
+  });
+});
+
+/**
+ * 含图轮次的 vision 自动切换（`docs/04 §5.2`、`docs/08 §7.2`、`AC-PROV-009`）。三处文档都写了、
+ * 代码里此前一行都没有 —— `capabilities_json` 只有 WebUI 的徽章在读（`docs/03:392` 自己承认过）。
+ * 表现是用户发图给 `vision=false` 的模型，模型看不见却不知道自己看不见：实测它去 cp 文件、
+ * python 读尺寸、开本地 http 服务器、拿 agent-browser 截图，绕了 11 步
+ * （logs/2026-08-18 · turn `01M0AKMXG4…`）。
+ */
+describe('vision alias fallback', () => {
+  /** 每一步真正出力的 modelId 都记下来：断言的是「哪个模型看到了这轮」，不是别名字符串。 */
+  function served(modelId: string, vision: boolean, seen: string[], prompts: PromptMessage[][] = []) {
+    return { model: { ...candidate(modelId, () => ok),
+      doGenerate: async (options: { prompt: PromptMessage[] }) => { seen.push(modelId); prompts.push(options.prompt); return ok as never; } } as ReturnType<typeof candidate>,
+      info: info(modelId, vision) };
+  }
+  const withImage = (turn: RuntimeTurnContext): void => {
+    turn.delta[0]!.parts = [{ type: 'text', text: '看看这张图' }, { type: 'file', ref: 'attachment://a1', mediaType: 'image/jpeg' }];
+  };
+
+  it('switches to the vision alias when the turn has an image the current model cannot see', async () => {
+    const { db, turn, dependencies } = harness('vision-switch');
+    withImage(turn);
+    const seen: string[] = [];
+    await runMainAgent(turn, { ...dependencies, registry: registryFor({ main: [served('blind', false, seen)], vision: [served('eyes', true, seen)] }) });
+    expect(seen).toEqual(['eyes']);
+    closeDatabase(db);
+  });
+
+  // vision 压过 `downgradeAfterStep`：为了省钱降档而把眼睛降掉是最不划算的一种省。
+  it('keeps vision even on a step that would otherwise downgrade to low', async () => {
+    const { db, turn, dependencies } = harness('vision-vs-downgrade', { agent: { main: { modelAlias: 'main', maxSteps: 4, downgradeAfterStep: 1 } } } as Partial<Config>);
+    withImage(turn);
+    dependencies.tools.register({ name: 'look', description: '', inputSchema: z.object({}),
+      policy: { minRole: 'trusted', approval: 'never', scope: 'chat', source: 'builtin' }, sourcePriority: 1, execute: () => ({ ok: true }) });
+    // 第一步调一次工具 → 第二步才是 `downgradeAfterStep: 1` 真正生效的那一步。
+    let step = 0;
+    const twoStep = (modelId: string, vision: boolean, seen: string[]) => ({
+      model: { ...candidate(modelId, () => ok), doGenerate: async () => {
+        seen.push(modelId);
+        step += 1;
+        return (step === 1 ? { ...ok, content: [{ type: 'tool-call', toolCallId: 'c1', toolName: 'look', input: '{}' }] } : ok) as never;
+      } } as ReturnType<typeof candidate>, info: info(modelId, vision) });
+    const seen: string[] = [];
+    await runMainAgent(turn, { ...dependencies, registry: registryFor({
+      main: [twoStep('blind', false, seen)], low: [twoStep('cheap', false, seen)], vision: [twoStep('eyes', true, seen)] }) });
+    expect(seen).toEqual(['eyes', 'eyes']);
+    closeDatabase(db);
+  });
+
+  // 也压过 `set_model` 的当轮指定：模型自己挑的别名同样可能看不见图。
+  it('overrides an explicit set_model alias that cannot see', async () => {
+    const { db, turn, dependencies } = harness('vision-vs-setmodel');
+    withImage(turn);
+    Object.assign(turn, { modelAliasOverride: 'low' });
+    const seen: string[] = [];
+    await runMainAgent(turn, { ...dependencies, registry: registryFor({
+      main: [served('blind', false, seen)], low: [served('cheap', false, seen)], vision: [served('eyes', true, seen)] }) });
+    expect(seen).toEqual(['eyes']);
+    closeDatabase(db);
+  });
+
+  // 没有图就不许乱切：vision 通常是贵的那一档。
+  it('leaves the alias alone when the turn has no image', async () => {
+    const { db, turn, dependencies } = harness('vision-noop');
+    const seen: string[] = [];
+    await runMainAgent(turn, { ...dependencies, registry: registryFor({ main: [served('blind', false, seen)], vision: [served('eyes', true, seen)] }) });
+    expect(seen).toEqual(['blind']);
+    closeDatabase(db);
+  });
+
+  // 一张都看不了时按 `docs/08 §7.2` 降级：图片换成占位文本 + 回复末尾一句提示。
+  // 不透明 part 原样发给一个不认它的模型，宽容的 provider 静默忽略、严格的直接 400。
+  it('degrades the image to a placeholder and appends a notice when nothing can see', async () => {
+    const { db, turn, dependencies } = harness('vision-degraded');
+    withImage(turn);
+    const seen: string[] = [];
+    const prompts: PromptMessage[][] = [];
+    const answer = await runMainAgent(turn, { ...dependencies, registry: registryFor({ main: [served('blind', false, seen, prompts)] }) });
+    expect(seen).toEqual(['blind']);
+    expect(answer).toBe(`ok\n\n（当前模型不支持看图，这张图我没能真的看到。）`);
+    const flat = JSON.stringify(prompts[0]);
+    expect(flat).toContain('[图片：当前模型不支持看图，本轮没能查看]');
+    expect(flat).not.toContain('image/jpeg');
     closeDatabase(db);
   });
 });

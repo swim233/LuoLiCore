@@ -62,6 +62,47 @@ describe('context → AI SDK contract', () => {
     closeDatabase(db);
   });
 
+  /**
+   * **写入侧挡住反方向的孤儿：tool-call 没有配对的 tool-result。**
+   *
+   * `assertValidShape` 只查 orphan tool-**result**（provider 立刻拒收那一种）。反过来这一种同样
+   * 致命，只是晚一轮才暴露：畸形请求体让 provider 0 步返回，AI SDK 于是用 `NoOutputGeneratedError`
+   * reject 结果 promise，而 parts 是持久化的 —— 该会话在 `/new` 之前每轮都重演，实测能一路崩到
+   * 进程被带走（logs/2026-08-18 两次）。所以坏形状要在产生它的那一轮就报错。
+   */
+  it('rejects a commit whose delta has a tool call with no result', async () => {
+    const { db, archive, engine } = harness('contract-orphan-call');
+    const turn = await openTurn(engine, archive, 1);
+    engine.appendDelta(turn, { id: 'call', role: 'assistant', origin: 'tool_call', parts: [{ type: 'tool-call', toolCallId: 'c1', toolName: 'get_message', input: { messageId: 0 } }], pruneLevel: 2 });
+    engine.appendDelta(turn, { id: 'answer', role: 'assistant', origin: 'assistant', parts: [{ type: 'text', text: 'done' }] });
+    await expect(engine.commitTurn(turn)).rejects.toThrow('orphan tool-call c1');
+    closeDatabase(db);
+  });
+
+  /**
+   * 但**已经落库的孤儿不许挡提交**：库里那条（本次事故那一条至今还在）会让整条会话彻底锁死，
+   * 比现在更糟。读出侧的自愈在 `contextMessages` 里（`tests/toolcall.regression.test.ts`），
+   * 写入侧只负责「不再产生新的」—— 与 `hydrateAttachment` 同一分工。
+   */
+  it('still commits when the orphan is already in committed history', async () => {
+    const { db, archive, engine } = harness('contract-orphan-history');
+    const first = await openTurn(engine, archive, 1);
+    // 绕过写入侧断言把孤儿写进历史：模拟上一版留下的那种库。
+    engine.appendDelta(first, { id: 'call', role: 'assistant', origin: 'tool_call', parts: [{ type: 'tool-call', toolCallId: 'legacy', toolName: 'x', input: {} }], pruneLevel: 2 });
+    engine.appendDelta(first, { id: 'result', role: 'tool', origin: 'tool_result', parts: [{ type: 'tool-result', toolCallId: 'legacy', toolName: 'x', output: { type: 'json', value: 1 } }], pruneLevel: 1 });
+    await engine.commitTurn(first);
+    expect(db.prepare("DELETE FROM context_messages WHERE id='result'").run().changes).toBe(1);
+    const history = engine.materialize('chat:chat', null).messages.flatMap((message) => message.parts as Array<{ type?: string }>);
+    expect(history.filter((part) => part.type === 'tool-call')).toHaveLength(1);
+    expect(history.filter((part) => part.type === 'tool-result')).toHaveLength(0);
+    const second = await openTurn(engine, archive, 2);
+    engine.appendDelta(second, { id: 'answer', role: 'assistant', origin: 'assistant', parts: [{ type: 'text', text: 'done' }] });
+    await expect(engine.commitTurn(second)).resolves.toBeDefined();
+    // 读出侧照旧把它补齐，所以下一轮的 prompt 是 AI SDK 收得下的。
+    await expect(accepted(await openTurn(engine, archive, 3))).resolves.toBe('ok');
+    closeDatabase(db);
+  });
+
   it('accepts a turn that already contains tool calls and results', async () => {
     const { db, archive, engine } = harness('contract-tools');
     const first = await openTurn(engine, archive, 1);
