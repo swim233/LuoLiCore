@@ -8,7 +8,7 @@
 >
 > **第二轮（2026-08-16 下午）**：完成 G-SSE-01、G-SRV-01、G-API-08、G-API-09 与自动生成配置表单，
 > 可写配置覆盖率达到 151/151（其中 2 项密钥字段只读）。**第三轮**继续完成 G-API-10/11/12 与
-> G-SRV-02/03/04；本文口径内的 WebUI 控制面缺口已清零，注册 API 端点从 82 条增至 **89 条**。
+> G-SRV-02/03/04；本文口径内的 WebUI 控制面缺口已清零，注册 API 端点从 82 条增至 **89 条**（该数字是第三轮当时的；此后仍在涨，2026-08-18 复算为 **105 条**）。
 > 第三轮顺带把 `approval.ttlMs` 与 `mcp.enabled` 接了线（从 `KNOWN_UNIMPLEMENTED_CONFIG_KEYS` 摘掉），
 > 分母因此从 151 变成 **153**，覆盖率仍是满的。
 >
@@ -331,14 +331,14 @@ G-API-10/11/12 与 G-SRV-02/03/04 均已完成；按本文「运行时已有、W
   挂起 pending 行之后立刻往发起人所在会话发一句「需要 owner 在 WebUI 里批准，N 秒内没人处理就
   自动拒绝」。此前那一轮会静默停住最多 `approval.ttlMs`（默认 180s）而 Telegram 一个字都没有 ——
   发起人现在至少知道自己在等什么、等多久。待审角标照旧挂在导航上（§4.6）。
-  一个裁决通道都没有时不等待，当场拒绝并把原因交给模型（[22](./22-review-round6.md) · `D-APPR-01`、
-  [24](./24-review-round6-verification.md) · `R-APPR-01`）。
+  一个裁决通道都没有时不等待，当场拒绝并把原因交给模型（[22](./reviews/22-review-round6.md) · `D-APPR-01`、
+  [24](./reviews/24-review-round6-verification.md) · `R-APPR-01`）。
 
 ### 6.1 新增缺口（第六轮整改后）
 
 | 编号 | 运行时已有 | 界面缺什么 | 状态 |
 |---|---|---|---|
-| **G-API-13** | `POST /api/auth/password {current, next}`：校验旧口令、写 `config_kv` + `config_revisions`、吊销其余 session、即时生效（[22](./22-review-round6.md) · `V-AUTH-02`） | 设置页没有改口令表单。泄露口令后的应急处置目前只能打 API 或线下 `pnpm webui:passwd` + 重启，而这正是 `V-AUTH-02` 要消灭的形态的另一半 | ✅ 第四轮：设置页首屏就是「修改登录口令」；`WEBUI_PASSWORD` 钉住口令时换成一条告警（改了重启就回退，见 G-CFG-03） |
+| **G-API-13** | `POST /api/auth/password {current, next}`：校验旧口令、写 `config_kv` + `config_revisions`、吊销其余 session、即时生效（[22](./reviews/22-review-round6.md) · `V-AUTH-02`） | 设置页没有改口令表单。泄露口令后的应急处置目前只能打 API 或线下 `pnpm webui:passwd` + 重启，而这正是 `V-AUTH-02` 要消灭的形态的另一半 | ✅ 第四轮：设置页首屏就是「修改登录口令」；`WEBUI_PASSWORD` 钉住口令时换成一条告警（改了重启就回退，见 G-CFG-03） |
 | **G-API-14** | `app_kv` 的 `modelAlias:<contextKey>`（Telegram `/model` 写入）**压过** WebUI 能改的 `perChat.<key>.agent.main.modelAlias` 与全局 `agent.main.modelAlias`（`runtime.ts` 先读它） | 界面上只有覆盖面板里一行小字提到这件事：改了模型别名不生效时，运维在 WebUI 里既看不到那份别名、也清不掉 | ✅ 第四轮：`GET /api/chats/:key` 带回 `modelAlias`，会话页出黄色提示 + `[清除会话别名]`（`DELETE /api/chats/:key/model-alias`） |
 
 - `health` 事件仍只在 provider 测试与 MCP 重连后发送，没有周期心跳；顶栏的新鲜度依据业务事件，
@@ -424,12 +424,12 @@ G-API-10/11/12 与 G-SRV-02/03/04 均已完成；按本文「运行时已有、W
 两处值得记下来的取舍：
 
 - **建任务与工具共用 `createScheduledJob`**（`packages/core/src/schedule/create.ts`）。端点自己抄一遍
-  校验的话，WebUI 迟早能建出工具建不出来的任务 —— 这正是 [26](./26-round8-tool-review.md) §1
+  校验的话，WebUI 迟早能建出工具建不出来的任务 —— 这正是 [26](./reviews/26-round8-tool-review.md) §1
   「同一道闸修过一次但漏了另一侧」的形态。落点也不收客户端给的 `chatId`：按 `key` 从 `contexts`
   反查，与 [05 §8](./05-tools-and-permissions.md) 对工具参数的要求同源。
 - **没装配运行时时 `available:false` 而不是空数组**。「一条都没有」和「读不到」在运维眼里是两回事
-  （[16](./16-remediation-plan.md) §5「摘除比伪造安全」）。前端也按这个归一化：形状对不上的响应
-  不该让整页崩在 `DataGrid` 的 `rows` 上（[24](./24-review-round6-verification.md) · `R-UI-01`）。
+  （[16](./reviews/16-remediation-plan.md) §5「摘除比伪造安全」）。前端也按这个归一化：形状对不上的响应
+  不该让整页崩在 `DataGrid` 的 `rows` 上（[24](./reviews/24-review-round6-verification.md) · `R-UI-01`）。
 
 **新增缺口：无。** 定时任务的运行时能力（列、建、停、手动触发）现在都够得着；
 `schedule.*` 五个配置键走通用配置表单。

@@ -18,7 +18,7 @@
   白名单是 `HOT_RELOADABLE_CONFIG_KEYS`（`packages/core/src/config/schema.ts`），`GET /api/config/schema`
   以 `hotReloadable` 一并返回，`tests/config.test.ts` 断言本文件里标 `热更新` 的每个键都在白名单内。
   上一轮有十组键标着热更新而实际冻在启动时，其中 `sandbox.mode`、`approval.enabled`、`approval.rules`
-  三组是「出事时运维会去点的那个开关」—— 点了没用而界面还说成功（[20 · W-CFG-02](./20-review-round5.md)）。
+  三组是「出事时运维会去点的那个开关」—— 点了没用而界面还说成功（[20 · W-CFG-02](./reviews/20-review-round5.md)）。
   设置页的「全部配置」表单覆盖全部已接线叶子（热更新与需重启都能改），徽标直接照 `hotReloadable`
   打，保存后的 Toast 会点名其中需重启的那几项；新增可编辑项时按 `hotReloadable` 判定。
 - **被环境变量钉住的键**（`ENV_PINNED_CONFIG_KEYS`）：env 层在 `config_kv` 之后合并，所以这些键的

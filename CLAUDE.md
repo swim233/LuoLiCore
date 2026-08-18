@@ -37,7 +37,7 @@ pnpm start                    # 跑 dist 产物（生产）
 ## 架构
 
 pnpm workspace，依赖方向严格单向：`shared → db → core → {telegram, server} → apps/bot`。
-`packages/core` 是绝大部分逻辑所在（约 35 个源文件），`apps/bot/src/main.ts` 只做装配与生命周期。
+`packages/core` 是绝大部分逻辑所在（约 50 个源文件），`apps/bot/src/main.ts` 只做装配与生命周期。
 路径别名同时存在于三处，加新包时要一起改：`tsconfig.json` 的 `paths`、`vitest.config.ts` 的
 `resolve.alias`、以及各 `package.json` 的 `dependencies`。
 
@@ -49,7 +49,7 @@ pnpm workspace，依赖方向严格单向：`shared → db → core → {telegra
 
 ### 上下文引擎（`packages/core/src/context/engine.ts` + `packages/db/src/context.ts`）
 
-这是系统的核心，也是历史上出问题最集中的地方（`docs/15`–`docs/19` 四轮复审）。git 式模型：
+这是系统的核心，也是历史上出问题最集中的地方（`docs/reviews/15`–`19` 四轮复审）。git 式模型：
 
 - `context_messages` 只追加；`context_commits` 不可变；`refs(name='done')` 指向 HEAD
 - **ordinal 只在提交时分配**，`appendDelta` 拿到带 ordinal 的消息会抛错
@@ -58,7 +58,7 @@ pnpm workspace，依赖方向严格单向：`shared → db → core → {telegra
 - 一轮 = `openTurn` → 多次 `appendDelta` → `commitTurn` / `abortTurn`；
   `finalized` 置位后再 `appendDelta` 会抛错，而不是静默丢弃
 
-**改这块之前先读 `docs/02-context-engine.md` 的不变量清单（14 条）。** 尤其是：
+**改这块之前先读 `docs/02-context-engine.md` §9 的实现红线清单（19 条）。** 尤其是：
 
 - 任何改写 parts 的逻辑（`elidePart`、`truncatePartStrings`）**绝不能碰判别字段**
   （`type` / `toolCallId` / `toolName` / `mediaType`）。改坏了 provider 会拒收整个请求，
@@ -124,16 +124,22 @@ better-sqlite3 + 原生 SQL，无 ORM 查询层。WAL 模式。迁移是 `packag
 ## 项目约定
 
 - **文档是权威来源。实现与文档不一致时，先改文档再改代码**（`docs/README.md` 开头即声明）。
-  `docs/13-acceptance-criteria.md` 是 413 条可逐条勾选的验收条目（改动条数时同步该文件末尾的签署表）。
+  文档分两层：`docs/00`–`docs/21` 是**活的规格层**，`docs/reviews/` 是**冻结的历史复审**。
+  **`docs/00-state.md` 是「现在还欠什么 / 哪些查过没问题」的唯一入口**，开工前先看它 ——
+  复审报告里的结论一律是当轮快照，不代表现在。
+  `docs/13-acceptance-criteria.md` 是 421 条可逐条勾选的验收条目（改动条数时同步该文件末尾的签署表）。
   `docs/21-webui-coverage-gaps.md` 记录 WebUI 控制面还够不着哪些已实现的能力，动 WebUI 前先扫一眼。
 - 修不了的东西不要假装修好。已确立的先例：`PUT /api/quota` 返回 `not_implemented` 而不是假成功；
   `ask_parent` 在父 agent 仲裁未实现时返回 `ask_parent_not_implemented` 而不是拿默认值伪造答复。
-  "摘除比伪造安全"（`docs/16 §5`）。
+  "摘除比伪造安全"（`docs/reviews/16 §5`）。
 - 代码风格：单文件内密度高、少空行、注释只写"为什么"不写"做了什么"。跟着邻近代码写。
-- 复审报告 `docs/15`–`docs/26` 记录了每一轮的缺陷与根因，改到相关模块前值得先扫一眼对应条目。
-  `docs/25` 仍是**当前 🚧 清单的权威来源**（哪些留着、为什么留着都在 §4.3 与 §8）。
-  `docs/26` 是最近一轮，只审工具系统：动 `packages/core/src/tools/` 或任何内建工具之前先看它，
+- 复审报告在 `docs/reviews/`（九轮，`15`–`20` / `22`–`27`），记录每一轮的缺陷与根因，改到相关模块前
+  值得先扫一眼对应条目 —— 但**只当历史读**：每份都带 frozen header，结论是当轮快照。
+  当前状态一律以 `docs/00-state.md` 为准，🚧 配置键一律以 `docs/11 §2.0.1` 为准（由 `config.test.ts` 焊住）。
+  `docs/reviews/26` 只审工具系统：动 `packages/core/src/tools/` 或任何内建工具之前先看它，
   §6 列了「查过没问题」的地方，§2–§4 每条都带复现方式。
+  **复审文档的条目编号（`W-CFG-02`、`S-01` 之类）被源码注释当溯源凭据大量引用，不得重编号或删除**
+  —— `tests/docs.test.ts` 会挡住。
 - `docs/13` 的勾选由 `tests/acceptance.test.ts` 约束：`[x]` 必须带 `〔用例文件〕`、只有标 `(自动)`
   的能勾、签署表的分子分母必须等于文档里数出来的条数。**改动条目时那张表会自己报错**，不用手算。
 

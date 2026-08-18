@@ -1,5 +1,10 @@
 # 20 · 复审报告（第五轮）
 
+> ❄️ **已冻结（2026-08-16 快照）** —— 本文只记录当轮的发现与整改，**不再更新**。文中所有
+> 「未实现 / 未接线 / 仍然开着的」都是**当时**的状态，不代表现在；当前状态见
+> [`00-state.md`](../00-state.md)。条目编号（`V-SSRF-01` 之类）是 240 处源码注释的溯源凭据，
+> **不得重编号、不得删除**。
+
 > 复审对象：`docs/19-review-round4.md` 第四轮整改后的实现（HEAD = `fffdcc3`）
 > 基线：`pnpm typecheck` 通过；`pnpm test` **43 个文件 / 134 个用例全部通过**（上一轮 38 / 98）
 > 方法：全量重读源码 → 针对性可运行探针（PROBE-A…E）→ 清理探针 → 复原绿基线
@@ -379,7 +384,7 @@ function assignDotted(root: Record<string, unknown>, key: string, value: unknown
 
 **位置**：`apps/bot/src/main.ts` 的装配段 · `docs/11-config-reference.md`
 
-[11 §开头](./11-config-reference.md) 立下的契约是：「标 `热更新` 的项保存后立即生效（下一个 turn）；标 `需重启` 的项保存后 WebUI 显示待重启徽标。」
+[11 §开头](../11-config-reference.md) 立下的契约是：「标 `热更新` 的项保存后立即生效（下一个 turn）；标 `需重启` 的项保存后 WebUI 显示待重启徽标。」
 
 实际上只有三条通路是活的：`bot.ts` 的 `config` Proxy（每次读都取 `currentConfig()`）、`turn.config`（`openTurn` 时合并 perChat）、`ToolRegistry.bindOverrides()`。其余子系统在 `main.ts` 里拿的是**启动时那份 `config` 对象**，`config.changed` 只 `configStore.replace(...)`，不重建它们：
 
@@ -492,7 +497,7 @@ for (const entry of this.#tools.values())
     minRole: entry.minRole, source: 'mcp', execute: entry.call });
 ```
 
-于是模型拿到的工具定义是「一个任意对象」。它只能靠工具名和描述猜参数名，猜错了 `ToolRegistry.execute` 的 `safeParse` 也不会拦（`z.record(z.unknown())` 什么都收），错误参数直接送到 MCP server。**MCP 工具在实践中不可用**，而 [07 §4](./07-skills-plugins-mcp.md) 把它写成一等能力。
+于是模型拿到的工具定义是「一个任意对象」。它只能靠工具名和描述猜参数名，猜错了 `ToolRegistry.execute` 的 `safeParse` 也不会拦（`z.record(z.unknown())` 什么都收），错误参数直接送到 MCP server。**MCP 工具在实践中不可用**，而 [07 §4](../07-skills-plugins-mcp.md) 把它写成一等能力。
 
 同一处顺带两条：`server.timeoutMs` 存进了 `mcp_servers` 表但从未用来限制 `callTool`；`connect()` 缓存的 client 在服务器被移除/禁用后不会断开（只有 `close()` 会）。
 
@@ -513,7 +518,7 @@ inputSchema: jsonSchema(entry.inputSchema as JSONSchema7),
 
 **位置**：`packages/core/src/approvals.ts` · `packages/telegram/src/bot.ts:238`
 
-[05 §6](./05-tools-and-permissions.md) 的流程图第 315 行明确写着：
+[05 §6](../05-tools-and-permissions.md) 的流程图第 315 行明确写着：
 
 ```
 ├─ Telegram: 发消息 + inline [✓ 批准][✗ 拒绝]（仅 owner 与 approval.allowInitiator 时的发起人可点）
@@ -540,9 +545,9 @@ WebUI 那半实现了（`events.emit('approval.pending')` + `/api/approvals/:id/
 | **W-TG-02** | `bot.ts:146,151` | `/ctx` 与 `/tasks` 把 `context.stats(key)`（含窗口内**全部消息及其 parts**）JSON 序列化后发出去，活跃会话轻松超过 Telegram 的 4096 字符上限 → API 400 → `bot.catch` 记一条日志，用户看到的是没有回应 | 只回摘要（commit id / 窗口 / token / 消息条数），完整数据给 WebUI 链接；或走 `splitTelegramText` |
 | **W-TG-03** | `bot.ts:320` | 非流式分支 `ctx.reply(part, { parse_mode: 'MarkdownV2' })` 没有 parse-entities 降级重试，而 `TelegramOutput.send()`（`stream-output.ts:26-32`）有。`safeRender` 之后再按字符数切分，仍可能切开 `\.` 转义对或 `*bold*` 配对 | 抽出 `sendWithFallback()`，两条路径共用 |
 | **W-TG-04** | `stream-output.ts:94` | `consume()` 收尾循环里新增消息用的是裸 `bot.api.sendMessage(..., {parse_mode:'MarkdownV2'})`，既没走 `deliver()` 也没有降级重试，抛出后会把整轮打成 failed | 同上，改走 `deliver()` + 降级 |
-| **W-TOOL-01** | `registry.ts:108-121` | `execute()` 复查了 `disabledByOperator`、`state.disabled`、`minRole`，但**没有复查 `tool.available?.()`，也没有复查 `agentKind==='sub' && name==='memory_write'`**。目前每个相关工具都恰好各自 fail-closed（`sandbox.run` 内部再判一次 plan；`telegram!` 为空时 TypeError 被 catch 成 `ok:false`），所以不可利用，但这是靠巧合而不是靠设计 | 在 `execute()` 里补这两条，与 `active()` 的过滤集合对齐；[05 §220](./05-tools-and-permissions.md) 的「单一数据源」精神要求两边一致 |
-| **W-SBX-01** | `sandbox/index.ts:118` | 容器名是 `luoli-sbx-${Date.now()}`。并发上限 8，同毫秒启动两个容器就撞名（`docker run --name` 冲突，第二个直接失败）；且 [05 §5.3](./05-tools-and-permissions.md) 写的是 `luoli-sbx-<turnId>-<n>`，`/cancel` 想按 turn 找容器也找不到 | 按文档改成 `luoli-sbx-${turnId}-${seq}`，`Sandbox.run` 接收 turnId |
-| **W-SBX-02** | `sandbox/index.ts:104-111` | [05 §5.2](./05-tools-and-permissions.md) 要求 jail 模式「日志 level=warn 提示隔离较弱」，`plan()` 里没有这条日志 | 补上；WebUI 沙箱页也照 §5.4 显示「jail 不是安全边界」 |
+| **W-TOOL-01** | `registry.ts:108-121` | `execute()` 复查了 `disabledByOperator`、`state.disabled`、`minRole`，但**没有复查 `tool.available?.()`，也没有复查 `agentKind==='sub' && name==='memory_write'`**。目前每个相关工具都恰好各自 fail-closed（`sandbox.run` 内部再判一次 plan；`telegram!` 为空时 TypeError 被 catch 成 `ok:false`），所以不可利用，但这是靠巧合而不是靠设计 | 在 `execute()` 里补这两条，与 `active()` 的过滤集合对齐；[05 §220](../05-tools-and-permissions.md) 的「单一数据源」精神要求两边一致 |
+| **W-SBX-01** | `sandbox/index.ts:118` | 容器名是 `luoli-sbx-${Date.now()}`。并发上限 8，同毫秒启动两个容器就撞名（`docker run --name` 冲突，第二个直接失败）；且 [05 §5.3](../05-tools-and-permissions.md) 写的是 `luoli-sbx-<turnId>-<n>`，`/cancel` 想按 turn 找容器也找不到 | 按文档改成 `luoli-sbx-${turnId}-${seq}`，`Sandbox.run` 接收 turnId |
+| **W-SBX-02** | `sandbox/index.ts:104-111` | [05 §5.2](../05-tools-and-permissions.md) 要求 jail 模式「日志 level=warn 提示隔离较弱」，`plan()` 里没有这条日志 | 补上；WebUI 沙箱页也照 §5.4 显示「jail 不是安全边界」 |
 | **W-PROMPT-01** | `assembler.ts:78` · `runtime.ts:229` | `build()` 算出了 `truncated: string[]`，调用方只取 `.instructions`。当 catalog + runtime 块把预算吃满时，`CHARACTER.md` 会被整段截成一句「（记忆已截断…）」，**人格静默消失且无任何日志** | `runtime.ts` 取回 `truncated`，非空时记一条 `prompt.truncated` warn |
 | **W-PROV-01** | `provider/store.ts:55` | `retryDelay` 的「jitter」是 `sha256(String(attempt))` —— 对同一 attempt 是常量，所有并发请求退避到同一时刻。这不是抖动 | 用 `crypto.randomInt` 或按 turnId 派生 |
 | **W-LEDGER-01** | `runtime.ts:296` | `modelAlias: step.model.modelId === initialInfo.modelId ? alias : 'low'` —— 走 fallback 链切到第二个模型时会被记成 `'low'`，而它可能根本不是降档。按别名分组的用量报表因此失真 | 用 `infoByModelId(step.model.modelId)` 反查真实别名，查不到记 `unknown` |
@@ -626,17 +631,17 @@ it.each(SCENARIOS)('%s：contextMessages() 能被 ToolLoopAgent 接受', async (
 
 | 项 | 状态 |
 |---|---|
-| [11 §2.1](./11-config-reference.md) perChat 白名单与「谁可以写 perChat」 | ✅ 第四轮已补，读取端也接上了 |
-| [11](./11-config-reference.md) 的 `🚧` 标注 | ✅ 67 个键逐行标注，CI 断言已加强 |
-| [03](./03-data-model.md) 数据模型 | ✅ `media_parts_json`、`claimed_by_turn`、`app_kv` 都在 |
-| [02](./02-context-engine.md) 不变量清单 | ⚠️ 14 条里没有一条讲 `role`。补第 15 条：「可发送给 provider 的消息 role 只能是 user/assistant/tool；system 只存在于 instructions」 |
-| [11](./11-config-reference.md) 的热更新标注 | ❌ 至少 10 组键标着「热更新」而实际需重启，其中 3 组安全相关（`W-CFG-02`） |
-| [05 §6](./05-tools-and-permissions.md) Telegram 审批 | ❌ 流程图里的 inline keyboard 一行没实现（`W-APPR-01`） |
-| [05 §5.2](./05-tools-and-permissions.md) jail 的 warn 日志 | ❌ 未实现（`W-SBX-02`） |
-| [05 §5.3](./05-tools-and-permissions.md) 容器名 `luoli-sbx-<turnId>-<n>` | ❌ 实现是 `luoli-sbx-<Date.now()>`（`W-SBX-01`） |
-| [07 §4](./07-skills-plugins-mcp.md) MCP 工具能力 | ❌ 入参 schema 未接线，工具实际不可用（`W-MCP-01`） |
-| [08](./08-telegram-adapter.md) 命令表 | ❌ 与 `trigger.ts` 的 `ours`、`bot.ts` 的注册三方不一致（`W-TG-01`） |
-| [13](./13-acceptance-criteria.md) | 自第二轮起未更新，`R-*` / `W-*` 相关 AC 需要补 |
+| [11 §2.1](../11-config-reference.md) perChat 白名单与「谁可以写 perChat」 | ✅ 第四轮已补，读取端也接上了 |
+| [11](../11-config-reference.md) 的 `🚧` 标注 | ✅ 67 个键逐行标注，CI 断言已加强 |
+| [03](../03-data-model.md) 数据模型 | ✅ `media_parts_json`、`claimed_by_turn`、`app_kv` 都在 |
+| [02](../02-context-engine.md) 不变量清单 | ⚠️ 14 条里没有一条讲 `role`。补第 15 条：「可发送给 provider 的消息 role 只能是 user/assistant/tool；system 只存在于 instructions」 |
+| [11](../11-config-reference.md) 的热更新标注 | ❌ 至少 10 组键标着「热更新」而实际需重启，其中 3 组安全相关（`W-CFG-02`） |
+| [05 §6](../05-tools-and-permissions.md) Telegram 审批 | ❌ 流程图里的 inline keyboard 一行没实现（`W-APPR-01`） |
+| [05 §5.2](../05-tools-and-permissions.md) jail 的 warn 日志 | ❌ 未实现（`W-SBX-02`） |
+| [05 §5.3](../05-tools-and-permissions.md) 容器名 `luoli-sbx-<turnId>-<n>` | ❌ 实现是 `luoli-sbx-<Date.now()>`（`W-SBX-01`） |
+| [07 §4](../07-skills-plugins-mcp.md) MCP 工具能力 | ❌ 入参 schema 未接线，工具实际不可用（`W-MCP-01`） |
+| [08](../08-telegram-adapter.md) 命令表 | ❌ 与 `trigger.ts` 的 `ours`、`bot.ts` 的注册三方不一致（`W-TG-01`） |
+| [13](../13-acceptance-criteria.md) | 自第二轮起未更新，`R-*` / `W-*` 相关 AC 需要补 |
 
 ---
 
@@ -661,7 +666,7 @@ it.each(SCENARIOS)('%s：contextMessages() 能被 ToolLoopAgent 接受', async (
 
 ## 8. 验收状态快照（粗估）
 
-沿用前四轮口径（[13](./13-acceptance-criteria.md) 的 253 条 AC，★ 为 62 条关键项）：
+沿用前四轮口径（[13](../13-acceptance-criteria.md) 的 253 条 AC，★ 为 62 条关键项）：
 
 | 轮次 | 通过 | 比例 | ★ 关键项 |
 |---|---|---|---|
