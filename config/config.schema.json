@@ -1574,6 +1574,36 @@
               "$ref": "#/definitions/LuoLiConfig/properties/access/properties/defaultUserRole",
               "default": "trusted",
               "description": "在 WebUI 新建技能时没显式选角色则用它。"
+            },
+            "package": {
+              "type": "object",
+              "properties": {
+                "maxEntries": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 2000,
+                  "description": "装技能包时，包里最多允许多少个文件与目录。"
+                },
+                "maxTotalBytes": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 67108864,
+                  "description": "技能包解开之后的总字节上限。按实际写出的字节数算，不信压缩包自己声明的大小。"
+                },
+                "maxFileBytes": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 33554432,
+                  "description": "技能包里单个文件的字节上限。同样按实际写出的字节数算。"
+                },
+                "allowExecutable": {
+                  "type": "boolean",
+                  "default": true,
+                  "description": "给技能包 scripts/ 与 bin/ 下原本就带执行位的文件保留执行权限。关掉之后包里的脚本与二进制装得进来但跑不了。"
+                }
+              },
+              "additionalProperties": false,
+              "default": {}
             }
           },
           "additionalProperties": false,

@@ -18,7 +18,7 @@
 | 问题 | 权威 | 由什么焊住 |
 |---|---|---|
 | 哪些配置键还没接线 | [11 §2.0.1](./11-config-reference.md)（当前 10 条，每条写明为什么留着） | `tests/config.test.ts` —— 白名单每条必须在 `docs/11` 标记，且标注要跟着 `HOT_RELOADABLE_CONFIG_KEYS` |
-| 验收条目的勾选状态 | [13](./13-acceptance-criteria.md)（当前 **160 / 440**） | `tests/acceptance.test.ts` —— 只有标 `(自动)` 且点名真实用例文件的能勾，签署表分子分母自动核对 |
+| 验收条目的勾选状态 | [13](./13-acceptance-criteria.md)（当前 **169 / 449**） | `tests/acceptance.test.ts` —— 只有标 `(自动)` 且点名真实用例文件的能勾，签署表分子分母自动核对 |
 | WebUI 控制面够不着什么 | [21](./21-webui-coverage-gaps.md) | 无自动约束（人工复算，方法见其 §1） |
 | 某行代码为什么长这样 | [`reviews/`](./reviews/) 里的条目编号 | `tests/docs.test.ts` —— 编号被源码注释大量引用，删了或改了会报错 |
 
@@ -62,6 +62,8 @@ Telegram 侧没有「发一条带选项的消息、等人点、把结果回灌�
 | 验收条目 274 条未勾 | 其中人工条目一律保持未勾（要人签字，不是测试的事）；其余是没有对应 vitest 用例的 `(自动)` 条目 | 勾选形式由 `tests/acceptance.test.ts` 定死，勾之前先写用例 |
 | 10 条配置键未接线 | 见 [11 §2.0.1](./11-config-reference.md)，每条写明「暂时没做」还是「不该在这一层做」 | 摘键之前先看 [21 §1](./21-webui-coverage-gaps.md) 的复算方法 |
 | 自我扩展刚落地（M12），四条通道默认全关 | `tools.selfExtend.*` 出厂 `enabled: false`；打开之后模型能写自定义工具 / skill / plugin，能登记 MCP server | 主闸不是审批而是「落库即禁用，owner 在扩展页点开」。动这一块之前先读 [14 T18/T19](./14-open-questions.md)：**授权时点与执行时点是分离的**，而 `requireSandbox` 默认关时自定义工具就是调用者的 `bash`（因而能直接写 `data/luoli.db` 绕开启用闸）|
+| 装 skill 包的通道刚补上（`install_skill` + `POST /api/skills/package`） | 起因：用户在 Telegram 丢了一个带 `scripts/` + `bin/`（4.9 MB ELF）的音乐 skill 包，模型解到**工作目录**、一路 `bash scripts/invoke.sh` 用了起来 —— 能用，但它不是一个 skill：不进目录、不进 `skills` 表、扩展页看不见（`logs/2026-08-18/tool.jsonl` ts 1787036340–1787036441，全程没有一次 `write_skill`）。两条根因：① `tools.selfExtend.skills.enabled` 默认 `false` 且没人开过，`write_skill` 压根不在它的工具目录里，**而它拿不到任何说明为什么没有**；② 就算开着也装不了 —— `write_skill` 只收 `body: string`，`SkillLoader` 只写一个 `SKILL.md`，而 §2.1 的格式一开始就允许附属文件 | 通道见 [07 §2.5 / §6.5](./07-skills-plugins-mcp.md)，解包判据那张表列了每一道挡什么。**「装了一半」整棵回滚**是这条的红线：一个半成品在扩展页上和一个装好的坏 skill 长得一模一样 |
+| owner 的 `bash` 绕得过 `skills/**` 的 deny-glob | `selfAuthoringDenyGlobs()` 只叠在 **fs 工具**的 `PathJail` 上（`main.ts` 的 `filesFor`），而 `sandbox.bypassRoles` 默认含 `owner` —— owner 的 `bash` 跑在宿主上不过沙箱，`unzip` 直接写进 `skills/` 没有任何东西挡 | **不算新洞**：owner 的宿主 `bash` 本来就等价于机器读写权限（[14 T8](./14-open-questions.md)），deny-glob 防的是 `write_file` 那条更安静的路。记在这里是因为它解释了「模型其实一直有条野路子，只是不知道」，以及为什么补的是一条**带校验的**通道而不是放开 deny-glob |
 
 ---
 

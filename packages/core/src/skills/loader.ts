@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { watch } from 'chokidar';
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync, type Dirent } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import matter from 'gray-matter';
 import { z } from 'zod';
@@ -9,7 +9,20 @@ import { roleRank } from '@luoli/shared';
 import type { Sqlite } from '@luoli/db';
 
 const VALID_ROLES: Record<Role, true> = { blocked: true, limited: true, trusted: true, owner: true };
-const frontmatterSchema = z.object({
+
+/**
+ * 随包提交在 `skills/` 里的四份说明书 —— 模型写 plugin / 定义工具 / 装 MCP 之前要读的那份文档。
+ * 它们经 `load_skill` 渐进式取用，所以平时只占目录里四行。`write_skill` 与 `install_skill`
+ * 都拒绝覆写它们、WebUI 也只放行启停：模型把自己的说明书改掉之后，下一次它就是照着改坏的那份写的。
+ *
+ * **住在 loader 里而不是 `tools/authoring.ts`**：`persist()` 要靠它把 `source` 判成 `bundled`，
+ * 而 authoring 反过来 import loader —— 放在那边就是一个 import 环。
+ */
+export const BUNDLED_SKILLS = ['writing-tools', 'writing-skills', 'writing-plugins', 'installing-mcp'] as const;
+/** 装包时留下的痕迹（来源、时间、原档 sha256）。它在不在，决定 `source` 是 `package` 还是 `local`。 */
+export const SKILL_PACKAGE_MARKER = '.package.json';
+
+export const frontmatterSchema = z.object({
   name: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
   description: z.string().max(500),
   'allowed-tools': z.array(z.string()).optional(),
@@ -65,15 +78,31 @@ export class SkillLoader {
   readonly #skills = new Map<string, SkillDefinition>();
 
   readonly #defaultMinRole: () => Role;
-  constructor(private readonly db: Sqlite, readonly directory: string, defaultMinRole: Role | (() => Role) = 'trusted') {
+  readonly #onChange: (() => void) | undefined;
+  /** 上一次扫描的 `name → content_hash`，用来判断这一次是不是真的变了（见 `scan()` 末尾）。 */
+  #signature = new Map<string, string>();
+  constructor(private readonly db: Sqlite, readonly directory: string, defaultMinRole: Role | (() => Role) = 'trusted', onChange?: () => void) {
     this.#defaultMinRole = typeof defaultMinRole === 'function' ? defaultMinRole : () => defaultMinRole;
+    this.#onChange = onChange;
   }
   #watcher: ReturnType<typeof watch> | null = null;
 
   scan(): SkillDefinition[] {
     this.#skills.clear();
-    let directories: string[] = [];
-    try { directories = readdirSync(this.directory); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    let entries: Dirent[] = [];
+    // ENOENT 与其余错误必须分开：目录不存在是「一个 skill 都没有」，而权限错误 / EIO 是
+    // 「读不到」——后者绝不能一路走到下面的清理，那等于把整张表当成「盘上真的空了」删空。
+    let readable = true;
+    try { entries = readdirSync(this.directory, { withFileTypes: true }); } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      readable = false;
+    }
+    // **只认真正的子目录，且跳过点号开头的。** `.staging-*` / `.backups/` 靠这一条才能住在
+    // `skills/` 里（装包要同分区 `renameSync` 落位，docs/07 §2.5）；顺带也修掉了一个独立的老问题：
+    // 在这之前 `skills/` 下随便一个 `.DS_Store` 都会被当成 skill 目录扫出一行 `load_error`。
+    // 符号链接同样不认（`Dirent.isDirectory()` 对它为假）：`resolveResource()` 的包含判断走
+    // `resolve()` 而不是 `realpath`，一个指向别处的软链接等于给 `skill://` 开了条出口。
+    const directories = entries.filter((entry) => entry.isDirectory() && !entry.name.startsWith('.')).map((entry) => entry.name);
     for (const directory of directories) {
       const path = join(this.directory, directory, 'SKILL.md');
       try {
@@ -95,7 +124,27 @@ export class SkillLoader {
         this.persist(skill, path, '', {});
       }
     }
+    // **`skills` 是盘上那批文件的读模型，不是真相**（docs/03 §2.10）。`persist()` 只 upsert，
+    // 所以在这之前盘上删掉一个 skill 目录，那一行会永远留在表里、永远显示在扩展页 ——
+    // 唯一会删行的是 `remove()`，而它只覆盖「从 WebUI/工具删」这一条路。
+    if (readable) this.prune([...this.#skills.keys()]);
+    const signature = new Map([...this.#skills].map(([name, skill]) => [name, `${skill.enabled}:${skill.loadError ?? ''}:${this.hashOf(name)}`]));
+    const changed = signature.size !== this.#signature.size || [...signature].some(([name, value]) => this.#signature.get(name) !== value);
+    this.#signature = signature;
+    // watcher 的 100ms 去抖之外再挡一层：装一个包要写几十个文件，每一次写盘都广播的话，
+    // 一次安装就是几十条 SSE + 几十次「WebUI 重新拉四个端点」。
+    if (changed) this.#onChange?.();
     return [...this.#skills.values()];
+  }
+
+  private prune(keep: readonly string[]): void {
+    const stale = this.db.prepare('SELECT name FROM skills').all() as Array<{ name: string }>;
+    const alive = new Set(keep);
+    for (const row of stale) if (!alive.has(row.name)) this.db.prepare('DELETE FROM skills WHERE name=?').run(row.name);
+  }
+
+  private hashOf(name: string): string {
+    return (this.db.prepare('SELECT content_hash FROM skills WHERE name=?').get(name) as { content_hash: string } | undefined)?.content_hash ?? '';
   }
   startWatching(): void {
     if (this.#watcher) return;
@@ -237,12 +286,22 @@ export class SkillLoader {
     return path;
   }
 
+  /**
+   * `source` 此前是死列：schema 有、这里从不写、WebUI 从不读，于是每一行都是默认值 `local`，
+   * 界面上分不出「随包发的说明书」「装进来的包」「手写的」。`plugin` 那个旧取值从来没有过
+   * 写入方（plugin 不贡献 skill），一并换掉（docs/03 §2.10）。
+   */
+  private sourceOf(name: string): string {
+    if ((BUNDLED_SKILLS as readonly string[]).includes(name)) return 'bundled';
+    return existsSync(join(this.directory, name, SKILL_PACKAGE_MARKER)) ? 'package' : 'local';
+  }
+
   private persist(skill: SkillDefinition, path: string, raw: string, frontmatter: unknown): void {
     const hash = createHash('sha256').update(raw).digest('hex');
-    this.db.prepare(`INSERT INTO skills(name,path,description,min_role,allowed_tools_json,model_alias,enabled,content_hash,frontmatter_json,load_error,updated_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET path=excluded.path,description=excluded.description,min_role=excluded.min_role,
-      allowed_tools_json=excluded.allowed_tools_json,model_alias=excluded.model_alias,enabled=excluded.enabled,content_hash=excluded.content_hash,
+    this.db.prepare(`INSERT INTO skills(name,path,description,min_role,allowed_tools_json,model_alias,enabled,source,content_hash,frontmatter_json,load_error,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET path=excluded.path,description=excluded.description,min_role=excluded.min_role,
+      allowed_tools_json=excluded.allowed_tools_json,model_alias=excluded.model_alias,enabled=excluded.enabled,source=excluded.source,content_hash=excluded.content_hash,
       frontmatter_json=excluded.frontmatter_json,load_error=excluded.load_error,updated_at=excluded.updated_at`).run(skill.name, path, skill.description, skill.minRole,
-      skill.allowedTools ? JSON.stringify(skill.allowedTools) : null, skill.model ?? null, skill.enabled ? 1 : 0, hash, JSON.stringify(frontmatter), skill.loadError ?? null, Date.now());
+      skill.allowedTools ? JSON.stringify(skill.allowedTools) : null, skill.model ?? null, skill.enabled ? 1 : 0, this.sourceOf(skill.name), hash, JSON.stringify(frontmatter), skill.loadError ?? null, Date.now());
   }
 }

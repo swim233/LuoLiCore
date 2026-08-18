@@ -93,7 +93,11 @@ export const HOT_RELOADABLE_CONFIG_KEYS = [
   // captureBodies 是每轮从 turn.config 现读的（runtime.ts 的 bodyForLog、/api/turns/:id/detail），
   // 改完下一轮就生效。漏在白名单外时 WebUI 会对着排障时最常翻的这个开关说「需重启」。
   // AlertDispatcher 每次 raise() 都现读 `alerts` 整段（开关、去重窗口、webhook、事件白名单）。
-  'sandbox', 'skills.defaultMinRole', 'quota', 'alerts', 'logs.level', 'logs.captureBodies', 'logs.redactPatterns',
+  // `skills.package.*` 在 `install_skill`（从 `turn.config` 取，下一轮生效）与
+  // `POST /api/skills/package`（每请求从 `currentConfig()` 现读）两处都是现读的。
+  // 整段 `skills` 仍然不能标热更新：`dir` 被 `SkillLoader` 在构造时拿走了，`enabled` / `watch`
+  // 也只在启动时判过一次（docs/21 §9 末尾）。
+  'sandbox', 'skills.defaultMinRole', 'skills.package', 'quota', 'alerts', 'logs.level', 'logs.captureBodies', 'logs.redactPatterns',
   // mcp 整段曾在这里，但 `mcp.healthCheckCron` 是 `scheduler.add(config.mcp.healthCheckCron, …)`
   // 在启动时拿走的，Scheduler 也没有重配入口 —— 整段标热更新等于对着那一项说谎（docs/20 · W-CFG-02）。
   // 这三项才是真的按 getter 读（`McpManager` 的 config getter + config.changed 后的 reconcile）。
@@ -301,7 +305,12 @@ export const configSchema = z.object({
   // 正文一起消失（docs/14 §2 Q9-a）。与 `maintenance.retention.*` 一样在启动时交给
   // MaintenanceService，所以是「需重启」。
   media: z.object({ dir: z.string().default('./data/files'), retentionDays: z.number().int().nonnegative().default(90), maxImageBytes: z.number().int().positive().default(8_388_608), maxDocBytes: z.number().int().positive().default(20_971_520), maxImageEdge: z.number().int().positive().default(1568), maxImagesPerTurn: z.number().int().positive().default(4), groupDebounceMs: z.number().int().positive().default(1500), stickerAsImage: z.boolean().default(false), downloadVoice: z.boolean().default(true), extract: z.object({ enabled: z.boolean().default(true), maxChars: z.number().int().positive().default(40_000), inlineChars: z.number().int().positive().default(4000), codeExtensions: z.array(z.string()).default([]) }).default({}) }).default({}),
-  skills: z.object({ enabled: z.boolean().default(true), dir: z.string().default('./skills'), watch: z.boolean().default(true), defaultMinRole: role.default('trusted') }).default({}),
+  skills: z.object({ enabled: z.boolean().default(true), dir: z.string().default('./skills'), watch: z.boolean().default(true), defaultMinRole: role.default('trusted'),
+    // 装 skill 包时的解包上限（docs/07 §2.5）。**两个体积上限一律按实际写出的字节数判**，
+    // 不信 zip 头里的 `uncompressedSize` —— 那个字段是打包方填的，压缩炸弹正是从这里进来。
+    // `allowExecutable` 关掉 = 包退化成纯文本，`scripts/` 与 `bin/` 装进来也跑不了。
+    package: z.object({ maxEntries: z.number().int().positive().default(2000), maxTotalBytes: z.number().int().positive().default(67_108_864),
+      maxFileBytes: z.number().int().positive().default(33_554_432), allowExecutable: z.boolean().default(true) }).default({}) }).default({}),
   plugins: z.object({ enabled: z.boolean().default(true), dir: z.string().default('./plugins'), watch: z.boolean().default(false), hookTimeoutMs: z.number().int().positive().default(5000), order: z.array(z.string()).default([]), autoDisableAfterErrors: z.number().int().positive().default(3) }).default({}),
   mcp: z.object({ enabled: z.boolean().default(false), connectTimeoutMs: z.number().int().positive().default(15_000), healthCheckCron: z.string().default('*/5 * * * *'), defaultMinRole: role.default('trusted'), servers: z.array(mcpServerSchema).default([]) }).default({}),
   // 定时任务（docs/14 §2 Q4 已拍板）。上界写进 schema 而不只写在工具描述里：模型看得见 schema，

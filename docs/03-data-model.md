@@ -467,7 +467,7 @@ CREATE TABLE skills (
   allowed_tools_json TEXT,
   model_alias TEXT,
   enabled     INTEGER NOT NULL DEFAULT 1,
-  source      TEXT NOT NULL DEFAULT 'local',  -- local|plugin
+  source      TEXT NOT NULL DEFAULT 'local',  -- bundled|package|local
   content_hash TEXT NOT NULL,
   frontmatter_json TEXT NOT NULL,
   load_error  TEXT,
@@ -498,7 +498,19 @@ CREATE TABLE mcp_servers (
   state       TEXT, last_error TEXT, tools_json TEXT, connected_at INTEGER,
   updated_at  INTEGER NOT NULL
 );
+```
 
+> `skills` 是盘上那批 `SKILL.md` 的**读模型，不是真相**：真相是文件，每次
+> `SkillLoader.scan()` 都能整张重建。所以 `scan()` 末尾会
+> `DELETE FROM skills WHERE name NOT IN (盘上这一批)` —— 在这之前 `persist()` 只 upsert，
+> 盘上删掉一个目录那一行会永远留在表里、永远显示在扩展页（`GET /api/skills` 读的就是这张表）。
+> **`skills.dir` 读不到（`ENOENT`）时不清理**：目录临时不在时清空整张表比留着陈行糟得多。
+>
+> `source` 从 `local` / `plugin` 改成 `bundled` / `package` / `local`
+> （[07 §2.1](./07-skills-plugins-mcp.md)）。这一列此前是死的 —— schema 有、`persist()` 从不写、
+> WebUI 从不读，于是所有行都是默认值 `local`。plugin 不贡献 skill，那个取值从来没有过写入方。
+
+```sql
 CREATE TABLE memory_docs (
   id           TEXT PRIMARY KEY,
   scope        TEXT NOT NULL CHECK (scope IN ('assist','character','pubmemory','primemory')),

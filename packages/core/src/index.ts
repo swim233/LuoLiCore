@@ -37,6 +37,7 @@ export * from './provider/model-catalog.js';
 export * from './provider/store.js';
 export * from './scheduler.js';
 export * from './skills/loader.js';
+export * from './skills/package.js';
 export * from './tools/authoring.js';
 export * from './tools/builtins.js';
 export * from './tools/cite.js';

@@ -381,8 +381,12 @@ tools:
       defaultMinRole: owner       # 热更新 · 模型没指定时新工具的最低调用角色。无论怎么配都不低于 bash 的门槛
       timeoutMs: 60000            # 热更新 · 没指定超时时的默认值，最终仍封顶在 tools.exec.maxTimeoutMs
     skills:
-      enabled: false              # 热更新 · 允许 write_skill 写 SKILL.md（纯文本，不含可执行代码）
-      minRole: trusted            # 热更新 · 模型写出来的 skill 的 min-role **下限**：能写得更严，不能更松
+      enabled: false              # 热更新 · ★ 允许 write_skill 写 SKILL.md（纯文本），以及 install_skill
+                                  #   装一个带 scripts/ 与 bin/ 的 skill 包。包落地一律停用，要 owner
+                                  #   在扩展页看过文件清单才启用（07 §6.1）。一个开关管两件事：
+                                  #   都是「往 skills/ 里写东西」，分成两个只会多出「开了一半」的状态
+      minRole: trusted            # 热更新 · 模型写出来的 skill 的 min-role **下限**：能写得更严，不能更松。
+                                  #   装包时同样按它抬高包里写的那个值
     mcp:
       enabled: false              # 热更新 · 允许 install_mcp 登记 server。落地一律 enabled:false，要 owner 点开
       allowTransports: [stdio, http]  # 热更新 · ★ stdio 是一条模型发明的命令行，启用后以 bot 进程的身份跑在
@@ -505,6 +509,15 @@ skills:
   watch: true                     # 需重启
   # WebUI 新建 Skill 未显式选择角色时使用；SkillLoader 每次创建都读当前快照
   defaultMinRole: trusted         # 热更新
+  # 装 skill 包（zip / 目录）时的解包上限，install_skill 与 POST /api/skills/package 共用。
+  # 07 §2.5 那张表列了每一道各挡什么。
+  package:
+    maxEntries: 2000              # 热更新 · 包里最多多少个条目
+    maxTotalBytes: 67108864       # 热更新 · 解包后总字节上限（64 MiB）。**按实际写出的累计判**，
+                                  #   不信 zip 头里的 uncompressedSize —— 那个字段是打包方填的
+    maxFileBytes: 33554432        # 热更新 · 单个文件上限（32 MiB）。同样按实际写出的判
+    allowExecutable: true         # 热更新 · ★ 给 scripts/ 与 bin/ 下原本带执行位的文件保留 0700。
+                                  #   关掉 = 包退化成纯文本，附带的脚本与二进制装进来也跑不了
 plugins:
   enabled: true                   # 需重启 · 关掉后不 reconcile，钩子链为空
   dir: ./plugins                  # 需重启

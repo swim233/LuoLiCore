@@ -311,7 +311,7 @@ bash: tool({
 
 ### 3.10 自我扩展（M12）
 
-七个工具，全部 `owner`，四个写工具 `approval: 'always'`。
+八个工具，全部 `owner`，五个写工具 `approval: 'always'`。
 **`owner` 这道地板同时写在每个工具的 `available()` 里**，不只写在 `TOOL_POLICY` 上 —— 运维能把
 `write_plugin.minRole` 覆盖成 `trusted`（带二次确认），而覆盖绕不过 `available()`（[09 §3.7](./09-webui.md)）。
 少了这一道，一次放宽就等于让任意受信会话里的成员往本进程里写全信任代码。
@@ -320,16 +320,21 @@ bash: tool({
 |---|---|---|
 | `define_tool` / `delete_tool` / `list_tools` | 模型把一段带参数声明的 bash / python 脚本注册成自己的工具 | `custom_tools` 表 → `registerExternal(source:'custom')` |
 | `write_skill` | 写 / 改一份 `SKILL.md` | `SkillLoader.create/update` |
+| `install_skill` | 把一个 zip / 目录形态的 skill 包装成 `skills/<name>/` 一整棵（带 `scripts/`、`bin/`、`references/`） | `installSkillPackage` → `SkillLoader.scan` |
 | `write_plugin` | 写 `plugins/<name>/plugin.js` | `PluginManager.writeSource` |
 | `install_mcp` / `list_mcp` | 登记一台 MCP server | `persistMcpServers` → `mcp.servers` |
 
 **共同纪律：模型能创建，但不能让自己创建的东西生效。** 自定义工具与 plugin 落库即
-`enabled=0`，MCP server 落地即 `enabled: false`，都要 owner 在 WebUI 扩展页看过正文 / 源码 /
-argv 再点启用。唯一例外是运维显式打开 `tools.selfExtend.customTools.autoEnable`。
-改动正文 / 参数 / 源码会把对应的行**打回未启用** —— 否则「先定义无害的、拿到启用、再改成恶意的」
-这条路直接走通。
+`enabled=0`，MCP server 与装进来的 skill 包落地即 `enabled: false`，都要 owner 在 WebUI 扩展页
+看过正文 / 源码 / argv / 文件清单再点启用。唯一例外是运维显式打开
+`tools.selfExtend.customTools.autoEnable`。改动正文 / 参数 / 源码会把对应的行**打回未启用**
+—— 否则「先定义无害的、拿到启用、再改成恶意的」这条路直接走通。
 
-**七个工具一律无条件注册，开关放在 `available()` 里。** 按配置跳过注册会撞上 `main.ts` 那条
+`write_skill` 是这条纪律里唯一直接生效的一档，因为它写出去的确实只是一段 Markdown。
+`install_skill` 不在这一档：一个包带着 `scripts/` 与 `bin/`，「纯文本」这个前提不成立
+（[07 §6.1](./07-skills-plugins-mcp.md)）。两者共用 `tools.selfExtend.skills.enabled` 一个开关。
+
+**八个工具一律无条件注册，开关放在 `available()` 里。** 按配置跳过注册会撞上 `main.ts` 那条
 「每个 `TOOL_POLICY` 条目都必须已注册」的启动断言 —— 表现是关掉这个功能之后进程起不来。
 
 #### 自定义工具的运行器与参数契约

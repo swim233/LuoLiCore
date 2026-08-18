@@ -441,3 +441,26 @@ G-API-10/11/12 与 G-SRV-02/03/04 均已完成；按本文「运行时已有、W
 
 **新增缺口：无。** 定时任务的运行时能力（列、建、停、手动触发）现在都够得着；
 `schedule.*` 五个配置键走通用配置表单。
+
+---
+
+## 9. 装 skill 包这一轮
+
+起因不是复算出来的缺口，是一次实测：用户在 Telegram 丢了一个带 `scripts/` + `bin/`
+的音乐 skill 包，模型解到工作目录用了起来，而扩展页上一个字都没有。根因与通道见
+[00 §2.3](./00-state.md) 与 [07 §2.5 / §6.5](./07-skills-plugins-mcp.md)。
+
+| ID | 缺的是什么 | 优先级 | 状态 |
+|---|---|---|---|
+| G-EXT-01 | **装不了多文件 skill**。`docs/07 §2.1` 的格式一开始就允许附属文件，`SkillDefinition.files` 与 `skill://` 也是为它准备的，但没有任何途径把它们放进去：`write_skill` 只收 `body: string`，fs 工具对 `skills/**` 关死 | P1 | ✅ 本轮补（`installSkillPackage` + `install_skill` + `POST /api/skills/package`） |
+| G-EXT-02 | `skills.source` 是死列 —— schema 有、`persist()` 从不写、WebUI 从不读，所有行都是默认值 `local`。装包进来的和随包发的四份说明书在界面上分不开 | P2 | ✅ 本轮补（`bundled`/`package`/`local` + 来源徽标 + 未审阅徽标） |
+| G-EXT-03 | **陈行永不清理**。`persist()` 只 upsert，唯一会删行的是 `SkillLoader.remove()`；盘上删掉一个 skill 目录，那一行永远留在表里、永远显示在扩展页 | P2 | ✅ 本轮补（`scan()` 末尾清理，`ENOENT` 那支不清） |
+| G-EXT-04 | 随包那四份说明书 WebUI 侧**能改能删**。`write_skill` 从一开始就拒改它们，同一条不变量只焊住了一半 | P2 | ✅ 本轮补（`DELETE` 与「改 `enabled` 以外任何字段」回 403） |
+| G-EXT-05 | `skills` 的变更不进 SSE。`EVENT_REFRESH` 里没有对应事件，扩展页只靠 `health` 顺带刷新 —— 从 Telegram 装进来的东西要等下一次健康检查才出现（`docs/07 §2.3` 写着广播 `EventBus('skills.changed')`，而那个 emit 从来没有实现过） | P2 | ✅ 本轮补（`extensions.changed`，只在 `name → content_hash` 真变时发） |
+| G-EXT-06 | `GET /api/skills` 是 `SELECT *`，把 `path`（宿主文件系统路径）、`content_hash`、整份 `frontmatter_json` 全发给前端，而 `interface Extension` 只声明了 5 个字段 | P3 | ✅ 本轮补（收窄到 7 列） |
+| G-EXT-07 | 通道关着时界面上没有任何解释。`tools.selfExtend.skills.enabled` 默认 `false`，而扩展页只给 MCP 做了总开关提示条 | P3 | ✅ 本轮补（skills 侧同形状的提示条） |
+
+**新增缺口**：`skills.dir` 改成运行时可改仍然无效 —— `SkillLoader` 在构造时就把 `directory`
+拿走了，而 `main.ts` 对任何 `skills.*` 变更都只是重扫**老目录**。`docs/11` 标的是「需重启」，
+所以不算文档撒谎，但那条重扫的接线读起来像是支持热更新的。同类的还有 `skills.enabled` /
+`skills.watch`：运行时打开不会启动 watcher，关掉不会清空内存里那份目录。

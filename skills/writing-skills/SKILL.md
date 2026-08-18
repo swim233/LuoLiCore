@@ -1,8 +1,8 @@
 ---
 name: writing-skills
-description: 用 write_skill 给自己写一份 SKILL.md 时读这份：frontmatter 有哪些字段、渐进式披露是什么意思、allowed-tools 的收窄语义。
+description: 给自己写一份 SKILL.md（write_skill）或装一个别人给的 skill 包（install_skill）时读这份：frontmatter 有哪些字段、渐进式披露是什么意思、allowed-tools 的收窄语义、装包为什么装完还用不了。
 min-role: owner
-requires-tools: [write_skill]
+requires-tools: [write_skill, install_skill]
 ---
 
 # 给自己写一份 skill
@@ -48,9 +48,35 @@ enabled: true                 # 置 false = 退休这份 skill
 skill 目录里可以放别的文件，用 `read_file("skill://<name>/<相对路径>")` 读，只读。
 长参考表、模板、样例数据都该放这里，让 SKILL.md 正文保持短。
 
-（`write_skill` 目前只写 SKILL.md 本身；附件要用 `write_file` 落到能写的地方再由运维放进去。）
+`write_skill` 只写 SKILL.md 本身，**它没有办法带附件**。要装一个自带 `scripts/` / `bin/` /
+`references/` 的包，用下面的 `install_skill`。
+
+## 装一个别人给的 skill 包（install_skill）
+
+用户在聊天里丢来一个 zip、或者你已经把它解到工作目录里了 —— 用 `install_skill` 装，
+**不要**自己解到工作目录里然后靠 `bash` 去调它。后者能跑，但那不是一个 skill：
+它不进你的 skill 目录、不能 `load_skill`、`skill://` 读不到、运维在 WebUI 上也看不见它。
+
+```
+install_skill({ source: "music-cli.zip" })                     # 工作目录里的相对路径
+install_skill({ source: "/…/data/files/<chatId>/xxx.zip" })    # 本会话收到的附件
+```
+
+`source` **只认这两处**（本轮工作目录、本会话的附件目录），别的路径一律拒。
+
+三件事要有心理准备：
+
+1. **装完是停用的，你还用不了它。** 包里可能带可执行文件，所以要 owner 在 WebUI 的扩展页
+   看过 SKILL.md 与文件清单再点启用。这一点和只写一段正文的 `write_skill` 不同 ——
+   别装完就去 `load_skill`，那时它还不在目录里。**该做的是告诉用户去点一下启用。**
+2. **一个包里可能有好几份 SKILL.md**（常见的是 windows / linux 各一套）。这时会报
+   `skill_ambiguous_root` 并把候选列出来，带 `subdir` 挑一个重试。
+3. **包里写的 `name` / `enabled` / `min-role` 不算数**，会被改写成安装名、停用、以及不低于
+   配置下限的角色。想装成别的名字就自己给 `name`。
+
+装失败一律是整棵回滚，不会在目录里留下半成品，放心重试。
 
 ## 退休一份 skill
 
 没有删除工具。`write_skill` 同名再写一次、把 `enabled` 置 `false` 就行 —— 它会从目录里消失，
-但文件还在，改回来很容易。随包发的四份说明书（本文件在内）不允许覆写。
+但文件还在，改回来很容易。随包发的四份说明书（本文件在内）不允许覆写，装包也不许占这四个名字。
