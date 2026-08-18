@@ -358,6 +358,11 @@ code { font-family: var(--font-mono); font-size: .82rem; }
 .level.info { color: var(--cyan); background: color-mix(in srgb, var(--cyan), transparent 88%); }
 .health-row { min-height: 55px; display: flex; align-items: center; justify-content: space-between; border-top: 1px solid var(--border); font-size: .84rem; }
 .page-surface { min-height: calc(100vh - 146px); }
+/* 抬头右侧要放不止一个计数标签时用它；`.surface > header` 是 space-between，直接并排会被拉开。 */
+.header-tags { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+/* 「这一格被运维覆盖过」的角标。只做提示，鼠标悬停给出代码默认值。 */
+.overridden { margin-left: 6px; font-size: .62rem; color: var(--amber); vertical-align: middle; }
+.relax-list { margin: 10px 0 12px; padding-left: 20px; display: grid; gap: 6px; font-size: .82rem; }
 .provider-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 14px; }
 .provider-grid article { border: 1px solid var(--border); border-radius: 15px; padding: 19px; display: grid; gap: 10px; }
 .provider-head { display: flex; align-items: center; justify-content: space-between; }
@@ -556,6 +561,7 @@ code { font-family: var(--font-mono); font-size: .82rem; }
 .schema-toolbar .search { flex: 1 1 240px; }
 .schema-toolbar .search input { width: 100%; background: var(--surface); }
 .schema-toolbar .ui-check { color: var(--muted); white-space: nowrap; transition: color 140ms ease; }
+.schema-toolbar-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
 .schema-toolbar .ui-check:hover { color: var(--ink); }
 .schema-form > .section-note { max-width: 96ch; }
 .schema-form > .empty-card { display: grid; gap: 8px; border: 1px dashed var(--border); border-radius: 16px; }
@@ -569,6 +575,10 @@ code { font-family: var(--font-mono); font-size: .82rem; }
    不是必须读完的正文，换行会把每一条抬头撑成两行，22 个分组一起变成一堵墙。 */
 .schema-group-head small { flex: 0 1 auto; min-width: 0; color: var(--muted); font-size: .74rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .schema-group-head .count { flex: none; margin-left: auto; color: var(--muted); font: .72rem var(--font-mono); }
+/* 两个 count 并排时靠 auto 外边距一起推到右边：第二个再来一次 auto 会把它们分开到两端。 */
+.schema-group-head .count.nd { color: var(--primary); }
+.schema-group-head .count.nd + .count { margin-left: 0; }
+.schema-group-head .count.nd + .count::before { content: '·'; margin-right: 6px; color: var(--border); }
 .schema-group-head .caret { flex: none; color: var(--muted); font-size: .68rem; transition: transform 220ms cubic-bezier(.22, .61, .36, 1); }
 .schema-group.open .schema-group-head .caret { transform: rotate(90deg); color: var(--primary); }
 /* `min(320px, 100%)` 而不是裸的 320px：窄屏上轨道宽度不会缩到容器以下，一格就把整页撑出横向滚动。 */
@@ -579,6 +589,9 @@ code { font-family: var(--font-mono); font-size: .82rem; }
 .schema-field:hover, .schema-field:focus-within { border-color: color-mix(in srgb, var(--primary), transparent 58%); }
 .schema-field.wide { grid-column: 1 / -1; }
 .schema-field.off { opacity: .6; }
+/* 「非默认」是**已经生效**的值不等于代码默认值，「待保存」是这次编辑还没提交 —— 两件事，
+   所以一个用左侧色条、一个用整框高亮，同时命中时两者叠加而不是互相盖掉。 */
+.schema-field.nondefault { border-left: 3px solid color-mix(in srgb, var(--primary), transparent 45%); padding-left: 11px; }
 .schema-field.dirty { border-color: var(--primary); background: color-mix(in srgb, var(--primary-soft), transparent 45%); }
 .schema-field.dirty .schema-key code { color: var(--primary); font-weight: 600; }
 .schema-field > :is(input, textarea) { background: var(--surface); }

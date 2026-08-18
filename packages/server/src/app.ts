@@ -12,10 +12,11 @@ import { getConnInfo } from '@hono/node-server/conninfo';
 import { serveStatic } from '@hono/node-server/serve-static';
 import type { AgentManager, Config, ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, PluginManager, PromptDocuments, ProviderStore, Sandbox, SkillLoader, SkillWriteInput, SubAgentRuntimeEvent, TurnRegistry } from '@luoli/core';
 import { ALIAS_NAME_PATTERN, HOT_RELOADABLE_CONFIG_KEYS, createScheduledJob, mergeAgentDefinitions, scanAgentFiles, scheduledJobView, testApprovalRules, KNOWN_UNIMPLEMENTED_CONFIG_KEYS, TOOL_POLICY, aliasSettingsSchema, checkWakeword, configSchema as runtimeConfigSchema, envPinnedConfigKeys, perChatConfig, probeProvider, quotaBucket, rejectedWakewords } from '@luoli/core';
-import type { CatalogIndex, ModelMetadata, ProviderProbe } from '@luoli/core';
+import { APPROVAL_POLICIES, effectiveToolPolicy, relaxedFields } from '@luoli/core';
+import type { CatalogIndex, ModelMetadata, ProviderProbe, ToolOverride, ToolRegistry } from '@luoli/core';
 import type { ArchiveRepository, OperationsRepository, PrincipalRepository, ScheduleRepository, ScheduledJob, Sqlite } from '@luoli/db';
 import { deleteAppKv, modelAliasKey, readAppKv } from '@luoli/db';
-import { assignDotted, readDotted, TG_ID_PATTERN, type Role } from '@luoli/shared';
+import { assignDotted, readDotted, ROLES, TG_ID_PATTERN, type Role } from '@luoli/shared';
 import type { EventStreamRegistry } from './events.js';
 
 export interface PromptPreviewResult {
@@ -64,6 +65,11 @@ export interface ServerDependencies {
   plugins?: PluginManager;
   mcp?: McpManager;
   agents?: AgentManager;
+  /**
+   * 工具注册表。缺它时 `GET /api/tools` 退回「`TOOL_POLICY` + 覆盖层」那份静态表 —— 少了
+   * MCP / plugin 注册进来的工具和每个工具声明的超时，但策略与启停仍然是对的。
+   */
+  tools?: ToolRegistry;
   turnRegistry?: TurnRegistry;
   sandbox?: Sandbox;
   eventStreams?: EventStreamRegistry;
@@ -660,11 +666,27 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     dependencies.events.emit('config.changed', { keys: applicable });
     return ctx.json({ ok: true, data: { keys: applicable, skipped: [...pinned], subsumed } });
   });
-  // 策略本身是代码里的单一来源（TOOL_POLICY），但「现在这台机器上开着没有」只在 tools.overrides 里，
-  // 不一起返回的话工具页只能显示一份与运行时无关的静态表。
+  /**
+   * 工具页那张表。扁平的 `minRole` / `approval` / `scope` / `source` / `enabled` / `timeoutMs`
+   * 一律是**生效值**（旧消费点因此不用改），`defaults` 是代码里那份，`relaxed` 是比默认更松的
+   * 字段名 —— 两者都给才看得出「我现在偏离了多少」（docs/09 §3.7）。
+   *
+   * 有注册表就问它（合并逻辑只有一份，还能顺带列出 MCP / plugin 的工具）；没有就退回静态表。
+   */
   app.get('/api/tools', (ctx) => {
     const overrides = currentConfig().tools.overrides;
-    return ctx.json({ ok: true, data: Object.fromEntries(Object.entries(TOOL_POLICY).map(([name, policy]) => [name, { ...policy, enabled: overrides[name]?.enabled !== false }])) });
+    if (dependencies.tools) {
+      return ctx.json({ ok: true, data: Object.fromEntries(dependencies.tools.describe().map((entry) => [entry.name, {
+        ...entry.effective, enabled: entry.enabled, timeoutMs: entry.timeoutMs, selfManagedTimeout: entry.selfManagedTimeout,
+        defaults: { minRole: entry.defaults.minRole, approval: entry.defaults.approval, timeoutMs: entry.defaultTimeoutMs },
+        relaxed: entry.relaxed }])) });
+    }
+    return ctx.json({ ok: true, data: Object.fromEntries(Object.entries(TOOL_POLICY).map(([name, policy]) => {
+      const override = overrides[name];
+      return [name, { ...effectiveToolPolicy(policy, override), enabled: override?.enabled !== false,
+        timeoutMs: override?.timeoutMs ?? null, selfManagedTimeout: false,
+        defaults: { minRole: policy.minRole, approval: policy.approval, timeoutMs: null }, relaxed: relaxedFields(policy, override) }];
+    })) });
   });
   app.get('/api/principals', (ctx) => ctx.json({ ok: true, data: dependencies.principals.list() }));
   app.patch('/api/principals/:id', async (ctx) => {
@@ -1114,17 +1136,58 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
   });
   app.patch('/api/tools/:name', async (ctx) => {
     const name = ctx.req.param('name');
-    const body = await ctx.req.json<{ enabled?: boolean }>();
-    if (typeof body.enabled !== 'boolean') return ctx.json(apiError('invalid_tool_override', 'enabled 必须是布尔值').body, 400);
-    if (!Object.hasOwn(TOOL_POLICY, name)) return ctx.json(apiError('not_found', '工具不存在', 404).body, 404);
+    const body = await ctx.req.json<{ enabled?: boolean; minRole?: unknown; approval?: unknown; timeoutMs?: unknown; confirmRelax?: boolean }>();
+    const known = dependencies.tools?.describe().find((entry) => entry.name === name);
+    if (!known && !Object.hasOwn(TOOL_POLICY, name)) return ctx.json(apiError('not_found', '工具不存在', 404).body, 404);
+    const base = known?.defaults ?? TOOL_POLICY[name as keyof typeof TOOL_POLICY];
     const key = `tools.overrides.${name}`;
-    const merged = mergeDotted(currentConfig(), { [key]: { enabled: body.enabled } });
+    const pinned = envConflicts([key]);
+    if (pinned.length) return ctx.json(envPinnedError(pinned).body, 400);
+    // 一个 key 就是 `config_kv` 里一条整叶 JSON，所以必须**先读当前覆盖再整体写回**：只写请求里
+    // 带来的那个字段，会把同一条 JSON 里其余的覆盖一起抹掉（点一下启停就丢掉刚调好的 minRole）。
+    // 三个策略字段显式给 `null` = 恢复默认，也就是从这条 JSON 里删掉它。
+    //
+    // 基准优先取**库里那一行**而不是 `currentConfig()`：`config.changed` 之后的重载是异步的
+    // （`main.ts` 里 `void loadConfig(...).then(...)`），连着改两次的话第二次会读到重载前的旧快照，
+    // 把第一次的改动原样覆盖掉。没有那一行时才回落到快照 —— 覆盖也可能来自 config.yaml 或
+    // `tools.overrides` 整块那一层，那两层只有快照看得见。
+    const persisted = dependencies.db.prepare('SELECT value_json AS value FROM config_kv WHERE key=?').get(key) as { value: string } | undefined;
+    const current: ToolOverride = persisted ? JSON.parse(persisted.value) as ToolOverride : { ...currentConfig().tools.overrides[name] };
+    const next: ToolOverride = { ...current };
+    if (body.enabled !== undefined) {
+      if (typeof body.enabled !== 'boolean') return ctx.json(apiError('invalid_tool_override', 'enabled 必须是布尔值').body, 400);
+      next.enabled = body.enabled;
+    }
+    if (body.minRole !== undefined) {
+      if (body.minRole !== null && !ROLES.includes(body.minRole as Role)) return ctx.json(apiError('invalid_tool_override', `minRole 必须是 ${ROLES.join(' / ')} 之一`).body, 400);
+      if (body.minRole === null) delete next.minRole; else next.minRole = body.minRole as Role;
+    }
+    if (body.approval !== undefined) {
+      if (body.approval !== null && !APPROVAL_POLICIES.includes(body.approval as (typeof APPROVAL_POLICIES)[number])) return ctx.json(apiError('invalid_tool_override', `approval 必须是 ${APPROVAL_POLICIES.join(' / ')} 之一`).body, 400);
+      if (body.approval === null) delete next.approval; else next.approval = body.approval as (typeof APPROVAL_POLICIES)[number];
+    }
+    if (body.timeoutMs !== undefined) {
+      if (body.timeoutMs !== null && (typeof body.timeoutMs !== 'number' || !Number.isInteger(body.timeoutMs) || body.timeoutMs <= 0)) return ctx.json(apiError('invalid_tool_override', 'timeoutMs 必须是正整数毫秒').body, 400);
+      if (body.timeoutMs === null) delete next.timeoutMs; else next.timeoutMs = body.timeoutMs;
+    }
+    // 放宽（minRole 调低 / 审批降档）要二次确认。**校验在落库之前**：没确认时一个字都不写，
+    // 否则「先存了再问」的确认框只是事后通知（docs/09 §3.7）。超时与启停不在其列。
+    const relaxed = relaxedFields(base, next);
+    if (relaxed.length && body.confirmRelax !== true) {
+      const effective = effectiveToolPolicy(base, next);
+      return ctx.json({ ok: false, error: { code: 'relax_requires_confirmation', message: `${name} 的${relaxed.map((field) => field === 'minRole' ? '最低角色' : '审批策略').join(' 与 ')}比代码里的默认更松，需要二次确认`,
+        details: relaxed.map((field) => ({ path: field, from: base[field], to: effective[field] })) } }, 409);
+    }
+    const merged = mergeDotted(currentConfig(), { [key]: next });
     if (!merged.ok) return ctx.json(invalidKey(merged).body, 400);
     const parsed = runtimeConfigSchema.safeParse(merged.value);
-    if (!parsed.success) return ctx.json({ ok: false, error: { code: 'invalid_config', message: '工具开关校验失败', details: parsed.error.issues.map((issue) => ({ path: issue.path.join('.'), message: issue.message })) } }, 400);
-    writeConfigRows([[key, { enabled: body.enabled }]], 'webui');
+    if (!parsed.success) return ctx.json({ ok: false, error: { code: 'invalid_config', message: '工具覆盖校验失败', details: parsed.error.issues.map((issue) => ({ path: issue.path.join('.'), message: issue.message })) } }, 400);
+    writeConfigRows([[key, readDotted(parsed.data, key)]], 'webui');
     dependencies.events.emit('config.changed', { keys: [key] });
-    return ctx.json({ ok: true, data: { name, enabled: body.enabled } });
+    // 放宽记 warn 而不是 info：这是日志页上最该一眼看见的运维动作。这个端点此前一条日志都不记。
+    dependencies.log.event({ level: relaxed.length ? 'warn' : 'info', kind: 'webui.action',
+      summary: relaxed.length ? `tool policy relaxed: ${name}` : `tool override changed: ${name}`, data: { tool: name, override: next, relaxed } });
+    return ctx.json({ ok: true, data: { name, override: next, relaxed, effective: { ...effectiveToolPolicy(base, next), enabled: next.enabled !== false } } });
   });
   app.get('/api/sandbox', (ctx) => ctx.json({ ok: true, data: { config: publicConfig(currentConfig().sandbox), plan: dependencies.sandbox?.plan('owner') } }));
   app.put('/api/sandbox', async (ctx) => {

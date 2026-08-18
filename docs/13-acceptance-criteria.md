@@ -252,6 +252,8 @@
 | [ ] AC-APV-007 (自动) | `skipForOwner=true`，owner 执行 `delete_file` | 直接执行，日志记 `auto_approved` |
 | [ ] AC-TOOL-026 (自动) ★ | 注册一个永不 resolve 的工具并调用它 | 在 `tools.defaultTimeoutMs` 到点后返回 `{ok:false, error:'tool_timeout', hint}`，本轮继续往下走；被丢下的那次调用之后无论 resolve 还是 reject 都不能变成 unhandledRejection（一次工具超时打崩进程）。`bash`/`python`/`spawn_agent`/`send_file` 与两个 web 工具自己管超时，不受这一项约束（[05 §8.1](./05-tools-and-permissions.md#81-超时重试与连续失败)） |
 | [ ] AC-TOOL-027 (自动) ★ | `web_fetch` 目标：①连上之后永不响应 ②连续 503 后转 200 ③404 ④`ssrf_blocked` | 依次：单次尝试在 `tools.web.timeoutMs` 到点后失败、按 `tools.web.retries` 重试、耗尽后交回 `{ok:false, error:'web_timeout', attempts, hint}`；②重试后成功并带 `attempts`；③④**一次都不重试**（站点自己答的 4xx 是答案，拒绝是拒绝）。全程有界，不能靠 `turnTimeoutMs` 兜底。自动化分三处落：单次超时用本机「连上不答」的服务器打 `guardedFetch`，重试与耗尽形状用注入尝试函数打 `withWebRetries`，拒绝分类用 SSRF 目标打 `webFetch` —— `webFetch` 自己不许打私网，所以这三处合起来才是整条路径 |
+| [ ] AC-TOOL-029 (自动) ★ | 给某工具写 `tools.overrides.<name>.minRole`，一次调高一次调低，然后取 `active()` 与 `admit()` | 两处判定**同时**跟着覆盖走：调高后该角色的工具目录里没有它 **且** `admit()` 拒绝；调低后两处同时放行。只改一处的表现是「目录里看得见但调不动」或反过来「目录里没有但硬猜工具名能调通」（docs/20 · W-TOOL-01）。覆盖绕不过 `available()`：把 `spawn_harness.minRole` 覆盖成 `limited`，非 owner / 非私聊仍然 `tool_unavailable` |
+| [ ] AC-TOOL-030 (自动) ★ | `tools.overrides` 里把某工具的 `approval` 基准改成 `never`，其中一个是靠 `approvalFor` 抬档的工具（`memory_write`）；再把另一个工具的基准改成 `always` | 覆盖设的是**基准档**：`approvalFor` 的抬档照样生效（取最严者），基准 `never` 抬不下去；基准 `always` 的工具每次都要审批。覆盖 `timeoutMs` 对声明了超时的工具生效，对 `timeoutMs: null` 的（bash/python/spawn_agent/spawn_harness/ask_parent）**不生效** —— 它们各有自己的硬期限，套外层 race 会提前砍断 |
 | [ ] AC-TOOL-028 (自动) | 同一工具连续失败到 `maxConsecutiveErrors`，之后再调一次；中间夹一次成功再失败 | 停用后返回 `tool_disabled_after_errors` + hint（不是含糊的 `tool_unavailable`，那会让模型原地重试到步数耗尽），并有一条 `tool.disabled_after_errors` warn；成功一次即清零 —— 门槛是**连续**失败，不是本轮失败总数 |
 | [ ] AC-APV-008 (自动) ★ | trusted 用户触发一个需审批的工具，然后无人裁决直到 `ttlMs` 到期 | 调用**挂起等待**而不是当场伪拒绝：先写一行 `state=pending` 并广播 `approval.pending`；到期后原子改成 `state=expired, decided_by=system`，工具返回 `ok:false, error:'未获批准'` 且 hint 说的是「审批已超时」而不是「管理员已拒绝」。轮次在等待中被取消时落 `state=denied, decided_by=system` 并给「轮次已取消」的 hint —— 三条路径都 fail-closed，工具一次都不执行（docs/21 · G-API-12） |
 | [ ] AC-APV-010 (自动) ★ | 命中规则后 owner 在 WebUI 点 `[批准执行]` | `decide` 用 `UPDATE … WHERE state='pending' AND expires_at>?` 抢裁决权，只有真改到一行才唤醒等待者；**批准之后原工具调用才继续执行**，落 `state=approved, decided_by=owner, decision_channel=webui`。对已裁决/已过期的行重复裁决返回 `changed:false`，不重复唤醒 |
@@ -423,10 +425,13 @@
 | [ ] AC-WEB-015d (自动) | 主体页勾选若干行 → `[批量改角色]` | 被勾的行角色真的改了（返回 `{count, changed, missing}`）；库里不存在的 id 进 `missing` 而不是被新建；非法角色/空列表 400。勾中引导 owner 且目标不是 owner 时有降级警示 |
 | [ ] AC-WEB-015e (自动) | 重启 + `[批量导入]` 命中同一个已存在主体 | Telegram 同步来的显示名与 `@username` 不被占位值冲掉（`ensureOwner` 只插不改、bulk 对已存在的行只 `setRole`）；顶栏与主体页显示的是真实用户名 |
 | [ ] AC-WEB-016 | 权限矩阵视图 | 与 `TOOL_POLICY` 一致；「以某角色视角」预览正确 |
-| [ ] AC-WEB-016b (自动) | 工具页点某个工具 | 弹出二级菜单：来源/minRole/审批/作用域只读并注明来自 `TOOL_POLICY`，唯一可写的是启停；`GET /api/tools` 返回的 `enabled` 与 `tools.overrides` 一致；停用后该工具从工具目录消失且 `execute` 二次拦截 |
+| [ ] AC-WEB-016b (自动) | 工具页点某个工具 | 弹出二级菜单：来源/作用域只读，启停 + minRole + 审批 + 单次超时四项可写；每一项同时显示「代码默认」与「当前生效」；`GET /api/tools` 的扁平字段是**生效值**、`defaults` 是 `TOOL_POLICY` 那份、`relaxed` 列出比默认更松的字段；停用后该工具从工具目录消失且 `execute` 二次拦截（docs/09 §3.7） |
+| [ ] AC-WEB-016b1 (自动) ★ | 把 `delete_file` 的审批从 `always` 降成 `never`（或把某工具 minRole 调低）后保存 | 无 `confirmRelax` 时 `409 relax_requires_confirmation` 并列出哪些字段、从什么放宽到什么，**此时一个字都没落库**；带 `confirmRelax:true` 重发才写入，并留一条 `webui.action` 的 **warn** 日志。收紧（minRole 调高 / 审批抬档）与恢复默认不需要确认，超时改动也不需要（资源旋钮不是权限闸） |
+| [ ] AC-WEB-016b2 (自动) | 先覆盖某工具的 `minRole`，再单独 PATCH 它的 `enabled`；然后把 `minRole` 显式置 `null` | 第二次 PATCH **不会抹掉** `minRole`（端点先读当前覆盖再整体写回 —— `tools.overrides.<name>` 一个 key 就是一条整叶 JSON）；置 `null` 后该字段从覆盖里消失，`GET /api/tools` 回到 `TOOL_POLICY` 的值。未知工具名 404，非法枚举/非正整数超时 400 |
 | [ ] AC-WEB-016c (自动) | Agent 页点某个 Agent | 弹出二级菜单可改 description/modelAlias/minRole/maxSteps/工具多选/instructions；保存写 `agent.agents` 整张数组并过 `configSchema`（缺必填字段 400）；热更新后 `spawn_agent` 用的是新定义，无需重启 |
 | [ ] AC-WEB-017 | 沙箱页 | 显示 docker 可用性；开 `allowHostFsForOwner` 有红色二次确认 |
 | [ ] AC-WEB-018 | 配置页「全部配置」 | 由 `config.schema.json` 自动生成：控件形态、默认值、取值范围全部来自 schema（布尔/枚举/数字/字符串/字符串数组/JSON 各有其控件，`anyOf[number,null]` 留空即「不限」）；热更新项即时生效、需重启项在保存后的 Toast 里被点名；未接线的键默认隐藏且控件禁用；值为 `«redacted»` 或名字像密钥的字段只读并写明该去哪儿改；只发真正改过的那几项。原始 YAML 模式已实现（解析与校验在服务端，语法错误给行号，见 `GET/PUT /api/config/yaml`） |
+| [ ] AC-WEB-018c | 设置页分四个二级 tab（`常用 / 全部配置 / 维护 / 高级`），并在「全部配置」里勾上「只看非默认值」 | 四个 tab 逐个切过去都渲染得出内容；**在「全部配置」里改一格再切去别的 tab 再切回来，那一格的未保存值还在**（前三个 tab 是 `v-show`，`v-if` 会连草稿一起销毁）。筛选按「当前值 ≠ schema 的 `default`」判定，没有 `default` 的叶子不参与；分组抬头给出该组非默认项数，非默认的格子带左侧色条，且它与「待保存」是两套标记；勾上后自动展开命中的分组；正在编辑但值回到默认的那一格不会被筛掉。「合并后的完整配置」在「高级」里默认收起，点`[展开]`才渲染（docs/09 §3.13） |
 | [ ] AC-WEB-018b (自动) | 「全部配置」的每一项说明 | **每个 schema 叶子与每个顶层分组都有一句作用说明**，来源是 `CONFIG_DESCRIPTIONS` → `configJsonSchema()` 注入的 `description`（`tests/config.test.ts` 断言严格一一对应，多一条少一条都不给过）；界面上说明显示在键名与控件之间，搜索框同时匹配键名与说明；默认值与说明读的是**原始节点**而不是 `$ref` 指过去的那个（否则 `quota.perChat.daily` 显示成「默认 5」、`memory.pubWriteMinRole` 显示成「默认 blocked」，说明也会串成同一句）|
 | [ ] AC-WEB-044 (自动) | `GET /api/config/schema` | `{schema, hotReloadable, unimplemented}` 三件套都在 `data` 信封里 —— 挂在顶层的兄弟键会被只解 `data` 的客户端丢掉，表单会把每一项都当成需重启 |
 | [ ] AC-WEB-045 | 会话页「只对这个会话生效的设置」 | 只渲染 [11 §2.1](./11-config-reference.md) 白名单内的子树，控件显示的是该会话**实际生效**的值（全局 + 覆盖）；保存后 chip 列表出现对应点分项，`[✕]` 取消覆盖后该项回到全局值、空掉的中间层一并收掉；越界路径（如 `sandbox.mode`）返回 400；`context.scope` 那一项带「改了等于把这条覆盖作废」的警告 |
@@ -521,14 +526,14 @@
 | **上下文引擎** | | 30 / 39 | | | |
 | Telegram 与准入 | | 21 / 45 | | | |
 | Agent 与 Provider | | 20 / 42 | | | |
-| 工具/沙箱/审批 | | 15 / 54 | | | |
+| 工具/沙箱/审批 | | 15 / 56 | | | |
 | Subagent 与任务 | | 20 / 38 | | | |
 | 记忆 | | 1 / 13 | | | |
 | 日志与成本 | | 5 / 26 | | | |
 | 扩展生态 | | 3 / 27 | | | |
-| WebUI | | 10 / 81 | | | |
+| WebUI | | 10 / 84 | | | |
 | 安全 | | 6 / 22 | | | |
 | 运维 | | 1 / 9 | | | |
-| **合计** | | **147 / 421** | | | |
+| **合计** | | **147 / 426** | | | |
 
 **整体通过条件**：全部 ★ 项通过 + 非 ★ 项通过率 ≥ 95% + 所有豁免项经需求方书面确认。

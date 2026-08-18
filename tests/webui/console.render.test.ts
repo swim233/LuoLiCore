@@ -16,6 +16,8 @@ import { mount, type VueWrapper } from '@vue/test-utils';
 
 const NAV_KEYS = ['dashboard', 'chats', 'messages', 'prompts', 'providers', 'principals', 'tools',
   'extensions', 'agents', 'logs', 'usage', 'quota', 'tasks', 'settings'] as const;
+/** 设置页的四个二级 tab（docs/09 §3.13）。跟导航项同一个道理：漏一个分支，那个 tab 从此没人渲染过。 */
+const SETTINGS_TABS = ['common', 'all', 'maintenance', 'advanced'] as const;
 
 /** 每个端点回一份形状对得上的空数据。这里刻意**不 mock 组件内部**：要测的就是真实模板 + 真实
  *  setup 在拿到正常响应时能不能渲染出来。 */
@@ -35,7 +37,11 @@ const RESPONSES: Record<string, unknown> = {
     output: { mode: 'stream', replyDelayMs: 0, streamBufferMs: 900, streamIntervalMs: 1500, streamMinDeltaChars: 24, maxMessageChars: 3900 }, webui: { passwordHash: '«redacted»' } },
   '/api/config/schema': { schema: { definitions: { LuoLiConfig: { properties: {} } } }, hotReloadable: [], unimplemented: [], envPinned: [] },
   '/api/sandbox': { mode: 'docker', bypassRoles: ['owner'], plan: { allowed: true, mode: 'docker' } },
-  '/api/tools': { bash: { minRole: 'trusted', approval: 'conditional', scope: 'global', source: 'builtin', enabled: true } },
+  // 扁平字段是生效值，`defaults` 是代码里那份 —— 少了 defaults，工具页弹窗的「代码默认」绑定读到 undefined。
+  '/api/tools': { bash: { minRole: 'trusted', approval: 'conditional', scope: 'global', source: 'builtin', enabled: true,
+    timeoutMs: null, selfManagedTimeout: true, defaults: { minRole: 'trusted', approval: 'conditional', timeoutMs: null }, relaxed: [] },
+    web_fetch: { minRole: 'owner', approval: 'never', scope: 'global', source: 'builtin', enabled: true,
+      timeoutMs: 45_000, selfManagedTimeout: false, defaults: { minRole: 'limited', approval: 'never', timeoutMs: 60_000 }, relaxed: [] } },
   '/api/turns': { items: [], total: 0, page: 1, size: 20 },
   '/api/messages': { items: [], total: 0, page: 1, size: 50 },
   '/api/usage/report': { groupBy: 'day', from: 0, to: Date.now(), rows: [] },
@@ -103,6 +109,40 @@ describe('ConsoleView 渲染', () => {
     expect(rendering, `渲染期间产生了 Vue 警告：\n${rendering.join('\n')}`).toEqual([]);
     spy.mockRestore();
     errorSpy.mockRestore();
+    wrapper.unmount();
+  });
+
+  it('设置页的四个二级 tab 逐个切过去都有内容，且不产生 Vue 警告', async () => {
+    const warnings: string[] = [];
+    const spy = vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => { warnings.push(args.map(String).join(' ')); });
+    const { default: ConsoleView } = await import('../../packages/webui/src/views/ConsoleView.vue');
+    const wrapper = mount(ConsoleView, { attachTo: document.body });
+    await settle(wrapper);
+    const vm = wrapper.vm as unknown as { active: string; settingsTab: string };
+    vm.active = 'settings';
+    await settle(wrapper);
+    for (const tab of SETTINGS_TABS) {
+      vm.settingsTab = tab;
+      await settle(wrapper);
+      const panel = wrapper.find(`[data-settings-tab="${tab}"]`);
+      expect(panel.exists(), `设置页缺少 ${tab} 这个 tab 的分支`).toBe(true);
+      // 前三个 tab 是 v-show（未保存的草稿不能因为切 tab 就没了），所以 DOM 里始终有四个之中的三个：
+      // 断言「当前这个可见」而不是「只有它存在」。
+      expect(panel.attributes('style') ?? '', `${tab} 这个 tab 切过去之后仍然是隐藏的`).not.toContain('display: none');
+      expect(panel.text().trim().length, `${tab} 这个 tab 的内容是空的`).toBeGreaterThan(20);
+    }
+    const rendering = warnings.filter((line) => line.includes('[Vue warn]'));
+    expect(rendering, `渲染期间产生了 Vue 警告：\n${rendering.join('\n')}`).toEqual([]);
+    spy.mockRestore();
+    wrapper.unmount();
+  });
+
+  it('设置页 tab 定义与模板分支一一对应', async () => {
+    const { default: ConsoleView } = await import('../../packages/webui/src/views/ConsoleView.vue');
+    const wrapper = mount(ConsoleView, { attachTo: document.body });
+    await settle(wrapper);
+    const vm = wrapper.vm as unknown as { active: string; SETTINGS_TABS: ReadonlyArray<readonly [string, string]> };
+    expect(vm.SETTINGS_TABS.map(([key]) => key)).toEqual([...SETTINGS_TABS]);
     wrapper.unmount();
   });
 

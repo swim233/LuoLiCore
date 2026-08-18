@@ -297,6 +297,20 @@ tools:
                                   #   `tool_disabled_after_errors`（成功一次即清零，见 05 §8.1）
   defaultTimeoutMs: 60000         # 热更新 · 单次工具调用的默认墙钟上限，到点返回 `tool_timeout` 给模型。
                                   #   bash/python/spawn_agent 与两个 web 工具自己管超时，不受这一项约束
+  overrides: {}                   # 热更新 · 逐个工具的运维覆盖层，键为工具名。工具页是它的入口（09 §3.7）
+                                  #   <name>.enabled     缺省 true；false = 硬边界（目录里没有 + execute 二次拦截）
+                                  #   <name>.minRole     覆盖 TOOL_POLICY 的最低角色
+                                  #   <name>.approval    覆盖审批基准档：never | conditional | always
+                                  #   <name>.timeoutMs   覆盖该工具的单次超时（毫秒）
+                                  # 后三项**没有默认值**：字段缺席 = 沿用代码里 `TOOL_POLICY` / 工具自己声明的那份。
+                                  #   写死一个默认值等于把每条历史覆盖行钉在写它那天的策略上，此后改代码推不动它们。
+                                  # 三条不变量：① 覆盖只动角色闸与审批闸，绕不过 `available()`（`spawn_harness`
+                                  #   仍然只有 owner 且只在私聊）；② `approvalFor` 的抬档只升不降，基准改成 never
+                                  #   也照样抬；③ `timeoutMs: null` 的工具（bash/python/spawn_agent/spawn_harness/
+                                  #   ask_parent）不吃超时覆盖 —— 它们各有自己的硬期限，套外层 race 会提前砍断。
+                                  # 「放宽（minRole 调低 / 审批降档）需二次确认」是 `PATCH /api/tools/:name` 的
+                                  #   端点行为（409 `relax_requires_confirmation`），**不是 schema 约束** ——
+                                  #   直接改 YAML 或整块写 `PUT /api/config` 绕得过去，那是有意的：schema 只管形状。
   fs:
     maxReadBytes: 262144
     maxWriteBytes: 5242880

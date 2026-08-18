@@ -75,6 +75,12 @@ schema 自动表单，可写覆盖率达到 151/151（第三轮接线两项后�
 > `docs/11`。现在每一格都带一句作用说明，来源是 `CONFIG_DESCRIPTIONS` 注入 schema 的 `description`
 > （[09 §3.13](./09-webui.md)），`tests/config.test.ts` 断言它与 schema 叶子一一对应 ——
 > 新增配置项时不写说明就过不了 CI。
+>
+> 还有第三个问题不在本文口径内但同一张表单上：**「这个部署到底改过什么」**。覆盖率做满之后
+> 243 个叶子平铺在一起，而实测一个真实部署只有 **21 个偏离默认值** —— 此前唯一能查的是
+> 「原始 YAML」，可那里是**覆盖层不是差异集**（专用面板保存时整组写回，`config_kv` 实测 50 行、
+> 大半与默认值相同）。表单现在有「只看非默认值」筛选，判据是当前值 ≠ schema 的 `default`
+> （[09 §3.13](./09-webui.md)）。
 
 | 分组 | 数量 | 键 |
 |---|---|---|
@@ -314,7 +320,8 @@ SPA fallback（`app.get('*')` 返回 `index.html`，200），所以 **`GET /api/
 | `GET /api/logs/blob` | 被 `GET /api/logs/:id/data` 取代（后者带 `content-disposition`，且 blob 解引用一致） |
 | `GET /api/messages/:id`、`GET /api/chats/:key/commits` | 列表端点已经返回同样的字段，单条端点是给外部集成留的 |
 | `GET /api/models/catalog` | `GET /api/providers/:id/models` 的响应里已经带 `catalog` 状态块 |
-| 工具的 `minRole` / `approval` / `scope` 只读 | 单一策略源 `TOOL_POLICY` 在注册期 fail-closed；从界面调低某个工具的最低角色 = 权限矩阵有两份会漂移的真相（docs/09 §3.7） |
+| 工具的 `scope` 只读 | `scope` 在运行时不参与任何判定，只是给人看的标签 —— 做成可写等于放一个改了没效果的开关。`source` 同理，它由注册方式决定 |
+| ~~工具的 `minRole` / `approval` 只读~~ **已推翻** | 原理由是「单一策略源 `TOOL_POLICY` 注册期 fail-closed，从界面调低最低角色 = 权限矩阵有两份会漂移的真相」。现按运维诉求开放为覆盖层（`tools.overrides.<name>.minRole` / `.approval` / `.timeoutMs`）：`TOOL_POLICY` 降级为默认值与对照基准，界面同时显示「代码默认」与「当前生效」，**放宽需二次确认**（409 `relax_requires_confirmation`）并在表上留标记。漂移风险用三条性质压住 —— 覆盖绕不过 `available()`、`approvalFor` 抬档只升不降、合并逻辑（`effectiveToolPolicy`）只有一份且 registry 与服务端共用。仅全局，不进 `perChat` 白名单。见 docs/09 §3.7 |
 | 模型别名不能指向不存在的模型、别名链不能为空 | `PUT /api/aliases/:alias` 的校验，不是缺口 |
 | 70 个 `KNOWN_UNIMPLEMENTED_CONFIG_KEYS` | 运行时没接线，**不该**有控件。接线时从白名单里摘掉，同时补控件、改 `docs/11` 的 🚧 清单、复算 §1 的数字 |
 

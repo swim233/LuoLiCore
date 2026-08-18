@@ -261,10 +261,27 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
 - 工具表：名称、来源（builtin/plugin/skill/mcp）、minRole、审批策略、作用域、启停状态、近 7 天调用次数与失败率、平均耗时。
   `GET /api/tools` 除策略外还返回每个工具当前的 `enabled`（来自 `tools.overrides`）——
   只给静态策略表的话，页面显示的东西与运行时无关。
-- 点任一行打开二级菜单（`UiModal`）：来源 / minRole / 审批 / 作用域**只读**并注明它们来自代码里的
-  单一策略源 `TOOL_POLICY`（注册期 fail-closed）；**能从界面调低某个工具的最低角色等于把权限矩阵
-  变成两份会漂移的真相**，所以这里唯一可写的是启停。停用是硬边界：既从工具目录移除，
-  `ToolRegistry.execute` 也二次拦截返回 `tool_disabled_by_operator`。
+- 点任一行打开二级菜单（`UiModal`）。**来源与作用域只读**：`source` 由注册方式决定，`scope`
+  在运行时不参与任何判定（它是给人看的标签），做成可写等于放一个改了没效果的开关。
+  **启停、minRole、审批策略、单次超时四项可写**，写进 `tools.overrides.<name>`。
+  停用仍是硬边界：既从工具目录移除，`ToolRegistry.execute` 也二次拦截返回 `tool_disabled_by_operator`。
+  - `TOOL_POLICY` 从「唯一真相」降级为**默认值与对照基准**：覆盖层缺某个字段就用它那份，
+    所以后续改代码里的策略仍然推得动没被显式覆盖的工具（覆盖字段一律 optional，不写默认值 ——
+    给了默认值等于把每一条历史覆盖行钉死在写它那天的策略上）。界面因此必须**同时显示
+    「代码默认」与「当前生效」**，只显示一个的话运维看不出自己在偏离什么。
+  - **放宽要二次确认**：minRole 调低、或审批降档（`always` → `conditional` → `never`）时，
+    `PATCH` 在没有 `confirmRelax:true` 的情况下返回 `409 relax_requires_confirmation` 并列出
+    哪几个字段、从什么放宽到什么；界面据此弹确认框，并在工具表上给该行留「已放宽」标记。
+    收紧与恢复默认直接保存。超时不算放宽（资源旋钮不是权限闸），照样进审计但不拦。
+  - **覆盖只动「角色闸」与「审批闸」这两道，绕不过 `available()`。** `spawn_harness` 在
+    `available()` 里硬判 `role === 'owner' && isPrivate`，把它的 minRole 覆盖成 `limited`
+    照样开不出来；`web_fetch` 对 `limited` 的 allowlist 判定同理。这一点要写在弹窗里 ——
+    否则运维会以为调低 minRole 就等于放开了那个工具。
+  - **`approvalFor` 的抬档不受覆盖影响**：覆盖设的是**基准档**，`memory_write` 这类靠
+    `approvalFor` 把自己抬进审批的工具，基准改成 `never` 也照样抬（`ToolRegistry` 取最严者）。
+  - `timeoutMs` 只对声明了超时的工具有效。`bash` / `python` / `spawn_agent` / `spawn_harness` /
+    `ask_parent` 声明的是 `timeoutMs: null`（它们各自有自己的硬期限），界面对这几个置灰并注明
+    原因 —— 从外面给它们套一层 race 会在它们自己的超时之前把调用砍掉。
 - 沙箱设置（已实现，在工具表下方）：`mode` 单选、容器网络、镜像、`dockerBin`、工作目录与
   **宿主工作目录**、内存 / CPU / 进程数 / tmpfs、`readOnlyRoot`、`bypassRoles`（多选）。
   写走 `PUT /api/sandbox`（点分键相对 `sandbox`），`sandbox` 在热更新白名单里，下一次工具调用即生效。
@@ -436,13 +453,33 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
 - 桌面通知仍未实现。
 
 ### 3.13 配置（Settings）
-- **触发与唤醒词**卡片（已实现）：`private` / `mention` / `reply` / `command` / `channels` 五个开关、
+
+页面是**四个二级 tab**（`常用 / 全部配置 / 维护 / 高级`，复用 §3.6 那套 `.subtabs`），不是一条长滚动。
+拆开的理由是量出来的：改之前八个区块并排，分组全折叠时首屏就有 **4430 px**，「全部配置」点一次
+「全部展开」是 **28075 px**（26 组 / 233 个可见字段，`tools` 一组就 2917 px）。而这八块实际是**四类
+访问频率差两三个数量级**的东西 —— 日常旋钮、全量 schema 表单、运维动作、逃生舱，此前在页面上权重完全相同。
+
+| tab | 装什么 |
+|---|---|
+| 常用 | 触发与唤醒词、输出节奏（含等待文案） |
+| 全部配置 | schema 自动生成的全量表单 + `[变更历史]` |
+| 维护 | 修改登录口令、五个维护动作、`[重启进程]`、导出 / 导入配置 |
+| 高级 | 原始 YAML 覆盖层、合并后的完整配置（默认收起） |
+
+- **前三个 tab 用 `v-show`，「高级」用 `v-if`**。这不是风格选择：触发、输出、全量表单三处各自握着
+  未保存的草稿（`triggerDirty` / `outputDirty` / `SchemaForm` 的 `draft`），`v-if` 会在切 tab 时销毁组件，
+  表现是**改了一半点去看别的 tab，回来什么都没了、也没有任何提示**。反过来「高级」必须 `v-if`：
+  它要把整份合并配置 `JSON.stringify` 一遍，常驻等于每次进设置页都白算一次。
+- `settingsTab` 与模板分支由 `tests/webui/console.render.test.ts` 逐个切过去断言有内容 ——
+  与导航项同一条防线（少一个分支 = 那个 tab 从此没人渲染过）。
+
+- **触发与唤醒词**卡片（已实现，`常用`）：`private` / `mention` / `reply` / `command` / `channels` 五个开关、
   唤醒词增删（每条标注「包含 / 正则」，不会生效的标红并写明原因）、`wakewordMinLength`、
   `requireTextAfterMention`、`ignoreEditedAsTrigger`。可用性判定打 `POST /api/config/wakewords/check`，
   与运行时匹配共用 `checkWakeword`（[08 §4](./08-telegram-adapter.md#4-触发判定)）；保存走 `PUT /api/config` 的点分键，
   热更新即时生效。列表里有不可用模式时保存会被服务端拒绝（`invalid_wakeword`）并把原因回显在 Toast 上。
   日志 SSE 会不断触发页面刷新，表单在有未保存改动时不被回写覆盖。
-- **输出节奏**卡片（已实现）：`output.mode`、`replyDelayMs`（防秒回，锚点是用户那条消息）、
+- **输出节奏**卡片（已实现，`常用`）：`output.mode`、`replyDelayMs`（防秒回，锚点是用户那条消息）、
   `streamBufferMs`（首帧缓冲，锚点是上游第一个 chunk）、`streamIntervalMs`、`streamMinDeltaChars`。
   两个锚点的区别写在字段说明里 —— 只调 `replyDelayMs` 治不了「第一条消息只有一个字」
   （[08 §5.2](./08-telegram-adapter.md#52-流式算法)）。保存同样走 `PUT /api/config` 的点分键，
@@ -456,7 +493,7 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
   界面预告的和实际发出去的会是两条不同的文案。
 - 会话级覆盖（`perChat.<contextKey>.*`）优先于全局值。**入口在会话页**（§3.2），不在这里 ——
   它只对选中的那个会话有意义，放在全局设置页既看不出改的是谁也看不出改的是什么。
-- **「全部配置」表单**（已实现）：由 `config.schema.json`（zod → JSON Schema）**自动生成**，
+- **「全部配置」表单**（已实现，`全部配置`）：由 `config.schema.json`（zod → JSON Schema）**自动生成**，
   分组折叠面板，每项一张卡片，显示键路径、**这一项的作用说明**、当前值、默认值、取值范围与
   `Tag: 热更新 / 需重启 / 未接线`。
   这是 [21 §1.1](./21-webui-coverage-gaps.md) 里那 109 个「已接线但改不了」配置项的正路 ——
@@ -476,6 +513,13 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
     （`role`、`nullableMoney`）发 `$ref`，把 `default` 放在 `$ref` 的兄弟位置。跟着 `$ref` 走再读，
     `quota.perChat.daily` 会显示成「默认 5」（真值 1）、`memory.pubWriteMinRole` 显示成
     「默认 blocked」（真值 trusted），说明也会串成同一句。
+  - **「只看非默认值」筛选**：判据是**当前值 ≠ schema 的 `default`**，两份数据表单本来就都在手，
+    不加端点、也不在前端存第二份清单。实测一个真实部署 **243 个叶子里只有 21 个偏离默认值** ——
+    「这个部署到底改过什么」此前在界面上根本答不出来，只能去「原始 YAML」猜，而那里是**覆盖层
+    不是差异集**：专用面板（配额 / 沙箱 / 输出）保存时整组写回，实测 `config_kv` 有 50 行，
+    其中大半的值与默认值相同。判定按 `JSON.stringify` 比较，**没有 `default` 的叶子不参与**
+    （判不出来就不标，别假装知道）。分组抬头同时给出该组的非默认项数，非默认的格子带一个左侧色条。
+    它与「待保存」是两件事：待保存 = 这次编辑还没提交，非默认 = 已经生效的值不是代码默认值。
   - **未接线的键默认隐藏**且控件禁用（可用「显示未接线项」翻出来看）：能点但运行时不读就是假控件。
   - **密钥字段只写**：不回显（`GET /api/config` 里它们已经是 `«redacted»`），占位符写明「已设置，
     留空表示不改」，另给 `[清空]` / `[撤销清空]`。曾经是整体只读，代价是 `tools.web.searchApiKey`
@@ -490,32 +534,36 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
     所以写入端也直接 400（[21 · G-CFG-03](./21-webui-coverage-gaps.md)）。
   - **整块写入会作废同一子树下更细的覆盖**（例如工具页逐个点出来的 `tools.overrides.<name>`）：
     响应里的 `subsumed` 列出它们，Toast 点名提醒去核对工具页的开关状态。
-  - **修改登录口令**（设置页首屏）：`POST /api/auth/password`，改完其余 session 全部吊销、
-    不用重启即时生效。`WEBUI_PASSWORD` 在环境里时整个表单换成告警 —— 那种情况下改了重启就回退。
   - 保存只发**真正改过的那几项**（点分键 → `PUT /api/config`）；保存后按 `hotReloadable` 分类回报，
     **需重启的键在 Toast 里点名** —— 「保存成功但运行时没变」是最误导的一类反馈（docs/20 · W-CFG-02）。
   - 有专用面板的键（触发 / 输出 / 配额 / 沙箱 / 工具开关 / Agent）在这里照样能改，但标注
     「另有专用面板」，那边有额外的校验与实时数据。
-- **`[原始 YAML]` 模式**（已实现）：编辑的是**覆盖层**（`config_kv`）而不是合并后的全量 ——
+- **修改登录口令**（已实现，`维护` 首屏）：`POST /api/auth/password`，改完其余 session 全部吊销、
+  不用重启即时生效。`WEBUI_PASSWORD` 在环境里时整个表单换成告警 —— 那种情况下改了重启就回退。
+- **`[原始 YAML]` 模式**（已实现，`高级`）：编辑的是**覆盖层**（`config_kv`）而不是合并后的全量 ——
   全量里绝大多数是代码默认值，导进另一个部署等于把那一刻的默认值钉死。
   **解析与校验都在服务端**，用的就是 `loadConfig` 那个 YAML 解析器：放到前端等于让两处方言各自漂移
   （缩进 tab、锚点、`yes/no` 当布尔这些边角都有差异），而「界面上过了、启动时炸了」是最难查的一类。
   语法错误回 `{ line, column }`，校验错误回 zod 的路径，两者都显示在编辑器旁边而不是让 Toast 一闪而过。
   落库按**顶层段**逐段覆盖，不是把整棵树写成一行 —— 后者会把工具页那种更细的覆盖全部作废（G-CFG-02）。
+- **合并后的完整配置**（已实现，`高级`，**默认收起**）：`config.yaml` → DB 覆盖层 → 环境变量三层
+  合并的只读结果，点 `[展开]` 才 `JSON.stringify`。它此前常驻在设置页最底下：既占掉一整屏，
+  又因为「看起来最全」而被当成真正的配置源 —— 它和上面那张表单是同一份数据的两种视图，
+  而能改的是表单那一份。
 - 保存 → 写 `config_kv` + `config_revisions` → 广播热更新事件；需重启项标注。
-- **`[重启进程]`**（`POST /api/restart`，已实现）：走和 SIGTERM 完全一样的优雅关闭路径（排空在途
+- **`[重启进程]`**（`POST /api/restart`，已实现，`维护`）：走和 SIGTERM 完全一样的优雅关闭路径（排空在途
   轮次、刷日志、WAL checkpoint），落点在 `apps/bot` —— 服务器包不重实现一遍。**先回响应再退出**：
   同一个 tick 里 `process.exit` 会让这次请求连响应都收不到，界面上表现成「点了没反应」。
   二次确认里必须写明**没有 systemd / docker 这类 supervisor 时进程不会自己回来**。
-- **`[变更历史]`**（已实现）：读 `GET /api/config/revisions`，列出最近 500 条覆盖写入的键、
+- **`[变更历史]`**（已实现，`全部配置` 抬头）：读 `GET /api/config/revisions`，列出最近 500 条覆盖写入的键、
   操作者、时间与新旧值。密钥类字段在写入时就已存成 `«redacted»`。
-- **`[导出配置]` / `[导入配置]`**（已实现）：导的是 `config_kv` 的**覆盖层**。密钥类键
+- **`[导出配置]` / `[导入配置]`**（已实现，`维护`）：导的是 `config_kv` 的**覆盖层**。密钥类键
   **直接不导出**而不是导成 `«redacted»` —— 导成占位符的话，导入端会把真密钥覆盖成一个字面量。
   判据是「叶子段像密钥 + 值是非空字符串」，与 `publicConfig` 同一套口径：拿整条点分路径去匹配会把
   `context.limit.tokens` 也当成密钥（`/token/i` 命中 "tokens"），于是一份导出里静静地少几项真配置。
   导入走和 `PUT /api/config` 完全一样的校验与落库路径，**按键覆盖、不删除**文件里没有的那些；
   被环境变量锁定的键跳过并点名（比让人先去删环境变量再导一次好）。
-- **维护操作**（已实现）：`[立即备份 DB]`、`[VACUUM]`、`[清理过期日志]`、`[清理孤儿文件]`、`[重建 FTS 索引]`
+- **维护操作**（已实现，`维护`）：`[立即备份 DB]`、`[VACUUM]`、`[清理过期日志]`、`[清理孤儿文件]`、`[重建 FTS 索引]`
   五个按钮，都走 `POST /api/maintenance/:action`，执行前二次确认（同步执行，大库上会阻塞写入），
   结果回显在 Toast 里（备份返回文件路径）。
   `[清理孤儿文件]`（`gc-files`）扫的是**孤儿**：`data/files/**` 与 `data/agent-results/**` 里没有任何
@@ -560,7 +608,7 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
 | `GET/PATCH /api/principals[/:id]` | 主体与角色 |
 | `POST /api/principals/bulk` | 批量登记主体：`{ids:[…], kind: user\|chat, role}`，单次上限 500。ID 必须是 Telegram 数字 ID（`^-?\d{1,20}$`），非法 ID 或非法角色返回 400。已存在的主体**只补一次 `setRole`，不再走 `upsertSeen`**（`ON CONFLICT` 分支不动 role 但会照写 `display_name`/`username`，而这里手上只有 `null`，等于把 Telegram 同步来的真名清空），返回 `{count, created, updated}` |
 | `POST /api/principals/roles` | 勾选批量改角色：`{ids:[主体 id…], role}`，单次上限 500。**只改已存在的行，不新建**（新建走 `/api/principals/bulk`，那边收的是 Telegram 数字 ID）；库里找不到的 id 原样回报而不是静默跳过，返回 `{count, changed, missing}` |
-| `GET /api/tools` `PATCH /api/tools/:name` | 工具启停。`GET` 在静态策略之外一并返回当前 `enabled`（来自 `tools.overrides`）。`PATCH` 写入 `tools.overrides.<name>.enabled`；被禁用的工具从工具目录消失，且 `ToolRegistry.execute` 会二次拦截并返回 `tool_disabled_by_operator`。未知工具名返回 404 |
+| `GET /api/tools` `PATCH /api/tools/:name` | 工具启停与策略覆盖。`GET` 每个工具回**生效值**（`minRole`/`approval`/`scope`/`source`/`enabled`/`timeoutMs`）外加 `defaults`（代码里那份）、`relaxed`（比默认更松的字段名）、`selfManagedTimeout`。`PATCH` 收 `{enabled?, minRole?, approval?, timeoutMs?, confirmRelax?}`，三个策略字段给 `null` = 恢复默认；**先读当前覆盖再整体写回** `tools.overrides.<name>`（一个 key 一条整叶 JSON，只写变动的那个字段会把其余的抹掉）。放宽且无 `confirmRelax` 时 `409 relax_requires_confirmation`。被禁用的工具从工具目录消失，且 `ToolRegistry.execute` 会二次拦截并返回 `tool_disabled_by_operator`。未知工具名返回 404 |
 | `GET/PUT /api/sandbox` `POST /api/sandbox/probe` `POST /api/sandbox/image` | 沙箱配置、探测、拉取镜像（只 pull 不 build；镜像名取自已保存的配置） |
 | `POST /api/approvals/test` | 审批规则试跑：`{tool, input?, rules?}` → 逐条命中报告 + 最终风险档位。用的是运行时那份匹配器 |
 | `GET /api/schedules` | 定时任务面板的数据：`{available, enabled, timezone, settings:{maxPerChat, minIntervalMinutes, maxPayloadChars}, jobs:[{id, key, chatId, threadId, createdBy, chatLabel, creatorLabel, name, mode, state, cron\|at, timezone, payload, runCount, nextRun?, lastRunAt?, lastState?, lastError?, createdAt, updatedAt}]}`。**跨会话**（WebUI 只有 owner 一个身份，[14](./14-open-questions.md) A15），`nextRun` 来自进程内的 `Scheduler`。没装配运行时时 `available:false` + 空数组 —— 界面据此说「读不到」，而不是「一条都没有」 |
