@@ -183,7 +183,8 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
 - **附件（已实现）**：对话卡片与检索结果行下面挂一条附件带子 —— 光栅图直接出缩略图，点开是大图
   （`GET /api/files/:id?inline=1`，白名单只有 png/jpeg/gif/webp，理由见 §4）；其余按类型出 chip，
   显示文件名 / mime / 大小 / 尺寸 / 时长，提取过正文的文档标「已提取正文」（模型当时读到的是正文）。
-  `download_state` 不是 `done` 的行打「下载失败 / 超限未下载」徽标并**不给下载链接** ——
+  `download_state` 不是 `done` 的行打「下载失败 / 超限未下载 / 已过期」徽标并**不给下载链接**
+  （`expired` = 文件按 `media.retentionDays` 清掉了，元数据还在，[14 §2 Q9-a](./14-open-questions.md)）——
   点开必然 404，给一个必然报错的入口比没有更糟。
 - **单条操作**：有 `turnId` 的消息可打开该轮实际调用；`[软删除]` 二次确认后调用
   `DELETE /api/messages/:id`，只设置 `deleted_at`，上下文提交、turn 与附件不级联删除；消息检索、
@@ -309,8 +310,15 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
 ### 3.9 子 Agent（Agents）
 
 - 表格：name、description、modelAlias、maxSteps、tools、minRole、resultMaxChars、injectMemory。
+- **来源徽标**（[14 §2 Q5-b](./14-open-questions.md)）：`GET /api/agents` 交回文件定义
+  （`agents/<name>.md`）与配置定义合并后的名单，每条带 `source` —— `file`（只在文件里，打
+  「来自文件」）/ `file-overridden`（两边都有，跑的是配置那份，打「覆盖了文件」）/ `config`（无徽标）。
 - `[新建 Agent]` / 行点击编辑整份 `agent.agents` 配置数组；保存后 `config.changed` 触发
-  `AgentManager.replaceDefinitions()`，删除也走同一条干净切换路径。
+  `AgentManager.replaceDefinitions()`（含一次文件重扫），删除也走同一条干净切换路径。
+  **写回时只写 `source !== 'file'` 的那些** —— 把整张合并名单写回去等于把每个 `.md` 悄悄复制进
+  DB 覆盖层，从此改文件不再生效而界面上什么都看不出来。
+- 编辑一条 `file` 定义**不置灰**：那正是「文件只读 / DB 赢」该有的入口，保存后它变成 `file-overridden`。
+  删除分两种：纯文件定义删不掉（提示去删那个 `.md`），覆盖则删掉覆盖、回到文件那份。
 - `[试跑]` 打开隔离面板：输入 task 后调用 `POST /api/agents/:name/dryrun`。服务端创建可审计的
   `agent_run`，复用 `runSubAgent`，以 NDJSON 逐行推送 step（正文、工具输入输出）、usage、
   final 或 error。关闭请求或点 `[取消试跑]` 会 abort 该试跑，不影响 Telegram turn。

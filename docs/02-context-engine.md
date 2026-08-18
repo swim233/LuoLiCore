@@ -475,10 +475,14 @@ type MaterializeResult = {
 | `/new` | 开新话题：不删历史，仅把窗口收缩到空 | 写 `kind='reset'` commit，`window_start = head_ordinal + 1` |
 | `/undo` | 撤销上一轮：done 指针回退一个 commit | `setRef(key,'done', head.parent_id)`；`context_messages` 不删（后续新 turn 的 ordinal 仍从当前最大值继续，不复用）。**`seq` 同理按 `MAX(seq)+1` 分配**：`ux_commits_key_seq` 是唯一索引，按 `head.seq+1` 递推会让撤销之后的下一次写入撞唯一约束 —— 表现是「撤销过的会话，下一条消息直接失败」，且 WebUI 的「回滚到此」一并 500 |
 | `/ctx` | 显示上下文状态 | commit seq、窗口 `[start,head]`、消息数、token 数/上限、最近一次 rebase/prune、claim 水位 |
-| `/ctx export` | 导出当前窗口为 `.md`（仅 owner） | 走 `sendDocument` |
 | WebUI「回滚到此 commit」 | 任意 commit 设为 done（owner） | `setRef` + 写 `kind='manual'` 审计 commit |
 
 `/undo` 之后若有并发 turn 正基于被撤销的 commit 运行，其 commit 会走 §3.3 情况 0（base 失效 → 挂到当前 HEAD + note）。
+
+> **没有 `/ctx export`。** 这张表此前列过一行「导出当前窗口为 `.md`（仅 owner）」，但它从未实现过 ——
+> `/ctx` 只回统计摘要。[14 §2 Q12](./14-open-questions.md) 已拍板**不做**上下文导出/导入（导入等于给
+> 上下文引擎开一个不受信入口，§9 那 14 条不变量多一个防守面，而「把会话搬到另一个部署」的收益几乎
+> 用不上），所以那行被删掉而不是补实现。完整时间线看 WebUI 的会话页。
 
 ---
 

@@ -111,7 +111,13 @@ export const CONFIG_DESCRIPTIONS: Record<string, string> = {
   'agent.askTimeoutMs': '子 agent 用 ask_parent 提问后，等待答复的超时（毫秒）。',
   'agent.maxAsksPerRun': '单次运行里 ask_parent 的调用次数上限，防止子 agent 一直反问而不干活。',
   'agent.askArbiter': '是否用 low 档模型自动仲裁 ask_parent 的提问，而不是每次都打断真人。',
-  'agent.askEscalateToUser': '仲裁也答不上来时，是否把问题转给真人。',
+  'agent.harness.command': 'harness 的可执行名，例如 claude 或 codex。',
+  'agent.harness.args': '固定参数；任务正文作为最后一个参数追加，不经 shell。',
+  'agent.harness.allowedDirs': 'harness 允许进入的仓库路径白名单。**留空 = 整个功能关闭**，工具连模型的工具目录都不进。',
+  'agent.harness.timeoutMs': '单次 harness 运行的时间上限，超时先 SIGTERM 再 SIGKILL。',
+  'agent.harness.maxOutputBytes': '交回给模型的 harness 输出上限，超出从中间截断。',
+  'agent.agentsDir': '子 agent 的 markdown 定义目录（agents/<名字>.md）。文件是只读来源，下面「子 Agent」页里的同名定义会覆盖它。改了 .md 之后要动一次配置或重启才会重扫。',
+  'agent.askEscalateToUser': '🚧 未接线：仲裁答不上来时把问题转给真人，需要一条「发选项—等人点—回灌」的阻塞式通道，目前没有。打开它只会在仲裁失败时多记一条日志。',
   'agent.progressThrottleMs': '子 agent 向上回报进度的最小间隔（毫秒）。',
   'agent.agents': '子 agent 定义数组：名字、描述、模型别名、步数、最低角色、可用工具、指令。Agent 页有专用编辑器，在这里直接改 JSON 容易写坏结构。',
 
@@ -199,6 +205,7 @@ export const CONFIG_DESCRIPTIONS: Record<string, string> = {
   'output.maxMentions': '单条回复里最多 @ 几个人，防止模型把整群都点一遍。',
 
   media: '图片与文件的下载、缩放与文本抽取。',
+  'media.retentionDays': '媒体文件保留多少天，0 = 不清。到期只删磁盘上的文件，消息与附件元数据保留（界面上会标「已过期」且不给下载）。改了要重启。',
   'media.dir': '下载下来的图片与文件的存放目录。',
   'media.maxImageBytes': '单张图片允许下载的字节上限。',
   'media.maxDocBytes': '单个文档允许下载的字节上限。',
@@ -250,7 +257,6 @@ export const CONFIG_DESCRIPTIONS: Record<string, string> = {
   'db.path': 'SQLite 数据库文件路径。',
   'db.backupKeep': '执行迁移前自动备份，保留最近几份。',
   'db.vacuumCron': 'VACUUM 整理任务的 cron 表达式。',
-  'db.ftsTokenizer': '全文检索的分词器：trigram 对中文友好，unicode61 更省空间。改了要重建索引，已有数据不会自动迁移。',
 
   logs: '日志级别、留存与请求载荷抓取。日志页读的就是这些文件。',
   'logs.level': '日志级别，低于它的不记录。',

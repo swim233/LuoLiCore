@@ -41,6 +41,12 @@ pnpm workspace，依赖方向严格单向：`shared → db → core → {telegra
 路径别名同时存在于三处，加新包时要一起改：`tsconfig.json` 的 `paths`、`vitest.config.ts` 的
 `resolve.alias`、以及各 `package.json` 的 `dependencies`。
 
+**单实例纪律**（`docs/01 §3.1`，`docs/14 §2 Q1` 拍板）：部署是单进程，但**保留了将来横向扩展的可能**。
+所以两条约束：为多实例预留的抽象（Repository 层的 key 参数、`KeyedMutex`）不许为了"反正单机"删掉；
+新代码不许引入**新的**进程内状态假设 —— 进程内缓存当唯一真相、进程内的锁/限流、只在本进程可见的广播、
+"启动时扫一遍之后只信内存"的表。**没有断言能挡住这条**，只能改到这几类东西时对着 `docs/01 §3.1` 那张
+表逐条看。纯函数记忆化、单请求内缓存、per-instance 语义的指标计数不算。
+
 ### 上下文引擎（`packages/core/src/context/engine.ts` + `packages/db/src/context.ts`）
 
 这是系统的核心，也是历史上出问题最集中的地方（`docs/15`–`docs/19` 四轮复审）。git 式模型：

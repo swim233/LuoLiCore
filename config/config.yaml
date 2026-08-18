@@ -104,6 +104,10 @@ output:
   maxMessageChars: 3900
 media:
   dir: ./data/files
+  # 媒体**文件**保留 90 天（14 §2 Q9-a）。到期只删磁盘上的文件，attachments 行与元数据留着，
+  # 界面上标「已过期」。0 = 永不清理。**升级到这一版的部署，第一次维护任务就会清掉 90 天前的
+  # 图片与文档** —— 不想要就在这里写 0。
+  retentionDays: 90
 skills:
   enabled: true
   dir: ./skills

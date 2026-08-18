@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AgentManager, Config, ContextEngine, FileTools, MemoryStore, ModelRegistry, QuotaGuard, QuotaReservation, Sandbox, SkillLoader, ToolRegistry, UsageLedger, LogSink } from '@luoli/core';
-import { DEFAULT_WEB_RETRY, builtinPolicy, numberLines, readSlice, runSubAgent, webFetch, webSearch, type WebRetryOptions } from '@luoli/core';
+import { DEFAULT_WEB_RETRY, arbitrateAsk, builtinPolicy, numberLines, readSlice, runHarness, runSubAgent, webFetch, webSearch, type WebRetryOptions } from '@luoli/core';
 import type { ArchiveRepository, ArchivedMessage, ScopedArchiveRepository } from '@luoli/db';
 import { citeArchivedMessages } from './cite.js';
 import { registerScheduleTools, type ScheduleToolDependencies } from './schedule.js';
@@ -342,9 +342,35 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
         progressBroadcast.delete(run.id);
       }
     } });
+  /**
+   * M11 · 起一个外部 harness CLI 改宿主上的仓库（docs/14 §2 Q8）。三道门：
+   * `available()` 判**仅 owner + 仅私聊 + 目录白名单非空**（三者任一不成立，工具根本不进模型的
+   * 工具目录，而不是进了目录再报错）；`TOOL_POLICY` 判 owner + 每次都审批；`runHarness` 判目录。
+   * `timeoutMs: null` —— 它自己有 `agent.harness.timeoutMs`，注册表那道 60s 兜底 race 会在
+   * harness 跑到一半时判 `tool_timeout`，而那个进程还在改文件。
+   */
+  registry.register({ name: 'spawn_harness', description: '在允许的仓库目录里起一个外部 coding harness（Claude Code / Codex）执行任务；仅 owner、仅私聊。', inputSchema: z.object({ task: z.string().min(10), dir: z.string() }), policy: builtinPolicy('spawn_harness'), sourcePriority: 90, timeoutMs: null, untrustedOutput: true,
+    available: (role, context) => {
+      const harness = (context.turn.config as Readonly<Config>).agent.harness;
+      return role === 'owner' && context.turn.isPrivate && harness.allowedDirs.length > 0;
+    },
+    execute: async (input, context) => {
+      const harness = (context.turn.config as Readonly<Config>).agent.harness;
+      // `available()` 已经判过一遍，这里再判一次：热更新可能在注册与执行之间把目录名单清空，
+      // 而模型完全可能沿用上一步的工具名（禁用必须是硬边界，CLAUDE.md）。
+      if (!context.turn.isPrivate || context.turn.effectiveRole !== 'owner') return { ok: false, error: 'harness_forbidden', hint: '仅 owner 在私聊里可用' };
+      const started = Date.now();
+      const result = await runHarness(input.task, input.dir, harness, context.turn.abortSignal);
+      dependencies.log.event({ level: result.ok ? 'info' : 'warn', kind: 'agent.harness', summary: `harness ${result.ok ? 'ok' : result.error} · ${result.dir ?? input.dir}`,
+        traceId: context.turn.turnId, chatId: context.turn.chatId, userId: context.turn.initiatorUserId,
+        data: { dir: result.dir ?? input.dir, command: harness.command, exitCode: result.exitCode, timedOut: result.timedOut, ms: Date.now() - started } });
+      return result;
+    } });
   registry.register({ name: 'read_agent_result', description: '分页读取子 agent 完整结果。', inputSchema: z.object({ runId: z.string(), offset: z.number().int().nonnegative().default(0), limit: z.number().int().positive().max(262_144).default(65_536) }), policy: builtinPolicy('read_agent_result'), sourcePriority: 90,
     execute: (input) => ({ ok: true, ...dependencies.agents.result(input.runId, input.offset, input.limit) }) });
-  registry.register({ name: 'ask_parent', description: '向父 agent 提问；仅子 agent 可用。', inputSchema: z.object({ question: z.string(), options: z.array(z.string()).default([]), default: z.string().optional() }), policy: builtinPolicy('ask_parent'), sourcePriority: 90,
+  // `timeoutMs: null`：仲裁自己有硬期限（`agent.askTimeoutMs`），再叠一层 `tools.defaultTimeoutMs`
+  // 的 60s race 只会让默认配置下的仲裁在跑到一半时被判 `tool_timeout`，而模型调用继续花钱。
+  registry.register({ name: 'ask_parent', description: '向父 agent 提问；仅子 agent 可用。', inputSchema: z.object({ question: z.string(), options: z.array(z.string()).default([]), default: z.string().optional() }), policy: builtinPolicy('ask_parent'), sourcePriority: 90, timeoutMs: null,
     available: (_role, context) => context.agentKind === 'sub', execute: async (input, context) => {
       const run = context.agentRunId ? dependencies.agents.byId(context.agentRunId) : null;
       const parent = run?.parentRunId ? dependencies.agents.byId(run.parentRunId) : null;
@@ -352,11 +378,29 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
       const count = dependencies.db.prepare("SELECT COUNT(*) FROM agent_messages WHERE from_run_id=? AND kind='ask'").pluck().get(run.id) as number;
       if (count >= (dependencies.maxAsksPerRun ?? 5)) return { ok: false, error: 'agent_ask_limit_exceeded' };
       const askId = dependencies.agents.ask(run, parent, input);
-      // 父 agent 仲裁（agent.askArbiter / askEscalateToUser）尚未实现。此前这里拿子 agent 自己的
-      // options[0] 当答复并返回 ok:true，等于伪造"请示已获批"（docs/19 · R-TOOL-01）。
+      const live = context.turn.config as Readonly<Config>;
+      // 父 agent 仲裁（docs/14 A7）。此前这里返回 `ask_parent_not_implemented` —— 那是正确的降级
+      // （更早的版本拿子 agent 自己的 options[0] 当答复并返回 ok:true，等于伪造「请示已获批」，
+      // docs/19 · R-TOOL-01），但它让三个配置键长期挂着。现在真的问一次 low 档模型。
+      if (live.agent.askArbiter) {
+        const task = dependencies.db.prepare('SELECT task_input AS task FROM agent_runs WHERE id=?').pluck().get(run.id) as string | undefined;
+        const verdict = await arbitrateAsk(parent, { question: input.question, options: input.options ?? [], agentName: run.agentName, task: task ?? '' }, context.turn,
+          { registry: dependencies.models, ledger: dependencies.ledger, log: dependencies.log, ...(dependencies.quota ? { quota: dependencies.quota } : {}),
+            reservation: (context.turn.reservation as QuotaReservation | undefined) ?? null,
+            provider: { maxRetries: live.provider.maxRetries, retryBaseMs: live.provider.retryBaseMs, retryMaxMs: live.provider.retryMaxMs,
+              requestTimeoutMs: live.provider.requestTimeoutMs, streamIdleTimeoutMs: live.provider.streamIdleTimeoutMs } },
+          { timeoutMs: live.agent.askTimeoutMs });
+        if (verdict.ok) { dependencies.agents.answer(askId, verdict.answer, 'arbiter'); return { ok: true, askId, answer: verdict.answer, source: 'arbiter' }; }
+        // 仲裁没成不是静默事件：它花了钱或者本该花钱，而子 agent 接下来会按「没人应答」走。
+        // `escalationRequested` 是刻意记出来的：`askEscalateToUser` 仍未接线（转人工要一条阻塞式
+        // 人机通道，docs/25 §8 那个缺口还开着），运维把它打开却什么都没发生时，日志里得有一行。
+        dependencies.log.event({ level: verdict.reason === 'cancelled' ? 'info' : 'warn', kind: 'agent.ask_unarbitrated', summary: `ask_parent arbitration ${verdict.reason}`,
+          traceId: context.turn.turnId, chatId: context.turn.chatId, data: { askId, agentRunId: run.id, reason: verdict.reason, detail: verdict.detail, escalationRequested: live.agent.askEscalateToUser } });
+      }
+      // 降级顺序：仲裁 → 子 agent 自带的 default → 明说没人应答。**不伪造答复**（docs/16 §5）。
       if (input.default !== undefined) { dependencies.agents.answer(askId, input.default, 'rule'); return { ok: true, askId, answer: input.default, source: 'default' }; }
       dependencies.agents.answer(askId, null, 'timeout');
-      return { ok: false, error: 'ask_parent_not_implemented', hint: '父 agent 仲裁尚未实现；请在 task 里自带决策依据，或提供 default', askId };
+      return { ok: false, error: 'ask_parent_unanswered', hint: live.agent.askArbiter ? '仲裁没能给出答复；请在 task 里自带决策依据，或调用时提供 default' : '仲裁已关闭（agent.askArbiter=false）；请在 task 里自带决策依据，或调用时提供 default', askId };
     } });
   registry.register({ name: 'report_progress', description: '报告子 agent 当前进度。', inputSchema: z.object({ status: z.string(), current: z.number().optional(), total: z.number().optional(), detail: z.string().optional() }), policy: builtinPolicy('report_progress'), sourcePriority: 90,
     available: (_role, context) => context.agentKind === 'sub', execute: (input, context) => {

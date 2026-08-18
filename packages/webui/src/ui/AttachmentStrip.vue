@@ -12,10 +12,13 @@ defineProps<{ items: Attachment[] }>();
 // 否则会画出一张永远加载不出来的缩略图。
 const INLINE_IMAGE_MIME = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 const ICONS: Record<string, string> = { photo: 'pi pi-image', document: 'pi pi-file', voice: 'pi pi-microphone', audio: 'pi pi-volume-up', sticker: 'pi pi-face-smile' };
-// download_state 只有 done / failed / skipped 三种（TelegramMedia.insert），done 不需要徽标。
+// download_state：done / failed / skipped 由 TelegramMedia.insert 写，expired 由
+// MaintenanceService.cleanup 写。done 不需要徽标。**expired 与 failed 必须分开**：前者是文件当初
+// 下来过、模型也看到过，只是过了 media.retentionDays 被清了；后者是从头到尾就没有过。
 const STATES: Record<string, { label: string; severity: TagSeverity; hint: string }> = {
   failed: { label: '下载失败', severity: 'danger', hint: '这条附件没有落盘 —— 模型当时看到的也只是一句「处理失败」占位文本' },
   skipped: { label: '超限未下载', severity: 'warn', hint: '超过 media.maxImageBytes / media.maxDocBytes，当时就没有下载' },
+  expired: { label: '已过期', severity: 'info', hint: '文件按 media.retentionDays 清掉了，元数据保留。当时模型看到的是原文件' },
 };
 const viewed = ref<Attachment | null>(null);
 const name = (file: Attachment): string => file.fileName || `${file.kind}-${file.id.slice(0, 8)}`;

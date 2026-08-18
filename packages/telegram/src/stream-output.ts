@@ -50,8 +50,10 @@ export class TelegramOutput {
     const finalText = this.beforeSend ? await this.beforeSend(text) : text;
     const parts = splitTelegramText(finalText, this.options.maxChars);
     const ids: number[] = [];
-    for (const part of parts) {
-      const message = await sendWithFallback(this.bot.api, this.chatId, part, replyToMessageId ? { reply_parameters: { message_id: replyToMessageId } } : {});
+    // **只有第一条分片带引用**，与 `consume()` 的收尾分片一致：整份都带的话，一条被切成五段的
+    // 长回复会在群里刷出五个引用块（docs/14 §2 Q10）。
+    for (const [index, part] of parts.entries()) {
+      const message = await sendWithFallback(this.bot.api, this.chatId, part, index === 0 && replyToMessageId ? { reply_parameters: { message_id: replyToMessageId } } : {});
       ids.push(message.message_id);
     }
     return ids;

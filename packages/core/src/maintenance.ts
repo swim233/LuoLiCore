@@ -12,7 +12,8 @@ export interface BlobDirectories {
 }
 
 /**
- * `maintenance.retention.*`。**每一项 0 = 不清** —— 保留期是运维策略，缺省不能变成「悄悄删了」。
+ * `maintenance.retention.*` + `media.retentionDays`。**每一项 0 = 不清** —— 保留期是运维策略，
+ * 缺省不能变成「悄悄删了」。
  * 只有派生数据在这里：`turns` / `tasks` 是 trace 的骨架，不给它们保留期是刻意的（见 schema 注释）。
  */
 export interface RetentionDays {
@@ -20,6 +21,8 @@ export interface RetentionDays {
   quotaCounters?: number;
   configRevisions?: number;
   memoryRevisions?: number;
+  /** `media.retentionDays`（不在 `maintenance.retention.*` 下，但过期动作在同一处执行）。 */
+  media?: number;
 }
 
 export class MaintenanceService {
@@ -92,8 +95,6 @@ export class MaintenanceService {
     // 子 agent 的全文结果是调试产物，和日志同龄同命：按 `logs.retentionDays` 过期。
     // 只清文件、把 `result_full_ref` 置空，`result_summary` 留着 —— 摘要是上下文里已经引用过的
     // 东西，删了会让历史轮次的引述变成悬空（docs/22 · I-09）。
-    // **媒体附件不在这里过期**：`data/files/**` 是用户数据，自动过期策略是 docs/14 §2 Q9 的
-    // 未决问题，替需求方决定不合适。gcFiles() 只扫没有任何 DB 行指向的孤儿。
     let agentResults = 0;
     for (const row of this.db.prepare("SELECT id,result_full_ref AS path FROM agent_runs WHERE result_full_ref IS NOT NULL AND finished_at IS NOT NULL AND finished_at<?").all(logCutoff) as Array<{ id: string; path: string }>) {
       try { rmSync(row.path, { force: true }); } catch { continue; }
@@ -114,10 +115,27 @@ export class MaintenanceService {
     const quotaCounters = expire(this.retention.quotaCounters, 'DELETE FROM quota_counters WHERE updated_at<?');
     const configRevisions = expire(this.retention.configRevisions, 'DELETE FROM config_revisions WHERE ts<?');
     const memoryRevisions = expire(this.retention.memoryRevisions, 'DELETE FROM memory_revisions WHERE ts<?');
+    // 媒体文件按 `media.retentionDays` 过期（docs/14 §2 Q9-a）：**删文件、留行**。行删掉的话
+    // 历史消息里那条「[图片]」会连同 mime/尺寸/已提取正文一起消失，上下文与检索结果都缺一块。
+    // `download_state='expired'` 是刻意的：只把 `local_path` 置空会和「下载失败」（'failed'）
+    // 混成同一种状态，运维分不出是过期清的还是当初就没下来。gcFiles() 扫不到这些文件 ——
+    // 它只找没有任何 DB 行指向的孤儿，而这些行一直指着。
+    let mediaFiles = 0;
+    if (this.retention.media && this.retention.media > 0) {
+      const mediaCutoff = now - this.retention.media * 86_400_000;
+      const forget = this.db.prepare("UPDATE attachments SET local_path=NULL,download_state='expired' WHERE id=?");
+      for (const row of this.db.prepare('SELECT id,local_path AS path FROM attachments WHERE local_path IS NOT NULL AND created_at<?').all(mediaCutoff) as Array<{ id: string; path: string }>) {
+        // force:true 不为「文件已经不在了」抛错 —— 那种行同样该标成 expired，否则每天扫一遍
+        // 都要再试一次这条永远删不掉的路径。
+        try { rmSync(row.path, { force: true }); } catch { continue; }
+        forget.run(row.id);
+        mediaFiles += 1;
+      }
+    }
     // 压缩在删除之后：已经过保留期的目录整个没了，没必要先压再删。
     const compressed = this.gzipAfterDays > 0 ? this.#gzipOldLogs(new Date(now - this.gzipAfterDays * 86_400_000).toISOString().slice(0, 10)) : 0;
     this.checkpoint();
-    return { logs, logDirectories, updates, sessions, approvals, agentResults, schedules, compressed, usage, quotaCounters, configRevisions, memoryRevisions };
+    return { logs, logDirectories, updates, sessions, approvals, agentResults, schedules, compressed, usage, quotaCounters, configRevisions, memoryRevisions, mediaFiles };
   }
 
   /**

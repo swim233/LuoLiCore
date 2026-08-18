@@ -170,7 +170,7 @@ CREATE TABLE attachments (
   size_bytes     INTEGER,
   width INTEGER, height INTEGER, duration_sec INTEGER,
   local_path     TEXT,                    -- data/files/<chatId>/<unique>.<ext>；null=未下载
-  download_state TEXT NOT NULL DEFAULT 'pending', -- pending|ok|skipped|failed
+  download_state TEXT NOT NULL DEFAULT 'pending', -- pending|ok|skipped|failed|expired（expired = 文件按 media.retentionDays 清掉了，行还在）
   download_error TEXT,
   extracted_text TEXT,                    -- pdf/txt/code 抽取结果（截断至 extract.maxChars）
   extract_state  TEXT,                    -- ok|too_large|unsupported|failed
@@ -630,7 +630,7 @@ Telegram 消息号，从这个高位段按会话取 `MAX+1`。别在这个区间
 
 | 数据 | 默认保留 | 清理方式 |
 |---|---|---|
-| `messages` / `attachments` | 永久 | 不清理（owner 可在 WebUI 按 chat 手动清） |
+| `messages` / `attachments`（**行**） | 永久 | 不清理（owner 可在 WebUI 按 chat 手动清）。[14 §2 Q9-b](./14-open-questions.md) 拍板：纯文本每万条才 5–15MB，不值得为它冒删错的风险。**行永久不代表文件永久** —— 见下面 `media.dir` 那行 |
 | `context_messages` | 永久 | 不清理（裁剪只移窗口） |
 | `log_events` | `logs.retentionDays` = 30 | 按 ts 删除 + `logs/` 目录同期归档删除 |
 | `logs/*.jsonl` | 同上 | 超期文件删除；可选先 gzip |
@@ -638,12 +638,12 @@ Telegram 消息号，从这个高位段按会话取 `MAX+1`。别在这个区间
 | `quota_counters` | `maintenance.retention.quotaCounterDays` = 400 | 按 `updated_at` 删过期账期的行；当前账期每轮都在更新，落不进保留期之外 |
 | `config_revisions` | `maintenance.retention.configRevisionDays` = 180 | 按 ts 删。删的是审计记录，不影响当前配置（`config_kv` 不动） |
 | `memory_revisions` | `maintenance.retention.memoryRevisionDays` = 180 | 按 ts 删。删掉之后回滚不到比它更早的版本 |
-| `turns` / `tasks` | 永久 | **刻意不给保留期**：它们是 trace 的骨架（`/api/turns/:id/detail` 靠 turn 行把日志、用量与上下文串起来），删掉等于历史轮次凭空消失。自动过期属 [14 §2 Q9](./14-open-questions.md) 的未决问题 |
+| `turns` / `tasks` | 永久 | **刻意不给保留期**：它们是 trace 的骨架（`/api/turns/:id/detail` 靠 turn 行把日志、用量与上下文串起来），删掉等于历史轮次凭空消失。[14 §2 Q9-c](./14-open-questions.md) 已确认永久保留，不再是未决问题 |
 | `processed_updates` | 7 天 | 定期删 |
 | `sessions` | 过期即删 | 每小时 |
 | `approvals` | 90 天 | pending 超 `expires_at` 标 `expired` |
 | `scheduled_jobs` | `schedule.retentionDays` = 30 | 只删**已结束**（`done` / `cancelled`）且 `updated_at` 超期的行。**活跃任务永不清** —— 清掉一条还在排的任务，表现是「bot 突然不再提醒了」而库里毫无痕迹 |
-| `data/files` | 永久 | owner 手动；孤儿文件（无 attachments 行）由周任务清理 |
+| `media.dir`（默认 `./data/files`）下的媒体**文件** | `media.retentionDays` = 90 | 按 `attachments.created_at` 删磁盘上的文件，**`attachments` 行与元数据保留**（[14 §2 Q9-a](./14-open-questions.md)）：历史消息里的「[图片]」还在、上下文与检索结果都不塌，只是点不开（T16）。`0 = 不清`。**真正占盘的是这一项** —— `gcFiles()` 只扫孤儿（没有任何 DB 行指向的文件），扫不到有行指着的正常媒体。删完把 `local_path` 置空并把 `download_state` 写成 `'expired'` —— 光置空会和「下载失败」（`'failed'`）混成一种状态，运维查起来分不出是过期删的还是当初就没下来 |
 | `data/cache/models.dev.json` | 永久 | 纯派生数据，删掉即可（下次拉取模型时自动重下）。年龄记在 `app_kv` 的 `catalog:models.dev`，超 `provider.catalog.ttlHours` 时用 ETag 条件请求续期 |
 
 清理任务在 `general.maintenanceCron`（默认每日 04:00 本地时间）执行，并在完成后 `PRAGMA wal_checkpoint(TRUNCATE)` + 每周一次 `VACUUM`。

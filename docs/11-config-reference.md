@@ -83,18 +83,17 @@ NODE_ENV=production
 
 ### 2.0.1 未实现键白名单
 
-当前白名单。**每一行都以 🚧 起头，测试 `config.test.ts` 要求白名单里的每个键都能在本文件里找到一行同时含该键与 🚧**，否则视为文档未同步。第五轮把这张表从 65 条压到 13 条，**剩下的每一条都写明为什么留着** —— 「暂时没做」和「做不了 / 不该在这一层做」是两回事：
+当前白名单。**每一行都以 🚧 起头，测试 `config.test.ts` 要求白名单里的每个键都能在本文件里找到一行同时含该键与 🚧**，否则视为文档未同步。第五轮把这张表从 65 条压到 13 条；[14 §2](./14-open-questions.md) 全部答复之后（2026-08-18）又降到 **10 条** —— `agent.askArbiter` / `agent.askTimeoutMs` 随 A7 接线，`db.ftsTokenizer` 随 Q3 直接从 schema 摘除，而 `agent.askEscalateToUser` 留下（原因见下）。**剩下的每一条都写明为什么留着** —— 「暂时没做」和「做不了 / 不该在这一层做」是两回事：
 
 | 🚧 键 | 为什么还没接 |
 |---|---|
 | 🚧 `telegram.webhook.url` · `telegram.webhook.path` · `telegram.webhook.secretToken` | webhook 模式整体没实现。`main.ts` 在 `mode !== 'polling'` 时**显式抛错**，不会出现「配成 webhook 后静默收不到消息」 |
 | 🚧 `telegram.notifyEdits` | 要把「上一轮之后有哪些编辑」带进 RUNTIME 块，得给 `RuntimeTurnContext` 加一块会话级瞬时状态 —— 那是上下文引擎的表面 |
-| 🚧 `trigger.ignoreEditedAsTrigger` | 先要定「编辑触发的那一轮与原轮次什么关系」：重开一轮还是改写历史，两种都会动到 rebase 与认领水位 |
+| 🚧 `trigger.ignoreEditedAsTrigger` | 先要定「编辑触发的那一轮与原轮次什么关系」：重开一轮还是改写历史，两种都会动到 rebase 与认领水位。[14 §2](./14-open-questions.md) 那一轮**没有覆盖这一条** —— 它不在 Q1–Q12 里 |
 | 🚧 `memory.autoApplyCompaction` | **记忆压缩本身没实现**（`compactCron` 只统计超过软上限的文档数）。给一个不存在的产物配「是否自动应用」是假开关 |
-| 🚧 `agent.askArbiter` · `agent.askEscalateToUser` · `agent.askTimeoutMs` | `ask_parent` 的父 agent 仲裁没实现（返回 `ask_parent_not_implemented`，不伪造答复）。[14](./14-open-questions.md) A7 也未确认。`askTimeoutMs` 同属这件事：这个工具从来不等答复，「等多久」无处可用 —— 它此前一路传进 `registerBuiltins` 却没有任何地方读它 |
-| 🚧 `tools.web.summarizeWithAlias` | 要在 `web_fetch` 里插一次模型调用：计费、配额、取消、失败降级都得跟着走一遍 |
+| 🚧 `agent.askEscalateToUser` | 转人工要一条**阻塞式人机通道**：在 Telegram 发一条带 inline 选项的消息、等人点、把结果回灌给正在等的那个子 agent。那条通道整体不存在（同一个缺口也挡着 inline keyboard 审批，`docs/25 §8`）。仲裁本身（`agent.askArbiter` + `askTimeoutMs`）已接线；这个键为真时仲裁失败只会多记一条 `agent.ask_unarbitrated` warn（带 `escalationRequested: true`），**不会真的去问人** |
+| 🚧 `tools.web.summarizeWithAlias` | 要在 `web_fetch` 里插一次模型调用：计费、配额、取消、失败降级都得跟着走一遍。**A7 的仲裁调用已经趟过同一条路**（见 `agent/ask-arbiter.ts`），要接的话照那个形状抄 |
 | 🚧 `media.groupDebounceMs` | 相册合并要按 `media_group_id` 在触发路径上缓冲 update，与并发和认领水位有交互（`concurrency.coalesceSameUserMs` 做的是按人合并） |
-| 🚧 `db.ftsTokenizer` | 换 tokenizer 要追加迁移重建 `messages_fts`，而「trigram 还是 jieba」是 [14 §2](./14-open-questions.md) Q3 的未决问题 |
 | 🚧 `webui.basePath` | 子路径挂载：要给所有路由加前缀、改静态资源 base、改 SPA 的 router base，三处一起动 |
 
 ```yaml
@@ -221,11 +220,21 @@ agent:
   maxDepth: 3                     # 需重启 · AgentManager 构造时吃的是快照（docs/20 · W-CFG-02）
   maxConcurrentSubagents: 3       # 热更新 · 同一轮里同时在跑的子 agent 数上限
   maxSubagentsPerTurn: 10         # 需重启 · 同上
-  askTimeoutMs: 120000            # 🚧 `ask_parent` 不等答复，这个值没有任何地方读
+  askTimeoutMs: 120000            # 热更新 · 子 agent 等仲裁答复的上限，超时按「仲裁不可用」降级
   maxAsksPerRun: 5                # 需重启 · registerBuiltins 构造时吃的是快照
-  askArbiter: true                # 热更新 · 用 low 档模型仲裁 ask_parent
-  askEscalateToUser: false        # 热更新 · 仲裁失败时是否转人工
+  askArbiter: true                # 热更新 · 用 low 档模型仲裁 ask_parent；false = 工具直接回「无人应答」
+  askEscalateToUser: false        # 🚧 转人工缺一条阻塞式人机通道，打开也只会多记一条 warn
   progressThrottleMs: 3000        # 热更新 · report_progress 广播到 SSE 的节流窗口（库里那行照常更新）
+  agentsDir: ./agents             # 热更新 · agents/<name>.md 的目录（14 §2 Q5）。文件是**只读**
+                                  # 来源，下面这份 agents 里的同名定义覆盖它。目录不存在 = 没有
+                                  # 文件定义，不报错。没有文件监听：改 .md 要动一次配置或重启
+  harness:                        # M11 · 起外部 coding harness 改宿主仓库（14 §2 Q8）
+    command: claude               # 需重启位面无关：每次调用现读。CLI 可执行名
+    args: [-p]                    # 任务正文作为 argv 最后一项追加，**不经 shell**
+    allowedDirs: []               # 热更新 · **空 = 整个功能关闭**，工具不进模型的工具目录。
+                                  # 只能在这里列出的路径（或其子目录）里跑
+    timeoutMs: 900000             # 热更新 · 单次上限；超时 SIGTERM，5s 后 SIGKILL
+    maxOutputBytes: 65536         # 热更新 · 交回模型的输出上限，中间截断
   agents:                         # 子 agent 定义（WebUI 可编辑，见 04 §3.1）
     - name: researcher
       description: 在聊天记录/文件/网络中检索资料并给出带引用的结论
@@ -419,6 +428,11 @@ output:
 # ============================================================ media（D16）
 media:
   dir: ./data/files               # 需重启
+  retentionDays: 90               # 需重启 · 媒体**文件**保留天数，0 = 不清。到期删盘上的文件、
+                                  # 保留 attachments 行（download_state 写 'expired'）——
+                                  # 历史消息里的「[图片]」还在，只是点不开（14 §2 Q9-a / T16）。
+                                  # 需重启的原因同 maintenance.retention.*：启动时交给
+                                  # MaintenanceService，不是每次 cleanup 现读
   maxImageBytes: 8388608
   maxDocBytes: 20971520
   maxImageEdge: 1568
@@ -482,7 +496,8 @@ schedule:
 # 而下面这四张表只涨不落 —— 读端点都有 LIMIT，所以症状不是慢查询而是**库文件只涨不落**，
 # 且 VACUUM 帮不上（数据还在，docs/27 · R-05）。
 # **turns 与 tasks 刻意不在其列**：它们是 trace 的骨架（/api/turns/:id/detail 靠 turn 行把日志、
-# 用量与上下文串起来），删掉等于历史轮次凭空消失 —— 那是 [14 §2 Q9] 的未决问题。
+# 用量与上下文串起来），删掉等于历史轮次凭空消失 —— [14 §2 Q9-c] 已确认永久保留。
+# 媒体**文件**的过期在 media.retentionDays（不在这一段下，但由同一次 cleanup() 执行）。
 # 每一项 **0 = 不清**；四项都在启动时交给 MaintenanceService，因此都需重启。
 maintenance:
   retention:
@@ -496,7 +511,8 @@ db:
   path: ./data/luoli.db           # 需重启
   backupKeep: 5
   vacuumCron: '0 5 * * 0'         # 需重启
-  ftsTokenizer: trigram           # 需重启 · trigram | unicode61
+                                  # 没有 ftsTokenizer：tokenize='trigram' 写死在 0001_init.sql 的建表
+                                  # 语句里，换它必须追加迁移重建 messages_fts，配置项换不动（14 §2 Q3）
 
 # ============================================================ logs（见 10）
 logs:

@@ -11,7 +11,7 @@ import { bodyLimit } from 'hono/body-limit';
 import { getConnInfo } from '@hono/node-server/conninfo';
 import { serveStatic } from '@hono/node-server/serve-static';
 import type { AgentManager, Config, ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, PluginManager, PromptDocuments, ProviderStore, Sandbox, SkillLoader, SkillWriteInput, SubAgentRuntimeEvent, TurnRegistry } from '@luoli/core';
-import { ALIAS_NAME_PATTERN, HOT_RELOADABLE_CONFIG_KEYS, createScheduledJob, scheduledJobView, testApprovalRules, KNOWN_UNIMPLEMENTED_CONFIG_KEYS, TOOL_POLICY, aliasSettingsSchema, checkWakeword, configSchema as runtimeConfigSchema, envPinnedConfigKeys, perChatConfig, probeProvider, quotaBucket, rejectedWakewords } from '@luoli/core';
+import { ALIAS_NAME_PATTERN, HOT_RELOADABLE_CONFIG_KEYS, createScheduledJob, mergeAgentDefinitions, scanAgentFiles, scheduledJobView, testApprovalRules, KNOWN_UNIMPLEMENTED_CONFIG_KEYS, TOOL_POLICY, aliasSettingsSchema, checkWakeword, configSchema as runtimeConfigSchema, envPinnedConfigKeys, perChatConfig, probeProvider, quotaBucket, rejectedWakewords } from '@luoli/core';
 import type { CatalogIndex, ModelMetadata, ProviderProbe } from '@luoli/core';
 import type { ArchiveRepository, OperationsRepository, PrincipalRepository, ScheduleRepository, ScheduledJob, Sqlite } from '@luoli/db';
 import { deleteAppKv, modelAliasKey, readAppKv } from '@luoli/db';
@@ -1400,7 +1400,23 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     dependencies.events.emit('health', { source: 'mcp', name: ctx.req.param('name'), ok: row?.state === 'up', code: row?.state ?? 'unknown' });
     return ctx.json({ ok: true, data: { name: ctx.req.param('name'), state: row?.state ?? null, error: row?.error ?? null } });
   });
-  app.get('/api/agents', (ctx) => ctx.json({ ok: true, data: currentConfig().agent.agents }));
+  // 文件定义（`agents/<name>.md`）与配置定义合并后一起交出去，每条带 `source`（docs/14 §2 Q5-b）：
+  // 界面上要能一眼看出哪条来自文件、哪条被 WebUI 覆盖过。**只回不可编辑的事实，不回文件路径**。
+  // 合并逻辑与 `main.ts` 共用 `mergeAgentDefinitions` —— 端点自己抄一遍的话，WebUI 迟早会显示出
+  // 一份运行时并不生效的名单。
+  app.get('/api/agents', (ctx) => {
+    const config = currentConfig();
+    const scan = scanAgentFiles(config.agent.agentsDir);
+    const fromFiles = new Set(scan.definitions.map((definition) => definition.name));
+    const overridden = new Set(config.agent.agents.map((definition) => definition.name));
+    const data = mergeAgentDefinitions(scan.definitions, config.agent.agents).map((definition) => ({ ...definition,
+      source: fromFiles.has(definition.name) ? (overridden.has(definition.name) ? 'file-overridden' : 'file') : 'config' }));
+    // 解析失败的文件不混进这张表（它们没有可展示的定义），走日志：启动与每次配置热更新时
+    // `main.ts` 各记一条 `agent.file_invalid` error + 一行 stderr。**没有文件监听** —— 光改
+    // agents/ 下的 .md 不会自动重扫，要么改一次配置要么重启。
+    for (const failure of scan.errors) dependencies.log.event({ level: 'error', kind: 'agent.file_invalid', summary: `子 agent 定义解析失败：${failure.file}`, data: failure });
+    return ctx.json({ ok: true, data });
+  });
   app.post('/api/agents/:name/dryrun', async (ctx) => {
     if (!dependencies.dryRunAgent) return ctx.json(apiError('not_implemented', 'Agent 试跑未接入运行时', 500).body, 500);
     const body = await ctx.req.json<{ task?: unknown }>().catch((): { task?: unknown } => ({}));

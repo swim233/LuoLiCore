@@ -216,6 +216,21 @@ bash: tool({
 
 `spawn_agent`（limited）、`list_agents`（limited）、`read_agent_result`（limited）、`ask_parent`/`report_progress`（仅子 agent）、`set_model`（trusted）。见 [04](./04-agents-and-providers.md)。
 
+`spawn_harness`（**owner + 每次审批**，M11）：在白名单目录里起一个外部 coding harness
+（Claude Code / Codex）执行任务。三道门，而且**只有三道**：
+
+| 门 | 判据 | 在哪 |
+|---|---|---|
+| 准入 | 仅 `owner` **且仅私聊**（`turn.isPrivate`） | `available()` —— 不满足时工具**不进模型的工具目录** |
+| 目录 | 只能在 `agent.harness.allowedDirs` 列出的路径或其子目录里跑；**空名单 = 功能关闭** | `available()` + `runHarness()` 各判一次（热更新可能在两者之间清空名单） |
+| 审批 | `approval: 'always'` —— 起 harness 这一个动作走一次审批 | `TOOL_POLICY` |
+
+**它内部的工具调用不受本系统约束**（[14](./14-open-questions.md) T17）：harness 自带一整套工具，
+`available()` 的注册期 fail-closed 与 `execute()` 的二次硬拦截都看不见。批准一次 = 批准它这一趟
+在那个目录里做的全部事情。任务正文作为 argv 最后一项传入、**不经 shell**；子进程 env 去掉
+`LUOLI_MASTER_KEY` / `BOT_TOKEN` / `WEBUI_PASSWORD`（harness 不需要，而我们看不见它的行为）。
+输出按 `untrustedOutput` 包裹后才进上下文。
+
 ### 3.6 网络
 
 | 工具 | minRole | 说明 |

@@ -4,7 +4,7 @@ import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { serve } from '@hono/node-server';
 import { ArchiveRepository, OperationsRepository, PrincipalRepository, ScheduleRepository, TurnRepository, closeDatabase, migrateDatabase, modelAliasKey, openDatabase, readAppKv, readPersistedConfig, recomputeMessageTokens, recoverAfterCrash, writeAppKv } from '@luoli/db';
-import { AgentManager, AgentResultStore, AlertDispatcher, ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, FileTools, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, ModelRegistry, PathJail, PluginManager, PromptAssembler, PromptDocuments, ProviderStore, QuotaGuard, Sandbox, ScheduledJobRunner, Scheduler, Secrets, SkillLoader, STABLE_PROMPT_BLOCKS, TOOL_POLICY, ToolRegistry, TurnConcurrency, TurnRegistry, UsageLedger, assembleMainPrompt, configJsonSchema, loadConfig, perChatConfig, registerBuiltins, rejectedWakewords, runMainAgent, runSubAgent, streamMainAgent, type SubAgentRuntimeEvent } from '@luoli/core';
+import { AgentManager, AgentResultStore, AlertDispatcher, ConfigStore, mergeAgentDefinitions, scanAgentFiles, ContextEngine, DatabaseApprovalBroker, EventBus, FileTools, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, ModelRegistry, PathJail, PluginManager, PromptAssembler, PromptDocuments, ProviderStore, QuotaGuard, Sandbox, ScheduledJobRunner, Scheduler, Secrets, SkillLoader, STABLE_PROMPT_BLOCKS, TOOL_POLICY, ToolRegistry, TurnConcurrency, TurnRegistry, UsageLedger, assembleMainPrompt, configJsonSchema, loadConfig, perChatConfig, registerBuiltins, rejectedWakewords, runMainAgent, runSubAgent, streamMainAgent, type SubAgentRuntimeEvent } from '@luoli/core';
 import { createServer, EventStreamRegistry, issueLoginToken, setupToken, type PromptPreviewResult } from '@luoli/server';
 import type { RuntimeTurnContext } from '@luoli/shared';
 import { TelegramTools, UpdatePoller, createTelegramBot } from '@luoli/telegram';
@@ -98,7 +98,21 @@ else log.event({ level: 'info', kind: 'skills.disabled', summary: 'Skills disabl
 // 跟着 `LUOLI_DATA_DIR` 走，和 `db.path` / `media.dir` 同一处（config/index.ts 的 envLayer）。
 // 三者指向不同部署时 `gcFiles()` 会把别人的数据当孤儿删掉（docs/25 §10）。
 const agentResultsDir = process.env.LUOLI_DATA_DIR ? resolve(process.env.LUOLI_DATA_DIR, 'agent-results') : resolve('data/agent-results');
-const agents = new AgentManager(db, new AgentResultStore(agentResultsDir), config.agent.agents, config.agent.maxDepth, config.agent.maxSubagentsPerTurn);
+/**
+ * `agents/<name>.md`（docs/14 §2 Q5）：文件是只读来源，`agent.agents`（DB / WebUI）同名覆盖它。
+ * 解析失败**必须报出来** —— 一个写错 frontmatter 的 agent 悄悄不存在，表现是「我明明加了这个
+ * agent，模型说没有」。所以每条错误一行 error 日志 + 一行 stderr，而不是让它消失在启动噪音里。
+ * 不为此中止启动：一个 agent 定义写错，不该让整个 bot 起不来（同 skills 的取舍）。
+ */
+const scanAgents = (current: typeof config) => {
+  const scan = scanAgentFiles(current.agent.agentsDir);
+  for (const failure of scan.errors) {
+    log.event({ level: 'error', kind: 'agent.file_invalid', summary: `子 agent 定义解析失败：${failure.file}`, data: failure });
+    process.stderr.write(`[agents] ${failure.file}: ${failure.error}\n`);
+  }
+  return mergeAgentDefinitions(scan.definitions, current.agent.agents);
+};
+const agents = new AgentManager(db, new AgentResultStore(agentResultsDir), scanAgents(config), config.agent.maxDepth, config.agent.maxSubagentsPerTurn);
 if (config.skills.enabled && config.skills.watch) skills.startWatching();
 const plugins = new PluginManager(db, config.plugins.dir, config.plugins.hookTimeoutMs, config.plugins.autoDisableAfterErrors, config.plugins.order, undefined,
   (name, error) => alerts.fire('plugin_auto_disabled', `plugin ${name} 连续出错已被自动禁用`, { plugin: name, error }, name));
@@ -115,7 +129,8 @@ await mcp.reconcile();
 const maintenance = new MaintenanceService(db, config.db.path, config.db.backupKeep, config.logs.retentionDays, config.logs.dir,
   { files: config.media.dir, agentResults: agentResultsDir }, config.logs.gzipAfterDays, config.schedule.retentionDays,
   { usage: config.maintenance.retention.usageDays, quotaCounters: config.maintenance.retention.quotaCounterDays,
-    configRevisions: config.maintenance.retention.configRevisionDays, memoryRevisions: config.maintenance.retention.memoryRevisionDays });
+    configRevisions: config.maintenance.retention.configRevisionDays, memoryRevisions: config.maintenance.retention.memoryRevisionDays,
+    media: config.media.retentionDays });
 const scheduler = new Scheduler((name, error) => log.event({ level: 'error', kind: 'scheduler.failed', summary: `${name} failed`, data: { error: error instanceof Error ? error.message : String(error) } }));
 scheduler.add(config.general.maintenanceCron, () => { const result = maintenance.cleanup(); log.event({ level: 'info', kind: 'maintenance.cleanup', summary: 'Scheduled cleanup complete', data: result }); }, 'maintenance');
 scheduler.add(config.db.vacuumCron, () => { maintenance.vacuum(); log.event({ level: 'info', kind: 'maintenance.vacuum', summary: 'Scheduled VACUUM complete' }); }, 'vacuum');
@@ -311,7 +326,10 @@ events.subscribe((event) => {
     if (keys.some((key) => key.startsWith('logs.level'))) log.setLevel(next.logs.level);
     if (keys.some((key) => key.startsWith('logs.redactPatterns'))) log.redactPatterns = next.logs.redactPatterns;
     if (keys.some((key) => key.startsWith('provider.') || key.startsWith('model') || key === 'tools.web.searchApiKey')) rebuildModels();
-    if (keys.some((key) => key.startsWith('agent.agents'))) agents.replaceDefinitions(next.agent.agents);
+    // `agentsDir` 也要触发重扫：改了目录却还用着旧目录扫出来的定义，是最难查的一种「没生效」。
+    // 写成两个显式判据而不是 `startsWith('agent.agents')` —— 后者顺带匹配上 `agentsDir` 是巧合，
+    // 而巧合会在下一次改键名时安静地失效。
+    if (keys.some((key) => key === 'agent.agentsDir' || key.startsWith('agent.agents.') || key === 'agent.agents')) agents.replaceDefinitions(scanAgents(next));
     if (keys.some((key) => key.startsWith('skills.'))) skills.scan();
     if (keys.some((key) => key.startsWith('plugins.'))) void plugins.reconcile();
     // McpManager 现在按 getter 读配置，但连接是有状态的：改了 servers 必须重跑一次 reconcile

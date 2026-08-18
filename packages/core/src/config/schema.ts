@@ -60,7 +60,14 @@ export const HOT_RELOADABLE_CONFIG_KEYS = [
   'general.name',
   // 取消时是否提交半截产出，`abortTurn` 从本轮 `turn.config` 读。
   'cancel.commitPartial',
-  'agent.main', 'agent.agents', 'agent.maxConcurrentSubagents', 'agent.progressThrottleMs',
+  // `agentsDir` 与 `agents` 一起热更新：两者任一变化都触发一次重扫 + `replaceDefinitions`
+  // （main.ts 的 scanAgents）。改了目录却还用着旧目录扫出来的定义是最难查的一种「没生效」。
+  'agent.main', 'agent.agents', 'agent.agentsDir', 'agent.maxConcurrentSubagents', 'agent.progressThrottleMs',
+  // 仲裁那两项每次 `ask_parent` 从本轮 `turn.config` 现读（builtins.ts）。
+  'agent.askArbiter', 'agent.askTimeoutMs',
+  // harness 的四项同理：`available()` 与 `execute()` 都从本轮 `turn.config` 现读。清空
+  // `allowedDirs` 下一轮就把工具从目录里摘掉 —— 关一个绕过全部工具闸的能力不该等重启。
+  'agent.harness',
   // 四项都是每轮从 `turn.config` 现读的（runtime.ts 的 wrappedFor / subagent 的 provider 块），
   // 改完下一轮生效；在途那一轮沿用开轮时的值。
   'provider.maxRetries', 'provider.retryBaseMs', 'provider.retryMaxMs', 'provider.requestTimeoutMs', 'provider.streamIdleTimeoutMs', 'provider.catalog',
@@ -120,23 +127,18 @@ export const KNOWN_UNIMPLEMENTED_CONFIG_KEYS = [
   // 记忆压缩**本身**没实现：`memory.compactCron` 那个定时任务只统计超过软上限的文档数，
   // 没有任何地方产出「压缩结果」。给一个不存在的产物配「是否自动应用」是假开关。
   'memory.autoApplyCompaction',
-  // `ask_parent` 的父 agent 仲裁没实现（`builtins.ts` 返回 `ask_parent_not_implemented`，
-  // 按「摘除比伪造安全」不拿默认值伪造答复）。这两个键是那件事的配置面，docs/14 A7 也还没确认。
-  'agent.askArbiter',
+  // 仲裁（`askArbiter`）与它的期限（`askTimeoutMs`）已接线（docs/14 A7）。**转人工没有**：
+  // 它要的是一个阻塞式的人机通道——在 Telegram 发一条带 inline 选项的消息、等人点、把结果回灌
+  // 给正在等的子 agent。那条通道整体不存在（同一个缺口也挡着 inline keyboard 审批，docs/25 §8）。
+  // 仲裁失败时这个键为真只会记一条 warn，不会真的去问人 —— 所以它仍然是未接线。
   'agent.askEscalateToUser',
-  // 同一件事的第三个键：`ask_parent` 从来不等答复（当场返回 `ask_parent_not_implemented` 或
-  // 调用方自带的 `default`），所以「等多久」无处可用。它此前一路传进 `registerBuiltins` 却
-  // 没有任何地方读，配置手册里也没标 —— 运维改它、以为改了什么。
-  'agent.askTimeoutMs',
   // 「抓回来的网页先用某个别名摘要再进上下文」要在 web_fetch 里插一次模型调用：计费、配额、
   // 取消信号、失败降级都得跟着走一遍。那是一个特性，不是一行读取。
+  // （`agent/ask-arbiter.ts` 已经趟过同一条路，要接的话照那个形状抄。）
   'tools.web.summarizeWithAlias',
   // 相册合并要在触发路径上按 `media_group_id` 缓冲 update 再统一开轮次，与并发、认领水位、
   // 去重都有交互。`concurrency.coalesceSameUserMs` 做的是按人合并，这个是按相册合并。
   'media.groupDebounceMs',
-  // 换 FTS tokenizer 要追加迁移重建 `messages_fts`（迁移文件提交后不可修改），而「trigram 还是
-  // jieba」本身是 docs/14 §2 Q3 的未决问题 —— 先定方案再动表。
-  'db.ftsTokenizer',
   // 子路径挂载：要给所有路由加前缀、改静态资源的 base、改 SPA 的 router base，三处一起动。
   // `publicUrl` 已随 `/webui` 一次性登录链接接线（第五轮）。
   'webui.basePath',
@@ -224,6 +226,20 @@ export const configSchema = z.object({
   agent: z.object({
     main: z.object({ modelAlias: z.string().default('main'), maxSteps: z.number().int().positive().default(12), downgradeAfterStep: z.number().int().positive().default(8) }).default({}),
     maxDepth: z.number().int().positive().default(3), maxConcurrentSubagents: z.number().int().positive().default(3), maxSubagentsPerTurn: z.number().int().positive().default(10), askTimeoutMs: z.number().int().positive().default(120_000), maxAsksPerRun: z.number().int().positive().default(5), askArbiter: z.boolean().default(true), askEscalateToUser: z.boolean().default(false), progressThrottleMs: z.number().int().positive().default(3000),
+    // `agentsDir`：`agents/<name>.md` 的目录（docs/14 §2 Q5）。文件是**只读**来源，下面这份
+    // `agents`（DB / WebUI）里的同名定义覆盖它。优先级写死，不做成配置项。
+    agentsDir: z.string().default('./agents'),
+    // M11 · HarnessAgent（docs/14 §2 Q8）：起一个外部 CLI（Claude Code / Codex）改宿主上的仓库。
+    // **`allowedDirs` 为空 = 整个功能关闭**，工具连模型的目录都不进 —— 这是刻意的默认：它绕过
+    // 本系统全部工具闸（T17），开它必须是一次显式的运维动作，而不是「装上就有」。
+    harness: z.object({
+      command: z.string().default('claude'),
+      // 任务正文作为 argv 的最后一项追加在这些参数之后，**不经 shell**。
+      args: z.array(z.string()).default(['-p']),
+      allowedDirs: z.array(z.string()).default([]),
+      timeoutMs: z.number().int().positive().default(900_000),
+      maxOutputBytes: z.number().int().positive().default(65_536),
+    }).default({}),
     agents: z.array(z.object({ name: z.string(), description: z.string(), modelAlias: z.string(), maxSteps: z.number().int().positive(), minRole: role.default('limited'), tools: z.array(z.string()).default([]), resultMaxChars: z.number().int().positive().default(4000), instructions: z.string(), injectMemory: z.boolean().default(false) })).default([]),
   }).default({}),
   provider: z.object({ maxRetries: z.number().int().nonnegative().default(2), retryBaseMs: z.number().int().positive().default(1000), retryMaxMs: z.number().int().positive().default(30_000), healthCheckCron: z.string().default('*/10 * * * *'), healthDownCooldownMinutes: z.number().positive().default(30), requestTimeoutMs: z.number().int().positive().default(120_000), streamIdleTimeoutMs: z.number().int().positive().default(60_000), allowPrivateBaseUrl: z.boolean().default(false),
@@ -251,7 +267,11 @@ export const configSchema = z.object({
     // 空白行在挑选时滤掉只是少一条备选。
     placeholderTexts: z.array(z.string()).default(['…']), placeholderPick: z.enum(['random', 'fixed']).default('random'), placeholderIndex: z.number().int().nonnegative().default(0),
     maxMentions: z.number().int().nonnegative().default(3) }).default({}),
-  media: z.object({ dir: z.string().default('./data/files'), maxImageBytes: z.number().int().positive().default(8_388_608), maxDocBytes: z.number().int().positive().default(20_971_520), maxImageEdge: z.number().int().positive().default(1568), maxImagesPerTurn: z.number().int().positive().default(4), groupDebounceMs: z.number().int().positive().default(1500), stickerAsImage: z.boolean().default(false), downloadVoice: z.boolean().default(true), extract: z.object({ enabled: z.boolean().default(true), maxChars: z.number().int().positive().default(40_000), inlineChars: z.number().int().positive().default(4000), codeExtensions: z.array(z.string()).default([]) }).default({}) }).default({}),
+  // `retentionDays`：媒体**文件**的保留天数（0 = 不清）。删文件、留 `attachments` 行并把
+  // `download_state` 写成 'expired' —— 行删掉的话历史消息里那条「[图片]」连同 mime/尺寸/已提取
+  // 正文一起消失（docs/14 §2 Q9-a）。与 `maintenance.retention.*` 一样在启动时交给
+  // MaintenanceService，所以是「需重启」。
+  media: z.object({ dir: z.string().default('./data/files'), retentionDays: z.number().int().nonnegative().default(90), maxImageBytes: z.number().int().positive().default(8_388_608), maxDocBytes: z.number().int().positive().default(20_971_520), maxImageEdge: z.number().int().positive().default(1568), maxImagesPerTurn: z.number().int().positive().default(4), groupDebounceMs: z.number().int().positive().default(1500), stickerAsImage: z.boolean().default(false), downloadVoice: z.boolean().default(true), extract: z.object({ enabled: z.boolean().default(true), maxChars: z.number().int().positive().default(40_000), inlineChars: z.number().int().positive().default(4000), codeExtensions: z.array(z.string()).default([]) }).default({}) }).default({}),
   skills: z.object({ enabled: z.boolean().default(true), dir: z.string().default('./skills'), watch: z.boolean().default(true), defaultMinRole: role.default('trusted') }).default({}),
   plugins: z.object({ enabled: z.boolean().default(true), dir: z.string().default('./plugins'), watch: z.boolean().default(false), hookTimeoutMs: z.number().int().positive().default(5000), order: z.array(z.string()).default([]), autoDisableAfterErrors: z.number().int().positive().default(3) }).default({}),
   mcp: z.object({ enabled: z.boolean().default(false), connectTimeoutMs: z.number().int().positive().default(15_000), healthCheckCron: z.string().default('*/5 * * * *'), defaultMinRole: role.default('trusted'), servers: z.array(mcpServerSchema).default([]) }).default({}),
@@ -279,7 +299,9 @@ export const configSchema = z.object({
       memoryRevisionDays: z.number().int().nonnegative().default(180),
     }).default({}),
   }).default({}),
-  db: z.object({ path: z.string().default('./data/luoli.db'), backupKeep: z.number().int().nonnegative().default(5), vacuumCron: z.string().default('0 5 * * 0'), ftsTokenizer: z.enum(['trigram', 'unicode61']).default('trigram') }).default({}),
+  // 没有 ftsTokenizer：`tokenize='trigram'` 写死在 0001_init.sql 的建表语句里，换它必须追加一份
+  // 重建 `messages_fts` 的迁移，配置项换不动。docs/14 §2 Q3 已拍板不引入 jieba，键随之摘除。
+  db: z.object({ path: z.string().default('./data/luoli.db'), backupKeep: z.number().int().nonnegative().default(5), vacuumCron: z.string().default('0 5 * * 0') }).default({}),
   logs: z.object({ level: z.enum(['debug', 'info', 'warn', 'error']).default('info'), dir: z.string().default('./logs'), captureBodies: z.boolean().default(true), bodyMaxBytes: z.number().int().positive().default(262_144), maxFileMb: z.number().positive().default(128), retentionDays: z.number().int().nonnegative().default(30), gzipAfterDays: z.number().int().nonnegative().default(3), console: z.enum(['pretty', 'json', 'off']).default('pretty'), redactPatterns: z.array(z.string()).default([]) }).default({}),
   quota: z.object({ enabled: z.boolean().default(true), requirePricing: z.boolean().default(true), minReserveUsd: z.number().nonnegative().default(0.02), global: z.object({ daily: nullableMoney.default(5), monthly: nullableMoney.default(100) }).default({}), perChat: z.object({ daily: nullableMoney.default(1), monthly: nullableMoney.default(null) }).default({}), perUser: z.object({ daily: nullableMoney.default(0.5), monthly: nullableMoney.default(null), byRole: z.record(z.object({ daily: nullableMoney.optional(), monthly: nullableMoney.optional() })).default({}) }).default({}), // perTurn 只留真正生效的两项。maxToolCalls / maxSubagents / maxDurationMs 已摘除：
   // 它们各有一个真正在管这件事的同名键（`tools.maxCallsPerTurn` / `agent.maxSubagentsPerTurn` /

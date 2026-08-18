@@ -54,6 +54,7 @@
 | [x] AC-DB-004 (自动) | 中文关键词「隆福」检索 | FTS trigram 命中；查询串长度 <3 时回退 LIKE 且仍带 chat 过滤 | 〔db.isolation.test.ts〕
 | [ ] AC-DB-005 | 迁移前 | `data/backup/luoli-*-pre-NNNN.db` 生成，且可用 `sqlite3` 打开 |
 | [ ] AC-DB-006 | 运行维护任务 | 过期日志删除、WAL checkpoint 生效、`processed_updates` 清理，日志有 `maintenance.*` |
+| [x] AC-DB-007 (自动) | 一条 100 天前的附件 + `media.retentionDays=90` | 磁盘上的文件删掉、`attachments` 行**留着**（mime / 大小 / 已提取正文都在），`download_state='expired'`（与 `failed` 分开）；90 天内的那条不动；`0 = 不清`；文件已经不在盘上时同样标 expired | 〔regression.round10.test.ts〕
 
 ## 2. 上下文引擎 AC-CTX
 
@@ -130,6 +131,7 @@
 | [x] AC-TG-022 (自动) | 流式回复持续输出，`streamIntervalMs=2000` | 首条消息发出本身算一次刷新，紧随其后的 chunk 不触发编辑；两次 `editMessageText` 之间同时满足 ≥ `streamIntervalMs` 与 ≥ `streamMinDeltaChars`；收尾那次编辑不受这两项约束 | 〔output.pacing.test.ts〕
 | [x] AC-TG-024 (自动) ★ | 同一会话连发 3 条都会触发的消息（`perKey=3`） | 三轮**同时**在跑（`turns` 里 3 行 `running`），不是排队等前一轮说完；`perKey=1` 时后两条进队列并最终各自跑完，一条都不丢 | 〔telegram.concurrency.test.ts〕
 | [x] AC-TG-025 (自动) ★ | 一批 update 同时到达，其中一条的入口段（媒体下载 / `onMessage` 钩子）很慢 | update 并发派发且在途数不超过 `global + queueMax`（到顶不再 `getUpdates`）；同一个 chat 的归档顺序仍等于用户说话顺序；单条 handler 抛错只上报不中断轮询 | 〔telegram.concurrency.test.ts〕
+| [x] AC-TG-026 (自动) | 一条被切成多片的长回复 | 每片都发出去，但**只有第一片**带 `reply_parameters`（否则群里刷出一串引用块）；流式与非流式（含「没配可用模型」那条兜底）两条投递路径一致；没有触发消息 id 时一片都不带（docs/14 §2 Q10） | 〔regression.round10.test.ts〕
 | [x] AC-ACL-001 (自动) ★ | `BLOCKED` 用户私聊 | 无回复、**不入库**、无 token 消耗；只有一条 `access.denied` 日志 | 〔access.commands.test.ts、security.test.ts〕
 | [x] AC-ACL-002 (自动) ★ | `OWNER` 在群 `G_LIMITED` @bot | `effective=limited`：写/执行类工具不在 `activeTools` 中 | 〔security.test.ts〕
 | [x] AC-ACL-003 (自动) ★ | `LIMITED` 用户在群 `G_TRUSTED` @bot | `effective=limited` | 〔security.test.ts〕
@@ -267,13 +269,16 @@
 | [ ] AC-SUB-005 (自动) ★ | `trusted` 派发子 agent | 子 agent `effective_role='trusted'`，不可能变成 owner；`allowHostFsForOwner` 对它无效 |
 | [ ] AC-SUB-006 (自动) | researcher 再派 researcher 再派 researcher | 第三层被环路检测/深度上限拒绝 |
 | [ ] AC-SUB-007 (自动) | 同 turn 派发 11 个子 agent | 第 11 个被 `maxSubagentsPerTurn` 拒绝 |
-| [ ] AC-SUB-008 | 子 agent 调 `ask_parent` | 依次尝试 rule → arbiter；`agent_messages` 有 ask/answer 行，`source='arbiter'`；子 agent 继续执行 |
-| [ ] AC-SUB-009 (自动) | 关闭 `askArbiter` 与 `askEscalateToUser` | ask 超时后返回提示，子 agent 自行决策并在结果中声明假设 |
+| [x] AC-SUB-008 (自动) | 子 agent 调 `ask_parent` | `askArbiter=true` 时走 low 档仲裁：`agent_messages` 有 ask/answer 行、`source='arbiter'`、花费落 `usage_ledger`（挂在父 run 上）；子 agent 继续执行 | 〔regression.round10.test.ts〕
+| [x] AC-SUB-015 (自动) | 仲裁不可用（没有 low 档模型 / 超时 / 空答复） | 有 `default` 时用它并记 `source='rule'`；没有则返回 `ask_parent_unanswered` + hint，**不伪造答复**；记一条 `agent.ask_unarbitrated` warn | 〔regression.round10.test.ts〕
+| [x] AC-SUB-009 (自动) | 关闭 `askArbiter`（`askEscalateToUser` 仍未接线） | 不发起仲裁调用，直接走 `default` / `ask_parent_unanswered`，hint 里点名是仲裁被关掉了 | 〔regression.round10.test.ts〕
 | [ ] AC-SUB-010 (自动) | 单个子 agent 提问 6 次 | 第 6 次直接返回超时错误（`maxAsksPerRun`） |
 | [ ] AC-SUB-011 (自动) | 子 agent 失败 | 主 agent 收到 `{ok:false,error}`；主 agent 组织回复告知用户，turn 不整体失败 |
 | [ ] AC-SUB-012 (自动) ★ | 子 agent 无 `memory_write` | 该工具不在子 agent 工具集；`injectMemory=false` 时其 instructions 不含记忆内容 |
 | [ ] AC-SUB-013 (自动) | 子 agent 返回 20 万字 | 按 `resultMaxChars` 截断 + `fullRef`；`read_agent_result` 可分页读全文 |
 | [ ] AC-SUB-014 (自动) ★ | 一轮里派发子 agent 并让它跑若干步 | `quota_counters.cost_usd` 的增量等于 `usage_ledger` 里该 turn 的总和；单轮成本闸门读 `ledger.turnCost`，子 agent 的花费也受 `quota.perTurn.maxCostUsd` 约束（docs/20 · W-QUOTA-01） |
+| [x] AC-SUB-016 (自动) | `agents/researcher.md` 写好 frontmatter + 正文 | 扫出来的定义缺省值与 `agent.agents` 那套一致（model=low / max-steps=8 / min-role=limited）；正文即 instructions；`agent.agents` 里的同名定义覆盖它，只在文件里的照常保留（docs/14 §2 Q5-a） | 〔regression.round10.test.ts〕
+| [x] AC-SUB-017 (自动) | 目录里放一个 name 与文件名不符的 .md、一个正文为空的 .md | 两个都进 `errors` 并各记一条 `agent.file_invalid`，**其余定义照常加载**（一个写错不该让整批消失，也不中止启动）；目录不存在时是空结果而不是异常 | 〔regression.round10.test.ts〕
 | [ ] AC-TASK-001 | 触发一个 >4s 的任务 | 出现占位消息「⏳ 已接收…」+ 取消按钮 |
 | [ ] AC-TASK-002 | 日常聊天（<4s） | **不出现**占位消息 |
 | [ ] AC-TASK-003 | 子 agent 多次 `report_progress` | 占位消息按 3s 节流更新，内容为最新进度 |
@@ -489,6 +494,7 @@
 | [x] AC-SEC-018 ★ (自动) | 审批规则写 `pattern: '(a+)+$'`，输入是 34 个 `a` 加一个 `!` | 求值在毫秒级完成（RE2，线性时间）；不兼容 RE2 的模式与超过 128 字符的模式在写入端当场拒收（docs/27 · S-03） | 〔regression.round9.test.ts〕
 | [x] AC-SEC-019 (自动) | `LUOLI_OWNER_ID=../../etc` | `configSchema` 拒收：这个值会被当成 `memory/private/<id>/` 的目录名用（docs/27 · S-08） | 〔regression.round9.test.ts〕
 | [x] AC-SEC-020 (自动) | `/grant user @alice owner` | 拒收并给出用法；`@username` 写不进 `principals`（否则那一行永远匹配不到任何消息，而命令回「已设置」）。三个 Telegram 命令与 `POST /api/principals/bulk` 共用 `parsePrincipal`（docs/27 · C-05） | 〔regression.round9.test.ts〕
+| [x] AC-SEC-022 (自动) ★ | `spawn_harness` 的三道门 | 默认（`agent.harness.allowedDirs` 为空）**不进模型的工具目录**，群聊同样不进；白名单外的目录当场拒绝且 hint 点名允许的路径；`/srv/app-secrets` 不算 `/srv/app` 的子目录；任务正文**不经 shell**；超时与取消分开报；策略档位恒为 owner + `approval: 'always'`（docs/14 §2 Q8 / T17） | 〔regression.round10.test.ts〕
 | [ ] AC-SEC-021 | 默认配置（`approval.rules` 为空）下让 `trusted` 用户触发 `bash` | 启动日志有一条 `approval.no_rules` 警告、stderr 有对应提示、WebUI 审批页顶上说明「0 条规则时 conditional 等于 never」—— 门是开的这件事必须说出来（docs/27 · S-02，选定方案②） |
 
 ## 12. 运维与稳定性（AC-OPS）
@@ -511,18 +517,18 @@
 
 | 模块 | 负责人 | 通过 AC 数 / 总数 | 豁免项及理由 | 日期 | 签署 |
 |---|---|---|---|---|---|
-| 配置与 DB | | 14 / 24 | | | |
+| 配置与 DB | | 15 / 25 | | | |
 | **上下文引擎** | | 30 / 39 | | | |
-| Telegram 与准入 | | 20 / 44 | | | |
+| Telegram 与准入 | | 21 / 45 | | | |
 | Agent 与 Provider | | 20 / 42 | | | |
 | 工具/沙箱/审批 | | 15 / 54 | | | |
-| Subagent 与任务 | | 15 / 35 | | | |
+| Subagent 与任务 | | 20 / 38 | | | |
 | 记忆 | | 1 / 13 | | | |
 | 日志与成本 | | 5 / 26 | | | |
 | 扩展生态 | | 3 / 27 | | | |
 | WebUI | | 10 / 81 | | | |
-| 安全 | | 5 / 21 | | | |
+| 安全 | | 6 / 22 | | | |
 | 运维 | | 1 / 9 | | | |
-| **合计** | | **139 / 415** | | | |
+| **合计** | | **147 / 421** | | | |
 
 **整体通过条件**：全部 ★ 项通过 + 非 ★ 项通过率 ≥ 95% + 所有豁免项经需求方书面确认。

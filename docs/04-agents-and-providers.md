@@ -183,7 +183,40 @@ for await (const chunk of res.textStream) out.push(chunk);   // → Telegram 流
 
 ### 3.1 定义方式
 
-Subagent 定义为**配置数据**（`config.agents[]` + WebUI 可编辑；plugin 也可注册），不是代码：
+Subagent 定义有**两个来源**，都不是代码（[14 §2 Q5](./14-open-questions.md)）：
+
+| 来源 | 谁写 | 能不能在 WebUI 改 |
+|---|---|---|
+| `agent.agents[]`（配置数据，DB 覆盖层 + WebUI；plugin 也可注册） | 运维 | 能 |
+| `agents/<name>.md`（`agent.agentsDir`，默认 `./agents`） | 谁都行，**可以 git 版本化** | 能，但改的结果是在配置层建一份**覆盖** |
+
+**同名时配置赢**，优先级写死、不做成配置项 —— 两个来源静默打架比只有一个来源糟得多。
+`GET /api/agents` 交回合并后的名单，每条带 `source`（`config` / `file` / `file-overridden`），
+WebUI 据此打徽标；写回 `agent.agents` 时**只写 source 不是 `file` 的那些**，否则一次保存就会把每个
+文件定义悄悄复制进 DB 覆盖层，从此改文件不再生效而界面上什么都看不出来。
+
+md 的 frontmatter 用 kebab-case（与 `SKILL.md` 一致），正文就是 `instructions`：
+
+```markdown
+---
+name: researcher            # 必须等于文件名
+description: 在聊天记录/文件/网络中检索资料并给出带引用的结论
+model: low                  # 默认 low
+max-steps: 20               # 默认 8
+min-role: limited           # 默认 limited
+tools: [read_file, grep, web_fetch]
+result-max-chars: 4000
+inject-memory: false
+---
+你是检索型子 agent。目标：用尽可能少的 token 找到确定答案。
+```
+
+解析失败**不静默跳过**：每个坏文件记一条 `agent.file_invalid` error + 一行 stderr，其余照常加载
+（一个 agent 写错不该让整个 bot 起不来）。正文为空同样算错误 —— 那等于一个没有职责说明的 agent。
+**没有文件监听**：只改 `.md` 不会自动重扫，要么动一次配置（`agent.agents` / `agent.agentsDir` 都会
+触发）要么重启。
+
+配置数据那一份长这样：
 
 ```yaml
 agents:
@@ -350,12 +383,20 @@ report_progress: tool({
 
 ### 4.3 父 agent 侧如何应答 `ask`
 
-父 agent 正处在 `spawn_agent` 的 `execute` 里（同一个 JS 事件循环），不可能「在工具执行中途再跑一次模型 step」。因此 `ask` 的应答策略按顺序尝试：
+父 agent 正处在 `spawn_agent` 的 `execute` 里（同一个 JS 事件循环），不可能「在工具执行中途再跑一次模型 step」。因此 `ask` 的应答按顺序降级 —— **任何一级都不伪造答复**（[16 §5](./16-remediation-plan.md)）：
 
-1. **规则应答**：若 `options` 非空且 ASSIST.md 预设了默认选择策略（如「不确定时选第一项并声明假设」），Bus 直接按规则应答，记 `answer.source='rule'`。
-2. **独立仲裁调用**（默认启用，`agent.askArbiter: true`）：Bus 用 `low` 档模型发起一次**独立的、无工具的**小调用，输入 = 父 agent 的系统提示词摘要 + 主对话最近 N 条 + 子 agent 的问题，输出 = 答复文本。这既不打断父 loop，也让答复具备主对话上下文。记 `answer.source='arbiter'`。
-3. **转人工**（`urgency='blocking'` 且 `agent.askEscalateToUser: true`，默认 false）：在 Telegram 发一条带 inline 选项的消息问用户，等待 `askTimeoutMs`。记 `answer.source='user'`。
-4. **超时**：返回 `{ok:false}`，子 agent 按提示词自行决策并声明假设。
+1. **独立仲裁调用**（默认启用，`agent.askArbiter: true`）：用 `low` 档模型发起一次**独立的、无工具、只走一步**的调用（`packages/core/src/agent/ask-arbiter.ts`），输入 = 提问的子 agent 名 + 它的 task + 问题 + options，输出 = 答复文本。记 `answer.source='arbiter'`。
+   - 硬期限 `agent.askTimeoutMs`，与本轮 `abortSignal` 合成一个信号：**取消与超时分开报**，否则用户按了 `/cancel` 却看到「仲裁超时」，会去调一个不相干的配置。
+   - 花费按 `low` 档记进 `usage_ledger` 并 `quota.commit`，挂在**父 run** 上（是父 agent 在回答，也不该给子 agent 记一笔它没花的钱）。
+   - 子 agent 的 task 与问题一律经 `untrusted()` 包裹后再交给仲裁模型：那些文本里可能带着它读过的网页与文件。
+   - 空答复算失败 —— 子 agent 会把空串当成一个有效结论继续做下去。
+2. **调用方自带的 `default`**：仲裁不可用（没有 `low` 档模型 / 超时 / 失败 / 空答复）且调用时给了 `default` 时用它，记 `answer.source='rule'`。
+3. **明说没人应答**：返回 `{ok:false, error:'ask_parent_unanswered'}` + 一句能照着改的 hint，子 agent 按提示词自行决策并声明假设。
+
+**没有「转人工」这一级。** `agent.askEscalateToUser` 仍在未接线白名单里：它要的是一条阻塞式人机通道
+（发 inline 选项 → 等人点 → 把结果回灌给正在等的子 agent），而那条通道整体不存在 —— 挡着它的
+缺口与 inline keyboard 审批是同一个（[25 §8](./25-round7-remediation.md)）。打开这个键时，仲裁失败
+会多记一条带 `escalationRequested: true` 的 `agent.ask_unarbitrated` warn，**不会真的去问人**。
 
 所有 `ask/answer` 都落 `agent_messages` 表并进日志（`kind='agent.ask'` / `'agent.answer'`）。
 

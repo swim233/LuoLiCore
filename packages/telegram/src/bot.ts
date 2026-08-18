@@ -534,8 +534,11 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
         // `output.maxMentions` 在**投递侧**收口：提示词里说好不要 @全群不是边界，这里才是。
         const outgoing = capMentions(hooked, outputConfig.maxMentions);
         await holdReply(receivedAt, outputConfig.replyDelayMs);
-        for (const part of splitTelegramText(outgoing, outputConfig.maxMessageChars)) {
-          const sent = await sendWithFallback(bot.api, chatId, part, {}, outputConfig.parseMode);
+        // 引用触发消息：与流式那条路（`TelegramOutput.consume`）必须一致。此前这条兜底路径不带
+        // 引用，于是「尚未配置可用模型」这类提示在群里飘着，没人知道它在回谁（docs/14 §2 Q10）。
+        // **只有第一条分片带**，否则一条长回复会在群里刷出一串引用块。
+        for (const [index, part] of splitTelegramText(outgoing, outputConfig.maxMessageChars).entries()) {
+          const sent = await sendWithFallback(bot.api, chatId, part, index === 0 ? { reply_parameters: { message_id: message.message_id } } : {}, outputConfig.parseMode);
           scoped.append({ chatId, messageThreadId: message.message_thread_id ?? null, tgMessageId: sent.message_id, direction: 'out', fromKind: 'bot', fromUserId: String(bot.botInfo.id), fromName: bot.botInfo.first_name, fromUsername: bot.botInfo.username,
             kind: 'text', text: part, tgDate: sent.date * 1000, raw: sent, triggered: false, turnId: turn.turnId });
         }
