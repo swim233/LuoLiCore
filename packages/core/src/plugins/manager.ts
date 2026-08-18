@@ -86,13 +86,15 @@ export class PluginManager {
     for (const plugin of this.list()) {
       const hook = plugin.hooks[name];
       if (!hook || !plugin.enabled) continue;
+      // 计时器在 finally 里清：钩子抛错时走的是 catch，`clearTimeout` 被跳过，那个定时器要留到
+      // `plugins.hookTimeoutMs` 才自灭 —— 一个每条消息都抛的 onMessage 钩子就是每条消息留一个
+      // 挂着的定时器（docs/27 · R-07）。
+      let timer: ReturnType<typeof setTimeout> | undefined;
       try {
-        let timer: ReturnType<typeof setTimeout> | undefined;
         const timeout = new Promise<never>((_, reject) => {
           timer = setTimeout(() => reject(new Error('plugin hook timeout')), this.timeoutMs);
         });
         const result = await Promise.race([Promise.resolve(hook(...arguments_)), timeout]);
-        clearTimeout(timer);
         plugin.errors = 0;
         output.push({ plugin: plugin.name, result });
       } catch (error) {
@@ -105,7 +107,7 @@ export class PluginManager {
           // 用户只看到某个能力没了（`alerts.on` 的 plugin_auto_disabled）。
           this.onAutoDisable?.(plugin.name, message);
         }
-      }
+      } finally { clearTimeout(timer); }
     }
     return output;
   }

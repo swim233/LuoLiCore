@@ -539,6 +539,11 @@ code { font-family: var(--font-mono); font-size: .82rem; }
 .override-chip button { display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; color: var(--muted); }
 .override-chip button:hover { color: var(--rose); background: var(--surface); }
 .chat-overrides .schema-form { width: 100%; }
+/* character 不是 schema 叶子键，所以它有一个自己的输入行而不是长在 SchemaForm 里（docs/27 · C-08）。 */
+.chat-character { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 10px; align-items: end; width: 100%; max-width: 520px; }
+.chat-character label { display: grid; gap: 4px; font-size: .78rem; color: var(--muted); }
+.chat-character input { width: 100%; font-family: var(--font-mono); }
+.chat-character .field-note { grid-column: 1 / -1; margin: 0; color: var(--muted); font-size: .72rem; line-height: 1.55; }
 
 /* ── 由 config.schema.json 自动生成的配置表单（docs/21 §1.1） ──
    这块以前只写了骨架，几乎每个类名都落在别处的后代选择器里（`.form-grid .field-note`、

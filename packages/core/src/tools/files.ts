@@ -1,4 +1,4 @@
-import { type Stats, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { type Stats, closeSync, cpSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { minimatch } from 'minimatch';
 import { basename, dirname, relative } from 'node:path';
 import { ulid } from 'ulid';
@@ -21,11 +21,36 @@ export function numberLines(content: string, firstLine: number): string {
   if (lines.length > 1 && lines.at(-1) === '') lines.pop();
   return lines.map((line, index) => `${firstLine + index}\t${line}`).join('\n');
 }
-/** 分页读的第二页行号要接着第一页往下数，所以起点按 offset 之前的换行数算，而不是从 1 重来。 */
-export function lineAtOffset(buffer: Buffer, offset: number): number {
-  let lines = 1;
-  for (let index = 0; index < Math.min(offset, buffer.length); index += 1) if (buffer[index] === 0x0A) lines += 1;
-  return lines;
+/** 数换行时的固定缓冲。分块只是为了让内存有界，大小无所谓，够摊平系统调用就行。 */
+const SCAN_CHUNK_BYTES = 65_536;
+/**
+ * 定位读。整份 `readFileSync` 之后再 `subarray` 只裁了「交给模型的那一段」——**读盘那一下仍是
+ * 整份进内存**，而 `tools.fs.maxReadBytes`（默认 256 KiB）管不到它。workspace 里的大文件正是
+ * `bash` / `python` 自己造出来的（`dd`、日志、下载），`read_file` 一个 2 GB 文件就是一次 2 GB
+ * 分配（docs/27 · R-02；`grep` 早就有 `size > maxReadBytes*4` 那道闸，read / edit 没有）。
+ *
+ * 分页语义一个字不变，行号也仍然精确：第二页的起始行号要接着第一页往下数，所以前 `offset`
+ * 字节按固定缓冲分块扫一遍换行 —— I/O 与从前一样，内存从 O(文件) 变成 O(1)。
+ */
+export function readSlice(path: string, offset: number, limit: number): { content: string; firstLine: number; size: number; read: number } {
+  const size = statSync(path).size;
+  const handle = openSync(path, 'r');
+  try {
+    let firstLine = 1;
+    if (offset > 0) {
+      const scan = Buffer.allocUnsafe(Math.min(offset, SCAN_CHUNK_BYTES));
+      for (let position = 0; position < offset;) {
+        const got = readSync(handle, scan, 0, Math.min(scan.length, offset - position), position);
+        if (!got) break;
+        for (let index = 0; index < got; index += 1) if (scan[index] === 0x0A) firstLine += 1;
+        position += got;
+      }
+    }
+    const want = Math.max(0, Math.min(limit, size - offset));
+    const buffer = Buffer.allocUnsafe(want);
+    const read = want ? readSync(handle, buffer, 0, want, offset) : 0;
+    return { content: new TextDecoder('utf-8', { fatal: false }).decode(buffer.subarray(0, read)), firstLine, size, read };
+  } finally { closeSync(handle); }
 }
 
 interface Child { real: string; logical: string; stat: Stats }
@@ -47,13 +72,10 @@ export class FileTools {
 
   read(path: string, offset = 0, limit = this.maxReadBytes): Record<string, unknown> {
     const target = this.jail.resolve(path);
-    const buffer = readFileSync(target);
-    const effective = Math.min(limit, this.maxReadBytes);
-    const decoder = new TextDecoder('utf-8', { fatal: false });
-    const content = decoder.decode(buffer.subarray(offset, offset + effective));
-    const firstLine = lineAtOffset(buffer, offset);
-    return { ok: true, path: relative(this.jail.root, target), content: numberLines(content, firstLine), firstLine, offset, bytes: Buffer.byteLength(content),
-      truncated: offset + effective < buffer.length, nextOffset: offset + effective < buffer.length ? offset + effective : null };
+    const slice = readSlice(target, offset, Math.min(limit, this.maxReadBytes));
+    const more = offset + slice.read < slice.size;
+    return { ok: true, path: relative(this.jail.root, target), content: numberLines(slice.content, slice.firstLine), firstLine: slice.firstLine, offset, bytes: Buffer.byteLength(slice.content),
+      truncated: more, nextOffset: more ? offset + slice.read : null };
   }
 
   /** 目录去重按 realpath 记：软链自指时同一个真实目录会被再次进入，条数上限拦不住无限递归。 */
@@ -206,6 +228,12 @@ export class FileTools {
 
   edit(path: string, oldString: string, newString: string, replaceAll = false): Record<string, unknown> {
     const target = this.jail.resolve(path);
+    // 这一支**必须**整份读（要在全文里数 oldString 的出现次数），所以先量再读。判据用
+    // `maxWriteBytes` 而不是 `maxReadBytes`：改完这份内容反正要经 `write()` 那道写入闸，
+    // 拿读预算（256 KiB）挡会把一堆正常大小的源码文件一起挡掉（docs/27 · R-02）。
+    const size = statSync(target).size;
+    if (size > this.maxWriteBytes) return { ok: false, error: 'file_too_large_to_edit',
+      hint: `${relative(this.jail.root, target)} 有 ${size} 字节，超过 tools.fs.maxWriteBytes（${this.maxWriteBytes}）—— 这个工具要把全文读进内存才能定位 oldString。改用 bash 里的 sed / python 就地改。` };
     const content = readFileSync(target, 'utf8');
     const occurrences = content.split(oldString).length - 1;
     // 行号前缀被一起抄进 oldString 是这个工具最常见的失败方式（`read_file` 交回的正文带行号）。

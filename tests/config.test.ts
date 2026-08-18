@@ -1,7 +1,7 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { CONFIG_DESCRIPTIONS, HOT_RELOADABLE_CONFIG_KEYS, KNOWN_UNIMPLEMENTED_CONFIG_KEYS, configJsonSchema, configSchemaLeafPaths, configSchema } from '@luoli/core';
+import { CONFIG_DESCRIPTIONS, HOT_RELOADABLE_CONFIG_KEYS, KNOWN_UNIMPLEMENTED_CONFIG_KEYS, PER_CHAT_NON_SCHEMA_KEYS, PER_CHAT_OVERRIDE_ALLOWLIST, configJsonSchema, configSchemaLeafPaths, configSchema } from '@luoli/core';
 
 function sourceFiles(directory: string): string[] {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
@@ -114,6 +114,27 @@ describe('config schema', () => {
     expect(quota.perUser.properties.monthly.$ref).toContain('quota/properties/global');
     expect(quota.perUser.properties.monthly.description).toBe(CONFIG_DESCRIPTIONS['quota.perUser.monthly']);
     expect(quota.global.properties.daily.description).not.toBe(quota.perUser.properties.monthly.description);
+  });
+
+  /**
+   * `perChat` 是 `z.record(z.unknown())`，所以白名单里的路径不是 schema 叶子键 —— 下面那条
+   * 「每个叶子要么被引用、要么进 KNOWN_UNIMPLEMENTED」的断言看不见它们。`character` 就这么
+   * 在白名单里躺过一轮：能存进 `config_kv`、能过校验、`perChatConfig` 也会把它合进本轮配置，
+   * 而没有任何代码读它（docs/27 · C-08）。这条断言把那个盲区补上。
+   */
+  it('keeps every perChat allowlist path either on a schema leaf or explicitly wired', () => {
+    const leaves = configLeafPaths(configSchema.parse({}));
+    const exempt = new Set<string>(PER_CHAT_NON_SCHEMA_KEYS as readonly string[]);
+    const orphans = PER_CHAT_OVERRIDE_ALLOWLIST.filter((pattern) =>
+      !leaves.some((leaf) => pattern.test(leaf)) && ![...exempt].some((key) => pattern.test(key)));
+    expect(orphans.map(String), '这些 perChat 白名单路径既不对应 schema 叶子，也没登记进 PER_CHAT_NON_SCHEMA_KEYS').toEqual([]);
+    // 登记为「不对应 schema」的键必须真的被读到，否则它只是一个换了地方的假格子。
+    const source = [...sourceFiles('packages'), ...sourceFiles('apps')]
+      .filter((path) => path !== 'packages/core/src/config/schema.ts')
+      .map((path) => readFileSync(path, 'utf8')).join('\n');
+    for (const key of PER_CHAT_NON_SCHEMA_KEYS) {
+      expect(new RegExp(`(?:\\.|\\?\\.)${escape(key)}\\b`).test(source), `${key} 在白名单里但没有任何代码读它`).toBe(true);
+    }
   });
 
   it('requires every config leaf to be referenced by full path or explicitly classified', () => {

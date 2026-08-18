@@ -11,7 +11,7 @@ describe('MCP runtime', () => {
     for (const suffix of ['', '-wal', '-shm']) rmSync(`${database}${suffix}`, { force: true });
     const db = openDatabase(database); migrateDatabase(db);
     const log = new LogSink(new OperationsRepository(db), './data/mcp-runtime-logs');
-    const config = configSchema.parse({ access: { bootstrapOwnerId: 'owner' }, mcp: { enabled: true, servers: [{ name: 'fixture', transport: 'stdio', command: process.execPath, args: [resolve('tests/fixtures/mcp-server.mjs')], enabled: true, toolAllow: ['echo'] }] } });
+    const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, mcp: { enabled: true, servers: [{ name: 'fixture', transport: 'stdio', command: process.execPath, args: [resolve('tests/fixtures/mcp-server.mjs')], enabled: true, toolAllow: ['echo'] }] } });
     const registry = new ToolRegistry(log, { request: async () => true }, { maxRegistered: 80, maxCallsPerTurn: 40, maxConsecutiveErrors: 3 });
     const manager = new McpManager(db, config.mcp, log, registry);
     await manager.reconcile();
@@ -38,12 +38,12 @@ describe('MCP runtime', () => {
     const db = openDatabase(database); migrateDatabase(db);
     const log = new LogSink(new OperationsRepository(db), './data/mcp-runtime-logs');
     const server = { name: 'fixture', transport: 'stdio', command: process.execPath, args: [resolve('tests/fixtures/mcp-server.mjs')], enabled: true };
-    let live = configSchema.parse({ access: { bootstrapOwnerId: 'owner' }, mcp: { enabled: true, servers: [server] } }).mcp;
+    let live = configSchema.parse({ access: { bootstrapOwnerId: '1' }, mcp: { enabled: true, servers: [server] } }).mcp;
     const registry = new ToolRegistry(log, { request: async () => true }, { maxRegistered: 80, maxCallsPerTurn: 40, maxConsecutiveErrors: 3 });
     const manager = new McpManager(db, () => live, log, registry);
     await manager.reconcile();
     expect(registry.names()).toEqual(['mcp__fixture__echo']);
-    live = configSchema.parse({ access: { bootstrapOwnerId: 'owner' }, mcp: { enabled: true, servers: [{ ...server, enabled: false }] } }).mcp;
+    live = configSchema.parse({ access: { bootstrapOwnerId: '1' }, mcp: { enabled: true, servers: [{ ...server, enabled: false }] } }).mcp;
     await manager.reconcile();
     expect(registry.names()).toEqual([]);
     expect(db.prepare("SELECT state FROM mcp_servers WHERE name='fixture'").pluck().get()).toBe('disabled');

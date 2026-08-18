@@ -240,6 +240,12 @@ export const CONFIG_DESCRIPTIONS: Record<string, string> = {
   'schedule.maxPayloadChars': '任务正文（agent 的任务描述 / notify 的原文）的字数上限。',
   'schedule.retentionDays': '已结束（完成/取消）的任务行保留多少天。活跃任务永不清理。需重启：跟 logs.retentionDays 一样在启动时交给 MaintenanceService。',
 
+  maintenance: '维护任务清理派生数据的保留期。每日 general.maintenanceCron 触发时按这几项删行。',
+  'maintenance.retention.usageDays': 'usage_ledger（每次模型调用一行）保留多少天。0 = 不清。这张表只涨不落，而 VACUUM 帮不上——数据还在。需重启：启动时交给 MaintenanceService。',
+  'maintenance.retention.quotaCounterDays': 'quota_counters 里过期账期的行保留多少天（每个 scope×subject×窗口×账期一行，跨天跨月只增）。0 = 不清。当前账期的行永远不会被删。需重启。',
+  'maintenance.retention.configRevisionDays': 'config_revisions（配置变更历史）保留多少天。0 = 不清。删掉的是审计记录，不影响当前配置。需重启。',
+  'maintenance.retention.memoryRevisionDays': 'memory_revisions（记忆/提示词文档的完整 diff）保留多少天。0 = 不清。删掉之后回滚不到比它更早的版本。需重启。',
+
   db: 'SQLite 数据库的位置、备份与整理。',
   'db.path': 'SQLite 数据库文件路径。',
   'db.backupKeep': '执行迁移前自动备份，保留最近几份。',
@@ -287,7 +293,7 @@ export const CONFIG_DESCRIPTIONS: Record<string, string> = {
   'webui.sessionTtlHours': '登录会话的有效小时数，过期要重新输口令。',
   'webui.passwordHash': '登录口令的 argon2id 哈希。不在这里改：用 pnpm webui:passwd 生成后写入，或首次启动时由 WEBUI_PASSWORD 环境变量生成。',
   'webui.trustProxy': '是否信任反代传来的 X-Forwarded-For 作为客户端 IP。直连时必须关着，否则任何人伪造一个头就换了个身份，登录限速形同虚设。',
-  'webui.trustedProxyHops': '反代自己追加的跳数。X-Forwarded-For 按这个数**从右往左**取 —— 取最左那一跳等于让客户端自己声明自己是谁。直连或 trustProxy 关着时读 X-Real-IP，再没有就记为 direct。',
+  'webui.trustedProxyHops': '反代自己追加的跳数。X-Forwarded-For 按这个数**从右往左**取 —— 取最左那一跳等于让客户端自己声明自己是谁。trustProxy 关着时一个请求头都不看，只认连接的远端地址（拿不到就记为 local）。',
   'webui.allowOrigins': '允许跨源访问 API 的 Origin 列表，一行一条（本机用 vite 开发时把 dev 地址加进来，否则登录会被 Origin 中间件挡成 403）。',
   'webui.loginRateLimit.attempts': '单个 IP 在窗口内允许的登录失败次数。',
   'webui.loginRateLimit.windowMinutes': '登录失败计数的窗口长度（分钟）。',

@@ -79,10 +79,22 @@ sandbox:
 approval:
   enabled: true
   skipForOwner: true
+  # ⚠ enabled: true 只是「审批流水线开着」。**判定完全由 rules 决定** —— 规则表为空时
+  # ApprovalRules.evaluate() 恒回「不需要审批」，于是 bash / python / write_file / edit_file /
+  # move_file / memory_write 这几个标着「条件审批」的工具一个都不会停下来问（docs/27 · S-02）。
+  # 空表时启动会记一条 approval.no_rules 警告，WebUI 的审批页也会说明。
+  # pattern 走 RE2（线性时间，不支持反向引用），上界 128 字符；求值对象是模型给的整份工具参数 JSON。
   rules:
     - tool: delete_file
       always: true
       risk: high
+    # 下面几条是**示例，默认注释掉**：开箱就弹审批会让每一次 bash 都要人点一下，那是部署方的取舍。
+    # - tool: [bash, python]
+    #   pattern: '(?i)\b(rm\s+-rf|mkfs|dd\s+if=|shutdown|reboot|curl\s+[^|]*\|\s*(ba)?sh)\b'
+    #   risk: high
+    # - tool: [write_file, edit_file, move_file]
+    #   when: target_exists
+    #   risk: medium
 output:
   mode: stream
   replyDelayMs: 2000
@@ -104,6 +116,14 @@ schedule:
   enabled: true
   maxPerChat: 20
   minIntervalMinutes: 5
+# 派生数据的保留期（每日 general.maintenanceCron 触发时按这几项删行）。**每一项 0 = 不清。**
+# turns / tasks 刻意没有保留期：它们是 trace 的骨架，删掉等于历史轮次凭空消失（见 docs/11）。
+maintenance:
+  retention:
+    usageDays: 400            # usage_ledger，每次模型调用一行
+    quotaCounterDays: 400     # quota_counters 里过期账期的行（当前账期永不删）
+    configRevisionDays: 180   # config_revisions，配置变更审计
+    memoryRevisionDays: 180   # memory_revisions，存完整 diff
 db:
   path: ./data/luoli.db
 logs:

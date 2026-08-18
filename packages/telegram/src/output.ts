@@ -8,7 +8,10 @@ export function escapeMarkdownV2(text: string): string {
 }
 
 export function safeRender(markdown: string): string {
-  let text = markdown;
+  // 代码块被换成 `\u0000<n>\u0000` 占位符，最后再换回来 —— 而 `SPECIAL` 里没有 NUL，所以正文里
+  // 自带 `\u0000 0 \u0000` 的消息会被替换成别的代码块、或者（下标越界时）整段吞掉（docs/27 · C-07）。
+  // NUL 在 Telegram 正文里没有任何显示意义，进门就摘掉，占位符从此不可能被伪造。
+  let text = markdown.replaceAll('\u0000', '');
   const fences = (text.match(/```/g) ?? []).length;
   if (fences % 2) text += '\n```';
   const protectedBlocks: string[] = [];
@@ -67,13 +70,19 @@ export async function sendWithFallback(api: Api, chatId: string, text: string, e
  * `output.maxMentions`：一条消息里最多保留几个 `@用户名`，多出来的去掉 `@` 只留名字。
  * 这是防「模型被诱导 @全群」的护栏 —— 提示词里说好不要这么做，但那不是边界，投递侧才是。
  * 0 表示不限。
+ *
+ * 前置条件是「前一个字符不是 `[\w@]`」，而不是「前面是空白或左括号」：`,@bob`、`.@cindy`、
+ * `;@daisy` 这些 Telegram 照样解析成 mention，而旧判据在 `max=1` 下让它们全部逃过
+ * （docs/27 · S-10 实测三种全漏）。投递侧的判据必须跟 Telegram 的一致。
+ * 排掉 `@` 是为了不把 `@@name` 的第二个 `@` 当成新的 mention；排掉 `\w` 是因为 `foo@bar`
+ * 在 Telegram 那边也不是 mention。
  */
 export function capMentions(text: string, max: number): string {
   if (max <= 0) return text;
   let seen = 0;
-  return text.replace(/(^|[\s(（])@([A-Za-z][\w]{4,31})\b/g, (whole, lead: string, name: string) => {
+  return text.replace(/(?<![\w@])@([A-Za-z][\w]{4,31})\b/g, (whole, name: string) => {
     seen += 1;
-    return seen <= max ? whole : `${lead}${name}`;
+    return seen <= max ? whole : name;
   });
 }
 

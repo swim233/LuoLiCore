@@ -8,7 +8,9 @@ function harness() {
   const path = './data/config-write.test.db';
   for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
   const db = openDatabase(path); migrateDatabase(db);
-  const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, webui: { passwordHash: 'secret-hash' } });
+  // `memory.dir` 要和 PromptDocuments 的根一致：`GET /api/prompts/:id` 按 `config.memory.dir`
+  // 做包含性校验（docs/27 · S-07），两处指不同目录的部署在生产里不存在。
+  const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, webui: { passwordHash: 'secret-hash' }, memory: { dir: './data/config-prompts' } });
   const operations = new OperationsRepository(db); const events = new EventBus(); const log = new LogSink(operations, './data/config-write-logs'); const archive = new ArchiveRepository(db);
   const promptDocuments = new PromptDocuments(db, './data/config-prompts'); promptDocuments.ensure();
   const app = createServer({ config, db, operations, principals: new PrincipalRepository(db), archive, context: new ContextEngine(db, archive), providers: new ProviderStore(db, new Secrets('x'.repeat(32))), approvals: new DatabaseApprovalBroker(db, config, events, log), maintenance: new MaintenanceService(db, path, 2, 30), promptDocuments, events, log, configSchema: {}, startedAt: Date.now(), setup: undefined });

@@ -1,18 +1,21 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { createReadStream, existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { resolve, sep } from 'node:path';
+import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import argon2 from 'argon2';
 import { Hono } from 'hono';
 import YAML from 'yaml';
 import type { Context } from 'hono';
+import { bodyLimit } from 'hono/body-limit';
+import { getConnInfo } from '@hono/node-server/conninfo';
 import { serveStatic } from '@hono/node-server/serve-static';
 import type { AgentManager, Config, ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, PluginManager, PromptDocuments, ProviderStore, Sandbox, SkillLoader, SkillWriteInput, SubAgentRuntimeEvent, TurnRegistry } from '@luoli/core';
 import { ALIAS_NAME_PATTERN, HOT_RELOADABLE_CONFIG_KEYS, createScheduledJob, scheduledJobView, testApprovalRules, KNOWN_UNIMPLEMENTED_CONFIG_KEYS, TOOL_POLICY, aliasSettingsSchema, checkWakeword, configSchema as runtimeConfigSchema, envPinnedConfigKeys, perChatConfig, probeProvider, quotaBucket, rejectedWakewords } from '@luoli/core';
 import type { CatalogIndex, ModelMetadata, ProviderProbe } from '@luoli/core';
 import type { ArchiveRepository, OperationsRepository, PrincipalRepository, ScheduleRepository, ScheduledJob, Sqlite } from '@luoli/db';
 import { deleteAppKv, modelAliasKey, readAppKv } from '@luoli/db';
-import { assignDotted, readDotted, type Role } from '@luoli/shared';
+import { assignDotted, readDotted, TG_ID_PATTERN, type Role } from '@luoli/shared';
 import type { EventStreamRegistry } from './events.js';
 
 export interface PromptPreviewResult {
@@ -42,7 +45,7 @@ export interface ServerDependencies {
   rebuildModels?: () => void;
   maintenance: MaintenanceService;
   /** 用量聚合（`GET /api/usage/report`）。缺它时那个端点回空数组而不是 500 —— 明细表照常。 */
-  ledger?: { report(from: number, to: number, groupBy: 'day' | 'chat' | 'user' | 'model' | 'alias' | 'agent'): unknown[] };
+  ledger?: { report(from: number, to: number, groupBy: 'day' | 'chat' | 'user' | 'model' | 'alias' | 'agent', timezone?: string): unknown[] };
   /** `POST /api/restart` 的落点。优雅关闭那套在 apps/bot，服务器包只负责把请求转过去。 */
   restart?: (reason: string) => Promise<void> | void;
   /**
@@ -88,7 +91,7 @@ function cookie(header: string | undefined, name: string): string | null {
   return null;
 }
 
-const apiError = (code: string, message: string, status: 400 | 401 | 403 | 404 | 409 | 429 | 500 | 502 = 400) => ({ body: { ok: false as const, error: { code, message } }, status });
+const apiError = (code: string, message: string, status: 400 | 401 | 403 | 404 | 409 | 413 | 429 | 500 | 502 = 400) => ({ body: { ok: false as const, error: { code, message } }, status });
 
 /**
  * 展开一律走 `assignDotted`：裸的 `cursor[part]` 遇到 `__proto__` 会在**校验之前**污染 `Object.prototype`，
@@ -157,6 +160,20 @@ function safeRef(root: string, reference: string): string {
   if (absolute !== base && !absolute.startsWith(`${base}${sep}`)) throw new Error('invalid_file_ref');
   return absolute;
 }
+/**
+ * 库里存下来的那种路径的包含性校验。与 `safeRef` 的区别只在一点：**先绝对化再判包含**，
+ * 不把它当成相对 `root` 的引用 —— `attachments.local_path` 是 `join('./data/files', chatId, …)`
+ * 这种相对 cwd 的路径，交给 `safeRef` 会被拼成 `<root>/data/files/…`，一个都对不上。
+ *
+ * 这两列今天只由本进程写，所以这是纵深防御；但「DB 里的路径值可信」是一个会随时间失效的假设
+ * ——导入、迁移、手工修库都能改它，而同一个文件里读日志目录早就是过闸的（docs/27 · S-07）。
+ */
+function storedPathWithin(root: string, stored: string): string {
+  const absolute = resolve(stored);
+  const base = resolve(root);
+  if (absolute !== base && !absolute.startsWith(`${base}${sep}`)) throw new Error('invalid_file_ref');
+  return absolute;
+}
 
 const SECRET_KEY_SEGMENT = /key|secret|token|password/i;
 /**
@@ -188,10 +205,19 @@ function previousJson(key: string, previous: { value: string } | undefined): str
   if (!previous?.value) return null;
   try { return revisionJson(key, JSON.parse(previous.value) as unknown); } catch { return null; }
 }
-function requestIp(ctx: { req: { header(name: string): string | undefined } }, config: Readonly<Config>): string {
-  if (!config.webui.trustProxy) return ctx.req.header('x-real-ip')?.trim() || 'direct';
-  const chain = ctx.req.header('x-forwarded-for')?.split(',').map((entry) => entry.trim()).filter(Boolean) ?? [];
-  return chain.at(-config.webui.trustedProxyHops) ?? 'direct';
+/**
+ * 登录限流的桶键与 `sessions.ip` 的来源。**`trustProxy` 为假时一个请求头都不看** ——
+ * 桶键要是请求头，限流的代价就只是「再换一个头值」：docs/18 · N-WEB-02 那一轮的修复原文写的是
+ * 「`trustProxy` 为假时恒返回 `local`」，后来丢了这一半，于是 docs/27 · S-01 实测 12 次轮换
+ * `X-Real-IP` 全部 401、一次 429 都没有。直连时只认连接的远端地址；拿不到（`app.request()`
+ * 这类没有底层 socket 的调用）就全落进同一个 `local` 桶 —— fail-closed 的那一侧是「一起锁」。
+ */
+function requestIp(ctx: Context, config: Readonly<Config>): string {
+  if (config.webui.trustProxy) {
+    const chain = ctx.req.header('x-forwarded-for')?.split(',').map((entry) => entry.trim()).filter(Boolean) ?? [];
+    return chain.at(-config.webui.trustedProxyHops) ?? ctx.req.header('x-real-ip')?.trim() ?? 'direct';
+  }
+  try { return getConnInfo(ctx).remote.address?.trim() || 'local'; } catch { return 'local'; }
 }
 function requestIsSecure(ctx: { req: { header(name: string): string | undefined; url: string } }, config: Readonly<Config>): boolean {
   return ctx.req.url.startsWith('https:') || (config.webui.trustProxy && ctx.req.header('x-forwarded-proto')?.split(',')[0]?.trim() === 'https');
@@ -298,6 +324,28 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     if (!allowedOrigin(ctx, currentConfig())) return ctx.json(apiError('origin', 'Origin 不允许', 403).body, 403);
     await next();
   });
+  /**
+   * 请求体上界。`ctx.req.json()` 把整份请求体读进内存，而 `/api/setup` 与两条登录端点注册在鉴权
+   * 中间件**之前** —— 未登录就能推一个任意大的请求体进来（docs/27 · S-05）。`login` 那条
+   * `password.length > 1024` 的检查发生在 `await ctx.req.json()` 之后，挡不住这件事。
+   * 挂在 Origin 闸之后、所有路由之前：`bodyLimit` 也要在真正读体之前拦，装在具体端点上就晚了。
+   * 三条业务上就大的端点各自放宽，其余一律 1 MiB —— 上界要按端点给，不是找一个「都够用」的数。
+   */
+  const DEFAULT_BODY_LIMIT = 1_048_576;
+  const WIDE_BODY_LIMITS: Array<[RegExp, number]> = [
+    [/^\/api\/config\/yaml$/, 4_194_304],
+    [/^\/api\/models\/import$/, 4_194_304],
+    [/^\/api\/prompts\/[^/]+$/, 2_097_152],
+  ];
+  const bodyLimiters = new Map<number, ReturnType<typeof bodyLimit>>();
+  const limiterFor = (max: number): ReturnType<typeof bodyLimit> => {
+    const existing = bodyLimiters.get(max);
+    if (existing) return existing;
+    const created = bodyLimit({ maxSize: max, onError: (ctx) => ctx.json(apiError('payload_too_large', `请求体超过 ${Math.round(max / 1024)} KiB 上限`, 413).body, 413) });
+    bodyLimiters.set(max, created);
+    return created;
+  };
+  app.use('/api/*', (ctx, next) => limiterFor(WIDE_BODY_LIMITS.find(([pattern]) => pattern.test(ctx.req.path))?.[1] ?? DEFAULT_BODY_LIMIT)(ctx, next));
 
   // 无鉴权的那份只回存活状态。provider 列表（含 baseUrl）、MCP 服务器、沙箱 plan、在途轮次数
   // 都是内部拓扑：默认绑 127.0.0.1 时影响有限，但 `webui.host` 一放开就是无鉴权信息泄露
@@ -496,7 +544,8 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
    */
   app.get('/api/chats/:key', (ctx) => {
     const key = ctx.req.param('key');
-    return ctx.json({ ok: true, data: { ...dependencies.context.stats(key), modelAlias: readAppKv<string>(dependencies.db, modelAliasKey(key)) ?? null } });
+    // `timeline: true`：会话页要 commit 列表与逐条消息。工具那一侧刻意只拿摘要（docs/27 · R-03）。
+    return ctx.json({ ok: true, data: { ...dependencies.context.stats(key, { timeline: true }), modelAlias: readAppKv<string>(dependencies.db, modelAliasKey(key)) ?? null } });
   });
   app.delete('/api/chats/:key/model-alias', (ctx) => {
     const key = ctx.req.param('key');
@@ -974,15 +1023,22 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
   });
   app.get('/api/files/:attachmentId', (ctx) => {
     const row = dependencies.db.prepare('SELECT local_path AS path,mime,file_name AS name FROM attachments WHERE id=?').get(ctx.req.param('attachmentId')) as { path: string | null; mime: string | null; name: string | null } | undefined;
-    if (!row?.path || !existsSync(row.path)) return ctx.json(apiError('not_found', '附件不存在', 404).body, 404);
+    if (!row?.path) return ctx.json(apiError('not_found', '附件不存在', 404).body, 404);
+    let absolute: string;
+    try { absolute = storedPathWithin(currentConfig().media.dir, row.path); }
+    catch { return ctx.json(apiError('not_found', '附件路径不在媒体目录内', 404).body, 404); }
+    if (!existsSync(absolute)) return ctx.json(apiError('not_found', '附件不存在', 404).body, 404);
     // `?inline=1` 只对光栅图放行。同源内联渲染 SVG/HTML 等于把用户上传的内容变成本站脚本，
     // 而附件的 mime 来自 Telegram、是发送方可控的 —— 白名单之外一律照旧当附件下载。
     const inline = ctx.req.query('inline') === '1' && INLINE_MIME.has(row.mime ?? '');
-    return new Response(readFileSync(row.path), { headers: { 'content-type': row.mime ?? 'application/octet-stream',
+    // 流式而不是 `readFileSync`：一份 20 MB 的文档此前是一次 20 MB 堆分配加一次 20 MB 响应缓冲，
+    // 而 `media.maxDocBytes` 就是 20 MiB（docs/27 · S-07）。
+    return new Response(Readable.toWeb(createReadStream(absolute)) as ReadableStream, { headers: { 'content-type': row.mime ?? 'application/octet-stream',
+      'content-length': String(statSync(absolute).size),
       'content-disposition': inline ? 'inline' : contentDisposition(row.name ?? ctx.req.param('attachmentId')) } });
   });
   app.get('/api/chats/:key/context', (ctx) => ctx.json({ ok: true, data: dependencies.context.materialize(ctx.req.param('key'), ctx.req.query('commit') ?? null, currentConfig().context.cacheCommits) }));
-  app.get('/api/chats/:key/commits', (ctx) => ctx.json({ ok: true, data: dependencies.context.stats(ctx.req.param('key')) }));
+  app.get('/api/chats/:key/commits', (ctx) => ctx.json({ ok: true, data: dependencies.context.stats(ctx.req.param('key'), { timeline: true }) }));
   app.post('/api/chats/:key/commits/:id/checkout', (ctx) => ctx.json({ ok: true, data: dependencies.context.setHead(ctx.req.param('key'), ctx.req.param('id'), 'webui') }));
   app.post('/api/chats/:key/reset', (ctx) => ctx.json({ ok: true, data: dependencies.context.reset(ctx.req.param('key'), 'webui') }));
   app.post('/api/chats/:key/undo', (ctx) => ctx.json({ ok: true, data: dependencies.context.undo(ctx.req.param('key')) }));
@@ -1017,7 +1073,8 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     if (!ids.length) return ctx.json(apiError('invalid_ids', 'ids 至少要有一个 Telegram 数字 ID').body, 400);
     if (ids.length > 500) return ctx.json(apiError('invalid_ids', '单次最多导入 500 个主体').body, 400);
     // Telegram ID 是整数（群/频道为负）。放行 @username 只会写出一条永远匹配不到任何消息的主体记录。
-    const malformed = ids.filter((id) => !/^-?\d{1,20}$/.test(id));
+    // 判据与三个 Telegram 命令共用一份（`TG_ID_PATTERN` / `parsePrincipal`，docs/27 · C-05）。
+    const malformed = ids.filter((id) => !TG_ID_PATTERN.test(id));
     if (malformed.length) return ctx.json(apiError('invalid_ids', `不是合法的 Telegram 数字 ID：${malformed.slice(0, 5).join('、')}${malformed.length > 5 ? ` 等 ${malformed.length} 个` : ''}`).body, 400);
     // upsertSeen 的 ON CONFLICT 分支刻意不动 role（避免每条消息把手工设的角色冲掉），
     // 所以只调它的话已存在的主体会「导入成功」却什么都没变 —— 角色必须再走一次 setRole。
@@ -1117,7 +1174,16 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     return ctx.json({ ok: true, data: matched });
   });
   app.get('/api/prompts', (ctx) => ctx.json({ ok: true, data: dependencies.db.prepare('SELECT * FROM memory_docs ORDER BY scope,subject').all() }));
-  app.get('/api/prompts/:id', (ctx) => { const row = dependencies.db.prepare('SELECT * FROM memory_docs WHERE id=?').get(ctx.req.param('id')) as { path?: string } | undefined; if (!row?.path) return ctx.json(apiError('not_found', '文档不存在', 404).body, 404); return ctx.json({ ok: true, data: { ...row, content: readFileSync(row.path, 'utf8') } }); });
+  app.get('/api/prompts/:id', (ctx) => {
+    const row = dependencies.db.prepare('SELECT * FROM memory_docs WHERE id=?').get(ctx.req.param('id')) as { path?: string } | undefined;
+    if (!row?.path) return ctx.json(apiError('not_found', '文档不存在', 404).body, 404);
+    // `memory_docs.path` 今天只由本进程写，但「库里的路径值可信」是一个会随时间失效的假设
+    // （导入、迁移、手工修库）。同一个文件里读日志目录就是过 `safeRef()` 的（docs/27 · S-07）。
+    let content: string;
+    try { content = readFileSync(storedPathWithin(currentConfig().memory.dir, row.path), 'utf8'); }
+    catch { return ctx.json(apiError('not_found', '文档文件读不到或不在记忆目录内', 404).body, 404); }
+    return ctx.json({ ok: true, data: { ...row, content } });
+  });
   app.get('/api/prompts/:id/revisions', (ctx) => ctx.json({ ok: true, data: dependencies.db.prepare('SELECT id,doc_id AS docId,ts,actor,turn_id AS turnId,chat_id AS chatId,user_id AS userId,op,diff,bytes_after AS bytesAfter FROM memory_revisions WHERE doc_id=? ORDER BY ts DESC,id DESC LIMIT 200').all(ctx.req.param('id')) }));
   app.put('/api/prompts/:id', async (ctx) => {
     const body = await ctx.req.json<{ content?: string }>();
@@ -1418,7 +1484,8 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     const from = Number(ctx.req.query('from') ?? now - 30 * 86_400_000);
     const to = Number(ctx.req.query('to') ?? now);
     if (!Number.isFinite(from) || !Number.isFinite(to) || from > to) return ctx.json(apiError('invalid_range', 'from/to 必须是毫秒时间戳且 from ≤ to').body, 400);
-    const rows = dependencies.ledger?.report(from, to, groupBy as 'day') ?? [];
+    // 时区必须传：日界与总览趋势、配额窗口用同一个口径，否则同一天在两个页面上是两个数字（docs/27 · C-02）。
+    const rows = dependencies.ledger?.report(from, to, groupBy as 'day', currentConfig().general.timezone) ?? [];
     // chat / user 维度的 bucket 是裸 id，界面上认不出是谁。在这里补显示名，别让前端再实现一遍
     // `principals` 的反查规则（会话页已经有一份，两份必然漂移）。
     const labelled = ['chat', 'user'].includes(groupBy)

@@ -361,20 +361,32 @@ sandbox:
 
 ```yaml
 # ============================================================ approval
+# ⚠ enabled: true 只表示「审批流水线开着」，**判定完全由 rules 决定**：规则表为空时
+#   ApprovalRules.evaluate() 恒回「不需要审批」，于是 TOOL_POLICY 里标 conditional 的六个工具
+#   （bash / python / write_file / edit_file / move_file / memory_write）一个都不会停下来问
+#   —— 面板显示「审批已启用」、[05] 的工具表写着「条件审批」，而门是开着的（docs/27 · S-02）。
+#   出厂默认是空表；空表时启动记一条 approval.no_rules 警告，WebUI 的审批页顶上也会说明。
+#   config/config.yaml 里带了注释掉的示例规则，取舍留给部署方（开箱就弹审批 = 每次 bash 都要人点）。
 approval:
   enabled: true                   # 热更新
   # 命中规则的调用挂起等待 WebUI 裁决的上限；到点落 expired 并把「未获批准」还给模型
   ttlMs: 180000                   # 热更新
   skipForOwner: true              # 热更新
   rememberWithinTurn: true        # 热更新
+  # pattern 走 **RE2**（线性时间，不支持反向引用 / lookaround），上界 128 字符，`(?i)` 前缀原生支持。
+  # 求值对象是模型给的整份工具参数 JSON —— 用 JS 引擎时一条 `(a+)+` 撞上合适输入就是指数回溯，
+  # 而这是单线程进程，卡住的是整个 bot（docs/27 · S-03；grep 与唤醒词早已换 RE2）。
+  # 写入端（WebUI / PUT /api/config）用同一份判据，不兼容的模式当场 400 而不是存下来永不命中。
   rules:                          # 热更新（WebUI 可编辑）
     - tool: bash
-      pattern: '(?i)\b(rm\s+-rf|mkfs|dd\s+if=|shutdown|reboot|:\(\)\{|chmod\s+777\s+/)'
+      pattern: '(?i)\b(rm\s+-rf|mkfs|dd\s+if=|shutdown|reboot|chmod\s+777\s+/)'
       risk: high
     - tool: bash
       pattern: '(?i)\b(curl|wget|nc|ssh|scp)\b'
       risk: medium
-    - tool: [write_file, move_file]
+    # edit_file 与 write_file 同档：edit() 最后一步就是 write()，且能把整份文件换掉，
+    # 而它恰好**只**作用于已存在的文件 —— 漏了它等于给覆盖审批留一条绕道（docs/27 · C-03）。
+    - tool: [write_file, edit_file, move_file]
       when: target_exists
       risk: medium
     - tool: delete_file
@@ -464,6 +476,21 @@ schedule:
   # 需重启：跟 logs.retentionDays 一样在启动时交给 MaintenanceService。
   retentionDays: 30               # 需重启
 
+# ============================================================ maintenance（保留期，见 10 §5）
+# 每日 general.maintenanceCron 触发时按这几项删行。MaintenanceService.cleanup() 此前只清
+# log_events / processed_updates / sessions / approvals / 子 agent 结果 / scheduled_jobs，
+# 而下面这四张表只涨不落 —— 读端点都有 LIMIT，所以症状不是慢查询而是**库文件只涨不落**，
+# 且 VACUUM 帮不上（数据还在，docs/27 · R-05）。
+# **turns 与 tasks 刻意不在其列**：它们是 trace 的骨架（/api/turns/:id/detail 靠 turn 行把日志、
+# 用量与上下文串起来），删掉等于历史轮次凭空消失 —— 那是 [14 §2 Q9] 的未决问题。
+# 每一项 **0 = 不清**；四项都在启动时交给 MaintenanceService，因此都需重启。
+maintenance:
+  retention:
+    usageDays: 400                # 需重启 · usage_ledger，每次模型调用一行
+    quotaCounterDays: 400         # 需重启 · quota_counters 里过期账期的行（当前账期永不删）
+    configRevisionDays: 180       # 需重启 · config_revisions，配置变更审计
+    memoryRevisionDays: 180       # 需重启 · memory_revisions，存完整 diff；删了就回滚不到更早的版本
+
 # ============================================================ db
 db:
   path: ./data/luoli.db           # 需重启
@@ -524,11 +551,16 @@ webui:
   # 它们在 `serve()` 时就绑定了。WebUI 一度把这几项标成「需重启」，让人白重启一次（docs/21 · G-CFG-05）。
   sessionTtlHours: 168            # 热更新 · 只影响此后新建的会话，已签发的不变
   passwordHash: ''                # 热更新 · 由首次启动向导、设置页的改口令表单或 `pnpm webui:passwd` 写入
-  trustProxy: false               # 热更新
+  trustProxy: false               # 热更新 · **false 时一个请求头都不看**，见下
   trustedProxyHops: 1             # 热更新 · 反代自己追加的跳数。XFF 按这个数**从右往左**取：
                                   #   最左那一跳是客户端自己写的，取它等于限速形同虚设
                                   #   （每次换一个 X-Forwarded-For 就是一个新桶，22 · V-AUTH-01）。
-                                  #   直连或 trustProxy=false 时读 X-Real-IP，再没有就记为 direct。
+                                  # trustProxy=false（默认，直连）时**只认连接的远端地址**：
+                                  #   X-Real-IP / X-Forwarded-For 一概不参与。桶键要是请求头，限流的
+                                  #   代价就只是「再换一个头值」—— 18 · N-WEB-02 修过一次，后来丢了
+                                  #   这一半，27 · S-01 实测 12 次轮换 X-Real-IP 全部 401、一次 429
+                                  #   都没有。拿不到远端地址（无底层 socket）时全落进常量桶 `local`，
+                                  #   fail-closed 的那一侧是「一起锁」。回归用例在 tests/server.test.ts。
   allowOrigins: []                # 热更新
   loginRateLimit: { attempts: 5, windowMinutes: 15 }   # 热更新
                                   # 单 IP 桶之外还有一个全局失败窗口：达到 attempts×20 之后所有登录
@@ -564,14 +596,20 @@ output.*
 context.limit.*        context.background.*      context.scope        context.active.*
 trigger.*
 agent.main.*
-character（指向 memory/ 下的替代人设文件）🚧 未接线
+character（memory/ 下的替代人设**文件名**）
 memory.pubWriteMinRole（只允许比全局更严格）
 ```
 
-> `character` **运行时没有任何代码读它**：会话专属人设走的是 `memory/CHARACTER.<chat>.md` 文件
-> （`PromptDocuments.readForPrompt`），不是这个配置键。它留在白名单里只是「写进去不会被拒」，
-> 因此 WebUI 的会话级覆盖面板**不提供这一项** —— 给一个存得下但没人读的控件就是假控件。
-> 白名单本身不动：摘掉它会让已经这么配过的部署在下次启动时校验失败。
+> `character` 已接线（docs/27 · C-08）：`assembleMainPrompt` 从本轮合并后的配置里读它，交给
+> `PromptDocuments.paths(userId, characterOverride)`，于是这个会话的人格块换成 `memory/<那个文件>`。
+> 在此之前它是一个**存得下、过得了校验、什么都不做**的键 —— 白名单里的路径不是 schema 叶子键
+> （`perChat` 是 `z.record(z.unknown())`），所以「每个叶子要么被引用、要么进 KNOWN_UNIMPLEMENTED」
+> 那条 CI 断言看不见它。现在 `tests/config.test.ts` 另有一条断言把这个盲区补上：白名单里的每条路径
+> 要么对应 schema 叶子，要么登进 `PER_CHAT_NON_SCHEMA_KEYS` 且真的被代码读到。
+>
+> **只收纯文件名**（`^[\w.-]{1,96}\.md$`，且不含 `..`）：它会被当成 `memory/` 下的路径段用，
+> 而这是自由字符串（同 `S-08` 的教训）。不合格时**静默退回全局 `CHARACTER.md`** —— 一个拼错的
+> 文件名不该让整个会话开不了轮次，而用回全局人格是安全的默认。
 
 覆盖在 `openTurn` 时由 `perChatConfig(config, key)` 合并进本轮配置，`onTurn` 用的是 `turn.config` 而不是全局快照，因此 agent 运行时看到的也是合并后的值。
 `trigger.*` 还要更早一步：`matchTrigger` 在 `openTurn` 之前就跑，所以触发判定处（`bot.ts` 的消息与

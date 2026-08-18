@@ -109,7 +109,16 @@ export async function withWebRetries<T>(options: WebRetryOptions, abortSignal: A
   return exhausted(failure, options.retries + 1);
 }
 
-export async function webSearch(provider: 'brave' | 'serper' | 'tavily', apiKey: string, query: string, limit: number, abortSignal: AbortSignal, options: WebRetryOptions = DEFAULT_WEB_RETRY): Promise<Record<string, unknown>> {
+/**
+ * 搜索请求**也走 `guardedFetch`** —— 这里此前是全仓库唯一一条裸 `fetch`，而它带着搜索 API key
+ * （`x-subscription-token` / `x-api-key`）：undici 的 fetch 只按规范摘 `Authorization` / `Cookie` /
+ * `Proxy-Authorization`，自定义认证头会跟着 302 原样送到新主机，同时没有 SSRF 策略、没有响应体
+ * 上界（`response.json()` 全收）。目标域名是常量，所以这是纵深防御缺口而不是可直接利用的漏洞，
+ * 但代价是一个 302 就能带走搜索 key（docs/27 · S-04）。
+ *
+ * **`maxRedirects: 0`**：搜索 API 不需要重定向，一次 3xx 就该当异常而不是跟过去。
+ */
+export async function webSearch(provider: 'brave' | 'serper' | 'tavily', apiKey: string, query: string, limit: number, abortSignal: AbortSignal, options: WebRetryOptions = DEFAULT_WEB_RETRY, maxBytes = 1_048_576): Promise<Record<string, unknown>> {
   if (!apiKey) return { ok: false, error: 'web_search_key_missing' };
   const target = provider === 'brave' ? `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${limit}` : provider === 'serper' ? 'https://google.serper.dev/search' : 'https://api.tavily.com/search';
   const headers: Record<string, string> = { 'content-type': 'application/json' };
@@ -118,19 +127,23 @@ export async function webSearch(provider: 'brave' | 'serper' | 'tavily', apiKey:
   else if (provider === 'serper') { headers['x-api-key'] = apiKey; body = JSON.stringify({ q: query, num: limit }); }
   else body = JSON.stringify({ api_key: apiKey, query, max_results: limit });
   return await withWebRetries<Record<string, unknown>>(options, abortSignal, async (attempt) => {
-    // 裸 fetch 只带轮次信号时同样没有上限：搜索 API 挂在半开连接上照样卡死一整轮。
-    const signal = AbortSignal.any([abortSignal, AbortSignal.timeout(options.timeoutMs)]);
-    let response: Response;
-    try { response = await fetch(target, { method: provider === 'brave' ? 'GET' : 'POST', headers, ...(body ? { body } : {}), signal }); }
+    let response;
+    try { response = await guardedFetch(target, { method: provider === 'brave' ? 'GET' : 'POST', headers, ...(body ? { body } : {}), signal: abortSignal },
+      { allowPrivate: false, maxRedirects: 0, maxBytes, timeoutMs: options.timeoutMs }); }
     catch (error) {
       if (abortSignal.aborted) throw error;
-      return { retry: errorCode(error) };
+      // 拒绝类错误（重定向、协议、SSRF）再试三次也是同一个结果。与 `webFetch` 不同的是这里
+      // **不往上抛**：搜索失败是要交给模型读的一句话，不是 SSRF 断言依赖的「不许去」。
+      const code = errorCode(error);
+      return fatal(error) ? { done: { ok: false, error: code } } : { retry: code };
     }
     if (!response.ok) {
       const failure = `search_http_${response.status}`;
       return retriableStatus(response.status) ? { retry: failure } : { done: { ok: false, error: failure } };
     }
-    const raw = await response.json() as Record<string, unknown>;
+    let raw: Record<string, unknown>;
+    try { raw = JSON.parse(response.body.toString('utf8')) as Record<string, unknown>; }
+    catch { return { done: { ok: false, error: response.truncated ? 'search_response_truncated' : 'search_bad_json' } }; }
     const values = provider === 'brave' ? (raw.web as { results?: unknown[] } | undefined)?.results : provider === 'serper' ? raw.organic : raw.results;
     return { done: { ok: true, provider, ...(attempt ? { attempts: attempt + 1 } : {}), results: Array.isArray(values) ? values.slice(0, limit) : [], content: untrusted(`search:${provider}`, JSON.stringify(values ?? [])) } };
   }, (failure, attempts) => ({ ok: false, error: failure, attempts, hint: `已重试 ${options.retries} 次仍未取到搜索结果（${failure}）；换个说法或稍后再试，不要立刻重复调用。` }));

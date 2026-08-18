@@ -482,6 +482,12 @@
 | [ ] AC-SEC-013 (自动) | 库里存在 v1（`sha256(masterKey)`）加密的 provider key | 仍能解密；读到之后就地重写成 v2（scrypt + 随机 salt，salt 随密文存），无需迁移脚本（docs/20 · W-SEC-02） |
 | [ ] AC-SEC-014 | `LUOLI_MASTER_KEY` 短于 32 字符 | 启动时 stderr 有明确告警（scrypt 抬不动一个短口令） |
 | [ ] AC-SEC-015 | `tools.web.searchApiKey` | 键名不再叫 `Ref`（它本来就不是引用）；doc 11 写明是明文存储、建议用 `${env:...}`；`GET /api/config` 与日志里脱敏（docs/20 · W-SEC-01） |
+| [x] AC-SEC-016 ★ (自动) | `webui.trustProxy=false`（默认）下每次登录都换一个 `X-Real-IP` / `X-Forwarded-For` | 第 `attempts` 次仍被锁成 429：桶键取自连接的远端地址，**请求头一概不参与**。这一项回归过一次（docs/18 · N-WEB-02 → docs/27 · S-01） | 〔server.test.ts〕
+| [x] AC-SEC-017 (自动) | 未登录向 `/api/auth/login` 推一个 2 MB 请求体 | 413 `payload_too_large`，且在 `ctx.req.json()` 之前就被拦下（docs/27 · S-05） | 〔server.test.ts〕
+| [x] AC-SEC-018 ★ (自动) | 审批规则写 `pattern: '(a+)+$'`，输入是 34 个 `a` 加一个 `!` | 求值在毫秒级完成（RE2，线性时间）；不兼容 RE2 的模式与超过 128 字符的模式在写入端当场拒收（docs/27 · S-03） | 〔regression.round9.test.ts〕
+| [x] AC-SEC-019 (自动) | `LUOLI_OWNER_ID=../../etc` | `configSchema` 拒收：这个值会被当成 `memory/private/<id>/` 的目录名用（docs/27 · S-08） | 〔regression.round9.test.ts〕
+| [x] AC-SEC-020 (自动) | `/grant user @alice owner` | 拒收并给出用法；`@username` 写不进 `principals`（否则那一行永远匹配不到任何消息，而命令回「已设置」）。三个 Telegram 命令与 `POST /api/principals/bulk` 共用 `parsePrincipal`（docs/27 · C-05） | 〔regression.round9.test.ts〕
+| [ ] AC-SEC-021 | 默认配置（`approval.rules` 为空）下让 `trusted` 用户触发 `bash` | 启动日志有一条 `approval.no_rules` 警告、stderr 有对应提示、WebUI 审批页顶上说明「0 条规则时 conditional 等于 never」—— 门是开的这件事必须说出来（docs/27 · S-02，选定方案②） |
 
 ## 12. 运维与稳定性（AC-OPS）
 
@@ -513,8 +519,8 @@
 | 日志与成本 | | 4 / 25 | | | |
 | 扩展生态 | | 3 / 27 | | | |
 | WebUI | | 10 / 81 | | | |
-| 安全 | | 0 / 15 | | | |
+| 安全 | | 5 / 21 | | | |
 | 运维 | | 1 / 9 | | | |
-| **合计** | | **132 / 407** | | | |
+| **合计** | | **137 / 413** | | | |
 
 **整体通过条件**：全部 ★ 项通过 + 非 ★ 项通过率 ≥ 95% + 所有豁免项经需求方书面确认。

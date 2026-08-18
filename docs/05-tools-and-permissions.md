@@ -56,7 +56,12 @@ role(chat):
 - 「白名单」= `principals` 中 `role != 'blocked'` 的行。
 - 入口：
   - WebUI 「主体」页（增删改角色、勾选批量改角色、批量导入）。
-  - Telegram 命令（仅 `owner`）：`/grant <user|chat> <id> <role>`、`/revoke <id>`、`/whois <id>`、`/whoami`。
+  - Telegram 命令（仅 `owner`）：`/grant <user|chat> <id> <role>`、`/revoke <user|chat> <id>`（也收裸 id，
+    两种主体都试）、`/whois <id>`、`/whoami`。三者的主体串**共用一份解析**（`parsePrincipal`，
+    `@luoli/shared`）：id 必须是 Telegram 数字 id（群/频道为负），`@username` 一律拒收 ——
+    放行它只会写出一条永远匹配不到任何消息的主体行，而命令还回「已设置」。
+    `POST /api/principals/bulk` 用的是同一个 `TG_ID_PATTERN`：这道闸此前只修了 HTTP 那一侧
+    （docs/27 · C-05，与 docs/26 同主题）。
   - 引导：首次启动时 `access.bootstrapOwnerId`（env `LUOLI_OWNER_ID`）写入一条 owner 记录；**若未配置则 bot 拒绝启动**（避免出现无主 bot）。
     这条记录**只在不存在时插入**（`PrincipalRepository.ensureOwner`）：显示名与 username 归 Telegram 那边同步，
     每次启动覆盖一遍等于把真名冲成占位符。
@@ -74,12 +79,12 @@ role(chat):
 
 | 工具 | minRole | 审批 | 说明 |
 |---|---|---|---|
-| `read_file` | limited | — | `{path, offset?, limit?}`；返回带行号内容（`行号<TAB>正文`，另见下）；单次上限 `tools.fs.maxReadBytes`（默认 256KB），超出要求分页。`skill://` 资源走同一份预算 |
+| `read_file` | limited | — | `{path, offset?, limit?}`；返回带行号内容（`行号<TAB>正文`，另见下）；单次上限 `tools.fs.maxReadBytes`（默认 256KB），超出要求分页。**定位读**（`openSync` + `readSync(offset)`），不整份进内存 —— 那个上限此前只裁「交给模型的那一段」，读盘仍是整份，而 workspace 里的大文件正是 `bash`/`python` 造出来的（docs/27 · R-02）。`skill://` 资源走同一份预算与同一份读法 |
 | `list_dir` | limited | — | `{path, depth?}`；隐藏 dotfile 除非 `showHidden`；上限 500 条 |
 | `glob` | limited | — | `{pattern, path?}`；上限 500 条 |
 | `grep` | limited | — | `{pattern, path?, glob?, contextLines?, ignoreCase?}`；JS 实现（正则走 RE2，见 docs/24 · R-SEC-01）；`glob` 按相对搜索根的路径筛文件，`contextLines` ≤10 附带命中行前后各若干行；上限 200 命中 |
 | `write_file` | trusted | 覆盖已存在文件时需审批 | `{path, content}`；自动建父目录；写前备份到 `.luoli-bak/<ts>-<ulid>-<name>` |
-| `edit_file` | trusted | — | `{path, oldString, newString, replaceAll?}`；`oldString` 必须唯一，否则报错（照抄 Claude Code 语义，模型最熟悉） |
+| `edit_file` | trusted | 覆盖已存在文件时需审批（与 `write_file` **同档**） | `{path, oldString, newString, replaceAll?}`；`oldString` 必须唯一，否则报错（照抄 Claude Code 语义，模型最熟悉）。要在全文里定位 `oldString`，所以必须整份读：超过 `tools.fs.maxWriteBytes` 的文件直接 `file_too_large_to_edit` 并让模型改用 `sed`/`python`（docs/27 · R-02） |
 | `delete_file` | trusted | **必需** | `{path, recursive?}`；`recursive` 时必须审批且路径深度 ≥2；实现为移入 `.luoli-trash/<ts>/`（不真删） |
 | `move_file` | trusted | 覆盖时需审批 | `{from, to}` |
 
@@ -88,6 +93,11 @@ role(chat):
 而不是从 1 重来。代价是模型容易把前缀连着行号一起抄进 `oldString` —— 所以 `read_file` 的
 description 里明说一句，且 `edit_file` 在 `oldString` 形如 `12\t…` 时把 `old_string_not_found`
 补上一句「去掉行号前缀」：只报「没找到」的话模型通常只会换一段文字再试一次。
+
+**`edit_file` 与 `write_file` 同档。** `FileTools.edit()` 最后一步就是 `return this.write(...)`，
+而它可以把整份文件换掉（`oldString` 取全文，或 `replaceAll`）；`write_file` 带 `approvalTargetExists`
+说明「覆盖已存在的文件要审批」正是设计意图，而 `edit_file` 恰好**只**作用于已存在的文件 ——
+标成 `never` 等于给覆盖审批留了一条绕道（docs/27 · C-03）。两者的 `when: 'target_exists'` 判据也是同一个。
 
 **目录整棵删要显式 `recursive`。** `delete_file` 的实现是 `rename` 进回收站，而 `rename` 一个目录
 就是把整棵树搬走 —— 等价于 `rm -r`。所以：目录必须显式传 `recursive: true`（否则 `path_is_directory`），
@@ -137,7 +147,7 @@ function resolveJailed(p: string, root: string): string {
 | `read_messages` | limited | 「按顺序读取聊天记录」：`{anchor?, direction?, limit?}`。`anchor` 可为 message id（`12841` 或 `#12841`）或 ISO 时间；`direction: 'before'\|'after'\|'around'`（默认 `before`，`around` 两侧各一半）；不给 `anchor` 就是最近若干条；默认 limit 50、上限 200。**一律按 id 升序交回** —— `recent()` 那种「最新在最前」会让 `direction:'after'` 读出来的一段反着念。数字串一律按 id 认而不是当日期：模型十有八九把 `#12841` 里的数字当字符串递过来，而 `Date.parse('12841')` 在某些运行时会解析成一个年份，于是它读到一段完全不相干的记录还以为那就是自己要的位置。解析不出来交回 `invalid_anchor`，**不悄悄退回「最近 N 条」** |
 | `get_message` | limited | `{messageId}` — 单条详情（含附件元数据、回复链） |
 | `admin_search_messages` | **owner** | 跨全部 chat 检索；返回结果附 `chat_id`。**不给** `search_messages` 那组过滤参数：`adminSearchAll` 不认它们，而收下一个参数再默默忽略比没有这个参数更糟 —— 模型会以为自己已经按人过滤过了（「摘除比伪造安全」，[16 §5](./16-remediation-plan.md)） |
-| `context_stats` | limited | 当前上下文窗口统计（等价 `/ctx`），供模型自我判断是否该收敛 |
+| `context_stats` | limited | 当前上下文窗口的**摘要**（窗口 ordinal 区间 / 消息数 / tokens / 背景认领水位，等价 `/ctx`），供模型自我判断是否该收敛。**不含逐条历史** —— 带上整份之后输出会被 `tools.exec.maxOutputBytes` 从中间截断，模型拿到的是一段掐断的 JSON（前半是最早的历史、后半是 commit 列表），既烧 token 又没有信息（docs/27 · R-03）。逐条时间线在 WebUI 的会话页 |
 
 返回格式（`search_messages` / `read_messages` / `admin_search_messages` 统一，便于模型引用）：
 ```
@@ -211,7 +221,7 @@ bash: tool({
 | 工具 | minRole | 说明 |
 |---|---|---|
 | `web_fetch` | limited | `{url}`；SSRF 防护：解析后拒绝 私有网段/回环/link-local/元数据地址（169.254.169.254）；只允许 http/https；跟随重定向 ≤3 次且每跳重新校验；响应上限 2MB → HTML 抽成纯文本（见下）→ 🚧 可选交给 `low` 模型按 `prompt` 摘要（`tools.web.summarizeWithAlias`，未实现，所以 schema 里**没有** `prompt` 这个参数）。单次尝试 `tools.web.timeoutMs`（含 DNS 与全部跳），瞬时失败按 `tools.web.retries` 重试，见 §8.1 |
-| `web_search` | limited | 需配置搜索 provider（Brave/Serper/Tavily 之一）；未配置则不注册该工具。超时与重试同 `web_fetch` |
+| `web_search` | limited | 需配置搜索 provider（Brave/Serper/Tavily 之一）；未配置则不注册该工具。超时与重试同 `web_fetch`，且**同样走 `guardedFetch`**（`maxRedirects: 0` + 响应体上界）—— 它此前是全仓库唯一一条裸 `fetch`，而请求头里带着搜索 API key：undici 只按规范摘 `Authorization`/`Cookie`，自定义认证头会跟着 302 原样送到新主机（docs/27 · S-04） |
 
 **HTML 要抽成正文才交给模型。** 一个普通页面九成是 script / style / 导航，原样交出去按
 `tools.maxOutputBytes`（64KB）截断之后经常连正文的第一段都没进去 —— 模型「取回来了但什么也没读到」。
@@ -291,7 +301,7 @@ bash: tool({
 |---|:---:|:---:|:---:|:---:|
 | （任何工具 / 任何回复） | ✗ | | | |
 | `read_file` `list_dir` `glob` `grep` | ✗ | ✓ jail | ✓ jail | ✓ jail（可开宿主） |
-| `write_file` `edit_file` `move_file` | ✗ | ✗ | ✓ jail | ✓ |
+| `write_file` `edit_file` `move_file` | ✗ | ✗ | ✓ jail（+条件审批） | ✓ |
 | `delete_file` | ✗ | ✗ | ✓ + 审批 | ✓ + 审批* |
 | `bash` `python` | ✗ | ✗ | ✓ 沙箱（+条件审批） | ✓ 宿主/沙箱 |
 | `search_messages` `read_messages` `get_message` | ✗ | ✓ 本会话 | ✓ 本会话 | ✓ 本会话 |
@@ -469,6 +479,18 @@ Telegram 不会看到按钮；有 WebUI 连着时调用按 `ttlMs` 等待，而�
 
 风险规则（`approval.rules`，正则匹配后触发审批，可在 WebUI 编辑）：
 
+> ⚠ **`approval.enabled: true` 只是「流水线开着」，判定完全由 `rules` 决定。** 规则表为空时
+> `ApprovalRules.evaluate()` 恒回 `{needed:false}`，于是上面工具表里标「条件审批」的六个
+> （`bash` `python` `write_file` `edit_file` `move_file` `memory_write`）一个都不会停下来问
+> —— 而面板显示「审批已启用」（docs/27 · S-02，实测 `{command:'rm -rf /'}` 也是 `needed:false`）。
+> 出厂 schema 默认是**空表**：空表时启动记一条 `approval.no_rules` 警告并写 stderr，WebUI 的
+> 审批页顶上也会说明「0 条规则时 conditional 等于 never」。`config/config.yaml` 里带了注释掉的
+> 示例规则 —— 取舍留给部署方（开箱就弹审批 = 每次 `bash` 都要人点一下）。
+>
+> `pattern` 走 **RE2**（线性时间；不支持反向引用与 lookaround），上界 128 字符，`(?i)` 前缀原生
+> 支持。求值对象是模型给的整份工具参数 JSON，用 JS 引擎时一条 `(a+)+` 撞上合适输入就是指数回溯，
+> 而这是单线程进程（docs/27 · S-03）。写入端用同一份判据，不兼容的模式当场 400。
+
 ```yaml
 approval:
   ttlMs: 180000
@@ -476,12 +498,12 @@ approval:
   allowInitiator: false        # 是否允许 turn 发起人自行批准（默认否，只有 owner 能批）
   rules:
     - tool: bash
-      pattern: '(?i)\b(rm\s+-rf|mkfs|dd\s+if=|shutdown|reboot|:\(\)\{|chmod\s+777\s+/)'
+      pattern: '(?i)\b(rm\s+-rf|mkfs|dd\s+if=|shutdown|reboot|chmod\s+777\s+/)'
       risk: high
     - tool: bash
       pattern: '(?i)\b(curl|wget|nc|ssh|scp)\b'
       risk: medium
-    - tool: [write_file, move_file]
+    - tool: [write_file, edit_file, move_file]
       when: target_exists
       risk: medium
     - tool: delete_file

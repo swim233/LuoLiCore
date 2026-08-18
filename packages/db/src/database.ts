@@ -30,7 +30,9 @@ export function migrateDatabase(db: Sqlite, migrationsDir = fileURLToPath(new UR
       const directory = resolve(dirname(database), 'backup');
       mkdirSync(directory, { recursive: true, mode: 0o700 });
       const path = join(directory, `luoli-${Date.now()}-pre-${pending[0]!.slice(0, 4)}.db`);
-      db.exec(`VACUUM INTO '${path.replaceAll("'", "''")}'`);
+      // `VACUUM INTO` 收的是 SQL 表达式，所以能绑参数。这里的 path 不含外部输入，
+      // 但「自己转义 SQL 引号」不该是仓库里留着的先例（docs/27 · T-05）。
+      db.prepare('VACUUM INTO ?').run(path);
     }
   }
   for (const name of pending) {

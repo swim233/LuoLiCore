@@ -16,6 +16,7 @@ import type { ToolExecutionContext, ToolRegistry } from '../tools/registry.js';
 import { SKILL_NARROWING_EXEMPT } from '../tools/policy.js';
 import type { ProviderStore } from '../provider/store.js';
 import { type FallbackOptions, fallbackLanguageModel } from './fallback-model.js';
+import { createStepObservers, type StepFacts } from './step-observers.js';
 import { type AliasSettings, parseAliasSettings } from '../provider/alias-settings.js';
 import type { UsageLedger } from '../ledger/usage.js';
 import type { QuotaGuard, QuotaReservation } from '../ledger/quota.js';
@@ -56,7 +57,8 @@ export class ModelRegistry {
   readonly #chains = new Map<string, Array<{ model: V4LanguageModel; info: ModelRow }>>();
   readonly #settings = new Map<string, AliasSettings>();
 
-  constructor(private readonly db: Sqlite, private readonly providers: ProviderStore) {}
+  /** @param onProviderUnusable rebuild 时跳过某个 provider 的原因。装配方拿它记一条 warn。 */
+  constructor(private readonly db: Sqlite, private readonly providers: ProviderStore, private readonly onProviderUnusable?: (providerId: string, reason: string) => void) {}
 
   /**
    * `provider.healthDownCooldownMinutes`：判成 `down` 的 provider 只在冷却期内被排除，过期后
@@ -74,20 +76,36 @@ export class ModelRegistry {
       .all(Date.now() - cooldownMinutes * 60_000) as ProviderRow[];
     const providerInstances = new Map<string, Provider>();
     for (const provider of providerRows) {
-      const apiKey = this.providers.key(provider.id);
-      const headers = provider.headers ? JSON.parse(provider.headers) as Record<string, string> : null;
-      const common: { apiKey?: string; baseURL?: string; headers?: Record<string, string> } = {};
-      if (apiKey) common.apiKey = apiKey;
-      if (provider.baseUrl) common.baseURL = provider.baseUrl;
-      if (headers) common.headers = headers;
-      const instance: Provider = provider.kind === 'anthropic'
-        ? createAnthropic(common)
-        : provider.kind === 'google'
-          ? createGoogleGenerativeAI(common)
-          : provider.kind === 'openai-compatible'
-            ? createOpenAICompatible({ name: provider.name, baseURL: provider.baseUrl ?? '', ...common })
-            : createOpenAI(common);
-      providerInstances.set(provider.id, instance);
+      /**
+       * **一个 provider 坏掉不能带走全部别名。** `ProviderStore.key()` 在密文解不开时抛（换过
+       * `LUOLI_MASTER_KEY` 就会），`JSON.parse` 在 `headers_json` 是坏 JSON 时抛 —— 而注册表在
+       * 函数开头已经清空了，异常往上抛的结果是**所有别名一起没了**；调用点又是同步的
+       * `POST /api/providers` / `PATCH /api/models/:id`，于是端点 500 且运行时从此没有任何可用
+       * 模型，直到下一次成功的 rebuild（docs/27 · C-01）。`app.ts` 对同一列早就是 try/catch 兜的。
+       *
+       * 跳过的那一个记成 `down`：界面能说出原因，冷却期过后下一次 rebuild 会再试一次，
+       * 而「一个别名都不剩」正是 `all_providers_down` 该响的条件。
+       */
+      try {
+        const apiKey = this.providers.key(provider.id);
+        const headers = provider.headers ? JSON.parse(provider.headers) as Record<string, string> : null;
+        const common: { apiKey?: string; baseURL?: string; headers?: Record<string, string> } = {};
+        if (apiKey) common.apiKey = apiKey;
+        if (provider.baseUrl) common.baseURL = provider.baseUrl;
+        if (headers) common.headers = headers;
+        const instance: Provider = provider.kind === 'anthropic'
+          ? createAnthropic(common)
+          : provider.kind === 'google'
+            ? createGoogleGenerativeAI(common)
+            : provider.kind === 'openai-compatible'
+              ? createOpenAICompatible({ name: provider.name, baseURL: provider.baseUrl ?? '', ...common })
+              : createOpenAI(common);
+        providerInstances.set(provider.id, instance);
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        this.db.prepare("UPDATE providers SET health_state='down',health_checked_at=?,health_error=? WHERE id=?").run(Date.now(), reason.slice(0, 500), provider.id);
+        this.onProviderUnusable?.(provider.id, reason);
+      }
     }
     const modelRows = this.db.prepare(`SELECT id,provider_id AS providerId,model_id AS modelId,context_window AS contextWindow,
       max_output AS maxOutput,capabilities_json AS capabilities,price_in AS priceIn,price_out AS priceOut,
@@ -297,7 +315,12 @@ function initiatorDescription(turn: RuntimeTurnContext): string {
 export function assembleMainPrompt(turn: RuntimeTurnContext, dependencies: PromptAssemblyDependencies, executionContext?: ToolExecutionContext): MainPromptAssembly {
   const toolContext = executionContext ?? { turn, workspace: dependencies.workspace, agentKind: 'main' };
   const activeTools = dependencies.tools.activeNames(turn.effectiveRole, toolContext);
-  const documents = dependencies.documents.readForPrompt({ userId: turn.initiatorUserId, isPrivate: turn.isPrivate });
+  // `perChat.<key>.character`：会话级人格文件名。它在 `perChat` 白名单里，但不是 schema 叶子键
+  // （`perChat` 是 `z.record(z.unknown())`），所以从合并后的本轮配置里按名字取（docs/27 · C-08）。
+  // 形态闸在 `PromptDocuments.paths` 里：这个值会被当成 `memory/` 下的路径段用。
+  const characterOverride = (turn.config as Record<string, unknown>).character;
+  const documents = dependencies.documents.readForPrompt({ userId: turn.initiatorUserId, isPrivate: turn.isPrivate,
+    ...(typeof characterOverride === 'string' && characterOverride ? { characterOverride } : {}) });
   const skillCatalog = dependencies.skills?.catalog(turn.effectiveRole).map((skill) => `- skill:${skill.name}: ${skill.description}`).join('\n') ?? '';
   // `prompt.includeToolCatalog=false` 时只发工具名（RUNTIME 里那一行），不发描述。省的是每轮
   // 几百到几千 token，代价是模型少了参数用法的提示 —— 所以默认开着。
@@ -415,6 +438,10 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
   const messageOptions: ContextMessageOptions = { volatile: prompt.volatile, cacheBreakpoint: providerKind === 'anthropic' };
   const stepSpans = new Map<number, { id: string; end: (data?: unknown, error?: unknown) => void }>();
   const stepAlias = new Map<number, string>();
+  const observers = createStepObservers(turn, { ledger: dependencies.ledger, registry: dependencies.registry, context: dependencies.context,
+    log: dependencies.log, quota: dependencies.quota, reservation: dependencies.reservation ?? null,
+    tokenRatioAlpha: dependencies.config.context.tokenRatioAlpha, fallbackInfo: initialInfo,
+    aliasForStep: (stepNumber) => stepAlias.get(stepNumber) ?? alias });
   const agent = new ToolLoopAgent({ model, instructions, tools: toolSet, activeTools: activeNames,
     // 重试与 fallback 归 `fallbackLanguageModel` 管（它认 Retry-After、带真随机抖动、401 短路、
     // 链内换模型）。SDK 默认还会自己再重试 2 次，两层相乘 = 同一次故障要熬 3×(候选数×尝试数) 次
@@ -456,37 +483,24 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
         data: { stepNumber: event.stepNumber, modelId: event.modelId, provider: event.provider, messages: bodyForLog(event.messages, dependencies.config.logs.captureBodies), instructions: bodyForLog(event.instructions, dependencies.config.logs.captureBodies) } }));
       dependencies.log.publish('turn.progress', { turnId: turn.turnId, phase: 'model', step: event.stepNumber, note: `${event.provider}/${event.modelId}` });
     },
+    // 四件事拆成四个可单独喂假 step 的观察者（`step-observers.ts`，docs/27 · D-05）。
+    // 这里只剩「把 AI SDK 的 step 映射成 StepFacts」这一层适配 —— 那个 step 类型没人能手搓，
+    // 而记账 / 广播 / 上下文 / 校准真正需要的只有十来个字段。
     onStepEnd: (step) => {
-      const servedId = servedModelId ?? step.model.modelId;
-      const info = dependencies.registry.infoByModelId(servedId) ?? initialInfo;
-      const cost = dependencies.ledger.record({ turnId: turn.turnId, chatId: turn.chatId, userId: turn.initiatorUserId,
-        // 链内 fallback 换的是模型不是别名：按「是不是链首」判会把第二个候选记成 low，
-        // 而它可能根本不是降档，按别名分组的用量报表因此失真（docs/20 · W-LEDGER-01）。
-        providerId: info.providerId, modelId: info.modelId, modelAlias: dependencies.registry.aliasOf(servedId, stepAlias.get(step.stepNumber) ?? alias) ?? 'unknown',
-        inputTokens: step.usage.inputTokens ?? 0, outputTokens: step.usage.outputTokens ?? 0,
-        cacheReadTokens: step.usage.inputTokenDetails.cacheReadTokens ?? 0, cacheWriteTokens: step.usage.inputTokenDetails.cacheWriteTokens ?? 0,
-        reasoningTokens: step.usage.outputTokenDetails.reasoningTokens ?? 0, priceIn: info.priceIn, priceOut: info.priceOut,
-        priceCacheRead: info.priceCacheRead, priceCacheWrite: info.priceCacheWrite, latencyMs: step.performance.responseTimeMs,
-        finishReason: step.finishReason, ok: true });
-      if (dependencies.quota && dependencies.reservation) dependencies.quota.commit(dependencies.reservation, cost);
-      dependencies.log.publish('usage', { turnId: turn.turnId, model: info.modelId, alias: stepAlias.get(step.stepNumber) ?? alias, in: step.usage.inputTokens ?? 0, out: step.usage.outputTokens ?? 0, costUsd: cost });
-      if (step.toolCalls.length) dependencies.log.publish('turn.progress', { turnId: turn.turnId, phase: 'tools', step: step.stepNumber, note: step.toolCalls.map((call) => call.toolName).join(', ') });
-      stepSpans.get(step.stepNumber)?.end({ model: step.model, usage: step.usage, cost, request: bodyForLog(step.request, dependencies.config.logs.captureBodies), response: bodyForLog(step.response, dependencies.config.logs.captureBodies) });
-      for (const call of step.toolCalls) dependencies.context.appendDelta(turn, { id: `call:${call.toolCallId}`, role: 'assistant', origin: 'tool_call', parts: [{ type: 'tool-call', toolCallId: call.toolCallId, toolName: call.toolName, input: call.input }], textPreview: `${call.toolName}(${JSON.stringify(call.input).slice(0, 180)})`, pruneLevel: 2 });
-      for (const result of step.toolResults) dependencies.context.appendDelta(turn, { id: `result:${result.toolCallId}`, role: 'tool', origin: 'tool_result', parts: [toolResultPart(result.toolCallId, result.toolName, result.output)], textPreview: `${result.toolName}: ${JSON.stringify(result.output).slice(0, 180)}`, pruneLevel: 1 });
-      // 校准的两端必须是同一个东西。此前左边是「窗口内消息的估算」、右边是 `usage.inputTokens`
-      // ——后者还含着系统提示词与全部工具 schema（本机实测约 12,000 token 里有 9,500 是这两样）。
-      // 首轮空上下文时左边只有几十，一次采样就把 ratio 推到 26，此后每条消息按 26 倍存进库
-      // （logs/2026-08-16 的 ctx.token_calibration 记录了这条曲线）。改成拿真正发出去的整个
-      // 请求体来估：同一把尺子量同一段内容，得到的才是分词器差异本身。
-      const requestBody = (step.request as { body?: unknown } | undefined)?.body;
-      const estimatedInput = requestBody === undefined ? 0 : estimateStructureTokens(requestBody);
-      const realInput = step.usage.inputTokens ?? 0;
-      // 小样本的相对误差被常数项主导，校准它只会引入噪声。
-      if (estimatedInput >= 200 && realInput > 0) {
-        const ratio = dependencies.context.calibrate(turn.key, realInput, estimatedInput, dependencies.config.context.tokenRatioAlpha);
-        if (Math.abs(realInput / estimatedInput - 1) > 0.2) dependencies.log.event({ level: 'warn', kind: 'ctx.token_calibration', summary: `token ratio ${ratio.toFixed(3)}`, traceId: turn.turnId, key: turn.key, data: { estimatedInput, realInput, ratio } });
-      }
+      const facts: StepFacts = { stepNumber: step.stepNumber, servedModelId: servedModelId ?? step.model.modelId,
+        usage: { inputTokens: step.usage.inputTokens ?? 0, outputTokens: step.usage.outputTokens ?? 0,
+          cacheReadTokens: step.usage.inputTokenDetails.cacheReadTokens ?? 0, cacheWriteTokens: step.usage.inputTokenDetails.cacheWriteTokens ?? 0,
+          reasoningTokens: step.usage.outputTokenDetails.reasoningTokens ?? 0 },
+        latencyMs: step.performance.responseTimeMs, finishReason: step.finishReason,
+        toolCalls: step.toolCalls.map((call) => ({ toolCallId: call.toolCallId, toolName: call.toolName, input: call.input })),
+        toolResults: step.toolResults.map((result) => ({ toolCallId: result.toolCallId, toolName: result.toolName,
+          part: toolResultPart(result.toolCallId, result.toolName, result.output), preview: `${result.toolName}: ${JSON.stringify(result.output).slice(0, 180)}` })),
+        requestBody: (step.request as { body?: unknown } | undefined)?.body };
+      const resolved = observers.record(facts);
+      observers.broadcast(facts, resolved);
+      stepSpans.get(step.stepNumber)?.end({ model: step.model, usage: step.usage, cost: resolved.cost, request: bodyForLog(step.request, dependencies.config.logs.captureBodies), response: bodyForLog(step.response, dependencies.config.logs.captureBodies) });
+      observers.appendContext(facts);
+      observers.calibrate(facts);
     },
   });
   try {
