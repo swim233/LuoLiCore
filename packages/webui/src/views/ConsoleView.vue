@@ -942,13 +942,13 @@ const quota = ref<QuotaPayload | null>(null);
  * `limit === null` 时环不画，只写「不限」（见 UiRing）。
  */
 // ── 用量聚合：时间范围 + 维度（docs/09 §3.11）────────────────────────────────────
-interface UsageReportRow { bucket: string | null; costUsd: number; inputTokens: number; outputTokens: number; calls: number; successes: number; label?: string | null }
+interface UsageReportRow { bucket: string | null; costUsd: number; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; calls: number; successes: number; label?: string | null }
 // `UiSelect` 是**只认字符串**的选择器（内部 `String(...)` 归一化、emit 也是 string）。
 // 这里的天数因此存成字符串，用的时候再 Number()：给它传数字会让 prop 类型校验报警，
 // 而且 `picked` 的 `===` 比对也对不上（"7" !== 7），下拉框显示成空。
 const USAGE_RANGES = [{ label: '近 7 天', value: '7' }, { label: '近 30 天', value: '30' }, { label: '近 90 天', value: '90' }];
 const USAGE_DIMENSIONS = [{ label: '按天', value: 'day' }, { label: '按会话', value: 'chat' }, { label: '按用户', value: 'user' },
-  { label: '按模型', value: 'model' }, { label: '按别名', value: 'alias' }, { label: '按 agent', value: 'agent' }];
+  { label: '按模型', value: 'model' }, { label: '按别名', value: 'alias' }, { label: '按 agent', value: 'agent' }, { label: '按 provider', value: 'provider' }];
 const usageRange = ref('7');
 const usageGroupBy = ref('day');
 const usageReport = ref<UsageReportRow[]>([]);
@@ -957,8 +957,18 @@ const usageTotals = computed(() => {
   const rows = usageReport.value;
   const calls = rows.reduce((sum, row) => sum + row.calls, 0);
   const successes = rows.reduce((sum, row) => sum + row.successes, 0);
-  return { cost: rows.reduce((sum, row) => sum + row.costUsd, 0), calls, successRate: calls ? `${Math.round((successes / calls) * 100)}%` : '—' };
+  const inputTokens = rows.reduce((sum, row) => sum + row.inputTokens, 0);
+  const cacheRead = rows.reduce((sum, row) => sum + (row.cacheReadTokens ?? 0), 0);
+  return { cost: rows.reduce((sum, row) => sum + row.costUsd, 0), calls, successRate: calls ? `${Math.round((successes / calls) * 100)}%` : '—',
+    inputTokens, cacheRead, hitRate: inputTokens ? `${Math.round((cacheRead / inputTokens) * 100)}%` : '—' };
 });
+/** 命中率按桶算，不是把总数一除 —— 一个大桶会把其它桶的表现整个盖掉，而这一页正是用来
+ *  分辨「哪一家上游 / 哪个模型的缓存是真的」。同理，没有输入的桶给 0 而不是跳过。 */
+const usageCacheRows = computed(() => usageReport.value.map((row) => ({
+  label: row.label ?? String(row.bucket ?? '—'),
+  value: row.inputTokens ? Math.round((row.cacheReadTokens ?? 0) / row.inputTokens * 100) : 0,
+  hint: `${(row.cacheReadTokens ?? 0).toLocaleString()} / ${row.inputTokens.toLocaleString()}`,
+})));
 async function loadUsageReport(): Promise<void> {
   const to = Date.now();
   const from = to - Number(usageRange.value) * 86_400_000;
@@ -2190,6 +2200,12 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
               <UiLineChart v-if="usageGroupBy === 'day' && usageReport.length" :labels="usageReport.map((row) => String(row.bucket).slice(5))"
                 :series="[{ name: '输入', values: usageReport.map((row) => row.inputTokens) }, { name: '输出', values: usageReport.map((row) => row.outputTokens) }]" />
               <UiBarChart v-else :rows="usageReport.map((row) => ({ label: row.label ?? String(row.bucket ?? '—'), value: row.inputTokens + row.outputTokens }))" />
+            </article>
+            <!-- 缓存命中：`cache_read_tokens` 一直在记账里，但此前没有任何一处把它除以输入。
+                 中转站的前缀缓存可能是概率性的（同一份请求发两次，一次命中一次不命中），
+                 这时「哪家上游值得开缓存」只有按 provider 分维度看这个数才答得出（docs/04 §5.1.1）。 -->
+            <article class="surface inner"><header><div><h3>缓存命中</h3><p class="section-note">cache_read / 输入 token</p></div><UiTag :value="`合计 ${usageTotals.hitRate}`" :severity="usageTotals.cacheRead ? 'success' : 'secondary'" /></header>
+              <UiBarChart :rows="usageCacheRows" :format="(value) => `${value}%`" />
             </article>
           </div>
           <h3 class="usage-detail-title">明细</h3>

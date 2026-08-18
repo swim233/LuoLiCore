@@ -99,6 +99,7 @@
 | [x] AC-CTX-036 (自动) ★ | 同上，继续提交到撞上 `context.active.tokens` / `maxMessages` 天花板 | 照常裁剪，且**裁回 `context.limit.*` 而不是天花板**（每次 `kind='prune'` commit 的 `msg_count` ≤ `limit.maxMessages`）；窗口起点仍落在 turn 边界。只裁到天花板的话此后每一轮都要再裁一次，等于白推迟 | 〔context.active.test.ts〕
 | [x] AC-CTX-037 (自动) | 活跃期过后（把 HEAD 的 `created_at` 往回拨超过 `windowMs`）再发一条消息 | `openTurn` 在开轮**之前**就把窗口裁回 `context.limit.*`，本轮 `turn.snapshot` 已是裁剪后的小上下文 —— 否则久别重逢那一轮要按全价发一次数倍大的请求。此时缓存本来就已过期，裁剪不损失任何命中 | 〔context.active.test.ts〕
 | [x] AC-CTX-038 (自动) | `context.active.windowMs=0`（schema 默认） | 每轮提交后照常裁剪，行为与未引入活跃期时逐字一致 | 〔context.active.test.ts〕
+| [x] AC-CTX-039 (自动) ★ | 活跃期内连着走完四轮真实轮次（`openTurn → runMainAgent → commitTurn`），逐字节比对相邻两轮真正递到 provider 那一层的 prompt 数组 | 第 N 轮请求**去掉末尾易变段**之后，必须逐字节是第 N+1 轮请求的前缀；同时稳定段那条 system 与 tools schema 跨轮完全相同。这一条一破，整段历史的缓存就一起没了 —— 历史上破它的两种方式（分钟时钟留在稳定段、活跃期内推进 `window_start`）都出现过（[04 §2.1](./04-agents-and-providers.md#21-prompt-缓存)、[02 §5.1.1]） | 〔context.cache-prefix.test.ts〕
 
 ## 3. Telegram 与准入（AC-TG / AC-ACL / AC-OUT）
 
@@ -323,6 +324,7 @@
 | [ ] AC-LOG-002 ★ | 展开任一 `model.call` | 含完整请求 messages、tools 列表、settings、响应文本/toolCalls、四类 token、费用、延迟、finishReason |
 | [x] AC-LOG-020 (自动) ★ | 一次成功的工具调用与一次失败的工具调用，各查它的 `tool.call` 行 | **同一行里既有 `input` 又有 `output`**；失败那行是 `input` + `error`。一个 span 只落一行，开始时的载荷与结束时的载荷是合并的 —— 此前 `end()` 用结束载荷整体顶掉开始那份，于是 `input` 一次都没进过库，WebUI 详情因此只有工具输出 | 〔log.span.test.ts〕
 | [x] AC-LOG-021 (自动) | `span.end()` 不给载荷 / 给一个非对象值 / 调两次 | 不给：开始那份原样保留；非对象：挂在 `result` 下而不顶掉开始那份；两次：只落一行 | 〔log.span.test.ts〕
+| [x] AC-LOG-022 (自动) | `GET /api/usage/report?groupBy=provider` | 每个桶带 `cacheReadTokens` / `cacheWriteTokens`，bucket 的裸 provider id 在服务端补成 provider 名。`cache_read_tokens` 一直在记账里，缺了这条聚合时「某家上游的前缀缓存是不是真的」只能靠翻 JSONL 反推请求体逐轮比对前缀 —— 而中转站的命中可能是概率性的，只有按 provider 看这个比值才测得出（[04 §5.1.1](./04-agents-and-providers.md)、[09 §3.11](./09-webui.md)） | 〔webui.gaps.test.ts〕
 | [ ] AC-LOG-003 ★ | 展开任一 `tool.call` | 含完整输入、输出（或截断标记+全文引用）、耗时、是否沙箱、是否经审批 |
 | [ ] AC-LOG-004 (自动) ★ | 求和校验 | 该 turn 所有 `usage_ledger.cost_usd` 之和 == `turns.cost_usd`（误差 <1e-9） |
 | [ ] AC-LOG-005 (自动) | 子 agent 的 span | `parent_span_id` = 派发它的 `tool.call` span；费用计入同一 `turn_id` |
@@ -510,17 +512,17 @@
 | 模块 | 负责人 | 通过 AC 数 / 总数 | 豁免项及理由 | 日期 | 签署 |
 |---|---|---|---|---|---|
 | 配置与 DB | | 14 / 24 | | | |
-| **上下文引擎** | | 29 / 38 | | | |
+| **上下文引擎** | | 30 / 39 | | | |
 | Telegram 与准入 | | 20 / 44 | | | |
 | Agent 与 Provider | | 20 / 42 | | | |
 | 工具/沙箱/审批 | | 15 / 54 | | | |
 | Subagent 与任务 | | 15 / 35 | | | |
 | 记忆 | | 1 / 13 | | | |
-| 日志与成本 | | 4 / 25 | | | |
+| 日志与成本 | | 5 / 26 | | | |
 | 扩展生态 | | 3 / 27 | | | |
 | WebUI | | 10 / 81 | | | |
 | 安全 | | 5 / 21 | | | |
 | 运维 | | 1 / 9 | | | |
-| **合计** | | **137 / 413** | | | |
+| **合计** | | **139 / 415** | | | |
 
 **整体通过条件**：全部 ★ 项通过 + 非 ★ 项通过率 ≥ 95% + 所有豁免项经需求方书面确认。

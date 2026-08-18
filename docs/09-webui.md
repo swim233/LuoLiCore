@@ -364,13 +364,19 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
 - 定时轮次跑完会改「上一次」与「下一次」，所以这一组跟着 `turn.finished` 事件刷新。
 
 ### 3.11 用量（Usage）
-- **时间范围（7/30/90 天）+ 维度切换**（按天/会话/用户/模型/别名/agent）：走
-  `GET /api/usage/report?groupBy&from&to`。聚合本来就实现好了（`UsageLedger.report` 六个维度一个不少），
+- **时间范围（7/30/90 天）+ 维度切换**（按天/会话/用户/模型/别名/agent/provider）：走
+  `GET /api/usage/report?groupBy&from&to`。聚合本来就实现好了（`UsageLedger.report`），
   只是从来没有端点调过它 —— 这一页因此长期只有一张不分维度的明细表。
-  `chat` / `user` 维度的 bucket 是裸 id，显示名在**服务端**补（前端不再实现第二份 `principals` 反查规则）。
+  `chat` / `user` / `provider` 维度的 bucket 是裸 id，显示名在**服务端**补（前端不再实现第二份反查规则）。
 - **图表**：按天时是折线（花费、输入/输出 token），按其他维度时是水平条形排行 —— 维度值是群名/模型名，
   竖着放会把标签压成竖排。条形图只画前 10 并把余下的合成一条「其余 N 项」，**不静默截断**。
   自建 SVG（`UiLineChart` / `UiBarChart` / `UiRing`），不引图表库：全站已摘掉 PrimeVue，而 CSP 也不允许从 CDN 取。
+- **缓存命中卡片**（`cache_read / 输入 token`）：`cache_read_tokens` 一直在 `usage_ledger` 里，
+  但此前没有任何一处把它除以输入 —— 于是「这家上游的前缀缓存到底是不是真的」只能靠翻 JSONL
+  反推请求体、逐轮比对前缀。命中率**按桶单独算**（不是把总数一除）：一个大桶会盖掉其它桶，
+  而这张卡正是用来分辨哪一家上游、哪个模型的缓存值得依赖的。
+  中转站的前缀缓存可能是**概率性**的（同一份请求发两次，一次命中一次不命中），
+  配 `provider` 维度看这个数是唯一能把它测出来的办法（[04 §5.1.1](./04-agents-and-providers.md)）。
 - 明细表（`usage_ledger` 分页）（已实现）。
 - 配额是**独立一页**，见 §3.11a —— 限额、实时计数器与重置按钮都在那里。
 
