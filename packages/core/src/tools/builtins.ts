@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import type { AgentManager, Config, ContextEngine, FileTools, MemoryStore, ModelRegistry, QuotaGuard, QuotaReservation, Sandbox, SkillLoader, ToolRegistry, UsageLedger, LogSink } from '@luoli/core';
 import { DEFAULT_WEB_RETRY, NOTE_PREFIX, arbitrateAsk, builtinPolicy, numberLines, readSlice, runHarness, runSubAgent, webFetch, webSearch, type WebRetryOptions } from '@luoli/core';
 import type { ArchiveRepository, ArchivedMessage, ScopedArchiveRepository } from '@luoli/db';
+import { archiveQuery } from '@luoli/db';
 import { citeArchivedMessages } from './cite.js';
 import { registerScheduleTools, type ScheduleToolDependencies } from './schedule.js';
 import type { Role } from '@luoli/shared';
@@ -237,7 +238,12 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
       const before = parseMoment(input.before);
       if (after === false || before === false) return { ok: false, error: 'invalid_time_filter', hint: 'after / before 要写成 ISO 时间，例如 2026-08-14 或 2026-08-14T10:02:00Z' };
       const scope = dependencies.archive.scope(context.turn.chatId, context.turn.threadId);
-      return { ok: true, messages: cite(scope.search(input.query, input.limit, { from: input.from ?? null, after, before, kind: input.kind ?? null }), context, scope) };
+      const messages = cite(scope.search(input.query, input.limit, { from: input.from ?? null, after, before, kind: input.kind ?? null }), context, scope);
+      // 短词进不了 trigram 索引，剔掉是正确降级 —— 但不说出来就是「我按你写的都查了」的假象：
+      // `search_messages("名字 李小明")` 只按 `李小明` 检索过，而模型据此判定「没有这回事」
+      // （docs/28 · L-DB-01）。给的是可操作的下一步，不是一句免责声明。
+      const dropped = archiveQuery(input.query).dropped;
+      return { ok: true, messages, ...(dropped.length ? { note: `以下词短于 3 个字、trigram 索引检索不到，本次未参与检索：${dropped.join('、')}。需要按它们找就把它们单独作为 query 再查一次（单独查会走逐字匹配）。` } : {}) };
     } });
   registry.register({ name: 'read_messages', description: '按顺序读取当前会话聊天记录。anchor 可以是消息 id 或 ISO 时间，direction 决定往哪边读；不给 anchor 就是最近若干条。', inputSchema: readSchema({ defaultReadLimit: 50, maxReadLimit: 200 }),
     inputSchemaFor: (context) => readSchema(archiveLimits(context)), policy: builtinPolicy('read_messages'), sourcePriority: 100, untrustedOutput: true,

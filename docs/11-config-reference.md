@@ -584,7 +584,10 @@ maintenance:
 db:
   path: ./data/luoli.db           # 需重启
   backupKeep: 5
-  vacuumCron: '0 5 * * 0'         # 需重启
+  vacuumCron: '0 5 * * 0'         # 需重启 · VACUUM 之后立刻 wal_checkpoint(TRUNCATE)：WAL 模式下
+                                  # VACUUM 把整库重写一遍**进 WAL**，不 checkpoint 就要等下一次
+                                  # 自动 checkpoint 攒够写入 —— 实测 37MB 的库 84 秒后 WAL 仍是
+                                  # 38MB，于是每次周维护之后以整库大小挂约 23 小时（28 · L-OPS-05）
                                   # 没有 ftsTokenizer：tokenize='trigram' 写死在 0001_init.sql 的建表
                                   # 语句里，换它必须追加迁移重建 messages_fts，配置项换不动（14 §2 Q3）
 

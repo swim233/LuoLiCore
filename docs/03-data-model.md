@@ -320,7 +320,13 @@ CREATE TABLE agent_runs (
   steps INTEGER DEFAULT 0, tool_calls INTEGER DEFAULT 0,
   input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0,
   cost_usd REAL NOT NULL DEFAULT 0,
-  result_summary TEXT, result_full_ref TEXT,   -- 全文落盘路径（避免撑爆 DB）
+  result_summary TEXT, result_full_ref TEXT,   -- 全文落盘路径（避免撑爆 DB）：存**相对**结果目录
+                                               -- （<LUOLI_DATA_DIR|cwd>/data/agent-results）的 ref，
+                                               -- 与 attachments.local_path 同一套。存绝对路径的话
+                                               -- 换个 cwd 起一次进程，库里记旧根、文件在新根，
+                                               -- gcFiles() 把新根下的全文当孤儿删空（28 · L-OPS-06）。
+                                               -- 存量绝对路径行由启动期一次性归一化处理，指向别的
+                                               -- 根的原样留下 —— 那是 gc 拒绝清理的依据
   error TEXT,
   started_at INTEGER NOT NULL, finished_at INTEGER
 );

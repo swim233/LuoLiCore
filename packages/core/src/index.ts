@@ -9,6 +9,7 @@ export * from './agent/fallback-model.js';
 export * from './agent/subagent.js';
 export * from './agent/runtime.js';
 export * from './agent/step-observers.js';
+export * from './agent/result-refs.js';
 export * from './access.js';
 export * from './config/descriptions.js';
 export * from './config/index.js';

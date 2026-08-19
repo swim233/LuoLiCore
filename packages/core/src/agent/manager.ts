@@ -46,9 +46,11 @@ export class AgentManager {
   }
 
   result(runId: string, offset = 0, limit = 65_536): { content: string; nextOffset: number | null } {
-    const row = this.db.prepare('SELECT result_full_ref AS path FROM agent_runs WHERE id=? AND state=\'done\'').get(runId) as { path: string | null } | undefined;
-    if (!row?.path) throw new Error('agent_result_unavailable');
-    return this.results.read(row.path, offset, limit);
+    // 列里存的是相对结果目录的 ref（docs/28 · L-OPS-06），拼接在 `AgentResultStore` 里做 ——
+    // 那里才知道当前配置指向哪棵目录。
+    const row = this.db.prepare('SELECT result_full_ref AS ref FROM agent_runs WHERE id=? AND state=\'done\'').get(runId) as { ref: string | null } | undefined;
+    if (!row?.ref) throw new Error('agent_result_unavailable');
+    return this.results.read(row.ref, offset, limit);
   }
 
   createMain(turnId: string, role: Role, modelAlias: string): AgentRun {
@@ -92,8 +94,10 @@ export class AgentManager {
     const definition = this.#definitions.get(run.agentName);
     const limit = definition?.resultMaxChars ?? 4000;
     const summary = [...result].slice(0, limit).join('');
-    const fullRef = this.results.put(run.id, result);
-    this.db.prepare("UPDATE agent_runs SET state='done',result_summary=?,result_full_ref=?,finished_at=? WHERE id=? AND state='running'").run(summary, fullRef, Date.now(), run.id);
+    // 落库的是相对 ref，交给模型的是 `agentresult://<runId>`：模型那一份是句柄不是路径，
+    // 两者从来不是同一个东西（docs/28 · L-OPS-06）。
+    const ref = this.results.put(run.id, result);
+    this.db.prepare("UPDATE agent_runs SET state='done',result_summary=?,result_full_ref=?,finished_at=? WHERE id=? AND state='running'").run(summary, ref, Date.now(), run.id);
     return { summary, fullRef: `agentresult://${run.id}`, truncated: [...summary].length < [...result].length };
   }
 

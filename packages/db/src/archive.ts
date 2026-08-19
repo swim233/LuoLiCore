@@ -47,6 +47,11 @@ export interface AppendMessageInput extends Omit<ArchivedMessage, 'id' | 'trigge
  * - 一个都没有（中文两字词几乎全在这一档）：退回 LIKE，且用最长的那个词而不是原串 ——
  *   原串里还带着 `|`，`LIKE '%名字|我是%'` 永远匹配不到任何东西。
  * 多词之间取 OR 而不是 FTS 默认的隐式 AND：这个工具的调用方是模型，它写多个词就是在列同义词。
+ *
+ * **丢弃是对的，沉默不对。** 短词进不了 trigram 索引（`MATCH` 恒 0 命中），所以走 FTS 时把它们
+ * 剔掉是正确降级；但混合查询（`search_messages("名字 李小明")`）里模型无从知道自己只查了
+ * `李小明` —— 于是 `dropped` 把没参与的词交回给调用方，由它告诉模型「这几个词要单独查一次」
+ * （单独查时它们就是全场最长的词，会走下面那条 LIKE 兜底）。docs/28 · L-DB-01。
  */
 /**
  * LIKE 里 `_` 是「任意一个字符」、`%` 是「任意串」，而上面那个分词正则刻意把 `_` 当词内字符
@@ -56,12 +61,22 @@ export interface AppendMessageInput extends Omit<ArchivedMessage, 'id' | 'trigge
 const escapeLike = (value: string): string => value.replace(/[\\%_]/g, '\\$&');
 /** 上面那句转义的另一半。加新的 LIKE 查询时跟着带上，否则 `\` 会被当成普通字符。 */
 export const LIKE_ESCAPE = " ESCAPE '\\'";
-export function archiveQuery(raw: string): { fts: string } | { like: string } {
+/**
+ * `dropped` 挂在交集上而不是单独一个返回值：`'like' in parsed` 是三个调用点共用的判别式，
+ * 加一个平级字段会把那个判别弄坏。
+ */
+export type ArchiveQuery = ({ fts: string } | { like: string }) & {
+  /** 切出来了但**没参与这次检索**的词（都短于 3 码点）。调用方有责任把它交回给使用者。 */
+  dropped: string[];
+};
+export function archiveQuery(raw: string): ArchiveQuery {
   const tokens = [...new Set(raw.split(/[^\p{L}\p{N}_]+/u).filter(Boolean))];
   const matchable = tokens.filter((token) => [...token].length >= 3);
-  if (matchable.length) return { fts: matchable.map((token) => `"${token.replaceAll('"', '""')}"`).join(' OR ') };
+  if (matchable.length) return { fts: matchable.map((token) => `"${token.replaceAll('"', '""')}"`).join(' OR '), dropped: tokens.filter((token) => [...token].length < 3) };
   const longest = [...tokens].sort((left, right) => [...right].length - [...left].length)[0];
-  return { like: `%${escapeLike(longest ?? raw)}%` };
+  // LIKE 那条路只用最长的一个词，其余同样没参与 —— 一并报出去。此时全部词都短于 3 码点，
+  // 所以调用方那句「短于 3 个字」的措辞在两条路上都成立。
+  return { like: `%${escapeLike(longest ?? raw)}%`, dropped: tokens.filter((token) => token !== longest) };
 }
 
 /** `search_messages` 的过滤参数（docs/05 §3.2）。`from` 同时认 tg 用户 id 与 `@username`。 */

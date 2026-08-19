@@ -4,7 +4,7 @@ import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { serve } from '@hono/node-server';
 import { ArchiveRepository, CustomToolRepository, OperationsRepository, PrincipalRepository, ScheduleRepository, TurnRepository, acquireInstanceLock, closeDatabase, migrateDatabase, modelAliasKey, openDatabase, readAppKv, readPersistedConfig, recomputeMessageTokens, recoverAfterCrash, writeAppKv } from '@luoli/db';
-import { AgentManager, AgentResultStore, AlertDispatcher, BUNDLED_SKILLS, ConfigStore, CustomToolManager, mergeAgentDefinitions, scanAgentFiles, ContextEngine, DatabaseApprovalBroker, EventBus, FileTools, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, ModelRegistry, PathJail, PluginManager, selfAuthoringDenyGlobs, PromptAssembler, PromptDocuments, ProviderStore, PROVIDER_FAILURES_TO_DOWN, PROVIDER_PROBE_TIMEOUT_MS, QuotaGuard, repairLedgerCacheCost, runProviderHealthCheck, Sandbox, ScheduledJobRunner, Scheduler, Secrets, SkillLoader, STABLE_PROMPT_BLOCKS, TOOL_POLICY, ToolRegistry, TurnConcurrency, TurnRegistry, UsageLedger, assembleMainPrompt, configJsonSchema, loadConfig, perChatConfig, registerAuthoringTools, registerBuiltins, rejectedWakewords, runMainAgent, runSubAgent, streamMainAgent, type SubAgentRuntimeEvent } from '@luoli/core';
+import { AgentManager, AgentResultStore, AlertDispatcher, BUNDLED_SKILLS, ConfigStore, CustomToolManager, mergeAgentDefinitions, scanAgentFiles, ContextEngine, DatabaseApprovalBroker, EventBus, FileTools, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, ModelRegistry, PathJail, PluginManager, selfAuthoringDenyGlobs, PromptAssembler, PromptDocuments, ProviderStore, PROVIDER_FAILURES_TO_DOWN, PROVIDER_PROBE_TIMEOUT_MS, QuotaGuard, repairAgentResultRefs, repairLedgerCacheCost, runProviderHealthCheck, Sandbox, ScheduledJobRunner, Scheduler, Secrets, SkillLoader, STABLE_PROMPT_BLOCKS, TOOL_POLICY, ToolRegistry, TurnConcurrency, TurnRegistry, UsageLedger, assembleMainPrompt, configJsonSchema, loadConfig, perChatConfig, registerAuthoringTools, registerBuiltins, rejectedWakewords, runMainAgent, runSubAgent, streamMainAgent, type SubAgentRuntimeEvent } from '@luoli/core';
 import { createServer, EventStreamRegistry, issueLoginToken, setupToken, type PromptPreviewResult } from '@luoli/server';
 import type { RuntimeTurnContext } from '@luoli/shared';
 import { TelegramTools, UpdatePoller, createTelegramBot } from '@luoli/telegram';
@@ -129,7 +129,20 @@ else log.event({ level: 'info', kind: 'skills.disabled', summary: 'Skills disabl
 // 不同目录时，gc 会把整棵结果目录当成孤儿删空。
 // 跟着 `LUOLI_DATA_DIR` 走，和 `db.path` / `media.dir` 同一处（config/index.ts 的 envLayer）。
 // 三者指向不同部署时 `gcFiles()` 会把别人的数据当孤儿删掉（docs/25 §10）。
+// 这个值只用来**定位目录**：库里那一列存的是相对它的 ref（`AgentResultStore.put`）。
+// 此前存的是 `resolve()` 出来的绝对路径，于是「同一次运行内两处指向不同目录」防住了，
+// 而**时间性**错配没防住 —— 无 `LUOLI_DATA_DIR` 时它绑定的是启动那一刻的 cwd，换个目录
+// 起一次进程，库里记的就是旧根、文件在新根，gc 把新根下的全文整批当孤儿删掉（docs/28 · L-OPS-06）。
 const agentResultsDir = process.env.LUOLI_DATA_DIR ? resolve(process.env.LUOLI_DATA_DIR, 'agent-results') : resolve('data/agent-results');
+// 存量绝对路径行的一次性归一化，门闸同上面那两条修复。指向另一个根的行**不动** ——
+// 那是「这两套东西不是同一个部署」的唯一信号，`gcFiles()` 要靠它拒绝清理。
+const resultRefs = repairAgentResultRefs(db, agentResultsDir);
+if (resultRefs?.rewritten) process.stdout.write(`[agents] 已把 ${resultRefs.rewritten} 行子 agent 结果路径归一化成相对 ${agentResultsDir} 的 ref（另有 ${resultRefs.relative} 行本来就是）。\n`);
+if (resultRefs?.foreign) {
+  process.stderr.write(`[agents] ${resultRefs.foreign} 行子 agent 结果路径指向另一个部署根（例如 ${resultRefs.sample}），原样留下。\n`
+    + `[agents] gc-files 会因此拒绝清理子 agent 结果目录 —— 先确认这个库与 ${agentResultsDir} 是不是同一个部署的。\n`);
+  log.event({ level: 'warn', kind: 'maintenance.repair', summary: `${resultRefs.foreign} 行子 agent 结果路径指向另一个部署根`, data: resultRefs });
+}
 /**
  * `agents/<name>.md`（docs/14 §2 Q5）：文件是只读来源，`agent.agents`（DB / WebUI）同名覆盖它。
  * 解析失败**必须报出来** —— 一个写错 frontmatter 的 agent 悄悄不存在，表现是「我明明加了这个
