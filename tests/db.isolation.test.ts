@@ -40,7 +40,7 @@ describe('AC-DB-003 ★ · 跨会话隔离由 SQL 扫描兜住', () => {
    * 判据是**语句文本**而不是运行时行为：跨会话泄漏一旦发生就是把别人的私聊读给模型听，
    * 那种 bug 不能靠「等它出现」来发现。
    */
-  const PARTITIONED = ['messages', 'context_messages', 'context_commits', 'refs', 'contexts', 'turns', 'attachments'];
+  const PARTITIONED = ['messages', 'context_messages', 'context_commits', 'refs', 'contexts', 'turns', 'attachments', 'sandbox_containers'];
   /**
    * **按设计跨会话**的方法，逐条写明理由。这张表是这条断言的全部弹性所在 ——
    * 新出现的无过滤查询会让用例变红，直到有人在这里把「为什么它可以是全局的」写下来。
@@ -51,10 +51,12 @@ describe('AC-DB-003 ★ · 跨会话隔离由 SQL 扫描兜住', () => {
     adminSearchCount: '同上，配套的命中总数',
     dashboard: '总览页的全局聚合，端点仅 owner 可见（docs/22 · V-INFO-01）',
     recomputeMessageTokens: '一次性数据修复：按新估算器重算全部会话的 tokens，本来就要扫全表',
+    list: '持久容器的回收对账与运维面板要看全部容器；容器管理工具整族 owner-only（docs/05 §3.11）',
+    count: '同上：撞没撞 sandbox.persistent.maxContainers 是个全局判据',
   };
 
   it('作用域化仓库里碰分区表的 SQL 都带 chat_id 或 key 过滤', () => {
-    const sources = ['archive.ts', 'context.ts', 'operations.ts', 'principals.ts', 'config.ts']
+    const sources = ['archive.ts', 'context.ts', 'operations.ts', 'principals.ts', 'config.ts', 'sandbox.ts']
       .map((name) => ({ name, text: readFileSync(`packages/db/src/${name}`, 'utf8') }));
     const offenders: string[] = [];
     const globalsSeen = new Set<string>();
@@ -73,7 +75,7 @@ describe('AC-DB-003 ★ · 跨会话隔离由 SQL 扫描兜住', () => {
           const scoped = /chat_id\s*(=|IN)/i.test(statement) || /\bkey\s*=/i.test(statement)
             || /claimed_by_turn\s*=/i.test(statement)
             || /\b(id|rowid|turn_id|message_id|doc_id|commit_id|update_id)\s*(=|IN)/i.test(statement)
-            || /INSERT INTO (messages|context_messages|context_commits|refs|contexts|turns|attachments)\b/i.test(statement);
+            || /INSERT INTO (messages|context_messages|context_commits|refs|contexts|turns|attachments|sandbox_containers)\b/i.test(statement);
           if (scoped) continue;
           if (method in GLOBAL_BY_DESIGN) { globalsSeen.add(method); continue; }
           offenders.push(`${name} · ${method} · ${statement.replace(/\s+/g, ' ').slice(0, 110)}`);

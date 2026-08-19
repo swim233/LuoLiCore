@@ -109,7 +109,12 @@ with_parent 0`，浏览器里展开一条 trace，13 个节点的 `marginLeft` �
 | `tool.mcp` | info | ms —— 一次 MCP 工具调用（`server/tool` 在 summary 里）。它是 `tool.call` 之下那一跳真正出网的部分 |
 | `sandbox.run` | info（`ok=false` 时 **warn**） | mode, image, exitCode, ms, oom, killed, truncated, role, denied —— 每一次沙箱执行一行，**被拒的那一档也落**（模型侧只看到一句工具失败，而「为什么」是配置层的事）。`killed` 分不出是超时、取消还是输出超限，看 `truncated` 与 `ms`（[05 §5.2](./05-tools.md)）。带 traceId 但**没有 parentSpanId**：沙箱是 `bash` / `python` / 自撰写工具三条路共用的底层，只交出事实、不认识 span —— 所以它在 trace 里是 depth 0，而「哪次工具调用引起的」按时间与 `tool.call` 对照。`turnId='adhoc'`（探测、非轮次调用）那些连 traceId 都没有 |
 | `sandbox.unavailable` | error | 启动探测发现 `sandbox.mode=docker` 但 docker 不可用 —— 执行类工具会整批失败 |
-| `sandbox.weak_isolation` | warn | `sandbox.mode=jail`：只有 ulimit + 目录隔离，不是安全边界。模式变了才再说一次 |
+| `sandbox.weak_isolation` | warn | `sandbox.mode=jail`：只有 ulimit + 目录隔离，不是安全边界。模式变了才再说一次。**`sandbox.persistent.network=bridge` 也走这一条**（持久容器默认能出网，而可审计出站代理没有实现，[05 §5.5](./05-tools-and-permissions.md)）：同样按「变了才再说一次」去重 |
+| `sandbox.container.created` | info | chatId, name, image, specHash, ms, hasSetsid —— 给某个会话建了一个持久容器（[05 §5.5](./05-tools-and-permissions.md)）。`hasSetsid=false` 意味着**取消杀不干净整个进程组**，排障时先看这一位 |
+| `sandbox.container.reaped` | info | chatId, name, reason(`idle`/`hard`/`respec`/`reset`/`orphan`/`exited`), aliveProcs, ageMs —— 销毁一个持久容器。**`aliveProcs` 是这一行存在的理由**：容器一没，那个会话里跑着的 server 就没了，而用户看到的只是「它突然不工作了」 |
+| `sandbox.container.limit` | warn | chatId, used, max —— 撞上 `sandbox.persistent.maxContainers`，**没建**并把错交回模型。不退回一次性容器，所以这一行是运维侧唯一的信号 |
+| `sandbox.container.reconciled` | info（有孤儿时 **warn**） | adopted, dropped, orphans, exited —— 每个 `reapCron` tick 与启动时的 DB ↔ docker 双向对账。`orphans>0` 表示有带 `luoli.managed` 标签却不在库里的容器被 `rm -f` 了 |
+| `sandbox.container.exec` | info（`ok=false` 时 **warn**） | chatId, name, exitCode, ms, background, killed —— 持久容器里的一次 `docker exec`，**只有 `container_*` 工具那条路会落**（`bash` / `python` 走 `Sandbox.run`，记的仍是 `sandbox.run`）。两者并列而不是互相取代：`sandbox.run` 记「工具要执行一段命令」，这一条记「owner 点名往某个会话的容器里执行」 |
 | `approval.pending` / `approval.decided` | info（拒绝与过期 **warn**） | id, tool, risk, channel, actor, expiresAt, ms。`pending` 是「已经推给 owner，等裁决」那一刻（文档此前叫 `approval.requested`，实现里从来是 `pending`） |
 | `approval.expired` | warn | id, risk —— `ttlMs` 到点没人裁决，按拒绝处理 |
 | `approval.unavailable` | warn | risk —— 没有任何裁决通道（`webui.enabled=false` 或一个 SSE 连接都没有），命中规则的调用当场被拒（[reviews/24](./reviews/24-review-round9.md) · R-APPR-01） |

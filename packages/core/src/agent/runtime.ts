@@ -19,6 +19,7 @@ import { PROVIDER_FAILURES_TO_DOWN, recordProviderFailure, recordProviderServed 
 import { type FallbackOptions, fallbackLanguageModel } from './fallback-model.js';
 import { createStepObservers, type StepFacts } from './step-observers.js';
 import { type AliasSettings, parseAliasSettings } from '../provider/alias-settings.js';
+import { sandboxLabel, type ContainerManager } from '../sandbox/containers.js';
 import type { UsageLedger } from '../ledger/usage.js';
 import type { QuotaGuard, QuotaReservation } from '../ledger/quota.js';
 import type { LogSink, LogSpan } from '../log/sink.js';
@@ -521,6 +522,11 @@ export interface MainAgentDependencies {
   agents?: AgentManager;
   /** 自撰写工具的注册器。每轮开始同步一次，见 `runMainAgentInternal` 顶部那一行。 */
   customTools?: { syncIfChanged(): void };
+  /**
+   * 持久容器（docs/05 §5.5）。只被 RUNTIME 块的「工作目录」行用：模型不知道自己能起常驻进程
+   * 的话，这个功能等于没做（docs/06 §1）。可选 —— 没绑时那一行退回原来的措辞。
+   */
+  containers?: ContainerManager;
   /** 只用来记 `turns.steps`（此前没有任何写入方）。可选：子 agent 与测试都不必给。 */
   turns?: { countStep(id: string, steps: number): void };
 }
@@ -530,7 +536,7 @@ export interface MainPromptAssembly extends PromptBuildResult {
   runtime: string;
 }
 
-type PromptAssemblyDependencies = Pick<MainAgentDependencies, 'config' | 'tools' | 'prompts' | 'documents' | 'workspace' | 'skills' | 'agents' | 'quota' | 'reservation'>;
+type PromptAssemblyDependencies = Pick<MainAgentDependencies, 'config' | 'tools' | 'prompts' | 'documents' | 'workspace' | 'skills' | 'agents' | 'quota' | 'reservation' | 'containers'>;
 
 /**
  * RUNTIME 块里的发起人。昵称与用户名是用户可控内容，`formatSpeakerIdentity` 已经清掉换行与
@@ -576,7 +582,10 @@ export function assembleMainPrompt(turn: RuntimeTurnContext, dependencies: Promp
     chatDescription: chatDescription(turn), triggerDescription: initiatorDescription(turn), role: turn.effectiveRole,
     tools: activeTools, agents: dependencies.config.agent.agents.filter((agent) => ['blocked', 'limited', 'trusted', 'owner'].indexOf(turn.effectiveRole) >= ['blocked', 'limited', 'trusted', 'owner'].indexOf(agent.minRole)).map((agent) => `${agent.name}(${agent.description})`),
     contextMessages: turn.snapshot.messages.length, contextTokens: turn.snapshot.tokens, maxMessages: dependencies.config.context.limit.maxMessages,
-    maxTokens: dependencies.config.context.limit.tokens, workspace: dependencies.workspace, sandbox: dependencies.config.sandbox.mode,
+    maxTokens: dependencies.config.context.limit.tokens, workspace: dependencies.workspace,
+    // 持久容器那一档要说清「常驻 / 还剩多久 / 出不出网」，否则模型不会去起常驻进程（docs/06 §1）。
+    sandbox: sandboxLabel(dependencies.config.sandbox.mode, dependencies.config.sandbox.persistent,
+      dependencies.containers?.expiryHintFor(turn.chatId) ?? { state: 'none' }),
     // 只在真有本轮预留时才给得出额度；WebUI 的提示词预览没有预留，那一行本来就不该出现。
     ...(spent ? { quota: `本轮已用 $${spent.committed.toFixed(4)} / 上限 $${dependencies.config.quota.perTurn.maxCostUsd.toFixed(2)}` } : {}),
     // 刚被清空过的那一轮说一句。措辞按 `context.recallBarrier` 分岔：隔断开着时归档也翻不动，

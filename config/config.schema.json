@@ -1274,6 +1274,51 @@
               "type": "string",
               "default": "docker",
               "description": "docker 可执行文件的名字或绝对路径。"
+            },
+            "persistent": {
+              "type": "object",
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "★ 打开后每个会话一个常驻容器（执行走 docker exec 而不是每次新起一个）。注意它同时把持久容器的网络默认设成 bridge —— 那是下面单独的一个键，和上面的 sandbox.network 不是同一个。关掉它不会立刻销毁已有容器，由下一次回收对账收走。"
+                },
+                "idleTtlMs": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 86400000,
+                  "description": "容器闲置多久后回收。每执行一次就重新计时，所以一直在用的会话容器可以活很久。"
+                },
+                "maxLifetimeMs": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "default": 0,
+                  "description": "容器从创建算起最长活多久，不因活跃而延长。0 = 不设上限。「钉住」只豁免上面那条闲置回收，豁免不了这一条。"
+                },
+                "maxContainers": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 16,
+                  "description": "同时存在的持久容器数上限。撞上限时新会话的执行类工具直接报错，不会退回一次性容器。"
+                },
+                "network": {
+                  "type": "string",
+                  "enum": [
+                    "none",
+                    "bridge"
+                  ],
+                  "default": "bridge",
+                  "description": "★ 持久容器的网络：none 断网，bridge 可出网。默认 bridge —— 不能出网的持久容器基本没有意义。bridge 下容器能直达公网与宿主，且没有可审计的出站代理。"
+                },
+                "reapCron": {
+                  "type": "string",
+                  "default": "*/5 * * * *",
+                  "description": "回收到期容器、并与 docker 双向对账的频率（五段式 cron）。"
+                }
+              },
+              "additionalProperties": false,
+              "default": {},
+              "description": "会话级持久容器：每个群 / 私聊一个常驻容器，跑着的进程能活到下一轮。只在 docker 模式下有意义。"
             }
           },
           "additionalProperties": false,

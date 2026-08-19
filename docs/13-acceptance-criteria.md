@@ -246,6 +246,17 @@
 | [ ] AC-SBX-012 (自动) ★ | 运行中把 `sandbox.mode` 从 `docker` 改成 `none` | 下一轮 `plan()` 立即拒绝，执行类工具从目录中消失 —— 不再是「界面说保存成功、bash 照跑」（docs/20 · W-CFG-02） |
 | [ ] AC-SBX-013 | `mode=jail` 时第一次 `plan()` | 日志有一条 warn 说明 jail 不是安全边界（[05 §5.2]；docs/20 · W-SBX-02） |
 | [ ] AC-SBX-014 | 同一毫秒并发起两个容器 | 容器名是 `luoli-sbx-<turnId>-<n>`，不撞名（[05 §5.3]；docs/20 · W-SBX-01） |
+| [x] AC-SBX-015 (自动) ★ | 持久模式下同一会话连续两次执行 | 落在**同一个**容器上（`/tmp` 里的痕迹读得回来）；另一个会话是另一个容器，互相看不到 `/tmp` 与工作区（[05 §5.5](./05-tools-and-permissions.md)） | 〔sandbox.containers.docker.test.ts〕
+| [x] AC-SBX-016 (自动) ★ | 持久容器里起一个后台任务（`background`），隔一次 exec 再看 | 进程还活着（`docker top` 数得到），输出在 `.luoli-logs/<name>.log` 里可回读。**不重定向就会被 SIGPIPE 打死** —— exec 一结束管道就关 | 〔sandbox.containers.docker.test.ts〕
+| [x] AC-SBX-017 (自动) ★ | 持久容器里一条命令跑到一半被取消 | **当场**返回（墙钟本身是判据）、`killed=true`、那个进程组真的没了，而**容器与别人的后台进程照常活着**。`docker kill <容器>` 在这一档等于销毁整个会话的环境；`kill -KILL -- -<pgid>` 会被 dash 拒掉，取消静静失效 | 〔sandbox.containers.docker.test.ts〕
+| [x] AC-SBX-018 (自动) ★ | 容器到期被回收 | 容器与库里那行都没了，而 `/workspace` 里的文件**一个都不动**；下一次执行新建一个，并在结果里带一句「上一个被回收了」的旁白（[06 §1](./06-prompt-and-memory.md)） | 〔sandbox.containers.docker.test.ts〕
+| [x] AC-SBX-019 (自动) ★ | 进程重启后跑一次对账 | 在用的容器被**认领**而不是全杀（24h TTL 要扛得住重启）；带 `luoli.managed` 标签却不在库里的孤儿被 `rm -f` | 〔sandbox.containers.docker.test.ts〕
+| [x] AC-SBX-020 (自动) | 改了 image / 内存 / 网络等容器形态参数 | spec 指纹对不上的容器被回收，下次用时按新配置重建 —— 否则「界面上改了但没生效」 | 〔sandbox.containers.docker.test.ts〕
+| [x] AC-SBX-021 (自动) ★ | 钉住一个容器，再让它撞上 `maxLifetimeMs` | 钉住豁免闲置回收，**豁免不了绝对上限**（豁免了它就不是上限）；`maxLifetimeMs: 0` = 不设上限而不是立刻过期 | 〔sandbox.persistent.test.ts〕
+| [x] AC-SBX-022 (自动) ★ | 撞上 `sandbox.persistent.maxContainers` | 直接报 `sandbox_container_limit` 并落一条 warn，**不悄悄退回一次性容器**；库里不多出行 | 〔sandbox.persistent.test.ts〕
+| [x] AC-SBX-023 (自动) ★ | `container_*` 的 `chat` 参数匹配到多个会话 | 交回候选并**拒绝执行**，一个容器都不动；零命中交回现有会话列表而不是空成功（[05 §3.11](./05-tools-and-permissions.md)） | 〔sandbox.persistent.test.ts〕
+| [x] AC-SBX-024 (自动) | 负数 chatId、带冒号的 turnId | 都合法化成 docker 收得下的容器名，且不同会话不撞名。此前 `dryrun:<ulid>` 那条路的 `bash` 一直以 `invalid name` 收场 | 〔sandbox.persistent.test.ts〕
+| [ ] AC-SBX-025 ★ | 持久模式下 owner 说「重置一下 xxx 群的容器」 | 容器换了新 id，而那个群 `/workspace` 里的文件**还在**；要连文件一起清必须显式传 `wipeWorkspace`，且那一档走审批、文件挪进 `.luoli-trash` |
 | [ ] AC-APV-001 | `trusted` 执行 `rm -rf build` | Telegram 出现审批消息（含命令全文、发起人、风险 high、时限） |
 | [ ] AC-APV-002 | 非 owner 点击批准按钮 | `answerCallbackQuery` 提示无权限；`approvals` 未变更 |
 | [ ] AC-APV-003 | owner 点击批准 | 命令执行；`approvals.state='approved'`，含 `decided_by`/`channel` |
@@ -555,7 +566,7 @@
 | **上下文引擎** | | 31 / 40 | | | |
 | Telegram 与准入 | | 22 / 46 | | | |
 | Agent 与 Provider | | 23 / 43 | | | |
-| 工具/沙箱/审批 | | 19 / 60 | | | |
+| 工具/沙箱/审批 | | 29 / 71 | | | |
 | Subagent 与任务 | | 20 / 38 | | | |
 | 记忆 | | 1 / 13 | | | |
 | 日志与成本 | | 8 / 28 | | | |
@@ -563,6 +574,6 @@
 | WebUI | | 11 / 85 | | | |
 | 安全 | | 9 / 25 | | | |
 | 运维 | | 2 / 10 | | | |
-| **合计** | | **179 / 455** | | | |
+| **合计** | | **189 / 466** | | | |
 
 **整体通过条件**：全部 ★ 项通过 + 非 ★ 项通过率 ≥ 95% + 所有豁免项经需求方书面确认。

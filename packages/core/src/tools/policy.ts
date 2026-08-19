@@ -73,6 +73,17 @@ export const TOOL_POLICY = {
   write_plugin: { minRole: 'owner', approval: 'always', scope: 'global', source: 'builtin' },
   install_mcp: { minRole: 'owner', approval: 'always', scope: 'global', source: 'builtin' },
   list_mcp: { minRole: 'owner', approval: 'never', scope: 'global', source: 'builtin' },
+  // 会话级持久容器的管理（docs/05 §3.11）。六条全部 `owner`，理由同上；另外两道门
+  // （持久化没开时整族不进目录、`chat` 参数的会话解析）在 `available()` / `execute()` 里。
+  //
+  // **这是本表里唯一一族收落点参数的工具**（§8「参数里没有 chatId」的例外），所以那道
+  // owner 地板必须同时焊在 `available()` 里 —— 运维改得动 `minRole`，改不动 `available()`。
+  container_list: { minRole: 'owner', approval: 'never', scope: 'sandbox', source: 'builtin' },
+  container_exec: { minRole: 'owner', approval: 'conditional', scope: 'sandbox', source: 'builtin' },
+  container_reset: { minRole: 'owner', approval: 'conditional', scope: 'sandbox', source: 'builtin' },
+  container_inspect: { minRole: 'owner', approval: 'never', scope: 'sandbox', source: 'builtin' },
+  container_keep: { minRole: 'owner', approval: 'never', scope: 'sandbox', source: 'builtin' },
+  container_logs: { minRole: 'owner', approval: 'never', scope: 'sandbox', source: 'builtin' },
 } as const satisfies Record<string, ToolPolicyEntry>;
 
 export type ToolName = keyof typeof TOOL_POLICY;

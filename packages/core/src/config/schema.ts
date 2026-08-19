@@ -308,7 +308,11 @@ export const configSchema = z.object({
       plugins: z.object({ enabled: z.boolean().default(false), maxBodyChars: z.number().int().positive().default(200_000) }).default({}),
     }).default({}),
   }).default({}),
-  sandbox: z.object({ mode: z.enum(['none', 'jail', 'docker']).default('docker'), bypassRoles: z.array(role).default(['owner']), image: z.string().default('luoli-sandbox:latest'), network: z.enum(['none', 'bridge']).default('none'), memoryMb: z.number().positive().default(512), cpus: z.number().positive().default(1), pidsLimit: z.number().int().positive().default(128), readOnlyRoot: z.boolean().default(true), tmpfsMb: z.number().positive().default(64), workspaceDir: z.string().default('./data/workspace'), hostWorkspaceDir: z.string().default(''), dockerBin: z.string().default('docker') }).default({}),
+  sandbox: z.object({ mode: z.enum(['none', 'jail', 'docker']).default('docker'), bypassRoles: z.array(role).default(['owner']), image: z.string().default('luoli-sandbox:latest'), network: z.enum(['none', 'bridge']).default('none'), memoryMb: z.number().positive().default(512), cpus: z.number().positive().default(1), pidsLimit: z.number().int().positive().default(128), readOnlyRoot: z.boolean().default(true), tmpfsMb: z.number().positive().default(64), workspaceDir: z.string().default('./data/workspace'), hostWorkspaceDir: z.string().default(''), dockerBin: z.string().default('docker'),
+    // 会话级持久容器（docs/05 §5.5）。**`network` 与上面那个 `sandbox.network` 是两个键**：
+    // 那个管一次性容器（默认断网），这个管持久容器（默认出网）。合并成一个的话，打开持久化
+    // 就顺手把一次性那条路也开了网 —— 一个开关不能悄悄改两件事。
+    persistent: z.object({ enabled: z.boolean().default(false), idleTtlMs: z.number().int().positive().default(86_400_000), maxLifetimeMs: z.number().int().nonnegative().default(0), maxContainers: z.number().int().positive().default(16), network: z.enum(['none', 'bridge']).default('bridge'), reapCron: z.string().default('*/5 * * * *') }).default({}) }).default({}),
   // `allowInitiator` 已摘除：WebUI 只有一个 owner 身份（docs/14 A15），裁决权下放不到发起人，
   // 这个开关在当前架构里没有能实现它的落点（docs/21 §6）。
   approval: z.object({ enabled: z.boolean().default(true), ttlMs: z.number().int().positive().default(180_000), skipForOwner: z.boolean().default(true), rememberWithinTurn: z.boolean().default(true), rules: z.array(approvalRuleSchema).default([]) }).default({}),

@@ -75,10 +75,13 @@ describe('telegram side tools', () => {
     // `spawn_harness` —— 这个 harness 是**默认关闭**的（`agent.harness.allowedDirs` 为空），
     // 而且这条 turn 是群聊（`isPrivate: false`）。两个条件各自都足以把它挡在目录之外，
     // 这正是 docs/14 §2 Q8-a/b 要的：不进目录，而不是进了目录再报错。
-    // 最后八个是自我扩展那一族：它们由 `registerAuthoringTools` 注册（这个 harness 只装了
+    // 接着八个是自我扩展那一族：它们由 `registerAuthoringTools` 注册（这个 harness 只装了
     // builtins），而且 `tools.selfExtend.enabled` 出厂就是关的 —— 两条各自都足以让它们缺席。
+    // 最后六个是容器管理（docs/05 §3.11）：由 `registerContainerTools` 注册，而且
+    // `sandbox.persistent.enabled` 出厂也是关的 —— 同样两条各自都够。
     expect(Object.keys(TOOL_POLICY).filter((name) => !active.has(name))).toEqual(['ask_parent', 'report_progress', 'spawn_harness',
-      'define_tool', 'delete_tool', 'list_tools', 'write_skill', 'install_skill', 'write_plugin', 'install_mcp', 'list_mcp']);
+      'define_tool', 'delete_tool', 'list_tools', 'write_skill', 'install_skill', 'write_plugin', 'install_mcp', 'list_mcp',
+      'container_list', 'container_exec', 'container_reset', 'container_inspect', 'container_keep', 'container_logs']);
     closeDatabase(wired.db);
   });
 
