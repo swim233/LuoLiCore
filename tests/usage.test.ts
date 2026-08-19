@@ -144,13 +144,17 @@ describe('repairLedgerCacheCost · 存量账目重算（L-COST-01）', () => {
   it('明细已过保留期的账期算不回来时原样留下', () => {
     const { db, close, ts } = fixture('ledger-repair-stale-counter');
     legacyRow(db, 1, 'turn-a', '1', '1', ts, { input: 10_000, output: 100, cacheRead: 8000, cacheWrite: 0 }, { in: 0.14, out: 0.28, cacheRead: 0.0028 });
-    // 计数器里记着 $5，而 ledger 里只剩这一条 —— 聚合出来远小于库里那个数，说明明细被清过。
+    // 计数器里记着 $5，而 ledger 里只剩这一条 —— **旧口径**聚合复现不出 5，说明明细被清过。
+    // 判据不能是「聚合出来更大还是更小」：这个修复只会让费用变小，删过明细的账期同样更小，
+    // 于是按大小判会把这一行下调到 $0.0027 —— `usageDays` 短于账期长度时，被写低的就是**当期**
+    // 额度，等于凭空还给用户一截。
     db.prepare(`INSERT INTO quota_counters(scope,subject,window,bucket,cost_usd,reserved_usd,turns,updated_at) VALUES ('global','global','day','2026-08-18',5,0,300,0)`).run();
     // 另一个账期压根不在 ledger 里。
     db.prepare(`INSERT INTO quota_counters(scope,subject,window,bucket,cost_usd,reserved_usd,turns,updated_at) VALUES ('global','global','day','2026-07-01',2,0,10,0)`).run();
     const result = repairLedgerCacheCost(db, 'UTC');
-    // 第一行会被下调到聚合值（只降不升成立），第二行没有聚合值 → stale。
-    expect(result!.countersStale).toBe(1);
+    expect(result!.countersStale).toBe(2);
+    expect(result!.counters).toBe(0);
+    expect(db.prepare(`SELECT cost_usd FROM quota_counters WHERE bucket='2026-08-18'`).pluck().get()).toBe(5);
     expect(db.prepare(`SELECT cost_usd FROM quota_counters WHERE bucket='2026-07-01'`).pluck().get()).toBe(2);
     close();
   });

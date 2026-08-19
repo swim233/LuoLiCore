@@ -528,7 +528,9 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
     // 之前是 `limit.tokens / 4` 这个与本会话无关的常数，空会话高估、长会话严重低估（docs/17 · N-QUOTA-01）。
     const estimatedTokens = Math.max(dependencies.context.windowTokens(key) + config.prompt.maxTokens, 1000);
     const modelEstimate = dependencies.estimateTurnCost?.(estimatedTokens, key) ?? null;
-    if (config.quota.enabled && config.quota.requirePricing && effectiveRole !== 'owner' && modelEstimate === null) { await ctx.reply('当前模型缺少定价，无法开始对话。'); return; }
+    // 拒绝也要把这条消息降级成背景（同频率 / 冷却 / 合并三条路，docs/20 · W-TG-05）：留着
+    // `triggered=1` 的话它既没被回答、`claimBackground` 也认领不到，模型下一轮压根不知道有人说过话。
+    if (config.quota.enabled && config.quota.requirePricing && effectiveRole !== 'owner' && modelEstimate === null) { scoped.demoteToBackground(archived.id); await ctx.reply('当前模型缺少定价，无法开始对话。'); return; }
     const reservation = config.quota.enabled ? dependencies.quota.reserve({ chatId, userId,
       estimateUsd: Math.max(config.quota.minReserveUsd, modelEstimate ?? config.quota.minReserveUsd),
       limits: { globalDaily: config.quota.global.daily, globalMonthly: config.quota.global.monthly,
@@ -550,10 +552,18 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
         dependencies.alerts?.fire('quota_global_exceeded', `全局额度用尽：${rejection.window} 窗口已用 ${money(rejection.spent)} / ${money(rejection.limit)}`,
           { window: rejection.window, spent: rejection.spent, limit: rejection.limit }, rejection.window);
       }
-      await ctx.reply(config.quota.onExceeded.message
-        .replace('{spent}', rejection ? money(rejection.spent) : '—')
-        .replace('{limit}', rejection ? money(rejection.limit) : '—')
-        .replace('{resetAt}', rejection?.window === 'month' ? '下月初' : '明天'));
+      // 同上：没开成轮次的触发消息一律降级成背景，否则额度用光那一天说的话全部凭空消失。
+      scoped.demoteToBackground(archived.id);
+      // **金额这一档是 `onExceeded.reply` 唯一管得着的地方**（docs/11 的 quota 段）：关掉它的语义是
+      // 「额度用光了就别再回话」。频率与并发那两档各有自己的文案且不受它管，理由见上面两处注释。
+      // 分档文案那次整改把 `main` 上唯一的读点（那个 `else if`）删掉了，而金额档从来没读过它 ——
+      // 于是这个开关存得住、WebUI 还在写、运行时零效果。
+      if (config.quota.onExceeded.reply) {
+        await ctx.reply(config.quota.onExceeded.message
+          .replace('{spent}', rejection ? money(rejection.spent) : '—')
+          .replace('{limit}', rejection ? money(rejection.limit) : '—')
+          .replace('{resetAt}', rejection?.window === 'month' ? '下月初' : '明天'));
+      }
       return;
     }
     const pendingId = crypto.randomUUID();
@@ -629,18 +639,25 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
         // **只有第一条分片带**，否则一条长回复会在群里刷出一串引用块。
         // 分片要跟着 parseMode 走：三档各有自己的渲染器，按一档渲染再按另一档声明发出去，
         // 用户看到的就是转义符本身（docs/08 §5.3）。
+        // 这条兜底路径同样要有投递侧的 span：它是 `onTurn` 缺省时那句提示与非流式产出走的路
+        // （`docs/10 §2` 的 `tg.send`，docs/28 · L-LOG-02）。**失败那一档照落（warn）**：这里抛
+        // 出去只会记成整轮失败，而「这一轮发了什么、哪一段没发出去」是这条日志唯一回答得了的事。
+        const logSend = (ok: boolean, ms: number, data: Record<string, unknown>): void =>
+          void dependencies.log.event({ level: ok ? 'debug' : 'warn', kind: 'tg.send', summary: `sendMessage → ${chatId}`, traceId: turn.turnId,
+            ...(turn.rootSpanId ? { parentSpanId: turn.rootSpanId } : {}), chatId, userId, key, durationMs: ms,
+            data: { method: 'sendMessage', ok, path: 'fallback', ...data } });
         const segmented = segmentTelegramText(outgoing, outputConfig.maxMessageChars, outputConfig.parseMode);
         // 这一批分段按 chat 串行（docs/28 · L-TG-02）：段与段之间那个空档里挤进别的轮次的
         // `sendMessage` 时，用户看到的是「最后一段在后面几条回复之后才冒出来」。
         await deliveryOrder.run(chatId, async () => {
           for (const [index, part] of segmented.rendered.entries()) {
             const sentAt = Date.now();
-            const sent = await sendWithFallback(bot.api, chatId, part, index === 0 ? { reply_parameters: { message_id: message.message_id } } : {}, outputConfig.parseMode, onParseFallback);
-            // 这条兜底路径同样要有投递侧的 span：它是 `onTurn` 缺省时那句提示与非流式产出走的路
-            // （`docs/10 §2` 的 `tg.send`，docs/28 · L-LOG-02）。
-            dependencies.log.event({ level: 'debug', kind: 'tg.send', summary: `sendMessage → ${chatId}`, traceId: turn.turnId,
-              ...(turn.rootSpanId ? { parentSpanId: turn.rootSpanId } : {}), chatId, userId, key, durationMs: Date.now() - sentAt,
-              data: { method: 'sendMessage', ok: true, messageId: sent.message_id, chars: part.length, path: 'fallback' } });
+            const sent = await sendWithFallback(bot.api, chatId, part, index === 0 ? { reply_parameters: { message_id: message.message_id } } : {}, outputConfig.parseMode, onParseFallback)
+              .catch((error: unknown) => {
+                logSend(false, Date.now() - sentAt, { chars: part.length, error: error instanceof Error ? error.message : String(error) });
+                throw error;
+              });
+            logSend(true, Date.now() - sentAt, { messageId: sent.message_id, chars: part.length });
             // 归档存**渲染前**的正文，与流式那条路（下面存 `answer`）一致。存 `part` 的话
             // `messages.text` 里躺的是 MarkdownV2 转义后的文本 —— WebUI 会话页和 `read_messages`
             // 看到的 bot 发言带一串 `\-` `\.`，同一张表里两条路径两种内容。**分片时每个

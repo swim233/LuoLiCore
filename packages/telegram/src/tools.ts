@@ -54,7 +54,7 @@ export class TelegramTools implements TelegramToolBridge {
   }
 
   async sendMessage(target: TelegramTarget, text: string): Promise<object> {
-    return this.guard(async (api) => {
+    return this.guard(target, 'sendMessage', async (api) => {
       // 三条出站路径都要过 @ 上限这道闸，不然它不是边界只是建议。
       const capped = capMentions(text, this.dependencies.maxMentions());
       const parseMode = this.dependencies.parseMode();
@@ -81,7 +81,7 @@ export class TelegramTools implements TelegramToolBridge {
   }
 
   async sendPhoto(target: TelegramTarget, absolutePath: string, caption?: string): Promise<object> {
-    return this.guard(async (api) => {
+    return this.guard(target, 'sendPhoto', async (api) => {
       const startedAt = performance.now();
       const sent = await api.sendPhoto(target.chatId, new InputFile(absolutePath), { ...this.thread(target), ...(caption ? { caption } : {}) });
       this.#sent(target, 'sendPhoto', true, startedAt, { messageId: sent.message_id, chars: caption?.length ?? 0 });
@@ -91,7 +91,7 @@ export class TelegramTools implements TelegramToolBridge {
   }
 
   async sendFile(target: TelegramTarget, absolutePath: string, caption?: string): Promise<object> {
-    return this.guard(async (api) => {
+    return this.guard(target, 'sendDocument', async (api) => {
       const startedAt = performance.now();
       const sent = await api.sendDocument(target.chatId, new InputFile(absolutePath), { ...this.thread(target), ...(caption ? { caption } : {}) });
       this.#sent(target, 'sendDocument', true, startedAt, { messageId: sent.message_id, chars: caption?.length ?? 0 });
@@ -103,7 +103,7 @@ export class TelegramTools implements TelegramToolBridge {
   async react(target: TelegramTarget, messageId: number, emoji: string): Promise<object> {
     const resolved = canonical.get(emoji.replaceAll('️', ''));
     if (!resolved) return { ok: false, error: 'unsupported_emoji', hint: 'Telegram 只接受固定的一组 reaction emoji', allowed: [...canonical.values()] };
-    return this.guard(async (api) => {
+    return this.guard(target, 'setMessageReaction', async (api) => {
       const startedAt = performance.now();
       await api.setMessageReaction(target.chatId, messageId, [{ type: 'emoji', emoji: resolved }]);
       this.#sent(target, 'setMessageReaction', true, startedAt, { messageId, emoji: resolved });
@@ -112,7 +112,7 @@ export class TelegramTools implements TelegramToolBridge {
   }
 
   async pin(target: TelegramTarget, messageId: number): Promise<object> {
-    return this.guard(async (api) => {
+    return this.guard(target, 'pinChatMessage', async (api) => {
       const startedAt = performance.now();
       await api.pinChatMessage(target.chatId, messageId);
       this.#sent(target, 'pinChatMessage', true, startedAt, { messageId });
@@ -123,12 +123,22 @@ export class TelegramTools implements TelegramToolBridge {
   /**
    * 上游报错一律转成 `ok:false`：抛出去会被注册表记成工具异常，模型看到的只有一句堆栈式的
    * `Call to "pinChatMessage" failed!`，而「bot 没有置顶权限」这种事它本可以据此换个做法。
+   *
+   * **吞掉的那一跳必须自己落一行 `tg.send`（失败档 warn，`docs/10 §2`）。** 不落的话「模型发的
+   * 消息被 Telegram 拒收」在带 turn 上下文的日志里一个字都没有：`tg.api` 那条没有 traceId，
+   * 回答不了「这一轮到底发出去了什么」（docs/28 · L-LOG-02）。`durationMs` 从进这道门算起 ——
+   * 分段投递会在 `deliveryOrder` 里排队，而失败那一刻要的就是「这次工具调用等了多久才失败」。
    */
-  private async guard(run: (api: Api) => Promise<object>): Promise<object> {
+  private async guard(target: TelegramTarget, method: string, run: (api: Api) => Promise<object>): Promise<object> {
     const api = this.dependencies.bot()?.api;
     if (!api) return { ok: false, error: 'telegram_unavailable', hint: 'Telegram 入口未启用' };
+    const startedAt = performance.now();
     try { return await run(api); }
-    catch (error) { return { ok: false, error: 'telegram_api_error', hint: error instanceof Error ? error.message : String(error) }; }
+    catch (error) {
+      const hint = error instanceof Error ? error.message : String(error);
+      this.#sent(target, method, false, startedAt, { error: hint });
+      return { ok: false, error: 'telegram_api_error', hint };
+    }
   }
 
   private thread(target: TelegramTarget): Record<string, unknown> {

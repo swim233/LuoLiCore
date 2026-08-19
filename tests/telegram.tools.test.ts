@@ -7,8 +7,8 @@ import { TelegramTools, type ParseMode } from '@luoli/telegram';
 import type { Bot } from 'grammy';
 
 /** 投递侧的 `tg.send` 要真的落下来（docs/28 · L-LOG-02），所以这里收事件而不是丢掉。 */
-const logged: Array<{ kind: string; traceId?: string; parentSpanId?: string; data?: unknown }> = [];
-const log = { event: (event: { kind: string; traceId?: string; parentSpanId?: string; data?: unknown }) => { logged.push(event); return 1; },
+const logged: Array<{ kind: string; level?: string; traceId?: string; parentSpanId?: string; data?: unknown }> = [];
+const log = { event: (event: { kind: string; level?: string; traceId?: string; parentSpanId?: string; data?: unknown }) => { logged.push(event); return 1; },
   publish: () => undefined, span: () => ({ id: 's', end: () => undefined }) } as unknown as LogSink;
 
 interface ApiCall { method: string; arguments_: unknown[] }
@@ -193,9 +193,27 @@ describe('telegram side tools', () => {
 
   it('turns upstream API failures into tool errors the model can act on', async () => {
     const h = harness('tg-tools-fail', { fail: 'pinChatMessage' });
+    logged.length = 0;
     const result = await h.registry.execute('pin_message', {}, h.context) as { ok: boolean; error: string; hint: string };
     expect(result).toMatchObject({ ok: false, error: 'telegram_api_error' });
     expect(result.hint).toContain('not enough rights');
+    // **吞掉的那一跳要自己落一行**（`docs/10 §2` 的 `tg.send` 失败档 warn）：上游报错在这里被换成
+    // `ok:false` 交回模型，不落的话「发不出去」在带 traceId 的日志里一个字都没有 —— 只剩没有
+    // turn 上下文的 `tg.api`（docs/28 · L-LOG-02）。此前五个调用点全硬写 `ok: true`，失败档不可达。
+    const sends = logged.filter((event) => event.kind === 'tg.send');
+    expect(sends).toHaveLength(1);
+    expect(sends[0]).toMatchObject({ level: 'warn', traceId: 't1' });
+    expect(sends[0]!.data).toMatchObject({ method: 'pinChatMessage', ok: false, path: 'tool' });
+    closeDatabase(h.db);
+  });
+
+  it('模型发的消息被 Telegram 拒收时同样落一行 warn 的 tg.send', async () => {
+    const h = harness('tg-tools-send-fail', { fail: 'sendMessage' });
+    logged.length = 0;
+    expect(await h.registry.execute('send_message', { text: '发不出去的一条' }, h.context)).toMatchObject({ ok: false, error: 'telegram_api_error' });
+    const sends = logged.filter((event) => event.kind === 'tg.send');
+    expect(sends).toHaveLength(1);
+    expect(sends[0]!.data).toMatchObject({ method: 'sendMessage', ok: false, path: 'tool' });
     closeDatabase(h.db);
   });
 });

@@ -49,7 +49,7 @@ if (!instanceLock.ok) {
   process.stderr.write(`[lock] 另一个实例正在使用这个库（pid ${instanceLock.holder.pid}@${instanceLock.holder.host}，`
     + `起于 ${new Date(instanceLock.holder.startedAt).toISOString()}）。\n`
     + `[lock] 同库双实例会互相清掉在途轮次与消息认领，所以这里拒绝启动。要换实例先停掉那一个；\n`
-    + `[lock] 确认它已经死了但锁还在，删掉 ${config.db.path}.lock 再试。\n`);
+    + `[lock] 确认它已经死了但锁还在，删掉 ${config.db.path}.lock 再试（旁边的 .lock.<n> 可一并删）。\n`);
   process.exit(1);
 }
 if (instanceLock.lock.stolenFrom) process.stdout.write(`[lock] 接手了 pid ${instanceLock.lock.stolenFrom} 留下的锁 —— 上一次不是正常退出。\n`);

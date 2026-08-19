@@ -337,6 +337,7 @@
 | [x] AC-LOG-020 (自动) ★ | 一次成功的工具调用与一次失败的工具调用，各查它的 `tool.call` 行 | **同一行里既有 `input` 又有 `output`**；失败那行是 `input` + `error`。一个 span 只落一行，开始时的载荷与结束时的载荷是合并的 —— 此前 `end()` 用结束载荷整体顶掉开始那份，于是 `input` 一次都没进过库，WebUI 详情因此只有工具输出 | 〔log.span.test.ts〕
 | [x] AC-LOG-021 (自动) | `span.end()` 不给载荷 / 给一个非对象值 / 调两次 | 不给：开始那份原样保留；非对象：挂在 `result` 下而不顶掉开始那份；两次：只落一行 | 〔log.span.test.ts〕
 | [x] AC-LOG-022 (自动) | `GET /api/usage/report?groupBy=provider` | 每个桶带 `cacheReadTokens` / `cacheWriteTokens`，bucket 的裸 provider id 在服务端补成 provider 名。`cache_read_tokens` 一直在记账里，缺了这条聚合时「某家上游的前缀缓存是不是真的」只能靠翻 JSONL 反推请求体逐轮比对前缀 —— 而中转站的命中可能是概率性的，只有按 provider 看这个比值才测得出（[04 §5.1.1](./04-agents-and-providers.md)、[09 §3.11](./09-webui.md)） | 〔webui.gaps.test.ts〕
+| [x] AC-LOG-023 (自动) | `send_message` 被 Telegram 拒收（403 拉黑 / 被踢） | 投递侧落一行 **warn** `tg.send`（`path:'tool'`、`ok:false`、带 traceId 与本次 `tool.call` 的 span id）；`once` 与 `fallback` 两条**抛出去**的路径同样落。此前五个调用点全硬写 `ok:true`，失败档不可达 —— 只剩没有 traceId 的 `tg.api`，而它回答不了「这一轮到底发出去了什么」（docs/28 · L-LOG-02） | 〔telegram.tools.test.ts、output.pacing.test.ts〕
 | [ ] AC-LOG-003 ★ | 展开任一 `tool.call` | 含完整输入、输出（或截断标记+全文引用）、耗时、是否沙箱、是否经审批 |
 | [ ] AC-LOG-004 (自动) ★ | 求和校验 | 该 turn 所有 `usage_ledger.cost_usd` 之和 == `turns.cost_usd`（误差 <1e-9） |
 | [ ] AC-LOG-005 (自动) | 子 agent 的 span | `parent_span_id` = 派发它的 `tool.call` span；费用计入同一 `turn_id` |
@@ -358,6 +359,7 @@
 | [ ] AC-QUOTA-010 (自动) | 进程 `kill -9` 后重启 | 所有 `quota_counters.reserved_usd` 归零，无永久占用 |
 | [ ] AC-QUOTA-011 | `/usage` | 数字与 WebUI 用量页、`usage_ledger` 聚合一致 |
 | [x] AC-QUOTA-012 (自动) | `rateLimit.turnsPerUserPerHour=2` | 第 3 次触发被拒且文案区别于金额超限：说清是**频率**、按人还是按会话、窗口是滚动一小时，且**不受 `onExceeded.reply` 管**（那个开关是给「额度用光」用的，频率沉默等于 bot 对一句正常的话装没看见）。此前这一档复用额度文案，占位符原样漏给用户（`已用 —/—`，docs/28 · L-QUOTA-02） | 〔telegram.concurrency.test.ts〕
+| [x] AC-QUOTA-013 (自动) | 金额额度用尽，分别在 `quota.onExceeded.reply=true` / `false` 下发一句话 | `true`：回一句带实际数值的额度文案。`false`：**一句都不回**（那个开关的语义就是「额度用光了就别再回话」），而 `quota.exceeded` 照记。两种都必须把那条触发消息降级成背景（`triggered=0`），否则额度用光那天说的话既没被回答、也再进不了任何一轮的上下文（docs/20 · W-TG-05）。此前这个开关在金额档没有任何读点，被拒的消息也留着 `triggered=1` | 〔telegram.concurrency.test.ts〕
 
 ## 9. Skill / Plugin / MCP（AC-SKL / AC-PLG / AC-MCP）
 
@@ -538,6 +540,7 @@
 | [ ] AC-OPS-007 | 磁盘写满（模拟） | DB 写失败被捕获；回复「内部错误(ref)」；owner 收告警；进程不崩 |
 | [ ] AC-OPS-008 | 时区设为 UTC 后重启 | 配额 bucket 与时间渲染一致切换，无跨日重复计费 |
 | [ ] AC-OPS-009 | 人为制造一次 uncaught 异常 / unhandled rejection | `uncaughtException`：退出前写入 `system.crash`（含 event 与 stack）到日志与 stderr，下次启动 `recoverAfterCrash` 照常收尾。`unhandledRejection`：写入 `system.unhandled_rejection` 并**继续运行**，其它并发轮次不受影响（[10 §2](./10-logging-and-observability.md)）。两种都不允许在日志里不留痕迹 |
+| [x] AC-OPS-010 (自动) | 锁文件写着一个已死的 pid，两个进程同时启动 | 只有一个拿到锁：胜负由「同一代 claim 文件（`<db.path>.lock.<n>`）的独占创建」定，输的那个看见活着的 pid 被拒、且**不覆盖锁文件**；claim 的主人也死了（抢占崩在中途）时往下一代找，不把人永久锁在外面。写完回读定不了胜负 —— 两个进程各自「写—读」都能读到自己的 pid，于是一起进 `recoverAfterCrash`，正是 L-OPS-01 那次在途状态损坏 | 〔shutdown.test.ts〕
 
 ---
 
@@ -552,11 +555,11 @@
 | 工具/沙箱/审批 | | 19 / 60 | | | |
 | Subagent 与任务 | | 20 / 38 | | | |
 | 记忆 | | 1 / 13 | | | |
-| 日志与成本 | | 6 / 26 | | | |
+| 日志与成本 | | 8 / 28 | | | |
 | 扩展生态 | | 18 / 42 | | | |
 | WebUI | | 10 / 84 | | | |
 | 安全 | | 9 / 25 | | | |
-| 运维 | | 1 / 9 | | | |
-| **合计** | | **173 / 449** | | | |
+| 运维 | | 2 / 10 | | | |
+| **合计** | | **176 / 452** | | | |
 
 **整体通过条件**：全部 ★ 项通过 + 非 ★ 项通过率 ≥ 95% + 所有豁免项经需求方书面确认。
