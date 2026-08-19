@@ -60,16 +60,41 @@
             "allowedUpdates": {
               "type": "array",
               "items": {
-                "type": "string"
+                "type": "string",
+                "enum": [
+                  "message",
+                  "edited_message",
+                  "callback_query",
+                  "my_chat_member",
+                  "channel_post",
+                  "edited_channel_post",
+                  "message_reaction",
+                  "message_reaction_count",
+                  "inline_query",
+                  "chosen_inline_result",
+                  "shipping_query",
+                  "pre_checkout_query",
+                  "purchased_paid_media",
+                  "poll",
+                  "poll_answer",
+                  "chat_member",
+                  "chat_join_request",
+                  "chat_boost",
+                  "removed_chat_boost",
+                  "business_connection",
+                  "business_message",
+                  "edited_business_message",
+                  "deleted_business_messages"
+                ]
               },
+              "minItems": 1,
               "default": [
                 "message",
                 "edited_message",
                 "callback_query",
-                "my_chat_member",
-                "message_reaction"
+                "my_chat_member"
               ],
-              "description": "向 Telegram 声明只接收哪几类更新，一行一条。漏写一类，那类事件就永远收不到（例如去掉 message_reaction 后表情回应不再入库）。"
+              "description": "向 Telegram 声明只接收哪几类更新。去掉 message 就等于让 bot 彻底不说话；勾上没有处理器的类型不会有任何行为，只是白拉一遍流量。chat_member / chat_join_request 这类 Telegram 默认不推送，非要不可才勾。"
             },
             "webhook": {
               "type": "object",
@@ -1052,10 +1077,11 @@
                     "",
                     "brave",
                     "serper",
-                    "tavily"
+                    "tavily",
+                    "exa"
                   ],
                   "default": "",
-                  "description": "web_search 走哪家搜索 API。留空则根本不注册 web_search 这个工具。"
+                  "description": "web_search 走哪家搜索 API。留空则根本不注册 web_search 这个工具。exa 会额外要 highlights（每条带命中片段），其余三家自带摘要。"
                 },
                 "searchApiKey": {
                   "type": "string",
@@ -1317,8 +1343,7 @@
                 }
               },
               "additionalProperties": false,
-              "default": {},
-              "description": "会话级持久容器：每个群 / 私聊一个常驻容器，跑着的进程能活到下一轮。只在 docker 模式下有意义。"
+              "default": {}
             }
           },
           "additionalProperties": false,

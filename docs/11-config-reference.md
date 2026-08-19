@@ -109,8 +109,12 @@ general:
 telegram:
   mode: polling                   # 需重启 · polling | webhook
   dropPendingOnStart: false       # 需重启
-  allowedUpdates:                 # 需重启
-    [message, edited_message, callback_query, my_chat_member, message_reaction]
+  allowedUpdates:                 # 需重启 · 取值受限（schema 的 TELEGRAM_UPDATE_KINDS，23 类），
+                                  #   WebUI 渲染成一组复选框并逐条标「已处理 / 无处理器」。
+                                  #   默认值 = 适配器真的有处理器的那四类；其余申报了也不会有行为
+                                  #   （`message_reaction` 曾在默认值里，而从来没有处理器）。
+                                  #   **不许为空**：Bot API 把空数组读作「几乎全都收」，与「一条都不勾」相反
+    [message, edited_message, callback_query, my_chat_member]
   webhook:
     url: ''                       # 需重启 · https://example.com/webhook/telegram
     path: /webhook/telegram
@@ -376,7 +380,10 @@ tools:
     summarizeWithAlias: low       # 热更新 · web_fetch 的 prompt 摘要用哪个别名
     allowlist: []                 # 热更新 · 域名 glob（`*.x.com` 只配子域）；非空时只放行命中的。空则 limited 角色不注册 web_fetch
     denylist: ['*.local', '*.internal']  # 热更新 · 命中即拒，优先于 allowlist；每一跳重定向都复验
-    searchProvider: ''            # 需重启 · brave | serper | tavily | ''（空则不注册 web_search）。
+    searchProvider: ''            # 需重启 · brave | serper | tavily | exa | ''（空则不注册 web_search）。
+                                  #   exa 走 POST api.exa.ai/search（x-api-key），本实现固定带
+                                  #   `contents.highlights` —— 不带的话每条只有标题和 URL，模型得
+                                  #   对每条再 web_fetch 一次；全文（contents.text）刻意不要，按页计费
                                   #   与 searchApiKey 一起在启动时读进 registerBuiltins 的依赖，
                                   #   `web_search` 的 available() 判的就是那份快照
     searchApiKey: ''              # 需重启 · **明文**存在 config.yaml / config_kv 里（不是引用，

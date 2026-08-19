@@ -28,7 +28,10 @@ bot.api.config.use(loggingTransformer);          // 自建：每次 Bot API 调�
 | 长轮询（默认） | `telegram.mode: 'polling'` | `bot.start({ allowed_updates, drop_pending_updates })` |
 | Webhook | `telegram.mode: 'webhook'` + `telegram.webhook.{url,path,secretToken}` | Hono 挂 `webhookCallback(bot, 'hono')`；校验 `X-Telegram-Bot-Api-Secret-Token`；须 HTTPS（自行前置反代） |
 
-- `allowed_updates: ['message','edited_message','callback_query','my_chat_member','message_reaction']`
+- `allowed_updates: ['message','edited_message','callback_query','my_chat_member']` —— **默认值 = 真的有
+  处理器的那四类**。取值受限（`TELEGRAM_UPDATE_KINDS`，Bot API 的 23 类），WebUI 渲染成一组复选框并
+  逐条标「已处理 / 无处理器」；申报没有处理器的类型只是白拉一遍流量（`message_reaction` 曾在默认值里，
+  而这个适配器只**发**表情、从来没有收表情的处理器）。空数组当场拒掉：Bot API 把它读作「几乎全都收」。
 - `telegram.dropPendingOnStart`（默认 `false`）：为 true 时启动丢弃积压更新（避免重启后回复一堆旧消息）。
 - 启动时 `setMyCommands` 同步命令列表（按 scope 区分 private/group，owner 命令通过 `BotCommandScopeChat` 单独设给 owner）。
 

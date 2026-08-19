@@ -24,7 +24,7 @@ export const CONFIG_DESCRIPTIONS: Record<string, string> = {
   telegram: '与 Telegram 服务端对接的方式：收哪些更新、发送速率、命令识别。',
   'telegram.mode': '怎么拿更新：polling 由本进程主动轮询（不需要公网地址），webhook 由 Telegram 回调（需要可访问的 https 地址）。',
   'telegram.dropPendingOnStart': '启动时是否丢弃离线期间堆积的更新。关着的话重启后会把积压的消息全部补跑一遍。',
-  'telegram.allowedUpdates': '向 Telegram 声明只接收哪几类更新，一行一条。漏写一类，那类事件就永远收不到（例如去掉 message_reaction 后表情回应不再入库）。',
+  'telegram.allowedUpdates': '向 Telegram 声明只接收哪几类更新。去掉 message 就等于让 bot 彻底不说话；勾上没有处理器的类型不会有任何行为，只是白拉一遍流量。chat_member / chat_join_request 这类 Telegram 默认不推送，非要不可才勾。',
   'telegram.webhook.url': 'webhook 模式下告诉 Telegram 往哪儿回调的完整 https 地址。',
   'telegram.webhook.path': '本进程监听 webhook 回调的路径。',
   'telegram.webhook.secretToken': 'Telegram 回调时携带的密钥头，用来确认请求确实来自 Telegram 而不是别人伪造的。',
@@ -165,7 +165,7 @@ export const CONFIG_DESCRIPTIONS: Record<string, string> = {
   'tools.web.summarizeWithAlias': 'web_fetch 抓回的长网页用哪个模型别名做摘要。',
   'tools.web.allowlist': 'web_fetch 的域名白名单，一行一条。留空时 limited 角色用不了 web_fetch。',
   'tools.web.denylist': 'web_fetch 的域名黑名单，一行一条。内网后缀默认在内。',
-  'tools.web.searchProvider': 'web_search 走哪家搜索 API。留空则根本不注册 web_search 这个工具。',
+  'tools.web.searchProvider': 'web_search 走哪家搜索 API。留空则根本不注册 web_search 这个工具。exa 会额外要 highlights（每条带命中片段），其余三家自带摘要。',
   'tools.web.searchApiKey': '搜索 API 的密钥。★ 与 provider key 不同，它明文存在配置里，建议写成 ${env:BRAVE_API_KEY} 这样的环境变量引用而不是直接落库。',
   'tools.selfExtend.enabled': '自我扩展总开关：模型能不能给自己写工具 / 写 skill / 写 plugin / 装 MCP。默认关。关掉之后那七个工具整体不进工具目录，已经启用的自定义工具也一并消失。',
   'tools.selfExtend.customTools.enabled': '允许模型用 define_tool 把一段 bash / python 脚本注册成自己的工具（名字带 custom_ 前缀）。',
@@ -337,6 +337,52 @@ export const CONFIG_DESCRIPTIONS: Record<string, string> = {
   'alerts.on': '哪些事件算告警，一行一条，如 quota_global_exceeded、all_providers_down。',
 
   perChat: '会话级配置覆盖层（键为 context key），不是一个能直接编辑的配置项 —— 它的入口在会话页，且只放行白名单内的路径。',
+};
+
+/**
+ * **逐个取值**的注解：`{ 点分路径: { 取值: 说明 } }`。跟着 `CONFIG_DESCRIPTIONS` 一起进
+ * `GET /api/config/schema`，WebUI 把它渲染在每个复选框/选项旁边。
+ *
+ * 存在的理由只有一个：一格里的取值不是等价的选项。`telegram.allowedUpdates` 23 个取值里只有 4 个
+ * 有处理器，把这件事写进那一格的 `description` 里说不清（一句话装不下 23 条），不写又等于让运维
+ * 勾一个「勾了什么也不会发生」的框 —— 而它长得和另外四个完全一样。
+ *
+ * `tests/config.test.ts` 断言这里的键是 schema 叶子、取值与该叶子的 enum **严格一一对应**：
+ * 加一个更新类型而忘了写注解，或删掉一个取值而注解还留着，都会当场报错。
+ */
+export const CONFIG_ENUM_NOTES: Record<string, Record<string, string>> = {
+  'telegram.allowedUpdates': {
+    message: '已处理 · 唯一的消息入口，斜杠命令也走它。去掉之后 bot 什么都收不到',
+    edited_message: '已处理 · 用户改过历史消息时更新归档并记一条修订（不会因此开新轮次）',
+    callback_query: '已处理 · inline 按钮回调，目前只有「取消本轮」那个按钮用得到',
+    my_chat_member: '已处理 · bot 自己被拉进群 / 被踢 / 权限变化时登记会话主体',
+    channel_post: '无处理器 · 频道消息走这一类，而适配器没有接 —— trigger.channels 因此点不亮',
+    edited_channel_post: '无处理器 · 同上，频道里的编辑',
+    message_reaction: '无处理器 · 别人的表情回应收不进库（bot 自己发表情是工具那条路，与这里无关）',
+    message_reaction_count: '无处理器 · 大群里的匿名表情计数',
+    inline_query: '无处理器 · @bot 的行内查询（本 bot 没开 inline 模式）',
+    chosen_inline_result: '无处理器 · 行内结果被选中的回执',
+    shipping_query: '无处理器 · Telegram 支付流程',
+    pre_checkout_query: '无处理器 · Telegram 支付流程',
+    purchased_paid_media: '无处理器 · 付费媒体购买回执',
+    poll: '无处理器 · 投票状态变化',
+    poll_answer: '无处理器 · 有人投票',
+    chat_member: '无处理器 · 群成员进出（Telegram 默认不推送，要显式申报）',
+    chat_join_request: '无处理器 · 入群申请（Telegram 默认不推送，要显式申报）',
+    chat_boost: '无处理器 · 频道 boost',
+    removed_chat_boost: '无处理器 · 频道 boost 取消',
+    business_connection: '无处理器 · Telegram Business 账号接入',
+    business_message: '无处理器 · Business 账号收到的消息',
+    edited_business_message: '无处理器 · Business 账号里的编辑',
+    deleted_business_messages: '无处理器 · Business 账号里的删除',
+  },
+  'tools.web.searchProvider': {
+    '': '不配 = web_search 根本不进模型的工具目录',
+    brave: 'api.search.brave.com · 结果自带 description 摘要',
+    serper: 'google.serper.dev · Google 结果，自带 snippet',
+    tavily: 'api.tavily.com · 面向 LLM 的搜索，自带 content',
+    exa: 'api.exa.ai · 语义检索，本实现额外要 highlights（每条带命中片段，按条计费）',
+  },
 };
 
 type Node = Record<string, unknown>;

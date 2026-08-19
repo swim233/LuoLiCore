@@ -840,22 +840,37 @@ async function copyEvent(event: DetailEvent): Promise<void> {
   } catch (error) { toastError('复制失败', error); }
 }
 
-// ── 主体：群聊与用户分开看，角色改动走二级菜单 ────────────────────────────────
-const PRINCIPAL_KINDS = [['all', '全部'], ['user', '用户'], ['chat', '群聊']] as const;
+// ── 主体：用户 / 私聊 / 群与频道分开看，角色改动走二级菜单 ────────────────────────
+/**
+ * `principals.kind` 只有 `user` / `chat` 两个取值，而 `chat` 是「一个 Telegram 会话」**不是「群」**
+ * —— 每个私聊也有一行 `chat:<用户 id>`（`bot.ts` 每条消息都 upsert）。此前这一页把 kind 直接当标签
+ * 用，于是私聊在这里一律显示成「群聊」，实测库里 5 行 chat 主体有 4 行是 private。
+ * 判据与会话页的 `chatIdentity()` 同一套：先信 `chat_type`，缺失时回落到 Telegram 的 id 正负号。
+ */
+const isPrivatePrincipal = (entry: Principal): boolean => (entry.chatType ? entry.chatType === 'private' : !entry.tgId.startsWith('-'));
+const principalKindLabel = (entry: Principal): string => (entry.kind === 'chat'
+  ? CHAT_TYPE_LABELS[String(entry.chatType)] ?? (isPrivatePrincipal(entry) ? '私聊' : '群 / 频道')
+  : '用户');
+const PRINCIPAL_KINDS = [['all', '全部'], ['user', '用户'], ['private', '私聊'], ['group', '群与频道']] as const;
+type PrincipalKind = (typeof PRINCIPAL_KINDS)[number][0];
+const matchesPrincipalKind = (entry: Principal, kind: PrincipalKind): boolean => kind === 'all' ? true
+  : kind === 'user' ? entry.kind === 'user'
+    : entry.kind === 'chat' && isPrivatePrincipal(entry) === (kind === 'private');
 const ROLES = ['owner', 'trusted', 'limited', 'blocked'];
 const ROLE_HINTS: Record<string, string> = { owner: '不受审批与沙箱限制，可读写所有配置', trusted: '可用写文件、执行代码等高风险工具（按审批策略）', limited: '只读类工具，日常对话', blocked: '消息不触发轮次；archiveBlocked 关闭时连归档都不做' };
-const principalKind = ref<'all' | 'user' | 'chat'>('all');
-const visiblePrincipals = computed(() => principalKind.value === 'all' ? principals.value : principals.value.filter((entry) => entry.kind === principalKind.value));
+const principalKind = ref<PrincipalKind>('all');
+const visiblePrincipals = computed(() => principalKind.value === 'all' ? principals.value : principals.value.filter((entry) => matchesPrincipalKind(entry, principalKind.value)));
 // 引导 owner（access.bootstrapOwnerId）是 bot 的实际主人：这一行改成 blocked 就没人能在 Telegram 里管它了。
 const ownerPrincipalId = computed(() => { const tgId = String((config.value.access as Record<string, unknown> | undefined)?.bootstrapOwnerId ?? ''); return tgId ? `user:${tgId}` : ''; });
 const ownerPrincipal = computed(() => principals.value.find((entry) => entry.id === ownerPrincipalId.value) ?? null);
 const ownerLabel = computed(() => ownerPrincipal.value?.displayName || (ownerPrincipal.value ? `#${ownerPrincipal.value.tgId}` : 'Owner'));
 const ownerHandle = computed(() => ownerPrincipal.value?.username ? `@${ownerPrincipal.value.username}` : ownerPrincipal.value ? `ID ${ownerPrincipal.value.tgId}` : '未登记');
 const ownerInitials = computed(() => [...ownerLabel.value.replace(/\s+/gu, '')].slice(0, 2).join('').toUpperCase() || 'OW');
-const principalCount = (kind: string): number => kind === 'all' ? principals.value.length : principals.value.filter((entry) => entry.kind === kind).length;
+const principalCount = (kind: PrincipalKind): number => kind === 'all' ? principals.value.length : principals.value.filter((entry) => matchesPrincipalKind(entry, kind)).length;
 const principalDialog = ref(false);
 const principalSaving = ref(false);
-const principalForm = ref<Principal & { originalRole: string }>({ id: '', kind: 'user', tgId: '', role: 'limited', displayName: null, username: null, originalRole: 'limited' });
+// `chatType` 也要进来：弹窗里那行「类型」现在按它显示，缺了它每个会话都会掉进 id 正负号那条回落。
+const principalForm = ref<Principal & { originalRole: string }>({ id: '', kind: 'user', tgId: '', role: 'limited', displayName: null, username: null, chatType: null, originalRole: 'limited' });
 function editPrincipal(row: Principal): void { principalForm.value = { ...row, originalRole: row.role }; principalDialog.value = true; }
 async function savePrincipal(): Promise<void> {
   const form = principalForm.value;
@@ -2008,7 +2023,7 @@ function scheduleRefresh(groups: readonly RefreshGroup[]): void {
 // ── 全量配置表单：由 config.schema.json 自动生成（docs/09 §3.13、docs/21 §1.1）──────────
 // 153 个已接线叶子里此前只有 15 个能在界面上改。手写 100 多个控件必然与 schema 漂移，
 // 所以这里只取 `GET /api/config/schema` 的三件套喂给 SchemaForm，控件形态全从 schema 推。
-interface ConfigSchemaPayload { schema: Record<string, unknown>; hotReloadable: string[]; unimplemented: string[]; envPinned: Array<{ key: string; env: string }> }
+interface ConfigSchemaPayload { schema: Record<string, unknown>; hotReloadable: string[]; unimplemented: string[]; envPinned: Array<{ key: string; env: string }>; enumNotes: Record<string, Record<string, string>> }
 const configSchema = ref<ConfigSchemaPayload | null>(null);
 const schemaSaving = ref(false);
 const schemaForm = ref<{ commit(paths: string[]): void } | null>(null);
@@ -2373,7 +2388,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             <UiButton variant="text" :icon="chatOverrideOpen ? 'pi pi-chevron-up' : 'pi pi-chevron-down'" :label="chatOverrideOpen ? '收起' : '编辑覆盖项'" @click="chatOverrideOpen = !chatOverrideOpen" />
             <!-- 控件里显示的是这个会话实际生效的值（全局 + 覆盖）；改动才会写进覆盖层 -->
             <SchemaForm v-if="chatOverrideOpen && configSchema" ref="chatOverrideForm" :schema="configSchema.schema" :value="chatEffectiveConfig"
-              :hot-reloadable="PER_CHAT_ALLOWLIST" :unimplemented="configSchema.unimplemented" :env-pinned="configSchema.envPinned" :include="PER_CHAT_ALLOWLIST" :notes="PER_CHAT_NOTES"
+              :hot-reloadable="PER_CHAT_ALLOWLIST" :unimplemented="configSchema.unimplemented" :env-pinned="configSchema.envPinned" :enum-notes="configSchema.enumNotes" :include="PER_CHAT_ALLOWLIST" :notes="PER_CHAT_NOTES"
               :saving="chatOverrideSaving" save-label="写入覆盖" @save="saveChatOverrides" />
             <p v-else-if="chatOverrideOpen" class="empty-card"><i class="pi pi-spin pi-spinner" aria-hidden="true" /> 正在加载配置 schema…</p>
           </article>
@@ -2736,8 +2751,9 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             <UiButton size="small" variant="text" label="清空勾选" @click="principalSelection = []" />
             <UiButton size="small" icon="pi pi-user-edit" label="批量改角色" @click="openRoleBulk" />
           </div>
-          <DataGrid v-model:selection="principalSelection" :rows="visiblePrincipals" :columns="COLUMNS.principals" data-key="id" paginate :page-size="12" clickable :empty="principalKind === 'chat' ? '还没有见过任何群聊' : principalKind === 'user' ? '还没有见过任何用户' : '还没有任何主体'" @row-click="editPrincipal">
-            <template #kind="{ data }"><UiTag :value="data.kind === 'chat' ? '群聊' : '用户'" :severity="data.kind === 'chat' ? 'info' : 'secondary'" /></template>
+          <DataGrid v-model:selection="principalSelection" :rows="visiblePrincipals" :columns="COLUMNS.principals" data-key="id" paginate :page-size="12" clickable :empty="principalKind === 'group' ? '还没有见过任何群 / 频道' : principalKind === 'private' ? '还没有见过任何私聊会话' : principalKind === 'user' ? '还没有见过任何用户' : '还没有任何主体'" @row-click="editPrincipal">
+            <!-- kind 只有 user / chat 两个取值，而 chat 涵盖私聊 —— 标签按 chat_type 出（docs/21 · G-UI-01） -->
+            <template #kind="{ data }"><UiTag :value="principalKindLabel(data)" :severity="data.kind === 'user' ? 'secondary' : isPrivatePrincipal(data) ? 'warn' : 'info'" /></template>
             <template #displayName="{ data }"><span class="alias-name">{{ data.displayName ?? '—' }}<UiTag v-if="data.id === ownerPrincipalId" value="引导 OWNER" severity="success" title="access.bootstrapOwnerId 指向的这一行；改掉它的角色，Telegram 那边就没人能管 bot 了" /></span></template>
             <template #username="{ data }">{{ data.username ? `@${data.username}` : '—' }}</template>
             <template #role="{ data }"><UiTag :value="data.role" :severity="roleSeverity(data.role)" /></template>
@@ -2938,7 +2954,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             <div><h3>全部配置</h3><p class="section-note">由 <code>config/config.schema.json</code> 自动生成 —— 控件形态、默认值、取值范围与每一项的作用说明全部取自 schema，不在前端维护第二份清单。搜索框同时匹配键名与说明。热更新项保存即生效，需重启项会在保存后的提示里点名。密钥字段是<b>只写</b>的（不回显，留空表示不改）；标「环境变量锁定」的键由环境变量最终决定，写进来也会被盖回去，所以不给改。</p></div>
             <UiButton size="small" variant="text" icon="pi pi-history" label="变更历史" @click="openConfigRevisions" />
           </div>
-          <SchemaForm v-if="configSchema" ref="schemaForm" :schema="configSchema.schema" :value="config" :hot-reloadable="configSchema.hotReloadable" :unimplemented="configSchema.unimplemented" :env-pinned="configSchema.envPinned" :saving="schemaSaving" @save="saveSchemaConfig" />
+          <SchemaForm v-if="configSchema" ref="schemaForm" :schema="configSchema.schema" :value="config" :hot-reloadable="configSchema.hotReloadable" :unimplemented="configSchema.unimplemented" :env-pinned="configSchema.envPinned" :enum-notes="configSchema.enumNotes" :saving="schemaSaving" @save="saveSchemaConfig" />
           <p v-else class="empty-card"><i class="pi pi-spin pi-spinner" aria-hidden="true" /> 正在加载配置 schema…</p>
           </div>
           <div v-if="settingsTab === 'advanced'" data-settings-tab="advanced">
@@ -3032,15 +3048,16 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
       </div>
       <template #footer><UiButton variant="text" label="取消" @click="aliasDialog = false" /><UiButton :label="aliasForm.isNew ? '创建别名' : '保存别名'" @click="saveAlias" /></template>
     </UiModal>
-    <UiModal v-model:visible="principalDialog" :title="`${principalForm.kind === 'chat' ? '群聊' : '用户'} ${principalForm.displayName || principalForm.tgId}`">
+    <UiModal v-model:visible="principalDialog" :title="`${principalKindLabel(principalForm)} ${principalForm.displayName || principalForm.tgId}`">
       <div class="form-grid">
-        <label>类型<input :value="principalForm.kind === 'chat' ? '群聊' : '用户'" disabled></label>
+        <label>类型<input :value="principalKindLabel(principalForm)" disabled></label>
         <label>Telegram ID<input :value="principalForm.tgId" disabled></label>
         <label>显示名<input :value="principalForm.displayName ?? '—'" disabled></label>
         <label>用户名<input :value="principalForm.username ? `@${principalForm.username}` : '—'" disabled></label>
         <label class="wide">角色<UiSelect v-model="principalForm.role" :options="ROLES" /></label>
         <p class="wide field-note">{{ ROLE_HINTS[principalForm.role] }}</p>
-        <p v-if="principalForm.kind === 'chat'" class="wide field-note">会话角色只是上限：群里某个人的有效角色 = min(他自己的角色, 这个群的角色)。私聊会话不看这一行。</p>
+        <p v-if="principalForm.kind === 'chat' && !isPrivatePrincipal(principalForm)" class="wide field-note">会话角色只是上限：群里某个人的有效角色 = min(他自己的角色, 这个群的角色)。</p>
+        <p v-else-if="principalForm.kind === 'chat'" class="wide field-note">这是一条<b>私聊会话</b>：有效角色仍取 min(用户角色, 这一行)，而对面只有一个人 —— 要放行或封掉这个人，改 <code>user:{{ principalForm.tgId }}</code> 那一行更直接。</p>
         <p v-if="principalForm.role === 'owner' && principalForm.originalRole !== 'owner'" class="wide callout warn"><i class="pi pi-exclamation-triangle" aria-hidden="true" />owner 跳过审批与沙箱（<code>sandbox.bypassRoles</code>），可以在会话里直接执行宿主命令。</p>
       </div>
       <template #footer><UiButton variant="text" label="取消" @click="principalDialog = false" /><UiButton label="保存角色" :loading="principalSaving" :disabled="principalForm.role === principalForm.originalRole" @click="savePrincipal" /></template>
@@ -3051,7 +3068,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
         <label>目标角色<UiSelect v-model="roleBulkForm.role" :options="ROLES" /></label>
         <p class="wide field-note">{{ ROLE_HINTS[roleBulkForm.role] }}</p>
         <div class="wide selection-preview">
-          <span v-for="entry in principalSelection.slice(0, 24)" :key="entry.id" class="wake-chip"><UiTag :value="entry.kind === 'chat' ? '群' : '人'" :severity="entry.kind === 'chat' ? 'info' : 'secondary'" /><code>{{ entry.displayName || entry.username || entry.tgId }}</code><UiTag :value="entry.role" :severity="roleSeverity(entry.role)" /></span>
+          <span v-for="entry in principalSelection.slice(0, 24)" :key="entry.id" class="wake-chip"><UiTag :value="entry.kind === 'user' ? '人' : isPrivatePrincipal(entry) ? '私聊' : '群'" :severity="entry.kind === 'user' ? 'secondary' : isPrivatePrincipal(entry) ? 'warn' : 'info'" /><code>{{ entry.displayName || entry.username || entry.tgId }}</code><UiTag :value="entry.role" :severity="roleSeverity(entry.role)" /></span>
           <small v-if="principalSelection.length > 24" class="alias-empty">…等 {{ principalSelection.length }} 个</small>
         </div>
         <p v-if="roleBulkForm.role === 'owner'" class="wide callout warn"><i class="pi pi-exclamation-triangle" aria-hidden="true" />owner 跳过审批与沙箱（<code>sandbox.bypassRoles</code>），可以在会话里直接执行宿主命令。一次给这么多人不是常规操作。</p>
@@ -3178,7 +3195,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
     <UiModal v-model:visible="bulkDialog" title="批量导入主体">
       <div class="form-grid">
         <p class="wide field-note">把一批 Telegram <b>数字 ID</b> 一次性登记成主体并统一设角色：还没跟 bot 说过话的人也能提前放行或拉黑。已存在的主体只改角色，不动显示名。</p>
-        <label>类型<UiSelect v-model="bulkForm.kind" :options="[{ value: 'user', label: '用户' }, { value: 'chat', label: '群聊' }]" /></label>
+        <label>类型<UiSelect v-model="bulkForm.kind" :options="[{ value: 'user', label: '用户' }, { value: 'chat', label: '会话（群 / 频道 / 私聊）' }]" /></label>
         <label>角色<UiSelect v-model="bulkForm.role" :options="ROLES" /></label>
         <p class="wide field-note">{{ ROLE_HINTS[bulkForm.role] }}</p>
         <label class="wide">ID 列表<textarea v-model="bulkForm.ids" rows="7" placeholder="每行一个，或用空格/逗号分隔：&#10;123456789&#10;-1001234567890" /></label>

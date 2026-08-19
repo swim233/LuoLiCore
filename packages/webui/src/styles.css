@@ -250,7 +250,8 @@ code { font-family: var(--font-mono); font-size: .82rem; }
 .toast { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: start; gap: 11px; padding: 13px 14px; border: 1px solid var(--border); border-left: 3px solid var(--muted); border-radius: 14px; background: var(--surface); box-shadow: var(--shadow); pointer-events: auto; }
 .toast > i { margin-top: 1px; color: var(--muted); font-size: 1rem; }
 .toast b { font-size: .84rem; letter-spacing: -.01em; }
-.toast p { margin: 5px 0 0; color: var(--muted); font-size: .78rem; line-height: 1.55; overflow-wrap: anywhere; }
+/* `pre-line`：校验失败时 detail 是一行一条原因（`toastError` 的 details 清单），挤成一段就读不出条数。 */
+.toast p { margin: 5px 0 0; color: var(--muted); font-size: .78rem; line-height: 1.55; overflow-wrap: anywhere; white-space: pre-line; }
 .toast button { display: grid; place-items: center; width: 24px; height: 24px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); font-size: .7rem; }
 .toast button:hover { color: var(--ink); background: var(--surface-2); }
 .toast.success { border-left-color: var(--green); } .toast.success > i { color: var(--green); }
@@ -609,6 +610,13 @@ code { font-family: var(--font-mono); font-size: .82rem; }
 .schema-field > .ui-switch { justify-self: start; margin: 1px 0 2px; }
 .schema-field > .ui-switch .ui-switch-label { color: var(--muted); font-size: .78rem; }
 .schema-field > .ui-switch.on .ui-switch-label { color: var(--green); }
+/* 取值受限的数组（telegram.allowedUpdates）：一列复选框，键名等宽、注解压暗跟在后面。
+   两列排布 —— 23 个更新类型排成一列要滚很久，而注解本身不短，三列会把它们挤成竖条。 */
+.enum-choices { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(360px, 100%), 1fr)); gap: 6px 18px; }
+.enum-choices .ui-check { align-items: start; padding: 3px 0; }
+.enum-choices .ui-check-box { margin-top: 2px; }
+.enum-choices code { font-size: .75rem; }
+.enum-choices small { color: var(--muted); font-size: .7rem; line-height: 1.5; }
 /* 改口令表单（docs/21 · G-API-13）：按钮与那行提示同排，提示既当校验反馈也当后果说明。 */
 .password-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 /* 密钥是只写字段：输入框旁边挂「清空 / 撤销清空」，留空的语义是不改（docs/21 · G-CFG-04）。 */
