@@ -179,6 +179,36 @@ describe('ConsoleView 渲染', () => {
     wrapper.unmount();
   });
 
+  /**
+   * Trace 视图**必须是树**。此前它是 `marginLeft: node.parent_span_id ? '24px' : '0'` —— 只有一级，
+   * 在 `parent_span_id` 全库为 NULL 的年代看不出问题（13 个节点全是 `0px`），父边真的连上之后
+   * 一级缩进会把 `agent.run` 下面那三层压成同一层（docs/28 · L-LOG-04）。
+   * `.vue` 模板不进 `tsc --noEmit`（`ConsoleView.vue` 开头那段注释自陈过这件事害过人），
+   * 所以判据只能靠这里焊住。
+   */
+  it('trace 缩进按 parentSpanId 链算真实 depth，环与悬挂父都按 depth 0 兜住', async () => {
+    const { default: ConsoleView } = await import('../../packages/webui/src/views/ConsoleView.vue');
+    const wrapper = mount(ConsoleView, { attachTo: document.body });
+    await settle(wrapper);
+    const vm = wrapper.vm as unknown as { traceDepths(nodes: ReadonlyArray<Record<string, unknown>>): number[] };
+    const chain = [
+      { span_id: 'root', parent_span_id: null },
+      { span_id: 'a', parent_span_id: 'root' },
+      { span_id: 'b', parent_span_id: 'a' },
+      { span_id: 'c', parent_span_id: 'b' },
+      { span_id: null, parent_span_id: 'c' },
+    ];
+    expect(vm.traceDepths(chain)).toEqual([0, 1, 2, 3, 4]);
+    // 悬挂父：一次查询只取 500 行，子 span 的父完全可能不在这一页里。按现有深度收尾，不炸。
+    expect(vm.traceDepths([{ span_id: 'x', parent_span_id: 'not-in-this-page' }])).toEqual([0]);
+    // 环：两个 span 互指、或指回自己。整条按 depth 0 渲染，绝不死循环。
+    expect(vm.traceDepths([{ span_id: 'p', parent_span_id: 'q' }, { span_id: 'q', parent_span_id: 'p' }])).toEqual([0, 0]);
+    expect(vm.traceDepths([{ span_id: 'self', parent_span_id: 'self' }])).toEqual([0]);
+    // camelCase 也认：对话详情那份（`/api/turns/:id/detail`）给的是 `parentSpanId`。
+    expect(vm.traceDepths([{ spanId: 'r', parentSpanId: null }, { spanId: 's', parentSpanId: 'r' }])).toEqual([0, 1]);
+    wrapper.unmount();
+  });
+
   it('导航项与页面分支一一对应：多一个少一个都会红', async () => {
     const { default: ConsoleView } = await import('../../packages/webui/src/views/ConsoleView.vue');
     const wrapper = mount(ConsoleView, { attachTo: document.body });

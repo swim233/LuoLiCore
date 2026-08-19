@@ -1,5 +1,5 @@
 import { InputFile, type Api, type Bot } from 'grammy';
-import type { TelegramTarget, TelegramToolBridge } from '@luoli/core';
+import type { LogSink, TelegramTarget, TelegramToolBridge } from '@luoli/core';
 import type { ArchiveRepository } from '@luoli/db';
 import { capMentions, deliveryOrder, segmentTelegramText, sendWithFallback, type ParseMode } from './output.js';
 
@@ -34,10 +34,24 @@ export interface TelegramToolsDependencies {
    * 之后，`send_message` 发出去的仍是转义过的 MarkdownV2 文本 —— 三条出站路径两种渲染。
    */
   parseMode(): ParseMode;
+  /**
+   * 投递层的语义 span（`docs/10 §2` 的 `tg.send`）。`tg.api` 那条在 grammY 的 transformer 里，
+   * 拿不到 turn 上下文（docs/28 · L-LOG-02），而这里 `TelegramTarget` 带着 turnId 与
+   * 本次 `tool.call` 的 span id。可选：测试不必给。
+   */
+  log?: LogSink;
 }
 
 export class TelegramTools implements TelegramToolBridge {
   constructor(private readonly dependencies: TelegramToolsDependencies) {}
+
+  /** 一次出站投递落一行。`method` 只用来说清是哪一种（sendMessage / sendPhoto / …）。 */
+  #sent(target: TelegramTarget, method: string, ok: boolean, startedAt: number, data: Record<string, unknown>): void {
+    this.dependencies.log?.event({ level: ok ? 'debug' : 'warn', kind: 'tg.send', summary: `${method} → ${target.chatId}`,
+      traceId: target.turnId, ...(target.parentSpanId ? { parentSpanId: target.parentSpanId } : {}),
+      chatId: target.chatId, durationMs: Math.round(performance.now() - startedAt),
+      data: { method, ok, path: 'tool', ...data } });
+  }
 
   async sendMessage(target: TelegramTarget, text: string): Promise<object> {
     return this.guard(async (api) => {
@@ -51,7 +65,9 @@ export class TelegramTools implements TelegramToolBridge {
       // 被切成的那几段中间挤进别的轮次的 `sendMessage`，用户看到的就是错序。
       await deliveryOrder.run(target.chatId, async () => {
         for (const [index, part] of rendered.entries()) {
+          const startedAt = performance.now();
           const sent = await sendWithFallback(api, target.chatId, part, this.thread(target), parseMode);
+          this.#sent(target, 'sendMessage', true, startedAt, { messageId: sent.message_id, chars: part.length });
           // 归档存渲染前的正文而不是 `part`：三条出站路径（这里、`bot.ts` 的兜底、流式）必须在
           // `messages.text` 里放同一种东西，否则同一张表里一半带 MarkdownV2 转义符。**分片时存
           // 该段自己那一份**（docs/28 · L-TG-03）。存的是 `capMentions` 之后的那份 —— 归档要与
@@ -66,7 +82,9 @@ export class TelegramTools implements TelegramToolBridge {
 
   async sendPhoto(target: TelegramTarget, absolutePath: string, caption?: string): Promise<object> {
     return this.guard(async (api) => {
+      const startedAt = performance.now();
       const sent = await api.sendPhoto(target.chatId, new InputFile(absolutePath), { ...this.thread(target), ...(caption ? { caption } : {}) });
+      this.#sent(target, 'sendPhoto', true, startedAt, { messageId: sent.message_id, chars: caption?.length ?? 0 });
       this.archiveOutgoing(target, sent.message_id, sent.date, caption ?? '[图片]', 'photo', sent);
       return { ok: true, messageId: sent.message_id };
     });
@@ -74,7 +92,9 @@ export class TelegramTools implements TelegramToolBridge {
 
   async sendFile(target: TelegramTarget, absolutePath: string, caption?: string): Promise<object> {
     return this.guard(async (api) => {
+      const startedAt = performance.now();
       const sent = await api.sendDocument(target.chatId, new InputFile(absolutePath), { ...this.thread(target), ...(caption ? { caption } : {}) });
+      this.#sent(target, 'sendDocument', true, startedAt, { messageId: sent.message_id, chars: caption?.length ?? 0 });
       this.archiveOutgoing(target, sent.message_id, sent.date, caption ?? `[文档 ${sent.document?.file_name ?? ''}]`, 'document', sent);
       return { ok: true, messageId: sent.message_id };
     });
@@ -84,14 +104,18 @@ export class TelegramTools implements TelegramToolBridge {
     const resolved = canonical.get(emoji.replaceAll('️', ''));
     if (!resolved) return { ok: false, error: 'unsupported_emoji', hint: 'Telegram 只接受固定的一组 reaction emoji', allowed: [...canonical.values()] };
     return this.guard(async (api) => {
+      const startedAt = performance.now();
       await api.setMessageReaction(target.chatId, messageId, [{ type: 'emoji', emoji: resolved }]);
+      this.#sent(target, 'setMessageReaction', true, startedAt, { messageId, emoji: resolved });
       return { ok: true, messageId, emoji: resolved };
     });
   }
 
   async pin(target: TelegramTarget, messageId: number): Promise<object> {
     return this.guard(async (api) => {
+      const startedAt = performance.now();
       await api.pinChatMessage(target.chatId, messageId);
+      this.#sent(target, 'pinChatMessage', true, startedAt, { messageId });
       return { ok: true, messageId };
     });
   }

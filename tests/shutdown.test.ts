@@ -136,6 +136,30 @@ describe('SIGTERM 退出路径', () => {
   });
 
   /**
+   * 关停时被中止的长轮询不是 Telegram 故障。
+   *
+   * 生产库 `kind='tg.api' AND level='error'` 共 **42 条，42/42** 落在某次 `system.stop` 的 3 秒内
+   * （56 次关停）—— 也就是说这个部署至今没有过一次真实的 Telegram API 故障，而日志里躺着 42 条
+   * error 级噪声：真出故障时与正常重启长得一样（docs/28 · L-TG-01）。`UpdatePoller.stop()` abort 掉
+   * 在途 `getUpdates`，`#fetch` 的 catch 确实吞掉了它，但 span 在更低一层（transformer）已经记成
+   * error 了。降级本身（`span().end()` 的 level 覆盖）由 `log.span.test.ts` 钉住，这里钉的是**接线**：
+   * 判据要真的从装配方传进来，否则 transformer 永远不知道「我们正在关停」。
+   */
+  it('关停判据从 main.ts 传进 Telegram transformer，且只对 abort 生效', async () => {
+    const { readFileSync } = await import('node:fs');
+    const main = readFileSync(resolve('apps/bot/src/main.ts'), 'utf8');
+    expect(main, 'main.ts 没把关停判据传给 createTelegramBot').toContain('stopping: () => shuttingDown');
+    const bot = readFileSync(resolve('packages/telegram/src/bot.ts'), 'utf8');
+    // transformer 那一段：判据是 `stopping() && isAbortLike(error)` —— 关停期间**真的**出 API 故障
+    // （发最后一条消息被拒）照旧记 error，这是收窄不是放行。
+    expect(bot).toContain("dependencies.stopping?.() === true && isAbortLike(error)");
+    expect(bot).toContain("reason: 'shutdown'");
+    expect(bot).toMatch(/\{ level: 'info', summary: `\$\{method\} aborted during shutdown` \}/);
+    // `stopping` 必须是可选的：缺它时行为与从前一致（测试与不装 Telegram 的部署）。
+    expect(bot).toMatch(/stopping\?: \(\) => boolean;/);
+  });
+
+  /**
    * `docs/reviews/28 · L-OPS-01`：第二个实例启动会就地把在位实例**仍在执行**的轮次改成
    * `failed/process_restarted`、释放已认领的消息、清零在途预留 —— 赢的是后来者。
    * 这里直接测那把锁，而不是起两个真进程（后者要 40 秒 × 2 才能拿到同一个判据）。

@@ -6,7 +6,10 @@ import { FileTools, PathJail, TOOL_POLICY, ToolRegistry, configSchema, registerB
 import { TelegramTools, type ParseMode } from '@luoli/telegram';
 import type { Bot } from 'grammy';
 
-const log = { event: () => undefined, publish: () => undefined, span: () => ({ id: 's', end: () => undefined }) } as unknown as LogSink;
+/** 投递侧的 `tg.send` 要真的落下来（docs/28 · L-LOG-02），所以这里收事件而不是丢掉。 */
+const logged: Array<{ kind: string; traceId?: string; parentSpanId?: string; data?: unknown }> = [];
+const log = { event: (event: { kind: string; traceId?: string; parentSpanId?: string; data?: unknown }) => { logged.push(event); return 1; },
+  publish: () => undefined, span: () => ({ id: 's', end: () => undefined }) } as unknown as LogSink;
 
 interface ApiCall { method: string; arguments_: unknown[] }
 
@@ -36,7 +39,7 @@ function harness(name: string, options: { wired?: boolean; fail?: string; config
   const calls: ApiCall[] = [];
   const bot = fakeBot(calls, options.fail);
   const telegram = new TelegramTools({ bot: () => bot, archive, maxMessageChars: () => 3900, maxMentions: () => 5,
-    parseMode: () => options.parseMode ?? 'MarkdownV2' });
+    parseMode: () => options.parseMode ?? 'MarkdownV2', log });
   const registry = new ToolRegistry(log, { request: async () => true }, { maxRegistered: 200, maxCallsPerTurn: 50, maxConsecutiveErrors: 10 });
   // 定时任务的投递也靠 Telegram，所以它跟 telegram 一族同生共死：`deliverable` 跟着 `wired` 走。
   const schedule = { jobs: new ScheduleRepository(db), deliverable: () => options.wired !== false,
@@ -167,6 +170,24 @@ describe('telegram side tools', () => {
     expect(h.calls[0]?.method).toBe('sendDocument');
     // 越界与超限都不该消耗本轮的追发预算：预算是给真正发出去的消息留的。
     expect((h.turn as { extraMessages?: number }).extraMessages).toBe(1);
+    closeDatabase(h.db);
+  });
+
+  /**
+   * `tg.api` 那条在 grammY 的 transformer 里，**拿不到 turn 上下文**：生产库 9745 条里
+   * `trace_id IS NULL` 的是 9745 条，按 trace 归轮的结果每一轮都是 0，而 `data` 只有
+   * `{method, ok}` —— 没有 chars、没有 messageId（docs/28 · L-LOG-02）。所以语义 span 在
+   * 投递层发，而这里知道 turnId 与本次 `tool.call` 的 span。
+   */
+  it('每条追发都落一条带 traceId 的 tg.send，父是本次 tool.call 的 span', async () => {
+    const h = harness('tg-tools-log');
+    logged.length = 0;
+    expect(await h.registry.execute('send_message', { text: '追发一条' }, h.context)).toMatchObject({ ok: true });
+    const sends = logged.filter((event) => event.kind === 'tg.send');
+    expect(sends).toHaveLength(1);
+    // `execute()` 浅拷贝 context 时把 `tool.call` 的 span id 塞了进去，`target()` 再原样带下来。
+    expect(sends[0]).toMatchObject({ traceId: 't1', parentSpanId: 's' });
+    expect(sends[0]!.data).toMatchObject({ method: 'sendMessage', ok: true, messageId: 11, chars: 4, path: 'tool' });
     closeDatabase(h.db);
   });
 

@@ -397,6 +397,10 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
   └ context.commit      (14ms) rebase onto c042, prune 2 turns
   ```
   每个节点可展开看完整 payload（请求 messages、工具输入输出、响应），大 payload 从 `logs/*.jsonl` 按 `file_ref` 懒加载。
+  缩进按 `parent_span_id` **链**算 depth（[10 §1](./10-logging-and-observability.md#1-trace-模型)），不是「有父就缩一级」——
+  后者在 `parent_span_id` 全库为 NULL 的年代看不出问题，父边真的连上之后会把 `agent.run` 下面那三层
+  压成同一层（docs/28 · L-LOG-04）。**环与悬挂父都按 depth 0 渲染**：一次查询只取 500 行，
+  子 span 的父完全可能不在这一页里，而一条坏数据不该把整个视图打成空白（`tests/webui/console.render.test.ts`）。
 - **点任一行看这条事件的详情（已实现）**：`GET /api/logs/:id` → `UiModal`。上半是元信息栅格
   （时间 / 级别 / kind / 摘要 / trace / span / parent span / chat / user / key / 耗时 / 载荷大小），
   下半是格式化后的 `data_json`，带 `[复制 JSON]` 与 `[下载完整 JSON]`（走 `GET /api/logs/:id/data` 取未截断那份）。

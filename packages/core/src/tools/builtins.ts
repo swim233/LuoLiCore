@@ -15,6 +15,8 @@ export interface TelegramTarget {
   chatId: string;
   threadId: number | null;
   turnId: string;
+  /** 这次投递该挂在哪个 span 之下（`docs/10 §1`）。工具路径给的是本次 `tool.call` 的 span id。 */
+  parentSpanId?: string;
 }
 
 /**
@@ -45,7 +47,7 @@ const UPLOAD_TIMEOUT_MS = 300_000;
 const PYTHON_TMP_DIR = '.luoli-tmp';
 
 const target = (context: ToolExecutionContext): TelegramTarget =>
-  ({ chatId: context.turn.chatId, threadId: context.turn.threadId, turnId: context.turn.turnId });
+  ({ chatId: context.turn.chatId, threadId: context.turn.threadId, turnId: context.turn.turnId, ...(context.parentSpanId ? { parentSpanId: context.parentSpanId } : {}) });
 /** 取本轮那份合并后的配置：运维在 WebUI 改了上限，下一轮就该生效（`tools.tg` 在热更新白名单里）。 */
 const tgLimits = (context: ToolExecutionContext): Config['tools']['tg'] => (context.turn.config as Readonly<Config>).tools.tg;
 
@@ -349,6 +351,9 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
         const result = await runSubAgent(run, definition, input.task, input.context, context.turn, { db: dependencies.db, agents: dependencies.agents, registry: dependencies.models, tools: registry, ledger: dependencies.ledger, log: dependencies.log, workspace: context.workspace,
           provider: { maxRetries: live.provider.maxRetries, retryBaseMs: live.provider.retryBaseMs, retryMaxMs: live.provider.retryMaxMs,
             requestTimeoutMs: live.provider.requestTimeoutMs, streamIdleTimeoutMs: live.provider.streamIdleTimeoutMs },
+          // 子 agent 那一整段挂在**本次** `spawn_agent` 的 `tool.call` 之下（`docs/10 §7` 第 4 条）。
+          // `context` 已经是 `execute()` 浅拷贝过的那一份，所以同一步里并排的几个 spawn 各带自己的父。
+          ...(context.parentSpanId ? { parentSpanId: context.parentSpanId } : {}),
           ...(dependencies.quota ? { quota: dependencies.quota } : {}), reservation: (context.turn.reservation as QuotaReservation | undefined) ?? null }, input.modelAlias);
         dependencies.db.prepare("UPDATE tasks SET state='done',result_summary=?,updated_at=?,finished_at=? WHERE id=?").run(result.summary, Date.now(), Date.now(), taskId);
         dependencies.log.publish('task.updated', { id: taskId, turnId: context.turn.turnId, title, state: 'done', progress: null });
@@ -399,6 +404,21 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
       if (count >= (dependencies.maxAsksPerRun ?? 5)) return { ok: false, error: 'agent_ask_limit_exceeded' };
       const askId = dependencies.agents.ask(run, parent, input);
       const live = context.turn.config as Readonly<Config>;
+      // 一次请示是一个 span（`docs/10 §1` 的 span H）：仲裁的模型调用与 `agent.answer` 都挂在它之下。
+      // 父是本次 `ask_parent` 的 `tool.call` —— 请示在实现里就是一次工具调用，图里那条 `parent=E`
+      // 少画了中间这一跳。
+      const askSpan = dependencies.log.span({ level: 'info', kind: 'agent.ask', summary: `${run.agentName} → ${parent.agentName}`,
+        traceId: context.turn.turnId, ...(context.parentSpanId ? { parentSpanId: context.parentSpanId } : {}),
+        chatId: context.turn.chatId, userId: context.turn.initiatorUserId, key: context.turn.key,
+        data: { askId, fromRun: run.id, toRun: parent.id, options: input.options?.length ?? 0 } });
+      /** 三条降级路径共用：`agent.answer` 挂在 `agent.ask` 之下，`source` 说清是谁答的。 */
+      const answered = (source: 'arbiter' | 'rule' | 'timeout', answer: string | null): void => {
+        dependencies.agents.answer(askId, answer, source);
+        askSpan.end({ source, answered: answer !== null });
+        dependencies.log.event({ level: 'info', kind: 'agent.answer', summary: `${parent.agentName} → ${run.agentName} (${source})`,
+          traceId: context.turn.turnId, parentSpanId: askSpan.id, chatId: context.turn.chatId, userId: context.turn.initiatorUserId, key: context.turn.key,
+          data: { askId, fromRun: parent.id, toRun: run.id, source, chars: answer?.length ?? 0 } });
+      };
       // 父 agent 仲裁（docs/14 A7）。此前这里返回 `ask_parent_not_implemented` —— 那是正确的降级
       // （更早的版本拿子 agent 自己的 options[0] 当答复并返回 ok:true，等于伪造「请示已获批」，
       // docs/19 · R-TOOL-01），但它让三个配置键长期挂着。现在真的问一次 low 档模型。
@@ -406,20 +426,20 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
         const task = dependencies.db.prepare('SELECT task_input AS task FROM agent_runs WHERE id=?').pluck().get(run.id) as string | undefined;
         const verdict = await arbitrateAsk(parent, { question: input.question, options: input.options ?? [], agentName: run.agentName, task: task ?? '' }, context.turn,
           { registry: dependencies.models, ledger: dependencies.ledger, log: dependencies.log, ...(dependencies.quota ? { quota: dependencies.quota } : {}),
-            reservation: (context.turn.reservation as QuotaReservation | undefined) ?? null,
+            reservation: (context.turn.reservation as QuotaReservation | undefined) ?? null, parentSpanId: askSpan.id,
             provider: { maxRetries: live.provider.maxRetries, retryBaseMs: live.provider.retryBaseMs, retryMaxMs: live.provider.retryMaxMs,
               requestTimeoutMs: live.provider.requestTimeoutMs, streamIdleTimeoutMs: live.provider.streamIdleTimeoutMs } },
           { timeoutMs: live.agent.askTimeoutMs });
-        if (verdict.ok) { dependencies.agents.answer(askId, verdict.answer, 'arbiter'); return { ok: true, askId, answer: verdict.answer, source: 'arbiter' }; }
+        if (verdict.ok) { answered('arbiter', verdict.answer); return { ok: true, askId, answer: verdict.answer, source: 'arbiter' }; }
         // 仲裁没成不是静默事件：它花了钱或者本该花钱，而子 agent 接下来会按「没人应答」走。
         // `escalationRequested` 是刻意记出来的：`askEscalateToUser` 仍未接线（转人工要一条阻塞式
         // 人机通道，docs/25 §8 那个缺口还开着），运维把它打开却什么都没发生时，日志里得有一行。
         dependencies.log.event({ level: verdict.reason === 'cancelled' ? 'info' : 'warn', kind: 'agent.ask_unarbitrated', summary: `ask_parent arbitration ${verdict.reason}`,
-          traceId: context.turn.turnId, chatId: context.turn.chatId, data: { askId, agentRunId: run.id, reason: verdict.reason, detail: verdict.detail, escalationRequested: live.agent.askEscalateToUser } });
+          traceId: context.turn.turnId, parentSpanId: askSpan.id, chatId: context.turn.chatId, data: { askId, agentRunId: run.id, reason: verdict.reason, detail: verdict.detail, escalationRequested: live.agent.askEscalateToUser } });
       }
       // 降级顺序：仲裁 → 子 agent 自带的 default → 明说没人应答。**不伪造答复**（docs/16 §5）。
-      if (input.default !== undefined) { dependencies.agents.answer(askId, input.default, 'rule'); return { ok: true, askId, answer: input.default, source: 'default' }; }
-      dependencies.agents.answer(askId, null, 'timeout');
+      if (input.default !== undefined) { answered('rule', input.default); return { ok: true, askId, answer: input.default, source: 'default' }; }
+      answered('timeout', null);
       return { ok: false, error: 'ask_parent_unanswered', hint: live.agent.askArbiter ? '仲裁没能给出答复；请在 task 里自带决策依据，或调用时提供 default' : '仲裁已关闭（agent.askArbiter=false）；请在 task 里自带决策依据，或调用时提供 default', askId };
     } });
   registry.register({ name: 'report_progress', description: '报告子 agent 当前进度。', inputSchema: z.object({ status: z.string(), current: z.number().optional(), total: z.number().optional(), detail: z.string().optional() }), policy: builtinPolicy('report_progress'), sourcePriority: 90,
@@ -427,6 +447,11 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
       const run = context.agentRunId ? dependencies.agents.byId(context.agentRunId) : null;
       if (!run) return { ok: false, error: 'agent_run_unavailable' };
       dependencies.agents.progress(run, input);
+      // 落一条 debug：`docs/10 §2` 给 `agent.progress` 定的字段就是 phase + done/total。它不受
+      // 下面那道 SSE 节流管 —— 节流护的是浏览器连接，日志侧本来就按 `logs.level` 分档。
+      dependencies.log.event({ level: 'debug', kind: 'agent.progress', summary: `${run.agentName}: ${input.status}`, traceId: context.turn.turnId,
+        ...(context.parentSpanId ? { parentSpanId: context.parentSpanId } : {}), key: context.turn.key,
+        data: { agentRunId: run.id, phase: input.status, done: input.current ?? null, total: input.total ?? null } });
       // `agent.progressThrottleMs`：库里那行照常更新（它是当前状态，谁读谁看最新的），但 SSE 只在
       // 节流窗口外广播。一个爱汇报的子 agent 每步喊一次，够把 WebUI 的事件流刷成进度条。
       const throttleMs = (context.turn.config as Readonly<Config>).agent.progressThrottleMs;

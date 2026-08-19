@@ -145,6 +145,11 @@ export class ContextEngine {
 
   constructor(private readonly db: Sqlite, private readonly archive: ArchiveRepository, private readonly log?: LogSink) {}
 
+  /** 轮次级事件挂在 trace 根之下（`docs/10 §1`）。`rootSpanId` 缺失（预览、试跑造的假 turn）时什么都不加。 */
+  #parent(turn: RuntimeTurnContext): { parentSpanId?: string } {
+    return turn.rootSpanId ? { parentSpanId: turn.rootSpanId } : {};
+  }
+
   async openTurn(request: OpenTurnRequest): Promise<RuntimeTurnContext> {
     return this.#mutex.run(request.key, async () => {
       const turnId = ulid();
@@ -192,6 +197,7 @@ export class ContextEngine {
     return Boolean(quoted.turnId) && snapshot.some((message) => (message as { turnId?: string }).turnId === quoted.turnId);
   }
 
+  /** trace 的根：`turn.start` 的 spanId，也是本轮其余事件的 `parentSpanId`（`docs/10 §1`）。 */
   private buildTurn(request: OpenTurnRequest, turnId: string, repo: ContextRepository, ctx: { tokenRatio: number }, head: CommitRow | null, claim: { rows: ArchivedMessage[]; omitted: number }, deferPrune: boolean): RuntimeTurnContext {
     {
       const scale = (message: NewContextMessage): NewContextMessage => {
@@ -227,11 +233,14 @@ export class ContextEngine {
         windowStart: head?.windowStart ?? 1,
         headOrdinal: head?.headOrdinal ?? 0,
       };
-      this.log?.event({ level: 'debug', kind: 'ctx.open', summary: `Opened context ${request.key}`, chatId: request.chatId, userId: request.initiatorUserId, key: request.key, data: { baseCommit: head?.id ?? null, claimed: claim.rows.length, quoted: request.quoted?.id ?? null, snapshotTokens: snapshot.tokens, snapshotMsgs: snapshot.messages.length } });
+      const rootSpanId = ulid();
+      // traceId + parentSpanId：`ctx.open` 此前两个都没有，于是它压根不出现在
+      // `GET /api/logs/trace/:id` 的结果里 —— `docs/10 §1` 那张图的第一个节点在实现里是游离的。
+      this.log?.event({ level: 'debug', kind: 'ctx.open', summary: `Opened context ${request.key}`, traceId: turnId, parentSpanId: rootSpanId, chatId: request.chatId, userId: request.initiatorUserId, key: request.key, data: { baseCommit: head?.id ?? null, claimed: claim.rows.length, quoted: request.quoted?.id ?? null, snapshotTokens: snapshot.tokens, snapshotMsgs: snapshot.messages.length } });
       return { turnId, key: request.key, chatId: request.chatId, threadId: request.threadId,
         initiatorUserId: request.initiatorUserId, effectiveRole: request.effectiveRole, isPrivate: request.isPrivate,
         ...(request.chatTitle ? { chatTitle: request.chatTitle } : {}),
-        baseCommitId: head?.id ?? null, claimThroughMessageId: request.trigger.id,
+        baseCommitId: head?.id ?? null, rootSpanId, claimThroughMessageId: request.trigger.id,
         initiator: { name: request.trigger.fromName ?? null, username: request.trigger.fromUsername ?? null },
         triggerTgMessageId: request.trigger.tgMessageId,
         snapshot, delta, abortSignal: request.abortSignal, tokenRatio: ctx.tokenRatio, deferPrune, config: request.config };
@@ -261,9 +270,9 @@ export class ContextEngine {
       this.invalidate(turn.key);
       const pruned = this.prune(repo, inserted.commit, config, turn.deferPrune === true);
       this.invalidate(turn.key);
-      this.log?.event({ level: 'info', kind: 'ctx.commit', summary: `Committed ${turn.turnId}`, traceId: turn.turnId, chatId: turn.chatId, userId: turn.initiatorUserId, key: turn.key, data: { commitId: (pruned?.commit ?? inserted.commit).id, rebased: inserted.rebased } });
-      if (inserted.rebased) this.log?.event({ level: 'warn', kind: 'ctx.rebase', summary: `Rebased ${turn.turnId}`, traceId: turn.turnId, key: turn.key, data: { base: turn.baseCommitId, onto: inserted.commit.parentId } });
-      if (pruned) this.log?.event({ level: 'info', kind: 'ctx.prune', summary: `Pruned ${turn.key}`, traceId: turn.turnId, key: turn.key, data: pruned.result });
+      this.log?.event({ level: 'info', kind: 'ctx.commit', summary: `Committed ${turn.turnId}`, traceId: turn.turnId, ...this.#parent(turn), chatId: turn.chatId, userId: turn.initiatorUserId, key: turn.key, data: { commitId: (pruned?.commit ?? inserted.commit).id, rebased: inserted.rebased } });
+      if (inserted.rebased) this.log?.event({ level: 'warn', kind: 'ctx.rebase', summary: `Rebased ${turn.turnId}`, traceId: turn.turnId, ...this.#parent(turn), key: turn.key, data: { base: turn.baseCommitId, onto: inserted.commit.parentId } });
+      if (pruned) this.log?.event({ level: 'info', kind: 'ctx.prune', summary: `Pruned ${turn.key}`, traceId: turn.turnId, ...this.#parent(turn), key: turn.key, data: pruned.result });
       return { commit: pruned?.commit ?? inserted.commit, rebased: inserted.rebased, pruned: pruned?.result ?? null };
     });
   }
@@ -281,15 +290,15 @@ export class ContextEngine {
     if (reason === 'cancelled' && config.cancel?.commitPartial && turn.delta.length && !turn.finalized) {
       try {
         await this.commitTurn(turn);
-        this.log?.event({ level: 'warn', kind: 'ctx.abort', summary: 'Committed partial delta on cancel', traceId: turn.turnId, key: turn.key, data: { messages: turn.delta.length } });
+        this.log?.event({ level: 'warn', kind: 'ctx.abort', summary: 'Committed partial delta on cancel', traceId: turn.turnId, ...this.#parent(turn), key: turn.key, data: { messages: turn.delta.length } });
         return;
       } catch (error) {
-        this.log?.event({ level: 'error', kind: 'ctx.abort', summary: 'Partial commit failed; releasing claims instead', traceId: turn.turnId, key: turn.key, data: { error: error instanceof Error ? error.message : String(error) } });
+        this.log?.event({ level: 'error', kind: 'ctx.abort', summary: 'Partial commit failed; releasing claims instead', traceId: turn.turnId, ...this.#parent(turn), key: turn.key, data: { error: error instanceof Error ? error.message : String(error) } });
       }
     }
     turn.finalized = true;
     const released = this.archive.scope(turn.chatId, turn.threadId).releaseClaims(turn.turnId);
-    this.log?.event({ level: 'warn', kind: 'ctx.abort', summary: `Released ${released} background claims (${reason})`, traceId: turn.turnId, key: turn.key });
+    this.log?.event({ level: 'warn', kind: 'ctx.abort', summary: `Released ${released} background claims (${reason})`, traceId: turn.turnId, ...this.#parent(turn), key: turn.key });
   }
 
   /**

@@ -49,6 +49,24 @@ export interface LogBroadcast {
   merged?: number;
 }
 
+/**
+ * `end()` 里可以改写的两列。**`summary` 与 `level` 是列不是载荷**（`span()` 用 `...input` 展开），
+ * 所以开始时定下的那份没有别的办法改 —— 而「开始时还不知道最终该写什么」是真实存在的：
+ * `model.call` 的 span 在 `onStepStart` 开，那时 AI SDK 报的是**链首**，而链内 fallback 换掉的
+ * 候选它看不见（`wrapLanguageModel` 让 SDK 可见的永远是链首）。此前那一行于是记着**失败的候选**，
+ * 同一次调用在日志与 `usage_ledger` 里指向两个不同的 provider（docs/28 · L-PROV-01），而
+ * `docs/10 §7` 第 3 条要求摘要行里就能看出 provider/模型/别名。
+ */
+export interface SpanOverride {
+  summary?: string;
+  level?: LogEvent['level'];
+}
+
+export interface LogSpan {
+  id: string;
+  end: (data?: unknown, error?: unknown, override?: SpanOverride) => void;
+}
+
 export class LogSink {
   #level: LogEvent['level'];
   readonly #maxFileBytes: number;
@@ -217,19 +235,22 @@ export class LogSink {
    * `stepNumber` / `provider` / `instructions` 同样丢掉，而失败路径 `end(undefined, error)`
    * 更是把输入输出一起丢 —— 排障时只剩「某个工具报错了」。`docs/10 §2` 的字段集和
    * `docs/09 §3.10` 的「可展开看工具输入输出」写的一直是合并后的那份。
+   *
+   * `end()` 的第三个参数只改 `summary` / `level` 两**列**（载荷的合并契约一个字不动），见 `SpanOverride`。
    */
-  span(input: Omit<LogEvent, 'spanId'>): { id: string; end: (data?: unknown, error?: unknown) => void } {
+  span(input: Omit<LogEvent, 'spanId'>): LogSpan {
     const id = ulid();
     const started = performance.now();
     let ended = false;
     return {
       id,
-      end: (data?: unknown, error?: unknown) => {
+      end: (data?: unknown, error?: unknown, override?: SpanOverride) => {
         if (ended) return;
         ended = true;
-        const level = error ? 'error' : input.level;
+        const level = override?.level ?? (error ? 'error' : input.level);
         const merged = mergeSpanData(input.data, data, error);
-        this.event({ ...input, level, spanId: id, data: merged, durationMs: Math.round(performance.now() - started) });
+        this.event({ ...input, level, ...(override?.summary === undefined ? {} : { summary: override.summary }),
+          spanId: id, data: merged, durationMs: Math.round(performance.now() - started) });
       },
     };
   }

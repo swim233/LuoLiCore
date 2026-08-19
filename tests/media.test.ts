@@ -60,12 +60,53 @@ describe('Telegram media processing', () => {
     const { db, archive } = harness('media-fail');
     vi.stubGlobal('fetch', async () => new Response('nope', { status: 502 }));
     const api = { getFile: async () => ({ file_path: 'photos/file_5.jpg' }) } as unknown as Api;
-    const media = new TelegramMedia(api, 'token', db, config);
+    // `media.download` / `media.extract` 是 `docs/10 §2` 写了而实现里一直没有的两条：一张超限的图、
+    // 一个解析失败的 PDF，此前只落在 `attachments` 那两列错误里（docs/28 · L-LOG-01）。
+    const events: Array<{ level: string; kind: string; data?: unknown }> = [];
+    const log = { event: (event: { level: string; kind: string; data?: unknown }) => { events.push(event); return 1; } } as never;
+    const media = new TelegramMedia(api, 'token', db, config, log);
     const archived = archive.scope('chat', null).append({ chatId: 'chat', messageThreadId: null, tgMessageId: 2, direction: 'in', fromKind: 'user',
       fromUserId: 'user', fromName: 'User', fromUsername: null, kind: 'photo', text: null, tgDate: Date.now(), raw: {}, triggered: true, triggerReason: 'private' });
     const parts = await media.process({ photo: [{ file_id: 'f2', file_unique_id: 'u2', width: 10, height: 10, file_size: 10 }] }, archived);
     expect(parts[0]).toMatchObject({ type: 'text' });
     expect((db.prepare('SELECT download_state AS state FROM attachments').get() as { state: string }).state).toBe('failed');
+    const download = events.filter((event) => event.kind === 'media.download');
+    expect(download).toHaveLength(1);
+    expect(download[0]!.level).toBe('warn');
+    expect(download[0]!.data).toMatchObject({ kind: 'photo', state: 'failed' });
+    // 下载都没成，提取那一条不该出现。
+    expect(events.filter((event) => event.kind === 'media.extract')).toEqual([]);
+    closeDatabase(db);
+  });
+
+  it('超出 maxImageBytes 时记一条 skipped，而且一次网络都不发', async () => {
+    const { db, archive } = harness('media-oversize');
+    const events: Array<{ level: string; kind: string; data?: unknown }> = [];
+    const log = { event: (event: { level: string; kind: string; data?: unknown }) => { events.push(event); return 1; } } as never;
+    vi.stubGlobal('fetch', async () => { throw new Error('不该走到网络'); });
+    const media = new TelegramMedia({ getFile: async () => { throw new Error('不该走到 getFile'); } } as unknown as Api, 'token', db, config, log);
+    const archived = archive.scope('chat', null).append({ chatId: 'chat', messageThreadId: null, tgMessageId: 3, direction: 'in', fromKind: 'user',
+      fromUserId: 'user', fromName: 'User', fromUsername: null, kind: 'photo', text: null, tgDate: Date.now(), raw: {}, triggered: true, triggerReason: 'private' });
+    await media.process({ photo: [{ file_id: 'f3', file_unique_id: 'u3', width: 10, height: 10, file_size: config.maxImageBytes + 1 }] }, archived);
+    expect(events.filter((event) => event.kind === 'media.download').map((event) => event.data)).toMatchObject([{ state: 'skipped', reason: 'size_limit' }]);
+    closeDatabase(db);
+  });
+
+  it('文档提取成功时 download 与 extract 各落一条', async () => {
+    const { db, archive } = harness('media-extract');
+    const events: Array<{ level: string; kind: string; data?: unknown }> = [];
+    const log = { event: (event: { level: string; kind: string; data?: unknown }) => { events.push(event); return 1; } } as never;
+    vi.stubGlobal('fetch', async () => new Response('第一行\n第二行', { status: 200 }));
+    const media = new TelegramMedia({ getFile: async () => ({ file_path: 'documents/notes.md' }) } as unknown as Api, 'token', db, config, log);
+    const archived = archive.scope('chat', null).append({ chatId: 'chat', messageThreadId: null, tgMessageId: 4, direction: 'in', fromKind: 'user',
+      fromUserId: 'user', fromName: 'User', fromUsername: null, kind: 'document', text: null, tgDate: Date.now(), raw: {}, triggered: true, triggerReason: 'private' });
+    await media.process({ document: { file_id: 'f4', file_unique_id: 'u4', file_name: 'notes.md', mime_type: 'text/markdown', file_size: 20 } }, archived);
+    expect(events.filter((event) => event.kind === 'media.download').map((event) => event.data)).toMatchObject([{ state: 'done' }]);
+    const extract = events.filter((event) => event.kind === 'media.extract');
+    expect(extract).toHaveLength(1);
+    expect(extract[0]!.level).toBe('info');
+    expect(extract[0]!.data).toMatchObject({ state: 'done' });
+    expect((extract[0]!.data as { chars: number }).chars).toBeGreaterThan(0);
     closeDatabase(db);
   });
 });

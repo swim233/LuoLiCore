@@ -73,6 +73,26 @@ describe('sandbox host execution bypasses the jail limits', () => {
     expect(result.ok).toBe(true);
   });
 
+  /**
+   * 沙箱执行此前在日志里**完全不存在**：`docs/10 §2` 有 `sandbox.run` 这一行，而源码零处发出
+   * （docs/28 · L-LOG-01）。一次 OOM、一次被 SIGKILL 的命令、以及「非 owner 请求执行但沙箱不可用」
+   * 都只能从 `tool.call` 的输出里猜。被拒那一档同样要落 —— 模型侧只看到一句工具失败。
+   */
+  it('每次执行都交出一条 sandbox.run，被拒那一档带 denied', async () => {
+    const runs: Array<Record<string, unknown>> = [];
+    const sandbox = new Sandbox(jailable, true, false, undefined, undefined, (event) => runs.push({ ...event }));
+    const result = await sandbox.run('/bin/echo hi', 'owner', workspace, new AbortController().signal, 20_000, 'turn-42');
+    expect(result.ok).toBe(true);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({ turnId: 'turn-42', role: 'owner', mode: 'host', ok: true, exitCode: 0, killed: false, oom: false, truncated: false });
+    expect(runs[0]!.durationMs).toEqual(expect.any(Number));
+    // mode=none 时非 owner 被拒：这条路本来一个字都不落。
+    const closed = new Sandbox({ ...jailable, mode: 'none' as const, bypassRoles: [] }, true, false, undefined, undefined, (event) => runs.push({ ...event }));
+    expect((await closed.run('true', 'trusted', workspace, new AbortController().signal, 1000, 'turn-43')).ok).toBe(false);
+    expect(runs[1]).toMatchObject({ turnId: 'turn-43', role: 'trusted', ok: false, exitCode: null });
+    expect(String(runs[1]!.denied)).toContain('沙箱未启用');
+  });
+
   // ulimit -u 是 RLIMIT_NPROC，按 UID 全局的**任务数**算（线程，不是进程，也不是当前进程树）。
   // 直接取 pidsLimit 的话宿主上早就超了，子 shell 一次 fork 都做不成。
   it('raises the jail nproc ceiling above the host baseline instead of using pidsLimit verbatim', async () => {

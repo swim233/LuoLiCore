@@ -447,6 +447,44 @@ async function clearChatModelAlias(): Promise<void> {
   } catch (error) { toastError('清除会话模型别名失败', error); }
 }
 async function inspectTrace(traceId: string | null): Promise<void> { if (!traceId) return; traceDetail.value = await api<LogRow[]>(`/api/logs/trace/${encodeURIComponent(traceId)}`); }
+
+/**
+ * 按 `parentSpanId` 链算真实 depth（`docs/10 §1`「WebUI Trace 视图按 `parent_span_id` 重建树」）。
+ *
+ * 此前 trace 视图**不是树**，是 `marginLeft: node.parent_span_id ? '24px' : '0'` —— 只有一级。
+ * 那个写法在 `parent_span_id` 全库为 NULL 的年代看不出问题（13 个节点全是 `0px`），
+ * 现在父边真的连上了，一级缩进会把 `agent.run` 下面那三层压成同一层（docs/28 · L-LOG-04）。
+ *
+ * **环与悬挂父都要兜住**：一次查询只取 500 行，子 span 的父完全可能不在这一页里；而一条坏数据
+ * （父指回自己、或两个 span 互指）不该把整个视图打成空白。两者一律按 depth 0 渲染 ——
+ * `.vue` 模板不进 `tsc --noEmit`（本文件开头那段注释自陈过这件事害过人），所以判据由
+ * `tests/webui/console.render.test.ts` 焊住。
+ */
+const TRACE_MAX_DEPTH = 12;
+function traceDepths<T extends { span_id?: string | null; spanId?: string | null; parent_span_id?: string | null; parentSpanId?: string | null }>(nodes: readonly T[]): number[] {
+  const spanOf = (node: T): string | null => node.span_id ?? node.spanId ?? null;
+  const parentOf = (node: T): string | null => node.parent_span_id ?? node.parentSpanId ?? null;
+  const bySpan = new Map<string, T>();
+  for (const node of nodes) { const id = spanOf(node); if (id && !bySpan.has(id)) bySpan.set(id, node); }
+  return nodes.map((node) => {
+    let depth = 0;
+    const seen = new Set<string>();
+    const own = spanOf(node);
+    if (own) seen.add(own);
+    let parent = parentOf(node);
+    while (parent && depth < TRACE_MAX_DEPTH) {
+      if (seen.has(parent)) return 0;            // 环：这一段数据是坏的，别缩进
+      const next = bySpan.get(parent);
+      if (!next) break;                          // 悬挂父（不在这一页里）：按当前深度收尾
+      seen.add(parent);
+      depth += 1;
+      parent = parentOf(next);
+    }
+    return depth;
+  });
+}
+/** `traceDepths` 的结果按下标对齐 `traceDetail`，模板直接按 index 取。 */
+const traceIndent = computed(() => traceDepths(traceDetail.value));
 /**
  * 日志行的详情。此前点一行只会去重建 trace，`trace_id` 为空的那些（`system.start`、
  * `config.changed`、`maintenance.*`、`webui.action`）点了**什么都不发生**；有 trace 的也只得到
@@ -714,6 +752,15 @@ function eventGroup(kind: string): Exclude<DetailGroup, 'all' | 'parts'> {
 }
 const detailEvents = computed(() => detailGroup.value === 'parts' ? []
   : (detail.value?.events ?? []).filter((entry) => detailGroup.value === 'all' || eventGroup(entry.kind) === detailGroup.value));
+/**
+ * 对话详情里的缩进：depth 按**整轮**的父链算（`detail.events` 那一份完整列表），不是按当前分组
+ * 算 —— 分组把中间层滤掉之后，`agent.run` 之下的 `model.call` 会因为找不到父而落回 depth 0，
+ * 那正是「看起来是树、其实是平表」的另一种形态（docs/28 · L-LOG-04）。
+ */
+const detailDepths = computed(() => {
+  const depths = traceDepths(detail.value?.events ?? []);
+  return new Map((detail.value?.events ?? []).map((entry, index) => [entry.id, depths[index] ?? 0]));
+});
 const detailParts = computed(() => (detail.value?.contextMessages ?? []).filter((entry) => entry.origin === 'tool_call' || entry.origin === 'tool_result'));
 const detailCount = (group: DetailGroup): number => group === 'parts' ? detailParts.value.length
   : (detail.value?.events ?? []).filter((entry) => group === 'all' || eventGroup(entry.kind) === group).length;
@@ -2586,7 +2633,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             <template #level="{ data }"><span :class="['level', data.level]">{{ data.level }}</span></template>
             <template #data_bytes="{ data }"><small>{{ data.data_bytes ? formatBytes(data.data_bytes) : '—' }}</small></template>
           </DataGrid>
-          <article v-if="traceDetail.length" class="inspector"><header><b>Trace {{ traceDetail[0]?.trace_id }}</b><UiTag :value="`${traceDetail.length} spans`" /></header><ol><li v-for="node in traceDetail" :key="node.id" :style="{ marginLeft: node.parent_span_id ? '24px' : '0' }"><code>{{ node.kind }}</code><span>{{ node.summary }}</span><small>{{ node.duration_ms ?? 0 }} ms</small></li></ol></article>
+          <article v-if="traceDetail.length" class="inspector"><header><b>Trace {{ traceDetail[0]?.trace_id }}</b><UiTag :value="`${traceDetail.length} spans`" /></header><ol><li v-for="(node, index) in traceDetail" :key="node.id" :style="{ marginLeft: `${(traceIndent[index] ?? 0) * 24}px` }"><code>{{ node.kind }}</code><span>{{ node.summary }}</span><small>{{ node.duration_ms ?? 0 }} ms</small></li></ol></article>
         </section>
         <section v-else-if="active === 'prompts'" key="prompts" class="surface page-surface"><header><div><p class="eyebrow">PROMPT WORKSPACE</p><h2>提示词编辑与版本</h2><p>每次保存落盘 unified diff；预览与真实轮次共用同一条 PromptAssembler 路径。</p></div><UiButton label="预览组装" icon="pi pi-eye" @click="openPromptPreview" /></header>
           <div class="prompt-workbench">
@@ -2912,7 +2959,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
           <li v-if="!detailParts.length" class="empty">这一轮没有工具调用。这一组读的是 <code>context_messages</code> 的原始 parts，不受 <code>logs.retentionDays</code> 与 <code>logs.captureBodies</code> 影响。</li>
         </ol>
         <ol v-else class="detail-events">
-          <li v-for="event in detailEvents" :key="event.id">
+          <li v-for="event in detailEvents" :key="event.id" :style="{ marginLeft: `${(detailDepths.get(event.id) ?? 0) * 18}px` }">
             <button type="button" @click="toggleEvent(event.id)">
               <i :class="expandedEvents.has(event.id) ? 'pi pi-chevron-down' : 'pi pi-chevron-right'" aria-hidden="true" />
               <span :class="['level', event.level]">{{ event.level }}</span>

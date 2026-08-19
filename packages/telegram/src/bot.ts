@@ -42,6 +42,30 @@ export interface TelegramDependencies {
   failures?: TurnFailureStreak;
   log: LogSink;
   botInfo?: UserFromGetMe;
+  /**
+   * 「本进程正在关停吗」。装配方给 `() => shuttingDown`。
+   *
+   * `UpdatePoller.stop()` abort 掉在途的 `getUpdates`，`#fetch` 的 catch 确实吞掉了它 —— 但
+   * `tg.api` 的 span 在更低一层（下面那个 transformer）已经记成 error 了。生产库 42 条
+   * `tg.api` error **42/42** 落在某次 `system.stop` 的 3 秒内（56 次关停），也就是说这个部署至今
+   * 没有过一次真实的 Telegram API 故障，而日志里躺着 42 条 error 级噪声：真出故障时与正常重启
+   * 长得一模一样（docs/28 · L-TG-01）。缺它时行为与从前一致。
+   */
+  stopping?: () => boolean;
+}
+
+/**
+ * 这个错误是不是「被 abort 掉了」。判据要窄 —— 只有**关停期间**的 abort 才降级成 info，
+ * 关停期间真发生的 API 故障（发最后一条消息被拒）照旧是 error。
+ *
+ * grammY 把 fetch 的失败包成 `HttpError`（`error` 或 `cause` 上挂原始异常），所以要往下钻几层。
+ */
+function isAbortLike(error: unknown, depth = 0): boolean {
+  if (depth > 3 || !error || typeof error !== 'object') return false;
+  const value = error as { name?: unknown; message?: unknown; cause?: unknown; error?: unknown };
+  if (value.name === 'AbortError' || value.name === 'TimeoutError') return true;
+  if (typeof value.message === 'string' && /abort/i.test(value.message)) return true;
+  return isAbortLike(value.cause, depth + 1) || isAbortLike(value.error, depth + 1);
 }
 
 // 运维态失败（模型没配、缺定价）不能并进「出了点问题」：用户重试多少次都不会好，
@@ -83,12 +107,24 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
   bot.catch((error) => dependencies.log.event({ level: 'error', kind: 'tg.error', summary: error.message, data: error.error }));
   bot.api.config.use(autoRetry({ maxRetryAttempts: 3, maxDelaySeconds: 30 }));
   bot.api.config.use(apiThrottler({ global: { reservoir: config.telegram.throttle.globalPerSecond, reservoirRefreshAmount: config.telegram.throttle.globalPerSecond, reservoirRefreshInterval: 1000 }, group: { reservoir: config.telegram.throttle.perChatPerMinute, reservoirRefreshAmount: config.telegram.throttle.perChatPerMinute, reservoirRefreshInterval: 60_000 }, out: { minTime: 1000 } }));
+  // **传输层**那一行（`docs/10 §2` 的 `tg.api`）：它拿不到 turn/chat 上下文，所以既没有 traceId
+  // 也说不出发了什么。「这一轮发了什么」由投递层的 `tg.send` / `tg.edit` / `tg.action` 回答
+  // （docs/28 · L-LOG-02）。装的位置在 `autoRetry` 与 `apiThrottler` **之后** = 最外层，
+  // 所以这里的 `durationMs` 含节流排队与全部重试退避。
   bot.api.config.use(async (prev, method, payload, signal) => {
     const span = dependencies.log.span({ level: 'info', kind: 'tg.api', summary: method, data: { method } });
     try { const result = await prev(method, payload, signal); span.end({ ok: true }); return result; }
-    catch (error) { span.end(undefined, error); throw error; }
+    catch (error) {
+      // 关停时被中止的长轮询不是故障（docs/28 · L-TG-01）：记 info + `reason:'shutdown'`，
+      // 好让「真的出过 Telegram 故障吗」这个问题按 `level='error'` 就能回答。
+      if (dependencies.stopping?.() === true && isAbortLike(error)) {
+        span.end({ ok: false, reason: 'shutdown', error: error instanceof Error ? error.message : String(error) }, undefined,
+          { level: 'info', summary: `${method} aborted during shutdown` });
+      } else span.end(undefined, error);
+      throw error;
+    }
   });
-  const media = new (await import('./media.js')).TelegramMedia(bot.api, token, dependencies.db, config.media);
+  const media = new (await import('./media.js')).TelegramMedia(bot.api, token, dependencies.db, config.media, dependencies.log);
   const ingress = new Map<number, TelegramIngress>();
   /** `trigger.cooldownMsPerUser` 的按人时间戳。有界淘汰见使用处。 */
   const triggerCooldown = new Map<string, number>();
@@ -523,6 +559,12 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
     const pendingId = crypto.randomUUID();
     const pending = dependencies.registry.register({ id: pendingId, key, chatId, userId, role: effectiveRole }, config.concurrency.turnTimeoutMs);
     let release: (() => void) | null = null;
+    // 「排队了多久」此前完全不可观测：`turn.start` 在**拿到槽位之后**才发、且不带等待时长，于是
+    // 「bot 半天不回」是排队还是上游慢，日志里分不出来（docs/28 · L-LOG-01）。判据用只读的
+    // `available()` —— 无条件记 `turn.queued` 等于每轮多一行 info，而「排过队」才是要找的那件事。
+    const queuedAt = Date.now();
+    const wasQueued = !dependencies.concurrency.available(key);
+    const queueSnapshot = { active: dependencies.concurrency.active, queued: dependencies.concurrency.queued };
     try { release = await dependencies.concurrency.acquire(key, pending.controller.signal); }
     catch (error) {
       dependencies.registry.finish(pendingId);
@@ -555,7 +597,13 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
       await ctx.reply('出了点问题，已记录。');
       return;
     }
-    dependencies.log.event({ level: 'info', kind: 'turn.start', summary: `Turn ${turn.turnId} started`, traceId: turn.turnId, chatId, userId, key, data: { role: effectiveRole, triggerReason } });
+    const waitedMs = Date.now() - queuedAt;
+    // `turn.queued` 排在 `turn.start` 之前、并且已经知道等了多久：turnId 要到 `openTurn` 之后才有，
+    // 而一条没有 traceId 的排队记录归不进这一轮（`docs/10 §2`）。
+    if (wasQueued) dependencies.log.event({ level: 'info', kind: 'turn.queued', summary: `Turn ${turn.turnId} waited ${waitedMs}ms in queue`,
+      traceId: turn.turnId, ...(turn.rootSpanId ? { parentSpanId: turn.rootSpanId } : {}), chatId, userId, key, durationMs: waitedMs, data: { ...queueSnapshot, waitedMs } });
+    // `spanId` = 这条 trace 的根：其余轮次级 span 都挂在它之下（`docs/10 §1`）。
+    dependencies.log.event({ level: 'info', kind: 'turn.start', summary: `Turn ${turn.turnId} started`, traceId: turn.turnId, ...(turn.rootSpanId ? { spanId: turn.rootSpanId } : {}), chatId, userId, key, data: { role: effectiveRole, triggerReason, waitedMs } });
     // 总览页的在途 turn 表只有这一个数据来源：`GET /api/turns/active` 给首屏，之后靠这三种事件增量更新。
     dependencies.log.publish('turn.started', { turnId: turn.turnId, key, chatId, user: userId, role: effectiveRole, triggerReason, at: Date.now() });
     try {
@@ -586,7 +634,13 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
         // `sendMessage` 时，用户看到的是「最后一段在后面几条回复之后才冒出来」。
         await deliveryOrder.run(chatId, async () => {
           for (const [index, part] of segmented.rendered.entries()) {
+            const sentAt = Date.now();
             const sent = await sendWithFallback(bot.api, chatId, part, index === 0 ? { reply_parameters: { message_id: message.message_id } } : {}, outputConfig.parseMode, onParseFallback);
+            // 这条兜底路径同样要有投递侧的 span：它是 `onTurn` 缺省时那句提示与非流式产出走的路
+            // （`docs/10 §2` 的 `tg.send`，docs/28 · L-LOG-02）。
+            dependencies.log.event({ level: 'debug', kind: 'tg.send', summary: `sendMessage → ${chatId}`, traceId: turn.turnId,
+              ...(turn.rootSpanId ? { parentSpanId: turn.rootSpanId } : {}), chatId, userId, key, durationMs: Date.now() - sentAt,
+              data: { method: 'sendMessage', ok: true, messageId: sent.message_id, chars: part.length, path: 'fallback' } });
             // 归档存**渲染前**的正文，与流式那条路（下面存 `answer`）一致。存 `part` 的话
             // `messages.text` 里躺的是 MarkdownV2 转义后的文本 —— WebUI 会话页和 `read_messages`
             // 看到的 bot 发言带一串 `\-` `\.`，同一张表里两条路径两种内容。**分片时每个
@@ -607,6 +661,16 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
           async (text) => (dependencies.plugins ? pluginText(await dependencies.plugins.hook('beforeSend', { turn, text }), text) : text),
           (text) => capMentions(text, outputConfig.maxMentions));
         output.onParseFallback = onParseFallback;
+        // 投递层的语义 span（`docs/10 §1` 的 span K/L/M）。`tg.edit` / `tg.action` 由
+        // `TelegramOutput` 聚合成一条，这里只负责把它落成日志行。
+        output.onDelivery = (event) => void dependencies.log.event({ level: event.ok ? 'debug' : 'warn',
+          kind: event.kind === 'send' ? 'tg.send' : event.kind === 'edit' ? 'tg.edit' : 'tg.action',
+          summary: `${event.kind} → ${chatId}${event.count ? ` ×${event.count}` : ''}`, traceId: turn.turnId,
+          ...(turn.rootSpanId ? { parentSpanId: turn.rootSpanId } : {}), chatId, userId, key, durationMs: event.ms,
+          data: { ok: event.ok, ...(event.messageId === undefined ? {} : { messageId: event.messageId }),
+            ...(event.chars === undefined ? {} : { chars: event.chars }),
+            ...(event.count === undefined ? {} : event.kind === 'edit' ? { editCount: event.count } : { count: event.count }),
+            ...(event.path ? { path: event.path } : {}), ...(event.error ? { error: event.error } : {}) } });
         const consumed = await output.consume(generated.stream, message.message_id);
         if (consumed.interrupted) {
           broken = true;
@@ -677,7 +741,7 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
       await dependencies.plugins?.hook('afterCommit', { turn, committed });
       dependencies.log.event({ level: broken ? 'warn' : 'info', kind: 'turn.end',
         summary: broken ? `${cancelled ? 'turn cancelled' : timedOut ? 'turn timed out' : 'turn failed'} after partial delivery` : 'turn committed',
-        traceId: turn.turnId, chatId, userId, key, data: { state, rebased: committed.rebased, ...(broken ? { deliveredChars: answer.length } : {}) } });
+        traceId: turn.turnId, ...(turn.rootSpanId ? { parentSpanId: turn.rootSpanId } : {}), chatId, userId, key, data: { state, rebased: committed.rebased, waitedMs, ...(broken ? { deliveredChars: answer.length } : {}) } });
       dependencies.log.publish('turn.finished', { turnId: turn.turnId, key, chatId, state, steps: settled?.steps ?? 0, toolCalls: settled?.toolCalls ?? 0, costUsd: settled?.costUsd ?? 0, rebased: committed.rebased, durationMs: settled?.durationMs ?? 0 });
       // 工具真的跑过、结果也进了已提交的上下文：记忆写入跟着提交走，否则上下文说「写好了」而库里没有。
       dependencies.memory.flush(turn.turnId);
@@ -705,7 +769,7 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
       const settled = dependencies.turns.finish(turn.turnId, cancelled
         ? { state: 'cancelled', cancelReason: String(turn.abortSignal.reason ?? 'cancelled') }
         : { state: 'failed', error: timedOut ? 'turn_timeout' : error instanceof Error ? error.message : String(error), ...(timedOut ? { cancelReason: 'timeout' } : {}) });
-      dependencies.log.event({ level: cancelled ? 'warn' : 'error', kind: 'turn.end', summary: cancelled ? 'turn cancelled' : timedOut ? 'turn timed out' : error instanceof Error ? error.message : 'turn failed', traceId: turn.turnId, chatId, userId, key });
+      dependencies.log.event({ level: cancelled ? 'warn' : 'error', kind: 'turn.end', summary: cancelled ? 'turn cancelled' : timedOut ? 'turn timed out' : error instanceof Error ? error.message : 'turn failed', traceId: turn.turnId, ...(turn.rootSpanId ? { parentSpanId: turn.rootSpanId } : {}), chatId, userId, key, data: { state: cancelled ? 'cancelled' : 'failed', waitedMs } });
       dependencies.log.publish('turn.finished', { turnId: turn.turnId, key, chatId, state: cancelled ? 'cancelled' : 'failed', steps: settled?.steps ?? 0, toolCalls: settled?.toolCalls ?? 0, costUsd: settled?.costUsd ?? 0, rebased: false, durationMs: settled?.durationMs ?? 0 });
       // 连续 5 轮失败是「整个部署坏了」的信号（docs/10 §6）。取消不算 —— 用户点了取消不是故障；
       // 超时算，而且它正是那个信号最该覆盖的场景（上游变黑洞时每一轮都走这条路）。

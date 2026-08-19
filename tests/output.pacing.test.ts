@@ -20,6 +20,57 @@ async function* ticker(chunks: string[], everyMs: number): AsyncGenerator<string
 
 const options = { mode: 'stream' as const, replyDelayMs: 150, bufferMs: 150, intervalMs: 40, minDeltaChars: 1, maxChars: 3900 };
 
+/**
+ * 投递层的语义 span（`docs/10 §2` 的 `tg.send` / `tg.edit` / `tg.action`）。
+ *
+ * `tg.api` 那条在 grammY 的 transformer 里，**拿不到 turn/chat 上下文**：生产库 9745 条里
+ * `trace_id IS NULL` 的是 9745 条，`data` 只有 `{method, ok}` —— 没有 chars、没有 messageId
+ * （docs/28 · L-LOG-02）。`tg.edit` / `tg.action` 一轮各只落**一条**：一次流式回复能编辑几十次。
+ */
+describe('投递层的 tg.send / tg.edit / tg.action', () => {
+  it('send 一条一行，edit 与 action 各聚合成一条带次数', async () => {
+    const calls: Call[] = [];
+    const { bot } = fakeBot(calls);
+    const events: Array<{ kind: string; count?: number; messageId?: number; chars?: number; ok: boolean }> = [];
+    const output = new TelegramOutput(bot, 'chat', { ...options, replyDelayMs: 0, bufferMs: 0, intervalMs: 1 }, undefined, Date.now() - 5000);
+    output.onDelivery = (event) => events.push(event);
+    await output.consume(ticker(['一', '二', '三', '四', '五'], 20));
+    const sends = events.filter((event) => event.kind === 'send');
+    const edits = events.filter((event) => event.kind === 'edit');
+    // 首帧一条 send；其余全是编辑，聚合成**一条**带 count。
+    expect(sends).toHaveLength(1);
+    expect(sends[0]).toMatchObject({ ok: true, messageId: 101, path: 'stream' });
+    expect(edits).toHaveLength(1);
+    expect(edits[0]!.count).toBe(calls.filter((call) => call.kind === 'edit').length);
+    expect(edits[0]!.count!).toBeGreaterThan(1);
+    // 开轮那一发 typing 是无条件的，所以 action 至少一次，同样聚合成一条。
+    const actions = events.filter((event) => event.kind === 'action');
+    expect(actions).toHaveLength(1);
+    expect(actions[0]!.count).toBeGreaterThanOrEqual(1);
+  });
+
+  it('`once` 档也发 tg.send —— 三个 return 点都要经过聚合收口', async () => {
+    const calls: Call[] = [];
+    const { bot } = fakeBot(calls);
+    const events: Array<{ kind: string; path?: string }> = [];
+    const output = new TelegramOutput(bot, 'chat', { ...options, mode: 'once', replyDelayMs: 0 }, undefined, Date.now() - 5000);
+    output.onDelivery = (event) => events.push(event);
+    await output.consume(ticker(['整', '条'], 1));
+    expect(events.filter((event) => event.kind === 'send').map((event) => event.path)).toEqual(['once']);
+    expect(events.filter((event) => event.kind === 'edit')).toEqual([]);
+  });
+
+  it('onDelivery 抛出来也不许打断投递', async () => {
+    const calls: Call[] = [];
+    const { bot } = fakeBot(calls);
+    const output = new TelegramOutput(bot, 'chat', { ...options, replyDelayMs: 0, bufferMs: 0, intervalMs: 1 }, undefined, Date.now() - 5000);
+    output.onDelivery = () => { throw new Error('日志挂了'); };
+    const result = await output.consume(ticker(['一', '二'], 5));
+    expect(result.text).toBe('一二');
+    expect(calls.some((call) => call.kind === 'send')).toBe(true);
+  });
+});
+
 describe('Telegram reply pacing', () => {
   it('holds the first message until replyDelayMs has passed since the user message', async () => {
     const calls: Call[] = [];

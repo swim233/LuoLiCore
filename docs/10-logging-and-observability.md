@@ -11,86 +11,156 @@ trace_id = turn_id                        （命令类操作用 cmd_<ulid>；定
 span_id  = ULID
 parent_span_id = 上级 span
 
-turn 01J8…                                     kind=turn.start / turn.end
-├── ctx.open        span A                     claimed=3, base=c041
-├── prompt.build    span B                     blocks tokens=…
+turn 01J8…                                     kind=turn.start（spanId = turn 根）/ turn.end
+├── turn.queued                                只在真的排过队时才落，带 waitedMs
+├── ctx.open        span A  parent=turn        claimed=3, base=c041
+├── prompt.build    span B  parent=turn        blockTokens=…
 ├── model.call      span C  parent=turn        #1 main→claude-opus-5
-│   └── tool.call   span D  parent=C           spawn_agent(researcher)
-│       └── agent.run  span E  parent=D        sub run_id=…
-│           ├── model.call  span F parent=E
-│           ├── tool.call   span G parent=E    grep
-│           ├── agent.ask   span H parent=E
-│           └── agent.answer span I parent=H
-├── model.call      span J                     #2
-├── tg.send         span K
-├── tg.edit         span L (×N，聚合为一条带 count)
-└── ctx.commit      span M                     rebase, prune
+│   ├── tool.call   span D  parent=C           spawn_agent(researcher)
+│   │   ├── agent.spawn     parent=D           派出去那一刻就落，不等它跑完
+│   │   ├── agent.run  span E  parent=D        sub run_id=…
+│   │   │   ├── model.call  span F parent=E
+│   │   │   ├── agent.progress    parent=E
+│   │   │   └── tool.call   span G parent=E    grep
+│   │   │       └── agent.ask  span H parent=G ask_parent 本身是一次工具调用
+│   │   │           ├── model.call  parent=H   仲裁（low 档，一步，无工具）
+│   │   │           └── agent.answer parent=H  source=arbiter
+│   │   └── agent.end       parent=E           steps, costUsd
+│   └── tool.error          parent=C           模型给了非法参数：SDK 内部就拒了，execute 没被调到
+├── model.call      span J  parent=turn        #2
+├── tg.send         span K  parent=turn
+├── tg.edit         span L  parent=turn        （×N，聚合为一条带 editCount）
+├── tg.action       span M  parent=turn        （×N，聚合为一条带 count）
+└── ctx.commit      span N  parent=turn        rebase, prune
 ```
 
 - span 落 `log_events` 一行（含 `duration_ms`），大 payload 落 `logs/<date>/<kind>.jsonl` 并在行里记 `file_ref`。
-- WebUI Trace 视图按 `parent_span_id` 重建树（[09 §3.10](./09-webui.md#310-日志logs)）。
+- WebUI Trace 视图按 `parent_span_id` 重建树（[09 §3.10](./09-webui.md#310-日志logs)）：depth 由父链长度算，
+  **环与悬挂父都按 depth 0 渲染** —— 一次查询只取 500 行，子 span 的父完全可能不在这一页里，
+  而一条坏数据不该把整个视图打成空白。
+
+**父边一律显式传，不用 AsyncLocalStorage。** 全仓零处使用隐式上下文，而「当前 span」这种
+进程内隐式状态与 [01 §3.1](./01-architecture.md) 那张表相冲。四条边各自的载体：
+
+| 边 | 载体 |
+|---|---|
+| turn 根 → `ctx.*` / `prompt.build` / `model.call` / `tg.*` / `turn.end` | `RuntimeTurnContext.rootSpanId`（`openTurn` 生成一个 ULID） |
+| `model.call` → `tool.call` | `onStepStart` 把该步 span 的 id 写进 `ToolExecutionContext.parentSpanId`（步是串行的，同一步里并行的工具调用共享同一个父，正确） |
+| `tool.call` → 子 agent / 子调用 | `ToolRegistry.execute()` 建完 span 后**浅拷贝**一份 context 交给 `tool.execute`（改共享对象的话，同一步里并排的多个 `spawn_agent` 会互相顶掉） |
+| `agent.run` → 子 agent 内部 | `runSubAgent` 建 `agent.run` span，它的 `model.call` / `tool.call` 都挂在它之下 |
+
+此前 `parent_span_id` 这一列**从来没有任何调用点写过**：staging 库 `total 15841 / with_span 11354 /
+with_parent 0`，浏览器里展开一条 trace，13 个节点的 `marginLeft` 全是 `0px`。读出侧修过一次
+（`ConsoleView.vue` 开头那段注释），修完之后**正确地读着一个永远是 NULL 的列**
+（[reviews/28](./reviews/28-round10-live-system-test.md) · L-LOG-04）。
 
 ## 2. 事件种类（`log_events.kind` 枚举）
 
+这张表与实现是**双向焊住**的：`tests/docs.test.ts` 把这一列的 kind 集合与 `packages/*/src` +
+`apps/*/src` 里的 `kind:` 字面量集合逐条比对，多一个少一个都会红。加日志点要同时加一行；
+新增的**非日志** `kind:`（principal 的 `user`/`chat`、message 的 `text`、commit 的 `turn` 之类）
+要进那条断言的排除名单。此前这张表与实现严重脱节：表里写了源码零发出 19 个、源码在发表里没有
+约 35 个（含全库 78% 的 `tg.api`），而 `docs/13` 的 `AC-LOG-001` 按字面永远不可能通过
+（[reviews/28](./reviews/28-round10-live-system-test.md) · L-LOG-01）。
+
 | kind | level | 关键字段 |
 |---|---|---|
-| `tg.update` | debug | update_id, type, chat, user, bytes |
-| `access.denied` | info | user, chat, userRole, chatRole, reason |
-| `archive.append` | debug | messageId, kind, hasMedia |
-| `media.download` | info | attachmentId, bytes, ms, state |
-| `media.extract` | info | attachmentId, chars, state |
-| `trigger.matched` / `trigger.skipped` | debug | reason |
-| `quota.check` | info | scope, spent, limit, decision |
-| `quota.exceeded` | warn | scope, subject, spent, limit |
-| `turn.queued` / `turn.start` / `turn.end` | info（`turn.end` 断掉时 **warn**） | key, initiator, role, steps, costUsd, state。`turn cancelled/timed out/failed after partial delivery` = 已经吐过内容之后才断的那一路（[04 §5.3](./04-agents-and-providers.md) 的三档）：delta 提交了、状态不是 committed，`deliveredChars` 是留在屏幕上的字数。`turn timed out` = `turnTimeoutMs` 到点（`state='failed'`、`error='turn_timeout'`、`cancel_reason='timeout'`），与用户 `/cancel` 分开记 |
+| `tg.update` | debug | updateId, type, chat, user |
+| `tg.api` | info / error | method, ok, ms —— **传输层**那一行，装在 grammY 的 API transformer 里。它**没有 traceId**：transformer 拿不到 turn/chat 上下文（生产库 9745 条里 `trace_id IS NULL` 的是 9745 条），所以「这一轮发了什么」要看 `tg.send` / `tg.edit` / `tg.action`，这一条只回答「那次 HTTP 调用花了多久」。`durationMs` **含节流排队与全部重试退避** —— transformer 装在 `autoRetry` 与 `apiThrottler` **之后**，而 grammY 后装的在最外层，所以重试次数在这一行里看不出来。关停期间被 `UpdatePoller.stop()` abort 掉的在途 `getUpdates` 记 `info` + `reason:'shutdown'`：生产库 42 条 error **42/42** 落在某次 `system.stop` 的 3 秒内，也就是说这个部署至今没有过一次真实的 Telegram API 故障，而真出故障时与正常重启在日志里长得一样（[reviews/28](./reviews/28-round10-live-system-test.md) · L-TG-01） |
+| `tg.membership` | info | status —— bot 被拉进 / 踢出一个会话 |
+| `access.denied` | info | userRole, chatRole —— `blocked` 主体的消息不开轮次 |
+| `media.download` | info（`skipped`/`failed` 时 **warn**） | attachmentId, kind, bytes, ms, state（`done` \| `skipped` \| `failed`）, reason。入站附件的下载与归一化。没有 traceId —— 它跑在开轮之前 |
+| `media.extract` | info（`failed` 时 **warn**） | attachmentId, kind, chars, ms, state, error —— 文档正文提取。提取失败**不算**下载失败（文件已经在盘上了），所以它是独立一行 |
+| `trigger.matched` / `trigger.skipped` | debug（编辑那一路 info） | reason —— 一个三元发出点，两个 kind 共用一处 |
+| `trigger.cooldown` | debug | cooldownMs, sinceMs —— `trigger.cooldownMsPerUser` 压住了这一条。它已降级成背景消息，下一轮照样进上下文 |
+| `trigger.coalesced` | debug | coalesceMs —— `concurrency.coalesceSameUserMs` 窗口内被同一个人后面那条取代 |
+| `quota.check` | info（未知拒绝档 warn） | scope, spent, limit, decision。并发与频率两档也走它（`rejection`, `limit`）—— 那两档与金额无关，见 [§5.1](#51-层级) |
+| `quota.exceeded` | warn | scope, subject, spent, limit —— 与 `quota.check` 同一个三元发出点。`quota.enabled=false` 时**一条都不落**（预留恒为空，此前每轮都记一条假的超限） |
+| `turn.queued` | info | active, queued, waitedMs —— **只在真的排过队时才落**（`TurnConcurrency.available(key)` 为假）。`turn.start` 也带 `waitedMs`：少了这两样，「bot 半天不回」是排队还是上游慢，日志里分不出来（[reviews/28](./reviews/28-round10-live-system-test.md) · L-LOG-01） |
+| `turn.start` / `turn.end` | info（`turn.end` 断掉时 **warn**） | key, initiator, role, steps, costUsd, state, waitedMs。`turn.start` 的 `spanId` 就是这条 trace 的根，`turn.end` 挂在它之下。`turn cancelled/timed out/failed after partial delivery` = 已经吐过内容之后才断的那一路（[04 §5.3](./04-agents-and-providers.md) 的三档）：delta 提交了、状态不是 committed，`deliveredChars` 是留在屏幕上的字数。`turn timed out` = `turnTimeoutMs` 到点（`state='failed'`、`error='turn_timeout'`、`cancel_reason='timeout'`），与用户 `/cancel` 分开记 |
+| `turn.cancel` | info | cancelled —— WebUI 点的取消（`POST /api/turns/:id/cancel`）。`false` 表示那一轮已经收尾了 |
 | `turn.wrap_up` | **warn** | chars（最后一步没有正文，补跑了一次收尾；失败时带 error） |
 | `turn.no_final_text` | **warn** | streamedChars, messages（补跑也没救回来，回落到流里攒到的文本） |
 | `ctx.open` | debug | baseCommit, claimed, snapshotTokens, snapshotMsgs |
-| `ctx.commit` | info | commitId, ordinals[from,to], fastForward |
-| `ctx.rebase` | **warn** | base, onto, skippedCommits[] |
-| `ctx.prune` | info | fromOrdinal, toOrdinal, levels[], tokensBefore/After |
-| `ctx.hardcap` | warn | step, tokensBefore/After |
-| `prompt.build` | debug | blockTokens{kernel,character,assist,catalog,pub,pri,runtime}, total |
-| `model.call` | info | alias, provider, modelId, in/out/cacheR/cacheW, ms, finishReason, costUsd, requestRef |
-| `model.error` | error/warn | alias, modelId, errorKind, status, retryAttempt, willRetry, willFallback。**每一次失败的尝试一行**（warn），整条链耗尽时再一行（error）。只落最后那一条时，「熬满三次超时再 fallback」在日志里就是一段什么都没有的空白 —— `logs/2026-08-18` 那 363 秒只有开头的 `turn.start` 与结尾的 `provider.fallback`，中间靠 `3 × requestTimeoutMs + 退避` 的算术反推 |
+| `ctx.commit` | info | commitId, rebased |
+| `ctx.rebase` | **warn** | base, onto |
+| `ctx.prune` | info | fromOrdinal, toOrdinal, levels[], tokensBefore/After。空闲超期补裁那一次带 `reason:'idle_expired'` 且没有 traceId（它跑在开轮里，那时 turnId 还没交出去） |
+| `ctx.hardcap` | warn（读出侧兜底耗尽时 **error**） | stepNumber, cap, before/after |
+| `ctx.abort` | warn（清理本身失败时 **error**） | messages / error —— 轮次中止那一路：`cancel.commitPartial` 提交了半份 delta、或者只释放认领。`abortTurn failed; turn still recorded as ended` 那条 error 说的是「清理挂了但状态记住了」 |
+| `ctx.invalid_shape` | error | key —— `assertValidShape` 在读出或写入侧拒收了一份形状。**这条会话的历史是坏的** |
+| `ctx.token_calibration` | warn | estimatedInput, realInput, ratio —— 估算与真实相差超过 20% 才记。生产库里它是 warn 级第二多的一种 |
+| `prompt.build` | debug | blockTokens{kernel,character,assist,catalog,pubmemory,primemory,runtime}, total, truncated[] |
+| `prompt.truncated` | **warn** | truncated[], blocks, maxTokens —— 预算被 catalog + runtime 吃满时 CHARACTER.md 会被整段截成一句提示，人格静默消失 |
+| `model.call` | info（服务的候选 ≠ 链首时 **warn**） | alias, servedProvider, servedModelId, stepNumber, usage, ms, finishReason, costUsd, request/response。**摘要行里写的是真正出力的那个候选**，不是链首：span 在 `onStepStart` 开、`onStepEnd` 关，而链内 fallback 发生在 `fallbackLanguageModel` 中间件内部、AI SDK 看不见（`wrapLanguageModel` 让 SDK 可见的永远是链首）。此前这一行记的是**失败的候选**，同一次调用在日志与 `usage_ledger` 里指向两个不同的 provider（[reviews/28](./reviews/28-round10-live-system-test.md) · L-PROV-01），而 [§7](#7-可观测性验收要点) 第 3 条要求「每次模型调用能看到 provider/模型/别名」。所以 `span().end()` 有一个可覆盖 `summary` 与 `level` 的入口 —— `summary` 是列不是载荷，改不了它就只能在载荷里说 |
+| `model.error` | warn / error | alias, modelId, errorKind, status, retryAttempt, willRetry, willFallback；整条链耗尽时 `cause`，流里的 `error` 部件与 0 步空流时 `source:'stream'`。**每一次失败的尝试一行**（warn），整条链耗尽时再一行（error）。只落最后那一条时，「熬满三次超时再 fallback」在日志里就是一段什么都没有的空白 —— `logs/2026-08-18` 那 363 秒只有开头的 `turn.start` 与结尾的 `provider.fallback`，中间靠 `3 × requestTimeoutMs + 退避` 的算术反推 |
 | `provider.fallback` | warn | from, to, reason。`to` 是**真正会被尝试的下一个候选**（跳过已 down 的），不是链数组里的下一个；`reason='skipped_down'` 是「这个候选因为已 down 被跳过」那一路 —— 不落它的话，链 A→B→C 而 B 已 down 时日志写「A → B」而实际服务的是 C（[04 §5.3](./04-agents-and-providers.md)） |
 | `provider.health` | info/warn/**error** | provider, state, ms, failures, status。error = 这一次把 provider 判成了 `down`（[04 §5.3](./04-agents-and-providers.md)） |
+| `provider.catalog` | info/warn | outcome, models, error —— models.dev 的模型目录拉取结果（[04 §5.4.1](./04-agents-and-providers.md)） |
 | `tool.call` | info | **input**（工具参数）, output, ms, ok；失败时 input + error。一个 span 只落一行，所以开始时的 `input` 与结束时的 `output` 是**合并**进同一行的 —— `LogSink.span().end()` 曾经用结束载荷整体顶掉开始那份，于是这一行只有 `output`，WebUI 的对话详情因此永远看不到工具输入（`tests/log.span.test.ts`） |
-| `tool.denied` | warn | tool, reason(role/rate/approval), role |
-| `tool.error` | warn | tool, errorKind, message |
-| `tool.disabled` | warn | tool —— 运维在 WebUI 关掉的工具被调用（目录之外的第二道硬拦截） |
+| `tool.denied` | warn | tool, reason, role, error —— **准入闸的每一次拒绝一行**。`reason` 穷举：`unknown_tool` / `disabled_after_errors` / `disabled_by_operator` / `role` / `subagent` / `unavailable` / `allowlist` / `skill_narrowed` / `rate`（`tools.maxCallsPerTurn`）/ `approval`。`ToolRegistry.admit()` 刻意是**只读**判定（不写状态、不记日志），所以这一行由 `execute()` 记。此前整批闸门全是静默的：实测 45 次调用恰好 40 条 `tool.call`，超出的**零日志**，模型侧只收到一句不带 hint 的 `tool_call_limit_exceeded`（[reviews/28](./reviews/28-round10-live-system-test.md) · L-LOG-01） |
+| `tool.error` | warn | tool, toolCallId, errorKind, message —— 模型给了**非法工具参数**：校验发生在 AI SDK 内部（`AI_InvalidToolInputError`），`ToolRegistry.execute` 根本没被调到，于是 `tool.call` 计数是 0，唯一痕迹是上下文里那条 `output.type='error-text'` 的 tool-result，而它下一轮就被 `prune_level=1` 抹掉。这一行从 `stepToolResults` 收到的 `tool-error` part 上记。2026-08-18 打崩进程的事故起点正是 `get_message({messageId:0})`（[reviews/28](./reviews/28-round10-live-system-test.md) · L-LOG-03）。注册表自己的入参校验失败（`inputSchemaFor` 收窄过的那一档）走同一个 kind，`errorKind='invalid_input'` |
+| `tool.disabled` | warn | tool —— 运维在 WebUI 关掉的工具被调用（目录之外的第二道硬拦截）。这一档**同时**记 `tool.denied`：那一条是统一的拒绝流水，这一条是运维视角的凭据 |
 | `tool.disabled_after_errors` | warn | tool, failures —— 同一工具连续失败到 `tools.maxConsecutiveErrors`，本轮停用。这条是排障时区分「模型没试」和「试了被拦」的唯一凭据 |
-| `sandbox.run` | info | mode, image, exitCode, ms, oom, killed |
-| `approval.requested` / `approval.decided` | info | tool, risk, decidedBy, channel, ms |
-| `agent.spawn` / `agent.end` | info | name, depth, modelAlias, steps, costUsd |
-| `agent.ask` / `agent.answer` | info | fromRun, toRun, source(rule/arbiter/timeout), ms。**没有 `source='user'`** —— 转人工那一级没实现（[04 §4.3](./04-agents-and-providers.md)） |
+| `tool.registry_truncated` | warn | total, visible —— 可用工具数超过 `tools.maxRegistered`，目录被截断 |
+| `tool.external_conflict` | warn | source, existing —— 两个来源想注册同一个工具名，后来的被拒 |
+| `tool.custom_defined` / `tool.custom_removed` | info | tool —— 自撰写工具的增删（[07](./07-skills-and-extensions.md)） |
+| `tool.custom_invalid` | warn | tool —— `custom_tools` 里那一行注册失败（schema 坏了、超时值非法） |
+| `tool.mcp` | info | ms —— 一次 MCP 工具调用（`server/tool` 在 summary 里）。它是 `tool.call` 之下那一跳真正出网的部分 |
+| `sandbox.run` | info（`ok=false` 时 **warn**） | mode, image, exitCode, ms, oom, killed, truncated, role, denied —— 每一次沙箱执行一行，**被拒的那一档也落**（模型侧只看到一句工具失败，而「为什么」是配置层的事）。`killed` 分不出是超时、取消还是输出超限，看 `truncated` 与 `ms`（[05 §5.2](./05-tools.md)）。带 traceId 但**没有 parentSpanId**：沙箱是 `bash` / `python` / 自撰写工具三条路共用的底层，只交出事实、不认识 span —— 所以它在 trace 里是 depth 0，而「哪次工具调用引起的」按时间与 `tool.call` 对照。`turnId='adhoc'`（探测、非轮次调用）那些连 traceId 都没有 |
+| `sandbox.unavailable` | error | 启动探测发现 `sandbox.mode=docker` 但 docker 不可用 —— 执行类工具会整批失败 |
+| `sandbox.weak_isolation` | warn | `sandbox.mode=jail`：只有 ulimit + 目录隔离，不是安全边界。模式变了才再说一次 |
+| `approval.pending` / `approval.decided` | info（拒绝与过期 **warn**） | id, tool, risk, channel, actor, expiresAt, ms。`pending` 是「已经推给 owner，等裁决」那一刻（文档此前叫 `approval.requested`，实现里从来是 `pending`） |
+| `approval.expired` | warn | id, risk —— `ttlMs` 到点没人裁决，按拒绝处理 |
+| `approval.unavailable` | warn | risk —— 没有任何裁决通道（`webui.enabled=false` 或一个 SSE 连接都没有），命中规则的调用当场被拒（[reviews/24](./reviews/24-review-round9.md) · R-APPR-01） |
+| `approval.no_rules` | warn | conditional[] —— `approval.enabled=true` 但 `approval.rules` 是空的：0 条规则时 `conditional` 等于 `never`，门是开着的 |
+| `approval.disabled` | warn | 审批整块关掉，高危工具不经复审直接执行 |
+| `approval.receipt_failed` | warn | error —— 回执发不回发起人所在的会话 |
+| `agent.spawn` | info | runId, name, depth, modelAlias, taskChars —— **派出去那一刻就落**，不等它跑完。`agent.run` 只在结束时才落库（span 的语义），所以一个卡住的子 agent 只有这一行能证明它存在 |
+| `agent.run` | info（失败时 **warn**） | runId, name, alias, steps, costUsd, ok, ms —— 子 agent 那一整段的**容器 span**：它的 id 是内部 `model.call` / `tool.call` 的父。父是派发它的那次 `tool.call`（[§7](#7-可观测性验收要点) 第 4 条） |
+| `agent.end` | info（失败时 **warn**） | runId, name, steps, costUsd, ok, error, summaryChars |
+| `agent.ask` / `agent.answer` | info | askId, fromRun, toRun, source(rule/arbiter/timeout), ms。`agent.ask` 是一个 span（父是 `ask_parent` 那次 `tool.call`），`agent.answer` 挂在它之下。**没有 `source='user'`** —— 转人工那一级没实现（[04 §4.3](./04-agents-and-providers.md)） |
 | `agent.ask_unarbitrated` | warn（取消时 info） | askId, agentRunId, reason(no_model/cancelled/timeout/failed/empty), detail, escalationRequested —— 仲裁没能给出答复，子 agent 接下来按「没人应答」走。`escalationRequested:true` 表示运维开了 `agent.askEscalateToUser` 但那个键仍未接线，**没有真的去问人** |
 | `agent.file_invalid` | error | file, error —— `agents/<name>.md` 解析失败。其余定义照常加载，所以这一行是「我加的那个 agent 为什么不存在」的唯一凭据（[04 §3.1](./04-agents-and-providers.md)） |
 | `agent.harness` | info/warn | dir, command, exitCode, timedOut, ms —— M11 起了一次外部 harness。**它内部干了什么不在这里**（也不在任何地方），本系统看不见（[14](./14-open-questions.md) T17） |
-| `agent.progress` | debug | phase, done/total |
-| `memory.read` / `memory.write` | info | scope, subject, op, section, bytesAfter, reason |
+| `agent.progress` | debug | phase, done/total —— 子 agent 每跑完一步一条（`phase:'step'`），加上模型自己调 `report_progress` 那一条 |
+| `memory.read` / `memory.write` | info | scope, subject, op, bytesAfter |
 | `memory.owner_read_private` | **warn** | targetUserId |
-| `memory.compact` | info | scope, tokensBefore/After, autoApplied |
-| `skill.load` | info | name, tokens, allowedTools |
-| `plugin.hook` | debug | plugin, hook, ms |
-| `plugin.error` | warn | plugin, hook, message |
-| `mcp.connect` / `mcp.error` | info/warn | server, transport, toolCount |
-| `tg.send` / `tg.edit` / `tg.action` | debug | chatId, messageId, chars, ms, editCount |
+| `memory.hard_limit` | warn | scope, subject, tokens, hardLimit —— 这次写入被硬上限挡掉了 |
+| `memory.compact` | info | pending —— 压缩复审的定时提醒（`memory.compactCron`） |
+| `skill.load` | info（解析失败 **error**） | name, tokens, minRole, allowedTools, requiresTools, error。**只在那份 skill 真的变了时才落**（`scan()` 自己算的 `name → 内容哈希` 签名）：watcher 一次保存能连发好几个事件，逐次记等于把一次 `install_skill` 写成几十行。解析失败这一档与 `agent.file_invalid` 对称 —— 少了它，「我加的那个 skill 为什么不存在」只能去翻 `skills.load_error` 那一列 |
+| `skills.disabled` | info | `skills.enabled=false`：目录整块不扫，一份说明书都不进工具目录 |
+| `plugin.hook` | debug | plugin, hook, ms —— **只记慢的那一次**：判据是 `ms >= max(50, plugins.hookTimeoutMs / 10)`，也就是「已经吃掉超时预算 10% 的那一次」。钩子每轮要跑好几次（`onToolCall` 是每次工具调用一次），逐次记会把 `logs.level='debug'` 的部署刷爆，而「这个钩子跑了 3ms」不是任何排障问题的答案。运维调紧 `hookTimeoutMs` 时这条线跟着紧 |
+| `plugin.error` | warn | plugin, hook, message, errors, disabled —— **每一次**失败都记。此前只有累计到 `plugins.autoDisableAfterErrors` 时才经告警落一行，而那一行还受 `alerts.on`（默认 `[]`）与 `dedupeMinutes` 管：实测一个三轮必抛的 `beforeTurn`，与 plugin 有关的日志 **0 条**（[reviews/28](./reviews/28-round10-live-system-test.md) · L-LOG-01）。加载失败与目录重扫失败走同一个 kind（`phase:'load'` / `'rescan'`） |
+| `plugin.hot_reload_unreliable` | warn | entry —— 这个运行时下热重载会「成功」但仍跑旧代码（tsx 的 loader 按路径缓存模块）。修不了，只能说出来（[reviews/28](./reviews/28-round10-live-system-test.md) · L-EXT-04） |
+| `plugins.disabled` | info | `plugins.enabled=false`：一个 plugin 都不加载，钩子链是空的 |
+| `mcp.connect` / `mcp.error` | info/warn | server, transport, tool |
+| `mcp.disconnect` | info/warn | server —— 连接断开（warn，下一次 reconcile 会重连）或从配置里移除（info） |
+| `tg.send` | debug（失败 **warn**） | chatId, messageId, chars, ms, path（`stream` \| `once` \| `tool` \| `fallback`）—— **投递层**那一行，带 traceId。`tg.api` 拿不到 turn 上下文，所以「这一轮到底发了什么、编辑了几次」只有这三条回答得了（[reviews/28](./reviews/28-round10-live-system-test.md) · L-LOG-02） |
+| `tg.edit` | debug | chatId, messageId, editCount, chars, ms —— **一轮聚合成一条**（[§1](#1-trace-模型) 那张图）：一次流式回复能编辑几十次，逐次记只是噪声 |
+| `tg.action` | debug | chatId, count, ms —— typing 同样聚合成一条 |
 | `tg.error` | warn | method, description, retryAfter |
 | `tg.parse_fallback` | **warn** | chars, error, phase(`send` \| `edit`) —— `parseMode` 渲染被 Telegram 拒收（`can't parse entities`），已降级成纯文本重发/重编辑一次。**这一跳此前一个字都不落**，于是行内代码那个 bug 只能靠翻下一次模型调用的 context blob 反推。第二级兜底（发 `.md` 文档）仍未实现，见 [00 §2.3](./00-state.md) |
-| `webui.action` | info | method, path, bodyDigest, ip |
+| `webui.action` | info（高危动作 **warn**） | method, path, bodyDigest, ip |
 | `webui.error` | error | method, path, error —— 端点抛出了没有被自己接住的异常，由 `app.onError` 兜住。**回给前端的信封里只有这一行的 id**（`ref:`），异常消息不出网：它可能带库路径、SQL、密钥片段 |
-| `config.changed` | info | keys[], actor |
-| `maintenance.*` | info | job, ms, affected |
+| `webui.disabled` | warn | `webui.enabled=false`：整个 HTTP 面不监听，**审批也就没有裁决通道** |
+| `config.changed` | info | keys[] |
+| `config.invalid` | warn / error | 启动与热重载时的配置问题：缺 `main` 别名、唤醒词不会生效、一个触发源都没开、持久化覆盖被剔除（`dropped[]`）。这些都不中止启动 —— 补配置要用的 WebUI 不能被配置错误带走 |
+| `maintenance.cleanup` / `maintenance.vacuum` | info | 每日维护与 VACUUM 的结果 |
+| `maintenance.repair` | warn | 一次性数据修复留下的痕迹（计价口径重算、子 agent 结果路径归一化）。它只在真的改过东西时才落 |
+| `scheduler.failed` | error | error —— 五个维护 cron 里某一个抛了（用户任务那一路走 `schedule.failed`） |
+| `schedule.created` | info | job, name, cron, mode —— 从 WebUI 新建了一条定时任务（工具那一路的痕迹在 `tool.call` 里） |
 | `schedule.fired` | info | job, name, mode, role, runCount —— 定时任务开始一轮（trace_id 是那一轮的 turn_id） |
 | `schedule.skipped` | warn | job, name, reason（`schedule.disabled` \| `role_downgraded` \| `quota_exceeded` \| `turn_queue_rejected` \| `telegram_unavailable`）—— 任务留着，只跳过这一次 |
 | `schedule.missed` | warn | job, name, expected, catchUp:false —— 停机期间错过了触发点。**不补跑**（[02 §10.3](./02-context-engine.md#103-不补跑)），所以这一条是「今天早报没发」的唯一凭据 |
 | `schedule.failed` | error | job, name, error —— 这一次触发失败；一次性任务不重试 |
 | `schedule.cancelled` | warn | job, role —— 创建者被封禁，整条任务停用 |
 | `schedule.loaded` | info | registered, missed, enabled —— 启动时装载了多少条 |
-| `system.start` / `system.stop` | info | version, mode, uptime |
-| `model.error` | error | alias, modelId, cause \| source —— fallback 链整条耗尽（`onExhausted`），或流里的 `error` 部件 / 0 步空流（`source:'stream'`） |
+| `system.start` / `system.stop` | info（Telegram 入口禁用时 **warn**） | name, webui, providerSecrets / signal |
+| `system.restart` | warn | reason —— WebUI 按下的「重启进程」。**没有 supervisor 时进程不会自己回来** |
+| `system.recovered` | warn | turns, tasks, agentRuns, claims, reservations —— 上一个进程没有正常收尾，`recoverAfterCrash` 判死了这些。此前它一个字都不落，一次非正常重启 reap 了什么只能靠翻 `turns` 表反推（[reviews/28](./reviews/28-round10-live-system-test.md) · L-OPS-04） |
 | `ctx.orphan_tool_call` | warn | toolCallIds[] —— 读出侧给「没有配对结果的 tool-call」补了结果。**这条会话的历史是坏的** |
+| `alert.raised` | error | alert, …告警自己的载荷 —— 一条告警被触发（[§6](#6-健康检查与告警)）。**它不挡在投递前面**：`db_write_failed` 的触发源就是「库写不进去」 |
+| `alert.deliver_failed` | warn | alert, error —— owner 私聊或 webhook 发不出去。告警链路自己坏了不能再炸一次 |
 | `system.crash` | error | event（`uncaughtException`）, detail（stack）—— 进程即将退出 |
 | `system.unhandled_rejection` | error | event（`unhandledRejection`）, detail（stack）—— 进程**不**退出 |
 
@@ -403,8 +473,14 @@ GET /api/health/detail（需登录）—— 详细状态
 一次典型 turn 结束后，必须能做到（对应 [13 §8](./13-acceptance-criteria.md#8-日志与成本-ac-log)）：
 
 1. 用 `turn_id` 在 WebUI 一次检索出完整调用树，含每次模型调用的**完整请求消息**与响应。
+   「树」的判据是 `parent_span_id` 真的连着（[§1](#1-trace-模型)）——`tests/log.trace.test.ts` 跑一轮假上游 + 假工具，
+   断言那四条边真的落库（`with_parent > 0` 且父子 kind 对得上）。
 2. 每次工具调用能看到完整输入、输出（或截断标记 + 全文引用）、耗时、是否走沙箱、是否经审批。
+   **被拒的那些也要看得见**：`tool.denied` 覆盖准入闸的每一种拒绝，`tool.error` 覆盖「参数非法、
+   `execute` 压根没被调到」那一路。
 3. 每次模型调用能看到 provider/模型/别名/四类 token/费用/延迟/finishReason；费用之和 = `turns.cost_usd`（误差 < 1e-9）。
-4. 子 agent 的 span 挂在派发它的 `tool.call` 之下，且其费用计入同一 turn。
+   **一旦发生链内 fallback，这三个说的必须是真正出力的那个候选** —— 它与 `usage_ledger` 那一行
+   指向同一个 provider（[reviews/28](./reviews/28-round10-live-system-test.md) · L-PROV-01）。
+4. 子 agent 的 span（`agent.run`）挂在派发它的 `tool.call` 之下，且其费用计入同一 turn。
 5. rebase / prune / hardcap 事件在日志中明确可见，且能看出裁掉了哪些 ordinal。
 6. 日志中**不出现**任何 API key、bot token、master key 明文（自动化测试用正则扫全部 JSONL，AC-LOG-007）。
