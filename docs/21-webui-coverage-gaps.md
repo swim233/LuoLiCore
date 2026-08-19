@@ -352,6 +352,13 @@ G-API-10/11/12 与 G-SRV-02/03/04 均已完成；按本文「运行时已有、W
 - `health` 事件仍只在 provider 测试与 MCP 重连后发送，没有周期心跳；顶栏的新鲜度依据业务事件，
   不把连接状态伪装成周期健康检查。
 
+### 6.3 新增缺口（第十轮活体测试整改后）
+
+| 编号 | 运行时已有 | 界面缺什么 | 状态 |
+|---|---|---|---|
+| **G-API-15** | `POST /api/plugins/:name/reload` 现在回 `hotReloadReliable` + `warning`：跑在 tsx（`pnpm dev`）下时热重载**静默跑旧代码**，reconcile 每次都真跑、`onLoad` 每次打印的都是第一版（`docs/28 · L-EXT-04`） | 扩展页仍只弹「已重载」。而这个开关唯一该用的场景就是本机写 plugin —— 恰好是它失效的场景。启动时那条 warn 只有盯着终端的人看得见 | 🚧 未接 |
+| **G-API-16** | `mcp_servers.state` 在子进程被 `kill -9` 之后最长 5 分钟才被下一次 `mcp-health` reconcile 纠正 —— 期间界面显示 `up` 而那台 server 的工具已经不在模型目录里（`docs/28 · L-EXT-02` 的残留） | 扩展页没有「这一行可能是陈旧的」提示。**不是在 `onclose` 里写库就能解决**：那个回调从子进程的 `'close'` 事件同步跑，`closeDatabase()` 之后一条泄漏子进程自然死亡会让裸 `db.prepare` 抛在 handler 里 → `uncaughtException`（`LogSink.event` 保证不抛，所以那条路只记日志）。要秒级反映得先给它加一个「库还开着吗」的判据 | 🚧 未接 |
+
 ### 6.2 第五轮：docs/09 的 11 处 🚧 已清零
 
 按需求方「全面推进」的决定，`docs/09` 里那 11 处 `🚧` 全部补上（doc 09 的 🚧 计数现在是 **0**）：
