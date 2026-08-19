@@ -122,8 +122,10 @@ if (!modelRegistry.aliases().includes('main')) {
 const memory = new MemoryStore(db, config.memory.dir, config.memory.softLimitTokens, config.memory.hardLimitTokens, config.memory.maxSections, config.memory.forgetMeRetentionDays, log);
 // 第四个参数：扫描结果真的变了才广播。没有它，扩展页只能靠 `health` 事件顺带刷新 ——
 // 从 Telegram 装进来的东西要等下一次健康检查才出现（docs/21 §9 · G-EXT-05）。
+// 第五个参数是 `LogSink`：`scan()` 的 per-skill catch 此前只写 `skills.load_error` 那一列，
+// 「我加的那个 skill 为什么不存在」在日志里一个字都没有（docs/28 · L-LOG-01）。
 const skills = new SkillLoader(db, config.skills.dir, () => configStore.snapshot().skills.defaultMinRole,
-  () => events.emit('extensions.changed', { kind: 'skill' }));
+  () => events.emit('extensions.changed', { kind: 'skill' }), log);
 // `skills.enabled=false` 时不扫盘也不监听：目录里的 SKILL.md 一个都不进工具目录。
 // 关掉是整块关掉，而不是「扫出来但不给用」—— 后者会让工具目录里多出一批点不动的名字。
 if (config.skills.enabled) skills.scan();
@@ -162,8 +164,11 @@ const scanAgents = (current: typeof config) => {
 };
 const agents = new AgentManager(db, new AgentResultStore(agentResultsDir), scanAgents(config), config.agent.maxDepth, config.agent.maxSubagentsPerTurn);
 if (config.skills.enabled && config.skills.watch) skills.startWatching();
+// 第八个参数是 `LogSink`：单次钩子失败此前完全静默（要累计到 `autoDisableAfterErrors` 才经告警
+// 落一行，而那一行还受 `alerts.on` 默认 `[]` 与 `dedupeMinutes` 管）—— 实测一个三轮必抛的
+// `beforeTurn`，与 plugin 有关的日志 0 条（docs/28 · L-LOG-01）。
 const plugins = new PluginManager(db, config.plugins.dir, config.plugins.hookTimeoutMs, config.plugins.autoDisableAfterErrors, config.plugins.order, undefined,
-  (name, error) => alerts.fire('plugin_auto_disabled', `plugin ${name} 连续出错已被自动禁用`, { plugin: name, error }, name));
+  (name, error) => alerts.fire('plugin_auto_disabled', `plugin ${name} 连续出错已被自动禁用`, { plugin: name, error }, name), log);
 // `plugins.enabled=false` 时不 reconcile：一个 plugin 都不加载，钩子链是空的。
 // 「进程内全信任」（docs/14 A27）意味着这个开关是安全边界，不是性能开关。
 if (config.plugins.enabled) {
@@ -238,7 +243,13 @@ const sandbox = new Sandbox(() => {
     workspaceDir: live.sandbox.workspaceDir, hostWorkspaceDir: live.sandbox.hostWorkspaceDir,
     defaultTimeoutMs: live.tools.exec.defaultTimeoutMs, maxTimeoutMs: live.tools.exec.maxTimeoutMs, maxOutputBytes: live.tools.exec.maxOutputBytes };
 }, undefined, undefined, (message) => log.event({ level: 'warn', kind: 'sandbox.weak_isolation', summary: message }),
-  (reason, role) => alerts.fire('sandbox_unavailable', `沙箱不可用，${role} 的执行请求被拒`, { reason, role }, role));
+  (reason, role) => alerts.fire('sandbox_unavailable', `沙箱不可用，${role} 的执行请求被拒`, { reason, role }, role),
+  // 第六个参数：每一次沙箱执行落一条 `sandbox.run`（docs/10 §2）。沙箱本身不认识 LogSink ——
+  // 它是三条工具路径共用的底层，只交出事实。`turnId='adhoc'` 的那些（探测、非轮次调用）没有 trace。
+  (run) => log.event({ level: run.ok ? 'info' : 'warn', kind: 'sandbox.run',
+    summary: `${run.mode}${run.denied ? ` denied: ${run.denied}` : ` exit ${run.exitCode ?? 'null'}`}`,
+    ...(run.turnId === 'adhoc' ? {} : { traceId: run.turnId }), durationMs: run.durationMs,
+    data: { mode: run.mode, image: run.image, exitCode: run.exitCode, ms: run.durationMs, ok: run.ok, oom: run.oom, killed: run.killed, truncated: run.truncated, role: run.role, ...(run.denied ? { denied: run.denied } : {}) } }));
 // 自撰写工具的注册器。真相在 `custom_tools` 表，进程内那份每次 `reconcile()` 都能重建
 // （docs/01 §3.1）；`execMaxTimeoutMs` 单独传是因为它归 `tools.exec`，不在 selfExtend 那一段里。
 const customToolRepo = new CustomToolRepository(db);
@@ -252,7 +263,7 @@ if (!sandboxProbe.available && config.sandbox.mode === 'docker') log.event({ lev
 let bot: Bot | null = null;
 let poller: UpdatePoller | null = null;
 const telegramTools = process.env.BOT_TOKEN
-  ? new TelegramTools({ bot: () => bot, archive, maxMessageChars: () => configStore.snapshot().output.maxMessageChars, maxMentions: () => configStore.snapshot().output.maxMentions, parseMode: () => configStore.snapshot().output.parseMode })
+  ? new TelegramTools({ bot: () => bot, archive, maxMessageChars: () => configStore.snapshot().output.maxMessageChars, maxMentions: () => configStore.snapshot().output.maxMentions, parseMode: () => configStore.snapshot().output.parseMode, log })
   : null;
 // 定时任务（docs/14 §2 Q4）。这里只**建**不**装**：`load()` 要等 bot 起来，否则第一批任务触发时
 // `telegram()` 还是 null，只会往日志里写一串 skipped。工具反过来在这里就得拿到 runner。
@@ -564,6 +575,8 @@ if (process.env.BOT_TOKEN) {
   try {
     bot = await createTelegramBot(process.env.BOT_TOKEN, { config: configStore, db, principals, archive, operations, context, turns, quota, memory, plugins, tools: toolRegistry, approvals: approval,
       registry: turnRegistry, concurrency: turnConcurrency, log, alerts, failures: turnFailures, issueLoginToken: () => issueLoginToken(),
+      // 关停期间被 abort 的长轮询记 info 而不是 error（docs/28 · L-TG-01）。
+      stopping: () => shuttingDown,
       estimateTurnCost: (inputTokens, key) => modelRegistry.estimate(readAppKv<string>(db, modelAliasKey(key)) ?? perChatConfig(configStore.snapshot(), key).agent.main.modelAlias, inputTokens),
       // 用 turn.config 而不是全局快照：本轮的 perChat 覆盖已经在 openTurn 时合并进去了。
       onTurn: (turn, reservation) => { const live = turn.config as Readonly<typeof config>; return streamMainAgent(turn, { config: live, db, registry: modelRegistry, tools: toolRegistry,

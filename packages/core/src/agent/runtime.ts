@@ -21,7 +21,7 @@ import { createStepObservers, type StepFacts } from './step-observers.js';
 import { type AliasSettings, parseAliasSettings } from '../provider/alias-settings.js';
 import type { UsageLedger } from '../ledger/usage.js';
 import type { QuotaGuard, QuotaReservation } from '../ledger/quota.js';
-import type { LogSink } from '../log/sink.js';
+import type { LogSink, LogSpan } from '../log/sink.js';
 import { isImagePart, type ContextEngine } from '../context/engine.js';
 import type { AgentManager } from './manager.js';
 import type { SkillLoader } from '../skills/loader.js';
@@ -581,6 +581,10 @@ function estimateModelMessages(messages: ModelMessage[]): number {
 function bodyForLog(value: unknown, enabled: boolean): unknown {
   return enabled ? value : undefined;
 }
+/** 轮次级 span 的父边（`docs/10 §1`）。假 turn（WebUI 预览、试跑）没有根，就什么都不加。 */
+function turnParent(turn: RuntimeTurnContext): { parentSpanId?: string } {
+  return turn.rootSpanId ? { parentSpanId: turn.rootSpanId } : {};
+}
 export interface MainAgentStreamResult {
   stream: AsyncIterable<string>;
   final: Promise<string>;
@@ -659,11 +663,18 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
   // 子 agent 从 turn 上取同一份预留：spawn_agent 在工具层执行，拿不到这里的 dependencies。
   turn.reservation = dependencies.reservation ?? null;
   await dependencies.plugins?.hook('beforeTurn', { turn });
-  const prompt = assembleMainPrompt(turn, dependencies, toolContext);
+  // `docs/10 §1` 那张图里的 span B。抛出来时也要落一行 —— 组装是同步的，但它会读盘（人格、记忆、
+  // skill 目录），一个不可读的 CHARACTER.md 此前在 trace 里什么都不留。
+  const promptSpan = dependencies.log.span({ level: 'debug', kind: 'prompt.build', summary: `Assembled prompt for ${turn.key}`,
+    traceId: turn.turnId, ...turnParent(turn), chatId: turn.chatId, userId: turn.initiatorUserId, key: turn.key });
+  let prompt: MainPromptAssembly;
+  try { prompt = assembleMainPrompt(turn, dependencies, toolContext); }
+  catch (error) { promptSpan.end(undefined, error); throw error; }
+  promptSpan.end({ blockTokens: prompt.blocks, total: Object.values(prompt.blocks).reduce((sum, value) => sum + value, 0), truncated: prompt.truncated });
   const activeNames = prompt.activeTools;
   // 预算被 catalog + runtime 吃满时 CHARACTER.md 会被整段截成一句「（记忆已截断…）」——
   // 人格静默消失，而日志里一个字都没有（docs/20 · W-PROMPT-01）。
-  if (prompt.truncated.length) dependencies.log.event({ level: 'warn', kind: 'prompt.truncated', summary: `Prompt blocks truncated: ${prompt.truncated.join(', ')}`, traceId: turn.turnId, key: turn.key, data: { truncated: prompt.truncated, blocks: prompt.blocks, maxTokens: dependencies.config.prompt.maxTokens } });
+  if (prompt.truncated.length) dependencies.log.event({ level: 'warn', kind: 'prompt.truncated', summary: `Prompt blocks truncated: ${prompt.truncated.join(', ')}`, traceId: turn.turnId, ...turnParent(turn), key: turn.key, data: { truncated: prompt.truncated, blocks: prompt.blocks, maxTokens: dependencies.config.prompt.maxTokens } });
   const toolSet: ToolSet = {};
   for (const registered of dependencies.tools.active(turn.effectiveRole, toolContext)) {
     toolSet[registered.name] = tool({ description: registered.description, inputSchema: registered.inputSchema, execute: (input) => dependencies.tools.execute(registered.name, input, toolContext) });
@@ -785,7 +796,7 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
       dependencies.log.event({ level: 'warn', kind: 'ctx.orphan_tool_call', summary: `Repaired ${toolCallIds.length} tool-call(s) with no result`,
         traceId: turn.turnId, key: turn.key, data: { toolCallIds: toolCallIds.slice(0, 20) } });
     } };
-  const stepSpans = new Map<number, { id: string; end: (data?: unknown, error?: unknown) => void }>();
+  const stepSpans = new Map<number, LogSpan>();
   const stepAlias = new Map<number, string>();
   /** vision 切换每轮只记一条：`prepareStep` 每一步都会重算同一个结论。 */
   let visionSwitchLogged = false;
@@ -865,8 +876,12 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
     },
     onStepStart: (event) => {
       const stepNumber = wrapUpMode ? mainStepCount + event.stepNumber : event.stepNumber;
-      stepSpans.set(stepNumber, dependencies.log.span({ level: 'info', kind: 'model.call', summary: `${event.provider}/${event.modelId}`, traceId: turn.turnId, key: turn.key,
-        data: { stepNumber, wrapUp: wrapUpMode || undefined, modelId: event.modelId, provider: event.provider, messages: bodyForLog(event.messages, dependencies.config.logs.captureBodies), instructions: bodyForLog(event.instructions, dependencies.config.logs.captureBodies) } }));
+      const span = dependencies.log.span({ level: 'info', kind: 'model.call', summary: `${event.provider}/${event.modelId}`, traceId: turn.turnId, ...turnParent(turn), chatId: turn.chatId, userId: turn.initiatorUserId, key: turn.key,
+        data: { stepNumber, wrapUp: wrapUpMode || undefined, modelId: event.modelId, provider: event.provider, messages: bodyForLog(event.messages, dependencies.config.logs.captureBodies), instructions: bodyForLog(event.instructions, dependencies.config.logs.captureBodies) } });
+      stepSpans.set(stepNumber, span);
+      // 这一步的工具调用挂在这条 `model.call` 之下（`docs/10 §1` 的第二条边）。步是**串行**的，
+      // 所以原地改这一项是安全的；同一步内并行的工具调用共享同一个父，那正是它们真实的关系。
+      toolContext.parentSpanId = span.id;
       dependencies.log.publish('turn.progress', { turnId: turn.turnId, phase: 'model', step: stepNumber, note: `${event.provider}/${event.modelId}` });
     },
     // 四件事拆成四个可单独喂假 step 的观察者（`step-observers.ts`，docs/27 · D-05）。
@@ -895,7 +910,34 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
       dependencies.turns?.countStep(turn.turnId, stepNumber + 1);
       const resolved = observers.record(facts);
       observers.broadcast(facts, resolved);
-      stepSpans.get(stepNumber)?.end({ model: step.model, usage: step.usage, cost: resolved.cost, request: bodyForLog(step.request, dependencies.config.logs.captureBodies), response: bodyForLog(step.response, dependencies.config.logs.captureBodies) });
+      /**
+       * **摘要写真正出力的那个候选，不是链首。** `onStepStart` 拿到的 `event.provider/modelId`
+       * 是 AI SDK 看见的模型，而链内 fallback 发生在 `fallbackLanguageModel` 中间件内部
+       * （`wrapLanguageModel` 让 SDK 可见的永远是链首）—— 实测链 `fake-bad → deepseek-v4-flash`
+       * 时日志记 `rig-fake-bad.chat/fake-bad`、`usage_ledger` 记 `deepseek-v4-flash@ksm-api`，
+       * 同一次调用在两处指向两个不同的 provider（docs/28 · L-PROV-01）。`resolved` 出自
+       * `onServed` 报回来的 `servedModelId`，它就是真的那一个；`docs/10 §7` 第 3 条要求摘要里看得见，
+       * 所以这里用 `end()` 的 override 改列（`summary` 是列不是载荷）。
+       */
+      const fellBack = facts.servedModelId !== step.model.modelId;
+      stepSpans.get(stepNumber)?.end({ model: step.model, servedProvider: resolved.info.providerId, servedModelId: resolved.info.modelId, alias: resolved.alias,
+        usage: step.usage, cost: resolved.cost, request: bodyForLog(step.request, dependencies.config.logs.captureBodies), response: bodyForLog(step.response, dependencies.config.logs.captureBodies) },
+        undefined, { summary: `${resolved.info.providerId}/${resolved.info.modelId}${fellBack ? ` ← fallback from ${step.model.modelId}` : ''}`, ...(fellBack ? { level: 'warn' as const } : {}) });
+      /**
+       * **模型给了非法工具参数时，`ToolRegistry.execute` 根本没被调到。** 校验在 AI SDK 内部
+       * （`AI_InvalidToolInputError`），于是 `tool.call` 计数是 0，唯一痕迹是上下文里那条
+       * `output.type='error-text'` 的 tool-result —— 而它下一轮就被 `prune_level=1` 抹掉。
+       * 2026-08-18 打崩进程的事故起点正是 `get_message({messageId:0})`（docs/28 · L-LOG-03）。
+       */
+      for (const raw of step.content as readonly unknown[]) {
+        const part = raw as { type?: string; toolName?: string; toolCallId?: string; error?: unknown };
+        if (part?.type !== 'tool-error') continue;
+        const message = part.error instanceof Error ? `${part.error.name}: ${part.error.message}` : String(part.error);
+        dependencies.log.event({ level: 'warn', kind: 'tool.error', summary: `${part.toolName ?? 'unknown'}: ${message}`.slice(0, 300),
+          traceId: turn.turnId, ...(stepSpans.get(stepNumber) ? { parentSpanId: stepSpans.get(stepNumber)!.id } : {}),
+          chatId: turn.chatId, userId: turn.initiatorUserId, key: turn.key,
+          data: { tool: part.toolName ?? null, toolCallId: part.toolCallId ?? null, errorKind: part.error instanceof Error ? part.error.name : 'unknown', message: message.slice(0, 500) } });
+      }
       observers.appendContext(facts);
       observers.calibrate(facts);
     },

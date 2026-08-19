@@ -3,7 +3,7 @@ import type { Role, RuntimeTurnContext } from '@luoli/shared';
 import { elideMiddleBytes, roleRank, untrusted } from '@luoli/shared';
 import type { ToolPolicyEntry, ToolName, ToolOverride } from './policy.js';
 import { SKILL_NARROWING_EXEMPT, TOOL_POLICY, effectiveToolPolicy, relaxedFields } from './policy.js';
-import type { LogSink } from '../log/sink.js';
+import type { LogSink, LogSpan } from '../log/sink.js';
 import { ApprovalRules, type ApprovalRisk } from '../approval/rules.js';
 export type { ApprovalRisk } from '../approval/rules.js';
 import type { ApprovalPolicy, ToolScope } from './policy.js';
@@ -14,6 +14,14 @@ export interface ToolExecutionContext {
   agentKind: 'main' | 'sub';
   agentRunId?: string;
   allow?: ReadonlySet<string>;
+  /**
+   * 这次工具调用该挂在哪个 span 之下（`docs/10 §1`）。主 agent 由 `onStepStart` 写进这一项
+   * （那一步的 `model.call` span），子 agent 写的是自己那条 `agent.run`。
+   *
+   * `execute()` 之后它被**浅拷贝**换成本次 `tool.call` 的 span id 再交给 `tool.execute` ——
+   * 改共享对象的话，同一步里并排的多个 `spawn_agent` 会互相顶掉父边。
+   */
+  parentSpanId?: string;
 }
 
 export interface RegisteredTool<I = unknown> {
@@ -32,6 +40,13 @@ export interface RegisteredTool<I = unknown> {
   approvalFor?(input: I, context: ToolExecutionContext): ApprovalPolicy | null;
   execute(input: I, context: ToolExecutionContext): Promise<object> | object;
 }
+
+/**
+ * 准入被拒的档位（落在 `tool.denied` 的 `reason` 上，`docs/10 §2` 列了同一份穷举）。
+ * `approval` 不是 `admit()` 给的 —— 审批发生在准入之后，由 `execute()` 自己记。
+ */
+export type ToolDenyReason = 'unknown_tool' | 'disabled_after_errors' | 'disabled_by_operator' | 'role'
+  | 'subagent' | 'unavailable' | 'allowlist' | 'skill_narrowed' | 'rate' | 'approval';
 
 /** `hint` 是给模型看的：被拒时它需要知道「为什么」才能用自己的话回复，而不是干巴巴一句「未获批准」。 */
 export interface ApprovalVerdict {
@@ -193,27 +208,39 @@ export class ToolRegistry {
    * W-TOOL-01），问题是它们此前和执行编排焊在同一个方法里，而这正是最需要穷举的部分
    * （docs/27 · D-03）。`execute()` 因此只剩 admit → approve → run → normalize 四步。
    *
-   * `warn` 标的是「这一次拒绝值得留一条日志」：运维禁用的工具被模型硬调过来是排障线索。
+   * `warn` 标的是「这一次拒绝额外值得一条运维视角的日志」：运维禁用的工具被模型硬调过来是排障线索。
+   *
+   * `reason` 是**机器可读的拒绝档位**，由 `execute()` 记进 `tool.denied`。它不能在这里记 ——
+   * 这个方法刻意只读（可穷举地测「给定 (角色, 上下文) 这一次该不该放行」，docs/27 · D-03）；
+   * 而不记的代价实测是「45 次调用恰好 40 条 `tool.call`，超出的零日志」（docs/28 · L-LOG-01）。
    */
-  admit(name: string, context: ToolExecutionContext): { ok: true; tool: RegisteredTool } | { ok: false; error: string; hint?: string; warn?: boolean } {
+  admit(name: string, context: ToolExecutionContext): { ok: true; tool: RegisteredTool } | { ok: false; error: string; hint?: string; warn?: boolean; reason: ToolDenyReason } {
     const state = this.#state(context.turn.turnId);
     const tool = this.#tools.get(name);
-    if (!tool) return { ok: false, error: 'tool_unavailable' };
+    if (!tool) return { ok: false, error: 'tool_unavailable', reason: 'unknown_tool' };
     // 「本轮已经连续失败到被停用」和「这个工具根本不存在」对模型是两回事：前者要让它换个办法，
     // 后者要让它别再猜工具名。混成一句 tool_unavailable 时模型通常继续原地重试到步数耗尽。
-    if (state.disabled.has(name)) return { ok: false, error: 'tool_disabled_after_errors', hint: `本轮连续失败 ${this.#limits().maxConsecutiveErrors} 次后已停用，换个办法或如实告诉用户。` };
+    if (state.disabled.has(name)) return { ok: false, error: 'tool_disabled_after_errors', reason: 'disabled_after_errors', hint: `本轮连续失败 ${this.#limits().maxConsecutiveErrors} 次后已停用，换个办法或如实告诉用户。` };
     // 目录过滤之外再挡一次：模型可能沿用上一步的工具名，运维的禁用必须是硬边界。
-    if (this.disabledByOperator(name)) return { ok: false, error: 'tool_disabled_by_operator', warn: true };
-    if (roleRank(context.turn.effectiveRole) < roleRank(this.effectivePolicy(tool).minRole)) return { ok: false, error: '权限不足' };
+    if (this.disabledByOperator(name)) return { ok: false, error: 'tool_disabled_by_operator', reason: 'disabled_by_operator', warn: true };
+    if (roleRank(context.turn.effectiveRole) < roleRank(this.effectivePolicy(tool).minRole)) return { ok: false, error: '权限不足', reason: 'role' };
     // active() 的过滤集合必须在这里逐条复查，否则「目录里没有」就成了唯一的边界，而模型完全可以
     // 凭上一步的工具名直接调过来。目前每个相关工具恰好各自 fail-closed，但那是巧合不是设计
     // （docs/20 · W-TOOL-01；docs/05 §220「单一数据源」）。
-    if (context.agentKind === 'sub' && name === 'memory_write') return { ok: false, error: 'tool_unavailable_for_subagent' };
-    if (tool.available?.(context.turn.effectiveRole, context) === false) return { ok: false, error: 'tool_unavailable' };
-    if (context.allow && !context.allow.has(name)) return { ok: false, error: 'tool_not_in_allowlist' };
-    if (context.turn.skillAllowedTools?.size && !SKILL_NARROWING_EXEMPT.includes(name as ToolName) && !context.turn.skillAllowedTools.has(name)) return { ok: false, error: 'tool_not_in_allowlist' };
-    if (state.calls >= this.#limits().maxCallsPerTurn) return { ok: false, error: 'tool_call_limit_exceeded' };
+    if (context.agentKind === 'sub' && name === 'memory_write') return { ok: false, error: 'tool_unavailable_for_subagent', reason: 'subagent' };
+    if (tool.available?.(context.turn.effectiveRole, context) === false) return { ok: false, error: 'tool_unavailable', reason: 'unavailable' };
+    if (context.allow && !context.allow.has(name)) return { ok: false, error: 'tool_not_in_allowlist', reason: 'allowlist' };
+    if (context.turn.skillAllowedTools?.size && !SKILL_NARROWING_EXEMPT.includes(name as ToolName) && !context.turn.skillAllowedTools.has(name)) return { ok: false, error: 'tool_not_in_allowlist', reason: 'skill_narrowed' };
+    if (state.calls >= this.#limits().maxCallsPerTurn) return { ok: false, error: 'tool_call_limit_exceeded', reason: 'rate' };
     return { ok: true, tool };
+  }
+
+  /** 一次拒绝落一条 `tool.denied`。`error` 是给模型看的那句，`reason` 是给日志与排障用的档位。 */
+  #denied(name: string, context: ToolExecutionContext, reason: ToolDenyReason, error: string): void {
+    this.log.event({ level: 'warn', kind: 'tool.denied', summary: `${name}: ${reason}`, traceId: context.turn.turnId,
+      ...(context.parentSpanId ? { parentSpanId: context.parentSpanId } : {}),
+      chatId: context.turn.chatId, userId: context.turn.initiatorUserId, key: context.turn.key,
+      data: { tool: name, reason, role: context.turn.effectiveRole, error } });
   }
 
   /**
@@ -236,6 +263,9 @@ export class ToolRegistry {
   async execute(name: string, rawInput: unknown, context: ToolExecutionContext): Promise<object> {
     const admitted = this.admit(name, context);
     if (!admitted.ok) {
+      // 两条日志不是重复：`tool.denied` 是准入闸的统一流水（每一次拒绝一行，带档位），
+      // `tool.disabled` 是「运维在界面上关掉的东西被模型硬调过来」这一档的运维视角凭据。
+      this.#denied(name, context, admitted.reason, admitted.error);
       if (admitted.warn) this.log.event({ level: 'warn', kind: 'tool.disabled', summary: `Blocked disabled tool ${name}`, traceId: context.turn.turnId, data: { tool: name } });
       return { ok: false, error: admitted.error, ...(admitted.hint ? { hint: admitted.hint } : {}) };
     }
@@ -245,14 +275,24 @@ export class ToolRegistry {
     // 参数不合法算一次失败。`maxConsecutiveErrors` 是「模型别原地重试到步数耗尽」的**唯一**硬
     // 边界，而它此前只数 execute 的失败 —— 参数写错和审批被拒这两种最常见的失败一次都不计，
     // 于是同一个错误的调用可以无限次重来（实测 6 次全部照收）。
-    if (!parsed.success) { this.#failed(state, name, context); return { ok: false, error: 'invalid_input', hint: parsed.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ') }; }
+    if (!parsed.success) {
+      this.#failed(state, name, context);
+      const detail = parsed.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ');
+      // 与 `runtime.ts` 那条 `tool.error` 同一个 kind：从模型的角度这是同一件事（参数写错了），
+      // 只是这一份是 AI SDK 放过、被 `inputSchemaFor` 收窄后的 schema 拦下的那一档（docs/28 · L-LOG-03）。
+      this.log.event({ level: 'warn', kind: 'tool.error', summary: `${name}: invalid_input`, traceId: context.turn.turnId,
+        ...(context.parentSpanId ? { parentSpanId: context.parentSpanId } : {}),
+        chatId: context.turn.chatId, userId: context.turn.initiatorUserId, key: context.turn.key,
+        data: { tool: name, errorKind: 'invalid_input', message: detail.slice(0, 500) } });
+      return { ok: false, error: 'invalid_input', hint: detail };
+    }
     // **审批段与钩子也在 try 里面。** 它们此前在外面，于是 `approval.request` 的
     // `INSERT INTO approvals` 一旦失败（库满/被锁/已 close），异常就穿过 `execute()` 抛进
     // AI SDK —— 绕开了这个方法对其他所有失败都保证的统一 `{ok:false,error,hint}` 形状，
     // 而且 `#failed` 不计数，`tools.maxConsecutiveErrors` 那道「模型别原地重试到步数耗尽」
     // 的唯一硬边界不推进。`#approvalDecision` 里的 RE2 编译、`onToolCall` 钩子同理。
     // span 因此要提前声明：抛在建 span 之前时 catch 里 `span?.end` 才不会再抛一次。
-    let span: { id: string; end: (data?: unknown, error?: unknown) => void } | null = null;
+    let span: LogSpan | null = null;
     try {
       const decision = this.#approvalDecision(tool, parsed.data, context);
       if (decision.needed) {
@@ -261,7 +301,7 @@ export class ToolRegistry {
         const hint = typeof verdict === 'boolean' ? undefined : verdict.hint;
         // 被拒同样计一次失败：owner 连着拒两次之后模型该换个做法，而不是把同一个高危调用
         // 改个字再递上来 —— 每一次都是一条推给 owner 的审批通知。
-        if (!approved) { this.#failed(state, name, context); return { ok: false, error: '未获批准', ...(hint ? { hint } : {}) }; }
+        if (!approved) { this.#failed(state, name, context); this.#denied(name, context, 'approval', '未获批准'); return { ok: false, error: '未获批准', ...(hint ? { hint } : {}) }; }
       }
       state.calls += 1;
       // 记在这里而不是 `admit()` 之后：被拒的参数、被拒的审批都不算「调用过工具」，
@@ -269,7 +309,9 @@ export class ToolRegistry {
       // （`context.turn.turnId` 对父子是同一个），与 `model_calls` 的口径一致。
       this.turns?.incrementToolCall(context.turn.turnId);
       await this.hooks?.hook('onToolCall', { name, input: parsed.data, context });
-      span = this.log.span({ level: 'info', kind: 'tool.call', summary: name, traceId: context.turn.turnId, chatId: context.turn.chatId, userId: context.turn.initiatorUserId, key: context.turn.key, data: { input: parsed.data } });
+      span = this.log.span({ level: 'info', kind: 'tool.call', summary: name, traceId: context.turn.turnId,
+        ...(context.parentSpanId ? { parentSpanId: context.parentSpanId } : {}),
+        chatId: context.turn.chatId, userId: context.turn.initiatorUserId, key: context.turn.key, data: { input: parsed.data } });
       // 挂住的工具调用会挂住整轮：AI SDK 的 toolMs 只是把一个信号递给 execute()，工具不认它就等于
       // 没有超时。这里改成硬 race —— 到点就把失败交回模型，让它换个做法，而不是让用户对着沉默
       // 一直等到 `turnTimeoutMs`（logs/2026-08-17 有 7 轮只有 turn.start 没有 turn.end）。
@@ -278,7 +320,10 @@ export class ToolRegistry {
       // 把调用砍掉（工具页对这几个置灰，这里是不信界面的那道兜底）。
       const budget = tool.timeoutMs === null ? null
         : this.#overrides()[name]?.timeoutMs ?? tool.timeoutMs ?? this.#limits().defaultTimeoutMs ?? FALLBACK_TOOL_TIMEOUT_MS;
-      const called = tool.execute(parsed.data, context);
+      // **浅拷贝一份**，不改共享的 context：这一层往下的 span（子 agent 的 `agent.run`、
+      // `ask_parent` 的 `agent.ask`、`send_message` 的 `tg.send`）都要挂在**本次**调用之下，
+      // 而同一步里并排的多个 `spawn_agent` 共用同一个 context 对象 —— 原地改就会互相顶掉（docs/10 §1）。
+      const called = tool.execute(parsed.data, { ...context, parentSpanId: span.id });
       const rawOutput = budget === null ? await called : await withTimeout(called, budget);
       const output = this.#normalizeOutput(name, rawOutput, tool.untrustedOutput === true);
       await this.hooks?.hook('onToolResult', { name, input: parsed.data, output, context });

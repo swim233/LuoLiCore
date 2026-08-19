@@ -70,6 +70,96 @@ describe('文档溯源', () => {
   });
 });
 
+/**
+ * `docs/10 §2` 那张 kind 表与实现的**双向**焊接。
+ *
+ * 背景：上一轮实测「表里写了源码零发出 19 个、源码在发表里没有约 35 个（含全库 78% 的
+ * `tg.api`）」，而 `docs/13` 的 `AC-LOG-001` 按字面永远不可能通过（docs/28 · L-LOG-01）。
+ * 两个方向都要挡：只挡一边的话，「文档写了没实现」和「实现了没写」各能漂回去一半。
+ */
+const LOG_DOC = 'docs/10-logging-and-observability.md';
+/** 表格所在的那一节。`## 3.` 之后是落盘格式，不再有 kind 表。 */
+const KIND_SECTION = /^## 2\. 事件种类[\s\S]*?(?=^## 3\.)/m;
+/**
+ * 源码里带 `kind:` 但**不是** `LogEvent.kind` 的那些。每一条都要说清出处 —— 这份名单是
+ * 「新增一个非日志 kind 时该往哪加」的唯一说明，而它自己也是判据：不在这里、又不在文档表里，
+ * 就是红的。**不要只信这份名单**，加 `kind:` 字面量时自己再穷举一遍。
+ */
+const NON_LOG_KINDS = new Map<string, string>([
+  ['user', 'principals.kind（`PrincipalRepository.upsertSeen`）'],
+  ['chat', 'principals.kind（同上）'],
+  ['text', 'messages.kind（归档出站消息）'],
+  ['photo', 'messages.kind（`media.ts` 的 `fileFrom`）'],
+  ['turn', 'context_commits.kind'],
+  ['manual', 'context_commits.kind（`insertControl`）'],
+  ['reset', 'context_commits.kind（同上）'],
+  ['regex', 'WakewordKind'],
+  ['contains', 'WakewordKind'],
+  ['timeout', 'CandidateFailure.kind（`fallback-model.ts`）'],
+  ['status', 'CandidateFailure.kind（同上，嵌套三元）'],
+  ['network', 'CandidateFailure.kind（同上，嵌套三元）'],
+  ['skill', "`extensions.changed` 的载荷（`events.emit('extensions.changed', { kind: 'skill' })`）"],
+  ['quota_global_exceeded', 'AlertKind'],
+  ['consecutive_turn_failures', 'AlertKind'],
+  ['send', 'TelegramDeliveryEvent.kind（`stream-output.ts`；落库时才映射成 `tg.send`）'],
+  ['edit', 'TelegramDeliveryEvent.kind（同上 → `tg.edit`）'],
+  ['action', 'TelegramDeliveryEvent.kind（同上 → `tg.action`）'],
+]);
+
+function documentedKinds(): Set<string> {
+  const section = KIND_SECTION.exec(readFileSync(LOG_DOC, 'utf8'))?.[0];
+  expect(section, `${LOG_DOC} 里找不到「## 2. 事件种类」那一节`).toBeTruthy();
+  const kinds = new Set<string>();
+  for (const line of section!.split('\n')) {
+    if (!line.startsWith('|')) continue;
+    // 只认**第一列**：其余列的正文里大量引用别的 kind（`model.error` 那行就提到 `provider.fallback`）。
+    const first = line.slice(1).split('|')[0] ?? '';
+    for (const match of first.matchAll(/`([^`]+)`/g)) kinds.add(match[1]!);
+  }
+  return kinds;
+}
+
+function emittedKinds(): Map<string, string> {
+  const found = new Map<string, string>();
+  const roots = ['packages', 'apps'];
+  const files = roots.flatMap(walk).filter((path) => path.endsWith('.ts') && /^(packages|apps)\/[^/]+\/src\//.test(path));
+  expect(files.length, '没扫到任何源文件，路径判据坏了').toBeGreaterThan(20);
+  for (const path of files) {
+    const text = readFileSync(path, 'utf8');
+    for (const match of text.matchAll(/kind: '([^']+)'/g)) if (!found.has(match[1]!)) found.set(match[1]!, path);
+    // 三元发出点（`bot.ts` 的 `trigger.matched|skipped` 与 `quota.check|exceeded`），
+    // 以及 `fallback-model.ts` 那个嵌套三元 —— 两个分支都要被解析出来。
+    for (const match of text.matchAll(/kind: [^,}\n]*\? *'([^']+)' *: *'([^']+)'/g)) {
+      for (const kind of [match[1]!, match[2]!]) if (!found.has(kind)) found.set(kind, path);
+    }
+  }
+  return found;
+}
+
+describe('日志 kind 与 docs/10 §2 双向一致', () => {
+  it('表里的每个 kind 源码都真的在发', () => {
+    const emitted = emittedKinds();
+    const missing = [...documentedKinds()].filter((kind) => !emitted.has(kind)).sort();
+    expect(missing, `${LOG_DOC} §2 写了这些 kind，但 packages/*/src 与 apps/*/src 里一处都没发 ——`
+      + '要么实现它，要么把这一行从表里删掉（"摘除比伪造安全"）').toEqual([]);
+  });
+
+  it('源码发的每个 kind 表里都有一行', () => {
+    const documented = documentedKinds();
+    const stray = [...emittedKinds()].filter(([kind]) => !documented.has(kind) && !NON_LOG_KINDS.has(kind))
+      .map(([kind, path]) => `${kind}（${path}）`).sort();
+    expect(stray, `这些 kind 在发但 ${LOG_DOC} §2 没写。是日志事件就补一行（level + 关键字段），`
+      + '不是的话补进 `NON_LOG_KINDS` 并写清出处').toEqual([]);
+  });
+
+  it('排除名单里的每一条都还在源码里出现', () => {
+    const emitted = emittedKinds();
+    const stale = [...NON_LOG_KINDS.keys()].filter((kind) => !emitted.has(kind));
+    // 与上面两条同一个道理：一份没人再用的排除名单会静静放过一个真正该被记录的 kind。
+    expect(stale, '这些非日志 kind 已经从源码里消失，从 NON_LOG_KINDS 里删掉').toEqual([]);
+  });
+});
+
 describe('文档分层', () => {
   it('复审层每份都带 frozen header', () => {
     const missing = docs

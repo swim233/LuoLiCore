@@ -57,6 +57,54 @@ describe('LogSink.span 的载荷是开始与结束的合并', () => {
     close();
   });
 
+  it('parentSpanId 原样落库，而 spanId 由 span() 自己生成', () => {
+    const { log, db, close } = sink('log-span-parent');
+    const parent = log.span({ level: 'info', kind: 'model.call', summary: 'x/y', traceId: 't1', data: { stepNumber: 0 } });
+    const child = log.span({ level: 'info', kind: 'tool.call', summary: 'bash', traceId: 't1', parentSpanId: parent.id, data: { input: {} } });
+    child.end({ output: { ok: true } });
+    parent.end({ usage: {} });
+    const rows = db.prepare('SELECT kind,span_id AS spanId,parent_span_id AS parentSpanId FROM log_events ORDER BY id').all() as Array<{ kind: string; spanId: string | null; parentSpanId: string | null }>;
+    expect(rows.map((row) => row.kind)).toEqual(['tool.call', 'model.call']);
+    expect(rows[0]!.parentSpanId).toBe(parent.id);
+    expect(rows[0]!.spanId).toBe(child.id);
+    // 父那一行自己没有父：它挂在 turn 根上，而这个用例没给根。
+    expect(rows[1]!.parentSpanId).toBeNull();
+    close();
+  });
+
+  /**
+   * `summary` 与 `level` 是**列**不是载荷（`span()` 用 `...input` 展开），所以 `end()` 得有一个
+   * 能改它们的入口 —— 一旦发生链内 fallback，`model.call` 开始时记的是失败的候选（docs/28 · L-PROV-01）。
+   * 覆盖不许弄坏合并契约：`data` 仍然是开始那份与结束那份的并集。
+   */
+  it('end() 可以改写 summary 与 level，而载荷照旧合并', () => {
+    const { log, db, close } = sink('log-span-override');
+    log.span({ level: 'info', kind: 'model.call', summary: 'rig-fake-bad.chat/fake-bad', traceId: 't2', data: { stepNumber: 0, modelId: 'fake-bad' } })
+      .end({ servedModelId: 'deepseek-v4-flash' }, undefined, { summary: 'ksm-api/deepseek-v4-flash ← fallback from fake-bad', level: 'warn' });
+    const row = db.prepare("SELECT level,summary,data_json AS data FROM log_events WHERE kind='model.call'").get() as { level: string; summary: string; data: string };
+    expect(row.level).toBe('warn');
+    expect(row.summary).toBe('ksm-api/deepseek-v4-flash ← fallback from fake-bad');
+    expect(JSON.parse(row.data)).toEqual({ stepNumber: 0, modelId: 'fake-bad', servedModelId: 'deepseek-v4-flash' });
+    close();
+  });
+
+  it('不传覆盖时 summary 与 level 一个字都不变（既有五条契约的回归）', () => {
+    const { log, db, close } = sink('log-span-no-override');
+    log.span({ level: 'info', kind: 'tool.call', summary: 'glob', data: { input: {} } }).end({ output: [] });
+    const row = db.prepare("SELECT level,summary FROM log_events WHERE kind='tool.call'").get() as { level: string; summary: string };
+    expect(row).toEqual({ level: 'info', summary: 'glob' });
+    close();
+  });
+
+  it('给了 error 又给了 level 覆盖时，覆盖赢 —— 关停期间的 abort 不该记成 error', () => {
+    const { log, db, close } = sink('log-span-shutdown');
+    log.span({ level: 'info', kind: 'tg.api', summary: 'getUpdates', data: { method: 'getUpdates' } })
+      .end({ ok: false, reason: 'shutdown' }, undefined, { level: 'info', summary: 'getUpdates aborted during shutdown' });
+    expect(db.prepare("SELECT COUNT(*) FROM log_events WHERE kind='tg.api' AND level='error'").pluck().get()).toBe(0);
+    expect(payload(db, 'tg.api')).toEqual({ method: 'getUpdates', ok: false, reason: 'shutdown' });
+    close();
+  });
+
   it('重复 end 只落一行', () => {
     const { log, db, close } = sink('log-span-once');
     const span = log.span({ level: 'info', kind: 'tool.call', summary: 'glob', data: { input: {} } });

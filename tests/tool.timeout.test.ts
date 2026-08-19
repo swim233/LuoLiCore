@@ -5,8 +5,10 @@ import type { ApprovalBroker, LogSink } from '@luoli/core';
 import type { RuntimeTurnContext } from '@luoli/shared';
 
 const broker: ApprovalBroker = { request: async () => true };
-const events: Array<{ kind: string; summary: string }> = [];
-const log = { span: () => ({ id: 'span', end: () => undefined }), event: (event: { kind: string; summary: string }) => events.push(event) } as unknown as LogSink;
+const events: Array<{ kind: string; summary: string; data?: unknown }> = [];
+const log = { span: () => ({ id: 'span', end: () => undefined }), event: (event: { kind: string; summary: string; data?: unknown }) => events.push(event) } as unknown as LogSink;
+const denials = (): Array<{ tool: string; reason: string }> => events.filter((event) => event.kind === 'tool.denied')
+  .map((event) => event.data as { tool: string; reason: string });
 const turn = { turnId: 't', key: 'chat:1', chatId: '1', threadId: null, initiatorUserId: '2', effectiveRole: 'owner', isPrivate: true, baseCommitId: null,
   snapshot: { messages: [], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 0 }, delta: [], abortSignal: new AbortController().signal, config: {} } satisfies RuntimeTurnContext;
 const context = { turn, workspace: '.', agentKind: 'main' as const };
@@ -78,6 +80,70 @@ describe('tool call timeout', () => {
     expect(registry.activeNames('owner', context)).toContain('mixed');
     await registry.execute('mixed', {}, context);
     expect(registry.activeNames('owner', context)).not.toContain('mixed');
+  });
+});
+
+/**
+ * 准入闸的每一次拒绝都要落一条 `tool.denied`。
+ *
+ * `admit()` 刻意是**只读**判定（不写状态、不记日志），于是整批闸门此前全是静默的：实测 45 次
+ * 工具调用恰好 40 条 `tool.call`，超出 `maxCallsPerTurn` 的那 5 次**零日志**，模型侧只收到一句
+ * 不带 hint 的 `tool_call_limit_exceeded`；role 不够、allowlist、skill 收窄、subagent 限制同理
+ * （docs/28 · L-LOG-01）。所以 `reason` 由 `admit()` 交出来、由 `execute()` 记。
+ */
+describe('tool.denied 覆盖准入闸的每一档', () => {
+  const context2 = { turn: { ...turn, effectiveRole: 'limited' as const }, workspace: '.', agentKind: 'main' as const };
+
+  it('role 不够、allowlist、subagent、超限、运维禁用各记一条，reason 分得开', async () => {
+    events.length = 0;
+    const registry = new ToolRegistry(log, broker, { maxRegistered: 10, maxCallsPerTurn: 1, maxConsecutiveErrors: 5 });
+    registry.register({ name: 'ok_tool', description: '', inputSchema: z.object({}), policy, sourcePriority: 1, execute: () => ({ ok: true }) });
+    registry.register({ name: 'owner_only', description: '', inputSchema: z.object({}), policy: { ...policy, minRole: 'owner' }, sourcePriority: 1, execute: () => ({ ok: true }) });
+    registry.register({ name: 'memory_write', description: '', inputSchema: z.object({}), policy, sourcePriority: 1, execute: () => ({ ok: true }) });
+    registry.bindOverrides(() => ({ blocked_tool: { enabled: false } }));
+    registry.register({ name: 'blocked_tool', description: '', inputSchema: z.object({}), policy, sourcePriority: 1, execute: () => ({ ok: true }) });
+
+    await registry.execute('nope', {}, context);
+    await registry.execute('owner_only', {}, context2);
+    await registry.execute('blocked_tool', {}, context);
+    await registry.execute('memory_write', {}, { ...context, agentKind: 'sub' as const });
+    await registry.execute('ok_tool', {}, { ...context, allow: new Set(['other']) });
+    // 这一次真的跑起来，把 maxCallsPerTurn(1) 用掉；下一次就该撞上限。
+    expect(await registry.execute('ok_tool', {}, context)).toEqual({ ok: true });
+    expect(await registry.execute('ok_tool', {}, context)).toMatchObject({ error: 'tool_call_limit_exceeded' });
+
+    expect(denials()).toEqual([
+      { tool: 'nope', reason: 'unknown_tool', role: 'owner', error: 'tool_unavailable' },
+      { tool: 'owner_only', reason: 'role', role: 'limited', error: '权限不足' },
+      { tool: 'blocked_tool', reason: 'disabled_by_operator', role: 'owner', error: 'tool_disabled_by_operator' },
+      { tool: 'memory_write', reason: 'subagent', role: 'owner', error: 'tool_unavailable_for_subagent' },
+      { tool: 'ok_tool', reason: 'allowlist', role: 'owner', error: 'tool_not_in_allowlist' },
+      { tool: 'ok_tool', reason: 'rate', role: 'owner', error: 'tool_call_limit_exceeded' },
+    ]);
+    // 运维禁用那一档**同时**保留 `tool.disabled`：那一条是「界面上关掉的东西被模型硬调过来」的
+    // 运维视角凭据，而 `tool.denied` 是统一的拒绝流水。
+    expect(events.filter((event) => event.kind === 'tool.disabled')).toHaveLength(1);
+  });
+
+  it('skill 收窄与审批被拒各有自己的 reason', async () => {
+    events.length = 0;
+    const registry = new ToolRegistry(log, { request: async () => false }, limits, () => [{ tool: 'gated', when: 'always', risk: 'high' }] as never);
+    registry.register({ name: 'gated', description: '', inputSchema: z.object({}), policy: { ...policy, approval: 'conditional' }, sourcePriority: 1, execute: () => ({ ok: true }) });
+    registry.register({ name: 'narrowed', description: '', inputSchema: z.object({}), policy, sourcePriority: 1, execute: () => ({ ok: true }) });
+    await registry.execute('gated', {}, context);
+    await registry.execute('narrowed', {}, { ...context, turn: { ...turn, skillAllowedTools: new Set(['other']) } });
+    expect(denials().map((entry) => entry.reason)).toEqual(['approval', 'skill_narrowed']);
+  });
+
+  it('参数非法记 tool.error 而不是 tool.denied —— 那是模型写错了，不是被拦下了', async () => {
+    events.length = 0;
+    const registry = new ToolRegistry(log, broker, limits);
+    registry.register({ name: 'strict', description: '', inputSchema: z.object({ n: z.number() }), policy, sourcePriority: 1, execute: () => ({ ok: true }) });
+    expect(await registry.execute('strict', { n: 'x' }, context)).toMatchObject({ error: 'invalid_input' });
+    expect(denials()).toEqual([]);
+    const errors = events.filter((event) => event.kind === 'tool.error');
+    expect(errors).toHaveLength(1);
+    expect(errors[0]!.data).toMatchObject({ tool: 'strict', errorKind: 'invalid_input' });
   });
 });
 

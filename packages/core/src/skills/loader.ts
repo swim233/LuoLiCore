@@ -5,8 +5,9 @@ import { dirname, join, relative, resolve, sep } from 'node:path';
 import matter from 'gray-matter';
 import { z } from 'zod';
 import type { Role } from '@luoli/shared';
-import { roleRank } from '@luoli/shared';
+import { estimateTextTokens, roleRank } from '@luoli/shared';
 import type { Sqlite } from '@luoli/db';
+import type { LogSink } from '../log/sink.js';
 
 const VALID_ROLES: Record<Role, true> = { blocked: true, limited: true, trusted: true, owner: true };
 
@@ -81,7 +82,12 @@ export class SkillLoader {
   readonly #onChange: (() => void) | undefined;
   /** 上一次扫描的 `name → content_hash`，用来判断这一次是不是真的变了（见 `scan()` 末尾）。 */
   #signature = new Map<string, string>();
-  constructor(private readonly db: Sqlite, readonly directory: string, defaultMinRole: Role | (() => Role) = 'trusted', onChange?: () => void) {
+  /**
+   * @param log 可选。`scan()` 的 per-skill catch 此前只写 `skills.load_error` 那一列，而那一列
+   *   只有扩展页在读 —— 「我加的那个 skill 为什么不存在」在日志里一个字都没有，与
+   *   `agent.file_invalid` 不对称（docs/28 · L-LOG-01）。
+   */
+  constructor(private readonly db: Sqlite, readonly directory: string, defaultMinRole: Role | (() => Role) = 'trusted', onChange?: () => void, private readonly log?: LogSink) {
     this.#defaultMinRole = typeof defaultMinRole === 'function' ? defaultMinRole : () => defaultMinRole;
     this.#onChange = onChange;
   }
@@ -130,6 +136,17 @@ export class SkillLoader {
     if (readable) this.prune([...this.#skills.keys()]);
     const signature = new Map([...this.#skills].map(([name, skill]) => [name, `${skill.enabled}:${skill.loadError ?? ''}:${this.hashOf(name)}`]));
     const changed = signature.size !== this.#signature.size || [...signature].some(([name, value]) => this.#signature.get(name) !== value);
+    // **只在这一份 skill 真的变了时才落 `skill.load`**：watcher 一次保存能连发好几个事件，
+    // 而装一个包要写几十个文件 —— 逐次记等于把一次 `install_skill` 写成几十行（`docs/10 §2`）。
+    // 签名就是「盘上那份 + 启停 + 解析结果」，与广播用的是同一份判据。
+    for (const [name, value] of signature) {
+      if (this.#signature.get(name) === value) continue;
+      const skill = this.#skills.get(name)!;
+      this.log?.event({ level: skill.loadError ? 'error' : 'info', kind: 'skill.load',
+        summary: skill.loadError ? `skill ${name} 解析失败：${skill.loadError}`.slice(0, 300) : `skill ${name} 已装载`,
+        data: { name, tokens: estimateTextTokens(skill.body), minRole: skill.minRole, enabled: skill.enabled,
+          allowedTools: skill.allowedTools ?? null, requiresTools: skill.requiresTools ?? null, error: skill.loadError ?? null } });
+    }
     this.#signature = signature;
     // watcher 的 100ms 去抖之外再挡一层：装一个包要写几十个文件，每一次写盘都广播的话，
     // 一次安装就是几十条 SSE + 几十次「WebUI 重新拉四个端点」。

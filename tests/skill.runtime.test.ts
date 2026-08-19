@@ -16,6 +16,45 @@ function setup() {
   return { db, skills };
 }
 
+describe('skill.load 的可观测性', () => {
+  /**
+   * `scan()` 的 per-skill catch 此前只写 `skills.load_error` 那一列，而那一列只有扩展页在读 ——
+   * 「我加的那个 skill 为什么不存在」在日志里一个字都没有，与 `agent.file_invalid` 不对称
+   * （docs/28 · L-LOG-01）。而 `skill.load` 又不能逐次记：watcher 一次保存能连发好几个事件、
+   * 装一个包要写几十个文件，所以判据是**这份 skill 的签名变了**。
+   */
+  it('只在真的变了时落一行，解析失败那一档是 error', () => {
+    const database = './data/skill-load-log.test.db';
+    const skillsDir = './data/skill-load-log-skills';
+    for (const suffix of ['', '-wal', '-shm']) rmSync(`${database}${suffix}`, { force: true });
+    rmSync(skillsDir, { recursive: true, force: true });
+    mkdirSync(`${skillsDir}/good`, { recursive: true });
+    writeFileSync(`${skillsDir}/good/SKILL.md`, '---\nname: good\ndescription: 好的\nmin-role: limited\nallowed-tools: [read_file]\n---\n正文很长一点点。\n');
+    const db = openDatabase(database); migrateDatabase(db);
+    const events: Array<{ level: string; kind: string; data?: unknown }> = [];
+    const log = { event: (event: { level: string; kind: string; data?: unknown }) => { events.push(event); return 1; } } as never;
+    const skills = new SkillLoader(db, skillsDir, 'trusted', undefined, log);
+    skills.scan();
+    expect(events.filter((event) => event.kind === 'skill.load')).toHaveLength(1);
+    expect(events[0]).toMatchObject({ level: 'info' });
+    expect(events[0]!.data).toMatchObject({ name: 'good', minRole: 'limited', enabled: true, allowedTools: ['read_file'], error: null });
+    expect((events[0]!.data as { tokens: number }).tokens).toBeGreaterThan(0);
+    // 第二次扫描什么都没变 —— 一行都不许再落，否则 `plugins.watch` 打开时日志会被刷爆。
+    events.length = 0;
+    skills.scan();
+    expect(events).toEqual([]);
+    // 坏 frontmatter：error 级，与 `agent.file_invalid` 对称。
+    mkdirSync(`${skillsDir}/broken`, { recursive: true });
+    writeFileSync(`${skillsDir}/broken/SKILL.md`, '---\nname: mismatch\ndescription: 名字对不上\n---\n正文\n');
+    skills.scan();
+    const failed = events.filter((event) => event.kind === 'skill.load');
+    expect(failed).toHaveLength(1);
+    expect(failed[0]!.level).toBe('error');
+    expect(failed[0]!.data).toMatchObject({ name: 'broken', enabled: false });
+    closeDatabase(db);
+  });
+});
+
 describe('skill runtime', () => {
   it('catalogs, narrows allowed tools, and confines skill resources', () => {
     const { db, skills } = setup();

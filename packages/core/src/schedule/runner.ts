@@ -170,6 +170,11 @@ export class ScheduledJobRunner {
     await this.#run(job, role, live, bridge);
   }
 
+  /** 轮次级事件挂在 trace 根之下（`docs/10 §1`）。 */
+  #parent(turn: RuntimeTurnContext): { parentSpanId?: string } {
+    return turn.rootSpanId ? { parentSpanId: turn.rootSpanId } : {};
+  }
+
   async #run(job: ScheduledJob, role: Role, live: Readonly<Config>, bridge: TelegramToolBridge): Promise<void> {
     const chatConfig = perChatConfig(live, job.key);
     const isPrivate = !job.chatId.startsWith('-');
@@ -179,6 +184,11 @@ export class ScheduledJobRunner {
     const pendingId = `job_${ulid()}`;
     const pending = this.dependencies.registry.register({ id: pendingId, key: job.key, chatId: job.chatId, userId: job.createdBy, role }, live.concurrency.turnTimeoutMs);
     let release: (() => void) | null = null;
+    // 与 `bot.ts` 同一条判据（docs/28 · L-LOG-01）：只在真的排过队时记 `turn.queued`，
+    // `turn.start` 一律带 `waitedMs`。定时轮次撞上并发闸的概率不比用户轮次低 —— 它们常常同时到点。
+    const queuedAt = Date.now();
+    const wasQueued = !this.dependencies.concurrency.available(job.key);
+    const queueSnapshot = { active: this.dependencies.concurrency.active, queued: this.dependencies.concurrency.queued };
     try { release = await this.dependencies.concurrency.acquire(job.key, pending.controller.signal); }
     catch (error) {
       this.dependencies.registry.finish(pendingId);
@@ -211,22 +221,25 @@ export class ScheduledJobRunner {
       this.#failed(job, error);
       return;
     }
-    this.dependencies.log.event({ level: 'info', kind: 'schedule.fired', summary: `定时任务 ${job.name} 触发`, traceId: turn.turnId, chatId: job.chatId, userId: job.createdBy, key: job.key,
+    const waitedMs = Date.now() - queuedAt;
+    this.dependencies.log.event({ level: 'info', kind: 'schedule.fired', summary: `定时任务 ${job.name} 触发`, traceId: turn.turnId, ...this.#parent(turn), chatId: job.chatId, userId: job.createdBy, key: job.key,
       data: { job: job.id, name: job.name, mode: job.mode, role, runCount: job.runCount } });
-    this.dependencies.log.event({ level: 'info', kind: 'turn.start', summary: `Turn ${turn.turnId} started`, traceId: turn.turnId, chatId: job.chatId, userId: job.createdBy, key: job.key, data: { role, triggerReason: 'schedule' } });
+    if (wasQueued) this.dependencies.log.event({ level: 'info', kind: 'turn.queued', summary: `Turn ${turn.turnId} waited ${waitedMs}ms in queue`,
+      traceId: turn.turnId, ...this.#parent(turn), chatId: job.chatId, userId: job.createdBy, key: job.key, durationMs: waitedMs, data: { ...queueSnapshot, waitedMs } });
+    this.dependencies.log.event({ level: 'info', kind: 'turn.start', summary: `Turn ${turn.turnId} started`, traceId: turn.turnId, ...(turn.rootSpanId ? { spanId: turn.rootSpanId } : {}), chatId: job.chatId, userId: job.createdBy, key: job.key, data: { role, triggerReason: 'schedule', waitedMs } });
     this.dependencies.log.publish('turn.started', { turnId: turn.turnId, key: job.key, chatId: job.chatId, user: job.createdBy, role, triggerReason: 'schedule', at: Date.now() });
     try {
       const answer = job.mode === 'notify' ? job.payload : (await this.dependencies.runAgent(turn, reservation)).trim();
       // 空正文当成失败：发不出去（splitTelegramText('') 是空数组）、还会往上下文里留一条
       // 谁都解释不了的空消息（docs/16 §5「摘除比伪造安全」）。
       if (!answer) throw new Error('model_returned_empty');
-      const sent = await bridge.sendMessage({ chatId: job.chatId, threadId: job.threadId, turnId: turn.turnId }, answer) as { ok?: boolean; error?: string };
+      const sent = await bridge.sendMessage({ chatId: job.chatId, threadId: job.threadId, turnId: turn.turnId, ...(turn.rootSpanId ? { parentSpanId: turn.rootSpanId } : {}) }, answer) as { ok?: boolean; error?: string };
       if (sent.ok === false) throw new Error(`delivery_failed:${sent.error ?? 'unknown'}`);
       this.dependencies.context.appendDelta(turn, { id: turn.turnId, role: 'assistant', origin: 'assistant', parts: [{ type: 'text', text: answer }], textPreview: answer.slice(0, 240), pruneLevel: 0 });
       const committed = await this.dependencies.context.commitTurn(turn);
       const settled = this.dependencies.turns.finish(turn.turnId, { state: 'committed', commitId: committed.commit.id, rebased: committed.rebased });
       await this.dependencies.plugins?.hook('afterCommit', { turn, committed });
-      this.dependencies.log.event({ level: 'info', kind: 'turn.end', summary: 'turn committed', traceId: turn.turnId, chatId: job.chatId, userId: job.createdBy, key: job.key, data: { state: 'committed', rebased: committed.rebased, schedule: job.id } });
+      this.dependencies.log.event({ level: 'info', kind: 'turn.end', summary: 'turn committed', traceId: turn.turnId, ...this.#parent(turn), chatId: job.chatId, userId: job.createdBy, key: job.key, data: { state: 'committed', rebased: committed.rebased, waitedMs, schedule: job.id } });
       this.dependencies.log.publish('turn.finished', { turnId: turn.turnId, key: job.key, chatId: job.chatId, state: 'committed', steps: settled?.steps ?? 0, toolCalls: settled?.toolCalls ?? 0, costUsd: settled?.costUsd ?? 0, rebased: committed.rebased, durationMs: settled?.durationMs ?? 0 });
       this.dependencies.memory.flush(turn.turnId);
       this.dependencies.jobs.markRun(job.id, { state: 'committed' });
@@ -244,7 +257,7 @@ export class ScheduledJobRunner {
       const settled = this.dependencies.turns.finish(turn.turnId, cancelled
         ? { state: 'cancelled', cancelReason: String(turn.abortSignal.reason ?? 'cancelled') }
         : { state: 'failed', error: timedOut ? 'turn_timeout' : error instanceof Error ? error.message : String(error), ...(timedOut ? { cancelReason: 'timeout' } : {}) });
-      this.dependencies.log.event({ level: cancelled ? 'warn' : 'error', kind: 'turn.end', summary: cancelled ? 'turn cancelled' : timedOut ? 'turn timed out' : error instanceof Error ? error.message : 'turn failed', traceId: turn.turnId, chatId: job.chatId, userId: job.createdBy, key: job.key, data: { schedule: job.id } });
+      this.dependencies.log.event({ level: cancelled ? 'warn' : 'error', kind: 'turn.end', summary: cancelled ? 'turn cancelled' : timedOut ? 'turn timed out' : error instanceof Error ? error.message : 'turn failed', traceId: turn.turnId, ...this.#parent(turn), chatId: job.chatId, userId: job.createdBy, key: job.key, data: { state: cancelled ? 'cancelled' : 'failed', waitedMs, schedule: job.id } });
       this.dependencies.log.publish('turn.finished', { turnId: turn.turnId, key: job.key, chatId: job.chatId, state: cancelled ? 'cancelled' : 'failed', steps: settled?.steps ?? 0, toolCalls: settled?.toolCalls ?? 0, costUsd: settled?.costUsd ?? 0, rebased: false, durationMs: settled?.durationMs ?? 0 });
       // 同 `bot.ts` 的两个出口：取消不算故障，超时算 —— 而「上游变黑洞、每次定时触发都超时」
       // 正是这条告警最该覆盖的场景，也正是它此前一次都不响的那个（docs/28 · L-SCH-02）。

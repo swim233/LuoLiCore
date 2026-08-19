@@ -1,4 +1,5 @@
 import { ToolLoopAgent, stepCountIs } from 'ai';
+import { ulid } from 'ulid';
 import type { RuntimeTurnContext } from '@luoli/shared';
 import { untrusted } from '@luoli/shared';
 import type { AgentRun } from './manager.js';
@@ -26,6 +27,8 @@ export interface AskArbiterDependencies {
   reservation?: QuotaReservation | null;
   /** 缺省时退回裸模型（无重试、无 fallback）。调用方应当传，与 `runSubAgent` 同一份设置。 */
   provider?: { maxRetries: number; retryBaseMs: number; retryMaxMs: number; requestTimeoutMs?: number; streamIdleTimeoutMs?: number };
+  /** 那条 `agent.ask` span 的 id。仲裁的模型调用挂在它之下（`docs/10 §1`）。 */
+  parentSpanId?: string;
 }
 
 export interface AskArbiterQuestion {
@@ -54,6 +57,8 @@ const MAX_ANSWER_TOKENS = 400;
 export async function arbitrateAsk(parent: AgentRun, ask: AskArbiterQuestion, turn: RuntimeTurnContext, dependencies: AskArbiterDependencies,
   options: { alias?: string; timeoutMs: number }): Promise<AskArbitration> {
   const alias = options.alias ?? 'low';
+  /** 仲裁产出的 span 都挂在那条 `agent.ask` 之下（`docs/10 §1`）。 */
+  const askParent = dependencies.parentSpanId ? { parentSpanId: dependencies.parentSpanId } : {};
   if (!dependencies.registry.info(alias)) return { ok: false, reason: 'no_model', detail: alias };
   if (turn.abortSignal.aborted) return { ok: false, reason: 'cancelled' };
 
@@ -67,7 +72,7 @@ export async function arbitrateAsk(parent: AgentRun, ask: AskArbiterQuestion, tu
       ...(dependencies.provider.requestTimeoutMs === undefined ? {} : { requestTimeoutMs: dependencies.provider.requestTimeoutMs }),
       ...(dependencies.provider.streamIdleTimeoutMs === undefined ? {} : { streamIdleTimeoutMs: dependencies.provider.streamIdleTimeoutMs }),
       onUnavailable: (candidate, error) => dependencies.registry.markProviderDown(candidate.id, error instanceof Error ? error.message : 'authentication_failed'),
-      onExhausted: (error) => dependencies.log.event({ level: 'error', kind: 'model.error', summary: error instanceof Error ? `${error.name}: ${error.message}`.slice(0, 300) : String(error).slice(0, 300), traceId: turn.turnId, data: { alias, arbiterFor: parent.id } }) })
+      onExhausted: (error) => dependencies.log.event({ level: 'error', kind: 'model.error', summary: error instanceof Error ? `${error.name}: ${error.message}`.slice(0, 300) : String(error).slice(0, 300), traceId: turn.turnId, ...askParent, data: { alias, arbiterFor: parent.id } }) })
     : dependencies.registry.resolve(alias);
 
   const agent = new ToolLoopAgent({ model, ...dependencies.registry.settings(alias), maxRetries: 0, maxOutputTokens: MAX_ANSWER_TOKENS,
@@ -87,6 +92,11 @@ export async function arbitrateAsk(parent: AgentRun, ask: AskArbiterQuestion, tu
         priceIn: info.priceIn, priceOut: info.priceOut, priceCacheRead: info.priceCacheRead, priceCacheWrite: info.priceCacheWrite,
         latencyMs: step.performance.responseTimeMs, finishReason: step.finishReason, ok: true });
       if (dependencies.quota && dependencies.reservation) dependencies.quota.commit(dependencies.reservation, cost);
+      // 仲裁也是一次真实的模型调用，此前只在 `usage_ledger` 里留一行 —— 于是 `agent.answer`
+      // `source=arbiter` 那一条在 trace 里没有任何东西解释它的耗时与花费（`docs/10 §1`）。
+      dependencies.log.event({ level: 'info', kind: 'model.call', summary: `${info.providerId}/${info.modelId}`, traceId: turn.turnId,
+        spanId: ulid(), ...askParent, chatId: turn.chatId, userId: turn.initiatorUserId, key: turn.key, durationMs: step.performance.responseTimeMs,
+        data: { arbiterFor: parent.id, alias, servedProvider: info.providerId, servedModelId: info.modelId, usage: step.usage, cost, finishReason: step.finishReason } });
     },
   });
 

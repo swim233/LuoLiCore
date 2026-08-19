@@ -332,7 +332,7 @@
 
 | ID | 步骤 | 期望 |
 |---|---|---|
-| [ ] AC-LOG-001 ★ | 完成一次含子 agent 的 turn，用 `turn_id` 查 trace | 完整调用树：ctx.open → prompt.build → model.call ×N → tool.call（含 spawn_agent）→ 子 agent 的 model.call/tool.call/ask → tg.send → ctx.commit |
+| [ ] AC-LOG-001 ★ | 完成一次含子 agent 的 turn，用 `turn_id` 查 trace | 完整调用树，且 `parent_span_id` 真的连着（[10 §1](./10-logging-and-observability.md#1-trace-模型)）：`turn.start`（spanId = 根）→ `ctx.open` / `prompt.build` / `model.call ×N` / `tg.send` / `tg.edit` / `ctx.commit` 挂在根之下；`tool.call` 挂在那一步的 `model.call` 之下；`spawn_agent` 那次 `tool.call` 之下是 `agent.spawn` + `agent.run`，`agent.run` 之下是子 agent 的 `model.call` / `tool.call` / `agent.end`，`ask_parent` 那次 `tool.call` 之下是 `agent.ask` → `agent.answer`。四条边的自动化判据在 `tests/log.trace.test.ts`，本条是浏览器里再看一眼缩进（此前 13 个节点的 `marginLeft` 全是 `0px`，docs/28 · L-LOG-04） |
 | [ ] AC-LOG-002 ★ | 展开任一 `model.call` | 含完整请求 messages、tools 列表、settings、响应文本/toolCalls、四类 token、费用、延迟、finishReason |
 | [x] AC-LOG-020 (自动) ★ | 一次成功的工具调用与一次失败的工具调用，各查它的 `tool.call` 行 | **同一行里既有 `input` 又有 `output`**；失败那行是 `input` + `error`。一个 span 只落一行，开始时的载荷与结束时的载荷是合并的 —— 此前 `end()` 用结束载荷整体顶掉开始那份，于是 `input` 一次都没进过库，WebUI 详情因此只有工具输出 | 〔log.span.test.ts〕
 | [x] AC-LOG-021 (自动) | `span.end()` 不给载荷 / 给一个非对象值 / 调两次 | 不给：开始那份原样保留；非对象：挂在 `result` 下而不顶掉开始那份；两次：只落一行 | 〔log.span.test.ts〕
@@ -386,7 +386,7 @@
 | [x] AC-PLG-001 (自动) | 放一个示例 plugin，未启用 | 其工具/命令/钩子均不生效 | 〔plugin.runtime.test.ts〕
 | [ ] AC-PLG-002 | WebUI 启用 plugin | 弹出「全信任运行任意代码」确认；确认后工具可用 |
 | [ ] AC-PLG-003 (自动) | plugin 的 `configSchema` | WebUI 生成对应表单；含密字段加密存储且前端只显示 hint |
-| [ ] AC-PLG-004 (自动) | plugin hook 抛异常 | 被 catch，只记 `plugin.error`，turn 正常完成 |
+| [ ] AC-PLG-004 (自动) | plugin hook 抛异常**一次** | 被 catch，**当场**记一条 `plugin.error`（带 plugin/hook/message/errors/disabled），plugin 还开着，turn 正常完成（判据在 `tests/plugin.runtime.test.ts`）。此前只有累计到 `plugins.autoDisableAfterErrors` 时才经告警落一行，而那一行还受 `alerts.on`（默认 `[]`）与 `dedupeMinutes` 管 —— 实测一个三轮必抛的 `beforeTurn`，与 plugin 有关的日志 0 条（docs/28 · L-LOG-01） |
 | [x] AC-PLG-005 (自动) ★ | `write_plugin` 写一个 plugin；运维启用它；模型再改一次源码 | 写下来就是 `enabled=0`（模型不能让自己写的代码在本进程里跑起来）；启用后再改源码**自动打回未启用** —— `reconcile()` 用 `sha256(文件+配置)` 当 ESM 的 cache-busting 签名，不打回的话下一次 reconcile 就把新代码 import 进本进程了（[14 A27](./14-open-questions.md)） | 〔selfextend.author.test.ts〕
 | [x] AC-PLG-006 (自动) | `GET /api/plugins/:name/source` 与 `DELETE /api/plugins/:name` | 前者交回 plugin.js 全文（没有它，「启用前先看过源码」只是句口号），不存在时 404；后者连目录带库里那行一起删 | 〔selfextend.api.test.ts〕
 | [ ] AC-PLG-005 (自动) | 同一 hook 连续失败 3 次 | 自动禁用该 plugin + owner 告警 |

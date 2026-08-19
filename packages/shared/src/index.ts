@@ -219,6 +219,17 @@ export interface RuntimeTurnContext {
    */
   chatTitle?: string;
   baseCommitId: string | null;
+  /**
+   * 这一轮 trace 的**根 span id**（`openTurn` 生成的 ULID）。`turn.start` 用它当 `spanId`，
+   * 其余轮次级事件（`ctx.*` / `prompt.build` / `model.call` / `tg.*` / `turn.end`）用它当
+   * `parentSpanId` —— 也就是 `docs/10 §1` 那张 trace 图的第一条边。
+   *
+   * **显式传，不用 AsyncLocalStorage**：隐式的「当前 span」是一份进程内状态，与
+   * `docs/01 §3.1` 相冲，而本仓到处显式穿依赖。`parent_span_id` 此前全库为 NULL、
+   * 「调用树」结构上是一张平表（docs/28 · L-LOG-04）。可选：WebUI 的提示词预览与
+   * 子 agent 试跑各自造一个 turn，它们不是真的一轮。
+   */
+  rootSpanId?: string;
   claimThroughMessageId?: number;
   finalized?: boolean;
   modelAliasOverride?: string;

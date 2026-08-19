@@ -49,6 +49,30 @@ export function pickPlaceholder(texts: readonly string[] | undefined, pick: 'ran
   return candidates[Math.floor(Math.random() * candidates.length)]!;
 }
 
+/**
+ * 投递层的语义事件（`docs/10 §2` 的 `tg.send` / `tg.edit` / `tg.action`）。
+ *
+ * `tg.api` 那条在 grammY 的 API transformer 里，**拿不到 turn/chat 上下文** —— 生产库 9745 条
+ * `tg.api` 里 `trace_id IS NULL` 的是 9745 条（100%），人工窗口那 14 轮按 trace 归轮的结果每一轮
+ * 都是 0，而 `data` 只有 `{method, ok}`：没有 chars、没有 messageId（docs/28 · L-LOG-02）。
+ * 所以语义 span 在这一层发 —— 这里知道 turnId、chatId、chars 与 messageId。
+ *
+ * `edit` 与 `action` 是**一轮聚合成一条**：一次流式回复能编辑几十次，逐次记只是噪声。
+ */
+export interface TelegramDeliveryEvent {
+  kind: 'send' | 'edit' | 'action';
+  ok: boolean;
+  ms: number;
+  /** `send`：这一条的 message_id。`edit`：最后一次编辑的那一条。 */
+  messageId?: number;
+  chars?: number;
+  /** `edit` / `action` 聚合了多少次。 */
+  count?: number;
+  /** `send` 的来路：流式首发、`once` 档、收尾补发。 */
+  path?: 'stream' | 'once' | 'final';
+  error?: string;
+}
+
 export class TelegramOutput {
   constructor(private readonly bot: Bot, private readonly chatId: string, private readonly options: StreamOutputOptions, private readonly onDeliveryError?: (error: unknown) => void,
     /** 起算点是用户那条消息的到达时刻，不是这个对象被构造的时刻：模型本来就想了 3 秒时不该再压 2 秒。 */
@@ -71,6 +95,17 @@ export class TelegramOutput {
    * 构造签名已经有七个位置参数了，再加一个没人能记住顺序。装配方（`bot.ts`）在 new 之后挂上。
    */
   onParseFallback?: (info: ParseFallbackInfo) => void;
+
+  /**
+   * 投递层的语义事件（见 `TelegramDeliveryEvent`）。同样做成可赋值字段而不是第八个位置参数。
+   * 缺它时整段是空操作（测试与不关心观测的调用点）。
+   */
+  onDelivery?: (event: TelegramDeliveryEvent) => void;
+
+  /** 观测不许打断投递：这个回调的实现方是 `LogSink.event`（保证不抛），但契约上不该赌它。 */
+  #emit(event: TelegramDeliveryEvent): void {
+    try { this.onDelivery?.(event); } catch { /* 记不上日志也不能让这条消息发不出去 */ }
+  }
 
   /**
    * `output.parseMode`。**分片、发送、编辑三处必须读同一个值** —— 三档各有自己的渲染器，
@@ -102,8 +137,10 @@ export class TelegramOutput {
       // **只有第一条分片带引用**，与 `consume()` 的收尾分片一致：整份都带的话，一条被切成五段的
       // 长回复会在群里刷出五个引用块（docs/14 §2 Q10）。
       for (const [index, part] of rendered.entries()) {
+        const at = Date.now();
         const message = await sendWithFallback(this.bot.api, this.chatId, part, index === 0 && replyToMessageId ? { reply_parameters: { message_id: replyToMessageId } } : {}, this.parseMode, this.onParseFallback);
         ids.push(message.message_id);
+        this.#emit({ kind: 'send', ok: true, ms: Date.now() - at, messageId: message.message_id, chars: part.length, path: 'once' });
       }
     });
     return { messageIds: ids, segments: rendered.length > 1 ? archived : [] };
@@ -144,6 +181,13 @@ export class TelegramOutput {
     let lastTypingAt = 0;
     let bodyInFlight = 0;
     let lastBodyAt = 0;
+    // 聚合计数（`docs/10 §2`）：`tg.edit` / `tg.action` 各只落一条，带次数与总耗时。
+    let actionCount = 0;
+    let actionMs = 0;
+    let editCount = 0;
+    let editMs = 0;
+    let lastEditChars = 0;
+    let lastEditMessageId: number | undefined;
     const typing = this.options.typingWhileWorking === false ? null
       : setInterval(() => {
         if (typingInFlight || bodyInFlight > 0) return;
@@ -153,9 +197,14 @@ export class TelegramOutput {
         if (messageIds.length && now - Math.max(lastTypingAt, lastBodyAt) < TYPING_QUIET_MS) return;
         lastTypingAt = now;
         typingInFlight = true;
-        void this.bot.api.sendChatAction(this.chatId, 'typing').catch(() => undefined).finally(() => { typingInFlight = false; });
+        actionCount += 1;
+        void this.bot.api.sendChatAction(this.chatId, 'typing').catch(() => undefined).finally(() => { typingInFlight = false; actionMs += Date.now() - now; });
       }, TYPING_TICK_MS);
     const edit = async (messageId: number, rendered: string): Promise<void> => {
+      const at = Date.now();
+      editCount += 1;
+      lastEditChars = rendered.length;
+      lastEditMessageId = messageId;
       try {
         if (this.parseMode === 'none') { await this.bot.api.editMessageText(this.chatId, messageId, rendered); return; }
         await this.bot.api.editMessageText(this.chatId, messageId, rendered, { parse_mode: this.parseMode });
@@ -170,7 +219,16 @@ export class TelegramOutput {
           return;
         }
         throw error;
-      }
+      } finally { editMs += Date.now() - at; }
+    };
+    /**
+     * `tg.edit` / `tg.action` 一轮各只落一条（`docs/10 §1`）。三个 return 点都要经过这里 ——
+     * 漏一个的表现是「某一类轮次的编辑次数永远是 0」，而那正好是最需要看它的那一类
+     * （被打断、只发了占位、`once` 档）。
+     */
+    const flushAggregates = (): void => {
+      if (editCount) this.#emit({ kind: 'edit', ok: true, ms: editMs, count: editCount, chars: lastEditChars, ...(lastEditMessageId === undefined ? {} : { messageId: lastEditMessageId }) });
+      if (actionCount) this.#emit({ kind: 'action', ok: true, ms: actionMs, count: actionCount });
     };
     // 投递失败不等于生成中断：把两者混为一谈会让网络抖动被记成 stream_interrupted，
     // 并给用户一句本不该出现的「（生成中断）」（docs/19-review-round4.md · R-TG-02）。
@@ -195,19 +253,21 @@ export class TelegramOutput {
     if (this.options.mode === 'stream' && placeholderAfterMs > 0 && placeholderText) {
       placeholder = setTimeout(() => void (async () => {
         if (messageIds.length || text) return;
+        const at = Date.now();
         const sent = await body(() => sendWithFallback(this.bot.api, this.chatId, placeholderText, replyToMessageId ? { reply_parameters: { message_id: replyToMessageId } } : {}, this.parseMode, this.onParseFallback));
         // 基线归 0 而不是占位文案的长度：`lastRenderedLength` 量的是「答复已经渲染了多少字」，
         // 占位消息里一个字都不是答复。记成文案长度的话，一句十来个字的文案会让第一次编辑多等
         // 十来个字才够 minDeltaChars —— 占位消息挂着的时间反倒随文案变长。原先写死的 1 是它
         // 还只能是「…」时两种读法恰好重合的产物。
         if (sent) { messageIds.push(sent.message_id); lastRenderedLength = 0; lastEdit = Date.now(); }
+        this.#emit({ kind: 'send', ok: sent !== null, ms: Date.now() - at, ...(sent ? { messageId: sent.message_id } : {}), chars: placeholderText.length, path: 'stream' });
       })(), placeholderAfterMs);
       placeholder.unref?.();
     }
     try {
       // 开轮那一发照旧无条件送出：`docs/08 §5.2` 要的是「看起来是在打字而不是卡住」，而这一刻
       // 屏幕上一个字都没有，typing 是唯一的信号。记下时刻，好让首条消息发出后的第一拍也认这个起点。
-      if (this.options.typingWhileWorking !== false) { lastTypingAt = Date.now(); await deliver(() => this.bot.api.sendChatAction(this.chatId, 'typing')); }
+      if (this.options.typingWhileWorking !== false) { lastTypingAt = Date.now(); actionCount += 1; await deliver(() => this.bot.api.sendChatAction(this.chatId, 'typing')); actionMs += Date.now() - lastTypingAt; }
       const iterator = stream[Symbol.asyncIterator]();
       for (;;) {
         let step: IteratorResult<string>;
@@ -236,7 +296,9 @@ export class TelegramOutput {
         const before = messageIds.length;
         while (messageIds.length < rendered.length) {
           const index = messageIds.length;
+          const at = Date.now();
           const sent = await body(() => sendWithFallback(this.bot.api, this.chatId, rendered[index]!, index === 0 && replyToMessageId ? { reply_parameters: { message_id: replyToMessageId } } : {}, this.parseMode, this.onParseFallback));
+          this.#emit({ kind: 'send', ok: sent !== null, ms: Date.now() - at, ...(sent ? { messageId: sent.message_id } : {}), chars: rendered[index]!.length, path: 'stream' });
           if (!sent) break;
           messageIds.push(sent.message_id);
         }
@@ -279,10 +341,12 @@ export class TelegramOutput {
      */
     if (interrupted && !closing.trim() && messageIds.length) {
       for (const messageId of messageIds) await deliver(() => this.bot.api.deleteMessage(this.chatId, messageId));
+      flushAggregates();
       return { text: closing, interrupted, messageIds: [], segments: [] };
     }
     if (this.options.mode === 'once' || !messageIds.length) {
       const once = await this.send(closing, replyToMessageId);
+      flushAggregates();
       return { text: closing, interrupted, messageIds: once.messageIds, segments: once.segments };
     }
     // 定稿这一次才跑插件的 `beforeSend`（每帧都跑等于把钩子的语义从「一条消息一次」改成
@@ -294,11 +358,14 @@ export class TelegramOutput {
       // 收尾也要走 deliver + 降级：这里抛出去会把一轮已经发出大半的回复整个记成 failed（docs/20 · W-TG-04）。
       for (let index = 0; index < rendered.length; index += 1) {
         if (index < messageIds.length) { await deliver(() => edit(messageIds[index]!, rendered[index]!)); continue; }
+        const at = Date.now();
         const sent = await deliver(() => sendWithFallback(this.bot.api, this.chatId, rendered[index]!, {}, this.parseMode, this.onParseFallback));
+        this.#emit({ kind: 'send', ok: sent !== null, ms: Date.now() - at, ...(sent ? { messageId: sent.message_id } : {}), chars: rendered[index]!.length, path: 'final' });
         if (!sent) break;
         messageIds.push(sent.message_id);
       }
     });
+    flushAggregates();
     return { text: closing, interrupted, messageIds, segments: rendered.length > 1 ? archived : [] };
   }
 }

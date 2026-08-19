@@ -4,7 +4,7 @@ import { StringDecoder } from 'node:string_decoder';
 import { ulid } from 'ulid';
 import sharp from 'sharp';
 import type { Api } from 'grammy';
-import type { Config } from '@luoli/core';
+import type { Config, LogSink } from '@luoli/core';
 import type { ArchivedMessage, Sqlite } from '@luoli/db';
 import { untrusted } from '@luoli/shared';
 
@@ -63,7 +63,20 @@ function fileFrom(message: Record<string, unknown>): TelegramFile | null {
 }
 
 export class TelegramMedia {
-  constructor(private readonly api: Api, private readonly token: string, private readonly db: Sqlite, private readonly config: Readonly<Config['media']>) {}
+  /**
+   * @param log 可选。`media.download` / `media.extract` 是 `docs/10 §2` 里写了而实现里一直没有的
+   *   两条：一张 20MB 的图被 `maxImageBytes` 挡掉、一个 PDF 解析超时，此前只落在 `attachments`
+   *   那两列错误里（docs/28 · L-LOG-01）。**没有 traceId** —— 这一段跑在开轮之前。
+   */
+  constructor(private readonly api: Api, private readonly token: string, private readonly db: Sqlite, private readonly config: Readonly<Config['media']>,
+    private readonly log?: LogSink) {}
+
+  /** 一次附件下载的结局。`state` 与 `attachments.download_state` 同一套取值。 */
+  #download(id: string, archived: ArchivedMessage, file: TelegramFile, state: string, startedAt: number, extra: Record<string, unknown> = {}): void {
+    this.log?.event({ level: state === 'done' ? 'info' : 'warn', kind: 'media.download', summary: `${file.kind} ${file.name ?? file.uniqueId} ${state}`,
+      chatId: archived.chatId, durationMs: Math.round(performance.now() - startedAt),
+      data: { attachmentId: id, kind: file.kind, bytes: file.size ?? null, state, ...extra } });
+  }
 
   /** 贴纸是不是当图片看。默认否 —— 贴纸多半是表情噪音，每张按 1500 token 记会把群聊上下文吃穿。 */
   #asImage(file: TelegramFile): boolean {
@@ -73,16 +86,20 @@ export class TelegramMedia {
   async process(message: Record<string, unknown>, archived: ArchivedMessage): Promise<unknown[]> {
     const file = fileFrom(message);
     if (!file) return [];
+    const startedAt = performance.now();
     // `downloadVoice=false`：语音一律不下载（第一版不做 STT，见 docs/14 A13，下下来也只是占磁盘）。
     // 仍然落一条 attachments 行，好让「这里有条语音」在归档与界面上看得见。
     if (file.kind === 'voice' && !this.config.downloadVoice) {
-      this.insert(ulid(), archived, file, null, 'skipped', 'download_voice_disabled', null, 'skipped');
+      const voiceId = ulid();
+      this.insert(voiceId, archived, file, null, 'skipped', 'download_voice_disabled', null, 'skipped');
+      this.#download(voiceId, archived, file, 'skipped', startedAt, { reason: 'download_voice_disabled' });
       return [{ type: 'text', text: `[语音${file.duration ? ` ${file.duration}s` : ''}]` }];
     }
     const limit = this.#asImage(file) ? this.config.maxImageBytes : this.config.maxDocBytes;
     const id = ulid();
     if ((file.size ?? 0) > limit) {
       this.insert(id, archived, file, null, 'skipped', 'size_limit', null, 'skipped');
+      this.#download(id, archived, file, 'skipped', startedAt, { reason: 'size_limit', limit });
       return [{ type: 'text', text: `[${file.kind} ${file.name ?? ''} 超出下载限制]` }];
     }
     try {
@@ -102,6 +119,7 @@ export class TelegramMedia {
       // 挡不住纯 CPU 的紧循环（docs/27 · R-01）。
       if (payload.length > limit) {
         this.insert(id, archived, file, null, 'skipped', 'size_limit', null, 'skipped');
+        this.#download(id, archived, file, 'skipped', startedAt, { reason: 'size_limit', limit, realBytes: payload.length });
         return [{ type: 'text', text: `[${file.kind} ${file.name ?? ''} 超出下载限制]` }];
       }
       writeFileSync(path, payload, { mode: 0o600 });
@@ -114,9 +132,11 @@ export class TelegramMedia {
       // 提取失败**不算**下载失败：文件已经在盘上了，记成 failed 会让 local_path 变成 NULL、
       // 盘上那份变成 gcFiles 眼里的孤儿。`attachments` 没有 extract_error 列（迁移提交后不可
       // 修改），所以原因带前缀写进唯一那个错误列 —— `download_state='done'` 已经说清了是哪一步。
+      this.#download(id, archived, file, 'done', startedAt, { realBytes: payload.length });
       let extracted: string | null = null;
       let extractState = 'skipped';
       let extractError: string | null = null;
+      const extractStartedAt = performance.now();
       try {
         extracted = await withDeadline(this.extract(localPath, file), EXTRACT_TIMEOUT_MS, 'extract');
         extractState = extracted === null ? 'skipped' : 'done';
@@ -124,6 +144,9 @@ export class TelegramMedia {
         extractState = 'failed';
         extractError = `extract: ${error instanceof Error ? error.message : String(error)}`;
       }
+      this.log?.event({ level: extractState === 'failed' ? 'warn' : 'info', kind: 'media.extract', summary: `${file.name ?? file.uniqueId} ${extractState}`,
+        chatId: archived.chatId, durationMs: Math.round(performance.now() - extractStartedAt),
+        data: { attachmentId: id, kind: file.kind, chars: extracted?.length ?? 0, state: extractState, error: extractError } });
       this.insert(id, archived, file, localPath, 'done', extractError, extracted, extractState);
       // `image` part 在 AI SDK v7 已废弃（SDK 内部就是转成 file 再发，顺带每张图打一条
       // DeprecationWarning）。读出侧 `contextMessages` 兜历史 part，写入侧从这里就产出新形状。
@@ -132,7 +155,9 @@ export class TelegramMedia {
       if (extracted) return [{ type: 'text', text: `[文档 ${file.name ?? file.uniqueId}]\n${untrusted(`file:${file.name ?? file.uniqueId}`, [...extracted].slice(0, this.config.extract.inlineChars).join(''))}` }];
       return [{ type: 'text', text: `[${file.kind} ${file.name ?? ''}${file.duration ? ` ${file.duration}s` : ''}]` }];
     } catch (error) {
-      this.insert(id, archived, file, null, 'failed', error instanceof Error ? error.message : String(error), null, 'failed');
+      const message = error instanceof Error ? error.message : String(error);
+      this.insert(id, archived, file, null, 'failed', message, null, 'failed');
+      this.#download(id, archived, file, 'failed', startedAt, { error: message.slice(0, 300) });
       return [{ type: 'text', text: `[${file.kind} 处理失败]` }];
     }
   }

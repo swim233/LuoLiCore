@@ -72,6 +72,25 @@ export interface SandboxResult {
   hint?: string;
 }
 
+/**
+ * 一次沙箱执行的事实（`docs/10 §2` 的 `sandbox.run`）。`turnId` 让它进得了那一轮的 trace ——
+ * 沙箱执行此前在日志里**完全不存在**，一次 OOM 或被 SIGKILL 的命令只能从 `tool.call` 的输出里猜。
+ */
+export interface SandboxRunEvent {
+  turnId: string;
+  role: Role;
+  mode: 'host' | 'jail' | 'docker';
+  image: string | null;
+  exitCode: number | null;
+  durationMs: number;
+  ok: boolean;
+  killed: boolean;
+  oom: boolean;
+  truncated: boolean;
+  /** 被拒（沙箱未启用 / docker 不可用 / 路径映射不成立）时的原因，正常执行是 undefined。 */
+  denied?: string;
+}
+
 /** 按字节算预算、按字符边界切，且结果真的不超过 `max`（docs/27 · T-04：此前那个按比例估的
  *  码点数会算出一个超预算的结果）。与工具输出归一化共用同一份实现。 */
 function clipped(buffer: string, max: number): { value: string; truncated: boolean } {
@@ -92,7 +111,13 @@ export class Sandbox {
    * （docs/20 · W-CFG-02）。
    */
   constructor(config: SandboxConfig | (() => SandboxConfig), dockerAvailable?: boolean, inContainer?: boolean, onWarn?: (message: string) => void,
-    private readonly onUnavailable?: (reason: string, role: Role) => void) {
+    private readonly onUnavailable?: (reason: string, role: Role) => void,
+    /**
+     * 每一次执行落一条 `sandbox.run`（`docs/10 §2`）。装配方把它接到 `LogSink` 上 —— 这里只发事实，
+     * 不认识 LogSink：沙箱是 `bash` / `python` / 自撰写工具三条路共用的底层，让它持有日志接口
+     * 等于给它一个它用不上的依赖方向。可选：测试直接构造时不给，行为一个字不变。
+     */
+    private readonly onRun?: (event: SandboxRunEvent) => void) {
     this.#cfg = typeof config === 'function' ? config : () => config;
     this.#dockerAvailable = dockerAvailable ?? null;
     this.#inContainer = inContainer ?? detectContainer();
@@ -101,6 +126,11 @@ export class Sandbox {
 
   setDockerAvailable(available: boolean): void {
     this.#dockerAvailable = available;
+  }
+
+  /** 发事件不许打断执行：这一层的调用点在返回结果的正路上，而 `LogSink.event` 之外的回调不保证不抛。 */
+  #emit(event: SandboxRunEvent): void {
+    try { this.onRun?.(event); } catch { /* 观测不该把一次成功的执行变成失败 */ }
   }
 
   /**
@@ -196,14 +226,19 @@ export class Sandbox {
   async run(command: string, role: Role, workspace: string, abortSignal: AbortSignal, timeoutMs = this.#cfg().defaultTimeoutMs, turnId = 'adhoc', extraEnv?: Readonly<Record<string, string>>): Promise<SandboxResult> {
     if (abortSignal.aborted) return { ok: false, exitCode: null, stdout: '', stderr: 'cancelled', truncated: false, durationMs: 0, killed: true, oom: false };
     const plan = this.plan(role, workspace);
+    /** 被拒也要落一行：模型侧只看到一句工具失败，而「为什么」是配置层的事。 */
+    const denied = (reason: string): SandboxResult => {
+      this.#emit({ turnId, role, mode: plan.mode, image: null, exitCode: null, durationMs: 0, ok: false, killed: false, oom: false, truncated: false, denied: reason });
+      return { ok: false, exitCode: null, stdout: '', stderr: reason, truncated: false, durationMs: 0, killed: false, oom: false };
+    };
     if (!plan.allowed) {
       // 「沙箱不可用而有非 owner 请求执行」是 docs/10 §6 那六类告警之一：对用户表现为工具莫名
       // 失败，而运维那边没有任何信号。owner 走 bypass 不算 —— 那是配置本来就允许的形态。
       if (role !== 'owner') this.onUnavailable?.(plan.reason ?? 'denied', role);
-      return { ok: false, exitCode: null, stdout: '', stderr: plan.reason ?? 'denied', truncated: false, durationMs: 0, killed: false, oom: false };
+      return denied(plan.reason ?? 'denied');
     }
     const mounted = plan.mode === 'docker' ? this.#hostPath(workspace) : workspace;
-    if (mounted === null) return { ok: false, exitCode: null, stdout: '', stderr: `workspace 不在 sandbox.workspaceDir 之下，无法换算成宿主路径：${workspace}`, truncated: false, durationMs: 0, killed: false, oom: false };
+    if (mounted === null) return denied(`workspace 不在 sandbox.workspaceDir 之下，无法换算成宿主路径：${workspace}`);
     // 建目录放在放行之后：被拒的调用不该在盘上留下痕迹。容器内建的目录经 ./data 绑定挂载
     // 同步到宿主，所以 #hostPath 换算出来的路径此刻在宿主上也已存在。
     mkdirSync(workspace, { recursive: true, mode: 0o700 });
@@ -265,7 +300,10 @@ export class Sandbox {
     // 那个 `&& !truncatedByCap` 唯一还起作用的场合恰好是 bug：子进程已自己退出 0、最后一批
     // >2×cap 的输出在 `close` 之前才 flush 完，`kill()` 打空，于是一次**成功**调用被记成失败，
     // 连着三次就把 bash 停掉一整轮（docs/28 · L-TOOL-01）。
-    return { ok: exitCode === 0, exitCode, stdout: out.value, stderr: err.value, truncated: truncatedByCap || out.truncated || err.truncated, durationMs: Math.round(performance.now() - started), killed, oom,
+    const durationMs = Math.round(performance.now() - started);
+    this.#emit({ turnId, role, mode: plan.mode, image: plan.mode === 'docker' ? this.#cfg().image : null,
+      exitCode, durationMs, ok: exitCode === 0, killed, oom, truncated: truncatedByCap || out.truncated || err.truncated });
+    return { ok: exitCode === 0, exitCode, stdout: out.value, stderr: err.value, truncated: truncatedByCap || out.truncated || err.truncated, durationMs, killed, oom,
       ...(truncatedByCap ? { hint: `输出超过 ${cap * 2} 字节（tools.exec.maxOutputBytes 的两倍）后子进程已被 SIGKILL，交回的只有头尾各半 —— 命令可能没跑完。把输出收窄再来（重定向到文件后分段 read_file、用 grep/head 过滤、只打印统计），别原样重试。` } : {}) };
   }
 }
