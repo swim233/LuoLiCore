@@ -66,6 +66,39 @@ describe('tool-result 形状', () => {
     expect(part.output).toEqual({ type: 'error-text', value: '[工具结果缺失：这次调用的结果没有被记录下来]' });
   });
 
+  /**
+   * `docs/28 · L-CTX-01`：判据曾是一个**全局** `Set<toolCallId>` —— 窗口内任何位置有一条同名
+   * 结果，就会让真正的孤儿逃过修复。而 AI SDK 的 `convertToLanguageModelPrompt` 是**有序**校验，
+   * 于是在发请求之前直接抛 `MissingToolResultsError`：会话每一轮都 `steps=0` 失败，
+   * 而**一条 `ctx.orphan_tool_call` 都没有**（本该救它的代码认为它已被回答）。
+   */
+  it('同一个 toolCallId 在窗口里重复时，真孤儿仍然被补 —— 一条结果只认领一次', () => {
+    const turn = { snapshot: { messages: [
+      { role: 'assistant', parts: [{ type: 'tool-call', toolCallId: 'dup', toolName: 'x', input: {} }] },
+      { role: 'tool', parts: [{ type: 'tool-result', toolCallId: 'dup', toolName: 'x', output: { type: 'json', value: { ok: true } } }] },
+      // 第二次用同一个 id 调用，而这一次没有结果 —— 全局集合会认为它已经被上面那条回答了。
+      { role: 'assistant', parts: [{ type: 'tool-call', toolCallId: 'dup', toolName: 'x', input: {} }] },
+    ], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 3 }, delta: [] } as unknown as RuntimeTurnContext;
+    const reported: string[][] = [];
+    const messages = contextMessages(turn, undefined, { onOrphanToolCalls: (ids) => reported.push(ids) });
+    expect(reported).toEqual([['dup']]);
+    expect(messages).toHaveLength(4);
+    for (const message of messages) expect(modelMessageSchema.safeParse(message).success).toBe(true);
+    expect((messages[3]!.content as Array<Record<string, unknown>>)[0]).toMatchObject({ type: 'tool-result', toolCallId: 'dup', output: { type: 'error-text' } });
+  });
+
+  it('结果排在调用之前时不算回答 —— 那条调用仍然是孤儿', () => {
+    // 顺序颠倒的历史（rebase / 裁剪切错位置都可能留下）不该被当成配对齐全：SDK 按顺序校验，
+    // 它看到的是「assistant 的 tool-call 后面没有 tool 消息」。
+    const turn = { snapshot: { messages: [
+      { role: 'tool', parts: [{ type: 'tool-result', toolCallId: 'late', toolName: 'x', output: { type: 'json', value: { ok: true } } }] },
+      { role: 'assistant', parts: [{ type: 'tool-call', toolCallId: 'late', toolName: 'x', input: {} }] },
+    ], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 2 }, delta: [] } as unknown as RuntimeTurnContext;
+    const reported: string[][] = [];
+    contextMessages(turn, undefined, { onOrphanToolCalls: (ids) => reported.push(ids) });
+    expect(reported).toEqual([['late']]);
+  });
+
   it('配对齐全时一条都不补，也不报', () => {
     const turn = { snapshot: { messages: [
       { role: 'assistant', parts: [{ type: 'tool-call', toolCallId: 'c-1', toolName: 'search_messages', input: { query: 'x' } }] },

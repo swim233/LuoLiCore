@@ -88,6 +88,17 @@ function cite(messages: readonly ArchivedMessage[], context: ToolExecutionContex
     resolveReplies: (ids) => scope.archiveIdsByTgMessageIds(ids) });
 }
 
+/**
+ * 短词进不了 trigram 索引，剔掉是**正确降级**（`archiveQuery` 的 docstring 写明了理由）——
+ * 但不说出来就是「我按你写的都查了」的假象：`search_messages("名字 李小明")` 只按 `李小明`
+ * 检索过，而模型据此判定「没有这回事」（docs/28 · L-DB-01）。给的是可操作的下一步，
+ * 不是一句免责声明。两个检索工具共用一份文案 —— 各写一份的结果是其中一个以后忘了改。
+ */
+function droppedTokenNote(query: string): { note?: string } {
+  const dropped = archiveQuery(query).dropped;
+  return dropped.length ? { note: `以下词短于 3 个字、trigram 索引检索不到，本次未参与检索：${dropped.join('、')}。需要按它们找就把它们单独作为 query 再查一次（单独查会走逐字匹配）。` } : {};
+}
+
 /** workspace 内的绝对路径 + 大小闸门。越界、不存在、超限三种都要在调 API 之前变成 `ok:false`。 */
 function resolveOutgoingFile(context: ToolExecutionContext, files: FileTools, path: string): { ok: false; error: string; hint?: string } | { ok: true; absolute: string } {
   let absolute: string;
@@ -239,11 +250,7 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
       if (after === false || before === false) return { ok: false, error: 'invalid_time_filter', hint: 'after / before 要写成 ISO 时间，例如 2026-08-14 或 2026-08-14T10:02:00Z' };
       const scope = dependencies.archive.scope(context.turn.chatId, context.turn.threadId);
       const messages = cite(scope.search(input.query, input.limit, { from: input.from ?? null, after, before, kind: input.kind ?? null }), context, scope);
-      // 短词进不了 trigram 索引，剔掉是正确降级 —— 但不说出来就是「我按你写的都查了」的假象：
-      // `search_messages("名字 李小明")` 只按 `李小明` 检索过，而模型据此判定「没有这回事」
-      // （docs/28 · L-DB-01）。给的是可操作的下一步，不是一句免责声明。
-      const dropped = archiveQuery(input.query).dropped;
-      return { ok: true, messages, ...(dropped.length ? { note: `以下词短于 3 个字、trigram 索引检索不到，本次未参与检索：${dropped.join('、')}。需要按它们找就把它们单独作为 query 再查一次（单独查会走逐字匹配）。` } : {}) };
+      return { ok: true, messages, ...droppedTokenNote(input.query) };
     } });
   registry.register({ name: 'read_messages', description: '按顺序读取当前会话聊天记录。anchor 可以是消息 id 或 ISO 时间，direction 决定往哪边读；不给 anchor 就是最近若干条。', inputSchema: readSchema({ defaultReadLimit: 50, maxReadLimit: 200 }),
     inputSchemaFor: (context) => readSchema(archiveLimits(context)), policy: builtinPolicy('read_messages'), sourcePriority: 100, untrustedOutput: true,
@@ -260,8 +267,10 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
   registry.register({ name: 'admin_search_messages', description: '跨会话搜索聊天记录，仅 owner。', inputSchema: adminSearchSchema({ defaultSearchLimit: 20, maxSearchLimit: 100 }),
     inputSchemaFor: (context) => adminSearchSchema(archiveLimits(context)), policy: builtinPolicy('admin_search_messages'), sourcePriority: 100, untrustedOutput: true,
     // 跨会话的行不带 thread 作用域，回复标记换不出归档 id，所以只带 `[chat:<id>]` 不带 `↩︎`。
+    // 短词丢弃的 note 与 `search_messages` 同办：跨会话检索走的是同一个 `archiveQuery`，
+    // 只在其中一个工具上说出来，等于让 owner 那条路继续拿到「我全查过了」的假象。
     execute: (input, context) => ({ ok: true, messages: citeArchivedMessages(dependencies.archive.adminSearchAll(input.query, input.limit),
-      { timezone: (context.turn.config as Readonly<Config>).general.timezone, withChat: true }) }) });
+      { timezone: (context.turn.config as Readonly<Config>).general.timezone, withChat: true }), ...droppedTokenNote(input.query) }) });
   // 只回摘要（窗口区间 / 条数 / tokens / 认领水位）。带上整份历史时输出会被 `maxOutputBytes`
   // 从中间截断，模型拿到的是一段掐断的 JSON —— 前半是最早的历史、后半是 commit 列表，
   // 既烧 token 又没有信息（docs/27 · R-03）。逐条历史在 WebUI 的会话页。
