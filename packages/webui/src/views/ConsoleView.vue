@@ -21,7 +21,8 @@ import { api, ApiError, apiStream, hydrateSession } from '../api/client';
 
 interface TrendPoint { day: string; messages: number; turns: number; costUsd: number }
 interface Dashboard { turns: { total: number; running: number; failed: number; cost: number }; messages: { total: number }; providers: { total: number; enabled: number }; trend?: TrendPoint[] }
-interface Principal { id: string; kind: string; tgId: string; role: string; displayName: string | null; username: string | null; chatType: string | null }
+/** `effectiveRole` 是服务端算的 min(user, chat)，只有私聊配得上对的那两行有值（docs/21 · G-UI-03）。 */
+interface Principal { id: string; kind: string; tgId: string; role: string; displayName: string | null; username: string | null; chatType: string | null; effectiveRole: string | null }
 interface Provider { id: string; name: string; kind: string; baseUrl?: string | null; apiKeyHint: string | null; enabled: number; healthState: string | null; healthError?: string | null }
 interface ProviderTest { reachable: boolean; code: string; message: string; status: number | null; latencyMs: number; models: number }
 interface CatalogMeta { match: 'provider' | 'official' | 'third-party' | 'none'; catalogProviderId: string | null; catalogProviderName: string | null; catalogModelId: string | null; normalized: boolean; priceRange: { min: number; max: number; providers: number } | null; capabilities: Record<string, boolean>; reasoningControl: string | null; reasoningEfforts: string[]; modalities: { input: string[]; output: string[] }; knowledge: string | null; releaseDate: string | null }
@@ -256,7 +257,7 @@ const COLUMNS = {
   agents: [{ key: 'name', header: '名称' }, { key: 'description', header: '职责' }, { key: 'minRole', header: '最低角色', width: '7rem' }, { key: 'modelAlias', header: '模型别名', width: '8rem' }, { key: 'tools', header: '可用工具' }, { key: 'maxSteps', header: '步数上限', width: '6rem' }, { key: 'actions', header: '', width: '6rem' }],
   hits: [{ key: 'tgDate', header: '时间', width: '12rem' }, { key: 'chatId', header: '会话', width: '9rem' }, { key: 'from', header: '发言人', width: '10rem' }, { key: 'text', header: '内容' }, { key: 'detail', header: '操作', width: '8rem' }],
   usage: [{ key: 'ts', header: '时间', width: '13rem' }, { key: 'model_alias', header: '别名' }, { key: 'input_tokens', header: '输入' }, { key: 'output_tokens', header: '输出' }, { key: 'cost_usd', header: '成本' }],
-  principals: [{ key: 'kind', header: '类型' }, { key: 'displayName', header: '显示名' }, { key: 'tgId', header: 'Telegram ID' }, { key: 'role', header: '角色', width: '8rem' }, { key: 'username', header: '用户名' }],
+  principals: [{ key: 'kind', header: '类型' }, { key: 'displayName', header: '显示名' }, { key: 'tgId', header: 'Telegram ID' }, { key: 'role', header: '角色', width: '9rem' }, { key: 'username', header: '用户名' }],
   models: [{ key: 'model_id', header: '模型 ID' }, { key: 'provider_id', header: 'Provider' }, { key: 'context_window', header: '窗口' }, { key: 'capabilities', header: '能力' }, { key: 'price_in', header: '输入价格' }, { key: 'price_out', header: '输出价格' }, { key: 'enabled', header: '启用', width: '6rem' }],
   aliases: [{ key: 'alias', header: '别名', width: '12%' }, { key: 'purpose', header: '用途', width: '27%' }, { key: 'chain', header: 'Fallback 链', width: '31%' }, { key: 'settings', header: '采样参数', width: '20%' }, { key: 'actions', header: '', width: '10%' }],
   logs: [{ key: 'ts', header: '时间', width: '13rem' }, { key: 'level', header: '级别', width: '7rem' }, { key: 'kind', header: '事件' }, { key: 'summary', header: '摘要' }, { key: 'data_bytes', header: '载荷', width: '6rem' }, { key: 'trace_id', header: 'Trace' }],
@@ -870,7 +871,7 @@ const principalCount = (kind: PrincipalKind): number => kind === 'all' ? princip
 const principalDialog = ref(false);
 const principalSaving = ref(false);
 // `chatType` 也要进来：弹窗里那行「类型」现在按它显示，缺了它每个会话都会掉进 id 正负号那条回落。
-const principalForm = ref<Principal & { originalRole: string }>({ id: '', kind: 'user', tgId: '', role: 'limited', displayName: null, username: null, chatType: null, originalRole: 'limited' });
+const principalForm = ref<Principal & { originalRole: string }>({ id: '', kind: 'user', tgId: '', role: 'limited', displayName: null, username: null, chatType: null, effectiveRole: null, originalRole: 'limited' });
 function editPrincipal(row: Principal): void { principalForm.value = { ...row, originalRole: row.role }; principalDialog.value = true; }
 async function savePrincipal(): Promise<void> {
   const form = principalForm.value;
@@ -2745,7 +2746,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             <article v-if="!visibleCounters.length" class="empty-card"><i class="pi pi-gauge" /><h3>{{ quota?.counters.length ? '当前窗口还没有产生花费' : '还没有任何计数' }}</h3><p>{{ quota?.counters.length ? `有 ${staleCounters} 行属于历史 bucket，勾上上面那个开关可以看到。` : '有轮次跑起来之后，这里按 全局 / 会话 / 用户 × 日 / 月 六个维度记账。' }}</p></article>
           </div>
         </section>
-        <section v-else-if="active === 'principals'" key="principals" class="surface page-surface"><header><div><p class="eyebrow">ACCESS CONTROL</p><h2>主体与权限</h2><p>effectiveRole 始终取用户与会话角色的较低者。点任一行改角色。</p></div><UiButton label="批量导入" icon="pi pi-upload" @click="openBulk" /></header>
+        <section v-else-if="active === 'principals'" key="principals" class="surface page-surface"><header><div><p class="eyebrow">ACCESS CONTROL</p><h2>主体与权限</h2><p>effectiveRole 始终取用户与会话角色的较低者 —— 一个私聊占 <code>user:</code> 与 <code>chat:</code> 两行，只改一行时角色列会标出实际生效的那个。点任一行改角色。</p></div><UiButton label="批量导入" icon="pi pi-upload" @click="openBulk" /></header>
           <nav class="subtabs" aria-label="主体类型">
             <button v-for="[key, label] in PRINCIPAL_KINDS" :key="key" type="button" :class="{ active: principalKind === key }" @click="principalKind = key">{{ label }}<span>{{ principalCount(key) }}</span></button>
           </nav>
@@ -2759,7 +2760,8 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             <template #kind="{ data }"><UiTag :value="principalKindLabel(data)" :severity="data.kind === 'user' ? 'secondary' : isPrivatePrincipal(data) ? 'warn' : 'info'" /></template>
             <template #displayName="{ data }"><span class="alias-name">{{ data.displayName ?? '—' }}<UiTag v-if="data.id === ownerPrincipalId" value="引导 OWNER" severity="success" title="access.bootstrapOwnerId 指向的这一行；改掉它的角色，Telegram 那边就没人能管 bot 了" /></span></template>
             <template #username="{ data }">{{ data.username ? `@${data.username}` : '—' }}</template>
-            <template #role="{ data }"><UiTag :value="data.role" :severity="roleSeverity(data.role)" /></template>
+            <!-- 私聊占两行而 min() 的结果此前一处都不显示：只改了一半看起来和改对了一样（docs/21 · G-UI-03） -->
+            <template #role="{ data }"><UiTag :value="data.role" :severity="roleSeverity(data.role)" /><small v-if="data.effectiveRole && data.effectiveRole !== data.role" class="catalog-sub role-shadowed" :title="`另一半是 ${data.kind === 'user' ? 'chat' : 'user'}:${data.tgId}（${data.effectiveRole}）—— 有效角色取两行里较低的那个，模型看到的是 ${data.effectiveRole}`">实际 {{ data.effectiveRole }}</small></template>
           </DataGrid>
         </section>
         <section v-else-if="active === 'providers'" key="providers" class="surface page-surface">

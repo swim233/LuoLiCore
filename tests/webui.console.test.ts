@@ -74,6 +74,33 @@ describe('console endpoints', () => {
     closeDatabase(db);
   });
 
+  /**
+   * 一个私聊占两行，而角色列此前各显示各的：只把 `chat:X` 改成 trusted、`user:X` 还停在
+   * limited 时，界面写着 trusted 而模型每一轮都说 limited，两边都没错（docs/21 · G-UI-03）。
+   * 判据只有服务端这一份，所以断言落在 `GET /api/principals` 的字段上。
+   */
+  it('reports the effective role of a private pair, not just each row on its own', async () => {
+    const { app, db, principals, headers } = harness('principals-effective');
+    principals.upsertSeen({ id: 'user:7', kind: 'user', tgId: '7', role: 'limited', displayName: '某人', username: null, chatType: null });
+    principals.upsertSeen({ id: 'chat:7', kind: 'chat', tgId: '7', role: 'trusted', displayName: '某人', username: null, chatType: 'private' });
+    // 群那行的角色是上限而不是有效角色 —— 成员各不相同，编一个确定值出来比不给更坏。
+    principals.upsertSeen({ id: 'chat:-100', kind: 'chat', tgId: '-100', role: 'trusted', displayName: '某群', username: null, chatType: 'supergroup' });
+    // 只见过一边（还没私聊过的群友）也配不上对。
+    principals.upsertSeen({ id: 'user:9', kind: 'user', tgId: '9', role: 'trusted', displayName: '群友', username: null, chatType: null });
+    const rows = await body<Array<{ id: string; role: string; effectiveRole: string | null }>>(await app.request('/api/principals', { headers }));
+    const byId = new Map(rows.map((row) => [row.id, row]));
+    // 配得上对的两行报同一个 min()，而且都不等于 chat 那行自己的 role —— 界面靠这个差出红字。
+    expect(byId.get('user:7')).toMatchObject({ role: 'limited', effectiveRole: 'limited' });
+    expect(byId.get('chat:7')).toMatchObject({ role: 'trusted', effectiveRole: 'limited' });
+    expect(byId.get('chat:-100')).toMatchObject({ role: 'trusted', effectiveRole: null });
+    expect(byId.get('user:9')).toMatchObject({ role: 'trusted', effectiveRole: null });
+    // 补上另一半之后不一致消失：这正是那次事故的修法。
+    principals.setRole('user:7', 'trusted', 'test');
+    const fixed = new Map((await body<Array<{ id: string; effectiveRole: string | null }>>(await app.request('/api/principals', { headers }))).map((row) => [row.id, row.effectiveRole]));
+    expect([fixed.get('user:7'), fixed.get('chat:7')]).toEqual(['trusted', 'trusted']);
+    closeDatabase(db);
+  });
+
   it('serves the JSON that was actually sent upstream for one turn, blobs included', async () => {
     const { app, db, log, headers } = harness('turn-detail', { logs: { dir: './data/turn-detail-logs', bodyMaxBytes: 512 } });
     db.prepare(`INSERT INTO turns(id,key,chat_id,initiator_user_id,effective_role,trigger_reason,state,started_at,finished_at,steps,model_calls,tool_calls,input_tokens,output_tokens,cost_usd)
