@@ -119,10 +119,12 @@ describe('C9 · 原始 YAML', () => {
     const invalid = await app.request('/api/config/yaml', { method: 'PUT', headers, body: JSON.stringify({ yaml: 'context:\n  limit:\n    tokens: 1\n' }) });
     expect(invalid.status).toBe(400);
     expect((await invalid.json() as { error: { details: Array<{ path: string }> } }).error.details.some((entry) => entry.path === 'context.limit.tokens')).toBe(true);
-    // 合法的写进去，按顶层段落库（粒度是点分键，不是一整棵树写成一行）。
+    // 合法的写进去，**按叶子落库**：按顶层段落库时 zod 会把整棵子树的默认值一起钉死
+    // （docs/28 · L-WEB-02，往返粒度的用例在 `tests/config.api.test.ts`）。
     const ok = await app.request('/api/config/yaml', { method: 'PUT', headers, body: JSON.stringify({ yaml: 'context:\n  limit:\n    tokens: 48000\n' }) });
     expect(ok.status).toBe(200);
-    expect(db.prepare("SELECT COUNT(*) FROM config_kv WHERE key='context'").pluck().get()).toBe(1);
+    expect(db.prepare("SELECT value_json FROM config_kv WHERE key='context.limit.tokens'").pluck().get()).toBe('48000');
+    expect(db.prepare("SELECT COUNT(*) FROM config_kv WHERE key='context'").pluck().get()).toBe(0);
     closeDatabase(db);
   });
 });

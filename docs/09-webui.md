@@ -77,10 +77,17 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
 - 群里不给：`/webui` 在非私聊里直接回「这个命令只在私聊里用」——登录链接出现在群里等于把 owner
   权限递给屏幕前所有人。
 - `webui.publicUrl` 没配时**明说生成不出来**，而不是发一条打不开的链接。
-- **三者由 CI 断言锁死**（`tests/trigger.test.ts` 的 `keeps /webui wired on both sides`）：
-  `HANDLED_COMMANDS` + `bot.command('webui')` + `issueLoginToken` + `POST /api/auth/token` +
-  该端点在鉴权中间件的放行名单里。上一轮就是因为「名字留在白名单里但服务端没写」才把它整个摘掉的
-  （docs/20 · W-TG-01）。
+- **前端那一跳在 `LoginView` 的 `onMounted` 里**：非 setup 分支且 query 带 `t` 时先兑换，成功照
+  口令登录的收尾走（存 csrf → `authenticated=true` → 进控制台），失败落回口令框并把服务端给的原因
+  写进表单内的 error callout —— token 是 5 分钟一次性的，**过期是常态**，那里不能只有一句「请求失败」。
+  兑换期间整张卡片是 loading 态。安全上失败即降级成口令框（fail-closed），所以这条路只补功能。
+- **四者由 CI 断言锁死**：前三者（`HANDLED_COMMANDS` + `bot.command('webui')` + `issueLoginToken` +
+  `POST /api/auth/token` + 该端点在鉴权中间件的放行名单里）在 `tests/trigger.test.ts` 的
+  `keeps /webui wired on both sides`；**前端消费那一跳**在 `tests/webui/login.render.test.ts`。
+  上一轮是因为「名字留在白名单里但服务端没写」才把它整个摘掉的（docs/20 · W-TG-01）；这一轮是
+  反过来 —— 命令、服务端、bot 三处各有测试且全绿，而前端从未打过那个端点，`/login?t=…` 渲染的是
+  普通口令框，整条功能死了一轮没人发现（docs/28 · L-WEB-01）。**没有一条测试跨过前后端边界**
+  就是它能活下来的唯一原因。
 
 ---
 
@@ -573,7 +580,31 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
   **解析与校验都在服务端**，用的就是 `loadConfig` 那个 YAML 解析器：放到前端等于让两处方言各自漂移
   （缩进 tab、锚点、`yes/no` 当布尔这些边角都有差异），而「界面上过了、启动时炸了」是最难查的一类。
   语法错误回 `{ line, column }`，校验错误回 zod 的路径，两者都显示在编辑器旁边而不是让 Toast 一闪而过。
-  落库按**顶层段**逐段覆盖，不是把整棵树写成一行 —— 后者会把工具页那种更细的覆盖全部作废（G-CFG-02）。
+  - **落库粒度是叶子**（`context.limit.tokens` 这样的点分键），既不是顶层段、更不是整棵树写成一行
+    —— 后者会把工具页那种更细的覆盖全部作废（G-CFG-02）。按**段**落库同样不行：
+    `runtimeConfigSchema.safeParse` 会把每个 `.default()` 填满，写回去的是**填满之后**那整棵子树，
+    于是一次「一个字不改」的往返就把生效覆盖叶子从 73 涨到 171，把那一刻的代码默认值永久钉死，
+    而第二次往返起幂等 —— 第一次保存就钉死了，之后界面上看不出来（docs/28 · L-WEB-02）。
+    枚举叶子时**递归普通对象、把数组当叶子**（`approval.rules` / `mcp.servers` / `agent.agents`
+    是整块语义，逐个下标落库既没人这么读、也会被 `sortOverrideKeys` 拼回原样），空对象不产生叶子。
+    落库的值仍取**校验后**的那一份，与 `PUT /api/config` 同一条契约（zod 的强制转换要进 `config_kv`）。
+  - **这份 YAML 是所提交段落的全量视图**：段里删掉一个键，那一行就真的从 `config_kv` 消失 ——
+    端点算出「落在提交段之下、但不在新叶子集里」的旧键，交给 `writeConfigRows` 在**同一个事务**里
+    删掉并记进 `config_revisions`（配置写入的唯一出口不能绕）。反过来，把**整个顶层段**从 YAML 里
+    删掉**不删任何东西**：「这一段我不管」与「这一段清空」在提交的树里区分不出来，宁可不删。
+  - **密钥类行不参与往返，也永不被删**。`GET` 对 `looksSecret` 为真的行整行跳过（与导出同一套判据：
+    叶子段像密钥 + 值是非空字符串），并在 YAML **顶部生成一段注释**逐条列出它们，写明「保持原值，
+    删掉这段注释也不会删掉它们」—— 界面上此前只有一个 `skipped` 数组，运维看不出「我提交的这份少了
+    什么」。`PUT` 那一侧按同一份判据**自己重算一次**（`GET`/`PUT` 是两次独立请求，不能信客户端），
+    把它们连同 `envPinnedConfigKeys()` 一起排除在删除集之外。
+    此前 `webui.passwordHash` 就是这样被一次往返擦掉的：`PUT` 拿到的树里没有它 → zod 补上默认值 `''`
+    → 整个 `webui` 段写回 → 那一行被删 → `main.ts` 的 `if (!config.webui.passwordHash)` 生效、
+    进程掉回 setup-token 形态，而 `host` 是默认回环时 `superRefine` 不拦，**全程静默**。
+    触发条件恰好是产品自己引导的配置：`webui.passwordHash` 只在 `WEBUI_PASSWORD` 存在时才被
+    `envPinnedConfigKeys()` 钉住，而 `.env.example` 与 `POST /api/auth/password` 的 409 都在劝运维
+    删掉那个环境变量、改用界面改密（docs/28 · L-WEB-04）。`tools.web.searchApiKey` 是同一条路。
+  - 被环境变量钉住的**那个叶子**跳过并在响应的 `skipped` 里点名（此前是整个顶层段一起跳过）。
+    响应另带 `pruned`（这次真的删掉的旧键）与 `preserved`（保住的密钥行），Toast 逐项点名。
 - **合并后的完整配置**（已实现，`高级`，**默认收起**）：`config.yaml` → DB 覆盖层 → 环境变量三层
   合并的只读结果，点 `[展开]` 才 `JSON.stringify`。它此前常驻在设置页最底下：既占掉一整屏，
   又因为「看起来最全」而被当成真正的配置源 —— 它和上面那张表单是同一份数据的两种视图，
@@ -598,6 +629,11 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
   DB 行指向的文件（下载中途崩溃、`local_path` 被换掉、手工删过库行留下的）。返回删除条数与字节数。
   **它不是保留策略** —— 媒体附件的自动过期是 [14 §2](./14-open-questions.md) Q9 的未决问题，
   二次确认里要写清这一点，别让运维以为点一下就能瘦身（docs/22 · I-09）。
+  **返回体里带 `refused` 时 Toast 必须是 `warn`、标题写「已拒绝」、且不自动消失**：`severity` 与标题
+  写死成绿色「完成」的话，拒绝理由只会挤在一行 JSON 的尾巴上、8 秒后自己消失（docs/28 · L-WEB-03）。
+  而 `gcFiles` 的 `refused` 唯一触发条件是「库与目录来自两套部署」—— 正是运维最该立刻停手、
+  去核对 `LUOLI_DATA_DIR` 与 `media.dir` 的那一种（[25 §10](./reviews/25-round7-remediation.md)
+  记的误删 76 个附件 + 90 份子 agent 全文就是它防住的）。
 
 ---
 
@@ -675,7 +711,7 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
 | `POST /api/maintenance/{backup,vacuum,cleanup-logs,gc-files,rebuild-fts}` | 维护。`gc-files` 只删没有任何 DB 行指向的孤儿，**不是过期策略** |
 | `POST /api/restart` | 重启进程：走和 SIGTERM 一样的优雅关闭。**先回响应再退出**；没有 supervisor 时进程不会自己回来 |
 | `GET /api/config/export` `POST /api/config/import` | 配置覆盖层的导出 / 导入。密钥类键不导出（不是导成 `«redacted»`）；导入按键覆盖、不删除 |
-| `GET/PUT /api/config/yaml` | 原始 YAML 模式。解析在服务端（与 `loadConfig` 同一个解析器）；语法错误回 `{line, column}`，校验错误回 zod 路径 |
+| `GET/PUT /api/config/yaml` | 原始 YAML 模式。解析在服务端（与 `loadConfig` 同一个解析器）；语法错误回 `{line, column}`，校验错误回 zod 路径。`GET` 跳过密钥类行并在 YAML 顶部生成注释逐条点名；`PUT` **按叶子落库**（递归对象、数组当叶子），并删掉「落在提交段之下、不在新叶子集里」的旧键 —— 密钥类行与 env 钉住的键排除在删除集之外。响应 `{keys, skipped, pruned, preserved, subsumed}` |
 | `POST /api/auth/token` | 用 `/webui` 发的一次性 token 换 session。单次使用、5 分钟过期；**在鉴权中间件的放行名单里**（否则它自己就要求先登录） |
 | `GET /api/logs?minLevel=` | 日志列表。`minLevel` ∈ `debug\|info\|warn\|error`，总览页的「最近错误」卡片用 `warn`。字段是 `log_events` 的列（snake_case）**减去 `data_json`，加 `data_bytes`** —— 单条载荷能到 `logs.bodyMaxBytes`（256 KB）、列表一次上千行，带着载荷刷新等于每次往浏览器推几十 MB。要正文走 `GET /api/logs/:id` |
 | `GET /api/events` | SSE |

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { mount, type VueWrapper } from '@vue/test-utils';
+import { toasts } from '../../packages/webui/src/ui/toast';
 
 /**
  * 控制台的**渲染**防线。
@@ -47,6 +48,9 @@ const RESPONSES: Record<string, unknown> = {
   '/api/usage/report': { groupBy: 'day', from: 0, to: Date.now(), rows: [] },
   // 唤醒词可用性是个数组端点，但路径不长得像列表 —— 显式列出来。
   '/api/config/wakewords/check': [{ pattern: '洛璃', kind: 'contains', ok: true, reason: null }],
+  // fail-closed 的拒绝：`gcFiles` 的 `refused` 唯一触发条件是「库与目录来自两套部署」。
+  '/api/maintenance/gc-files': { files: 0, fileBytes: 0, agentResults: 0, agentResultBytes: 0,
+    refused: ['attachments 里一条带路径的行都没有，而 ./data/files 下有文件 —— 这通常意味着库与目录来自两套部署。拒绝清理。'] },
   '/api/schedules': { available: true, enabled: true, timezone: 'UTC', settings: { maxPerChat: 20, minIntervalMinutes: 5, maxPayloadChars: 2000 },
     jobs: [{ id: 'j1', key: 'chat:c1', chatId: 'c1', threadId: null, createdBy: '1', name: '每日早报', mode: 'agent', state: 'active',
       chatLabel: '阿离', creatorLabel: '阿离', cron: '0 8 * * *', timezone: 'UTC', payload: '汇总昨天群里聊了什么', runCount: 2,
@@ -58,8 +62,10 @@ const RESPONSES: Record<string, unknown> = {
 function responseFor(url: string): unknown {
   const path = url.split('?')[0]!;
   if (path in RESPONSES) return RESPONSES[path];
+  // `/api/turns/active` 也回数组：它慢一步落到 DataGrid 的 `rows`，回 `{}` 的表现是一条
+  // 「Invalid prop: type check failed for prop "rows"」，而那正是这套装置要挡的那类症状。
   const listLike = ['/api/principals', '/api/providers', '/api/logs', '/api/chats', '/api/usage', '/api/skills', '/api/plugins',
-    '/api/mcp', '/api/custom-tools', '/api/agents', '/api/approvals', '/api/tasks', '/api/prompts', '/api/models', '/api/aliases'];
+    '/api/mcp', '/api/custom-tools', '/api/agents', '/api/approvals', '/api/tasks', '/api/prompts', '/api/models', '/api/aliases', '/api/turns/active'];
   return listLike.includes(path) ? [] : {};
 }
 
@@ -143,6 +149,33 @@ describe('ConsoleView 渲染', () => {
     await settle(wrapper);
     const vm = wrapper.vm as unknown as { active: string; SETTINGS_TABS: ReadonlyArray<readonly [string, string]> };
     expect(vm.SETTINGS_TABS.map(([key]) => key)).toEqual([...SETTINGS_TABS]);
+    wrapper.unmount();
+  });
+
+  /**
+   * `gc-files` 的 fail-closed 拒绝不能渲染成绿色「完成」。`severity` 与标题此前写死，拒绝理由挤在
+   * 一行 JSON 的 `refused` 字段尾巴上、8 秒后自动消失 —— 而它唯一的触发条件是「库与目录来自两套
+   * 部署」，正是运维最该立刻停手的那一种（docs/28 · L-WEB-03；docs/25 §10 记的误删 76 个附件 +
+   * 90 份子 agent 全文就是它防住的）。
+   */
+  it('维护动作返回 refused 时是 warn 且不自动消失', async () => {
+    vi.stubGlobal('confirm', () => true);
+    toasts.splice(0, toasts.length);
+    const { default: ConsoleView } = await import('../../packages/webui/src/views/ConsoleView.vue');
+    const wrapper = mount(ConsoleView, { attachTo: document.body });
+    await settle(wrapper);
+    await (wrapper.vm as unknown as { runMaintenance(action: string, label: string): Promise<void> }).runMaintenance('gc-files', '清理孤儿文件');
+    await settle(wrapper);
+    const toast = toasts.at(-1)!;
+    expect(toast.severity).toBe('warn');
+    expect(toast.summary).toBe('清理孤儿文件 已拒绝');
+    // life <= 0 才不自动消失（`pushToast` 的语义）：8 秒后消失等于把这条拒绝藏起来。
+    expect(toast.life).toBeLessThanOrEqual(0);
+    expect(toast.detail).toContain('两套部署');
+    // 对照组：不带 refused 的动作照旧是绿色「完成」。
+    await (wrapper.vm as unknown as { runMaintenance(action: string, label: string): Promise<void> }).runMaintenance('vacuum', 'VACUUM');
+    await settle(wrapper);
+    expect(toasts.at(-1)).toMatchObject({ severity: 'success', summary: 'VACUUM 完成' });
     wrapper.unmount();
   });
 
