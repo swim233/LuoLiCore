@@ -182,6 +182,33 @@ describe('吐过内容之后断掉的轮次', () => {
     closeDatabase(bed.db);
   }, 20_000);
 
+  /**
+   * `docs/28 · L-TG-03`：一条 9469 字的回复切成 3 条 Telegram 消息，`messages` 表里是 3 行、
+   * **每行 `length(text)` 都是 9469**、head/tail 完全相同 —— 连带 `messages_fts` 也是三份，
+   * `search_messages` 把同一条回复搜出三次，归档体积按分段数翻倍。上下文侧一直是对的
+   * （`context_messages` 只有一条），所以这条缺陷只在「投递侧分段 × 归档」这条缝里。
+   */
+  it('分段投递：每个 message_id 存自己那一段，上下文仍是一条整全文', async () => {
+    const answer = `首段标记：${'甲'.repeat(120)}中段：${'乙'.repeat(120)}末段标记。`;
+    const bed = await fixture('segment-archive', () => ({ stream: (async function* () { yield answer; })(), final: Promise.resolve(answer) }),
+      { output: { mode: 'once', replyDelayMs: 0, maxMessageChars: 100 } });
+    await bed.bot.handleUpdate(privateUpdate(1, '给我一段长的'));
+    const rows = bed.db.prepare("SELECT tg_message_id AS id, text FROM messages WHERE direction='out' ORDER BY id").all() as Array<{ id: number; text: string }>;
+    expect(rows.length).toBeGreaterThan(2);
+    // 三行各存自己那一段：没有一行是全文，也没有两行相同。
+    expect(rows.every((row) => [...row.text].length < [...answer].length)).toBe(true);
+    expect(new Set(rows.map((row) => row.text)).size).toBe(rows.length);
+    expect(rows.map((row) => row.text).join('').replaceAll(/\s/gu, '')).toBe(answer.replaceAll(/\s/gu, ''));
+    // 只有末段那一行含末段的标记 → `search_messages` 不再把同一条回复搜出三次。
+    for (const marker of ['首段标记', '末段标记']) {
+      expect(bed.db.prepare(`SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH '"${marker}"'`).pluck().get()).toBe(1);
+    }
+    // 上下文侧一个字都不动：仍是一条整全文。
+    const parts = bed.db.prepare("SELECT parts_json FROM context_messages WHERE role='assistant'").pluck().all() as string[];
+    expect(parts.map((entry) => JSON.parse(entry))).toEqual([[{ type: 'text', text: answer }]]);
+    closeDatabase(bed.db);
+  }, 20_000);
+
   it('正常收尾的那一路一个字都没变', async () => {
     const bed = await fixture('partial-ok', () => ({ stream: (async function* () { yield '查好了：三条。'; })() }));
     await bed.bot.handleUpdate(privateUpdate(1, '帮我查个东西'));

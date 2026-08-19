@@ -1,7 +1,7 @@
 import { InputFile, type Api, type Bot } from 'grammy';
 import type { TelegramTarget, TelegramToolBridge } from '@luoli/core';
 import type { ArchiveRepository } from '@luoli/db';
-import { capMentions, sendWithFallback, splitTelegramText, type ParseMode } from './output.js';
+import { capMentions, deliveryOrder, segmentTelegramText, sendWithFallback, type ParseMode } from './output.js';
 
 /**
  * Telegram 只接受这一组固定的 reaction emoji（Bot API `ReactionTypeEmoji`）；别的一律 400
@@ -41,20 +41,25 @@ export class TelegramTools implements TelegramToolBridge {
 
   async sendMessage(target: TelegramTarget, text: string): Promise<object> {
     return this.guard(async (api) => {
-      // 三条出站路径都要过 @ 上限这道闸，不然它不是边界只是建议。归档仍存收口前的 `text`
-      // （见下面那条注释），改写只影响真正发出去的那份。
+      // 三条出站路径都要过 @ 上限这道闸，不然它不是边界只是建议。
       const capped = capMentions(text, this.dependencies.maxMentions());
       const parseMode = this.dependencies.parseMode();
-      const parts = splitTelegramText(capped, this.dependencies.maxMessageChars(), parseMode);
-      if (!parts.length) return { ok: false, error: 'empty_text' };
+      const { rendered, archived } = segmentTelegramText(capped, this.dependencies.maxMessageChars(), parseMode);
+      if (!rendered.length) return { ok: false, error: 'empty_text' };
       const messageIds: number[] = [];
-      for (const part of parts) {
-        const sent = await sendWithFallback(api, target.chatId, part, this.thread(target), parseMode);
-        // 归档存渲染前的 `text` 而不是 `part`：三条出站路径（这里、`bot.ts` 的兜底、流式）
-        // 必须在 `messages.text` 里放同一种东西，否则同一张表里一半带 MarkdownV2 转义符。
-        this.archiveOutgoing(target, sent.message_id, sent.date, text, 'text', sent);
-        messageIds.push(sent.message_id);
-      }
+      // 这一批分段按 chat 串行，理由与 `bot.ts` 的定稿分段同一条（docs/28 · L-TG-02）：一条消息
+      // 被切成的那几段中间挤进别的轮次的 `sendMessage`，用户看到的就是错序。
+      await deliveryOrder.run(target.chatId, async () => {
+        for (const [index, part] of rendered.entries()) {
+          const sent = await sendWithFallback(api, target.chatId, part, this.thread(target), parseMode);
+          // 归档存渲染前的正文而不是 `part`：三条出站路径（这里、`bot.ts` 的兜底、流式）必须在
+          // `messages.text` 里放同一种东西，否则同一张表里一半带 MarkdownV2 转义符。**分片时存
+          // 该段自己那一份**（docs/28 · L-TG-03）。存的是 `capMentions` 之后的那份 —— 归档要与
+          // 真正发出去的一致，另外两条路径也都是收口后的。
+          this.archiveOutgoing(target, sent.message_id, sent.date, archived[index] ?? capped, 'text', sent);
+          messageIds.push(sent.message_id);
+        }
+      });
       return { ok: true, messageIds };
     });
   }

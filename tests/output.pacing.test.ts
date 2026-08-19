@@ -116,6 +116,68 @@ describe('Telegram reply pacing', () => {
       await consuming;
     } finally { vi.useRealTimers(); }
   });
+
+  /**
+   * 上面那条只让 typing **少**了，而它是 per `TelegramOutput` 实例（= per 轮次）的，20/分钟 那个桶
+   * 却是 per chat 的 —— 「队列不再增长」只在单轮成立。第十轮实测：群内 6 轮并发 17 秒吃光储备，
+   * 随后**整整 14 秒零投递**，排在队首的 `sendChatAction` 排了 14455ms，占的正是后面那条
+   * `editMessageText`（14028ms）要用的槽位（docs/28 · L-TG-04）。
+   *
+   * 判据：**typing 可丢、正文不可丢，所以本轮有正文在途时整拍跳过 typing。**
+   */
+  it('正文在途时整拍不发 typing：可丢的不许占住不可丢的槽位', async () => {
+    vi.useFakeTimers();
+    try {
+      let typings = 0;
+      let releaseSend!: (message: { message_id: number; date: number }) => void;
+      const api = {
+        // 压在 apiThrottler 队列里的一条正文：整段时间里它都「在途」。
+        sendMessage: () => new Promise<{ message_id: number; date: number }>((resolve) => { releaseSend = resolve; }),
+        editMessageText: () => Promise.resolve(true),
+        sendChatAction: () => { typings += 1; return Promise.resolve(true); },
+      };
+      const bot = { api } as unknown as Bot;
+      let open!: () => void;
+      const gate = new Promise<void>((resolve) => { open = resolve; });
+      const stream = (async function* () { yield '在查'; await gate; })();
+      const consuming = new TelegramOutput(bot, 'chat', { ...options, replyDelayMs: 0, bufferMs: 0 }, undefined, Date.now()).consume(stream);
+      await vi.advanceTimersByTimeAsync(21_000); // 5 拍，一拍都不该发
+      // 只有进循环之前那一发（那时屏幕上一个字都没有，typing 是唯一的「在干活」信号）。
+      expect(typings).toBe(1);
+      releaseSend({ message_id: 1, date: 0 });
+      open();
+      await consuming;
+    } finally { vi.useRealTimers(); }
+  });
+
+  /**
+   * 另一半判据：**首条消息发出之后节拍放宽**（`docs/08 §5.2` 的伪码本来就写着「每 4s 续期，直到
+   * 首次消息发出」）。旧行为在这 60 秒里要发 15 条 sendChatAction，占掉 20/分钟 预算的四分之三。
+   * 同时**不许退化成「typing 完全不发」** —— 一次三十秒的工具调用在用户那边不能和「bot 死了」一样。
+   */
+  it('首条消息发出之后 typing 的节拍放宽，但绝不整轮不发', async () => {
+    vi.useFakeTimers();
+    try {
+      const start = Date.now();
+      const at: number[] = [];
+      const api = {
+        sendMessage: () => Promise.resolve({ message_id: 1, date: 0 }),
+        editMessageText: () => Promise.resolve(true),
+        sendChatAction: () => { at.push(Date.now() - start); return Promise.resolve(true); },
+      };
+      const bot = { api } as unknown as Bot;
+      let open!: () => void;
+      const gate = new Promise<void>((resolve) => { open = resolve; });
+      const stream = (async function* () { yield '在查'; await gate; })();
+      const consuming = new TelegramOutput(bot, 'chat', { ...options, replyDelayMs: 0, bufferMs: 0 }, undefined, start).consume(stream);
+      await vi.advanceTimersByTimeAsync(60_000);
+      // 开轮那一发 + 首条之后每 15 秒一发（4 秒一拍，所以落在 16 / 32 / 48 秒）= 60 秒里 4 条，
+      // 旧行为是 15 条。这两个数字（TYPING_TICK_MS / TYPING_QUIET_MS）改动时这条会红。
+      expect(at).toEqual([0, 16_000, 32_000, 48_000]);
+      open();
+      await consuming;
+    } finally { vi.useRealTimers(); }
+  });
 });
 
 // `output.placeholderTexts` / `placeholderPick` / `placeholderIndex`：等待文案此前是写死的 `…`，

@@ -129,6 +129,32 @@ describe('telegram side tools', () => {
     closeDatabase(h.db);
   });
 
+  /**
+   * `docs/28 · L-TG-03`：分段投递时三条出站路径都给**每一段**存了一份完整全文（实测一条 9469 字的
+   * 回复在 `messages` 里躺三行 9469 字），连带 `messages_fts` 三份 → `search_messages` 把同一条
+   * 回复搜出三次。这条路还额外差一道：归档存的是**未经 `capMentions`** 的原文。
+   */
+  it('archives each segment on its own row, capped mentions included', async () => {
+    const h = harness('tg-tools-segments');
+    // maxMessageChars 是 3900，所以这段 4002 字正好切成两条，断点落在中间那个空行上。
+    const text = `${'甲'.repeat(2000)}\n\n${'乙'.repeat(2000)}`;
+    expect(await h.registry.execute('send_message', { text }, h.context)).toMatchObject({ ok: true, messageIds: [11, 12] });
+    expect(h.calls).toHaveLength(2);
+    // recent() 是倒序：先看到后发的那一段。两行各存自己那一段，而不是两份全文。
+    expect(h.archive.scope('1', null).recent(10).map((row) => row.text)).toEqual(['乙'.repeat(2000), '甲'.repeat(2000)]);
+    closeDatabase(h.db);
+  });
+
+  it('archives the capped text, not the raw one with every mention still in it', async () => {
+    // 三条出站路径都该在 `messages.text` 里放「真正发出去的那份」。这条路此前存收口前的原文，
+    // 于是 `read_messages` 与 WebUI 里躺的 @ 数量比群里实际出现的多（maxMentions=5）。
+    const h = harness('tg-tools-cap-archive');
+    const text = '@alpha1 @bravo2 @charlie3 @delta44 @echo555 @foxtrot6 收到';
+    expect(await h.registry.execute('send_message', { text }, h.context)).toMatchObject({ ok: true });
+    expect(h.archive.scope('1', null).recent(1)[0]!.text).toBe('@alpha1 @bravo2 @charlie3 @delta44 @echo555 foxtrot6 收到');
+    closeDatabase(h.db);
+  });
+
   it('keeps send_file inside the workspace and under the size cap', async () => {
     const h = harness('tg-tools-file', { config: { maxFileSendMb: 0.001 } });
     writeFileSync(resolve(h.workspace, 'small.txt'), 'ok');
