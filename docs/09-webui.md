@@ -382,8 +382,11 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
   `DELETE /api/custom-tools/:name` 连注册一起摘掉。
   **正文与参数在这里是只读的**：顺手改一行会让 `definition_hash` 与模型以为的那份定义脱节，
   要改就让模型改，或者直接删。
-- **MCP**：卡片显示 transport、连接状态、失败原因、最小角色与发现到的工具名；可新建、编辑、启停、
-  删除和重连。表单按 stdio / Streamable HTTP 切换 command、args、env 或 url、headers，并覆盖
+- **MCP**：卡片显示 transport、连接状态、失败原因、最小角色、**工具条数**与发现到的工具名；可新建、
+  编辑、启停、删除和重连。工具名清单**封在一个固定高度的内嵌滚动区里**：条数没有上限（一台
+  agent-browser 就发现 64 个），而卡片网格会把同排每张卡片一起拉到最高那张的高度 ——
+  不封高的话一台 server 足以把整页拉到 1700px、并让邻居卡片变成内容散开的空盒子。
+  封高之后清单里读不出总数，所以副标题补了「N 个工具」。表单按 stdio / Streamable HTTP 切换 command、args、env 或 url、headers，并覆盖
   minRole、toolAllow、toolDeny、timeoutMs。CRUD 写入 `mcp.servers` 配置覆盖与 revision，发
   `config.changed` 后立即 `McpManager.reconcile()`；不是直接改运行时缓存。重名返回 409。
   **`mcp.enabled` 是总开关且出厂为 `false`**（`reconcile` 一上来就对它 early-return）：关着的时候
