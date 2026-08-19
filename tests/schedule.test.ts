@@ -1,8 +1,8 @@
 import { mkdirSync, rmSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { ArchiveRepository, OperationsRepository, PrincipalRepository, ScheduleRepository, TurnRepository, closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
-import { ContextEngine, EventBus, LogSink, MemoryStore, QuotaGuard, SYNTHETIC_TG_MESSAGE_ID_BASE, ScheduledJobRunner, Scheduler, ToolRegistry, TurnConcurrency, TurnRegistry, configSchema, registerScheduleTools } from '@luoli/core';
-import type { Config } from '@luoli/core';
+import { ContextEngine, EventBus, LogSink, MemoryStore, QuotaGuard, SYNTHETIC_TG_MESSAGE_ID_BASE, ScheduledJobRunner, Scheduler, ToolRegistry, TurnConcurrency, TurnFailureStreak, TurnRegistry, configSchema, registerScheduleTools } from '@luoli/core';
+import type { Config, TelegramToolBridge } from '@luoli/core';
 import type { RuntimeTurnContext } from '@luoli/shared';
 
 /**
@@ -30,14 +30,21 @@ function harness(name: string, extra: Record<string, unknown> = {}) {
   const agentCalls: RuntimeTurnContext[] = [];
   let live = config;
   const context = new ContextEngine(db, archive);
+  // 投递通道可拔：`telegram()` 在 bot 起来之前必须是 null，那条 skip 分支靠它才活着
+  // （docs/28 · L-SCH-01）。用例自己传 getter，不依赖 main.ts 的装配。
+  let bridge: TelegramToolBridge | null = {
+    sendMessage: (target, text) => { sent.push({ chatId: target.chatId, text }); return Promise.resolve({ ok: true, messageIds: [1] }); },
+    sendPhoto: () => Promise.resolve({ ok: true }), sendFile: () => Promise.resolve({ ok: true }), react: () => Promise.resolve({ ok: true }), pin: () => Promise.resolve({ ok: true }),
+  };
+  const fired: Array<{ kind: string; count: unknown }> = [];
+  const failures = new TurnFailureStreak({ fire: (kind, _summary, data) => { fired.push({ kind, count: (data as { count?: unknown } | undefined)?.count }); } }, 2);
   const runner = new ScheduledJobRunner({
     db, jobs, scheduler, context, archive, turns: new TurnRepository(db),
     registry: new TurnRegistry(), concurrency: new TurnConcurrency(config.concurrency),
     quota: new QuotaGuard(db, config.general.timezone, events), memory: new MemoryStore(db, memoryDir, 1500, 3000),
-    tools: new ToolRegistry(log, { request: async () => true }, { maxRegistered: 200, maxCallsPerTurn: 50, maxConsecutiveErrors: 10 }), log,
+    tools: new ToolRegistry(log, { request: async () => true }, { maxRegistered: 200, maxCallsPerTurn: 50, maxConsecutiveErrors: 10 }), log, failures,
     config: () => live,
-    telegram: () => ({ sendMessage: (target, text) => { sent.push({ chatId: target.chatId, text }); return Promise.resolve({ ok: true, messageIds: [1] }); },
-      sendPhoto: () => Promise.resolve({ ok: true }), sendFile: () => Promise.resolve({ ok: true }), react: () => Promise.resolve({ ok: true }), pin: () => Promise.resolve({ ok: true }) }),
+    telegram: () => bridge,
     roleOf: (kind, tgId) => principals.roleOf(kind, tgId),
     runAgent: (turn) => { agentCalls.push(turn); return Promise.resolve('早报：昨天聊了三件事。'); },
   });
@@ -50,7 +57,8 @@ function harness(name: string, extra: Record<string, unknown> = {}) {
     workspace: `./data/${name}-workspace`, agentKind: 'main',
   });
   principals.upsertSeen({ id: 'user:7', kind: 'user', tgId: '7', role: 'trusted', displayName: '阿离', username: null, chatType: null });
-  return { db, jobs, runner, registry, scheduler, principals, sent, agentCalls, contextFor, context,
+  return { db, jobs, runner, registry, scheduler, principals, sent, agentCalls, contextFor, context, archive, fired, failures,
+    unplugTelegram: () => { bridge = null; },
     setConfig: (patch: Record<string, unknown>) => { live = configSchema.parse({ access: { bootstrapOwnerId: '1' }, general: { timezone: 'UTC' }, quota: { enabled: false }, ...extra, ...patch }) as Config; },
     close: () => { scheduler.stop(); closeDatabase(db); } };
 }
@@ -223,6 +231,123 @@ describe('定时任务触发', () => {
     expect(h.sent).toHaveLength(1);
     expect(h.jobs.byId(job.id)).toMatchObject({ state: 'cancelled' });
     expect(h.scheduler.names()).toHaveLength(0);
+    // 文案指的是真正被封的那一侧（这里是创建者）。
+    expect(h.db.prepare("SELECT summary FROM log_events WHERE kind='schedule.cancelled'").pluck().get()).toContain('创建者 user:7');
+    h.close();
+  });
+
+  /**
+   * 判据是 `min(用户角色, 会话角色)`，而告警文案此前写死「**创建者**已被封禁」—— 封的是会话时
+   * 同样这么说，运维会去查错的对象（docs/28 · L-SCH-04）。
+   */
+  it('封的是会话时，告警说的就是会话而不是创建者', async () => {
+    const h = harness('sched-role-chat');
+    await call(h, 'schedule_create', { name: '早报', mode: 'notify', text: '早', cron: '0 8 * * *' });
+    const job = h.jobs.byName('chat:c1', '早报')!;
+    h.principals.upsertSeen({ id: 'chat:c1', kind: 'chat', tgId: 'c1', role: 'blocked', displayName: null, username: null, chatType: 'private' });
+    await h.runner.fire(job.id);
+    expect(h.sent).toHaveLength(0);
+    expect(h.jobs.byId(job.id)).toMatchObject({ state: 'cancelled' });
+    const summary = h.db.prepare("SELECT summary FROM log_events WHERE kind='schedule.cancelled'").pluck().get() as string;
+    expect(summary).toContain('会话 chat:c1');
+    expect(summary).not.toContain('创建者');
+    // 两侧的角色都进 data，运维不用再去猜是哪一边。
+    expect(h.db.prepare("SELECT data_json FROM log_events WHERE kind='schedule.cancelled'").pluck().get()).toContain('"userRole":"trusted"');
+    h.close();
+  });
+
+  /**
+   * `telegram()` 回 null 时**一步都不许往下走**：配额预留、并发闸、`openTurn` 全在 `#run` 里，
+   * 而发不出去的一轮开了也白开。实测（docs/28 · L-SCH-01）启动窗口内经
+   * `POST /api/schedules/:id/trigger` 触发的任务跑完 2 步、`usage_ledger` 记了 $0.30，
+   * 最后以 `delivery_failed:telegram_unavailable` 收尾且**不提交** —— 钱花了、上下文没留下。
+   * 那条 skip 分支当时是死代码，因为装配方给的 getter 判的是「有没有 BOT_TOKEN」那个外层对象。
+   */
+  it('投递通道不在时不开轮：不记账、只落一条 skipped、任务留存', async () => {
+    const h = harness('sched-no-telegram', { quota: { enabled: true, minReserveUsd: 0.02, global: { daily: 5 } } });
+    await call(h, 'schedule_create', { name: '早报', mode: 'agent', text: '汇总', cron: '0 8 * * *' });
+    const job = h.jobs.byName('chat:c1', '早报')!;
+    h.unplugTelegram();
+    await h.runner.fire(job.id);
+    expect(h.sent).toHaveLength(0);
+    expect(h.agentCalls).toHaveLength(0);
+    // 一行都不该有：轮次、合成触发消息、上下文、账、配额预留。
+    expect(h.db.prepare('SELECT COUNT(*) FROM turns').pluck().get()).toBe(0);
+    expect(h.db.prepare('SELECT COUNT(*) FROM messages').pluck().get()).toBe(0);
+    expect(h.db.prepare('SELECT COUNT(*) FROM context_messages').pluck().get()).toBe(0);
+    expect(h.db.prepare('SELECT COUNT(*) FROM usage_ledger').pluck().get()).toBe(0);
+    expect(h.db.prepare('SELECT COUNT(*) FROM quota_counters').pluck().get()).toBe(0);
+    expect(h.db.prepare("SELECT data_json FROM log_events WHERE kind='schedule.skipped'").pluck().get()).toContain('telegram_unavailable');
+    // 任务留着：通道回来了它照跑，这不是「停用」。
+    expect(h.jobs.byId(job.id)).toMatchObject({ state: 'active', lastState: 'skipped', lastError: 'telegram_unavailable' });
+    expect(h.scheduler.names()).toEqual([`job:${job.id}`]);
+    h.close();
+  });
+
+  /**
+   * `POST /api/schedules/:id/trigger` 拿 `loaded` 挡启动窗口：HTTP 从 `serve()` 起就在监听，
+   * 而 `load()` 要等 bot 起来（docs/28 · L-SCH-01）。
+   */
+  it('load() 之前 loaded 为假 —— 手动触发端点的判据', () => {
+    const h = harness('sched-loaded');
+    expect(h.runner.loaded).toBe(false);
+    h.runner.load();
+    expect(h.runner.loaded).toBe(true);
+    h.close();
+  });
+
+  /**
+   * 定时轮次的失败要计入 `consecutive_turn_failures`（docs/28 · L-SCH-02）。「上游变黑洞、
+   * 每次定时触发都超时」这类故障在没人聊天的部署里此前一次告警都不响，而 docs/10 §6 把这条
+   * 告警定义为「这个部署坏了」的信号。计数由装配方建一份、与 Telegram 轮次共用。
+   */
+  it('定时轮次的失败计入连续失败告警，成功一次归零', async () => {
+    const h = harness('sched-failure-streak');
+    await call(h, 'schedule_create', { name: '早报', mode: 'notify', text: '早', cron: '0 * * * *' });
+    const job = h.jobs.byName('chat:c1', '早报')!;
+    const healthy = { commitTurn: h.context.commitTurn.bind(h.context) };
+    const broken = { commitTurn: () => Promise.reject(new Error('上游黑了')) };
+    Object.assign(h.context, broken);
+    await h.runner.fire(job.id);
+    expect(h.failures.count).toBe(1);
+    expect(h.fired).toHaveLength(0);
+    // 成功一次归零 —— 阈值数的是「连续」。
+    Object.assign(h.context, healthy);
+    await h.runner.fire(job.id);
+    expect(h.failures.count).toBe(0);
+    Object.assign(h.context, broken);
+    await h.runner.fire(job.id); await h.runner.fire(job.id);
+    expect(h.fired).toEqual([{ kind: 'consecutive_turn_failures', count: 2 }]);
+    h.close();
+  });
+
+  /**
+   * 合成 id 撞号的核对（`docs/02 §10.2`）此前是死代码：`append` 回读既有那一行是按入参
+   * `tg_message_id` 查的，返回值恒等于分配值（docs/28 · L-SCH-03）。判据换成 `inserted`。
+   * 单进程内 `MAX+1` 撞不上（SELECT 与 INSERT 之间没有 await），所以这里模拟「另一个实例
+   * 在这两步之间抢先插了同一个号」—— 撞号的表现是一条真实消息凭空消失，必须失败而不是静默。
+   */
+  it('合成触发消息撞号时抛 schedule_trigger_conflict，不认领别人那一行', async () => {
+    const h = harness('sched-id-conflict');
+    await call(h, 'schedule_create', { name: '早报', mode: 'notify', text: '早', cron: '0 * * * *' });
+    const job = h.jobs.byName('chat:c1', '早报')!;
+    const scopeOf = h.archive.scope.bind(h.archive);
+    Object.assign(h.archive, { scope: (chatId: string, threadId: number | null = null) => {
+      const scoped = scopeOf(chatId, threadId);
+      const append = scoped.append.bind(scoped);
+      return Object.assign(scoped, { append: (input: Parameters<typeof append>[0]) => {
+        append({ ...input, text: '另一个实例抢先写的', fromKind: 'user', triggered: false, triggerReason: null });
+        return append(input);
+      } });
+    } });
+    await h.runner.fire(job.id);
+    expect(h.sent).toHaveLength(0);
+    expect(h.jobs.byId(job.id)).toMatchObject({ state: 'active', lastState: 'failed' });
+    expect(h.jobs.byId(job.id)!.lastError).toContain('schedule_trigger_conflict');
+    expect(h.db.prepare("SELECT COUNT(*) FROM log_events WHERE kind='schedule.failed'").pluck().get()).toBe(1);
+    // 抢先那一行原封不动 —— 静默走下去的话它会被当成本轮的触发消息用掉。
+    expect(h.db.prepare('SELECT text FROM messages').pluck().get()).toBe('另一个实例抢先写的');
+    expect(h.db.prepare('SELECT COUNT(*) FROM turns').pluck().get()).toBe(0);
     h.close();
   });
 

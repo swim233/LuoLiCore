@@ -294,17 +294,29 @@ quota:
     maxToolCalls: 40
     maxSubagents: 10
     maxDurationMs: 600000
-  rateLimit:                   # 与金额无关的防滥用
-    turnsPerUserPerHour: 30
+  rateLimit:                   # 与金额无关的防滥用；滚动一小时窗口，不受 quota.enabled 影响
+    turnsPerUserPerHour: 30    # 定时任务的轮次不计入这两项（见下）
     turnsPerChatPerHour: 100
-    concurrentPerUser: 2
+    concurrentPerUser: 2       # 这一项照旧数定时轮次：它真的占着一个槽
   onExceeded:
-    reply: true                # 是否回复用户（false 则静默丢弃）
+    reply: true                # 是否回复用户（false 则静默丢弃）—— 只管**金额**那一档
     message: '今天的额度用完了（已用 {spent}/{limit}），{resetAt} 重置。'
     notifyOwner: true          # global 超限时私聊 owner
 ```
 
 判定顺序（任一拒绝即拒绝）：`global` → `perChat` → `perUser(byRole 覆盖)` → `rateLimit`。
+
+**`rateLimit` 的两档按小时次数不数定时任务的轮次。** 它防的是「人在刷」，而定时任务的频率在
+**创建时**就由 `schedule.minIntervalMinutes` / `schedule.maxPerChat` 管住了；实测一天 38 次定时
+触发把 owner 自己挡在了门外（docs/28 · L-QUOTA-02）。判据是 `turns.trigger_reason <> 'schedule'`，
+只作用于 `canStart`；**金额那一侧一个子句都没改**（`reserve()` 照旧把定时轮次的花费算进
+global / perChat / perUser 的 daily / monthly）。
+
+**并发与频率两档各有自己的文案，且都不受 `onExceeded.reply` 管。** 那个开关的语义是「额度用光了
+就别再回话」，而这两档说的是「现在不行，等一会儿」—— 沉默等于 bot 对一句正常的话装没看见。
+套 `onExceeded.message` 更糟：`{spent}`/`{limit}` 没有值可填，真人看到的原话是
+「今天的额度用完了（已用 —/—），下个额度窗口 重置。」而真实原因是「这一小时开了 30 轮」
+（docs/28 · L-QUOTA-02）。频率那句要说清是**频率**、按人还是按会话、以及窗口是滚动一小时。
 
 ### 5.2 时间窗口
 
@@ -370,6 +382,11 @@ GET /api/health/detail（需登录）—— 详细状态
     而 **`concurrency.turnTimeoutMs` 到点算**（[04 §5.3](./04-agents-and-providers.md) 那三档）。
     超时曾经和 `/cancel` 一样归进 `cancelled`，于是「每一轮都卡满十分钟」这种最该响的故障
     一次都不响（`logs/2026-08-18`：三十来轮全记 `cancelled`）。
+  - 计数**跨会话，也跨入口**：连续失败说的是「这个部署坏了」，不是「这个群坏了」。所以
+    `TurnFailureStreak` 由装配方建**一份**，同时交给 Telegram 入口与 `ScheduledJobRunner`
+    —— 它此前只存在于 `createTelegramBot` 的闭包里，定时轮次的失败一次都不计入，于是上游变黑洞时
+    没人聊天的部署一次告警都不响（docs/28 · L-SCH-02）。每条入口各持一份同样不行：两份各卡在
+    4 次，而这个部署已经全线不通了。
 - 告警去重：同 `alertKey` 在 `alerts.dedupeMinutes`（默认 30）内只发一次。
 - 可选 webhook：`alerts.webhookUrl`（POST JSON），便于接自有监控。
 

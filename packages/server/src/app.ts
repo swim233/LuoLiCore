@@ -56,7 +56,7 @@ export interface ServerDependencies {
    */
   schedules?: {
     jobs: ScheduleRepository;
-    runner: { register(job: ScheduledJob): boolean; unregister(id: string): boolean; nextRun(id: string): Date | null; fire(id: string): Promise<void> };
+    runner: { loaded: boolean; register(job: ScheduledJob): boolean; unregister(id: string): boolean; nextRun(id: string): Date | null; fire(id: string): Promise<void> };
   };
   events: EventBus;
   memory?: MemoryStore;
@@ -1357,6 +1357,10 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
   app.post('/api/schedules/:id/trigger', (ctx) => {
     const runtime = scheduleRuntime();
     if (!runtime) return ctx.json(apiError('not_implemented', '这个部署没有装配定时任务运行时', 500).body, 500);
+    // 启动窗口：HTTP 从 `serve()` 起就在监听，而 runner 的 `load()` 要等 bot 起来 —— 这中间触发
+    // 一条任务会开一整轮、跑完模型、记完账，最后以 `delivery_failed:telegram_unavailable` 收尾且
+    // 不提交（docs/28 · L-SCH-01）。**理由要写进响应**，否则界面上只剩一句「触发失败」。
+    if (!runtime.runner.loaded) return ctx.json(apiError('not_ready', '定时任务运行时还没装载完（Telegram 投递通道未就绪），过几秒再试；这个部署没有配可用的 BOT_TOKEN 时手动触发一直不可用', 400).body, 400);
     const id = ctx.req.param('id');
     const job = runtime.jobs.byId(id);
     if (!job) return ctx.json(apiError('not_found', '任务不存在', 404).body, 404);

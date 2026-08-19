@@ -15,6 +15,37 @@ export interface AlertDelivery {
   owner?(text: string): Promise<void> | void;
 }
 
+/** docs/10 §6 写的就是「连续 5 个 turn 失败」。 */
+export const CONSECUTIVE_TURN_FAILURE_ALERT = 5;
+
+/** `TurnFailureStreak` 只用得上 `fire` 这一个方法，声明成结构类型好让测试塞假的进来。 */
+export interface TurnFailureAlertSink {
+  fire(kind: 'consecutive_turn_failures', summary: string, data?: Record<string, unknown>, key?: string): void;
+}
+
+/**
+ * 连续失败计数（`consecutive_turn_failures`，docs/10 §6）。
+ *
+ * **跨会话计数**：连续失败说明的是「这个部署坏了」，不是「这个群坏了」。**成功一次归零，
+ * 达到阈值才 fire。** 计入判据由调用方定，两条既有的不许弄丢（`docs/04 §5.3` 的三档）：
+ * 超时是故障、要计入；用户 `/cancel` 不算。
+ *
+ * 从 `createTelegramBot` 的闭包里提出来是因为它**只**存在于那里：定时轮次一次都不记，于是
+ * 「上游变黑洞、每次定时触发都超时」这类故障在没人聊天的部署里一次告警都不响
+ * （docs/28 · L-SCH-02）。装配方建**一份**传给所有开轮次的入口 —— 每条入口各持一份的话，
+ * 两份各卡在 3 次，而这个部署已经全线不通了。
+ */
+export class TurnFailureStreak {
+  #count = 0;
+  constructor(private readonly alerts?: TurnFailureAlertSink, private readonly threshold: number = CONSECUTIVE_TURN_FAILURE_ALERT) {}
+  get count(): number { return this.#count; }
+  succeeded(): void { this.#count = 0; }
+  failed(lastError: string): void {
+    this.#count += 1;
+    if (this.#count >= this.threshold) this.alerts?.fire('consecutive_turn_failures', `连续 ${this.#count} 个轮次失败`, { count: this.#count, lastError });
+  }
+}
+
 /**
  * 告警分发：去重 → 私聊 owner → webhook。
  *

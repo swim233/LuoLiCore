@@ -134,7 +134,7 @@ describe('UpdatePoller：并发派发 update', () => {
   });
 });
 
-interface BotFixture { bot: Bot; db: ReturnType<typeof openDatabase> }
+interface BotFixture { bot: Bot; db: ReturnType<typeof openDatabase>; replies: string[] }
 
 function telegramFixture(name: string, overrides: Record<string, unknown>,
   dependencies: { onTurn?: (turnId: string) => Promise<string>; plugins?: { hook(name: string, ...arguments_: unknown[]): Promise<unknown[]> } } = {}): Promise<BotFixture> {
@@ -156,10 +156,15 @@ function telegramFixture(name: string, overrides: Record<string, unknown>,
     ...(dependencies.plugins ? { plugins: dependencies.plugins } : {}),
     ...(dependencies.onTurn ? { onTurn: (turn) => dependencies.onTurn!(turn.turnId) } : {}),
   }).then((bot) => {
-    // 整个 Bot API 短路掉：测试不打网络。
-    bot.api.config.use((async (_prev: unknown, method: string) => ({ ok: true, result: method === 'sendMessage' || method === 'editMessageText'
-      ? { message_id: 900, date: 0, chat: { id: 500, type: 'private' }, text: 'ok' } : true })) as never);
-    return { bot, db };
+    // 整个 Bot API 短路掉：测试不打网络。发出去的正文留一份 —— 拒绝时用户看到的那句话本身
+    // 就是判据（docs/28 · L-QUOTA-02）。
+    const replies: string[] = [];
+    bot.api.config.use((async (_prev: unknown, method: string, payload: { text?: string }) => {
+      if (method === 'sendMessage' && typeof payload.text === 'string') replies.push(payload.text);
+      return { ok: true, result: method === 'sendMessage' || method === 'editMessageText'
+        ? { message_id: 900, date: 0, chat: { id: 500, type: 'private' }, text: 'ok' } : true };
+    }) as never);
+    return { bot, db, replies };
   });
 }
 
@@ -236,6 +241,48 @@ describe('额度这条警报只在真的被拒时响', () => {
     await bot.handleUpdate(privateUpdate(1, '你好'));
     expect(db.prepare("SELECT COUNT(*) AS count FROM log_events WHERE kind IN ('quota.exceeded','quota.check')").pluck().get()).toBe(0);
     expect(db.prepare("SELECT COUNT(*) AS count FROM turns WHERE state='committed'").pluck().get()).toBe(1);
+    closeDatabase(db);
+  }, 20_000);
+
+  /**
+   * 真人看到的原话：**「今天的额度用完了（已用 —/—），下个额度窗口 重置。」** 而真实原因是
+   * 「这一小时你已经开了 30 轮」，与金额无关，占位符还原样漏了出去（docs/28 · L-QUOTA-02）。
+   * 紧邻的 `concurrent` 分支早就论证过这么做的危害（「会让人当天不再尝试」），同一个论证适用于
+   * 频率这一档。**这句不受 `onExceeded.reply` 管**：那个开关是给「额度用光」用的。
+   */
+  it('频率拒绝给的是频率文案，不是额度文案，也不漏占位符', async () => {
+    const { bot, db, replies } = await telegramFixture('tg-rate-user-message',
+      { quota: { enabled: false, rateLimit: { turnsPerUserPerHour: 1, turnsPerChatPerHour: 100, concurrentPerUser: 3 }, onExceeded: { reply: false } } },
+      { onTurn: async () => '好' });
+    await bot.handleUpdate(privateUpdate(1, '第一句'));
+    await bot.handleUpdate(privateUpdate(2, '第二句'));
+    // 第二条被频率闸挡住：没有第二个轮次，但用户拿到了一句说得清的话。
+    expect(db.prepare('SELECT COUNT(*) AS count FROM turns').pluck().get()).toBe(1);
+    const last = replies.at(-1)!;
+    expect(last).toContain('频率上限');
+    expect(last).toContain('按人算');
+    expect(last).not.toContain('额度用完');
+    expect(last).not.toContain('—/—');
+    // 挡下来的那条要降级成背景消息，否则它既没被回答也进不了下一轮上下文。
+    expect(db.prepare('SELECT triggered FROM messages WHERE tg_message_id=2').pluck().get()).toBe(0);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM log_events WHERE kind='quota.check' AND summary LIKE '%rate_user%'").pluck().get()).toBe(1);
+    closeDatabase(db);
+  }, 20_000);
+
+  /**
+   * 定时任务的轮次不再计入按小时的频率闸：它不是「人在刷」，而本轮测试用定时任务跑的 38 轮
+   * 把 owner 自己挡在了门外（docs/28 · L-QUOTA-02）。金额额度照旧全部生效。
+   */
+  it('同一小时里的定时轮次不占创建者的频率额度', async () => {
+    const { bot, db } = await telegramFixture('tg-rate-schedule-exempt',
+      { quota: { enabled: false, rateLimit: { turnsPerUserPerHour: 2, turnsPerChatPerHour: 3, concurrentPerUser: 3 } } },
+      { onTurn: async () => '好' });
+    for (let index = 0; index < 10; index += 1) {
+      db.prepare(`INSERT INTO turns(id,key,chat_id,initiator_user_id,effective_role,trigger_reason,state,started_at)
+        VALUES (?,'chat:500','500','500','owner','schedule','committed',?)`).run(`job-turn-${index}`, Date.now());
+    }
+    await bot.handleUpdate(privateUpdate(1, '你好'));
+    expect(db.prepare("SELECT COUNT(*) AS count FROM turns WHERE trigger_reason<>'schedule'").pluck().get()).toBe(1);
     closeDatabase(db);
   }, 20_000);
 

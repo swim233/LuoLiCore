@@ -28,6 +28,9 @@ function harness(name: string, extra: Record<string, unknown> = {}, wired = true
   const registered = new Set<string>();
   const fired: string[] = [];
   const runner = {
+    // `loaded` = 「`load()` 跑过了，投递通道已具备」。手动触发端点拿它挡启动窗口：HTTP 从
+    // `serve()` 起就在监听，此时触发会开一条发不出去的轮次（docs/28 · L-SCH-01）。
+    loaded: true,
     register: (job: ScheduledJob) => { registered.add(job.id); return true; },
     unregister: (id: string) => registered.delete(id),
     nextRun: (id: string) => (registered.has(id) ? new Date(1_900_000_000_000) : null),
@@ -132,6 +135,23 @@ describe('定时任务面板端点', () => {
     expect((await h.app.request(`/api/schedules/${created.id}/trigger`, { method: 'POST', headers: h.headers })).status).toBe(409);
     expect((await h.app.request('/api/schedules/nope/trigger', { method: 'POST', headers: h.headers })).status).toBe(404);
     expect(h.fired).toHaveLength(1);
+    h.close();
+  });
+
+  /**
+   * `docs/28 · L-SCH-01`：HTTP 从 `serve()` 起就在监听，而 runner 的 `load()` 要等 bot 起来。
+   * 这中间手动触发会开一整轮、跑完模型、记完账（实测 $0.30），最后以
+   * `delivery_failed:telegram_unavailable` 收尾且**不提交** —— 钱花了、上下文没留下。
+   */
+  it('runner 还没 load() 时手动触发回 400 并说明理由，而不是白跑一整轮', async () => {
+    const h = harness('sched-api-not-loaded');
+    const created = await body<JobRow>(await h.app.request('/api/schedules', { method: 'POST', headers: h.headers,
+      body: JSON.stringify({ key: 'chat:c1', name: '早报', mode: 'agent', text: '汇总', cron: '0 8 * * *' }) }));
+    h.runner.loaded = false;
+    const response = await h.app.request(`/api/schedules/${created.id}/trigger`, { method: 'POST', headers: h.headers });
+    expect(response.status).toBe(400);
+    expect(await error(response)).toBe('not_ready');
+    expect(h.fired).toHaveLength(0);
     h.close();
   });
 

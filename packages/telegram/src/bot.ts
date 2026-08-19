@@ -3,7 +3,7 @@ import { autoRetry } from '@grammyjs/auto-retry';
 import { apiThrottler } from '@grammyjs/transformer-throttler';
 import type { Message, UserFromGetMe } from 'grammy/types';
 import type { Config, ConfigStore, ContextEngine, LogSink, MainAgentStreamResult, MemoryStore, QuotaGuard, QuotaReservation, TurnConcurrency, TurnRegistry } from '@luoli/core';
-import { KeyedMutex, perChatConfig, resolveEffectiveRole } from '@luoli/core';
+import { KeyedMutex, TurnFailureStreak, perChatConfig, resolveEffectiveRole } from '@luoli/core';
 import type { ArchivedMessage, ArchiveRepository, OperationsRepository, PrincipalRepository, ScopedArchiveRepository, Sqlite, TurnRepository } from '@luoli/db';
 import type { Role, RuntimeTurnContext } from '@luoli/shared';
 import { parsePrincipal, roleRank } from '@luoli/shared';
@@ -34,12 +34,15 @@ export interface TelegramDependencies {
   issueLoginToken?: () => { token: string; expiresAt: number };
   /** 告警分发。缺它时这几条只落日志 —— 别让「装配方没给」变成静默崩溃。 */
   alerts?: { fire(kind: 'quota_global_exceeded' | 'consecutive_turn_failures', summary: string, data?: Record<string, unknown>, key?: string): void };
+  /**
+   * 连续失败计数。**装配方建一份传给所有开轮次的入口**（这里与 `ScheduledJobRunner`）——
+   * 它此前是本文件的一个闭包变量，于是定时轮次的失败一次都不计入，「上游变黑洞」在没人聊天的
+   * 部署里一次告警都不响（docs/28 · L-SCH-02）。缺它时退回本地一份，行为与从前一致。
+   */
+  failures?: TurnFailureStreak;
   log: LogSink;
   botInfo?: UserFromGetMe;
 }
-
-/** docs/10 §6 写的就是「连续 5 个 turn 失败」。 */
-const CONSECUTIVE_FAILURE_ALERT = 5;
 
 // 运维态失败（模型没配、缺定价）不能并进「出了点问题」：用户重试多少次都不会好，
 // 得说清楚该由谁去做什么（docs/08 §9）。其余错误仍不暴露内部细节，只给 ref。
@@ -91,15 +94,12 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
   const triggerCooldown = new Map<string, number>();
   /** `concurrency.coalesceSameUserMs` 的在等窗口，键是 `${chatId}:${userId}`。同一个键最多一个。 */
   const coalescing = new Map<string, { supersede: () => void }>();
-  /** 跨会话计数：连续失败说明的是「这个部署坏了」，不是「这个群坏了」（docs/10 §6）。 */
-  let consecutiveFailures = 0;
-  /** 两个失败出口（抛出去的、以及「吐过内容之后断掉」的）共用同一条告警规则，免得两边阈值走岔。 */
-  const noteFailure = (lastError: string): void => {
-    consecutiveFailures += 1;
-    if (consecutiveFailures >= CONSECUTIVE_FAILURE_ALERT) {
-      dependencies.alerts?.fire('consecutive_turn_failures', `连续 ${consecutiveFailures} 个轮次失败`, { count: consecutiveFailures, lastError });
-    }
-  };
+  /**
+   * 跨会话计数：连续失败说明的是「这个部署坏了」，不是「这个群坏了」（docs/10 §6）。
+   * 两个失败出口（抛出去的、以及「吐过内容之后断掉」的）共用同一份，免得两边阈值走岔；
+   * 定时轮次也往同一份里记 —— 前提是装配方把 `failures` 传进来（docs/28 · L-SCH-02）。
+   */
+  const failures = dependencies.failures ?? new TurnFailureStreak(dependencies.alerts);
   /**
    * 入口段（认领 update → 归档 → 挂媒体）按 chat 串行。
    *
@@ -457,10 +457,31 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
       // `concurrentPerUser` 挡下来的不是额度：这个人手上还有轮次在跑，说完就能接着说。入口串行的
       // 年代这一档碰不到，所以一直和额度共用同一句文案 —— 而「今天的额度用完了」会让人当天不再尝试。
       // 这句不受 `onExceeded.reply` 管：那个开关是给「额度用光」用的，而这里沉默等于 bot 装没看见。
-      if (dependencies.quota.lastStartRejection === 'concurrent') {
+      const rejection = dependencies.quota.lastStartRejection;
+      if (rejection === 'concurrent') {
         dependencies.log.event({ level: 'info', kind: 'quota.check', summary: 'concurrent turn limit reached', chatId, userId, data: { concurrentPerUser: config.quota.rateLimit.concurrentPerUser } });
         await ctx.reply(`我同时最多接 ${config.quota.rateLimit.concurrentPerUser} 件事，你手上的还没说完。等它收尾再说这条。`);
-      } else if (config.quota.onExceeded.reply) await ctx.reply(config.quota.onExceeded.message.replace('{spent}', '—').replace('{limit}', '—').replace('{resetAt}', '下个额度窗口'));
+      } else if (rejection === 'rate_user' || rejection === 'rate_chat') {
+        // **频率这一档也不是额度。** 上面那个论证一字不改地适用：真人看到的原话是「今天的额度
+        // 用完了（已用 —/—），下个额度窗口 重置。」而真实原因是「这一小时开了 30 轮」，与金额
+        // 无关，占位符还直接漏了出去（docs/28 · L-QUOTA-02）。窗口是**滚动**一小时
+        // （`canStart` 数的是 `started_at >= now-1h`），所以说的是「等最早那一轮滚出窗口」而不是
+        // 「整点重置」—— 后者会让人在 59 分时白等。
+        // 同样不受 `onExceeded.reply` 管，理由与并发那档一致：那个开关是给「额度用光」用的
+        // （沉默意味着「今天别再来了」），而频率拒绝沉默等于 bot 对一句正常的话装没看见。
+        const perChat = rejection === 'rate_chat';
+        const limit = perChat ? config.quota.rateLimit.turnsPerChatPerHour : config.quota.rateLimit.turnsPerUserPerHour;
+        dependencies.log.event({ level: 'info', kind: 'quota.check', summary: `hourly turn rate limit reached (${rejection})`, chatId, userId, data: { rejection, limit } });
+        // 说「到上限了」而不是「开了 N 轮」：判据是 `count >= limit`，运维中途调小限额时 count
+        // 会大于 limit，报一个算不准的数字比不报更糟。
+        await ctx.reply(`${perChat ? '这个会话' : '你'}最近一小时开的轮次到频率上限了（每小时 ${limit} 轮，按${perChat ? '会话' : '人'}算，与额度无关）。`
+          + '等最早那一轮满一小时滚出窗口就能接着说，最多再等一小时。');
+      } else {
+        // `canStart` 只有那三档，走到这里说明有人加了第四档却没跟这里对齐。**别再套额度文案** ——
+        // 那正是上面两处注释在说的事（占位符会原样漏给用户，而原因根本不是金额）。
+        dependencies.log.event({ level: 'warn', kind: 'quota.check', summary: `unhandled start rejection: ${String(rejection)}`, chatId, userId, data: { rejection } });
+        await ctx.reply('现在接不了这条，过一会儿再说。');
+      }
       return;
     }
     const scoped = dependencies.archive.scope(chatId, message.message_thread_id ?? null);
@@ -640,7 +661,7 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
        */
       /**
        * **超时不是取消。** 两者都是 abort，可判据只看 `aborted` 的话，`turnTimeoutMs` 到点的轮次
-       * 会记 `cancelled` 并被下面的 `noteFailure` 跳过 —— 于是「每一轮都卡满十分钟」这种最该响的
+       * 会记 `cancelled` 并被下面的 `failures.failed` 跳过 —— 于是「每一轮都卡满十分钟」这种最该响的
        * 故障一次告警都不响（`logs/2026-08-18`：三十来轮全记 cancelled，`consecutiveFailures`
        * 一次没涨）。`docs/04 §5.3` 现在把收尾分三档：`/cancel` → cancelled；超时 → failed 且计入；
        * 上游自己挂 → failed。用户可见文案仍按 `reason` 分（收到「已取消」的人会以为自己误触了）。
@@ -662,8 +683,8 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
       dependencies.memory.flush(turn.turnId);
       // 断掉的一轮不清零（它不是一次成功），但也只有 `failed` 才计入连续失败 —— 取消不算故障，
       // 超时算（`docs/04 §5.3` 的三档）。
-      if (!broken) consecutiveFailures = 0;
-      else if (!cancelled) noteFailure(timedOut ? 'turn_timeout' : 'stream_interrupted');
+      if (!broken) failures.succeeded();
+      else if (!cancelled) failures.failed(timedOut ? 'turn_timeout' : 'stream_interrupted');
       // `quota.warnAtRatio`：跨过预警线时在回复后补一句，每个 bucket 只提示一次（docs/10 §5.4）。
       // 提示挂在成功那一轮的后面而不是单独发一条：多一条消息在群里是噪音。
       if (reservation) {
@@ -688,7 +709,7 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
       dependencies.log.publish('turn.finished', { turnId: turn.turnId, key, chatId, state: cancelled ? 'cancelled' : 'failed', steps: settled?.steps ?? 0, toolCalls: settled?.toolCalls ?? 0, costUsd: settled?.costUsd ?? 0, rebased: false, durationMs: settled?.durationMs ?? 0 });
       // 连续 5 轮失败是「整个部署坏了」的信号（docs/10 §6）。取消不算 —— 用户点了取消不是故障；
       // 超时算，而且它正是那个信号最该覆盖的场景（上游变黑洞时每一轮都走这条路）。
-      if (!cancelled) noteFailure(timedOut ? 'turn_timeout' : error instanceof Error ? error.message : String(error));
+      if (!cancelled) failures.failed(timedOut ? 'turn_timeout' : error instanceof Error ? error.message : String(error));
       // 记账上超时算故障，**对用户仍是另一句话**：没点过取消的人收到「已取消」只会以为自己误触了，
       // 而收到一句通用的失败提示也说不出「这一轮卡了十分钟」。
       await ctx.reply(timedOut ? `这一轮太久没有进展，已经停下了。(ref: ${turn.turnId.slice(0, 12)})`

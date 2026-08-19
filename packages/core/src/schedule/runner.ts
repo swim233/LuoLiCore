@@ -2,8 +2,9 @@ import { Cron } from 'croner';
 import { ulid } from 'ulid';
 import type { Role, RuntimeTurnContext } from '@luoli/shared';
 import { minRole } from '@luoli/shared';
-import { contextKey, type ArchiveRepository, type ArchivedMessage, type ScheduleRepository, type ScheduledJob, type Sqlite, type TurnRepository } from '@luoli/db';
+import { contextKey, type AppendedMessage, type ArchiveRepository, type ScheduleRepository, type ScheduledJob, type Sqlite, type TurnRepository } from '@luoli/db';
 import { resolveEffectiveRole } from '../access.js';
+import type { TurnFailureStreak } from '../alerts.js';
 import type { Config } from '../config/schema.js';
 import { perChatConfig } from '../config/index.js';
 import type { ContextEngine } from '../context/engine.js';
@@ -44,9 +45,23 @@ export interface ScheduledJobRunnerDependencies {
   tools: ToolRegistry;
   log: LogSink;
   config(): Readonly<Config>;
-  /** 懒取：工具在 bot 建起来之前就注册好了，投递通道要到 `createTelegramBot` 之后才有。 */
+  /**
+   * 懒取：工具在 bot 建起来之前就注册好了，投递通道要到 `createTelegramBot` 之后才有。
+   *
+   * **装配方必须让它在 bot 真的起来之后才非空。** 它此前给的是那个「有 `BOT_TOKEN` 就立刻
+   * 非空」的外层对象，于是下面 `fire()` 里那条 `telegram_unavailable` 的 skip 分支是死代码：
+   * HTTP 从 `serve()` 起就在监听，启动窗口内经 `POST /api/schedules/:id/trigger` 手动触发的
+   * 任务会正常开轮、跑完模型、记账，最后以 `delivery_failed:telegram_unavailable` 收尾且
+   * **不提交** —— 钱花了、上下文没留下（docs/28 · L-SCH-01）。
+   */
   telegram(): TelegramToolBridge | null;
   roleOf(kind: 'user' | 'chat', tgId: string): Role | null;
+  /**
+   * 连续失败计数。**与 Telegram 轮次共用同一份**（装配方建一个传两处）：这条告警说的是
+   * 「这个部署坏了」，而它此前只存在于 `createTelegramBot` 的闭包里 —— 上游变黑洞时，
+   * 没人聊天的部署里每次定时触发都超时，一次告警都不响（docs/28 · L-SCH-02）。
+   */
+  failures?: TurnFailureStreak;
   /**
    * `mode:'agent'` 的实际执行，签名照 `main.ts` 的 `onTurn` —— 装配方在那里注入
    * `runMainAgent`（非流式：定时轮次没有人盯着屏幕，也没有 Telegram 流消费者）。
@@ -68,7 +83,19 @@ const jobCronName = (id: string): string => `job:${id}`;
  * `/cancel`、也不出现在 `GET /api/turns/active` 里，卡住之后运维完全看不见它。
  */
 export class ScheduledJobRunner {
+  #loaded = false;
+
   constructor(private readonly dependencies: ScheduledJobRunnerDependencies) {}
+
+  /**
+   * `load()` 跑过没有 —— 也就是「投递通道已经具备」。
+   *
+   * `POST /api/schedules/:id/trigger` 拿它挡启动窗口：HTTP 从 `serve()` 起就在监听，而 `load()`
+   * 要等 bot 起来（装配方的注释一直是对的），所以 cron 触发本来就安全，漏的只有那条手动触发
+   * （docs/28 · L-SCH-01）。`telegram()` 那道判据仍在 `fire()` 里兜着 —— 这一条是为了让手动
+   * 触发**在响应里就能说清为什么没跑**，而不是回 `started:true` 然后往日志里写一条 skipped。
+   */
+  get loaded(): boolean { return this.#loaded; }
 
   /**
    * 进程启动时把库里的活跃任务装回 cron。
@@ -79,6 +106,7 @@ export class ScheduledJobRunner {
    */
   load(): { registered: number; missed: number } {
     let registered = 0; let missed = 0;
+    this.#loaded = true;
     for (const job of this.dependencies.jobs.listActive()) {
       const skew = this.#missedSince(job);
       if (skew) {
@@ -121,16 +149,22 @@ export class ScheduledJobRunner {
     if (!job || job.state !== 'active') { this.unregister(id); return; }
     const live = this.dependencies.config();
     if (!live.schedule.enabled) { this.#skip(job, 'schedule.disabled'); return; }
-    const role = this.#effectiveRole(job, live);
+    const { role, userRole, chatRole } = this.#effectiveRole(job, live);
     // 创建之后被降级/拉黑的人不该继续借 bot 的手花钱。blocked 是永久判定 —— 停掉任务；
     // 只是掉到 trusted 以下（`schedule_create` 的 minRole）则跳过这一次，权限回来了任务还在。
     if (role === 'blocked') {
       this.dependencies.jobs.finish(job.id, 'cancelled', 'cancelled');
       this.unregister(job.id);
-      this.dependencies.log.event({ level: 'warn', kind: 'schedule.cancelled', summary: `定时任务 ${job.name} 的创建者已被封禁，任务已停用`, chatId: job.chatId, key: job.key, data: { job: job.id, role } });
+      // **文案按实际命中的那一侧写。** 判据是 `min(用户角色, 会话角色)`，而这里此前写死「创建者
+      // 已被封禁」—— 封的是会话时同样这么说，运维会去查错的对象（docs/28 · L-SCH-04）。
+      // `minRole` 的定义保证了：有效角色是 blocked 而用户不是，那一定是会话这一侧。
+      const culprit = userRole === 'blocked' ? `创建者 user:${job.createdBy}` : `会话 chat:${job.chatId}`;
+      this.dependencies.log.event({ level: 'warn', kind: 'schedule.cancelled', summary: `定时任务 ${job.name} 的${culprit}已被封禁，任务已停用`, chatId: job.chatId, key: job.key, data: { job: job.id, role, userRole, chatRole } });
       return;
     }
-    if (minRole(role, 'trusted') !== 'trusted') { this.#skip(job, 'role_downgraded', { role }); return; }
+    if (minRole(role, 'trusted') !== 'trusted') { this.#skip(job, 'role_downgraded', { role, userRole, chatRole }); return; }
+    // **这道判据必须排在 `#run` 之前**（配额预留、并发闸、`openTurn` 都在里面）：发不出去的
+    // 一轮开了也是白开，模型钱花掉、上下文一个字都留不下（docs/28 · L-SCH-01）。
     const bridge = this.dependencies.telegram();
     if (!bridge) { this.#skip(job, 'telegram_unavailable'); return; }
     await this.#run(job, role, live, bridge);
@@ -196,6 +230,8 @@ export class ScheduledJobRunner {
       this.dependencies.log.publish('turn.finished', { turnId: turn.turnId, key: job.key, chatId: job.chatId, state: 'committed', steps: settled?.steps ?? 0, toolCalls: settled?.toolCalls ?? 0, costUsd: settled?.costUsd ?? 0, rebased: committed.rebased, durationMs: settled?.durationMs ?? 0 });
       this.dependencies.memory.flush(turn.turnId);
       this.dependencies.jobs.markRun(job.id, { state: 'committed' });
+      // 与 Telegram 轮次共用同一份计数（docs/28 · L-SCH-02）：成功一次归零，跨会话。
+      this.dependencies.failures?.succeeded();
     } catch (error) {
       // 超时不是取消（`docs/04 §5.3` 的三档，同 `bot.ts`）。定时任务这条路上尤其明显：**没有人会去
       // 取消一个自己触发的任务**，记成 cancelled 等于「上游黑着的那几天里，每次触发都安静地算不了数」。
@@ -210,6 +246,9 @@ export class ScheduledJobRunner {
         : { state: 'failed', error: timedOut ? 'turn_timeout' : error instanceof Error ? error.message : String(error), ...(timedOut ? { cancelReason: 'timeout' } : {}) });
       this.dependencies.log.event({ level: cancelled ? 'warn' : 'error', kind: 'turn.end', summary: cancelled ? 'turn cancelled' : timedOut ? 'turn timed out' : error instanceof Error ? error.message : 'turn failed', traceId: turn.turnId, chatId: job.chatId, userId: job.createdBy, key: job.key, data: { schedule: job.id } });
       this.dependencies.log.publish('turn.finished', { turnId: turn.turnId, key: job.key, chatId: job.chatId, state: cancelled ? 'cancelled' : 'failed', steps: settled?.steps ?? 0, toolCalls: settled?.toolCalls ?? 0, costUsd: settled?.costUsd ?? 0, rebased: false, durationMs: settled?.durationMs ?? 0 });
+      // 同 `bot.ts` 的两个出口：取消不算故障，超时算 —— 而「上游变黑洞、每次定时触发都超时」
+      // 正是这条告警最该覆盖的场景，也正是它此前一次都不响的那个（docs/28 · L-SCH-02）。
+      if (!cancelled) this.dependencies.failures?.failed(timedOut ? 'turn_timeout' : error instanceof Error ? error.message : String(error));
       this.#failed(job, error, turn.turnId);
     } finally {
       this.dependencies.tools.releaseTurn(turn.turnId);
@@ -229,8 +268,11 @@ export class ScheduledJobRunner {
    * `append` 是 `INSERT OR IGNORE`：撞号会静静返回既有那一行，于是这一轮的触发消息其实是
    * 上一次的那条，`claimThroughMessageId` 与 `turns.trigger_message_id` 一起错位。所以
    * 分配完必须核对返回值，不等就抛 —— 静默走下去比失败难查得多。
+   *
+   * **判 `inserted` 而不是比 `tgMessageId`。** 后者是这条核对此前的写法，而回读那一行是按入参
+   * 的 id 查的 —— 返回值的 `tgMessageId` 恒等于分配值，比较永远为假（docs/28 · L-SCH-03）。
    */
-  #appendTrigger(job: ScheduledJob): ArchivedMessage {
+  #appendTrigger(job: ScheduledJob): AppendedMessage {
     const scoped = this.dependencies.archive.scope(job.chatId, job.threadId);
     const highest = this.dependencies.db.prepare('SELECT MAX(tg_message_id) FROM messages WHERE chat_id=? AND tg_message_id>=?')
       .pluck().get(job.chatId, SYNTHETIC_TG_MESSAGE_ID_BASE) as number | null;
@@ -239,14 +281,19 @@ export class ScheduledJobRunner {
       fromUserId: job.createdBy, fromName: '定时任务', fromUsername: null, kind: 'text',
       text: `[定时任务 ${job.name}] ${job.payload}`, tgDate: Date.now(), raw: { schedule: { id: job.id, name: job.name, mode: job.mode } },
       triggered: true, triggerReason: 'schedule' });
-    if (appended.tgMessageId !== tgMessageId) throw new Error(`schedule_trigger_conflict:${tgMessageId}`);
+    if (!appended.inserted) throw new Error(`schedule_trigger_conflict:${tgMessageId}`);
     return appended;
   }
 
-  #effectiveRole(job: ScheduledJob, live: Readonly<Config>): Role {
+  /**
+   * 有效角色 = min(用户角色, 会话角色)。两侧一起交回去：告警文案要说清是**哪一侧**命中的
+   * （docs/28 · L-SCH-04），而判据本身仍只有 `resolveEffectiveRole` 一份 —— 在这里把默认值
+   * 那套规则再算一遍就是第二份判据。`chatRole` 是**库里存的**那个，null 表示走了默认。
+   */
+  #effectiveRole(job: ScheduledJob, live: Readonly<Config>): { role: Role; userRole: Role; chatRole: Role | null } {
     const userRole = this.dependencies.roleOf('user', job.createdBy) ?? live.access.defaultUserRole;
     const chatRole = this.dependencies.roleOf('chat', job.chatId);
-    return resolveEffectiveRole({ userRole, ...(chatRole ? { chatRole } : {}), isPrivate: !job.chatId.startsWith('-'), defaultChatRole: live.access.defaultChatRole });
+    return { role: resolveEffectiveRole({ userRole, ...(chatRole ? { chatRole } : {}), isPrivate: !job.chatId.startsWith('-'), defaultChatRole: live.access.defaultChatRole }), userRole, chatRole };
   }
 
   #reserve(job: ScheduledJob, role: Role, live: Readonly<Config>): ReturnType<QuotaGuard['reserve']> | null {

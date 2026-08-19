@@ -4,7 +4,7 @@ import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { serve } from '@hono/node-server';
 import { ArchiveRepository, CustomToolRepository, OperationsRepository, PrincipalRepository, ScheduleRepository, TurnRepository, acquireInstanceLock, closeDatabase, migrateDatabase, modelAliasKey, openDatabase, readAppKv, readPersistedConfig, recomputeMessageTokens, recoverAfterCrash, writeAppKv } from '@luoli/db';
-import { AgentManager, AgentResultStore, AlertDispatcher, BUNDLED_SKILLS, ConfigStore, CustomToolManager, mergeAgentDefinitions, scanAgentFiles, ContextEngine, DatabaseApprovalBroker, EventBus, FileTools, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, ModelRegistry, PathJail, PluginManager, selfAuthoringDenyGlobs, PromptAssembler, PromptDocuments, ProviderStore, PROVIDER_FAILURES_TO_DOWN, PROVIDER_PROBE_TIMEOUT_MS, QuotaGuard, repairAgentResultRefs, repairLedgerCacheCost, runProviderHealthCheck, Sandbox, ScheduledJobRunner, Scheduler, Secrets, SkillLoader, STABLE_PROMPT_BLOCKS, TOOL_POLICY, ToolRegistry, TurnConcurrency, TurnRegistry, UsageLedger, assembleMainPrompt, configJsonSchema, loadConfig, perChatConfig, registerAuthoringTools, registerBuiltins, rejectedWakewords, runMainAgent, runSubAgent, streamMainAgent, type SubAgentRuntimeEvent } from '@luoli/core';
+import { AgentManager, AgentResultStore, AlertDispatcher, BUNDLED_SKILLS, ConfigStore, CustomToolManager, mergeAgentDefinitions, scanAgentFiles, ContextEngine, DatabaseApprovalBroker, EventBus, FileTools, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, ModelRegistry, PathJail, PluginManager, selfAuthoringDenyGlobs, PromptAssembler, PromptDocuments, ProviderStore, PROVIDER_FAILURES_TO_DOWN, PROVIDER_PROBE_TIMEOUT_MS, QuotaGuard, repairAgentResultRefs, repairLedgerCacheCost, runProviderHealthCheck, Sandbox, ScheduledJobRunner, Scheduler, Secrets, SkillLoader, STABLE_PROMPT_BLOCKS, TOOL_POLICY, ToolRegistry, TurnConcurrency, TurnFailureStreak, TurnRegistry, UsageLedger, assembleMainPrompt, configJsonSchema, loadConfig, perChatConfig, registerAuthoringTools, registerBuiltins, rejectedWakewords, runMainAgent, runSubAgent, streamMainAgent, type SubAgentRuntimeEvent } from '@luoli/core';
 import { createServer, EventStreamRegistry, issueLoginToken, setupToken, type PromptPreviewResult } from '@luoli/server';
 import type { RuntimeTurnContext } from '@luoli/shared';
 import { TelegramTools, UpdatePoller, createTelegramBot } from '@luoli/telegram';
@@ -104,6 +104,9 @@ const alerts = new AlertDispatcher(() => configStore.snapshot().alerts, log,
   { owner: async (text: string) => { await notifyOwner?.(text); } }, () => configStore.snapshot().provider.allowPrivateBaseUrl);
 // 日志自己写不进去时也要有人知道 —— 只写 stderr 的话运维通常永远看不到（docs/10 §6 db_write_failed）。
 log.onWriteFailure = (error) => alerts.fire('db_write_failed', '日志写入失败', { error: error instanceof Error ? error.message : String(error) });
+// 连续失败计数只此一份：Telegram 轮次与定时轮次记在同一个计数器上，否则「上游变黑洞」在
+// 没人聊天的部署里一次告警都不响，两份各卡在 4 次（docs/28 · L-SCH-02）。
+const turnFailures = new TurnFailureStreak(alerts);
 const context = new ContextEngine(db, archive, log);
 const modelRegistry = new ModelRegistry(db, providers,
   (providerId, reason) => log.event({ level: 'warn', kind: 'provider.health', summary: `provider ${providerId} 已跳过：${reason}`, data: { providerId, reason } }));
@@ -258,7 +261,11 @@ const scheduleRunner = new ScheduledJobRunner({
   db, jobs: scheduledJobs, scheduler, context, archive, turns, registry: turnRegistry, concurrency: turnConcurrency,
   quota, memory, tools: toolRegistry, log, plugins, approvals: approval,
   config: () => configStore.snapshot(),
-  telegram: () => telegramTools,
+  // **bot 起来之后才非空**：给外层对象会让 runner 里那条 `telegram_unavailable` 的 skip 分支变成
+  // 死代码，启动窗口内经 HTTP 手动触发的任务会开一整轮、跑完模型、记完账，最后不提交
+  // （docs/28 · L-SCH-01）。
+  telegram: () => (bot ? telegramTools : null),
+  failures: turnFailures,
   roleOf: (kind, tgId) => principals.roleOf(kind, tgId),
   estimateTurnCost: (inputTokens, key) => modelRegistry.estimate(readAppKv<string>(db, modelAliasKey(key)) ?? perChatConfig(configStore.snapshot(), key).agent.main.modelAlias, inputTokens),
   // 非流式：定时轮次没有 Telegram 流消费者，也没人盯着屏幕等增量。其余依赖与 `onTurn` 完全一致。
@@ -556,7 +563,7 @@ if (process.env.BOT_TOKEN) {
    */
   try {
     bot = await createTelegramBot(process.env.BOT_TOKEN, { config: configStore, db, principals, archive, operations, context, turns, quota, memory, plugins, tools: toolRegistry, approvals: approval,
-      registry: turnRegistry, concurrency: turnConcurrency, log, alerts, issueLoginToken: () => issueLoginToken(),
+      registry: turnRegistry, concurrency: turnConcurrency, log, alerts, failures: turnFailures, issueLoginToken: () => issueLoginToken(),
       estimateTurnCost: (inputTokens, key) => modelRegistry.estimate(readAppKv<string>(db, modelAliasKey(key)) ?? perChatConfig(configStore.snapshot(), key).agent.main.modelAlias, inputTokens),
       // 用 turn.config 而不是全局快照：本轮的 perChat 覆盖已经在 openTurn 时合并进去了。
       onTurn: (turn, reservation) => { const live = turn.config as Readonly<typeof config>; return streamMainAgent(turn, { config: live, db, registry: modelRegistry, tools: toolRegistry,

@@ -558,6 +558,9 @@ schedule:
   enabled: true                   # 热更新 · 每次触发时现读
   maxPerChat: 20                  # 热更新 · 单会话活跃任务上限，超了 schedule_create 直接拒绝
   # cron 两次触发之间的最小间隔。cron 最细能到每分钟，而 agent 模式下那就是每分钟一次真实模型调用。
+  # **这一项与 maxPerChat 就是定时轮次的频率闸**：定时轮次不计入 quota.rateLimit 的按小时次数
+  # （docs/28 · L-QUOTA-02），所以这两个值是「机器一天最多开多少轮」的唯一上界。
+  # 金额那一侧仍由 quota 的 daily / monthly / perTurn 兜着。
   minIntervalMinutes: 5           # 热更新
   maxPayloadChars: 2000           # 热更新 · 任务正文上限，同时写进模型看到的 inputSchema
   # 已结束（done / cancelled）的任务行保留多久。活跃任务永不清理（见 03 §4）。
@@ -620,11 +623,19 @@ quota:
   perTurn:
     maxCostUsd: 0.50
     maxSteps: 12
+  # 与金额无关的防滥用（docs/10 §5.1），**不受 `quota.enabled` 影响**。窗口是滚动一小时
+  # （数 `turns.started_at >= now-1h`），不是整点重置。
+  # **定时任务的轮次不计入下面这两项**：它不是「人在刷」，频率已由 schedule.minIntervalMinutes /
+  # schedule.maxPerChat 在创建时管住，而实测一天 38 次定时触发把 owner 自己挡在了门外
+  # （docs/28 · L-QUOTA-02）。金额额度照旧全部生效；concurrentPerUser 照旧数它。
   rateLimit:
     turnsPerUserPerHour: 30
     turnsPerChatPerHour: 100
     concurrentPerUser: 2
   onExceeded:
+    # 这三项只管**金额**那一档。频率（rateLimit 的按小时次数）与并发拒绝各有自己的文案，
+    # 也都不受 `reply` 管 —— 那个开关的语义是「额度用光了就别再回话」，而对一句正常的话沉默
+    # 等于 bot 装没看见。套额度文案更糟：占位符会原样漏给用户（docs/28 · L-QUOTA-02）。
     reply: true
     message: '今天的额度用完了（已用 {spent}/{limit}），{resetAt} 重置。'
     notifyOwner: true             # 热更新 · 只有 global 档超限才私聊 owner；chat/user 超限只回发起人
