@@ -1,7 +1,7 @@
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { ArchiveRepository, OperationsRepository, PrincipalRepository, closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
-import { ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceService, McpManager, ProviderStore, Secrets, SkillLoader, configSchema } from '@luoli/core';
+import { ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceService, McpManager, ModelRegistry, ProviderStore, Secrets, SkillLoader, configSchema } from '@luoli/core';
 import { createServer, type ServerDependencies } from '@luoli/server';
 import { zipFixture } from './fixtures/zip.js';
 
@@ -111,6 +111,57 @@ describe('documented API surface', () => {
     expect((await app.request('/api/aliases/main', { method: 'DELETE', headers })).status).toBe(200);
     expect((await app.request('/api/aliases/main', { method: 'DELETE', headers })).status).toBe(404);
     expect(db.prepare("SELECT COUNT(*) FROM model_aliases WHERE alias='main'").pluck().get()).toBe(0);
+    closeDatabase(db);
+  });
+
+  /**
+   * 人工标记模型的看图能力（docs/21 §10）。`capabilities_json` 是按**模型名**从 models.dev 抄来的，
+   * 中转站照抄官方模型名却不真的转发图片时，抄来的 `vision:true` 让含图轮次不切 `vision` 别名 ——
+   * 图就留在一个看不见它的模型上（实测 `logs/2026-08-19`：那家网关的 grok-4.5 收下 image_url、
+   * 200 返回、usage 里没有 image_tokens，四次全在瞎猜；同一家的 grok-4.3 正常）。
+   *
+   * 这条断言链要求的是「界面上标一下 → 运行时真的改了路」，所以它拿真的 `ModelRegistry` 复算，
+   * 而不是只看库里那行 JSON。
+   */
+  it('marks a relayed model as blind and the runtime registry follows', async () => {
+    const { app, db, headers } = harness();
+    const now = Date.now();
+    db.prepare("INSERT INTO providers(id,name,kind,base_url,enabled,created_at,updated_at) VALUES('p','relay','openai-compatible','http://127.0.0.1:9/v1',1,?,?)").run(now, now);
+    // 目录抄来的那份：vision=true，而这家网关根本不转发图片。
+    db.prepare(`INSERT INTO models(id,provider_id,model_id,context_window,max_output,capabilities_json,enabled,sort,created_at,updated_at)
+      VALUES('m','p','grok-4.5',128000,8192,'{"vision":true,"tools":true,"catalog":{"source":"models.dev","match":"official","priceSource":null}}',1,0,?,?)`).run(now, now);
+    db.prepare('INSERT INTO model_aliases(alias,model_ids_json,updated_at) VALUES (?,?,?)').run('main', JSON.stringify(['m']), now);
+    const registry = new ModelRegistry(db, new ProviderStore(db, new Secrets('x'.repeat(32))));
+    registry.rebuild();
+    expect(registry.supportsVision('main')).toBe(true);
+
+    // 白名单外的能力位一律报错：让人以为标了「不支持工具」就不会发工具目录，比不给这个选项糟。
+    const stray = await app.request('/api/models/m', { method: 'PATCH', headers, body: JSON.stringify({ capabilities: { tools: false } }) });
+    expect(stray.status).toBe(400);
+    expect((await stray.json() as { error: { message: string } }).error.message).toContain('运行时不读');
+    expect((await app.request('/api/models/m', { method: 'PATCH', headers, body: JSON.stringify({ capabilities: { vision: 'no' } }) })).status).toBe(400);
+    expect(JSON.parse(db.prepare('SELECT capabilities_json FROM models WHERE id=?').pluck().get('m') as string)).toMatchObject({ vision: true });
+
+    const marked = await app.request('/api/models/m', { method: 'PATCH', headers, body: JSON.stringify({ capabilities: { vision: false } }) });
+    expect(marked.status).toBe(200);
+    expect((await marked.json() as { data: { changes: number } }).data.changes).toBe(1);
+    // 生效值写顶层（运行时与界面徽章都读那里），意图记 manual（「补齐元数据」据它盖回来）。
+    const block = JSON.parse(db.prepare('SELECT capabilities_json FROM models WHERE id=?').pluck().get('m') as string) as Record<string, unknown>;
+    expect(block).toMatchObject({ vision: false, tools: true, manual: { vision: false } });
+    expect(block.catalog).toBeTruthy();
+    registry.rebuild();
+    expect(registry.supportsVision('main')).toBe(false);
+    // 改一路的记账要能查：中间件那条只记方法与路径，认不出这一次动的是哪个模型的哪一位。
+    expect(db.prepare("SELECT COUNT(*) FROM log_events WHERE kind='webui.action' AND summary='model capability marked'").pluck().get()).toBe(1);
+
+    // 取消标记：只摘掉 manual，顶层维持现值（不出网重查目录），下一次「补齐元数据」再按目录重填。
+    expect((await app.request('/api/models/m', { method: 'PATCH', headers, body: JSON.stringify({ capabilities: { vision: null } }) })).status).toBe(200);
+    const cleared = JSON.parse(db.prepare('SELECT capabilities_json FROM models WHERE id=?').pluck().get('m') as string) as Record<string, unknown>;
+    expect(cleared.manual).toBeUndefined();
+    expect(cleared.vision).toBe(false);
+    // 空 patch 与不存在的行都不该造出一条 UPDATE。
+    expect((await (await app.request('/api/models/m', { method: 'PATCH', headers, body: JSON.stringify({ capabilities: {} }) })).json() as { data: { changes: number } }).data.changes).toBe(0);
+    expect((await (await app.request('/api/models/missing', { method: 'PATCH', headers, body: JSON.stringify({ capabilities: { vision: false } }) })).json() as { data: { changes: number } }).data.changes).toBe(0);
     closeDatabase(db);
   });
 

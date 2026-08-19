@@ -393,11 +393,18 @@ CREATE UNIQUE INDEX ux_models_provider_model ON models(provider_id, model_id);
 --   "catalog": { "source": "models.dev", "match": "provider|official|third-party|none",
 --                "providerId": "anthropic", "modelId": "claude-opus-5", "normalized": false,
 --                "priceRange": { "min": 0.2, "max": 0.4, "providers": 2 } | null,
---                "priceSource": "provider|official|manual" | null, "fetchedAt": 1739000000000 }
+--                "priceSource": "provider|official|manual" | null, "fetchedAt": 1739000000000 },
+--   "manual": { "vision": false }                        -- 可选；owner 人工标过的能力位，见下
 -- }
 -- 运行时**只读 `vision` 这一个字段**：`ModelRegistry.supportsVision(alias)` 解析别名链首那一行，
 -- 含图轮次据此在 `prepareStep` 自动切 `vision`（04 §5.2）。其余字段服务于 WebUI 的展示与人工判断。
 -- priceSource=manual 由 `PATCH /api/models/:id` 改动任一价格字段时写入：手填过的价不能再挂官方价徽标。
+-- `manual` 是**人工标记**：目录按模型名匹配，中转站照抄官方模型名却不转发图片时抄来的
+-- `vision:true` 会让含图轮次不切别名。`PATCH /api/models/:id` 的 `capabilities` 把生效值写顶层
+-- （运行时与徽标都读那里，不必各自再懂一层优先级），同时把意图记进 `manual` —— 「补齐元数据」
+-- 拿目录那份整块覆盖能力位，不留下意图的话一次补齐就把标记静默撤销了。**`manual` 的键只能来自
+-- 运行时真的会读的那几个**（现在只有 `vision`），白名单外的键端点直接 400：让人以为标了
+-- 「不支持工具」就不会发工具目录，比不给这个选项糟（09 §4、21 §10）。
 
 -- 别名 → 有序 fallback 链
 CREATE TABLE model_aliases (

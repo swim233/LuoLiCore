@@ -105,7 +105,7 @@ const aliases = ref<Array<Record<string, unknown>>>([]);
 const providerDialog = ref(false);
 const providerForm = ref({ id: '', name: '', kind: 'openai', baseUrl: '', apiKey: '', enabled: true });
 const modelDialog = ref(false);
-const modelForm = ref({ id: '', providerId: '', modelId: '', displayName: '', contextWindow: 128000, maxOutput: 8192, priceIn: 0, priceOut: 0, priceCacheRead: 0, priceCacheWrite: 0, enabled: true, sort: 0 });
+const modelForm = ref({ id: '', providerId: '', modelId: '', displayName: '', contextWindow: 128000, maxOutput: 8192, priceIn: 0, priceOut: 0, priceCacheRead: 0, priceCacheWrite: 0, enabled: true, sort: 0, vision: 'follow' as VisionMark });
 const aliasDialog = ref(false);
 // 别名的用途只写在 docs/04 里，运维在这个页面上是看不到的——六个内建别名常驻表格并带用途说明。
 const ALIAS_GUIDE: Array<{ alias: string; purpose: string; tier: string }> = [
@@ -183,6 +183,25 @@ const catalogAge = computed(() => {
   const hours = status.ageMs / 3_600_000;
   return hours < 1 ? '刚刚更新' : hours < 48 ? `${Math.round(hours)} 小时前更新` : `${Math.round(hours / 24)} 天前更新`;
 });
+/**
+ * 「这个模型到底看不看得见图」是 `capabilities_json` 里**唯一有运行时行为**的能力位：含图轮次
+ * 据它自动切 `vision` 别名。而它是从 models.dev 按模型名抄来的 —— 中转站照抄官方模型名却不真的
+ * 转发图片时，抄来的 `vision:true` 让那一轮**不切**别名，图就留在一个看不见它的模型上。
+ * 所以这里给的是「跟随目录 / 人工强制」的三态；标记落在 `capabilities_json.manual.vision`。
+ */
+type VisionMark = 'follow' | 'on' | 'off';
+const VISION_MARKS: Array<{ value: VisionMark; label: string }> = [
+  { value: 'follow', label: '跟随目录判断（默认）' },
+  { value: 'on', label: '强制：这个模型能看图' },
+  { value: 'off', label: '强制：这个模型看不了图' },
+];
+/** 已入库那一行上人工标记的看图能力；没标过是 `follow`。徽标与表单共用这一份判据。 */
+const manualVision = (model: Record<string, unknown>): VisionMark => {
+  try {
+    const manual = (JSON.parse(String(model.capabilities_json ?? '{}')) as { manual?: { vision?: unknown } }).manual;
+    return manual?.vision === true ? 'on' : manual?.vision === false ? 'off' : 'follow';
+  } catch { return 'follow'; }
+};
 const capabilityTags = (meta: CatalogMeta | null): string[] => {
   if (!meta || meta.match === 'none') return [];
   const tags: string[] = [];
@@ -642,8 +661,15 @@ async function importCatalog(): Promise<void> {
   } catch (error) { toastError('导入模型失败', error); }
 }
 async function removeProvider(id: string): Promise<void> { try { await api(`/api/providers/${encodeURIComponent(id)}`, { method: 'DELETE' }); pushToast({ severity: 'success', summary: 'Provider 已删除' }); } catch (error) { toastError('删除失败', error); } await load(); }
-function editModel(model?: Record<string, unknown>): void { modelForm.value = model ? { id: String(model.id), providerId: String(model.provider_id), modelId: String(model.model_id), displayName: String(model.display_name ?? ''), contextWindow: Number(model.context_window), maxOutput: Number(model.max_output), priceIn: Number(model.price_in ?? 0), priceOut: Number(model.price_out ?? 0), priceCacheRead: Number(model.price_cache_read ?? 0), priceCacheWrite: Number(model.price_cache_write ?? 0), enabled: Boolean(model.enabled), sort: Number(model.sort ?? 0) } : { id: '', providerId: providers.value[0]?.id ?? '', modelId: '', displayName: '', contextWindow: 128000, maxOutput: 8192, priceIn: 0, priceOut: 0, priceCacheRead: 0, priceCacheWrite: 0, enabled: true, sort: 0 }; modelDialog.value = true; }
-async function saveModel(): Promise<void> { const form = modelForm.value; try { await api(form.id ? `/api/models/${encodeURIComponent(form.id)}` : '/api/models', { method: form.id ? 'PATCH' : 'POST', body: JSON.stringify(form) }); modelDialog.value = false; pushToast({ severity: 'success', summary: '模型配置已保存', detail: form.modelId }); await load(); } catch (error) { toastError('保存模型失败', error); } }
+function editModel(model?: Record<string, unknown>): void { modelForm.value = model ? { id: String(model.id), providerId: String(model.provider_id), modelId: String(model.model_id), displayName: String(model.display_name ?? ''), contextWindow: Number(model.context_window), maxOutput: Number(model.max_output), priceIn: Number(model.price_in ?? 0), priceOut: Number(model.price_out ?? 0), priceCacheRead: Number(model.price_cache_read ?? 0), priceCacheWrite: Number(model.price_cache_write ?? 0), enabled: Boolean(model.enabled), sort: Number(model.sort ?? 0), vision: manualVision(model) } : { id: '', providerId: providers.value[0]?.id ?? '', modelId: '', displayName: '', contextWindow: 128000, maxOutput: 8192, priceIn: 0, priceOut: 0, priceCacheRead: 0, priceCacheWrite: 0, enabled: true, sort: 0, vision: 'follow' }; modelDialog.value = true; }
+async function saveModel(): Promise<void> {
+  const { vision, ...form } = modelForm.value;
+  const mark = vision === 'follow' ? null : vision === 'on';
+  // 改已有行时 `follow` 要发 `null`（= 取消标记）而不是省略这个键，否则「标错了想撤回」在界面上
+  // 做不到 —— 省略与「跟随目录」在服务端是两件事。新建时反过来：没标就别在能力块里留个空键。
+  const body = form.id ? { ...form, capabilities: { vision: mark } } : mark === null ? form : { ...form, capabilities: { vision: mark } };
+  try { await api(form.id ? `/api/models/${encodeURIComponent(form.id)}` : '/api/models', { method: form.id ? 'PATCH' : 'POST', body: JSON.stringify(body) }); modelDialog.value = false; pushToast({ severity: 'success', summary: '模型配置已保存', detail: form.modelId }); await load(); } catch (error) { toastError('保存模型失败', error); }
+}
 function editAlias(row?: AliasRow): void {
   const known = ALIAS_GUIDE.some((entry) => entry.alias === row?.alias);
   const chosen = (row?.chain ?? []).flatMap((segment) => modelOptions.value.filter((option) => option.id === segment.id));
@@ -2611,10 +2637,10 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
           <header><div><p class="eyebrow">MODEL REGISTRY</p><h2>Provider、模型与别名</h2><p>写入后服务端重建运行时 registry；API Key 只显示 hint。</p></div><UiButton label="添加 Provider" icon="pi pi-plus" @click="editProvider()" /></header>
           <div v-if="modelMissingMain" class="danger-banner"><i class="pi pi-exclamation-triangle" />没有可用的 <code>main</code> 别名（未配置、链为空或链里的模型都不可用），所有轮次都会失败。见下方「别名路由」。</div>
           <div class="provider-grid"><article v-for="provider in providers" :key="provider.id"><div class="provider-head"><div class="provider-tags"><UiTag :value="provider.enabled ? '启用' : '停用'" :severity="provider.enabled ? 'success' : 'secondary'" /><UiTag v-if="provider.healthState" :value="provider.healthState === 'up' ? '连通' : '不可用'" :severity="provider.healthState === 'up' ? 'success' : 'danger'" /></div><div class="card-actions"><UiButton variant="text" size="small" icon="pi pi-bolt" aria-label="测试连接" :loading="testingProvider === provider.id" @click="testProvider(provider)" /><UiButton variant="text" size="small" icon="pi pi-cloud-download" aria-label="从该 Provider 拉取模型" @click="openCatalog(provider.id)" /><UiButton variant="text" size="small" icon="pi pi-pencil" aria-label="编辑 Provider" @click="editProvider(provider)" /><UiButton variant="text" size="small" severity="danger" icon="pi pi-trash" aria-label="删除 Provider" @click="removeProvider(provider.id)" /></div></div><h3>{{ provider.name }}</h3><p>{{ provider.kind }}</p><code>{{ provider.apiKeyHint ?? '未设置密钥' }}</code><small v-if="provider.healthError" class="provider-error">{{ provider.healthError }}</small></article></div>
-          <div class="registry-heading"><div><h3>模型</h3><p class="section-note">窗口、最大输出、能力与定价来自 models.dev 的本地缓存目录，导入时自动带入；<code>补齐元数据</code>只填空着的价格，已填的不会被覆盖。</p></div><div class="section-actions"><UiButton size="small" variant="outlined" icon="pi pi-cloud-download" label="从 Provider 拉取" :disabled="!providers.length" @click="openCatalog()" /><UiButton size="small" variant="outlined" icon="pi pi-sparkles" label="补齐元数据" :disabled="!models.length" :loading="enriching" @click="enrichModels" /><UiButton size="small" variant="outlined" label="添加模型" @click="editModel()" /></div></div>
+          <div class="registry-heading"><div><h3>模型</h3><p class="section-note">窗口、最大输出、能力与定价来自 models.dev 的本地缓存目录，导入时自动带入；<code>补齐元数据</code>只填空着的价格，已填的不会被覆盖。目录按模型名匹配，中转站会撒谎 —— 点开任一行可以手动标记它的<b>看图能力</b>，标记压过目录，且不会被<code>补齐元数据</code>撤销。</p></div><div class="section-actions"><UiButton size="small" variant="outlined" icon="pi pi-cloud-download" label="从 Provider 拉取" :disabled="!providers.length" @click="openCatalog()" /><UiButton size="small" variant="outlined" icon="pi pi-sparkles" label="补齐元数据" :disabled="!models.length" :loading="enriching" @click="enrichModels" /><UiButton size="small" variant="outlined" label="添加模型" @click="editModel()" /></div></div>
           <DataGrid :rows="models" :columns="COLUMNS.models" data-key="id" clickable empty="还没有导入任何模型" @row-click="editModel">
             <template #provider_id="{ data }">{{ providerLabel(String(data.provider_id)) }}</template>
-            <template #capabilities="{ data }"><span v-if="capabilityTags(storedMeta(data)).length" class="cap-tags"><UiTag v-for="tag in capabilityTags(storedMeta(data))" :key="tag" :value="tag" severity="secondary" /></span><small v-else class="catalog-sub">未知</small></template>
+            <template #capabilities="{ data }"><span v-if="capabilityTags(storedMeta(data)).length || manualVision(data) !== 'follow'" class="cap-tags"><UiTag v-for="tag in capabilityTags(storedMeta(data))" :key="tag" :value="tag" severity="secondary" /><UiTag v-if="manualVision(data) !== 'follow'" :value="manualVision(data) === 'on' ? '手标 · 能看图' : '手标 · 看不了图'" :severity="manualVision(data) === 'on' ? 'info' : 'warn'" title="运维手动标过这个模型的看图能力，压过 models.dev 的判断；「补齐元数据」不会撤销它" /></span><small v-else class="catalog-sub">未知</small></template>
             <template #price_in="{ data }"><span>{{ data.price_in ?? '—' }}</span><small v-if="storedPriceSource(data)" class="catalog-sub">{{ storedPriceSource(data) === 'manual' ? '手工填写' : MATCH_LABELS[String(storedPriceSource(data))]?.label ?? '' }}</small><small v-else-if="data.price_in === null" class="catalog-sub match-third-party">缺定价 · 花费按 0 记账</small></template>
             <template #enabled="{ data }"><UiTag :value="data.enabled ? '启用' : '停用'" :severity="data.enabled ? 'success' : 'secondary'" /></template>
           </DataGrid>
@@ -2873,6 +2899,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
         <label>缓存读取价格<UiNumber :model-value="modelForm.priceCacheRead" :min="0" :step="0.01" @update:model-value="changeModelNumber('priceCacheRead', $event)" /></label>
         <label>缓存写入价格<UiNumber :model-value="modelForm.priceCacheWrite" :min="0" :step="0.01" @update:model-value="changeModelNumber('priceCacheWrite', $event)" /></label>
         <UiSwitch v-model="modelForm.enabled" class="wide" label="启用" />
+        <label class="wide">看图能力（含图轮次据它选模型）<UiSelect v-model="modelForm.vision" :options="VISION_MARKS" option-label="label" option-value="value" /><small class="field-note">能力标签是按<b>模型名</b>在 models.dev 上匹配来的，而中转站常常照抄官方模型名却不真的转发图片 —— 那种模型照常 200 返回、usage 里没有 <code>image_tokens</code>，然后凭上下文瞎猜图里有什么。<b>这是能力块里唯一有运行时行为的一位</b>：标成「看不了图」之后含图轮次会自动切到 <code>vision</code> 别名（<code>docs/04 §5.2</code>），标成「能看图」则相反 —— 那一轮就留在它自己身上。怎么判断：拿一张三色块图问它颜色，答错就是看不见。取消标记后这一行维持现值，下一次<code>补齐元数据</code>按目录重填。</small></label>
       </div>
       <template #footer><UiButton variant="text" label="取消" @click="modelDialog = false" /><UiButton label="保存模型" @click="saveModel" /></template>
     </UiModal>

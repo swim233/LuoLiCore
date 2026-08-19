@@ -513,6 +513,14 @@ shim 去翻译 Responses 语义，代价有两项，都是实测出来的：
   别名自己就支持看图」。一个都没有才降级：图片整体换成文本占位，并在**回复末尾**追加一句提示
   （走 `stepSeparatedText` 的收尾通道，与收尾补跑同一条路，不新开 core→telegram 的管子）。
   切换与降级各记一条 `provider.fallback`（`reason: 'vision_required' | 'vision_unavailable'`）。
+  **能力位可以被人工推翻。** `capabilities_json.vision` 是按**模型名**从 models.dev 抄来的，而中转站
+  照抄官方模型名却不真的转发图片是常态：那种模型照常 200 返回、usage 里没有 `image_tokens`，然后
+  凭上下文瞎猜图里有什么，而抄来的 `vision:true` 让这一轮**不切**别名 —— 于是「模型看不见图却不
+  知道自己看不见」这个形态从另一头又回来了一次（实测 `logs/2026-08-19`：同一家网关的 `grok-4.5`
+  四次全错、`grok-4.3` 正确且 usage 里有 `image_tokens`）。目录改不了那个事实，所以运维能在 WebUI
+  的模型行上标记这一位（`PATCH /api/models/:id` 的 `capabilities`，落 `capabilities_json.manual`，
+  见 [09 §3.5](./09-webui.md) 与 [03](./03-data-model.md) 的形状说明）。标记压过目录，且
+  **「补齐元数据」不会撤销它**。反向也能标（目录说不行、这家网关其实行）。
 - 模型可用 `set_model` 工具（`minRole=trusted`）为**当轮**指定别名，写入 `turn.runtime.modelAliasOverride`；不跨轮持久。
   工具的 description 与返回值都写明这一点（返回 `scope: 'this_turn_only'`）：模型曾据此对用户说
   「切好啦，现在是 vision 模型」，而下一轮（真正带图那一轮）早就回到默认别名了。
@@ -668,6 +676,12 @@ Anthropic 连这个都没有，定价、输入模态、可用思考档位没有�
 配额就按一个与账单无关的数字算 —— 「摘除比伪造安全」（[16 §5](./reviews/16-remediation-plan.md)）。
 匹配前会剥掉 `:free` / `@版本` / `-latest` / 日期后缀再试一次，命中时 `normalized=true`，
 界面显示实际匹配到的那个 key。
+
+**匹配是按模型名做的，所以网关能对着它撒谎。** 抄一个官方模型名但不转发图片的中转站，会拿到一份
+`vision:true` 的能力块 —— 而这一位有运行时行为（§5.2）。因此 `vision` 可以在 WebUI 的模型行上
+人工标记，标记落 `capabilities_json.manual` 并压过目录，**「补齐元数据」把能力块整块重写时会把它
+盖回去**（`keepManualCapabilities`）。能人工标的只有运行时真的会读的那几位 —— 其余能力位只喂徽章，
+给它们做开关就是假开关。
 
 ### 5.5 定价与 token 计费
 

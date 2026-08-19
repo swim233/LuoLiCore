@@ -221,8 +221,15 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
 - `[测试连接]` 的结果与所有 provider/模型写操作的反馈走**右上角 `ToastHost`**（滑入、到点自动消失、可手动关掉，最多同时留 5 条），不再用顶栏的静态横幅：连通时显示耗时与上游返回的模型数，失败时显示错误类型与上游消息摘要。详见 [04 §5.4](./04-agents-and-providers.md#54-密钥管理)。
 - 模型表：model_id、Provider、context_window、**能力标签**（看图 / 读 PDF / 工具 / 结构化输出 / 思考档位，来自 `capabilities_json`）、
   两个价格字段（每行标出定价出处：`provider 自报价` / `厂商官方价` / `手工填写`；为空时红字提示「缺定价 · 花费按 0 记账」）、启用、排序。
-  表头的 `[补齐元数据]` 对**已入库**的模型重跑一次匹配：能力块照写，**价格只填空着的**（已填的不覆盖），
-  窗口/最大输出默认不动（运维可能按预算调小过），走 `POST /api/models/enrich`。
+  表头的 `[补齐元数据]` 对**已入库**的模型重跑一次匹配：能力块照写（**但人工标记盖回去**，见下），
+  **价格只填空着的**（已填的不覆盖），窗口/最大输出默认不动（运维可能按预算调小过），走 `POST /api/models/enrich`。
+- **看图能力可以人工标记**（模型编辑对话框里的三态下拉：`跟随目录判断` / `强制：能看图` / `强制：看不了图`）。
+  为什么要有这个：能力标签是按**模型名**在 models.dev 上匹配来的，而中转站照抄官方模型名却不真的
+  转发图片是常态 —— 那种模型照常 200 返回、usage 里没有 `image_tokens`，然后凭上下文瞎猜图里有什么，
+  而抄来的 `vision:true` 让含图轮次**不切** `vision` 别名（[04 §5.2](./04-agents-and-providers.md)）。
+  三件事写在控件旁边：**这是能力块里唯一有运行时行为的一位**（其余标签只影响界面，所以不给开关 ——
+  假开关比没开关糟）；判断方法（拿一张三色块图问它颜色，答错就是看不见）；取消标记后该行维持现值、
+  下一次 `[补齐元数据]` 再按目录重填。标过的行在能力列上多一枚 `手标 · 能看图` / `手标 · 看不了图` 徽标。
 - `[从 Provider 拉取模型]`：选 provider → 调 `GET /api/providers/:id/models` 拿上游模型目录 → 带搜索框的多选表格（**不做白名单过滤**，上游返回什么就列什么；已在库中的行灰显且不可勾选）→ 勾选若干 → `POST /api/models/import` 批量落库。
   每行同时展示窗口/最大输出、价格、能力标签与**定价出处徽标**，数据来自 models.dev 的本地缓存目录（[04 §5.4.1](./04-agents-and-providers.md#541-模型元数据目录modelsdev)）：
   - 窗口/最大输出：上游自己给了（Google）就用上游的（它是那台机器上的事实），没给才用目录补，再没有才用对话框顶部的默认值 —— 每行标明是哪一种。
@@ -685,7 +692,7 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
 | `GET /api/providers/:id/models` | 拉取上游模型目录并用 models.dev 的本地缓存补齐元数据，返回 `{models:[{modelId, displayName, contextWindow, maxOutput, limitSource, priceIn, priceOut, priceCacheRead, priceCacheWrite, meta}], latencyMs, catalog}`。`meta` 是匹配结果（`match`/`catalogProviderId`/`catalogModelId`/`normalized`/`capabilities`/`reasoningControl`/`reasoningEfforts`/`modalities`/`priceRange`，见 [04 §5.4.1](./04-agents-and-providers.md#541-模型元数据目录modelsdev)），目录不可用时整块为 `match:'none'` 的空值而不是编造。上游不可达时返回 `502` + 错误 code |
 | `GET /api/models/catalog` | models.dev 缓存状态：`{enabled, available, stale, ageMs, ttlHours, fetchedAt, etag, providers, models, path, error}` |
 | `POST /api/models/catalog/refresh` | 强制续期一次（带 `If-None-Match`）。返回状态 + `outcome`：`fetched` / `not-modified` / `stale`（出网失败但旧缓存可用，仍返回 200）；**完全没有缓存又拉不到**才 `502 catalog_unavailable` |
-| `GET/POST/PATCH/DELETE /api/models[/:id]` | 模型。`PATCH` 动到任一价格字段时，会把 `capabilities_json.catalog.priceSource` 翻成 `manual` |
+| `GET/POST/PATCH/DELETE /api/models[/:id]` | 模型。`PATCH` 动到任一价格字段时，会把 `capabilities_json.catalog.priceSource` 翻成 `manual`。`PATCH` 另收 `capabilities`：`{vision: true \| false \| null}`（`null` = 取消标记，回到目录判断），生效值写 `capabilities_json` 顶层、意图写 `manual`，落库后 `rebuildModels()` 即时生效并记一条 `webui.action / model capability marked`。**只认运行时真的会读的能力位**（现在只有 `vision`），其余键回 `400 model_invalid` 而不是静静吞掉；取值不是 `true/false/null` 同样 400。行不存在时回 `{changes:0}`（与其它 `PATCH` 一致，不是 404） |
 | `POST /api/models/import` | 从上游目录批量落库：`{providerId, models:[{modelId, displayName?, contextWindow?, maxOutput?, priceIn?, priceOut?, priceCacheRead?, priceCacheWrite?}], contextWindow?, maxOutput?}`，单次上限 200 条。**能力块与定价出处一律在服务端重新解析**（请求体里的 capabilities 是客户端说的，落库的必须是目录里实际有的那条）。已存在的 `(provider_id, model_id)` 跳过而不是覆盖（不能把已调好的定价冲掉），返回 `{inserted, skipped, priced, ids}` |
 | `POST /api/models/enrich` | 给已入库的模型补元数据：`{ids?: string[], overwrite?: boolean}`（不给 `ids` 就是全部）。能力块照写；**价格只填 `NULL` 的那几个**，已有价格保留并把出处标成 `manual`；窗口/最大输出只有 `overwrite:true` 才覆盖。返回 `{scanned, updated, priced, unmatched}`；目录完全不可用时 `502 catalog_unavailable`（不能拿空值把现有行洗掉） |
 | `GET/PUT/DELETE /api/aliases[/:alias]` | 别名、fallback 链与采样参数。`PUT` 校验别名名（`^[a-z][a-z0-9_-]{0,31}$`）、链非空且模型存在、`settings` 过 `aliasSettingsSchema`（[04 §5.2.1](./04-agents-and-providers.md#521-别名参数settings_json)），任一不过返回 `alias_invalid` + 具体路径 |
