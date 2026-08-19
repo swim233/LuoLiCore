@@ -1,6 +1,7 @@
 import type { Api } from 'grammy';
 import type { Message } from 'grammy/types';
 import { marked, type MarkedOptions, type Token, type Tokens } from 'marked';
+import { KeyedMutex } from '@luoli/core';
 
 /**
  * 普通文本里要转义的全集。**`\` 必须在内** —— 漏掉它时 `C:\x` 会被 Telegram 当成「转义 x」，
@@ -304,6 +305,23 @@ export async function sendWithFallback(api: Api, chatId: string, text: string, e
 }
 
 /**
+ * **一条消息的那一批分段按 chat 串行**（docs/28 · L-TG-02）。
+ *
+ * 每一段各自过一次 `apiThrottler`（`bot.ts` 那份 `out: { minTime: 1000 }`），段与段之间因此有一个
+ * 「上一段落地了才排下一段」的空档，别的轮次的 `sendMessage` 会在空档里挤进队列：实测一条 9469 字
+ * 的回复切成 3 条，Telegram 给的 id 是 1458 / 1459 / **1467** —— 中间隔着三轮后续对话，真人在屏幕上
+ * 确认第三段是在后面三条回复之后才冒出来的。
+ *
+ * **只盖「一条消息的那一批分段」，绝不盖流中途的增量编辑** —— 盖整轮会让同一个群里的并发轮次
+ * 变成实质串行（前一轮跑完才能看到后一轮的字），那是把一个投递顺序问题换成一个吞吐问题。
+ *
+ * 模块级单例：同一个 chat 的所有轮次必须排同一条队，每轮新建一把等于没有锁。进程内序与
+ * `bot.ts` 的 `ingressOrder` 同一档 —— 它排的是那个 grammY api 客户端的调用顺序，而那个客户端
+ * 本来就只存在于这个进程里（`docs/01 §3.1` 为横向扩展保留的抽象仍是 `KeyedMutex` 自己）。
+ */
+export const deliveryOrder = new KeyedMutex();
+
+/**
  * `output.maxMentions`：一条消息里最多保留几个 `@用户名`，多出来的去掉 `@` 只留名字。
  * 这是防「模型被诱导 @全群」的护栏 —— 提示词里说好不要这么做，但那不是边界，投递侧才是。
  * 0 表示不限。
@@ -478,4 +496,32 @@ export function toPlainText(rendered: string, parseMode: ParseMode): string {
       .replaceAll('&amp;', '&');
   }
   return rendered.replace(/\\([\\_*[\]()~`>#+\-=|{}.!])/g, '$1');
+}
+
+/**
+ * 分片的两份结果：`rendered[i]` 是真正发出去的那一条，`archived[i]` 是它要落进 `messages.text`
+ * 的那一份。两个数组等长，出站路径靠下标把 `message_id` 与文本对应起来。
+ */
+export interface TelegramSegments { rendered: string[]; archived: string[] }
+
+/**
+ * 分片 + **逐段的归档文本**（docs/28 · L-TG-03）。
+ *
+ * 此前三条出站路径都给每一段存一份**完整全文**：一条 9469 字的回复切成 3 条 → `messages` 三行
+ * 各 9469 字、head/tail 完全相同，`messages_fts` 也是三份，于是 `search_messages` 把同一条回复搜出
+ * 三次、归档体积按分段数翻倍。（上下文侧一直是对的：`context_messages` 只有一条整全文。）
+ *
+ * 归档存的是**渲染前**的正文（`safeRender` 之后的 MarkdownV2 转义符不该进库，否则 WebUI 会话页与
+ * `read_messages` 看到的 bot 发言带一串 `\-` `\.`）。而**渲染在分片之前**，分片点是渲染后码点数组
+ * 上的下标 —— 反推不回源文本里的下标：转义、`###` 降级成粗体、列表符号替换、表格进围栏，
+ * 都不是可逆的 1:1 映射。所以：
+ *
+ * - **只有一片**（绝大多数消息）：那一片就是整条源文本，`archived` 直接是它，口径一个字未变。
+ * - **真的切开了**：按 `toPlainText` 逐段反推。它是 `sendWithFallback` 解析失败降级时**真正发出去**
+ *   的那一份，同样不含转义符 —— 代价是几个标记形态会归一（`**粗**` → `*粗*`、`- 项` → `• 项`），
+ *   换来的是「每一段只存自己那一段」。近似的是**字面形态**，不是段与 `message_id` 的对应关系。
+ */
+export function segmentTelegramText(text: string, max = 3900, parseMode: ParseMode = 'MarkdownV2'): TelegramSegments {
+  const rendered = splitTelegramText(text, max, parseMode);
+  return { rendered, archived: rendered.length > 1 ? rendered.map((part) => toPlainText(part, parseMode)) : rendered.map(() => text) };
 }

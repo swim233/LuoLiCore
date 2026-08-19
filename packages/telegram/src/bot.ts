@@ -9,7 +9,7 @@ import type { Role, RuntimeTurnContext } from '@luoli/shared';
 import { parsePrincipal, roleRank } from '@luoli/shared';
 import { contextKey, modelAliasKey, readAppKv, writeAppKv } from '@luoli/db';
 import { matchTrigger } from './trigger.js';
-import { capMentions, holdReply, sendWithFallback, splitTelegramText, type ParseFallbackInfo } from './output.js';
+import { capMentions, deliveryOrder, holdReply, segmentTelegramText, sendWithFallback, type ParseFallbackInfo } from './output.js';
 import { archiveQuotedMessage, attachMedia, messageKind } from './reply.js';
 import { TelegramOutput } from './stream-output.js';
 
@@ -560,15 +560,21 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
         // **只有第一条分片带**，否则一条长回复会在群里刷出一串引用块。
         // 分片要跟着 parseMode 走：三档各有自己的渲染器，按一档渲染再按另一档声明发出去，
         // 用户看到的就是转义符本身（docs/08 §5.3）。
-        for (const [index, part] of splitTelegramText(outgoing, outputConfig.maxMessageChars, outputConfig.parseMode).entries()) {
-          const sent = await sendWithFallback(bot.api, chatId, part, index === 0 ? { reply_parameters: { message_id: message.message_id } } : {}, outputConfig.parseMode, onParseFallback);
-          // 归档存**渲染前**的正文，与流式那条路（下面存 `answer`）一致。存 `part` 的话
-          // `messages.text` 里躺的是 MarkdownV2 转义后的文本 —— WebUI 会话页和 `read_messages`
-          // 看到的 bot 发言带一串 `\-` `\.`，同一张表里两条路径两种内容。分片多于一条时这里会
-          // 重复存全文，这也是流式那条路一直以来的行为（每个 message_id 一条，text 都是 answer）。
-          scoped.append({ chatId, messageThreadId: message.message_thread_id ?? null, tgMessageId: sent.message_id, direction: 'out', fromKind: 'bot', fromUserId: String(bot.botInfo.id), fromName: bot.botInfo.first_name, fromUsername: bot.botInfo.username,
-            kind: 'text', text: outgoing, tgDate: sent.date * 1000, raw: sent, triggered: false, turnId: turn.turnId });
-        }
+        const segmented = segmentTelegramText(outgoing, outputConfig.maxMessageChars, outputConfig.parseMode);
+        // 这一批分段按 chat 串行（docs/28 · L-TG-02）：段与段之间那个空档里挤进别的轮次的
+        // `sendMessage` 时，用户看到的是「最后一段在后面几条回复之后才冒出来」。
+        await deliveryOrder.run(chatId, async () => {
+          for (const [index, part] of segmented.rendered.entries()) {
+            const sent = await sendWithFallback(bot.api, chatId, part, index === 0 ? { reply_parameters: { message_id: message.message_id } } : {}, outputConfig.parseMode, onParseFallback);
+            // 归档存**渲染前**的正文，与流式那条路（下面存 `answer`）一致。存 `part` 的话
+            // `messages.text` 里躺的是 MarkdownV2 转义后的文本 —— WebUI 会话页和 `read_messages`
+            // 看到的 bot 发言带一串 `\-` `\.`，同一张表里两条路径两种内容。**分片时每个
+            // `message_id` 存自己那一段**（`segmentTelegramText`，docs/28 · L-TG-03）：此前这里给
+            // 每一段都存一份完整全文，三段的回复在 `messages` 与 `messages_fts` 里各躺三份。
+            scoped.append({ chatId, messageThreadId: message.message_thread_id ?? null, tgMessageId: sent.message_id, direction: 'out', fromKind: 'bot', fromUserId: String(bot.botInfo.id), fromName: bot.botInfo.first_name, fromUsername: bot.botInfo.username,
+              kind: 'text', text: segmented.archived[index] ?? outgoing, tgDate: sent.date * 1000, raw: sent, triggered: false, turnId: turn.turnId });
+          }
+        });
         answer = outgoing;
       } else {
         const output = new TelegramOutput(bot, chatId, { mode: outputConfig.mode, replyDelayMs: outputConfig.replyDelayMs, bufferMs: outputConfig.streamBufferMs, intervalMs: outputConfig.streamIntervalMs, minDeltaChars: outputConfig.streamMinDeltaChars, maxChars: outputConfig.maxMessageChars,
@@ -607,8 +613,13 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
           if (!final.trim()) dependencies.log.event({ level: 'warn', kind: 'turn.no_final_text', summary: 'Last step produced no text; fell back to streamed narration',
             traceId: turn.turnId, chatId, userId, key, data: { streamedChars: consumed.text.length, messages: consumed.messageIds.length } });
         }
-        for (const messageId of consumed.messageIds) scoped.append({ chatId, messageThreadId: message.message_thread_id ?? null, tgMessageId: messageId, direction: 'out', fromKind: 'bot', fromUserId: String(bot.botInfo.id), fromName: bot.botInfo.first_name, fromUsername: bot.botInfo.username,
-          kind: 'text', text: answer, tgDate: Date.now(), raw: { streamed: true, interrupted: consumed.interrupted }, triggered: false, turnId: turn.turnId });
+        // **分段时每个 `message_id` 存自己那一段**（docs/28 · L-TG-03）：此前这个循环给每一段都存
+        // `answer`，一条 9469 字切成 3 条的回复于是在 `messages` 里躺三行 9469 字、`messages_fts`
+        // 三份，`search_messages` 把同一条回复搜出三次。`segments` 只在真的分片时非空 —— 单条那一路
+        // 存的仍是模型原话（`answer`），而 `segments` 出自改写并渲染之后的文本。
+        // 上下文侧不动：下面 `appendDelta` 仍是一条整全文。
+        for (const [index, messageId] of consumed.messageIds.entries()) scoped.append({ chatId, messageThreadId: message.message_thread_id ?? null, tgMessageId: messageId, direction: 'out', fromKind: 'bot', fromUserId: String(bot.botInfo.id), fromName: bot.botInfo.first_name, fromUsername: bot.botInfo.username,
+          kind: 'text', text: consumed.segments[index] ?? answer, tgDate: Date.now(), raw: { streamed: true, interrupted: consumed.interrupted }, triggered: false, turnId: turn.turnId });
       }
       // 空正文既发不出去（splitTelegramText('') 是空数组，用户看到的是彻底的沉默），
       // 又会把一条空的 assistant 消息留进上下文。当成失败处理：至少用户知道这轮没成，

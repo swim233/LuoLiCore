@@ -128,8 +128,12 @@ describe('Q10 · 回复一律引用触发消息，且只有第一条分片带', 
     // 整个 bot 依赖树，所以这里断言源码：`docs/25 §6` 的同一种取舍（测不到的空话不如源码断言）。
     // 它此前不带引用，于是那句提示在群里飘着，没人知道它在回谁。
     const source = readFileSync(resolve('packages/telegram/src/bot.ts'), 'utf8');
-    const branch = source.slice(source.indexOf('for (const [index, part] of splitTelegramText('));
-    expect(branch.slice(0, 400)).toContain('reply_parameters: { message_id: message.message_id }');
+    // 锚点跟着实现走：这条路现在用 `segmentTelegramText`（分片 + 逐段归档，docs/28 · L-TG-03），
+    // 而且整批分段包在 `deliveryOrder.run` 里（docs/28 · L-TG-02）—— 找不到锚点时 `indexOf` 给 -1、
+    // `slice(-1)` 只剩最后一个字符，断言会红而不是静默失效。
+    const anchor = source.indexOf('const segmented = segmentTelegramText(outgoing');
+    expect(anchor).toBeGreaterThan(0);
+    expect(source.slice(anchor, anchor + 600)).toContain('reply_parameters: { message_id: message.message_id }');
   });
 });
 
