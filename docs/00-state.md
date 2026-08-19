@@ -7,8 +7,9 @@
 > 想知道现在的状态只看本文。反过来，本文**不重抄**别处已经由测试焊住的清单，只指过去：
 > 同一个事实有两份副本，迟早会漂。上一次漂的代价是「未接线配置键」在四个地方有三个数字。
 >
-> 核对时间：2026-08-19（第九轮整改后 + M12 自我扩展落地 + 8-18 两次进程崩溃的收口）。
-> 每一条都回代码查过，不采信文档自述。
+> 核对时间：2026-08-19（第九轮整改后 + M12 自我扩展落地 + 8-18 两次进程崩溃的收口
+> + **第十轮停机活体测试**，见 §2.0）。
+> 每一条都回代码查过，不采信文档自述；§2.0 那一批**另外在真环境上跑过**。
 
 ---
 
@@ -28,6 +29,34 @@
 ## 2. 还欠什么
 
 按「挡着别人 / 单独可做」分组。**每条都实测过**，括号里是核对时的实际值。
+
+### 2.0 第十轮**活体测试**的发现（[`reviews/28`](./reviews/28-round10-live-system-test.md)）
+
+前九轮都是读码复审；第十轮把系统真的跑起来（真进程 · 真 Telegram · 真 docker · 真时钟 · 真上游），
+**只找单元测试结构性看不见的问题**。共 30 条，下面按「先修哪个」排，全部带 `file:line` 与实测值。
+
+**先修这七条：**
+
+| 编号 | 一句话 | 关键位置 |
+|---|---|---|
+| `L-COST-01` | **缓存命中的 token 被双重计价，生产账面 44.4% 是虚的**（342 条 ledger 里 270 条有缓存命中）。公式按 Anthropic 口径写（input 不含 cached），却用在 openai-compatible 上（input **含** cached）；本部署三个 provider 没有一个是 Anthropic。`quota` 吃的就是这个数 —— 缓存越有效，用户越早被挡 | `ledger/usage.ts:34` + `docs/10 §4.1` 的公式本身 |
+| `L-WEB-04` | **YAML 往返会擦掉登录口令哈希**，实例掉回 setup-token 形态。`GET` 因 `looksSecret` 整行跳过 `webui.passwordHash`，`PUT` 用 zod 默认值 `''` 写回并 `DELETE` 旧行。触发条件恰是产品自己推荐的配置（`.env` 注释与 `app.ts:420` 都引导删掉 `WEBUI_PASSWORD`）| `app.ts:568` / `:585-593`、`config/redact.ts:13` |
+| `L-EXT-02` | **MCP 子进程死后永远连不回来** —— `connect()` 只比指纹不判活性，cron 与 `/api/mcp/:name/reconnect` 是同一条死路，「重连」按钮结构上点不动任何东西 | `mcp/manager.ts:58` |
+| `L-EXT-03` | **每次新增/指纹变更 MCP server 泄漏一个 stdio 子进程**，一条就足以让进程无法优雅退出（实测 SIGTERM 后存活 >100 秒）。根因是一次写入触发两次重叠的 `reconcile()`（`ports.emit` 的订阅者 + 端点自己 await），而 `reconcile()` 无串行化 | `mcp/persist.ts:29` + `main.ts:373` + `app.ts:1491` |
+| `L-TOOL-02` | **`tools.fs.allowHostFsForOwner=true` 时 owner 的 fs 工具全线失效** —— `startsWith(root+sep)` 在 root=`/` 时是 `startsWith('//')`，恒为假。连带：为该模式写的那批 deny-glob 从未被真正执行过 | `tools/jail.ts:40` |
+| `L-LOG-01` | `docs/10 §2` 那张「`log_events.kind` 枚举」与实现严重脱节：**表里写了、源码零处发出**的有 20 个（含 `tool.denied` / `turn.queued` / `plugin.*` / `sandbox.run` / `agent.*` / `prompt.build`），**源码在发、表里没有**的 36 个（含全库最多的 `tg.api`）。权限拒绝、排队时长、插件行为因此全都不可观测；`AC-LOG-001`/`AC-PLG-004` 按字面不可能通过 | 见报告 §2 |
+| `L-LOG-04` | **`parent_span_id` 全库为 NULL** —— 全仓没有任何调用点传过它，Trace「调用树」结构上是一张平表。与 `L-LOG-02` 叠加后，`docs/10 §1` 那张 trace 图**在实现里一条边都不存在** | `log/sink.ts:220` 收得下但零写入方 |
+
+**其余 23 条**（P2 十四条、P3 八条、另有 1 条复核后撤回）见报告 §3–§5。其中值得单独记住的：
+`L-OPS-01`（第二个实例启动会就地清掉在位实例的在途轮次与认领）、
+`L-TG-04`（群内并发把 per-chat 20/分钟 预算 17 秒吃光、随后 **14 秒零投递** —— `docs/00` 此前记的
+「队列不再增长」在并发下不成立）、
+`L-WEB-01`（`/webui` 一次性登录整条功能是死的：服务端有完整用例、bot 侧正确、**前端从来不打那个端点**）。
+
+> **这一轮的模式**：找到的东西几乎全部落在「每一半都有测试、没有一条跨过边界」的位置上 ——
+> 前后端边界（`L-WEB-01`）、写入侧与读出侧的边界（`L-LOG-04`：读出侧修过一次，
+> 修完之后正确地读着一个永远是 NULL 的列）、被整体替换掉的依赖（`L-TG-04`：所有既有用例都把
+> `bot.api` 换掉，节流器从没进过测试回路）。
 
 ### 2.1 结构性的三条（[`reviews/27` §8](./reviews/27-full-scope-review.md) 的 `Z4`/`Z5`，需求方拍板留到下一轮）
 
@@ -63,7 +92,7 @@ Telegram 侧没有「发一条带选项的消息、等人点、把结果回灌�
 | 含图轮次自动切 `vision` 别名刚落地 | 三处文档（[04 §5.2](./04-agents-and-providers.md)、[08 §7.2](./08-telegram-adapter.md)、`AC-PROV-009`）都写了、代码里一行都没有 —— `capabilities_json` 只有 WebUI 的徽章在读，`docs/03` 自己承认过「运行时不读这一列」。表现是模型看不见图却不知道自己看不见：实测它去 cp 文件、python 读尺寸、开本地 http 服务器、拿 agent-browser 截图，绕 11 步也没看到那张图；它还调了 `set_model('vision')` 并对用户说「切好啦」，而那个覆盖只在当轮生效（logs/2026-08-18 22:15） | **vision 压过一切**：压过 `downgradeAfterStep`，也压过 `set_model` 的当轮指定。`ModelRegistry.supportsVision(alias)` 必须先 `#models.has` —— `info()` 走 `#pick`，别名不存在时静默回落到 `main`，直接问就恒为真。一个能看图的别名都没有时才降级（图片换文本占位 + 回复末尾一句提示，走 `stepSeparatedText` 的收尾通道）。`set_model` 的 description 与返回值现在都写明「仅本轮」|
 | 收尾补跑（`wrapUpIfNeeded`）刚落地 | 最后一步没有正文时（以工具调用或纯 reasoning 收尾）追加**一次**禁工具的模型调用让模型自己写结论。四道闸：最后一步无正文、本轮真的调过工具、`streamFailure` 为空、单轮成本闸有余量 | 它同时修掉了定时任务那条路的静默失败（`runMainAgent` 拿的也是「最后一步正文」，以工具调用收尾就空正文 → `model_returned_empty`）。**不伪造答复**是这条的红线（[16 §5](./reviews/16-remediation-plan.md)）：补跑是让模型自己说，不是替它编一句 |
 | provider 健康检查刚落地，粒度是 **provider 而不是模型** | 周期探测（`provider/health.ts`，[04 §5.3](./04-agents-and-providers.md)）此前压根不存在：那个 cron 只调 `ModelRegistry.rebuild()`，一次探测都不发，于是「上游连上了但不返回」没有任何一处会记住 —— 实测 `logs/2026-08-18` 三个轮次各在开轮 363 秒后才 fallback（`3 × requestTimeoutMs` + 退避），一轮 600 秒最多够走一步，全部以「太久没有进展」收尾，而库里那行 `health_state` 始终是 `up` | 健康状态挂在 `providers` 上（`health_state` / `health_fail_count`），**不是挂在模型上**：一个 provider 被判 down，它下面所有模型一起从各自的别名链里消失（本部署 ksm-api 被判 down 会连带 `high` 的链首 `gpt-5.6-sol`）。这是 [04](./04-agents-and-providers.md) 现在的口径，要改成按模型判就得先改那份文档 + 加一张表。**判据的四条已经过了一轮复审并改齐**（`tests/provider.health.test.ts`）：计数单位是「一次调用一个候选」而不是一次尝试（按尝试记时 `maxRetries: 2` 的一次慢调用就能判死一个好 provider）、服务成功一次就归零（否则「连续」是「累计」，而计数在库里、重启也不清）、冷却到期时把库里那一行也改回 `up`/0（只在内存里放行会 30 分 down / 一个 cron 间隔 up 地抖）、cron 里**先 rebuild 再探**（`#probes` 是上一次 rebuild 的产物，反过来探不到刚放回来的那个）。另一条已知的：调用路径上把最后一个 provider 判成 down 时，`all_providers_down` 要等下一次 cron 才响（那条尾巴在 `main.ts` 的 `rebuildModels`，`recordFailure` 刻意不 rebuild —— 轮次中途换链会让这一步的记账反查不到服务它的那一行） |
-| `turnTimeoutMs` 是硬边界，但**收尾那一条消息还是要发出去** | 到点后模型调用当场断，投递侧现在看得见（流会抛，轮次记 `failed` + `error='turn_timeout'`、`cancel_reason='timeout'` 而不是 committed，**也不是 `cancelled`** —— 超时是故障，要计入 `consecutive_turn_failures`，否则「每一轮都卡满十分钟」这种最该响的故障一次都不响，见 [04 §5.3](./04-agents-and-providers.md) 的三档）；但已经在屏幕上的内容要补一个「（生成中断）」（一个字都没投出去时不补，改为把那条占位消息删掉），那一次 `editMessageText` 要排 `telegram.throttle.perChatPerMinute`（群聊默认 20/分钟）的队 | 所以一轮的墙钟仍可能超出 `turnTimeoutMs` **一个 API 调用**的时间。此前超的是 3 分钟：typing 是 4 秒一发的 fire-and-forget（15/分钟），同一个群两轮并行就压满了那 20/分钟的预算，队里全是过期的 typing 而真正的消息排在最后（logs/2026-08-18 · B8F92Z）。现在 typing 上一拍没落地就跳过这一拍（`tests/output.pacing.test.ts`），队列不再增长 |
+| `turnTimeoutMs` 是硬边界，但**收尾那一条消息还是要发出去** | 到点后模型调用当场断，投递侧现在看得见（流会抛，轮次记 `failed` + `error='turn_timeout'`、`cancel_reason='timeout'` 而不是 committed，**也不是 `cancelled`** —— 超时是故障，要计入 `consecutive_turn_failures`，否则「每一轮都卡满十分钟」这种最该响的故障一次都不响，见 [04 §5.3](./04-agents-and-providers.md) 的三档）；但已经在屏幕上的内容要补一个「（生成中断）」（一个字都没投出去时不补，改为把那条占位消息删掉），那一次 `editMessageText` 要排 `telegram.throttle.perChatPerMinute`（群聊默认 20/分钟）的队 | 所以一轮的墙钟仍可能超出 `turnTimeoutMs` **一个 API 调用**的时间。此前超的是 3 分钟：typing 是 4 秒一发的 fire-and-forget（15/分钟），同一个群两轮并行就压满了那 20/分钟的预算，队里全是过期的 typing 而真正的消息排在最后（logs/2026-08-18 · B8F92Z）。现在 typing 上一拍没落地就跳过这一拍（`tests/output.pacing.test.ts`）。**但「队列不再增长」只在单轮成立** —— 第十轮实测：同一个群里 6 轮并发时 20/分钟 的预算 17 秒被吃光，随后 **14 秒零投递**，一次 `editMessageText` 排队 14028ms。那个修复减少了 typing 的**数量**，但 typing 与正文编辑仍共用同一份 per-chat 预算（`reviews/28 · L-TG-04`）|
 | 验收条目 273 条未勾 | 其中人工条目一律保持未勾（要人签字，不是测试的事）；其余是没有对应 vitest 用例的 `(自动)` 条目 | 勾选形式由 `tests/acceptance.test.ts` 定死，勾之前先写用例 |
 | 10 条配置键未接线 | 见 [11 §2.0.1](./11-config-reference.md)，每条写明「暂时没做」还是「不该在这一层做」 | 摘键之前先看 [21 §1](./21-webui-coverage-gaps.md) 的复算方法 |
 | 自我扩展刚落地（M12），四条通道默认全关 | `tools.selfExtend.*` 出厂 `enabled: false`；打开之后模型能写自定义工具 / skill / plugin，能登记 MCP server | 主闸不是审批而是「落库即禁用，owner 在扩展页点开」。动这一块之前先读 [14 T18/T19](./14-open-questions.md)：**授权时点与执行时点是分离的**，而 `requireSandbox` 默认关时自定义工具就是调用者的 `bash`（因而能直接写 `data/luoli.db` 绕开启用闸）|
@@ -78,6 +107,8 @@ Telegram 侧没有「发一条带选项的消息、等人点、把结果回灌�
 
 | 范围 | 在哪 | 覆盖了什么 |
 |---|---|---|
+| **真环境跑过的**（第十轮活体测试） | [`reviews/28` §6](./reviews/28-round10-live-system-test.md) | **这一节是读码复审给不出来的**：docker 沙箱真执行（argv/OOM/pids/网络/超时 kill/卷映射/只读根，此前零执行覆盖）、cron 真到点触发与停机错过不补跑（此前全靠手动 `trigger()`）、真人 + 真 Telegram 的毒 markdown 渲染与 `/cancel` 与媒体全类型与 vision 别名切换、真并发 rebase、provider 健康全周期含冷却恢复、审批三条路、SSRF 五类含 DNS rebinding 与重定向、skill 包「装一半整棵回滚」、7 路并发压 SQLite、真浏览器跑 14 页、SSE 四条硬约束、**日志脱敏 400 MB 全量扫描零命中（阳性对照 9/9）**、`reviews/27 · S-01` 复验未回归 |
+| 第十轮**排除**掉的 8 条假象 | [`reviews/28` §8](./reviews/28-round10-live-system-test.md) | 下一轮若沿用同一套装置会再撞上：假上游的固定 usage / 非流式判据 / 跨轮复用 toolCallId、`fetch()` 探针的 450 ms 基线、以及两条属历史而非现状的日志形态 |
 | 全维度（OWASP / SOLID / JS·TS） | [`reviews/27` §7](./reviews/27-full-scope-review.md) | 13 个面：SQL 注入、原型污染、CSRF + 会话、SSRF 主路径、密钥、提示词注入、ReDoS、权限模型、上下文引擎 §9 的 19 条红线、优雅关停、并发闸与互斥、WebUI 前端 XSS |
 | 工具系统 | [`reviews/26` §6](./reviews/26-round8-tool-review.md) | 七道权限闸、`PathJail` 的五类穿越、`untrusted()` 包裹顺序、超时账、追发预算、`edit_file` 审批档位 |
 | WebUI 控制面 | [21 §5](./21-webui-coverage-gaps.md) | 判定为「不是缺口」的三类：运行时没接线的配置项、被取代的重复端点、有意做成只读的地方 |
