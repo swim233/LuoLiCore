@@ -263,6 +263,18 @@ export default definePlugin({
 - 隔离：**无沙箱**（进程内）。文档与 WebUI 必须明确警告：安装第三方 plugin 等同于运行任意代码。
 - 崩溃隔离：所有 hook 调用包 try/catch，超时 `plugins.hookTimeoutMs`（默认 5000）；单个 plugin 连续失败 3 次自动禁用并告警（`plugins.load_error` 写入原因）。
 - 热更新：`plugins.watch`（默认 `false`，因为卸载副作用难保证）。改动后在 WebUI 点「重载」，执行 `onUnload` → 清注册表 → 重新 import（Node ESM 需加 cache-busting query）。
+- **热重载在 `pnpm dev`（tsx）下不生效，而且修不了。** tsx 的 ESM loader 按文件路径缓存模块、
+  忽略 URL 上的 `?v=`，于是重载会照常跑完 `onUnload` / `onLoad`、更新数据库、不留 `load_error`，
+  但加载到的仍是本进程第一次 import 的那份代码（实测改 11 版，每次 `onLoad` 打印的都是 v1，
+  docs/28 · L-EXT-04）。生产不受影响 —— `pnpm start` 跑 `dist/` 的纯 node。
+  按「摘除比伪造安全」，实现侧不假装修好，只把它说出来：`PluginManager.hotReloadReliable`
+  （判据是「进程入口是不是 `.ts`」）为假时，启动落一条 `plugin.hot_reload_unreliable` 警告 +
+  stderr，`POST /api/plugins/:name/reload` 的响应里带同一句话。要验证 plugin 改动就重启进程，
+  或 `pnpm build && pnpm start`。
+- cache-busting 本身**无界**（纯 node 下量化过，未修）：同一文件带唯一 `?v=` 连 import 30 次、
+  每份模块级持有 4 MB → RSS 从 54 MB 涨到 175 MB，显式 `global.gc()` 后不回落。`onUnload` 能清掉
+  规矩 plugin 注册的定时器与句柄，泄漏的是**模块记录本身与它持有的模块级内存** ——
+  所以「反复重载」不是能长期跑的运维动作，重载多次之后该重启。
 
 ### 3.3 Hook 执行顺序与并发
 
@@ -347,12 +359,31 @@ object/array/string/number/integer/boolean/enum/required/default/nullable；遇�
 
 - **懒连接**：首次有角色 ≥ `minRole` 的 turn 需要该 server 时才连接；连接结果缓存。
 - 健康：每 `mcp.healthCheckCron`（默认 5 分钟）`list_tools` 探活；失败标 `state='down'`，工具从注册表移除并在 RUNTIME 块中消失（模型不会调用不存在的工具）。
-- stdio server 崩溃 → 自动重启，指数退避，最多 5 次后标 `down` 并告警。
+- **子进程死了要认得出来。** transport 的 `onclose` 把那条缓存标成非活，`connect()` 的短路判的是
+  「指纹相同**且**还活着」—— 只比连接参数指纹的话，`kill -9` 之后那条死 client 永远命中，
+  `mcp-health` cron 与 `POST /api/mcp/:name/reconnect` 走的是同一条路，于是两条恢复路一起变成死路
+  （docs/28 · L-EXT-02）。**没有指数退避、没有重试上限**：判死之后就等下一次 `reconcile()`
+  （健康检查 / 手动重连 / 配置变更）重连，连不上照旧记 `state='down'`。
+- **`reconcile()` 整体串行，`connect()` 按 server 名串行**（`KeyedMutex`）。一次 `mcp.servers` 写入
+  会触发两条重叠的 reconcile —— HTTP 端点自己 `await` 一条（响应里要给出真实 state），
+  `config.changed` 的订阅者在 `loadConfig` 落地后再一条 —— 不串行化的话两条都会看到「还没连上」
+  并各 spawn 一个 stdio 子进程，而缓存只留住后来的那个（docs/28 · L-EXT-03）。
+  WebUI 那几个端点在 `config.changed` 载荷里带 `reconciled: ['mcp']` 让订阅者让位；
+  模型侧的 `install_mcp` 不带，仍由订阅者负责。
+- **工具目录是原子替换的**：先并行 `discover()` 到临时表，全部落定之后才在一个同步段里
+  `unregisterBySource('mcp')` + 重新注册。反过来（先清空再逐台串行 await）会给模型开一段
+  「一个 MCP 工具都没有」的窗口，每台最长 `mcp.connectTimeoutMs`（默认 15s），而健康检查默认
+  5 分钟就开一次（docs/28 · L-EXT-05）。
 - **配置里被移除或停用的 server 在下一次 `reconcile()` 就断开**（`state='disabled'`），连接参数
   （url/command/args/env/headers）变了也会先断旧连接再重连：只把工具从注册表摘掉的话，stdio 子进程
   会一直挂着，而缓存的 client 又会被当成「已连接」复用。`McpManager` 按 getter 读配置，
   `config.changed` 命中 `mcp.` 前缀时重跑 `reconcile()`，新增 server 不再需要重启（docs/20 · W-MCP-01）。
-- 退出时统一 `client.close()`。
+- 握手（或首次 `list_tools`）超时的那条**当场关掉**，不留到进程结束：不收的话健康检查每 5 分钟
+  给一台「spawn 得起来但握不上手」的 server 多留一个子进程。
+- 退出时关的是**所有建过、还没关完的 transport**，不只是缓存里那几条。MCP SDK 的
+  `StdioClientTransport` 不 `unref` 子进程，而 `shutdown()` 只设 `process.exitCode` ——
+  漏掉一条 refed handle，event loop 就不空，进程就不退（实测 SIGTERM 后存活 >100 秒，
+  docs/28 · L-EXT-03）。
 - WebUI：server 列表、状态、发现到的工具清单（含 schema 预览）、启停、`toolAllow/Deny` 编辑、手动重连、最近错误。
 
 ### 4.4 与自建工具的取舍（遵循 AI SDK 官方建议）

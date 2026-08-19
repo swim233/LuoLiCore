@@ -1,7 +1,7 @@
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
-import { LogSink, PluginManager, ToolRegistry } from '@luoli/core';
+import { HOT_RELOAD_UNRELIABLE_HINT, LogSink, PluginManager, ToolRegistry, isHotReloadReliable } from '@luoli/core';
 import type { ToolExecutionContext } from '@luoli/core';
 import { OperationsRepository } from '@luoli/db';
 
@@ -50,6 +50,23 @@ describe('plugin runtime', () => {
     db.prepare('UPDATE plugins SET enabled=1 WHERE name=?').run('new-plugin'); await manager.reconcile();
     expect(manager.list().map((plugin) => plugin.name)).toEqual(['new-plugin']);
     expect(db.prepare('SELECT min_role AS minRole FROM plugins WHERE name=?').get('new-plugin')).toEqual({ minRole: 'owner' });
+    await manager.close(); closeDatabase(db);
+  });
+
+  /**
+   * tsx 的 ESM loader 按路径缓存模块、忽略 `?v=`，于是 `pnpm dev` 下 reload 每次都回 ok 而跑的
+   * 一直是第一份代码 —— 修不了，只能说出来（docs/28 · L-EXT-04）。
+   * 断言判据本身（纯函数，不去真的起一次 tsx），以及「启动告警与 reload 响应共用同一句话」。
+   */
+  it('把 .ts 入口的运行时判成热重载不可靠', async () => {
+    expect(isHotReloadReliable('/srv/luoli/dist/apps/bot/src/main.js')).toBe(true);
+    expect(isHotReloadReliable('/srv/luoli/apps/bot/src/main.ts')).toBe(false);
+    expect(isHotReloadReliable('/srv/luoli/apps/bot/src/main.mts')).toBe(false);
+    expect(isHotReloadReliable(undefined)).toBe(true);
+    const { db, manager } = setup();
+    expect(manager.hotReloadReliable).toBe(isHotReloadReliable());
+    expect(manager.hotReloadWarning).toBe(manager.hotReloadReliable ? null : HOT_RELOAD_UNRELIABLE_HINT);
+    expect(HOT_RELOAD_UNRELIABLE_HINT).toContain('pnpm dev');
     await manager.close(); closeDatabase(db);
   });
 });
