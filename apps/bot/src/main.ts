@@ -4,7 +4,7 @@ import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { serve } from '@hono/node-server';
 import { ArchiveRepository, CustomToolRepository, OperationsRepository, PrincipalRepository, ScheduleRepository, TurnRepository, closeDatabase, migrateDatabase, modelAliasKey, openDatabase, readAppKv, readPersistedConfig, recomputeMessageTokens, recoverAfterCrash, writeAppKv } from '@luoli/db';
-import { AgentManager, AgentResultStore, AlertDispatcher, BUNDLED_SKILLS, ConfigStore, CustomToolManager, mergeAgentDefinitions, scanAgentFiles, ContextEngine, DatabaseApprovalBroker, EventBus, FileTools, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, ModelRegistry, PathJail, PluginManager, selfAuthoringDenyGlobs, PromptAssembler, PromptDocuments, ProviderStore, PROVIDER_FAILURES_TO_DOWN, PROVIDER_PROBE_TIMEOUT_MS, QuotaGuard, runProviderHealthCheck, Sandbox, ScheduledJobRunner, Scheduler, Secrets, SkillLoader, STABLE_PROMPT_BLOCKS, TOOL_POLICY, ToolRegistry, TurnConcurrency, TurnRegistry, UsageLedger, assembleMainPrompt, configJsonSchema, loadConfig, perChatConfig, registerAuthoringTools, registerBuiltins, rejectedWakewords, runMainAgent, runSubAgent, streamMainAgent, type SubAgentRuntimeEvent } from '@luoli/core';
+import { AgentManager, AgentResultStore, AlertDispatcher, BUNDLED_SKILLS, ConfigStore, CustomToolManager, mergeAgentDefinitions, scanAgentFiles, ContextEngine, DatabaseApprovalBroker, EventBus, FileTools, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, ModelRegistry, PathJail, PluginManager, selfAuthoringDenyGlobs, PromptAssembler, PromptDocuments, ProviderStore, PROVIDER_FAILURES_TO_DOWN, PROVIDER_PROBE_TIMEOUT_MS, QuotaGuard, repairLedgerCacheCost, runProviderHealthCheck, Sandbox, ScheduledJobRunner, Scheduler, Secrets, SkillLoader, STABLE_PROMPT_BLOCKS, TOOL_POLICY, ToolRegistry, TurnConcurrency, TurnRegistry, UsageLedger, assembleMainPrompt, configJsonSchema, loadConfig, perChatConfig, registerAuthoringTools, registerBuiltins, rejectedWakewords, runMainAgent, runSubAgent, streamMainAgent, type SubAgentRuntimeEvent } from '@luoli/core';
 import { createServer, EventStreamRegistry, issueLoginToken, setupToken, type PromptPreviewResult } from '@luoli/server';
 import type { RuntimeTurnContext } from '@luoli/shared';
 import { TelegramTools, UpdatePoller, createTelegramBot } from '@luoli/telegram';
@@ -40,7 +40,13 @@ const configStore = new ConfigStore(config);
 for (const path of [resolve('data'), resolve('logs'), resolve('skills'), resolve('plugins'), resolve(config.memory.dir), resolve(config.sandbox.workspaceDir)]) mkdirSync(path, { recursive: true, mode: 0o700 });
 const db = openDatabase(config.db.path);
 migrateDatabase(db);
-recoverAfterCrash(db);
+// 报出来而不是静静收尾：`LogSink` 到下面才建得起来，所以先走 stdout，等 sink 有了再补一条
+// `system.recovered`。此前它返回 void 也不记日志，一次非正常重启之后 reap 了什么只能靠翻
+// `turns` 表反推（docs/28 · L-OPS-04）。
+const recovered = recoverAfterCrash(db);
+const recoveredAny = Object.values(recovered).some((count) => count > 0);
+if (recoveredAny) process.stdout.write(`[recover] 上一个进程没有正常收尾：判死 ${recovered.turns} 条轮次 / ${recovered.tasks} 条任务 / ${recovered.agentRuns} 条子 agent，`
+  + `释放 ${recovered.claims} 条消息认领，清零 ${recovered.reservations} 行在途预留。\n`);
 // 一次性数据修复而不是迁移：迁移文件提交后不可修改，而这件事要用 TS 侧的估算器重算 parts。
 // 修的是 token 校准失控期间落库的 tokens（实测系数最高约 26 倍，logs/2026-08-16）。
 if (!readAppKv<boolean>(db, TOKEN_REPAIR_KEY)) {
@@ -48,6 +54,12 @@ if (!readAppKv<boolean>(db, TOKEN_REPAIR_KEY)) {
   writeAppKv(db, TOKEN_REPAIR_KEY, true, 'startup');
   if (repaired.messages || repaired.contexts) process.stdout.write(`[context] 已按新估算器重算 ${repaired.messages} 条上下文消息的 tokens，并重置 ${repaired.contexts} 个会话的校准系数。\n`);
 }
+// 同一条路的第二次一次性修复：缓存 token 曾被双重计价，账面高估约 44%（docs/28 · L-COST-01）。
+// 它自己带 `app_kv` 门闸，跑过一次就返回 null。
+const ledgerRepair = repairLedgerCacheCost(db, config.general.timezone);
+if (ledgerRepair?.rewritten) process.stdout.write(`[ledger] 已按新计价口径重算 ${ledgerRepair.rewritten} 条用量（受影响 ${ledgerRepair.affected} 条、跳过 ${ledgerRepair.skipped} 条），`
+  + `合计 $${ledgerRepair.before.toFixed(6)} → $${ledgerRepair.after.toFixed(6)}；同时重算 ${ledgerRepair.turns} 条轮次与 ${ledgerRepair.counters} 行配额计数`
+  + `${ledgerRepair.countersStale ? `（另有 ${ledgerRepair.countersStale} 行明细已过保留期，算不回来）` : ''}。\n`);
 const principals = new PrincipalRepository(db);
 principals.ensureOwner(config.access.bootstrapOwnerId);
 const archive = new ArchiveRepository(db);
@@ -68,6 +80,10 @@ const turnRegistry = new TurnRegistry();
 const turnConcurrency = new TurnConcurrency(config.concurrency);
 const log = new LogSink(operations, config.logs.dir, [process.env.BOT_TOKEN ?? '', process.env.LUOLI_MASTER_KEY ?? ''], { level: config.logs.level, maxFileMb: config.logs.maxFileMb, bodyMaxBytes: config.logs.bodyMaxBytes, console: config.logs.console, events });
 log.redactPatterns = config.logs.redactPatterns;
+// 两条修复都发生在 sink 之前，所以补记在这里 —— stdout 那两行只有盯着终端的人看得见，
+// 而「上一次崩溃 reap 了什么」正是事后才会有人来查的东西（docs/28 · L-OPS-04）。
+if (recoveredAny) log.event({ level: 'warn', kind: 'system.recovered', summary: `上一个进程没有正常收尾：判死 ${recovered.turns} 条轮次`, data: recovered });
+if (ledgerRepair?.rewritten) log.event({ level: 'warn', kind: 'maintenance.repair', summary: `按新计价口径重算了 ${ledgerRepair.rewritten} 条用量`, data: ledgerRepair });
 // 告警要早于沙箱、plugin、模型注册表建起来：那三处的构造参数里就挂着告警回调。
 // owner 私聊在 bot 建好之后再补（`alerts.bindOwner`），此前只走 webhook 与日志。
 let notifyOwner: ((text: string) => Promise<unknown>) | null = null;

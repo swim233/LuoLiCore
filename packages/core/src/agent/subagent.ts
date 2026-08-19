@@ -79,7 +79,9 @@ export async function runSubAgent(run: AgentRun, definition: AgentDefinition, ta
       const cost = dependencies.ledger.record({ turnId: turn.turnId, agentRunId: run.id, chatId: turn.chatId, userId: turn.initiatorUserId,
         providerId: info.providerId, modelId: info.modelId, modelAlias: alias, inputTokens: step.usage.inputTokens ?? 0,
         outputTokens: step.usage.outputTokens ?? 0, cacheReadTokens: step.usage.inputTokenDetails.cacheReadTokens ?? 0,
-        cacheWriteTokens: step.usage.inputTokenDetails.cacheWriteTokens ?? 0, reasoningTokens: step.usage.outputTokenDetails.reasoningTokens ?? 0,
+        cacheWriteTokens: step.usage.inputTokenDetails.cacheWriteTokens ?? 0,
+        // `inputTokens` 是 total（超集）；计价用这一份互斥的（`pricedInputTokens`，docs/10 §4.1）。
+        noCacheTokens: step.usage.inputTokenDetails.noCacheTokens ?? undefined, reasoningTokens: step.usage.outputTokenDetails.reasoningTokens ?? 0,
         priceIn: info.priceIn, priceOut: info.priceOut, priceCacheRead: info.priceCacheRead, priceCacheWrite: info.priceCacheWrite,
         latencyMs: step.performance.responseTimeMs, finishReason: step.finishReason, ok: true });
       // 只 record 不 commit 的话，用量报表看得见这笔花费、配额却拦不住它：日/月计数器只在

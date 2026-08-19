@@ -198,16 +198,19 @@ logs:
 
 ```ts
 const m = modelRow;
-const cost = (u.inputTokens  * m.price_in
-            + u.outputTokens * m.price_out
-            + (u.cachedInputTokens ?? 0) * (m.price_cache_read  ?? 0)
-            + (u.cacheCreationInputTokens ?? 0) * (m.price_cache_write ?? 0)) / 1_000_000;
+// **计价的输入是 noCache 那一份，不是 inputTokens。** 见下面那条口径说明。
+const priced = u.noCacheTokens ?? Math.max(0, u.inputTokens - u.cacheReadTokens - u.cacheWriteTokens);
+const cost = (priced           * m.price_in
+            + u.outputTokens   * m.price_out
+            + u.cacheReadTokens  * (m.price_cache_read  ?? 0)
+            + u.cacheWriteTokens * (m.price_cache_write ?? 0)) / 1_000_000;
 
 await ledger.insert({ ts, turnId, agentRunId, spanId, chatId, userId,
   providerId: m.provider_id, modelId: m.model_id, modelAlias,
-  inputTokens: u.inputTokens, outputTokens: u.outputTokens,
-  cacheReadTokens: u.cachedInputTokens ?? 0,
-  cacheWriteTokens: u.cacheCreationInputTokens ?? 0,
+  inputTokens: u.inputTokens,               // 存 total（超集），不存 priced —— 见口径说明
+  outputTokens: u.outputTokens,
+  cacheReadTokens: u.cacheReadTokens,
+  cacheWriteTokens: u.cacheWriteTokens,
   reasoningTokens: u.reasoningTokens ?? 0,
   costUsd: cost, latencyMs, finishReason, ok });
 
@@ -215,11 +218,36 @@ await quota.commit({ chatId, userId, costUsd: cost });     // 见 §5.3
 await turns.addCost(turnId, cost);
 ```
 
+**口径：`inputTokens` 是超集，缓存那部分必须先扣掉。** AI SDK 的 `asLanguageModelUsage` 把
+`step.usage.inputTokens` 统一成 `inputTokens.total`，而三家 provider 包都让 total 成为超集：
+`@ai-sdk/openai-compatible` 的 total 是 `promptTokens`（DeepSeek 是 `cache_hit + cache_miss`），
+`@ai-sdk/openai` 同理，`@ai-sdk/anthropic` 则是把 Anthropic 互斥的原始字段重新加成
+`input + cacheCreation + cacheRead`。**所以这里不按 provider kind 分叉** ——
+`inputTokenDetails.noCacheTokens` 就是那份互斥的输入，三家一致。
+
+此前这条公式把 `cacheRead` 当成与 `inputTokens` **互斥**的一份、在两者之上各收一次钱
+（Anthropic 上 `cacheWrite` 还要再重复一次），而 `cacheRead` 通常比 base input 便宜几十倍
+—— 一次 91% 前缀命中的调用因此高估 9.4 倍，生产库 342 条 ledger 里 270 条有缓存命中，
+**账面高估 44.4%**。`quota.commit` 吃的就是这个数，于是**前缀缓存做得越成功，用户越早撞上
+日额度**（`docs/reviews/28 · L-COST-01`；那份报告归因到 provider kind，实测不成立，
+所以那条假设在这里被显式否掉，别再去接 kind）。
+
+**`usage_ledger.input_tokens` 仍存 total，不存 priced。** `cacheReadTokens / inputTokens`
+是「这家上游的缓存到底是不是真的」唯一能回答的那个比值（`AC-LOG-022` 的 provider 维度聚合
+就靠它），存 priced 会把它弄坏 —— 计价口径与观测口径在这一列上是两件事。
+
 注意点：
 - **流式也要记账**：`doStream` 的 usage 在流结束时才有；middleware 需在流的 `finish` part 上记账，不能在 `doStream` 返回时就记。
 - **失败调用也记一行**（`ok=0`，cost 按实际已产生的 usage；很多 provider 在超时/中断时不返回 usage → cost=0，但仍记录以便统计失败率）。
-- 缓存 token 单独计价（Anthropic 的 cache write 通常比 base input 贵、cache read 便宜很多，不区分会严重失真）。
+- 缓存 token 单独计价（cache write 通常比 base input 贵、cache read 便宜几十倍，不区分会严重失真）。
+- **`noCacheTokens` 缺失时回落到相减，不回落到 `inputTokens`**：SDK 换大版本时那个字段一旦
+  消失，「少扣一次缓存」是账目偏高（可查、可回溯），「按 total 计价」是账目翻倍。
 - 无定价 → `cost=0` + `error_kind='no_pricing'`，WebUI 告警；`quota.requirePricing=true` 时非 owner 不得使用该模型。
+- **旧口径的存量数据由一次性修复（`repair:ledger-cache-cost:v1`）重算**：逐行先验算旧
+  `cost_usd` 是否复现旧公式，复现的按新公式重写，不复现的（定价此后改过、`no_pricing`）
+  原样留下并计数 —— 只改我们自己算错的那些。`turns.cost_usd` 跟着按
+  `SUM(usage_ledger.cost_usd)` 重算；`quota_counters.cost_usd` 只对**明细还在**的账期重新聚合
+  （超过 `maintenance.retention.usageDays` 的明细已经没有了，那些账期算不回来，也早已过期）。
 
 ### 4.2 聚合视图
 

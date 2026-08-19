@@ -846,6 +846,8 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
       const facts: StepFacts = { stepNumber, servedModelId: servedModelId ?? step.model.modelId,
         usage: { inputTokens: step.usage.inputTokens ?? 0, outputTokens: step.usage.outputTokens ?? 0,
           cacheReadTokens: step.usage.inputTokenDetails.cacheReadTokens ?? 0, cacheWriteTokens: step.usage.inputTokenDetails.cacheWriteTokens ?? 0,
+          // `inputTokens` 是 total（超集），计价要用这一份互斥的。三家 provider 一致，见 `pricedInputTokens`。
+          noCacheTokens: step.usage.inputTokenDetails.noCacheTokens ?? undefined,
           reasoningTokens: step.usage.outputTokenDetails.reasoningTokens ?? 0 },
         latencyMs: step.performance.responseTimeMs, finishReason: step.finishReason,
         toolCalls: step.toolCalls.map((call) => ({ toolCallId: call.toolCallId, toolName: call.toolName, input: call.input })),

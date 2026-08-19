@@ -26,6 +26,7 @@ export * from './maintenance.js';
 export * from './prompt/assembler.js';
 export * from './ledger/usage.js';
 export * from './ledger/quota.js';
+export * from './ledger/repair.js';
 export * from './prompt/documents.js';
 export * from './sandbox/index.js';
 export * from './secrets.js';
