@@ -528,7 +528,9 @@ shim 去翻译 Responses 语义，代价有两项，都是实测出来的：
   照抄官方模型名却不真的转发图片是常态：那种模型照常 200 返回、usage 里没有 `image_tokens`，然后
   凭上下文瞎猜图里有什么，而抄来的 `vision:true` 让这一轮**不切**别名 —— 于是「模型看不见图却不
   知道自己看不见」这个形态从另一头又回来了一次（实测 `logs/2026-08-19`：同一家网关的 `grok-4.5`
-  四次全错、`grok-4.3` 正确且 usage 里有 `image_tokens`）。目录改不了那个事实，所以运维能在 WebUI
+  四次全错、`grok-4.3` 正确且 usage 里有 `image_tokens`。**那一个模型上游已于 2026-08-19 修好**，
+  例子留着是因为**判据**可复用 —— 看 usage 的 `prompt_tokens_details` 里有没有 `image_tokens`，
+  不看目录写了什么）。目录改不了那个事实，所以运维能在 WebUI
   的模型行上标记这一位（`PATCH /api/models/:id` 的 `capabilities`，落 `capabilities_json.manual`，
   见 [09 §3.5](./09-webui.md) 与 [03](./03-data-model.md) 的形状说明）。标记压过目录，且
   **「补齐元数据」不会撤销它**。反向也能标（目录说不行、这家网关其实行）。
