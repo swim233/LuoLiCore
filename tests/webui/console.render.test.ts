@@ -51,6 +51,14 @@ const RESPONSES: Record<string, unknown> = {
   // fail-closed 的拒绝：`gcFiles` 的 `refused` 唯一触发条件是「库与目录来自两套部署」。
   '/api/maintenance/gc-files': { files: 0, fileBytes: 0, agentResults: 0, agentResultBytes: 0,
     refused: ['attachments 里一条带路径的行都没有，而 ./data/files 下有文件 —— 这通常意味着库与目录来自两套部署。拒绝清理。'] },
+  // 模型行：一行「目录说能看图、运维标了看不了图」的中转模型。此前 `/api/models` 一律回 `[]`，
+  // 于是模型表的行模板（能力徽标、定价出处、手标徽标）从来没被渲染过一次。
+  '/api/models': [{ id: 'm1', provider_id: 'p1', model_id: 'grok-4.5', display_name: 'Grok 4.5', context_window: 500_000, max_output: 16_384,
+    capabilities_json: JSON.stringify({ vision: false, tools: true, reasoningControl: 'effort', reasoningEfforts: ['low', 'high'],
+      modalities: { input: ['text', 'image'], output: ['text'] },
+      catalog: { source: 'models.dev', match: 'official', providerId: 'xai', modelId: 'grok-4.5', normalized: false, priceRange: null, priceSource: 'official', fetchedAt: 1_787_000_000_000 },
+      manual: { vision: false } }),
+    price_in: 3, price_out: 15, price_cache_read: null, price_cache_write: null, enabled: 1, sort: 0 }],
   '/api/schedules': { available: true, enabled: true, timezone: 'UTC', settings: { maxPerChat: 20, minIntervalMinutes: 5, maxPayloadChars: 2000 },
     jobs: [{ id: 'j1', key: 'chat:c1', chatId: 'c1', threadId: null, createdBy: '1', name: '每日早报', mode: 'agent', state: 'active',
       chatLabel: '阿离', creatorLabel: '阿离', cron: '0 8 * * *', timezone: 'UTC', payload: '汇总昨天群里聊了什么', runCount: 2,
@@ -206,6 +214,43 @@ describe('ConsoleView 渲染', () => {
     expect(vm.traceDepths([{ span_id: 'self', parent_span_id: 'self' }])).toEqual([0]);
     // camelCase 也认：对话详情那份（`/api/turns/:id/detail`）给的是 `parentSpanId`。
     expect(vm.traceDepths([{ spanId: 'r', parentSpanId: null }, { spanId: 's', parentSpanId: 'r' }])).toEqual([0, 1]);
+    wrapper.unmount();
+  });
+
+  /**
+   * 标记模型看图能力那条入口（docs/21 §10 · `G-API-17`）。三个判据都只能在这里焊：`.vue` 模板不进
+   * `tsc --noEmit`，而「三态下拉发出去的 patch 长什么样」是这条控件说话算数的全部 ——
+   * `follow` 必须发 `{vision:null}`（取消标记）而不是省略这个键，否则标错了在界面上撤不回来。
+   */
+  it('模型行的看图能力标记：徽标、表单三态、发出去的 patch 形状', async () => {
+    const { default: ConsoleView } = await import('../../packages/webui/src/views/ConsoleView.vue');
+    const wrapper = mount(ConsoleView, { attachTo: document.body });
+    await settle(wrapper);
+    const vm = wrapper.vm as unknown as { active: string; models: Array<Record<string, unknown>>;
+      modelForm: { id: string; vision: string }; editModel(model?: Record<string, unknown>): void; saveModel(): Promise<void>;
+      capabilityTags(meta: unknown): string[]; storedMeta(model: Record<string, unknown>): unknown };
+    vm.active = 'providers';
+    await settle(wrapper);
+    expect(wrapper.text()).toContain('手标 · 看不了图');
+    // 生效值写在顶层，所以目录给的「看图」标签也跟着消失 —— 徽标与运行时读的是同一个字段。
+    const tags = vm.capabilityTags(vm.storedMeta(vm.models[0]!));
+    expect(tags).not.toContain('看图');
+    expect(tags).toContain('工具');
+    vm.editModel(vm.models[0]);
+    await settle(wrapper);
+    expect(vm.modelForm.vision).toBe('off');
+
+    const patchBody = async (mark: string): Promise<Record<string, unknown>> => {
+      vm.modelForm.vision = mark;
+      await vm.saveModel();
+      const calls = (fetch as unknown as { mock: { calls: Array<[string, RequestInit]> } }).mock.calls;
+      const patch = calls.filter(([url, init]) => url.includes('/api/models/m1') && init?.method === 'PATCH').at(-1)!;
+      return JSON.parse(String(patch[1].body)) as Record<string, unknown>;
+    };
+    expect(await patchBody('off')).toMatchObject({ capabilities: { vision: false } });
+    expect(await patchBody('on')).toMatchObject({ capabilities: { vision: true } });
+    // 取消标记：键要在、值是 null。`toMatchObject` 对 undefined 与 null 不区分，所以直接比对整块。
+    expect((await patchBody('follow')).capabilities).toEqual({ vision: null });
     wrapper.unmount();
   });
 

@@ -264,6 +264,27 @@ describe('WebUI 拉取与导入链路', () => {
     closeDatabase(db);
   });
 
+  // 「补齐元数据」把能力块整块按目录重写 —— 人工标的看图能力必须盖回去。不盖的话一次补齐就把
+  // 运维对中转站撒谎的修正静默撤销了，而含图轮次会立刻回到那个看不见图的模型上（docs/21 §10）。
+  it('补齐元数据不撤销人工标的看图能力', async () => {
+    const { db, config, catalog } = harness();
+    const { app, headers } = server(catalog, db, config);
+    const now = Date.now();
+    db.prepare("INSERT INTO providers(id,name,kind,base_url,enabled,created_at,updated_at) VALUES('p','relay','openai-compatible','https://gw.internal/v1',1,?,?)").run(now, now);
+    db.prepare("INSERT INTO models(id,provider_id,model_id,context_window,max_output,capabilities_json,enabled,sort,created_at,updated_at) VALUES('m1','p','claude-opus-5',128000,8192,'{}',1,0,?,?)").run(now, now);
+    await app.request('/api/models/enrich', { method: 'POST', headers, body: JSON.stringify({}) });
+    // 目录说这个模型能看图。
+    expect((JSON.parse(db.prepare('SELECT capabilities_json FROM models WHERE id=?').pluck().get('m1') as string) as { vision: boolean }).vision).toBe(true);
+    await app.request('/api/models/m1', { method: 'PATCH', headers, body: JSON.stringify({ capabilities: { vision: false } }) });
+    await app.request('/api/models/enrich', { method: 'POST', headers, body: JSON.stringify({}) });
+    const kept = JSON.parse(db.prepare('SELECT capabilities_json FROM models WHERE id=?').pluck().get('m1') as string) as Record<string, unknown>;
+    expect(kept).toMatchObject({ vision: false, manual: { vision: false } });
+    // 其余能力位照旧按目录刷新，标记只钉住它自己那一位。
+    expect(kept).toMatchObject({ tools: true, reasoningControl: 'effort' });
+    expect((kept.catalog as { match: string }).match).toBe('official');
+    closeDatabase(db);
+  });
+
   it('目录状态端点报出缓存年龄，刷新失败但有旧缓存时仍然可用', async () => {
     const { db, config, catalog } = harness();
     const { app, headers } = server(catalog, db, config);

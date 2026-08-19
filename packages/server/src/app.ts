@@ -720,6 +720,48 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
   };
   app.get('/api/providers', (ctx) => ctx.json({ ok: true, data: dependencies.providers.list() }));
   app.post('/api/providers', async (ctx) => { try { const id = dependencies.providers.save(await ctx.req.json()); dependencies.rebuildModels?.(); return ctx.json({ ok: true, data: { id } }); } catch (error) { return ctx.json(apiError('provider_invalid', error instanceof Error ? error.message : 'Provider 配置无效').body, 400); } });
+  /**
+   * 能力位里**运行时真的会读**的那几个 —— 目前只有 `vision`（`ModelRegistry.supportsVision`，
+   * 含图轮次据它自动切 `vision` 别名，见 `docs/04 §5.2`）。其余能力位只喂 WebUI 的徽章，放开它们
+   * 等于给运维一个「关掉工具」的开关而代码照旧把工具目录发上去 —— 假开关比没开关糟
+   * （`reviews/16` §5「摘除比伪造安全」）。**运行时开始读某个能力位时，才把它加进这里。**
+   */
+  const OVERRIDABLE_CAPABILITIES = ['vision'] as const;
+  /**
+   * 把 owner 的能力标记合进 `capabilities_json`。**生效值写顶层** —— 运行时与界面徽章都读那里，
+   * 不必各自再懂一层「人工优先于目录」；而「这是人标的」记在 `manual` 里：`enrich` / `import`
+   * 拿目录那份整块覆盖能力位，不留下这个意图的话一次「补齐元数据」就把标记静默撤销了。
+   *
+   * `null` = 取消标记：只摘掉 `manual` 的键，顶层维持现状（这里不做目录查询，撤销不该依赖出网），
+   * 下一次「补齐元数据」再按目录重填 —— 界面上那行提示写的就是这件事。
+   *
+   * @returns 新的 JSON 串；这次 patch 一个字段都没动到时回 `null`，调用方据此跳过 UPDATE。
+   */
+  const applyManualCapabilities = (current: string | null, patch: Record<string, unknown>): string | null => {
+    let block: Record<string, unknown> = {};
+    try { block = current ? JSON.parse(current) as Record<string, unknown> : {}; } catch { block = {}; }
+    const previous = block.manual;
+    const manual: Record<string, unknown> = previous && typeof previous === 'object' && !Array.isArray(previous) ? { ...previous as Record<string, unknown> } : {};
+    let touched = false;
+    for (const key of OVERRIDABLE_CAPABILITIES) {
+      if (!(key in patch)) continue;
+      const value = patch[key];
+      if (value === null) { if (key in manual) { delete manual[key]; touched = true; } continue; }
+      if (typeof value !== 'boolean') continue;
+      manual[key] = value; block[key] = value; touched = true;
+    }
+    if (!touched) return null;
+    if (Object.keys(manual).length) block.manual = manual; else delete block.manual;
+    return JSON.stringify(block);
+  };
+  /** 把某一行现存的人工标记盖回新算出来的能力块（`enrich` 用）。坏 JSON 一律当「没有标记」。 */
+  const keepManualCapabilities = (next: string, current: string | null): string => {
+    let block: Record<string, unknown> = {};
+    try { block = current ? JSON.parse(current) as Record<string, unknown> : {}; } catch { return next; }
+    const manual = block.manual;
+    if (!manual || typeof manual !== 'object' || Array.isArray(manual)) return next;
+    return applyManualCapabilities(next, manual as Record<string, unknown>) ?? next;
+  };
   app.get('/api/models', (ctx) => ctx.json({ ok: true, data: dependencies.db.prepare('SELECT * FROM models ORDER BY provider_id,sort').all() }));
   app.post('/api/models', async (ctx) => {
     const body = await ctx.req.json<Record<string, unknown>>();
@@ -727,8 +769,13 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     const contextWindow = Number(body.contextWindow); const maxOutput = Number(body.maxOutput);
     if (!Number.isInteger(contextWindow) || contextWindow <= 0 || !Number.isInteger(maxOutput) || maxOutput <= 0) return ctx.json(apiError('model_invalid', 'contextWindow 与 maxOutput 必须是正整数').body, 400);
     const id = typeof body.id === 'string' && body.id ? body.id : randomBytes(16).toString('hex');
+    // 手工建的行没有目录来源，`capabilities` 整块就是人说的 —— 其中可覆盖的那几个位同时记进
+    // `manual`，否则第一次「补齐元数据」就把它们按目录改掉了。（这里不校验键名：这条路也承载
+    // 备份导入的完整能力块；「标记」那个手势只在 PATCH 上，那里才逐键挡。）
+    const declared = body.capabilities && typeof body.capabilities === 'object' && !Array.isArray(body.capabilities) ? body.capabilities as Record<string, unknown> : {};
+    const capabilities = applyManualCapabilities(JSON.stringify(declared), declared) ?? JSON.stringify(declared);
     try { dependencies.db.prepare(`INSERT INTO models(id,provider_id,model_id,display_name,context_window,max_output,capabilities_json,price_in,price_out,price_cache_read,price_cache_write,enabled,sort,created_at,updated_at)
-      VALUES (@id,@providerId,@modelId,@displayName,@contextWindow,@maxOutput,@capabilities,@priceIn,@priceOut,@priceCacheRead,@priceCacheWrite,@enabled,@sort,@now,@now)`).run({ id, providerId: body.providerId, modelId: body.modelId, displayName: body.displayName ?? null, contextWindow, maxOutput, capabilities: JSON.stringify(body.capabilities ?? {}), priceIn: body.priceIn ?? null, priceOut: body.priceOut ?? null, priceCacheRead: body.priceCacheRead ?? null, priceCacheWrite: body.priceCacheWrite ?? null, enabled: body.enabled === false ? 0 : 1, sort: body.sort ?? 0, now: Date.now() }); }
+      VALUES (@id,@providerId,@modelId,@displayName,@contextWindow,@maxOutput,@capabilities,@priceIn,@priceOut,@priceCacheRead,@priceCacheWrite,@enabled,@sort,@now,@now)`).run({ id, providerId: body.providerId, modelId: body.modelId, displayName: body.displayName ?? null, contextWindow, maxOutput, capabilities, priceIn: body.priceIn ?? null, priceOut: body.priceOut ?? null, priceCacheRead: body.priceCacheRead ?? null, priceCacheWrite: body.priceCacheWrite ?? null, enabled: body.enabled === false ? 0 : 1, sort: body.sort ?? 0, now: Date.now() }); }
     catch (error) { return ctx.json(apiError('model_invalid', error instanceof Error ? error.message : '模型配置无效').body, 400); }
     dependencies.rebuildModels?.();
     return ctx.json({ ok: true, data: { id } });
@@ -843,14 +890,15 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     dependencies.rebuildModels?.();
     return ctx.json({ ok: true, data: { inserted: ids.length, skipped: entries.length - ids.length, priced, ids } });
   });
-  /** 已经导入过的模型行补元数据：能力块照写（纯信息），定价只填空着的那几个，
+  /** 已经导入过的模型行补元数据：能力块照写（**但人工标记盖回去** —— 能力块不再是纯信息，
+   *  `vision` 有运行时行为），定价只填空着的那几个，
    *  窗口/最大输出默认不动 —— 运维可能按自己的预算调小过，覆盖要显式 overwrite。 */
   app.post('/api/models/enrich', async (ctx) => {
     const body = await ctx.req.json<{ ids?: unknown; overwrite?: unknown }>().catch((): { ids?: unknown; overwrite?: unknown } => ({}));
     const wanted = Array.isArray(body.ids) ? new Set(body.ids.filter((entry): entry is string => typeof entry === 'string')) : null;
     const overwrite = body.overwrite === true;
     const rows = dependencies.db.prepare(`SELECT m.id,m.model_id AS modelId,m.context_window AS contextWindow,m.max_output AS maxOutput,m.price_in AS priceIn,m.price_out AS priceOut,
-      m.price_cache_read AS priceCacheRead,m.price_cache_write AS priceCacheWrite,p.kind,p.base_url AS baseUrl FROM models m JOIN providers p ON p.id=m.provider_id`).all() as Array<Record<string, unknown>>;
+      m.price_cache_read AS priceCacheRead,m.price_cache_write AS priceCacheWrite,m.capabilities_json AS capabilities,p.kind,p.base_url AS baseUrl FROM models m JOIN providers p ON p.id=m.provider_id`).all() as Array<Record<string, unknown>>;
     const targets = rows.filter((row) => !wanted || wanted.has(String(row.id)));
     if (!targets.length) return ctx.json({ ok: true, data: { updated: 0, priced: 0, unmatched: 0, scanned: 0 } });
     const catalog = await catalogMeta();
@@ -867,7 +915,7 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
         const nextPrices = [keep(row.priceIn, meta.priceIn), keep(row.priceOut, meta.priceOut), keep(row.priceCacheRead, meta.priceCacheRead), keep(row.priceCacheWrite, meta.priceCacheWrite)];
         const filled = row.priceIn === null && nextPrices[0] !== null;
         const priceSource = row.priceIn !== null ? 'manual' : nextPrices[0] !== null ? meta.match : null;
-        update.run(capabilityBlock(meta, fetchedAt, priceSource),
+        update.run(keepManualCapabilities(capabilityBlock(meta, fetchedAt, priceSource), row.capabilities as string | null),
           overwrite ? meta.contextWindow ?? Number(row.contextWindow) : Number(row.contextWindow),
           overwrite ? meta.maxOutput ?? Number(row.maxOutput) : Number(row.maxOutput),
           ...nextPrices, now, row.id);
@@ -1074,10 +1122,29 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     const body = await ctx.req.json<Record<string, unknown>>();
     const map: Record<string, string> = { displayName: 'display_name', contextWindow: 'context_window', maxOutput: 'max_output', priceIn: 'price_in', priceOut: 'price_out', priceCacheRead: 'price_cache_read', priceCacheWrite: 'price_cache_write', enabled: 'enabled', sort: 'sort' };
     const entries = Object.entries(body).filter(([key]) => map[key]);
-    if (!entries.length) return ctx.json({ ok: true, data: { changes: 0 } });
-    const sql = entries.map(([key]) => `${map[key]}=?`).join(',');
-    const values = entries.map(([key, value]) => key === 'enabled' ? (value ? 1 : 0) : value);
-    const changes = dependencies.db.prepare(`UPDATE models SET ${sql},updated_at=? WHERE id=?`).run(...values, Date.now(), ctx.req.param('id')).changes;
+    /**
+     * 能力标记：中转站照抄官方模型名却不真的转发图片时，`capabilities_json` 抄来的
+     * `vision:true` 会让含图轮次**不切** `vision` 别名，图就留在一个看不见它的模型上
+     * （实测 `logs/2026-08-19`：同一家网关的 grok-4.5 收下 image_url、200 返回、
+     * usage 里没有 image_tokens，四次全在瞎猜；同一家的 grok-4.3 正常）。目录改不了那个事实，
+     * 所以要给运维一条推翻它的路 —— 这是本条唯一的存在理由。
+     *
+     * 白名单外的键**报错而不是静静吞掉**：让人以为标了「不支持工具」就不会发工具目录，
+     * 比不给这个选项糟得多。
+     */
+    const patch = body.capabilities && typeof body.capabilities === 'object' && !Array.isArray(body.capabilities) ? body.capabilities as Record<string, unknown> : null;
+    if (patch) {
+      const stray = Object.keys(patch).filter((key) => !(OVERRIDABLE_CAPABILITIES as readonly string[]).includes(key));
+      if (stray.length) return ctx.json(apiError('model_invalid', `只有 ${OVERRIDABLE_CAPABILITIES.join(' / ')} 能人工标记；${stray.join('、')} 运行时不读，标了也不会改变行为`).body, 400);
+      if (Object.values(patch).some((value) => value !== null && typeof value !== 'boolean')) return ctx.json(apiError('model_invalid', '能力标记只能是 true / false / null（null = 取消标记，回到目录判断）').body, 400);
+    }
+    if (!entries.length && !patch) return ctx.json({ ok: true, data: { changes: 0 } });
+    let changes = 0;
+    if (entries.length) {
+      const sql = entries.map(([key]) => `${map[key]}=?`).join(',');
+      const values = entries.map(([key, value]) => key === 'enabled' ? (value ? 1 : 0) : value);
+      changes = dependencies.db.prepare(`UPDATE models SET ${sql},updated_at=? WHERE id=?`).run(...values, Date.now(), ctx.req.param('id')).changes;
+    }
     // 手改过价格之后还挂着「官方价」徽标就是在骗人：把出处翻成 manual，界面据此改标。
     if (changes && entries.some(([key]) => key.startsWith('price'))) {
       const row = dependencies.db.prepare('SELECT capabilities_json AS capabilities FROM models WHERE id=?').get(ctx.req.param('id')) as { capabilities: string | null } | undefined;
@@ -1086,6 +1153,16 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
         const catalog = parsed.catalog && typeof parsed.catalog === 'object' ? parsed.catalog as Record<string, unknown> : null;
         if (catalog) { catalog.priceSource = 'manual'; dependencies.db.prepare('UPDATE models SET capabilities_json=? WHERE id=?').run(JSON.stringify(parsed), ctx.req.param('id')); }
       } catch { /* 历史行里可能是坏 JSON，改价不该因此失败 */ }
+    }
+    if (patch) {
+      // 上面那段可能刚改过 capabilities_json（priceSource），所以在它之后再读一次。
+      const row = dependencies.db.prepare('SELECT capabilities_json AS capabilities FROM models WHERE id=?').get(ctx.req.param('id')) as { capabilities: string | null } | undefined;
+      const next = row ? applyManualCapabilities(row.capabilities, patch) : null;
+      if (next !== null) {
+        changes = Math.max(changes, dependencies.db.prepare('UPDATE models SET capabilities_json=?,updated_at=? WHERE id=?').run(next, Date.now(), ctx.req.param('id')).changes);
+        // 这条标记会改变含图轮次走哪个模型，值得单独留一行 —— 中间件那条只记方法与路径。
+        dependencies.log.event({ level: 'info', kind: 'webui.action', summary: 'model capability marked', data: { id: ctx.req.param('id'), capabilities: patch } });
+      }
     }
     dependencies.rebuildModels?.();
     return ctx.json({ ok: true, data: { changes } });
