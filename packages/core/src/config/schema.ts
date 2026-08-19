@@ -52,6 +52,11 @@ export const HOT_RELOADABLE_CONFIG_KEYS = [
   'access.defaultUserRole', 'access.defaultChatRole', 'access.archiveBlocked',
   'trigger',
   'context.limit', 'context.active', 'context.hardCapRatio', 'context.background', 'context.rebase', 'context.tokenRatioAlpha', 'context.cacheCommits',
+  // 回忆隔断：归档三工具每次执行从 `context.turn.config` 现读，`/new` 与 WebUI 清空从
+  // `currentConfig()` 现读。开关一改，下一次工具调用与下一次清空就按新值走。
+  'context.recallBarrier',
+  // 含图轮次的判据范围：`runtime.ts` 每轮从 `turn.config`（= `dependencies.config`）现读。
+  'media.visionScope',
   // 合并窗口是 bot.ts 的 config Proxy 每条消息现读的，改完下一条消息就按新值走。
   'concurrency.turnTimeoutMs', 'concurrency.coalesceSameUserMs',
   // 提示词装配拿的是 `turn.config`（每轮 perChatConfig 重算一次），改完下一轮生效。
@@ -227,6 +232,20 @@ export const configSchema = z.object({
     background: z.object({ enabled: z.boolean().default(true), maxPerTurn: z.number().int().nonnegative().default(20), showUsername: z.boolean().default(true), showTime: z.boolean().default(true), includeNonText: z.boolean().default(true) }).default({}),
     rebase: z.object({ injectNotice: z.boolean().default(false), markMeta: z.boolean().default(true) }).default({}),
     cacheCommits: z.number().int().positive().default(64), tokenRatioAlpha: z.number().gt(0).lte(1).default(0.2),
+    /**
+     * 清空上下文（`/new` / WebUI）之后，模型还能不能从归档里把清空之前的话翻回来。
+     *
+     * 关（默认）= 只挪 `done` 指针：窗口空了，但 `read_messages` / `search_messages` /
+     * `get_message` 读的是 `messages` 归档表，不受窗口约束 —— 实测清空后模型第一步就
+     * `read_messages({direction:'before',limit:20})` 把 20 条历史整段捞回来，那份工具结果又落进
+     * 新窗口，于是「清空」在用户眼里没生效（logs/2026-08-19 · turn `01M0CKK6W018B5KS9613SNEX5J`）。
+     *
+     * 开 = 清空那一刻的 `messages.id` 记进 reset commit 的 `meta.archiveFloor`，三个归档工具
+     * 只能看到它之后的消息，**并且**清空会把背景认领水位一并推到那里 —— 否则清空之前那些
+     * 还没被认领的群发言会从另一扇门进到新窗口里，与隔断自相矛盾。
+     * owner 的 `admin_search_messages` 不受管（跨会话，按 key 记的水位对它没有意义）。
+     */
+    recallBarrier: z.boolean().default(false),
   }).default({}),
   concurrency: z.object({ mode: z.enum(['parallel', 'serial']).default('parallel'), perKey: z.number().int().positive().default(3), global: z.number().int().positive().default(8), queueMax: z.number().int().nonnegative().default(20), coalesceSameUserMs: z.number().int().nonnegative().default(0), turnTimeoutMs: z.number().int().positive().default(600_000) }).default({}),
   cancel: z.object({ commitPartial: z.boolean().default(false) }).default({}),
@@ -304,7 +323,20 @@ export const configSchema = z.object({
   // `download_state` 写成 'expired' —— 行删掉的话历史消息里那条「[图片]」连同 mime/尺寸/已提取
   // 正文一起消失（docs/14 §2 Q9-a）。与 `maintenance.retention.*` 一样在启动时交给
   // MaintenanceService，所以是「需重启」。
-  media: z.object({ dir: z.string().default('./data/files'), retentionDays: z.number().int().nonnegative().default(90), maxImageBytes: z.number().int().positive().default(8_388_608), maxDocBytes: z.number().int().positive().default(20_971_520), maxImageEdge: z.number().int().positive().default(1568), maxImagesPerTurn: z.number().int().positive().default(4), groupDebounceMs: z.number().int().positive().default(1500), stickerAsImage: z.boolean().default(false), downloadVoice: z.boolean().default(true), extract: z.object({ enabled: z.boolean().default(true), maxChars: z.number().int().positive().default(40_000), inlineChars: z.number().int().positive().default(4000), codeExtensions: z.array(z.string()).default([]) }).default({}) }).default({}),
+  /**
+   * `visionScope`：判断「这一轮含图」时看哪些图（`docs/04 §5.2`、`docs/08 §7.2`）。
+   *
+   * `window`（默认，= 一直以来的行为）= 整个上下文窗口，`snapshot + delta` 一起算。代价是**一张图
+   * 会把它之后的每一轮都钉在 vision 别名上**：图片留在窗口里，而判据不区分「用户此刻发的」与
+   * 「三轮前那张」—— 纯文本的一句「几点了」照样切走贵的那一档；一个能看图的别名都没有时，
+   * 那一轮的回复末尾还会附上「这张图我没能真的看到」，而用户这一轮根本没发图。
+   *
+   * `turn` = 只算**本轮新进来的**图（触发消息、被回复的那条、本轮认领的群背景发言，也就是
+   * `turn.delta`）。更早轮次留在窗口里的图片：这一轮真落在看不了图的模型上时才整体换成占位文本
+   * （`docs/02` 的不变量：不透明 part 要么原样保留、要么整体换占位，不能截半），落在能看图的
+   * 模型上则原样带着 —— 「再看一遍上面那张图」在 vision 模型上仍然可用。
+   */
+  media: z.object({ dir: z.string().default('./data/files'), retentionDays: z.number().int().nonnegative().default(90), maxImageBytes: z.number().int().positive().default(8_388_608), maxDocBytes: z.number().int().positive().default(20_971_520), maxImageEdge: z.number().int().positive().default(1568), maxImagesPerTurn: z.number().int().positive().default(4), visionScope: z.enum(['window', 'turn']).default('window'), groupDebounceMs: z.number().int().positive().default(1500), stickerAsImage: z.boolean().default(false), downloadVoice: z.boolean().default(true), extract: z.object({ enabled: z.boolean().default(true), maxChars: z.number().int().positive().default(40_000), inlineChars: z.number().int().positive().default(4000), codeExtensions: z.array(z.string()).default([]) }).default({}) }).default({}),
   skills: z.object({ enabled: z.boolean().default(true), dir: z.string().default('./skills'), watch: z.boolean().default(true), defaultMinRole: role.default('trusted'),
     // 装 skill 包时的解包上限（docs/07 §2.5）。**两个体积上限一律按实际写出的字节数判**，
     // 不信 zip 头里的 `uncompressedSize` —— 那个字段是打包方填的，压缩炸弹正是从这里进来。

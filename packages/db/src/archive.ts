@@ -90,8 +90,14 @@ export function archiveQuery(raw: string): ArchiveQuery {
   return { like: `%${escapeLike(longest ?? raw)}%`, dropped: tokens.filter((token) => token !== longest) };
 }
 
-/** `search_messages` 的过滤参数（docs/05 §3.2）。`from` 同时认 tg 用户 id 与 `@username`。 */
-export interface SearchFilters { from?: string | null; after?: number | null; before?: number | null; kind?: string | null }
+/**
+ * `search_messages` 的过滤参数（docs/05 §3.2）。`from` 同时认 tg 用户 id 与 `@username`。
+ *
+ * `minId` 不是模型能填的参数，是**回忆隔断**（`context.recallBarrier`）灌进来的下限：清空上下文
+ * 那一刻的 `messages.id`。挂在这里而不是在工具层过滤返回值 —— 那样 `limit:20` 会先取到 20 条
+ * 再被削成 3 条，模型看到的是「一共只有 3 条」。
+ */
+export interface SearchFilters { from?: string | null; after?: number | null; before?: number | null; kind?: string | null; minId?: number | null }
 /**
  * 过滤条件一律写成 `@x IS NULL OR …` 的常量 SQL，而不是按传了哪几个参数拼串：语句文本固定
  * 才能吃到 better-sqlite3 的预编译缓存，而「没传的参数不出现在 SQL 里」还得在绑定侧同步剔掉
@@ -100,10 +106,11 @@ export interface SearchFilters { from?: string | null; after?: number | null; be
 function filterClause(prefix: string): string {
   return ` AND (@from IS NULL OR ${prefix}from_user_id = @from OR ${prefix}from_username = @from)
     AND (@after IS NULL OR ${prefix}tg_date >= @after) AND (@before IS NULL OR ${prefix}tg_date <= @before)
-    AND (@kind IS NULL OR ${prefix}kind = @kind)`;
+    AND (@kind IS NULL OR ${prefix}kind = @kind) AND (@minId IS NULL OR ${prefix}id > @minId)`;
 }
 function filterParameters(filters: SearchFilters): Required<SearchFilters> {
-  return { from: filters.from?.replace(/^@/, '') ?? null, after: filters.after ?? null, before: filters.before ?? null, kind: filters.kind ?? null };
+  return { from: filters.from?.replace(/^@/, '') ?? null, after: filters.after ?? null, before: filters.before ?? null, kind: filters.kind ?? null,
+    minId: filters.minId ?? null };
 }
 
 const MESSAGE_COLUMNS = `m.id,m.chat_id AS chatId,m.message_thread_id AS messageThreadId,m.tg_message_id AS tgMessageId,m.direction,
@@ -180,8 +187,15 @@ export class ScopedArchiveRepository {
     this.db.prepare("UPDATE messages SET triggered=0,trigger_reason=NULL WHERE id=? AND chat_id=? AND turn_id IS NULL").run(id, this.chatId);
   }
 
-  byId(id: number): ArchivedMessage | null {
-    return withMedia(this.db.prepare(`SELECT ${messageQuery()},media_parts_json AS mediaPartsJson FROM messages WHERE chat_id = ? AND id = ?`).get(this.chatId, id) as ArchivedMessage | undefined ?? null);
+  /** @param minId 回忆隔断的下限（`context.recallBarrier`）：0 = 不设限，见 `SearchFilters.minId`。 */
+  byId(id: number, minId = 0): ArchivedMessage | null {
+    return withMedia(this.db.prepare(`SELECT ${messageQuery()},media_parts_json AS mediaPartsJson FROM messages WHERE chat_id = ? AND id = ? AND id > ?`).get(this.chatId, id, minId) as ArchivedMessage | undefined ?? null);
+  }
+
+  /** 本会话归档里最大的 `messages.id`。清空上下文时拿它当回忆隔断的水位（`ContextEngine.reset`）。 */
+  maxMessageId(): number {
+    return (this.db.prepare('SELECT COALESCE(MAX(id),0) AS value FROM messages WHERE chat_id = ? AND (? IS NULL OR message_thread_id = ?)')
+      .pluck().get(this.chatId, this.threadId, this.threadId) ?? 0) as number;
   }
 
   search(query: string, limit = 20, filters: SearchFilters = {}): ArchivedMessage[] {
@@ -195,9 +209,9 @@ export class ScopedArchiveRepository {
     return rows.map((row) => withMedia(row)!);
   }
 
-  recent(limit = 50): ArchivedMessage[] {
+  recent(limit = 50, minId = 0): ArchivedMessage[] {
     const rows = this.db.prepare(`SELECT ${messageQuery()},media_parts_json AS mediaPartsJson FROM messages WHERE chat_id = ?
-      AND (? IS NULL OR message_thread_id = ?) AND deleted_at IS NULL ORDER BY id DESC LIMIT ?`).all(this.chatId, this.threadId, this.threadId, limit) as ArchivedMessage[];
+      AND (? IS NULL OR message_thread_id = ?) AND deleted_at IS NULL AND id > ? ORDER BY id DESC LIMIT ?`).all(this.chatId, this.threadId, this.threadId, minId, limit) as ArchivedMessage[];
     return rows.map((row) => withMedia(row)!);
   }
 
@@ -209,14 +223,15 @@ export class ScopedArchiveRepository {
    * 一律按 id 升序交回：`recent()` 那种「最新在最前」在 `direction:'after'` 上会让读出来的
    * 一段反着念，而模型是照顺序理解对话的。
    */
-  window(input: { anchorId?: number | null | undefined; anchorDate?: number | null | undefined; direction?: 'before' | 'after' | 'around' | undefined; limit?: number | undefined }): ArchivedMessage[] {
+  window(input: { anchorId?: number | null | undefined; anchorDate?: number | null | undefined; direction?: 'before' | 'after' | 'around' | undefined; limit?: number | undefined; minId?: number | null | undefined }): ArchivedMessage[] {
     const limit = input.limit ?? 50;
+    const floor = input.minId ?? 0;
     const anchor = input.anchorId ?? (input.anchorDate === null || input.anchorDate === undefined ? null : this.#anchorAt(input.anchorDate));
-    if (anchor === null) return this.recent(limit).reverse();
-    if (input.direction === 'after') return this.#slice('id >= @anchor', 'ASC', limit, anchor);
-    if (input.direction !== 'around') return this.#slice('id <= @anchor', 'DESC', limit, anchor).reverse();
+    if (anchor === null) return this.recent(limit, floor).reverse();
+    if (input.direction === 'after') return this.#slice('id >= @anchor', 'ASC', limit, anchor, floor);
+    if (input.direction !== 'around') return this.#slice('id <= @anchor', 'DESC', limit, anchor, floor).reverse();
     const before = Math.floor((limit - 1) / 2);
-    return [...this.#slice('id < @anchor', 'DESC', before, anchor).reverse(), ...this.#slice('id >= @anchor', 'ASC', limit - before, anchor)];
+    return [...this.#slice('id < @anchor', 'DESC', before, anchor, floor).reverse(), ...this.#slice('id >= @anchor', 'ASC', limit - before, anchor, floor)];
   }
 
   /**
@@ -230,11 +245,11 @@ export class ScopedArchiveRepository {
       ?? this.db.prepare('SELECT id FROM messages WHERE chat_id = @chatId AND (@threadId IS NULL OR message_thread_id = @threadId) AND deleted_at IS NULL ORDER BY id DESC LIMIT 1').pluck().get(bound) ?? null) as number | null;
   }
 
-  #slice(comparison: string, order: 'ASC' | 'DESC', limit: number, anchor: number): ArchivedMessage[] {
+  #slice(comparison: string, order: 'ASC' | 'DESC', limit: number, anchor: number, minId = 0): ArchivedMessage[] {
     if (limit <= 0) return [];
     const rows = this.db.prepare(`SELECT ${messageQuery()},media_parts_json AS mediaPartsJson FROM messages
-      WHERE chat_id = @chatId AND (@threadId IS NULL OR message_thread_id = @threadId) AND deleted_at IS NULL AND ${comparison}
-      ORDER BY id ${order} LIMIT @limit`).all({ chatId: this.chatId, threadId: this.threadId, anchor, limit }) as ArchivedMessage[];
+      WHERE chat_id = @chatId AND (@threadId IS NULL OR message_thread_id = @threadId) AND deleted_at IS NULL AND id > @minId AND ${comparison}
+      ORDER BY id ${order} LIMIT @limit`).all({ chatId: this.chatId, threadId: this.threadId, anchor, limit, minId }) as ArchivedMessage[];
     return rows.map((row) => withMedia(row)!);
   }
 

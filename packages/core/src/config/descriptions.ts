@@ -70,6 +70,7 @@ export const CONFIG_DESCRIPTIONS: Record<string, string> = {
   'context.rebase.markMeta': '是否在被 rebase 影响到的消息 meta 上打标记，WebUI 的上下文视图据此标红。',
   'context.cacheCommits': '物化后的上下文结果的 LRU 缓存容量（按 commit 数算）。调大省 CPU，代价是常驻内存。',
   'context.tokenRatioAlpha': 'token 估算校准的 EMA 系数：越大越快跟上上游报回来的真实用量，越小越平滑抗抖动。',
+  'context.recallBarrier': '清空上下文（/new 或 WebUI 的「清空上下文窗口」）之后，是否连归档检索也挡在那一刻之后：关掉时窗口空了但 read_messages / search_messages / get_message 照样能把清空前的话整段翻回来（清空于是形同没生效），开了才真的等于失忆。同时会把背景认领水位推到清空那一刻，免得清空前的群发言从另一扇门进来。owner 的 admin_search_messages 不受管；用 /undo 撤回那次清空会一并解除。',
 
   concurrency: '同时能跑几个轮次、排多长的队、单轮多久算超时。',
   'concurrency.mode': 'parallel = 不同会话并行跑轮次；serial = 全局串行，出问题时的逃生舱。',
@@ -225,6 +226,7 @@ export const CONFIG_DESCRIPTIONS: Record<string, string> = {
   'media.maxDocBytes': '单个文档允许下载的字节上限。',
   'media.maxImageEdge': '送进模型前把图片最长边缩到这个像素数。图片按面积计费，缩一半省一大半 token。',
   'media.maxImagesPerTurn': '单轮最多带几张图片给模型。',
+  'media.visionScope': '判断「这一轮含图、要切 vision 模型」时看哪些图。window = 整个上下文窗口（默认，一直以来的行为）：一张图会把它之后的每一轮都钉在 vision 别名上，纯文本的一句话也照样切走贵的那一档。turn = 只算这一轮新进来的图（你发的、你引用的、本轮认领的群发言）；更早轮次留在窗口里的图片，只在这一轮真落在看不了图的模型上时才换成占位文本，落在能看图的模型上仍原样带着（「再看一遍上面那张图」还能用）。',
   'media.groupDebounceMs': '相册（一次发多张）的合并等待窗口（毫秒），等齐了当一组处理而不是逐张开轮。',
   'media.stickerAsImage': '是否把贴纸当图片送给模型看。',
   'media.downloadVoice': '是否下载语音消息。只存盘，不做语音转文字。',

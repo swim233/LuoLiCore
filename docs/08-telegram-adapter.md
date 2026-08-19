@@ -485,6 +485,10 @@ media:
   vision 压过 `downgradeAfterStep` 与 `set_model`）。一个能看图的别名都没有时才降级：
   图片整体换成 `[图片：当前模型不支持看图，本轮没能查看]`，并在回复末尾追加
   「（当前模型不支持看图，这张图我没能真的看到。）」。
+- 「这一轮含图」算到哪里由 `media.visionScope` 决定（默认 `window` = 整个上下文窗口，见
+  [04 §5.2](./04-agents-and-providers.md#52-内建别名语义)）。`turn` 档只算本轮新进来的图，历史图在
+  当步别名看不了图时换成 `[图片：更早轮次里的图，当前模型不看图。要看的话请用户重新发一次或引用那条消息]`
+  —— 这一档**不追加**上面那句回复末尾的提示：用户这一轮发的是纯文本，向他道歉一张他没发的图很怪。
   **不许把不透明 part 原样发给一个不认它的模型**：宽容的 provider 静默忽略、严格的直接 400，
   而模型不知道自己没看见图 —— 实测它会去 cp 文件、python 读尺寸、开本地 http 服务器、
   拿 agent-browser 截图，绕 11 步也没看到那张图（logs/2026-08-18 · turn `01M0AKMXG4…`）。
@@ -529,7 +533,7 @@ media:
 | `/start` | all | limited | 欢迎语 + 能力简介 + 当前权限 |
 | `/help` | all | limited | 命令列表（按角色过滤） |
 | `/ask <text>` | all | limited | 显式触发（等价 @bot）。**唯一进 AI 流程的命令**，`matchTrigger` 为它返回 `'ask'` 而不是 `'command'`，因此不在 `HANDLED_COMMANDS` 里 |
-| `/new` | all | limited | 开新话题（窗口清零，历史保留） |
+| `/new` | all | limited | 开新话题（窗口清零，历史保留）。回执跟着 `context.recallBarrier` 分岔：隔断关着时明说「我仍可用 read_messages 去查更早的消息」，开着时说「这之前的内容我不会再去翻了」—— 两句话描述的是两种不同的清空（[02 §7.1](./02-context-engine.md)） |
 | `/undo` | all | limited | 撤销上一轮（done 回退一个 commit） |
 | `/ctx` | all | limited | 上下文状态；`/ctx export` 导出（owner） |
 | `/cancel [id]` | all | limited | 取消在途 turn |

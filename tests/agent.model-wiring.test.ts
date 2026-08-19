@@ -468,6 +468,108 @@ describe('vision alias fallback', () => {
     closeDatabase(db);
   });
   /**
+   * `media.visionScope`：**一张图不该把它之后的每一轮都钉在 vision 别名上。**
+   *
+   * 判据此前恒为 `snapshot + delta`（整个窗口）。实测一个私聊里 4 条带图消息留在窗口内，此后每一轮
+   * 纯文本都记 `provider.fallback … vision_required`（logs/2026-08-19），而一个 vision 别名都没配时
+   * 那些轮次的回复末尾还会挂一句「这张图我没能真的看到」—— 用户那一轮根本没发图。
+   */
+  const withHistoryImage = (turn: RuntimeTurnContext, text = '这张图'): void => {
+    // 用带 `data` 的 part 而不是 `attachment://`：后者过 `hydrateAttachment` 时因为附件行不存在
+    // 会变成「图片已不可用」，那就分不出「被隔断换掉」和「附件丢了」两种占位。
+    turn.snapshot.messages = [{ id: 'old', ordinal: 1, turnId: 'turn-0', key: 'chat:1', role: 'user', origin: 'trigger', pruneLevel: 0,
+      pruneApplied: 0, createdAt: 0, parts: [{ type: 'text', text }, { type: 'file', data: 'QUJD', mediaType: 'image/jpeg' }], tokens: 1500 }] as never;
+    turn.snapshot.ordinals = [1];
+    turn.snapshot.headOrdinal = 1;
+    turn.snapshot.tokens = 1500;
+  };
+  /** 本轮真的带图（触发消息里那张）。参数收成 `RuntimeTurnContext` 才拿得到 `parts: unknown[]`。 */
+  const withFreshImage = (turn: RuntimeTurnContext): void => {
+    turn.delta[0]!.parts = [{ type: 'text', text: '再看这张' }, { type: 'file', data: 'REVG', mediaType: 'image/png' }];
+  };
+  const turnScope = { media: { visionScope: 'turn' } } as Partial<Config>;
+
+  it('window（默认）：窗口里剩下的那张图把纯文本轮次也切去 vision', async () => {
+    const { db, turn, dependencies } = harness('vision-scope-window');
+    withHistoryImage(turn);
+    const seen: string[] = [];
+    await runMainAgent(turn, { ...dependencies, registry: registryFor({ main: [served('blind', false, seen)], vision: [served('eyes', true, seen)] }) });
+    expect(seen).toEqual(['eyes']);
+    closeDatabase(db);
+  });
+
+  it('turn：本轮没有新图就不切别名，历史图换成占位文本，且末尾不道歉', async () => {
+    const { db, turn, dependencies } = harness('vision-scope-turn', turnScope);
+    withHistoryImage(turn);
+    const seen: string[] = [];
+    const prompts: PromptMessage[][] = [];
+    const answer = await runMainAgent(turn, { ...dependencies, registry: registryFor({ main: [served('blind', false, seen, prompts)], vision: [served('eyes', true, seen)] }) });
+    expect(seen).toEqual(['blind']);
+    // 用户这一轮发的是纯文本，没有「这张图我没能真的看到」可道歉的。
+    expect(answer).toBe('ok');
+    const flat = JSON.stringify(prompts[0]);
+    expect(flat).toContain('[图片：更早轮次里的图，当前模型不看图。要看的话请用户重新发一次或引用那条消息]');
+    expect(flat).not.toContain('image/jpeg');
+    closeDatabase(db);
+  });
+
+  it('turn：本轮真的带图时照旧切 vision，两段的图都原样带着', async () => {
+    const { db, turn, dependencies } = harness('vision-scope-fresh', turnScope);
+    withHistoryImage(turn);
+    withFreshImage(turn);
+    const seen: string[] = [];
+    const prompts: PromptMessage[][] = [];
+    await runMainAgent(turn, { ...dependencies, registry: registryFor({ main: [served('blind', false, seen)], vision: [served('eyes', true, seen, prompts)] }) });
+    expect(seen).toEqual(['eyes']);
+    const flat = JSON.stringify(prompts[0]);
+    expect(flat).toContain('image/png');
+    expect(flat).toContain('image/jpeg');
+    closeDatabase(db);
+  });
+
+  it('turn：这一轮的别名自己就能看图时，历史图原样发出去', async () => {
+    const { db, turn, dependencies } = harness('vision-scope-seeing', turnScope);
+    withHistoryImage(turn);
+    const seen: string[] = [];
+    const prompts: PromptMessage[][] = [];
+    await runMainAgent(turn, { ...dependencies, registry: registryFor({ main: [served('eyes', true, seen, prompts)] }) });
+    expect(seen).toEqual(['eyes']);
+    // 「再看一遍上面那张图」正是靠这一条还能用。
+    expect(JSON.stringify(prompts[0])).toContain('image/jpeg');
+    closeDatabase(db);
+  });
+
+  /**
+   * `turn` 档下 `turnHasImages` 为假，于是 `prepareStep` 那个 vision 覆盖不再拦 —— 而
+   * `downgradeAfterStep` 到点照样会把一个瞎模型放到还带着历史图的请求前面。当步兜底就是为它准备的。
+   */
+  it('turn：降档到看不了图的 low 那一步，请求体里也不留不透明 part', async () => {
+    const { db, turn, dependencies } = harness('vision-scope-downgrade',
+      { ...turnScope, agent: { main: { modelAlias: 'main', maxSteps: 4, downgradeAfterStep: 1 } } } as Partial<Config>);
+    withHistoryImage(turn);
+    dependencies.tools.register({ name: 'look', description: '', inputSchema: z.object({}),
+      policy: { minRole: 'trusted', approval: 'never', scope: 'chat', source: 'builtin' }, sourcePriority: 1, execute: () => ({ ok: true }) });
+    let step = 0;
+    const twoStep = (modelId: string, vision: boolean, seen: string[], prompts: PromptMessage[][]) => ({
+      model: { ...candidate(modelId, () => ok), doGenerate: async (options: { prompt: PromptMessage[] }) => {
+        seen.push(modelId);
+        prompts.push(options.prompt);
+        step += 1;
+        return (step === 1 ? { ...ok, content: [{ type: 'tool-call', toolCallId: 'c1', toolName: 'look', input: '{}' }] } : ok) as never;
+      } } as ReturnType<typeof candidate>, info: info(modelId, vision) });
+    const seen: string[] = [];
+    const prompts: PromptMessage[][] = [];
+    await runMainAgent(turn, { ...dependencies, registry: registryFor({
+      main: [twoStep('eyes', true, seen, prompts)], low: [twoStep('cheap', false, seen, prompts)] }) });
+    expect(seen).toEqual(['eyes', 'cheap']);
+    // 第 0 步在能看图的 main 上：图原样。第 1 步降到 low：同一份历史图必须已经变成占位文本。
+    expect(JSON.stringify(prompts[0])).toContain('image/jpeg');
+    expect(JSON.stringify(prompts[1])).not.toContain('image/jpeg');
+    expect(JSON.stringify(prompts[1])).toContain('更早轮次里的图');
+    closeDatabase(db);
+  });
+
+  /**
    * 收尾补跑必须是**一次**调用（`docs/00 §2` 与 `docs/08 §5.2` 的原话），而 `agent.generate(...)`
    * 是 `ToolLoopAgent` 的**整个循环** —— 实测让上游在 `tools:[]` 的请求里仍返回 tool_calls，
    * 收尾阶段又跑了 12 步（`steps=24`），最终 `turn.wrap_up chars=0` + `model_returned_empty`

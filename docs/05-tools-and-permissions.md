@@ -176,6 +176,12 @@ function resolveJailed(p: string, root: string, base = root): string {
   `[chat:<id>]` 不带 `↩︎`。
 - 正文里的换行折成 `⏎`：这个格式一条消息一行，而多行正文能在结果里伪造出好几条别人的发言。
   整份结果另外还在 `<untrusted-content>` 边界里，这一层管的是格式本身不被撬开。
+- **`context.recallBarrier` 开着时这三个工具带一道下限**（`context.recallBarrier`，见
+  [02 §7.1](./02-context-engine.md)）：清空上下文那一刻的 `messages.id`。下限灌进 SQL 而不是过滤
+  返回值 —— 后者会让 `limit:20` 先取满再被削短，模型看到的是「一共只有这么几条」。削短了就在结果里
+  多一个 `recallBarrier` 字段说出来（同 `note` 那条先例：沉默的降级等于假象）；`get_message` 撞上
+  下限时回 `ok:false, error:'recall_barrier'`，**不回 `message: null`** —— 那和「这条消息不存在」
+  长得一样，模型会换个 id 再试一遍。`admin_search_messages` 不受管（跨会话，且它是运维的逃生舱）。
 
 ### 3.3 代码执行
 

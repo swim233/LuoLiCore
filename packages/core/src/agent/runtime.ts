@@ -390,11 +390,16 @@ export interface ContextMessageOptions {
   /** 读出侧自愈补了几条缺失的 tool-result。给了就能在日志里看见「这个会话的历史是坏的」。 */
   onOrphanToolCalls?(toolCallIds: string[]): void;
   /**
-   * 图片整体换成占位文本。含图轮次既没有 `vision` 别名、当前别名自己也不支持看图时才开
-   * （`docs/08 §7.2`）—— 把不透明 part 原样发给一个不认它的模型，宽容的 provider 静默忽略、
-   * 严格的直接 400，两种都比一句「我看不了图」糟。
+   * 图片整体换成占位文本。把不透明 part 原样发给一个不认它的模型，宽容的 provider 静默忽略、
+   * 严格的直接 400，两种都比一句「我看不了图」糟（`docs/08 §7.2`）。
+   *
+   * - `'all'`：本轮的图与历史的图一起换。含图轮次既没有 `vision` 别名、当前别名自己也不支持
+   *   看图时走这一档，回复末尾还要追加一句提示。
+   * - `'history'`：只换 **snapshot 里**那些（= 更早轮次留在窗口里的图）。`media.visionScope='turn'`
+   *   且本轮没有新图、而这一轮的模型看不了图时走这一档 —— 用户这一轮发的是纯文本，没有理由
+   *   为了三轮前那张图切走贵的那一档，也没有理由给他一句「这张图我没能真的看到」。
    */
-  degradeImages?: boolean;
+  degradeImages?: 'all' | 'history';
 }
 
 /** 补出来的那条结果的正文。不伪造成功，只如实说结果没了（照 `hydrateAttachment` 的占位先例）。 */
@@ -402,6 +407,26 @@ const ORPHAN_TOOL_RESULT = '[工具结果缺失：这次调用的结果没有被
 /** `degradeImages` 时替掉图片的占位文本，以及回复末尾那句提示（`docs/08 §7.2`）。 */
 const IMAGE_UNSUPPORTED = '[图片：当前模型不支持看图，本轮没能查看]';
 export const VISION_UNSUPPORTED_NOTICE = '（当前模型不支持看图，这张图我没能真的看到。）';
+/**
+ * `degradeImages:'history'` 的占位文本。**写清楚怎么才能看到**：这一档下重新发一次或引用那条
+ * 消息就会被算成「本轮的图」，于是切回能看图的别名 —— 不写的话模型只知道自己看不到，
+ * 只能猜或者绕远路（那正是 `docs/00 §2` 里那 11 步的由来）。
+ */
+const HISTORY_IMAGE_UNSUPPORTED = '[图片：更早轮次里的图，当前模型不看图。要看的话请用户重新发一次或引用那条消息]';
+
+/**
+ * 已经物化成 `ModelMessage` 的那一份里，把图片 part 整体换成占位文本 —— `prepareStep` 的当步兜底
+ * （降档到一个看不了图的别名时用）。判据仍是 `isImagePart`：`contextMessages` 出来的图片是
+ * `{type:'file', data, mediaType:'image/…'}`，与库里那份同一个判据。
+ * 没有图的消息**原样返回同一个对象**：这一层每步都跑，无谓的浅拷贝会把整段前缀的引用换掉。
+ */
+function degradeImageParts(messages: ModelMessage[]): ModelMessage[] {
+  return messages.map((message) => {
+    const content = (message as { content?: unknown }).content;
+    if (!Array.isArray(content) || !content.some((part) => isImagePart(part))) return message;
+    return { ...message, content: content.map((part) => isImagePart(part) ? { type: 'text', text: HISTORY_IMAGE_UNSUPPORTED } : part) } as ModelMessage;
+  });
+}
 
 export function contextMessages(turn: RuntimeTurnContext, attachments?: Sqlite, options?: ContextMessageOptions): ModelMessage[] {
   const source = [...turn.snapshot.messages, ...turn.delta];
@@ -443,9 +468,14 @@ export function contextMessages(turn: RuntimeTurnContext, attachments?: Sqlite, 
   // 补出来的结果会让下标漂移，所以 `stored` 数的是**产出侧**的条数，不是 snapshot 的条数。
   let stored = 0;
   for (const [index, message] of source.entries()) {
+    // `'history'` 只管 snapshot 那一段。判据用下标而不是 `origin`：被回复的那条消息渲染出来
+    // 也是 `origin:'background'`（`renderArchivedMessage`），按 origin 分等于把用户此刻指着的
+    // 那张图也当成历史抹掉。
+    const historical = index < turn.snapshot.messages.length;
+    const degradeThis = options?.degradeImages === 'all' || (options?.degradeImages === 'history' && historical);
     const content = (message.parts as Array<Record<string, unknown>>).map((part) => {
       if (part?.type === 'tool-result') return { ...part, output: normalizeToolOutput(part.output) };
-      if (options?.degradeImages && isImagePart(part)) return { type: 'text', text: IMAGE_UNSUPPORTED };
+      if (degradeThis && isImagePart(part)) return { type: 'text', text: options?.degradeImages === 'history' ? HISTORY_IMAGE_UNSUPPORTED : IMAGE_UNSUPPORTED };
       if (part?.type === 'image') return imageToFilePart(part);
       if (part?.type === 'file' && typeof part.ref === 'string' && part.ref.startsWith('attachment://')) return hydrateAttachment(part, attachments);
       // 易变段现在和用户正文同处 user role，正文里能写出 `<system-instructions` 就等于能伪造它。
@@ -549,6 +579,11 @@ export function assembleMainPrompt(turn: RuntimeTurnContext, dependencies: Promp
     maxTokens: dependencies.config.context.limit.tokens, workspace: dependencies.workspace, sandbox: dependencies.config.sandbox.mode,
     // 只在真有本轮预留时才给得出额度；WebUI 的提示词预览没有预留，那一行本来就不该出现。
     ...(spent ? { quota: `本轮已用 $${spent.committed.toFixed(4)} / 上限 $${dependencies.config.quota.perTurn.maxCostUsd.toFixed(2)}` } : {}),
+    // 刚被清空过的那一轮说一句。措辞按 `context.recallBarrier` 分岔：隔断开着时归档也翻不动，
+    // 不说清楚模型会在那条死路上来回试（`read_messages` 会返回空，而它无从知道为什么）。
+    ...(turn.contextCleared ? { contextCleared: dependencies.config.context.recallBarrier
+      ? '刚被清空。之前的对话不在你眼前，归档检索也查不到清空之前的消息 —— 不要反复尝试，需要的话请用户重说一次。'
+      : '刚被清空。之前的对话不在你眼前；确有必要时可用 read_messages / search_messages 去归档里查，但别把它当默认动作。' } : {}),
     // 工具名只在目录关掉时才列进 RUNTIME：开着的时候 TOOL CATALOG 已经一行一个带描述地列过了，
     // 两处同源（都是 `active(role, ctx)`），重复一遍等于每轮白付一份易变段的钱（docs/06 §1.2）。
     show: { quota: runtimeShow.showQuota, contextWatermark: runtimeShow.showContextWatermark, workspace: runtimeShow.showWorkspace,
@@ -694,13 +729,31 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
    * （logs/2026-08-18 · turn `01M0AKMXG4…`）。它也试过自己 `set_model('vision')`，但那个
    * 覆盖只在**当轮**生效（`docs/04 §5.2`），下一轮（真正带图那一轮）又回到了 `main`。
    *
-   * 判据在轮次级算一次：图片在 `snapshot + delta` 里，`prepareStep` 每步重算纯属浪费。
+   * 判据在轮次级算一次：图片就在 `snapshot` 与 `delta` 里，`prepareStep` 每步重算纯属浪费。
+   *
+   * **`media.visionScope` 决定「这一轮含图」算到哪里**（默认 `window` = 两段一起算，一直以来的
+   * 行为）。选 `turn` 时只算 `delta`：一张图不该把它之后的每一轮都钉在 vision 别名上 ——
+   * 实测一个私聊里 4 条带图消息留在窗口内，此后每一轮纯文本都记 `vision_required`
+   * （logs/2026-08-19 · `01M0CKPECYZMM…` 一带），而一个 vision 别名都没配时，那些轮次的回复
+   * 末尾还会挂一句「这张图我没能真的看到」—— 用户那一轮根本没发图。
    */
-  const turnHasImages = [...turn.snapshot.messages, ...turn.delta].some((message) => (message.parts as unknown[]).some(isImagePart));
+  const freshImages = turn.delta.some((message) => (message.parts as unknown[]).some(isImagePart));
+  const historyImages = turn.snapshot.messages.some((message) => (message.parts as unknown[]).some(isImagePart));
+  const turnHasImages = dependencies.config.media.visionScope === 'turn' ? freshImages : freshImages || historyImages;
   // 一张都看不了的时候才降级：`vision` 别名没配、当前别名自己也不支持。
   const visionDegraded = turnHasImages && !dependencies.registry.supportsVision('vision') && !dependencies.registry.supportsVision(alias);
   if (visionDegraded) dependencies.log.event({ level: 'warn', kind: 'provider.fallback', summary: `${alias} 不支持看图且无 vision 别名`,
     traceId: turn.turnId, key: turn.key, data: { alias, reason: 'vision_unavailable' } });
+  /**
+   * `visionScope='turn'` 的另一半：本轮没有新图，于是不切别名 —— 那么更早轮次留在窗口里的图
+   * 也不能原样发给这个看不了图的模型（宽容的 provider 静默忽略、严格的直接 400）。
+   * 判据只看**本轮真正会用的那个别名**支不支持：能看图就原样带着，「再看一遍上面那张图」照旧可用。
+   * `visionDegraded` 优先 —— 那一档本来就把两段一起换掉了，再叠一次没有意义。
+   */
+  const historyDegraded = !visionDegraded && historyImages && !freshImages
+    && dependencies.config.media.visionScope === 'turn' && !dependencies.registry.supportsVision(alias);
+  if (historyDegraded) dependencies.log.event({ level: 'info', kind: 'ctx.image_placeholder', summary: `${alias} 不看图，历史图片换成占位文本`,
+    traceId: turn.turnId, ...turnParent(turn), key: turn.key, data: { alias, scope: 'turn', reason: 'history_only' } });
   // 步骤级失败（上游 5xx、重试耗尽）不会从 textStream 抛出来：AI SDK 把它吞进内部的 onError，
   // 让 result.text 安静地解析成空串。不抓住这一份，一次彻底的上游故障和「模型没话说」
   // 在调用方眼里长得一模一样 —— 上一次就是这样变成「不回复」的。
@@ -789,7 +842,8 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
   const instructions = stableInstructions(prompt, providerKind);
   // 同一轮里 `contextMessages` 会被调最多三次（主流 / 收尾补跑 / 非流式），坏历史只报一次。
   let reportedOrphans = false;
-  const messageOptions: ContextMessageOptions = { volatile: prompt.volatile, cacheBreakpoint: providerKind === 'anthropic', degradeImages: visionDegraded,
+  const messageOptions: ContextMessageOptions = { volatile: prompt.volatile, cacheBreakpoint: providerKind === 'anthropic',
+    ...(visionDegraded ? { degradeImages: 'all' as const } : historyDegraded ? { degradeImages: 'history' as const } : {}),
     onOrphanToolCalls: (toolCallIds) => {
       if (reportedOrphans) return;
       reportedOrphans = true;
@@ -866,6 +920,16 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
       // 重试三次全挂，而 AI SDK 把 RetryError 吞成空结果，调用方看到的只是「什么都没生成」。
       // reasoning 本来也只在一轮的步骤之间有意义（上下文里不落盘），摘掉它换来的是工具调用之后还能有回复。
       patch.messages = pruneMessages({ messages, reasoning: 'all' });
+      /**
+       * **当步别名看不了图时，请求体里也不能留着不透明 part。** 上面那个 vision 覆盖只在
+       * `turnHasImages` 为真时才拦；`media.visionScope='turn'` 下「窗口里有图但本轮没有新图」
+       * 恰好是它不为真的那一档 —— 而 `downgradeAfterStep` 到点降到 `low`（或 `set_model('low')`）
+       * 照样会把一个瞎模型放到还带着历史图的请求前面，正是 `docs/08 §7.2` 禁的那件事。
+       * `window` 档下这里恒为 no-op：那时要么已经切成能看图的别名，要么 `visionDegraded`
+       * 已经把两段的图都换成文本了。判据带上「这一轮到底有没有图」—— 纯文本轮次连问一次能力位
+       * 都不必。
+       */
+      if ((freshImages || historyImages) && !dependencies.registry.supportsVision(selectedAlias)) patch.messages = degradeImageParts(patch.messages);
       const selected = dependencies.registry.info(selectedAlias) ?? initialInfo;
       const cap = selected.contextWindow * dependencies.config.context.hardCapRatio;
       if (estimateModelMessages(patch.messages) > cap) {

@@ -101,6 +101,7 @@
 | [x] AC-CTX-037 (自动) | 活跃期过后（把 HEAD 的 `created_at` 往回拨超过 `windowMs`）再发一条消息 | `openTurn` 在开轮**之前**就把窗口裁回 `context.limit.*`，本轮 `turn.snapshot` 已是裁剪后的小上下文 —— 否则久别重逢那一轮要按全价发一次数倍大的请求。此时缓存本来就已过期，裁剪不损失任何命中 | 〔context.active.test.ts〕
 | [x] AC-CTX-038 (自动) | `context.active.windowMs=0`（schema 默认） | 每轮提交后照常裁剪，行为与未引入活跃期时逐字一致 | 〔context.active.test.ts〕
 | [x] AC-CTX-039 (自动) ★ | 活跃期内连着走完四轮真实轮次（`openTurn → runMainAgent → commitTurn`），逐字节比对相邻两轮真正递到 provider 那一层的 prompt 数组 | 第 N 轮请求**去掉末尾易变段**之后，必须逐字节是第 N+1 轮请求的前缀；同时稳定段那条 system 与 tools schema 跨轮完全相同。这一条一破，整段历史的缓存就一起没了 —— 历史上破它的两种方式（分钟时钟留在稳定段、活跃期内推进 `window_start`）都出现过（[04 §2.1](./04-agents-and-providers.md#21-prompt-缓存)、[02 §5.1.1]） | 〔context.cache-prefix.test.ts〕
+| [x] AC-CTX-040 (自动) ★ | 清空上下文（`/new` 或 WebUI）后，分别在 `context.recallBarrier` 两档下调 `read_messages` / `search_messages` / `get_message`，并各开一轮 | 关（默认）：三个工具照旧看得到清空之前的话（实测里模型第一步就这么把 20 条历史捞回来了）。开：只看得到 `reset` commit 的 `meta.archiveFloor` 之后的消息，结果里带 `recallBarrier` 说明自己被削短了，单条被挡住时回 `ok:false, error:'recall_barrier'` 而不是 `message:null`；背景认领水位一并推到清空那一刻（清空前未认领的群发言不再进新窗口）；`/undo` 撤回那次清空后隔断解除。两档下清空后的第一轮 RUNTIME 块都带那句「上下文：刚被清空」（[02 §7.1]） | 〔context.recall-barrier.test.ts〕
 
 ## 3. Telegram 与准入（AC-TG / AC-ACL / AC-OUT）
 
@@ -188,6 +189,7 @@
 | [x] AC-PROV-021 (自动) ★ | 让链首「连上之后永不返回」（既不 resolve 也不认 abortSignal），链上还有第二个候选 | 每次尝试在 `provider.requestTimeoutMs` 到点后中止并计一次可重试失败，链内重试/fallback 照常走，最终由第二个候选出结果。**不能只 abort 就接着等**：provider 实现不认 signal 时那个 promise 永远不 settle，表现就是「工具调完之后 bot 再也不说话」，而日志里一行都没有（`logs/2026-08-17` 有 7 轮死在这里） | 〔tool.timeout.test.ts、agent.retry.test.ts〕
 | [x] AC-PROV-022 (自动) ★ | 上游把流建立起来后一个 token 都不发；另一路让流正常连续吐字 | 前者在 `provider.streamIdleTimeoutMs` 到点后让这条流报错（`stream_idle_timeout_*`）、abort 底层请求、经 `onExhausted` 记一条 `model.error`，轮次以真实原因记 failed；后者原样透传每个 chunk。空闲计时**只覆盖「在等下一个 chunk」**，本轮正在执行工具不算 | 〔agent.retry.test.ts〕
 | [ ] AC-PROV-023 | 用户在重试退避中途 `/cancel`；另一路让轮次撞上 `concurrency.turnTimeoutMs` | 前者不再发起下一次尝试、不切换候选，抛出原始错误（自动断言这一半）；后者给用户的话不能是「⛔ 已取消」——他没点过取消，真实情况是这一轮卡住了 |
+| [x] AC-PROV-024 (自动) ★ | 窗口里留着一张更早轮次的图，随后发一条**纯文本**消息，`media.visionScope` 两档各跑一次 | `window`（默认）：照旧切 `vision`（这正是「一张图把它之后每一轮都钉在 vision 上」的代价）。`turn`：不切别名；这一轮的别名看不了图时历史图整体换成占位文本（含「重新发一次或引用那条消息」的指路）且**回复末尾不追加**那句道歉，别名自己能看图时原样带着；同一轮里降档到看不了图的 `low` 的那一步，请求体里也不留不透明 part。记一条 `ctx.image_placeholder`（[04 §5.2](./04-agents-and-providers.md)、[08 §7.2](./08-telegram-adapter.md)） | 〔agent.model-wiring.test.ts〕
 | [x] AC-PROMPT-001 (自动) ★ | 组装私聊系统提示词 | block 顺序为 KERNEL→CHARACTER→ASSIST→CATALOG→PUBMEMORY→PRIMEMORY→RUNTIME | 〔prompt.test.ts〕
 | [x] AC-PROMPT-002 (自动) ★ | 组装群聊系统提示词 | **不含** PRIMEMORY；断言其内容字符串不出现在结果中 | 〔prompt.test.ts〕
 | [x] AC-PROMPT-003 (自动) | RUNTIME 块的工具列表 | 与本 step 的 `activeTools` 完全一致（无多、无少） | 〔config.wiring.test.ts〕
@@ -550,9 +552,9 @@
 | 模块 | 负责人 | 通过 AC 数 / 总数 | 豁免项及理由 | 日期 | 签署 |
 |---|---|---|---|---|---|
 | 配置与 DB | | 15 / 25 | | | |
-| **上下文引擎** | | 30 / 39 | | | |
+| **上下文引擎** | | 31 / 40 | | | |
 | Telegram 与准入 | | 22 / 46 | | | |
-| Agent 与 Provider | | 22 / 42 | | | |
+| Agent 与 Provider | | 23 / 43 | | | |
 | 工具/沙箱/审批 | | 19 / 60 | | | |
 | Subagent 与任务 | | 20 / 38 | | | |
 | 记忆 | | 1 / 13 | | | |
@@ -561,6 +563,6 @@
 | WebUI | | 11 / 85 | | | |
 | 安全 | | 9 / 25 | | | |
 | 运维 | | 2 / 10 | | | |
-| **合计** | | **177 / 453** | | | |
+| **合计** | | **179 / 455** | | | |
 
 **整体通过条件**：全部 ★ 项通过 + 非 ★ 项通过率 ≥ 95% + 所有豁免项经需求方书面确认。

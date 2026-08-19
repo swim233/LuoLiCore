@@ -73,6 +73,19 @@ describe('runtime block', () => {
     expect(runtimeBlock({ ...base, role: 'owner' })).toContain('你的有效权限：owner（全部工具；可绕过沙箱）');
   });
 
+  /**
+   * 刚被清空那一轮要说一句。不说的话模型看到的是一段凭空开始的对话，会把它当自己的失忆去补救 ——
+   * 实测清空后第一步就 `read_messages({direction:'before',limit:20})` 把 20 条历史捞回来
+   * （logs/2026-08-19 · `01M0CKK6W018B5KS9613SNEX5J`）。这一行**不受 `showContextWatermark` 管**：
+   * 它不是水位，是一件刚发生的事。
+   */
+  it('says the context was just cleared, watermark switch or not', () => {
+    expect(runtimeBlock({ ...base, role: 'owner' })).not.toContain('上下文：');
+    const cleared = runtimeBlock({ ...base, role: 'owner', contextCleared: '刚被清空。', show: { contextWatermark: false } });
+    expect(cleared).toContain('上下文：刚被清空。');
+    expect(cleared).not.toContain('上下文水位：');
+  });
+
   // TOOL CATALOG 与这一行同源（都是 active(role, ctx)）。目录开着时重复一遍等于每轮白付一份易变段的钱；
   // 目录关掉时它是唯一的工具清单，必须还在，否则模型会去试不存在的工具。
   it('lists tool names only when the catalog block is off', () => {

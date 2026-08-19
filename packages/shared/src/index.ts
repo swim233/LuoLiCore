@@ -260,6 +260,13 @@ export interface RuntimeTurnContext {
    * 恒为活跃期。true 时 `commitTurn` 把裁剪触发阈值抬到 `context.active.*`（docs/02 §5.1.1）。
    */
   deferPrune?: boolean;
+  /**
+   * 开轮时 HEAD 就是一条 `reset` commit 且窗口是空的 —— 也就是「上一件发生的事是有人清空了
+   * 上下文，此后还没有任何一轮」。只喂给 RUNTIME 块的那一行：模型看到的是一段凭空开始的对话，
+   * 不说的话它会把「我不记得刚才的事」当成自己的失忆去补救（实测清空后第一步就
+   * `read_messages` 捞回 20 条历史），而 `context.recallBarrier` 开着时那条路还是死的。
+   */
+  contextCleared?: boolean;
   config: Readonly<Record<string, unknown>>;
 }
 

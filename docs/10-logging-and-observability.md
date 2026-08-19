@@ -89,6 +89,7 @@ with_parent 0`，浏览器里展开一条 trace，13 个节点的 `marginLeft` �
 | `ctx.abort` | warn（清理本身失败时 **error**） | messages / error —— 轮次中止那一路：`cancel.commitPartial` 提交了半份 delta、或者只释放认领。`abortTurn failed; turn still recorded as ended` 那条 error 说的是「清理挂了但状态记住了」 |
 | `ctx.invalid_shape` | error | key —— `assertValidShape` 在读出或写入侧拒收了一份形状。**这条会话的历史是坏的** |
 | `ctx.token_calibration` | warn | estimatedInput, realInput, ratio —— 估算与真实相差超过 20% 才记。生产库里它是 warn 级第二多的一种 |
+| `ctx.image_placeholder` | info | alias, scope, reason —— `media.visionScope='turn'` 那一档：本轮没有新图、而这一轮的别名看不了图，于是更早轮次留在窗口里的图片整体换成占位文本（[08 §7.2](./08-telegram-adapter.md)）。它**不是** `vision_unavailable`：那一档是「用户此刻发的图也看不了」，要在回复末尾道歉；这一档用户这一轮根本没发图，什么都不该对他说，所以只有这一行日志能解释「它为什么说看不到上面那张图」 |
 | `prompt.build` | debug | blockTokens{kernel,character,assist,catalog,pubmemory,primemory,runtime}, total, truncated[] |
 | `prompt.truncated` | **warn** | truncated[], blocks, maxTokens —— 预算被 catalog + runtime 吃满时 CHARACTER.md 会被整段截成一句提示，人格静默消失 |
 | `model.call` | info（服务的候选 ≠ 链首时 **warn**） | alias, servedProvider, servedModelId, stepNumber, usage, ms, finishReason, costUsd, request/response。**摘要行里写的是真正出力的那个候选**，不是链首：span 在 `onStepStart` 开、`onStepEnd` 关，而链内 fallback 发生在 `fallbackLanguageModel` 中间件内部、AI SDK 看不见（`wrapLanguageModel` 让 SDK 可见的永远是链首）。此前这一行记的是**失败的候选**，同一次调用在日志与 `usage_ledger` 里指向两个不同的 provider（[reviews/28](./reviews/28-round10-live-system-test.md) · L-PROV-01），而 [§7](#7-可观测性验收要点) 第 3 条要求「每次模型调用能看到 provider/模型/别名」。所以 `span().end()` 有一个可覆盖 `summary` 与 `level` 的入口 —— `summary` 是列不是载荷，改不了它就只能在载荷里说 |

@@ -240,6 +240,9 @@ export class ContextEngine {
       return { turnId, key: request.key, chatId: request.chatId, threadId: request.threadId,
         initiatorUserId: request.initiatorUserId, effectiveRole: request.effectiveRole, isPrivate: request.isPrivate,
         ...(request.chatTitle ? { chatTitle: request.chatTitle } : {}),
+        // 「上一件发生的事是有人清空了上下文」：HEAD 就是那条 reset 且窗口还是空的。提交过一轮之后
+        // HEAD 变成 turn commit，这一位自动消失 —— 它说的是「这一轮之前刚清过」，不是「清过」。
+        ...(head?.kind === 'reset' && stored.length === 0 ? { contextCleared: true } : {}),
         baseCommitId: head?.id ?? null, rootSpanId, claimThroughMessageId: request.trigger.id,
         initiator: { name: request.trigger.fromName ?? null, username: request.trigger.fromUsername ?? null },
         triggerTgMessageId: request.trigger.tgMessageId,
@@ -323,12 +326,40 @@ export class ContextEngine {
     return materialized;
   }
 
-  reset(key: string, actor: string): CommitRow {
+  /**
+   * `/new` 与 WebUI 的「清空上下文窗口」：插一条 reset commit 把窗口起点推到最新 ordinal 之后。
+   * 消息一条不删 —— 这是刻意的（`docs/09 §3.10`「两者都不删消息」），所以**清空只挡窗口，挡不住
+   * 归档工具**：实测清空后模型第一步就 `read_messages({direction:'before',limit:20})` 把 20 条历史
+   * 整段捞回来，那份工具结果又落进新窗口（logs/2026-08-19 · `01M0CKK6W018B5KS9613SNEX5J`）。
+   *
+   * 所以这里顺手记下清空那一刻的归档水位（`meta.archiveFloor`），交给 `context.recallBarrier`
+   * 决定要不要真的挡。**水位无条件记**：开关是运行时的，而 commit 是不可变的历史 ——
+   * 事后打开开关时，没记过水位的旧 reset 就再也补不上了。
+   *
+   * @param advanceClaims 隔断开着时为真：把背景认领水位也推到同一处。否则清空之后第一轮会把
+   *   清空之前那些还没被认领的群发言重新带进新窗口（`claimBackground` 认的是 `claim_watermark`
+   *   到触发消息之间那一段，与窗口无关），一扇门关了另一扇门还开着。
+   */
+  reset(key: string, actor: string, options: { advanceClaims?: boolean } = {}): CommitRow {
     const repo = new ScopedContextRepository(this.db, key);
     const head = repo.head();
     const max = repo.maxOrdinal();
+    const context = repo.context();
+    // 没有 contexts 行 = 这个 key 还没开过任何一轮（`/new` 打在从没被唤醒过的会话里）。
+    // 那时既没有窗口也没有认领过的东西，水位记 0 就是「不设限」。
+    const archiveFloor = context ? this.archive.scope(context.chatId, context.threadId).maxMessageId() : 0;
+    if (options.advanceClaims && archiveFloor > 0) repo.advanceWatermark(archiveFloor);
     this.invalidate(key);
-    return repo.insertControl('reset', { windowStart: max + 1, headOrdinal: max, parentId: head?.id ?? null, createdBy: actor });
+    return repo.insertControl('reset', { windowStart: max + 1, headOrdinal: max, parentId: head?.id ?? null,
+      meta: { archiveFloor, advancedClaims: options.advanceClaims === true }, createdBy: actor });
+  }
+
+  /**
+   * 归档检索的下限（`context.recallBarrier`）。**开关不在这里判** —— 调用方（`builtins.ts` 的三个
+   * 归档工具）按本轮配置决定要不要用它，这样同一份水位在开关关掉时不影响任何查询。
+   */
+  recallFloor(key: string): number {
+    return new ScopedContextRepository(this.db, key).recallFloor();
   }
 
   undo(key: string): CommitRow | null {

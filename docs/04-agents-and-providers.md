@@ -505,9 +505,20 @@ shim 去翻译 Responses 语义，代价有两项，都是实测出来的：
   运维反而没有地方去补配置。缺 `main` 时轮次在 `streamMainAgent` 里以 `model alias unavailable` 失败，
   WebUI 写入别名后 `rebuildModels()` 即时生效，无需重启。
 - 轮次包含图片且当前模型 `capabilities.vision=false` → `prepareStep` 自动切 `vision`。判据在轮次级算
-  一次（图片在 `snapshot + delta` 里，判据是 `isImagePart`，与 `capImages` 共用一份），能力取自
+  一次（判据是 `isImagePart`，与 `capImages` 共用一份），能力取自
   `capabilities_json.vision`（`ModelRegistry.supportsVision`，别名不存在时恒为 false —— `info()` 走
   `#pick` 会静默回落到 `main`）。
+  **「包含图片」的取样范围由 `media.visionScope` 决定**（默认 `window` = `snapshot + delta`，即整个
+  上下文窗口）。`window` 的代价是一张图会把它之后的每一轮都钉在 vision 别名上：实测一个私聊里
+  4 条带图消息留在窗口内，此后每一轮纯文本都记 `vision_required`（`logs/2026-08-19`），而一个能看图的
+  别名都没配时，那些轮次的回复末尾还会挂一句「这张图我没能真的看到」—— 用户那一轮根本没发图。
+  `turn` 只算 `delta`（本轮新进来的：触发消息、被回复的那条、本轮认领的群背景发言）；此时更早轮次
+  留在窗口里的图片在**这一轮真落在看不了图的别名上**时整体换成占位文本（记
+  `ctx.image_placeholder`，**不追加**回复末尾那句提示 —— 用户这一轮没发图，没什么可道歉的），
+  落在能看图的别名上则原样带着，「再看一遍上面那张图」仍然可用。占位文本写明「重新发一次或引用
+  那条消息」，那两种都会被算成本轮的图。`downgradeAfterStep` 降到 `low` 的那一步按**当步别名**
+  再兜一次（`prepareStep` 里把请求体中的图片 part 换成占位）：`turn` 档下轮次级判据为假，那个
+  vision 覆盖不再拦，而把不透明 part 交给一个瞎模型正是下面这条禁的事。
   **优先级：vision 压过一切。** 既压过 `downgradeAfterStep`（`low` 大概也看不见图，为了省钱把眼睛
   降掉是最不划算的一种省），也压过 `set_model` 的当轮指定；`vision` 别名不可用时退而选「降档前那个
   别名自己就支持看图」。一个都没有才降级：图片整体换成文本占位，并在**回复末尾**追加一句提示

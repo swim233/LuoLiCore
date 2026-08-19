@@ -235,6 +235,20 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
   // 四个 `tools.archive.*Limit` 从这里生效。走 `inputSchemaFor` 而不是注册期固定：那是**每轮**
   // 取一次 `turn.config`，所以热更新和 perChat 覆盖都能落到模型看到的那份 schema 上。
   const archiveLimits = (context: ToolExecutionContext): Config['tools']['archive'] => (context.turn.config as Readonly<Config>).tools.archive;
+  /**
+   * 回忆隔断（`context.recallBarrier`）：清空上下文那一刻的 `messages.id`，0 = 不设限。
+   * 下限灌进 SQL 而不是过滤返回值 —— 后者会让 `limit:20` 先取满再被削短，模型看到的是
+   * 「一共只有这么几条」。开关每次调用现读，所以改完下一次工具调用就生效。
+   */
+  const recallFloor = (context: ToolExecutionContext): number =>
+    (context.turn.config as Readonly<Config>).context.recallBarrier ? dependencies.context.recallFloor(context.turn.key) : 0;
+  /**
+   * **隔断削短了结果就必须说出来。** 不说的话模型拿到的是一段没有更早历史的归档，而它会把这个
+   * 当成「本来就没有」——照 `droppedTokenNote` 同一条先例（沉默的降级等于假象）。
+   */
+  const barrierNote = (floor: number): { recallBarrier?: string } => floor > 0
+    ? { recallBarrier: `上下文在 #${floor} 之后被清空过，那之前的消息不在检索范围内（context.recallBarrier 开着）。用户提起更早的事，请让他重说一次。` }
+    : {};
   const limitField = (fallback: number, max: number) => z.number().int().min(1).max(max).default(Math.min(fallback, max));
   const searchSchema = (limits: { defaultSearchLimit: number; maxSearchLimit: number }) =>
     z.object({ query: z.string(), from: z.string().optional(), after: z.string().optional(), before: z.string().optional(), kind: z.string().optional(),
@@ -251,8 +265,9 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
       const before = parseMoment(input.before);
       if (after === false || before === false) return { ok: false, error: 'invalid_time_filter', hint: 'after / before 要写成 ISO 时间，例如 2026-08-14 或 2026-08-14T10:02:00Z' };
       const scope = dependencies.archive.scope(context.turn.chatId, context.turn.threadId);
-      const messages = cite(scope.search(input.query, input.limit, { from: input.from ?? null, after, before, kind: input.kind ?? null }), context, scope);
-      return { ok: true, messages, ...droppedTokenNote(input.query) };
+      const floor = recallFloor(context);
+      const messages = cite(scope.search(input.query, input.limit, { from: input.from ?? null, after, before, kind: input.kind ?? null, minId: floor || null }), context, scope);
+      return { ok: true, messages, ...droppedTokenNote(input.query), ...barrierNote(floor) };
     } });
   registry.register({ name: 'read_messages', description: '按顺序读取当前会话聊天记录。anchor 可以是消息 id 或 ISO 时间，direction 决定往哪边读；不给 anchor 就是最近若干条。', inputSchema: readSchema({ defaultReadLimit: 50, maxReadLimit: 200 }),
     inputSchemaFor: (context) => readSchema(archiveLimits(context)), policy: builtinPolicy('read_messages'), sourcePriority: 100, untrustedOutput: true,
@@ -260,10 +275,18 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
       const anchor = resolveAnchor(input.anchor);
       if (anchor === false) return { ok: false, error: 'invalid_anchor', hint: 'anchor 要么是消息 id（如 12841 或 #12841），要么是 ISO 时间（如 2026-08-14T10:02:00Z）' };
       const scope = dependencies.archive.scope(context.turn.chatId, context.turn.threadId);
-      return { ok: true, messages: cite(scope.window({ ...anchor, direction: input.direction, limit: input.limit }), context, scope) };
+      const floor = recallFloor(context);
+      return { ok: true, messages: cite(scope.window({ ...anchor, direction: input.direction, limit: input.limit, minId: floor }), context, scope), ...barrierNote(floor) };
     } });
   registry.register({ name: 'get_message', description: '读取当前会话的单条归档消息。', inputSchema: z.object({ messageId: z.number().int().positive() }), policy: builtinPolicy('get_message'), sourcePriority: 100, untrustedOutput: true,
-    execute: (input, context) => ({ ok: true, message: dependencies.archive.scope(context.turn.chatId, context.turn.threadId).byId(input.messageId) }) });
+    execute: (input, context) => {
+      const floor = recallFloor(context);
+      const message = dependencies.archive.scope(context.turn.chatId, context.turn.threadId).byId(input.messageId, floor);
+      // 被隔断挡住时**不能**回 `message: null`：那和「这条消息不存在」长得一模一样，而模型会据此
+      // 换个 id 再试一遍。如实说是被挡住的（「摘除比伪造安全」，docs/16 §5）。
+      if (!message && floor > 0 && input.messageId <= floor) return { ok: false, error: 'recall_barrier', hint: barrierNote(floor).recallBarrier };
+      return { ok: true, message };
+    } });
   // 跨会话检索**不给**过滤参数：`adminSearchAll` 不认它们，而收下一个参数再默默忽略比没有这个
   // 参数更糟 —— 模型会以为自己已经按人过滤过了（「摘除比伪造安全」，docs/16 §5）。
   registry.register({ name: 'admin_search_messages', description: '跨会话搜索聊天记录，仅 owner。', inputSchema: adminSearchSchema({ defaultSearchLimit: 20, maxSearchLimit: 100 }),

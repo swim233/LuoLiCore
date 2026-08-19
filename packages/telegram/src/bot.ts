@@ -291,8 +291,13 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
   bot.command('new', async (ctx) => {
     const key = contextKey({ chatId: String(ctx.chat.id), messageThreadId: ctx.message?.message_thread_id ?? null }, config.context.scope);
     if (!await requireRole(ctx.update.update_id, 'limited', (text) => ctx.reply(text))) return;
-    dependencies.context.reset(key, `command:${ctx.from?.id ?? 'unknown'}`);
-    await ctx.reply('已开启新话题，历史记录仍保留。');
+    // `context.recallBarrier` 开着时清空还要推背景认领水位（`ContextEngine.reset` 的 docstring）。
+    const barrier = currentConfig().context.recallBarrier;
+    dependencies.context.reset(key, `command:${ctx.from?.id ?? 'unknown'}`, { advanceClaims: barrier });
+    // 回执要跟着开关说实话：隔断关着时「历史记录仍保留」意味着模型照样能用 read_messages 翻回来。
+    await ctx.reply(barrier
+      ? '已开启新话题。历史消息仍在库里，但这之前的内容我不会再去翻了。'
+      : '已开启新话题，历史记录仍保留（我仍可用 read_messages 去查更早的消息）。');
   });
   bot.command('undo', async (ctx) => {
     const key = contextKey({ chatId: String(ctx.chat.id), messageThreadId: ctx.message?.message_thread_id ?? null }, config.context.scope);
