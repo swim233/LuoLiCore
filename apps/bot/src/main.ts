@@ -3,7 +3,7 @@ import argon2 from 'argon2';
 import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { serve } from '@hono/node-server';
-import { ArchiveRepository, CustomToolRepository, OperationsRepository, PrincipalRepository, ScheduleRepository, TurnRepository, closeDatabase, migrateDatabase, modelAliasKey, openDatabase, readAppKv, readPersistedConfig, recomputeMessageTokens, recoverAfterCrash, writeAppKv } from '@luoli/db';
+import { ArchiveRepository, CustomToolRepository, OperationsRepository, PrincipalRepository, ScheduleRepository, TurnRepository, acquireInstanceLock, closeDatabase, migrateDatabase, modelAliasKey, openDatabase, readAppKv, readPersistedConfig, recomputeMessageTokens, recoverAfterCrash, writeAppKv } from '@luoli/db';
 import { AgentManager, AgentResultStore, AlertDispatcher, BUNDLED_SKILLS, ConfigStore, CustomToolManager, mergeAgentDefinitions, scanAgentFiles, ContextEngine, DatabaseApprovalBroker, EventBus, FileTools, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, ModelRegistry, PathJail, PluginManager, selfAuthoringDenyGlobs, PromptAssembler, PromptDocuments, ProviderStore, PROVIDER_FAILURES_TO_DOWN, PROVIDER_PROBE_TIMEOUT_MS, QuotaGuard, repairLedgerCacheCost, runProviderHealthCheck, Sandbox, ScheduledJobRunner, Scheduler, Secrets, SkillLoader, STABLE_PROMPT_BLOCKS, TOOL_POLICY, ToolRegistry, TurnConcurrency, TurnRegistry, UsageLedger, assembleMainPrompt, configJsonSchema, loadConfig, perChatConfig, registerAuthoringTools, registerBuiltins, rejectedWakewords, runMainAgent, runSubAgent, streamMainAgent, type SubAgentRuntimeEvent } from '@luoli/core';
 import { createServer, EventStreamRegistry, issueLoginToken, setupToken, type PromptPreviewResult } from '@luoli/server';
 import type { RuntimeTurnContext } from '@luoli/shared';
@@ -40,6 +40,19 @@ const configStore = new ConfigStore(config);
 for (const path of [resolve('data'), resolve('logs'), resolve('skills'), resolve('plugins'), resolve(config.memory.dir), resolve(config.sandbox.workspaceDir)]) mkdirSync(path, { recursive: true, mode: 0o700 });
 const db = openDatabase(config.db.path);
 migrateDatabase(db);
+// **拿锁必须排在 `recoverAfterCrash` 之前**：那个函数假定「进程启动 ⇒ 上一个进程已死」，
+// 而在这把锁之前没有任何东西保证这一点 —— 用同一个库起第二个实例会把在位实例**仍在执行**的
+// 轮次就地判死、释放已认领的消息、清零在途预留，之后 A 才因为 409 关停（docs/28 · L-OPS-01）。
+// 迁移排在前面是有意的：锁文件放在库旁边，而空库首启时目录可能还不存在。
+const instanceLock = acquireInstanceLock(config.db.path);
+if (!instanceLock.ok) {
+  process.stderr.write(`[lock] 另一个实例正在使用这个库（pid ${instanceLock.holder.pid}@${instanceLock.holder.host}，`
+    + `起于 ${new Date(instanceLock.holder.startedAt).toISOString()}）。\n`
+    + `[lock] 同库双实例会互相清掉在途轮次与消息认领，所以这里拒绝启动。要换实例先停掉那一个；\n`
+    + `[lock] 确认它已经死了但锁还在，删掉 ${config.db.path}.lock 再试。\n`);
+  process.exit(1);
+}
+if (instanceLock.lock.stolenFrom) process.stdout.write(`[lock] 接手了 pid ${instanceLock.lock.stolenFrom} 留下的锁 —— 上一次不是正常退出。\n`);
 // 报出来而不是静静收尾：`LogSink` 到下面才建得起来，所以先走 stdout，等 sink 有了再补一条
 // `system.recovered`。此前它返回 void 也不记日志，一次非正常重启之后 reap 了什么只能靠翻
 // `turns` 表反推（docs/28 · L-OPS-04）。
@@ -360,89 +373,22 @@ scheduler.add(config.provider.healthCheckCron, async () => {
   log.event({ level: 'info', kind: 'provider.health', summary: 'Provider registry health refreshed',
     data: { aliases: modelRegistry.aliases(), probed: outcomes.length, down: outcomes.filter((outcome) => outcome.state === 'down').map((outcome) => outcome.name) } });
 }, 'provider-health');
+// `shutdown` 要关它，所以它比那一块更早。
 const eventStreams = new EventStreamRegistry();
-const server = createServer({ config: configStore, db, operations, principals, archive, context, providers, modelCatalog, approvals: approval, rebuildModels, maintenance, ledger, restart: (reason) => restart(reason), events, log,
-  memory, promptDocuments, skills, plugins, mcp, agents, tools: toolRegistry, customTools: customToolRepo, customToolManager: customTools, turnRegistry, sandbox, eventStreams, previewPrompt, dryRunAgent,
-  schedules: { jobs: scheduledJobs, runner: scheduleRunner }, configSchema: configJsonSchema(), startedAt, setup });
-// `webui.enabled=false`：整个 HTTP 面不监听。这不只是省一个端口 —— 单口令 + owner 全权限的
-// 控制台是这个部署最大的攻击面，只跑 Telegram 的场景该能把它整个关掉。
-// 代价要说清楚：**没有 WebUI 就没有审批裁决通道**，命中审批规则的调用会被当场拒绝
-// （`EventBus.channelCount === 0`，docs/24 · R-APPR-01）。
-const http = config.webui.enabled ? serve({ fetch: server.fetch, hostname: config.webui.host, port: config.webui.port }) : null;
-if (!config.webui.enabled) log.event({ level: 'warn', kind: 'webui.disabled', summary: 'WebUI disabled by config; approvals will be rejected outright' });
-events.subscribe((event) => {
-  if (event.type !== 'config.changed') return;
-  const keys = (event.data as { keys?: string[] }).keys ?? [];
-  void loadConfig({ overrides: envOverlay(readPersistedConfig(config.db.path, reportRejectedKey)), onInvalidOverride: (dropped, reasons) => log.event({ level: 'error', kind: 'config.invalid', summary: `已忽略 ${dropped.length} 条非法覆盖`, data: { dropped, reasons } }) }).then((next) => {
-    configStore.replace(next, keys);
-    if (keys.some((key) => key.startsWith('logs.level'))) log.setLevel(next.logs.level);
-    if (keys.some((key) => key.startsWith('logs.redactPatterns'))) log.redactPatterns = next.logs.redactPatterns;
-    if (keys.some((key) => key.startsWith('provider.') || key.startsWith('model') || key === 'tools.web.searchApiKey')) rebuildModels();
-    // `agentsDir` 也要触发重扫：改了目录却还用着旧目录扫出来的定义，是最难查的一种「没生效」。
-    // 写成两个显式判据而不是 `startsWith('agent.agents')` —— 后者顺带匹配上 `agentsDir` 是巧合，
-    // 而巧合会在下一次改键名时安静地失效。
-    if (keys.some((key) => key === 'agent.agentsDir' || key.startsWith('agent.agents.') || key === 'agent.agents')) agents.replaceDefinitions(scanAgents(next));
-    if (keys.some((key) => key.startsWith('skills.'))) skills.scan();
-    if (keys.some((key) => key.startsWith('plugins.'))) void plugins.reconcile();
-    // McpManager 现在按 getter 读配置，但连接是有状态的：改了 servers 必须重跑一次 reconcile
-    // 才会真的连上/断开（docs/20 · W-CFG-02）。
-    if (keys.some((key) => key.startsWith('mcp.'))) void mcp.reconcile();
-    // `tools.selfExtend` 在 `HOT_RELOADABLE_CONFIG_KEYS` 里，靠的就是这一行：关掉
-    // `customTools.enabled` 之后下一轮那批工具要真的从目录里消失，而不是等重启（docs/20 · W-CFG-02）。
-    if (keys.some((key) => key.startsWith('tools.selfExtend'))) customTools.reconcile();
-    log.event({ level: 'info', kind: 'config.changed', summary: 'Runtime configuration reloaded', data: { keys } });
-  }).catch((error) => log.event({ level: 'error', kind: 'config.invalid', summary: error instanceof Error ? error.message : String(error) }));
-});
-log.event({ level: 'info', kind: 'system.start', summary: `${config.general.name} started`, data: { name: config.general.name, webui: `${config.webui.host}:${config.webui.port}`, providerSecrets: secrets.available } });
-if (process.env.BOT_TOKEN) {
-  bot = await createTelegramBot(process.env.BOT_TOKEN, { config: configStore, db, principals, archive, operations, context, turns, quota, memory, plugins, tools: toolRegistry, approvals: approval,
-    registry: turnRegistry, concurrency: turnConcurrency, log, alerts, issueLoginToken: () => issueLoginToken(),
-    estimateTurnCost: (inputTokens, key) => modelRegistry.estimate(readAppKv<string>(db, modelAliasKey(key)) ?? perChatConfig(configStore.snapshot(), key).agent.main.modelAlias, inputTokens),
-    // 用 turn.config 而不是全局快照：本轮的 perChat 覆盖已经在 openTurn 时合并进去了。
-    onTurn: (turn, reservation) => { const live = turn.config as Readonly<typeof config>; return streamMainAgent(turn, { config: live, db, registry: modelRegistry, tools: toolRegistry,
-      prompts: promptAssembler, documents: promptDocuments, skills, plugins, agents, customTools, ledger, context, quota, reservation, log, turns, workspace: resolve(live.sandbox.workspaceDir, turn.chatId) }); } });
-  // `dropPendingOnStart`：停机期间积压的 update 直接丢掉，不补跑。默认关 —— 丢的是真实用户
-  // 发过的消息。开它的场景是长时间停机后重启，不想让 bot 对着一小时前的话题连开几十轮。
-  //
-  // 不用 grammY 的 `bot.start()`：它逐条串行处理 update，`TurnConcurrency` 因此永远争用不到
-  // （第二个人得等第一个人整轮跑完，docs/01 §3 的 global / perKey / queueMax 形同虚设）。
-  // 在途上限取 `global + queueMax`：超出这个数再拉进来的轮次也只会被 `acquire` 顶回去。
-  if (config.telegram.mode === 'polling') {
-    poller = new UpdatePoller(bot, {
-      allowedUpdates: config.telegram.allowedUpdates,
-      dropPendingUpdates: config.telegram.dropPendingOnStart,
-      maxInFlight: config.concurrency.global + config.concurrency.queueMax,
-      onError: (error, phase) => log.event({ level: phase === 'fetch' ? 'warn' : 'error', kind: 'tg.error',
-        summary: error instanceof Error ? error.message : String(error), data: { phase } }),
-      // 401 / 409 说明这个 token 不该由本进程轮询（撤销了，或者另一个实例正在拉）。原先
-      // `void bot.start()` 在这两种错误上 rethrow，经 unhandledRejection 变成 exit(1)；
-      // 保留「死掉让 supervisor 重启」这一半，但走优雅关闭，别把 WAL 和日志留在半截状态。
-      onFatal: (error) => {
-        log.event({ level: 'error', kind: 'tg.error', summary: `polling aborted: ${error instanceof Error ? error.message : String(error)}`, data: { fatal: true } });
-        process.stderr.write(`[telegram] 轮询被 Telegram 拒绝（token 失效或另有实例在拉同一个 bot）：${error instanceof Error ? error.message : String(error)}\n`);
-        void shutdown('telegram:fatal').then(() => { process.exitCode = 1; });
-      },
-    });
-    poller.start();
-  } else {
-    // webhook 模式没有实现：既不 start 也不注册路由，静默不收任何消息比直接报错危险得多。
-    throw new Error(`telegram.mode=${config.telegram.mode} is not implemented; only polling is supported`);
-  }
-  // owner 私聊通道到这里才具备。`sendMessage` 失败由 AlertDispatcher 自己吞掉并记一条
-  // `alert.deliver_failed` —— owner 没跟 bot 说过话时 Telegram 会拒发，那不该把告警链路带崩。
-  const ownerChatId = configStore.snapshot().access.bootstrapOwnerId;
-  if (ownerChatId) notifyOwner = (text) => bot!.api.sendMessage(ownerChatId, text);
-  // 到这里投递通道才具备，定时任务可以装回 cron 了。停机期间错过的不补跑，只在日志里说出来
-  // （需求方决策；`load()` 每条错过的任务记一条 schedule.missed）。
-  const loaded = scheduleRunner.load();
-  log.event({ level: 'info', kind: 'schedule.loaded', summary: `装载 ${loaded.registered} 个定时任务`, data: { ...loaded, enabled: config.schedule.enabled } });
-} else {
-  log.event({ level: 'warn', kind: 'system.start', summary: 'BOT_TOKEN missing; Telegram ingress disabled' });
-  // 没有 Telegram 就没有投递通道。不装载而不是装载后每次触发失败：库里的任务原样留着，
-  // 配上 token 重启就会继续跑。
-  const pending = scheduledJobs.listActive().length;
-  if (pending) log.event({ level: 'warn', kind: 'schedule.skipped', summary: `${pending} 个定时任务未装载：没有 Telegram 投递通道`, data: { reason: 'telegram_unavailable', pending } });
-}
+/**
+ * **关停 / 重启 / 崩溃处理器必须排在 HTTP 开始监听之前。** 此前它们排在 `main.ts` 末尾，而
+ * `serve()` 在八十行之上就已经在听了，于是有一个从「/api/health 回 ok」到这里的窗口
+ * （实测 1.0–1.1 秒，Telegram 慢时更长，`await createTelegramBot` 就在里面）：
+ *
+ * - 窗口内 `POST /api/restart` 打进来 → `restart` 还在 TDZ 里 → `ReferenceError` 裸崩，
+ *   而 `uncaughtException` 也还没挂上，于是没有 `system.crash`、没有优雅关停、没有 WAL
+ *   checkpoint，日志里一个字都不落（docs/28 · L-OPS-02，复现 2/2）。
+ * - 同一个窗口里 `process.once('SIGTERM')` 也还没挂上。
+ *
+ * 所以顺序是：先把这一整块装好，再 `createServer` / `serve`。`http` 因此必须是 `let` ——
+ * 换成 `const` 排在下面的话，TDZ 只是从 `restart` 挪到了 `http` 上。
+ */
+let http: ReturnType<typeof serve> | null = null;
 let shuttingDown = false;
 /**
  * WebUI 的 `[重启进程]`：走同一条优雅关闭路径，只是把退出码设成 `SIGTERM` 之外的一档，
@@ -461,9 +407,11 @@ const shutdown = async (signal: string): Promise<void> => {
   eventStreams.closeAll();
   const { promise: closed, resolve: markClosed } = Promise.withResolvers<void>();
   let force: ReturnType<typeof setTimeout> | null = null;
-  if (http) {
-    http.close(() => markClosed());
-    force = setTimeout(() => { if ('closeAllConnections' in http) http.closeAllConnections(); markClosed(); }, config.general.shutdown.graceMs); force.unref?.();
+  // 绑成局部 const：`http` 现在是 `let`（见上面那段注释），闭包里 TS 收窄不住它。
+  const listening = http;
+  if (listening) {
+    listening.close(() => markClosed());
+    force = setTimeout(() => { if ('closeAllConnections' in listening) listening.closeAllConnections(); markClosed(); }, config.general.shutdown.graceMs); force.unref?.();
   } else markClosed();
   // 先停拉取（`stop()` 顺手把 offset 交回 Telegram），在途的 update 交给下面的 drain。
   if (poller) await poller.stop();
@@ -483,6 +431,9 @@ const shutdown = async (signal: string): Promise<void> => {
   await skills.close();
   log.close();
   closeDatabase(db);
+  // 锁最后才放：库关完了才轮到下一个实例进来。留着不放也只是让下一次启动多走一次 stale 接手，
+  // 不会把人锁在外面（`acquireInstanceLock` 判的是 PID 还活着没有）。
+  instanceLock.lock.release();
   process.exitCode = 0;
 };
 process.once('SIGTERM', () => void shutdown('SIGTERM'));
@@ -522,3 +473,110 @@ process.on('unhandledRejection', (error: unknown) => {
   process.stderr.write(`[unhandled] unhandledRejection: ${detail}\n`);
   log.event({ level: 'error', kind: 'system.unhandled_rejection', summary: fatalSummary('unhandledRejection', error), data: { event: 'unhandledRejection', detail } });
 });
+
+// webhook 模式整体没有实现（docs/11 §2.0.1）。**判在 HTTP 监听之前** —— 它排在下面 Telegram
+// 那一段里的时候，`/api/health` 已经回了一整个窗口的 ok，而这个进程接下来就要死。
+if (process.env.BOT_TOKEN && config.telegram.mode !== 'polling') {
+  throw new Error(`telegram.mode=${config.telegram.mode} is not implemented; only polling is supported`);
+}
+const server = createServer({ config: configStore, db, operations, principals, archive, context, providers, modelCatalog, approvals: approval, rebuildModels, maintenance, ledger, restart: (reason) => restart(reason), events, log,
+  memory, promptDocuments, skills, plugins, mcp, agents, tools: toolRegistry, customTools: customToolRepo, customToolManager: customTools, turnRegistry, sandbox, eventStreams, previewPrompt, dryRunAgent,
+  schedules: { jobs: scheduledJobs, runner: scheduleRunner }, configSchema: configJsonSchema(), startedAt, setup });
+// `webui.enabled=false`：整个 HTTP 面不监听。这不只是省一个端口 —— 单口令 + owner 全权限的
+// 控制台是这个部署最大的攻击面，只跑 Telegram 的场景该能把它整个关掉。
+// 代价要说清楚：**没有 WebUI 就没有审批裁决通道**，命中审批规则的调用会被当场拒绝
+// （`EventBus.channelCount === 0`，docs/24 · R-APPR-01）。
+http = config.webui.enabled ? serve({ fetch: server.fetch, hostname: config.webui.host, port: config.webui.port }) : null;
+if (!config.webui.enabled) log.event({ level: 'warn', kind: 'webui.disabled', summary: 'WebUI disabled by config; approvals will be rejected outright' });
+events.subscribe((event) => {
+  if (event.type !== 'config.changed') return;
+  const keys = (event.data as { keys?: string[] }).keys ?? [];
+  void loadConfig({ overrides: envOverlay(readPersistedConfig(config.db.path, reportRejectedKey)), onInvalidOverride: (dropped, reasons) => log.event({ level: 'error', kind: 'config.invalid', summary: `已忽略 ${dropped.length} 条非法覆盖`, data: { dropped, reasons } }) }).then((next) => {
+    configStore.replace(next, keys);
+    if (keys.some((key) => key.startsWith('logs.level'))) log.setLevel(next.logs.level);
+    if (keys.some((key) => key.startsWith('logs.redactPatterns'))) log.redactPatterns = next.logs.redactPatterns;
+    if (keys.some((key) => key.startsWith('provider.') || key.startsWith('model') || key === 'tools.web.searchApiKey')) rebuildModels();
+    // `agentsDir` 也要触发重扫：改了目录却还用着旧目录扫出来的定义，是最难查的一种「没生效」。
+    // 写成两个显式判据而不是 `startsWith('agent.agents')` —— 后者顺带匹配上 `agentsDir` 是巧合，
+    // 而巧合会在下一次改键名时安静地失效。
+    if (keys.some((key) => key === 'agent.agentsDir' || key.startsWith('agent.agents.') || key === 'agent.agents')) agents.replaceDefinitions(scanAgents(next));
+    if (keys.some((key) => key.startsWith('skills.'))) skills.scan();
+    if (keys.some((key) => key.startsWith('plugins.'))) void plugins.reconcile();
+    // McpManager 现在按 getter 读配置，但连接是有状态的：改了 servers 必须重跑一次 reconcile
+    // 才会真的连上/断开（docs/20 · W-CFG-02）。
+    if (keys.some((key) => key.startsWith('mcp.'))) void mcp.reconcile();
+    // `tools.selfExtend` 在 `HOT_RELOADABLE_CONFIG_KEYS` 里，靠的就是这一行：关掉
+    // `customTools.enabled` 之后下一轮那批工具要真的从目录里消失，而不是等重启（docs/20 · W-CFG-02）。
+    if (keys.some((key) => key.startsWith('tools.selfExtend'))) customTools.reconcile();
+    log.event({ level: 'info', kind: 'config.changed', summary: 'Runtime configuration reloaded', data: { keys } });
+  }).catch((error) => log.event({ level: 'error', kind: 'config.invalid', summary: error instanceof Error ? error.message : String(error) }));
+});
+log.event({ level: 'info', kind: 'system.start', summary: `${config.general.name} started`, data: { name: config.general.name, webui: `${config.webui.host}:${config.webui.port}`, providerSecrets: secrets.available } });
+if (process.env.BOT_TOKEN) {
+  /**
+   * **`bot.init()` 的 401 要接住，不能让它从这个顶层 await 逃出去。**
+   *
+   * 换 token / token 被撤销是常规运维动作，而撞上之后异常从这里逃逸 → 进程反复起不来 ——
+   * 偏偏**你恰恰需要 WebUI 才能改 token**。这违背 `main.ts` 自己在缺 `main` 别名那里确立的
+   * 原则（只警告、不 fatal，好让 WebUI 还能进去改）。`BOT_TOKEN` **缺失**一直是被正确处理的，
+   * **失效**却无人接，两条路不一致（docs/28 · L-OPS-03）。
+   *
+   * 与 `poller.onFatal` 的分工：那一条只覆盖**轮询**阶段（进程已经跑起来之后 token 被撤销），
+   * 这一条覆盖**启动**阶段。前者优雅关停并退出码 1 让 supervisor 重启是对的；后者不能退，
+   * 退了就没有能改 token 的地方了。
+   */
+  try {
+    bot = await createTelegramBot(process.env.BOT_TOKEN, { config: configStore, db, principals, archive, operations, context, turns, quota, memory, plugins, tools: toolRegistry, approvals: approval,
+      registry: turnRegistry, concurrency: turnConcurrency, log, alerts, issueLoginToken: () => issueLoginToken(),
+      estimateTurnCost: (inputTokens, key) => modelRegistry.estimate(readAppKv<string>(db, modelAliasKey(key)) ?? perChatConfig(configStore.snapshot(), key).agent.main.modelAlias, inputTokens),
+      // 用 turn.config 而不是全局快照：本轮的 perChat 覆盖已经在 openTurn 时合并进去了。
+      onTurn: (turn, reservation) => { const live = turn.config as Readonly<typeof config>; return streamMainAgent(turn, { config: live, db, registry: modelRegistry, tools: toolRegistry,
+        prompts: promptAssembler, documents: promptDocuments, skills, plugins, agents, customTools, ledger, context, quota, reservation, log, turns, workspace: resolve(live.sandbox.workspaceDir, turn.chatId) }); } });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    log.event({ level: 'error', kind: 'tg.error', summary: `Telegram 入口启动失败：${message}`, data: { phase: 'init', fatal: false } });
+    process.stderr.write(`[telegram] 建不起 bot（token 失效、被撤销，或网络不通）：${message}\n`
+      + `[telegram] Telegram 入口已禁用，WebUI 照常启动 —— 去 http://${config.webui.host}:${config.webui.port} 换掉 BOT_TOKEN 再重启。\n`);
+  }
+}
+if (bot) {
+  // `dropPendingOnStart`：停机期间积压的 update 直接丢掉，不补跑。默认关 —— 丢的是真实用户
+  // 发过的消息。开它的场景是长时间停机后重启，不想让 bot 对着一小时前的话题连开几十轮。
+  //
+  // 不用 grammY 的 `bot.start()`：它逐条串行处理 update，`TurnConcurrency` 因此永远争用不到
+  // （第二个人得等第一个人整轮跑完，docs/01 §3 的 global / perKey / queueMax 形同虚设）。
+  // 在途上限取 `global + queueMax`：超出这个数再拉进来的轮次也只会被 `acquire` 顶回去。
+  {
+    poller = new UpdatePoller(bot, {
+      allowedUpdates: config.telegram.allowedUpdates,
+      dropPendingUpdates: config.telegram.dropPendingOnStart,
+      maxInFlight: config.concurrency.global + config.concurrency.queueMax,
+      onError: (error, phase) => log.event({ level: phase === 'fetch' ? 'warn' : 'error', kind: 'tg.error',
+        summary: error instanceof Error ? error.message : String(error), data: { phase } }),
+      // 401 / 409 说明这个 token 不该由本进程轮询（撤销了，或者另一个实例正在拉）。原先
+      // `void bot.start()` 在这两种错误上 rethrow，经 unhandledRejection 变成 exit(1)；
+      // 保留「死掉让 supervisor 重启」这一半，但走优雅关闭，别把 WAL 和日志留在半截状态。
+      onFatal: (error) => {
+        log.event({ level: 'error', kind: 'tg.error', summary: `polling aborted: ${error instanceof Error ? error.message : String(error)}`, data: { fatal: true } });
+        process.stderr.write(`[telegram] 轮询被 Telegram 拒绝（token 失效或另有实例在拉同一个 bot）：${error instanceof Error ? error.message : String(error)}\n`);
+        void shutdown('telegram:fatal').then(() => { process.exitCode = 1; });
+      },
+    });
+    poller.start();
+  }
+  // owner 私聊通道到这里才具备。`sendMessage` 失败由 AlertDispatcher 自己吞掉并记一条
+  // `alert.deliver_failed` —— owner 没跟 bot 说过话时 Telegram 会拒发，那不该把告警链路带崩。
+  const ownerChatId = configStore.snapshot().access.bootstrapOwnerId;
+  if (ownerChatId) notifyOwner = (text) => bot!.api.sendMessage(ownerChatId, text);
+  // 到这里投递通道才具备，定时任务可以装回 cron 了。停机期间错过的不补跑，只在日志里说出来
+  // （需求方决策；`load()` 每条错过的任务记一条 schedule.missed）。
+  const loaded = scheduleRunner.load();
+  log.event({ level: 'info', kind: 'schedule.loaded', summary: `装载 ${loaded.registered} 个定时任务`, data: { ...loaded, enabled: config.schedule.enabled } });
+} else {
+  // 缺 token 与 token 失效（上面那个 catch）从这里起走同一条路。
+  log.event({ level: 'warn', kind: 'system.start', summary: process.env.BOT_TOKEN ? 'Telegram ingress disabled: bot init failed' : 'BOT_TOKEN missing; Telegram ingress disabled' });
+  // 没有 Telegram 就没有投递通道。不装载而不是装载后每次触发失败：库里的任务原样留着，
+  // 配上 token 重启就会继续跑。
+  const pending = scheduledJobs.listActive().length;
+  if (pending) log.event({ level: 'warn', kind: 'schedule.skipped', summary: `${pending} 个定时任务未装载：没有 Telegram 投递通道`, data: { reason: 'telegram_unavailable', pending } });
+}

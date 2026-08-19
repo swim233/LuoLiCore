@@ -108,4 +108,76 @@ describe('SIGTERM 退出路径', () => {
     expect(source).toContain("kind: 'system.stop'");
     expect(source).toContain('await skills.close()');
   });
+
+  /**
+   * `docs/reviews/28 · L-OPS-02`：HTTP 从 `serve()` 起就在听，而 `restart` / 信号处理器 /
+   * crash handler 此前都排在文件末尾 —— 窗口内 `POST /api/restart` 打进来是
+   * `ReferenceError: Cannot access 'restart' before initialization`，而 `uncaughtException`
+   * 也还没挂上，于是**一个字都不落**（实测 2/2）。
+   *
+   * 源码级断言而不是真实进程：那个窗口只有 1 秒上下，靠 race 去打它的测试会是本仓最不稳的
+   * 一条。装配顺序反过来是**静态**的事实，钉住它就够了。
+   */
+  it('关停 / 重启 / 崩溃处理器都装在 HTTP 开始监听之前', async () => {
+    const { readFileSync } = await import('node:fs');
+    const source = readFileSync(resolve('apps/bot/src/main.ts'), 'utf8');
+    const listen = source.indexOf('http = config.webui.enabled ? serve(');
+    expect(listen, '找不到 HTTP 监听那一行 —— 这条断言的锚点没了').toBeGreaterThan(0);
+    for (const marker of ['const restart = async (reason: string)', 'const shutdown = async (signal: string)',
+      "process.once('SIGTERM'", "process.once('SIGINT'", "process.on('uncaughtException'", "process.on('unhandledRejection'"]) {
+      const at = source.indexOf(marker);
+      expect(at, `找不到 ${marker}`).toBeGreaterThan(0);
+      expect(at, `${marker} 排在 serve() 之后 —— 启动窗口里它不可用`).toBeLessThan(listen);
+    }
+    // `http` 必须是 `let`：改回 `const` 只是把 TDZ 从 `restart` 挪到 `http` 上。
+    expect(source).toMatch(/^let http: /m);
+    // webhook 模式那个 throw 也要在监听之前 —— 否则 `/api/health` 会先回一整个窗口的 ok。
+    expect(source.indexOf("is not implemented; only polling is supported")).toBeLessThan(listen);
+  });
+
+  /**
+   * `docs/reviews/28 · L-OPS-01`：第二个实例启动会就地把在位实例**仍在执行**的轮次改成
+   * `failed/process_restarted`、释放已认领的消息、清零在途预留 —— 赢的是后来者。
+   * 这里直接测那把锁，而不是起两个真进程（后者要 40 秒 × 2 才能拿到同一个判据）。
+   */
+  it('同一个库上第二个实例拿不到锁，而主人死掉之后能被接手', async () => {
+    const { acquireInstanceLock } = await import('@luoli/db');
+    const { existsSync, writeFileSync, mkdirSync } = await import('node:fs');
+    const dir = resolve('./data/lock-test');
+    rmSync(dir, { recursive: true, force: true });
+    mkdirSync(dir, { recursive: true });
+    const dbPath = resolve(dir, 'luoli.db');
+
+    const first = acquireInstanceLock(dbPath);
+    expect(first.ok).toBe(true);
+    expect(existsSync(`${dbPath}.lock`)).toBe(true);
+    // 同一个进程再拿一次也算「在位」—— 用一个真实存在的别的 pid 冒充在位实例。
+    writeFileSync(`${dbPath}.lock`, JSON.stringify({ pid: process.ppid, startedAt: Date.now(), host: 'somewhere' }));
+    const second = acquireInstanceLock(dbPath);
+    expect(second.ok, '主人还活着的时候不该放行').toBe(false);
+    if (!second.ok) expect(second.holder.pid).toBe(process.ppid);
+
+    // 主人已经死了：pid 用一个不可能存在的值。接手成功，并说出原来那个 pid。
+    writeFileSync(`${dbPath}.lock`, JSON.stringify({ pid: 0x7ff_ffff, startedAt: 1, host: 'gone' }));
+    const third = acquireInstanceLock(dbPath);
+    expect(third.ok, 'stale 锁必须能被接手，否则一次崩溃就要人手动删文件').toBe(true);
+    if (third.ok) {
+      expect(third.lock.stolenFrom).toBe(0x7ff_ffff);
+      third.lock.release();
+      expect(existsSync(`${dbPath}.lock`)).toBe(false);
+    }
+
+    // 锁文件被改坏（手工编辑、写了一半）时当成没有主人，而不是把人永久锁在外面。
+    writeFileSync(`${dbPath}.lock`, '{ 半截');
+    expect(acquireInstanceLock(dbPath).ok).toBe(true);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('拿锁排在 recoverAfterCrash 之前', async () => {
+    const { readFileSync } = await import('node:fs');
+    const source = readFileSync(resolve('apps/bot/src/main.ts'), 'utf8');
+    // 顺序反过来的话，被拒绝启动的那个实例已经先把在位实例的在途轮次判死了 —— 拒绝启动
+    // 就成了「我不跑，但我顺手把你弄坏了」。
+    expect(source.indexOf('acquireInstanceLock(')).toBeLessThan(source.indexOf('recoverAfterCrash(db)'));
+  });
 });
