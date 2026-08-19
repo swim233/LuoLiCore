@@ -251,20 +251,22 @@ describe('额度这条警报只在真的被拒时响', () => {
    * 频率这一档。**这句不受 `onExceeded.reply` 管**：那个开关是给「额度用光」用的。
    */
   it('频率拒绝给的是频率文案，不是额度文案，也不漏占位符', async () => {
+    // 限额取 2、第 3 条被拒 —— 照 `AC-QUOTA-012` 写的那个场景，别让用例与验收条目各说一套。
     const { bot, db, replies } = await telegramFixture('tg-rate-user-message',
-      { quota: { enabled: false, rateLimit: { turnsPerUserPerHour: 1, turnsPerChatPerHour: 100, concurrentPerUser: 3 }, onExceeded: { reply: false } } },
+      { quota: { enabled: false, rateLimit: { turnsPerUserPerHour: 2, turnsPerChatPerHour: 100, concurrentPerUser: 3 }, onExceeded: { reply: false } } },
       { onTurn: async () => '好' });
     await bot.handleUpdate(privateUpdate(1, '第一句'));
     await bot.handleUpdate(privateUpdate(2, '第二句'));
-    // 第二条被频率闸挡住：没有第二个轮次，但用户拿到了一句说得清的话。
-    expect(db.prepare('SELECT COUNT(*) AS count FROM turns').pluck().get()).toBe(1);
+    await bot.handleUpdate(privateUpdate(3, '第三句'));
+    // 第三条被频率闸挡住：没有第三个轮次，但用户拿到了一句说得清的话。
+    expect(db.prepare('SELECT COUNT(*) AS count FROM turns').pluck().get()).toBe(2);
     const last = replies.at(-1)!;
     expect(last).toContain('频率上限');
     expect(last).toContain('按人算');
     expect(last).not.toContain('额度用完');
     expect(last).not.toContain('—/—');
     // 挡下来的那条要降级成背景消息，否则它既没被回答也进不了下一轮上下文。
-    expect(db.prepare('SELECT triggered FROM messages WHERE tg_message_id=2').pluck().get()).toBe(0);
+    expect(db.prepare('SELECT triggered FROM messages WHERE tg_message_id=3').pluck().get()).toBe(0);
     expect(db.prepare("SELECT COUNT(*) AS count FROM log_events WHERE kind='quota.check' AND summary LIKE '%rate_user%'").pluck().get()).toBe(1);
     closeDatabase(db);
   }, 20_000);

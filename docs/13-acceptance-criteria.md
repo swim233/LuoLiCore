@@ -357,7 +357,7 @@
 | [ ] AC-QUOTA-009 (自动) ★ | `requirePricing=true`，模型无定价 | 非 owner 不可使用该模型；WebUI 用量页有告警条 |
 | [ ] AC-QUOTA-010 (自动) | 进程 `kill -9` 后重启 | 所有 `quota_counters.reserved_usd` 归零，无永久占用 |
 | [ ] AC-QUOTA-011 | `/usage` | 数字与 WebUI 用量页、`usage_ledger` 聚合一致 |
-| [ ] AC-QUOTA-012 (自动) | `rateLimit.turnsPerUserPerHour=2` | 第 3 次触发被拒且文案区别于金额超限 |
+| [x] AC-QUOTA-012 (自动) | `rateLimit.turnsPerUserPerHour=2` | 第 3 次触发被拒且文案区别于金额超限：说清是**频率**、按人还是按会话、窗口是滚动一小时，且**不受 `onExceeded.reply` 管**（那个开关是给「额度用光」用的，频率沉默等于 bot 对一句正常的话装没看见）。此前这一档复用额度文案，占位符原样漏给用户（`已用 —/—`，docs/28 · L-QUOTA-02） | 〔telegram.concurrency.test.ts〕
 
 ## 9. Skill / Plugin / MCP（AC-SKL / AC-PLG / AC-MCP）
 
@@ -386,7 +386,7 @@
 | [x] AC-PLG-001 (自动) | 放一个示例 plugin，未启用 | 其工具/命令/钩子均不生效 | 〔plugin.runtime.test.ts〕
 | [ ] AC-PLG-002 | WebUI 启用 plugin | 弹出「全信任运行任意代码」确认；确认后工具可用 |
 | [ ] AC-PLG-003 (自动) | plugin 的 `configSchema` | WebUI 生成对应表单；含密字段加密存储且前端只显示 hint |
-| [ ] AC-PLG-004 (自动) | plugin hook 抛异常**一次** | 被 catch，**当场**记一条 `plugin.error`（带 plugin/hook/message/errors/disabled），plugin 还开着，turn 正常完成（判据在 `tests/plugin.runtime.test.ts`）。此前只有累计到 `plugins.autoDisableAfterErrors` 时才经告警落一行，而那一行还受 `alerts.on`（默认 `[]`）与 `dedupeMinutes` 管 —— 实测一个三轮必抛的 `beforeTurn`，与 plugin 有关的日志 0 条（docs/28 · L-LOG-01） |
+| [x] AC-PLG-004 (自动) | plugin hook 抛异常**一次** | 被 catch，**当场**记一条 `plugin.error`（带 plugin/hook/message/errors/disabled），plugin 还开着，turn 正常完成（判据在 `tests/plugin.runtime.test.ts`）。此前只有累计到 `plugins.autoDisableAfterErrors` 时才经告警落一行，而那一行还受 `alerts.on`（默认 `[]`）与 `dedupeMinutes` 管 —— 实测一个三轮必抛的 `beforeTurn`，与 plugin 有关的日志 0 条（docs/28 · L-LOG-01） | 〔plugin.runtime.test.ts〕
 | [x] AC-PLG-005 (自动) ★ | `write_plugin` 写一个 plugin；运维启用它；模型再改一次源码 | 写下来就是 `enabled=0`（模型不能让自己写的代码在本进程里跑起来）；启用后再改源码**自动打回未启用** —— `reconcile()` 用 `sha256(文件+配置)` 当 ESM 的 cache-busting 签名，不打回的话下一次 reconcile 就把新代码 import 进本进程了（[14 A27](./14-open-questions.md)） | 〔selfextend.author.test.ts〕
 | [x] AC-PLG-006 (自动) | `GET /api/plugins/:name/source` 与 `DELETE /api/plugins/:name` | 前者交回 plugin.js 全文（没有它，「启用前先看过源码」只是句口号），不存在时 404；后者连目录带库里那行一起删 | 〔selfextend.api.test.ts〕
 | [ ] AC-PLG-005 (自动) | 同一 hook 连续失败 3 次 | 自动禁用该 plugin + owner 告警 |
@@ -476,7 +476,7 @@
 | [ ] AC-WEB-034 | 工具页沙箱卡片 | `mode` / 网络 / 镜像 / 资源限制 / `bypassRoles` 可改并热更新；`[探测可用性]` 打的是**已保存**的那份配置并回显结果；`mode=none` 保存前二次确认；owner 之外的角色进 `bypassRoles` 时给出警示 |
 | [ ] AC-WEB-035 | 总览页「依赖健康」 | 六行全部来自 `GET /api/health/detail`（DB 读写、SSE、模型注册表、在途 turn、MCP、沙箱 mode 与可用性），沙箱一行随 `sandbox.mode` 变化 —— 不再是恒显示「Docker」的写死文本 |
 | [ ] AC-WEB-036 | 扩展页 | Skill/Plugin 可启停、Plugin 可重载、MCP 可重连；启用 Plugin 前有「全信任运行任意代码」二次确认；MCP 行的状态与错误取自 `state` / `last_error`（连不上的 server 显示「连不上」+ 错误原文，而不是「可用」） |
-| [ ] AC-WEB-037 | 设置页 | 四个维护操作（备份 / VACUUM / 清理日志 / 重建 FTS）可执行并回显结果；`gc-files` 后端未实现，界面上**不提供按钮**；「变更历史」列出 `config_revisions` 的键、操作者、时间与新旧值 |
+| [ ] AC-WEB-037 | 设置页 | **五个**维护操作（备份 / VACUUM / 清理日志 / 重建 FTS / 清孤儿文件）可执行并回显结果；`gc-files` 的 `refused` 必须渲染成 `warn` + 「已拒绝」+ 不自动消失（它只在库与目录对不上时出现，是运维最该立刻停手的那一种，docs/28 · L-WEB-03）；「变更历史」列出 `config_revisions` 的键、操作者、时间与新旧值。**此前这一行写的是「`gc-files` 后端未实现，界面上不提供按钮」** —— 它早就实现了，而同一份文档的 `AC-WEB-021` 一直把它列在期望里，两条自相矛盾 |
 | [ ] AC-WEB-038 | 顶栏 `[退出登录]` | 打 `POST /api/auth/logout`，session 失效、cookie 清空并跳回 `/login`；此后带旧 cookie 访问 `/api/*` 返回 401 |
 | [ ] AC-WEB-039 (自动) ★ | 契约测试遍历文档里的读端点 | 除 200 外还断言 `content-type: application/json` 与信封 `ok:true` —— 未注册的 `/api/*` 会掉进 SPA fallback 拿到 200 + `index.html`，只看状态码是假绿灯（`GET /api/quota` 曾以此「通过」而端点并不存在，docs/21 §2.3） |
 | [ ] AC-WEB-040 | 打开控制台后在另一进程写日志 / 跑一轮 / 改配置 | 界面自行刷新，无需手动重载：`log` 让日志页与总览的事件流走字，`turn.*` 更新在途表，`usage` / `quota` / `task.updated` / `config.changed` / `health` 各自刷新对应页面。**只刷当前页面看得见的那几组**（不是每条事件重跑 18 个端点），同组 400 ms 内合并；切换页面时补拉 |
@@ -552,11 +552,11 @@
 | 工具/沙箱/审批 | | 19 / 60 | | | |
 | Subagent 与任务 | | 20 / 38 | | | |
 | 记忆 | | 1 / 13 | | | |
-| 日志与成本 | | 5 / 26 | | | |
-| 扩展生态 | | 17 / 42 | | | |
+| 日志与成本 | | 6 / 26 | | | |
+| 扩展生态 | | 18 / 42 | | | |
 | WebUI | | 10 / 84 | | | |
 | 安全 | | 9 / 25 | | | |
 | 运维 | | 1 / 9 | | | |
-| **合计** | | **171 / 449** | | | |
+| **合计** | | **173 / 449** | | | |
 
 **整体通过条件**：全部 ★ 项通过 + 非 ★ 项通过率 ≥ 95% + 所有豁免项经需求方书面确认。
