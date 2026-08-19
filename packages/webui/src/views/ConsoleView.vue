@@ -1550,10 +1550,16 @@ async function saveYaml(): Promise<void> {
   yamlSaving.value = true;
   yamlError.value = '';
   try {
-    const result = await api<{ keys: string[]; skipped: string[]; subsumed: string[] }>('/api/config/yaml', { method: 'PUT', body: JSON.stringify({ yaml: yamlText.value }) });
+    const result = await api<{ keys: string[]; skipped: string[]; pruned: string[]; preserved: string[]; subsumed: string[] }>('/api/config/yaml', { method: 'PUT', body: JSON.stringify({ yaml: yamlText.value }) });
     await REFRESH_LOADERS.config();
-    pushToast({ severity: 'success', summary: `已保存 ${result.keys.length} 个配置段`,
-      detail: [result.skipped.length ? `${result.skipped.length} 项被环境变量锁定，已跳过` : '', result.subsumed.length ? `${result.subsumed.length} 条更细的覆盖被整段写入作废：${result.subsumed.join('、')}` : ''].filter(Boolean).join('\n') || '全部生效', life: 12_000 });
+    // 「个配置项」而不是「个配置段」：落库粒度是叶子（docs/28 · L-WEB-02）。删掉的键要单独点名 ——
+    // 这条路现在真的会删行，而运维得看得见自己删了什么；保住的密钥行同样要说，否则「我提交的
+    // 那份里没有 passwordHash」这件事在界面上仍然不可见（docs/28 · L-WEB-04）。
+    pushToast({ severity: 'success', summary: `已保存 ${result.keys.length} 个配置项`,
+      detail: [result.skipped.length ? `${result.skipped.length} 项被环境变量锁定，已跳过：${result.skipped.join('、')}` : '',
+        result.pruned.length ? `${result.pruned.length} 个键已从覆盖层删除：${result.pruned.join('、')}` : '',
+        result.preserved.length ? `${result.preserved.length} 个密钥类键未参与这次往返，保持原值：${result.preserved.join('、')}` : '',
+        result.subsumed.length ? `${result.subsumed.length} 条更细的覆盖被整块写入作废：${result.subsumed.join('、')}` : ''].filter(Boolean).join('\n') || '全部生效', life: 12_000 });
   } catch (error) {
     // 语法错误带行号、校验错误带路径：把它们留在编辑器旁边，而不是让 Toast 一闪而过。
     const detail = error as { body?: { error?: { message?: string; line?: number; column?: number; details?: Array<{ path: string; message: string }> } } };
@@ -1624,6 +1630,13 @@ async function runMaintenance(action: string, label: string): Promise<void> {
   maintenanceBusy.value = action;
   try {
     const result = await api<unknown>(`/api/maintenance/${action}`, { method: 'POST', body: '{}' });
+    // `refused` 是 fail-closed 的拒绝，不是「完成」。`gc-files` 的唯一触发条件是「库与目录来自两套
+    // 部署」—— 正是运维最该立刻停手的那一种（docs/25 §10 记的误删 76 个附件 + 90 份子 agent 全文
+    // 就是它防住的）。渲染成绿色「完成」+ 一行 JSON 尾巴 + 8 秒自动消失，等于把它藏起来
+    // （docs/28 · L-WEB-03）。`life: 0` 走 pushToast 的「不自动消失」分支，要人手点掉。
+    const refused = (result as { refused?: unknown } | null)?.refused;
+    const reasons = Array.isArray(refused) ? refused.map(String) : refused ? [String(refused)] : [];
+    if (reasons.length) { pushToast({ severity: 'warn', summary: `${label} 已拒绝`, detail: [...reasons, JSON.stringify(result)].join('\n'), life: 0 }); return; }
     pushToast({ severity: 'success', summary: `${label} 完成`, detail: typeof result === 'string' ? result : JSON.stringify(result), life: 8000 });
   } catch (error) { toastError(`${label} 失败`, error); }
   finally { maintenanceBusy.value = ''; }
@@ -2747,7 +2760,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
           </div>
           <div v-if="settingsTab === 'advanced'" data-settings-tab="advanced">
           <div class="registry-heading">
-            <div><h3>原始 YAML</h3><p class="section-note">直接编辑<b>覆盖层</b>（<code>config_kv</code>），不是合并后的全量 —— 全量里绝大多数是代码默认值。解析与校验都在服务端（和启动时那份 <code>loadConfig</code> 用同一个解析器，不会「界面上过了、启动时炸了」），语法错误会给出行号。落库按顶层段覆盖。</p></div>
+            <div><h3>原始 YAML</h3><p class="section-note">直接编辑<b>覆盖层</b>（<code>config_kv</code>），不是合并后的全量 —— 全量里绝大多数是代码默认值。解析与校验都在服务端（和启动时那份 <code>loadConfig</code> 用同一个解析器，不会「界面上过了、启动时炸了」），语法错误会给出行号。落库<b>按叶子</b>（点分键）覆盖，不是按顶层段 —— 按段写回等于把那一刻的代码默认值整棵钉死。段里删掉一个键，那一行会真的从覆盖层消失；整个顶层段删掉则什么都不动。</p></div>
             <div class="section-actions"><UiButton size="small" variant="text" :icon="yamlMode ? 'pi pi-times' : 'pi pi-code'" :label="yamlMode ? '收起' : '编辑 YAML'" @click="toggleYamlMode" /><UiButton v-if="yamlMode" size="small" icon="pi pi-save" label="保存 YAML" :loading="yamlSaving" @click="saveYaml" /></div>
           </div>
           <template v-if="yamlMode">

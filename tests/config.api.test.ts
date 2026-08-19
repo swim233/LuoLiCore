@@ -1,8 +1,10 @@
 import { rmSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { ArchiveRepository, OperationsRepository, PrincipalRepository, closeDatabase, migrateDatabase, modelAliasKey, openDatabase, readAppKv, writeAppKv } from '@luoli/db';
+import type { Sqlite } from '@luoli/db';
 import { ContextEngine, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceService, PromptDocuments, ProviderStore, Secrets, configSchema } from '@luoli/core';
 import { createServer } from '@luoli/server';
+import { assignDotted, sortOverrideKeys } from '@luoli/shared';
 
 function harness() {
   const path = './data/config-write.test.db';
@@ -16,6 +18,23 @@ function harness() {
   const app = createServer({ config, db, operations, principals: new PrincipalRepository(db), archive, context: new ContextEngine(db, archive), providers: new ProviderStore(db, new Secrets('x'.repeat(32))), approvals: new DatabaseApprovalBroker(db, config, events, log), maintenance: new MaintenanceService(db, path, 2, 30), promptDocuments, events, log, configSchema: {}, startedAt: Date.now(), setup: undefined });
   const session = operations.createSession(1); const headers = { cookie: `luoli_sid=${session.id}`, 'x-csrf-token': session.csrf, 'content-type': 'application/json' };
   return { app, db, headers };
+}
+
+const data = async <T>(response: Response): Promise<T> => (await response.json() as { data: T }).data;
+
+/**
+ * `config_kv` 展开成一棵树之后的**叶子集**——「生效覆盖」的真实计量。
+ * 行数看不出 docs/28 · L-WEB-02：按顶层段落库时 `config_kv` 的行数反而**下降**
+ * （祖先键吞掉后代行），而生效覆盖叶子从 73 涨到 171，全是那一刻的代码默认值。
+ */
+function effectiveLeaves(db: Sqlite): string[] {
+  const rows = db.prepare('SELECT key,value_json AS valueJson FROM config_kv').all() as Array<{ key: string; valueJson: string }>;
+  const root: Record<string, unknown> = {};
+  for (const row of sortOverrideKeys(rows)) assignDotted(root, row.key, JSON.parse(row.valueJson));
+  const walk = (node: unknown, prefix: string): string[] => !node || typeof node !== 'object' || Array.isArray(node)
+    ? [prefix]
+    : Object.entries(node as Record<string, unknown>).flatMap(([key, value]) => walk(value, prefix ? `${prefix}.${key}` : key));
+  return walk(root, '').sort();
 }
 
 describe('config API validation', () => {
@@ -214,6 +233,93 @@ describe('config API validation', () => {
     expect(readAppKv(db, modelAliasKey('chat:-100'))).toBeUndefined();
     // 本来就没有别名时不谎报清除。
     expect((await (await app.request('/api/chats/chat%3A-100/model-alias', { method: 'DELETE', headers })).json() as { data: { cleared: boolean } }).data.cleared).toBe(false);
+    closeDatabase(db);
+  });
+
+  /**
+   * 「设置 → 高级」tab 就是 `GET /api/config/yaml` → 编辑 → `PUT`。密钥类行**不在 GET 那棵树里**
+   * （整行跳过），所以「树里没有」绝不能当成「运维删掉了」—— 那一次往返曾经把 `webui.passwordHash`
+   * 擦掉，`main.ts` 的 `if (!config.webui.passwordHash)` 随即生效、进程静静掉回 setup-token 形态，
+   * 而 `host` 是默认回环时 schema 的 `superRefine` 不拦（docs/28 · L-WEB-04）。
+   */
+  it('never drops secret overlay rows through a YAML round trip', async () => {
+    const { app, db, headers } = harness();
+    const hash = '$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2g';
+    // 同一段里必须还有别的键，否则那个段压根不会被提交、也就无从被误删 —— 真实部署正是这样。
+    expect((await app.request('/api/config', { method: 'PUT', headers, body: JSON.stringify({
+      'webui.passwordHash': hash, 'webui.sessionTtlHours': 24, 'tools.web.searchApiKey': 'brave-key', 'tools.web.searchProvider': 'brave' }) })).status).toBe(200);
+    const rendered = await data<{ yaml: string; skipped: string[] }>(await app.request('/api/config/yaml', { headers: { cookie: headers.cookie } }));
+    expect(rendered.skipped).toEqual(expect.arrayContaining(['webui.passwordHash', 'tools.web.searchApiKey']));
+    expect(rendered.yaml).not.toContain(hash);
+    // 顶部生成注释逐条点名：响应里那个 `skipped` 数组在编辑器里看不见（docs/09 §3.13）。
+    expect(rendered.yaml).toContain('#   webui.passwordHash');
+    expect(rendered.yaml).toContain('#   tools.web.searchApiKey');
+    expect(rendered.yaml).toContain('删掉这段注释也不会');
+    const saved = await app.request('/api/config/yaml', { method: 'PUT', headers, body: JSON.stringify({ yaml: rendered.yaml }) });
+    expect(saved.status).toBe(200);
+    expect(db.prepare("SELECT value_json FROM config_kv WHERE key='webui.passwordHash'").pluck().get()).toBe(JSON.stringify(hash));
+    expect(db.prepare("SELECT value_json FROM config_kv WHERE key='tools.web.searchApiKey'").pluck().get()).toBe('"brave-key"');
+    // 保住这件事要交回给运维：注释可能被连同整段删掉，响应是第二道说明。
+    expect((await data<{ preserved: string[]; pruned: string[] }>(saved)).preserved)
+      .toEqual(expect.arrayContaining(['webui.passwordHash', 'tools.web.searchApiKey']));
+    closeDatabase(db);
+  });
+
+  // 一个字不改的往返必须是恒等变换。按段落库时 zod 已经把每个 `.default()` 填满，写回去的是填满
+  // 之后那整棵子树 —— 生效覆盖叶子 73 → 171，凭空多出 98 个从没被覆盖过的键，值全等于当时的
+  // 代码默认值；第二次往返起还幂等，界面上再也看不出来（docs/28 · L-WEB-02）。
+  it('keeps a no-op YAML round trip identical instead of pinning code defaults', async () => {
+    const { app, db, headers } = harness();
+    expect((await app.request('/api/config', { method: 'PUT', headers, body: JSON.stringify({
+      'context.limit.tokens': 48_000, 'output.mode': 'once', 'approval.rules': [{ tool: 'bash', pattern: 'rm\\s+-rf', risk: 'high' }],
+      'tools.overrides': { web_fetch: { enabled: false } } }) })).status).toBe(200);
+    expect((await app.request('/api/chats/chat%3A-100', { method: 'PATCH', headers, body: JSON.stringify({ output: { mode: 'once' } }) })).status).toBe(200);
+    const before = effectiveLeaves(db);
+    const rendered = await data<{ yaml: string }>(await app.request('/api/config/yaml', { headers: { cookie: headers.cookie } }));
+    expect((await app.request('/api/config/yaml', { method: 'PUT', headers, body: JSON.stringify({ yaml: rendered.yaml }) })).status).toBe(200);
+    expect(effectiveLeaves(db)).toEqual(before);
+    // 数组仍按整块落库（`approval.rules` 逐个下标落库既没人这么读，也会被 sortOverrideKeys 拼回原样）。
+    expect(db.prepare("SELECT COUNT(*) FROM config_kv WHERE key='approval.rules'").pluck().get()).toBe(1);
+    // 再来一次仍然是恒等：幂等本身不是问题，钉死默认值才是。
+    const second = await data<{ yaml: string }>(await app.request('/api/config/yaml', { headers: { cookie: headers.cookie } }));
+    expect(second.yaml).toBe(rendered.yaml);
+    closeDatabase(db);
+  });
+
+  // 「这份 YAML 是所提交段落的全量视图」：段里删掉一个键，那一行要真的从库里消失。此前靠
+  // `writeConfigRows` 删掉祖先键的后代行来实现，改成叶子粒度之后必须显式算出删除集。
+  it('drops overlay keys that the submitted YAML no longer carries', async () => {
+    const { app, db, headers } = harness();
+    expect((await app.request('/api/config', { method: 'PUT', headers, body: JSON.stringify({ 'context.limit.tokens': 48_000, 'context.limit.maxMessages': 150, 'output.mode': 'once' }) })).status).toBe(200);
+    const saved = await app.request('/api/config/yaml', { method: 'PUT', headers, body: JSON.stringify({ yaml: 'context:\n  limit:\n    tokens: 48000\n' }) });
+    expect(saved.status).toBe(200);
+    expect((await data<{ pruned: string[] }>(saved)).pruned).toEqual(['context.limit.maxMessages']);
+    expect(db.prepare("SELECT COUNT(*) FROM config_kv WHERE key='context.limit.maxMessages'").pluck().get()).toBe(0);
+    // 删除也要进变更历史，否则历史瞒下了「谁把那条覆盖弄掉的」。
+    expect(db.prepare("SELECT old_json,new_json FROM config_revisions WHERE key='context.limit.maxMessages' ORDER BY rowid DESC").get())
+      .toMatchObject({ old_json: '150', new_json: null });
+    // 没提交的那个顶层段一个字都不动：「这一段我不管」与「这一段清空」区分不出来，宁可不删。
+    expect(db.prepare("SELECT value_json FROM config_kv WHERE key='output.mode'").pluck().get()).toBe('"once"');
+    closeDatabase(db);
+  });
+
+  // 被 env 钉住的是**那个叶子**而不是它所在的整个顶层段：此前一条 LUOLI_WEBUI_HOST 就能让
+  // `webui` 段其余的键在这条路上全都存不进去。
+  it('skips only the env-pinned leaf on the YAML path', async () => {
+    const { app, db, headers } = harness();
+    const previous = process.env.LUOLI_WEBUI_HOST;
+    process.env.LUOLI_WEBUI_HOST = '0.0.0.0';
+    try {
+      const saved = await app.request('/api/config/yaml', { method: 'PUT', headers, body: JSON.stringify({ yaml: 'webui:\n  host: 127.0.0.1\n  sessionTtlHours: 24\n' }) });
+      expect(saved.status).toBe(200);
+      const body = await data<{ keys: string[]; skipped: string[] }>(saved);
+      expect(body.keys).toEqual(['webui.sessionTtlHours']);
+      expect(body.skipped).toEqual(['webui.host']);
+      expect(db.prepare("SELECT COUNT(*) FROM config_kv WHERE key='webui.host'").pluck().get()).toBe(0);
+      expect(db.prepare("SELECT value_json FROM config_kv WHERE key='webui.sessionTtlHours'").pluck().get()).toBe('24');
+    } finally {
+      if (previous === undefined) delete process.env.LUOLI_WEBUI_HOST; else process.env.LUOLI_WEBUI_HOST = previous;
+    }
     closeDatabase(db);
   });
 

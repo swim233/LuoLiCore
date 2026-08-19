@@ -44,13 +44,22 @@ export const modelAliasKey = (contextKey: string): string => `modelAlias:${conte
  * 它作为参数传进来而不是写死在这里 —— 「哪些键算密钥」是配置层的策略，不是存储层该知道的事。
  * 写入端不止 WebUI 一个（`install_mcp` 走同一条路），两边必须共用同一份实现，否则密钥会明文
  * 躺进其中一条路径的变更历史里。
+ *
+ * `prune` 是**显式删除**的键：叶子粒度的写入端（`PUT /api/config/yaml`）不再靠祖先键吞并后代来
+ * 实现「这份 YAML 是覆盖层的全量视图」，删掉一个键必须真的让它从库里消失。它和 `stale` 走同一条
+ * 删除路径 —— 同一个事务、同样记 `config_revisions`：这个函数是配置写入的唯一出口，另开一条
+ * `DELETE` 的代价是那批删除不进变更历史（docs/28 · L-WEB-02）。不在库里的键静静跳过，
+ * 不留一条新旧都为空的假 revision。返回值仍只是 `stale`：「被整块吞并的更细覆盖」要交回给运维
+ * 点名核对，而 `prune` 是调用方自己算出来的，它本来就知道。
  */
 export function writeConfigRows(db: Sqlite, entries: Array<[string, unknown]>, actor: string,
-  revisionValue: (key: string, value: unknown) => string): string[] {
+  revisionValue: (key: string, value: unknown) => string, prune: readonly string[] = []): string[] {
   const now = Date.now();
   const keys = entries.map(([key]) => key);
   const stale = (db.prepare('SELECT key FROM config_kv').pluck().all() as string[])
     .filter((row) => keys.some((key) => row.startsWith(`${key}.`)));
+  // 这次要写的键不参与删除：先删再写只会多出一条 `old→null→new` 的假历史。
+  const removals = [...new Set([...stale, ...prune.filter((key) => !keys.includes(key))])];
   const read = db.prepare('SELECT value_json AS value FROM config_kv WHERE key=?');
   const write = db.prepare(`INSERT INTO config_kv(key,value_json,updated_at,updated_by) VALUES (?,?,?,?)
     ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at,updated_by=excluded.updated_by`);
@@ -62,8 +71,9 @@ export function writeConfigRows(db: Sqlite, entries: Array<[string, unknown]>, a
     try { return revisionValue(key, JSON.parse(previous.value) as unknown); } catch { return null; }
   };
   db.transaction(() => {
-    for (const key of stale) {
+    for (const key of removals) {
       const previous = read.get(key) as { value: string } | undefined;
+      if (!previous) continue;
       drop.run(key);
       revision.run(randomBytes(16).toString('hex'), now, actor, key, previousJson(key, previous), null);
     }

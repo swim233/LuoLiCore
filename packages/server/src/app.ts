@@ -114,6 +114,21 @@ function mergeDotted(base: unknown, updates: Record<string, unknown>): { ok: tru
   return { ok: true, value: clone };
 }
 const invalidKey = (result: { ok: false; key: string }) => apiError('invalid_config_key', `非法配置键：${result.key}`);
+/**
+ * 一棵配置树里的**叶子路径**。`PUT /api/config/yaml` 的落库粒度：按顶层段落库时 zod 已经把每个
+ * `.default()` 填满，写回去的是填满之后那整棵子树，一次「一个字不改」的往返就把那一刻的代码默认值
+ * 永久钉死（docs/28 · L-WEB-02）。
+ *
+ * 两条刻意的取舍：**数组当叶子** —— `approval.rules` / `mcp.servers` / `agent.agents` 是整块语义，
+ * 逐个下标落库既没人这么读、也会被 `sortOverrideKeys` 拼回原样；**空对象不产生叶子** —— 它表达的是
+ * 「这里什么都不覆盖」，而写成一行 `{}` 会让 `writeConfigRows` 顺手删掉同一子树下的密钥行，
+ * 那正是 docs/28 · L-WEB-04 的形态。
+ */
+function configLeafPaths(node: unknown, prefix = ''): string[] {
+  if (!node || typeof node !== 'object' || Array.isArray(node)) return prefix ? [prefix] : [];
+  return Object.entries(node as Record<string, unknown>)
+    .flatMap(([key, value]) => configLeafPaths(value, prefix ? `${prefix}.${key}` : key));
+}
 function page<T>(items: T[], pageNumber: number, size: number): { items: T[]; total: number; page: number; size: number } {
   return { items: items.slice((pageNumber - 1) * size, pageNumber * size), total: items.length, page: pageNumber, size };
 }
@@ -220,9 +235,21 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
    * 作废也要进变更历史，否则历史会瞒下「你那条逐项覆盖是谁弄掉的」。
    * 顺带把六个写入点的四条重复语句收成一处：`PUT /api/sandbox` 此前只写 `config_kv` 不写
    * `config_revisions`，沙箱 mode / bypassRoles 这种安全相关改动压根不进「变更历史」。
+   * `prune` 是显式删除集（只有叶子粒度的 YAML 端点用得上），和被吞并的后代行走同一个事务。
    */
-  const writeConfigRows = (entries: Array<[string, unknown]>, actor: string): string[] =>
-    writeConfigRowsToDatabase(dependencies.db, entries, actor, revisionJson);
+  const writeConfigRows = (entries: Array<[string, unknown]>, actor: string, prune: readonly string[] = []): string[] =>
+    writeConfigRowsToDatabase(dependencies.db, entries, actor, revisionJson, prune);
+  const persistedConfigRows = (): Array<{ key: string; value: unknown }> =>
+    (dependencies.db.prepare('SELECT key,value_json AS value FROM config_kv ORDER BY key').all() as Array<{ key: string; value: string }>)
+      .map((row) => ({ key: row.key, value: JSON.parse(row.value) as unknown }));
+  /**
+   * 「这一行是密钥，不参与 YAML 往返」的唯一判据。`GET` 用它决定整行跳过哪些，`PUT` 用它决定哪些
+   * 旧键永不删 —— 两次是**独立请求**，`PUT` 必须自己重算一次而不能信客户端交回来的 `skipped`
+   * （docs/28 · L-WEB-04）。整块写入（`mcp.servers`）里也可能埋着密钥字段，`publicConfig` 会把它们
+   * 变成占位符，那种块同样不能出现在往返里。
+   */
+  const secretConfigRow = (key: string, value: unknown): boolean =>
+    looksSecret(key, value) || JSON.stringify(publicConfig(value)).includes('«redacted»');
   /**
    * 被环境变量钉住的键一律拒收，而不是写库之后让 `loadConfig` 悄悄交回 env 的值。
    * 祖先写入（`webui` 整块）同样命中：它对那个叶子照样不会生效。
@@ -538,17 +565,13 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
    * `«redacted»`：导成占位符的话，导入端会把真密钥覆盖成一个字面量。
    */
   app.get('/api/config/export', (ctx) => {
-    const rows = dependencies.db.prepare('SELECT key,value_json AS value FROM config_kv ORDER BY key').all() as Array<{ key: string; value: string }>;
     const overrides: Record<string, unknown> = {};
     const skipped: string[] = [];
-    for (const row of rows) {
-      const value = JSON.parse(row.value) as unknown;
-      if (looksSecret(row.key, value)) { skipped.push(row.key); continue; }
-      const cleaned = publicConfig(value);
-      // 整块写入（`mcp.servers`）里也可能埋着密钥字段，`publicConfig` 会把它们变成占位符 ——
-      // 那种块同样不能导。
-      if (JSON.stringify(cleaned).includes('«redacted»')) { skipped.push(row.key); continue; }
-      overrides[row.key] = value;
+    // 判据与 YAML 那条路共用 `secretConfigRow`：整块写入（`mcp.servers`）里也可能埋着密钥字段，
+    // 而两份各自演化的判据最终必然在其中一条路上把真密钥漏出去。
+    for (const row of persistedConfigRows()) {
+      if (secretConfigRow(row.key, row.value)) { skipped.push(row.key); continue; }
+      overrides[row.key] = row.value;
     }
     return ctx.json({ ok: true, data: { exportedAt: Date.now(), overrides, skipped } });
   });
@@ -560,15 +583,19 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
    * GET 渲染的是**覆盖层**而不是合并后的全量 —— 与导出同一个理由：全量里绝大多数是代码默认值。
    */
   app.get('/api/config/yaml', (ctx) => {
-    const rows = dependencies.db.prepare('SELECT key,value_json AS value FROM config_kv ORDER BY key').all() as Array<{ key: string; value: string }>;
     const tree: Record<string, unknown> = {};
     const skipped: string[] = [];
-    for (const row of rows) {
-      const value = JSON.parse(row.value) as unknown;
-      if (looksSecret(row.key, value) || JSON.stringify(publicConfig(value)).includes('«redacted»')) { skipped.push(row.key); continue; }
-      assignDotted(tree, row.key, value);
+    for (const row of persistedConfigRows()) {
+      if (secretConfigRow(row.key, row.value)) { skipped.push(row.key); continue; }
+      assignDotted(tree, row.key, row.value);
     }
-    return ctx.json({ ok: true, data: { yaml: YAML.stringify(tree, { indent: 2 }), skipped } });
+    // 被跳过的键在 YAML **顶部生成注释**逐条点名：此前界面上只有一个 `skipped` 数组，运维看不出
+    // 「我提交的这份少了什么」，而提交一份少了 `webui.passwordHash` 的树曾经等于把口令哈希删掉
+    // （docs/28 · L-WEB-04）。注释拼在 `YAML.stringify` 的结果**前面** —— 进配置树就是一个键了。
+    const banner = skipped.length
+      ? `# 这份 YAML 里不含以下 ${skipped.length} 个密钥类键（值一律不回显）：\n${skipped.map((key) => `#   ${key}\n`).join('')}# 它们保持原值：提交这份 YAML 不会删掉它们，删掉这段注释也不会。\n`
+      : '';
+    return ctx.json({ ok: true, data: { yaml: banner + YAML.stringify(tree, { indent: 2 }), skipped } });
   });
   app.put('/api/config/yaml', async (ctx) => {
     const body = await ctx.req.json<{ yaml?: string }>().catch(() => null);
@@ -584,17 +611,37 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     if (!tree || typeof tree !== 'object' || Array.isArray(tree)) return ctx.json(apiError('invalid_yaml', '顶层必须是一个映射（key: value），不是数组或标量').body, 400);
     const parsed = runtimeConfigSchema.safeParse(tree);
     if (!parsed.success) return ctx.json({ ok: false, error: { code: 'invalid_config', message: '配置校验失败', details: parsed.error.issues.map((issue) => ({ path: issue.path.join('.'), message: issue.message })) } }, 400);
-    // 落库仍是**顶层段**的逐段覆盖，而不是一整棵树写成一行：`config_kv` 的粒度是点分键，
-    // 写成一行 `''` 会让工具页那种更细的覆盖全部被作废（G-CFG-02 的整块吞并问题）。
+    // 落库粒度是**提交的那棵树的叶子**（`configLeafPaths`），不是顶层段：按段落库时写回去的是
+    // zod 把 `.default()` 填满之后那整棵子树，一次「一个字不改」的往返就把生效覆盖叶子从 73 涨到
+    // 171、把那一刻的代码默认值永久钉死（docs/28 · L-WEB-02）。键取自**提交的树**、值取自
+    // `parsed.data` —— 后者保住「落库的是校验后的值」这条既有契约（同 `PUT /api/config` 的注释）。
     const sections = Object.keys(tree as Record<string, unknown>);
-    const pinnedConflicts = envConflicts(sections);
-    const applicable = sections.filter((key) => !pinnedConflicts.some((entry) => key === entry.key || entry.key.startsWith(`${key}.`)));
+    const leaves = configLeafPaths(tree);
+    // env 钉住的也按叶子跳过：此前是含被钉键的**整个顶层段**一起跳过，一条 `LUOLI_WEBUI_HOST`
+    // 就能让 `webui` 段其余的键在这条路上全都存不进去。
+    const pinnedConflicts = envConflicts(leaves);
+    const applicable = leaves.filter((leaf) => !pinnedConflicts.some((entry) => leaf === entry.key || entry.key.startsWith(`${leaf}.`) || leaf.startsWith(`${entry.key}.`)));
     const rows: Array<[string, unknown]> = applicable.map((key) => [key, readDotted(parsed.data, key)]);
-    const unknownSections = rows.filter(([, value]) => value === undefined).map(([key]) => key);
-    if (unknownSections.length) return ctx.json(apiError('unknown_config_key', `${unknownSections.join('、')} 不是 schema 里的配置段`).body, 400);
-    const subsumed = writeConfigRows(rows, 'webui:yaml');
-    dependencies.events.emit('config.changed', { keys: applicable });
-    return ctx.json({ ok: true, data: { keys: applicable, skipped: pinnedConflicts.map((entry) => entry.key), subsumed } });
+    const unknownKeys = rows.filter(([, value]) => value === undefined).map(([key]) => key);
+    if (unknownKeys.length) return ctx.json(apiError('unknown_config_key', `${unknownKeys.join('、')} 不是 schema 里的配置路径`).body, 400);
+    // 「这份 YAML 是所提交段落的全量视图」此前靠 `writeConfigRows` 删掉祖先键的后代行来实现；
+    // 叶子粒度之后没有祖先键可依赖了，删除必须显式算出来，否则从 YAML 里删掉一个键什么也不会发生。
+    const written = new Set(applicable);
+    const submitted = new Set(sections);
+    const pinnedNames = new Set(envPinnedConfigKeys().map((entry) => entry.key));
+    const prune: string[] = [];
+    const preserved: string[] = [];
+    for (const row of persistedConfigRows()) {
+      if (!submitted.has(row.key.split('.')[0]!) || written.has(row.key)) continue;
+      // 密钥行与被 env 钉住的键**永不删**：前者压根没出现在运维手上那棵树里（`GET` 整行跳过），
+      // 把「树里没有」当成「运维删掉了」就是 docs/28 · L-WEB-04 —— 一次往返擦掉 `webui.passwordHash`、
+      // 进程静静掉回 setup-token 形态。
+      if (secretConfigRow(row.key, row.value) || pinnedNames.has(row.key)) { preserved.push(row.key); continue; }
+      prune.push(row.key);
+    }
+    const subsumed = writeConfigRows(rows, 'webui:yaml', prune);
+    dependencies.events.emit('config.changed', { keys: [...new Set([...applicable, ...prune])] });
+    return ctx.json({ ok: true, data: { keys: applicable, skipped: pinnedConflicts.map((entry) => entry.key), pruned: prune, preserved, subsumed } });
   });
   /**
    * 配置导入：走和 `PUT /api/config` 完全一样的校验与落库路径（点分键 → mergeDotted →
