@@ -1,13 +1,18 @@
 import { gzipSync } from 'node:zlib';
 import { mkdirSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
 import type { Sqlite } from '@luoli/db';
 
 /** 落在磁盘上、由 DB 行指路的两棵 blob 目录。给不出路径的那一棵就不扫（测试里常只给一棵）。 */
 export interface BlobDirectories {
   /** `attachments.local_path` 指向的媒体目录（`media.dir`）。 */
   files?: string;
-  /** `agent_runs.result_full_ref` 指向的子 agent 全文目录。 */
+  /**
+   * `agent_runs.result_full_ref` 指向的子 agent 全文目录。库里那一列存的是**相对这棵目录**的
+   * 路径（`AgentResultStore.put`，docs/28 · L-OPS-06），所以这个值同时是读出侧的解析基准 ——
+   * 给错了不只是「扫错目录」，还会让每一条 ref 都解析到别处。存量绝对路径行仍能认（`resolve`
+   * 对绝对路径是恒等），它们正是错配保护要拦下来的信号。
+   */
   agentResults?: string;
 }
 
@@ -40,8 +45,18 @@ export class MaintenanceService {
     return path;
   }
 
+  /**
+   * `VACUUM` 在 WAL 模式下把**整库重写一遍进 WAL**，所以跑完这一刻 WAL 就有整库那么大；
+   * 不 checkpoint 就只能等下一次自动 checkpoint，而那要攒够写入把 WAL 推过
+   * `wal_autocheckpoint` 阈值 —— 实测 37MB 的库上 WAL 冲到 39,325,432 字节、**84 秒后仍是
+   * 38MB**，而 `db.vacuumCron` 默认周日 5 点，于是每次周维护之后 WAL 要以整库大小挂约 23 小时
+   * （docs/28 · L-OPS-05）。一个「收缩主库」的动作让占盘翻倍，正好反了。
+   * 挂在这里而不是靠 `cleanup()` 那次：同一 tick 内两个 cron 的先后并不稳定（实测两种顺序都有），
+   * 而 `db.vacuumCron`（周）比 `general.maintenanceCron`（日）稀疏，指望后者兜是指望不上的。
+   */
   vacuum(): void {
     this.db.exec('VACUUM');
+    this.checkpoint();
   }
 
   checkpoint(): void {
@@ -97,7 +112,8 @@ export class MaintenanceService {
     // 东西，删了会让历史轮次的引述变成悬空（docs/22 · I-09）。
     let agentResults = 0;
     for (const row of this.db.prepare("SELECT id,result_full_ref AS path FROM agent_runs WHERE result_full_ref IS NOT NULL AND finished_at IS NOT NULL AND finished_at<?").all(logCutoff) as Array<{ id: string; path: string }>) {
-      try { rmSync(row.path, { force: true }); } catch { continue; }
+      // ref 是相对 `blobs.agentResults` 的（存量绝对路径行 resolve 后是它自己）。
+      try { rmSync(resolve(this.blobs.agentResults ?? '.', row.path), { force: true }); } catch { continue; }
       this.db.prepare('UPDATE agent_runs SET result_full_ref=NULL WHERE id=?').run(row.id);
       agentResults += 1;
     }
@@ -175,6 +191,35 @@ export class MaintenanceService {
         }
       }
       const root = resolve(directory);
+      /**
+       * 上面那道守卫只挡「一条带路径的行都没有」这种**全错配**，而它自己描述的场景
+       * （`LUOLI_DATA_DIR` 指到别处）产生的是**部分错配**：`referenced` 非空，于是它结构性地
+       * 永远不触发。实测 `agent_runs` 269 行带 ref、其中 161 行指向另一个部署根，
+       * 被删掉的正是「盘上在新根、库里记着旧根」那 74 份（docs/28 · L-OPS-06）。
+       *
+       * **阈值取「非零即拒」而不是某个百分比**：一条指向目录外的 ref 在这棵目录里护不住任何
+       * 文件，于是它本该保护的那一份就会被当成孤儿删掉 —— ref 与可能被误删的文件是一对一的，
+       * 不存在「可以接受的错配比例」。
+       *
+       * 「合法的目录外 ref」确实存在一种：运维改过 `media.dir` 而把老文件留在原地不动 ——
+       * 此时老行指着的文件还在，新目录里的每个文件也都有行指着，其实没什么可误删的。
+       * 这种部署会被这道保护挡住（少清一次孤儿），所以文案必须给出可操作的下一步；
+       * 反过来放行的代价是删掉别人的数据，不对称得很明显。
+       *
+       * **想收窄成「目录外且盘上已经不在」的话别做 —— 那是错的。** 本轮的装置正是「生产 data/
+       * 的完整副本」：老根的文件还在，而新根那份仍然会被整批当孤儿删掉，收窄之后这道保护
+       * 恰好在真实事故那一刻放行。
+       * 子 agent 结果那一列此后存相对路径（`AgentResultStore.put`），从此天然免疫；
+       * 剩下会走到这里的绝对路径行就是启动期归一化刻意留下的、要人先看一眼的那些。
+       */
+      const prefix = root.endsWith(sep) ? root : root + sep;
+      const outside = [...referenced].filter((path) => !path.startsWith(prefix));
+      if (outside.length) {
+        result.refused = `${table} 里有 ${outside.length}/${referenced.size} 行指向 ${root} 之外（例如 ${outside[0]}）—— 库与这棵目录很可能来自两套部署，或者目录搬过而库里的行没跟着改。`
+          + `拒绝清理：那些行在这棵目录里护不住任何文件，照着删会把本该留下的数据当孤儿删空。`
+          + `确认之后要么把这些行的路径改到当前目录，要么把 LUOLI_DATA_DIR / media.dir 指回原处，再跑一次。`;
+        return result;
+      }
       const walk = (current: string): void => {
         let entries;
         try { entries = readdirSync(current, { withFileTypes: true }); } catch { return; }
@@ -188,12 +233,14 @@ export class MaintenanceService {
       walk(root);
       return result;
     };
-    // 路径按 resolve 后比对：DB 里存的可能是相对路径（`./data/files/...`），磁盘遍历给的是
-    // 绝对路径，不归一化的话每个文件都会被判成孤儿——那是把整棵媒体目录删空。
-    const referenced = (column: string, table: string): Set<string> =>
-      new Set((this.db.prepare(`SELECT ${column} FROM ${table} WHERE ${column} IS NOT NULL`).pluck().all() as string[]).map((path) => resolve(path)));
+    // 路径按 resolve 后比对：DB 里存的是相对路径（`attachments.local_path` 相对 cwd、
+    // `agent_runs.result_full_ref` 相对结果目录），磁盘遍历给的是绝对路径，不归一化的话每个
+    // 文件都会被判成孤儿——那是把整棵媒体目录删空。**存相对路径的那一半是保护而不是共犯**：
+    // 归一化用的 base 与 walk 的 root 同源，目录整体搬走也不会对不上（docs/28 · L-OPS-06）。
+    const referenced = (column: string, table: string, base = '.'): Set<string> =>
+      new Set((this.db.prepare(`SELECT ${column} FROM ${table} WHERE ${column} IS NOT NULL`).pluck().all() as string[]).map((path) => resolve(base, path)));
     const files = sweep(this.blobs.files, referenced('local_path', 'attachments'), 'attachments');
-    const results = sweep(this.blobs.agentResults, referenced('result_full_ref', 'agent_runs'), 'agent_runs');
+    const results = sweep(this.blobs.agentResults, referenced('result_full_ref', 'agent_runs', this.blobs.agentResults ?? '.'), 'agent_runs');
     const refused = [files.refused, results.refused].filter((reason): reason is string => Boolean(reason));
     // 拒绝的理由必须交回给调用方：静静地「删了 0 个」会让运维以为目录本来就是干净的。
     return { files: files.removed, fileBytes: files.bytes, agentResults: results.removed, agentResultBytes: results.bytes,

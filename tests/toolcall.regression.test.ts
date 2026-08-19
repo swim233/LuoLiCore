@@ -100,11 +100,26 @@ describe('tool-result 形状', () => {
 
 describe('归档检索的 FTS5 查询串', () => {
   it('把模型写的运算符切成词，而不是塞进 MATCH 里报语法错', () => {
-    expect(archiveQuery('名字|我是|叫|谁')).toEqual({ like: '%名字%' });
-    expect(archiveQuery('洛璃早上好')).toEqual({ fts: '"洛璃早上好"' });
-    expect(archiveQuery('hello world')).toEqual({ fts: '"hello" OR "world"' });
-    expect(archiveQuery('"unclosed')).toEqual({ fts: '"unclosed"' });
-    expect(archiveQuery('洛璃')).toEqual({ like: '%洛璃%' });
+    expect(archiveQuery('名字|我是|叫|谁')).toEqual({ like: '%名字%', dropped: ['我是', '叫', '谁'] });
+    expect(archiveQuery('洛璃早上好')).toEqual({ fts: '"洛璃早上好"', dropped: [] });
+    expect(archiveQuery('hello world')).toEqual({ fts: '"hello" OR "world"', dropped: [] });
+    expect(archiveQuery('"unclosed')).toEqual({ fts: '"unclosed"', dropped: [] });
+    expect(archiveQuery('洛璃')).toEqual({ like: '%洛璃%', dropped: [] });
+  });
+
+  /**
+   * 混合查询里 <3 码点的词被整体丢弃 —— **丢弃本身是对的**（trigram 索引匹配不了它们，
+   * `MATCH` 恒 0 命中），错的是不说：`search_messages("名字 李小明")` 只按 `李小明` 检索过，
+   * 而模型据此判定「没有这回事」（docs/28 · L-DB-01）。
+   */
+  it('混合查询丢掉的短词进 dropped，判别式仍然是 fts / like', () => {
+    const mixed = archiveQuery('名字 李小明');
+    expect(mixed).toEqual({ fts: '"李小明"', dropped: ['名字'] });
+    // 加字段不能破坏三个调用点共用的 `'like' in parsed`。
+    expect('like' in mixed).toBe(false);
+    expect('like' in archiveQuery('名字')).toBe(true);
+    // 单独查那个短词时它就是全场最长的词，会走 LIKE 兜底 —— 这正是 note 让模型去做的事。
+    expect(archiveQuery('名字')).toEqual({ like: '%名字%', dropped: [] });
   });
 
   it('对真实的 FTS 表跑一遍，敌意查询不再抛 SQLite 错', () => {
@@ -123,6 +138,12 @@ describe('归档检索的 FTS5 查询串', () => {
     }
     expect(scoped.search('名字|我是|叫|谁', 10).map((row) => row.text)).toEqual(['我的名字是阿离']);
     expect(scoped.search('洛璃早上好', 10).map((row) => row.text)).toEqual(['洛璃早上好哦']);
+    // 混合查询：长词命中，短词一条都不参与（trigram 上它 MATCH 不出东西）——「丢弃是正确降级」
+    // 这一半在这里被钉住，`dropped` 那一半负责让调用方能说出来（docs/28 · L-DB-01）。
+    expect(scoped.search('名字 洛璃早上好', 10).map((row) => row.text)).toEqual(['洛璃早上好哦']);
+    expect(archiveQuery('名字 洛璃早上好').dropped).toEqual(['名字']);
+    // 而单独查它走 LIKE，是有命中的 —— 所以那句「单独查一次」不是空话。
+    expect(scoped.search('名字', 10).map((row) => row.text)).toEqual(['我的名字是阿离']);
     closeDatabase(db);
   });
 });
