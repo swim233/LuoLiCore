@@ -166,7 +166,8 @@ describe('SIGTERM 退出路径', () => {
    */
   it('同一个库上第二个实例拿不到锁，而主人死掉之后能被接手', async () => {
     const { acquireInstanceLock } = await import('@luoli/db');
-    const { existsSync, writeFileSync, mkdirSync } = await import('node:fs');
+    const { existsSync, readFileSync, writeFileSync, mkdirSync } = await import('node:fs');
+    const holderPid = (file: string): number => (JSON.parse(readFileSync(file, 'utf8')) as { pid: number }).pid;
     const dir = resolve('./data/lock-test');
     rmSync(dir, { recursive: true, force: true });
     mkdirSync(dir, { recursive: true });
@@ -187,8 +188,37 @@ describe('SIGTERM 退出路径', () => {
     expect(third.ok, 'stale 锁必须能被接手，否则一次崩溃就要人手动删文件').toBe(true);
     if (third.ok) {
       expect(third.lock.stolenFrom).toBe(0x7ff_ffff);
+      // 抢占按代走：第 1 代那个 claim 就是「谁赢」的凭据，release 要把它一起带走。
+      expect(existsSync(`${dbPath}.lock.1`)).toBe(true);
       third.lock.release();
       expect(existsSync(`${dbPath}.lock`)).toBe(false);
+      expect(existsSync(`${dbPath}.lock.1`)).toBe(false);
+    }
+
+    /**
+     * **抢占不能靠写完回读定胜负**：write 与 read 是两次 syscall，`write(A) → read(A) →
+     * write(B) → read(B)` 下两个进程都读到自己的 pid，于是两个实例一起进 `recoverAfterCrash`
+     * —— 正是这把锁要挡的那件事。判据是「同一代的 claim 只能被一个进程独占创建」，所以这一代
+     * 已经被一个**活着**的进程拿走时，后来者必须被拒，哪怕锁文件里那个 pid 已经死了。
+     */
+    writeFileSync(`${dbPath}.lock`, JSON.stringify({ pid: 0x7ff_ffff, startedAt: 1, host: 'gone', gen: 0 }));
+    writeFileSync(`${dbPath}.lock.1`, JSON.stringify({ pid: process.ppid, startedAt: Date.now(), host: 'somewhere', gen: 1 }));
+    const raced = acquireInstanceLock(dbPath);
+    expect(raced.ok, '这一代已经被活着的进程抢走了，后来者不该也拿到锁').toBe(false);
+    if (!raced.ok) expect(raced.holder.pid).toBe(process.ppid);
+    // 输的那个不许覆盖锁文件：覆盖了就是两个实例都认为自己在位。
+    expect(holderPid(`${dbPath}.lock`)).toBe(0x7ff_ffff);
+
+    // 抢占方崩在「建了 claim 还没装上锁文件」那一刻：那一代属于死进程，往下一代继续找，
+    // 而不是把人永久锁在外面。赢的那个顺手清掉更早的 claim。
+    writeFileSync(`${dbPath}.lock.1`, JSON.stringify({ pid: 0x7ff_fffe, startedAt: 1, host: 'gone', gen: 1 }));
+    const fourth = acquireInstanceLock(dbPath);
+    expect(fourth.ok, 'claim 的主人也死了时必须能往下一代找').toBe(true);
+    if (fourth.ok) {
+      expect(existsSync(`${dbPath}.lock.2`)).toBe(true);
+      expect(existsSync(`${dbPath}.lock.1`), '赢的那个要清掉更早的 claim').toBe(false);
+      expect(holderPid(`${dbPath}.lock`)).toBe(process.pid);
+      fourth.lock.release();
     }
 
     // 锁文件被改坏（手工编辑、写了一半）时当成没有主人，而不是把人永久锁在外面。

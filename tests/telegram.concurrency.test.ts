@@ -289,12 +289,33 @@ describe('额度这条警报只在真的被拒时响', () => {
   }, 20_000);
 
   it('额度开着而预留被拒时照旧响，并且不开轮次', async () => {
-    const { bot, db } = await telegramFixture('tg-quota-rejected',
+    const { bot, db, replies } = await telegramFixture('tg-quota-rejected',
       { quota: { enabled: true, requirePricing: false, minReserveUsd: 0.02, perUser: { daily: 0.001 } } },
       { onTurn: async () => '好' });
     await bot.handleUpdate(privateUpdate(1, '你好'));
     expect(db.prepare("SELECT COUNT(*) AS count FROM log_events WHERE kind='quota.exceeded'").pluck().get()).toBe(1);
     expect(db.prepare('SELECT COUNT(*) AS count FROM turns').pluck().get()).toBe(0);
+    expect(replies.at(-1)).toContain('额度用完了');
+    // 没开成轮次的触发消息一律降级成背景（docs/20 · W-TG-05）：金额这一档此前留着 `triggered=1`，
+    // 于是额度用光那天说的每一句话既没被回答、也再没进过任何一轮的上下文。
+    expect(db.prepare('SELECT triggered FROM messages WHERE tg_message_id=1').pluck().get()).toBe(0);
+    closeDatabase(db);
+  }, 20_000);
+
+  /**
+   * `quota.onExceeded.reply=false` 的语义是「额度用光了就别再回话」，而**金额这一档是它唯一管得着
+   * 的地方**（频率与并发各有自己的文案）。分档文案那次整改把 `main` 上唯一的读点删掉了，而金额档
+   * 从来没读过它 —— 于是这个开关存得住、WebUI 还在写、运行时零效果。
+   */
+  it('onExceeded.reply=false 时金额超额一句都不回，而拒绝照旧记账并降级', async () => {
+    const { bot, db, replies } = await telegramFixture('tg-quota-silent',
+      { quota: { enabled: true, requirePricing: false, minReserveUsd: 0.02, perUser: { daily: 0.001 }, onExceeded: { reply: false } } },
+      { onTurn: async () => '好' });
+    await bot.handleUpdate(privateUpdate(1, '你好'));
+    expect(replies, '关掉之后一句都不该回').toEqual([]);
+    expect(db.prepare('SELECT COUNT(*) AS count FROM turns').pluck().get()).toBe(0);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM log_events WHERE kind='quota.exceeded'").pluck().get()).toBe(1);
+    expect(db.prepare('SELECT triggered FROM messages WHERE tg_message_id=1').pluck().get()).toBe(0);
     closeDatabase(db);
   }, 20_000);
 });

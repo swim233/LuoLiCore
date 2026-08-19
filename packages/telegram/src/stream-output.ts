@@ -138,7 +138,13 @@ export class TelegramOutput {
       // 长回复会在群里刷出五个引用块（docs/14 §2 Q10）。
       for (const [index, part] of rendered.entries()) {
         const at = Date.now();
-        const message = await sendWithFallback(this.bot.api, this.chatId, part, index === 0 && replyToMessageId ? { reply_parameters: { message_id: replyToMessageId } } : {}, this.parseMode, this.onParseFallback);
+        // 这一档抛出去（由上层记成 turn 失败），但**失败也要落投递侧那一行**（`docs/10 §2` 的失败
+        // 档 warn）：不落的话「这一轮发了什么」只剩没有 traceId 的 `tg.api`（docs/28 · L-LOG-02）。
+        const message = await sendWithFallback(this.bot.api, this.chatId, part, index === 0 && replyToMessageId ? { reply_parameters: { message_id: replyToMessageId } } : {}, this.parseMode, this.onParseFallback)
+          .catch((error: unknown) => {
+            this.#emit({ kind: 'send', ok: false, ms: Date.now() - at, chars: part.length, path: 'once', error: error instanceof Error ? error.message : String(error) });
+            throw error;
+          });
         ids.push(message.message_id);
         this.#emit({ kind: 'send', ok: true, ms: Date.now() - at, messageId: message.message_id, chars: part.length, path: 'once' });
       }

@@ -135,7 +135,7 @@ with_parent 0`，浏览器里展开一条 trace，13 个节点的 `marginLeft` �
 | `plugins.disabled` | info | `plugins.enabled=false`：一个 plugin 都不加载，钩子链是空的 |
 | `mcp.connect` / `mcp.error` | info/warn | server, transport, tool |
 | `mcp.disconnect` | info/warn | server —— 连接断开（warn，下一次 reconcile 会重连）或从配置里移除（info） |
-| `tg.send` | debug（失败 **warn**） | chatId, messageId, chars, ms, path（`stream` \| `once` \| `tool` \| `fallback`）—— **投递层**那一行，带 traceId。`tg.api` 拿不到 turn 上下文，所以「这一轮到底发了什么、编辑了几次」只有这三条回答得了（[reviews/28](./reviews/28-round10-live-system-test.md) · L-LOG-02） |
+| `tg.send` | debug（失败 **warn**） | chatId, messageId, chars, ms, error, path（`stream` \| `once` \| `final` \| `tool` \| `fallback`）—— **投递层**那一行，带 traceId。`tg.api` 拿不到 turn 上下文，所以「这一轮到底发了什么、编辑了几次」只有这三条回答得了（[reviews/28](./reviews/28-round10-live-system-test.md) · L-LOG-02）。**失败档在五条路径上都要落**：`tool` 那条把上游报错吞成 `ok:false` 交回模型、`once` / `fallback` 抛出去记成整轮失败，两种都不落的话「消息被 Telegram 拒收」在带 traceId 的日志里一个字都没有 |
 | `tg.edit` | debug | chatId, messageId, editCount, chars, ms —— **一轮聚合成一条**（[§1](#1-trace-模型) 那张图）：一次流式回复能编辑几十次，逐次记只是噪声 |
 | `tg.action` | debug | chatId, count, ms —— typing 同样聚合成一条 |
 | `tg.error` | warn | method, description, retryAfter |

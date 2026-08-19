@@ -60,6 +60,22 @@ describe('投递层的 tg.send / tg.edit / tg.action', () => {
     expect(events.filter((event) => event.kind === 'edit')).toEqual([]);
   });
 
+  /**
+   * 这一档发不出去时是**抛出去**的（由上层记成整轮失败），而投递侧那一行不能跟着消失：
+   * `tg.api` 没有 traceId，「这一轮发了什么、哪一段没发出去」只有 `tg.send` 回答得了
+   * （docs/28 · L-LOG-02）。此前 `once` 与兜底两条路径都硬写 `ok: true`，失败档不可达。
+   */
+  it('`once` 档发不出去时也落一条 ok:false 的 tg.send', async () => {
+    const bot = { api: { sendMessage: () => Promise.reject(new Error('403: bot was blocked by the user')),
+      sendChatAction: () => Promise.resolve(true) } } as unknown as Bot;
+    const events: Array<{ kind: string; ok: boolean; path?: string; error?: string }> = [];
+    const output = new TelegramOutput(bot, 'chat', { ...options, mode: 'once', replyDelayMs: 0 }, undefined, Date.now() - 5000);
+    output.onDelivery = (event) => events.push(event);
+    await expect(output.consume(ticker(['整', '条'], 1))).rejects.toThrow('blocked');
+    expect(events.filter((event) => event.kind === 'send'))
+      .toMatchObject([{ ok: false, path: 'once', error: expect.stringContaining('blocked') }]);
+  });
+
   it('onDelivery 抛出来也不许打断投递', async () => {
     const calls: Call[] = [];
     const { bot } = fakeBot(calls);
