@@ -28,6 +28,17 @@ export interface ArchivedMessage {
   replyToName?: string;
 }
 
+/**
+ * `append()` 的返回值：那一行，外加**这次到底插进去了没有**。
+ *
+ * `INSERT OR IGNORE` 撞号时静静返回既有那一行，而下面那条回读是按入参 `tgMessageId` 查的 ——
+ * 返回行的 `tgMessageId` 因此**恒等于**入参，调用方无从看出「这行不是我刚写的」。定时轮次的
+ * 撞号核对（`runner.ts` 的 `schedule_trigger_conflict`）就是这么变成死代码的（docs/28 · L-SCH-03）。
+ * 标记挂在返回值上而不是另开一个方法：`info.changes` 只在这一次 `run()` 里成立，隔一条 SELECT
+ * 再问就已经是「现在有没有这一行」而不是「刚才是我插的吗」了。
+ */
+export type AppendedMessage = ArchivedMessage & { inserted: boolean };
+
 export interface AppendMessageInput extends Omit<ArchivedMessage, 'id' | 'triggered' | 'triggerReason'> {
   tgUpdateId?: number | null;
   raw: unknown;
@@ -135,7 +146,7 @@ export class ArchiveRepository {
 export class ScopedArchiveRepository {
   constructor(private readonly db: Sqlite, readonly chatId: string, readonly threadId: number | null) {}
 
-  append(input: AppendMessageInput): ArchivedMessage {
+  append(input: AppendMessageInput): AppendedMessage {
     const info = this.db.prepare(`INSERT OR IGNORE INTO messages(chat_id,message_thread_id,tg_message_id,tg_update_id,direction,from_kind,
       from_user_id,from_name,from_username,reply_to_tg_message_id,media_group_id,kind,text,raw_json,media_parts_json,tg_date,received_at,
       triggered,trigger_reason,turn_id,revision,claimed_at) VALUES (@chatId,@messageThreadId,@tgMessageId,@tgUpdateId,@direction,@fromKind,
@@ -146,8 +157,8 @@ export class ScopedArchiveRepository {
         triggerReason: input.triggerReason ?? null, turnId: input.turnId ?? null, revision: input.revision ?? 0,
         // claimed_by_turn 留空：这条消息已经被消费掉了，但不属于任何在途轮次，abortTurn 的 releaseClaims 不该把它放回去。
         claimedAt: input.claimed ? Date.now() : null });
-    if (info.changes) return this.byId(Number(info.lastInsertRowid))!;
-    return withMedia(this.db.prepare(`SELECT ${messageQuery()},media_parts_json AS mediaPartsJson FROM messages WHERE chat_id=? AND tg_message_id=? AND revision=?`).get(this.chatId, input.tgMessageId, input.revision ?? 0) as ArchivedMessage) !;
+    if (info.changes) return Object.assign(this.byId(Number(info.lastInsertRowid))!, { inserted: true });
+    return Object.assign(withMedia(this.db.prepare(`SELECT ${messageQuery()},media_parts_json AS mediaPartsJson FROM messages WHERE chat_id=? AND tg_message_id=? AND revision=?`).get(this.chatId, input.tgMessageId, input.revision ?? 0) as ArchivedMessage)!, { inserted: false });
   }
 
   /** 最新 revision 的那一行：编辑过的消息会有多行，引用时要拿用户此刻看到的那一版。 */

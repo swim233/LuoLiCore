@@ -625,7 +625,22 @@ cron 到点 ──► 重算有效角色 ──► 合成触发消息（落归�
 - 背景消息认领照常发生（`claim_watermark` 正常推进），所以「汇总一下昨天群里聊了什么」这类任务
   拿得到未进上下文的那批发言。
 - 这条轮次照常进 `turns` 表、照常注册进 `TurnRegistry`（可 `/cancel`、出现在
-  `GET /api/turns/active`）、照常记账与占配额。
+  `GET /api/turns/active`）、照常记账与占配额。**金额额度全部生效**（global / perChat / perUser 的
+  daily / monthly 与 `perTurn`），但**不计入 `quota.rateLimit` 的按小时轮次数**
+  （`turnsPerUserPerHour` / `turnsPerChatPerHour`）：它不是「人在刷」，频率已经由
+  `schedule.minIntervalMinutes` / `schedule.maxPerChat` 在创建时管住了，而实测一天 38 次定时触发
+  把创建者自己挡在了门外（docs/28 · L-QUOTA-02）。`concurrentPerUser` 照旧数它 —— 在跑的定时
+  轮次真的占着一个槽，且它只挡几十秒。
+- 失败照常计入 `consecutive_turn_failures`（docs/10 §6，判据同 `docs/04 §5.3`：超时算、`/cancel`
+  不算）。这份计数**跨会话也跨入口**：装配方建一份 `TurnFailureStreak` 同时交给 Telegram 入口和
+  定时执行器。此前它只存在于 Telegram 那边的闭包里，于是「上游变黑洞、每次定时触发都超时」
+  在没人聊天的部署里一次告警都不响（docs/28 · L-SCH-02）。
+- **投递通道不在就不开轮。** `telegram()` 返回 null 时这一次只记一条
+  `schedule.skipped{reason:'telegram_unavailable'}`，任务留存 —— 判据必须排在配额预留、并发闸与
+  `openTurn` **之前**：发不出去的一轮开了也白开，模型钱花掉、上下文一个字都留不下。
+  所以那个 getter 必须在 bot **真的起来之后**才非空（拿「有 `BOT_TOKEN` 就非空」的外层对象会让
+  这条分支变成死代码，而 HTTP 手动触发端点从 `serve()` 起就够得着它，docs/28 · L-SCH-01）；
+  `POST /api/schedules/:id/trigger` 另有一道 `runner.loaded` 的 400 兜在前面。
 
 **`notify` 也开轮提交。** 只发不提交更省事，但那条消息只会进 `messages` 归档
 （`claimBackground` 不认领 `direction='out'`），于是模型下一轮不知道自己刚提醒过什么 ——
@@ -649,8 +664,14 @@ Telegram 流消费者；流式的占位消息与进度编辑在这条路上只�
   `ScopedArchiveRepository.append` 是 `INSERT OR IGNORE`，撞号时**静静返回既有那一行** ——
   一条真实用户消息凭空消失，且日志里一个字都没有。
 
-所以分配之后必须**核对 `append` 的返回值**：`tgMessageId` 与分配值不等就抛
-`schedule_trigger_conflict` 让这次触发失败。静默走下去比失败难查一个数量级。
+所以分配之后必须**核对 `append` 的返回值**：`inserted` 为假就抛 `schedule_trigger_conflict`
+让这次触发失败。静默走下去比失败难查一个数量级。
+
+**判 `inserted`，不要比 `tgMessageId`。** 这条核对一度写成「返回行的 `tgMessageId` 与分配值不等
+就抛」——而 `append` 回读既有那一行用的是 `WHERE chat_id=? AND tg_message_id=? AND revision=?`，
+绑的就是入参那个 id，于是返回值恒等于分配值，比较**永远为假**（docs/28 · L-SCH-03）。
+`ScopedArchiveRepository.append` 因此在返回值上带一个 `inserted`（取 `INSERT OR IGNORE` 那次
+`run()` 的 `changes`）：只有它能区分「我刚写的」和「本来就在那儿的」。
 
 ### 10.3 不补跑
 

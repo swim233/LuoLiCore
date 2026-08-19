@@ -1,7 +1,7 @@
 import { rmSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { OperationsRepository, closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
-import { AlertDispatcher, LogSink, QuotaGuard, configSchema, hostMatches } from '@luoli/core';
+import { AlertDispatcher, CONSECUTIVE_TURN_FAILURE_ALERT, LogSink, QuotaGuard, TurnFailureStreak, configSchema, hostMatches } from '@luoli/core';
 import { capMentions } from '@luoli/telegram';
 
 /** 第五轮接线的告警链路 / 出网域名策略 / 输出护栏 / 配额预警。 */
@@ -61,6 +61,34 @@ describe('AlertDispatcher', () => {
     await expect(alerts.raise('db_write_failed', '写不进去')).resolves.toBeUndefined();
     expect(() => alerts.fire('db_write_failed', '同步入口', {}, 'x')).not.toThrow();
     closeDatabase(db);
+  });
+});
+
+/**
+ * 连续失败计数从 `createTelegramBot` 的闭包里提出来（docs/28 · L-SCH-02）。语义一条都不许变：
+ * 跨会话、成功一次归零、达到阈值才 fire —— 现在还要**跨入口**，定时轮次与 Telegram 轮次记在
+ * 同一份里，否则「上游变黑洞」在没人聊天的部署里一次告警都不响。
+ */
+describe('TurnFailureStreak', () => {
+  it('跨会话累计、成功归零、只在到阈值时 fire', () => {
+    const fired: Array<{ kind: string; data?: Record<string, unknown> }> = [];
+    const streak = new TurnFailureStreak({ fire: (kind, _summary, data) => { fired.push({ kind, ...(data ? { data } : {}) }); } }, 3);
+    streak.failed('turn_timeout');
+    streak.failed('turn_timeout');
+    expect(fired).toHaveLength(0);
+    expect(streak.count).toBe(2);
+    // 中间成功一次就归零：连续才算「这个部署坏了」。
+    streak.succeeded();
+    expect(streak.count).toBe(0);
+    streak.failed('a'); streak.failed('b');
+    expect(fired).toHaveLength(0);
+    streak.failed('turn_timeout');
+    expect(fired).toEqual([{ kind: 'consecutive_turn_failures', data: { count: 3, lastError: 'turn_timeout' } }]);
+    // 缺 alerts 的装配（没有 Telegram 通道时）不许炸，只是不发。
+    const orphan = new TurnFailureStreak(undefined, 1);
+    expect(() => orphan.failed('x')).not.toThrow();
+    // docs/10 §6 的默认阈值就是 5，别让它悄悄漂。
+    expect(CONSECUTIVE_TURN_FAILURE_ALERT).toBe(5);
   });
 });
 
