@@ -62,8 +62,14 @@ export interface SandboxResult {
   stderr: string;
   truncated: boolean;
   durationMs: number;
+  /** 「输出超限 / 超时 / 被取消」三条路共用同一个 `kill()`，所以这一位**分不出**是哪一种：
+   *  输出超限看 `truncated`，超时看 `durationMs` 是否贴着 `timeoutMs`。 */
   killed: boolean;
   oom: boolean;
+  /** 只在输出撞上 `2 × maxOutputBytes`、子进程被就地 SIGKILL 时出现：`bash` / `python` 把整个
+   *  结果原样交回模型（registry 的 `{ok,error,hint}` 那一套），而这一次是**我们**杀的 ——
+   *  不说清楚它会原样重试，再被杀一次（docs/28 · L-TOOL-01）。 */
+  hint?: string;
 }
 
 /** 按字节算预算、按字符边界切，且结果真的不超过 `max`（docs/27 · T-04：此前那个按比例估的
@@ -255,6 +261,11 @@ export class Sandbox {
     const out = clipped(stdout, cap);
     const err = clipped(stderr, cap);
     const oom = exitCode === 137 || /out of memory|oom/i.test(stderr);
-    return { ok: exitCode === 0 && !truncatedByCap, exitCode, stdout: out.value, stderr: err.value, truncated: truncatedByCap || out.truncated || err.truncated, durationMs: Math.round(performance.now() - started), killed, oom };
+    // `ok` 只看退出码。`truncatedByCap` 同一行就 `kill()` 了子进程，退出码本来就不是 0 ——
+    // 那个 `&& !truncatedByCap` 唯一还起作用的场合恰好是 bug：子进程已自己退出 0、最后一批
+    // >2×cap 的输出在 `close` 之前才 flush 完，`kill()` 打空，于是一次**成功**调用被记成失败，
+    // 连着三次就把 bash 停掉一整轮（docs/28 · L-TOOL-01）。
+    return { ok: exitCode === 0, exitCode, stdout: out.value, stderr: err.value, truncated: truncatedByCap || out.truncated || err.truncated, durationMs: Math.round(performance.now() - started), killed, oom,
+      ...(truncatedByCap ? { hint: `输出超过 ${cap * 2} 字节（tools.exec.maxOutputBytes 的两倍）后子进程已被 SIGKILL，交回的只有头尾各半 —— 命令可能没跑完。把输出收窄再来（重定向到文件后分段 read_file、用 grep/head 过滤、只打印统计），别原样重试。` } : {}) };
   }
 }

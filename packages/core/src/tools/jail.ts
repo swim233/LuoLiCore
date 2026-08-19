@@ -18,11 +18,34 @@ export function selfAuthoringDenyGlobs(directories: { skillsDir: string; plugins
 }
 
 export class PathJail {
+  /**
+   * 相对路径的解析基点，也是 `FileTools` 回给模型的路径的相对基点 —— **不是**可达边界。
+   * host-fs 模式（`tools.fs.allowHostFsForOwner`）下边界是 `/` 而这里仍是会话 workspace：
+   * 模型写出来的 `a.txt` 指的是「我的工作目录」，把它解到 `/a.txt` 去既写不进也读不回。
+   * 两者同名同源时（默认模式）行为与从前一个字不变。docs/28 · L-TOOL-02。
+   */
   readonly root: string;
+  /** 可达边界；判定一律走 `#inside`，不要在别处重算前缀。 */
+  readonly #boundary: string;
+  /**
+   * `${boundary}${sep}` 在 `boundary === '/'` 时是 `'//'`，而没有任何真实路径以它开头 ——
+   * 那一行曾让 `allowHostFsForOwner=true` 的 owner **每一次** fs 调用都抛
+   * `path_outside_workspace`（长得像安全拦截的功能性打死，docs/28 · L-TOOL-02）。
+   */
+  readonly #prefix: string;
 
-  constructor(root: string, private readonly denyGlobs: string[]) {
-    mkdirSync(root, { recursive: true, mode: 0o700 });
-    this.root = realpathSync(root);
+  constructor(root: string, private readonly denyGlobs: string[], options?: { base?: string }) {
+    const base = options?.base ?? root;
+    // 建 base 不建 root：默认模式下两者是同一个目录；host-fs 模式下 root 是 `/`（必然存在，
+    // recursive mkdir 落在已存在目录上只是白跑一趟），真正需要被建出来的是会话 workspace。
+    mkdirSync(base, { recursive: true, mode: 0o700 });
+    this.root = realpathSync(base);
+    this.#boundary = realpathSync(root);
+    this.#prefix = this.#boundary.endsWith(sep) ? this.#boundary : `${this.#boundary}${sep}`;
+  }
+
+  #inside(path: string): boolean {
+    return path === this.#boundary || path.startsWith(this.#prefix);
   }
 
   resolve(input: string): string {
@@ -37,13 +60,13 @@ export class PathJail {
       const realParent = realpathSync(parent);
       real = `${realParent}${absolute.slice(parent.length)}`;
     }
-    if (real !== this.root && !real.startsWith(`${this.root}${sep}`)) throw new Error('path_outside_workspace');
+    if (!this.#inside(real)) throw new Error('path_outside_workspace');
     const normalized = real.replaceAll('\\', '/');
     const denied = this.denyGlobs.some((glob) => minimatch(normalized, glob.replace('<root>', process.cwd()), { dot: true }));
     if (denied) throw new Error('path_denied');
     if (existsSync(real) && lstatSync(real).isSymbolicLink()) {
       const target = realpathSync(real);
-      if (target !== this.root && !target.startsWith(`${this.root}${sep}`)) throw new Error('path_outside_workspace');
+      if (!this.#inside(target)) throw new Error('path_outside_workspace');
     }
     return real;
   }
