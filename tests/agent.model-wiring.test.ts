@@ -467,4 +467,28 @@ describe('vision alias fallback', () => {
     expect(flat).not.toContain('image/jpeg');
     closeDatabase(db);
   });
+  /**
+   * 收尾补跑必须是**一次**调用（`docs/00 §2` 与 `docs/08 §5.2` 的原话），而 `agent.generate(...)`
+   * 是 `ToolLoopAgent` 的**整个循环** —— 实测让上游在 `tools:[]` 的请求里仍返回 tool_calls，
+   * 收尾阶段又跑了 12 步（`steps=24`），最终 `turn.wrap_up chars=0` + `model_returned_empty`
+   * （docs/28 · L-AGT-01）。真模型不会这么配合，所以只有假上游测得出来 —— 而「最多一次」是判据，
+   * 不是指望；`perTurn.maxCostUsd` 只是兜底。
+   */
+  it('上游在收尾那次仍返回 tool_calls 时，补跑也只跑一步', async () => {
+    const { db, turn, dependencies } = harness('wrapup-one-step', { agent: { main: { maxSteps: 2 } }, quota: { requirePricing: false, perTurn: { maxSteps: 2 } } } as Partial<Config>);
+    // 一个真的进得了 toolSet 的工具：模型返回的 tool-call 得有东西可执行，否则 SDK 在别处就炸了。
+    dependencies.tools.registerExternal({ name: 'noop', description: 'noop', inputSchema: z.object({}), minRole: 'trusted', source: 'mcp', execute: () => ({ ok: true }) });
+    // 每一步都只回 tool-call、从不回正文：主循环因此跑满 maxSteps 且「最后一步没有正文」，
+    // 补跑的四道闸全过；而补跑那次上游照样回 tool-call。
+    let calls = 0;
+    const stubborn = { model: { ...candidate('stubborn', () => ok),
+      doGenerate: async () => { calls += 1; return { content: [{ type: 'tool-call', toolCallId: `c-${calls}`, toolName: 'noop', input: '{}' }],
+        finishReason: { unified: 'tool-calls', raw: 'tool_calls' },
+        usage: { inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 1, text: 0, reasoning: 0 } }, warnings: [] } as never; } } as ReturnType<typeof candidate>,
+      info: info('stubborn') };
+    await runMainAgent(turn, { ...dependencies, registry: registryFor({ main: [stubborn] }) });
+    // 2 步主循环 + 1 步补跑。放开那道闸的话补跑会自己再跑满 stopWhen（= 4 次）。
+    expect(calls).toBe(3);
+    closeDatabase(db);
+  });
 });

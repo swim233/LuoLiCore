@@ -409,12 +409,33 @@ export function contextMessages(turn: RuntimeTurnContext, attachments?: Sqlite, 
   // （中转站的表现是 200 + 0 步），而 parts 是持久化的 —— 不在读出侧兜，该会话在 `/new` 之前
   // 每轮都失败，实测能一路崩到进程被带走。写入侧的 `assertPairedToolCalls` 只管「不再产生新的」，
   // 库里已经有的那些只能在这里救。
-  const answered = new Set<string>();
+  /**
+   * **按位置配对，不是全局集合。** 这里曾是一个 `Set<toolCallId>`：窗口内**任何位置**存在同名
+   * `toolCallId` 的 tool-result，那条真正没有结果的 tool-call 就不会被补。而 AI SDK 的
+   * `convertToLanguageModelPrompt` 是**有序**校验，于是它在发请求之前直接抛
+   * `MissingToolResultsError` —— 该会话每一轮都以 `Tool result is missing for tool call <id>.`
+   * 失败、`steps=0`，而**一条 `ctx.orphan_tool_call` 都没有**（本该救它的这段代码认为它已被回答），
+   * 直到窗口推过那条或 `/new`。真实 provider 的 id 是随机的所以概率低，但修法很小
+   * （docs/28 · L-CTX-01）。
+   *
+   * 判据两条：一条结果只认领一次；一条结果只认领**排在它之前**的调用。
+   */
+  const unclaimed = new Map<string, number>();
   for (const message of source) {
     for (const part of message.parts as Array<Record<string, unknown>>) {
-      if (part?.type === 'tool-result' && typeof part.toolCallId === 'string') answered.add(part.toolCallId);
+      if (part?.type === 'tool-result' && typeof part.toolCallId === 'string') unclaimed.set(part.toolCallId, (unclaimed.get(part.toolCallId) ?? 0) + 1);
     }
   }
+  const forget = (id: string): void => { const left = (unclaimed.get(id) ?? 0) - 1; if (left > 0) unclaimed.set(id, left); else unclaimed.delete(id); };
+  /** 走到某条消息时先把**这条**里的结果划掉：它们属于更早的调用，不能再认领后面的。 */
+  const passResults = (parts: Array<Record<string, unknown>>): void => {
+    for (const part of parts) if (part?.type === 'tool-result' && typeof part.toolCallId === 'string') forget(part.toolCallId);
+  };
+  const claim = (id: string): boolean => {
+    if (!(unclaimed.get(id) ?? 0)) return false;
+    forget(id);
+    return true;
+  };
   const messages: ModelMessage[] = [];
   const repaired: string[] = [];
   // 断点打在「已提交历史的最后一条」而不是整个数组的最后一条：本轮 delta 与工具循环的产出都排在
@@ -437,7 +458,8 @@ export function contextMessages(turn: RuntimeTurnContext, attachments?: Sqlite, 
       const text = content.map((part) => typeof part?.text === 'string' ? part.text : '').filter(Boolean).join('\n');
       messages.push({ role: 'user', content: [{ type: 'text', text: `${NOTE_PREFIX}${text}` }] } as ModelMessage);
     }
-    const orphans = content.filter((part) => part?.type === 'tool-call' && typeof part.toolCallId === 'string' && !answered.has(part.toolCallId));
+    passResults(message.parts as Array<Record<string, unknown>>);
+    const orphans = content.filter((part) => part?.type === 'tool-call' && typeof part.toolCallId === 'string' && !claim(part.toolCallId));
     if (orphans.length) {
       repaired.push(...orphans.map((part) => part.toolCallId as string));
       messages.push({ role: 'tool', content: orphans.map((part) => toolResultPart(part.toolCallId as string,
@@ -777,7 +799,17 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
     // 上游超时才收场 —— logs/2026-08-17 那几轮卡死就是这么来的：fallback→model.error 的 62 秒
     // 节拍整整走了两遍，第三遍还在等的时候用户已经去重启进程了。
     maxRetries: 0,
-    stopWhen: stepCountIs(Math.min(dependencies.config.agent.main.maxSteps, dependencies.config.quota.perTurn.maxSteps)),
+    /**
+     * 第二条判据是收尾补跑的硬边界：`docs/00 §2` 与 `docs/08 §5.2` 都写「追加**一次**禁工具的
+     * 模型调用」，而 `agent.generate(...)` 是 `ToolLoopAgent` 的**整个循环** —— 实测让上游在
+     * `tools:[]` 的请求里仍返回 tool_calls，收尾阶段又跑了 12 步（`steps=24`），最终
+     * `turn.wrap_up chars=0` + `model_returned_empty`。真模型不会这么配合，但「最多一次」
+     * 是判据而不是指望；`perTurn.maxCostUsd` 只是兜底（docs/28 · L-AGT-01）。
+     * `stopWhen` 不是 per-call 选项，而 `wrapUpMode` 只在补跑期间为真，所以判据挂在这里；
+     * 补跑那次调用的 `steps` 是它自己的（从 0 数起，与 `mainStepCount` 的重编号一致）。
+     */
+    stopWhen: [stepCountIs(Math.min(dependencies.config.agent.main.maxSteps, dependencies.config.quota.perTurn.maxSteps)),
+      ({ steps }) => wrapUpMode && steps.length >= 1],
     include: { requestMessages: true, requestBody: true, responseBody: true },
     prepareStep: async ({ stepNumber: rawStep, messages }) => {
       // 收尾补跑是**另一次** `agent.generate`，它的 stepNumber 从 0 重新起。不换算的话：
