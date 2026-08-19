@@ -36,6 +36,21 @@ const approvalRuleSchema = z.object({
   const checked = checkApprovalPattern(rule.pattern);
   if (!checked.ok) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['pattern'], message: `这条规则在运行时永不命中：${checked.reason}` });
 });
+/**
+ * Bot API 的全部更新类型（`getUpdates` 的 `allowed_updates`）。**前四条是本适配器真的有处理器的**，
+ * 排在前面是因为 WebUI 按这个顺序渲染那一组复选框；其余的申报了也不会有任何行为 —— 逐条的
+ * 「已处理 / 无处理器」写在 `CONFIG_ENUM_NOTES`（descriptions.ts），与这里同一份顺序。
+ *
+ * 收成 enum 而不是自由字符串：拼错一个名字 Telegram 会整条 `getUpdates` 400，而表现是「bot 一条
+ * 消息都收不到」，与配置面板上那个绿色的「保存成功」隔着一次重启。加处理器时这张表要跟着动。
+ */
+export const TELEGRAM_UPDATE_KINDS = [
+  'message', 'edited_message', 'callback_query', 'my_chat_member',
+  'channel_post', 'edited_channel_post', 'message_reaction', 'message_reaction_count',
+  'inline_query', 'chosen_inline_result', 'shipping_query', 'pre_checkout_query', 'purchased_paid_media',
+  'poll', 'poll_answer', 'chat_member', 'chat_join_request', 'chat_boost', 'removed_chat_boost',
+  'business_connection', 'business_message', 'edited_business_message', 'deleted_business_messages',
+] as const;
 /** 拼错的时区只在群聊分支炸（私聊不走 Intl），漏到运行时会让整个群会话开不了轮次。 */
 const ianaTimezone = z.string().refine((zone) => {
   try { new Intl.DateTimeFormat('en-US', { timeZone: zone }); return true; } catch { return false; }
@@ -194,7 +209,12 @@ export const configSchema = z.object({
   telegram: z.object({
     mode: z.enum(['polling', 'webhook']).default('polling'),
     dropPendingOnStart: z.boolean().default(false),
-    allowedUpdates: z.array(z.string()).default(['message', 'edited_message', 'callback_query', 'my_chat_member', 'message_reaction']),
+    // 默认值 = 有处理器的那四条。`message_reaction` 曾在默认值里躺着，而适配器从来没有接过它
+    // （`packages/telegram` 里只有**发**表情的工具）—— 申报一类没人处理的更新只是白拉一遍流量。
+    // 一条都不勾**不等于**什么都不收：Bot API 把空数组读作「除 chat_member 那几类外全都收」，
+    // 正好与界面上「一个都没勾」相反。所以空数组当场拒掉，而不是留一个语义翻转的格子。
+    allowedUpdates: z.array(z.enum(TELEGRAM_UPDATE_KINDS)).min(1, { message: '至少留一类（一定要有 message，否则 bot 收不到任何消息）：空数组在 Bot API 里表示「几乎全都收」，与界面上一个都没勾的意思相反' })
+      .default(['message', 'edited_message', 'callback_query', 'my_chat_member']),
     webhook: z.object({ url: z.string().default(''), path: z.string().default('/webhook/telegram'), secretToken: z.string().default('') }).default({}),
     allowBots: z.array(z.string()).default([]),
     notifyEdits: z.boolean().default(true),
@@ -286,7 +306,7 @@ export const configSchema = z.object({
     exec: z.object({ defaultTimeoutMs: z.number().int().positive().default(60_000), maxTimeoutMs: z.number().int().positive().default(300_000), maxOutputBytes: z.number().int().positive().default(65_536) }).default({}),
     archive: z.object({ defaultSearchLimit: z.number().int().positive().default(20), maxSearchLimit: z.number().int().positive().default(100), defaultReadLimit: z.number().int().positive().default(50), maxReadLimit: z.number().int().positive().default(200) }).default({}),
     tg: z.object({ maxExtraMessagesPerTurn: z.number().int().nonnegative().default(3), maxFileSendMb: z.number().positive().default(50) }).default({}),
-    web: z.object({ maxResponseBytes: z.number().int().positive().default(2_097_152), timeoutMs: z.number().int().positive().default(15_000), retries: z.number().int().nonnegative().max(5).default(2), summarizeWithAlias: z.string().default('low'), allowlist: z.array(z.string()).default([]), denylist: z.array(z.string()).default(['*.local', '*.internal']), searchProvider: z.enum(['', 'brave', 'serper', 'tavily']).default(''), searchApiKey: z.string().default('') }).default({}),
+    web: z.object({ maxResponseBytes: z.number().int().positive().default(2_097_152), timeoutMs: z.number().int().positive().default(15_000), retries: z.number().int().nonnegative().max(5).default(2), summarizeWithAlias: z.string().default('low'), allowlist: z.array(z.string()).default([]), denylist: z.array(z.string()).default(['*.local', '*.internal']), searchProvider: z.enum(['', 'brave', 'serper', 'tavily', 'exa']).default(''), searchApiKey: z.string().default('') }).default({}),
     // 自我扩展（docs/07 §6）：模型给自己写工具 / 写 skill / 写 plugin / 装 MCP。
     // **整块默认关闭**，与 `mcp.enabled`、`agent.harness.allowedDirs` 同一个形态 —— 这几件事都是
     // 「打开之后模型能改变自己下一轮的能力」，默认值必须是关。
@@ -385,9 +405,14 @@ export const configSchema = z.object({
   alerts: z.object({ notifyOwner: z.boolean().default(true), dedupeMinutes: z.number().positive().default(30), webhookUrl: z.string().default(''), on: z.array(z.string()).default([]) }).default({}),
   perChat: z.record(z.unknown()).default({}),
 }).superRefine((cfg, ctx) => {
-  if (cfg.concurrency.perKey > cfg.concurrency.global) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['concurrency', 'perKey'], message: 'perKey must be <= global' });
-  if (cfg.memory.softLimitTokens >= cfg.memory.hardLimitTokens) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['memory', 'softLimitTokens'], message: 'softLimitTokens must be < hardLimitTokens' });
-  if (cfg.webui.host !== '127.0.0.1' && cfg.webui.host !== '::1' && !cfg.webui.passwordHash) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['webui', 'passwordHash'], message: 'password is required when binding beyond loopback' });
+  /**
+   * 跨字段的三条**必须点名对方那一格现在是多少**：WebUI 的表单一次只改一格，而这三条报错说的是
+   * 「你改的这一格和另一格冲突」—— 只说「必须小于硬上限」的话，运维看不出硬上限此刻是几，
+   * 也就不知道该把哪一格改成什么（`GET /api/config` 里那 200 多个值得自己翻）。
+   */
+  if (cfg.concurrency.perKey > cfg.concurrency.global) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['concurrency', 'perKey'], message: `单会话并发（${cfg.concurrency.perKey}）不能大于全局并发 concurrency.global（当前 ${cfg.concurrency.global}）—— 前者是后者的一部分` });
+  if (cfg.memory.softLimitTokens >= cfg.memory.hardLimitTokens) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['memory', 'softLimitTokens'], message: `软上限（${cfg.memory.softLimitTokens}）必须小于硬上限 memory.hardLimitTokens（当前 ${cfg.memory.hardLimitTokens}）：软上限触发压缩、硬上限直接截断，两者相等等于压缩永远来不及。要调大就把这两格一起改` });
+  if (cfg.webui.host !== '127.0.0.1' && cfg.webui.host !== '::1' && !cfg.webui.passwordHash) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['webui', 'passwordHash'], message: `绑到 ${cfg.webui.host} 这种非回环地址时必须先设登录口令（webui.passwordHash 现在是空的）：pnpm webui:passwd <口令> 生成哈希，或用设置页的「修改登录口令」` });
   for (const [key, value] of Object.entries(cfg.perChat)) {
     const walk = (node: unknown, prefix = ''): void => {
       if (!node || typeof node !== 'object' || Array.isArray(node)) {

@@ -253,15 +253,19 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
 
 ### 3.6 主体与权限（Principals）
 - 表格：kind、tg_id、显示名/username、角色、首次出现、最后活跃、消息数、今日花费、备注。
-- **子导航把用户与群聊分开**（全部 / 用户 / 群聊，每项带计数）：两者的语义不同 ——
+- **子导航分四档**（全部 / 用户 / 私聊 / 群与频道，每项带计数）：三者的语义不同 ——
   会话角色只是上限，群里某人的有效角色 = min(他自己的角色, 该群的角色)，混在一张表里看不出来。
+- **`kind` 不是类型标签。** 库里它只有 `user` / `chat` 两个取值，而 `chat` 是「一个 Telegram 会话」
+  **不是「群」**：每个私聊也有一行 `chat:<用户 id>`。类型一律按 `principals.chat_type` 显示
+  （私聊 / 普通群 / 超级群 / 频道），缺失时回落到 Telegram id 的正负号 —— 与会话页的
+  `chatIdentity()` 同一套判据，两处不许各写一份（[21 · G-UI-01](./21-webui-coverage-gaps.md)）。
 - 点任一行打开二级菜单（`UiModal`）：只读展示 kind / tg_id / 显示名 / username，
   角色下拉可改并写明该角色意味着什么；升到 `owner` 时额外警示「跳过审批与沙箱」。
   保存走 `PATCH /api/principals/:id`，下一轮生效并写审计日志。
 - **表格每行带勾选框**，选中若干行后表格上方出现批量条（已勾选数 + `[清空勾选]` + `[批量改角色]`）：
   对话框里选目标角色、列出被选中的主体（类型 / 名字 / 当前角色）、写明该角色意味着什么，
   保存走 `POST /api/principals/roles`。一次新进十几个人时逐行点开改角色是纯粹的重复劳动。
-  切换「全部 / 用户 / 群聊」子导航会清空勾选（跨 kind 的批量在语义上是两回事）。
+  切换子导航会清空勾选（跨类型的批量在语义上是两回事）。
 - 引导 owner（`access.bootstrapOwnerId` 指向的那一行）在表里带 `引导 OWNER` 徽标，
   批量改角色时若选中了它且目标不是 owner，对话框里红色提示「降级之后 Telegram 那边没人能管 bot」。
   另外**引导 owner 的显示名与用户名只能由 Telegram 那边写**：启动时的 `ensureOwner` 只在行不存在时插入占位的 `Owner`，
@@ -567,8 +571,14 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
   手写控件必然与 schema 漂移，所以前端**不维护第二份清单**，控件形态一律从 schema 推：
   布尔 → 开关药丸（写着「已开启 / 已关闭」，不是一个孤零零的勾选框），`enum` → 下拉，
   `integer`/`number` → 数字框（`anyOf[number,null]` 留空即「不限」），
-  字符串数组 → 一行一条的文本域，对象与对象数组（`tools.overrides`、`approval.rules`、
+  字符串数组 → 一行一条的文本域，**取值受限的数组（`items.enum`）→ 一组复选框**，
+  对象与对象数组（`tools.overrides`、`approval.rules`、
   `agent.agents`、`mcp.servers`）→ JSON 文本域（保存前本地校验，敲错了不发请求）。
+  - **复选框那一档还带逐个取值的说明**（`CONFIG_ENUM_NOTES`，随三件套一起进
+    `GET /api/config/schema` 的 `enumNotes`）：一格里的取值不总是等价的 ——
+    `telegram.allowedUpdates` 那 23 个 Bot API 更新类型里只有 4 个真的有处理器，
+    而它们在界面上长得一模一样。这件事写不进那一格的 `description`（一句话装不下 23 条），
+    不写又等于让运维勾一个「勾了什么都不会发生」的框（[21 · G-UI-02](./21-webui-coverage-gaps.md)）。
   - **作用说明同样来自 schema 的 `description`**：唯一来源是 `packages/core/src/config/descriptions.ts`
     的 `CONFIG_DESCRIPTIONS`（点分路径 → 一句话），由 `configJsonSchema()` 注入
     —— `GET /api/config/schema` 与 `pnpm config:schema` 生成的文件走的是同一个函数。

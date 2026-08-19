@@ -1,7 +1,7 @@
 import { lookup } from 'node:dns/promises';
 import { createServer, type Server } from 'node:http';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { guardedFetch, webFetch, withWebRetries } from '@luoli/core';
+import { guardedFetch, searchRequest, searchResults, webFetch, withWebRetries } from '@luoli/core';
 
 describe('web fetch SSRF guard', () => {
   it('rejects private, reserved, tunneled, and non-HTTP ports before fetching', async () => {
@@ -100,5 +100,38 @@ describe('web tool retries', () => {
   // 站点自己答的 404 是答案，不是「这一次没打通」：重试它只是白等三倍时间。
   it('does not retry a target that refuses on policy grounds', async () => {
     await expect(webFetch('http://169.254.169.254/latest/meta-data', 1024, signal(), fast)).rejects.toThrow('ssrf_blocked');
+  });
+});
+
+/**
+ * 四家搜索 API 的请求形态与结果位置（docs/11 的 `tools.web.searchProvider`）。
+ *
+ * 断言的是不出网就能查的那四件事：打哪个地址、key 挂在哪个头上、请求体的字段名、结果数组藏在
+ * 哪个键下面。加一家 provider 时错的正是它们，而错了的表现是「搜索永远 0 条」或「key 根本没送
+ * 上去」—— 两者都要真打一次上游才看得见，于是它们此前一条断言都没有。
+ */
+describe('web search provider shapes', () => {
+  it('builds each provider request with its own auth header and body', () => {
+    expect(searchRequest('brave', 'k', '洛璃 是谁', 5)).toMatchObject({
+      target: 'https://api.search.brave.com/res/v1/web/search?q=%E6%B4%9B%E7%92%83%20%E6%98%AF%E8%B0%81&count=5',
+      method: 'GET', headers: { 'x-subscription-token': 'k' },
+    });
+    expect(searchRequest('brave', 'k', 'q', 5).body).toBeUndefined();
+    expect(searchRequest('serper', 'k', 'q', 3)).toMatchObject({ target: 'https://google.serper.dev/search', method: 'POST', headers: { 'x-api-key': 'k' }, body: '{"q":"q","num":3}' });
+    // tavily 的 key 在**请求体**里而不是头上 —— 照着别家抄成 header 的话它会一路 401。
+    expect(JSON.parse(searchRequest('tavily', 'k', 'q', 3).body!)).toEqual({ api_key: 'k', query: 'q', max_results: 3 });
+    expect(searchRequest('exa', 'k', 'q', 4)).toMatchObject({ target: 'https://api.exa.ai/search', method: 'POST', headers: { 'x-api-key': 'k' } });
+    // exa 不带 contents 时每条只有标题和 URL；highlights 是这个实现刻意要的那一档（全文按页计费）。
+    expect(JSON.parse(searchRequest('exa', 'k', 'q', 4).body!)).toEqual({ query: 'q', numResults: 4, contents: { highlights: true } });
+  });
+
+  it('reads the result array out of each provider response, and gives [] for a shape it does not know', () => {
+    expect(searchResults('brave', { web: { results: [{ title: 'a' }] } })).toEqual([{ title: 'a' }]);
+    expect(searchResults('serper', { organic: [{ title: 'b' }] })).toEqual([{ title: 'b' }]);
+    expect(searchResults('tavily', { results: [{ title: 'c' }] })).toEqual([{ title: 'c' }]);
+    expect(searchResults('exa', { requestId: 'x', results: [{ title: 'd', highlights: ['片段'] }], costDollars: { total: 0.007 } })).toEqual([{ title: 'd', highlights: ['片段'] }]);
+    // 上游改了形状（或答了一份错误体）时给空数组，而不是把一个对象当成结果往上送。
+    expect(searchResults('exa', { error: 'nope' })).toEqual([]);
+    expect(searchResults('brave', {})).toEqual([]);
   });
 });

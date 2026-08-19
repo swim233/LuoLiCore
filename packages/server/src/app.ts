@@ -11,7 +11,7 @@ import { bodyLimit } from 'hono/body-limit';
 import { getConnInfo } from '@hono/node-server/conninfo';
 import { serveStatic } from '@hono/node-server/serve-static';
 import type { AgentManager, Config, ConfigChangedEvent, ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, PluginManager, PromptDocuments, ProviderStore, Sandbox, SkillLoader, SkillWriteInput, SubAgentRuntimeEvent, TurnRegistry } from '@luoli/core';
-import { ALIAS_NAME_PATTERN, HOT_RELOADABLE_CONFIG_KEYS, chatCandidates, createScheduledJob, mergeAgentDefinitions, scanAgentFiles, scheduledJobView, testApprovalRules, KNOWN_UNIMPLEMENTED_CONFIG_KEYS, TOOL_POLICY, aliasSettingsSchema, checkWakeword, configSchema as runtimeConfigSchema, envPinnedConfigKeys, perChatConfig, probeProvider, quotaBucket, rejectedWakewords } from '@luoli/core';
+import { ALIAS_NAME_PATTERN, CONFIG_ENUM_NOTES, HOT_RELOADABLE_CONFIG_KEYS, chatCandidates, createScheduledJob, mergeAgentDefinitions, scanAgentFiles, scheduledJobView, testApprovalRules, KNOWN_UNIMPLEMENTED_CONFIG_KEYS, TOOL_POLICY, aliasSettingsSchema, checkWakeword, configSchema as runtimeConfigSchema, envPinnedConfigKeys, perChatConfig, probeProvider, quotaBucket, rejectedWakewords } from '@luoli/core';
 import { APPROVAL_POLICIES, BUNDLED_SKILLS, SkillPackageError, effectiveToolPolicy, installSkillPackage, looksSecret, persistMcpServers as persistMcpServersShared, publicConfig, relaxedFields, revisionJson } from '@luoli/core';
 import type { CatalogIndex, ContainerManager, CustomToolManager, ModelMetadata, ProviderProbe, ToolOverride, ToolRegistry } from '@luoli/core';
 import type { ArchiveRepository, CustomToolRepository, OperationsRepository, PrincipalRepository, ScheduleRepository, ScheduledJob, Sqlite } from '@luoli/db';
@@ -114,6 +114,20 @@ function mergeDotted(base: unknown, updates: Record<string, unknown>): { ok: tru
   return { ok: true, value: clone };
 }
 const invalidKey = (result: { ok: false; key: string }) => apiError('invalid_config_key', `非法配置键：${result.key}`);
+/**
+ * 配置校验失败的统一信封。**原因必须拼进 `message`**：`details` 一直挂在这儿，而前端的 toast 只念
+ * `message` —— 界面上就只剩一句「配置校验失败」，看不出是哪一格、更看不出为什么。跨字段的那几条
+ * （`memory.softLimitTokens` 与硬上限、`concurrency.perKey` 与全局并发）因此变成哑巴 400：
+ * 报错说的是「你改的这一格和另一格冲突」，而运维连是哪两格都不知道。
+ *
+ * 只拼前两条：一次改一格时它就是全部；整棵树提交（YAML / 导入）时拼十条只会把 toast 撑成一堵墙，
+ * 余下的仍在 `details` 里 —— 那一份是结构化的，能按 path 定位到具体控件。
+ */
+const invalidConfig = (summary: string, issues: ReadonlyArray<{ path: ReadonlyArray<string | number>; message: string }>) => {
+  const details = issues.map((issue) => ({ path: issue.path.join('.'), message: issue.message }));
+  const head = details.slice(0, 2).map((entry) => (entry.path ? `${entry.path} —— ${entry.message}` : entry.message)).join('；');
+  return { body: { ok: false as const, error: { code: 'invalid_config', message: details.length > 2 ? `${summary}（共 ${details.length} 条）：${head} 等` : `${summary}：${head}`, details } }, status: 400 as const };
+};
 /**
  * 一棵配置树里的**叶子路径**。`PUT /api/config/yaml` 的落库粒度：按顶层段落库时 zod 已经把每个
  * `.default()` 填满，写回去的是填满之后那整棵子树，一次「一个字不改」的往返就把那一刻的代码默认值
@@ -491,7 +505,9 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
   // 三件套一律放进 `data`：统一信封的客户端只解 `data`，挂在信封顶层的兄弟键会被静默丢掉 ——
   // 自动生成的表单正是靠这两份前缀表判断「热更新 / 需重启」与「未接线」的。
   // `envPinned` 是第三份前缀表：这些键的 config_kv 行会被 env 层压掉，表单据此禁控件并点名环境变量。
-  app.get('/api/config/schema', (ctx) => ctx.json({ ok: true, data: { schema: dependencies.configSchema, hotReloadable: HOT_RELOADABLE_CONFIG_KEYS, unimplemented: KNOWN_UNIMPLEMENTED_CONFIG_KEYS, envPinned: envPinnedConfigKeys() } }));
+  // `enumNotes` 是第四份：一格里的取值不等价时（`telegram.allowedUpdates` 23 个取值只有 4 个有
+  // 处理器）逐个取值给一句话，否则界面上那 23 个复选框长得一模一样。同样只能挂在 `data` 里。
+  app.get('/api/config/schema', (ctx) => ctx.json({ ok: true, data: { schema: dependencies.configSchema, hotReloadable: HOT_RELOADABLE_CONFIG_KEYS, unimplemented: KNOWN_UNIMPLEMENTED_CONFIG_KEYS, envPinned: envPinnedConfigKeys(), enumNotes: CONFIG_ENUM_NOTES } }));
   // 不安全或过短的唤醒词在匹配时被静默跳过（trigger.ts）。收下这种模式等于让运维以为配好了，
   // 实际表现是「bot 不理我」，所以写入端直接挡回去；只在这次写操作真的动了唤醒词时校验。
   app.post('/api/config/wakewords/check', async (ctx) => {
@@ -509,7 +525,7 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     const merged = mergeDotted(currentConfig(), body);
     if (!merged.ok) return ctx.json(invalidKey(merged).body, 400);
     const parsed = runtimeConfigSchema.safeParse(merged.value);
-    if (!parsed.success) return ctx.json({ ok: false, error: { code: 'invalid_config', message: '配置校验失败', details: parsed.error.issues.map((issue) => ({ path: issue.path.join('.'), message: issue.message })) } }, 400);
+    if (!parsed.success) return ctx.json(invalidConfig('配置校验失败', parsed.error.issues).body, 400);
     if (Object.keys(body).some((key) => key === 'trigger' || key.startsWith('trigger.'))) {
       const rejected = rejectedWakewords(parsed.data.trigger.wakewords, parsed.data.trigger.wakewordMinLength);
       if (rejected.length) return ctx.json(apiError('invalid_wakeword', `唤醒词不会生效：${rejected.join('；')}`).body, 400);
@@ -551,7 +567,7 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     const merged = mergeDotted(currentConfig(), { [key]: body });
     if (!merged.ok) return ctx.json(invalidKey(merged).body, 400);
     const parsed = runtimeConfigSchema.safeParse(merged.value);
-    if (!parsed.success) return ctx.json({ ok: false, error: { code: 'invalid_config', message: '会话覆盖校验失败', details: parsed.error.issues.map((issue) => ({ path: issue.path.join('.'), message: issue.message })) } }, 400);
+    if (!parsed.success) return ctx.json(invalidConfig('会话覆盖校验失败', parsed.error.issues).body, 400);
     if (body.trigger) {
       const merged = perChatConfig(parsed.data, ctx.req.param('key')).trigger;
       const rejected = rejectedWakewords(merged.wakewords, merged.wakewordMinLength);
@@ -613,7 +629,7 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     }
     if (!tree || typeof tree !== 'object' || Array.isArray(tree)) return ctx.json(apiError('invalid_yaml', '顶层必须是一个映射（key: value），不是数组或标量').body, 400);
     const parsed = runtimeConfigSchema.safeParse(tree);
-    if (!parsed.success) return ctx.json({ ok: false, error: { code: 'invalid_config', message: '配置校验失败', details: parsed.error.issues.map((issue) => ({ path: issue.path.join('.'), message: issue.message })) } }, 400);
+    if (!parsed.success) return ctx.json(invalidConfig('配置校验失败', parsed.error.issues).body, 400);
     // 落库粒度是**提交的那棵树的叶子**（`configLeafPaths`），不是顶层段：按段落库时写回去的是
     // zod 把 `.default()` 填满之后那整棵子树，一次「一个字不改」的往返就把生效覆盖叶子从 73 涨到
     // 171、把那一刻的代码默认值永久钉死（docs/28 · L-WEB-02）。键取自**提交的树**、值取自
@@ -664,7 +680,7 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     const merged = mergeDotted(currentConfig(), Object.fromEntries(applicable.map((key) => [key, overrides[key]])));
     if (!merged.ok) return ctx.json(invalidKey(merged).body, 400);
     const parsed = runtimeConfigSchema.safeParse(merged.value);
-    if (!parsed.success) return ctx.json({ ok: false, error: { code: 'invalid_config', message: '导入的配置校验失败', details: parsed.error.issues.map((issue) => ({ path: issue.path.join('.'), message: issue.message })) } }, 400);
+    if (!parsed.success) return ctx.json(invalidConfig('导入的配置校验失败', parsed.error.issues).body, 400);
     const rows: Array<[string, unknown]> = applicable.map((key) => [key, readDotted(parsed.data, key)]);
     const unknownKeys = rows.filter(([, value]) => value === undefined).map(([key]) => key);
     if (unknownKeys.length) return ctx.json(apiError('unknown_config_key', `${unknownKeys.join('、')} 不是 schema 里的配置路径`).body, 400);
@@ -1266,7 +1282,7 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     const merged = mergeDotted(currentConfig(), { [key]: next });
     if (!merged.ok) return ctx.json(invalidKey(merged).body, 400);
     const parsed = runtimeConfigSchema.safeParse(merged.value);
-    if (!parsed.success) return ctx.json({ ok: false, error: { code: 'invalid_config', message: '工具覆盖校验失败', details: parsed.error.issues.map((issue) => ({ path: issue.path.join('.'), message: issue.message })) } }, 400);
+    if (!parsed.success) return ctx.json(invalidConfig('工具覆盖校验失败', parsed.error.issues).body, 400);
     writeConfigRows([[key, readDotted(parsed.data, key)]], 'webui');
     dependencies.events.emit('config.changed', { keys: [key] });
     // 放宽记 warn 而不是 info：这是日志页上最该一眼看见的运维动作。这个端点此前一条日志都不记。
@@ -1285,7 +1301,7 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     const merged = mergeDotted(currentConfig(), dotted);
     if (!merged.ok) return ctx.json(invalidKey(merged).body, 400);
     const parsed = runtimeConfigSchema.safeParse(merged.value);
-    if (!parsed.success) return ctx.json({ ok: false, error: { code: 'invalid_config', message: '沙箱配置校验失败', details: parsed.error.issues } }, 400);
+    if (!parsed.success) return ctx.json(invalidConfig('沙箱配置校验失败', parsed.error.issues).body, 400);
     writeConfigRows(Object.entries(dotted), 'webui');
     dependencies.events.emit('config.changed', { keys: Object.keys(dotted) });
     return ctx.json({ ok: true, data: body });
@@ -1357,7 +1373,7 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     const merged = mergeDotted(currentConfig(), { 'approval.rules': rules });
     if (!merged.ok) return ctx.json(invalidKey(merged).body, 400);
     const parsed = runtimeConfigSchema.safeParse(merged.value);
-    if (!parsed.success) return ctx.json({ ok: false, error: { code: 'invalid_config', message: '规则校验失败', details: parsed.error.issues.map((issue) => ({ path: issue.path.join('.'), message: issue.message })) } }, 400);
+    if (!parsed.success) return ctx.json(invalidConfig('规则校验失败', parsed.error.issues).body, 400);
     const matched = testApprovalRules(parsed.data.approval.rules, body.tool, body.input ?? {});
     return ctx.json({ ok: true, data: matched });
   });
@@ -1853,7 +1869,7 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     const merged = mergeDotted(currentConfig(), dotted);
     if (!merged.ok) return ctx.json(invalidKey(merged).body, 400);
     const parsed = runtimeConfigSchema.safeParse(merged.value);
-    if (!parsed.success) return ctx.json({ ok: false, error: { code: 'invalid_config', message: '配额配置校验失败', details: parsed.error.issues.map((issue) => ({ path: issue.path.join('.'), message: issue.message })) } }, 400);
+    if (!parsed.success) return ctx.json(invalidConfig('配额配置校验失败', parsed.error.issues).body, 400);
     writeConfigRows(Object.entries(dotted), 'webui');
     dependencies.events.emit('config.changed', { keys: Object.keys(dotted) });
     return ctx.json({ ok: true, data: { keys: Object.keys(dotted) } });

@@ -36,7 +36,14 @@ const RESPONSES: Record<string, unknown> = {
     unpriced: [], unpricedTotal: 0, unimplemented: [] },
   '/api/config': { general: { name: '洛璃', timezone: 'UTC' }, trigger: { private: true, mention: true, reply: true, command: true, channels: false, wakewords: ['洛璃'], wakewordMinLength: 2, requireTextAfterMention: false, ignoreEditedAsTrigger: true },
     output: { mode: 'stream', replyDelayMs: 0, streamBufferMs: 900, streamIntervalMs: 1500, streamMinDeltaChars: 24, maxMessageChars: 3900 }, webui: { passwordHash: '«redacted»' } },
-  '/api/config/schema': { schema: { definitions: { LuoLiConfig: { properties: {} } } }, hotReloadable: [], unimplemented: [], envPinned: [] },
+  '/api/config/schema': { schema: { definitions: { LuoLiConfig: { properties: {} } } }, hotReloadable: [], unimplemented: [], envPinned: [], enumNotes: {} },
+  // 主体三行：一个用户、一个私聊会话（`chat:` 前缀 + 正数 id + chat_type=private）、一个超级群。
+  // 私聊那一行是 docs/21 · G-UI-01 的形态 —— 它此前在这一页上一律显示成「群聊」。
+  '/api/principals': [
+    { id: 'user:555', kind: 'user', tgId: '555', role: 'owner', displayName: '主人', username: 'owner', chatType: null },
+    { id: 'chat:555', kind: 'chat', tgId: '555', role: 'owner', displayName: '主人', username: 'owner', chatType: 'private' },
+    { id: 'chat:-100777', kind: 'chat', tgId: '-100777', role: 'trusted', displayName: '绒布球聚集地', username: null, chatType: 'supergroup' },
+  ],
   '/api/sandbox': { mode: 'docker', bypassRoles: ['owner'], plan: { allowed: true, mode: 'docker' } },
   // 扁平字段是生效值，`defaults` 是代码里那份 —— 少了 defaults，工具页弹窗的「代码默认」绑定读到 undefined。
   '/api/tools': { bash: { minRole: 'trusted', approval: 'conditional', scope: 'global', source: 'builtin', enabled: true,
@@ -155,6 +162,33 @@ describe('ConsoleView 渲染', () => {
     const rendering = warnings.filter((line) => line.includes('[Vue warn]'));
     expect(rendering, `渲染期间产生了 Vue 警告：\n${rendering.join('\n')}`).toEqual([]);
     spy.mockRestore();
+    wrapper.unmount();
+  });
+
+  /**
+   * 主体页的类型标签（docs/21 · G-UI-01）。`principals.kind` 只有 `user` / `chat`，而 `chat` 是
+   * 「一个 Telegram 会话」**不是「群」**：每个私聊也有一行 `chat:<用户 id>`。这一页此前把 kind
+   * 直接当标签用，于是私聊一律显示成「群聊」—— 而同一份数据在会话页上是对的（那边读 `chat_type`）。
+   */
+  it('主体页按 chat_type 区分私聊与群，筛选页签也跟着分', async () => {
+    const { default: ConsoleView } = await import('../../packages/webui/src/views/ConsoleView.vue');
+    const wrapper = mount(ConsoleView, { attachTo: document.body });
+    await settle(wrapper);
+    const vm = wrapper.vm as unknown as { active: string; principalKind: string; visiblePrincipals: Array<{ id: string }> };
+    vm.active = 'principals';
+    await settle(wrapper);
+    const rows = wrapper.findAll('tbody tr').map((row) => row.text());
+    expect(rows.find((text) => text.includes('绒布球聚集地')), '群那一行没渲染出来').toContain('超级群');
+    // 私聊那一行：不能出现「群聊」这个词，而它的 tgId 是正数、chat_type 是 private。
+    const privateRow = rows.find((text) => text.includes('私聊'));
+    expect(privateRow, '私聊会话那一行没有按 chat_type 标出来').toBeDefined();
+    expect(privateRow).not.toContain('群');
+    // 四个页签把三行分成 3 / 1 / 1 / 1。
+    for (const [kind, ids] of [['all', ['user:555', 'chat:555', 'chat:-100777']], ['user', ['user:555']], ['private', ['chat:555']], ['group', ['chat:-100777']]] as const) {
+      vm.principalKind = kind;
+      await settle(wrapper);
+      expect(vm.visiblePrincipals.map((entry) => entry.id), `${kind} 页签筛出来的行不对`).toEqual([...ids]);
+    }
     wrapper.unmount();
   });
 

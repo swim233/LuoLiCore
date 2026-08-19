@@ -41,6 +41,19 @@ const SCHEMA = {
   },
 } as const;
 
+/** 取值受限的数组：`items.enum`（zodToJsonSchema 对 `z.array(z.enum([…]))` 发的就是这个形状）。 */
+const ENUM_ARRAY_SCHEMA = {
+  type: 'object',
+  properties: {
+    telegram: {
+      type: 'object',
+      properties: {
+        allowedUpdates: { type: 'array', items: { type: 'string', enum: ['message', 'message_reaction', 'my_chat_member'] }, default: ['message'], description: '收哪几类更新' },
+      },
+    },
+  },
+} as const;
+
 const mountForm = (value: Record<string, unknown>) => mount(SchemaForm, {
   props: { schema: SCHEMA as unknown as Record<string, unknown>, value, hotReloadable: [], unimplemented: [], saving: false },
   attachTo: document.body,
@@ -68,6 +81,38 @@ describe('SchemaForm 的「只看非默认值」', () => {
     await wrapper.vm.$nextTick();
     expect(vm.groups.map((group) => group.name)).toEqual(['logs']);
     expect(vm.groups[0]?.entries).toHaveLength(1);
+    wrapper.unmount();
+  });
+
+  /**
+   * 取值受限的数组渲染成一组复选框（docs/21 · G-UI-02）。三条断言各锁一件事：
+   * 控件形态是复选框而不是文本域、逐值注解真的渲染出来、以及**没动过的表单不是脏的** ——
+   * 值在内部以「一行一条的文本」持有，直接持数组的话 `changed` 那个 `!==` 会把每一格都认成待保存。
+   */
+  it('取值受限的数组给复选框，勾选按 schema 的 enum 顺序回传', async () => {
+    const wrapper = mount(SchemaForm, {
+      props: {
+        schema: ENUM_ARRAY_SCHEMA as unknown as Record<string, unknown>,
+        value: { telegram: { allowedUpdates: ['message', 'my_chat_member'] } },
+        hotReloadable: [], unimplemented: [], saving: false,
+        enumNotes: { 'telegram.allowedUpdates': { message: '已处理 · 主消息入口', my_chat_member: '已处理', message_reaction: '无处理器' } },
+      },
+      attachTo: document.body,
+    });
+    await wrapper.vm.$nextTick();
+    const vm = wrapper.vm as unknown as { openGroups: Set<string>; changed: unknown[] };
+    vm.openGroups = new Set(['telegram']);
+    await wrapper.vm.$nextTick();
+    expect(wrapper.findAll('.enum-choices .ui-check')).toHaveLength(3);
+    expect(wrapper.find('.enum-choices').text()).toContain('无处理器');
+    expect(wrapper.findAll('.enum-choices input[type="checkbox"]').map((input) => (input.element as HTMLInputElement).checked)).toEqual([true, false, true]);
+    // 一个字都没动 → 没有待保存项。
+    expect(vm.changed).toHaveLength(0);
+
+    // 勾上第二个（schema 里排在中间的 message_reaction），回传的数组按 enum 顺序而不是点击顺序。
+    await wrapper.findAll('.enum-choices input[type="checkbox"]')[1]!.setValue(true);
+    (wrapper.vm as unknown as { save(): void }).save();
+    expect(wrapper.emitted('save')?.at(-1)).toEqual([{ 'telegram.allowedUpdates': ['message', 'message_reaction', 'my_chat_member'] }]);
     wrapper.unmount();
   });
 

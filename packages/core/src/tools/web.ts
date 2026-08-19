@@ -118,17 +118,42 @@ export async function withWebRetries<T>(options: WebRetryOptions, abortSignal: A
  *
  * **`maxRedirects: 0`**：搜索 API 不需要重定向，一次 3xx 就该当异常而不是跟过去。
  */
-export async function webSearch(provider: 'brave' | 'serper' | 'tavily', apiKey: string, query: string, limit: number, abortSignal: AbortSignal, options: WebRetryOptions = DEFAULT_WEB_RETRY, maxBytes = 1_048_576): Promise<Record<string, unknown>> {
-  if (!apiKey) return { ok: false, error: 'web_search_key_missing' };
-  const target = provider === 'brave' ? `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${limit}` : provider === 'serper' ? 'https://google.serper.dev/search' : 'https://api.tavily.com/search';
+export type SearchProvider = 'brave' | 'serper' | 'tavily' | 'exa';
+/**
+ * 四家搜索 API 的差异**全在这两个函数里**：打哪个地址、认证头叫什么、请求体怎么写、结果数组藏在
+ * 哪个键下面。抽出来是为了能在不出网的情况下断言它 —— 加一家 provider 时错的正是这四件事，
+ * 而错了的表现是「搜索永远返回 0 条」或「key 送不上去」，两者都要真打一次上游才看得见。
+ */
+export function searchRequest(provider: SearchProvider, apiKey: string, query: string, limit: number): { target: string; method: 'GET' | 'POST'; headers: Record<string, string>; body?: string } {
   const headers: Record<string, string> = { 'content-type': 'application/json' };
-  let body: string | undefined;
-  if (provider === 'brave') headers['x-subscription-token'] = apiKey;
-  else if (provider === 'serper') { headers['x-api-key'] = apiKey; body = JSON.stringify({ q: query, num: limit }); }
-  else body = JSON.stringify({ api_key: apiKey, query, max_results: limit });
+  if (provider === 'brave') {
+    headers['x-subscription-token'] = apiKey;
+    return { target: `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${limit}`, method: 'GET', headers };
+  }
+  if (provider === 'serper') {
+    headers['x-api-key'] = apiKey;
+    return { target: 'https://google.serper.dev/search', method: 'POST', headers, body: JSON.stringify({ q: query, num: limit }) };
+  }
+  // exa 不带 `contents` 时每条只有 title/url/publishedDate —— 那要模型对每一条再 web_fetch 一次才
+  // 知道值不值得看。`highlights` 给的是命中片段，与 brave 的 description / serper 的 snippet 对齐；
+  // 全文（`contents.text`）刻意不要：按页计费，且十条正文足以顶掉半个上下文窗口。
+  if (provider === 'exa') {
+    headers['x-api-key'] = apiKey;
+    return { target: 'https://api.exa.ai/search', method: 'POST', headers, body: JSON.stringify({ query, numResults: limit, contents: { highlights: true } }) };
+  }
+  return { target: 'https://api.tavily.com/search', method: 'POST', headers, body: JSON.stringify({ api_key: apiKey, query, max_results: limit }) };
+}
+/** 结果数组的位置：brave 在 `web.results`、serper 在 `organic`，tavily 与 exa 都在 `results`。 */
+export function searchResults(provider: SearchProvider, raw: Record<string, unknown>): unknown[] {
+  const values = provider === 'brave' ? (raw.web as { results?: unknown[] } | undefined)?.results : provider === 'serper' ? raw.organic : raw.results;
+  return Array.isArray(values) ? values : [];
+}
+export async function webSearch(provider: SearchProvider, apiKey: string, query: string, limit: number, abortSignal: AbortSignal, options: WebRetryOptions = DEFAULT_WEB_RETRY, maxBytes = 1_048_576): Promise<Record<string, unknown>> {
+  if (!apiKey) return { ok: false, error: 'web_search_key_missing' };
+  const { target, method, headers, body } = searchRequest(provider, apiKey, query, limit);
   return await withWebRetries<Record<string, unknown>>(options, abortSignal, async (attempt) => {
     let response;
-    try { response = await guardedFetch(target, { method: provider === 'brave' ? 'GET' : 'POST', headers, ...(body ? { body } : {}), signal: abortSignal },
+    try { response = await guardedFetch(target, { method, headers, ...(body ? { body } : {}), signal: abortSignal },
       { allowPrivate: false, maxRedirects: 0, maxBytes, timeoutMs: options.timeoutMs }); }
     catch (error) {
       if (abortSignal.aborted) throw error;
@@ -144,8 +169,8 @@ export async function webSearch(provider: 'brave' | 'serper' | 'tavily', apiKey:
     let raw: Record<string, unknown>;
     try { raw = JSON.parse(response.body.toString('utf8')) as Record<string, unknown>; }
     catch { return { done: { ok: false, error: response.truncated ? 'search_response_truncated' : 'search_bad_json' } }; }
-    const values = provider === 'brave' ? (raw.web as { results?: unknown[] } | undefined)?.results : provider === 'serper' ? raw.organic : raw.results;
-    return { done: { ok: true, provider, ...(attempt ? { attempts: attempt + 1 } : {}), results: Array.isArray(values) ? values.slice(0, limit) : [], content: untrusted(`search:${provider}`, JSON.stringify(values ?? [])) } };
+    const values = searchResults(provider, raw);
+    return { done: { ok: true, provider, ...(attempt ? { attempts: attempt + 1 } : {}), results: values.slice(0, limit), content: untrusted(`search:${provider}`, JSON.stringify(values)) } };
   }, (failure, attempts) => ({ ok: false, error: failure, attempts, hint: `已重试 ${options.retries} 次仍未取到搜索结果（${failure}）；换个说法或稍后再试，不要立刻重复调用。` }));
 }
 

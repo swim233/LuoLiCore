@@ -19,17 +19,19 @@ const props = withDefaults(defineProps<{
   include?: readonly string[];
   /** 被环境变量钉住的键：写得进 config_kv，但 env 层会在加载时盖回去，所以这里只展示不给改。 */
   envPinned?: ReadonlyArray<{ key: string; env: string }>;
+  /** 逐个取值的说明（core 的 `CONFIG_ENUM_NOTES`）：一格里的取值不等价时，光有键的说明不够。 */
+  enumNotes?: Record<string, Record<string, string>>;
   notes?: Record<string, string>;
   saveLabel?: string;
-}>(), { include: undefined, envPinned: () => [], notes: () => ({}), saveLabel: '保存' });
+}>(), { include: undefined, envPinned: () => [], enumNotes: () => ({}), notes: () => ({}), saveLabel: '保存' });
 const emit = defineEmits<{ save: [Record<string, unknown>] }>();
 
-type FieldKind = 'boolean' | 'number' | 'enum' | 'string' | 'stringList' | 'json';
+type FieldKind = 'boolean' | 'number' | 'enum' | 'string' | 'stringList' | 'multiEnum' | 'json';
 interface Field {
   path: string; group: string; label: string; kind: FieldKind; enumValues: string[]; itemHint: string;
   min: number | null; exclusiveMin: boolean; max: number | null; integer: boolean; nullable: boolean;
   defaultValue: unknown; hot: boolean; wired: boolean; readOnly: boolean; secret: boolean; pinnedEnv: string | null;
-  description: string; note: string;
+  description: string; note: string; optionNotes: Record<string, string>;
 }
 type Node = Record<string, unknown>;
 
@@ -80,15 +82,19 @@ function classify(document_: Node, raw: Node, path: string): Field {
   const items = primary.items ? resolve(document_, primary.items as Node) : null;
   const enumValues = Array.isArray(primary.enum) ? primary.enum.map(String) : [];
   const itemEnum = items && Array.isArray(items.enum) ? items.enum.map(String) : [];
+  // 取值受限的数组（`telegram.allowedUpdates`）渲染成一组复选框而不是文本框：那里能填的名字是
+  // Telegram 定死的一张表，让运维自己回忆拼写等于把 `getUpdates` 400（表现为「一条消息都收不到」）
+  // 留在保存成功之后。带 enum 的数组一律走这条路，不是给某个键开的特例。
   const kind: FieldKind = type === 'boolean' ? 'boolean'
     : enumValues.length ? 'enum'
       : type === 'integer' || type === 'number' ? 'number'
-        : type === 'array' ? (items?.type === 'string' ? 'stringList' : 'json')
+        : type === 'array' ? (itemEnum.length ? 'multiEnum' : items?.type === 'string' ? 'stringList' : 'json')
           : type === 'string' ? 'string' : 'json';
   const segments = path.split('.');
   return {
-    path, group: segments[0] ?? path, label: segments.slice(1).join('.') || path, kind, enumValues,
-    itemHint: itemEnum.length ? `可选值：${itemEnum.join(' / ')}` : '',
+    path, group: segments[0] ?? path, label: segments.slice(1).join('.') || path, kind, enumValues: kind === 'multiEnum' ? itemEnum : enumValues,
+    // 复选框自己就把可选值列全了，再重复一遍只会把说明挤下去。
+    itemHint: itemEnum.length && kind !== 'multiEnum' ? `可选值：${itemEnum.join(' / ')}` : '',
     min: typeof primary.minimum === 'number' ? primary.minimum : typeof primary.exclusiveMinimum === 'number' ? primary.exclusiveMinimum : null,
     exclusiveMin: typeof primary.minimum !== 'number' && typeof primary.exclusiveMinimum === 'number',
     max: typeof primary.maximum === 'number' ? primary.maximum : null,
@@ -102,6 +108,7 @@ function classify(document_: Node, raw: Node, path: string): Field {
     pinnedEnv: props.envPinned.find((entry) => entry.key === path)?.env ?? null,
     description: text(raw.description) || text(node.description),
     note: props.notes[path] ?? DEDICATED[path] ?? '',
+    optionNotes: props.enumNotes[path] ?? {},
   };
 }
 
@@ -133,7 +140,9 @@ const groupNote = (name: string): string => text((((root.value.properties as Nod
 function display(field: Field, value: unknown): unknown {
   // 密钥一律不回显（服务端给的本来就是 «redacted»）：空 = 不改，输入了才提交。
   if (field.secret) return '';
-  if (field.kind === 'stringList') return (Array.isArray(value) ? value : []).join('\n');
+  // multiEnum 与 stringList 共用「一行一条的文本」这个内部表示：`changed` 是拿 `!==` 跟基线比的，
+  // 数组每次重建都是新引用，那样每一格都会永远显示「待保存」。
+  if (field.kind === 'stringList' || field.kind === 'multiEnum') return (Array.isArray(value) ? value : []).join('\n');
   if (field.kind === 'json') return JSON.stringify(value ?? (field.defaultValue ?? null), null, 2);
   if (field.kind === 'boolean') return value === true;
   if (field.kind === 'number') return typeof value === 'number' ? value : null;
@@ -229,6 +238,14 @@ function update(field: Field, value: unknown): void {
 const asText = (path: string): string => String(draft.value[path] ?? '');
 const asOption = (path: string): string | null => { const value = draft.value[path]; return value === null || value === undefined ? null : String(value); };
 const asNumber = (path: string): number | null => { const value = draft.value[path]; return typeof value === 'number' ? value : null; };
+const asList = (path: string): string[] => String(draft.value[path] ?? '').split('\n').map((line) => line.trim()).filter(Boolean);
+/** 勾选按 **schema 里 enum 的顺序**重建，不按点击顺序：否则两次勾出同一组会得到两个不同的数组，
+ *  而「有没有改过」是拿字符串比的。 */
+function toggleOption(field: Field, option: string, on: boolean): void {
+  const chosen = new Set(asList(field.path));
+  if (on) chosen.add(option); else chosen.delete(option);
+  update(field, field.enumValues.filter((value) => chosen.has(value)).join('\n'));
+}
 function reset(): void { draft.value = { ...pristine.value }; cleared.value = new Set(); }
 
 const badge = (field: Field): { label: string; severity: TagSeverity; hint: string } => (field.pinnedEnv
@@ -267,7 +284,7 @@ const problems = computed(() => changed.value.flatMap((field) => {
 }));
 function toValue(field: Field, value: unknown): unknown {
   if (field.secret) return cleared.value.has(field.path) ? '' : String(value);
-  if (field.kind === 'stringList') return String(value).split('\n').map((line) => line.trim()).filter(Boolean);
+  if (field.kind === 'stringList' || field.kind === 'multiEnum') return String(value).split('\n').map((line) => line.trim()).filter(Boolean);
   if (field.kind === 'json') return JSON.parse(String(value));
   if (field.kind === 'number') return value === null ? null : Number(value);
   if (field.kind === 'enum') return value === '' ? null : value;
@@ -326,8 +343,10 @@ defineExpose({ commit });
         <span class="count">{{ group.entries.length }} 项</span>
       </button>
       <div v-if="openGroups.has(group.name)" class="schema-fields">
-        <component :is="field.kind === 'boolean' ? 'div' : 'label'" v-for="field in group.entries" :key="field.path"
-          :class="['schema-field', { dirty: changedPaths.has(field.path), nondefault: nonDefaultPaths.has(field.path), off: !field.wired, wide: field.kind === 'json' || field.kind === 'stringList' }]">
+        <!-- multiEnum 与 boolean 一样不能包在 `<label>` 里：里面每个复选框自带 `<label>`，
+             嵌套之后点哪一格都可能落到第一个控件上。 -->
+        <component :is="field.kind === 'boolean' || field.kind === 'multiEnum' ? 'div' : 'label'" v-for="field in group.entries" :key="field.path"
+          :class="['schema-field', { dirty: changedPaths.has(field.path), nondefault: nonDefaultPaths.has(field.path), off: !field.wired, wide: field.kind === 'json' || field.kind === 'stringList' || field.kind === 'multiEnum' }]">
           <span class="schema-key"><code><span v-if="field.label !== field.path" class="prefix">{{ field.group }}.</span>{{ field.label }}</code><UiTag :value="badge(field).label" :severity="badge(field).severity" :title="badge(field).hint" /></span>
           <p v-if="field.description" class="schema-desc">{{ field.description }}</p>
           <template v-if="field.pinnedEnv">
@@ -348,6 +367,12 @@ defineExpose({ commit });
             </span>
             <small class="field-note">只写字段：不回显、留空表示不改。也可以填 <code>${env:NAME}</code> 形式的引用，加载时替换成该环境变量的值。</small>
           </template>
+          <div v-else-if="field.kind === 'multiEnum'" class="enum-choices">
+            <UiCheckbox v-for="option in field.enumValues" :key="option" :model-value="asList(field.path).includes(option)" :disabled="!field.wired"
+              @update:model-value="toggleOption(field, option, $event)">
+              <code>{{ option }}</code><small v-if="field.optionNotes[option]">{{ field.optionNotes[option] }}</small>
+            </UiCheckbox>
+          </div>
           <textarea v-else-if="field.kind === 'json' || field.kind === 'stringList'" :value="asText(field.path)" :disabled="!field.wired" :rows="field.kind === 'json' ? 6 : 3" spellcheck="false" @input="update(field, ($event.target as HTMLTextAreaElement).value)" />
           <UiSwitch v-else-if="field.kind === 'boolean'" :model-value="draft[field.path] === true" :disabled="!field.wired"
             on-label="已开启" off-label="已关闭" @update:model-value="update(field, $event)" />

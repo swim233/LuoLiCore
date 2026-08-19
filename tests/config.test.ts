@@ -1,7 +1,7 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { CONFIG_DESCRIPTIONS, HOT_RELOADABLE_CONFIG_KEYS, KNOWN_UNIMPLEMENTED_CONFIG_KEYS, PER_CHAT_NON_SCHEMA_KEYS, PER_CHAT_OVERRIDE_ALLOWLIST, configJsonSchema, configSchemaLeafPaths, configSchema } from '@luoli/core';
+import { CONFIG_DESCRIPTIONS, CONFIG_ENUM_NOTES, HOT_RELOADABLE_CONFIG_KEYS, KNOWN_UNIMPLEMENTED_CONFIG_KEYS, PER_CHAT_NON_SCHEMA_KEYS, PER_CHAT_OVERRIDE_ALLOWLIST, configJsonSchema, configSchemaLeafPaths, configSchema } from '@luoli/core';
 
 function sourceFiles(directory: string): string[] {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
@@ -102,6 +102,33 @@ describe('config schema', () => {
     const required = new Set([...leaves, ...sections]);
     expect([...required].filter((path) => !CONFIG_DESCRIPTIONS[path]?.trim()), '这些配置项还没有作用说明').toEqual([]);
     expect(Object.keys(CONFIG_DESCRIPTIONS).filter((path) => !required.has(path)), '这些说明对应的配置项已经不存在了').toEqual([]);
+  });
+
+  /**
+   * 逐个取值的说明（`CONFIG_ENUM_NOTES`，docs/21 · G-UI-02）。WebUI 把取值受限的数组渲染成一组
+   * 复选框，每个复选框旁边就是这里的一句话 —— `telegram.allowedUpdates` 那 23 个取值里只有 4 个
+   * 真的有处理器，而它们在界面上长得一模一样。
+   *
+   * 断言严格一一对应：加一个更新类型而忘了写注解，那一格会是个没有说明的复选框；删一个取值而
+   * 注解还留着，下一个人会以为那个取值还在。
+   */
+  it('annotates every value of the enums that carry per-value notes', () => {
+    const document_ = configJsonSchema() as Record<string, any>;
+    const resolve = (node: any): any => {
+      if (typeof node?.$ref !== 'string') return node;
+      let cursor: any = document_;
+      for (const segment of node.$ref.slice(2).split('/')) cursor = cursor?.[segment];
+      return resolve(cursor ?? {});
+    };
+    const nodeAt = (path: string): any => path.split('.').reduce<any>((cursor, key) => resolve(resolve(cursor).properties?.[key] ?? {}), document_);
+    expect(Object.keys(CONFIG_ENUM_NOTES).length).toBeGreaterThan(0);
+    for (const [path, notes] of Object.entries(CONFIG_ENUM_NOTES)) {
+      const node = nodeAt(path);
+      const values = node.enum ?? resolve(node.items ?? {}).enum;
+      expect(values, `${path} 不是一个取值受限的键，给它写逐值注解没有意义`).toBeDefined();
+      expect([...Object.keys(notes)].sort(), `${path} 的逐值注解与 schema 里的取值对不上`).toEqual([...(values as string[])].sort());
+      expect(Object.values(notes).filter((note) => !note.trim()), `${path} 有空注解`).toEqual([]);
+    }
   });
 
   // 说明必须真的进到 `GET /api/config/schema` 的返回里，而不是只躺在那张表里。zodToJsonSchema

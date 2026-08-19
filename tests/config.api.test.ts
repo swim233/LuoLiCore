@@ -48,6 +48,27 @@ describe('config API validation', () => {
     closeDatabase(db);
   });
 
+  /**
+   * 跨字段约束的报错要**自己说得清**（docs/21 · G-CFG-08）。前端的 toast 只念 `message`，
+   * 而 `details` 此前谁都不读 —— 一次「软上限调大了」在界面上就是一句「配置校验失败」，
+   * 看不出跟哪一格冲突。这条锁两件事：出问题的 path 进了 `message`，`details` 仍在。
+   */
+  it('names the offending key and the other side of a cross-field rule in the message itself', async () => {
+    const { app, db, headers } = harness();
+    const response = await app.request('/api/config', { method: 'PUT', headers, body: JSON.stringify({ 'memory.softLimitTokens': 4000 }) });
+    expect(response.status).toBe(400);
+    const error = (await response.json() as { error: { code: string; message: string; details: Array<{ path: string; message: string }> } }).error;
+    expect(error.code).toBe('invalid_config');
+    expect(error.message).toContain('memory.softLimitTokens');
+    // 对方那一格现在是多少也要说出来，否则运维还得去 200 多个值里翻硬上限。
+    expect(error.message).toContain('3000');
+    expect(error.details[0]).toMatchObject({ path: 'memory.softLimitTokens' });
+    expect(db.prepare("SELECT COUNT(*) FROM config_kv WHERE key='memory.softLimitTokens'").pluck().get()).toBe(0);
+    // 两格一起改就过：这条约束本来就是「这两格的关系」，而不是「这一格不能动」。
+    expect((await app.request('/api/config', { method: 'PUT', headers, body: JSON.stringify({ 'memory.softLimitTokens': 4000, 'memory.hardLimitTokens': 9000 }) })).status).toBe(200);
+    closeDatabase(db);
+  });
+
   it('accepts backtracking shapes under the linear regex engine and reports incompatible syntax', async () => {
     const { app, db, headers } = harness();
     const linear = await app.request('/api/config', { method: 'PUT', headers, body: JSON.stringify({ 'trigger.wakewords': ['洛璃', '^(a+)+$'] }) });
@@ -111,11 +132,14 @@ describe('config API validation', () => {
   it('serves schema, hot-reload prefixes, and unimplemented keys inside one data envelope', async () => {
     const { app, db, headers } = harness();
     const response = await app.request('/api/config/schema', { headers: { cookie: headers.cookie } });
-    const payload = await response.json() as { ok: boolean; data: { schema: unknown; hotReloadable: string[]; unimplemented: string[] } };
+    const payload = await response.json() as { ok: boolean; data: { schema: unknown; hotReloadable: string[]; unimplemented: string[]; enumNotes: Record<string, Record<string, string>> } };
     expect(payload.ok).toBe(true);
     expect(payload.data.schema).toBeDefined();
     expect(payload.data.hotReloadable).toContain('logs.level');
     expect(payload.data.unimplemented).toContain('trigger.ignoreEditedAsTrigger');
+    // 第四份：逐个取值的说明。缺了它，取值受限的那几格会渲染成一排没有说明的复选框。
+    expect(payload.data.enumNotes['telegram.allowedUpdates']?.message).toContain('已处理');
+    expect(payload.data.enumNotes['telegram.allowedUpdates']?.message_reaction).toContain('无处理器');
     closeDatabase(db);
   });
 
