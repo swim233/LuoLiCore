@@ -239,6 +239,10 @@ CREATE TABLE context_commits (
   head_ordinal     INTEGER NOT NULL,
   tokens_total     INTEGER NOT NULL DEFAULT 0,
   msg_count        INTEGER NOT NULL DEFAULT 0,
+  -- 按 kind 各有形状：prune 记 { reason, from, to, levels[], hardTruncated }；manual 记
+  -- { targetCommitId }；reset 记 { archiveFloor, advancedClaims } —— archiveFloor 是清空那一刻
+  -- 归档里最大的 messages.id，`context.recallBarrier` 拿它当归档检索的下限（02 §7.1）。
+  -- 无条件写：开关是运行时的，而这张表不可变，事后打开开关补不回旧 reset 的水位
   meta_json        TEXT,
   created_at       INTEGER NOT NULL,
   created_by       TEXT                   -- 'system'|'webui'|'command:<userId>'

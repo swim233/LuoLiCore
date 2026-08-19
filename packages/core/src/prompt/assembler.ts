@@ -159,7 +159,7 @@ export class PromptAssembler {
  * 「上下文水位：」后面跟着空白比不写更让模型犯迷糊。`showQuota` 还依赖调用方真的给得出额度
  * （WebUI 的提示词预览没有本轮预留，那时这一行本来就不该有）。
  */
-export function runtimeBlock(input: { now: Date; timezone: string; chatDescription: string; triggerDescription: string; role: string; tools: string[]; agents: string[]; contextMessages: number; contextTokens: number; maxMessages: number; maxTokens: number; quota?: string; workspace: string; sandbox: string; show?: { quota?: boolean; contextWatermark?: boolean; workspace?: boolean; toolNames?: boolean } }): string {
+export function runtimeBlock(input: { now: Date; timezone: string; chatDescription: string; triggerDescription: string; role: string; tools: string[]; agents: string[]; contextMessages: number; contextTokens: number; maxMessages: number; maxTokens: number; quota?: string; workspace: string; sandbox: string; contextCleared?: string; show?: { quota?: boolean; contextWatermark?: boolean; workspace?: boolean; toolNames?: boolean } }): string {
   const now = new Intl.DateTimeFormat('zh-CN', { dateStyle: 'full', timeStyle: 'short', timeZone: input.timezone }).format(input.now);
   // `toolNames` 默认 true：调用方不表态时行为与从前一致（工具名照旧列在这里）。
   const show = { quota: true, contextWatermark: true, workspace: true, toolNames: true, ...input.show };
@@ -177,6 +177,9 @@ export function runtimeBlock(input: { now: Date; timezone: string; chatDescripti
   if (show.toolNames) lines.push(`可用工具：${input.tools.join(', ') || '无'}`);
   lines.push(`可用子 agent：${input.agents.join(', ') || '无'}`);
   if (show.contextWatermark) lines.push(`上下文水位：${input.contextMessages} 条 / ${input.contextTokens.toLocaleString()} tokens（上限 ${input.maxMessages} 条 / ${input.maxTokens.toLocaleString()} tokens）`);
+  // 刚被清空那一轮才有这一行，**不受 `showContextWatermark` 管**：它不是水位，是一件刚发生的事。
+  // 不说的话模型看到的是一段凭空开始的对话，会把它当自己的失忆去补救（清空后第一步就去翻归档）。
+  if (input.contextCleared) lines.push(`上下文：${input.contextCleared}`);
   if (show.quota && input.quota) lines.push(`额度：${input.quota}`);
   if (show.workspace) lines.push(`工作目录：${input.workspace}（沙箱：${input.sandbox}）`);
   return lines.join('\n');

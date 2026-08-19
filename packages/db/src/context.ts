@@ -110,6 +110,26 @@ export class ContextRepository {
       FROM context_messages WHERE key=? AND ordinal BETWEEN ? AND ?`).get(this.key, from, to) as { tokens: number; count: number };
     return row;
   }
+  /**
+   * 回忆隔断的水位（`context.recallBarrier`）：HEAD 之前（含）最近那次 `reset` commit 记下的
+   * `meta.archiveFloor` —— 也就是「最后一次清空发生时，归档里最大的 messages.id」。0 = 没设过。
+   *
+   * 按 **seq** 取而不是按祖先链取，与 `hasResetAfter` 同一套语义。好处是 `/undo` 把 HEAD 退回
+   * 那次清空之前时隔断随之解除（head.seq 小于它了）；代价是 WebUI 的「回滚到此」解除不了 ——
+   * 它插的是一条 seq 更大的 `manual` commit。那条路本来就把旧窗口整段搬回来了，窗口里的消息
+   * 模型照样看得见，只是再往前翻不动。
+   */
+  recallFloor(): number {
+    const head = this.head();
+    if (!head) return 0;
+    const meta = this.db.prepare("SELECT meta_json FROM context_commits WHERE key=? AND kind='reset' AND seq<=? ORDER BY seq DESC LIMIT 1")
+      .pluck().get(this.key, head.seq) as string | null | undefined;
+    if (!meta) return 0;
+    // 坏 JSON 当「没设过」：这个方法在每次归档检索的路径上，抛出去等于把三个工具一起打死。
+    try { const floor = (JSON.parse(meta) as { archiveFloor?: unknown }).archiveFloor; return typeof floor === 'number' && floor > 0 ? floor : 0; }
+    catch { return 0; }
+  }
+
   hasResetAfter(baseId: string | null, throughSeq: number): boolean {
     const baseSeq = baseId ? this.commit(baseId)?.seq ?? -1 : -1;
     return Boolean(this.db.prepare("SELECT 1 FROM context_commits WHERE key=? AND kind='reset' AND seq>? AND seq<=? LIMIT 1").get(this.key, baseSeq, throughSeq));

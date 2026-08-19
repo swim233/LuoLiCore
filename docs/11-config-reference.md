@@ -177,6 +177,16 @@ context:
     markMeta: true                # 热更新 · 是否在消息 meta 标记 rebased（建议保持 true）
   cacheCommits: 64                # 热更新 · 物化结果 LRU 容量；0 = 不缓存（排查「读出来的窗口和库里对不上」时用）
   tokenRatioAlpha: 0.2            # 热更新 · 估算校准 EMA 系数
+  # 热更新 · 清空上下文（/new 与 WebUI「清空上下文窗口」）之后，归档检索要不要也挡在那一刻之后。
+  # 关（默认）= 只挪 done 指针：窗口空了，而 read_messages / search_messages / get_message 读的是
+  #   messages 归档表、不受窗口约束 —— 实测清空后模型第一步就 read_messages 把 20 条历史整段捞回来，
+  #   那份工具结果又落进新窗口（logs/2026-08-19 · 01M0CKK6W018B5KS9613SNEX5J）。清空于是形同没生效。
+  # 开 = 清空那一刻的 messages.id 记进 reset commit 的 meta.archiveFloor，三个归档工具只看得到它
+  #   之后的消息（被挡住时如实回 recall_barrier，不伪装成「这条不存在」）；同时把背景认领水位一并
+  #   推到那里，否则清空前那些没被认领的群发言会从另一扇门进新窗口。owner 的
+  #   admin_search_messages 不受管（跨会话，按 key 记的水位对它没有意义）；/undo 撤回那次清空会
+  #   一并解除，而 WebUI 的「回滚到此」解除不了（它插的是 seq 更大的 manual commit）。02 §7.1
+  recallBarrier: false
 
 # ============================================================ concurrency
 concurrency:
@@ -502,6 +512,16 @@ media:
   maxDocBytes: 20971520
   maxImageEdge: 1568
   maxImagesPerTurn: 4             # 需重启 · 超出的图片在装配时换成占位文本
+  # 热更新 · 判断「这一轮含图、该切 vision 别名」时看哪些图（04 §5.2 / 08 §7.2）。
+  # window（默认，一直以来的行为）= 整个上下文窗口（snapshot + delta）。代价是**一张图会把它之后的
+  #   每一轮都钉在 vision 别名上**：实测一个私聊里 4 条带图消息留在窗口内，此后每一轮纯文本都记
+  #   provider.fallback … vision_required（logs/2026-08-19），而一个能看图的别名都没配时，那些轮次的
+  #   回复末尾还会挂一句「这张图我没能真的看到」—— 用户那一轮根本没发图。
+  # turn = 只算本轮新进来的图（触发消息、被回复的那条、本轮认领的群背景发言）。更早轮次留在窗口里的
+  #   图片：这一轮真落在看不了图的模型上时才整体换成占位文本（换的文本写明「重新发一次或引用那条
+  #   消息」，那两种都会被算成本轮的图），落在能看图的模型上则原样带着 —— 「再看一遍上面那张图」
+  #   在 vision 模型上仍然可用。降档到 low 的那一步同样按当步别名兜一次。记一条 ctx.image_placeholder
+  visionScope: window
   groupDebounceMs: 1500
   stickerAsImage: false           # 需重启 · 开了之后贴纸按图片下载并归一化
   downloadVoice: true             # 需重启 · 存盘但不解析（不做 STT）；关掉后语音一律不下载

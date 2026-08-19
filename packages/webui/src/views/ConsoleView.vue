@@ -562,13 +562,26 @@ async function checkoutCommit(id: unknown): Promise<void> {
   catch (error) { toastError('切换 commit 失败', error); }
 }
 async function inspectCommit(id: unknown): Promise<void> { if (!selectedChat.value) return; inspectedSnapshot.value = await api<Record<string, unknown>>(`/api/chats/${encodeURIComponent(selectedChat.value.key)}/context?commit=${encodeURIComponent(String(id))}`); }
-/** 等同 Telegram 的 /new：插一条 reset commit 把窗口起点推到最新 ordinal 之后，消息一条不删。 */
+/**
+ * 等同 Telegram 的 /new：插一条 reset commit 把窗口起点推到最新 ordinal 之后，消息一条不删。
+ *
+ * 回执要说清**清空的是窗口还是记忆**：归档表不受窗口约束，`read_messages` 照旧翻得到清空之前的话
+ * （实测清空后模型第一步就把 20 条历史捞了回来）。判据取自服务端刚写下的那条 commit 的
+ * `meta.advancedClaims`（`context.recallBarrier` 的落地痕迹），不在前端另猜一次配置。
+ */
 async function resetContext(): Promise<void> {
   const chat = selectedChat.value;
   if (!chat) return;
   if (!confirm(`清空「${chatIdentity(chat).name}」的上下文窗口？下一轮起模型看不到之前的对话；消息与提交历史都还在，可以用「回滚到此」走回来。`)) return;
-  try { await api(`/api/chats/${encodeURIComponent(chat.key)}/reset`, { method: 'POST' }); pushToast({ severity: 'success', summary: '上下文窗口已清空', detail: `${chatIdentity(chat).name} · 下一轮从零开始` }); await inspectChat(chat); await load(); }
-  catch (error) { toastError('清空上下文窗口失败', error); }
+  try {
+    const commit = await api<Record<string, unknown>>(`/api/chats/${encodeURIComponent(chat.key)}/reset`, { method: 'POST' });
+    let barred = false;
+    try { barred = (JSON.parse(String(commit.meta ?? '{}')) as { advancedClaims?: unknown }).advancedClaims === true; } catch { /* 老 commit 没有 meta */ }
+    pushToast({ severity: 'success', summary: '上下文窗口已清空',
+      detail: `${chatIdentity(chat).name} · ${barred ? '归档检索也挡在这一刻之后了' : '下一轮从零开始；模型仍可用 read_messages 翻更早的消息（context.recallBarrier 可关掉这条路）'}` });
+    await inspectChat(chat);
+    await load();
+  } catch (error) { toastError('清空上下文窗口失败', error); }
 }
 /** 等同 /undo：done 指针退回父 commit。被跳过的 commit 仍留在时间线上，可以再「回滚到此」走回去。 */
 async function undoContext(): Promise<void> {

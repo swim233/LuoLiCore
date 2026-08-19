@@ -472,7 +472,7 @@ type MaterializeResult = {
 
 | 命令 | 语义 | 实现 |
 |---|---|---|
-| `/new` | 开新话题：不删历史，仅把窗口收缩到空 | 写 `kind='reset'` commit，`window_start = head_ordinal + 1` |
+| `/new` | 开新话题：不删历史，仅把窗口收缩到空 | 写 `kind='reset'` commit，`window_start = head_ordinal + 1`；`meta.archiveFloor` 记下清空那一刻的 `messages.id`（见 §7.1） |
 | `/undo` | 撤销上一轮：done 指针回退一个 commit | `setRef(key,'done', head.parent_id)`；`context_messages` 不删（后续新 turn 的 ordinal 仍从当前最大值继续，不复用）。**`seq` 同理按 `MAX(seq)+1` 分配**：`ux_commits_key_seq` 是唯一索引，按 `head.seq+1` 递推会让撤销之后的下一次写入撞唯一约束 —— 表现是「撤销过的会话，下一条消息直接失败」，且 WebUI 的「回滚到此」一并 500 |
 | `/ctx` | 显示上下文状态 | commit seq、窗口 `[start,head]`、消息数、token 数/上限、最近一次 rebase/prune、claim 水位 |
 | WebUI「回滚到此 commit」 | 任意 commit 设为 done（owner） | `setRef` + 写 `kind='manual'` 审计 commit |
@@ -483,6 +483,40 @@ type MaterializeResult = {
 > `/ctx` 只回统计摘要。[14 §2 Q12](./14-open-questions.md) 已拍板**不做**上下文导出/导入（导入等于给
 > 上下文引擎开一个不受信入口，§9 那 20 条红线多一个防守面，而「把会话搬到另一个部署」的收益几乎
 > 用不上），所以那行被删掉而不是补实现。完整时间线看 WebUI 的会话页。
+
+### 7.1 「清空」清掉了什么：`context.recallBarrier`
+
+**`/new` 只挪窗口，挡不住归档。** 消息一条不删是刻意的，可代价直到实测才看清：清空之后那一轮，
+模型第一步就 `read_messages({direction:'before',limit:20})` 把 20 条历史整段捞了回来，那份工具结果又
+作为一条新消息落进新窗口，此后每一轮都带着它（`logs/2026-08-19` · turn `01M0CKK6W018B5KS9613SNEX5J`，
+用户那句话是「你记得我刚刚说过什么嘛」—— 模型的动作本身没错）。于是「清空了但历史又回来了」。
+
+所以这件事由一个开关回答，默认维持原状：
+
+| `context.recallBarrier` | 窗口 | `read_messages` / `search_messages` / `get_message` | 背景认领水位 |
+|---|---|---|---|
+| `false`（默认） | 清空 | 照旧看得到清空之前的一切 | 不动 |
+| `true` | 清空 | 只看得到 `meta.archiveFloor` 之后的消息 | 推到 `archiveFloor` |
+
+三条纪律：
+
+- **水位无条件记**（开关关着也记）。开关是运行时的，而 commit 是不可变历史 —— 事后打开开关时，
+  没记过水位的旧 `reset` 再也补不上了。
+- **下限灌进 SQL，不在工具层过滤返回值。** 后者会让 `limit:20` 先取满再被削短，模型看到的是
+  「一共只有这么几条」。削短了要在结果里说出来（`recallBarrier` 字段），照
+  [`droppedTokenNote`](./05-tools.md) 那条先例：沉默的降级等于假象。单条被挡住时回
+  `ok:false, error:'recall_barrier'`，**不能**回 `message: null` —— 那和「这条消息不存在」长得一样，
+  模型会换个 id 再试一遍。
+- **两扇门一起关。** `claimBackground` 认的是 `claim_watermark` 到触发消息之间那一段，与窗口无关；
+  不推水位的话，清空之前那些还没被认领的群发言会在清空之后的第一轮进到新窗口里 —— 归档查不到、
+  上下文里却读得到，自相矛盾。
+- `admin_search_messages`（仅 owner、跨会话）**不受管**：按 key 记的水位对它没有意义，而它是运维
+  的逃生舱。`/undo` 撤回那次清空会一并解除隔断（判据按 `seq`）；WebUI 的「回滚到此」解除不了
+  （它插的是 `seq` 更大的 `manual` commit），那条路本来就把旧窗口整段搬回来了。
+
+**清空之后的第一轮还会在 RUNTIME 块里说一句**（`turn.contextCleared`，判据是「HEAD 就是那条 `reset`
+且窗口为空」，提交过一轮之后自动消失）：措辞跟着开关分岔，隔断开着时明说归档也查不到，免得模型在
+一条死路上来回试。
 
 ---
 
@@ -505,7 +539,10 @@ export interface ContextEngine {
   materialize(commitId: string | null): Promise<MaterializeResult>;
   stats(key: string): Promise<ContextStats>;
 
-  reset(key: string, by: Actor): Promise<Commit>;                 // /new
+  /** /new。`advanceClaims` 跟着 `context.recallBarrier`（§7.1）：连背景认领水位一起推到清空那一刻 */
+  reset(key: string, by: Actor, opts?: { advanceClaims?: boolean }): Promise<Commit>;
+  /** 归档检索的下限（§7.1）。开关不在这里判 —— 调用方按本轮配置决定用不用它 */
+  recallFloor(key: string): number;
   undo(key: string, by: Actor): Promise<Commit | null>;           // /undo
   setHead(key: string, commitId: string, by: Actor): Promise<void>; // WebUI 回滚
 }

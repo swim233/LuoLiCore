@@ -1116,7 +1116,9 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
   app.get('/api/chats/:key/context', (ctx) => ctx.json({ ok: true, data: dependencies.context.materialize(ctx.req.param('key'), ctx.req.query('commit') ?? null, currentConfig().context.cacheCommits) }));
   app.get('/api/chats/:key/commits', (ctx) => ctx.json({ ok: true, data: dependencies.context.stats(ctx.req.param('key'), { timeline: true }) }));
   app.post('/api/chats/:key/commits/:id/checkout', (ctx) => ctx.json({ ok: true, data: dependencies.context.setHead(ctx.req.param('key'), ctx.req.param('id'), 'webui') }));
-  app.post('/api/chats/:key/reset', (ctx) => ctx.json({ ok: true, data: dependencies.context.reset(ctx.req.param('key'), 'webui') }));
+  // `advanceClaims` 跟着 `context.recallBarrier`：开着时清空要连背景认领水位一起推，否则清空前
+  // 那些没被认领的群发言会从另一扇门进到新窗口里（`ContextEngine.reset` 的 docstring）。
+  app.post('/api/chats/:key/reset', (ctx) => ctx.json({ ok: true, data: dependencies.context.reset(ctx.req.param('key'), 'webui', { advanceClaims: currentConfig().context.recallBarrier }) }));
   app.post('/api/chats/:key/undo', (ctx) => ctx.json({ ok: true, data: dependencies.context.undo(ctx.req.param('key')) }));
   app.patch('/api/models/:id', async (ctx) => {
     const body = await ctx.req.json<Record<string, unknown>>();

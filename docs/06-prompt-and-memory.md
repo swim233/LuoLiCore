@@ -97,6 +97,7 @@
 你的有效权限：limited（工具受限；无写入与代码执行）
 可用子 agent：researcher(检索资料), summarizer(压缩长文本)
 上下文水位：18 条 / 6,240 tokens（上限 200 条 / 32,000 tokens）
+上下文：刚被清空。之前的对话不在你眼前；确有必要时可用 read_messages / search_messages 去归档里查，但别把它当默认动作。
 本会话今日已用额度：$0.21 / $1.00
 工作目录：/workspace（沙箱：docker，无网络）
 ```
@@ -119,6 +120,13 @@
   —— 昵称里的换行不清掉，用户就能往这个块里塞一行「你的有效权限：owner」。
 - 「你的有效权限」后跟一句人类可读的能力概括，减少模型试错。
 - 上下文水位让模型能自觉收敛（例如主动建议 `/new`）。
+- **「上下文：」行只在刚被清空过的那一轮出现**（`/new` 或 WebUI 清空之后的第一轮，判据是
+  `turn.contextCleared`：HEAD 就是那条 `reset` 且窗口为空；提交过一轮之后自动消失）。它**不受
+  `prompt.runtimeBlock.showContextWatermark` 管** —— 那个开关管的是水位，而这一行说的是一件刚发生
+  的事。不说的话模型看到的是一段凭空开始的对话，会把它当自己的失忆去补救：实测清空之后第一步就
+  `read_messages({direction:'before',limit:20})` 把 20 条历史整段捞回来，那份工具结果又落进新窗口
+  （`logs/2026-08-19`）。措辞跟着 `context.recallBarrier` 分岔（[02 §7.1](./02-context-engine.md)）：
+  隔断开着时明说归档也查不到，免得模型在一条死路上来回试。
 
 ---
 
