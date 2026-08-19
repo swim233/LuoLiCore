@@ -674,7 +674,9 @@ Anthropic 连这个都没有，定价、输入模态、可用思考档位没有�
 - `models.price_*` 单位 USD / 1M tokens。导入模型时按 §5.4.1 的规则自动带入 `provider` / `official`
   两档来源的价格，其余情况留空由 owner 在 WebUI 填。**出处记在 `capabilities_json.catalog.priceSource`**，
   owner 手改过价格后翻成 `manual` —— 改完还挂着「官方价」徽标就是在骗人。
-- `cost = (in*price_in + out*price_out + cache_read*price_cache_read + cache_write*price_cache_write) / 1e6`
+- `cost = (no_cache_in*price_in + out*price_out + cache_read*price_cache_read + cache_write*price_cache_write) / 1e6`
+  —— **第一项不是 `in`**：AI SDK 的 `inputTokens` 是含缓存的**超集**（三家 provider 都是），
+  拿它计价等于对缓存那部分收两次钱。口径与那次事故的量级见 [10 §4.1](./10-logging-and-observability.md#41-记账点)。
 - 缺定价的模型：`cost=0` 但记 `usage_ledger.error_kind='no_pricing'`，WebUI 在用量页显式告警（否则配额会被绕过）。
 - 若 `quota.requirePricing = true`（默认 `true`），**无定价的模型不允许被非 owner 使用**（fail-closed，防止配额形同虚设）。
 

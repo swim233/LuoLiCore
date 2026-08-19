@@ -19,7 +19,8 @@ export interface StepFacts {
   stepNumber: number;
   /** 这一步**实际出力**的模型 id。链内 fallback 换的是模型不是别名，所以它不一定是链首。 */
   servedModelId: string;
-  usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; reasoningTokens: number };
+  /** `inputTokens` 是 AI SDK 的 `inputTokens.total` —— **超集**，含 cacheRead。计价走 `noCacheTokens`。 */
+  usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; noCacheTokens?: number | undefined; reasoningTokens: number };
   latencyMs: number;
   finishReason: string | undefined;
   toolCalls: Array<{ toolCallId: string; toolName: string; input: unknown }>;
@@ -77,6 +78,7 @@ export function createStepObservers(turn: RuntimeTurnContext, dependencies: Step
         providerId: info.providerId, modelId: info.modelId, modelAlias: alias,
         inputTokens: facts.usage.inputTokens, outputTokens: facts.usage.outputTokens,
         cacheReadTokens: facts.usage.cacheReadTokens, cacheWriteTokens: facts.usage.cacheWriteTokens,
+        noCacheTokens: facts.usage.noCacheTokens,
         reasoningTokens: facts.usage.reasoningTokens, priceIn: info.priceIn, priceOut: info.priceOut,
         priceCacheRead: info.priceCacheRead, priceCacheWrite: info.priceCacheWrite, latencyMs: facts.latencyMs,
         ...(facts.finishReason ? { finishReason: facts.finishReason } : {}), ok: true });
