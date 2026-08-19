@@ -14,6 +14,28 @@ function assertPluginName(name: string): void {
   if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name)) throw new Error('invalid_plugin_name');
 }
 
+/**
+ * 热重载在当前运行时下靠不靠得住。
+ *
+ * tsx 的 ESM loader 按文件路径缓存模块、忽略 URL 上的 `?v=`，于是 `reconcile()` 里那句
+ * cache-busting 的 `import()` 在 `pnpm dev` 下整体失效：reconcile 每次都真跑（`onUnload` /
+ * `onLoad` / DB 全对、没有 `load_error`），但加载到的一直是本进程第一次 import 的那份代码
+ * （docs/28 · L-EXT-04）。生产不受影响 —— `pnpm start` 跑 `dist/` 的纯 node。
+ * **修不了的东西不假装修好**（`docs/reviews/16 §5`），所以这里只是把它说出来。
+ *
+ * 判据取「进程入口是不是 `.ts`」，不去嗅 tsx 的内部 API：能直接跑 `.ts` 入口就意味着挂着一层
+ * 转译 loader，而那层的模块缓存语义不由我们决定；反过来 tsx 没有任何稳定的「我在」标记可问
+ * （`process.env.TSX`、`import.meta` 上那些都不是契约），嗅到的下一次它改实现就静静失效。
+ * 误判成「不可靠」的代价只是多一条警告，误判成「可靠」的代价是本条缺陷原封不动地复发。
+ */
+export function isHotReloadReliable(entry: string | undefined = process.argv[1]): boolean {
+  return !/\.[cm]?ts$/.test(entry ?? '');
+}
+
+/** 启动告警与 `POST /api/plugins/:name/reload` 的响应共用同一句话：两处说法不一致的话，
+ *  「reload 回了 ok」和「启动时警告过」会被当成两件事。 */
+export const HOT_RELOAD_UNRELIABLE_HINT = 'tsx（pnpm dev）的 ESM loader 按路径缓存模块、忽略 cache-busting 查询串：重载会照常跑完 onUnload/onLoad 并更新数据库，但加载到的仍是本进程第一次 import 的那份代码。要让 plugin 改动真的生效，重启进程，或用 pnpm build && pnpm start（docs/28 · L-EXT-04）。';
+
 export interface LoadedPlugin {
   name: string;
   version?: string;
@@ -34,6 +56,11 @@ export class PluginManager {
   constructor(private readonly db: Sqlite, readonly directory: string, private readonly timeoutMs: number, private readonly disableAfter: number, private readonly order: readonly string[] = [], private registry?: ToolRegistry,
     private readonly onAutoDisable?: (name: string, error: string) => void) {}
   bindRegistry(registry: ToolRegistry): void { this.registry = registry; }
+  /** 只读判据，不是开关 —— 见 `isHotReloadReliable`。`plugins.watch` 的既定用途正是「本机写
+   *  plugin」，而那恰好是它静默失效的场景，所以调用方（启动告警 / reload 端点）必须说出来。 */
+  get hotReloadReliable(): boolean { return isHotReloadReliable(); }
+  /** 不可靠时给出该说的那句话，可靠时 `null`。让两处调用方拿同一份字符串，而不是各写一句。 */
+  get hotReloadWarning(): string | null { return this.hotReloadReliable ? null : HOT_RELOAD_UNRELIABLE_HINT; }
 
   async reconcile(): Promise<void> {
     if (existsSync(this.directory)) for (const name of readdirSync(this.directory)) {
@@ -189,7 +216,8 @@ export class PluginManager {
   /**
    * `plugins.watch`：目录变动后重跑 `reconcile()`。**默认关，而且应该保持关**——
    * plugin 是进程内全信任运行的（docs/14 A27），热加载等于让磁盘上的一次写入直接拿到 root。
-   * 开它的唯一场景是自己在本机写 plugin。
+   * 开它的唯一场景是自己在本机写 plugin —— 而那个场景通常是 `pnpm dev`（tsx），
+   * 恰好是重载静默失效的那一个（`isHotReloadReliable`，docs/28 · L-EXT-04）。
    *
    * 与 `SkillLoader.startWatching` 同一形状：100ms 去抖（编辑器保存会连发好几个事件），
    * 重入由 `#reconciling` 挡住 —— `reconcile()` 是 async，去抖只能挡住「连发」，挡不住

@@ -10,7 +10,7 @@ import type { Context } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { getConnInfo } from '@hono/node-server/conninfo';
 import { serveStatic } from '@hono/node-server/serve-static';
-import type { AgentManager, Config, ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, PluginManager, PromptDocuments, ProviderStore, Sandbox, SkillLoader, SkillWriteInput, SubAgentRuntimeEvent, TurnRegistry } from '@luoli/core';
+import type { AgentManager, Config, ConfigChangedEvent, ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, PluginManager, PromptDocuments, ProviderStore, Sandbox, SkillLoader, SkillWriteInput, SubAgentRuntimeEvent, TurnRegistry } from '@luoli/core';
 import { ALIAS_NAME_PATTERN, HOT_RELOADABLE_CONFIG_KEYS, createScheduledJob, mergeAgentDefinitions, scanAgentFiles, scheduledJobView, testApprovalRules, KNOWN_UNIMPLEMENTED_CONFIG_KEYS, TOOL_POLICY, aliasSettingsSchema, checkWakeword, configSchema as runtimeConfigSchema, envPinnedConfigKeys, perChatConfig, probeProvider, quotaBucket, rejectedWakewords } from '@luoli/core';
 import { APPROVAL_POLICIES, BUNDLED_SKILLS, SkillPackageError, effectiveToolPolicy, installSkillPackage, looksSecret, persistMcpServers as persistMcpServersShared, publicConfig, relaxedFields, revisionJson } from '@luoli/core';
 import type { CatalogIndex, CustomToolManager, ModelMetadata, ProviderProbe, ToolOverride, ToolRegistry } from '@luoli/core';
@@ -267,10 +267,13 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     .filter(([, value]) => JSON.stringify(value ?? null).includes('«redacted»')).map(([key]) => key);
   // 与 `install_mcp` 工具共用同一份校验与写入（`persistMcpServers`，core）：抄两份的必然结果是
   // WebUI 建得出来的 server 工具建不出来，或者反过来。
+  // `reconciled: ['mcp']`：这三个端点每一个都在写完之后自己 `await dependencies.mcp.reconcile()`
+  // （响应里要给出真实 state），所以 `main.ts` 的订阅者不能再跑一次 —— 两条重叠的 reconcile 会
+  // 各 spawn 一个 stdio 子进程（`ConfigChangedEvent`，docs/28 · L-EXT-03）。
   const persistMcpServers = (servers: unknown[]): { ok: true; servers: Readonly<Config['mcp']['servers']> } | { ok: false; details: unknown } =>
     persistMcpServersShared({ db: dependencies.db, config: currentConfig,
       apply: (next, keys) => { if ('replace' in dependencies.config) dependencies.config.replace(next, keys); },
-      emit: (keys) => dependencies.events.emit('config.changed', { keys }) }, servers, 'webui');
+      emit: (keys) => dependencies.events.emit('config.changed', { keys, reconciled: ['mcp'] } satisfies ConfigChangedEvent) }, servers, 'webui');
   // 刚写进 config_kv、但 config.changed 的重载还没落到 configStore 的那一份口令。只在「快照仍是
   // 写入前那个值」时顶上；快照一旦变成别的（比如 PUT /api/config 又改了一次），立刻交回配置——
   // 无条件缓存就是 V-AUTH-02 换个位置复发：写入返回 200，登录还认旧的（docs/24 · R-AUTH-01）。
@@ -1467,7 +1470,14 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     await dependencies.plugins?.reconcile();
     return ctx.json({ ok: true, data: { changes } });
   });
-  app.post('/api/plugins/:name/reload', async (ctx) => { await dependencies.plugins?.reconcile(); return ctx.json({ ok: true, data: { name: ctx.req.param('name') } }); });
+  // 重载在 tsx（`pnpm dev`）下装得像成功了、实际一直跑旧代码，而这是修不掉的（tsx 的 loader
+  // 按路径缓存、忽略 cache-busting 查询串）。回 200 就必须把这件事带在响应里，否则界面上
+  // 「已重载」是一句假话（docs/28 · L-EXT-04）。与启动告警共用同一句 `hotReloadWarning`。
+  app.post('/api/plugins/:name/reload', async (ctx) => {
+    await dependencies.plugins?.reconcile();
+    const warning = dependencies.plugins?.hotReloadWarning ?? null;
+    return ctx.json({ ok: true, data: { name: ctx.req.param('name'), hotReloadReliable: warning === null, ...(warning ? { warning } : {}) } });
+  });
   // 「启用前先看过源码」是 plugin 那道闸的**全部**内容（进程内全信任 = root，docs/14 A27），
   // 而模型现在能往 `plugins/` 里写文件了 —— 没有这个读端点，那句话就只是口号。
   app.get('/api/plugins/:name/source', (ctx) => {

@@ -165,6 +165,13 @@ const plugins = new PluginManager(db, config.plugins.dir, config.plugins.hookTim
 // 「进程内全信任」（docs/14 A27）意味着这个开关是安全边界，不是性能开关。
 if (config.plugins.enabled) {
   await plugins.reconcile();
+  // 「装得像成功了、实际一直跑旧代码」是最贵的一种沉默：tsx 下 reload 每一次都回 ok
+  // （docs/28 · L-EXT-04）。修不了就在启动时说出来，与 reload 端点同一句话。
+  if (plugins.hotReloadWarning) {
+    // kind 用单数 `plugin.` 前缀：`CATEGORY_BY_PREFIX` 只认这一个，复数会掉进 turn.jsonl。
+    log.event({ level: 'warn', kind: 'plugin.hot_reload_unreliable', summary: '这个运行时下 plugin 热重载不可靠：重载会成功但仍跑旧代码', data: { entry: process.argv[1] ?? null } });
+    process.stderr.write(`[plugins] ${plugins.hotReloadWarning}\n`);
+  }
   // `plugins.watch`：目录变动后重新 reconcile。默认关 —— 热加载一个全信任的 JS 文件，
   // 风险面比省一次重启大得多，开它要自己清楚这一点。
   if (config.plugins.watch) plugins.startWatching();
@@ -506,7 +513,10 @@ http = config.webui.enabled ? serve({ fetch: server.fetch, hostname: config.webu
 if (!config.webui.enabled) log.event({ level: 'warn', kind: 'webui.disabled', summary: 'WebUI disabled by config; approvals will be rejected outright' });
 events.subscribe((event) => {
   if (event.type !== 'config.changed') return;
-  const keys = (event.data as { keys?: string[] }).keys ?? [];
+  // 载荷形状与它的理由在 `packages/core/src/events.ts` 的 `ConfigChangedEvent`。
+  const changed = event.data as { keys?: string[]; reconciled?: readonly string[] };
+  const keys = changed.keys ?? [];
+  const reconciled = changed.reconciled ?? [];
   void loadConfig({ overrides: envOverlay(readPersistedConfig(config.db.path, reportRejectedKey)), onInvalidOverride: (dropped, reasons) => log.event({ level: 'error', kind: 'config.invalid', summary: `已忽略 ${dropped.length} 条非法覆盖`, data: { dropped, reasons } }) }).then((next) => {
     configStore.replace(next, keys);
     if (keys.some((key) => key.startsWith('logs.level'))) log.setLevel(next.logs.level);
@@ -520,7 +530,10 @@ events.subscribe((event) => {
     if (keys.some((key) => key.startsWith('plugins.'))) void plugins.reconcile();
     // McpManager 现在按 getter 读配置，但连接是有状态的：改了 servers 必须重跑一次 reconcile
     // 才会真的连上/断开（docs/20 · W-CFG-02）。
-    if (keys.some((key) => key.startsWith('mcp.'))) void mcp.reconcile();
+    // `reconciled` 里带 'mcp' 的是 WebUI 的 `/api/mcp*` —— 那几个端点自己 `await` 了一次
+    // reconcile（响应里要给出真实 state），这里再跑就是两条重叠（docs/28 · L-EXT-03）。
+    // 模型侧的 `install_mcp` 不带这个标记，仍由这一行负责。
+    if (!reconciled.includes('mcp') && keys.some((key) => key.startsWith('mcp.'))) void mcp.reconcile();
     // `tools.selfExtend` 在 `HOT_RELOADABLE_CONFIG_KEYS` 里，靠的就是这一行：关掉
     // `customTools.enabled` 之后下一轮那批工具要真的从目录里消失，而不是等重启（docs/20 · W-CFG-02）。
     if (keys.some((key) => key.startsWith('tools.selfExtend'))) customTools.reconcile();

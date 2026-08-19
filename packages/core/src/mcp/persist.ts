@@ -6,8 +6,14 @@ import { configSchema, type Config } from '../config/schema.js';
 export interface McpPersistPorts {
   db: Sqlite;
   config(): Readonly<Config>;
-  /** 写完之后把新配置盖回 `ConfigStore`。缺席也不致命 —— `config.changed` 的重载会补上，只是慢一拍。 */
+  /** 写完之后把新配置盖回 `ConfigStore`。缺席也不致命 —— `config.changed` 的重载会补上，只是慢一拍。
+   *  但**自己接着调 `reconcile()` 的调用方非给不可**：`emit` 的订阅者是异步落地的，不 apply
+   *  的话紧随其后那次 reconcile 读到的还是旧 servers。 */
   apply?(next: Readonly<Config>, keys: string[]): void;
+  /** 广播 `config.changed`。**自己会 `await mcp.reconcile()` 的调用方要在载荷里带
+   *  `reconciled: ['mcp']`**（见 `ConfigChangedEvent`）—— 否则订阅者再跑一次，两条重叠的
+   *  reconcile 会各 spawn 一个 stdio 子进程（docs/28 · L-EXT-03）。`install_mcp` 不 reconcile，
+   *  所以它不带这个标记。 */
   emit(keys: string[]): void;
 }
 

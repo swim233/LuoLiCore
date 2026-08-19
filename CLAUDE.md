@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 pnpm dev                      # 本地运行 bot（tsx apps/bot/src/main.ts）
+                              # ⚠ tsx 下 plugin 热重载静默失效（跑旧代码，docs/07 §3.2）——
+                              #   验 plugin 改动要重启进程或 pnpm build && pnpm start
 pnpm typecheck                # tsc --noEmit
 pnpm lint                     # eslint .
 pnpm test                     # vitest run（全量）
