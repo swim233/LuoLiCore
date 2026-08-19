@@ -365,7 +365,9 @@ code { font-family: var(--font-mono); font-size: .82rem; }
 .overridden { margin-left: 6px; font-size: .62rem; color: var(--amber); vertical-align: middle; }
 .relax-list { margin: 10px 0 12px; padding-left: 20px; display: grid; gap: 6px; font-size: .82rem; }
 .provider-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 14px; }
-.provider-grid article { border: 1px solid var(--border); border-radius: 15px; padding: 19px; display: grid; gap: 10px; }
+/* `align-content: start` 是必须的：卡片被同排最高的那张拉伸（grid 默认 stretch），而卡片自己也是
+   grid —— 拉伸出来的余量会被平均塞进它的隐式行间，表现是标签、标题、正文在一张空卡片里散开。 */
+.provider-grid article { border: 1px solid var(--border); border-radius: 15px; padding: 19px; display: grid; align-content: start; gap: 10px; }
 .provider-head { display: flex; align-items: center; justify-content: space-between; }
 .provider-tags { display: flex; align-items: center; gap: 6px; }
 .provider-error { color: var(--rose); word-break: break-word; }
@@ -379,11 +381,19 @@ code { font-family: var(--font-mono); font-size: .82rem; }
 .catalog-sub.match-provider { color: var(--green); }
 .catalog-sub.match-third-party, .catalog-sub.match-none { color: var(--amber); }
 .cap-tags { display: flex; flex-wrap: wrap; gap: 4px; }
+/* MCP server 的工具清单条数没有上限（agent-browser 一家就 70 个）。不封高的话这张卡片能长到
+   1700px，而 grid 会把同排的每张卡片一起拉到那个高度 —— 一台 server 足以毁掉整页排版。
+   封成一个有边框的内嵌滚动区，被切掉的半行才读得出是「可以滚」而不是「画坏了」。
+   只作用在 .provider-grid 里：表格的能力列与 Skill 附属文件清单同样用 .cap-tags，那两处该照旧铺开。 */
+.provider-grid .cap-tags { max-height: 7.5rem; overflow-y: auto; overscroll-behavior: contain; align-content: start; padding: 7px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2); }
+/* 工具名可以比卡片还宽（.ui-tag 是 nowrap 的），只能让它折行，否则最窄那一列会横向溢出。 */
+.provider-grid .cap-tags .ui-tag { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 .provider-grid h3, .provider-grid p { margin: 0; }
 .provider-grid p { color: var(--muted); }
 .provider-grid code { padding: 8px; background: var(--surface-2); border-radius: 7px; }
 .empty, .empty-card { color: var(--muted); text-align: center; padding: 36px; }
-.empty-card { place-items: center; border-style: dashed !important; }
+/* 空态卡片要压回居中：上面给 .provider-grid article 加的 align-content: start 会顶到它头上。 */
+.empty-card { place-items: center; align-content: center; border-style: dashed !important; }
 .empty-card i, .coming > i { color: var(--primary); font-size: 1.6rem; }
 .coming { display: grid; place-items: center; align-content: center; text-align: center; }
 .coming p:not(.eyebrow) { color: var(--muted); max-width: 520px; }

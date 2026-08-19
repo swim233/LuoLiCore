@@ -1419,7 +1419,10 @@ function extensionStatus(row: ExtensionRow): { label: string; severity: TagSever
   if (row.kind === 'mcp') return MCP_STATE_LABELS[String(row.state)] ?? { label: row.state ? String(row.state) : '未连接', severity: 'warn' };
   return extensionError(row) ? { label: '错误', severity: 'danger' } : { label: '可用', severity: 'success' };
 }
-const extensionSubtitle = (row: ExtensionRow): string => (row.kind === 'mcp' ? `${row.transport ?? '未知 transport'} · 最低角色 ${row.min_role ?? '未标注'}`
+// 工具条数要写在副标题里：下面那张清单是封高滚动的（styles.css 的 .provider-grid .cap-tags），
+// 光看那几行读不出这台 server 到底给了 7 个工具还是 70 个。
+const extensionSubtitle = (row: ExtensionRow): string => (row.kind === 'mcp'
+  ? `${row.transport ?? '未知 transport'} · 最低角色 ${row.min_role ?? '未标注'}${row.tools?.length ? ` · ${row.tools.length} 个工具` : ''}`
   : row.description || `${row.version ? `v${row.version} · ` : ''}最低角色 ${row.min_role ?? '未标注'}`);
 const extensionBusy = ref('');
 const extensionRows = computed(() => [
