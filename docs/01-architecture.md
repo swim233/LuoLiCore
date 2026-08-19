@@ -113,6 +113,20 @@ Telegram Update
 
 ### 3.1 单实例纪律
 
+**「单进程」现在由一把文件锁保证，而不再只是一句约定。** 启动时抢 `<db.path>.lock`
+（`acquireInstanceLock`，`packages/db/src/instance-lock.ts`），抢不到且主人的 PID 还活着就拒绝启动；
+主人已死则接手并说出原来那个 pid。**顺序是 open → migrate → 拿锁 → `recoverAfterCrash`** ——
+反过来的话，被拒绝启动的那个实例已经先把在位实例的在途状态清掉了。
+
+之前没有这道闸的代价实测过：用同一个库起第二个实例，`recoverAfterCrash` 无条件把在位实例
+**仍在执行**的轮次改成 `state='failed', error='process_restarted'`，顺带释放已认领的消息、
+清零在途预留额度，之后 A 才因为 Telegram 409 关停 —— **赢的是后来者**。本机误跑一次
+`pnpm dev` 就足够（`docs/reviews/28 · L-OPS-01`）。
+
+锁是**按库**而不是按机器：两个各自有库的实例本来就不该互相挡。它不改变下面这两条 ——
+横向扩展的路仍然是把 `KeyedMutex` 换成 DB 行级 advisory lock，那时这把锁要跟着换成
+「同一个库允许 N 个实例」的租约。
+
 [14 §2 Q1](./14-open-questions.md) 的决策有两半，第二半容易被忘掉：
 
 1. **不删**为多实例预留的抽象。主要就是 Repository 层那些 key 参数与 `KeyedMutex` 的键 —— 它们同时
