@@ -102,16 +102,27 @@ export class PromptDocuments {
 export class AgentResultStore {
   constructor(private readonly directory: string) {}
 
+  /**
+   * 返回值就是落进 `agent_runs.result_full_ref` 的那个 ref，**相对 `directory`** ——
+   * 与 `attachments.local_path` 同一套（docs/28 · L-OPS-06）。存绝对路径的代价是：
+   * `LUOLI_DATA_DIR` 变过、或没有它而换了个 cwd 起一次进程之后，库里记的是旧根、文件在新根，
+   * 于是 `gcFiles()` 把新根下的全文整批当孤儿删掉（实测删掉 74 份）。绝对路径记的是
+   * 「写的时候在哪」，而这一列要回答的是「现在去哪读」—— 后者只能相对当前配置解析。
+   */
   put(runId: string, value: string): string {
-    const path = join(this.directory, `${runId}.txt`);
+    const ref = `${runId}.txt`;
+    const path = join(this.directory, ref);
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     writeFileSync(path, value, { mode: 0o600 });
-    return path;
+    return ref;
   }
 
   /** 文件可能已被 `MaintenanceService` 按 `logs.retentionDays` 清掉，或在读之前被 gc 扫走。
-   *  抛出去只会变成一句与原因无关的 ENOENT —— 直说它过期了。 */
-  read(path: string, offset: number, limit: number): { content: string; nextOffset: number | null } {
+   *  抛出去只会变成一句与原因无关的 ENOENT —— 直说它过期了。
+   *  `ref` 是相对 `directory` 的；存量绝对路径行（归一化时指向另一个根、原样留下的那些）
+   *  照旧读得出来 —— `resolve` 对绝对路径是恒等。 */
+  read(ref: string, offset: number, limit: number): { content: string; nextOffset: number | null } {
+    const path = resolve(this.directory, ref);
     if (!existsSync(path)) return { content: '[子 agent 的完整结果已按日志保留期清理，只剩摘要]', nextOffset: null };
     const buffer = readFileSync(path);
     const content = buffer.subarray(offset, offset + limit).toString('utf8');
