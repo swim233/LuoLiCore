@@ -12,7 +12,7 @@ import { getConnInfo } from '@hono/node-server/conninfo';
 import { serveStatic } from '@hono/node-server/serve-static';
 import type { AgentManager, Config, ConfigChangedEvent, ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, PluginManager, PromptDocuments, ProviderStore, Sandbox, SkillLoader, SkillWriteInput, SubAgentRuntimeEvent, TurnRegistry } from '@luoli/core';
 import { ALIAS_NAME_PATTERN, CONFIG_ENUM_NOTES, HOT_RELOADABLE_CONFIG_KEYS, chatCandidates, createScheduledJob, mergeAgentDefinitions, scanAgentFiles, scheduledJobView, testApprovalRules, KNOWN_UNIMPLEMENTED_CONFIG_KEYS, TOOL_POLICY, aliasSettingsSchema, checkWakeword, configSchema as runtimeConfigSchema, envPinnedConfigKeys, perChatConfig, probeProvider, quotaBucket, rejectedWakewords } from '@luoli/core';
-import { APPROVAL_POLICIES, BUNDLED_SKILLS, SkillPackageError, effectiveToolPolicy, installSkillPackage, looksSecret, persistMcpServers as persistMcpServersShared, publicConfig, relaxedFields, revisionJson } from '@luoli/core';
+import { APPROVAL_POLICIES, BUNDLED_SKILLS, SkillPackageError, effectiveToolPolicy, installSkillPackage, looksSecret, persistMcpServers as persistMcpServersShared, publicConfig, relaxedFields, resolveEffectiveRole, revisionJson } from '@luoli/core';
 import type { CatalogIndex, ContainerManager, CustomToolManager, ModelMetadata, ProviderProbe, ToolOverride, ToolRegistry } from '@luoli/core';
 import type { ArchiveRepository, CustomToolRepository, OperationsRepository, PrincipalRepository, ScheduleRepository, ScheduledJob, Sqlite } from '@luoli/db';
 import { deleteAppKv, modelAliasKey, readAppKv, writeConfigRows as writeConfigRowsToDatabase } from '@luoli/db';
@@ -710,7 +710,22 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
         defaults: { minRole: policy.minRole, approval: policy.approval, timeoutMs: null }, relaxed: relaxedFields(policy, override) }];
     })) });
   });
-  app.get('/api/principals', (ctx) => ctx.json({ ok: true, data: dependencies.principals.list() }));
+  /**
+   * 每行多回一个 `effectiveRole` —— 模型系统提示里那个 `role`（docs/21 · G-UI-03）。一个私聊
+   * 占两行（`user:X` + `chat:X`），显示名与 tg_id 一模一样，此前界面上 `min()` 的结果一处都不显示，
+   * 于是「只改了 `chat:X`」与「改对了」长得完全一样。**配对本身就是「这是私聊」的判据**：
+   * Telegram 用户 id 恒正、群 / 频道 id 恒负，两边同时在表里就只可能是一对私聊 —— 不再引第三份
+   * 「先信 chat_type，缺了看正负号」。群 / 频道回 null：那一行的角色是上限，成员各不相同。
+   */
+  app.get('/api/principals', (ctx) => {
+    const rows = dependencies.principals.list();
+    const { defaultChatRole } = currentConfig().access;
+    const roles = new Map(rows.map((row) => [`${row.kind}:${row.tgId}`, row.role]));
+    return ctx.json({ ok: true, data: rows.map((row) => {
+      const userRole = roles.get(`user:${row.tgId}`), chatRole = roles.get(`chat:${row.tgId}`);
+      return { ...row, effectiveRole: userRole && chatRole ? resolveEffectiveRole({ userRole, chatRole, isPrivate: true, defaultChatRole }) : null };
+    }) });
+  });
   app.patch('/api/principals/:id', async (ctx) => {
     const body = await ctx.req.json<{ role: 'owner' | 'trusted' | 'limited' | 'blocked' }>();
     const changed = dependencies.principals.setRole(ctx.req.param('id'), body.role, 'webui');

@@ -259,6 +259,15 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
   **不是「群」**：每个私聊也有一行 `chat:<用户 id>`。类型一律按 `principals.chat_type` 显示
   （私聊 / 普通群 / 超级群 / 频道），缺失时回落到 Telegram id 的正负号 —— 与会话页的
   `chatIdentity()` 同一套判据，两处不许各写一份（[21 · G-UI-01](./21-webui-coverage-gaps.md)）。
+- **角色列同时给出有效角色。** 一个私聊在库里是两行（`user:X` 与 `chat:X`），显示名与 tg_id
+  一模一样、只差一个类型标签，而 `list()` 按 `updated_at DESC` 排，刚改过的那行必然置顶 ——
+  于是「只改了 `chat:X`」与「改对了」在界面上长得完全一样（[21 · G-UI-03](./21-webui-coverage-gaps.md)）。
+  `GET /api/principals` 每行多回一个 `effectiveRole`，**由服务端用 `resolveEffectiveRole` 算**，
+  前端不重算第二份。配对本身就是「这是一对私聊」的判据：Telegram 用户 id 恒正、群 / 频道 id 恒负，
+  `user:X` 与 `chat:X` 同时在表里就只可能是私聊，不需要再看一次 `chat_type`。
+  群 / 频道那行回 `null` —— 它的角色是上限不是有效角色，每个成员各不相同，编一个确定值出来
+  比不给更坏。`effectiveRole` 与本行 `role` 不一致时，角色列下面多一行红字「实际 <角色>」；
+  一致时不出，这一页有几十行，逐行挂一个「有效 X」是噪声。
 - 点任一行打开二级菜单（`UiModal`）：只读展示 kind / tg_id / 显示名 / username，
   角色下拉可改并写明该角色意味着什么；升到 `owner` 时额外警示「跳过审批与沙箱」。
   保存走 `PATCH /api/principals/:id`，下一轮生效并写审计日志。
@@ -730,7 +739,7 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
 | `POST /api/models/import` | 从上游目录批量落库：`{providerId, models:[{modelId, displayName?, contextWindow?, maxOutput?, priceIn?, priceOut?, priceCacheRead?, priceCacheWrite?}], contextWindow?, maxOutput?}`，单次上限 200 条。**能力块与定价出处一律在服务端重新解析**（请求体里的 capabilities 是客户端说的，落库的必须是目录里实际有的那条）。已存在的 `(provider_id, model_id)` 跳过而不是覆盖（不能把已调好的定价冲掉），返回 `{inserted, skipped, priced, ids}` |
 | `POST /api/models/enrich` | 给已入库的模型补元数据：`{ids?: string[], overwrite?: boolean}`（不给 `ids` 就是全部）。能力块照写；**价格只填 `NULL` 的那几个**，已有价格保留并把出处标成 `manual`；窗口/最大输出只有 `overwrite:true` 才覆盖。返回 `{scanned, updated, priced, unmatched}`；目录完全不可用时 `502 catalog_unavailable`（不能拿空值把现有行洗掉） |
 | `GET/PUT/DELETE /api/aliases[/:alias]` | 别名、fallback 链与采样参数。`PUT` 校验别名名（`^[a-z][a-z0-9_-]{0,31}$`）、链非空且模型存在、`settings` 过 `aliasSettingsSchema`（[04 §5.2.1](./04-agents-and-providers.md#521-别名参数settings_json)），任一不过返回 `alias_invalid` + 具体路径 |
-| `GET/PATCH /api/principals[/:id]` | 主体与角色 |
+| `GET/PATCH /api/principals[/:id]` | 主体与角色。`GET` 的每一行除库里那份 `role` 外还带 `effectiveRole`：`user:X` 与 `chat:X` 配得上对时是两者的 `resolveEffectiveRole` 结果（即模型系统提示里那个 `role`），配不上对（只见过一边、或本行是群 / 频道）时为 `null` —— 群的角色是上限不是有效角色 |
 | `POST /api/principals/bulk` | 批量登记主体：`{ids:[…], kind: user\|chat, role}`，单次上限 500。ID 必须是 Telegram 数字 ID（`^-?\d{1,20}$`），非法 ID 或非法角色返回 400。已存在的主体**只补一次 `setRole`，不再走 `upsertSeen`**（`ON CONFLICT` 分支不动 role 但会照写 `display_name`/`username`，而这里手上只有 `null`，等于把 Telegram 同步来的真名清空），返回 `{count, created, updated}` |
 | `POST /api/principals/roles` | 勾选批量改角色：`{ids:[主体 id…], role}`，单次上限 500。**只改已存在的行，不新建**（新建走 `/api/principals/bulk`，那边收的是 Telegram 数字 ID）；库里找不到的 id 原样回报而不是静默跳过，返回 `{count, changed, missing}` |
 | `GET /api/tools` `PATCH /api/tools/:name` | 工具启停与策略覆盖。`GET` 每个工具回**生效值**（`minRole`/`approval`/`scope`/`source`/`enabled`/`timeoutMs`）外加 `defaults`（代码里那份）、`relaxed`（比默认更松的字段名）、`selfManagedTimeout`。`PATCH` 收 `{enabled?, minRole?, approval?, timeoutMs?, confirmRelax?}`，三个策略字段给 `null` = 恢复默认；**先读当前覆盖再整体写回** `tools.overrides.<name>`（一个 key 一条整叶 JSON，只写变动的那个字段会把其余的抹掉）。放宽且无 `confirmRelax` 时 `409 relax_requires_confirmation`。被禁用的工具从工具目录消失，且 `ToolRegistry.execute` 会二次拦截并返回 `tool_disabled_by_operator`。未知工具名返回 404 |
