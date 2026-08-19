@@ -124,10 +124,11 @@ jail 再 `statSync`，两步都会抛：**断链软链**（`ln -s /nowhere x`，
 **路径 jail（所有 fs 工具共用）**：
 
 ```ts
-function resolveJailed(p: string, root: string): string {
-  const abs = path.resolve(root, p);
+function resolveJailed(p: string, root: string, base = root): string {
+  const abs = path.resolve(base, p);                              // ★ 相对路径解在 base 上，不是 root
   const real = fs.existsSync(abs) ? fs.realpathSync(abs) : abs;   // ★ 解析 symlink
-  if (real !== root && !real.startsWith(root + path.sep))
+  const prefix = root.endsWith(path.sep) ? root : root + path.sep;  // ★ root='/' 时 root+sep 是 '//'
+  if (real !== root && !real.startsWith(prefix))
     throw new ToolError('path_outside_workspace', `路径必须在工作目录内: ${root}`);
   if (cfg.tools.fs.denyGlobs.some(g => minimatch(real, g)))       // .env / *.key / .git/config ...
     throw new ToolError('path_denied', '该路径被策略禁止');
@@ -135,9 +136,17 @@ function resolveJailed(p: string, root: string): string {
 }
 ```
 
-- `root = data/workspace/<chatId>`（每会话独立工作目录，天然隔离）。
-- `owner` 且 `tools.fs.allowHostFsForOwner = true`（默认 `false`）时，`root = '/'`（仍受 `denyGlobs` 约束）。此开关在 WebUI 有醒目红色警告。
+- `root = base = data/workspace/<chatId>`（每会话独立工作目录，天然隔离）。
+- `owner` 且 `tools.fs.allowHostFsForOwner = true`（默认 `false`）时**只有边界放开**：`root = '/'`
+  （整机可读写，仍受 `denyGlobs` 约束），而 `base` 仍是会话 workspace —— 绝对路径能到整机是这个
+  开关的本意，相对路径（`a.txt`）仍然是「我的工作目录」，后者才是模型实际写出来的形态；fs 工具
+  回给模型的路径同样相对 `base`（机器上别处的文件回成 `../..` 形态，原样再交回来能解回同一个文件）。
+  边界前缀必须按上面那个 `prefix` 算：`'/' + sep` 是 `'//'`，没有任何真实路径以它开头，那一行曾让
+  这个开关下 owner 的**每一次** fs 调用都抛 `path_outside_workspace`（docs/28 · L-TOOL-02）。
+  此开关在 WebUI 有醒目红色警告。
 - `denyGlobs` 默认：`**/.env*`, `**/*.pem`, `**/*.key`, `**/id_rsa*`, `**/.git/config`, `**/.ssh/**`, `<项目根>/config/**`, `<项目根>/data/luoli.db*`, `<项目根>/memory/**`（记忆只能通过 `memory_*` 工具改，保证有版本记录）。
+  配置里写成 `<root>`，展开成**进程 cwd**（部署根），与 jail 的 `root` 无关。带 `<项目根>` 前缀的
+  那几条只在 host-fs 模式下真正起作用 —— 默认模式下这些绝对路径先撞 `path_outside_workspace`。
 
 ### 3.2 聊天记录检索
 
@@ -201,7 +210,16 @@ bash: tool({
 
 - `timeoutMs` 的上界写进 schema（`tools.exec.maxTimeoutMs`）。`sandbox.run` 反正会夹一次，
   但只夹在里面模型永远不知道自己要的 30 分钟被改成了 5 分钟，然后据此去解释「命令没跑完」。
-- 输出上限 `maxOutputBytes`（默认 64KB），超出保留头尾各半并标注省略字节数。
+- 输出上限 `maxOutputBytes`（默认 64KB），超出保留头尾各半并标注省略字节数。这一道是**收集完之后
+  在内存里**做的，所以还有第二道：**单条流（stdout / stderr 各自）累计到 `2 × maxOutputBytes` 时
+  子进程当场被 SIGKILL**，多出来的字节连读都不读。没有这一道就等于没有上界 —— 一条
+  `yes` / verbose 构建能一直吐到进程吃满内存。
+- 被这一道杀掉的调用，结果里带 `truncated: true` 与一条 `hint`（「输出已截断且进程已被终止，
+  把输出收窄再来，别原样重试」）。`ok` **只看退出码**：被 SIGKILL 的进程退出码不是 0，所以
+  照常记失败；而「子进程已自己退出 0、最后一批输出在 `close` 之前才 flush 完」的竞态里 kill 打空，
+  那一次仍记 `ok: true` —— 不能因为截断把一次成功调用改判成失败（docs/28 · L-TOOL-01）。
+- 结果里的 `killed` 对「输出超限 / 超时 / 被取消」三种原因**不可分**：三条路走的是同一个 `kill()`。
+  要区分只能看 `truncated`（输出超限）与 `durationMs` 是否贴着 `timeoutMs`（超时）。
 - `python` = `bash` 的特化：把 `code` 写入 `workspace/.luoli-tmp/<id>.py` 再执行 `python3 <path>`，
   跑完删掉。**不用 heredoc**（`python3 - <<'PY'`）：正文里只要出现一行 `PY` 就把脚本从那里截断，
   而 stdin 整条被 heredoc 占着 —— 脚本里的 `input()` 读到的是自己的后半截，`sys.argv[0]` 是 `-`，
@@ -451,7 +469,7 @@ sandbox:
 ### 5.2 策略解析（`sandbox.plan`）
 
 ```
-role ∈ bypassRoles                      → 宿主执行（cwd=workspace 或 '/' 若 allowHostFsForOwner）
+role ∈ bypassRoles                      → 宿主执行（cwd=workspace，恒定；allowHostFsForOwner 只放开 fs 工具的边界，不动执行的 cwd）
 role ∉ bypassRoles ∧ mode='docker'      → 容器执行
 role ∉ bypassRoles ∧ mode='jail'        → jail 执行（日志 level=warn 提示隔离较弱）
 role ∉ bypassRoles ∧ mode='none'        → ✗ 拒绝：{ allowed:false, reason:'沙箱未启用，执行类工具已禁用' }

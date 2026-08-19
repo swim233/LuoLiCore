@@ -1,5 +1,5 @@
 import { mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { relative, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { FileTools, PathJail, TOOL_POLICY, ToolRegistry, configSchema, renderArchivedMessage, selfAuthoringDenyGlobs, type LogSink } from '@luoli/core';
 import { resolveEffectiveRole } from '@luoli/core';
@@ -57,6 +57,54 @@ describe('security boundaries', () => {
     expect(() => jail.resolve('custom-skills/a/SKILL.md')).toThrow('path_denied');
     expect(() => jail.resolve('custom-plugins/a/plugin.js')).toThrow('path_denied');
     expect(jail.resolve('ok.txt')).toBe(`${root}/ok.txt`);
+  });
+
+  // `allowHostFsForOwner` 打开时 jail 的**边界**是 `/`，而 `${'/'}${sep}` 是 `'//'` —— 没有任何真实
+  // 路径以它开头，于是这个模式下 owner 的每一次 fs 调用都抛 path_outside_workspace，报错还长得像
+  // 安全拦截（docs/28 · L-TOOL-02）。这条同时锁住相对路径的基点：模型写 `a.txt` 指的是它的工作目录，
+  // 解到 `/a.txt` 去既写不进也读不回。
+  it('reaches the whole host with allowHostFsForOwner while keeping relative paths in the workspace', () => {
+    const base = resolve('data/jail-hostfs');
+    const outside = resolve('data/jail-hostfs-elsewhere');
+    for (const dir of [base, outside]) rmSync(dir, { recursive: true, force: true });
+    mkdirSync(base, { recursive: true });
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(`${base}/a.txt`, 'ok');
+    writeFileSync(`${outside}/host.txt`, 'ok');
+    const jail = new PathJail('/', ['**/.env*'], { base });
+    expect(jail.resolve(`${outside}/host.txt`)).toBe(`${outside}/host.txt`);
+    expect(() => jail.resolve('/etc/hostname')).not.toThrow();
+    // 相对路径落在 base，不落在边界根上。
+    expect(jail.resolve('a.txt')).toBe(`${base}/a.txt`);
+    expect(jail.resolve('.')).toBe(base);
+    expect(jail.resolve('../jail-hostfs-elsewhere/host.txt')).toBe(`${outside}/host.txt`);
+    // 相对模式那批 glob 与边界无关，host-fs 下照常生效。
+    writeFileSync(`${base}/.env.local`, 'secret');
+    expect(() => jail.resolve('.env.local')).toThrow('path_denied');
+    // `#children` 靠「回显成相对 base → 再交回 jail」这条往返把每个子条目重新过一遍守卫。
+    // 边界根与 base 是同一个值时它恒等，不是同一个值时报出来的路径必须仍解得回同一个文件 ——
+    // 否则整机可达的这个模式下 list/glob/grep 全部回 `entries:[]` 加一堆 skipped。
+    const files = new FileTools(jail, 1024, 1024);
+    expect(files.list(outside, 1)).toMatchObject({ ok: true, entries: [{ path: relative(base, `${outside}/host.txt`), type: 'file' }], skipped: 0 });
+    expect(files.read(relative(base, `${outside}/host.txt`))).toMatchObject({ ok: true, bytes: 2 });
+  });
+
+  // 那批 `<root>/…` deny-glob 是**专为** host-fs 模式写的（jail.ts 开头的 docstring 自陈这一点），
+  // 而在此之前边界那一行让这个模式下的每次调用都先抛越界 —— 它们一条都没被真正执行过。
+  // `<root>` 展开成 **process.cwd()**（部署根），不是 jail 的边界根。
+  it('executes the deploy-root deny globs in the host-fs shape', () => {
+    const base = resolve('data/jail-hostfs-deny');
+    rmSync(base, { recursive: true, force: true });
+    mkdirSync(base, { recursive: true });
+    const deployRoot = process.cwd();
+    const jail = new PathJail('/', [...configSchema.parse({}).tools.fs.denyGlobs,
+      ...selfAuthoringDenyGlobs({ skillsDir: `${base}/custom-skills`, pluginsDir: `${base}/custom-plugins` })], { base });
+    for (const path of [`${deployRoot}/config/config.yaml`, `${deployRoot}/data/luoli.db`, `${deployRoot}/data/luoli.db-wal`,
+      `${deployRoot}/memory/global/notes.md`, `${deployRoot}/skills/x/SKILL.md`, `${deployRoot}/plugins/x/plugin.js`,
+      `${base}/custom-skills/x/SKILL.md`, `${base}/custom-plugins/x/plugin.js`]) {
+      expect(() => jail.resolve(path), path).toThrow('path_denied');
+    }
+    expect(jail.resolve(`${deployRoot}/package.json`)).toBe(`${deployRoot}/package.json`);
   });
 
   // 断言的是「grep 有 CPU 上界」，不是「守卫认得这几种坏形状」——后者验证的是守卫自己的公理

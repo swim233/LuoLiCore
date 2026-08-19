@@ -315,7 +315,10 @@ tools:
     maxReadBytes: 262144
     maxWriteBytes: 5242880
     showHidden: false
-    allowHostFsForOwner: false    # 热更新 · ★ 危险，WebUI 有红色警告
+    allowHostFsForOwner: false    # 热更新 · ★ 危险，WebUI 有红色警告。放开的只是**边界**：owner 的
+                                  #   绝对路径可达整机（仍受 denyGlobs 约束），而相对路径与回给模型的
+                                  #   路径仍以会话 workspace 为基点（05 §3.1 的 base）。开着时下面那几条
+                                  #   `<root>/…` 才真正起作用 —— 默认模式下它们先撞 path_outside_workspace
     denyGlobs:
       - '**/.env*'
       - '**/*.pem'
@@ -335,9 +338,16 @@ tools:
     trashDir: .luoli-trash
     backupDir: .luoli-bak
   exec:
-    defaultTimeoutMs: 60000
-    maxTimeoutMs: 300000
-    maxOutputBytes: 65536
+    defaultTimeoutMs: 60000       # 热更新 · bash/python 不传 timeoutMs 时用它
+    maxTimeoutMs: 300000          # 热更新 · timeoutMs 的上界，同时写进模型看到的 schema（05 §3.3）。
+                                  #   到点 SIGKILL 整个进程组
+    maxOutputBytes: 65536         # 热更新 · 交回模型的单流输出上限，超出保留头尾各半并标注省略字节数。
+                                  #   ★ 还有第二道：**单条流累计到本值的两倍时子进程当场 SIGKILL**
+                                  #   （截断是收集完在内存里做的，不设第二道等于没有上界）。那一次带
+                                  #   truncated:true 与一条 hint，但 ok 只看退出码 —— 进程已自己退出 0
+                                  #   时不因截断改判成失败（28 · L-TOOL-01）。
+                                  #   结果里的 killed 对「输出超限 / 超时 / 被取消」三种原因不可分：
+                                  #   同一个 kill()。要分辨看 truncated 与 durationMs 是否贴着 timeoutMs
   archive:
     defaultSearchLimit: 20        # 热更新
     maxSearchLimit: 100           # 热更新

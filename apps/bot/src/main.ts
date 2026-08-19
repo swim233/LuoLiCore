@@ -251,9 +251,12 @@ registerBuiltins(toolRegistry, {
   // 都是完整的机器读写权限。默认关，`denyGlobs` 照样生效（它是绝对路径 glob，不依赖 root）。
   // 判据用工具执行上下文里的有效角色 —— owner 在非受信群里已经被抿平成群角色（D9），
   // 所以「owner 在陌生群里被诱导读 /etc/shadow」走不到这条路。
+  // `base` 恒为 workspace：绝对路径能到整机（这个开关的本意），而模型写出来的相对路径仍然是
+  // 「我的工作目录」—— 后者才是它实际写出来的形态（docs/28 · L-TOOL-02）。非 host-fs 模式下
+  // base 就等于 root，行为一个字不变。
   db, filesFor: (workspace, role) => new FileTools(
     new PathJail(role === 'owner' && configStore.snapshot().tools.fs.allowHostFsForOwner ? '/' : workspace,
-      [...config.tools.fs.denyGlobs, ...selfAuthoringDenyGlobs({ skillsDir: config.skills.dir, pluginsDir: config.plugins.dir })]),
+      [...config.tools.fs.denyGlobs, ...selfAuthoringDenyGlobs({ skillsDir: config.skills.dir, pluginsDir: config.plugins.dir })], { base: workspace }),
     config.tools.fs.maxReadBytes, config.tools.fs.maxWriteBytes, { showHidden: config.tools.fs.showHidden, trashDir: config.tools.fs.trashDir, backupDir: config.tools.fs.backupDir }),
   sandbox, archive, context, memory, skills, agents, models: modelRegistry, ledger, log, quota,
   maxWebBytes: config.tools.web.maxResponseBytes, maxAsksPerRun: config.agent.maxAsksPerRun,
