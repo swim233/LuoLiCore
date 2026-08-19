@@ -212,7 +212,8 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
   const execMax = (context: ToolExecutionContext): number => (context.turn.config as Readonly<Config>).tools.exec.maxTimeoutMs;
   registry.register({ name: 'bash', description: '在工作目录执行命令；非 owner 必须使用可用沙箱。留给真正需要执行的事（跑脚本、装依赖、处理数据）：读文件用 read_file、搜内容用 grep、找文件用 glob、看目录用 list_dir —— 那些工具带路径拦截、分页和统一的引用格式，用 cat/rg/ls 绕过去出错时也更难说清坏在哪一步。', inputSchema: bashSchema(300_000), inputSchemaFor: (context) => bashSchema(execMax(context)), policy: builtinPolicy('bash'), sourcePriority: 100, timeoutMs: null,
     available: (role, context) => dependencies.sandbox.plan(role, context.workspace).allowed,
-    execute: async (input, context) => dependencies.sandbox.run(input.command, context.turn.effectiveRole, context.workspace, context.turn.abortSignal, input.timeoutMs, context.turn.turnId) });
+    // `chatId` 显式传：持久容器按会话分（docs/05 §5.5），不传就退回一次性容器。
+    execute: async (input, context) => dependencies.sandbox.run(input.command, context.turn.effectiveRole, context.workspace, context.turn.abortSignal, input.timeoutMs, context.turn.turnId, { chatId: context.turn.chatId }) });
   registry.register({ name: 'python', description: '在工作目录执行 Python 代码；非 owner 必须使用可用沙箱。留给真正需要计算或处理数据的事：单纯读文件 / 搜内容 / 列目录一律走 read_file / grep / glob / list_dir。', inputSchema: pythonSchema(300_000), inputSchemaFor: (context) => pythonSchema(execMax(context)), policy: builtinPolicy('python'), sourcePriority: 100, timeoutMs: null,
     available: (role, context) => dependencies.sandbox.plan(role, context.workspace).allowed,
     execute: async (input, context) => {
@@ -229,7 +230,7 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
       const name = `${crypto.randomUUID()}.py`;
       mkdirSync(directory, { recursive: true, mode: 0o700 });
       writeFileSync(join(directory, name), input.code, { mode: 0o600 });
-      try { return await dependencies.sandbox.run(`python3 ${JSON.stringify(`${PYTHON_TMP_DIR}/${name}`)}`, context.turn.effectiveRole, context.workspace, context.turn.abortSignal, input.timeoutMs, context.turn.turnId); }
+      try { return await dependencies.sandbox.run(`python3 ${JSON.stringify(`${PYTHON_TMP_DIR}/${name}`)}`, context.turn.effectiveRole, context.workspace, context.turn.abortSignal, input.timeoutMs, context.turn.turnId, { chatId: context.turn.chatId }); }
       finally { try { rmSync(join(directory, name)); } catch { /* 沙箱里删掉了、或整个 workspace 被清了 */ } }
     } });
   // 四个 `tools.archive.*Limit` 从这里生效。走 `inputSchemaFor` 而不是注册期固定：那是**每轮**

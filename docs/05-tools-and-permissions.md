@@ -398,6 +398,35 @@ sh ".luoli-tmp/<uuid>.sh" ".luoli-tmp/<uuid>.json"
 模型调 `bash` 时命令正文在转录里、在 span 里、在人眼前；调 `custom_backup` 时提示词里只有
 `{"target":"/etc"}`，正文是若干轮之前写下的。**审计面从转录挪进了 SQLite，而 SQLite 不在提示词里。**
 
+### 3.11 容器管理
+
+只在 `sandbox.persistent.enabled` 为真时有意义（§5.5）。六个工具**全部 owner**，
+且 `owner` 这道地板与 §3.10 同理**同时焊在 `available()` 里** —— 运维能把 `minRole` 覆盖成
+`trusted`，而覆盖绕不过 `available()`。持久模式关掉时六个工具整体不进目录（不是进了再报错）。
+
+| 工具 | minRole | 审批 | 说明 |
+|---|---|---|---|
+| `container_list` | **owner** | — | 全部容器：会话名、状态、建于 / 上次用 / 还剩多久、是否钉住、image、`used/max`。**没有 `chat` 参数** |
+| `container_exec` | **owner** | 条件 | `{chat, command, timeoutMs?, background?, name?}`。目标会话没有容器就**建一个**（含 owner 自己的会话）。`background:true` 时不套 `timeout`，包成重定向到 `.luoli-logs/<name>.log` 的后台进程并立刻返回 |
+| `container_reset` | **owner** | 条件（`wipeWorkspace` 时**必需**） | `{chat, wipeWorkspace?}`。销毁 + 立即重建。**`wipeWorkspace` 默认 `false`** —— 只换容器，`/workspace` 里的文件一个不动 |
+| `container_inspect` | **owner** | — | `{chat}`。容器内进程表（`docker top`）+ CPU / 内存 / 磁盘 + `.luoli-logs/` 里的日志清单 |
+| `container_keep` | **owner** | — | `{chat, hours?, pin?}`。改到期时间 / 钉住 |
+| `container_logs` | **owner** | — | `{chat, name?, lines?}`。不给 `name` 就列出有哪些日志，给了就 tail |
+
+- **「重置」默认不删文件。** 用户说的「重置一下 xxx 群的容器」十有八九指环境而不是数据，而
+  这两件事在持久模式下第一次变得可分（容器没了文件还在）。要清得显式传 `wipeWorkspace: true`，
+  那一档必须审批，且文件是挪进 `.luoli-trash/<ts>/` 而不是真删（与 `delete_file` 同一套）。
+- **`chat` 参数收名字，而匹配不唯一就拒绝。** 没有 `chats` 表，名字在 `principals`：
+  群取 `chat:<id>` 那行的 `display_name`，私聊要优先取 `user:<id>`（`chat:<id>` 对私聊只存了
+  `first_name`）—— 与 WebUI 的 `chatIdentity()` 同一套 join。**歧义时交回候选列表并拒绝执行**，
+  零命中同样交回现有会话列表：一次模糊匹配错了，`container_reset` 重置的是另一个群的容器
+  （「摘除比伪造安全」，[16 §5](./reviews/16-remediation-plan.md)）。
+- **这五个带 `chat` 的工具是本文档里唯一收落点参数的一族**，与 §8「参数里没有 chatId」正面冲突 ——
+  例外的理由是它们全部 owner-only 且用途本身就是跨会话运维（同 `admin_search_messages`）。
+  正因如此那道 owner 地板不能只写在 `TOOL_POLICY` 上。
+- 输出一律 `untrustedOutput: true`：前四个是容器里出来的内容，`container_list` 带着陌生人取的群名。
+- `container_exec` 用 `timeoutMs: null`（自己管期限，同 `bash`）。
+
 ---
 
 ## 4. 权限矩阵（权威表）
@@ -423,6 +452,9 @@ sh ".luoli-tmp/<uuid>.sh" ".luoli-tmp/<uuid>.json"
 | `send_file` `pin_message` | ✗ | ✗ | ✓ | ✓ |
 | `define_tool` `delete_tool` `write_skill` `write_plugin` `install_mcp` | ✗ | ✗ | ✗ | ✓ + 审批* |
 | `list_tools` `list_mcp` | ✗ | ✗ | ✗ | ✓ |
+| `container_list` `container_inspect` `container_logs` `container_keep` | ✗ | ✗ | ✗ | ✓ 跨会话§ |
+| `container_exec` | ✗ | ✗ | ✗ | ✓ 跨会话§（+条件审批） |
+| `container_reset` | ✗ | ✗ | ✗ | ✓ 跨会话§（清文件时 + 审批） |
 | Skill | ✗ | 按 `min-role` | 按 `min-role` | ✓ |
 | Plugin 工具 | ✗ | 按 `minRole` | 按 `minRole` | ✓ |
 | MCP 工具 | ✗ | 按 server `minRole`（默认 trusted ⇒ ✗） | ✓ | ✓ |
@@ -434,6 +466,9 @@ sh ".luoli-tmp/<uuid>.sh" ".luoli-tmp/<uuid>.json"
 † `memory.pubWriteMinRole` 默认 `trusted`（D12 的安全阀：防止任意群成员污染全局公开记忆）。
 ‡ 自定义工具的角色地板焊在 `available()` 里，等于 `TOOL_POLICY.bash.minRole`：一段 shell 不能比
 `bash` 更松，运维把 `tools.overrides.<name>.minRole` 调到 `limited` 也开不出来。
+§ 容器管理那六个只在 `sandbox.persistent.enabled` 为真时进目录，且 owner 地板同样焊在
+`available()` 里（§3.11）。「跨会话」指参数里的 `chat` 可以指向任意会话 —— 这是本表里除
+`admin_search_messages` 之外唯一一族不受 `context.turn` 约束的工具。
 
 矩阵在代码中是**默认值与对照基准**：`packages/core/tools/policy.ts` 导出
 `TOOL_POLICY: Record<ToolName, {minRole, approval, scope, source}>`，`ToolRegistry` 与 WebUI 工具页
@@ -464,13 +499,19 @@ sandbox:
   maxTimeoutMs: 300000
   readOnlyRoot: true
   tmpfsMb: 64
+  persistent:             # §5.5
+    enabled: false
 ```
 
 | mode | 行为 | 隔离强度 |
 |---|---|---|
-| `docker` | 每次调用 `docker run --rm`，挂载 `data/workspace/<chatId>` 到 `/workspace` | 强 |
+| `docker`（一次性，默认） | 每次调用 `docker run --rm`，挂载 `data/workspace/<chatId>` 到 `/workspace` | 强 |
+| `docker` + `persistent.enabled` | 每个会话一个常驻容器，调用走 `docker exec`；到期回收（§5.5） | 强，但容器内状态跨轮次留存 |
 | `jail` | 宿主子进程，`cwd=workspace`，`env` 白名单，命令/模块黑名单，`ulimit`，超时 kill 进程组 | 弱（仅防误操作） |
 | `none` | 不隔离 | 无 |
+
+**两档 `docker` 的隔离参数完全相同**（同一套 `--cap-drop=ALL` / `--read-only` / `--user=1000:1000` /
+cgroup 限额），差别只有三处：容器活多久、`/tmp` 与容器可写层跨不跨轮次、以及默认出不出网。
 
 ### 5.2 策略解析（`sandbox.plan`）
 
@@ -521,7 +562,10 @@ docker run --rm \
 - 命令通过 stdin 或 `sh -lc` 传参，**不做字符串拼接进 shell 之外的地方**。
 - 容器名 `luoli-sbx-<turnId>-<n>`，便于 `/cancel` 时 `docker kill`。
 - `sandbox.network: bridge` 时移除 `--network=none`，并注入 `HTTP_PROXY` 指向可审计的出站代理（可选，第一版仅支持 none/bridge 二选一）。
-- 镜像内容（`docker/sandbox.Dockerfile`）：`python:3.12-slim` + `ripgrep jq curl git` + `pip: requests pandas numpy matplotlib`。**不包含** docker CLI、ssh、云 CLI。
+- 镜像内容（`docker/sandbox.Dockerfile`）：`python:3.12-slim` + `ripgrep jq curl git procps` + `pip: requests pandas numpy matplotlib`。**不包含** docker CLI、ssh、云 CLI。
+  `procps` 是持久容器这一轮加的：基础镜像里连 `ps` 都没有，而「我起的那个服务还活着吗」在
+  §5.5 那一档是个日常问题，`docker top` 又只有 owner 的 `container_inspect` 够得着。
+  注意 `ps` 缺席时 `ps … | grep -c` 照样打印 `0` —— 拿它写断言会得到一条永远为真的用例。
 
 ### 5.4 jail 模式细节
 
@@ -543,6 +587,108 @@ docker run --rm \
   > 这条坑在测试里很难自己冒出来：`ulimit -u 1; /bin/echo hi` 是**通过**的——脚本最后一条命令被
   > bash 直接 `exec` 掉，根本没 fork。要复现必须让它真的 fork（管道、后台任务、非末条命令）。
 - 明确记录在文档与 WebUI：**jail 不是安全边界**，仅适合「只有你自己和完全可信的人用」的部署。
+
+### 5.5 持久容器（`sandbox.persistent`）
+
+```yaml
+sandbox:
+  persistent:
+    enabled: false            # 默认关：打开它同时改变容器寿命并默认开出网
+    idleTtlMs: 86400000       # 滑动 24h，每次执行重新计时
+    maxLifetimeMs: 0          # 绝对上限；0 = 不设（照 maintenance.retention.* 的约定）
+    maxContainers: 16
+    network: bridge           # 持久容器的网络；与 sandbox.network（一次性）是两个键
+    reapCron: '*/5 * * * *'
+```
+
+**它买的是两件 `--rm` 结构上做不到的事：跨轮次活着的进程，和出网。**
+文件本来就是按会话持久的 —— `data/workspace/<chatId>` 一直绑定挂载在 `/workspace` 上，
+群 / 私聊从来不共享。一次性的只是容器本身：装的包、`/tmp`、以及**跑着的进程**。
+
+**`readOnlyRoot` 保持 `true`。** 持久化不为 `apt-get` 放开可写根层：`HOME=/workspace`，
+所以 `pip install --user` 装的包本来就落在持久工作区里，缺的只是网。
+
+#### 生命周期
+
+```
+docker run -d --init --name luoli-box-<sanitized chatId> \
+  --label luoli.managed=1 --label luoli.chat=<chatId> --label luoli.spec=<hash> \
+  --network=<persistent.network> --memory=..m --memory-swap=..m --cpus=.. --pids-limit=.. \
+  --cap-drop=ALL --security-opt=no-new-privileges --user=1000:1000 --read-only \
+  --tmpfs=/tmp:rw,size=..m,noexec \
+  -v <hostWorkspace>/<chatId>:/workspace:rw -w /workspace \
+  -e HOME=/workspace -e LANG=C.UTF-8 \
+  <image> sleep infinity
+```
+
+- **`--init` 是必需的。** PID 1 是 `sleep`，它不收僵尸，而一个持久容器会积累成百上千次 exec。
+- **容器按 `chatId` 分，不按 `contextKey` 分。** workspace 本来就按 chatId 分，thread 级上下文
+  共用同一个工作目录 —— 容器必须跟着工作目录走，否则同一个群的两个话题会看到两份 `/workspace`
+  的不同视图（实际是同一个目录，两个容器并发写）。
+- 名字要合法（`[a-zA-Z0-9][a-zA-Z0-9_.-]*`）。chatId 常为负数，`-100123` → `luoli-box-n100123`。
+- 建容器按 chatId 走 `KeyedMutex`：同一会话并发两轮否则会 `--name` 撞车，第二个直接失败。
+- **撞 `maxContainers` 上限直接报错**（`sandbox_container_limit` + `sandbox.container.limit` warn），
+  **不静默退回一次性容器** —— 那样「为什么这个群的后台进程没了」变成一个查不出来的隐形行为。
+- 建失败原样交回 docker 的 stderr。
+
+#### TTL 两档
+
+| 档 | 语义 | 钉住（`container_keep pin`）豁免吗 |
+|---|---|---|
+| `idleTtlMs` | **滑动**：每次执行推进到 `now + idleTtlMs` | 豁免 |
+| `maxLifetimeMs` | **绝对**：从创建那一刻算起，不因活跃延长 | **不豁免** |
+
+绝对上限被钉住豁免掉就不是上限了，所以钉住只挡滑动那一档。默认 `0` = 不设绝对上限，
+与 `maintenance.retention.*` 一致 —— **0 一律是「不清」，不是「立刻过期」**。
+
+#### 回收（`reapCron`，一条独立的维护 cron）
+
+每次 tick 做三件事，返回各自的条数交给注册点原样落日志（照 `MaintenanceService.cleanup()`）：
+
+1. **回收到期的**。销毁前数一下容器里还剩几个非 PID1 进程，落进 `sandbox.container.reaped`
+   的 `data` —— 「这个群的 server 突然没了」必须在日志里查得到。
+2. **spec 漂移即重建**。`luoli.spec` 标签与当前配置算出的 hash 不符 → 销毁，下次用到时懒加载。
+   覆盖 image / memory / cpus / pidsLimit / network 的改动；没有这一条，「我在 WebUI 改了镜像」
+   对所有已存在的容器永远不生效。
+3. **对账**。DB 有行而容器没了 → 删行；带 `luoli.managed=1` 标签的容器 DB 里没有 → 孤儿，`rm -f`；
+   已退出的容器 → 记下退出码到 `last_error` 再删。**进程启动时先对账而不是全杀** ——
+   24h 的 TTL 要能扛住一次重启。
+
+真相在 DB + docker 两边互为校验，不是进程内的一张 Map（[01 §3.1](./01-architecture.md)）。
+
+#### 执行与取消
+
+```
+docker exec --user=1000:1000 --workdir=/workspace -e HOME=/workspace [-e extraEnv…] \
+  <name> setsid -w sh -c 'echo $$ > /tmp/.luoli-exec/<execId>.pgid; exec timeout -s KILL <n> sh -c "<cmd>"'
+```
+
+**`docker kill <容器名>` 在这一档是错的。** 一次性容器里它等于「取消这条命令」，持久容器里它等于
+「销毁这个群的整个环境」—— 而 `/cancel` 与超时走的是同一个 `kill()`。所以取消必须打进程而不是打容器：
+
+- `setsid -w` 让被执行的命令成为**会话首进程**（`$$` 即 pgid），`-w` 保证退出码原样透传；
+- 取消 / 超时 → `docker exec <name> sh -c 'kill -KILL -<pgid>'`，整个进程组一起走，容器活着。
+  **`kill` 后面不能写 `--`**：dash 的内建 `kill` 不认这个分隔符，`kill -KILL -- -123` 直接
+  `Illegal number: -` 退 2，于是取消整条静静失效 —— 表现是 `/cancel` 之后那条命令一直跑到
+  自己的 timeout 才结束。这条是活体测试逮到的：`docker exec` 的**客户端**会一直挂到容器里那个
+  进程真的退出为止，所以「取消要当场返回」这件事，墙钟本身就是判据（`sandbox.containers.docker.test.ts`）；
+- 镜像里没有 `setsid` 时（自带镜像有，自定义镜像未必）退化成只杀 pidfile 里那一个 pid，
+  **并在日志里写明子进程可能残留** —— 不假装取消干净了。
+
+**后台进程必须重定向。** `background: true` 包成
+`setsid sh -c '<cmd>' > /workspace/.luoli-logs/<name>.log 2>&1 &` 并立刻返回日志路径。
+不重定向的话 exec 一结束管道就关，后台进程下一次写 stdout 吃 SIGPIPE 就死了 ——
+「起了个 server，下一轮发现它不在」正是这么来的。`container_logs` 读的就是这些文件。
+
+#### 出网
+
+**`persistent.network` 与 `sandbox.network` 是两个键**，前者管持久容器（默认 `bridge`），
+后者管一次性容器（保持 `none`）。一个开关不能悄悄改两件事，而不能出网的持久容器基本没有意义。
+
+打开 `enabled` 且 `network: bridge` 时**启动打一条 warn**，形状照 `plan()` 里 jail 那一条：
+bridge 实测能直达公网与宿主 `172.17.0.1`（[reviews/28](./reviews/28-round10-live-system-test.md)），
+而 §5.3 里那个「注入 HTTP_PROXY 指向可审计出站代理」至今没有实现。这是一句必须说出口的话，
+不是一个可以靠默认值糊过去的取舍。
 
 ---
 

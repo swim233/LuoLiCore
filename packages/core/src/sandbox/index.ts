@@ -1,10 +1,15 @@
 import { spawn } from 'node:child_process';
-import { StringDecoder } from 'node:string_decoder';
 import { existsSync, mkdirSync, readdirSync, statSync } from 'node:fs';
 import { userInfo } from 'node:os';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import type { Role } from '@luoli/shared';
-import { elideMiddleBytes } from '@luoli/shared';
+import type { ContainerManager, PersistentSandboxConfig } from './containers.js';
+import { sanitizeDockerToken } from './containers.js';
+import type { SandboxResult } from './exec-stream.js';
+import { collectProcess } from './exec-stream.js';
+
+export type { SandboxResult } from './exec-stream.js';
+export * from './containers.js';
 
 /** 本进程是否跑在容器里。docker 和 podman 各自留的标记文件。 */
 function detectContainer(): boolean {
@@ -53,24 +58,17 @@ export interface SandboxConfig {
   defaultTimeoutMs: number;
   maxTimeoutMs: number;
   maxOutputBytes: number;
+  /**
+   * 会话级持久容器（§5.5）。只在 `mode='docker'` 且角色不在 `bypassRoles` 里时有意义。
+   *
+   * **可选，缺省 = 关**：装配方不给这一段时行为与持久化落地之前一个字不差。这不是图省事 ——
+   * 「没配过这个功能」和「配了并关掉」在运行时本来就该是同一件事，而让每一个既有构造点
+   * 都必须写一遍 `persistent: { enabled: false, … }` 只会让人照着抄一份很快就漂掉的默认值。
+   */
+  persistent?: PersistentSandboxConfig;
 }
 
-export interface SandboxResult {
-  ok: boolean;
-  exitCode: number | null;
-  stdout: string;
-  stderr: string;
-  truncated: boolean;
-  durationMs: number;
-  /** 「输出超限 / 超时 / 被取消」三条路共用同一个 `kill()`，所以这一位**分不出**是哪一种：
-   *  输出超限看 `truncated`，超时看 `durationMs` 是否贴着 `timeoutMs`。 */
-  killed: boolean;
-  oom: boolean;
-  /** 只在输出撞上 `2 × maxOutputBytes`、子进程被就地 SIGKILL 时出现：`bash` / `python` 把整个
-   *  结果原样交回模型（registry 的 `{ok,error,hint}` 那一套），而这一次是**我们**杀的 ——
-   *  不说清楚它会原样重试，再被杀一次（docs/28 · L-TOOL-01）。 */
-  hint?: string;
-}
+const PERSISTENT_OFF: PersistentSandboxConfig = { enabled: false, idleTtlMs: 86_400_000, maxLifetimeMs: 0, maxContainers: 16, network: 'none', reapCron: '*/5 * * * *' };
 
 /**
  * 一次沙箱执行的事实（`docs/10 §2` 的 `sandbox.run`）。`turnId` 让它进得了那一轮的 trace ——
@@ -91,19 +89,15 @@ export interface SandboxRunEvent {
   denied?: string;
 }
 
-/** 按字节算预算、按字符边界切，且结果真的不超过 `max`（docs/27 · T-04：此前那个按比例估的
- *  码点数会算出一个超预算的结果）。与工具输出归一化共用同一份实现。 */
-function clipped(buffer: string, max: number): { value: string; truncated: boolean } {
-  return elideMiddleBytes(buffer, max, (omitted) => `\n…省略 ${omitted} bytes…\n`);
-}
-
 export class Sandbox {
   #dockerAvailable: boolean | null = null;
   readonly #inContainer: boolean;
   readonly #cfg: () => SandboxConfig;
   readonly #warn: ((message: string) => void) | undefined;
   #warnedMode: string | null = null;
+  #warnedEgress = false;
   #seq = 0;
+  #containers: ContainerManager | null = null;
 
   /**
    * config 传 getter 时每次读都取最新值。吃启动快照的后果是：事故中在 WebUI 把 `docker` 改成 `none`
@@ -126,6 +120,42 @@ export class Sandbox {
 
   setDockerAvailable(available: boolean): void {
     this.#dockerAvailable = available;
+  }
+
+  /**
+   * 持久容器的管理器。**装配期注入而不是构造参数**：`ContainerManager` 要 DB 句柄，而
+   * `Sandbox` 一直是「不认识仓储层」的底层（同 `onRun` 那条注释）；没注入时整块降级成
+   * 一次性容器，行为与本次改动之前一个字不差。
+   */
+  bindContainers(containers: ContainerManager): void {
+    this.#containers = containers;
+  }
+
+  containers(): ContainerManager | null {
+    return this.#containers;
+  }
+
+  /**
+   * 某个会话的工作目录在**宿主**上的路径 —— `docker run -v` 的左半边由宿主 daemon 解析（§5.3）。
+   * `container_*` 工具要给任意会话建容器，而那条路径的换算规则只有这里知道，所以开一个
+   * 公开入口而不是让工具层自己拼（拼错的表现是宿主上默默多一个空目录，而不是报错）。
+   * 顺手把本进程视角的那个目录建出来 —— docker 对不存在的宿主路径同样不报错。
+   */
+  hostWorkspaceFor(chatId: string): string | null {
+    const workspace = resolve(this.#cfg().workspaceDir, chatId);
+    const mounted = this.#hostPath(workspace);
+    if (mounted === null) return null;
+    mkdirSync(workspace, { recursive: true, mode: 0o700 });
+    return mounted;
+  }
+
+  #persistent(): PersistentSandboxConfig {
+    return this.#cfg().persistent ?? PERSISTENT_OFF;
+  }
+
+  /** `mode='docker'` + 持久化开着 + 这个角色不 bypass 时，这一轮该落进会话的常驻容器。 */
+  #usesPersistent(mode: 'host' | 'jail' | 'docker'): boolean {
+    return mode === 'docker' && this.#persistent().enabled && this.#containers !== null;
   }
 
   /** 发事件不许打断执行：这一层的调用点在返回结果的正路上，而 `LogSink.event` 之外的回调不保证不抛。 */
@@ -201,6 +231,13 @@ export class Sandbox {
     // jail 只是 ulimit + 目录隔离，不是安全边界（docs/05 §5.2）。模式变了才再说一次，避免刷屏。
     if (mode === 'jail' && this.#warnedMode !== 'jail') this.#warn?.('sandbox.mode=jail：只有 ulimit + 工作目录隔离，同机逃逸手段一概挡不住，不要当成安全边界');
     this.#warnedMode = mode;
+    // 持久容器默认出网，而 §5.3 里那个「可审计出站代理」至今没实现 —— 这是一句必须说出口的话，
+    // 不能靠默认值糊过去。与 jail 那条同样按「变了才再说一次」去重。
+    const egress = mode === 'docker' && this.#persistent().enabled && this.#persistent().network === 'bridge';
+    if (egress !== this.#warnedEgress) {
+      if (egress) this.#warn?.('sandbox.persistent.network=bridge：持久容器能直达公网与宿主，且没有可审计的出站代理。要断网把它改成 none（上面的 sandbox.network 管的是一次性容器，不是这个）');
+      this.#warnedEgress = egress;
+    }
     return { allowed: true, mode };
   }
 
@@ -218,12 +255,16 @@ export class Sandbox {
   }
 
   /**
-   * @param extraEnv 追加给子进程的环境变量。**两条路都不经过 shell 解析** —— docker 走
-   *   `-e k=v` 的 argv，宿主/jail 走 `spawn` 的 options —— 所以这是把模型给的值交进脚本时
-   *   唯一不需要做引号决策的通道。键名白名单在调用方（`CustomToolManager`）那一层，这里只负责
-   *   「叠加在既有三键白名单之上」：`BOT_TOKEN` / `LUOLI_MASTER_KEY` 仍然进不来。
+   * @param options.extraEnv 追加给子进程的环境变量。**三条路都不经过 shell 解析** —— docker
+   *   （一次性与持久）走 `-e k=v` 的 argv，宿主/jail 走 `spawn` 的 options —— 所以这是把模型
+   *   给的值交进脚本时唯一不需要做引号决策的通道。键名白名单在调用方（`CustomToolManager`）
+   *   那一层，这里只负责「叠加在既有三键白名单之上」：`BOT_TOKEN` / `LUOLI_MASTER_KEY` 仍然进不来。
+   * @param options.chatId 这一次执行属于哪个会话。**显式传，不从 workspace 路径反推** ——
+   *   路径反推靠的是「最后一段恰好是 chatId」这个巧合，而持久容器是按会话分的，认错了就是
+   *   把一个群的命令送进另一个群的容器。不给（WebUI 试跑、探测）时退回一次性容器。
    */
-  async run(command: string, role: Role, workspace: string, abortSignal: AbortSignal, timeoutMs = this.#cfg().defaultTimeoutMs, turnId = 'adhoc', extraEnv?: Readonly<Record<string, string>>): Promise<SandboxResult> {
+  async run(command: string, role: Role, workspace: string, abortSignal: AbortSignal, timeoutMs = this.#cfg().defaultTimeoutMs, turnId = 'adhoc', options: { extraEnv?: Readonly<Record<string, string>>; chatId?: string } = {}): Promise<SandboxResult> {
+    const extraEnv = options.extraEnv;
     if (abortSignal.aborted) return { ok: false, exitCode: null, stdout: '', stderr: 'cancelled', truncated: false, durationMs: 0, killed: true, oom: false };
     const plan = this.plan(role, workspace);
     /** 被拒也要落一行：模型侧只看到一句工具失败，而「为什么」是配置层的事。 */
@@ -243,10 +284,18 @@ export class Sandbox {
     // 同步到宿主，所以 #hostPath 换算出来的路径此刻在宿主上也已存在。
     mkdirSync(workspace, { recursive: true, mode: 0o700 });
     const timeout = Math.min(timeoutMs, this.#cfg().maxTimeoutMs);
+    // 持久容器（§5.5）：`docker exec` 进这个会话的常驻容器，而不是每次新起一个。
+    // 拿不到 chatId 就退回一次性容器 —— 那条路一个字没改。
+    const persistent = this.#usesPersistent(plan.mode) && options.chatId
+      ? await this.#containers!.prepareExec({ chatId: options.chatId, mountedWorkspace: mounted, command, timeoutMs: timeout, ...(extraEnv ? { extraEnv } : {}) })
+      : null;
+    if (persistent && !persistent.ok) return { ...denied(persistent.error), ...(persistent.hint ? { hint: persistent.hint } : {}) };
     // 名字必须带 turnId（docs/05 §5.3）：`Date.now()` 在并发上限 8 的同一毫秒里会撞名，
     // `docker run --name` 冲突让第二个容器直接失败；而且 /cancel 想按 turn 找容器也无从找起。
+    // **turnId 要 sanitize**：WebUI 试跑那条路的 turnId 是 `dryrun:<ulid>`，而冒号不在 docker
+    // 容器名的字符集里 —— 那条路的 `bash` 一直以 `invalid name` 收场，不是沙箱层的错误。
     this.#seq += 1;
-    const name = `luoli-sbx-${turnId}-${this.#seq}`;
+    const name = `luoli-sbx-${sanitizeDockerToken(turnId)}-${this.#seq}`;
     const dockerArgs = ['run', '--rm', '--name', name, `--network=${this.#cfg().network}`, `--memory=${this.#cfg().memoryMb}m`, `--memory-swap=${this.#cfg().memoryMb}m`, `--cpus=${this.#cfg().cpus}`, `--pids-limit=${this.#cfg().pidsLimit}`, '--cap-drop=ALL', '--security-opt=no-new-privileges', '--user=1000:1000', `--tmpfs=/tmp:rw,size=${this.#cfg().tmpfsMb}m,noexec`, '-v', `${mounted}:/workspace:rw`, '-w', '/workspace', '-e', 'HOME=/workspace', '-e', 'LANG=C.UTF-8'];
     // 追加 env 必须在 push image 之前：image 之后的 argv 是**容器里的命令**，`-e` 落到那边就成了
     // 传给 `timeout` 的参数。
@@ -258,52 +307,19 @@ export class Sandbox {
     // 真要让它可配，那时再把过滤加回来。
     const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => ['PATH', 'LANG', 'TZ'].includes(key)));
     const child = plan.mode === 'docker'
-      ? spawn(this.#cfg().dockerBin, dockerArgs, { stdio: ['ignore', 'pipe', 'pipe'] })
+      ? spawn(this.#cfg().dockerBin, persistent ? persistent.argv : dockerArgs, { stdio: ['ignore', 'pipe', 'pipe'] })
       : spawn('/bin/sh', ['-c', plan.mode === 'jail' ? this.#jailed(command, timeout) : command], { cwd: workspace, env: { ...env, HOME: workspace, ...extraEnv }, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
-    const started = performance.now();
-    const cap = this.#cfg().maxOutputBytes;
-    const stdoutDecoder = new StringDecoder('utf8');
-    const stderrDecoder = new StringDecoder('utf8');
-    let stdout = '';
-    let stderr = '';
-    let stdoutBytes = 0;
-    let stderrBytes = 0;
-    let truncatedByCap = false;
-    let killed = false;
-    const kill = (): void => {
-      if (killed) return;
-      killed = true;
-      if (plan.mode === 'docker') spawn(this.#cfg().dockerBin, ['kill', name], { stdio: 'ignore' });
-      else if (child.pid) try { process.kill(-child.pid, 'SIGKILL'); } catch { /* 已退出 */ }
-    };
-    const collect = (chunk: Buffer, stream: 'stdout' | 'stderr'): void => {
-      const current = stream === 'stdout' ? stdoutBytes : stderrBytes;
-      const remaining = Math.max(0, cap * 2 - current);
-      const kept = chunk.subarray(0, remaining);
-      if (stream === 'stdout') { stdoutBytes += kept.length; stdout += stdoutDecoder.write(kept); }
-      else { stderrBytes += kept.length; stderr += stderrDecoder.write(kept); }
-      if (kept.length < chunk.length) { truncatedByCap = true; kill(); }
-    };
-    child.stdout.on('data', (chunk: Buffer) => collect(chunk, 'stdout'));
-    child.stderr.on('data', (chunk: Buffer) => collect(chunk, 'stderr'));
-    const timer = setTimeout(kill, timeout);
-    abortSignal.addEventListener('abort', kill, { once: true });
-    const exitCode = await new Promise<number | null>((resolve, reject) => { child.once('error', reject); child.once('close', resolve); });
-    clearTimeout(timer);
-    abortSignal.removeEventListener('abort', kill);
-    stdout += stdoutDecoder.end();
-    stderr += stderrDecoder.end();
-    const out = clipped(stdout, cap);
-    const err = clipped(stderr, cap);
-    const oom = exitCode === 137 || /out of memory|oom/i.test(stderr);
-    // `ok` 只看退出码。`truncatedByCap` 同一行就 `kill()` 了子进程，退出码本来就不是 0 ——
-    // 那个 `&& !truncatedByCap` 唯一还起作用的场合恰好是 bug：子进程已自己退出 0、最后一批
-    // >2×cap 的输出在 `close` 之前才 flush 完，`kill()` 打空，于是一次**成功**调用被记成失败，
-    // 连着三次就把 bash 停掉一整轮（docs/28 · L-TOOL-01）。
-    const durationMs = Math.round(performance.now() - started);
+    const result = await collectProcess(child, { timeoutMs: timeout, maxOutputBytes: this.#cfg().maxOutputBytes, abortSignal,
+      kill: () => {
+        // **持久容器这一档不能 `docker kill`**：那会把整个会话的环境连同别人的后台进程一起干掉，
+        // 而超时与 `/cancel` 走的是同一个钩子（§5.5）。打容器里那个进程组就够了。
+        if (persistent) persistent.cancel();
+        else if (plan.mode === 'docker') spawn(this.#cfg().dockerBin, ['kill', name], { stdio: 'ignore' });
+        else if (child.pid) try { process.kill(-child.pid, 'SIGKILL'); } catch { /* 已退出 */ }
+      } });
+    persistent?.settle();
     this.#emit({ turnId, role, mode: plan.mode, image: plan.mode === 'docker' ? this.#cfg().image : null,
-      exitCode, durationMs, ok: exitCode === 0, killed, oom, truncated: truncatedByCap || out.truncated || err.truncated });
-    return { ok: exitCode === 0, exitCode, stdout: out.value, stderr: err.value, truncated: truncatedByCap || out.truncated || err.truncated, durationMs, killed, oom,
-      ...(truncatedByCap ? { hint: `输出超过 ${cap * 2} 字节（tools.exec.maxOutputBytes 的两倍）后子进程已被 SIGKILL，交回的只有头尾各半 —— 命令可能没跑完。把输出收窄再来（重定向到文件后分段 read_file、用 grep/head 过滤、只打印统计），别原样重试。` } : {}) };
+      exitCode: result.exitCode, durationMs: result.durationMs, ok: result.ok, killed: result.killed, oom: result.oom, truncated: result.truncated });
+    return persistent?.note ? { ...result, note: persistent.note } : result;
   }
 }

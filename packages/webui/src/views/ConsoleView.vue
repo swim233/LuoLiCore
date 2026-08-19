@@ -261,6 +261,7 @@ const COLUMNS = {
   aliases: [{ key: 'alias', header: '别名', width: '12%' }, { key: 'purpose', header: '用途', width: '27%' }, { key: 'chain', header: 'Fallback 链', width: '31%' }, { key: 'settings', header: '采样参数', width: '20%' }, { key: 'actions', header: '', width: '10%' }],
   logs: [{ key: 'ts', header: '时间', width: '13rem' }, { key: 'level', header: '级别', width: '7rem' }, { key: 'kind', header: '事件' }, { key: 'summary', header: '摘要' }, { key: 'data_bytes', header: '载荷', width: '6rem' }, { key: 'trace_id', header: 'Trace' }],
   tasks: [{ key: 'title', header: '标题' }, { key: 'state', header: '状态', width: '7rem' }, { key: 'updated_at', header: '更新时间', width: '13rem' }, { key: 'actions', header: '', width: '7rem' }],
+  containers: [{ key: 'chat', header: '会话' }, { key: 'name', header: '容器', width: '14rem' }, { key: 'used', header: '上次用 / 次数', width: '13rem' }, { key: 'expires', header: '还剩', width: '8rem' }, { key: 'actions', header: '', width: '17rem' }],
   schedules: [{ key: 'name', header: '任务' }, { key: 'chatLabel', header: '会话' }, { key: 'mode', header: '模式', width: '6rem' }, { key: 'trigger', header: '触发', width: '11rem' }, { key: 'nextRun', header: '下一次', width: '12rem' }, { key: 'last', header: '上一次', width: '12rem' }, { key: 'state', header: '状态', width: '6rem' }, { key: 'actions', header: '', width: '11rem' }],
   activeTurns: [{ key: 'who', header: '发起人' }, { key: 'chat', header: '会话' }, { key: 'progress', header: '当前动作' }, { key: 'stats', header: '步数 / 花费', width: '11rem' }, { key: 'elapsed', header: '已用时长', width: '8rem' }, { key: 'actions', header: '', width: '6rem' }],
   approvals: [{ key: 'tool_name', header: '工具' }, { key: 'risk', header: '风险', width: '7rem' }, { key: 'state', header: '状态', width: '7rem' }, { key: 'requested_at', header: '请求时间', width: '12rem' }, { key: 'actions', header: '', width: '12rem' }],
@@ -284,6 +285,8 @@ async function load(): Promise<void> {
   await Promise.all([loadQuota().catch(() => undefined), loadUsageReport()]);
   // 定时任务面板：没装配运行时的部署会回 available:false，界面据此说明白，而不是显示零条任务。
   await REFRESH_LOADERS.schedules().catch(() => undefined);
+  // 容器面板同理：没装配持久容器运行时的部署回 not_implemented，面板说明白而不是显示零个容器。
+  await loadContainers().catch(() => undefined);
   syncTrigger();
   syncOutput();
   syncBotName();
@@ -1232,11 +1235,16 @@ async function resetQuota(row?: QuotaCounter): Promise<void> {
 
 // ── 沙箱：mode 决定 exec 类工具跑在哪儿，配错了要么全落空要么直接跑在宿主上 ──────────────
 interface SandboxForm { mode: string; network: string; image: string; dockerBin: string; workspaceDir: string; hostWorkspaceDir: string;
-  memoryMb: number | null; cpus: number | null; pidsLimit: number | null; tmpfsMb: number | null; readOnlyRoot: boolean; bypassRoles: string[] }
+  memoryMb: number | null; cpus: number | null; pidsLimit: number | null; tmpfsMb: number | null; readOnlyRoot: boolean; bypassRoles: string[];
+  persistent: { enabled: boolean; idleTtlMs: number | null; maxLifetimeMs: number | null; maxContainers: number | null; network: string; reapCron: string } }
 interface SandboxPayload { config: Record<string, unknown>; plan?: { allowed: boolean; mode: string; reason?: string } }
 const sandbox = ref<SandboxPayload | null>(null);
 const sandboxForm = ref<SandboxForm>({ mode: 'docker', network: 'none', image: '', dockerBin: 'docker', workspaceDir: '', hostWorkspaceDir: '',
-  memoryMb: 512, cpus: 1, pidsLimit: 128, tmpfsMb: 64, readOnlyRoot: true, bypassRoles: ['owner'] });
+  memoryMb: 512, cpus: 1, pidsLimit: 128, tmpfsMb: 64, readOnlyRoot: true, bypassRoles: ['owner'],
+  persistent: { enabled: false, idleTtlMs: 86400000, maxLifetimeMs: 0, maxContainers: 16, network: 'bridge', reapCron: '*/5 * * * *' } });
+// 界面按小时收，配置按毫秒存 —— 「24」比「86400000」好核对得多，而 schema 那边保持 Ms 后缀的一致性。
+const HOUR_MS = 3_600_000;
+const hoursOf = (ms: number | null): number => Math.round((ms ?? 0) / HOUR_MS * 10) / 10;
 const sandboxDirty = ref(false);
 const sandboxSaving = ref(false);
 const sandboxProbing = ref(false);
@@ -1277,7 +1285,9 @@ function markSandboxDirty(): void { sandboxDirty.value = true; }
 function syncSandbox(payload: SandboxPayload): void {
   if (sandboxDirty.value) return;
   const config = payload.config as Partial<SandboxForm>;
-  sandboxForm.value = { ...sandboxForm.value, ...config, bypassRoles: [...(config.bypassRoles ?? [])] };
+  // `persistent` 要单独合一层：浅铺会把整个嵌套对象换成后端那份，旧部署里它可能缺字段。
+  sandboxForm.value = { ...sandboxForm.value, ...config, bypassRoles: [...(config.bypassRoles ?? [])],
+    persistent: { ...sandboxForm.value.persistent, ...(config.persistent ?? {}) } };
 }
 async function loadSandbox(): Promise<void> {
   try { const payload = await api<SandboxPayload>('/api/sandbox'); sandbox.value = payload; syncSandbox(payload); }
@@ -1295,13 +1305,66 @@ async function saveSandbox(): Promise<void> {
   try {
     await api('/api/sandbox', { method: 'PUT', body: JSON.stringify({ mode: form.mode, network: form.network, image: form.image, dockerBin: form.dockerBin,
       workspaceDir: form.workspaceDir, hostWorkspaceDir: form.hostWorkspaceDir, memoryMb: form.memoryMb, cpus: form.cpus, pidsLimit: form.pidsLimit,
-      tmpfsMb: form.tmpfsMb, readOnlyRoot: form.readOnlyRoot, bypassRoles: form.bypassRoles }) });
+      tmpfsMb: form.tmpfsMb, readOnlyRoot: form.readOnlyRoot, bypassRoles: form.bypassRoles, persistent: form.persistent }) });
     sandboxDirty.value = false;
     pushToast({ severity: 'success', summary: '沙箱配置已保存', detail: '热更新已生效，下一次工具调用即按新配置执行' });
     await loadSandbox();
+    await loadContainers();
   } catch (error) { toastError('保存沙箱配置失败', error); }
   finally { sandboxSaving.value = false; }
 }
+// ── 持久容器（docs/09 §3.7 / docs/05 §5.5）：一个会话一个常驻容器，到期回收 ────────────
+interface ContainerRow { chatId: string; chatLabel: string | null; name: string; image: string; createdAt: number; lastUsedAt: number;
+  expiresAt: number; hardExpiresAt: number | null; pinned: boolean; execCount: number; hasSetsid: boolean; lastError: string | null }
+interface ContainerPayload { enabled: boolean; used: number; max: number; containers: ContainerRow[] }
+/** `available: false` = 这个部署没装配持久容器运行时。**和「一个容器都没有」是两回事**，
+ *  面板上必须分开说（同定时任务那一节，docs/16 §5「摘除比伪造安全」）。 */
+const containers = ref<ContainerPayload & { available: boolean }>({ available: true, enabled: false, used: 0, max: 0, containers: [] });
+const containerBusy = ref('');
+async function loadContainers(): Promise<void> {
+  try {
+    // 归一化而不是直接塞（同 schedules 那条）：形状对不上的响应不该让整页崩在 DataGrid 的 rows 上。
+    const next = await api<Partial<ContainerPayload>>('/api/containers');
+    containers.value = { available: true, enabled: Boolean(next?.enabled), used: next?.used ?? 0, max: next?.max ?? 0,
+      containers: Array.isArray(next?.containers) ? next.containers : [] };
+  }
+  catch (error) {
+    if (error instanceof ApiError && error.code === 'not_implemented') { containers.value = { available: false, enabled: false, used: 0, max: 0, containers: [] }; return; }
+    toastError('加载容器列表失败', error);
+  }
+}
+/** 「重置」的代价要写在确认框里：容器里跑着的进程会一起没（照「立即触发」那条的写法）。 */
+async function resetContainer(row: ContainerRow, wipe: boolean): Promise<void> {
+  const who = row.chatLabel ?? row.chatId;
+  const cost = wipe
+    ? `\n\n⚠ 同时会把「${who}」工作区里的文件全部挪进 .luoli-trash（不真删，但模型和文件工具都看不到了）。`
+    : '\n\n工作区里的文件一个都不动。';
+  if (!confirm(`重置「${who}」的容器？容器里装的东西和正在跑的后台进程会一起没。${cost}`)) return;
+  containerBusy.value = row.chatId;
+  try {
+    await api(`/api/containers/${encodeURIComponent(row.chatId)}${wipe ? '?wipe=1' : ''}`, { method: 'DELETE' });
+    pushToast({ severity: 'success', summary: `已重置「${who}」的容器`, detail: wipe ? '工作区文件已挪进 .luoli-trash' : '工作区文件未改动' });
+    await loadContainers();
+  } catch (error) { toastError('重置容器失败', error); }
+  finally { containerBusy.value = ''; }
+}
+async function keepContainer(row: ContainerRow, patch: { hours?: number; pin?: boolean }): Promise<void> {
+  containerBusy.value = row.chatId;
+  try {
+    await api(`/api/containers/${encodeURIComponent(row.chatId)}/keep`, { method: 'POST', body: JSON.stringify(patch) });
+    await loadContainers();
+  } catch (error) { toastError('改到期时间失败', error); }
+  finally { containerBusy.value = ''; }
+}
+function containerExpiry(row: ContainerRow): string {
+  if (row.pinned && row.hardExpiresAt === null) return '已钉住';
+  const deadline = row.pinned ? row.hardExpiresAt! : Math.min(row.expiresAt, row.hardExpiresAt ?? row.expiresAt);
+  const ms = deadline - Date.now();
+  if (ms <= 0) return '已到期';
+  const hours = Math.floor(ms / HOUR_MS);
+  return hours >= 1 ? `${hours} 小时` : `${Math.max(1, Math.round(ms / 60000))} 分钟`;
+}
+
 /** 探测打的是**库里已保存的那份**配置：表单里改了还没存，探出来的仍是旧 mode。 */
 async function probeSandbox(): Promise<void> {
   sandboxProbing.value = true;
@@ -1876,7 +1939,7 @@ async function triggerSchedule(job: ScheduleJob): Promise<void> {
 // ── SSE：首屏之后界面的数据新鲜度全靠这里（docs/21 · G-SSE-01）───────────────────
 // 事件到达**不再无脑重跑 `load()`**（那是一次 18 个端点）：按事件类型只刷相关的那几组，
 // 且只刷当前页面看得见的。服务端已按 kind 合并过一轮，这一层挡的是「多个 kind 同时来」。
-type RefreshGroup = 'dashboard' | 'logs' | 'chats' | 'usage' | 'quota' | 'tasks' | 'approvals' | 'extensions' | 'config' | 'activeTurns' | 'schedules';
+type RefreshGroup = 'dashboard' | 'logs' | 'chats' | 'usage' | 'quota' | 'tasks' | 'approvals' | 'extensions' | 'config' | 'activeTurns' | 'schedules' | 'containers';
 const REFRESH_DEBOUNCE_MS = 400;
 const lastEventAt = ref(0);
 const REFRESH_LOADERS: Record<RefreshGroup, () => Promise<void>> = {
@@ -1901,11 +1964,14 @@ const REFRESH_LOADERS: Record<RefreshGroup, () => Promise<void>> = {
   extensions: async () => { [skills.value, plugins.value, mcp.value, customTools.value] = await Promise.all([api<Extension[]>('/api/skills'), api<Extension[]>('/api/plugins'), api<Extension[]>('/api/mcp'), api<CustomTool[]>('/api/custom-tools').catch(() => [])]); },
   config: async () => { [config.value, tools.value, agents.value] = await Promise.all([api<Record<string, unknown>>('/api/config'), api<Record<string, ToolPolicy>>('/api/tools'), api<AgentDefinition[]>('/api/agents')]); syncTrigger(); syncOutput(); },
   activeTurns: loadActiveTurns,
+  containers: loadContainers,
 };
 // 哪些页面看得见这一组。看不见就不刷 —— 切过去时 watch(active) 会补一次。
 const REFRESH_VISIBILITY: Record<RefreshGroup, readonly string[]> = {
   dashboard: ['dashboard'], logs: ['dashboard', 'logs'], chats: ['chats'], usage: ['usage'], quota: ['quota'],
   tasks: ['tasks'], extensions: ['extensions', 'dashboard'], activeTurns: ['dashboard'], schedules: ['tasks'],
+  // 容器面板在工具页的沙箱块下方 —— 只有那一页看得见。
+  containers: ['tools'],
   // 待审批不做页面过滤：一条 pending 会把某个真实轮次卡住最多 approval.ttlMs，
   // 只在任务页刷新等于「运维不切到那一页就永远不知道有人在等」。事件本身很稀疏（命中规则才发）。
   approvals: ['dashboard', 'chats', 'messages', 'prompts', 'providers', 'principals', 'tools', 'extensions', 'agents', 'logs', 'usage', 'quota', 'tasks', 'settings'],
@@ -1921,7 +1987,7 @@ const EVENT_REFRESH: Record<string, readonly RefreshGroup[]> = {
   quota: ['quota'],
   'task.updated': ['tasks'],
   'approval.pending': ['approvals'], 'approval.decided': ['approvals'],
-  'config.changed': ['config'],
+  'config.changed': ['config', 'containers'],
   // 扩展页此前只靠 `health` 顺带刷新，而那个事件只在 provider 测试与 MCP 重连后才发 ——
   // 从 Telegram 装进来的 skill 要等下一次健康检查才出现（docs/21 §9 · G-EXT-05）。
   'extensions.changed': ['extensions'],
@@ -2470,6 +2536,37 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
               <p v-if="sandboxForm.bypassRoles.some((role) => role !== 'owner')" class="field-note wake-issue"><i class="pi pi-exclamation-triangle" />owner 之外的角色也在绕过名单里：这些人能让模型在宿主上执行任意命令。</p>
             </div>
           </div>
+          <div class="registry-heading">
+            <div><h3>持久容器</h3><p class="section-note">开着的时候，<b>每个群 / 私聊有一个常驻容器</b>，执行走 <code>docker exec</code> 而不是每次新起一个 —— 跑着的后台进程能活到下一轮。工作区文件本来就是按会话持久的，这里管的是容器本身。只在 <code>mode = docker</code> 下有意义。</p></div>
+          </div>
+          <div v-if="sandboxForm.persistent.enabled" class="danger-banner"><i class="pi pi-exclamation-triangle" />持久容器<b>默认能出网</b>（下面单独那个「持久容器网络」，与上面的容器网络不是同一个键）：<code>bridge</code> 下容器可直达公网与宿主，而可审计的出站代理并没有实现。</div>
+          <div class="form-grid">
+            <UiSwitch v-model="sandboxForm.persistent.enabled" class="wide" label="启用会话级持久容器" :disabled="sandboxForm.mode !== 'docker'" @change="markSandboxDirty" />
+            <label>闲置多久回收（小时）<UiNumber :model-value="hoursOf(sandboxForm.persistent.idleTtlMs)" :min="0.1" :step="1" :disabled="!sandboxForm.persistent.enabled" @update:model-value="sandboxForm.persistent.idleTtlMs = Math.round(($event ?? 0) * 3600000); markSandboxDirty()" /><small class="field-note">每执行一次就重新计时，所以一直在用的会话容器可以活很久。</small></label>
+            <label>最长存活（小时）<UiNumber :model-value="hoursOf(sandboxForm.persistent.maxLifetimeMs)" :min="0" :step="24" :disabled="!sandboxForm.persistent.enabled" @update:model-value="sandboxForm.persistent.maxLifetimeMs = Math.round(($event ?? 0) * 3600000); markSandboxDirty()" /><small class="field-note"><b>0 = 不设上限。</b>从创建算起，不因活跃延长；「钉住」豁免不了这一条。</small></label>
+            <label>容器数上限<UiNumber :model-value="sandboxForm.persistent.maxContainers" :min="1" :disabled="!sandboxForm.persistent.enabled" @update:model-value="sandboxForm.persistent.maxContainers = $event; markSandboxDirty()" /><small class="field-note">撞上限时新会话的执行类工具<b>直接报错</b>，不会悄悄退回一次性容器。</small></label>
+            <label>持久容器网络<UiSelect v-model="sandboxForm.persistent.network" :options="[{ value: 'none', label: 'none · 断网' }, { value: 'bridge', label: 'bridge · 可出网' }]" :disabled="!sandboxForm.persistent.enabled" @change="markSandboxDirty" /><small class="field-note">与上面那个「容器网络」是<b>两个键</b>：那个管一次性容器，这个管持久容器。</small></label>
+            <label>回收频率（cron）<input v-model="sandboxForm.persistent.reapCron" :disabled="!sandboxForm.persistent.enabled" @input="markSandboxDirty"><small class="field-note">五段式。到期回收与「库 ↔ docker」对账都在这条上。</small></label>
+          </div>
+          <p class="callout"><i class="pi pi-info-circle" />关掉这个开关<b>不会立刻销毁已有容器</b>：它们由下一次回收对账收走，在那之前 <code>docker ps</code> 里还看得见。</p>
+          <div class="registry-heading">
+            <div><h4>当前容器</h4><p class="section-note">「重置」= 销毁并立刻重建，容器里跑着的进程会一起没；工作区文件默认不动。</p></div>
+            <UiTag :value="containers.available ? `${containers.used} / ${containers.max}` : '未装配'" :severity="containers.available && containers.used >= containers.max ? 'danger' : 'secondary'" />
+          </div>
+          <p v-if="!containers.available" class="callout warn"><i class="pi pi-exclamation-triangle" />这个部署没有装配持久容器运行时，这里读不到任何容器（<b>不是「一个都没有」</b>）。</p>
+          <p v-else-if="!containers.enabled" class="callout"><i class="pi pi-info-circle" />持久容器没开着。下面列出的是还没被回收的存量容器（如果有）。</p>
+          <DataGrid :rows="containers.containers" :columns="COLUMNS.containers" data-key="chatId" empty="现在没有持久容器">
+            <template #chat="{ data }"><div class="alias-name"><b>{{ data.chatLabel ?? `未登记会话 ${data.chatId}` }}</b></div><small class="hit-text">{{ data.chatId }}<template v-if="data.lastError"> · <span class="wake-issue">{{ data.lastError }}</span></template></small></template>
+            <template #name="{ data }"><code>{{ data.name }}</code><small class="alias-empty">{{ data.image }}<template v-if="!data.hasSetsid"> · 无 setsid（取消杀不干净子进程）</template></small></template>
+            <template #used="{ data }"><span>{{ new Date(data.lastUsedAt).toLocaleString() }}</span><small class="alias-empty">共 {{ data.execCount }} 次执行</small></template>
+            <template #expires="{ data }"><UiTag :value="containerExpiry(data)" :severity="data.pinned ? 'info' : 'secondary'" /></template>
+            <template #actions="{ data }"><div class="section-actions">
+              <UiButton size="small" variant="outlined" :icon="data.pinned ? 'pi pi-lock-open' : 'pi pi-lock'" :label="data.pinned ? '取消钉住' : '钉住'" :loading="containerBusy === data.chatId" @click="keepContainer(data, { pin: !data.pinned })" />
+              <UiButton size="small" variant="outlined" icon="pi pi-clock" label="+24h" :loading="containerBusy === data.chatId" @click="keepContainer(data, { hours: 24 })" />
+              <UiButton size="small" variant="outlined" severity="danger" label="重置" :loading="containerBusy === data.chatId" @click="resetContainer(data, false)" />
+              <UiButton size="small" variant="outlined" severity="danger" icon="pi pi-trash" title="重置并把工作区文件挪进 .luoli-trash" :loading="containerBusy === data.chatId" @click="resetContainer(data, true)" />
+            </div></template>
+          </DataGrid>
         </section>
         <section v-else-if="active === 'extensions'" key="extensions" class="surface page-surface">
           <header><div><p class="eyebrow">EXTENSIONS</p><h2>Skills / Plugins / MCP / 自定义工具</h2><p>Skill 渐进式披露；Plugin 在 bot 进程里<b>全信任</b>运行，没有沙箱；MCP 工具动态发现；自定义工具是模型自己写的沙箱脚本。保存后即时重扫或重连。</p></div><div class="section-actions"><UiButton variant="outlined" label="新建 Skill" icon="pi pi-plus" @click="editSkill()" /><UiButton variant="outlined" label="安装 Skill 包" icon="pi pi-upload" :loading="skillPackageBusy" @click="pickSkillPackage" /><UiButton label="新建 MCP" icon="pi pi-plus" @click="editMcp()" /><UiTag :value="`${extensionRows.filter((row) => row.enabled !== 0).length} / ${extensionRows.length} 启用`" :severity="extensionRows.some((row) => extensionError(row)) ? 'danger' : 'secondary'" /></div></header>

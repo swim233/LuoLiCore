@@ -59,6 +59,13 @@ const RESPONSES: Record<string, unknown> = {
       catalog: { source: 'models.dev', match: 'official', providerId: 'xai', modelId: 'grok-4.5', normalized: false, priceRange: null, priceSource: 'official', fetchedAt: 1_787_000_000_000 },
       manual: { vision: false } }),
     price_in: 3, price_out: 15, price_cache_read: null, price_cache_write: null, enabled: 1, sort: 0 }],
+  // 持久容器：一个钉住的、一个正常的。行模板里那几个派生值（还剩多久、无 setsid 的提示、
+  // 上次用的时间）只有真有行时才被渲染 —— 回 `[]` 的话这一块和没写一样。
+  '/api/containers': { enabled: true, used: 2, max: 16, containers: [
+    { chatId: '-1001', chatLabel: '隆福饭搭子', name: 'luoli-box-n1001', image: 'luoli-sandbox:latest', createdAt: Date.now() - 7_200_000,
+      lastUsedAt: Date.now() - 600_000, expiresAt: Date.now() + 86_000_000, hardExpiresAt: null, pinned: false, execCount: 12, hasSetsid: true, lastError: null },
+    { chatId: '8899001', chatLabel: '阿离', name: 'luoli-box-8899001', image: 'luoli-sandbox:latest', createdAt: Date.now() - 86_400_000,
+      lastUsedAt: Date.now() - 60_000, expiresAt: Date.now() + 3_600_000, hardExpiresAt: Date.now() + 600_000_000, pinned: true, execCount: 3, hasSetsid: false, lastError: 'docker exec 上一次以 137 退出' }] },
   '/api/schedules': { available: true, enabled: true, timezone: 'UTC', settings: { maxPerChat: 20, minIntervalMinutes: 5, maxPayloadChars: 2000 },
     jobs: [{ id: 'j1', key: 'chat:c1', chatId: 'c1', threadId: null, createdBy: '1', name: '每日早报', mode: 'agent', state: 'active',
       chatLabel: '阿离', creatorLabel: '阿离', cron: '0 8 * * *', timezone: 'UTC', payload: '汇总昨天群里聊了什么', runCount: 2,

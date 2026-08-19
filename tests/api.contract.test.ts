@@ -1,7 +1,7 @@
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { ArchiveRepository, OperationsRepository, PrincipalRepository, closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
-import { ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceService, McpManager, ModelRegistry, ProviderStore, Secrets, SkillLoader, configSchema } from '@luoli/core';
+import { ArchiveRepository, OperationsRepository, PrincipalRepository, SandboxContainerRepository, closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
+import { ConfigStore, ContainerManager, ContextEngine, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceService, McpManager, ModelRegistry, ProviderStore, Sandbox, Secrets, SkillLoader, configSchema } from '@luoli/core';
 import { createServer, type ServerDependencies } from '@luoli/server';
 import { zipFixture } from './fixtures/zip.js';
 
@@ -28,6 +28,49 @@ describe('documented API surface', () => {
     }
     const response = await app.request('/api/quota/reset', { method: 'POST', headers }); expect(response.status).toBe(200);
     expect(db.prepare("SELECT COUNT(*) FROM log_events WHERE kind='webui.action' AND summary='POST /api/quota/reset'").pluck().get()).toBe(1);
+    closeDatabase(db);
+  });
+
+  /**
+   * 持久容器的三个端点（docs/09 §3.7）。**没装配运行时时回 `not_implemented` 而不是空列表** ——
+   * 「读不到」和「一个容器都没有」在运维眼里是两回事（docs/16 §5「摘除比伪造安全」），
+   * 而面板正是靠这一位决定显示「这个部署没装配」还是「现在没有容器」。
+   */
+  it('container endpoints tell "not wired" apart from "none", and list carries chat labels', async () => {
+    const bare = harness();
+    const missing = await bare.app.request('/api/containers', { headers: { cookie: bare.headers.cookie } });
+    expect(missing.status).toBe(500);
+    expect((await missing.json() as { error: { code: string } }).error.code).toBe('not_implemented');
+    closeDatabase(bare.db);
+
+    const { app, db, config, headers } = harness(({ db: database, config: store }) => {
+      const sandbox = new Sandbox(() => ({ ...store.snapshot().sandbox, defaultTimeoutMs: 1000, maxTimeoutMs: 1000, maxOutputBytes: 1024 }));
+      sandbox.bindContainers(new ContainerManager(database, new SandboxContainerRepository(database), () => ({
+        dockerBin: 'docker', image: 'i', memoryMb: 512, cpus: 1, pidsLimit: 128, readOnlyRoot: true, tmpfsMb: 64,
+        maxOutputBytes: 1024, persistent: store.snapshot().sandbox.persistent })));
+      return { sandbox };
+    });
+    config.replace(configSchema.parse({ access: { bootstrapOwnerId: '1' }, webui: { passwordHash: 'hash' },
+      sandbox: { persistent: { enabled: true } } }), ['sandbox.persistent.enabled']);
+    new PrincipalRepository(db).upsertSeen({ id: 'chat:-1001', kind: 'chat', tgId: '-1001', role: 'trusted', displayName: '隆福饭搭子', username: null, chatType: 'supergroup' });
+    new SandboxContainerRepository(db).create({ chatId: '-1001', name: 'luoli-box-n1001', containerId: null, image: 'i', specHash: 'h',
+      hasSetsid: true, expiresAt: Date.now() + 3_600_000, hardExpiresAt: null });
+    const listed = await app.request('/api/containers', { headers: { cookie: headers.cookie } });
+    expect(listed.status).toBe(200);
+    const payload = (await listed.json() as { data: { enabled: boolean; used: number; max: number; containers: Array<{ chatLabel: string; pinned: boolean }> } }).data;
+    expect(payload).toMatchObject({ enabled: true, used: 1 });
+    // 会话名从 principals join 出来 —— 面板上只显示裸 chatId 的话，运维认不出这是哪个群。
+    expect(payload.containers[0]).toMatchObject({ chatLabel: '隆福饭搭子', pinned: false });
+
+    // 钉住走 keep，并且**只豁免闲置回收**：这里没有绝对上限，所以 hardExpiresAt 仍是 null。
+    const kept = await app.request('/api/containers/-1001/keep', { method: 'POST', headers, body: JSON.stringify({ pin: true }) });
+    expect(kept.status).toBe(200);
+    expect((await kept.json() as { data: { pinned: boolean; hardExpiresAt: number | null } }).data).toMatchObject({ pinned: true, hardExpiresAt: null });
+    const absent = await app.request('/api/containers/-9999/keep', { method: 'POST', headers, body: JSON.stringify({ pin: true }) });
+    expect(absent.status).toBe(404);
+    expect((await absent.json() as { error: { code: string } }).error.code).toBe('container_not_found');
+    // 写操作照常进审计流水。
+    expect(db.prepare("SELECT COUNT(*) FROM log_events WHERE kind='webui.action' AND summary LIKE 'POST /api/containers%'").pluck().get()).toBe(2);
     closeDatabase(db);
   });
 

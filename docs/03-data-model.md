@@ -684,6 +684,38 @@ Telegram 消息号，从这个高位段按会话取 `MAX+1`。别在这个区间
 `append` 的 `INSERT OR IGNORE` 会静静返回既有行，而那正是「一条真实用户消息凭空消失」的成因
 （[02 §10.2](./02-context-engine.md#102-合成触发消息的-id-分配)）。
 
+### 2.14 会话级持久容器
+
+> 语义见 [05 §5.5](./05-tools-and-permissions.md)（迁移 0010）。只在 `sandbox.persistent.enabled` 下有行。
+
+```sql
+-- 一行 = 一个会话常驻的沙箱容器。**这张表不是真相的唯一副本**：docker 那边同样有
+-- luoli.managed=1 标签，两边每个 reapCron tick 对一次账（DB 有行容器没了 → 删行；
+-- 有标签的容器 DB 里没有 → 孤儿 rm -f）。进程重启后先对账而不是全杀，24h 的 TTL 要扛得住重启。
+CREATE TABLE sandbox_containers (
+  chat_id         TEXT PRIMARY KEY,      -- 按 chatId 而非 contextKey：workspace 就是按 chatId 分的
+  name            TEXT NOT NULL UNIQUE,  -- luoli-box-<sanitized chatId>，docker 容器名
+  container_id    TEXT,
+  image           TEXT NOT NULL,
+  spec_hash       TEXT NOT NULL,         -- image/memory/cpus/pids/network 的指纹；与配置不符即重建
+  has_setsid      INTEGER NOT NULL DEFAULT 1,  -- 镜像里有没有 setsid，决定取消能不能杀整个进程组
+  created_at      INTEGER NOT NULL,
+  last_used_at    INTEGER NOT NULL,
+  expires_at      INTEGER NOT NULL,      -- 滑动到期：每次执行推到 now + idleTtlMs
+  hard_expires_at INTEGER,               -- 绝对上限；NULL = maxLifetimeMs 为 0，不设
+  pinned          INTEGER NOT NULL DEFAULT 0,  -- 只豁免 expires_at，**不豁免** hard_expires_at
+  exec_count      INTEGER NOT NULL DEFAULT 0,
+  last_error      TEXT
+);
+CREATE INDEX ix_sandbox_containers_expires ON sandbox_containers(expires_at);
+```
+
+**`pinned` 豁免的是滑动那一档而不是绝对上限** —— 豁免了绝对上限，它就不是上限了。
+
+**`spec_hash` 存在的理由是「改了配置却不生效」。** 容器一旦跑起来，`--memory` / `--network` /
+image 都改不动了；没有这一列，运维在 WebUI 换了镜像之后所有已存在的容器会一直用旧的，
+而界面上显示的是新的。
+
 ---
 
 ## 3. 迁移策略
@@ -712,6 +744,8 @@ Telegram 消息号，从这个高位段按会话取 `MAX+1`。别在这个区间
 | `scheduled_jobs` | `schedule.retentionDays` = 30 | 只删**已结束**（`done` / `cancelled`）且 `updated_at` 超期的行。**活跃任务永不清** —— 清掉一条还在排的任务，表现是「bot 突然不再提醒了」而库里毫无痕迹 |
 | `media.dir`（默认 `./data/files`）下的媒体**文件** | `media.retentionDays` = 90 | 按 `attachments.created_at` 删磁盘上的文件，**`attachments` 行与元数据保留**（[14 §2 Q9-a](./14-open-questions.md)）：历史消息里的「[图片]」还在、上下文与检索结果都不塌，只是点不开（T16）。`0 = 不清`。**真正占盘的是这一项** —— `gcFiles()` 只扫孤儿（没有任何 DB 行指向的文件），扫不到有行指着的正常媒体。删完把 `local_path` 置空并把 `download_state` 写成 `'expired'` —— 光置空会和「下载失败」（`'failed'`）混成一种状态，运维查起来分不出是过期删的还是当初就没下来 |
 | `data/cache/models.dev.json` | 永久 | 纯派生数据，删掉即可（下次拉取模型时自动重下）。年龄记在 `app_kv` 的 `catalog:models.dev`，超 `provider.catalog.ttlHours` 时用 ETag 条件请求续期 |
+| `sandbox_containers` | 跟着容器走 | **不由 `maintenanceCron` 管**，走自己的 `sandbox.persistent.reapCron`（默认每 5 分钟）：容器被销毁时删行，同一个 tick 里与 docker 双向对账。行本身不占空间，它只是 docker 状态的索引 |
+| `data/workspace/<chatId>` | **永久，且至今无人清理** | **没有实现任何回收**。`MaintenanceService` 一行都没管它，唯一的可见性是 `GET /api/health` 的 `workspaceBytes`。容器到期被回收**不动这里的文件**（那正是 `container_reset` 默认不清文件的同一条取舍：容器是环境，workspace 是数据）。要清只能人工，或用 `container_reset` 的 `wipeWorkspace` 单会话清 |
 
 清理任务在 `general.maintenanceCron`（默认每日 04:00 本地时间）执行，并在完成后 `PRAGMA wal_checkpoint(TRUNCATE)` + 每周一次 `VACUUM`。
 

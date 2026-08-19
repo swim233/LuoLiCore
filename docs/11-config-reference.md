@@ -431,7 +431,32 @@ sandbox:
   workspaceDir: ./data/workspace  # 需重启 · 本进程视角
   hostWorkspaceDir: ''            # 需重启 · 同一目录的宿主视角路径；本进程也在宿主上跑时留空
   dockerBin: docker
+  persistent:                     # 会话级持久容器（05 §5.5）；只在 mode: docker 下有意义
+    enabled: false                # 热更新 · ★ 打开后每个会话一个常驻容器，且默认能出网
+    idleTtlMs: 86400000           # 热更新 · 滑动 24h：每次执行重新计时
+    maxLifetimeMs: 0              # 热更新 · 绝对上限，从创建算起；0 = 不设
+    maxContainers: 16             # 热更新 · 撞上限直接报错，不退回一次性容器
+    network: bridge               # 热更新 · ★ 持久容器的网络。与上面的 sandbox.network 是两个键
+    reapCron: '*/5 * * * *'       # 热更新 · 回收 / 对账的频率（改了会重挂那条 cron）
 ```
+
+**`reapCron` 是这一段里唯一需要额外接线才算热更新的键。** cron 是「构造即排期」，改配置不会自己
+重挂 —— `mcp.healthCheckCron` 正是因为没接这条线，整段 `mcp` 才被移出热更新白名单。这里选了
+另一条路：`config.changed` 里判到它变了就 `scheduler.remove('sandbox-reap')` 再按新表达式
+`add` 回去，于是整段 `sandbox` 留在白名单里仍然是真话。
+
+**`persistent.network` 与 `sandbox.network` 是两个键，不要合并着看。** 上面那个管一次性容器
+（默认 `none`），这个管持久容器（默认 `bridge`）。分开是因为一个开关不能悄悄改两件事，
+而一个不能出网的持久容器基本没有意义 —— 持久化本来就是为「后台进程 + 出网」做的。
+`enabled: true` 且 `network: bridge` 时**启动会打一条 warn**：bridge 实测能直达公网与宿主
+`172.17.0.1`，而 [05 §5.3](./05-tools-and-permissions.md) 里那个「注入 HTTP_PROXY 指向可审计
+出站代理」至今没有实现。
+
+**`maxLifetimeMs: 0` = 不设上限**，与 `maintenance.retention.*` 同一套约定 —— 本文档里
+**0 一律是「不清」而不是「立刻过期」**。`container_keep` 的「钉住」只豁免 `idleTtlMs` 那一档，
+豁免了绝对上限它就不是上限了。
+
+`persistent` 打开时才注册 `container_*` 那六个 owner 工具（[05 §3.11](./05-tools-and-permissions.md)）。
 
 **`hostWorkspaceDir` 只在「应用自己跑在容器里 + `mode: docker`」时需要。** `docker run -v` 的左半边
 由**宿主** daemon 解析，而 `run()` 拿到的是本进程视角的路径（容器里是 `/app/data/workspace/<chatId>`）。

@@ -195,6 +195,12 @@ export const CONFIG_DESCRIPTIONS: Record<string, string> = {
   'sandbox.workspaceDir': '工作目录（本进程视角）。每个会话在它下面有自己的子目录，文件工具与执行工具都只在这里活动。',
   'sandbox.hostWorkspaceDir': '同一个工作目录在宿主上的路径。只有「应用自己跑在容器里 + docker 模式」时才需要填 —— docker run -v 的左半边由宿主解析，填错不会报错，只会在宿主上默默建一个空目录。',
   'sandbox.dockerBin': 'docker 可执行文件的名字或绝对路径。',
+  'sandbox.persistent.enabled': '★ 打开后每个会话一个常驻容器（执行走 docker exec 而不是每次新起一个）。注意它同时把持久容器的网络默认设成 bridge —— 那是下面单独的一个键，和上面的 sandbox.network 不是同一个。关掉它不会立刻销毁已有容器，由下一次回收对账收走。',
+  'sandbox.persistent.idleTtlMs': '容器闲置多久后回收。每执行一次就重新计时，所以一直在用的会话容器可以活很久。',
+  'sandbox.persistent.maxLifetimeMs': '容器从创建算起最长活多久，不因活跃而延长。0 = 不设上限。「钉住」只豁免上面那条闲置回收，豁免不了这一条。',
+  'sandbox.persistent.maxContainers': '同时存在的持久容器数上限。撞上限时新会话的执行类工具直接报错，不会退回一次性容器。',
+  'sandbox.persistent.network': '★ 持久容器的网络：none 断网，bridge 可出网。默认 bridge —— 不能出网的持久容器基本没有意义。bridge 下容器能直达公网与宿主，且没有可审计的出站代理。',
+  'sandbox.persistent.reapCron': '回收到期容器、并与 docker 双向对账的频率（五段式 cron）。',
 
   approval: '高风险工具调用挂起等人裁决。规则命中即挂起，裁决在「任务与审批」页做。',
   'approval.enabled': '高风险工具调用是否需要人在 WebUI 里批准后才执行。',

@@ -320,6 +320,23 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
     上下文、会跑任意构建指令、耗时以分钟计，那是部署动作不是控制台按钮。镜像名取自**已保存的配置**
     而不是请求体 —— 让人从界面上指定任意镜像等于绕开 `sandbox.image` 那道配置，而沙箱镜像决定了
     模型能在里面用什么。拉取有 10 分钟上界（这是一个同步等着的 HTTP 请求）。
+  - **持久容器**（`sandbox.persistent.*`，[05 §5.5](./05-tools-and-permissions.md)）：`enabled` 开关、
+    滑动 TTL、绝对上限、容器数上限、持久容器的网络、回收频率。三条界面纪律：
+    - `enabled` 旁边**必须有红色警示**说明它同时把网络默认改成 `bridge` —— 上面那个
+      `sandbox.network` 管的是一次性容器，两个键并排显示时最容易被当成一个。
+    - 绝对上限与容器数上限要写明 `0`/边界的含义（`maxLifetimeMs: 0` = 不设上限；撞容器数上限
+      是**直接报错**而不是退回一次性容器）。
+    - 关掉 `enabled` **不会立刻销毁已有容器**，它们由下一次 `reapCron` 对账收走 —— 界面要说这句话，
+      否则运维关掉开关之后在 `docker ps` 里还看得见容器，会以为没生效。
+  - **容器面板**（在沙箱设置下方，`persistent.enabled` 为假时整块折叠并说明原因）：一行一个会话，
+    列出会话名、状态、建于 / 上次用 / 还剩多久、进程数、内存、是否钉住，表头带 `used/max`。
+    行内操作「重置」「钉住」「续期」分别打 `DELETE /api/containers/:chatId`（`?wipe=1` 才清文件）
+    与 `POST /api/containers/:chatId/keep`。
+    - **「重置」的 `confirm()` 要写明代价**：容器里跑着的进程会一起没（照「立即触发」那条的写法）。
+      清文件是**另一个**勾选项且默认不勾 —— 界面上把「换环境」和「删数据」做成一个按钮，
+      迟早有人点错（同 `container_reset` 的默认值，[05 §3.11](./05-tools-and-permissions.md)）。
+    - 依赖没装配时回 `not_implemented`，面板显示「这个部署没有装配持久容器运行时」而**不是空列表** ——
+      「读不到」和「一个都没有」必须分得开（同定时任务面板）。
   - `tools.fs.allowHostFsForOwner` 已接线（第五轮）：owner 的 fs 工具 jail 到 `/` 而不是会话
     workspace，`denyGlobs` 照样生效。**开关旁边必须有红色警示** —— 这是 [14](./14-open-questions.md) T8
     那条取舍的显式入口。
@@ -705,6 +722,9 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
 | `POST /api/principals/roles` | 勾选批量改角色：`{ids:[主体 id…], role}`，单次上限 500。**只改已存在的行，不新建**（新建走 `/api/principals/bulk`，那边收的是 Telegram 数字 ID）；库里找不到的 id 原样回报而不是静默跳过，返回 `{count, changed, missing}` |
 | `GET /api/tools` `PATCH /api/tools/:name` | 工具启停与策略覆盖。`GET` 每个工具回**生效值**（`minRole`/`approval`/`scope`/`source`/`enabled`/`timeoutMs`）外加 `defaults`（代码里那份）、`relaxed`（比默认更松的字段名）、`selfManagedTimeout`。`PATCH` 收 `{enabled?, minRole?, approval?, timeoutMs?, confirmRelax?}`，三个策略字段给 `null` = 恢复默认；**先读当前覆盖再整体写回** `tools.overrides.<name>`（一个 key 一条整叶 JSON，只写变动的那个字段会把其余的抹掉）。放宽且无 `confirmRelax` 时 `409 relax_requires_confirmation`。被禁用的工具从工具目录消失，且 `ToolRegistry.execute` 会二次拦截并返回 `tool_disabled_by_operator`。未知工具名返回 404 |
 | `GET/PUT /api/sandbox` `POST /api/sandbox/probe` `POST /api/sandbox/image` | 沙箱配置、探测、拉取镜像（只 pull 不 build；镜像名取自已保存的配置） |
+| `GET /api/containers` | 持久容器列表 + `used/max`。运行时没装配时 `not_implemented`，**不是空列表** |
+| `DELETE /api/containers/:chatId` | 重置（销毁 + 立即重建）。`?wipe=1` 才连 `/workspace` 的文件一起清，且那一档把文件挪进 `.luoli-trash/<ts>/` |
+| `POST /api/containers/:chatId/keep` | 改到期时间 / 钉住。钉住只豁免滑动 TTL，绝对上限照常 |
 | `POST /api/approvals/test` | 审批规则试跑：`{tool, input?, rules?}` → 逐条命中报告 + 最终风险档位。用的是运行时那份匹配器 |
 | `GET /api/schedules` | 定时任务面板的数据：`{available, enabled, timezone, settings:{maxPerChat, minIntervalMinutes, maxPayloadChars}, jobs:[{id, key, chatId, threadId, createdBy, chatLabel, creatorLabel, name, mode, state, cron\|at, timezone, payload, runCount, nextRun?, lastRunAt?, lastState?, lastError?, createdAt, updatedAt}]}`。**跨会话**（WebUI 只有 owner 一个身份，[14](./14-open-questions.md) A15），`nextRun` 来自进程内的 `Scheduler`。没装配运行时时 `available:false` + 空数组 —— 界面据此说「读不到」，而不是「一条都没有」 |
 | `POST /api/schedules` | 建一个定时任务。body `{key, name, mode, text, cron\|at}`。**落点从 `contexts` 按 `key` 反查**，不收客户端给的 `chatId`/`threadId`（同 [05 §8](./05-tools-and-permissions.md) 对工具的要求）；归属身份取 `access.bootstrapOwnerId`，没配则 `owner_unset` 400。校验与 `schedule_create` 工具**共用 `createScheduledJob`** —— 两边各写一遍的话 WebUI 迟早能建出工具建不出来的任务 |

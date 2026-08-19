@@ -11,9 +11,9 @@ import { bodyLimit } from 'hono/body-limit';
 import { getConnInfo } from '@hono/node-server/conninfo';
 import { serveStatic } from '@hono/node-server/serve-static';
 import type { AgentManager, Config, ConfigChangedEvent, ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, PluginManager, PromptDocuments, ProviderStore, Sandbox, SkillLoader, SkillWriteInput, SubAgentRuntimeEvent, TurnRegistry } from '@luoli/core';
-import { ALIAS_NAME_PATTERN, HOT_RELOADABLE_CONFIG_KEYS, createScheduledJob, mergeAgentDefinitions, scanAgentFiles, scheduledJobView, testApprovalRules, KNOWN_UNIMPLEMENTED_CONFIG_KEYS, TOOL_POLICY, aliasSettingsSchema, checkWakeword, configSchema as runtimeConfigSchema, envPinnedConfigKeys, perChatConfig, probeProvider, quotaBucket, rejectedWakewords } from '@luoli/core';
+import { ALIAS_NAME_PATTERN, HOT_RELOADABLE_CONFIG_KEYS, chatCandidates, createScheduledJob, mergeAgentDefinitions, scanAgentFiles, scheduledJobView, testApprovalRules, KNOWN_UNIMPLEMENTED_CONFIG_KEYS, TOOL_POLICY, aliasSettingsSchema, checkWakeword, configSchema as runtimeConfigSchema, envPinnedConfigKeys, perChatConfig, probeProvider, quotaBucket, rejectedWakewords } from '@luoli/core';
 import { APPROVAL_POLICIES, BUNDLED_SKILLS, SkillPackageError, effectiveToolPolicy, installSkillPackage, looksSecret, persistMcpServers as persistMcpServersShared, publicConfig, relaxedFields, revisionJson } from '@luoli/core';
-import type { CatalogIndex, CustomToolManager, ModelMetadata, ProviderProbe, ToolOverride, ToolRegistry } from '@luoli/core';
+import type { CatalogIndex, ContainerManager, CustomToolManager, ModelMetadata, ProviderProbe, ToolOverride, ToolRegistry } from '@luoli/core';
 import type { ArchiveRepository, CustomToolRepository, OperationsRepository, PrincipalRepository, ScheduleRepository, ScheduledJob, Sqlite } from '@luoli/db';
 import { deleteAppKv, modelAliasKey, readAppKv, writeConfigRows as writeConfigRowsToDatabase } from '@luoli/db';
 import { assignDotted, readDotted, ROLES, TG_ID_PATTERN, type Role } from '@luoli/shared';
@@ -1291,6 +1291,46 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     return ctx.json({ ok: true, data: body });
   });
   app.post('/api/sandbox/probe', async (ctx) => ctx.json({ ok: true, data: await dependencies.sandbox?.probe() ?? { available: false, error: 'sandbox_unconfigured' } }));
+  /**
+   * 会话级持久容器（docs/09 §3.7，语义见 docs/05 §5.5）。三个端点共用这一道：运行时没装配时
+   * 回 `not_implemented` 而**不是空列表** —— 「读不到」和「一个都没有」在运维眼里是两回事。
+   */
+  const containersOr501 = (): ContainerManager | null => dependencies.sandbox?.containers() ?? null;
+  app.get('/api/containers', (ctx) => {
+    const boxes = containersOr501();
+    if (!boxes) return ctx.json(apiError('not_implemented', '这个部署没有装配持久容器运行时', 500).body, 500);
+    const labels = new Map(chatCandidates(dependencies.db).map((candidate) => [candidate.chatId, candidate.label]));
+    return ctx.json({ ok: true, data: { enabled: boxes.enabled(), ...boxes.capacity(),
+      containers: boxes.list().map((row) => ({ ...row, pinned: row.pinned !== 0, hasSetsid: row.hasSetsid !== 0,
+        chatLabel: labels.get(row.chatId) ?? null })) } });
+  });
+  app.delete('/api/containers/:chatId', async (ctx) => {
+    const boxes = containersOr501();
+    if (!boxes) return ctx.json(apiError('not_implemented', '这个部署没有装配持久容器运行时', 500).body, 500);
+    const chatId = ctx.req.param('chatId');
+    const workspace = dependencies.sandbox!.hostWorkspaceFor(chatId);
+    if (workspace === null) return ctx.json(apiError('workspace_unmappable', '这个会话的工作目录换算不到宿主路径，建不了容器').body, 400);
+    // `?wipe=1` 才动文件。**「换环境」和「删数据」是两件事**，默认那一档一个文件都不碰
+    // （同 `container_reset` 的默认值，docs/05 §3.11）。
+    if (ctx.req.query('wipe') === '1') {
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const wipe = await boxes.exec({ chatId, mountedWorkspace: workspace, timeoutMs: 60_000, abortSignal: AbortSignal.timeout(90_000),
+        command: `set -e; mkdir -p .luoli-trash/${stamp}; for entry in * .[!.]*; do [ -e "$entry" ] || continue; case "$entry" in .luoli-trash) continue;; esac; mv -- "$entry" .luoli-trash/${stamp}/; done` });
+      if ('error' in wipe) return ctx.json(apiError(wipe.error, wipe.hint ?? '清理工作区失败，容器也没动').body, 400);
+      if (!wipe.ok) return ctx.json(apiError('workspace_wipe_failed', `文件没能挪进回收站，容器也没动：${wipe.stderr.slice(0, 400)}`).body, 400);
+    }
+    const reset = await boxes.reset(chatId, workspace);
+    if (!reset.ok) return ctx.json(apiError(reset.error, reset.hint ?? '重置失败').body, 400);
+    return ctx.json({ ok: true, data: { chatId, name: reset.row.name, wiped: ctx.req.query('wipe') === '1' } });
+  });
+  app.post('/api/containers/:chatId/keep', async (ctx) => {
+    const boxes = containersOr501();
+    if (!boxes) return ctx.json(apiError('not_implemented', '这个部署没有装配持久容器运行时', 500).body, 500);
+    const body = await ctx.req.json<{ hours?: number; pin?: boolean }>();
+    const kept = boxes.keep(ctx.req.param('chatId'), { ...(body.hours === undefined ? {} : { hours: body.hours }), ...(body.pin === undefined ? {} : { pin: body.pin }) });
+    if (!kept.ok) return ctx.json(apiError(kept.error, kept.hint ?? '改不了到期时间').body, 404);
+    return ctx.json({ ok: true, data: { ...kept.row, pinned: kept.row.pinned !== 0, hasSetsid: kept.row.hasSetsid !== 0 } });
+  });
   /**
    * 拉取沙箱镜像（docs/09 §3.7）。**只做 pull，不做 build** —— build 要有 Dockerfile 上下文、
    * 会跑任意构建指令、耗时以分钟计，那是部署动作不是控制台按钮。镜像名取自当前配置，

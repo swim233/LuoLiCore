@@ -3,8 +3,8 @@ import argon2 from 'argon2';
 import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { serve } from '@hono/node-server';
-import { ArchiveRepository, CustomToolRepository, OperationsRepository, PrincipalRepository, ScheduleRepository, TurnRepository, acquireInstanceLock, closeDatabase, migrateDatabase, modelAliasKey, openDatabase, readAppKv, readPersistedConfig, recomputeMessageTokens, recoverAfterCrash, writeAppKv } from '@luoli/db';
-import { AgentManager, AgentResultStore, AlertDispatcher, BUNDLED_SKILLS, ConfigStore, CustomToolManager, mergeAgentDefinitions, scanAgentFiles, ContextEngine, DatabaseApprovalBroker, EventBus, FileTools, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, ModelRegistry, PathJail, PluginManager, selfAuthoringDenyGlobs, PromptAssembler, PromptDocuments, ProviderStore, PROVIDER_FAILURES_TO_DOWN, PROVIDER_PROBE_TIMEOUT_MS, QuotaGuard, repairAgentResultRefs, repairLedgerCacheCost, runProviderHealthCheck, Sandbox, ScheduledJobRunner, Scheduler, Secrets, SkillLoader, STABLE_PROMPT_BLOCKS, TOOL_POLICY, ToolRegistry, TurnConcurrency, TurnFailureStreak, TurnRegistry, UsageLedger, assembleMainPrompt, configJsonSchema, loadConfig, perChatConfig, registerAuthoringTools, registerBuiltins, rejectedWakewords, runMainAgent, runSubAgent, streamMainAgent, type SubAgentRuntimeEvent } from '@luoli/core';
+import { ArchiveRepository, CustomToolRepository, OperationsRepository, PrincipalRepository, SandboxContainerRepository, ScheduleRepository, TurnRepository, acquireInstanceLock, closeDatabase, migrateDatabase, modelAliasKey, openDatabase, readAppKv, readPersistedConfig, recomputeMessageTokens, recoverAfterCrash, writeAppKv } from '@luoli/db';
+import { AgentManager, AgentResultStore, AlertDispatcher, BUNDLED_SKILLS, ConfigStore, ContainerManager, CustomToolManager, mergeAgentDefinitions, scanAgentFiles, ContextEngine, DatabaseApprovalBroker, EventBus, FileTools, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, ModelRegistry, PathJail, PluginManager, selfAuthoringDenyGlobs, PromptAssembler, PromptDocuments, ProviderStore, PROVIDER_FAILURES_TO_DOWN, PROVIDER_PROBE_TIMEOUT_MS, QuotaGuard, repairAgentResultRefs, repairLedgerCacheCost, runProviderHealthCheck, Sandbox, ScheduledJobRunner, Scheduler, Secrets, SkillLoader, STABLE_PROMPT_BLOCKS, TOOL_POLICY, ToolRegistry, TurnConcurrency, TurnFailureStreak, TurnRegistry, UsageLedger, assembleMainPrompt, configJsonSchema, loadConfig, perChatConfig, registerAuthoringTools, registerBuiltins, registerContainerTools, rejectedWakewords, runMainAgent, runSubAgent, streamMainAgent, type ContainerEvent, type SubAgentRuntimeEvent } from '@luoli/core';
 import { createServer, EventStreamRegistry, issueLoginToken, setupToken, type PromptPreviewResult } from '@luoli/server';
 import type { RuntimeTurnContext } from '@luoli/shared';
 import { TelegramTools, UpdatePoller, createTelegramBot } from '@luoli/telegram';
@@ -240,7 +240,7 @@ const sandbox = new Sandbox(() => {
   return { mode: live.sandbox.mode, bypassRoles: live.sandbox.bypassRoles, dockerBin: live.sandbox.dockerBin,
     image: live.sandbox.image, network: live.sandbox.network, memoryMb: live.sandbox.memoryMb, cpus: live.sandbox.cpus,
     pidsLimit: live.sandbox.pidsLimit, readOnlyRoot: live.sandbox.readOnlyRoot, tmpfsMb: live.sandbox.tmpfsMb,
-    workspaceDir: live.sandbox.workspaceDir, hostWorkspaceDir: live.sandbox.hostWorkspaceDir,
+    workspaceDir: live.sandbox.workspaceDir, hostWorkspaceDir: live.sandbox.hostWorkspaceDir, persistent: live.sandbox.persistent,
     defaultTimeoutMs: live.tools.exec.defaultTimeoutMs, maxTimeoutMs: live.tools.exec.maxTimeoutMs, maxOutputBytes: live.tools.exec.maxOutputBytes };
 }, undefined, undefined, (message) => log.event({ level: 'warn', kind: 'sandbox.weak_isolation', summary: message }),
   (reason, role) => alerts.fire('sandbox_unavailable', `沙箱不可用，${role} 的执行请求被拒`, { reason, role }, role),
@@ -250,6 +250,41 @@ const sandbox = new Sandbox(() => {
     summary: `${run.mode}${run.denied ? ` denied: ${run.denied}` : ` exit ${run.exitCode ?? 'null'}`}`,
     ...(run.turnId === 'adhoc' ? {} : { traceId: run.turnId }), durationMs: run.durationMs,
     data: { mode: run.mode, image: run.image, exitCode: run.exitCode, ms: run.durationMs, ok: run.ok, oom: run.oom, killed: run.killed, truncated: run.truncated, role: run.role, ...(run.denied ? { denied: run.denied } : {}) } }));
+// 会话级持久容器（docs/05 §5.5）。**装配期注入而不是构造参数**：`Sandbox` 一直是「不认识仓储层」
+// 的底层，而这个管理器要 DB 句柄。没绑上时整块降级成一次性容器，行为与落地之前一致。
+const containers = new ContainerManager(db, new SandboxContainerRepository(db), () => {
+  const live = configStore.snapshot();
+  return { dockerBin: live.sandbox.dockerBin, image: live.sandbox.image, memoryMb: live.sandbox.memoryMb, cpus: live.sandbox.cpus,
+    pidsLimit: live.sandbox.pidsLimit, readOnlyRoot: live.sandbox.readOnlyRoot, tmpfsMb: live.sandbox.tmpfsMb,
+    maxOutputBytes: live.tools.exec.maxOutputBytes, persistent: live.sandbox.persistent };
+}, (event: ContainerEvent) => {
+  // **kind 写成四条字面量而不是拼串**：`tests/docs.test.ts` 把源码里的 `kind:` 与 `docs/10 §2`
+  // 那张表双向焊死，而模板串在那道扫描里是隐形的 ——「表与实现差了 54 个」正是这么来的。
+  const shared = { level: (event.type === 'limit' || event.ok === false ? 'warn' : 'info') as 'warn' | 'info',
+    summary: `${event.type}${event.name ? ` ${event.name}` : ''}`,
+    ...(event.durationMs === undefined ? {} : { durationMs: event.durationMs }),
+    data: { ...(event.chatId ? { chatId: event.chatId } : {}), ...(event.name ? { name: event.name } : {}), ...event.data } };
+  if (event.type === 'created') log.event({ kind: 'sandbox.container.created', ...shared });
+  else if (event.type === 'reaped') log.event({ kind: 'sandbox.container.reaped', ...shared });
+  else if (event.type === 'limit') log.event({ kind: 'sandbox.container.limit', ...shared });
+  else log.event({ kind: 'sandbox.container.exec', ...shared });
+});
+sandbox.bindContainers(containers);
+/**
+ * 回收 + 对账。**注册点必须在 `containers` 之后**（同 `provider-health` 那条注释的理由：cron 是
+ * 构造即排期，排在声明之前那一次会以 TDZ 的 ReferenceError 收场，只在 `scheduler.failed` 里留一行）。
+ *
+ * 名字不能和用户任务的 `job:<id>` 命名空间撞 —— `Scheduler.add` 撞名直接抛。
+ * `croner` 的 `protect:true` 让重叠的一次被跳过而不是排队，所以 `ContainerManager` 里
+ * 每一条 docker 调用都有超时：一次不返回的回收会把这条 cron 永久打死。
+ */
+const reapContainers = async (): Promise<void> => {
+  const result = await containers.reap();
+  log.event({ level: result.orphans > 0 ? 'warn' : 'info', kind: 'sandbox.container.reconciled', summary: 'Sandbox container reap complete', data: result });
+};
+scheduler.add(config.sandbox.persistent.reapCron, reapContainers, 'sandbox-reap');
+// 启动时先对账一次而不是全杀：24h 的 TTL 要扛得住一次进程重启（docs/05 §5.5）。
+void reapContainers().catch((error) => log.event({ level: 'error', kind: 'scheduler.failed', summary: 'sandbox-reap 首次对账失败', data: { error: error instanceof Error ? error.message : String(error) } }));
 // 自撰写工具的注册器。真相在 `custom_tools` 表，进程内那份每次 `reconcile()` 都能重建
 // （docs/01 §3.1）；`execMaxTimeoutMs` 单独传是因为它归 `tools.exec`，不在 selfExtend 那一段里。
 const customToolRepo = new CustomToolRepository(db);
@@ -281,7 +316,7 @@ const scheduleRunner = new ScheduledJobRunner({
   estimateTurnCost: (inputTokens, key) => modelRegistry.estimate(readAppKv<string>(db, modelAliasKey(key)) ?? perChatConfig(configStore.snapshot(), key).agent.main.modelAlias, inputTokens),
   // 非流式：定时轮次没有 Telegram 流消费者，也没人盯着屏幕等增量。其余依赖与 `onTurn` 完全一致。
   runAgent: (turn, reservation) => { const live = turn.config as Readonly<typeof config>; return runMainAgent(turn, { config: live, db, registry: modelRegistry, tools: toolRegistry,
-    prompts: promptAssembler, documents: promptDocuments, skills, plugins, agents, customTools, ledger, context, quota, reservation, log, turns, workspace: resolve(live.sandbox.workspaceDir, turn.chatId) }); },
+    prompts: promptAssembler, documents: promptDocuments, skills, plugins, agents, customTools, containers, ledger, context, quota, reservation, log, turns, workspace: resolve(live.sandbox.workspaceDir, turn.chatId) }); },
 });
 registerBuiltins(toolRegistry, {
   // `tools.fs.allowHostFsForOwner`：owner 的 fs 工具 jail 到 `/` 而不是本会话 workspace。
@@ -306,6 +341,10 @@ registerBuiltins(toolRegistry, {
 });
 registerAuthoringTools(toolRegistry, { customTools, skills, plugins, reservedSkills: BUNDLED_SKILLS,
   mcp: { db, config: () => configStore.snapshot(), apply: (next, keys) => configStore.replace(next, keys), emit: (keys) => events.emit('config.changed', { keys }) } });
+// 容器管理（docs/05 §3.11）。**无条件注册，开关放在 `available()` 里** —— 按配置跳过注册会撞上
+// 下面那条「每个 TOOL_POLICY 条目都必须已注册」的启动断言，表现是关掉持久化之后进程起不来
+// （同 authoring.ts 那八个）。
+registerContainerTools(toolRegistry, { sandbox, db });
 plugins.bindRegistry(toolRegistry);
 mcp.bindRegistry(toolRegistry);
 customTools.bindRegistry(toolRegistry);
@@ -340,7 +379,7 @@ const previewPrompt = (key: string, role: RuntimeTurnContext['effectiveRole']): 
   const built = ((): ReturnType<typeof assembleMainPrompt> => {
     try {
       return assembleMainPrompt(turn, { config: live, tools: toolRegistry, prompts: promptAssembler, documents: promptDocuments,
-        workspace: resolve(live.sandbox.workspaceDir, contextRow.chatId), skills, agents });
+        workspace: resolve(live.sandbox.workspaceDir, contextRow.chatId), skills, agents, containers });
     } finally { toolRegistry.releaseTurn(turn.turnId); }
   })();
   const order = ['kernel', 'character', 'assist', 'catalog', 'pubmemory', 'primemory', 'runtime'];
@@ -555,6 +594,12 @@ events.subscribe((event) => {
     // `tools.selfExtend` 在 `HOT_RELOADABLE_CONFIG_KEYS` 里，靠的就是这一行：关掉
     // `customTools.enabled` 之后下一轮那批工具要真的从目录里消失，而不是等重启（docs/20 · W-CFG-02）。
     if (keys.some((key) => key.startsWith('tools.selfExtend'))) customTools.reconcile();
+    // cron 是「构造即排期」，改配置不会自己重挂 —— `mcp.healthCheckCron` 正是因为缺这条线，
+    // 整段 `mcp` 才被移出热更新白名单（见那一段注释）。整段 `sandbox` 要留在白名单里就得接上它。
+    if (keys.some((key) => key === 'sandbox.persistent.reapCron')) {
+      scheduler.remove('sandbox-reap');
+      scheduler.add(next.sandbox.persistent.reapCron, reapContainers, 'sandbox-reap');
+    }
     log.event({ level: 'info', kind: 'config.changed', summary: 'Runtime configuration reloaded', data: { keys } });
   }).catch((error) => log.event({ level: 'error', kind: 'config.invalid', summary: error instanceof Error ? error.message : String(error) }));
 });
@@ -580,7 +625,7 @@ if (process.env.BOT_TOKEN) {
       estimateTurnCost: (inputTokens, key) => modelRegistry.estimate(readAppKv<string>(db, modelAliasKey(key)) ?? perChatConfig(configStore.snapshot(), key).agent.main.modelAlias, inputTokens),
       // 用 turn.config 而不是全局快照：本轮的 perChat 覆盖已经在 openTurn 时合并进去了。
       onTurn: (turn, reservation) => { const live = turn.config as Readonly<typeof config>; return streamMainAgent(turn, { config: live, db, registry: modelRegistry, tools: toolRegistry,
-        prompts: promptAssembler, documents: promptDocuments, skills, plugins, agents, customTools, ledger, context, quota, reservation, log, turns, workspace: resolve(live.sandbox.workspaceDir, turn.chatId) }); } });
+        prompts: promptAssembler, documents: promptDocuments, skills, plugins, agents, customTools, containers, ledger, context, quota, reservation, log, turns, workspace: resolve(live.sandbox.workspaceDir, turn.chatId) }); } });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     log.event({ level: 'error', kind: 'tg.error', summary: `Telegram 入口启动失败：${message}`, data: { phase: 'init', fatal: false } });

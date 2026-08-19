@@ -178,7 +178,7 @@ export class CustomToolManager {
     const timeout = Math.min(tool.timeoutMs ?? this.config().customTools.timeoutMs, this.execMaxTimeoutMs());
     try {
       const result = await this.sandbox.run(command, context.turn.effectiveRole, context.workspace, context.turn.abortSignal, timeout, context.turn.turnId,
-        { LUOLI_PARAMS: paramsPath, ...environmentFor(input) });
+        { extraEnv: { LUOLI_PARAMS: paramsPath, ...environmentFor(input) }, chatId: context.turn.chatId });
       return { ...result, tool: tool.name };
     } finally {
       for (const file of [scriptName, paramsName]) try { rmSync(join(directory, file)); } catch { /* 沙箱里删掉了、或整个 workspace 被清了 */ }
