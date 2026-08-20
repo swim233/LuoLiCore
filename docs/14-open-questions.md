@@ -266,4 +266,4 @@ Q13-c 那道闸是这套东西的**主闸**，不是审批。四个写工具虽�
 | 每群独立 PUBMEMORY | D12 选了全局单份；数据模型（`memory_docs.subject`）已预留 |
 | Telegram Business / Stars / 支付 | 需求未提 |
 | 频道（channel）支持 | `trigger.channels` 默认 false，未做完整验证 |
-| i18n 多语言界面 | 结构已预留（`i18n/`），第一版只有 zh-CN |
+| i18n 多语言界面 | 第一版只有 zh-CN。**结构并没有预留** —— 原文写的 `i18n/` 目录从来没存在过，文案就在各 SFC 里（改写工具见 [`docs/copy/README.md`](./copy/README.md)）。真做时要连 `general.locale` 一起加回来 |

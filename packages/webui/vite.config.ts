@@ -1,12 +1,15 @@
 import { defineConfig } from 'vite';
 import vue from '@vitejs/plugin-vue';
 import { resolve } from 'node:path';
+import { copyEditPlugin } from '../../scripts/copy/plugin.js';
 
 const DEV_API = process.env.WEBUI_DEV_API ?? 'http://127.0.0.1:8787';
 
 export default defineConfig({
   root: resolve('packages/webui'),
-  plugins: [vue()],
+  // `copyEditPlugin()` 在 `COPY_EDIT !== '1'` 时返回 false（Vite 忽略假值），返回的插件又带
+  // `apply: 'serve'` —— 两道闩，`pnpm build` 的产物里不会有文案面板的任何痕迹。
+  plugins: [vue(), copyEditPlugin()],
   build: { outDir: 'dist', emptyOutDir: true, sourcemap: true },
   // 代理目标可用 `WEBUI_DEV_API` 改：在真实例旁边起一个隔离实例（自己的库 / skills / memory）
   // 调界面时，dev server 要指向那一个而不是 8787。默认值不变，`pnpm webui:dev` 照旧。

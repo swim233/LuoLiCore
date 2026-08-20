@@ -960,3 +960,53 @@ code { font-family: var(--font-mono); font-size: .82rem; }
 /* 分段抬头与它下面那段说明：`.eyebrow` 与 `.section-note` 都是全局原语，这里只补这一处的节奏。 */
 [data-ext-tab] > .eyebrow { margin: 18px 0 6px; }
 [data-ext-tab] > .section-note { margin: 0 0 16px; }
+
+/* ── 文案版式工具层（docs/09 §6）───────────────────────────────────────────
+   dev 文案面板（`COPY_EDIT=1`）往模板的 `class` 里写的就是这几个 token。管位置、留白、字号、
+   字重、斜体与隐藏；**不碰颜色** —— 颜色承载状态语义（危险 / 主次 / 禁用），逐句改颜色会让
+   同一个红色在两处意思不同，那是设计系统的事。
+
+   字号那四档一开始是不给的（初版注释写着「不碰字号、字重」），后来按需求方要求开了 ——
+   代价用**相对档**兑：`em` 而不是 `rem`/`px`。这套界面的字号是 8 个各不相同的 rem 值，没有
+   统一刻度，绝对档会把标题与脚注压到同一号；相对档对两者都是「比它现在小一点」。
+
+   `!important` 是故意的，也只允许在这一层出现：`.auth-card p { margin: 0 }`（0,1,1）、
+   `.hero-row p:last-child { margin: 0 }`（0,2,1）这类既有规则都比裸工具类（0,1,0）更特异，
+   不带 important 的话面板上点了没反应 —— 一个静默失效的控件比没有这个控件更糟。
+
+   一律用 logical 属性（`inline` / `block`），深浅色两套主题与将来的 RTL 都不受影响。
+   档位固定，不开任意数值：尺度一旦按句微调，两周之后这套界面的节奏就碎了。 */
+.u-push-start { margin-inline-end: auto !important; }
+.u-push-center { margin-inline: auto !important; }
+.u-push-end { margin-inline-start: auto !important; }
+.u-text-start { text-align: start !important; }
+.u-text-center { text-align: center !important; }
+.u-text-end { text-align: end !important; }
+.u-gap-x-0 { margin-inline-start: 0 !important; }
+.u-gap-x-1 { margin-inline-start: 6px !important; }
+.u-gap-x-2 { margin-inline-start: 14px !important; }
+.u-gap-x-3 { margin-inline-start: 26px !important; }
+.u-gap-y-0 { margin-block-start: 0 !important; }
+.u-gap-y-1 { margin-block-start: 6px !important; }
+.u-gap-y-2 { margin-block-start: 14px !important; }
+.u-gap-y-3 { margin-block-start: 26px !important; }
+/* 字号档 = **基准 × 倍数**，基准由面板量一次元素自己的字号写进内联 `--u-base`。
+   为什么不能直接写 `font-size: 1.12em`：`em` 在 `font-size` 上是**父级**的字号，不是元素自己的。
+   实测这个界面上一个 64px 的 `<h1>`（父级 16px）点「大」会缩到 17.9px —— 与按钮上写的字相反。
+   而 CSS 里没有任何单位能表达「我自己现在这么大的 1.12 倍」，所以基准必须存下来。
+   `1em` 兜底是给手写这个 class 的人：退回父级相对，而不是整条失效。 */
+.u-size-xs { font-size: calc(var(--u-base, 1em) * .85) !important; }
+.u-size-sm { font-size: calc(var(--u-base, 1em) * .92) !important; }
+.u-size-lg { font-size: calc(var(--u-base, 1em) * 1.12) !important; }
+.u-size-xl { font-size: calc(var(--u-base, 1em) * 1.3) !important; }
+.u-weight-400 { font-weight: 400 !important; }
+.u-weight-500 { font-weight: 500 !important; }
+.u-weight-600 { font-weight: 600 !important; }
+.u-weight-700 { font-weight: 700 !important; }
+/* 中文没有真斜体，浏览器是把字**倾斜**画出来的（synthetic oblique），落在正文上通常难看 ——
+   面板上那个按钮因此写着「限英文」。`normal` 那一档留给「把继承来的斜体掰正」。 */
+.u-slant-italic { font-style: italic !important; }
+.u-slant-normal { font-style: normal !important; }
+/* 隐藏：`display: none` 而不是 `visibility`/`opacity` —— 后两者留着占位，看上去像布局坏了。
+   它是「先藏起来看看」的档，真要摘走由面板的〔删除〕改源码。 */
+.u-display-none { display: none !important; }
