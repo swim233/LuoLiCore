@@ -63,6 +63,27 @@ describe('server security', () => {
     closeDatabase(db);
   });
 
+  /**
+   * 同一道闸的另一侧：`pnpm webui:dev` 的浏览器请求必须过得去。dev server 与 `/api` 不同源
+   * （5173 vs 8787），Origin 闸比的是请求头 Origin 与**服务端自己**的 origin，而后者由 Host 算出
+   * —— 于是这两个头怎么被代理改造，决定了登录是 401（到了口令校验）还是 403（连门都没进）。
+   * 这里照着 `vite.config.ts` 真实的代理配置算出那两个头再打一遍：`changeOrigin` 或
+   * `headers.origin` 任缺其一，两个值就对不上，`webui:dev` 的每一个 /api 请求恒定 403。
+   * 上一次就是这么坏的（对象形式的代理不会自动补 `changeOrigin`），而这件事在自动化里一直没人看着。
+   */
+  it('accepts what the dev proxy forwards', async () => {
+    const { app, db } = await appHarness();
+    const { server } = (await import('../packages/webui/vite.config.js')).default as
+      { server: { port: number; proxy: Record<string, { target: string; changeOrigin?: boolean; headers?: Record<string, string> }> } };
+    const api = server.proxy['/api']!;
+    const host = api.changeOrigin === true ? new URL(api.target).host : `localhost:${server.port}`;
+    const origin = api.headers?.origin ?? `http://localhost:${server.port}`;
+    const response = await app.request(`http://${host}/api/auth/login`, { method: 'POST',
+      headers: { origin, 'content-type': 'application/json' }, body: JSON.stringify({ password: 'wrong' }) });
+    expect(response.status).toBe(401);
+    closeDatabase(db);
+  });
+
   it('rotates the active password and revokes other sessions', async () => {
     const { app, db, operations } = await appHarness();
     const current = operations.createSession(1); const other = operations.createSession(1);
