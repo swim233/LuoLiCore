@@ -134,7 +134,10 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
     const media = dependencies.webMedia;
     if (!media) return null;
     return { capture: (input) => captureImage({ assets: media.assets, appendDelta: (turn, message) => dependencies.context.appendDelta(turn, message as never),
-      visionAvailable: () => media.visionAvailable(context), log: dependencies.log }, context.turn, input) };
+      visionAvailable: () => media.visionAvailable(context), log: dependencies.log,
+      // 子 agent 那一档：父轮只留文字痕迹、张数按 run 自己数、「注入过图」置在它身上（docs/04 §5.2）。
+      ...(context.subAgent ? { subAgent: { name: context.subAgent.name, images: context.subAgent.images, onInjected: context.subAgent.onMediaInjected } } : {}) },
+    context.turn, input) };
   };
   // 跟 `telegram` 同样是必填：漏传一个 key 就让三个工具永久消失，而
   // 「TOOL_POLICY ↔ 注册表」的启动断言只看注册没注册，一个字都不会报。

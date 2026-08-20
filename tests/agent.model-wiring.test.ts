@@ -269,21 +269,40 @@ describe('model wiring through prepareStep', () => {
    */
   it('switches a sub-agent to the vision alias when a tool injected an image mid-run', async () => {
     const { db, turn, dependencies } = harness('wiring-subvision');
-    Object.assign(turn, { mediaInjected: true });
+    // 信号走真实那条路：图片落地那一步调的就是 `context.subAgent.onMediaInjected()`
+    // （`captureImage` 里那一句）。手改 `turn.mediaInjected` 测不到这条线 —— 父轮那个标志现在
+    // 刻意**不**参与子 agent 的判据：父轮的图不在它的 messages 里，跟着切是白付钱。
+    let seenContext: { subAgent?: { alias: string; name: string } } | null = null;
+    // `minRole` 要 ≤ 子 agent 的有效角色（`min(父 agent, definition.minRole)` = limited），
+    // 否则它根本不进那份工具目录 —— 注册期 fail-closed，而表现只是「模型调了个不存在的工具」。
+    dependencies.tools.register({ name: 'shot', description: '', inputSchema: z.object({}),
+      policy: { minRole: 'limited', approval: 'never', scope: 'chat', source: 'builtin' }, sourcePriority: 1,
+      execute: (_input, context) => { seenContext = context; context.subAgent?.onMediaInjected(); return { ok: true }; } });
+    let step = 0;
+    const blind = { ...candidate('blind', () => ok), doGenerate: async () => {
+      step += 1;
+      return (step === 1 ? { ...ok, content: [{ type: 'tool-call', toolCallId: 'c1', toolName: 'shot', input: '{}' }] } : ok) as never;
+    } } as ReturnType<typeof candidate>;
     const registry = registryFor({
       main: [{ model: candidate('m1', () => ok), info: info('m1') }],
-      low: [{ model: candidate('blind', () => ok), info: info('blind') }],
+      low: [{ model: blind, info: info('blind') }],
       vision: [{ model: candidate('seeing', () => ok), info: info('seeing', true) }],
     });
     const manager = new AgentManager(db, new AgentResultStore('./data/wiring-subvision-results'),
-      [{ name: 'researcher', description: 'r', modelAlias: 'low', maxSteps: 1, minRole: 'limited', tools: [], resultMaxChars: 100, instructions: 'r', injectMemory: false }], 3, 10);
+      [{ name: 'researcher', description: 'r', modelAlias: 'low', maxSteps: 2, minRole: 'limited', tools: ['shot'], resultMaxChars: 100, instructions: 'r', injectMemory: false }], 3, 10);
     const parent = manager.createMain(turn.turnId, 'trusted', 'main');
     const { run, definition } = manager.spawn(parent, 'researcher', 'read that picture please');
     await runSubAgent(run, definition, 'read that picture please', undefined, turn,
       { db, agents: manager, registry, tools: dependencies.tools, ledger: dependencies.ledger, log: dependencies.log, workspace: './data',
         provider: { maxRetries: 0, retryBaseMs: 1, retryMaxMs: 1 } });
-    const rows = db.prepare('SELECT model_id AS modelId,model_alias AS alias FROM usage_ledger').all() as Array<{ modelId: string; alias: string }>;
-    expect(rows).toEqual([{ modelId: 'seeing', alias: 'vision' }]);
+    // 图片路径要按**它自己**的别名问能力位，所以别名与名字都得到工具侧（docs/04 §5.2）。
+    expect(seenContext!.subAgent).toMatchObject({ alias: 'low', name: 'researcher' });
+    // 第一步还在 low 上（图是这一步才来的），第二步那张图进请求体，于是切到 vision ——
+    // 记账跟着走：切了却按定义里那个别名记，钱就算到了一个没跑的模型上。
+    const rows = db.prepare('SELECT model_id AS modelId,model_alias AS alias FROM usage_ledger ORDER BY rowid').all() as Array<{ modelId: string; alias: string }>;
+    expect(rows).toEqual([{ modelId: 'blind', alias: 'low' }, { modelId: 'seeing', alias: 'vision' }]);
+    // 父轮不受牵连：它的 messages 里一张图都没有，不该被顺手切到贵别名上。
+    expect((turn as { mediaInjected?: boolean }).mediaInjected).toBeUndefined();
     closeDatabase(db);
   });
 

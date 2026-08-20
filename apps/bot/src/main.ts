@@ -252,8 +252,10 @@ const imageAudience = (toolContext: { agentKind: 'main' | 'sub'; agentAlias?: st
 // `#normalizeOutput` 截成半截 base64 当不可信文本交给模型 —— 既看不见图又烧光输出预算。
 toolRegistry.bindMedia({ capture: (toolContext, input) => captureImage({ assets: webAssets,
   appendDelta: (turn, message) => context.appendDelta(turn, message as never),
-  visionAvailable: () => imageAudience(toolContext),
-  log }, toolContext.turn, { url: input.label, mediaType: input.mediaType, body: input.body, label: `MCP 工具 ${input.label}` }) });
+  visionAvailable: () => imageAudience(toolContext), log,
+  // 与 `web_fetch` 同一条路：子 agent 的截图在父轮只留文字痕迹（docs/04 §5.2）。
+  ...(toolContext.subAgent ? { subAgent: { name: toolContext.subAgent.name, images: toolContext.subAgent.images, onInjected: toolContext.subAgent.onMediaInjected } } : {}) },
+toolContext.turn, { url: input.label, mediaType: input.mediaType, body: input.body, label: `MCP 工具 ${input.label}` }) });
 // 吃 getter 而不是启动快照：sandbox.mode 是「出事时运维会去点的那个开关」，冻住它等于
 // 界面说改成功了、bash 照跑（docs/20 · W-CFG-02）。
 const sandbox = new Sandbox(() => {

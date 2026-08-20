@@ -41,9 +41,11 @@ async function png(width = 40, height = 30): Promise<Buffer> {
   return await sharp({ create: { width, height, channels: 3, background: { r: 10, g: 120, b: 200 } } }).png().toBuffer();
 }
 
-function sink(harnessed: ReturnType<typeof harness>, visionAvailable: boolean) {
+function sink(harnessed: ReturnType<typeof harness>, visionAvailable: boolean,
+  subAgent?: { name: string; images: () => number; onInjected: () => void }) {
   return { assets: harnessed.assets, visionAvailable: () => visionAvailable, log: harnessed.log,
-    appendDelta: (turn: RuntimeTurnContext, message: unknown) => harnessed.engine.appendDelta(turn, message as never) };
+    appendDelta: (turn: RuntimeTurnContext, message: unknown) => harnessed.engine.appendDelta(turn, message as never),
+    ...(subAgent ? { subAgent } : {}) };
 }
 
 describe('web_assets · 抓回来的图存哪、怎么归一化', () => {
@@ -108,6 +110,46 @@ describe('captureImage · 注入的是顶层 part，而且看不了图时不许�
       expect(bench.db.prepare('SELECT COUNT(*) FROM web_assets').pluck().get()).toBe(0);
       expect(bench.turn.delta).toHaveLength(0);
       expect(bench.turn.mediaInjected).toBeUndefined();
+    } finally { bench.cleanup(); }
+  });
+
+  /**
+   * 子 agent 要的图不进父轮的**像素**，只留一条文字痕迹：图是它派出去那个 agent 要的，结论在它
+   * 交回的摘要里。像素也塞给父轮 = 主 agent 为一张自己没要过的图付图片额度、并被钉在 vision
+   * 别名上（`visionScope='window'`）。行与文件照存 —— `gcFiles` 的 referenced 读的是表，而
+   * 「它当时到底看到哪张图」事后要查得到。
+   */
+  it('子 agent 要的那张图：父轮只留文字痕迹，行与文件照存', async () => {
+    const bench = harness('capture-subagent');
+    try {
+      let injected = 0;
+      const result = await captureImage(sink(bench, true, { name: 'researcher', images: () => injected, onInjected: () => { injected += 1; } }),
+        bench.turn, { url: 'https://a.example/chart.png', mediaType: 'image/png', body: await png() });
+      expect(result.ok).toBe(true);
+      const parts = bench.turn.delta.at(-1)!.parts as unknown[];
+      expect(parts.some((part) => isImagePart(part))).toBe(false);
+      // 痕迹要说清是谁取的、以及「你自己没看到」—— 否则主 agent 会以为自己看过这张图。
+      expect(JSON.stringify(parts)).toContain('researcher');
+      expect(JSON.stringify(parts)).toContain('webasset://');
+      // 标志落在看到图的那个 agent 身上：置父轮那个等于白付一次贵别名的钱。
+      expect(bench.turn.mediaInjected).toBeUndefined();
+      expect(injected).toBe(1);
+      expect(bench.db.prepare('SELECT COUNT(*) FROM web_assets').pluck().get()).toBe(1);
+      expect(existsSync(bench.assets.path((result as { assetId: string }).assetId)!)).toBe(true);
+      // 当步那条通道照旧给它 base64 —— 它就是要看这张图才取的。
+      expect((result as { data: string }).data.length).toBeGreaterThan(100);
+    } finally { bench.cleanup(); }
+  });
+
+  it('子 agent 的张数按它这次运行自己数 —— 父轮 delta 里没有它们，数 delta 等于数不到', async () => {
+    const bench = harness('capture-subagent-cap');
+    try {
+      const limit = bench.config.media.maxImagesPerTurn;
+      const result = await captureImage(sink(bench, true, { name: 'researcher', images: () => limit, onInjected: () => {} }),
+        bench.turn, { url: 'https://a.example/chart.png', mediaType: 'image/png', body: await png() });
+      expect(result).toMatchObject({ ok: false, error: 'image_limit_reached' });
+      expect(bench.turn.delta).toHaveLength(0);
+      expect(bench.db.prepare('SELECT COUNT(*) FROM web_assets').pluck().get()).toBe(0);
     } finally { bench.cleanup(); }
   });
 
@@ -247,16 +289,16 @@ describe('这张图交给谁看，就问谁的能力位', () => {
   it('主 agent 问本轮别名，子 agent 问它自己那个', () => {
     const registry = seeing({ vision: false, main: true, low: false });
     expect(canSeeImages(registry, { agentKind: 'main' }, () => 'main')).toBe(true);
-    expect(canSeeImages(registry, { agentKind: 'sub', agentAlias: 'low' }, () => 'main')).toBe(false);
-    expect(canSeeImages(registry, { agentKind: 'sub', agentAlias: 'main' }, () => 'low')).toBe(true);
+    expect(canSeeImages(registry, { agentKind: 'sub', subAgent: { alias: 'low' } }, () => 'main')).toBe(false);
+    expect(canSeeImages(registry, { agentKind: 'sub', subAgent: { alias: 'main' } }, () => 'low')).toBe(true);
   });
 
   it('有能看图的 vision 别名时两边都算能看 —— 两处切换都会切到它', () => {
-    expect(canSeeImages(seeing({ vision: true, low: false }), { agentKind: 'sub', agentAlias: 'low' }, () => 'low')).toBe(true);
+    expect(canSeeImages(seeing({ vision: true, low: false }), { agentKind: 'sub', subAgent: { alias: 'low' } }, () => 'low')).toBe(true);
     expect(canSeeImages(seeing({ vision: true, low: false }), { agentKind: 'main' }, () => 'low')).toBe(true);
   });
 
-  it('子 agent 没带别名时按看不了算 —— 存疑的一档 fail-closed', () => {
+  it('子 agent 的上下文缺了 subAgent 时按看不了算 —— 存疑的一档 fail-closed', () => {
     expect(canSeeImages(seeing({ vision: false, low: true }), { agentKind: 'sub' }, () => 'low')).toBe(false);
   });
 });
