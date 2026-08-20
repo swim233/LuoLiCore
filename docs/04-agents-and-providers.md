@@ -531,8 +531,18 @@ shim 去翻译 Responses 语义，代价有两项，都是实测出来的：
   同样骑在工具结果上进下一步的请求体，所以两处都要按**子 agent 的别名**来：① 注入前那次能力位
   （问主轮别名等于问了一个跟这张图无关的模型），② `runSubAgent` 的 `prepareStep` 里也要有那次切换
   —— 否则没有任何一处会把它换到能看图的别名上，而它拿到的图既躲开 `isImagePart`（红线 22）
-  也就躲开了当步降级兜底。别名经 `ToolExecutionContext.agentAlias` 交给工具侧；切换之后那一步的
-  `usage_ledger.model_alias` 记**实际用的**那个别名，不是定义里写的那个。
+  也就躲开了当步降级兜底。别名经 `ToolExecutionContext.subAgent.alias` 交给工具侧；切换之后那一步的
+  `usage_ledger.model_alias` 记**实际用的**那个别名，不是定义里写的那个。候选只有
+  `{它自己那个, vision}`：子 agent 没有 `downgradeAfterStep` 那种机械降档，它看不了图只可能是
+  它**就是被指定成**这个别名的，把 `spawn_agent` 明确指定的别名偷偷换成定义里那个不是修复。
+  **子 agent 要的图，父轮只留一条文字痕迹**（`captureImage` 的 `subAgent` 分支）：一句「你派出的
+  `<name>` 从 `<url>` 取过一张图（`webasset://<id>`），你自己没有看到它」，**不带 file part**。
+  像素也塞进父轮 = 主 agent 为一张自己没要过的图付图片额度、并被钉在 vision 别名上
+  （`visionScope='window'`）。行与文件照存 —— `gcFiles` 的 `referenced` 读的是表而不是 part，
+  「它当时到底看到哪张图」事后仍查得到。跟着这条走的还有两样：`media.maxImagesPerTurn` 对子 agent
+  **按这次 run 自己数**（它的图不进父轮 delta，数 delta 等于数不到），而「注入过图」这个标志置在
+  它自己身上（`subAgent.onMediaInjected`）而不是 `turn.mediaInjected` —— 置父轮那个会把主 agent
+  后续每一步都切到贵别名上，而主 agent 的 messages 里一张图都没有。
   **优先级：vision 压过一切。** 既压过 `downgradeAfterStep`（`low` 大概也看不见图，为了省钱把眼睛
   降掉是最不划算的一种省），也压过 `set_model` 的当轮指定；`vision` 别名不可用时退而选「降档前那个
   别名自己就支持看图」。一个都没有才降级：图片整体换成文本占位，并在**回复末尾**追加一句提示

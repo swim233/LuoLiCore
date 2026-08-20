@@ -77,8 +77,15 @@ export async function runSubAgent(run: AgentRun, definition: AgentDefinition, ta
    * 注入侧问的必须是同一个集合（`ToolExecutionContext.agentAlias` + `vision`）—— 两边不一致
    * 就会出现「存下来了却没人能看」或者「本可以看却如实说了看不了」。
    */
+  /**
+   * 判据是**这次 run 自己**注入过图（`toolContext.subAgent.onMediaInjected`），不是父轮那个
+   * `turn.mediaInjected` —— 父轮的图不在子 agent 的 messages 里（它只拿到任务文本），跟着切
+   * 等于白付一次贵别名的钱；反过来子 agent 的图也不该把父轮钉到 vision 上。
+   */
+  let mediaImages = 0;
+  let mediaInjected = false;
   const visionAlias = (): string | null => {
-    if (!turn.mediaInjected || dependencies.registry.supportsVision(alias)) return null;
+    if (!mediaInjected || dependencies.registry.supportsVision(alias)) return null;
     return dependencies.registry.supportsVision('vision') ? 'vision' : null;
   };
   /** 当步实际用的别名。记账与日志按它落 —— 切过去却按定义里那个记，钱就算到了没跑的模型上。 */
@@ -97,9 +104,10 @@ export async function runSubAgent(run: AgentRun, definition: AgentDefinition, ta
   const runSpan = dependencies.log.span({ level: 'info', kind: 'agent.run', summary: `${definition.name} (run ${run.id.slice(0, 8)})`, traceId: turn.turnId, ...parent,
     chatId: turn.chatId, userId: turn.initiatorUserId, key: turn.key, data: { runId: run.id, name: definition.name, depth: run.depth, alias } });
   // 内部的工具调用挂在 `agent.run` 之下（`docs/10 §1` 里 `tool.call span G parent=E`）。
-  // `agentAlias` 是给图片路径问能力位用的：问主轮别名等于问了一个跟这张图无关的模型
-  // （一个跑在 `low` 上的子 agent 会因为主轮是 vision 就被塞一张它看不了的图，`docs/04 §5.2`）。
-  const toolContext: ToolExecutionContext = { turn, workspace: dependencies.workspace, agentKind: 'sub', agentRunId: run.id, agentAlias: alias, allow, parentSpanId: runSpan.id };
+  // `subAgent` 那一组是给图片路径用的（`docs/04 §5.2`）：按**它自己**的别名问能力位（问主轮
+  // 别名等于问了个无关的模型）、父轮那条痕迹要写清是谁取的、张数与「注入过图」都按这次 run 记。
+  const toolContext: ToolExecutionContext = { turn, workspace: dependencies.workspace, agentKind: 'sub', agentRunId: run.id, allow, parentSpanId: runSpan.id,
+    subAgent: { alias, name: definition.name, images: () => mediaImages, onMediaInjected: () => { mediaImages += 1; mediaInjected = true; } } };
   // 与主 agent 共用 `toolSetFor`：`toModelOutput`（带图的工具结果）这类钩子加漏一处的表现是
   // 「主 agent 能看图、子 agent 不能」，而且要真跑一次带图的子 agent 才看得见。
   const toolSet = toolSetFor(dependencies.tools, dependencies.tools.active(run.effectiveRole, toolContext, definition.tools), toolContext);

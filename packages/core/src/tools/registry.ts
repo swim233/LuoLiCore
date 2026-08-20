@@ -14,14 +14,19 @@ export interface ToolExecutionContext {
   agentKind: 'main' | 'sub';
   agentRunId?: string;
   /**
-   * 这次调用背后那个 agent 用的模型别名。**只有子 agent 需要它**：主 agent 的别名由
-   * `prepareStep` 每步现算（`turn.modelAliasOverride` 等），而子 agent 的别名是
-   * `runSubAgent` 的局部变量，工具侧此前完全看不到。
-   *
-   * 图片路径按它问能力位（`docs/04 §5.2`）：问主轮别名等于问了一个跟这张图无关的模型 ——
-   * 一个跑在 `low` 上的子 agent 会因为主轮是 vision 就被塞一张它看不了的图。
+   * 子 agent 专属的那几样，主 agent 的上下文里恒为 `undefined`。工具侧此前对子 agent 一无所知
+   * （别名、名字、张数都是 `runSubAgent` 的局部变量），而图片路径这三样都要用（`docs/04 §5.2`）。
    */
-  agentAlias?: string;
+  subAgent?: {
+    /** 它自己的模型别名 —— 图片能不能进上下文按**它**问，问主轮别名等于问了个无关的模型。 */
+    alias: string;
+    /** 它的名字。父轮那条文字痕迹要写清是谁取的（「你派出的 researcher 取过一张图」）。 */
+    name: string;
+    /** 本次 run 已经注入过几张图。父轮 delta 里没有它们，`maxImagesPerTurn` 只能按 run 自己数。 */
+    images: () => number;
+    /** 「本 run 注入过图」置位 —— vision 切换要落在**看到这张图**的那个 agent 上。 */
+    onMediaInjected: () => void;
+  };
   allow?: ReadonlySet<string>;
   /**
    * 这次工具调用该挂在哪个 span 之下（`docs/10 §1`）。主 agent 由 `onStepStart` 写进这一项
