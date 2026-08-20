@@ -180,6 +180,36 @@ CREATE INDEX ix_attachments_msg ON attachments(message_id);
 CREATE UNIQUE INDEX ux_attachments_unique ON attachments(chat_id, tg_file_unique_id);
 ```
 
+`web_fetch` / MCP 工具抓回来的图片走**另一张表**。不复用 `attachments`：那张表整体是 Telegram
+形状的（`message_id NOT NULL REFERENCES messages(id)`、`tg_file_id NOT NULL`、
+`UNIQUE(chat_id, tg_file_unique_id)`），网页图这三样一个都没有，只能填假值 —— 而「摘除比伪造
+安全」是已确立的先例（`docs/reviews/16 §5`）。引用形式是 `webasset://<id>`，与 `attachment://<id>`
+在读出侧走同一个 `hydrateAttachment`、同一条「文件丢了换占位文本、绝不抛」的兜底。
+
+```sql
+CREATE TABLE web_assets (
+  id          TEXT PRIMARY KEY,
+  key         TEXT NOT NULL,        -- 上下文 key（chat:<id> / thread:<id>:<tid>）
+  url         TEXT NOT NULL,        -- 取自哪（截至 2048 字符）
+  media_type  TEXT NOT NULL,        -- 归一化之后恒为 image/jpeg
+  local_path  TEXT,                 -- media.dir/web/<key>/<sha256-32>.jpg；null=文件已不在
+  bytes       INTEGER,              -- 归一化**之后**的字节数，不是下载下来那份
+  width INTEGER, height INTEGER,    -- 归一化之后的尺寸
+  created_at  INTEGER NOT NULL
+);
+CREATE INDEX ix_web_assets_key ON web_assets(key);
+CREATE INDEX ix_web_assets_created ON web_assets(created_at);
+```
+
+文件名取内容哈希：同一张图在一个会话里被取两次时盘上只留一份，但**库里仍是两行**（`id` 是注入
+用的引用，一行一次注入，共享的只是那份字节）。文件落在 `media.dir` 之下是刻意的 —— 跟着同一个
+目录走，`gcFiles()` 那道「库与目录来自两套部署」的 fail-closed 守卫才继续适用（`docs/25 §10`）。
+
+> **改这张表时两处必须一起改**：`MaintenanceService.gcFiles()` 的 `referenced` 集合
+> （`media.dir` 下现在有 `attachments` 与 `web_assets` **两张**表在引用文件，漏一张的表现不是
+> 报错、是那张表的文件被静默当孤儿删掉 —— 这个坑本仓踩过两次），以及 `cleanup()` 里
+> `media.retentionDays` 的过期清理。
+
 ### 2.5 上下文层（核心）
 
 ```sql
@@ -775,6 +805,7 @@ image 都改不动了；没有这一列，运维在 WebUI 换了镜像之后所�
 | `approvals` | 90 天 | pending 超 `expires_at` 标 `expired` |
 | `scheduled_jobs` | `schedule.retentionDays` = 30 | 只删**已结束**（`done` / `cancelled`）且 `updated_at` 超期的行。**活跃任务永不清** —— 清掉一条还在排的任务，表现是「bot 突然不再提醒了」而库里毫无痕迹 |
 | `media.dir`（默认 `./data/files`）下的媒体**文件** | `media.retentionDays` = 90 | 按 `attachments.created_at` 删磁盘上的文件，**`attachments` 行与元数据保留**（[14 §2 Q9-a](./14-open-questions.md)）：历史消息里的「[图片]」还在、上下文与检索结果都不塌，只是点不开（T16）。`0 = 不清`。**真正占盘的是这一项** —— `gcFiles()` 只扫孤儿（没有任何 DB 行指向的文件），扫不到有行指着的正常媒体。删完把 `local_path` 置空并把 `download_state` 写成 `'expired'` —— 光置空会和「下载失败」（`'failed'`）混成一种状态，运维查起来分不出是过期删的还是当初就没下来 |
+| `web_assets`（**行 + 文件**） | `media.retentionDays` = 90 | 与上面那一项同一个保留期、同一处执行，但**行也一起删**。`attachments` 留行是因为历史消息里那条「[图片]」要保住 mime / 尺寸 / 已提取正文；网页图那条 `webasset://` part 自己就带着「这张图取自哪」的文本，行没了读出侧照旧交回占位文本（`hydrateAttachment` 的 `missing` 分支），留一堆 `local_path=NULL` 的行只是让 `gcFiles` 与过期清理都得多绕一次 |
 | `data/cache/models.dev.json` | 永久 | 纯派生数据，删掉即可（下次拉取模型时自动重下）。年龄记在 `app_kv` 的 `catalog:models.dev`，超 `provider.catalog.ttlHours` 时用 ETag 条件请求续期 |
 | `sandbox_containers` | 跟着容器走 | **不由 `maintenanceCron` 管**，走自己的 `sandbox.persistent.reapCron`（默认每 5 分钟）：容器被销毁时删行，同一个 tick 里与 docker 双向对账。行本身不占空间，它只是 docker 状态的索引 |
 | `data/workspace/<chatId>` | **永久，且至今无人清理** | **没有实现任何回收**。`MaintenanceService` 一行都没管它，唯一的可见性是 `GET /api/health` 的 `workspaceBytes`。容器到期被回收**不动这里的文件**（那正是 `container_reset` 默认不清文件的同一条取舍：容器是环境，workspace 是数据）。要清只能人工，或用 `container_reset` 的 `wipeWorkspace` 单会话清 |

@@ -273,6 +273,14 @@
 | [x] AC-TOOL-032 (自动) ★ | 给一个 `custom_*` 工具写 `tools.overrides.<name>.minRole: limited`，然后取 `active()` 与 `admit()` | 两侧**同时**仍然拒绝：角色地板焊在 `available()` 里（不低于 `TOOL_POLICY.bash.minRole`），而覆盖只动 `effectivePolicy()`。一个自定义工具就是一段 shell，放给 `limited` 等于绕过 `bash` 的门槛 | 〔selfextend.custom.test.ts〕
 | [x] AC-TOOL-033 (自动) ★ | 定义一个工具但不启用；启用后再改一次正文；另起一个 `autoEnable: true` 的实例 | 落库即 `enabled=0` 且不进目录；owner 启用后下一轮出现；改正文后回到未启用且 `reviewed_at` 清空（否则「先定义无害的、拿到启用、再改成恶意的」直接走通）；`autoEnable` 打开时定义完即可用 | 〔selfextend.custom.test.ts〕
 | [x] AC-TOOL-034 (自动) | 注册后在轮内改掉定义再调用；名字非法 / params 不是 object / 与别的来源重名 / 超出 `maxTools` | 依次：`custom_tool_redefined`（注册在开轮、执行在若干步之后，模型看到的是旧 schema）；四类校验都在**定义期**返回错误码，而不是留到 `active()` 那条没人看的截断 warn | 〔selfextend.custom.test.ts〕
+| [x] AC-TOOL-035 (自动) | `web_fetch` 一个带 `<title>` / 相对 `<a href>` / 带 alt 的 `<img>` / `data-href` 陷阱的页面 | 标题走 `title` 字段（`head` 整棵被丢，它此前永远到不了模型）且不重复进正文；链接与图片地址按响应最终 URL 解析成**绝对**地址；`#锚点` / `javascript:` / `data:` 不算链接但锚文本仍留；`data-href` 不许命中 `href`；没有 title 时是 `null` 而不是空串 | 〔tools.round8.test.ts〕
+| [x] AC-TOOL-036 (自动) | 一份有 500 个链接的页面；再拿 8 万个未闭合 `<script>` 与 1 万个带属性的 `<a>` 打抽取层 | 链接到 `LINK_BUDGET`（200）为止，此后只留锚文本、不留半个 `[`，并交回 `linksOmitted`；两条压力输入都在 2 秒内跑完 —— 属性解析只许在已被 `>` 界定的那一个标签里扫，不许把线性上界拖回 O(n²)（docs/24 · R-SEC-01） | 〔tools.round8.test.ts〕
+| [x] AC-TOOL-037 (自动) ★ | 依次拿 `image/png`、`application/pdf`、`application/ld+json`、`text/html`、无 `content-type` 的 PNG 字节、无 `content-type` 的纯文本、空响应体去分档 | 四档各归各位；`content-type` 一个字都没说时才看字节（NUL 与替换字符占比是二进制的凭据），空响应体算 `text` 而不是 `binary`；撒谎的 `content-type` 最坏只降到 `text` 档（正文原样交出，仍可读）。`binary` / `image` 两档**不带正文** —— 此前无条件 `toString('utf8')` 会把最多 2MB 乱码截断后塞进上下文，整个工具输出预算烧在噪声上而模型以为自己读到了页面 | 〔web.test.ts〕
+| [x] AC-TOOL-038 (自动) ★ | 有能看图的别名时 `web_fetch` 一个 `image/*` 地址 | 图按 `media.maxImageEdge` 归一化成 JPEG（与 Telegram 附件共用 `normalizeImage`）、落 `web_assets` 表与 `media.dir/web/<key>/`；往本轮 delta 注入一条 `origin:'note'` 消息，带**顶层** `{type:'file', ref:'webasset://<id>'}` part 且 `isImagePart` 认得它；`turn.mediaInjected` 置位；`parts_json` 里**只有引用没有字节**；工具结果上骑的 `media` 被 `#normalizeOutput` 在序列化之前摘走，几百 KB base64 既不被 `maxOutputBytes` 截半也不挤掉正文 | 〔web.media.test.ts〕
+| [x] AC-TOOL-039 (自动) ★ | 同一个 `image/*` 地址，但 `vision` 别名与本轮别名都看不了图；再试一个截断的图与一份解不成图的字节 | 三种都**不注入、不入库、不落盘、不置位**，各自交回 `vision_unavailable` / `image_truncated` / `image_unreadable` 加一句「不要猜它画的是什么」。把图交给瞎模型，宽容的 provider 静默忽略、严格的直接 400（docs/08 §7.2）；而截断的 JPEG 就是坏图 —— 两种都比一句「我看不了图」糟，伪造一次「已放进上下文」更糟 | 〔web.media.test.ts〕
+| [x] AC-TOOL-040 (自动) ★ | 存了几张网页图之后跑一次 `gcFiles()`，目录里另放一个没人引用的文件；再把 `created_at` 推到 `media.retentionDays` 之外跑 `cleanup()` | gc 只删那个孤儿，`web_assets` 引用的一张不动（`referenced` 集合现在要并 `attachments` **与** `web_assets` 两张表 —— 漏一张的表现不是报错、是那张表的文件被静默当孤儿删掉，本仓踩过两次）；保留期到了文件与行一起删，读出侧照旧交回占位文本而不是抛 | 〔web.media.test.ts〕
+| [x] AC-TOOL-041 (自动) | 一个外部工具（MCP / plugin）返回 `{content:[{type:'image', data, mimeType}]}`；`tool-result` 里带图的那份准备落库 | 图片走与 `web_fetch` 完全同一条落地路径（`ToolRegistry.bindMedia`），JSON 里换成一句文本标记；落库之前 `normalizeToolOutput` 把 tool-result 里的图片摘成占位文本，判别字段一个不碰。不做这两步：浏览器类 MCP 的截图变成一坨截半 base64 当不可信文本，而落库那份会被硬截断切半且**结果是持久化的**（docs/02 §9 红线 21） | 〔web.media.test.ts〕
+| [x] AC-TOOL-042 (自动) | 一轮里连续 `web_fetch` 超过 `media.maxImagesPerTurn` 张图 | 到上限**拒新的**并交回 `image_limit_reached`，已经进去的那几张原样留着。`capImages` 只在 `openTurn` 跑（管「用户这一轮发了几张」），模型自己在一轮里取十张它一张都拦不住；而丢最旧会让模型已经就前几张说过的话失去依据 | 〔web.media.test.ts〕
 | [ ] AC-APV-008 (自动) ★ | trusted 用户触发一个需审批的工具，然后无人裁决直到 `ttlMs` 到期 | 调用**挂起等待**而不是当场伪拒绝：先写一行 `state=pending` 并广播 `approval.pending`；到期后原子改成 `state=expired, decided_by=system`，工具返回 `ok:false, error:'未获批准'` 且 hint 说的是「审批已超时」而不是「管理员已拒绝」。轮次在等待中被取消时落 `state=denied, decided_by=system` 并给「轮次已取消」的 hint —— 三条路径都 fail-closed，工具一次都不执行（docs/21 · G-API-12） |
 | [ ] AC-APV-010 (自动) ★ | 命中规则后 owner 在 WebUI 点 `[批准执行]` | `decide` 用 `UPDATE … WHERE state='pending' AND expires_at>?` 抢裁决权，只有真改到一行才唤醒等待者；**批准之后原工具调用才继续执行**，落 `state=approved, decided_by=owner, decision_channel=webui`。对已裁决/已过期的行重复裁决返回 `changed:false`，不重复唤醒 |
 | [ ] AC-APV-011 (自动) | `rememberWithinTurn=true` 时同轮重试一个刚过期的调用 | 复用上次结论不再挂第二个 `ttlMs`，但 hint 仍是「审批已超时」—— 只记布尔会让模型把超时说成「管理员已拒绝」 |
@@ -576,7 +584,7 @@
 | **上下文引擎** | | 31 / 40 | | | |
 | Telegram 与准入 | | 22 / 46 | | | |
 | Agent 与 Provider | | 23 / 43 | | | |
-| 工具/沙箱/审批 | | 29 / 71 | | | |
+| 工具/沙箱/审批 | | 37 / 79 | | | |
 | Subagent 与任务 | | 20 / 38 | | | |
 | 记忆 | | 1 / 13 | | | |
 | 日志与成本 | | 8 / 28 | | | |
@@ -584,6 +592,6 @@
 | WebUI | | 11 / 85 | | | |
 | 安全 | | 9 / 25 | | | |
 | 运维 | | 2 / 10 | | | |
-| **合计** | | **199 / 476** | | | |
+| **合计** | | **207 / 484** | | | |
 
 **整体通过条件**：全部 ★ 项通过 + 非 ★ 项通过率 ≥ 95% + 所有豁免项经需求方书面确认。

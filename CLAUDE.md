@@ -65,7 +65,7 @@ pnpm workspace，依赖方向严格单向：`shared → db → core → {telegra
 - 一轮 = `openTurn` → 多次 `appendDelta` → `commitTurn` / `abortTurn`；
   `finalized` 置位后再 `appendDelta` 会抛错，而不是静默丢弃
 
-**改这块之前先读 `docs/02-context-engine.md` §9 的实现红线清单（20 条）。** 尤其是：
+**改这块之前先读 `docs/02-context-engine.md` §9 的实现红线清单（22 条）。** 尤其是：
 
 - 任何改写 parts 的逻辑（`elidePart`、`truncatePartStrings`）**绝不能碰判别字段**
   （`type` / `toolCallId` / `toolName` / `mediaType`）。改坏了 provider 会拒收整个请求，
@@ -134,7 +134,7 @@ better-sqlite3 + 原生 SQL，无 ORM 查询层。WAL 模式。迁移是 `packag
   文档分两层：`docs/00`–`docs/21` 是**活的规格层**，`docs/reviews/` 是**冻结的历史复审**。
   **`docs/00-state.md` 是「现在还欠什么 / 哪些查过没问题」的唯一入口**，开工前先看它 ——
   复审报告里的结论一律是当轮快照，不代表现在。
-  `docs/13-acceptance-criteria.md` 是 466 条可逐条勾选的验收条目（改动条数时同步该文件末尾的签署表）。
+  `docs/13-acceptance-criteria.md` 是 484 条可逐条勾选的验收条目（改动条数时同步该文件末尾的签署表）。
   `docs/21-webui-coverage-gaps.md` 记录 WebUI 控制面还够不着哪些已实现的能力，动 WebUI 前先扫一眼。
 - 修不了的东西不要假装修好。已确立的先例：`PUT /api/quota` 返回 `not_implemented` 而不是假成功；
   `ask_parent` 在父 agent 仲裁未实现时返回 `ask_parent_not_implemented` 而不是拿默认值伪造答复。

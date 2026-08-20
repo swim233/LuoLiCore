@@ -12,7 +12,7 @@ import { modelAliasKey, readAppKv } from '@luoli/db';
 import { escapeSystemInstructions, estimateStructureTokens, formatSpeakerIdentity, sanitizeIdentity, systemInstructions, type RuntimeTurnContext } from '@luoli/shared';
 import type { PromptAssembler, PromptDocuments } from '../index.js';
 import { runtimeBlock, type PromptBuildResult } from '../prompt/assembler.js';
-import type { ToolExecutionContext, ToolRegistry } from '../tools/registry.js';
+import type { RegisteredTool, ToolExecutionContext, ToolMedia, ToolRegistry } from '../tools/registry.js';
 import { SKILL_NARROWING_EXEMPT } from '../tools/policy.js';
 import type { ProviderStore } from '../provider/store.js';
 import { PROVIDER_FAILURES_TO_DOWN, recordProviderFailure, recordProviderServed } from '../provider/health.js';
@@ -296,15 +296,78 @@ export class ModelRegistry {
  * 只改写入端的话，凡是调过一次工具的会话在 `/new` 之前每轮都会失败，所以读出侧也要兜一层。
  * 只补 output，不碰判别字段（docs/02 不变量）。
  */
+/**
+ * 上下文里存**引用**不存字节。
+ *
+ * 带图的 tool-result 是 `{type:'content', value:[…, {type:'file', data}]}`（`toolModelOutput`
+ * 产出、SDK 原样发给 provider 的那份）。它落进 `context_messages.parts_json` 会两头出事：
+ * 每次物化都重放几百 KB base64；而硬截断 `truncatePartStrings` 走进 `output.value[].data`
+ * 会把它切一半 —— `tool-result` 不在 `OPAQUE_PART_TYPES` 里，拿不到「要么原样要么整体换占位」
+ * 那道保护，而**截断结果是持久化的**，该会话在 `/new` 之前每轮都被 provider 拒收（docs/02 红线）。
+ *
+ * 图片跨轮靠的是那条顶层 `webasset://` part（`isImagePart` 认得它，于是 vision 切换、`capImages`、
+ * `degradeImages` 全部适用），不靠工具结果 —— 所以这里摘掉不丢信息。
+ * 放在 `normalizeToolOutput` 里而不是只在写入侧：读出侧也过这一层，库里已经有的那些同样被兜住。
+ */
+const PERSISTED_MEDIA_PLACEHOLDER = '[图片已另存为附件，工具结果里不重复存字节]';
+function stripToolResultMedia(output: { type: string; value: unknown }): { type: string; value: unknown } {
+  if (output.type !== 'content' || !Array.isArray(output.value)) return output;
+  let touched = false;
+  const value = output.value.map((entry) => {
+    const part = entry as { type?: unknown } | null;
+    if (part?.type !== 'file' && part?.type !== 'media') return entry;
+    touched = true;
+    return { type: 'text', text: PERSISTED_MEDIA_PLACEHOLDER };
+  });
+  // 判别字段一个不碰（docs/02 红线 14）：只换 `value` 里那几项，`type` 原样。
+  return touched ? { ...output, value } : output;
+}
 export function normalizeToolOutput(output: unknown): { type: string; value: unknown } {
   if (output && typeof output === 'object' && !Array.isArray(output)) {
     const typed = output as { type?: unknown; value?: unknown };
-    if (typeof typed.type === 'string' && 'value' in typed) return typed as { type: string; value: unknown };
+    if (typeof typed.type === 'string' && 'value' in typed) return stripToolResultMedia(typed as { type: string; value: unknown });
   }
   return { type: 'json', value: output ?? null };
 }
 export function toolResultPart(toolCallId: string, toolName: string, output: unknown): { type: 'tool-result'; toolCallId: string; toolName: string; output: { type: string; value: unknown } } {
   return { type: 'tool-result', toolCallId, toolName, output: normalizeToolOutput(output) };
+}
+/**
+ * 工具输出 → SDK 的 tool-result 形状。带 `media` 时产出多模态的 `{type:'content'}`，
+ * 否则照 SDK 的默认行为（字符串走 `text`、其余走 `json`）。
+ *
+ * 这是**图片当步就能被看到的唯一通道**：`context.appendDelta` 写的是 `turn.delta`，而
+ * `prepareStep` 拿到的 `messages` 由 SDK 给 —— 轮内注入的 part 到不了本步的请求体，
+ * 只有骑在工具结果上才行。跨轮那一份由 `webasset://` 顶层 part 负责。
+ */
+/**
+ * SDK 的 `JSONValue` 只从 `@ai-sdk/provider-utils` 导出，而 core 不直接依赖那个包。
+ * 工具输出按约定是 JSON 可序列化的（`#normalizeOutput` 就 `JSON.stringify` 它），所以这里写一个
+ * 等价的递归类型，而不是把 `unknown` 硬塞过去 —— 塞过去等于把这一处的类型检查整个关掉。
+ */
+type JsonValue = null | string | number | boolean | JsonValue[] | { [key: string]: JsonValue };
+type ToolModelOutput = { type: 'text'; value: string } | { type: 'json'; value: JsonValue }
+  | { type: 'content'; value: Array<{ type: 'text'; text: string } | { type: 'file'; data: { type: 'data'; data: string }; mediaType: string }> };
+export function toolModelOutput(output: unknown): ToolModelOutput {
+  const media = (output as { media?: unknown } | null)?.media;
+  if (!Array.isArray(media) || !media.length) return typeof output === 'string' ? { type: 'text', value: output } : { type: 'json', value: (output ?? null) as JsonValue };
+  const { media: _media, ...rest } = output as Record<string, unknown>;
+  return { type: 'content', value: [{ type: 'text', text: JSON.stringify(rest) },
+    ...media.map((entry) => ({ type: 'file' as const, data: { type: 'data' as const, data: (entry as ToolMedia).data }, mediaType: (entry as ToolMedia).mediaType }))] };
+}
+/**
+ * 注册表工具 → SDK 的 `ToolSet`。**只有一份**：主 agent 与子 agent 此前各写一遍同样的三行，
+ * 而 `toModelOutput` 这类钩子加漏一处的表现是「主 agent 能看图、子 agent 不能」，
+ * 而且要真跑一次带图的子 agent 才看得见。
+ */
+export function toolSetFor(registry: ToolRegistry, tools: readonly RegisteredTool[], context: ToolExecutionContext): ToolSet {
+  const set: ToolSet = {};
+  for (const registered of tools) {
+    set[registered.name] = tool({ description: registered.description, inputSchema: registered.inputSchema,
+      execute: (input) => registry.execute(registered.name, input, context),
+      toModelOutput: ({ output }) => toolModelOutput(output) });
+  }
+  return set;
 }
 /**
  * 一步的工具结果，**`tool-error` 必须一起收**。
@@ -365,15 +428,31 @@ function imageToFilePart(part: Record<string, unknown>): Record<string, unknown>
  * 写进库、又没跑迁移的历史数据 —— parts 是持久化的，读出侧不兜就是会话级永久损坏。
  */
 /**
- * `attachment://<id>` 换回 base64。文件丢了就整体降级成一句占位文本，**不能抛** ——
- * parts 是持久化的，这里抛一次等于该会话在 `/new` 之前每轮都失败；而「不透明 part 要么原样保留、
- * 要么整体换成占位文本」正是 docs/02 的不变量（docs/24 · R-MEDIA-01）。
+ * `attachment://<id>` / `webasset://<id>` 换回 base64。文件丢了就整体降级成一句占位文本，
+ * **不能抛** —— parts 是持久化的，这里抛一次等于该会话在 `/new` 之前每轮都失败；而「不透明
+ * part 要么原样保留、要么整体换成占位文本」正是 docs/02 的不变量（docs/24 · R-MEDIA-01）。
+ *
+ * 两个 scheme 走同一个函数、同一条兜底：`attachment://` 是 Telegram 发来的附件
+ * （`attachments` 表），`webasset://` 是 `web_fetch` / MCP 抓回来的图（`web_assets` 表）。
+ * 分表是因为 `attachments` 整体是 Telegram 形状的（`message_id NOT NULL`、`tg_file_id NOT NULL`），
+ * 网页图只能填假值 —— 而这个仓库的先例是「摘除比伪造安全」。
  */
+/** `web_fetch` / MCP 抓回来的图。**同一个 wire 标记只能有一份定义**（照 `NOTE_PREFIX` 的先例）：
+ *  写入侧在 `media/web-assets.ts`、读出侧在下面，各写一遍就等于「存进去的和取出来的不是一个前缀」。 */
+export const WEB_ASSET_SCHEME = 'webasset://';
+const ASSET_SCHEMES = ['attachment://', WEB_ASSET_SCHEME] as const;
+function assetRef(part: Record<string, unknown>): string | null {
+  return typeof part.ref === 'string' && ASSET_SCHEMES.some((scheme) => (part.ref as string).startsWith(scheme)) ? part.ref : null;
+}
 function hydrateAttachment(part: Record<string, unknown>, attachments?: Sqlite): Record<string, unknown> {
   const missing = { type: 'text', text: '[图片已不可用：附件文件已丢失]' };
   if (!attachments) return missing;
-  const id = (part.ref as string).slice('attachment://'.length);
-  const path = attachments.prepare("SELECT local_path FROM attachments WHERE id=? AND download_state='done'").pluck().get(id) as string | undefined;
+  const ref = part.ref as string;
+  const web = ref.startsWith(WEB_ASSET_SCHEME);
+  const id = ref.slice(ref.indexOf('//') + 2);
+  const path = web
+    ? attachments.prepare('SELECT local_path FROM web_assets WHERE id=?').pluck().get(id) as string | undefined
+    : attachments.prepare("SELECT local_path FROM attachments WHERE id=? AND download_state='done'").pluck().get(id) as string | undefined;
   if (!path) return missing;
   const { ref: _ref, ...rest } = part;
   try { return { ...rest, data: readFileSync(path).toString('base64') }; } catch { return missing; }
@@ -478,7 +557,7 @@ export function contextMessages(turn: RuntimeTurnContext, attachments?: Sqlite, 
       if (part?.type === 'tool-result') return { ...part, output: normalizeToolOutput(part.output) };
       if (degradeThis && isImagePart(part)) return { type: 'text', text: options?.degradeImages === 'history' ? HISTORY_IMAGE_UNSUPPORTED : IMAGE_UNSUPPORTED };
       if (part?.type === 'image') return imageToFilePart(part);
-      if (part?.type === 'file' && typeof part.ref === 'string' && part.ref.startsWith('attachment://')) return hydrateAttachment(part, attachments);
+      if (part?.type === 'file' && assetRef(part)) return hydrateAttachment(part, attachments);
       // 易变段现在和用户正文同处 user role，正文里能写出 `<system-instructions` 就等于能伪造它。
       // 只改 text 字符串，判别字段一个不碰（docs/02 红线 14）。
       if (typeof part?.text === 'string') return { ...part, text: escapeSystemInstructions(part.text) };
@@ -719,10 +798,7 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
   // 预算被 catalog + runtime 吃满时 CHARACTER.md 会被整段截成一句「（记忆已截断…）」——
   // 人格静默消失，而日志里一个字都没有（docs/20 · W-PROMPT-01）。
   if (prompt.truncated.length) dependencies.log.event({ level: 'warn', kind: 'prompt.truncated', summary: `Prompt blocks truncated: ${prompt.truncated.join(', ')}`, traceId: turn.turnId, ...turnParent(turn), key: turn.key, data: { truncated: prompt.truncated, blocks: prompt.blocks, maxTokens: dependencies.config.prompt.maxTokens } });
-  const toolSet: ToolSet = {};
-  for (const registered of dependencies.tools.active(turn.effectiveRole, toolContext)) {
-    toolSet[registered.name] = tool({ description: registered.description, inputSchema: registered.inputSchema, execute: (input) => dependencies.tools.execute(registered.name, input, toolContext) });
-  }
+  const toolSet = toolSetFor(dependencies.tools, dependencies.tools.active(turn.effectiveRole, toolContext), toolContext);
   const persistedAlias = readAppKv<string>(dependencies.db, modelAliasKey(turn.key));
   const alias = turn.modelAliasOverride ?? persistedAlias ?? dependencies.config.agent.main.modelAlias;
   const mainRun = dependencies.agents?.createMain(turn.turnId, turn.effectiveRole, alias);
@@ -900,7 +976,11 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
       // **vision 压过其它一切**（`docs/04 §5.2`）：`low` 大概也看不见图，`set_model` 指定的别名
       // 同样可能看不见 —— 看不见图的模型拿到这一轮就只能瞎猜或者绕远路。`vision` 优先，退而用
       // 「降档前那个别名自己就支持」这一条：为了省钱降档而把眼睛降掉是最不划算的一种省。
-      if (turnHasImages && !dependencies.registry.supportsVision(selectedAlias)) {
+      // `turn.mediaInjected` 是**轮内**注入的那一档（`web_fetch` 抓回来的图、MCP 的截图）。
+      // `turnHasImages` 只是轮首快照，结构性地认不出它 —— 而这一步正是那张图要被读到的一步：
+      // step N 调 web_fetch → 图骑在工具结果上 → step N+1 的请求体里带着它。不在这里补一次，
+      // 那张图就落在一个看不了图的别名上（`docs/08 §7.2` 禁的正是这件事）。
+      if ((turnHasImages || turn.mediaInjected) && !dependencies.registry.supportsVision(selectedAlias)) {
         // 候选里带上 `alias`（本轮解析出来的那个）：`set_model('low')` 把 `requestedAlias` 换掉之后，
         // 「降档前那个别名」就只剩它了。
         const seeing = ['vision', requestedAlias, alias].find((name) => dependencies.registry.supportsVision(name));
@@ -937,8 +1017,12 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
        * `window` 档下这里恒为 no-op：那时要么已经切成能看图的别名，要么 `visionDegraded`
        * 已经把两段的图都换成文本了。判据带上「这一轮到底有没有图」—— 纯文本轮次连问一次能力位
        * 都不必。
+       *
+       * **`mediaInjected` 也要算进来**：轮内注入的那条 `webasset://` part 就在 `turn.delta` 里，
+       * 下一轮它是历史图，但**这一轮**它已经在 `messages` 里了（`contextMessages` 把 delta 也物化了）。
+       * 漏掉它 = 上面那次别名切换没找到能看图的别名时，这道兜底也不兜。
        */
-      if ((freshImages || historyImages) && !dependencies.registry.supportsVision(selectedAlias)) patch.messages = degradeImageParts(patch.messages);
+      if ((freshImages || historyImages || turn.mediaInjected) && !dependencies.registry.supportsVision(selectedAlias)) patch.messages = degradeImageParts(patch.messages);
       const selected = dependencies.registry.info(selectedAlias) ?? initialInfo;
       const cap = selected.contextWindow * dependencies.config.context.hardCapRatio;
       if (estimateModelMessages(patch.messages) > cap) {

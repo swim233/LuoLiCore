@@ -2,12 +2,12 @@ import { z } from 'zod';
 import { mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AgentManager, Config, ContextEngine, FileTools, MemoryStore, ModelRegistry, QuotaGuard, QuotaReservation, Sandbox, SkillLoader, ToolRegistry, UsageLedger, LogSink } from '@luoli/core';
-import { DEFAULT_WEB_RETRY, NOTE_PREFIX, arbitrateAsk, builtinPolicy, numberLines, readSlice, runHarness, runSubAgent, webFetch, webSearch, type WebRetryOptions } from '@luoli/core';
+import { DEFAULT_WEB_RETRY, NOTE_PREFIX, arbitrateAsk, builtinPolicy, captureImage, numberLines, readSlice, runHarness, runSubAgent, webFetch, webSearch, type WebAssetStore, type WebMediaSink, type WebRetryOptions } from '@luoli/core';
 import type { ArchiveRepository, ArchivedMessage, ScopedArchiveRepository } from '@luoli/db';
 import { archiveQuery } from '@luoli/db';
 import { citeArchivedMessages } from './cite.js';
 import { registerScheduleTools, type ScheduleToolDependencies } from './schedule.js';
-import type { Role } from '@luoli/shared';
+import type { Role, RuntimeTurnContext } from '@luoli/shared';
 import type { ToolExecutionContext } from './registry.js';
 
 /** 一次投递的落点。thread 必须跟着走，否则话题群里的追发会掉到「General」去。 */
@@ -113,8 +113,26 @@ function resolveOutgoingFile(context: ToolExecutionContext, files: FileTools, pa
   return { ok: true, absolute };
 }
 
-export function registerBuiltins(registry: ToolRegistry, dependencies: { db: import('@luoli/db').Sqlite; filesFor: (workspace: string, role: Role) => FileTools; sandbox: Sandbox; archive: ArchiveRepository; context: ContextEngine; memory: MemoryStore; skills: SkillLoader; agents: AgentManager; models: ModelRegistry; ledger: UsageLedger; log: LogSink; quota?: QuotaGuard; telegram: TelegramToolBridge | null; schedule: ScheduleToolDependencies; maxWebBytes: number; maxAsksPerRun?: number; web?: WebRetryOptions; webSearch?: { provider: '' | 'brave' | 'serper' | 'tavily' | 'exa'; apiKey: string } }): void {
+export function registerBuiltins(registry: ToolRegistry, dependencies: { db: import('@luoli/db').Sqlite; filesFor: (workspace: string, role: Role) => FileTools; sandbox: Sandbox; archive: ArchiveRepository; context: ContextEngine; memory: MemoryStore; skills: SkillLoader; agents: AgentManager; models: ModelRegistry; ledger: UsageLedger; log: LogSink; quota?: QuotaGuard; telegram: TelegramToolBridge | null; schedule: ScheduleToolDependencies; maxWebBytes: number; maxAsksPerRun?: number; web?: WebRetryOptions; webSearch?: { provider: '' | 'brave' | 'serper' | 'tavily' | 'exa'; apiKey: string };
+  /**
+   * 抓回来的图片往哪去。**可选**：不给就走「只报类型与大小」那一档 —— 不假装读到了内容
+   * （测试与不配 vision 的部署都落在这里）。`visionAvailable` 每次调用现算，因为它要看的是
+   * **本轮**这个别名支不支持看图，而别名可以被 `set_model` 换掉。
+   */
+  webMedia?: { assets: WebAssetStore; visionAvailable: (turn: RuntimeTurnContext) => boolean } }): void {
   const web = dependencies.web ?? DEFAULT_WEB_RETRY;
+  /**
+   * 本次调用的图片落地口。**每次调用现建**：`visionAvailable` 判的是本轮**当前**别名的能力位，
+   * 而 `set_model` 能在轮内把它换掉；建一次存起来等于把第一步那个答案冻住。
+   *
+   * 与 MCP 的截图共用 `captureImage`（`media/web-assets.ts`）—— 两份实现就是两种行为。
+   */
+  const webMediaSink = (context: ToolExecutionContext): WebMediaSink | null => {
+    const media = dependencies.webMedia;
+    if (!media) return null;
+    return { capture: (input) => captureImage({ assets: media.assets, appendDelta: (turn, message) => dependencies.context.appendDelta(turn, message as never),
+      visionAvailable: () => media.visionAvailable(context.turn), log: dependencies.log }, context.turn, input) };
+  };
   // 跟 `telegram` 同样是必填：漏传一个 key 就让三个工具永久消失，而
   // 「TOOL_POLICY ↔ 注册表」的启动断言只看注册没注册，一个字都不会报。
   registerScheduleTools(registry, dependencies.schedule);
@@ -530,6 +548,6 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
     // 但仍然走 turn.config —— 热更新后下一轮生效，不用重启）。
     timeoutMs: webBudgetMs, execute: (input, context) => {
       const live = (context.turn.config as Readonly<Config>).tools.web;
-      return webFetch(input.url, dependencies.maxWebBytes, context.turn.abortSignal, web, { allowlist: live.allowlist, denylist: live.denylist });
+      return webFetch(input.url, dependencies.maxWebBytes, context.turn.abortSignal, web, { allowlist: live.allowlist, denylist: live.denylist }, webMediaSink(context));
     } });
 }

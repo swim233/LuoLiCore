@@ -481,7 +481,7 @@ type MaterializeResult = {
 
 > **没有 `/ctx export`。** 这张表此前列过一行「导出当前窗口为 `.md`（仅 owner）」，但它从未实现过 ——
 > `/ctx` 只回统计摘要。[14 §2 Q12](./14-open-questions.md) 已拍板**不做**上下文导出/导入（导入等于给
-> 上下文引擎开一个不受信入口，§9 那 20 条红线多一个防守面，而「把会话搬到另一个部署」的收益几乎
+> 上下文引擎开一个不受信入口，§9 那 22 条红线多一个防守面，而「把会话搬到另一个部署」的收益几乎
 > 用不上），所以那行被删掉而不是补实现。完整时间线看 WebUI 的会话页。
 
 ### 7.1 「清空」清掉了什么：`context.recallBarrier`
@@ -633,6 +633,27 @@ export interface CommitResult {
     `output: {type:'error-text', value}`，与上线那份一致）；`commitTurn` 的 `assertPairedToolCalls`
     只查 **delta**（查 snapshot 会让已经损坏的会话彻底锁死，比现在更糟）；`contextMessages` 在读出侧
     给孤儿补一条 `[工具结果缺失…]`，并记 `ctx.orphan_tool_call` —— 库里存量不必 `/new` 就能恢复。
+
+21. ✅ **`parts_json` 里只存图片的引用，绝不存字节。** 图片进上下文的形状只有一种：顶层
+    `{type:'file', ref:'attachment://<id>' | 'webasset://<id>', mediaType:'image/…'}`
+    （`attachment://` 是 Telegram 附件，`webasset://` 是 `web_fetch` / MCP 抓回来的图）。
+    读出侧 `hydrateAttachment` 才换回 base64，取不到就**整体**换成占位文本、**绝不抛**
+    （parts 是持久化的，抛一次等于该会话在 `/new` 之前每轮都失败，docs/24 · R-MEDIA-01）。
+
+    带图的 tool-result（`{type:'content', value:[…, {type:'file', data}]}`，`toolModelOutput` 产出、
+    SDK 原样发给 provider 的那份）**必须在持久化之前把图摘成占位文本** ——
+    `normalizeToolOutput` 里做，读出侧同一层也过，所以库里存量一并兜住。两个理由，各自都足够：
+    每次物化重放几百 KB base64；而硬截断 `truncatePartStrings` 会走进 `output.value[].data`
+    把它切一半 —— `tool-result` **不在** `OPAQUE_PART_TYPES` 里，拿不到红线 11 那道「要么原样
+    保留、要么整体换占位」的保护，而截断结果是持久化的（与红线 15 同一条下坡路）。
+
+    摘掉不丢信息：跨轮那一份由顶层 `webasset://` part 负责，工具结果只负责**当步**让模型看见。
+
+22. ✅ **`isImagePart` 只认顶层 part —— 所有「这一轮有图吗」的判据都必须绕开这个坑。**
+    vision 别名自动切换、`capImages`、`degradeImages` 全都建在它上面，而藏在 tool-result
+    `output.value` 里那张骑着工具结果过来的图它结构性地认不出。所以轮内注入图片的路径
+    （`captureImage`）要置 `turn.mediaInjected`，`prepareStep` 的两处判据把它 OR 进去。
+    改成「每步重扫 messages」不管用 —— 扫的是同一个认不出它的判据。
 
 ---
 

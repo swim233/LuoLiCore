@@ -71,6 +71,7 @@ with_parent 0`，浏览器里展开一条 trace，13 个节点的 `marginLeft` �
 | `access.denied` | info | userRole, chatRole —— `blocked` 主体的消息不开轮次 |
 | `media.download` | info（`skipped`/`failed` 时 **warn**） | attachmentId, kind, bytes, ms, state（`done` \| `skipped` \| `failed`）, reason。入站附件的下载与归一化。没有 traceId —— 它跑在开轮之前 |
 | `media.extract` | info（`failed` 时 **warn**） | attachmentId, kind, chars, ms, state, error —— 文档正文提取。提取失败**不算**下载失败（文件已经在盘上了），所以它是独立一行 |
+| `media.web_asset` | info（处理失败时 **warn**） | assetId, bytes, width, height（成功）／url, error（失败）—— `web_fetch` 抓回来的图、MCP 工具交回的截图进上下文的那一步（存 `web_assets` → 注入 `webasset://` 顶层 part）。有 traceId：它跑在轮内，是「模型这一轮到底看到了哪几张图」的唯一凭据。**没有这一行就说明图根本没进去** —— `vision_unavailable` 那一档（没有能看图的别名）刻意不落日志，它作为 `hint` 交给模型自己说 |
 | `trigger.matched` / `trigger.skipped` | debug（编辑那一路 info） | reason —— 一个三元发出点，两个 kind 共用一处 |
 | `trigger.cooldown` | debug | cooldownMs, sinceMs —— `trigger.cooldownMsPerUser` 压住了这一条。它已降级成背景消息，下一轮照样进上下文 |
 | `trigger.coalesced` | debug | coalesceMs —— `concurrency.coalesceSameUserMs` 窗口内被同一个人后面那条取代 |

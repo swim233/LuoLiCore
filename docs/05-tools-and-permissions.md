@@ -259,7 +259,7 @@ bash: tool({
 
 | 工具 | minRole | 说明 |
 |---|---|---|
-| `web_fetch` | limited | `{url}`；SSRF 防护：解析后拒绝 私有网段/回环/link-local/元数据地址（169.254.169.254）；只允许 http/https；跟随重定向 ≤3 次且每跳重新校验；响应上限 2MB → HTML 抽成纯文本（见下）→ 🚧 可选交给 `low` 模型按 `prompt` 摘要（`tools.web.summarizeWithAlias`，未实现，所以 schema 里**没有** `prompt` 这个参数）。单次尝试 `tools.web.timeoutMs`（含 DNS 与全部跳），瞬时失败按 `tools.web.retries` 重试，见 §8.1 |
+| `web_fetch` | limited | `{url}`；SSRF 防护：解析后拒绝 私有网段/回环/link-local/元数据地址（169.254.169.254）；只允许 http/https；跟随重定向 ≤3 次且每跳重新校验；响应上限 2MB → **按 `content-type` 分四档**（见下）→ 🚧 可选交给 `low` 模型按 `prompt` 摘要（`tools.web.summarizeWithAlias`，未实现，所以 schema 里**没有** `prompt` 这个参数）。单次尝试 `tools.web.timeoutMs`（含 DNS 与全部跳），瞬时失败按 `tools.web.retries` 重试，见 §8.1 |
 | `web_search` | limited | 需配置搜索 provider（Brave/Serper/Tavily 之一）；未配置则不注册该工具。超时与重试同 `web_fetch`，且**同样走 `guardedFetch`**（`maxRedirects: 0` + 响应体上界）—— 它此前是全仓库唯一一条裸 `fetch`，而请求头里带着搜索 API key：undici 只按规范摘 `Authorization`/`Cookie`，自定义认证头会跟着 302 原样送到新主机（docs/27 · S-04） |
 
 **HTML 要抽成正文才交给模型。** 一个普通页面九成是 script / style / 导航，原样交出去按
@@ -269,6 +269,60 @@ bash: tool({
 与 docs/24 · R-SEC-01（grep 换 RE2）同一条教训 —— 接受任意输入就必须有线性上界。判据是
 `content-type`，缺失时再看正文开头像不像 HTML（撒谎的站点不少）。抽过的响应带 `extracted: 'text'`：
 这一点要交出去，否则模型会以为页面上本来就没有那些表格和脚本里的数据。
+
+抽成纯文本之后还有三样东西是**页面上有、而模型看不见**的，现在都交出去（`extractHtml`）：
+
+- **`<title>` → 结果里的 `title` 字段**。`head` 整棵在 `DROP_TAGS` 里（`<meta>` / `<link>` / `<script>`
+  确实都是噪声），标题此前跟着一起没了 —— 而它是一整页里信息密度最高的一行。
+- **`<a href>` → `[锚文本](绝对地址)`**。只留锚文本不留地址的话模型没法顺着页面往下走，只能退回
+  `web_search` 再搜一遍。相对地址按响应的最终 URL 解析成绝对地址（不解析等于没给）；
+  `#锚点` / `javascript:` / `data:` 丢掉（`data:` URI 能有几十 KB，够把输出预算吃光）。
+- **`<img>` → `![alt](绝对地址)`**，没有可用地址时至少留 `[图：alt]`。模型得先知道「这里有张图、
+  画的大概是什么」，才可能决定要不要再 `web_fetch` 一次去真看它。`data-src`（懒加载）也认。
+
+链接与图片地址合计有上限（200 条）：门户与文档站侧栏光链接就能几千条，不设上限的话「保住链接」
+会把 64KB 预算整个吃光、正文反过来又没了。到顶之后只保留锚文本，并在结果里带 `linksOmitted`
+—— 不说的话模型会以为页面上就这么几个链接。
+
+**非 HTML 的响应按类型分档，不再无条件当 utf8 倒出来**（`classifyResponse`）。此前对
+`image/png` 之类产出的是最多 2MB 乱码、再被 64KB 截断塞进上下文 —— 比「取不到」更糟：整个工具
+输出预算烧在噪声上，而模型还以为自己读到了页面。四档：
+
+| 档 | 判据 | 交回什么 |
+|---|---|---|
+| `html` | `text/html` / `application/xhtml+xml`，或无类型头而正文开头像 HTML | 抽取后的正文 + `title` + `extracted:'text'` |
+| `text` | `text/*`、`application/json`、`+json` / `+xml` 后缀族、js/xml/ndjson | 正文原样 |
+| `image` | `image/*` | 归一化后放进上下文（见下）；没有能看图的模型时只报 `mediaType` 与 `bytes` |
+| `binary` | 其余有类型头的，或无类型头而字节里有 NUL / 大量非法 UTF-8 | 只报 `mediaType` 与 `bytes`，**不带正文**，并写明「不要猜它的内容」 |
+
+`content-type` 撒谎的站点最坏也只降到 `text` 档（正文原样交出去，仍可读），不会变成乱码。
+
+**图片真的会进上下文**（`media/web-assets.ts`）。`image/*` 那一档走：`sharp` 归一化
+（`media.maxImageEdge` 缩进框内 + JPEG 85，与 Telegram 附件**共用** `normalizeImage`）→ 存
+`web_assets` 表、文件落在 `media.dir/web/<key>/` → 往本轮 delta 注入一条 `origin:'note'` 的消息，
+带一个**顶层** `{type:'file', ref:'webasset://<id>'}` part。顶层是关键：`isImagePart` 只认顶层 part，
+于是 vision 别名自动切换、`media.maxImagesPerTurn`、`degradeImages`、以及硬截断对不透明 part 的
+「要么原样要么整体换占位」保护全部免费适用，一条新不变量都不用加。三条硬规则：
+
+- **看不了图就不放。** `vision` 别名与本轮别名都不支持看图时整条路不走，如实回一句「当前没有能
+  看图的模型」，一个字节都不入库 —— 把图交给瞎模型，宽容的 provider 静默忽略、严格的直接 400
+  （`docs/08 §7.2`），两种都比一句「我看不了图」糟。
+- **截断的图不存。** 撞上 `maxResponseBytes` 被截的 JPEG 就是坏图，返回 `image_truncated`。
+- **本轮的张数照 `media.maxImagesPerTurn` 卡，到上限拒新的**（不换掉旧的：模型可能已经就前几张
+  说过话了，抽走会让它自己上一句变得没有依据）。`capImages` 只在 `openTurn` 跑，管不到轮内注入。
+
+图片有**两条通道**，各管一段，缺一条就是「这一轮看不见」或「下一轮看不见」：跨轮靠上面那条
+`webasset://` 顶层 part（读出侧 `hydrateAttachment` 换回 base64，文件丢了整体换占位文本、
+**绝不抛** —— 与 `attachment://` 同一条铁律）；**本轮**靠工具结果上骑的 `media` 字段 ——
+`ToolRegistry.#normalizeOutput` 在序列化之前把它摘走（否则几百 KB base64 自己撞 64KB 上限被截半，
+而截半的 base64 会被 provider 整个拒收），再由 `toolModelOutput` 变成多模态 tool-result。
+反过来，**持久化之前 `normalizeToolOutput` 会把 tool-result 里的图片摘成占位文本**：
+`parts_json` 里只存引用不存字节（`tool-result` 不在 `OPAQUE_PART_TYPES` 里，拿不到半截保护）。
+
+**MCP / plugin 交回的图片走完全同一条路**（`ToolRegistry.bindMedia`）：`{content:[{type:'image',
+data, mimeType}]}` 被换成 `media` + 一句文本标记。不做这一步的话浏览器类 MCP 的截图工具
+（obscura 的 `browser_screenshot`、playwright 那些）返回的就是一坨截半的 base64 当不可信文本 ——
+既看不见图又烧光输出预算。
 
 `tools.web.allowlist` / `tools.web.denylist`（域名 glob，`*.x.com` 只匹配子域、不含裸域）在 WebUI 可配。
 判据在 `net/outbound.ts` 的 `safeTarget` 里，**每一跳重定向都复验**：只挡第一跳的话，一个放行域名的

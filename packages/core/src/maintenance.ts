@@ -147,6 +147,19 @@ export class MaintenanceService {
         forget.run(row.id);
         mediaFiles += 1;
       }
+      /**
+       * `web_assets` 走同一个保留期，但**删行不留行**：`attachments` 留行是因为历史消息里那条
+       * 「[图片]」要保住 mime / 尺寸 / 已提取正文；网页图那条 `webasset://` part 自己就带着
+       * 「这张图取自哪」的文本，行没了读出侧照旧交回占位文本（`hydrateAttachment` 的
+       * `missing` 分支）。留一堆 `local_path=NULL` 的行只是让 `gcFiles` 与这里都得多绕一次。
+       */
+      const webAssets = this.db.prepare('SELECT id,local_path AS path FROM web_assets WHERE created_at<?').all(mediaCutoff) as Array<{ id: string; path: string | null }>;
+      const drop = this.db.prepare('DELETE FROM web_assets WHERE id=?');
+      for (const row of webAssets) {
+        if (row.path) { try { rmSync(row.path, { force: true }); } catch { continue; } }
+        drop.run(row.id);
+        mediaFiles += 1;
+      }
     }
     // 压缩在删除之后：已经过保留期的目录整个没了，没必要先压再删。
     const compressed = this.gzipAfterDays > 0 ? this.#gzipOldLogs(new Date(now - this.gzipAfterDays * 86_400_000).toISOString().slice(0, 10)) : 0;
@@ -239,7 +252,13 @@ export class MaintenanceService {
     // 归一化用的 base 与 walk 的 root 同源，目录整体搬走也不会对不上（docs/28 · L-OPS-06）。
     const referenced = (column: string, table: string, base = '.'): Set<string> =>
       new Set((this.db.prepare(`SELECT ${column} FROM ${table} WHERE ${column} IS NOT NULL`).pluck().all() as string[]).map((path) => resolve(base, path)));
-    const files = sweep(this.blobs.files, referenced('local_path', 'attachments'), 'attachments');
+    /**
+     * **`media.dir` 下现在有两张表在引用文件**：`attachments`（Telegram 附件）与 `web_assets`
+     * （`web_fetch` / MCP 抓回来的图）。少并一张的表现不是报错，是那张表的文件被静静当孤儿删掉
+     * —— 这个坑本仓踩过两次（docs/25 §10 删掉 76 个真实附件、docs/28 · L-OPS-06 删掉 74 份全文）。
+     */
+    const mediaRefs = new Set([...referenced('local_path', 'attachments'), ...referenced('local_path', 'web_assets')]);
+    const files = sweep(this.blobs.files, mediaRefs, 'attachments/web_assets');
     const results = sweep(this.blobs.agentResults, referenced('result_full_ref', 'agent_runs', this.blobs.agentResults ?? '.'), 'agent_runs');
     const refused = [files.refused, results.refused].filter((reason): reason is string => Boolean(reason));
     // 拒绝的理由必须交回给调用方：静静地「删了 0 个」会让运维以为目录本来就是干净的。

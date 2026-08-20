@@ -479,11 +479,18 @@ media:
 ### 7.2 图片处理
 
 - 下载后用 `sharp` 归一化：最长边 ≤ `media.maxImageEdge`（默认 1568，与主流 vision 模型的最优输入吻合），转 JPEG q85，写 `data/files/`。
+  归一化那条链在 `core` 的 `normalizeImage` 里，**与 `web_fetch` / MCP 抓回来的图共用一份** ——
+  两处各写一遍的表现是「Telegram 的图归一化了、网页的图没有」，而不归一化的代价是一张 6000×4000
+  的原图按 provider 的分块计价能顶掉半个上下文窗口。
 - 进上下文：`{ type:'file', data: <base64 或 file://>, mediaType:'image/jpeg' }`。
   **不是 `image` part**：AI SDK v7 起 `image` 已废弃，SDK 内部照样把它转成 `file` 再发给 provider，
   只是顺带对每一张图打一条 DeprecationWarning。库里的历史 `image` part 由读出侧
   （`runtime.ts` 的 `contextMessages`）就地转换 —— parts 是持久化的，不兜就得等图片滚出窗口。
 - 一轮内图片数上限 `media.maxImagesPerTurn`（默认 4），超出丢最旧并注明。
+  这一条**只在 `openTurn` 组装 delta 那一次跑**（`capImages`），管的是「用户这一轮发了几张」。
+  模型自己在一轮里 `web_fetch` 十张图它一张都拦不住，所以轮内注入那条路（`captureImage`）自己
+  再卡一次同一个上限，**到顶拒新的**而不是丢最旧的：模型可能已经就前几张说过话了，把它们抽走会让
+  它自己上一句变得没有依据，而拒绝给了它一个能读懂的下一步。
 - 若当前别名模型 `capabilities.vision=false` → `prepareStep` 切 `vision` 别名（优先级见 [04 §5.2](./04-agents-and-providers.md#52-内建别名语义)：
   vision 压过 `downgradeAfterStep` 与 `set_model`）。一个能看图的别名都没有时才降级：
   图片整体换成 `[图片：当前模型不支持看图，本轮没能查看]`，并在回复末尾追加

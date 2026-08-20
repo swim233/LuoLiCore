@@ -23,6 +23,8 @@ export * from './mcp/manager.js';
 export * from './mcp/oauth.js';
 export * from './mcp/persist.js';
 export * from './mcp/schema.js';
+export * from './media/normalize.js';
+export * from './media/web-assets.js';
 export * from './memory/store.js';
 export * from './maintenance.js';
 export * from './prompt/assembler.js';

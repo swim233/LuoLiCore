@@ -75,6 +75,31 @@ export type ExternalToolSource = 'plugin' | 'mcp' | 'custom';
  */
 const EXTERNAL_SOURCE_PRIORITY: Record<ExternalToolSource, number> = { plugin: 60, mcp: 40, custom: 30 };
 
+/**
+ * 工具输出里骑着的图片（`web_fetch` 抓回来的图、MCP 的截图）。
+ *
+ * **序列化之前就要摘出去。** 一张 base64 图有几百 KB，留在 JSON 里是双重损坏：
+ * ① 它自己撞上 `tools.maxOutputBytes`（64KB）被 `elideMiddleBytes` 从中间截半，而截半的
+ * base64 会被 provider 整个拒收；② 就算不截，它也会把模型真正要读的那几行挤出预算。
+ * 摘出来之后由 `toolModelOutput` 交给 provider 的多模态 tool-result 形状（`agent/runtime.ts`）。
+ */
+export interface ToolMedia { mediaType: string; data: string }
+/**
+ * 外部工具（MCP / plugin）交回的图片往哪去。实现是 `media/web-assets.ts` 的 `captureImage`
+ * —— 与 `web_fetch` 同一条路径，所以「存哪、怎么归一化、vision 不可用时怎么如实说」只有一份。
+ */
+export interface ToolMediaSink {
+  capture(context: ToolExecutionContext, input: { label: string; mediaType: string; body: Buffer }):
+  Promise<{ ok: true; assetId: string; mediaType: string; data: string } | { ok: false; error: string; hint: string }>;
+}
+export function splitToolMedia(output: object): { media: ToolMedia[]; rest: Record<string, unknown> } {
+  const { media, ...rest } = output as Record<string, unknown> & { media?: unknown };
+  const values = Array.isArray(media) ? media.filter((entry): entry is ToolMedia => Boolean(entry) && typeof entry === 'object'
+    && typeof (entry as ToolMedia).mediaType === 'string' && typeof (entry as ToolMedia).data === 'string') : [];
+  // 一条都不合形状时**原样交回**：`media` 有可能只是某个工具自己的普通字段。
+  return values.length ? { media: values, rest } : { media: [], rest: output as Record<string, unknown> };
+}
+
 const FALLBACK_TOOL_TIMEOUT_MS = 60_000;
 class ToolTimeout extends Error {
   constructor(readonly ms: number) { super('tool_timeout'); }
@@ -129,6 +154,40 @@ export class ToolRegistry {
     this.#overrides = overrides;
   }
 
+  /** 不绑就没有：外部工具的图片照旧走 JSON，而 `#absorbExternalMedia` 整个是 no-op。 */
+  bindMedia(sink: ToolMediaSink): void {
+    this.#media = sink;
+  }
+  #media: ToolMediaSink | null = null;
+
+  /**
+   * MCP 的图片结果 → `media` + 一句文本标记。
+   *
+   * 不做这一步的话它会照原样走进 `#normalizeOutput`：`JSON.stringify` → 撞上
+   * `tools.maxOutputBytes`（64KB）从中间截半 → `untrusted()` 包成文本。也就是一张截图变成
+   * 一坨截半的 base64 当不可信文本交给模型 —— 既看不见图，又把整个工具输出预算烧光。
+   * 浏览器类 MCP（obscura 的 `browser_screenshot`、playwright 那些）返回的正是这个形状。
+   *
+   * 失败也要如实写进结果：静静地把图丢掉的话，模型只会以为这个工具坏了然后再调一次。
+   */
+  async #absorbExternalMedia(name: string, output: object, context: ToolExecutionContext): Promise<object> {
+    const sink = this.#media;
+    const content = (output as { content?: unknown }).content;
+    if (!sink || !Array.isArray(content)) return output;
+    const absorbed: ToolMedia[] = [];
+    const rewritten: unknown[] = [];
+    for (const entry of content) {
+      const part = entry as { type?: unknown; data?: unknown; mimeType?: unknown } | null;
+      if (part?.type !== 'image' || typeof part.data !== 'string' || !part.data) { rewritten.push(entry); continue; }
+      const mediaType = typeof part.mimeType === 'string' && part.mimeType ? part.mimeType : 'image/png';
+      const captured = await sink.capture(context, { label: name, mediaType, body: Buffer.from(part.data, 'base64') });
+      if (!captured.ok) { rewritten.push({ type: 'text', text: `[图片没能放进上下文：${captured.error}]${captured.hint}` }); continue; }
+      absorbed.push({ mediaType: captured.mediaType, data: captured.data });
+      rewritten.push({ type: 'text', text: `[图片已放进本轮上下文（${captured.mediaType}），直接看即可]` });
+    }
+    return absorbed.length ? { ...output, content: rewritten, media: absorbed } : output;
+  }
+
   disabledByOperator(name: string): boolean {
     return this.#overrides()[name]?.enabled === false;
   }
@@ -167,7 +226,10 @@ export class ToolRegistry {
       policy: { minRole: input.minRole, approval: input.approval ?? 'conditional', scope: input.scope ?? 'global', source: input.source },
       sourcePriority: EXTERNAL_SOURCE_PRIORITY[input.source], untrustedOutput: true,
       ...(input.available ? { available: input.available } : {}), ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
-      execute: async (value, context) => { const output = await input.execute(value, context); return output && typeof output === 'object' ? output as object : { value: output }; } });
+      execute: async (value, context) => {
+        const output = await input.execute(value, context);
+        return await this.#absorbExternalMedia(input.name, output && typeof output === 'object' ? output as object : { value: output }, context);
+      } });
     return true;
   }
 
@@ -375,12 +437,14 @@ export class ToolRegistry {
 
   #normalizeOutput(name: string, output: object, wrap: boolean): object {
     const max = this.#limits().maxOutputBytes ?? 65_536;
-    const serialized = JSON.stringify(output);
+    const { media, rest } = splitToolMedia(output);
+    const serialized = JSON.stringify(rest);
     // 按字符边界切（docs/27 · T-04）：裸 `subarray().toString('utf8')` 会把末尾那个多字节字符
     // 切成半个，模型看到的是一串 U+FFFD。
     const { value, truncated } = elideMiddleBytes(serialized, max, (omitted) => `\n…省略 ${omitted} bytes…\n`);
-    if (!wrap && !truncated) return output;
-    return { ok: !('ok' in output) || output.ok !== false, content: wrap ? untrusted(`tool:${name}`, value) : value, truncated };
+    const carry = media.length ? { media } : {};
+    if (!wrap && !truncated) return media.length ? { ...rest, ...carry } : output;
+    return { ok: !('ok' in rest) || rest.ok !== false, content: wrap ? untrusted(`tool:${name}`, value) : value, truncated, ...carry };
   }
   #state(turnId: string): TurnToolState {
     let state = this.#turns.get(turnId);
