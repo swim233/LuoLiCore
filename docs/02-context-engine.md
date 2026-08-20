@@ -640,12 +640,19 @@ export interface CommitResult {
     读出侧 `hydrateAttachment` 才换回 base64，取不到就**整体**换成占位文本、**绝不抛**
     （parts 是持久化的，抛一次等于该会话在 `/new` 之前每轮都失败，docs/24 · R-MEDIA-01）。
 
-    带图的 tool-result（`{type:'content', value:[…, {type:'file', data}]}`，`toolModelOutput` 产出、
-    SDK 原样发给 provider 的那份）**必须在持久化之前把图摘成占位文本** ——
-    `normalizeToolOutput` 里做，读出侧同一层也过，所以库里存量一并兜住。两个理由，各自都足够：
-    每次物化重放几百 KB base64；而硬截断 `truncatePartStrings` 会走进 `output.value[].data`
-    把它切一半 —— `tool-result` **不在** `OPAQUE_PART_TYPES` 里，拿不到红线 11 那道「要么原样
-    保留、要么整体换占位」的保护，而截断结果是持久化的（与红线 15 同一条下坡路）。
+    带图的 tool-result **必须在持久化之前把图摘成占位文本** —— `normalizeToolOutput` 里做，
+    读出侧同一层也过，所以库里存量一并兜住。两个理由，各自都足够：每次物化重放几百 KB base64；
+    而硬截断 `truncatePartStrings` 会走进去把 base64 切一半 —— `tool-result` **不在**
+    `OPAQUE_PART_TYPES` 里，拿不到红线 11 那道「要么原样保留、要么整体换占位」的保护，
+    而截断结果是持久化的（与红线 15 同一条下坡路）。
+
+    **两种形状都要摘，落库走的是第二种。** ① `{type:'content', value:[…, {type:'file', data}]}`
+    是 `toolModelOutput` 产出、SDK 发给 provider 的那份；② `{type:'json', value:{…, media:[{data}]}}`
+    是**真正被写进 `parts_json` 的那份** —— AI SDK 对客户端执行的工具，把 `execute()` 的返回值
+    原样放进 `step.content[].output`（`asContent`），`toModelOutput` 只作用于发给 provider 的
+    messages。于是 `stepToolResults` 手里是带 `media` 的原始输出，`normalizeToolOutput` 给它套上
+    `{type:'json'}` 就落库了。只认第一种形状的话，摘的是一份从不落库的形状，而几百 KB base64
+    照旧每轮重放（193ba9e 起如此，实测 `parts_json` 单条 300 KB）。
 
     摘掉不丢信息：跨轮那一份由顶层 `webasset://` part 负责，工具结果只负责**当步**让模型看见。
 

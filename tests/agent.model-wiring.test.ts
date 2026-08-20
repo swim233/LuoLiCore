@@ -261,6 +261,52 @@ describe('model wiring through prepareStep', () => {
     closeDatabase(db);
   });
 
+  /**
+   * 子 agent 此前**一条 vision 判据都没有**：它常跑在 `low` 上，而它自己 `web_fetch` 回来的图骑在
+   * 工具结果上进下一步的请求体 —— 那张图于是落在一个瞎模型上（docs/08 §7.2 禁的那件事），而
+   * `degradeImageParts` 那道兜底也救不了它：`isImagePart` 只认顶层 part，认不出藏在 tool-result
+   * 里的图（docs/02 §9 红线 22）。记账要跟着切换走 —— 否则钱算到了一个没跑的模型上。
+   */
+  it('switches a sub-agent to the vision alias when a tool injected an image mid-run', async () => {
+    const { db, turn, dependencies } = harness('wiring-subvision');
+    Object.assign(turn, { mediaInjected: true });
+    const registry = registryFor({
+      main: [{ model: candidate('m1', () => ok), info: info('m1') }],
+      low: [{ model: candidate('blind', () => ok), info: info('blind') }],
+      vision: [{ model: candidate('seeing', () => ok), info: info('seeing', true) }],
+    });
+    const manager = new AgentManager(db, new AgentResultStore('./data/wiring-subvision-results'),
+      [{ name: 'researcher', description: 'r', modelAlias: 'low', maxSteps: 1, minRole: 'limited', tools: [], resultMaxChars: 100, instructions: 'r', injectMemory: false }], 3, 10);
+    const parent = manager.createMain(turn.turnId, 'trusted', 'main');
+    const { run, definition } = manager.spawn(parent, 'researcher', 'read that picture please');
+    await runSubAgent(run, definition, 'read that picture please', undefined, turn,
+      { db, agents: manager, registry, tools: dependencies.tools, ledger: dependencies.ledger, log: dependencies.log, workspace: './data',
+        provider: { maxRetries: 0, retryBaseMs: 1, retryMaxMs: 1 } });
+    const rows = db.prepare('SELECT model_id AS modelId,model_alias AS alias FROM usage_ledger').all() as Array<{ modelId: string; alias: string }>;
+    expect(rows).toEqual([{ modelId: 'seeing', alias: 'vision' }]);
+    closeDatabase(db);
+  });
+
+  it('leaves a sub-agent on its own alias when no tool injected an image', async () => {
+    const { db, turn, dependencies } = harness('wiring-subvision-none');
+    const registry = registryFor({
+      main: [{ model: candidate('m1', () => ok), info: info('m1') }],
+      low: [{ model: candidate('blind', () => ok), info: info('blind') }],
+      vision: [{ model: candidate('seeing', () => ok), info: info('seeing', true) }],
+    });
+    const manager = new AgentManager(db, new AgentResultStore('./data/wiring-subvision-none-results'),
+      [{ name: 'researcher', description: 'r', modelAlias: 'low', maxSteps: 1, minRole: 'limited', tools: [], resultMaxChars: 100, instructions: 'r', injectMemory: false }], 3, 10);
+    const parent = manager.createMain(turn.turnId, 'trusted', 'main');
+    const { run, definition } = manager.spawn(parent, 'researcher', 'just read this text');
+    await runSubAgent(run, definition, 'just read this text', undefined, turn,
+      { db, agents: manager, registry, tools: dependencies.tools, ledger: dependencies.ledger, log: dependencies.log, workspace: './data',
+        provider: { maxRetries: 0, retryBaseMs: 1, retryMaxMs: 1 } });
+    // 纯文本的子 agent 不该被顺手升到贵的那个别名上 —— vision 只在真有图的时候压过一切。
+    const rows = db.prepare('SELECT model_id AS modelId,model_alias AS alias FROM usage_ledger').all() as Array<{ modelId: string; alias: string }>;
+    expect(rows).toEqual([{ modelId: 'blind', alias: 'low' }]);
+    closeDatabase(db);
+  });
+
   it('records the real alias for a fallback candidate instead of guessing low', async () => {
     const { db, turn, dependencies } = harness('wiring-alias');
     const registry = registryFor({

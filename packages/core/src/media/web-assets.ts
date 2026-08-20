@@ -62,6 +62,22 @@ export interface WebMediaDependencies {
   log?: LogSink;
 }
 
+/**
+ * 「这张图交给谁看，就问谁的能力位」（`docs/04 §5.2`）。**主 agent 与子 agent 不是同一个模型**：
+ * 子 agent 常跑在 `low` 上，按主轮别名判等于问了一个跟这张图无关的模型，于是一张图落在一个瞎模型上
+ * （`docs/08 §7.2` 禁的那件事，而 `degradeImageParts` 救不了它 —— 图藏在 tool-result 里，
+ * `isImagePart` 认不出，`docs/02 §9` 红线 22）。
+ *
+ * 候选集合与 `runMainAgent` / `runSubAgent` 里那两次切换**一字对齐**：不一致就会出现「存下来了却
+ * 没人能看」，或者反过来「本可以看却如实说了看不了」。主轮那个别名要现算（`set_model` 能在轮内换掉
+ * 它），所以它是个闭包而不是一个值。
+ */
+export function canSeeImages(registry: { supportsVision(alias: string): boolean },
+  context: { agentKind: 'main' | 'sub'; agentAlias?: string | undefined }, mainAlias: () => string): boolean {
+  if (registry.supportsVision('vision')) return true;
+  return registry.supportsVision(context.agentKind === 'sub' ? context.agentAlias ?? '' : mainAlias());
+}
+
 /** 注入一张图的公共路径。`web_fetch` 与 MCP 的图片结果共用它 —— 两份实现就是两种行为。 */
 export async function captureImage(dependencies: WebMediaDependencies, turn: RuntimeTurnContext, input: { url: string; mediaType: string; body: Buffer; label?: string }):
 Promise<{ ok: true; assetId: string; mediaType: string; data: string; width: number; height: number } | { ok: false; error: string; hint: string }> {

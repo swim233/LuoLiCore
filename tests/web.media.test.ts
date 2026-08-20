@@ -3,8 +3,8 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import sharp from 'sharp';
 import { ArchiveRepository, OperationsRepository, closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
-import { ContextEngine, LogSink, MaintenanceService, ToolRegistry, WebAssetStore, captureImage, configSchema,
-  contextMessages, isImagePart, normalizeToolOutput, splitToolMedia, toolModelOutput } from '@luoli/core';
+import { ContextEngine, LogSink, MaintenanceService, ToolRegistry, WebAssetStore, canSeeImages, captureImage, configSchema,
+  contextMessages, isImagePart, normalizeToolOutput, splitToolMedia, toolModelOutput, toolResultPart } from '@luoli/core';
 import type { RuntimeTurnContext } from '@luoli/shared';
 
 /**
@@ -205,6 +205,60 @@ describe('工具结果里的图片：摘出去交给 provider，不写进上下�
     const plain = { type: 'json', value: { ok: true } };
     expect(normalizeToolOutput(plain)).toBe(plain);
   });
+
+  /**
+   * **落库走的是注册表交回的那一份，不是上面那个 `content` 形状。** AI SDK 对客户端执行的工具，
+   * 把 `execute()` 的返回值原样放进 `step.content[].output`（`asContent`）—— `toModelOutput` 只作用于
+   * 发给 provider 的 messages。于是 `stepToolResults` 手里是 `{ok, content, truncated, media}`，
+   * `normalizeToolOutput` 给它套上 `{type:'json'}` 就落库了。
+   *
+   * 只认 `content` 形状的话，摘的是一份**从不落库**的形状：实测 `parts_json` 单条 300 KB，而且
+   * 每次物化都重放一遍（docs/02 §9 红线 21）。所以这条用例从 `registry.execute` 出发，不手搓形状。
+   */
+  it('落库那一份是注册表的原始形状 —— 那一支也摘，parts_json 里不留字节', async () => {
+    const bench = harness('persist-media');
+    try {
+      const { z } = await import('zod');
+      const registry = new ToolRegistry(bench.log, { request: async () => true },
+        { maxRegistered: 10, maxCallsPerTurn: 10, maxConsecutiveErrors: 5, maxOutputBytes: 65_536 });
+      const data = 'A'.repeat(300_000);
+      registry.registerExternal({ name: 'shot', description: '', inputSchema: z.record(z.unknown()),
+        minRole: 'owner', source: 'plugin', execute: () => ({ ok: true, note: '看这张图', media: [{ mediaType: 'image/jpeg', data }] }) });
+      const output = await registry.execute('shot', {}, { turn: bench.turn, workspace: './data', agentKind: 'main' });
+      const part = toolResultPart('call-1', 'shot', output);   // stepToolResults 干的就是这一句
+      const persisted = JSON.stringify(part);
+      expect(persisted).not.toContain('AAAA');
+      expect(persisted.length).toBeLessThan(1000);
+      // 判别字段一个不碰（红线 14）：形状还是那个 tool-result，只是 `media` 变成一句占位文本。
+      expect(part.output.type).toBe('json');
+      expect(persisted).toContain('看这张图');
+      // 而**当步**那条通道照旧带着完整的 base64 —— 截半的 base64 会被 provider 整个拒收。
+      expect(JSON.stringify(toolModelOutput(output))).toContain(data);
+    } finally { bench.cleanup(); }
+  });
+});
+
+describe('这张图交给谁看，就问谁的能力位', () => {
+  const seeing = (aliases: Record<string, boolean>) => ({ supportsVision: (alias: string) => aliases[alias] === true });
+  /**
+   * 判据错的表现是「一张图落在一个瞎模型上」：宽容的 provider 静默忽略、严格的直接 400
+   * （docs/08 §7.2）。子 agent 常跑在 `low` 上，而这里此前问的是主轮别名 —— 一个跟这张图无关的模型。
+   */
+  it('主 agent 问本轮别名，子 agent 问它自己那个', () => {
+    const registry = seeing({ vision: false, main: true, low: false });
+    expect(canSeeImages(registry, { agentKind: 'main' }, () => 'main')).toBe(true);
+    expect(canSeeImages(registry, { agentKind: 'sub', agentAlias: 'low' }, () => 'main')).toBe(false);
+    expect(canSeeImages(registry, { agentKind: 'sub', agentAlias: 'main' }, () => 'low')).toBe(true);
+  });
+
+  it('有能看图的 vision 别名时两边都算能看 —— 两处切换都会切到它', () => {
+    expect(canSeeImages(seeing({ vision: true, low: false }), { agentKind: 'sub', agentAlias: 'low' }, () => 'low')).toBe(true);
+    expect(canSeeImages(seeing({ vision: true, low: false }), { agentKind: 'main' }, () => 'low')).toBe(true);
+  });
+
+  it('子 agent 没带别名时按看不了算 —— 存疑的一档 fail-closed', () => {
+    expect(canSeeImages(seeing({ vision: false, low: true }), { agentKind: 'sub' }, () => 'low')).toBe(false);
+  });
 });
 
 describe('gcFiles / 保留期 · 网页图不许被当孤儿删掉', () => {
@@ -224,6 +278,28 @@ describe('gcFiles / 保留期 · 网页图不许被当孤儿删掉', () => {
       expect(existsSync(row.localPath)).toBe(true);
       expect(existsSync(orphan)).toBe(false);
       expect(result.files).toBe(1);
+    } finally { bench.cleanup(); }
+  });
+
+  /**
+   * 文件名取内容哈希，所以同一张图取两次是「盘上一份、库里两行」（`docs/03 §2.4`）。见行就删文件
+   * 会把还在保留期内那行的图一起弄没 —— 表现不是报错，是那张图提前变成
+   * 「[图片已不可用：附件文件已丢失]」。所以顺序必须是先删行、再删没有任何行指着的文件。
+   */
+  it('两行共享一份字节时，过期那行不许把保留期内那行的图删掉', async () => {
+    const bench = harness('retention-shared');
+    try {
+      const image = await png();
+      const old = await bench.assets.put('chat:chat', 'https://a.example/a.png', image);
+      const fresh = await bench.assets.put('chat:chat', 'https://a.example/again.png', image);
+      expect(fresh.localPath).toBe(old.localPath);
+      bench.db.prepare('UPDATE web_assets SET created_at=? WHERE id=?').run(Date.now() - 40 * 86_400_000, old.id);
+      const maintenance = new MaintenanceService(bench.db, './data/retention-shared.test.db', 1, 0, './data/retention-shared-logs',
+        { files: bench.mediaDir }, 0, 30, { media: 30 });
+      maintenance.cleanup();
+      expect(bench.assets.path(old.id)).toBeNull();
+      expect(bench.assets.path(fresh.id)).toBe(fresh.localPath);
+      expect(existsSync(fresh.localPath)).toBe(true);
     } finally { bench.cleanup(); }
   });
 

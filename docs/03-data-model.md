@@ -205,6 +205,11 @@ CREATE INDEX ix_web_assets_created ON web_assets(created_at);
 用的引用，一行一次注入，共享的只是那份字节）。文件落在 `media.dir` 之下是刻意的 —— 跟着同一个
 目录走，`gcFiles()` 那道「库与目录来自两套部署」的 fail-closed 守卫才继续适用（`docs/25 §10`）。
 
+**一份字节被多行共享，所以过期清理不能「见行删文件」**：`local_path` 相同的两行里旧那行到期时，
+先删文件就把还在保留期内那行的图一起弄没了（表现不是报错，是那张图提前变成
+「[图片已不可用：附件文件已丢失]」）。顺序必须是**先删行、再删没有任何行指着的文件**。
+`gcFiles()` 天然没有这个问题 —— 它的 `referenced` 是并集。
+
 > **改这张表时两处必须一起改**：`MaintenanceService.gcFiles()` 的 `referenced` 集合
 > （`media.dir` 下现在有 `attachments` 与 `web_assets` **两张**表在引用文件，漏一张的表现不是
 > 报错、是那张表的文件被静默当孤儿删掉 —— 这个坑本仓踩过两次），以及 `cleanup()` 里

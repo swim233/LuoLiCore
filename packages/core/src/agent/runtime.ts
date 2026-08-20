@@ -13,6 +13,9 @@ import { escapeSystemInstructions, estimateStructureTokens, formatSpeakerIdentit
 import type { PromptAssembler, PromptDocuments } from '../index.js';
 import { runtimeBlock, type PromptBuildResult } from '../prompt/assembler.js';
 import type { RegisteredTool, ToolExecutionContext, ToolMedia, ToolRegistry } from '../tools/registry.js';
+// 摘 `media` 的那把尺子只有一份：注册表在序列化之前用它，这里在落库之前用同一个（形状判据
+// 分两份写，迟早出现「注册表认得是图、落库那侧不认得」）。registry 不 import runtime，无环。
+import { splitToolMedia } from '../tools/registry.js';
 import { SKILL_NARROWING_EXEMPT } from '../tools/policy.js';
 import type { ProviderStore } from '../provider/store.js';
 import { PROVIDER_FAILURES_TO_DOWN, recordProviderFailure, recordProviderServed } from '../provider/health.js';
@@ -311,23 +314,41 @@ export class ModelRegistry {
  */
 const PERSISTED_MEDIA_PLACEHOLDER = '[图片已另存为附件，工具结果里不重复存字节]';
 function stripToolResultMedia(output: { type: string; value: unknown }): { type: string; value: unknown } {
-  if (output.type !== 'content' || !Array.isArray(output.value)) return output;
-  let touched = false;
-  const value = output.value.map((entry) => {
-    const part = entry as { type?: unknown } | null;
-    if (part?.type !== 'file' && part?.type !== 'media') return entry;
-    touched = true;
-    return { type: 'text', text: PERSISTED_MEDIA_PLACEHOLDER };
-  });
-  // 判别字段一个不碰（docs/02 红线 14）：只换 `value` 里那几项，`type` 原样。
-  return touched ? { ...output, value } : output;
+  if (output.type === 'content' && Array.isArray(output.value)) {
+    let touched = false;
+    const value = output.value.map((entry) => {
+      const part = entry as { type?: unknown } | null;
+      if (part?.type !== 'file' && part?.type !== 'media') return entry;
+      touched = true;
+      return { type: 'text', text: PERSISTED_MEDIA_PLACEHOLDER };
+    });
+    // 判别字段一个不碰（docs/02 红线 14）：只换 `value` 里那几项，`type` 原样。
+    return touched ? { ...output, value } : output;
+  }
+  /**
+   * **落库走的是这一支。** AI SDK 对客户端执行的工具，把 `execute()` 的返回值**原样**放进
+   * `step.content[].output`（`asContent`）—— `toModelOutput` 只作用于发给 provider 的 messages。
+   * 于是 `stepToolResults` 手里是注册表那份带 `media` 的原始输出，`normalizeToolOutput` 给它套上
+   * `{type:'json'}` 就落库了。只认上面那个 `content` 形状的话，摘的是一份**从不落库**的形状，
+   * 而几百 KB base64 照旧每轮重放（实测 `parts_json` 单条 300 KB）。
+   *
+   * 摘掉不丢信息：这一份的正文（`content` 字段）里已经有工具自己那句话，图片跨轮靠的是顶层
+   * `webasset://` part。换成一句占位文本而不是删掉键 —— 模型据此知道「这里本来有张图」。
+   */
+  if (output.value && typeof output.value === 'object' && !Array.isArray(output.value)) {
+    const { media, rest } = splitToolMedia(output.value as object);
+    if (media.length) return { ...output, value: { ...rest, media: PERSISTED_MEDIA_PLACEHOLDER } };
+  }
+  return output;
 }
 export function normalizeToolOutput(output: unknown): { type: string; value: unknown } {
   if (output && typeof output === 'object' && !Array.isArray(output)) {
     const typed = output as { type?: unknown; value?: unknown };
     if (typeof typed.type === 'string' && 'value' in typed) return stripToolResultMedia(typed as { type: string; value: unknown });
   }
-  return { type: 'json', value: output ?? null };
+  // **这一支也要过一遍摘除**：注册表交回的原始输出（`{ok, content, truncated, media}`）没有 `type`
+  // 字段，走的正是这里 —— 而它就是落库那一份。漏掉它等于摘了个从不落库的形状。
+  return stripToolResultMedia({ type: 'json', value: output ?? null });
 }
 export function toolResultPart(toolCallId: string, toolName: string, output: unknown): { type: 'tool-result'; toolCallId: string; toolName: string; output: { type: string; value: unknown } } {
   return { type: 'tool-result', toolCallId, toolName, output: normalizeToolOutput(output) };

@@ -13,6 +13,15 @@ export interface ToolExecutionContext {
   workspace: string;
   agentKind: 'main' | 'sub';
   agentRunId?: string;
+  /**
+   * 这次调用背后那个 agent 用的模型别名。**只有子 agent 需要它**：主 agent 的别名由
+   * `prepareStep` 每步现算（`turn.modelAliasOverride` 等），而子 agent 的别名是
+   * `runSubAgent` 的局部变量，工具侧此前完全看不到。
+   *
+   * 图片路径按它问能力位（`docs/04 §5.2`）：问主轮别名等于问了一个跟这张图无关的模型 ——
+   * 一个跑在 `low` 上的子 agent 会因为主轮是 vision 就被塞一张它看不了的图。
+   */
+  agentAlias?: string;
   allow?: ReadonlySet<string>;
   /**
    * 这次工具调用该挂在哪个 span 之下（`docs/10 §1`）。主 agent 由 `onStepStart` 写进这一项

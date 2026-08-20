@@ -155,10 +155,24 @@ export class MaintenanceService {
        */
       const webAssets = this.db.prepare('SELECT id,local_path AS path FROM web_assets WHERE created_at<?').all(mediaCutoff) as Array<{ id: string; path: string | null }>;
       const drop = this.db.prepare('DELETE FROM web_assets WHERE id=?');
+      /**
+       * **按文件分组，而不是按行删文件。** 文件名取内容哈希，所以同一张图被取两次时两行共享同一份
+       * 字节（`docs/03 §2.4`）。见行就删文件会把**还在保留期内**那行的图一起弄没 —— 表现不是报错，
+       * 是那张图提前变成「[图片已不可用：附件文件已丢失]」。这种情况下行照删、字节留给那一行。
+       * 删不掉的文件则把行留到下次（与上面 `attachments` 同一条：宁可重试，不留孤儿）。
+       */
+      const referencedLater = this.db.prepare('SELECT 1 FROM web_assets WHERE local_path=? AND created_at>=? LIMIT 1').pluck();
+      const expiredByPath = new Map<string, string[]>();
       for (const row of webAssets) {
-        if (row.path) { try { rmSync(row.path, { force: true }); } catch { continue; } }
-        drop.run(row.id);
-        mediaFiles += 1;
+        if (!row.path) { drop.run(row.id); continue; }
+        expiredByPath.set(row.path, [...expiredByPath.get(row.path) ?? [], row.id]);
+      }
+      for (const [path, ids] of expiredByPath) {
+        if (!referencedLater.get(path, mediaCutoff)) {
+          try { rmSync(path, { force: true }); } catch { continue; }
+          mediaFiles += 1;
+        }
+        for (const id of ids) drop.run(id);
       }
     }
     // 压缩在删除之后：已经过保留期的目录整个没了，没必要先压再删。
