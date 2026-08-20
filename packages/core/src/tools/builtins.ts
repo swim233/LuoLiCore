@@ -7,7 +7,7 @@ import type { ArchiveRepository, ArchivedMessage, ScopedArchiveRepository } from
 import { archiveQuery } from '@luoli/db';
 import { citeArchivedMessages } from './cite.js';
 import { registerScheduleTools, type ScheduleToolDependencies } from './schedule.js';
-import type { Role, RuntimeTurnContext } from '@luoli/shared';
+import type { Role } from '@luoli/shared';
 import type { ToolExecutionContext } from './registry.js';
 
 /** 一次投递的落点。thread 必须跟着走，否则话题群里的追发会掉到「General」去。 */
@@ -118,8 +118,11 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
    * 抓回来的图片往哪去。**可选**：不给就走「只报类型与大小」那一档 —— 不假装读到了内容
    * （测试与不配 vision 的部署都落在这里）。`visionAvailable` 每次调用现算，因为它要看的是
    * **本轮**这个别名支不支持看图，而别名可以被 `set_model` 换掉。
+   *
+   * 收整个 `ToolExecutionContext` 而不只是 `turn`：子 agent 的别名不在 turn 上（它是
+   * `runSubAgent` 的局部变量，经 `agentAlias` 带过来），而这张图要交给的正是它（`docs/04 §5.2`）。
    */
-  webMedia?: { assets: WebAssetStore; visionAvailable: (turn: RuntimeTurnContext) => boolean } }): void {
+  webMedia?: { assets: WebAssetStore; visionAvailable: (context: ToolExecutionContext) => boolean } }): void {
   const web = dependencies.web ?? DEFAULT_WEB_RETRY;
   /**
    * 本次调用的图片落地口。**每次调用现建**：`visionAvailable` 判的是本轮**当前**别名的能力位，
@@ -131,7 +134,7 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
     const media = dependencies.webMedia;
     if (!media) return null;
     return { capture: (input) => captureImage({ assets: media.assets, appendDelta: (turn, message) => dependencies.context.appendDelta(turn, message as never),
-      visionAvailable: () => media.visionAvailable(context.turn), log: dependencies.log }, context.turn, input) };
+      visionAvailable: () => media.visionAvailable(context), log: dependencies.log }, context.turn, input) };
   };
   // 跟 `telegram` 同样是必填：漏传一个 key 就让三个工具永久消失，而
   // 「TOOL_POLICY ↔ 注册表」的启动断言只看注册没注册，一个字都不会报。

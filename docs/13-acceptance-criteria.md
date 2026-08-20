@@ -281,6 +281,9 @@
 | [x] AC-TOOL-040 (自动) ★ | 存了几张网页图之后跑一次 `gcFiles()`，目录里另放一个没人引用的文件；再把 `created_at` 推到 `media.retentionDays` 之外跑 `cleanup()` | gc 只删那个孤儿，`web_assets` 引用的一张不动（`referenced` 集合现在要并 `attachments` **与** `web_assets` 两张表 —— 漏一张的表现不是报错、是那张表的文件被静默当孤儿删掉，本仓踩过两次）；保留期到了文件与行一起删，读出侧照旧交回占位文本而不是抛 | 〔web.media.test.ts〕
 | [x] AC-TOOL-041 (自动) | 一个外部工具（MCP / plugin）返回 `{content:[{type:'image', data, mimeType}]}`；`tool-result` 里带图的那份准备落库 | 图片走与 `web_fetch` 完全同一条落地路径（`ToolRegistry.bindMedia`），JSON 里换成一句文本标记；落库之前 `normalizeToolOutput` 把 tool-result 里的图片摘成占位文本，判别字段一个不碰。不做这两步：浏览器类 MCP 的截图变成一坨截半 base64 当不可信文本，而落库那份会被硬截断切半且**结果是持久化的**（docs/02 §9 红线 21） | 〔web.media.test.ts〕
 | [x] AC-TOOL-042 (自动) | 一轮里连续 `web_fetch` 超过 `media.maxImagesPerTurn` 张图 | 到上限**拒新的**并交回 `image_limit_reached`，已经进去的那几张原样留着。`capImages` 只在 `openTurn` 跑（管「用户这一轮发了几张」），模型自己在一轮里取十张它一张都拦不住；而丢最旧会让模型已经就前几张说过的话失去依据 | 〔web.media.test.ts〕
+| [x] AC-TOOL-043 (自动) ★ | 一个外部工具交回 `media:[{mediaType,data}]`，把 `registry.execute` 交回的**那一份**（不是手搓的 `{type:'content'}`）送进 `toolResultPart` | 落库那条 tool-result 里一个 base64 字节都没有（`media` 换成占位文本、判别字段不动），而 `toolModelOutput` 那条当步通道照旧带着完整 base64。**落库走的是 `{type:'json', value:{…, media}}`** —— AI SDK 对客户端执行的工具把 `execute()` 的返回值原样放进 `step.content[].output`（`asContent`），`toModelOutput` 只作用于发给 provider 的 messages；只认 `content` 形状等于摘了一份从不落库的形状，实测 `parts_json` 单条 300 KB 且每轮重放（docs/02 §9 红线 21） | 〔web.media.test.ts〕
+| [x] AC-TOOL-044 (自动) ★ | 同一张图在一个会话里取两次（盘上一份、库里两行），只把旧那行推到 `media.retentionDays` 之外跑 `cleanup()` | 旧行删掉、**新行的文件还在**。文件名取内容哈希所以两行共享一份字节：见行就删文件会让保留期内那张图提前变成「[图片已不可用]」，顺序必须是先删行、再删没有任何行指着的文件（docs/03 §2.4） | 〔web.media.test.ts〕
+| [x] AC-TOOL-045 (自动) ★ | 分别按主 agent 与子 agent 的上下文问「这张图能不能放进上下文」：有 / 没有 `vision` 别名、子 agent 别名能 / 不能看图、子 agent 没带别名 | 主 agent 问本轮别名（`set_model` 覆盖 → 会话固定 → 配置默认），子 agent 问**它自己那个**（`ToolExecutionContext.agentAlias`），没带别名时按看不了算。判据与 `runMainAgent` / `runSubAgent` 里那两次切换同一个集合 —— 不一致就是「存下来了却没人能看」或者反过来（docs/04 §5.2） | 〔web.media.test.ts〕
 | [ ] AC-APV-008 (自动) ★ | trusted 用户触发一个需审批的工具，然后无人裁决直到 `ttlMs` 到期 | 调用**挂起等待**而不是当场伪拒绝：先写一行 `state=pending` 并广播 `approval.pending`；到期后原子改成 `state=expired, decided_by=system`，工具返回 `ok:false, error:'未获批准'` 且 hint 说的是「审批已超时」而不是「管理员已拒绝」。轮次在等待中被取消时落 `state=denied, decided_by=system` 并给「轮次已取消」的 hint —— 三条路径都 fail-closed，工具一次都不执行（docs/21 · G-API-12） |
 | [ ] AC-APV-010 (自动) ★ | 命中规则后 owner 在 WebUI 点 `[批准执行]` | `decide` 用 `UPDATE … WHERE state='pending' AND expires_at>?` 抢裁决权，只有真改到一行才唤醒等待者；**批准之后原工具调用才继续执行**，落 `state=approved, decided_by=owner, decision_channel=webui`。对已裁决/已过期的行重复裁决返回 `changed:false`，不重复唤醒 |
 | [ ] AC-APV-011 (自动) | `rememberWithinTurn=true` 时同轮重试一个刚过期的调用 | 复用上次结论不再挂第二个 `ttlMs`，但 hint 仍是「审批已超时」—— 只记布尔会让模型把超时说成「管理员已拒绝」 |
@@ -307,6 +310,7 @@
 | [ ] AC-SUB-014 (自动) ★ | 一轮里派发子 agent 并让它跑若干步 | `quota_counters.cost_usd` 的增量等于 `usage_ledger` 里该 turn 的总和；单轮成本闸门读 `ledger.turnCost`，子 agent 的花费也受 `quota.perTurn.maxCostUsd` 约束（docs/20 · W-QUOTA-01） |
 | [x] AC-SUB-016 (自动) | `agents/researcher.md` 写好 frontmatter + 正文 | 扫出来的定义缺省值与 `agent.agents` 那套一致（model=low / max-steps=8 / min-role=limited）；正文即 instructions；`agent.agents` 里的同名定义覆盖它，只在文件里的照常保留（docs/14 §2 Q5-a） | 〔regression.round10.test.ts〕
 | [x] AC-SUB-017 (自动) | 目录里放一个 name 与文件名不符的 .md、一个正文为空的 .md | 两个都进 `errors` 并各记一条 `agent.file_invalid`，**其余定义照常加载**（一个写错不该让整批消失，也不中止启动）；目录不存在时是空结果而不是异常 | 〔regression.round10.test.ts〕
+| [x] AC-SUB-018 (自动) ★ | 一个别名为 `low`（看不了图）的子 agent，轮内有工具注入过图片（`turn.mediaInjected`）；再跑一次纯文本的 | 前者当步切到 `vision` 别名，且 `usage_ledger` 记的是**实际用的**那个（切了却按定义里那个记，钱就算到没跑的模型上）；后者原样留在 `low`，不被顺手升到贵的别名。子 agent 此前一条 vision 判据都没有 —— 它自己 `web_fetch` 回来的图骑在工具结果上进下一步的请求体，那张图直接落在瞎模型上，而 `degradeImageParts` 也救不了它（`isImagePart` 认不出藏在 tool-result 里的图，docs/02 §9 红线 22） | 〔agent.model-wiring.test.ts〕
 | [ ] AC-TASK-001 | 触发一个 >4s 的任务 | 出现占位消息「⏳ 已接收…」+ 取消按钮 |
 | [ ] AC-TASK-002 | 日常聊天（<4s） | **不出现**占位消息 |
 | [ ] AC-TASK-003 | 子 agent 多次 `report_progress` | 占位消息按 3s 节流更新，内容为最新进度 |
@@ -585,14 +589,14 @@
 | **上下文引擎** | | 31 / 40 | | | |
 | Telegram 与准入 | | 22 / 46 | | | |
 | Agent 与 Provider | | 23 / 43 | | | |
-| 工具/沙箱/审批 | | 37 / 79 | | | |
-| Subagent 与任务 | | 20 / 38 | | | |
+| 工具/沙箱/审批 | | 40 / 82 | | | |
+| Subagent 与任务 | | 21 / 39 | | | |
 | 记忆 | | 1 / 13 | | | |
 | 日志与成本 | | 8 / 28 | | | |
 | 扩展生态 | | 29 / 53 | | | |
 | WebUI | | 11 / 85 | | | |
 | 安全 | | 9 / 25 | | | |
 | 运维 | | 2 / 10 | | | |
-| **合计** | | **208 / 485** | | | |
+| **合计** | | **212 / 489** | | | |
 
 **整体通过条件**：全部 ★ 项通过 + 非 ★ 项通过率 ≥ 95% + 所有豁免项经需求方书面确认。

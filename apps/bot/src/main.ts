@@ -4,7 +4,7 @@ import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { serve } from '@hono/node-server';
 import { ArchiveRepository, CustomToolRepository, OperationsRepository, PrincipalRepository, McpAuthRepository, SandboxContainerRepository, ScheduleRepository, TurnRepository, acquireInstanceLock, closeDatabase, migrateDatabase, modelAliasKey, openDatabase, readAppKv, readPersistedConfig, recomputeMessageTokens, recoverAfterCrash, writeAppKv } from '@luoli/db';
-import { AgentManager, AgentResultStore, AlertDispatcher, BUNDLED_SKILLS, ConfigStore, ContainerManager, CustomToolManager, mergeAgentDefinitions, scanAgentFiles, ContextEngine, DatabaseApprovalBroker, EventBus, FileTools, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, ModelRegistry, PathJail, PendingAuthorizations, PluginManager, selfAuthoringDenyGlobs, PromptAssembler, PromptDocuments, ProviderStore, PROVIDER_FAILURES_TO_DOWN, PROVIDER_PROBE_TIMEOUT_MS, QuotaGuard, repairAgentResultRefs, repairLedgerCacheCost, runProviderHealthCheck, Sandbox, ScheduledJobRunner, Scheduler, Secrets, SkillLoader, STABLE_PROMPT_BLOCKS, TOOL_POLICY, ToolRegistry, TurnConcurrency, TurnFailureStreak, TurnRegistry, UsageLedger, WebAssetStore, assembleMainPrompt, captureImage, configJsonSchema, loadConfig, perChatConfig, registerAuthoringTools, registerBuiltins, registerContainerTools, rejectedWakewords, runMainAgent, runSubAgent, streamMainAgent, type ContainerEvent, type SubAgentRuntimeEvent } from '@luoli/core';
+import { AgentManager, AgentResultStore, AlertDispatcher, BUNDLED_SKILLS, ConfigStore, ContainerManager, CustomToolManager, mergeAgentDefinitions, scanAgentFiles, ContextEngine, DatabaseApprovalBroker, EventBus, FileTools, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, ModelRegistry, PathJail, PendingAuthorizations, PluginManager, selfAuthoringDenyGlobs, PromptAssembler, PromptDocuments, ProviderStore, PROVIDER_FAILURES_TO_DOWN, PROVIDER_PROBE_TIMEOUT_MS, QuotaGuard, repairAgentResultRefs, repairLedgerCacheCost, runProviderHealthCheck, Sandbox, ScheduledJobRunner, Scheduler, Secrets, SkillLoader, STABLE_PROMPT_BLOCKS, TOOL_POLICY, ToolRegistry, TurnConcurrency, TurnFailureStreak, TurnRegistry, UsageLedger, WebAssetStore, assembleMainPrompt, canSeeImages, captureImage, configJsonSchema, loadConfig, perChatConfig, registerAuthoringTools, registerBuiltins, registerContainerTools, rejectedWakewords, runMainAgent, runSubAgent, streamMainAgent, type ContainerEvent, type SubAgentRuntimeEvent } from '@luoli/core';
 import { createServer, EventStreamRegistry, issueLoginToken, setupToken, type PromptPreviewResult } from '@luoli/server';
 import type { RuntimeTurnContext } from '@luoli/shared';
 import { TelegramTools, UpdatePoller, createTelegramBot } from '@luoli/telegram';
@@ -241,13 +241,18 @@ const toolRegistry = new ToolRegistry(log, approval,
   () => { const live = configStore.snapshot(); return { maxRegistered: live.tools.maxRegistered, maxCallsPerTurn: live.tools.maxCallsPerTurn, maxConsecutiveErrors: live.tools.maxConsecutiveErrors, maxOutputBytes: live.tools.exec.maxOutputBytes, defaultTimeoutMs: live.tools.defaultTimeoutMs }; },
   () => configStore.snapshot().approval.rules, plugins, turns);
 toolRegistry.bindOverrides(() => configStore.snapshot().tools.overrides);
+// 判据本身在 core（`canSeeImages`，与两处 vision 切换一字对齐）；这里只补它问不到的那一半：
+// 主轮此刻用的是哪个别名 —— `set_model` 的当轮覆盖、会话固定别名、配置默认值，按这个顺序。
+const imageAudience = (toolContext: { agentKind: 'main' | 'sub'; agentAlias?: string; turn: RuntimeTurnContext }): boolean =>
+  canSeeImages(modelRegistry, toolContext, () => toolContext.turn.modelAliasOverride
+    ?? readAppKv<string>(db, modelAliasKey(toolContext.turn.key))
+    ?? perChatConfig(configStore.snapshot(), toolContext.turn.key).agent.main.modelAlias);
 // MCP / plugin 交回的图片走与 `web_fetch` 完全同一条路（存 `web_assets` → 注入 `webasset://`
 // 顶层 part → 骑工具结果给本步）。不绑的话浏览器类 MCP 的 `browser_screenshot` 会被
 // `#normalizeOutput` 截成半截 base64 当不可信文本交给模型 —— 既看不见图又烧光输出预算。
 toolRegistry.bindMedia({ capture: (toolContext, input) => captureImage({ assets: webAssets,
   appendDelta: (turn, message) => context.appendDelta(turn, message as never),
-  visionAvailable: () => modelRegistry.supportsVision('vision')
-    || modelRegistry.supportsVision(toolContext.turn.modelAliasOverride ?? readAppKv<string>(db, modelAliasKey(toolContext.turn.key)) ?? perChatConfig(configStore.snapshot(), toolContext.turn.key).agent.main.modelAlias),
+  visionAvailable: () => imageAudience(toolContext),
   log }, toolContext.turn, { url: input.label, mediaType: input.mediaType, body: input.body, label: `MCP 工具 ${input.label}` }) });
 // 吃 getter 而不是启动快照：sandbox.mode 是「出事时运维会去点的那个开关」，冻住它等于
 // 界面说改成功了、bash 照跑（docs/20 · W-CFG-02）。
@@ -351,12 +356,10 @@ registerBuiltins(toolRegistry, {
   maxWebBytes: config.tools.web.maxResponseBytes, maxAsksPerRun: config.agent.maxAsksPerRun,
   web: { timeoutMs: config.tools.web.timeoutMs, retries: config.tools.web.retries },
   webSearch: { provider: config.tools.web.searchProvider, apiKey: config.tools.web.searchApiKey },
-  // 抓回来的图片进上下文。`visionAvailable` 的判据与 `runMainAgent` 里那条**必须一致**：
-  // 一边说能看、另一边把图换成占位文本，模型就会收到「图已放进上下文」加一句「当前模型不看图」。
-  // 别名按轮现算（`set_model` 能在轮内换掉它），所以这里是个函数而不是快照。
-  webMedia: { assets: webAssets,
-    visionAvailable: (turn) => modelRegistry.supportsVision('vision')
-      || modelRegistry.supportsVision(turn.modelAliasOverride ?? readAppKv<string>(db, modelAliasKey(turn.key)) ?? perChatConfig(configStore.snapshot(), turn.key).agent.main.modelAlias) },
+  // 抓回来的图片进上下文。`visionAvailable` 的判据与 `runMainAgent` / `runSubAgent` 里那两次切换
+  // **必须一致**：一边说能看、另一边把图换成占位文本，模型就会收到「图已放进上下文」加一句
+  // 「当前模型不看图」。别名按次现算（`set_model` 能在轮内换掉它），所以这里是个函数而不是快照。
+  webMedia: { assets: webAssets, visionAvailable: imageAudience },
   telegram: telegramTools,
   // 没有投递通道时这三个工具整体不进目录：排一个到点发不出去的任务是纯粹的假承诺。
   schedule: { jobs: scheduledJobs, runner: scheduleRunner, deliverable: () => telegramTools !== null },

@@ -2,8 +2,8 @@ import { closeSync, mkdirSync, openSync, readFileSync, readSync, rmSync, writeFi
 import { extname, join } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { ulid } from 'ulid';
-import sharp from 'sharp';
 import type { Api } from 'grammy';
+import { normalizeImage } from '@luoli/core';
 import type { Config, LogSink } from '@luoli/core';
 import type { ArchivedMessage, Sqlite } from '@luoli/db';
 import { untrusted } from '@luoli/shared';
@@ -126,7 +126,9 @@ export class TelegramMedia {
       let localPath = path;
       if (this.#asImage(file)) {
         localPath = join(directory, `${file.uniqueId}.jpg`);
-        await sharp(path).rotate().resize({ width: this.config.maxImageEdge, height: this.config.maxImageEdge, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 85 }).toFile(localPath);
+        // 归一化只有一份（`@luoli/core` 的 `normalizeImage`）：这里与 `web_fetch` / MCP 抓回来的图
+        // 各写一遍 sharp 链的话，「Telegram 的图归一化了、网页的图没有」是必然会出现的第二种形状。
+        await normalizeImage(path, localPath, this.config.maxImageEdge);
         rmSync(path, { force: true });
       }
       // 提取失败**不算**下载失败：文件已经在盘上了，记成 failed 会让 local_path 变成 NULL、
