@@ -2,11 +2,17 @@
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "noEmit": false,
+    // 默认是「报错照样 emit」，而 `pnpm build` 的 && 断在 tsc 上让 postbuild 不跑 —— 磁盘上留下
+    // 新 dist/ + 旧 packages/*/dist/ 的混龄产物，`pnpm start` 不报错、安静地跑一半新一半旧。
+    "noEmitOnError": true,
     "outDir": "dist",
     "rootDir": ".",
     "allowImportingTsExtensions": false,
     "declaration": true,
     "sourceMap": true
   },
-  "exclude": ["packages/webui/**", "**/*.test.ts", "tests/**"]
+  // scripts/copy/runtime/** 是只在 dev server 上注入的文案校样面板（docs/copy/README.md）：它 import
+  // 一个 .vue，而 *.vue 垫片在被排掉的 packages/webui/src/env.d.ts 里。排掉它而不是补垫片 —— 那面板
+  // 刻意有两道闩不进 release（plugin 带 apply:'serve'、COPY_EDIT 才装），产物里也不该有它的编译结果。
+  "exclude": ["packages/webui/**", "scripts/copy/runtime/**", "**/*.test.ts", "tests/**"]
 }
