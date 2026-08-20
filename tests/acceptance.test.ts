@@ -106,4 +106,26 @@ describe('docs/13 的勾选是可核对的', () => {
     }
     expect(problems, problems.join('\n')).toEqual([]);
   });
+
+  it('docs/00 与 CLAUDE.md 引用的条数与文档里数出来的一致', () => {
+    // 同一个数字抄在三处，而此前只有签署表被断言焊住 —— 于是加了 10 条的那一轮改了表、
+    // 另外两处没人管，三处各说各话（表 199/476、docs/00 189/466、CLAUDE.md 466）。
+    // docs/00 是「现在还欠什么」的唯一入口，它写着的数字比签署表更常被人当真。
+    const all = rows();
+    const total = all.length;
+    const checked = all.filter((row) => row.checked).length;
+    const problems: string[] = [];
+    const cite = (file: string, pattern: RegExp, expected: number[], label: string) => {
+      const found = pattern.exec(readFileSync(file, 'utf8'));
+      if (!found) { problems.push(`${file} 里找不到${label}那句（正则：${pattern.source}）`); return; }
+      const actual = expected.map((_, index) => Number(found[index + 1]));
+      if (actual.some((value, index) => value !== expected[index])) {
+        problems.push(`${file} 的${label}写 ${actual.join(' / ')}，实际数出来 ${expected.join(' / ')}`);
+      }
+    };
+    cite('docs/00-state.md', /当前 \*\*(\d+) *\/ *(\d+)\*\*/, [checked, total], '勾选状态');
+    cite('docs/00-state.md', /验收条目 (\d+) 条未勾/, [total - checked], '未勾条数');
+    cite('CLAUDE.md', /是 (\d+) 条可逐条勾选/, [total], '总条数');
+    expect(problems, problems.join('\n')).toEqual([]);
+  });
 });

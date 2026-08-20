@@ -1,10 +1,9 @@
-import { ToolLoopAgent, stepCountIs, tool } from 'ai';
-import type { ToolSet } from 'ai';
+import { ToolLoopAgent, stepCountIs } from 'ai';
 import { ulid } from 'ulid';
 import type { Sqlite } from '@luoli/db';
 import type { RuntimeTurnContext } from '@luoli/shared';
 import type { AgentDefinition, AgentManager, AgentRun } from './manager.js';
-import { type ModelRegistry, aliasModel } from './runtime.js';
+import { type ModelRegistry, aliasModel, toolSetFor } from './runtime.js';
 import { PROVIDER_FAILURES_TO_DOWN } from '../provider/health.js';
 import { SUBAGENT_KERNEL } from '../prompt/assembler.js';
 import type { QuotaGuard, QuotaReservation } from '../ledger/quota.js';
@@ -76,10 +75,9 @@ export async function runSubAgent(run: AgentRun, definition: AgentDefinition, ta
     chatId: turn.chatId, userId: turn.initiatorUserId, key: turn.key, data: { runId: run.id, name: definition.name, depth: run.depth, alias } });
   // 内部的工具调用挂在 `agent.run` 之下（`docs/10 §1` 里 `tool.call span G parent=E`）。
   const toolContext: ToolExecutionContext = { turn, workspace: dependencies.workspace, agentKind: 'sub', agentRunId: run.id, allow, parentSpanId: runSpan.id };
-  const toolSet: ToolSet = {};
-  for (const registered of dependencies.tools.active(run.effectiveRole, toolContext, definition.tools)) {
-    toolSet[registered.name] = tool({ description: registered.description, inputSchema: registered.inputSchema, execute: (input) => dependencies.tools.execute(registered.name, input, toolContext) });
-  }
+  // 与主 agent 共用 `toolSetFor`：`toModelOutput`（带图的工具结果）这类钩子加漏一处的表现是
+  // 「主 agent 能看图、子 agent 不能」，而且要真跑一次带图的子 agent 才看得见。
+  const toolSet = toolSetFor(dependencies.tools, dependencies.tools.active(run.effectiveRole, toolContext, definition.tools), toolContext);
   const perTurn = (turn.config as { quota: { perTurn: { maxSteps: number; maxCostUsd: number } } }).quota.perTurn;
   const maxSteps = Math.min(definition.maxSteps, perTurn.maxSteps);
   let stepNumber = 0;

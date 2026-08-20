@@ -1,7 +1,7 @@
 import { lookup } from 'node:dns/promises';
 import { createServer, type Server } from 'node:http';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { guardedFetch, searchRequest, searchResults, webFetch, withWebRetries } from '@luoli/core';
+import { classifyResponse, guardedFetch, searchRequest, searchResults, webFetch, withWebRetries } from '@luoli/core';
 
 describe('web fetch SSRF guard', () => {
   it('rejects private, reserved, tunneled, and non-HTTP ports before fetching', async () => {
@@ -60,6 +60,48 @@ describe('guarded fetch deadline', () => {
     const started = Date.now();
     await expect(guardedFetch(`http://localhost:${port}/`, {}, { allowPrivate: true, maxBytes: 1024, timeoutMs: 300 })).rejects.toThrow();
     expect(Date.now() - started).toBeLessThan(5000);
+  });
+});
+
+/**
+ * `webFetch` 此前对**任何**响应都是 `body.toString('utf8')`。对 `image/png` 之类那是最多 2MB
+ * 乱码，再被 `tools.maxOutputBytes`（64KB）截断塞进上下文 —— 比「取不到」更糟：整个工具输出
+ * 预算烧在噪声上，而模型还以为自己读到了页面。
+ *
+ * 分档抽成纯函数才穷举得起来：`webFetch` 自己写死 `allowPrivate: false`，放行路径在测试里跑不到。
+ */
+describe('web_fetch 按 content-type 分档，二进制不许当文本倒出来', () => {
+  const png = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex');
+  it('image/* 与常见二进制走各自那一档', () => {
+    expect(classifyResponse('image/png', png)).toBe('image');
+    expect(classifyResponse('image/jpeg; charset=binary', png)).toBe('image');
+    expect(classifyResponse('application/pdf', Buffer.from('%PDF-1.7\n'))).toBe('binary');
+    expect(classifyResponse('application/octet-stream', png)).toBe('binary');
+    expect(classifyResponse('application/zip', png)).toBe('binary');
+  });
+
+  it('文本类照旧当文本，`+json` / `+xml` 后缀族一起收', () => {
+    expect(classifyResponse('text/plain', Buffer.from('hi'))).toBe('text');
+    expect(classifyResponse('application/json', Buffer.from('{"a":1}'))).toBe('text');
+    expect(classifyResponse('application/ld+json', Buffer.from('{}'))).toBe('text');
+    expect(classifyResponse('application/atom+xml', Buffer.from('<feed/>'))).toBe('text');
+    expect(classifyResponse('text/html; charset=utf-8', Buffer.from('<html>'))).toBe('html');
+    expect(classifyResponse('application/xhtml+xml', Buffer.from('<html>'))).toBe('html');
+  });
+
+  it('content-type 一个字都没说时才去看字节 —— NUL 与替换字符是二进制的凭据', () => {
+    expect(classifyResponse('', Buffer.from('<!doctype html><html>'))).toBe('html');
+    expect(classifyResponse('', Buffer.from('just words'))).toBe('text');
+    expect(classifyResponse('', png)).toBe('binary');
+    // 没有 NUL 但满是非法 UTF-8 的字节（JPEG 尾段那种）同样不该当文本。
+    expect(classifyResponse('', Buffer.from(Array.from({ length: 512 }, () => 0xff)))).toBe('binary');
+    // 空响应不是二进制：一个 200 空正文该按文本档交回去，而不是「不许读」。
+    expect(classifyResponse('', Buffer.alloc(0))).toBe('text');
+  });
+
+  it('content-type 撒谎时最坏也只是降到 text 档，仍然可读', () => {
+    // 把 HTML 标成 text/plain 的站点不少 —— 抽取层没跑，但正文原样交出去了，不是乱码。
+    expect(classifyResponse('text/plain', Buffer.from('<html><body>x</body></html>'))).toBe('text');
   });
 });
 

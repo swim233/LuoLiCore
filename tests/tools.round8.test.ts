@@ -3,7 +3,7 @@ import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { ArchiveRepository, closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
-import { FileTools, PathJail, SKILL_NARROWING_EXEMPT, Sandbox, SkillLoader, ToolRegistry, citeArchivedMessages, htmlToText } from '@luoli/core';
+import { FileTools, PathJail, SKILL_NARROWING_EXEMPT, Sandbox, SkillLoader, ToolRegistry, citeArchivedMessages, extractHtml } from '@luoli/core';
 import type { ApprovalBroker, LogSink } from '@luoli/core';
 import type { RuntimeTurnContext } from '@luoli/shared';
 
@@ -205,9 +205,9 @@ describe('R8-SKILL-01 · skill 的 allowed-tools 收窄不到核心工具集', (
 
 describe('R8-WEB-01 · web_fetch 抓回来的 HTML 要抽成正文', () => {
   it('剥掉 script / style / 注释，块级标签换行，实体解码', () => {
-    const extracted = htmlToText(`<!doctype html><html><head><title>t</title><style>a{color:red}</style></head>
+    const extracted = extractHtml(`<!doctype html><html><head><title>t</title><style>a{color:red}</style></head>
       <body><script>var x = "<p>not text</p>";</script><!-- 注释 --><h1>标题</h1><p>第一段 &amp; 实体</p>
-      <ul><li>甲</li><li>乙</li></ul><div>末尾</div></body></html>`);
+      <ul><li>甲</li><li>乙</li></ul><div>末尾</div></body></html>`).text;
     expect(extracted).not.toContain('color:red');
     expect(extracted).not.toContain('var x');
     expect(extracted).not.toContain('注释');
@@ -221,10 +221,80 @@ describe('R8-WEB-01 · web_fetch 抓回来的 HTML 要抽成正文', () => {
   it('一堆开标签而没有闭标签时仍是线性的，不回溯', () => {
     // 正则版（`<script[^>]*>[\s\S]*?</script>`）在这个形状上是 O(n²)：25 万个起点各扫到结尾。
     // 与 docs/24 · R-SEC-01（grep 换 RE2）同一条教训 —— 接受任意输入就必须有线性上界。
+    // **属性解析加进来之后这条尤其要绿**：`attribute` 只许在已被 `>` 界定的那一个标签里扫。
     const started = performance.now();
-    expect(htmlToText(`${'<script>'.repeat(80_000)}tail`)).toBe('');
-    expect(htmlToText(`${'<div><p><span>'.repeat(60_000)}tail`)).toContain('tail');
+    expect(extractHtml(`${'<script>'.repeat(80_000)}tail`).text).toBe('');
+    expect(extractHtml(`${'<div><p><span>'.repeat(60_000)}tail`).text).toContain('tail');
+    // 一万个带属性的链接：属性解析是逐标签的，总代价仍与输入线性相关。
+    expect(extractHtml(`${'<a href="/x?a=1&b=2" data-href="trap">锚</a>'.repeat(10_000)}`).text).toContain('锚');
     expect(performance.now() - started).toBeLessThan(2000);
+  });
+});
+
+/**
+ * 抽成纯文本之后还剩三处在丢东西 —— 模型看不见页面上明明有的标题、链接地址与图片。
+ * 这三条各自是「取回来了但读不到」的一个分支，见 `tools/web.ts · extractHtml` 的注释。
+ */
+describe('web_fetch 抽取层：标题 / 链接 / 图片不能再丢', () => {
+  it('`<title>` 要留下来 —— head 整棵被丢，标题此前永远到不了模型', () => {
+    const page = extractHtml('<html><head><meta name="x" content="y"><title>洛璃 &amp; 核心</title><script>var a=1</script></head><body><p>正文</p></body></html>');
+    expect(page.title).toBe('洛璃 & 核心');
+    // head 里其余的东西照旧是噪声，不许跟着标题一起进来。
+    expect(page.text).not.toContain('var a');
+    expect(page.text).not.toContain('content="y"');
+    expect(page.text).toContain('正文');
+    // 标题只走 title 字段，不重复塞进正文。
+    expect(page.text).not.toContain('洛璃');
+  });
+
+  it('没有 title 时是 null，不是空串 —— 「没有标题」和「标题是空的」对模型是两回事', () => {
+    expect(extractHtml('<html><body><p>只有正文</p></body></html>').title).toBeNull();
+    expect(extractHtml('<html><head><title>   </title></head><body>x</body></html>').title).toBeNull();
+  });
+
+  it('`<a href>` 按 baseUrl 解析成绝对地址：相对路径对模型等于没给', () => {
+    const page = extractHtml('<p>见 <a href="/docs/a.html">这一页</a> 与 <a href="https://b.example/x">那一页</a></p>', 'https://a.example/blog/index.html');
+    expect(page.text).toContain('[这一页](https://a.example/docs/a.html)');
+    expect(page.text).toContain('[那一页](https://b.example/x)');
+    expect(page.links).toBe(2);
+  });
+
+  it('锚点、javascript:、data: 不算链接；data URI 能有几十 KB，够把输出预算吃光', () => {
+    const page = extractHtml('<a href="#top">回顶部</a><a href="javascript:void(0)">假链接</a><a href="data:text/html;base64,AAAA">内联</a>', 'https://a.example/');
+    expect(page.links).toBe(0);
+    expect(page.text).not.toContain('(');
+    // 锚文本本身照旧要留：它是页面上真实存在的字。
+    expect(page.text).toContain('回顶部');
+    expect(page.text).toContain('假链接');
+  });
+
+  it('`data-href` 不许命中 `href` —— 属性名前面必须是空白', () => {
+    const page = extractHtml('<a data-href="/trap">文字</a>', 'https://a.example/');
+    expect(page.links).toBe(0);
+    expect(page.text).not.toContain('trap');
+  });
+
+  it('`<img>` 交出 alt 与 src；懒加载站点的 data-src 也认', () => {
+    const page = extractHtml('<img src="/a.png" alt="一只猫"><img data-src="/b.png" alt="占位"><img alt="没有地址">', 'https://a.example/p/');
+    expect(page.text).toContain('![一只猫](https://a.example/a.png)');
+    expect(page.text).toContain('![占位](https://a.example/b.png)');
+    // 没有可用地址时至少把 alt 留下：模型得知道「这里有张图」才可能决定要不要再取一次。
+    expect(page.text).toContain('[图：没有地址]');
+  });
+
+  it('属性值的三种写法都认，未闭合的 `<a>` 也要补上右括号', () => {
+    expect(extractHtml(`<a href='/single'>甲</a>`, 'https://a.example/').text).toContain('[甲](https://a.example/single)');
+    expect(extractHtml('<a href=/bare>乙</a>', 'https://a.example/').text).toContain('[乙](https://a.example/bare)');
+    // 开了 `[` 却没闭合等于交一个坏掉的 markdown。
+    expect(extractHtml('<a href="/x">丙', 'https://a.example/').text).toBe('[丙](https://a.example/x)');
+  });
+
+  it('撞上链接上限之后只留锚文本，并把省掉的条数交出去', () => {
+    const page = extractHtml(`${'<a href="/x">锚</a>'.repeat(500)}`, 'https://a.example/');
+    expect(page.links).toBe(200);
+    expect(page.linksOmitted).toBe(300);
+    // 到顶之后不许再开括号：`[` 开了没地址填就是坏 markdown。
+    expect([...page.text].filter((char) => char === '[')).toHaveLength(200);
   });
 });
 

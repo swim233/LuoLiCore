@@ -405,6 +405,51 @@ object/array/string/number/integer/boolean/enum/required/default/nullable；遇�
 - MCP 定位为「用户可选的第三方能力接入」，默认 `minRole=trusted`、默认全部 `enabled=0`。
 - MCP 工具名冲突：加 `mcp__<server>__` 前缀天然隔离；同 server 内重名由上游负责。
 
+### 4.4.1 浏览器类 MCP（JS 渲染 / 反爬 / 截图）
+
+`web_fetch` 是一条 HTTP 请求：不跑 JS（SPA 只能取到空壳）、UA 是 `LuoLiCore/0.1`（不少站点直接
+403）。要补上这一段的话，形态是**接一台浏览器 MCP**，而不是把渲染引擎接进 `web_fetch`。
+[obscura](https://github.com/h4ckf0r0day/obscura)（Rust，Apache-2.0，自带 `obscura mcp`）是一个候选：
+
+```yaml
+mcp:
+  enabled: true
+  servers:
+    - name: obscura
+      transport: stdio
+      command: obscura
+      args: [mcp]
+      minRole: owner        # ← 不要下调，理由见下
+      enabled: false        # ← 默认关，运维自己开
+```
+
+> ⚠️ **它不受 `tools.web.allowlist` / `tools.web.denylist` 约束，也不走 `guardedFetch`。**
+> 那一整套 SSRF 防护（`safeTarget` 的 DNS 钉定、私网/回环/元数据地址拦截、端口白名单、
+> **每一跳重定向重新校验域名**）只长在 `web_fetch` 这条路上。`browser_navigate` 完全绕开它，
+> 而且它**执行页面 JS** —— URL 预校验挡不住页面自己去打 `169.254.169.254` 或本机端口，
+> DNS rebinding 也重新活了。换句话说：**开了它就等于给模型一个无限制的取网器。**
+>
+> 唯一的闸是 `mcp.servers[].minRole`（缺省取 `mcp.defaultMinRole`，默认 `owner`）。而
+> `web_fetch` 对 `limited` 都是开的（且只在配了 allowlist 时才开），两者的门槛差着两档 ——
+> 把这台 server 的 `minRole` 调到 `owner` 以下，等于把 `web_fetch` 那道白名单整个绕过去。
+>
+> 供应链上也值得单独拍一次板（截至 2026-08-20）：repo 建于 2026-04-13、owner 账号建于
+> 2026-03-29 且无名无公司，21.7k star 对 72 watcher（正常基建项目在 10–30:1，这里 ~300:1），
+> 同账号另一个 repo 是 reCAPTCHA solver。这些都不构成证据，但那个二进制会跑在持有
+> `LUOLI_MASTER_KEY` 与 `BOT_TOKEN` 的进程旁边（stdio = 以 bot 进程的身份，沙箱之外）。
+> 想降风险就用它的 docker 形态（`distroless/cc`，无 shell、无包管理器）或自己
+> `cargo build --release -p obscura-cli --features render`，而不是下预编译产物。
+
+它的 `browser_screenshot` 返回 MCP 图片，**这条路是通的** —— `ToolRegistry.bindMedia` 把
+`{content:[{type:'image', data, mimeType}]}` 换成 `media`，走与 `web_fetch` 完全同一条落地路径
+（`web_assets` → `webasset://` 顶层 part → 骑工具结果给本步，见 [05 §3.6](./05-tools-and-permissions.md)）。
+不做这一步的话它会被 `#normalizeOutput` 截成半截 base64 当不可信文本交给模型：既看不见图，
+又把整个 64KB 输出预算烧光。
+
+值不值得深度集成（把渲染接进 `web_fetch`，代价是给它套 egress 限制才算真正闭合）是
+[00 §待议](./00-state.md) 里的一条，先按上面这个形态验证效果：拿一个 SPA 比
+`browser_snapshot` 与 `web_fetch` 的正文长度、一个 Cloudflare 站、一次 `browser_screenshot`。
+
 ### 4.5 需要登录的 server
 
 远端 MCP server 常常要登录。此前这条路是**结构上走不通**的，而且看不出来走不通：

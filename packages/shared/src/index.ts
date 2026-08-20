@@ -239,6 +239,18 @@ export interface RuntimeTurnContext {
   loadedSkills?: Set<string>;
   skillAllowedTools?: Set<string>;
   /**
+   * 本轮**轮内**有工具往上下文里注入过图片（`web_fetch` 抓到的图、MCP 的截图）。
+   *
+   * 必须是一个标志而不是「重新扫一遍消息」：vision 别名自动切换的判据（`runtime.ts` 的
+   * `turnHasImages`）是**轮首快照** —— 图片就在 snapshot 与 delta 里，每步重算纯属浪费。
+   * 轮中来的图它结构性地认不出，于是一张图会落在一个看不了图的别名上（宽容的 provider
+   * 静默忽略、严格的直接 400，`docs/08 §7.2` 禁的正是这件事）。
+   *
+   * 而扫消息也不管用：`isImagePart` 只认**顶层** part，认不出藏在 tool-result 的
+   * `output.value` 里那张骑着工具结果过来的图。所以由注入方置位，`prepareStep` 读它。
+   */
+  mediaInjected?: boolean;
+  /**
    * 触发这一轮的人是谁（`openTurn` 从触发消息上取）。只喂给 RUNTIME 块的「触发」行：
    * 私聊上下文按红线 10 不带发言人前缀，模型此前连问话人的昵称都看不到。
    */
