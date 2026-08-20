@@ -19,6 +19,8 @@ const NAV_KEYS = ['dashboard', 'chats', 'messages', 'prompts', 'providers', 'pri
   'extensions', 'agents', 'logs', 'usage', 'quota', 'tasks', 'settings'] as const;
 /** 设置页的四个二级 tab（docs/09 §3.13）。跟导航项同一个道理：漏一个分支，那个 tab 从此没人渲染过。 */
 const SETTINGS_TABS = ['common', 'all', 'maintenance', 'advanced'] as const;
+/** 扩展页的四个分段（docs/09 §3.8）。同上：加一段就要加进这里。 */
+const EXTENSION_TABS = ['skills', 'mcp', 'plugins', 'tools'] as const;
 
 /** 每个端点回一份形状对得上的空数据。这里刻意**不 mock 组件内部**：要测的就是真实模板 + 真实
  *  setup 在拿到正常响应时能不能渲染出来。 */
@@ -78,6 +80,42 @@ const RESPONSES: Record<string, unknown> = {
       chatLabel: '阿离', creatorLabel: '阿离', cron: '0 8 * * *', timezone: 'UTC', payload: '汇总昨天群里聊了什么', runCount: 2,
       nextRun: new Date(Date.now() + 3_600_000).toISOString(), lastRunAt: Date.now() - 3_600_000, lastState: 'committed',
       createdAt: Date.now() - 86_400_000, updatedAt: Date.now() - 3_600_000 }] },
+  // ── 扩展页的四类。四个端点此前一律回 `[]`（走 `listLike` 那条兜底），于是**四类的行模板
+  //    一次都没被渲染过** —— 和模型行、容器行、定时任务行当初的处境完全一样。每一类都放一行
+  //    「正常的」和一行「在等人处理的」，因为这一页真正的活儿是后者。
+  '/api/skills': [
+    // 随包那四份说明书之一：只放行启停，改正文/删除回 403 `skill_reserved`。
+    { name: 'writing-tools', description: '用 define_tool 给自己写一个可复用的工具时读这份。', min_role: 'owner',
+      enabled: 1, source: 'bundled', load_error: null, updated_at: Date.now() - 86_400_000 },
+    // 装包进来且从未被启用过 = 未审阅。这一档必须与「停用」分得开（docs/07 §6.4）。
+    { name: 'music-download-cli-linux', description: 'Search and download music from QQ / Kuwo / NetEase.', min_role: 'trusted',
+      enabled: 0, source: 'package', load_error: null, updated_at: Date.now() - 3_600_000 },
+    // 解析失败的 stub：`SkillLoader` 照样 persist，界面上要看得见是坏的。
+    { name: 'broken-skill', description: '', min_role: 'owner', enabled: 0, source: 'local',
+      load_error: 'skill name must equal directory name', updated_at: Date.now() - 600_000 },
+  ],
+  // `provides_json` 是 plugin 侧的「N 个工具」—— 端点一直在发，界面一直没读。
+  '/api/plugins': [{ name: 'weather', path: './plugins/weather', version: '1.2.0', min_role: 'trusted', enabled: 1,
+    config_json: '{}', provides_json: JSON.stringify({ tools: ['weather_now'], hooks: ['onTurnStart'], commands: ['/weather'] }),
+    load_error: null, updated_at: Date.now() - 7_200_000 }],
+  // 两台 server：一台连上了（带 connected_at 与 20 个工具名），一台等着人去登录。
+  // `needs_auth` 是本轮新增的状态，`MCP_STATE_LABELS` 少一条它就会原样显示成英文。
+  '/api/mcp': [
+    { name: 'agent-browser', transport: 'stdio', command: 'agent-browser', args: ['mcp'], env: {}, minRole: 'trusted',
+      min_role: 'trusted', enabled: 1, toolAllow: [], toolDeny: [], timeoutMs: 60_000, state: 'up', last_error: null,
+      connected_at: Date.now() - 900_000, updated_at: Date.now() - 900_000,
+      tools: Array.from({ length: 20 }, (_value, index) => ({ name: `browser_action_${index}`, description: `第 ${index} 个动作` })),
+      auth: { mode: 'none', authorizedAt: null, expiresAt: null, scope: null } },
+    { name: 'notion', transport: 'http', url: 'https://mcp.example.com/notion', headers: {}, minRole: 'owner',
+      min_role: 'owner', enabled: 1, toolAllow: [], toolDeny: [], timeoutMs: 30_000, state: 'needs_auth',
+      last_error: '这台 server 要求登录。点〔登录〕走一遍授权。', connected_at: null, updated_at: Date.now() - 60_000,
+      tools: [], auth: { mode: 'oauth', authorizedAt: null, expiresAt: null, scope: 'read write' } },
+  ],
+  // 模型自己写的脚本：`reviewedAt === null` 且停用 = 在等人读过正文再启用。
+  '/api/custom-tools': [{ name: 'tally_votes', description: '统计群里投票消息的票数', runtime: 'python',
+    body: 'import json, sys\nprint(json.dumps({"ok": True}))\n', paramsJson: JSON.stringify({ type: 'object', properties: {} }),
+    minRole: 'owner', scope: 'chat', ownerChatId: '-1001', timeoutMs: 60_000, enabled: 0, createdBy: '5568996608',
+    reviewedAt: null, lastError: null, updatedAt: Date.now() - 1_800_000 }],
 };
 
 /** 没显式列出的端点：按路径形状猜一个空值。数组端点回 `[]`，其余回 `{}`。 */
@@ -292,6 +330,117 @@ describe('ConsoleView 渲染', () => {
     expect(await patchBody('on')).toMatchObject({ capabilities: { vision: true } });
     // 取消标记：键要在、值是 null。`toMatchObject` 对 undefined 与 null 不区分，所以直接比对整块。
     expect((await patchBody('follow')).capabilities).toEqual({ vision: null });
+    wrapper.unmount();
+  });
+
+  /**
+   * 扩展页的四个分段（docs/09 §3.8）。跟设置页那四个 tab 同一个道理：漏一个分支，那一段从此
+   * 没人渲染过。这一页是从 `ConsoleView.vue` 里**整段抽出来**的（`ExtensionsPage.vue`），
+   * 而上一次抽子视图时三条绿灯都亮着、14 个页面全空白（docs/24 · R-UI-01）—— 所以这里断言的是
+   * 「四个分段各自真的渲染出了内容」，不是「组件 import 得进来」。
+   */
+  it('扩展页四个分段逐个切过去都有内容，且分段定义与模板分支一一对应', async () => {
+    const warnings: string[] = [];
+    const spy = vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => { warnings.push(args.map(String).join(' ')); });
+    const { default: ConsoleView } = await import('../../packages/webui/src/views/ConsoleView.vue');
+    const wrapper = mount(ConsoleView, { attachTo: document.body });
+    await settle(wrapper);
+    (wrapper.vm as unknown as { active: string }).active = 'extensions';
+    await settle(wrapper);
+    const page = wrapper.findComponent({ name: 'ExtensionsPage' });
+    expect(page.exists(), '扩展页组件没挂上').toBe(true);
+    const vm = page.vm as unknown as { EXTENSION_TABS: ReadonlyArray<readonly [string, string, string]>; tab: string };
+    expect(vm.EXTENSION_TABS.map(([key]) => key)).toEqual([...EXTENSION_TABS]);
+    for (const key of EXTENSION_TABS) {
+      vm.tab = key;
+      await settle(wrapper);
+      const panel = wrapper.find(`[data-ext-tab="${key}"]`);
+      expect(panel.exists(), `扩展页缺少 ${key} 这个分段的分支`).toBe(true);
+      // 四个分段都是 `v-show`：切分段不该把没保存的东西弄丢，所以 DOM 里始终有四个。
+      expect(panel.attributes('style') ?? '', `${key} 分段切过去之后仍然是隐藏的`).not.toContain('display: none');
+      expect(panel.text().trim().length, `${key} 分段的内容是空的`).toBeGreaterThan(20);
+    }
+    const rendering = warnings.filter((line) => line.includes('[Vue warn]'));
+    expect(rendering, `渲染期间产生了 Vue 警告：\n${rendering.join('\n')}`).toEqual([]);
+    spy.mockRestore();
+    wrapper.unmount();
+  });
+
+  /**
+   * 「要登录」必须是独立一档，而且那一行要真的给出一个能点的入口。此前 `state` 只有
+   * up/pending/down/disabled，一台要登录的 server 显示成「连不上」加一句
+   * `Error POSTing to endpoint: <原始响应体>` —— 从里面读不出该做什么。
+   */
+  it('MCP 段：needs_auth 渲染成「要登录」并给出登录按钮，down 那台不给', async () => {
+    const { default: ConsoleView } = await import('../../packages/webui/src/views/ConsoleView.vue');
+    const wrapper = mount(ConsoleView, { attachTo: document.body });
+    await settle(wrapper);
+    (wrapper.vm as unknown as { active: string }).active = 'extensions';
+    await settle(wrapper);
+    const page = wrapper.findComponent({ name: 'ExtensionsPage' });
+    (page.vm as unknown as { tab: string }).tab = 'mcp';
+    await settle(wrapper);
+    const rows = wrapper.findAll('.ext-table tbody tr');
+    expect(rows.length, 'MCP 表一行都没渲染').toBe(2);
+    const needsAuth = rows.find((row) => row.text().includes('notion'))!;
+    expect(needsAuth.text()).toContain('要登录');
+    expect(needsAuth.text()).not.toContain('连不上');
+    expect(needsAuth.findAll('button').map((button) => button.text()), 'needs_auth 那一行没有〔登录〕入口')
+      .toContain('登录');
+    // 已连接那台：不该出现登录按钮，而工具条数要点得开。
+    const connected = rows.find((row) => row.text().includes('agent-browser'))!;
+    expect(connected.text()).toContain('已连接');
+    expect(connected.findAll('button').map((button) => button.text())).not.toContain('登录');
+    expect(connected.text()).toContain('20 个');
+    wrapper.unmount();
+  });
+
+  /**
+   * 未审阅的行要有**自己的形态**，不只是换一个标签的字：`.pending-review` 那条虚线 + 琥珀脊
+   * 才是「这几行在等你」的视觉判据。查 class 而不查文案 —— 后者改一句话就红。
+   */
+  it('未审阅的 Skill 与自定义工具带 pending-review 形态，已启用的不带', async () => {
+    const { default: ConsoleView } = await import('../../packages/webui/src/views/ConsoleView.vue');
+    const wrapper = mount(ConsoleView, { attachTo: document.body });
+    await settle(wrapper);
+    (wrapper.vm as unknown as { active: string }).active = 'extensions';
+    await settle(wrapper);
+    const page = wrapper.findComponent({ name: 'ExtensionsPage' });
+    const rows = wrapper.findAll('[data-ext-tab="skills"] .ext-row');
+    const packaged = rows.find((row) => row.text().includes('music-download-cli-linux'))!;
+    expect(packaged.classes(), '装进来且从未启用过的 skill 没有 pending-review 形态').toContain('pending-review');
+    expect(packaged.classes(), '来源脊没有按 source 上色').toContain('from-package');
+    const bundled = rows.find((row) => row.text().includes('writing-tools'))!;
+    expect(bundled.classes()).toContain('from-bundled');
+    expect(bundled.classes()).not.toContain('pending-review');
+    // 随包那份只放行启停：不该给删除按钮（服务端会回 403，摆一个必然报错的按钮更难排查）。
+    expect(bundled.findAll('button').map((button) => button.attributes('aria-label') ?? button.text())).not.toContain('删除');
+
+    (page.vm as unknown as { tab: string }).tab = 'tools';
+    await settle(wrapper);
+    const tool = wrapper.find('[data-ext-tab="tools"] .ext-row');
+    expect(tool.classes()).toContain('pending-review');
+    expect(tool.text()).toContain('未审阅');
+    wrapper.unmount();
+  });
+
+  /**
+   * 待你处理那条 —— 这一页真正的收件箱。它必须把三类「在等人」的东西都数进去：
+   * 未审阅的包、未复审的脚本、要登录的 server。
+   */
+  it('待你处理把未审阅、要登录、加载失败三类都数进去', async () => {
+    const { default: ConsoleView } = await import('../../packages/webui/src/views/ConsoleView.vue');
+    const wrapper = mount(ConsoleView, { attachTo: document.body });
+    await settle(wrapper);
+    (wrapper.vm as unknown as { active: string }).active = 'extensions';
+    await settle(wrapper);
+    const inbox = wrapper.find('.ext-inbox');
+    expect(inbox.exists()).toBe(true);
+    expect(inbox.text()).toContain('等人读过');
+    expect(inbox.text()).toContain('等人复审');
+    expect(inbox.text()).toContain('要登录');
+    // fixture 里有一个 load_error 的 skill。
+    expect(inbox.text()).toContain('加载或连接失败');
     wrapper.unmount();
   });
 

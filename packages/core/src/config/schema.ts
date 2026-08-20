@@ -13,9 +13,29 @@ const mcpServerBase = z.object({
   toolDeny: z.array(z.string()).default([]),
   timeoutMs: z.number().int().positive().optional(),
 });
+/**
+ * 「这台 server 怎么登录」。**凭据本身不在这里** —— 它在 `mcp_auth` 表里，加密存放
+ * （migrations/0011，理由写在那个文件开头：配置要进 `config_revisions` 与配置导出，
+ * 而 `headers.Authorization` 逃得过按键名判密的那条正则）。
+ *
+ * `stdio` 没有这个字段：OAuth 是 HTTP 的事，而一台 stdio server 的「登录」是它自己在带外做的
+ * （照 harness 的先例，docs/07 §4.5）—— 能帮上的只有把它的 stderr 收进日志。
+ */
+const mcpAuthSchema = z.discriminatedUnion('mode', [
+  z.object({ mode: z.literal('none') }),
+  z.object({ mode: z.literal('bearer') }),
+  z.object({
+    mode: z.literal('oauth'),
+    scope: z.string().optional(),
+    /** 对方不支持动态注册（RFC 7591）时手填。留空就走动态注册。 */
+    clientId: z.string().min(1).optional(),
+    /** 授权服务器与资源服务器不同源、且对方没有 RFC 9728 元数据时手指一下。 */
+    issuer: z.string().url().optional(),
+  }),
+]);
 const mcpServerSchema = z.discriminatedUnion('transport', [
   mcpServerBase.extend({ transport: z.literal('stdio'), command: z.string().min(1), args: z.array(z.string()).default([]), env: z.record(z.string()).default({}) }),
-  mcpServerBase.extend({ transport: z.literal('http'), url: z.string().url(), headers: z.record(z.string()).default({}) }),
+  mcpServerBase.extend({ transport: z.literal('http'), url: z.string().url(), headers: z.record(z.string()).default({}), auth: mcpAuthSchema.default({ mode: 'none' }) }),
 ]);
 /**
  * 审批规则此前是 `z.record(z.unknown())`：写入端什么都收，运行时 `ApprovalRules` 却会把没有 `tool`

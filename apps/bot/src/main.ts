@@ -3,8 +3,8 @@ import argon2 from 'argon2';
 import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { serve } from '@hono/node-server';
-import { ArchiveRepository, CustomToolRepository, OperationsRepository, PrincipalRepository, SandboxContainerRepository, ScheduleRepository, TurnRepository, acquireInstanceLock, closeDatabase, migrateDatabase, modelAliasKey, openDatabase, readAppKv, readPersistedConfig, recomputeMessageTokens, recoverAfterCrash, writeAppKv } from '@luoli/db';
-import { AgentManager, AgentResultStore, AlertDispatcher, BUNDLED_SKILLS, ConfigStore, ContainerManager, CustomToolManager, mergeAgentDefinitions, scanAgentFiles, ContextEngine, DatabaseApprovalBroker, EventBus, FileTools, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, ModelRegistry, PathJail, PluginManager, selfAuthoringDenyGlobs, PromptAssembler, PromptDocuments, ProviderStore, PROVIDER_FAILURES_TO_DOWN, PROVIDER_PROBE_TIMEOUT_MS, QuotaGuard, repairAgentResultRefs, repairLedgerCacheCost, runProviderHealthCheck, Sandbox, ScheduledJobRunner, Scheduler, Secrets, SkillLoader, STABLE_PROMPT_BLOCKS, TOOL_POLICY, ToolRegistry, TurnConcurrency, TurnFailureStreak, TurnRegistry, UsageLedger, assembleMainPrompt, configJsonSchema, loadConfig, perChatConfig, registerAuthoringTools, registerBuiltins, registerContainerTools, rejectedWakewords, runMainAgent, runSubAgent, streamMainAgent, type ContainerEvent, type SubAgentRuntimeEvent } from '@luoli/core';
+import { ArchiveRepository, CustomToolRepository, OperationsRepository, PrincipalRepository, McpAuthRepository, SandboxContainerRepository, ScheduleRepository, TurnRepository, acquireInstanceLock, closeDatabase, migrateDatabase, modelAliasKey, openDatabase, readAppKv, readPersistedConfig, recomputeMessageTokens, recoverAfterCrash, writeAppKv } from '@luoli/db';
+import { AgentManager, AgentResultStore, AlertDispatcher, BUNDLED_SKILLS, ConfigStore, ContainerManager, CustomToolManager, mergeAgentDefinitions, scanAgentFiles, ContextEngine, DatabaseApprovalBroker, EventBus, FileTools, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, ModelRegistry, PathJail, PendingAuthorizations, PluginManager, selfAuthoringDenyGlobs, PromptAssembler, PromptDocuments, ProviderStore, PROVIDER_FAILURES_TO_DOWN, PROVIDER_PROBE_TIMEOUT_MS, QuotaGuard, repairAgentResultRefs, repairLedgerCacheCost, runProviderHealthCheck, Sandbox, ScheduledJobRunner, Scheduler, Secrets, SkillLoader, STABLE_PROMPT_BLOCKS, TOOL_POLICY, ToolRegistry, TurnConcurrency, TurnFailureStreak, TurnRegistry, UsageLedger, assembleMainPrompt, configJsonSchema, loadConfig, perChatConfig, registerAuthoringTools, registerBuiltins, registerContainerTools, rejectedWakewords, runMainAgent, runSubAgent, streamMainAgent, type ContainerEvent, type SubAgentRuntimeEvent } from '@luoli/core';
 import { createServer, EventStreamRegistry, issueLoginToken, setupToken, type PromptPreviewResult } from '@luoli/server';
 import type { RuntimeTurnContext } from '@luoli/shared';
 import { TelegramTools, UpdatePoller, createTelegramBot } from '@luoli/telegram';
@@ -184,7 +184,12 @@ if (config.plugins.enabled) {
   // 风险面比省一次重启大得多，开它要自己清楚这一点。
   if (config.plugins.watch) plugins.startWatching();
 } else log.event({ level: 'info', kind: 'plugins.disabled', summary: 'Plugins disabled by config' });
-const mcp = new McpManager(db, () => configStore.snapshot().mcp, log);
+// MCP 的凭据库与待授权表。`publicUrl` 传 getter 而不是快照：运维在设置页补完它之后
+// 不该还要重启才登得上（照 `configStore.snapshot()` 在这一行上下的一贯做法）。
+const mcpAuth = new McpAuthRepository(db, secrets);
+const mcpPending = new PendingAuthorizations();
+const mcp = new McpManager(db, () => configStore.snapshot().mcp, log, undefined,
+  { store: mcpAuth, pending: mcpPending, publicUrl: () => configStore.snapshot().webui.publicUrl });
 await mcp.reconcile();
 const maintenance = new MaintenanceService(db, config.db.path, config.db.backupKeep, config.logs.retentionDays, config.logs.dir,
   { files: config.media.dir, agentResults: agentResultsDir }, config.logs.gzipAfterDays, config.schedule.retentionDays,
@@ -560,7 +565,7 @@ if (process.env.BOT_TOKEN && config.telegram.mode !== 'polling') {
   throw new Error(`telegram.mode=${config.telegram.mode} is not implemented; only polling is supported`);
 }
 const server = createServer({ config: configStore, db, operations, principals, archive, context, providers, modelCatalog, approvals: approval, rebuildModels, maintenance, ledger, restart: (reason) => restart(reason), events, log,
-  memory, promptDocuments, skills, plugins, mcp, agents, tools: toolRegistry, customTools: customToolRepo, customToolManager: customTools, turnRegistry, sandbox, eventStreams, previewPrompt, dryRunAgent,
+  memory, promptDocuments, skills, plugins, mcp, mcpAuth: { store: mcpAuth, pending: mcpPending }, agents, tools: toolRegistry, customTools: customToolRepo, customToolManager: customTools, turnRegistry, sandbox, eventStreams, previewPrompt, dryRunAgent,
   schedules: { jobs: scheduledJobs, runner: scheduleRunner }, configSchema: configJsonSchema(), startedAt, setup });
 // `webui.enabled=false`：整个 HTTP 面不监听。这不只是省一个端口 —— 单口令 + owner 全权限的
 // 控制台是这个部署最大的攻击面，只跑 Telegram 的场景该能把它整个关掉。

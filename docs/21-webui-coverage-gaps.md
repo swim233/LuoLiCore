@@ -384,8 +384,15 @@ G-API-10/11/12 与 G-SRV-02/03/04 均已完成；按本文「运行时已有、W
 
 | 编号 | 运行时已有 | 界面缺什么 | 状态 |
 |---|---|---|---|
-| **G-API-15** | `POST /api/plugins/:name/reload` 现在回 `hotReloadReliable` + `warning`：跑在 tsx（`pnpm dev`）下时热重载**静默跑旧代码**，reconcile 每次都真跑、`onLoad` 每次打印的都是第一版（`docs/28 · L-EXT-04`） | 扩展页仍只弹「已重载」。而这个开关唯一该用的场景就是本机写 plugin —— 恰好是它失效的场景。启动时那条 warn 只有盯着终端的人看得见 | 🚧 未接 |
-| **G-API-16** | `mcp_servers.state` 在子进程被 `kill -9` 之后最长 5 分钟才被下一次 `mcp-health` reconcile 纠正 —— 期间界面显示 `up` 而那台 server 的工具已经不在模型目录里（`docs/28 · L-EXT-02` 的残留） | 扩展页没有「这一行可能是陈旧的」提示。**不是在 `onclose` 里写库就能解决**：那个回调从子进程的 `'close'` 事件同步跑，`closeDatabase()` 之后一条泄漏子进程自然死亡会让裸 `db.prepare` 抛在 handler 里 → `uncaughtException`（`LogSink.event` 保证不抛，所以那条路只记日志）。要秒级反映得先给它加一个「库还开着吗」的判据 | 🚧 未接 |
+| **G-API-15** | `POST /api/plugins/:name/reload` 回 `hotReloadReliable` + `warning`：跑在 tsx（`pnpm dev`）下时热重载**静默跑旧代码**，reconcile 每次都真跑、`onLoad` 每次打印的都是第一版（`docs/28 · L-EXT-04`） | ~~扩展页仍只弹「已重载」~~ | ✅ 已接（`PluginCards.vue` + `ExtensionsPage.reloadPlugin`：`hotReloadReliable === false` 时弹**不自动消失**的 warn，并在卡片上常驻一条提示） |
+| **G-API-16** | `mcp_servers.state` 在子进程被 `kill -9` 之后最长 5 分钟才被下一次 `mcp-health` reconcile 纠正 —— 期间界面显示 `up` 而那台 server 的工具已经不在模型目录里（`docs/28 · L-EXT-02` 的残留） | ~~扩展页没有「这一行可能是陈旧的」提示~~。**底层那件事没修也修不了**：不是在 `onclose` 里写库就能解决（那个回调从子进程的 `'close'` 事件同步跑，`closeDatabase()` 之后一条泄漏子进程自然死亡会让裸 `db.prepare` 抛在 handler 里 → `uncaughtException`），要秒级反映得先给它加一个「库还开着吗」的判据 | ✅ 界面这一半已接（`McpTable.vue`：「上次核对」列 + 超过一个 `healthCheckCron` 周期就标「可能已陈旧」。判据用 `updated_at` 而不是去解 cron 表达式）。**运行时那一半仍然开着**，见 [00 §2.3](./00-state.md) |
+
+### 6.4 新增缺口（扩展页重设计 + MCP 登录这一轮）
+
+| 编号 | 运行时已有 | 界面缺什么 | 状态 |
+|---|---|---|---|
+| **G-API-18** | `plugins.config_json` + `PATCH /api/plugins/:name` 收 `config`，而 `definePlugin` 的 `configSchema` 就是为它准备的 | 前端从来不发那个字段，也没有表单。`SchemaForm.vue` 已经能把一份 JSON Schema 渲染成表单（设置页「全部配置」在用），所以缺的是接线而不是控件 | 🚧 未接 |
+| **G-API-19** | `skills.dir` / `skills.enabled` / `skills.watch` 运行时改了不生效：`SkillLoader` 在构造时就把 `directory` 拿走了，而 `main.ts` 对任何 `skills.*` 变更只是重扫**老目录**；运行时打开不会启动 watcher，关掉不会清空内存里那份目录 | `docs/11` 标的是「需重启」所以不算文档撒谎，但那条重扫的接线读起来像是支持热更新的。界面上没有任何提示 | 🚧 未接（本轮沿用，非新增） |
 
 ---
 

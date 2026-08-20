@@ -597,6 +597,11 @@ mcp:
   healthCheckCron: '*/5 * * * *'  # 需重启
   defaultMinRole: trusted         # 热更新
   servers: []                     # 热更新 · 见 07 §4.1（改完立刻 reconcile）
+  # 每台 server 的字段见 07 §4.1。http 那一支多一个 `auth`（stdio 没有，OAuth 是 HTTP 的事）：
+  #   auth: { mode: none | bearer | oauth, scope?, clientId?, issuer? }
+  # **凭据本身不在配置里** —— 它加密存在 `mcp_auth` 表（03 §2.10、07 §4.5）。这里只说「怎么登录」。
+  # `oauth` 还要求 `webui.publicUrl` 非空：OAuth 回调需要一个外部可达的 redirect_uri，
+  # 而它一旦注册进对方那里就不好改，所以没配时整条流程直接拒绝启动而不是编一个地址。
 
 # ============================================================ schedule（见 02 §10、05 §3.8）
 # 定时任务：模型用 schedule_create 自己排的周期 / 一次性任务（14 §2 Q4 已拍板）。

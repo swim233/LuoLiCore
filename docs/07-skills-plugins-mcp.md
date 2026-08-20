@@ -316,10 +316,18 @@ mcp:
     - name: notion
       transport: http
       url: https://mcp.example.com/notion
-      headers: { Authorization: 'Bearer ${env:NOTION_MCP_TOKEN}' }
+      # 「怎么登录」在配置里，**凭据本身不在**（见 §4.5）。none | bearer | oauth
+      auth: { mode: oauth, scope: 'read write' }
+      headers: { 'X-Tenant': acme }   # 非密用途；token 不放这里
       minRole: owner
       timeoutMs: 30000
 ```
+
+> **`${env:NAME}` 只在 YAML 文件层展开**（`packages/core/src/config/index.ts`，理由见
+> `docs/27 · S-06`：在 DB 覆盖层展开等于给了一条从任意非密配置键读出 `LUOLI_MASTER_KEY` 的路）。
+> 所以 `headers: { Authorization: 'Bearer ${env:TOKEN}' }` 这个老写法**只在手写进
+> `config/config.yaml` 时有效**；从 WebUI 或 `install_mcp` 建出来的 server 落在 `config_kv` 里，
+> 那串 `${env:...}` 会被原样当成 header 值发出去。这条不对称是 §4.5 改用凭据库的原因之一。
 
 ### 4.2 接入实现
 
@@ -330,8 +338,12 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 
 const client = new Client({ name: 'luolicore', version: '0.1.0' });
 const transport = srv.transport === 'stdio'
-  ? new StdioClientTransport({ command: srv.command, args: srv.args, env: resolveEnv(srv.env) })
-  : new StreamableHTTPClientTransport(new URL(srv.url), { requestInit: { headers: resolveEnv(srv.headers) } });
+  // `stderr: 'pipe'` 不是可选项：SDK 默认 `'inherit'`，于是一台 server 打印的
+  // 「打开这个链接授权」「缺 XXX_TOKEN」直接写进 bot 进程的 stderr —— 不进 LogSink、不落库、
+  // 界面上一个字都没有，而那恰好是「它为什么连不上」的答案（§4.5）。
+  ? new StdioClientTransport({ command: srv.command, args: srv.args, env: resolveEnv(srv.env), stderr: 'pipe' })
+  // `authProvider` 只在 `auth.mode === 'oauth'` 时挂（§4.5 说明为什么不无条件挂）。
+  : new StreamableHTTPClientTransport(new URL(srv.url), httpOptions(srv));
 await client.connect(transport);
 const raw = await client.listTools();
 const tools = raw.tools.filter((tool) => matchAllow(tool.name, srv.toolAllow, srv.toolDeny));
@@ -384,13 +396,101 @@ object/array/string/number/integer/boolean/enum/required/default/nullable；遇�
   `StdioClientTransport` 不 `unref` 子进程，而 `shutdown()` 只设 `process.exitCode` ——
   漏掉一条 refed handle，event loop 就不空，进程就不退（实测 SIGTERM 后存活 >100 秒，
   docs/28 · L-EXT-03）。
-- WebUI：server 列表、状态、发现到的工具清单（含 schema 预览）、启停、`toolAllow/Deny` 编辑、手动重连、最近错误。
+- WebUI：server 列表、状态（含 `needs_auth`）、凭据、工具清单（抽屉里带每个工具的描述）、启停、
+  `toolAllow/Deny` 编辑、手动重连、登录 / 注销、最近错误。形状见 [09 §3.8](./09-webui.md)。
 
 ### 4.4 与自建工具的取舍（遵循 AI SDK 官方建议）
 
 - **核心能力（fs、exec、检索、记忆、agent）一律自建**，不用 MCP —— 需要严格的 jail、审批、日志与类型安全。
 - MCP 定位为「用户可选的第三方能力接入」，默认 `minRole=trusted`、默认全部 `enabled=0`。
 - MCP 工具名冲突：加 `mcp__<server>__` 前缀天然隔离；同 server 内重名由上游负责。
+
+### 4.5 需要登录的 server
+
+远端 MCP server 常常要登录。此前这条路是**结构上走不通**的，而且看不出来走不通：
+
+`StreamableHTTPClientTransport` 没有传 `authProvider`，而 SDK 那条 401 分支是
+`if (response.status === 401 && this._authProvider)` —— 于是 `UnauthorizedError`
+在本仓库**构造不出来**，一台要登录的 server 只留下 `state='down'` 加一句
+`Error POSTing to endpoint: <原始响应体>`。stdio 那侧更糟：`stderr` 是 SDK 默认的 `'inherit'`，
+server 打印的授权链接直接写进 bot 进程的 stderr，然后握手 15 秒超时判死、`mcp-health` 每 5 分钟
+再来一次，无退避无上限。
+
+#### 凭据存哪儿：`mcp_auth` 表，不在配置里
+
+`migrations/0011_mcp_auth.sql` + `packages/db/src/mcp-auth.ts`（`McpAuthRepository`）。
+一行一台 server，密文一律经 `Secrets`（AES-256-GCM + scrypt，`LUOLI_MASTER_KEY`），
+`hint` 只留 bearer token 的末 4 位。加解密由调用方注入（`SecretCodec`）—— `Secrets` 住在
+`packages/core`，而依赖方向是 `shared → db → core`。
+
+**为什么不放 `mcp.servers` 配置里**（三条，缺一条都不够）：
+
+1. `config_kv` 的每一行都会被 `loadConfig` 当**配置覆盖层**解析；
+2. 配置写入要进 `config_revisions`（审计，存完整值）；
+3. `GET /api/config/export` 与 `/api/config/yaml` 会把非密的行原样导出。
+
+而按键名判密的那条正则是 `/key|secret|token|password/i`（`packages/core/src/config/redact.ts`），
+它**匹配不到 `Authorization`**。于是一个只用 `headers: { Authorization: 'Bearer …' }` 的 server，
+它的 token 明文进了 revision、也从配置导出里原样出来 —— `secretConfigRow` 的两个判据同时为假，
+那一行压根不会被跳过。用 `env.XXX_TOKEN` 的 server 反而是安全的。**同一件事按用哪个通道决定
+安不安全**，这本身就是要修的东西。凭据搬进 `mcp_auth` 之后，配置里只剩「用哪种方式登录」。
+
+#### 三种 `auth.mode`
+
+| mode | 谁在登录 | 实现 |
+|---|---|---|
+| `none` | 不需要 | 不挂 `authProvider`。撞上 401 时**照样记 `needs_auth`**（判据见下），提示语指向「去把 `auth.mode` 改掉」 |
+| `bearer` | 运维把一个长期 token 填进来 | 连接时从 `mcp_auth` 取出、注入 `Authorization` header。**拿不到就不编一个空 Bearer 发出去** —— 那样对方回的是「token 无效」，而真相是本地没有这一份 |
+| `oauth` | 人在浏览器里授权一次 | 挂 `McpOAuthProvider`（`packages/core/src/mcp/oauth.ts`），SDK 的 `auth()` 走完发现 → 动态注册 → PKCE 授权码 → 换 token → 自动 refresh |
+
+**`none` 模式不挂 `authProvider` 是有意的。** 无条件挂上去能让 401 检测「免费」，但代价是：
+一台运维还没决定要不要接的 server，我们会替他去对方那里跑一遍 RFC 7591 动态注册。
+所以 `none` / `bearer` 走另一条判据 —— `StreamableHTTPError.code` 是 401/403
+（没挂 provider 时 SDK 就是抛这个），加一条兜底的消息匹配。三种来源都归到
+`looksLikeAuthFailure()` 一处。
+
+#### `needs_auth` 是独立一档
+
+`mcp_servers.state` 多这一个值（那一列没有 CHECK 约束，不需要迁移）。它跟 `down` 分开是因为
+**运维动作完全不同**：前者要人去点一次授权，后者要人去看命令行 / 网络。`last_error` 换成一句
+按 `auth.mode` 分岔的人话，而不是原始响应体。
+
+#### OAuth 流程的四条纪律
+
+1. **`redirectToAuthorization` 不重定向。** 它把授权 URL 记进进程内的 `PendingAuthorizations`，
+   然后让 `connect()` 抛 `UnauthorizedError`、manager 记 `needs_auth`。人是在扩展页点〔登录〕
+   才去那个 URL 的 —— 一次 reconcile 不该自己弹浏览器。
+2. **待授权表照 `issueLoginToken` 的三条**（`packages/server/src/app.ts`）：进程内、不落库、
+   不记进日志；`state` 单次使用（读即删）、10 分钟 TTL、最多 16 条。一台 server 只留最后一条，
+   所以连点两次〔登录〕之后先点的那一条换不到凭据。
+3. **换码不需要留住 transport。** `finishAuth()` 是 transport 上的方法，而失败路径上那条
+   transport 早就被 `#discard` 掉了；`auth(provider, { serverUrl, authorizationCode })` 走同一套
+   逻辑而不依赖连接。换完 token 再单台 `connect()`，不做整体 reconcile（那会让另外几台健康
+   server 也跟着断一次）。
+4. **`webui.publicUrl` 没配就不开始。** `redirect_uri` 一旦注册进对方那里就不好改，编一个
+   127.0.0.1 的地址等于把这次授权变成一条注册完就废掉的死路。照 `/webui` 命令没配 publicUrl 时
+   那句话的做法，指名道姓说缺什么。
+
+#### 连接指纹必须带凭据版本
+
+`fingerprint()` 原本是 `[transport, command, args, env, url, headers]`。凭据从 `headers` 搬进
+`mcp_auth` 之后，**轮换一次 token 不会改变上面任何一项** —— `existing.fingerprint === print`
+会命中旧连接，拿着已经作废的 token 一直用下去，而界面上那台 server 还显示「已连接」。
+所以 `mcp_auth.version` 进指纹，且**所有写凭据的路径都走同一个 `#write`**（漏一条就是漏一次
+强制重连）。`tests/mcp.oauth.test.ts` 里那条「轮换 token 真的换掉连接」焊的就是这件事。
+
+#### stdio server：帮不上，但别把它说的话丢掉
+
+一台 stdio server 的「登录」是它自己在带外做的 —— 它继承 `HOME`，所以 `~/.mcp-auth`
+这类磁盘缓存本来就能用（照 harness 的先例：`docs/12` 的「harness 自己的登录态不进本项目的
+`config_kv`」）。我们能做的就是 `stderr: 'pipe'`，逐行进 `LogSink`（新 kind `mcp.stderr`，
+warn 级，单行截到 2 KB，缓冲上界 8 KB）。这一条独立于 OAuth，是这一整块里最便宜的一半。
+
+#### 清理
+
+`reconcile()` 顺手 `prune` 掉配置里已经没有的 server 的凭据（照 `SkillLoader.scan()` 末尾清陈行的
+做法）。判据用**整份 `servers`** 而不是「本次要连的那些」—— 停用一台 server 不该把它的 token
+一起丢掉，否则「停一下再开」等于要人重新登录一次。
 
 ---
 

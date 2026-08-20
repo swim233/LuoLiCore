@@ -410,15 +410,25 @@
 | [ ] AC-PLG-008 | `onMessage` 返回 `{drop:true}` | 该消息不入库、不触发 |
 | [ ] AC-MCP-001 | 配置 stdio MCP server 并启用 | 懒连接成功；工具以 `mcp__<name>__*` 出现在 RUNTIME 块 |
 | [ ] AC-MCP-002 (自动) ★ | `limited` 用户 + server `minRole=trusted` | 该 server 的工具不注册 |
-| [ ] AC-MCP-003 | kill 掉 stdio server 进程 | 自动重启（退避）；期间工具从 RUNTIME 块消失；5 次失败后标 down + 告警 |
+| [x] AC-MCP-003 (自动) | kill 掉 stdio server 进程 | 期间工具从 RUNTIME 块消失、`state='down'`；**下一次 `mcp-health` reconcile 重连**（`docs/07 §4.3` 拍板：没有指数退避、没有重试上限、也没有 MCP 告警 kind —— 原先这一行写的「自动重启（退避）／5 次失败后告警」与那条设计直接矛盾，两样都不存在） | 〔mcp.runtime.test.ts〕
 | [ ] AC-MCP-004 (自动) | `toolAllow: ['read_*']` | 只注册匹配的工具 |
 | [ ] AC-MCP-005 (自动) | MCP 工具返回内容 | 被 `<untrusted-content source="mcp:…">` 包裹；超限截断 |
 | [ ] AC-MCP-006 (自动) | MCP 工具超 `timeoutMs` | 返回结构化超时错误，turn 继续 |
-| [ ] AC-MCP-007 | WebUI 查看 server | 显示状态、发现的工具清单与 schema 预览；`[重连]` 可用 |
+| [ ] AC-MCP-007 | WebUI 查看 server | 显示状态（含 `needs_auth`）、凭据、工具条数；点条数在抽屉里摊开每个工具的名字与描述；`[重连]` 用端点返回值给即时反馈；「上次核对」超过一个 `healthCheckCron` 周期标「可能已陈旧」 |
 | [ ] AC-MCP-008 | 退出进程 | 所有 MCP client 正常 close，无残留子进程 |
 | [ ] AC-MCP-009 (自动) ★ | 一个入参为 `{text: string, required:[text]}` 的 MCP 工具 | 注册后 `execute()` 用错误参数调用返回 `invalid_input`，用正确参数才通过；模型拿到的是真实参数定义而不是「任意对象」（docs/20 · W-MCP-01） |
 | [ ] AC-MCP-010 (自动) | 把某个 server 从配置里移除或置 `enabled:false` 后触发一次 reconcile | 工具从注册表消失、client 断开、`mcp_servers.state='disabled'`；新增 server 无需重启即可连上 |
 | [ ] AC-MCP-011 | 一个故意卡住的 MCP server | `callTool` 在 `timeoutMs` 后失败，不把整轮拖到轮次超时 |
+| [x] AC-MCP-013 (自动) ★ | 一台要求登录的 http server（401 + `WWW-Authenticate`），`auth.mode: oauth` | `state='needs_auth'` 而**不是** `down`；`last_error` 是一句说清下一步的话而不是原始响应体；留下一条带 PKCE `code_challenge_method=S256` 的授权 URL 供界面点击。此前 `UnauthorizedError` 在本仓库构造不出来（SDK 那条 401 分支是 `if (status === 401 && this._authProvider)` 而 `authProvider` 从没传过） | 〔mcp.oauth.test.ts〕
+| [x] AC-MCP-014 (自动) ★ | 走完浏览器授权，把 `code` 交给回调 | 换到 token → `state='up'` → 工具进注册表；凭据落 `mcp_auth` 且公开视图里读不到密文；PKCE verifier 与待授权条目双双清掉 | 〔mcp.oauth.test.ts〕
+| [x] AC-MCP-015 (自动) | access token 过期后再 reconcile | 自动走 refresh_token 换新的，`state` 保持 `up`，**授权端点一次都没有再被打过**（人不用再登一次） | 〔mcp.oauth.test.ts〕
+| [x] AC-MCP-016 (自动) | 对一台已授权的 server 点注销 | 凭据清空（`authorized=false`、`expiresAt`/`authorizedAt` 归 null）但那一行的 `mode` 留着（「用 OAuth 但没登录」与「压根不需要登录」要分得开）；下一次 reconcile 回到 `needs_auth` | 〔mcp.oauth.test.ts〕
+| [x] AC-MCP-017 (自动) ★ | `webui.publicUrl` 为空时开始 OAuth | 当场拒绝并说明缺什么；**一次网络请求都没发出去**（`redirect_uri` 注册进对方那里就不好改，不能编一个 127.0.0.1 的地址） | 〔mcp.oauth.test.ts〕
+| [x] AC-MCP-018 (自动) ★ | `auth.mode: bearer`：先不填 token，再填一个有效的，再让对方撤销，最后换一个新的 | 依次：`needs_auth` 且提示语是「本地没有保存 token」→ `up` 且界面只看得到末 4 位 → `needs_auth` 且提示语是「拒收」→ 重新 `up`。**最后那一步必须是一次真的重连**：连接指纹里带 `mcp_auth.version`，否则轮换 token 不改变指纹、旧连接被缓存命中而界面显示「已连接」 | 〔mcp.oauth.test.ts〕
+| [x] AC-MCP-019 (自动) ★ | `auth.mode: none` 的 server 撞上 401 | 照样记 `needs_auth`，提示语指向「去把 `auth.mode` 改掉」；**不去对方那里注册任何客户端**（无条件挂 `authProvider` 能让检测免费，代价是替运维跑一遍 RFC 7591 动态注册） | 〔mcp.oauth.test.ts〕
+| [x] AC-MCP-020 (自动) ★ | 同一个 `state` 回调两次；一个没发过的 `state`；同一台 server 连点两次〔登录〕 | 依次：第二次落空（单次使用）、直接落空、先点的那一条换不到凭据。`state` 只在进程内、不落库、不记日志（照 `issueLoginToken` 的三条） | 〔mcp.oauth.test.ts〕
+| [x] AC-MCP-021 (自动) ★ | 存一个 bearer token 之后扫全库每一张表每一列 | **没有任何一列出现明文 token**，而 `mcp_auth.secret_enc` 确实是 `v2.` 密文。此前 `headers.Authorization` 的 token 明文进 `config_revisions` 并从 `/api/config/export` 原样出来（按键名判密那条正则匹配不到 `Authorization`） | 〔mcp.oauth.test.ts〕
+| [ ] AC-MCP-022 | 一台 stdio server 在启动时往 stderr 打印「缺 XXX_TOKEN，打开这个链接授权」 | 那几行逐行进日志（`mcp.stderr`，warn，单行截 2 KB）并在总览页「最近错误」里看得见。SDK 默认 `stderr: 'inherit'`，此前这些话直接写进 bot 进程的 stderr，不落库也不上界面 |
 | [x] AC-MCP-012 (自动) ★ | `install_mcp` 登记一台 server；再试一种不在 `allowTransports` 里的 transport；再登记同名的 | 依次：写进 `mcp.servers` 且 `enabled: false`（模型登记的是一条会以 bot 进程身份长期运行的 argv / 一个能往系统提示词里塞工具描述的远端 —— 那一步必须有人看过），并发出 `config.changed`；`transport_not_allowed`；`already_exists`。校验与写入与 `POST /api/mcp` **共用同一份** `persistMcpServers` | 〔selfextend.author.test.ts〕
 
 ## 10. WebUI（AC-WEB）
@@ -570,10 +580,10 @@
 | Subagent 与任务 | | 20 / 38 | | | |
 | 记忆 | | 1 / 13 | | | |
 | 日志与成本 | | 8 / 28 | | | |
-| 扩展生态 | | 18 / 42 | | | |
+| 扩展生态 | | 28 / 52 | | | |
 | WebUI | | 11 / 85 | | | |
 | 安全 | | 9 / 25 | | | |
 | 运维 | | 2 / 10 | | | |
-| **合计** | | **189 / 466** | | | |
+| **合计** | | **199 / 476** | | | |
 
 **整体通过条件**：全部 ★ 项通过 + 非 ★ 项通过率 ≥ 95% + 所有豁免项经需求方书面确认。

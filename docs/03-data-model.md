@@ -516,10 +516,42 @@ CREATE TABLE mcp_servers (
   enabled     INTEGER NOT NULL DEFAULT 0,
   tool_allow_json TEXT, tool_deny_json TEXT,
   timeout_ms  INTEGER NOT NULL DEFAULT 30000,
+  -- state: up | down | needs_auth | disabled。'pending' 只是 `GET /api/mcp` 的兜底显示值，
+  -- 从不落库。**needs_auth 与 down 分开**：前者要人去点一次授权，后者要人去看命令行/网络
+  -- （docs/07 §4.5）。这一列没有 CHECK 约束，所以加值不需要迁移。
   state       TEXT, last_error TEXT, tools_json TEXT, connected_at INTEGER,
   updated_at  INTEGER NOT NULL
 );
+
+-- 需要登录的 MCP server 的凭据（migrations/0011，语义见 docs/07 §4.5）。
+-- **凭据不在 `mcp.servers` 配置里**：`config_kv` 的每一行都会被 loadConfig 当配置覆盖层解析，
+-- 配置还要进 `config_revisions` 与 `/api/config/export`，而按键名判密的那条正则
+-- （/key|secret|token|password/i）匹配不到 `Authorization` —— 一个只用 bearer header 的 server，
+-- 它的 token 此前明文进了 revision、也从配置导出里原样出来。
+CREATE TABLE mcp_auth (
+  server         TEXT PRIMARY KEY,
+  mode           TEXT NOT NULL CHECK (mode IN ('bearer','oauth')),
+  secret_enc     TEXT,        -- bearer: token；oauth: 整块 OAuthTokens JSON。Secrets 加密
+  client_enc     TEXT,        -- oauth: 动态注册（RFC 7591）拿到的 client_information
+  verifier_enc   TEXT,        -- oauth: 进行中那一次授权的 PKCE code_verifier，换完就清
+  discovery_json TEXT,        -- oauth: 授权服务器发现结果缓存（不含密，故不加密）
+  scope          TEXT,
+  hint           TEXT,        -- bearer token 的末 4 位，照 providers.api_key_hint 的做法
+  expires_at     INTEGER,     -- access token 到期时刻（毫秒）。null = 不过期或对方没说
+  authorized_at  INTEGER,
+  -- 每次写凭据 +1，并且**进 McpManager 的连接指纹**：指纹原本只含 transport/command/env/
+  -- url/headers，token 搬进这张表之后轮换一次 token 不再改变指纹，于是旧连接被缓存命中、
+  -- 拿着已作废的 token 一直用，而界面上那台 server 还显示「已连接」。
+  version        INTEGER NOT NULL DEFAULT 1,
+  updated_at     INTEGER NOT NULL
+);
 ```
+
+> `mcp_auth` **一行都不含明文**。读出侧只有 `McpAuthRepository` 一个入口，它的 `get()` / `list()`
+> 交回的公开视图里没有任何密文列（`{ mode, scope, hint, expiresAt, authorizedAt, authorized,
+> version }`），`GET /api/mcp` 直接用那一份。`reconcile()` 顺手 prune 掉配置里已经没有的 server
+> 的行；判据是**整份 `servers`** 而不是「本次要连的那些」——停用一台 server 不该把它的 token
+> 一起丢掉。
 
 > `skills` 是盘上那批 `SKILL.md` 的**读模型，不是真相**：真相是文件，每次
 > `SkillLoader.scan()` 都能整张重建。所以 `scan()` 末尾会

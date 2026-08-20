@@ -13,5 +13,44 @@ coverage/
 .luoli-*
 .claude/settings.local.json
 *.tsbuildinfo
-# 每用户一份的私有记忆是运行时数据（0700），不进版本库
+
+# ── 运行时目录：目录本身进版本库，内容不进 ─────────────────────────────────────────
+# 三个目录（skills / plugins / memory）都被 docker/Dockerfile 直接 `COPY` 进镜像，
+# 也都被 docker-compose 绑挂上来。**目录必须存在于构建上下文**，否则 `docker build` 当场失败 ——
+# 所以这里用 `dir/*` + `!dir/.gitkeep` 的写法（照 data/ 与 logs/ 的既有做法），而不是整个忽略。
+
+# skills/：只有**随包发的那几份说明书**进版本库。它们的名单是
+# `packages/core/src/skills/loader.ts` 的 `BUNDLED_SKILLS`，而 `sourceOf()` 用同一份名单把
+# `bundled` 与 `package`（目录里有 `.package.json`）/ `local`（手写或 write_skill 写的）分开。
+# 装进来的和模型写的都是运行时数据 —— 前者可能带几 MB 的二进制，后者随时在变。
+# 下面这份白名单由 `tests/repo-hygiene.test.ts` 焊住必须等于 `BUNDLED_SKILLS`：
+# 加第五份随包 skill 而忘了改这里的表现是它悄悄不进版本库，没有任何东西会响。
+skills/*
+!skills/.gitkeep
+!skills/installing-mcp/
+!skills/writing-plugins/
+!skills/writing-skills/
+!skills/writing-tools/
+# 装包过程中的中间态（installSkillPackage 的暂存 / 备份，以及 WebUI 上传的落点）。
+# 上面的 `skills/*` 已经盖住它们了，显式列一遍是为了让「这几个是什么」写在这儿。
+skills/.staging-*
+skills/.backups/
+skills/.uploads/
+
+# plugins/：一份都不随包发。模型能写 plugin（tools.selfExtend.plugins），运维也能手写，
+# 两种都是这台部署自己的东西。
+plugins/*
+!plugins/.gitkeep
+
+# memory/：**模型写的记忆是运行时数据。**
+#   - PUBMEMORY.md      —— `memory_write` 工具与 WebUI 提示词编辑器都写它
+#   - private/<userId>/ —— 每用户一份的私有记忆（0700）
+#   - .pending/         —— 超过软上限、等待压缩的那些
+#   - .forgotten/       —— `forget_me` 之后留档的正文，按 memory.forgetMeRetentionDays 保留
+# CHARACTER.md 与 ASSIST.md **留在版本库里**：它们是人格与助手规则（提示词文档，不是记忆），
+# 有真实的编写提交，只经 WebUI 的 `PUT /api/prompts/:id` 改，而 ASSIST.md 与 KERNEL 的空行
+# 约定是耦合的（docs/00 §2.3）。
+memory/PUBMEMORY.md
 memory/private/
+memory/.pending/
+memory/.forgotten/

@@ -4,30 +4,63 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { minimatch } from 'minimatch';
 import { z } from 'zod';
 import { jsonSchemaToZod } from './schema.js';
+import { McpOAuthProvider, beginMcpAuthorization, completeMcpAuthorization, looksLikeAuthFailure, type PendingAuthorizations } from './oauth.js';
 import { KeyedMutex } from '../turn/keyed-mutex.js';
 import type { Role } from '@luoli/shared';
 import type { ToolRegistry } from '../tools/registry.js';
 import type { Config, LogSink } from '../index.js';
-import type { Sqlite } from '@luoli/db';
+import type { McpAuthRepository, Sqlite } from '@luoli/db';
 
-interface ServerConfig {
-  name: string;
-  transport: 'stdio' | 'http';
-  command?: string;
-  args?: string[];
-  env?: Record<string, string>;
-  url?: string;
-  headers?: Record<string, string>;
-  minRole?: string;
-  enabled?: boolean;
-  toolAllow?: string[];
-  toolDeny?: string[];
-  timeoutMs?: number;
+export interface McpServerAuthConfig {
+  mode: 'none' | 'bearer' | 'oauth';
+  scope?: string | undefined;
+  clientId?: string | undefined;
+  issuer?: string | undefined;
 }
 
-/** 连接标识：url / command / args / env / headers 任何一项变了，缓存的 client 就不再是这台服务器。 */
-function fingerprint(server: ServerConfig): string {
-  return JSON.stringify([server.transport, server.command ?? null, server.args ?? [], server.env ?? {}, server.url ?? null, server.headers ?? {}]);
+/**
+ * 一台 server 的连接参数。可选项一律写 `?: T | undefined` 而不是 `?: T`：
+ * 根 tsconfig 开了 `exactOptionalPropertyTypes`，而调用方手里那份是 zod 出来的
+ * `minRole?: Role | undefined` —— 不带 `| undefined` 的话每个调用点都得再套一次 cast。
+ */
+export interface McpServerConfig {
+  name: string;
+  transport: 'stdio' | 'http';
+  command?: string | undefined;
+  args?: string[] | undefined;
+  env?: Record<string, string> | undefined;
+  url?: string | undefined;
+  headers?: Record<string, string> | undefined;
+  minRole?: string | undefined;
+  enabled?: boolean | undefined;
+  toolAllow?: string[] | undefined;
+  toolDeny?: string[] | undefined;
+  timeoutMs?: number | undefined;
+  auth?: McpServerAuthConfig | undefined;
+}
+type ServerConfig = McpServerConfig;
+
+/**
+ * 登录相关的外挂件。整块可选：`tests/mcp.runtime.test.ts` 与 `api.contract` 都不需要它，
+ * 而 `McpAuthRepository` 要一个 `Secrets`，那是 `main.ts` 才装得起来的东西。
+ * 没给的时候 `auth.mode` 只有 `none` 有意义，另两种在连接时如实报错而不是静默降级。
+ */
+export interface McpAuthDependencies {
+  store: McpAuthRepository;
+  pending: PendingAuthorizations;
+  /** `webui.publicUrl`，每次现读 —— 运维在界面上补完它之后不该还要重启才能登录。 */
+  publicUrl: () => string;
+}
+
+/**
+ * 连接标识：url / command / args / env / headers 任何一项变了，缓存的 client 就不再是这台服务器。
+ *
+ * **`authVersion` 是必须的一项。** 凭据从 `headers` 搬进 `mcp_auth` 之后，轮换一次 token
+ * 不会改变上面任何一项，于是 `existing.fingerprint === print` 命中旧连接、拿着已经作废的
+ * token 一直用下去；界面上那台 server 还显示「已连接」。
+ */
+function fingerprint(server: ServerConfig, authVersion: number): string {
+  return JSON.stringify([server.transport, server.command ?? null, server.args ?? [], server.env ?? {}, server.url ?? null, server.headers ?? {}, server.auth?.mode ?? 'none', authVersion]);
 }
 
 /** SDK 没从 exports 里放出 `Transport` 接口，而这里只需要这三个面 —— stdio 与 streamable-http
@@ -79,10 +112,57 @@ export class McpManager {
   readonly #config: () => Readonly<Config['mcp']>;
   /** config 传 getter 时每次 reconcile 都取最新值：吃启动快照的话，新增 MCP server 必须重启，
    *  `/api/mcp/:name/reconnect` 重连的也永远是启动时那份列表（docs/20 · W-CFG-02）。 */
-  constructor(private readonly db: Sqlite, config: Readonly<Config['mcp']> | (() => Readonly<Config['mcp']>), private readonly log: LogSink, private registry?: ToolRegistry) {
+  constructor(private readonly db: Sqlite, config: Readonly<Config['mcp']> | (() => Readonly<Config['mcp']>), private readonly log: LogSink, private registry?: ToolRegistry, private readonly authDeps?: McpAuthDependencies) {
     this.#config = typeof config === 'function' ? config : () => config;
   }
   bindRegistry(registry: ToolRegistry): void { this.registry = registry; }
+
+  /** 这台 server 现在这一版凭据的号。没接凭据库时恒为 0 —— 指纹里也就等于没有这一项。 */
+  #authVersion(name: string): number {
+    return this.authDeps?.store.version(name) ?? 0;
+  }
+
+  #providerFor(server: ServerConfig): McpOAuthProvider {
+    if (!this.authDeps) throw new Error(`${server.name} 配了 auth.mode=oauth，但这个运行时没有凭据库（缺 LUOLI_MASTER_KEY？）`);
+    this.authDeps.store.ensureOAuth(server.name, server.auth?.scope ?? null);
+    return new McpOAuthProvider(server.name, this.authDeps.store, this.authDeps.pending, {
+      publicUrl: this.authDeps.publicUrl(),
+      ...(server.auth?.scope ? { scope: server.auth.scope } : {}),
+      ...(server.auth?.clientId ? { clientId: server.auth.clientId } : {}),
+    });
+  }
+
+  /**
+   * 开一次授权。返回授权 URL 给界面 —— 人点了才去，`reconcile()` 自己不弹浏览器。
+   * 已经有可用 token 时 SDK 直接回 `'AUTHORIZED'`，这时顺手重连一次就行。
+   */
+  async authorize(server: ServerConfig): Promise<{ status: 'AUTHORIZED' | 'REDIRECT'; authorizationUrl: string | null; expiresAt: number | null }> {
+    if (server.transport !== 'http' || !server.url) throw new Error(`${server.name} 不是 http transport，没有 OAuth 可走`);
+    const provider = this.#providerFor(server);
+    if (!provider.redirectUrl) throw new Error('还没配 `webui.publicUrl`，OAuth 回调没有可注册的地址 —— 去设置页填上它再登录。');
+    const status = await beginMcpAuthorization(provider, server.url, server.auth?.scope);
+    const entry = this.authDeps!.pending.peek(server.name);
+    this.log.event({ level: 'info', kind: 'mcp.auth', summary: `${server.name} ${status === 'AUTHORIZED' ? '已有可用凭据' : '开始授权'}`, data: { server: server.name, status } });
+    return { status, authorizationUrl: entry?.authorizationUrl ?? null, expiresAt: entry?.expiresAt ?? null };
+  }
+
+  /** 回调那一步：用 code 换 token，成功后单台重连。 */
+  async completeAuthorization(server: ServerConfig, code: string): Promise<'AUTHORIZED' | 'REDIRECT'> {
+    if (server.transport !== 'http' || !server.url) throw new Error(`${server.name} 不是 http transport，没有 OAuth 可走`);
+    const status = await completeMcpAuthorization(this.#providerFor(server), server.url, code);
+    this.log.event({ level: status === 'AUTHORIZED' ? 'info' : 'warn', kind: 'mcp.auth', summary: `${server.name} 换取 token ${status === 'AUTHORIZED' ? '成功' : '未完成'}`, data: { server: server.name, status } });
+    return status;
+  }
+
+  /** 注销：凭据全清、pending 清、当场断开。下一次 reconcile 会把它重新记成 `needs_auth`。 */
+  async signOut(server: ServerConfig): Promise<void> {
+    if (!this.authDeps) return;
+    this.authDeps.store.invalidate(server.name, 'all');
+    this.authDeps.pending.forget(server.name);
+    const existing = this.#clients.get(server.name);
+    if (existing) { this.#clients.delete(server.name); await this.#discard(existing.transport, existing.client); }
+    this.log.event({ level: 'info', kind: 'mcp.auth', summary: `${server.name} 已注销`, data: { server: server.name } });
+  }
 
   /**
    * 按 server 名串行。这一处才是「两条 reconcile 各 spawn 一个子进程」的真正入口：查缓存与
@@ -95,7 +175,7 @@ export class McpManager {
   }
 
   async #connect(server: ServerConfig): Promise<Client> {
-    const print = fingerprint(server);
+    const print = fingerprint(server, this.#authVersion(server.name));
     const existing = this.#clients.get(server.name);
     // 指纹相同还不够，得判活性：子进程被 kill -9 之后这条缓存永远命中，而拿死 client 调
     // `listTools()` 必抛 —— cron 与 `/api/mcp/:name/reconnect` 就都成了同一条死路，那个
@@ -106,8 +186,12 @@ export class McpManager {
     if (existing) { this.#clients.delete(server.name); await this.#discard(existing.transport, existing.client); }
     const client = new Client({ name: 'luolicore', version: '0.1.0' });
     const transport: McpTransport = server.transport === 'stdio'
-      ? new StdioClientTransport({ command: server.command!, args: server.args ?? [], ...(server.env ? { env: server.env } : {}) })
-      : new StreamableHTTPClientTransport(new URL(server.url!), server.headers ? { requestInit: { headers: server.headers } } : undefined);
+      // **`stderr: 'pipe'`**：SDK 的默认是 `'inherit'`，于是一台 server 打印的
+      // 「打开这个链接授权」「缺 XXX_TOKEN」直接写进 bot 进程的 stderr —— 不进 LogSink、
+      // 不落库、界面上一个字都没有，而这恰好是「为什么它连不上」最常见的答案所在。
+      ? new StdioClientTransport({ command: server.command!, args: server.args ?? [], stderr: 'pipe', ...(server.env ? { env: server.env } : {}) })
+      : new StreamableHTTPClientTransport(new URL(server.url!), this.#httpOptions(server));
+    if (server.transport === 'stdio') this.#pipeStderr(server.name, transport);
     this.#transports.add(transport);
     transport.onclose = () => this.#markDead(server.name, transport);
     // **只有 onclose 判死。** transport 的 onerror 也会为「一行读不动的 JSON」「stdin 写失败」
@@ -133,6 +217,46 @@ export class McpManager {
       void this.#discard(transport, client);
       throw error;
     }
+  }
+
+  /**
+   * http transport 的构造参数。凭据在这里注入，**不经过配置** —— `mcp.servers` 要进
+   * `config_revisions` 与配置导出，而按键名判密的那条正则匹配不到 `Authorization`。
+   */
+  #httpOptions(server: ServerConfig): { requestInit?: { headers: Record<string, string> }; authProvider?: McpOAuthProvider } | undefined {
+    const mode = server.auth?.mode ?? 'none';
+    const headers = { ...(server.headers ?? {}) };
+    if (mode === 'bearer') {
+      const token = this.authDeps?.store.bearerToken(server.name);
+      // 拿不到就**不编一个空 Bearer 发出去**：那样对方回的是「token 无效」，而真相是本地没有
+      // 这一份（没配、或者换过 LUOLI_MASTER_KEY 解不开了）。让它照常撞 401，然后被记成 needs_auth。
+      if (token) headers.Authorization = `Bearer ${token}`;
+    }
+    if (mode === 'oauth') return { authProvider: this.#providerFor(server), ...(Object.keys(headers).length ? { requestInit: { headers } } : {}) };
+    return Object.keys(headers).length ? { requestInit: { headers } } : undefined;
+  }
+
+  /**
+   * 把 stdio server 的 stderr 逐行收进日志。**这是「需要登录的 stdio server」唯一能给出的线索** ——
+   * 那类 server 的登录是它自己在带外做的（照 harness 的先例，docs/07 §4.5），我们能做的
+   * 就是别把它说的话丢掉。
+   *
+   * 逐行而不是整块：一条 500 KB 的栈会把日志行撑爆，而 `LogSink` 的载荷是要落盘的。
+   */
+  #pipeStderr(name: string, transport: McpTransport): void {
+    const stream = (transport as { stderr?: { on(event: 'data', listener: (chunk: Buffer) => void): void } }).stderr;
+    if (!stream) return;
+    let buffered = '';
+    stream.on('data', (chunk) => {
+      buffered += chunk.toString('utf8');
+      const lines = buffered.split('\n');
+      // 最后一段可能是半行，留到下一块。上界 8 KB：一台不打换行的 server 不该让这个缓冲无界涨。
+      buffered = (lines.pop() ?? '').slice(-8192);
+      for (const line of lines) {
+        const text = line.trim();
+        if (text) this.log.event({ level: 'warn', kind: 'mcp.stderr', summary: `${name}: ${text.slice(0, 2000)}`, data: { server: name } });
+      }
+    });
   }
 
   /** 连接没了。**不从 `#clients` 删**，只标死 —— 留着这条才保得住那个还得关的 handle。 */
@@ -197,6 +321,10 @@ export class McpManager {
       this.log.event({ level: 'info', kind: 'mcp.disconnect', summary: `${name} removed from configuration`, data: { server: name } });
     }
     const targets = config.enabled ? (config.servers as unknown as ServerConfig[]).filter((server) => server.enabled !== false) : [];
+    // 配置里已经没有的 server，它的凭据不该永远留着（照 `SkillLoader.scan()` 末尾清陈行的做法）。
+    // 判据用**整份 servers** 而不是 `targets`：停用一台 server 不该把它的 token 一起丢掉，
+    // 否则「停一下再开」等于要人重新登录一次。
+    this.authDeps?.store.prune((config.servers as unknown as ServerConfig[]).map((server) => server.name));
     // **先并行 discover 到临时表，全部落定之后才在一个同步段里换掉注册表。** 反过来（先
     // `unregisterBySource` 再逐台串行 await）会给模型开一段「一个 MCP 工具都没有」的窗口，
     // 每台最长 `connectTimeoutMs`（默认 15s），而 `mcp.healthCheckCron` 默认 5 分钟就开一次
@@ -219,10 +347,28 @@ export class McpManager {
     }
   }
 
+  /**
+   * 判死。**「要登录」单独一档**：它跟「连不上」在运维动作上是两件完全不同的事 —— 前者要人去
+   * 点一次授权，后者要人去看命令行/网络。此前两者挤在 `down` 里，而 `last_error` 是一句
+   * `Error POSTing to endpoint: <原始响应体>`，从里面读不出该做什么。
+   */
   #recordDown(server: ServerConfig, error: unknown): void {
-    const message = error instanceof Error ? error.message : String(error);
-    this.db.prepare(`INSERT INTO mcp_servers(name,transport,min_role,enabled,timeout_ms,state,last_error,updated_at) VALUES (?,?,?,?,?,'down',?,?) ON CONFLICT(name) DO UPDATE SET state='down',last_error=excluded.last_error,updated_at=excluded.updated_at`).run(server.name, server.transport, server.minRole ?? this.#config().defaultMinRole, 1, server.timeoutMs ?? 30_000, message, Date.now());
-    this.log.event({ level: 'warn', kind: 'mcp.error', summary: message, data: { server: server.name } });
+    const authFailure = server.transport === 'http' && looksLikeAuthFailure(error);
+    const state = authFailure ? 'needs_auth' : 'down';
+    const message = authFailure ? this.#authHint(server) : error instanceof Error ? error.message : String(error);
+    this.db.prepare(`INSERT INTO mcp_servers(name,transport,min_role,enabled,timeout_ms,state,last_error,updated_at) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET state=excluded.state,last_error=excluded.last_error,updated_at=excluded.updated_at`).run(server.name, server.transport, server.minRole ?? this.#config().defaultMinRole, 1, server.timeoutMs ?? 30_000, state, message, Date.now());
+    this.log.event({ level: 'warn', kind: authFailure ? 'mcp.auth' : 'mcp.error', summary: `${server.name}: ${message}`, data: { server: server.name, ...(authFailure ? { authMode: server.auth?.mode ?? 'none' } : {}) } });
+  }
+
+  /** 「要登录」这一档要说清**下一步做什么**，而下一步取决于 `auth.mode` 配的是哪一种。 */
+  #authHint(server: ServerConfig): string {
+    switch (server.auth?.mode) {
+      case 'oauth': return '这台 server 要求登录。在扩展页点〔登录〕走一遍浏览器授权。';
+      case 'bearer': return this.authDeps?.store.bearerToken(server.name)
+        ? '这台 server 拒收了保存的 token（过期或被撤销）。在扩展页重新填一次。'
+        : '这台 server 要求登录，而本地没有保存 token。在扩展页填一个。';
+      default: return '这台 server 要求登录，而它的 auth.mode 是 none。编辑它，选 bearer（填 token）或 oauth（浏览器授权）。';
+    }
   }
 
   /**

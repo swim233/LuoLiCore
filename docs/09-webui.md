@@ -360,48 +360,129 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
   一律记成「取决于运行时」：试跑没有真实执行上下文，含糊其辞比编一个答案好。
   规则本身仍在「全部配置」的 `approval.rules` 里编辑。
 
-### 3.8 扩展（Skills / Plugins / MCP / 自定义工具）
+### 3.8 扩展（Skills / MCP / Plugins / 自定义工具）
 
-四类扩展继续共用卡片网格，但操作按各自真实生命周期区分：
+**这一页的活儿不是「列出扩展」，是决定模型被允许具备什么能力、并且真的看过。** M12 之后其中
+两类是模型自己写下来的，所以视觉主轴取 **来源 + 有没有人看过**，而不是「开着还是关着」。
 
-- **Skills**：name、description、min-role、状态、来源、允许工具、模型建议与附属文件；可 `[新建]`、
-  `[编辑]` 正文/frontmatter、启停和删除。`GET /api/skills/:name` 返回正文与文件清单；
-  `POST /api/skills`、`PUT /api/skills/:name`、`DELETE /api/skills/:name` 直接安全写入或删除
-  `SKILL.md`，随后重扫并同步数据库。新建时未指定 `min-role` 则热读 `skills.defaultMinRole`。
-  卡片带**来源徽标**（随包 / 本地 / 安装包，来自 `skills.source`）。
-  `[安装 skill 包]` 选一个 zip → `POST /api/skills/package`，装的是带 `scripts/` / `bin/` /
-  `references/` 的整棵目录（[07 §2.5](./07-skills-plugins-mcp.md)）；**落地一律停用**，
-  且带独立的「未审阅」徽标，详情里摊开 `SKILL.md` 正文与附带文件清单 ——
-  「这个包往我机器上放了什么」是启用它之前唯一要回答的问题。
-  **随包那四份说明书只放行启停**：改正文 / 描述 / 删除回 403 `skill_reserved`
-  （`write_skill` 一直拒改它们，此前 WebUI 侧却能改能删）。
-  `skills.enabled` 或 `tools.selfExtend.skills.enabled` 关着时页顶给提示条，形状照 MCP 那条
-  总开关提示 —— 这次「为什么装不了」全靠人去翻 schema 默认值。
-- **Plugins**：name、version、minRole、load_error；启用 plugin 会执行全信任代码，因此二次确认。
-  启停与重载继续走 `PATCH /api/plugins/:name` / `POST /api/plugins/:name/reload`。
-  模型现在能写 `plugin.js`（[07 §6](./07-skills-plugins-mcp.md)），所以加了两个端点：
-  `GET /api/plugins/:name/source` 只读地摊开源码 —— 没有它，「启用前先看过源码」就只是句口号；
+实现在 `packages/webui/src/views/ExtensionsPage.vue` + `src/components/extensions/`
+（四个纯呈现子组件 + 一份共用类型），**不在 `ConsoleView.vue` 里**。写操作与 busy 态全在页面外壳，
+子组件不碰 `api()`。
+
+> **共用卡片网格那条口径被推翻了。** 原文是「四类扩展继续共用卡片网格，但操作按各自真实生命周期
+> 区分」，实现是一个 `extensionRows` 把四类拼成一个数组塞进一个 `provider-grid`，八个动作按钮靠
+> `v-if="item.kind === ..."` 分流。代价是每一类只显示得出四类的**交集**：MCP 的连接状态与凭据、
+> plugin 的 `provides`、skill 的 `requires-tools`、自定义工具的 runtime/scope 全都摆不下，
+> 而这些字段 API 早就在发。另有一条纯排版的代价：`.provider-grid` 会把同排每张卡片一起拉到最高
+> 那张的高度，一份长描述或一台发现了 70 个工具的 server 就能把邻居撑成内容散开的空盒子。
+
+**四个分段（`.subtabs` + `[data-ext-tab="<key>"]`，形状照设置页那四个 tab）**，
+键是 `skills` / `mcp` / `plugins` / `tools`。改这里要连同
+`tests/webui/console.render.test.ts` 的 `EXTENSION_TABS` 一起改 —— 漏一个分支，那一段从此没人
+渲染过（`docs/24 · R-UI-01` 是没有渲染用例就拆子视图的那一次）。
+
+**两个结构性元素：**
+
+- **来源脊**：每行左侧 3px，`bundled` 灰 / `local` 主色 / `package` 青 / 模型自撰 琥珀 /
+  加载失败 玫红。**「未审阅」有自己的形态**（虚线边框 + 琥珀脊）而不只是换一个标签的字 ——
+  「没人看过」和「有人看过之后关掉」是两回事，混成一个标签运维就分不清哪些在等自己。
+- **待你处理**：页顶一条，数三类在等人的东西（未审阅的包 / 未复审的脚本 / 要登录的 server /
+  加载或连接失败）。点一下跳到对应分段。归零时降级成一句灰字，不放庆祝文案。
+
+四类各自的版式与「说是之前要看什么」：
+
+- **Skills**（阅读式列表）—— 要看的是**正文**；装包进来的还要看它带了哪些文件
+  （「这个包往我机器上放了什么」是启用它之前唯一要回答的问题）。行上摆 name、description、
+  来源徽标、`min-role`、`requires-tools`、`allowed-tools`、上次变更。
+  **`requires-tools` 必须摆出来**：这几个工具不在本轮工具集里时这份 skill 压根不进模型目录
+  （`SkillLoader.catalog()`），而 `tools.selfExtend.*` 出厂全关 —— 于是一份说明书在这一页上
+  显示「可用」，模型那边却永远看不见它。`GET /api/skills` 因此多回 `requires_tools` 与
+  `allowed_tools` 两列（**只取那两个字段，不放行整份 `frontmatter_json`**，G-EXT-06 的口径不变）。
+  可 `[新建]`、`[编辑]`/`[读一遍]`、启停、删除、`[装 Skill 包]`。
+  **随包那四份说明书只放行启停**：改正文 / 描述 / 删除回 403 `skill_reserved`，界面上那个删除
+  按钮因此根本不渲染（摆一个点下去必然报错的按钮比不给更难排查）。
+  `skills.enabled` 关着时页顶给提示条并带 `[打开总开关]`。
+- **MCP**（连接表）—— 要看的是**活没活、谁的、挂了哪些工具、登录了没有**。列：server（名 + url
+  或命令行）、状态、凭据、工具条数、最低角色、上次核对、动作。要登录 / 连不上的行排在最前并
+  整行浅琥珀底。详见 [§3.8.1](#381-需要登录的-mcp-server)。
+  - **工具清单从行内挪进抽屉**（`UiDrawer`）。此前它是一个封高的内嵌滚动区：条数没有上限
+    （一台 agent-browser 就发现 64–70 个），不封高的话一台 server 足以把整页拉到 1700px；
+    封高之后清单里读不出总数，所以又在副标题补了一句「N 个工具」。现在**条数进列、清单进抽屉**，
+    既读得出总数，也读得到每个工具的描述 —— 那份描述由对面那台 server 写，是提示注入面之一
+    （[05 §7](./05-tools-and-permissions.md#7-提示注入防护)），值得能看见。
+  - **`mcp.enabled` 是总开关且出厂为 `false`**（`reconcile` 一上来就对它 early-return）：
+    关着时页顶与新建对话框都给横幅加 `[打开总开关]`，保存后的 Toast 也说明「存下了但不会连」——
+    否则运维拿到的是 `ok:true` 加一条永远停在「等待连接」的行（docs/20 · W-CFG-02）。
+  - **`[重连]` 直接用 `POST /api/mcp/:name/reconnect` 的返回值**（`{state, error}`）：此前整块
+    响应被丢掉、恒弹一句「已重连」，而这一跳最想知道的恰好是它这次连上没有。
+  - **「上次核对」列 + 陈旧提示**：`mcp_servers.state` 由 `mcp-health` 每 5 分钟对一次账，
+    子进程被 `kill -9` 之后最长 5 分钟才从 `up` 改过来。判据用 `updated_at`（每次成功 reconcile
+    都会推）而不是去解 cron 表达式。
+- **Plugins**（代码物件卡）—— 要看的是**源码**，所以主动作是 `[看源码]`
+  （`GET /api/plugins/:name/source`；没有它，「启用前先看过源码」就只是句口号）。
+  卡片上摆 `provides_json` 解出来的「它往运行时加了 N 个工具 / M 个 hook」—— 那是 MCP 工具条数的
+  plugin 对应物，端点一直在发而界面一直没读。启用要二次确认（全信任、无沙箱）。
+  `[重载]` 之后**按 `hotReloadReliable` 分流**：跑在 tsx（`pnpm dev`）下时热重载静默跑旧代码，
+  这时弹的是不自动消失的 warn 并在卡片上常驻一条提示，而不是一句「已重载」。
   `DELETE /api/plugins/:name` 连目录带库里那行一起删。
-- **自定义工具**（模型自撰写的沙箱脚本）：卡片显示 `custom_<name>`、描述、runtime、最低角色与
-  作用域。**「未审阅」是独立于「停用」的一档** —— 「没人看过」和「有人看过之后关掉了」是两回事，
-  混成一个标签运维就分不清哪些在等自己。点 `[眼睛]` 只读地看参数 schema 与脚本正文，
-  确认后在同一个对话框里启用（`PATCH /api/custom-tools/:name`，顺手盖 `reviewed_at`，
-  随即 `reconcile()` —— 只改库不重扫的话，界面说启用了而模型下一轮还是看不见）。
+- **自定义工具**（待复审队列）—— 要看的是**脚本正文与参数**，未审阅的排在最前。行上直接摆
+  runtime、作用域、超时、由谁写下，不用点开才看得到。**正文与参数在这里是只读的**：顺手改一行
+  会让 `definition_hash` 与模型以为的那份定义脱节，要改就让模型改，或者直接删。
   启用一段模型写的脚本记 **warn** 级 `webui.action`，跟放宽工具权限同一档。
-  `DELETE /api/custom-tools/:name` 连注册一起摘掉。
-  **正文与参数在这里是只读的**：顺手改一行会让 `definition_hash` 与模型以为的那份定义脱节，
-  要改就让模型改，或者直接删。
-- **MCP**：卡片显示 transport、连接状态、失败原因、最小角色、**工具条数**与发现到的工具名；可新建、
-  编辑、启停、删除和重连。工具名清单**封在一个固定高度的内嵌滚动区里**：条数没有上限（一台
-  agent-browser 就发现 64 个），而卡片网格会把同排每张卡片一起拉到最高那张的高度 ——
-  不封高的话一台 server 足以把整页拉到 1700px、并让邻居卡片变成内容散开的空盒子。
-  封高之后清单里读不出总数，所以副标题补了「N 个工具」。表单按 stdio / Streamable HTTP 切换 command、args、env 或 url、headers，并覆盖
-  minRole、toolAllow、toolDeny、timeoutMs。CRUD 写入 `mcp.servers` 配置覆盖与 revision，发
-  `config.changed` 后立即 `McpManager.reconcile()`；不是直接改运行时缓存。重名返回 409。
-  **`mcp.enabled` 是总开关且出厂为 `false`**（`reconcile` 一上来就对它 early-return）：关着的时候
-  页面顶部与新建对话框都给一条横幅加 `[打开总开关]`，保存后的 Toast 也说明「存下了但不会连」——
-  否则运维拿到的是 `ok:true` 加一条永远停在「等待连接」的行，正是「保存成功但运行时没变」
-  那类反馈（docs/20 · W-CFG-02）。
+
+**通道闸提示条要指名道姓说出真正关着的那个键。** 判据是「`tools.selfExtend.enabled` 主闸或
+本分段那个子闸任一为假」，而提示文案此前恒定写 `tools.selfExtend.skills.enabled` —— 主闸关着时
+它指向的那个键其实是开的，照它去翻只会发现「明明开着」。现在按当前分段选键，并给
+`[打开这条通道]`。
+
+**页内确认框取代 `window.confirm` / `window.prompt`**（此前六处）。它是这一页唯一不走设计系统的
+模态：系统绘制、深色主题下露出亮色面板、长文案会被截断 —— 而这几处的文案恰恰是「启用之前你该
+知道什么」。装包的多份 `SKILL.md` 选择也从 `prompt` 改成一个带 `UiSelect` 的对话框。
+
+#### 3.8.1 需要登录的 MCP server
+
+规格在 [07 §4.5](./07-skills-plugins-mcp.md)；这里只说界面。
+
+`mcp_servers.state` 多一档 **`needs_auth`（「要登录」）**。它跟 `down` 分开是因为运维动作完全
+不同：前者要人去点一次授权，后者要人去看命令行 / 网络。此前两者挤在 `down` 里，而 `last_error`
+是一句 `Error POSTing to endpoint: <原始响应体>` —— 从里面读不出该做什么。
+
+`GET /api/mcp` 每行多两块（都**不含密文**）：
+
+- `credential`：`{ mode, scope, hint, expiresAt, authorizedAt, authorized }`。`hint` 是 bearer
+  token 的末 4 位（照 `providers.api_key_hint` 的既有做法），界面因此不必解密就能显示。
+- `pendingAuthorization`：`{ authorizationUrl, expiresAt }`。刷新页面之后〔登录〕按钮还得能点，
+  所以这条要能在**不消费掉 `state`** 的前提下读到。
+
+三种 `auth.mode` 在这一行上的样子：
+
+| `auth.mode` | 凭据列 | 动作 |
+|---|---|---|
+| `none` | 「不需要」 | 撞上 401 时状态是「要登录」，提示语指向「去把 `auth.mode` 改成 bearer 或 oauth」——**这个模式下没有登录按钮**，因为还没决定用哪种方式 |
+| `bearer` | `Bearer` 徽标 + `····末4位` + 到期时间 | `[填 token]` / `[换 token]` → `PUT /api/mcp/:name/auth`；有凭据时另给 `[注销]` |
+| `oauth` | `OAuth` 徽标 + 到期时间 | `[登录]` → `POST /api/mcp/:name/auth/start`，拿到授权 URL 后 `window.open` 到新标签；`[注销]` → `DELETE /api/mcp/:name/auth` |
+
+**授权 URL 由服务端算，不由前端拼。** 只有服务端知道 `webui.publicUrl`，而 `redirect_uri` 一旦
+注册进对方那里就不好改；`publicUrl` 没配时这条路**直接断掉并说明缺什么**，不编一个 127.0.0.1
+的地址（照 `/webui` 命令没配 publicUrl 时那句话的做法）。
+
+**回调那一跳的落点是浏览器地址栏，不是 fetch**，所以服务端只能把结果编进 URL：
+`302 → /?mcpAuth=<status>[&detail=...]`。控制台在 `onMounted` 里读出来弹一条 toast、
+把参数擦掉（`replaceState`，否则刷新会再弹一遍）、并切到扩展页。不读它的话，人被重定向回来
+只看到一个多了查询串的首页 —— 「授权到底成没成」一个字都没有。
+
+`mcpAuth` 的取值：`ok` / `denied` / `bad_state` / `incomplete` / `failed` / `not_found` /
+`unavailable`，每一条对应一句说清下一步的话。**`bad_state` 不含糊**：state 无效、已用过、
+或已过期（10 分钟）都归它，文案直接说「回扩展页重新点一次〔登录〕」。
+
+新建 / 编辑 MCP 的表单在 http transport 下多一组：登录方式（三选）、`scope`、`client_id`
+（对方不支持动态注册时手填）。表单里**不收 token** —— 那一栏在列表行的 `[填 token]` 对话框里，
+写入即加密、任何读路径都不回显。表单上写明这件事，因为「凭据不在这份配置里」是个反直觉但
+重要的事实（它同时是 `headers.Authorization` 明文进 `config_revisions` 那条路的修复）。
+
+`stdio` server **没有** `auth` 字段：OAuth 是 HTTP 的事，而一台 stdio server 的「登录」是它自己
+在带外做的。界面上这类 server 的凭据列恒为「不需要」，而它的 stderr 现在会逐行进日志
+（`mcp.stderr`）—— 那是这类 server 唯一能给出的线索。
 
 ### 3.9 子 Agent（Agents）
 
@@ -752,10 +833,14 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
 | `POST /api/schedules` | 建一个定时任务。body `{key, name, mode, text, cron\|at}`。**落点从 `contexts` 按 `key` 反查**，不收客户端给的 `chatId`/`threadId`（同 [05 §8](./05-tools-and-permissions.md) 对工具的要求）；归属身份取 `access.bootstrapOwnerId`，没配则 `owner_unset` 400。校验与 `schedule_create` 工具**共用 `createScheduledJob`** —— 两边各写一遍的话 WebUI 迟早能建出工具建不出来的任务 |
 | `DELETE /api/schedules/:id` | 停用一条任务：置 `cancelled` 并从 `Scheduler` 摘掉。已经结束的行回 `{cancelled:false}` 而不是假成功 |
 | `POST /api/schedules/:id/trigger` | 立即触发一次。**不等它跑完**（`mode='agent'` 的一次触发是一整轮真实模型调用，同步等会把请求挂到 `concurrency.turnTimeoutMs`），先回 `{started:true}`，结果落在该行的 `lastState`/`lastError` 与日志里。非 `active` 的任务回 409；runner 还没 `load()`（Telegram 投递通道未就绪）时回 400 `not_ready` —— 启动窗口内触发会开一条**发不出去**的轮次：跑完模型、记完账，最后不提交（`docs/28 · L-SCH-01`）；不影响 cron 的下一次 |
-| `GET/POST /api/skills` `GET/PUT/PATCH/DELETE /api/skills/:name` | Skill 列表、正文/frontmatter CRUD、启停。列表回 `{name, description, min_role, enabled, source, load_error, updated_at}` —— **不是 `SELECT *`**：`path`（宿主文件系统路径）、`content_hash`、整份 `frontmatter_json` 前端一个都不用。随包 skill 的 `DELETE` 与「改 `enabled` 以外任何字段」回 403 `skill_reserved` |
+| `GET/POST /api/skills` `GET/PUT/PATCH/DELETE /api/skills/:name` | Skill 列表、正文/frontmatter CRUD、启停。列表回 `{name, description, min_role, enabled, source, load_error, updated_at, allowed_tools, requires_tools}` —— **不是 `SELECT *`**：`path`（宿主文件系统路径）、`content_hash`、整份 `frontmatter_json` 前端一个都不用；后两列是从 `frontmatter_json` 里**只取那两个字段**再发出去（`requires-tools` 没被满足的 skill 压根不进模型目录，那件事必须在列表上看得见，见 §3.8）。随包 skill 的 `DELETE` 与「改 `enabled` 以外任何字段」回 403 `skill_reserved` |
 | `POST /api/skills/package` | 装一个 skill 包。multipart，字段 `file` 收 zip，可选 `name` / `subdir` / `overwrite`。与 `install_skill` 工具**共用 `installSkillPackage`**（端点自己抄一遍的话两条路迟早在校验上分叉）。落地即停用。包根有歧义时回 400 `skill_ambiguous_root` 并列出候选，重名回 409 |
-| `GET/PATCH /api/plugins[/:name]` `POST /api/plugins/:name/reload` | Plugin |
-| `GET/POST /api/mcp` `PATCH/DELETE /api/mcp/:name` `POST /api/mcp/:name/reconnect` | MCP transport CRUD、热重连 |
+| `GET/PATCH /api/plugins[/:name]` `POST /api/plugins/:name/reload` `GET/DELETE /api/plugins/:name/source` | Plugin。`reload` 回 `{name, hotReloadReliable, warning?}` —— 跑在 tsx 下时热重载静默跑旧代码，界面按这个字段分流（§3.8） |
+| `GET/POST /api/mcp` `PATCH/DELETE /api/mcp/:name` `POST /api/mcp/:name/reconnect` | MCP transport CRUD、热重连。列表每行带 `credential` 与 `pendingAuthorization`（**都不含密文**，见 §3.8.1）与 `connectedAt` |
+| `POST /api/mcp/:name/auth/start` | 开一次 OAuth 授权，回 `{status, authorizationUrl, expiresAt}`。`webui.publicUrl` 没配时 400 并说明缺什么；`auth.mode` 不是 `oauth` 时 400 `mcp_auth_mode` |
+| `GET /api/mcp/oauth/callback` | 授权服务器重定向回来的落点。**在鉴权白名单里** —— session cookie 是 `SameSite=Strict`，跨站重定向不会带上它；准入判据换成 OAuth 自己的 `state`（32 字节随机、单次使用、10 分钟、只在进程内）。换完 token 单台重连，然后 `302 → /?mcpAuth=<status>` |
+| `PUT/DELETE /api/mcp/:name/auth` | 设 / 清 bearer token。写入即加密（`LUOLI_MASTER_KEY`），任何读路径都不回显；拒 `«redacted»`。缺凭据库（通常是缺 `LUOLI_MASTER_KEY`）时四条 auth 端点一律 500 `mcp_auth_unavailable` —— **不假装保存成功**（照 `PUT /api/quota` 回 `not_implemented` 的先例） |
+| `GET/PATCH/DELETE /api/custom-tools[/:name]` | 模型自撰写的工具。缺装配时 500 `not_implemented` 而不是空数组 |
 | `GET /api/agents` `POST /api/agents/:name/dryrun` | 子 agent 定义与 NDJSON 隔离试跑（定义增删改走 `agent.agents` 配置） |
 | `GET /api/logs` `GET /api/logs/:id` `GET /api/logs/trace/:traceId` `GET /api/logs/blob?ref=` | 日志 |
 | `GET /api/usage` | 用量明细（`usage_ledger`，最近 1000 条） |
@@ -817,31 +902,47 @@ event: approval.decided  data: {id, tool, risk, chatId, approved, actor, channel
 
 ## 6. 前端结构
 
+**这是盘上的实际形状**，不是构想。此前这一节列着 `stores/`（9 个）与 `components/`（10 个）
+一整棵目录树，而两者都不存在 —— pinia 装在 `main.ts` 里但一个 store 都没有，共用组件全在 `ui/`。
+文档写着不存在的结构，比不写更容易让人照着找。
+
 ```
 packages/webui/
 ├── index.html
-├── vite.config.ts             base: '/', proxy /api → :8787（dev）
+├── vite.config.ts             build → dist；dev server 5173，proxy /api → WEBUI_DEV_API ?? :8787
 └── src/
-    ├── main.ts                createApp + router + pinia（无 UI 框架插件）
+    ├── main.ts                createApp + router + pinia（无 UI 框架插件）+ 自托管字体
     ├── styles.css             设计变量（浅/深两套 + 字体栈）+ 全站样式，唯一的样式来源
-    ├── router/index.ts        路由 + 全局守卫（未登录 → /login）
-    ├── stores/
-    │   ├── auth.ts  events.ts（SSE 单例）  dashboard.ts  chats.ts
-    │   ├── providers.ts  logs.ts  usage.ts  config.ts  approvals.ts
-    ├── api/client.ts          fetch 封装：CSRF 头、401 跳登录、统一错误 toast
+    ├── router/index.ts        三条路由（/login /setup /），全局守卫（未登录 → /login）
+    ├── api/client.ts          fetch 封装：CSRF 头、401 跳登录、统一错误 toast、NDJSON 流
     ├── ui/                    自建原语，全部只用 styles.css 的变量
-    │   ├── toast.ts           pushToast()：全站唯一的通知通道
+    │   ├── toast.ts           pushToast() / toastError()：全站唯一的通知通道
     │   ├── ToastHost.vue      右上角通知栈（success/info/warn/error）
-    │   ├── UiButton.vue  UiTag.vue
+    │   ├── UiButton.vue  UiTag.vue  types.ts
     │   ├── UiCheckbox.vue  UiSwitch.vue  UiNumber.vue  UiSelect.vue   ← 点选与步进控件，见下
     │   ├── DataGrid.vue       表格：列定义 + 具名插槽 + 分页 + 单/多选
-    │   ├── UiModal.vue  UiDrawer.vue  ChainPicker.vue
-    ├── components/
-    │   ├── StatusBar.vue  RoleTag.vue  TokenMeter.vue  CostBadge.vue
-    │   ├── ContextViewer.vue  CommitTimeline.vue  TraceTree.vue
-    │   ├── DiffView.vue  SecretInput.vue  SchemaForm.vue（config.schema → 表单）
-    └── views/                 每个 §3 页面一个 .vue
+    │   ├── UiModal.vue  UiDrawer.vue  ChainPicker.vue  AttachmentStrip.vue
+    │   ├── SchemaForm.vue     config.schema → 表单（设置页「全部配置」）
+    │   └── UiLineChart.vue  UiBarChart.vue  UiRing.vue                ← 手写 SVG，无图表库
+    ├── components/extensions/  扩展页四类各一个纯呈现组件 + 一份共用类型（§3.8）
+    │   ├── types.ts           四类的行类型、来源判据、状态标签映射
+    │   └── SkillList.vue  McpTable.vue  PluginCards.vue  CustomToolQueue.vue
+    └── views/
+        ├── LoginView.vue
+        ├── ExtensionsPage.vue 扩展页（§3.8）。ConsoleView 里只留 `<ExtensionsPage>` 一行
+        └── ConsoleView.vue    其余 13 个页面（docs/00 §2.1 的 D-02 就是它）
 ```
+
+- **抽子组件一律用普通 `<script setup>`，不返回任何 Proxy。** 上一次把控制台拆成 15 个子视图时，
+  子 SFC 的 `setup` 返回了一个只有 `get` 陷阱的 Proxy，而 Vue 解析模板绑定走
+  `hasOwn(setupState, key)` —— `pnpm build` 通过、`pnpm test` 全绿、`/login` 打得开，
+  而 14 个页面全是空白（`docs/24 · R-UI-01`）。**`.vue` 模板不进 `tsc --noEmit`**，
+  所以判据只能靠 `tests/webui/console.render.test.ts` 真的渲染一次。
+- **WebUI 不 import `@luoli/shared`。** 那个包的 `exports` 指向 `dist/index.js`，而它 import
+  `node:crypto`；vite 会把它 externalize 成一个一调用就抛的桩，表现是整页空白加一条
+  「Module "node:crypto" has been externalized for browser compatibility」。而 vitest 把
+  `@luoli/shared` 别名到 `src/index.ts` 并跑在 node 里，**所以渲染用例是绿的** ——
+  这条只有真浏览器发现得了。要共用常量就在前端自己留一份（`ROLES` 已经是这么做的）。
 
 - **不引入第三方 UI 框架**。组件框架自带的主题（此前是 PrimeVue + Aura）与总览页那套手写卡片是两套并行的视觉系统，
   同一个页面上会同时出现两种圆角、两种输入框、两种阴影；调它的 CSS 变量只能逼近、不能对齐。`src/ui/` 下的原语

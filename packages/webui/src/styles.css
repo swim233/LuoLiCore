@@ -862,3 +862,101 @@ code { font-family: var(--font-mono); font-size: .82rem; }
 
 /* 重启是唯一一个能让整个部署下线的维护按钮，要看得出来它跟别的不一样。 */
 .maintenance-grid > article.danger { border-color: color-mix(in srgb, var(--rose) 45%, var(--border)); }
+
+/* ── 扩展页（docs/09 §3.8）─────────────────────────────────────────────────────
+   这一页的视觉主轴是**来源 + 有没有人看过**，不是「开着还是关着」：M12 之后其中两类是模型
+   自己写下来的，而运维在这一页的活儿正是「决定模型被允许具备什么能力，并且真的看过」。
+   主轴的载体就是每行左侧那条 3px 的脊 —— 看过两遍之后不读字也能扫完整页。
+
+   四类**不再共用卡片网格**。此前共用的代价不只是难看：`.provider-grid` 会把同排每张卡片
+   一起拉到最高那张的高度（grid 默认 stretch），一份长描述或一台发现了 70 个工具的 server
+   就能把邻居撑成内容散开的空盒子 —— 那条注释还在 `.provider-grid article` 上。
+   现在 Skill 与自定义工具是阅读式列表、MCP 是表、Plugin 是卡片，各自没有这个问题。
+
+   类名一律带 `ext-` 前缀并在这一段里写全。抄 `.field-note` / `.switch-line` 这类只定义在
+   别人后代选择器下的类名拿不到样式，那次的表现是说明文字变满黑正文色（docs/09 §6）。 ── */
+.ext-list, .ext-cards { display: grid; gap: 12px; }
+.ext-cards { grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); align-content: start; }
+
+/* 来源脊。四种来源四种颜色，全部取既有语义色，不新造。 */
+.ext-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 16px;
+  padding: 16px 18px 16px 15px; border: 1px solid var(--border); border-left: 3px solid var(--border);
+  border-radius: 14px; background: var(--surface); }
+.ext-cards .ext-row { grid-template-columns: minmax(0, 1fr); align-content: start; }
+.ext-row.from-local { border-left-color: var(--primary); }
+.ext-row.from-package { border-left-color: var(--cyan); }
+.ext-row.from-model { border-left-color: var(--amber); }
+.ext-row.broken { border-left-color: var(--rose); }
+/* **「未审阅」与「停用」是两档。** 前者没人看过、在等人；后者有人看过之后关掉的。
+   所以它有自己的形态（虚线 + 琥珀脊）而不是只换一个标签的字。 */
+.ext-row.pending-review { border-style: dashed; border-left-style: solid; border-left-color: var(--amber);
+  background: color-mix(in srgb, var(--amber), var(--surface) 96%); }
+.ext-row-main { display: grid; gap: 8px; min-width: 0; }
+.ext-row-main h3 { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; font-size: .95rem; letter-spacing: -.01em; }
+.ext-row-main h3 code { font-size: .9rem; }
+.ext-row-main p { margin: 0; font-size: .82rem; line-height: 1.6; color: var(--muted); overflow-wrap: anywhere; }
+.ext-row-main > code { display: block; padding: 8px 10px; border-radius: 8px; background: var(--surface-2); color: var(--rose); overflow-wrap: anywhere; }
+.ext-row-side { display: grid; justify-items: end; gap: 10px; }
+.ext-facts { display: grid; gap: 4px; justify-items: end; font-size: .78rem; color: var(--ink); white-space: nowrap; }
+.ext-facts small { display: block; color: var(--muted); font-size: .68rem; text-transform: uppercase; letter-spacing: .08em; }
+.ext-cards .ext-row-side { justify-items: start; }
+.ext-cards .ext-facts { grid-auto-flow: column; justify-items: start; gap: 18px; }
+.ext-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px; }
+.ext-cards .ext-actions { justify-content: flex-start; }
+.ext-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.ext-chips small { font-size: .7rem; color: var(--muted); }
+.ext-muted { color: var(--muted); }
+.ext-note-warn { display: flex; align-items: flex-start; gap: 8px; margin: 0; font-size: .78rem; line-height: 1.55; color: var(--amber); }
+.ext-note-warn > i { margin-top: .15em; }
+
+/* 待你处理：这一页真正的收件箱。归零时降级成一句灰字，不放庆祝文案。 */
+.ext-inbox { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 0 0 16px;
+  padding: 10px 14px; border: 1px solid color-mix(in srgb, var(--amber), transparent 60%); border-radius: 12px;
+  background: color-mix(in srgb, var(--amber), transparent 92%); font-size: .8rem; }
+.ext-inbox.quiet { border-color: var(--border); background: var(--surface-2); }
+.ext-inbox-title { display: inline-flex; align-items: center; gap: 7px; color: var(--muted);
+  font: 600 .68rem var(--font-mono); letter-spacing: .12em; text-transform: uppercase; }
+.ext-inbox-item { display: inline-flex; align-items: baseline; gap: 6px; padding: 3px 10px; border: 1px solid var(--border);
+  border-radius: 999px; background: var(--surface); color: var(--ink); font: inherit; font-size: .8rem; transition: 150ms ease; }
+.ext-inbox-item:hover { border-color: var(--primary); color: var(--primary); }
+.ext-inbox-item b { font-size: .95rem; color: var(--amber); }
+
+/* MCP 是一张表：要比较的是状态、凭据、工具条数、上次核对，竖着排才比得出来。 */
+.ext-table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); }
+.ext-table { width: 100%; border-collapse: collapse; font-size: .8rem; }
+.ext-table th { padding: 11px 14px; border-bottom: 1px solid var(--border); color: var(--muted);
+  font: 600 .68rem var(--font-mono); letter-spacing: .1em; text-transform: uppercase; text-align: left; white-space: nowrap; }
+.ext-table td { padding: 12px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+.ext-table tbody tr:last-child td { border-bottom: 0; }
+.ext-table tbody tr.needs-attention { background: color-mix(in srgb, var(--amber), transparent 94%); }
+.ext-table td b { display: block; font-size: .84rem; }
+.ext-table td small { display: block; margin-top: 3px; color: var(--muted); font-size: .72rem; overflow-wrap: anywhere; }
+.ext-table td small.ext-error { color: var(--rose); }
+.ext-table td small.ext-stale { display: inline-flex; align-items: center; gap: 5px; margin-top: 5px; color: var(--amber); }
+.ext-col-actions { text-align: right; }
+.ext-col-actions .ext-actions { justify-content: flex-end; }
+
+/* 工具清单抽屉。**条数在表里、描述在这里** —— 此前它是行内一个封高滚动区，封高之后
+   读不出总数（于是又在副标题补了一句「N 个工具」），而每个工具的描述压根没地方放。 */
+.ext-tool-list { display: grid; gap: 10px; margin-top: 14px; }
+.ext-tool-list article { display: grid; gap: 4px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2); }
+.ext-tool-list code { font-size: .78rem; color: var(--primary); overflow-wrap: anywhere; }
+.ext-tool-list p { margin: 0; font-size: .76rem; line-height: 1.55; color: var(--muted); overflow-wrap: anywhere; }
+
+/* 空态是邀请，不是墓碑：说清这一类是什么、以及从哪儿开始。 */
+.ext-empty { display: grid; place-items: center; align-content: center; gap: 8px; padding: 36px 24px;
+  border: 1px dashed var(--border); border-radius: 14px; text-align: center; }
+.ext-cards .ext-empty, .ext-list .ext-empty { grid-column: 1 / -1; }
+.ext-empty > i { font-size: 1.5rem; color: var(--muted); }
+.ext-empty h3 { margin: 0; font-size: .95rem; }
+.ext-empty p { margin: 0; max-width: 56ch; font-size: .8rem; line-height: 1.65; color: var(--muted); }
+
+@media (max-width: 780px) {
+  .ext-row { grid-template-columns: minmax(0, 1fr); }
+  .ext-row-side { justify-items: start; }
+  .ext-facts { grid-auto-flow: column; justify-items: start; gap: 18px; }
+  .ext-actions { justify-content: flex-start; }
+}
+/* 分段抬头与它下面那段说明：`.eyebrow` 与 `.section-note` 都是全局原语，这里只补这一处的节奏。 */
+[data-ext-tab] > .eyebrow { margin: 18px 0 6px; }
+[data-ext-tab] > .section-note { margin: 0 0 16px; }
