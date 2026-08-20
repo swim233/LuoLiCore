@@ -8,7 +8,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 pnpm dev                      # 本地运行 bot（tsx apps/bot/src/main.ts）
                               # ⚠ tsx 下 plugin 热重载静默失效（跑旧代码，docs/07 §3.2）——
                               #   验 plugin 改动要重启进程或 pnpm build && pnpm start
-pnpm typecheck                # tsc --noEmit
+pnpm typecheck                # 两份 project：tsc --noEmit + tsc -p tsconfig.build.json --noEmit
+                              # 两者文件集不同，只跑前者会漏掉「只在构建里存在」的错误
 pnpm lint                     # eslint .
 pnpm test                     # vitest run（全量）
 pnpm test tests/context.test.ts          # 单文件
@@ -30,6 +31,10 @@ pnpm start                    # 跑 dist 产物（生产）
 **改 `tsconfig.build.json` 的 `outDir`/`rootDir`、包的 `exports`、或根 `package.json` 里的
 `@luoli/*` workspace 依赖时，这三处要一起看**；对不上的表现是 `pnpm start` 报
 `ERR_MODULE_NOT_FOUND: @luoli/db`（`pnpm dev` 走 tsx + tsconfig paths，发现不了）。
+
+`tsconfig.build.json` 排掉 `packages/webui/**`、`tests/**` 与 `scripts/copy/runtime/**`（dev 文案面板，
+`import` 了 `.vue` 而 `*.vue` 垫片在被排掉的 webui 里）—— **往 `scripts/` 加 import 非 `.ts` 资源的文件时
+记得它**，构建的文件集比根 project 窄，这类错误只有 `pnpm typecheck` 的第二趟能看见（docs/README §4.1）。
 
 环境变量（见 `.env.example`）：`LUOLI_OWNER_ID` 必需，缺失时 `loadConfig` 直接拒绝启动；
 `BOT_TOKEN` 缺失时 Telegram 入口禁用但 WebUI 仍可跑；`LUOLI_MASTER_KEY` 用于加密 provider API key。

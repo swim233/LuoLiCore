@@ -11,7 +11,7 @@
     "dev": "tsx --env-file-if-exists=.env apps/bot/src/main.ts",
     "start": "node --env-file-if-exists=.env dist/apps/bot/src/main.js",
     "build": "pnpm webui:build && tsc -p tsconfig.build.json && tsx scripts/postbuild.ts",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.build.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
     "smoke": "tsx scripts/smoke.ts",

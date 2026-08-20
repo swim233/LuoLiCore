@@ -189,6 +189,18 @@ pnpm build && pnpm start      # 生产
 由 pnpm 按根 `package.json` 的 workspace 依赖生成。**改 `tsconfig.build.json` 的 `outDir` / `rootDir`
 或包的 `exports` 时，这三处要一起看** —— 对不上的表现是 `pnpm start` 报 `ERR_MODULE_NOT_FOUND: @luoli/db`。
 
+`pnpm typecheck` 跑的是**两份 project**：根 `tsconfig.json` 与 `tsconfig.build.json`。两份的文件集不同 ——
+构建那份排掉 `packages/webui/**`、`tests/**`，以及只在 dev server 上注入的 `scripts/copy/runtime/**`
+（dev 文案校样面板，见 [`copy/README.md`](./copy/README.md)；它 `import` 一个 `.vue`，而 release
+产物里没有任何一处引用得到它）。只跑根那份会漏掉「只在构建里存在」的错误：`*.vue` 的类型垫片在
+`packages/webui/src/env.d.ts`，构建排掉了 webui，于是 `boot.ts` 那句 `import` 在根 project 下解析得到、
+在构建下解析不到 —— `pnpm typecheck` 全绿而 `pnpm build` 恒定失败，实际漏了整整一轮才被发现。
+
+`tsconfig.build.json` 的 `noEmitOnError: true` 是同一件事的另一半。tsc 默认**报错照样 emit**，而
+`pnpm build` 的 `&&` 断在 tsc 上 —— `postbuild.ts` 不跑，磁盘上就留下**新 `dist/` + 旧
+`packages/*/dist/`** 的混龄产物。这种状态下 `pnpm start` 不报错，它安静地跑一半新一半旧，
+比构建硬失败难查得多。
+
 不装 docker 也能跑，但执行类工具（`bash` 等）只剩 `sandbox.mode: none | jail` 两个选项，
 且 `jail` 不是安全边界（[05 §5.4](./05-tools-and-permissions.md)）。注意 `bypassRoles` 在
 `Sandbox.plan()` 里先于 `mode` 判断 —— 即使 `mode: none`，owner 触发的命令仍在宿主直跑，
