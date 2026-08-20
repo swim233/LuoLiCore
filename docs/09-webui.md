@@ -24,7 +24,7 @@ webui:
   sessionTtlHours: 168
   passwordHash: '$argon2id$...'     # 由 `pnpm webui:passwd` 生成或首次启动向导写入
   trustProxy: false                 # true 时读取 X-Forwarded-For 记 session ip
-  allowOrigins: []                  # 默认同源；配置 CORS 仅供开发
+  allowOrigins: []                  # 默认同源即可；`pnpm webui:dev` 不需要它（见 §2.1 Origin 闸）
 ```
 
 启动检查：`webui.enabled && !passwordHash` → 生成一次性 setup token 打印到控制台，`/setup` 页面用它设定初始密码。`host` 非 `127.0.0.1` 且未设密码 → **拒绝启动**。
@@ -36,7 +36,9 @@ webui:
 ### 2.1 密码 + Session
 
 - 密码用 **argon2id**（`memoryCost=19456, timeCost=2, parallelism=1`）哈希存配置。
-- `POST /api/auth/login {password}` → 校验 → 生成 32 字节随机 session id → 写 `sessions` 表 → `Set-Cookie: luoli_sid=…; HttpOnly; SameSite=Lax; Path=/; Secure(当 https)`。
+- `POST /api/auth/login {password}` → 校验 → 生成 32 字节随机 session id → 写 `sessions` 表 → `Set-Cookie: luoli_sid=…; HttpOnly; SameSite=Strict; Path=/; Secure(当 https)`。
+  （此前这里写的是 `Lax`，实现一直是 `Strict`。MCP 的 OAuth 回调之所以要进鉴权豁免名单，正是
+  因为 `Strict`：那一跳是授权服务器发起的跨站重定向，浏览器不会带上这个 cookie。）
 - 同时返回 `csrf` token（存 `sessions.csrf`）；前端放内存，所有非 GET 请求带 `X-CSRF-Token`。
 - 失败限流：同 IP 连续失败 `webui.loginRateLimit.attempts` 次 → 锁 `windowMinutes` 分钟（内存计数 + 日志 `warn`）。
   IP 的来源分两种，判据只看 `webui.trustProxy`：
@@ -49,6 +51,17 @@ webui:
 
   单 IP 桶之外还有一个全局失败窗口，触发后所有登录请求先延迟 250ms 再校验 —— 换 IP 绕过要付出代价，
   而不是把 owner 一起锁死。失败表上限 1024 条。
+- **Origin 闸**：`/api/*` 最前面一道，比 `Origin` 头与**服务端自己的 origin**（由 `Host` 算出）；
+  不相等且不在 `webui.allowOrigins` 里 → `403 origin`。**没有 `Origin` 头的请求放行** —— 它挡的是
+  浏览器发起的跨站请求（cookie 是 `SameSite=Strict`、写操作另有 CSRF token，这是第三层），
+  不是鉴权，curl / 脚本不受影响。
+  **`pnpm webui:dev` 因此要靠 dev 代理改造请求头**：dev server 在 5173 而 `/api` 在 8787，
+  `packages/webui/vite.config.ts` 的代理同时改写 `Host`（`changeOrigin: true`）与 `Origin`
+  （`headers.origin`），让服务端看到一份彻底同源的请求。**缺任一个，`webui:dev` 里登录及一切
+  `/api` 请求恒定 403** —— 且 Vite 只对字符串简写的代理自动补 `changeOrigin`，改成对象形式时会
+  静静丢掉。不要改用「往 `allowOrigins` 里加 dev 地址」绕过：`config/config.yaml` 在版本控制里，
+  那等于把一条开发用的跨源放行提交进仓库。回归用例在 `tests/server.test.ts`，照着 vite 配置真的
+  算一遍那两个头再打一次登录。
 - **请求体上界**：`/api/*` 全局挂 hono 的 `bodyLimit`，默认 1 MiB；`PUT /api/config/yaml` 与
   `POST /api/models/import` 放宽到 4 MiB、`PUT /api/prompts/:id` 到 2 MiB，超出回 `413 payload_too_large`。
   它必须挂在**鉴权中间件之前**：`/api/setup` 与两条登录端点注册在鉴权之前，未登录就能推一个任意大的
@@ -910,6 +923,7 @@ event: approval.decided  data: {id, tool, risk, chatId, approved, actor, channel
 packages/webui/
 ├── index.html
 ├── vite.config.ts             build → dist；dev server 5173，proxy /api → WEBUI_DEV_API ?? :8787
+│                              （代理改写 Host + Origin 过 §2.1 的 Origin 闸，缺了就恒 403）
 └── src/
     ├── main.ts                createApp + router + pinia（无 UI 框架插件）+ 自托管字体
     ├── styles.css             设计变量（浅/深两套 + 字体栈）+ 全站样式，唯一的样式来源
