@@ -174,6 +174,13 @@ load_skill: tool({
 | 总体积 / 压缩炸弹 | `skills.package.maxTotalBytes`，同样按实际写出的累计 |
 | 执行位 | 一律 `0o600`（目录 `0o700`）；**只有 `scripts/` 与 `bin/` 下、且原条目带执行位的**保留 `0o700`，受 `skills.package.allowExecutable` 管（关掉 = 包退化成纯文本） |
 
+**畸形包只许让这一次装包失败，不许带崩进程。** 解每个条目的那条流上，error 闸必须挂在
+`writePackageEntry` 的第一句、**早于它自己的第一个 `await`** —— 流拿到手时已经在流动
+（`openReadStream` 内部就 pipe 上了 inflate），而随后那句 `open()` 是真的文件系统调用；
+谎报大小的包会在这段窗口里吐 error，Node 对流上未处理的 error 直接抛。这条不变量由
+AC-SKL-021 用一条「第一个 await 之前就带 error 死掉」的流确定性地钉住 —— 靠那个压缩炸弹去撞
+是不确定的（并行跑全量测试时才崩，单跑十次都绿）。
+
 **包根定位**：`SKILL.md` 常被套一层顶层目录，而一个包里可以有好几份（那个音乐包就同时带
 `music-download-cli/` 与 `music-download-cli-linux/` 两套）。深度 ≤2 内恰好一个 → 取它所在
 目录；多个 → 回 `skill_ambiguous_root` 并**把候选列出来**，让调用方带 `subdir` 重试。

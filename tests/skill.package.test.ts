@@ -1,8 +1,9 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { Readable } from 'node:stream';
 import { describe, expect, it } from 'vitest';
 import { closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
-import { SkillLoader, installSkillPackage, type SkillPackageLimits } from '@luoli/core';
+import { SkillLoader, installSkillPackage, writePackageEntry, type SkillPackageLimits } from '@luoli/core';
 import { zipFixture, type ZipFixtureEntry } from './fixtures/zip.js';
 
 /**
@@ -256,6 +257,25 @@ describe('装 skill 包', () => {
     const { db, skillsDir, zipAt, install } = setup();
     await install(zipAt('demo.zip', [{ name: 'demo/SKILL.md', content: SKILL_MD }]));
     expect(readdirSync(skillsDir).filter((entry) => entry.startsWith('.staging'))).toEqual([]);
+    closeDatabase(db);
+  });
+
+  /**
+   * 上面那个压缩炸弹用例真的把整个测试进程崩过一次（全量并行跑，`too many bytes in the stream.
+   * expected 1. got at least 16384`）—— 而单跑它十次都是绿的。差别只在 `writePackageEntry` 里
+   * `await open()` 的耗时：流拿到手时已经在流动，error 闸挂在那句 await **之后**就有一段没人监听的
+   * 窗口，并行跑时它拉到 20ms 量级，谎报大小的包正好在里面吐 error。
+   *
+   * 所以这里不赌时序：拿一条 `nextTick` 就带 error 死掉的流，它必定死在 `await open()` 之前 ——
+   * 闸挂晚了就是 `uncaughtException`（进程级，不是这条用例失败），挂对了这个 error 只是让这次
+   * 装包失败。**这是「一个畸形包不许带崩进程」的确定性版本。**
+   */
+  it('流在第一个 await 之前就带 error 死掉时，是这次装包失败而不是进程崩', async () => {
+    const { db, skillsDir } = setup();
+    const stream = new Readable({ read() {} });
+    process.nextTick(() => stream.destroy(new Error('boom')));
+    await expect(writePackageEntry(stream, join(skillsDir, 'entry.bin'), 'demo/entry.bin',
+      { entries: 0, bytes: 0 }, LIMITS)).rejects.toThrow('boom');
     closeDatabase(db);
   });
 });

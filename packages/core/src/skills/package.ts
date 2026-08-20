@@ -109,23 +109,27 @@ function applyExecutableBits(stage: string, root: string, extracted: Extracted, 
   }
 }
 
-interface Budget { entries: number; bytes: number }
+export interface SkillPackageBudget { entries: number; bytes: number }
+type Budget = SkillPackageBudget;
 
 function claimEntry(budget: Budget, limits: SkillPackageLimits): void {
   budget.entries += 1;
   if (budget.entries > limits.maxEntries) fail('skill_package_too_many_entries', `包里的条目数超过 ${limits.maxEntries}。`);
 }
 
-async function writeStream(stream: Readable, target: string, relativePath: string, budget: Budget, limits: SkillPackageLimits): Promise<void> {
+/** 导出只为了给「error 闸早于第一个 await」那条不变量一个确定性的用例，见 `tests/skill.package.test.ts`。 */
+export async function writePackageEntry(stream: Readable, target: string, relativePath: string, budget: Budget, limits: SkillPackageLimits): Promise<void> {
+  // **早于这个函数里的第一个 await**：超限那一刻我们从循环里抛出去，异步迭代器随即摘掉自己的监听，
+  // 而 yauzl 的 `validateEntrySizes` 还会在这条流上继续吐 error（压缩炸弹谎报大小时必然吐，而且
+  // 不止一次）。那时没人在听，**流上未处理的 error 在 Node 里直接抛** —— 一个畸形包足以把进程带崩。
+  // 挂在 finally 里太晚；挂在下面那句 `await open()` **之后同样太晚** —— 流在拿到手时已经在流动了
+  // （`openReadStream` 内部就 pipe 上了 inflate），而 `open` 是真的文件系统调用：并行跑全量测试时
+  // 这个窗口能拉到 20ms 量级，那个谎报大小的包正好在里面吐 error，进程当场崩在没人监听的流上。
+  stream.on('error', () => {});
   // 一律先写成 0600，执行位等落位前由 `applyExecutableBits` 按包根重判 —— 解包这一刻还不知道
   // 包根在哪。中间态是「谁都跑不了」而不是「先给上再收回」。
   const handle = await open(target, 'w', 0o600);
   let written = 0;
-  // **在开始消费之前就挂上**：超限那一刻我们从循环里抛出去，异步迭代器随即摘掉自己的监听，而
-  // yauzl 的 `validateEntrySizes` 还会在这条流上继续吐 error（压缩炸弹谎报大小时必然吐，而且
-  // 不止一次）。那时没人在听，**流上未处理的 error 在 Node 里直接抛** —— 一个畸形包足以把进程带崩。
-  // 挂在 finally 里太晚：抛出与摘监听之间就已经有一发落空了。
-  stream.on('error', () => {});
   try {
     for await (const chunk of stream) {
       const buffer = chunk as Buffer;
@@ -202,7 +206,7 @@ async function extractZip(source: string, stage: string, limits: SkillPackageLim
       const stream = await new Promise<Readable>((resolvePromise, reject) => {
         zip.openReadStream(entry, (error, value) => (error ? reject(error) : resolvePromise(value as unknown as Readable)));
       });
-      await writeStream(stream, target, relativePath, budget, limits);
+      await writePackageEntry(stream, target, relativePath, budget, limits);
       modes.set(relativePath, sourceMode);
     }
   } finally { zip.close(); }
@@ -225,7 +229,7 @@ async function extractDirectory(source: string, stage: string, limits: SkillPack
       if (entry.isDirectory()) { mkdirSync(target, { recursive: true, mode: 0o700 }); await walk(absolute); continue; }
       if (!entry.isFile()) fail('skill_package_entry_invalid', `包里有既不是文件也不是目录的条目：${relativePath}`);
       mkdirSync(resolve(target, '..'), { recursive: true, mode: 0o700 });
-      await writeStream(createReadStream(absolute), target, relativePath, budget, limits);
+      await writePackageEntry(createReadStream(absolute), target, relativePath, budget, limits);
       modes.set(relativePath, lstatSync(absolute).mode);
     }
   };
