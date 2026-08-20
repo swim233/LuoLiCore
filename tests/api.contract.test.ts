@@ -305,7 +305,10 @@ describe('documented API surface', () => {
       return { skills };
     });
     const rows = (await (await app.request('/api/skills', { headers: { cookie: headers.cookie } })).json()) as { data: Array<Record<string, unknown>> };
-    expect(Object.keys(rows.data[0]!).sort()).toEqual(['description', 'enabled', 'load_error', 'min_role', 'name', 'source', 'updated_at']);
+    // 九列，一列不多：`path`（宿主文件系统路径）、`content_hash`、整份 `frontmatter_json` 都不发。
+    // `allowed_tools` / `requires_tools` 是从 `frontmatter_json` 里**只取那两个字段**再发出去 ——
+    // `requires-tools` 没被满足的 skill 压根不进模型目录，那件事必须在扩展页的列表上看得见（docs/09 §3.8）。
+    expect(Object.keys(rows.data[0]!).sort()).toEqual(['allowed_tools', 'description', 'enabled', 'load_error', 'min_role', 'name', 'requires_tools', 'source', 'updated_at']);
     expect(rows.data[0]).toMatchObject({ name: 'writing-tools', source: 'bundled' });
     // 随包说明书只放行启停：`write_skill` 一直拒改它们，这一侧此前能改能删。
     expect((await app.request('/api/skills/writing-tools', { method: 'DELETE', headers })).status).toBe(403);

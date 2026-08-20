@@ -12,9 +12,9 @@ import { getConnInfo } from '@hono/node-server/conninfo';
 import { serveStatic } from '@hono/node-server/serve-static';
 import type { AgentManager, Config, ConfigChangedEvent, ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, PluginManager, PromptDocuments, ProviderStore, Sandbox, SkillLoader, SkillWriteInput, SubAgentRuntimeEvent, TurnRegistry } from '@luoli/core';
 import { ALIAS_NAME_PATTERN, CONFIG_ENUM_NOTES, HOT_RELOADABLE_CONFIG_KEYS, chatCandidates, createScheduledJob, mergeAgentDefinitions, scanAgentFiles, scheduledJobView, testApprovalRules, KNOWN_UNIMPLEMENTED_CONFIG_KEYS, TOOL_POLICY, aliasSettingsSchema, checkWakeword, configSchema as runtimeConfigSchema, envPinnedConfigKeys, perChatConfig, probeProvider, quotaBucket, rejectedWakewords } from '@luoli/core';
-import { APPROVAL_POLICIES, BUNDLED_SKILLS, SkillPackageError, effectiveToolPolicy, installSkillPackage, looksSecret, persistMcpServers as persistMcpServersShared, publicConfig, relaxedFields, resolveEffectiveRole, revisionJson } from '@luoli/core';
-import type { CatalogIndex, ContainerManager, CustomToolManager, ModelMetadata, ProviderProbe, ToolOverride, ToolRegistry } from '@luoli/core';
-import type { ArchiveRepository, CustomToolRepository, OperationsRepository, PrincipalRepository, ScheduleRepository, ScheduledJob, Sqlite } from '@luoli/db';
+import { APPROVAL_POLICIES, BUNDLED_SKILLS, MCP_OAUTH_CALLBACK_PATH, SkillPackageError, effectiveToolPolicy, installSkillPackage, looksSecret, persistMcpServers as persistMcpServersShared, publicConfig, relaxedFields, resolveEffectiveRole, revisionJson } from '@luoli/core';
+import type { CatalogIndex, ContainerManager, CustomToolManager, ModelMetadata, PendingAuthorizations, ProviderProbe, ToolOverride, ToolRegistry } from '@luoli/core';
+import type { ArchiveRepository, CustomToolRepository, McpAuthRepository, OperationsRepository, PrincipalRepository, ScheduleRepository, ScheduledJob, Sqlite } from '@luoli/db';
 import { deleteAppKv, modelAliasKey, readAppKv, writeConfigRows as writeConfigRowsToDatabase } from '@luoli/db';
 import { assignDotted, readDotted, ROLES, TG_ID_PATTERN, type Role } from '@luoli/shared';
 import type { EventStreamRegistry } from './events.js';
@@ -64,6 +64,12 @@ export interface ServerDependencies {
   skills?: SkillLoader;
   plugins?: PluginManager;
   mcp?: McpManager;
+  /**
+   * MCP 凭据库与待授权表。缺它时四条 auth 端点一律 `mcp_auth_unavailable`（缺
+   * `LUOLI_MASTER_KEY` 的部署就是这样）—— 不假装保存成功，照 `PUT /api/quota` 回
+   * `not_implemented` 的先例。
+   */
+  mcpAuth?: { store: McpAuthRepository; pending: PendingAuthorizations };
   agents?: AgentManager;
   /**
    * 工具注册表。缺它时 `GET /api/tools` 退回「`TOOL_POLICY` + 覆盖层」那份静态表 —— 少了
@@ -442,7 +448,12 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
   });
 
   app.use('/api/*', async (ctx, next) => {
-    if (ctx.req.path === '/api/health' || ctx.req.path === '/api/auth/login' || ctx.req.path === '/api/auth/token' || ctx.req.path === '/api/setup') return next();
+    // MCP 的 OAuth 回调进白名单，**不是偷懒**：session cookie 是 `SameSite=Strict`，
+    // 而这一跳是授权服务器发起的跨站重定向 —— 浏览器不会带上它，要求登录态等于这条路走不通。
+    // 准入判据换成 OAuth 自己的 `state`：32 字节随机、单次使用、10 分钟 TTL、只存在进程内
+    // （`PendingAuthorizations`）。没有有效 state 的请求在那里就被拒了。
+    if (ctx.req.path === '/api/health' || ctx.req.path === '/api/auth/login' || ctx.req.path === '/api/auth/token' || ctx.req.path === '/api/setup'
+      || ctx.req.path === MCP_OAUTH_CALLBACK_PATH) return next();
     const id = cookie(ctx.req.header('cookie'), 'luoli_sid');
     const session = id ? dependencies.operations.session(id) : null;
     if (!session) return ctx.json(apiError('unauthorized', '未登录', 401).body, 401);
@@ -1521,10 +1532,38 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
       summary: `手动触发 ${job.name} 失败`, chatId: job.chatId, key: job.key, data: { job: id, error: error instanceof Error ? error.message : String(error) } }));
     return ctx.json({ ok: true, data: { started: true, name: job.name, mode: job.mode } });
   });
-  // **不是 `SELECT *`**：那会把 `path`（宿主文件系统路径）、`content_hash` 与整份
-  // `frontmatter_json` 一起发给前端，而扩展页只用得上这七列。
-  app.get('/api/skills', (ctx) => ctx.json({ ok: true, data: dependencies.db.prepare(
-    'SELECT name,description,min_role,enabled,source,load_error,updated_at FROM skills ORDER BY name').all() }));
+  /**
+   * **不是 `SELECT *`**：那会把 `path`（宿主文件系统路径）、`content_hash` 与整份
+   * `frontmatter_json` 一起发给前端。
+   *
+   * `requires_tools` 是从 `frontmatter_json` 里**只取那一个字段**再发出去，不是把整份 frontmatter
+   * 放行回去。它值得摆在列表上：`requires-tools` 没被满足的 skill 压根不进模型的目录
+   * （`SkillLoader.catalog()`），而 `tools.selfExtend.*` 出厂全关 —— 于是一份说明书在这一页上
+   * 显示「可用」，模型那边却永远看不见它。实测代价记在 `packages/core/src/skills/loader.ts` 的
+   * `requires-tools` 注释里（模型读到「用 install_mcp 装 MCP」，去调却没有这个工具，
+   * 于是花了八分钟用 bash 逆向代码库、从 sessions 表取 owner 会话去打 WebUI）。
+   */
+  app.get('/api/skills', (ctx) => {
+    const rows = dependencies.db.prepare(
+      'SELECT name,description,min_role,enabled,source,load_error,updated_at,allowed_tools_json,frontmatter_json FROM skills ORDER BY name')
+      .all() as Array<Record<string, unknown>>;
+    const stringList = (raw: unknown): string[] => {
+      if (typeof raw !== 'string' || !raw) return [];
+      try {
+        const parsed = JSON.parse(raw) as unknown;
+        return Array.isArray(parsed) ? parsed.filter((entry): entry is string => typeof entry === 'string') : [];
+      } catch { return []; }
+    };
+    return ctx.json({ ok: true, data: rows.map((row) => {
+      let requires: string[] = [];
+      try {
+        const frontmatter = typeof row.frontmatter_json === 'string' ? JSON.parse(row.frontmatter_json) as Record<string, unknown> : {};
+        requires = stringList(JSON.stringify(frontmatter['requires-tools'] ?? []));
+      } catch { requires = []; }
+      const { frontmatter_json: _dropped, allowed_tools_json: allowed, ...rest } = row;
+      return { ...rest, allowed_tools: stringList(allowed), requires_tools: requires };
+    }) });
+  });
   app.get('/api/skills/:name', (ctx) => {
     const skill = dependencies.skills?.read(ctx.req.param('name'));
     return skill ? ctx.json({ ok: true, data: skill }) : ctx.json(apiError('not_found', 'Skill 不存在', 404).body, 404);
@@ -1688,8 +1727,13 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
       const row = byName.get(server.name) ?? {};
       let tools: unknown[] = [];
       try { tools = row.tools_json ? JSON.parse(String(row.tools_json)) as unknown[] : []; } catch { tools = []; }
+      // `auth` 只回**没有密文**的那一份（`McpAuthRepository.get` 的返回类型保证这件事），
+      // 外加一条「授权链接还在等着」——刷新页面之后〔登录〕按钮还得能点。
+      const credential = dependencies.mcpAuth?.store.get(server.name) ?? null;
+      const pending = dependencies.mcpAuth?.pending.peek(server.name) ?? null;
       return { ...row, ...server, min_role: server.minRole ?? currentConfig().mcp.defaultMinRole, enabled: server.enabled === false ? 0 : 1,
-        state: server.enabled === false ? 'disabled' : row.state ?? 'pending', last_error: row.last_error ?? null, tools };
+        state: server.enabled === false ? 'disabled' : row.state ?? 'pending', last_error: row.last_error ?? null, tools,
+        credential, pendingAuthorization: pending ? { authorizationUrl: pending.authorizationUrl, expiresAt: pending.expiresAt } : null };
     });
     return ctx.json({ ok: true, data });
   });
@@ -1727,6 +1771,98 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     dependencies.db.prepare('DELETE FROM mcp_servers WHERE name=?').run(name);
     return ctx.json({ ok: true, data: { removed: true } });
   });
+  /**
+   * 四条 auth 端点共用的前置：凭据库在不在、这台 server 在不在、是不是 http。
+   * 返回的是**收窄到 http 那一支**的 server —— `auth` 只长在那一支上，判别联合不收窄就读不到它。
+   */
+  type HttpMcpServer = Extract<Config['mcp']['servers'][number], { transport: 'http' }>;
+  const mcpAuthTarget = (name: string): { server: HttpMcpServer } | { error: ReturnType<typeof apiError> } => {
+    if (!dependencies.mcpAuth || !dependencies.mcp) return { error: apiError('mcp_auth_unavailable', '这个部署没接 MCP 凭据库（通常是缺 LUOLI_MASTER_KEY）：凭据存不下来，所以这里不假装保存成功。', 500) };
+    const server = currentConfig().mcp.servers.find((entry) => entry.name === name);
+    if (!server) return { error: apiError('not_found', 'MCP server 不存在', 404) };
+    if (server.transport !== 'http') return { error: apiError('mcp_auth_stdio', 'stdio server 的登录由它自己在带外完成（它的 stderr 现在会进日志）—— 这里没有可走的授权流程。', 400) };
+    return { server };
+  };
+
+  /**
+   * 开一次授权。回授权 URL 给界面，**由人去点** —— reconcile 自己弹浏览器是另一种毛病。
+   * `webui.publicUrl` 没配时这里就断掉：`redirect_uri` 一旦注册进对方那里就不好改，
+   * 编一个 127.0.0.1 的地址等于把这次授权变成一条注册完就废掉的死路。
+   */
+  app.post('/api/mcp/:name/auth/start', async (ctx) => {
+    const target = mcpAuthTarget(ctx.req.param('name'));
+    if ('error' in target) return ctx.json(target.error.body, target.error.status as 400);
+    if (target.server.auth?.mode !== 'oauth') return ctx.json(apiError('mcp_auth_mode', '这台 server 的 auth.mode 不是 oauth。要走浏览器授权先把它改成 oauth；只有一个静态 token 的话用 PUT /api/mcp/:name/auth。').body, 400);
+    try {
+      const started = await dependencies.mcp!.authorize(target.server);
+      return ctx.json({ ok: true, data: started });
+    } catch (error) {
+      return ctx.json(apiError('mcp_auth_failed', error instanceof Error ? error.message : String(error), 400).body, 400);
+    }
+  });
+
+  /**
+   * 授权服务器把人重定向回来的那一跳。**判据只有 `state`**：单次使用、10 分钟、进程内。
+   * 成功之后单台重连，然后 302 回控制台 —— 这一跳的落点是浏览器地址栏，不是 fetch，
+   * 所以回 JSON 的话人看到的是一屏花括号。
+   */
+  app.get(MCP_OAUTH_CALLBACK_PATH, async (ctx) => {
+    const state = ctx.req.query('state');
+    const code = ctx.req.query('code');
+    const upstreamError = ctx.req.query('error');
+    const back = (status: string, detail?: string): Response => ctx.redirect(`/?mcpAuth=${encodeURIComponent(status)}${detail ? `&detail=${encodeURIComponent(detail)}` : ''}`, 302);
+    if (!dependencies.mcpAuth || !dependencies.mcp) return back('unavailable');
+    // 先把 state 消费掉，再看别的 —— 一条回来过的 state 不该因为后面某个判据失败而留着能重放。
+    const pending = state ? dependencies.mcpAuth.pending.take(state) : null;
+    if (!pending) { dependencies.log.event({ level: 'warn', kind: 'mcp.auth', summary: 'OAuth 回调的 state 无效或已过期' }); return back('bad_state'); }
+    if (upstreamError || !code) {
+      dependencies.log.event({ level: 'warn', kind: 'mcp.auth', summary: `${pending.server} 授权被拒绝或取消`, data: { server: pending.server, error: upstreamError ?? 'no_code' } });
+      return back('denied', upstreamError ?? undefined);
+    }
+    const target = mcpAuthTarget(pending.server);
+    if ('error' in target) return back('not_found');
+    const server = target.server;
+    try {
+      const status = await dependencies.mcp.completeAuthorization(server, code);
+      if (status !== 'AUTHORIZED') return back('incomplete');
+      // 单台重连而不是整体 reconcile：整体的话另外几台健康 server 也要跟着断一次。
+      await dependencies.mcp.connect(server).catch(() => undefined);
+      dependencies.events.emit('health', { source: 'mcp', name: server.name, ok: true, code: 'authorized' });
+      return back('ok', server.name);
+    } catch (error) {
+      dependencies.log.event({ level: 'warn', kind: 'mcp.auth', summary: `${server.name} 换取 token 失败`, data: { server: server.name, error: error instanceof Error ? error.message : String(error) } });
+      return back('failed', error instanceof Error ? error.message : undefined);
+    }
+  });
+
+  /** 静态 bearer token。**写入即加密**，此后任何读路径都不回它 —— 界面上只看得到末 4 位。 */
+  app.put('/api/mcp/:name/auth', async (ctx) => {
+    const target = mcpAuthTarget(ctx.req.param('name'));
+    if ('error' in target) return ctx.json(target.error.body, target.error.status as 400);
+    const body = await ctx.req.json<{ token?: unknown }>().catch((): { token?: unknown } => ({}));
+    if (typeof body.token !== 'string' || !body.token.trim()) return ctx.json(apiError('invalid_token', 'token 必填').body, 400);
+    // 读出来的脱敏值原样提交回来只会把真凭据换成那几个字（照 POST/PATCH /api/mcp 的既有守卫）。
+    if (body.token.includes('«redacted»')) return ctx.json(apiError('redacted_placeholder', 'token 是脱敏占位符 «redacted»，那不是真值').body, 400);
+    if (target.server.auth?.mode !== 'bearer') return ctx.json(apiError('mcp_auth_mode', '这台 server 的 auth.mode 不是 bearer。先把它改成 bearer 再填 token。').body, 400);
+    dependencies.mcpAuth!.store.setBearer(target.server.name, body.token.trim());
+    // 凭据版本推高了，指纹跟着变 —— 这一次 reconcile 必然重连而不是复用旧连接。
+    await dependencies.mcp!.reconcile();
+    const row = dependencies.db.prepare('SELECT state,last_error AS error FROM mcp_servers WHERE name=?').get(target.server.name) as { state: string; error: string | null } | undefined;
+    dependencies.events.emit('health', { source: 'mcp', name: target.server.name, ok: row?.state === 'up', code: row?.state ?? 'unknown' });
+    return ctx.json({ ok: true, data: { name: target.server.name, credential: dependencies.mcpAuth!.store.get(target.server.name), state: row?.state ?? null, error: row?.error ?? null } });
+  });
+
+  /** 注销。凭据清空但保留那一行的 `mode` —— 「用 OAuth 但没登录」与「压根不需要登录」是两回事。 */
+  app.delete('/api/mcp/:name/auth', async (ctx) => {
+    const target = mcpAuthTarget(ctx.req.param('name'));
+    if ('error' in target) return ctx.json(target.error.body, target.error.status as 400);
+    await dependencies.mcp!.signOut(target.server);
+    await dependencies.mcp!.reconcile();
+    const row = dependencies.db.prepare('SELECT state,last_error AS error FROM mcp_servers WHERE name=?').get(target.server.name) as { state: string; error: string | null } | undefined;
+    dependencies.events.emit('health', { source: 'mcp', name: target.server.name, ok: false, code: row?.state ?? 'unknown' });
+    return ctx.json({ ok: true, data: { name: target.server.name, credential: dependencies.mcpAuth!.store.get(target.server.name), state: row?.state ?? null, error: row?.error ?? null } });
+  });
+
   app.post('/api/mcp/:name/reconnect', async (ctx) => {
     await dependencies.mcp?.reconcile();
     const row = dependencies.db.prepare('SELECT state,last_error AS error FROM mcp_servers WHERE name=?').get(ctx.req.param('name')) as { state: string; error: string | null } | undefined;

@@ -141,6 +141,8 @@ with_parent 0`，浏览器里展开一条 trace，13 个节点的 `marginLeft` �
 | `plugins.disabled` | info | `plugins.enabled=false`：一个 plugin 都不加载，钩子链是空的 |
 | `mcp.connect` / `mcp.error` | info/warn | server, transport, tool |
 | `mcp.disconnect` | info/warn | server —— 连接断开（warn，下一次 reconcile 会重连）或从配置里移除（info） |
+| `mcp.auth` | info/warn | server, status, authMode —— 登录相关的每一步：开始授权 / 换到 token / 授权被拒 / 注销 / **判定为「要登录」**（[07 §4.5](./07-skills-plugins-mcp.md)）。「要登录」刻意不记成 `mcp.error`：它跟「连不上」要人做的事完全不同 |
+| `mcp.stderr` | warn | server —— stdio 子进程 stderr 的**逐行**转发（单行截到 2 KB）。SDK 的默认是 `stderr: 'inherit'`，于是一台 server 打印的「打开这个链接授权」「缺 XXX_TOKEN」直接写进 bot 进程的 stderr：不进这里、不落库、界面上一个字都没有 —— 而那恰好是「它为什么连不上」的答案 |
 | `tg.send` | debug（失败 **warn**） | chatId, messageId, chars, ms, error, path（`stream` \| `once` \| `final` \| `tool` \| `fallback`）—— **投递层**那一行，带 traceId。`tg.api` 拿不到 turn 上下文，所以「这一轮到底发了什么、编辑了几次」只有这三条回答得了（[reviews/28](./reviews/28-round10-live-system-test.md) · L-LOG-02）。**失败档在五条路径上都要落**：`tool` 那条把上游报错吞成 `ok:false` 交回模型、`once` / `fallback` 抛出去记成整轮失败，两种都不落的话「消息被 Telegram 拒收」在带 traceId 的日志里一个字都没有 |
 | `tg.edit` | debug | chatId, messageId, editCount, chars, ms —— **一轮聚合成一条**（[§1](#1-trace-模型) 那张图）：一次流式回复能编辑几十次，逐次记只是噪声 |
 | `tg.action` | debug | chatId, count, ms —— typing 同样聚合成一条 |

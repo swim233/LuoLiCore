@@ -1862,6 +1862,63 @@
                           "type": "string"
                         },
                         "default": {}
+                      },
+                      "auth": {
+                        "anyOf": [
+                          {
+                            "type": "object",
+                            "properties": {
+                              "mode": {
+                                "type": "string",
+                                "const": "none"
+                              }
+                            },
+                            "required": [
+                              "mode"
+                            ],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "mode": {
+                                "type": "string",
+                                "const": "bearer"
+                              }
+                            },
+                            "required": [
+                              "mode"
+                            ],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "mode": {
+                                "type": "string",
+                                "const": "oauth"
+                              },
+                              "scope": {
+                                "type": "string"
+                              },
+                              "clientId": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "issuer": {
+                                "type": "string",
+                                "format": "uri"
+                              }
+                            },
+                            "required": [
+                              "mode"
+                            ],
+                            "additionalProperties": false
+                          }
+                        ],
+                        "default": {
+                          "mode": "none"
+                        }
                       }
                     },
                     "required": [
