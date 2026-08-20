@@ -121,6 +121,11 @@ async function writeStream(stream: Readable, target: string, relativePath: strin
   // 包根在哪。中间态是「谁都跑不了」而不是「先给上再收回」。
   const handle = await open(target, 'w', 0o600);
   let written = 0;
+  // **在开始消费之前就挂上**：超限那一刻我们从循环里抛出去，异步迭代器随即摘掉自己的监听，而
+  // yauzl 的 `validateEntrySizes` 还会在这条流上继续吐 error（压缩炸弹谎报大小时必然吐，而且
+  // 不止一次）。那时没人在听，**流上未处理的 error 在 Node 里直接抛** —— 一个畸形包足以把进程带崩。
+  // 挂在 finally 里太晚：抛出与摘监听之间就已经有一发落空了。
+  stream.on('error', () => {});
   try {
     for await (const chunk of stream) {
       const buffer = chunk as Buffer;
