@@ -406,6 +406,7 @@
 | [x] AC-SKL-018 (自动) | 盘上删掉一个 skill 目录后重扫；再让 `skills.dir` 整个不存在时重扫 | 前者那一行从 `skills` 表消失；后者（`ENOENT`）**不清理**，表原样保留 | 〔skill.runtime.test.ts〕
 | [x] AC-SKL-019 (自动) | `skills/` 下放一个 `.staging-x/` 与一个普通文件 | 两个都不进 `skills` 表，也不产生 `load_error` 行 | 〔skill.runtime.test.ts〕
 | [x] AC-SKL-020 (自动) | `DELETE /api/skills/writing-tools`；`PUT` 改它的正文；`PATCH` 只改 `enabled` | 前两个 403 `skill_reserved`，第三个放行 —— 停用是正当运维动作，改正文不是 | 〔api.contract.test.ts〕
+| [x] AC-SKL-021 (自动) ★ | 一条在 `writePackageEntry` 的第一个 `await` 之前就带 error 死掉的流（等价于谎报大小的包在 `await open()` 那段窗口里吐 error） | error 闸挂在函数第一句、**早于** `await open()`：那个 error 只让这次装包失败，而不是 `uncaughtException`。挂在那句 await 之后就有一段没人监听的窗口 —— 流拿到手时已经在流动（`openReadStream` 内部就 pipe 上了 inflate），而 `open` 是真的文件系统调用；并行跑全量测试时窗口拉到 20ms 量级，AC-SKL-013 那个压缩炸弹真的把测试进程崩过一次（`too many bytes in the stream. expected 1. got at least 16384`），而单跑它十次都是绿的 | 〔skill.package.test.ts〕
 | [x] AC-PLG-001 (自动) | 放一个示例 plugin，未启用 | 其工具/命令/钩子均不生效 | 〔plugin.runtime.test.ts〕
 | [ ] AC-PLG-002 | WebUI 启用 plugin | 弹出「全信任运行任意代码」确认；确认后工具可用 |
 | [ ] AC-PLG-003 (自动) | plugin 的 `configSchema` | WebUI 生成对应表单；含密字段加密存储且前端只显示 hint |
@@ -588,10 +589,10 @@
 | Subagent 与任务 | | 20 / 38 | | | |
 | 记忆 | | 1 / 13 | | | |
 | 日志与成本 | | 8 / 28 | | | |
-| 扩展生态 | | 28 / 52 | | | |
+| 扩展生态 | | 29 / 53 | | | |
 | WebUI | | 11 / 85 | | | |
 | 安全 | | 9 / 25 | | | |
 | 运维 | | 2 / 10 | | | |
-| **合计** | | **207 / 484** | | | |
+| **合计** | | **208 / 485** | | | |
 
 **整体通过条件**：全部 ★ 项通过 + 非 ★ 项通过率 ≥ 95% + 所有豁免项经需求方书面确认。
