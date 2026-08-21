@@ -125,6 +125,40 @@ load_skill: tool({
 
 > 为什么不把所有 skill 正文都塞进系统提示词？因为 10 个 skill 就能吃掉 10k+ token。渐进式披露是 skill 机制的**核心价值**，必须实现。
 
+**`load_skill` 与 `search_tools` 是同一个思想的两个通道**：一个展开**正文**（SKILL.md 那几 KB 操作说明），
+一个展开**schema**（工具的描述与完整 JSON Schema，[05 §3.12](./05-tools-and-permissions.md)）。两笔账是
+同一笔 —— 10 个 skill 的正文能吃掉 10k token，一台话多的 MCP server 的 schema 也能，而后者每 step 都
+重发。所以两者的档位也对齐：`sourcePriority` 同为 80，同在 `SKILL_NARROWING_EXEMPT`，同在折叠豁免表。
+
+两者叠加之后，本步的允许集是：
+
+```
+activeTools = (常驻 ∪ 本轮已展开) ∩ skill 允许集 ∩ 开轮冻结的 toolSet
+```
+
+最后那一项容易漏掉。前两项都是**每步现算**的（合格集走 `active()` 的过滤链、展开集是活的），而
+`toolSet` 在开轮那一刻就冻结了（`runMainAgentInternal`）—— 轮中 MCP `reconcile` 新接一台 server、
+或热更新放宽了 `tools.overrides`，都会让现算的那份里出现冻结集之外的名字。AI SDK 那边
+（`filterActiveTools`）做的是纯交集，多报的名字被**静默丢掉**，所以漏掉这一项不会报错，会说假话：
+`search_tools` 对一个轮中新挂的工具回 `status:'expanded'`，而它这一轮永远发不出去。显式写出这一项是
+为了让「本步到底发得出哪些」只有一个答案，也为了不把正确性押在某个 SDK 版本恰好选了宽容语义上。
+
+**先扩张后收窄，收窄永远赢。** 载入一个 `allowed-tools: [bash]` 的 skill 之后，已展开的 MCP 工具照样被
+滤掉：展开改变的是可见性，不是权限，压不过收窄。`search_tools` 自己豁免于收窄，但它必须把这种命中
+如实标成 `status:'narrowed'`（[05 §3.12](./05-tools-and-permissions.md)）。
+
+**展开集「只增不减」是上面那条 `narrows` 教训的镜像。** 那一条栽在「分不清『收窄到这些』与『没收窄，
+这些就是全部』」，只好另加一个标志位；这一条要分清的是「没展开过」与「展开了但一个都没命中」——
+单调的集合天然区分这两种（前者是空集且永远不会被回收，后者只是这一次没往里加东西），所以不需要第二个
+标志位。轮内不回收已展开的工具还有第二个理由：回收一次就是再打穿一次 tools 段的缓存前缀
+（[04 §2.1](./04-agents-and-providers.md#21-prompt-缓存)）。
+
+**行为悬崖有兜底，不只靠提示词引导。** 渐进披露的代价是模型看不见折叠工具的详情，因而可能想不到去检索
+（[14 T20](./14-open-questions.md)）。`search_tools` 那侧挂了 `repairToolCall`：模型直接调一个
+折叠工具时，这次调用被自动改写成一次 `search_tools({ names: [...] })`，下一步就真能调到
+（[05 §3.12](./05-tools-and-permissions.md) 的「自愈」段）。`load_skill` 没有对应的兜底，因为 skill 名字
+本来就整份列在目录里 —— 折叠工具是**名字在、详情不在**，两种缺口不同形。
+
 ### 2.3 加载与热更新
 
 - 启动时扫描 `skills/*/SKILL.md`，解析 frontmatter（`gray-matter` + zod 校验），写 `skills` 表（`content_hash` 用于变更检测）。
@@ -335,6 +369,24 @@ mcp:
 > 所以 `headers: { Authorization: 'Bearer ${env:TOKEN}' }` 这个老写法**只在手写进
 > `config/config.yaml` 时有效**；从 WebUI 或 `install_mcp` 建出来的 server 落在 `config_kv` 里，
 > 那串 `${env:...}` 会被原样当成 header 值发出去。这条不对称是 §4.5 改用凭据库的原因之一。
+
+**`toolAllow` / `toolDeny` 与目录折叠是两层，并存不冲突。** 前者是**连接期**过滤：`discover()` 在
+`listTools()` 之后就把不匹配的条目丢掉（§4.2），那些工具**不存在** —— 不进注册表、不进 `toolSet`，
+硬调撞 `admit()` 的 `unknown_tool`。折叠是**目录期**的：工具存在、可执行、只是在提示词里缩成折叠组里的
+一行名字，`search_tools` 一调就回来（[05 §3.12](./05-tools-and-permissions.md)）。想真的不给就用
+`toolDeny`（或 `tools.overrides.<name>.enabled=false`），想省 token 就让它折叠；拿折叠当访问控制是把
+**可达性**误当**权限边界**，而前者由 AI SDK 的 `activeTools` 过滤决定、随时会变
+（[05 §4](./05-tools-and-permissions.md#4-权限矩阵权威表) 末尾把这两层分开写了）。
+
+一台 server 掉线时它的工具从注册表整批消失（§4.3），**折叠组那行摘要跟着一起消失** —— 摘要是每轮从
+`active()` 现算的，不是缓存下来的一份清单。所以模型不会看着一行「`[mcp:github]` 12 个」去检索一台已经
+连不上的 server。轮**中**掉线同理：已展开的名字在下一步的交集里自动掉出可见集，硬调由 `admit()` 兜住。
+
+**子 agent 是显式非目标。** 它的工具集由 `definition.tools` 白名单定死
+（[04 §3.1](./04-agents-and-providers.md#31-定义方式)），那已经是比折叠更强的表达 —— 白名单外的工具根本
+不进它的 `toolSet`，没有「折叠起来省 token」这回事，而白名单内的工具正是派它出去要用的那几个。所以
+`search_tools` 对子 agent 不可用（[05 §3.12](./05-tools-and-permissions.md) 不变量 4），子 agent 的目录
+形态一个字节都不变。
 
 ### 4.2 接入实现
 
@@ -568,6 +620,46 @@ plugin 60 > MCP 40 > 自定义 30），记 `warn` 日志并在 RUNTIME 块告知
 
 **装配顺序上，自定义工具最后 reconcile**（`main.ts`）：`registerExternal` 拒绝跨来源覆盖，先注册的赢，
 于是重名时运维显式配的 plugin / MCP 压过模型自己造的那份 —— 方向是 fail-safe。
+
+**注册完之后再切一刀：常驻 / 折叠。** 上面那份 `tools` 是**全集**，它整份进 `toolSet`（开轮冻结，
+[04 §2.1](./04-agents-and-providers.md#21-prompt-缓存)）；提示词的 TOOL CATALOG 块与 provider 的 tools 数组
+看到的是它按 `tools.catalog.*` 二分出来的常驻那一半，折叠的那一半每组只留一行名字，靠 `search_tools`
+按需展开（规格见 [05 §3.12](./05-tools-and-permissions.md)）。判据在**查询期**算、不在 `RegisteredTool`
+上打标 —— 打标会被 MCP reconcile 与配置热更新弄脏：
+
+判据按**代码里的顺序**读（前四级只要命中一条就「一律不折叠」，`#deferredFor` 立刻返回 false）：
+
+```
+① deferExternal 不为 true（或整段缺席）→ 一律不折叠            ← 总开关，管全部来源
+② search_tools 被运维禁用            → 一律不折叠（梯子没了）
+③ 本角色够不到 search_tools 的生效 minRole → 一律不折叠（同上，按角色）
+④ 豁免表（search_tools / load_skill）      → 永不折叠
+⑤ tools.catalog.resident 的 glob 命中     → 强制常驻（压得过 defer）
+⑥ builtin / agent                        → 默认常驻，只有 tools.catalog.defer 的 glob 点名才折叠
+⑦ 其余（mcp / plugin / custom）           → 折叠
+```
+
+**① 是总开关这一点要读准：**`deferExternal: false` 配上 `defer: ['bash']` 折叠的是**零个工具**，
+不是「只折叠 bash」—— `defer` 与 `resident` 都只在折叠机制开着时才有意义。
+**②③ 是同一条不变量的两半**（[05 §3.12](./05-tools-and-permissions.md) 不变量 3）：能展开的那个工具
+一旦对当前角色不可用，折叠必须整体回退，否则就留下「看得见摘要却没有任何路径展开」的形态。
+③ 判的是**生效** minRole（`TOOL_POLICY` 叠加 `tools.overrides.search_tools`），且**按角色**回退 ——
+把它抬到 `owner` 的效果是 owner 那边照旧折叠、trusted 及以下整体回退。
+
+折叠组的 key 从**既有命名空间**派生，不新增字段（[05 §3.9](./05-tools-and-permissions.md) 那套命名）：
+`mcp__<server>__*` → `mcp:<server>`；`custom_*` → `custom`；plugin → `plugin`；被点名的内建 → `builtin`。
+
+**`maxRegistered` 的语义不变，它作用于上面那个全集。** 折叠工具照占名额：名额护的是 `toolSet` 这个
+**可执行面**，不是提示词长度。折叠解除的是「注册数 ∝ 每步 token」这条正比关系，所以运维现在可以放心
+把它调大。代价是一条硬约束：**折叠组的摘要行严格从截断之后的集合生成** —— 被砍掉的名字不进摘要，
+否则模型会去展开一个 `toolSet` 里压根没有的工具。
+
+**「在 RUNTIME 块告知」从此是承诺而不是欠账。** 撞上截断时 RUNTIME 块输出一行事实：共注册 N 个、
+按来源优先级只保留前 M 个、其余本轮不可用、以及那个配置键的名字（体例与措辞见
+[06 §1.2](./06-prompt-and-memory.md#12-block-6-runtime-模板)）。它**不受 `prompt.runtimeBlock.show.*` 管**
+—— 那些开关管的是「要不要显示某类状态」，而这一行说的是一件已经发生的事（照「上下文：刚被清空」那条
+先例）。`AC-TOOL-020` 此前只落地了「按优先级截断 + warn 日志」，模型对自己少了什么完全不知情，
+唯一凭据是一条没人看的 `tool.registry_truncated`。
 
 ---
 

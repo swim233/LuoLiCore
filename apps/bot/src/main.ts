@@ -4,7 +4,7 @@ import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { serve } from '@hono/node-server';
 import { ArchiveRepository, CustomToolRepository, OperationsRepository, PrincipalRepository, McpAuthRepository, SandboxContainerRepository, ScheduleRepository, TurnRepository, acquireInstanceLock, closeDatabase, migrateDatabase, modelAliasKey, openDatabase, readAppKv, readPersistedConfig, recomputeMessageTokens, recoverAfterCrash, writeAppKv } from '@luoli/db';
-import { AgentManager, AgentResultStore, AlertDispatcher, BUNDLED_SKILLS, ConfigStore, ContainerManager, CustomToolManager, mergeAgentDefinitions, scanAgentFiles, ContextEngine, DatabaseApprovalBroker, EventBus, FileTools, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, ModelRegistry, PathJail, PendingAuthorizations, PluginManager, selfAuthoringDenyGlobs, PromptAssembler, PromptDocuments, ProviderStore, PROVIDER_FAILURES_TO_DOWN, PROVIDER_PROBE_TIMEOUT_MS, QuotaGuard, repairAgentResultRefs, repairLedgerCacheCost, runProviderHealthCheck, Sandbox, ScheduledJobRunner, Scheduler, Secrets, SkillLoader, STABLE_PROMPT_BLOCKS, TOOL_POLICY, ToolRegistry, TurnConcurrency, TurnFailureStreak, TurnRegistry, UsageLedger, WebAssetStore, assembleMainPrompt, canSeeImages, captureImage, configJsonSchema, loadConfig, perChatConfig, registerAuthoringTools, registerBuiltins, registerContainerTools, rejectedWakewords, runMainAgent, runSubAgent, streamMainAgent, type ContainerEvent, type SubAgentRuntimeEvent } from '@luoli/core';
+import { AgentManager, AgentResultStore, AlertDispatcher, BUNDLED_SKILLS, ConfigStore, ContainerManager, CustomToolManager, mergeAgentDefinitions, scanAgentFiles, ContextEngine, DatabaseApprovalBroker, EventBus, FileTools, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, ModelRegistry, PathJail, PendingAuthorizations, PluginManager, selfAuthoringDenyGlobs, PromptAssembler, PromptDocuments, ProviderStore, PROVIDER_FAILURES_TO_DOWN, PROVIDER_PROBE_TIMEOUT_MS, QuotaGuard, repairAgentResultRefs, repairLedgerCacheCost, runProviderHealthCheck, Sandbox, ScheduledJobRunner, Scheduler, Secrets, SkillLoader, STABLE_PROMPT_BLOCKS, TOOL_POLICY, ToolRegistry, TurnConcurrency, TurnFailureStreak, TurnRegistry, UsageLedger, WebAssetStore, assembleMainPrompt, canSeeImages, captureImage, configJsonSchema, loadConfig, perChatConfig, registerAuthoringTools, registerBuiltins, registerCatalogTools, registerContainerTools, rejectedWakewords, runMainAgent, runSubAgent, streamMainAgent, type ContainerEvent, type SubAgentRuntimeEvent } from '@luoli/core';
 import { createServer, EventStreamRegistry, issueLoginToken, setupToken, type PromptPreviewResult } from '@luoli/server';
 import type { RuntimeTurnContext } from '@luoli/shared';
 import { TelegramTools, UpdatePoller, createTelegramBot } from '@luoli/telegram';
@@ -238,7 +238,11 @@ if (!config.trigger.private && !config.trigger.mention && !config.trigger.reply 
   log.event({ level: 'warn', kind: 'config.invalid', summary: 'No trigger source is enabled; the bot will never respond' });
 }
 const toolRegistry = new ToolRegistry(log, approval,
-  () => { const live = configStore.snapshot(); return { maxRegistered: live.tools.maxRegistered, maxCallsPerTurn: live.tools.maxCallsPerTurn, maxConsecutiveErrors: live.tools.maxConsecutiveErrors, maxOutputBytes: live.tools.exec.maxOutputBytes, defaultTimeoutMs: live.tools.defaultTimeoutMs }; },
+  // `catalog` 那一段是折叠判据的**唯一**入口（`#deferredFor` 每次查询都从这个 getter 现读，
+  // 所以它天然跟着热更新走）。漏掉这一行的表现是「配置页改了 tools.catalog.*，运行时一个字没变」，
+  // 而 `tests/config.test.ts` 那条「路径级引用」断言挡不住它：`descriptions.ts` 里的点分键字面
+  // 已经让 `tools.catalog.*` 各叶子匹配上了，接线漏没漏它看不出来。
+  () => { const live = configStore.snapshot(); return { maxRegistered: live.tools.maxRegistered, maxCallsPerTurn: live.tools.maxCallsPerTurn, maxConsecutiveErrors: live.tools.maxConsecutiveErrors, maxOutputBytes: live.tools.exec.maxOutputBytes, defaultTimeoutMs: live.tools.defaultTimeoutMs, catalog: live.tools.catalog }; },
   () => configStore.snapshot().approval.rules, plugins, turns);
 toolRegistry.bindOverrides(() => configStore.snapshot().tools.overrides);
 // 判据本身在 core（`canSeeImages`，与两处 vision 切换一字对齐）；这里只补它问不到的那一半：
@@ -372,6 +376,10 @@ registerAuthoringTools(toolRegistry, { customTools, skills, plugins, reservedSki
 // 下面那条「每个 TOOL_POLICY 条目都必须已注册」的启动断言，表现是关掉持久化之后进程起不来
 // （同 authoring.ts 那八个）。
 registerContainerTools(toolRegistry, { sandbox, db });
+// 折叠目录的检索入口（docs/05 §3.12）。同上：无条件注册，开关（`agentKind==='main'` + 本角色
+// 折叠集非空）焊在 `available()` 里 —— 它在 `TOOL_POLICY` 里，跳过注册会让下面那条启动断言
+// 直接把进程拦死。
+registerCatalogTools(toolRegistry, { log });
 plugins.bindRegistry(toolRegistry);
 mcp.bindRegistry(toolRegistry);
 customTools.bindRegistry(toolRegistry);

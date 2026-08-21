@@ -733,12 +733,17 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
       return ctx.json({ ok: true, data: Object.fromEntries(dependencies.tools.describe().map((entry) => [entry.name, {
         ...entry.effective, enabled: entry.enabled, timeoutMs: entry.timeoutMs, selfManagedTimeout: entry.selfManagedTimeout,
         defaults: { minRole: entry.defaults.minRole, approval: entry.defaults.approval, timeoutMs: entry.defaultTimeoutMs },
-        relaxed: entry.relaxed }])) });
+        // 这个工具此刻是常驻还是折叠（`tools.catalog.*`，docs/05 §3.12）。它**不是**启停开关的
+        // 另一种说法：折叠工具照旧可执行，只是模型默认看不见 schema、要先 `search_tools` 展开。
+        deferred: entry.deferred, relaxed: entry.relaxed }])) });
     }
     return ctx.json({ ok: true, data: Object.fromEntries(Object.entries(TOOL_POLICY).map(([name, policy]) => {
       const override = overrides[name];
       return [name, { ...effectiveToolPolicy(policy, override), enabled: override?.enabled !== false,
         timeoutMs: override?.timeoutMs ?? null, selfManagedTimeout: false,
+        // 这条路没有注册表，折叠判不出来（判据要 `#limits()` 与实际注册进来的那批工具）。
+        // 报 false 而不是省掉这个字段：形状统一，前端不必分两种响应处理。
+        deferred: false,
         defaults: { minRole: policy.minRole, approval: policy.approval, timeoutMs: null }, relaxed: relaxedFields(policy, override) }];
     })) });
   });

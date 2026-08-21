@@ -46,6 +46,7 @@ export * from './skills/loader.js';
 export * from './skills/package.js';
 export * from './tools/authoring.js';
 export * from './tools/builtins.js';
+export * from './tools/catalog-meta.js';
 export * from './tools/cite.js';
 export * from './tools/containers.js';
 export * from './tools/custom.js';

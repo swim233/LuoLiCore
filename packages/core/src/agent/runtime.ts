@@ -12,7 +12,7 @@ import { modelAliasKey, readAppKv } from '@luoli/db';
 import { escapeSystemInstructions, estimateStructureTokens, formatSpeakerIdentity, sanitizeIdentity, systemInstructions, type RuntimeTurnContext } from '@luoli/shared';
 import type { PromptAssembler, PromptDocuments } from '../index.js';
 import { runtimeBlock, type PromptBuildResult } from '../prompt/assembler.js';
-import type { RegisteredTool, ToolExecutionContext, ToolMedia, ToolRegistry } from '../tools/registry.js';
+import type { DeferredToolGroup, RegisteredTool, ToolExecutionContext, ToolMedia, ToolRegistry } from '../tools/registry.js';
 // 摘 `media` 的那把尺子只有一份：注册表在序列化之前用它，这里在落库之前用同一个（形状判据
 // 分两份写，迟早出现「注册表认得是图、落库那侧不认得」）。registry 不 import runtime，无环。
 import { splitToolMedia } from '../tools/registry.js';
@@ -658,10 +658,55 @@ export function chatDescription(turn: RuntimeTurnContext): string {
   return `${where}(chat ${turn.chatId}, ${topic})  上下文键 ${turn.key}`;
 }
 
+/**
+ * TOOL CATALOG 的常驻段（docs/06 §1）。
+ *
+ * `tools.catalog.residentDescriptions=false` 时压成一行名字清单：同一份 description 此前在两处
+ * 各发一遍 —— provider 的 tools 数组那份在请求体头部、属可缓存前缀，这一份在易变段、**每步重发**。
+ * 重复贵就贵在后者，而描述的权威副本本来就是 tools 数组那一份（还带完整 JSON Schema）。
+ * 默认仍是 `true`：折叠与去重是两个变量，同时翻的话模型行为真变差时分不清是哪个引起的。
+ *
+ * 名字清单那一档带「常驻工具」四个字，是给 KERNEL 里「见 TOOL CATALOG 的**常驻部分**」一个能对上
+ * 的锚点。默认那一档**不加任何标题** —— 加了就不再是「现状逐字节不变」。
+ */
+function residentCatalog(resident: readonly RegisteredTool[], withDescriptions: boolean): string {
+  if (!resident.length) return '';
+  return withDescriptions ? resident.map((tool) => `- ${tool.name}: ${tool.description}`).join('\n')
+    : `常驻工具（可直接调用）：${resident.map((tool) => tool.name).join(', ')}`;
+}
+/** 每组超过这个数就只列前 `DEFERRED_GROUP_HEAD` 个（docs/06 §1）：摘要行也在易变段，每步重发。 */
+const DEFERRED_GROUP_CAP = 12;
+const DEFERRED_GROUP_HEAD = 10;
+/**
+ * 折叠段：**每组一行、只列名字、不带 per-tool 描述**（docs/06 §1 那份形状）。
+ *
+ * 不带描述是这个机制的本体，不是排版偏好：MCP 工具名本身相当自描述，而上游 description 动辄
+ * 数 KB、每步重发正是要消灭的东西。行首那句「本步不可直接调用；用 search_tools 展开」是
+ * 两处引导之一（另一处是 KERNEL 那句；RUNTIME 的计数后缀只在目录关掉时出现，docs/14 §3 T20 ①）——
+ * 摘要给了名字却不说怎么用，模型只会直接调过去然后撞 `NoSuchToolError`。
+ *
+ * 组的顺序照 `activeView()` 交回的原序（`sourcePriority desc, name asc` 的首次出现顺序），
+ * **不要重排**：这一段在易变段里，无谓的重排就是每步把提示词改一次。
+ */
+function deferredCatalog(groups: readonly DeferredToolGroup[], total: number): string {
+  if (!total) return '';
+  const lines = groups.map((group) => {
+    const shown = group.total > DEFERRED_GROUP_CAP ? group.names.slice(0, DEFERRED_GROUP_HEAD) : group.names;
+    return `- [${group.key}] ${group.total} 个：${shown.join(', ')}${shown.length < group.total ? `, …等 ${group.total} 个` : ''}`;
+  });
+  return [`【折叠工具 · 共 ${total} 个，本步不可直接调用；用 search_tools 按关键词或名字展开】`, ...lines].join('\n');
+}
+
 /** Runtime 与 WebUI 预览共用这一条组装路径；预览出来的 block 必须就是下一轮会发给模型的 block。 */
 export function assembleMainPrompt(turn: RuntimeTurnContext, dependencies: PromptAssemblyDependencies, executionContext?: ToolExecutionContext): MainPromptAssembly {
   const toolContext = executionContext ?? { turn, workspace: dependencies.workspace, agentKind: 'main' };
-  const activeTools = dependencies.tools.activeNames(turn.effectiveRole, toolContext);
+  // **一次**取数供三个消费点（常驻段、折叠摘要段、RUNTIME 的两行）。此前是 `activeNames()` +
+  // `catalog()` 各跑一遍整条过滤链，而那条链会调每个工具的 `available()` —— 两遍不只是浪费，
+  // 中间还留了一个「两次结果不一致」的缝（`available()` 读的是活的配置与容器状态）。
+  const view = dependencies.tools.activeView(turn.effectiveRole, toolContext);
+  // 开轮时 `expandedTools` 恒空（唯一写入方是轮内的 `search_tools`），所以这里的常驻集就是
+  // 第 0 步的 `activeTools`；此后每一步由 `prepareStep` 现算。
+  const activeTools = view.resident.map((tool) => tool.name);
   // `perChat.<key>.character`：会话级人格文件名。它在 `perChat` 白名单里，但不是 schema 叶子键
   // （`perChat` 是 `z.record(z.unknown())`），所以从合并后的本轮配置里按名字取（docs/27 · C-08）。
   // 形态闸在 `PromptDocuments.paths` 里：这个值会被当成 `memory/` 下的路径段用。
@@ -670,12 +715,19 @@ export function assembleMainPrompt(turn: RuntimeTurnContext, dependencies: Promp
     ...(typeof characterOverride === 'string' && characterOverride ? { characterOverride } : {}) });
   // 目录按**本轮真正可用的工具**过滤：一份讲 `install_mcp` 的说明书，在那个工具没开的时候
   // 出现在目录里只会把模型带进死胡同（实测：它读完说明书找不到工具，转头用 bash 逆向代码库）。
-  const skillCatalog = dependencies.skills?.catalog(turn.effectiveRole, activeTools).map((skill) => `- skill:${skill.name}: ${skill.description}`).join('\n') ?? '';
+  // **过滤用的是全量名字（常驻 + 折叠）**：一份讲某个折叠 MCP 工具的 skill 仍该出现在目录里 ——
+  // 折叠是「要先展开一次」，不是「没有」，而模型读完 skill 正文正好知道该展开哪个。
+  const skillCatalog = dependencies.skills?.catalog(turn.effectiveRole, [...activeTools, ...view.deferred.map((tool) => tool.name)])
+    .map((skill) => `- skill:${skill.name}: ${skill.description}`).join('\n') ?? '';
   // `prompt.includeToolCatalog=false` 时只发工具名（RUNTIME 里那一行），不发描述。省的是每轮
   // 几百到几千 token，代价是模型少了参数用法的提示 —— 所以默认开着。
-  const catalog = dependencies.config.prompt.includeToolCatalog
-    ? [...dependencies.tools.catalog(turn.effectiveRole, toolContext).map((entry) => `- ${entry.name}: ${entry.description}`), skillCatalog].filter(Boolean).join('\n')
-    : '';
+  //
+  // **skill 目录不跟着工具目录一起关**（docs/06 §1）：它此前塞在这个三元的 then 分支里，于是
+  // 关掉工具目录连带把 skill 清单也关了 —— 而 skill 目录不与任何东西重复（RUNTIME 那行「可用
+  // 工具」只列工具），关掉模型就不知道有哪些 skill 可载。所以两段各自渲染，最后一起拼。
+  const catalog = [...(dependencies.config.prompt.includeToolCatalog
+    ? [residentCatalog(view.resident, dependencies.config.tools.catalog.residentDescriptions), deferredCatalog(view.groups, view.deferred.length)]
+    : []), skillCatalog].filter(Boolean).join('\n');
   const runtimeShow = dependencies.config.prompt.runtimeBlock;
   const spent = dependencies.quota && dependencies.reservation ? dependencies.quota.status(dependencies.reservation) : null;
   const runtime = runtimeBlock({ now: new Date(), timezone: dependencies.config.general.timezone,
@@ -693,12 +745,20 @@ export function assembleMainPrompt(turn: RuntimeTurnContext, dependencies: Promp
     ...(turn.contextCleared ? { contextCleared: dependencies.config.context.recallBarrier
       ? '刚被清空。之前的对话不在你眼前，归档检索也查不到清空之前的消息 —— 不要反复尝试，需要的话请用户重说一次。'
       : '刚被清空。之前的对话不在你眼前；确有必要时可用 read_messages / search_messages 去归档里查，但别把它当默认动作。' } : {}),
-    // 工具名只在目录关掉时才列进 RUNTIME：开着的时候 TOOL CATALOG 已经一行一个带描述地列过了，
-    // 两处同源（都是 `active(role, ctx)`），重复一遍等于每轮白付一份易变段的钱（docs/06 §1.2）。
+    // 工具名只在目录关掉时才列进 RUNTIME：开着的时候 TOOL CATALOG 的常驻段已经列过了，两处
+    // 同源（都是这一次 `activeView()` 的 `resident`），重复一遍等于每轮白付一份易变段的钱
+    // （docs/06 §1.2）。折叠的那些不进这一行，只在后缀里报一个数。
     show: { quota: runtimeShow.showQuota, contextWatermark: runtimeShow.showContextWatermark, workspace: runtimeShow.showWorkspace,
-      toolNames: !dependencies.config.prompt.includeToolCatalog } });
+      toolNames: !dependencies.config.prompt.includeToolCatalog },
+    // 截断告知与折叠计数都从上面那一次 `activeView()` 穿下来。折叠数为 0 时 `runtimeBlock` 自己
+    // 不加后缀，所以这里无条件给。
+    ...(view.truncated ? { catalogTruncated: view.truncated } : {}), deferredTools: view.deferred.length });
   const promptInput = { character: documents.character, assist: documents.assist, catalog, publicMemory: documents.publicMemory, runtime,
-    maxTokens: dependencies.config.prompt.maxTokens, includeCatalog: dependencies.config.prompt.includeToolCatalog };
+    maxTokens: dependencies.config.prompt.maxTokens,
+    // 判据不能只看 `includeToolCatalog`：关掉工具目录之后这一块里还剩 skill 清单，整块跳掉就是
+    // 上面那条耦合的另一半。两半都空时才真的不渲染（纯 `includeToolCatalog=false` 且没装 skill，
+    // 与改动之前逐字节一致）。
+    includeCatalog: dependencies.config.prompt.includeToolCatalog || Boolean(catalog) };
   if (documents.privateMemory !== undefined) Object.assign(promptInput, { privateMemory: documents.privateMemory });
   return { ...dependencies.prompts.build(promptInput), activeTools, catalog, runtime };
 }
@@ -960,6 +1020,12 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
   const stepAlias = new Map<number, string>();
   /** vision 切换每轮只记一条：`prepareStep` 每一步都会重算同一个结论。 */
   let visionSwitchLogged = false;
+  /**
+   * `repairToolCall` 本轮已经改写过的名字（判据 ⓿，见那个钩子的注释）。**不放在 turn 上** ——
+   * 它只对这一次 `agent.generate` 有意义（收尾补跑与主轮共用同一个 `agent`，共用它是对的），
+   * 而 `expandedTools` 那份是要给 `prepareStep` 和下一轮的痕迹读的，两者语义不同。
+   */
+  const repairedThisTurn = new Set<string>();
   const observers = createStepObservers(turn, { ledger: dependencies.ledger, registry: dependencies.registry, context: dependencies.context,
     log: dependencies.log, quota: dependencies.quota, reservation: dependencies.reservation ?? null,
     tokenRatioAlpha: dependencies.config.context.tokenRatioAlpha, fallbackInfo: initialInfo,
@@ -982,6 +1048,72 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
     stopWhen: [stepCountIs(Math.min(dependencies.config.agent.main.maxSteps, dependencies.config.quota.perTurn.maxSteps)),
       ({ steps }) => wrapUpMode && steps.length >= 1],
     include: { requestMessages: true, requestBody: true, responseBody: true },
+    /**
+     * **折叠工具被硬调时自愈成一次检索**（docs/05 §3.12 的「自愈」段）。
+     *
+     * 背景：SDK 先按本步 `activeTools` 把 toolSet 过一遍，再拿过滤后的那份去 `parseToolCall` ——
+     * 所以模型调一个折叠工具时在**解析阶段**就撞 `NoSuchToolError`，压根到不了
+     * `registry.execute()`。折叠把这件事从罕见幻觉变成常规事件，光靠提示词引导（KERNEL 那句无条件在，
+     * 折叠组行与 RUNTIME 计数后缀二者只会出现一个 —— 后者挂在 `show.toolNames` 上）就是在赌模型
+     * 「想到」去检索。这个钩子把它改写成
+     * `search_tools({ names: [原名] })`：调用被自动展开，下一步真能调到那个工具，模型不需要先
+     * 学会用 `search_tools`。代价与它自己先搜一次一样（多一个 step）。
+     *
+     * 回调参数里的 `tools` 是**已按 activeTools 过滤的** stepToolSet，折叠集压根不在里面 ——
+     * 所以折叠判据只能从注册表现算，不能指望参数。
+     */
+    repairToolCall: ({ toolCall, tools: stepTools }) => {
+      /**
+       * 四条「改写了也白改」的判据排在最前，因为它们最便宜而下面那次 `activeView()` 要跑整条
+       * 过滤链（含每个工具的 `available()`）—— 而最常见的入场情形恰好是幻觉名字，那一档要一路
+       * 判到最后才知道不该改。
+       *
+       * ⚠ **这四条都是防死循环的，不是优化。** 判据统一是「这次改写能不能让状态真的往前一格」：
+       * 改写成检索而检索又不会改变任何东西，就是「模型调 X → NoSuchToolError → 改写成检索 →
+       * 检索原地返回 → 模型再调 X → …」一路烧到步数上限或熔断。落回一句正常的
+       * `NoSuchToolError` 比一个来回强 —— 模型看到的是明确的失败，而不是一次假装有进展的往复。
+       *
+       * ⓿ **同一个名字本轮只改写一次。** 这一条是**兜底**，而且必须是第一条：①②③ 各自点名一种
+       *    「检索不会往前一格」的成因，而成因不止那三种 —— `search_tools` 自己也会在 `admit()`
+       *    上失败（`tools.maxCallsPerTurn` 用满、运维把它的 `approval` 覆盖成 `always` 而审批被拒、
+       *    轮内连续失败到 `maxConsecutiveErrors` 之前那几次），这些档位一律**不写**
+       *    `expandedTools`，于是 ① 永远拦不住第二次。实测（`tests/tools.catalog.wiring.test.ts`
+       *    那条 `maxCallsPerTurn` 用例）：额度用满之后同一个折叠工具被连着改写 11 次，只有
+       *    `maxSteps` 兜住 —— 11 次白付的模型调用。按名字判一次，成因有多少种都不必枚举。
+       *    happy path 上它与 ① 等价（改写成功 ⇒ 名字进 `expandedTools` ⇒ ① 本来就会拦），
+       *    所以加上它不会挡掉任何一次有用的改写；顺带把同一步里并排的两次同名硬调也合成一次。
+       *    集合是这次 `runMainAgentInternal` 调用的**局部**变量，随本轮的函数帧消亡 —— 不是
+       *    进程内状态（`docs/01 §3.1`）。
+       * ① 本轮已展开过它。`tools/catalog-meta.ts` 里「被 skill 收窄挡住的照样记进 `expandedTools`」
+       *    那段注释是这一条的另一半：单独看任何一处都会觉得对方多余（那边像是白占额度，这边
+       *    像是可以顺手也判一次 narrowed），两处一起改才成立。narrowed 的判据刻意**不在这里
+       *    再抄一份** —— 它已经有两份（`admit()` 与 `catalog-meta.ts`）且必须逐字对齐。
+       * ② 本轮展开额度已经用满。这一档 `search_tools` 会回 `expansion_limit` 且**不写**
+       *    `expandedTools`，所以 ① 拦不住它；而它的 hint 是「用 names 精确点名」，改写出来的
+       *    调用本来就是 `names:[X]` —— 模型照 hint 做也没有出路。
+       *    判据写成 `size >= budget` 与 `catalog-meta.ts` 那条 `size + fresh > budget` 在
+       *    `fresh` 恒为 1（这里永远只点一个名）时逐字等价，改动任何一侧都要看另一侧。
+       *    ⓿ 也能兜住它，但这一条让**第一次**就落回明确的失败，省掉一次无用的检索。
+       * ③ `search_tools` 自己本步发不出去。常态成立（它常驻、豁免收窄），但成本闸门与收尾补跑
+       *    会把 `activeTools` 整个清空 —— 那两档改写只是换一个名字撞同一个错。
+       */
+      if (repairedThisTurn.has(toolCall.toolName)) return Promise.resolve(null);
+      if (turn.expandedTools?.has(toolCall.toolName)) return Promise.resolve(null);
+      if ((turn.expandedTools?.size ?? 0) >= dependencies.config.tools.catalog.maxExpandedPerTurn) return Promise.resolve(null);
+      if (!('search_tools' in stepTools)) return Promise.resolve(null);
+      // 幻觉名字（注册表里根本没有的）**不改写**：把一个不存在的名字喂给检索只会得到空结果，
+      // 而模型会以为自己找过了。它照旧走 `NoSuchToolError`，那是一句明确的失败。
+      if (!dependencies.tools.activeView(turn.effectiveRole, toolContext).deferred.some((entry) => entry.name === toolCall.toolName)) return Promise.resolve(null);
+      repairedThisTurn.add(toolCall.toolName);
+      dependencies.log.event({ level: 'info', kind: 'tool.repaired', summary: `${toolCall.toolName} → search_tools`,
+        traceId: turn.turnId, ...turnParent(turn), chatId: turn.chatId, userId: turn.initiatorUserId, key: turn.key,
+        data: { tool: toolCall.toolName, into: 'search_tools', reason: 'deferred_not_expanded' } });
+      // 逐个字段列而不是 `...toolCall`：原调用上的 `providerExecuted` / `providerMetadata` 是**那个**
+      // 工具的元数据，整份透传给 `search_tools` 就是把它挂到错的工具上。`input` **必须是 JSON
+      // 字符串** —— 下游走的是 `safeParseJSON({ text: toolCall.input, schema })`。
+      return Promise.resolve({ type: 'tool-call' as const, toolCallId: toolCall.toolCallId,
+        toolName: 'search_tools', input: JSON.stringify({ names: [toolCall.toolName] }) });
+    },
     prepareStep: async ({ stepNumber: rawStep, messages }) => {
       // 收尾补跑是**另一次** `agent.generate`，它的 stepNumber 从 0 重新起。不换算的话：
       // ① `stepSpans.set(0, …)` 会顶掉主轮 step 0 那条已经结束的 span（出错时还会被 end 第二次）；
@@ -990,7 +1122,21 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
       const stepNumber = wrapUpMode ? mainStepCount + rawStep : rawStep;
       await dependencies.plugins?.hook('beforeModelCall', { turn, step: stepNumber });
       const skillAllow = turn.skillAllowedTools?.size ? new Set<string>([...turn.skillAllowedTools, ...SKILL_NARROWING_EXEMPT]) : null;
-      const activeForStep = dependencies.tools.activeNames(turn.effectiveRole, toolContext).filter((name) => !skillAllow || skillAllow.has(name));
+      const activeForStep = dependencies.tools.activeNamesForStep(turn.effectiveRole, toolContext, turn.expandedTools)
+        // **先扩张后收窄，收窄永远赢**（docs/07 §2.2）：载入一个 `allowed-tools: [bash]` 的 skill
+        // 之后，已展开的 MCP 工具照样滤掉 —— 展开改变的是可见性，不是权限。
+        .filter((name) => !skillAllow || skillAllow.has(name))
+        // 护栏：`toolSet` 开轮就冻结了，而这一行算出来的合格集是**每步 fresh** 的。轮中 MCP
+        // reconcile 新接一台 server、或热更新放宽了 `tools.overrides`，都会让 fresh 集合里出现
+        // 冻结集之外的名字。此前只有自撰写工具那一条路做了防护（开轮前 `syncIfChanged`）。
+        //
+        // ⚠ **这道交集在 ai@7.0.65 上是「说清楚」而不是「兜住崩溃」**：`filterActiveTools`
+        // （`ai/dist/index.js`）做的是 `Object.entries(tools).filter(([n]) => activeTools.includes(n))`
+        // —— 纯交集，多报的名字被**静默丢掉**，SDK 一个字都不说。真正的坏处因此不是报错而是
+        // 「说了假话」：`search_tools` 会对一个轮中新挂的工具回 `status:'expanded'`，而它压根不在
+        // 冻结的 toolSet 里、这一轮永远发不出去。显式写出这道交集是为了让「本步到底发得出哪些」
+        // 只有一个答案，也为了不把正确性押在某个 SDK 版本恰好选了宽容语义上。
+        .filter((name) => name in toolSet);
       const requestedAlias = turn.modelAliasOverride ?? alias;
       const downgrade = stepNumber >= dependencies.config.agent.main.downgradeAfterStep && dependencies.registry.aliases().includes('low');
       let selectedAlias = downgrade ? 'low' : requestedAlias;

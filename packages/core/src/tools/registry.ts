@@ -1,8 +1,9 @@
+import { minimatch } from 'minimatch';
 import { z } from 'zod';
 import type { Role, RuntimeTurnContext } from '@luoli/shared';
 import { elideMiddleBytes, roleRank, untrusted } from '@luoli/shared';
 import type { ToolPolicyEntry, ToolName, ToolOverride } from './policy.js';
-import { SKILL_NARROWING_EXEMPT, TOOL_POLICY, effectiveToolPolicy, relaxedFields } from './policy.js';
+import { DEFER_EXEMPT, SKILL_NARROWING_EXEMPT, TOOL_POLICY, effectiveToolPolicy, relaxedFields } from './policy.js';
 import type { LogSink, LogSpan } from '../log/sink.js';
 import { ApprovalRules, type ApprovalRisk } from '../approval/rules.js';
 export type { ApprovalRisk } from '../approval/rules.js';
@@ -72,12 +73,42 @@ export interface ApprovalBroker {
   request(tool: RegisteredTool, input: unknown, context: ToolExecutionContext, risk: ApprovalRisk): Promise<boolean | ApprovalVerdict>;
 }
 
+/**
+ * `tools.catalog.*` 的形状（docs/07 §5）。**这里独立声明而不 import 配置类型** —— 注册表不认
+ * `Config`，`ToolLimits` 一直是「运行时给我这几个数」的窄契约。
+ *
+ * 每一项都 optional，且**整段缺席 = 一律不折叠**：全仓约十处手工构造 `ToolRegistry` 的测试
+ * （`tests/mcp.runtime.test.ts` 那份 limits 等）都不给这一段，缺省必须是改动前的行为。
+ */
+export interface ToolCatalogLimits {
+  deferExternal?: boolean; defer?: readonly string[]; resident?: readonly string[];
+  residentDescriptions?: boolean; maxExpandedPerTurn?: number;
+}
+/**
+ * 折叠组的摘要素材。`names` 是**完整**清单（已在截断后的集合内），`total = names.length` ——
+ * 「每组超 12 个只列前 10 + 等 N 个」是提示层的排版，由渲染方按这两项自己决定，注册表不预先砍掉
+ * 名字：砍在这里的话检索的 `group` 通道就再也列不全那一组了。
+ */
+export interface DeferredToolGroup { key: string; names: readonly string[]; total: number }
+/**
+ * 目录的折叠视图。`resident ∪ deferred` **恰好等于** `active()`（同一次 `#eligible()` 的产物二分，
+ * 不漏不重）—— 提示词的两段、`prepareStep` 的集合、检索的域全部从这一份派生，才不会出现
+ * 「摘要里报了一个 toolSet 里没有的名字」。
+ */
+export interface ToolCatalogView {
+  resident: RegisteredTool[];
+  deferred: RegisteredTool[];
+  groups: DeferredToolGroup[];
+  truncated: { total: number; visible: number } | null;
+}
+
 interface ToolLimits {
   maxRegistered: number;
   maxCallsPerTurn: number;
   maxConsecutiveErrors: number;
   maxOutputBytes?: number;
   defaultTimeoutMs?: number;
+  catalog?: ToolCatalogLimits;
 }
 
 /** 注册期之后才出现的工具来源。`builtin` / `agent` 是编译期的，不走 `registerExternal`。 */
@@ -251,7 +282,19 @@ export class ToolRegistry {
     for (const [name, tool] of this.#tools) if (tool.policy.source === source) this.#tools.delete(name);
   }
 
-  active(role: Role, context: ToolExecutionContext, allow?: string[]): RegisteredTool[] {
+  /**
+   * `active()` 的过滤链本体，`activeView()` / `activeNamesForStep()` 共用。
+   *
+   * **整条过滤链、排序、`slice` 的行为一个字都不能变**：`admit()` 与它逐条对齐（`AC-TOOL-022`、
+   * docs/20 · W-TOOL-01），抽出来只是为了让折叠视图不必把整条链抄第二遍 —— 抄第二遍就是
+   * 两份会漂移的准入判据。
+   *
+   * **warn 不落在这里，落在 `active()`。** 折叠视图与 `active()` 都走这条链，日志写在这里的话
+   * 同一轮会按调用次数重复记 `tool.registry_truncated`；而 `toolSetFor` 那一次 `active()`
+   * （`runtime.ts` 开轮时的全量取数）仍然保证每轮至少落一条运维视角的凭据，提示层则另有
+   * RUNTIME 块里那行给模型看的截断告知。
+   */
+  #eligible(role: Role, context: ToolExecutionContext, allow?: string[]): { tools: RegisteredTool[]; truncated: { total: number; visible: number } | null } {
     const state = this.#state(context.turn.turnId);
     const tools = [...this.#tools.values()]
       .filter((tool) => roleRank(role) >= roleRank(this.effectivePolicy(tool).minRole))
@@ -262,8 +305,123 @@ export class ToolRegistry {
       .filter((tool) => tool.available?.(role, context) !== false)
       .map((tool) => tool.inputSchemaFor ? { ...tool, inputSchema: tool.inputSchemaFor(context) } : tool)
       .sort((a, b) => b.sourcePriority - a.sourcePriority || a.name.localeCompare(b.name));
-    if (tools.length > this.#limits().maxRegistered) this.log.event({ level: 'warn', kind: 'tool.registry_truncated', summary: `Registered tool limit ${this.#limits().maxRegistered}`, traceId: context.turn.turnId, data: { total: tools.length, visible: this.#limits().maxRegistered } });
-    return tools.slice(0, this.#limits().maxRegistered);
+    const max = this.#limits().maxRegistered;
+    return { tools: tools.slice(0, max), truncated: tools.length > max ? { total: tools.length, visible: max } : null };
+  }
+
+  active(role: Role, context: ToolExecutionContext, allow?: string[]): RegisteredTool[] {
+    const { tools, truncated } = this.#eligible(role, context, allow);
+    if (truncated) this.log.event({ level: 'warn', kind: 'tool.registry_truncated', summary: `Registered tool limit ${truncated.visible}`, traceId: context.turn.turnId, data: truncated });
+    return tools;
+  }
+
+  /**
+   * 这一个工具在**本次查询**里该不该折叠（docs/07 §5）。
+   *
+   * **查询期算，不在 `RegisteredTool` 上打标。** 打标的那份会被 MCP `reconcile`（重连一次就换了
+   * 一批 tool 对象）与配置热更新（`tools.catalog.*` 标着热更新）弄脏，而弄脏的表现是「摘要里
+   * 有、正文里也有」或者反过来「两处都没有」—— 都得等下次重启才好。走 `#limits()` getter
+   * 天然跟着热更新走。
+   *
+   * 判据顺序本身是契约：
+   * ① 整段缺席或 `deferExternal !== true` → 一律不折叠（改动前的行为）；② 豁免表（梯子）；
+   * ③ `resident` glob 白名单**最高优先**（运维显式点名常驻的，`defer` 再点也压不过）；
+   * ④ 内建 / agent 默认常驻，只有被 `defer` glob 点名才折叠；⑤ 其余（plugin / mcp / custom）折叠。
+   *
+   * 夹在 ① 之后那两条是 docs/05 §3.12 不变量 3 的后半：运维在工具页**把梯子收走**时
+   * **整个目录回退常驻**。判在这里而不是提示层，是因为「看得见折叠摘要却没法展开」这种形态只有
+   * 在折叠判据、目录文本、`prepareStep` 三处同时回退才不会出现，而三处都从这一个判据派生。
+   *
+   * 「收走」有**两种**写法，工具页把它们并排放在同一行上（docs/09 §3.7：启停、minRole、审批策略、
+   * 单次超时四项可写）：`enabled=false`，以及**把 `minRole` 抬到本会话的有效角色之上**。后者此前
+   * 漏判 —— `#eligible()` 那道 minRole 闸会把 `search_tools` 滤掉，而折叠判据当时只问 `enabled`，
+   * 于是一个 trusted 会话看得见折叠摘要、调不动 `search_tools`，连 `repairToolCall` 的自愈也一起
+   * 失效（它的闸 ③ 正是「`search_tools` 本步发不出去」）。判据取 `TOOL_POLICY` + 覆盖层而不是
+   * 注册表里那一份：`main.ts` 的启动断言保证它一定注册着，而这样写在手搓注册表的测试里也成立。
+   */
+  #deferredFor(tool: RegisteredTool, role?: Role): boolean {
+    const catalog = this.#limits().catalog;
+    if (!catalog || catalog.deferExternal !== true) return false;
+    if (this.disabledByOperator('search_tools')) return false;
+    if (role !== undefined && roleRank(role) < roleRank(effectiveToolPolicy(TOOL_POLICY.search_tools, this.#overrides().search_tools).minRole)) return false;
+    if (DEFER_EXEMPT.includes(tool.name as ToolName)) return false;
+    if (catalog.resident?.some((pattern) => minimatch(tool.name, pattern))) return false;
+    const source = tool.policy.source;
+    if (source === 'builtin' || source === 'agent') return catalog.defer?.some((pattern) => minimatch(tool.name, pattern)) === true;
+    return true;
+  }
+
+  /**
+   * 折叠组的 key 从**既有命名空间**派生，不新增注册字段（docs/05 §3.9 那套前缀已经把这套命名
+   * 列全了）：多一个字段就多一处 MCP / plugin / custom 三条注册路都要记得填的地方。
+   */
+  #groupKey(tool: RegisteredTool): string {
+    // `mcp__<server>__<tool>` 是 `mcp/manager.ts` 拼的。server 名允许下划线，所以按**第一个**
+    // `__` 断开 —— 与拼接方同一个约定，认不出来时退回整族一组而不是编一个假的 server 名。
+    if (tool.policy.source === 'mcp') { const server = /^mcp__(.+?)__/.exec(tool.name)?.[1]; return server ? `mcp:${server}` : 'mcp'; }
+    return tool.policy.source === 'plugin' ? 'plugin' : tool.policy.source === 'custom' ? 'custom' : 'builtin';
+  }
+
+  /**
+   * 目录的折叠视图。提示词的常驻段、折叠摘要段、截断告知行全部从这**一次**取数派生
+   * （此前 `assembleMainPrompt` 里 `activeNames()` + `catalog()` 各算一遍 `active()`）。
+   *
+   * 分区在**截断之后**做：被 `maxRegistered` 砍掉的名字不进摘要，否则模型按摘要里的名字检索，
+   * 展开出来的是一个开轮冻结的 toolSet 里根本没有的键 —— AI SDK 那边（`filterActiveTools` 是纯
+   * 交集）会把它**静默丢掉**而不是报错，于是坏处是「检索回了 `status:'expanded'`，模型照着调却
+   * 撞 `NoSuchToolError`」：一条说不清的假话，比一次报错难查。
+   */
+  activeView(role: Role, context: ToolExecutionContext, allow?: string[]): ToolCatalogView {
+    const { tools, truncated } = this.#eligible(role, context, allow);
+    const resident: RegisteredTool[] = [];
+    const deferred: RegisteredTool[] = [];
+    for (const tool of tools) (this.#deferredFor(tool, role) ? deferred : resident).push(tool);
+    // 组的顺序 = 首次出现的顺序，也就是 `sourcePriority desc, name asc`（plugin 60 > mcp 40 >
+    // custom 30）。稳定的顺序本身有价值：摘要行属易变段，无谓的重排每步都在改提示词。
+    const grouped = new Map<string, string[]>();
+    for (const tool of deferred) {
+      const key = this.#groupKey(tool);
+      const names = grouped.get(key);
+      if (names) names.push(tool.name); else grouped.set(key, [tool.name]);
+    }
+    return { resident, deferred, groups: [...grouped].map(([key, names]) => ({ key, names, total: names.length })), truncated };
+  }
+
+  /**
+   * `prepareStep` 的**唯一**集合来源：常驻 ∪（本轮已展开 ∩ 折叠集）。
+   *
+   * 直接过滤 `#eligible()` 的有序数组，而不是把 `activeView()` 的两个分区拼回去 —— 拼回来的那份
+   * 是 `resident ++ deferred`，与 `active()` 的 `sourcePriority desc, name asc` 不是同一个序。
+   *
+   * ⚠ **这不影响 provider 的 tools 数组顺序**（那一份由 `filterActiveTools` 按开轮冻结的 toolSet
+   * 的键序生成，与这里返回的数组序无关，`docs/04 §2.1` 那笔缓存账不落在这个函数上）。要的只是
+   * 「一个名字集合只有一种写法」：断言、日志、请求体三处对得上，读 diff 时看得出来哪一步真的变了。
+   */
+  activeNamesForStep(role: Role, context: ToolExecutionContext, expanded?: ReadonlySet<string>, allow?: string[]): string[] {
+    return this.#eligible(role, context, allow).tools
+      .filter((tool) => !this.#deferredFor(tool, role) || expanded?.has(tool.name) === true)
+      .map((tool) => tool.name);
+  }
+
+  /**
+   * 本角色下**有没有**东西可折叠 —— `search_tools` 的 `available()` 判它，折叠集为空时整个
+   * 元工具不进目录（纯内建部署的提示词逐字节不变）。
+   *
+   * ⚠ **绝不能改成走 `activeView()`。** 那条路是 `activeView()` → `#eligible()` →
+   * `tool.available?.()` → 回到 `search_tools.available()` → 又一次 `activeView()`：一个无限
+   * 递归环，表现是开轮直接栈溢出。所以这里只遍历 `#tools` 自己判三件事（折叠判据、角色门槛、
+   * 运维禁用），**一次 `available()` 都不调**。
+   *
+   * 代价是它比真实折叠集**宽**：某个折叠工具因自己的 `available()` 缺席时，这里仍算它在。
+   * 表现上限是「`search_tools` 进了目录但检索结果为空」，而反过来（漏判成空、模型再也看不到
+   * 折叠摘要背后的东西）才是真正说不清的那一档。
+   */
+  hasDeferrable(role: Role): boolean {
+    for (const tool of this.#tools.values()) {
+      if (!this.#deferredFor(tool, role) || this.disabledByOperator(tool.name)) continue;
+      if (roleRank(role) >= roleRank(this.effectivePolicy(tool).minRole)) return true;
+    }
+    return false;
   }
 
   activeNames(role: Role, context: ToolExecutionContext, allow?: string[]): string[] {
@@ -424,10 +582,6 @@ export class ToolRegistry {
     this.log.event({ level: 'warn', kind: 'tool.disabled_after_errors', summary: `Disabled ${name} after ${state.failures[name]} failures`, traceId: context.turn.turnId, key: context.turn.key, data: { tool: name, failures: state.failures[name] } });
   }
 
-  catalog(role: Role, context: ToolExecutionContext): Array<{ name: string; description: string; policy: ToolPolicyEntry }> {
-    return this.active(role, context).map(({ name, description, policy }) => ({ name, description, policy }));
-  }
-
   /**
    * 工具页要的那张表：每个**已注册**工具的默认策略、当前生效策略、以及哪几项被放宽了。
    *
@@ -437,7 +591,7 @@ export class ToolRegistry {
    * `disabledByOperator` 一直是认它们的。
    */
   describe(): Array<{ name: string; description: string; defaults: ToolPolicyEntry; effective: ToolPolicyEntry;
-    enabled: boolean; timeoutMs: number | null; defaultTimeoutMs: number | null; selfManagedTimeout: boolean; relaxed: Array<'minRole' | 'approval'> }> {
+    enabled: boolean; timeoutMs: number | null; defaultTimeoutMs: number | null; selfManagedTimeout: boolean; deferred: boolean; relaxed: Array<'minRole' | 'approval'> }> {
     const overrides = this.#overrides();
     return [...this.#tools.values()].sort((a, b) => a.name.localeCompare(b.name)).map((tool) => {
       const override = overrides[tool.name];
@@ -445,7 +599,9 @@ export class ToolRegistry {
       const declared = selfManaged ? null : tool.timeoutMs ?? this.#limits().defaultTimeoutMs ?? FALLBACK_TOOL_TIMEOUT_MS;
       return { name: tool.name, description: tool.description, defaults: tool.policy, effective: this.effectivePolicy(tool),
         enabled: override?.enabled !== false, timeoutMs: selfManaged ? null : override?.timeoutMs ?? declared,
-        defaultTimeoutMs: declared, selfManagedTimeout: selfManaged, relaxed: relaxedFields(tool.policy, override) };
+        // 按当前 `tools.catalog.*` **静态**判：这张表没有角色也没有轮次上下文，所以它答的是
+        // 「这个工具在这台机器的配置下属于折叠族吗」，不是「某一轮里它被折叠了吗」。
+        defaultTimeoutMs: declared, selfManagedTimeout: selfManaged, deferred: this.#deferredFor(tool), relaxed: relaxedFields(tool.policy, override) };
     });
   }
 

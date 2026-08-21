@@ -4,7 +4,10 @@
 
 1. **Fail-closed**：任何权限判断不确定、配置缺失、沙箱不可用 —— 一律**禁用**工具，而不是放行。
 2. **权限在执行器强制，不在提示词**。提示词里的「你不能做 X」只是引导；真正的边界在 `ToolRegistry.execute` 的前置检查里。
-3. **工具白名单每 step 重算**（`prepareStep.activeTools`），因为 Skill 载入、MCP 上下线、审批结果都会改变可用集。
+3. **工具白名单每 step 重算**（`prepareStep.activeTools`），因为 Skill 载入、MCP 上下线、审批结果、
+   以及 `search_tools` 的**检索展开**（§3.12）都会改变可用集。前三样与 skill 的 `allowed-tools` 一样是
+   **收窄**，检索展开是这条链上唯一的**轮内扩张** —— 它把折叠起来的工具加回本步的可见集，而收窄仍然
+   压在它之上（先扩张后收窄，收窄永远赢）。扩张只动可见性，一个权限判据都不动。
 4. **子 agent 权限 ≤ 派发者权限**，永不提权。
 5. **模型可见的一切文本都是不可信输入**（含群成员发言、文件内容、网页内容、MCP 返回）。
 
@@ -511,6 +514,122 @@ sh ".luoli-tmp/<uuid>.sh" ".luoli-tmp/<uuid>.json"
 - 输出一律 `untrustedOutput: true`：前四个是容器里出来的内容，`container_list` 带着陌生人取的群名。
 - `container_exec` 用 `timeoutMs: null`（自己管期限，同 `bash`）。
 
+### 3.12 目录按需暴露与 `search_tools`
+
+工具目录有两处 token 开销，且**每 step 都重发**：提示词里的 TOOL CATALOG 块（易变段，
+[06 §1](./06-prompt-and-memory.md#1-系统提示词的固定结构)）与 provider 请求体最前面那份 tools 数组
+（description + 完整 JSON Schema）。两处的 description 是**重复**的，而 MCP server 把上游工具的描述与
+schema **原样透传**（[07 §4.2](./07-skills-plugins-mcp.md#42-接入实现)），一台话多的 server 就能把整份
+目录顶到 `tools.maxRegistered` 的静默截断上（[14 T11](./14-open-questions.md)）。
+
+所以目录分两半：**常驻**逐条带描述照旧列出，**折叠**每组只留一行名字，模型要用时用 `search_tools`
+检索、展开到本轮后续 step 的可见集里。切分判据与 `tools.catalog.*` 五个配置键在
+[07 §5](./07-skills-plugins-mcp.md#5-三者的统一注册流程) 与 [11](./11-config-reference.md)；本节写这个
+meta 工具本身与它的五条不变量。
+
+| 工具 | minRole | 审批 | 说明 |
+|---|---|---|---|
+| `search_tools` | limited | — | 按关键词 / 名字 / 折叠组检索工具；命中者本轮后续 step 起可直接调用 |
+
+`TOOL_POLICY` 条目是 `{ minRole:'limited', approval:'never', scope:'global', source:'builtin' }`，
+`sourcePriority: 80` —— 与 `load_skill` 同档（都是渐进披露类的 meta 工具，目录溢出截断时要活到最后）。
+它进 `SKILL_NARROWING_EXEMPT`（一个 `allowed-tools: [bash]` 的 skill 不该顺手把检索通道关掉），也进
+折叠豁免表。**无条件注册，开关全焊在 `available()` 里** —— 按配置跳过注册会撞上 `main.ts` 那条
+「每个 `TOOL_POLICY` 条目都必须已注册」的启动断言（同 §3.10 自我扩展八工具、§3.8 `stay_silent`、
+§3.11 容器族）。
+
+参数三通道，外加 `limit`（默认 8、上限 20），三个通道至少给一个（`.refine`）：
+
+| 通道 | 语义 |
+|---|---|
+| `query` | 在 name + description 上做小写子串匹配；串里含 `*?[` 时改按 glob 匹配 name |
+| `names` | 精确名字数组。**跨轮重展开的廉价通道** —— 展开集不跨轮保留，模型照历史里的名字一次批量取回 |
+| `group` | 列出某个折叠组（`mcp:<server>` / `plugin` / `custom` / `builtin`）里的全部工具 |
+
+返回 `{ matches: [{ name, description, group, status }], omitted, hint }`，`status` 三档：
+`'expanded'`（本次展开）/ `'already_active'`（本来就常驻或已展开过）/ `'narrowed'`（命中但被 skill 收窄挡住）。
+
+- **description 截到 240 字符单行。** tool result 会永久留在上下文里，把一份 4KB 的 MCP 描述抄进去
+  等于把折叠省下来的钱原地还回去；完整 schema 由下一步的 tools 数组权威送达。
+- **`status:'narrowed'` 必须如实报。** 检索命中了、但本轮 skill 收窄不放它过 —— 不说的话模型会对着
+  一个「已展开」却调不动的工具原地重试到步数耗尽。
+- 检索域 = 本 `(role, context)` 下 `active()` 的常驻 ∪ 折叠两部分，**从 `active()` 派生** ⇒ 角色、
+  `available()`、运维禁用、`maxRegistered` 截断已经全过滤过：`limited` 用户枚举不到 owner 工具的描述，
+  也报不出被截断掉、`toolSet` 里压根没有的名字。
+- 护栏 `tools.catalog.maxExpandedPerTurn`（默认 32）：超了返回 `expansion_limit` 并提示改用精确 `names`。
+  它不是可选优化 —— 每次展开都改 tools 数组，而那是请求体第 0 段
+  （[04 §2.1](./04-agents-and-providers.md#21-prompt-缓存) 记了这笔账）。
+- 展开状态是 `turn.expandedTools`：**轮内只增不减**、随 turn 对象消亡、**不跨轮保留**、不持久化
+  （持久化会造出「server 早删了而展开集还记着」这类状态腐烂）。单调既让 tools 段在一轮内至多变几次而
+  不来回抖，又天然区分「没展开过」与「展开了但一个都没命中」—— 与
+  [07 §2.2](./07-skills-plugins-mcp.md#22-渐进式披露progressive-disclosure) 那条 `narrows` 教训同形。
+- **检索不新造痕迹通道。** `search_tools` 自己的 tool-call / tool-result 对由既有 step observer 照常进
+  上下文，那就是「本轮搜过什么、展开了什么」的持久凭据（同 [02 §10.5](./02-context-engine.md) 那条
+  「痕迹走既有提交通道」）。另记一条 `tool.expanded` info 日志（[10 §2](./10-logging-and-observability.md)）。
+
+**自愈：折叠工具被硬调时自动改写成一次检索。** 挂 AI SDK 的 `repairToolCall`：模型调的
+名字**命中本轮折叠集**时，把这一次调用改写成 `search_tools({ names: [那个名字] })` —— 折叠工具被调 ⇒
+自动展开 ⇒ 下一步真能调到。纯粹的幻觉名字（不在折叠集里）**不改写**，照旧走 `NoSuchToolError`：
+把一个不存在的工具名喂给检索只会得到一份空结果，而模型会以为自己找过了。这条兜底是「模型行为悬崖」
+的主要防线 —— 有了它，模型不必先学会用 `search_tools` 也能摸到折叠的工具，提示词里那两处引导
+（KERNEL 那句无条件在；折叠组行内嵌指引与 RUNTIME 计数后缀按 `prompt.includeToolCatalog` 二选一，
+见 [14 §3 T20 ①](./14-open-questions.md)）从**唯一出路**降级成**首选出路**。
+
+**改写必须让状态往前一格，否则不改写。** 反例是「模型调 X → `NoSuchToolError` → 改写成检索 →
+检索原地返回 → 模型再调 X → …」一路烧到步数上限，每一圈都是一次白付的模型调用。判据分两层，
+**上层是兜底、下层是让第一次就落回明确的失败**：
+
+| 层 | 判据 | 为什么 |
+|---|---|---|
+| 兜底 | **同一个名字本轮只改写一次** | 「检索不会往前一格」的成因数不完：`search_tools` 自己会在 `admit()` 上失败（`tools.maxCallsPerTurn` 用满、运维把它的 `approval` 覆盖成 `always` 而审批被拒、轮内熔断前那几次），这些档位一律**不写** `expandedTools`，逐条枚举必然漏。按名字判一次，成因有多少种都不必管；happy path 上它与下面第一条等价（改写成功 ⇒ 名字进了 `expandedTools`），所以不会挡掉任何一次有用的改写，还顺带把同一步里并排的两次同名硬调合成一次 |
+| 逐档 | 本轮**已展开过**它 | 折叠且被 skill 收窄挡住的工具照样记进 `expandedTools`（正因为如此，第二次硬调才落回一句明确的 `NoSuchToolError` 而不是又一次检索）|
+| 逐档 | `maxExpandedPerTurn` **已满** | 这一档 `search_tools` 回 `expansion_limit` 且不写 `expandedTools`，而它的 hint 是「用 `names` 精确点名」—— 改写出来的调用本来就是 `names:[X]`，模型照 hint 做也没有出路 |
+| 逐档 | `search_tools` **本步发不出去** | 常态成立（它常驻、豁免收窄），但单轮成本闸门与收尾补跑会把 `activeTools` 整个清空，那两档改写只是换一个名字撞同一个错 |
+
+这一组判据挂在 `agent/runtime.ts` 的钩子里，**不在 turn 上留状态**：兜底那个集合是本轮那次
+`runMainAgentInternal` 调用的局部变量，随函数帧消亡（`turn.expandedTools` 是给 `prepareStep`
+与下一轮痕迹读的，语义不同，不要合并）。
+
+**五条不变量**（改这块之前逐条对）：
+
+1. **折叠只是可见性，本系统的权限判定一个字未改。** `active()` 的过滤链、`admit()` 与 `execute()` 的
+   复查集合里**不出现**折叠判据；到达 `execute()` 的调用照旧逐条全判（`minRole`、运维禁用、本轮熔断、
+   `available()`、审批）。折叠工具在模型侧事实上不可达是 SDK 的 `activeTools` 过滤造成的**可达性**收缩，
+   与权限边界是两件事 —— §4 末尾把这两层分开写了。
+2. **豁免表永不折叠。** `search_tools` 与 `load_skill` 不进折叠集，`tools.catalog.defer` 里命中它们的
+   glob 静默不生效。折叠了检索通道就没有任何路径能把工具取回来。
+3. **折叠集为空、或 meta 工具对本角色取不到 ⇒ 整目录回退常驻。** 前者让 `search_tools` 的 `available()`
+   返回 false（沿用「`web_search` 未配 provider 就不进目录」的先例，§3.6）—— `mcp.enabled` 默认 false、
+   `selfExtend.customTools` 默认关、出厂 `plugins/` 只有 `.gitkeep`，所以**出厂**折叠集为空、纯内建部署下
+   **block 3（TOOL CATALOG）与 RUNTIME 的「可用工具」行逐字节不变**。**这个理由里没有「plugin 默认关」**：
+   `plugins.enabled` 默认是 `true`（它管扫不扫插件目录；默认关的是只管 `write_plugin` 的
+   `tools.selfExtend.plugins.enabled`），而 `#deferredFor` 对 `source === 'plugin'` 一律折叠 ——
+   装一个插件并由 owner 启用它，折叠集就非空，`search_tools` 随之进目录。这是预期行为。**KERNEL 是唯一的例外**：那句「折叠的工具要先用 `search_tools`
+   展开再调用」是静态常量、无条件发出，没有东西可折叠时它是一条空转的引导句（[06 §1.1](./06-prompt-and-memory.md#11-block-0kernel)）。
+   写清这一条而不是笼统说「提示词逐字节不变」：稳定段多一句 = 缓存前缀一次性作废，那是上线时
+   就接受了的取舍，但它不该在验收条目里以一句假话的形式留着；后者不许留下「看得见折叠摘要却没法
+   展开」的形态，整份目录退回常驻。两条都不新增独立开关。
+
+   **「取不到」有两种写法，工具页把它们并排放在同一行上**（§4.1 那四项都可写）：
+   `tools.overrides.search_tools.enabled=false`，以及**把它的 `minRole` 抬到本会话有效角色之上**。
+   两者的效果必须一样 —— 后者是按**角色**回退的（抬到 owner 之后 owner 那一档照旧折叠，
+   trusted 那一档整目录回退），因为折叠判据本身就要按角色算。这一条不能只判 `enabled`：
+   `#eligible()` 的 minRole 闸会照样把 `search_tools` 滤掉，而那时折叠摘要还在渲染，
+   连上面那个自愈钩子也一起失效（它的闸 ③ 正是「`search_tools` 本步发不出去」）。
+4. **只有主 agent 能检索**（`agentKind === 'main'`）。子 agent 与主轮**共享同一个 turn 对象**（同 §3.8
+   `stay_silent` 那道闸），让它调就是往父轮的 `expandedTools` 里写，而子 agent 没有 per-step 重算 ——
+   那是纯粹的状态泄漏。子 agent 的目录形态是**显式非目标**：`definition.tools` 白名单本来就是比折叠
+   更强的表达（[07 §4.1](./07-skills-plugins-mcp.md#41-配置)）。
+5. **模型调一个未展开工具时，上下文必须保持配对。** SDK 在 `parseToolCall` 阶段就用本步 `activeTools`
+   过滤掉它 ⇒ `NoSuchToolError` ⇒ 产出一条 `invalid` 的 tool-call，随后被转成带 `toolCallId` **与**
+   `toolName` 的 `tool-error` part；而 `stepToolResults`（`packages/core/src/agent/runtime.ts`）正是收
+   `tool-error` 的，那句 `if (!part.toolCallId || !part.toolName) continue` 两个字段都拿得到，不会把它
+   丢掉。**这一条是这个机制能上线的前提，不是可省的注解**：折叠把「调了一个不在 `activeTools` 里的
+   工具」从罕见幻觉变成常规事件，而未配对的 tool-call 正是 `runtime.ts` 那段注释记着的灾难的起点
+   —— 下一轮起每次请求都畸形 → provider 0 步返回 → `NoOutputGeneratedError` → 进程崩
+   （[02 §9](./02-context-engine.md#9-实现红线清单code-review-必查) 第 20 条）。有了上面那条自愈钩子，
+   绝大多数这类调用连 `tool-error` 都走不到；剩下的（幻觉名字）必须配对。
+
 ---
 
 ## 4. 权限矩阵（权威表）
@@ -540,6 +659,7 @@ sh ".luoli-tmp/<uuid>.sh" ".luoli-tmp/<uuid>.json"
 | `container_list` `container_inspect` `container_logs` `container_keep` | ✗ | ✗ | ✗ | ✓ 跨会话§ |
 | `container_exec` | ✗ | ✗ | ✗ | ✓ 跨会话§（+条件审批） |
 | `container_reset` | ✗ | ✗ | ✗ | ✓ 跨会话§（清文件时 + 审批） |
+| `search_tools` | ✗ | ✓‖ | ✓‖ | ✓‖ |
 | Skill | ✗ | 按 `min-role` | 按 `min-role` | ✓ |
 | Plugin 工具 | ✗ | 按 `minRole` | 按 `minRole` | ✓ |
 | MCP 工具 | ✗ | 按 server `minRole`（默认 trusted ⇒ ✗） | ✓ | ✓ |
@@ -559,6 +679,10 @@ sh ".luoli-tmp/<uuid>.sh" ".luoli-tmp/<uuid>.json"
 与上面 ‡ 的自定义工具地板、§ 的容器 owner 地板同形。`minRole` 管的是「谁够格」，这一条管的是
 「这一轮的形态允不允许」，两者相乘才是它进不进目录。角色那一栏写 trusted 只是与
 `schedule_create` 对齐（能排静默任务的人才可能触发一条静默轮次），真正的边界不在那里。
+‖ `search_tools` 只在本 (角色, 会话) 的**折叠集非空**时进目录（§3.12 不变量 3），且只对主 agent 可用
+（不变量 4）。纯内建部署下折叠集恒为空，它一次都不出现。这道闸与上面 ¶ 同形：`minRole` 管「谁够格」，
+它管「这一轮的目录形态里到底有没有东西可展开」。角色那一栏是 `limited` 而不是更高档，因为它检索的域
+是**调用者自己那份** `active()`（§3.12），`limited` 用户枚举不到自己本来就没有的工具。
 
 矩阵在代码中是**默认值与对照基准**：`packages/core/tools/policy.ts` 导出
 `TOOL_POLICY: Record<ToolName, {minRole, approval, scope, source}>`，`ToolRegistry` 与 WebUI 工具页
@@ -569,6 +693,19 @@ sh ".luoli-tmp/<uuid>.sh" ".luoli-tmp/<uuid>.json"
 再判一次：`minRole`、运维禁用、本轮熔断、`available()`、以及「子 agent 不给 `memory_write`」。
 模型完全可以沿用上一步的工具名直接调过来，「目录里没有」拦不住它 —— 曾经每个相关工具恰好各自
 fail-closed，但那是巧合不是设计（docs/20 · W-TOOL-01）。
+
+**折叠同样不是本系统新增的边界，而它的可达性收缩来自别处 —— 这两层要分开说**（§3.12 不变量 1）：
+
+1. **权限判定一个字未改。** `active()` 的过滤链、`admit()` 与 `execute()` 的复查集合里都不出现折叠判据；
+   对**所有到达 `execute()` 的**调用，那七道闸照旧逐条全判。`execute()` 仍然是唯一的权限边界。
+2. **可达性由 AI SDK 决定，不由我们决定。** `generateText` 先按本步 `activeTools` 把 toolSet 过一遍，
+   再拿过滤后的那份去 `parseToolCall` —— 于是一个「在 toolSet 里、不在本步 `activeTools` 里」的折叠工具
+   在模型侧**事实上不可达**：调用在解析阶段就撞 `NoSuchToolError`，产出 `invalid` 的 tool-call，
+   压根到不了 `ToolRegistry.execute()`。这是 SDK 行为，不是本系统的一道闸。
+3. **所以结论不变，但不要把这层收缩当安全边界用。** 换 AI SDK 大版本、或改 `activeTools` 的用法，
+   这层收缩随时会没；而权限边界不会动。任何「反正折叠了它调不到」的推理都是在依赖上游实现细节 ——
+   要真的不给就用 `tools.overrides.<name>.enabled=false` 或 `toolDeny`
+   （[07 §4.1](./07-skills-plugins-mcp.md#41-配置) 写了这两层的分工），不要用折叠。
 
 ---
 

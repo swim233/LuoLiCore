@@ -72,6 +72,18 @@ agent:
 tools:
   maxRegistered: 80
   maxCallsPerTurn: 40
+  # 工具目录按需暴露（docs/07 §5、docs/11 的 tools.catalog 段）。外部工具（MCP / 插件 / custom_*）
+  # 默认折叠成每组一行摘要，模型用 search_tools 展开 —— 而 mcp.enabled 出厂 false、自我扩展的
+  # customTools 出厂关、出厂 plugins/ 是空目录（注意 plugins.enabled 默认就是 true，它只表示会去
+  # 扫这个目录），所以**出厂折叠集为空**，提示词与以前逐字节一致；接进第一台 MCP server、或启用
+  # 第一个带工具的插件，才看得出区别。
+  # 下面几行是**示例，默认注释掉**：
+  # catalog:
+  #   resident: ['mcp__github__get_*'] # 强制常驻（优先级最高）：折叠整台 server 之后把几个常用的捞回来
+  #                                      （写成 mcp__github__* 就是整台都不折叠了）
+  #   defer: ['send_*', 'container_*'] # 反过来把点名的内建工具也折叠掉（要 deferExternal 开着才起作用）
+  #   residentDescriptions: false     # 常驻段只列名字：描述在 API 的 tools 字段里已经完整送过一遍。
+  #                                     建议先只开折叠、观察一段再翻它（两个一起动就分不清因果）
 sandbox:
   mode: docker
   bypassRoles: [owner]

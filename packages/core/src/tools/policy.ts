@@ -48,6 +48,12 @@ export const TOOL_POLICY = {
   send_file: { minRole: 'trusted', approval: 'never', scope: 'telegram', source: 'builtin' },
   pin_message: { minRole: 'trusted', approval: 'never', scope: 'telegram', source: 'builtin' },
   load_skill: { minRole: 'limited', approval: 'never', scope: 'chat', source: 'builtin' },
+  // 折叠工具的检索入口（docs/07 §5）。与 `load_skill` 同档同族：两个都是渐进披露的元工具
+  // （一个展开 skill 正文、一个展开工具 schema），所以门槛取最低的 `limited` —— 它自己什么都
+  // 做不了，只把「本轮你还能调什么」如实报出来，而检索域是从 `active()` 派生的，角色过滤已经
+  // 在上游做完了（limited 枚举不到 owner 工具的描述）。**开关不在这一栏上**：折叠集为空时
+  // `available()` 让它整个不进目录（纯内建部署的提示词逐字节不变）。
+  search_tools: { minRole: 'limited', approval: 'never', scope: 'global', source: 'builtin' },
   // 定时任务是唯一能让 bot 在没人说话时主动花钱的能力，所以起点是 trusted 而不是 limited；
   // 作用域是 chat 而不是 global —— 落点绑死本会话，工具参数里没有 chatId（docs/05 §8）。
   // list / cancel / update 同样收在 trusted：能看见任务名就能看见别人排了什么。
@@ -103,8 +109,22 @@ export type ToolName = keyof typeof TOOL_POLICY;
  *
  * 这不是放权：skill 的 `allowed-tools` 只能是角色白名单的子集（docs/07 §2），豁免这几个
  * 交回去的仍然是该角色本来就有的东西。
+ *
+ * `search_tools` 在列的理由与 `load_skill` 同一条：元能力不是作业工具。一个
+ * `allowed-tools: [bash]` 的 skill 把检索入口一起关掉之后，模型既看不见折叠工具的 schema、
+ * 又没有办法问「我还能调什么」—— 而收窄本身照旧生效（展开过的工具仍被 `admit()` 挡住，
+ * `search_tools` 因此必须如实回一个 `status: 'narrowed'`）。
  */
-export const SKILL_NARROWING_EXEMPT: readonly ToolName[] = ['load_skill', 'send_message', 'report_progress', 'context_stats'];
+export const SKILL_NARROWING_EXEMPT: readonly ToolName[] = ['load_skill', 'search_tools', 'send_message', 'report_progress', 'context_stats'];
+
+/**
+ * 目录折叠（`tools.catalog.*`，docs/07 §5）永远不折叠的那两个 —— 渐进披露的**入口**。
+ *
+ * 折叠它们等于把梯子收走：`load_skill` 被折叠时模型看不见怎么载入 skill 正文，`search_tools`
+ * 被折叠时连「有哪些折叠工具」都问不出来，而折叠摘要行里那句「用 search_tools 展开」指向一个
+ * 它发不出调用的名字。所以运维用 `tools.catalog.defer` 点名这两个时**静默不生效**。
+ */
+export const DEFER_EXEMPT: readonly ToolName[] = ['search_tools', 'load_skill'];
 
 /**
  * 运维在工具页按下的那一份覆盖（`tools.overrides.<name>`，docs/09 §3.7）。

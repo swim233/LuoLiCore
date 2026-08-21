@@ -192,7 +192,7 @@
 | [x] AC-PROV-024 (自动) ★ | 窗口里留着一张更早轮次的图，随后发一条**纯文本**消息，`media.visionScope` 两档各跑一次 | `window`（默认）：照旧切 `vision`（这正是「一张图把它之后每一轮都钉在 vision 上」的代价）。`turn`：不切别名；这一轮的别名看不了图时历史图整体换成占位文本（含「重新发一次或引用那条消息」的指路）且**回复末尾不追加**那句道歉，别名自己能看图时原样带着；同一轮里降档到看不了图的 `low` 的那一步，请求体里也不留不透明 part。记一条 `ctx.image_placeholder`（[04 §5.2](./04-agents-and-providers.md)、[08 §7.2](./08-telegram-adapter.md)） | 〔agent.model-wiring.test.ts〕
 | [x] AC-PROMPT-001 (自动) ★ | 组装私聊系统提示词 | block 顺序为 KERNEL→CHARACTER→ASSIST→CATALOG→PUBMEMORY→PRIMEMORY→RUNTIME | 〔prompt.test.ts〕
 | [x] AC-PROMPT-002 (自动) ★ | 组装群聊系统提示词 | **不含** PRIMEMORY；断言其内容字符串不出现在结果中 | 〔prompt.test.ts〕
-| [x] AC-PROMPT-003 (自动) | RUNTIME 块的工具列表 | 与本 step 的 `activeTools` 完全一致（无多、无少） | 〔config.wiring.test.ts〕
+| [x] AC-PROMPT-003 (自动) | **开轮那一刻（step 0）** RUNTIME 块与 TOOL CATALOG 块里的工具列表 | 与 step 0 的 `activeTools` 一致，无多无少 —— step 0 的 `expandedTools` 恒空，所以这一刻它就是常驻集，两块与 tools 数组三处同源（同一次 `activeView()`）。折叠工具**不在**这个集合里，它们只以折叠组摘要出现。`search_tools` 命中之后那个名字从**下一 step 起**进 `activeTools` 与 tools 数组，而**正文不跟着变**：提示词每轮只装一次（`assembleMainPrompt` 在开轮跑，`prepareStep` 从不返回 `instructions`），要让正文每步同步就得每步重装、于是每步重发整个易变段 —— 那正是折叠要消灭的开销，而模型并没有因此看不见它（描述与完整 schema 已经在 tools 数组里）。所以展开之后断的是「正文一个字节都没动」，不是「正文与 tools 数组一致」。下一轮 `expandedTools` 随 turn 消亡，回到折叠态（[05 §3.12](./05-tools-and-permissions.md)、[07 §2.2](./07-skills-plugins-mcp.md#22-渐进式披露progressive-disclosure)） | 〔tools.catalog.wiring.test.ts〕
 | [x] AC-PROMPT-004 (自动) | 记忆超大导致总量超 `prompt.maxTokens` | 按 5→4→1 顺序截断并加提示；KERNEL/ASSIST/CATALOG/RUNTIME 完整；有 warn 日志 | 〔prompt.test.ts〕
 | [ ] AC-PROMPT-005 | Anthropic provider | 缓存断点两个：稳定段末尾（ASSIST 之后）与已提交历史最后一条消息；第二轮 `cache_read_tokens > 0` 并单独计价 |
 | [ ] AC-PROMPT-006 | WebUI `[预览组装]` | 输出与实际发送的 `instructions` 一致（可用日志中的 `instructionsHash` 比对） |
@@ -226,11 +226,11 @@
 | [ ] AC-TOOL-017 (自动) ★ | 模型尝试在工具输入里传 `chatId`/`role` | schema 中不存在这些字段 → 校验失败；实际作用域由 `TurnCtx` 注入 |
 | [ ] AC-TOOL-018 (自动) | `tools.maxCallsPerTurn=5`，模型试图调 10 次 | 第 6 次起被拒并告知模型 |
 | [ ] AC-TOOL-019 | `web_fetch` 抓一个**放行**的公网页面 | 真的取回正文（不是异常）并被 `<untrusted-content source="web:…">` 包裹。放行路径必须被断言：只测 SSRF 拒绝路径的话，钉死 DNS 的 lookup 回调不认 `{all:true}` 这类 bug 会让 `web_fetch` 全线失败而测试全绿 |
-| [ ] AC-TOOL-020 (自动) | 注册工具数超 `maxRegistered` | 按优先级截断（内建>agent>plugin>skill>MCP），RUNTIME 块告知，有 warn 日志 |
+| [x] AC-TOOL-020 (自动) | 注册工具数超 `maxRegistered` | 按优先级截断（内建>agent>plugin>skill>MCP），**且三件事同时到位**：RUNTIME 块出现一行「工具目录已截断：共注册 N 个，按来源优先级仅保留前 M 个…（`tools.maxRegistered`）」且**不受 `prompt.runtimeBlock.show.*` 管**（[06 §1.2](./06-prompt-and-memory.md#12-block-6-runtime-模板)）；有一条 `tool.registry_truncated` warn；被截掉的名字**不出现在折叠组摘要里**（否则模型会去展开一个 `toolSet` 里压根没有的工具，[07 §5](./07-skills-plugins-mcp.md#5-三者的统一注册流程)）。截断语义本身不变 —— 此前只落地了后一件，模型对自己少了什么完全不知情 | 〔tools.catalog.wiring.test.ts、tools.catalog.test.ts、prompt.test.ts〕
 | [x] AC-TOOL-021 (自动) | `search_messages` 依次传 `名字\|我是\|叫\|谁`、`NEAR(a b)`、`"unclosed`、`***` | 一律正常返回（命中或空），不出现 `fts5: syntax error`；≥3 字的词走 FTS，两字中文词退回 LIKE 且用最长的词而非原串 | 〔toolcall.regression.test.ts〕
 | [ ] AC-TOOL-022 (自动) | 直接调用 `execute()` 绕过目录：子 agent 调 `memory_write`、或调一个 `available()` 返回 false 的工具 | 一律 `ok:false` 拒绝；`execute()` 的复查集合与 `active()` 的过滤集合一致（docs/20 · W-TOOL-01） |
 | [x] AC-TOOL-023 (自动) | workspace 里建一个指向祖先目录的软链后跑 `list_dir` / `glob` / `grep`；再建一个指向 workspace 外的软链和一个断链 | 正常返回，不无限递归也不重复列（已访问目录按 realpath 去重，docs/20 · W-FS-01 当时漏了 `list_dir`）；显示路径取软链名那一侧而不是 realpath（`loop -> .` 的 realpath 就是搜索根，报出来是空串）；越界软链与断链各自只让自己被跳过并计入 `skipped`，不让整次调用返回 `ok:false` | 〔tools.round8.test.ts〕
-| [ ] AC-TOOL-024 (自动) ★ | 依赖齐全时取 owner 的 `activeNames()` | 等于 `TOOL_POLICY` 全集减去子 agent 专用的 `ask_parent`/`report_progress`。**AC-TOOL-001b 只看「注册没注册」**，而 `send_message`/`send_photo`/`send_file`/`react`/`pin_message` 曾经注册着、启动断言全过、却因为 `main.ts` 没传 `telegram` 依赖而永远不进模型的工具目录 —— 模型答「我没有这个功能」是对的。断言必须落在可见性上 |
+| [ ] AC-TOOL-024 (自动) ★ | 依赖齐全时取 owner 的**可见面** = 常驻目录里的名字 ∪ 折叠组摘要里的名字 | 等于 `TOOL_POLICY` 全集减去子 agent 专用的 `ask_parent`/`report_progress`；折叠集为空时（纯内建部署）再减去 `search_tools`（[05 §3.12](./05-tools-and-permissions.md) 不变量 3）。**AC-TOOL-001b 只看「注册没注册」**，而 `send_message`/`send_photo`/`send_file`/`react`/`pin_message` 曾经注册着、启动断言全过、却因为 `main.ts` 没传 `telegram` 依赖而永远不进模型的工具目录 —— 模型答「我没有这个功能」是对的。断言必须落在可见性上；折叠之后「可见」= 常驻正文 **或** 折叠摘要，两者之一即算，因为两者都能让模型知道这个工具存在 |
 | [ ] AC-TOOL-025 (自动) | `react` 不传 messageId；传 `❤️`；传 `🍕`；`send_file` 传 `../../etc/passwd` / 超 `maxFileSendMb` 的文件；一轮内第 4 次 `send_message` | 依次：点触发消息；归一化成 Telegram 认的 `❤` 后发出；`unsupported_emoji` 且**不调用 API**、返回可选集合；`path_outside_workspace`；`file_too_large`；`extra_message_limit_exceeded`。发出去的消息回写归档（`direction='out'`、带 `turn_id`），否则模型自己追发的内容下一轮就从上下文里消失 |
 | [x] AC-SBX-001 (自动) ★ | `mode=none`，`trusted` 请求 `bash` | 工具**不存在**（fail-closed），不是「执行后被拒」 | 〔sandbox.failclosed.test.ts〕
 | [x] AC-SBX-002 (自动) ★ | `mode=none`，`owner` 请求 `bash` | 可执行（bypassRoles），cwd = workspace，且**不套 jail 的 ulimit 前缀**——命令真的 fork（管道、后台任务）时不出现 `fork: 资源暂时不可用` | 〔sandbox.failclosed.test.ts〕
@@ -285,6 +285,12 @@
 | [x] AC-TOOL-044 (自动) ★ | 同一张图在一个会话里取两次（盘上一份、库里两行），只把旧那行推到 `media.retentionDays` 之外跑 `cleanup()` | 旧行删掉、**新行的文件还在**。文件名取内容哈希所以两行共享一份字节：见行就删文件会让保留期内那张图提前变成「[图片已不可用]」，顺序必须是先删行、再删没有任何行指着的文件（docs/03 §2.4） | 〔web.media.test.ts〕
 | [x] AC-TOOL-045 (自动) ★ | 分别按主 agent 与子 agent 的上下文问「这张图能不能放进上下文」：有 / 没有 `vision` 别名、子 agent 别名能 / 不能看图、子 agent 没带别名 | 主 agent 问本轮别名（`set_model` 覆盖 → 会话固定 → 配置默认），子 agent 问**它自己那个**（`ToolExecutionContext.agentAlias`），没带别名时按看不了算。判据与 `runMainAgent` / `runSubAgent` 里那两次切换同一个集合 —— 不一致就是「存下来了却没人能看」或者反过来（docs/04 §5.2） | 〔web.media.test.ts〕
 | [x] AC-TOOL-046 (自动) ★ | 子 agent 的上下文里取一张图；再让它这次运行已经取满 `media.maxImagesPerTurn` 张 | 父轮 delta 里那一条**只有文字**（写清是谁取的 + 「你自己没有看到这张图」+ `webasset://<id>`），一个 `isImagePart` 都没有，`turn.mediaInjected` 不置位；行与文件照存（`gcFiles` 的 referenced 读的是表，事后要查得到它看的是哪张）；当步仍拿到 base64。张数按**这次 run** 自己数 —— 它的图不进父轮 delta，数 delta 等于数不到，一个 run 取五十张就没人拦得住 | 〔web.media.test.ts〕
+| [x] AC-TOOL-047 (自动) ★ | `deferExternal` 开着、注册表里有一台 MCP server 的工具，抓真实请求体：先看开轮第一步，再让模型 `search_tools` 命中其中一个，再看下一步，最后看下一轮的第一步 | 第一步：那些工具**不在** TOOL CATALOG 正文里、`inputSchema` 一个字节都不在 tools 数组里，只有一行折叠组摘要（组名 + 个数 + 名字清单 + `search_tools` 指引）；检索之后那一步：命中的工具进 `activeTools`、完整 schema 由 tools 数组下发、落一条 `tool.expanded`；下一轮第一步：回到折叠态（展开集不跨轮保留），模型凭历史里的名字用 `names:[…]` 一次批量取回（[05 §3.12](./05-tools-and-permissions.md)） | 〔tools.catalog.wiring.test.ts、mcp.runtime.test.ts〕
+| [x] AC-TOOL-048 (自动) ★ | 折叠状态下**不经模型**、直接 `registry.execute('<折叠工具名>', input, ctx)`；再把它用 `tools.overrides.<name>.enabled=false` 关掉后重试 | 第一次照常走 admit → 审批 → 执行：折叠判据**不参与准入判定**，闸一道不多一道不少（[05 §4](./05-tools-and-permissions.md#4-权限矩阵权威表) 末尾第 1 层）；第二次仍是两道硬拦（目录过滤 + `execute()` 复查），与折叠正交。反向也要断言：`admit()` / `execute()` 的判据集合里不出现折叠判据。**注**：经模型的同一次调用到不了 `execute()` —— AI SDK 先按本步 `activeTools` 过滤 toolSet 再 `parseToolCall`，于是撞 `NoSuchToolError` 并产出 `tool-error`。那是 SDK 的可达性收缩，不是本系统的权限闸，不要拿它当边界（同上，第 2/3 层） | 〔tools.catalog.test.ts、mcp.runtime.test.ts〕
+| [x] AC-TOOL-049 (自动) ★ | ①`tools.catalog.defer` 写上命中 `search_tools` / `load_skill` 的 glob；②纯内建部署（`mcp.enabled:false` + plugin / `selfExtend` / custom 全关）跑一轮；③把 `tools.overrides.search_tools.enabled` 关掉，但留着会被折叠的外部工具 | ①两个豁免工具照样常驻，那条 glob 静默不生效；②折叠集为空 ⇒ `search_tools` 的 `available()` 为假、不进目录，**block 3 与 RUNTIME 的「可用工具」行**与按需暴露之前**逐字节一致**（KERNEL 例外：那句引导语是静态常量、无条件发出，此时空转）。②的判据取「与 `deferExternal:false` 那一档逐字节相同」—— 那一档在折叠判据①上就返回不折叠，逐字节等于改动前的行为；而**注册表的 limits 里必须把 `catalog` 段给全**，整段缺席走的是「没配过折叠的部署」那条分支，测不到这一档；③整份目录回退常驻 —— 不许出现「看得见折叠摘要却没法展开」的形态（[05 §3.12](./05-tools-and-permissions.md) 不变量 2/3） | 〔tools.catalog.test.ts、prompt.test.ts〕
+| [x] AC-TOOL-050 (自动) | `residentDescriptions=false` 装配一条完整请求体（instructions + messages + tools 数组），逐段扫 | 每个常驻工具的 description 全文出现次数 **≤ 1**（此前 TOOL CATALOG 与 tools 数组各一份）；折叠工具的 `inputSchema` 出现次数为 **0**。**不做数值 token 断言** —— 数值随描述文本腐烂，结构断言等价且稳定，降幅另在实测里报一次（[04 §2.1](./04-agents-and-providers.md#21-prompt-缓存)） | 〔tools.catalog.wiring.test.ts〕
+| [x] AC-TOOL-051 (自动) ★ | 一轮内检索两次（第二次命中另一个工具），中间载入一个 `allowed-tools: [bash]` 的 skill；然后在轮**中**摘掉一台 MCP server、再挂一台新的 | 展开集**只增不减**：第二次检索之后第一次展开的工具仍在 `activeTools` 里；skill 收窄压过展开（已展开的 MCP 工具被滤掉，`search_tools` 对它如实报 `status:'narrowed'`）；`activeTools ⊆ toolSet` 在摘掉与新挂**两个方向**上都成立。摘掉那个方向可断言：那些名字下一步自动掉出 tools 数组（硬调由 `admit()` 的 `unknown_tool` 兜住）。新挂那个方向**只能断言三件事** —— 整轮不抛、新挂的那个一个字节都不下发、以及 `search_tools` 照旧把它记进 `expandedTools` 并回 `status:'expanded'`（最后这件是本方向**尚存的假话**：那句「下一步就能直接调用」对一个开轮冻结的 toolSet 里没有的键不成立）。**`prepareStep` 末尾那道 `name in toolSet` 交集本身无法被断言**：ai@7.0.65 的 `filterActiveTools` 是纯交集、多报的名字被静默丢掉，`activeTools` 又不经任何回调或日志露出来，所以删掉那道交集全量一条都不红 —— 它是显式写出来的防御与文档，不是一道有外部可观察行为的闸 | 〔tools.catalog.wiring.test.ts〕
+| [x] AC-TOOL-052 (自动) ★ | 派一个 `definition.tools` 白名单里含「本来会被折叠」的工具的子 agent | `search_tools` **不在**它的工具目录里（`agentKind==='main'` 那道闸，防它往父轮共享的 `expandedTools` 里写）；白名单里的工具**全部常驻**、逐条带描述，子 agent 的目录与按需暴露之前逐字节一致（[07 §4.1](./07-skills-plugins-mcp.md#41-配置)） | 〔subagent.test.ts、tools.catalog.test.ts〕
 | [ ] AC-APV-008 (自动) ★ | trusted 用户触发一个需审批的工具，然后无人裁决直到 `ttlMs` 到期 | 调用**挂起等待**而不是当场伪拒绝：先写一行 `state=pending` 并广播 `approval.pending`；到期后原子改成 `state=expired, decided_by=system`，工具返回 `ok:false, error:'未获批准'` 且 hint 说的是「审批已超时」而不是「管理员已拒绝」。轮次在等待中被取消时落 `state=denied, decided_by=system` 并给「轮次已取消」的 hint —— 三条路径都 fail-closed，工具一次都不执行（docs/21 · G-API-12） |
 | [ ] AC-APV-010 (自动) ★ | 命中规则后 owner 在 WebUI 点 `[批准执行]` | `decide` 用 `UPDATE … WHERE state='pending' AND expires_at>?` 抢裁决权，只有真改到一行才唤醒等待者；**批准之后原工具调用才继续执行**，落 `state=approved, decided_by=owner, decision_channel=webui`。对已裁决/已过期的行重复裁决返回 `changed:false`，不重复唤醒 |
 | [ ] AC-APV-011 (自动) | `rememberWithinTurn=true` 时同轮重试一个刚过期的调用 | 复用上次结论不再挂第二个 `ttlMs`，但 hint 仍是「审批已超时」—— 只记布尔会让模型把超时说成「管理员已拒绝」 |
@@ -431,7 +437,7 @@
 | [ ] AC-PLG-010 (自动) | hook 执行超 5s | 超时中断，记日志，turn 继续 |
 | [ ] AC-PLG-007 (自动) | 两个 plugin 注册同名工具 | 后者加载失败并报明确错误（前缀隔离下应仅在同名 plugin 时发生） |
 | [ ] AC-PLG-008 | `onMessage` 返回 `{drop:true}` | 该消息不入库、不触发 |
-| [ ] AC-MCP-001 | 配置 stdio MCP server 并启用 | 懒连接成功；工具以 `mcp__<name>__*` 出现在 RUNTIME 块 |
+| [ ] AC-MCP-001 | 配置 stdio MCP server 并启用 | 懒连接成功；`tools.catalog.deferExternal` 默认开时那些工具以**折叠摘要**（`[mcp:<name>] N 个：…`）出现在 TOOL CATALOG 块里、`search_tools` 检索之后本轮可用；`deferExternal: false` 时恢复原形态，逐条以 `mcp__<name>__*` 出现在目录与 RUNTIME 块里（[05 §3.12](./05-tools-and-permissions.md)） |
 | [ ] AC-MCP-002 (自动) ★ | `limited` 用户 + server `minRole=trusted` | 该 server 的工具不注册 |
 | [x] AC-MCP-003 (自动) | kill 掉 stdio server 进程 | 期间工具从 RUNTIME 块消失、`state='down'`；**下一次 `mcp-health` reconcile 重连**（`docs/07 §4.3` 拍板：没有指数退避、没有重试上限、也没有 MCP 告警 kind —— 原先这一行写的「自动重启（退避）／5 次失败后告警」与那条设计直接矛盾，两样都不存在） | 〔mcp.runtime.test.ts〕
 | [ ] AC-MCP-004 (自动) | `toolAllow: ['read_*']` | 只注册匹配的工具 |
@@ -620,7 +626,7 @@
 | **上下文引擎** | | 31 / 40 | | | |
 | Telegram 与准入 | | 22 / 46 | | | |
 | Agent 与 Provider | | 23 / 43 | | | |
-| 工具/沙箱/审批 | | 41 / 83 | | | |
+| 工具/沙箱/审批 | | 48 / 89 | | | |
 | Subagent 与任务 | | 26 / 44 | | | |
 | 记忆 | | 1 / 13 | | | |
 | 日志与成本 | | 8 / 28 | | | |
@@ -628,6 +634,6 @@
 | WebUI | | 15 / 89 | | | |
 | 安全 | | 9 / 25 | | | |
 | 运维 | | 2 / 10 | | | |
-| **合计** | | **222 / 499** | | | |
+| **合计** | | **229 / 505** | | | |
 
 **整体通过条件**：全部 ★ 项通过 + 非 ★ 项通过率 ≥ 95% + 所有豁免项经需求方书面确认。

@@ -1,7 +1,8 @@
 import { rmSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 import { ArchiveRepository, OperationsRepository, PrincipalRepository, closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
-import { ContextEngine, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceService, ProviderStore, Secrets, TOOL_POLICY, configSchema } from '@luoli/core';
+import { ContextEngine, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceService, ProviderStore, Secrets, TOOL_POLICY, ToolRegistry, configSchema } from '@luoli/core';
 import type { ToolOverride } from '@luoli/core';
 import { createServer } from '@luoli/server';
 
@@ -12,15 +13,21 @@ import { createServer } from '@luoli/server';
  * 各有一条用例：**放宽必须先 409 且一个字都不落库**、**部分 PATCH 不能抹掉同一条 JSON 里其余的
  * 覆盖**、**显式 null 是恢复默认而不是写一个 null 进去**。
  */
-function harness(name: string, overrides: Record<string, ToolOverride> = {}) {
+/**
+ * `tools` 收的是**工厂**而不是现成的注册表：`ToolRegistry` 要 `LogSink`，而 `LogSink` 要这里才
+ * 打开的那个库 —— 直接收实例的话调用方得自己再开一个库。缺省仍不装配注册表（静态兜底那条路）。
+ */
+function harness(name: string, overrides: Record<string, ToolOverride> = {}, registryFor?: (log: LogSink) => ToolRegistry) {
   const path = `./data/${name}.test.db`;
   for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
   const db = openDatabase(path); migrateDatabase(db);
   const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, webui: { passwordHash: 'hash' }, tools: { overrides } });
   const operations = new OperationsRepository(db); const events = new EventBus(); const log = new LogSink(operations, `./data/${name}-logs`); const archive = new ArchiveRepository(db);
+  const tools = registryFor?.(log);
   const app = createServer({ config, db, operations, principals: new PrincipalRepository(db), archive, context: new ContextEngine(db, archive),
     providers: new ProviderStore(db, new Secrets('x'.repeat(32))), approvals: new DatabaseApprovalBroker(db, config, events, log),
-    maintenance: new MaintenanceService(db, path, 2, 30), events, log, configSchema: {}, startedAt: Date.now(), setup: undefined });
+    maintenance: new MaintenanceService(db, path, 2, 30), events, log, configSchema: {}, startedAt: Date.now(), setup: undefined,
+    ...(tools ? { tools } : {}) });
   const session = operations.createSession(1);
   return { app, db, headers: { cookie: `luoli_sid=${session.id}`, 'x-csrf-token': session.csrf, 'content-type': 'application/json' } };
 }
@@ -121,6 +128,52 @@ describe('GET /api/tools', () => {
     expect(data.bash!.minRole).toBe(TOOL_POLICY.bash.minRole);
     expect(data.bash!.enabled).toBe(false);
     expect(data.bash!.relaxed).toEqual([]);
+    closeDatabase(db);
+  });
+
+  /**
+   * 这条路判不出折叠（判据要 `#limits()` 与实际注册进来的那批工具），于是每行**都**报 `false`
+   * 而不是省掉这个字段：形状统一，前端不必分两种响应处理（docs/05 §3.12）。
+   */
+  it('静态兜底分支里每一行都带 deferred:false', async () => {
+    const { app, db, headers } = harness('tools-api-get-static');
+    const response = await app.request('/api/tools', { headers: { cookie: headers.cookie } });
+    const data = (await response.json() as { data: Record<string, { deferred: boolean }> }).data;
+    expect(Object.keys(data).length).toBe(Object.keys(TOOL_POLICY).length);
+    expect(Object.entries(data).filter(([, row]) => row.deferred !== false)).toEqual([]);
+    closeDatabase(db);
+  });
+});
+
+describe('GET /api/tools · 装配了注册表的那条分支', () => {
+  const registryFor = (deferExternal: () => boolean) => (log: LogSink): ToolRegistry => {
+    // limits 走 getter：`tools.catalog` 标着热更新，翻开关不该等重启（docs/11、docs/20 · W-CFG-02）。
+    const registry = new ToolRegistry(log, { request: async () => true },
+      () => ({ maxRegistered: 80, maxCallsPerTurn: 40, maxConsecutiveErrors: 3, catalog: { deferExternal: deferExternal() } }));
+    registry.register({ name: 'read_file', description: '读文件', inputSchema: z.object({}), sourcePriority: 100,
+      policy: { minRole: 'limited', approval: 'never', scope: 'chat', source: 'builtin' }, execute: () => ({ ok: true }) });
+    registry.registerExternal({ name: 'mcp__fixture__echo', description: 'echo text', inputSchema: z.object({}),
+      minRole: 'trusted', source: 'mcp', execute: () => ({ ok: true }) });
+    return registry;
+  };
+
+  /**
+   * `describe()` 的 `deferred` 是**静态**判：没有角色也没有轮次上下文，它答的是「这个工具在这台
+   * 机器的配置下属于折叠族吗」，不是「某一轮里它被折叠了吗」。它也**不是**启停开关的另一种说法
+   * —— 折叠工具照旧可执行，只是模型默认看不见 schema（docs/05 §3.12）。
+   */
+  it('外部来源标 deferred:true，内建不标；deferExternal 关掉时两行都是 false', async () => {
+    let deferExternal = true;
+    const { app, db, headers } = harness('tools-api-deferred', {}, registryFor(() => deferExternal));
+    const read = async (): Promise<Record<string, { deferred: boolean; enabled: boolean }>> =>
+      (await (await app.request('/api/tools', { headers: { cookie: headers.cookie } })).json() as { data: Record<string, { deferred: boolean; enabled: boolean }> }).data;
+    const folded = await read();
+    expect(folded.mcp__fixture__echo).toMatchObject({ deferred: true, enabled: true });
+    expect(folded.read_file).toMatchObject({ deferred: false, enabled: true });
+    deferExternal = false;
+    const flat = await read();
+    expect(flat.mcp__fixture__echo!.deferred).toBe(false);
+    expect(flat.read_file!.deferred).toBe(false);
     closeDatabase(db);
   });
 });
