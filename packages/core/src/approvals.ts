@@ -34,6 +34,25 @@ export interface ApprovalOutcome {
 export interface StaleReceipt { chatId: string; messageId: number; state: string; tool: string }
 
 /**
+ * 一条**不是工具调用**、但要走同一条审批链的请求（`requestExternal` / `recordDecided`）。
+ *
+ * @property toolName 落进 `approvals.tool_name`，也是 `approval.rules` 匹配用的那个名字。
+ * @property exemptOwnerSkip **反过来豁免 `approval.skipForOwner`。**
+ *   那个开关的前提是「owner 自己让 bot 做的事不必再问 owner 一次」—— 发起人与裁决人是同一个人。
+ *   ACP 的 `session/request_permission` 不是这个形状：动作的发起人是一台**外部 agent**，owner 只是
+ *   那个把它放进来的人，两者不是同一个主体。而 `skipForOwner` 默认为真、ACP 又是 owner-only，
+ *   所以不在这里反过来的话，整条逐条审批**一行都不会生效**（每一次都直接 `approved: true`）。
+ *   ⚠️ 看着像 bug，不是 —— 改回去等于把逐条审批静默摘掉，而屏幕上、文档里都还写着它在。
+ */
+export interface ExternalApprovalRequest {
+  toolName: string;
+  input: unknown;
+  context: ToolExecutionContext;
+  risk: ApprovalRisk;
+  exemptOwnerSkip?: boolean;
+}
+
+/**
  * 回执回调的返回值。两样东西都是可选的 —— 没有 Telegram 入口（或回执只是一条纯文本）时全空。
  *
  * @property tgMessageId 落进 `approvals.tg_message_id`。那一列是**启动时收拾残留回执**的待办
@@ -136,16 +155,52 @@ export class DatabaseApprovalBroker implements ApprovalBroker {
   }
 
   async request(tool: RegisteredTool, input: unknown, context: ToolExecutionContext, risk: ApprovalRisk): Promise<ApprovalVerdict> {
+    return this.#request({ toolName: tool.name, input, context, risk });
+  }
+
+  /**
+   * 不是工具调用、但需要走同一条审批链的那些（`docs/05 §3.5.3`）。第一个消费者是 ACP 的
+   * `session/request_permission`：动作发起人是一台外部 agent，而它问过来的每一步都要落进
+   * `approvals` 表、走同一套 `approval.rules` / TTL / 双通道裁决 —— 那张表与那套规则**只有一份**，
+   * 让 ACP 自己再建一套等于让「审批」这个词在这个项目里有两种意思。
+   *
+   * `tool_name` 由调用方给（ACP 恒为 `acp_permission`）。它不必是一个注册过的工具 ——
+   * `ApprovalRules.evaluate` 只吃名字与 `JSON.stringify(input)`，而这条路的 input 里已经有
+   * `"kind":"execute"` 这类足够精准的判据；为每种 kind 编一个假工具名只会污染工具页与
+   * `tools.overrides` 的键空间（那张表只认注册过的工具，多出来的键运维改了也没用）。
+   */
+  async requestExternal(request: ExternalApprovalRequest): Promise<ApprovalVerdict> {
+    return this.#request(request);
+  }
+
+  /**
+   * 一条**已经有结论**的审批：不问人，只留凭据。
+   *
+   * ACP 的 `allow_always` / `reject_always` 命中会话内那份记忆时走它 —— 不落这一行的话，
+   * 「批了一次之后它接着改了 40 个文件」在审计里只剩最初那一条，而那正是 always 这一档最需要
+   * 被数出来的地方。`decided_by` 由调用方给（`acp:always`），好让它与真人裁决（`user:<tgId>` /
+   * `owner`）和系统裁决（`system`）在同一列里分得开（`docs/03` 的 `approvals` 段）。
+   */
+  recordDecided(request: ExternalApprovalRequest & { approved: boolean; decidedBy: string }): void {
+    const now = Date.now();
+    this.db.prepare(`INSERT INTO approvals(id,turn_id,agent_run_id,chat_id,requester_user_id,tool_name,input_json,risk,state,requested_at,expires_at,decided_by,decided_at,decision_channel)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(ulid(), request.context.turn.turnId, request.context.agentRunId ?? null, request.context.turn.chatId,
+      request.context.turn.initiatorUserId, request.toolName, JSON.stringify(request.input), request.risk,
+      request.approved ? 'approved' : 'denied', now, now, request.decidedBy, now, request.decidedBy);
+  }
+
+  async #request(request: ExternalApprovalRequest): Promise<ApprovalVerdict> {
+    const { toolName, input, context, risk } = request;
     const config = this.#config();
     if (!config.approval.enabled) return { approved: true };
     if (context.turn.abortSignal.aborted) return { approved: false, hint: CANCELLED_HINT };
-    const rememberedKey = `${context.turn.turnId}:${tool.name}:${JSON.stringify(input)}`;
+    const rememberedKey = `${context.turn.turnId}:${toolName}:${JSON.stringify(input)}`;
     if (config.approval.rememberWithinTurn && this.#remembered.has(rememberedKey)) {
       const previous = this.#remembered.get(rememberedKey)!;
       return previous.approved ? { approved: true } : { approved: false, hint: previous.hint ?? DENIED_HINT };
     }
-    if (context.turn.effectiveRole === 'owner' && config.approval.skipForOwner) {
-      this.log.event({ level: 'info', kind: 'approval.decided', summary: `${tool.name} auto-approved`, traceId: context.turn.turnId, data: { channel: 'auto', role: 'owner', risk } });
+    if (context.turn.effectiveRole === 'owner' && config.approval.skipForOwner && !request.exemptOwnerSkip) {
+      this.log.event({ level: 'info', kind: 'approval.decided', summary: `${toolName} auto-approved`, traceId: context.turn.turnId, data: { channel: 'auto', role: 'owner', risk } });
       if (config.approval.rememberWithinTurn) this.#remembered.set(rememberedKey, { approved: true });
       return { approved: true };
     }
@@ -163,7 +218,7 @@ export class DatabaseApprovalBroker implements ApprovalBroker {
     // 接住，口径与这里完全相同 —— 两处必须一起看：只挡这一处的话，`post` 被 Telegram 拒收
     // 就又回到「干等满 ttlMs 而屏幕上一个字都没有」（reviews/20 §0.0 换了个来路）。
     if (this.events.channelCount === 0 && this.prompts?.available(context.turn.chatId) !== true) {
-      this.log.event({ level: 'warn', kind: 'approval.unavailable', summary: `${tool.name} approval channel unavailable`, traceId: context.turn.turnId, data: { risk } });
+      this.log.event({ level: 'warn', kind: 'approval.unavailable', summary: `${toolName} approval channel unavailable`, traceId: context.turn.turnId, data: { risk } });
       if (config.approval.rememberWithinTurn) this.#remembered.set(rememberedKey, { approved: false, hint: UNAVAILABLE_HINT });
       return { approved: false, hint: UNAVAILABLE_HINT };
     }
@@ -172,7 +227,7 @@ export class DatabaseApprovalBroker implements ApprovalBroker {
     const now = Date.now();
     const expiresAt = now + config.approval.ttlMs;
     this.db.prepare(`INSERT INTO approvals(id,turn_id,agent_run_id,chat_id,requester_user_id,tool_name,input_json,risk,state,requested_at,expires_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(id, context.turn.turnId, context.agentRunId ?? null, context.turn.chatId, context.turn.initiatorUserId, tool.name, JSON.stringify(input), risk, 'pending', now, expiresAt);
+      VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(id, context.turn.turnId, context.agentRunId ?? null, context.turn.chatId, context.turn.initiatorUserId, toolName, JSON.stringify(input), risk, 'pending', now, expiresAt);
 
     // 回执那条消息的句柄。裁决落定（Telegram 点的 / 另一条通道抢先 / TTL / 轮次取消）时要把键盘
     // 撤掉并把正文换成结局，而投递可能还在途 —— 所以两头各判一次：`finish` 里判 `settle` 有没有到，
@@ -181,7 +236,7 @@ export class DatabaseApprovalBroker implements ApprovalBroker {
     const receipt: { settle: ((outcome: ApprovalOutcome) => void) | undefined; outcome: ApprovalOutcome | null; recorded: boolean } = { settle: undefined, outcome: null, recorded: false };
     // 回执在**插入 pending 行之后**发：先落库再通知，通知失败也不会留下一个没人知道的等待。
     try {
-      void Promise.resolve(this.notifyInitiator?.({ id, chatId: context.turn.chatId, threadId: context.turn.threadId, requesterUserId: context.turn.initiatorUserId, tool: tool.name, risk, ttlMs: config.approval.ttlMs }))
+      void Promise.resolve(this.notifyInitiator?.({ id, chatId: context.turn.chatId, threadId: context.turn.threadId, requesterUserId: context.turn.initiatorUserId, tool: toolName, risk, ttlMs: config.approval.ttlMs }))
         .then((value) => {
           const posted = value as ApprovalReceipt | undefined;
           // 投递还在途中就裁决完了：当场收尾，那一列一个字都不必记 —— 它记的是「还在屏幕上」。
@@ -191,7 +246,7 @@ export class DatabaseApprovalBroker implements ApprovalBroker {
           if (posted?.tgMessageId) { this.db.prepare('UPDATE approvals SET tg_message_id=? WHERE id=?').run(posted.tgMessageId, id); receipt.recorded = true; }
           receipt.settle = posted?.settle;
           // 回执压根没送到人眼前，而它可能是这次审批唯一的通道 —— 见 `#receiptUndeliverable`。
-          if (posted?.delivered === false) this.#receiptUndeliverable(id, tool.name, risk, context.turn.chatId, context.turn.turnId);
+          if (posted?.delivered === false) this.#receiptUndeliverable(id, toolName, risk, context.turn.chatId, context.turn.turnId);
         })
         .catch((error: unknown) => this.log.event({ level: 'warn', kind: 'approval.receipt_failed', summary: 'initiator receipt failed', traceId: context.turn.turnId, data: { error: error instanceof Error ? error.message : String(error) } }));
     } catch { /* 同步抛也不能影响审批 */ }
@@ -199,7 +254,7 @@ export class DatabaseApprovalBroker implements ApprovalBroker {
       let settled = false;
       const abort = (): void => {
         const changed = this.db.prepare("UPDATE approvals SET state='denied',decided_by='system',decided_at=?,decision_channel='system' WHERE id=? AND state='pending'").run(Date.now(), id).changes;
-        if (changed) this.events.emit('approval.decided', { id, tool: tool.name, risk, chatId: context.turn.chatId, approved: false, actor: 'system', channel: 'system' });
+        if (changed) this.events.emit('approval.decided', { id, tool: toolName, risk, chatId: context.turn.chatId, approved: false, actor: 'system', channel: 'system' });
         finish(false, CANCELLED_HINT, { kind: 'cancelled' });
       };
       const finish = (approved: boolean, hint: string | undefined, outcome: ApprovalOutcome): void => {
@@ -230,17 +285,17 @@ export class DatabaseApprovalBroker implements ApprovalBroker {
       const timer = setTimeout(() => {
         const changed = this.db.prepare("UPDATE approvals SET state='expired',decided_by='system',decided_at=?,decision_channel='system' WHERE id=? AND state='pending'").run(Date.now(), id).changes;
         if (changed) {
-          this.events.emit('approval.decided', { id, tool: tool.name, risk, chatId: context.turn.chatId, approved: false, actor: 'system', channel: 'system', state: 'expired' });
-          this.log.event({ level: 'warn', kind: 'approval.expired', summary: `${tool.name} approval expired`, traceId: context.turn.turnId, data: { id, risk } });
+          this.events.emit('approval.decided', { id, tool: toolName, risk, chatId: context.turn.chatId, approved: false, actor: 'system', channel: 'system', state: 'expired' });
+          this.log.event({ level: 'warn', kind: 'approval.expired', summary: `${toolName} approval expired`, traceId: context.turn.turnId, data: { id, risk } });
         }
         finish(false, EXPIRED_HINT, { kind: 'expired' });
       }, config.approval.ttlMs);
       timer.unref?.();
       this.#pending.set(id, { finish });
       context.turn.abortSignal.addEventListener('abort', abort, { once: true });
-      this.events.emit('approval.pending', { id, turnId: context.turn.turnId, agentRunId: context.agentRunId ?? null, tool: tool.name, input, risk,
+      this.events.emit('approval.pending', { id, turnId: context.turn.turnId, agentRunId: context.agentRunId ?? null, tool: toolName, input, risk,
         chatId: context.turn.chatId, requesterUserId: context.turn.initiatorUserId, requestedAt: now, expiresAt });
-      this.log.event({ level: 'warn', kind: 'approval.pending', summary: `${tool.name} awaits approval`, traceId: context.turn.turnId, data: { id, risk, expiresAt } });
+      this.log.event({ level: 'warn', kind: 'approval.pending', summary: `${toolName} awaits approval`, traceId: context.turn.turnId, data: { id, risk, expiresAt } });
     });
   }
 

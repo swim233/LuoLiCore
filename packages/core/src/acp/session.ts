@@ -14,7 +14,8 @@ import type { ClientContext, SessionNotification, StopReason } from '@agentclien
 /** `session/cancel` 之后等 `stopReason: 'cancelled'` 的宽限。等不到就放弃这次等待，交给关停梯。 */
 export const ACP_CANCEL_GRACE_MS = 10_000;
 
-export type AcpCancelReason = 'abort' | 'timeout' | 'cost';
+/** `permission` = 逐条审批的结论表达不出来（agent 没给能用的档），见 `acp_permission_unanswerable`。 */
+export type AcpCancelReason = 'abort' | 'timeout' | 'cost' | 'permission';
 
 export interface AcpUpdateSinkOptions {
   /** 一次 prompt 最多收多少条。撞上界后**只丢弃、不断连**（`agent.acp.maxUpdatesPerPrompt`）。 */
@@ -23,7 +24,7 @@ export interface AcpUpdateSinkOptions {
   maxTextBytes: number;
   /** 累计花费上界，0 = 不限。 */
   maxCostUsd: number;
-  /** 波 3 的呈现层挂在这里：每条 `session/update` 原样过一遍。**丢弃的那些不给它** ——
+  /** 呈现层（Telegram 进度卡片）挂在这里：每条 `session/update` 原样过一遍。**丢弃的那些不给它** ——
    *  上界的意义就是「后面这些我们不处理」，绕过上界喂给呈现层等于没有上界。 */
   onUpdate?: (notification: SessionNotification) => void;
 }
@@ -39,16 +40,29 @@ export class AcpUpdateSink {
   dropped = 0;
   toolCalls = 0;
   thoughts = 0;
+  /** agent 自己那些工具调用里报了 `failed` 的条数。进度卡片终帧要它 —— 「跑完了」与「跑完了但
+   *  一半的步骤失败了」在屏幕上必须是两句话。有界：至多 `maxUpdatesPerPrompt` 条。 */
+  failures = 0;
   /** `usage_update.cost.amount` 是**累计值**，所以取见过的最大值而不是求和。 */
   costUsd: number | null = null;
   contextUsed: number | null = null;
   contextSize: number | null = null;
   /** 撞上花费上界时调一次（只一次）。由 `runAcpPrompt` 装上，走的是 `session/cancel`。 */
   onOverBudget?: (() => void) | undefined;
+  /**
+   * 逐条审批答不出来时由权限处理器调一次，同样走 `session/cancel`。
+   *
+   * **挂在 sink 上是因为它已经是那条被穿到底的线**（`#run` 建它、`#open` 的处理器拿得到它、
+   * `runAcpPrompt` 往上装回调）—— 为它另开一个 holder 对象只是多一份要一起传的东西。
+   * 与 `onOverBudget` 同一形状：**只有 `runAcpPrompt` 装它**，没装上时调用是 no-op（握手期间
+   * 收到的 permission 请求就落在那个窗口里，那时压根还没有 prompt 可取消）。
+   */
+  onPermissionUnanswerable?: (() => void) | undefined;
   #text = '';
   #textBytes = 0;
   #textTruncated = false;
   #overBudget = false;
+  readonly #failedIds = new Set<string>();
 
   constructor(private readonly options: AcpUpdateSinkOptions) {}
 
@@ -59,14 +73,17 @@ export class AcpUpdateSink {
     switch (update.sessionUpdate) {
       case 'agent_message_chunk': {
         // 只聚合 text：image / audio / resource 是不透明块，截半没有意义（同 docs/02 对不透明
-        // part 的不变量）。波 3 的呈现层从 `onUpdate` 拿原件。
+        // part 的不变量）。呈现层从 `onUpdate` 拿原件，不受这里的聚合影响。
         if (update.content.type === 'text') this.#append(update.content.text);
         break;
       }
       // 思考链**不进聚合正文**：它是 agent 的内心戏，量级又是正文的几十倍（37–89 条 / 任务）。
       // 只记条数，好让呈现层与日志说得出「它想了多久」。
       case 'agent_thought_chunk': { this.thoughts += 1; break; }
-      case 'tool_call': { this.toolCalls += 1; break; }
+      // 失败按 `toolCallId` 去重：同一次调用先在 `tool_call` 里报 failed、再来一条 `tool_call_update`
+      // 也报 failed 是 agent 的常规写法，数两遍会让进度卡片终帧上的数字比真实失败数大一倍。
+      case 'tool_call': { this.toolCalls += 1; this.#failed(update.toolCallId, update.status); break; }
+      case 'tool_call_update': { this.#failed(update.toolCallId, update.status); break; }
       case 'usage_update': {
         this.contextUsed = update.used;
         this.contextSize = update.size;
@@ -83,6 +100,12 @@ export class AcpUpdateSink {
       default: break;
     }
     this.options.onUpdate?.(notification);
+  }
+
+  #failed(toolCallId: string | undefined, status: string | null | undefined): void {
+    if (status !== 'failed' || !toolCallId || this.#failedIds.has(toolCallId)) return;
+    this.#failedIds.add(toolCallId);
+    this.failures += 1;
   }
 
   #append(text: string): void {
@@ -143,6 +166,7 @@ export async function runAcpPrompt(cx: ClientContext, options: AcpPromptOptions)
   if (abortSignal.aborted) return { stopReason: null, failure: acpFailure('acp_cancelled'), cancelReason: 'abort', cancelSent: false };
   const onAbort = (): void => { void cancel('abort'); };
   sink.onOverBudget = () => { void cancel('cost'); };
+  sink.onPermissionUnanswerable = () => { void cancel('permission'); };
   abortSignal.addEventListener('abort', onAbort, { once: true });
   // 握手期间就已经撞线的花费：`#overBudget` 那时已经置位，而 `onOverBudget` 还没装上 —— 那一位
   // 是一次性的，不在这里补一刀的话这次调用**永远不会**因为超预算被取消。
@@ -166,8 +190,9 @@ export async function runAcpPrompt(cx: ClientContext, options: AcpPromptOptions)
      * 于是「取消之后 agent 恰好跑完了」被报成 ok:true：文件已经被改，而这一轮本该是取消的。
      * 现在这一档如实交回 `acp_cancelled` + 真实的 `stopReason`，两件事都说得出来。
      */
-    const cancelled = (): 'acp_timeout' | 'acp_cost_exceeded' | 'acp_cancelled' | null =>
-      cancelReason === 'timeout' ? 'acp_timeout' : cancelReason === 'cost' ? 'acp_cost_exceeded' : cancelReason === 'abort' ? 'acp_cancelled' : null;
+    const cancelled = (): 'acp_timeout' | 'acp_cost_exceeded' | 'acp_permission_unanswerable' | 'acp_cancelled' | null =>
+      cancelReason === 'timeout' ? 'acp_timeout' : cancelReason === 'cost' ? 'acp_cost_exceeded'
+        : cancelReason === 'permission' ? 'acp_permission_unanswerable' : cancelReason === 'abort' ? 'acp_cancelled' : null;
     if (raced.via === 'response') {
       const stopReason = raced.response.stopReason;
       const code = cancelled() ?? acpStopReasonError(stopReason);
@@ -182,5 +207,6 @@ export async function runAcpPrompt(cx: ClientContext, options: AcpPromptOptions)
     if (grace) clearTimeout(grace);
     abortSignal.removeEventListener('abort', onAbort);
     sink.onOverBudget = undefined;
+    sink.onPermissionUnanswerable = undefined;
   }
 }

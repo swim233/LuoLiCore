@@ -1,7 +1,9 @@
 import { InputFile, type Api, type Bot } from 'grammy';
 import type { LogSink, TelegramTarget, TelegramToolBridge } from '@luoli/core';
 import type { ArchiveRepository } from '@luoli/db';
-import { capMentions, deliveryOrder, segmentTelegramText, sendWithFallback, type ParseMode } from './output.js';
+import { capMentions, deliveryOrder, segmentTelegramText, sendWithFallback, type ParseFallbackInfo, type ParseMode } from './output.js';
+import { openAcpProgressCard, type AcpCardOptions, type AcpCardTarget, type AcpProgressCard } from './acp-card.js';
+import type { TelegramDeliveryEvent } from './stream-output.js';
 
 /**
  * Telegram 只接受这一组固定的 reaction emoji（Bot API `ReactionTypeEmoji`）；别的一律 400
@@ -118,6 +120,46 @@ export class TelegramTools implements TelegramToolBridge {
       this.#sent(target, 'pinChatMessage', true, startedAt, { messageId });
       return { ok: true, messageId };
     });
+  }
+
+  /**
+   * 一次 ACP 运行的进度卡片（`docs/08 §6.1`）。**`null` = 没有 Telegram 入口** —— ACP 照跑，
+   * 只是没有卡片：呈现层起不来不该让「起一台外部 agent」这件事失败，这也是 `catch` 兜到 `null`
+   * 而不是往外抛的理由。
+   *
+   * `parseMode` / `maxMessageChars` / `intervalMs` 由调用方给，而不是在这里读 `dependencies`：
+   * 调用方拿的是**本轮**那份合并后的配置（`output.*` 在 `perChat` 白名单里，`docs/11 §2.1`），
+   * 而同一个会话里卡片与主回复必须是同一档渲染 —— 三条出站路径两种渲染的账已经付过一次了。
+   */
+  async openProgressCard(target: AcpCardTarget & { turnId?: string; parentSpanId?: string }, options: AcpCardOptions): Promise<AcpProgressCard | null> {
+    const bot = this.dependencies.bot();
+    if (!bot) return null;
+    try {
+      // 不挂 `onDeliveryError`：send 失败那一跳已经有一条 `ok:false` 的 `tg.send`，edit 失败
+      // 由聚合那一条带出来（`docs/10 §2`：`tg.edit` 一轮一条）。两处都挂等于同一次失败落两行。
+      return await openAcpProgressCard(bot, { chatId: target.chatId, threadId: target.threadId }, options,
+        { onDelivery: (event) => this.#card(target, event), onParseFallback: (info) => this.#cardFallback(target, info) });
+    } catch { return null; }
+  }
+
+  /** 卡片的投递事件 → `tg.send` / `tg.edit`（`docs/10 §2`）。形状与 `bot.ts` 给 `TelegramOutput`
+   *  挂的那个一致；`traceId` 只在调用方给了 turnId 时才有 —— 卡片本身不需要它。 */
+  #card(target: { chatId: string; turnId?: string; parentSpanId?: string }, event: TelegramDeliveryEvent): void {
+    this.dependencies.log?.event({ level: event.ok ? 'debug' : 'warn', kind: event.kind === 'send' ? 'tg.send' : 'tg.edit',
+      summary: `acp card ${event.kind}${event.count ? ` ×${event.count}` : ''} → ${target.chatId}`,
+      ...(target.turnId ? { traceId: target.turnId } : {}), ...(target.parentSpanId ? { parentSpanId: target.parentSpanId } : {}),
+      chatId: target.chatId, durationMs: event.ms,
+      data: { method: event.kind === 'send' ? 'sendMessage' : 'editMessageText', ok: event.ok, path: 'tool',
+        ...(event.messageId === undefined ? {} : { messageId: event.messageId }), ...(event.chars === undefined ? {} : { chars: event.chars }),
+        ...(event.count === undefined ? {} : { editCount: event.count }), ...(event.path ? { frame: event.path } : {}),
+        ...(event.error ? { error: event.error } : {}) } });
+  }
+
+  #cardFallback(target: { chatId: string; turnId?: string }, info: ParseFallbackInfo): void {
+    this.dependencies.log?.event({ level: 'warn', kind: 'tg.parse_fallback',
+      summary: `acp 卡片渲染被拒，已降级成纯文本${info.phase === 'edit' ? '重编辑' : '重发'}`,
+      ...(target.turnId ? { traceId: target.turnId } : {}), chatId: target.chatId,
+      data: { chars: info.chars, error: info.error, phase: info.phase } });
   }
 
   /**

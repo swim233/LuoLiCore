@@ -83,7 +83,7 @@ NODE_ENV=production
 
 ### 2.0.1 未实现键白名单
 
-当前白名单。**每一行都以 🚧 起头，测试 `config.test.ts` 要求白名单里的每个键都能在本文件里找到一行同时含该键与 🚧**，否则视为文档未同步。第五轮把这张表从 65 条压到 13 条；[14 §2](./14-open-questions.md) 全部答复之后（2026-08-18）又降到 10 条 —— `agent.askArbiter` / `agent.askTimeoutMs` 随 A7 接线，`db.ftsTokenizer` 随 Q3 直接从 schema 摘除，而 `agent.askEscalateToUser` 留下（原因见下）。M13 的 ACP 客户端加回两条（`agent.acp.maxTerminals` / `agent.acp.progressIntervalMs`，落点都在波 3），现在是 **12 条**。**剩下的每一条都写明为什么留着** —— 「暂时没做」和「做不了 / 不该在这一层做」是两回事：
+当前白名单。**每一行都以 🚧 起头，测试 `config.test.ts` 要求白名单里的每个键都能在本文件里找到一行同时含该键与 🚧**，否则视为文档未同步。第五轮把这张表从 65 条压到 13 条；[14 §2](./14-open-questions.md) 全部答复之后（2026-08-18）又降到 10 条 —— `agent.askArbiter` / `agent.askTimeoutMs` 随 A7 接线，`db.ftsTokenizer` 随 Q3 直接从 schema 摘除，而 `agent.askEscalateToUser` 留下（原因见下）。M13 的 ACP 客户端曾加回两条（`agent.acp.maxTerminals` / `agent.acp.progressIntervalMs`），反向 terminal 与进度卡片落地之后又双双摘掉 —— 它们当初留着的理由是「根本没有 terminal 可数 / 没有在途的东西需要节流」，那个前提没了，键就不该再挂在这里。现在是 **10 条**。**剩下的每一条都写明为什么留着** —— 「暂时没做」和「做不了 / 不该在这一层做」是两回事：
 
 | 🚧 键 | 为什么还没接 |
 |---|---|
@@ -95,8 +95,6 @@ NODE_ENV=production
 | 🚧 `tools.web.summarizeWithAlias` | 要在 `web_fetch` 里插一次模型调用：计费、配额、取消、失败降级都得跟着走一遍。**A7 的仲裁调用已经趟过同一条路**（见 `agent/ask-arbiter.ts`），要接的话照那个形状抄 |
 | 🚧 `media.groupDebounceMs` | 相册合并要按 `media_group_id` 在触发路径上缓冲 update，与并发和认领水位有交互（`concurrency.coalesceSameUserMs` 做的是按人合并） |
 | 🚧 `webui.basePath` | 子路径挂载：要给所有路由加前缀、改静态资源 base、改 SPA 的 router base，三处一起动 |
-| 🚧 `agent.acp.maxTerminals` | 这一轮 `ACP_CLIENT_CAPABILITIES` 不申报 `terminal`，七个 `terminal/*` 处理器一律抛 `methodNotFound` —— **根本没有 terminal 可数**。给一个不存在的东西设上限是假开关（同 `memory.autoApplyCompaction` 的道理）。波 3 接反向 terminal 时，它是那份实现的第一个读取点 |
-| 🚧 `agent.acp.progressIntervalMs` | 呈现层（把 `session/update` 变成 Telegram 卡片）是波 3。这一轮的 `AcpUpdateSink` 只做有界聚合，一次 prompt 只在结束时交回一份结果，中间没有任何东西需要节流 |
 
 ```yaml
 # ============================================================ general
@@ -278,45 +276,78 @@ agent:
                                   #   多一条：两个并发轮次绝不会在同一个目录上各起一个 agent —— 按 realpath
                                   #   硬互斥，等待有上界（30s，可取消），超时交回 acp_dir_busy
     defaultAgent: ''              # 热更新 · 模型没给 agent 参数时用哪一台；空 = 列表里第一台启用的
-    permissionMode: ask           # 热更新 · ask | auto | deny —— agent 反过来问「这一步准不准」时**我们**怎么
+    permissionMode: auto          # 热更新 · ask | auto | deny —— agent 反过来问「这一步准不准」时**我们**怎么
                                   #   回。与下面 agents[].approvalMode 是两件事（那个是 agent 内部的自动放行档）。
-                                  #   auto / deny 都真的接上了；ask 档 🚧 本轮落到地板（按 auto 放行，每次多记
-                                  #   一条 warn），真人通道是波 3 —— 逐值说明在 CONFIG_ENUM_NOTES，界面上每一档
-                                  #   旁边就有一句
+                                  #   默认 auto = 14 §2 Q8-c 原本的语义：**起这台 agent 这一个动作整体走一次审批，
+                                  #   批了之后它这一趟怎么跑不再逐条拦**。这一档走 floorPermission（从它自己给的
+                                  #   options 里挑第一个 allow 档），一次都不问人。
+                                  #   ⚠ **所以默认没有逐条审批。** ask 那条链是实的、完整、有用例（requestExternal
+                                  #   → 同一张 approvals 表、同一套 approval.rules / TTL / 双通道裁决，05 §3.5.3），
+                                  #   但**要自己拨到 ask 才生效** —— 「机制存在」与「默认生效」是两件事。
+                                  #   ⚠ 主动配了 ask 而运行时没有审批 broker 时 spawn_acp **整个不进工具目录**
+                                  #   （照 allowedDirs 为空的同一形态）：一个叫 ask 的档实际在放行就是伪造一道门。
+                                  #   这道闸只对**主动配了 ask 的部署**生效，默认档不经过它。
+                                  #   逐条审批**不是第四道门**：真正拦得住的仍然是目录白名单那一道（三道门里
+                                  #   TOOL_POLICY.spawn_acp 的 approval:'always' 对 owner 因 approval.skipForOwner
+                                  #   默认真而实际无感）。逐值说明在 CONFIG_ENUM_NOTES，界面上每一档旁边就有一句
     maxUpdatesPerPrompt: 2000     # 热更新 · 一次 prompt 收 session/update 的条数上界。撞线后**只丢弃、不断
                                   #   连**，刻意与 collectProcess 的「输出超限就地 SIGKILL」分岔：那边溢出源是
                                   #   我们杀得掉的字节流，这边 agent 正在改真实文件。量级参考：6 秒的琐碎任务
                                   #   82–131 条，86 秒那次 263 条
-    maxTerminals: 8               # 🚧 本轮 ACP_CLIENT_CAPABILITIES 不申报 terminal、七个 terminal/* 处理器
-                                  #    一律 methodNotFound，没有 terminal 可数（§2.0.1）
-    progressIntervalMs: 5000      # 🚧 呈现层（session/update → Telegram 卡片）是波 3（§2.0.1）
+    maxTerminals: 8               # 热更新 · 同时存在的 terminal/* 句柄上界，**含已退出但还没 release 的** ——
+                                  #   那正是逼 agent 把用完的句柄还回来的那道压力。数活着的句柄而不是历史
+                                  #   总数，所以规矩的 agent 永远撞不到它；撞上界时下一次 create 回一个说得清
+                                  #   下一步的错，而不是排队或静默复用
+    progressIntervalMs: 5000      # 热更新 · Telegram 进度卡片两次编辑之间的最小间隔。
+                                  #   ⚠ **小于 1000 会被卡片按 1000 处理**（那是发送侧那个桶的 minTime）——
+                                  #   schema 上这一项只是 positive()，填 200 不会被拒但也不会生效，运维会
+                                  #   以为生效了。ACP 是 owner + 仅私聊，所以 perChatPerMinute 那 20 条不管
+                                  #   它（私聊走的是只管 1 秒最小间隔的那个桶，08 §6.1）；真正要让出的是
+                                  #   正文流式输出的节拍。调大了卡片看着像卡住
     maxCostUsd: 0                 # 热更新 · 单次调用的花费上界（USD，0 = 不限）。**这是 ACP 花费的唯一闸门**
                                   #   —— agent 烧的是它自己那份 provider 凭据，usage_ledger、quota.* 与
                                   #   quota.perTurn.maxCostUsd 全都看不见它。判据取 usage_update 的 cost.amount
-                                  #   （累计值），撞线走 session/cancel；已经落盘的文件改动**不回滚**
+                                  #   （累计值），撞线走 session/cancel；已经落盘的文件改动**不回滚**。
+                                  #   那笔钱现在**落库了**：agent_runs.external_cost_usd / external_usage_json
+                                  #   （迁移 0014，同一行的 cost_usd 恒 0）。⚠ **落库不等于记账接上了** —— 它仍然
+                                  #   不进 usage_ledger、不进 quota.*、不进用量页的聚合。那个数不是我们的钱、口径
+                                  #   由外部 agent 定、我们无法核对，摆进 SUM(cost_usd) 就是邀请人把两者相加。
+                                  #   所以这一格仍然是唯一的闸，不是「有账可查所以不必设上限」
     agents:                       # 热更新 · agent 定义数组（WebUI 可编辑）
       - name: omp                 # ^[a-z0-9][a-z0-9_-]{0,63}$：它进日志、错误文案与 agent 参数的枚举
         enabled: true             # 停用的既不进 agent 参数的取值，也过不了 execute() 的复查
         command: omp              # CLI 可执行名，不经 shell
         profile: telegram         # --profile=：omp 的隔离档（凭据 / 会话 / 设置 / 缓存各一份）；空 = 不加
-        approvalMode: write       # always-ask | write | yolo —— agent **内部**哪些工具自动放行。它与
-                                  #   tools 一样是一等键、**无条件下发成 flag**，不塞进自由格式的 args：磁盘上
-                                  #   那份 profile 里可能写着 yolo，不显式盖过就是静默失去权限门，而运维在 WebUI
-                                  #   改一行自由 args 同样能静默去掉它。
+        approvalMode: yolo        # always-ask | write | yolo —— agent **内部**哪些工具自动放行。三档都留着，
+                                  #   而**默认是 yolo，因为另两档下 bash 可证明用不了**：实测 omp 17.4.0 在
+                                  #   approvalMode=write 下把 bash 问过来、我们从它自己给的选项里挑一个
+                                  #   allow_always 回过去，它照旧自己记成 `Tool call denied by user: bash`，
+                                  #   terminal/create 一次都不发生；换 yolo 立刻走通（terminals: 1，命令真在宿主
+                                  #   上跑）。留一个可证明用不了的工具在默认值里，模型会试、失败、然后绕路或编
+                                  #   一个理由（「摘除比伪造安全」，16 §5）。
                                   #   ⚠ **不要用 always-ask**：实测可复现的 edit 故障 —— 文件没被改、
-                                  #   fs/write_text_file 一次都没走，而 agent 自己认为改完了
-        tools: [read, write, edit]
+                                  #   fs/write_text_file 一次都没走，而 agent 自己认为改完了。
+                                  #   yolo 的代价说清：等于关掉 agent 内部全部自动放行判据。挡住它的是三道门那
+                                  #   一套（owner + 仅私聊 + 目录白名单，05 §3.5.1）加上面 tools 那一格的收窄；
+                                  #   **想逐条拦就把 agent.acp.permissionMode 拨到 ask**。
+                                  #   它与 tools 一样是一等键、**无条件下发成 flag**，不塞进自由格式的 args ——
+                                  #   一等键的意义是**这一档由本系统的配置说了算，不由磁盘上那份 profile 说了算**
+                                  #   （运维把它拨回 write 时必须真的生效，而不是被 profile 里的 yolo 顶掉）；
+                                  #   而运维在 WebUI 改一行自由 args 同样能静默去掉它
+        tools: [read, write, edit, bash]
                                   # --tools=：**这套东西唯一接近真咽喉点的手段**。omp 有 31 个内建工具，只有
                                   #   read / write / edit / bash 这 4 个走 ACP；剩下 27 个里 ast_edit（不经
                                   #   fs/write_text_file 的写路径）、eval（常驻 Python/JS）、computer（宿主桌面
                                   #   控制）都是绕过路径。只在非空时下发 —— 空的 --tools= 是「一个工具都不给」
                                   #   而不是「全给」，所以空数组 = 不加这个 flag（= 全开）。
-                                  #   ⚠ **bash 不在默认值里，因为它现在可证明用不了**：客户端不申报 terminal
-                                  #   能力，实测 omp 的 bash 连权限批了都还是 `Tool call denied by user: bash`。
-                                  #   read / write / edit 照常 —— omp 退回自己直接读写磁盘，实测文件真的变了。
-                                  #   一个可证明用不了的工具写在默认值里，模型会试、失败、然后绕路或编一个
-                                  #   理由（「摘除比伪造安全」）。**bash 与 terminal capability 同生共死**：
-                                  #   哪一轮申报了 terminal 并实现了那七个处理器，就在同一个改动里把它加回来
+                                  #   bash 在默认值里，它真能用要两个条件同时成立：① 申报 terminal（七个
+                                  #   terminal/* 处理器 + 能力申报，05 §3.5.2）；② approvalMode: yolo。
+                                  #   **两条默认都满足，所以默认值下 bash 真的能跑**（实测 terminals: 1，命令在
+                                  #   宿主上真的执行）。acp.run 里那条点名 bash 的 warn 只在运维**主动**把
+                                  #   approvalMode 拨回 write / always-ask 而又留着 bash 时出现 —— 那两档下 agent
+                                  #   自己会拒掉它，而它拒的时候不说真实原因。
+                                  #   ⚠ 反过来那一半仍然成立：sandbox.plan 不是 host 时 terminal 压根不申报
+                                  #   （fail-closed 落在申报那一刻），这一格里的 bash 又成了用不了的工具（05 §3.5.1）
         model: ''                 # --model=：空 = 用 profile 的默认（实测全局 flag 对 acp 子命令有效）
         mode: ''                  # '' | default | plan —— ACP 会话模式，**不下发到 argv**：omp 的 --mode 是
                                   #   输出格式（text / json / rpc / rpc-ui），发过去会把 JSON-RPC 的 stdio 协议

@@ -201,15 +201,10 @@ export const KNOWN_UNIMPLEMENTED_CONFIG_KEYS = [
   // 子路径挂载：要给所有路由加前缀、改静态资源的 base、改 SPA 的 router base，三处一起动。
   // `publicUrl` 已随 `/webui` 一次性登录链接接线（第五轮）。
   'webui.basePath',
-  // ACP 的两项**波 3 才有落点**，这一轮刻意不接：
-  // `maxTerminals` —— 这一轮 `ACP_CLIENT_CAPABILITIES` 不申报 `terminal`，七个 `terminal/*`
-  // 处理器一律抛 `methodNotFound`，所以**根本没有 terminal 可数**。给一个不存在的东西设上限，
-  // 读一次算一次就是假开关（同 `memory.autoApplyCompaction` 的道理）。波 3 接反向 terminal 时
-  // 它是那份实现的第一个读取点。
-  'agent.acp.maxTerminals',
-  // `progressIntervalMs` —— 呈现层（把 `session/update` 变成 Telegram 卡片）是波 3。这一轮
-  // `AcpUpdateSink` 只做有界聚合，一次 prompt 只在结束时交回一份结果，中间没有任何东西需要节流。
-  'agent.acp.progressIntervalMs',
+  // ACP 那两项（`agent.acp.maxTerminals` / `agent.acp.progressIntervalMs`）**已经摘掉**：
+  // 反向 `terminal/*` 与进度卡片这一轮都落地了，前者是 `AcpTerminals` 的句柄上界、后者是
+  // `AcpProgressCard` 的编辑节流。它们曾经在这张表里的理由是「根本没有 terminal 可数 / 没有在途
+  // 的东西需要节流」—— 那个前提没了，键就不该再挂在这里。
 ] as const;
 
 

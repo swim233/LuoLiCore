@@ -437,6 +437,115 @@ bot:  ⏳ 已接收，正在处理…                      [取消]        ← �
 - `/tasks`：列出本会话 `state='running'` 的任务（id、标题、已运行时长、进度）。`/cancel [id]`：无 id 时取消本人最近一个在途 turn。
 - 任务超时 `concurrency.turnTimeoutMs`（默认 10 分钟）→ 视为 cancelled，消息编辑为「⛔ 超时中止」。
 
+### 6.1 ACP 运行的进度卡片
+
+`spawn_acp`（[05 §3.5.1](./05-tools-and-permissions.md)）起一台外部编码 agent 之后，用户那边的观感是
+「几分钟一个字都没有，也不知道它动了哪些文件」：模型那条流正卡在等工具返回，而 agent 自己那
+82–263 条 `session/update`（实测：6 秒的琐碎任务 82–131 条，86 秒那次 263 条，其中
+`agent_thought_chunk` 40–89 条）全在进程里。**进度卡片把那些 update 折成屏幕上恒定的一条消息**
+—— `packages/telegram/src/acp-card.ts`，入口是 `TelegramToolBridge.openProgressCard`
+（没有 Telegram 入口时返回 `null`，ACP 照跑，只是没有卡片）。
+
+**一次 run = 一条消息**，这是不变量：只 `editMessageText`，不分片、不追发、不逐帧归档。
+它是 `TelegramOutput`（§5.2）的**兄弟而不是模式开关**：那 377 行整个建立在「文本单调追加」上
+（`lastRenderedLength` 差值判据、装不下就再发一条承接、`（生成中断）`后缀、逐段归档），而卡片是
+**快照重写** —— 计划项打勾、当前工具换掉、计数器加一，文本会**变短**。喂进 `consume()` 的坏法是
+确定的：`[...current].length - lastRenderedLength` 为负 ⇒ 永远不满 `minDeltaChars` ⇒ 一次都不编辑；
+偶尔涨过头 ⇒ 多发一条永远收不回的消息。所以卡片**复用原语不复用控制流**：`sendWithFallback` /
+`toPlainText` 那一跳的解析失败降级、`deliveryOrder` 的首帧串行、`TelegramDeliveryEvent`
+（`tg.send` / `tg.edit`，[10 §2](./10-logging-and-observability.md)）、以及「投递失败 ≠ 运行失败」。
+
+渲染规则，每条都写「不这么做会怎样」：
+
+1. **字符预算 `min(output.maxMessageChars, 3500)`，超预算按固定优先级整段丢**：思考行 → 已完成
+   计划项 → 变更文件明细（**保留那行计数**）→ 已完成工具的分项 → 正文尾 → …。**绝不切半行** ——
+   这是 [02 §9](./02-context-engine.md) 红线 11「不透明单元要么原样保留、要么整体换成占位」搬到
+   UI 上。表头、`⚠ 失败` 行、三个计数行**永不进丢弃梯**。判据量的是**渲染之后**的长度：转义能让
+   长度接近翻倍，而超长不是解析失败 —— `sendWithFallback` 兜不住它，Telegram 直接
+   `message is too long`。3500 比 `maxMessageChars` 的默认 3900 更紧，因为卡片没有「装不下就再发
+   一条」这条退路。
+2. **`plan` 整体替换**，渲染 `✓ / ▶ / ○` + `3/7` 计数。ACP 的 plan 语义就是每次带全量，合并会在
+   agent 改主意时留下永不消失的幽灵条目。`plan_update`（SDK 里仍标 UNSTABLE）只认 `items` 那一档
+   —— `file` / `markdown` 是要我们去读文件或渲染 markdown，两者都不该在卡片这一层做。
+3. **`tool_call` 只显示 `title` + kind 图标 + `locations[0]` 的路径**，一行。`title` 是 agent 自己
+   写的一句人读的话，正是「不知道它动了哪些文件」要的东西；`content` 与 `terminal` 一律不进卡片，
+   它们是成块内容，而卡片的预算是一条消息。路径按**尾部**收（`…/tools/builtins.ts` 认得出是哪个
+   文件，`/home/swim/code/Luo…` 认不出）—— 那是外部字段，长度不受我们控制。
+4. **失败粘性**：`tool_call_update → failed` 钉一条 `⚠ 失败 N 次 · 最近：…` 并在**后续每一帧**留着。
+   失败才是这一趟花了十五分钟的原因，只显示「当前在干什么」会把它冲掉。
+5. **diff 绝不进消息**，只显示 `± path +A −B`（`diffLines` 数行数，输入超 128 KiB 或编辑距离超界时
+   只显示路径）。两条硬理由：① 4096 上限，一份真实 diff 一条就顶满；② 终帧那份文本要被归档、
+   下一轮进模型上下文 —— 让外部 agent 生成的 diff 原文走这条路，等于给注入开一条**不经
+   `untrusted()`** 的门。
+6. **`agent_message_chunk` 不驱动刷新**：累积后只在没有 `in_progress` 工具时显示尾部约 120 字一行。
+   chunk 是按 token 来的，让它驱动刷新等于整个 run 顶在间隔下限上。
+7. **`agent_thought_chunk` 显示，但只一行、只在空闲时、可关（默认开）、永不累积、永不归档。**
+   一个还没出 plan、想了 90 秒的 agent，不显示思考就是一张冻住的卡片；而思考链是 agent 的内心戏
+   （同 [02](./02-context-engine.md) 对不透明 part 的口径）—— 显示给人看可以，钉进历史不行。
+   「永不累积」实现成**有界滚动窗口**并按 `messageId` 换段清空：一条 chunk 常常只有两三个字，
+   每条都整段替换的话屏幕上是个毫无意义的碎片。
+
+**刷新判据**：`dirty && now - lastEdit >= intervalMs`（默认 5000，下限焊在 1000 —— 私聊那个桶
+`{minTime: 1000}` 本来就一秒一拍，配得更小只会让编辑排队）。三种即时刷新绕过间隔：plan 被替换、
+某个 tool_call 变 `failed`、`close()`。前两种之间有 2 秒地板 —— 一个 200 次工具调用全失败的 agent
+否则能把它变成 200 次编辑，而两个关键事件隔不到 2 秒时第二次晚 3 秒显示没有任何损失。
+**渲染结果与上一帧逐字节相同就不发**，不靠 Telegram 回 `message is not modified` 兜：那一跳照样
+占掉一个槽位，还排在真正要发的东西前面。判据里**不含表头那个计时器** —— 时钟走了一秒不是新信息。
+
+**投递预算**（这条算术是上面那些数字的地基）：`@grammyjs/transformer-throttler` 按 `chat_id < 0`
+分流，群聊走 `group` 桶（`telegram.throttle.perChatPerMinute`，默认 20/分钟），**私聊走 `out` 桶，
+而 `bot.ts` 只给它 `{minTime: 1000}` —— 没有 per-minute reservoir**。而 ACP 是 owner + 仅私聊
+（`available()` 判 `turn.isPrivate`，[14 §2 Q8-a](./14-open-questions.md)），所以真实预算是
+**约 60 次/分钟、串行一秒一拍**。竞争者两个：主 agent 自己那条流（ACP 工具执行期间上游没有 chunk，
+它是静止的）；以及 typing —— **首条消息发出之前是 4 秒一拍 = 15/分钟**，之后才放宽到 15 秒一拍
+（§5.2），而「模型一上来就调 `spawn_acp`」正是首条消息还没发出的那一档。合计
+12（卡片）+ 15（typing）≈ 27/60，留一半余量。
+
+> ⚠ **这条算术依赖「ACP 仅私聊」。** 哪天放宽 Q8-a，§5.2 那个「储备被吃光后整整 14 秒零投递」的
+> 队尾饿死（[reviews/28](./reviews/28-round10-live-system-test.md) · L-TG-04）会原样复发，而卡片的
+> `editMessageText` 对 `TelegramOutput` 的 `bodyInFlight` / `lastBodyAt` **完全不可见**（那两个计数器
+> 是 per 实例 = per 轮次的）。要放宽就得先把「typing 给正文让路」那道判据做成跨实例的
+> per-chat 信标 —— 现在没有。
+
+两处容易写错的，都在收尾上：
+
+- **归档只在终帧一次。** `ScopedArchiveRepository.append` 是 `INSERT OR IGNORE`，首帧就归档等于把
+  「⏳ 正在启动…」永久钉进 `messages` 与 `messages_fts`。`close()` 交回的那份文本才是归档用的
+  （卡片只负责交回文本与 `messageId`，真的落库在调用方）。终帧不含思考行。
+- **取消要留终帧。** `/cancel` 与 `turnTimeoutMs` 时必须收到最后一次编辑（`⛔ 已取消 · 已改动 N
+  个文件`），照 [00](./00-state.md) 那条「`turnTimeoutMs` 是硬边界，但收尾那一条消息还是要发出去」
+  的既定取舍：屏幕上停着一张「现在 · ✏️ 改 …」的卡片而进程已经没了，用户没有任何办法判断它是
+  死了还是还在跑。所以 `close()` **永不 throw**，且中途 `push` 全部失败（限流、被拉黑）之后照样能
+  渲染出一帧 —— 首帧没发出去时它走 `sendMessage` 而不是 `editMessageText`。
+
+`push()` 里**任何异常都不冒出去**：它跑在收 `session/update` 那条路上，呈现层不许打断投递
+（同 `TelegramOutput.#emit` 对 `onDelivery` 的口径）。卡片正文**整体按纯文本转义**，不走
+`safeRender` 那棵 Markdown AST：卡片里每一个变量都是外部 agent 递过来的字符串，交给 Markdown
+解析器的话，一个标题里的 ` ``` ` 就能开一段围栏把整张卡片吞进去 —— 输出仍是合法的 MarkdownV2
+（`safeRender` 保证这一点），但卡片会变成一团代码块。代价只是卡片里没有粗体，而它不需要。
+
+一张跑到一半的卡片长这样（`parseMode: none`，转义前）：
+
+```
+🔧 omp · /home/swim/code/LuoLiCore · 1m12s
+计划 2/5
+  ✓ 读 acp-card.ts 与 stream-output.ts
+  ✓ 补 openProgressCard 与用例
+  ▶ 更新 docs/08 的新节
+  ○ 跑 typecheck 与 lint · ○ 贴一份真实渲染输出  … 还有 1 项
+现在 · ✏️ 给 TelegramTools 补 openProgressCard · packages/telegram/src/tools.ts
+改动 3 个文件
+  ± packages/telegram/src/tools.ts +44 −3
+  ± packages/telegram/src/index.ts +1
+  + tests/acp.card.test.ts +180
+⚠ 失败 1 次 · 最近：跑 pnpm lint
+工具 14 次
+  读 6 · 改 4 · 跑 3 · 搜 1
+```
+
+路径**去掉工作目录前缀**（目录已经在表头上，每行再重复一遍 `/home/swim/code/LuoLiCore/` 只是把
+本来就紧的预算花在同一段字上），目录**外**的路径原样保留 —— 那恰恰是最该看清的一种。
+
 ---
 
 ## 7. 多模态

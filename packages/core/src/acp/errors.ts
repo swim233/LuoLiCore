@@ -37,6 +37,11 @@ export const ACP_ERROR_HINTS = {
   acp_timeout: '超过 `agent.acp.agents[].timeoutMs` 还没跑完，已按协议发过 `session/cancel`。把任务拆小，或者让运维调大那一项（注意它不该大于 `concurrency.turnTimeoutMs`）。',
   acp_cancelled: '这一轮被取消了（用户 `/cancel`、或者 agent 自己报的 cancelled）。已经落地的文件改动**不会**回滚。',
   acp_cost_exceeded: '这次调用的累计花费撞上 `agent.acp.maxCostUsd`，已按协议发过 `session/cancel`。已经落地的文件改动不会回滚。要接着做就把任务拆小，或者让运维调高那一项。',
+  // 逐条审批（`permissionMode: ask`）的一条硬失败：结论有了，但 agent 给的 options 里没有一个能
+  // 表达它。**不回 `cancelled` 假装是取消** —— 那个词的协议含义是「client 取消了这一轮」，
+  // 把「人拒绝了」说成「用户取消了」会让 agent 记错这一轮到底发生了什么（前者该停、后者该等下一
+  // 条指令）。所以那条请求回一个 JSON-RPC error，再按协议取消整轮，然后落到这个码上。
+  acp_permission_unanswerable: 'agent 反过来问权限时给的选项里没有一个能表达我们的结论（通常是它一个「拒绝」档都没给），这一轮已按协议取消。这是那台 agent 的协议实现问题，别原样重试 —— 换 `agent.acp.permissionMode` 为 `deny` 能稳定拒掉它，或者去它的 issue 里报一句。',
   // 下面三条是 StopReason 的非正常档。它们不是本系统的失败，但也不是「做完了」——
   // 说成 ok:true 会让模型据此向用户宣布任务完成（"摘除比伪造安全"，docs/16 §5）。
   acp_max_tokens: 'agent 把自己的上下文窗口用满了就停了，任务大概只做了一半。把任务拆成几次，或者给它换一个窗口更大的模型（`agent.acp.agents[].model`）。',

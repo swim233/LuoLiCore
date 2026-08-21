@@ -4,7 +4,7 @@ import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { serve } from '@hono/node-server';
 import { ArchiveRepository, CustomToolRepository, OperationsRepository, PrincipalRepository, McpAuthRepository, SandboxContainerRepository, ScheduleRepository, TurnRepository, acquireInstanceLock, closeDatabase, migrateDatabase, modelAliasKey, openDatabase, readAppKv, readPersistedConfig, recomputeMessageTokens, recoverAfterCrash, writeAppKv } from '@luoli/db';
-import { AcpManager, AgentManager, AgentResultStore, AlertDispatcher, BUNDLED_SKILLS, ConfigStore, ContainerManager, CustomToolManager, mergeAgentDefinitions, scanAgentFiles, ContextEngine, DatabaseApprovalBroker, EventBus, FileTools, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, ModelRegistry, PathJail, PendingAuthorizations, PendingPrompts, PluginManager, selfAuthoringDenyGlobs, PromptAssembler, PromptDocuments, ProviderStore, PROVIDER_FAILURES_TO_DOWN, PROVIDER_PROBE_TIMEOUT_MS, QuotaGuard, repairAgentResultRefs, repairLedgerCacheCost, runProviderHealthCheck, Sandbox, ScheduledJobRunner, Scheduler, Secrets, SkillLoader, STABLE_PROMPT_BLOCKS, TOOL_POLICY, ToolRegistry, TurnConcurrency, TurnFailureStreak, TurnRegistry, UsageLedger, WebAssetStore, assembleMainPrompt, canSeeImages, captureImage, configJsonSchema, loadConfig, perChatConfig, registerAuthoringTools, registerBuiltins, registerCatalogTools, registerContainerTools, rejectedWakewords, runMainAgent, runSubAgent, streamMainAgent, type ContainerEvent, type SubAgentRuntimeEvent } from '@luoli/core';
+import { AcpManager, AcpRunRecorder, AgentManager, AgentResultStore, AlertDispatcher, BUNDLED_SKILLS, ConfigStore, ContainerManager, CustomToolManager, mergeAgentDefinitions, scanAgentFiles, ContextEngine, DatabaseApprovalBroker, EventBus, FileTools, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, ModelRegistry, PathJail, PendingAuthorizations, PendingPrompts, PluginManager, selfAuthoringDenyGlobs, PromptAssembler, PromptDocuments, ProviderStore, PROVIDER_FAILURES_TO_DOWN, PROVIDER_PROBE_TIMEOUT_MS, QuotaGuard, repairAgentResultRefs, repairLedgerCacheCost, runProviderHealthCheck, Sandbox, ScheduledJobRunner, Scheduler, Secrets, SkillLoader, STABLE_PROMPT_BLOCKS, TOOL_POLICY, ToolRegistry, TurnConcurrency, TurnFailureStreak, TurnRegistry, UsageLedger, WebAssetStore, assembleMainPrompt, canSeeImages, captureImage, configJsonSchema, loadConfig, perChatConfig, registerAuthoringTools, registerBuiltins, registerCatalogTools, registerContainerTools, rejectedWakewords, runMainAgent, runSubAgent, streamMainAgent, type ContainerEvent, type SubAgentRuntimeEvent } from '@luoli/core';
 import { createServer, EventStreamRegistry, issueLoginToken, setupToken, type PromptPreviewResult } from '@luoli/server';
 import type { RuntimeTurnContext } from '@luoli/shared';
 import { TelegramPromptChannel, TelegramTools, UpdatePoller, approvalSettledText, createTelegramBot, staleApprovalOutcome } from '@luoli/telegram';
@@ -192,9 +192,11 @@ const mcp = new McpManager(db, () => configStore.snapshot().mcp, log, undefined,
   { store: mcpAuth, pending: mcpPending, publicUrl: () => configStore.snapshot().webui.publicUrl });
 await mcp.reconcile();
 // M13 · ACP 客户端（`docs/04 §6.2`）。**不吃配置** —— 连接与会话都不缓存，`spawn_acp` 每次调用
-// 从本轮 `turn.config` 现读 `agent.acp` 交给它。所以这里只给它一个日志口，没有 getter。
+// 从本轮 `turn.config` 现读 `agent.acp` 交给它。所以这里只有日志口与记账口，没有 config getter。
 // `shutdown()` 里紧挨着 `await mcp.close()` 等它（见那一行）。
-const acp = new AcpManager(log);
+// 记账口落的是 `agent_runs` 上的一行：外部花费进 `external_cost_usd`（迁移 0014），`cost_usd`
+// 恒 0 —— 那个数不是我们的钱，**不进 `usage_ledger`、不进配额、不进用量页的聚合**（`acp/runs.ts`）。
+const acp = new AcpManager(log, new AcpRunRecorder(db));
 // `web_fetch` / MCP 抓回来的图片。落在 `media.dir` 之下 —— 跟着同一个目录走，`gcFiles()` 那道
 // 「库与目录来自两套部署」的 fail-closed 守卫才继续适用（docs/25 §10）。
 const webAssets = new WebAssetStore(db, config.media.dir, config.media.maxImageEdge);
@@ -424,6 +426,11 @@ registerBuiltins(toolRegistry, {
   // 没有投递通道时这三个工具整体不进目录：排一个到点发不出去的任务是纯粹的假承诺。
   schedule: { jobs: scheduledJobs, runner: scheduleRunner, deliverable: () => telegramTools !== null },
   acp,
+  // ACP 的逐条 permission 走同一条审批链（`docs/05 §3.5.3`）：同一张 `approvals` 表、同一套
+  // `approval.rules` / TTL / 双通道裁决。**默认档是 `auto`，这条链默认不生效** —— 运维把
+  // `permissionMode` 拨到 `ask` 才会用上它，而那时漏传它是一道真的门：没有 broker 时 `spawn_acp`
+  // 直接不进工具目录（不是「悄悄放行」）。
+  approvals: approval,
 });
 registerAuthoringTools(toolRegistry, { customTools, skills, plugins, reservedSkills: BUNDLED_SKILLS,
   mcp: { db, config: () => configStore.snapshot(), apply: (next, keys) => configStore.replace(next, keys), emit: (keys) => events.emit('config.changed', { keys }) } });

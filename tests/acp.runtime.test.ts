@@ -2,7 +2,8 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
 import { Readable } from 'node:stream';
 import { resolve } from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { ACP_ERROR_HINTS, AcpLineOverflowError, AcpManager, ACP_CLIENT_CAPABILITIES, acpChildEnv, acpStopReasonError, buildAcpArgv, clipToJsonBudget, configSchema, enabledAcpAgents, floorPermission, guardedByteStream, resolveAcpAgent, ToolRegistry, registerBuiltins, TOOL_POLICY, type AcpAgentSettings, type AcpSettings, type ToolExecutionContext } from '@luoli/core';
+import { closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
+import { ACP_APPROVAL_MODES, ACP_ERROR_HINTS, ACP_PERMISSION_MODES, AcpLineOverflowError, AcpManager, AcpRunRecorder, acpChildEnv, acpClientCapabilities, acpStopReasonError, buildAcpArgv, clipToJsonBudget, configSchema, enabledAcpAgents, floorPermission, guardedByteStream, resolveAcpAgent, ToolRegistry, registerBuiltins, TOOL_POLICY, type AcpAgentSettings, type AcpSettings, type ToolExecutionContext } from '@luoli/core';
 
 /**
  * M13 · ACP 客户端的运行时用例。**一律用 fixture，不碰真 `omp`** —— 用例必须离线且确定性。
@@ -71,6 +72,30 @@ beforeEach(() => {
 });
 
 describe('ACP · 纯函数与契约', () => {
+  it('两个默认值是「整趟交给它」：permissionMode=auto + approvalMode=yolo', () => {
+    /**
+     * **这两个默认值是一次安全取舍，被人顺手改回去时应该有东西报警。** 合起来的语义是
+     * `docs/14 §2 Q8-c` 原本那一条：起这台 agent 这一个动作整体走一次审批，批了之后它内部怎么跑
+     * 不再逐条拦。`approvalMode` 尤其不能退回 `write` —— 那一档下 `bash` 可证明用不了（实测 omp
+     * 17.4.0 把它问过来、我们从它自己给的 options 里挑 `allow_always` 回过去、它照旧记成
+     * `Tool call denied by user: bash`，`terminal/create` 一次都不发生）。
+     */
+    const acp = configSchema.parse({ access: { bootstrapOwnerId: '1' },
+      agent: { acp: { agents: [{ name: 'omp', command: 'omp' }] } } }).agent.acp;
+    expect(acp.permissionMode).toBe('auto');
+    expect(acp.agents[0]!.approvalMode).toBe('yolo');
+    // `bash` 留在默认 `tools` 里 —— 在上面那两个默认值下它真的能用（另一个必要条件是申报
+    // `terminal`，`acpClientCapabilities` 那一位由 `sandbox.plan` 判）。
+    expect(acp.agents[0]!.tools).toEqual(['read', 'write', 'edit', 'bash']);
+    // 逐条审批那台机器留着、完整、有用例（`acp.permission.test.ts`），**只是不在默认档上**。
+    // 三档都还在是这条断言的另一半：默认值换了不等于把别的档摘了。
+    expect([...ACP_PERMISSION_MODES]).toEqual(['ask', 'auto', 'deny']);
+    expect([...ACP_APPROVAL_MODES]).toEqual(['always-ask', 'write', 'yolo']);
+    // 整块仍然默认关（`enabled` + `allowedDirs` 双闸）—— 上面那两个默认值只在有人打开它之后才谈。
+    expect(acp.enabled).toBe(false);
+    expect(acp.allowedDirs).toEqual([]);
+  });
+
   it('argv：--approval-mode 无条件下发，--tools 空数组不下发，会话模式不上 argv', () => {
     const base: AcpAgentSettings = { name: 'a', enabled: true, command: 'omp', profile: 'telegram', approvalMode: 'write',
       tools: ['read', 'write', 'edit', 'bash'], model: '', mode: 'plan', extraArgs: ['--no-session'],
@@ -97,11 +122,15 @@ describe('ACP · 纯函数与契约', () => {
       agent: { acp: { agents: [{ name: 'a', command: 'omp', extraArgs: ['--no-session', '--thinking=low'] }] } } })).not.toThrow();
   });
 
-  it('本轮不申报 fs / terminal —— 协议里省略就等于 UNSUPPORTED', () => {
+  it('能力申报是算出来的，缺省不申报 —— 协议里省略就等于 UNSUPPORTED', () => {
     // 谎报一个我们不会答的 method 会让 agent 发出请求之后挂住，而它正握着一个半改完的文件。
-    expect(ACP_CLIENT_CAPABILITIES).toEqual({});
-    expect(ACP_CLIENT_CAPABILITIES.fs).toBeUndefined();
-    expect(ACP_CLIENT_CAPABILITIES.terminal).toBeUndefined();
+    // 所以两位都是「能力真的到位了才置」，而缺省（没有 host bridge / plan 不是 host）是空对象。
+    expect(acpClientCapabilities({ fs: false, terminal: false })).toEqual({});
+    expect(acpClientCapabilities({ fs: true, terminal: false })).toEqual({ fs: { readTextFile: true, writeTextFile: true } });
+    expect(acpClientCapabilities({ fs: true, terminal: true })).toEqual({ fs: { readTextFile: true, writeTextFile: true }, terminal: true });
+    // fs 没申报而 terminal 申报了不是一个我们会构造的组合，但它必须仍然是「只申报那一位」——
+    // 顺手把两位真的独立这件事钉住。
+    expect(acpClientCapabilities({ fs: false, terminal: true })).toEqual({ terminal: true });
   });
 
   it('StopReason 五档：只有 end_turn 算成功', () => {
@@ -178,16 +207,17 @@ describe('ACP · 纯函数与契约', () => {
     expect(resolveAcpAgent(two, 'nope')).toBeNull();
   });
 
-  it('permission 地板：deny 真拒、auto 放行、ask 本轮按放行且标记出来', () => {
+  it('不问人的那两档：auto 放行、deny 真拒，而落到地板上的 ask 按 deny 算', () => {
     const request = { sessionId: 's', toolCall: { toolCallId: 't' },
       options: [{ optionId: 'ok', name: 'Allow', kind: 'allow_once' as const }, { optionId: 'no', name: 'Reject', kind: 'reject_once' as const }] };
-    expect(floorPermission(request, 'auto')).toEqual({ response: { outcome: { outcome: 'selected', optionId: 'ok' } }, floored: false });
-    expect(floorPermission(request, 'deny')).toEqual({ response: { outcome: { outcome: 'selected', optionId: 'no' } }, floored: false });
-    // `ask` 这一档的真实行为在波 3。`floored: true` 是它每次记一条 warn 的依据 ——
-    // 「我配的是 ask 但它没问我」必须在日志里有一行。
-    expect(floorPermission(request, 'ask')).toEqual({ response: { outcome: { outcome: 'selected', optionId: 'ok' } }, floored: true });
-    // 一个 reject 档都没给时 `deny` 回 cancelled，**不翻成放行**。
-    expect(floorPermission({ ...request, options: [request.options[0]!] }, 'deny')).toEqual({ response: { outcome: { outcome: 'cancelled' } }, floored: false });
+    expect(floorPermission(request, 'auto')).toEqual({ outcome: { outcome: 'selected', optionId: 'ok' } });
+    expect(floorPermission(request, 'deny')).toEqual({ outcome: { outcome: 'selected', optionId: 'no' } });
+    // `ask` 真走到这个函数上只有一种可能：运行时没接审批通道，而 `available()` 本该已经把工具挡在
+    // 目录外。**答案是拒绝而不是放行** —— 一个叫 `ask` 的档实际在放行正是「伪造一道门」。
+    expect(floorPermission(request, 'ask')).toEqual({ outcome: { outcome: 'selected', optionId: 'no' } });
+    // 一个 reject 档都没给时回 cancelled，**不翻成放行**。
+    expect(floorPermission({ ...request, options: [request.options[0]!] }, 'deny')).toEqual({ outcome: { outcome: 'cancelled' } });
+    expect(floorPermission({ ...request, options: [request.options[0]!] }, 'ask')).toEqual({ outcome: { outcome: 'cancelled' } });
   });
 });
 
@@ -402,18 +432,19 @@ describe('ACP · 进程与连接生命周期', () => {
     const manager = new AcpManager(log);
     script({ ACP_PERMISSION: '1', ACP_SLEEP_MS: '50' });
     await run(manager, settings({ permissionMode: 'deny' }));
-    expect(methods().some((line) => line.includes('"optionId":"reject"'))).toBe(true);
+    expect(methods().some((line) => line.includes('"optionId":"reject_once"'))).toBe(true);
     rmSync(METHOD_LOG, { force: true });
     script({ ACP_PERMISSION: '1', ACP_SLEEP_MS: '50' });
     await run(manager, settings({ permissionMode: 'auto' }));
-    expect(methods().some((line) => line.includes('"optionId":"allow"'))).toBe(true);
+    expect(methods().some((line) => line.includes('"optionId":"allow_once"'))).toBe(true);
     expect(events.some((event) => event.kind === 'acp.permission' && event.level === 'info')).toBe(true);
     rmSync(METHOD_LOG, { force: true });
     events.length = 0;
     script({ ACP_PERMISSION: '1', ACP_SLEEP_MS: '50' });
     await run(manager, settings({ permissionMode: 'ask' }));
-    // `ask` 这一档本轮暂按放行，而它**必须留一行 warn** —— 否则「我配的是 ask 但它没问我」
-    // 在任何地方都看不出来。
+    // 没接 `hooks.permission` 的 `ask`：**按 deny 处理**（不是放行），并留一行 warn ——
+    // 生产里 `available()` 已经把工具挡在目录外了，走到这儿就说明有人绕过了那道门。
+    expect(methods().some((line) => line.includes('"optionId":"reject_once"'))).toBe(true);
     expect(events.some((event) => event.kind === 'acp.permission' && event.level === 'warn')).toBe(true);
     await manager.close();
   });
@@ -485,8 +516,10 @@ describe('ACP · 进程与连接生命周期', () => {
 });
 
 describe('ACP · spawn_acp 的三道门', () => {
+  /** 逐条审批的 broker。**只要在**就够 —— 这一节量的是准入，不是审批本身（那在 acp.permission.test.ts）。 */
+  const approvals = { requestExternal: async () => ({ approved: true }), recordDecided: () => undefined };
   const registry = new ToolRegistry(log, { request: async () => true }, { maxRegistered: 200, maxCallsPerTurn: 40, maxConsecutiveErrors: 3 });
-  registerBuiltins(registry, { log, acp: new AcpManager(log), telegram: null,
+  registerBuiltins(registry, { log, acp: new AcpManager(log), telegram: null, approvals,
     sandbox: { plan: () => ({ allowed: false }) }, schedule: { deliverable: () => false } } as never);
 
   const context = (config: unknown, role: string, isPrivate: boolean): ToolExecutionContext => ({
@@ -512,6 +545,27 @@ describe('ACP · spawn_acp 的三道门', () => {
     expect(registry.activeNames('owner', context(on({ agents: [{ name: 'x', command: 'y', enabled: false }] }), 'owner', true))).not.toContain('spawn_acp');
   });
 
+  /**
+   * `ask` 需要一条真的审批通道，接不上时**整个工具不进目录** —— 留着自动放行的话，一个叫 `ask`
+   * 的档实际在放行，那正是 `docs/reviews/16 §5` 说的伪造一道门。判据落在 `available()` 而不是
+   * `execute()`：模型不会去试一个必然被拒的调用。
+   *
+   * **`ask` 不是默认档**（默认 `auto`，`docs/14 §2 Q8-c`），所以这道闸只对主动配了它的部署生效
+   * —— 用例因此显式写出 `permissionMode: 'ask'`，而不是靠默认值把它带进来。
+   */
+  it('ask 档没有审批 broker 时不进目录，默认档 auto 与 deny 照旧进', () => {
+    const noBroker = new ToolRegistry(log, { request: async () => true }, { maxRegistered: 200, maxCallsPerTurn: 40, maxConsecutiveErrors: 3 });
+    registerBuiltins(noBroker, { log, acp: new AcpManager(log), telegram: null,
+      sandbox: { plan: () => ({ allowed: false }) }, schedule: { deliverable: () => false } } as never);
+    expect(noBroker.activeNames('owner', context(on({ permissionMode: 'ask' }), 'owner', true))).not.toContain('spawn_acp');
+    // 默认档（不给这个键）与 `deny` 都不需要 broker，所以缺一条审批通道拦不住它们。
+    for (const acp of [{}, { permissionMode: 'auto' }, { permissionMode: 'deny' }]) {
+      expect(noBroker.activeNames('owner', context(on(acp), 'owner', true))).toContain('spawn_acp');
+    }
+    // 有 broker 时 `ask` 照旧进 —— 缺席的是通道，不是这个档位本身。
+    expect(registry.activeNames('owner', context(on({ permissionMode: 'ask' }), 'owner', true))).toContain('spawn_acp');
+  });
+
   it('仅 owner、仅私聊', () => {
     const config = on({});
     expect(registry.activeNames('owner', context(config, 'owner', true))).toContain('spawn_acp');
@@ -533,7 +587,7 @@ describe('ACP · spawn_acp 的三道门', () => {
     // spawn 日志：拒了之后那份日志必须一行都没有（`available()` 与 `admit()` 都放行了，
     // 挡住它的只能是审批）。
     const denied = new ToolRegistry(log, { request: async () => false }, { maxRegistered: 200, maxCallsPerTurn: 40, maxConsecutiveErrors: 3 });
-    registerBuiltins(denied, { log, acp: new AcpManager(log), telegram: null,
+    registerBuiltins(denied, { log, acp: new AcpManager(log), telegram: null, approvals,
       sandbox: { plan: () => ({ allowed: false }) }, schedule: { deliverable: () => false } } as never);
     const ctx = context(on({}), 'owner', true);
     expect(denied.activeNames('owner', ctx)).toContain('spawn_acp');
@@ -554,5 +608,103 @@ describe('ACP · spawn_acp 的三道门', () => {
     expect(Object.keys((two as unknown as { shape: object }).shape).sort()).toEqual(['agent', 'dir', 'task']);
     expect(two.safeParse({ task: 'x'.repeat(20), dir: WORK, agent: 'nope' }).success).toBe(false);
     expect(two.safeParse({ task: 'x'.repeat(20), dir: WORK, agent: 'b' }).success).toBe(true);
+  });
+});
+
+/**
+ * 外部花费落库（迁移 `0014`）。**这里量的不是「记了多少」，而是「它没跑进哪儿」** ——
+ * 那个数不是我们的钱：外部 agent 自己那份 provider 账单的累计值，口径由它定、我们无法核对、
+ * 也没有 tokens × prices 可以重算。真库跑（照本仓的规矩，不引 mock 层）。
+ */
+describe('ACP · 外部花费落库，但不进任何计价口径', () => {
+  const DB_PATH = resolve('data/acp-runs.test.db');
+  const TURN = 'turn-acp-external-1';
+  const fresh = () => {
+    for (const suffix of ['', '-wal', '-shm']) rmSync(`${DB_PATH}${suffix}`, { force: true });
+    const db = openDatabase(DB_PATH);
+    migrateDatabase(db);
+    // 本轮的主 run 先在：ACP 那一行要挂在它之下（那次调用发生在主 agent 的一次工具调用里）。
+    db.prepare(`INSERT INTO agent_runs(id,turn_id,depth,kind,agent_name,model_alias,effective_role,state,started_at)
+      VALUES ('main-1',?,0,'main','main','fast','owner','running',?)`).run(TURN, Date.now());
+    return db;
+  };
+
+  it('花费进 external_cost_usd，cost_usd 恒 0，usage_ledger / quota_counters 零新增', async () => {
+    const db = fresh();
+    script({ ACP_TEXT: '改好了', ACP_TOOL_CALL: '1', ACP_COST: '0.42', ACP_COST_STEPS: '0.11,0.42' });
+    const manager = new AcpManager(log, new AcpRunRecorder(db));
+    const result = await run(manager, settings(), '把 probe.txt 里的 hello 改成 HELLO', { trace: { traceId: TURN } });
+    expect(result).toMatchObject({ ok: true, costUsd: 0.42 });
+    const row = db.prepare("SELECT * FROM agent_runs WHERE turn_id=? AND kind='sub'").get(TURN) as Record<string, unknown>;
+    // 累计值取见过的最大的那个（0.11 之后又来了 0.42），而它落的是**这一列**。
+    expect(row.external_cost_usd).toBe(0.42);
+    /**
+     * **这一条是整块的判据**：`cost_usd` 恒 0，于是外部数字结构上进不了任何 `SUM(cost_usd)`。
+     * 断言写成全表求和而不是只看这一行 —— 「有人哪天把它挪回 cost_usd」正是要挡的形态。
+     */
+    expect(db.prepare('SELECT COALESCE(SUM(cost_usd),0) AS value FROM agent_runs').pluck().get()).toBe(0);
+    expect(row.cost_usd).toBe(0);
+    // 行的身份：`kind='sub'`（`CHECK` 只有两档，迁移是附加式的、一个 CHECK 都没碰）+ 两个能把它
+    // 从本系统自己的子 agent 里认出来的字段。
+    expect(row.agent_name).toBe('acp:fixture');
+    expect(row.model_alias).toBe('external');
+    expect(row.parent_run_id).toBe('main-1');
+    expect(row.depth).toBe(1);
+    expect(row.state).toBe('done');
+    expect(row.input_tokens).toBe(0);
+    expect(row.output_tokens).toBe(0);
+    // 用量是自描述的：读的人第一眼要看出这些数字的出处不是本系统。
+    expect(JSON.parse(row.external_usage_json as string)).toMatchObject({ source: 'acp', agent: 'fixture', costUsd: 0.42, toolCalls: 1 });
+    /**
+     * **三张与计价有关的表一行都不许新增。** `usage_ledger` 的行有 provider 身份（`provider_id` /
+     * `model_id` 必填、用量页按它分桶），塞一条 `provider_id='omp'` 等于凭空造一个我们不拥有的
+     * provider；`quota_counters` 的分母是本系统的 key，掺进外部花费之后那个比例看起来权威、实际
+     * 无意义；`turns.cost_usd` 同理（这个用例连 turn 行都没建，所以顺带证明它一个字都没写）。
+     */
+    expect(db.prepare('SELECT COUNT(*) AS value FROM usage_ledger').pluck().get()).toBe(0);
+    expect(db.prepare('SELECT COUNT(*) AS value FROM quota_counters').pluck().get()).toBe(0);
+    expect(db.prepare('SELECT COUNT(*) AS value FROM turns').pluck().get()).toBe(0);
+    // 日志与库里那一行之间唯一的接缝。
+    const line = events.find((event) => event.kind === 'acp.run')!;
+    expect((line.data as { runId: string }).runId).toBe(row.id);
+    await manager.close();
+    closeDatabase(db);
+  });
+
+  it('它一次 usage_update 都没报 → external_cost_usd 是 NULL，不是 0', async () => {
+    const db = fresh();
+    // 「没报过」与「报了 0」是两件事，所以那一列可空而不是 default 0 —— 写 0 会让一次没有账单
+    // 的调用看起来像一次免费的调用。
+    script({ ACP_TEXT: '看了看，没动手' });
+    const manager = new AcpManager(log, new AcpRunRecorder(db));
+    expect(await run(manager, settings(), '看一眼 probe.txt 里写了什么', { trace: { traceId: TURN } })).toMatchObject({ ok: true });
+    const row = db.prepare("SELECT external_cost_usd AS cost, cost_usd AS ours FROM agent_runs WHERE turn_id=? AND kind='sub'").get(TURN) as { cost: number | null; ours: number };
+    expect(row.cost).toBeNull();
+    expect(row.ours).toBe(0);
+    await manager.close();
+    closeDatabase(db);
+  });
+
+  it('没有 traceId 就不落行 —— 挂不上 turn 的 trace 行没有读法', async () => {
+    const db = fresh();
+    script({ ACP_TEXT: 'ok', ACP_COST: '0.01' });
+    const manager = new AcpManager(log, new AcpRunRecorder(db));
+    expect(await run(manager, settings())).toMatchObject({ ok: true });
+    expect(db.prepare("SELECT COUNT(*) AS value FROM agent_runs WHERE kind='sub'").pluck().get()).toBe(0);
+    await manager.close();
+    closeDatabase(db);
+  });
+
+  it('记账失败不改变调用的结果 —— 只多一条 warn', async () => {
+    const db = fresh();
+    script({ ACP_TEXT: 'ok', ACP_COST: '0.01' });
+    // 一次成功的 ACP 调用已经把仓库改完了。让它因为写库失败而报 ok:false，模型会以为什么都
+    // 没发生 —— 那比丢掉一行记账坏得多。
+    const manager = new AcpManager(log, { record: () => { throw new Error('disk full'); } });
+    expect(await run(manager, settings(), '把 probe.txt 里的 hello 改成 HELLO', { trace: { traceId: TURN } })).toMatchObject({ ok: true });
+    expect(events.some((event) => event.kind === 'acp.run' && event.level === 'warn'
+      && typeof (event.data as { recordFailed?: string }).recordFailed === 'string')).toBe(true);
+    await manager.close();
+    closeDatabase(db);
   });
 });

@@ -15,6 +15,15 @@
 // - `ACP_FINISH_ANYWAY`：收到过 cancel 但活其实已经干完了 —— 竞态的另一半。
 // - `ACP_LEAK_FD`：留一个继承 stdout/stderr 的孙进程，逼客户端的关停梯露出它有没有绝对上界。
 // - `ACP_STDERR_LINES` / `ACP_REJECT_CONFIG=long`：把结果对象的固定字段撑到最紧，量「按构造有界」。
+// - `ACP_CAPS`：initialize 时把收到的 `clientCapabilities` 原样记进 method log（`caps:{…}`）——
+//   「不是 host 就不申报 terminal」这条断言只有它证明得了：申报值是客户端算出来的，从外面看不见。
+// - `ACP_PERMISSION_OPTIONS`：逗号分隔的 option kind（默认 `allow_once,reject_once`）。写成只有
+//   `allow_once` 就造出「一个 reject 档都没给」那一档，客户端必须回 error 而不是假 cancelled。
+// - `ACP_PERMISSION_COUNT` / `ACP_PERMISSION_KIND` / `ACP_PERMISSION_PATHS`：问几次、报什么 kind、
+//   带哪些 locations（逗号分隔的绝对路径）—— always 那一档要两次同目录的请求才量得到。
+// - `ACP_TERMINAL` (+ `_ARGS` / `_CWD` / `_NO_RELEASE` / `_KILL` / `_NO_WAIT`)：prompt 期间真起一个
+//   终端，走 create → wait_for_exit → output（→ release），结果逐条进 method log。`_NO_WAIT` 是
+//   「起了就不管了」那一档 —— 客户端收摊时那条命令**还在跑**，也就是三道 release 兜底真正要挡的形态。
 import { appendFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 
@@ -48,6 +57,8 @@ async function handle(method, params, id) {
   if (env.ACP_DELAY_AT === method && env.ACP_DELAY_MS) await sleep(Number(env.ACP_DELAY_MS));
   switch (method) {
     case 'initialize': {
+      // 申报值是客户端**算出来的**，从外面唯一看得见的地方就是这里收到的这份。
+      if (env.ACP_CAPS === '1') note(`caps:${JSON.stringify(params.clientCapabilities ?? null)}`);
       if (env.ACP_LONG_LINE === '1') process.stdout.write(`{"jsonrpc":"2.0","method":"noop","params":{"pad":"${'x'.repeat(Number(env.ACP_LONG_LINE_BYTES ?? 200_000))}"}}\n`);
       return reply(id, { protocolVersion: Number(env.ACP_PROTOCOL_VERSION ?? 1),
         agentInfo: { name: 'acp-fixture', version: '0.0.1' },
@@ -82,12 +93,47 @@ async function handle(method, params, id) {
         }
       }
       if (env.ACP_PERMISSION === '1') {
-        const answer = await request('session/request_permission', { sessionId: SESSION, toolCall: { toolCallId: 'tc-p', kind: 'execute', title: 'run pwd' },
-          options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }, { optionId: 'reject', name: 'Reject', kind: 'reject_once' }] });
-        note(`permission:${JSON.stringify(answer?.outcome ?? null)}`);
+        // option 集合可脚本化：只给 allow 就造出「拒绝表达不出来」那一档，而那一档客户端必须回
+        // 一个 JSON-RPC error + 取消整轮，**不能**回一句 cancelled 假装是用户取消的。
+        const kinds = (env.ACP_PERMISSION_OPTIONS ?? 'allow_once,reject_once').split(',').filter(Boolean);
+        const options = kinds.map((kind) => ({ optionId: kind, name: kind, kind }));
+        const locations = (env.ACP_PERMISSION_PATHS ?? '').split(',').filter(Boolean).map((path) => ({ path }));
+        for (let index = 0; index < Number(env.ACP_PERMISSION_COUNT ?? 1); index += 1) {
+          const answer = await request('session/request_permission', { sessionId: SESSION,
+            // toolCallId 带 pid：真 agent 每次调用都是新 id，而用例要靠它区分「always 那份会话内记忆」
+            // 与 `approval.rememberWithinTurn`（按 turnId + input 记，跨调用同轮仍然命中）。
+            toolCall: { toolCallId: `tc-${process.pid}-${index}`, kind: env.ACP_PERMISSION_KIND ?? 'execute', title: 'run pwd', ...(locations.length ? { locations } : {}) },
+            options });
+          // 成功与失败分开记：`permission_error:` 那一行是「客户端拒绝作答」的唯一凭据。
+          if (answer.error) note(`permission_error:${JSON.stringify(answer.error.code)}`);
+          else note(`permission:${JSON.stringify(answer.result?.outcome ?? null)}`);
+        }
+      }
+      if (env.ACP_TERMINAL) {
+        const created = await request('terminal/create', { sessionId: SESSION, command: env.ACP_TERMINAL,
+          args: (env.ACP_TERMINAL_ARGS ?? '').split(',').filter(Boolean),
+          ...(env.ACP_TERMINAL_CWD ? { cwd: env.ACP_TERMINAL_CWD } : {}) });
+        if (created.error) note(`terminal_error:${JSON.stringify(created.error.code)}`);
+        else {
+          const terminalId = created.result.terminalId;
+          note(`terminal_created:${terminalId}`);
+          if (env.ACP_TERMINAL_KILL === '1') await request('terminal/kill', { sessionId: SESSION, terminalId });
+          // 「起了就不管了」：客户端收摊时那条命令还在跑。等它退出反而会让硬期限先把它收掉，
+          // 于是这一档就再也量不到「有命令活到了我们收摊的时候」。
+          if (env.ACP_TERMINAL_NO_WAIT === '1') return reply(id, { stopReason: env.ACP_STOP_REASON ?? 'end_turn' });
+          const exited = await request('terminal/wait_for_exit', { sessionId: SESSION, terminalId });
+          note(`terminal_exit:${JSON.stringify(exited.result ?? exited.error ?? null)}`);
+          const out = await request('terminal/output', { sessionId: SESSION, terminalId });
+          note(`terminal_output:${JSON.stringify(out.result ?? out.error ?? null)}`);
+          // 不 release 那一档是刻意的：客户端的兜底回收必须替我们收拾，并留一条看得见的凭据。
+          if (env.ACP_TERMINAL_NO_RELEASE !== '1') await request('terminal/release', { sessionId: SESSION, terminalId });
+        }
       }
       if (env.ACP_SLEEP_MS) await sleep(Number(env.ACP_SLEEP_MS));
       if (env.ACP_NEVER_STOP === '1' && !cancelled) return;
+      // `session/cancel` 可能已经替这条 prompt 答过了（它就是这么做的）。再答一次的表现是客户端
+      // 一句 `Got response to unknown request` —— 无害，但那是 fixture 不守规矩，不该留在噪声里。
+      if (pending !== id) return;
       pending = null;
       // `ACP_FINISH_ANYWAY`：收到过 cancel 但活其实已经干完了 —— 竞态的另一半，agent 如实答
       // `end_turn`。客户端在这一档仍然不能报成功（文件已经被改，而这一轮本该是取消的）。
@@ -107,6 +153,8 @@ async function handle(method, params, id) {
 
 let nextId = 1;
 const waiting = new Map();
+// 交回 `{ result, error }` 而不是裸 result：客户端**拒绝作答**（回一个 JSON-RPC error）是这一轮要量
+// 的一整档行为，而 `message.result ?? null` 把它和「答了个 null」压成了同一件事。
 const request = (method, params) => new Promise((resolve) => { const id = `f${nextId++}`; waiting.set(id, resolve); send({ jsonrpc: '2.0', id, method, params }); });
 
 let buffer = '';
@@ -122,7 +170,7 @@ process.stdin.on('data', (chunk) => {
     try { message = JSON.parse(line); } catch { continue; }
     if (message.method) { void handle(message.method, message.params ?? {}, message.id); continue; }
     const resolve = waiting.get(message.id);
-    if (resolve) { waiting.delete(message.id); resolve(message.result ?? null); }
+    if (resolve) { waiting.delete(message.id); resolve({ result: message.result ?? null, error: message.error ?? null }); }
   }
 });
 // `ACP_HANG_AT` 那一档必须扛住 stdin 结束：客户端的关停梯是 `stdin.end → SIGTERM → 5s → SIGKILL`，
