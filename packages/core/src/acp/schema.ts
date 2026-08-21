@@ -13,16 +13,30 @@ import { z } from 'zod';
  */
 
 /**
- * omp 的 `--approval-mode`：agent **内部**哪些工具自动放行。
+ * omp 的 `--approval-mode`：agent **内部**哪些工具自动放行。三档都留着，默认 `yolo`。
  *
- * 默认 `write`（写操作及以下自动放行、exec 要问）。**不用 `always-ask`** —— 实测它有可复现的
- * edit 故障：文件没被改、`fs/write_text_file` 一次都没走，而 agent 自己认为改完了。
+ * **默认 `yolo` 是因为另两档下 `bash` 可证明用不了**，不是因为「反正批过一次了」：实测 omp 17.4.0
+ * 在 `write` 下会把 `bash` 问过来（`session/request_permission`，kind `execute`，四个档一个不少），
+ * 我们从**它自己给的** options 里挑一个 `allow_always` 回过去，它照旧把那次调用记成
+ * `Tool call denied by user: bash` —— `terminal/create` 一次都不发生。换 `yolo` 之后同一条命令
+ * 立刻走通（`terminals: 1`，跑的是我们的终端）。留一个可证明用不了的工具在默认值里，模型会试、
+ * 失败、然后绕路或编一个理由（「摘除比伪造安全」，`docs/16 §5`）。
+ *
+ * **`always-ask` 更不能当默认**：它有可复现的 edit 故障 —— 文件没被改、`fs/write_text_file`
+ * 一次都没走，而 agent 自己认为改完了。
+ *
+ * 代价说清楚：`yolo` 等于关掉 agent 内部全部自动放行判据。挡住它的仍然是三道门那一套
+ * （owner + 仅私聊 + 目录白名单，`docs/05 §3.5.1`），而**想逐条拦就把 `permissionMode` 拨到 `ask`**。
  */
 export const ACP_APPROVAL_MODES = ['always-ask', 'write', 'yolo'] as const;
 export type AcpApprovalMode = (typeof ACP_APPROVAL_MODES)[number];
 /**
  * agent 真的问过来时（`session/request_permission`）**我们**怎么回。与上面那个是两件事：
  * 那个是 agent 内部的自动放行档位，这个是本系统侧的门。
+ *
+ * 默认 `auto` = `docs/14 §2 Q8-c` 原本的语义：起这台 agent 这一个动作整体走一次审批，批了之后
+ * 它内部怎么跑不再逐条拦。`ask`（逐条问真人）整条链是实的、有用例，但**默认不生效** ——
+ * 「机制存在」与「默认生效」是两件事，别把前者写成后者。
  */
 export const ACP_PERMISSION_MODES = ['ask', 'auto', 'deny'] as const;
 export type AcpPermissionMode = (typeof ACP_PERMISSION_MODES)[number];
@@ -61,21 +75,23 @@ export const acpAgentSchema = z.object({
   command: z.string().min(1),
   /** `--profile=`：omp 的隔离档（凭据 / 会话 / 设置 / 缓存各一份）。空 = 不加这个 flag。 */
   profile: z.string().default(''),
-  approvalMode: z.enum(ACP_APPROVAL_MODES).default('write'),
+  approvalMode: z.enum(ACP_APPROVAL_MODES).default('yolo'),
   /**
    * `--tools=`：**这套东西唯一接近「真咽喉点」的手段**。omp 有 31 个内建工具，只有 4 个
    * （read / write / edit / bash）走 ACP，剩下 27 个里 `ast_edit`（不经 `fs/write_text_file`
    * 的写路径）、`eval`（常驻 Python/JS）、`computer`（宿主桌面控制）都是绕过路径。
    * 空数组 = 不加这个 flag（= 全开），所以默认值是显式的。
    *
-   * **`bash` 不在默认值里，因为它现在可证明用不了**：`ACP_CLIENT_CAPABILITIES` 不申报
-   * `terminal`，而实测在那种情况下 omp 的 `bash` 连权限批了都还是 `Tool call denied by user: bash`
-   * （`read`/`write`/`edit` 会退回自己直接动磁盘，所以那三个照常能用）。一个可证明用不了的工具
-   * 写在默认值里，模型会试、失败、然后绕路或编一个理由 —— 「摘除比伪造安全」（`docs/16 §5`）。
-   * **`bash` 与 terminal capability 同生共死**：哪一轮申报了 `terminal` 并实现了那七个处理器，
-   * 就在同一个改动里把它加回来。
+   * **`bash` 在默认值里，而它真的能用要两个条件同时成立。** ① 申报 `terminal`（七个 `terminal/*`
+   * 处理器 + `acpClientCapabilities`，这一轮实了）；② `approvalMode: 'yolo'`（默认），否则 agent
+   * **自己内部**那道审批会拒掉它 —— 那是本轮实测纠正的归因，见 `ACP_APPROVAL_MODES` 那段。
+   *
+   * ⚠️ 反过来那一半仍然成立：`sandbox.plan(role, root).mode !== 'host'` 时 `terminal` **不申报**，
+   * 于是这一格里的 `bash` 又变成一个用不了的工具。`AcpManager.#surface` 在那种组合下往
+   * `acp.run` 里落一条点名 `bash` 的 warn —— 因为「配置里写着它、运行时它没用」这件事没有别的地方
+   * 说得出口（「摘除比伪造安全」，`docs/16 §5`）。
    */
-  tools: z.array(z.string().min(1)).default(['read', 'write', 'edit']),
+  tools: z.array(z.string().min(1)).default(['read', 'write', 'edit', 'bash']),
   /** `--model=`。空 = 用 profile 默认（实测全局 flag 对 `acp` 子命令有效）。 */
   model: z.string().default(''),
   mode: z.enum(ACP_SESSION_MODES).default(''),
@@ -102,7 +118,8 @@ export const acpSchema = z.object({
   allowedDirs: z.array(z.string()).default([]),
   /** 多 agent 部署时模型不给 `agent` 参数时用哪个。空 = 用第一个启用的。 */
   defaultAgent: z.string().default(''),
-  permissionMode: z.enum(ACP_PERMISSION_MODES).default('ask'),
+  /** 默认 `auto`：整趟交给它，一次审批管到底。逐条拦是 `ask`，见 `ACP_PERMISSION_MODES` 那段。 */
+  permissionMode: z.enum(ACP_PERMISSION_MODES).default('auto'),
   /**
    * 一次 prompt 最多收多少条 `session/update`。撞上界后**只丢弃、不断连** —— 这里刻意与
    * `collectProcess` 的「输出超限就地 SIGKILL」分岔：那边溢出源是我们杀得掉的字节流，这边
@@ -110,7 +127,13 @@ export const acpSchema = z.object({
    * 量级参考：6 秒的琐碎任务 82–104 条，86 秒那次 263 条。
    */
   maxUpdatesPerPrompt: z.number().int().positive().default(2000),
+  /**
+   * 同时存在的 `terminal/*` 句柄上界，**含已退出但还没 release 的** —— 那正是逼 agent 把用完的
+   * 句柄还回来的那道压力。数的是活着的句柄而不是历史总数：规矩的 agent 永远撞不到它。
+   * 撞上界时 `terminal/create` 回一个说得清下一步的 `invalidParams`，而不是排队或静默复用。
+   */
   maxTerminals: z.number().int().positive().default(8),
+  /** Telegram 进度卡片两次编辑之间的最小间隔（`AcpProgressCard`）。群里那个 20/分钟 的桶是真的。 */
   progressIntervalMs: z.number().int().positive().default(5000),
   /**
    * 一次调用的花费上界（USD，0 = 不限）。**这是 ACP agent 花费的唯一闸门** —— 它烧的是自己那份

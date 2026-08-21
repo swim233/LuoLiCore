@@ -274,14 +274,19 @@ Harness 抽象。所以这不是「接一个 SDK 类」，而是**起一个外�
 
 ---
 
-## M13 · ACP 客户端（波 2）
+## M13 · ACP 客户端（波 2 + 波 3）
 
 和 [14 §2 Q8](./14-open-questions.md) / M11 是同一条路，只是这次不走 argv 而走协议：`spawn_acp` 起一台
 **本机已经装好**的编码 agent（对着 `omp` = oh-my-pi 17.4.0 实测的：自包含 ELF，`omp acp` 自述
 「Run Oh My Pi as an ACP server over stdio」），用 `@agentclientprotocol/sdk`（1.3.0，零运行时依赖）
-在 stdio 上以 JSON-RPC 驱动它。波 2 交的是**连接 + 进程生命周期 + 一次 prompt**；**呈现层、逐条审批、
-反向终端归波 3** —— 它们的接口契约（`AcpClientHooks.onUpdate` / `requestPermission`、
-`ACP_CLIENT_CAPABILITIES`）在波 2 就钉住了，好让三个 agent 并行往里填。
+在 stdio 上以 JSON-RPC 驱动它。波 2 交的是**连接 + 进程生命周期 + 一次 prompt**，波 3 把余下那三块
+填完了：呈现层成了一张 Telegram 进度卡片（`TelegramToolBridge.openProgressCard?()`，**可选方法、
+presence 即开关** —— 拿不到就照旧跑，只是屏幕上没有中途的动静；归档只在终帧发生一次），逐条审批
+成了 `acpPermissionGate` → 同一张 `approvals` 表（[05 §3.5.3](./05-tools-and-permissions.md)），反向
+调用面成了七个真处理器（`fs/*` 两个 + `terminal/*` 五个，[05 §3.5.2](./05-tools-and-permissions.md)）。
+三块的接口契约（`AcpClientHooks.onUpdate` / `permission`、`ACP_CLIENT_CAPABILITIES`）在波 2 就钉住了，
+好让三个 agent 并行往里填 —— **那笔押注收回来了**：三块各改各的文件、谁也没去动对方的，而那个空常量
+本身就是「契约先钉、实现后填」留下的桩，波 3 把它换成了 `acpClientCapabilities({ fs, terminal })`。
 
 ⚠️ **SDK 既不管子进程、也不做 `initialize`**，两件事都是我们的账。这和 MCP 那边正好相反：那边
 `StdioClientTransport` 起进程、但**不 `unref`**。我们**刻意也不 unref** —— unref 是把「进程退不出去」
@@ -294,17 +299,31 @@ Harness 抽象。所以这不是「接一个 SDK 类」，而是**起一个外�
 `session/update` 灌进一个**无界**异步队列，而喂它的是我们不信任其输出量的子进程 —— 263 条 update
 只是一个 86 秒的任务。
 
-⚠️ **这一轮不申报 `fs`、也不申报 `terminal`。** 协议明文规定字段省略 == UNSUPPORTED，谎报一个我们
-不会答的 method 会让 agent 挂在半个写操作上。实测代价：omp 退回自己直接碰磁盘，于是
-`read`/`write`/`edit` 照样能用（验证过：文件真的改了），但它的 `bash` **执行不了** —— 权限问过、
-也批了，调用仍以 `Tool call denied by user: bash` 失败。波 3 的 terminal handler 与
-`ACP_CLIENT_CAPABILITIES` **必须同一个提交**落地。
+⚠️ **申报与实现落在同一个提交里** —— 这是波 3 的排期硬约束，不是巧合。协议明文规定字段省略 ==
+UNSUPPORTED，所以「先申报、后实现」的那个中间态里，agent 每发一次 `fs/read_text_file` 都是一次挂死，
+而它此刻正握着一个写了一半的文件；反过来（实现好了还没申报）只是白写几天。代价不对称，排期就照这个
+方向定的。
+
+⚠️ **能力按本次调用现算，fail-closed 落在申报那一刻。** `fs` 要有一个建得起来的 jail
+（root = `realpathSync(dir)`），`terminal` 还要额外过 `sandbox.plan(role, root).mode === 'host'`；
+拿不到就**不申报**，而不是申报了让 agent 每次 create 都撞一个它没法据此改变行为的错（它会反复试，
+每次失败都自己编一段解释）。降级理由逐条进 `acp.run` 的 `data.degraded`，并把那一行抬成 warn
+（[10 §2](./10-logging-and-observability.md)）。
+
+**`bash` 因此回到了默认的 `agents[].tools`**（`['read','write','edit','bash']`）：它与 `terminal`
+capability 同生共死，而 capability 这一轮真的申报出去了。上一轮把它摘掉是实测出来的 —— 不申报
+`terminal` 时 omp 退回自己直接碰磁盘，于是 `read`/`write`/`edit` 照样能用（验证过：文件真的改了），
+但它的 `bash` **执行不了**，权限问过、也批了，调用仍以 `Tool call denied by user: bash` 失败。
+⚠ 反向仍然成立：`sandbox.plan` 不是 `'host'` 时 `terminal` 不申报，配置里那个 `bash` 就成了一个可证明
+用不了的工具，manager 会在那条 `acp.run` warn 里点名它。
 
 **先读 [14](./14-open-questions.md) §2 Q8（Q8-a/b/c）与 T17，以及 [05 §3.5](./05-tools-and-permissions.md)。**
 三道门就是 M11 那三道，而且它们就是全部的门。
 
 **做什么**
-- `packages/core/src/acp/` 五个文件，切法有讲究：`schema.ts`（配置 zod + 运行时契约，**不 import 任何
+- `packages/core/src/acp/` 八个文件（波 2 那五个，加波 3 的 `fs.ts` / `terminals.ts` / `permission.ts`
+  —— 三块反向能力各一个文件，正是「三个 agent 并行填」那笔押注的形状），切法有讲究：`schema.ts`
+  （配置 zod + 运行时契约，**不 import 任何
   SDK 运行时** —— `config/schema.ts` 要 import 它，而后者被 `scripts/config-schema.ts` 与 WebUI 吃进去）、
   `errors.ts`（错误码联合 + hint 文案，**一处定义**，manager / session / 工具壳三处共用 —— 散成三份会
   慢慢漂，而 [05 §3.5](./05-tools-and-permissions.md) 是它们的文档来源）、`process.ts`（spawn、argv、
@@ -329,6 +348,46 @@ Harness 抽象。所以这不是「接一个 SDK 类」，而是**起一个外�
   没有任何人点头。所以本版不做追问，也没有 `acp_follow_up`。
 - 取消**走协议**：`session/cancel` → 等 `stopReason: 'cancelled'` → 才收进程。三条取消源（用户 abort /
   `timeoutMs` / `maxCostUsd`）都走这条路。
+- 反向 fs（`acp/fs.ts`）：`fs/read_text_file` 走 `FileTools.readText` 而**不是** `read()` —— 后者无条件
+  给正文加 `行号<TAB>` 前缀（那是给我们自己的模型当 `edit_file` 坐标用的），而 ACP 的写是**全量覆盖**，
+  于是「读出来改两行再写回去」会把整个文件换成一份带行号的垃圾。`fs/write_text_file` 走
+  `FileTools.write`，顺带买到三样：`maxWriteBytes` 闸、覆盖前备份、tmp + rename 原子落地 —— 最后一样
+  最实在，agent 写到一半被 `/cancel` 掐断时目标文件要么是旧的要么是新的，不会是半个。
+- **jail 每次调用新建，root = `realpathSync(dir)`，而那个字面量同时是 `session/new` 的 `cwd` 与子进程
+  的 cwd**：路径中间有一段软链时，agent 自己解析出来的绝对路径与 jail 边界会是两套字面量，于是每一次
+  `fs/*` 都是一次越界拒绝。**刻意不复用 `dependencies.filesFor(workspace, role)`** —— 那份的 root 是
+  `data/workspace/<chatId>`（[14](./14-open-questions.md) Q8-b 明说不复用），而且
+  `tools.fs.allowHostFsForOwner` 一开它的 root 就成了 `/`：「批准一个目录」不能因为一个全局开关变成
+  「批准整台机器」。`tools.fs.denyGlobs` 与自撰写通道那两条一起带上（一台外部 agent 更没有理由能改
+  已启用的 plugin）。`allowedDirs` 白名单**在 realpath 上再判一遍，且两侧都解析** —— 只解目标那一侧
+  的话，`/home` 本身是软链的部署会把一份能用的配置判成越界。
+- 反向终端（`acp/terminals.ts`）：宿主直跑、cwd = 会话 root、argv 原样传（`shell: false`，参数永远不会
+  被拼进命令串）、`detached: true` + `process.kill(-pid)` 杀**整个进程组**（不 detached 的话
+  `child.kill()` 只杀最外层那一个，`make -j8` 留下八个孤儿）、硬期限取 `tools.exec.maxTimeoutMs`
+  （到点杀进程组，不是「不再等」）、句柄数上界取 `agent.acp.maxTerminals`（**含已退出但还没 release
+  的**，那正是逼 agent release 的那道压力）。**输出超限从头部丢、保尾部** —— 协议明文如此，而这与本仓
+  `elideMiddleBytes`（留头留尾、省略中间）**刻意分岔**：那个的消费者是我们自己的模型，读的是一次
+  `bash` 的完整回执（头有命令回显、尾有报错，中间才是可丢的）；这一份的消费者是那台 agent，它自己
+  知道发了什么命令，要的是「最后发生了什么」。
+- **没申报的那一位，对应处理器照旧抛 `methodNotFound`。** 不守规矩的 agent 该拿到一个干净的错，
+  而不是一个永远不回的请求。
+- 终端的 release 有**三道兜底**：`abortSignal`（用户 `/cancel`）、工具返回路径上的 `finally`、进程关停
+  时的 `close()`。少了第一道，一次被取消的调用会留下一条在宿主上接着跑的命令，而没有任何人还在等它的
+  输出。漏 release 的条数进 `acp.run` 的 `terminalsLeaked` 并把那一行抬成 warn。
+- 逐条审批（`acp/permission.ts`）：`tool_name` 恒为字面量 `acp_permission`（不按 kind 拆，见
+  [03 §2.11](./03-data-model.md)），风险由 `toolCall.kind` 推、**不认识的 kind 一律 medium 不猜低**、
+  jail 之外或撞 `denyGlobs` 一律抬到 high。`allow_always` / `reject_always` **只记在这一次调用的闭包
+  里**，绝不落成 `approval.rules` —— 那张表的 pattern 走 RE2 且 ≤128 字符，更要紧的是它会进
+  `config_revisions` 与配置导出，一次点击就成了一条**永久全局**授权，而按下去的人以为自己只放过了
+  眼前这一步；命中时照旧落一条 `decided_by='acp:always'` 的审计行。agent 给的 options 里一个能表达
+  我们结论的档都没有时，回一个 JSON-RPC error + 立刻 `session/cancel`，落到
+  `acp_permission_unanswerable` —— **不回 `{outcome:'cancelled'}` 糊过去**：那个词在协议里的意思是
+  「client 取消了这一轮」，把「人拒绝了」说成「用户取消了」会让 agent 记错这一轮到底发生了什么
+  （前者该停、后者该等下一条指令）。
+- `agent.acp.maxTerminals` 与 `agent.acp.progressIntervalMs` 随这一轮接线，两条都从
+  `KNOWN_UNIMPLEMENTED_CONFIG_KEYS` 里摘掉了。进度卡片的渲染选项从**本轮** `turn.config` 取
+  （`output.parseMode` / `output.maxMessageChars` 都在 `PER_CHAT_OVERRIDE_ALLOWLIST` 里，读全局快照
+  就是把会话级覆盖静默丢掉）。
 
 **出口条件**
 - 默认配置（`enabled: false`、`allowedDirs: []`）下工具**不进模型的工具目录**，但仍然注册着
@@ -339,6 +398,19 @@ Harness 抽象。所以这不是「接一个 SDK 类」，而是**起一个外�
 - 同一个目录上的两个并发调用串行执行；第二个的等待有界且可取消。
 - 取消一轮，线上出现的是一条 `session/cancel`，不是一个裸 SIGTERM。
 - StopReason 的四个非正常档一个都不报成功（最危险的是 `max_tokens`：它长得最像成功，而活只干了一半）。
+- `sandbox.plan(role, root)` 不是 `'host'`（例如运维把 owner 从 `sandbox.bypassRoles` 里拿掉）时，
+  `initialize` 里**没有** `terminal` 这一位，五个 `terminal/*` 抛 `methodNotFound`，而那次 `acp.run`
+  是 warn 且 `degraded` 里点了名 —— 配置里配着 `bash` 时连它一起点名。
+- 软链目录下跑一趟：互斥键、jail 的 root、`session/new` 的 `cwd`、子进程 cwd 是同一个字面量，
+  `fs/*` 不会因为路径写法不同被判越界；而软链解开之后落在 `allowedDirs` 之外的那种，拒。
+- `permissionMode: 'ask'` 而运行时没接审批 broker 时工具**不进目录**；真走到地板上的 `ask`
+  按 **deny** 处理并落一条 warn（一个叫 `ask` 的档实际在放行，正是
+  [16 §5](./reviews/16-remediation-plan.md) 说的伪造一道门）。
+- 一次被取消的调用之后，宿主上没有还在跑的命令（三道 release 兜底任一生效就够）。
+- 进度卡片拿不到（没有 Telegram 入口 / 这个会话开不出来）时调用照旧跑完；`close` 抛不出来，
+  一次改文案不会把一次正在改仓库的调用变成失败。
+- **记账这一轮没有动**：`agent_runs` 仍然没有外部花费列，`usage_ledger` 里一分钱都没有，唯一的闸
+  仍是 `agent.acp.maxCostUsd`（[04 §6.2](./04-agents-and-providers.md)）。
 
 ---
 

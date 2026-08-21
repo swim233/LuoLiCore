@@ -73,8 +73,9 @@ export const TOOL_POLICY = {
   spawn_harness: { minRole: 'owner', approval: 'always', scope: 'global', source: 'agent' },
   // M13 · 同一件事换成协议（ACP）而不是 argv：起一台本机编码 agent 改宿主上的仓库。
   // 档位与 `spawn_harness` **逐字相同**，而且必须相同 —— 两者的风险面是同一个（`docs/14` T17），
-  // 差别只在「它的内部动作我们看得见多少」，而看得见不等于拦得住：`session/request_permission`
-  // 这一轮还是地板（自动放行），真审批是波 3。给它一个更松的档等于用可观测性换权限。
+  // 差别只在「它的内部动作我们看得见多少」，而看得见不等于拦得住 —— `session/request_permission`
+  // 现在真的接到审批链上了（`docs/05 §3.5.3`），而那**不是**放松这一档的理由：它只看得见 agent
+  // 选择问过来的那些动作，`ast_edit` / `eval` / `computer` 压根不经这条链。用可观测性换权限是错的方向。
   spawn_acp: { minRole: 'owner', approval: 'always', scope: 'global', source: 'agent' },
   // M12 · 自我扩展（docs/07 §6）。八条全部 `owner`，理由同 `spawn_harness`：`resolveEffectiveRole`
   // 会把不受信群里的 owner 压平，所以这一档实际含义是「owner 且在 owner 信任的会话里」。

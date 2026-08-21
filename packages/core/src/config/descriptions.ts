@@ -120,12 +120,12 @@ export const CONFIG_DESCRIPTIONS: Record<string, string> = {
   'agent.acp.enabled': '总开关。关着的时候 spawn_acp 连模型的工具目录都不进。它与下面的 allowedDirs 任一为空/假，整个功能就是关的。',
   'agent.acp.allowedDirs': 'ACP agent 允许进入的仓库路径白名单，语义与 harness 那份完全一样。**留空 = 整个功能关闭**。两个并发轮次不会在同一个目录上各起一个 agent（按 realpath 硬互斥，等待有上界）。',
   'agent.acp.defaultAgent': '模型没指定用哪台 agent 时用这一台（填名字）。留空就用下面列表里第一台启用的。只配了一台时这一项没有意义。',
-  'agent.acp.permissionMode': 'agent 反过来问「这一步准不准」时怎么回：auto 放行、deny 拒绝、ask 交给真人确认。ask 档的真人通道还没接，当前等同 auto 并每次记一条警告。',
+  'agent.acp.permissionMode': 'agent 反过来问「这一步准不准」时怎么回：**默认 auto = 直接放行**（起它那一次已经走过审批，批一次就是批这一趟），deny 一律拒绝，ask 逐条问真人（走审批页 / Telegram 按钮，与工具审批同一条链）。逐条审批的机器是实的、随时可用，但**要你自己拨到 ask 才生效**。三档的代价不一样，看每一档旁边那句。',
   'agent.acp.maxUpdatesPerPrompt': '一次任务最多接收多少条进度更新。撞上界之后只丢弃后续更新、**不中断 agent** —— 它正在改真实文件，为了我们装不下而把它掐死是更坏的选择。',
-  'agent.acp.maxTerminals': '🚧 未接线：一次任务里允许 agent 同时开多少个终端。当前这一版不向 agent 申报终端能力（它会自己直接执行命令），所以没有终端可数。',
-  'agent.acp.progressIntervalMs': '🚧 未接线：把 agent 的进度刷成聊天里那张卡片的最小间隔。当前这一版只在任务结束时交回一份结果，中途没有东西需要节流。',
+  'agent.acp.maxTerminals': '一次任务里允许 agent 同时开多少个终端（含已经跑完但它还没释放的那些 —— 那正是逼它释放的压力）。撞上界时下一次开终端会被拒，并附一句让它先释放用完的。',
+  'agent.acp.progressIntervalMs': '把 agent 的进度刷成聊天里那张卡片的最小间隔。**小于 1000 会被卡片按 1000 处理**（发送侧本来就有 1 秒的最小间隔，填 200 只是让每条进度都排一次队）。调大了卡片看起来像卡住了。',
   'agent.acp.maxCostUsd': '单次任务的花费上限（美元，0 = 不限）。**这是唯一管得住 ACP 花费的地方** —— agent 烧的是它自己那份 provider 凭据，本项目的配额和用量账单都看不见它。撞线时按协议取消，已经改掉的文件不会回滚。',
-  'agent.acp.agents': 'ACP agent 定义数组：名字、可执行名、profile、审批档、允许的工具、模型、会话模式、超时。审批档与工具清单是独立的键而不是自由参数 —— 塞进自由参数就能被一行配置静默去掉，而那两项是权限门。',
+  'agent.acp.agents': 'ACP agent 定义数组：名字、可执行名、profile、审批档、允许的工具、模型、会话模式、超时。审批档与工具清单是独立的键而不是自由参数 —— 塞进自由参数就能被一行配置静默去掉，而那两项是权限门。approvalMode **默认 yolo**（agent 内部不自己拦）：另两档下实测 bash 可证明用不了，而 always-ask 还有可复现的 edit 故障。',
   'agent.agentsDir': '子 agent 的 markdown 定义目录（agents/<名字>.md）。文件是只读来源，下面「子 Agent」页里的同名定义会覆盖它。改了 .md 之后要动一次配置或重启才会重扫。',
   'agent.askEscalateToUser': '🚧 未接线：仲裁答不上来时把问题转给真人，需要一条「发选项—等人点—回灌」的阻塞式通道，目前没有。打开它只会在仲裁失败时多记一条日志。',
   'agent.progressThrottleMs': '子 agent 向上回报进度的最小间隔（毫秒）。',
@@ -390,12 +390,12 @@ export const CONFIG_ENUM_NOTES: Record<string, Record<string, string>> = {
     edited_business_message: '无处理器 · Business 账号里的编辑',
     deleted_business_messages: '无处理器 · Business 账号里的删除',
   },
-  // 三个取值里有一个的真实行为还没到，而它恰好是默认值 —— 这正是逐值注解存在的理由：
-  // 一句 `description` 装不下「其中一档暂时等同另一档」，不写又等于让运维选一个「选了不算」的档。
+  // 三档的**代价**各不相同，而一句 `description` 装不下三条 —— 这正是逐值注解存在的理由。
+  // `ask` 曾经在这里挂着 🚧（那条通道没接到这里，实际等同 auto）；现在它是真的了，只是**不再是默认档**。
   'agent.acp.permissionMode': {
-    ask: '🚧 交给真人确认 —— 而那条通道（发选项 / 等人点 / 回灌）还没接到这里，所以**当前等同 auto**，只是每次多记一条警告日志',
-    auto: '直接放行。语义上诚实的一档：起这个 agent 本身已经过了一次审批，批准一次就等于批准它这一趟在那个目录里做的全部事情',
-    deny: '一律拒绝。注意它挡不住 agent 自己直接做的事 —— 只挡它反过来问我们的那些（配了 approvalMode: write 时通常就是执行命令这一类）',
+    ask: '交给真人确认：每一步走 approvals 表 + Telegram 按钮 / WebUI 审批页（与工具审批同一条链、同一套 approval.rules 与 TTL）。**不是默认档 —— 要你自己选它**。选了它会拦住 agent 的每一步，所以一次多文件改动可能要点很多次；agent 给了「以后都这样」那一档时，会话内对同一个 (kind, 目录) 记住答案（不跨调用、不落成 approval.rules），但审计行照旧一条一条落。⚠ 它只拦得住 agent **选择问过来**的那些动作，不是第四道门',
+    auto: '**默认**。直接放行 —— 语义上诚实的一档：起这个 agent 本身已经过了一次审批，批准一次就等于批准它这一趟在那个目录里做的全部事情。这一趟里它改了什么你**看得见**（进度卡片逐条渲染 tool_call），但看得见不等于拦得住',
+    deny: '一律拒绝。注意它挡不住 agent 自己直接做的事 —— 只挡它反过来问我们的那些；而默认的 approvalMode: yolo 下它几乎什么都不问，所以这一档在默认组合里近乎无声（要真的不给某个能力，用 agents[].tools 摘掉它）',
   },
   'tools.web.searchProvider': {
     '': '不配 = web_search 根本不进模型的工具目录',

@@ -326,17 +326,20 @@ bash: tool({
 | 审批 | `approval: 'always'` —— 起这台 agent 这一个动作走一次审批 | `TOOL_POLICY` |
 
 **为什么档位不能更松。** 相比 harness，ACP 这条路我们**看得见**它内部做了什么（`session/update`
-一路报过来：思考、工具调用、用量），而看得见不等于拦得住 —— `session/request_permission` 这一轮
-还是地板（自动放行，见下），真审批是波 3。给它一个更松的档等于**用可观测性换权限**，而 T17 那条
-取舍一个字没变：批准一次 = 批准它这一趟在那个目录里做的全部事情。
+一路报过来：思考、工具调用、用量，进度卡片就在逐条渲染），而看得见不等于拦得住 ——
+**`agent.acp.permissionMode` 的默认档是 `auto`，也就是地板（自动放行）**。逐条审批的整条链是实的、
+有用例、随时可用（§3.5.3），但**默认不生效**：要它就把那个键拨到 `ask`。给这三道门一个更松的档
+等于**用可观测性换权限**，而 T17 那条取舍一个字没变：批准一次 = 批准它这一趟在那个目录里做的
+全部事情。在默认档下这句话是字面真理，不是修辞。
 
 另外三道门之外的两处收窄，都在配置里而不是在这套闸上（[11](./11-config-reference.md) 的
 `agent.acp`）：`agents[].tools` 是唯一接近「真咽喉点」的手段（omp 有 31 个内建工具，只有 4 个走
 ACP；剩下 27 个里 `ast_edit`、`eval`、`computer` 都是绕过路径），`agents[].approvalMode` 决定
-agent 内部哪些工具自动放行。**这两项是一等配置键、且无条件下发成 flag** —— agent 自己的 profile
-里可能写着 `approvalMode: yolo`，不显式盖过就是静默失去权限门；而运维在界面上往自由参数里填一行
-同样能静默去掉它。`extraArgs` 里重写一份我们管着的 flag 会被 schema 当场拒收（400）：哪一份生效
-取决于对方的参数解析顺序，而其中两个是权限门。
+agent 内部哪些工具自动放行（**默认 `yolo` = 它内部一概不自拦**，理由见下面 `bash` 那段）。
+**这两项是一等配置键、且无条件下发成 flag** —— 这一档由本系统的配置说了算，不由磁盘上那份
+profile 说了算（那里面可能写着别的值），而运维在界面上往自由参数里填一行也不该能改掉它。
+`extraArgs` 里重写一份我们管着的 flag 会被 schema 当场拒收（400）：哪一份生效取决于对方的参数
+解析顺序，而其中两个是权限门 —— 把 `approvalMode` 拨回 `write` 的运维需要它真的生效。
 
 **会话不落库、连接不缓存。** 作用域 = 一次工具调用：一次调用 spawn 一次，`finally` 里
 `session/close`（best-effort、短超时）。理由**不是**「落库会引入进程内状态假设」——
@@ -384,25 +387,39 @@ agent 内部哪些工具自动放行。**这两项是一等配置键、且无条
 计数进结果的 `updatesDropped`。这里刻意与 `collectProcess` 分岔 —— 那边溢出源是我们杀得掉的
 字节流，这边 agent 正在改真实文件，为了我们的 transcript 装不下而把它掐死是更坏的选择。
 
-**⚠️ 本轮不申报 `fs` 与 `terminal` 能力，而这有一个实测代价。** 协议明文：能力字段省略 ==
-UNSUPPORTED；谎报一个我们不会答的 method 会让 agent 发出请求之后挂住，而它正握着一个半改完的
-文件。所以 `ACP_CLIENT_CAPABILITIES` 这一轮是空的，七个 `fs/*` `terminal/*` 处理器一律抛
-`methodNotFound`（不守规矩的 agent 应该拿到一个干净的错，而不是一个挂住的请求）。实测后果：
-omp 的 `read` / `write` / `edit` **照旧能用**（它退回自己直接读写磁盘，文件真的被改了），
-而它的 `bash` **执行不了** —— permission 问过、我们放行了，调用照样以
-`Tool call denied by user: bash` 失败。**所以 `bash` 不在默认 `tools` 里** —— 一个可证明用不了的
-工具写在默认值里，模型会试、失败、然后绕路或编一个理由（§「摘除比伪造安全」的同一条判据）。
-`bash` 与 `terminal` capability **同生共死**：哪一轮申报了 `terminal` 并实现了那七个处理器，就在
-同一个改动里把它加回默认值。反向 fs / terminal 与真审批都是后续，届时
-`ACP_CLIENT_CAPABILITIES` 与那几个处理器**必须同一个提交**落地。
+**客户端能力**（`fs` / `terminal`）**按本次调用现算，而「省略」是一个承诺**。协议明文：能力字段
+省略 == UNSUPPORTED；谎报一个我们不会答的 method 会让 agent 发出请求之后挂住，而它此刻正握着一个
+写了一半的文件。所以 `acpClientCapabilities({ fs, terminal })` 的两位都是**能力真的建出来了才置**：
+`fs` 要有一个建得起来的 jail，`terminal` 还要额外过 `sandbox.plan(role, root).mode === 'host'`。
+建不出来就不申报，理由进那条 `acp.run`（并把它抬成 warn）—— 而不是申报了让 agent 每次 create 都撞
+一个错，它会反复试，每次失败都换来一段它自己编的解释。没申报的那些处理器照旧抛 `methodNotFound`：
+不守规矩的 agent 应该拿到一个干净的错，而不是一个挂住的请求。反向 fs 与 terminal 的形状见 §3.5.2，
+逐条审批见 §3.5.3。
 
-**`session/request_permission` 这一轮是地板，它看着像一个洞，因为它就是。**
-`agent.acp.permissionMode` 三档里 `deny`（选第一个 reject 档；一个都没给就按协议回 cancelled，
-**不因为对方没提供选项就翻成放行**）与 `auto`（选 allow）是真接上的；默认的 `ask` 本轮**暂按
-放行**并每次记一条 `acp.permission` warn —— 那条 warn 是「我配的是 ask 但它没问我」唯一的凭据。
-不 fail-closed 到拒绝的理由与 T17 同一条：三道门已经在「起不起这台 agent」那一层拦过了，在没有
-真审批通道的这一轮把每次 permission 都拒掉，得到的是一个能读不能写的半残 agent，而门的位置一点
-没变。波 3 接真审批时走 `AcpClientHooks.requestPermission` → `PendingPrompts`（§6.1）。
+**`bash` 在默认 `tools` 里，而让它真能跑命令要两个条件 —— 出厂默认两个都满足。**
+
+第一个条件是申报 `terminal`，这一轮做到了。**⚠️ 但它是必要条件而不是充分条件** —— 这是本轮实测
+纠正的一条判断（上一轮把「不申报 terminal」当成了 `bash` 跑不了的**原因**，那只是当时同时成立的
+另一件事）。omp 17.4.0 的实际行为是：`agents[].approvalMode` 不是 `yolo` 时它把 `bash` 问过来
+（`session/request_permission`，kind `execute`，四个档一个不少），我们从**它自己给的** options 里挑一个
+`allow_always` 回过去，它照旧把那次调用记成 `Tool call denied by user: bash` —— 而 `terminal/create`
+一次都没有发生。换成 `approvalMode: yolo` 之后同一条命令立刻走通，跑的是我们的终端。
+**卡住它的是 agent 自己内部那道审批，不是能力申报、也不是我们的回答。**
+
+第二个条件因此是 `approvalMode: yolo`，而**它现在就是默认值**（需求方拍板：整趟交给它）。
+把默认值定在这一档不是「反正批过一次了」，而是另两档下 `bash` **可证明用不了**：留一个用不了的
+工具在默认 `tools` 里，模型会试、失败、然后绕路或编一个理由（「摘除比伪造安全」，`docs/16 §5`）。
+`always-ask` 更不能当默认 —— 它另有一个可复现的 edit 故障：文件没被改、`fs/write_text_file` 一次
+都没走，而 agent 自己认为改完了。三档都留着。
+
+**代价要说清：`yolo` 等于关掉 agent 内部全部自动放行判据。** 站在它与仓库之间的是三道门那一套
+（owner + 仅私聊 + 目录白名单）加上 `agents[].tools` 的收窄，**不是**它内部那道审批。想逐条拦就把
+`agent.acp.permissionMode` 拨到 `ask`（§3.5.3）—— 那条链是实的，只是不在默认档上。
+`acp.run` 那条点名 `bash` 的 warn 因此只在运维**主动**把 `approvalMode` 拨回 `write` /
+`always-ask` 而又留着 `bash` 时出现，也就是「界面上配了、运行时用不了」那个形态。
+
+⚠ 另一半也仍然成立：`sandbox.plan` 不是 `'host'` 时 `terminal` 根本不申报，那一档 `bash` 连必要条件
+都不满足。两种情形下 `acp.run` 都被抬成 warn 并说清是哪一种（同一条判据）。
 
 **会话模式（`agents[].mode`）只能走 `session/set_config_option`，不能上 argv。** omp 的
 `--mode` 是输出格式（text / json / rpc / rpc-ui），下发过去会把 stdio 上的 JSON-RPC 本身弄坏。
@@ -435,6 +452,7 @@ omp 的 `read` / `write` / `edit` **照旧能用**（它退回自己直接读写
 | `acp_timeout` | 到 `agents[].timeoutMs`，已发过 `session/cancel` | 与 `acp_cancelled` 分开报：两者的下一步不一样 |
 | `acp_cancelled` | 用户 `/cancel`，或 agent 自己报 `cancelled` | 已落地的文件改动**不回滚**，hint 要说出来 |
 | `acp_cost_exceeded` | 累计花费撞 `agent.acp.maxCostUsd`，已发过 `session/cancel` | 同上 |
+| `acp_permission_unanswerable` | 逐条审批有了结论，而 agent 给的 `options` 里没有一个能表达它（通常是它一个 reject 档都没给）| 回一个 JSON-RPC error + 立刻 `session/cancel`。**不回 `{outcome:'cancelled'}` 假装是取消** —— 那个词的协议含义是「client 取消了这一轮」，把「人拒绝了」说成「用户取消了」会让 agent 记错这一轮到底发生了什么（前者该停、后者该等下一条指令）|
 | `acp_max_tokens` · `acp_max_turn_requests` · `acp_refusal` | StopReason 的三个非正常档 | 见下 |
 
 **StopReason 五档里只有 `end_turn` 算成功。** 另外四档都是「停下来了，但不是因为做完了」：
@@ -442,10 +460,126 @@ omp 的 `read` / `write` / `edit` **照旧能用**（它退回自己直接读写
 `refusal` 是对方不干，`cancelled` 是我们或它取消了。把它们并进 `ok: true`，模型会拿着一份做了
 一半的改动向用户宣布完成（「摘除比伪造安全」，`docs/16 §5`）。
 
-**日志**：一次调用一条 `acp.run`（info/warn，带 agent / dir / stopReason / 计数 / costUsd / ms），
-stderr 逐行 `acp.stderr`，子进程自己死记 `acp.disconnect`，每次 permission 记 `acp.permission`
-（`ask` 档那一次是 warn）。**agent 内部干了什么不在 `acp.run` 里** —— 那是波 3 呈现层的事，
-而权限层面它一个字都不改（T17）。
+**日志**：一次调用一条 `acp.run`（info/warn，带 agent / dir / stopReason / 计数 / capabilities /
+degraded / filesWritten / terminals / terminalsLeaked / costUsd / ms），stderr 逐行 `acp.stderr`，
+子进程自己死记 `acp.disconnect`，每次 permission 记 `acp.permission`（拒绝那一次是 warn）。
+**那两件只在异常路径上出现的事没有自己的 kind**，它们进 `acp.run` 的 `data` 并把那一行抬成 warn：
+「能力没申报出去」（`degraded` 带人话理由）与「agent 漏了 release」（`terminalsLeaked`）—— 各开一个
+kind 就是往 [10 §2](./10-logging-and-observability.md) 那张被双向焊住的表里加两个只在出事时出现的
+枚举值。**agent 内部干了什么仍然不在 `acp.run` 里**：那是进度卡片的事（§3.5.2），而权限层面它一个字
+都不改（T17）。
+
+#### 3.5.2 反向 fs 与反向终端（M13）
+
+agent 反过来调我们的七个 method。**能力申报与这七个处理器必须落在同一个提交里**（§3.5.1 那段），
+先申报后实现的中间态里，每一次 `fs/read_text_file` 都是一次挂死。
+
+**边界是一个新建的 `PathJail`，root = `realpathSync(dir)`，而同一个字面量也是 `session/new` 的
+`cwd` 与子进程的 cwd。** 三处必须是同一个字面量：`resolveHarnessDir` 只做 `resolve()`，路径中间有
+一段软链时 agent 自己解析出来的绝对路径与 jail 的边界会是两套写法，于是每一次 `fs/*` 都被判越界。
+`allowedDirs` 因此也在 realpath 上再判一遍（**两侧都解析** —— 只解析目标那一侧的话，`/home` 本身是
+软链的部署会把一份能用的配置判成越界）。`tools.fs.denyGlobs` 与自撰写通道那两条一并生效。
+
+⚠ **不复用 `dependencies.filesFor(workspace, role)`**（[14 §2](./14-open-questions.md) Q8-b 明说不
+复用）：那份的 root 是 `data/workspace/<chatId>`，而且 `tools.fs.allowHostFsForOwner` 一开它就是 `/`
+—— ACP 这条路的边界必须是**这次被批准的那个仓库目录**，跟着一个全局开关走等于把「批准一个目录」
+变成「批准整台机器」。
+
+**读走 `FileTools.readText()` 而不是 `read()`。** 后者无条件给正文加 `行号<TAB>` 前缀 —— 那对我们的
+模型是对的（是 `edit_file` 的对照坐标），但 ACP 的写是**全量覆盖**：agent 读出来改两行再写回去，就把
+整个文件换成一份带行号的垃圾。`readText` 的正文逐字节等于磁盘，而且**超预算与非 UTF-8 都
+fail-closed**：截断过的、U+FFFD 替换过的正文写回去都是一次静默毁坏，而 `ReadTextFileResponse` 里
+只有 `content` 一个字段，没有任何地方说得出「这只是一段」。分窗读（`line` + `limit`）合法，截断不合法。
+参数**拒收而不纠正**：`{limit: 0}` 纠正成「全读」会把一次分窗读悄悄变成全文读，而 NaN 纠正出来的
+空正文交给一个全量覆盖的写端就是清空文件。
+
+**写走 `FileTools.write()`**，于是免费拿到三样：`maxWriteBytes` 闸、覆盖前备份、tmp + rename 原子
+落地。最实在的是最后一样 —— agent 写到一半被 `/cancel` 掐断时，目标文件要么是旧的要么是新的，不会
+是半个。⚠ **备份落在目标仓库里**（`<root>/.luoli-bak/`，目录名跟 `tools.fs.backupDir` 走），也就是说
+它会出现在那个仓库的 `git status` 里；搬到仓库外就得另建一套「哪个备份属于哪个仓库」的账，一次
+`.gitignore` 换一整套映射不值得。⚠ **ACP 没有 delete / move 方法**，所以 `FileTools` 的回收站在这条
+链上永远不会被用到 —— agent 删文件走的是它自己的进程（我们看不见），把回收站算进这条路的收益是自欺。
+
+**终端是宿主直跑**，cwd = 会话 root。ACP 这条路是 owner + 仅私聊，而 `sandbox.bypassRoles: ['owner']`
+下 `plan('owner')` 本来就回 `'host'`；更根本的是今天的 `spawn_harness` 就是宿主起 CLI、它自己 fork 的
+shell 一样在宿主上跑 —— 宿主直跑不是退步，是与既有那条路持平。**排除掉的另两个方案写在这里，别让
+下一个人重新试一遍**：① 为 ACP 新起一个把仓库挂进去的容器 = 收益幻觉（仓库必须 `:rw` 挂进去，容器
+里的 `rm -rf` 照样毁得掉它，而 agent 自己那三个内建工具仍在宿主上碰磁盘，于是「命令在容器里、文件
+改在宿主上」，工具链与 `node_modules` 还各一份）；② 复用会话持久容器（`ContainerManager.prepareExec`）
+= **明确错误**，它挂进去的是 `data/workspace/<chatId>`，仓库根本不在那底下 —— 命令会在一个空目录里
+跑、`git status` 报 not a repository，而模型会把这句话当成「仓库坏了」。那个方法的签名看着正好合用，
+所以这个坑要点名。
+
+fail-closed 落在**申报**那一刻：`create` 之前先问 `sandbox.plan(role, root)`，不是 `'host'` 就整个
+capability 不申报 + 一条 warn，而不是申报了每次 create 都失败。终端这一侧另外五件事：
+
+- **argv 直传，不过 shell。** ACP 给的是 command + args 数组，比 `bash` 工具那个字符串命令严格更安全；
+  把它拼回 `sh -c "…"` 等于自己造一个引号注入面（一个带空格的文件名就够）。
+- **`detached: true` + `process.kill(-pid)`**：杀的是整个进程组，`make -j8` 不会留下八个孤儿。
+- **输出按协议从头部丢、保尾部**（协议明文 "truncates from the beginning"，且切口必须落在字符边界
+  上）。这与本仓 `elideMiddleBytes` 的留头留尾**刻意分岔**：那个的消费者是我们自己的模型，它读的是一次
+  `bash` 调用的完整回执（头部有命令回显、尾部有报错，中间才是可丢的）；这一份的消费者是外部 agent，
+  它自己知道发了什么命令，要的是「最后发生了什么」。
+- **硬期限 `tools.exec.maxTimeoutMs`**：到点杀进程组，而不是「不再等」。句柄上界是
+  `agent.acp.maxTerminals`，数的是**活着的**句柄（含已退出但没 release 的 —— 那正是逼 agent 把用完的
+  还回来的那道压力）。
+- **三道 release 兜底**：`abortSignal`（用户 `/cancel`）、工具返回路径上的 `finally`、以及关停时的
+  `AcpManager.close()`。少任何一道都会留下一条在宿主上接着跑的命令，而没有人还在等它的输出。漏
+  release 的那些落一条 warn —— 那是 agent 的 bug，要看得见。
+
+**进度卡片**走 `TelegramToolBridge.openProgressCard?()`（可选方法，**presence 即开关**：拿不到就照旧
+跑，只是屏幕上没有中途的动静）。渲染选项从**本轮**配置取（`output.parseMode` / `output.maxMessageChars`
+都在 `PER_CHAT_OVERRIDE_ALLOWLIST` 里，读全局快照就是把会话级覆盖静默丢掉），节流按
+`agent.acp.progressIntervalMs`。**归档只在终帧一次** —— `ScopedArchiveRepository.append` 是
+`INSERT OR IGNORE`，首帧就归档等于把「正在启动…」永久钉进 `messages` 与 FTS。
+
+#### 3.5.3 逐条审批（M13）
+
+**⚠️ 先把「机制存在」与「默认生效」分开：这一节写的是一台可用的机器，而它默认是关的。**
+`agent.acp.permissionMode` 的默认档是 **`auto`**（不问人，见 §3.5.1）—— 也就是 `docs/14 §2 Q8-c`
+原本的语义：起这台 agent 这一个动作整体走一次审批，批了之后它内部怎么跑不再逐条拦。**本节的每一句
+都只在运维把那个键拨到 `ask` 之后成立。** 别把这一节读成「ACP 默认有逐条审批」，也别在别处那么写。
+
+`ask` 档本身是真的：每一条 `session/request_permission` 走 `requestExternal` → 同一张 `approvals`
+表、同一套 `approval.rules` / TTL / 双通道裁决（§6、§6.1）。`auto` 与 `deny` **不问人**（前者选第一个
+allow 档、后者选第一个 reject 档，一个都没给时按协议回 `cancelled` —— `deny` 的语义不能因为对方没
+提供选项就翻过来）。**给了处理器就完全取代地板，两者不串联**：串起来的话「谁先答」变成一个要看
+代码才知道的问题。
+
+`tool_name` 恒为字面量 `acp_permission`，**不按 kind 拆成 `acp:edit` 这类名字**：`ApprovalRules` 的
+pattern 是对 `JSON.stringify(input)` 求值的，而这条路的 input 里就有 `"kind":"execute"`，已经够精准；
+多一批工具名换来的是工具页上一批点不进去的行、以及 `tools.overrides` 里一批运维改了也没用的键
+（那张表只认注册过的工具）。风险档由 `toolCall.kind` 推，**与本系统同类工具对齐**：`execute` /
+`delete` → high，`edit` / `move` → medium，`read` / `search` / `fetch` / `think` → low，
+**其余（含 `switch_mode`、`other`、以及压根没给 kind）→ medium，不猜低档** —— 这一层的输入是外部
+agent 写的 JSON，一个我们不认识的 kind 更可能是新增的危险动作。路径落在 jail 外或撞上 `denyGlobs` 时
+**一律抬到 high**：那时它要动的东西已经出了这次会话该碰的范围，kind 说什么都不重要了。
+
+**⚠️ 这一条路 `exemptOwnerSkip: true`，反过来豁免 `approval.skipForOwner` —— 看着像 bug，不是。**
+那个开关的前提是「owner 自己让 bot 做的事不必再问 owner 一次」，也就是**发起人与裁决人是同一个人**；
+而这里动作的发起人是一台**外部 agent**，owner 只是那个把它放进来的人，两者不是同一个主体。
+`skipForOwner` 默认为真而 ACP 又是 owner-only，所以不反过来的话整条逐条审批**一行都不生效**（每一次
+都直接 `approved: true`）。改回去等于把这一整块静默摘掉，而屏幕上、文档里都还写着它在。
+
+`allow_always` / `reject_always` **只落会话内存**（键 = `kind` + 第一条路径所在的目录 —— agent 在同一个
+目录里连着改十个文件是常态，而「换个目录」值得再问一次），作用域恰好是一次 `spawn_acp` 调用，与
+「会话不落库」是同一条纪律。**绝不落成 `approval.rules`**：那张表的 pattern 走 RE2 且 ≤128 字符，硬塞
+一条绝对路径多半直接编译不过；更要紧的是它会进 `config_revisions` 与配置导出 —— 一次点击变成一条
+**永久全局**授权，而按下去的人以为自己只是放过了眼前这一步。命中记忆时**照旧落一条 `approvals` 行**
+（`decided_by='acp:always'`，见 [03 §2.11](./03-data-model.md)）：不落的话「批了一次之后它改了 40 个
+文件」在审计里只剩最初那一条，而 always 恰恰是最需要被数出来的那一档。
+
+`signal`（本次请求被取消 / 连接关闭）**必须 settle**，那一档回 `{outcome:'cancelled'}` —— 这一次它是
+真话。结论表达不出来那一档不是：见 §3.5.1 表里 `acp_permission_unanswerable` 那一行。
+
+**接不上时是一道真的门，不是自动放行。** `permissionMode === 'ask'` 而运行时没有审批 broker 时，
+`spawn_acp` 直接不进模型的工具目录（照 `allowedDirs` 为空的同一形态）；真走到地板上的 `ask` 按 `deny`
+处理并留一条 warn。一个叫 `ask` 的默认值实际在放行，正是 `docs/reviews/16 §5` 说的伪造一道门。
+
+**它不是第四道门。** 它只看得见 agent **选择问过来**的那些动作 —— 而 `agents[].approvalMode` 的默认
+档就是 `yolo`，那样的 agent 什么都不问；`ast_edit` / `eval` / `computer` 那类绕过路径更是压根不经
+这条链。真正的收窄仍然是 `agents[].tools`（§3.5.1），T17 一个字没变 —— **在默认配置下它甚至更成立**：
+我们看得见它每一次 tool_call（进度卡片就在渲染），但默认不拦。看得见不等于拦得住。
 
 ### 3.6 网络
 
@@ -888,12 +1022,17 @@ meta 工具本身与它的五条不变量。
 是目录白名单那一道**。批准一次 = 批准它这一趟在那个目录里做的全部事情：harness 自带一整套工具，
 `available()` 的注册期 fail-closed 与 `execute()` 的二次硬拦截都看不见它内部的调用（[14](./14-open-questions.md) T17）。
 ◆ `spawn_acp` 的三道门与上面 ◇ **完全同形，档位在 `TOOL_POLICY` 里逐字相同**（§3.5.1）：
-`available()` 判仅 owner 且仅私聊、`agent.acp.enabled`、`allowedDirs` 非空、至少一台 agent 启用；
+`available()` 判仅 owner 且仅私聊、`agent.acp.enabled`、`allowedDirs` 非空、至少一台 agent 启用、
+**以及 `permissionMode` 那一档接得上**（`ask` 而没有审批 broker 时整个工具不进目录，§3.5.3）；
 `TOOL_POLICY` 判 `approval: 'always'`；`AcpManager.run` 再判一次目录。**相同不是偷懒，是判据**：
-ACP 这条路我们看得见 agent 内部做了什么（`session/update` 一路报过来），而看得见不等于拦得住 ——
-逐条 permission 这一轮还是地板（自动放行）。给它一个更松的档等于用可观测性换权限，而 T17 那条
-取舍一个字没变。第四道门（`agent.acp.agents[].tools` / `approvalMode`）是**配置**而不是这套闸上的
-一环，且默认那份收窄挡不住 `ast_edit` / `eval` / `computer` 那类绕过路径。
+ACP 这条路我们看得见 agent 内部做了什么（进度卡片逐条渲染它的 tool_call），但那不是理由把这三道门
+放松 —— 用可观测性换权限是错的方向，T17 那条取舍一个字没变。**而默认档下我们并不拦**：
+`permissionMode` 默认 `auto`、`agents[].approvalMode` 默认 `yolo`，逐条审批（§3.5.3）是一台建好了但
+默认关着的机器，拨到 `ask` 才生效，且**即便拨过去也不是第四道门**（它只看得见 agent 选择问过来的
+那些动作）。第四道门（`agent.acp.agents[].tools` / `approvalMode`）是**配置**而不是这套闸上的一环，
+且默认那份收窄挡不住 `ast_edit` / `eval` / `computer` 那类绕过路径。**三道门里真正拦得住的仍然是目录
+白名单那一道** —— 与上面 ◇ 同一条脚注：`approval: 'always'` 对 owner 因 `approval.skipForOwner`
+默认为真而实际无感。
 
 矩阵在代码中是**默认值与对照基准**：`packages/core/tools/policy.ts` 导出
 `TOOL_POLICY: Record<ToolName, {minRole, approval, scope, source}>`，`ToolRegistry` 与 WebUI 工具页
@@ -1192,7 +1331,7 @@ Telegram 侧判的是**有效角色** `resolveEffectiveRole`，不是裸的用�
 > 那样按钮在任何来源的审批上都点得动，代价是每条审批**两条消息**、以及 owner 从没跟 bot 说过话时的
 > 403（`AlertDispatcher` 有同一个已知缺口）。否掉的实质理由是**这个缺口挡不住任何已规划的功能**：
 > `HarnessAgent` / ACP 那条路本身就是 **owner + 仅私聊**（[14 §2](./14-open-questions.md) Q8-a、
-> D23），所以它将来的逐条 permission 恰好落在按钮能用的那个格子里；而群里的审批本来就有 WebUI
+> D23），所以它的逐条 permission（§3.5.3，机制已接、默认档不用它）恰好落在按钮能用的那个格子里；而群里的审批本来就有 WebUI
 > 那条通道，且群成员看得见的回执已经说清了「去 WebUI 的审批页」。
 > **所以「按钮只在 owner 私聊与 owner 档群里出现」是记录在案的边界，不是待办。** 哪天真要覆盖任意
 > 来源，代价就是上面那两条，别当成一次纯增量。
@@ -1283,8 +1422,10 @@ approval:
 ### 6.1 阻塞式人机通道（`PendingPrompts`）
 
 按钮那一半不是审批专用的一次性代码，而是一条通用原语：**发一条带选项的消息、等人点、把结果
-回灌给正在等的调用方**。它同时是 `agent.askEscalateToUser`（转人工）与将来 ACP 逐条 permission
-的落点，所以接口里带 `kind` 与 `decidableBy` 两个维度 —— 事后加这两个会改到签名。
+回灌给正在等的调用方**。ACP 的逐条 permission 已经接上（§3.5.3，走 `requestExternal` 落进同一张
+`approvals` 表、复用同一条回执与裁决路径 —— **接上了，但 `permissionMode` 默认 `auto`，要拨到 `ask`
+才用得到它**），剩下 `agent.askEscalateToUser`（转人工）还没接；
+接口里从一开始就带 `kind` 与 `decidableBy` 两个维度 —— 事后加这两个会改到签名。
 
 - 等待者注册表在 core：`packages/core/src/interaction/prompts.ts`（`PendingPrompts`）。
   渲染与 Bot API 调用在 `packages/telegram/src/prompts.ts`（`TelegramPromptChannel`），

@@ -714,8 +714,8 @@
                     "auto",
                     "deny"
                   ],
-                  "default": "ask",
-                  "description": "agent 反过来问「这一步准不准」时怎么回：auto 放行、deny 拒绝、ask 交给真人确认。ask 档的真人通道还没接，当前等同 auto 并每次记一条警告。"
+                  "default": "auto",
+                  "description": "agent 反过来问「这一步准不准」时怎么回：**默认 auto = 直接放行**（起它那一次已经走过审批，批一次就是批这一趟），deny 一律拒绝，ask 逐条问真人（走审批页 / Telegram 按钮，与工具审批同一条链）。逐条审批的机器是实的、随时可用，但**要你自己拨到 ask 才生效**。三档的代价不一样，看每一档旁边那句。"
                 },
                 "maxUpdatesPerPrompt": {
                   "type": "integer",
@@ -727,13 +727,13 @@
                   "type": "integer",
                   "exclusiveMinimum": 0,
                   "default": 8,
-                  "description": "🚧 未接线：一次任务里允许 agent 同时开多少个终端。当前这一版不向 agent 申报终端能力（它会自己直接执行命令），所以没有终端可数。"
+                  "description": "一次任务里允许 agent 同时开多少个终端（含已经跑完但它还没释放的那些 —— 那正是逼它释放的压力）。撞上界时下一次开终端会被拒，并附一句让它先释放用完的。"
                 },
                 "progressIntervalMs": {
                   "type": "integer",
                   "exclusiveMinimum": 0,
                   "default": 5000,
-                  "description": "🚧 未接线：把 agent 的进度刷成聊天里那张卡片的最小间隔。当前这一版只在任务结束时交回一份结果，中途没有东西需要节流。"
+                  "description": "把 agent 的进度刷成聊天里那张卡片的最小间隔。**小于 1000 会被卡片按 1000 处理**（发送侧本来就有 1 秒的最小间隔，填 200 只是让每条进度都排一次队）。调大了卡片看起来像卡住了。"
                 },
                 "maxCostUsd": {
                   "type": "number",
@@ -769,7 +769,7 @@
                           "write",
                           "yolo"
                         ],
-                        "default": "write"
+                        "default": "yolo"
                       },
                       "tools": {
                         "type": "array",
@@ -780,7 +780,8 @@
                         "default": [
                           "read",
                           "write",
-                          "edit"
+                          "edit",
+                          "bash"
                         ]
                       },
                       "model": {
@@ -826,7 +827,7 @@
                     "additionalProperties": false
                   },
                   "default": [],
-                  "description": "ACP agent 定义数组：名字、可执行名、profile、审批档、允许的工具、模型、会话模式、超时。审批档与工具清单是独立的键而不是自由参数 —— 塞进自由参数就能被一行配置静默去掉，而那两项是权限门。"
+                  "description": "ACP agent 定义数组：名字、可执行名、profile、审批档、允许的工具、模型、会话模式、超时。审批档与工具清单是独立的键而不是自由参数 —— 塞进自由参数就能被一行配置静默去掉，而那两项是权限门。approvalMode **默认 yolo**（agent 内部不自己拦）：另两档下实测 bash 可证明用不了，而 always-ask 还有可复现的 edit 故障。"
                 }
               },
               "additionalProperties": false,

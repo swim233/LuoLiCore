@@ -1,12 +1,18 @@
 import { existsSync, realpathSync, statSync } from 'node:fs';
+import { resolve, sep } from 'node:path';
 import { client, ndJsonStream, PROTOCOL_VERSION, RequestError, type ClientCapabilities, type ClientConnection, type ClientContext, type RequestPermissionRequest, type RequestPermissionResponse, type SessionNotification, type StopReason } from '@agentclientprotocol/sdk';
 import { elideMiddleBytes } from '@luoli/shared';
 import { resolveHarnessDir } from '../agent/harness.js';
+import { FileTools } from '../tools/files.js';
+import { PathJail } from '../tools/jail.js';
 import { KeyedMutex } from '../turn/keyed-mutex.js';
 import { acpFailure, type AcpErrorCode, type AcpFailure } from './errors.js';
+import { AcpFs } from './fs.js';
 import { AcpChild, spawnAcpAgent } from './process.js';
 import { resolveAcpAgent, type AcpAgentSettings, type AcpPermissionMode, type AcpSettings } from './schema.js';
+import type { AcpRunLedger } from './runs.js';
 import { AcpUpdateSink, runAcpPrompt } from './session.js';
+import { AcpTerminals } from './terminals.js';
 import type { LogSink } from '../log/sink.js';
 
 /**
@@ -28,60 +34,99 @@ import type { LogSink } from '../log/sink.js';
  */
 
 /**
- * `initialize` 里申报的客户端能力。**这一轮是空的，而空是有意义的** ——
- * ACP 明文规定：字段省略 == UNSUPPORTED。谎报一个我们不会答的 method 会让 agent 发出请求之后
- * 挂在那里等，而它正握着一个半改完的文件。
+ * `initialize` 里申报的客户端能力。**按本次调用现算，不是常量** ——
+ * ACP 明文规定：字段省略 == UNSUPPORTED，而谎报一个我们不会答的 method 会让 agent 发出请求之后
+ * 挂在那里等，此刻它正握着一个半改完的文件。
  *
- * 所以这一轮**不申报 `fs` 也不申报 `terminal`**：omp 会退回自己直接读写磁盘（它本来就是本机
- * CLI），我们照旧拿得到产出。波 3 接反向 fs / terminal 时，这个常量与对应的 handler
- * **必须同一个提交**落地 —— 先申报后实现的那一版，中间每一次 `fs/read_text_file` 都是一次挂死。
+ * 所以这两位都是**能力真的到位了才置**：`fs` 要有一个建得起来的 jail（root = `realpathSync(dir)`），
+ * `terminal` 还要额外过 `sandbox.plan(role, root).mode === 'host'`。拿不到就不申报 —— 而不是申报了
+ * 让 agent 每次 create 都撞一个错（它会反复试，而每次失败都是一段它自己编出来的解释）。
  */
-export const ACP_CLIENT_CAPABILITIES: ClientCapabilities = {};
+export function acpClientCapabilities(enabled: { fs: boolean; terminal: boolean }): ClientCapabilities {
+  return { ...(enabled.fs ? { fs: { readTextFile: true, writeTextFile: true } } : {}), ...(enabled.terminal ? { terminal: true } : {}) };
+}
 
 /**
- * 波 3 的接入点。**契约在这里，实现不在** —— 呈现层卡片与逐条审批各自按这份签名实现，互不阻塞。
+ * 逐条审批的处理器要等 manager 解析完才建得出来：jail 的 root 必须是 `realpathSync(dir)`
+ * （与 `session/new` 的 `cwd` 同一个字面量），而 agent 名字要等 `resolveAcpAgent` 挑完。
+ * 所以 `AcpClientHooks.permission` 收的是一个**工厂**而不是一个处理器。
+ */
+export interface AcpPermissionBinding {
+  /** 本次会话的 jail。**只用来判「这条路径在边界内吗 / 撞 denyGlobs 了吗」，不读写。** */
+  jail: PathJail;
+  agent: string;
+  /**
+   * 结论表达不出来时调它（agent 一个能表达我们答案的档都没给）—— 实现是 `session/cancel`
+   * + `acp_permission_unanswerable`。**不能回 `{outcome:'cancelled'}` 糊过去**：那个词在协议里
+   * 的意思是「client 取消了这一轮」，把「人拒绝了」说成「用户取消了」会让 agent 记错这一轮。
+   */
+  onUnanswerable(): void;
+}
+
+/**
+ * 反向调用与呈现层的接入点。
  *
  * - `onUpdate`：每条 `session/update` 原样过一遍（呈现层）。**被 `maxUpdatesPerPrompt` 丢弃的
  *   那些不会给它** —— 上界的意义就是「后面这些我们不处理」，绕过上界喂给呈现层等于没有上界。
- * - `requestPermission`：接真审批（波 3）。给了它就完全接管，`floorPermission` 不再参与；
- *   没给就走地板。`signal` 在本次请求被取消 / 连接关闭时 abort。
+ * - `permission`：逐条审批（`docs/05 §3.5.3`）。**只在 `permissionMode === 'ask'` 那一档被调用，
+ *   而它一旦给出处理器就完全接管，`floorPermission` 不再参与** —— 两者串联的话「谁先答」就变成
+ *   一个要看代码才知道的问题。`signal` 在本次请求被取消 / 连接关闭时 abort，实现方**必须 settle**。
  */
 export interface AcpClientHooks {
   onUpdate?(notification: SessionNotification): void;
-  requestPermission?(request: RequestPermissionRequest, signal: AbortSignal): Promise<RequestPermissionResponse>;
+  permission?(binding: AcpPermissionBinding): (request: RequestPermissionRequest, signal: AbortSignal) => Promise<RequestPermissionResponse>;
 }
 
 type PermissionKind = RequestPermissionRequest['options'][number]['kind'];
 
 /**
- * ⚠️ **这是本轮的临时地板，它看着像一个洞，因为它就是。** `permissionMode` 为 `ask` 时这里
- * 自动选第一个 allow 档 —— 也就是「agent 问我们准不准，我们说准」。
+ * **不问人的那两档**（`auto` / `deny`）怎么答。**`auto` 是默认档**，所以这个函数是出厂路径。
  *
- * 为什么不 fail-closed 到拒绝：`spawn_acp` 的三道门（owner + 仅私聊 + 目录白名单 + 一次审批）
- * 已经在「起不起这个 agent」那一层拦过了，与 `spawn_harness` 同一条口径 ——
- * **批准一次 = 批准它这一趟在那个目录里做的全部事情**（`docs/14` T17，「不要以为里面还有第四道门」）。
- * 在没有真审批通道的这一轮把每次 permission 都拒掉，得到的是一个能读不能写的半残 agent，
- * 而门的位置一点没变。
+ * `auto` 选第一个 allow 档 —— 语义上诚实的一档：起这台 agent 本身已经过了一次审批，
+ * **批准一次 = 批准它这一趟在那个目录里做的全部事情**（`docs/14` T17，Q8-c 原本的语义）。
+ * `deny` 选第一个 reject 档；一个都没给时按协议回 `cancelled`（唯一不需要 optionId 的合法出口），
+ * 而不是硬挑一个 allow —— `deny` 的语义不能因为对方没提供选项就翻过来。
  *
- * `deny` 与 `auto` 是**真的**接上的：前者选第一个 reject 档，后者选 allow。`ask` 这一档的真实
- * 行为要等波 3（走 `hooks.requestPermission` → `PendingPrompts`，`docs/05 §6.1`）；在那之前它
- * 每次都记一条 warn，好让「我配的是 ask 但它没问我」在日志里有一行。
+ * **`ask` 走的不是这里**，而是 `hooks.permission`（`acpPermissionGate`）。它落到这个函数上只有一种
+ * 可能：运行时压根没接审批通道，而 `spawn_acp.available()` 本该已经把工具挡在目录外
+ * （`permissionMode === 'ask'` 且没有 broker → 不进目录，照 `allowedDirs` 为空的同一形态）。
+ * 真走到了就**按 `deny` 处理** —— 一个叫 `ask` 的档实际在放行，正是 `docs/reviews/16 §5` 说的
+ * 伪造一道门。调用方据此把这一条记成 warn。
  */
-export function floorPermission(request: RequestPermissionRequest, mode: AcpPermissionMode): { response: RequestPermissionResponse; floored: boolean } {
+export function floorPermission(request: RequestPermissionRequest, mode: AcpPermissionMode): RequestPermissionResponse {
   const pick = (...kinds: PermissionKind[]): string | null =>
     kinds.map((kind) => request.options.find((option) => option.kind === kind)?.optionId).find((id) => id !== undefined) ?? null;
-  if (mode === 'deny') {
-    const rejected = pick('reject_once', 'reject_always');
-    // 一个 reject 档都没给的 agent：按协议回 cancelled（唯一不需要 optionId 的合法出口），
-    // 而不是硬挑一个 allow —— `deny` 的语义不能因为对方没提供选项就翻过来。
-    return { response: rejected ? { outcome: { outcome: 'selected', optionId: rejected } } : { outcome: { outcome: 'cancelled' } }, floored: false };
-  }
-  const allowed = pick('allow_once', 'allow_always');
-  return { response: allowed ? { outcome: { outcome: 'selected', optionId: allowed } } : { outcome: { outcome: 'cancelled' } }, floored: mode === 'ask' };
+  const chosen = mode === 'auto' ? pick('allow_once', 'allow_always') : pick('reject_once', 'reject_always');
+  return chosen ? { outcome: { outcome: 'selected', optionId: chosen } } : { outcome: { outcome: 'cancelled' } };
 }
 
 export interface AcpRunInput { task: string; dir: string; agent?: string }
 export interface AcpTrace { traceId?: string; chatId?: string; userId?: string; key?: string }
+
+/**
+ * 反向调用面要用的宿主侧闸门。**由调用方从本轮 `turn.config` 现读再传进来**，`AcpManager` 自己
+ * 不持有配置（`docs/11` 的 `agent.acp` 整段在热更新白名单里，靠的就是这条纪律）。
+ *
+ * 整段缺席 = **fs 与 terminal 都不申报**，回到「agent 自己直接碰磁盘」那条老路。分段用例（以及任何
+ * 手工造 manager 的地方）落在这一档，缺省必须是「不申报」而不是「申报一个没实现的东西」。
+ */
+export interface AcpHostAccess {
+  /**
+   * jail 与 `FileTools` 的参数。**不复用 `dependencies.filesFor(workspace, role)`** ——
+   * 那份的 root 是 `data/workspace/<chatId>`（`docs/14 Q8-b` 明说不复用），而且
+   * `tools.fs.allowHostFsForOwner` 一开它的 root 就成了 `/`：ACP 这条路的边界必须是**这次被批准的
+   * 那个仓库目录**，跟着一个全局开关走等于把「批准一个目录」变成「批准整台机器」。
+   */
+  fs: { denyGlobs: readonly string[]; maxReadBytes: number; maxWriteBytes: number; backupDir: string };
+  /** `tools.exec.maxTimeoutMs` / `tools.exec.maxOutputBytes`。终端的硬期限与单个终端的输出上界。 */
+  exec: { maxTimeoutMs: number; maxOutputBytes: number };
+  /**
+   * `sandbox.plan(role, root)`。**不是 `'host'` 就整个 terminal capability 不申报** ——
+   * 申报了每次 create 都失败是最坏的形态：agent 会反复试，而它每次拿到的都是一个它没法据此改变
+   * 行为的错。fail-closed 落在申报那一刻。
+   */
+  plan(root: string): { mode: 'host' | 'jail' | 'docker'; reason?: string };
+}
 
 export interface AcpRunOptions {
   abortSignal: AbortSignal;
@@ -92,6 +137,7 @@ export interface AcpRunOptions {
    */
   outputBudgetBytes: number;
   hooks?: AcpClientHooks;
+  host?: AcpHostAccess;
   trace?: AcpTrace;
   /**
    * 目录互斥的等待上界，缺省 `ACP_DIR_WAIT_MS`。**只有用例会传** —— 生产的调用方不传，
@@ -116,7 +162,15 @@ export interface AcpRunResult {
   updates?: number;
   updatesDropped?: number;
   toolCalls?: number;
+  /** 它自己那些工具调用里报了 `failed` 的条数。0 时不出现。「跑完了」与「跑完了但一半步骤失败了」
+   *  是两件事，而 `stopReason: 'end_turn'` 说不出后者。 */
+  failures?: number;
   thoughts?: number;
+  /** 经 `fs/write_text_file` 改过的**不同**文件数。0 时不出现 —— 一次「什么都没写」的任务里
+   *  这个数字比它占的字节更值钱：模型据此判断「它是不是只看了看」。 */
+  filesWritten?: number;
+  /** 起过的终端数（`terminal/create`）。0 时不出现。它是「命令到底跑了没有」唯一的凭据。 */
+  terminals?: number;
   costUsd?: number;
   contextUsed?: number;
   ms?: number;
@@ -139,6 +193,51 @@ const CLIP_FLOOR_BYTES = 64;
 const AUTH_REQUIRED_CODE = -32000;
 
 const elision = (omitted: number): string => `\n…省略 ${omitted} bytes…\n`;
+
+/** `resolveHarnessDir` 的判据，但**两侧都解 realpath**。见 `resolveAcpTarget` 里那段注释。 */
+function insideRealAllowed(root: string, allowedDirs: readonly string[]): boolean {
+  for (const entry of allowedDirs) {
+    let base = resolve(entry);
+    try { base = realpathSync(base); } catch { /* 名单里那条不存在，按字面比 */ }
+    if (root === base || root.startsWith(`${base}${sep}`)) return true;
+  }
+  return false;
+}
+
+/** 挑哪台 agent、在哪个目录跑。`ok:false` 那一支带着已经分好档的失败。 */
+export type AcpTarget = { ok: true; agent: AcpAgentSettings; root: string } | { ok: false; failure: AcpFailure; agent?: string; dir?: string };
+
+/**
+ * 三道门里「哪台 agent + 哪个目录」这一半。**一处实现两个调用方**：`run()` 拿它当准入判据，
+ * 而工具壳拿它给进度卡片填表头（agent 名字与相对化路径的基点）—— 卡片自己再算一遍的话，
+ * 「屏幕上说的目录」与「真的在跑的目录」就是两个可以分叉的答案。
+ *
+ * **realpath 是这一整趟的唯一目录字面量**：互斥键、jail 的 root+base、`session/new` 的 `cwd`、
+ * 子进程的 cwd 全用它。互斥的理由是老的（两条软链指向同一个仓库时，按请求路径加锁等于没加）；
+ * jail 与 `cwd` 的理由是新的：`resolveHarnessDir` 只做 `resolve()`，路径中间有一段软链时 agent 自己
+ * 解析出来的绝对路径与 jail 的边界会是**两套字面量**，于是每一次 `fs/*` 都是一次越界拒绝。
+ */
+export function resolveAcpTarget(input: AcpRunInput, settings: AcpSettings): AcpTarget {
+  if (!settings.enabled || !settings.allowedDirs.length) return { ok: false, failure: acpFailure('acp_disabled') };
+  const agent = resolveAcpAgent(settings, input.agent);
+  if (!agent) {
+    return { ok: false, failure: settings.agents.some((entry) => entry.enabled)
+      ? acpFailure('acp_agent_unknown', input.agent ?? settings.defaultAgent) : acpFailure('acp_no_agents') };
+  }
+  const resolved = resolveHarnessDir(input.dir, settings.allowedDirs);
+  if (!resolved) return { ok: false, failure: acpFailure('acp_dir_not_allowed', settings.allowedDirs.join(' · ')), agent: agent.name };
+  if (!existsSync(resolved) || !statSync(resolved).isDirectory()) return { ok: false, failure: acpFailure('acp_dir_missing'), agent: agent.name, dir: resolved };
+  // 解不开就退回 `resolved`（目录刚被删这类情况，下一步的 spawn 会如实失败）。
+  let root = resolved;
+  try { root = realpathSync(resolved); } catch { /* 用 resolved */ }
+  // 白名单在 realpath 上**再判一遍**。jail 的边界现在是 realpath，而 `allowedDirs` 里一条指向别处的
+  // 软链原本只是「agent 在那儿跑」，现在还等于「jail 的边界在名单之外」。两侧都解析：只解析目标那
+  // 一侧的话，`/home` 本身是软链的部署会把一份能用的配置判成越界。
+  if (root !== resolved && !insideRealAllowed(root, settings.allowedDirs)) {
+    return { ok: false, failure: acpFailure('acp_dir_not_allowed', `${resolved} → ${root}（软链解开之后落在白名单外）`), agent: agent.name };
+  }
+  return { ok: true, agent, root };
+}
 
 /**
  * 按**序列化之后**的字节数裁。`#normalizeOutput` 量的是 `JSON.stringify(rest)`，而换行、引号、
@@ -192,6 +291,19 @@ class AcpFailureError extends Error {
 interface OpenSession { child: AcpChild; connection: ClientConnection; cx: ClientContext; sessionId: string; closable: boolean }
 type OpenOutcome = { ok: true; session: OpenSession } | { ok: false; failure: AcpFailure; child: AcpChild | null };
 
+/**
+ * 本次会话的反向调用面。`capabilities` 是**从 `fs` / `terminals` 在不在算出来的**，不是另一份要
+ * 手动对齐的声明 —— 那两者与申报值分成两处写的话，迟早有一处漏改，而漏改的表现是一次挂死。
+ */
+interface AcpSurface {
+  fs: AcpFs | null;
+  terminals: AcpTerminals | null;
+  jail: PathJail | null;
+  capabilities: ClientCapabilities;
+  /** 有能力没申报出去的理由，逐条人话。进 `acp.run` 的 `data.degraded` 并把那一行抬成 warn。 */
+  notes: string[];
+}
+
 export class AcpManager {
   /**
    * 所有起过、还没关完的子进程。`close()` 关它而不是只关「当前那一条」：握手超时被丢掉的、
@@ -211,49 +323,77 @@ export class AcpManager {
    * （`reconcile` → `connect`），所以不需要第二个键空间去躲自等。
    */
   readonly #mutex = new KeyedMutex();
+  /**
+   * 在途会话的终端集合。三道 release 兜底的**第三道**（进程关停）—— 前两道是 `abortSignal` 与
+   * `#run` 的 `finally`。`close()` 只关子进程的话，agent 让我们起的那些命令还在宿主上跑着，
+   * 而它们继承的是**本进程**的生命周期之外的东西（`detached: true`），没人收就是真孤儿。
+   */
+  readonly #terminals = new Set<AcpTerminals>();
 
-  constructor(private readonly log: LogSink) {}
+  /**
+   * `runs` 可选：给了就把每次调用落一行 `agent_runs`（外部花费进 `external_cost_usd`，`cost_usd`
+   * 恒 0 —— 见 `runs.ts` 顶部）。缺席时照旧跑，只是那次调用在 trace 骨架上没有行 —— 分段用例与
+   * 任何手工造 manager 的地方落在这一档，而**记账失败绝不改变调用的结果**（见 `#record`）。
+   */
+  constructor(private readonly log: LogSink, private readonly runs?: AcpRunLedger) {}
 
   /**
    * 跑一次 ACP 任务。三道门的第二道（目录）在这里判第二遍 —— `available()` 判过一次，
    * 热更新可能在注册与执行之间把名单清空（同 `spawn_harness` 的做法）。
    */
   async run(input: AcpRunInput, settings: AcpSettings, options: AcpRunOptions): Promise<AcpRunResult> {
-    if (!settings.enabled || !settings.allowedDirs.length) return acpFailure('acp_disabled');
-    const agent = resolveAcpAgent(settings, input.agent);
-    if (!agent) return settings.agents.some((entry) => entry.enabled) ? acpFailure('acp_agent_unknown', input.agent ?? settings.defaultAgent) : acpFailure('acp_no_agents');
-    const resolved = resolveHarnessDir(input.dir, settings.allowedDirs);
-    if (!resolved) return { ...acpFailure('acp_dir_not_allowed', settings.allowedDirs.join(' · ')), agent: agent.name };
-    if (!existsSync(resolved) || !statSync(resolved).isDirectory()) return { ...acpFailure('acp_dir_missing'), agent: agent.name, dir: resolved };
-    // 互斥键按 realpath：两个符号链接指向同一个仓库时，按请求路径加锁等于没加。
-    // 解不开就用 resolve 后那份（目录刚被删这类情况，下一步的 spawn 会如实失败）。
-    let key = resolved;
-    try { key = realpathSync(resolved); } catch { /* 用 resolved */ }
-    const release = await this.#acquireDir(key, options.abortSignal, options.dirWaitMs ?? ACP_DIR_WAIT_MS);
-    if (!release) return { ...acpFailure(options.abortSignal.aborted ? 'acp_cancelled' : 'acp_dir_busy'), agent: agent.name, dir: resolved };
-    try { return await this.#run(agent, resolved, input.task, settings, options); }
+    const target = resolveAcpTarget(input, settings);
+    if (!target.ok) return { ...target.failure, ...(target.agent ? { agent: target.agent } : {}), ...(target.dir ? { dir: target.dir } : {}) };
+    const { agent, root } = target;
+    const release = await this.#acquireDir(root, options.abortSignal, options.dirWaitMs ?? ACP_DIR_WAIT_MS);
+    if (!release) return { ...acpFailure(options.abortSignal.aborted ? 'acp_cancelled' : 'acp_dir_busy'), agent: agent.name, dir: root };
+    try { return await this.#run(agent, root, input.task, settings, options); }
     finally { release(); }
   }
 
   async #run(agent: AcpAgentSettings, dir: string, task: string, settings: AcpSettings, options: AcpRunOptions): Promise<AcpRunResult> {
     const started = performance.now();
+    // `agent_runs.started_at` 要的是墙钟。`performance.now()` 那个是单调时钟，只用来算 `ms`。
+    const startedAt = Date.now();
     // 聚合期的上界只跟 `agents[].maxOutputBytes` 有关：2× 是为了让末尾那次从中间截断能保住头尾
     // （同 `runHarness`）。真正交回去多少由下面**量出来**的预算定 —— 那时才知道 hint / detail /
     // stderr 各占了多少。
     const sink = new AcpUpdateSink({ maxUpdates: settings.maxUpdatesPerPrompt, maxTextBytes: agent.maxOutputBytes * 2, maxCostUsd: settings.maxCostUsd,
       ...(options.hooks?.onUpdate ? { onUpdate: options.hooks.onUpdate } : {}) });
-    const opened = await this.#open(agent, dir, settings, sink, options);
-    const child = opened.ok ? opened.session.child : opened.child;
-    let failure: AcpFailure | null = opened.ok ? null : opened.failure;
+    const surface = this.#surface(agent, dir, settings, options);
+    /**
+     * 三道 release 兜底的**第一道**：用户 `/cancel`。少了它，一次被取消的调用会留下一条在宿主上
+     * 接着跑的命令，而没有任何人还在等它的输出。另两道是下面的 `finally`（工具返回路径）与
+     * `close()`（进程关停）。
+     */
+    const onAbort = (): void => { surface.terminals?.releaseAll(); };
+    if (surface.terminals) {
+      options.abortSignal.addEventListener('abort', onAbort, { once: true });
+      this.#terminals.add(surface.terminals);
+    }
+    let opened: OpenOutcome;
+    let child: AcpChild | null;
+    let failure: AcpFailure | null;
     let stopReason: StopReason | undefined;
-    if (opened.ok) {
-      try {
-        const outcome = await runAcpPrompt(opened.session.cx, { agent, sessionId: opened.session.sessionId, task, sink,
-          abortSignal: options.abortSignal, closed: opened.session.connection.closed });
-        stopReason = outcome.stopReason ?? undefined;
-        failure = outcome.failure;
-      } catch (error) { failure = acpFailure('acp_prompt_failed', error); }
-      finally { await this.#closeSession(opened.session); }
+    try {
+      opened = await this.#open(agent, dir, settings, sink, options, surface);
+      child = opened.ok ? opened.session.child : opened.child;
+      failure = opened.ok ? null : opened.failure;
+      if (opened.ok) {
+        try {
+          const outcome = await runAcpPrompt(opened.session.cx, { agent, sessionId: opened.session.sessionId, task, sink,
+            abortSignal: options.abortSignal, closed: opened.session.connection.closed });
+          stopReason = outcome.stopReason ?? undefined;
+          failure = outcome.failure;
+        } catch (error) { failure = acpFailure('acp_prompt_failed', error); }
+        finally { await this.#closeSession(opened.session); }
+      }
+    } finally {
+      options.abortSignal.removeEventListener('abort', onAbort);
+      // 第二道兜底。**排在结果组装之前** —— `leaked` 要进那条 `acp.run`，而漏 release 是 agent 的
+      // bug：不落一行的话「命令还在宿主上跑」这件事在任何地方都说不出口。
+      surface.terminals?.releaseAll();
+      if (surface.terminals) this.#terminals.delete(surface.terminals);
     }
     // 单行越界压过一切：连接是因此断的，而「断开」本身分不出原因（`acp_connection_lost` 会把
     // 这件事说成 agent 自己死了，运维照那句话去查退出码，什么也查不到）。
@@ -276,7 +416,13 @@ export class AcpManager {
       ...(failure ? { error: failure.error, hint: failure.hint, ...(failure.detail ? { detail: failure.detail } : {}) } : {}),
       agent: agent.name, dir,
       ...(stopReason ? { stopReason } : {}),
-      updates: sink.updates, updatesDropped: sink.dropped, toolCalls: sink.toolCalls, thoughts: sink.thoughts,
+      updates: sink.updates, updatesDropped: sink.dropped, toolCalls: sink.toolCalls,
+      ...(sink.failures > 0 ? { failures: sink.failures } : {}),
+      thoughts: sink.thoughts,
+      // 两个「它到底动了什么」的凭据，都只在非 0 时出现。`stopReason: 'end_turn'` + 一份漂亮的
+      // 总结 + `filesWritten: 0` 是一次真实见过的组合（它只是读了读然后描述了一遍）。
+      ...(surface.fs && surface.fs.writes > 0 ? { filesWritten: surface.fs.writes } : {}),
+      ...(surface.terminals && surface.terminals.created > 0 ? { terminals: surface.terminals.created } : {}),
       ...(sink.costUsd === null ? {} : { costUsd: sink.costUsd }),
       ...(sink.contextUsed === null ? {} : { contextUsed: sink.contextUsed }),
       ms: Math.round(performance.now() - started),
@@ -294,12 +440,116 @@ export class AcpManager {
     const result: AcpRunResult = { ...head,
       ...(clipped.truncated || sink.textTruncated() || clipped.value.length < sink.text().length ? { truncated: true } : {}),
       output: clipped.value };
-    this.log.event({ level: result.ok ? 'info' : 'warn', kind: 'acp.run', summary: `acp ${result.ok ? 'ok' : failure!.error} · ${agent.name} · ${dir}`,
+    const leaked = surface.terminals?.leaked ?? [];
+    const runId = this.#record(agent, dir, task, result, sink, surface, startedAt, options.trace);
+    /**
+     * **`acp.run` 这一行同时是反向调用面那两条 warn 的落点** —— `docs/10 §2` 那张 kind 表被
+     * `tests/docs.test.ts` 双向焊住，为「terminal 没申报」和「agent 漏了 release」各开一个新 kind
+     * 就是两条只在异常路径上出现的枚举值。它们进这一行的 `data`，并且**把这一行抬成 warn**：
+     * 前者是运维要看见的一次能力降级（`sandbox.mode` 配成了 docker 而 owner 不在 `bypassRoles` 里），
+     * 后者是 agent 的协议 bug（我们替它收拾了，但那意味着有命令在宿主上跑到了我们收摊的时候）。
+     */
+    const degraded = surface.notes.length > 0 || leaked.length > 0;
+    this.log.event({ level: result.ok && !degraded ? 'info' : 'warn', kind: 'acp.run',
+      summary: `acp ${result.ok ? 'ok' : failure!.error} · ${agent.name} · ${dir}${surface.notes.length ? ` · ${surface.notes.join(' · ')}` : ''}${leaked.length ? ` · ${leaked.length} 个终端没 release` : ''}`,
       ...this.#trace(options.trace),
       data: { agent: agent.name, dir, command: agent.command, approvalMode: agent.approvalMode, stopReason: stopReason ?? null,
         error: failure?.error ?? null, updates: sink.updates, dropped: sink.dropped, toolCalls: sink.toolCalls,
-        costUsd: sink.costUsd, ms: result.ms } });
+        capabilities: Object.keys(surface.capabilities), degraded: surface.notes, filesWritten: surface.fs?.writes ?? 0,
+        terminals: surface.terminals?.created ?? 0, terminalsLeaked: leaked.length,
+        // `costUsd` 在这条 kind 上一直是「外部 agent 自己报的那个数」，与 `agent_runs.cost_usd`
+        // （本系统的钱，ACP 行恒 0）不是一回事 —— 所以那一列的值落在 `external_cost_usd` 上，
+        // 而不是在这里换个名字再说一遍。`runId` 是这一行与库里那一行之间唯一的接缝。
+        costUsd: sink.costUsd, runId, ms: result.ms } });
     return result;
+  }
+
+  /**
+   * 落那一行 `agent_runs`。**吞掉自己的异常**：记账失败不该把一次已经改完仓库的成功调用变成失败
+   * （反过来更糟 —— 模型会以为什么都没发生）。失败留一条 warn，而它复用 `acp.run` 这个 kind：
+   * `docs/10 §2` 那张表被 `tests/docs.test.ts` 双向焊住，为一条只在写库出错时出现的事新开一个
+   * 枚举值不值得。
+   *
+   * 没有 `traceId` 时**不落行**：`agent_runs.turn_id` 挂不上 turn 的行没有读法（trace 树进不去、
+   * `ix_agentruns_turn` 上是一条查不出来的孤儿）。生产的调用方恒传，落在这一档的只有用例。
+   */
+  #record(agent: AcpAgentSettings, dir: string, task: string, result: AcpRunResult, sink: AcpUpdateSink,
+    surface: AcpSurface, startedAt: number, trace?: AcpTrace): string | null {
+    const turnId = trace?.traceId;
+    if (!this.runs || !turnId) return null;
+    try {
+      return this.runs.record({ turnId, agent: agent.name, dir, task, ok: result.ok,
+        ...(result.error ? { error: result.error } : {}), ...(result.stopReason ? { stopReason: result.stopReason } : {}),
+        output: result.output ?? '', toolCalls: sink.toolCalls, costUsd: sink.costUsd,
+        /**
+         * `external_usage_json` 的载荷。**自描述**（`source` / `agent` / `model` 都在里面）——
+         * 读的人第一眼要能看出这些数字的出处不是本系统，否则它与旁边那些自己的读数长得一样。
+         * 这里一个 token 数都没有：`usage_update` 给的是上下文占用（`used` / `size`）与一个
+         * 已经算好的金额，没有 tokens × prices 可以重算（`ledger/quota.ts` 删掉 `modelCost()`
+         * 时的那条禁令：计价只有一份判据）。
+         */
+        usage: { source: 'acp', agent: agent.name, command: agent.command, model: agent.model || null,
+          approvalMode: agent.approvalMode, dir, costUsd: sink.costUsd,
+          contextUsed: sink.contextUsed, contextSize: sink.contextSize,
+          updates: sink.updates, updatesDropped: sink.dropped, toolCalls: sink.toolCalls, failures: sink.failures,
+          thoughts: sink.thoughts, filesWritten: surface.fs?.writes ?? 0, terminals: surface.terminals?.created ?? 0,
+          stopReason: result.stopReason ?? null, error: result.error ?? null, ms: result.ms ?? null },
+        startedAt, finishedAt: Date.now() });
+    } catch (error) {
+      this.log.event({ level: 'warn', kind: 'acp.run', summary: `acp 记账失败 · ${agent.name} · ${dir}`,
+        ...this.#trace(trace), data: { agent: agent.name, dir, recordFailed: error instanceof Error ? error.message : String(error) } });
+      return null;
+    }
+  }
+
+  /**
+   * 本次会话的反向调用面：jail、fs、终端，以及**据此算出来的** `clientCapabilities`。
+   *
+   * 顺序是判据：先把能力建出来，建成了才申报。反过来（先申报再建）的那一版，中间每一次
+   * `fs/read_text_file` 都是一次挂死 —— 而此刻 agent 正握着一个半改完的文件。
+   */
+  #surface(agent: AcpAgentSettings, root: string, settings: AcpSettings, options: AcpRunOptions): AcpSurface {
+    const notes: string[] = [];
+    const host = options.host;
+    if (!host) return { fs: null, terminals: null, jail: null, capabilities: {}, notes };
+    let jail: PathJail;
+    try { jail = new PathJail(root, [...host.fs.denyGlobs], { base: root }); }
+    catch (error) {
+      // jail 建不起来（目录在这一瞬被删、权限没了）—— 这一档**不申报任何能力**而不是让整次调用失败：
+      // agent 会退回自己直接碰磁盘，产出照旧拿得到，而降级本身进那条 `acp.run` warn。
+      notes.push(`fs 未申报（jail 建不起来：${error instanceof Error ? error.message : String(error)}）`);
+      return { fs: null, terminals: null, jail: null, capabilities: {}, notes };
+    }
+    const files = new FileTools(jail, host.fs.maxReadBytes, host.fs.maxWriteBytes, { backupDir: host.fs.backupDir });
+    // 终端要**宿主直跑**（cwd = 会话 root）。不是 `'host'` 就整个 capability 不申报，而不是申报了
+    // 每次 create 都失败 —— 见 `AcpHostAccess.plan` 那段。
+    const plan = host.plan(root);
+    const terminals = plan.mode === 'host'
+      ? new AcpTerminals(jail, root, { maxTerminals: settings.maxTerminals, maxTimeoutMs: host.exec.maxTimeoutMs, maxOutputBytes: host.exec.maxOutputBytes })
+      : null;
+    if (!terminals) notes.push(`terminal 未申报（sandbox.plan=${plan.mode}${plan.reason ? `：${plan.reason}` : ''}）`);
+    // `agents[].tools` 里配了 `bash` 而终端没申报 = 一个可证明用不了的工具在它的目录里。
+    // 那正是上一轮把 `bash` 从默认值里摘掉的理由，配置里又写回来时要说出来。
+    if (!terminals && agent.tools.includes('bash')) notes.push('agents[].tools 里有 bash，但 terminal 没申报 —— 它执行不了');
+    /**
+     * ⚠️ **申报 `terminal` 是让 `bash` 能跑的必要条件，不是充分条件。** omp 17.4.0 实测：
+     * `approvalMode` 不是 `yolo` 时，它会把 `bash` 问过来（`session/request_permission`，kind
+     * `execute`，四个档一个不少），我们从它自己给的 options 里挑一个 `allow_always` 回过去，
+     * 它照旧把那次调用记成 `Tool call denied by user: bash` —— `terminal/create` 一次都不发生
+     * （`terminals: 0`）。换成 `yolo` 之后同一条命令立刻走通（`terminals: 1`，跑的是我们的终端）。
+     *
+     * 也就是说卡住它的是 **agent 自己内部那道审批**，而不是本客户端的能力申报或我们的回答。
+     * 这个组合因此是一个可证明用不了的工具留在配置里 —— 模型会试、失败、然后绕路或编一个理由，
+     * 而唯一能让它说得出口的地方就是这一行（「摘除比伪造安全」，`docs/16 §5`）。
+     *
+     * **默认值现在就是 `yolo`**（需求方拍板：整趟交给它），所以这条 warn 只在运维**主动**把它拨回
+     * `write` / `always-ask` 而又留着 `bash` 时出现 —— 也就是「界面上配了、运行时用不了」那个形态。
+     * 取舍写在 `docs/05 §3.5.1`。
+     */
+    if (terminals && agent.tools.includes('bash') && agent.approvalMode !== 'yolo') {
+      notes.push(`agents[].tools 里有 bash，而 approvalMode=${agent.approvalMode}（默认是 yolo，这是被改过的）—— 实测 omp 在这一档会把 bash 问过来、我们放行、它照旧自己拒掉（terminal 一次都没用上）。要它真能跑命令得配 approvalMode: yolo；想逐条拦就把 agent.acp.permissionMode 拨到 ask`);
+    }
+    return { fs: new AcpFs(files), terminals, jail, capabilities: acpClientCapabilities({ fs: true, terminal: Boolean(terminals) }), notes };
   }
 
   #trace(trace?: AcpTrace): { traceId?: string; chatId?: string; userId?: string; key?: string } {
@@ -308,7 +558,7 @@ export class AcpManager {
   }
 
   /** spawn → 连接 → initialize（含版本协商与 authenticate 那一支）→ `session/new` → 会话模式。 */
-  async #open(agent: AcpAgentSettings, dir: string, settings: AcpSettings, sink: AcpUpdateSink, options: AcpRunOptions): Promise<OpenOutcome> {
+  async #open(agent: AcpAgentSettings, dir: string, settings: AcpSettings, sink: AcpUpdateSink, options: AcpRunOptions, surface: AcpSurface): Promise<OpenOutcome> {
     // `spawn()` 绝大多数失败是异步的（ENOENT 走 'error' 事件，靠 `child.spawned` 分档），但**参数
     // 本身不合法时它同步抛** —— `command` 里一个 NUL 字节就够。让那一路也落进错误契约，而不是
     // 抛出去变成 `execute()` catch 里那句裸的 `error.message`。
@@ -330,36 +580,79 @@ export class AcpManager {
       // 超时与取消**不**归到 `acp_spawn_failed`：那句 hint 让运维去查「装没装、拼没拼错」，
       // 而这两档跟可执行文件在不在毫无关系。让它们照原样穿到下面那个 catch 去分档。
       catch (error) { throw error instanceof AcpTimedOut || error instanceof AcpAborted ? error : new AcpFailureError(acpFailure('acp_spawn_failed', error)); }
+      /**
+       * 逐条审批的处理器。**只在 `ask` 那一档、且运行时真接上了审批通道时存在**；给出来就完全接管，
+       * `floorPermission` 不再参与（串联的话「谁先答」变成一个要看代码才知道的问题）。
+       *
+       * `jail` 为 null（没有 `host`）时拿不到边界判据，那时按没有 gate 处理 —— 落到地板上的 `ask`
+       * 是**按 deny 算**的，fail-closed 在这一侧。
+       */
+      const gate = settings.permissionMode === 'ask' && surface.jail
+        ? options.hooks?.permission?.({ jail: surface.jail, agent: agent.name, onUnanswerable: () => sink.onPermissionUnanswerable?.() })
+        : undefined;
+      const fs = surface.fs;
+      const terminals = surface.terminals;
       connection = client({ name: 'luolicore' })
         .onNotification('session/update', ({ params }) => { sink.accept(params); })
         .onRequest('session/request_permission', async (ctx) => {
-          if (options.hooks?.requestPermission) return await options.hooks.requestPermission(ctx.params, ctx.signal);
-          const { response, floored } = floorPermission(ctx.params, settings.permissionMode);
-          this.log.event({ level: floored ? 'warn' : 'info', kind: 'acp.permission',
-            summary: `${agent.name} 请求权限（${ctx.params.toolCall.kind ?? 'other'}）→ ${floored ? 'ask 档本轮暂按放行' : settings.permissionMode}`,
+          if (gate) return await gate(ctx.params, ctx.signal);
+          const response = floorPermission(ctx.params, settings.permissionMode);
+          // `ask` 落到地板上 = 运行时压根没接审批通道，而 `available()` 本该已经把工具挡在目录外。
+          // 一条 warn 是这件事唯一的凭据 —— 而答案是**拒绝**，不是放行：一个叫 `ask` 的档实际在放行
+          // 正是 `docs/reviews/16 §5` 说的伪造一道门。
+          this.log.event({ level: settings.permissionMode === 'ask' ? 'warn' : 'info', kind: 'acp.permission',
+            summary: `${agent.name} 请求权限（${ctx.params.toolCall.kind ?? 'other'}）→ ${settings.permissionMode === 'ask' ? 'ask 档没有审批通道，按 deny 处理' : settings.permissionMode}`,
             ...this.#trace(options.trace),
-            data: { agent: agent.name, mode: settings.permissionMode, floored, kind: ctx.params.toolCall.kind ?? null,
+            data: { agent: agent.name, mode: settings.permissionMode, gated: false, kind: ctx.params.toolCall.kind ?? null,
               title: ctx.params.toolCall.title ?? null, outcome: response.outcome.outcome } });
           return response;
         })
-        // 没申报能力就不该被调，不守规矩的那些照旧要拿到一个干净的 `methodNotFound`。
-        // **注意这七行不是那个保证的来源**：SDK 的 `Connection.processIncomingMessage` 对任何
-        // 没人认领的 request 已经自己回 `methodNotFound` 了（还有五个 client 方法我们连名字都没写，
-        // 走的正是那条默认路）。写出来只为一件事：让波 3 有一个显眼的落点，且**换掉它们的那个提交
-        // 必须同时改 `ACP_CLIENT_CAPABILITIES`** —— 先申报后实现的中间态，每一次 `fs/read_text_file`
-        // 都是一次挂死。
-        .onRequest('fs/read_text_file', () => { throw RequestError.methodNotFound('fs/read_text_file'); })
-        .onRequest('fs/write_text_file', () => { throw RequestError.methodNotFound('fs/write_text_file'); })
-        .onRequest('terminal/create', () => { throw RequestError.methodNotFound('terminal/create'); })
-        .onRequest('terminal/output', () => { throw RequestError.methodNotFound('terminal/output'); })
-        .onRequest('terminal/wait_for_exit', () => { throw RequestError.methodNotFound('terminal/wait_for_exit'); })
-        .onRequest('terminal/kill', () => { throw RequestError.methodNotFound('terminal/kill'); })
-        .onRequest('terminal/release', () => { throw RequestError.methodNotFound('terminal/release'); })
+        /**
+         * 反向 fs（`docs/05 §3.5.2`）。**`surface.fs` 为 null 时照旧抛 `methodNotFound`** ——
+         * 那一档我们压根没申报（`acpClientCapabilities` 是从它算出来的），而不守规矩的 agent 应该
+         * 拿到一个干净的错，不是一个挂住的请求。
+         *
+         * 读走的是 `FileTools.readText` 而**不是** `read()`：后者无条件加 `行号<TAB>` 前缀，而 ACP 的
+         * 写是全量覆盖 —— 读出来改两行写回去就把整个文件换成带行号的垃圾（理由全文在 `fs.ts`）。
+         */
+        .onRequest('fs/read_text_file', (ctx) => {
+          if (!fs) throw RequestError.methodNotFound('fs/read_text_file');
+          return fs.readTextFile(ctx.params);
+        })
+        .onRequest('fs/write_text_file', (ctx) => {
+          if (!fs) throw RequestError.methodNotFound('fs/write_text_file');
+          return fs.writeTextFile(ctx.params);
+        })
+        // 反向终端（`docs/05 §3.5.2`）。同上：没申报的那一档抛 `methodNotFound`。
+        .onRequest('terminal/create', (ctx) => {
+          if (!terminals) throw RequestError.methodNotFound('terminal/create');
+          return terminals.create(ctx.params);
+        })
+        .onRequest('terminal/output', (ctx) => {
+          if (!terminals) throw RequestError.methodNotFound('terminal/output');
+          return terminals.output(ctx.params.terminalId);
+        })
+        // `signal` 在这条请求被取消 / 连接关闭时触发，**必须 settle** —— 不 settle 的话 SDK 那侧留一个
+        // 永不应答的请求，而 agent 就挂在那儿。`waitForExit` 自己认它。
+        .onRequest('terminal/wait_for_exit', (ctx) => {
+          if (!terminals) throw RequestError.methodNotFound('terminal/wait_for_exit');
+          return terminals.waitForExit(ctx.params.terminalId, ctx.signal);
+        })
+        .onRequest('terminal/kill', (ctx) => {
+          if (!terminals) throw RequestError.methodNotFound('terminal/kill');
+          terminals.kill(ctx.params.terminalId);
+          return {};
+        })
+        .onRequest('terminal/release', (ctx) => {
+          if (!terminals) throw RequestError.methodNotFound('terminal/release');
+          terminals.release(ctx.params.terminalId);
+          return {};
+        })
         .connect(ndJsonStream(child.stdin, child.stdout));
       this.#connections.set(child, connection);
       const cx = connection.agent;
       const init = await withTimeout(cx.request('initialize', { protocolVersion: PROTOCOL_VERSION,
-        clientCapabilities: ACP_CLIENT_CAPABILITIES, clientInfo: { name: 'luolicore', version: '0.1.0' } }), agent.handshakeTimeoutMs, `${agent.name} initialize`, options.abortSignal);
+        clientCapabilities: surface.capabilities, clientInfo: { name: 'luolicore', version: '0.1.0' } }), agent.handshakeTimeoutMs, `${agent.name} initialize`, options.abortSignal);
       if (init.protocolVersion !== PROTOCOL_VERSION) {
         throw new AcpFailureError(acpFailure('acp_protocol_unsupported', `agent 谈出 v${init.protocolVersion}，本客户端只支持 v${PROTOCOL_VERSION}`));
       }
@@ -454,6 +747,13 @@ export class AcpManager {
   }
 
   async close(): Promise<void> {
+    // 终端排在子进程**之前**：先把 agent 让我们起的那些命令杀掉，再收 agent 本身。反过来的话
+    // 那一小段窗口里 agent 已经没了而它的命令还在往一条没人读的管道里写。
+    for (const terminals of [...this.#terminals]) {
+      const live = terminals.releaseAll();
+      if (live.length) this.log.event({ level: 'warn', kind: 'acp.run', summary: `关停时收拾了 ${live.length} 个没 release 的 ACP 终端`, data: { terminalsLeaked: live.length, at: 'shutdown' } });
+      this.#terminals.delete(terminals);
+    }
     for (const child of [...this.#children]) void this.#discard(child, this.#connections.get(child));
     await Promise.all([...this.#closing]);
   }

@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AgentManager, Config, ContextEngine, FileTools, MemoryStore, ModelRegistry, QuotaGuard, QuotaReservation, Sandbox, SkillLoader, ToolRegistry, UsageLedger, LogSink } from '@luoli/core';
-import { DEFAULT_WEB_RETRY, NOTE_PREFIX, acpFailure, arbitrateAsk, builtinPolicy, captureImage, enabledAcpAgents, numberLines, readSlice, runHarness, runSubAgent, webFetch, webSearch, type AcpManager, type AcpSettings, type WebAssetStore, type WebMediaSink, type WebRetryOptions } from '@luoli/core';
+import { DEFAULT_WEB_RETRY, NOTE_PREFIX, acpFailure, acpPermissionGate, arbitrateAsk, builtinPolicy, captureImage, enabledAcpAgents, numberLines, readSlice, resolveAcpTarget, runHarness, runSubAgent, selfAuthoringDenyGlobs, webFetch, webSearch, type AcpApprovalBroker, type AcpManager, type AcpSettings, type WebAssetStore, type WebMediaSink, type WebRetryOptions } from '@luoli/core';
 import type { ArchiveRepository, ArchivedMessage, ScopedArchiveRepository } from '@luoli/db';
 import { archiveQuery } from '@luoli/db';
 import { citeArchivedMessages } from './cite.js';
@@ -35,6 +35,37 @@ export interface TelegramToolBridge {
   sendFile(target: TelegramTarget, absolutePath: string, caption?: string): Promise<object>;
   react(target: TelegramTarget, messageId: number, emoji: string): Promise<object>;
   pin(target: TelegramTarget, messageId: number): Promise<object>;
+  /**
+   * ACP 的进度卡片（`docs/05 §3.5.2`）。**这一个是可选的，与上面五个刻意不同** ——
+   * presence 就是开关：拿不到（没有 Telegram 入口、或适配层这一版还没实现）时 `spawn_acp` 照旧跑，
+   * 只是屏幕上没有中途的动静。上面五个是必填的理由不适用于它：漏传那五个会让工具**永久消失**而
+   * 启动断言只看注册没注册；这一个漏了只是少一层呈现，工具本身照旧在目录里、照旧能用。
+   *
+   * 返回 `null` = 这个会话上开不出卡片。**渲染选项由调用方从本轮 `turn.config` 取**，不是这里读
+   * 全局快照：`output.*` 在 `PER_CHAT_OVERRIDE_ALLOWLIST` 里，读快照就是把会话级覆盖静默丢掉。
+   */
+  openProgressCard?(target: { chatId: string; threadId: number | null; turnId?: string; parentSpanId?: string }, options: {
+    parseMode: 'MarkdownV2' | 'HTML' | 'none'; maxMessageChars: number; intervalMs: number;
+    /** 那台 agent 的 `name`，进卡片表头。不给就退化成一句「外部 agent」。 */
+    agent?: string;
+    /** 会话 root（realpath）。卡片拿它把 agent 报上来的绝对路径相对化 —— 不给就每行多一条长路径。 */
+    dir?: string;
+    thoughts?: boolean;
+  }): Promise<AcpProgressCard | null>;
+}
+
+/**
+ * 一张在途的 ACP 进度卡片。**两个方法都永不 throw** —— 一次改文案绝不能把一次正在改仓库的调用
+ * 变成失败（同「回执失败不影响审批本身」那条纪律）。
+ */
+export interface AcpProgressCard {
+  /** 一条 `session/update` 原件。节流、渲染、去重都在适配层。 */
+  push(notification: unknown): void;
+  /**
+   * 终帧。**归档只在这里发生一次** —— `ScopedArchiveRepository.append` 是 `INSERT OR IGNORE`，
+   * 首帧就归档等于把「正在启动…」永久钉进 `messages` 与 FTS。
+   */
+  close(final: { stopReason?: string; error?: string; files: number; failures: number; toolCalls: number; costUsd?: number }): Promise<string>;
 }
 
 /**
@@ -128,7 +159,16 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
    * 「每个 `TOOL_POLICY` 条目都已注册」的启动断言要求无条件注册）但 `available()` 恒假，
    * 于是它连模型的工具目录都不进。分段用例不需要起一个真管着子进程的 manager。
    */
-  acp?: AcpManager }): void {
+  acp?: AcpManager;
+  /**
+   * 审批 broker。**只有 ACP 的逐条 permission 用它**（`docs/05 §3.5.3`）：工具自己那道审批走的是
+   * `ToolRegistry` 手里的同一个对象，这里要的是「不是工具调用、但走同一条链」那两个动作。
+   *
+   * **可选，而它的缺席是一道真的门**：`permissionMode === 'ask'` 且没有它时 `spawn_acp` 直接不进
+   * 工具目录（照 `allowedDirs` 为空的同一形态）—— 一个叫 `ask` 的默认值实际在放行，正是
+   * `docs/reviews/16 §5` 说的伪造一道门。
+   */
+  approvals?: AcpApprovalBroker }): void {
   const web = dependencies.web ?? DEFAULT_WEB_RETRY;
   /**
    * 本次调用的图片落地口。**每次调用现建**：`visionAvailable` 判的是本轮**当前**别名的能力位，
@@ -463,16 +503,20 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
     names.length > 1
       ? z.object({ task: z.string().min(10), dir: z.string(), agent: z.enum(names as unknown as [string, ...string[]]) })
       : z.object({ task: z.string().min(10), dir: z.string() });
-  // description 里那句「跑不了 shell 命令」是实测出来的，**不是保守说法**：本轮
-  // `ACP_CLIENT_CAPABILITIES` 不申报 `terminal`，而 omp 的 `bash` 在没有这项能力时会走到
-  // permission 问过、我们放行了、调用照样以 `Tool call denied by user: bash` 失败。读写改文件不受
-  // 影响（它退回自己直接碰磁盘）。波 3 接反向 terminal 时，这句话与那份实现同一个提交删掉。
-  registry.register({ name: 'spawn_acp', description: '在允许的仓库目录里让一台本机编码 agent（经 ACP 协议驱动）执行任务；仅 owner、仅私聊。它自带一整套工具并会真的改文件 —— 任务要写成自包含的一段话，说清目标、约束和验收方式。**本版不向它开放终端，所以它跑不了 shell 命令**（读、写、改文件都正常）：要跑命令、装依赖、跑测试的活儿改用 bash，或者把命令写进任务里让用户自己跑。',
+  /**
+   * `permissionMode === 'ask'` 但运行时没有审批 broker 时**整个工具不进目录**（照 `allowedDirs`
+   * 为空的同一形态）。一个叫 `ask` 的档实际在放行，正是 `docs/reviews/16 §5` 说的伪造一道门；
+   * **`ask` 不是默认档**（默认 `auto`，`docs/14 §2 Q8-c`），所以这道闸只对主动配了它的部署生效；
+   * 而落在 `available()` 上比落在 `execute()` 上好：模型不会去试一个必然被拒的调用。
+   */
+  const acpPermissionReady = (acp: AcpSettings): boolean => acp.permissionMode !== 'ask' || Boolean(dependencies.approvals);
+  registry.register({ name: 'spawn_acp', description: '在允许的仓库目录里让一台本机编码 agent（经 ACP 协议驱动）执行任务；仅 owner、仅私聊。它自带一整套工具（读写改文件、跑 shell 命令）并会真的改仓库 —— 任务要写成自包含的一段话，说清目标、约束和验收方式（例如「改完跑 pnpm test」）。',
     inputSchema: acpInputSchema([]), inputSchemaFor: (context) => acpInputSchema(enabledAcpAgents(acpSettings(context)).map((agent) => agent.name)),
     policy: builtinPolicy('spawn_acp'), sourcePriority: 90, timeoutMs: null, untrustedOutput: true,
     available: (role, context) => {
       const acp = acpSettings(context);
-      return Boolean(dependencies.acp) && role === 'owner' && context.turn.isPrivate && acp.enabled && acp.allowedDirs.length > 0 && acp.agents.some((agent) => agent.enabled);
+      return Boolean(dependencies.acp) && role === 'owner' && context.turn.isPrivate && acp.enabled && acp.allowedDirs.length > 0
+        && acp.agents.some((agent) => agent.enabled) && acpPermissionReady(acp);
     },
     execute: async (input, context) => {
       // `available()` 已经判过一遍，这里再判一次：热更新可能在注册与执行之间把整块关掉或把目录
@@ -482,13 +526,63 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
       // 的话「先改文档」就只能验到 manager 那一半（`docs/05 §3.5.1` 那张表是它们共同的文档来源）。
       if (!dependencies.acp) return acpFailure('acp_unavailable');
       if (!context.turn.isPrivate || context.turn.effectiveRole !== 'owner') return acpFailure('acp_forbidden');
-      return dependencies.acp.run({ task: input.task, dir: input.dir, ...(input.agent ? { agent: input.agent } : {}) }, acpSettings(context), {
+      const live = context.turn.config as Readonly<Config>;
+      const acp = acpSettings(context);
+      if (!acpPermissionReady(acp)) return acpFailure('acp_unavailable');
+      const approvals = dependencies.approvals;
+      /**
+       * 进度卡片。**渲染选项从本轮配置取** —— `output.*` 在 `PER_CHAT_OVERRIDE_ALLOWLIST` 里，
+       * 读全局快照就是把会话级覆盖静默丢掉（`main.ts` 里那几个读快照的 getter 是既有 bug 类）。
+       * 拿不到卡片（没有 Telegram 入口 / 适配层没实现 / 这个会话开不出来）就照旧跑，presence 即开关。
+       */
+      // agent 名字与目录走 `resolveAcpTarget` —— 与 `AcpManager.run` **同一个**判据。卡片自己再算
+      // 一遍的话，「屏幕上说的目录」与「真的在跑的目录」就是两个可以分叉的答案；而 `dir` 是卡片把
+      // agent 报上来的绝对路径相对化的基点（不给它就每行退回一条长路径，小预算下多丢一整段）。
+      // 拿不到（准入不过）时不填：`run()` 随即会用同一个判据交回那条失败。
+      const target = resolveAcpTarget({ task: input.task, dir: input.dir, ...(input.agent ? { agent: input.agent } : {}) }, acp);
+      const card = await dependencies.telegram?.openProgressCard?.(
+        // `turnId` 是卡片那两条 `tg.send` / `tg.edit` span 的 traceId —— 不给就又是一张平表
+        // （`docs/28 · L-LOG-02`）。`parentSpanId` 让它们挂在本次 `tool.call` 之下。
+        { chatId: context.turn.chatId, threadId: context.turn.threadId, turnId: context.turn.turnId,
+          ...(context.parentSpanId ? { parentSpanId: context.parentSpanId } : {}) },
+        { parseMode: live.output.parseMode, maxMessageChars: live.output.maxMessageChars, intervalMs: acp.progressIntervalMs,
+          ...(target.ok ? { agent: target.agent.name, dir: target.root } : {}) }).catch(() => null) ?? null;
+      const result = await dependencies.acp.run({ task: input.task, dir: input.dir, ...(input.agent ? { agent: input.agent } : {}) }, acp, {
         abortSignal: context.turn.abortSignal,
         // 与注册表 `#normalizeOutput` 量的是同一个上界（`main.ts` 把它接成 `tools.exec.maxOutputBytes`），
         // 交给 manager 去减固定字段的余量 —— 让「按构造有界」这件事有一个真实的被除数。
-        outputBudgetBytes: (context.turn.config as Readonly<Config>).tools.exec.maxOutputBytes,
+        outputBudgetBytes: live.tools.exec.maxOutputBytes,
+        /**
+         * 反向调用面的宿主侧闸门。**jail 不复用 `dependencies.filesFor`** —— 那份的 root 是
+         * `data/workspace/<chatId>`（`docs/14 Q8-b`），而 `tools.fs.allowHostFsForOwner` 一开它就是
+         * `/`：ACP 的边界必须是**这次被批准的那个仓库目录**。`denyGlobs` 照旧生效（绝对路径 glob，
+         * 不依赖 root），自撰写通道那两条也一起带上 —— 一台外部 agent 更没有理由能改已启用的 plugin。
+         */
+        host: {
+          fs: { denyGlobs: [...live.tools.fs.denyGlobs, ...selfAuthoringDenyGlobs({ skillsDir: live.skills.dir, pluginsDir: live.plugins.dir })],
+            maxReadBytes: live.tools.fs.maxReadBytes, maxWriteBytes: live.tools.fs.maxWriteBytes, backupDir: live.tools.fs.backupDir },
+          exec: { maxTimeoutMs: live.tools.exec.maxTimeoutMs, maxOutputBytes: live.tools.exec.maxOutputBytes },
+          // 终端**宿主直跑**，所以申报前先问一次。`bypassRoles: ['owner']` 下这一问对 ACP 恒为
+          // `'host'`；运维把 owner 从 bypassRoles 里拿掉时，terminal 能力当场不申报（而不是申报了
+          // 每次 create 都失败）。
+          plan: (root) => dependencies.sandbox.plan(context.turn.effectiveRole, root),
+        },
+        hooks: {
+          ...(card ? { onUpdate: (notification) => card.push(notification) } : {}),
+          // 只有 `ask` 那一档会被调（manager 判的），所以这里无条件给：给了而 mode 是 auto/deny 时
+          // 它一次都不会被调到，而把 mode 判据抄到这里就等于同一个判据有两份。
+          ...(approvals ? { permission: (binding) => acpPermissionGate({ approvals, context, log: dependencies.log, ...binding }) } : {}),
+        },
         trace: { traceId: context.turn.turnId, chatId: context.turn.chatId, userId: context.turn.initiatorUserId, key: context.turn.key },
       });
+      // 终帧。`close` 永不 throw（契约），但 `await` 它是刻意的：归档只在这一次发生，而工具返回之后
+      // 这一轮就开始收尾了。返回值是适配层自己的凭据，core 不解释它。
+      if (card) {
+        await card.close({ ...(result.stopReason ? { stopReason: result.stopReason } : {}), ...(result.error ? { error: result.error } : {}),
+          files: result.filesWritten ?? 0, failures: result.failures ?? 0, toolCalls: result.toolCalls ?? 0,
+          ...(result.costUsd === undefined ? {} : { costUsd: result.costUsd }) });
+      }
+      return result;
     } });
   registry.register({ name: 'read_agent_result', description: '分页读取子 agent 完整结果。', inputSchema: z.object({ runId: z.string(), offset: z.number().int().nonnegative().default(0), limit: z.number().int().positive().max(262_144).default(65_536) }), policy: builtinPolicy('read_agent_result'), sourcePriority: 90,
     execute: (input) => ({ ok: true, ...dependencies.agents.result(input.runId, input.offset, input.limit) }) });

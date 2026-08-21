@@ -358,7 +358,20 @@ CREATE TABLE agent_runs (
   state            TEXT NOT NULL CHECK (state IN ('running','done','failed','cancelled')),
   steps INTEGER DEFAULT 0, tool_calls INTEGER DEFAULT 0,
   input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0,
-  cost_usd REAL NOT NULL DEFAULT 0,
+  cost_usd REAL NOT NULL DEFAULT 0,            -- **ACP 那种行恒为 0**，见下面两列
+  -- 外部编码 agent（M13 · `spawn_acp`）自己报的花费与用量（迁移 0014）。**两列都可空：
+  -- NULL = 它一次 usage_update 都没报过**，与「它报了 0」是两件事 —— 后者是一个它给出的数字。
+  -- 为什么另开两列而不是写 cost_usd：那个数不是我们的钱。它是外部 agent 自己那份 provider 账单的
+  -- 累计值，口径由它定、我们无法核对、也没有 tokens × prices 可以重算；写进 cost_usd 就等于让它
+  -- 出现在每一个 SUM(cost_usd) 里，摆在我们自己的成本旁边就是邀请人把两者相加。所以 ACP 行的
+  -- cost_usd 恒 0，结构上把外部数字挡在每一个聚合之外。
+  -- 同理这两列**不进** usage_ledger（那张表的行有 provider 身份，provider_id / model_id 必填、
+  -- 用量页按它分桶，塞一条 provider_id='omp' 等于凭空造一个我们不拥有的 provider）、也不进
+  -- quota_counters / turns.cost_usd（配额的分母是本系统的 key，掺进外部花费后那个比例看起来权威、
+  -- 实际无意义）。落库 ≠ 记账接上了，唯一的闸仍然是 agent.acp.maxCostUsd（04 §6.2）。
+  external_cost_usd REAL,
+  external_usage_json TEXT,                    -- 自描述载荷（source / agent / model 都在里面）：
+                                               -- 读的人要能看出这些数字的出处不是本系统
   result_summary TEXT, result_full_ref TEXT,   -- 全文落盘路径（避免撑爆 DB）：存**相对**结果目录
                                                -- （<LUOLI_DATA_DIR|cwd>/data/agent-results）的 ref，
                                                -- 与 attachments.local_path 同一套。存绝对路径的话
@@ -386,6 +399,18 @@ CREATE TABLE agent_messages (
 CREATE INDEX ix_agentmsg_turn ON agent_messages(turn_id, created_at);
 CREATE INDEX ix_agentmsg_pending ON agent_messages(to_run_id, state) WHERE state='sent';
 ```
+
+**迁移 0014 是附加式的，一个 CHECK 都没碰。** `kind` 上那条 `CHECK (kind IN ('main','sub'))` 要给
+ACP 加一档就得整表重建，而 `agent_runs` 是 trace 的骨架表（§4：`turns` / `tasks` 永久保留，靠这张表
+把子 run 串起来）—— 重建期间那些 id 引用全在半空中。所以 **ACP 行照旧记 `kind='sub'`**，认它靠
+`agent_name='acp:<name>'` + `model_alias='external'` 这一对，而不是一个新的 kind。
+
+**连带后果，如实记下：一条 ACP 行会占掉本轮一个子 agent 名额。** `AgentManager.spawn()` 判
+`agent.maxSubagentsPerTurn`（默认 10）用的是
+`SELECT COUNT(*) FROM agent_runs WHERE turn_id=? AND kind='sub'` —— 它数的是行，不看 `agent_name`。
+这是既有计数口径的连带结果，不是为 ACP 设计的额度。范围有限但真实：ACP 那一行是**跑完之后**才
+一次性插入的（没有 `state='running'` 那一段），所以受影响的只有同一轮里排在它**后面**的
+`spawn_agent`。
 
 ### 2.8 Provider 与模型
 
@@ -638,13 +663,24 @@ CREATE TABLE approvals (
   tg_message_id INTEGER,
   requested_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
   decided_by TEXT, decided_at INTEGER, decision_channel TEXT
-  -- decision_channel: telegram|webui|system
-  -- decided_by 有三种格式，无 CHECK 约束：`user:<tgId>`（Telegram 点的按钮，见 [05 §6.1]）、
+  -- decision_channel: telegram|webui|system|acp:always
+  -- decided_by 有四种格式，无 CHECK 约束：`user:<tgId>`（Telegram 点的按钮，见 [05 §6.1]）、
   -- 字面量 `owner`（WebUI 的 POST /api/approvals/:id/decide —— 那一面只有一个 owner 身份，A15）、
-  -- `system`（TTL 到期 / 轮次取消 / 回执发不出去 / 启动扫描）。**回执正文一律说 decision_channel
+  -- `system`（TTL 到期 / 轮次取消 / 回执发不出去 / 启动扫描）、`acp:always`（M13 的
+  -- `DatabaseApprovalBroker.recordDecided()`：ACP 那条路上会话内的 allow_always / reject_always
+  -- 记忆命中了，这一次没有任何人被问）。**没问人也要落一行**：不落的话「批了一次之后它接着改了
+  -- 40 个文件」在审计里只剩最初那一条，而 always 恰恰是最需要被数出来的一档。这些行**出生即已
+  -- 裁决** —— requested_at == decided_at、decision_channel 同为 acp:always、state 直接是
+  -- approved/denied，从不经过 pending，所以 TTL 与下面 tg_message_id 那套待办机器一样都碰不到
+  -- 它们（没有回执、没有按钮、没有可过期的东西）。**回执正文一律说 decision_channel
   -- 而不是这一列**：一串 Telegram id 对群里其他人什么都不是，还顺手把 owner 的 id 抖出去。
   -- WebUI 的审批卡走服务端的 `decidedByLabel()` → `principalLabel()` 反查显示名（docs/21 · G-API-24），
   -- 格式的解析只有 `parsePrincipal` 那一份 —— 前端不许自己拆 `user:` 前缀。
+  -- tool_name **不必是一个注册过的工具**：ACP 逐条审批那条路恒为字面量 `acp_permission`，不按
+  -- toolCall.kind 拆成 `acp:edit` 这类名字 —— `approval.rules` 只对「名字 + JSON.stringify(input)」
+  -- 求值，而这条路的 input 里已经有 kind / paths / outsideJail / toolCallId，`"kind":"execute"`
+  -- 本身就够精准；多编一批工具名换来的是 WebUI 工具页上一批点不进去的行，与 `tools.overrides`
+  -- 里一批运维改了也没用的键（那张表只认注册过的工具）。规格见 [05 §3.5.3]。
   -- 有裁决通道时才写 pending 行，判据是**两条通道**都没有才当场拒：WebUI 的 SSE
   -- （`EventBus.channelCount > 0`，`{channel:true}` 标记的订阅者）**或** Telegram 的 inline keyboard
   -- 对**这个会话**可用（`PendingPrompts.available(chatId)`，见 [05 §6]）。命中规则的调用落成 pending

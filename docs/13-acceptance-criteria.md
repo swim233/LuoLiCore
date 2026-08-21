@@ -168,6 +168,7 @@
 | [ ] AC-AGENT-008 (自动) | `limited` 用户触发 `set_model` | 工具不可用 |
 | [x] AC-AGENT-009 (自动) ★ | ACP 的取消与上界 | 取消一轮时线上出现的是 `session/cancel`、agent 用 `stopReason: 'cancelled'` 应答（进程在那之后才收）；`agents[].timeoutMs` 走同一条路，但报 `acp_timeout` 而不是 `acp_cancelled`（我们自己的原因压过对方那句实话 —— 它的 hint 里有下一步该做什么）；`maxCostUsd` 同理，而它是 **ACP 花费唯一的闸**（agent 烧的是自己那份 provider 凭据，`usage_ledger` 与 `quota.*` 一个数都看不见）；单行字节越界报 `acp_line_too_long` 而不是 `acp_connection_lost`（后者会把运维打发去查一个不存在的退出码）；`maxUpdatesPerPrompt` 溢出**只丢弃、不断连** | 〔acp.runtime.test.ts〕
 | [x] AC-AGENT-010 (自动) | ACP 的 StopReason 五档 | 只有 `end_turn` 算成功；`max_tokens` / `max_turn_requests` / `refusal` / `cancelled` 各有自己的错误码与一句能照着做的 hint。最危险的是 `max_tokens`：它长得最像成功，而活只干了一半 —— 报成 ok 的话，模型会拿着一份做了一半的改动向用户宣布完成 | 〔acp.runtime.test.ts〕
+| [x] AC-AGENT-011 (自动) | ACP 的反向终端 | 申报 `terminal` 之前先问 `sandbox.plan(role, root)`，**不是 `host` 就整个 capability 不申报**（申报了让 agent 每次 create 都失败是更坏的形态 —— 它会反复试，而每次失败都换来一段它自己编的解释），那一档配置里留着的 `bash` 被 `acp.run` 点名；`create` / `output` / `wait_for_exit` / `kill` / `release` 各是一个动词（kill 之后 output 照旧读得到）；argv **直传不过 shell**；`detached: true` + `process.kill(-pid)` 杀整个进程组（孙进程不留成孤儿）；输出超上界**从头部丢、保尾部**（协议明文，与本仓 `elideMiddleBytes` 的留头留尾刻意分岔）；硬期限 `tools.exec.maxTimeoutMs` 与句柄上界 `agent.acp.maxTerminals`（含已退出但没 release 的）；三道 release 兜底（`abortSignal` / 工具返回的 finally / 进程关停），命令活到收摊时那一行被抬成 warn | 〔acp.terminal.test.ts〕
 | [x] AC-PROV-001 (自动) | P1 返回 429 | 按 `retry_after` 退避重试；仍失败则 fallback 到 P2；日志有 `provider.fallback` | 〔provider.test.ts〕
 | [ ] AC-PROV-002 (自动) | P1 返回 401 | 不重试、不 fallback，直接失败并告警（认证错误） |
 | [ ] AC-PROV-003 (自动) ★ | 全部 provider 不可用 | 回复「模型暂时不可用(ref:…)」；`turns.state='failed'`；**delta 未提交** |
@@ -380,6 +381,7 @@
 | [x] AC-LOG-021 (自动) | `span.end()` 不给载荷 / 给一个非对象值 / 调两次 | 不给：开始那份原样保留；非对象：挂在 `result` 下而不顶掉开始那份；两次：只落一行 | 〔log.span.test.ts〕
 | [x] AC-LOG-022 (自动) | `GET /api/usage/report?groupBy=provider` | 每个桶带 `cacheReadTokens` / `cacheWriteTokens`，bucket 的裸 provider id 在服务端补成 provider 名。`cache_read_tokens` 一直在记账里，缺了这条聚合时「某家上游的前缀缓存是不是真的」只能靠翻 JSONL 反推请求体逐轮比对前缀 —— 而中转站的命中可能是概率性的，只有按 provider 看这个比值才测得出（[04 §5.1.1](./04-agents-and-providers.md)、[09 §3.11](./09-webui.md)） | 〔webui.gaps.test.ts〕
 | [x] AC-LOG-023 (自动) | `send_message` 被 Telegram 拒收（403 拉黑 / 被踢） | 投递侧落一行 **warn** `tg.send`（`path:'tool'`、`ok:false`、带 traceId 与本次 `tool.call` 的 span id）；`once` 与 `fallback` 两条**抛出去**的路径同样落。此前五个调用点全硬写 `ok:true`，失败档不可达 —— 只剩没有 traceId 的 `tg.api`，而它回答不了「这一轮到底发出去了什么」（docs/28 · L-LOG-02） | 〔telegram.tools.test.ts、output.pacing.test.ts〕
+| [x] AC-LOG-024 (自动) ★ | 一次 ACP 调用跑完，查它在 `agent_runs` 上那一行与三张计价表 | 外部花费进 `external_cost_usd`（迁移 `0014`；agent 一次 `usage_update` 都没报时是 **NULL** 而不是 0 —— 「没报过」与「报了 0」是两件事），**同一行的 `cost_usd` 恒为 0**，于是 `SELECT SUM(cost_usd) FROM agent_runs` 全表仍然是 0；行靠 `kind='sub'` + `agent_name='acp:<name>'` + `model_alias='external'` 认（迁移是附加式的，`kind` 上那条 CHECK 一个字没碰）；`usage_ledger` / `quota_counters` / `turns` **零新增** —— 那个数不是我们的钱，口径由外部 agent 定、我们无法核对，摆在自己的成本旁边就是邀请人把两者相加（唯一的闸仍是 `agent.acp.maxCostUsd`）；记账本身失败时**调用的结果不变**，只多一条带 `recordFailed` 的 `acp.run` warn（一次已经改完仓库的调用报成失败，模型会以为什么都没发生）| 〔acp.runtime.test.ts〕
 | [ ] AC-LOG-003 ★ | 展开任一 `tool.call` | 含完整输入、输出（或截断标记+全文引用）、耗时、是否沙箱、是否经审批 |
 | [ ] AC-LOG-004 (自动) ★ | 求和校验 | 该 turn 所有 `usage_ledger.cost_usd` 之和 == `turns.cost_usd`（误差 <1e-9） |
 | [ ] AC-LOG-005 (自动) | 子 agent 的 span | `parent_span_id` = 派发它的 `tool.call` span；费用计入同一 `turn_id` |
@@ -606,7 +608,9 @@
 | [x] AC-SEC-025 (自动) | `tools.fs.denyGlobs` 被运维改写、或 `skills.dir`/`plugins.dir` 指向别处时的 `PathJail` | 两个自撰写目录照样 `path_denied`：那道拒绝由目录配置推出来并**叠加**在运维那份数组之上，不是 schema 默认值里的两条字面量（后者在非默认部署上一条都不生效，而那正是 `allowHostFsForOwner` 打开时最需要它的时候） | 〔security.test.ts〕
 | [x] AC-SEC-026 (自动) ★ | `spawn_acp` 的三道门 | 默认（`agent.acp.enabled=false`，或 `allowedDirs` 为空）**不进模型的工具目录**，群聊同样不进；运维把 `minRole` 覆盖到 `limited` 之后，目录与 `admit()` 两侧**同时**仍然拒绝；策略档位恒为 owner + `approval: 'always'`，且与 `spawn_harness` **逐字节相同** —— 风险面是同一个（docs/14 T17），可观测性不换权限；任务正文**不经 argv、也不经 shell**（它是 `session/prompt` 的一个 text content block） | 〔acp.runtime.test.ts〕
 | [x] AC-SEC-027 (自动) ★ | 目录边界与目录互斥 | 只放行 `agent.acp.allowedDirs` 之内的路径（与 harness 共用 `resolveHarnessDir`，所以 `/srv/app-secrets` 不算 `/srv/app` 的子目录）；两个并发轮次绝不会把两台 agent 放进同一个目录（按 `realpath` 硬互斥）；这道等待**有界且可取消**，等不到时交回 `acp_dir_busy`，而不是让第二个调用干等十五分钟（外层工具是 `timeoutMs: null`） | 〔acp.runtime.test.ts〕
-| [x] AC-SEC-028 (自动) | 子进程与凭据 | `LUOLI_MASTER_KEY` / `BOT_TOKEN` / `WEBUI_PASSWORD` 不进子进程的 env（与 `HARNESS_ENV_DENY` 同一份判据：两处都是我们看不见内部行为的进程），而 `process.env` 其余部分照旧整份交下去 —— agent 要用它自己的登录态；`--approval-mode` **无条件下发**，profile 里写着 `approvalMode: yolo` 也静默去不掉那道权限门；`extraArgs` 里重写任何一个被管着的 flag 在写入端当场拒收 | 〔acp.runtime.test.ts〕
+| [x] AC-SEC-028 (自动) | 子进程与凭据 | `LUOLI_MASTER_KEY` / `BOT_TOKEN` / `WEBUI_PASSWORD` 不进子进程的 env（与 `HARNESS_ENV_DENY` 同一份判据：两处都是我们看不见内部行为的进程），而 `process.env` 其余部分照旧整份交下去 —— agent 要用它自己的登录态；`--approval-mode` **无条件下发**，这一档由本系统的配置说了算而不由磁盘上那份 profile 说了算（默认值是 `yolo`，而运维把它拨回 `write` 时必须真的生效）；`extraArgs` 里重写任何一个被管着的 flag 在写入端当场拒收 | 〔acp.runtime.test.ts〕
+| [x] AC-SEC-029 (自动) ★ | ACP 的反向 fs 边界 | jail 是**新建**的 `PathJail`，root = `realpathSync(dir)`，与 `session/new` 的 `cwd`、子进程的 cwd 是同一个字面量（**不复用** `filesFor(workspace, role)` —— 那份的 root 是 `data/workspace/<chatId>`，且 `tools.fs.allowHostFsForOwner` 一开就是 `/`）；绝对路径越界、软链越界、`tools.fs.denyGlobs` 命中都在碰盘之前被拒，且**边界判据排在体积判据之前**（越界是安全信号，不该被一句参数抱怨盖掉）；读走 `readText` 所以正文**不含 `行号<TAB>` 前缀**（ACP 的写是全量覆盖）；超预算与非 UTF-8 都 fail-closed 且**不返回被截断的正文**；`line` / `limit` 拒收而不纠正；写经 `maxWriteBytes` 闸 + 覆盖前备份（真落在 `<root>/.luoli-bak/`）+ tmp/rename 原子落地 | 〔acp.fs.test.ts〕
+| [x] AC-SEC-030 (自动) ★ | ACP 的逐条审批（**不是默认档**：默认 `auto`，[14 §2](./14-open-questions.md) Q8-c） | `permissionMode: ask` 走同一张 `approvals` 表、同一套 `approval.rules` / TTL / 双通道裁决；`tool_name` 恒为 `acp_permission`（不按 kind 拆名字）；风险由 `toolCall.kind` 推而未知值落 medium、越界抬 high；**`approval.skipForOwner` 在这一处反过来豁免**（发起人是外部 agent 而非 owner 本人），所以 owner-only 的路径上 pending 行仍然真的出现；`allow_always` / `reject_always` 只落会话内存（绝不进 `approval.rules`）而**命中照旧落一条 `decided_by=acp:always` 的审计行**；`auto` / `deny` 一行都不落库；`signal` 触发时必须 settle 且那一档回 `cancelled` 是真话；agent 一个能表达我们结论的档都没给时回 JSON-RPC error + `session/cancel` → `acp_permission_unanswerable`，**不回 `cancelled` 假装是取消**；`ask` 而运行时没有审批 broker 时 `spawn_acp` 整个不进工具目录 | 〔acp.permission.test.ts〕
 | [ ] AC-SEC-021 | 默认配置（`approval.rules` 为空）下让 `trusted` 用户触发 `bash` | 启动日志有一条 `approval.no_rules` 警告、stderr 有对应提示、WebUI 审批页顶上说明「0 条规则时 conditional 等于 never」—— 门是开的这件事必须说出来（docs/27 · S-02，选定方案②） |
 
 ## 12. 运维与稳定性（AC-OPS）
@@ -633,15 +637,15 @@
 | 配置与 DB | | 15 / 25 | | | |
 | **上下文引擎** | | 31 / 40 | | | |
 | Telegram 与准入 | | 22 / 46 | | | |
-| Agent 与 Provider | | 25 / 45 | | | |
+| Agent 与 Provider | | 26 / 46 | | | |
 | 工具/沙箱/审批 | | 55 / 92 | | | |
 | Subagent 与任务 | | 26 / 44 | | | |
 | 记忆 | | 1 / 13 | | | |
-| 日志与成本 | | 8 / 28 | | | |
+| 日志与成本 | | 9 / 29 | | | |
 | 扩展生态 | | 29 / 53 | | | |
 | WebUI | | 15 / 89 | | | |
-| 安全 | | 12 / 28 | | | |
+| 安全 | | 14 / 30 | | | |
 | 运维 | | 2 / 10 | | | |
-| **合计** | | **241 / 513** | | | |
+| **合计** | | **245 / 517** | | | |
 
 **整体通过条件**：全部 ★ 项通过 + 非 ★ 项通过率 ≥ 95% + 所有豁免项经需求方书面确认。

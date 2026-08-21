@@ -807,26 +807,72 @@ M13 加的是第二条路，**与 harness 并存而不是替换它**：起一台
 |---|---|---|
 | 驱动方式 | 一条 argv，任务是最后一项 | `session/prompt`，任务是一个 text content block —— **argv 里根本没有任务** |
 | 收得回什么 | 混在一起的 stdout + stderr | 结构化的 `session/update` 流：思考、工具调用、计划、用量 |
-| 花费 | 完全不可见 | `usage_update.cost.amount`，因此 `agent.acp.maxCostUsd` 拦得住 |
+| 文件读写 | 它自己碰磁盘，我们看不见 | 走 `fs/read_text_file` / `fs/write_text_file`，经本次会话的 jail + `tools.fs.denyGlobs` + 覆盖前备份 + tmp/rename 原子落地 |
+| 跑命令 | 它 fork 的 shell，我们看不见 | 走 `terminal/*`，宿主直跑（cwd = 会话 root），但句柄数、硬期限、输出上界与进程组回收都在我们手里 |
+| 逐条审批 | 做不到 —— 一条 argv 交出去之后就没有交互面了 | 机器是有的（`session/request_permission` → 同一张 `approvals` 表、同一套 `approval.rules` / TTL / 双通道裁决），但**默认不生效**：`permissionMode` 默认 `auto`，要逐条问人得自己把它拨到 `ask` |
+| 花费 | 完全不可见 | `usage_update.cost.amount`，因此 `agent.acp.maxCostUsd` 拦得住；跑完还落一行 `agent_runs`（见下） |
 | 取消 | abortSignal → SIGTERM | `session/cancel` → 等 `stopReason: 'cancelled'` → 才收进程 |
 | 会话 | 没有会话概念 | 有，但**刻意不留**（见下） |
 
 **配置新开 `agent.acp`，不扩 `agent.harness`。** 后者 `args` 的契约是「任务正文作为 argv 最后
 一项」，而 ACP 下 argv 里没有任务 —— 同名同键语义相反是最坏的假开关。
 
-**记账仍然接不上，而这一次是「看得见但记不进」。** `usage_update` 给的是那台 agent 自己那份
-provider 账单的累计值，落进 `usage_ledger` 会污染本系统的成本口径（它不是我们的 provider、
-不是我们的模型、也不进 `quota`）。所以那个数字只出现在 `acp.run` 日志与交回模型的结果里，
-唯一的闸是 `agent.acp.maxCostUsd`。
+**两个默认值合起来是「整趟交给它」**，也就是 [14 §2 Q8-c](./14-open-questions.md) 原本的语义：
+起这台 agent 这一个动作整体走一次审批（`TOOL_POLICY` 上的 `approval: 'always'`），批了之后它内部
+怎么跑不再逐条拦。本系统侧 `agent.acp.permissionMode` 默认 **`auto`**（它问过来我们照样不问人），
+agent 内部那道 `agents[].approvalMode` 默认 **`yolo`**（它自己也不自拦）。后者不是「反正批过一次
+了」这种省事，而是另两档下 `bash` **可证明用不了**：实测 omp 17.4.0 在 `write` 下确实把 `bash` 问过来
+（`session/request_permission`，kind `execute`），我们从**它自己给的** options 里挑一个 `allow_always`
+回过去，它照旧把那次调用记成 `Tool call denied by user: bash` —— `terminal/create` 一次都不发生；
+换 `yolo` 之后同一条命令立刻走通（`terminals: 1`，命令真在宿主上跑）。所以卡住它的是 agent
+**内部**那道审批，不是我们的能力申报、也不是我们回了什么（上一轮把它归因给能力申报是错的，
+实测记录在 [05 §3.5.1](./05-tools-and-permissions.md)）。留一个可证明用不了的工具在默认值里，
+模型会去试、失败、然后绕路或者编一个理由 —— 「摘除比伪造安全」（[16 §5](./reviews/16-remediation-plan.md)）。
+
+**外部花费落库了，但记账仍然接不上。** 一次调用跑完在 `agent_runs` 上留一行：外部花费进
+`external_cost_usd` / `external_usage_json` 两列（迁移 `0014`，DDL 与理由在
+[03 §2.7](./03-data-model.md)），而那一行的 `cost_usd` **恒写 0**；行靠 `kind='sub'` +
+`agent_name='acp:<name>'` + `model_alias='external'` 认出来。**它绝不进 `usage_ledger` /
+`quota_counters` / `turns.cost_usd`**，三条理由各自成立：① `usage_ledger` 的行带 provider 身份
+（`provider_id` / `model_id` 必填、用量页按它分桶），塞一条 `provider_id='omp'` 等于凭空造一个我们
+不拥有的 provider；② 计价只有一份判据 —— `ledger/quota.ts` 那个 `modelCost()` 被删时留下的禁令是
+「下一个人接上这个函数就是同一个 bug 复活」（[28 · L-COST-02](./reviews/28-round10-live-system-test.md)），
+而 ACP 交回来的是**已经算好的**金额，没有 tokens × prices 可以重算；③ `quota` 的分母是本系统的 key，
+掺进外部花费之后配额比例就是一个看起来权威、实际无意义的数。所以**落库 ≠ 记账接上了**：那个数字
+出现在 `acp.run` 日志、`agent_runs` 那两列与交回模型的结果里，唯一的闸仍然是 `agent.acp.maxCostUsd`
+—— 照 `PUT /api/quota → not_implemented` 那条先例，摘除比伪造安全。
 
 **会话不落库、连接不缓存**：一次工具调用 spawn 一次，`finally` 里 `session/close`。理由不是
 「进程内状态假设」（`sessionId` 是外部存储的句柄，与 `sandbox_containers.container_id` 同型，
 落库是合规形态），而是**持久化它会把第三道门从「一次审批」偷偷改成「一次审批，此后永久」**。
 详见 [05 §3.5.1](./05-tools-and-permissions.md)。
 
-**看得见不等于拦得住。** T17 那条取舍一个字没变：`session/request_permission` 这一轮是地板
-（自动放行），真审批是波 3。所以 `spawn_acp` 的档位与 `spawn_harness` 逐字相同 —— 用可观测性
-换权限是错的方向。
+**看得见不等于拦得住。** T17 那条取舍**一个字都不用改，而在这两个默认值下它是字面真理**：三道门
+与 `spawn_harness` 逐字相同（用可观测性换权限是错的方向），我们**看得见**它每一次 `tool_call`
+（Telegram 进度卡片就在逐条渲染），但默认**不拦** —— `permissionMode` 默认 `auto`，`floorPermission`
+从 agent 自己给的 options 里挑第一个 allow 档回过去，不问人。真正拦得住的仍然是三道门里**目录白
+名单**那一道。
+
+**逐条审批是一台建好了、留着、有用例的机器，但它默认是关的。** `acpPermissionGate` →
+`DatabaseApprovalBroker.requestExternal` → 上面那张 `approvals` 表整条链都是实的（规格在
+[05 §3.5.3](./05-tools-and-permissions.md)），要它就把 `agent.acp.permissionMode` 拨到 `ask`。
+「机制存在」与「默认生效」是两件事，**别在任何地方把它写成「ACP 默认有逐条审批」**。拨过去的部署
+另有一条闸：一个落到地板上的 `ask` **按 deny 算**，而 `spawn_acp.available()` 已经把「配了 `ask` 却
+没有审批通道」的运行时整个挡在工具目录之外（所以那一档只可能是有人绕过了它）—— 这道闸只对**主动
+配了 `ask`** 的部署生效，默认档下 gate 压根不构造。
+
+⚠️ **它仍然不是第四道门**，别按第四道门去信它：这一层**只看得见 agent 自己选择要问的那些**。
+不问就没有请求，而它那些绕开 `fs/*` 与 `terminal/*` 的内建工具（omp 31 个里的 `ast_edit` /
+`eval` / `computer` 那几个）问不问由它决定 —— 站在 agent 与这些旁路之间的仍然只有
+`agents[].tools` 的收窄，不是审批。**默认值下这一段还要更狠**：`approvalMode: 'yolo'` 的 agent
+什么都不问，`permissionMode: 'auto'` 也不会去问人，于是这一层一次都不被调用 ——
+它不是「拦得少」，是默认根本不在链上。
+
+⚠️ 这条路上 `exemptOwnerSkip: true`，**刻意把 `approval.skipForOwner` 反了过来**：那个开关的前提
+是「发起人 == 裁决人」，而这里发起动作的是一台**外部 agent**，owner 只是当初把它放进来的那个人。
+不反过来的话，ACP 是 owner-only、`skipForOwner` 又默认为真，整套逐条审批会是一次恒真的空转。
+**但这段代码只在 `ask` 档跑得到**（gate 只在 `permissionMode === 'ask'` 且拿到 jail 时才构造）——
+默认部署里它一行都不执行，别读成「默认值下这个反向豁免正在生效」。
 
 ---
 
