@@ -779,12 +779,54 @@ Anthropic 连这个都没有，定价、输入模态、可用思考档位没有�
 
 ---
 
-## 6. WorkflowAgent / HarnessAgent 的取舍
+## 6. 外部编码 agent：两条路
 
-AI SDK v7 还提供 `WorkflowAgent`（确定性编排）与 `HarnessAgent`（包装 Claude Code / Codex 等现成 harness）。本项目：
+### 6.1 WorkflowAgent 不用，HarnessAgent 那个前提是错的
+
+AI SDK v7 号称还提供 `WorkflowAgent`（确定性编排）与 `HarnessAgent`（包装 Claude Code / Codex 等
+现成 harness）。本项目：
 
 - **不使用 `WorkflowAgent`**：本系统的编排逻辑（turn 生命周期、上下文提交）在我们自己的 `TurnRunner` 里，语义更强；把它塞进 WorkflowAgent 反而丢失对 commit/rebase 的控制。
-- **`HarnessAgent` 列为可选扩展**：可作为一个内置 subagent 定义（`agents[].kind: 'harness'`），把「让 Claude Code 在 workspace 里改代码」变成一个子 agent。**第一版不实现**，记入 [14](./14-open-questions.md)。设计上只需 `spawn_agent` 的 `execute` 分支到 `HarnessAgent`，其余（权限、记账、进度、取消）复用现有管线。
+- ⚠️ **`HarnessAgent` 这个抽象不存在。** `ai@7` 里只有 `ToolLoopAgent`（[14 §2](./14-open-questions.md) Q8
+  与 [12 · M11](./12-implementation-plan.md) 都点了这一处错）。所以 M11 落地的不是「接一个 SDK 类」，
+  而是 `spawn_harness`：起一个外部 CLI 子进程（`claude -p "<任务>"` / `codex exec "<任务>"`），
+  任务正文作为 argv 最后一项、不经 shell，把输出收回来。它**不是**一个子 agent 定义 ——
+  没有 `agents[].kind: 'harness'` 这个东西，权限与门在 `TOOL_POLICY` 与 `available()` 上
+  （[05 §3.5](./05-tools-and-permissions.md)）。连带影响：**配额与记账接不上**，花的是 harness
+  自己的额度，本系统数不到它的 token；能复用的只有取消（abortSignal → SIGTERM）与日志。
+
+### 6.2 `spawn_acp`（M13）：同一件事换成协议
+
+M13 加的是第二条路，**与 harness 并存而不是替换它**：起一台 ACP（Agent Client Protocol）server
+并走 stdio 上的 JSON-RPC 驱动它（`@agentclientprotocol/sdk`，零运行时依赖）。规格与三道门在
+[05 §3.5.1](./05-tools-and-permissions.md)，配置在 [11](./11-config-reference.md) 的 `agent.acp`。
+
+两条路的分工，按**它到底给了我们什么**来分：
+
+| | `spawn_harness` | `spawn_acp` |
+|---|---|---|
+| 驱动方式 | 一条 argv，任务是最后一项 | `session/prompt`，任务是一个 text content block —— **argv 里根本没有任务** |
+| 收得回什么 | 混在一起的 stdout + stderr | 结构化的 `session/update` 流：思考、工具调用、计划、用量 |
+| 花费 | 完全不可见 | `usage_update.cost.amount`，因此 `agent.acp.maxCostUsd` 拦得住 |
+| 取消 | abortSignal → SIGTERM | `session/cancel` → 等 `stopReason: 'cancelled'` → 才收进程 |
+| 会话 | 没有会话概念 | 有，但**刻意不留**（见下） |
+
+**配置新开 `agent.acp`，不扩 `agent.harness`。** 后者 `args` 的契约是「任务正文作为 argv 最后
+一项」，而 ACP 下 argv 里没有任务 —— 同名同键语义相反是最坏的假开关。
+
+**记账仍然接不上，而这一次是「看得见但记不进」。** `usage_update` 给的是那台 agent 自己那份
+provider 账单的累计值，落进 `usage_ledger` 会污染本系统的成本口径（它不是我们的 provider、
+不是我们的模型、也不进 `quota`）。所以那个数字只出现在 `acp.run` 日志与交回模型的结果里，
+唯一的闸是 `agent.acp.maxCostUsd`。
+
+**会话不落库、连接不缓存**：一次工具调用 spawn 一次，`finally` 里 `session/close`。理由不是
+「进程内状态假设」（`sessionId` 是外部存储的句柄，与 `sandbox_containers.container_id` 同型，
+落库是合规形态），而是**持久化它会把第三道门从「一次审批」偷偷改成「一次审批，此后永久」**。
+详见 [05 §3.5.1](./05-tools-and-permissions.md)。
+
+**看得见不等于拦得住。** T17 那条取舍一个字没变：`session/request_permission` 这一轮是地板
+（自动放行），真审批是波 3。所以 `spawn_acp` 的档位与 `spawn_harness` 逐字相同 —— 用可观测性
+换权限是错的方向。
 
 ---
 

@@ -136,6 +136,10 @@ with_parent 0`，浏览器里展开一条 trace，13 个节点的 `marginLeft` �
 | `agent.ask_unarbitrated` | warn（取消时 info） | askId, agentRunId, reason(no_model/cancelled/timeout/failed/empty), detail, escalationRequested —— 仲裁没能给出答复，子 agent 接下来按「没人应答」走。`escalationRequested:true` 表示运维开了 `agent.askEscalateToUser` 但那个键仍未接线，**没有真的去问人** |
 | `agent.file_invalid` | error | file, error —— `agents/<name>.md` 解析失败。其余定义照常加载，所以这一行是「我加的那个 agent 为什么不存在」的唯一凭据（[04 §3.1](./04-agents-and-providers.md)） |
 | `agent.harness` | info/warn | dir, command, exitCode, timedOut, ms —— M11 起了一次外部 harness。**它内部干了什么不在这里**（也不在任何地方），本系统看不见（[14](./14-open-questions.md) T17） |
+| `acp.run` | info/warn | agent, dir, command, approvalMode, stopReason, error, updates, dropped, toolCalls, costUsd, ms —— M13 起了一次 ACP agent。**它内部干了什么不在这里**：`session/update` 一路报过来了（`updates` 就是条数），但把 131 条思考与工具调用摊进日志只会把 `tool.jsonl` 冲掉，逐条呈现是波 3 呈现层的事。`costUsd` 是这条路花费的**唯一**记录 —— agent 烧的是它自己那份 provider 凭据，`usage_ledger` 里一分钱都没有 |
+| `acp.stderr` | warn | agent —— stdio 子进程 stderr 的**逐行**转发（单行截到 2 KB），与 `mcp.stderr` 同一条理由：那是「它为什么起不来 / 为什么握不上手」的答案所在。omp 一类 agent 把 `console.*` 全重定向到 stderr，所以成功那一路这里也会有话 |
+| `acp.disconnect` | warn | agent, exitCode, signal —— 子进程**自己**退了（我们主动关的走 `#intentional`，不记这一条）。它与 `acp.run` 那条 `error: 'acp_connection_lost'` 是一件事的两面：这一条带退出码 |
+| `acp.permission` | info（`ask` 档 **warn**） | agent, mode, floored, kind, title, outcome —— agent 反过来问「这一步准不准」时我们回了什么。**`ask` 档那一次必须是 warn**：真人通道是波 3，这一轮它暂按放行，而「我配的是 ask 但它没问我」除了这一行没有任何凭据（[05 §3.5.1](./05-tools-and-permissions.md)） |
 | `agent.progress` | debug | phase, done/total —— 子 agent 每跑完一步一条（`phase:'step'`），加上模型自己调 `report_progress` 那一条 |
 | `memory.read` / `memory.write` | info | scope, subject, op, bytesAfter |
 | `memory.owner_read_private` | **warn** | targetUserId |

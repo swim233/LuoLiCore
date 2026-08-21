@@ -117,6 +117,15 @@ export const CONFIG_DESCRIPTIONS: Record<string, string> = {
   'agent.harness.allowedDirs': 'harness 允许进入的仓库路径白名单。**留空 = 整个功能关闭**，工具连模型的工具目录都不进。',
   'agent.harness.timeoutMs': '单次 harness 运行的时间上限，超时先 SIGTERM 再 SIGKILL。',
   'agent.harness.maxOutputBytes': '交回给模型的 harness 输出上限，超出从中间截断。',
+  'agent.acp.enabled': '总开关。关着的时候 spawn_acp 连模型的工具目录都不进。它与下面的 allowedDirs 任一为空/假，整个功能就是关的。',
+  'agent.acp.allowedDirs': 'ACP agent 允许进入的仓库路径白名单，语义与 harness 那份完全一样。**留空 = 整个功能关闭**。两个并发轮次不会在同一个目录上各起一个 agent（按 realpath 硬互斥，等待有上界）。',
+  'agent.acp.defaultAgent': '模型没指定用哪台 agent 时用这一台（填名字）。留空就用下面列表里第一台启用的。只配了一台时这一项没有意义。',
+  'agent.acp.permissionMode': 'agent 反过来问「这一步准不准」时怎么回：auto 放行、deny 拒绝、ask 交给真人确认。ask 档的真人通道还没接，当前等同 auto 并每次记一条警告。',
+  'agent.acp.maxUpdatesPerPrompt': '一次任务最多接收多少条进度更新。撞上界之后只丢弃后续更新、**不中断 agent** —— 它正在改真实文件，为了我们装不下而把它掐死是更坏的选择。',
+  'agent.acp.maxTerminals': '🚧 未接线：一次任务里允许 agent 同时开多少个终端。当前这一版不向 agent 申报终端能力（它会自己直接执行命令），所以没有终端可数。',
+  'agent.acp.progressIntervalMs': '🚧 未接线：把 agent 的进度刷成聊天里那张卡片的最小间隔。当前这一版只在任务结束时交回一份结果，中途没有东西需要节流。',
+  'agent.acp.maxCostUsd': '单次任务的花费上限（美元，0 = 不限）。**这是唯一管得住 ACP 花费的地方** —— agent 烧的是它自己那份 provider 凭据，本项目的配额和用量账单都看不见它。撞线时按协议取消，已经改掉的文件不会回滚。',
+  'agent.acp.agents': 'ACP agent 定义数组：名字、可执行名、profile、审批档、允许的工具、模型、会话模式、超时。审批档与工具清单是独立的键而不是自由参数 —— 塞进自由参数就能被一行配置静默去掉，而那两项是权限门。',
   'agent.agentsDir': '子 agent 的 markdown 定义目录（agents/<名字>.md）。文件是只读来源，下面「子 Agent」页里的同名定义会覆盖它。改了 .md 之后要动一次配置或重启才会重扫。',
   'agent.askEscalateToUser': '🚧 未接线：仲裁答不上来时把问题转给真人，需要一条「发选项—等人点—回灌」的阻塞式通道，目前没有。打开它只会在仲裁失败时多记一条日志。',
   'agent.progressThrottleMs': '子 agent 向上回报进度的最小间隔（毫秒）。',
@@ -380,6 +389,13 @@ export const CONFIG_ENUM_NOTES: Record<string, Record<string, string>> = {
     business_message: '无处理器 · Business 账号收到的消息',
     edited_business_message: '无处理器 · Business 账号里的编辑',
     deleted_business_messages: '无处理器 · Business 账号里的删除',
+  },
+  // 三个取值里有一个的真实行为还没到，而它恰好是默认值 —— 这正是逐值注解存在的理由：
+  // 一句 `description` 装不下「其中一档暂时等同另一档」，不写又等于让运维选一个「选了不算」的档。
+  'agent.acp.permissionMode': {
+    ask: '🚧 交给真人确认 —— 而那条通道（发选项 / 等人点 / 回灌）还没接到这里，所以**当前等同 auto**，只是每次多记一条警告日志',
+    auto: '直接放行。语义上诚实的一档：起这个 agent 本身已经过了一次审批，批准一次就等于批准它这一趟在那个目录里做的全部事情',
+    deny: '一律拒绝。注意它挡不住 agent 自己直接做的事 —— 只挡它反过来问我们的那些（配了 approvalMode: write 时通常就是执行命令这一类）',
   },
   'tools.web.searchProvider': {
     '': '不配 = web_search 根本不进模型的工具目录',

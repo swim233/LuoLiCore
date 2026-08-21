@@ -310,6 +310,143 @@ bash: tool({
 所以「是谁掐的」这个问题要看 `timedOut` 那一位，不是看 `error` —— 光看错误码会把一次用户主动
 `/cancel` 读成 harness 自己跑失败了。
 
+#### 3.5.1 `spawn_acp`（M13）
+
+同一件事换成协议。`spawn_harness` 是「拼一条 argv、把任务当最后一项、把 stdout 收回来」；
+`spawn_acp` 是「起一台 ACP（Agent Client Protocol）server、走 stdio 上的 JSON-RPC 驱动它」。
+参数 `{task, dir}`（多 agent 部署另加一个 `agent`，取值是启用的 agent 名字的枚举；**单 agent
+部署 schema 逐字节不变** —— 只有一台 agent 的部署不该因此多出一个模型必须填的参数）。
+
+**三道门与 `spawn_harness` 1:1 相同，档位在 `TOOL_POLICY` 里逐字相同**，而且必须相同：
+
+| 门 | 判据 | 在哪 |
+|---|---|---|
+| 准入 | 仅 `owner` **且仅私聊**，且 `agent.acp.enabled`，且 `allowedDirs` 非空，且至少一台 agent 启用 | `available()` —— 任一不成立时工具**不进模型的工具目录** |
+| 目录 | 只能在 `agent.acp.allowedDirs` 列出的路径或其子目录里跑（复用 `resolveHarnessDir`，逐段比较）；**空名单 = 功能关闭** | `available()` + `AcpManager.run()` 各判一次（热更新可能在两者之间清空名单） |
+| 审批 | `approval: 'always'` —— 起这台 agent 这一个动作走一次审批 | `TOOL_POLICY` |
+
+**为什么档位不能更松。** 相比 harness，ACP 这条路我们**看得见**它内部做了什么（`session/update`
+一路报过来：思考、工具调用、用量），而看得见不等于拦得住 —— `session/request_permission` 这一轮
+还是地板（自动放行，见下），真审批是波 3。给它一个更松的档等于**用可观测性换权限**，而 T17 那条
+取舍一个字没变：批准一次 = 批准它这一趟在那个目录里做的全部事情。
+
+另外三道门之外的两处收窄，都在配置里而不是在这套闸上（[11](./11-config-reference.md) 的
+`agent.acp`）：`agents[].tools` 是唯一接近「真咽喉点」的手段（omp 有 31 个内建工具，只有 4 个走
+ACP；剩下 27 个里 `ast_edit`、`eval`、`computer` 都是绕过路径），`agents[].approvalMode` 决定
+agent 内部哪些工具自动放行。**这两项是一等配置键、且无条件下发成 flag** —— agent 自己的 profile
+里可能写着 `approvalMode: yolo`，不显式盖过就是静默失去权限门；而运维在界面上往自由参数里填一行
+同样能静默去掉它。`extraArgs` 里重写一份我们管着的 flag 会被 schema 当场拒收（400）：哪一份生效
+取决于对方的参数解析顺序，而其中两个是权限门。
+
+**会话不落库、连接不缓存。** 作用域 = 一次工具调用：一次调用 spawn 一次，`finally` 里
+`session/close`（best-effort、短超时）。理由**不是**「落库会引入进程内状态假设」——
+那个说法是反的，`sessionId` 是指向外部存储的句柄，与 `sandbox_containers.container_id` 同型，
+落库是合规形态。真正的理由是：**持久化 `sessionId` 会把第三道门从「一次审批」偷偷改成「一次审批，
+此后永久」** —— 一条 `session/load` 带着当初被批过的 `cwd` 重新进那个目录，而这一次没有任何人
+点头。`fork` / `resume` 同理。所以本版不做追问，也没有 `acp_follow_up` 工具。
+
+**目录互斥。** 两条并发轮次在同一个 `cwd` 各起一个 agent 改同一个仓库是实打实的危险，所以按
+`realpath` 硬互斥（`turn/keyed-mutex.ts`）。等待**有界且可取消**（默认 30 秒）：外层工具是
+`timeoutMs: null`，让第二个调用干等十五分钟等于把并发保护变成并发阻塞。等不到回
+`acp_dir_busy` —— 换个目录或者如实告诉用户上一个还在跑，比原地排队有用。
+
+**取消走的是协议，不是信号。** 三条取消源（用户 `/cancel`、`agents[].timeoutMs`、
+`agent.acp.maxCostUsd`）都先发 `session/cancel`，等 agent 用 `stopReason: 'cancelled'` 应答，
+**之后**才收进程；只有它在宽限期内不应答时才落回 `stdin.end → SIGTERM → 5s → SIGKILL`。
+直接杀进程会让一个正在写文件的 agent 死在半个写操作上。三条源的错误码不同，因为**我们自己的
+取消原因压过 agent 那句 cancelled**：`acp_timeout` / `acp_cost_exceeded` 的 hint 里有下一步该
+做什么，而 agent 只会如实回一句「取消了」。
+
+取消这条路上有三个位置容易写错，三个都被用例钉住了：
+
+- **握手本身要认 abortSignal。** 握手走四跳（initialize / session/new / authenticate /
+  set_config_option），各自最长 `handshakeTimeoutMs`，默认合起来两分钟 —— `/cancel` 完全可能落在
+  那一段里。而 ACP **没有「预先取消」的语义**：在没有在途 prompt 时发一条 `session/cancel`，
+  agent 会把它丢掉。所以「照发 cancel 再照发 prompt」的写法等于**一轮已经取消的调用把整个仓库
+  改完**，还答一句 `end_turn`。
+- **取消过就一定不算成功**，哪怕 agent 回的是 `end_turn`（cancel 送到时它恰好跑完了）。这一档
+  如实交回 `acp_cancelled` **加上真实的 `stopReason`** —— 两件事都说得出来：我们取消了，而它报
+  它干完了。判成 ok 的话，模型会拿着一份「本该没发生」的改动向用户宣布完成。
+- **关停梯要有绝对上界。** `ChildProcess` 的 `'close'` 要求进程已死**并且**三条 stdio 管道全关，
+  而一个被 agent 丢到后台、继承了它 stdout/stderr 的孙进程（omp 的 `bash` 正会留下这种）能把那
+  两个 fd 一直握着。那时 agent 早被 SIGKILL 收掉，我们却在等一个永远不来的事件 —— `shutdown()`
+  就钉在这里（`docs/28 · L-EXT-03` 那个形态）。所以 SIGKILL 之后再给一档宽限，到点自己 destroy
+  三条管道并返回。
+
+**`maxCostUsd` 是 ACP 花费唯一的闸。** agent 烧的是它自己那份 provider 凭据，`usage_ledger`、
+`quota.*` 与 `quota.perTurn.maxCostUsd` 一个都看不见它；判据是 `usage_update` 的 `cost.amount`
+（累计值）。撞线时按协议取消，**已经落地的文件改动不会回滚** —— 这一点要在 hint 里说出来。
+
+**两道 SDK 给不了的上界。** ① 单行字节上界（默认 8 MB）：`ndJsonStream` 按 `\n` 切，一个吐
+500 MB 单行的 agent 会把它整行缓冲住，所以我们自己那条 `ReadableStream` 数「距上一个 `\n` 多少
+字节」，越界就 error 掉流 —— 这是 `sandbox/exec-stream.ts` 里 `collectProcess` 那个 `2×cap`
+就地 kill 的 ACP 对偶。② `maxUpdatesPerPrompt`（默认 2000）：撞上界后**只丢弃、不断连**，
+计数进结果的 `updatesDropped`。这里刻意与 `collectProcess` 分岔 —— 那边溢出源是我们杀得掉的
+字节流，这边 agent 正在改真实文件，为了我们的 transcript 装不下而把它掐死是更坏的选择。
+
+**⚠️ 本轮不申报 `fs` 与 `terminal` 能力，而这有一个实测代价。** 协议明文：能力字段省略 ==
+UNSUPPORTED；谎报一个我们不会答的 method 会让 agent 发出请求之后挂住，而它正握着一个半改完的
+文件。所以 `ACP_CLIENT_CAPABILITIES` 这一轮是空的，七个 `fs/*` `terminal/*` 处理器一律抛
+`methodNotFound`（不守规矩的 agent 应该拿到一个干净的错，而不是一个挂住的请求）。实测后果：
+omp 的 `read` / `write` / `edit` **照旧能用**（它退回自己直接读写磁盘，文件真的被改了），
+而它的 `bash` **执行不了** —— permission 问过、我们放行了，调用照样以
+`Tool call denied by user: bash` 失败。**所以 `bash` 不在默认 `tools` 里** —— 一个可证明用不了的
+工具写在默认值里，模型会试、失败、然后绕路或编一个理由（§「摘除比伪造安全」的同一条判据）。
+`bash` 与 `terminal` capability **同生共死**：哪一轮申报了 `terminal` 并实现了那七个处理器，就在
+同一个改动里把它加回默认值。反向 fs / terminal 与真审批都是后续，届时
+`ACP_CLIENT_CAPABILITIES` 与那几个处理器**必须同一个提交**落地。
+
+**`session/request_permission` 这一轮是地板，它看着像一个洞，因为它就是。**
+`agent.acp.permissionMode` 三档里 `deny`（选第一个 reject 档；一个都没给就按协议回 cancelled，
+**不因为对方没提供选项就翻成放行**）与 `auto`（选 allow）是真接上的；默认的 `ask` 本轮**暂按
+放行**并每次记一条 `acp.permission` warn —— 那条 warn 是「我配的是 ask 但它没问我」唯一的凭据。
+不 fail-closed 到拒绝的理由与 T17 同一条：三道门已经在「起不起这台 agent」那一层拦过了，在没有
+真审批通道的这一轮把每次 permission 都拒掉，得到的是一个能读不能写的半残 agent，而门的位置一点
+没变。波 3 接真审批时走 `AcpClientHooks.requestPermission` → `PendingPrompts`（§6.1）。
+
+**会话模式（`agents[].mode`）只能走 `session/set_config_option`，不能上 argv。** omp 的
+`--mode` 是输出格式（text / json / rpc / rpc-ui），下发过去会把 stdio 上的 JSON-RPC 本身弄坏。
+这一跳**失败必须硬失败**：运维要的是 `plan`（只读规划），静默退回 `default` 等于让它真的去改文件。
+
+**错误契约**（与 `harness_*` 那张表同一个体例；`ok: false` 时 `error` 恒为下表之一，
+`hint` 面向模型 —— 它要能用自己的话向用户解释为什么没做成，或者据此改一次参数）。
+文案的**唯一来源**是 `packages/core/src/acp/errors.ts` 的 `ACP_ERROR_HINTS`：manager、session
+与工具壳三处共用同一份，散成三份的话「先改文档」就再也验不动了。
+
+| `error` | 何时 | 判在哪 |
+|---|---|---|
+| `acp_disabled` | `agent.acp.enabled` 为假、或 `allowedDirs` 为空 | `AcpManager.run` 第一行 |
+| `acp_unavailable` | 这个运行时压根没装 ACP 客户端 | 与上一条分开一档：那一档改配置就能用，这一档不是配置问题。`available()` 判的第一项就是它，所以生产里到不了（`main.ts` 恒传）—— 它是工具壳那道二次硬拦截的返回值 |
+| `acp_no_agents` | `agents` 里一台启用的都没有 | 同上 |
+| `acp_agent_unknown` | 模型给的 `agent` 名不在启用集里（或它被停用了）| `resolveAcpAgent` 回 `null`。**不「随便挑一个」** —— 那台 agent 的 `--tools` / `--approval-mode` 可能完全不同 |
+| `acp_forbidden` | 非 owner 或非私聊 | `execute()` 的二次硬拦截 |
+| `acp_dir_not_allowed` | 目录不在白名单里（逐段比较）| `resolveHarnessDir` 回 `null`；`hint` 点名允许的路径 |
+| `acp_dir_missing` | 目录不存在或不是目录 | `AcpManager.run` |
+| `acp_dir_busy` | 同一目录上已有一台 agent 在跑，等锁超时 | 目录互斥（等待有界且可取消）|
+| `acp_spawn_failed` | 子进程起不来（最常见 `ENOENT`：`command` 那个东西这台机器上没装）| `child.spawned` 拒绝 —— Node 的 ENOENT 是异步来的，靠这一位才分得开「起不来」与「起来了但握不上手」 |
+| `acp_handshake_timeout` | `handshakeTimeoutMs` 内没答完 initialize / session/new / authenticate / set_config_option | **连接与子进程当场收掉**，不留「起得来但握不上手」的孤儿（MCP 那边的教训，docs/28 · L-EXT-03）|
+| `acp_handshake_failed` | 握手报错但不是超时 | 它的 stderr 已逐行进 `acp.stderr` |
+| `acp_protocol_unsupported` | 谈出来的 `protocolVersion` 不是本客户端支持的那一版 | `initialize` 之后立刻判，**不硬着头皮开会话** |
+| `acp_auth_required` | 拿它已有的本机凭据 `authenticate` 一次之后 `session/new` 仍然要登录 | 要浏览器授权那一类在带外做（照 [07 §4.5](./07-skills-plugins-mcp.md) 对 stdio MCP server 的先例）|
+| `acp_session_failed` | `session/new` 报错，或 `mode` 那一跳被拒 | 最常见是 `cwd` 它不接受；`detail` 带对方原话 |
+| `acp_prompt_failed` | `session/prompt` 本身报错（不是 StopReason 的某一档，是那次 JSON-RPC 调用失败）| `detail` 带对方原话；取消过的话压成对应的取消码而不是这一条 |
+| `acp_line_too_long` | 单行超过 8 MB，流被 error 掉 | **压过 `acp_connection_lost`** —— 后者会让运维去查 agent 的退出码，而那里什么都查不到 |
+| `acp_connection_lost` | agent 进程在这一轮跑完之前就消失了 | `detail` 带退出码与信号，stderr 在 `acp.stderr` |
+| `acp_timeout` | 到 `agents[].timeoutMs`，已发过 `session/cancel` | 与 `acp_cancelled` 分开报：两者的下一步不一样 |
+| `acp_cancelled` | 用户 `/cancel`，或 agent 自己报 `cancelled` | 已落地的文件改动**不回滚**，hint 要说出来 |
+| `acp_cost_exceeded` | 累计花费撞 `agent.acp.maxCostUsd`，已发过 `session/cancel` | 同上 |
+| `acp_max_tokens` · `acp_max_turn_requests` · `acp_refusal` | StopReason 的三个非正常档 | 见下 |
+
+**StopReason 五档里只有 `end_turn` 算成功。** 另外四档都是「停下来了，但不是因为做完了」：
+`max_tokens` / `max_turn_requests` 是产出被截断（**最危险的一档 —— 它长得最像成功**），
+`refusal` 是对方不干，`cancelled` 是我们或它取消了。把它们并进 `ok: true`，模型会拿着一份做了
+一半的改动向用户宣布完成（「摘除比伪造安全」，`docs/16 §5`）。
+
+**日志**：一次调用一条 `acp.run`（info/warn，带 agent / dir / stopReason / 计数 / costUsd / ms），
+stderr 逐行 `acp.stderr`，子进程自己死记 `acp.disconnect`，每次 permission 记 `acp.permission`
+（`ask` 档那一次是 warn）。**agent 内部干了什么不在 `acp.run` 里** —— 那是波 3 呈现层的事，
+而权限层面它一个字都不改（T17）。
+
 ### 3.6 网络
 
 | 工具 | minRole | 说明 |
@@ -704,6 +841,7 @@ meta 工具本身与它的五条不变量。
 | `list_agents` `read_agent_result` | ✗ | ✓ | ✓ | ✓ |
 | `ask_parent` `report_progress` | ✗ | ✓ 仅子 agent※ | ✓ 仅子 agent※ | ✓ 仅子 agent※ |
 | `spawn_harness` | ✗ | ✗ | ✗ | ✓ + 审批 · 仅私聊 · 仅白名单目录◇ |
+| `spawn_acp` | ✗ | ✗ | ✗ | ✓ + 审批 · 仅私聊 · 仅白名单目录◆ |
 | `set_model` | ✗ | ✗ | ✓ | ✓ |
 | `web_fetch` | ✗ | ✓ allowlist | ✓ | ✓ |
 | `web_search` | ✗ | ✓ | ✓ | ✓ |
@@ -749,6 +887,13 @@ meta 工具本身与它的五条不变量。
 一次目录。第三道门对 owner 实际无感（`approval.skipForOwner` 默认 `true`，同上面 \*），**真正拦得住的
 是目录白名单那一道**。批准一次 = 批准它这一趟在那个目录里做的全部事情：harness 自带一整套工具，
 `available()` 的注册期 fail-closed 与 `execute()` 的二次硬拦截都看不见它内部的调用（[14](./14-open-questions.md) T17）。
+◆ `spawn_acp` 的三道门与上面 ◇ **完全同形，档位在 `TOOL_POLICY` 里逐字相同**（§3.5.1）：
+`available()` 判仅 owner 且仅私聊、`agent.acp.enabled`、`allowedDirs` 非空、至少一台 agent 启用；
+`TOOL_POLICY` 判 `approval: 'always'`；`AcpManager.run` 再判一次目录。**相同不是偷懒，是判据**：
+ACP 这条路我们看得见 agent 内部做了什么（`session/update` 一路报过来），而看得见不等于拦得住 ——
+逐条 permission 这一轮还是地板（自动放行）。给它一个更松的档等于用可观测性换权限，而 T17 那条
+取舍一个字没变。第四道门（`agent.acp.agents[].tools` / `approvalMode`）是**配置**而不是这套闸上的
+一环，且默认那份收窄挡不住 `ast_edit` / `eval` / `computer` 那类绕过路径。
 
 矩阵在代码中是**默认值与对照基准**：`packages/core/tools/policy.ts` 导出
 `TOOL_POLICY: Record<ToolName, {minRole, approval, scope, source}>`，`ToolRegistry` 与 WebUI 工具页

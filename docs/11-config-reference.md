@@ -83,7 +83,7 @@ NODE_ENV=production
 
 ### 2.0.1 未实现键白名单
 
-当前白名单。**每一行都以 🚧 起头，测试 `config.test.ts` 要求白名单里的每个键都能在本文件里找到一行同时含该键与 🚧**，否则视为文档未同步。第五轮把这张表从 65 条压到 13 条；[14 §2](./14-open-questions.md) 全部答复之后（2026-08-18）又降到 **10 条** —— `agent.askArbiter` / `agent.askTimeoutMs` 随 A7 接线，`db.ftsTokenizer` 随 Q3 直接从 schema 摘除，而 `agent.askEscalateToUser` 留下（原因见下）。**剩下的每一条都写明为什么留着** —— 「暂时没做」和「做不了 / 不该在这一层做」是两回事：
+当前白名单。**每一行都以 🚧 起头，测试 `config.test.ts` 要求白名单里的每个键都能在本文件里找到一行同时含该键与 🚧**，否则视为文档未同步。第五轮把这张表从 65 条压到 13 条；[14 §2](./14-open-questions.md) 全部答复之后（2026-08-18）又降到 10 条 —— `agent.askArbiter` / `agent.askTimeoutMs` 随 A7 接线，`db.ftsTokenizer` 随 Q3 直接从 schema 摘除，而 `agent.askEscalateToUser` 留下（原因见下）。M13 的 ACP 客户端加回两条（`agent.acp.maxTerminals` / `agent.acp.progressIntervalMs`，落点都在波 3），现在是 **12 条**。**剩下的每一条都写明为什么留着** —— 「暂时没做」和「做不了 / 不该在这一层做」是两回事：
 
 | 🚧 键 | 为什么还没接 |
 |---|---|
@@ -95,6 +95,8 @@ NODE_ENV=production
 | 🚧 `tools.web.summarizeWithAlias` | 要在 `web_fetch` 里插一次模型调用：计费、配额、取消、失败降级都得跟着走一遍。**A7 的仲裁调用已经趟过同一条路**（见 `agent/ask-arbiter.ts`），要接的话照那个形状抄 |
 | 🚧 `media.groupDebounceMs` | 相册合并要按 `media_group_id` 在触发路径上缓冲 update，与并发和认领水位有交互（`concurrency.coalesceSameUserMs` 做的是按人合并） |
 | 🚧 `webui.basePath` | 子路径挂载：要给所有路由加前缀、改静态资源 base、改 SPA 的 router base，三处一起动 |
+| 🚧 `agent.acp.maxTerminals` | 这一轮 `ACP_CLIENT_CAPABILITIES` 不申报 `terminal`，七个 `terminal/*` 处理器一律抛 `methodNotFound` —— **根本没有 terminal 可数**。给一个不存在的东西设上限是假开关（同 `memory.autoApplyCompaction` 的道理）。波 3 接反向 terminal 时，它是那份实现的第一个读取点 |
+| 🚧 `agent.acp.progressIntervalMs` | 呈现层（把 `session/update` 变成 Telegram 卡片）是波 3。这一轮的 `AcpUpdateSink` 只做有界聚合，一次 prompt 只在结束时交回一份结果，中间没有任何东西需要节流 |
 
 ```yaml
 # ============================================================ general
@@ -200,8 +202,10 @@ concurrency:
   queueMax: 20                    # 需重启
   coalesceSameUserMs: 0           # 热更新 · >0 时只为窗口内最后一条开轮次，先到的降级成背景消息
   turnTimeoutMs: 600000           # 热更新 · 一轮的墙钟上限，是**所有**长工具的实际天花板 ——
-                                  # agent.harness.timeoutMs（默认 900000）比它大，因此默认配置下
-                                  # 那个 15 分钟从来没生效过（见 agent.harness.timeoutMs 那条）
+                                  # agent.harness.timeoutMs 与 agent.acp.agents[].timeoutMs（默认
+                                  # 都是 900000）比它大，因此默认配置下那两个 15 分钟从来没生效过
+                                  # （见各自那条）。启动时有一条 config.invalid warn 点名所有配得
+                                  # 比它长的长工具（main.ts），不必靠人对着两处默认值自己算
 cancel:
   commitPartial: false            # 热更新 · 取消时是否提交**没投递给用户**的那部分（已发到屏幕上的一律提交，见 04 §5.3）
 
@@ -258,6 +262,80 @@ agent:
                                   # 表现差别还在错误码上：轮次 abort 落 harness_failed +
                                   # timedOut:false，不是 harness_timeout（05 §3.5）
     maxOutputBytes: 65536         # 热更新 · 交回模型的输出上限，中间截断
+  acp:                            # 热更新 · M13 · 经 ACP 协议驱动一台本机编码 agent（14 §2 Q8 那条路的另一半）。
+                                  #   **另开一段而不是扩 harness**：harness 的契约是「任务正文作为 argv 最后一
+                                  #   项」，而 ACP 下任务走 session/prompt，argv 里根本没有任务 —— 同名同键语义
+                                  #   相反是最坏的假开关。
+                                  #   会话状态**不持久化**：一次工具调用 spawn 一次，finally 里 session/close。
+                                  #   理由不是「进程内状态」（sessionId 是指向外部存储的句柄，落库本身是合规
+                                  #   形态），而是存下它会把第三道门从「一次审批」偷偷改成「一次审批、此后
+                                  #   永久」—— 一条 session/load 带着当初被批过的 cwd 重新进那个目录，而这一次
+                                  #   没有任何人点头。fork / resume 同理，所以本版没有追问
+    enabled: false                # 热更新 · 它与 allowedDirs **任一为假 / 为空 = 整个功能关闭**，spawn_acp
+                                  #   连模型的工具目录都不进（同族：mcp.enabled、tools.selfExtend）
+    allowedDirs: []               # 热更新 · 语义与实现都复用 agent.harness.allowedDirs 那份（同一个
+                                  #   resolveHarnessDir，按路径段比较：/srv/app 不放行 /srv/app-secrets）。
+                                  #   多一条：两个并发轮次绝不会在同一个目录上各起一个 agent —— 按 realpath
+                                  #   硬互斥，等待有上界（30s，可取消），超时交回 acp_dir_busy
+    defaultAgent: ''              # 热更新 · 模型没给 agent 参数时用哪一台；空 = 列表里第一台启用的
+    permissionMode: ask           # 热更新 · ask | auto | deny —— agent 反过来问「这一步准不准」时**我们**怎么
+                                  #   回。与下面 agents[].approvalMode 是两件事（那个是 agent 内部的自动放行档）。
+                                  #   auto / deny 都真的接上了；ask 档 🚧 本轮落到地板（按 auto 放行，每次多记
+                                  #   一条 warn），真人通道是波 3 —— 逐值说明在 CONFIG_ENUM_NOTES，界面上每一档
+                                  #   旁边就有一句
+    maxUpdatesPerPrompt: 2000     # 热更新 · 一次 prompt 收 session/update 的条数上界。撞线后**只丢弃、不断
+                                  #   连**，刻意与 collectProcess 的「输出超限就地 SIGKILL」分岔：那边溢出源是
+                                  #   我们杀得掉的字节流，这边 agent 正在改真实文件。量级参考：6 秒的琐碎任务
+                                  #   82–131 条，86 秒那次 263 条
+    maxTerminals: 8               # 🚧 本轮 ACP_CLIENT_CAPABILITIES 不申报 terminal、七个 terminal/* 处理器
+                                  #    一律 methodNotFound，没有 terminal 可数（§2.0.1）
+    progressIntervalMs: 5000      # 🚧 呈现层（session/update → Telegram 卡片）是波 3（§2.0.1）
+    maxCostUsd: 0                 # 热更新 · 单次调用的花费上界（USD，0 = 不限）。**这是 ACP 花费的唯一闸门**
+                                  #   —— agent 烧的是它自己那份 provider 凭据，usage_ledger、quota.* 与
+                                  #   quota.perTurn.maxCostUsd 全都看不见它。判据取 usage_update 的 cost.amount
+                                  #   （累计值），撞线走 session/cancel；已经落盘的文件改动**不回滚**
+    agents:                       # 热更新 · agent 定义数组（WebUI 可编辑）
+      - name: omp                 # ^[a-z0-9][a-z0-9_-]{0,63}$：它进日志、错误文案与 agent 参数的枚举
+        enabled: true             # 停用的既不进 agent 参数的取值，也过不了 execute() 的复查
+        command: omp              # CLI 可执行名，不经 shell
+        profile: telegram         # --profile=：omp 的隔离档（凭据 / 会话 / 设置 / 缓存各一份）；空 = 不加
+        approvalMode: write       # always-ask | write | yolo —— agent **内部**哪些工具自动放行。它与
+                                  #   tools 一样是一等键、**无条件下发成 flag**，不塞进自由格式的 args：磁盘上
+                                  #   那份 profile 里可能写着 yolo，不显式盖过就是静默失去权限门，而运维在 WebUI
+                                  #   改一行自由 args 同样能静默去掉它。
+                                  #   ⚠ **不要用 always-ask**：实测可复现的 edit 故障 —— 文件没被改、
+                                  #   fs/write_text_file 一次都没走，而 agent 自己认为改完了
+        tools: [read, write, edit]
+                                  # --tools=：**这套东西唯一接近真咽喉点的手段**。omp 有 31 个内建工具，只有
+                                  #   read / write / edit / bash 这 4 个走 ACP；剩下 27 个里 ast_edit（不经
+                                  #   fs/write_text_file 的写路径）、eval（常驻 Python/JS）、computer（宿主桌面
+                                  #   控制）都是绕过路径。只在非空时下发 —— 空的 --tools= 是「一个工具都不给」
+                                  #   而不是「全给」，所以空数组 = 不加这个 flag（= 全开）。
+                                  #   ⚠ **bash 不在默认值里，因为它现在可证明用不了**：客户端不申报 terminal
+                                  #   能力，实测 omp 的 bash 连权限批了都还是 `Tool call denied by user: bash`。
+                                  #   read / write / edit 照常 —— omp 退回自己直接读写磁盘，实测文件真的变了。
+                                  #   一个可证明用不了的工具写在默认值里，模型会试、失败、然后绕路或编一个
+                                  #   理由（「摘除比伪造安全」）。**bash 与 terminal capability 同生共死**：
+                                  #   哪一轮申报了 terminal 并实现了那七个处理器，就在同一个改动里把它加回来
+        model: ''                 # --model=：空 = 用 profile 的默认（实测全局 flag 对 acp 子命令有效）
+        mode: ''                  # '' | default | plan —— ACP 会话模式，**不下发到 argv**：omp 的 --mode 是
+                                  #   输出格式（text / json / rpc / rpc-ui），发过去会把 JSON-RPC 的 stdio 协议
+                                  #   本身弄坏。它走 session/new 之后的 session/set_config_option，**那一步失败
+                                  #   是硬失败** —— 运维要的是 plan（只读推演）而静默退回 default，等于放它真的
+                                  #   去改文件
+        extraArgs: []             # 追加的原始 argv。凡与我们管着的 flag 重复的当场拒掉（写入端 400）：
+                                  #   --approval-mode / --tools / --no-tools / --auto-approve / --profile /
+                                  #   --model / --mode / --cwd —— 两份哪一份生效取决于对方的参数解析顺序，
+                                  #   而其中两个是权限门
+        handshakeTimeoutMs: 30000 # initialize / session/new / authenticate / set_config_option 的上界。超时后
+                                  #   连接**与子进程**当场一起收掉，不留「spawn 了但从没握手成功」的孤儿
+                                  #   （MCP 的教训，docs/28 · L-EXT-03）
+        timeoutMs: 900000         # 一次 session/prompt 的墙钟上界，到点走 session/cancel（协议）而不是 SIGTERM。
+                                  #   ⚠ 默认值大于 concurrency.turnTimeoutMs（600000）—— 轮次先超时 →
+                                  #   abortSignal → 同一条 session/cancel，**这 15 分钟从来没有机会生效**。与
+                                  #   agent.harness.timeoutMs 同一个坑，区别是现在启动时会有一条 config.invalid
+                                  #   warn 点名所有配长了的 agent
+        maxOutputBytes: 65536     # 交回模型的输出上限（工具壳再按注册表那个上界收一次）
   agents:                         # 子 agent 定义（WebUI 可编辑，见 04 §3.1）
     - name: researcher
       description: 在聊天记录/文件/网络中检索资料并给出带引用的结论

@@ -4,7 +4,7 @@ import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { serve } from '@hono/node-server';
 import { ArchiveRepository, CustomToolRepository, OperationsRepository, PrincipalRepository, McpAuthRepository, SandboxContainerRepository, ScheduleRepository, TurnRepository, acquireInstanceLock, closeDatabase, migrateDatabase, modelAliasKey, openDatabase, readAppKv, readPersistedConfig, recomputeMessageTokens, recoverAfterCrash, writeAppKv } from '@luoli/db';
-import { AgentManager, AgentResultStore, AlertDispatcher, BUNDLED_SKILLS, ConfigStore, ContainerManager, CustomToolManager, mergeAgentDefinitions, scanAgentFiles, ContextEngine, DatabaseApprovalBroker, EventBus, FileTools, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, ModelRegistry, PathJail, PendingAuthorizations, PendingPrompts, PluginManager, selfAuthoringDenyGlobs, PromptAssembler, PromptDocuments, ProviderStore, PROVIDER_FAILURES_TO_DOWN, PROVIDER_PROBE_TIMEOUT_MS, QuotaGuard, repairAgentResultRefs, repairLedgerCacheCost, runProviderHealthCheck, Sandbox, ScheduledJobRunner, Scheduler, Secrets, SkillLoader, STABLE_PROMPT_BLOCKS, TOOL_POLICY, ToolRegistry, TurnConcurrency, TurnFailureStreak, TurnRegistry, UsageLedger, WebAssetStore, assembleMainPrompt, canSeeImages, captureImage, configJsonSchema, loadConfig, perChatConfig, registerAuthoringTools, registerBuiltins, registerCatalogTools, registerContainerTools, rejectedWakewords, runMainAgent, runSubAgent, streamMainAgent, type ContainerEvent, type SubAgentRuntimeEvent } from '@luoli/core';
+import { AcpManager, AgentManager, AgentResultStore, AlertDispatcher, BUNDLED_SKILLS, ConfigStore, ContainerManager, CustomToolManager, mergeAgentDefinitions, scanAgentFiles, ContextEngine, DatabaseApprovalBroker, EventBus, FileTools, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, ModelRegistry, PathJail, PendingAuthorizations, PendingPrompts, PluginManager, selfAuthoringDenyGlobs, PromptAssembler, PromptDocuments, ProviderStore, PROVIDER_FAILURES_TO_DOWN, PROVIDER_PROBE_TIMEOUT_MS, QuotaGuard, repairAgentResultRefs, repairLedgerCacheCost, runProviderHealthCheck, Sandbox, ScheduledJobRunner, Scheduler, Secrets, SkillLoader, STABLE_PROMPT_BLOCKS, TOOL_POLICY, ToolRegistry, TurnConcurrency, TurnFailureStreak, TurnRegistry, UsageLedger, WebAssetStore, assembleMainPrompt, canSeeImages, captureImage, configJsonSchema, loadConfig, perChatConfig, registerAuthoringTools, registerBuiltins, registerCatalogTools, registerContainerTools, rejectedWakewords, runMainAgent, runSubAgent, streamMainAgent, type ContainerEvent, type SubAgentRuntimeEvent } from '@luoli/core';
 import { createServer, EventStreamRegistry, issueLoginToken, setupToken, type PromptPreviewResult } from '@luoli/server';
 import type { RuntimeTurnContext } from '@luoli/shared';
 import { TelegramPromptChannel, TelegramTools, UpdatePoller, approvalSettledText, createTelegramBot, staleApprovalOutcome } from '@luoli/telegram';
@@ -191,6 +191,10 @@ const mcpPending = new PendingAuthorizations();
 const mcp = new McpManager(db, () => configStore.snapshot().mcp, log, undefined,
   { store: mcpAuth, pending: mcpPending, publicUrl: () => configStore.snapshot().webui.publicUrl });
 await mcp.reconcile();
+// M13 · ACP 客户端（`docs/04 §6.2`）。**不吃配置** —— 连接与会话都不缓存，`spawn_acp` 每次调用
+// 从本轮 `turn.config` 现读 `agent.acp` 交给它。所以这里只给它一个日志口，没有 getter。
+// `shutdown()` 里紧挨着 `await mcp.close()` 等它（见那一行）。
+const acp = new AcpManager(log);
 // `web_fetch` / MCP 抓回来的图片。落在 `media.dir` 之下 —— 跟着同一个目录走，`gcFiles()` 那道
 // 「库与目录来自两套部署」的 fail-closed 守卫才继续适用（docs/25 §10）。
 const webAssets = new WebAssetStore(db, config.media.dir, config.media.maxImageEdge);
@@ -275,6 +279,17 @@ const unusableWakewords = rejectedWakewords(config.trigger.wakewords, config.tri
 if (unusableWakewords.length) log.event({ level: 'warn', kind: 'config.invalid', summary: `${unusableWakewords.length} 条唤醒词不会生效`, data: { rejected: unusableWakewords } });
 if (!config.trigger.private && !config.trigger.mention && !config.trigger.reply && !config.trigger.command && config.trigger.wakewords.length === unusableWakewords.length) {
   log.event({ level: 'warn', kind: 'config.invalid', summary: 'No trigger source is enabled; the bot will never respond' });
+}
+// **`concurrency.turnTimeoutMs` 是所有长工具的实际天花板**（`docs/11` 那条已写明，代码侧的告知是
+// 这一轮补的，`docs/14` F13）。ACP agent 配了 15 分钟而轮次上限 10 分钟时，那 15 分钟从来没有机会
+// 生效：轮次先超时 → abortSignal → `session/cancel`，而运维看到的是「我配的是 15 分钟」。
+// 照 `approval.no_rules` 的先例只 warn 不拒启动 —— 这是一个错配而不是一个非法值。
+// 名单里也带上 harness：同一个坑、同一个默认值，而运维踩的是哪一个由配置决定。
+const overlongLongTools = [...config.agent.acp.agents, ...(config.agent.harness.timeoutMs > config.concurrency.turnTimeoutMs ? [{ name: 'agent.harness', timeoutMs: config.agent.harness.timeoutMs }] : [])]
+  .filter((agent) => agent.timeoutMs > config.concurrency.turnTimeoutMs);
+if (overlongLongTools.length) {
+  log.event({ level: 'warn', kind: 'config.invalid', summary: `${overlongLongTools.length} 个长工具的 timeoutMs 大于 concurrency.turnTimeoutMs（${config.concurrency.turnTimeoutMs}），那部分预算从来不会生效`,
+    data: { turnTimeoutMs: config.concurrency.turnTimeoutMs, overlong: overlongLongTools.map((agent) => ({ name: agent.name, timeoutMs: agent.timeoutMs })) } });
 }
 const toolRegistry = new ToolRegistry(log, approval,
   // `catalog` 那一段是折叠判据的**唯一**入口（`#deferredFor` 每次查询都从这个 getter 现读，
@@ -408,6 +423,7 @@ registerBuiltins(toolRegistry, {
   telegram: telegramTools,
   // 没有投递通道时这三个工具整体不进目录：排一个到点发不出去的任务是纯粹的假承诺。
   schedule: { jobs: scheduledJobs, runner: scheduleRunner, deliverable: () => telegramTools !== null },
+  acp,
 });
 registerAuthoringTools(toolRegistry, { customTools, skills, plugins, reservedSkills: BUNDLED_SKILLS,
   mcp: { db, config: () => configStore.snapshot(), apply: (next, keys) => configStore.replace(next, keys), emit: (keys) => events.emit('config.changed', { keys }) } });
@@ -585,6 +601,11 @@ const shutdown = async (signal: string): Promise<void> => {
   await closed; if (force) clearTimeout(force);
   await plugins.close();
   await mcp.close();
+  // ACP 的子进程与 MCP 的同类：**不 unref**，所以必须在这里等它们真死，否则 event loop 不空、
+  // `shutdown()` 只设 `process.exitCode` 的进程就是不退（docs/28 · L-EXT-03）。
+  // 排在 `turnRegistry.abortAll` 之后：在途那一轮先收到 abort，`spawn_acp` 走
+  // `session/cancel` 让 agent 自己收尾，这一行只负责兜没收干净的那些。
+  await acp.close();
   await skills.close();
   log.close();
   closeDatabase(db);

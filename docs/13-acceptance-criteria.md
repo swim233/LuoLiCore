@@ -166,6 +166,8 @@
 | [ ] AC-AGENT-006 | 用户 `/model low` | 本会话固定 low；`/model` 无参显示当前别名；新会话不受影响 |
 | [ ] AC-AGENT-007 (自动) | 模型请求 `set_model('high')`（trusted） | 仅当轮生效，下一轮回到默认 |
 | [ ] AC-AGENT-008 (自动) | `limited` 用户触发 `set_model` | 工具不可用 |
+| [x] AC-AGENT-009 (自动) ★ | ACP 的取消与上界 | 取消一轮时线上出现的是 `session/cancel`、agent 用 `stopReason: 'cancelled'` 应答（进程在那之后才收）；`agents[].timeoutMs` 走同一条路，但报 `acp_timeout` 而不是 `acp_cancelled`（我们自己的原因压过对方那句实话 —— 它的 hint 里有下一步该做什么）；`maxCostUsd` 同理，而它是 **ACP 花费唯一的闸**（agent 烧的是自己那份 provider 凭据，`usage_ledger` 与 `quota.*` 一个数都看不见）；单行字节越界报 `acp_line_too_long` 而不是 `acp_connection_lost`（后者会把运维打发去查一个不存在的退出码）；`maxUpdatesPerPrompt` 溢出**只丢弃、不断连** | 〔acp.runtime.test.ts〕
+| [x] AC-AGENT-010 (自动) | ACP 的 StopReason 五档 | 只有 `end_turn` 算成功；`max_tokens` / `max_turn_requests` / `refusal` / `cancelled` 各有自己的错误码与一句能照着做的 hint。最危险的是 `max_tokens`：它长得最像成功，而活只干了一半 —— 报成 ok 的话，模型会拿着一份做了一半的改动向用户宣布完成 | 〔acp.runtime.test.ts〕
 | [x] AC-PROV-001 (自动) | P1 返回 429 | 按 `retry_after` 退避重试；仍失败则 fallback 到 P2；日志有 `provider.fallback` | 〔provider.test.ts〕
 | [ ] AC-PROV-002 (自动) | P1 返回 401 | 不重试、不 fallback，直接失败并告警（认证错误） |
 | [ ] AC-PROV-003 (自动) ★ | 全部 provider 不可用 | 回复「模型暂时不可用(ref:…)」；`turns.state='failed'`；**delta 未提交** |
@@ -602,6 +604,9 @@
 | [x] AC-SEC-023 (自动) ★ | `PATCH /api/tools/write_plugin {minRole:'trusted'}` 与 `define_tool {minRole:'limited'}` 之后，用对应角色取 `active()` 与 `admit()` | 两侧**同时**仍然拒绝：七个自撰写工具的 `owner` 地板写在 `available()` 里，而运维覆盖只动 `effectivePolicy()`。少这一道的话，一次放宽就等于让任意受信会话里的成员往本进程里写全信任代码（[14 A27](./14-open-questions.md)） | 〔selfextend.author.test.ts〕
 | [x] AC-SEC-024 (自动) ★ | `GET /api/plugins/..%2F..%2Fetc/source` 一类的百分号编码名字 | 400 `invalid_plugin_name`。名字同时是目录段，而 Hono 的 `ctx.req.param()` 会解码 —— 三个文件方法（读 / 写 / 删）共用同一道正则，漏掉读那一处就是「磁盘上任何一个 plugin.js 都读得到」外加一个目录存在性探针 | 〔selfextend.api.test.ts〕
 | [x] AC-SEC-025 (自动) | `tools.fs.denyGlobs` 被运维改写、或 `skills.dir`/`plugins.dir` 指向别处时的 `PathJail` | 两个自撰写目录照样 `path_denied`：那道拒绝由目录配置推出来并**叠加**在运维那份数组之上，不是 schema 默认值里的两条字面量（后者在非默认部署上一条都不生效，而那正是 `allowHostFsForOwner` 打开时最需要它的时候） | 〔security.test.ts〕
+| [x] AC-SEC-026 (自动) ★ | `spawn_acp` 的三道门 | 默认（`agent.acp.enabled=false`，或 `allowedDirs` 为空）**不进模型的工具目录**，群聊同样不进；运维把 `minRole` 覆盖到 `limited` 之后，目录与 `admit()` 两侧**同时**仍然拒绝；策略档位恒为 owner + `approval: 'always'`，且与 `spawn_harness` **逐字节相同** —— 风险面是同一个（docs/14 T17），可观测性不换权限；任务正文**不经 argv、也不经 shell**（它是 `session/prompt` 的一个 text content block） | 〔acp.runtime.test.ts〕
+| [x] AC-SEC-027 (自动) ★ | 目录边界与目录互斥 | 只放行 `agent.acp.allowedDirs` 之内的路径（与 harness 共用 `resolveHarnessDir`，所以 `/srv/app-secrets` 不算 `/srv/app` 的子目录）；两个并发轮次绝不会把两台 agent 放进同一个目录（按 `realpath` 硬互斥）；这道等待**有界且可取消**，等不到时交回 `acp_dir_busy`，而不是让第二个调用干等十五分钟（外层工具是 `timeoutMs: null`） | 〔acp.runtime.test.ts〕
+| [x] AC-SEC-028 (自动) | 子进程与凭据 | `LUOLI_MASTER_KEY` / `BOT_TOKEN` / `WEBUI_PASSWORD` 不进子进程的 env（与 `HARNESS_ENV_DENY` 同一份判据：两处都是我们看不见内部行为的进程），而 `process.env` 其余部分照旧整份交下去 —— agent 要用它自己的登录态；`--approval-mode` **无条件下发**，profile 里写着 `approvalMode: yolo` 也静默去不掉那道权限门；`extraArgs` 里重写任何一个被管着的 flag 在写入端当场拒收 | 〔acp.runtime.test.ts〕
 | [ ] AC-SEC-021 | 默认配置（`approval.rules` 为空）下让 `trusted` 用户触发 `bash` | 启动日志有一条 `approval.no_rules` 警告、stderr 有对应提示、WebUI 审批页顶上说明「0 条规则时 conditional 等于 never」—— 门是开的这件事必须说出来（docs/27 · S-02，选定方案②） |
 
 ## 12. 运维与稳定性（AC-OPS）
@@ -628,15 +633,15 @@
 | 配置与 DB | | 15 / 25 | | | |
 | **上下文引擎** | | 31 / 40 | | | |
 | Telegram 与准入 | | 22 / 46 | | | |
-| Agent 与 Provider | | 23 / 43 | | | |
+| Agent 与 Provider | | 25 / 45 | | | |
 | 工具/沙箱/审批 | | 55 / 92 | | | |
 | Subagent 与任务 | | 26 / 44 | | | |
 | 记忆 | | 1 / 13 | | | |
 | 日志与成本 | | 8 / 28 | | | |
 | 扩展生态 | | 29 / 53 | | | |
 | WebUI | | 15 / 89 | | | |
-| 安全 | | 9 / 25 | | | |
+| 安全 | | 12 / 28 | | | |
 | 运维 | | 2 / 10 | | | |
-| **合计** | | **236 / 508** | | | |
+| **合计** | | **241 / 513** | | | |
 
 **整体通过条件**：全部 ★ 项通过 + 非 ★ 项通过率 ≥ 95% + 所有豁免项经需求方书面确认。
