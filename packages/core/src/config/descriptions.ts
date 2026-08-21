@@ -32,7 +32,7 @@ export const CONFIG_DESCRIPTIONS: Record<string, string> = {
   'telegram.notifyEdits': '用户改过历史消息时，是否在下一轮的 RUNTIME 块里告诉模型「这条被编辑过」。',
   'telegram.strictCommandSuffix': '群里的斜杠命令是否必须写成 /cmd@botusername 才认。一个群里有多个 bot 时打开，否则谁都会抢同名命令。',
   'telegram.throttle.globalPerSecond': '全局发送速率上限（条/秒）。超出的请求排队而不是被丢弃，用来躲 Telegram 的 429。',
-  'telegram.throttle.perChatPerMinute': '单个会话的发送速率上限（条/分钟）。',
+  'telegram.throttle.perChatPerMinute': '单个**群聊**会话的发送速率上限（条/分钟）。私聊不受这一项约束 —— 节流器按 chat_id 正负分流，私聊走的是另一个只管最小间隔（1 秒）的桶。',
 
   access: '谁能用这台 bot。有效角色 = min(用户角色, 会话角色)，两边任一为 blocked 就不回。',
   'access.defaultUserRole': '没在主体页登记过的用户拿到的角色。默认 blocked = 陌生人不能用，要逐个放行。',

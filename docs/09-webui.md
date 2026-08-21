@@ -984,14 +984,21 @@ event: health            data: {source: provider|mcp, name, ok, code}
 event: config.changed    data: {keys:[...]}
 event: approval.pending  data: {id, turnId, agentRunId, tool, input, risk, chatId, requesterUserId, requestedAt, expiresAt}
 event: approval.decided  data: {id, tool, risk, chatId, approved, actor, channel, state?}
+event: extensions.changed data: {kind: 'skill'}
 ```
+
+⚠ `extensions.changed` **此前一直不在这张表里**（运行时在发、前端在收，只有文档缺一行）。它的
+`kind` 字段留着扩展的余地，但**目前只有 `'skill'` 一个取值**：唯一的发送点是 `SkillLoader` 的
+变更回调（`main.ts`，「扫描结果真的变了才广播」）。plugin / MCP / 自定义工具那几页靠别的事件顺带刷新，
+不走这一条 —— 不要看着 `kind` 就以为另外三类也会发。
 
 发送点（都在已有的日志点旁边）：`turn.started` / `turn.finished` 在 `packages/telegram/src/bot.ts`，
 `turn.progress` / `usage` 在 `packages/core/src/agent/runtime.ts` 的 `onStepStart` / `onStepEnd`，
 `quota` 在 `QuotaGuard.commit`（结算事务提交之后才发，先发会让订阅方读到旧值），
 `task.updated` 在 `spawn_agent` 与 `report_progress`，`health` 在 `POST /api/providers/:id/test`
 与 `POST /api/mcp/:name/reconnect`（这两处是健康状态**真的会变**的地方；没有独立的健康轮询器，
-所以它不是周期心跳）。`log` 由 `LogSink` 自己发。
+所以它不是周期心跳），`extensions.changed` 在 `SkillLoader` 的变更回调（`apps/bot/src/main.ts` 装配处）。
+`log` 由 `LogSink` 自己发。
 
 - 单连接多主题。心跳注释 `: ping` 每 20s，防中间代理断连；断线由浏览器 `EventSource` 自动重连。
 - **`log` 事件只带摘要**（不含 `data`），`debug` 不广播，同一 `kind` 在 200 ms 内合并成一条并带

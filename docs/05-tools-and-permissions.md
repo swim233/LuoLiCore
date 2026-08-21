@@ -258,6 +258,25 @@ bash: tool({
 `LUOLI_MASTER_KEY` / `BOT_TOKEN` / `WEBUI_PASSWORD`（harness 不需要，而我们看不见它的行为）。
 输出按 `untrustedOutput` 包裹后才进上下文。
 
+**错误契约**（此前七条一条都没进文档）。`ok: false` 时 `error` 恒为下表之一，`hint` 面向模型
+（它要能用自己的话向用户解释为什么没执行）：
+
+| `error` | 何时 | 判在哪 |
+|---|---|---|
+| `harness_disabled` | `agent.harness.allowedDirs` 为空 = 功能整体关闭 | `runHarness` 第一行 |
+| `harness_forbidden` | 非 owner 或非私聊 | `execute()` 的二次硬拦截 —— `available()` 判过一次，热更新可能在注册与执行之间把名单清空 |
+| `harness_dir_not_allowed` | 请求的目录不在白名单里（逐段比较，`/srv/app` 不放行 `/srv/app-secrets`）| `resolveHarnessDir` 回 `null`；`hint` 点名允许的路径 |
+| `harness_dir_missing` | 目录不存在或不是目录 | `runHarness` |
+| `harness_spawn_failed` | 子进程起不来（最常见是 `ENOENT`：配了 `command: claude` 但那台机器上没装）| `spawn` 抛 |
+| `harness_timeout` | 到 `agent.harness.timeoutMs` | `timedOut: true`，与取消分开报 |
+| `harness_failed` | 退出码非 0（且没超时）| 输出照样交回去 |
+
+**取消没有自己的错误码，靠 `timedOut` 区分。** 轮次 abort 与到期走的是同一个
+`SIGTERM → 5s → SIGKILL`，区别只在：到期置 `timedOut: true` 报 `harness_timeout`，而 abort
+**不置**，于是落在 `harness_failed` + `timedOut: false` 上（子进程被信号杀掉，退出码非 0）。
+所以「是谁掐的」这个问题要看 `timedOut` 那一位，不是看 `error` —— 光看错误码会把一次用户主动
+`/cancel` 读成 harness 自己跑失败了。
+
 ### 3.6 网络
 
 | 工具 | minRole | 说明 |
@@ -643,10 +662,15 @@ meta 工具本身与它的五条不变量。
 | `bash` `python` | ✗ | ✗ | ✓ 沙箱（+条件审批） | ✓ 宿主/沙箱 |
 | `search_messages` `read_messages` `get_message` | ✗ | ✓ 本会话 | ✓ 本会话 | ✓ 本会话 |
 | `admin_search_messages` | ✗ | ✗ | ✗ | ✓ 跨会话 |
+| `context_stats` | ✗ | ✓ 本会话 | ✓ 本会话 | ✓ 本会话 |
 | `memory_read(pub)` | ✗ | ✓ | ✓ | ✓ |
 | `memory_write(pub)` | ✗ | ✗† | ✓ | ✓ |
 | `memory_read/write(pri)` | ✗ | ✓ 仅私聊·仅本人 | ✓ 仅私聊·仅本人 | ✓ 全部 |
+| `memory_list` | ✗ | ✗ | ✗ | ✓ 全部记忆 |
 | `spawn_agent` | ✗ | ✓（受 agent.minRole 约束） | ✓ | ✓ |
+| `list_agents` `read_agent_result` | ✗ | ✓ | ✓ | ✓ |
+| `ask_parent` `report_progress` | ✗ | ✓ 仅子 agent※ | ✓ 仅子 agent※ | ✓ 仅子 agent※ |
+| `spawn_harness` | ✗ | ✗ | ✗ | ✓ + 审批 · 仅私聊 · 仅白名单目录◇ |
 | `set_model` | ✗ | ✗ | ✓ | ✓ |
 | `web_fetch` | ✗ | ✓ allowlist | ✓ | ✓ |
 | `web_search` | ✗ | ✓ | ✓ | ✓ |
@@ -654,11 +678,12 @@ meta 工具本身与它的五条不变量。
 | `schedule_create` `schedule_update` `schedule_list` `schedule_cancel` | ✗ | ✗ | ✓ 本会话 | ✓ 本会话 |
 | `stay_silent` | ✗ | ✗ | ✓ 仅静默定时轮次¶ | ✓ 仅静默定时轮次¶ |
 | `send_file` `pin_message` | ✗ | ✗ | ✓ | ✓ |
-| `define_tool` `delete_tool` `write_skill` `write_plugin` `install_mcp` | ✗ | ✗ | ✗ | ✓ + 审批* |
+| `define_tool` `delete_tool` `write_skill` `install_skill` `write_plugin` `install_mcp` | ✗ | ✗ | ✗ | ✓ + 审批* |
 | `list_tools` `list_mcp` | ✗ | ✗ | ✗ | ✓ |
 | `container_list` `container_inspect` `container_logs` `container_keep` | ✗ | ✗ | ✗ | ✓ 跨会话§ |
 | `container_exec` | ✗ | ✗ | ✗ | ✓ 跨会话§（+条件审批） |
 | `container_reset` | ✗ | ✗ | ✗ | ✓ 跨会话§（清文件时 + 审批） |
+| `load_skill` | ✗ | ✓ | ✓ | ✓ |
 | `search_tools` | ✗ | ✓‖ | ✓‖ | ✓‖ |
 | Skill | ✗ | 按 `min-role` | 按 `min-role` | ✓ |
 | Plugin 工具 | ✗ | 按 `minRole` | 按 `minRole` | ✓ |
@@ -683,11 +708,25 @@ meta 工具本身与它的五条不变量。
 （不变量 4）。纯内建部署下折叠集恒为空，它一次都不出现。这道闸与上面 ¶ 同形：`minRole` 管「谁够格」，
 它管「这一轮的目录形态里到底有没有东西可展开」。角色那一栏是 `limited` 而不是更高档，因为它检索的域
 是**调用者自己那份** `active()`（§3.12），`limited` 用户枚举不到自己本来就没有的工具。
+※ 「仅子 agent」= `available()` 判 `agentKind === 'sub'`，与 ¶ ‖ 同形（`minRole` 管「谁够格」，这一条管
+「这一轮的形态允不允许」）。角色那一栏写 `limited` 只是与 `spawn_agent` 对齐 —— 主 agent 无论什么角色
+都拿不到这两个，运维调 `tools.overrides` 也开不出来。
+◇ `spawn_harness` 的三道门（§3.5）：`available()` 判**仅 owner 且仅私聊且 `agent.harness.allowedDirs`
+非空**（默认空 = 功能整体关闭，工具不进目录）；`TOOL_POLICY` 判 `approval: 'always'`；`runHarness` 再判
+一次目录。第三道门对 owner 实际无感（`approval.skipForOwner` 默认 `true`，同上面 \*），**真正拦得住的
+是目录白名单那一道**。批准一次 = 批准它这一趟在那个目录里做的全部事情：harness 自带一整套工具，
+`available()` 的注册期 fail-closed 与 `execute()` 的二次硬拦截都看不见它内部的调用（[14](./14-open-questions.md) T17）。
 
 矩阵在代码中是**默认值与对照基准**：`packages/core/tools/policy.ts` 导出
 `TOOL_POLICY: Record<ToolName, {minRole, approval, scope, source}>`，`ToolRegistry` 与 WebUI 工具页
 共用 `effectiveToolPolicy()` 把它与运维覆盖合并成本次生效的策略（[09 §3.7](./09-webui.md)）。
-新增工具必须同时更新该表与本文档（CI 有一致性测试，AC-TOOL-001）。
+新增工具必须同时更新该表与本文档。⚠ **这一条目前没有任何自动断言在守**：`AC-TOOL-001b`
+（`TOOL_POLICY` ↔ 实际注册表）由 `main.ts` 的启动断言焊住（缺失或多余都拒绝启动），但
+`AC-TOOL-001a`（`TOOL_POLICY` ↔ 本表）**至今未勾**、没有对应用例。这句话此前写的是「CI 有一致性
+测试」—— 而那正是本表曾经漏掉九个工具（`context_stats` `memory_list` `list_agents`
+`read_agent_result` `ask_parent` `report_progress` `load_skill` `install_skill` `spawn_harness`）
+而没有任何人被绊倒的原因。**声称一个不存在的保证比没有保证更糟**：在 `AC-TOOL-001a` 真的落地之前，
+这张表的一致性只能靠改动时逐条对。
 
 **目录过滤不是边界，`execute()` 才是。** `ToolRegistry.active()` 的每一条过滤在 `execute()` 里都要
 再判一次：`minRole`、运维禁用、本轮熔断、`available()`、以及「子 agent 不给 `memory_write`」。
