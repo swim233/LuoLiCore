@@ -84,7 +84,11 @@ describe('telegram side tools', () => {
     // 置位方是 `ScheduledJobRunner`（docs/02 §10.5 ②）。**一条普通轮次看得见它就是这次改动最坏
     // 的失败形态**：模型可以对着正在等回话的人宣布不汇报。四个 `schedule_*` 则都在目录里
     // （`deliverable()` 为真），`schedule_update` 因此不出现在这张缺席表上。
-    expect(Object.keys(TOOL_POLICY).filter((name) => !active.has(name))).toEqual(['ask_parent', 'report_progress', 'stay_silent', 'spawn_harness',
+    // `search_tools` 缺席的理由又是一档新的：它注册着（这个 harness 只装 builtins，连注册都没有），
+    // 而**就算注册了它也不该在**——这条 turn 的折叠集是空的（没有 MCP / plugin / custom 工具），
+    // `hasDeferrable()` 为假于是整个元工具不进目录。这正是 docs/07 §5 承诺的「纯内建部署的提示词
+    // 逐字节不变」：折叠机制在没有东西可折叠时必须完全隐身（`AC-TOOL-049`）。
+    expect(Object.keys(TOOL_POLICY).filter((name) => !active.has(name))).toEqual(['ask_parent', 'report_progress', 'search_tools', 'stay_silent', 'spawn_harness',
       'define_tool', 'delete_tool', 'list_tools', 'write_skill', 'install_skill', 'write_plugin', 'install_mcp', 'list_mcp',
       'container_list', 'container_exec', 'container_reset', 'container_inspect', 'container_keep', 'container_logs']);
     closeDatabase(wired.db);

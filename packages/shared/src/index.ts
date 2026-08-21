@@ -239,6 +239,21 @@ export interface RuntimeTurnContext {
   loadedSkills?: Set<string>;
   skillAllowedTools?: Set<string>;
   /**
+   * 本轮被 `search_tools` 检索展开过的折叠工具（`docs/05 §3.12`）。与上面那个**方向相反**：
+   * `skillAllowedTools` 是收窄，这个是**扩张** —— `prepareStep` 算的是
+   * `(常驻 ∪ 本轮已展开) ∩ skill 允许集`，先扩张后收窄，收窄永远赢（`docs/07 §2.2`）。
+   *
+   * **轮内只增不减。** 单调有两个理由：① 回收一次就是再把请求体第 0 段（tools 数组）改一次，
+   * 本轮剩余步骤的前缀缓存整段作废重写（`docs/04 §2.1`）；② 它天然区分「没展开过」与「展开了
+   * 但一个都没命中」—— 正是 `docs/07 §2.2` 那条 `narrows` 教训的镜像：那一条栽在「分不清
+   * 『收窄到这些』与『没收窄，这些就是全部』」，只好另加一个标志位，而单调的集合不需要第二个。
+   *
+   * **唯一写入方是 `search_tools`**（`tools/catalog-meta.ts`），读的是 `prepareStep` 与
+   * `repairToolCall`。随 turn 对象消亡，不跨轮保留、不持久化 —— 持久化会造出「server 早删了而
+   * 展开集还记着」这类状态腐烂；模型凭历史里的名字用 `names:[…]` 一次批量重展开就够了。
+   */
+  expandedTools?: Set<string>;
+  /**
    * 本轮**轮内**有工具往上下文里注入过图片（`web_fetch` 抓到的图、MCP 的截图）。
    *
    * 必须是一个标志而不是「重新扫一遍消息」：vision 别名自动切换的判据（`runtime.ts` 的

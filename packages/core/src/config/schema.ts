@@ -122,6 +122,11 @@ export const HOT_RELOADABLE_CONFIG_KEYS = [
   // archive 的四个 limit 走 `inputSchemaFor(context)`，每轮从 `turn.config` 取一次 —— 改完下一轮
   // 模型看到的 schema 就是新的上限。
   'tools.maxRegistered', 'tools.maxCallsPerTurn', 'tools.maxConsecutiveErrors', 'tools.defaultTimeoutMs', 'tools.overrides', 'tools.exec', 'tools.tg', 'tools.archive',
+  // `tools.catalog` 整段（前缀覆盖全部叶子）与 `tools.maxRegistered` 走同一条路：经 `ToolRegistry`
+  // 的 limits getter（`apps/bot/src/main.ts` 那个 `() => configStore.snapshot()…`）在每次 `active()` /
+  // `activeView()` 时现读。折叠判据刻意不在 `RegisteredTool` 上打标，就是为了不被 MCP reconcile
+  // 与这里的热更新弄脏。
+  'tools.catalog',
   // 这三项各自现读：宿主 fs 放行在 `filesFor` 里取 snapshot，域名策略在 web_fetch 里取 turn.config。
   // `tools.fs` / `tools.web` 的其余键仍是启动快照，所以只列这三条而不是整段。
   'tools.fs.allowHostFsForOwner', 'tools.web.allowlist', 'tools.web.denylist',
@@ -322,6 +327,35 @@ export const configSchema = z.object({
     // 「放宽要二次确认」是 `PATCH /api/tools/:name` 的端点行为而不是 schema 约束：schema 只管形状。
     overrides: z.record(z.object({ enabled: z.boolean().default(true), minRole: role.optional(),
       approval: z.enum(APPROVAL_POLICIES).optional(), timeoutMs: z.number().int().positive().optional() })).default({}),
+    // 工具目录按需暴露（docs/07 §5）。**纯粹是提示层视图**：折叠只改模型看不看见 schema，
+    // 不新增以目录为边界的闸 —— 未展开工具被硬调照常走 `admit()` / `execute()`。
+    catalog: z.object({
+      // 默认 `true` 在**出厂配置**下是零改变：`mcp.enabled` 默认 false、`selfExtend.customTools`
+      // 默认关、出厂 `plugins/` 只有 `.gitkeep` ⇒ 出厂折叠集为空，而折叠集为空时 `search_tools`
+      // 不进目录，纯内建部署的提示词逐字节不变。**理由不是「plugin 默认关」**：下面那个
+      // `plugins.enabled` 默认就是 `true`（它管扫不扫插件目录；默认关的是只管 `write_plugin` 的
+      // `tools.selfExtend.plugins.enabled`）—— 往 `plugins/` 放一个插件、owner 在扩展页启用它
+      // （落库即 `enabled=0`），折叠集就非空。折叠判据按 `policy.source` 走（mcp / plugin / custom
+      // 三个来源一律折叠，不看任何开关）。
+      deferExternal: z.boolean().default(true),
+      // 工具名 glob（minimatch，先例是 `mcp` 的 `toolAllow` 与 `tools.fs.denyGlobs`），命中的内建 /
+      // agent 族也折叠。命中豁免表（`search_tools` / `load_skill`）的模式**静默不生效** —— 把展开
+      // 的入口自己折叠掉就再没有人能展开了。
+      defer: z.array(z.string()).default([]),
+      // 判据的第一顺位，压得过上面两项：「默认全常驻 + 显式折叠」才是向后兼容的方向，所以
+      // 常驻是补集，而这份白名单是运维在折叠整台 server 之后捞回几个常用工具的唯一途径。
+      resident: z.array(z.string()).default([]),
+      // `false` 时 TOOL CATALOG 的常驻段只列名字：描述与 provider tools 数组里那份完全重复，
+      // 而 tools 数组在请求体头部、属缓存前缀，catalog 在易变段每步重发 —— 重复贵就贵在这里。
+      // 默认 `true` 保持现状逐字节不变：折叠与去重是两个变量，同时动的话模型行为真变差时
+      // 分不清是哪个引起的（docs/06 §1）。
+      residentDescriptions: z.boolean().default(true),
+      // 一轮内**累计展开的工具数**上限（判据是 `已展开 + 本次新增 > 上限` 就整次拒掉）。要压的其实
+      // 是展开的**次数** —— 每次展开都让请求体第 0 段（tools 数组）变化、打穿本轮剩余步骤的前缀缓存
+      // （docs/04 §2.1）—— 所以撞上限时的 hint 是「改用精确 `names` 一次批量展开」：批量占掉同样多
+      // 的额度，但只付一次缓存的账。次数的硬上限来自 `agent.main.maxSteps`，不是这一项。
+      maxExpandedPerTurn: z.number().int().positive().default(32),
+    }).default({}),
     fs: z.object({ maxReadBytes: z.number().int().positive().default(262_144), maxWriteBytes: z.number().int().positive().default(5_242_880), showHidden: z.boolean().default(false), allowHostFsForOwner: z.boolean().default(false), denyGlobs: z.array(z.string()).default(['**/.env*', '**/*.pem', '**/*.key', '**/id_rsa*', '**/.ssh/**', '**/.git/config', '<root>/config/**', '<root>/data/luoli.db*', '<root>/memory/**', '<root>/skills/**', '<root>/plugins/**']), trashDir: z.string().default('.luoli-trash'), backupDir: z.string().default('.luoli-bak') }).default({}),
     exec: z.object({ defaultTimeoutMs: z.number().int().positive().default(60_000), maxTimeoutMs: z.number().int().positive().default(300_000), maxOutputBytes: z.number().int().positive().default(65_536) }).default({}),
     archive: z.object({ defaultSearchLimit: z.number().int().positive().default(20), maxSearchLimit: z.number().int().positive().default(100), defaultReadLimit: z.number().int().positive().default(50), maxReadLimit: z.number().int().positive().default(200) }).default({}),

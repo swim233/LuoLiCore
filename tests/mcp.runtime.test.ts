@@ -2,7 +2,7 @@ import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { closeDatabase, migrateDatabase, openDatabase, OperationsRepository } from '@luoli/db';
-import { LogSink, McpManager, ToolRegistry, configSchema } from '@luoli/core';
+import { LogSink, McpManager, ToolRegistry, configSchema, registerCatalogTools } from '@luoli/core';
 import type { ToolExecutionContext } from '@luoli/core';
 
 const PROBE = resolve('tests/fixtures/mcp-server-probe.mjs');
@@ -124,6 +124,42 @@ describe('MCP runtime', () => {
     await manager.close();
     expect(pids.filter((pid) => alive(pid))).toEqual([]);
     closeDatabase(db);
+  });
+
+  /**
+   * 一台真 MCP server 走完「折叠 → 检索 → 可调」（`AC-MCP-001`、`AC-TOOL-047`、`AC-TOOL-048`）。
+   * 手搓注册表的分段用例挡不住这条链上的接线错：注册名怎么拼、`#groupKey` 在哪一个 `__` 上断句、
+   * `expandedTools` 那一笔落在哪个 turn 对象上，都只有跑一遍真注册流程才看得见。
+   */
+  it('deferExternal 开着时 MCP 工具先折叠，检索展开之后本轮可用', async () => {
+    const database = './data/mcp-defer.test.db';
+    for (const suffix of ['', '-wal', '-shm']) rmSync(`${database}${suffix}`, { force: true });
+    const db = openDatabase(database); migrateDatabase(db);
+    const log = new LogSink(new OperationsRepository(db), './data/mcp-runtime-logs');
+    const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, mcp: { enabled: true, servers: [{ name: 'fixture', transport: 'stdio', command: process.execPath, args: [resolve('tests/fixtures/mcp-server.mjs')], enabled: true }] } });
+    const registry = new ToolRegistry(log, { request: async () => true }, { maxRegistered: 80, maxCallsPerTurn: 40, maxConsecutiveErrors: 3, catalog: { deferExternal: true } });
+    registerCatalogTools(registry, { log });
+    const manager = new McpManager(db, config.mcp, log, registry);
+    await manager.reconcile();
+    // `turn.config` 必须是真配置：`search_tools` 的护栏从 `tools.catalog.maxExpandedPerTurn` 现读。
+    const context: ToolExecutionContext = { turn: { turnId: 't', key: 'k', chatId: 'c', threadId: null, initiatorUserId: 'u', effectiveRole: 'trusted', isPrivate: false, baseCommitId: null, snapshot: { messages: [], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 0 }, delta: [], abortSignal: new AbortController().signal, config }, workspace: '.', agentKind: 'main' };
+    const view = registry.activeView('trusted', context);
+    expect(view.resident.map((tool) => tool.name)).toEqual(['search_tools']);
+    expect(view.deferred.map((tool) => tool.name)).toEqual(['mcp__fixture__echo']);
+    // 组名按**第一个** `__` 断开，与 `mcp/manager.ts` 拼接方同一个约定（server 名允许下划线）。
+    expect(view.groups).toEqual([{ key: 'mcp:fixture', names: ['mcp__fixture__echo'], total: 1 }]);
+    expect(registry.activeNamesForStep('trusted', context)).toEqual(['search_tools']);
+    // 折叠集非空才有 `search_tools`：纯内建部署下它连目录都不进。
+    expect(registry.hasDeferrable('trusted')).toBe(true);
+    const searched = await registry.execute('search_tools', { names: ['mcp__fixture__echo'] }, context) as { ok: boolean; matches: Array<{ name: string; group: string; status: string }> };
+    expect(searched.ok).toBe(true);
+    expect(searched.matches).toEqual([{ name: 'mcp__fixture__echo', description: 'echo text', group: 'mcp:fixture', status: 'expanded' }]);
+    expect([...context.turn.expandedTools!]).toEqual(['mcp__fixture__echo']);
+    // 顺序仍是 `sourcePriority desc, name asc`：展开只是放行，不重排请求体第 0 段。
+    expect(registry.activeNamesForStep('trusted', context, context.turn.expandedTools)).toEqual(['search_tools', 'mcp__fixture__echo']);
+    // 折叠**不参与准入**：直调照常走 admit → 审批 → 执行，闸一道不多一道不少。
+    expect(await registry.execute('mcp__fixture__echo', { text: 'hello' }, context)).toMatchObject({ ok: true });
+    await manager.close(); closeDatabase(db);
   });
 
   /** 先 `unregisterBySource('mcp')` 再逐台串行 await 的话，每台最长 `connectTimeoutMs` 的那段

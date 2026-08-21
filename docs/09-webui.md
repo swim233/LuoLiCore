@@ -305,6 +305,18 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
 - 工具表：名称、来源（builtin/agent/plugin/mcp/custom）、minRole、审批策略、作用域、启停状态、近 7 天调用次数与失败率、平均耗时。
   `GET /api/tools` 除策略外还返回每个工具当前的 `enabled`（来自 `tools.overrides`）——
   只给静态策略表的话，页面显示的东西与运行时无关。
+- 每行还带一个 `deferred`：**这台机器的配置下**这个工具属不属于折叠族，由 `tools.catalog.*` 的 glob、
+  `policy.source`、折叠豁免表、以及 `search_tools` 那一行的 `enabled` 在查询期一起算
+  （[05 §3.12](./05-tools-and-permissions.md)、[07 §5](./07-skills-plugins-mcp.md#5-三者的统一注册流程)）。
+  **它答的不是「某一轮里它被折叠了吗」**：`describe()` 手上没有角色也没有轮次上下文，所以真实轮次里
+  还会叠上角色门槛、`available()`、skill 收窄、`maxRegistered` 截断，而子 agent 那条路一个都不折叠。
+  一个连带后果值得单说：把 `search_tools` 那一行 `enabled` 关掉（或把它的 `minRole` 抬上去）会让
+  **每一行**的 `deferred` 变成 false —— 折叠机制整体停摆，就在这个开关所在的同一张表上。
+  **它与 `enabled` 是两件事**：折叠工具
+  照旧可执行，只是模型默认看不见它的 schema、要先 `search_tools` 展开一次；而 `enabled=false`
+  是硬边界。没有注册表的那条兜底路（静态策略表）一律报 `false` —— 折叠判据在那里判不出来。
+  界面目前还没用上这个字段（[21 · G-API-23](./21-webui-coverage-gaps.md)），而单个工具的折叠与否
+  **不做成 per-tool 开关**：真相在 `tools.catalog.resident` / `defer` 那两个 glob 上，配置页已经改得到。
 - 点任一行打开二级菜单（`UiModal`）。**来源与作用域只读**：`source` 由注册方式决定，`scope`
   在运行时不参与任何判定（它是给人看的标签），做成可写等于放一个改了没效果的开关。
   **启停、minRole、审批策略、单次超时四项可写**，写进 `tools.overrides.<name>`。
@@ -905,7 +917,7 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
 | `GET/PATCH /api/principals[/:id]` | 主体与角色。`GET` 的每一行除库里那份 `role` 外还带 `effectiveRole`：`user:X` 与 `chat:X` 配得上对时是两者的 `resolveEffectiveRole` 结果（即模型系统提示里那个 `role`），配不上对（只见过一边、或本行是群 / 频道）时为 `null` —— 群的角色是上限不是有效角色 |
 | `POST /api/principals/bulk` | 批量登记主体：`{ids:[…], kind: user\|chat, role}`，单次上限 500。ID 必须是 Telegram 数字 ID（`^-?\d{1,20}$`），非法 ID 或非法角色返回 400。已存在的主体**只补一次 `setRole`，不再走 `upsertSeen`**（`ON CONFLICT` 分支不动 role 但会照写 `display_name`/`username`，而这里手上只有 `null`，等于把 Telegram 同步来的真名清空），返回 `{count, created, updated}` |
 | `POST /api/principals/roles` | 勾选批量改角色：`{ids:[主体 id…], role}`，单次上限 500。**只改已存在的行，不新建**（新建走 `/api/principals/bulk`，那边收的是 Telegram 数字 ID）；库里找不到的 id 原样回报而不是静默跳过，返回 `{count, changed, missing}` |
-| `GET /api/tools` `PATCH /api/tools/:name` | 工具启停与策略覆盖。`GET` 每个工具回**生效值**（`minRole`/`approval`/`scope`/`source`/`enabled`/`timeoutMs`）外加 `defaults`（代码里那份）、`relaxed`（比默认更松的字段名）、`selfManagedTimeout`。`PATCH` 收 `{enabled?, minRole?, approval?, timeoutMs?, confirmRelax?}`，三个策略字段给 `null` = 恢复默认；**先读当前覆盖再整体写回** `tools.overrides.<name>`（一个 key 一条整叶 JSON，只写变动的那个字段会把其余的抹掉）。放宽且无 `confirmRelax` 时 `409 relax_requires_confirmation`。被禁用的工具从工具目录消失，且 `ToolRegistry.execute` 会二次拦截并返回 `tool_disabled_by_operator`。未知工具名返回 404 |
+| `GET /api/tools` `PATCH /api/tools/:name` | 工具启停与策略覆盖。`GET` 每个工具回**生效值**（`minRole`/`approval`/`scope`/`source`/`enabled`/`timeoutMs`）外加 `defaults`（代码里那份）、`relaxed`（比默认更松的字段名）、`selfManagedTimeout`、`deferred`（这台机器的 `tools.catalog.*` 下它属不属于折叠族；没装配注册表的静态兜底分支一律 false，见 §3.7）。`PATCH` 收 `{enabled?, minRole?, approval?, timeoutMs?, confirmRelax?}`，三个策略字段给 `null` = 恢复默认；**先读当前覆盖再整体写回** `tools.overrides.<name>`（一个 key 一条整叶 JSON，只写变动的那个字段会把其余的抹掉）。放宽且无 `confirmRelax` 时 `409 relax_requires_confirmation`。被禁用的工具从工具目录消失，且 `ToolRegistry.execute` 会二次拦截并返回 `tool_disabled_by_operator`。未知工具名返回 404 |
 | `GET/PUT /api/sandbox` `POST /api/sandbox/probe` `POST /api/sandbox/image` | 沙箱配置、探测、拉取镜像（只 pull 不 build；镜像名取自已保存的配置） |
 | `GET /api/containers` | 持久容器列表 + `used/max`。运行时没装配时 `not_implemented`，**不是空列表** |
 | `DELETE /api/containers/:chatId` | 重置（销毁 + 立即重建）。`?wipe=1` 才连 `/workspace` 的文件一起清，且那一档把文件挪进 `.luoli-trash/<ts>/` |

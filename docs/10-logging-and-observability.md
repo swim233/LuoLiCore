@@ -104,6 +104,8 @@ with_parent 0`，浏览器里展开一条 trace，13 个节点的 `marginLeft` �
 | `tool.disabled` | warn | tool —— 运维在 WebUI 关掉的工具被调用（目录之外的第二道硬拦截）。这一档**同时**记 `tool.denied`：那一条是统一的拒绝流水，这一条是运维视角的凭据 |
 | `tool.disabled_after_errors` | warn | tool, failures —— 同一工具连续失败到 `tools.maxConsecutiveErrors`，本轮停用。这条是排障时区分「模型没试」和「试了被拦」的唯一凭据 |
 | `tool.registry_truncated` | warn | total, visible —— 可用工具数超过 `tools.maxRegistered`，目录被截断 |
+| `tool.expanded` | info | query, names, group, matched, expanded[] —— `search_tools` 的一次检索展开（`tools/catalog-meta.ts`，[05 §3.12](./05-tools-and-permissions.md)）。`expanded` 是这一次**新**进 `turn.expandedTools` 的名字，从下一步起它们的 schema 才会下发。检索本身另有一条 `tool.call` span（它是一次普通的工具调用），所以这一行只记「展开了什么」，不重复参数与耗时 |
+| `tool.repaired` | info | tool, into, reason —— 模型直接调了一个**折叠且本轮未展开**的工具，`repairToolCall` 把这次调用改写成一次 `search_tools`（`agent/runtime.ts` 的自愈钩子，[05 §3.12](./05-tools-and-permissions.md)）。这一档不是故障而是设计好的兜底，所以是 info；但**它的频率是提示词有没有起作用的唯一读数** —— 常态下模型该照提示词里那两处引导（KERNEL 一句 + 折叠组行或 RUNTIME 后缀）自己去检索，这一行多起来说明引导没被看见。紧接着会有一条 `tool.expanded`（改写后的那次检索），两行按 traceId 对照。改写只发生在「名字在本轮折叠集里」时：纯幻觉的名字照旧走 `tool.error` 那条路 |
 | `tool.external_conflict` | warn | source, existing —— 两个来源想注册同一个工具名，后来的被拒 |
 | `tool.custom_defined` / `tool.custom_removed` | info | tool —— 自撰写工具的增删（[07](./07-skills-and-extensions.md)） |
 | `tool.custom_invalid` | warn | tool —— `custom_tools` 里那一行注册失败（schema 坏了、超时值非法） |

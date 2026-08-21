@@ -95,9 +95,19 @@ WebUI 的写端点必须走 `runtimeConfigSchema.safeParse(mergeDotted(...))` �
 
 角色 `owner > trusted > limited > blocked`，有效角色 = min(用户角色, 会话角色)。
 工具在 `packages/core/src/tools/registry.ts` 注册，权限在注册期 fail-closed
-（`available(role, ctx)` 返回 false 的工具根本不进模型的工具目录）。沙箱 `none | jail | docker`，
-`bypassRoles: ['owner']`。运维在 WebUI 关掉的工具走 `tools.overrides`，目录过滤 + `execute()`
-二次硬拦截 —— 模型可能沿用上一步的工具名，禁用必须是硬边界。
+（`available(role, ctx)` 返回 false 的工具连注册表的合格集 `active()` 都进不去，因而既不进模型的
+工具目录、也过不了 `execute()` 的复查）。沙箱 `none | jail | docker`，`bypassRoles: ['owner']`。
+运维在 WebUI 关掉的工具走 `tools.overrides`，目录过滤 + `execute()` 二次硬拦截 ——
+模型可能沿用上一步的工具名，禁用必须是硬边界。
+
+**目录本身还分常驻 / 折叠**（`tools.catalog.*`，`docs/05 §3.12`）：外部工具（MCP / plugin / custom）
+默认折叠成每组一行名字，模型用 `search_tools` 检索后写进 `turn.expandedTools`，本轮后续 step 的
+`activeTools = (常驻 ∪ 已展开) ∩ skill 允许集`（先扩张后收窄，收窄永远赢；展开集轮内只增不减、
+不跨轮保留）。**折叠不是权限边界**：`active()` / `admit()` / `execute()` 的判据里不出现折叠判据，
+到达 `execute()` 的调用照旧逐条全判。未展开的工具在模型侧事实上不可达，那是 AI SDK 先按
+`activeTools` 过滤 toolSet 再 `parseToolCall` 造成的**可达性**收缩（撞 `NoSuchToolError`）——
+换 SDK 版本这层就没了，别把它当安全边界用。要真的不给就用 `tools.overrides.<name>.enabled=false`
+或 MCP 的 `toolDeny`。
 
 一切外部内容（工具输出、网页、文件、群聊背景发言）经 `untrusted()` 包裹，
 带随机 nonce 边界并转义闭合标记。**用户自己的触发消息不包裹** —— 包裹它等于告诉模型
@@ -146,7 +156,7 @@ better-sqlite3 + 原生 SQL，无 ORM 查询层。WAL 模式。迁移是 `packag
   文档分两层：`docs/00`–`docs/21` 是**活的规格层**，`docs/reviews/` 是**冻结的历史复审**。
   **`docs/00-state.md` 是「现在还欠什么 / 哪些查过没问题」的唯一入口**，开工前先看它 ——
   复审报告里的结论一律是当轮快照，不代表现在。
-  `docs/13-acceptance-criteria.md` 是 499 条可逐条勾选的验收条目（改动条数时同步该文件末尾的签署表）。
+  `docs/13-acceptance-criteria.md` 是 505 条可逐条勾选的验收条目（改动条数时同步该文件末尾的签署表）。
   `docs/21-webui-coverage-gaps.md` 记录 WebUI 控制面还够不着哪些已实现的能力，动 WebUI 前先扫一眼。
 - 修不了的东西不要假装修好。已确立的先例：`PUT /api/quota` 返回 `not_implemented` 而不是假成功；
   `ask_parent` 在父 agent 仲裁未实现时返回 `ask_parent_not_implemented` 而不是拿默认值伪造答复。

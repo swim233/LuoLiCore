@@ -236,7 +236,7 @@ Q13-c 那道闸是这套东西的**主闸**，不是审批。四个写工具虽�
 | T8 | **owner 宿主直跑代码 = 完整机器权限**。任何能让 owner 的轮次执行工具的注入路径都是完整的机器沦陷 | D10（你明确选择） | owner 在非受信群里角色被抿平为群角色（D9 的取交集正是为此）；`allowHostFsForOwner` 默认关；高危命令仍走审批 |
 | T9 | **jail 模式不是安全边界** | D10 的 mode 选项 | 文档与 WebUI 明确警示；默认推荐 docker |
 | T10 | **流式编辑会消耗大量 Bot API 调用**：一条长回复可能编辑 20+ 次 | D18 | 节流 1.5s + 最小增量 24 字符 + 429 时跳过；`output.mode='once'` 可关 |
-| T11 | **`prepareStep` 每 step 重算工具集 ⇒ 工具描述 token 每 step 都发一遍** | 安全需要 | prompt cache 覆盖工具定义（大多数 provider 会缓存 tools 段）；`tools.maxRegistered` 限总量 |
+| T11 | **`prepareStep` 每 step 重算工具集 ⇒ 工具描述 token 每 step 都发一遍**，而 TOOL CATALOG 块与 provider 的 tools 数组里那两份描述是重复的 | 安全需要 | **目录按需暴露**（`tools.catalog.*`，[05 §3.12](./05-tools-and-permissions.md) / [07 §5](./07-skills-plugins-mcp.md#5-三者的统一注册流程)）：默认只下发常驻集，外部工具折叠成每组一行、靠 `search_tools` 检索展开；外加目录块去重（`residentDescriptions`）把重复的那一份摘掉。prompt cache 与 `tools.maxRegistered` **退居兜底** —— 前者只在前缀不分叉时有效，后者是静默截断（截断本身现在会在 RUNTIME 块告知，见 `AC-TOOL-020`）|
 | T12 | **子 agent 摘要回灌 ⇒ 主 agent 看不到细节**，可能重复提问或误解 | AI SDK subagent 模式 + 上下文预算 | `read_agent_result` 可按需读全文；`resultMaxChars` 可调 |
 | T13 | **AI SDK v7 是较新的 API 表面**，升级可能有破坏性变更 | D20 | 锁 `^7`；升级前跑 AC-AGENT-* 与 AC-CTX-* 全集；provider 与 agent 装配集中在两个文件里，替换成本可控 |
 | T14 | **Plugin 全信任 ⇒ 安装第三方 plugin 等于给 root** | A27 | 默认禁用 + 启用时二次确认 + 只装自己审过的 |
@@ -245,6 +245,7 @@ Q13-c 那道闸是这套东西的**主闸**，不是审批。四个写工具虽�
 | T17 | **HarnessAgent 内部的工具调用不受本系统的权限模型约束**：`available()` 注册期 fail-closed 与 `execute()` 二次硬拦截都看不见它 | §2 Q8-c（审批粒度定在「起 harness」这一层） | 准入收到最窄（仅 owner + 仅私聊）+ 目录白名单默认空 + 起 harness 走审批。**这三道是全部的门**，不要以为里面还有第四道 |
 | T18 | **授权时点与执行时点是分离的**：模型调 `bash` 时命令正文在转录里、在 span 里、在人眼前；调 `custom_backup` 时提示词里只有 `{"target":"/etc"}`，正文是若干轮之前写下的，可能在另一个会话、可能是在一段注入的影响下写的。**审计面从转录挪进了 SQLite，而 SQLite 不在提示词里** | §2 Q13 | 落库即禁用 + 改正文即重置 + `definition_hash` 挡轮内改写 + `tool.custom_defined` / `webui.action`（启用记 warn）两条日志 + 扩展页可随时读回正文 |
 | T19 | **`requireSandbox` 默认关 ⇒ 自定义工具就是调用者的 `bash`**。owner 命中 `bypassRoles` 时脚本在宿主上跑，因而能直接写 `data/luoli.db` —— `tools.fs.denyGlobs` 只被 `PathJail` 执行，沙箱不看它，所以启用闸对一段**已经在宿主上跑起来的脚本**是无效的 | §2 Q13-d（需求方明确选择与 bash 一视同仁） | 启用闸防的是「只有工具的模型」，不防已经拿到宿主执行的脚本。想要真边界就打开 `tools.selfExtend.customTools.requireSandbox`，此时自定义工具严格弱于 bash。**角色地板 + 沙箱判据 + 会话作用域 + 启用闸，这四道就是全部的门**，不要以为脚本跑起来之后还有第五道 |
+| T20 | **折叠的工具模型不知其详 ⇒ 它可能想不到去检索**。折叠行只给名字，一台 MCP server 到底能干什么要检索一次才看得见；而检索是**多一跳** —— 多一个 step、多一对留在上下文里的 tool-call/result，以及本轮剩余步骤的缓存前缀作废（[04 §2.1](./04-agents-and-providers.md#21-prompt-缓存)）。最坏形态是模型答「我没有这个功能」，而那个工具就躺在折叠组里 | T11 的缓解（目录按需暴露） | 四层，缺一层就是一次「答我没有」：① 提示词引导恒有**两处**：KERNEL 那句无条件在，另一处随 `prompt.includeToolCatalog` 二选一 —— 目录开着时是折叠组行里内嵌的 `search_tools` 指引，目录关掉时是 RUNTIME 的折叠计数后缀（那个后缀挂在 `show.toolNames` 上，而 `show.toolNames = !includeToolCatalog`，[06 §1.2](./06-prompt-and-memory.md#12-block-6-runtime-模板)）。所以「三处同时在」是做不到的，也不必要：任一档下都有一处告诉模型有东西可取、一处告诉它怎么取；② `repairToolCall` 兜底：直接调折叠工具会被自动改写成一次检索（[05 §3.12](./05-tools-and-permissions.md)），所以模型不必先学会用 `search_tools`；③ `names` 通道让跨轮重展开只花一次调用；④ `tools.catalog.deferExternal: false` 是随时可退的逃生舱，退回去 block 3 与 RUNTIME 逐字节回到原样（KERNEL 那句引导语留着空转，见 [05 §3.12](./05-tools-and-permissions.md) 不变量 3） |
 
 ---
 

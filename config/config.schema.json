@@ -891,6 +891,45 @@
               "default": {},
               "description": "逐个工具的运维覆盖层（键为工具名），每个工具可写 enabled / minRole / approval / timeoutMs。工具页有更好的入口 —— 那里改完这里会同步，而且放宽权限时会二次确认。后三项缺席即沿用代码里的默认策略。禁用是硬边界：目录里看不到，模型硬猜工具名也会在 execute() 被拦下。"
             },
+            "catalog": {
+              "type": "object",
+              "properties": {
+                "deferExternal": {
+                  "type": "boolean",
+                  "default": true,
+                  "description": "把外部工具（MCP / 插件 / 模型自己定义的 custom_*）折叠成每组一行的摘要，不在目录里逐个展开描述。默认开着，但 MCP 与自我扩展都出厂关闭、plugins/ 出厂是空目录，所以默认部署下没有东西可折叠，提示词与以前完全一样。一台话多的 MCP server 接进来、或启用第一个带工具的插件之后才看得出区别。"
+                },
+                "defer": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [],
+                  "description": "额外要折叠的工具名 glob，一行一条（如 send_* 、container_* ）。只在上面那一项开着时才起作用。内建与 agent 类工具默认常驻，只有被这里点名才折叠。写 search_tools 或 load_skill 不会生效 —— 把展开的入口自己折叠掉就再没人能展开了。"
+                },
+                "resident": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [],
+                  "description": "强制常驻的工具名 glob，一行一条。优先级最高，压得过上面两项 —— 用来把某台 MCP server 的几个常用工具留在目录里。"
+                },
+                "residentDescriptions": {
+                  "type": "boolean",
+                  "default": true,
+                  "description": "常驻工具在目录里带不带描述。关掉之后只剩一行名字清单：描述本来就在 API 的 tools 字段里完整送了一遍，而那份属于请求体前缀（能被缓存），目录这份每步重发。建议先只开折叠、观察一段再关它 —— 两个一起动，模型真变笨了分不清是哪个引起的。"
+                },
+                "maxExpandedPerTurn": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 32,
+                  "description": "一轮内累计最多展开多少个工具。要压的其实是展开的次数 —— 每展开一次就改写一遍 API 的 tools 字段，本轮剩下的步骤全部缓存未命中重算一次 —— 所以撞上限时会提示模型改用精确名字一次批量展开（一次展开三个和分三次展开占掉同样三格，但只付一次缓存的账）。"
+                }
+              },
+              "additionalProperties": false,
+              "default": {}
+            },
             "fs": {
               "type": "object",
               "properties": {

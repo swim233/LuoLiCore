@@ -305,7 +305,11 @@ provider:
 
 # ============================================================ tools（D10）
 tools:
-  maxRegistered: 80               # 热更新
+  maxRegistered: 80               # 热更新 · 名额护的是 toolSet 这个**可执行面**，不是提示词长度。
+                                  #   `catalog.deferExternal` 开着时折叠解除了「注册数 ∝ 每步 token」
+                                  #   这条正比关系（provider 每步只收常驻 ∪ 已展开那部分的 schema），
+                                  #   所以可以放心往上调 —— 折叠的工具照占名额，超出的仍按来源优先级
+                                  #   静默截断，只是现在 RUNTIME 块会把截断这件事告知模型（07 §5）
   maxCallsPerTurn: 40             # 热更新
   maxConsecutiveErrors: 3         # 热更新 · 同一工具连续失败到这个数就在本轮停用；之后再调返回
                                   #   `tool_disabled_after_errors`（成功一次即清零，见 05 §8.1）
@@ -325,6 +329,43 @@ tools:
                                   # 「放宽（minRole 调低 / 审批降档）需二次确认」是 `PATCH /api/tools/:name` 的
                                   #   端点行为（409 `relax_requires_confirmation`），**不是 schema 约束** ——
                                   #   直接改 YAML 或整块写 `PUT /api/config` 绕得过去，那是有意的：schema 只管形状。
+                                  # `overrides.search_tools` 那一行有一个额外的连带后果：把它 `enabled: false`
+                                  #   或把 `minRole` 抬到某个会话的有效角色之上，折叠机制对**那些角色整体
+                                  #   停摆**，全体工具回退常驻。不许出现「看得见摘要却无法展开」—— 那比目录
+                                  #   长一点糟糕得多（07 §5、05 §3.12 不变量 3）。这不是折叠的开关，
+                                  #   开关是下面 `catalog.deferExternal`。
+  catalog:                        # 热更新 · 工具目录按需暴露（07 §5、05 §3.12）。**纯粹是提示层视图**：
+                                  #   折叠只改模型看不看见 schema，不新增以目录为边界的闸 —— 未展开工具
+                                  #   被硬调照常走 `admit()` / `execute()`（05 §4 末尾的红线段）
+    deferExternal: true           # 热更新 · 外部工具（按 `policy.source` 判 mcp / plugin / custom）折叠成
+                                  #   每组一行摘要，模型用 `search_tools` 按关键词或名字展开。
+                                  #   **默认 true 在出厂配置下是零改变**：`mcp.enabled` 默认 false、
+                                  #   `selfExtend.customTools` 默认关、出厂 `plugins/` 只有 `.gitkeep`
+                                  #   ⇒ 出厂折叠集为空，而折叠集为空时 `search_tools` 的 `available()`
+                                  #   返回 false（沿用 web_search 未配 provider 就不进目录的先例）——
+                                  #   纯内建部署的提示词**逐字节不变**。**理由不是「plugin 默认关」**：
+                                  #   `plugins.enabled` 默认就是 true（见本文件 plugins 段，它管扫不扫
+                                  #   插件目录；默认关的是只管 write_plugin 的
+                                  #   `tools.selfExtend.plugins.enabled`）—— 装一个插件并由 owner 在扩展页
+                                  #   启用它，折叠集就非空，这是预期行为而不是回归
+    defer: []                     # 热更新 · 额外折叠的工具名 glob（minimatch，与 mcp 的 toolAllow /
+                                  #   tools.fs.denyGlobs 同一套），一行一条。内建与 agent 族默认常驻，
+                                  #   只有被这里点名才折叠。命中豁免表（`search_tools` / `load_skill`）的
+                                  #   模式**静默不生效**：把展开的入口自己折叠掉就再没人能展开了
+    resident: []                  # 热更新 · 强制常驻的 glob 白名单，一行一条。优先级最高，压得过上面两项
+                                  #   （典型用法：折叠某台 MCP server 的同时把它两三个常用工具留在目录里）
+    residentDescriptions: true    # 热更新 · 常驻段带不带每个工具的描述。false = 只列一行名字清单：描述由
+                                  #   API 的 tools 字段权威携带，而那份在请求体头部、属**缓存前缀**，
+                                  #   目录这份在易变段**每步重发** —— 重复贵就贵在这里（04 §2.1、06 §1）。
+                                  #   默认 true 保持现状逐字节不变，且建议先只开折叠、观察一段再翻它：
+                                  #   折叠与去重是两个变量，同时动的话模型行为真变差时分不清是哪个引起的
+    maxExpandedPerTurn: 32        # 热更新 · 一轮内**累计能展开多少个工具**（不是检索了几次）：判据是
+                                  #   `已展开数 + 本次新增 > 上限` 就整次拒掉。压这个数的理由在检索**次数**
+                                  #   上 —— tools 数组是请求体第 0 段，每展开一次本轮剩余步骤的前缀缓存
+                                  #   整体作废重写一次（14 §3 T20），所以一次展开三个远比展开三次便宜
+                                  #   （省的是缓存，不是这里的额度：三个工具照样占三格）。撞上限返回
+                                  #   `expansion_limit`，并提示模型改用精确 `names` 一次批量展开。
+                                  #   变化次数的硬上限其实是 `agent.main.maxSteps`，不是这一项
   fs:
     maxReadBytes: 262144
     maxWriteBytes: 5242880
