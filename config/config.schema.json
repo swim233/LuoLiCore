@@ -839,7 +839,8 @@
                 "type": "object",
                 "properties": {
                   "name": {
-                    "type": "string"
+                    "type": "string",
+                    "pattern": "^[^:]+$"
                   },
                   "description": {
                     "type": "string"
@@ -1120,7 +1121,7 @@
                     "<root>/skills/**",
                     "<root>/plugins/**"
                   ],
-                  "description": "文件工具一律拒绝访问的 glob 列表，一行一条；<root> 指仓库根。密钥、私钥、数据库与配置目录默认在内，删条目等于放开对应的读写。"
+                  "description": "文件工具一律拒绝访问的 glob 列表，一行一条；<root> 指仓库根。以 /** 结尾的条目连那个目录本身一起拒 —— 写了 X/** 就不用再补一条 X（补了只是冗余，不补也没有洞），模型因此既读不到 X 底下的东西，也搬不走、删不掉 X 那棵树。密钥、私钥、数据库与配置目录默认在内，删条目等于放开对应的读写。"
                 },
                 "trashDir": {
                   "type": "string",

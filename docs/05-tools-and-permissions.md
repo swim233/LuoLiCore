@@ -88,7 +88,7 @@ role(chat):
 | `grep` | limited | — | `{pattern, path?, glob?, contextLines?, ignoreCase?}`；JS 实现（正则走 RE2，见 docs/24 · R-SEC-01）；`glob` 按相对搜索根的路径筛文件，`contextLines` ≤10 附带命中行前后各若干行；上限 200 命中 |
 | `write_file` | trusted | 覆盖已存在文件时需审批 | `{path, content}`；自动建父目录；写前备份到 `.luoli-bak/<ts>-<ulid>-<name>` |
 | `edit_file` | trusted | 覆盖已存在文件时需审批（与 `write_file` **同档**） | `{path, oldString, newString, replaceAll?}`；`oldString` 必须唯一，否则报错（照抄 Claude Code 语义，模型最熟悉）。要在全文里定位 `oldString`，所以必须整份读：超过 `tools.fs.maxWriteBytes` 的文件直接 `file_too_large_to_edit` 并让模型改用 `sed`/`python`（docs/27 · R-02） |
-| `delete_file` | trusted | **必需** | `{path, recursive?}`；`recursive` 时必须审批且路径深度 ≥2；实现为移入 `.luoli-trash/<ts>/`（不真删） |
+| `delete_file` | trusted | **必需** | `{path, recursive?}`；`recursive` 时必须审批且离可达边界 ≥2 层；实现为移入 `.luoli-trash/<ts>/`（不真删） |
 | `move_file` | trusted | 覆盖时需审批 | `{from, to}` |
 
 **行号是 `edit_file` 的对照坐标，也是它最常见的失败来源。** `read_file` 交回的正文每行带
@@ -130,6 +130,26 @@ NaN（JSON 序列化后是 `null`）的正文」；`limit: 0` 则走到「`ok: t
 `read_file`，要处理二进制用 `bash`。「文本以外的内容不要走它」这句话是给模型的劝告，而劝告不是闸；
 闸在这里。
 
+**路径解析排在体积闸之前，写端与读端同一个口径。** `write_file` 此前是先量 `Buffer.byteLength`
+再 `jail.resolve` —— 于是一次**越界**（或撞 `denyGlobs`）的超大写入报出来的是一句 `write_too_large`：
+什么都没落盘，但**安全信号被一句参数抱怨盖住了**，而模型据此去拆分内容重试，它永远拆不出一个
+不越界的路径。`readText` 那条路上早就是「先解析」（越界仍在读到任何内容之前抛），写端补齐。
+`edit_file` 因此会解析两次（它最后一步调 `write`），无害。
+
+**读一个目录是 `path_is_directory`，不是 `ok: true` + 空正文。** `read_file` 与 `readText` 两条都判。
+此前这件事的表现**取决于文件系统**：目录的 `statSync().size` 在 btrfs 上是 0，于是 `readSlice` 的
+`want = min(limit, size - offset)` 是 0、`readLineWindow` 的 `position < size` 一次循环都不进 ——
+`readSync` 从不被调用，**EISDIR 永远不抛**，交回的是一个 `ok: true` + 空正文；ext4 上目录 size 是
+4096，会如实抛 EISDIR。而空正文交给一个**全量覆盖**的写端就是一次静默清空（`readText` 的调用方正是
+这个形状）。ACP 那条路早就在 `AcpFs.#target` 里显式判过（§3.5.2），这一条是把同一道判据补到模型
+自己那条工具路上。错误码**复用 `delete_file` 那一个**，不新造同义词。判据顺序：越界 → 是不是目录 →
+窗口参数（`{limit: 0}` 读一个目录时「那是个目录」比「limit 要 ≥1」有用，而两句话里只有前者说得出
+下一步该做什么）。
+
+**写一个目录路径同样是 `path_is_directory`。** 此前它死在 `write()` 里备份那步的 `cpSync` 上，
+报一句**不带 `EISDIR`** 的 `Recursive option not enabled` —— 模型拿它没法做任何事，还会以为是权限
+或磁盘问题。这道判排在 `mkdir` / 备份 / tmp 落地之前，所以撞上它的时候树一个字节都没动。
+
 **`edit_file` 与 `write_file` 同档。** `FileTools.edit()` 最后一步就是 `return this.write(...)`，
 而它可以把整份文件换掉（`oldString` 取全文，或 `replaceAll`）；`write_file` 带 `approvalTargetExists`
 说明「覆盖已存在的文件要审批」正是设计意图，而 `edit_file` 恰好**只**作用于已存在的文件 ——
@@ -137,8 +157,14 @@ NaN（JSON 序列化后是 `null`）的正文」；`limit: 0` 则走到「`ok: t
 
 **目录整棵删要显式 `recursive`。** `delete_file` 的实现是 `rename` 进回收站，而 `rename` 一个目录
 就是把整棵树搬走 —— 等价于 `rm -r`。所以：目录必须显式传 `recursive: true`（否则 `path_is_directory`），
-且路径深度 ≥2（否则 `recursive_delete_too_shallow`）。审批弹窗上只有一个路径，owner 分不出这一下
-删的是一个文件还是半个工作目录，而这个工具是 `approval: 'always'` —— 点下去就真的搬走了。
+且**离可达边界 ≥2 层**（否则 `recursive_delete_too_shallow`）。审批弹窗上只有一个路径，owner 分不出
+这一下删的是一个文件还是半个工作目录，而这个工具是 `approval: 'always'` —— 点下去就真的搬走了。
+
+深度**从可达边界数起，不是从相对路径的解析基点数起**（`PathJail.depthFromBoundary`，判据留在 jail
+里而不是让调用方自己 `relative()`）。默认模式下两者是同一个目录，所以这句话读起来像废话；而
+`tools.fs.allowHostFsForOwner` 打开时边界是 `/` 而基点仍是会话 workspace，按基点数的话一个绝对路径
+会攒出一串 `..` 段 —— `/etc` 数出 7 层，那道闸对整个宿主文件系统近乎无效。按边界数则是 `etc` → 1 层
+→ 拒。**这道闸拦不住被 `denyGlobs` 漏掉的东西**，它只保证「递归删除不作用在浅路径上」。
 
 **读不到的条目跳过，不让整次调用失败。** `list_dir` / `glob` / `grep` 的目录遍历对每个条目先过
 jail 再 `statSync`，两步都会抛：**断链软链**（`ln -s /nowhere x`，下载失败也会留下）抛 ENOENT，
@@ -166,7 +192,9 @@ function resolveJailed(p: string, root: string, base = root): string {
   const prefix = root.endsWith(path.sep) ? root : root + path.sep;  // ★ root='/' 时 root+sep 是 '//'
   if (real !== root && !real.startsWith(prefix))
     throw new ToolError('path_outside_workspace', `路径必须在工作目录内: ${root}`);
-  if (cfg.tools.fs.denyGlobs.some(g => minimatch(real, g)))       // .env / *.key / .git/config ...
+  const globs = cfg.tools.fs.denyGlobs.flatMap(g =>               // ★ `X/**` 同时拒绝 X 自己
+    g.endsWith('/**') ? [g, g.slice(0, -3)] : [g]);               //   （构造时算一次，不在这条热路径上推导）
+  if (globs.some(g => minimatch(real, g)))                        // .env / *.key / .git/config ...
     throw new ToolError('path_denied', '该路径被策略禁止');
   return real;
 }
@@ -180,9 +208,23 @@ function resolveJailed(p: string, root: string, base = root): string {
   边界前缀必须按上面那个 `prefix` 算：`'/' + sep` 是 `'//'`，没有任何真实路径以它开头，那一行曾让
   这个开关下 owner 的**每一次** fs 调用都抛 `path_outside_workspace`（docs/28 · L-TOOL-02）。
   此开关在 WebUI 有醒目红色警告。
-- `denyGlobs` 默认：`**/.env*`, `**/*.pem`, `**/*.key`, `**/id_rsa*`, `**/.git/config`, `**/.ssh/**`, `<项目根>/config/**`, `<项目根>/data/luoli.db*`, `<项目根>/memory/**`（记忆只能通过 `memory_*` 工具改，保证有版本记录）。
+- `denyGlobs` 默认：`**/.env*`, `**/*.pem`, `**/*.key`, `**/id_rsa*`, `**/.git/config`, `**/.ssh/**`, `<项目根>/config/**`, `<项目根>/data/luoli.db*`, `<项目根>/memory/**`（记忆只能通过 `memory_*` 工具改，保证有版本记录）, `<项目根>/skills/**`, `<项目根>/plugins/**`（自撰写通道的落点；后两条只保护**默认**目录，真正的保证来自 `selfAuthoringDenyGlobs()`，见 §3.10）。
   配置里写成 `<root>`，展开成**进程 cwd**（部署根），与 jail 的 `root` 无关。带 `<项目根>` 前缀的
   那几条只在 host-fs 模式下真正起作用 —— 默认模式下这些绝对路径先撞 `path_outside_workspace`。
+  `<root>` 的展开发生在**匹配时**（每次 `resolve()`），不在构造时：挪到构造时会让「进程 cwd 在
+  构造之后变了」的行为静默改变。
+- **以 `/**` 结尾的 deny glob 同时拒绝那个目录本身。** minimatch 下 `X/**` 匹配 `X` 底下的东西而
+  **不匹配 `X` 自己**，而上面那份默认值的形状几乎全是 `X/**`（`**/.ssh/**` 与四条 `<项目根>/…/**`，
+  再加自撰写通道那两条绝对路径，§3.10）。语义因此是：「你碰不到 X 底下的任何东西」**蕴含**
+  「你也搬不走、删不掉 X 本身」。**这不是一道新的门，是把一道本来就想有的门修严** ——
+  少了这一层就有一条完整绕行：`move_file` 一道额外的闸都没有（`delete_file` 有「显式 `recursive`
+  + 深度 ≥2」两道，`move_file` 什么都没有），于是 `move_file('skills','x')` 把整棵树搬到名单之外、
+  随便改一个**已启用** plugin 的源码、再搬回去，而 [07 §6.1](./07-skills-plugins-mcp.md) 那道
+  「内容变了就打回未启用」的闸住在 `PluginManager.writeSource` 里、这条路根本不经过它。
+  判据只有一份，落在 `PathJail` 而不是 `move_file` 上：`list_dir` / `glob` / `grep` / `read_file` /
+  `delete_file` 走的是同一个 `resolve`。派生的模式在构造时算一次（`resolve()` 是每次 fs 调用都走的
+  热路径），仍走 minimatch 而不是字符串前缀比较 —— 后者会把 `skills-backup` 一起吃掉。
+  **不以 `/**` 结尾的 glob（`**/*.pem`、`<项目根>/data/luoli.db*`）语义一个字不变**，那些目录照旧解得开。
 
 ### 3.2 聊天记录检索
 
@@ -396,6 +438,17 @@ profile 说了算（那里面可能写着别的值），而运维在界面上往
 不守规矩的 agent 应该拿到一个干净的错，而不是一个挂住的请求。反向 fs 与 terminal 的形状见 §3.5.2，
 逐条审批见 §3.5.3。
 
+**那些理由同时进结果的 `degraded`，因为它们是给模型看的。** 与 `acp.run` 的 `data.degraded`
+**同源**（`AcpSurface.notes` 那一份），不是第二份要手动对齐的文案。此前它只进日志：运维在 WebUI
+里看得见，而模型一个字都看不到 —— 于是模型让 agent 去跑命令（`agents[].tools` 里明明有 `bash`）、
+拿回一个说不清的失败，然后绕路或者编一个理由。`degraded` 是一个 `string[]`，**0 条时不出现这个键**
+（同 `filesWritten` / `terminals` 的口径：一个恒为 `[]` 的键每轮都要模型读一遍「没有降级」）。
+它按构造有界，与结果里其他字段一样：**单条 384 字节**（量出来的 —— 最长那条固定 note 是 326 字节，
+唯一会撞上界的是嵌着 jail 构造失败 `error.message` 的那条，那是不可控长度的）、**最多 4 条**
+（`#surface` 能产出的 note 总数；不写「今天最多同时出现两条」那个算出来的数字，加一条 note 就悄悄
+失效）。字段位置**排在 `output` / `stderr` 之前** —— 结果的字段顺序有意义，万一还是被截了，
+被 `elideMiddleBytes` 吃掉的绝不该是「它执行不了」这句话。
+
 **`bash` 在默认 `tools` 里，而让它真能跑命令要两个条件 —— 出厂默认两个都满足。**
 
 第一个条件是申报 `terminal`，这一轮做到了。**⚠️ 但它是必要条件而不是充分条件** —— 这是本轮实测
@@ -464,7 +517,8 @@ profile 说了算（那里面可能写着别的值），而运维在界面上往
 degraded / filesWritten / terminals / terminalsLeaked / costUsd / ms），stderr 逐行 `acp.stderr`，
 子进程自己死记 `acp.disconnect`，每次 permission 记 `acp.permission`（拒绝那一次是 warn）。
 **那两件只在异常路径上出现的事没有自己的 kind**，它们进 `acp.run` 的 `data` 并把那一行抬成 warn：
-「能力没申报出去」（`degraded` 带人话理由）与「agent 漏了 release」（`terminalsLeaked`）—— 各开一个
+「能力没申报出去」（`degraded` 带人话理由，**同一份也进结果里那个键** —— 那一份是给模型的，见
+§3.5.1）与「agent 漏了 release」（`terminalsLeaked`）—— 各开一个
 kind 就是往 [10 §2](./10-logging-and-observability.md) 那张被双向焊住的表里加两个只在出事时出现的
 枚举值。**agent 内部干了什么仍然不在 `acp.run` 里**：那是进度卡片的事（§3.5.2），而权限层面它一个字
 都不改（T17）。
@@ -478,7 +532,11 @@ agent 反过来调我们的七个 method。**能力申报与这七个处理器�
 `cwd` 与子进程的 cwd。** 三处必须是同一个字面量：`resolveHarnessDir` 只做 `resolve()`，路径中间有
 一段软链时 agent 自己解析出来的绝对路径与 jail 的边界会是两套写法，于是每一次 `fs/*` 都被判越界。
 `allowedDirs` 因此也在 realpath 上再判一遍（**两侧都解析** —— 只解析目标那一侧的话，`/home` 本身是
-软链的部署会把一份能用的配置判成越界）。`tools.fs.denyGlobs` 与自撰写通道那两条一并生效。
+软链的部署会把一份能用的配置判成越界）。`tools.fs.denyGlobs` 与自撰写通道那两条一并生效，包括
+「以 `/**` 结尾的同时拒绝那个目录本身」那一条（§3.1）—— 终端的 `cwd` 走的也是这个 `resolve`，所以
+「把工作目录设成一个被保护目录」同样被拒。⚠ 但那一道是**一致性**（同一个 jail 判 cwd 与判文件），
+不是一道边界：命令在宿主上直跑，`denyGlobs` 只被 `PathJail` 执行，一条 `cat ~/.ssh/id_rsa` 压根不经
+那个函数（同 [14](./14-open-questions.md) T19）。真边界仍然只有 `allowedDirs` + 仅 owner + 仅私聊。
 
 ⚠ **不复用 `dependencies.filesFor(workspace, role)`**（[14 §2](./14-open-questions.md) Q8-b 明说不
 复用）：那份的 root 是 `data/workspace/<chatId>`，而且 `tools.fs.allowHostFsForOwner` 一开它就是 `/`

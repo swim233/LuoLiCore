@@ -1,4 +1,5 @@
 import type { Bot } from 'grammy';
+import type { InlineKeyboardMarkup } from 'grammy/types';
 import { diffLines } from 'diff';
 import type { PlanEntry, PlanEntryStatus, SessionNotification, ToolCallContent, ToolCallLocation, ToolCallStatus, ToolKind } from '@agentclientprotocol/sdk';
 import { deliveryOrder, escapeHtml, escapeMarkdownV2, sendWithFallback, toPlainText, type ParseFallbackInfo, type ParseMode } from './output.js';
@@ -39,13 +40,22 @@ export interface AcpProgressCard {
   readonly messageId: number | null;
   /** 收一条 `session/update`；内部按「时间窗 + 状态变化」双闸决定是否真的编辑。**永不 throw**。 */
   push(notification: unknown): void;
-  /** 终帧：立刻渲染并落定（不受节流约束），交回归档用的最终文本（渲染前的正文）。**永不 throw**。 */
+  /**
+   * 终帧：立刻渲染并落定（不受节流约束），**同一次调用里把取消按钮撤掉**，交回归档用的最终文本
+   * （渲染前的正文）。**永不 throw**。
+   */
   close(final: AcpCardFinal): Promise<string>;
 }
 
 export interface AcpCardTarget {
   chatId: string;
   threadId: number | null;
+  /**
+   * 取消按钮挂的那个 turn（`docs/08 §6.1`）。**缺席时整个按钮不挂** —— `c:` 那条通道的判据是
+   * 「这个 id 还在 `TurnRegistry` 里且点的人是发起人或 owner」，一个空 payload 必然判 false，
+   * 而屏幕上出现的是「只有发起人或管理员可以取消」：一句与真实原因毫不相干的话。
+   */
+  turnId?: string | undefined;
 }
 
 export interface AcpCardOptions {
@@ -84,6 +94,18 @@ const CARD_MAX_CHARS = 3500;
 const IMMEDIATE_MIN_GAP_MS = 2000;
 /** `close()` 等在途那一帧落地的上界。它挂在调用方的 `finally` 上，不能没有底。 */
 const CLOSE_WAIT_MS = 5000;
+/**
+ * 取消按钮走的是 **`bot.ts` 那条既有的 `c:<turnId>` 通道**（`docs/08 §6` 的取消按钮，那里已经判过
+ * 「点的人是发起人或 owner」），不是一种新的 callback 种类 —— 所以适配层这边只有「挂不挂这副键盘」
+ * 一个决定，`callback_query:data` 的处理器一个字都不用改。
+ *
+ * 64 字节是 Bot API 给 `callback_data` 的硬上界（同 `docs/05 §6.1` 里 `a:` 那套的算术）。
+ * `c:` + ULID(26) = 28，这道闸只在 turnId 不是 ULID 时才够得着；而它一旦超界，Telegram 拒的是整条
+ * `sendMessage` —— 屏幕上连卡片都没有。宁可不挂按钮。
+ */
+const CANCEL_PREFIX = 'c:';
+const CALLBACK_DATA_MAX = 64;
+const CANCEL_LABEL = '⛔ 取消';
 const TITLE_MAX = 72;
 const PLAN_INLINE_MAX = 24;
 const PATH_MAX = 52;
@@ -253,6 +275,8 @@ class AcpCard implements AcpProgressCard {
   readonly #root: string;
   readonly #budget: number;
   readonly #interval: number;
+  /** 整趟 run 不变的那副键盘，`undefined` = 这张卡片没有取消按钮（见 `AcpCardTarget.turnId`）。 */
+  readonly #cancel: InlineKeyboardMarkup | undefined;
   #mode: string | null = null;
   #plan: Array<{ content: string; status: PlanEntryStatus }> = [];
   #planId: string | null = null;
@@ -296,6 +320,9 @@ class AcpCard implements AcpProgressCard {
     // 间隔有下限：私聊那个桶本来就是 `{minTime: 1000}` 一秒一拍，配得比它更小只会让编辑在
     // 节流器里排队 —— 而排在队里的编辑占的正是下一帧要用的槽位（`docs/08 §5.2` 的队尾饿死）。
     this.#interval = Math.max(1000, options.intervalMs);
+    const data = `${CANCEL_PREFIX}${target.turnId ?? ''}`;
+    this.#cancel = target.turnId && Buffer.byteLength(data) <= CALLBACK_DATA_MAX
+      ? { inline_keyboard: [[{ text: CANCEL_LABEL, callback_data: data }]] } : undefined;
   }
 
   get messageId(): number | null { return this.#messageId; }
@@ -377,21 +404,27 @@ class AcpCard implements AcpProgressCard {
   async #flushNow(final: AcpCardFinal | null): Promise<void> {
     const frame = this.#frame(final);
     this.#plain = frame.plain;
+    // **键盘只挂在过程帧上，所以它进判据。** 终帧通常正文也变了（多一行 `✅ 完成` / `⛔ …`），但那是
+    // 常态不是不变量：表头本身就长过预算时，`#frame` 最后那道按码点硬收的兜底会把每一帧都磨成表头
+    // 的同一截（计时器与 verdict 都在截断点之后），于是「逐字节相同就不发」把终帧整个吃掉 ——
+    // 那排按钮就永远留在一张已经结束的卡片上。「键盘从有到无」是一次真的变化，不许被正文吃掉。
+    const markup = final === null ? this.#cancel : undefined;
+    const key = `${markup ? CANCEL_PREFIX : ''}${frame.key}`;
     // 逐字节相同就不发，**不靠 Telegram 回 `message is not modified` 兜**：那一跳照样占掉一个
     // 槽位（还是排在真正要发的东西前面）。也不动 `#lastEditAt` —— 这一帧没花掉配额。
-    if (this.#lastKey !== null && frame.key === this.#lastKey) { this.#dirty = false; return; }
+    if (this.#lastKey !== null && key === this.#lastKey) { this.#dirty = false; return; }
     this.#dirty = false;
-    this.#lastKey = frame.key;
+    this.#lastKey = key;
     // 先记时刻再投递：投递失败也算用掉了一次尝试，不然一个持续失败的 chat 会被连着重试打光预算。
     this.#lastEditAt = Date.now();
-    if (this.#messageId === null) { await this.#send(frame.rendered, final !== null); return; }
-    await this.#edit(this.#messageId, frame.rendered);
+    if (this.#messageId === null) { await this.#send(frame.rendered, final !== null, markup); return; }
+    await this.#edit(this.#messageId, frame.rendered, markup);
   }
 
   /** 投递失败 ≠ ACP 运行失败（`R-TG-02` 那条的同一道理）：吞掉、记一行、卡片继续。 */
-  async #send(rendered: string, isFinal: boolean): Promise<void> {
+  async #send(rendered: string, isFinal: boolean, markup: InlineKeyboardMarkup | undefined): Promise<void> {
     const at = Date.now();
-    const extra = this.target.threadId === null ? {} : { message_thread_id: this.target.threadId };
+    const extra = { ...(this.target.threadId === null ? {} : { message_thread_id: this.target.threadId }), ...(markup ? { reply_markup: markup } : {}) };
     // 首帧这一条按 chat 串行（同另外三条出站路径，`L-TG-02`）：卡片不能挤进别的消息那批分段中间。
     // **编辑一律在锁外** —— 盖上去会让整个 ACP 运行期间这个 chat 的投递变成实质串行。
     const sent = await deliveryOrder.run(this.target.chatId, () => sendWithFallback(this.bot.api, this.target.chatId, rendered, extra, this.options.parseMode, this.hooks.onParseFallback))
@@ -401,12 +434,16 @@ class AcpCard implements AcpProgressCard {
     this.#emit({ kind: 'send', ok: sent !== null, ms: Date.now() - at, ...(sent ? { messageId: sent.message_id } : {}), chars: [...rendered].length, path: isFinal ? 'final' : 'stream' });
   }
 
-  async #edit(messageId: number, rendered: string): Promise<void> {
+  async #edit(messageId: number, rendered: string, markup: InlineKeyboardMarkup | undefined): Promise<void> {
     const at = Date.now();
     this.#editCount += 1;
+    // **`reply_markup` 每一帧都要重给**：Bot API 把「不带这个字段的 `editMessageText`」当成撤键盘
+    // （同 `TelegramPromptChannel.settle` 那一跳），所以省略它正是终帧要的语义 —— 反过来，过程帧
+    // 忘了带就等于按钮在第一次编辑之后自己消失了。撤键盘与改正文因此是同一次调用，不额外占槽位。
+    const extra = markup === undefined ? {} : { reply_markup: markup };
     try {
-      if (this.options.parseMode === 'none') await this.bot.api.editMessageText(this.target.chatId, messageId, rendered);
-      else await this.bot.api.editMessageText(this.target.chatId, messageId, rendered, { parse_mode: this.options.parseMode });
+      if (this.options.parseMode === 'none') await this.bot.api.editMessageText(this.target.chatId, messageId, rendered, extra);
+      else await this.bot.api.editMessageText(this.target.chatId, messageId, rendered, { parse_mode: this.options.parseMode, ...extra });
     } catch (error) {
       const description = error instanceof Error ? error.message : String(error);
       if (/message is not modified|429/i.test(description)) return;
@@ -414,7 +451,7 @@ class AcpCard implements AcpProgressCard {
         // 与 `sendWithFallback` 同一跳、同一条 warn：格式丢掉，卡片还在。降级发的是 `toPlainText`
         // 而不是渲染结果原文 —— 后者在 MarkdownV2 下是满屏 `\-`。
         try {
-          await this.bot.api.editMessageText(this.target.chatId, messageId, toPlainText(rendered, this.options.parseMode));
+          await this.bot.api.editMessageText(this.target.chatId, messageId, toPlainText(rendered, this.options.parseMode), extra);
           this.hooks.onParseFallback?.({ chars: [...rendered].length, error: description, phase: 'edit' });
           return;
         } catch { /* 二次失败照旧只记不抛 */ }

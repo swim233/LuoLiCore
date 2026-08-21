@@ -203,8 +203,10 @@ describe('ACP 逐条审批 · always 只活在这一次调用里', () => {
     // 而 always 恰恰是最需要被数出来的那一档。
     const all = rows();
     expect(all).toHaveLength(2);
-    expect(all[0]).toMatchObject({ state: 'approved', decidedBy: 'owner' });
-    expect(all[1]).toMatchObject({ state: 'approved', decidedBy: 'acp:always', channel: 'acp:always' });
+    expect(all[0]).toMatchObject({ state: 'approved', decidedBy: 'owner', channel: 'webui' });
+    // 通道与主体是两列：`acp:always` 说的是「谁裁的」，通道是 `acp`。两列同值时审批卡把同一个
+    // 字符串印两遍，而按通道分桶的查询会多出一个取值域外的桶（docs/21 §18）。
+    expect(all[1]).toMatchObject({ state: 'approved', decidedBy: 'acp:always', channel: 'acp' });
     await manager.close();
   });
 

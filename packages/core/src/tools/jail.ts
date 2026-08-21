@@ -1,5 +1,5 @@
 import { existsSync, lstatSync, mkdirSync, realpathSync } from 'node:fs';
-import { resolve, sep } from 'node:path';
+import { relative, resolve, sep } from 'node:path';
 import { minimatch } from 'minimatch';
 
 /**
@@ -33,8 +33,27 @@ export class PathJail {
    * `path_outside_workspace`（长得像安全拦截的功能性打死，docs/28 · L-TOOL-02）。
    */
   readonly #prefix: string;
+  /**
+   * `denyGlobs` 加上「以 `/**` 结尾的那些各再来一条去掉后缀的」。
+   *
+   * minimatch 下 `X/**` **不匹配 `X` 自己**，而 `tools.fs.denyGlobs` 的默认值形状几乎全是这个
+   * （`.ssh` 那条、`<root>/config/**`、`<root>/memory/**`、`<root>/skills/**`、`<root>/plugins/**`，
+   * 再加 `selfAuthoringDenyGlobs()` 生成的那两条绝对路径）—— 于是被保护目录**本身**过得去，而
+   * `FileTools.move` 一道额外的闸都没有：`move_file('skills', 'x')` 把整棵树搬到名单之外，改完再
+   * 搬回来，`docs/07 §6.1`「内容变了就打回未启用」那道闸整条被绕过（它住在
+   * `PluginManager.writeSource` 里，而这条路根本不经过它）。所以「你碰不到 X 底下的任何东西」
+   * 在这里蕴含「你也搬不走、删不掉 X 本身」—— 这不是新开一道门，是把一道本来就想有的门修严。
+   * 判据只有这一份：`move` / `remove` / `list` / `grep` / `read` 走的是同一个 `resolve`。
+   *
+   * 不以 `/**` 结尾的 glob（`*.pem` 那条、`<root>/data/luoli.db*`）语义一个字不变。
+   * 在构造时算一次：`resolve()` 是每次 fs 调用都走的热路径，不该在里面做字符串推导。
+   * **但 `<root>` 仍在匹配时才替换** —— 挪到这里会让「进程 cwd 在构造之后变了」的行为静默改变。
+   */
+  readonly #denyGlobs: string[];
 
-  constructor(root: string, private readonly denyGlobs: string[], options?: { base?: string }) {
+  constructor(root: string, denyGlobs: readonly string[], options?: { base?: string }) {
+    // `'/**'` 本身（长度 3）去掉后缀是空串，minimatch 拿空模式什么都不匹配 —— 那一条不派生。
+    this.#denyGlobs = denyGlobs.flatMap((glob) => (glob.length > 3 && glob.endsWith('/**') ? [glob, glob.slice(0, -3)] : [glob]));
     const base = options?.base ?? root;
     // 建 base 不建 root：默认模式下两者是同一个目录；host-fs 模式下 root 是 `/`（必然存在，
     // recursive mkdir 落在已存在目录上只是白跑一趟），真正需要被建出来的是会话 workspace。
@@ -46,6 +65,21 @@ export class PathJail {
 
   #inside(path: string): boolean {
     return path === this.#boundary || path.startsWith(this.#prefix);
+  }
+
+  /**
+   * 从**可达边界**数起有几层。`FileTools.remove` 的「递归删除只允许作用在二级及更深的路径」那道闸
+   * 要的是这个数 —— 它此前量的是 `relative(jail.root, target)`，而 `root` 只是相对路径的解析基点：
+   * host-fs 模式下边界是 `/` 而 root 仍是会话 workspace，于是 `<部署根>/skills` 相对化成
+   * `../../../skills` 数出 4 层、闸放行，而那正是 `selfAuthoringDenyGlobs()` 存在的那个模式。更一般地
+   * 那个模式下**任何**绝对路径都会攒出一堆 `..` 段（`/etc` 数出来是一个大数），那道闸对整个宿主
+   * 文件系统近乎无效。默认模式下 `root === boundary`，这个数与从前逐字节相同。
+   *
+   * 方法留在 jail 里而不是把 `#boundary` 暴露出去：判据一律走这里，不在别处重算前缀。只对
+   * `resolve()` 交回的路径有意义 —— 边界外的路径照旧会把 `..` 段数进来（调用方先过 `resolve`）。
+   */
+  depthFromBoundary(real: string): number {
+    return relative(this.#boundary, real).split(sep).filter(Boolean).length;
   }
 
   resolve(input: string): string {
@@ -62,7 +96,7 @@ export class PathJail {
     }
     if (!this.#inside(real)) throw new Error('path_outside_workspace');
     const normalized = real.replaceAll('\\', '/');
-    const denied = this.denyGlobs.some((glob) => minimatch(normalized, glob.replace('<root>', process.cwd()), { dot: true }));
+    const denied = this.#denyGlobs.some((glob) => minimatch(normalized, glob.replace('<root>', process.cwd()), { dot: true }));
     if (denied) throw new Error('path_denied');
     if (existsSync(real) && lstatSync(real).isSymbolicLink()) {
       const target = realpathSync(real);

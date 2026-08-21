@@ -484,13 +484,27 @@ bot:  ⏳ 已接收，正在处理…                      [取消]        ← �
    （同 [02](./02-context-engine.md) 对不透明 part 的口径）—— 显示给人看可以，钉进历史不行。
    「永不累积」实现成**有界滚动窗口**并按 `messageId` 换段清空：一条 chunk 常常只有两三个字，
    每条都整段替换的话屏幕上是个毫无意义的碎片。
+8. **取消按钮挂在卡片上，走的是 §6 那条既有的 `c:<turnId>` 通道**（`callback_data = 'c:' + turnId`），
+   **不是一种新的 callback 种类**：`bot.ts` 的 `callback_query:data` 处理器一个字都不用改，
+   「点的人是发起人或 owner」也照旧由那边的 `TurnRegistry.cancel` 判。卡片这边因此只有「挂不挂这副
+   键盘」一个决定。一趟 ACP 能跑满 `agent.acp.agents[].timeoutMs`（默认 15 分钟），而这段时间里用户
+   面前只有这一张卡片 —— 此前要停掉它只能另发一条 `/cancel`。两种情况退化成**不挂按钮**：
+   `turnId` 缺席（它在 `TelegramToolBridge.openProgressCard` 的 target 上是 optional）——
+   空 payload 在注册表那边必然判 false，屏幕上出现的是「只有发起人或管理员可以取消」，一句与真实
+   原因毫不相干的话，比没有按钮更坏；以及 `c:` + turnId 超过 Bot API 给 `callback_data` 的
+   **64 字节**上界（`c:` + ULID(26) = 28，只有 turnId 不是 ULID 时才够得着）—— 那时 Telegram 拒的是
+   整条 `sendMessage`，屏幕上连卡片都没有。
 
 **刷新判据**：`dirty && now - lastEdit >= intervalMs`（默认 5000，下限焊在 1000 —— 私聊那个桶
 `{minTime: 1000}` 本来就一秒一拍，配得更小只会让编辑排队）。三种即时刷新绕过间隔：plan 被替换、
 某个 tool_call 变 `failed`、`close()`。前两种之间有 2 秒地板 —— 一个 200 次工具调用全失败的 agent
 否则能把它变成 200 次编辑，而两个关键事件隔不到 2 秒时第二次晚 3 秒显示没有任何损失。
 **渲染结果与上一帧逐字节相同就不发**，不靠 Telegram 回 `message is not modified` 兜：那一跳照样
-占掉一个槽位，还排在真正要发的东西前面。判据里**不含表头那个计时器** —— 时钟走了一秒不是新信息。
+占掉一个槽位，还排在真正要发的东西前面。判据里**不含表头那个计时器** —— 时钟走了一秒不是新信息；
+但**含那副取消键盘**：键盘从有到无（只发生在终帧）是一次真的变化。不算它的话有一种正文真的没变的
+收尾 —— 表头本身就长过预算时，丢弃梯走完之后那道按码点硬收的兜底会把每一帧都磨成表头的同一截
+（计时器与终帧那行 verdict 都在截断点之后），于是「逐字节相同就不发」把终帧整个吃掉，那排按钮
+永远留在一张已经结束的卡片上。过程帧那副键盘是常量，所以它对判据的贡献也是常量：编辑次数不变。
 
 **投递预算**（这条算术是上面那些数字的地基）：`@grammyjs/transformer-throttler` 按 `chat_id < 0`
 分流，群聊走 `group` 桶（`telegram.throttle.perChatPerMinute`，默认 20/分钟），**私聊走 `out` 桶，
@@ -507,7 +521,7 @@ bot:  ⏳ 已接收，正在处理…                      [取消]        ← �
 > 是 per 实例 = per 轮次的）。要放宽就得先把「typing 给正文让路」那道判据做成跨实例的
 > per-chat 信标 —— 现在没有。
 
-两处容易写错的，都在收尾上：
+三处容易写错的，都在收尾上：
 
 - **归档只在终帧一次。** `ScopedArchiveRepository.append` 是 `INSERT OR IGNORE`，首帧就归档等于把
   「⏳ 正在启动…」永久钉进 `messages` 与 `messages_fts`。`close()` 交回的那份文本才是归档用的
@@ -517,6 +531,13 @@ bot:  ⏳ 已接收，正在处理…                      [取消]        ← �
   的既定取舍：屏幕上停着一张「现在 · ✏️ 改 …」的卡片而进程已经没了，用户没有任何办法判断它是
   死了还是还在跑。所以 `close()` **永不 throw**，且中途 `push` 全部失败（限流、被拉黑）之后照样能
   渲染出一帧 —— 首帧没发出去时它走 `sendMessage` 而不是 `editMessageText`。
+- **终帧必须把取消键盘撤掉。** `close()` 之后那一轮已经收尾（`registry.finish` 把它从 `TurnRegistry`
+  里删了），留着的按钮点下去 `cancel` 判 false，用户看到的仍是那句「只有发起人或管理员可以取消」
+  —— 与真实原因毫不相干，正是 [21 §12](./21-webui-coverage-gaps.md)「界面在说谎」清过的那一类。
+  撤键盘与改正文是**同一次** `editMessageText`（省略 `reply_markup` 就是撤键盘），口径同
+  `TelegramPromptChannel.settle`：分成两次要在节流器里排两回队，说的还是同一件事。反过来，
+  **过程帧每一帧都要重新带上 `reply_markup`**（含 parse-entities 降级那一跳的重编辑），
+  漏了就等于按钮在第一次编辑之后自己消失了。
 
 `push()` 里**任何异常都不冒出去**：它跑在收 `session/update` 那条路上，呈现层不许打断投递
 （同 `TelegramOutput.#emit` 对 `onDelivery` 的口径）。卡片正文**整体按纯文本转义**，不走
@@ -541,6 +562,7 @@ bot:  ⏳ 已接收，正在处理…                      [取消]        ← �
 ⚠ 失败 1 次 · 最近：跑 pnpm lint
 工具 14 次
   读 6 · 改 4 · 跑 3 · 搜 1
+                    [⛔ 取消]        ← inline keyboard，callback_data = 'c:<turnId>'；终帧撤掉
 ```
 
 路径**去掉工作目录前缀**（目录已经在表头上，每行再重复一遍 `/home/swim/code/LuoLiCore/` 只是把

@@ -405,12 +405,29 @@ ACP 加一档就得整表重建，而 `agent_runs` 是 trace 的骨架表（§4�
 把子 run 串起来）—— 重建期间那些 id 引用全在半空中。所以 **ACP 行照旧记 `kind='sub'`**，认它靠
 `agent_name='acp:<name>'` + `model_alias='external'` 这一对，而不是一个新的 kind。
 
-**连带后果，如实记下：一条 ACP 行会占掉本轮一个子 agent 名额。** `AgentManager.spawn()` 判
-`agent.maxSubagentsPerTurn`（默认 10）用的是
-`SELECT COUNT(*) FROM agent_runs WHERE turn_id=? AND kind='sub'` —— 它数的是行，不看 `agent_name`。
-这是既有计数口径的连带结果，不是为 ACP 设计的额度。范围有限但真实：ACP 那一行是**跑完之后**才
-一次性插入的（没有 `state='running'` 那一段），所以受影响的只有同一轮里排在它**后面**的
-`spawn_agent`。
+**ACP 行不占本轮的子 agent 名额。** `AgentManager.spawn()` 判 `agent.maxSubagentsPerTurn`（默认 10）
+的那条 COUNT 把它们排掉：
+`… WHERE turn_id=? AND kind='sub' AND NOT (agent_name GLOB 'acp:*' AND model_alias='external')`。
+
+**为什么排除是对的：** 那个数管的是**本系统自己的 fan-out 成本** —— 每个子 agent 都是一次我们
+付钱的模型调用，护栏防的是模型一步派出一片；而 ACP 那条路有它自己的三道门（owner + 仅私聊、
+目录白名单、每次审批，[05 §3.5.1](./05-tools-and-permissions.md)）加目录互斥加
+`agent.acp.maxCostUsd`，从来不共用这个数。**旧口径（数行、不看 `agent_name`）的问题不只是
+「多占一个」**：那一行是**跑完之后**才一次性插入的（没有 `state='running'` 那一段），所以它只压得住
+同一轮里排在它**后面**的 `spawn_agent` —— 一个依赖调用顺序的上界，比「占」与「不占」两种一致的
+选择都更坏（同样两次 ACP 调用 + 两次 `spawn_agent`，换个顺序就是两个不同的额度）。
+
+判据取 `acp:` 前缀与 `model_alias='external'` **两个都中**才排除。`agent.agents[].name` 是裸
+`z.string()`，没有正则：`agents/<name>.md` 那条路挡得住冒号（`^[a-z0-9]+(?:-[a-z0-9]+)*$`），
+DB / WebUI 那条挡不住，所以运维真能建一个叫 `acp:x` 的子 agent —— 要它**同时**把 `modelAlias`
+写成 `external` 才会被漏数。用 `GLOB` 而不是 `LIKE`：后者在 SQLite 里 ASCII 大小写不敏感，
+会把 `ACP:x` 一起排掉。
+
+**这是 `agent_runs` 上唯一一处按行聚合的地方**，其余读法结构上碰不到 ACP 行：深度是
+`parent.depth + 1`、环路检测（`ancestors()`）沿 `parent_run_id` 往上走，而没有任何 run 以 ACP 行
+为父；`agent.maxConcurrentSubagents` 的闸是进程内计数、不查库；`recoverAfterCrash` 只改
+`state='running'` 的行，而 ACP 行落库即终态；§4 的结果全文过期只挑 `result_full_ref IS NOT NULL`，
+而 ACP 行那一列恒 NULL（它只有 `result_summary`）。
 
 ### 2.8 Provider 与模型
 
@@ -663,14 +680,18 @@ CREATE TABLE approvals (
   tg_message_id INTEGER,
   requested_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
   decided_by TEXT, decided_at INTEGER, decision_channel TEXT
-  -- decision_channel: telegram|webui|system|acp:always
+  -- decision_channel: telegram|webui|system|acp
+  -- **这一列是通道，不是主体**（两者取值域不同，无 CHECK 约束所以只能靠这行字）。写入侧曾把
+  -- decided_by 原样抄进这一列，于是 acp 那一档两列同值 —— 审批卡那一格渲染的正是
+  -- `decided_by · decision_channel`，同一个字符串印两遍；按通道分桶的查询还会多出一个取值域外的
+  -- 桶（docs/21 · G-UI-04）。`recordDecided()` 的入参因此把 channel 与 decidedBy 拆成两项。
   -- decided_by 有四种格式，无 CHECK 约束：`user:<tgId>`（Telegram 点的按钮，见 [05 §6.1]）、
   -- 字面量 `owner`（WebUI 的 POST /api/approvals/:id/decide —— 那一面只有一个 owner 身份，A15）、
   -- `system`（TTL 到期 / 轮次取消 / 回执发不出去 / 启动扫描）、`acp:always`（M13 的
   -- `DatabaseApprovalBroker.recordDecided()`：ACP 那条路上会话内的 allow_always / reject_always
   -- 记忆命中了，这一次没有任何人被问）。**没问人也要落一行**：不落的话「批了一次之后它接着改了
   -- 40 个文件」在审计里只剩最初那一条，而 always 恰恰是最需要被数出来的一档。这些行**出生即已
-  -- 裁决** —— requested_at == decided_at、decision_channel 同为 acp:always、state 直接是
+  -- 裁决** —— requested_at == decided_at、decision_channel 为 acp、state 直接是
   -- approved/denied，从不经过 pending，所以 TTL 与下面 tg_message_id 那套待办机器一样都碰不到
   -- 它们（没有回执、没有按钮、没有可过期的东西）。**回执正文一律说 decision_channel
   -- 而不是这一列**：一串 Telegram id 对群里其他人什么都不是，还顺手把 owner 的 id 抖出去。
@@ -872,6 +893,7 @@ image 都改不动了；没有这一列，运维在 WebUI 换了镜像之后所�
 | `config_revisions` | `maintenance.retention.configRevisionDays` = 180 | 按 ts 删。删的是审计记录，不影响当前配置（`config_kv` 不动） |
 | `memory_revisions` | `maintenance.retention.memoryRevisionDays` = 180 | 按 ts 删。删掉之后回滚不到比它更早的版本 |
 | `turns` / `tasks` | 永久 | **刻意不给保留期**：它们是 trace 的骨架（`/api/turns/:id/detail` 靠 turn 行把日志、用量与上下文串起来），删掉等于历史轮次凭空消失。[14 §2 Q9-c](./14-open-questions.md) 已确认永久保留，不再是未决问题 |
+| `agent_runs` / `agent_messages`（**行**） | 永久 | 同上：子 run 与 ask/answer 是那条 trace 的另一半，`turns` 留着而它们被清掉的话，「这一轮里哪个子 agent 干了什么」凭空消失。**但行永久不代表全文永久** —— `result_full_ref` 指向的文件按 `logs.retentionDays` 过期：删文件、把该列置空、`result_summary` 留着（摘要是历史轮次已经引述过的东西，删了会让那些引述变成悬空，`docs/22 · I-09`）。ACP 那种行结构上落不进这一路，它的 `result_full_ref` 恒 NULL（只有 `result_summary`）|
 | `processed_updates` | 7 天 | 定期删 |
 | `sessions` | 过期即删 | 每小时 |
 | `approvals` | 90 天 | pending 超 `expires_at` 标 `expired` |

@@ -180,13 +180,18 @@ export class DatabaseApprovalBroker implements ApprovalBroker {
    * 「批了一次之后它接着改了 40 个文件」在审计里只剩最初那一条，而那正是 always 这一档最需要
    * 被数出来的地方。`decided_by` 由调用方给（`acp:always`），好让它与真人裁决（`user:<tgId>` /
    * `owner`）和系统裁决（`system`）在同一列里分得开（`docs/03` 的 `approvals` 段）。
+   *
+   * **`decision_channel` 不是 `decided_by` 的副本**：前者的取值域是通道（`telegram` / `webui` /
+   * `system` / `acp`），后者是主体。把裁决者原样写进通道列，审批卡上那一格就是同一个字符串印两遍
+   * （它渲染的正是 `decided_by · decision_channel`，`docs/21 §18`），而按通道分桶的查询会多出一个
+   * 取值域外的桶。
    */
-  recordDecided(request: ExternalApprovalRequest & { approved: boolean; decidedBy: string }): void {
+  recordDecided(request: ExternalApprovalRequest & { approved: boolean; decidedBy: string; channel: string }): void {
     const now = Date.now();
     this.db.prepare(`INSERT INTO approvals(id,turn_id,agent_run_id,chat_id,requester_user_id,tool_name,input_json,risk,state,requested_at,expires_at,decided_by,decided_at,decision_channel)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(ulid(), request.context.turn.turnId, request.context.agentRunId ?? null, request.context.turn.chatId,
       request.context.turn.initiatorUserId, request.toolName, JSON.stringify(request.input), request.risk,
-      request.approved ? 'approved' : 'denied', now, now, request.decidedBy, now, request.decidedBy);
+      request.approved ? 'approved' : 'denied', now, now, request.decidedBy, now, request.channel);
   }
 
   async #request(request: ExternalApprovalRequest): Promise<ApprovalVerdict> {

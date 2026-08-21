@@ -3,30 +3,34 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TelegramTools, openAcpProgressCard, toPlainText, type AcpCardOptions } from '@luoli/telegram';
 
 /**
- * ACP 运行的进度卡片（`docs/08 §6.1`）。这一组盯的不是「好看」，是四条不变量：
+ * ACP 运行的进度卡片（`docs/08 §6.1`）。这一组盯的不是「好看」，是五条不变量：
  *
  * - **一次 run = 一条消息**：`sendMessage` 恰好一次，其余全是对那一条的编辑；
  * - **节流真的在节流**：`intervalMs` 是编辑次数的上界，即时刷新有 2 秒地板；
  * - **超预算整段丢、绝不切半行**（`docs/02 §9` 红线 11 搬到 UI 上）；
  * - **观测不许打断投递**：`push()` 永不 throw，`close()` 在中途全失败之后照样渲染出终帧。
+ * - **取消按钮走既有那条 `c:<turnId>` 通道**：过程帧每一帧都挂着，终帧撤掉。
  *
  * 照 `tests/output.pacing.test.ts` 的形状自己实现一个假 bot —— 全仓没有 mock 层。
  */
 
-interface Call { method: 'send' | 'edit'; at: number; text: string; messageId: number; parseMode?: string }
+interface Markup { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> }
+interface Extra { parse_mode?: string; reply_markup?: Markup }
+/** `markup` 缺席 = 那一跳压根没给 `reply_markup`，而 Bot API 把这件事当成**撤键盘**。 */
+interface Call { method: 'send' | 'edit'; at: number; text: string; messageId: number; parseMode?: string; markup?: Markup }
 
 function fakeBot(calls: Call[], broken: { send?: boolean; edit?: boolean } = {}): Bot {
   let nextId = 500;
   const api = {
-    sendMessage: (_chat: string, text: string, extra?: { parse_mode?: string }) => {
+    sendMessage: (_chat: string, text: string, extra?: Extra) => {
       if (broken.send) return Promise.reject(new Error('429: Too Many Requests: retry after 30'));
       nextId += 1;
-      calls.push({ method: 'send', at: Date.now(), text, messageId: nextId, ...(extra?.parse_mode ? { parseMode: extra.parse_mode } : {}) });
+      calls.push({ method: 'send', at: Date.now(), text, messageId: nextId, ...(extra?.parse_mode ? { parseMode: extra.parse_mode } : {}), ...(extra?.reply_markup ? { markup: extra.reply_markup } : {}) });
       return Promise.resolve({ message_id: nextId, date: 0 });
     },
-    editMessageText: (_chat: string, messageId: number, text: string, extra?: { parse_mode?: string }) => {
+    editMessageText: (_chat: string, messageId: number, text: string, extra?: Extra) => {
       if (broken.edit) return Promise.reject(new Error('400: Bad Request: message to edit not found'));
-      calls.push({ method: 'edit', at: Date.now(), text, messageId, ...(extra?.parse_mode ? { parseMode: extra.parse_mode } : {}) });
+      calls.push({ method: 'edit', at: Date.now(), text, messageId, ...(extra?.parse_mode ? { parseMode: extra.parse_mode } : {}), ...(extra?.reply_markup ? { markup: extra.reply_markup } : {}) });
       return Promise.resolve(true);
     },
   };
@@ -34,6 +38,8 @@ function fakeBot(calls: Call[], broken: { send?: boolean; edit?: boolean } = {})
 }
 
 const target = { chatId: '4242', threadId: null };
+/** 真实形态是 ULID（`context/engine.ts` 那句 `ulid()`），26 个字符 —— `c:` + 26 = 28 字节。 */
+const TURN_ID = '01JZ8QK9V4N7Y2M5B3C6D8E0F1';
 const options = (overrides: Partial<AcpCardOptions> = {}): AcpCardOptions =>
   ({ parseMode: 'none', maxMessageChars: 3900, intervalMs: 5000, agent: 'omp', dir: '/home/swim/code/LuoLiCore', ...overrides });
 
@@ -376,5 +382,154 @@ describe('ACP 进度卡片 · 永不打断投递', () => {
     // 卡片这条路不碰归档（归档只在终帧、且由调用方做），所以这里不需要一个真的库。
     const tools = new TelegramTools({ bot: () => null, archive: {} as never, maxMessageChars: () => 3900, maxMentions: () => 3, parseMode: () => 'MarkdownV2' });
     expect(await tools.openProgressCard(target, { parseMode: 'MarkdownV2', maxMessageChars: 3900, intervalMs: 5000 })).toBeNull();
+  });
+});
+
+describe('ACP 进度卡片 · 取消按钮', () => {
+  /**
+   * 一趟 ACP 能跑到十五分钟（`agent.acp.agents[].timeoutMs` 默认 900000），而这整段时间里用户面前
+   * 只有这一张卡片 —— 要停掉它此前得另发一条 `/cancel`。按钮走的是 `bot.ts` 那条**既有**的
+   * `c:<turnId>` 通道（`docs/08 §6`：那里已经判过「点的人是发起人或 owner」），不是一种新的
+   * callback 种类，所以适配层这边的不变量只有两条：payload 恰好是 `c:` + 本轮 turnId，
+   * 且**每一帧都重新挂上** —— `editMessageText` 不带 `reply_markup` 就等于撤键盘。
+   */
+  it('过程帧每一帧都带按钮，callback_data 恰好是 c:<turnId>', async () => {
+    vi.useFakeTimers();
+    const calls: Call[] = [];
+    const card = await openAcpProgressCard(fakeBot(calls), { ...target, turnId: TURN_ID }, options());
+    const keyboard = { inline_keyboard: [[{ text: '⛔ 取消', callback_data: `c:${TURN_ID}` }]] };
+    expect(calls[0]!.markup).toEqual(keyboard);
+    card.push(toolCall('t1', 'edit', '改 packages/telegram/src/acp-card.ts', { status: 'in_progress' }));
+    await vi.advanceTimersByTimeAsync(6000);
+    card.push(toolCall('t2', 'execute', '跑 pnpm typecheck', { status: 'in_progress' }));
+    await vi.advanceTimersByTimeAsync(6000);
+    const edits = calls.filter((call) => call.method === 'edit');
+    expect(edits.length).toBeGreaterThanOrEqual(2);
+    expect(edits.every((call) => call.markup !== undefined)).toBe(true);
+    for (const call of calls) expect(call.markup).toEqual(keyboard); // 64 字节上界：`c:` + ULID(26) = 28
+    await card.close({ stopReason: 'end_turn', files: 0, failures: 0, toolCalls: 2 });
+  });
+
+  /**
+   * **终帧撤键盘，与改正文同一次调用**（照 `TelegramPromptChannel.settle` 那一跳的口径：分成两次
+   * 要在节流器里排两回队，说的还是同一件事）。留着的话点下去 `registry.cancel` 判 false —— 那一轮
+   * 早已 `finish()` 出注册表 —— 而用户看到的是「只有发起人或管理员可以取消」：一句与真实原因毫不
+   * 相干的话，比没有按钮更坏。
+   */
+  it('close() 之后键盘没了，且撤键盘没有多占一次编辑', async () => {
+    vi.useFakeTimers();
+    const calls: Call[] = [];
+    const card = await openAcpProgressCard(fakeBot(calls), { ...target, turnId: TURN_ID }, options());
+    card.push(toolCall('t1', 'edit', '改一个文件', { status: 'in_progress' }));
+    await vi.advanceTimersByTimeAsync(6000);
+    const before = calls.length;
+    await card.close({ stopReason: 'end_turn', files: 1, failures: 0, toolCalls: 1 });
+    expect(calls.length).toBe(before + 1); // 一次编辑，不是「撤键盘 + 改正文」两次
+    expect(calls.at(-1)!.method).toBe('edit');
+    expect(calls.at(-1)!.markup).toBeUndefined();
+    expect(calls.at(-1)!.text).toContain('✅ 完成');
+    // 取消那一档同理：终帧那句话换了，按钮一样撤掉。
+    const cancelled: Call[] = [];
+    const other = await openAcpProgressCard(fakeBot(cancelled), { ...target, turnId: TURN_ID }, options());
+    await other.close({ error: 'acp_cancelled', files: 2, failures: 0, toolCalls: 3 });
+    expect(cancelled.at(-1)!.text).toContain('⛔ 已取消');
+    expect(cancelled.at(-1)!.markup).toBeUndefined();
+  });
+
+  /**
+   * `turnId` 在类型上是 optional，缺席时**一个按钮都不挂**。空 payload（`c:`）在
+   * `TurnRegistry.cancel` 那边必然判 false —— 一个点下去必然答错的按钮比没有按钮更坏。
+   * 64 字节是 Bot API 给 `callback_data` 的硬上界，超界时 Telegram 拒的是整条 `sendMessage`：
+   * 那样连卡片都没有，所以同样退化成不挂按钮。
+   */
+  it('turnId 缺席或超过 64 字节上界时一帧都不带按钮', async () => {
+    vi.useFakeTimers();
+    for (const turnId of [undefined, '', 'x'.repeat(63)]) {
+      const calls: Call[] = [];
+      const card = await openAcpProgressCard(fakeBot(calls), { ...target, ...(turnId === undefined ? {} : { turnId }) }, options());
+      card.push(toolCall('t1', 'read', '读 README', { status: 'in_progress' }));
+      await vi.advanceTimersByTimeAsync(6000);
+      await card.close({ stopReason: 'end_turn', files: 0, failures: 0, toolCalls: 1 });
+      expect(calls.length).toBeGreaterThan(1);
+      expect(calls.every((call) => call.markup === undefined)).toBe(true);
+    }
+  });
+
+  /**
+   * **挂上按钮不许让节流变形。** 判据是「同一串 update 喂进两张卡片（一张有按钮一张没有），
+   * 编辑次数与逐帧正文完全一致」—— 键盘进了快照比较的判据（见下一条）之后，最容易写坏的就是
+   * 让它顺手多刷几帧：过程帧的键盘恒定，所以它对判据的贡献也必须是恒定的。
+   */
+  it('挂上按钮之后编辑次数与逐帧正文都不变', async () => {
+    vi.useFakeTimers();
+    const feed = async (card: { push(notification: unknown): void }): Promise<void> => {
+      card.push(plan([{ content: '读那 700 行', status: 'in_progress' }, { content: '补用例', status: 'pending' }]));
+      for (let index = 0; index < 30; index += 1) {
+        card.push(toolCall(`t${index}`, index % 2 ? 'read' : 'edit', `处理第 ${index} 个文件`, { status: index % 3 ? 'completed' : 'in_progress' }));
+        card.push(chunk(`第 ${index} 段。`));
+        await vi.advanceTimersByTimeAsync(400);
+      }
+    };
+    const bare: Call[] = [];
+    const bareCard = await openAcpProgressCard(fakeBot(bare), target, options());
+    await feed(bareCard);
+    await bareCard.close({ stopReason: 'end_turn', files: 3, failures: 0, toolCalls: 30 });
+    const withButton: Call[] = [];
+    const buttonCard = await openAcpProgressCard(fakeBot(withButton), { ...target, turnId: TURN_ID }, options());
+    await feed(buttonCard);
+    await buttonCard.close({ stopReason: 'end_turn', files: 3, failures: 0, toolCalls: 30 });
+    expect(withButton.map((call) => `${call.method}:${call.text}`)).toEqual(bare.map((call) => `${call.method}:${call.text}`));
+    expect(bare.every((call) => call.markup === undefined)).toBe(true);
+    expect(withButton.filter((call) => call.markup !== undefined)).toHaveLength(withButton.length - 1); // 只有终帧那一次没有
+  });
+
+  /**
+   * **键盘从有到无是一次真的变化，所以它进快照比较的判据。** 不算它的话有一种正文真的没变的收尾：
+   * 表头本身就长过预算时，丢弃梯走完之后那道**按码点硬收**的兜底会把每一帧都磨成表头的同一截
+   * （计时器与终帧那行 verdict 都在截断点之后），于是「逐字节相同就不发」把终帧整个吃掉 ——
+   * 那排按钮就永远留在一张已经结束的卡片上。
+   */
+  it('正文被硬收成同一串时终帧照旧发出去，键盘撤得掉', async () => {
+    vi.useFakeTimers();
+    const calls: Call[] = [];
+    const card = await openAcpProgressCard(fakeBot(calls), { ...target, turnId: TURN_ID },
+      options({ maxMessageChars: 64, agent: 'a'.repeat(200), dir: '' }));
+    card.push(toolCall('t1', 'execute', '跑 pnpm test', { status: 'in_progress' }));
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(calls).toHaveLength(1); // 每一帧都磨成同一截，过程中一次编辑都不该有
+    expect(calls[0]!.markup).toBeDefined();
+    await card.close({ stopReason: 'end_turn', files: 0, failures: 0, toolCalls: 1 });
+    expect(calls.map((call) => call.method)).toEqual(['send', 'edit']);
+    expect(calls[1]!.text).toBe(calls[0]!.text); // 正文一个字节都没变
+    expect(calls[1]!.markup).toBeUndefined();
+  });
+
+  /**
+   * parse-entities 降级那一跳是**另一次** `editMessageText`（正文换成 `toPlainText`）。忘了把
+   * `reply_markup` 一起带上的话，按钮会在第一次渲染被拒之后悄悄消失 —— 而卡片正文里每个变量都是
+   * 外部 agent 递过来的字符串，那一跳是常态不是异常。
+   */
+  it('parse-entities 降级重编辑照旧带着按钮', async () => {
+    vi.useFakeTimers();
+    const calls: Call[] = [];
+    const api = {
+      sendMessage: (_chat: string, text: string, extra?: Extra) => {
+        calls.push({ method: 'send', at: Date.now(), text, messageId: 901, ...(extra?.reply_markup ? { markup: extra.reply_markup } : {}) });
+        return Promise.resolve({ message_id: 901, date: 0 });
+      },
+      editMessageText: (_chat: string, messageId: number, text: string, extra?: Extra) => {
+        if (extra?.parse_mode) return Promise.reject(new Error("400: Bad Request: can't parse entities: unexpected end of input"));
+        calls.push({ method: 'edit', at: Date.now(), text, messageId, ...(extra?.reply_markup ? { markup: extra.reply_markup } : {}) });
+        return Promise.resolve(true);
+      },
+    };
+    const card = await openAcpProgressCard({ api } as unknown as Bot, { ...target, turnId: TURN_ID }, options({ parseMode: 'MarkdownV2' }));
+    card.push(toolCall('t1', 'edit', '改 config.ts', { status: 'in_progress' }));
+    await vi.advanceTimersByTimeAsync(6000);
+    const fallback = calls.filter((call) => call.method === 'edit');
+    expect(fallback).toHaveLength(1);
+    expect(fallback[0]!.markup?.inline_keyboard[0]![0]!.callback_data).toBe(`c:${TURN_ID}`);
+    await card.close({ stopReason: 'end_turn', files: 0, failures: 0, toolCalls: 1 });
+    expect(calls.at(-1)!.markup).toBeUndefined();
   });
 });

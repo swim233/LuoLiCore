@@ -368,6 +368,11 @@ agent:
                                   #   warn 点名所有配长了的 agent
         maxOutputBytes: 65536     # 交回模型的输出上限（工具壳再按注册表那个上界收一次）
   agents:                         # 子 agent 定义（WebUI 可编辑，见 04 §3.1）
+                                  # name 里不许有冒号（其余字符不限）：`AgentManager.spawn` 数本轮
+                                  #   子 agent 时要把 ACP 落的行排除掉，判据是
+                                  #   `agent_name GLOB 'acp:*' AND model_alias='external'`（03 §2.7）——
+                                  #   一个真子 agent 能起名叫 `acp:x` 且别名叫 `external` 的话，
+                                  #   它就永久不占名额。文件那条路（agents/<name>.md）另有更严的正则。
     - name: researcher
       description: 在聊天记录/文件/网络中检索资料并给出带引用的结论
       modelAlias: low
@@ -492,7 +497,12 @@ tools:
                                   #   绝对路径可达整机（仍受 denyGlobs 约束），而相对路径与回给模型的
                                   #   路径仍以会话 workspace 为基点（05 §3.1 的 base）。开着时下面那几条
                                   #   `<root>/…` 才真正起作用 —— 默认模式下它们先撞 path_outside_workspace
-    denyGlobs:
+    denyGlobs:                    # ★ 以 `/**` 结尾的条目**连那个目录本身一起拒**（`PathJail` 在构造时
+                                  #   派生一条去掉后缀的模式）。minimatch 下 `X/**` 匹配 X 底下的东西而
+                                  #   **不匹配 X 自己**，于是「把整个被保护目录 move / delete 走、改完再
+                                  #   搬回来」此前是一条完整绕行（05 §3.1）。自己写一份数组时因此不必
+                                  #   再补一条 `X`：补了只是冗余，不补也不再有洞。不以 `/**` 结尾的条目
+                                  #   （`**/*.pem`、`<root>/data/luoli.db*`）语义一个字不变
       - '**/.env*'
       - '**/*.pem'
       - '**/*.key'

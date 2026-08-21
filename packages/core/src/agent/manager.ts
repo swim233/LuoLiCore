@@ -81,7 +81,20 @@ export class AgentManager {
     if (!definition) throw new Error(`未知子 agent: ${name}`);
     if (parent.depth + 1 > this.maxDepth) throw new Error('已达子 agent 深度上限');
     if (roleRank(parent.effectiveRole) < roleRank(definition.minRole)) throw new Error('当前用户权限不足以派发该子 agent');
-    const count = this.db.prepare("SELECT COUNT(*) AS value FROM agent_runs WHERE turn_id=? AND kind='sub'").get(parent.turnId) as { value: number };
+    /**
+     * ACP 行（M13，`packages/core/src/acp/runs.ts`）不占这个名额。`maxSubagentsPerTurn` 管的是
+     * **本系统自己的 fan-out 成本** —— 每个子 agent 都是一次我们付钱的模型调用；而 `spawn_acp`
+     * 有它自己那三道门（owner + 仅私聊、目录白名单、每次审批）加目录互斥加 `agent.acp.maxCostUsd`，
+     * 从来不共用这个数。旧口径（数行、不看 `agent_name`）的问题不只是「多占一个」：那一行是
+     * **跑完之后**才一次性插入的，所以它只压得住同一轮里排在它后面的 `spawn_agent` —— 一个依赖
+     * 调用顺序的上界，比「占」与「不占」两种一致的选择都更坏（docs/03 §2.7）。
+     *
+     * 前缀与别名**两个都中**才排除：`agent.agents[].name` 是裸 `z.string()`（`agents/<name>.md`
+     * 那条路的正则挡得住冒号，DB / WebUI 那条挡不住），运维真能建一个叫 `acp:x` 的子 agent ——
+     * 要它同时把 `modelAlias` 也写成 `external` 才会被漏数。`GLOB` 而不是 `LIKE`：后者在 SQLite 里
+     * ASCII 大小写不敏感，会把 `ACP:x` 一起排掉。
+     */
+    const count = this.db.prepare("SELECT COUNT(*) AS value FROM agent_runs WHERE turn_id=? AND kind='sub' AND NOT (agent_name GLOB 'acp:*' AND model_alias='external')").get(parent.turnId) as { value: number };
     if (count.value >= this.maxSubagentsPerTurn) throw new Error('已达本轮子 agent 数量上限');
     const ancestors = this.ancestors(parent);
     if (ancestors.filter((entry) => entry.agentName === name).length >= 2) throw new Error('检测到子 agent 环路');

@@ -325,6 +325,7 @@ SPA fallback（`app.get('*')` 返回 `index.html`，200），所以 **`GET /api/
 | ~~工具的 `minRole` / `approval` 只读~~ **已推翻** | 原理由是「单一策略源 `TOOL_POLICY` 注册期 fail-closed，从界面调低最低角色 = 权限矩阵有两份会漂移的真相」。现按运维诉求开放为覆盖层（`tools.overrides.<name>.minRole` / `.approval` / `.timeoutMs`）：`TOOL_POLICY` 降级为默认值与对照基准，界面同时显示「代码默认」与「当前生效」，**放宽需二次确认**（409 `relax_requires_confirmation`）并在表上留标记。漂移风险用三条性质压住 —— 覆盖绕不过 `available()`、`approvalFor` 抬档只升不降、合并逻辑（`effectiveToolPolicy`）只有一份且 registry 与服务端共用。仅全局，不进 `perChat` 白名单。见 docs/09 §3.7 |
 | 模型别名不能指向不存在的模型、别名链不能为空 | `PUT /api/aliases/:alias` 的校验，不是缺口 |
 | 70 个 `KNOWN_UNIMPLEMENTED_CONFIG_KEYS` | 运行时没接线，**不该**有控件。接线时从白名单里摘掉，同时补控件、改 `docs/11` 的 🚧 清单、复算 §1 的数字 |
+| `ACP_DIR_WAIT_MS`（30 s，M13） | 它是 `acp/manager.ts` 里的**模块常量**，压根不是配置项 —— 目录互斥的等待上界。本文的口径是「运行时有这个能力而界面够不着」，而这里没有可够的东西：要它可配就先加配置键（连带 `docs/11` 一行、`CONFIG_DESCRIPTIONS` 一条、以及「等锁等多久」这件事到底该不该给运维调的判断） |
 
 ---
 
@@ -729,3 +730,46 @@ inline keyboard 审批落地（[05 §6.1](./05-tools-and-permissions.md)）之�
 `decision_channel` —— 「谁批的」与「在哪儿批的」是两件事，后者是这一轮才有的。
 **前端一个字节都不拆 `user:` 前缀**：那等于把 `decided_by` 的格式变成前后端各存一半的暗契约，
 下一种写法（比如将来 ACP 的裁决者）出现时前端会静静把它渲染成乱码。用例：`webui.gaps.test.ts`。
+
+---
+
+## 18. ACP 客户端这一轮（M13，2026-08-22）
+
+三条。**一条当轮闭合** —— 它正是 [§17](#17-telegram-审批裁决通道这一轮2026-08-21) 结尾预言的那件事
+（「下一种写法（比如将来 ACP 的裁决者）出现时前端会静静把它渲染成乱码」），而它真的出现了，所以
+按 §17 同一条口径当轮修掉：这不是「运行时已有而界面够不着」，是我们刚往一列里写进一个界面读不懂
+的值。**另两条如实记着不闭合**，理由写在各自下面 —— 都不是「懒得做」，而是做错的代价高于不做。
+
+| 编号 | 运行时已有 | 界面缺什么 | 状态 |
+|---|---|---|---|
+| **G-UI-04** | `approvals.decision_channel` 的取值域是**通道**（`telegram` / `webui` / `system`），主体在 `decided_by`（[03](./03-data-model.md) 的 `approvals` 段） | ~~`recordDecided()` 把裁决者原样写进了通道列，于是 ACP 会话内 `allow_always` 命中时两列同值，审批卡那一格（渲染的正是 `decided_by · decision_channel`）把 `acp:always` 印两遍；按通道分桶的查询还会多出一个取值域外的桶~~ | ✅ 已闭合（2026-08-22） |
+| **G-API-25** | 一次 ACP 调用跑完在 `agent_runs` 上留一行，外部花费与用量在迁移 `0014` 新加的 `external_cost_usd` / `external_usage_json` 上（写入侧 `packages/core/src/acp/runs.ts`，[03 §2.7](./03-data-model.md)） | **WebUI 里没有任何一处读得到那一行** —— 不只是花费，是整行。全仓唯一读 `agent_runs` 的地方是 `GET /api/tasks/:id` 那条 join，而它的入口是 `tasks.agent_run_id`；ACP 这条路**不建 `tasks` 行**，所以那条 join 永远够不着它。用量页聚合的是 `usage_ledger` 与 `turns`，而 ACP 一行都不进那两张表（刻意的） | 📋 记录，不当轮闭合 |
+| **G-CFG-09** | `agent.acp.agents` 是对象数组，每一项里有 `approvalMode`（agent 内部的自动放行档）与 `tools`（下发成 flag 的工具白名单）—— 两个都是权限相关字段 | 只有自动生成的「全部配置」表单够得着它，而对象数组在那张表单里就是**一格裸 JSON**。MCP transport 有专用的 CRUD 表（[§4.5](#45-第三轮最后六项缺口)、`G-API-11`），这一格没有：改错一个字母时 zod 会拒，但回给运维的是一条路径式报错，而不是「这一档是什么意思」 | 📋 记录，不当轮闭合 |
+
+**G-UI-04 的闭合方式**：`decision_channel` 的取值域加第四个值 `acp`（`ACP_DECISION_CHANNEL`，
+`packages/core/src/acp/permission.ts`），`recordDecided` 的入参把 `channel` 与 `decidedBy` 拆成两项。
+主体仍然写 `acp:always` —— 那是**刻意**的、`parsePrincipal` 解不出来也是刻意的：它不是一个人。
+前端一个字节都不改，仍然是「`decidedByLabel ?? decided_by ?? 'system'` 再挂一个通道」。
+用例：`acp.permission.test.ts`（那条断言原来钉的正是两列同值）。
+
+**G-API-25 为什么不当轮闭合。** 它读起来像「给那条 join 加两列」，但那条路走不通：ACP 不建 `tasks`
+行，所以要闭合就得**新开一个呈现面**（按 turn 列 `agent_runs` 的端点 + 界面上的一块），那是一个
+WebUI 功能而不是一行 SQL。更要紧的是它有个坑：这个数字**刻意**不进任何聚合（迁移 `0014` 的注释
+写了为什么 —— 那不是我们的钱、口径由外部 agent 定、我们无法核对），所以把它接到用量页上就是
+「摆在自己的成本旁边邀请人把两者相加」，而那恰恰是它被单独开一列的理由。**做错比不做贵**，所以
+先记着，等有人真的要这块面板时连位置一起定。
+
+运维今天不是全瞎：`acp.run` 那条日志带 `costUsd` / `degraded` / `filesWritten` / `terminals`，
+日志页看得见 —— 缺的是聚合与「挂在那一轮上」，不是这次调用花了多少钱本身。
+
+**G-CFG-09 为什么不当轮闭合。** 专用表要照 MCP transport 那张的规格做（逐字段控件 + 校验回显 +
+每一档的说明），那是一块真界面。而这一格的实际风险比它看起来小：`approvalMode` 与 `tools` 是
+**一等配置键**（`acp/schema.ts` 里 `ACP_MANAGED_FLAGS` 拒收把它们塞进 `extraArgs` 的写法），
+所以裸 JSON 里改错的结果是 zod 拒收整块、配置不生效，**不是静默失去一道权限门**。
+
+`docs/13` 的验收覆盖：`AC-LOG-024` 覆盖那一行的落库形状，`AC-SEC-028` / `AC-SEC-030` 覆盖两个默认
+档位 —— 但**没有条目覆盖 G-API-25 这个缺口本身**，缺口不是可验收行为。
+
+§1 那三个数字是 **2026-08-18** 的快照，这一轮没有复算：M13 往 schema 里加了 `agent.acp.*` 整块
+（叶子数上涨），同时从 `KNOWN_UNIMPLEMENTED_CONFIG_KEYS` 里摘掉了两个 acp 键。可写覆盖率不受影响
+（自动生成的表单一次覆盖全部新叶子，`G-CFG-09` 说的是那一格的**形式**不是有没有）。

@@ -174,6 +174,16 @@ export interface AcpRunResult {
   costUsd?: number;
   contextUsed?: number;
   ms?: number;
+  /**
+   * 有能力却没申报出去的理由，逐条人话。**这一份是给模型看的**，与 `acp.run` 那条 warn 的
+   * `data.degraded` 同源（`AcpSurface.notes`）—— 此前它只进日志，运维在 WebUI 里看得见而模型一个字
+   * 都看不到，于是模型让 agent 去跑命令、拿回一个说不清的失败、然后绕路或者编一个理由。0 条时
+   * **不出现这个键**（同 `filesWritten` / `terminals`）。
+   *
+   * 按 `DEGRADED_MAX_NOTES` × `DEGRADED_NOTE_BYTES` 有界：其中一条 note 里嵌着 jail 构造失败的
+   * `error.message`，那是不可控长度的。
+   */
+  degraded?: string[];
   truncated?: boolean;
   output?: string;
   stderr?: string;
@@ -187,6 +197,18 @@ const CLOSE_TIMEOUT_MS = 3000;
 const RESULT_KEY_OVERHEAD = 48;
 /** 失败时附上的 stderr 尾巴。够看一句报错，不够跟正文抢预算。 */
 const STDERR_TAIL_BYTES = 1024;
+/**
+ * 单条 `degraded` note 的字节上界。量出来的：`#surface` 里最长那条固定 note（`approvalMode` 被拨回
+ * 非 yolo 那句）是 326 字节，384 给它留一点余量，于是**固定 note 一条都不会被截** —— 唯一会撞上
+ * 这个数的是嵌着 jail 构造失败 `error.message` 的那条，而那正是它存在的理由。
+ */
+const DEGRADED_NOTE_BYTES = 384;
+/**
+ * `degraded` 的条数上界。`#surface` 一共能产出四条（jail 建不起来 / terminal 未申报 / 有 bash 而没
+ * 终端 / 有 bash 而 approvalMode 被拨回非 yolo），所以上界就写四。**不写「今天最多同时出现两条」
+ * 那个数**：那是从「jail 那条会提前 return」推出来的，加一条 note 就悄悄失效。
+ */
+const DEGRADED_MAX_NOTES = 4;
 /** `clipToJsonBudget` 的收敛下限（它自己的 `Math.max(64, …)`）。低于这个预算就别裁了，整段丢。 */
 const CLIP_FLOOR_BYTES = 64;
 /** JSON-RPC 的 `auth_required`（SDK 的 `RequestError.authRequired`）。 */
@@ -426,6 +448,10 @@ export class AcpManager {
       ...(sink.costUsd === null ? {} : { costUsd: sink.costUsd }),
       ...(sink.contextUsed === null ? {} : { contextUsed: sink.contextUsed }),
       ms: Math.round(performance.now() - started),
+      // 降级同时进结果与日志：`data.degraded` 给运维，这一份给模型。**排在 stderr / output 之前** ——
+      // 「它执行不了」这句话被中间截断吃掉的话，模型会照着一份自己编的解释往下走。
+      ...(surface.notes.length ? { degraded: surface.notes.slice(0, DEGRADED_MAX_NOTES)
+        .map((note) => elideMiddleBytes(note, DEGRADED_NOTE_BYTES, elision).value) } : {}),
       // stderr 只在失败时附上：成功那一路它是噪声（omp 把 console.* 全重定向到 stderr），
       // 而失败时它常常是唯一说得出原因的东西。
       ...(failure && child?.stderrTail() ? { stderr: elideMiddleBytes(child!.stderrTail(), STDERR_TAIL_BYTES, elision).value } : {}),

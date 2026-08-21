@@ -327,7 +327,12 @@ export const configSchema = z.object({
     // 都不必把整个 ACP SDK 拖进来。**不扩 `harness`**：那边 `args` 的契约是「任务正文作为 argv
     // 最后一项」，而 ACP 下任务走 `session/prompt`，argv 里根本没有任务。
     acp: acpSchema.default({}),
-    agents: z.array(z.object({ name: z.string(), description: z.string(), modelAlias: z.string(), maxSteps: z.number().int().positive(), minRole: role.default('limited'), tools: z.array(z.string()).default([]), resultMaxChars: z.number().int().positive().default(4000), instructions: z.string(), injectMemory: z.boolean().default(false) })).default([]),
+    // 名字里不许有冒号。`agent_runs` 上按行数子 agent 的那条闸（`AgentManager.spawn`）要把 ACP 落的
+    // 行排除掉，判据是 `agent_name GLOB 'acp:*' AND model_alias='external'` —— 一个真子 agent 只要能
+    // 起名叫 `acp:x` 且别名叫 `external`，就永久不占本轮名额。文件那条路（`agents/<name>.md`）本来
+    // 就有更严的正则，这里只补齐**冒号**这一个命名空间分隔符：那是判据用到的唯一字符，收得再紧
+    // 会让既有部署里一个大写字母的名字变成一次启动失败。
+    agents: z.array(z.object({ name: z.string().regex(/^[^:]+$/, '子 agent 的名字里不能有冒号（冒号是 acp: 这类内部命名空间的分隔符）'), description: z.string(), modelAlias: z.string(), maxSteps: z.number().int().positive(), minRole: role.default('limited'), tools: z.array(z.string()).default([]), resultMaxChars: z.number().int().positive().default(4000), instructions: z.string(), injectMemory: z.boolean().default(false) })).default([]),
   }).default({}),
   provider: z.object({ maxRetries: z.number().int().nonnegative().default(2), retryBaseMs: z.number().int().positive().default(1000), retryMaxMs: z.number().int().positive().default(30_000), healthCheckCron: z.string().default('*/10 * * * *'), healthDownCooldownMinutes: z.number().positive().default(30), requestTimeoutMs: z.number().int().positive().default(120_000), streamIdleTimeoutMs: z.number().int().positive().default(60_000), allowPrivateBaseUrl: z.boolean().default(false),
     // 模型元数据目录（models.dev）。只在 WebUI 主动拉取时出网，缓存到 cacheFile 后按 ttlHours 用

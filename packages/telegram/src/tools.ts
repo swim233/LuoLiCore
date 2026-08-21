@@ -137,7 +137,9 @@ export class TelegramTools implements TelegramToolBridge {
     try {
       // 不挂 `onDeliveryError`：send 失败那一跳已经有一条 `ok:false` 的 `tg.send`，edit 失败
       // 由聚合那一条带出来（`docs/10 §2`：`tg.edit` 一轮一条）。两处都挂等于同一次失败落两行。
-      return await openAcpProgressCard(bot, { chatId: target.chatId, threadId: target.threadId }, options,
+      // `turnId` 在卡片里有第二个用途：取消按钮的 `callback_data`（`c:<turnId>`，`docs/08 §6.1`）。
+      // 缺席时不挂按钮 —— 交回一个必然答「只有发起人或管理员可以取消」的按钮比没有按钮更坏。
+      return await openAcpProgressCard(bot, { chatId: target.chatId, threadId: target.threadId, ...(target.turnId ? { turnId: target.turnId } : {}) }, options,
         { onDelivery: (event) => this.#card(target, event), onParseFallback: (info) => this.#cardFallback(target, info) });
     } catch { return null; }
   }
