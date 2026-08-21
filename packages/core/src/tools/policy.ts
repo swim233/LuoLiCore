@@ -50,10 +50,16 @@ export const TOOL_POLICY = {
   load_skill: { minRole: 'limited', approval: 'never', scope: 'chat', source: 'builtin' },
   // 定时任务是唯一能让 bot 在没人说话时主动花钱的能力，所以起点是 trusted 而不是 limited；
   // 作用域是 chat 而不是 global —— 落点绑死本会话，工具参数里没有 chatId（docs/05 §8）。
-  // list / cancel 同样收在 trusted：能看见任务名就能看见别人排了什么。
+  // list / cancel / update 同样收在 trusted：能看见任务名就能看见别人排了什么。
   schedule_create: { minRole: 'trusted', approval: 'never', scope: 'chat', source: 'builtin' },
+  schedule_update: { minRole: 'trusted', approval: 'never', scope: 'chat', source: 'builtin' },
   schedule_list: { minRole: 'trusted', approval: 'never', scope: 'chat', source: 'builtin' },
   schedule_cancel: { minRole: 'trusted', approval: 'never', scope: 'chat', source: 'builtin' },
+  // 「本轮不用汇报」（docs/02 §10.5）。角色档与 `schedule_create` 对齐——能排一条静默任务的人
+  // 才可能触发一条静默轮次——但**真正的边界不在这一栏上**：两道闸（`agentKind==='main'` 且
+  // 本轮 `silenceable`）焊在 `available()` 里，运维把 `tools.overrides.stay_silent.minRole`
+  // 调到 limited 也开不出来（docs/05 §4 脚注 ¶，同自定义工具与容器那两道地板）。
+  stay_silent: { minRole: 'trusted', approval: 'never', scope: 'chat', source: 'builtin' },
   // M11 · 起一个外部 harness CLI（Claude Code / Codex）改宿主上的仓库（docs/14 §2 Q8）。
   // `owner` + `approval: 'always'` 是这张表能表达的最严档位，另外两道门（仅私聊、目录白名单）
   // 在 `available()` 里 —— 它们判的是本轮上下文与配置，不是角色。

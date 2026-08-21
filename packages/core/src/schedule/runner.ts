@@ -28,8 +28,22 @@ import type { TurnRegistry } from '../turn/registry.js';
  */
 export const SYNTHETIC_TG_MESSAGE_ID_BASE = 2_000_000_000;
 
-/** 一次触发的最终状态，落在 `scheduled_jobs.last_state` 上。 */
-export type ScheduledRunState = 'committed' | 'failed' | 'skipped' | 'missed' | 'cancelled';
+/**
+ * 一次触发的最终状态，落在 `scheduled_jobs.last_state` 上。
+ *
+ * **这个联合类型就是那一列的取值权威** —— 迁移 0013 说明了为什么列上没有 CHECK。
+ * `silent` 与 `committed` 必须分成两档：静默按设计就是安静的，混进 `committed` 之后
+ * 「这条任务其实一直在静默」在库里再无痕迹（docs/02 §10.5 的四层分辨手段之一）。
+ */
+export type ScheduledRunState = 'committed' | 'silent' | 'failed' | 'skipped' | 'missed' | 'cancelled';
+
+/**
+ * 连续静默多少次之后 `schedule.silent` 从 info 升 warn。
+ *
+ * 代码常量而不是配置键（照 `PROVIDER_FAILURES_TO_DOWN` 的先例）：这是「这台定时器已经只烧钱
+ * 不说话了」的发现机制，不是运维要按部署调的策略 —— 而多一个配置键就多一处能被调到永远不响。
+ */
+export const SILENT_STREAK_WARN = 10;
 
 export interface ScheduledJobRunnerDependencies {
   db: Sqlite;
@@ -207,8 +221,11 @@ export class ScheduledJobRunner {
       // 群名从库里读：这条路没有 Telegram update 可取，而 RUNTIME 的「会话」行要它。
       // 权威副本是 `principals` 的 `chat:<id>`（`upsertSeen` 每条消息刷新一次 `display_name`）。
       const chatTitle = this.dependencies.db.prepare("SELECT display_name FROM principals WHERE kind='chat' AND tg_id=?").pluck().get(job.chatId) as string | null;
+      // `silenceable` 只从这里进来（docs/02 §10.5）：其余造 turn 的地方一处都不传，于是「模型
+      // 能宣布不投递」这件事结构上只可能发生在开了 allow_silent 的定时轮次上。
       turn = await this.dependencies.context.openTurn({ chatId: job.chatId, threadId: job.threadId, key: job.key, initiatorUserId: job.createdBy,
-        effectiveRole: role, isPrivate, trigger, ...(chatTitle ? { chatTitle } : {}), abortSignal: pending.controller.signal, config: chatConfig });
+        effectiveRole: role, isPrivate, trigger, ...(chatTitle ? { chatTitle } : {}), ...(job.allowSilent ? { silenceable: true } : {}),
+        abortSignal: pending.controller.signal, config: chatConfig });
       this.dependencies.registry.finish(pendingId);
       const tracked = this.dependencies.registry.register({ id: turn.turnId, key: job.key, chatId: job.chatId, userId: job.createdBy, role }, live.concurrency.turnTimeoutMs);
       Object.assign(turn, { abortSignal: tracked.controller.signal });
@@ -232,18 +249,43 @@ export class ScheduledJobRunner {
       const answer = job.mode === 'notify' ? job.payload : (await this.dependencies.runAgent(turn, reservation)).trim();
       // 空正文当成失败：发不出去（splitTelegramText('') 是空数组）、还会往上下文里留一条
       // 谁都解释不了的空消息（docs/16 §5「摘除比伪造安全」）。
+      // **这道闸对静默一样不放松。** 静默 + 空正文 = 上下文里一个字都没留，而「模型下一轮知道
+      // 自己查过了」正是静默这件事的全部目的（docs/02 §10.5）。
       if (!answer) throw new Error('model_returned_empty');
-      const sent = await bridge.sendMessage({ chatId: job.chatId, threadId: job.threadId, turnId: turn.turnId, ...(turn.rootSpanId ? { parentSpanId: turn.rootSpanId } : {}) }, answer) as { ok?: boolean; error?: string };
-      if (sent.ok === false) throw new Error(`delivery_failed:${sent.error ?? 'unknown'}`);
+      // `notify` 恒为 false：那条路不调模型，没有任何人够得着 `turn.silenced`。
+      const silenced = turn.silenced === true;
+      if (!silenced) {
+        const sent = await bridge.sendMessage({ chatId: job.chatId, threadId: job.threadId, turnId: turn.turnId, ...(turn.rootSpanId ? { parentSpanId: turn.rootSpanId } : {}) }, answer) as { ok?: boolean; error?: string };
+        if (sent.ok === false) throw new Error(`delivery_failed:${sent.error ?? 'unknown'}`);
+      } else {
+        // `job.silentStreak` 是这次触发**之前**的值，下面那句 markRun 才会 +1 —— 日志里要的是
+        // 「这是连续第几次」，所以先加。
+        const streak = job.silentStreak + 1;
+        this.dependencies.log.event({ level: streak >= SILENT_STREAK_WARN ? 'warn' : 'info', kind: 'schedule.silent',
+          summary: `定时任务 ${job.name} 本轮不用汇报（连续第 ${streak} 次）`, traceId: turn.turnId, ...this.#parent(turn),
+          chatId: job.chatId, userId: job.createdBy, key: job.key,
+          // `?? null` 而不是条件展开：这条日志是「这条任务是不是从此再也不说话了」的唯一可读凭据，
+          // 字段恒在才 grep 得动、才过滤得了。缺席的 reason 说明置位方只置了一半（见 `silenceReason`）。
+          data: { job: job.id, name: job.name, mode: job.mode, streak, warnAt: SILENT_STREAK_WARN, reason: turn.silenceReason ?? null } });
+      }
+      // **两条路在这里合流，`appendDelta` / `commitTurn` 必须在合流点之后。** 把它们挪进上面那个
+      // 分支里（或者干脆 `if (silenced) return`）正好复刻 docs/02 §10.1 当初否掉的方案：省下的是
+      // 一次 commit，代价是一次说不清的失忆 —— 用户第二天问「昨天你查的怎么样」而模型一脸茫然。
       this.dependencies.context.appendDelta(turn, { id: turn.turnId, role: 'assistant', origin: 'assistant', parts: [{ type: 'text', text: answer }], textPreview: answer.slice(0, 240), pruneLevel: 0 });
       const committed = await this.dependencies.context.commitTurn(turn);
+      // `turns.finish` **仍记 `committed`**：那一轮确实提交了，静默是投递侧的事。分辨手段在
+      // `scheduled_jobs.last_state` 与 `schedule.silent` 那一行上，不在这里再造一个轮次状态。
       const settled = this.dependencies.turns.finish(turn.turnId, { state: 'committed', commitId: committed.commit.id, rebased: committed.rebased });
       await this.dependencies.plugins?.hook('afterCommit', { turn, committed });
-      this.dependencies.log.event({ level: 'info', kind: 'turn.end', summary: 'turn committed', traceId: turn.turnId, ...this.#parent(turn), chatId: job.chatId, userId: job.createdBy, key: job.key, data: { state: 'committed', rebased: committed.rebased, waitedMs, schedule: job.id } });
+      // `silenced` 进 `turn.end` 的 data：不然一条完整的 trace 里凭空少了 `tg.send`，看的人无从解释。
+      this.dependencies.log.event({ level: 'info', kind: 'turn.end', summary: 'turn committed', traceId: turn.turnId, ...this.#parent(turn), chatId: job.chatId, userId: job.createdBy, key: job.key, data: { state: 'committed', rebased: committed.rebased, waitedMs, schedule: job.id, ...(silenced ? { silenced: true } : {}) } });
       this.dependencies.log.publish('turn.finished', { turnId: turn.turnId, key: job.key, chatId: job.chatId, state: 'committed', steps: settled?.steps ?? 0, toolCalls: settled?.toolCalls ?? 0, costUsd: settled?.costUsd ?? 0, rebased: committed.rebased, durationMs: settled?.durationMs ?? 0 });
       this.dependencies.memory.flush(turn.turnId);
-      this.dependencies.jobs.markRun(job.id, { state: 'committed' });
+      // `last_error` 在静默这一路上恒为 NULL（markRun 不给 error），这是把「静默」与
+      // 「failed / skipped」分开的第二层手段。`silent_streak` 由 markRun 就地 +1。
+      this.dependencies.jobs.markRun(job.id, { state: silenced ? 'silent' : 'committed' });
       // 与 Telegram 轮次共用同一份计数（docs/28 · L-SCH-02）：成功一次归零，跨会话。
+      // **静默照旧算成功**：这一轮跑完了、提交了，只是没什么可说的。
       this.dependencies.failures?.succeeded();
     } catch (error) {
       // 超时不是取消（`docs/04 §5.3` 的三档，同 `bot.ts`）。定时任务这条路上尤其明显：**没有人会去

@@ -139,7 +139,7 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
       ...(context.subAgent ? { subAgent: { name: context.subAgent.name, images: context.subAgent.images, onInjected: context.subAgent.onMediaInjected } } : {}) },
     context.turn, input) };
   };
-  // 跟 `telegram` 同样是必填：漏传一个 key 就让三个工具永久消失，而
+  // 跟 `telegram` 同样是必填：漏传一个 key 就让五个工具永久消失，而
   // 「TOOL_POLICY ↔ 注册表」的启动断言只看注册没注册，一个字都不会报。
   registerScheduleTools(registry, dependencies.schedule);
   /** 每个 agent_run 上一次向 SSE 广播进度的时刻（`agent.progressThrottleMs`）。 */

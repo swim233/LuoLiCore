@@ -158,11 +158,14 @@ with_parent 0`，浏览器里展开一条 trace，13 个节点的 `marginLeft` �
 | `maintenance.repair` | warn | 一次性数据修复留下的痕迹（计价口径重算、子 agent 结果路径归一化）。它只在真的改过东西时才落 |
 | `scheduler.failed` | error | error —— 五个维护 cron 里某一个抛了（用户任务那一路走 `schedule.failed`） |
 | `schedule.created` | info | job, name, cron, mode —— 从 WebUI 新建了一条定时任务（工具那一路的痕迹在 `tool.call` 里） |
+| `schedule.updated` | info | job, name, changed, actor:'webui' —— 从 WebUI 改了一条定时任务（`PATCH /api/schedules/:id`）。`changed` 是这次真正收下的字段名，落点（`key`/`chatId`/`threadId`）、创建者与 `mode` 不在其中 —— 那几样收下来等于凭一个字段把任务搬进别的群。工具那一路（`schedule_update`）的痕迹同样在 `tool.call` 里 |
 | `schedule.fired` | info | job, name, mode, role, runCount —— 定时任务开始一轮（trace_id 是那一轮的 turn_id） |
+| `schedule.silent` | info（`streak >= SILENT_STREAK_WARN`（=10）时 **warn**） | job, name, mode, streak, warnAt, reason —— 这一轮模型调了 `stay_silent`：**没投递，但照常提交**（[02 §10.5](./02-context-engine.md)）。这一行是「到点看一眼没事」与「这条任务已经死了」唯一分得开的地方 —— 两者在 Telegram 上都是没消息，而静默那一路 `last_state='silent'`、`last_error` 恒为 NULL、`turns.state` 仍是 `committed`，没有任何一条错误日志会响。连续静默到阈值自动升 warn 是发现「它已经变成一台只烧钱不说话的定时器」的唯一机制，所以阈值是代码常量而不是配置键（照 `PROVIDER_FAILURES_TO_DOWN` 的先例）。`reason` 是 `stay_silent` 的必填入参、**字段恒在**（没有时写 `null`，那说明置位方只置了一半）—— 字段恒在才 grep 得动。同一轮的 `turn.end` 带 `silenced:true`：一条正常提交的轮次凭空少了 `tg.send`，没有那一位在 trace 里无从解释 |
 | `schedule.skipped` | warn | job, name, reason（`schedule.disabled` \| `role_downgraded` \| `quota_exceeded` \| `turn_queue_rejected` \| `telegram_unavailable`）—— 任务留着，只跳过这一次 |
 | `schedule.missed` | warn | job, name, expected, catchUp:false —— 停机期间错过了触发点。**不补跑**（[02 §10.3](./02-context-engine.md#103-不补跑)），所以这一条是「今天早报没发」的唯一凭据 |
 | `schedule.failed` | error | job, name, error —— 这一次触发失败；一次性任务不重试 |
 | `schedule.cancelled` | warn | job, role —— 创建者被封禁，整条任务停用 |
+| `schedule.purged` | **warn** | job, name, state, wasActive, actor:'webui' —— WebUI 上「彻底删除」硬删了整行（`POST /api/schedules/:id/purge`，与软取消的 `DELETE` 是两个动词：那个的行还在、还看得见跑过多少次，这个把 `run_count` 与全部运行历史一起抹掉，**active 的也删得掉**）。**warn 而不是 info**：`schedule.*` 其余日志都挂在触发上，行一没，「bot 突然不再提醒了」在库里就再无痕迹 —— 这一行就是那个痕迹 |
 | `schedule.loaded` | info | registered, missed, enabled —— 启动时装载了多少条 |
 | `system.start` / `system.stop` | info（Telegram 入口禁用时 **warn**） | name, webui, providerSecrets / signal |
 | `system.restart` | warn | reason —— WebUI 按下的「重启进程」。**没有 supervisor 时进程不会自己回来** |

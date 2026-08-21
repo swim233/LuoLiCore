@@ -13,6 +13,7 @@ import ChainPicker from '../ui/ChainPicker.vue';
 import AttachmentStrip from '../ui/AttachmentStrip.vue';
 import SchemaForm from '../ui/SchemaForm.vue';
 import ExtensionsPage from './ExtensionsPage.vue';
+import TasksPage from './TasksPage.vue';
 // 扩展四类的行类型跟着页面一起搬走了：这一层只负责拉数据，形状由那一份定义。
 import type { CustomToolRow, McpRow, PluginRow, SkillRow } from '../components/extensions/types';
 import UiLineChart from '../ui/UiLineChart.vue';
@@ -65,8 +66,8 @@ const plugins = ref<PluginRow[]>([]);
 const mcp = ref<McpRow[]>([]);
 const customTools = ref<CustomToolRow[]>([]);
 const agents = ref<AgentDefinition[]>([]);
-const approvals = ref<Array<Record<string, unknown>>>([]);
-const tasks = ref<Array<Record<string, unknown>>>([]);
+// 任务 / 审批 / 定时任务三份行数据整段搬进 `TasksPage.vue` 的三张卡 —— 它们各自握着服务端
+// 分页的游标，行留在这一层的话页码就没地方放（`loadConversations` 同形）。
 const prompts = ref<Array<Record<string, unknown>>>([]);
 const config = ref<Record<string, unknown>>({});
 const botName = ref('LuoLiCore');
@@ -243,8 +244,20 @@ const navigation = [
   ['tasks', 'pi pi-check-square', '任务与审批'], ['settings', 'pi pi-cog', '设置'],
 ] as const;
 const currentLabel = computed(() => navigation.find(([key]) => key === active.value)?.[2] ?? '总览');
-/** 每一条 pending 都对应一个正卡在工具调用上的真实轮次，所以角标挂在导航上而不是只在任务页里。 */
-const pendingApprovals = computed(() => approvals.value.filter((row) => row.state === 'pending').length);
+/**
+ * 每一条 pending 都对应一个正卡在工具调用上的真实轮次，所以角标挂在导航上而不是只在任务页里。
+ *
+ * `/api/approvals` 分页之后，这个数**不能再从当前页数出来**：翻到第 2 页角标就会变，
+ * 而 `AC-WEB-049` 要的是「不必切到任务页就看得见还有几个人在等」。信封里的 `pending` 是
+ * 服务端全表 `COUNT(*)`，所以这里只取一行、只读那个字段。
+ */
+const pendingApprovals = ref(0);
+async function loadApprovalBadge(): Promise<void> {
+  const result = await api<{ pending?: number }>('/api/approvals?page=1&size=1');
+  pendingApprovals.value = Number(result?.pending ?? 0);
+}
+/** 任务页的「该重拉了」脉冲。三张卡各自 `watch` 它，父层不碰它们的行数据与页码。 */
+const tick = ref(0);
 const COLUMNS = {
   tools: [{ key: 'name', header: '工具' }, { key: 'source', header: '来源', width: '7rem' }, { key: 'minRole', header: '最低角色', width: '8rem' }, { key: 'approval', header: '审批', width: '9rem' }, { key: 'scope', header: '作用域', width: '8rem' }, { key: 'enabled', header: '状态', width: '8rem' }],
   agents: [{ key: 'name', header: '名称' }, { key: 'description', header: '职责' }, { key: 'minRole', header: '最低角色', width: '7rem' }, { key: 'modelAlias', header: '模型别名', width: '8rem' }, { key: 'tools', header: '可用工具' }, { key: 'maxSteps', header: '步数上限', width: '6rem' }, { key: 'actions', header: '', width: '6rem' }],
@@ -254,22 +267,21 @@ const COLUMNS = {
   models: [{ key: 'model_id', header: '模型 ID' }, { key: 'provider_id', header: 'Provider' }, { key: 'context_window', header: '窗口' }, { key: 'capabilities', header: '能力' }, { key: 'price_in', header: '输入价格' }, { key: 'price_out', header: '输出价格' }, { key: 'enabled', header: '启用', width: '6rem' }],
   aliases: [{ key: 'alias', header: '别名', width: '12%' }, { key: 'purpose', header: '用途', width: '27%' }, { key: 'chain', header: 'Fallback 链', width: '31%' }, { key: 'settings', header: '采样参数', width: '20%' }, { key: 'actions', header: '', width: '10%' }],
   logs: [{ key: 'ts', header: '时间', width: '13rem' }, { key: 'level', header: '级别', width: '7rem' }, { key: 'kind', header: '事件' }, { key: 'summary', header: '摘要' }, { key: 'data_bytes', header: '载荷', width: '6rem' }, { key: 'trace_id', header: 'Trace' }],
-  tasks: [{ key: 'title', header: '标题' }, { key: 'state', header: '状态', width: '7rem' }, { key: 'updated_at', header: '更新时间', width: '13rem' }, { key: 'actions', header: '', width: '7rem' }],
+  // tasks / schedules / approvals 三套跟着那三张卡搬进 `components/tasks/types.ts`。
   containers: [{ key: 'chat', header: '会话' }, { key: 'name', header: '容器', width: '14rem' }, { key: 'used', header: '上次用 / 次数', width: '13rem' }, { key: 'expires', header: '还剩', width: '8rem' }, { key: 'actions', header: '', width: '17rem' }],
-  schedules: [{ key: 'name', header: '任务' }, { key: 'chatLabel', header: '会话' }, { key: 'mode', header: '模式', width: '6rem' }, { key: 'trigger', header: '触发', width: '11rem' }, { key: 'nextRun', header: '下一次', width: '12rem' }, { key: 'last', header: '上一次', width: '12rem' }, { key: 'state', header: '状态', width: '6rem' }, { key: 'actions', header: '', width: '11rem' }],
   activeTurns: [{ key: 'who', header: '发起人' }, { key: 'chat', header: '会话' }, { key: 'progress', header: '当前动作' }, { key: 'stats', header: '步数 / 花费', width: '11rem' }, { key: 'elapsed', header: '已用时长', width: '8rem' }, { key: 'actions', header: '', width: '6rem' }],
-  approvals: [{ key: 'tool_name', header: '工具' }, { key: 'risk', header: '风险', width: '7rem' }, { key: 'state', header: '状态', width: '7rem' }, { key: 'requested_at', header: '请求时间', width: '12rem' }, { key: 'actions', header: '', width: '12rem' }],
   catalog: [{ key: 'modelId', header: '模型 ID' }, { key: 'limits', header: '窗口 / 最大输出', width: '11rem' }, { key: 'price', header: '价格 / M token', width: '13rem' }, { key: 'capabilities', header: '能力' }, { key: 'status', header: '状态', width: '7rem' }],
   fallback: [{ key: 'kind', header: '关联事件' }, { key: 'summary', header: '最近状态' }, { key: 'level', header: '级别' }],
 } satisfies Record<string, GridColumn[]>;
 
 async function load(): Promise<void> {
-  [dashboard.value, principals.value, providers.value, logs.value, chats.value, usage.value, skills.value, plugins.value, mcp.value, customTools.value, agents.value, tools.value, approvals.value, tasks.value, prompts.value, config.value, models.value, aliases.value, health.value] = await Promise.all([
+  // 位置解构：左右两串必须一一对齐，错一位就是整片数据错位（而且类型全是 `any` 级的，没人会拦）。
+  [dashboard.value, principals.value, providers.value, logs.value, chats.value, usage.value, skills.value, plugins.value, mcp.value, customTools.value, agents.value, tools.value, prompts.value, config.value, models.value, aliases.value, health.value] = await Promise.all([
     api<Dashboard>('/api/dashboard'), api<Principal[]>('/api/principals'), api<Provider[]>('/api/providers'), api<LogRow[]>('/api/logs'),
     api<Chat[]>('/api/chats'), api<Usage[]>('/api/usage'), api<SkillRow[]>('/api/skills'), api<PluginRow[]>('/api/plugins'), api<McpRow[]>('/api/mcp'),
-    // 没装配自撰写工具的部署会回 not_implemented，那不该把另外 18 个端点一起带下去。
+    // 没装配自撰写工具的部署会回 not_implemented，那不该把另外 16 个端点一起带下去。
     api<CustomToolRow[]>('/api/custom-tools').catch(() => []), api<AgentDefinition[]>('/api/agents'), api<Record<string, ToolPolicy>>('/api/tools'),
-    api<Array<Record<string, unknown>>>('/api/approvals'), api<Array<Record<string, unknown>>>('/api/tasks'), api<Array<Record<string, unknown>>>('/api/prompts'), api<Record<string, unknown>>('/api/config'), api<Array<Record<string, unknown>>>('/api/models'), api<Array<Record<string, unknown>>>('/api/aliases'),
+    api<Array<Record<string, unknown>>>('/api/prompts'), api<Record<string, unknown>>('/api/config'), api<Array<Record<string, unknown>>>('/api/models'), api<Array<Record<string, unknown>>>('/api/aliases'),
     api<HealthDetail>('/api/health/detail'),
   ]);
   // 总览页那张「最近错误」卡片走单独一次请求：日志页要的是全量流，卡片要的是 warn 以上的十条，
@@ -277,9 +289,9 @@ async function load(): Promise<void> {
   recentErrors.value = await api<LogRow[]>('/api/logs?minLevel=warn&size=10');
   // 总览的额度环和配额页读的是同一个端点。失败不该把整个总览页带下去 —— 配额关掉时它本来就是空的。
   await Promise.all([loadQuota().catch(() => undefined), loadUsageReport()]);
-  // 定时任务面板：没装配运行时的部署会回 available:false，界面据此说明白，而不是显示零条任务。
-  await REFRESH_LOADERS.schedules().catch(() => undefined);
-  // 容器面板同理：没装配持久容器运行时的部署回 not_implemented，面板说明白而不是显示零个容器。
+  // 导航角标：任务页的三份数据由那三张卡自己拉，但这个数不切页也要看得见（AC-WEB-049）。
+  await loadApprovalBadge().catch(() => undefined);
+  // 容器面板：没装配持久容器运行时的部署回 not_implemented，面板说明白而不是显示零个容器。
   await loadContainers().catch(() => undefined);
   syncTrigger();
   syncOutput();
@@ -1592,99 +1604,8 @@ async function cancelTurn(turn: ActiveTurn): Promise<void> {
   finally { cancellingTurn.value = ''; }
 }
 
-/** 任务没有独立的取消句柄：`spawn_agent` 的子 agent 跑在父轮次的 abort 信号下，
- *  取消一条任务只能取消它所属的整轮 —— 说清楚再动手，别让人以为只停了这一个子 agent。 */
-async function cancelTaskTurn(task: Record<string, unknown>): Promise<void> {
-  const turnId = String(task.turn_id ?? '');
-  if (!turnId) { pushToast({ severity: 'warn', summary: '这条任务没有关联轮次', detail: '没有可取消的对象' }); return; }
-  if (!confirm(`取消任务「${String(task.title ?? turnId)}」？它没有独立的取消句柄，实际取消的是所属的整轮 ${turnId.slice(0, 12)} —— 同一轮里的其他子 agent 也会一起停。`)) return;
-  cancellingTurn.value = turnId;
-  try {
-    const result = await api<{ cancelled: boolean }>(`/api/turns/${encodeURIComponent(turnId)}/cancel`, { method: 'POST', body: '{}' });
-    pushToast(result.cancelled ? { severity: 'success', summary: '已发出取消信号', detail: `轮次 ${turnId.slice(0, 12)}` }
-      : { severity: 'warn', summary: '这一轮已经结束了', detail: '任务状态会在下次刷新时归位' });
-    await REFRESH_LOADERS.tasks();
-  } catch (error) { toastError('取消失败', error); }
-  finally { cancellingTurn.value = ''; }
-}
-
-const decidingApproval = ref('');
-async function decideApproval(approval: Record<string, unknown>, approved: boolean): Promise<void> {
-  const id = String(approval.id);
-  decidingApproval.value = id;
-  try {
-    const result = await api<{ changed: boolean }>(`/api/approvals/${encodeURIComponent(id)}/decide`, { method: 'POST', body: JSON.stringify({ approved }) });
-    pushToast(result.changed
-      ? { severity: approved ? 'success' : 'warn', summary: approved ? '已批准，工具继续执行' : '已拒绝，工具不会执行', detail: String(approval.tool_name ?? id) }
-      : { severity: 'warn', summary: '审批已经失效', detail: '可能已被处理、过期或所属轮次已取消' });
-    await REFRESH_LOADERS.tasks();
-  } catch (error) { toastError('提交审批决定失败', error); }
-  finally { decidingApproval.value = ''; }
-}
-
-// ── 定时任务（docs/21 · G-API-16）──────────────────────────────────────────────
-// 此前这个部署有哪些任务在排、下一次什么时候、上一次是成是败，运维在界面上一个都看不到，
-// 停一条也只能去 Telegram 让 bot 跑 `schedule_cancel`。
-interface ScheduleJob { id: string; key: string; chatId: string; name: string; mode: 'agent' | 'notify'; state: string;
-  chatLabel: string | null; creatorLabel: string | null; cron?: string; at?: string; timezone: string; payload: string;
-  runCount: number; nextRun?: string; lastRunAt?: string; lastState?: string | null; lastError?: string }
-interface ScheduleList { available: boolean; enabled: boolean; timezone: string; jobs: ScheduleJob[];
-  settings?: { maxPerChat: number; minIntervalMinutes: number; maxPayloadChars: number } }
-const schedules = ref<ScheduleList>({ available: true, enabled: true, timezone: '', jobs: [] });
-const scheduleBusy = ref('');
-const scheduleDialog = ref(false);
-const scheduleSaving = ref(false);
-const scheduleForm = ref({ key: '', name: '', mode: 'notify' as 'agent' | 'notify', trigger: 'cron' as 'cron' | 'at', cron: '0 8 * * *', at: '', text: '' });
-const SCHEDULE_STATES: Record<string, { label: string; severity: 'success' | 'warn' | 'danger' | 'secondary' }> = {
-  active: { label: '在排', severity: 'success' }, done: { label: '已完成', severity: 'secondary' }, cancelled: { label: '已停用', severity: 'warn' },
-};
-/** 上一次触发的结果。`skipped` 的原因是排障的关键 —— 它意味着任务响了但什么都没发生。 */
-const SCHEDULE_RUN_STATES: Record<string, { label: string; severity: 'success' | 'warn' | 'danger' | 'secondary' }> = {
-  committed: { label: '成功', severity: 'success' }, failed: { label: '失败', severity: 'danger' },
-  skipped: { label: '跳过', severity: 'warn' }, missed: { label: '错过', severity: 'warn' }, cancelled: { label: '停用', severity: 'secondary' },
-};
-function openScheduleDialog(): void {
-  scheduleForm.value = { key: chats.value[0]?.key ?? '', name: '', mode: 'notify', trigger: 'cron', cron: '0 8 * * *', at: '', text: '' };
-  scheduleDialog.value = true;
-}
-async function submitSchedule(): Promise<void> {
-  const form = scheduleForm.value;
-  if (!form.key) { pushToast({ severity: 'warn', summary: '先选一个会话', detail: '只能给已经有上下文的会话排任务' }); return; }
-  scheduleSaving.value = true;
-  try {
-    const created = await api<ScheduleJob>('/api/schedules', { method: 'POST', body: JSON.stringify({ key: form.key, name: form.name, mode: form.mode,
-      text: form.text, ...(form.trigger === 'cron' ? { cron: form.cron } : { at: form.at }) }) });
-    pushToast({ severity: 'success', summary: `已排上「${created.name}」`,
-      detail: created.nextRun ? `下一次：${new Date(created.nextRun).toLocaleString()}` : '已建立' });
-    scheduleDialog.value = false;
-    await REFRESH_LOADERS.schedules();
-  } catch (error) { toastError('建定时任务失败', error); }
-  finally { scheduleSaving.value = false; }
-}
-async function cancelSchedule(job: ScheduleJob): Promise<void> {
-  if (!confirm(`停掉「${job.name}」？停掉后不再触发；任务行按 schedule.retentionDays 保留，之后同名任务可以重建。`)) return;
-  scheduleBusy.value = job.id;
-  try {
-    const result = await api<{ cancelled: boolean }>(`/api/schedules/${encodeURIComponent(job.id)}`, { method: 'DELETE' });
-    pushToast(result.cancelled ? { severity: 'success', summary: `已停用「${job.name}」`, detail: '调度器里也摘掉了' }
-      : { severity: 'warn', summary: '这条本来就已经停了', detail: '状态会在下次刷新时归位' });
-    await REFRESH_LOADERS.schedules();
-  } catch (error) { toastError('停用失败', error); }
-  finally { scheduleBusy.value = ''; }
-}
-/** 立即触发。代价必须写在确认框里：agent 模式点一下就是一次真实模型调用，而且真的会发消息出去。 */
-async function triggerSchedule(job: ScheduleJob): Promise<void> {
-  const cost = job.mode === 'agent' ? '这会真的跑一轮模型调用（花钱）' : '这会真的发一条消息';
-  if (!confirm(`立即触发「${job.name}」？${cost}，落点是「${job.chatLabel ?? job.chatId}」。不影响下一次的正常触发。`)) return;
-  scheduleBusy.value = job.id;
-  try {
-    await api<{ started: boolean }>(`/api/schedules/${encodeURIComponent(job.id)}/trigger`, { method: 'POST', body: '{}' });
-    // 不等它跑完：agent 模式一次触发是一整轮。结果落在这一行的「上一次」上。
-    pushToast({ severity: 'success', summary: `已触发「${job.name}」`, detail: '不等它跑完；结果看这一行的「上一次」，或去日志页看这一轮' });
-    await REFRESH_LOADERS.schedules();
-  } catch (error) { toastError('触发失败', error); }
-  finally { scheduleBusy.value = ''; }
-}
+// 任务的取消、审批的裁决、定时任务的建 / 停 / 触发整段搬进 `components/tasks/` 那三张卡：
+// 三者的端点、分页游标、弹窗与 busy 态零交集，留在这一层只会互相挡道。
 
 // ── SSE：首屏之后界面的数据新鲜度全靠这里（docs/21 · G-SSE-01）───────────────────
 // 事件到达**不再无脑重跑 `load()`**（那是一次 18 个端点）：按事件类型只刷相关的那几组，
@@ -1701,15 +1622,14 @@ const REFRESH_LOADERS: Record<RefreshGroup, () => Promise<void>> = {
   chats: async () => { chats.value = await api<Chat[]>('/api/chats'); },
   usage: async () => { [usage.value] = await Promise.all([api<Usage[]>('/api/usage'), loadUsageReport()]); },
   quota: loadQuota,
-  tasks: async () => { tasks.value = await api<Array<Record<string, unknown>>>('/api/tasks'); },
-  approvals: async () => { approvals.value = await api<Array<Record<string, unknown>>>('/api/approvals'); },
-  // 归一化而不是直接塞：形状对不上的响应（老版本服务端、代理截断）不该让整页崩在
-  // DataGrid 的 rows 上。渲染防线就是为这类事建的（docs/24 · R-UI-01）。
-  schedules: async () => {
-    const next = await api<Partial<ScheduleList>>('/api/schedules');
-    schedules.value = { available: Boolean(next?.available) && Array.isArray(next?.jobs), enabled: Boolean(next?.enabled),
-      timezone: next?.timezone ?? '', jobs: Array.isArray(next?.jobs) ? next.jobs : [], ...(next?.settings ? { settings: next.settings } : {}) };
-  },
+  // 任务页那三组只发一个脉冲：行数据、页码与 busy 态都在三张卡自己手里，父层再拉一次
+  // 只会把运维翻到的页码打回第一页。组名、下面的 EVENT_REFRESH 映射、400ms 合并与
+  // REFRESH_VISIBILITY 的可见性过滤一个字不改 —— 变的只是「刷新」这个动作本身。
+  tasks: async () => { tick.value += 1; },
+  // 审批多一步：导航角标是全表 pending，不切到任务页也得跟着变（AC-WEB-049），
+  // 而它只有这一层拉得到。卡片没挂载时 tick 空转，代价是零。
+  approvals: async () => { tick.value += 1; await loadApprovalBadge(); },
+  schedules: async () => { tick.value += 1; },
   // 自定义工具单独 catch：没装配这块的部署会回 `not_implemented`，那不该把另外三类一起带下去。
   extensions: async () => { [skills.value, plugins.value, mcp.value, customTools.value] = await Promise.all([api<SkillRow[]>('/api/skills'), api<PluginRow[]>('/api/plugins'), api<McpRow[]>('/api/mcp'), api<CustomTool[]>('/api/custom-tools').catch(() => [])]); },
   config: async () => { [config.value, tools.value, agents.value] = await Promise.all([api<Record<string, unknown>>('/api/config'), api<Record<string, ToolPolicy>>('/api/tools'), api<AgentDefinition[]>('/api/agents')]); syncTrigger(); syncOutput(); },
@@ -2035,7 +1955,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
         <Transition name="page" mode="out-in">
         <div v-if="active === 'dashboard'" key="dashboard">
           <section class="hero-row">
-            <div><p class="eyebrow">LIVE OVERVIEW</p><h2>早上好，系统状态<span>稳定。</span></h2><p>所有关键路径集中在一个 trace 中。异常先看证据，再处理。</p></div>
+            <div><p class="eyebrow">LIVE OVERVIEW</p><h2>早上好，系统状态<span>稳定。</span></h2><p>在此处查看您所有数据流</p></div>
             <UiButton label="打开实时日志" icon="pi pi-wave-pulse" @click="active = 'logs'" />
           </section>
           <section class="metric-grid">
@@ -2047,7 +1967,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
           <!-- 在途 turn 表（docs/09 §3.1）：数据来自进程内的 TurnRegistry，首屏拉一次，
                之后 turn.started / turn.progress / turn.finished 三种事件增量更新。 -->
           <section class="surface in-flight">
-            <header><div><p class="eyebrow">IN FLIGHT</p><h3>在途 turn</h3><p class="section-note">这里有几行，就有几轮真的在跑（进程内的 TurnRegistry，不是 turns 表里可能残留的 running 行）。取消会中断模型调用、把该轮记成 cancelled，已经发出去的消息不撤回。</p></div>
+            <header><div><p class="eyebrow">IN FLIGHT</p><h3>在途 turn</h3><p class="section-note">显示所有进行中的对话</p></div>
               <UiTag :value="activeTurns.length ? `${activeTurns.length} 轮进行中` : '空闲'" :severity="activeTurns.length ? 'info' : 'secondary'" /></header>
             <DataGrid :rows="activeTurns" :columns="COLUMNS.activeTurns" data-key="id" empty="当前没有正在跑的轮次。">
               <template #who="{ data }"><b>{{ turnWho(data) }}</b><UiTag :value="data.role" :severity="roleSeverity(data.role)" /></template>
@@ -2064,7 +1984,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
           <section class="dashboard-grid">
             <!-- 最近**错误**（level≥warn，10 条），点一行直接跳到那条 trace。此前这里是不分级别
                  的最近 6 条，实际上永远被 info 刷满 —— 一张「最近错误」卡片看不到错误（docs/09 §3.1）。 -->
-            <article class="surface span-2"><header><div><p class="eyebrow">RECENT ERRORS</p><h3>最近错误</h3><p class="section-note">level ≥ warn · 点一行跳到该 trace</p></div><UiButton variant="text" label="查看全部" icon="pi pi-arrow-right" icon-pos="right" @click="active = 'logs'" /></header>
+            <article class="surface"><header><div><p class="eyebrow">RECENT ERRORS</p><h3>最近错误</h3><p class="section-note">点击以查看具体日志</p></div><UiButton variant="text" label="查看全部" icon="pi pi-arrow-right" icon-pos="right" @click="active = 'logs'" /></header>
               <div class="log-list">
                 <button v-for="row in recentErrors" :key="row.id" type="button" class="log-row" @click="openTrace(row.trace_id)">
                   <span :class="['level', row.level]">{{ row.level }}</span><code>{{ row.kind }}</code><p>{{ row.summary }}</p><time>{{ new Date(row.ts).toLocaleTimeString() }}</time>
@@ -2088,7 +2008,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             </article>
           </section>
           <section class="dashboard-grid">
-            <article class="surface span-2"><header><div><p class="eyebrow">TREND</p><h3>近 7 天</h3><p class="section-note">按 general.timezone 的本地日分桶；没有数据的那天是 0，不是断点</p></div></header>
+            <article class="surface"><header><div><p class="eyebrow">TREND</p><h3>活跃</h3><p class="section-note">显示近七天的活跃数据</p></div></header>
               <UiLineChart v-if="dashboard.trend?.length" :labels="dashboard.trend.map((point) => point.day.slice(5))"
                 :series="[{ name: '消息', values: dashboard.trend.map((point) => point.messages) }, { name: '轮次', values: dashboard.trend.map((point) => point.turns) }]" />
               <div v-else class="empty">还没有数据。</div>
@@ -2103,7 +2023,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
         </div>
 
         <section v-else-if="active === 'chats'" key="chats" class="surface page-surface">
-          <header><div><p class="eyebrow">CONTEXTS</p><h2>会话上下文</h2><p>每个会话一张卡片，点开看它的消息窗口与提交历史。</p></div><UiTag :value="`${chats.length} 个会话`" severity="secondary" /></header>
+          <header><div><p class="eyebrow">CONTEXTS</p><h2>会话上下文</h2><p>在此处管理所有会话与上下文</p></div><UiTag :value="`${chats.length} 个会话`" severity="secondary" /></header>
           <div class="chat-cards">
             <button v-for="(entry, index) in chatCards" :key="entry.chat.key" type="button" :style="{ animationDelay: `${Math.min(index, 11) * 40}ms` }"
               :class="['chat-card', entry.isPrivate ? 'private' : 'group', { active: selectedChat?.key === entry.chat.key }]" @click="inspectChat(entry.chat)">
@@ -2205,7 +2125,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
           </div>
         </section>
         <section v-else-if="active === 'messages'" key="messages" class="surface page-surface">
-          <header><div><p class="eyebrow">ARCHIVE</p><h2>消息与对话</h2><p>默认按 turn 列出最近的模型对话，每页 {{ CONVERSATION_PAGE_SIZE }} 次；搜索走全库归档（中文三字以上 FTS5 trigram，短词回退 LIKE）。</p></div></header>
+          <header><div><p class="eyebrow">ARCHIVE</p><h2>消息与对话</h2><p>按回合列出最近的模型对话，当前显示 {{ CONVERSATION_PAGE_SIZE }} 次</p></div></header>
           <div class="search-row">
             <label class="search grow"><i class="pi pi-search" /><input v-model="query" placeholder="输入关键词搜索中文或英文消息" @keyup.enter="searchArchive"></label>
             <UiButton label="搜索归档" icon="pi pi-search" :loading="searching" @click="searchArchive" />
@@ -2495,7 +2415,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
           </DataGrid>
         </section>
         <section v-else-if="active === 'providers'" key="providers" class="surface page-surface">
-          <header><div><p class="eyebrow">MODEL REGISTRY</p><h2>Provider、模型与别名</h2><p>写入后服务端重建运行时 registry；API Key 只显示 hint。</p></div><UiButton label="添加 Provider" icon="pi pi-plus" @click="editProvider()" /></header>
+          <header><div><p class="eyebrow">MODEL REGISTRY</p><h2>Provider、模型与别名</h2><p>在此处管理您的 Provider 与模型，修改实时生效</p></div><UiButton label="添加 Provider" icon="pi pi-plus" @click="editProvider()" /></header>
           <div v-if="modelMissingMain" class="danger-banner"><i class="pi pi-exclamation-triangle" />没有可用的 <code>main</code> 别名（未配置、链为空或链里的模型都不可用），所有轮次都会失败。见下方「别名路由」。</div>
           <div class="provider-grid"><article v-for="provider in providers" :key="provider.id"><div class="provider-head"><div class="provider-tags"><UiTag :value="provider.enabled ? '启用' : '停用'" :severity="provider.enabled ? 'success' : 'secondary'" /><UiTag v-if="provider.healthState" :value="provider.healthState === 'up' ? '连通' : '不可用'" :severity="provider.healthState === 'up' ? 'success' : 'danger'" /></div><div class="card-actions"><UiButton variant="text" size="small" icon="pi pi-bolt" aria-label="测试连接" :loading="testingProvider === provider.id" @click="testProvider(provider)" /><UiButton variant="text" size="small" icon="pi pi-cloud-download" aria-label="从该 Provider 拉取模型" @click="openCatalog(provider.id)" /><UiButton variant="text" size="small" icon="pi pi-pencil" aria-label="编辑 Provider" @click="editProvider(provider)" /><UiButton variant="text" size="small" severity="danger" icon="pi pi-trash" aria-label="删除 Provider" @click="removeProvider(provider.id)" /></div></div><h3>{{ provider.name }}</h3><p>{{ provider.kind }}</p><code>{{ provider.apiKeyHint ?? '未设置密钥' }}</code><small v-if="provider.healthError" class="provider-error">{{ provider.healthError }}</small></article></div>
           <div class="registry-heading"><div><h3>模型</h3><p class="section-note">窗口、最大输出、能力与定价来自 models.dev 的本地缓存目录，导入时自动带入；<code>补齐元数据</code>只填空着的价格，已填的不会被覆盖。目录按模型名匹配，中转站会撒谎 —— 点开任一行可以手动标记它的<b>看图能力</b>，标记压过目录，且不会被<code>补齐元数据</code>撤销。</p></div><div class="section-actions"><UiButton size="small" variant="outlined" icon="pi pi-cloud-download" label="从 Provider 拉取" :disabled="!providers.length" @click="openCatalog()" /><UiButton size="small" variant="outlined" icon="pi pi-sparkles" label="补齐元数据" :disabled="!models.length" :loading="enriching" @click="enrichModels" /><UiButton size="small" variant="outlined" label="添加模型" @click="editModel()" /></div></div>
@@ -2522,7 +2442,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
           </DataGrid>
           <article v-if="traceDetail.length" class="inspector"><header><b>Trace {{ traceDetail[0]?.trace_id }}</b><UiTag :value="`${traceDetail.length} spans`" /></header><ol><li v-for="(node, index) in traceDetail" :key="node.id" :style="{ marginLeft: `${(traceIndent[index] ?? 0) * 24}px` }"><code>{{ node.kind }}</code><span>{{ node.summary }}</span><small>{{ node.duration_ms ?? 0 }} ms</small></li></ol></article>
         </section>
-        <section v-else-if="active === 'prompts'" key="prompts" class="surface page-surface"><header><div><p class="eyebrow">PROMPT WORKSPACE</p><h2>提示词编辑与版本</h2><p>每次保存落盘 unified diff；预览与真实轮次共用同一条 PromptAssembler 路径。</p></div><UiButton label="预览组装" icon="pi pi-eye" @click="openPromptPreview" /></header>
+        <section v-else-if="active === 'prompts'" key="prompts" class="surface page-surface"><header><div><p class="eyebrow">PROMPT WORKSPACE</p><h2>提示词编辑与版本</h2><p class="u-size-sm" style="--u-base: 14px">在此处管理提示词与长期记忆</p></div><UiButton label="预览组装" icon="pi pi-eye" @click="openPromptPreview" /></header>
           <div class="prompt-workbench">
             <div class="prompt-cards">
               <button v-for="doc in promptCards" :key="String(doc.id)" type="button" :class="['prompt-card', { active: String(selectedPrompt?.id ?? '') === String(doc.id) }]" @click="inspectPrompt(doc)">
@@ -2542,52 +2462,17 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
               <h3>版本记录</h3>
               <ol class="revision-list"><li v-for="revision in promptRevisions" :key="String(revision.id)"><div><code>{{ String(revision.id).slice(0, 12) }}</code><small>{{ revision.actor }} · {{ new Date(Number(revision.ts)).toLocaleString() }}</small></div><UiButton size="small" variant="text" label="回滚" @click="rollbackPrompt(revision.id)" /></li><li v-if="!promptRevisions.length" class="empty">还没有保存过任何版本。</li></ol>
             </article>
-            <article v-else class="editor-panel empty-card"><i class="pi pi-align-left" aria-hidden="true" /><h3>选一份文档开始编辑</h3><p>每次保存都会落一条 unified diff 版本，可随时回滚。</p></article>
+            <article v-else class="editor-panel empty-card"><i class="pi pi-align-left" aria-hidden="true" /><h3>选一份文档开始编辑</h3><p>可在版本管理中进行回滚</p></article>
           </div>
         </section>
-        <section v-else-if="active === 'tasks'" key="tasks" class="surface page-surface"><header><div><p class="eyebrow">WORK QUEUE</p><h2>任务与审批</h2><p>在途任务、历史状态与高风险工具批准队列。</p></div></header><div class="dashboard-grid">
-          <article class="surface"><h3>任务</h3><p class="section-note">任务由 <code>spawn_agent</code> 派发，跟着它所属的那一轮活着。子 agent 没有独立的取消句柄，<b>「取消」取消的是整轮</b> —— 同一轮里的其他子 agent 也会一起停。</p>
-            <DataGrid :rows="tasks" :columns="COLUMNS.tasks" data-key="id" empty="没有在途或历史任务">
-              <template #updated_at="{ data }">{{ new Date(Number(data.updated_at)).toLocaleString() }}</template>
-              <template #actions="{ data }"><UiButton v-if="data.state === 'running'" size="small" variant="outlined" severity="danger" label="取消" :loading="cancellingTurn === data.turn_id" @click="cancelTaskTurn(data)" /></template>
-            </DataGrid></article>
-          <article class="surface"><h3>审批</h3><p class="section-note">命中审批规则的工具会暂停到 <code>approval.ttlMs</code>；批准后原调用继续，拒绝、过期或取消后不会执行。</p>
-            <p v-if="approvalRulesEmpty" class="callout warn"><i class="pi pi-exclamation-triangle" aria-hidden="true" /><b>0 条规则时 <code>conditional</code> 等于 <code>never</code>。</b><code>approval.enabled</code> 是开的，但 <code>approval.rules</code> 是空的 —— 规则表为空时判定恒为「不需要审批」，于是 <span v-if="conditionalToolNames"><code>{{ conditionalToolNames }}</code></span><span v-else>标着「条件审批」的工具</span> 全部直接执行。规则在「全部配置」的 <code>approval.rules</code> 里加，上面的试跑可以先验一遍。</p>
-            <DataGrid :rows="approvals" :columns="COLUMNS.approvals" data-key="id" empty="没有审批记录">
-              <template #tool_name="{ data }"><code>{{ data.tool_name }}</code><small class="hit-text">{{ data.input_json }}</small></template>
-              <template #risk="{ data }"><UiTag :value="String(data.risk)" :severity="data.risk === 'high' ? 'danger' : data.risk === 'medium' ? 'warn' : 'secondary'" /></template>
-              <template #state="{ data }"><UiTag :value="String(data.state)" :severity="data.state === 'pending' ? 'warn' : data.state === 'approved' ? 'success' : data.state === 'denied' ? 'danger' : 'secondary'" /></template>
-              <template #requested_at="{ data }">{{ new Date(Number(data.requested_at)).toLocaleString() }}</template>
-              <template #actions="{ data }"><div v-if="data.state === 'pending'" class="section-actions"><UiButton size="small" severity="danger" variant="outlined" label="拒绝" :loading="decidingApproval === data.id" @click="decideApproval(data, false)" /><UiButton size="small" label="批准执行" :loading="decidingApproval === data.id" @click="decideApproval(data, true)" /></div><small v-else class="alias-empty">{{ data.decided_by ?? 'system' }}</small></template>
-            </DataGrid>
-          </article>
-          <article class="surface wide">
-            <div class="registry-heading">
-              <div><h3>定时任务</h3><p class="section-note">模型用 <code>schedule_create</code> 排的、或在这里建的周期 / 一次性任务。到点<b>起一条完整轮次</b>并提交，所以产出照常进那个会话的上下文；<code>notify</code> 模式只发预写文本、不调模型。停机期间错过的<b>不补跑</b>，只在日志里留一条 <code>schedule.missed</code>。</p></div>
-              <UiButton icon="pi pi-plus" label="新建定时任务" :disabled="!schedules.available || !schedules.enabled || !chats.length" :title="chats.length ? '' : '还没有任何会话上下文'" @click="openScheduleDialog()" />
-            </div>
-            <p v-if="!schedules.available" class="callout warn"><i class="pi pi-exclamation-triangle" aria-hidden="true" />这个部署没有装配定时任务运行时，这里读不到任何任务（<b>不是「一条都没有」</b>）。</p>
-            <p v-else-if="!schedules.enabled" class="callout warn"><i class="pi pi-pause" aria-hidden="true" /><code>schedule.enabled</code> 是关的：下面的任务都留在库里但不会触发，每次跳过记一条 <code>schedule.skipped</code>。</p>
-            <p v-else-if="!chats.length" class="callout warn"><i class="pi pi-info-circle" aria-hidden="true" />还没有任何会话上下文，建不了任务 —— 任务要挂在一个真实会话上（先让 bot 在某个会话里说过一次话）。</p>
-            <DataGrid :rows="schedules.jobs" :columns="COLUMNS.schedules" data-key="id" paginate empty="还没有定时任务">
-              <template #name="{ data }"><div class="alias-name"><b>{{ data.name }}</b></div><small class="hit-text">{{ data.payload }}</small></template>
-              <template #chatLabel="{ data }"><span>{{ data.chatLabel ?? data.chatId }}</span><small class="alias-empty">建于 {{ data.creatorLabel ?? data.createdBy }}</small></template>
-              <template #mode="{ data }"><UiTag :value="data.mode" :severity="data.mode === 'agent' ? 'warn' : 'secondary'" :title="data.mode === 'agent' ? '每次触发都是一轮真实模型调用' : '只发预写文本，不调模型'" /></template>
-              <template #trigger="{ data }"><code v-if="data.cron">{{ data.cron }}</code><span v-else>{{ new Date(data.at).toLocaleString() }}</span><small class="alias-empty">{{ data.timezone }}{{ data.cron ? '' : ' · 一次性' }}</small></template>
-              <template #nextRun="{ data }"><span v-if="data.nextRun">{{ new Date(data.nextRun).toLocaleString() }}</span><small v-else class="alias-empty">不再触发</small></template>
-              <template #last="{ data }">
-                <template v-if="data.lastRunAt">
-                  <UiTag :value="(SCHEDULE_RUN_STATES[data.lastState ?? ''] ?? { label: data.lastState ?? '—' }).label" :severity="(SCHEDULE_RUN_STATES[data.lastState ?? ''] ?? { severity: 'secondary' }).severity" />
-                  <small class="alias-empty">{{ new Date(data.lastRunAt).toLocaleString() }} · 共 {{ data.runCount }} 次</small>
-                  <small v-if="data.lastError" class="detail-truncated">{{ data.lastError }}</small>
-                </template>
-                <small v-else class="alias-empty">还没跑过</small>
-              </template>
-              <template #state="{ data }"><UiTag :value="(SCHEDULE_STATES[data.state] ?? { label: data.state }).label" :severity="(SCHEDULE_STATES[data.state] ?? { severity: 'secondary' }).severity" /></template>
-              <template #actions="{ data }"><div v-if="data.state === 'active'" class="section-actions"><UiButton size="small" variant="outlined" icon="pi pi-play" label="立即触发" :loading="scheduleBusy === data.id" @click="triggerSchedule(data)" /><UiButton size="small" variant="outlined" severity="danger" label="停掉" :loading="scheduleBusy === data.id" @click="cancelSchedule(data)" /></div></template>
-            </DataGrid>
-          </article>
-        </div></section>
+        <!-- 任务页整段搬进 `TasksPage.vue`（三张卡竖排：任务 → 定时任务 → 审批，docs/09 §3.10.1）。
+             `key` 是必须的：相邻页面都是 `<section>`，没有 key 时 Vue 认成同一个节点，
+             只换内容不走过渡。 -->
+        <TasksPage
+          v-else-if="active === 'tasks'" key="tasks"
+          :tick="tick" :chats="chats" :approval-rules-empty="approvalRulesEmpty" :conditional-tool-names="conditionalToolNames"
+          @approvals-changed="loadApprovalBadge" @open-turn="openDetail" @open-trace="openTrace"
+        />
         <section v-else-if="active === 'settings'" key="settings" class="surface page-surface">
           <header><div><p class="eyebrow">CONFIGURATION</p><h2>配置与维护</h2><p>完整合并配置已通过 zod 校验；密钥字段不会回显。</p></div></header>
           <nav class="subtabs" aria-label="设置分区">
@@ -2908,24 +2793,6 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
         <UiButton v-if="logDetail?.traceId && !/^(cmd|job)_/.test(logDetail.traceId)" variant="text" icon="pi pi-comments" label="看这一轮详情" @click="logDialog = false; openDetail(logDetail!.traceId!)" />
         <UiButton variant="text" label="关闭" @click="logDialog = false" />
       </template>
-    </UiModal>
-    <UiModal v-model:visible="scheduleDialog" title="新建定时任务" width="min(680px, 94vw)">
-      <div class="form-grid">
-        <p class="wide field-note">任务归属 <b>owner</b>（<code>access.bootstrapOwnerId</code>）—— WebUI 只有这一个身份。触发时仍按 <code>min(用户角色, 会话角色)</code> 重算，所以在不受信的群里不会因为「是 owner 建的」而提权。</p>
-        <label>会话<UiSelect v-model="scheduleForm.key" :options="chats.map((chat) => ({ value: chat.key, label: chat.key }))" /></label>
-        <label>任务名<input v-model="scheduleForm.name" maxlength="64" placeholder="同一会话内唯一，取消时用它"></label>
-        <label>模式<UiSelect v-model="scheduleForm.mode" :options="[{ value: 'notify', label: 'notify · 只发预写文本，不调模型' }, { value: 'agent', label: 'agent · 起一轮完整对话（花钱）' }]" /></label>
-        <label>触发方式<UiSelect v-model="scheduleForm.trigger" :options="[{ value: 'cron', label: '周期（cron）' }, { value: 'at', label: '一次性（绝对时间）' }]" /></label>
-        <label v-if="scheduleForm.trigger === 'cron'">cron 表达式<input v-model="scheduleForm.cron" placeholder="0 8 * * * = 每天早八点"></label>
-        <label v-else>时间<input v-model="scheduleForm.at" placeholder="2026-08-19T08:00"></label>
-        <p class="wide field-note">
-          时间按 <code>general.timezone</code>（<b>{{ schedules.timezone || '未知' }}</b>）解释，不是浏览器时区。
-          <template v-if="schedules.settings">两次触发间隔不能小于 {{ schedules.settings.minIntervalMinutes }} 分钟，单会话最多 {{ schedules.settings.maxPerChat }} 个活跃任务。</template>
-          一次性任务的时间必须在将来 —— 错过的触发点不会补跑。
-        </p>
-        <label class="wide">{{ scheduleForm.mode === 'agent' ? '任务描述（给模型看）' : '要发出的正文' }}<textarea v-model="scheduleForm.text" rows="4" :maxlength="schedules.settings?.maxPayloadChars ?? 2000" :placeholder="scheduleForm.mode === 'agent' ? '汇总昨天群里聊了什么，300 字以内' : '该喝水了'" /></label>
-      </div>
-      <template #footer><UiButton variant="text" label="取消" @click="scheduleDialog = false" /><UiButton :loading="scheduleSaving" icon="pi pi-check" label="排上" @click="submitSchedule()" /></template>
     </UiModal>
     <UiModal v-model:visible="bulkDialog" title="批量导入主体">
       <div class="form-grid">

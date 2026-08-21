@@ -333,6 +333,11 @@
 | [x] AC-TASK-030 (自动) | 库里某行的 cron 表达式坏掉（手改 / 跨版本残留）后启动 | 那一条置 `cancelled` + `schedule.failed`，其余任务照常装载 | 〔schedule.test.ts〕
 | [x] AC-TASK-031 (自动) | 结束的任务行超过 `schedule.retentionDays` | 被清掉；**活跃任务即使很久没动也不清** | 〔schedule.test.ts〕
 | [x] AC-TASK-032 (自动) | `Scheduler` 重名注册 / `remove` 一个不存在的名字 / 给绝对时间 / 给两个不同时区的同一表达式 | 重名抛错；`remove` 返回 false；一次性任务的 `nextRun` 等于给定时刻；两个时区的 `nextRun` 不同 | 〔scheduler.test.ts〕
+| [x] AC-TASK-033 (自动) | `schedule_update` 改一条任务的正文 / cron / 名字；改名撞同会话另一条；改成它自己现在的名字；在别的会话里改同名任务 | 改动落库并**重排进调度器**，而 `run_count` 与全部运行历史留着（「停掉再重建」正是它要替掉的那条路）；撞名回 `duplicate_name`，改成自己原来的名字放行（`gateDuplicate` 排除自己）；只改得到本会话那一条，找不到就 `not_found` | 〔schedule.test.ts〕
+| [x] AC-TASK-034 (自动) ★ | 建好任务后把 `schedule.minIntervalMinutes` 从 5 调到 120，再只改正文；另一条任务在 `Asia/Shanghai` 下建好后把 `general.timezone` 改成 `UTC`，再改它的 `at` | **只校验这次真的给了的字段**：只改正文时 cron 原样保留且不重新校验（收紧规则的语义是「别再建新的」，不是「存量全部冻结」），真去改 cron 时那道闸照样拦；`at` 一律按**任务行上的** `timezone` 解释 —— 拿 `general.timezone` 解释会把任务静默挪走几小时而两侧都不报错 | 〔schedule.test.ts〕
+| [x] AC-TASK-035 (自动) | `schedule_update` 一个字段都不给 / `cron` 与 `at` 两个都给 / 排不进调度器 | 依次是 `nothing_to_update`（不回假成功 —— 调用方多半是模型，会以为自己改了东西）、`invalid_schedule`（表上那条 `CHECK` 只允许两者其一）、`schedule_register_failed` 且**整行回滚**（库里叫「晚报」而调度器上排的还是早八点是最坏的收场） | 〔schedule.test.ts〕
+| [x] AC-TASK-036 (自动) ★ | 开了静默的 `mode='agent'` 任务触发一次（模型调 `stay_silent` 后照常写结论）；同一形态下再看没开静默的任务与子 agent | **一条 Telegram 消息都不发**，但触发消息与产出两行都进 `context_messages`、`turns.state='committed'`、`last_state='silent'` 且 `last_error` 为 NULL、`turn.end` 带 `silenced:true`（[02 §10.5](./02-context-engine.md)）；没开静默时 `stay_silent` 不在工具目录里且硬调回 `tool_unavailable`；**子 agent 一律拿不到它**（拿的是父轮同一个 turn 对象，够得着等于一个 researcher 替整轮闭嘴），此时产出照常发出去 | 〔schedule.test.ts〕
+| [x] AC-TASK-037 (自动) ★ | 连续静默 `SILENT_STREAK_WARN` 次后再成功说一次话；静默那一轮模型返回空正文；给 `mode='notify'` 的任务开静默 | 前 9 条 `schedule.silent` 是 info、第 10 条升 **warn**，`silent_streak` 累到 10 后任何一次非静默结果归零 —— 这是发现「这条任务已经变成一台只烧钱不说话的定时器」的唯一机制；**`model_returned_empty` 不为静默开例外**：空正文仍记 `failed`、上下文一行不留、`schedule.silent` 一条都不落；`notify` + `silent` 建与改都回 `invalid_silent`（存得下但运行时不读的开关比没有更糟） | 〔schedule.test.ts〕
 
 ## 7. 记忆（AC-MEM）
 
@@ -389,6 +394,10 @@
 
 ## 9. Skill / Plugin / MCP（AC-SKL / AC-PLG / AC-MCP）
 
+> **AC-PLG-005 / 006 曾各有两条**（自撰写 plugin 那两条已勾的，与 hook 自动禁用 / hook 超时那两条
+> 未实现的）。按与 §10 同一条规则处理：**未实现的那两条改号为 AC-PLG-009 / 010**，已勾那两条不动。
+> 这两个号全仓只有本文引用过，改号不影响任何溯源凭据。
+
 | ID | 步骤 | 期望 |
 |---|---|---|
 | [x] AC-SKL-001 (自动) ★ | 放 3 个 SKILL.md | 系统提示词目录里**只有** name+description（正文不在 `instructions` 中） | 〔skill.runtime.test.ts〕
@@ -418,8 +427,8 @@
 | [x] AC-PLG-004 (自动) | plugin hook 抛异常**一次** | 被 catch，**当场**记一条 `plugin.error`（带 plugin/hook/message/errors/disabled），plugin 还开着，turn 正常完成（判据在 `tests/plugin.runtime.test.ts`）。此前只有累计到 `plugins.autoDisableAfterErrors` 时才经告警落一行，而那一行还受 `alerts.on`（默认 `[]`）与 `dedupeMinutes` 管 —— 实测一个三轮必抛的 `beforeTurn`，与 plugin 有关的日志 0 条（docs/28 · L-LOG-01） | 〔plugin.runtime.test.ts〕
 | [x] AC-PLG-005 (自动) ★ | `write_plugin` 写一个 plugin；运维启用它；模型再改一次源码 | 写下来就是 `enabled=0`（模型不能让自己写的代码在本进程里跑起来）；启用后再改源码**自动打回未启用** —— `reconcile()` 用 `sha256(文件+配置)` 当 ESM 的 cache-busting 签名，不打回的话下一次 reconcile 就把新代码 import 进本进程了（[14 A27](./14-open-questions.md)） | 〔selfextend.author.test.ts〕
 | [x] AC-PLG-006 (自动) | `GET /api/plugins/:name/source` 与 `DELETE /api/plugins/:name` | 前者交回 plugin.js 全文（没有它，「启用前先看过源码」只是句口号），不存在时 404；后者连目录带库里那行一起删 | 〔selfextend.api.test.ts〕
-| [ ] AC-PLG-005 (自动) | 同一 hook 连续失败 3 次 | 自动禁用该 plugin + owner 告警 |
-| [ ] AC-PLG-006 (自动) | hook 执行超 5s | 超时中断，记日志，turn 继续 |
+| [ ] AC-PLG-009 (自动) | 同一 hook 连续失败 3 次 | 自动禁用该 plugin + owner 告警 |
+| [ ] AC-PLG-010 (自动) | hook 执行超 5s | 超时中断，记日志，turn 继续 |
 | [ ] AC-PLG-007 (自动) | 两个 plugin 注册同名工具 | 后者加载失败并报明确错误（前缀隔离下应仅在同名 plugin 时发生） |
 | [ ] AC-PLG-008 | `onMessage` 返回 `{drop:true}` | 该消息不入库、不触发 |
 | [ ] AC-MCP-001 | 配置 stdio MCP server 并启用 | 懒连接成功；工具以 `mcp__<name>__*` 出现在 RUNTIME 块 |
@@ -447,6 +456,23 @@
 
 ## 10. WebUI（AC-WEB）
 
+> **AC-WEB-030 ～ 036 曾整段各有两条**：定时任务面板那七条（已勾、`(自动)`、
+> 〔schedule.api.test.ts〕）与配额页 / 工具页 / 总览页 / 扩展页那七条未实现的，编号撞在一起
+> —— 于是「AC-WEB-033 过了吗」这个问题没有答案，而这是一份逐条勾选的清单。
+> **未实现的那一侧改号为 AC-WEB-065 ～ 071**，已勾那一侧一个字不动。
+> 一律改未实现那侧，是因为它风险最低：这批编号全仓只有本文引用，没有任何源码注释拿它当
+> 溯源凭据 —— 所以改号不触碰「复审条目编号不得重编号」那条约定要防的东西（它防的是注释里的
+> 凭据失效）。条目总数、勾选数与签署表都不变。
+>
+> ⚠ **唯一一处代价，记在这里**：`AC-WEB-033` 是这批里**唯一**被本文之外引用过的号，而且两处
+> 引用各指一条不同的条目 —— `docs/09 §4` 指的是定时任务那条（`DELETE /api/schedules/:id` 的三种
+> 返回，编号未动，仍然对得上），而 `docs/reviews/28` 指的是配额页那条缺定价告警红条，
+> **也就是现在的 `AC-WEB-070`**。`docs/reviews/**` 是冻结层、按约定不改，所以那句引用从此指错；
+> 它本来也连行号一起引（`docs/13:475`），而那个行号早已因增删失效 —— 复审层按 `docs/README`
+> 的分层就是「只当历史读」。这一行是给顺着旧号找过来的人留的转向牌。
+>
+> `tests/acceptance.test.ts` 现在有一条编号唯一性断言，同样的重号不会再无声无息地进来。
+
 | ID | 步骤 | 期望 |
 |---|---|---|
 | [ ] AC-WEB-001 | 首次启动（无密码） | 控制台打印 setup token；`/setup` 可设密码；设完后 token 失效 |
@@ -464,13 +490,17 @@
 | [ ] AC-WEB-011c (自动) | 对某一轮点 `[查看详情]` | 弹出该轮实际调用：`model.call` 的载荷里能看到 `request.body`（真正发给上游的请求体）；超过 `logs.bodyMaxBytes` 被挪进 `blobs/` 的载荷同样解引用出来，而不是显示 `{"fileRef":…}`；超长 JSON 截断并置 `truncated`，`[复制 JSON]` / `[下载完整 JSON]` 取到的是完整那一份；`logs.captureBodies` 关闭时页面明说「没有请求体」；turn 不存在返回 404 |
 | [x] AC-WEB-011d (自动) ★ | 对一轮点 `[查看详情]`，切到「工具输入输出」组 | 列出该轮的 `tool_call` / `tool_result`，**能看到工具调用的原始参数**；被裁剪降级过的行（`prune_applied=1`）也给出库里保留的原文并标注「模型现在看到的是占位符」；这一组读 `context_messages.parts_json` 而不是日志，所以对 `LogSink.span` 修好之前的历史轮次同样有效，也不受 `logs.retentionDays` / `captureBodies` 影响；别的会话里同 `turn_id` 的 parts 不会串进来 | 〔webui.console.test.ts〕
 | [x] AC-WEB-011e (自动) ★ | 日志页点一行（分别点有 trace 的、没有 trace 的、载荷被挪进 `blobs/` 的） | 三种都打开详情：元信息（trace/span/parent/chat/user/key/耗时）+ 格式化载荷；blob 解引用；无载荷的行如实说「没有载荷」而不是空白。`GET /api/logs/:id` 对不存在的 id 与非数字 id 都是 404，且 `/api/logs/blob`、`/api/logs/trace/:traceId` 仍然可达（`:id` 注册在它们之后）。列表响应里**不含 `data_json`**，只带 `data_bytes` | 〔webui.console.test.ts〕
-| [x] AC-WEB-030 (自动) ★ | 定时任务面板：两个会话各排一个任务后打开「任务与审批」页 | 跨会话都列出来，每行带会话名、创建者、模式、cron/绝对时间 + 时区、下一次触发（来自进程内 `Scheduler`）、上一次结果与累计次数 | 〔schedule.api.test.ts〕
+| [x] AC-WEB-030 (自动) ★ | 定时任务面板：两个会话各排一个任务后打开「任务与审批」页 | 跨会话都列出来，每行带会话名、创建者、模式、cron/绝对时间 + 时区、下一次触发（来自进程内 `Scheduler`）、上一次结果与累计次数，外加静默开关与连续静默次数（`silent` / `silentStreak` —— 后者是「这条任务已经变成一台只烧钱不说话的定时器」在界面上唯一看得见的凭据）；信封带 `total` / `truncated`，撞上 `listAll` 那 500 条上限时界面说「还有 N 条」而不是显示一份看不出来是截断过的列表 | 〔schedule.api.test.ts〕
 | [x] AC-WEB-031 (自动) ★ | 在面板里建任务时给非法 cron / 间隔过密 / 已过去的 `at` / 超过 `maxPerChat` / 重名 / 非法 mode / 空正文 / 不存在的会话 | 八种全部 400 且一条都不落库；判定与 `schedule_create` 工具**共用 `createScheduledJob`**，所以两边必然一致 | 〔schedule.api.test.ts〕
 | [x] AC-WEB-032 (自动) | 面板里建一次性任务，`general.timezone='Asia/Shanghai'`，填 `2030-06-01T15:00` | 存成 `07:00Z` —— 按配置时区解释，不是浏览器/宿主时区 | 〔schedule.api.test.ts〕
 | [x] AC-WEB-033 (自动) ★ | 点「停掉」，再点一次 | 第一次 `cancelled:true` 且**从调度器里也摘掉**；第二次如实回 `cancelled:false` 而不是假成功；不存在的 id 404 | 〔schedule.api.test.ts〕
 | [x] AC-WEB-034 (自动) ★ | 点「立即触发」 | 立刻回 `{started:true}`（不等一整轮跑完），落一条带 `actor:'webui'` / `manual:true` 的 `schedule.fired`；已结束的任务回 409 且不会被触发 | 〔schedule.api.test.ts〕
 | [x] AC-WEB-035 (自动) ★ | 部署没有装配定时任务运行时 | `GET /api/schedules` 回 `available:false` + 空数组，界面说「读不到」而不是「一条都没有」；三个写端点回 `not_implemented`。另断言 `main.ts` 真的把运行时传给了 `createServer`（依赖是可选的，漏传不会编译报错） | 〔schedule.api.test.ts〕
 | [x] AC-WEB-036 (自动) | 没配 `access.bootstrapOwnerId` 时在面板里建任务 | `owner_unset` 400 —— 任务需要一个归属身份，否则触发时无从重算权限 | 〔schedule.api.test.ts〕
+| [x] AC-WEB-061 (自动) ★ | `PATCH /api/schedules/:id` 逐个发非法的 name / text / cron / at，再发 `key`+`chatId`+`threadId`+`createdBy`+`mode`，最后正常改一次并对已停掉的行再改一次 | 十种校验码与 `schedule_update` 工具**逐条一致**（两边共用 `updateScheduledJob`，端点自己抄一遍的话 WebUI 迟早能改出工具改不出来的任务），一条都不落库；落点、创建者与 `mode` **不收** —— 只发这五样时回 `nothing_to_update` 而不是假成功，混在合法字段里发也只有合法那部分生效；改成功后重排调度器、返回行上叫 `silent`（DB 列是 `allow_silent`）、留一条 `schedule.updated` 且 `changed` 只列真正收下的字段；已结束的行回 **409 `not_active`**（是状态冲突不是参数不合法），不存在的 id 404 | 〔schedule.api.test.ts〕
+| [x] AC-WEB-062 (自动) ★ | 对一条 active 与一条已停掉的任务分别点 `[彻底删除]` | 两条都真的从库里消失（硬删整行，与 `[停掉]` 的软取消是两个动词：那个行还在、还看得见跑过多少次）；active 那条**先 `runner.unregister` 再 `jobs.remove`** —— 反过来的话删行到下一次 cron 之间调度器里还排着一条指向已消失行的任务；各留一条 **warn** `schedule.purged`（带 `state` / `wasActive` / `actor`），不存在的 id 404 | 〔schedule.api.test.ts〕
+| [x] AC-WEB-063 (自动) ★ | `/api/messages`、`/api/turns`、`/api/approvals`、`/api/tasks` 各带 `?page=&size=` 请求第 1、2 页，并在 `/api/approvals` 上放一条已过期的待审 | 四条的信封键**完全一致**（`{items,total,page,size}`，approvals 多一个 `pending`），`total` 是全表数而不是本页条数，第 2 页拿到的确实是另一行（真走 SQL 的 `OFFSET`，不是取一大坨再在内存里切）；`pending` 是**服务端全表** `COUNT(*) WHERE state='pending'`，翻到第 2 页左侧导航那个角标不变（按页数的话角标会悄悄掉 0 —— 整次分页改造里唯一一处静默的功能退化）；过期扫描排在 `COUNT` 与 `SELECT` **之前**，所以 `total`/`pending` 与页内容数的是同一时刻 | 〔api.contract.test.ts〕
+| [x] AC-WEB-064 (自动) | 一条 running 的任务（带 `progress_json` + `agent_run_id`）与一条 done 的任务：看列表、点详情、再各删一次 | 列表按 running 优先 + 更新时间倒序，**不驮 `progress_json`**（一帧进度能有几 KB），并由服务端补出 `chatLabel` / `userLabel`（前端不实现第二份反查规则）；`GET /api/tasks/:id` 给出解析后的 `progress` 以及 join 出来的 `turn`（步数 / 工具数 / 花费 / 错误）与 `agentRun`（agent 名 / 模型别名 / 状态 / 结果摘要），原始 JSON 串不再发第二遍，不存在的 id 404；`DELETE` 删的是**记录不是取消通道** —— running 一律 409 `task_running`，done 的删掉，删不到东西时 404 而不是假成功 | 〔api.contract.test.ts〕
 | [ ] AC-WEB-012 | 提示词编辑 | token 实时计数；保存生成 diff 版本；`[回滚]` 生效；`[预览组装]` 与实际一致 |
 | [ ] AC-WEB-012b | 提示词页文档列表 | 卡片网格而非四列表格：每张卡写明文档类型（人格/助理守则/公共记忆/私有记忆）、进哪个 block 及用途、`全局` 或所属会话/用户、字节 / token / 更新时间；选中高亮，未选中时右侧是提示卡片；PRIMEMORY 打开时有「查看会被记录」的醒目提示 |
 | [ ] AC-WEB-013 | Provider 页 | key 永不回显；`[测试连接]` 可用；`[从 Provider 拉取模型]` 列出上游全部模型、支持搜索与多选批量导入、已存在的行不可重复导入；模型定价可编辑；别名 fallback 链可拖拽排序 |
@@ -508,13 +538,13 @@
 | [ ] AC-WEB-027 | 会话页会话列表 | 每个会话一张卡片：群聊显示群组名、私聊显示对方昵称（取自 `principals`，未登记时退回 `未登记群聊/用户 <id>`），第二行是 `@username` 或会话类型，卡片上仍能看到 contextKey、消息数与窗口 token |
 | [ ] AC-WEB-028 | 会话页「改这个会话的 HEAD」 | `[撤回上一次提交]` `[清空上下文窗口]` 只在选中会话后的 commit 卡片里出现，各自写明等价于 `/undo` 与 `/new`；HEAD 已是首个 commit 时撤回按钮禁用；清空前二次确认；两者都不删消息，可用同卡片的 `[回滚到此]` 走回来 |
 | [ ] AC-WEB-029 | 配额页改「全局 · 每日」并保存 | 写 `config_kv` + `config_revisions` 并广播 `config.changed`；热更新即时生效（下一条消息按新限额判定）；非法值（负数、非整数的步数/并发）返回 `invalid_config` 且逐条给出 path，不落库 |
-| [ ] AC-WEB-030 (自动) ★ | `GET /api/quota` | 返回的每行计数器带**服务端合成**的 `limit`：user 行套用 `perUser.byRole[该主体角色]` 覆盖，配了 `byRole` 时置 `limitApprox`（有效角色取 min(用户, 会话)，服务端只看得到前者）；`current` 正确区分当前 bucket 与历史 bucket；chat/user 行按 `principals` 反查显示名与角色 |
-| [ ] AC-WEB-031 | 配额页计数器行内 `[重置]` | 只删这一行（`{scope, subject, window, bucket}`），其余计数不动；「全部清零」不带 body 清全表；只给 `bucket` 不给 `scope` 返回 400 `invalid_filter`；两者都写 `webui.action` 审计 |
-| [ ] AC-WEB-032 ★ | 配额页表单 | `KNOWN_UNIMPLEMENTED_CONFIG_KEYS` 里 `quota.` 开头的 5 项**没有控件**，只在灰条里列出键名并写明「现在真正生效的是谁」；键名来自 `GET /api/quota` 的 `unimplemented`，前端不维护第二份清单。同理，设置页的 `trigger.ignoreEditedAsTrigger` 开关禁用并标「未接线」 |
-| [ ] AC-WEB-033 | 配额页 | 存在启用中但缺定价的模型时顶部出现告警条并列出模型（这些轮次花费按 0 记账）；`quota.enabled` 关闭时出现「金额限额不再判定、频率限制仍生效」的红条 |
-| [ ] AC-WEB-034 | 工具页沙箱卡片 | `mode` / 网络 / 镜像 / 资源限制 / `bypassRoles` 可改并热更新；`[探测可用性]` 打的是**已保存**的那份配置并回显结果；`mode=none` 保存前二次确认；owner 之外的角色进 `bypassRoles` 时给出警示 |
-| [ ] AC-WEB-035 | 总览页「依赖健康」 | 六行全部来自 `GET /api/health/detail`（DB 读写、SSE、模型注册表、在途 turn、MCP、沙箱 mode 与可用性），沙箱一行随 `sandbox.mode` 变化 —— 不再是恒显示「Docker」的写死文本 |
-| [ ] AC-WEB-036 | 扩展页 | Skill/Plugin 可启停、Plugin 可重载、MCP 可重连；启用 Plugin 前有「全信任运行任意代码」二次确认；MCP 行的状态与错误取自 `state` / `last_error`（连不上的 server 显示「连不上」+ 错误原文，而不是「可用」） |
+| [ ] AC-WEB-067 (自动) ★ | `GET /api/quota` | 返回的每行计数器带**服务端合成**的 `limit`：user 行套用 `perUser.byRole[该主体角色]` 覆盖，配了 `byRole` 时置 `limitApprox`（有效角色取 min(用户, 会话)，服务端只看得到前者）；`current` 正确区分当前 bucket 与历史 bucket；chat/user 行按 `principals` 反查显示名与角色 |
+| [ ] AC-WEB-068 | 配额页计数器行内 `[重置]` | 只删这一行（`{scope, subject, window, bucket}`），其余计数不动；「全部清零」不带 body 清全表；只给 `bucket` 不给 `scope` 返回 400 `invalid_filter`；两者都写 `webui.action` 审计 |
+| [ ] AC-WEB-069 ★ | 配额页表单 | `KNOWN_UNIMPLEMENTED_CONFIG_KEYS` 里 `quota.` 开头的 5 项**没有控件**，只在灰条里列出键名并写明「现在真正生效的是谁」；键名来自 `GET /api/quota` 的 `unimplemented`，前端不维护第二份清单。同理，设置页的 `trigger.ignoreEditedAsTrigger` 开关禁用并标「未接线」 |
+| [ ] AC-WEB-070 | 配额页 | 存在启用中但缺定价的模型时顶部出现告警条并列出模型（这些轮次花费按 0 记账）；`quota.enabled` 关闭时出现「金额限额不再判定、频率限制仍生效」的红条 |
+| [ ] AC-WEB-071 | 工具页沙箱卡片 | `mode` / 网络 / 镜像 / 资源限制 / `bypassRoles` 可改并热更新；`[探测可用性]` 打的是**已保存**的那份配置并回显结果；`mode=none` 保存前二次确认；owner 之外的角色进 `bypassRoles` 时给出警示 |
+| [ ] AC-WEB-065 | 总览页「依赖健康」 | 六行全部来自 `GET /api/health/detail`（DB 读写、SSE、模型注册表、在途 turn、MCP、沙箱 mode 与可用性），沙箱一行随 `sandbox.mode` 变化 —— 不再是恒显示「Docker」的写死文本 |
+| [ ] AC-WEB-066 | 扩展页 | Skill/Plugin 可启停、Plugin 可重载、MCP 可重连；启用 Plugin 前有「全信任运行任意代码」二次确认；MCP 行的状态与错误取自 `state` / `last_error`（连不上的 server 显示「连不上」+ 错误原文，而不是「可用」） |
 | [ ] AC-WEB-037 | 设置页 | **五个**维护操作（备份 / VACUUM / 清理日志 / 重建 FTS / 清孤儿文件）可执行并回显结果；`gc-files` 的 `refused` 必须渲染成 `warn` + 「已拒绝」+ 不自动消失（它只在库与目录对不上时出现，是运维最该立刻停手的那一种，docs/28 · L-WEB-03）；「变更历史」列出 `config_revisions` 的键、操作者、时间与新旧值。**此前这一行写的是「`gc-files` 后端未实现，界面上不提供按钮」** —— 它早就实现了，而同一份文档的 `AC-WEB-021` 一直把它列在期望里，两条自相矛盾 |
 | [ ] AC-WEB-038 | 顶栏 `[退出登录]` | 打 `POST /api/auth/logout`，session 失效、cookie 清空并跳回 `/login`；此后带旧 cookie 访问 `/api/*` 返回 401 |
 | [ ] AC-WEB-039 (自动) ★ | 契约测试遍历文档里的读端点 | 除 200 外还断言 `content-type: application/json` 与信封 `ok:true` —— 未注册的 `/api/*` 会掉进 SPA fallback 拿到 200 + `index.html`，只看状态码是假绿灯（`GET /api/quota` 曾以此「通过」而端点并不存在，docs/21 §2.3） |
@@ -591,13 +621,13 @@
 | Telegram 与准入 | | 22 / 46 | | | |
 | Agent 与 Provider | | 23 / 43 | | | |
 | 工具/沙箱/审批 | | 41 / 83 | | | |
-| Subagent 与任务 | | 21 / 39 | | | |
+| Subagent 与任务 | | 26 / 44 | | | |
 | 记忆 | | 1 / 13 | | | |
 | 日志与成本 | | 8 / 28 | | | |
 | 扩展生态 | | 29 / 53 | | | |
-| WebUI | | 11 / 85 | | | |
+| WebUI | | 15 / 89 | | | |
 | 安全 | | 9 / 25 | | | |
 | 运维 | | 2 / 10 | | | |
-| **合计** | | **213 / 490** | | | |
+| **合计** | | **222 / 499** | | | |
 
 **整体通过条件**：全部 ★ 项通过 + 非 ★ 项通过率 ≥ 95% + 所有豁免项经需求方书面确认。

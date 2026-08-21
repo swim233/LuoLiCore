@@ -79,7 +79,12 @@ describe('telegram side tools', () => {
     // builtins），而且 `tools.selfExtend.enabled` 出厂就是关的 —— 两条各自都足以让它们缺席。
     // 最后六个是容器管理（docs/05 §3.11）：由 `registerContainerTools` 注册，而且
     // `sandbox.persistent.enabled` 出厂也是关的 —— 同样两条各自都够。
-    expect(Object.keys(TOOL_POLICY).filter((name) => !active.has(name))).toEqual(['ask_parent', 'report_progress', 'spawn_harness',
+    // 夹在中间的 `stay_silent` 缺席的理由与上面几族都不同：它注册着、角色也够（owner ≥ trusted），
+    // 挡住它的是 `available()` 里那两道轮次形态闸 —— 这条 turn 没有 `silenceable`，而它的唯一
+    // 置位方是 `ScheduledJobRunner`（docs/02 §10.5 ②）。**一条普通轮次看得见它就是这次改动最坏
+    // 的失败形态**：模型可以对着正在等回话的人宣布不汇报。四个 `schedule_*` 则都在目录里
+    // （`deliverable()` 为真），`schedule_update` 因此不出现在这张缺席表上。
+    expect(Object.keys(TOOL_POLICY).filter((name) => !active.has(name))).toEqual(['ask_parent', 'report_progress', 'stay_silent', 'spawn_harness',
       'define_tool', 'delete_tool', 'list_tools', 'write_skill', 'install_skill', 'write_plugin', 'install_mcp', 'list_mcp',
       'container_list', 'container_exec', 'container_reset', 'container_inspect', 'container_keep', 'container_logs']);
     closeDatabase(wired.db);

@@ -7,7 +7,7 @@
 > 想知道现在的状态只看本文。反过来，本文**不重抄**别处已经由测试焊住的清单，只指过去：
 > 同一个事实有两份副本，迟早会漂。上一次漂的代价是「未接线配置键」在四个地方有三个数字。
 >
-> 核对时间：2026-08-20（扩展页重设计 + MCP 登录落地）／2026-08-19（第九轮整改后 + M12 自我扩展落地 + 8-18 两次进程崩溃的收口
+> 核对时间：2026-08-21（定时任务静默 / 编辑 / 硬删 + 任务与审批页补齐）／2026-08-20（扩展页重设计 + MCP 登录落地）／2026-08-19（第九轮整改后 + M12 自我扩展落地 + 8-18 两次进程崩溃的收口
 > + **第十轮停机活体测试的 30 条整改全部落地**）。
 > 每一条都回代码查过，不采信文档自述。
 >
@@ -28,7 +28,7 @@
 | 问题 | 权威 | 由什么焊住 |
 |---|---|---|
 | 哪些配置键还没接线 | [11 §2.0.1](./11-config-reference.md)（当前 10 条，每条写明为什么留着） | `tests/config.test.ts` —— 白名单每条必须在 `docs/11` 标记，且标注要跟着 `HOT_RELOADABLE_CONFIG_KEYS` |
-| 验收条目的勾选状态 | [13](./13-acceptance-criteria.md)（当前 **213 / 490**） | `tests/acceptance.test.ts` —— 只有标 `(自动)` 且点名真实用例文件的能勾，签署表分子分母自动核对 |
+| 验收条目的勾选状态 | [13](./13-acceptance-criteria.md)（当前 **222 / 499**） | `tests/acceptance.test.ts` —— 只有标 `(自动)` 且点名真实用例文件的能勾，签署表分子分母自动核对 |
 | WebUI 控制面够不着什么 | [21](./21-webui-coverage-gaps.md) | 无自动约束（人工复算，方法见其 §1） |
 | 某行代码为什么长这样 | [`reviews/`](./reviews/) 里的条目编号 | `tests/docs.test.ts` —— 编号被源码注释大量引用，删了或改了会报错 |
 
@@ -46,7 +46,7 @@
 |---|---|---|---|
 | `D-01` | 裸 SQL 散在仓储层之外 | **165 条语句 / 16 个文件**（`app.ts` 一个就占 76 条）。`reviews/27` 记的是「40+」，已经涨了；M12 把 `writeConfigRows` 下沉进了 `packages/db`，`custom_tools` 也是从头就走 `CustomToolRepository`，这一条没有再被加高 | 先做这条。`tests/db.isolation.test.ts` 的按 chat 隔离断言只覆盖得到 `packages/db` 里的查询，仓储外的这 165 条**一条都没被那道断言覆盖** |
 | `D-04` | `composeRuntime` 没抽出来 | 函数不存在；`apps/bot/src/main.ts` 445 行全是装配 | 依赖 `D-01`。抽出来之后集成测试才装得起运行时 —— 现在 `I-10` 那条改动就是因此没有用例覆盖 |
-| `D-02` | `ConsoleView.vue` 拆分 | **3034 行**（`reviews/25 §8` 记的是「1700+」；本轮之前是 3366，抽走扩展页减了 332 行）。渲染用例现在 **12 条**（此前 4 条）：14 个导航页各一次、设置页四个 tab、扩展页四个分段、外加 trace 深度 / 模型能力标记 / 未审阅形态 / 待你处理这几条 | 前置条件是渲染用例，**这一条仍然是硬前置**：上一次没有用例就拆，14 个控制台页面全变空白（`reviews/24 · D-UI-01`）。本轮按那个形状走通了一遍 —— 先补非空 fixture 让四类的行模板真的被渲染，再抽 `ExtensionsPage.vue` + `components/extensions/` 四个纯呈现子组件，然后补四条结构相关的用例。**再抽下一个页面照这个顺序**。另外记一条只有真浏览器发现得了的：WebUI 不能 import `@luoli/shared`（它拉 `node:crypto`，vite 会 externalize 成一调用就抛的桩；而 vitest 别名到 `src/` 并跑在 node 里，用例是绿的）|
+| `D-02` | `ConsoleView.vue` 拆分 | **2921 行**（`reviews/25 §8` 记的是「1700+」；抽走扩展页从 3366 减到 3054，本轮再抽走任务页减 133 行）。渲染用例：`console.render.test.ts` 现在 **14 条**（此前 12 条，新增「任务页三张卡竖排」与「待审角标取全表 pending」），抽出去的三张卡另有自己的一份 —— `tasks.card.test.ts` 10 条 + `schedules.card.test.ts` 11 条 | 前置条件是渲染用例，**这一条仍然是硬前置**：上一次没有用例就拆，14 个控制台页面全变空白（`reviews/24 · D-UI-01`）。这个形状已经走通两遍 —— 先补非空 fixture 让行模板真的被渲染，再抽页面壳 + `components/<页面>/` 的纯呈现子组件，然后补结构相关的用例。**再抽下一个页面照这个顺序**。第二遍（任务页）多两条经验：拆出去的卡各自带 loader 与分页游标，不要照抄扩展页「父层管所有写操作」（那条防的是跨卡共享 busy，这里没有，提到父层反而又造出一个争用点）；`DataGrid` 的 `row-click` 挂在 `<tr>` 上，行内按钮必须 `@click.stop`，否则「点取消同时弹出详情框」。另外记一条只有真浏览器发现得了的：WebUI 不能 import `@luoli/shared`（它拉 `node:crypto`，vite 会 externalize 成一调用就抛的桩；而 vitest 别名到 `src/` 并跑在 node 里，用例是绿的）|
 
 ### 2.2 缺一条阻塞式人机通道（两项同根）
 
@@ -90,6 +90,8 @@ Telegram 侧没有「发一条带选项的消息、等人点、把结果回灌�
 | 一张图会把它**之后的每一轮**都钉在 vision 别名上 | 判据（`turnHasImages`）一直是 `snapshot + delta`，也就是整个上下文窗口。实测一个私聊里 4 条带图消息留在窗口内，此后每一轮纯文本都记 `provider.fallback … vision_required`（`logs/2026-08-19`）—— 纯文本的一句话切走贵的那一档；而一个能看图的别名都没配时，那些轮次的回复末尾还会挂一句「这张图我没能真的看到」，用户那一轮根本没发图 | `media.visionScope`（默认 `window` = 保持原状 / `turn` = 只算本轮新进来的图）。`turn` 档下历史图**只在这一轮真落在看不了图的别名上**时才换成占位文本（占位文本写明「重新发一次或引用那条消息」，那两种都会被算成本轮的图），落在能看图的别名上原样带着 —— 「再看一遍上面那张图」还能用。降档到 `low` 的那一步按**当步别名**再兜一次：`turn` 档下轮次级判据为假，`prepareStep` 那个 vision 覆盖不再拦，而把不透明 part 交给一个瞎模型正是 [08 §7.2](./08-telegram-adapter.md) 禁的事 |
 | `web_fetch` 现在会抽标题 / 链接 / 图片，图片也真的进上下文 —— **JS 渲染与反爬仍然没有** | 此前三样东西是「页面上有、模型看不见」：`<title>`（`head` 整棵在 `DROP_TAGS` 里）、`<a href>` 的地址（只留锚文本，模型没法顺着页面走，只能退回 `web_search` 再搜一遍）、`<img>` 的 alt 与 src（`img` 既不在 `DROP_TAGS` 也不在 `BLOCK_TAGS`，扫到它一个字都不 push）。另外**非 HTML 响应被无条件 `toString('utf8')`**：`image/png` 之类产出最多 2MB 乱码再被 64KB 截断塞进上下文，比「取不到」更糟 —— 整个工具输出预算烧在噪声上，而模型以为自己读到了页面。而图片走不通是**三处各自独立**地挡着：抽取层丢掉 img、工具结果被 `JSON.stringify` + 截断 + 包成不可信文本、`isImagePart` 只认顶层 part 所以 vision 切换 / `capImages` / `degradeImages` 一个都认不出它。同一条管道让 **MCP 的截图也是坏的**（`browser_screenshot` 变成一坨截半 base64） | 规格在 [05 §3.6](./05-tools-and-permissions.md)，红线进了 [02 §9](./02-context-engine.md) 第 21/22 条，表在 [03 §2.4](./03-data-model.md)（`web_assets`）。三处最容易踩：① **`gcFiles()` 的 `referenced` 现在要并两张表** —— 漏一张的表现不是报错，是那张表的文件被静默当孤儿删掉（本仓踩过两次）；② **图片有两条通道**，跨轮靠 `webasset://` 顶层 part、本轮靠骑在工具结果上的 `media`，缺一条就是「这一轮看不见」或「下一轮看不见」，而 base64 **绝不许**落进 `parts_json`（`tool-result` 不在 `OPAQUE_PART_TYPES` 里，硬截断会把它切半，而截断结果是持久化的）；③ **vision 判据是轮首快照**，轮内注入的图靠 `turn.mediaInjected` 补，改成「每步重扫 messages」不管用（扫的是同一个认不出它的判据）。**仍然欠的**：JS 渲染（SPA 只能取到空壳）与反爬（UA 是 `LuoLiCore/0.1`，不少站点直接 403）。形态已经定了 —— 接一台浏览器 MCP 而**不是**把渲染引擎接进 `web_fetch`（那会绕开 `guardedFetch` 整套 SSRF 防护，而它还执行页面 JS，URL 预校验挡不住页面自己去打元数据地址），候选与那一整套警告见 [07 §4.4.1](./07-skills-plugins-mcp.md)。值不值得深度集成没拍板 |
 | MCP 登录刚落地（OAuth + bearer 凭据库 + `needs_auth`） | 此前这条路**结构上走不通且看不出走不通**：`StreamableHTTPClientTransport` 没传 `authProvider`，而 SDK 那条 401 分支是 `if (response.status === 401 && this._authProvider)` —— `UnauthorizedError` 在本仓库构造不出来，一台要登录的 server 只留下 `state='down'` 加一句 `Error POSTing to endpoint: <原始响应体>`。stdio 那侧 `stderr` 是 SDK 默认的 `'inherit'`，server 打印的授权链接直接进 bot 进程的 stderr，不落库也不上界面 | 规格在 [07 §4.5](./07-skills-plugins-mcp.md)，界面在 [09 §3.8.1](./09-webui.md)。四条红线：① **凭据不进配置** —— `config_kv` 每行都被当配置覆盖层解析，配置还要进 `config_revisions` 与 `/api/config/export`，而按键名判密那条正则匹配不到 `Authorization`（这就是它此前明文外泄的路）；② **连接指纹必须带 `mcp_auth.version`**，否则轮换 token 不改变指纹、旧连接被缓存命中而界面显示「已连接」；③ **`auth.mode: none` 不挂 `authProvider`** —— 无条件挂能让 401 检测免费，代价是替运维去第三方那里跑一遍动态注册；④ **`webui.publicUrl` 没配就不开始授权**，不编一个 127.0.0.1 的 `redirect_uri`（注册进对方那里就不好改了）。回路由 `tests/mcp.oauth.test.ts` 对着一台真的受 OAuth 保护的 MCP server 焊住（PKCE 真验、code 一次性、refresh 真换）|
+| 定时任务的「本轮不用汇报」（静默）刚落地，**默认关** | 「每天中午看一眼有没有更新，没有就别说话」此前**表达不出来**：投递是一条无条件路径，模型想说「没什么可说」只能输出空正文，而空正文是 `model_returned_empty` —— 记 `failed`、写 error 日志、计进连续失败告警、`abortTurn` 把上下文整个回滚。于是只剩「每天收一条噪声」或「每天记一次假故障」。这个缺口此前在本文、[14 §4](./14-open-questions.md)、[21 §8](./21-webui-coverage-gaps.md) 里**一处都没被记录** —— §8 那句「新增缺口：无」是当轮的记录、按体例不改，它下面新加了一条指针指向 §15。**「一条都没人写下来」本身才是这次值得记的事**：那一节盘的是「界面够不着哪些已实现的能力」，而这个缺口是「运行时压根没有这个能力」，两份台账之间恰好有一道谁都不负责的缝 | 规格在 [02 §10.5](./02-context-engine.md)（八条取舍），工具在 [05 §3.8](./05-tools-and-permissions.md)，列在 [03 §2.12](./03-data-model.md)（迁移 0013）。**静默是「不投递」，不是「不开轮」更不是「不提交」** —— `if (silenced) return` 放在 `appendDelta` 之前正好复刻 §10.1 当初为 `notify` 否掉的方案（省下一次 commit，换一次说不清的失忆）。开关是**任务行上的列**（`allow_silent`）而不是 `mode` 第三档、不是配置键；`stay_silent` 的两道闸焊在 `available()` 里（`agentKind==='main'` **且** `turn.silenceable===true`），模型能置的 `silenced` **只有 runner 读**。代价是明知的：调完 `stay_silent` 就收工会命中 `wrapUpIfNeeded` 的前两道闸，每次静默多付一次模型调用（缓解只在工具的 `hint` 上，没有为它开跳过分支 —— 跳过就撞上「上下文一个字不留」）。**它让「这条任务其实一直在失败」变得很安静**，四层分辨手段（`last_state` / `last_error` 恒 NULL / `schedule.silent` / trace 里少一跳 `tg.send`）加 `silent_streak` 自动升 warn 缺一不可 |
+| 定时任务的编辑与硬删、任务卡详情与删除、审批与任务分页刚落地 | 四个缺口同根，都是「运行时一直在写、界面上从来看不到 / 够不着」：改一条任务只能「停掉再重建」而重建丢掉 `run_count` 与全部运行历史（服务端连 `PATCH` 都没有，模型侧只有 `create/list/cancel`）；`tasks.progress_json` / `result_summary` 点开什么都没有、行也删不掉（`tasks` 是永久保留表，一次跑歪的批量派发永远排在最前）；审批表服务端硬 `LIMIT 200`，撞上限是**静默截断**且被截掉的恰好是最老的历史行 | 端点与界面在 [09 §3.10.1 / §3.11 / §4](./09-webui.md)，缺口台账在 [21 §15](./21-webui-coverage-gaps.md)（`G-API-21`/`G-API-22` 本轮闭合）。四条最容易踩：① **建与改的校验只有一份**（`createScheduledJob` / `updateScheduledJob` 同在 `schedule/create.ts`），端点抄一遍的话 WebUI 迟早能改出工具改不出来的任务；② `updateScheduledJob` **只校验这次真的给了的字段** —— 运维事后把 `minIntervalMinutes` 调大时「我只改了一句正文」不该以 `interval_too_short` 失败；③ `at` 一律按**任务行上的** `timezone` 解释，前端回填走 `toWallClock`，两处错的方向一致（静默偏移几小时且没有一处报错）；④ `GET /api/approvals` 的 `pending` 必须是**服务端全表计数** —— 按页数出来的话翻到第 2 页左侧角标悄悄掉 0，这是整次分页改造里唯一一处静默的功能退化。硬删（`POST /api/schedules/:id/purge`）与软取消（`DELETE`）是两个动词，前者留一条 **warn** `schedule.purged` 当唯一凭据；`DELETE /api/tasks/:id` 删的是**记录不是取消通道**，所以 running 一律 409 |
 
 ---
 
@@ -113,4 +115,4 @@ Telegram 侧没有「发一条带选项的消息、等人点、把结果回灌�
 - **补完一条** → 从 §2 删掉。历史留在当轮的复审报告里，不在这儿堆。
 - **做完一轮复审** → 报告写进 [`reviews/`](./reviews/)，加 frozen header，然后**把结论折进本文**。
   报告本身从此不再改 —— 它的条目编号是源码注释的凭据（`tests/docs.test.ts` 焊住）。
-- **§1 那四张表永远不要抄到这里来**。想知道具体哪 10 个配置键、哪 274 条验收项，点进去看。
+- **§1 那四张表永远不要抄到这里来**。想知道具体哪 10 个配置键、哪 277 条验收项，点进去看。

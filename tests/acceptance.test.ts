@@ -17,11 +17,14 @@ import { describe, expect, it } from 'vitest';
  */
 
 const DOC = 'docs/13-acceptance-criteria.md';
-// 编号可能带小写后缀（`AC-TOOL-001a`、`AC-WEB-011b` 那种拆细的子项）；`★` 出现在
-// `(自动)` 前后都有先例，两种顺序都得认 —— 正则太紧的话那些行会被静静漏掉，
-// 而「漏掉」在这份文档里等于「没人核对过」。
-const CHECKED = /^\| \[x\] (AC-[A-Z]+-\d+[a-z]?)((?: ★| \(自动\))+) \|(.*)$/;
-const UNCHECKED = /^\| \[ \] (AC-[A-Z]+-\d+[a-z]?)/;
+// 编号可能带小写后缀（`AC-TOOL-001a`、`AC-WEB-011b` 那种拆细的子项），后缀还可能再带一位数字
+// 把子项拆得更细（`AC-WEB-016b1` / `016b2`）；`★` 出现在 `(自动)` 前后都有先例，两种顺序都得认
+// —— 正则太紧的话那些行会被静静漏掉，而「漏掉」在这份文档里等于「没人核对过」。
+// 尾巴那个 `\d*` 不能省：少了它，`AC-WEB-016b1` 会被截成 `AC-WEB-016b`，于是三条互不相同的
+// 条目在下面「编号不重复」那条里报成一组重号，而真要给它打上 `[x]`，CHECKED 又会因为剩下的
+// `1 (自动)` 对不上而整行落空 —— 那一条从此不进任何计数。
+const CHECKED = /^\| \[x\] (AC-[A-Z]+-\d+[a-z]?\d*)((?: ★| \(自动\))+) \|(.*)$/;
+const UNCHECKED = /^\| \[ \] (AC-[A-Z]+-\d+[a-z]?\d*)/;
 
 interface Row { id: string; module: string; checked: boolean; annotation: string | null; line: number }
 
@@ -49,6 +52,17 @@ describe('docs/13 的勾选是可核对的', () => {
       }
     }
     expect(broken, broken.join('\n')).toEqual([]);
+  });
+
+  it('编号不重复', () => {
+    // 重号会让「AC-WEB-035 过了吗」这个问题**没有答案**：一条勾着、一条没勾，签署表照样算得平
+    // （两条各计一次），上面几条断言也全绿 —— 它们逐行看，从不横向比。而这份文档的全部用处
+    // 就是「按编号逐条勾」，编号不唯一等于这个动作失去指代。
+    const seen = new Map<string, number[]>();
+    for (const row of rows()) (seen.get(row.id) ?? seen.set(row.id, []).get(row.id)!).push(row.line);
+    const dup = [...seen].filter(([, lines]) => lines.length > 1)
+      .map(([id, lines]) => `${id} 出现 ${lines.length} 次：第 ${lines.join('、')} 行`);
+    expect(dup, `这些编号被用了不止一次：\n${dup.join('\n')}`).toEqual([]);
   });
 
   it('没勾的条目不许挂用例注记', () => {

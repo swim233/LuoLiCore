@@ -551,18 +551,53 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
 
 ### 3.10.1 定时任务（在「任务与审批」页；docs/21 · `G-API-16`）
 
-第三张卡片，**跨会话**列出全部任务：任务名 + 正文 / 会话（带创建者）/ 模式 / 触发（cron 或绝对时间 +
+**跨会话**列出全部任务：任务名 + 正文 / 会话（带创建者）/ 模式 / 触发（cron 或绝对时间 +
 时区）/ 下一次 / 上一次（结果标签 + 时刻 + 累计次数 + 错误原文）/ 状态 / 操作。
 
-- `[新建定时任务]` → `UiModal`：会话下拉（只列已有上下文的会话）、任务名、模式、触发方式
-  （cron / 一次性）、正文。正文的标签跟着模式变（agent 是「任务描述（给模型看）」，notify 是
-  「要发出的正文」）。**一个会话都没有时按钮禁用并给一条说明** —— 空下拉配「填完才报错」
-  是最难受的那种表单。
+- **一个弹窗管新建与编辑**（`isNew` 分支）。`[新建定时任务]` 与行内 `[编辑]` 打开的是同一个
+  `UiModal`：会话下拉（只列已有上下文的会话）、任务名、模式、触发方式（cron / 一次性）、正文、
+  静默开关。正文的标签跟着模式变（agent 是「任务描述（给模型看）」，notify 是「要发出的正文」）。
+  **一个会话都没有时新建按钮禁用并给一条说明** —— 空下拉配「填完才报错」是最难受的那种表单。
+- **编辑时四个字段只读，每个只读都有理由**，且理由要写在控件旁边而不是只留在这份文档里：
+  **会话**（隔离锚点，`POST` 连客户端给的 `chatId` 都不收）、**模式**（正文语义与花不花钱随它
+  一起翻转，见 [05 §3.8](./05-tools-and-permissions.md)）、**时区**（任务含义锚在创建时那个时区上，
+  [03 §2.12](./03-data-model.md)）、**创建者**（每次触发按 `min(用户角色, 会话角色)` 重算，
+  做成可写就是一个提权把手）。要换这四样只能取消重建 —— 代价是 `run_count` 与运行历史归零，
+  而那正好是「这已经是另一条任务了」的诚实表达。
+- ⚠ **一次性任务的 `at` 回填必须走墙钟折算，不能直接填 ISO。** `GET` 发的是 `toISOString()` 的
+  UTC 瞬时，而表单收的是**任务行上那个时区**的墙钟串（`YYYY-MM-DDTHH:mm`）。直接回填的话，
+  `Asia/Shanghai` 上一条「早八点」的任务会显示成 `…T00:00:00Z`，人顺手改成 `08:00` 再保存 ——
+  **任务被静默挪后 8 小时，两次操作各自都不报错**。折算按行上的 `timezone`，不是 `general.timezone`。
+- **前端只做格式校验，不做策略校验**（`name` / `text` 非空、cron 非空、`at` 匹配正则）。
+  `interval_too_short` / `at_in_the_past` / `too_many_jobs` / `duplicate_name` / `invalid_cron`
+  一律等服务端回 —— 「建与改的校验只有一份」（`createScheduledJob` / `updateScheduledJob`）
+  对前端比对端点更成立：抄一份到浏览器里，它连库里有没有重名都不知道。
 - `[立即触发]`：二次确认里**写清代价** —— agent 模式点一下就是一次真实模型调用（花钱），
   而且真的会往那个会话发一条消息。不等结果，提示语指向该行的「上一次」。
 - `[停掉]`：二次确认说明停掉后不再触发、任务行按 `schedule.retentionDays` 保留、同名任务之后可重建。
+- **`[永久删除]` 与 `[停掉]` 是两个动词，二次确认必须把区别说全**：停掉是软取消（行还在、状态
+  「已停用」、按保留期自然清），永久删除是**把那一行从库里删掉**（`POST …/purge`），
+  **连 active 的也删得掉**，`run_count` 与全部运行历史一起没有。所以它**放在弹窗 footer 最左**、
+  不进行内操作区 —— 与「停掉」两个红按钮在同一行里并排迟早误点，而这两个的后果差着一整段历史。
+  服务端那一路留了一条 warn 日志（`schedule.purged`），界面上这句「库里只剩那一行凭据」也要说。
+- **静默开关**（`silent`，对应 `scheduled_jobs.allow_silent`）：勾上之后模型在这条任务的轮次里
+  多一个 `stay_silent` 工具，可以宣布这一轮不投递（[02 §10.5](./02-context-engine.md)）。
+  **`mode='notify'` 时置灰并说明为什么** —— notify 不调模型，没有任何人能在触发时做这个判断，
+  服务端那一侧也直接拒（`invalid_silent`）。控件禁用要配一句解释，光灰着等于让人以为界面坏了。
+- **「上一次」多一档「静默」标签**，与「成功 / 失败 / 跳过 / 错过 / 已取消」并列，用中性色而不是
+  成功色也不是失败色 —— 它两样都不是。**连续静默次数超过阈值时那一行出提示**（`silentStreak`
+  由 `GET` 一起回），文案指向「这条任务可能已经变成一台只烧钱不说话的定时器」：这是运维在界面上
+  唯一看得见的那一层，其余三层都在库和日志里（[02 §10.5](./02-context-engine.md) 那张四层表）。
+- **列表撞上限时出「还有 N 条」，不静默截断。** 这一卡不分页（行数有界，`DataGrid` 客户端切片），
+  但 `GET` 的信封带 `total` / `truncated`；`truncated` 为真时表尾一条说明 —— 与用量页条形图
+  「其余 N 项」同一条规矩（§3.11）：**看不见的部分必须说出来**。
 - `schedule.enabled` 关着时整卡一条横幅（任务留在库里但不触发）；没装配运行时时明说「读不到」，
   不显示零条。
+- **总开关关着时「建不了但改得了」**：`POST` 照旧回 `schedule_disabled`（建一条不会响的任务，除了
+  让人以为它排上了之外没有别的作用），而 `PATCH`（连同 `[停掉]` / `[永久删除]`）放行。这个不对称
+  是有意的，理由是止损路径：一条任务跑飞了要改它，如果编辑也被总开关拦住，运维就得**先把总开关
+  打开** —— 那一下会把**所有**任务一起重新武装。而改一条根本不会触发的任务本身没有任何副作用
+  （`fire()` 那一侧照旧 skip，`updateScheduledJob` 因此不过 `gateEnabled`）。
 - 定时轮次跑完会改「上一次」与「下一次」，所以这一组跟着 `turn.finished` 事件刷新。
 
 ### 3.11 用量（Usage）
@@ -610,17 +645,51 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
 
 ### 3.12 任务与审批
 
-- 任务表：在途 + 历史（`tasks` 表，由 `spawn_agent` 派发），标题、状态、更新时间、`[取消]`。
-  子 agent 没有独立取消句柄；按钮调用 `POST /api/turns/:id/cancel`，二次确认明确会取消整轮及
-  同轮其他子 agent。
+**三张卡竖排，顺序是 任务 → 定时任务（§3.10.1）→ 审批。** 此前审批卡挤在定时任务卡右边
+（`.dashboard-grid` 是 `2fr 1fr`），而定时任务那张 8 列宽的表只占 2fr —— 它上面挂的 `wide`
+在整个 webui 里没有任何 CSS 命中，是一个死 class。三张卡都是宽表，横排只能让每一张都不够宽；
+竖排（`.card-stack`）之后各占满整行。**总览页的 `.dashboard-grid` 不动**，那是另一页的骨架。
+
+- 任务表：在途 + 历史（`tasks` 表，由 `spawn_agent` 派发），标题、状态、会话 / 发起人、更新时间、
+  `[取消]`。**删除不在行内**，见下。**服务端分页**（`?page=&size=`），排序是「running 优先，其余按
+  `updated_at` 倒序」—— 在途的那几条是运维唯一等得起的东西，不该被昨天的历史挤到第二页。
+  会话名与用户名由**服务端**反查（`principals`），前端不实现第二份规则（同 §3.11 的用量维度）。
+- **只读详情弹窗**（点行打开，抄日志详情那套 `.detail-summary` + `.detail-payload` 两段式）：
+  整行字段 + `progress`（解析后）+ join 出来的那一轮（`turns`：状态、步数、工具数、花费、错误）
+  与那次子运行（`agent_runs`：agent 名、模型别名、状态、结果摘要）。**只读，不做编辑** ——
+  一条任务记录是某一轮真实发生过的事，改它等于改历史。
+  ⚠ 进度那一栏的标签必须写「**最后一条**进度」而不是「进度」：`AgentManager.progress` 每次
+  覆盖 `progress_json` 同一列，历史行里留下的是最后那一帧，不是一条时间线。
+- **`[取消整轮]` 与 `[永久删除]` 是两个动词，而且都在详情弹窗的 footer 里。** 取消打的是
+  `POST /api/turns/:id/cancel`（子 agent 没有独立取消句柄，二次确认要明说会取消整轮及同轮其他
+  子 agent）；删除打的是 `DELETE /api/tasks/:id`，**删的是这一行记录，不是取消通道** ——
+  它对在跑的任务直接回 409 `task_running`。二次确认要写清：删掉之后这条子任务的进度与
+  结果摘要都没有了，而那一轮的 trace（`turns` / `agent_runs` / 日志）还在。
+  两条形状上的取舍，都跟着已有先例：**删除不进行内**（与 `[取消]` 两个红按钮并排必然误点，
+  同 §3.10.1 的定时任务卡与扩展页的 Skill 弹窗），而 running 时那一档是**置灰而不是隐藏** ——
+  隐藏之后运维只会问「为什么这条没有删除按钮」，置灰配一句说明才答得上来。
+- ⚠ 行内按钮一律 `@click.stop`：`DataGrid` 的 `row-click` **无条件**挂在 `<tr>` 上（不看
+  `clickable`），不 stop 就是「点取消的同时弹出详情框」。先例是 §3.9 子 Agent 表里那个行内
+  `[试跑]`，只是那一处没有用例守着。
+- ⚠ 二次确认是在**详情弹窗开着**的时候弹的，而 `.ui-overlay` 恒为 `z-index: 40` —— 两层弹窗
+  只能靠 DOM 顺序分胜负，而 `ConfirmHost` 挂在 `App.vue` 里、锚点排在所有页内弹窗**之前**。
+  所以确认框的遮罩要单独抬一层（`.ui-overlay:has(.confirm-detail)`），否则点了什么都不会发生。
 - 审批队列：工具、风险、状态、请求时间、过期时间、发起人、输入摘要与操作。命中审批规则后
   `DatabaseApprovalBroker` 插入 pending 行并发 `approval.pending`；owner 可 `[拒绝]` /
   `[批准]`，调用 `POST /api/approvals/:id/decide`。批准后原工具调用才继续；拒绝、TTL 到期或
   轮次取消均不执行。历史行只显示裁决人，不能重复裁决。
+  **服务端分页**（`?page=&size=`，size 上限 200），排序是「pending 优先，其余按请求时间倒序」。
+  此前是硬 `LIMIT 200` —— 撞上限就是静默截断，而被截掉的恰恰是最老的那些历史行。
+  过期扫描留在 `COUNT` 与 `SELECT` **之前**：先把该标 `expired` 的标掉，再数、再取，
+  否则第一页显示的 pending 与角标上的数字会差一个刷新周期。
   **待审数挂在左侧导航的角标上**，不只在这一页：一条 pending 意味着某个真实轮次正卡在工具调用上
   最多 `approval.ttlMs`，只在任务页刷新等于「运维不切过来就永远不知道有人在等」。
   `approval.pending` / `approval.decided` 因此单独成一个全页面可见的刷新组（事件本身很稀疏，
   只有命中规则才发），而不是跟着任务表一起走 §5 的页面过滤。
+  ⚠ **角标那个数来自服务端的全表 `pending` 计数，不是当前页里数出来的。** 分页之后这两者不再
+  相等：翻到第 2 页时页内可能一条 pending 都没有，而门外还有五个人在等。这是整次分页改造里
+  唯一一处会**静默造成功能退化**的地方 —— 界面看不出错，只是角标悄悄变成 0。所以 `GET` 的信封
+  里 `pending` 与 `total` 是两个字段，前端不拿 `items` 去推。
 - **「0 条规则时 conditional 等于 never」的 callout**（已实现）：`approval.enabled` 开着而
   `approval.rules` 是空数组时，这一块顶上出现一条黄色提示并点名受影响的工具（从工具表里筛
   `approval === 'conditional'` 的那些）。`ApprovalRules.evaluate()` 在规则表为空时恒回
@@ -842,9 +911,11 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
 | `DELETE /api/containers/:chatId` | 重置（销毁 + 立即重建）。`?wipe=1` 才连 `/workspace` 的文件一起清，且那一档把文件挪进 `.luoli-trash/<ts>/` |
 | `POST /api/containers/:chatId/keep` | 改到期时间 / 钉住。钉住只豁免滑动 TTL，绝对上限照常 |
 | `POST /api/approvals/test` | 审批规则试跑：`{tool, input?, rules?}` → 逐条命中报告 + 最终风险档位。用的是运行时那份匹配器 |
-| `GET /api/schedules` | 定时任务面板的数据：`{available, enabled, timezone, settings:{maxPerChat, minIntervalMinutes, maxPayloadChars}, jobs:[{id, key, chatId, threadId, createdBy, chatLabel, creatorLabel, name, mode, state, cron\|at, timezone, payload, runCount, nextRun?, lastRunAt?, lastState?, lastError?, createdAt, updatedAt}]}`。**跨会话**（WebUI 只有 owner 一个身份，[14](./14-open-questions.md) A15），`nextRun` 来自进程内的 `Scheduler`。没装配运行时时 `available:false` + 空数组 —— 界面据此说「读不到」，而不是「一条都没有」 |
-| `POST /api/schedules` | 建一个定时任务。body `{key, name, mode, text, cron\|at}`。**落点从 `contexts` 按 `key` 反查**，不收客户端给的 `chatId`/`threadId`（同 [05 §8](./05-tools-and-permissions.md) 对工具的要求）；归属身份取 `access.bootstrapOwnerId`，没配则 `owner_unset` 400。校验与 `schedule_create` 工具**共用 `createScheduledJob`** —— 两边各写一遍的话 WebUI 迟早能建出工具建不出来的任务 |
-| `DELETE /api/schedules/:id` | 停用一条任务：置 `cancelled` 并从 `Scheduler` 摘掉。已经结束的行回 `{cancelled:false}` 而不是假成功 |
+| `GET /api/schedules` | 定时任务面板的数据：`{available, enabled, timezone, settings:{maxPerChat, minIntervalMinutes, maxPayloadChars}, jobs:[{id, key, chatId, threadId, createdBy, chatLabel, creatorLabel, name, mode, state, cron\|at, timezone, payload, silent, silentStreak, runCount, nextRun?, lastRunAt?, lastState?, lastError?, createdAt, updatedAt}], total, truncated}`。**跨会话**（WebUI 只有 owner 一个身份，[14](./14-open-questions.md) A15），`nextRun` 来自进程内的 `Scheduler`。**不分页**：行数由 `schedule.maxPerChat` 有界，前端 `DataGrid` 客户端切片就够；但撞上 `listAll` 的上限时 `truncated:true` + `total`，界面出「还有 N 条」而不是静默少显示几行。`at` 发的是 ISO **瞬时**（`POST`/`PATCH` 收的是墙钟串，方向不对称，见下）。没装配运行时时 `available:false` + 空数组 —— 界面据此说「读不到」，而不是「一条都没有」 |
+| `POST /api/schedules` | 建一个定时任务。body `{key, name, mode, text, cron\|at, silent?}`。**落点从 `contexts` 按 `key` 反查**，不收客户端给的 `chatId`/`threadId`（同 [05 §8](./05-tools-and-permissions.md) 对工具的要求）；归属身份取 `access.bootstrapOwnerId`，没配则 `owner_unset` 400。校验与 `schedule_create` 工具**共用 `createScheduledJob`** —— 两边各写一遍的话 WebUI 迟早能建出工具建不出来的任务 |
+| `PATCH /api/schedules/:id` | 改一条**活跃**任务。body `{name?, text?, cron?, at?, silent?}`，给几改几；一个都没给回 400 `nothing_to_update`（不回假成功）。**不收 `key` / `chatId` / `threadId` / `createdBy` / `mode`**：前四个是隔离与提权锚点，`mode` 会同时翻转 `payload` 的语义与花不花钱（[05 §3.8](./05-tools-and-permissions.md)）。校验与 `schedule_update` 工具共用 `updateScheduledJob`，返回体与 `POST` 同形（`scheduleRow`）。**两个触发字段都没给时触发时间原样保留且不重新校验** —— 运维事后把 `minIntervalMinutes` 从 5 调到 60，「我只改了一句正文」不该以 `interval_too_short` 失败。`at` 按**任务行上的** `timezone` 解释，不是 `general.timezone`。400 是全部校验码（`invalid_cron` / `interval_too_short` / `at_in_the_past` / `invalid_schedule` / `duplicate_name` / `invalid_silent` / `nothing_to_update` / `schedule_register_failed` …）、404 `not_found`、409 `not_active`、500 `not_implemented`（没装配运行时）。**改动排不进调度器时整行回滚**（旧 name / payload / cron 都回来，旧 cron 排回调度器）—— 半改半没改的行会让「界面上写着新时间、实际按旧时间触发」。**`name` 在这里是新名字**（HTTP 已经用 `:id` 定位了），而工具那边 `name` 是定位符、`newName` 才是新名字 —— 这处不对称是故意的，两侧各自的定位方式决定的 |
+| `DELETE /api/schedules/:id` | 停用一条任务：置 `cancelled` 并从 `Scheduler` 摘掉。已经结束的行回 `{cancelled:false}` 而不是假成功。**这一行一个字都不改** —— `AC-WEB-033` 逐条焊住三种返回，硬删走下面那条 |
+| `POST /api/schedules/:id/purge` | **硬删一行**（[03 §4](./03-data-model.md) 那条手工通道）：`{removed:true, name, wasActive}`；404 / 500。与 `DELETE` 是两个动词 —— 那个是软取消、行还在，这个把 `run_count` 与全部运行历史一起抹掉，**active 的也删得掉**。顺序**必须**是 active 时先 `runner.unregister` 再 `jobs.remove`：反过来的话调度器里还留着一条指向已消失行的 cron，下一次到点是一条查不到出处的失败。留一条 **warn** `schedule.purged` —— 硬删一条 active 任务之后「bot 突然不再提醒了」在库里再无痕迹，这一行就是那个痕迹 |
 | `POST /api/schedules/:id/trigger` | 立即触发一次。**不等它跑完**（`mode='agent'` 的一次触发是一整轮真实模型调用，同步等会把请求挂到 `concurrency.turnTimeoutMs`），先回 `{started:true}`，结果落在该行的 `lastState`/`lastError` 与日志里。非 `active` 的任务回 409；runner 还没 `load()`（Telegram 投递通道未就绪）时回 400 `not_ready` —— 启动窗口内触发会开一条**发不出去**的轮次：跑完模型、记完账，最后不提交（`docs/28 · L-SCH-01`）；不影响 cron 的下一次 |
 | `GET/POST /api/skills` `GET/PUT/PATCH/DELETE /api/skills/:name` | Skill 列表、正文/frontmatter CRUD、启停。列表回 `{name, description, min_role, enabled, source, load_error, updated_at, allowed_tools, requires_tools}` —— **不是 `SELECT *`**：`path`（宿主文件系统路径）、`content_hash`、整份 `frontmatter_json` 前端一个都不用；后两列是从 `frontmatter_json` 里**只取那两个字段**再发出去（`requires-tools` 没被满足的 skill 压根不进模型目录，那件事必须在列表上看得见，见 §3.8）。随包 skill 的 `DELETE` 与「改 `enabled` 以外任何字段」回 403 `skill_reserved` |
 | `POST /api/skills/package` | 装一个 skill 包。multipart，字段 `file` 收 zip，可选 `name` / `subdir` / `overwrite`。与 `install_skill` 工具**共用 `installSkillPackage`**（端点自己抄一遍的话两条路迟早在校验上分叉）。落地即停用。包根有歧义时回 400 `skill_ambiguous_root` 并列出候选，重名回 409 |
@@ -861,10 +932,12 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
 | `GET /api/quota` | 配额页的全部数据：`{quota, timezone, buckets:{day,month}, counters:[…], unpriced:[…], unpricedTotal, unimplemented:[…]}`。`counters` 是 `quota_counters` 全表（上限 500 行）**加上服务端合成的 `limit`**：`(scope, window)` 到配置的取值规则含 `perUser.byRole` 覆盖，让前端自己拼等于把 `bot.ts` 的规则实现两遍。`current` 标记该行是否落在当前 bucket；chat/user 行按 `principals` 反查 `role`/`label`/`username`；配了 `byRole` 时 user 行带 `limitApprox`（有效角色取 `min(用户, 会话)`，服务端只看得到前者）。`unimplemented` 转发 `KNOWN_UNIMPLEMENTED_CONFIG_KEYS` 里 `quota.` 开头的那几项，界面据此不给控件 |
 | `PUT /api/quota` | body 是**相对 `quota` 的点分键**（`{"global.daily": 5}` → `quota.global.daily`），与 `PUT /api/sandbox` 一致。展开走 `assignDotted`、整体过 `configSchema`，落 `config_kv` + `config_revisions` 并广播 `config.changed`（与 `PUT /api/config` 同一套校验与审计）。非法键 400 `invalid_config_key`，校验失败 400 `invalid_config` + 逐条 `details` |
 | `POST /api/quota/reset` | 重置计数器。不带 body = 全表清零；带 `{scope, subject?, window?, bucket?}` 只删匹配的行（**给了任一过滤条件就必须给 `scope`**，否则 400 `invalid_filter` —— 只按 `bucket` 删会跨 scope 误伤）。返回 `{changes}` |
-| `GET /api/tasks` | 任务列表（`tasks` 表，最近 500 条）。**没有 `POST /api/tasks/:id/cancel`**：子 agent 跑在父轮次的 abort 信号下，没有独立的取消句柄，界面上的任务 `[取消]` 打的是下面那条轮次取消 —— 造一个只能取消整轮的 task 端点等于起个会误导人的名字 |
+| `GET /api/tasks` | 任务列表（`tasks` 表）：`?page=&size=` → `{items, total, page, size}`，排序「`state='running'` 优先，其余 `updated_at` 倒序」。**行里不带 `progress_json`**（那是详情的事，列表一次上百行带着它只是往浏览器推死重量），**加 `chatLabel` / `userLabel`**（服务端 `principalLabel` 反查，前端不实现第二份规则，同 `GET /api/usage/report`）。**没有 `POST /api/tasks/:id/cancel`**：子 agent 跑在父轮次的 abort 信号下，没有独立的取消句柄，界面上的任务 `[取消]` 打的是下面那条轮次取消 —— 造一个只能取消整轮的 task 端点等于起个会误导人的名字 |
+| `GET /api/tasks/:id` | 单条任务的只读详情：整行 + `progress`（解析后的 `progress_json`，注意它是**最后一帧**不是时间线 —— `AgentManager.progress` 每次覆盖同一列）+ join 出来的 `turn{state, steps, toolCalls, costUsd, error}` 与 `agentRun{agentName, modelAlias, state, resultSummary}`。404 表示这一行不在了。这两块数据运行时一直在写，而界面此前一处都看不到（[21 §15](./21-webui-coverage-gaps.md)） |
+| `DELETE /api/tasks/:id` | 删这一行**记录**，不是取消通道：`{removed:true}`；404；**409 `task_running`**（只拒 `state='running'`，其余四态都放行）。删掉之后这条子任务的进度与结果摘要没有了，而那一轮的 trace（`turns` / `agent_runs` / 日志）还在 —— 界面上的二次确认要把这句说出来。名字里是 `tasks` 不是 `turns`，两者删的东西完全不同 |
 | `GET /api/turns/active` | 在途轮次：`[{id, key, chatId, userId, role, startedAt, steps, toolCalls, costUsd, inputTokens, outputTokens}]`。**来源是进程内的 `TurnRegistry`**（`turns` 表里可能有上次崩溃残留的 `running` 行），步数与花费仍从表里按 `id IN (…)` 一次取回；表里没有对应行时补零。进程内的 `AbortController` / 定时器不出现在响应里 |
 | `POST /api/turns/:id/cancel` | 取消一个在途轮次：向该轮的 `AbortController` 发 abort，轮次走 `abortTurn` 落成 `cancelled`，**不删任何消息或上下文**。WebUI 是单角色 owner，可取消任何人的轮次。轮次不在注册表里（已经结束）时返回 `{cancelled:false}` 而不是 404 —— 这不是错误，是「没有作用对象」。写 `webui.action` 与 `turn.cancel` 审计 |
-| `GET /api/approvals` `POST /api/approvals/:id/decide` | pending 与历史审批；owner 裁决 |
+| `GET /api/approvals` `POST /api/approvals/:id/decide` | pending 与历史审批；owner 裁决。`GET` 收 `?page=&size=`（size 上限 200）→ `{items, total, page, size, pending}`，排序 `(state='pending') DESC, requested_at DESC`。**`pending` 是服务端全表 `COUNT(*) WHERE state='pending'`，不是当前页数出来的** —— 左侧导航那个角标读的就是它（§3.12），拿页内条数去推的话翻到第 2 页角标就悄悄变成 0，而门外还有人在等 `approval.ttlMs`。过期扫描（把超 `expires_at` 的 pending 标 `expired`）留在 `COUNT` 与 `SELECT` **之前**，否则这一页的数字和角标差一个刷新周期。此前是硬 `LIMIT 200`，撞上限静默截断 |
 | `GET /api/config` `PUT /api/config` `GET /api/config/schema` `GET /api/config/revisions` | 配置。`/schema` 的三件套 `{schema, hotReloadable, unimplemented}` **都在 `data` 信封里**（统一客户端只解 `data`，挂在顶层的兄弟键会被静默丢掉，自动生成的表单就是靠这两份前缀表打「热更新 / 需重启 / 未接线」徽标的）。`PUT` body 为点分键；含 `__proto__`/`constructor`/`prototype` 段的键一律 400 `invalid_config_key`（原型污染发生在校验之前，一次请求就能让此后所有配置写入失败，docs/20 · W-CFG-01）；动到 `trigger.*` 时唤醒词要过 `checkWakeword`，不可用返回 400 `invalid_wakeword`。`/schema` 另带 `hotReloadable` 与 `unimplemented` 两个键名前缀表：不在 `hotReloadable` 里的键保存后需要重启才生效，WebUI 据此显示待重启徽标（[11](./11-config-reference.md)） |
 | `POST /api/config/wakewords/check` | 逐条返回唤醒词的 `{ kind: contains\|regex, ok, reason }`，供面板即时提示；判定与运行时匹配同源 |
 | `POST /api/maintenance/{backup,vacuum,cleanup-logs,gc-files,rebuild-fts}` | 维护。`gc-files` 只删没有任何 DB 行指向的孤儿，**不是过期策略** |
@@ -874,6 +947,12 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
 | `POST /api/auth/token` | 用 `/webui` 发的一次性 token 换 session。单次使用、5 分钟过期；**在鉴权中间件的放行名单里**（否则它自己就要求先登录） |
 | `GET /api/logs?minLevel=` | 日志列表。`minLevel` ∈ `debug\|info\|warn\|error`，总览页的「最近错误」卡片用 `warn`。字段是 `log_events` 的列（snake_case）**减去 `data_json`，加 `data_bytes`** —— 单条载荷能到 `logs.bodyMaxBytes`（256 KB）、列表一次上千行，带着载荷刷新等于每次往浏览器推几十 MB。要正文走 `GET /api/logs/:id` |
 | `GET /api/events` | SSE |
+
+**定时任务的 `at` 在两个方向上不是同一种字符串**：`GET` 发 `toISOString()` 的 UTC 瞬时，
+`POST` / `PATCH` 收墙钟串 `YYYY-MM-DDTHH:mm` 并**按任务行上的 `timezone`** 解释
+（不是 `general.timezone`）。折算由前端做（§3.10.1 那条 ⚠）。两侧统一成 ISO 也是一种选法，
+但那要求表单控件替人做时区换算，而 `<input type="datetime-local">` 收的本来就是墙钟 ——
+真正危险的是**看起来两边都对**：直接回填 ISO 再保存，任务被静默挪走几小时，两次操作各自都不报错。
 
 审计：所有非 GET 请求写 `log_events(kind='webui.action')`，含路径、body 摘要（脱敏）、session ip。
 
@@ -932,6 +1011,8 @@ packages/webui/
     ├── ui/                    自建原语，全部只用 styles.css 的变量
     │   ├── toast.ts           pushToast() / toastError()：全站唯一的通知通道
     │   ├── ToastHost.vue      右上角通知栈（success/info/warn/error）
+    │   ├── confirm.ts         askConfirm()：二次确认的唯一通道，照 toast.ts 那对的形状
+    │   ├── ConfirmHost.vue    确认框宿主，App.vue 挂一次
     │   ├── UiButton.vue  UiTag.vue  types.ts
     │   ├── UiCheckbox.vue  UiSwitch.vue  UiNumber.vue  UiSelect.vue   ← 点选与步进控件，见下
     │   ├── DataGrid.vue       表格：列定义 + 具名插槽 + 分页 + 单/多选
@@ -941,11 +1022,24 @@ packages/webui/
     ├── components/extensions/  扩展页四类各一个纯呈现组件 + 一份共用类型（§3.8）
     │   ├── types.ts           四类的行类型、来源判据、状态标签映射
     │   └── SkillList.vue  McpTable.vue  PluginCards.vue  CustomToolQueue.vue
+    ├── components/tasks/       「任务与审批」页三张卡各一个自足组件（§3.12）
+    │   ├── types.ts           三套 COLUMNS、行类型、状态枚举、toWallClock()/WALL_CLOCK_RE
+    │   └── TasksCard.vue  SchedulesCard.vue  ApprovalsCard.vue
     └── views/
         ├── LoginView.vue
         ├── ExtensionsPage.vue 扩展页（§3.8）。ConsoleView 里只留 `<ExtensionsPage>` 一行
-        └── ConsoleView.vue    其余 13 个页面（docs/00 §2.1 的 D-02 就是它）
+        ├── TasksPage.vue      任务与审批页（§3.12）：三张卡竖排的壳，同样只在 ConsoleView 里占一行
+        └── ConsoleView.vue    其余 12 个页面（docs/00 §2.1 的 D-02 就是它）
 ```
+
+- **`components/tasks/` 这三张卡各管各的端点、分页游标、弹窗与 busy 态，写操作不上提到父层。**
+  扩展页那条「父层管所有写操作」的规矩防的是**跨卡共享 busy**，这里三张卡零交集；
+  而服务端分页的页码必须和它的 loader 待在一起（同 `loadConversations`），提到父层就又变回争用点。
+- **能挪进 `.ts` 的逻辑就别留在 SFC 里。** `types.ts` 一次写全三套列定义与折算函数，是因为
+  **`.vue` 不进 `tsc`**（`tsconfig.json` 里那条 `packages/**/*.vue` 是空转）——
+  留在 SFC 里的那部分等于没有类型检查，只有渲染用例兜得住。
+- **`scripts/copy/extract.ts` 的 `BROWSER_FILES` 要跟着改**：`views/` 是逐个列名字的、
+  `components/` 下没有通配。不加进去，新 UI 的文案在 dev 校样面板里一句都看不见。
 
 - **抽子组件一律用普通 `<script setup>`，不返回任何 Proxy。** 上一次把控制台拆成 15 个子视图时，
   子 SFC 的 `setup` 返回了一个只有 `get` 陷阱的 Proxy，而 Vue 解析模板绑定走
