@@ -4,10 +4,10 @@ import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { serve } from '@hono/node-server';
 import { ArchiveRepository, CustomToolRepository, OperationsRepository, PrincipalRepository, McpAuthRepository, SandboxContainerRepository, ScheduleRepository, TurnRepository, acquireInstanceLock, closeDatabase, migrateDatabase, modelAliasKey, openDatabase, readAppKv, readPersistedConfig, recomputeMessageTokens, recoverAfterCrash, writeAppKv } from '@luoli/db';
-import { AgentManager, AgentResultStore, AlertDispatcher, BUNDLED_SKILLS, ConfigStore, ContainerManager, CustomToolManager, mergeAgentDefinitions, scanAgentFiles, ContextEngine, DatabaseApprovalBroker, EventBus, FileTools, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, ModelRegistry, PathJail, PendingAuthorizations, PluginManager, selfAuthoringDenyGlobs, PromptAssembler, PromptDocuments, ProviderStore, PROVIDER_FAILURES_TO_DOWN, PROVIDER_PROBE_TIMEOUT_MS, QuotaGuard, repairAgentResultRefs, repairLedgerCacheCost, runProviderHealthCheck, Sandbox, ScheduledJobRunner, Scheduler, Secrets, SkillLoader, STABLE_PROMPT_BLOCKS, TOOL_POLICY, ToolRegistry, TurnConcurrency, TurnFailureStreak, TurnRegistry, UsageLedger, WebAssetStore, assembleMainPrompt, canSeeImages, captureImage, configJsonSchema, loadConfig, perChatConfig, registerAuthoringTools, registerBuiltins, registerCatalogTools, registerContainerTools, rejectedWakewords, runMainAgent, runSubAgent, streamMainAgent, type ContainerEvent, type SubAgentRuntimeEvent } from '@luoli/core';
+import { AgentManager, AgentResultStore, AlertDispatcher, BUNDLED_SKILLS, ConfigStore, ContainerManager, CustomToolManager, mergeAgentDefinitions, scanAgentFiles, ContextEngine, DatabaseApprovalBroker, EventBus, FileTools, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, ModelRegistry, PathJail, PendingAuthorizations, PendingPrompts, PluginManager, selfAuthoringDenyGlobs, PromptAssembler, PromptDocuments, ProviderStore, PROVIDER_FAILURES_TO_DOWN, PROVIDER_PROBE_TIMEOUT_MS, QuotaGuard, repairAgentResultRefs, repairLedgerCacheCost, runProviderHealthCheck, Sandbox, ScheduledJobRunner, Scheduler, Secrets, SkillLoader, STABLE_PROMPT_BLOCKS, TOOL_POLICY, ToolRegistry, TurnConcurrency, TurnFailureStreak, TurnRegistry, UsageLedger, WebAssetStore, assembleMainPrompt, canSeeImages, captureImage, configJsonSchema, loadConfig, perChatConfig, registerAuthoringTools, registerBuiltins, registerCatalogTools, registerContainerTools, rejectedWakewords, runMainAgent, runSubAgent, streamMainAgent, type ContainerEvent, type SubAgentRuntimeEvent } from '@luoli/core';
 import { createServer, EventStreamRegistry, issueLoginToken, setupToken, type PromptPreviewResult } from '@luoli/server';
 import type { RuntimeTurnContext } from '@luoli/shared';
-import { TelegramTools, UpdatePoller, createTelegramBot } from '@luoli/telegram';
+import { TelegramPromptChannel, TelegramTools, UpdatePoller, approvalSettledText, createTelegramBot, staleApprovalOutcome } from '@luoli/telegram';
 
 const startedAt = Date.now();
 const TOKEN_REPAIR_KEY = 'repair:context-tokens:v1';
@@ -209,16 +209,55 @@ const promptAssembler = new PromptAssembler();
 const promptDocuments = new PromptDocuments(db, config.memory.dir);
 promptDocuments.ensure();
 // 审批回执发给**发起人所在的会话**（`docs/22 · D-APPR-01`）：有裁决通道时这一轮会静静挂满
-// ttlMs，用户看到的是 bot 收了消息然后沉默三分钟。bot 要到最后才建得起来，所以这里吃 getter。
+// ttlMs，用户看到的是 bot 收了消息然后沉默三分钟。bot 要到最后才建得起来，所以这里吃 getter
+// ——`TelegramPromptChannel` 的 presence 就是这条通道的开关（`docs/05 §6.1`）。
+// `decidable` 是这条通道的真判据。有效角色 = min(用户角色, 会话角色)（D9，`docs/05 §2.2` 那张表），
+// 所以 `decidableBy:'owner'` 只在**会话本身也是 owner 档**的地方满足得了 —— 一个 `trusted` 群里连
+// owner 本人都是 `trusted`，那儿的按钮谁都点不动。少了这一问，可用性就比可裁决性宽一档：库里挂上
+// pending 行、屏幕上贴出一排点不动的按钮，然后这一轮干等满 ttlMs（`docs/22 · D-APPR-01` 换了个来路）。
+// 私聊按 §2.2 的 ★ 继承用户角色，而 owner 的私聊 chatId 就是他的 userId。
+const approvalPrompts = new PendingPrompts(new TelegramPromptChannel({ bot: () => bot, log,
+  decidable: (chatId) => {
+    const access = configStore.snapshot().access;
+    return chatId === access.bootstrapOwnerId || (principals.roleOf('chat', chatId) ?? access.defaultChatRole) === 'owner';
+  } }), log);
+// 回执上挂 inline keyboard：**裁决权只给 owner**（`approval.allowInitiator` 已永久摘除，docs/14 A26），按下去走
+// `claim` → `approval.decide(..., 'telegram')`，也就是与 WebUI 共用那句
+// `UPDATE … WHERE state='pending' AND expires_at>?` —— 两条通道之间唯一的原子抢夺点。
+// 正文不传 `parse_mode`：键盘挂在一条消息上，MarkdownV2 一 400 就会被 `sendWithFallback` 重发一遍，
+// 屏幕上于是有两条各带一套按钮的消息。
 const approval = new DatabaseApprovalBroker(db, () => configStore.snapshot(), events, log, async (pending) => {
   if (!bot) return;
   const risk = pending.risk === 'high' ? '高风险' : pending.risk === 'medium' ? '中风险' : '低风险';
-  await bot.api.sendMessage(pending.chatId,
-    `⏳ \`${pending.tool}\` 是${risk}操作，需要 owner 在 WebUI 里批准。${Math.round(pending.ttlMs / 1000)} 秒内没人处理就会自动拒绝，我会接着往下说。`,
-    { parse_mode: 'MarkdownV2', ...(pending.threadId ? { message_thread_id: pending.threadId } : {}) })
-    .catch(() => bot!.api.sendMessage(pending.chatId, `⏳ ${pending.tool} 是${risk}操作，需要 owner 在 WebUI 里批准。${Math.round(pending.ttlMs / 1000)} 秒内没人处理就会自动拒绝。`,
-      pending.threadId ? { message_thread_id: pending.threadId } : {}));
-});
+  const seconds = Math.round(pending.ttlMs / 1000);
+  const thread = pending.threadId === null ? {} : { message_thread_id: pending.threadId };
+  // 这个会话里按钮点不动（`decidable` 为假）时**不贴按钮**，只报信 —— 走到这儿说明 WebUI 那条
+  // SSE 通道在，否则上面那道闸已经当场拒了。贴一排点不动的按钮比不贴更糟。
+  if (!approvalPrompts.available(pending.chatId)) {
+    await bot.api.sendMessage(pending.chatId, `⏳ ${pending.tool} 是${risk}操作，要 owner 在 WebUI 的审批页批准。${seconds} 秒内没人处理就会自动拒绝，我会接着往下说。`, thread);
+    return;
+  }
+  const handle = approvalPrompts.ask({
+    kind: 'approval', chatId: pending.chatId, threadId: pending.threadId, decidableBy: 'owner', initiatorUserId: pending.requesterUserId,
+    text: `⏳ ${pending.tool} 是${risk}操作，要 owner 批准 —— 就在下面点，或去 WebUI 的审批页。${seconds} 秒内没人处理就会自动拒绝，我会接着往下说。`,
+    options: [{ id: 'approve', label: '批准' }, { id: 'deny', label: '拒绝' }],
+    ttlMs: pending.ttlMs,
+    claim: (optionId, actor) => approval.decide(pending.id, optionId === 'approve', actor, 'telegram'),
+  });
+  const posted = await handle.posted;
+  // `tg_message_id` 落库是为了下次启动能把残留回执收掉（`staleKeyboards`）；`settle` 让 Telegram
+  // 点了 / WebUI 抢先裁决 / TTL 到点 / 轮次取消时那两个按钮当场消失 —— 留着就是下一次误点 ——
+  // **并且把正文换成结局**：上面那句「${seconds} 秒内没人处理就会自动拒绝」这时已经不成立，
+  // 让它停在屏幕上就是 `docs/21 §12` 那类「界面在说谎」（`AC-APV-004`）。撤键盘与改正文合成
+  // 一次 `editMessageText`（见 `TelegramPromptChannel.settle`），两次调用要排两回 20/分钟 的队。
+  // `settle` 交回「那次编辑真落地了吗」——`tg_message_id` 只在为真时才清（待办队列不是历史记录）。
+  //
+  // `delivered: false`：这条带按钮的回执**发不出去**。上面那道可用性闸是按这个会话点得动才放行的，
+  // 所以走到这儿时 Telegram 可能是唯一的通道 —— 由 broker 两边一起判（`#receiptUndeliverable`）。
+  return posted
+    ? { tgMessageId: posted.messageId, settle: (outcome) => approvalPrompts.dismiss(posted, approvalSettledText(pending.tool, outcome)) }
+    : { delivered: false };
+}, approvalPrompts);
 if (!config.approval.enabled) log.event({ level: 'warn', kind: 'approval.disabled', summary: 'Approval flow disabled; dangerous tools execute without review' });
 // **开着的开关 + 空规则表 = 门开着。** `approval.rules` 默认 `[]`，而 `ApprovalRules.evaluate()`
 // 在规则表为空时恒回 `{needed:false}` —— 于是 `TOOL_POLICY` 里标 `conditional` 的六个工具
@@ -520,6 +559,9 @@ const shutdown = async (signal: string): Promise<void> => {
   log.event({ level: 'info', kind: 'system.stop', summary: `Stopping on ${signal}` });
   scheduler.stop();
   eventStreams.closeAll();
+  // 只清 timer 与等待者，**不撤键盘** —— 那几次编辑会被紧随其后的 `bot.stop()` 掐断，而残留键盘
+  // 由下一次启动那趟 `staleKeyboards()` 负责（`docs/05 §6.1`）。两条路里那一条才是可靠的。
+  approvalPrompts.dispose();
   const { promise: closed, resolve: markClosed } = Promise.withResolvers<void>();
   let force: ReturnType<typeof setTimeout> | null = null;
   // 绑成局部 const：`http` 现在是 `let`（见上面那段注释），闭包里 TS 收窄不住它。
@@ -599,10 +641,10 @@ const server = createServer({ config: configStore, db, operations, principals, a
   schedules: { jobs: scheduledJobs, runner: scheduleRunner }, configSchema: configJsonSchema(), startedAt, setup });
 // `webui.enabled=false`：整个 HTTP 面不监听。这不只是省一个端口 —— 单口令 + owner 全权限的
 // 控制台是这个部署最大的攻击面，只跑 Telegram 的场景该能把它整个关掉。
-// 代价要说清楚：**没有 WebUI 就没有审批裁决通道**，命中审批规则的调用会被当场拒绝
-// （`EventBus.channelCount === 0`，docs/24 · R-APPR-01）。
+// 代价要说清楚：**审批只剩 Telegram 那一条裁决通道**（回执上的 inline keyboard，docs/05 §6.1）。
+// 连 `BOT_TOKEN` 都没有时两条都没有，命中审批规则的调用会被当场拒绝（docs/24 · R-APPR-01）。
 http = config.webui.enabled ? serve({ fetch: server.fetch, hostname: config.webui.host, port: config.webui.port }) : null;
-if (!config.webui.enabled) log.event({ level: 'warn', kind: 'webui.disabled', summary: 'WebUI disabled by config; approvals will be rejected outright' });
+if (!config.webui.enabled) log.event({ level: 'warn', kind: 'webui.disabled', summary: process.env.BOT_TOKEN ? 'WebUI disabled by config; approvals can only be decided from Telegram' : 'WebUI disabled by config and no BOT_TOKEN; approvals will be rejected outright' });
 events.subscribe((event) => {
   if (event.type !== 'config.changed') return;
   // 载荷形状与它的理由在 `packages/core/src/events.ts` 的 `ConfigChangedEvent`。
@@ -654,6 +696,8 @@ if (process.env.BOT_TOKEN) {
    */
   try {
     bot = await createTelegramBot(process.env.BOT_TOKEN, { config: configStore, db, principals, archive, operations, context, turns, quota, memory, plugins, tools: toolRegistry, approvals: approval,
+      // `a:` 那批回调（inline keyboard 审批）从这里查等待者；裁决本身仍走 `claim` → `approval.decide`。
+      prompts: approvalPrompts,
       registry: turnRegistry, concurrency: turnConcurrency, log, alerts, failures: turnFailures, issueLoginToken: () => issueLoginToken(),
       // 关停期间被 abort 的长轮询记 info 而不是 error（docs/28 · L-TG-01）。
       stopping: () => shuttingDown,
@@ -669,6 +713,14 @@ if (process.env.BOT_TOKEN) {
   }
 }
 if (bot) {
+  // 上一次进程留在屏幕上的那些审批按钮此刻已经点不动了（等待者是进程内的 Promise，跨不了重启），
+  // 而一排点不动的按钮就是下一次误点。`staleKeyboards()` 读完顺手清列，所以这一趟只跑一次
+  // （`docs/05 §6.1`；那一列存在的意义就是这个待办队列）。正文也一起换掉：那些消息还写着
+  // 「N 秒内没人处理就会自动拒绝」，而它们等的那个进程已经不在了（`AC-APV-004` 同一条理由）。
+  //
+  // **排在 `poller.start()` 之前**：拉到的第一条 update 就可能命中审批规则并往那一列写一行，
+  // 而这趟扫描不认「这一行是刚写的」—— 反过来就会把一条活着的键盘当残留撤掉。
+  for (const stale of approval.staleKeyboards()) approvalPrompts.dismiss(stale, approvalSettledText(stale.tool, staleApprovalOutcome(stale.state)));
   // `dropPendingOnStart`：停机期间积压的 update 直接丢掉，不补跑。默认关 —— 丢的是真实用户
   // 发过的消息。开它的场景是长时间停机后重启，不想让 bot 对着一小时前的话题连开几十轮。
   //

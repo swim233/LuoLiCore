@@ -107,7 +107,7 @@ Telegram ──► 准入(白名单/角色) ──► 归档(DB, 按 chat 隔离
 | D22 | 子 agent 的 md 定义 | **做**（[14 §2 Q5](./14-open-questions.md)）：`agents/<name>.md` 是**只读**来源，DB / WebUI 同名定义覆盖它；加载失败报错而不是静默跳过 | [04](./04-agents-and-providers.md) |
 | D23 | `HarnessAgent` | **做，排 [M11](./12-implementation-plan.md)**（[14 §2 Q8](./14-open-questions.md)）：仅 owner 且仅私聊、目录限白名单（默认空 = 关闭）、起 harness 整体走一次审批。它内部的工具调用**不受本系统权限模型约束**（T17） | [12 · M11](./12-implementation-plan.md) |
 | D24 | 保留策略 | **媒体文件 90 天**（`media.retentionDays`，0 = 不清）删文件留元数据；`messages` / `context_messages` / `turns` / `tasks` **永久**（[14 §2 Q9](./14-open-questions.md)） | [03 §4](./03-data-model.md) |
-| D25 | `ask_parent` 应答 | **实现 low 档仲裁**（[14](./14-open-questions.md) A7）：`agent.askArbiter` / `askTimeoutMs` 接线，不再返回 `ask_parent_not_implemented`。降级顺序 仲裁 → `default` → `ask_parent_unanswered`。**转人工（`askEscalateToUser`）仍未实现** —— 缺一条阻塞式人机通道 | [04 §3.4](./04-agents-and-providers.md) |
+| D25 | `ask_parent` 应答 | **实现 low 档仲裁**（[14](./14-open-questions.md) A7）：`agent.askArbiter` / `askTimeoutMs` 接线，不再返回 `ask_parent_not_implemented`。降级顺序 仲裁 → `default` → `ask_parent_unanswered`。**转人工（`askEscalateToUser`）仍未实现** —— 阻塞式人机通道本身已落地（`PendingPrompts`，[05 §6.1](./05-tools-and-permissions.md)），欠的是「问谁 / 选项从哪儿来 / 等人期间的并发槽与超时怎么算」这三条语义 | [04 §3.4](./04-agents-and-providers.md) |
 
 ---
 

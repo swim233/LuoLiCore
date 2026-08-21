@@ -2,14 +2,15 @@ import { Bot } from 'grammy';
 import { autoRetry } from '@grammyjs/auto-retry';
 import { apiThrottler } from '@grammyjs/transformer-throttler';
 import type { Message, UserFromGetMe } from 'grammy/types';
-import type { Config, ConfigStore, ContextEngine, LogSink, MainAgentStreamResult, MemoryStore, QuotaGuard, QuotaReservation, TurnConcurrency, TurnRegistry } from '@luoli/core';
-import { KeyedMutex, TurnFailureStreak, perChatConfig, resolveEffectiveRole } from '@luoli/core';
+import type { Config, ConfigStore, ContextEngine, LogSink, MainAgentStreamResult, MemoryStore, PromptResolution, QuotaGuard, QuotaReservation, TurnConcurrency, TurnRegistry } from '@luoli/core';
+import { KeyedMutex, PROMPT_CALLBACK_PREFIX, TurnFailureStreak, perChatConfig, resolveEffectiveRole } from '@luoli/core';
 import type { ArchivedMessage, ArchiveRepository, OperationsRepository, PrincipalRepository, ScopedArchiveRepository, Sqlite, TurnRepository } from '@luoli/db';
 import type { Role, RuntimeTurnContext } from '@luoli/shared';
 import { parsePrincipal, roleRank } from '@luoli/shared';
 import { contextKey, modelAliasKey, readAppKv, writeAppKv } from '@luoli/db';
 import { matchTrigger } from './trigger.js';
 import { capMentions, deliveryOrder, holdReply, segmentTelegramText, sendWithFallback, type ParseFallbackInfo } from './output.js';
+import { promptAckText, promptDeniedByChat } from './prompts.js';
 import { archiveQuotedMessage, attachMedia, messageKind } from './reply.js';
 import { TelegramOutput } from './stream-output.js';
 
@@ -27,6 +28,13 @@ export interface TelegramDependencies {
   plugins?: { hook(name: string, ...arguments_: unknown[]): Promise<unknown[]> };
   tools?: { releaseTurn(turnId: string): void };
   approvals?: { releaseTurn(turnId: string): void };
+  /**
+   * 阻塞式人机通道的等待者注册表（`docs/05 §6.1`，core 的 `PendingPrompts`）。inline keyboard
+   * 审批那批回调（`a:` 前缀）从这里查等待者；缺它时那批回调一律回「已过期」—— 但那时也不会有
+   * 谁发出带按钮的消息。**裁决本身不在这里做**：`PromptRequest.claim` 才是原子抢夺点
+   * （审批传的是 `DatabaseApprovalBroker.decide`）。
+   */
+  prompts?: { resolve(token: string, actor: { userId: string; role: Role; chatId: string }): PromptResolution };
   concurrency: TurnConcurrency;
   onTurn?: (turn: RuntimeTurnContext, reservation: QuotaReservation | null) => Promise<string | MainAgentStreamResult>;
   estimateTurnCost?: (inputTokens: number, key: string) => number | null;
@@ -418,9 +426,31 @@ export async function createTelegramBot(token: string, dependencies: TelegramDep
     dependencies.log.event({ level: 'info', kind: 'tg.membership', summary: active ? 'bot added to chat' : 'bot removed from chat', chatId, data: { status: member.new_chat_member.status } });
   });
   bot.on('callback_query:data', async (ctx) => {
-    if (!ctx.callbackQuery.data.startsWith('c:')) return;
-    const turnId = ctx.callbackQuery.data.slice(2);
+    const data = ctx.callbackQuery.data;
     const userId = String(ctx.from.id);
+    // `a:` = 阻塞式人机提示（审批的 inline keyboard、将来的转人工与 ACP permission，docs/05 §6.1）。
+    // **判的是有效角色**（D9：min(用户角色, 会话角色)）—— 下面 `c:` 那条只取用户角色是既有的窄
+    // 口径，别照抄：会话被降级到 limited 的群里，owner 也不该在那儿按下批准。
+    if (data.startsWith(PROMPT_CALLBACK_PREFIX)) {
+      const chat = ctx.chat;
+      // 会话认不出来（消息不可达）就当查不到这条提示 —— 有效角色是**按这个会话**算的，
+      // 会话对不上时那个判据本身就没有意义（`PendingPrompts.resolve` 的会话绑定同一条理由）。
+      if (!chat) { await ctx.answerCallbackQuery({ text: '认不出这条消息所在的会话，请重新发起。', show_alert: true }); return; }
+      const userRole = dependencies.principals.roleOf('user', userId) ?? config.access.defaultUserRole;
+      const storedChatRole = dependencies.principals.roleOf('chat', String(chat.id));
+      const effectiveRole = resolveEffectiveRole({ userRole, ...(storedChatRole ? { chatRole: storedChatRole } : {}), isPrivate: chat.type === 'private', defaultChatRole: config.access.defaultChatRole });
+      const resolution = dependencies.prompts?.resolve(data, { userId, role: effectiveRole, chatId: String(chat.id) }) ?? { status: 'unknown' as const };
+      // **先答再编辑。** 超约 15 秒不给 answerCallbackQuery，客户端上就是一个转不停的圈；而撤键盘
+      // 是 fire-and-forget 的（`PendingPrompts` 收尾时自己会撤，见那里的去重）。查不到等待者的那一
+      // 种（进程重启过）没人替它撤，所以这里补一次 —— 不补的话那排按钮永远留在屏幕上。
+      // **只有 `unknown` 该撤**：`invalid`（提示还挂着、只是下标上没这个选项）走这一步的话，
+      // 一次伪造的 `callback_data` 就能把一条活着的提示的键盘撕掉。
+      await ctx.answerCallbackQuery(promptDeniedByChat(resolution, userRole, effectiveRole) ?? promptAckText(resolution));
+      if (resolution.status === 'unknown') void ctx.editMessageReplyMarkup().catch(() => undefined);
+      return;
+    }
+    if (!data.startsWith('c:')) return;
+    const turnId = data.slice(2);
     const role = dependencies.principals.roleOf('user', userId) ?? config.access.defaultUserRole;
     const cancelled = dependencies.registry.cancel(turnId, userId, role);
     await ctx.answerCallbackQuery(cancelled ? '已取消' : { text: '只有发起人或管理员可以取消', show_alert: true });

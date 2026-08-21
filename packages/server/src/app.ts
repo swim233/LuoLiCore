@@ -16,7 +16,7 @@ import { APPROVAL_POLICIES, BUNDLED_SKILLS, MCP_OAUTH_CALLBACK_PATH, SkillPackag
 import type { CatalogIndex, ContainerManager, CustomToolManager, ModelMetadata, PendingAuthorizations, ProviderProbe, ToolOverride, ToolRegistry } from '@luoli/core';
 import type { ArchiveRepository, CustomToolRepository, McpAuthRepository, OperationsRepository, PrincipalRepository, ScheduleRepository, ScheduledJob, Sqlite } from '@luoli/db';
 import { deleteAppKv, modelAliasKey, readAppKv, writeConfigRows as writeConfigRowsToDatabase } from '@luoli/db';
-import { assignDotted, readDotted, ROLES, TG_ID_PATTERN, type Role } from '@luoli/shared';
+import { assignDotted, parsePrincipal, readDotted, ROLES, TG_ID_PATTERN, type Role } from '@luoli/shared';
 import type { EventStreamRegistry } from './events.js';
 
 export interface PromptPreviewResult {
@@ -214,6 +214,21 @@ function principalLabel(db: Sqlite, kind: 'chat' | 'user', tgId: string | null):
   const row = db.prepare('SELECT display_name AS name,username FROM principals WHERE kind=? AND tg_id=?').get(kind, tgId) as { name: string | null; username: string | null } | undefined;
   if (row?.name) return row.username ? `${row.name} (@${row.username})` : row.name;
   return `未登记${kind === 'chat' ? '会话' : '用户'} ${tgId}`;
+}
+
+/**
+ * `approvals.decided_by` → 人读得懂的裁决者。三种写法（[03](../../../docs/03-data-model.md) 的
+ * `approvals` 段）里只有 `user:<tgId>` 需要反查 —— `owner`（WebUI，那一面只有一个 owner 身份）与
+ * `system`（TTL / 轮次取消 / 启动扫描）本来就是话。
+ *
+ * 格式的解析走 `parsePrincipal`（三个 Telegram 命令与 `POST /api/principals/bulk` 共用的那一份），
+ * **不在这里手写 `slice(5)`**：`user:<id>` 就是主体串的格式，多一份解析就多一处会漂的地方。
+ * 反查不到时交回 `null` 而不是原串 —— 前端已经在显示原串了，这一列只负责「查得到就给个名字」。
+ */
+function decidedByLabel(db: Sqlite, decidedBy: unknown): string | null {
+  if (typeof decidedBy !== 'string') return null;
+  const principal = parsePrincipal(decidedBy);
+  return principal?.kind === 'user' ? principalLabel(db, 'user', principal.tgId) : null;
 }
 
 function diskUsage(config: Readonly<Config>): { bytes: number; walBytes: number; workspaceBytes: number } {
@@ -1479,7 +1494,17 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     const { page: pageNumber, size, offset } = pageParams(ctx, { defaultSize: 50, maxSize: 200 });
     const total = Number(dependencies.db.prepare('SELECT COUNT(*) FROM approvals').pluck().get());
     const pending = Number(dependencies.db.prepare("SELECT COUNT(*) FROM approvals WHERE state='pending'").pluck().get());
-    const items = dependencies.db.prepare("SELECT * FROM approvals ORDER BY (state='pending') DESC,requested_at DESC LIMIT ? OFFSET ?").all(size, offset);
+    // 列表收窄成显式列（原先是 `SELECT *`）：列集与 `ApprovalRow` 逐字对齐，多一列少一列都该在这里
+    // 看得见。**没有新增语句** —— 就是原来那一条，只是不再靠 `*` 猜。
+    const items = (dependencies.db.prepare(`SELECT id,turn_id,agent_run_id,span_id,chat_id,requester_user_id,tool_name,input_json,risk,state,
+      requested_at,expires_at,decided_by,decided_at,decision_channel FROM approvals ORDER BY (state='pending') DESC,requested_at DESC LIMIT ? OFFSET ?`)
+      .all(size, offset) as Array<Record<string, unknown>>)
+      // `decided_by` 有三种写法（`user:<tgId>` / `owner` / `system`，[03] 的 approvals 段）。
+      // `user:<tgId>` 是 Telegram 那条裁决通道带来的**新**格式，而这一页的用途正是事后查「这条是
+      // 谁批的」—— 一串数字答不了那个问题。反查规则只有服务端这一份（`principalLabel`，与任务页
+      // 和定时任务页同一个 helper）：**前端不许自己拆 `user:` 前缀**，那会把格式变成前后端各存
+      // 一半的暗契约，下一种写法出现时前端会静静把它渲染成乱码。
+      .map((row) => ({ ...row, decidedByLabel: decidedByLabel(dependencies.db, row.decided_by) }));
     return ctx.json({ ok: true, data: { items, total, page: pageNumber, size, pending } });
   });
   app.post('/api/approvals/:id/decide', async (ctx) => {
