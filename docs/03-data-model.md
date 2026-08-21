@@ -637,12 +637,25 @@ CREATE TABLE approvals (
   state        TEXT NOT NULL CHECK (state IN ('pending','approved','denied','expired')),
   tg_message_id INTEGER,
   requested_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
-  decided_by TEXT, decided_at INTEGER, decision_channel TEXT   -- telegram|webui|system
-  -- 有裁决通道时才写 pending 行：判据是 `EventBus.channelCount > 0`，而 WebUI 的 SSE 订阅是目前
-  -- 唯一带 `{channel:true}` 标记的订阅者。命中规则的调用落成 pending 后等裁决 / TTL / 轮次取消
-  -- （docs/24 · R-APPR-01）。一个裁决通道都没有时不写 pending，当场 state='denied',
+  decided_by TEXT, decided_at INTEGER, decision_channel TEXT
+  -- decision_channel: telegram|webui|system
+  -- decided_by 有三种格式，无 CHECK 约束：`user:<tgId>`（Telegram 点的按钮，见 [05 §6.1]）、
+  -- 字面量 `owner`（WebUI 的 POST /api/approvals/:id/decide —— 那一面只有一个 owner 身份，A15）、
+  -- `system`（TTL 到期 / 轮次取消 / 回执发不出去 / 启动扫描）。**回执正文一律说 decision_channel
+  -- 而不是这一列**：一串 Telegram id 对群里其他人什么都不是，还顺手把 owner 的 id 抖出去。
+  -- WebUI 的审批卡走服务端的 `decidedByLabel()` → `principalLabel()` 反查显示名（docs/21 · G-API-24），
+  -- 格式的解析只有 `parsePrincipal` 那一份 —— 前端不许自己拆 `user:` 前缀。
+  -- 有裁决通道时才写 pending 行，判据是**两条通道**都没有才当场拒：WebUI 的 SSE
+  -- （`EventBus.channelCount > 0`，`{channel:true}` 标记的订阅者）**或** Telegram 的 inline keyboard
+  -- 对**这个会话**可用（`PendingPrompts.available(chatId)`，见 [05 §6]）。命中规则的调用落成 pending
+  -- 后等裁决 / TTL / 轮次取消（docs/24 · R-APPR-01）。两条都没有时不写 pending，当场 state='denied',
   -- decided_by='system', decision_channel='system' —— 让模型立刻知道审批不可用，而不是干等满
-  -- approval.ttlMs（[05 §6]）。Telegram inline keyboard 尚未实现，发起人在等待期间收不到提示。
+  -- approval.ttlMs（[05 §6]）。
+  -- tg_message_id: 发起人回执那条消息的编号，**是「屏幕上还有一排点不动的按钮」的待办队列，不是
+  -- 历史记录**：投递落地时写，裁决落定**且那次收尾编辑真回来了**才清，启动时把剩下的逐条收尾
+  -- （撤键盘 + 把正文换成结局）再整列清空（`DatabaseApprovalBroker.staleKeyboards()`）。
+  -- 所以稳态下它几乎总是 NULL。**清列的前提是收尾已落地** —— 编辑没回来就等于这条还没办完，
+  -- 抢在前面清的表现是消息被删 / 网络抖 / 429 各来一次，那排按钮就永久没人收。
 );
 CREATE INDEX ix_approvals_state ON approvals(state, requested_at);
 

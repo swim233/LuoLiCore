@@ -1,5 +1,6 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { TOOL_POLICY } from '@luoli/core';
 import { describe, expect, it } from 'vitest';
 
 /**
@@ -101,6 +102,15 @@ const NON_LOG_KINDS = new Map<string, string>([
   ['skill', "`extensions.changed` 的载荷（`events.emit('extensions.changed', { kind: 'skill' })`）"],
   ['quota_global_exceeded', 'AlertKind'],
   ['consecutive_turn_failures', 'AlertKind'],
+  ['approval', "PromptRequest.kind（`main.ts` 装配审批那条 inline keyboard 提示时的 `kind: 'approval'`，docs/05 §6.1）"],
+  // 一条审批是怎么收场的（`ApprovalOutcome.kind`，`approvals.ts` + `telegram/src/prompts.ts` 的
+  // `staleApprovalOutcome`）。回执正文照这五档换（docs/05 §6.1 · AC-APV-004），一个都不是日志事件
+  // —— 真正落库的那两条是 `approval.decided` 与 `approval.expired`。
+  ['approved', 'ApprovalOutcome.kind'],
+  ['denied', 'ApprovalOutcome.kind（同上）'],
+  ['expired', 'ApprovalOutcome.kind（同上；`staleApprovalOutcome` 的三元里也有一支）'],
+  ['cancelled', 'ApprovalOutcome.kind（同上）'],
+  ['stale', 'ApprovalOutcome.kind（同上，启动扫描那一趟）'],
   ['send', 'TelegramDeliveryEvent.kind（`stream-output.ts`；落库时才映射成 `tg.send`）'],
   ['edit', 'TelegramDeliveryEvent.kind（同上 → `tg.edit`）'],
   ['action', 'TelegramDeliveryEvent.kind（同上 → `tg.action`）'],
@@ -157,6 +167,81 @@ describe('日志 kind 与 docs/10 §2 双向一致', () => {
     const stale = [...NON_LOG_KINDS.keys()].filter((kind) => !emitted.has(kind));
     // 与上面两条同一个道理：一份没人再用的排除名单会静静放过一个真正该被记录的 kind。
     expect(stale, '这些非日志 kind 已经从源码里消失，从 NON_LOG_KINDS 里删掉').toEqual([]);
+  });
+});
+
+/**
+ * `docs/05 §4` 那张「权限矩阵（权威表）」与 `TOOL_POLICY` 的双向焊接（`docs/13` · AC-TOOL-001a）。
+ *
+ * 背景：表尾曾写着「CI 有一致性测试（AC-TOOL-001）」，而那条测试从来没有存在过 —— 声称的保证
+ * 比没有保证更糟：这张表一度漏掉九个工具（`context_stats` `memory_list` `list_agents`
+ * `read_agent_result` `ask_parent` `report_progress` `load_skill` `install_skill` `spawn_harness`）
+ * 而没有任何人被绊倒。它是**权威表**，运维和下一轮复审都拿它当工具全集读，漏一行等于那个工具的
+ * 权限档从此没人复核过。另一条（`TOOL_POLICY` ↔ 实际注册表）由 `main.ts` 的启动断言管。
+ *
+ * 判据故意收得很窄：**只解析 §4 那一节、只看表格的第一列**。放宽任何一头断言就废掉 ——
+ * 整份文件 grep 会让 §3.x 散文里的一次提名就算「表里有」；而六条脚注也落在节内，它们逐条引用
+ * 工具名（`TOOL_POLICY.bash.minRole`、`tools.overrides.stay_silent.minRole`），第一列判据把
+ * 这些排掉。同族的 kind 表断言（上面）是同一个理由。
+ */
+const TOOL_DOC = 'docs/05-tools-and-permissions.md';
+const MATRIX_SECTION = /^## 4\. 权限矩阵（权威表）[\s\S]*?(?=^## 5\.)/m;
+/**
+ * 表里的写法 → `TOOL_POLICY` 的键。**只有记忆这一族**，三条同一个理由：公开与私有记忆的权限档
+ * 不同（私有多一道「仅私聊·仅本人」，公开写另受 `memory.pubWriteMinRole` 约束），表里因此按
+ * 作用域分三行写；而策略表只有 `memory_read` / `memory_write` 两个键，那层差异在 `available()`
+ * 里，不在这一栏上。**往这张映射里加东西之前先想清楚**：它每多一条，断言就少认一个工具名 ——
+ * 用它去把测试弄绿等于把这条断言拆掉。
+ */
+const MATRIX_ALIASES = new Map<string, readonly string[]>([
+  ['memory_read(pub)', ['memory_read']],
+  ['memory_write(pub)', ['memory_write']],
+  ['memory_read/write(pri)', ['memory_read', 'memory_write']],
+]);
+/** 工具名的形状。第一列里不合形状的是斜杠命令与通配（`/grant` `/revoke` `custom_*`）。 */
+const TOOL_NAME = /^[a-z][a-z0-9_]*$/;
+
+function matrixSection(): string {
+  const section = MATRIX_SECTION.exec(readFileSync(TOOL_DOC, 'utf8'))?.[0];
+  expect(section, `${TOOL_DOC} 里找不到「## 4. 权限矩阵（权威表）」那一节`).toBeTruthy();
+  return section!;
+}
+
+function matrixTools(): Set<string> {
+  const names = new Set<string>();
+  for (const line of matrixSection().split('\n')) {
+    if (!line.startsWith('|')) continue;
+    const first = line.slice(1).split('|')[0] ?? '';
+    for (const match of first.matchAll(/`([^`]+)`/g)) {
+      for (const name of MATRIX_ALIASES.get(match[1]!) ?? [match[1]!]) names.add(name);
+    }
+  }
+  expect(names.size, '§4 的表几乎没解析出东西，第一列判据坏了').toBeGreaterThan(40);
+  return names;
+}
+
+describe('TOOL_POLICY 与 docs/05 §4 双向一致', () => {
+  it('每个 TOOL_POLICY 键在表里都有一格', () => {
+    const documented = matrixTools();
+    const missing = Object.keys(TOOL_POLICY).filter((name) => !documented.has(name)).sort();
+    expect(missing, `这些工具不在 ${TOOL_DOC} §4 的权限矩阵里 —— 那是权威表，缺一行等于这个工具的`
+      + '权限档没有任何人复核过（分作用域写的行请走 MATRIX_ALIASES，并在那里写清为什么）').toEqual([]);
+  });
+
+  it('表里的每个工具名都是 TOOL_POLICY 的键', () => {
+    // 反方向只判「形状像工具名」的格子：同一列里还有 `custom_*` 这种通配、`/grant` `/revoke`
+    // 这种斜杠命令，而 `Skill` / `Plugin 工具` / `MCP 工具` /「（任何工具 / 任何回复）」几行连
+    // 反引号都没有，本来就不进判据。分类行是这张表的既有形态（它同时也是「非内建工具怎么判」
+    // 的说明），所以这一向靠形状容忍它们，而不是靠一份会被人往里塞名字的白名单。
+    const stray = [...matrixTools()].filter((name) => TOOL_NAME.test(name) && !(name in TOOL_POLICY)).sort();
+    expect(stray, `${TOOL_DOC} §4 列了这些工具，但 TOOL_POLICY 里没有 —— 删工具或改名时表要一起改`).toEqual([]);
+  });
+
+  it('别名映射里的每一条表里都还写着', () => {
+    // 与 NON_LOG_KINDS 那条同一个道理：一条没人再用的别名会静静放过一个真该被列出的工具名。
+    const section = matrixSection();
+    const stale = [...MATRIX_ALIASES.keys()].filter((alias) => !section.includes(`\`${alias}\``));
+    expect(stale, '这些写法已从 §4 消失，从 MATRIX_ALIASES 里删掉').toEqual([]);
   });
 });
 

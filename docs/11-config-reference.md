@@ -91,7 +91,7 @@ NODE_ENV=production
 | 🚧 `telegram.notifyEdits` | 要把「上一轮之后有哪些编辑」带进 RUNTIME 块，得给 `RuntimeTurnContext` 加一块会话级瞬时状态 —— 那是上下文引擎的表面 |
 | 🚧 `trigger.ignoreEditedAsTrigger` | 先要定「编辑触发的那一轮与原轮次什么关系」：重开一轮还是改写历史，两种都会动到 rebase 与认领水位。[14 §2](./14-open-questions.md) 那一轮**没有覆盖这一条** —— 它不在 Q1–Q12 里 |
 | 🚧 `memory.autoApplyCompaction` | **记忆压缩本身没实现**（`compactCron` 只统计超过软上限的文档数）。给一个不存在的产物配「是否自动应用」是假开关 |
-| 🚧 `agent.askEscalateToUser` | 转人工要一条**阻塞式人机通道**：在 Telegram 发一条带 inline 选项的消息、等人点、把结果回灌给正在等的那个子 agent。那条通道整体不存在（同一个缺口也挡着 inline keyboard 审批，`docs/25 §8`）。仲裁本身（`agent.askArbiter` + `askTimeoutMs`）已接线；这个键为真时仲裁失败只会多记一条 `agent.ask_unarbitrated` warn（带 `escalationRequested: true`），**不会真的去问人** |
+| 🚧 `agent.askEscalateToUser` | 转人工要一条**阻塞式人机通道**：在 Telegram 发一条带 inline 选项的消息、等人点、把结果回灌给正在等的那个子 agent。**那条通道现在有了** —— `PendingPrompts` + `TelegramPromptChannel`（[05 §6.1](./05-tools-and-permissions.md)），inline keyboard 审批就跑在它上面，`PromptRequest.kind` 里已经留着 `agent_ask` 这一档。**缺的是接线与语义**：`ask_parent` 走的是仲裁模型那条路，转人工要定「问谁」（子 agent 的发起人还是 owner）、「选项从哪儿来」（自由文本答复 vs 固定选项）、以及等人期间那个子 agent 占着的并发槽与 `askTimeoutMs` 怎么算。仲裁本身（`agent.askArbiter` + `askTimeoutMs`）已接线；这个键为真时仲裁失败只会多记一条 `agent.ask_unarbitrated` warn（带 `escalationRequested: true`），**不会真的去问人** |
 | 🚧 `tools.web.summarizeWithAlias` | 要在 `web_fetch` 里插一次模型调用：计费、配额、取消、失败降级都得跟着走一遍。**A7 的仲裁调用已经趟过同一条路**（见 `agent/ask-arbiter.ts`），要接的话照那个形状抄 |
 | 🚧 `media.groupDebounceMs` | 相册合并要按 `media_group_id` 在触发路径上缓冲 update，与并发和认领水位有交互（`concurrency.coalesceSameUserMs` 做的是按人合并） |
 | 🚧 `webui.basePath` | 子路径挂载：要给所有路由加前缀、改静态资源 base、改 SPA 的 router base，三处一起动 |
@@ -239,7 +239,8 @@ agent:
   askTimeoutMs: 120000            # 热更新 · 子 agent 等仲裁答复的上限，超时按「仲裁不可用」降级
   maxAsksPerRun: 5                # 需重启 · registerBuiltins 构造时吃的是快照
   askArbiter: true                # 热更新 · 用 low 档模型仲裁 ask_parent；false = 工具直接回「无人应答」
-  askEscalateToUser: false        # 🚧 转人工缺一条阻塞式人机通道，打开也只会多记一条 warn
+  askEscalateToUser: false        # 🚧 通道已有（PendingPrompts），缺的是「问谁 / 选项从哪儿来 /
+                                  #    等人期间的并发槽与超时怎么算」，打开也只会多记一条 warn
   progressThrottleMs: 3000        # 热更新 · report_progress 广播到 SSE 的节流窗口（库里那行照常更新）
   agentsDir: ./agents             # 热更新 · agents/<name>.md 的目录（14 §2 Q5）。文件是**只读**
                                   # 来源，下面这份 agents 里的同名定义覆盖它。目录不存在 = 没有
@@ -758,8 +759,9 @@ quota:
 
 # ============================================================ webui（D15）
 webui:
-  # 关掉之后整个 HTTP 面不监听。代价要说清楚：**没有 WebUI 就没有审批裁决通道**，
-  # 命中审批规则的调用会被当场拒绝（`EventBus.channelCount === 0`，docs/24 · R-APPR-01）。
+  # 关掉之后整个 HTTP 面不监听。代价要说清楚：**审批只剩 Telegram 那一条裁决通道**
+  # （回执上的 inline keyboard，docs/05 §6.1）—— 连 `BOT_TOKEN` 都没有时两条通道都没有，
+  # 命中审批规则的调用会被当场拒绝（docs/24 · R-APPR-01）。
   enabled: true                   # 需重启
   host: 127.0.0.1                 # 需重启 · ★ 默认回环
   port: 8787                      # 需重启

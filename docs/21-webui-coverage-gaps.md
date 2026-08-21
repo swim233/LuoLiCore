@@ -335,11 +335,14 @@ G-API-10/11/12 与 G-SRV-02/03/04 均已完成；按本文「运行时已有、W
 
 - ~~`POST /api/maintenance/gc-files` 仍显式返回 `not_implemented`，界面继续不提供按钮。~~
   → 第五轮已实现并补上按钮（`G-SRV-05`）。
-- Telegram inline keyboard 审批仍未实现（裁决只能在 WebUI 做），但**发起人回执已补上**（第七轮）：
-  挂起 pending 行之后立刻往发起人所在会话发一句「需要 owner 在 WebUI 里批准，N 秒内没人处理就
-  自动拒绝」。此前那一轮会静默停住最多 `approval.ttlMs`（默认 180s）而 Telegram 一个字都没有 ——
-  发起人现在至少知道自己在等什么、等多久。待审角标照旧挂在导航上（§4.6）。
-  一个裁决通道都没有时不等待，当场拒绝并把原因交给模型（[22](./reviews/22-review-round6.md) · `D-APPR-01`、
+- ~~Telegram inline keyboard 审批仍未实现（裁决只能在 WebUI 做）~~ → **已实现**：发起人回执本身
+  就带〔批准〕〔拒绝〕，owner 点了落 `decision_channel='telegram'`（[05 §6.1](./05-tools-and-permissions.md)）。
+  回执正文在收场时换成结局（撤键盘的同一次 `editMessageText`），不留那句已经不成立的倒计时 ——
+  正是本文 §12「界面在说谎」那一类。待审角标照旧挂在导航上（§4.6）。
+  **按钮的适用面是拍板过的边界**：有效角色 = min(用户角色, 会话角色)，所以它只在 owner 的私聊与
+  owner 档的群里出现，别处退回「去 WebUI 批」的纯文本回执。这**不是**本清单口径下的缺口
+  （运行时能力与 WebUI 控制面都在），是一条记录在案的取舍。
+  两条裁决通道都没有时不等待，当场拒绝并把原因交给模型（[22](./reviews/22-review-round6.md) · `D-APPR-01`、
   [24](./reviews/24-review-round6-verification.md) · `R-APPR-01`）。
 
 ### 6.1 新增缺口（第六轮整改后）
@@ -705,3 +708,24 @@ PATCH 成 `trusted` 三次而 `user:` 那行一次都没被点到，期间 10 �
 `tools.catalog.resident` / `defer` 的 glob 决定，那两个键在配置页已经改得到；在工具表上再加一个
 per-tool 开关就是第二份真相，[§1.2](#12-假控件界面上能点运行时不读) 那类「界面上能点、运行时不读」
 的老问题会从这里长回来。
+
+---
+
+## 17. Telegram 审批裁决通道这一轮（2026-08-21）
+
+inline keyboard 审批落地（[05 §6.1](./05-tools-and-permissions.md)）之后，裁决**来源**变成两个，
+而审批卡只认得其中一个的写法。**这一条当轮就闭合了** —— 它不是「运行时已有而界面够不着」，而是
+「我们刚让界面读到一个它读不懂的新格式」，性质不同：留成缺口比在服务端补一行接上既有 helper 更贵。
+
+| 编号 | 运行时已有 | 界面缺什么 | 状态 |
+|---|---|---|---|
+| **G-API-24** | `approvals.decided_by` 现在有三种格式：Telegram 点的写 `user:<tgId>`、WebUI 裁的写字面量 `owner`、系统写 `system`；`decision_channel` 同步区分 `telegram` / `webui` / `system`（[03](./03-data-model.md) 的 `approvals` 段） | ~~审批卡把 `decided_by` 原样渲染，于是同一列里一半行写着 `owner`、一半行写着 `user:123456789`；`GET /api/approvals` 走 `SELECT *`，没接 `principalLabel()` 那层~~ | ✅ 已闭合（2026-08-21） |
+
+闭合方式：`GET /api/approvals` 那条查询接上 `decidedByLabel()` → `principalLabel()`（与用量聚合、
+任务页、定时任务页同一个 helper），并把 `SELECT *` 收窄成与 `ApprovalRow` 逐字对齐的显式列 ——
+**没有新增裸 SQL 语句**，就是原来那一条不再靠 `*` 猜（`D-01` 那个数字不许再涨）。
+`decided_by` 的格式解析走 `parsePrincipal`（三个 Telegram 命令与 `POST /api/principals/bulk` 共用的
+那一份），不在这里手写 `slice(5)`。前端显示 `decidedByLabel ?? decided_by ?? 'system'` 再挂一个
+`decision_channel` —— 「谁批的」与「在哪儿批的」是两件事，后者是这一轮才有的。
+**前端一个字节都不拆 `user:` 前缀**：那等于把 `decided_by` 的格式变成前后端各存一半的暗契约，
+下一种写法（比如将来 ACP 的裁决者）出现时前端会静静把它渲染成乱码。用例：`webui.gaps.test.ts`。

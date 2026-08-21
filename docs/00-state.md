@@ -28,7 +28,7 @@
 | 问题 | 权威 | 由什么焊住 |
 |---|---|---|
 | 哪些配置键还没接线 | [11 §2.0.1](./11-config-reference.md)（当前 10 条，每条写明为什么留着） | `tests/config.test.ts` —— 白名单每条必须在 `docs/11` 标记，且标注要跟着 `HOT_RELOADABLE_CONFIG_KEYS` |
-| 验收条目的勾选状态 | [13](./13-acceptance-criteria.md)（当前 **229 / 505**） | `tests/acceptance.test.ts` —— 只有标 `(自动)` 且点名真实用例文件的能勾，签署表分子分母自动核对 |
+| 验收条目的勾选状态 | [13](./13-acceptance-criteria.md)（当前 **236 / 508**） | `tests/acceptance.test.ts` —— 只有标 `(自动)` 且点名真实用例文件的能勾，签署表分子分母自动核对 |
 | WebUI 控制面够不着什么 | [21](./21-webui-coverage-gaps.md) | 无自动约束（人工复算，方法见其 §1） |
 | 某行代码为什么长这样 | [`reviews/`](./reviews/) 里的条目编号 | `tests/docs.test.ts` —— 编号被源码注释大量引用，删了或改了会报错 |
 
@@ -48,17 +48,36 @@
 | `D-04` | `composeRuntime` 没抽出来 | 函数不存在；`apps/bot/src/main.ts` 445 行全是装配 | 依赖 `D-01`。抽出来之后集成测试才装得起运行时 —— 现在 `I-10` 那条改动就是因此没有用例覆盖 |
 | `D-02` | `ConsoleView.vue` 拆分 | **2921 行**（`reviews/25 §8` 记的是「1700+」；抽走扩展页从 3366 减到 3054，本轮再抽走任务页减 133 行）。渲染用例：`console.render.test.ts` 现在 **14 条**（此前 12 条，新增「任务页三张卡竖排」与「待审角标取全表 pending」），抽出去的三张卡另有自己的一份 —— `tasks.card.test.ts` 10 条 + `schedules.card.test.ts` 11 条 | 前置条件是渲染用例，**这一条仍然是硬前置**：上一次没有用例就拆，14 个控制台页面全变空白（`reviews/24 · D-UI-01`）。这个形状已经走通两遍 —— 先补非空 fixture 让行模板真的被渲染，再抽页面壳 + `components/<页面>/` 的纯呈现子组件，然后补结构相关的用例。**再抽下一个页面照这个顺序**。第二遍（任务页）多两条经验：拆出去的卡各自带 loader 与分页游标，不要照抄扩展页「父层管所有写操作」（那条防的是跨卡共享 busy，这里没有，提到父层反而又造出一个争用点）；`DataGrid` 的 `row-click` 挂在 `<tr>` 上，行内按钮必须 `@click.stop`，否则「点取消同时弹出详情框」。另外记一条只有真浏览器发现得了的：WebUI 不能 import `@luoli/shared`（它拉 `node:crypto`，vite 会 externalize 成一调用就抛的桩；而 vitest 别名到 `src/` 并跑在 node 里，用例是绿的）|
 
-### 2.2 缺一条阻塞式人机通道（两项同根）
+### 2.2 阻塞式人机通道：通道已落地，转人工仍未接线
 
-Telegram 侧没有「发一条带选项的消息、等人点、把结果回灌给正在等的调用方」这条通道。实测
-`packages/telegram` / `packages/core` 里除 `/cancel` 外没有任何 `inline_keyboard` 使用。它挡着两件事：
+「发一条带选项的消息、等人点、把结果回灌给正在等的调用方」这条通道**已经有了**：
+`packages/core/src/interaction/prompts.ts`（`PendingPrompts`，等待者注册表 + 有界最近裁决表 +
+撤键盘用的宽限 timer）＋ `packages/telegram/src/prompts.ts`（`TelegramPromptChannel`，渲染与
+Bot API 调用），照 `TelegramToolBridge` 的形状注入、presence 即开关。规格在
+[05 §6.1](./05-tools-and-permissions.md)，用例在 `tests/interaction.prompts.test.ts`。
 
-- **Telegram inline keyboard 审批** —— 裁决目前只能在 WebUI 做。发起人回执**已经补上**了
-  （`approvals.ts:69`，落库后再发，发不出去不影响审批本身），所以现在不会再出现「沉默三分钟」，
-  但人不在 WebUI 前面就只能等 TTL 自动拒绝。
-- **`agent.askEscalateToUser`（转人工）** —— 仲裁本身（`agent.askArbiter` + `askTimeoutMs`）已接线；
-  这个键为真时仲裁失败只多记一条 `agent.ask_unarbitrated` warn，**不会真的去问人**。详见
-  [11 §2.0.1](./11-config-reference.md)。
+- **Telegram inline keyboard 审批 —— 已落地，适用面是拍板过的边界。** 发起人回执上挂
+  〔批准〕〔拒绝〕，owner 点了走 `callback_query` 的 `a:` 命名空间，落库 `decision_channel='telegram'`。
+  判 owner 用的是**有效角色**（`resolveEffectiveRole`），不是 `/cancel` 那条只取用户角色的窄口径。
+  `request()` 的可用性判据跟着改成「WebUI 没有 SSE 通道 **且** Telegram 通道对这个会话也不可用」
+  才当场拒 —— 只改一半的话新通道在没人开浏览器的部署里永远走不到，而那正是它唯一有用的场景。
+  那道闸判的是**放行那一刻**：回执发不出去（bot 被拉黑 / 429）而 WebUI 也没有 SSE 时，走同一条
+  「无通道」口径当场拒，不留一条谁都裁决不了的 pending 行干等 180 秒（`AC-APV-012`）。
+  启动时扫 `approvals` 里 `tg_message_id IS NOT NULL` 的行收尾并清列（那一列此前全库零写入），
+  裁决落定时也清 —— 但**只在那次编辑真回来之后**：它是待办队列不是历史记录。收尾 = 撤键盘 + 把
+  正文换成结局的**同一次** `editMessageText`（`AC-APV-004`）。
+  **适用面（2026-08-21 拍板，不是欠账）**：有效角色 = min(用户角色, 会话角色)，所以在一个 `trusted`
+  群里连 owner 本人都是 `trusted`，`decidableBy:'owner'` 在那儿无人可满足；而审批基本只在群里发生
+  （`skipForOwner` 默认真）。于是按钮**只在 owner 的私聊与 owner 档的群里出现**，别处退回
+  「去 WebUI 批」的纯文本回执（可用性判据按会话问，所以不会挂出点不动的按钮、也不会干等满 ttlMs）。
+  「裁决提示发 owner 私聊 + 发起人会话只留报信回执」那套**已明确否掉** —— 代价是每条审批两条消息
+  + owner 从没跟 bot 说过话时的 403，而这个缺口挡不住任何已规划的功能：ACP / `HarnessAgent` 那条路
+  本身就是 owner + 仅私聊（[14 §2](./14-open-questions.md) Q8-a），它的逐条 permission 正好落在按钮
+  能用的格子里。理由与代价见 [05 §6](./05-tools-and-permissions.md) 那个警示块。
+- **`agent.askEscalateToUser`（转人工）—— 仍未接线**，仍留在 [11 §2.0.1](./11-config-reference.md)
+  的 🚧 白名单里。通道不再是障碍（`PromptRequest.kind` 里已留 `agent_ask` 这一档），欠的是语义：
+  问谁（子 agent 的发起人还是 owner）、选项从哪儿来（自由文本答复 vs 固定选项）、以及等人期间
+  那个子 agent 占着的并发槽与 `askTimeoutMs` 怎么算。这三条没定之前接线就是又一个假开关。
 
 ### 2.3 零散的
 
@@ -78,7 +97,7 @@ Telegram 侧没有「发一条带选项的消息、等人点、把结果回灌�
 | provider 健康检查刚落地，粒度是 **provider 而不是模型** | 周期探测（`provider/health.ts`，[04 §5.3](./04-agents-and-providers.md)）此前压根不存在：那个 cron 只调 `ModelRegistry.rebuild()`，一次探测都不发，于是「上游连上了但不返回」没有任何一处会记住 —— 实测 `logs/2026-08-18` 三个轮次各在开轮 363 秒后才 fallback（`3 × requestTimeoutMs` + 退避），一轮 600 秒最多够走一步，全部以「太久没有进展」收尾，而库里那行 `health_state` 始终是 `up` | 健康状态挂在 `providers` 上（`health_state` / `health_fail_count`），**不是挂在模型上**：一个 provider 被判 down，它下面所有模型一起从各自的别名链里消失（本部署 ksm-api 被判 down 会连带 `high` 的链首 `gpt-5.6-sol`）。这是 [04](./04-agents-and-providers.md) 现在的口径，要改成按模型判就得先改那份文档 + 加一张表。**判据的四条已经过了一轮复审并改齐**（`tests/provider.health.test.ts`）：计数单位是「一次调用一个候选」而不是一次尝试（按尝试记时 `maxRetries: 2` 的一次慢调用就能判死一个好 provider）、服务成功一次就归零（否则「连续」是「累计」，而计数在库里、重启也不清）、冷却到期时把库里那一行也改回 `up`/0（只在内存里放行会 30 分 down / 一个 cron 间隔 up 地抖）、cron 里**先 rebuild 再探**（`#probes` 是上一次 rebuild 的产物，反过来探不到刚放回来的那个）。另一条已知的：调用路径上把最后一个 provider 判成 down 时，`all_providers_down` 要等下一次 cron 才响（那条尾巴在 `main.ts` 的 `rebuildModels`，`recordFailure` 刻意不 rebuild —— 轮次中途换链会让这一步的记账反查不到服务它的那一行） |
 | `turnTimeoutMs` 是硬边界，但**收尾那一条消息还是要发出去** | 到点后模型调用当场断，投递侧现在看得见（流会抛，轮次记 `failed` + `error='turn_timeout'`、`cancel_reason='timeout'` 而不是 committed，**也不是 `cancelled`** —— 超时是故障，要计入 `consecutive_turn_failures`，否则「每一轮都卡满十分钟」这种最该响的故障一次都不响，见 [04 §5.3](./04-agents-and-providers.md) 的三档）；但已经在屏幕上的内容要补一个「（生成中断）」（一个字都没投出去时不补，改为把那条占位消息删掉），那一次 `editMessageText` 要排 `telegram.throttle.perChatPerMinute`（群聊默认 20/分钟）的队 | 所以一轮的墙钟仍可能超出 `turnTimeoutMs` **一个 API 调用**的时间。此前超的是 3 分钟：typing 是 4 秒一发的 fire-and-forget（15/分钟），同一个群两轮并行就压满了那 20/分钟的预算，队里全是过期的 typing 而真正的消息排在最后（logs/2026-08-18 · B8F92Z）。现在 typing **给正文让路**：本轮有正文在途（含被节流器压着排队那一段）整拍跳过，首条消息发出之后节拍从 4 秒放宽到 15 秒（`tests/output.pacing.test.ts`）。此前只做了「上一拍没落地就跳过这一拍」，而那个判据是 per 轮次的、20/分钟 那个桶是 per chat 的 —— 于是「队列不再增长」只在单轮成立：第十轮实测同一个群 6 轮并发时预算 17 秒被吃光、随后 **14 秒零投递**，排在队首的 `sendChatAction` 占的正是 `editMessageText` 要用的槽位。**让一个可丢的请求占住不可丢请求的槽位本身就是错的**；grammY 那个桶没动，它是 Telegram 侧的真实限制 |
 | `trigger.channels` 点不亮：频道消息一条都进不来 | 频道消息是 `channel_post` 更新，而 `packages/telegram/src/bot.ts` 里没有这个处理器（`bot.on('message')` 不匹配它），`telegram.allowedUpdates` 的默认值里也没有它。`trigger.ts:45` 那半条判断（`chat.type === 'channel' && !config.channels → null`）因此永远等不到输入 | 不是「以为有其实没有」：那个更新类型在 WebUI 的复选框里标着「无处理器」，配置手册也写了。真要接得先定频道语义 —— 频道里没有「@ 谁」，打开等于对每条频道消息都表态（`descriptions.ts` 里那句话），而 `my_chat_member` 之外还要处理 `channel_post` 的作者身份（频道消息可以没有 `from`） |
-| 验收条目 276 条未勾 | 其中人工条目一律保持未勾（要人签字，不是测试的事）；其余是没有对应 vitest 用例的 `(自动)` 条目 | 勾选形式由 `tests/acceptance.test.ts` 定死，勾之前先写用例 |
+| 验收条目 272 条未勾 | 其中人工条目一律保持未勾（要人签字，不是测试的事）；其余是没有对应 vitest 用例的 `(自动)` 条目 | 勾选形式由 `tests/acceptance.test.ts` 定死，勾之前先写用例 |
 | 10 条配置键未接线 | 见 [11 §2.0.1](./11-config-reference.md)，每条写明「暂时没做」还是「不该在这一层做」 | 摘键之前先看 [21 §1](./21-webui-coverage-gaps.md) 的复算方法 |
 | 自我扩展刚落地（M12），四条通道默认全关 | `tools.selfExtend.*` 出厂 `enabled: false`；打开之后模型能写自定义工具 / skill / plugin，能登记 MCP server | 主闸不是审批而是「落库即禁用，owner 在扩展页点开」。动这一块之前先读 [14 T18/T19](./14-open-questions.md)：**授权时点与执行时点是分离的**，而 `requireSandbox` 默认关时自定义工具就是调用者的 `bash`（因而能直接写 `data/luoli.db` 绕开启用闸）|
 | 装 skill 包的通道刚补上（`install_skill` + `POST /api/skills/package`） | 起因：用户在 Telegram 丢了一个带 `scripts/` + `bin/`（4.9 MB ELF）的音乐 skill 包，模型解到**工作目录**、一路 `bash scripts/invoke.sh` 用了起来 —— 能用，但它不是一个 skill：不进目录、不进 `skills` 表、扩展页看不见（`logs/2026-08-18/tool.jsonl` ts 1787036340–1787036441，全程没有一次 `write_skill`）。两条根因：① `tools.selfExtend.skills.enabled` 默认 `false` 且没人开过，`write_skill` 压根不在它的工具目录里，**而它拿不到任何说明为什么没有**；② 就算开着也装不了 —— `write_skill` 只收 `body: string`，`SkillLoader` 只写一个 `SKILL.md`，而 §2.1 的格式一开始就允许附属文件 | 通道见 [07 §2.5 / §6.5](./07-skills-plugins-mcp.md)，解包判据那张表列了每一道挡什么。**「装了一半」整棵回滚**是这条的红线：一个半成品在扩展页上和一个装好的坏 skill 长得一模一样 |
@@ -116,4 +135,4 @@ Telegram 侧没有「发一条带选项的消息、等人点、把结果回灌�
 - **补完一条** → 从 §2 删掉。历史留在当轮的复审报告里，不在这儿堆。
 - **做完一轮复审** → 报告写进 [`reviews/`](./reviews/)，加 frozen header，然后**把结论折进本文**。
   报告本身从此不再改 —— 它的条目编号是源码注释的凭据（`tests/docs.test.ts` 焊住）。
-- **§1 那四张表永远不要抄到这里来**。想知道具体哪 10 个配置键、哪 276 条验收项，点进去看。
+- **§1 那四张表永远不要抄到这里来**。想知道具体哪 10 个配置键、哪 272 条验收项，点进去看。

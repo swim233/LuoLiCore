@@ -52,6 +52,84 @@ export function readSlice(path: string, offset: number, limit: number): { conten
     return { content: new TextDecoder('utf-8', { fatal: false }).decode(buffer.subarray(0, read)), firstLine, size, read };
   } finally { closeSync(handle); }
 }
+/**
+ * `endLine` / `lines` 说的是 `content` 真正含住的行；`bytes` 是窗口**在盘上**的字节数。
+ *
+ * **`overflow` 与 `notUtf8` 时 `content` 一律是空串。** 两者是同一类问题的两种形态：这条路的正文
+ * 会被原样写回文件，而「被截断的正文」与「被 U+FFFD 替换过的正文」写回去都是一次静默毁坏，
+ * 且返回形状里没有任何字段能让下游**在写之前**知道。所以不产出 —— 让这条保证落在产生侧，
+ * 而不是靠调用方记得先看标志位。`read()` 那边照旧有损解码，那是对的：它的正文给模型看，从不写回。
+ */
+export interface LineWindow { content: string; startLine: number; endLine: number; lines: number; bytes: number; size: number; eof: boolean; overflow: boolean; notUtf8: boolean }
+/**
+ * 行窗口读，正文**不带行号**。`read()` 无条件给正文加 `行号<TAB>` 前缀（见 `numberLines`），
+ * 那对模型是对的，但对「读出来的正文要原样写回去」的调用方是一次静默的数据毁坏 ——
+ * 读出来改两行写回去，整个文件被换成加了行号的垃圾（docs/05 §3.1）。
+ *
+ * 内存与 `readSlice` 同一形状（docs/27 · R-02）：起始行靠固定缓冲分块数换行定位，不 `readFileSync`
+ * 之后 `split('\n')` —— workspace 里的大文件正是 `bash` / `python` 自己造出来的。
+ * 到 `maxBytes` 就停并置 `overflow`：**这一层不判「算错还是算一页」**，因为「截了多少」只有这里
+ * 知道，而唯一的调用方对截断的容忍度是 0（`readText`）。**`maxBytes` 不给就是不设上界** ——
+ * 内存有界这件事由调用方传预算实现，`readText` 传的是 `tools.fs.maxReadBytes`。
+ *
+ * 三个数值参数不合形状时当「没给」而不是照算：`Math.max(1, NaN)` 是 NaN，而 NaN 的比较全假 ——
+ * 定位阶段整段被跳过、越界判据也失效，交回的会是一段**坐标是 NaN**（JSON 序列化后是 `null`）
+ * 的正文，看起来完全正常。真正的拒收在 `readText`，这一层只保证不说假话。
+ */
+export function readLineWindow(path: string, startLine = 1, limitLines = Number.POSITIVE_INFINITY, maxBytes = Number.POSITIVE_INFINITY): LineWindow {
+  const first = Number.isFinite(startLine) ? Math.max(1, Math.trunc(startLine)) : 1;
+  const wanted = Number.isNaN(limitLines) ? Number.POSITIVE_INFINITY : Math.max(0, limitLines);
+  const budget = Number.isNaN(maxBytes) ? Number.POSITIVE_INFINITY : Math.max(0, maxBytes);
+  const size = statSync(path).size;
+  const handle = openSync(path, 'r');
+  try {
+    const chunk = Buffer.allocUnsafe(SCAN_CHUNK_BYTES);
+    let position = 0;
+    let skip = first - 1;
+    while (skip > 0 && position < size) {
+      const got = readSync(handle, chunk, 0, Math.min(SCAN_CHUNK_BYTES, size - position), position);
+      if (!got) break;
+      let index = 0;
+      while (index < got && skip > 0) { if (chunk[index] === 0x0A) skip -= 1; index += 1; }
+      position += index;
+    }
+    // 起始行落在文件之外：交回空窗口。退回从头读等于把「你要的那段不存在」说成「这就是那段」。
+    if (skip > 0) return { content: '', startLine: first, endLine: first - 1, lines: 0, bytes: 0, size, eof: true, overflow: false, notUtf8: false };
+    const pieces: Buffer[] = [];
+    let bytes = 0, newlines = 0, overflow = false;
+    while (position < size && newlines < wanted && !overflow) {
+      const got = readSync(handle, chunk, 0, Math.min(SCAN_CHUNK_BYTES, size - position), position);
+      if (!got) break;
+      let take = got, found = 0;
+      for (let index = 0; index < got; index += 1) {
+        if (chunk[index] !== 0x0A) continue;
+        found += 1;
+        if (newlines + found >= wanted) { take = index + 1; break; }
+      }
+      if (bytes + take > budget) {
+        // 裁到预算就停，并把这一块的行数重数一遍：`found` 数的是整块里的换行，越过裁点的那些
+        // 不在正文里，报出去会让调用方的 hint 指着一行根本没读到的行。
+        take = budget - bytes; overflow = true; found = 0;
+        for (let index = 0; index < take; index += 1) if (chunk[index] === 0x0A) found += 1;
+      }
+      pieces.push(Buffer.from(chunk.subarray(0, take))); // 必须拷贝：下一轮 readSync 覆写同一个 chunk
+      bytes += take; newlines += found; position += take;
+    }
+    const body = Buffer.concat(pieces);
+    // 逐块解码会把跨块的多字节字符切坏，所以拼完再解一次（上界是 maxBytes，不是文件大小）。
+    // `ignoreBOM`：默认解码会把 BOM 吃掉，而这里的正文要被原样写回文件 —— 少一个 BOM 也是一次改写。
+    // `fatal: true`：坏字节**抛**而不是换成 U+FFFD。有损解码后的正文交给全量覆盖的写端，与截断
+    // 是同一类静默毁坏，而返回形状里同样没有字段说得出口（实测 6 字节的非法 UTF-8 解出 12 字节
+    // 正文，`bytes` 与 `Buffer.byteLength(content)` 从此不等，没人会去比）。overflow 同理不产出。
+    let content = '', notUtf8 = false;
+    if (!overflow) {
+      try { content = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(body); }
+      catch { notUtf8 = true; }
+    }
+    const lines = newlines + (body.length && body[body.length - 1] !== 0x0A ? 1 : 0);
+    return { content, startLine: first, endLine: first + lines - 1, lines, bytes: body.length, size, eof: position >= size, overflow, notUtf8 };
+  } finally { closeSync(handle); }
+}
 
 interface Child { real: string; logical: string; stat: Stats }
 
@@ -76,6 +154,45 @@ export class FileTools {
     const more = offset + slice.read < slice.size;
     return { ok: true, path: relative(this.jail.root, target), content: numberLines(slice.content, slice.firstLine), firstLine: slice.firstLine, offset, bytes: Buffer.byteLength(slice.content),
       truncated: more, nextOffset: more ? offset + slice.read : null };
+  }
+
+  /**
+   * 不带行号的读，正文逐字节等于磁盘内容（`readLineWindow`）。给「读出来的正文要原样写回去」的
+   * 调用方用 —— `read()` 的 `行号<TAB>` 前缀是给模型的定位坐标，喂给一个全量覆盖的写端就是把
+   * 文件换成带行号的垃圾。目录 / 不存在照旧抛（与 `read()` 一致）。
+   *
+   * **超预算与非 UTF-8 都 fail-closed，绝不交回不能原样写回的正文。** `read()` 能截是因为它的返回形状里有
+   * `truncated` + `nextOffset` 把这件事说出口；这条路的调用方响应形状里没有那个位置，于是
+   * 「截断的正文 + 全量覆盖」= 静静删掉文件的后半部分。分窗读合法（`endLine` / `eof` 说得出
+   * 「这只是一段」），截断不合法。总行数不数：数它要整份扫一遍，那正是这条路存在的理由。
+   *
+   * 非 UTF-8 同理走 `not_utf8` 而不是有损解码：U+FFFD 替换过的正文写回去也是一次静默毁坏，而
+   * 「有损了」这件事在返回形状里同样没有位置。**这一条与 `read()` 刻意分岔** —— 那边的正文给模型
+   * 看、从不写回，有损是可接受的；这边的正文要变成文件本身。二进制文件因此在这条路上是硬错误，
+   * 不是「读出来一堆问号」。
+   */
+  readText(path: string, options: { line?: number; limit?: number } = {}): Record<string, unknown> {
+    const target = this.jail.resolve(path); // 先解析：越界是安全信号，不该被一句参数抱怨盖掉
+    // 窗口参数照 `read_file` 的 schema 那样收（`z.number().int().positive()`）。这条路的调用方是
+    // **外部** agent 的 JSON，而这两个数只被 `Math.max`/`Math.trunc` 摸过 —— 那看起来已经兜住了：
+    // NaN 会一路走到「ok:true + 坐标是 NaN 的正文」，`limit: 0` 会走到「ok:true + 空正文」，
+    // 而空正文交给一个全量覆盖的写端就是清空文件。这里必须是拒收，不能是纠正。
+    for (const [name, value] of [['line', options.line], ['limit', options.limit]] as const) {
+      if (value !== undefined && (!Number.isInteger(value) || value < 1)) {
+        return { ok: false, error: 'invalid_line_window', hint: `${name} 要是 ≥1 的整数（line 是 1-based 行号，limit 是行数），收到 ${value}` };
+      }
+    }
+    const window = readLineWindow(target, options.line ?? 1, options.limit ?? Number.POSITIVE_INFINITY, this.maxReadBytes);
+    const display = relative(this.jail.root, target);
+    if (window.overflow) {
+      const fits = window.endLine - window.startLine;
+      return { ok: false, error: 'read_too_large', hint: `${display} 有 ${window.size} 字节，超过 tools.fs.maxReadBytes（${this.maxReadBytes}）；从第 ${window.startLine} 行起这份预算读到第 ${window.endLine} 行就用满了。这条路不截断正文（截断了返回形状里没地方说，而正文会被原样写回文件），请带 line + limit 分窗读`
+        + (fits > 0 ? `，例如 line: ${window.startLine}, limit: ${fits}。` : `；注意第 ${window.startLine} 行本身就超过预算，这个文件只能用 read_file 的 offset 分页看。`) };
+    }
+    if (window.notUtf8) {
+      return { ok: false, error: 'not_utf8', hint: `${display} 从第 ${window.startLine} 行起的这段不是合法 UTF-8。这条路不做有损解码（替换过的正文原样写回去就是一次静默毁坏，而返回里没有字段能说出「有损了」），所以二进制在这里是硬错误：要看内容用 read_file，要处理二进制用 bash。` };
+    }
+    return { ok: true, path: display, content: window.content, startLine: window.startLine, endLine: window.endLine, lines: window.lines, bytes: window.bytes, size: window.size, eof: window.eof };
   }
 
   /** 目录去重按 realpath 记：软链自指时同一个真实目录会被再次进入，条数上限拦不住无限递归。 */

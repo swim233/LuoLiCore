@@ -24,12 +24,18 @@ export interface TaskRow {
   chatLabel: string | null; userLabel: string | null;
 }
 
-/** `GET /api/approvals` 的一行 —— `approvals` 表原样直出，所以是 snake_case。 */
+/** `GET /api/approvals` 的一行 —— `approvals` 表逐列直出，所以是 snake_case。 */
 export interface ApprovalRow {
   id: string; turn_id: string; agent_run_id: string | null; span_id: string | null; chat_id: string;
   requester_user_id: string; tool_name: string; input_json: string; risk: string; state: string;
   requested_at: number; expires_at: number;
   decided_by: string | null; decided_at: number | null; decision_channel: string | null;
+  /**
+   * 服务端 `principalLabel` 反查出来的裁决者显示名。前端**不实现第二份**反查规则 ——
+   * `decided_by` 有三种写法（`user:<tgId>` / `owner` / `system`），在这儿拆 `user:` 前缀就等于把
+   * 格式变成前后端各存一半的暗契约。查不到时是 `null`，那时显示 `decided_by` 原串。
+   */
+  decidedByLabel: string | null;
 }
 
 /**

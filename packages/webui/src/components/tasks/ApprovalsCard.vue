@@ -67,7 +67,7 @@ watch(() => props.tick, () => { void reload(); });
       <template #risk="{ data }"><UiTag :value="String(data.risk)" :severity="data.risk === 'high' ? 'danger' : data.risk === 'medium' ? 'warn' : 'secondary'" /></template>
       <template #state="{ data }"><UiTag :value="String(data.state)" :severity="data.state === 'pending' ? 'warn' : data.state === 'approved' ? 'success' : data.state === 'denied' ? 'danger' : 'secondary'" /></template>
       <template #requested_at="{ data }">{{ new Date(Number(data.requested_at)).toLocaleString() }}</template>
-      <template #actions="{ data }"><div v-if="data.state === 'pending'" class="section-actions"><UiButton size="small" severity="danger" variant="outlined" label="拒绝" :loading="deciding === data.id" @click.stop="decideApproval(data, false)" /><UiButton size="small" label="批准执行" :loading="deciding === data.id" @click.stop="decideApproval(data, true)" /></div><small v-else class="alias-empty">{{ data.decided_by ?? 'system' }}</small></template>
+      <template #actions="{ data }"><div v-if="data.state === 'pending'" class="section-actions"><UiButton size="small" severity="danger" variant="outlined" label="拒绝" :loading="deciding === data.id" @click.stop="decideApproval(data, false)" /><UiButton size="small" label="批准执行" :loading="deciding === data.id" @click.stop="decideApproval(data, true)" /></div><small v-else class="alias-empty">{{ data.decidedByLabel ?? data.decided_by ?? 'system' }}<template v-if="data.decision_channel"> · {{ data.decision_channel }}</template></small></template>
     </DataGrid>
     <footer v-if="total" class="grid-pager">
       <span>共 {{ total }} 条 · 第 {{ page }} / {{ pages }} 页</span>

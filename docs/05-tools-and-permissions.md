@@ -97,6 +97,39 @@ role(chat):
 description 里明说一句，且 `edit_file` 在 `oldString` 形如 `12\t…` 时把 `old_string_not_found`
 补上一句「去掉行号前缀」：只报「没找到」的话模型通常只会换一段文字再试一次。
 
+**另有一条不带行号的读法，正文逐字节等于磁盘内容**（`FileTools.readText()`，底层
+`readLineWindow()`；`read_file` 那个前缀是对的，不动）。行号是给**模型**的坐标，而把带前缀的正文
+交给一个**全量覆盖**的写端就是一次静默的数据毁坏 —— 「读出来 → 改两行 → 写回去」会把整个文件
+换成加了行号的垃圾。这条路给这类调用方用：`readText(path, { line?, limit? })`，1-based 行窗口
+（按 `\n` 计行），路径照旧过同一个 `PathJail`（越界仍在**读到任何内容之前**抛
+`path_outside_workspace` / `path_denied`），起始行靠固定缓冲分块数换行定位，内存是 O(窗口) 而不是
+O(文件)（与 `read_file` 同一形状，docs/27 · R-02）。BOM 不吃掉（`ignoreBOM`）：`TextDecoder` 默认会
+摘掉它，而这条路的正文要被原样写回去，少一个 BOM 也是一次改写。
+
+**它超 `tools.fs.maxReadBytes` 一律 `read_too_large`，绝不交回被截断的正文。** `read_file` 可以截，
+是因为它的返回形状里有 `truncated` + `nextOffset` 两个字段把这件事说出口；这条路的调用方（全量覆盖
+的写端 —— 将来要接上来的外部编码 agent 的 `fs/read_text_file` / `fs/write_text_file` 就是这个形状）
+响应形状里**没有** truncated 的位置，截断了没有任何地方能说出口，而「截断的正文 + 全量覆盖」=
+静静删掉文件的后半部分。`hint` 里交回文件字节数、以及「从第 X 行起这份预算读到第 Y 行就用满了」，
+模型据此自己开 `line` + `limit`；分窗读的结果带 `endLine` / `eof`，「这只是一段」是**能**说出口的，
+所以分窗合法而截断不合法。总行数不数 —— 数它要整份扫一遍文件，那正是这条路存在的理由。
+「不交回被截断的正文」这条落在**产生侧**（`readLineWindow` 在 `overflow` 时正文就是空串），不靠调用方
+记得别读那个字段。
+
+**`line` / `limit` 不合形状一律 `invalid_line_window`，拒收而不纠正。** 判据与 `read_file` 的 schema
+同一套（≥1 的整数）。这两个数来自**外部** agent 的 JSON，而 `Math.max` / `Math.trunc` 那层看起来
+已经兜住了 —— 实际上 `Math.max(1, NaN)` 是 NaN 且 NaN 的比较全假，会一路走到「`ok: true` + 坐标是
+NaN（JSON 序列化后是 `null`）的正文」；`limit: 0` 则走到「`ok: true` + 空正文」，而空正文交给一个
+全量覆盖的写端就是**清空文件**。路径解析仍在这道闸之前：越界是安全信号，不该被一句参数抱怨盖掉。
+
+非 UTF-8 的字节**与 `read_file` 刻意分岔**：这条路用 `fatal: true`，坏字节直接回 `not_utf8` 而不是
+换成 U+FFFD。理由与超预算那条完全相同 —— 有损解码后的正文原样写回去也是一次静默毁坏，而「有损了」
+这件事在返回形状里同样没有位置（实测 6 字节的非法 UTF-8 会解出 12 字节正文，`bytes` 与
+`Buffer.byteLength(content)` 从此不等，而没人会去比这两个数）。`read_file` 继续有损是对的：它的正文
+给模型看、从不写回。**所以二进制文件在这条路上是硬错误，不是「读出来一堆问号」** —— 要看内容用
+`read_file`，要处理二进制用 `bash`。「文本以外的内容不要走它」这句话是给模型的劝告，而劝告不是闸；
+闸在这里。
+
 **`edit_file` 与 `write_file` 同档。** `FileTools.edit()` 最后一步就是 `return this.write(...)`，
 而它可以把整份文件换掉（`oldString` 取全文，或 `replaceAll`）；`write_file` 带 `approvalTargetExists`
 说明「覆盖已存在的文件要审批」正是设计意图，而 `edit_file` 恰好**只**作用于已存在的文件 ——
@@ -720,13 +753,20 @@ meta 工具本身与它的五条不变量。
 矩阵在代码中是**默认值与对照基准**：`packages/core/tools/policy.ts` 导出
 `TOOL_POLICY: Record<ToolName, {minRole, approval, scope, source}>`，`ToolRegistry` 与 WebUI 工具页
 共用 `effectiveToolPolicy()` 把它与运维覆盖合并成本次生效的策略（[09 §3.7](./09-webui.md)）。
-新增工具必须同时更新该表与本文档。⚠ **这一条目前没有任何自动断言在守**：`AC-TOOL-001b`
-（`TOOL_POLICY` ↔ 实际注册表）由 `main.ts` 的启动断言焊住（缺失或多余都拒绝启动），但
-`AC-TOOL-001a`（`TOOL_POLICY` ↔ 本表）**至今未勾**、没有对应用例。这句话此前写的是「CI 有一致性
-测试」—— 而那正是本表曾经漏掉九个工具（`context_stats` `memory_list` `list_agents`
-`read_agent_result` `ask_parent` `report_progress` `load_skill` `install_skill` `spawn_harness`）
-而没有任何人被绊倒的原因。**声称一个不存在的保证比没有保证更糟**：在 `AC-TOOL-001a` 真的落地之前，
-这张表的一致性只能靠改动时逐条对。
+新增工具必须同时更新该表与本文档，而这一条现在**有断言在守**：`tests/docs.test.ts` 的
+「TOOL_POLICY 与 docs/05 §4 双向一致」两向都判 —— 每个 `TOOL_POLICY` 键在本表里都要有一格，
+本表列出的每个工具名都要是策略键（`AC-TOOL-001a`）。另一向 `AC-TOOL-001b`（`TOOL_POLICY` ↔ 实际
+注册表）由 `main.ts` 的启动断言焊住（缺失或多余都拒绝启动）。判据只认**本节表格的第一列**：
+脚注与 §3.x 散文里的提名不算数，否则「文档里提到过」就等于「表里有」，断言随即变成永远绿的。
+记忆那三行按作用域拆写（`memory_read(pub)` / `memory_write(pub)` / `memory_read/write(pri)` →
+两个策略键），映射表在用例里，**想加第四条之前先读那段注释** —— 每加一条，断言就少认一个工具名。
+分类行（`Skill` / `Plugin 工具` / `MCP 工具` / `custom_*` / 配置类）靠「不是工具名的形状」被容忍。
+
+**仍然没有被焊住的是角色与审批那几栏**：某一格是 ✓ 还是 ✗、审批标不标，与 `minRole` / `approval`
+的对应仍然靠改动时逐条对。这段话的边界要跟着用例走，不要提前写：本表曾经漏掉九个工具
+（`context_stats` `memory_list` `list_agents` `read_agent_result` `ask_parent` `report_progress`
+`load_skill` `install_skill` `spawn_harness`）而没有任何人被绊倒，正是因为那时这里写着「CI 有
+一致性测试」而那条测试并不存在 —— **声称一个不存在的保证比没有保证更糟**。
 
 **目录过滤不是边界，`execute()` 才是。** `ToolRegistry.active()` 的每一条过滤在 `execute()` 里都要
 再判一次：`minRole`、运维禁用、本轮熔断、`available()`、以及「子 agent 不给 `memory_write`」。
@@ -971,10 +1011,11 @@ bridge 实测能直达公网与宿主 `172.17.0.1`（[reviews/28](./reviews/28-r
   │     │
   │     ├─ role=owner ∧ approval.skipForOwner     → 直接执行（记日志 auto_approved）
   │     └─ 其它情况 → 写 approvals(state=pending) + 广播 approval.pending
-  │           ├─ WebUI owner 批准 → 原工具调用继续，落 state=approved
-  │           ├─ WebUI owner 拒绝 → 不执行，落 state=denied
-  │           ├─ ttlMs 到期       → 不执行，落 state=expired
-  │           └─ 轮次 abort       → 不执行，落 state=denied / system
+  │                 + 给发起人发回执（正文 + inline keyboard〔批准〕〔拒绝〕）
+  │           ├─ WebUI owner 批准/拒绝  → 落 approved/denied，decision_channel='webui'
+  │           ├─ Telegram owner 点按钮  → 落 approved/denied，decision_channel='telegram'
+  │           ├─ ttlMs 到期            → 不执行，落 state=expired
+  │           └─ 轮次 abort            → 不执行，落 state=denied / system
 ```
 
 `DatabaseApprovalBroker.request` 在进程内保存等待中的 Promise；`decide` 用
@@ -982,28 +1023,76 @@ bridge 实测能直达公网与宿主 `172.17.0.1`（[reviews/28](./reviews/28-r
 拒绝、过期与取消返回 `{ok:false, error:'未获批准', hint:'…'}`，由模型向用户解释未执行原因。
 `approval.rememberWithinTurn` 只在同一 turn、同一工具与同一输入上复用裁决。
 
-**当前可用通道是 WebUI。** 任务与审批页通过 SSE 收到 `approval.pending`，owner 调
-`POST /api/approvals/:id/decide` 批准或拒绝。Telegram inline keyboard 仍未实现，因此用户若只看
-Telegram 不会看到按钮；有 WebUI 连着时调用按 `ttlMs` 等待，而不是像旧实现那样当场伪拒绝或轮询数据库。
-`approval.allowInitiator` 仍未接线：WebUI 是单角色 owner，不能把裁决权下放给发起人。
+**两条裁决通道：WebUI 与 Telegram。** WebUI 的任务与审批页通过 SSE 收到 `approval.pending`，
+owner 调 `POST /api/approvals/:id/decide`；Telegram 侧发起人回执本身就带 inline keyboard，owner
+点〔批准〕/〔拒绝〕走 `callback_query` 那条路，落库时 `decision_channel='telegram'`。两条通道
+写的是**同一行**，`decide` 的 `UPDATE … WHERE state='pending' AND expires_at>?` 就是它们之间的
+原子抢夺点 —— 先到的那一次改到行，后到的那一次改不到，等待者只被唤醒一次。
+两条通道的裁决权都只给 owner（`approval.allowInitiator` 已从 schema **永久摘除** ——
+[14 §2](./14-open-questions.md) A26 / Q7 定了不做 WebUI 多用户，裁决权没有能下放到发起人的落点）。
+Telegram 侧判的是**有效角色** `resolveEffectiveRole`，不是裸的用户角色。
 
-**没有裁决通道时当场拒绝，不等。** `request()` 先看 `EventBus.channelCount`——即当前挂着的 SSE 连接数。
-为零就直接返回 `{approved:false, hint:'…当前没有可用的审批通道…'}` 并记一条 `approval.unavailable`，
-**不插 pending 行、不 await**。否则这一轮会白占 `concurrency` 槽、配额预留和 `turnTimeoutMs` 预算干等满
-`ttlMs`（默认 180 秒），而 Telegram 侧一个字都没有 —— 这正是 [20](./reviews/20-review-round5.md) §0.0 裁决要消灭的形态。
-判据必须是「裁决通道」而不是「订阅者」：进程自己的 `config.changed` 订阅者常驻，拿 `subscriberCount`
-判断会让这段永远走不到（[22](./reviews/22-review-round6.md) · `D-APPR-01`、[24](./reviews/24-review-round6-verification.md) · `R-APPR-01`）。
+> ⚠ **这条判据把 Telegram 通道限死在「会话本身也是 owner 档」的地方。** 有效角色是
+> `min(用户角色, 会话角色)`（[§2.2](#22-有效角色) 那张表），所以在一个 `trusted` 群里连 owner
+> 本人都是 `trusted` —— `decidableBy:'owner'` 在那儿**无人可满足**。而审批基本只在群里发生
+> （`skipForOwner` 默认真，owner 自己的私聊会直接放行），**所以按钮的实际适用面是 owner 的私聊
+> 与 owner 档的群**，别处仍然只能去 WebUI 裁决。
+>
+> 这不是可以靠放宽角色判据糊过去的：那一档正是「防群内注入借权」（§2.2）。可用性判据因此
+> **按会话**问（`PendingPrompts.available(chatId)`），点不动的会话不算一条通道 —— 不问的话就会
+> 挂上一条 pending 行、贴一排点不动的按钮、再干等满 `ttlMs`。owner 本人在那种会话里点到按钮时
+> 收到的也不是「只有 owner 能裁决」那句谎，而是「你在这个会话里的权限是 `<角色>`，去 WebUI 裁决」。
+>
+> **另一条路已经拍板否掉了（2026-08-21）：不做「裁决提示发 owner 私聊 + 发起人会话只留报信回执」。**
+> 那样按钮在任何来源的审批上都点得动，代价是每条审批**两条消息**、以及 owner 从没跟 bot 说过话时的
+> 403（`AlertDispatcher` 有同一个已知缺口）。否掉的实质理由是**这个缺口挡不住任何已规划的功能**：
+> `HarnessAgent` / ACP 那条路本身就是 **owner + 仅私聊**（[14 §2](./14-open-questions.md) Q8-a、
+> D23），所以它将来的逐条 permission 恰好落在按钮能用的那个格子里；而群里的审批本来就有 WebUI
+> 那条通道，且群成员看得见的回执已经说清了「去 WebUI 的审批页」。
+> **所以「按钮只在 owner 私聊与 owner 档群里出现」是记录在案的边界，不是待办。** 哪天真要覆盖任意
+> 来源，代价就是上面那两条，别当成一次纯增量。
+
+**两条通道都没有时当场拒绝，不等。** `request()` 的判据是「WebUI 没有 SSE 裁决通道
+（`EventBus.channelCount === 0`）**且** Telegram 侧的提示通道对**这个会话**不可用
+（`PendingPrompts.available(chatId)` 为假：bot 没起来，或那个会话里没人满足得了 `decidableBy`）」。
+两者皆无就直接返回 `{approved:false, hint:'…当前没有可用的审批通道…'}`
+并记一条 `approval.unavailable`，**不插 pending 行、不 await**。否则这一轮会白占 `concurrency` 槽、
+配额预留和 `turnTimeoutMs` 预算干等满 `ttlMs`（默认 180 秒），而 Telegram 侧一个字都没有 ——
+这正是 [20](./reviews/20-review-round5.md) §0.0 裁决要消灭的形态。
+WebUI 那一半的判据必须是「裁决通道」而不是「订阅者」：进程自己的 `config.changed` 订阅者常驻，
+拿 `subscriberCount` 判断会让这段永远走不到（[22](./reviews/22-review-round6.md) · `D-APPR-01`、
+[24](./reviews/24-review-round6-verification.md) · `R-APPR-01`）。Telegram 那一半的判据是
+「**bot 起来了，且这个会话里点得动**」而不是「有人正在看」—— 后者根本测不出来，而 owner 的手机推送
+不需要他此刻盯着屏幕；「点得动」那一问的理由见上面那个警示块。
+**只漏掉 Telegram 这一半，新通道在没人开浏览器的部署里就永远走不到**：那种部署恰好是它唯一有用的场景。
+
+**这道闸判的是「放行那一刻」，投递那一下才死的要再判一次。** 闸放行之后回执才发，而
+`sendMessage` 可能被 Telegram 拒收（bot 被拉黑、群里没有发言权、429 耗尽）—— 那一刻屏幕上一个字
+都没有，如果 WebUI 也没有 SSE 通道，这次审批就没有任何人能裁决它，却照旧挂满 `ttlMs`。
+**那正是 [20](./reviews/20-review-round5.md) §0.0 裁决要消灭的形态换了个来路**，所以它走同一条口径：
+`ApprovalReceipt.delivered === false` 且 `channelCount === 0` 时当场落定并交回同一句
+「当前没有可用的审批通道」（`DatabaseApprovalBroker.#receiptUndeliverable`）。两边都要看 ——
+WebUI 还挂着 SSE 时投递失败只是锦上添花那一半没了，审批照旧等它的裁决，那才是「回执失败不影响
+审批本身」。落库落的是 `state='expired', decided_by='system', decision_channel='system'`：`denied +
+system` 在这张表里已经是「轮次被取消」的意思，而 `state` 的取值受 CHECK 约束
+（`pending|approved|denied|expired`），说得清「窗口结束、没人裁决」的只有 `expired`；真正说清缘由
+的是那条 `approval.unavailable` warn（`data.reason='receipt_undeliverable'` 分开两条来路）。
 **发起人回执**（第七轮补上）：挂起 pending 行之后，立刻往**发起人所在的会话**发一句
-「`<工具>` 是<风险>操作，需要 owner 在 WebUI 里批准，N 秒内没人处理就会自动拒绝」。此前有通道时
-这一轮会静静挂满 `ttlMs`（默认 180 秒），Telegram 那边一个字都没有 —— 用户看到的是 bot 收了消息
-然后沉默三分钟（[22](./reviews/22-review-round6.md) · `D-APPR-01`）。
+「`<工具>` 是<风险>操作，要 owner 批准。就在下面点，或去 WebUI 的审批页。N 秒内没人处理就会自动拒绝」，
+底下挂两个按钮。此前有通道时这一轮会静静挂满 `ttlMs`（默认 180 秒），Telegram 那边一个字都没有
+—— 用户看到的是 bot 收了消息然后沉默三分钟（[22](./reviews/22-review-round6.md) · `D-APPR-01`）。
+
+**收场之后回执正文换成结局**（`AC-APV-004`）：撤键盘的同一次 `editMessageText` 里把「N 秒内没人
+处理就会自动拒绝」换成实际发生的事。五种收场读起来各不相同 —— 「owner 在 Telegram 点的」
+「owner 在 WebUI 的审批页裁的」「窗口到点没人裁决」「这一轮被取消了」「赶上进程重启、已作废」
+（最后一种是启动扫描那一趟写的）。文案说的是 `decision_channel` 而**不是** `decided_by`：后者在
+Telegram 那条路上是 `user:<tgId>`，一串数字对群里其他人什么都不是，还顺手把 owner 的 Telegram id
+抖了出去；而裁决权只给 owner，「谁」本来就是常量。细节见 [§6.1](#61-阻塞式人机通道pendingprompts)。
 
 三条约束：**先落库再通知**（通知失败也不会留下一个没人知道的等待）；**回执失败不影响审批本身**
-（Telegram 拒发不该把一次高危调用从「等人批」变成「整轮失败」）；**没有裁决通道时不发回执**
-（那一条本来就当场拒绝，再发一句「等 owner 批」是骗人）。
-
-仍然没有的是 Telegram inline keyboard：裁决只能在 WebUI 做。发起人现在至少知道自己在等什么、
-等多久，而不是对着沉默猜。
+（Telegram 拒发不该把一次高危调用从「等人批」变成「整轮失败」，改正文那一次编辑同样适用这条 ——
+失败一律吞掉记 debug）；**没有裁决通道时不发回执**（那一条本来就当场拒绝，再发一句「等 owner 批」
+是骗人）。
 
 风险规则（`approval.rules`，正则匹配后触发审批，可在 WebUI 编辑）：
 
@@ -1023,7 +1112,8 @@ Telegram 不会看到按钮；有 WebUI 连着时调用按 `ttlMs` 等待，而�
 approval:
   ttlMs: 180000
   skipForOwner: true
-  allowInitiator: false        # 是否允许 turn 发起人自行批准（默认否，只有 owner 能批）
+  # `allowInitiator` 不在这里 —— 它已从 schema **永久摘除**（[14](./14-open-questions.md) A26 / Q7），
+  # 写进配置只会被剔掉。裁决权一律只给 owner，两条通道都是。
   rules:
     - tool: bash
       pattern: '(?i)\b(rm\s+-rf|mkfs|dd\s+if=|shutdown|reboot|chmod\s+777\s+/)'
@@ -1044,6 +1134,67 @@ approval:
 - 审批消息展示：工具名、`description` 字段、**完整输入的代码块**（超 1000 字截断 + 「在 WebUI 查看全文」链接）、发起人、会话、风险等级、剩余时限。
 - 同一 turn 内相同工具+相同输入的重复请求：命中 `approval.rememberWithinTurn`（默认 `true`）则复用上一次决定。
 - 所有决定落 `approvals` 表 + 日志（`kind='approval.decided'`）。
+
+### 6.1 阻塞式人机通道（`PendingPrompts`）
+
+按钮那一半不是审批专用的一次性代码，而是一条通用原语：**发一条带选项的消息、等人点、把结果
+回灌给正在等的调用方**。它同时是 `agent.askEscalateToUser`（转人工）与将来 ACP 逐条 permission
+的落点，所以接口里带 `kind` 与 `decidableBy` 两个维度 —— 事后加这两个会改到签名。
+
+- 等待者注册表在 core：`packages/core/src/interaction/prompts.ts`（`PendingPrompts`）。
+  渲染与 Bot API 调用在 `packages/telegram/src/prompts.ts`（`TelegramPromptChannel`），
+  按 `TelegramToolBridge` 那个形状注入 —— 依赖方向是 `core → telegram` **不允许**，
+  所以 core 只定 `PromptChannel` 接口，`main.ts` 用 `bot()` getter 把实现塞进来，
+  **presence 即开关**：没有 Telegram 入口时 `available()` 为假，上面那条判据自然退回单通道。
+- `callback_data` 形如 `a:<promptId>:<选项下标>`（`a:` + ULID 26 字符 + `:` + 一位下标 = 30 字节，
+  Bot API 的上界是 **64 字节**）。**不许把任意长度的东西塞进去** —— 超了 Telegram 直接 400，
+  而那时按钮已经在屏幕上了。`tests/interaction.prompts.test.ts` 有一条断言焊住这个上界。
+- **TTL 的唯一所有者是发起方**（审批是 `DatabaseApprovalBroker`：它已经有 timer + 落库 `expired`
+  + SSE 广播）。`PendingPrompts` 自己那个 timer 比它长几秒，**只负责把点不动的按钮收掉**；
+  两边都写 expired 就有两份真相。
+- 同一条消息被点两次：单发 `settled` 标志 + 一张**有界**的最近裁决表（FIFO，256 条）。第二次点
+  回「已经处理过了」，而进程重启后的迟到点击（注册表查不到 `promptId`）回「已过期（进程重启过）」
+  —— 两句话对点的人是不同的信息。注册表**不持久化**（Promise 跨不了进程），真相在 `approvals` 行。
+  这是一处**进程内状态**（`docs/01 §3.1`）：真跑多实例时，落在没有这个等待者的实例上的点击会回
+  `unknown`。那是 fail-safe 的一侧（伪造不出一次批准，库里那一行照旧等自己的 TTL），但话说错了
+  —— 要横向扩展得先把这条通道搬到库上，或者按 chat 路由。
+- **点击要绑会话**：`resolve()` 要求 `actor.chatId` 等于提示所在的会话，对不上按「查不到」处理。
+  按钮就在那条消息上，正常点击不可能来自别处；而传进来的 `role` 是**按 callback 所在的会话**算出的
+  有效角色 —— 不绑会话的话，一个人在自己是 owner 的那个群里对着另一个会话的 `promptId` 发一次
+  callback（非官方客户端能构造任意 `callback_data`）就能替那个会话裁决。ULID 猜不出来只让它不实用，
+  不让它不成立。
+- **先 `answerCallbackQuery` 再** fire-and-forget 编辑键盘（那个顺序在 `bot.ts` 的 `a:` 分支里，
+  不在 `resolve()` 里）：超约 15 秒不答，客户端上就是一个转不停的圈。撤键盘的 400（消息被用户删了、
+  或同一条键盘被撤第二次）一律吞掉记 debug。**只有「查不到 promptId」那一支该由调用方顺手撤键盘**
+  —— 提示还挂着、只是下标上没那个选项（`invalid`，只有伪造的 `callback_data` 到得了）时一个字节
+  都不许动，否则一次伪造就能把一条活着的提示的 Telegram 侧弄哑。
+- **裁决落定 / 过期时撤键盘并把正文换成结局，而且是同一次 `editMessageText`**
+  （省略 `reply_markup` 就等于把键盘撤掉）。分成「撤键盘 + 改正文」两次要在 `perChatPerMinute`
+  那 20 个槽位里排两回队，而它们说的是同一件事。**为什么必须改正文**：只撤按钮的话那条消息停在
+  「N 秒内没人处理就会自动拒绝」上，而那句话此刻已经不成立 —— [21 §12](./21-webui-coverage-gaps.md)
+  「界面在说谎」专门清过这一类，[13](./13-acceptance-criteria.md) 的 `AC-APV-004` 要的也是这个。
+  文案由发起方给（审批是 `approvalSettledText()`，`packages/telegram/src/prompts.ts`），注册表只负责
+  发出去 —— 结局是发起方的语义，注册表连「批准」和「拒绝」的区别都不该懂。
+  正常时序里带正文的那次收尾先到（`ApprovalReceipt.settle` 与 `tg_message_id` 是同一个 `.then` 里
+  置上的，而任何真实裁决都隔着一次网络往返），于是全程只有一次编辑；收尾抢在句柄落地**之前**
+  （开轮即被 abort、TTL 压到毫秒）时宁可多花一次预算补上那次编辑，也不把那句倒计时留在屏幕上。
+- 提示正文**不带 markdown、不分段**：键盘挂在一条消息上，被 `segmentTelegramText` 切成两条就有
+  一条没有按钮。正文硬截断到 700 字符，`parse_mode` 不传 —— 任何 `*` `_` `[` 都会让 MarkdownV2
+  400，而 `sendWithFallback` 的降级会把消息重发一遍、键盘状态就乱了。
+- **启动时收拾残留回执**：`approvals` 里 `tg_message_id IS NOT NULL` 的行逐条收尾（撤键盘 + 换正文，
+  同上那一次编辑），然后把这一列清空（`DatabaseApprovalBroker.staleKeyboards()`，排在
+  `poller.start()` **之前** —— 拉到的第一条 update 就可能往那一列写一行，而这趟扫描认不出
+  「这一行是刚写的」）。这是那一列存在的意义 —— 它是「屏幕上还有一排点不动的按钮」的待办队列，
+  不是历史记录：**裁决落定时也要清掉**（键盘那时已经撤了），不清的话一个长跑进程攒下的每一条审批
+  都会在下次启动被挨个编辑一遍，跟真实投递抢 `perChatPerMinute` 那 20 个槽位。
+  **但清列的前提是那次收尾编辑真回来了** —— 它是待办队列，所以「编辑没回来」就等于「这条还没办完」，
+  得留给下次启动这一趟。抢在前面清的表现是消息被删 / 网络抖 / 429 各来一次，那排按钮就永久没人收
+  （关停期间 `dispose()` 之后紧跟 `abortAll()` 那一下只是其中一条来路，不是唯一那条）。所以
+  `PendingPrompts.dismiss()` 返回的是「这次收尾真落地了吗」，而不是 void。判据比
+  「`state<>'pending'`」宽一档是故意的：新进程里**任何** pending 行都不可能还有等待者，而 TTL 没到
+  的那些不会被构造函数标成 `expired`。这一趟连 `state` / `tool_name` 一起读出来（`staleApprovalOutcome()`）：
+  构造函数刚扫成 `expired` 的那些说「窗口到点了」，TTL 未到的那些说「赶上进程重启、已作废」——
+  两句话对屏幕前的人是不同的信息，一律换成同一句就又是一次说谎。
 
 ---
 

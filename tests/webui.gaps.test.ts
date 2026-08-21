@@ -180,3 +180,43 @@ describe('C2 · 总览趋势', () => {
     closeDatabase(db);
   });
 });
+
+/**
+ * `G-API-24`（docs/21 §17）。Telegram 那条裁决通道给 `approvals.decided_by` 引入了**新格式**
+ * `user:<tgId>`，而审批页的用途正是事后查「这条是谁批的」—— 一串数字答不了那个问题。
+ *
+ * 反查只有服务端这一份（`principalLabel`，与任务页、定时任务页同一个 helper）。前端拆 `user:`
+ * 前缀会把格式变成前后端各存一半的暗契约，下一种写法出现时前端会静静渲染成乱码。
+ */
+describe('G-API-24 · 审批页认得出 Telegram 裁的那些行', () => {
+  it('decided_by 的三种写法各自给出人读得懂的裁决者', async () => {
+    const { app, db, headers } = harness('gaps-approvals-label');
+    new PrincipalRepository(db).upsertSeen({ id: 'user:4242', kind: 'user', tgId: '4242', role: 'trusted', displayName: '张三', username: 'zhangsan', chatType: null });
+    const row = (id: string, decidedBy: string | null, channel: string | null, state: string): void => {
+      db.prepare(`INSERT INTO approvals(id,turn_id,chat_id,requester_user_id,tool_name,input_json,risk,state,requested_at,expires_at,decided_by,decided_at,decision_channel)
+        VALUES (?,?,'c','7','bash','{}','high',?,?,?,?,?,?)`).run(id, `t-${id}`, state, Date.now(), Date.now() + 60_000, decidedBy, Date.now(), channel);
+    };
+    row('a', 'user:4242', 'telegram', 'approved');
+    row('b', 'owner', 'webui', 'denied');
+    row('c', 'system', 'system', 'expired');
+    row('d', 'user:999999', 'telegram', 'approved');
+    const { items } = await data<{ items: Array<{ id: string; decided_by: string; decidedByLabel: string | null }> }>(
+      await app.request('/api/approvals?size=10', { headers: { cookie: headers.cookie } }));
+    const byId = new Map(items.map((item) => [item.id, item]));
+    // 登记过的：显示名 + @用户名，与用量聚合、任务页那两处逐字一致。
+    expect(byId.get('a')!.decidedByLabel).toBe('张三 (@zhangsan)');
+    // 没登记过的说清楚是「未登记」，而不是留空让界面掉回一串数字。
+    expect(byId.get('d')!.decidedByLabel).toBe('未登记用户 999999');
+    // `owner` / `system` 本来就是话，不反查也不编一个名字出来。
+    expect(byId.get('b')!.decidedByLabel).toBeNull();
+    expect(byId.get('c')!.decidedByLabel).toBeNull();
+    // 原串照旧交回去：`decidedByLabel` 是**补**一列，不是替换 —— 前端查不到时退回原串。
+    expect(byId.get('a')!.decided_by).toBe('user:4242');
+    // 列表收窄成显式列之后，`ApprovalRow` 声明的每一列都还在（少一列前端就静默空一格）。
+    for (const column of ['id', 'turn_id', 'agent_run_id', 'span_id', 'chat_id', 'requester_user_id', 'tool_name',
+      'input_json', 'risk', 'state', 'requested_at', 'expires_at', 'decided_by', 'decided_at', 'decision_channel']) {
+      expect(Object.keys(byId.get('a')!), column).toContain(column);
+    }
+    closeDatabase(db);
+  });
+});

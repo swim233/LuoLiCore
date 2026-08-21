@@ -206,7 +206,7 @@
 
 | ID | 步骤 | 期望 |
 |---|---|---|
-| [ ] AC-TOOL-001a (自动) ★ | 对比 `TOOL_POLICY` 与文档 [05 §4](./05-tools-and-permissions.md#4-权限矩阵权威表) | 完全一致（CI 用测试固化该表快照） |
+| [x] AC-TOOL-001a (自动) ★ | 对比 `TOOL_POLICY` 与文档 [05 §4](./05-tools-and-permissions.md#4-权限矩阵权威表) | 工具名集合双向一致：每个策略键在表里都有一格，表里每个工具名都是策略键（只认 §4 表格第一列，脚注与散文里的提名不算）。角色 / 审批那几栏仍靠人对 | 〔docs.test.ts〕
 | [ ] AC-TOOL-001b (自动) ★ | 对比 `TOOL_POLICY` 与启动时实际注册表 | key 集合完全一致；缺失或多余工具均拒绝启动 |
 | [x] AC-TOOL-002 (自动) ★ | `limited` 用户请求写文件 | `write_file` **不在** `activeTools`；模型回复「没有写入权限」，未产生工具调用 | 〔security.test.ts〕
 | [x] AC-TOOL-003 (自动) ★ | 路径 `../../etc/passwd` | 拒绝 `path_outside_workspace` | 〔security.test.ts〕
@@ -258,9 +258,9 @@
 | [x] AC-SBX-024 (自动) | 负数 chatId、带冒号的 turnId | 都合法化成 docker 收得下的容器名，且不同会话不撞名。此前 `dryrun:<ulid>` 那条路的 `bash` 一直以 `invalid name` 收场 | 〔sandbox.persistent.test.ts〕
 | [ ] AC-SBX-025 ★ | 持久模式下 owner 说「重置一下 xxx 群的容器」 | 容器换了新 id，而那个群 `/workspace` 里的文件**还在**；要连文件一起清必须显式传 `wipeWorkspace`，且那一档走审批、文件挪进 `.luoli-trash` |
 | [ ] AC-APV-001 | `trusted` 执行 `rm -rf build` | Telegram 出现审批消息（含命令全文、发起人、风险 high、时限） |
-| [ ] AC-APV-002 | 非 owner 点击批准按钮 | `answerCallbackQuery` 提示无权限；`approvals` 未变更 |
-| [ ] AC-APV-003 | owner 点击批准 | 命令执行；`approvals.state='approved'`，含 `decided_by`/`channel` |
-| [ ] AC-APV-004 | 不做操作，等超时 | `state='expired'`；工具返回「未获批准」；消息更新为已过期 |
+| [x] AC-APV-002 (自动) ★ | 非 owner 点击批准按钮 | `answerCallbackQuery` 提示无权限（`forbidden` + `show_alert`）；`approvals` 未变更、pending 行照旧挂着 —— 越权那一次**不消耗**这条提示，owner 随后点仍然算。owner 本人在一个 `trusted` 群里点到按钮时收到的不是「只有 owner 能裁决」那句谎，而是「你在这个会话里的权限是 `<角色>`」（[05 §6](./05-tools-and-permissions.md)） | 〔interaction.prompts.test.ts〕
+| [x] AC-APV-003 (自动) ★ | owner 点击批准 | 命令执行；`approvals.state='approved'`，`decided_by='user:<tgId>'`、`decision_channel='telegram'`。裁决走的是与 WebUI 共用的那句 `UPDATE … WHERE state='pending' AND expires_at>?` —— 两条通道之间唯一的原子抢夺点 | 〔interaction.prompts.test.ts〕
+| [x] AC-APV-004 (自动) ★ | 分别走完五种收场：Telegram 点批准 / WebUI 抢先裁决 / 不做操作等超时 / 等审批时轮次被 abort（`/cancel` 走的同一个信号）/ 裁决前重启进程 | 回执消息在**每一种**收场里都撤键盘**并把正文换成结局**，且是同一次 `editMessageText`（省略 `reply_markup` 即等于撤键盘；分两次要在 `perChatPerMinute` 那 20 个槽位里排两回队）。五句文案互不相同，且**一句都不再含**「N 秒内没人处理就会自动拒绝」—— 留着它就是 [21 §12](./21-webui-coverage-gaps.md)「界面在说谎」那一类。文案说的是 `decision_channel` 而**不是** `decided_by`（后者在 Telegram 那条路上是 `user:<tgId>`，一串数字对群里其他人什么都不是，还顺手把 owner 的 id 抖出去）。改文案失败一律吞掉记 debug：**绝不能把审批从「等人批」变成「整轮失败」**。超时那一路照旧 `state='expired'` + 工具返回「未获批准」。**并且：`tg_message_id` 只在那次编辑真回来之后才清** —— 那一列是「屏幕上还有一排点不动的按钮」的待办队列而不是历史记录，编辑没回来（消息被删 / 网络抖 / 429 / 关停期间被 `bot.stop()` 掐断）就等于这条还没办完，得留给下次启动那趟 `staleKeyboards()` 扫回来；抢在前面清等于让那排按钮永久没人收 | 〔interaction.prompts.test.ts〕
 | [ ] AC-APV-005 | WebUI 审批队列批准 | 与 Telegram 路径等效；`decision_channel='webui'` |
 | [ ] AC-APV-006 (自动) ★ | 子 agent 内调用 `delete_file` | 同样触发审批（不依赖 AI SDK 的 toolApproval），批准后才执行 |
 | [ ] AC-APV-007 (自动) | `skipForOwner=true`，owner 执行 `delete_file` | 直接执行，日志记 `auto_approved` |
@@ -291,10 +291,13 @@
 | [x] AC-TOOL-050 (自动) | `residentDescriptions=false` 装配一条完整请求体（instructions + messages + tools 数组），逐段扫 | 每个常驻工具的 description 全文出现次数 **≤ 1**（此前 TOOL CATALOG 与 tools 数组各一份）；折叠工具的 `inputSchema` 出现次数为 **0**。**不做数值 token 断言** —— 数值随描述文本腐烂，结构断言等价且稳定，降幅另在实测里报一次（[04 §2.1](./04-agents-and-providers.md#21-prompt-缓存)） | 〔tools.catalog.wiring.test.ts〕
 | [x] AC-TOOL-051 (自动) ★ | 一轮内检索两次（第二次命中另一个工具），中间载入一个 `allowed-tools: [bash]` 的 skill；然后在轮**中**摘掉一台 MCP server、再挂一台新的 | 展开集**只增不减**：第二次检索之后第一次展开的工具仍在 `activeTools` 里；skill 收窄压过展开（已展开的 MCP 工具被滤掉，`search_tools` 对它如实报 `status:'narrowed'`）；`activeTools ⊆ toolSet` 在摘掉与新挂**两个方向**上都成立。摘掉那个方向可断言：那些名字下一步自动掉出 tools 数组（硬调由 `admit()` 的 `unknown_tool` 兜住）。新挂那个方向**只能断言三件事** —— 整轮不抛、新挂的那个一个字节都不下发、以及 `search_tools` 照旧把它记进 `expandedTools` 并回 `status:'expanded'`（最后这件是本方向**尚存的假话**：那句「下一步就能直接调用」对一个开轮冻结的 toolSet 里没有的键不成立）。**`prepareStep` 末尾那道 `name in toolSet` 交集本身无法被断言**：ai@7.0.65 的 `filterActiveTools` 是纯交集、多报的名字被静默丢掉，`activeTools` 又不经任何回调或日志露出来，所以删掉那道交集全量一条都不红 —— 它是显式写出来的防御与文档，不是一道有外部可观察行为的闸 | 〔tools.catalog.wiring.test.ts〕
 | [x] AC-TOOL-052 (自动) ★ | 派一个 `definition.tools` 白名单里含「本来会被折叠」的工具的子 agent | `search_tools` **不在**它的工具目录里（`agentKind==='main'` 那道闸，防它往父轮共享的 `expandedTools` 里写）；白名单里的工具**全部常驻**、逐条带描述，子 agent 的目录与按需暴露之前逐字节一致（[07 §4.1](./07-skills-plugins-mcp.md#41-配置)） | 〔subagent.test.ts、tools.catalog.test.ts〕
+| [x] AC-TOOL-053 (自动) ★ | `FileTools.readText()` 读一个混着行首数字 / CRLF / 四字节 emoji / CJK 的文件，另各读一个带 BOM 的与一个末行无换行的 | 混合那个文件的正文**逐字节等于磁盘内容**（`Buffer.from(content).equals(readFileSync(...))`），不带 `行号<TAB>` 前缀；BOM 那个同样逐字节相等（`TextDecoder` 默认会摘掉 BOM，`ignoreBOM` 挡住它）；末行无换行的那个正文原样、不补换行（这一条判的是字符串相等而不是字节相等 —— 那个 fixture 是纯 ASCII，两者等价）。**必须带一条 `read_file` 对照**（同一文件走那条路一定带前缀），否则断言在验证自己的公理。守的是「读出来 → 改两行 → 全量写回」不会把整个文件换成加了行号的垃圾（[05 §3.1](./05-tools-and-permissions.md)）| 〔files.readtext.test.ts〕
+| [x] AC-TOOL-054 (自动) ★ | `readText` 超 `tools.fs.maxReadBytes`；以及读一个含 `0xFF` 的非 UTF-8 文件 | 两者都 fail-closed：`read_too_large` / `not_utf8`，返回对象**只有 `{ok,error,hint}` 三个键**，一个字节的正文都不交回；`readLineWindow` 在**产生侧**就把 `content` 置空，不靠调用方记得别读那个字段。理由同一条：返回形状里没有位置能说出「截了」或「有损了」，而这条路的正文会被原样写回文件。分岔要有对照 —— 一个等价的非 UTF-8 文件走 `read_file` 照旧有损解码、正文里带着 U+FFFD 交回来（那边给模型看、从不写回）| 〔files.readtext.test.ts〕
 | [ ] AC-APV-008 (自动) ★ | trusted 用户触发一个需审批的工具，然后无人裁决直到 `ttlMs` 到期 | 调用**挂起等待**而不是当场伪拒绝：先写一行 `state=pending` 并广播 `approval.pending`；到期后原子改成 `state=expired, decided_by=system`，工具返回 `ok:false, error:'未获批准'` 且 hint 说的是「审批已超时」而不是「管理员已拒绝」。轮次在等待中被取消时落 `state=denied, decided_by=system` 并给「轮次已取消」的 hint —— 三条路径都 fail-closed，工具一次都不执行（docs/21 · G-API-12） |
 | [ ] AC-APV-010 (自动) ★ | 命中规则后 owner 在 WebUI 点 `[批准执行]` | `decide` 用 `UPDATE … WHERE state='pending' AND expires_at>?` 抢裁决权，只有真改到一行才唤醒等待者；**批准之后原工具调用才继续执行**，落 `state=approved, decided_by=owner, decision_channel=webui`。对已裁决/已过期的行重复裁决返回 `changed:false`，不重复唤醒 |
 | [ ] AC-APV-011 (自动) | `rememberWithinTurn=true` 时同轮重试一个刚过期的调用 | 复用上次结论不再挂第二个 `ttlMs`，但 hint 仍是「审批已超时」—— 只记布尔会让模型把超时说成「管理员已拒绝」 |
 | [ ] AC-APV-009 (自动) | 运行中把 `approval.enabled` 改成 false，或增删 `approval.rules` | 下一次工具调用即生效，无需重启（docs/20 · W-CFG-02） |
+| [x] AC-APV-012 (自动) ★ | 可用性闸放行（会话点得动）之后让那条带按钮的回执**发不出去**（Telegram 拒收），分两档：①WebUI 一个 SSE 都没挂着 ②WebUI 还挂着 | ①**当场拒**、毫秒级返回，hint 是同一句「当前没有可用的审批通道」，行落成 `state='expired', decided_by='system', decision_channel='system'` 并记一条 `approval.unavailable` warn（`data.reason='receipt_undeliverable'`）—— 闸判的是「放行那一刻」，投递那一下才死掉时屏幕上一个字都没有而没人能裁决它，照旧等满 `ttlMs` 就是 [reviews/20](./reviews/20-review-round5.md) §0.0 要消灭的形态换了个来路。落 `expired` 而不是 `denied`：后者加 `system` 在这张表里已经是「轮次被取消」的意思。②审批**照旧挂着等**、能被 WebUI 正常裁决 —— 真通道还在，那才是「回执失败不影响审批本身」（[05 §6](./05-tools-and-permissions.md)）| 〔interaction.prompts.test.ts〕
 
 ## 6. Subagent 与任务（AC-SUB / AC-TASK）
 
@@ -626,7 +629,7 @@
 | **上下文引擎** | | 31 / 40 | | | |
 | Telegram 与准入 | | 22 / 46 | | | |
 | Agent 与 Provider | | 23 / 43 | | | |
-| 工具/沙箱/审批 | | 48 / 89 | | | |
+| 工具/沙箱/审批 | | 55 / 92 | | | |
 | Subagent 与任务 | | 26 / 44 | | | |
 | 记忆 | | 1 / 13 | | | |
 | 日志与成本 | | 8 / 28 | | | |
@@ -634,6 +637,6 @@
 | WebUI | | 15 / 89 | | | |
 | 安全 | | 9 / 25 | | | |
 | 运维 | | 2 / 10 | | | |
-| **合计** | | **229 / 505** | | | |
+| **合计** | | **236 / 508** | | | |
 
 **整体通过条件**：全部 ★ 项通过 + 非 ★ 项通过率 ≥ 95% + 所有豁免项经需求方书面确认。

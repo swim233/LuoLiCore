@@ -120,10 +120,15 @@ with_parent 0`，浏览器里展开一条 trace，13 个节点的 `marginLeft` �
 | `sandbox.container.exec` | info（`ok=false` 时 **warn**） | chatId, name, exitCode, ms, background, killed —— 持久容器里的一次 `docker exec`，**只有 `container_*` 工具那条路会落**（`bash` / `python` 走 `Sandbox.run`，记的仍是 `sandbox.run`）。两者并列而不是互相取代：`sandbox.run` 记「工具要执行一段命令」，这一条记「owner 点名往某个会话的容器里执行」 |
 | `approval.pending` / `approval.decided` | info（拒绝与过期 **warn**） | id, tool, risk, channel, actor, expiresAt, ms。`pending` 是「已经推给 owner，等裁决」那一刻（文档此前叫 `approval.requested`，实现里从来是 `pending`） |
 | `approval.expired` | warn | id, risk —— `ttlMs` 到点没人裁决，按拒绝处理 |
-| `approval.unavailable` | warn | risk —— 没有任何裁决通道（`webui.enabled=false` 或一个 SSE 连接都没有），命中规则的调用当场被拒（[reviews/24](./reviews/24-review-round9.md) · R-APPR-01） |
+| `approval.unavailable` | warn | risk, reason —— **两条裁决通道都没有**，命中规则的调用当场被拒（[reviews/24](./reviews/24-review-round9.md) · R-APPR-01；判据的另一半见 [05 §6](./05-tools-and-permissions.md)）。两条来路各一次，靠 `reason` 分：缺省（无 `reason`）= 开闸那一刻就没有通道（WebUI `channelCount===0` **且** `PendingPrompts.available(chatId)` 为假）；`receipt_undeliverable` = 闸放行了、pending 行也写了，但那条带按钮的回执**发不出去**（bot 被拉黑 / 没有发言权 / 429），而 WebUI 也没有 SSE —— 这一刻语义上同样是「没有通道」，所以走同一条口径当场拒而不是干等满 `ttlMs`。后者会把行落成 `state='expired', decided_by='system'` |
 | `approval.no_rules` | warn | conditional[] —— `approval.enabled=true` 但 `approval.rules` 是空的：0 条规则时 `conditional` 等于 `never`，门是开着的 |
 | `approval.disabled` | warn | 审批整块关掉，高危工具不经复审直接执行 |
 | `approval.receipt_failed` | warn | error —— 回执发不回发起人所在的会话 |
+| `prompt.posted` | debug | kind, messageId, options —— 一条带 inline 选项的阻塞式提示发出去了（[05 §6.1](./05-tools-and-permissions.md)）。审批的那两个按钮就是它 |
+| `prompt.resolved` | info | kind, optionId, decidableBy + userId —— 谁点了哪一个。**越权点击不落这一行**（等待者一动不动，回一个 `forbidden` 弹窗）；裁决本身另有 `approval.decided`（`channel='telegram'`），两行都在是因为将来的转人工与 ACP permission 没有第二行 |
+| `prompt.post_failed` | warn | kind, error —— 提示发不出去（Telegram 拒收）。**发起方的语义不受它影响**：审批照旧等自己的 TTL 或 WebUI 裁决 |
+| `prompt.options_capped` | warn | kind, given —— 选项超过 8 个被砍掉。这是调用方的 bug：下标要压在一位数以内，`callback_data` 的长度才是常量（Bot API 上界 64 字节）|
+| `prompt.settle_failed` | debug | messageId, rewrote, error —— 收尾那次编辑被拒。`rewrote` 分开两种：`true` = 撤键盘**并**把正文换成结局（审批的正常收场，`AC-APV-004`），`false` = 只撤键盘。消息被用户删了、或同一条消息被收尾第二次（`message is not modified`）都会走到这里，两者都不该影响任何等待者 —— 一次改文案绝不能把审批从「等人批」变成「整轮失败」，所以是 debug |
 | `agent.spawn` | info | runId, name, depth, modelAlias, taskChars —— **派出去那一刻就落**，不等它跑完。`agent.run` 只在结束时才落库（span 的语义），所以一个卡住的子 agent 只有这一行能证明它存在 |
 | `agent.run` | info（失败时 **warn**） | runId, name, alias, steps, costUsd, ok, ms —— 子 agent 那一整段的**容器 span**：它的 id 是内部 `model.call` / `tool.call` 的父。父是派发它的那次 `tool.call`（[§7](#7-可观测性验收要点) 第 4 条） |
 | `agent.end` | info（失败时 **warn**） | runId, name, steps, costUsd, ok, error, summaryChars |

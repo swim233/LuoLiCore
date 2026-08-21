@@ -436,10 +436,13 @@ report_progress: tool({
 2. **调用方自带的 `default`**：仲裁不可用（没有 `low` 档模型 / 超时 / 失败 / 空答复）且调用时给了 `default` 时用它，记 `answer.source='rule'`。
 3. **明说没人应答**：返回 `{ok:false, error:'ask_parent_unanswered'}` + 一句能照着改的 hint，子 agent 按提示词自行决策并声明假设。
 
-**没有「转人工」这一级。** `agent.askEscalateToUser` 仍在未接线白名单里：它要的是一条阻塞式人机通道
-（发 inline 选项 → 等人点 → 把结果回灌给正在等的子 agent），而那条通道整体不存在 —— 挡着它的
-缺口与 inline keyboard 审批是同一个（[25 §8](./reviews/25-round7-remediation.md)）。打开这个键时，仲裁失败
-会多记一条带 `escalationRequested: true` 的 `agent.ask_unarbitrated` warn，**不会真的去问人**。
+**没有「转人工」这一级。** `agent.askEscalateToUser` 仍在未接线白名单里。它要的那条阻塞式人机通道
+（发 inline 选项 → 等人点 → 把结果回灌给正在等的子 agent）**现在有了** —— `PendingPrompts` +
+`TelegramPromptChannel`（[05 §6.1](./05-tools-and-permissions.md)），inline keyboard 审批就跑在它上面，
+`PromptRequest.kind` 里已经留着 `agent_ask` 这一档。**欠的不再是通道，而是语义**：问谁（子 agent 的
+发起人还是 owner）、选项从哪儿来（自由文本答复 vs 固定选项）、以及等人期间那个子 agent 占着的并发槽
+与 `askTimeoutMs` 怎么算。这三条没定之前接线就是又一个假开关。打开这个键时，仲裁失败会多记一条带
+`escalationRequested: true` 的 `agent.ask_unarbitrated` warn，**不会真的去问人**。
 
 所有 `ask/answer` 都落 `agent_messages` 表并进日志（`kind='agent.ask'` / `'agent.answer'`）。
 
