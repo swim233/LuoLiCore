@@ -212,13 +212,15 @@ describe('ACP 终端 · 上界', () => {
     // 命令的 cwd 与要读写的文件在「这条路径碰不碰得到」上没有理由分两套判据，所以 `jail.resolve`
     // 同时管 denyGlobs。
     const secret = resolve(ROOT, 'secret');
-    mkdirSync(secret, { recursive: true });
+    mkdirSync(resolve(secret, 'deep'), { recursive: true });
     const glob = secret.replaceAll('\\', '/');
-    // ⚠️ **两条 glob 都要写。** minimatch 的 `a/**` 匹配 `a` 底下的东西而**不匹配 `a` 自己**，
-    // 于是 `tools.fs.denyGlobs` 里那些 `<root>/config/**` 只挡得住「读那底下的文件」，挡不住
-    // 「把 cwd 设成那个目录」。运维照抄一条 `.../**` 会以为两件事都挡了。
+    // 一条 `X/**` 就够：minimatch 下它本身不匹配 `X`，而 `PathJail` 为每条这种形状的 glob 派生一条
+    // 去掉后缀的模式（`tools.fs.denyGlobs` 的默认值几乎全是这个形状，运维照抄一条 `.../**` 时
+    // 「把 cwd 设成那个目录」也要挡住）。两条一起写自然也拒。
     expect(() => create(terminals({}, [glob, `${glob}/**`]), process.execPath, ['-e', ''], { cwd: secret })).toThrow(/cwd/);
-    expect(create(terminals({}, [`${glob}/**`]), process.execPath, ['-e', ''], { cwd: secret })).toMatch(/^term_/);
+    expect(() => create(terminals({}, [`${glob}/**`]), process.execPath, ['-e', ''], { cwd: secret })).toThrow(/cwd/);
+    // 目录底下的路径照旧拒 —— 修严的是「X 自己」那一档，不是把原来的语义换掉。
+    expect(() => create(terminals({}, [`${glob}/**`]), process.execPath, ['-e', ''], { cwd: resolve(secret, 'deep') })).toThrow(/cwd/);
     // 不存在的目录同样是一个干净的错，而不是一次 spawn 失败。
     expect(() => create(terminals(), process.execPath, ['-e', ''], { cwd: resolve(ROOT, 'nope') })).toThrow(/cwd/);
     rmSync(secret, { recursive: true, force: true });

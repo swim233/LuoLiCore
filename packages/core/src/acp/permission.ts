@@ -22,6 +22,13 @@ import type { PermissionOption, PermissionOptionKind, RequestPermissionRequest, 
  * `tools.overrides` 的键空间里多出一批运维改了也没用的键（那张表只认注册过的工具）。
  */
 export const ACP_PERMISSION_TOOL_NAME = 'acp_permission';
+/**
+ * `approvals.decision_channel` 的第四个取值（前三个是 `telegram` / `webui` / `system`，见
+ * `docs/03` 的 `approvals` 段）。**它标的是「这条结论从哪条路来的」，不是「谁下的」** —— 后者在
+ * `decided_by` 里，会话内 always 命中时写 `acp:always`。两列同值的话，按通道分桶的查询会多出一个
+ * 取值域外的桶，而审批卡那一格渲染的正是 `decided_by · decision_channel`。
+ */
+export const ACP_DECISION_CHANNEL = 'acp';
 
 /**
  * `toolCall.kind` → 审批风险档，**与本系统同类工具对齐**（`docs/05 §4` 那张矩阵）：
@@ -50,7 +57,7 @@ export function acpPermissionRisk(kind: ToolKind | null | undefined, outsideJail
 /** 审批链上这条路需要的两个动作。`DatabaseApprovalBroker` 实现它。 */
 export interface AcpApprovalBroker {
   requestExternal(request: ExternalApprovalRequest): Promise<ApprovalVerdict>;
-  recordDecided(request: ExternalApprovalRequest & { approved: boolean; decidedBy: string }): void;
+  recordDecided(request: ExternalApprovalRequest & { approved: boolean; decidedBy: string; channel: string }): void;
 }
 
 export interface AcpPermissionGateOptions {
@@ -115,7 +122,9 @@ export function acpPermissionGate(options: AcpPermissionGateOptions): (request: 
       OPTION_KIND_ORDER[bucket].map((wanted) => request.options.find((entry) => entry.kind === wanted)).find((entry) => entry !== undefined);
 
     const record = (approved: boolean, decidedBy: string): void => {
-      try { approvals.recordDecided({ ...base, approved, decidedBy }); }
+      // `channel` 是通道不是主体：`decidedBy` 那个 `acp:always` 说的是「谁裁的」，而通道列的取值域是
+      // `telegram` / `webui` / `system` / `acp`。两列写同一个字符串会让审批卡把它印两遍（docs/21 §18）。
+      try { approvals.recordDecided({ ...base, approved, decidedBy, channel: ACP_DECISION_CHANNEL }); }
       catch (error) { log.event({ level: 'warn', kind: 'approval.receipt_failed', summary: 'acp always-decision 落库失败', traceId: context.turn.turnId, data: { error: error instanceof Error ? error.message : String(error) } }); }
     };
 

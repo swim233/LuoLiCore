@@ -244,6 +244,12 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
     execute: (input, context) => {
       if (!input.path.startsWith('skill://')) return dependencies.filesFor(context.workspace, context.turn.effectiveRole).read(input.path, input.offset, input.limit);
       const path = dependencies.skills.resolveResource(input.path, context.turn.effectiveRole);
+      // 目录判据这一支得自己判：它压根不经过 `FileTools`（理由那一份在 `FileTools.#isDirectory` 上，
+      // 一句话是「目录的 size 在 btrfs 上是 0，于是 readSync 从不被调用、EISDIR 永远不抛」）。
+      // 不把 `readSlice` 改成会抛：那个函数还有别的调用方。错误码与那边同一个。
+      let directory = false;
+      try { directory = statSync(path).isDirectory(); } catch { /* 不存在：readSlice 随后照旧如实抛 ENOENT */ }
+      if (directory) return { ok: false, error: 'path_is_directory', hint: `${input.path} 是目录不是文件；这个 skill 里有哪些文件看 load_skill 交回的 files 清单` };
       const offset = input.offset ?? 0;
       // skill 资源同样受 `tools.fs.maxReadBytes` 管。此前这一支写死 256KB 且照收模型传的任意
       // `limit`，于是 skill 目录里一个大文件能整份读进来 —— 两条读路径的预算必须是同一份，

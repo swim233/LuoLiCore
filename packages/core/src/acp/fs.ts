@@ -82,18 +82,18 @@ export class AcpFs {
   }
 
   /**
-   * 两件必须**先于** `FileTools` 发生的事，各有一条理由：
+   * 两件先于 `FileTools` 发生的事，各有一条理由：
    *
-   * ① **边界先判。** `FileTools.write()` 是先量 `maxWriteBytes` 再 `jail.resolve()`（`readText` 反过来，
-   *    且那边的注释写明了理由：「越界是安全信号，不该被一句参数抱怨盖掉」）。一次越界的超大写入因此
-   *    会被报成 `write_too_large` —— 什么都没落盘，但**安全信号被一句体积抱怨盖住了**。这条链的输入是
-   *    外部 agent 的 JSON，那句话必须是「你出界了」。
-   * ② **目录不是文件。** 读一个**空**目录时 `statSync(dir).size` 在 btrfs 上是 0，于是 `readLineWindow`
-   *    的 `position < size` 一次都不进循环、EISDIR 永远不抛，交回一个 `ok: true` + **空正文** ——
-   *    而空正文交给一个全量覆盖的写端就是清空文件。写一个目录则死在备份那一步的 `cpSync` 上，
-   *    报一句不带 `EISDIR` 的 `Recursive option not enabled`，agent 拿它没法做任何事。两档都在这里
-   *    收成一句能照着改的话。（非空目录在 ext4 / btrfs 上都会如实抛 EISDIR —— 但「看文件系统」不是
-   *    一个可以留在安全边界上的判据。）
+   * ① **边界先判。** `FileTools` 两条路现在都是「先 `jail.resolve()` 再量参数」（`readText` 一直如此，
+   *    `write()` 在 docs/05 §3.1 那一轮补齐 —— 此前它先量 `maxWriteBytes`，于是一次越界的超大写入报出来
+   *    的是 `write_too_large`，安全信号被一句体积抱怨盖住）。**所以这里不再是在补一个不对称**：`#call`
+   *    照样会把 `PathJail` 抛的裸 `Error('path_denied')` 收成一句带 `JAIL_HINTS` 的 `invalidParams`。
+   *    留着它是两件事 —— `writeTextFile` 无论如何都要拿这一步的返回值当 `#written` 的键；以及防御纵深，
+   *    这条链的对面是一台**外部** agent，那句「你出界了」不该取决于 `FileTools` 里两行的先后。
+   * ② **目录不是文件。** 读那半边的判据与理由都在 `FileTools.#isDirectory` 上（同一件事两处都判，那边
+   *    `read` / `readText` 各自返回 `path_is_directory`），不在这里重推一遍；写那半边 `FileTools` 没有这道
+   *    判，它死在备份那步的 `cpSync` 上、报一句不带 `EISDIR` 的 `Recursive option not enabled`，agent 拿它
+   *    没法做任何事。两档在这里收成一句能照着改的话，且分读写 —— ACP 这条链上没有列目录的 method。
    */
   #target(path: string, verb: 'read' | 'write'): string {
     let target: string;

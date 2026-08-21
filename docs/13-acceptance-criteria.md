@@ -133,6 +133,7 @@
 | [x] AC-TG-024 (自动) ★ | 同一会话连发 3 条都会触发的消息（`perKey=3`） | 三轮**同时**在跑（`turns` 里 3 行 `running`），不是排队等前一轮说完；`perKey=1` 时后两条进队列并最终各自跑完，一条都不丢 | 〔telegram.concurrency.test.ts〕
 | [x] AC-TG-025 (自动) ★ | 一批 update 同时到达，其中一条的入口段（媒体下载 / `onMessage` 钩子）很慢 | update 并发派发且在途数不超过 `global + queueMax`（到顶不再 `getUpdates`）；同一个 chat 的归档顺序仍等于用户说话顺序；单条 handler 抛错只上报不中断轮询 | 〔telegram.concurrency.test.ts〕
 | [x] AC-TG-026 (自动) | 一条被切成多片的长回复 | 每片都发出去，但**只有第一片**带 `reply_parameters`（否则群里刷出一串引用块）；流式与非流式（含「没配可用模型」那条兜底）两条投递路径一致；没有触发消息 id 时一片都不带（docs/14 §2 Q10） | 〔regression.round10.test.ts〕
+| [x] AC-TG-027 (自动) | ACP 进度卡片上的 `⛔ 取消` 按钮 | `callback_data` 恰好是 `c:<turnId>` —— 走的是 [08 §6](./08-telegram-adapter.md) 那条**既有**通道（`bot.ts` 的 handler、`TurnRegistry.cancel` 的「发起人或 owner」判据、收尾那次「⛔ 已取消」都已经在），**不新开一种 callback 种类**；`turnId` 缺席、或 `c:`+turnId 超过 Bot API 的 64 字节上界时整个按钮不挂（一个点下去必然答「只有发起人或管理员可以取消」的按钮比没有按钮更坏）；**终帧把键盘撤掉**，且撤键盘与改正文是**同一次编辑**（分两次要在 `perChatPerMinute` 那 20 个槽位里排两回队）；键盘参与刷新判据 —— 键盘从有到无是一次真的变化，不算它的话「正文被硬收成同一串」时终帧会被「字节没变」整条吃掉，按钮永远留在一张跑完的卡片上；进程帧的键盘是常量，所以它一条编辑都加不出来（同一段 30 次工具调用的输入，带按钮与不带按钮逐帧字节相同、调用次数相同）| 〔acp.card.test.ts〕
 | [x] AC-ACL-001 (自动) ★ | `BLOCKED` 用户私聊 | 无回复、**不入库**、无 token 消耗；只有一条 `access.denied` 日志 | 〔access.commands.test.ts、security.test.ts〕
 | [x] AC-ACL-002 (自动) ★ | `OWNER` 在群 `G_LIMITED` @bot | `effective=limited`：写/执行类工具不在 `activeTools` 中 | 〔security.test.ts〕
 | [x] AC-ACL-003 (自动) ★ | `LIMITED` 用户在群 `G_TRUSTED` @bot | `effective=limited` | 〔security.test.ts〕
@@ -296,6 +297,9 @@
 | [x] AC-TOOL-052 (自动) ★ | 派一个 `definition.tools` 白名单里含「本来会被折叠」的工具的子 agent | `search_tools` **不在**它的工具目录里（`agentKind==='main'` 那道闸，防它往父轮共享的 `expandedTools` 里写）；白名单里的工具**全部常驻**、逐条带描述，子 agent 的目录与按需暴露之前逐字节一致（[07 §4.1](./07-skills-plugins-mcp.md#41-配置)） | 〔subagent.test.ts、tools.catalog.test.ts〕
 | [x] AC-TOOL-053 (自动) ★ | `FileTools.readText()` 读一个混着行首数字 / CRLF / 四字节 emoji / CJK 的文件，另各读一个带 BOM 的与一个末行无换行的 | 混合那个文件的正文**逐字节等于磁盘内容**（`Buffer.from(content).equals(readFileSync(...))`），不带 `行号<TAB>` 前缀；BOM 那个同样逐字节相等（`TextDecoder` 默认会摘掉 BOM，`ignoreBOM` 挡住它）；末行无换行的那个正文原样、不补换行（这一条判的是字符串相等而不是字节相等 —— 那个 fixture 是纯 ASCII，两者等价）。**必须带一条 `read_file` 对照**（同一文件走那条路一定带前缀），否则断言在验证自己的公理。守的是「读出来 → 改两行 → 全量写回」不会把整个文件换成加了行号的垃圾（[05 §3.1](./05-tools-and-permissions.md)）| 〔files.readtext.test.ts〕
 | [x] AC-TOOL-054 (自动) ★ | `readText` 超 `tools.fs.maxReadBytes`；以及读一个含 `0xFF` 的非 UTF-8 文件 | 两者都 fail-closed：`read_too_large` / `not_utf8`，返回对象**只有 `{ok,error,hint}` 三个键**，一个字节的正文都不交回；`readLineWindow` 在**产生侧**就把 `content` 置空，不靠调用方记得别读那个字段。理由同一条：返回形状里没有位置能说出「截了」或「有损了」，而这条路的正文会被原样写回文件。分岔要有对照 —— 一个等价的非 UTF-8 文件走 `read_file` 照旧有损解码、正文里带着 U+FFFD 交回来（那边给模型看、从不写回）| 〔files.readtext.test.ts〕
+| [x] AC-TOOL-055 (自动) ★ | 读一个目录（空的与非空的）走 `read_file` / `readText` / `skill://…`；写一个目录路径走 `write_file` | 四条都是 `path_is_directory`，**复用 `delete_file` 那个码**不新造同义词。此前这件事的表现**取决于文件系统**：目录的 `statSync().size` 在 btrfs 上是 0，于是 `readSlice` 的 `want` 是 0、`readLineWindow` 的 `position < size` 一次循环都不进 —— `readSync` 从不被调用、EISDIR 永远不抛，交回 `ok:true` + **空正文**，而空正文喂给一个全量覆盖的写端就是一次静默清空（ext4 上 size 是 4096，会如实抛）。所以**断言一律压在错误码上，绝不断言「抛了 EISDIR」**。返回对象只有 `{ok,error,hint}`，一个正文字段都不给；判据顺序是越界 → 是不是目录 → 窗口参数（`{limit:0}` 读目录时报「那是个目录」，而同样的 `{limit:0}` 读文件照旧 `invalid_line_window`）；写侧那道排在 `mkdir` / 备份 / tmp 落地**之前**，所以撞上它时树一个字节没动（此前死在备份那步的 `cpSync` 上，报一句不带 `EISDIR` 的 `Recursive option not enabled`）| 〔files.dir-read.test.ts〕
+| [x] AC-TOOL-056 (自动) ★ | `tools.fs.allowHostFsForOwner` 打开（jail 的 root 是"整机根"而 base 是会话 workspace）时，对边界底下 0 层、1 层、2 层的目录各来一次 `delete_file(recursive:true)` | 0 层与 1 层都 `recursive_delete_too_shallow`，2 层放行。深度走 `PathJail.depthFromBoundary` **对着可达边界量**，不是对着相对路径的解析基点 —— 按基点数的话 host-fs 模式下任何绝对路径都会攒出一串 `..` 段（`/etc` 数出 7 层），那道闸对整个宿主文件系统近乎无效。默认模式下两个基准是同一个目录，行为**逐字节不变**（`tools.round8.test.ts` 那条原样绿）。hint 里的数字也是边界基准；判据留在 `PathJail` 里而不是让调用方自己 `relative()`（类注释：不要在别处重算前缀）。回收站落点仍按 `jail.root` 解析 —— 两个基准刻意不同，回收站必须落在一个确定写得进、且会被 `gcFiles` 收拾的地方 | 〔jail.deny.test.ts〕
+| [x] AC-TOOL-057 (自动) | 一次 ACP 调用，`sandbox.plan` 不是 `'host'`（于是 `terminal` 能力不申报）而 `agents[].tools` 里有 `bash` | 结果里带 `degraded`，其中一条就是「有 bash 但 terminal 没申报，它执行不了」。**这是给模型看的**，与 `acp.run` 那条 warn 的 `data.degraded` 同源 —— 此前那些话只进日志，模型一个字看不到，于是它会让 agent 去跑命令、拿回一个说不清的失败、然后绕路或者编一个理由。按 `AcpRunResult` 的两条既有契约落位：排在 `output` / `stderr` 之前（长字段最后，万一被截头部还活着），每条 note 与总条数都有量出来的上界（有一条 note 里嵌着 jail 构造失败的 `error.message`，那是不可控长度），空数组时**这个键不出现**（同 `filesWritten` / `terminals`）| 〔acp.runtime.test.ts〕
 | [ ] AC-APV-008 (自动) ★ | trusted 用户触发一个需审批的工具，然后无人裁决直到 `ttlMs` 到期 | 调用**挂起等待**而不是当场伪拒绝：先写一行 `state=pending` 并广播 `approval.pending`；到期后原子改成 `state=expired, decided_by=system`，工具返回 `ok:false, error:'未获批准'` 且 hint 说的是「审批已超时」而不是「管理员已拒绝」。轮次在等待中被取消时落 `state=denied, decided_by=system` 并给「轮次已取消」的 hint —— 三条路径都 fail-closed，工具一次都不执行（docs/21 · G-API-12） |
 | [ ] AC-APV-010 (自动) ★ | 命中规则后 owner 在 WebUI 点 `[批准执行]` | `decide` 用 `UPDATE … WHERE state='pending' AND expires_at>?` 抢裁决权，只有真改到一行才唤醒等待者；**批准之后原工具调用才继续执行**，落 `state=approved, decided_by=owner, decision_channel=webui`。对已裁决/已过期的行重复裁决返回 `changed:false`，不重复唤醒 |
 | [ ] AC-APV-011 (自动) | `rememberWithinTurn=true` 时同轮重试一个刚过期的调用 | 复用上次结论不再挂第二个 `ttlMs`，但 hint 仍是「审批已超时」—— 只记布尔会让模型把超时说成「管理员已拒绝」 |
@@ -324,6 +328,7 @@
 | [x] AC-SUB-016 (自动) | `agents/researcher.md` 写好 frontmatter + 正文 | 扫出来的定义缺省值与 `agent.agents` 那套一致（model=low / max-steps=8 / min-role=limited）；正文即 instructions；`agent.agents` 里的同名定义覆盖它，只在文件里的照常保留（docs/14 §2 Q5-a） | 〔regression.round10.test.ts〕
 | [x] AC-SUB-017 (自动) | 目录里放一个 name 与文件名不符的 .md、一个正文为空的 .md | 两个都进 `errors` 并各记一条 `agent.file_invalid`，**其余定义照常加载**（一个写错不该让整批消失，也不中止启动）；目录不存在时是空结果而不是异常 | 〔regression.round10.test.ts〕
 | [x] AC-SUB-018 (自动) ★ | 一个别名为 `low`（看不了图）的子 agent，轮内有工具注入过图片（`turn.mediaInjected`）；再跑一次纯文本的 | 前者当步切到 `vision` 别名（信号走真实那条路：工具执行时调 `subAgent.onMediaInjected()`，父轮那个 `turn.mediaInjected` 刻意**不**参与子 agent 的判据 —— 父轮的图不在它的 messages 里），且 `usage_ledger` 记的是**实际用的**那个（切了却按定义里那个记，钱就算到没跑的模型上）；后者原样留在 `low`，不被顺手升到贵的别名。子 agent 此前一条 vision 判据都没有 —— 它自己 `web_fetch` 回来的图骑在工具结果上进下一步的请求体，那张图直接落在瞎模型上，而 `degradeImageParts` 也救不了它（`isImagePart` 认不出藏在 tool-result 里的图，docs/02 §9 红线 22） | 〔agent.model-wiring.test.ts〕
+| [x] AC-SUB-019 (自动) | 本轮已经落了 N 条 ACP 行（`AcpRunRecorder` 真的写进去的那种），再 `spawn_agent` | 名额照旧是 `agent.maxSubagentsPerTurn` 个**真**子 agent —— 那条 `COUNT(*) … WHERE kind='sub'` 现在排除 `agent_name GLOB 'acp:*' AND model_alias='external'`。旧行为最坏的地方不是「多占一个」，而是 ACP 行是**跑完之后**才插的，于是上界依赖调用顺序（只影响排在它后面的 `spawn_agent`），比两种一致的选择都差；而 `maxSubagentsPerTurn` 管的是本系统自己的 fan-out 成本，ACP 那条路有它自己的三道门 + 目录互斥 + `maxCostUsd`。判据用 `GLOB` 而不是 `LIKE`（SQLite 的 `LIKE` 对 ASCII 大小写不敏感，`ACP:x` 会被漏数），且**前缀与别名两个都要中**：名叫 `acp:squatter` 而别名是 `low` 的真子 agent 照旧占名额。配套把 `agent.agents[].name` 收成拒冒号 —— 真根因是配置侧此前是裸 `z.string()`，而文件那条路 `agents/<name>.md` 一直有正则 | 〔agent.acp-slot.test.ts〕
 | [ ] AC-TASK-001 | 触发一个 >4s 的任务 | 出现占位消息「⏳ 已接收…」+ 取消按钮 |
 | [ ] AC-TASK-002 | 日常聊天（<4s） | **不出现**占位消息 |
 | [ ] AC-TASK-003 | 子 agent 多次 `report_progress` | 占位消息按 3s 节流更新，内容为最新进度 |
@@ -382,6 +387,7 @@
 | [x] AC-LOG-022 (自动) | `GET /api/usage/report?groupBy=provider` | 每个桶带 `cacheReadTokens` / `cacheWriteTokens`，bucket 的裸 provider id 在服务端补成 provider 名。`cache_read_tokens` 一直在记账里，缺了这条聚合时「某家上游的前缀缓存是不是真的」只能靠翻 JSONL 反推请求体逐轮比对前缀 —— 而中转站的命中可能是概率性的，只有按 provider 看这个比值才测得出（[04 §5.1.1](./04-agents-and-providers.md)、[09 §3.11](./09-webui.md)） | 〔webui.gaps.test.ts〕
 | [x] AC-LOG-023 (自动) | `send_message` 被 Telegram 拒收（403 拉黑 / 被踢） | 投递侧落一行 **warn** `tg.send`（`path:'tool'`、`ok:false`、带 traceId 与本次 `tool.call` 的 span id）；`once` 与 `fallback` 两条**抛出去**的路径同样落。此前五个调用点全硬写 `ok:true`，失败档不可达 —— 只剩没有 traceId 的 `tg.api`，而它回答不了「这一轮到底发出去了什么」（docs/28 · L-LOG-02） | 〔telegram.tools.test.ts、output.pacing.test.ts〕
 | [x] AC-LOG-024 (自动) ★ | 一次 ACP 调用跑完，查它在 `agent_runs` 上那一行与三张计价表 | 外部花费进 `external_cost_usd`（迁移 `0014`；agent 一次 `usage_update` 都没报时是 **NULL** 而不是 0 —— 「没报过」与「报了 0」是两件事），**同一行的 `cost_usd` 恒为 0**，于是 `SELECT SUM(cost_usd) FROM agent_runs` 全表仍然是 0；行靠 `kind='sub'` + `agent_name='acp:<name>'` + `model_alias='external'` 认（迁移是附加式的，`kind` 上那条 CHECK 一个字没碰）；`usage_ledger` / `quota_counters` / `turns` **零新增** —— 那个数不是我们的钱，口径由外部 agent 定、我们无法核对，摆在自己的成本旁边就是邀请人把两者相加（唯一的闸仍是 `agent.acp.maxCostUsd`）；记账本身失败时**调用的结果不变**，只多一条带 `recordFailed` 的 `acp.run` warn（一次已经改完仓库的调用报成失败，模型会以为什么都没发生）| 〔acp.runtime.test.ts〕
+| [x] AC-LOG-025 (自动) | ACP 会话内 `allow_always` 记忆命中时落的那条审计行，查 `decided_by` 与 `decision_channel` 两列 | 两列**不同值**：主体是 `acp:always`（刻意让 `parsePrincipal` 解不出来 —— 它不是一个人），通道是 `acp`（`decision_channel` 取值域的第四个值，前三个是 `telegram` / `webui` / `system`）。此前写入侧把裁决者原样抄进了通道列，于是审批卡那一格（渲染的正是 `decided_by · decision_channel`）把同一个字符串印两遍，而按通道分桶的查询会多出一个取值域外的桶（docs/21 · G-UI-04）。前端一个字节都不改，仍然是 `decidedByLabel ?? decided_by ?? 'system'` 再挂一个通道 | 〔acp.permission.test.ts〕
 | [ ] AC-LOG-003 ★ | 展开任一 `tool.call` | 含完整输入、输出（或截断标记+全文引用）、耗时、是否沙箱、是否经审批 |
 | [ ] AC-LOG-004 (自动) ★ | 求和校验 | 该 turn 所有 `usage_ledger.cost_usd` 之和 == `turns.cost_usd`（误差 <1e-9） |
 | [ ] AC-LOG-005 (自动) | 子 agent 的 span | `parent_span_id` = 派发它的 `tool.call` span；费用计入同一 `turn_id` |
@@ -611,6 +617,7 @@
 | [x] AC-SEC-028 (自动) | 子进程与凭据 | `LUOLI_MASTER_KEY` / `BOT_TOKEN` / `WEBUI_PASSWORD` 不进子进程的 env（与 `HARNESS_ENV_DENY` 同一份判据：两处都是我们看不见内部行为的进程），而 `process.env` 其余部分照旧整份交下去 —— agent 要用它自己的登录态；`--approval-mode` **无条件下发**，这一档由本系统的配置说了算而不由磁盘上那份 profile 说了算（默认值是 `yolo`，而运维把它拨回 `write` 时必须真的生效）；`extraArgs` 里重写任何一个被管着的 flag 在写入端当场拒收 | 〔acp.runtime.test.ts〕
 | [x] AC-SEC-029 (自动) ★ | ACP 的反向 fs 边界 | jail 是**新建**的 `PathJail`，root = `realpathSync(dir)`，与 `session/new` 的 `cwd`、子进程的 cwd 是同一个字面量（**不复用** `filesFor(workspace, role)` —— 那份的 root 是 `data/workspace/<chatId>`，且 `tools.fs.allowHostFsForOwner` 一开就是 `/`）；绝对路径越界、软链越界、`tools.fs.denyGlobs` 命中都在碰盘之前被拒，且**边界判据排在体积判据之前**（越界是安全信号，不该被一句参数抱怨盖掉）；读走 `readText` 所以正文**不含 `行号<TAB>` 前缀**（ACP 的写是全量覆盖）；超预算与非 UTF-8 都 fail-closed 且**不返回被截断的正文**；`line` / `limit` 拒收而不纠正；写经 `maxWriteBytes` 闸 + 覆盖前备份（真落在 `<root>/.luoli-bak/`）+ tmp/rename 原子落地 | 〔acp.fs.test.ts〕
 | [x] AC-SEC-030 (自动) ★ | ACP 的逐条审批（**不是默认档**：默认 `auto`，[14 §2](./14-open-questions.md) Q8-c） | `permissionMode: ask` 走同一张 `approvals` 表、同一套 `approval.rules` / TTL / 双通道裁决；`tool_name` 恒为 `acp_permission`（不按 kind 拆名字）；风险由 `toolCall.kind` 推而未知值落 medium、越界抬 high；**`approval.skipForOwner` 在这一处反过来豁免**（发起人是外部 agent 而非 owner 本人），所以 owner-only 的路径上 pending 行仍然真的出现；`allow_always` / `reject_always` 只落会话内存（绝不进 `approval.rules`）而**命中照旧落一条 `decided_by=acp:always` 的审计行**；`auto` / `deny` 一行都不落库；`signal` 触发时必须 settle 且那一档回 `cancelled` 是真话；agent 一个能表达我们结论的档都没给时回 JSON-RPC error + `session/cancel` → `acp_permission_unanswerable`，**不回 `cancelled` 假装是取消**；`ask` 而运行时没有审批 broker 时 `spawn_acp` 整个不进工具目录 | 〔acp.permission.test.ts〕
+| [x] AC-SEC-031 (自动) ★ | 一条 `X/**` 形状的 `tools.fs.denyGlobs`，对 `X` 自己来一次 `read` / `move_file` / `delete_file`；再对 `X/里面的文件` 来一次；再拿一个 `X-backup` 做对照 | `X` 自己与它底下的东西**都** `path_denied`，`X-backup` 不受影响（派生模式仍走 minimatch，不是前缀比较）。minimatch 下 `X/**` 本来**不匹配 `X` 自己**，而 `tools.fs.denyGlobs` 的默认值形状几乎全是这个（`**/.ssh/**`、`<root>/config/**`、`<root>/memory/**`、`<root>/skills/**`、`<root>/plugins/**`，加 `selfAuthoringDenyGlobs()` 那两条绝对路径）—— 于是被保护目录**本身**此前有两条完整的绕行：①`move_file` 一道额外的闸都没有，`move_file('skills','x')` 把整棵树搬到名单之外、改完再搬回来，`docs/07 §6.1`「内容变了就打回未启用」那道闸（住在 `PluginManager.writeSource` 里）整条被绕过；②`delete_file` 的深度闸在 host-fs 模式下按错的基准量，同样放行（见 AC-TOOL-056）。**这不是新开一道门，是把一道本来就想有的门修严**：判据只有一份，`move` / `remove` / `list` / `grep` / `read` 走的是同一个 `resolve`。派生在构造时算一次（`resolve()` 是每次 fs 调用都走的热路径），而 `<root>` 仍在**匹配时**替换（挪到构造会让「进程 cwd 在构造之后变了」的行为静默改变）；不以 `/**` 结尾的 glob（`**/*.pem`、`<root>/data/luoli.db*`）语义一个字不变。同族还钉住 `write` 的**路径判据排在体积闸之前** —— 一次越界的超大写入此前报的是一句体积抱怨，安全信号被参数抱怨盖掉了 | 〔jail.deny.test.ts〕
 | [ ] AC-SEC-021 | 默认配置（`approval.rules` 为空）下让 `trusted` 用户触发 `bash` | 启动日志有一条 `approval.no_rules` 警告、stderr 有对应提示、WebUI 审批页顶上说明「0 条规则时 conditional 等于 never」—— 门是开的这件事必须说出来（docs/27 · S-02，选定方案②） |
 
 ## 12. 运维与稳定性（AC-OPS）
@@ -636,16 +643,16 @@
 |---|---|---|---|---|---|
 | 配置与 DB | | 15 / 25 | | | |
 | **上下文引擎** | | 31 / 40 | | | |
-| Telegram 与准入 | | 22 / 46 | | | |
+| Telegram 与准入 | | 23 / 47 | | | |
 | Agent 与 Provider | | 26 / 46 | | | |
-| 工具/沙箱/审批 | | 55 / 92 | | | |
-| Subagent 与任务 | | 26 / 44 | | | |
+| 工具/沙箱/审批 | | 58 / 95 | | | |
+| Subagent 与任务 | | 27 / 45 | | | |
 | 记忆 | | 1 / 13 | | | |
-| 日志与成本 | | 9 / 29 | | | |
+| 日志与成本 | | 10 / 30 | | | |
 | 扩展生态 | | 29 / 53 | | | |
 | WebUI | | 15 / 89 | | | |
-| 安全 | | 14 / 30 | | | |
+| 安全 | | 15 / 31 | | | |
 | 运维 | | 2 / 10 | | | |
-| **合计** | | **245 / 517** | | | |
+| **合计** | | **252 / 524** | | | |
 
 **整体通过条件**：全部 ★ 项通过 + 非 ★ 项通过率 ≥ 95% + 所有豁免项经需求方书面确认。

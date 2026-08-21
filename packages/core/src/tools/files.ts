@@ -148,8 +148,22 @@ export class FileTools {
     return this.jail.resolve(path);
   }
 
+  /**
+   * 目录不是文件。`statSync(目录).size` 在 btrfs 上是 0，于是 `readSlice` 的 `want` 与
+   * `readLineWindow` 的 `position < size` 都一次不进 —— `readSync` 从不被调用，**EISDIR 永远不抛**，
+   * 交回一个 `ok: true` + 空正文，而空正文交给一个全量覆盖的写端就是一次静默清空。ext4 上目录
+   * 的 size 是 4096 会如实抛 EISDIR，也就是说「读一个目录报什么」此前取决于文件系统 —— 那不是
+   * 一个能留在判据上的东西，所以在这里显式判（同 `acp/fs.ts` 的 `#target`，那条路早就判过了）。
+   */
+  #isDirectory(target: string): boolean {
+    // 不存在时说「不是目录」：读那两条路随后照旧如实抛 ENOENT，与从前一个字不变。
+    try { return statSync(target).isDirectory(); } catch { return false; }
+  }
+
   read(path: string, offset = 0, limit = this.maxReadBytes): Record<string, unknown> {
     const target = this.jail.resolve(path);
+    if (this.#isDirectory(target)) return { ok: false, error: 'path_is_directory',
+      hint: `${relative(this.jail.root, target) || '.'} 是目录不是文件；要看它下面有什么用 list_dir` };
     const slice = readSlice(target, offset, Math.min(limit, this.maxReadBytes));
     const more = offset + slice.read < slice.size;
     return { ok: true, path: relative(this.jail.root, target), content: numberLines(slice.content, slice.firstLine), firstLine: slice.firstLine, offset, bytes: Buffer.byteLength(slice.content),
@@ -173,6 +187,10 @@ export class FileTools {
    */
   readText(path: string, options: { line?: number; limit?: number } = {}): Record<string, unknown> {
     const target = this.jail.resolve(path); // 先解析：越界是安全信号，不该被一句参数抱怨盖掉
+    // 目录同样排在窗口参数之前：`{limit: 0}` 读一个目录时「那是个目录」比「limit 要 ≥1」有用得多，
+    // 而两句话里只有前者说得出下一步该做什么。
+    if (this.#isDirectory(target)) return { ok: false, error: 'path_is_directory',
+      hint: `${relative(this.jail.root, target) || '.'} 是目录不是文件；这条路只读文件正文` };
     // 窗口参数照 `read_file` 的 schema 那样收（`z.number().int().positive()`）。这条路的调用方是
     // **外部** agent 的 JSON，而这两个数只被 `Math.max`/`Math.trunc` 摸过 —— 那看起来已经兜住了：
     // NaN 会一路走到「ok:true + 坐标是 NaN 的正文」，`limit: 0` 会走到「ok:true + 空正文」，
@@ -326,9 +344,14 @@ export class FileTools {
   }
 
   write(path: string, content: string): Record<string, unknown> {
+    const target = this.jail.resolve(path); // 先解析：越界是安全信号，不该被一句参数抱怨盖掉
+    // 写一个目录路径此前死在下面备份那步的 `cpSync` 上，报一句不带 `EISDIR` 的
+    // `Recursive option not enabled` —— 模型拿它没法做任何事，还会以为是权限或磁盘问题。
+    // 读那两条路已经在判了，这一条是把同一句话补到写侧（判据同 `#isDirectory`）。
+    if (this.#isDirectory(target)) return { ok: false, error: 'path_is_directory',
+      hint: `${relative(this.jail.root, target) || '.'} 是目录不是文件；要写它下面的文件就把文件名也带上` };
     const bytes = Buffer.byteLength(content);
     if (bytes > this.maxWriteBytes) return { ok: false, error: 'write_too_large' };
-    const target = this.jail.resolve(path);
     mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
     if (existsSync(target)) {
       // 备份名带 ulid：只按毫秒命名时同一毫秒里的两次写入会互相覆盖，而备份存在的意义
@@ -363,8 +386,12 @@ export class FileTools {
 
   /**
    * 目录整棵搬进回收站等价于 `rm -r`，所以按 docs/05 §3.1 加两道闸：要显式 `recursive`，
-   * 且路径深度 ≥2。审批弹窗上只有一个路径，owner 分不出这一下删的是一个文件还是半个工作
+   * 且离**可达边界** ≥2 层。审批弹窗上只有一个路径，owner 分不出这一下删的是一个文件还是半个工作
    * 目录，而 `delete_file` 是 `approval: 'always'` —— 点下去就真的搬走了。
+   *
+   * 回收站的落点按 `jail.root`（会话 workspace）解析，而深度按边界量 —— 两个基准刻意不同。于是
+   * host-fs 模式下删 `/home/u/x/y` 会把它搬进会话工作目录里，看着别扭但是对的：回收站必须落在
+   * 一个我们确定写得进、且会被 `gcFiles` 收拾的地方，而边界那一侧可能是 `/`。
    */
   remove(path: string, recursive = false): Record<string, unknown> {
     const target = this.jail.resolve(path);
@@ -373,8 +400,13 @@ export class FileTools {
     const directory = statSync(target).isDirectory();
     if (directory) {
       if (!recursive) return { ok: false, error: 'path_is_directory', hint: `${inside || '.'} 是目录；要连里面的内容一起删就显式传 recursive: true` };
-      const depth = inside.split('/').filter(Boolean).length;
-      if (depth < 2) return { ok: false, error: 'recursive_delete_too_shallow', hint: `${inside || '.'} 的深度是 ${depth}，递归删除只允许作用在工作目录的二级及更深路径上` };
+      // 深度对着**可达边界**量（`jail.depthFromBoundary`），不是 `inside` 那个基点：`jail.root` 只是
+      // 相对路径的解析基点，host-fs 模式下边界是 `/` 而它仍是会话 workspace，于是任何绝对路径都会
+      // 攒出一堆 `..` 段被数进来（`/etc` 数出来是个大数），那道闸对整个宿主文件系统近乎无效。
+      // `inside` 仍相对 root —— 它是给人看的那一半（回给模型的路径一律以会话目录为基点，原样再交
+      // 回来还能解回同一个文件），两个基准刻意不同。
+      const depth = this.jail.depthFromBoundary(target);
+      if (depth < 2) return { ok: false, error: 'recursive_delete_too_shallow', hint: `${inside || '.'} 在可达边界底下只有 ${depth} 层，递归删除只允许作用在二级及更深的路径上` };
     }
     const trash = this.jail.resolve(`${this.options.trashDir ?? '.luoli-trash'}/${Date.now()}-${ulid()}/${basename(target)}`);
     mkdirSync(dirname(trash), { recursive: true, mode: 0o700 });

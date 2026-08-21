@@ -161,7 +161,7 @@ export const CONFIG_DESCRIPTIONS: Record<string, string> = {
   'tools.fs.maxWriteBytes': 'write_file 单次写入的字节上限。',
   'tools.fs.showHidden': 'list_dir 是否列出以点开头的隐藏文件。',
   'tools.fs.allowHostFsForOwner': '允许 owner 的文件工具越过沙箱直接读写宿主文件系统。★ 危险：等于把宿主的文件系统交给模型，只在你完全清楚代价时打开。',
-  'tools.fs.denyGlobs': '文件工具一律拒绝访问的 glob 列表，一行一条；<root> 指仓库根。密钥、私钥、数据库与配置目录默认在内，删条目等于放开对应的读写。',
+  'tools.fs.denyGlobs': '文件工具一律拒绝访问的 glob 列表，一行一条；<root> 指仓库根。以 /** 结尾的条目连那个目录本身一起拒 —— 写了 X/** 就不用再补一条 X（补了只是冗余，不补也没有洞），模型因此既读不到 X 底下的东西，也搬不走、删不掉 X 那棵树。密钥、私钥、数据库与配置目录默认在内，删条目等于放开对应的读写。',
   'tools.fs.trashDir': 'delete_file 的软删目录 —— 文件挪进去而不是真删，便于事后找回。',
   'tools.fs.backupDir': '覆盖写之前把原文件备份到哪个目录。',
   'tools.exec.defaultTimeoutMs': 'bash / python 没指定超时时用的默认超时（毫秒）。',

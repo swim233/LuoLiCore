@@ -56,6 +56,15 @@ function script(vars: Record<string, string>): void {
 
 const run = (manager: AcpManager, acp: AcpSettings, task = '把 probe.txt 里的 hello 改成 HELLO', extra: Record<string, unknown> = {}) =>
   manager.run({ task, dir: WORK }, acp, { abortSignal: new AbortController().signal, outputBudgetBytes: 65_536, dirWaitMs: 500, ...extra });
+/**
+ * 宿主侧闸门。`plan` 的答案由用例给 —— `degraded` 那几条 note 的产生条件全挂在它上面
+ * （`reason` 更是用例可控的任意长度，那正是「一条 note 里嵌着不可控长度的字符串」的形态）。
+ */
+const host = (mode: 'host' | 'jail' | 'docker' = 'host', reason?: string) => ({
+  fs: { denyGlobs: [] as string[], maxReadBytes: 262_144, maxWriteBytes: 5_242_880, backupDir: '.luoli-bak' },
+  exec: { maxTimeoutMs: 5000, maxOutputBytes: 65_536 },
+  plan: () => ({ mode, ...(reason ? { reason } : {}) }),
+});
 
 beforeEach(() => {
   mkdirSync(WORK, { recursive: true });
@@ -511,6 +520,66 @@ describe('ACP · 进程与连接生命周期', () => {
     expect(Buffer.byteLength(JSON.stringify(worst))).toBeLessThanOrEqual(4096);
     // `detail` 的上界是**字节**而不是码元：中文按码元切出来是三倍。
     expect(Buffer.byteLength(worst.detail!)).toBeLessThanOrEqual(512);
+    await manager.close();
+  });
+
+  /**
+   * 「有能力却没申报出去」这件事要**模型也看得见**。此前那几条理由只进 `acp.run` 的
+   * `data.degraded`：运维在 WebUI 日志里看得见，而模型一个字都看不到 —— 于是它让 agent 去跑命令、
+   * 拿回一个说不清的失败，然后绕路或者编一个理由。结果里那一份与日志里那一份**同源**
+   * （`AcpSurface.notes`），不是第二份要手动对齐的文案。
+   */
+  it('terminal 没申报时结果里带那句人话，而它与 acp.run 的 data.degraded 同源', async () => {
+    script({ ACP_TEXT: '我没法跑命令' });
+    const manager = new AcpManager(log);
+    // `sandbox.plan` 不是 host → 整个 terminal capability 不申报，而配置里留着 `bash`。
+    const result = await run(manager, settings({}, { tools: ['read', 'bash'] }), '跑一下测试',
+      { host: host('docker', 'owner 不在 sandbox.bypassRoles 里') });
+    expect(result).toMatchObject({ ok: true });
+    expect(result.degraded).toEqual(expect.arrayContaining([expect.stringContaining('它执行不了')]));
+    expect(result.degraded!.some((note) => note.includes('sandbox.plan=docker'))).toBe(true);
+    // 同源：日志那一行的 `data.degraded` 是同一份未截断的 notes。
+    const line = events.find((event) => event.kind === 'acp.run')!;
+    expect(line.level).toBe('warn');
+    expect((line.data as { degraded: string[] }).degraded).toHaveLength(result.degraded!.length);
+    // 长字段仍在最后：这个键排在 output / stderr 之前，被中间截断吃掉的绝不该是「它执行不了」。
+    const keys = Object.keys(result);
+    expect(keys.indexOf('degraded')).toBeLessThan(keys.indexOf('output'));
+    await manager.close();
+  });
+
+  it('一切正常时这个键不出现 —— 同 filesWritten / terminals 的口径', async () => {
+    script({ ACP_TEXT: '改好了' });
+    const manager = new AcpManager(log);
+    const result = await run(manager, settings({}, { tools: ['read', 'write', 'bash'] }), '改一行', { host: host('host') });
+    expect(result).toMatchObject({ ok: true });
+    // `0 条 = 不出现`：一个恒为 `[]` 的键每次都占几个字节，还让模型每轮都读一遍「没有降级」。
+    expect(result).not.toHaveProperty('degraded');
+    expect(Object.keys(result)).not.toContain('degraded');
+    // 这一档 `bash` 真的能用（terminal 申报了 + approvalMode 默认 yolo），所以一条 note 都不该有。
+    expect(events.find((event) => event.kind === 'acp.run')!.level).toBe('info');
+    await manager.close();
+  });
+
+  it('一条不可控长度的 note 被截到上界之内，结果整体仍在预算内', async () => {
+    script({ ACP_TEXT: '"行\n'.repeat(3000), ACP_STOP_REASON: 'max_tokens', ACP_STDERR_LINES: '400' });
+    const manager = new AcpManager(log);
+    // `plan.reason` 由沙箱那侧给，长度不可控（这条 note 里还嵌得进 jail 构造失败的 `error.message`）。
+    // 失败路径 + 最小预算是最紧的那一档：hint、detail、stderr 与 degraded 要一起装得下。
+    const result = await run(manager, settings({}, { tools: ['bash'] }), '写一大堆',
+      { outputBudgetBytes: 4096, host: host('jail', '长'.repeat(3000)) });
+    expect(result).toMatchObject({ ok: false, error: 'acp_max_tokens' });
+    // 上界是 `DEGRADED_NOTE_BYTES`（384 字节）与 `DEGRADED_MAX_NOTES`（4 条）。按**字节**量而不是
+    // 码元：这几句全是中文，按码元切出来是三倍。
+    expect(result.degraded!.length).toBeLessThanOrEqual(4);
+    for (const note of result.degraded!) expect(Buffer.byteLength(note)).toBeLessThanOrEqual(384);
+    // 真的被截了（而不是碰巧短），且截的是中间 —— 头尾都还认得出这是哪一条。
+    const clipped = result.degraded!.find((note) => note.includes('省略'))!;
+    expect(clipped).toContain('terminal 未申报');
+    expect(clipped).toContain('bytes');
+    // 「按构造有界」那条保证照旧：`#normalizeOutput` 的中间截断永不触发。
+    expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(4096);
+    expect(Object.keys(result).at(-1)).toBe('output');
     await manager.close();
   });
 });
