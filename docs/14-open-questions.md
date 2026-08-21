@@ -237,7 +237,7 @@ Q13-c 那道闸是这套东西的**主闸**，不是审批。四个写工具虽�
 | T9 | **jail 模式不是安全边界** | D10 的 mode 选项 | 文档与 WebUI 明确警示；默认推荐 docker |
 | T10 | **流式编辑会消耗大量 Bot API 调用**：一条长回复可能编辑 20+ 次 | D18 | 节流 1.5s + 最小增量 24 字符 + 429 时跳过；`output.mode='once'` 可关 |
 | T11 | **`prepareStep` 每 step 重算工具集 ⇒ 工具描述 token 每 step 都发一遍**，而 TOOL CATALOG 块与 provider 的 tools 数组里那两份描述是重复的 | 安全需要 | **目录按需暴露**（`tools.catalog.*`，[05 §3.12](./05-tools-and-permissions.md) / [07 §5](./07-skills-plugins-mcp.md#5-三者的统一注册流程)）：默认只下发常驻集，外部工具折叠成每组一行、靠 `search_tools` 检索展开；外加目录块去重（`residentDescriptions`）把重复的那一份摘掉。prompt cache 与 `tools.maxRegistered` **退居兜底** —— 前者只在前缀不分叉时有效，后者是静默截断（截断本身现在会在 RUNTIME 块告知，见 `AC-TOOL-020`）|
-| T12 | **子 agent 摘要回灌 ⇒ 主 agent 看不到细节**，可能重复提问或误解 | AI SDK subagent 模式 + 上下文预算 | `read_agent_result` 可按需读全文；`resultMaxChars` 可调 |
+| T12 | **子 agent 摘要回灌 ⇒ 主 agent 看不到细节**，可能重复提问或误解 | AI SDK subagent 模式 + 上下文预算 | `read_agent_result` 可按需读全文；`resultMaxChars` 可调。⚠ **但那个句柄跨不过一次裁剪**：`agentresult://<runId>` 躺在工具结果里，而 level 1 降级把 `tool-result` 的 output **整体**换成 `[已省略工具结果]`（`packages/db/src/context.ts` 的 `elidePart`），改写还是持久化的 —— 降级之后模型手里没有 `runId` 可传，「可按需读全文」就只在**本轮与降级前**成立。要跨轮可靠只有一条路：让子 agent 的结论进主 agent 的**回复正文**（那条消息 `pruneLevel: 0`）|
 | T13 | **AI SDK v7 是较新的 API 表面**，升级可能有破坏性变更 | D20 | 锁 `^7`；升级前跑 AC-AGENT-* 与 AC-CTX-* 全集；provider 与 agent 装配集中在两个文件里，替换成本可控 |
 | T14 | **Plugin 全信任 ⇒ 安装第三方 plugin 等于给 root** | A27 | 默认禁用 + 启用时二次确认 + 只装自己审过的 |
 | T15 | **配额是「事后记账 + 事前预留估算」**，估算不准时可能小幅超支 | 成本只能在调用后才准确知道 | `perTurn.maxCostUsd` 硬止损 + `minReserveUsd` 缓冲 + 安全系数 1.5 |

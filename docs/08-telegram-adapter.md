@@ -217,7 +217,8 @@ sendChatAction('typing')  → 每 4s 续期，直到首条消息发出；之后�
     但仍受 `replyDelayMs` 约束 —— 短回答同样不会秒回。非流式（`mode='once'` 与 agent 直接返回
     字符串）只走 `replyDelayMs` 这一道。
 - **typing 给正文让路**：`typing` 与正文的 `sendMessage` / `editMessageText` 共用同一份 per-chat
-  预算（`telegram.throttle.perChatPerMinute`，默认 20/分钟），而两者的可丢性完全不同 ——
+  预算（**群聊**是 `telegram.throttle.perChatPerMinute`，默认 20/分钟；私聊是另一个桶，见本条最后
+  一颗），而两者的可丢性完全不同 ——
   typing 只在「现在」有意义（Telegram 那边约 5 秒过期），丢一拍谁都看不出来；一次 `editMessageText`
   丢掉就是用户永远看不到那一段字。**让一个可丢的请求占住不可丢请求的槽位本身就是错的**，所以：
   - 本轮有正文**在途**（含被节流器压着排队的那段时间）→ 整拍跳过。
@@ -225,6 +226,13 @@ sendChatAction('typing')  → 每 4s 续期，直到首条消息发出；之后�
     就是最好的 typing，这一档 typing 只剩「还在写」这一层意思（长工具调用期间指示器会闪断，
     这是有意的取舍）。首条消息**之前**照旧 4s 一拍：那时屏幕上一个字都没有，typing 是唯一的信号。
   - **不动 grammY 的桶** —— 那是 Telegram 侧的真实限制，不是我们的节流策略。
+  - ⚠ **那份 20/分钟 只对群聊生效。** `@grammyjs/transformer-throttler` 按 `chat_id < 0` 分流：
+    群聊走 `group` 桶（`perChatPerMinute` 的 60s reservoir），**私聊走 `out` 桶**，而 `bot.ts` 给
+    `out` 的只有 `{ minTime: 1000 }` —— 没有 per-minute reservoir，只有「同一个私聊两次调用至少隔
+    一秒」外加全局 `globalPerSecond`。所以私聊的真实预算是 **~60 次/分钟、串行一秒一拍**，下面那个
+    「储备被吃光后整整 14 秒零投递」的形态**只可能在群聊里发生**。任何按「一分钟只有 20 次」算出来
+    的投递预算，都只在群聊里成立 —— 私聊里算多了会浪费槽位，而**把私聊的算法搬去群聊会直接复现
+    `L-TG-04`**。
   上一版只做了「上一拍没落地就跳过这一拍」，减少的是 typing 的**数量**，而那个计数器是
   per `TelegramOutput` 实例（= per 轮次）的 —— 「队列不再增长」只在单轮成立。实测同一个群里
   6 轮并发时 20/分钟 的储备 17 秒被吃光，随后**整整 14 秒零投递**，排在队首的 `sendChatAction`

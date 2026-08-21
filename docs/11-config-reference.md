@@ -199,7 +199,9 @@ concurrency:
   global: 8                       # 需重启
   queueMax: 20                    # 需重启
   coalesceSameUserMs: 0           # 热更新 · >0 时只为窗口内最后一条开轮次，先到的降级成背景消息
-  turnTimeoutMs: 600000           # 热更新
+  turnTimeoutMs: 600000           # 热更新 · 一轮的墙钟上限，是**所有**长工具的实际天花板 ——
+                                  # agent.harness.timeoutMs（默认 900000）比它大，因此默认配置下
+                                  # 那个 15 分钟从来没生效过（见 agent.harness.timeoutMs 那条）
 cancel:
   commitPartial: false            # 热更新 · 取消时是否提交**没投递给用户**的那部分（已发到屏幕上的一律提交，见 04 §5.3）
 
@@ -248,6 +250,12 @@ agent:
     allowedDirs: []               # 热更新 · **空 = 整个功能关闭**，工具不进模型的工具目录。
                                   # 只能在这里列出的路径（或其子目录）里跑
     timeoutMs: 900000             # 热更新 · 单次上限；超时 SIGTERM，5s 后 SIGKILL
+                                  # ⚠ 默认值大于 concurrency.turnTimeoutMs（600000）——
+                                  # 轮次先超时 → abortSignal → 同一个 SIGTERM，**这 15 分钟
+                                  # 从来没有机会生效**，而运维看到的是「harness 被砍了但我配的
+                                  # 是 15 分钟」。要真用满就得同时抬高 turnTimeoutMs。
+                                  # 表现差别还在错误码上：轮次 abort 落 harness_failed +
+                                  # timedOut:false，不是 harness_timeout（05 §3.5）
     maxOutputBytes: 65536         # 热更新 · 交回模型的输出上限，中间截断
   agents:                         # 子 agent 定义（WebUI 可编辑，见 04 §3.1）
     - name: researcher
