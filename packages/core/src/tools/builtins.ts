@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AgentManager, Config, ContextEngine, FileTools, MemoryStore, ModelRegistry, QuotaGuard, QuotaReservation, Sandbox, SkillLoader, ToolRegistry, UsageLedger, LogSink } from '@luoli/core';
-import { DEFAULT_WEB_RETRY, NOTE_PREFIX, arbitrateAsk, builtinPolicy, captureImage, numberLines, readSlice, runHarness, runSubAgent, webFetch, webSearch, type WebAssetStore, type WebMediaSink, type WebRetryOptions } from '@luoli/core';
+import { DEFAULT_WEB_RETRY, NOTE_PREFIX, acpFailure, arbitrateAsk, builtinPolicy, captureImage, enabledAcpAgents, numberLines, readSlice, runHarness, runSubAgent, webFetch, webSearch, type AcpManager, type AcpSettings, type WebAssetStore, type WebMediaSink, type WebRetryOptions } from '@luoli/core';
 import type { ArchiveRepository, ArchivedMessage, ScopedArchiveRepository } from '@luoli/db';
 import { archiveQuery } from '@luoli/db';
 import { citeArchivedMessages } from './cite.js';
@@ -122,7 +122,13 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
    * 收整个 `ToolExecutionContext` 而不只是 `turn`：子 agent 的别名不在 turn 上（它是
    * `runSubAgent` 的局部变量，经 `agentAlias` 带过来），而这张图要交给的正是它（`docs/04 §5.2`）。
    */
-  webMedia?: { assets: WebAssetStore; visionAvailable: (context: ToolExecutionContext) => boolean } }): void {
+  webMedia?: { assets: WebAssetStore; visionAvailable: (context: ToolExecutionContext) => boolean };
+  /**
+   * ACP 客户端（M13）。**可选**：没有它 `spawn_acp` 照旧注册（`main.ts` 那条
+   * 「每个 `TOOL_POLICY` 条目都已注册」的启动断言要求无条件注册）但 `available()` 恒假，
+   * 于是它连模型的工具目录都不进。分段用例不需要起一个真管着子进程的 manager。
+   */
+  acp?: AcpManager }): void {
   const web = dependencies.web ?? DEFAULT_WEB_RETRY;
   /**
    * 本次调用的图片落地口。**每次调用现建**：`visionAvailable` 判的是本轮**当前**别名的能力位，
@@ -438,6 +444,51 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
         traceId: context.turn.turnId, chatId: context.turn.chatId, userId: context.turn.initiatorUserId,
         data: { dir: result.dir ?? input.dir, command: harness.command, exitCode: result.exitCode, timedOut: result.timedOut, ms: Date.now() - started } });
       return result;
+    } });
+  /**
+   * M13 · 起一台本机编码 agent 改宿主上的仓库，走 ACP 协议（`docs/05 §3.5`）。
+   *
+   * 三道门与 `spawn_harness` **1:1 相同**，而且必须相同 —— 风险面是同一个（`docs/14` T17）：
+   * `available()` 判仅 owner + 仅私聊 + 整块开着 + 目录白名单非空 + 至少一台启用的 agent；
+   * `TOOL_POLICY` 判 owner + 每次审批；`AcpManager.run` 再判一次目录。
+   * `timeoutMs: null` —— 它自己有 `agents[].timeoutMs`，注册表那道 60s 兜底 race 会在 agent
+   * 跑到一半时判 `tool_timeout`，而那个进程还在改文件。
+   */
+  const acpSettings = (context: ToolExecutionContext): AcpSettings => (context.turn.config as Readonly<Config>).agent.acp;
+  /**
+   * 多 agent 时给 `agent` 参数加一个枚举，**单 agent 部署 schema 逐字节不变** ——
+   * 一个只有一台 agent 的部署不该因为这个特性多出一个模型必须填的参数。
+   */
+  const acpInputSchema = (names: readonly string[]): z.ZodType<{ task: string; dir: string; agent?: string }> =>
+    names.length > 1
+      ? z.object({ task: z.string().min(10), dir: z.string(), agent: z.enum(names as unknown as [string, ...string[]]) })
+      : z.object({ task: z.string().min(10), dir: z.string() });
+  // description 里那句「跑不了 shell 命令」是实测出来的，**不是保守说法**：本轮
+  // `ACP_CLIENT_CAPABILITIES` 不申报 `terminal`，而 omp 的 `bash` 在没有这项能力时会走到
+  // permission 问过、我们放行了、调用照样以 `Tool call denied by user: bash` 失败。读写改文件不受
+  // 影响（它退回自己直接碰磁盘）。波 3 接反向 terminal 时，这句话与那份实现同一个提交删掉。
+  registry.register({ name: 'spawn_acp', description: '在允许的仓库目录里让一台本机编码 agent（经 ACP 协议驱动）执行任务；仅 owner、仅私聊。它自带一整套工具并会真的改文件 —— 任务要写成自包含的一段话，说清目标、约束和验收方式。**本版不向它开放终端，所以它跑不了 shell 命令**（读、写、改文件都正常）：要跑命令、装依赖、跑测试的活儿改用 bash，或者把命令写进任务里让用户自己跑。',
+    inputSchema: acpInputSchema([]), inputSchemaFor: (context) => acpInputSchema(enabledAcpAgents(acpSettings(context)).map((agent) => agent.name)),
+    policy: builtinPolicy('spawn_acp'), sourcePriority: 90, timeoutMs: null, untrustedOutput: true,
+    available: (role, context) => {
+      const acp = acpSettings(context);
+      return Boolean(dependencies.acp) && role === 'owner' && context.turn.isPrivate && acp.enabled && acp.allowedDirs.length > 0 && acp.agents.some((agent) => agent.enabled);
+    },
+    execute: async (input, context) => {
+      // `available()` 已经判过一遍，这里再判一次：热更新可能在注册与执行之间把整块关掉或把目录
+      // 名单清空，而模型完全可能沿用上一步的工具名（禁用必须是硬边界，CLAUDE.md）。
+      // 整块开关与目录名单由 `AcpManager.run` 判（`acp_disabled`），这里只判它判不到的那两样。
+      // 文案走 `acpFailure` 而不是就地写一句：`ACP_ERROR_HINTS` 是**唯一**来源，工具壳自己抄一份
+      // 的话「先改文档」就只能验到 manager 那一半（`docs/05 §3.5.1` 那张表是它们共同的文档来源）。
+      if (!dependencies.acp) return acpFailure('acp_unavailable');
+      if (!context.turn.isPrivate || context.turn.effectiveRole !== 'owner') return acpFailure('acp_forbidden');
+      return dependencies.acp.run({ task: input.task, dir: input.dir, ...(input.agent ? { agent: input.agent } : {}) }, acpSettings(context), {
+        abortSignal: context.turn.abortSignal,
+        // 与注册表 `#normalizeOutput` 量的是同一个上界（`main.ts` 把它接成 `tools.exec.maxOutputBytes`），
+        // 交给 manager 去减固定字段的余量 —— 让「按构造有界」这件事有一个真实的被除数。
+        outputBudgetBytes: (context.turn.config as Readonly<Config>).tools.exec.maxOutputBytes,
+        trace: { traceId: context.turn.turnId, chatId: context.turn.chatId, userId: context.turn.initiatorUserId, key: context.turn.key },
+      });
     } });
   registry.register({ name: 'read_agent_result', description: '分页读取子 agent 完整结果。', inputSchema: z.object({ runId: z.string(), offset: z.number().int().nonnegative().default(0), limit: z.number().int().positive().max(262_144).default(65_536) }), policy: builtinPolicy('read_agent_result'), sourcePriority: 90,
     execute: (input) => ({ ok: true, ...dependencies.agents.result(input.runId, input.offset, input.limit) }) });

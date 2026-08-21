@@ -88,7 +88,10 @@ describe('telegram side tools', () => {
     // 而**就算注册了它也不该在**——这条 turn 的折叠集是空的（没有 MCP / plugin / custom 工具），
     // `hasDeferrable()` 为假于是整个元工具不进目录。这正是 docs/07 §5 承诺的「纯内建部署的提示词
     // 逐字节不变」：折叠机制在没有东西可折叠时必须完全隐身（`AC-TOOL-049`）。
-    expect(Object.keys(TOOL_POLICY).filter((name) => !active.has(name))).toEqual(['ask_parent', 'report_progress', 'search_tools', 'stay_silent', 'spawn_harness',
+    // `spawn_acp` 缺席的理由与 `spawn_harness` 同一条（三道门任一不成立就不进目录），外加一条
+    // 独有的：这个 harness 没传 `acp` 依赖，而 `available()` 判的第一项就是它在不在 —— 没有 ACP
+    // 客户端的部署里这个工具根本不该露面（同 telegram 那五个与 `deliverable()` 的关系）。
+    expect(Object.keys(TOOL_POLICY).filter((name) => !active.has(name))).toEqual(['ask_parent', 'report_progress', 'search_tools', 'stay_silent', 'spawn_harness', 'spawn_acp',
       'define_tool', 'delete_tool', 'list_tools', 'write_skill', 'install_skill', 'write_plugin', 'install_mcp', 'list_mcp',
       'container_list', 'container_exec', 'container_reset', 'container_inspect', 'container_keep', 'container_logs']);
     closeDatabase(wired.db);

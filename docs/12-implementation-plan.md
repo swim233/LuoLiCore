@@ -1,4 +1,4 @@
-# 12 · 实施指导（M0–M12）
+# 12 · 实施指导（M0–M13）
 
 原则：**每个里程碑都必须是可运行、可验收的**。不允许出现「写了三周代码但跑不起来」的阶段。每个 M 的出口条件对应 [13](./13-acceptance-criteria.md) 的具体 AC 编号。
 
@@ -273,6 +273,72 @@ Harness 抽象。所以这不是「接一个 SDK 类」，而是**起一个外�
 - `install_mcp` 落地的记录 `enabled: false`，且与 `POST /api/mcp` 共用同一份校验。
 
 ---
+
+## M13 · ACP 客户端（波 2）
+
+和 [14 §2 Q8](./14-open-questions.md) / M11 是同一条路，只是这次不走 argv 而走协议：`spawn_acp` 起一台
+**本机已经装好**的编码 agent（对着 `omp` = oh-my-pi 17.4.0 实测的：自包含 ELF，`omp acp` 自述
+「Run Oh My Pi as an ACP server over stdio」），用 `@agentclientprotocol/sdk`（1.3.0，零运行时依赖）
+在 stdio 上以 JSON-RPC 驱动它。波 2 交的是**连接 + 进程生命周期 + 一次 prompt**；**呈现层、逐条审批、
+反向终端归波 3** —— 它们的接口契约（`AcpClientHooks.onUpdate` / `requestPermission`、
+`ACP_CLIENT_CAPABILITIES`）在波 2 就钉住了，好让三个 agent 并行往里填。
+
+⚠️ **SDK 既不管子进程、也不做 `initialize`**，两件事都是我们的账。这和 MCP 那边正好相反：那边
+`StdioClientTransport` 起进程、但**不 `unref`**。我们**刻意也不 unref** —— unref 是把「进程退不出去」
+换成「退出时把一个正在改文件的 agent 连账都不记地丢掉」。答案是 `#children` + `close()`，并在
+`main.ts` 的 `shutdown()` 里紧挨着 `await mcp.close()` 等它。
+
+⚠️ **刻意不用 SDK 的 `connectWith(stream, op)`**：它在 `op` resolve 时就把连接关掉，等于把连接寿命
+绑在一个回调作用域上；而我们的连接要横跨 initialize + session/new + prompt，还要能被外面关掉
+（关停路径与「子进程自己死了」两条都要）。**也不用 `ActiveSession` / `buildSession`**：它把
+`session/update` 灌进一个**无界**异步队列，而喂它的是我们不信任其输出量的子进程 —— 263 条 update
+只是一个 86 秒的任务。
+
+⚠️ **这一轮不申报 `fs`、也不申报 `terminal`。** 协议明文规定字段省略 == UNSUPPORTED，谎报一个我们
+不会答的 method 会让 agent 挂在半个写操作上。实测代价：omp 退回自己直接碰磁盘，于是
+`read`/`write`/`edit` 照样能用（验证过：文件真的改了），但它的 `bash` **执行不了** —— 权限问过、
+也批了，调用仍以 `Tool call denied by user: bash` 失败。波 3 的 terminal handler 与
+`ACP_CLIENT_CAPABILITIES` **必须同一个提交**落地。
+
+**先读 [14](./14-open-questions.md) §2 Q8（Q8-a/b/c）与 T17，以及 [05 §3.5](./05-tools-and-permissions.md)。**
+三道门就是 M11 那三道，而且它们就是全部的门。
+
+**做什么**
+- `packages/core/src/acp/` 五个文件，切法有讲究：`schema.ts`（配置 zod + 运行时契约，**不 import 任何
+  SDK 运行时** —— `config/schema.ts` 要 import 它，而后者被 `scripts/config-schema.ts` 与 WebUI 吃进去）、
+  `errors.ts`（错误码联合 + hint 文案，**一处定义**，manager / session / 工具壳三处共用 —— 散成三份会
+  慢慢漂，而 [05 §3.5](./05-tools-and-permissions.md) 是它们的文档来源）、`process.ts`（spawn、argv、
+  env 策略、Node↔Web stream 桥、stderr 环形缓冲、`stdin.end → SIGTERM → 5s → SIGKILL`；**同样不 import
+  SDK**，纯函数的用例不该为了量一次 argv 把整个 SDK 拖进来）、`manager.ts`、`session.ts`。
+- 把 `mcp/manager.ts` 踩过的坑照抄：`#children` / `#closing` / `#intentional` 三件套、握手超时**当场**
+  把连接与子进程一起收掉、stderr 逐行进 `LogSink` 且半行缓冲有上界。
+- 两道 SDK 给不了的上界：**单行字节上界**（默认 8 MB —— `ndJsonStream` 按 `\n` 切，一个吐 500 MB 单行的
+  agent 会把整行缓冲住；这是 `collectProcess` 那个 `2×cap` 就地 kill 的 ACP 对偶）与
+  `maxUpdatesPerPrompt`（撞上界**只丢弃、不断连**，刻意与 `collectProcess` 分岔：那边溢出源是我们杀得掉
+  的字节流，这边 agent 正在改真实文件）。
+- 目录互斥按 `realpath` 加锁，复用现成的 `turn/keyed-mutex.ts`，等待**有界且可取消**（外层工具是
+  `timeoutMs: null`，让第二个调用干等十五分钟等于把「并发保护」变成「并发阻塞」）。
+- 新开配置块 `agent.acp`，**不扩 `agent.harness`** —— 后者 `args` 的契约是「任务正文作为 argv 的最后
+  一项」，而 ACP 下任务走 `session/prompt`，argv 里根本没有任务。同名同键语义相反是最坏的假开关。
+  `approvalMode` 与 `tools` 是一等配置键、无条件下发成 flag，`extraArgs` 里重写任何一个被管着的 flag
+  当场拒收。
+- 不落库会话：一次工具调用 = 一次 spawn，`finally` 里 `session/close`。理由**不是**「落库会引入进程内
+  状态假设」（那个说法是反的：`sessionId` 是指向外部存储的句柄，与 `sandbox_containers.container_id`
+  同型，落库才是合规形态）。真正的理由是：**持久化 `sessionId` 会把第三道门从「一次审批」偷偷改成
+  「一次审批，此后永久」** —— 一条 `session/load` 带着当初被批过的 `cwd` 重新进那个目录，而这一次
+  没有任何人点头。所以本版不做追问，也没有 `acp_follow_up`。
+- 取消**走协议**：`session/cancel` → 等 `stopReason: 'cancelled'` → 才收进程。三条取消源（用户 abort /
+  `timeoutMs` / `maxCostUsd`）都走这条路。
+
+**出口条件**
+- 默认配置（`enabled: false`、`allowedDirs: []`）下工具**不进模型的工具目录**，但仍然注册着
+  —— 否则 `main.ts` 那条 `TOOL_POLICY ↔ 注册表` 的启动断言会拦死进程。
+- 群聊里、或非 owner → 不进目录；运维把 `tools.overrides.spawn_acp.minRole` 覆盖到 `limited`，两侧都
+  仍然拒绝。
+- 握手超时的那条子进程真的没了（`process.kill(pid, 0)` 抛）；`close()` 要等到每条子进程真死才返回。
+- 同一个目录上的两个并发调用串行执行；第二个的等待有界且可取消。
+- 取消一轮，线上出现的是一条 `session/cancel`，不是一个裸 SIGTERM。
+- StopReason 的四个非正常档一个都不报成功（最危险的是 `max_tokens`：它长得最像成功，而活只干了一半）。
 
 ---
 

@@ -149,7 +149,7 @@
                   "type": "number",
                   "exclusiveMinimum": 0,
                   "default": 20,
-                  "description": "单个会话的发送速率上限（条/分钟）。"
+                  "description": "单个**群聊**会话的发送速率上限（条/分钟）。私聊不受这一项约束 —— 节流器按 chat_id 正负分流，私聊走的是另一个只管最小间隔（1 秒）的桶。"
                 }
               },
               "additionalProperties": false,
@@ -681,6 +681,152 @@
                   "exclusiveMinimum": 0,
                   "default": 65536,
                   "description": "交回给模型的 harness 输出上限，超出从中间截断。"
+                }
+              },
+              "additionalProperties": false,
+              "default": {}
+            },
+            "acp": {
+              "type": "object",
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "总开关。关着的时候 spawn_acp 连模型的工具目录都不进。它与下面的 allowedDirs 任一为空/假，整个功能就是关的。"
+                },
+                "allowedDirs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [],
+                  "description": "ACP agent 允许进入的仓库路径白名单，语义与 harness 那份完全一样。**留空 = 整个功能关闭**。两个并发轮次不会在同一个目录上各起一个 agent（按 realpath 硬互斥，等待有上界）。"
+                },
+                "defaultAgent": {
+                  "type": "string",
+                  "default": "",
+                  "description": "模型没指定用哪台 agent 时用这一台（填名字）。留空就用下面列表里第一台启用的。只配了一台时这一项没有意义。"
+                },
+                "permissionMode": {
+                  "type": "string",
+                  "enum": [
+                    "ask",
+                    "auto",
+                    "deny"
+                  ],
+                  "default": "ask",
+                  "description": "agent 反过来问「这一步准不准」时怎么回：auto 放行、deny 拒绝、ask 交给真人确认。ask 档的真人通道还没接，当前等同 auto 并每次记一条警告。"
+                },
+                "maxUpdatesPerPrompt": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 2000,
+                  "description": "一次任务最多接收多少条进度更新。撞上界之后只丢弃后续更新、**不中断 agent** —— 它正在改真实文件，为了我们装不下而把它掐死是更坏的选择。"
+                },
+                "maxTerminals": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 8,
+                  "description": "🚧 未接线：一次任务里允许 agent 同时开多少个终端。当前这一版不向 agent 申报终端能力（它会自己直接执行命令），所以没有终端可数。"
+                },
+                "progressIntervalMs": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 5000,
+                  "description": "🚧 未接线：把 agent 的进度刷成聊天里那张卡片的最小间隔。当前这一版只在任务结束时交回一份结果，中途没有东西需要节流。"
+                },
+                "maxCostUsd": {
+                  "type": "number",
+                  "minimum": 0,
+                  "default": 0,
+                  "description": "单次任务的花费上限（美元，0 = 不限）。**这是唯一管得住 ACP 花费的地方** —— agent 烧的是它自己那份 provider 凭据，本项目的配额和用量账单都看不见它。撞线时按协议取消，已经改掉的文件不会回滚。"
+                },
+                "agents": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "name": {
+                        "type": "string",
+                        "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+                      },
+                      "enabled": {
+                        "type": "boolean",
+                        "default": true
+                      },
+                      "command": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "profile": {
+                        "type": "string",
+                        "default": ""
+                      },
+                      "approvalMode": {
+                        "type": "string",
+                        "enum": [
+                          "always-ask",
+                          "write",
+                          "yolo"
+                        ],
+                        "default": "write"
+                      },
+                      "tools": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "default": [
+                          "read",
+                          "write",
+                          "edit"
+                        ]
+                      },
+                      "model": {
+                        "type": "string",
+                        "default": ""
+                      },
+                      "mode": {
+                        "type": "string",
+                        "enum": [
+                          "",
+                          "default",
+                          "plan"
+                        ],
+                        "default": ""
+                      },
+                      "extraArgs": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        },
+                        "default": []
+                      },
+                      "handshakeTimeoutMs": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "default": 30000
+                      },
+                      "timeoutMs": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "default": 900000
+                      },
+                      "maxOutputBytes": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "default": 65536
+                      }
+                    },
+                    "required": [
+                      "name",
+                      "command"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "default": [],
+                  "description": "ACP agent 定义数组：名字、可执行名、profile、审批档、允许的工具、模型、会话模式、超时。审批档与工具清单是独立的键而不是自由参数 —— 塞进自由参数就能被一行配置静默去掉，而那两项是权限门。"
                 }
               },
               "additionalProperties": false,

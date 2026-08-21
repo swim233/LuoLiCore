@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { roleRank, TG_ID_PATTERN } from '@luoli/shared';
+import { acpSchema } from '../acp/schema.js';
 import { checkApprovalPattern } from '../approval/rules.js';
 import { APPROVAL_POLICIES } from '../tools/policy.js';
 
@@ -109,6 +110,10 @@ export const HOT_RELOADABLE_CONFIG_KEYS = [
   // harness 的四项同理：`available()` 与 `execute()` 都从本轮 `turn.config` 现读。清空
   // `allowedDirs` 下一轮就把工具从目录里摘掉 —— 关一个绕过全部工具闸的能力不该等重启。
   'agent.harness',
+  // `agent.acp` 整段同理，而且它比 harness 更彻底：**连接不缓存**（一次工具调用 spawn 一次），
+  // 所以没有任何启动快照 —— `available()` 与 `execute()` 都从本轮 `turn.config` 现读，
+  // `AcpManager` 自己不持有配置。把 `enabled` 关掉、或把 `allowedDirs` 清空，下一轮就没有这个工具。
+  'agent.acp',
   // 四项都是每轮从 `turn.config` 现读的（runtime.ts 的 wrappedFor / subagent 的 provider 块），
   // 改完下一轮生效；在途那一轮沿用开轮时的值。
   'provider.maxRetries', 'provider.retryBaseMs', 'provider.retryMaxMs', 'provider.requestTimeoutMs', 'provider.streamIdleTimeoutMs', 'provider.catalog',
@@ -196,6 +201,15 @@ export const KNOWN_UNIMPLEMENTED_CONFIG_KEYS = [
   // 子路径挂载：要给所有路由加前缀、改静态资源的 base、改 SPA 的 router base，三处一起动。
   // `publicUrl` 已随 `/webui` 一次性登录链接接线（第五轮）。
   'webui.basePath',
+  // ACP 的两项**波 3 才有落点**，这一轮刻意不接：
+  // `maxTerminals` —— 这一轮 `ACP_CLIENT_CAPABILITIES` 不申报 `terminal`，七个 `terminal/*`
+  // 处理器一律抛 `methodNotFound`，所以**根本没有 terminal 可数**。给一个不存在的东西设上限，
+  // 读一次算一次就是假开关（同 `memory.autoApplyCompaction` 的道理）。波 3 接反向 terminal 时
+  // 它是那份实现的第一个读取点。
+  'agent.acp.maxTerminals',
+  // `progressIntervalMs` —— 呈现层（把 `session/update` 变成 Telegram 卡片）是波 3。这一轮
+  // `AcpUpdateSink` 只做有界聚合，一次 prompt 只在结束时交回一份结果，中间没有任何东西需要节流。
+  'agent.acp.progressIntervalMs',
 ] as const;
 
 
@@ -313,6 +327,11 @@ export const configSchema = z.object({
       timeoutMs: z.number().int().positive().default(900_000),
       maxOutputBytes: z.number().int().positive().default(65_536),
     }).default({}),
+    // M13 · ACP 客户端（docs/14 §2 Q8 的同一条路，换成协议而不是 argv）。形状与默认值的理由都在
+    // `acp/schema.ts` —— 那个文件不 import SDK 运行时，好让这一份 schema 与 `scripts/config-schema.ts`
+    // 都不必把整个 ACP SDK 拖进来。**不扩 `harness`**：那边 `args` 的契约是「任务正文作为 argv
+    // 最后一项」，而 ACP 下任务走 `session/prompt`，argv 里根本没有任务。
+    acp: acpSchema.default({}),
     agents: z.array(z.object({ name: z.string(), description: z.string(), modelAlias: z.string(), maxSteps: z.number().int().positive(), minRole: role.default('limited'), tools: z.array(z.string()).default([]), resultMaxChars: z.number().int().positive().default(4000), instructions: z.string(), injectMemory: z.boolean().default(false) })).default([]),
   }).default({}),
   provider: z.object({ maxRetries: z.number().int().nonnegative().default(2), retryBaseMs: z.number().int().positive().default(1000), retryMaxMs: z.number().int().positive().default(30_000), healthCheckCron: z.string().default('*/10 * * * *'), healthDownCooldownMinutes: z.number().positive().default(30), requestTimeoutMs: z.number().int().positive().default(120_000), streamIdleTimeoutMs: z.number().int().positive().default(60_000), allowPrivateBaseUrl: z.boolean().default(false),
