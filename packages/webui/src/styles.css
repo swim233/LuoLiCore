@@ -233,6 +233,12 @@ code { font-family: var(--font-mono); font-size: .82rem; }
 
 /* ── 对话框 / 抽屉 ── */
 .ui-overlay { position: fixed; inset: 0; z-index: 40; display: grid; place-items: center; padding: 24px; background: color-mix(in srgb, #0a0c12, transparent 42%); backdrop-filter: blur(3px); }
+/* 确认框那一层单独抬高。所有遮罩都是同一个 z-index，同层只能靠 DOM 顺序分胜负，而 `ConfirmHost`
+   在 `App.vue` 里最先挂载 —— 它的 teleport 锚点排在所有页内弹窗之前，于是「弹窗里点〔永久删除〕」
+   弹出的确认框反而被那张弹窗盖住，点了像什么都没发生。钩子挂在内容上（`.confirm-detail`）而不是
+   遮罩上：遮罩的 class 由 `UiModal` 写死，不为一个层级问题去动那个共享组件。
+   仍在 toast（60）之下 —— 删成功没成功要由那一层说出来。 */
+.ui-overlay:has(.confirm-detail) { z-index: 55; }
 .ui-modal { display: flex; flex-direction: column; max-height: min(88vh, 900px); border: 1px solid var(--border); border-radius: 20px; background: var(--surface); box-shadow: var(--shadow); }
 .ui-modal > header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 19px 22px 15px; border-bottom: 1px solid var(--border); }
 .ui-modal h2 { margin: 0; font-size: 1.05rem; letter-spacing: -.02em; }
@@ -343,6 +349,9 @@ code { font-family: var(--font-mono); font-size: .82rem; }
 .metric-grid b { font: 600 1.55rem var(--font-mono); }
 .metric-grid small { color: var(--muted); font-size: .68rem; }
 .dashboard-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 14px; margin-top: 14px; }
+/* 任务页三张卡竖排。`.dashboard-grid` 是总览页的骨架（2fr 1fr），借来排这三张的代价是
+   八列宽的定时任务表被挤进 1fr —— 所以这里自己一条，单列不带 media query。 */
+.card-stack { display: grid; gap: 14px; margin-top: 14px; }
 .in-flight { margin-top: 14px; }
 .section-note { margin: 4px 0 12px; max-width: 72ch; font-size: .78rem; line-height: 1.55; color: var(--muted); }
 .surface { padding: 22px; }

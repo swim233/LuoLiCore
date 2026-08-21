@@ -703,6 +703,14 @@ CREATE TABLE scheduled_jobs (
   state       TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active','done','cancelled')),
   run_count   INTEGER NOT NULL DEFAULT 0,
   last_run_at INTEGER, last_state TEXT, last_error TEXT,
+  -- 「这一轮没什么可说时允许不投递」（02 §10.5，迁移 0013）。**默认 0**：一个到点什么都不说的
+  -- 任务和一个坏掉的任务在用户眼里长得一样，这份沉默必须是有人明确要过的。落在行上而不是配置里
+  -- ——「每天查更新」要静默而「每天早报」绝不能，一个全局开关表达不了。
+  allow_silent  INTEGER NOT NULL DEFAULT 0,
+  -- 连续静默次数：markRun 里就地一句 CASE 算（silent 则 +1，其余任何状态归零），到代码常量
+  -- SILENT_STREAK_WARN 之后 schedule.silent 日志升 warn。不做读-改-写：那在多实例下就是丢更新
+  -- （01 §3.1）。这是唯一能发现「这条任务已经变成一台只烧钱不说话的定时器」的机制。
+  silent_streak INTEGER NOT NULL DEFAULT 0,
   created_at  INTEGER NOT NULL,
   updated_at  INTEGER NOT NULL,
   CHECK ((cron IS NULL) + (run_at IS NULL) = 1)
@@ -711,6 +719,16 @@ CREATE INDEX ix_sched_key ON scheduled_jobs(key, state);
 CREATE INDEX ix_sched_state ON scheduled_jobs(state) WHERE state = 'active';
 CREATE UNIQUE INDEX ux_sched_name ON scheduled_jobs(key, name) WHERE state = 'active';
 ```
+
+**`last_state` 上没有 CHECK，是有意的。** 它的取值权威在 `ScheduledRunState` 联合类型上
+（`committed` / `failed` / `skipped` / `missed` / `cancelled` / `silent`，最后一个由迁移 0013 那一轮加入）。
+给它补一条 CHECK 要整表重建，而表上挂着**部分**唯一索引 `ux_sched_name` —— 重建期间那道
+「同会话内活跃任务不重名」的约束是断的，换来的只是一个 TS 侧已经挡住的枚举。
+
+**`ux_sched_name` 是部分唯一索引，所以预检挡不住并发。** `duplicate_name` 的判断
+（建任务与改任务共用，[05 §3.8](./05-tools-and-permissions.md)）与真正的写入之间有窗口，
+两条路都要在外面包一层 `SQLITE_CONSTRAINT` → `duplicate_name` 的翻译，
+而不是只做预检就当稳了。
 
 ### 2.13 自撰写工具
 
@@ -808,7 +826,7 @@ image 都改不动了；没有这一列，运维在 WebUI 换了镜像之后所�
 | `processed_updates` | 7 天 | 定期删 |
 | `sessions` | 过期即删 | 每小时 |
 | `approvals` | 90 天 | pending 超 `expires_at` 标 `expired` |
-| `scheduled_jobs` | `schedule.retentionDays` = 30 | 只删**已结束**（`done` / `cancelled`）且 `updated_at` 超期的行。**活跃任务永不清** —— 清掉一条还在排的任务，表现是「bot 突然不再提醒了」而库里毫无痕迹 |
+| `scheduled_jobs` | `schedule.retentionDays` = 30 | 只删**已结束**（`done` / `cancelled`）且 `updated_at` 超期的行。**自动清理永远不碰活跃任务** —— 清掉一条还在排的任务，表现是「bot 突然不再提醒了」而库里毫无痕迹。**但有一条手工硬删通道**：`POST /api/schedules/:id/purge`（[09 §4](./09-webui.md)）删的是整行，**active 的也删得掉**，先 `runner.unregister` 再落库。它与「停掉」（`DELETE`，软取消成 `cancelled`、行还在）是两个动词，也正因为它会把上面那句「毫无痕迹」变成现实，那一路**必须留一条 warn `schedule.purged`**：日后「bot 怎么不提醒了」在库里就只剩这一行凭据 |
 | `media.dir`（默认 `./data/files`）下的媒体**文件** | `media.retentionDays` = 90 | 按 `attachments.created_at` 删磁盘上的文件，**`attachments` 行与元数据保留**（[14 §2 Q9-a](./14-open-questions.md)）：历史消息里的「[图片]」还在、上下文与检索结果都不塌，只是点不开（T16）。`0 = 不清`。**真正占盘的是这一项** —— `gcFiles()` 只扫孤儿（没有任何 DB 行指向的文件），扫不到有行指着的正常媒体。删完把 `local_path` 置空并把 `download_state` 写成 `'expired'` —— 光置空会和「下载失败」（`'failed'`）混成一种状态，运维查起来分不出是过期删的还是当初就没下来 |
 | `web_assets`（**行 + 文件**） | `media.retentionDays` = 90 | 与上面那一项同一个保留期、同一处执行，但**行也一起删**。`attachments` 留行是因为历史消息里那条「[图片]」要保住 mime / 尺寸 / 已提取正文；网页图那条 `webasset://` part 自己就带着「这张图取自哪」的文本，行没了读出侧照旧交回占位文本（`hydrateAttachment` 的 `missing` 分支），留一堆 `local_path=NULL` 的行只是让 `gcFiles` 与过期清理都得多绕一次 |
 | `data/cache/models.dev.json` | 永久 | 纯派生数据，删掉即可（下次拉取模型时自动重下）。年龄记在 `app_kv` 的 `catalog:models.dev`，超 `provider.catalog.ttlHours` 时用 ETag 条件请求续期 |

@@ -32,6 +32,139 @@ describe('documented API surface', () => {
   });
 
   /**
+   * 分页信封是契约，而上面那条循环只断言 `ok:true` —— 一个端点从 `{items,total,page,size}` 退回
+   * 裸数组、或者 `total` 变成「本页条数」，它一条都挡不住。`/api/approvals` 与 `/api/tasks` 刚从
+   * 「硬 `LIMIT` + 裸数组」改成服务端分页，没有这条守卫的话那次破坏性改造没有任何回归防线。
+   *
+   * `pending` 单独焊：它是**全表** `COUNT(*) WHERE state='pending'`，左侧导航那个角标读的就是它
+   * （`AC-WEB-049` 要求不必切到任务页就看得见）。按页数出来的话翻到第 2 页角标就掉了 ——
+   * 这是整次分页改造里唯一一处会静默造成功能退化的地方。
+   */
+  it('四条分页端点信封一致、?page= 真的翻页，approvals 的 pending 是全表数', async () => {
+    const { app, db, headers } = harness();
+    const cookie = { cookie: headers.cookie };
+    const now = Date.now();
+    const scoped = new ArchiveRepository(db).scope('chat');
+    for (let index = 0; index < 3; index += 1) {
+      scoped.append({ chatId: 'chat', messageThreadId: null, tgMessageId: 100 + index, direction: 'in', fromKind: 'user',
+        fromUserId: 'user', fromName: 'User', fromUsername: null, kind: 'text', text: `第 ${index} 条`, tgDate: now + index, raw: {}, triggered: false, triggerReason: null });
+      db.prepare("INSERT INTO turns(id,key,chat_id,initiator_user_id,effective_role,state,queued_at,started_at) VALUES (?,'chat:chat','chat','user','trusted','committed',?,?)").run(`turn-${index}`, now + index, now + index);
+      db.prepare("INSERT INTO approvals(id,turn_id,chat_id,requester_user_id,tool_name,input_json,risk,state,requested_at,expires_at) VALUES (?,?,'chat','user','bash','{}','high',?,?,?)")
+        .run(`appr-${index}`, `turn-${index}`, index === 2 ? 'approved' : 'pending', now + index, now + 3_600_000);
+      db.prepare("INSERT INTO tasks(id,turn_id,chat_id,user_id,title,state,created_at,updated_at) VALUES (?,?,'chat','user',?,'done',?,?)")
+        .run(`task-${index}`, `turn-${index}`, `任务 ${index}`, now + index, now + index);
+    }
+    const envelope = async (path: string): Promise<Record<string, unknown>> =>
+      ((await (await app.request(path, { headers: cookie })).json()) as { data: Record<string, unknown> }).data;
+    for (const path of ['/api/messages', '/api/turns', '/api/approvals', '/api/tasks']) {
+      const first = await envelope(`${path}?page=1&size=1`);
+      expect(Object.keys(first).sort(), path).toEqual(path === '/api/approvals' ? ['items', 'page', 'pending', 'size', 'total'] : ['items', 'page', 'size', 'total']);
+      expect(first, path).toMatchObject({ total: 3, page: 1, size: 1 });
+      expect(first.items as unknown[], path).toHaveLength(1);
+      const second = await envelope(`${path}?page=2&size=1`);
+      expect(second, path).toMatchObject({ total: 3, page: 2, size: 1 });
+      // 真的走了 SQL 的 OFFSET：先取一大坨再在内存里切的写法，第 2 页要么是同一行要么恒空（docs/22 · I-01）。
+      expect((second.items as Array<{ id: unknown }>)[0]?.id, path).not.toEqual((first.items as Array<{ id: unknown }>)[0]?.id);
+    }
+    // 待办排在最前，且翻页不改角标。
+    const listed = await envelope('/api/approvals?page=1&size=3');
+    expect((listed.items as Array<{ state: string }>).map((row) => row.state)).toEqual(['pending', 'pending', 'approved']);
+    for (const pageNumber of [1, 2, 3]) expect((await envelope(`/api/approvals?page=${pageNumber}&size=1`)).pending, `page ${pageNumber}`).toBe(2);
+    // 过期扫描留在 COUNT 与 SELECT **之前**：夹在中间的话 total / pending 数的是扫描前那一刻，
+    // 页内容是扫描后那一刻，两个数字对不上而且没人能解释。
+    db.prepare("INSERT INTO approvals(id,turn_id,chat_id,requester_user_id,tool_name,input_json,risk,state,requested_at,expires_at) VALUES ('appr-stale','turn-0','chat','user','bash','{}','high','pending',?,?)")
+      .run(now - 10_000, now - 1_000);
+    const scanned = await envelope('/api/approvals?page=1&size=10');
+    expect(scanned).toMatchObject({ total: 4, pending: 2 });
+    expect((scanned.items as Array<{ state: string }>).filter((row) => row.state === 'pending')).toHaveLength(2);
+    expect(db.prepare("SELECT state FROM approvals WHERE id='appr-stale'").pluck().get()).toBe('expired');
+    closeDatabase(db);
+  });
+
+  /**
+   * `?size=abc` 曾经是 500 而不是 400：`Number('abc')` 是 `NaN`，`NaN` 进 better-sqlite3 的绑定参数
+   * **不是「当成 0」**，是整条查询抛 `TypeError: datatype mismatch`。四个端点原先各自写
+   * `Math.min(max, Math.max(1, Number(...)))`，一个都拦不住 —— `Math.max(1, NaN)` 返回的还是 `NaN`。
+   *
+   * 共用 `pageParams` 之后脏输入一律退化成**各自的**默认值/上限（这是健壮性修复，不是调参：
+   * 四个端点的默认值与上限在这条用例里逐一钉住，谁顺手把 `/api/turns` 的 20/100 抹平成 50/200 会红）。
+   */
+  it('脏 ?page=/?size= 退化成各端点的默认值与上限，而不是 500', async () => {
+    const { app, db, headers } = harness();
+    const cookie = { cookie: headers.cookie };
+    const now = Date.now();
+    new ArchiveRepository(db).scope('chat').append({ chatId: 'chat', messageThreadId: null, tgMessageId: 1, direction: 'in', fromKind: 'user',
+      fromUserId: 'user', fromName: 'User', fromUsername: null, kind: 'text', text: 'hello', tgDate: now, raw: {}, triggered: false, triggerReason: null });
+    db.prepare("INSERT INTO turns(id,key,chat_id,initiator_user_id,effective_role,state,queued_at,started_at) VALUES ('turn-x','chat:chat','chat','user','trusted','committed',?,?)").run(now, now);
+    db.prepare("INSERT INTO approvals(id,turn_id,chat_id,requester_user_id,tool_name,input_json,risk,state,requested_at,expires_at) VALUES ('appr-x','turn-x','chat','user','bash','{}','high','pending',?,?)")
+      .run(now, now + 3_600_000);
+    db.prepare("INSERT INTO tasks(id,turn_id,chat_id,user_id,title,state,created_at,updated_at) VALUES ('task-x','turn-x','chat','user','任务','done',?,?)").run(now, now);
+    for (const [path, defaultSize, maxSize] of [['/api/messages', 50, 200], ['/api/turns', 20, 100], ['/api/approvals', 50, 200], ['/api/tasks', 50, 200]] as const) {
+      for (const [query, expected] of [['size=abc&page=xyz', defaultSize], ['size=-1', defaultSize], ['size=0', defaultSize],
+        ['size=1.5', defaultSize], ['size=', defaultSize], ['page=0', defaultSize], ['size=99999', maxSize]] as const) {
+        const label = `${path}?${query}`;
+        const response = await app.request(`${path}?${query}`, { headers: cookie });
+        expect(response.status, label).toBe(200);
+        const body = await response.json() as { ok: boolean; data: { page: number; size: number; items: unknown[] } };
+        expect(body.ok, label).toBe(true);
+        expect(body.data.size, label).toBe(expected);
+        // `page` 同样不能是 NaN：它算的是 OFFSET，脏值或缺省都落回第 1 页。
+        expect(body.data.page, label).toBe(1);
+        expect(body.data.items, label).toHaveLength(1);
+      }
+    }
+    // 搜索分支不走 LIMIT/OFFSET，但 `adminSearchAll(query, page*size)` 的上限一样是绑定参数。
+    const searched = await app.request('/api/messages?q=hello&size=abc', { headers: cookie });
+    expect(searched.status).toBe(200);
+    expect(((await searched.json()) as { data: { page: number; size: number } }).data).toMatchObject({ page: 1, size: 50 });
+    closeDatabase(db);
+  });
+
+  /**
+   * `tasks` 表的 `progress_json` / `result_summary` 运行时一直在写，界面上从来没出现过，行也删不掉
+   * （docs/21 §8）。这条焊三件事：列表不驮进度、详情 join 得出「跑了几步 / 哪个 agent」、
+   * 以及**删的是记录不是取消通道** —— 没有 `POST /api/tasks/:id/cancel`，所以 running 一律 409。
+   */
+  it('任务详情 join 出轮次与子 agent；列表不带进度，running 的记录删不掉', async () => {
+    const { app, db, headers } = harness();
+    const cookie = { cookie: headers.cookie };
+    const now = Date.now();
+    const principals = new PrincipalRepository(db);
+    principals.upsertSeen({ id: 'chat:-1001', kind: 'chat', tgId: '-1001', role: 'trusted', displayName: '隆福饭搭子', username: null, chatType: 'supergroup' });
+    principals.upsertSeen({ id: 'user:9', kind: 'user', tgId: '9', role: 'owner', displayName: '阿离', username: 'ali', chatType: null });
+    db.prepare("INSERT INTO turns(id,key,chat_id,initiator_user_id,effective_role,state,queued_at,steps,tool_calls,cost_usd) VALUES ('turn-t','chat:-1001','-1001','9','owner','running',?,4,2,0.5)").run(now);
+    db.prepare("INSERT INTO agent_runs(id,turn_id,depth,kind,agent_name,model_alias,effective_role,state,started_at) VALUES ('run-t','turn-t',1,'sub','researcher','sub','owner','running',?)").run(now);
+    db.prepare("INSERT INTO tasks(id,turn_id,agent_run_id,chat_id,user_id,title,state,progress_json,created_at,updated_at) VALUES ('task-run','turn-t','run-t','-1001','9','查资料','running',?,?,?)")
+      .run(JSON.stringify({ step: 3, note: '读第 2 页' }), now, now);
+    db.prepare("INSERT INTO tasks(id,turn_id,chat_id,user_id,title,state,result_summary,created_at,updated_at,finished_at) VALUES ('task-done','turn-t','-1001','9','写摘要','done','写完了',?,?,?)")
+      .run(now - 1000, now - 1000, now);
+    const listed = ((await (await app.request('/api/tasks', { headers: cookie })).json()) as { data: { items: Array<Record<string, unknown>> } }).data;
+    // 在跑的顶到最前 —— 那几条才是要盯的。
+    expect(listed.items.map((row) => row.id)).toEqual(['task-run', 'task-done']);
+    // 一帧进度能有几 KB，而列表只显示标题与状态（同 `GET /api/logs` 不发 data_json 的理由）。
+    expect(Object.keys(listed.items[0]!)).not.toContain('progress_json');
+    // 裸 chat_id 认不出是哪个群：显示名在服务端补，前端不实现第二份反查规则（docs/09 §3.11）。
+    expect(listed.items[0]).toMatchObject({ title: '查资料', state: 'running', chatLabel: '隆福饭搭子', userLabel: '阿离 (@ali)' });
+
+    const detail = ((await (await app.request('/api/tasks/task-run', { headers: cookie })).json()) as { data: Record<string, unknown> }).data;
+    expect(detail).toMatchObject({ id: 'task-run', progress: { step: 3, note: '读第 2 页' },
+      turn: { state: 'running', steps: 4, toolCalls: 2, costUsd: 0.5, error: null },
+      agentRun: { agentName: 'researcher', modelAlias: 'sub', state: 'running', resultSummary: null } });
+    // 解析后的那一份就是全部：原始 JSON 串不再发第二遍。
+    expect(detail.progress_json).toBeUndefined();
+    expect((await app.request('/api/tasks/nope', { headers: cookie })).status).toBe(404);
+
+    const running = await app.request('/api/tasks/task-run', { method: 'DELETE', headers });
+    expect(running.status).toBe(409);
+    expect((await running.json() as { error: { code: string } }).error.code).toBe('task_running');
+    expect((await app.request('/api/tasks/task-done', { method: 'DELETE', headers })).status).toBe(200);
+    expect(db.prepare('SELECT COUNT(*) FROM tasks').pluck().get()).toBe(1);
+    // 什么都没删掉时不回 200，口径同 `DELETE /api/custom-tools/:name`。
+    expect((await app.request('/api/tasks/nope', { method: 'DELETE', headers })).status).toBe(404);
+    closeDatabase(db);
+  });
+
+  /**
    * 持久容器的三个端点（docs/09 §3.7）。**没装配运行时时回 `not_implemented` 而不是空列表** ——
    * 「读不到」和「一个容器都没有」在运维眼里是两回事（docs/16 §5「摘除比伪造安全」），
    * 而面板正是靠这一位决定显示「这个部署没装配」还是「现在没有容器」。

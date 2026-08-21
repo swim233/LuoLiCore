@@ -54,6 +54,25 @@ const RESPONSES: Record<string, unknown> = {
       timeoutMs: 45_000, selfManagedTimeout: false, defaults: { minRole: 'limited', approval: 'never', timeoutMs: 60_000 }, relaxed: [] } },
   '/api/turns': { items: [], total: 0, page: 1, size: 20 },
   '/api/messages': { items: [], total: 0, page: 1, size: 50 },
+  // 任务与审批都是分页信封。审批那份的 `pending` 是**服务端全表**计数（不是这一页里数出来的）：
+  // 左侧导航角标读它，翻页时不该变（`AC-WEB-049`）。这里刻意让 `pending` 大于本页的 pending 行数，
+  // 「从当前页数一遍」那种写法会立刻对不上。
+  '/api/tasks': { total: 2, page: 1, size: 20, items: [
+    { id: 't1', turn_id: 'turn_aaaaaaaaaaaa', agent_run_id: 'run1', chat_id: '-1001', user_id: '555', title: '查一下今天的更新',
+      state: 'running', result_summary: null, created_at: Date.now() - 120_000, updated_at: Date.now() - 30_000, finished_at: null,
+      chatLabel: '隆福饭搭子', userLabel: '主人' },
+    { id: 't2', turn_id: 'turn_bbbbbbbbbbbb', agent_run_id: null, chat_id: '8899001', user_id: '555', title: '整理昨天的群聊',
+      state: 'done', result_summary: '一共 12 条，主要在聊周末去哪。', created_at: Date.now() - 86_400_000,
+      updated_at: Date.now() - 86_000_000, finished_at: Date.now() - 86_000_000, chatLabel: '阿离', userLabel: '主人' },
+  ] },
+  '/api/approvals': { total: 2, page: 1, size: 20, pending: 3, items: [
+    { id: 'a1', turn_id: 'turn_aaaaaaaaaaaa', agent_run_id: null, span_id: null, chat_id: '-1001', requester_user_id: '555',
+      tool_name: 'bash', input_json: '{"command":"rm -rf ./build"}', risk: 'high', state: 'pending',
+      requested_at: Date.now() - 60_000, expires_at: Date.now() + 240_000, decided_by: null, decided_at: null, decision_channel: null },
+    { id: 'a2', turn_id: 'turn_bbbbbbbbbbbb', agent_run_id: null, span_id: null, chat_id: '8899001', requester_user_id: '555',
+      tool_name: 'write_file', input_json: '{"path":"./notes.md"}', risk: 'medium', state: 'approved',
+      requested_at: Date.now() - 3_600_000, expires_at: Date.now() - 3_300_000, decided_by: 'owner', decided_at: Date.now() - 3_500_000, decision_channel: 'webui' },
+  ] },
   '/api/usage/report': { groupBy: 'day', from: 0, to: Date.now(), rows: [] },
   // 唤醒词可用性是个数组端点，但路径不长得像列表 —— 显式列出来。
   '/api/config/wakewords/check': [{ pattern: '洛璃', kind: 'contains', ok: true, reason: null }],
@@ -79,7 +98,14 @@ const RESPONSES: Record<string, unknown> = {
     jobs: [{ id: 'j1', key: 'chat:c1', chatId: 'c1', threadId: null, createdBy: '1', name: '每日早报', mode: 'agent', state: 'active',
       chatLabel: '阿离', creatorLabel: '阿离', cron: '0 8 * * *', timezone: 'UTC', payload: '汇总昨天群里聊了什么', runCount: 2,
       nextRun: new Date(Date.now() + 3_600_000).toISOString(), lastRunAt: Date.now() - 3_600_000, lastState: 'committed',
-      createdAt: Date.now() - 86_400_000, updatedAt: Date.now() - 3_600_000 }] },
+      createdAt: Date.now() - 86_400_000, updatedAt: Date.now() - 3_600_000 },
+      // 静默那一档：上一次「跑了但没投递」。它必须与 failed / skipped 分得开，否则「这条任务
+      // 其实一直在失败」看起来会非常安静。`at` 发的是 UTC 瞬时，回填表单要过 `toWallClock`。
+      { id: 'j2', key: 'chat:c2', chatId: 'c2', threadId: null, createdBy: '1', name: '中午查一次更新', mode: 'agent', state: 'active',
+        chatLabel: '隆福饭搭子', creatorLabel: '主人', at: new Date(Date.now() + 7_200_000).toISOString(), timezone: 'Asia/Shanghai',
+        payload: '有更新就说，没有就静默', runCount: 9, silent: true, silentStreak: 9,
+        nextRun: new Date(Date.now() + 7_200_000).toISOString(), lastRunAt: Date.now() - 7_200_000, lastState: 'silent',
+        createdAt: Date.now() - 86_400_000, updatedAt: Date.now() - 7_200_000 }] },
   // ── 扩展页的四类。四个端点此前一律回 `[]`（走 `listLike` 那条兜底），于是**四类的行模板
   //    一次都没被渲染过** —— 和模型行、容器行、定时任务行当初的处境完全一样。每一类都放一行
   //    「正常的」和一行「在等人处理的」，因为这一页真正的活儿是后者。
@@ -125,7 +151,7 @@ function responseFor(url: string): unknown {
   // `/api/turns/active` 也回数组：它慢一步落到 DataGrid 的 `rows`，回 `{}` 的表现是一条
   // 「Invalid prop: type check failed for prop "rows"」，而那正是这套装置要挡的那类症状。
   const listLike = ['/api/principals', '/api/providers', '/api/logs', '/api/chats', '/api/usage', '/api/skills', '/api/plugins',
-    '/api/mcp', '/api/custom-tools', '/api/agents', '/api/approvals', '/api/tasks', '/api/prompts', '/api/models', '/api/aliases', '/api/turns/active'];
+    '/api/mcp', '/api/custom-tools', '/api/agents', '/api/prompts', '/api/models', '/api/aliases', '/api/turns/active'];
   return listLike.includes(path) ? [] : {};
 }
 
@@ -441,6 +467,64 @@ describe('ConsoleView 渲染', () => {
     expect(inbox.text()).toContain('要登录');
     // fixture 里有一个 load_error 的 skill。
     expect(inbox.text()).toContain('加载或连接失败');
+    wrapper.unmount();
+  });
+
+  /**
+   * 任务页是从 `ConsoleView.vue` 里**整段抽出来**的（`TasksPage.vue` + 三张卡），跟扩展页那次
+   * 同一个道理：上一回抽子视图时三条绿灯都亮着、14 个页面全空白（docs/24 · R-UI-01）。
+   * 所以这里断言的是「三张卡各自真的渲染出了自己的行」，不是「组件 import 得进来」。
+   * 顺序也焊住：任务 → 定时任务 → 审批（`.card-stack` 竖排）。
+   */
+  it('任务页三张卡竖排、顺序固定，且各自渲染出自己的行', async () => {
+    const warnings: string[] = [];
+    const spy = vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => { warnings.push(args.map(String).join(' ')); });
+    const { default: ConsoleView } = await import('../../packages/webui/src/views/ConsoleView.vue');
+    const wrapper = mount(ConsoleView, { attachTo: document.body });
+    await settle(wrapper);
+    (wrapper.vm as unknown as { active: string }).active = 'tasks';
+    await settle(wrapper);
+    expect(wrapper.findComponent({ name: 'TasksPage' }).exists(), '任务页组件没挂上').toBe(true);
+    const stack = wrapper.find('.card-stack');
+    expect(stack.exists(), '三张卡不在 .card-stack 里').toBe(true);
+    // `.dashboard-grid` 是总览页的骨架（2fr 1fr），任务页不该再借用它。
+    expect(wrapper.findAll('.page-surface .dashboard-grid').length).toBe(0);
+    expect(stack.findAll(':scope > article').map((card) => card.find('h3').text())).toEqual(['任务', '定时任务', '审批']);
+    for (const [name, needle] of [['TasksCard', '查一下今天的更新'], ['SchedulesCard', '每日早报'], ['ApprovalsCard', 'bash']] as const) {
+      const card = wrapper.findComponent({ name });
+      expect(card.exists(), `${name} 没挂上`).toBe(true);
+      expect(card.text(), `${name} 一行都没渲染`).toContain(needle);
+    }
+    // 静默那一档：`SCHEDULE_RUN_STATES` 少一条它就原样显示成英文的 `silent`。
+    expect(wrapper.findComponent({ name: 'SchedulesCard' }).text()).toContain('静默');
+    const rendering = warnings.filter((line) => line.includes('[Vue warn]'));
+    expect(rendering, `渲染期间产生了 Vue 警告：\n${rendering.join('\n')}`).toEqual([]);
+    spy.mockRestore();
+    wrapper.unmount();
+  });
+
+  /**
+   * 导航角标读的是 `GET /api/approvals` 信封里的**全表** `pending`，不是当前页里数出来的
+   * pending 行数。`AC-WEB-049` 要的是「不必切到任务页就看得见还有几个人在等」——
+   * 分页改造里唯一一处会**静默造成功能退化**的地方就是这里。
+   */
+  it('待审批角标取信封里的全表 pending，不是当前页数出来的', async () => {
+    const { default: ConsoleView } = await import('../../packages/webui/src/views/ConsoleView.vue');
+    const wrapper = mount(ConsoleView, { attachTo: document.body });
+    await settle(wrapper);
+    const vm = wrapper.vm as unknown as { active: string; pendingApprovals: number };
+    // `load()` 是一条六段的 await 链，角标在靠后那一段 —— `settle()` 的 6 轮只够跑完头一个
+    // `Promise.all`。全是 microtask，没有计时器，所以多转几轮是确定性的，不是在赌时间。
+    for (let round = 0; round < 20 && vm.pendingApprovals === 0; round += 1) await settle(wrapper);
+    // fixture：当前页只有 1 条 pending，而全表 pending 是 3。数当前页会得到 1。
+    expect(vm.pendingApprovals).toBe(3);
+    expect(wrapper.find('.sidebar .nav-badge').text()).toBe('3');
+    // 首屏就有 —— 不用切到任务页。
+    expect(vm.active).toBe('dashboard');
+    // 拉角标的那一次请求只要一行：全表计数在信封上，不需要把 200 行拖回来。
+    const calls = (fetch as unknown as { mock: { calls: Array<[string, RequestInit?]> } }).mock.calls
+      .map(([url]) => String(url)).filter((url) => url.startsWith('/api/approvals'));
+    expect(calls.some((url) => url.includes('size=1')), `角标没走单行请求：${calls.join(' , ')}`).toBe(true);
     wrapper.unmount();
   });
 

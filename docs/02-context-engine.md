@@ -679,8 +679,22 @@ cron 到点 ──► 重算有效角色 ──► 合成触发消息（落归�
                               mode='agent' ──► runMainAgent ──┤
                               mode='notify' ─► 预写文本 ──────┤
                                                           ▼
-                                        投递 ──► appendDelta ──► commitTurn
+                                                  正文非空？──否──► failed（abortTurn）
+                                                          │ 是
+                              ┌───────────────────────────┴──────────────┐
+                              │ turn.silenced                            │ 否（默认）
+                              │ （§10.5，只有开了 allow_silent 的任务够得着）  │
+                              ▼                                          ▼
+                    记 schedule.silent，不投递                       投递（tg.send）
+                              └───────────────────────────┬──────────────┘
+                                                          ▼
+                                            appendDelta ──► commitTurn
+                                                          ▼
+                                        markRun(silent | committed)
 ```
+
+**`appendDelta` / `commitTurn` 画在合流点之后不是排版偏好，是这一节的核心不变量**：
+静默改变的只有「发不发那条 Telegram 消息」，上下文这一侧两条路一个字都不差（§10.5 第 ①、④ 条）。
 
 - 触发消息是一条**真实的归档行**：`direction='in'`、`from_kind='system'`、
   `from_user_id` = 任务创建者、`triggered=1`、`trigger_reason='schedule'`，
@@ -710,6 +724,9 @@ cron 到点 ──► 重算有效角色 ──► 合成触发消息（落归�
 **`notify` 也开轮提交。** 只发不提交更省事，但那条消息只会进 `messages` 归档
 （`claimBackground` 不认领 `direction='out'`），于是模型下一轮不知道自己刚提醒过什么 ——
 用户回「知道了」时它一脸茫然。省下的是一次 commit，代价是一次说不清的失忆。
+**静默（§10.5）走的是同一条理由**，只是方向反过来：那一轮压根没有消息发出去，
+所以「不投递就别提交了吧」比这里更诱人，而失忆的代价一模一样 —— 用户第二天问
+「昨天你查的怎么样」，模型不知道自己查过。
 
 **`mode='agent'` 用 `runMainAgent` 而不是 `streamMainAgent`。** 没有人盯着屏幕，也没有
 Telegram 流消费者；流式的占位消息与进度编辑在这条路上只是白花 Bot API 调用。
@@ -763,3 +780,81 @@ Telegram 流消费者；流式的占位消息与进度编辑在这条路上只�
 | `blocked` | **整条停用**（`state='cancelled'`）并从调度器摘掉 |
 
 降级只跳过、封禁才停用：临时降权不该销毁用户排了很久的任务，而封禁是永久判定。
+
+### 10.5 本轮不用汇报（静默）
+
+需求是一句很朴素的话：「每天中午看一眼有没有更新，有就告诉我，没有就别说话」。而这句话此前
+**表达不出来** —— 模型想表示「这一轮没什么可说」，唯一的手段是输出空正文，而空正文在 §10.1
+那条路上是 `model_returned_empty`：记 `failed`、写 error 日志、计进连续失败告警、`abortTurn`
+把这一轮的上下文整个回滚。于是只剩两个选项：每天收一条噪声，或每天记一次假故障。
+
+**静默是「不投递」，不是「不开轮」，更不是「不提交」。** 模型调 `stay_silent`
+（[05 §3.8](./05-tools-and-permissions.md)）之后，这一轮照常 `appendDelta` + `commitTurn`，
+产出照常进上下文；省掉的只有 `bridge.sendMessage` 那一步。
+
+**① 开关落在任务行上（`scheduled_jobs.allow_silent`，[03 §2.12](./03-data-model.md)），默认关。**
+三个否掉的位置各有各的坏法：
+
+- **不是 `mode` 的第三档。** `mode` 一个字段同时决定「调不调模型」和「正文是任务描述还是原文」，
+  而静默与这两件事正交：notify 任务根本没有模型去做「要不要说」的判断，agent 任务无论静不静默
+  都照样花钱。挤进同一个字段的结果是「改一次静默顺手翻转了正文语义」——
+  这也是 `schedule_update` 不收 `mode` 的同一条理由。
+- **不是配置项。** 见 [11](./11-config-reference.md) 的 `schedule` 段：静默是**这一条任务**的性质，
+  「每天查更新」要静默而「每天早报」绝不能静默，一个全局开关表达不了，
+  按会话开更是把两类任务混在一起。
+- **不是默认开。** 一个到点什么都不说的定时任务，和一个坏掉的定时任务，在用户眼里长得一模一样。
+  默认关意味着这份沉默必须是有人明确要过的 —— 静默的代价（第 ⑥ 条）由开它的人承担。
+
+**② `stay_silent` 只在「可静默的主 agent 定时轮次」里进目录。** 两道闸写在同一个 `available()`
+里：`agentKind === 'main'` **且** `turn.silenceable === true`。
+
+- `silenceable` 的**唯一置位方是 `ScheduledJobRunner`**（且只在 `allow_silent` 为真时）。缺席 = 假，
+  所以每一条 Telegram 轮次、提示词预览、子 agent 隔离试跑都 fail-closed。
+- 子 agent 那道闸不是冗余：**子 agent 拿到的是父轮的同一个 turn 对象**，让它够得着这个工具等于
+  一个 researcher 可以替整轮闭嘴，而派它出去的主 agent 全程不知情。
+- 模型置的是 `turn.silenced`，而**只有 runner 读这个字段**。就算哪天有人误给一条 Telegram 轮次
+  置了 `silenceable`，模型能置的也只是一个没人读的布尔 —— 这是结构性保险，不指望调用方自觉。
+
+**③ `last_state='silent'` 是 `ScheduledRunState` 的第六个取值，而 `turns.state` 仍是 `committed`。**
+这不是记漏了：那一轮**确实提交了** —— 有 commit、有上下文行、花了真钱。把 turn 记成别的会让
+「定时轮次和用户轮次走同一条路」这条在 trace 上断开，`/api/turns/:id/detail`、连续失败计数、
+`turn.finished` 事件都要为它开一个特例分支。静默是投递侧的事，就只记在投递侧那张表上。
+
+**④ `model_returned_empty` 这道闸不为静默开例外。** 「静默 = 空正文放行」写起来只有一行，
+而它的结果是**上下文里一个字都没留** —— 而「模型下一轮知道自己查过了」正是这个功能的全部目的。
+所以静默轮次同样必须写下结论，只是这段结论只给它自己看。同理，`if (silenced) return;`
+不许放在 `appendDelta` 之前：那正好复刻 §10.1 当初为 `notify` 否掉的那个方案。
+
+**⑤ 与收尾补跑（`runtime.ts` 的 `wrapUpIfNeeded`，§2 的四道闸）相互作用，代价是明知的。**
+那个补跑的前两道闸是「最后一步没有正文」+「这一轮真的调过工具」，而「调完 `stay_silent`
+就收工」正好两条都命中 —— **每一次这样的静默都要多付一次模型调用**。没有为静默在
+`wrapUpIfNeeded` 上开一个「跳过」分支：跳过等于让那一轮真的一个字都不留，立刻撞上第 ④ 条。
+缓解在工具那一侧 —— `stay_silent` 的 `hint` 直接 nudge「现在把这一轮的结论写下来」，
+促使正文与工具调用落在同一步，第一道闸（`lastStepHadText`）于是不成立，补跑不发生。
+
+**⑥ `silent_streak` + `SILENT_STREAK_WARN`（代码常量，10）。** 静默最危险的地方是
+**它让「这条任务其实一直在失败」变得很安静**：一条每天静默的任务和一条每天白烧一次模型调用
+却永远判断不出该说什么的任务，在界面上都是「没消息」。`silent_streak` 在 `markRun` 里就地算
+（`silent` 则 +1，其余任何状态一律归零 —— 一次说话就说明它还认得出该说话的时候），
+连续到阈值之后 `schedule.silent` 这条日志从 info 升成 **warn**。
+这是唯一能发现「这条任务已经变成一台只烧钱不说话的定时器」的机制，所以它是自动的，
+不依赖运维想起来去翻 `run_count`。阈值不给配置键，理由见 [11](./11-config-reference.md) 的 `schedule` 段。
+
+**⑦ 投递通道判据的位置不变。** `telegram()` 返回 null 就不开轮（§10.1 最后一条），
+**开了静默的任务也一样**。看上去矛盾（既然可能不投递，为什么投递不了反而不开轮），其实不：
+静默是模型**跑完之后**才做的决定，开轮那一刻谁都不知道这一轮会不会要说话。为它放松判据，
+等于把「发不出去的一轮开了也白开」换成碰运气 —— 而输的那一半是真金白银加一次假故障。
+
+**⑧ 「静默」与「真故障」的四层分辨手段，缺一不可。**
+
+| 看哪里 | 静默 | 失败 |
+|---|---|---|
+| `scheduled_jobs.last_state` | `silent` | `failed` / `skipped` / `missed` |
+| `scheduled_jobs.last_error` | **恒为 NULL** | 错误原文 |
+| 日志 kind | `schedule.silent`（info；连续 ≥ `SILENT_STREAK_WARN` 升 warn），带 `reason` | `schedule.failed`（error）+ 失败态的 `turn.end` |
+| trace | `turns.state='committed'`、`model.call` 完整、**只是没有 `tg.send`**；`turn.end` 的 `data` 带 `silenced:true` | 没有 commit，`turn.end` 是 failed |
+
+最后那个 `silenced:true` 是这一层的关键：**一条正常提交的轮次为什么少了 `tg.send` 这一步**，
+没有它在 trace 里无从解释 —— 而「少了一跳」正是 [10 §2](./10-logging-and-observability.md) 的
+`tg.send` 行当初被补上的同一种形态。`reason` 在 `stay_silent` 上是必填参数，也是为了这张表：
+它既进日志、又逼模型对「为什么不用说」做一次显式判断。

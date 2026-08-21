@@ -68,13 +68,13 @@ async function submit(): Promise<void> {
   <main class="auth-page">
     <section class="auth-copy">
       <div class="brand-mark">L</div>
-      <p class="eyebrow">LUOLICORE / CONTROL PLANE</p>
-      <h1>把复杂运行状态<br /><span>收进一个安静的界面。</span></h1>
-      <p>上下文提交、模型调用、工具权限、费用与任务进度。默认仅在本机可见。</p>
+      <p class="eyebrow">Welcome To LuoLiCore</p>
+      <h1>「Hello World」<br /><span>你好 世界</span></h1>
+      <p>在此处管理你的助手</p>
       <div class="trust-row">
-        <span><i class="pi pi-shield" /> Session + CSRF</span>
-        <span><i class="pi pi-lock" /> 密钥不回显</span>
-        <span><i class="pi pi-eye-slash" /> 全链路脱敏</span>
+        <span class="u-display-none"><i class="pi pi-shield" /> Session + CSRF</span>
+        <span class="u-display-none"><i class="pi pi-lock" /> 密钥不回显</span>
+        <span class="u-display-none"><i class="pi pi-eye-slash" /> 全链路脱敏</span>
       </div>
     </section>
     <form class="auth-card" @submit.prevent="submit">
@@ -96,7 +96,7 @@ async function submit(): Promise<void> {
       <!-- 登录失败是表单内校验，留在原地；写操作的成败才走右上角通知（docs/09 §6） -->
       <p v-if="error" class="callout error"><i class="pi pi-times-circle" aria-hidden="true" />{{ error }}</p>
       <UiButton type="submit" :loading="loading" fluid :label="props.setup ? '完成初始化' : '进入控制台'" icon="pi pi-arrow-right" icon-pos="right" />
-      <small><i class="pi pi-info-circle" /> WebUI 默认只监听 127.0.0.1:8787</small>
+      <small><i class="pi pi-info-circle" /> WebUI 默认监听 127.0.0.1:8787</small>
     </form>
   </main>
 </template>

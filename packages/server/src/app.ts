@@ -10,8 +10,8 @@ import type { Context } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { getConnInfo } from '@hono/node-server/conninfo';
 import { serveStatic } from '@hono/node-server/serve-static';
-import type { AgentManager, Config, ConfigChangedEvent, ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, PluginManager, PromptDocuments, ProviderStore, Sandbox, SkillLoader, SkillWriteInput, SubAgentRuntimeEvent, TurnRegistry } from '@luoli/core';
-import { ALIAS_NAME_PATTERN, CONFIG_ENUM_NOTES, HOT_RELOADABLE_CONFIG_KEYS, chatCandidates, createScheduledJob, mergeAgentDefinitions, scanAgentFiles, scheduledJobView, testApprovalRules, KNOWN_UNIMPLEMENTED_CONFIG_KEYS, TOOL_POLICY, aliasSettingsSchema, checkWakeword, configSchema as runtimeConfigSchema, envPinnedConfigKeys, perChatConfig, probeProvider, quotaBucket, rejectedWakewords } from '@luoli/core';
+import type { AgentManager, Config, ConfigChangedEvent, ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, PluginManager, PromptDocuments, ProviderStore, Sandbox, ScheduleUpdateRequest, SkillLoader, SkillWriteInput, SubAgentRuntimeEvent, TurnRegistry } from '@luoli/core';
+import { ALIAS_NAME_PATTERN, CONFIG_ENUM_NOTES, HOT_RELOADABLE_CONFIG_KEYS, chatCandidates, createScheduledJob, mergeAgentDefinitions, scanAgentFiles, scheduledJobView, testApprovalRules, updateScheduledJob, KNOWN_UNIMPLEMENTED_CONFIG_KEYS, TOOL_POLICY, aliasSettingsSchema, checkWakeword, configSchema as runtimeConfigSchema, envPinnedConfigKeys, perChatConfig, probeProvider, quotaBucket, rejectedWakewords } from '@luoli/core';
 import { APPROVAL_POLICIES, BUNDLED_SKILLS, MCP_OAUTH_CALLBACK_PATH, SkillPackageError, effectiveToolPolicy, installSkillPackage, looksSecret, persistMcpServers as persistMcpServersShared, publicConfig, relaxedFields, resolveEffectiveRole, revisionJson } from '@luoli/core';
 import type { CatalogIndex, ContainerManager, CustomToolManager, ModelMetadata, PendingAuthorizations, ProviderProbe, ToolOverride, ToolRegistry } from '@luoli/core';
 import type { ArchiveRepository, CustomToolRepository, McpAuthRepository, OperationsRepository, PrincipalRepository, ScheduleRepository, ScheduledJob, Sqlite } from '@luoli/db';
@@ -151,6 +151,27 @@ function configLeafPaths(node: unknown, prefix = ''): string[] {
 }
 function page<T>(items: T[], pageNumber: number, size: number): { items: T[]; total: number; page: number; size: number } {
   return { items: items.slice((pageNumber - 1) * size, pageNumber * size), total: items.length, page: pageNumber, size };
+}
+/**
+ * 四个分页端点（`/api/messages`、`/api/turns`、`/api/approvals`、`/api/tasks`）共用的 `?page=`/`?size=` 解析。
+ *
+ * 各自原地写 `Math.min(max, Math.max(1, Number(ctx.req.query('size') ?? 50)))` 拦不住脏输入：
+ * `Number('abc')` 是 `NaN`，而 `Math.max(1, NaN)` / `Math.min(200, NaN)` 返回的仍是 `NaN`。
+ * `NaN` 喂给 better-sqlite3 的绑定参数**不是「当成 0」**，是整条查询抛 `TypeError: datatype mismatch`——
+ * 于是一个手滑的 query 把端点打成 500 而不是回一页默认结果。小数同理（`size=1.5` 落到 `LIMIT` 上一样炸）。
+ *
+ * 非法值一律回退默认而不是回 400：分页参数是界面拼出来的，坏 query 该退化成第一页，
+ * 不该让整块列表变成错误态。**每个端点的 `defaultSize`/`maxSize` 是它自己的**，这里只统一解析规则。
+ */
+function pageParams(ctx: Context, limits: { defaultSize: number; maxSize: number }): { page: number; size: number; offset: number } {
+  // Number(undefined)=NaN、Number('')=Number(' ')=0，都落在 `>= 1` 的整数之外，统一被判非法。
+  const positiveInt = (raw: string | undefined): number | null => {
+    const value = Number(raw);
+    return Number.isSafeInteger(value) && value >= 1 ? value : null;
+  };
+  const pageNumber = positiveInt(ctx.req.query('page')) ?? 1;
+  const size = Math.min(limits.maxSize, positiveInt(ctx.req.query('size')) ?? limits.defaultSize);
+  return { page: pageNumber, size, offset: (pageNumber - 1) * size };
 }
 
 /** 可以内联渲染的 mime：只有光栅图，刻意不含 image/svg+xml（SVG 能带脚本）。 */
@@ -1025,15 +1046,14 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
   };
   app.get('/api/messages', (ctx) => {
     const query = ctx.req.query('q') ?? '';
-    const pageNumber = Math.max(1, Number(ctx.req.query('page') ?? 1));
-    const size = Math.min(200, Math.max(1, Number(ctx.req.query('size') ?? 50)));
+    const { page: pageNumber, size, offset } = pageParams(ctx, { defaultSize: 50, maxSize: 200 });
     // 非搜索分支此前是 `LIMIT 1000` 拉回来再在内存里切：`size=50` 时第 21 页起永远是空的，
     // `total` 也封顶在 1000，界面上的页码是假的（docs/22 · I-01）。改成和 /api/turns 一样
     // 走 SQL 的 LIMIT/OFFSET + 单独 COUNT(*)。搜索分支仍走 FTS，它自己有命中上限。
     if (!query) {
       const total = Number(dependencies.db.prepare('SELECT COUNT(*) FROM messages WHERE deleted_at IS NULL').pluck().get());
       const items = dependencies.db.prepare(`SELECT id,chat_id AS chatId,message_thread_id AS threadId,tg_message_id AS tgMessageId,direction,from_kind AS fromKind,from_user_id AS fromUserId,from_name AS fromName,from_username AS fromUsername,kind,text,tg_date AS tgDate,triggered,trigger_reason AS triggerReason,turn_id AS turnId,revision,deleted_at AS deletedAt
-        FROM messages WHERE deleted_at IS NULL ORDER BY tg_date DESC,id DESC LIMIT ? OFFSET ?`).all(size, (pageNumber - 1) * size);
+        FROM messages WHERE deleted_at IS NULL ORDER BY tg_date DESC,id DESC LIMIT ? OFFSET ?`).all(size, offset);
       return ctx.json({ ok: true, data: { page: pageNumber, size, total, items: withAttachments(attachTurnIds(items)) } });
     }
     const paged = page(dependencies.archive.adminSearchAll(query, pageNumber * size), pageNumber, size);
@@ -1043,14 +1063,13 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
   // 消息页默认看的是「最近几次模型对话」而不是逐条消息流：一次 turn 的提问与回答分散在多行里，
   // 按行翻页读不出对话的样子。分页走 SQL 的 LIMIT/OFFSET，turns 表可能很大，不整表拉回来再切。
   app.get('/api/turns', (ctx) => {
-    const pageNumber = Math.max(1, Number(ctx.req.query('page') ?? 1));
-    const size = Math.min(100, Math.max(1, Number(ctx.req.query('size') ?? 20)));
+    const { page: pageNumber, size, offset } = pageParams(ctx, { defaultSize: 20, maxSize: 100 });
     const total = Number(dependencies.db.prepare('SELECT COUNT(*) FROM turns').pluck().get());
     const items = dependencies.db.prepare(`SELECT t.id,t.key,t.chat_id AS chatId,t.initiator_user_id AS userId,t.effective_role AS role,t.state,t.trigger_reason AS triggerReason,
       COALESCE(t.started_at,t.queued_at) AS startedAt,t.finished_at AS finishedAt,t.steps,t.tool_calls AS toolCalls,t.input_tokens AS inputTokens,t.output_tokens AS outputTokens,t.cost_usd AS costUsd,t.error,t.rebased,
       m.id AS promptMessageId,m.text AS prompt,m.kind AS promptKind,m.from_name AS fromName,m.from_username AS fromUsername
       FROM turns t LEFT JOIN messages m ON m.id=t.trigger_message_id AND m.deleted_at IS NULL
-      ORDER BY COALESCE(t.started_at,t.queued_at) DESC,t.rowid DESC LIMIT ? OFFSET ?`).all(size, (pageNumber - 1) * size) as Array<Record<string, unknown>>;
+      ORDER BY COALESCE(t.started_at,t.queued_at) DESC,t.rowid DESC LIMIT ? OFFSET ?`).all(size, offset) as Array<Record<string, unknown>>;
     if (items.length) {
       const placeholders = items.map(() => '?').join(',');
       const replies = dependencies.db.prepare(`SELECT turn_id AS turnId,text FROM messages WHERE turn_id IN (${placeholders}) AND direction='out' AND deleted_at IS NULL ORDER BY id`)
@@ -1437,10 +1456,26 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     try { return ctx.json({ ok: true, data: await dependencies.previewPrompt(body.key, body.role as Role) }); }
     catch (error) { return ctx.json(apiError('preview_failed', error instanceof Error ? error.message : '提示词组装失败', 404).body, 404); }
   });
+  /**
+   * 审批列表。此前是硬 `LIMIT 200` —— 撞上限就是静默截断，界面上看不出还有没有别的。
+   *
+   * 三处不能挪：
+   * - **过期扫描留在 `COUNT` 与 `SELECT` 之前**。夹在两者中间的话，`total` 数的是扫描前那一刻、
+   *   页内容是扫描后那一刻，两个数字对不上而且没人能解释。
+   * - **`pending` 是全表计数，不是本页里数出来的**。左侧导航那个角标读的就是它，要求「不必切到
+   *   任务页就看得见」（`AC-WEB-049`）—— 按页数的话翻到第 2 页角标就掉了，这是整次分页改造里
+   *   唯一一处会**静默造成功能退化**的地方。
+   * - 排序是 `(state='pending') DESC, requested_at DESC`：待办永远在第一页。`ix_approvals_state`
+   *   覆盖这个前缀。
+   */
   app.get('/api/approvals', (ctx) => {
     const now = Date.now();
     dependencies.db.prepare("UPDATE approvals SET state='expired',decided_by='system',decided_at=?,decision_channel='system' WHERE state='pending' AND expires_at<=?").run(now, now);
-    return ctx.json({ ok: true, data: dependencies.db.prepare('SELECT * FROM approvals ORDER BY requested_at DESC LIMIT 200').all() });
+    const { page: pageNumber, size, offset } = pageParams(ctx, { defaultSize: 50, maxSize: 200 });
+    const total = Number(dependencies.db.prepare('SELECT COUNT(*) FROM approvals').pluck().get());
+    const pending = Number(dependencies.db.prepare("SELECT COUNT(*) FROM approvals WHERE state='pending'").pluck().get());
+    const items = dependencies.db.prepare("SELECT * FROM approvals ORDER BY (state='pending') DESC,requested_at DESC LIMIT ? OFFSET ?").all(size, offset);
+    return ctx.json({ ok: true, data: { items, total, page: pageNumber, size, pending } });
   });
   app.post('/api/approvals/:id/decide', async (ctx) => {
     const body = await ctx.req.json<{ approved?: unknown }>().catch((): { approved?: unknown } => ({}));
@@ -1460,15 +1495,22 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     chatLabel: principalLabel(dependencies.db, 'chat', job.chatId),
     creatorLabel: principalLabel(dependencies.db, 'user', job.createdBy),
     createdAt: job.createdAt, updatedAt: job.updatedAt,
+    // `silent` 由 `scheduledJobView` 给（DB 列 `allow_silent`）；连续静默次数只有面板看得见，
+    // 它是「这条任务是不是已经变成一台只烧钱不说话的定时器」的唯一凭据（docs/02 §10.5）。
+    silentStreak: job.silentStreak,
     ...scheduledJobView(job, job.state === 'active' ? (scheduleRuntime()?.runner.nextRun(job.id) ?? null) : null),
   });
   app.get('/api/schedules', (ctx) => {
     const runtime = scheduleRuntime();
     const live = currentConfig();
-    if (!runtime) return ctx.json({ ok: true, data: { available: false, enabled: live.schedule.enabled, timezone: live.general.timezone, jobs: [] } });
+    if (!runtime) return ctx.json({ ok: true, data: { available: false, enabled: live.schedule.enabled, timezone: live.general.timezone, jobs: [], total: 0, truncated: false } });
+    // 不分页（行数有界，DataGrid 自己切片），但 `listAll` 有 500 条上限 —— 撞上去必须说出来。
+    // 静默截断的表现是「我明明建过那条任务，面板上找不到」，而界面没有任何理由怀疑自己看到的不全。
+    const jobs = runtime.jobs.listAll();
+    const total = Number(dependencies.db.prepare('SELECT COUNT(*) FROM scheduled_jobs').pluck().get());
     return ctx.json({ ok: true, data: { available: true, enabled: live.schedule.enabled, timezone: live.general.timezone,
       settings: { maxPerChat: live.schedule.maxPerChat, minIntervalMinutes: live.schedule.minIntervalMinutes, maxPayloadChars: live.schedule.maxPayloadChars },
-      jobs: runtime.jobs.listAll().map(scheduleRow) } });
+      jobs: jobs.map(scheduleRow), total, truncated: total > jobs.length } });
   });
   app.post('/api/schedules', async (ctx) => {
     const runtime = scheduleRuntime();
@@ -1487,11 +1529,51 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     const createdBy = live.access.bootstrapOwnerId;
     if (!createdBy) return ctx.json(apiError('owner_unset', '没有配 access.bootstrapOwnerId：任务需要一个归属身份才能在触发时重算权限').body, 400);
     const result = createScheduledJob(runtime.jobs, runtime.runner,
-      { name: String(body.name ?? ''), mode, text: String(body.text ?? ''), ...(typeof body.cron === 'string' && body.cron ? { cron: body.cron } : {}), ...(typeof body.at === 'string' && body.at ? { at: body.at } : {}) },
+      // `silent` 是对外线上的名字（DB 列 `allow_silent`）。收它是契约里那条「命名收敛」的一半 ——
+      // 不收的话 WebUI 建不出静默任务，而弹窗上那个开关会静静地什么都不做。
+      { name: String(body.name ?? ''), mode, text: String(body.text ?? ''), ...(typeof body.cron === 'string' && body.cron ? { cron: body.cron } : {}), ...(typeof body.at === 'string' && body.at ? { at: body.at } : {}), ...(typeof body.silent === 'boolean' ? { silent: body.silent } : {}) },
       { key, chatId: target.chatId, threadId: target.threadId, createdBy, timezone: live.general.timezone, settings: live.schedule });
     if (!result.ok) return ctx.json(apiError(result.error, result.hint).body, 400);
     dependencies.log.event({ level: 'info', kind: 'schedule.created', summary: `WebUI 新建定时任务 ${result.job.name}`, chatId: result.job.chatId, key: result.job.key,
       data: { job: result.job.id, name: result.job.name, mode: result.job.mode, cron: result.job.cron, runAt: result.job.runAt, actor: 'webui' } });
+    return ctx.json({ ok: true, data: scheduleRow(result.job) });
+  });
+  /**
+   * 改一条活跃任务。**校验与 `schedule_update` 工具共用 `updateScheduledJob`** —— 理由同建任务
+   * 那条：两边各写一遍的话，WebUI 迟早能改出工具改不出来的任务。
+   *
+   * **`gateEnabled` 是建与改唯一不共用的那道闸**：总开关（`schedule.enabled`）关着时这条路放行，
+   * 而 `POST /api/schedules` 仍回 `schedule_disabled`。不对称是有意的 —— 拒掉编辑等于「要修一条
+   * 跑飞的任务，得先把总开关打开」，而那一下会把所有任务一起重新武装（理由与出处见
+   * `updateScheduledJob` 的注释与 docs/09 §3.10.1）。
+   *
+   * body 里的 `name` 是**新名字**（HTTP 已经用 `:id` 定位了）；工具那边 `name` 是定位符、`newName`
+   * 才是新名字（docs/09 §4）。`key`/`chatId`/`threadId`/`createdBy`/`mode` 一个都不读：前四样是
+   * 会话隔离与「触发时按谁重算角色」的锚点，收下就等于给了一个把任务搬进任意群、或换个人担保的
+   * 原语（同 `POST /api/schedules` 反查 `contexts` 的理由）；`mode` 会同时翻转 `payload` 的语义与
+   * 花不花钱。只发这几样时落进 `nothing_to_update`，不是假成功。
+   */
+  app.patch('/api/schedules/:id', async (ctx) => {
+    const runtime = scheduleRuntime();
+    if (!runtime) return ctx.json(apiError('not_implemented', '这个部署没有装配定时任务运行时', 500).body, 500);
+    const id = ctx.req.param('id');
+    const job = runtime.jobs.byId(id);
+    if (!job) return ctx.json(apiError('not_found', '任务不存在（可能已被保留策略清理）', 404).body, 404);
+    const body = await ctx.req.json<Record<string, unknown>>().catch((): Record<string, unknown> => ({}));
+    const request: ScheduleUpdateRequest = {
+      ...(typeof body.name === 'string' ? { name: body.name } : {}),
+      ...(typeof body.text === 'string' ? { text: body.text } : {}),
+      ...(typeof body.cron === 'string' ? { cron: body.cron } : {}),
+      ...(typeof body.at === 'string' ? { at: body.at } : {}),
+      ...(typeof body.silent === 'boolean' ? { silent: body.silent } : {}),
+    };
+    const result = updateScheduledJob(runtime.jobs, runtime.runner, job, request, currentConfig().schedule);
+    // 只有「这条已经结束了」是状态冲突，其余都是这次请求本身不合法。
+    if (!result.ok) return result.error === 'not_active'
+      ? ctx.json(apiError(result.error, result.hint, 409).body, 409)
+      : ctx.json(apiError(result.error, result.hint).body, 400);
+    dependencies.log.event({ level: 'info', kind: 'schedule.updated', summary: `WebUI 改定时任务 ${result.job.name}`, chatId: result.job.chatId, key: result.job.key,
+      data: { job: id, name: result.job.name, changed: Object.keys(request), actor: 'webui' } });
     return ctx.json({ ok: true, data: scheduleRow(result.job) });
   });
   app.delete('/api/schedules/:id', (ctx) => {
@@ -1508,6 +1590,31 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
         data: { job: id, name: job.name, actor: 'webui' } });
     }
     return ctx.json({ ok: true, data: { cancelled: changed, name: job.name } });
+  });
+  /**
+   * 硬删一行（`ScheduleRepository.remove`，**不是**按保留期清理的 `purge(before)`）。与上面那条
+   * 软取消是两件事：停掉的行还在列表上、还能看见它跑过多少次，删掉的什么都不剩。
+   *
+   * **顺序不能反**：active 的先 `runner.unregister` 再删行。反过来的话，删行到下一次 cron 之间
+   * 那条任务在 `Scheduler` 里还排着，而界面上已经看不见它了。
+   *
+   * 日志记 **warn**：硬删一条 active 任务之后「bot 突然不再提醒了」在库里再无痕迹，这一行就是
+   * 那个痕迹（`schedule.cancelled` 同理）。
+   */
+  app.post('/api/schedules/:id/purge', (ctx) => {
+    const runtime = scheduleRuntime();
+    if (!runtime) return ctx.json(apiError('not_implemented', '这个部署没有装配定时任务运行时', 500).body, 500);
+    const id = ctx.req.param('id');
+    const job = runtime.jobs.byId(id);
+    if (!job) return ctx.json(apiError('not_found', '任务不存在（可能已被保留策略清理）', 404).body, 404);
+    const wasActive = job.state === 'active';
+    if (wasActive) runtime.runner.unregister(id);
+    const removed = runtime.jobs.remove(id);
+    if (removed) {
+      dependencies.log.event({ level: 'warn', kind: 'schedule.purged', summary: `WebUI 永久删除定时任务 ${job.name}`, chatId: job.chatId, key: job.key,
+        data: { job: id, name: job.name, state: job.state, wasActive, actor: 'webui' } });
+    }
+    return ctx.json({ ok: true, data: { removed, name: job.name, wasActive } });
   });
   /**
    * 立即触发一次。**不等它跑完**：`mode='agent'` 的一次触发是一整轮真实模型调用，
@@ -1923,7 +2030,9 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
   app.get('/api/logs', (ctx) => {
     const minLevel = ctx.req.query('minLevel');
     const level = minLevel && ['debug', 'info', 'warn', 'error'].includes(minLevel) ? minLevel as 'debug' | 'info' | 'warn' | 'error' : undefined;
-    return ctx.json({ ok: true, data: dependencies.operations.logs(Math.min(1000, Number(ctx.req.query('size') ?? 200)), ctx.req.query('traceId'), level) });
+    // 这一条不分页（只夹 size），但 `size` 的解析必须与那四个分页端点同源：`Math.min(1000, NaN)`
+    // 还是 `NaN`，照样把端点打成 500。走同一个 `pageParams` 就不会再有第二种写法可抄。
+    return ctx.json({ ok: true, data: dependencies.operations.logs(pageParams(ctx, { defaultSize: 200, maxSize: 1000 }).size, ctx.req.query('traceId'), level) });
   });
   app.get('/api/logs/trace/:traceId', (ctx) => ctx.json({ ok: true, data: dependencies.operations.logs(2000, ctx.req.param('traceId')) }));
   app.get('/api/logs/blob', (ctx) => { try { const path = safeRef(currentConfig().logs.dir, ctx.req.query('ref') ?? ''); return existsSync(path) ? ctx.text(readFileSync(path, 'utf8')) : ctx.json(apiError('not_found', '日志载荷不存在', 404).body, 404); } catch { return ctx.json(apiError('invalid_ref', '非法日志引用', 403).body, 403); } });
@@ -2037,7 +2146,61 @@ export function createServer(dependencies: ServerDependencies): Hono<ServerEnv> 
     dependencies.log.event({ level: 'info', kind: 'webui.action', summary: 'quota counters reset', data: { filters: Object.fromEntries(filters), changes } });
     return ctx.json({ ok: true, data: { changes } });
   });
-  app.get('/api/tasks', (ctx) => ctx.json({ ok: true, data: dependencies.db.prepare('SELECT * FROM tasks ORDER BY updated_at DESC LIMIT 500').all() }));
+  /**
+   * `spawn_agent` 派发出去的子 agent 任务（docs/09 §3.12）。
+   *
+   * **列表不发 `progress_json`**：`AgentManager.progress` 每一帧都覆盖同一列，一行能有几 KB，
+   * 而列表上只显示标题与状态 —— 同 `GET /api/logs` 不发 `data_json` 的理由。要看进度走详情。
+   * `chatLabel`/`userLabel` 在服务端补：裸 id 认不出是哪个群（docs/09 §3.11 明确显示名在服务端
+   * 反查，前端不实现第二份规则）。排序把 running 顶到第一页 —— 在跑的那几条才是要盯的。
+   */
+  app.get('/api/tasks', (ctx) => {
+    const { page: pageNumber, size, offset } = pageParams(ctx, { defaultSize: 50, maxSize: 200 });
+    const total = Number(dependencies.db.prepare('SELECT COUNT(*) FROM tasks').pluck().get());
+    const rows = dependencies.db.prepare(`SELECT id,turn_id,agent_run_id,chat_id,user_id,title,state,placeholder_tg_message_id,result_summary,created_at,updated_at,finished_at
+      FROM tasks ORDER BY (state='running') DESC,updated_at DESC LIMIT ? OFFSET ?`).all(size, offset) as Array<Record<string, unknown>>;
+    const items = rows.map((row) => ({ ...row,
+      chatLabel: principalLabel(dependencies.db, 'chat', row.chat_id as string | null),
+      userLabel: principalLabel(dependencies.db, 'user', row.user_id as string | null) }));
+    return ctx.json({ ok: true, data: { items, total, page: pageNumber, size } });
+  });
+  /**
+   * 单条任务的只读详情。`progress_json` 与 `result_summary` 运行时一直在写，界面上从来没出现过
+   * （docs/21 §8）。两条 join 是排障要的那一半：任务本身只记标题与状态，「跑了几步、花了多少钱、
+   * 为什么失败」在 `turns` 上，「哪个 agent、哪个别名」在 `agent_runs` 上。
+   *
+   * `progress` 是解析后的那一份，**不再把原始 JSON 串一起发**（同一份东西发两遍，而前端只会读
+   * 其中一份）。解不出来时给 null 而不是原样回一串 —— 那一列只由 `AgentManager` 写，解不出来
+   * 意味着库被人动过，界面照着渲染只会更难查。
+   */
+  app.get('/api/tasks/:id', (ctx) => {
+    const row = dependencies.db.prepare('SELECT * FROM tasks WHERE id=?').get(ctx.req.param('id')) as (Record<string, unknown> & { progress_json: string | null }) | undefined;
+    if (!row) return ctx.json(apiError('not_found', '任务不存在（可能已被删除）', 404).body, 404);
+    const { progress_json: raw, ...rest } = row;
+    let progress: unknown = null;
+    if (raw) { try { progress = JSON.parse(raw); } catch { progress = null; } }
+    const turn = dependencies.db.prepare('SELECT state,steps,tool_calls AS toolCalls,cost_usd AS costUsd,error FROM turns WHERE id=?').get(row.turn_id as string) ?? null;
+    const agentRun = row.agent_run_id
+      ? dependencies.db.prepare('SELECT agent_name AS agentName,model_alias AS modelAlias,state,result_summary AS resultSummary FROM agent_runs WHERE id=?').get(row.agent_run_id as string) ?? null
+      : null;
+    return ctx.json({ ok: true, data: { ...rest, progress,
+      chatLabel: principalLabel(dependencies.db, 'chat', row.chat_id as string | null),
+      userLabel: principalLabel(dependencies.db, 'user', row.user_id as string | null), turn, agentRun } });
+  });
+  /**
+   * 删的是**记录**，不是取消通道：这里没有 `POST /api/tasks/:id/cancel`（docs/09 §4），取消一条
+   * 在跑的子 agent 要走 `POST /api/turns/:id/cancel`。所以 `running` 一律 409 —— 把行删掉不会让
+   * 那个 agent 停下来，只会让它变成一条谁都看不见的在途任务。404 的口径同
+   * `DELETE /api/custom-tools/:name`：什么都没删掉时不回 200，否则界面会对着一个错 id 弹「已删除」。
+   */
+  app.delete('/api/tasks/:id', (ctx) => {
+    const id = ctx.req.param('id');
+    const row = dependencies.db.prepare('SELECT state FROM tasks WHERE id=?').get(id) as { state: string } | undefined;
+    if (!row) return ctx.json(apiError('not_found', '任务不存在', 404).body, 404);
+    if (row.state === 'running') return ctx.json(apiError('task_running', '这条任务还在跑：删记录不会让它停下来，先去对应轮次上取消', 409).body, 409);
+    const removed = dependencies.db.prepare('DELETE FROM tasks WHERE id=?').run(id).changes === 1;
+    return ctx.json({ ok: true, data: { removed } });
+  });
   app.post('/api/maintenance/:action', (ctx) => { const action = ctx.req.param('action'); const result = action === 'backup' ? dependencies.maintenance.backup() : action === 'vacuum' ? (dependencies.maintenance.vacuum(), 'ok') : action === 'cleanup-logs' ? dependencies.maintenance.cleanup() : action === 'gc-files' ? dependencies.maintenance.gcFiles() : action === 'rebuild-fts' ? (dependencies.maintenance.rebuildFts(), 'ok') : null; return result === null ? ctx.json(apiError('unknown_action', '未知维护操作', 404).body, 404) : ctx.json({ ok: true, data: result }); });
   /**
    * `[重启进程]`（docs/09 §3.13）。**先回响应再退出** —— 在同一个 tick 里 `process.exit` 会让

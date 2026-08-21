@@ -21,6 +21,11 @@ export interface OpenTurnRequest {
    * update 里带着它的完整副本，所以「库里没有」不等于「拿不到」（docs/08 §7.4）。
    */
   quoted?: ArchivedMessage;
+  /**
+   * 本轮允许模型宣布不投递。只有 `ScheduledJobRunner` 会给（任务行的 `allow_silent` 为真时），
+   * 其余入口一概缺席 —— fail-closed 的理由写在 `RuntimeTurnContext.silenceable` 上。
+   */
+  silenceable?: boolean;
   abortSignal: AbortSignal;
   config: Readonly<Config>;
 }
@@ -240,6 +245,7 @@ export class ContextEngine {
       return { turnId, key: request.key, chatId: request.chatId, threadId: request.threadId,
         initiatorUserId: request.initiatorUserId, effectiveRole: request.effectiveRole, isPrivate: request.isPrivate,
         ...(request.chatTitle ? { chatTitle: request.chatTitle } : {}),
+        ...(request.silenceable ? { silenceable: true } : {}),
         // 「上一件发生的事是有人清空了上下文」：HEAD 就是那条 reset 且窗口还是空的。提交过一轮之后
         // HEAD 变成 turn commit，这一位自动消失 —— 它说的是「这一轮之前刚清过」，不是「清过」。
         ...(head?.kind === 'reset' && stored.length === 0 ? { contextCleared: true } : {}),

@@ -413,9 +413,12 @@ function extractTs(sink: Sink, file: string, surface: string, routeAware: boolea
 export const BROWSER_FILES = [
   'packages/webui/src/App.vue',
   'packages/webui/src/views/ConsoleView.vue', 'packages/webui/src/views/ExtensionsPage.vue', 'packages/webui/src/views/LoginView.vue',
+  'packages/webui/src/views/TasksPage.vue',
   ...readdirSync('packages/webui/src/ui').filter((n) => n.endsWith('.vue')).map((n) => `packages/webui/src/ui/${n}`),
   ...readdirSync('packages/webui/src/components/extensions').filter((n) => n.endsWith('.vue')).map((n) => `packages/webui/src/components/extensions/${n}`),
-  'packages/webui/src/components/extensions/types.ts', 'packages/webui/src/api/client.ts', 'packages/webui/src/ui/toast.ts', 'packages/webui/src/main.ts',
+  ...readdirSync('packages/webui/src/components/tasks').filter((n) => n.endsWith('.vue')).map((n) => `packages/webui/src/components/tasks/${n}`),
+  'packages/webui/src/components/extensions/types.ts', 'packages/webui/src/components/tasks/types.ts',
+  'packages/webui/src/api/client.ts', 'packages/webui/src/ui/toast.ts', 'packages/webui/src/ui/confirm.ts', 'packages/webui/src/main.ts',
 ];
 
 /**
@@ -435,6 +438,7 @@ function dropNested(entries: Entry[]): Entry[] {
 export function extractFile(file: string): Entry[] {
   const sink: Sink = { entries: [], seen: new Map(), withPins: false };
   const prefix = file.includes('/views/ConsoleView') ? 'console-' : file.includes('ExtensionsPage') || file.includes('/components/extensions/') ? 'extensions-'
+    : file.includes('TasksPage') || file.includes('/components/tasks/') ? 'tasks-'
     : file.includes('LoginView') ? 'login-' : 'ui-';
   if (file.endsWith('.vue')) extractVue(sink, file, prefix);
   else extractTs(sink, file, `${prefix}script`, false);
@@ -447,11 +451,15 @@ export function extractAll(): Entry[] {
   extractVue(sink, 'packages/webui/src/views/ConsoleView.vue', 'console-');
   extractVue(sink, 'packages/webui/src/views/ExtensionsPage.vue', 'extensions-');
   extractVue(sink, 'packages/webui/src/views/LoginView.vue', 'login-');
+  extractVue(sink, 'packages/webui/src/views/TasksPage.vue', 'tasks-');
   for (const name of readdirSync('packages/webui/src/ui').filter((n) => n.endsWith('.vue'))) extractVue(sink, `packages/webui/src/ui/${name}`, 'ui-');
   for (const name of readdirSync('packages/webui/src/components/extensions').filter((n) => n.endsWith('.vue'))) extractVue(sink, `packages/webui/src/components/extensions/${name}`, 'extensions-');
+  for (const name of readdirSync('packages/webui/src/components/tasks').filter((n) => n.endsWith('.vue'))) extractVue(sink, `packages/webui/src/components/tasks/${name}`, 'tasks-');
   extractTs(sink, 'packages/webui/src/components/extensions/types.ts', 'extensions-labels', false);
+  extractTs(sink, 'packages/webui/src/components/tasks/types.ts', 'tasks-labels', false);
   extractTs(sink, 'packages/webui/src/api/client.ts', 'ui-plumbing', false);
   extractTs(sink, 'packages/webui/src/ui/toast.ts', 'ui-plumbing', false);
+  extractTs(sink, 'packages/webui/src/ui/confirm.ts', 'ui-plumbing', false);
   extractTs(sink, 'packages/webui/src/main.ts', 'ui-plumbing', false);
   extractTs(sink, 'packages/server/src/app.ts', 'api-errors', true);
   extractTs(sink, 'packages/core/src/config/descriptions.ts', 'config-descriptions', false);

@@ -489,7 +489,10 @@ defineExpose({ EXTENSION_TABS, tab, inbox, selfExtendOffKey });
 
     <!-- ── 对话框 ────────────────────────────────────────────────────────────── -->
     <UiModal v-model:visible="confirmBox.open" :title="confirmBox.title" width="min(560px, 94vw)">
-      <p class="callout warn"><i class="pi pi-exclamation-triangle" aria-hidden="true" />{{ confirmBox.detail }}</p>
+      <!-- `confirm-detail` 是层级钩子不是样式钩子：所有 `.ui-overlay` 同 z-index，同层只能靠 DOM 顺序
+           分胜负，而这张确认框在模板里排在 Skill / MCP 弹窗**之前** —— 在 Skill 弹窗里点〔永久删除〕，
+           确认框被盖在下面，表现是点了没反应。`styles.css` 的 `:has(.confirm-detail)` 认出它再抬一层。 -->
+      <p class="callout warn confirm-detail"><i class="pi pi-exclamation-triangle" aria-hidden="true" />{{ confirmBox.detail }}</p>
       <template #footer>
         <UiButton variant="text" label="取消" @click="confirmBox.open = false" />
         <UiButton severity="danger" label="确认" :loading="confirmBusy" @click="runConfirmed" />

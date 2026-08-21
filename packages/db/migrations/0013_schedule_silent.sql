@@ -1,0 +1,24 @@
+-- 定时任务的「本轮不用汇报」（docs/02 §10.5）。此前模型这一轮没什么可说时唯一的表达方式是
+-- 输出空正文，而空正文在 runner 里是 model_returned_empty —— 记 failed、写 error 日志、
+-- 计进连续失败告警、abortTurn 把上下文整个回滚。「每天中午查一次更新，没有就别吵我」于是
+-- 只有两种下场：每天一条噪声，或者每天一次假故障。
+--
+-- **为什么是任务行上的一列，而不是 mode 的第三档**：mode 决定的是「这一轮怎么跑」
+-- （notify 不调模型、agent 走完整轮次），静默决定的是「跑完投不投递」—— 两件正交的事。
+-- 做成 mode IN ('agent','notify','silent') 的话，「静默的 agent 任务」与「静默的 notify 任务」
+-- 里必然有一个表达不出来，而前者正是这次需求本身。同理不加配置键：这是每条任务各自的约定，
+-- 不是部署级策略（连续静默的告警阈值用代码常量 SILENT_STREAK_WARN，照 PROVIDER_FAILURES_TO_DOWN
+-- 的先例）。
+--
+-- silent_streak：连续静默次数，任何**非** silent 的触发结果都把它归零（markRun 里一句 CASE
+-- 就地算，不做读-改-写 —— 那在多实例下就是丢更新，docs/01 §3.1）。它是唯一能发现「这条任务
+-- 已经变成一台只烧钱不说话的定时器」的机制：静默按设计就是安静的，逐行看 last_state='silent'
+-- 每一次都很正常。
+--
+-- **last_state 上仍然不加 CHECK**：SQLite 加约束要整表重建，而这张表上挂着部分唯一索引
+-- ux_sched_name（重建时漏掉它，同会话重名任务立刻建得出来，而模型取消任务给的是名字）。
+-- 取值的权威在 core 的 ScheduledRunState 联合类型上，写入方只有 markRun 一处。
+--
+-- 默认 0：既有行相当于「不许静默、从没静默过」，与这次改动之前的行为逐字一致。
+ALTER TABLE scheduled_jobs ADD COLUMN allow_silent INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE scheduled_jobs ADD COLUMN silent_streak INTEGER NOT NULL DEFAULT 0;

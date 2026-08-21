@@ -44,7 +44,7 @@ pnpm start                    # 跑 dist 产物（生产）
 ## 架构
 
 pnpm workspace，依赖方向严格单向：`shared → db → core → {telegram, server} → apps/bot`。
-`packages/core` 是绝大部分逻辑所在（约 50 个源文件），`apps/bot/src/main.ts` 只做装配与生命周期。
+`packages/core` 是绝大部分逻辑所在（约 65 个源文件），`apps/bot/src/main.ts` 只做装配与生命周期。
 路径别名同时存在于三处，加新包时要一起改：`tsconfig.json` 的 `paths`、`vitest.config.ts` 的
 `resolve.alias`、以及各 `package.json` 的 `dependencies`。
 
@@ -107,20 +107,32 @@ WebUI 的写端点必须走 `runtimeConfigSchema.safeParse(mergeDotted(...))` �
 
 `docs/14 §2 Q4` 拍板后加的。触发时**开一条完整轮次**（照 `bot.ts` 那条路：配额 → 并发闸 →
 `openTurn` → `commitTurn`），产出照常进上下文；`mode='notify'` 也开轮，否则模型下一轮不知道
-自己刚提醒过什么。改这块前先读 `docs/02 §10` 的四条规则。两个容易踩的地方：
+自己刚提醒过什么。改这块前先读 `docs/02 §10` 的五条规则。三个容易踩的地方：
 
 - **合成触发消息的 `tg_message_id` 取自保留高位段 `2_000_000_000`**，且 `append` 之后必须核对
   返回值。`ScopedArchiveRepository.append` 是 `INSERT OR IGNORE` —— 撞号会静静返回既有那一行，
   表现是一条真实用户消息凭空消失。用负数同样不行（会把背景认领窗口算空）。
 - **每次触发都重算有效角色**，不能信创建时那个：降级到 `trusted` 以下跳过这一次、`blocked`
   整条停用。任务是在创建那一刻的角色下被允许的，而它此后每天都触发。
+- **静默（`docs/02 §10.5`）是「不投递」，不是「不开轮」更不是「不提交」。** `appendDelta` 与
+  `commitTurn` 必须在两条路的合流点**之后** —— 写成 `if (silenced) return` 省下的是一次 commit，
+  代价是一次说不清的失忆。`stay_silent` 的 `available()` 是 fail-closed 的
+  （`agentKind === 'main' && turn.silenceable === true`，两道闸都要：子 agent 拿到的是父轮同一个
+  turn 对象），而模型能置的 `silenced` / `silenceReason` **只有 runner 读** —— 哪天有人给别的
+  路径传了 `silenceable`，最坏也只是多一个没人读的标志位。
 
 `Scheduler` 现在有 `remove` / `has` / `nextRun` 与时区参数。**用户任务按行上记的 timezone 触发，
 而五个 `*Cron` 维护任务仍跑在进程本地时区** —— 这是既有行为，`docs/11` 的 `schedule` 段写明了。
 
-WebUI 在「任务与审批」页有管理面（列 / 建 / 停 / 立即触发，`docs/09 §3.10.1`）。
-**建任务的校验只有一份**：`packages/core/src/schedule/create.ts` 的 `createScheduledJob`，
-工具与 `POST /api/schedules` 共用 —— 端点自己抄一遍的话，WebUI 迟早能建出工具建不出来的任务。
+WebUI 在「任务与审批」页有管理面（列 / 建 / 改 / 停 / 彻底删除 / 立即触发，`docs/09 §3.10.1`）。
+**建与改的校验只有一份**：`packages/core/src/schedule/create.ts` 里的 `createScheduledJob` 与
+`updateScheduledJob`，两者共用同一组闸函数（`gateEnabled` / `gateName` / `gateText` / `gateSilent` /
+`gateCron` / `gateAt` / `gateDuplicate`）；工具与 `POST`/`PATCH /api/schedules` 四条路都走它 ——
+端点自己抄一遍的话，WebUI 迟早能建出（改出）工具建不出来的任务。`updateScheduledJob` 有一条
+反直觉的规矩：**只校验这次真的给了的字段**，两个触发字段都没给时触发时间原样保留且不重新校验
+（运维事后调大 `minIntervalMinutes` 时，「我只改了一句正文」不该以 `interval_too_short` 失败），
+时区一律取 `job.timezone` 而不是 `general.timezone`。「停掉」（`DELETE`，软取消、行还在）与
+「彻底删除」（`POST …/purge`，硬删整行）是两个动词，后者留一条 warn `schedule.purged` 当唯一凭据。
 
 ### 数据库（`packages/db/`）
 
@@ -134,7 +146,7 @@ better-sqlite3 + 原生 SQL，无 ORM 查询层。WAL 模式。迁移是 `packag
   文档分两层：`docs/00`–`docs/21` 是**活的规格层**，`docs/reviews/` 是**冻结的历史复审**。
   **`docs/00-state.md` 是「现在还欠什么 / 哪些查过没问题」的唯一入口**，开工前先看它 ——
   复审报告里的结论一律是当轮快照，不代表现在。
-  `docs/13-acceptance-criteria.md` 是 490 条可逐条勾选的验收条目（改动条数时同步该文件末尾的签署表）。
+  `docs/13-acceptance-criteria.md` 是 499 条可逐条勾选的验收条目（改动条数时同步该文件末尾的签署表）。
   `docs/21-webui-coverage-gaps.md` 记录 WebUI 控制面还够不着哪些已实现的能力，动 WebUI 前先扫一眼。
 - 修不了的东西不要假装修好。已确立的先例：`PUT /api/quota` 返回 `not_implemented` 而不是假成功；
   `ask_parent` 在父 agent 仲裁未实现时返回 `ask_parent_not_implemented` 而不是拿默认值伪造答复。

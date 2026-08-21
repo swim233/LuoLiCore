@@ -251,6 +251,35 @@ export interface RuntimeTurnContext {
    */
   mediaInjected?: boolean;
   /**
+   * 本轮**允许**模型宣布不投递（`docs/02 §10.5`）。`stay_silent` 只在这一位为真时才进工具目录。
+   *
+   * **唯一置位方是 `ScheduledJobRunner`**，且只在任务行的 `allow_silent` 为真时置。缺席 = 假，
+   * 于是 Telegram 轮次、WebUI 提示词预览、子 agent 试跑三条路都 fail-closed —— 有人正对着屏幕
+   * 等回话的那一轮，「不汇报」不是一个选项，那只是不回答。
+   */
+  silenceable?: boolean;
+  /**
+   * 模型的决定：这一轮不投递。**正文照常 `appendDelta` + `commitTurn`** —— 静默的是投递，
+   * 不是上下文，模型下一轮必须知道自己查过了（`docs/02 §10.5`）。
+   *
+   * **唯一读取方是 `ScheduledJobRunner`。** 这不是重复判据而是结构性保险：就算哪天有人给一条
+   * Telegram 轮次误置了 `silenceable`，模型能置的也只是一个没人读的标志，最坏结果是白调一次工具。
+   */
+  silenced?: boolean;
+  /**
+   * 模型给出的静默理由，落进 `schedule.silent` 日志。
+   *
+   * **与 `silenced` 是同一次置位的两半**：置位方同为 `stay_silent` 工具（`reason` 在它的
+   * inputSchema 里必填），读取方同为 `ScheduledJobRunner`。工具必须两个一起置 —— 只置理由不置
+   * `silenced` 那一轮照常投递，只置 `silenced` 则日志里那条 `reason` 恒为 null，而它是「这条任务
+   * 是不是从此再也不说话了」唯一可读的凭据。
+   *
+   * **不合成一个 `silenced?: string`**：`silenced` 是布尔判据，投递路径上那句 `turn.silenced === true`
+   * 不该被迫先去判空串 —— 「模型说了一句空理由」与「模型没要求静默」是两件事，用同一个字段表达
+   * 迟早会有一处把前者当后者（`docs/16 §5`「摘除比伪造安全」的同一个道理）。
+   */
+  silenceReason?: string;
+  /**
    * 触发这一轮的人是谁（`openTurn` 从触发消息上取）。只喂给 RUNTIME 块的「触发」行：
    * 私聊上下文按红线 10 不带发言人前缀，模型此前连问话人的昵称都看不到。
    */

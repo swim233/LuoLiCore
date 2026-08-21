@@ -361,14 +361,20 @@ data, mimeType}]}` 被换成 `media` + 一句文本标记。不做这一步的�
 
 | 工具 | minRole | 说明 |
 |---|---|---|
-| `schedule_create` | trusted | 排一个定时任务。`cron`（五段式，周期）与 `at`（本地时间，一次性）二者给一个；`mode='agent'` 到点起一轮完整对话执行 `text`，`mode='notify'` 到点原样发出 `text`（不调模型） |
+| `schedule_create` | trusted | 排一个定时任务。`cron`（五段式，周期）与 `at`（本地时间，一次性）二者给一个；`mode='agent'` 到点起一轮完整对话执行 `text`，`mode='notify'` 到点原样发出 `text`（不调模型）；`silent` 开这条任务的静默权（见下） |
+| `schedule_update` | trusted | 改本会话里一个**活跃**任务：`name` 定位，`newName` / `text` / `cron` / `at` / `silent` 各自可选，给几改几。**改不了 `mode`**（见下） |
 | `schedule_list` | trusted | 列出**本会话**的任务：活跃的在前，带 `nextRun` 与上一次的结果 |
 | `schedule_cancel` | trusted | 按名字取消本会话的一个活跃任务 |
+| `stay_silent` | trusted | **只在允许静默的定时轮次里存在**（见下）：宣布这一轮不投递。`reason` 必填 |
 
 - **起点是 trusted 而不是 limited**：定时任务是唯一能让 bot 在没人说话时主动花钱的能力。
 - **参数里没有 `chatId` / `userId`**（§8）：落点一律取自 `context.turn`。收一个 chatId 参数就等于
   给任何 trusted 群成员一个跨会话写原语 —— 他能让 bot 每小时往别的群发东西，而那个群里没人
-  解释得清这消息哪来的。`list` / `cancel` 同样按 `context.turn.key` 过滤、**不接受任务 id**。
+  解释得清这消息哪来的。`list` / `cancel` / `update` 同样按 `context.turn.key` 过滤、**不接受任务 id**：
+  按 `(key, name)` 找是这一族的通用定位方式，拿 id 直接改等于让别的会话的任务也能被点掉。
+  （HTTP 那一侧用 `:id` 定位是另一回事：WebUI 只有 owner 一个身份、本来就是跨会话面板，
+  所以 `PATCH /api/schedules/:id` 的 body 里 `name` 是**新名字**，而工具这边 `name` 是定位符、
+  `newName` 才是新名字，[09 §4](./09-webui.md) 写明了这处不对称。）
 - 建之前挡四件事，每条都返回 `{ok:false,error,hint}`：cron 非法、两次触发间隔 <
   `schedule.minIntervalMinutes`（默认 5 分钟 —— `* * * * *` 在 agent 模式下就是每分钟一次模型调用）、
   `at` 已经过去（不补跑，所以过去的时间毫无意义）、本会话活跃任务数 ≥ `schedule.maxPerChat`。
@@ -376,8 +382,32 @@ data, mimeType}]}` 被换成 `media` + 一句文本标记。不做这一步的�
   会把「下午三点」变成晚上十一点。
 - **触发时重算有效角色**（[02 §10.4](./02-context-engine.md#104-触发时重算权限)）：降级到 trusted
   以下跳过这一次，`blocked` 整条停用。任务是在创建那一刻的角色下被允许的，而它此后每天都触发。
-- 接线是这一族的边界，同 §3.7：没有 `TelegramToolBridge`（缺 `BOT_TOKEN`）时三个工具整体
-  不进目录 —— 排一个到点发不出去的任务是纯粹的假承诺。
+- **`schedule_update` 只校验改动的那一项。** 两个触发字段都没给时，触发时间原样保留且
+  **不重新校验** —— 运维事后把 `minIntervalMinutes` 从 5 调到 60 之后，「我只改了一句正文」
+  不该以 `interval_too_short` 失败。`cron` 与 `at` 作为一个整体收：只给其一是换触发方式
+  （另一列显式置 NULL），两个都给是 `invalid_schedule`。时区一律取**任务行上的** `timezone`
+  而不是当前的 `general.timezone`（同 [03 §2.12](./03-data-model.md) 那句「事后改
+  `general.timezone` 不该改变已有任务的含义」）。一个字段都没给回 `nothing_to_update`，
+  不回假成功。校验与端点共用一份（`updateScheduledJob`），理由同 `createScheduledJob`。
+- **改不了 `mode`。** 一个字段翻过去，`payload` 的语义（任务描述 / 待发原文）与花不花钱同时变，
+  而这两件事在界面上、在模型的记忆里都还挂着原来那句话。要换模式就取消重建 ——
+  代价是 `run_count` 与运行历史归零，那正好是「这已经是另一条任务了」的诚实表达。
+  同理，`key` / `chatId` / `threadId` / `createdBy` 一个都不收：前三个是隔离锚点，
+  最后一个是每次触发重算有效角色的依据，做成可写就是一个提权把手（[02 §10.4](./02-context-engine.md#104-触发时重算权限)）。
+- **`mode='notify'` + `silent=true` 一律拒**（`invalid_silent`），建与改两条路都拒。notify 不调模型，
+  没有任何人能在触发时决定「这次不用说」，那个开关存得下但运行时永远不读 ——
+  给一个存得下却不生效的开关比没有更糟（[20 · W-CFG-02](./reviews/20-review-round5.md)）。
+- **`stay_silent` 的两道 `available()` 闸**：`agentKind === 'main'` **且** `turn.silenceable === true`。
+  语义与全部取舍在 [02 §10.5](./02-context-engine.md)，这里只说这两道闸为什么都必须在：
+  `silenceable` 的唯一置位方是 `ScheduledJobRunner`，缺席即假，于是 Telegram 轮次、提示词预览、
+  agent 隔离试跑全部 fail-closed；而**子 agent 拿到的是父轮的同一个 turn 对象**，
+  少了主 agent 那道闸，一个 researcher 就能替整轮闭嘴，派它出去的主 agent 全程不知情。
+  判据写在 `available()` 里而不是像「子 agent 不给 `memory_write`」那样硬编码在注册表的分支上 ——
+  `admit()` 会自动复查一遍 `available()`，一处判据两道闸（目录过滤 + `execute()` 硬拦截，见 §4 末尾）。
+- 接线是这一族的边界，同 §3.7：没有 `TelegramToolBridge`（缺 `BOT_TOKEN`）时四个 `schedule_*`
+  整体不进目录 —— 排一个到点发不出去的任务是纯粹的假承诺。`stay_silent` 不看这一条：
+  它的 `silenceable` 只可能来自 runner，而 runner 在投递通道不在时压根不开轮
+  （[02 §10.1](./02-context-engine.md#101-归属规则) 最后一条）。
 
 ### 3.9 Skill / Plugin / MCP 工具
 
@@ -502,7 +532,8 @@ sh ".luoli-tmp/<uuid>.sh" ".luoli-tmp/<uuid>.json"
 | `web_fetch` | ✗ | ✓ allowlist | ✓ | ✓ |
 | `web_search` | ✗ | ✓ | ✓ | ✓ |
 | `send_message` `send_photo` `react` | ✗ | ✓ | ✓ | ✓ |
-| `schedule_create` `schedule_list` `schedule_cancel` | ✗ | ✗ | ✓ 本会话 | ✓ 本会话 |
+| `schedule_create` `schedule_update` `schedule_list` `schedule_cancel` | ✗ | ✗ | ✓ 本会话 | ✓ 本会话 |
+| `stay_silent` | ✗ | ✗ | ✓ 仅静默定时轮次¶ | ✓ 仅静默定时轮次¶ |
 | `send_file` `pin_message` | ✗ | ✗ | ✓ | ✓ |
 | `define_tool` `delete_tool` `write_skill` `write_plugin` `install_mcp` | ✗ | ✗ | ✗ | ✓ + 审批* |
 | `list_tools` `list_mcp` | ✗ | ✗ | ✗ | ✓ |
@@ -523,6 +554,11 @@ sh ".luoli-tmp/<uuid>.sh" ".luoli-tmp/<uuid>.json"
 § 容器管理那六个只在 `sandbox.persistent.enabled` 为真时进目录，且 owner 地板同样焊在
 `available()` 里（§3.11）。「跨会话」指参数里的 `chat` 可以指向任意会话 —— 这是本表里除
 `admin_search_messages` 之外唯一一族不受 `context.turn` 约束的工具。
+¶ 「仅静默定时轮次」= `agentKind === 'main'` 且 `turn.silenceable === true`，两道闸同样焊在
+`available()` 里（§3.8），**运维把 `tools.overrides.stay_silent.minRole` 调到 `limited` 也绕不过去** ——
+与上面 ‡ 的自定义工具地板、§ 的容器 owner 地板同形。`minRole` 管的是「谁够格」，这一条管的是
+「这一轮的形态允不允许」，两者相乘才是它进不进目录。角色那一栏写 trusted 只是与
+`schedule_create` 对齐（能排静默任务的人才可能触发一条静默轮次），真正的边界不在那里。
 
 矩阵在代码中是**默认值与对照基准**：`packages/core/tools/policy.ts` 导出
 `TOOL_POLICY: Record<ToolName, {minRole, approval, scope, source}>`，`ToolRegistry` 与 WebUI 工具页
@@ -872,6 +908,14 @@ approval:
 ```
 
 第 3 步是关键安全设计：**工具的 `inputSchema` 里没有 `chatId`、`userId`、`role`、`root` 这类字段**，它们从 `TurnCtx` 注入，模型无从伪造。
+
+**「这一轮是什么形态」与作用域归为同一类，判据一律从轮次上读、不从参数里收。**
+`turn.silenceable`（这一轮允不允许静默，§3.8 的 `stay_silent`）是这一类里最新的一个：
+它和 `chatId` / `key` 一样，是**派这一轮出来的那一方**说了算的事实，模型只能读、不能提。
+反过来，模型在轮内置下的 `turn.silenced` 是它的表态，**只有派轮次的那一方读** ——
+两个方向分成两个字段，是为了让「谁能说」和「谁会听」在类型上就分得开
+（[02 §10.5](./02-context-engine.md) 第 ② 条）。同形的还有 `turn.mediaInjected`
+与 `claimExtraMessage`：都挂在轮次对象上、随轮次消亡，不引入新的进程内表。
 
 ### 8.1 超时、重试与连续失败
 
