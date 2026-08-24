@@ -1,18 +1,27 @@
-import { pathToFileURL } from 'node:url';
-import { createHash } from 'node:crypto';
-import { type FSWatcher, watch } from 'chokidar';
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-import type { Sqlite } from '@luoli/db';
-import { readAppKv, writeAppKv } from '@luoli/db';
-import { z } from 'zod';
-import type { Role } from '@luoli/shared';
-import type { ToolRegistry } from '../tools/registry.js';
-import type { LogSink } from '../log/sink.js';
+import { pathToFileURL } from "node:url";
+import { createHash } from "node:crypto";
+import { type FSWatcher, watch } from "chokidar";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { join } from "node:path";
+import type { Sqlite } from "@luoli/db";
+import { readAppKv, writeAppKv } from "@luoli/db";
+import { z } from "zod";
+import type { Role } from "@luoli/shared";
+import type { ToolRegistry } from "../tools/registry.js";
+import type { LogSink } from "../log/sink.js";
 
 /** 三个文件方法共用同一道校验：名字同时是目录段，漏一处就是一条穿越（`readSource` 曾经漏过）。 */
 function assertPluginName(name: string): void {
-  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name)) throw new Error('invalid_plugin_name');
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name))
+    throw new Error("invalid_plugin_name");
 }
 
 /**
@@ -29,13 +38,16 @@ function assertPluginName(name: string): void {
  * （`process.env.TSX`、`import.meta` 上那些都不是契约），嗅到的下一次它改实现就静静失效。
  * 误判成「不可靠」的代价只是多一条警告，误判成「可靠」的代价是本条缺陷原封不动地复发。
  */
-export function isHotReloadReliable(entry: string | undefined = process.argv[1]): boolean {
-  return !/\.[cm]?ts$/.test(entry ?? '');
+export function isHotReloadReliable(
+  entry: string | undefined = process.argv[1],
+): boolean {
+  return !/\.[cm]?ts$/.test(entry ?? "");
 }
 
 /** 启动告警与 `POST /api/plugins/:name/reload` 的响应共用同一句话：两处说法不一致的话，
  *  「reload 回了 ok」和「启动时警告过」会被当成两件事。 */
-export const HOT_RELOAD_UNRELIABLE_HINT = 'tsx（pnpm dev）的 ESM loader 按路径缓存模块、忽略 cache-busting 查询串：重载会照常跑完 onUnload/onLoad 并更新数据库，但加载到的仍是本进程第一次 import 的那份代码。要让 plugin 改动真的生效，重启进程，或用 pnpm build && pnpm start（docs/28 · L-EXT-04）。';
+export const HOT_RELOAD_UNRELIABLE_HINT =
+  "tsx（pnpm dev）的 ESM loader 按路径缓存模块、忽略 cache-busting 查询串：重载会照常跑完 onUnload/onLoad 并更新数据库，但加载到的仍是本进程第一次 import 的那份代码。要让 plugin 改动真的生效，重启进程，或用 pnpm build && pnpm start（docs/28 · L-EXT-04）。";
 
 export interface LoadedPlugin {
   name: string;
@@ -54,7 +66,13 @@ export class PluginManager {
   #reconciling = false;
   #pendingRescan = false;
 
-  constructor(private readonly db: Sqlite, readonly directory: string, private readonly timeoutMs: number, private readonly disableAfter: number, private readonly order: readonly string[] = [], private registry?: ToolRegistry,
+  constructor(
+    private readonly db: Sqlite,
+    readonly directory: string,
+    private readonly timeoutMs: number,
+    private readonly disableAfter: number,
+    private readonly order: readonly string[] = [],
+    private registry?: ToolRegistry,
     private readonly onAutoDisable?: (name: string, error: string) => void,
     /**
      * 插件行为此前**全程不可观测**：单次钩子失败只 `plugin.errors += 1`，要累计到
@@ -62,7 +80,8 @@ export class PluginManager {
      * `dedupeMinutes` 管 —— 实测一个三轮必抛的 `beforeTurn`，与 plugin 有关的日志 **0 条**
      * （docs/28 · L-LOG-01）。可选：测试与 CLI 场景不必给，行为一个字不变。
      */
-    private readonly log?: LogSink) {}
+    private readonly log?: LogSink,
+  ) {}
 
   /**
    * `plugin.hook` 只记**慢**的那一次。钩子每轮要跑好几次（`onToolCall` 是每次工具调用一次，
@@ -71,29 +90,64 @@ export class PluginManager {
    * 也就是「已经吃掉 10% 预算的那一次」，运维调紧 `plugins.hookTimeoutMs` 时这条线跟着紧。
    * 判据同时写在 `docs/10 §2` 的 `plugin.hook` 行里。
    */
-  get #slowHookMs(): number { return Math.max(50, this.timeoutMs / 10); }
-  bindRegistry(registry: ToolRegistry): void { this.registry = registry; }
+  get #slowHookMs(): number {
+    return Math.max(50, this.timeoutMs / 10);
+  }
+  bindRegistry(registry: ToolRegistry): void {
+    this.registry = registry;
+  }
   /** 只读判据，不是开关 —— 见 `isHotReloadReliable`。`plugins.watch` 的既定用途正是「本机写
    *  plugin」，而那恰好是它静默失效的场景，所以调用方（启动告警 / reload 端点）必须说出来。 */
-  get hotReloadReliable(): boolean { return isHotReloadReliable(); }
+  get hotReloadReliable(): boolean {
+    return isHotReloadReliable();
+  }
   /** 不可靠时给出该说的那句话，可靠时 `null`。让两处调用方拿同一份字符串，而不是各写一句。 */
-  get hotReloadWarning(): string | null { return this.hotReloadReliable ? null : HOT_RELOAD_UNRELIABLE_HINT; }
+  get hotReloadWarning(): string | null {
+    return this.hotReloadReliable ? null : HOT_RELOAD_UNRELIABLE_HINT;
+  }
 
   async reconcile(): Promise<void> {
-    if (existsSync(this.directory)) for (const name of readdirSync(this.directory)) {
-      const path = join(this.directory, name, 'plugin.js');
-      if (!existsSync(path)) continue;
-      this.db.prepare("INSERT INTO plugins(name,path,min_role,enabled,updated_at) VALUES (?,?,'trusted',0,?) ON CONFLICT(name) DO UPDATE SET path=excluded.path,updated_at=excluded.updated_at").run(name, path, Date.now());
-    }
-    const enabled = new Map((this.db.prepare('SELECT name,enabled,config_json AS config FROM plugins').all() as Array<{ name: string; enabled: number; config: string | null }>).map((row) => [row.name, row]));
-    const desired = new Map<string, { path: string; row: { name: string; enabled: number; config: string | null }; signature: string }>();
-    if (existsSync(this.directory)) for (const name of readdirSync(this.directory)) {
-      const row = enabled.get(name);
-      const path = join(this.directory, name, 'plugin.js');
-      if (!row?.enabled || !existsSync(path)) continue;
-      const signature = createHash('sha256').update(readFileSync(path)).update('\0').update(row.config ?? '').digest('hex');
-      desired.set(name, { path, row, signature });
-    }
+    if (existsSync(this.directory))
+      for (const name of readdirSync(this.directory)) {
+        const path = join(this.directory, name, "plugin.js");
+        if (!existsSync(path)) continue;
+        this.db
+          .prepare(
+            "INSERT INTO plugins(name,path,min_role,enabled,updated_at) VALUES (?,?,'trusted',0,?) ON CONFLICT(name) DO UPDATE SET path=excluded.path,updated_at=excluded.updated_at",
+          )
+          .run(name, path, Date.now());
+      }
+    const enabled = new Map(
+      (
+        this.db
+          .prepare("SELECT name,enabled,config_json AS config FROM plugins")
+          .all() as Array<{
+          name: string;
+          enabled: number;
+          config: string | null;
+        }>
+      ).map((row) => [row.name, row]),
+    );
+    const desired = new Map<
+      string,
+      {
+        path: string;
+        row: { name: string; enabled: number; config: string | null };
+        signature: string;
+      }
+    >();
+    if (existsSync(this.directory))
+      for (const name of readdirSync(this.directory)) {
+        const row = enabled.get(name);
+        const path = join(this.directory, name, "plugin.js");
+        if (!row?.enabled || !existsSync(path)) continue;
+        const signature = createHash("sha256")
+          .update(readFileSync(path))
+          .update("\0")
+          .update(row.config ?? "")
+          .digest("hex");
+        desired.set(name, { path, row, signature });
+      }
     for (const [name, plugin] of this.#plugins) {
       if (desired.get(name)?.signature === plugin.signature) continue;
       await plugin.onUnload?.();
@@ -102,39 +156,113 @@ export class PluginManager {
     for (const [name, target] of desired) {
       if (this.#plugins.has(name)) continue;
       try {
-        const imported = await import(`${pathToFileURL(target.path).href}?v=${target.signature}`) as { default?: Record<string, unknown> };
+        const imported = (await import(
+          `${pathToFileURL(target.path).href}?v=${target.signature}`
+        )) as { default?: Record<string, unknown> };
         const definition = imported.default;
-        if (!definition || definition.name !== name) throw new Error('plugin name mismatch');
-        const context = { name, config: target.row.config ? JSON.parse(target.row.config) as Record<string, unknown> : {}, storage: { get: (key: string) => readAppKv(this.db, `plugin:${name}.${key}`), set: (key: string, value: unknown) => writeAppKv(this.db, `plugin:${name}.${key}`, value, 'plugin') } };
-        const rawTools = typeof definition.tools === 'function' ? (definition.tools as (ctx: unknown) => unknown)(context) : definition.tools;
-        const plugin: LoadedPlugin = { name, signature: target.signature,
-          hooks: definition.hooks && typeof definition.hooks === 'object' ? definition.hooks as LoadedPlugin['hooks'] : {},
-          tools: rawTools && typeof rawTools === 'object' ? rawTools as Record<string, unknown> : {}, enabled: true, errors: 0 };
-        if (typeof definition.version === 'string') plugin.version = definition.version;
-        if (typeof definition.onUnload === 'function') plugin.onUnload = definition.onUnload as () => Promise<void> | void;
-        if (typeof definition.onLoad === 'function') await (definition.onLoad as (ctx: unknown) => Promise<void> | void)(context);
-        const definitionRole = ['blocked', 'limited', 'trusted', 'owner'].includes(String(definition.minRole)) ? String(definition.minRole) : null;
-        if (definitionRole) this.db.prepare("UPDATE plugins SET min_role=CASE WHEN min_role='trusted' THEN ? ELSE min_role END WHERE name=?").run(definitionRole, name);
+        if (!definition || definition.name !== name)
+          throw new Error("plugin name mismatch");
+        const context = {
+          name,
+          config: target.row.config
+            ? (JSON.parse(target.row.config) as Record<string, unknown>)
+            : {},
+          storage: {
+            get: (key: string) => readAppKv(this.db, `plugin:${name}.${key}`),
+            set: (key: string, value: unknown) =>
+              writeAppKv(this.db, `plugin:${name}.${key}`, value, "plugin"),
+          },
+        };
+        const rawTools =
+          typeof definition.tools === "function"
+            ? (definition.tools as (ctx: unknown) => unknown)(context)
+            : definition.tools;
+        const plugin: LoadedPlugin = {
+          name,
+          signature: target.signature,
+          hooks:
+            definition.hooks && typeof definition.hooks === "object"
+              ? (definition.hooks as LoadedPlugin["hooks"])
+              : {},
+          tools:
+            rawTools && typeof rawTools === "object"
+              ? (rawTools as Record<string, unknown>)
+              : {},
+          enabled: true,
+          errors: 0,
+        };
+        if (typeof definition.version === "string")
+          plugin.version = definition.version;
+        if (typeof definition.onUnload === "function")
+          plugin.onUnload = definition.onUnload as () => Promise<void> | void;
+        if (typeof definition.onLoad === "function")
+          await (definition.onLoad as (ctx: unknown) => Promise<void> | void)(
+            context,
+          );
+        const definitionRole = [
+          "blocked",
+          "limited",
+          "trusted",
+          "owner",
+        ].includes(String(definition.minRole))
+          ? String(definition.minRole)
+          : null;
+        if (definitionRole)
+          this.db
+            .prepare(
+              "UPDATE plugins SET min_role=CASE WHEN min_role='trusted' THEN ? ELSE min_role END WHERE name=?",
+            )
+            .run(definitionRole, name);
         this.#plugins.set(name, plugin);
-        this.db.prepare('UPDATE plugins SET load_error=NULL,updated_at=? WHERE name=?').run(Date.now(), name);
+        this.db
+          .prepare(
+            "UPDATE plugins SET load_error=NULL,updated_at=? WHERE name=?",
+          )
+          .run(Date.now(), name);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        this.db.prepare('UPDATE plugins SET load_error=?,updated_at=? WHERE name=?').run(message, Date.now(), name);
+        this.db
+          .prepare("UPDATE plugins SET load_error=?,updated_at=? WHERE name=?")
+          .run(message, Date.now(), name);
         // `load_error` 那一列只有扩展页在读。加载失败与钩子失败同一个 kind（对运维是同一件事：
         // 「这个 plugin 没在干活」），靠 `phase` 分开 —— 与 `agent.file_invalid` 对称。
-        this.log?.event({ level: 'warn', kind: 'plugin.error', summary: `${name} 加载失败：${message}`.slice(0, 300), data: { plugin: name, phase: 'load', message: message.slice(0, 500) } });
+        this.log?.event({
+          level: "warn",
+          kind: "plugin.error",
+          summary: `${name} 加载失败：${message}`.slice(0, 300),
+          data: { plugin: name, phase: "load", message: message.slice(0, 500) },
+        });
       }
     }
-    this.registry?.unregisterBySource('plugin');
-    if (this.registry) for (const entry of this.toolEntries()) {
-      const tool = entry.tool as { description?: string; inputSchema?: z.ZodType<unknown>; execute?: (input: unknown) => Promise<unknown> | unknown };
-      if (!tool.execute) continue;
-      const role = (this.db.prepare('SELECT min_role FROM plugins WHERE name=?').pluck().get(entry.plugin) as Role | undefined) ?? 'trusted';
-      this.registry.registerExternal({ name: entry.name, description: tool.description ?? `Plugin ${entry.plugin} tool`, inputSchema: tool.inputSchema ?? z.record(z.unknown()), minRole: role, source: 'plugin', execute: tool.execute });
-    }
+    this.registry?.unregisterBySource("plugin");
+    if (this.registry)
+      for (const entry of this.toolEntries()) {
+        const tool = entry.tool as {
+          description?: string;
+          inputSchema?: z.ZodType<unknown>;
+          execute?: (input: unknown) => Promise<unknown> | unknown;
+        };
+        if (!tool.execute) continue;
+        const role =
+          (this.db
+            .prepare("SELECT min_role FROM plugins WHERE name=?")
+            .pluck()
+            .get(entry.plugin) as Role | undefined) ?? "trusted";
+        this.registry.registerExternal({
+          name: entry.name,
+          description: tool.description ?? `Plugin ${entry.plugin} tool`,
+          inputSchema: tool.inputSchema ?? z.record(z.unknown()),
+          minRole: role,
+          source: "plugin",
+          execute: tool.execute,
+        });
+      }
   }
 
-  async hook(name: string, ...arguments_: unknown[]): Promise<Array<{ plugin: string; result: unknown }>> {
+  async hook(
+    name: string,
+    ...arguments_: unknown[]
+  ): Promise<Array<{ plugin: string; result: unknown }>> {
     const output: Array<{ plugin: string; result: unknown }> = [];
     for (const plugin of this.list()) {
       const hook = plugin.hooks[name];
@@ -146,28 +274,58 @@ export class PluginManager {
       const started = performance.now();
       try {
         const timeout = new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new Error('plugin hook timeout')), this.timeoutMs);
+          timer = setTimeout(
+            () => reject(new Error("plugin hook timeout")),
+            this.timeoutMs,
+          );
         });
-        const result = await Promise.race([Promise.resolve(hook(...arguments_)), timeout]);
+        const result = await Promise.race([
+          Promise.resolve(hook(...arguments_)),
+          timeout,
+        ]);
         plugin.errors = 0;
         const elapsed = Math.round(performance.now() - started);
-        if (elapsed >= this.#slowHookMs) this.log?.event({ level: 'debug', kind: 'plugin.hook', summary: `${plugin.name}.${name} ${elapsed}ms`, durationMs: elapsed, data: { plugin: plugin.name, hook: name, ms: elapsed } });
+        if (elapsed >= this.#slowHookMs)
+          this.log?.event({
+            level: "debug",
+            kind: "plugin.hook",
+            summary: `${plugin.name}.${name} ${elapsed}ms`,
+            durationMs: elapsed,
+            data: { plugin: plugin.name, hook: name, ms: elapsed },
+          });
         output.push({ plugin: plugin.name, result });
       } catch (error) {
         plugin.errors += 1;
         const message = error instanceof Error ? error.message : String(error);
         const disabled = plugin.errors >= this.disableAfter;
         // **每一次**失败都记，不等累计到自动禁用那一档：前 `disableAfter - 1` 次此前完全静默。
-        this.log?.event({ level: 'warn', kind: 'plugin.error', summary: `${plugin.name}.${name}: ${message}`.slice(0, 300),
-          durationMs: Math.round(performance.now() - started), data: { plugin: plugin.name, hook: name, message: message.slice(0, 500), errors: plugin.errors, disabled } });
+        this.log?.event({
+          level: "warn",
+          kind: "plugin.error",
+          summary: `${plugin.name}.${name}: ${message}`.slice(0, 300),
+          durationMs: Math.round(performance.now() - started),
+          data: {
+            plugin: plugin.name,
+            hook: name,
+            message: message.slice(0, 500),
+            errors: plugin.errors,
+            disabled,
+          },
+        });
         if (disabled) {
           plugin.enabled = false;
-          this.db.prepare('UPDATE plugins SET enabled=0,load_error=?,updated_at=? WHERE name=?').run(message, Date.now(), plugin.name);
+          this.db
+            .prepare(
+              "UPDATE plugins SET enabled=0,load_error=?,updated_at=? WHERE name=?",
+            )
+            .run(message, Date.now(), plugin.name);
           // 自动禁用是「运维不点就永远不会恢复」的状态：不告警的话，一个 plugin 悄悄下线，
           // 用户只看到某个能力没了（`alerts.on` 的 plugin_auto_disabled）。
           this.onAutoDisable?.(plugin.name, message);
         }
-      } finally { clearTimeout(timer); }
+      } finally {
+        clearTimeout(timer);
+      }
     }
     return output;
   }
@@ -182,13 +340,26 @@ export class PluginManager {
    * 落盘用 tmp + rename（照 `SkillLoader.write`）：chokidar 在 `plugins.watch` 打开时盯着这个
    * 目录，写一半的文件会被它捡去 import。
    */
-  async writeSource(name: string, source: string): Promise<{ name: string; path: string; created: boolean; reset: boolean; backup: string | null }> {
+  async writeSource(
+    name: string,
+    source: string,
+  ): Promise<{
+    name: string;
+    path: string;
+    created: boolean;
+    reset: boolean;
+    backup: string | null;
+  }> {
     assertPluginName(name);
     const directory = join(this.directory, name);
-    const path = join(directory, 'plugin.js');
-    const previous = existsSync(path) ? readFileSync(path, 'utf8') : null;
+    const path = join(directory, "plugin.js");
+    const previous = existsSync(path) ? readFileSync(path, "utf8") : null;
     const changed = previous !== source;
-    const wasEnabled = (this.db.prepare('SELECT enabled FROM plugins WHERE name=?').pluck().get(name) as number | undefined) === 1;
+    const wasEnabled =
+      (this.db
+        .prepare("SELECT enabled FROM plugins WHERE name=?")
+        .pluck()
+        .get(name) as number | undefined) === 1;
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     // 覆盖前留一份。这个入口现在也给模型用（`write_plugin`），而被覆盖的可能是运维手写的那份 ——
     // `plugin.js` 没有 `write_file` 那样的 backupDir / 回收站，不留档就是真的没了。
@@ -196,14 +367,25 @@ export class PluginManager {
     let backup: string | null = null;
     if (previous !== null && changed) {
       backup = join(directory, `plugin.js.bak-${Date.now()}`);
-      writeFileSync(backup, previous, { encoding: 'utf8', mode: 0o600 });
+      writeFileSync(backup, previous, { encoding: "utf8", mode: 0o600 });
     }
     const temporary = join(directory, `.plugin.js.${process.pid}.tmp`);
-    writeFileSync(temporary, source, { encoding: 'utf8', mode: 0o600 });
+    writeFileSync(temporary, source, { encoding: "utf8", mode: 0o600 });
     renameSync(temporary, path);
-    if (changed && wasEnabled) this.db.prepare('UPDATE plugins SET enabled=0,load_error=NULL,updated_at=? WHERE name=?').run(Date.now(), name);
+    if (changed && wasEnabled)
+      this.db
+        .prepare(
+          "UPDATE plugins SET enabled=0,load_error=NULL,updated_at=? WHERE name=?",
+        )
+        .run(Date.now(), name);
     await this.reconcile();
-    return { name, path, created: previous === null, reset: changed && wasEnabled, backup };
+    return {
+      name,
+      path,
+      created: previous === null,
+      reset: changed && wasEnabled,
+      backup,
+    };
   }
 
   /**
@@ -215,8 +397,8 @@ export class PluginManager {
    */
   readSource(name: string): string | null {
     assertPluginName(name);
-    const path = join(this.directory, name, 'plugin.js');
-    return existsSync(path) ? readFileSync(path, 'utf8') : null;
+    const path = join(this.directory, name, "plugin.js");
+    return existsSync(path) ? readFileSync(path, "utf8") : null;
   }
 
   /** 连目录带库里那一行一起删。返回是否真的删掉了东西 —— 目录或行，有一个算一个。 */
@@ -225,20 +407,33 @@ export class PluginManager {
     const directory = join(this.directory, name);
     const hadDirectory = existsSync(directory);
     if (hadDirectory) rmSync(directory, { recursive: true, force: true });
-    const changes = this.db.prepare('DELETE FROM plugins WHERE name=?').run(name).changes;
+    const changes = this.db
+      .prepare("DELETE FROM plugins WHERE name=?")
+      .run(name).changes;
     await this.reconcile();
     return hadDirectory || changes === 1;
   }
 
   list(): LoadedPlugin[] {
     return [...this.#plugins.values()].sort((left, right) => {
-      const li = this.order.indexOf(left.name); const ri = this.order.indexOf(right.name);
-      return (li < 0 ? Number.MAX_SAFE_INTEGER : li) - (ri < 0 ? Number.MAX_SAFE_INTEGER : ri) || left.name.localeCompare(right.name);
+      const li = this.order.indexOf(left.name);
+      const ri = this.order.indexOf(right.name);
+      return (
+        (li < 0 ? Number.MAX_SAFE_INTEGER : li) -
+          (ri < 0 ? Number.MAX_SAFE_INTEGER : ri) ||
+        left.name.localeCompare(right.name)
+      );
     });
   }
 
   toolEntries(): Array<{ plugin: string; name: string; tool: unknown }> {
-    return this.list().flatMap((plugin) => Object.entries(plugin.tools).map(([name, tool]) => ({ plugin: plugin.name, name: `${plugin.name}_${name}`, tool })));
+    return this.list().flatMap((plugin) =>
+      Object.entries(plugin.tools).map(([name, tool]) => ({
+        plugin: plugin.name,
+        name: `${plugin.name}_${name}`,
+        tool,
+      })),
+    );
   }
 
   /**
@@ -255,31 +450,56 @@ export class PluginManager {
     if (this.#watcher) return;
     this.#watcher = watch(this.directory, { ignoreInitial: true });
     let pending: ReturnType<typeof setTimeout> | null = null;
-    this.#watcher.on('all', () => {
+    this.#watcher.on("all", () => {
       if (pending) clearTimeout(pending);
-      pending = setTimeout(() => { void this.#rescan(); }, 100);
+      pending = setTimeout(() => {
+        void this.#rescan();
+      }, 100);
     });
   }
 
   async #rescan(): Promise<void> {
-    if (this.#reconciling) { this.#pendingRescan = true; return; }
+    if (this.#reconciling) {
+      this.#pendingRescan = true;
+      return;
+    }
     this.#reconciling = true;
     try {
-      do { this.#pendingRescan = false; await this.reconcile(); } while (this.#pendingRescan);
+      do {
+        this.#pendingRescan = false;
+        await this.reconcile();
+      } while (this.#pendingRescan);
     } catch (error) {
       // 兜的是遍历本身失败（目录读不动、`unregisterBySource` 抛）。逐个 plugin 的错误由
       // `reconcile()` 自己记，但这一层此前是**裸 catch**：`plugins.watch` 打开时一次目录扫描
       // 失败在任何地方都留不下痕迹。
-      this.log?.event({ level: 'warn', kind: 'plugin.error', summary: `插件目录重扫失败：${error instanceof Error ? error.message : String(error)}`.slice(0, 300),
-        data: { phase: 'rescan', message: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500) } });
+      this.log?.event({
+        level: "warn",
+        kind: "plugin.error",
+        summary:
+          `插件目录重扫失败：${error instanceof Error ? error.message : String(error)}`.slice(
+            0,
+            300,
+          ),
+        data: {
+          phase: "rescan",
+          message:
+            error instanceof Error
+              ? error.message.slice(0, 500)
+              : String(error).slice(0, 500),
+        },
+      });
+    } finally {
+      this.#reconciling = false;
     }
-    finally { this.#reconciling = false; }
   }
 
   async close(): Promise<void> {
     await this.#watcher?.close();
     this.#watcher = null;
-    await Promise.all([...this.#plugins.values()].map((plugin) => plugin.onUnload?.()));
+    await Promise.all(
+      [...this.#plugins.values()].map((plugin) => plugin.onUnload?.()),
+    );
     this.#plugins.clear();
   }
 }

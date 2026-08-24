@@ -10,7 +10,7 @@ export interface PluginContext {
 export interface PluginDefinition {
   name: string;
   version?: string;
-  minRole?: 'blocked' | 'limited' | 'trusted' | 'owner';
+  minRole?: "blocked" | "limited" | "trusted" | "owner";
   configSchema?: unknown;
   tools?: (context: PluginContext) => Record<string, unknown>;
   hooks?: Record<string, (...arguments_: never[]) => unknown>;
@@ -21,10 +21,11 @@ export interface PluginDefinition {
 }
 
 export function definePlugin<T extends PluginDefinition>(plugin: T): T {
-  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(plugin.name)) throw new Error('plugin name must be kebab-case');
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(plugin.name))
+    throw new Error("plugin name must be kebab-case");
   return plugin;
 }
 
-export { z } from 'zod';
-export { tool } from 'ai';
-export type { Role } from '@luoli/shared';
+export { z } from "zod";
+export { tool } from "ai";
+export type { Role } from "@luoli/shared";

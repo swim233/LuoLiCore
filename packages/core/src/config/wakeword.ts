@@ -2,15 +2,15 @@
  * 唤醒词的可用性判定。运行时匹配（telegram/trigger.ts）与写入端校验（WebUI）必须共用这一份：
  * 分成两份实现会漂移，面板收下一个运行时永远匹配不上的模式，用户只能看到「bot 不理我」。
  */
-import { RE2 } from 're2-wasm';
+import { RE2 } from "re2-wasm";
 
 /** 正则只对消息开头这一段求值；匹配由 RE2 保证线性时间。 */
 export const WAKEWORD_SCAN_LIMIT = 4096;
 
-export type WakewordKind = 'contains' | 'regex';
+export type WakewordKind = "contains" | "regex";
 export type WakewordCheck =
-  | { ok: true; kind: 'contains'; folded: string }
-  | { ok: true; kind: 'regex'; regex: RE2 }
+  | { ok: true; kind: "contains"; folded: string }
+  | { ok: true; kind: "regex"; regex: RE2 }
   | { ok: false; kind: WakewordKind; reason: string };
 
 /**
@@ -20,13 +20,26 @@ export type WakewordCheck =
  */
 const REGEX_PREFIX = /^(?:\^|\(\?[a-zA-Z-]+\))/;
 
-export function checkWakeword(pattern: string, minLength: number): WakewordCheck {
-  const kind: WakewordKind = REGEX_PREFIX.test(pattern) ? 'regex' : 'contains';
-  if ([...pattern.replace(REGEX_PREFIX, '')].length < minLength) return { ok: false, kind, reason: `短于 wakewordMinLength=${minLength}` };
-  if (kind === 'contains') return { ok: true, kind, folded: pattern.toLocaleLowerCase() };
-  if ([...pattern].length > 128) return { ok: false, kind, reason: '正则超过 128 个字符' };
-  try { return { ok: true, kind, regex: new RE2(pattern, 'u') }; }
-  catch (error) { return { ok: false, kind, reason: `不是 RE2 兼容正则：${error instanceof Error ? error.message : String(error)}` }; }
+export function checkWakeword(
+  pattern: string,
+  minLength: number,
+): WakewordCheck {
+  const kind: WakewordKind = REGEX_PREFIX.test(pattern) ? "regex" : "contains";
+  if ([...pattern.replace(REGEX_PREFIX, "")].length < minLength)
+    return { ok: false, kind, reason: `短于 wakewordMinLength=${minLength}` };
+  if (kind === "contains")
+    return { ok: true, kind, folded: pattern.toLocaleLowerCase() };
+  if ([...pattern].length > 128)
+    return { ok: false, kind, reason: "正则超过 128 个字符" };
+  try {
+    return { ok: true, kind, regex: new RE2(pattern, "u") };
+  } catch (error) {
+    return {
+      ok: false,
+      kind,
+      reason: `不是 RE2 兼容正则：${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
 }
 
 /**
@@ -38,11 +51,18 @@ export function checkWakeword(pattern: string, minLength: number): WakewordCheck
 export function matchesWakeword(checked: WakewordCheck, text: string): boolean {
   if (!checked.ok) return false;
   // 正则只看开头这一段（RE2 是线性的，但没必要扫完超长消息）；contains 是 O(n) 的 includes，扫全文没有代价。
-  if (checked.kind === 'regex') return checked.regex.test(text.slice(0, WAKEWORD_SCAN_LIMIT));
+  if (checked.kind === "regex")
+    return checked.regex.test(text.slice(0, WAKEWORD_SCAN_LIMIT));
   return text.toLocaleLowerCase().includes(checked.folded);
 }
 
 /** 写入端用：返回每条不会生效的模式及原因，空数组表示整份唤醒词都可用。 */
-export function rejectedWakewords(wakewords: readonly string[], minLength: number): string[] {
-  return wakewords.flatMap((pattern) => { const checked = checkWakeword(pattern, minLength); return checked.ok ? [] : [`「${pattern}」${checked.reason}`]; });
+export function rejectedWakewords(
+  wakewords: readonly string[],
+  minLength: number,
+): string[] {
+  return wakewords.flatMap((pattern) => {
+    const checked = checkWakeword(pattern, minLength);
+    return checked.ok ? [] : [`「${pattern}」${checked.reason}`];
+  });
 }

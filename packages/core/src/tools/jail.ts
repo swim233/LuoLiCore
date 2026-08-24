@@ -1,6 +1,6 @@
-import { existsSync, lstatSync, mkdirSync, realpathSync } from 'node:fs';
-import { relative, resolve, sep } from 'node:path';
-import { minimatch } from 'minimatch';
+import { existsSync, lstatSync, mkdirSync, realpathSync } from "node:fs";
+import { relative, resolve, sep } from "node:path";
+import { minimatch } from "minimatch";
 
 /**
  * 自撰写通道的落点（`skills/` 与 `plugins/`）对 fs 工具一律关死。
@@ -13,8 +13,13 @@ import { minimatch } from 'minimatch';
  * `write_file` 能绕过 `PluginManager.writeSource` 直接改一个**已启用** plugin 的源码 ——
  * 而那道「内容变了就打回未启用」的闸就住在 `writeSource` 里（docs/07 §6.1）。
  */
-export function selfAuthoringDenyGlobs(directories: { skillsDir: string; pluginsDir: string }): string[] {
-  return [resolve(directories.skillsDir), resolve(directories.pluginsDir)].map((path) => `${path.replaceAll('\\', '/')}/**`);
+export function selfAuthoringDenyGlobs(directories: {
+  skillsDir: string;
+  pluginsDir: string;
+}): string[] {
+  return [resolve(directories.skillsDir), resolve(directories.pluginsDir)].map(
+    (path) => `${path.replaceAll("\\", "/")}/**`,
+  );
 }
 
 export class PathJail {
@@ -51,16 +56,26 @@ export class PathJail {
    */
   readonly #denyGlobs: string[];
 
-  constructor(root: string, denyGlobs: readonly string[], options?: { base?: string }) {
+  constructor(
+    root: string,
+    denyGlobs: readonly string[],
+    options?: { base?: string },
+  ) {
     // `'/**'` 本身（长度 3）去掉后缀是空串，minimatch 拿空模式什么都不匹配 —— 那一条不派生。
-    this.#denyGlobs = denyGlobs.flatMap((glob) => (glob.length > 3 && glob.endsWith('/**') ? [glob, glob.slice(0, -3)] : [glob]));
+    this.#denyGlobs = denyGlobs.flatMap((glob) =>
+      glob.length > 3 && glob.endsWith("/**")
+        ? [glob, glob.slice(0, -3)]
+        : [glob],
+    );
     const base = options?.base ?? root;
     // 建 base 不建 root：默认模式下两者是同一个目录；host-fs 模式下 root 是 `/`（必然存在，
     // recursive mkdir 落在已存在目录上只是白跑一趟），真正需要被建出来的是会话 workspace。
     mkdirSync(base, { recursive: true, mode: 0o700 });
     this.root = realpathSync(base);
     this.#boundary = realpathSync(root);
-    this.#prefix = this.#boundary.endsWith(sep) ? this.#boundary : `${this.#boundary}${sep}`;
+    this.#prefix = this.#boundary.endsWith(sep)
+      ? this.#boundary
+      : `${this.#boundary}${sep}`;
   }
 
   #inside(path: string): boolean {
@@ -83,24 +98,28 @@ export class PathJail {
   }
 
   resolve(input: string): string {
-    if (input.includes('\0')) throw new Error('path_invalid');
+    if (input.includes("\0")) throw new Error("path_invalid");
     const absolute = resolve(this.root, input);
     let real = absolute;
     if (existsSync(absolute)) {
       real = realpathSync(absolute);
     } else {
       let parent = absolute;
-      while (!existsSync(parent)) parent = resolve(parent, '..');
+      while (!existsSync(parent)) parent = resolve(parent, "..");
       const realParent = realpathSync(parent);
       real = `${realParent}${absolute.slice(parent.length)}`;
     }
-    if (!this.#inside(real)) throw new Error('path_outside_workspace');
-    const normalized = real.replaceAll('\\', '/');
-    const denied = this.#denyGlobs.some((glob) => minimatch(normalized, glob.replace('<root>', process.cwd()), { dot: true }));
-    if (denied) throw new Error('path_denied');
+    if (!this.#inside(real)) throw new Error("path_outside_workspace");
+    const normalized = real.replaceAll("\\", "/");
+    const denied = this.#denyGlobs.some((glob) =>
+      minimatch(normalized, glob.replace("<root>", process.cwd()), {
+        dot: true,
+      }),
+    );
+    if (denied) throw new Error("path_denied");
     if (existsSync(real) && lstatSync(real).isSymbolicLink()) {
       const target = realpathSync(real);
-      if (!this.#inside(target)) throw new Error('path_outside_workspace');
+      if (!this.#inside(target)) throw new Error("path_outside_workspace");
     }
     return real;
   }

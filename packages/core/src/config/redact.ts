@@ -11,13 +11,24 @@ export const SECRET_KEY_SEGMENT = /key|secret|token|password/i;
  * 静静地少了几项真配置。值不是字符串的行由 `publicConfig` 的 `«redacted»` 检查兜住。
  */
 export function looksSecret(key: string, value: unknown): boolean {
-  return SECRET_KEY_SEGMENT.test(key.split('.').at(-1) ?? key) && typeof value === 'string' && value.length > 0;
+  return (
+    SECRET_KEY_SEGMENT.test(key.split(".").at(-1) ?? key) &&
+    typeof value === "string" &&
+    value.length > 0
+  );
 }
 
 export function publicConfig(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(publicConfig);
-  if (!value || typeof value !== 'object') return value;
-  return Object.fromEntries(Object.entries(value).map(([key, nested]) => [key, SECRET_KEY_SEGMENT.test(key) && typeof nested === 'string' && nested ? '«redacted»' : publicConfig(nested)]));
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, nested]) => [
+      key,
+      SECRET_KEY_SEGMENT.test(key) && typeof nested === "string" && nested
+        ? "«redacted»"
+        : publicConfig(nested),
+    ]),
+  );
 }
 
 /**
@@ -26,7 +37,8 @@ export function publicConfig(value: unknown): unknown {
  * `publicConfig` 拿不到键名（值是个裸字符串），于是密钥会明文躺在变更历史里。
  */
 export function revisionJson(key: string, value: unknown): string {
-  const leaf = key.split('.').at(-1) ?? key;
-  if (SECRET_KEY_SEGMENT.test(leaf) && typeof value === 'string' && value) return JSON.stringify('«redacted»');
+  const leaf = key.split(".").at(-1) ?? key;
+  if (SECRET_KEY_SEGMENT.test(leaf) && typeof value === "string" && value)
+    return JSON.stringify("«redacted»");
   return JSON.stringify(publicConfig(value));
 }

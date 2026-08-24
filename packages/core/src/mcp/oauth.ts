@@ -1,13 +1,23 @@
-import { randomBytes } from 'node:crypto';
-import { UnauthorizedError, auth } from '@modelcontextprotocol/sdk/client/auth.js';
-import { StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import type { OAuthClientProvider, OAuthDiscoveryState } from '@modelcontextprotocol/sdk/client/auth.js';
-import type { OAuthClientInformationMixed, OAuthClientMetadata, OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js';
-import type { McpAuthRepository } from '@luoli/db';
+import { randomBytes } from "node:crypto";
+import {
+  UnauthorizedError,
+  auth,
+} from "@modelcontextprotocol/sdk/client/auth.js";
+import { StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import type {
+  OAuthClientProvider,
+  OAuthDiscoveryState,
+} from "@modelcontextprotocol/sdk/client/auth.js";
+import type {
+  OAuthClientInformationMixed,
+  OAuthClientMetadata,
+  OAuthTokens,
+} from "@modelcontextprotocol/sdk/shared/auth.js";
+import type { McpAuthRepository } from "@luoli/db";
 
 /** 回调路径。写死而不是做成配置项：它同时出现在 provider 的 `redirectUrl`、服务端路由与
  *  Origin/鉴权白名单里，做成可配就是三处各读一遍同一个值。 */
-export const MCP_OAUTH_CALLBACK_PATH = '/api/mcp/oauth/callback';
+export const MCP_OAUTH_CALLBACK_PATH = "/api/mcp/oauth/callback";
 
 /** 一次授权的 TTL。够人切到浏览器、登录、点同意；不够久到一条陈旧的 state 还能被重放。 */
 const PENDING_TTL_MS = 10 * 60_000;
@@ -32,15 +42,26 @@ export class PendingAuthorizations {
 
   #sweep(): void {
     const now = Date.now();
-    for (const [state, entry] of this.#entries) if (entry.expiresAt <= now) this.#entries.delete(state);
-    while (this.#entries.size >= PENDING_MAX) this.#entries.delete(this.#entries.keys().next().value!);
+    for (const [state, entry] of this.#entries)
+      if (entry.expiresAt <= now) this.#entries.delete(state);
+    while (this.#entries.size >= PENDING_MAX)
+      this.#entries.delete(this.#entries.keys().next().value!);
   }
 
-  put(state: string, server: string, authorizationUrl: string): PendingAuthorization {
+  put(
+    state: string,
+    server: string,
+    authorizationUrl: string,
+  ): PendingAuthorization {
     this.#sweep();
     // 同一台 server 的上一次授权作废：两条 state 同时有效时，先点的那一条回来会覆盖后点的。
-    for (const [key, entry] of this.#entries) if (entry.server === server) this.#entries.delete(key);
-    const entry: PendingAuthorization = { server, authorizationUrl, expiresAt: Date.now() + PENDING_TTL_MS };
+    for (const [key, entry] of this.#entries)
+      if (entry.server === server) this.#entries.delete(key);
+    const entry: PendingAuthorization = {
+      server,
+      authorizationUrl,
+      expiresAt: Date.now() + PENDING_TTL_MS,
+    };
     this.#entries.set(state, entry);
     return entry;
   }
@@ -55,12 +76,14 @@ export class PendingAuthorizations {
   /** 界面要能在不消费掉 state 的前提下拿到那个链接（刷新页面之后〔登录〕还得能点）。 */
   peek(server: string): PendingAuthorization | null {
     this.#sweep();
-    for (const entry of this.#entries.values()) if (entry.server === server) return entry;
+    for (const entry of this.#entries.values())
+      if (entry.server === server) return entry;
     return null;
   }
 
   forget(server: string): void {
-    for (const [key, entry] of this.#entries) if (entry.server === server) this.#entries.delete(key);
+    for (const [key, entry] of this.#entries)
+      if (entry.server === server) this.#entries.delete(key);
   }
 }
 
@@ -100,31 +123,35 @@ export class McpOAuthProvider implements OAuthClientProvider {
    * 调用方把这件事原样说出来（照 `/webui` 命令没配 publicUrl 时那句话的做法）。
    */
   get redirectUrl(): string | undefined {
-    const base = this.config.publicUrl.trim().replace(/\/$/, '');
+    const base = this.config.publicUrl.trim().replace(/\/$/, "");
     return base ? `${base}${MCP_OAUTH_CALLBACK_PATH}` : undefined;
   }
 
   get clientMetadata(): OAuthClientMetadata {
     return {
-      client_name: 'LuoLiCore',
+      client_name: "LuoLiCore",
       redirect_uris: this.redirectUrl ? [this.redirectUrl] : [],
-      grant_types: ['authorization_code', 'refresh_token'],
-      response_types: ['code'],
+      grant_types: ["authorization_code", "refresh_token"],
+      response_types: ["code"],
       // PKCE 公共客户端：不存 client_secret。服务端代持一个 secret 也不会更安全 ——
       // 能读到它的人已经能读到 access token 本身。
-      token_endpoint_auth_method: 'none',
+      token_endpoint_auth_method: "none",
       ...(this.config.scope ? { scope: this.config.scope } : {}),
     };
   }
 
   state(): string {
-    this.#pendingState = randomBytes(32).toString('base64url');
+    this.#pendingState = randomBytes(32).toString("base64url");
     return this.#pendingState;
   }
 
   clientInformation(): OAuthClientInformationMixed | undefined {
     if (this.config.clientId) return { client_id: this.config.clientId };
-    return (this.store.readClient(this.server) as OAuthClientInformationMixed | null) ?? undefined;
+    return (
+      (this.store.readClient(
+        this.server,
+      ) as OAuthClientInformationMixed | null) ?? undefined
+    );
   }
 
   saveClientInformation(clientInformation: OAuthClientInformationMixed): void {
@@ -132,24 +159,35 @@ export class McpOAuthProvider implements OAuthClientProvider {
   }
 
   tokens(): OAuthTokens | undefined {
-    return (this.store.readTokens(this.server) as OAuthTokens | null) ?? undefined;
+    return (
+      (this.store.readTokens(this.server) as OAuthTokens | null) ?? undefined
+    );
   }
 
   saveTokens(tokens: OAuthTokens): void {
     // `expires_in` 是「从现在起多少秒」，存下来的必须是绝对时刻 —— 存相对值的话重启之后
     // 界面上那个「还有多久过期」会一直显示同一个数字。
-    const expiresAt = typeof tokens.expires_in === 'number' ? Date.now() + tokens.expires_in * 1000 : null;
-    this.store.writeTokens(this.server, tokens, expiresAt, tokens.scope ?? this.config.scope ?? null);
+    const expiresAt =
+      typeof tokens.expires_in === "number"
+        ? Date.now() + tokens.expires_in * 1000
+        : null;
+    this.store.writeTokens(
+      this.server,
+      tokens,
+      expiresAt,
+      tokens.scope ?? this.config.scope ?? null,
+    );
     // 换到 token 了，PKCE verifier 与那条 pending 都没用了。留着 verifier 等于把一次性的东西留成常驻的。
-    this.store.invalidate(this.server, 'verifier');
+    this.store.invalidate(this.server, "verifier");
     this.pending.forget(this.server);
   }
 
   redirectToAuthorization(authorizationUrl: URL): void {
     // state 从 URL 里读而不是用 `#pendingState`：SDK 不保证先调 `state()` 再调这里，
     // 而真正会被授权服务器回传的就是 URL 上这一个。
-    const state = authorizationUrl.searchParams.get('state') ?? this.#pendingState;
-    if (!state) throw new Error('授权 URL 上没有 state，拒绝开始这次授权');
+    const state =
+      authorizationUrl.searchParams.get("state") ?? this.#pendingState;
+    if (!state) throw new Error("授权 URL 上没有 state，拒绝开始这次授权");
     this.pending.put(state, this.server, authorizationUrl.toString());
   }
 
@@ -161,13 +199,17 @@ export class McpOAuthProvider implements OAuthClientProvider {
     const verifier = this.store.readVerifier(this.server);
     // 抛而不是回空串：空串会被当成一个合法的 verifier 发给 token 端点，换回来的是一句
     // 语焉不详的 `invalid_grant`，而真正的原因是本地这一份丢了。
-    if (!verifier) throw new Error('本地没有这次授权的 code_verifier —— 重新点一次〔登录〕');
+    if (!verifier)
+      throw new Error("本地没有这次授权的 code_verifier —— 重新点一次〔登录〕");
     return verifier;
   }
 
-  invalidateCredentials(scope: 'all' | 'client' | 'tokens' | 'verifier' | 'discovery'): void {
+  invalidateCredentials(
+    scope: "all" | "client" | "tokens" | "verifier" | "discovery",
+  ): void {
     this.store.invalidate(this.server, scope);
-    if (scope === 'all' || scope === 'verifier') this.pending.forget(this.server);
+    if (scope === "all" || scope === "verifier")
+      this.pending.forget(this.server);
   }
 
   saveDiscoveryState(state: OAuthDiscoveryState): void {
@@ -175,7 +217,10 @@ export class McpOAuthProvider implements OAuthClientProvider {
   }
 
   discoveryState(): OAuthDiscoveryState | undefined {
-    return (this.store.readDiscovery(this.server) as OAuthDiscoveryState | null) ?? undefined;
+    return (
+      (this.store.readDiscovery(this.server) as OAuthDiscoveryState | null) ??
+      undefined
+    );
   }
 }
 
@@ -191,9 +236,13 @@ export class McpOAuthProvider implements OAuthClientProvider {
  */
 export function looksLikeAuthFailure(error: unknown): boolean {
   if (error instanceof UnauthorizedError) return true;
-  if (error instanceof StreamableHTTPError) return error.code === 401 || error.code === 403;
+  if (error instanceof StreamableHTTPError)
+    return error.code === 401 || error.code === 403;
   const message = error instanceof Error ? error.message : String(error);
-  return /\b(401|403)\b/.test(message) && /unauthor|forbidden|invalid_token|insufficient_scope/i.test(message);
+  return (
+    /\b(401|403)\b/.test(message) &&
+    /unauthor|forbidden|invalid_token|insufficient_scope/i.test(message)
+  );
 }
 
 /**
@@ -202,11 +251,19 @@ export function looksLikeAuthFailure(error: unknown): boolean {
  * `auth()` 内部会用 `provider.codeVerifier()` 与 `clientInformation()`，并在成功后
  * 调 `provider.saveTokens()` —— 所以这里不需要自己碰任何一列。
  */
-export async function completeMcpAuthorization(provider: McpOAuthProvider, serverUrl: string, authorizationCode: string): Promise<'AUTHORIZED' | 'REDIRECT'> {
+export async function completeMcpAuthorization(
+  provider: McpOAuthProvider,
+  serverUrl: string,
+  authorizationCode: string,
+): Promise<"AUTHORIZED" | "REDIRECT"> {
   return auth(provider, { serverUrl, authorizationCode });
 }
 
 /** 主动开一次授权：拿到授权 URL（走 `redirectToAuthorization` 落进 pending 表）。 */
-export async function beginMcpAuthorization(provider: McpOAuthProvider, serverUrl: string, scope?: string): Promise<'AUTHORIZED' | 'REDIRECT'> {
+export async function beginMcpAuthorization(
+  provider: McpOAuthProvider,
+  serverUrl: string,
+  scope?: string,
+): Promise<"AUTHORIZED" | "REDIRECT"> {
   return auth(provider, { serverUrl, ...(scope ? { scope } : {}) });
 }

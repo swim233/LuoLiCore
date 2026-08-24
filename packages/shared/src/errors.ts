@@ -5,10 +5,10 @@ export class LuoLiError extends Error {
     public readonly details?: unknown,
   ) {
     super(message);
-    this.name = 'LuoLiError';
+    this.name = "LuoLiError";
   }
 }
 
 export const assertNever = (value: never): never => {
-  throw new LuoLiError('unreachable', `Unhandled value: ${String(value)}`);
+  throw new LuoLiError("unreachable", `Unhandled value: ${String(value)}`);
 };

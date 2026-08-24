@@ -1,18 +1,36 @@
-import type { Message } from 'grammy/types';
-import type { ArchivedMessage, ScopedArchiveRepository } from '@luoli/db';
+import type { Message } from "grammy/types";
+import type { ArchivedMessage, ScopedArchiveRepository } from "@luoli/db";
 
 /** `TelegramMedia.process` 的最小形状，测试里可以换成不出网的替身。 */
 export interface MediaProcessor {
-  process(payload: Record<string, unknown>, row: ArchivedMessage): Promise<unknown[]>;
+  process(
+    payload: Record<string, unknown>,
+    row: ArchivedMessage,
+  ): Promise<unknown[]>;
 }
 
 export function messageKind(message: Record<string, unknown>): string {
-  const ordered = ['text', 'photo', 'document', 'voice', 'video', 'video_note', 'sticker', 'animation', 'audio', 'location', 'poll'];
-  return ordered.find((key) => key in message) ?? 'other';
+  const ordered = [
+    "text",
+    "photo",
+    "document",
+    "voice",
+    "video",
+    "video_note",
+    "sticker",
+    "animation",
+    "audio",
+    "location",
+    "poll",
+  ];
+  return ordered.find((key) => key in message) ?? "other";
 }
 
-export function displayName(from: Message['from']): string | null {
-  return from ? [from.first_name, from.last_name].filter(Boolean).join(' ') || (from.username ? `@${from.username}` : null) : null;
+export function displayName(from: Message["from"]): string | null {
+  return from
+    ? [from.first_name, from.last_name].filter(Boolean).join(" ") ||
+        (from.username ? `@${from.username}` : null)
+    : null;
 }
 
 /**
@@ -20,9 +38,17 @@ export function displayName(from: Message['from']): string | null {
  * 按 chat 串行的入口锁**外面** —— 它会调 pdf-parse / mammoth / sharp 解析用户上传的文件，
  * 挂在锁里等于一个畸形 PDF 就能让那个会话之后的每条消息都不再归档（docs/27 · R-01）。
  */
-export async function attachMedia(media: MediaProcessor, scoped: ScopedArchiveRepository, payload: Message, row: ArchivedMessage): Promise<void> {
+export async function attachMedia(
+  media: MediaProcessor,
+  scoped: ScopedArchiveRepository,
+  payload: Message,
+  row: ArchivedMessage,
+): Promise<void> {
   if (row.mediaParts?.length) return;
-  const parts = await media.process(payload as unknown as Record<string, unknown>, row);
+  const parts = await media.process(
+    payload as unknown as Record<string, unknown>,
+    row,
+  );
   if (!parts.length) return;
   row.mediaParts = parts;
   scoped.attachMedia(row.id, parts);
@@ -42,7 +68,12 @@ export async function resolveQuotedMessage(
   message: Message,
   trigger: ArchivedMessage,
 ): Promise<ArchivedMessage | null> {
-  const found = archiveQuotedMessage(dependencies.botId, scoped, message, trigger);
+  const found = archiveQuotedMessage(
+    dependencies.botId,
+    scoped,
+    message,
+    trigger,
+  );
   if (!found) return null;
   await attachMedia(dependencies.media, scoped, found.payload, found.row);
   return found.row;
@@ -65,16 +96,29 @@ export function archiveQuotedMessage(
   const repliedName = displayName(replied.from);
   if (repliedName) trigger.replyToName = repliedName;
   const isBot = replied.from?.id === botId;
-  const row = scoped.byTgMessageId(replied.message_id) ?? scoped.append({
-    chatId: String(replied.chat.id), messageThreadId: replied.message_thread_id ?? null, tgMessageId: replied.message_id,
-    tgUpdateId: null, direction: isBot ? 'out' : 'in', fromKind: isBot ? 'bot' : 'user',
-    fromUserId: replied.from ? String(replied.from.id) : null, fromName: repliedName, fromUsername: replied.from?.username ?? null,
-    kind: messageKind(replied as unknown as Record<string, unknown>), text: replied.text ?? replied.caption ?? null,
-    // Telegram 只展开一层 reply_to_message，被回复消息自己回复了谁这里拿不到。
-    replyToTgMessageId: null, mediaGroupId: replied.media_group_id ?? null,
-    tgDate: replied.date * 1000, raw: replied, triggered: false, triggerReason: null,
-    // 本轮就把它送进上下文了；不标成已消费的话，下一轮 claimBackground 会把它当新的背景发言再认领一次。
-    claimed: true,
-  });
+  const row =
+    scoped.byTgMessageId(replied.message_id) ??
+    scoped.append({
+      chatId: String(replied.chat.id),
+      messageThreadId: replied.message_thread_id ?? null,
+      tgMessageId: replied.message_id,
+      tgUpdateId: null,
+      direction: isBot ? "out" : "in",
+      fromKind: isBot ? "bot" : "user",
+      fromUserId: replied.from ? String(replied.from.id) : null,
+      fromName: repliedName,
+      fromUsername: replied.from?.username ?? null,
+      kind: messageKind(replied as unknown as Record<string, unknown>),
+      text: replied.text ?? replied.caption ?? null,
+      // Telegram 只展开一层 reply_to_message，被回复消息自己回复了谁这里拿不到。
+      replyToTgMessageId: null,
+      mediaGroupId: replied.media_group_id ?? null,
+      tgDate: replied.date * 1000,
+      raw: replied,
+      triggered: false,
+      triggerReason: null,
+      // 本轮就把它送进上下文了；不标成已消费的话，下一轮 claimBackground 会把它当新的背景发言再认领一次。
+      claimed: true,
+    });
   return { row, payload: replied };
 }

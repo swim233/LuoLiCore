@@ -6,9 +6,9 @@
  * 刻意放在 `packages/webui/src` 之外：生产构建里没有任何一处引用得到这个路径，插件本身也带
  * `apply: 'serve'`，两道闩都断了才谈得上「不影响 release」。
  */
-import { createApp, reactive, ref } from 'vue';
-import { fillSlots } from '../slots.js';
-import CopyPanel from './CopyPanel.vue';
+import { createApp, reactive, ref } from "vue";
+import { fillSlots } from "../slots.js";
+import CopyPanel from "./CopyPanel.vue";
 
 /** 改写中的文案。reactive 的缺键读取也会被追踪，所以后填一个 key 能触发用到它的组件重渲染。 */
 const overrides = reactive<Record<string, string>>({});
@@ -35,10 +35,17 @@ const slots: Record<string, string[]> = {};
 declare global {
   interface Window {
     __LUOLI_C__: (id: string, original: string, values?: unknown[]) => string;
-    __LUOLI_COPY__: { overrides: Record<string, string>; seen: Map<string, string>; tick: typeof tick;
+    __LUOLI_COPY__: {
+      overrides: Record<string, string>;
+      seen: Map<string, string>;
+      tick: typeof tick;
       slots: Record<string, string[]>;
-      picking: typeof picking; picked: typeof picked;
-      dragging: typeof dragging; dragged: typeof dragged; dragLive: typeof dragLive };
+      picking: typeof picking;
+      picked: typeof picked;
+      dragging: typeof dragging;
+      dragged: typeof dragged;
+      dragLive: typeof dragLive;
+    };
   }
 }
 
@@ -51,14 +58,32 @@ window.__LUOLI_C__ = (id, original, values) => {
   if (!seen.has(id)) {
     seen.set(id, original);
     // 渲染过程中改响应式状态会被 Vue 警告、还可能自激。攒到下一帧再让面板去读。
-    if (!pending) { pending = true; requestAnimationFrame(() => { pending = false; tick.value += 1; }); }
+    if (!pending) {
+      pending = true;
+      requestAnimationFrame(() => {
+        pending = false;
+        tick.value += 1;
+      });
+    }
   }
   const override = overrides[id];
   if (override === undefined) return original;
   const texts = slots[id];
-  return values?.length && texts?.length ? fillSlots(override, texts, values) : override;
+  return values?.length && texts?.length
+    ? fillSlots(override, texts, values)
+    : override;
 };
-window.__LUOLI_COPY__ = { overrides, seen, tick, slots, picking, picked, dragging, dragged, dragLive };
+window.__LUOLI_COPY__ = {
+  overrides,
+  seen,
+  tick,
+  slots,
+  picking,
+  picked,
+  dragging,
+  dragged,
+  dragLive,
+};
 
 /**
  * 自由拖拽。按住带 `data-copy-id` 的元素移动鼠标，实时改它的 `translate`，松手交给面板落盘。
@@ -69,72 +94,96 @@ window.__LUOLI_COPY__ = { overrides, seen, tick, slots, picking, picked, draggin
  *
  * 按住 Shift 锁定单轴 —— 只想水平挪的时候，手不稳会带出几像素的竖直偏移。
  */
-document.addEventListener('mousedown', (event) => {
-  if (!dragging.value || event.button !== 0) return;
-  const target = event.target as HTMLElement | null;
-  if (!target || target.closest('#luoli-copy-panel')) return;
-  const node = target.closest<HTMLElement>('[data-copy-id]');
-  if (!node) return;
-  const id = (node.getAttribute('data-copy-id') ?? '').split(/\s+/)[0] ?? '';
-  if (!id) return;
-  event.preventDefault();
-  event.stopPropagation();
-  const base = /(-?[\d.]+)px\s+(-?[\d.]+)px/.exec(node.style.translate || getComputedStyle(node).translate || '');
-  const from = { x: Number(base?.[1] ?? 0), y: Number(base?.[2] ?? 0) };
-  const origin = { x: event.clientX, y: event.clientY };
-  const outline = node.style.outline;
-  node.style.outline = '2px dashed #f59e0b';
-  const onMove = (moved: MouseEvent): void => {
-    let dx = moved.clientX - origin.x;
-    let dy = moved.clientY - origin.y;
-    if (moved.shiftKey) { if (Math.abs(dx) >= Math.abs(dy)) dy = 0; else dx = 0; }
-    const next = { dx: Math.round(from.x + dx), dy: Math.round(from.y + dy) };
-    node.style.translate = `${next.dx}px ${next.dy}px`;
-    dragLive.value = { id, ...next };
-  };
-  const onUp = (): void => {
-    document.removeEventListener('mousemove', onMove, true);
-    document.removeEventListener('mouseup', onUp, true);
-    node.style.outline = outline;
-    const live = dragLive.value;
-    dragLive.value = null;
-    // 没真的动过就不落盘 —— 一次误点不该在源码里留下 `translate: 0px 0px`。
-    if (live && (live.dx !== from.x || live.dy !== from.y)) dragged.value = live;
-  };
-  document.addEventListener('mousemove', onMove, true);
-  document.addEventListener('mouseup', onUp, true);
-}, true);
+document.addEventListener(
+  "mousedown",
+  (event) => {
+    if (!dragging.value || event.button !== 0) return;
+    const target = event.target as HTMLElement | null;
+    if (!target || target.closest("#luoli-copy-panel")) return;
+    const node = target.closest<HTMLElement>("[data-copy-id]");
+    if (!node) return;
+    const id = (node.getAttribute("data-copy-id") ?? "").split(/\s+/)[0] ?? "";
+    if (!id) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const base = /(-?[\d.]+)px\s+(-?[\d.]+)px/.exec(
+      node.style.translate || getComputedStyle(node).translate || "",
+    );
+    const from = { x: Number(base?.[1] ?? 0), y: Number(base?.[2] ?? 0) };
+    const origin = { x: event.clientX, y: event.clientY };
+    const outline = node.style.outline;
+    node.style.outline = "2px dashed #f59e0b";
+    const onMove = (moved: MouseEvent): void => {
+      let dx = moved.clientX - origin.x;
+      let dy = moved.clientY - origin.y;
+      if (moved.shiftKey) {
+        if (Math.abs(dx) >= Math.abs(dy)) dy = 0;
+        else dx = 0;
+      }
+      const next = { dx: Math.round(from.x + dx), dy: Math.round(from.y + dy) };
+      node.style.translate = `${next.dx}px ${next.dy}px`;
+      dragLive.value = { id, ...next };
+    };
+    const onUp = (): void => {
+      document.removeEventListener("mousemove", onMove, true);
+      document.removeEventListener("mouseup", onUp, true);
+      node.style.outline = outline;
+      const live = dragLive.value;
+      dragLive.value = null;
+      // 没真的动过就不落盘 —— 一次误点不该在源码里留下 `translate: 0px 0px`。
+      if (live && (live.dx !== from.x || live.dy !== from.y))
+        dragged.value = live;
+    };
+    document.addEventListener("mousemove", onMove, true);
+    document.addEventListener("mouseup", onUp, true);
+  },
+  true,
+);
 /** 拖拽模式下屏蔽点击，否则松手那一下会顺带触发按钮、切页、提交表单。 */
-document.addEventListener('click', (event) => {
-  if (!dragging.value) return;
-  const target = event.target as HTMLElement | null;
-  if (target?.closest('#luoli-copy-panel')) return;
-  event.preventDefault();
-  event.stopPropagation();
-}, true);
+document.addEventListener(
+  "click",
+  (event) => {
+    if (!dragging.value) return;
+    const target = event.target as HTMLElement | null;
+    if (target?.closest("#luoli-copy-panel")) return;
+    event.preventDefault();
+    event.stopPropagation();
+  },
+  true,
+);
 
 /**
  * 捕获阶段拦点击：插件给带文案的元素挂了 `data-copy-id`，往上找最近的一个就知道点的是哪几句。
  * 点选模式下要 `preventDefault` + `stopPropagation` —— 不拦的话这一下会顺带触发按钮、切页、
  * 提交表单，人是来指字的，不是来操作的。
  */
-document.addEventListener('click', (event) => {
-  if (!picking.value && !event.altKey) return;
-  const target = event.target as HTMLElement | null;
-  if (!target || target.closest('#luoli-copy-panel')) return;
-  const owner = target.closest('[data-copy-id]');
-  event.preventDefault();
-  event.stopPropagation();
-  picked.value = owner ? (owner.getAttribute('data-copy-id') ?? '').split(/\s+/).filter(Boolean) : [];
-}, true);
+document.addEventListener(
+  "click",
+  (event) => {
+    if (!picking.value && !event.altKey) return;
+    const target = event.target as HTMLElement | null;
+    if (!target || target.closest("#luoli-copy-panel")) return;
+    const owner = target.closest("[data-copy-id]");
+    event.preventDefault();
+    event.stopPropagation();
+    picked.value = owner
+      ? (owner.getAttribute("data-copy-id") ?? "").split(/\s+/).filter(Boolean)
+      : [];
+  },
+  true,
+);
 /** Esc 退出点选 / 拖动，免得鼠标被「黏住」。 */
-document.addEventListener('keydown', (event) => {
-  if (event.key !== 'Escape') return;
-  picking.value = false;
-  dragging.value = false;
-}, true);
+document.addEventListener(
+  "keydown",
+  (event) => {
+    if (event.key !== "Escape") return;
+    picking.value = false;
+    dragging.value = false;
+  },
+  true,
+);
 
-const host = document.createElement('div');
-host.id = 'luoli-copy-panel';
+const host = document.createElement("div");
+host.id = "luoli-copy-panel";
 document.body.appendChild(host);
 createApp(CopyPanel).mount(host);

@@ -1,7 +1,7 @@
-import { randomBytes } from 'node:crypto';
-import { StringDecoder } from 'node:string_decoder';
+import { randomBytes } from "node:crypto";
+import { StringDecoder } from "node:string_decoder";
 
-export const ROLES = ['blocked', 'limited', 'trusted', 'owner'] as const;
+export const ROLES = ["blocked", "limited", "trusted", "owner"] as const;
 export type Role = (typeof ROLES)[number];
 
 export function roleRank(role: Role): number {
@@ -19,15 +19,28 @@ export function minRole(a: Role, b: Role): Role {
  * 若这样一行落进 `config_kv`，启动时重放污染会让 `removeOverridePath` 也救不回来（docs/20 · W-CFG-01）。
  * 返回 false 表示该键被拒绝，调用方必须报错或告警，不能静默丢。
  */
-const FORBIDDEN_PATH_SEGMENTS = new Set(['__proto__', 'constructor', 'prototype']);
-export function assignDotted(root: Record<string, unknown>, key: string, value: unknown): boolean {
-  const parts = key.split('.').filter(Boolean);
-  if (!parts.length || parts.some((part) => FORBIDDEN_PATH_SEGMENTS.has(part))) return false;
+const FORBIDDEN_PATH_SEGMENTS = new Set([
+  "__proto__",
+  "constructor",
+  "prototype",
+]);
+export function assignDotted(
+  root: Record<string, unknown>,
+  key: string,
+  value: unknown,
+): boolean {
+  const parts = key.split(".").filter(Boolean);
+  if (!parts.length || parts.some((part) => FORBIDDEN_PATH_SEGMENTS.has(part)))
+    return false;
   let cursor = root;
   for (const [index, part] of parts.entries()) {
-    if (index === parts.length - 1) { cursor[part] = value; break; }
+    if (index === parts.length - 1) {
+      cursor[part] = value;
+      break;
+    }
     const current = cursor[part];
-    if (!current || typeof current !== 'object' || Array.isArray(current)) cursor[part] = {};
+    if (!current || typeof current !== "object" || Array.isArray(current))
+      cursor[part] = {};
     cursor = cursor[part] as Record<string, unknown>;
   }
   return true;
@@ -40,8 +53,8 @@ export function assignDotted(root: Record<string, unknown>, key: string, value: 
  */
 export function readDotted(root: unknown, key: string): unknown {
   let cursor: unknown = root;
-  for (const part of key.split('.').filter(Boolean)) {
-    if (!cursor || typeof cursor !== 'object') return undefined;
+  for (const part of key.split(".").filter(Boolean)) {
+    if (!cursor || typeof cursor !== "object") return undefined;
     cursor = (cursor as Record<string, unknown>)[part];
   }
   return cursor;
@@ -55,9 +68,14 @@ export function readDotted(root: unknown, key: string): unknown {
  * 排过序之后**更具体的路径总是赢**，与两行谁先落库无关；另一半在写入端 —— 写祖先键要删掉它的
  * 后代行，否则整块写入会被残留的逐项行局部否掉（`writeConfigRows`）。
  */
-export function sortOverrideKeys<T extends { key: string }>(rows: readonly T[]): T[] {
-  return [...rows].sort((left, right) => (left.key.split('.').length - right.key.split('.').length)
-    || (left.key < right.key ? -1 : left.key > right.key ? 1 : 0));
+export function sortOverrideKeys<T extends { key: string }>(
+  rows: readonly T[],
+): T[] {
+  return [...rows].sort(
+    (left, right) =>
+      left.key.split(".").length - right.key.split(".").length ||
+      (left.key < right.key ? -1 : left.key > right.key ? 1 : 0),
+  );
 }
 
 /**
@@ -71,15 +89,25 @@ export function sortOverrideKeys<T extends { key: string }>(rows: readonly T[]):
  * 头部交给 `StringDecoder`（不完整的序列它会攒着不吐，所以头永远不含半个字符）；尾部从
  * `length - budget` 起往前跳过续字节（`10xxxxxx`），落在一个合法起始字节上。
  */
-export function elideMiddleBytes(text: string, maxBytes: number, note: (omittedBytes: number) => string): { value: string; truncated: boolean } {
-  const buffer = Buffer.from(text, 'utf8');
+export function elideMiddleBytes(
+  text: string,
+  maxBytes: number,
+  note: (omittedBytes: number) => string,
+): { value: string; truncated: boolean } {
+  const buffer = Buffer.from(text, "utf8");
   if (buffer.length <= maxBytes) return { value: text, truncated: false };
   const marker = note(buffer.length - maxBytes);
-  const half = Math.max(1, Math.floor(Math.max(2, maxBytes - Buffer.byteLength(marker)) / 2));
-  const head = new StringDecoder('utf8').write(buffer.subarray(0, half));
+  const half = Math.max(
+    1,
+    Math.floor(Math.max(2, maxBytes - Buffer.byteLength(marker)) / 2),
+  );
+  const head = new StringDecoder("utf8").write(buffer.subarray(0, half));
   let start = Math.max(0, buffer.length - half);
-  while (start < buffer.length && (buffer[start]! & 0xC0) === 0x80) start += 1;
-  return { value: `${head}${marker}${buffer.subarray(start).toString('utf8')}`, truncated: true };
+  while (start < buffer.length && (buffer[start]! & 0xc0) === 0x80) start += 1;
+  return {
+    value: `${head}${marker}${buffer.subarray(start).toString("utf8")}`,
+    truncated: true,
+  };
 }
 
 /**
@@ -94,18 +122,47 @@ export function elideMiddleBytes(text: string, maxBytes: number, note: (omittedB
  * Asia/Shanghai 没有 DST；配额窗口仍走 `quotaBucket` 的 Intl 精确分桶 —— 它只按「现在」算当前
  * bucket，不回溯历史，没有这个折中。
  */
-export function timezoneOffsetMinutes(timezone: string, at: Date = new Date()): number {
+export function timezoneOffsetMinutes(
+  timezone: string,
+  at: Date = new Date(),
+): number {
   try {
-    const parts = new Intl.DateTimeFormat('en-CA', { timeZone: timezone, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }).formatToParts(at);
-    const get = (type: string): number => Number(parts.find((part) => part.type === type)?.value ?? '0');
-    return Math.round((Date.UTC(get('year'), get('month') - 1, get('day'), get('hour'), get('minute'), get('second')) - at.getTime()) / 60_000);
-  } catch { return 0; }
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: timezone,
+      hourCycle: "h23",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    }).formatToParts(at);
+    const get = (type: string): number =>
+      Number(parts.find((part) => part.type === type)?.value ?? "0");
+    return Math.round(
+      (Date.UTC(
+        get("year"),
+        get("month") - 1,
+        get("day"),
+        get("hour"),
+        get("minute"),
+        get("second"),
+      ) -
+        at.getTime()) /
+        60_000,
+    );
+  } catch {
+    return 0;
+  }
 }
 /** SQLite `strftime` 的时区修饰符（`'+08:00'`），与 `localDayName` 严格等价。 */
-export function sqliteTimezoneModifier(timezone: string, at: Date = new Date()): string {
+export function sqliteTimezoneModifier(
+  timezone: string,
+  at: Date = new Date(),
+): string {
   const minutes = timezoneOffsetMinutes(timezone, at);
   const absolute = Math.abs(minutes);
-  return `${minutes < 0 ? '-' : '+'}${String(Math.floor(absolute / 60)).padStart(2, '0')}:${String(absolute % 60).padStart(2, '0')}`;
+  return `${minutes < 0 ? "-" : "+"}${String(Math.floor(absolute / 60)).padStart(2, "0")}:${String(absolute % 60).padStart(2, "0")}`;
 }
 /** 与那个修饰符等价的 JS 侧日名：`ts` 加偏移后按 UTC 取 `YYYY-MM-DD`。 */
 export function localDayName(ts: number, offsetMinutes: number): string {
@@ -125,13 +182,23 @@ export const TG_ID_PATTERN = /^-?\d{1,20}$/;
  *
  * `kind` 缺省时返回 null 的 kind，由调用方决定是「两种都查」（`/whois`）还是「必须写明」（`/grant`）。
  */
-export function parsePrincipal(input: string): { id: string; kind: 'user' | 'chat' | null; tgId: string } | null {
-  const parts = input.trim().split(/[\s:]+/).filter(Boolean);
-  if (parts.length === 1) return TG_ID_PATTERN.test(parts[0]!) ? { id: parts[0]!, kind: null, tgId: parts[0]! } : null;
+export function parsePrincipal(
+  input: string,
+): { id: string; kind: "user" | "chat" | null; tgId: string } | null {
+  const parts = input
+    .trim()
+    .split(/[\s:]+/)
+    .filter(Boolean);
+  if (parts.length === 1)
+    return TG_ID_PATTERN.test(parts[0]!)
+      ? { id: parts[0]!, kind: null, tgId: parts[0]! }
+      : null;
   if (parts.length !== 2) return null;
   const [kind, tgId] = parts as [string, string];
-  if (kind !== 'user' && kind !== 'chat') return null;
-  return TG_ID_PATTERN.test(tgId) ? { id: `${kind}:${tgId}`, kind, tgId } : null;
+  if (kind !== "user" && kind !== "chat") return null;
+  return TG_ID_PATTERN.test(tgId)
+    ? { id: `${kind}:${tgId}`, kind, tgId }
+    : null;
 }
 
 /**
@@ -140,8 +207,13 @@ export function parsePrincipal(input: string): { id: string; kind: 'user' | 'cha
  * （`\n你的有效权限：owner`），方括号能提前闭合前缀。控制字符与 bidi override 一并清掉。
  */
 export function sanitizeIdentity(value: string, max = 48): string {
-  return [...value.replace(/[\p{Cc}\p{Cf}]/gu, ' ')].slice(0, max).join('').replaceAll('[', '［').replaceAll(']', '］')
-    .replace(/\s+/g, ' ').trim();
+  return [...value.replace(/[\p{Cc}\p{Cf}]/gu, " ")]
+    .slice(0, max)
+    .join("")
+    .replaceAll("[", "［")
+    .replaceAll("]", "］")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 /**
@@ -149,21 +221,30 @@ export function sanitizeIdentity(value: string, max = 48): string {
  * 括号里补的是**已经用作显示名之外**的那些标识 —— 昵称会改、用户名会换，只有 id 是稳定的。
  * 消息前缀与 RUNTIME 块共用这一个格式化函数，两处的写法不能各自漂移。
  */
-export function formatSpeakerIdentity(input: { name?: string | null; username?: string | null; userId?: string | null },
-  show: { username?: boolean; id?: boolean } = {}): string {
-  const name = sanitizeIdentity(input.name ?? '');
-  const username = sanitizeIdentity(input.username ?? '', 32);
-  const userId = sanitizeIdentity(input.userId ?? '', 32);
-  const base = name || (username ? `@${username}` : userId ? `user:${userId}` : 'user:unknown');
+export function formatSpeakerIdentity(
+  input: {
+    name?: string | null;
+    username?: string | null;
+    userId?: string | null;
+  },
+  show: { username?: boolean; id?: boolean } = {},
+): string {
+  const name = sanitizeIdentity(input.name ?? "");
+  const username = sanitizeIdentity(input.username ?? "", 32);
+  const userId = sanitizeIdentity(input.userId ?? "", 32);
+  const base =
+    name ||
+    (username ? `@${username}` : userId ? `user:${userId}` : "user:unknown");
   const extras: string[] = [];
-  if (show.username !== false && username && base !== `@${username}`) extras.push(`@${username}`);
-  if (show.id !== false && userId && base !== `user:${userId}`) extras.push(`id=${userId}`);
-  return extras.length ? `${base}(${extras.join(', ')})` : base;
+  if (show.username !== false && username && base !== `@${username}`)
+    extras.push(`@${username}`);
+  if (show.id !== false && userId && base !== `user:${userId}`)
+    extras.push(`id=${userId}`);
+  return extras.length ? `${base}(${extras.join(", ")})` : base;
 }
 
 export type Result<T extends Record<string, unknown> = Record<string, never>> =
-  | ({ ok: true } & T)
-  | { ok: false; error: string; hint?: string };
+  ({ ok: true } & T) | { ok: false; error: string; hint?: string };
 
 export interface AccessContext {
   userId: string;
@@ -179,8 +260,14 @@ export interface NewContextMessage {
   ordinal?: number;
   // system 不在这里：AI SDK v7 的 standardizePrompt 直接拒收 messages 里的 system 消息
   // （docs/02 不变量 15）。系统旁白一律以 origin:'note' + role:'user' 落库。
-  role: 'user' | 'assistant' | 'tool';
-  origin: 'background' | 'trigger' | 'assistant' | 'tool_call' | 'tool_result' | 'note';
+  role: "user" | "assistant" | "tool";
+  origin:
+    | "background"
+    | "trigger"
+    | "assistant"
+    | "tool_call"
+    | "tool_result"
+    | "note";
   parts: unknown[];
   textPreview?: string;
   speaker?: string;
@@ -352,19 +439,32 @@ export function estimateTextTokens(text: string): number {
 
 /** 图片没有尺寸信息时的兜底估值：1568px 长边、JPEG q85 归一化之后的典型量级。 */
 export const IMAGE_TOKEN_ESTIMATE = 1500;
-const OPAQUE_PAYLOAD_TYPES = new Set(['image', 'image_url', 'input_image', 'file', 'input_file']);
+const OPAQUE_PAYLOAD_TYPES = new Set([
+  "image",
+  "image_url",
+  "input_image",
+  "file",
+  "input_file",
+]);
 /** base64 载荷不能按字符估：一张图 40 万字符，`chars × 系数` 会算出几十万 token 的假水位。 */
 function opaquePayload(value: string): boolean {
-  return value.length > 2048 && (value.startsWith('data:') || /^[A-Za-z0-9+/\s]+={0,2}$/.test(value.slice(0, 4096)));
+  return (
+    value.length > 2048 &&
+    (value.startsWith("data:") ||
+      /^[A-Za-z0-9+/\s]+={0,2}$/.test(value.slice(0, 4096)))
+  );
 }
 export function estimatePartTokens(part: unknown): number {
-  if (!part || typeof part !== 'object') return estimateTextTokens(String(part ?? ''));
+  if (!part || typeof part !== "object")
+    return estimateTextTokens(String(part ?? ""));
   const value = part as Record<string, unknown>;
-  if (typeof value.text === 'string') return estimateTextTokens(value.text);
-  if (typeof value.type === 'string' && OPAQUE_PAYLOAD_TYPES.has(value.type)) {
-    const width = typeof value.width === 'number' ? value.width : 0;
-    const height = typeof value.height === 'number' ? value.height : 0;
-    return width && height ? Math.max(256, Math.ceil(width * height / 750)) : IMAGE_TOKEN_ESTIMATE;
+  if (typeof value.text === "string") return estimateTextTokens(value.text);
+  if (typeof value.type === "string" && OPAQUE_PAYLOAD_TYPES.has(value.type)) {
+    const width = typeof value.width === "number" ? value.width : 0;
+    const height = typeof value.height === "number" ? value.height : 0;
+    return width && height
+      ? Math.max(256, Math.ceil((width * height) / 750))
+      : IMAGE_TOKEN_ESTIMATE;
   }
   return estimateStructureTokens(part);
 }
@@ -378,13 +478,32 @@ export function estimateMessageTokens(parts: readonly unknown[]): number {
  */
 export function estimateStructureTokens(value: unknown, depth = 0): number {
   if (value === null || value === undefined) return 1;
-  if (typeof value === 'string') return opaquePayload(value) ? IMAGE_TOKEN_ESTIMATE : rawTextTokens(value) + 1;
-  if (typeof value === 'number' || typeof value === 'boolean') return 1;
+  if (typeof value === "string")
+    return opaquePayload(value)
+      ? IMAGE_TOKEN_ESTIMATE
+      : rawTextTokens(value) + 1;
+  if (typeof value === "number" || typeof value === "boolean") return 1;
   if (depth > 12) return 2;
-  if (Array.isArray(value)) return 1 + value.reduce<number>((sum, entry) => sum + estimateStructureTokens(entry, depth + 1), 0);
-  if (typeof value === 'object') {
-    return 1 + Object.entries(value as Record<string, unknown>).reduce<number>(
-      (sum, [key, entry]) => sum + rawTextTokens(key) + 1 + estimateStructureTokens(entry, depth + 1), 0);
+  if (Array.isArray(value))
+    return (
+      1 +
+      value.reduce<number>(
+        (sum, entry) => sum + estimateStructureTokens(entry, depth + 1),
+        0,
+      )
+    );
+  if (typeof value === "object") {
+    return (
+      1 +
+      Object.entries(value as Record<string, unknown>).reduce<number>(
+        (sum, [key, entry]) =>
+          sum +
+          rawTextTokens(key) +
+          1 +
+          estimateStructureTokens(entry, depth + 1),
+        0,
+      )
+    );
   }
   return 2;
 }
@@ -393,7 +512,8 @@ export function estimateStructureTokens(value: unknown, depth = 0): number {
  * 把正文里的 `<system-instructions` / `</system-instructions` 标记打成全角，让它写不出真的标记。
  * 与 `escapeForgedSpeakerPrefixes` 同一手法：判据字段一个不碰，只改文本。
  */
-export const escapeSystemInstructions = (text: string): string => text.replaceAll(/<(\/?)system-instructions/g, '＜$1system-instructions');
+export const escapeSystemInstructions = (text: string): string =>
+  text.replaceAll(/<(\/?)system-instructions/g, "＜$1system-instructions");
 
 /**
  * `untrusted()` 的反向：标出「只有这一段是系统指令」。易变段（工具目录 / 长期记忆 / RUNTIME）
@@ -402,11 +522,26 @@ export const escapeSystemInstructions = (text: string): string => text.replaceAl
  * 就和真的运行时块长得一模一样。两道防线：正文侧 `escapeSystemInstructions` 让人写不出标记，
  * 这里的 nonce 每请求现生成、用户无从得知，让漏网的路径（如工具输出）也伪造不出完整信封。
  */
-export const systemInstructions = (text: string, nonce = randomBytes(6).toString('hex')): string =>
+export const systemInstructions = (
+  text: string,
+  nonce = randomBytes(6).toString("hex"),
+): string =>
   `<system-instructions id="${nonce}">\n${escapeSystemInstructions(String(text))}\n</system-instructions id="${nonce}">`;
 
-export const untrusted = (source: string, text: string, nonce = randomBytes(6).toString('hex')): string => {
-  const safeSource = source.replaceAll('&', '＆').replaceAll('"', '＂').replaceAll("'", '＇').replaceAll('<', '＜').replaceAll('>', '＞');
-  const safeText = String(text).replaceAll('</untrusted-content', '<\\/untrusted-content');
+export const untrusted = (
+  source: string,
+  text: string,
+  nonce = randomBytes(6).toString("hex"),
+): string => {
+  const safeSource = source
+    .replaceAll("&", "＆")
+    .replaceAll('"', "＂")
+    .replaceAll("'", "＇")
+    .replaceAll("<", "＜")
+    .replaceAll(">", "＞");
+  const safeText = String(text).replaceAll(
+    "</untrusted-content",
+    "<\\/untrusted-content",
+  );
   return `<untrusted-content id="${nonce}" source="${safeSource}">\n${safeText}\n</untrusted-content id="${nonce}">`;
 };

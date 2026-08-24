@@ -1,4 +1,4 @@
-import { z } from 'zod';
+import { z } from "zod";
 
 /**
  * MCP 的入参是标准 JSON Schema，而 registry 只认 zod。此前注册时整份换成 `z.record(z.unknown())`，
@@ -16,38 +16,81 @@ import { z } from 'zod';
 const MAX_SCHEMA_DEPTH = 32;
 export function jsonSchemaToZod(schema: unknown, depth = 0): z.ZodTypeAny {
   if (depth > MAX_SCHEMA_DEPTH) return z.unknown();
-  if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return z.unknown();
+  if (!schema || typeof schema !== "object" || Array.isArray(schema))
+    return z.unknown();
   const node = schema as Record<string, unknown>;
   const described = (type: z.ZodTypeAny): z.ZodTypeAny => {
-    const withDescription = typeof node.description === 'string' ? type.describe(node.description) : type;
-    return node.default === undefined ? withDescription : withDescription.default(node.default);
+    const withDescription =
+      typeof node.description === "string"
+        ? type.describe(node.description)
+        : type;
+    return node.default === undefined
+      ? withDescription
+      : withDescription.default(node.default);
   };
   if (Array.isArray(node.enum) && node.enum.length) {
-    const literals: z.ZodTypeAny[] = node.enum.map((value) => z.literal(value as string | number | boolean));
-    return described(literals.length === 1 ? literals[0]! : z.union(literals as unknown as [z.ZodTypeAny, z.ZodTypeAny, ...z.ZodTypeAny[]]));
+    const literals: z.ZodTypeAny[] = node.enum.map((value) =>
+      z.literal(value as string | number | boolean),
+    );
+    return described(
+      literals.length === 1
+        ? literals[0]!
+        : z.union(
+            literals as unknown as [
+              z.ZodTypeAny,
+              z.ZodTypeAny,
+              ...z.ZodTypeAny[],
+            ],
+          ),
+    );
   }
-  const declared = Array.isArray(node.type) ? node.type.filter((entry): entry is string => typeof entry === 'string') : typeof node.type === 'string' ? [node.type] : [];
-  const nullable = declared.includes('null');
-  const type = declared.find((entry) => entry !== 'null') ?? (node.properties ? 'object' : undefined);
+  const declared = Array.isArray(node.type)
+    ? node.type.filter((entry): entry is string => typeof entry === "string")
+    : typeof node.type === "string"
+      ? [node.type]
+      : [];
+  const nullable = declared.includes("null");
+  const type =
+    declared.find((entry) => entry !== "null") ??
+    (node.properties ? "object" : undefined);
   const base = ((): z.ZodTypeAny => {
     switch (type) {
-      case 'object': {
-        const properties = node.properties && typeof node.properties === 'object' ? node.properties as Record<string, unknown> : null;
+      case "object": {
+        const properties =
+          node.properties && typeof node.properties === "object"
+            ? (node.properties as Record<string, unknown>)
+            : null;
         if (!properties) return z.record(z.unknown());
-        const required = new Set(Array.isArray(node.required) ? node.required.filter((entry): entry is string => typeof entry === 'string') : []);
-        const shape = Object.fromEntries(Object.entries(properties).map(([key, child]) => {
-          const converted = jsonSchemaToZod(child, depth + 1);
-          return [key, required.has(key) ? converted : converted.optional()];
-        }));
+        const required = new Set(
+          Array.isArray(node.required)
+            ? node.required.filter(
+                (entry): entry is string => typeof entry === "string",
+              )
+            : [],
+        );
+        const shape = Object.fromEntries(
+          Object.entries(properties).map(([key, child]) => {
+            const converted = jsonSchemaToZod(child, depth + 1);
+            return [key, required.has(key) ? converted : converted.optional()];
+          }),
+        );
         // additionalProperties 没被显式关掉时保留多余字段：删掉它们等于替 MCP server 做主。
-        return node.additionalProperties === false ? z.object(shape) : z.object(shape).passthrough();
+        return node.additionalProperties === false
+          ? z.object(shape)
+          : z.object(shape).passthrough();
       }
-      case 'array': return z.array(jsonSchemaToZod(node.items, depth + 1));
-      case 'string': return z.string();
-      case 'integer': return z.number().int();
-      case 'number': return z.number();
-      case 'boolean': return z.boolean();
-      default: return z.unknown();
+      case "array":
+        return z.array(jsonSchemaToZod(node.items, depth + 1));
+      case "string":
+        return z.string();
+      case "integer":
+        return z.number().int();
+      case "number":
+        return z.number();
+      case "boolean":
+        return z.boolean();
+      default:
+        return z.unknown();
     }
   })();
   return described(nullable ? base.nullable() : base);

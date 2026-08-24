@@ -1,43 +1,173 @@
-import type { Bot } from 'grammy';
-import argon2 from 'argon2';
-import { mkdirSync } from 'node:fs';
-import { resolve } from 'node:path';
-import { serve } from '@hono/node-server';
-import { ArchiveRepository, CustomToolRepository, OperationsRepository, PrincipalRepository, McpAuthRepository, SandboxContainerRepository, ScheduleRepository, TurnRepository, acquireInstanceLock, closeDatabase, migrateDatabase, modelAliasKey, openDatabase, readAppKv, readPersistedConfig, recomputeMessageTokens, recoverAfterCrash, writeAppKv } from '@luoli/db';
-import { AcpManager, AcpRunRecorder, AgentManager, AgentResultStore, AlertDispatcher, BUNDLED_SKILLS, ConfigStore, ContainerManager, CustomToolManager, mergeAgentDefinitions, scanAgentFiles, ContextEngine, DatabaseApprovalBroker, EventBus, FileTools, LogSink, MaintenanceService, McpManager, MemoryStore, ModelCatalog, ModelRegistry, PathJail, PendingAuthorizations, PendingPrompts, PluginManager, selfAuthoringDenyGlobs, PromptAssembler, PromptDocuments, ProviderStore, PROVIDER_FAILURES_TO_DOWN, PROVIDER_PROBE_TIMEOUT_MS, QuotaGuard, repairAgentResultRefs, repairLedgerCacheCost, runProviderHealthCheck, Sandbox, ScheduledJobRunner, Scheduler, Secrets, SkillLoader, STABLE_PROMPT_BLOCKS, TOOL_POLICY, ToolRegistry, TurnConcurrency, TurnFailureStreak, TurnRegistry, UsageLedger, WebAssetStore, assembleMainPrompt, canSeeImages, captureImage, configJsonSchema, loadConfig, perChatConfig, registerAuthoringTools, registerBuiltins, registerCatalogTools, registerContainerTools, rejectedWakewords, runMainAgent, runSubAgent, streamMainAgent, type ContainerEvent, type SubAgentRuntimeEvent } from '@luoli/core';
-import { createServer, EventStreamRegistry, issueLoginToken, setupToken, type PromptPreviewResult } from '@luoli/server';
-import type { RuntimeTurnContext } from '@luoli/shared';
-import { TelegramPromptChannel, TelegramTools, UpdatePoller, approvalSettledText, createTelegramBot, staleApprovalOutcome } from '@luoli/telegram';
+import type { Bot } from "grammy";
+import argon2 from "argon2";
+import { mkdirSync } from "node:fs";
+import { resolve } from "node:path";
+import { serve } from "@hono/node-server";
+import {
+  ArchiveRepository,
+  CustomToolRepository,
+  OperationsRepository,
+  PrincipalRepository,
+  McpAuthRepository,
+  SandboxContainerRepository,
+  ScheduleRepository,
+  TurnRepository,
+  acquireInstanceLock,
+  closeDatabase,
+  migrateDatabase,
+  modelAliasKey,
+  openDatabase,
+  readAppKv,
+  readPersistedConfig,
+  recomputeMessageTokens,
+  recoverAfterCrash,
+  writeAppKv,
+} from "@luoli/db";
+import {
+  AcpManager,
+  AcpRunRecorder,
+  AgentManager,
+  AgentResultStore,
+  AlertDispatcher,
+  BUNDLED_SKILLS,
+  ConfigStore,
+  ContainerManager,
+  CustomToolManager,
+  mergeAgentDefinitions,
+  scanAgentFiles,
+  ContextEngine,
+  DatabaseApprovalBroker,
+  EventBus,
+  FileTools,
+  LogSink,
+  MaintenanceService,
+  McpManager,
+  MemoryStore,
+  ModelCatalog,
+  ModelRegistry,
+  PathJail,
+  PendingAuthorizations,
+  PendingPrompts,
+  PluginManager,
+  selfAuthoringDenyGlobs,
+  PromptAssembler,
+  PromptDocuments,
+  ProviderStore,
+  PROVIDER_FAILURES_TO_DOWN,
+  PROVIDER_PROBE_TIMEOUT_MS,
+  QuotaGuard,
+  repairAgentResultRefs,
+  repairLedgerCacheCost,
+  runProviderHealthCheck,
+  Sandbox,
+  ScheduledJobRunner,
+  Scheduler,
+  Secrets,
+  SkillLoader,
+  STABLE_PROMPT_BLOCKS,
+  TOOL_POLICY,
+  ToolRegistry,
+  TurnConcurrency,
+  TurnFailureStreak,
+  TurnRegistry,
+  UsageLedger,
+  WebAssetStore,
+  assembleMainPrompt,
+  canSeeImages,
+  captureImage,
+  configJsonSchema,
+  loadConfig,
+  perChatConfig,
+  registerAuthoringTools,
+  registerBuiltins,
+  registerCatalogTools,
+  registerContainerTools,
+  rejectedWakewords,
+  runMainAgent,
+  runSubAgent,
+  streamMainAgent,
+  type ContainerEvent,
+  type SubAgentRuntimeEvent,
+} from "@luoli/core";
+import {
+  createServer,
+  EventStreamRegistry,
+  issueLoginToken,
+  setupToken,
+  type PromptPreviewResult,
+} from "@luoli/server";
+import type { RuntimeTurnContext } from "@luoli/shared";
+import {
+  TelegramPromptChannel,
+  TelegramTools,
+  UpdatePoller,
+  approvalSettledText,
+  createTelegramBot,
+  staleApprovalOutcome,
+} from "@luoli/telegram";
 
 const startedAt = Date.now();
-const TOKEN_REPAIR_KEY = 'repair:context-tokens:v1';
-const startupDatabasePath = process.env.LUOLI_DATA_DIR ? resolve(process.env.LUOLI_DATA_DIR, 'luoli.db') : './data/luoli.db';
+const TOKEN_REPAIR_KEY = "repair:context-tokens:v1";
+const startupDatabasePath = process.env.LUOLI_DATA_DIR
+  ? resolve(process.env.LUOLI_DATA_DIR, "luoli.db")
+  : "./data/luoli.db";
 // env 叠加抽成一个函数，启动与热重载共用：只在启动时叠的话，host 存在 DB 而口令只来自 env 的部署，
 // 热重载会撞上 webui.passwordHash 的 superRefine 而整体失败（removeOverridePath 也删不掉它，
 // 因为它根本不在 overrides 里），表现是配置改一次就再也不生效（docs/20 · W-CFG-03）。
 const passwordHashFromEnvironment = process.env.WEBUI_PASSWORD
-  ? await argon2.hash(process.env.WEBUI_PASSWORD, { type: argon2.argon2id, memoryCost: 19_456, timeCost: 2, parallelism: 1 })
+  ? await argon2.hash(process.env.WEBUI_PASSWORD, {
+      type: argon2.argon2id,
+      memoryCost: 19_456,
+      timeCost: 2,
+      parallelism: 1,
+    })
   : null;
-const reportRejectedKey = (key: string): void => void process.stderr.write(`[config] 拒绝了 config_kv 里的非法键：${key}（清理：DELETE FROM config_kv WHERE key='${key.replaceAll("'", "''")}';）\n`);
-const envOverlay = (overrides: Record<string, unknown>): Record<string, unknown> => {
-  if (!process.env.LUOLI_WEBUI_HOST && !passwordHashFromEnvironment) return overrides;
-  const webui = overrides.webui && typeof overrides.webui === 'object' && !Array.isArray(overrides.webui)
-    ? overrides.webui as Record<string, unknown> : {};
+const reportRejectedKey = (key: string): void =>
+  void process.stderr.write(
+    `[config] 拒绝了 config_kv 里的非法键：${key}（清理：DELETE FROM config_kv WHERE key='${key.replaceAll("'", "''")}';）\n`,
+  );
+const envOverlay = (
+  overrides: Record<string, unknown>,
+): Record<string, unknown> => {
+  if (!process.env.LUOLI_WEBUI_HOST && !passwordHashFromEnvironment)
+    return overrides;
+  const webui =
+    overrides.webui &&
+    typeof overrides.webui === "object" &&
+    !Array.isArray(overrides.webui)
+      ? (overrides.webui as Record<string, unknown>)
+      : {};
   if (process.env.LUOLI_WEBUI_HOST) webui.host = process.env.LUOLI_WEBUI_HOST;
-  if (passwordHashFromEnvironment) webui.passwordHash = passwordHashFromEnvironment;
+  if (passwordHashFromEnvironment)
+    webui.passwordHash = passwordHashFromEnvironment;
   overrides.webui = webui;
   return overrides;
 };
-const startupOverrides = envOverlay(readPersistedConfig(startupDatabasePath, reportRejectedKey));
+const startupOverrides = envOverlay(
+  readPersistedConfig(startupDatabasePath, reportRejectedKey),
+);
 const droppedOverrides: string[] = [];
 const reportInvalidOverride = (dropped: string[], messages: string[]): void => {
   droppedOverrides.push(...dropped);
-  process.stderr.write(`[config] 已忽略 ${dropped.length} 条非法的持久化覆盖：\n  ${messages.join('\n  ')}\n`
-    + `[config] 清理命令：DELETE FROM config_kv WHERE key IN (${dropped.map((key) => `'${key.replaceAll("'", "''")}'`).join(', ')});\n`);
+  process.stderr.write(
+    `[config] 已忽略 ${dropped.length} 条非法的持久化覆盖：\n  ${messages.join("\n  ")}\n` +
+      `[config] 清理命令：DELETE FROM config_kv WHERE key IN (${dropped.map((key) => `'${key.replaceAll("'", "''")}'`).join(", ")});\n`,
+  );
 };
-const config = await loadConfig({ overrides: startupOverrides, onInvalidOverride: reportInvalidOverride });
+const config = await loadConfig({
+  overrides: startupOverrides,
+  onInvalidOverride: reportInvalidOverride,
+});
 const configStore = new ConfigStore(config);
-for (const path of [resolve('data'), resolve('logs'), resolve('skills'), resolve('plugins'), resolve(config.memory.dir), resolve(config.sandbox.workspaceDir)]) mkdirSync(path, { recursive: true, mode: 0o700 });
+for (const path of [
+  resolve("data"),
+  resolve("logs"),
+  resolve("skills"),
+  resolve("plugins"),
+  resolve(config.memory.dir),
+  resolve(config.sandbox.workspaceDir),
+])
+  mkdirSync(path, { recursive: true, mode: 0o700 });
 const db = openDatabase(config.db.path);
 migrateDatabase(db);
 // **拿锁必须排在 `recoverAfterCrash` 之前**：那个函数假定「进程启动 ⇒ 上一个进程已死」，
@@ -46,33 +176,47 @@ migrateDatabase(db);
 // 迁移排在前面是有意的：锁文件放在库旁边，而空库首启时目录可能还不存在。
 const instanceLock = acquireInstanceLock(config.db.path);
 if (!instanceLock.ok) {
-  process.stderr.write(`[lock] 另一个实例正在使用这个库（pid ${instanceLock.holder.pid}@${instanceLock.holder.host}，`
-    + `起于 ${new Date(instanceLock.holder.startedAt).toISOString()}）。\n`
-    + `[lock] 同库双实例会互相清掉在途轮次与消息认领，所以这里拒绝启动。要换实例先停掉那一个；\n`
-    + `[lock] 确认它已经死了但锁还在，删掉 ${config.db.path}.lock 再试（旁边的 .lock.<n> 可一并删）。\n`);
+  process.stderr.write(
+    `[lock] 另一个实例正在使用这个库（pid ${instanceLock.holder.pid}@${instanceLock.holder.host}，` +
+      `起于 ${new Date(instanceLock.holder.startedAt).toISOString()}）。\n` +
+      `[lock] 同库双实例会互相清掉在途轮次与消息认领，所以这里拒绝启动。要换实例先停掉那一个；\n` +
+      `[lock] 确认它已经死了但锁还在，删掉 ${config.db.path}.lock 再试（旁边的 .lock.<n> 可一并删）。\n`,
+  );
   process.exit(1);
 }
-if (instanceLock.lock.stolenFrom) process.stdout.write(`[lock] 接手了 pid ${instanceLock.lock.stolenFrom} 留下的锁 —— 上一次不是正常退出。\n`);
+if (instanceLock.lock.stolenFrom)
+  process.stdout.write(
+    `[lock] 接手了 pid ${instanceLock.lock.stolenFrom} 留下的锁 —— 上一次不是正常退出。\n`,
+  );
 // 报出来而不是静静收尾：`LogSink` 到下面才建得起来，所以先走 stdout，等 sink 有了再补一条
 // `system.recovered`。此前它返回 void 也不记日志，一次非正常重启之后 reap 了什么只能靠翻
 // `turns` 表反推（docs/28 · L-OPS-04）。
 const recovered = recoverAfterCrash(db);
 const recoveredAny = Object.values(recovered).some((count) => count > 0);
-if (recoveredAny) process.stdout.write(`[recover] 上一个进程没有正常收尾：判死 ${recovered.turns} 条轮次 / ${recovered.tasks} 条任务 / ${recovered.agentRuns} 条子 agent，`
-  + `释放 ${recovered.claims} 条消息认领，清零 ${recovered.reservations} 行在途预留。\n`);
+if (recoveredAny)
+  process.stdout.write(
+    `[recover] 上一个进程没有正常收尾：判死 ${recovered.turns} 条轮次 / ${recovered.tasks} 条任务 / ${recovered.agentRuns} 条子 agent，` +
+      `释放 ${recovered.claims} 条消息认领，清零 ${recovered.reservations} 行在途预留。\n`,
+  );
 // 一次性数据修复而不是迁移：迁移文件提交后不可修改，而这件事要用 TS 侧的估算器重算 parts。
 // 修的是 token 校准失控期间落库的 tokens（实测系数最高约 26 倍，logs/2026-08-16）。
 if (!readAppKv<boolean>(db, TOKEN_REPAIR_KEY)) {
   const repaired = recomputeMessageTokens(db);
-  writeAppKv(db, TOKEN_REPAIR_KEY, true, 'startup');
-  if (repaired.messages || repaired.contexts) process.stdout.write(`[context] 已按新估算器重算 ${repaired.messages} 条上下文消息的 tokens，并重置 ${repaired.contexts} 个会话的校准系数。\n`);
+  writeAppKv(db, TOKEN_REPAIR_KEY, true, "startup");
+  if (repaired.messages || repaired.contexts)
+    process.stdout.write(
+      `[context] 已按新估算器重算 ${repaired.messages} 条上下文消息的 tokens，并重置 ${repaired.contexts} 个会话的校准系数。\n`,
+    );
 }
 // 同一条路的第二次一次性修复：缓存 token 曾被双重计价，账面高估约 44%（docs/28 · L-COST-01）。
 // 它自己带 `app_kv` 门闸，跑过一次就返回 null。
 const ledgerRepair = repairLedgerCacheCost(db, config.general.timezone);
-if (ledgerRepair?.rewritten) process.stdout.write(`[ledger] 已按新计价口径重算 ${ledgerRepair.rewritten} 条用量（受影响 ${ledgerRepair.affected} 条、跳过 ${ledgerRepair.skipped} 条），`
-  + `合计 $${ledgerRepair.before.toFixed(6)} → $${ledgerRepair.after.toFixed(6)}；同时重算 ${ledgerRepair.turns} 条轮次与 ${ledgerRepair.counters} 行配额计数`
-  + `${ledgerRepair.countersStale ? `（另有 ${ledgerRepair.countersStale} 行明细已过保留期，算不回来）` : ''}。\n`);
+if (ledgerRepair?.rewritten)
+  process.stdout.write(
+    `[ledger] 已按新计价口径重算 ${ledgerRepair.rewritten} 条用量（受影响 ${ledgerRepair.affected} 条、跳过 ${ledgerRepair.skipped} 条），` +
+      `合计 $${ledgerRepair.before.toFixed(6)} → $${ledgerRepair.after.toFixed(6)}；同时重算 ${ledgerRepair.turns} 条轮次与 ${ledgerRepair.counters} 行配额计数` +
+      `${ledgerRepair.countersStale ? `（另有 ${ledgerRepair.countersStale} 行明细已过保留期，算不回来）` : ""}。\n`,
+  );
 const principals = new PrincipalRepository(db);
 principals.ensureOwner(config.access.bootstrapOwnerId);
 const archive = new ArchiveRepository(db);
@@ -84,52 +228,127 @@ const events = new EventBus();
 const quota = new QuotaGuard(db, config.general.timezone, events);
 const secrets = new Secrets(process.env.LUOLI_MASTER_KEY);
 // scrypt 抬高了离线爆破成本，但抬不动一个短口令（docs/20 · W-SEC-02）。
-if (secrets.weak) process.stderr.write('[secrets] LUOLI_MASTER_KEY 短于 32 字符：provider key 的加密强度取决于它，建议换成 32 字节随机值。\n');
+if (secrets.weak)
+  process.stderr.write(
+    "[secrets] LUOLI_MASTER_KEY 短于 32 字符：provider key 的加密强度取决于它，建议换成 32 字节随机值。\n",
+  );
 const providers = new ProviderStore(db, secrets);
 // 只在 WebUI 主动拉取模型时才可能出网；缓存命中的路径不碰网络（docs/04 §5.4.1）。
-const modelCatalog = new ModelCatalog(db, () => ({ ...configStore.snapshot().provider.catalog, allowPrivate: configStore.snapshot().provider.allowPrivateBaseUrl }));
+const modelCatalog = new ModelCatalog(db, () => ({
+  ...configStore.snapshot().provider.catalog,
+  allowPrivate: configStore.snapshot().provider.allowPrivateBaseUrl,
+}));
 const ledger = new UsageLedger(db);
 const turnRegistry = new TurnRegistry();
 const turnConcurrency = new TurnConcurrency(config.concurrency);
-const log = new LogSink(operations, config.logs.dir, [process.env.BOT_TOKEN ?? '', process.env.LUOLI_MASTER_KEY ?? ''], { level: config.logs.level, maxFileMb: config.logs.maxFileMb, bodyMaxBytes: config.logs.bodyMaxBytes, console: config.logs.console, events });
+const log = new LogSink(
+  operations,
+  config.logs.dir,
+  [process.env.BOT_TOKEN ?? "", process.env.LUOLI_MASTER_KEY ?? ""],
+  {
+    level: config.logs.level,
+    maxFileMb: config.logs.maxFileMb,
+    bodyMaxBytes: config.logs.bodyMaxBytes,
+    console: config.logs.console,
+    events,
+  },
+);
 log.redactPatterns = config.logs.redactPatterns;
 // 两条修复都发生在 sink 之前，所以补记在这里 —— stdout 那两行只有盯着终端的人看得见，
 // 而「上一次崩溃 reap 了什么」正是事后才会有人来查的东西（docs/28 · L-OPS-04）。
-if (recoveredAny) log.event({ level: 'warn', kind: 'system.recovered', summary: `上一个进程没有正常收尾：判死 ${recovered.turns} 条轮次`, data: recovered });
-if (ledgerRepair?.rewritten) log.event({ level: 'warn', kind: 'maintenance.repair', summary: `按新计价口径重算了 ${ledgerRepair.rewritten} 条用量`, data: ledgerRepair });
+if (recoveredAny)
+  log.event({
+    level: "warn",
+    kind: "system.recovered",
+    summary: `上一个进程没有正常收尾：判死 ${recovered.turns} 条轮次`,
+    data: recovered,
+  });
+if (ledgerRepair?.rewritten)
+  log.event({
+    level: "warn",
+    kind: "maintenance.repair",
+    summary: `按新计价口径重算了 ${ledgerRepair.rewritten} 条用量`,
+    data: ledgerRepair,
+  });
 // 告警要早于沙箱、plugin、模型注册表建起来：那三处的构造参数里就挂着告警回调。
 // owner 私聊在 bot 建好之后再补（`alerts.bindOwner`），此前只走 webhook 与日志。
 let notifyOwner: ((text: string) => Promise<unknown>) | null = null;
-const alerts = new AlertDispatcher(() => configStore.snapshot().alerts, log,
-  { owner: async (text: string) => { await notifyOwner?.(text); } }, () => configStore.snapshot().provider.allowPrivateBaseUrl);
+const alerts = new AlertDispatcher(
+  () => configStore.snapshot().alerts,
+  log,
+  {
+    owner: async (text: string) => {
+      await notifyOwner?.(text);
+    },
+  },
+  () => configStore.snapshot().provider.allowPrivateBaseUrl,
+);
 // 日志自己写不进去时也要有人知道 —— 只写 stderr 的话运维通常永远看不到（docs/10 §6 db_write_failed）。
-log.onWriteFailure = (error) => alerts.fire('db_write_failed', '日志写入失败', { error: error instanceof Error ? error.message : String(error) });
+log.onWriteFailure = (error) =>
+  alerts.fire("db_write_failed", "日志写入失败", {
+    error: error instanceof Error ? error.message : String(error),
+  });
 // 连续失败计数只此一份：Telegram 轮次与定时轮次记在同一个计数器上，否则「上游变黑洞」在
 // 没人聊天的部署里一次告警都不响，两份各卡在 4 次（docs/28 · L-SCH-02）。
 const turnFailures = new TurnFailureStreak(alerts);
 const context = new ContextEngine(db, archive, log);
-const modelRegistry = new ModelRegistry(db, providers,
-  (providerId, reason) => log.event({ level: 'warn', kind: 'provider.health', summary: `provider ${providerId} 已跳过：${reason}`, data: { providerId, reason } }));
+const modelRegistry = new ModelRegistry(db, providers, (providerId, reason) =>
+  log.event({
+    level: "warn",
+    kind: "provider.health",
+    summary: `provider ${providerId} 已跳过：${reason}`,
+    data: { providerId, reason },
+  }),
+);
 modelRegistry.rebuild(config.provider.healthDownCooldownMinutes);
-log.setSecrets([process.env.BOT_TOKEN ?? '', process.env.LUOLI_MASTER_KEY ?? '', config.tools.web.searchApiKey, ...providers.allDecryptedKeys()]);
+log.setSecrets([
+  process.env.BOT_TOKEN ?? "",
+  process.env.LUOLI_MASTER_KEY ?? "",
+  config.tools.web.searchApiKey,
+  ...providers.allDecryptedKeys(),
+]);
 // 零配置首启本来就没有 main 别名，拒绝启动会把补配置用的 WebUI 一起带走（docs/04 §5.2）。
 // 缺 main 只告警：轮次会在 streamMainAgent 里失败，WebUI 写入别名后 rebuildModels() 即时生效。
-if (!modelRegistry.aliases().includes('main')) {
-  log.event({ level: 'error', kind: 'config.invalid', summary: 'Required model alias main is unavailable' });
-  process.stderr.write('[config] 缺少必需的 main 模型别名：服务照常启动，但所有轮次都会以 model alias unavailable 失败。\n'
-    + `[config] 去 WebUI（http://${config.webui.host}:${config.webui.port} → Provider 页）配置 provider / 模型 / main 别名，保存后即时生效，无需重启。\n`);
+if (!modelRegistry.aliases().includes("main")) {
+  log.event({
+    level: "error",
+    kind: "config.invalid",
+    summary: "Required model alias main is unavailable",
+  });
+  process.stderr.write(
+    "[config] 缺少必需的 main 模型别名：服务照常启动，但所有轮次都会以 model alias unavailable 失败。\n" +
+      `[config] 去 WebUI（http://${config.webui.host}:${config.webui.port} → Provider 页）配置 provider / 模型 / main 别名，保存后即时生效，无需重启。\n`,
+  );
 }
-const memory = new MemoryStore(db, config.memory.dir, config.memory.softLimitTokens, config.memory.hardLimitTokens, config.memory.maxSections, config.memory.forgetMeRetentionDays, log);
+const memory = new MemoryStore(
+  db,
+  config.memory.dir,
+  config.memory.softLimitTokens,
+  config.memory.hardLimitTokens,
+  config.memory.maxSections,
+  config.memory.forgetMeRetentionDays,
+  log,
+);
 // 第四个参数：扫描结果真的变了才广播。没有它，扩展页只能靠 `health` 事件顺带刷新 ——
 // 从 Telegram 装进来的东西要等下一次健康检查才出现（docs/21 §9 · G-EXT-05）。
 // 第五个参数是 `LogSink`：`scan()` 的 per-skill catch 此前只写 `skills.load_error` 那一列，
 // 「我加的那个 skill 为什么不存在」在日志里一个字都没有（docs/28 · L-LOG-01）。
-const skills = new SkillLoader(db, config.skills.dir, () => configStore.snapshot().skills.defaultMinRole,
-  () => events.emit('extensions.changed', { kind: 'skill' }), log);
+const skills = new SkillLoader(
+  db,
+  config.skills.dir,
+  () => configStore.snapshot().skills.defaultMinRole,
+  () => events.emit("extensions.changed", { kind: "skill" }),
+  log,
+);
 // `skills.enabled=false` 时不扫盘也不监听：目录里的 SKILL.md 一个都不进工具目录。
 // 关掉是整块关掉，而不是「扫出来但不给用」—— 后者会让工具目录里多出一批点不动的名字。
 if (config.skills.enabled) skills.scan();
-else log.event({ level: 'info', kind: 'skills.disabled', summary: 'Skills disabled by config' });
+else
+  log.event({
+    level: "info",
+    kind: "skills.disabled",
+    summary: "Skills disabled by config",
+  });
 // 一份常量供两处用：写入方（AgentResultStore）与清理方（MaintenanceService.gcFiles）指向
 // 不同目录时，gc 会把整棵结果目录当成孤儿删空。
 // 跟着 `LUOLI_DATA_DIR` 走，和 `db.path` / `media.dir` 同一处（config/index.ts 的 envLayer）。
@@ -138,15 +357,27 @@ else log.event({ level: 'info', kind: 'skills.disabled', summary: 'Skills disabl
 // 此前存的是 `resolve()` 出来的绝对路径，于是「同一次运行内两处指向不同目录」防住了，
 // 而**时间性**错配没防住 —— 无 `LUOLI_DATA_DIR` 时它绑定的是启动那一刻的 cwd，换个目录
 // 起一次进程，库里记的就是旧根、文件在新根，gc 把新根下的全文整批当孤儿删掉（docs/28 · L-OPS-06）。
-const agentResultsDir = process.env.LUOLI_DATA_DIR ? resolve(process.env.LUOLI_DATA_DIR, 'agent-results') : resolve('data/agent-results');
+const agentResultsDir = process.env.LUOLI_DATA_DIR
+  ? resolve(process.env.LUOLI_DATA_DIR, "agent-results")
+  : resolve("data/agent-results");
 // 存量绝对路径行的一次性归一化，门闸同上面那两条修复。指向另一个根的行**不动** ——
 // 那是「这两套东西不是同一个部署」的唯一信号，`gcFiles()` 要靠它拒绝清理。
 const resultRefs = repairAgentResultRefs(db, agentResultsDir);
-if (resultRefs?.rewritten) process.stdout.write(`[agents] 已把 ${resultRefs.rewritten} 行子 agent 结果路径归一化成相对 ${agentResultsDir} 的 ref（另有 ${resultRefs.relative} 行本来就是）。\n`);
+if (resultRefs?.rewritten)
+  process.stdout.write(
+    `[agents] 已把 ${resultRefs.rewritten} 行子 agent 结果路径归一化成相对 ${agentResultsDir} 的 ref（另有 ${resultRefs.relative} 行本来就是）。\n`,
+  );
 if (resultRefs?.foreign) {
-  process.stderr.write(`[agents] ${resultRefs.foreign} 行子 agent 结果路径指向另一个部署根（例如 ${resultRefs.sample}），原样留下。\n`
-    + `[agents] gc-files 会因此拒绝清理子 agent 结果目录 —— 先确认这个库与 ${agentResultsDir} 是不是同一个部署的。\n`);
-  log.event({ level: 'warn', kind: 'maintenance.repair', summary: `${resultRefs.foreign} 行子 agent 结果路径指向另一个部署根`, data: resultRefs });
+  process.stderr.write(
+    `[agents] ${resultRefs.foreign} 行子 agent 结果路径指向另一个部署根（例如 ${resultRefs.sample}），原样留下。\n` +
+      `[agents] gc-files 会因此拒绝清理子 agent 结果目录 —— 先确认这个库与 ${agentResultsDir} 是不是同一个部署的。\n`,
+  );
+  log.event({
+    level: "warn",
+    kind: "maintenance.repair",
+    summary: `${resultRefs.foreign} 行子 agent 结果路径指向另一个部署根`,
+    data: resultRefs,
+  });
 }
 /**
  * `agents/<name>.md`（docs/14 §2 Q5）：文件是只读来源，`agent.agents`（DB / WebUI）同名覆盖它。
@@ -157,18 +388,43 @@ if (resultRefs?.foreign) {
 const scanAgents = (current: typeof config) => {
   const scan = scanAgentFiles(current.agent.agentsDir);
   for (const failure of scan.errors) {
-    log.event({ level: 'error', kind: 'agent.file_invalid', summary: `子 agent 定义解析失败：${failure.file}`, data: failure });
+    log.event({
+      level: "error",
+      kind: "agent.file_invalid",
+      summary: `子 agent 定义解析失败：${failure.file}`,
+      data: failure,
+    });
     process.stderr.write(`[agents] ${failure.file}: ${failure.error}\n`);
   }
   return mergeAgentDefinitions(scan.definitions, current.agent.agents);
 };
-const agents = new AgentManager(db, new AgentResultStore(agentResultsDir), scanAgents(config), config.agent.maxDepth, config.agent.maxSubagentsPerTurn);
+const agents = new AgentManager(
+  db,
+  new AgentResultStore(agentResultsDir),
+  scanAgents(config),
+  config.agent.maxDepth,
+  config.agent.maxSubagentsPerTurn,
+);
 if (config.skills.enabled && config.skills.watch) skills.startWatching();
 // 第八个参数是 `LogSink`：单次钩子失败此前完全静默（要累计到 `autoDisableAfterErrors` 才经告警
 // 落一行，而那一行还受 `alerts.on` 默认 `[]` 与 `dedupeMinutes` 管）—— 实测一个三轮必抛的
 // `beforeTurn`，与 plugin 有关的日志 0 条（docs/28 · L-LOG-01）。
-const plugins = new PluginManager(db, config.plugins.dir, config.plugins.hookTimeoutMs, config.plugins.autoDisableAfterErrors, config.plugins.order, undefined,
-  (name, error) => alerts.fire('plugin_auto_disabled', `plugin ${name} 连续出错已被自动禁用`, { plugin: name, error }, name), log);
+const plugins = new PluginManager(
+  db,
+  config.plugins.dir,
+  config.plugins.hookTimeoutMs,
+  config.plugins.autoDisableAfterErrors,
+  config.plugins.order,
+  undefined,
+  (name, error) =>
+    alerts.fire(
+      "plugin_auto_disabled",
+      `plugin ${name} 连续出错已被自动禁用`,
+      { plugin: name, error },
+      name,
+    ),
+  log,
+);
 // `plugins.enabled=false` 时不 reconcile：一个 plugin 都不加载，钩子链是空的。
 // 「进程内全信任」（docs/14 A27）意味着这个开关是安全边界，不是性能开关。
 if (config.plugins.enabled) {
@@ -177,19 +433,38 @@ if (config.plugins.enabled) {
   // （docs/28 · L-EXT-04）。修不了就在启动时说出来，与 reload 端点同一句话。
   if (plugins.hotReloadWarning) {
     // kind 用单数 `plugin.` 前缀：`CATEGORY_BY_PREFIX` 只认这一个，复数会掉进 turn.jsonl。
-    log.event({ level: 'warn', kind: 'plugin.hot_reload_unreliable', summary: '这个运行时下 plugin 热重载不可靠：重载会成功但仍跑旧代码', data: { entry: process.argv[1] ?? null } });
+    log.event({
+      level: "warn",
+      kind: "plugin.hot_reload_unreliable",
+      summary: "这个运行时下 plugin 热重载不可靠：重载会成功但仍跑旧代码",
+      data: { entry: process.argv[1] ?? null },
+    });
     process.stderr.write(`[plugins] ${plugins.hotReloadWarning}\n`);
   }
   // `plugins.watch`：目录变动后重新 reconcile。默认关 —— 热加载一个全信任的 JS 文件，
   // 风险面比省一次重启大得多，开它要自己清楚这一点。
   if (config.plugins.watch) plugins.startWatching();
-} else log.event({ level: 'info', kind: 'plugins.disabled', summary: 'Plugins disabled by config' });
+} else
+  log.event({
+    level: "info",
+    kind: "plugins.disabled",
+    summary: "Plugins disabled by config",
+  });
 // MCP 的凭据库与待授权表。`publicUrl` 传 getter 而不是快照：运维在设置页补完它之后
 // 不该还要重启才登得上（照 `configStore.snapshot()` 在这一行上下的一贯做法）。
 const mcpAuth = new McpAuthRepository(db, secrets);
 const mcpPending = new PendingAuthorizations();
-const mcp = new McpManager(db, () => configStore.snapshot().mcp, log, undefined,
-  { store: mcpAuth, pending: mcpPending, publicUrl: () => configStore.snapshot().webui.publicUrl });
+const mcp = new McpManager(
+  db,
+  () => configStore.snapshot().mcp,
+  log,
+  undefined,
+  {
+    store: mcpAuth,
+    pending: mcpPending,
+    publicUrl: () => configStore.snapshot().webui.publicUrl,
+  },
+);
 await mcp.reconcile();
 // M13 · ACP 客户端（`docs/04 §6.2`）。**不吃配置** —— 连接与会话都不缓存，`spawn_acp` 每次调用
 // 从本轮 `turn.config` 现读 `agent.acp` 交给它。所以这里只有日志口与记账口，没有 config getter。
@@ -199,17 +474,79 @@ await mcp.reconcile();
 const acp = new AcpManager(log, new AcpRunRecorder(db));
 // `web_fetch` / MCP 抓回来的图片。落在 `media.dir` 之下 —— 跟着同一个目录走，`gcFiles()` 那道
 // 「库与目录来自两套部署」的 fail-closed 守卫才继续适用（docs/25 §10）。
-const webAssets = new WebAssetStore(db, config.media.dir, config.media.maxImageEdge);
-const maintenance = new MaintenanceService(db, config.db.path, config.db.backupKeep, config.logs.retentionDays, config.logs.dir,
-  { files: config.media.dir, agentResults: agentResultsDir }, config.logs.gzipAfterDays, config.schedule.retentionDays,
-  { usage: config.maintenance.retention.usageDays, quotaCounters: config.maintenance.retention.quotaCounterDays,
-    configRevisions: config.maintenance.retention.configRevisionDays, memoryRevisions: config.maintenance.retention.memoryRevisionDays,
-    media: config.media.retentionDays });
-const scheduler = new Scheduler((name, error) => log.event({ level: 'error', kind: 'scheduler.failed', summary: `${name} failed`, data: { error: error instanceof Error ? error.message : String(error) } }));
-scheduler.add(config.general.maintenanceCron, () => { const result = maintenance.cleanup(); log.event({ level: 'info', kind: 'maintenance.cleanup', summary: 'Scheduled cleanup complete', data: result }); }, 'maintenance');
-scheduler.add(config.db.vacuumCron, () => { maintenance.vacuum(); log.event({ level: 'info', kind: 'maintenance.vacuum', summary: 'Scheduled VACUUM complete' }); }, 'vacuum');
-scheduler.add(config.memory.compactCron, () => { log.event({ level: 'info', kind: 'memory.compact', summary: 'Memory compaction review scheduled', data: { pending: memory.list().filter((entry) => entry.tokens > config.memory.softLimitTokens).length } }); }, 'memory-compact');
-scheduler.add(config.mcp.healthCheckCron, () => mcp.reconcile(), 'mcp-health');
+const webAssets = new WebAssetStore(
+  db,
+  config.media.dir,
+  config.media.maxImageEdge,
+);
+const maintenance = new MaintenanceService(
+  db,
+  config.db.path,
+  config.db.backupKeep,
+  config.logs.retentionDays,
+  config.logs.dir,
+  { files: config.media.dir, agentResults: agentResultsDir },
+  config.logs.gzipAfterDays,
+  config.schedule.retentionDays,
+  {
+    usage: config.maintenance.retention.usageDays,
+    quotaCounters: config.maintenance.retention.quotaCounterDays,
+    configRevisions: config.maintenance.retention.configRevisionDays,
+    memoryRevisions: config.maintenance.retention.memoryRevisionDays,
+    media: config.media.retentionDays,
+  },
+);
+const scheduler = new Scheduler((name, error) =>
+  log.event({
+    level: "error",
+    kind: "scheduler.failed",
+    summary: `${name} failed`,
+    data: { error: error instanceof Error ? error.message : String(error) },
+  }),
+);
+scheduler.add(
+  config.general.maintenanceCron,
+  () => {
+    const result = maintenance.cleanup();
+    log.event({
+      level: "info",
+      kind: "maintenance.cleanup",
+      summary: "Scheduled cleanup complete",
+      data: result,
+    });
+  },
+  "maintenance",
+);
+scheduler.add(
+  config.db.vacuumCron,
+  () => {
+    maintenance.vacuum();
+    log.event({
+      level: "info",
+      kind: "maintenance.vacuum",
+      summary: "Scheduled VACUUM complete",
+    });
+  },
+  "vacuum",
+);
+scheduler.add(
+  config.memory.compactCron,
+  () => {
+    log.event({
+      level: "info",
+      kind: "memory.compact",
+      summary: "Memory compaction review scheduled",
+      data: {
+        pending: memory
+          .list()
+          .filter((entry) => entry.tokens > config.memory.softLimitTokens)
+          .length,
+      },
+    });
+  },
+  "memory-compact",
+);
+scheduler.add(config.mcp.healthCheckCron, () => mcp.reconcile(), "mcp-health");
 // provider-health 不在这里注册，它要用 `rebuildModels`（见那一行）。
 const promptAssembler = new PromptAssembler();
 const promptDocuments = new PromptDocuments(db, config.memory.dir);
@@ -222,136 +559,344 @@ promptDocuments.ensure();
 // owner 本人都是 `trusted`，那儿的按钮谁都点不动。少了这一问，可用性就比可裁决性宽一档：库里挂上
 // pending 行、屏幕上贴出一排点不动的按钮，然后这一轮干等满 ttlMs（`docs/22 · D-APPR-01` 换了个来路）。
 // 私聊按 §2.2 的 ★ 继承用户角色，而 owner 的私聊 chatId 就是他的 userId。
-const approvalPrompts = new PendingPrompts(new TelegramPromptChannel({ bot: () => bot, log,
-  decidable: (chatId) => {
-    const access = configStore.snapshot().access;
-    return chatId === access.bootstrapOwnerId || (principals.roleOf('chat', chatId) ?? access.defaultChatRole) === 'owner';
-  } }), log);
+const approvalPrompts = new PendingPrompts(
+  new TelegramPromptChannel({
+    bot: () => bot,
+    log,
+    decidable: (chatId) => {
+      const access = configStore.snapshot().access;
+      return (
+        chatId === access.bootstrapOwnerId ||
+        (principals.roleOf("chat", chatId) ?? access.defaultChatRole) ===
+          "owner"
+      );
+    },
+  }),
+  log,
+);
 // 回执上挂 inline keyboard：**裁决权只给 owner**（`approval.allowInitiator` 已永久摘除，docs/14 A26），按下去走
 // `claim` → `approval.decide(..., 'telegram')`，也就是与 WebUI 共用那句
 // `UPDATE … WHERE state='pending' AND expires_at>?` —— 两条通道之间唯一的原子抢夺点。
 // 正文不传 `parse_mode`：键盘挂在一条消息上，MarkdownV2 一 400 就会被 `sendWithFallback` 重发一遍，
 // 屏幕上于是有两条各带一套按钮的消息。
-const approval = new DatabaseApprovalBroker(db, () => configStore.snapshot(), events, log, async (pending) => {
-  if (!bot) return;
-  const risk = pending.risk === 'high' ? '高风险' : pending.risk === 'medium' ? '中风险' : '低风险';
-  const seconds = Math.round(pending.ttlMs / 1000);
-  const thread = pending.threadId === null ? {} : { message_thread_id: pending.threadId };
-  // 这个会话里按钮点不动（`decidable` 为假）时**不贴按钮**，只报信 —— 走到这儿说明 WebUI 那条
-  // SSE 通道在，否则上面那道闸已经当场拒了。贴一排点不动的按钮比不贴更糟。
-  if (!approvalPrompts.available(pending.chatId)) {
-    await bot.api.sendMessage(pending.chatId, `⏳ ${pending.tool} 是${risk}操作，要 owner 在 WebUI 的审批页批准。${seconds} 秒内没人处理就会自动拒绝，我会接着往下说。`, thread);
-    return;
-  }
-  const handle = approvalPrompts.ask({
-    kind: 'approval', chatId: pending.chatId, threadId: pending.threadId, decidableBy: 'owner', initiatorUserId: pending.requesterUserId,
-    text: `⏳ ${pending.tool} 是${risk}操作，要 owner 批准 —— 就在下面点，或去 WebUI 的审批页。${seconds} 秒内没人处理就会自动拒绝，我会接着往下说。`,
-    options: [{ id: 'approve', label: '批准' }, { id: 'deny', label: '拒绝' }],
-    ttlMs: pending.ttlMs,
-    claim: (optionId, actor) => approval.decide(pending.id, optionId === 'approve', actor, 'telegram'),
+const approval = new DatabaseApprovalBroker(
+  db,
+  () => configStore.snapshot(),
+  events,
+  log,
+  async (pending) => {
+    if (!bot) return;
+    const risk =
+      pending.risk === "high"
+        ? "高风险"
+        : pending.risk === "medium"
+          ? "中风险"
+          : "低风险";
+    const seconds = Math.round(pending.ttlMs / 1000);
+    const thread =
+      pending.threadId === null ? {} : { message_thread_id: pending.threadId };
+    // 这个会话里按钮点不动（`decidable` 为假）时**不贴按钮**，只报信 —— 走到这儿说明 WebUI 那条
+    // SSE 通道在，否则上面那道闸已经当场拒了。贴一排点不动的按钮比不贴更糟。
+    if (!approvalPrompts.available(pending.chatId)) {
+      await bot.api.sendMessage(
+        pending.chatId,
+        `⏳ ${pending.tool} 是${risk}操作，要 owner 在 WebUI 的审批页批准。${seconds} 秒内没人处理就会自动拒绝，我会接着往下说。`,
+        thread,
+      );
+      return;
+    }
+    const handle = approvalPrompts.ask({
+      kind: "approval",
+      chatId: pending.chatId,
+      threadId: pending.threadId,
+      decidableBy: "owner",
+      initiatorUserId: pending.requesterUserId,
+      text: `⏳ ${pending.tool} 是${risk}操作，要 owner 批准 —— 就在下面点，或去 WebUI 的审批页。${seconds} 秒内没人处理就会自动拒绝，我会接着往下说。`,
+      options: [
+        { id: "approve", label: "批准" },
+        { id: "deny", label: "拒绝" },
+      ],
+      ttlMs: pending.ttlMs,
+      claim: (optionId, actor) =>
+        approval.decide(pending.id, optionId === "approve", actor, "telegram"),
+    });
+    const posted = await handle.posted;
+    // `tg_message_id` 落库是为了下次启动能把残留回执收掉（`staleKeyboards`）；`settle` 让 Telegram
+    // 点了 / WebUI 抢先裁决 / TTL 到点 / 轮次取消时那两个按钮当场消失 —— 留着就是下一次误点 ——
+    // **并且把正文换成结局**：上面那句「${seconds} 秒内没人处理就会自动拒绝」这时已经不成立，
+    // 让它停在屏幕上就是 `docs/21 §12` 那类「界面在说谎」（`AC-APV-004`）。撤键盘与改正文合成
+    // 一次 `editMessageText`（见 `TelegramPromptChannel.settle`），两次调用要排两回 20/分钟 的队。
+    // `settle` 交回「那次编辑真落地了吗」——`tg_message_id` 只在为真时才清（待办队列不是历史记录）。
+    //
+    // `delivered: false`：这条带按钮的回执**发不出去**。上面那道可用性闸是按这个会话点得动才放行的，
+    // 所以走到这儿时 Telegram 可能是唯一的通道 —— 由 broker 两边一起判（`#receiptUndeliverable`）。
+    return posted
+      ? {
+          tgMessageId: posted.messageId,
+          settle: (outcome) =>
+            approvalPrompts.dismiss(
+              posted,
+              approvalSettledText(pending.tool, outcome),
+            ),
+        }
+      : { delivered: false };
+  },
+  approvalPrompts,
+);
+if (!config.approval.enabled)
+  log.event({
+    level: "warn",
+    kind: "approval.disabled",
+    summary: "Approval flow disabled; dangerous tools execute without review",
   });
-  const posted = await handle.posted;
-  // `tg_message_id` 落库是为了下次启动能把残留回执收掉（`staleKeyboards`）；`settle` 让 Telegram
-  // 点了 / WebUI 抢先裁决 / TTL 到点 / 轮次取消时那两个按钮当场消失 —— 留着就是下一次误点 ——
-  // **并且把正文换成结局**：上面那句「${seconds} 秒内没人处理就会自动拒绝」这时已经不成立，
-  // 让它停在屏幕上就是 `docs/21 §12` 那类「界面在说谎」（`AC-APV-004`）。撤键盘与改正文合成
-  // 一次 `editMessageText`（见 `TelegramPromptChannel.settle`），两次调用要排两回 20/分钟 的队。
-  // `settle` 交回「那次编辑真落地了吗」——`tg_message_id` 只在为真时才清（待办队列不是历史记录）。
-  //
-  // `delivered: false`：这条带按钮的回执**发不出去**。上面那道可用性闸是按这个会话点得动才放行的，
-  // 所以走到这儿时 Telegram 可能是唯一的通道 —— 由 broker 两边一起判（`#receiptUndeliverable`）。
-  return posted
-    ? { tgMessageId: posted.messageId, settle: (outcome) => approvalPrompts.dismiss(posted, approvalSettledText(pending.tool, outcome)) }
-    : { delivered: false };
-}, approvalPrompts);
-if (!config.approval.enabled) log.event({ level: 'warn', kind: 'approval.disabled', summary: 'Approval flow disabled; dangerous tools execute without review' });
 // **开着的开关 + 空规则表 = 门开着。** `approval.rules` 默认 `[]`，而 `ApprovalRules.evaluate()`
 // 在规则表为空时恒回 `{needed:false}` —— 于是 `TOOL_POLICY` 里标 `conditional` 的六个工具
 // （bash / python / write_file / edit_file / move_file / memory_write）在开箱配置下对 trusted
 // 用户完全不经审批，而面板显示「审批已启用」、docs/05 的工具表写着「条件审批」（docs/27 · S-02）。
 // 按 docs/16 §5「摘除比伪造安全」：宁可明说门是开的，也不替运维默认一份他没写过的高危规则。
 else if (!config.approval.rules.length) {
-  const conditional = Object.entries(TOOL_POLICY).filter(([, policy]) => policy.approval === 'conditional').map(([name]) => name);
-  log.event({ level: 'warn', kind: 'approval.no_rules', summary: `approval.enabled=true 但规则表是空的：${conditional.length} 个 conditional 工具等于 never`, data: { conditional } });
-  process.stderr.write(`[approval] 审批已启用但 approval.rules 是空的 —— 0 条规则时 conditional 等于 never，${conditional.join(' / ')} 全部不经审批直接执行。\n`
-    + '[approval] 去 WebUI（审批页）加规则，或在 config/config.yaml 的 approval.rules 里写（那里有注释示例）。\n');
+  const conditional = Object.entries(TOOL_POLICY)
+    .filter(([, policy]) => policy.approval === "conditional")
+    .map(([name]) => name);
+  log.event({
+    level: "warn",
+    kind: "approval.no_rules",
+    summary: `approval.enabled=true 但规则表是空的：${conditional.length} 个 conditional 工具等于 never`,
+    data: { conditional },
+  });
+  process.stderr.write(
+    `[approval] 审批已启用但 approval.rules 是空的 —— 0 条规则时 conditional 等于 never，${conditional.join(" / ")} 全部不经审批直接执行。\n` +
+      "[approval] 去 WebUI（审批页）加规则，或在 config/config.yaml 的 approval.rules 里写（那里有注释示例）。\n",
+  );
 }
 // 唤醒词在匹配时被静默跳过、或四个开关全关，表现都只是「bot 不理我」——启动时先把它说出来（docs/11 §启动校验）。
-const unusableWakewords = rejectedWakewords(config.trigger.wakewords, config.trigger.wakewordMinLength);
-if (unusableWakewords.length) log.event({ level: 'warn', kind: 'config.invalid', summary: `${unusableWakewords.length} 条唤醒词不会生效`, data: { rejected: unusableWakewords } });
-if (!config.trigger.private && !config.trigger.mention && !config.trigger.reply && !config.trigger.command && config.trigger.wakewords.length === unusableWakewords.length) {
-  log.event({ level: 'warn', kind: 'config.invalid', summary: 'No trigger source is enabled; the bot will never respond' });
+const unusableWakewords = rejectedWakewords(
+  config.trigger.wakewords,
+  config.trigger.wakewordMinLength,
+);
+if (unusableWakewords.length)
+  log.event({
+    level: "warn",
+    kind: "config.invalid",
+    summary: `${unusableWakewords.length} 条唤醒词不会生效`,
+    data: { rejected: unusableWakewords },
+  });
+if (
+  !config.trigger.private &&
+  !config.trigger.mention &&
+  !config.trigger.reply &&
+  !config.trigger.command &&
+  config.trigger.wakewords.length === unusableWakewords.length
+) {
+  log.event({
+    level: "warn",
+    kind: "config.invalid",
+    summary: "No trigger source is enabled; the bot will never respond",
+  });
 }
 // **`concurrency.turnTimeoutMs` 是所有长工具的实际天花板**（`docs/11` 那条已写明，代码侧的告知是
 // 这一轮补的，`docs/14` F13）。ACP agent 配了 15 分钟而轮次上限 10 分钟时，那 15 分钟从来没有机会
 // 生效：轮次先超时 → abortSignal → `session/cancel`，而运维看到的是「我配的是 15 分钟」。
 // 照 `approval.no_rules` 的先例只 warn 不拒启动 —— 这是一个错配而不是一个非法值。
 // 名单里也带上 harness：同一个坑、同一个默认值，而运维踩的是哪一个由配置决定。
-const overlongLongTools = [...config.agent.acp.agents, ...(config.agent.harness.timeoutMs > config.concurrency.turnTimeoutMs ? [{ name: 'agent.harness', timeoutMs: config.agent.harness.timeoutMs }] : [])]
-  .filter((agent) => agent.timeoutMs > config.concurrency.turnTimeoutMs);
+const overlongLongTools = [
+  ...config.agent.acp.agents,
+  ...(config.agent.harness.timeoutMs > config.concurrency.turnTimeoutMs
+    ? [{ name: "agent.harness", timeoutMs: config.agent.harness.timeoutMs }]
+    : []),
+].filter((agent) => agent.timeoutMs > config.concurrency.turnTimeoutMs);
 if (overlongLongTools.length) {
-  log.event({ level: 'warn', kind: 'config.invalid', summary: `${overlongLongTools.length} 个长工具的 timeoutMs 大于 concurrency.turnTimeoutMs（${config.concurrency.turnTimeoutMs}），那部分预算从来不会生效`,
-    data: { turnTimeoutMs: config.concurrency.turnTimeoutMs, overlong: overlongLongTools.map((agent) => ({ name: agent.name, timeoutMs: agent.timeoutMs })) } });
+  log.event({
+    level: "warn",
+    kind: "config.invalid",
+    summary: `${overlongLongTools.length} 个长工具的 timeoutMs 大于 concurrency.turnTimeoutMs（${config.concurrency.turnTimeoutMs}），那部分预算从来不会生效`,
+    data: {
+      turnTimeoutMs: config.concurrency.turnTimeoutMs,
+      overlong: overlongLongTools.map((agent) => ({
+        name: agent.name,
+        timeoutMs: agent.timeoutMs,
+      })),
+    },
+  });
 }
-const toolRegistry = new ToolRegistry(log, approval,
+const toolRegistry = new ToolRegistry(
+  log,
+  approval,
   // `catalog` 那一段是折叠判据的**唯一**入口（`#deferredFor` 每次查询都从这个 getter 现读，
   // 所以它天然跟着热更新走）。漏掉这一行的表现是「配置页改了 tools.catalog.*，运行时一个字没变」，
   // 而 `tests/config.test.ts` 那条「路径级引用」断言挡不住它：`descriptions.ts` 里的点分键字面
   // 已经让 `tools.catalog.*` 各叶子匹配上了，接线漏没漏它看不出来。
-  () => { const live = configStore.snapshot(); return { maxRegistered: live.tools.maxRegistered, maxCallsPerTurn: live.tools.maxCallsPerTurn, maxConsecutiveErrors: live.tools.maxConsecutiveErrors, maxOutputBytes: live.tools.exec.maxOutputBytes, defaultTimeoutMs: live.tools.defaultTimeoutMs, catalog: live.tools.catalog }; },
-  () => configStore.snapshot().approval.rules, plugins, turns);
+  () => {
+    const live = configStore.snapshot();
+    return {
+      maxRegistered: live.tools.maxRegistered,
+      maxCallsPerTurn: live.tools.maxCallsPerTurn,
+      maxConsecutiveErrors: live.tools.maxConsecutiveErrors,
+      maxOutputBytes: live.tools.exec.maxOutputBytes,
+      defaultTimeoutMs: live.tools.defaultTimeoutMs,
+      catalog: live.tools.catalog,
+    };
+  },
+  () => configStore.snapshot().approval.rules,
+  plugins,
+  turns,
+);
 toolRegistry.bindOverrides(() => configStore.snapshot().tools.overrides);
 // 判据本身在 core（`canSeeImages`，与两处 vision 切换一字对齐）；这里只补它问不到的那一半：
 // 主轮此刻用的是哪个别名 —— `set_model` 的当轮覆盖、会话固定别名、配置默认值，按这个顺序。
-const imageAudience = (toolContext: { agentKind: 'main' | 'sub'; agentAlias?: string; turn: RuntimeTurnContext }): boolean =>
-  canSeeImages(modelRegistry, toolContext, () => toolContext.turn.modelAliasOverride
-    ?? readAppKv<string>(db, modelAliasKey(toolContext.turn.key))
-    ?? perChatConfig(configStore.snapshot(), toolContext.turn.key).agent.main.modelAlias);
+const imageAudience = (toolContext: {
+  agentKind: "main" | "sub";
+  agentAlias?: string;
+  turn: RuntimeTurnContext;
+}): boolean =>
+  canSeeImages(
+    modelRegistry,
+    toolContext,
+    () =>
+      toolContext.turn.modelAliasOverride ??
+      readAppKv<string>(db, modelAliasKey(toolContext.turn.key)) ??
+      perChatConfig(configStore.snapshot(), toolContext.turn.key).agent.main
+        .modelAlias,
+  );
 // MCP / plugin 交回的图片走与 `web_fetch` 完全同一条路（存 `web_assets` → 注入 `webasset://`
 // 顶层 part → 骑工具结果给本步）。不绑的话浏览器类 MCP 的 `browser_screenshot` 会被
 // `#normalizeOutput` 截成半截 base64 当不可信文本交给模型 —— 既看不见图又烧光输出预算。
-toolRegistry.bindMedia({ capture: (toolContext, input) => captureImage({ assets: webAssets,
-  appendDelta: (turn, message) => context.appendDelta(turn, message as never),
-  visionAvailable: () => imageAudience(toolContext), log,
-  // 与 `web_fetch` 同一条路：子 agent 的截图在父轮只留文字痕迹（docs/04 §5.2）。
-  ...(toolContext.subAgent ? { subAgent: { name: toolContext.subAgent.name, images: toolContext.subAgent.images, onInjected: toolContext.subAgent.onMediaInjected } } : {}) },
-toolContext.turn, { url: input.label, mediaType: input.mediaType, body: input.body, label: `MCP 工具 ${input.label}` }) });
+toolRegistry.bindMedia({
+  capture: (toolContext, input) =>
+    captureImage(
+      {
+        assets: webAssets,
+        appendDelta: (turn, message) =>
+          context.appendDelta(turn, message as never),
+        visionAvailable: () => imageAudience(toolContext),
+        log,
+        // 与 `web_fetch` 同一条路：子 agent 的截图在父轮只留文字痕迹（docs/04 §5.2）。
+        ...(toolContext.subAgent
+          ? {
+              subAgent: {
+                name: toolContext.subAgent.name,
+                images: toolContext.subAgent.images,
+                onInjected: toolContext.subAgent.onMediaInjected,
+              },
+            }
+          : {}),
+      },
+      toolContext.turn,
+      {
+        url: input.label,
+        mediaType: input.mediaType,
+        body: input.body,
+        label: `MCP 工具 ${input.label}`,
+      },
+    ),
+});
 // 吃 getter 而不是启动快照：sandbox.mode 是「出事时运维会去点的那个开关」，冻住它等于
 // 界面说改成功了、bash 照跑（docs/20 · W-CFG-02）。
-const sandbox = new Sandbox(() => {
-  const live = configStore.snapshot();
-  return { mode: live.sandbox.mode, bypassRoles: live.sandbox.bypassRoles, dockerBin: live.sandbox.dockerBin,
-    image: live.sandbox.image, network: live.sandbox.network, memoryMb: live.sandbox.memoryMb, cpus: live.sandbox.cpus,
-    pidsLimit: live.sandbox.pidsLimit, readOnlyRoot: live.sandbox.readOnlyRoot, tmpfsMb: live.sandbox.tmpfsMb,
-    workspaceDir: live.sandbox.workspaceDir, hostWorkspaceDir: live.sandbox.hostWorkspaceDir, persistent: live.sandbox.persistent,
-    defaultTimeoutMs: live.tools.exec.defaultTimeoutMs, maxTimeoutMs: live.tools.exec.maxTimeoutMs, maxOutputBytes: live.tools.exec.maxOutputBytes };
-}, undefined, undefined, (message) => log.event({ level: 'warn', kind: 'sandbox.weak_isolation', summary: message }),
-  (reason, role) => alerts.fire('sandbox_unavailable', `沙箱不可用，${role} 的执行请求被拒`, { reason, role }, role),
+const sandbox = new Sandbox(
+  () => {
+    const live = configStore.snapshot();
+    return {
+      mode: live.sandbox.mode,
+      bypassRoles: live.sandbox.bypassRoles,
+      dockerBin: live.sandbox.dockerBin,
+      image: live.sandbox.image,
+      network: live.sandbox.network,
+      memoryMb: live.sandbox.memoryMb,
+      cpus: live.sandbox.cpus,
+      pidsLimit: live.sandbox.pidsLimit,
+      readOnlyRoot: live.sandbox.readOnlyRoot,
+      tmpfsMb: live.sandbox.tmpfsMb,
+      workspaceDir: live.sandbox.workspaceDir,
+      hostWorkspaceDir: live.sandbox.hostWorkspaceDir,
+      persistent: live.sandbox.persistent,
+      defaultTimeoutMs: live.tools.exec.defaultTimeoutMs,
+      maxTimeoutMs: live.tools.exec.maxTimeoutMs,
+      maxOutputBytes: live.tools.exec.maxOutputBytes,
+    };
+  },
+  undefined,
+  undefined,
+  (message) =>
+    log.event({
+      level: "warn",
+      kind: "sandbox.weak_isolation",
+      summary: message,
+    }),
+  (reason, role) =>
+    alerts.fire(
+      "sandbox_unavailable",
+      `沙箱不可用，${role} 的执行请求被拒`,
+      { reason, role },
+      role,
+    ),
   // 第六个参数：每一次沙箱执行落一条 `sandbox.run`（docs/10 §2）。沙箱本身不认识 LogSink ——
   // 它是三条工具路径共用的底层，只交出事实。`turnId='adhoc'` 的那些（探测、非轮次调用）没有 trace。
-  (run) => log.event({ level: run.ok ? 'info' : 'warn', kind: 'sandbox.run',
-    summary: `${run.mode}${run.denied ? ` denied: ${run.denied}` : ` exit ${run.exitCode ?? 'null'}`}`,
-    ...(run.turnId === 'adhoc' ? {} : { traceId: run.turnId }), durationMs: run.durationMs,
-    data: { mode: run.mode, image: run.image, exitCode: run.exitCode, ms: run.durationMs, ok: run.ok, oom: run.oom, killed: run.killed, truncated: run.truncated, role: run.role, ...(run.denied ? { denied: run.denied } : {}) } }));
+  (run) =>
+    log.event({
+      level: run.ok ? "info" : "warn",
+      kind: "sandbox.run",
+      summary: `${run.mode}${run.denied ? ` denied: ${run.denied}` : ` exit ${run.exitCode ?? "null"}`}`,
+      ...(run.turnId === "adhoc" ? {} : { traceId: run.turnId }),
+      durationMs: run.durationMs,
+      data: {
+        mode: run.mode,
+        image: run.image,
+        exitCode: run.exitCode,
+        ms: run.durationMs,
+        ok: run.ok,
+        oom: run.oom,
+        killed: run.killed,
+        truncated: run.truncated,
+        role: run.role,
+        ...(run.denied ? { denied: run.denied } : {}),
+      },
+    }),
+);
 // 会话级持久容器（docs/05 §5.5）。**装配期注入而不是构造参数**：`Sandbox` 一直是「不认识仓储层」
 // 的底层，而这个管理器要 DB 句柄。没绑上时整块降级成一次性容器，行为与落地之前一致。
-const containers = new ContainerManager(db, new SandboxContainerRepository(db), () => {
-  const live = configStore.snapshot();
-  return { dockerBin: live.sandbox.dockerBin, image: live.sandbox.image, memoryMb: live.sandbox.memoryMb, cpus: live.sandbox.cpus,
-    pidsLimit: live.sandbox.pidsLimit, readOnlyRoot: live.sandbox.readOnlyRoot, tmpfsMb: live.sandbox.tmpfsMb,
-    maxOutputBytes: live.tools.exec.maxOutputBytes, persistent: live.sandbox.persistent };
-}, (event: ContainerEvent) => {
-  // **kind 写成四条字面量而不是拼串**：`tests/docs.test.ts` 把源码里的 `kind:` 与 `docs/10 §2`
-  // 那张表双向焊死，而模板串在那道扫描里是隐形的 ——「表与实现差了 54 个」正是这么来的。
-  const shared = { level: (event.type === 'limit' || event.ok === false ? 'warn' : 'info') as 'warn' | 'info',
-    summary: `${event.type}${event.name ? ` ${event.name}` : ''}`,
-    ...(event.durationMs === undefined ? {} : { durationMs: event.durationMs }),
-    data: { ...(event.chatId ? { chatId: event.chatId } : {}), ...(event.name ? { name: event.name } : {}), ...event.data } };
-  if (event.type === 'created') log.event({ kind: 'sandbox.container.created', ...shared });
-  else if (event.type === 'reaped') log.event({ kind: 'sandbox.container.reaped', ...shared });
-  else if (event.type === 'limit') log.event({ kind: 'sandbox.container.limit', ...shared });
-  else log.event({ kind: 'sandbox.container.exec', ...shared });
-});
+const containers = new ContainerManager(
+  db,
+  new SandboxContainerRepository(db),
+  () => {
+    const live = configStore.snapshot();
+    return {
+      dockerBin: live.sandbox.dockerBin,
+      image: live.sandbox.image,
+      memoryMb: live.sandbox.memoryMb,
+      cpus: live.sandbox.cpus,
+      pidsLimit: live.sandbox.pidsLimit,
+      readOnlyRoot: live.sandbox.readOnlyRoot,
+      tmpfsMb: live.sandbox.tmpfsMb,
+      maxOutputBytes: live.tools.exec.maxOutputBytes,
+      persistent: live.sandbox.persistent,
+    };
+  },
+  (event: ContainerEvent) => {
+    // **kind 写成四条字面量而不是拼串**：`tests/docs.test.ts` 把源码里的 `kind:` 与 `docs/10 §2`
+    // 那张表双向焊死，而模板串在那道扫描里是隐形的 ——「表与实现差了 54 个」正是这么来的。
+    const shared = {
+      level: (event.type === "limit" || event.ok === false
+        ? "warn"
+        : "info") as "warn" | "info",
+      summary: `${event.type}${event.name ? ` ${event.name}` : ""}`,
+      ...(event.durationMs === undefined
+        ? {}
+        : { durationMs: event.durationMs }),
+      data: {
+        ...(event.chatId ? { chatId: event.chatId } : {}),
+        ...(event.name ? { name: event.name } : {}),
+        ...event.data,
+      },
+    };
+    if (event.type === "created")
+      log.event({ kind: "sandbox.container.created", ...shared });
+    else if (event.type === "reaped")
+      log.event({ kind: "sandbox.container.reaped", ...shared });
+    else if (event.type === "limit")
+      log.event({ kind: "sandbox.container.limit", ...shared });
+    else log.event({ kind: "sandbox.container.exec", ...shared });
+  },
+);
 sandbox.bindContainers(containers);
 /**
  * 回收 + 对账。**注册点必须在 `containers` 之后**（同 `provider-health` 那条注释的理由：cron 是
@@ -363,32 +908,77 @@ sandbox.bindContainers(containers);
  */
 const reapContainers = async (): Promise<void> => {
   const result = await containers.reap();
-  log.event({ level: result.orphans > 0 ? 'warn' : 'info', kind: 'sandbox.container.reconciled', summary: 'Sandbox container reap complete', data: result });
+  log.event({
+    level: result.orphans > 0 ? "warn" : "info",
+    kind: "sandbox.container.reconciled",
+    summary: "Sandbox container reap complete",
+    data: result,
+  });
 };
-scheduler.add(config.sandbox.persistent.reapCron, reapContainers, 'sandbox-reap');
+scheduler.add(
+  config.sandbox.persistent.reapCron,
+  reapContainers,
+  "sandbox-reap",
+);
 // 启动时先对账一次而不是全杀：24h 的 TTL 要扛得住一次进程重启（docs/05 §5.5）。
-void reapContainers().catch((error) => log.event({ level: 'error', kind: 'scheduler.failed', summary: 'sandbox-reap 首次对账失败', data: { error: error instanceof Error ? error.message : String(error) } }));
+void reapContainers().catch((error) =>
+  log.event({
+    level: "error",
+    kind: "scheduler.failed",
+    summary: "sandbox-reap 首次对账失败",
+    data: { error: error instanceof Error ? error.message : String(error) },
+  }),
+);
 // 自撰写工具的注册器。真相在 `custom_tools` 表，进程内那份每次 `reconcile()` 都能重建
 // （docs/01 §3.1）；`execMaxTimeoutMs` 单独传是因为它归 `tools.exec`，不在 selfExtend 那一段里。
 const customToolRepo = new CustomToolRepository(db);
-const customTools = new CustomToolManager(customToolRepo, () => configStore.snapshot().tools.selfExtend, sandbox, log,
-  () => configStore.snapshot().tools.exec.maxTimeoutMs);
+const customTools = new CustomToolManager(
+  customToolRepo,
+  () => configStore.snapshot().tools.selfExtend,
+  sandbox,
+  log,
+  () => configStore.snapshot().tools.exec.maxTimeoutMs,
+);
 const sandboxProbe = await sandbox.probe();
-if (!sandboxProbe.available && config.sandbox.mode === 'docker') log.event({ level: 'error', kind: 'sandbox.unavailable', summary: sandboxProbe.error ?? 'Docker sandbox unavailable' });
+if (!sandboxProbe.available && config.sandbox.mode === "docker")
+  log.event({
+    level: "error",
+    kind: "sandbox.unavailable",
+    summary: sandboxProbe.error ?? "Docker sandbox unavailable",
+  });
 // bot 要到最后才建得起来，而工具在这里就得注册完，所以桥拿的是 getter。**presence 即开关**：
 // `available()` 判的就是 `telegram` 在不在，没有 BOT_TOKEN 时这一族工具必须整体不进目录，
 // 而不是进了目录再在调用时失败。
 let bot: Bot | null = null;
 let poller: UpdatePoller | null = null;
 const telegramTools = process.env.BOT_TOKEN
-  ? new TelegramTools({ bot: () => bot, archive, maxMessageChars: () => configStore.snapshot().output.maxMessageChars, maxMentions: () => configStore.snapshot().output.maxMentions, parseMode: () => configStore.snapshot().output.parseMode, log })
+  ? new TelegramTools({
+      bot: () => bot,
+      archive,
+      maxMessageChars: () => configStore.snapshot().output.maxMessageChars,
+      maxMentions: () => configStore.snapshot().output.maxMentions,
+      parseMode: () => configStore.snapshot().output.parseMode,
+      log,
+    })
   : null;
 // 定时任务（docs/14 §2 Q4）。这里只**建**不**装**：`load()` 要等 bot 起来，否则第一批任务触发时
 // `telegram()` 还是 null，只会往日志里写一串 skipped。工具反过来在这里就得拿到 runner。
 const scheduledJobs = new ScheduleRepository(db);
 const scheduleRunner = new ScheduledJobRunner({
-  db, jobs: scheduledJobs, scheduler, context, archive, turns, registry: turnRegistry, concurrency: turnConcurrency,
-  quota, memory, tools: toolRegistry, log, plugins, approvals: approval,
+  db,
+  jobs: scheduledJobs,
+  scheduler,
+  context,
+  archive,
+  turns,
+  registry: turnRegistry,
+  concurrency: turnConcurrency,
+  quota,
+  memory,
+  tools: toolRegistry,
+  log,
+  plugins,
+  approvals: approval,
   config: () => configStore.snapshot(),
   // **bot 起来之后才非空**：给外层对象会让 runner 里那条 `telegram_unavailable` 的 skip 分支变成
   // 死代码，启动窗口内经 HTTP 手动触发的任务会开一整轮、跑完模型、记完账，最后不提交
@@ -396,10 +986,36 @@ const scheduleRunner = new ScheduledJobRunner({
   telegram: () => (bot ? telegramTools : null),
   failures: turnFailures,
   roleOf: (kind, tgId) => principals.roleOf(kind, tgId),
-  estimateTurnCost: (inputTokens, key) => modelRegistry.estimate(readAppKv<string>(db, modelAliasKey(key)) ?? perChatConfig(configStore.snapshot(), key).agent.main.modelAlias, inputTokens),
+  estimateTurnCost: (inputTokens, key) =>
+    modelRegistry.estimate(
+      readAppKv<string>(db, modelAliasKey(key)) ??
+        perChatConfig(configStore.snapshot(), key).agent.main.modelAlias,
+      inputTokens,
+    ),
   // 非流式：定时轮次没有 Telegram 流消费者，也没人盯着屏幕等增量。其余依赖与 `onTurn` 完全一致。
-  runAgent: (turn, reservation) => { const live = turn.config as Readonly<typeof config>; return runMainAgent(turn, { config: live, db, registry: modelRegistry, tools: toolRegistry,
-    prompts: promptAssembler, documents: promptDocuments, skills, plugins, agents, customTools, containers, ledger, context, quota, reservation, log, turns, workspace: resolve(live.sandbox.workspaceDir, turn.chatId) }); },
+  runAgent: (turn, reservation) => {
+    const live = turn.config as Readonly<typeof config>;
+    return runMainAgent(turn, {
+      config: live,
+      db,
+      registry: modelRegistry,
+      tools: toolRegistry,
+      prompts: promptAssembler,
+      documents: promptDocuments,
+      skills,
+      plugins,
+      agents,
+      customTools,
+      containers,
+      ledger,
+      context,
+      quota,
+      reservation,
+      log,
+      turns,
+      workspace: resolve(live.sandbox.workspaceDir, turn.chatId),
+    });
+  },
 });
 registerBuiltins(toolRegistry, {
   // `tools.fs.allowHostFsForOwner`：owner 的 fs 工具 jail 到 `/` 而不是本会话 workspace。
@@ -410,21 +1026,61 @@ registerBuiltins(toolRegistry, {
   // `base` 恒为 workspace：绝对路径能到整机（这个开关的本意），而模型写出来的相对路径仍然是
   // 「我的工作目录」—— 后者才是它实际写出来的形态（docs/28 · L-TOOL-02）。非 host-fs 模式下
   // base 就等于 root，行为一个字不变。
-  db, filesFor: (workspace, role) => new FileTools(
-    new PathJail(role === 'owner' && configStore.snapshot().tools.fs.allowHostFsForOwner ? '/' : workspace,
-      [...config.tools.fs.denyGlobs, ...selfAuthoringDenyGlobs({ skillsDir: config.skills.dir, pluginsDir: config.plugins.dir })], { base: workspace }),
-    config.tools.fs.maxReadBytes, config.tools.fs.maxWriteBytes, { showHidden: config.tools.fs.showHidden, trashDir: config.tools.fs.trashDir, backupDir: config.tools.fs.backupDir }),
-  sandbox, archive, context, memory, skills, agents, models: modelRegistry, ledger, log, quota,
-  maxWebBytes: config.tools.web.maxResponseBytes, maxAsksPerRun: config.agent.maxAsksPerRun,
-  web: { timeoutMs: config.tools.web.timeoutMs, retries: config.tools.web.retries },
-  webSearch: { provider: config.tools.web.searchProvider, apiKey: config.tools.web.searchApiKey },
+  db,
+  filesFor: (workspace, role) =>
+    new FileTools(
+      new PathJail(
+        role === "owner" && configStore.snapshot().tools.fs.allowHostFsForOwner
+          ? "/"
+          : workspace,
+        [
+          ...config.tools.fs.denyGlobs,
+          ...selfAuthoringDenyGlobs({
+            skillsDir: config.skills.dir,
+            pluginsDir: config.plugins.dir,
+          }),
+        ],
+        { base: workspace },
+      ),
+      config.tools.fs.maxReadBytes,
+      config.tools.fs.maxWriteBytes,
+      {
+        showHidden: config.tools.fs.showHidden,
+        trashDir: config.tools.fs.trashDir,
+        backupDir: config.tools.fs.backupDir,
+      },
+    ),
+  sandbox,
+  archive,
+  context,
+  memory,
+  skills,
+  agents,
+  models: modelRegistry,
+  ledger,
+  log,
+  quota,
+  maxWebBytes: config.tools.web.maxResponseBytes,
+  maxAsksPerRun: config.agent.maxAsksPerRun,
+  web: {
+    timeoutMs: config.tools.web.timeoutMs,
+    retries: config.tools.web.retries,
+  },
+  webSearch: {
+    provider: config.tools.web.searchProvider,
+    apiKey: config.tools.web.searchApiKey,
+  },
   // 抓回来的图片进上下文。`visionAvailable` 的判据与 `runMainAgent` / `runSubAgent` 里那两次切换
   // **必须一致**：一边说能看、另一边把图换成占位文本，模型就会收到「图已放进上下文」加一句
   // 「当前模型不看图」。别名按次现算（`set_model` 能在轮内换掉它），所以这里是个函数而不是快照。
   webMedia: { assets: webAssets, visionAvailable: imageAudience },
   telegram: telegramTools,
   // 没有投递通道时这三个工具整体不进目录：排一个到点发不出去的任务是纯粹的假承诺。
-  schedule: { jobs: scheduledJobs, runner: scheduleRunner, deliverable: () => telegramTools !== null },
+  schedule: {
+    jobs: scheduledJobs,
+    runner: scheduleRunner,
+    deliverable: () => telegramTools !== null,
+  },
   acp,
   // ACP 的逐条 permission 走同一条审批链（`docs/05 §3.5.3`）：同一张 `approvals` 表、同一套
   // `approval.rules` / TTL / 双通道裁决。**默认档是 `auto`，这条链默认不生效** —— 运维把
@@ -432,8 +1088,18 @@ registerBuiltins(toolRegistry, {
   // 直接不进工具目录（不是「悄悄放行」）。
   approvals: approval,
 });
-registerAuthoringTools(toolRegistry, { customTools, skills, plugins, reservedSkills: BUNDLED_SKILLS,
-  mcp: { db, config: () => configStore.snapshot(), apply: (next, keys) => configStore.replace(next, keys), emit: (keys) => events.emit('config.changed', { keys }) } });
+registerAuthoringTools(toolRegistry, {
+  customTools,
+  skills,
+  plugins,
+  reservedSkills: BUNDLED_SKILLS,
+  mcp: {
+    db,
+    config: () => configStore.snapshot(),
+    apply: (next, keys) => configStore.replace(next, keys),
+    emit: (keys) => events.emit("config.changed", { keys }),
+  },
+});
 // 容器管理（docs/05 §3.11）。**无条件注册，开关放在 `available()` 里** —— 按配置跳过注册会撞上
 // 下面那条「每个 TOOL_POLICY 条目都必须已注册」的启动断言，表现是关掉持久化之后进程起不来
 // （同 authoring.ts 那八个）。
@@ -450,72 +1116,193 @@ await mcp.reconcile();
 // 自撰写的工具**最后注册**：重名时先注册的赢（`registerExternal` 拒绝跨来源覆盖），让运维显式
 // 配的 plugin / MCP 压过模型自己造的那份，方向是 fail-safe。
 customTools.reconcile();
-for (const name of Object.keys(TOOL_POLICY)) if (!toolRegistry.has(name)) throw new Error(`tool policy is not registered: ${name}`);
+for (const name of Object.keys(TOOL_POLICY))
+  if (!toolRegistry.has(name))
+    throw new Error(`tool policy is not registered: ${name}`);
 let setup: { token: string; expiresAt: number } | undefined;
 if (!config.webui.passwordHash) {
   setup = setupToken();
-  process.stdout.write(`LuoLiCore setup token: ${setup.token}\nOpen http://${config.webui.host}:${config.webui.port}/setup\n`);
+  process.stdout.write(
+    `LuoLiCore setup token: ${setup.token}\nOpen http://${config.webui.host}:${config.webui.port}/setup\n`,
+  );
 }
-const previewPrompt = (key: string, role: RuntimeTurnContext['effectiveRole']): PromptPreviewResult => {
-  const contextRow = db.prepare('SELECT chat_id AS chatId,thread_id AS threadId FROM contexts WHERE key=?').get(key) as { chatId: string; threadId: number | null } | undefined;
-  if (!contextRow) throw new Error('会话不存在');
-  const latest = db.prepare('SELECT initiator_user_id AS userId FROM turns WHERE key=? ORDER BY COALESCE(started_at,queued_at) DESC,rowid DESC LIMIT 1').get(key) as { userId: string } | undefined;
+const previewPrompt = (
+  key: string,
+  role: RuntimeTurnContext["effectiveRole"],
+): PromptPreviewResult => {
+  const contextRow = db
+    .prepare(
+      "SELECT chat_id AS chatId,thread_id AS threadId FROM contexts WHERE key=?",
+    )
+    .get(key) as { chatId: string; threadId: number | null } | undefined;
+  if (!contextRow) throw new Error("会话不存在");
+  const latest = db
+    .prepare(
+      "SELECT initiator_user_id AS userId FROM turns WHERE key=? ORDER BY COALESCE(started_at,queued_at) DESC,rowid DESC LIMIT 1",
+    )
+    .get(key) as { userId: string } | undefined;
   // 群名也从这一行取：RUNTIME 的「会话」行要它，而预览必须逐字等于下一轮真正发出去的那一份。
-  const principal = db.prepare("SELECT chat_type AS chatType, display_name AS title FROM principals WHERE kind='chat' AND tg_id=?").get(contextRow.chatId) as { chatType: string | null; title: string | null } | undefined;
+  const principal = db
+    .prepare(
+      "SELECT chat_type AS chatType, display_name AS title FROM principals WHERE kind='chat' AND tg_id=?",
+    )
+    .get(contextRow.chatId) as
+    { chatType: string | null; title: string | null } | undefined;
   const live = perChatConfig(configStore.snapshot(), key);
   const snapshot = context.materialize(key, null, live.context.cacheCommits);
   const turn = {
-    turnId: 'webui:prompt-preview', key, chatId: contextRow.chatId, threadId: contextRow.threadId,
-    initiatorUserId: latest?.userId ?? contextRow.chatId, effectiveRole: role,
-    isPrivate: principal?.chatType ? principal.chatType === 'private' : !contextRow.chatId.startsWith('-'),
-    baseCommitId: null, snapshot, delta: [], abortSignal: new AbortController().signal, config: live,
+    turnId: "webui:prompt-preview",
+    key,
+    chatId: contextRow.chatId,
+    threadId: contextRow.threadId,
+    initiatorUserId: latest?.userId ?? contextRow.chatId,
+    effectiveRole: role,
+    isPrivate: principal?.chatType
+      ? principal.chatType === "private"
+      : !contextRow.chatId.startsWith("-"),
+    baseCommitId: null,
+    snapshot,
+    delta: [],
+    abortSignal: new AbortController().signal,
+    config: live,
     ...(principal?.title ? { chatTitle: principal.title } : {}),
   } satisfies RuntimeTurnContext;
   // 预览也会在 `toolRegistry` 里落一条按 turnId 挂的状态。turnId 是个常量所以不会堆积，
   // 但留着等于让下一次预览沿用上一次的工具调用计数 —— 顺手清掉（docs/22 · I-10）。
   const built = ((): ReturnType<typeof assembleMainPrompt> => {
     try {
-      return assembleMainPrompt(turn, { config: live, tools: toolRegistry, prompts: promptAssembler, documents: promptDocuments,
-        workspace: resolve(live.sandbox.workspaceDir, contextRow.chatId), skills, agents, containers });
-    } finally { toolRegistry.releaseTurn(turn.turnId); }
+      return assembleMainPrompt(turn, {
+        config: live,
+        tools: toolRegistry,
+        prompts: promptAssembler,
+        documents: promptDocuments,
+        workspace: resolve(live.sandbox.workspaceDir, contextRow.chatId),
+        skills,
+        agents,
+        containers,
+      });
+    } finally {
+      toolRegistry.releaseTurn(turn.turnId);
+    }
   })();
-  const order = ['kernel', 'character', 'assist', 'catalog', 'pubmemory', 'primemory', 'runtime'];
-  const blocks = order.filter((name) => name !== 'primemory' || built.instructions.includes('=== PRIMEMORY ==='))
-    .map((name) => ({ name, tokens: built.blocks[name] ?? 0, content: built.contents[name] ?? '', truncated: built.truncated.includes(name),
-      cached: (STABLE_PROMPT_BLOCKS as readonly string[]).includes(name) }));
-  return { key, role, instructions: built.instructions, blocks, totalTokens: blocks.reduce((sum, block) => sum + block.tokens, 0),
-    context: { messages: snapshot.messages.length, tokens: snapshot.tokens } };
+  const order = [
+    "kernel",
+    "character",
+    "assist",
+    "catalog",
+    "pubmemory",
+    "primemory",
+    "runtime",
+  ];
+  const blocks = order
+    .filter(
+      (name) =>
+        name !== "primemory" ||
+        built.instructions.includes("=== PRIMEMORY ==="),
+    )
+    .map((name) => ({
+      name,
+      tokens: built.blocks[name] ?? 0,
+      content: built.contents[name] ?? "",
+      truncated: built.truncated.includes(name),
+      cached: (STABLE_PROMPT_BLOCKS as readonly string[]).includes(name),
+    }));
+  return {
+    key,
+    role,
+    instructions: built.instructions,
+    blocks,
+    totalTokens: blocks.reduce((sum, block) => sum + block.tokens, 0),
+    context: { messages: snapshot.messages.length, tokens: snapshot.tokens },
+  };
 };
 
 /** 试跑的 chat/user 计数落在这个合成 subject 上：它花的是真钱，但不该记到某个真实会话头上。 */
-const DRY_RUN_SUBJECT = 'webui-dryrun';
+const DRY_RUN_SUBJECT = "webui-dryrun";
 
-async function dryRunAgent(name: string, task: string, signal: AbortSignal, emit: (event: SubAgentRuntimeEvent) => void | Promise<void>): Promise<{ summary: string; fullRef: string; truncated: boolean }> {
-  const { run, definition } = agents.createDryRun(name, task, 'owner');
+async function dryRunAgent(
+  name: string,
+  task: string,
+  signal: AbortSignal,
+  emit: (event: SubAgentRuntimeEvent) => void | Promise<void>,
+): Promise<{ summary: string; fullRef: string; truncated: boolean }> {
+  const { run, definition } = agents.createDryRun(name, task, "owner");
   const live = configStore.snapshot();
   const workspace = resolve(live.sandbox.workspaceDir, DRY_RUN_SUBJECT);
   mkdirSync(workspace, { recursive: true, mode: 0o700 });
   // 试跑跑的是真实模型调用。不接配额的话 usage_ledger 看得见这笔花费、quota_counters 却不涨，
   // global.daily 对试跑一概无效 —— 和 docs/20 · W-QUOTA-01 是同一个成因（subagent.ts 的注释）。
   const roleLimits = live.quota.perUser.byRole[run.effectiveRole];
-  const estimate = modelRegistry.estimate(definition.modelAlias, Math.max(live.context.limit.tokens / 4, 1000));
-  if (live.quota.enabled && live.quota.requirePricing && estimate === null) throw new Error(`别名 ${definition.modelAlias} 缺少定价，无法预估试跑花费（quota.requirePricing=true）`);
-  const reservation = live.quota.enabled ? quota.reserve({ chatId: DRY_RUN_SUBJECT, userId: DRY_RUN_SUBJECT,
-    estimateUsd: Math.max(live.quota.minReserveUsd, estimate ?? live.quota.minReserveUsd),
-    limits: { globalDaily: live.quota.global.daily, globalMonthly: live.quota.global.monthly,
-      chatDaily: live.quota.perChat.daily, chatMonthly: live.quota.perChat.monthly,
-      userDaily: roleLimits?.daily ?? live.quota.perUser.daily, userMonthly: roleLimits?.monthly ?? live.quota.perUser.monthly } }) : null;
+  const estimate = modelRegistry.estimate(
+    definition.modelAlias,
+    Math.max(live.context.limit.tokens / 4, 1000),
+  );
+  if (live.quota.enabled && live.quota.requirePricing && estimate === null)
+    throw new Error(
+      `别名 ${definition.modelAlias} 缺少定价，无法预估试跑花费（quota.requirePricing=true）`,
+    );
+  const reservation = live.quota.enabled
+    ? quota.reserve({
+        chatId: DRY_RUN_SUBJECT,
+        userId: DRY_RUN_SUBJECT,
+        estimateUsd: Math.max(
+          live.quota.minReserveUsd,
+          estimate ?? live.quota.minReserveUsd,
+        ),
+        limits: {
+          globalDaily: live.quota.global.daily,
+          globalMonthly: live.quota.global.monthly,
+          chatDaily: live.quota.perChat.daily,
+          chatMonthly: live.quota.perChat.monthly,
+          userDaily: roleLimits?.daily ?? live.quota.perUser.daily,
+          userMonthly: roleLimits?.monthly ?? live.quota.perUser.monthly,
+        },
+      })
+    : null;
   if (live.quota.enabled && !reservation) {
-    agents.fail(run, 'quota_exceeded');
-    throw new Error('额度不足：试跑与正常轮次共用同一份全局额度，当前窗口已经用满');
+    agents.fail(run, "quota_exceeded");
+    throw new Error(
+      "额度不足：试跑与正常轮次共用同一份全局额度，当前窗口已经用满",
+    );
   }
-  const turn = { turnId: run.turnId, key: run.turnId, chatId: DRY_RUN_SUBJECT, threadId: null, initiatorUserId: 'webui',
-    effectiveRole: run.effectiveRole, isPrivate: false, baseCommitId: null,
-    snapshot: { messages: [], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 0 }, delta: [], abortSignal: signal, config: live } satisfies RuntimeTurnContext;
+  const turn = {
+    turnId: run.turnId,
+    key: run.turnId,
+    chatId: DRY_RUN_SUBJECT,
+    threadId: null,
+    initiatorUserId: "webui",
+    effectiveRole: run.effectiveRole,
+    isPrivate: false,
+    baseCommitId: null,
+    snapshot: {
+      messages: [],
+      ordinals: [],
+      tokens: 0,
+      windowStart: 1,
+      headOrdinal: 0,
+    },
+    delta: [],
+    abortSignal: signal,
+    config: live,
+  } satisfies RuntimeTurnContext;
   try {
-    return await runSubAgent(run, definition, task, undefined, turn, { db, agents, registry: modelRegistry, tools: toolRegistry, ledger, log, workspace,
-      provider: { maxRetries: live.provider.maxRetries, retryBaseMs: live.provider.retryBaseMs, retryMaxMs: live.provider.retryMaxMs },
-      quota, reservation, onEvent: emit });
+    return await runSubAgent(run, definition, task, undefined, turn, {
+      db,
+      agents,
+      registry: modelRegistry,
+      tools: toolRegistry,
+      ledger,
+      log,
+      workspace,
+      provider: {
+        maxRetries: live.provider.maxRetries,
+        retryBaseMs: live.provider.retryBaseMs,
+        retryMaxMs: live.provider.retryMaxMs,
+      },
+      quota,
+      reservation,
+      onEvent: emit,
+    });
   } finally {
     // commit 只退掉已结算的那部分，剩下的预留必须还回去，否则一次试跑就永久占住一份额度。
     if (reservation) quota.release(reservation);
@@ -527,10 +1314,23 @@ async function dryRunAgent(name: string, task: string, signal: AbortSignal, emit
   }
 }
 
-const rebuildModels = (): void => { const live = configStore.snapshot(); modelRegistry.rebuild(live.provider.healthDownCooldownMinutes);
+const rebuildModels = (): void => {
+  const live = configStore.snapshot();
+  modelRegistry.rebuild(live.provider.healthDownCooldownMinutes);
   // 一个可用别名都不剩 = 所有 provider 都下线了（docs/10 §6 all_providers_down）。用户侧的表现
   // 是每一轮都以 model alias unavailable 失败，而运维那边只有一条 config.invalid 躺在日志里。
-  if (!modelRegistry.aliases().length) alerts.fire('all_providers_down', '没有任何可用的模型别名：所有 provider 都不可用或未配置'); log.setSecrets([process.env.BOT_TOKEN ?? '', process.env.LUOLI_MASTER_KEY ?? '', live.tools.web.searchApiKey, ...providers.allDecryptedKeys()]); };
+  if (!modelRegistry.aliases().length)
+    alerts.fire(
+      "all_providers_down",
+      "没有任何可用的模型别名：所有 provider 都不可用或未配置",
+    );
+  log.setSecrets([
+    process.env.BOT_TOKEN ?? "",
+    process.env.LUOLI_MASTER_KEY ?? "",
+    live.tools.web.searchApiKey,
+    ...providers.allDecryptedKeys(),
+  ]);
+};
 // 这个任务此前只调 `rebuild()`：一次探测都不发，于是「上游连上了但不返回」没有任何一处会记住，
 // 链首每一步都要重新熬满 `(maxRetries+1) × requestTimeoutMs`（logs/2026-08-18 的三轮各 363 秒，
 // 最后全部以「这一轮太久没有进展」收尾）。现在照 `docs/04 §5.3` 真的探一遍。
@@ -538,18 +1338,48 @@ const rebuildModels = (): void => { const live = configStore.snapshot(); modelRe
 // **注册点必须在 `rebuildModels` 之后**：cron 是构造即排期，而上面那几个 `await`（sandbox.probe
 // 要拉 docker）足够让它在 `const rebuildModels` 求值之前就到点 —— 那一次会以 TDZ 的
 // ReferenceError 收场，只在 `scheduler.failed` 里留一行，健康检查静静少跑一轮。
-scheduler.add(config.provider.healthCheckCron, async () => {
-  // **先 rebuild 再探。** `#probes` 是上一次 rebuild 的产物：反过来的话，刚过完 30 分钟冷却、
-  // 这一轮才被放回链里的那个 provider 探不到（`probeCandidate` 返回 null → 整个跳过），它会带着
-  // 上一次的判定承接一整个 cron 间隔的真实流量。探完再 rebuild 一次是因为探测本身会改状态
-  // （新判死的要出链、探回 up 的要进链）—— 这一次也顺带管 `all_providers_down` 与 `log.setSecrets`。
-  rebuildModels();
-  const outcomes = await runProviderHealthCheck({ db, models: modelRegistry, log, keyFor: (providerId) => { try { return providers.key(providerId); } catch { return null; } } },
-    { timeoutMs: PROVIDER_PROBE_TIMEOUT_MS, failuresToDown: PROVIDER_FAILURES_TO_DOWN });
-  rebuildModels();
-  log.event({ level: 'info', kind: 'provider.health', summary: 'Provider registry health refreshed',
-    data: { aliases: modelRegistry.aliases(), probed: outcomes.length, down: outcomes.filter((outcome) => outcome.state === 'down').map((outcome) => outcome.name) } });
-}, 'provider-health');
+scheduler.add(
+  config.provider.healthCheckCron,
+  async () => {
+    // **先 rebuild 再探。** `#probes` 是上一次 rebuild 的产物：反过来的话，刚过完 30 分钟冷却、
+    // 这一轮才被放回链里的那个 provider 探不到（`probeCandidate` 返回 null → 整个跳过），它会带着
+    // 上一次的判定承接一整个 cron 间隔的真实流量。探完再 rebuild 一次是因为探测本身会改状态
+    // （新判死的要出链、探回 up 的要进链）—— 这一次也顺带管 `all_providers_down` 与 `log.setSecrets`。
+    rebuildModels();
+    const outcomes = await runProviderHealthCheck(
+      {
+        db,
+        models: modelRegistry,
+        log,
+        keyFor: (providerId) => {
+          try {
+            return providers.key(providerId);
+          } catch {
+            return null;
+          }
+        },
+      },
+      {
+        timeoutMs: PROVIDER_PROBE_TIMEOUT_MS,
+        failuresToDown: PROVIDER_FAILURES_TO_DOWN,
+      },
+    );
+    rebuildModels();
+    log.event({
+      level: "info",
+      kind: "provider.health",
+      summary: "Provider registry health refreshed",
+      data: {
+        aliases: modelRegistry.aliases(),
+        probed: outcomes.length,
+        down: outcomes
+          .filter((outcome) => outcome.state === "down")
+          .map((outcome) => outcome.name),
+      },
+    });
+  },
+  "provider-health",
+);
 // `shutdown` 要关它，所以它比那一块更早。
 const eventStreams = new EventStreamRegistry();
 /**
@@ -573,25 +1403,39 @@ let shuttingDown = false;
  * 自己回来** —— 端点的响应里写着这句话，界面的二次确认也要写。
  */
 const restart = async (reason: string): Promise<void> => {
-  log.event({ level: 'warn', kind: 'system.restart', summary: `Restart requested by ${reason}` });
+  log.event({
+    level: "warn",
+    kind: "system.restart",
+    summary: `Restart requested by ${reason}`,
+  });
   await shutdown(`restart:${reason}`);
   process.exitCode = 0;
 };
 const shutdown = async (signal: string): Promise<void> => {
-  if (shuttingDown) return; shuttingDown = true;
-  log.event({ level: 'info', kind: 'system.stop', summary: `Stopping on ${signal}` });
+  if (shuttingDown) return;
+  shuttingDown = true;
+  log.event({
+    level: "info",
+    kind: "system.stop",
+    summary: `Stopping on ${signal}`,
+  });
   scheduler.stop();
   eventStreams.closeAll();
   // 只清 timer 与等待者，**不撤键盘** —— 那几次编辑会被紧随其后的 `bot.stop()` 掐断，而残留键盘
   // 由下一次启动那趟 `staleKeyboards()` 负责（`docs/05 §6.1`）。两条路里那一条才是可靠的。
   approvalPrompts.dispose();
-  const { promise: closed, resolve: markClosed } = Promise.withResolvers<void>();
+  const { promise: closed, resolve: markClosed } =
+    Promise.withResolvers<void>();
   let force: ReturnType<typeof setTimeout> | null = null;
   // 绑成局部 const：`http` 现在是 `let`（见上面那段注释），闭包里 TS 收窄不住它。
   const listening = http;
   if (listening) {
     listening.close(() => markClosed());
-    force = setTimeout(() => { if ('closeAllConnections' in listening) listening.closeAllConnections(); markClosed(); }, config.general.shutdown.graceMs); force.unref?.();
+    force = setTimeout(() => {
+      if ("closeAllConnections" in listening) listening.closeAllConnections();
+      markClosed();
+    }, config.general.shutdown.graceMs);
+    force.unref?.();
   } else markClosed();
   // 先停拉取（`stop()` 顺手把 offset 交回 Telegram），在途的 update 交给下面的 drain。
   if (poller) await poller.stop();
@@ -599,13 +1443,15 @@ const shutdown = async (signal: string): Promise<void> => {
   // 宽限期内没排空就主动中断：drain 只是等，等不来的轮次必须被 abort，否则它们要么把进程
   // 拖到 systemd 的 SIGKILL，要么在退出后留下 running 行等下次 recoverAfterCrash 认领（docs/24 · R-OPS-01）。
   if (!(await turnRegistry.drain(config.general.shutdown.graceMs))) {
-    turnRegistry.abortAll('shutdown');
+    turnRegistry.abortAll("shutdown");
     await turnRegistry.drain(Math.min(1000, config.general.shutdown.graceMs));
   }
   // 还没开成轮次的那些 update（正在归档、正在下载媒体）不在 turnRegistry 里。不等它们收尾就
   // `closeDatabase`，那几条写会撞上「database is not open」，消息凭空消失且只留一行 tg.error。
-  if (poller) await poller.drain(Math.min(2000, config.general.shutdown.graceMs));
-  await closed; if (force) clearTimeout(force);
+  if (poller)
+    await poller.drain(Math.min(2000, config.general.shutdown.graceMs));
+  await closed;
+  if (force) clearTimeout(force);
   await plugins.close();
   await mcp.close();
   // ACP 的子进程与 MCP 的同类：**不 unref**，所以必须在这里等它们真死，否则 event loop 不空、
@@ -621,8 +1467,8 @@ const shutdown = async (signal: string): Promise<void> => {
   instanceLock.lock.release();
   process.exitCode = 0;
 };
-process.once('SIGTERM', () => void shutdown('SIGTERM'));
-process.once('SIGINT', () => void shutdown('SIGINT'));
+process.once("SIGTERM", () => void shutdown("SIGTERM"));
+process.once("SIGINT", () => void shutdown("SIGINT"));
 // 一次 uncaught 的流错误可以直接带走进程，而日志里一个字都不留 —— 上一次排查只能靠翻数据库
 // 猜「最后一条 turn.start 之后发生了什么」。所以崩之前必须留下原因。
 //
@@ -630,14 +1476,21 @@ process.once('SIGINT', () => void shutdown('SIGINT'));
 // 依赖「log.event 不会抛」这条当时并不成立的假设：`insertLog` 曾是裸的，库满/被锁/已 close
 // 时它抛出来，这个处理器自己变成新的 uncaughtException —— 原因没留下，退出码也没设上。
 // sink 侧现在也不抛了（`LogSink.event` 入库失败返回 0），但顺序不该赌另一个文件的实现细节。
-const fatalDetail = (error: unknown): string => (error instanceof Error ? error.stack ?? error.message : String(error));
-const fatalSummary = (event: string, error: unknown): string => `${event}: ${error instanceof Error ? error.message : String(error)}`;
-process.on('uncaughtException', (error: unknown) => {
+const fatalDetail = (error: unknown): string =>
+  error instanceof Error ? (error.stack ?? error.message) : String(error);
+const fatalSummary = (event: string, error: unknown): string =>
+  `${event}: ${error instanceof Error ? error.message : String(error)}`;
+process.on("uncaughtException", (error: unknown) => {
   const detail = fatalDetail(error);
   process.stderr.write(`[crash] uncaughtException: ${detail}\n`);
   // `system.crash` 在 LogSink 里被标成 urgent（appendFileSync 立刻落盘），所以这一行在
   // 下面那个 exit 之前是真的写完了的，不是靠 200ms 的缓冲定时器。
-  log.event({ level: 'error', kind: 'system.crash', summary: fatalSummary('uncaughtException', error), data: { event: 'uncaughtException', detail } });
+  log.event({
+    level: "error",
+    kind: "system.crash",
+    summary: fatalSummary("uncaughtException", error),
+    data: { event: "uncaughtException", detail },
+  });
   process.exit(1);
 });
 /**
@@ -653,62 +1506,179 @@ process.on('uncaughtException', (error: unknown) => {
  * 本身就不该存在：rejection 是**某一次调用**的失败，不是进程级不可恢复状态（那是
  * `uncaughtException` 的语义）。所以这里只留证据、不退出；轮次侧该记 failed 的自有它自己的路。
  */
-process.on('unhandledRejection', (error: unknown) => {
+process.on("unhandledRejection", (error: unknown) => {
   const detail = fatalDetail(error);
   process.stderr.write(`[unhandled] unhandledRejection: ${detail}\n`);
-  log.event({ level: 'error', kind: 'system.unhandled_rejection', summary: fatalSummary('unhandledRejection', error), data: { event: 'unhandledRejection', detail } });
+  log.event({
+    level: "error",
+    kind: "system.unhandled_rejection",
+    summary: fatalSummary("unhandledRejection", error),
+    data: { event: "unhandledRejection", detail },
+  });
 });
 
 // webhook 模式整体没有实现（docs/11 §2.0.1）。**判在 HTTP 监听之前** —— 它排在下面 Telegram
 // 那一段里的时候，`/api/health` 已经回了一整个窗口的 ok，而这个进程接下来就要死。
-if (process.env.BOT_TOKEN && config.telegram.mode !== 'polling') {
-  throw new Error(`telegram.mode=${config.telegram.mode} is not implemented; only polling is supported`);
+if (process.env.BOT_TOKEN && config.telegram.mode !== "polling") {
+  throw new Error(
+    `telegram.mode=${config.telegram.mode} is not implemented; only polling is supported`,
+  );
 }
-const server = createServer({ config: configStore, db, operations, principals, archive, context, providers, modelCatalog, approvals: approval, rebuildModels, maintenance, ledger, restart: (reason) => restart(reason), events, log,
-  memory, promptDocuments, skills, plugins, mcp, mcpAuth: { store: mcpAuth, pending: mcpPending }, agents, tools: toolRegistry, customTools: customToolRepo, customToolManager: customTools, turnRegistry, sandbox, eventStreams, previewPrompt, dryRunAgent,
-  schedules: { jobs: scheduledJobs, runner: scheduleRunner }, configSchema: configJsonSchema(), startedAt, setup });
+const server = createServer({
+  config: configStore,
+  db,
+  operations,
+  principals,
+  archive,
+  context,
+  providers,
+  modelCatalog,
+  approvals: approval,
+  rebuildModels,
+  maintenance,
+  ledger,
+  restart: (reason) => restart(reason),
+  events,
+  log,
+  memory,
+  promptDocuments,
+  skills,
+  plugins,
+  mcp,
+  mcpAuth: { store: mcpAuth, pending: mcpPending },
+  agents,
+  tools: toolRegistry,
+  customTools: customToolRepo,
+  customToolManager: customTools,
+  turnRegistry,
+  sandbox,
+  eventStreams,
+  previewPrompt,
+  dryRunAgent,
+  schedules: { jobs: scheduledJobs, runner: scheduleRunner },
+  configSchema: configJsonSchema(),
+  startedAt,
+  setup,
+});
 // `webui.enabled=false`：整个 HTTP 面不监听。这不只是省一个端口 —— 单口令 + owner 全权限的
 // 控制台是这个部署最大的攻击面，只跑 Telegram 的场景该能把它整个关掉。
 // 代价要说清楚：**审批只剩 Telegram 那一条裁决通道**（回执上的 inline keyboard，docs/05 §6.1）。
 // 连 `BOT_TOKEN` 都没有时两条都没有，命中审批规则的调用会被当场拒绝（docs/24 · R-APPR-01）。
-http = config.webui.enabled ? serve({ fetch: server.fetch, hostname: config.webui.host, port: config.webui.port }) : null;
-if (!config.webui.enabled) log.event({ level: 'warn', kind: 'webui.disabled', summary: process.env.BOT_TOKEN ? 'WebUI disabled by config; approvals can only be decided from Telegram' : 'WebUI disabled by config and no BOT_TOKEN; approvals will be rejected outright' });
+http = config.webui.enabled
+  ? serve({
+      fetch: server.fetch,
+      hostname: config.webui.host,
+      port: config.webui.port,
+    })
+  : null;
+if (!config.webui.enabled)
+  log.event({
+    level: "warn",
+    kind: "webui.disabled",
+    summary: process.env.BOT_TOKEN
+      ? "WebUI disabled by config; approvals can only be decided from Telegram"
+      : "WebUI disabled by config and no BOT_TOKEN; approvals will be rejected outright",
+  });
 events.subscribe((event) => {
-  if (event.type !== 'config.changed') return;
+  if (event.type !== "config.changed") return;
   // 载荷形状与它的理由在 `packages/core/src/events.ts` 的 `ConfigChangedEvent`。
-  const changed = event.data as { keys?: string[]; reconciled?: readonly string[] };
+  const changed = event.data as {
+    keys?: string[];
+    reconciled?: readonly string[];
+  };
   const keys = changed.keys ?? [];
   const reconciled = changed.reconciled ?? [];
-  void loadConfig({ overrides: envOverlay(readPersistedConfig(config.db.path, reportRejectedKey)), onInvalidOverride: (dropped, reasons) => log.event({ level: 'error', kind: 'config.invalid', summary: `已忽略 ${dropped.length} 条非法覆盖`, data: { dropped, reasons } }) }).then((next) => {
-    configStore.replace(next, keys);
-    if (keys.some((key) => key.startsWith('logs.level'))) log.setLevel(next.logs.level);
-    if (keys.some((key) => key.startsWith('logs.redactPatterns'))) log.redactPatterns = next.logs.redactPatterns;
-    if (keys.some((key) => key.startsWith('provider.') || key.startsWith('model') || key === 'tools.web.searchApiKey')) rebuildModels();
-    // `agentsDir` 也要触发重扫：改了目录却还用着旧目录扫出来的定义，是最难查的一种「没生效」。
-    // 写成两个显式判据而不是 `startsWith('agent.agents')` —— 后者顺带匹配上 `agentsDir` 是巧合，
-    // 而巧合会在下一次改键名时安静地失效。
-    if (keys.some((key) => key === 'agent.agentsDir' || key.startsWith('agent.agents.') || key === 'agent.agents')) agents.replaceDefinitions(scanAgents(next));
-    if (keys.some((key) => key.startsWith('skills.'))) skills.scan();
-    if (keys.some((key) => key.startsWith('plugins.'))) void plugins.reconcile();
-    // McpManager 现在按 getter 读配置，但连接是有状态的：改了 servers 必须重跑一次 reconcile
-    // 才会真的连上/断开（docs/20 · W-CFG-02）。
-    // `reconciled` 里带 'mcp' 的是 WebUI 的 `/api/mcp*` —— 那几个端点自己 `await` 了一次
-    // reconcile（响应里要给出真实 state），这里再跑就是两条重叠（docs/28 · L-EXT-03）。
-    // 模型侧的 `install_mcp` 不带这个标记，仍由这一行负责。
-    if (!reconciled.includes('mcp') && keys.some((key) => key.startsWith('mcp.'))) void mcp.reconcile();
-    // `tools.selfExtend` 在 `HOT_RELOADABLE_CONFIG_KEYS` 里，靠的就是这一行：关掉
-    // `customTools.enabled` 之后下一轮那批工具要真的从目录里消失，而不是等重启（docs/20 · W-CFG-02）。
-    if (keys.some((key) => key.startsWith('tools.selfExtend'))) customTools.reconcile();
-    // cron 是「构造即排期」，改配置不会自己重挂 —— `mcp.healthCheckCron` 正是因为缺这条线，
-    // 整段 `mcp` 才被移出热更新白名单（见那一段注释）。整段 `sandbox` 要留在白名单里就得接上它。
-    if (keys.some((key) => key === 'sandbox.persistent.reapCron')) {
-      scheduler.remove('sandbox-reap');
-      scheduler.add(next.sandbox.persistent.reapCron, reapContainers, 'sandbox-reap');
-    }
-    log.event({ level: 'info', kind: 'config.changed', summary: 'Runtime configuration reloaded', data: { keys } });
-  }).catch((error) => log.event({ level: 'error', kind: 'config.invalid', summary: error instanceof Error ? error.message : String(error) }));
+  void loadConfig({
+    overrides: envOverlay(
+      readPersistedConfig(config.db.path, reportRejectedKey),
+    ),
+    onInvalidOverride: (dropped, reasons) =>
+      log.event({
+        level: "error",
+        kind: "config.invalid",
+        summary: `已忽略 ${dropped.length} 条非法覆盖`,
+        data: { dropped, reasons },
+      }),
+  })
+    .then((next) => {
+      configStore.replace(next, keys);
+      if (keys.some((key) => key.startsWith("logs.level")))
+        log.setLevel(next.logs.level);
+      if (keys.some((key) => key.startsWith("logs.redactPatterns")))
+        log.redactPatterns = next.logs.redactPatterns;
+      if (
+        keys.some(
+          (key) =>
+            key.startsWith("provider.") ||
+            key.startsWith("model") ||
+            key === "tools.web.searchApiKey",
+        )
+      )
+        rebuildModels();
+      // `agentsDir` 也要触发重扫：改了目录却还用着旧目录扫出来的定义，是最难查的一种「没生效」。
+      // 写成两个显式判据而不是 `startsWith('agent.agents')` —— 后者顺带匹配上 `agentsDir` 是巧合，
+      // 而巧合会在下一次改键名时安静地失效。
+      if (
+        keys.some(
+          (key) =>
+            key === "agent.agentsDir" ||
+            key.startsWith("agent.agents.") ||
+            key === "agent.agents",
+        )
+      )
+        agents.replaceDefinitions(scanAgents(next));
+      if (keys.some((key) => key.startsWith("skills."))) skills.scan();
+      if (keys.some((key) => key.startsWith("plugins.")))
+        void plugins.reconcile();
+      // McpManager 现在按 getter 读配置，但连接是有状态的：改了 servers 必须重跑一次 reconcile
+      // 才会真的连上/断开（docs/20 · W-CFG-02）。
+      // `reconciled` 里带 'mcp' 的是 WebUI 的 `/api/mcp*` —— 那几个端点自己 `await` 了一次
+      // reconcile（响应里要给出真实 state），这里再跑就是两条重叠（docs/28 · L-EXT-03）。
+      // 模型侧的 `install_mcp` 不带这个标记，仍由这一行负责。
+      if (
+        !reconciled.includes("mcp") &&
+        keys.some((key) => key.startsWith("mcp."))
+      )
+        void mcp.reconcile();
+      // `tools.selfExtend` 在 `HOT_RELOADABLE_CONFIG_KEYS` 里，靠的就是这一行：关掉
+      // `customTools.enabled` 之后下一轮那批工具要真的从目录里消失，而不是等重启（docs/20 · W-CFG-02）。
+      if (keys.some((key) => key.startsWith("tools.selfExtend")))
+        customTools.reconcile();
+      // cron 是「构造即排期」，改配置不会自己重挂 —— `mcp.healthCheckCron` 正是因为缺这条线，
+      // 整段 `mcp` 才被移出热更新白名单（见那一段注释）。整段 `sandbox` 要留在白名单里就得接上它。
+      if (keys.some((key) => key === "sandbox.persistent.reapCron")) {
+        scheduler.remove("sandbox-reap");
+        scheduler.add(
+          next.sandbox.persistent.reapCron,
+          reapContainers,
+          "sandbox-reap",
+        );
+      }
+      log.event({
+        level: "info",
+        kind: "config.changed",
+        summary: "Runtime configuration reloaded",
+        data: { keys },
+      });
+    })
+    .catch((error) =>
+      log.event({
+        level: "error",
+        kind: "config.invalid",
+        summary: error instanceof Error ? error.message : String(error),
+      }),
+    );
 });
-log.event({ level: 'info', kind: 'system.start', summary: `${config.general.name} started`, data: { name: config.general.name, webui: `${config.webui.host}:${config.webui.port}`, providerSecrets: secrets.available } });
+log.event({
+  level: "info",
+  kind: "system.start",
+  summary: `${config.general.name} started`,
+  data: {
+    name: config.general.name,
+    webui: `${config.webui.host}:${config.webui.port}`,
+    providerSecrets: secrets.available,
+  },
+});
 if (process.env.BOT_TOKEN) {
   /**
    * **`bot.init()` 的 401 要接住，不能让它从这个顶层 await 逃出去。**
@@ -723,21 +1693,72 @@ if (process.env.BOT_TOKEN) {
    * 退了就没有能改 token 的地方了。
    */
   try {
-    bot = await createTelegramBot(process.env.BOT_TOKEN, { config: configStore, db, principals, archive, operations, context, turns, quota, memory, plugins, tools: toolRegistry, approvals: approval,
+    bot = await createTelegramBot(process.env.BOT_TOKEN, {
+      config: configStore,
+      db,
+      principals,
+      archive,
+      operations,
+      context,
+      turns,
+      quota,
+      memory,
+      plugins,
+      tools: toolRegistry,
+      approvals: approval,
       // `a:` 那批回调（inline keyboard 审批）从这里查等待者；裁决本身仍走 `claim` → `approval.decide`。
       prompts: approvalPrompts,
-      registry: turnRegistry, concurrency: turnConcurrency, log, alerts, failures: turnFailures, issueLoginToken: () => issueLoginToken(),
+      registry: turnRegistry,
+      concurrency: turnConcurrency,
+      log,
+      alerts,
+      failures: turnFailures,
+      issueLoginToken: () => issueLoginToken(),
       // 关停期间被 abort 的长轮询记 info 而不是 error（docs/28 · L-TG-01）。
       stopping: () => shuttingDown,
-      estimateTurnCost: (inputTokens, key) => modelRegistry.estimate(readAppKv<string>(db, modelAliasKey(key)) ?? perChatConfig(configStore.snapshot(), key).agent.main.modelAlias, inputTokens),
+      estimateTurnCost: (inputTokens, key) =>
+        modelRegistry.estimate(
+          readAppKv<string>(db, modelAliasKey(key)) ??
+            perChatConfig(configStore.snapshot(), key).agent.main.modelAlias,
+          inputTokens,
+        ),
       // 用 turn.config 而不是全局快照：本轮的 perChat 覆盖已经在 openTurn 时合并进去了。
-      onTurn: (turn, reservation) => { const live = turn.config as Readonly<typeof config>; return streamMainAgent(turn, { config: live, db, registry: modelRegistry, tools: toolRegistry,
-        prompts: promptAssembler, documents: promptDocuments, skills, plugins, agents, customTools, containers, ledger, context, quota, reservation, log, turns, workspace: resolve(live.sandbox.workspaceDir, turn.chatId) }); } });
+      onTurn: (turn, reservation) => {
+        const live = turn.config as Readonly<typeof config>;
+        return streamMainAgent(turn, {
+          config: live,
+          db,
+          registry: modelRegistry,
+          tools: toolRegistry,
+          prompts: promptAssembler,
+          documents: promptDocuments,
+          skills,
+          plugins,
+          agents,
+          customTools,
+          containers,
+          ledger,
+          context,
+          quota,
+          reservation,
+          log,
+          turns,
+          workspace: resolve(live.sandbox.workspaceDir, turn.chatId),
+        });
+      },
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    log.event({ level: 'error', kind: 'tg.error', summary: `Telegram 入口启动失败：${message}`, data: { phase: 'init', fatal: false } });
-    process.stderr.write(`[telegram] 建不起 bot（token 失效、被撤销，或网络不通）：${message}\n`
-      + `[telegram] Telegram 入口已禁用，WebUI 照常启动 —— 去 http://${config.webui.host}:${config.webui.port} 换掉 BOT_TOKEN 再重启。\n`);
+    log.event({
+      level: "error",
+      kind: "tg.error",
+      summary: `Telegram 入口启动失败：${message}`,
+      data: { phase: "init", fatal: false },
+    });
+    process.stderr.write(
+      `[telegram] 建不起 bot（token 失效、被撤销，或网络不通）：${message}\n` +
+        `[telegram] Telegram 入口已禁用，WebUI 照常启动 —— 去 http://${config.webui.host}:${config.webui.port} 换掉 BOT_TOKEN 再重启。\n`,
+    );
   }
 }
 if (bot) {
@@ -748,7 +1769,11 @@ if (bot) {
   //
   // **排在 `poller.start()` 之前**：拉到的第一条 update 就可能命中审批规则并往那一列写一行，
   // 而这趟扫描不认「这一行是刚写的」—— 反过来就会把一条活着的键盘当残留撤掉。
-  for (const stale of approval.staleKeyboards()) approvalPrompts.dismiss(stale, approvalSettledText(stale.tool, staleApprovalOutcome(stale.state)));
+  for (const stale of approval.staleKeyboards())
+    approvalPrompts.dismiss(
+      stale,
+      approvalSettledText(stale.tool, staleApprovalOutcome(stale.state)),
+    );
   // `dropPendingOnStart`：停机期间积压的 update 直接丢掉，不补跑。默认关 —— 丢的是真实用户
   // 发过的消息。开它的场景是长时间停机后重启，不想让 bot 对着一小时前的话题连开几十轮。
   //
@@ -760,15 +1785,29 @@ if (bot) {
       allowedUpdates: config.telegram.allowedUpdates,
       dropPendingUpdates: config.telegram.dropPendingOnStart,
       maxInFlight: config.concurrency.global + config.concurrency.queueMax,
-      onError: (error, phase) => log.event({ level: phase === 'fetch' ? 'warn' : 'error', kind: 'tg.error',
-        summary: error instanceof Error ? error.message : String(error), data: { phase } }),
+      onError: (error, phase) =>
+        log.event({
+          level: phase === "fetch" ? "warn" : "error",
+          kind: "tg.error",
+          summary: error instanceof Error ? error.message : String(error),
+          data: { phase },
+        }),
       // 401 / 409 说明这个 token 不该由本进程轮询（撤销了，或者另一个实例正在拉）。原先
       // `void bot.start()` 在这两种错误上 rethrow，经 unhandledRejection 变成 exit(1)；
       // 保留「死掉让 supervisor 重启」这一半，但走优雅关闭，别把 WAL 和日志留在半截状态。
       onFatal: (error) => {
-        log.event({ level: 'error', kind: 'tg.error', summary: `polling aborted: ${error instanceof Error ? error.message : String(error)}`, data: { fatal: true } });
-        process.stderr.write(`[telegram] 轮询被 Telegram 拒绝（token 失效或另有实例在拉同一个 bot）：${error instanceof Error ? error.message : String(error)}\n`);
-        void shutdown('telegram:fatal').then(() => { process.exitCode = 1; });
+        log.event({
+          level: "error",
+          kind: "tg.error",
+          summary: `polling aborted: ${error instanceof Error ? error.message : String(error)}`,
+          data: { fatal: true },
+        });
+        process.stderr.write(
+          `[telegram] 轮询被 Telegram 拒绝（token 失效或另有实例在拉同一个 bot）：${error instanceof Error ? error.message : String(error)}\n`,
+        );
+        void shutdown("telegram:fatal").then(() => {
+          process.exitCode = 1;
+        });
       },
     });
     poller.start();
@@ -776,16 +1815,34 @@ if (bot) {
   // owner 私聊通道到这里才具备。`sendMessage` 失败由 AlertDispatcher 自己吞掉并记一条
   // `alert.deliver_failed` —— owner 没跟 bot 说过话时 Telegram 会拒发，那不该把告警链路带崩。
   const ownerChatId = configStore.snapshot().access.bootstrapOwnerId;
-  if (ownerChatId) notifyOwner = (text) => bot!.api.sendMessage(ownerChatId, text);
+  if (ownerChatId)
+    notifyOwner = (text) => bot!.api.sendMessage(ownerChatId, text);
   // 到这里投递通道才具备，定时任务可以装回 cron 了。停机期间错过的不补跑，只在日志里说出来
   // （需求方决策；`load()` 每条错过的任务记一条 schedule.missed）。
   const loaded = scheduleRunner.load();
-  log.event({ level: 'info', kind: 'schedule.loaded', summary: `装载 ${loaded.registered} 个定时任务`, data: { ...loaded, enabled: config.schedule.enabled } });
+  log.event({
+    level: "info",
+    kind: "schedule.loaded",
+    summary: `装载 ${loaded.registered} 个定时任务`,
+    data: { ...loaded, enabled: config.schedule.enabled },
+  });
 } else {
   // 缺 token 与 token 失效（上面那个 catch）从这里起走同一条路。
-  log.event({ level: 'warn', kind: 'system.start', summary: process.env.BOT_TOKEN ? 'Telegram ingress disabled: bot init failed' : 'BOT_TOKEN missing; Telegram ingress disabled' });
+  log.event({
+    level: "warn",
+    kind: "system.start",
+    summary: process.env.BOT_TOKEN
+      ? "Telegram ingress disabled: bot init failed"
+      : "BOT_TOKEN missing; Telegram ingress disabled",
+  });
   // 没有 Telegram 就没有投递通道。不装载而不是装载后每次触发失败：库里的任务原样留着，
   // 配上 token 重启就会继续跑。
   const pending = scheduledJobs.listActive().length;
-  if (pending) log.event({ level: 'warn', kind: 'schedule.skipped', summary: `${pending} 个定时任务未装载：没有 Telegram 投递通道`, data: { reason: 'telegram_unavailable', pending } });
+  if (pending)
+    log.event({
+      level: "warn",
+      kind: "schedule.skipped",
+      summary: `${pending} 个定时任务未装载：没有 Telegram 投递通道`,
+      data: { reason: "telegram_unavailable", pending },
+    });
 }

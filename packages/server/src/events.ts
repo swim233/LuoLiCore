@@ -9,8 +9,15 @@ export class EventStreamRegistry {
     return () => this.#streams.delete(stream);
   }
   closeAll(): void {
-    for (const stream of this.#streams) try { stream.close(); } catch { /* already closed */ }
+    for (const stream of this.#streams)
+      try {
+        stream.close();
+      } catch {
+        /* already closed */
+      }
     this.#streams.clear();
   }
-  get size(): number { return this.#streams.size; }
+  get size(): number {
+    return this.#streams.size;
+  }
 }

@@ -1,6 +1,13 @@
-import type { Bot } from 'grammy';
-import type { ApprovalOutcome, LogSink, PromptChannel, PromptPost, PromptResolution, PromptTarget } from '@luoli/core';
-import type { Role } from '@luoli/shared';
+import type { Bot } from "grammy";
+import type {
+  ApprovalOutcome,
+  LogSink,
+  PromptChannel,
+  PromptPost,
+  PromptResolution,
+  PromptTarget,
+} from "@luoli/core";
+import type { Role } from "@luoli/shared";
 
 export interface TelegramPromptDependencies {
   /** 懒取：`PendingPrompts` 在 bot 建起来之前就装配好了（照 `TelegramTools` 那个形状）。 */
@@ -29,7 +36,9 @@ export class TelegramPromptChannel implements PromptChannel {
    */
   available(chatId?: string): boolean {
     if (this.dependencies.bot() === null) return false;
-    return chatId === undefined || this.dependencies.decidable?.(chatId) !== false;
+    return (
+      chatId === undefined || this.dependencies.decidable?.(chatId) !== false
+    );
   }
 
   /**
@@ -42,10 +51,27 @@ export class TelegramPromptChannel implements PromptChannel {
     const api = this.dependencies.bot()?.api;
     if (!api) return null;
     const sent = await api.sendMessage(post.chatId, post.text, {
-      reply_markup: { inline_keyboard: [post.buttons.map((button) => ({ text: button.label, callback_data: button.token }))] },
+      reply_markup: {
+        inline_keyboard: [
+          post.buttons.map((button) => ({
+            text: button.label,
+            callback_data: button.token,
+          })),
+        ],
+      },
       ...(post.threadId === null ? {} : { message_thread_id: post.threadId }),
     });
-    this.dependencies.log?.event({ level: 'debug', kind: 'prompt.posted', summary: `${post.kind} → ${post.chatId}`, chatId: post.chatId, data: { kind: post.kind, messageId: sent.message_id, options: post.buttons.length } });
+    this.dependencies.log?.event({
+      level: "debug",
+      kind: "prompt.posted",
+      summary: `${post.kind} → ${post.chatId}`,
+      chatId: post.chatId,
+      data: {
+        kind: post.kind,
+        messageId: sent.message_id,
+        options: post.buttons.length,
+      },
+    });
     return { chatId: post.chatId, messageId: sent.message_id };
   }
 
@@ -61,9 +87,25 @@ export class TelegramPromptChannel implements PromptChannel {
   async settle(target: PromptTarget, text?: string): Promise<void> {
     const api = this.dependencies.bot()?.api;
     if (!api) return;
-    try { await (text === undefined ? api.editMessageReplyMarkup(target.chatId, target.messageId) : api.editMessageText(target.chatId, target.messageId, text)); }
-    catch (error) {
-      this.dependencies.log?.event({ level: 'debug', kind: 'prompt.settle_failed', summary: text === undefined ? 'keyboard removal rejected' : 'receipt rewrite rejected', chatId: target.chatId, data: { messageId: target.messageId, rewrote: text !== undefined, error: error instanceof Error ? error.message : String(error) } });
+    try {
+      await (text === undefined
+        ? api.editMessageReplyMarkup(target.chatId, target.messageId)
+        : api.editMessageText(target.chatId, target.messageId, text));
+    } catch (error) {
+      this.dependencies.log?.event({
+        level: "debug",
+        kind: "prompt.settle_failed",
+        summary:
+          text === undefined
+            ? "keyboard removal rejected"
+            : "receipt rewrite rejected",
+        chatId: target.chatId,
+        data: {
+          messageId: target.messageId,
+          rewrote: text !== undefined,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      });
     }
   }
 }
@@ -81,15 +123,28 @@ export class TelegramPromptChannel implements PromptChannel {
  * 说的是 `channel` 而不是 `decided_by`：后者在 Telegram 那条路上是 `user:<tgId>`，一串数字对群里
  * 其他人什么都不是，还顺手把 owner 的 Telegram id 抖了出去。裁决权只给 owner，所以「谁」是常量。
  */
-export function approvalSettledText(tool: string, outcome: ApprovalOutcome): string {
+export function approvalSettledText(
+  tool: string,
+  outcome: ApprovalOutcome,
+): string {
   // `decide()` 那条路一定带 `channel`；缺了就把整个括号省掉，而不是留一个「（owner ）」。
-  const who = outcome.channel === 'telegram' ? '（owner 在 Telegram 点的）' : outcome.channel === 'webui' ? '（owner 在 WebUI 的审批页裁的）' : '';
+  const who =
+    outcome.channel === "telegram"
+      ? "（owner 在 Telegram 点的）"
+      : outcome.channel === "webui"
+        ? "（owner 在 WebUI 的审批页裁的）"
+        : "";
   switch (outcome.kind) {
-    case 'approved': return `✅ ${tool} 已批准${who}，正在执行。`;
-    case 'denied': return `🚫 ${tool} 被拒绝${who}，没有执行。`;
-    case 'expired': return `⌛ ${tool} 的审批窗口到点了，没人裁决，按拒绝处理 —— 没有执行。`;
-    case 'cancelled': return `⛔ ${tool} 还在等审批时这一轮被取消了，审批一并作废 —— 没有执行。`;
-    case 'stale': return `♻️ ${tool} 的这条审批赶上了进程重启，已作废 —— 没有执行，要的话重新说一次。`;
+    case "approved":
+      return `✅ ${tool} 已批准${who}，正在执行。`;
+    case "denied":
+      return `🚫 ${tool} 被拒绝${who}，没有执行。`;
+    case "expired":
+      return `⌛ ${tool} 的审批窗口到点了，没人裁决，按拒绝处理 —— 没有执行。`;
+    case "cancelled":
+      return `⛔ ${tool} 还在等审批时这一轮被取消了，审批一并作废 —— 没有执行。`;
+    case "stale":
+      return `♻️ ${tool} 的这条审批赶上了进程重启，已作废 —— 没有执行，要的话重新说一次。`;
   }
 }
 
@@ -104,7 +159,7 @@ export function approvalSettledText(tool: string, outcome: ApprovalOutcome): str
  * 决定是做过的，但承接它的那一轮已经没了，「已作废、要的话重新说一次」对屏幕前的人才是真话。
  */
 export function staleApprovalOutcome(state: string): ApprovalOutcome {
-  return { kind: state === 'expired' ? 'expired' : 'stale' };
+  return { kind: state === "expired" ? "expired" : "stale" };
 }
 
 /**
@@ -113,10 +168,18 @@ export function staleApprovalOutcome(state: string): ApprovalOutcome {
  * `promptAckText` 的「只有 owner 能裁决这条请求。」—— 那句话对他是纯粹的谎。返回 `null` 表示
  * 这一条不适用，交回 `promptAckText`。
  */
-export function promptDeniedByChat(resolution: PromptResolution, userRole: Role, effectiveRole: Role): { text: string; show_alert: boolean } | null {
-  if (resolution.status !== 'forbidden' || resolution.required !== 'owner') return null;
-  if (userRole !== 'owner' || effectiveRole === 'owner') return null;
-  return { text: `你在这个会话里的权限是 ${effectiveRole}（会话本身不是 owner 档），按钮在这儿点不动 —— 去 WebUI 的审批页裁决。`, show_alert: true };
+export function promptDeniedByChat(
+  resolution: PromptResolution,
+  userRole: Role,
+  effectiveRole: Role,
+): { text: string; show_alert: boolean } | null {
+  if (resolution.status !== "forbidden" || resolution.required !== "owner")
+    return null;
+  if (userRole !== "owner" || effectiveRole === "owner") return null;
+  return {
+    text: `你在这个会话里的权限是 ${effectiveRole}（会话本身不是 owner 档），按钮在这儿点不动 —— 去 WebUI 的审批页裁决。`,
+    show_alert: true,
+  };
 }
 
 /**
@@ -126,13 +189,34 @@ export function promptDeniedByChat(resolution: PromptResolution, userRole: Role,
  * 「已经处理过了」与「已过期（进程重启过）」是两句不同的话，对点的人是不同的信息：前者说明有人
  * （可能是他自己）已经做过决定，后者说明这条请求根本没人接手过。
  */
-export function promptAckText(resolution: PromptResolution): { text: string; show_alert?: boolean } {
+export function promptAckText(resolution: PromptResolution): {
+  text: string;
+  show_alert?: boolean;
+} {
   switch (resolution.status) {
-    case 'accepted': return { text: `已${resolution.label}` };
-    case 'settled': return { text: '这条请求已经处理过了。', show_alert: true };
-    case 'invalid': return { text: '这个选项不在这条请求上。', show_alert: true };
-    case 'stale': return { text: '这条请求已经被处理或已过期，这次点击没有生效。', show_alert: true };
-    case 'unknown': return { text: '这条请求已过期（进程重启过），需要重新发起。', show_alert: true };
-    case 'forbidden': return { text: resolution.required === 'owner' ? '只有 owner 能裁决这条请求。' : '只有发起人或 owner 能裁决这条请求。', show_alert: true };
+    case "accepted":
+      return { text: `已${resolution.label}` };
+    case "settled":
+      return { text: "这条请求已经处理过了。", show_alert: true };
+    case "invalid":
+      return { text: "这个选项不在这条请求上。", show_alert: true };
+    case "stale":
+      return {
+        text: "这条请求已经被处理或已过期，这次点击没有生效。",
+        show_alert: true,
+      };
+    case "unknown":
+      return {
+        text: "这条请求已过期（进程重启过），需要重新发起。",
+        show_alert: true,
+      };
+    case "forbidden":
+      return {
+        text:
+          resolution.required === "owner"
+            ? "只有 owner 能裁决这条请求。"
+            : "只有发起人或 owner 能裁决这条请求。",
+        show_alert: true,
+      };
   }
 }

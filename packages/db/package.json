@@ -3,5 +3,7 @@
   "private": true,
   "type": "module",
   "exports": "./dist/index.js",
-  "dependencies": { "@luoli/shared": "workspace:*" }
+  "dependencies": {
+    "@luoli/shared": "workspace:*"
+  }
 }

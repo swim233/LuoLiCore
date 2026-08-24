@@ -1,6 +1,6 @@
-import { hostname } from 'node:os';
-import { readFileSync, unlinkSync, writeFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { hostname } from "node:os";
+import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
 
 /**
  * **进程级互斥。** 部署是单进程（`docs/01 §3.1`），而在这之前没有任何东西保证这一点：
@@ -28,21 +28,36 @@ export interface InstanceLock {
 }
 
 export interface InstanceLockHolder {
-  pid: number; startedAt: number; host: string;
+  pid: number;
+  startedAt: number;
+  host: string;
   /** 这把锁被接手过几次。抢占按代走，判胜负的就是这个数（`acquireInstanceLock`）。 */
   gen: number;
 }
 
-export type InstanceLockResult = { ok: true; lock: InstanceLock } | { ok: false; holder: InstanceLockHolder };
+export type InstanceLockResult =
+  { ok: true; lock: InstanceLock } | { ok: false; holder: InstanceLockHolder };
 
 const holderOf = (path: string): InstanceLockHolder | null => {
   try {
-    const parsed = JSON.parse(readFileSync(path, 'utf8')) as Partial<InstanceLockHolder>;
-    return typeof parsed.pid === 'number' && parsed.pid > 0
-      ? { pid: parsed.pid, startedAt: typeof parsed.startedAt === 'number' ? parsed.startedAt : 0, host: typeof parsed.host === 'string' ? parsed.host : '?',
-        gen: typeof parsed.gen === 'number' && parsed.gen >= 0 ? Math.floor(parsed.gen) : 0 }
+    const parsed = JSON.parse(
+      readFileSync(path, "utf8"),
+    ) as Partial<InstanceLockHolder>;
+    return typeof parsed.pid === "number" && parsed.pid > 0
+      ? {
+          pid: parsed.pid,
+          startedAt:
+            typeof parsed.startedAt === "number" ? parsed.startedAt : 0,
+          host: typeof parsed.host === "string" ? parsed.host : "?",
+          gen:
+            typeof parsed.gen === "number" && parsed.gen >= 0
+              ? Math.floor(parsed.gen)
+              : 0,
+        }
       : null;
-  } catch { return null; }        // 锁文件被手工改坏 / 读不出来 = 当成没有主人
+  } catch {
+    return null;
+  } // 锁文件被手工改坏 / 读不出来 = 当成没有主人
 };
 
 /**
@@ -50,8 +65,12 @@ const holderOf = (path: string): InstanceLockHolder | null => {
  * 「要人手动删一个锁文件」，反过来判错的代价是上面那条把在位实例的在途状态清掉。
  */
 const alive = (pid: number): boolean => {
-  try { process.kill(pid, 0); return true; }
-  catch (error) { return (error as { code?: string }).code === 'EPERM'; }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as { code?: string }).code === "EPERM";
+  }
 };
 
 /** 一次启动最多往上找这么多代。走到头意味着连着这么多代都被已死的进程占过，不该发生。 */
@@ -71,37 +90,59 @@ const MAX_STEAL_GENERATIONS = 32;
 export function acquireInstanceLock(databasePath: string): InstanceLockResult {
   const path = `${resolve(databasePath)}.lock`;
   const claimPath = (gen: number): string => `${path}.${gen}`;
-  const payload = (gen: number): string => JSON.stringify({ pid: process.pid, startedAt: Date.now(), host: hostname(), gen } satisfies InstanceLockHolder);
-  const held = (stolenFrom: number | null, gen: number): InstanceLockResult => ({
+  const payload = (gen: number): string =>
+    JSON.stringify({
+      pid: process.pid,
+      startedAt: Date.now(),
+      host: hostname(),
+      gen,
+    } satisfies InstanceLockHolder);
+  const held = (
+    stolenFrom: number | null,
+    gen: number,
+  ): InstanceLockResult => ({
     ok: true,
     lock: {
-      path, stolenFrom,
+      path,
+      stolenFrom,
       // 只删还写着自己 pid 的那把：别把接手的人的锁删掉（关停很慢时对方可能已经抢占过了）。
       // 自己那一代的 claim 跟着删，否则下一次抢占要先空转过这一代。
       release: () => {
-        if (holderOf(path)?.pid === process.pid) try { unlinkSync(path); } catch { /* 已经没了 */ }
-        if (gen > 0 && holderOf(claimPath(gen))?.pid === process.pid) try { unlinkSync(claimPath(gen)); } catch { /* 同上 */ }
+        if (holderOf(path)?.pid === process.pid)
+          try {
+            unlinkSync(path);
+          } catch {
+            /* 已经没了 */
+          }
+        if (gen > 0 && holderOf(claimPath(gen))?.pid === process.pid)
+          try {
+            unlinkSync(claimPath(gen));
+          } catch {
+            /* 同上 */
+          }
       },
     },
   });
   try {
-    writeFileSync(path, payload(0), { flag: 'wx', mode: 0o600 });
+    writeFileSync(path, payload(0), { flag: "wx", mode: 0o600 });
     return held(null, 0);
   } catch (error) {
-    if ((error as { code?: string }).code !== 'EEXIST') throw error;
+    if ((error as { code?: string }).code !== "EEXIST") throw error;
   }
   const holder = holderOf(path);
-  if (holder && holder.pid !== process.pid && alive(holder.pid)) return { ok: false, holder };
+  if (holder && holder.pid !== process.pid && alive(holder.pid))
+    return { ok: false, holder };
   const from = holder?.gen ?? 0;
   for (let gen = from + 1; gen <= from + MAX_STEAL_GENERATIONS; gen += 1) {
     try {
-      writeFileSync(claimPath(gen), payload(gen), { flag: 'wx', mode: 0o600 });
+      writeFileSync(claimPath(gen), payload(gen), { flag: "wx", mode: 0o600 });
     } catch (error) {
-      if ((error as { code?: string }).code !== 'EEXIST') throw error;
+      if ((error as { code?: string }).code !== "EEXIST") throw error;
       const claimed = holderOf(claimPath(gen));
       // 这一代被别人拿了：他活着就是在位实例（他刚接手，或正在接手）。他也死了就往下一代找 ——
       // 删掉这个 claim 再重建等于把上面那条原子性还回去（两个进程可以一起删、一起建）。
-      if (claimed && claimed.pid !== process.pid && alive(claimed.pid)) return { ok: false, holder: claimed };
+      if (claimed && claimed.pid !== process.pid && alive(claimed.pid))
+        return { ok: false, holder: claimed };
       continue;
     }
     // 这一代归自己了。装锁文件之前再核一次：这段时间里锁文件被人手删掉、又被一个新进程以第 0 代
@@ -109,12 +150,24 @@ export function acquireInstanceLock(databasePath: string): InstanceLockResult {
     // 删它不影响别人的胜负判定。
     const current = holderOf(path);
     if (current && current.pid !== process.pid && alive(current.pid)) {
-      try { unlinkSync(claimPath(gen)); } catch { /* 已经没了 */ }
+      try {
+        unlinkSync(claimPath(gen));
+      } catch {
+        /* 已经没了 */
+      }
       return { ok: false, holder: current };
     }
     writeFileSync(path, payload(gen), { mode: 0o600 });
-    for (let old = gen - 1; old > 0; old -= 1) try { unlinkSync(claimPath(old)); } catch { /* 没有就算了 */ }
+    for (let old = gen - 1; old > 0; old -= 1)
+      try {
+        unlinkSync(claimPath(old));
+      } catch {
+        /* 没有就算了 */
+      }
     return held(holder?.pid ?? null, gen);
   }
-  return { ok: false, holder: holderOf(path) ?? { pid: 0, startedAt: 0, host: '?', gen: from } };
+  return {
+    ok: false,
+    holder: holderOf(path) ?? { pid: 0, startedAt: 0, host: "?", gen: from },
+  };
 }

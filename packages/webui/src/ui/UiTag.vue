@@ -1,7 +1,10 @@
 <script setup lang="ts">
-import type { TagSeverity } from './types';
+import type { TagSeverity } from "./types";
 
-withDefaults(defineProps<{ value: string | number; severity?: TagSeverity }>(), { severity: 'primary' });
+withDefaults(
+  defineProps<{ value: string | number; severity?: TagSeverity }>(),
+  { severity: "primary" },
+);
 </script>
 
 <template>

@@ -1,8 +1,8 @@
-import { ulid } from 'ulid';
-import type { Role } from '@luoli/shared';
-import { minRole, roleRank } from '@luoli/shared';
-import type { Sqlite } from '@luoli/db';
-import type { AgentResultStore } from '../prompt/documents.js';
+import { ulid } from "ulid";
+import type { Role } from "@luoli/shared";
+import { minRole, roleRank } from "@luoli/shared";
+import type { Sqlite } from "@luoli/db";
+import type { AgentResultStore } from "../prompt/documents.js";
 
 export interface AgentDefinition {
   name: string;
@@ -28,59 +28,142 @@ export interface AgentRun {
 export class AgentManager {
   readonly #definitions = new Map<string, AgentDefinition>();
 
-  constructor(private readonly db: Sqlite, private readonly results: AgentResultStore, definitions: AgentDefinition[], private readonly maxDepth: number, private readonly maxSubagentsPerTurn: number) {
-    for (const definition of definitions) this.#definitions.set(definition.name, definition);
+  constructor(
+    private readonly db: Sqlite,
+    private readonly results: AgentResultStore,
+    definitions: AgentDefinition[],
+    private readonly maxDepth: number,
+    private readonly maxSubagentsPerTurn: number,
+  ) {
+    for (const definition of definitions)
+      this.#definitions.set(definition.name, definition);
   }
 
   /** 定义只在构造时读一次；WebUI 改完 agent 若不重建这张表，运维看到的是「保存成功但派发的还是旧的」。 */
   replaceDefinitions(definitions: readonly AgentDefinition[]): void {
     this.#definitions.clear();
-    for (const definition of definitions) this.#definitions.set(definition.name, definition);
+    for (const definition of definitions)
+      this.#definitions.set(definition.name, definition);
   }
 
   available(role: Role): AgentDefinition[] {
-    return [...this.#definitions.values()].filter((definition) => roleRank(role) >= roleRank(definition.minRole));
+    return [...this.#definitions.values()].filter(
+      (definition) => roleRank(role) >= roleRank(definition.minRole),
+    );
   }
   definition(name: string): AgentDefinition | null {
     return this.#definitions.get(name) ?? null;
   }
 
-  result(runId: string, offset = 0, limit = 65_536): { content: string; nextOffset: number | null } {
+  result(
+    runId: string,
+    offset = 0,
+    limit = 65_536,
+  ): { content: string; nextOffset: number | null } {
     // 列里存的是相对结果目录的 ref（docs/28 · L-OPS-06），拼接在 `AgentResultStore` 里做 ——
     // 那里才知道当前配置指向哪棵目录。
-    const row = this.db.prepare('SELECT result_full_ref AS ref FROM agent_runs WHERE id=? AND state=\'done\'').get(runId) as { ref: string | null } | undefined;
-    if (!row?.ref) throw new Error('agent_result_unavailable');
+    const row = this.db
+      .prepare(
+        "SELECT result_full_ref AS ref FROM agent_runs WHERE id=? AND state='done'",
+      )
+      .get(runId) as { ref: string | null } | undefined;
+    if (!row?.ref) throw new Error("agent_result_unavailable");
     return this.results.read(row.ref, offset, limit);
   }
 
   createMain(turnId: string, role: Role, modelAlias: string): AgentRun {
-    const existing = this.db.prepare("SELECT id,turn_id AS turnId,parent_run_id AS parentRunId,depth,agent_name AS agentName,effective_role AS effectiveRole FROM agent_runs WHERE turn_id=? AND kind='main'").get(turnId) as AgentRun | undefined;
+    const existing = this.db
+      .prepare(
+        "SELECT id,turn_id AS turnId,parent_run_id AS parentRunId,depth,agent_name AS agentName,effective_role AS effectiveRole FROM agent_runs WHERE turn_id=? AND kind='main'",
+      )
+      .get(turnId) as AgentRun | undefined;
     if (existing) return existing;
-    const run: AgentRun = { id: ulid(), turnId, parentRunId: null, depth: 0, agentName: 'main', effectiveRole: role };
-    this.db.prepare(`INSERT INTO agent_runs(id,turn_id,depth,kind,agent_name,model_alias,effective_role,state,started_at) VALUES (?,?,?,?,?,?,?,?,?)`).run(run.id, turnId, 0, 'main', 'main', modelAlias, role, 'running', Date.now());
+    const run: AgentRun = {
+      id: ulid(),
+      turnId,
+      parentRunId: null,
+      depth: 0,
+      agentName: "main",
+      effectiveRole: role,
+    };
+    this.db
+      .prepare(
+        `INSERT INTO agent_runs(id,turn_id,depth,kind,agent_name,model_alias,effective_role,state,started_at) VALUES (?,?,?,?,?,?,?,?,?)`,
+      )
+      .run(
+        run.id,
+        turnId,
+        0,
+        "main",
+        "main",
+        modelAlias,
+        role,
+        "running",
+        Date.now(),
+      );
     return run;
   }
   /** WebUI 试跑不创建 turns/context 行，只留一条可审计的 agent_run。 */
-  createDryRun(name: string, task: string, role: Role = 'owner'): { run: AgentRun; definition: AgentDefinition } {
+  createDryRun(
+    name: string,
+    task: string,
+    role: Role = "owner",
+  ): { run: AgentRun; definition: AgentDefinition } {
     const definition = this.#definitions.get(name);
     if (!definition) throw new Error(`未知子 agent: ${name}`);
-    if (roleRank(role) < roleRank(definition.minRole)) throw new Error('当前用户权限不足以试跑该子 agent');
+    if (roleRank(role) < roleRank(definition.minRole))
+      throw new Error("当前用户权限不足以试跑该子 agent");
     const turnId = `dryrun:${ulid()}`;
-    const run: AgentRun = { id: ulid(), turnId, parentRunId: null, depth: 0, agentName: name, effectiveRole: minRole(role, definition.minRole) };
-    this.db.prepare(`INSERT INTO agent_runs(id,turn_id,depth,kind,agent_name,model_alias,effective_role,task_input,state,started_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?)`).run(run.id, turnId, 0, 'sub', name, definition.modelAlias, run.effectiveRole, task, 'running', Date.now());
+    const run: AgentRun = {
+      id: ulid(),
+      turnId,
+      parentRunId: null,
+      depth: 0,
+      agentName: name,
+      effectiveRole: minRole(role, definition.minRole),
+    };
+    this.db
+      .prepare(
+        `INSERT INTO agent_runs(id,turn_id,depth,kind,agent_name,model_alias,effective_role,task_input,state,started_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?)`,
+      )
+      .run(
+        run.id,
+        turnId,
+        0,
+        "sub",
+        name,
+        definition.modelAlias,
+        run.effectiveRole,
+        task,
+        "running",
+        Date.now(),
+      );
     return { run, definition };
   }
 
   byId(id: string): AgentRun | null {
-    return this.db.prepare('SELECT id,turn_id AS turnId,parent_run_id AS parentRunId,depth,agent_name AS agentName,effective_role AS effectiveRole FROM agent_runs WHERE id=?').get(id) as AgentRun | undefined ?? null;
+    return (
+      (this.db
+        .prepare(
+          "SELECT id,turn_id AS turnId,parent_run_id AS parentRunId,depth,agent_name AS agentName,effective_role AS effectiveRole FROM agent_runs WHERE id=?",
+        )
+        .get(id) as AgentRun | undefined) ?? null
+    );
   }
 
-  spawn(parent: AgentRun, name: string, task: string, modelAlias?: string): { run: AgentRun; definition: AgentDefinition } {
+  spawn(
+    parent: AgentRun,
+    name: string,
+    task: string,
+    modelAlias?: string,
+  ): { run: AgentRun; definition: AgentDefinition } {
     const definition = this.#definitions.get(name);
     if (!definition) throw new Error(`未知子 agent: ${name}`);
-    if (parent.depth + 1 > this.maxDepth) throw new Error('已达子 agent 深度上限');
-    if (roleRank(parent.effectiveRole) < roleRank(definition.minRole)) throw new Error('当前用户权限不足以派发该子 agent');
+    if (parent.depth + 1 > this.maxDepth)
+      throw new Error("已达子 agent 深度上限");
+    if (roleRank(parent.effectiveRole) < roleRank(definition.minRole))
+      throw new Error("当前用户权限不足以派发该子 agent");
     /**
      * ACP 行（M13，`packages/core/src/acp/runs.ts`）不占这个名额。`maxSubagentsPerTurn` 管的是
      * **本系统自己的 fan-out 成本** —— 每个子 agent 都是一次我们付钱的模型调用；而 `spawn_acp`
@@ -94,57 +177,155 @@ export class AgentManager {
      * 要它同时把 `modelAlias` 也写成 `external` 才会被漏数。`GLOB` 而不是 `LIKE`：后者在 SQLite 里
      * ASCII 大小写不敏感，会把 `ACP:x` 一起排掉。
      */
-    const count = this.db.prepare("SELECT COUNT(*) AS value FROM agent_runs WHERE turn_id=? AND kind='sub' AND NOT (agent_name GLOB 'acp:*' AND model_alias='external')").get(parent.turnId) as { value: number };
-    if (count.value >= this.maxSubagentsPerTurn) throw new Error('已达本轮子 agent 数量上限');
+    const count = this.db
+      .prepare(
+        "SELECT COUNT(*) AS value FROM agent_runs WHERE turn_id=? AND kind='sub' AND NOT (agent_name GLOB 'acp:*' AND model_alias='external')",
+      )
+      .get(parent.turnId) as { value: number };
+    if (count.value >= this.maxSubagentsPerTurn)
+      throw new Error("已达本轮子 agent 数量上限");
     const ancestors = this.ancestors(parent);
-    if (ancestors.filter((entry) => entry.agentName === name).length >= 2) throw new Error('检测到子 agent 环路');
-    const run: AgentRun = { id: ulid(), turnId: parent.turnId, parentRunId: parent.id, depth: parent.depth + 1, agentName: name, effectiveRole: minRole(parent.effectiveRole, definition.minRole) };
-    this.db.prepare(`INSERT INTO agent_runs(id,turn_id,parent_run_id,depth,kind,agent_name,model_alias,effective_role,task_input,state,started_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(run.id, run.turnId, run.parentRunId, run.depth, 'sub', name, modelAlias ?? definition.modelAlias, run.effectiveRole, task, 'running', Date.now());
+    if (ancestors.filter((entry) => entry.agentName === name).length >= 2)
+      throw new Error("检测到子 agent 环路");
+    const run: AgentRun = {
+      id: ulid(),
+      turnId: parent.turnId,
+      parentRunId: parent.id,
+      depth: parent.depth + 1,
+      agentName: name,
+      effectiveRole: minRole(parent.effectiveRole, definition.minRole),
+    };
+    this.db
+      .prepare(
+        `INSERT INTO agent_runs(id,turn_id,parent_run_id,depth,kind,agent_name,model_alias,effective_role,task_input,state,started_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+      )
+      .run(
+        run.id,
+        run.turnId,
+        run.parentRunId,
+        run.depth,
+        "sub",
+        name,
+        modelAlias ?? definition.modelAlias,
+        run.effectiveRole,
+        task,
+        "running",
+        Date.now(),
+      );
     return { run, definition };
   }
 
-  finish(run: AgentRun, result: string): { summary: string; fullRef: string; truncated: boolean } {
+  finish(
+    run: AgentRun,
+    result: string,
+  ): { summary: string; fullRef: string; truncated: boolean } {
     const definition = this.#definitions.get(run.agentName);
     const limit = definition?.resultMaxChars ?? 4000;
-    const summary = [...result].slice(0, limit).join('');
+    const summary = [...result].slice(0, limit).join("");
     // 落库的是相对 ref，交给模型的是 `agentresult://<runId>`：模型那一份是句柄不是路径，
     // 两者从来不是同一个东西（docs/28 · L-OPS-06）。
     const ref = this.results.put(run.id, result);
-    this.db.prepare("UPDATE agent_runs SET state='done',result_summary=?,result_full_ref=?,finished_at=? WHERE id=? AND state='running'").run(summary, ref, Date.now(), run.id);
-    return { summary, fullRef: `agentresult://${run.id}`, truncated: [...summary].length < [...result].length };
+    this.db
+      .prepare(
+        "UPDATE agent_runs SET state='done',result_summary=?,result_full_ref=?,finished_at=? WHERE id=? AND state='running'",
+      )
+      .run(summary, ref, Date.now(), run.id);
+    return {
+      summary,
+      fullRef: `agentresult://${run.id}`,
+      truncated: [...summary].length < [...result].length,
+    };
   }
 
   fail(run: AgentRun, error: string): void {
-    this.db.prepare("UPDATE agent_runs SET state='failed',error=?,finished_at=? WHERE id=? AND state='running'").run(error, Date.now(), run.id);
+    this.db
+      .prepare(
+        "UPDATE agent_runs SET state='failed',error=?,finished_at=? WHERE id=? AND state='running'",
+      )
+      .run(error, Date.now(), run.id);
   }
 
   ask(run: AgentRun, parent: AgentRun, payload: unknown): string {
     const id = ulid();
-    this.db.prepare("INSERT INTO agent_messages(id,turn_id,from_run_id,to_run_id,kind,payload_json,state,created_at) VALUES (?,?,?,?,? ,?,'sent',?)").run(id, run.turnId, run.id, parent.id, 'ask', JSON.stringify(payload), Date.now());
+    this.db
+      .prepare(
+        "INSERT INTO agent_messages(id,turn_id,from_run_id,to_run_id,kind,payload_json,state,created_at) VALUES (?,?,?,?,? ,?,'sent',?)",
+      )
+      .run(
+        id,
+        run.turnId,
+        run.id,
+        parent.id,
+        "ask",
+        JSON.stringify(payload),
+        Date.now(),
+      );
     return id;
   }
 
-  answer(id: string, payload: unknown, source: 'rule' | 'arbiter' | 'user' | 'timeout'): void {
-    const ask = this.db.prepare("SELECT turn_id AS turnId,from_run_id AS fromRunId,to_run_id AS toRunId FROM agent_messages WHERE id=? AND kind='ask'").get(id) as { turnId: string; fromRunId: string; toRunId: string } | undefined;
-    if (!ask) throw new Error('agent_ask_not_found');
+  answer(
+    id: string,
+    payload: unknown,
+    source: "rule" | "arbiter" | "user" | "timeout",
+  ): void {
+    const ask = this.db
+      .prepare(
+        "SELECT turn_id AS turnId,from_run_id AS fromRunId,to_run_id AS toRunId FROM agent_messages WHERE id=? AND kind='ask'",
+      )
+      .get(id) as
+      { turnId: string; fromRunId: string; toRunId: string } | undefined;
+    if (!ask) throw new Error("agent_ask_not_found");
     this.db.transaction(() => {
-      this.db.prepare('UPDATE agent_messages SET state=?,answered_at=? WHERE id=?').run(source === 'timeout' ? 'timeout' : 'answered', Date.now(), id);
-      this.db.prepare("INSERT INTO agent_messages(id,turn_id,from_run_id,to_run_id,kind,payload_json,state,created_at,answered_at) VALUES (?,?,?,?,? ,?,'answered',?,?)")
-        .run(ulid(), ask.turnId, ask.toRunId, ask.fromRunId, 'answer', JSON.stringify({ askId: id, payload, source }), Date.now(), Date.now());
+      this.db
+        .prepare("UPDATE agent_messages SET state=?,answered_at=? WHERE id=?")
+        .run(source === "timeout" ? "timeout" : "answered", Date.now(), id);
+      this.db
+        .prepare(
+          "INSERT INTO agent_messages(id,turn_id,from_run_id,to_run_id,kind,payload_json,state,created_at,answered_at) VALUES (?,?,?,?,? ,?,'answered',?,?)",
+        )
+        .run(
+          ulid(),
+          ask.turnId,
+          ask.toRunId,
+          ask.fromRunId,
+          "answer",
+          JSON.stringify({ askId: id, payload, source }),
+          Date.now(),
+          Date.now(),
+        );
     })();
   }
 
   progress(run: AgentRun, payload: unknown): void {
-    this.db.prepare("INSERT INTO agent_messages(id,turn_id,from_run_id,to_run_id,kind,payload_json,state,created_at) VALUES (?,?,?,?,? ,?,'sent',?)")
-      .run(ulid(), run.turnId, run.id, run.parentRunId ?? run.id, 'progress', JSON.stringify(payload), Date.now());
-    this.db.prepare('UPDATE tasks SET progress_json=?,updated_at=? WHERE agent_run_id=? AND state=\'running\'').run(JSON.stringify(payload), Date.now(), run.id);
+    this.db
+      .prepare(
+        "INSERT INTO agent_messages(id,turn_id,from_run_id,to_run_id,kind,payload_json,state,created_at) VALUES (?,?,?,?,? ,?,'sent',?)",
+      )
+      .run(
+        ulid(),
+        run.turnId,
+        run.id,
+        run.parentRunId ?? run.id,
+        "progress",
+        JSON.stringify(payload),
+        Date.now(),
+      );
+    this.db
+      .prepare(
+        "UPDATE tasks SET progress_json=?,updated_at=? WHERE agent_run_id=? AND state='running'",
+      )
+      .run(JSON.stringify(payload), Date.now(), run.id);
   }
 
   private ancestors(run: AgentRun): AgentRun[] {
     const values: AgentRun[] = [run];
     let parent = run.parentRunId;
     while (parent) {
-      const row = this.db.prepare('SELECT id,turn_id AS turnId,parent_run_id AS parentRunId,depth,agent_name AS agentName,effective_role AS effectiveRole FROM agent_runs WHERE id=?').get(parent) as AgentRun | undefined;
+      const row = this.db
+        .prepare(
+          "SELECT id,turn_id AS turnId,parent_run_id AS parentRunId,depth,agent_name AS agentName,effective_role AS effectiveRole FROM agent_runs WHERE id=?",
+        )
+        .get(parent) as AgentRun | undefined;
       if (!row) break;
       values.push(row);
       parent = row.parentRunId;

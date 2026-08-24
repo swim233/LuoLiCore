@@ -1,34 +1,65 @@
-import { createAnthropic } from '@ai-sdk/anthropic';
-import { readFileSync } from 'node:fs';
-import { createGoogleGenerativeAI } from '@ai-sdk/google';
-import { createOpenAI } from '@ai-sdk/openai';
-import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
-import { ToolLoopAgent, pruneMessages, stepCountIs, tool } from 'ai';
-import type { Instructions, LanguageModel, ModelMessage, Provider, ToolSet } from 'ai';
-type V4LanguageModel = Exclude<LanguageModel, string> & { specificationVersion: 'v4' };
-import type { Config } from '../config/schema.js';
-import type { Sqlite } from '@luoli/db';
-import { modelAliasKey, readAppKv } from '@luoli/db';
-import { escapeSystemInstructions, estimateStructureTokens, formatSpeakerIdentity, sanitizeIdentity, systemInstructions, type RuntimeTurnContext } from '@luoli/shared';
-import type { PromptAssembler, PromptDocuments } from '../index.js';
-import { runtimeBlock, type PromptBuildResult } from '../prompt/assembler.js';
-import type { DeferredToolGroup, RegisteredTool, ToolExecutionContext, ToolMedia, ToolRegistry } from '../tools/registry.js';
+import { createAnthropic } from "@ai-sdk/anthropic";
+import { readFileSync } from "node:fs";
+import { createGoogleGenerativeAI } from "@ai-sdk/google";
+import { createOpenAI } from "@ai-sdk/openai";
+import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
+import { ToolLoopAgent, pruneMessages, stepCountIs, tool } from "ai";
+import type {
+  Instructions,
+  LanguageModel,
+  ModelMessage,
+  Provider,
+  ToolSet,
+} from "ai";
+type V4LanguageModel = Exclude<LanguageModel, string> & {
+  specificationVersion: "v4";
+};
+import type { Config } from "../config/schema.js";
+import type { Sqlite } from "@luoli/db";
+import { modelAliasKey, readAppKv } from "@luoli/db";
+import {
+  escapeSystemInstructions,
+  estimateStructureTokens,
+  formatSpeakerIdentity,
+  sanitizeIdentity,
+  systemInstructions,
+  type RuntimeTurnContext,
+} from "@luoli/shared";
+import type { PromptAssembler, PromptDocuments } from "../index.js";
+import { runtimeBlock, type PromptBuildResult } from "../prompt/assembler.js";
+import type {
+  DeferredToolGroup,
+  RegisteredTool,
+  ToolExecutionContext,
+  ToolMedia,
+  ToolRegistry,
+} from "../tools/registry.js";
 // 摘 `media` 的那把尺子只有一份：注册表在序列化之前用它，这里在落库之前用同一个（形状判据
 // 分两份写，迟早出现「注册表认得是图、落库那侧不认得」）。registry 不 import runtime，无环。
-import { splitToolMedia } from '../tools/registry.js';
-import { SKILL_NARROWING_EXEMPT } from '../tools/policy.js';
-import type { ProviderStore } from '../provider/store.js';
-import { PROVIDER_FAILURES_TO_DOWN, recordProviderFailure, recordProviderServed } from '../provider/health.js';
-import { type FallbackOptions, fallbackLanguageModel } from './fallback-model.js';
-import { createStepObservers, type StepFacts } from './step-observers.js';
-import { type AliasSettings, parseAliasSettings } from '../provider/alias-settings.js';
-import { sandboxLabel, type ContainerManager } from '../sandbox/containers.js';
-import type { UsageLedger } from '../ledger/usage.js';
-import type { QuotaGuard, QuotaReservation } from '../ledger/quota.js';
-import type { LogSink, LogSpan } from '../log/sink.js';
-import { isImagePart, type ContextEngine } from '../context/engine.js';
-import type { AgentManager } from './manager.js';
-import type { SkillLoader } from '../skills/loader.js';
+import { splitToolMedia } from "../tools/registry.js";
+import { SKILL_NARROWING_EXEMPT } from "../tools/policy.js";
+import type { ProviderStore } from "../provider/store.js";
+import {
+  PROVIDER_FAILURES_TO_DOWN,
+  recordProviderFailure,
+  recordProviderServed,
+} from "../provider/health.js";
+import {
+  type FallbackOptions,
+  fallbackLanguageModel,
+} from "./fallback-model.js";
+import { createStepObservers, type StepFacts } from "./step-observers.js";
+import {
+  type AliasSettings,
+  parseAliasSettings,
+} from "../provider/alias-settings.js";
+import { sandboxLabel, type ContainerManager } from "../sandbox/containers.js";
+import type { UsageLedger } from "../ledger/usage.js";
+import type { QuotaGuard, QuotaReservation } from "../ledger/quota.js";
+import type { LogSink, LogSpan } from "../log/sink.js";
+import { isImagePart, type ContextEngine } from "../context/engine.js";
+import type { AgentManager } from "./manager.js";
+import type { SkillLoader } from "../skills/loader.js";
 interface ProviderRow {
   id: string;
   name: string;
@@ -59,16 +90,29 @@ interface AliasRow {
 export class ModelRegistry {
   readonly #models = new Map<string, V4LanguageModel>();
   readonly #info = new Map<string, ModelRow>();
-  readonly #chains = new Map<string, Array<{ model: V4LanguageModel; info: ModelRow }>>();
+  readonly #chains = new Map<
+    string,
+    Array<{ model: V4LanguageModel; info: ModelRow }>
+  >();
   readonly #settings = new Map<string, AliasSettings>();
   /** 每个 provider 一个裸候选，只给健康探测用（`provider/health.ts`）。 */
-  readonly #probes = new Map<string, { model: V4LanguageModel; info: ModelRow }>();
+  readonly #probes = new Map<
+    string,
+    { model: V4LanguageModel; info: ModelRow }
+  >();
   /** 当前处于 `down` 且还在冷却期内的 `models.id`。**派生自库**：`rebuild()` 从库里重算，
    *  `recordFailure()` 写库的同一次调用里补一份 —— 进程内这份只是让调用路径不必每次查库。 */
   readonly #down = new Set<string>();
 
   /** @param onProviderUnusable rebuild 时跳过某个 provider 的原因。装配方拿它记一条 warn。 */
-  constructor(private readonly db: Sqlite, private readonly providers: ProviderStore, private readonly onProviderUnusable?: (providerId: string, reason: string) => void) {}
+  constructor(
+    private readonly db: Sqlite,
+    private readonly providers: ProviderStore,
+    private readonly onProviderUnusable?: (
+      providerId: string,
+      reason: string,
+    ) => void,
+  ) {}
 
   /**
    * `provider.healthDownCooldownMinutes`：判成 `down` 的 provider 只在冷却期内被排除，过期后
@@ -91,14 +135,27 @@ export class ModelRegistry {
      * 「30 分钟 down / 一个 cron 间隔 up」的抖动，而 WebUI 全程显示 down。`health_error` 留着
      * 当「上次失败原因」给界面看，`health_checked_at` 不动（它是上次判定的时间）。
      */
-    this.db.prepare("UPDATE providers SET health_state='up',health_fail_count=0 WHERE health_state='down' AND COALESCE(health_checked_at,0) < ?").run(cutoff);
-    const providerRows = this.db.prepare(`SELECT id,name,kind,base_url AS baseUrl,headers_json AS headers FROM providers
-      WHERE enabled=1 AND COALESCE(health_state,'up') <> 'down'`).all() as ProviderRow[];
+    this.db
+      .prepare(
+        "UPDATE providers SET health_state='up',health_fail_count=0 WHERE health_state='down' AND COALESCE(health_checked_at,0) < ?",
+      )
+      .run(cutoff);
+    const providerRows = this.db
+      .prepare(
+        `SELECT id,name,kind,base_url AS baseUrl,headers_json AS headers FROM providers
+      WHERE enabled=1 AND COALESCE(health_state,'up') <> 'down'`,
+      )
+      .all() as ProviderRow[];
     // down 的 provider 被上面那句整条滤掉，它的模型也就不在任何链里 —— 所以「这个候选是不是
     // down」必须单独查一次，不能反过来从链里推（`isDown` 判的正是已经不在链里的那些）。
     // 冷却判据不用在这里重复：过了期的行上面那句 UPDATE 已经改回 `up` 了。
-    for (const row of this.db.prepare(`SELECT m.id FROM models m JOIN providers p ON p.id=m.provider_id
-      WHERE p.health_state='down'`).all() as Array<{ id: string }>) this.#down.add(row.id);
+    for (const row of this.db
+      .prepare(
+        `SELECT m.id FROM models m JOIN providers p ON p.id=m.provider_id
+      WHERE p.health_state='down'`,
+      )
+      .all() as Array<{ id: string }>)
+      this.#down.add(row.id);
     const providerInstances = new Map<string, Provider>();
     for (const provider of providerRows) {
       /**
@@ -113,42 +170,83 @@ export class ModelRegistry {
        */
       try {
         const apiKey = this.providers.key(provider.id);
-        const headers = provider.headers ? JSON.parse(provider.headers) as Record<string, string> : null;
-        const common: { apiKey?: string; baseURL?: string; headers?: Record<string, string> } = {};
+        const headers = provider.headers
+          ? (JSON.parse(provider.headers) as Record<string, string>)
+          : null;
+        const common: {
+          apiKey?: string;
+          baseURL?: string;
+          headers?: Record<string, string>;
+        } = {};
         if (apiKey) common.apiKey = apiKey;
         if (provider.baseUrl) common.baseURL = provider.baseUrl;
         if (headers) common.headers = headers;
-        const instance: Provider = provider.kind === 'anthropic'
-          ? createAnthropic(common)
-          : provider.kind === 'google'
-            ? createGoogleGenerativeAI(common)
-            : provider.kind === 'openai-compatible'
-              ? createOpenAICompatible({ name: provider.name, baseURL: provider.baseUrl ?? '', ...common })
-              : createOpenAI(common);
+        const instance: Provider =
+          provider.kind === "anthropic"
+            ? createAnthropic(common)
+            : provider.kind === "google"
+              ? createGoogleGenerativeAI(common)
+              : provider.kind === "openai-compatible"
+                ? createOpenAICompatible({
+                    name: provider.name,
+                    baseURL: provider.baseUrl ?? "",
+                    ...common,
+                  })
+                : createOpenAI(common);
         providerInstances.set(provider.id, instance);
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
-        this.db.prepare("UPDATE providers SET health_state='down',health_checked_at=?,health_error=? WHERE id=?").run(Date.now(), reason.slice(0, 500), provider.id);
+        this.db
+          .prepare(
+            "UPDATE providers SET health_state='down',health_checked_at=?,health_error=? WHERE id=?",
+          )
+          .run(Date.now(), reason.slice(0, 500), provider.id);
         this.onProviderUnusable?.(provider.id, reason);
       }
     }
-    const modelRows = this.db.prepare(`SELECT id,provider_id AS providerId,model_id AS modelId,context_window AS contextWindow,
+    const modelRows = this.db
+      .prepare(
+        `SELECT id,provider_id AS providerId,model_id AS modelId,context_window AS contextWindow,
       max_output AS maxOutput,capabilities_json AS capabilities,price_in AS priceIn,price_out AS priceOut,
-      price_cache_read AS priceCacheRead,price_cache_write AS priceCacheWrite FROM models WHERE enabled=1 ORDER BY sort`).all() as ModelRow[];
+      price_cache_read AS priceCacheRead,price_cache_write AS priceCacheWrite FROM models WHERE enabled=1 ORDER BY sort`,
+      )
+      .all() as ModelRow[];
     const byId = new Map(modelRows.map((model) => [model.id, model]));
     // 探测用的候选按 `sort` 取每个 provider 的第一个启用模型 —— 与它在哪个别名链里无关：
     // 一个还没进任何别名的 provider 同样该被探（否则它永远是 `up`，直到有人手工点测试连接）。
     for (const info of modelRows) {
       if (this.#probes.has(info.providerId)) continue;
-      const probe = providerInstances.get(info.providerId)?.languageModel(info.modelId);
-      if (probe && typeof probe !== 'string' && probe.specificationVersion === 'v4') this.#probes.set(info.providerId, { model: probe as V4LanguageModel, info });
+      const probe = providerInstances
+        .get(info.providerId)
+        ?.languageModel(info.modelId);
+      if (
+        probe &&
+        typeof probe !== "string" &&
+        probe.specificationVersion === "v4"
+      )
+        this.#probes.set(info.providerId, {
+          model: probe as V4LanguageModel,
+          info,
+        });
     }
-    const aliases = this.db.prepare('SELECT alias,model_ids_json AS modelIds,settings_json AS settings FROM model_aliases').all() as AliasRow[];
+    const aliases = this.db
+      .prepare(
+        "SELECT alias,model_ids_json AS modelIds,settings_json AS settings FROM model_aliases",
+      )
+      .all() as AliasRow[];
     for (const alias of aliases) {
-      const chain = (JSON.parse(alias.modelIds) as string[]).map((id) => byId.get(id)).filter((row): row is ModelRow => Boolean(row))
+      const chain = (JSON.parse(alias.modelIds) as string[])
+        .map((id) => byId.get(id))
+        .filter((row): row is ModelRow => Boolean(row))
         .flatMap((info) => {
-          const model = providerInstances.get(info.providerId)?.languageModel(info.modelId);
-          return model && typeof model !== 'string' && model.specificationVersion === 'v4' ? [{ model: model as V4LanguageModel, info }] : [];
+          const model = providerInstances
+            .get(info.providerId)
+            ?.languageModel(info.modelId);
+          return model &&
+            typeof model !== "string" &&
+            model.specificationVersion === "v4"
+            ? [{ model: model as V4LanguageModel, info }]
+            : [];
         });
       const first = chain[0];
       if (!first) continue;
@@ -162,7 +260,11 @@ export class ModelRegistry {
 
   /** 别名缺失时的回退顺序（04 §5.2）。模型和采样参数必须落在同一个别名上，否则会串味。 */
   #pick(alias: string): string | null {
-    return [alias, 'main', 'high', 'low'].find((candidate) => this.#models.has(candidate)) ?? null;
+    return (
+      [alias, "main", "high", "low"].find((candidate) =>
+        this.#models.has(candidate),
+      ) ?? null
+    );
   }
 
   resolve(alias: string): LanguageModel {
@@ -173,7 +275,7 @@ export class ModelRegistry {
 
   settings(alias: string): AliasSettings {
     const picked = this.#pick(alias);
-    return picked ? this.#settings.get(picked) ?? {} : {};
+    return picked ? (this.#settings.get(picked) ?? {}) : {};
   }
 
   info(alias: string): ModelRow | null {
@@ -182,14 +284,25 @@ export class ModelRegistry {
   /** 链上的每一个候选都要能反查到：只扫 `#info`（每个别名的链首）会让 fallback 到第二个模型之后的
    *  计价、`markProviderDown` 全部落空（docs/20 · W-AGENT-01 / W-LEDGER-01）。 */
   infoByModelId(modelId: string): ModelRow | null {
-    for (const info of this.#info.values()) if (info.modelId === modelId) return info;
-    for (const chain of this.#chains.values()) for (const candidate of chain) if (candidate.info.modelId === modelId) return candidate.info;
+    for (const info of this.#info.values())
+      if (info.modelId === modelId) return info;
+    for (const chain of this.#chains.values())
+      for (const candidate of chain)
+        if (candidate.info.modelId === modelId) return candidate.info;
     return null;
   }
   /** modelId → 别名。`prefer` 命中时优先返回它：链内 fallback 换的是模型，别名没变。 */
   aliasOf(modelId: string, prefer?: string): string | null {
-    if (prefer && this.#chains.get(prefer)?.some((candidate) => candidate.info.modelId === modelId)) return prefer;
-    for (const [alias, chain] of this.#chains) if (chain.some((candidate) => candidate.info.modelId === modelId)) return alias;
+    if (
+      prefer &&
+      this.#chains
+        .get(prefer)
+        ?.some((candidate) => candidate.info.modelId === modelId)
+    )
+      return prefer;
+    for (const [alias, chain] of this.#chains)
+      if (chain.some((candidate) => candidate.info.modelId === modelId))
+        return alias;
     return null;
   }
   /**
@@ -199,14 +312,21 @@ export class ModelRegistry {
    * 中间件里是短路 `throw`：这一轮既白烧一次注定 401 的往返，也不会继续往下 fallback。
    */
   #downRows(providerId: string, down: boolean): void {
-    for (const row of this.db.prepare('SELECT id FROM models WHERE provider_id=?').all(providerId) as Array<{ id: string }>) {
-      if (down) this.#down.add(row.id); else this.#down.delete(row.id);
+    for (const row of this.db
+      .prepare("SELECT id FROM models WHERE provider_id=?")
+      .all(providerId) as Array<{ id: string }>) {
+      if (down) this.#down.add(row.id);
+      else this.#down.delete(row.id);
     }
   }
   markProviderDown(modelId: string, error: string): void {
     const row = this.infoByModelId(modelId);
     if (row) {
-      this.db.prepare("UPDATE providers SET health_state='down',health_checked_at=?,health_error=? WHERE id=?").run(Date.now(), error.slice(0, 500), row.providerId);
+      this.db
+        .prepare(
+          "UPDATE providers SET health_state='down',health_checked_at=?,health_error=? WHERE id=?",
+        )
+        .run(Date.now(), error.slice(0, 500), row.providerId);
       this.#downRows(row.providerId, true);
     }
   }
@@ -214,11 +334,18 @@ export class ModelRegistry {
   #providerOf(candidate: { id: string; rowId?: string }): string | null {
     const rowId = candidate.rowId ?? this.infoByModelId(candidate.id)?.id;
     if (!rowId) return null;
-    return this.db.prepare('SELECT provider_id FROM models WHERE id=?').pluck().get(rowId) as string ?? null;
+    return (
+      (this.db
+        .prepare("SELECT provider_id FROM models WHERE id=?")
+        .pluck()
+        .get(rowId) as string) ?? null
+    );
   }
 
   /** 健康探测用的裸候选（`provider/health.ts` 的 `ProbeSource`）。 */
-  probeCandidate(providerId: string): { model: V4LanguageModel; modelId: string } | null {
+  probeCandidate(
+    providerId: string,
+  ): { model: V4LanguageModel; modelId: string } | null {
     const probe = this.#probes.get(providerId);
     return probe ? { model: probe.model, modelId: probe.info.modelId } : null;
   }
@@ -241,10 +368,19 @@ export class ModelRegistry {
    * **一次调用一个候选只记一次**，重试不各记一次 —— 那道闸在调用点（`onCandidateFailed` 的
    * `willRetry`），因为「还会不会再试」只有中间件知道。
    */
-  recordFailure(candidate: { id: string; rowId?: string }, reason: string, failuresToDown: number): boolean {
+  recordFailure(
+    candidate: { id: string; rowId?: string },
+    reason: string,
+    failuresToDown: number,
+  ): boolean {
     const providerId = this.#providerOf(candidate);
     if (!providerId) return false;
-    const { down } = recordProviderFailure(this.db, providerId, reason, failuresToDown);
+    const { down } = recordProviderFailure(
+      this.db,
+      providerId,
+      reason,
+      failuresToDown,
+    );
     if (down) this.#downRows(providerId, true);
     return down;
   }
@@ -256,17 +392,26 @@ export class ModelRegistry {
    */
   recordSuccess(candidate: { id: string; rowId?: string }): void {
     const providerId = this.#providerOf(candidate);
-    if (providerId && recordProviderServed(this.db, providerId)) this.#downRows(providerId, false);
+    if (providerId && recordProviderServed(this.db, providerId))
+      this.#downRows(providerId, false);
   }
 
   estimate(alias: string, inputTokens: number): number | null {
     const info = this.info(alias);
     return info ? this.estimateModel(info, inputTokens) : null;
   }
-  estimateModel(info: Pick<ModelRow, 'priceIn' | 'priceOut' | 'maxOutput'>, inputTokens: number): number | null {
+  estimateModel(
+    info: Pick<ModelRow, "priceIn" | "priceOut" | "maxOutput">,
+    inputTokens: number,
+  ): number | null {
     if (info.priceIn === null || info.priceOut === null) return null;
-    const outputTokens = Math.min(info.maxOutput, Math.max(512, Math.ceil(inputTokens * 0.25)));
-    return (inputTokens * info.priceIn + outputTokens * info.priceOut) / 1_000_000;
+    const outputTokens = Math.min(
+      info.maxOutput,
+      Math.max(512, Math.ceil(inputTokens * 0.25)),
+    );
+    return (
+      (inputTokens * info.priceIn + outputTokens * info.priceOut) / 1_000_000
+    );
   }
 
   aliases(): string[] {
@@ -286,7 +431,13 @@ export class ModelRegistry {
     if (!this.#models.has(alias)) return false;
     const info = this.#info.get(alias);
     if (!info) return false;
-    try { return (JSON.parse(info.capabilities) as { vision?: unknown }).vision === true; } catch { return false; }
+    try {
+      return (
+        (JSON.parse(info.capabilities) as { vision?: unknown }).vision === true
+      );
+    } catch {
+      return false;
+    }
   }
 
   chain(alias: string): Array<{ model: V4LanguageModel; info: ModelRow }> {
@@ -312,15 +463,19 @@ export class ModelRegistry {
  * `degradeImages` 全部适用），不靠工具结果 —— 所以这里摘掉不丢信息。
  * 放在 `normalizeToolOutput` 里而不是只在写入侧：读出侧也过这一层，库里已经有的那些同样被兜住。
  */
-const PERSISTED_MEDIA_PLACEHOLDER = '[图片已另存为附件，工具结果里不重复存字节]';
-function stripToolResultMedia(output: { type: string; value: unknown }): { type: string; value: unknown } {
-  if (output.type === 'content' && Array.isArray(output.value)) {
+const PERSISTED_MEDIA_PLACEHOLDER =
+  "[图片已另存为附件，工具结果里不重复存字节]";
+function stripToolResultMedia(output: { type: string; value: unknown }): {
+  type: string;
+  value: unknown;
+} {
+  if (output.type === "content" && Array.isArray(output.value)) {
     let touched = false;
     const value = output.value.map((entry) => {
       const part = entry as { type?: unknown } | null;
-      if (part?.type !== 'file' && part?.type !== 'media') return entry;
+      if (part?.type !== "file" && part?.type !== "media") return entry;
       touched = true;
-      return { type: 'text', text: PERSISTED_MEDIA_PLACEHOLDER };
+      return { type: "text", text: PERSISTED_MEDIA_PLACEHOLDER };
     });
     // 判别字段一个不碰（docs/02 红线 14）：只换 `value` 里那几项，`type` 原样。
     return touched ? { ...output, value } : output;
@@ -335,23 +490,49 @@ function stripToolResultMedia(output: { type: string; value: unknown }): { type:
    * 摘掉不丢信息：这一份的正文（`content` 字段）里已经有工具自己那句话，图片跨轮靠的是顶层
    * `webasset://` part。换成一句占位文本而不是删掉键 —— 模型据此知道「这里本来有张图」。
    */
-  if (output.value && typeof output.value === 'object' && !Array.isArray(output.value)) {
+  if (
+    output.value &&
+    typeof output.value === "object" &&
+    !Array.isArray(output.value)
+  ) {
     const { media, rest } = splitToolMedia(output.value as object);
-    if (media.length) return { ...output, value: { ...rest, media: PERSISTED_MEDIA_PLACEHOLDER } };
+    if (media.length)
+      return {
+        ...output,
+        value: { ...rest, media: PERSISTED_MEDIA_PLACEHOLDER },
+      };
   }
   return output;
 }
-export function normalizeToolOutput(output: unknown): { type: string; value: unknown } {
-  if (output && typeof output === 'object' && !Array.isArray(output)) {
+export function normalizeToolOutput(output: unknown): {
+  type: string;
+  value: unknown;
+} {
+  if (output && typeof output === "object" && !Array.isArray(output)) {
     const typed = output as { type?: unknown; value?: unknown };
-    if (typeof typed.type === 'string' && 'value' in typed) return stripToolResultMedia(typed as { type: string; value: unknown });
+    if (typeof typed.type === "string" && "value" in typed)
+      return stripToolResultMedia(typed as { type: string; value: unknown });
   }
   // **这一支也要过一遍摘除**：注册表交回的原始输出（`{ok, content, truncated, media}`）没有 `type`
   // 字段，走的正是这里 —— 而它就是落库那一份。漏掉它等于摘了个从不落库的形状。
-  return stripToolResultMedia({ type: 'json', value: output ?? null });
+  return stripToolResultMedia({ type: "json", value: output ?? null });
 }
-export function toolResultPart(toolCallId: string, toolName: string, output: unknown): { type: 'tool-result'; toolCallId: string; toolName: string; output: { type: string; value: unknown } } {
-  return { type: 'tool-result', toolCallId, toolName, output: normalizeToolOutput(output) };
+export function toolResultPart(
+  toolCallId: string,
+  toolName: string,
+  output: unknown,
+): {
+  type: "tool-result";
+  toolCallId: string;
+  toolName: string;
+  output: { type: string; value: unknown };
+} {
+  return {
+    type: "tool-result",
+    toolCallId,
+    toolName,
+    output: normalizeToolOutput(output),
+  };
 }
 /**
  * 工具输出 → SDK 的 tool-result 形状。带 `media` 时产出多模态的 `{type:'content'}`，
@@ -366,27 +547,59 @@ export function toolResultPart(toolCallId: string, toolName: string, output: unk
  * 工具输出按约定是 JSON 可序列化的（`#normalizeOutput` 就 `JSON.stringify` 它），所以这里写一个
  * 等价的递归类型，而不是把 `unknown` 硬塞过去 —— 塞过去等于把这一处的类型检查整个关掉。
  */
-type JsonValue = null | string | number | boolean | JsonValue[] | { [key: string]: JsonValue };
-type ToolModelOutput = { type: 'text'; value: string } | { type: 'json'; value: JsonValue }
-  | { type: 'content'; value: Array<{ type: 'text'; text: string } | { type: 'file'; data: { type: 'data'; data: string }; mediaType: string }> };
+type JsonValue =
+  null | string | number | boolean | JsonValue[] | { [key: string]: JsonValue };
+type ToolModelOutput =
+  | { type: "text"; value: string }
+  | { type: "json"; value: JsonValue }
+  | {
+      type: "content";
+      value: Array<
+        | { type: "text"; text: string }
+        | {
+            type: "file";
+            data: { type: "data"; data: string };
+            mediaType: string;
+          }
+      >;
+    };
 export function toolModelOutput(output: unknown): ToolModelOutput {
   const media = (output as { media?: unknown } | null)?.media;
-  if (!Array.isArray(media) || !media.length) return typeof output === 'string' ? { type: 'text', value: output } : { type: 'json', value: (output ?? null) as JsonValue };
+  if (!Array.isArray(media) || !media.length)
+    return typeof output === "string"
+      ? { type: "text", value: output }
+      : { type: "json", value: (output ?? null) as JsonValue };
   const { media: _media, ...rest } = output as Record<string, unknown>;
-  return { type: 'content', value: [{ type: 'text', text: JSON.stringify(rest) },
-    ...media.map((entry) => ({ type: 'file' as const, data: { type: 'data' as const, data: (entry as ToolMedia).data }, mediaType: (entry as ToolMedia).mediaType }))] };
+  return {
+    type: "content",
+    value: [
+      { type: "text", text: JSON.stringify(rest) },
+      ...media.map((entry) => ({
+        type: "file" as const,
+        data: { type: "data" as const, data: (entry as ToolMedia).data },
+        mediaType: (entry as ToolMedia).mediaType,
+      })),
+    ],
+  };
 }
 /**
  * 注册表工具 → SDK 的 `ToolSet`。**只有一份**：主 agent 与子 agent 此前各写一遍同样的三行，
  * 而 `toModelOutput` 这类钩子加漏一处的表现是「主 agent 能看图、子 agent 不能」，
  * 而且要真跑一次带图的子 agent 才看得见。
  */
-export function toolSetFor(registry: ToolRegistry, tools: readonly RegisteredTool[], context: ToolExecutionContext): ToolSet {
+export function toolSetFor(
+  registry: ToolRegistry,
+  tools: readonly RegisteredTool[],
+  context: ToolExecutionContext,
+): ToolSet {
   const set: ToolSet = {};
   for (const registered of tools) {
-    set[registered.name] = tool({ description: registered.description, inputSchema: registered.inputSchema,
+    set[registered.name] = tool({
+      description: registered.description,
+      inputSchema: registered.inputSchema,
       execute: (input) => registry.execute(registered.name, input, context),
-      toModelOutput: ({ output }) => toolModelOutput(output) });
+      toModelOutput: ({ output }) => toolModelOutput(output),
+    });
   }
   return set;
 }
@@ -403,17 +616,36 @@ export function toolSetFor(registry: ToolRegistry, tools: readonly RegisteredToo
  *
  * 形状照 SDK 真正发上线的那份来（`output: {type:'error-text', value}`），不另造一种。
  */
-function stepToolResults(content: readonly unknown[]): StepFacts['toolResults'] {
-  const results: StepFacts['toolResults'] = [];
+function stepToolResults(
+  content: readonly unknown[],
+): StepFacts["toolResults"] {
+  const results: StepFacts["toolResults"] = [];
   for (const raw of content) {
-    const part = raw as { type?: string; toolCallId?: string; toolName?: string; output?: unknown; error?: unknown };
-    if (part?.type !== 'tool-result' && part?.type !== 'tool-error') continue;
+    const part = raw as {
+      type?: string;
+      toolCallId?: string;
+      toolName?: string;
+      output?: unknown;
+      error?: unknown;
+    };
+    if (part?.type !== "tool-result" && part?.type !== "tool-error") continue;
     if (!part.toolCallId || !part.toolName) continue;
-    const output = part.type === 'tool-error'
-      ? { type: 'error-text', value: part.error instanceof Error ? `${part.error.name}: ${part.error.message}` : String(part.error) }
-      : part.output;
-    results.push({ toolCallId: part.toolCallId, toolName: part.toolName,
-      part: toolResultPart(part.toolCallId, part.toolName, output), preview: `${part.toolName}: ${JSON.stringify(output).slice(0, 180)}` });
+    const output =
+      part.type === "tool-error"
+        ? {
+            type: "error-text",
+            value:
+              part.error instanceof Error
+                ? `${part.error.name}: ${part.error.message}`
+                : String(part.error),
+          }
+        : part.output;
+    results.push({
+      toolCallId: part.toolCallId,
+      toolName: part.toolName,
+      part: toolResultPart(part.toolCallId, part.toolName, output),
+      preview: `${part.toolName}: ${JSON.stringify(output).slice(0, 180)}`,
+    });
   }
   return results;
 }
@@ -422,25 +654,43 @@ function stepToolResults(content: readonly unknown[]): StepFacts['toolResults'] 
  * 都会重设 model，只包构造时那一个等于整条链从第 0 步起就没被用过（docs/20 · W-AGENT-01）。
  * 别名没有链（registry 只认识它的回退目标）时退回裸模型，行为与 `resolve()` 一致。
  */
-export function aliasModel(registry: ModelRegistry, alias: string, options: FallbackOptions): LanguageModel {
+export function aliasModel(
+  registry: ModelRegistry,
+  alias: string,
+  options: FallbackOptions,
+): LanguageModel {
   const candidates = registry.chain(alias);
   return candidates.length
-    ? fallbackLanguageModel(candidates.map((candidate) => ({ model: candidate.model, id: candidate.info.modelId, rowId: candidate.info.id })), options)
+    ? fallbackLanguageModel(
+        candidates.map((candidate) => ({
+          model: candidate.model,
+          id: candidate.info.modelId,
+          rowId: candidate.info.id,
+        })),
+        options,
+      )
     : registry.resolve(alias);
 }
 
-const SENDABLE_ROLES = new Set(['user', 'assistant', 'tool']);
+const SENDABLE_ROLES = new Set(["user", "assistant", "tool"]);
 /** 系统旁白的标记。`load_skill` 注入 skill 正文时也用它 —— 同一个 wire 标记只能有一份定义。 */
-export const NOTE_PREFIX = '（系统提示）';
+export const NOTE_PREFIX = "（系统提示）";
 /**
  * AI SDK v7 起 `image` part 已废弃：`convertToLanguageModelPrompt` 每遇到一个就打一条
  * DeprecationWarning，然后原样转成 `{type:'file', data, mediaType}` 再发出去。写入侧
  * （`telegram/media.ts`）已经直接产出 `file`，这里兜的是库里那些历史 part —— parts 是持久化的，
  * 不在读出侧转，老会话就得一直刷警告到图片滚出窗口为止。
  */
-function imageToFilePart(part: Record<string, unknown>): Record<string, unknown> {
+function imageToFilePart(
+  part: Record<string, unknown>,
+): Record<string, unknown> {
   const { image, type: _type, ...rest } = part;
-  return { ...rest, type: 'file', data: image, mediaType: typeof part.mediaType === 'string' ? part.mediaType : 'image' };
+  return {
+    ...rest,
+    type: "file",
+    data: image,
+    mediaType: typeof part.mediaType === "string" ? part.mediaType : "image",
+  };
 }
 /**
  * system 只能出现在 instructions 里：AI SDK v7 的 `standardizePrompt` 在 `allowSystemInMessages`
@@ -460,23 +710,41 @@ function imageToFilePart(part: Record<string, unknown>): Record<string, unknown>
  */
 /** `web_fetch` / MCP 抓回来的图。**同一个 wire 标记只能有一份定义**（照 `NOTE_PREFIX` 的先例）：
  *  写入侧在 `media/web-assets.ts`、读出侧在下面，各写一遍就等于「存进去的和取出来的不是一个前缀」。 */
-export const WEB_ASSET_SCHEME = 'webasset://';
-const ASSET_SCHEMES = ['attachment://', WEB_ASSET_SCHEME] as const;
+export const WEB_ASSET_SCHEME = "webasset://";
+const ASSET_SCHEMES = ["attachment://", WEB_ASSET_SCHEME] as const;
 function assetRef(part: Record<string, unknown>): string | null {
-  return typeof part.ref === 'string' && ASSET_SCHEMES.some((scheme) => (part.ref as string).startsWith(scheme)) ? part.ref : null;
+  return typeof part.ref === "string" &&
+    ASSET_SCHEMES.some((scheme) => (part.ref as string).startsWith(scheme))
+    ? part.ref
+    : null;
 }
-function hydrateAttachment(part: Record<string, unknown>, attachments?: Sqlite): Record<string, unknown> {
-  const missing = { type: 'text', text: '[图片已不可用：附件文件已丢失]' };
+function hydrateAttachment(
+  part: Record<string, unknown>,
+  attachments?: Sqlite,
+): Record<string, unknown> {
+  const missing = { type: "text", text: "[图片已不可用：附件文件已丢失]" };
   if (!attachments) return missing;
   const ref = part.ref as string;
   const web = ref.startsWith(WEB_ASSET_SCHEME);
-  const id = ref.slice(ref.indexOf('//') + 2);
+  const id = ref.slice(ref.indexOf("//") + 2);
   const path = web
-    ? attachments.prepare('SELECT local_path FROM web_assets WHERE id=?').pluck().get(id) as string | undefined
-    : attachments.prepare("SELECT local_path FROM attachments WHERE id=? AND download_state='done'").pluck().get(id) as string | undefined;
+    ? (attachments
+        .prepare("SELECT local_path FROM web_assets WHERE id=?")
+        .pluck()
+        .get(id) as string | undefined)
+    : (attachments
+        .prepare(
+          "SELECT local_path FROM attachments WHERE id=? AND download_state='done'",
+        )
+        .pluck()
+        .get(id) as string | undefined);
   if (!path) return missing;
   const { ref: _ref, ...rest } = part;
-  try { return { ...rest, data: readFileSync(path).toString('base64') }; } catch { return missing; }
+  try {
+    return { ...rest, data: readFileSync(path).toString("base64") };
+  } catch {
+    return missing;
+  }
 }
 
 export interface ContextMessageOptions {
@@ -500,20 +768,22 @@ export interface ContextMessageOptions {
    *   且本轮没有新图、而这一轮的模型看不了图时走这一档 —— 用户这一轮发的是纯文本，没有理由
    *   为了三轮前那张图切走贵的那一档，也没有理由给他一句「这张图我没能真的看到」。
    */
-  degradeImages?: 'all' | 'history';
+  degradeImages?: "all" | "history";
 }
 
 /** 补出来的那条结果的正文。不伪造成功，只如实说结果没了（照 `hydrateAttachment` 的占位先例）。 */
-const ORPHAN_TOOL_RESULT = '[工具结果缺失：这次调用的结果没有被记录下来]';
+const ORPHAN_TOOL_RESULT = "[工具结果缺失：这次调用的结果没有被记录下来]";
 /** `degradeImages` 时替掉图片的占位文本，以及回复末尾那句提示（`docs/08 §7.2`）。 */
-const IMAGE_UNSUPPORTED = '[图片：当前模型不支持看图，本轮没能查看]';
-export const VISION_UNSUPPORTED_NOTICE = '（当前模型不支持看图，这张图我没能真的看到。）';
+const IMAGE_UNSUPPORTED = "[图片：当前模型不支持看图，本轮没能查看]";
+export const VISION_UNSUPPORTED_NOTICE =
+  "（当前模型不支持看图，这张图我没能真的看到。）";
 /**
  * `degradeImages:'history'` 的占位文本。**写清楚怎么才能看到**：这一档下重新发一次或引用那条
  * 消息就会被算成「本轮的图」，于是切回能看图的别名 —— 不写的话模型只知道自己看不到，
  * 只能猜或者绕远路（那正是 `docs/00 §2` 里那 11 步的由来）。
  */
-const HISTORY_IMAGE_UNSUPPORTED = '[图片：更早轮次里的图，当前模型不看图。要看的话请用户重新发一次或引用那条消息]';
+const HISTORY_IMAGE_UNSUPPORTED =
+  "[图片：更早轮次里的图，当前模型不看图。要看的话请用户重新发一次或引用那条消息]";
 
 /**
  * 已经物化成 `ModelMessage` 的那一份里，把图片 part 整体换成占位文本 —— `prepareStep` 的当步兜底
@@ -524,12 +794,24 @@ const HISTORY_IMAGE_UNSUPPORTED = '[图片：更早轮次里的图，当前模�
 function degradeImageParts(messages: ModelMessage[]): ModelMessage[] {
   return messages.map((message) => {
     const content = (message as { content?: unknown }).content;
-    if (!Array.isArray(content) || !content.some((part) => isImagePart(part))) return message;
-    return { ...message, content: content.map((part) => isImagePart(part) ? { type: 'text', text: HISTORY_IMAGE_UNSUPPORTED } : part) } as ModelMessage;
+    if (!Array.isArray(content) || !content.some((part) => isImagePart(part)))
+      return message;
+    return {
+      ...message,
+      content: content.map((part) =>
+        isImagePart(part)
+          ? { type: "text", text: HISTORY_IMAGE_UNSUPPORTED }
+          : part,
+      ),
+    } as ModelMessage;
   });
 }
 
-export function contextMessages(turn: RuntimeTurnContext, attachments?: Sqlite, options?: ContextMessageOptions): ModelMessage[] {
+export function contextMessages(
+  turn: RuntimeTurnContext,
+  attachments?: Sqlite,
+  options?: ContextMessageOptions,
+): ModelMessage[] {
   const source = [...turn.snapshot.messages, ...turn.delta];
   // **读出侧自愈：没有配对结果的 tool-call 现补一条。** provider 见到这种形状会拒收整个请求
   // （中转站的表现是 200 + 0 步），而 parts 是持久化的 —— 不在读出侧兜，该会话在 `/new` 之前
@@ -549,13 +831,23 @@ export function contextMessages(turn: RuntimeTurnContext, attachments?: Sqlite, 
   const unclaimed = new Map<string, number>();
   for (const message of source) {
     for (const part of message.parts as Array<Record<string, unknown>>) {
-      if (part?.type === 'tool-result' && typeof part.toolCallId === 'string') unclaimed.set(part.toolCallId, (unclaimed.get(part.toolCallId) ?? 0) + 1);
+      if (part?.type === "tool-result" && typeof part.toolCallId === "string")
+        unclaimed.set(
+          part.toolCallId,
+          (unclaimed.get(part.toolCallId) ?? 0) + 1,
+        );
     }
   }
-  const forget = (id: string): void => { const left = (unclaimed.get(id) ?? 0) - 1; if (left > 0) unclaimed.set(id, left); else unclaimed.delete(id); };
+  const forget = (id: string): void => {
+    const left = (unclaimed.get(id) ?? 0) - 1;
+    if (left > 0) unclaimed.set(id, left);
+    else unclaimed.delete(id);
+  };
   /** 走到某条消息时先把**这条**里的结果划掉：它们属于更早的调用，不能再认领后面的。 */
   const passResults = (parts: Array<Record<string, unknown>>): void => {
-    for (const part of parts) if (part?.type === 'tool-result' && typeof part.toolCallId === 'string') forget(part.toolCallId);
+    for (const part of parts)
+      if (part?.type === "tool-result" && typeof part.toolCallId === "string")
+        forget(part.toolCallId);
   };
   const claim = (id: string): boolean => {
     if (!(unclaimed.get(id) ?? 0)) return false;
@@ -573,34 +865,76 @@ export function contextMessages(turn: RuntimeTurnContext, attachments?: Sqlite, 
     // 也是 `origin:'background'`（`renderArchivedMessage`），按 origin 分等于把用户此刻指着的
     // 那张图也当成历史抹掉。
     const historical = index < turn.snapshot.messages.length;
-    const degradeThis = options?.degradeImages === 'all' || (options?.degradeImages === 'history' && historical);
-    const content = (message.parts as Array<Record<string, unknown>>).map((part) => {
-      if (part?.type === 'tool-result') return { ...part, output: normalizeToolOutput(part.output) };
-      if (degradeThis && isImagePart(part)) return { type: 'text', text: options?.degradeImages === 'history' ? HISTORY_IMAGE_UNSUPPORTED : IMAGE_UNSUPPORTED };
-      if (part?.type === 'image') return imageToFilePart(part);
-      if (part?.type === 'file' && assetRef(part)) return hydrateAttachment(part, attachments);
-      // 易变段现在和用户正文同处 user role，正文里能写出 `<system-instructions` 就等于能伪造它。
-      // 只改 text 字符串，判别字段一个不碰（docs/02 红线 14）。
-      if (typeof part?.text === 'string') return { ...part, text: escapeSystemInstructions(part.text) };
-      return part;
-    });
-    if (SENDABLE_ROLES.has(message.role)) messages.push({ role: message.role, content } as ModelMessage);
+    const degradeThis =
+      options?.degradeImages === "all" ||
+      (options?.degradeImages === "history" && historical);
+    const content = (message.parts as Array<Record<string, unknown>>).map(
+      (part) => {
+        if (part?.type === "tool-result")
+          return { ...part, output: normalizeToolOutput(part.output) };
+        if (degradeThis && isImagePart(part))
+          return {
+            type: "text",
+            text:
+              options?.degradeImages === "history"
+                ? HISTORY_IMAGE_UNSUPPORTED
+                : IMAGE_UNSUPPORTED,
+          };
+        if (part?.type === "image") return imageToFilePart(part);
+        if (part?.type === "file" && assetRef(part))
+          return hydrateAttachment(part, attachments);
+        // 易变段现在和用户正文同处 user role，正文里能写出 `<system-instructions` 就等于能伪造它。
+        // 只改 text 字符串，判别字段一个不碰（docs/02 红线 14）。
+        if (typeof part?.text === "string")
+          return { ...part, text: escapeSystemInstructions(part.text) };
+        return part;
+      },
+    );
+    if (SENDABLE_ROLES.has(message.role))
+      messages.push({ role: message.role, content } as ModelMessage);
     else {
-      const text = content.map((part) => typeof part?.text === 'string' ? part.text : '').filter(Boolean).join('\n');
-      messages.push({ role: 'user', content: [{ type: 'text', text: `${NOTE_PREFIX}${text}` }] } as ModelMessage);
+      const text = content
+        .map((part) => (typeof part?.text === "string" ? part.text : ""))
+        .filter(Boolean)
+        .join("\n");
+      messages.push({
+        role: "user",
+        content: [{ type: "text", text: `${NOTE_PREFIX}${text}` }],
+      } as ModelMessage);
     }
     passResults(message.parts as Array<Record<string, unknown>>);
-    const orphans = content.filter((part) => part?.type === 'tool-call' && typeof part.toolCallId === 'string' && !claim(part.toolCallId));
+    const orphans = content.filter(
+      (part) =>
+        part?.type === "tool-call" &&
+        typeof part.toolCallId === "string" &&
+        !claim(part.toolCallId),
+    );
     if (orphans.length) {
       repaired.push(...orphans.map((part) => part.toolCallId as string));
-      messages.push({ role: 'tool', content: orphans.map((part) => toolResultPart(part.toolCallId as string,
-        typeof part.toolName === 'string' ? part.toolName : 'unknown', { type: 'error-text', value: ORPHAN_TOOL_RESULT })) } as ModelMessage);
+      messages.push({
+        role: "tool",
+        content: orphans.map((part) =>
+          toolResultPart(
+            part.toolCallId as string,
+            typeof part.toolName === "string" ? part.toolName : "unknown",
+            { type: "error-text", value: ORPHAN_TOOL_RESULT },
+          ),
+        ),
+      } as ModelMessage);
     }
     if (index < turn.snapshot.messages.length) stored = messages.length;
   }
   if (repaired.length) options?.onOrphanToolCalls?.(repaired);
-  if (options?.cacheBreakpoint && stored > 0) messages[stored - 1] = { ...messages[stored - 1]!, providerOptions: { anthropic: { cacheControl: { type: 'ephemeral' } } } } as ModelMessage;
-  if (options?.volatile) messages.push({ role: 'user', content: [{ type: 'text', text: systemInstructions(options.volatile) }] } as ModelMessage);
+  if (options?.cacheBreakpoint && stored > 0)
+    messages[stored - 1] = {
+      ...messages[stored - 1]!,
+      providerOptions: { anthropic: { cacheControl: { type: "ephemeral" } } },
+    } as ModelMessage;
+  if (options?.volatile)
+    messages.push({
+      role: "user",
+      content: [{ type: "text", text: systemInstructions(options.volatile) }],
+    } as ModelMessage);
   return messages;
 }
 
@@ -617,7 +951,9 @@ export interface MainAgentDependencies {
   quota?: QuotaGuard;
   reservation?: QuotaReservation | null;
   skills?: SkillLoader;
-  plugins?: { hook(name: string, ...arguments_: unknown[]): Promise<unknown[]> };
+  plugins?: {
+    hook(name: string, ...arguments_: unknown[]): Promise<unknown[]>;
+  };
   context: ContextEngine;
   agents?: AgentManager;
   /** 自撰写工具的注册器。每轮开始同步一次，见 `runMainAgentInternal` 顶部那一行。 */
@@ -636,14 +972,30 @@ export interface MainPromptAssembly extends PromptBuildResult {
   runtime: string;
 }
 
-type PromptAssemblyDependencies = Pick<MainAgentDependencies, 'config' | 'tools' | 'prompts' | 'documents' | 'workspace' | 'skills' | 'agents' | 'quota' | 'reservation' | 'containers'>;
+type PromptAssemblyDependencies = Pick<
+  MainAgentDependencies,
+  | "config"
+  | "tools"
+  | "prompts"
+  | "documents"
+  | "workspace"
+  | "skills"
+  | "agents"
+  | "quota"
+  | "reservation"
+  | "containers"
+>;
 
 /**
  * RUNTIME 块里的发起人。昵称与用户名是用户可控内容，`formatSpeakerIdentity` 已经清掉换行与
  * 方括号 —— 一个带换行的昵称在这里等于能往 RUNTIME 块里塞一整行「你的有效权限：owner」。
  */
 function initiatorDescription(turn: RuntimeTurnContext): string {
-  return formatSpeakerIdentity({ name: turn.initiator?.name ?? null, username: turn.initiator?.username ?? null, userId: turn.initiatorUserId });
+  return formatSpeakerIdentity({
+    name: turn.initiator?.name ?? null,
+    username: turn.initiator?.username ?? null,
+    userId: turn.initiatorUserId,
+  });
 }
 
 /**
@@ -652,9 +1004,9 @@ function initiatorDescription(turn: RuntimeTurnContext): string {
  * 它和昵称一样是用户可控内容，一个带换行的群名等于能往这个块里塞一行「你的有效权限：owner」。
  */
 export function chatDescription(turn: RuntimeTurnContext): string {
-  const topic = turn.threadId === null ? 'topic 无' : `topic ${turn.threadId}`;
-  const title = turn.chatTitle ? sanitizeIdentity(turn.chatTitle) : '';
-  const where = turn.isPrivate ? '私聊' : title ? `群聊「${title}」` : '群聊';
+  const topic = turn.threadId === null ? "topic 无" : `topic ${turn.threadId}`;
+  const title = turn.chatTitle ? sanitizeIdentity(turn.chatTitle) : "";
+  const where = turn.isPrivate ? "私聊" : title ? `群聊「${title}」` : "群聊";
   return `${where}(chat ${turn.chatId}, ${topic})  上下文键 ${turn.key}`;
 }
 
@@ -669,10 +1021,14 @@ export function chatDescription(turn: RuntimeTurnContext): string {
  * 名字清单那一档带「常驻工具」四个字，是给 KERNEL 里「见 TOOL CATALOG 的**常驻部分**」一个能对上
  * 的锚点。默认那一档**不加任何标题** —— 加了就不再是「现状逐字节不变」。
  */
-function residentCatalog(resident: readonly RegisteredTool[], withDescriptions: boolean): string {
-  if (!resident.length) return '';
-  return withDescriptions ? resident.map((tool) => `- ${tool.name}: ${tool.description}`).join('\n')
-    : `常驻工具（可直接调用）：${resident.map((tool) => tool.name).join(', ')}`;
+function residentCatalog(
+  resident: readonly RegisteredTool[],
+  withDescriptions: boolean,
+): string {
+  if (!resident.length) return "";
+  return withDescriptions
+    ? resident.map((tool) => `- ${tool.name}: ${tool.description}`).join("\n")
+    : `常驻工具（可直接调用）：${resident.map((tool) => tool.name).join(", ")}`;
 }
 /** 每组超过这个数就只列前 `DEFERRED_GROUP_HEAD` 个（docs/06 §1）：摘要行也在易变段，每步重发。 */
 const DEFERRED_GROUP_CAP = 12;
@@ -688,18 +1044,35 @@ const DEFERRED_GROUP_HEAD = 10;
  * 组的顺序照 `activeView()` 交回的原序（`sourcePriority desc, name asc` 的首次出现顺序），
  * **不要重排**：这一段在易变段里，无谓的重排就是每步把提示词改一次。
  */
-function deferredCatalog(groups: readonly DeferredToolGroup[], total: number): string {
-  if (!total) return '';
+function deferredCatalog(
+  groups: readonly DeferredToolGroup[],
+  total: number,
+): string {
+  if (!total) return "";
   const lines = groups.map((group) => {
-    const shown = group.total > DEFERRED_GROUP_CAP ? group.names.slice(0, DEFERRED_GROUP_HEAD) : group.names;
-    return `- [${group.key}] ${group.total} 个：${shown.join(', ')}${shown.length < group.total ? `, …等 ${group.total} 个` : ''}`;
+    const shown =
+      group.total > DEFERRED_GROUP_CAP
+        ? group.names.slice(0, DEFERRED_GROUP_HEAD)
+        : group.names;
+    return `- [${group.key}] ${group.total} 个：${shown.join(", ")}${shown.length < group.total ? `, …等 ${group.total} 个` : ""}`;
   });
-  return [`【折叠工具 · 共 ${total} 个，本步不可直接调用；用 search_tools 按关键词或名字展开】`, ...lines].join('\n');
+  return [
+    `【折叠工具 · 共 ${total} 个，本步不可直接调用；用 search_tools 按关键词或名字展开】`,
+    ...lines,
+  ].join("\n");
 }
 
 /** Runtime 与 WebUI 预览共用这一条组装路径；预览出来的 block 必须就是下一轮会发给模型的 block。 */
-export function assembleMainPrompt(turn: RuntimeTurnContext, dependencies: PromptAssemblyDependencies, executionContext?: ToolExecutionContext): MainPromptAssembly {
-  const toolContext = executionContext ?? { turn, workspace: dependencies.workspace, agentKind: 'main' };
+export function assembleMainPrompt(
+  turn: RuntimeTurnContext,
+  dependencies: PromptAssemblyDependencies,
+  executionContext?: ToolExecutionContext,
+): MainPromptAssembly {
+  const toolContext = executionContext ?? {
+    turn,
+    workspace: dependencies.workspace,
+    agentKind: "main",
+  };
   // **一次**取数供三个消费点（常驻段、折叠摘要段、RUNTIME 的两行）。此前是 `activeNames()` +
   // `catalog()` 各跑一遍整条过滤链，而那条链会调每个工具的 `available()` —— 两遍不只是浪费，
   // 中间还留了一个「两次结果不一致」的缝（`available()` 读的是活的配置与容器状态）。
@@ -711,56 +1084,127 @@ export function assembleMainPrompt(turn: RuntimeTurnContext, dependencies: Promp
   // （`perChat` 是 `z.record(z.unknown())`），所以从合并后的本轮配置里按名字取（docs/27 · C-08）。
   // 形态闸在 `PromptDocuments.paths` 里：这个值会被当成 `memory/` 下的路径段用。
   const characterOverride = (turn.config as Record<string, unknown>).character;
-  const documents = dependencies.documents.readForPrompt({ userId: turn.initiatorUserId, isPrivate: turn.isPrivate,
-    ...(typeof characterOverride === 'string' && characterOverride ? { characterOverride } : {}) });
+  const documents = dependencies.documents.readForPrompt({
+    userId: turn.initiatorUserId,
+    isPrivate: turn.isPrivate,
+    ...(typeof characterOverride === "string" && characterOverride
+      ? { characterOverride }
+      : {}),
+  });
   // 目录按**本轮真正可用的工具**过滤：一份讲 `install_mcp` 的说明书，在那个工具没开的时候
   // 出现在目录里只会把模型带进死胡同（实测：它读完说明书找不到工具，转头用 bash 逆向代码库）。
   // **过滤用的是全量名字（常驻 + 折叠）**：一份讲某个折叠 MCP 工具的 skill 仍该出现在目录里 ——
   // 折叠是「要先展开一次」，不是「没有」，而模型读完 skill 正文正好知道该展开哪个。
-  const skillCatalog = dependencies.skills?.catalog(turn.effectiveRole, [...activeTools, ...view.deferred.map((tool) => tool.name)])
-    .map((skill) => `- skill:${skill.name}: ${skill.description}`).join('\n') ?? '';
+  const skillCatalog =
+    dependencies.skills
+      ?.catalog(turn.effectiveRole, [
+        ...activeTools,
+        ...view.deferred.map((tool) => tool.name),
+      ])
+      .map((skill) => `- skill:${skill.name}: ${skill.description}`)
+      .join("\n") ?? "";
   // `prompt.includeToolCatalog=false` 时只发工具名（RUNTIME 里那一行），不发描述。省的是每轮
   // 几百到几千 token，代价是模型少了参数用法的提示 —— 所以默认开着。
   //
   // **skill 目录不跟着工具目录一起关**（docs/06 §1）：它此前塞在这个三元的 then 分支里，于是
   // 关掉工具目录连带把 skill 清单也关了 —— 而 skill 目录不与任何东西重复（RUNTIME 那行「可用
   // 工具」只列工具），关掉模型就不知道有哪些 skill 可载。所以两段各自渲染，最后一起拼。
-  const catalog = [...(dependencies.config.prompt.includeToolCatalog
-    ? [residentCatalog(view.resident, dependencies.config.tools.catalog.residentDescriptions), deferredCatalog(view.groups, view.deferred.length)]
-    : []), skillCatalog].filter(Boolean).join('\n');
+  const catalog = [
+    ...(dependencies.config.prompt.includeToolCatalog
+      ? [
+          residentCatalog(
+            view.resident,
+            dependencies.config.tools.catalog.residentDescriptions,
+          ),
+          deferredCatalog(view.groups, view.deferred.length),
+        ]
+      : []),
+    skillCatalog,
+  ]
+    .filter(Boolean)
+    .join("\n");
   const runtimeShow = dependencies.config.prompt.runtimeBlock;
-  const spent = dependencies.quota && dependencies.reservation ? dependencies.quota.status(dependencies.reservation) : null;
-  const runtime = runtimeBlock({ now: new Date(), timezone: dependencies.config.general.timezone,
-    chatDescription: chatDescription(turn), triggerDescription: initiatorDescription(turn), role: turn.effectiveRole,
-    tools: activeTools, agents: dependencies.config.agent.agents.filter((agent) => ['blocked', 'limited', 'trusted', 'owner'].indexOf(turn.effectiveRole) >= ['blocked', 'limited', 'trusted', 'owner'].indexOf(agent.minRole)).map((agent) => `${agent.name}(${agent.description})`),
-    contextMessages: turn.snapshot.messages.length, contextTokens: turn.snapshot.tokens, maxMessages: dependencies.config.context.limit.maxMessages,
-    maxTokens: dependencies.config.context.limit.tokens, workspace: dependencies.workspace,
+  const spent =
+    dependencies.quota && dependencies.reservation
+      ? dependencies.quota.status(dependencies.reservation)
+      : null;
+  const runtime = runtimeBlock({
+    now: new Date(),
+    timezone: dependencies.config.general.timezone,
+    chatDescription: chatDescription(turn),
+    triggerDescription: initiatorDescription(turn),
+    role: turn.effectiveRole,
+    tools: activeTools,
+    agents: dependencies.config.agent.agents
+      .filter(
+        (agent) =>
+          ["blocked", "limited", "trusted", "owner"].indexOf(
+            turn.effectiveRole,
+          ) >=
+          ["blocked", "limited", "trusted", "owner"].indexOf(agent.minRole),
+      )
+      .map((agent) => `${agent.name}(${agent.description})`),
+    contextMessages: turn.snapshot.messages.length,
+    contextTokens: turn.snapshot.tokens,
+    maxMessages: dependencies.config.context.limit.maxMessages,
+    maxTokens: dependencies.config.context.limit.tokens,
+    workspace: dependencies.workspace,
     // 持久容器那一档要说清「常驻 / 还剩多久 / 出不出网」，否则模型不会去起常驻进程（docs/06 §1）。
-    sandbox: sandboxLabel(dependencies.config.sandbox.mode, dependencies.config.sandbox.persistent,
-      dependencies.containers?.expiryHintFor(turn.chatId) ?? { state: 'none' }),
+    sandbox: sandboxLabel(
+      dependencies.config.sandbox.mode,
+      dependencies.config.sandbox.persistent,
+      dependencies.containers?.expiryHintFor(turn.chatId) ?? { state: "none" },
+    ),
     // 只在真有本轮预留时才给得出额度；WebUI 的提示词预览没有预留，那一行本来就不该出现。
-    ...(spent ? { quota: `本轮已用 $${spent.committed.toFixed(4)} / 上限 $${dependencies.config.quota.perTurn.maxCostUsd.toFixed(2)}` } : {}),
+    ...(spent
+      ? {
+          quota: `本轮已用 $${spent.committed.toFixed(4)} / 上限 $${dependencies.config.quota.perTurn.maxCostUsd.toFixed(2)}`,
+        }
+      : {}),
     // 刚被清空过的那一轮说一句。措辞按 `context.recallBarrier` 分岔：隔断开着时归档也翻不动，
     // 不说清楚模型会在那条死路上来回试（`read_messages` 会返回空，而它无从知道为什么）。
-    ...(turn.contextCleared ? { contextCleared: dependencies.config.context.recallBarrier
-      ? '刚被清空。之前的对话不在你眼前，归档检索也查不到清空之前的消息 —— 不要反复尝试，需要的话请用户重说一次。'
-      : '刚被清空。之前的对话不在你眼前；确有必要时可用 read_messages / search_messages 去归档里查，但别把它当默认动作。' } : {}),
+    ...(turn.contextCleared
+      ? {
+          contextCleared: dependencies.config.context.recallBarrier
+            ? "刚被清空。之前的对话不在你当前上下文中，归档检索也查不到清空之前的消息 —— 不要反复尝试，需要的话请用户重说一次。"
+            : "刚被清空。之前的对话不在你当前上下文中；有必要时可用 read_messages / search_messages 去归档里查。",
+        }
+      : {}),
     // 工具名只在目录关掉时才列进 RUNTIME：开着的时候 TOOL CATALOG 的常驻段已经列过了，两处
     // 同源（都是这一次 `activeView()` 的 `resident`），重复一遍等于每轮白付一份易变段的钱
     // （docs/06 §1.2）。折叠的那些不进这一行，只在后缀里报一个数。
-    show: { quota: runtimeShow.showQuota, contextWatermark: runtimeShow.showContextWatermark, workspace: runtimeShow.showWorkspace,
-      toolNames: !dependencies.config.prompt.includeToolCatalog },
+    show: {
+      quota: runtimeShow.showQuota,
+      contextWatermark: runtimeShow.showContextWatermark,
+      workspace: runtimeShow.showWorkspace,
+      toolNames: !dependencies.config.prompt.includeToolCatalog,
+    },
     // 截断告知与折叠计数都从上面那一次 `activeView()` 穿下来。折叠数为 0 时 `runtimeBlock` 自己
     // 不加后缀，所以这里无条件给。
-    ...(view.truncated ? { catalogTruncated: view.truncated } : {}), deferredTools: view.deferred.length });
-  const promptInput = { character: documents.character, assist: documents.assist, catalog, publicMemory: documents.publicMemory, runtime,
+    ...(view.truncated ? { catalogTruncated: view.truncated } : {}),
+    deferredTools: view.deferred.length,
+  });
+  const promptInput = {
+    character: documents.character,
+    assist: documents.assist,
+    catalog,
+    publicMemory: documents.publicMemory,
+    runtime,
     maxTokens: dependencies.config.prompt.maxTokens,
     // 判据不能只看 `includeToolCatalog`：关掉工具目录之后这一块里还剩 skill 清单，整块跳掉就是
     // 上面那条耦合的另一半。两半都空时才真的不渲染（纯 `includeToolCatalog=false` 且没装 skill，
     // 与改动之前逐字节一致）。
-    includeCatalog: dependencies.config.prompt.includeToolCatalog || Boolean(catalog) };
-  if (documents.privateMemory !== undefined) Object.assign(promptInput, { privateMemory: documents.privateMemory });
-  return { ...dependencies.prompts.build(promptInput), activeTools, catalog, runtime };
+    includeCatalog:
+      dependencies.config.prompt.includeToolCatalog || Boolean(catalog),
+  };
+  if (documents.privateMemory !== undefined)
+    Object.assign(promptInput, { privateMemory: documents.privateMemory });
+  return {
+    ...dependencies.prompts.build(promptInput),
+    activeTools,
+    catalog,
+    runtime,
+  };
 }
 
 /**
@@ -772,10 +1216,21 @@ export function assembleMainPrompt(turn: RuntimeTurnContext, dependencies: Promp
  *
  * 仍传数组而不是裸字符串：Anthropic 的 `cache_control` 要挂在消息对象上。
  */
-function stableInstructions(prompt: { stable: string }, providerKind: string): Instructions {
-  return [providerKind === 'anthropic'
-    ? { role: 'system' as const, content: prompt.stable, providerOptions: { anthropic: { cacheControl: { type: 'ephemeral' } } } }
-    : { role: 'system' as const, content: prompt.stable }];
+function stableInstructions(
+  prompt: { stable: string },
+  providerKind: string,
+): Instructions {
+  return [
+    providerKind === "anthropic"
+      ? {
+          role: "system" as const,
+          content: prompt.stable,
+          providerOptions: {
+            anthropic: { cacheControl: { type: "ephemeral" } },
+          },
+        }
+      : { role: "system" as const, content: prompt.stable },
+  ];
 }
 
 function estimateModelMessages(messages: ModelMessage[]): number {
@@ -796,7 +1251,11 @@ export interface MainAgentStreamResult {
 }
 
 /** `result.stream` 里我们只认 `text-delta`、`finish-step` 与 `error`；其余（reasoning、tool-call）一概跳过。 */
-interface StreamPartLike { type: string; text?: string; error?: unknown }
+interface StreamPartLike {
+  type: string;
+  text?: string;
+  error?: unknown;
+}
 
 /**
  * 把逐 step 的旁白拼成一条消息，**步边界恰好一个空行**。
@@ -822,21 +1281,38 @@ interface StreamPartLike { type: string; text?: string; error?: unknown }
  * `console.error`），流照常正常结束 —— 此前这里明文跳过它，于是「上游挂了」这条路在日志里
  * 是隐形的，0 步的那次连 `model.error` 都没留下。
  */
-export async function* stepSeparatedText(full: AsyncIterable<StreamPartLike>, trailing?: () => Promise<string>, onChunk?: (chunk: string) => void,
-  onError?: (error: unknown) => void): AsyncGenerator<string> {
-  let wrote = false;        // 这一轮到底产出过**非空白**正文没有
+export async function* stepSeparatedText(
+  full: AsyncIterable<StreamPartLike>,
+  trailing?: () => Promise<string>,
+  onChunk?: (chunk: string) => void,
+  onError?: (error: unknown) => void,
+): AsyncGenerator<string> {
+  let wrote = false; // 这一轮到底产出过**非空白**正文没有
   let pendingBreak = false; // 上次产出正文之后跨过了 step 边界
-  let held = '';            // 扣住不发的尾部空白
-  function* emit(text: string): Generator<string> { if (onChunk) onChunk(text); yield text; }
+  let held = ""; // 扣住不发的尾部空白
+  function* emit(text: string): Generator<string> {
+    if (onChunk) onChunk(text);
+    yield text;
+  }
   for await (const part of full) {
-    if (part.type === 'error') { onError?.(part.error); continue; }
+    if (part.type === "error") {
+      onError?.(part.error);
+      continue;
+    }
     // 边界一到，上一步的尾部空白就作废：它要被换成恰好一个空行。连续多个空步只 arm 一次。
-    if (part.type === 'finish-step') { held = ''; if (wrote) pendingBreak = true; continue; }
-    if (part.type !== 'text-delta' || !part.text) continue;
+    if (part.type === "finish-step") {
+      held = "";
+      if (wrote) pendingBreak = true;
+      continue;
+    }
+    if (part.type !== "text-delta" || !part.text) continue;
     const core = part.text.trim();
-    if (!core) { if (wrote && !pendingBreak) held += part.text; continue; }
+    if (!core) {
+      if (wrote && !pendingBreak) held += part.text;
+      continue;
+    }
     const lead = /^\s*/.exec(part.text)![0];
-    const gap = wrote ? (pendingBreak ? '\n\n' : held + lead) : '';
+    const gap = wrote ? (pendingBreak ? "\n\n" : held + lead) : "";
     yield* emit(gap + core);
     held = /\s*$/.exec(part.text)![0];
     wrote = true;
@@ -849,43 +1325,113 @@ export async function* stepSeparatedText(full: AsyncIterable<StreamPartLike>, tr
   yield* emit(wrote ? `\n\n${extra}` : extra);
 }
 
-const WRAP_UP_INSTRUCTION = '刚才的工具调用已经结束，但你还没有给出结论。把结果告诉用户：成了是什么，没成是卡在哪。不要再调用工具，不要复述过程。';
+const WRAP_UP_INSTRUCTION =
+  "刚才的工具调用已经结束，但你还没有给出结论。把结果告诉用户：成功了什么，没成功问题在哪。不要再调用工具，不要复述过程。";
 
-export async function streamMainAgent(turn: RuntimeTurnContext, dependencies: MainAgentDependencies): Promise<MainAgentStreamResult> {
-  return runMainAgentInternal(turn, dependencies, true) as Promise<MainAgentStreamResult>;
+export async function streamMainAgent(
+  turn: RuntimeTurnContext,
+  dependencies: MainAgentDependencies,
+): Promise<MainAgentStreamResult> {
+  return runMainAgentInternal(
+    turn,
+    dependencies,
+    true,
+  ) as Promise<MainAgentStreamResult>;
 }
-export async function runMainAgent(turn: RuntimeTurnContext, dependencies: MainAgentDependencies): Promise<string> {
+export async function runMainAgent(
+  turn: RuntimeTurnContext,
+  dependencies: MainAgentDependencies,
+): Promise<string> {
   return runMainAgentInternal(turn, dependencies, false) as Promise<string>;
 }
 
-async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: MainAgentDependencies, streaming: boolean): Promise<string | MainAgentStreamResult> {
+async function runMainAgentInternal(
+  turn: RuntimeTurnContext,
+  dependencies: MainAgentDependencies,
+  streaming: boolean,
+): Promise<string | MainAgentStreamResult> {
   // 自撰写的工具在**开轮前**同步进注册表：`toolSet` 下面就冻结了，轮内再注册只会让
   // `prepareStep` 的 `activeTools` 报出一个 `toolSet` 里没有的名字。**只在主 agent 做** ——
   // 子 agent 跑在父轮内部，在那里重扫会把父轮已经冻结的那份工具集弄脱节。
   dependencies.customTools?.syncIfChanged();
-  const toolContext: ToolExecutionContext = { turn, workspace: dependencies.workspace, agentKind: 'main' };
+  const toolContext: ToolExecutionContext = {
+    turn,
+    workspace: dependencies.workspace,
+    agentKind: "main",
+  };
   // 子 agent 从 turn 上取同一份预留：spawn_agent 在工具层执行，拿不到这里的 dependencies。
   turn.reservation = dependencies.reservation ?? null;
-  await dependencies.plugins?.hook('beforeTurn', { turn });
+  await dependencies.plugins?.hook("beforeTurn", { turn });
   // `docs/10 §1` 那张图里的 span B。抛出来时也要落一行 —— 组装是同步的，但它会读盘（人格、记忆、
   // skill 目录），一个不可读的 CHARACTER.md 此前在 trace 里什么都不留。
-  const promptSpan = dependencies.log.span({ level: 'debug', kind: 'prompt.build', summary: `Assembled prompt for ${turn.key}`,
-    traceId: turn.turnId, ...turnParent(turn), chatId: turn.chatId, userId: turn.initiatorUserId, key: turn.key });
+  const promptSpan = dependencies.log.span({
+    level: "debug",
+    kind: "prompt.build",
+    summary: `Assembled prompt for ${turn.key}`,
+    traceId: turn.turnId,
+    ...turnParent(turn),
+    chatId: turn.chatId,
+    userId: turn.initiatorUserId,
+    key: turn.key,
+  });
   let prompt: MainPromptAssembly;
-  try { prompt = assembleMainPrompt(turn, dependencies, toolContext); }
-  catch (error) { promptSpan.end(undefined, error); throw error; }
-  promptSpan.end({ blockTokens: prompt.blocks, total: Object.values(prompt.blocks).reduce((sum, value) => sum + value, 0), truncated: prompt.truncated });
+  try {
+    prompt = assembleMainPrompt(turn, dependencies, toolContext);
+  } catch (error) {
+    promptSpan.end(undefined, error);
+    throw error;
+  }
+  promptSpan.end({
+    blockTokens: prompt.blocks,
+    total: Object.values(prompt.blocks).reduce((sum, value) => sum + value, 0),
+    truncated: prompt.truncated,
+  });
   const activeNames = prompt.activeTools;
   // 预算被 catalog + runtime 吃满时 CHARACTER.md 会被整段截成一句「（记忆已截断…）」——
   // 人格静默消失，而日志里一个字都没有（docs/20 · W-PROMPT-01）。
-  if (prompt.truncated.length) dependencies.log.event({ level: 'warn', kind: 'prompt.truncated', summary: `Prompt blocks truncated: ${prompt.truncated.join(', ')}`, traceId: turn.turnId, ...turnParent(turn), key: turn.key, data: { truncated: prompt.truncated, blocks: prompt.blocks, maxTokens: dependencies.config.prompt.maxTokens } });
-  const toolSet = toolSetFor(dependencies.tools, dependencies.tools.active(turn.effectiveRole, toolContext), toolContext);
-  const persistedAlias = readAppKv<string>(dependencies.db, modelAliasKey(turn.key));
-  const alias = turn.modelAliasOverride ?? persistedAlias ?? dependencies.config.agent.main.modelAlias;
-  const mainRun = dependencies.agents?.createMain(turn.turnId, turn.effectiveRole, alias);
+  if (prompt.truncated.length)
+    dependencies.log.event({
+      level: "warn",
+      kind: "prompt.truncated",
+      summary: `Prompt blocks truncated: ${prompt.truncated.join(", ")}`,
+      traceId: turn.turnId,
+      ...turnParent(turn),
+      key: turn.key,
+      data: {
+        truncated: prompt.truncated,
+        blocks: prompt.blocks,
+        maxTokens: dependencies.config.prompt.maxTokens,
+      },
+    });
+  const toolSet = toolSetFor(
+    dependencies.tools,
+    dependencies.tools.active(turn.effectiveRole, toolContext),
+    toolContext,
+  );
+  const persistedAlias = readAppKv<string>(
+    dependencies.db,
+    modelAliasKey(turn.key),
+  );
+  const alias =
+    turn.modelAliasOverride ??
+    persistedAlias ??
+    dependencies.config.agent.main.modelAlias;
+  const mainRun = dependencies.agents?.createMain(
+    turn.turnId,
+    turn.effectiveRole,
+    alias,
+  );
   const chain = dependencies.registry.chain(alias);
   if (!chain.length) throw new Error(`model alias unavailable: ${alias}`);
-  if (dependencies.config.quota.requirePricing && turn.effectiveRole !== 'owner' && chain.some((candidate) => candidate.info.priceIn === null || candidate.info.priceOut === null)) throw new Error('model_pricing_required');
+  if (
+    dependencies.config.quota.requirePricing &&
+    turn.effectiveRole !== "owner" &&
+    chain.some(
+      (candidate) =>
+        candidate.info.priceIn === null || candidate.info.priceOut === null,
+    )
+  )
+    throw new Error("model_pricing_required");
   /**
    * **含图轮次的 vision 自动切换**（`docs/04 §5.2`、`docs/08 §7.2`、`AC-PROV-009`）。
    *
@@ -903,23 +1449,52 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
    * （logs/2026-08-19 · `01M0CKPECYZMM…` 一带），而一个 vision 别名都没配时，那些轮次的回复
    * 末尾还会挂一句「这张图我没能真的看到」—— 用户那一轮根本没发图。
    */
-  const freshImages = turn.delta.some((message) => (message.parts as unknown[]).some(isImagePart));
-  const historyImages = turn.snapshot.messages.some((message) => (message.parts as unknown[]).some(isImagePart));
-  const turnHasImages = dependencies.config.media.visionScope === 'turn' ? freshImages : freshImages || historyImages;
+  const freshImages = turn.delta.some((message) =>
+    (message.parts as unknown[]).some(isImagePart),
+  );
+  const historyImages = turn.snapshot.messages.some((message) =>
+    (message.parts as unknown[]).some(isImagePart),
+  );
+  const turnHasImages =
+    dependencies.config.media.visionScope === "turn"
+      ? freshImages
+      : freshImages || historyImages;
   // 一张都看不了的时候才降级：`vision` 别名没配、当前别名自己也不支持。
-  const visionDegraded = turnHasImages && !dependencies.registry.supportsVision('vision') && !dependencies.registry.supportsVision(alias);
-  if (visionDegraded) dependencies.log.event({ level: 'warn', kind: 'provider.fallback', summary: `${alias} 不支持看图且无 vision 别名`,
-    traceId: turn.turnId, key: turn.key, data: { alias, reason: 'vision_unavailable' } });
+  const visionDegraded =
+    turnHasImages &&
+    !dependencies.registry.supportsVision("vision") &&
+    !dependencies.registry.supportsVision(alias);
+  if (visionDegraded)
+    dependencies.log.event({
+      level: "warn",
+      kind: "provider.fallback",
+      summary: `${alias} 不支持看图且无 vision 别名`,
+      traceId: turn.turnId,
+      key: turn.key,
+      data: { alias, reason: "vision_unavailable" },
+    });
   /**
    * `visionScope='turn'` 的另一半：本轮没有新图，于是不切别名 —— 那么更早轮次留在窗口里的图
    * 也不能原样发给这个看不了图的模型（宽容的 provider 静默忽略、严格的直接 400）。
    * 判据只看**本轮真正会用的那个别名**支不支持：能看图就原样带着，「再看一遍上面那张图」照旧可用。
    * `visionDegraded` 优先 —— 那一档本来就把两段一起换掉了，再叠一次没有意义。
    */
-  const historyDegraded = !visionDegraded && historyImages && !freshImages
-    && dependencies.config.media.visionScope === 'turn' && !dependencies.registry.supportsVision(alias);
-  if (historyDegraded) dependencies.log.event({ level: 'info', kind: 'ctx.image_placeholder', summary: `${alias} 不看图，历史图片换成占位文本`,
-    traceId: turn.turnId, ...turnParent(turn), key: turn.key, data: { alias, scope: 'turn', reason: 'history_only' } });
+  const historyDegraded =
+    !visionDegraded &&
+    historyImages &&
+    !freshImages &&
+    dependencies.config.media.visionScope === "turn" &&
+    !dependencies.registry.supportsVision(alias);
+  if (historyDegraded)
+    dependencies.log.event({
+      level: "info",
+      kind: "ctx.image_placeholder",
+      summary: `${alias} 不看图，历史图片换成占位文本`,
+      traceId: turn.turnId,
+      ...turnParent(turn),
+      key: turn.key,
+      data: { alias, scope: "turn", reason: "history_only" },
+    });
   // 步骤级失败（上游 5xx、重试耗尽）不会从 textStream 抛出来：AI SDK 把它吞进内部的 onError，
   // 让 result.text 安静地解析成空串。不抓住这一份，一次彻底的上游故障和「模型没话说」
   // 在调用方眼里长得一模一样 —— 上一次就是这样变成「不回复」的。
@@ -938,8 +1513,22 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
   const noteStreamFailure = (error: unknown): void => {
     if (streamFailure) return;
     streamFailure = error;
-    dependencies.log.event({ level: 'error', kind: 'model.error', summary: error instanceof Error ? `${error.name}: ${error.message}`.slice(0, 300) : String(error).slice(0, 300),
-      traceId: turn.turnId, key: turn.key, data: { alias, modelId: dependencies.registry.info(alias)?.modelId ?? initialInfo.modelId, source: 'stream' } });
+    dependencies.log.event({
+      level: "error",
+      kind: "model.error",
+      summary:
+        error instanceof Error
+          ? `${error.name}: ${error.message}`.slice(0, 300)
+          : String(error).slice(0, 300),
+      traceId: turn.turnId,
+      key: turn.key,
+      data: {
+        alias,
+        modelId:
+          dependencies.registry.info(alias)?.modelId ?? initialInfo.modelId,
+        source: "stream",
+      },
+    });
   };
   const initialInfo = chain[0]!.info;
   // 包装必须做在「按别名解析」这一层：`prepareStep` 每一步都无条件设置 model，只包装构造时那一个的话，
@@ -953,69 +1542,173 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
     const cached = wrapped.get(aliasName);
     if (cached) return cached;
     const built = aliasModel(dependencies.registry, aliasName, {
-      maxRetries: dependencies.config.provider.maxRetries, retryBaseMs: dependencies.config.provider.retryBaseMs,
-      retryMaxMs: dependencies.config.provider.retryMaxMs, abortSignal: turn.abortSignal,
-      requestTimeoutMs: dependencies.config.provider.requestTimeoutMs, streamIdleTimeoutMs: dependencies.config.provider.streamIdleTimeoutMs,
+      maxRetries: dependencies.config.provider.maxRetries,
+      retryBaseMs: dependencies.config.provider.retryBaseMs,
+      retryMaxMs: dependencies.config.provider.retryMaxMs,
+      abortSignal: turn.abortSignal,
+      requestTimeoutMs: dependencies.config.provider.requestTimeoutMs,
+      streamIdleTimeoutMs: dependencies.config.provider.streamIdleTimeoutMs,
       // 服务成功 = 上游还答话，连续失败计数归零（`docs/04 §5.3`）。常态是一次 no-op 写。
-      onServed: (served) => { servedModelId = served.id; dependencies.registry.recordSuccess(served); },
+      onServed: (served) => {
+        servedModelId = served.id;
+        dependencies.registry.recordSuccess(served);
+      },
       isDown: (candidate) => dependencies.registry.isDown(candidate),
       // 跳过这件事必须有痕迹，而且 `to` 报的是真正会被试的那个（docs/10 · provider.fallback）。
       onSkipped: (candidate, next) => {
-        dependencies.log.event({ level: 'warn', kind: 'provider.fallback', summary: `${candidate.id} 已判 down，跳过${next ? ` → ${next.id}` : ''}`,
-          traceId: turn.turnId, key: turn.key, data: { alias: aliasName, from: candidate.id, to: next?.id ?? null, reason: 'skipped_down' } });
+        dependencies.log.event({
+          level: "warn",
+          kind: "provider.fallback",
+          summary: `${candidate.id} 已判 down，跳过${next ? ` → ${next.id}` : ""}`,
+          traceId: turn.turnId,
+          key: turn.key,
+          data: {
+            alias: aliasName,
+            from: candidate.id,
+            to: next?.id ?? null,
+            reason: "skipped_down",
+          },
+        });
       },
       // 每一次失败的尝试落一行（`docs/10` 给 `model.error` 定的 `retryAttempt` / `willFallback`）。
       // 少了它，「熬满三次超时再 fallback」在日志里是一段空白：本次事故 363 秒里只有开头的
       // `turn.start` 与结尾的 `provider.fallback`（docs/00 §2.3 同一类）。
       onCandidateFailed: (candidate, failure) => {
-        dependencies.log.event({ level: 'warn', kind: 'model.error',
-          summary: `${candidate.id} 第 ${failure.attempt + 1} 次尝试失败：${failure.error instanceof Error ? failure.error.message : String(failure.error)}`.slice(0, 300),
-          traceId: turn.turnId, key: turn.key,
-          data: { alias: aliasName, modelId: candidate.id, errorKind: failure.kind, status: failure.status, retryAttempt: failure.attempt, willRetry: failure.willRetry, willFallback: failure.willFallback, ms: failure.elapsedMs } });
+        dependencies.log.event({
+          level: "warn",
+          kind: "model.error",
+          summary:
+            `${candidate.id} 第 ${failure.attempt + 1} 次尝试失败：${failure.error instanceof Error ? failure.error.message : String(failure.error)}`.slice(
+              0,
+              300,
+            ),
+          traceId: turn.turnId,
+          key: turn.key,
+          data: {
+            alias: aliasName,
+            modelId: candidate.id,
+            errorKind: failure.kind,
+            status: failure.status,
+            retryAttempt: failure.attempt,
+            willRetry: failure.willRetry,
+            willFallback: failure.willFallback,
+            ms: failure.elapsedMs,
+          },
+        });
         // **只有超时计入连续失败。** 5xx / 429 是上游在说话，链内 fallback 当场就换人、代价是一次
         // 往返；真正贵的是「连上了但不返回」—— 每一步都要熬满 `(maxRetries+1) × requestTimeoutMs`。
         // **而且一次调用一个候选只记一次**：还会再试就先不记。按尝试记的话 `maxRetries: 2` 时一次
         // 请求就是三次增量，一个合法地超过 `requestTimeoutMs` 的调用（定时任务、子 agent、收尾
         // 补跑都走非流式，`deadline.guard` 罩的是整段生成）当场就把整个 provider 判死 30 分钟。
-        if (failure.kind !== 'timeout' || failure.willRetry) return;
-        const down = dependencies.registry.recordFailure(candidate, failure.error instanceof Error ? failure.error.message : String(failure.error), PROVIDER_FAILURES_TO_DOWN);
+        if (failure.kind !== "timeout" || failure.willRetry) return;
+        const down = dependencies.registry.recordFailure(
+          candidate,
+          failure.error instanceof Error
+            ? failure.error.message
+            : String(failure.error),
+          PROVIDER_FAILURES_TO_DOWN,
+        );
         if (down) {
-          dependencies.log.event({ level: 'error', kind: 'provider.health', summary: `${candidate.id} 连续超时，已标 down 并从模型链跳过`,
-            traceId: turn.turnId, data: { modelId: candidate.id, state: 'down', reason: 'request_timeout' } });
+          dependencies.log.event({
+            level: "error",
+            kind: "provider.health",
+            summary: `${candidate.id} 连续超时，已标 down 并从模型链跳过`,
+            traceId: turn.turnId,
+            data: {
+              modelId: candidate.id,
+              state: "down",
+              reason: "request_timeout",
+            },
+          });
         }
       },
       // 这条以前一个消费方都没有 —— `provider.fallback` 是 `docs/10` 里有定义、生产侧却没有任何
       // 产出的事件，于是「链首熬完之后换了谁」在日志里根本读不出来（本次事故靠算术反推的那一半）。
       onFallback: (from, to) => {
-        dependencies.log.event({ level: 'warn', kind: 'provider.fallback', summary: `${from.id} 试完仍失败，换 ${to.id}`,
-          traceId: turn.turnId, key: turn.key, data: { alias: aliasName, from: from.id, to: to.id, reason: 'candidate_exhausted' } });
+        dependencies.log.event({
+          level: "warn",
+          kind: "provider.fallback",
+          summary: `${from.id} 试完仍失败，换 ${to.id}`,
+          traceId: turn.turnId,
+          key: turn.key,
+          data: {
+            alias: aliasName,
+            from: from.id,
+            to: to.id,
+            reason: "candidate_exhausted",
+          },
+        });
       },
       onUnavailable: (candidate, error) => {
-        dependencies.registry.markProviderDown(candidate.id, error instanceof Error ? error.message : 'authentication_failed');
-        dependencies.log.event({ level: 'error', kind: 'provider.health', summary: `${candidate.id} credentials rejected`, traceId: turn.turnId, data: { modelId: candidate.id } });
+        dependencies.registry.markProviderDown(
+          candidate.id,
+          error instanceof Error ? error.message : "authentication_failed",
+        );
+        dependencies.log.event({
+          level: "error",
+          kind: "provider.health",
+          summary: `${candidate.id} credentials rejected`,
+          traceId: turn.turnId,
+          data: { modelId: candidate.id },
+        });
       },
       onExhausted: (error) => {
         streamFailure ??= error;
-        dependencies.log.event({ level: 'error', kind: 'model.error', summary: error instanceof Error ? `${error.name}: ${error.message}`.slice(0, 300) : String(error).slice(0, 300),
-          traceId: turn.turnId, key: turn.key, data: { alias: aliasName, modelId: dependencies.registry.info(aliasName)?.modelId ?? initialInfo.modelId, cause: error instanceof Error && error.cause instanceof Error ? error.cause.message.slice(0, 300) : undefined } });
+        dependencies.log.event({
+          level: "error",
+          kind: "model.error",
+          summary:
+            error instanceof Error
+              ? `${error.name}: ${error.message}`.slice(0, 300)
+              : String(error).slice(0, 300),
+          traceId: turn.turnId,
+          key: turn.key,
+          data: {
+            alias: aliasName,
+            modelId:
+              dependencies.registry.info(aliasName)?.modelId ??
+              initialInfo.modelId,
+            cause:
+              error instanceof Error && error.cause instanceof Error
+                ? error.cause.message.slice(0, 300)
+                : undefined,
+          },
+        });
       },
     });
     wrapped.set(aliasName, built);
     return built;
   };
   const model = wrappedFor(alias);
-  const providerKind = dependencies.db.prepare('SELECT kind FROM providers WHERE id=?').pluck().get(initialInfo.providerId) as string ?? '';
+  const providerKind =
+    (dependencies.db
+      .prepare("SELECT kind FROM providers WHERE id=?")
+      .pluck()
+      .get(initialInfo.providerId) as string) ?? "";
   const instructions = stableInstructions(prompt, providerKind);
   // 同一轮里 `contextMessages` 会被调最多三次（主流 / 收尾补跑 / 非流式），坏历史只报一次。
   let reportedOrphans = false;
-  const messageOptions: ContextMessageOptions = { volatile: prompt.volatile, cacheBreakpoint: providerKind === 'anthropic',
-    ...(visionDegraded ? { degradeImages: 'all' as const } : historyDegraded ? { degradeImages: 'history' as const } : {}),
+  const messageOptions: ContextMessageOptions = {
+    volatile: prompt.volatile,
+    cacheBreakpoint: providerKind === "anthropic",
+    ...(visionDegraded
+      ? { degradeImages: "all" as const }
+      : historyDegraded
+        ? { degradeImages: "history" as const }
+        : {}),
     onOrphanToolCalls: (toolCallIds) => {
       if (reportedOrphans) return;
       reportedOrphans = true;
-      dependencies.log.event({ level: 'warn', kind: 'ctx.orphan_tool_call', summary: `Repaired ${toolCallIds.length} tool-call(s) with no result`,
-        traceId: turn.turnId, key: turn.key, data: { toolCallIds: toolCallIds.slice(0, 20) } });
-    } };
+      dependencies.log.event({
+        level: "warn",
+        kind: "ctx.orphan_tool_call",
+        summary: `Repaired ${toolCallIds.length} tool-call(s) with no result`,
+        traceId: turn.turnId,
+        key: turn.key,
+        data: { toolCallIds: toolCallIds.slice(0, 20) },
+      });
+    },
+  };
   const stepSpans = new Map<number, LogSpan>();
   const stepAlias = new Map<number, string>();
   /** vision 切换每轮只记一条：`prepareStep` 每一步都会重算同一个结论。 */
@@ -1026,11 +1719,22 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
    * 而 `expandedTools` 那份是要给 `prepareStep` 和下一轮的痕迹读的，两者语义不同。
    */
   const repairedThisTurn = new Set<string>();
-  const observers = createStepObservers(turn, { ledger: dependencies.ledger, registry: dependencies.registry, context: dependencies.context,
-    log: dependencies.log, quota: dependencies.quota, reservation: dependencies.reservation ?? null,
-    tokenRatioAlpha: dependencies.config.context.tokenRatioAlpha, fallbackInfo: initialInfo,
-    aliasForStep: (stepNumber) => stepAlias.get(stepNumber) ?? alias });
-  const agent = new ToolLoopAgent({ model, instructions, tools: toolSet, activeTools: activeNames,
+  const observers = createStepObservers(turn, {
+    ledger: dependencies.ledger,
+    registry: dependencies.registry,
+    context: dependencies.context,
+    log: dependencies.log,
+    quota: dependencies.quota,
+    reservation: dependencies.reservation ?? null,
+    tokenRatioAlpha: dependencies.config.context.tokenRatioAlpha,
+    fallbackInfo: initialInfo,
+    aliasForStep: (stepNumber) => stepAlias.get(stepNumber) ?? alias,
+  });
+  const agent = new ToolLoopAgent({
+    model,
+    instructions,
+    tools: toolSet,
+    activeTools: activeNames,
     // 重试与 fallback 归 `fallbackLanguageModel` 管（它认 Retry-After、带真随机抖动、401 短路、
     // 链内换模型）。SDK 默认还会自己再重试 2 次，两层相乘 = 同一次故障要熬 3×(候选数×尝试数) 次
     // 上游超时才收场 —— logs/2026-08-17 那几轮卡死就是这么来的：fallback→model.error 的 62 秒
@@ -1045,8 +1749,15 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
      * `stopWhen` 不是 per-call 选项，而 `wrapUpMode` 只在补跑期间为真，所以判据挂在这里；
      * 补跑那次调用的 `steps` 是它自己的（从 0 数起，与 `mainStepCount` 的重编号一致）。
      */
-    stopWhen: [stepCountIs(Math.min(dependencies.config.agent.main.maxSteps, dependencies.config.quota.perTurn.maxSteps)),
-      ({ steps }) => wrapUpMode && steps.length >= 1],
+    stopWhen: [
+      stepCountIs(
+        Math.min(
+          dependencies.config.agent.main.maxSteps,
+          dependencies.config.quota.perTurn.maxSteps,
+        ),
+      ),
+      ({ steps }) => wrapUpMode && steps.length >= 1,
+    ],
     include: { requestMessages: true, requestBody: true, responseBody: true },
     /**
      * **折叠工具被硬调时自愈成一次检索**（docs/05 §3.12 的「自愈」段）。
@@ -1098,21 +1809,47 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
        *    会把 `activeTools` 整个清空 —— 那两档改写只是换一个名字撞同一个错。
        */
       if (repairedThisTurn.has(toolCall.toolName)) return Promise.resolve(null);
-      if (turn.expandedTools?.has(toolCall.toolName)) return Promise.resolve(null);
-      if ((turn.expandedTools?.size ?? 0) >= dependencies.config.tools.catalog.maxExpandedPerTurn) return Promise.resolve(null);
-      if (!('search_tools' in stepTools)) return Promise.resolve(null);
+      if (turn.expandedTools?.has(toolCall.toolName))
+        return Promise.resolve(null);
+      if (
+        (turn.expandedTools?.size ?? 0) >=
+        dependencies.config.tools.catalog.maxExpandedPerTurn
+      )
+        return Promise.resolve(null);
+      if (!("search_tools" in stepTools)) return Promise.resolve(null);
       // 幻觉名字（注册表里根本没有的）**不改写**：把一个不存在的名字喂给检索只会得到空结果，
       // 而模型会以为自己找过了。它照旧走 `NoSuchToolError`，那是一句明确的失败。
-      if (!dependencies.tools.activeView(turn.effectiveRole, toolContext).deferred.some((entry) => entry.name === toolCall.toolName)) return Promise.resolve(null);
+      if (
+        !dependencies.tools
+          .activeView(turn.effectiveRole, toolContext)
+          .deferred.some((entry) => entry.name === toolCall.toolName)
+      )
+        return Promise.resolve(null);
       repairedThisTurn.add(toolCall.toolName);
-      dependencies.log.event({ level: 'info', kind: 'tool.repaired', summary: `${toolCall.toolName} → search_tools`,
-        traceId: turn.turnId, ...turnParent(turn), chatId: turn.chatId, userId: turn.initiatorUserId, key: turn.key,
-        data: { tool: toolCall.toolName, into: 'search_tools', reason: 'deferred_not_expanded' } });
+      dependencies.log.event({
+        level: "info",
+        kind: "tool.repaired",
+        summary: `${toolCall.toolName} → search_tools`,
+        traceId: turn.turnId,
+        ...turnParent(turn),
+        chatId: turn.chatId,
+        userId: turn.initiatorUserId,
+        key: turn.key,
+        data: {
+          tool: toolCall.toolName,
+          into: "search_tools",
+          reason: "deferred_not_expanded",
+        },
+      });
       // 逐个字段列而不是 `...toolCall`：原调用上的 `providerExecuted` / `providerMetadata` 是**那个**
       // 工具的元数据，整份透传给 `search_tools` 就是把它挂到错的工具上。`input` **必须是 JSON
       // 字符串** —— 下游走的是 `safeParseJSON({ text: toolCall.input, schema })`。
-      return Promise.resolve({ type: 'tool-call' as const, toolCallId: toolCall.toolCallId,
-        toolName: 'search_tools', input: JSON.stringify({ names: [toolCall.toolName] }) });
+      return Promise.resolve({
+        type: "tool-call" as const,
+        toolCallId: toolCall.toolCallId,
+        toolName: "search_tools",
+        input: JSON.stringify({ names: [toolCall.toolName] }),
+      });
     },
     prepareStep: async ({ stepNumber: rawStep, messages }) => {
       // 收尾补跑是**另一次** `agent.generate`，它的 stepNumber 从 0 重新起。不换算的话：
@@ -1120,9 +1857,18 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
       // ② `stepAlias.set(0, …)` 会改写 step 0 实际用的别名，记账落到错的模型上；
       // ③ `downgrade` 判据回到 0，一轮从 step 8 起就在跑 low 的会话，最后这句结论反而按主别名计价。
       const stepNumber = wrapUpMode ? mainStepCount + rawStep : rawStep;
-      await dependencies.plugins?.hook('beforeModelCall', { turn, step: stepNumber });
-      const skillAllow = turn.skillAllowedTools?.size ? new Set<string>([...turn.skillAllowedTools, ...SKILL_NARROWING_EXEMPT]) : null;
-      const activeForStep = dependencies.tools.activeNamesForStep(turn.effectiveRole, toolContext, turn.expandedTools)
+      await dependencies.plugins?.hook("beforeModelCall", {
+        turn,
+        step: stepNumber,
+      });
+      const skillAllow = turn.skillAllowedTools?.size
+        ? new Set<string>([
+            ...turn.skillAllowedTools,
+            ...SKILL_NARROWING_EXEMPT,
+          ])
+        : null;
+      const activeForStep = dependencies.tools
+        .activeNamesForStep(turn.effectiveRole, toolContext, turn.expandedTools)
         // **先扩张后收窄，收窄永远赢**（docs/07 §2.2）：载入一个 `allowed-tools: [bash]` 的 skill
         // 之后，已展开的 MCP 工具照样滤掉 —— 展开改变的是可见性，不是权限。
         .filter((name) => !skillAllow || skillAllow.has(name))
@@ -1138,8 +1884,10 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
         // 只有一个答案，也为了不把正确性押在某个 SDK 版本恰好选了宽容语义上。
         .filter((name) => name in toolSet);
       const requestedAlias = turn.modelAliasOverride ?? alias;
-      const downgrade = stepNumber >= dependencies.config.agent.main.downgradeAfterStep && dependencies.registry.aliases().includes('low');
-      let selectedAlias = downgrade ? 'low' : requestedAlias;
+      const downgrade =
+        stepNumber >= dependencies.config.agent.main.downgradeAfterStep &&
+        dependencies.registry.aliases().includes("low");
+      let selectedAlias = downgrade ? "low" : requestedAlias;
       // **vision 压过其它一切**（`docs/04 §5.2`）：`low` 大概也看不见图，`set_model` 指定的别名
       // 同样可能看不见 —— 看不见图的模型拿到这一轮就只能瞎猜或者绕远路。`vision` 优先，退而用
       // 「降档前那个别名自己就支持」这一条：为了省钱降档而把眼睛降掉是最不划算的一种省。
@@ -1147,35 +1895,74 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
       // `turnHasImages` 只是轮首快照，结构性地认不出它 —— 而这一步正是那张图要被读到的一步：
       // step N 调 web_fetch → 图骑在工具结果上 → step N+1 的请求体里带着它。不在这里补一次，
       // 那张图就落在一个看不了图的别名上（`docs/08 §7.2` 禁的正是这件事）。
-      if ((turnHasImages || turn.mediaInjected) && !dependencies.registry.supportsVision(selectedAlias)) {
+      if (
+        (turnHasImages || turn.mediaInjected) &&
+        !dependencies.registry.supportsVision(selectedAlias)
+      ) {
         // 候选里带上 `alias`（本轮解析出来的那个）：`set_model('low')` 把 `requestedAlias` 换掉之后，
         // 「降档前那个别名」就只剩它了。
-        const seeing = ['vision', requestedAlias, alias].find((name) => dependencies.registry.supportsVision(name));
+        const seeing = ["vision", requestedAlias, alias].find((name) =>
+          dependencies.registry.supportsVision(name),
+        );
         if (seeing) {
           if (!visionSwitchLogged) {
             visionSwitchLogged = true;
-            dependencies.log.event({ level: 'info', kind: 'provider.fallback', summary: `${selectedAlias} → ${seeing}`,
-              traceId: turn.turnId, key: turn.key, data: { alias: selectedAlias, from: selectedAlias, to: seeing, reason: 'vision_required' } });
+            dependencies.log.event({
+              level: "info",
+              kind: "provider.fallback",
+              summary: `${selectedAlias} → ${seeing}`,
+              traceId: turn.turnId,
+              key: turn.key,
+              data: {
+                alias: selectedAlias,
+                from: selectedAlias,
+                to: seeing,
+                reason: "vision_required",
+              },
+            });
           }
           selectedAlias = seeing;
         }
       }
       // 采样参数按「当步实际选中的别名」取：降档到 low 之后就该用 low 的参数（04 §5.2.1）。
       stepAlias.set(stepNumber, selectedAlias);
-      const patch: { activeTools?: string[]; model?: LanguageModel; messages?: ModelMessage[]; toolChoice?: 'none' } & AliasSettings = { activeTools: activeForStep, model: wrappedFor(selectedAlias), ...dependencies.registry.settings(selectedAlias) };
+      const patch: {
+        activeTools?: string[];
+        model?: LanguageModel;
+        messages?: ModelMessage[];
+        toolChoice?: "none";
+      } & AliasSettings = {
+        activeTools: activeForStep,
+        model: wrappedFor(selectedAlias),
+        ...dependencies.registry.settings(selectedAlias),
+      };
       // 单轮成本闸门读 ledger：`reservation.committed` 只含主 agent 的花费，子 agent 全部漏在外面
       // （docs/20 · W-QUOTA-01）。`turnCost` 把主 agent 与该轮所有子 agent 的花费都算进去了。
       const cost = dependencies.ledger.turnCost(turn.turnId);
-      if (cost >= dependencies.config.quota.perTurn.maxCostUsd || (dependencies.quota && dependencies.reservation && !dependencies.quota.canSpend(dependencies.reservation, dependencies.config.quota.perTurn.maxCostUsd))) { patch.activeTools = []; patch.toolChoice = 'none'; }
+      if (
+        cost >= dependencies.config.quota.perTurn.maxCostUsd ||
+        (dependencies.quota &&
+          dependencies.reservation &&
+          !dependencies.quota.canSpend(
+            dependencies.reservation,
+            dependencies.config.quota.perTurn.maxCostUsd,
+          ))
+      ) {
+        patch.activeTools = [];
+        patch.toolChoice = "none";
+      }
       // 收尾补跑（§2）走的是同一条禁工具的路，不另造一套：那一次只许说话，再调工具就又可能
       // 以工具调用收尾，把同一个坑挖第二遍。
-      if (wrapUpMode) { patch.activeTools = []; patch.toolChoice = 'none'; }
+      if (wrapUpMode) {
+        patch.activeTools = [];
+        patch.toolChoice = "none";
+      }
       // 推理条目一律不回传。openai responses provider 会把上一步的 reasoning 写成
       // `{type:'item_reference', id:'rs_…'}` —— 那份内容存在 OpenAI 服务端，第三方兼容网关
       // 手上没有，解析不了就整个请求 502。表现是「模型一调工具就再也不说话」：后续那一步
       // 重试三次全挂，而 AI SDK 把 RetryError 吞成空结果，调用方看到的只是「什么都没生成」。
       // reasoning 本来也只在一轮的步骤之间有意义（上下文里不落盘），摘掉它换来的是工具调用之后还能有回复。
-      patch.messages = pruneMessages({ messages, reasoning: 'all' });
+      patch.messages = pruneMessages({ messages, reasoning: "all" });
       /**
        * **当步别名看不了图时，请求体里也不能留着不透明 part。** 上面那个 vision 覆盖只在
        * `turnHasImages` 为真时才拦；`media.visionScope='turn'` 下「窗口里有图但本轮没有新图」
@@ -1189,44 +1976,110 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
        * 下一轮它是历史图，但**这一轮**它已经在 `messages` 里了（`contextMessages` 把 delta 也物化了）。
        * 漏掉它 = 上面那次别名切换没找到能看图的别名时，这道兜底也不兜。
        */
-      if ((freshImages || historyImages || turn.mediaInjected) && !dependencies.registry.supportsVision(selectedAlias)) patch.messages = degradeImageParts(patch.messages);
+      if (
+        (freshImages || historyImages || turn.mediaInjected) &&
+        !dependencies.registry.supportsVision(selectedAlias)
+      )
+        patch.messages = degradeImageParts(patch.messages);
       const selected = dependencies.registry.info(selectedAlias) ?? initialInfo;
-      const cap = selected.contextWindow * dependencies.config.context.hardCapRatio;
+      const cap =
+        selected.contextWindow * dependencies.config.context.hardCapRatio;
       if (estimateModelMessages(patch.messages) > cap) {
-        patch.messages = pruneMessages({ messages: patch.messages, toolCalls: 'before-last-3-messages', emptyMessages: 'remove' });
-        dependencies.log.event({ level: 'warn', kind: 'ctx.hardcap', summary: 'Pruned in-flight model messages', traceId: turn.turnId, key: turn.key, data: { stepNumber, cap, before: estimateModelMessages(messages), after: estimateModelMessages(patch.messages) } });
+        patch.messages = pruneMessages({
+          messages: patch.messages,
+          toolCalls: "before-last-3-messages",
+          emptyMessages: "remove",
+        });
+        dependencies.log.event({
+          level: "warn",
+          kind: "ctx.hardcap",
+          summary: "Pruned in-flight model messages",
+          traceId: turn.turnId,
+          key: turn.key,
+          data: {
+            stepNumber,
+            cap,
+            before: estimateModelMessages(messages),
+            after: estimateModelMessages(patch.messages),
+          },
+        });
       }
       return patch;
     },
     onStepStart: (event) => {
-      const stepNumber = wrapUpMode ? mainStepCount + event.stepNumber : event.stepNumber;
-      const span = dependencies.log.span({ level: 'info', kind: 'model.call', summary: `${event.provider}/${event.modelId}`, traceId: turn.turnId, ...turnParent(turn), chatId: turn.chatId, userId: turn.initiatorUserId, key: turn.key,
-        data: { stepNumber, wrapUp: wrapUpMode || undefined, modelId: event.modelId, provider: event.provider, messages: bodyForLog(event.messages, dependencies.config.logs.captureBodies), instructions: bodyForLog(event.instructions, dependencies.config.logs.captureBodies) } });
+      const stepNumber = wrapUpMode
+        ? mainStepCount + event.stepNumber
+        : event.stepNumber;
+      const span = dependencies.log.span({
+        level: "info",
+        kind: "model.call",
+        summary: `${event.provider}/${event.modelId}`,
+        traceId: turn.turnId,
+        ...turnParent(turn),
+        chatId: turn.chatId,
+        userId: turn.initiatorUserId,
+        key: turn.key,
+        data: {
+          stepNumber,
+          wrapUp: wrapUpMode || undefined,
+          modelId: event.modelId,
+          provider: event.provider,
+          messages: bodyForLog(
+            event.messages,
+            dependencies.config.logs.captureBodies,
+          ),
+          instructions: bodyForLog(
+            event.instructions,
+            dependencies.config.logs.captureBodies,
+          ),
+        },
+      });
       stepSpans.set(stepNumber, span);
       // 这一步的工具调用挂在这条 `model.call` 之下（`docs/10 §1` 的第二条边）。步是**串行**的，
       // 所以原地改这一项是安全的；同一步内并行的工具调用共享同一个父，那正是它们真实的关系。
       toolContext.parentSpanId = span.id;
-      dependencies.log.publish('turn.progress', { turnId: turn.turnId, phase: 'model', step: stepNumber, note: `${event.provider}/${event.modelId}` });
+      dependencies.log.publish("turn.progress", {
+        turnId: turn.turnId,
+        phase: "model",
+        step: stepNumber,
+        note: `${event.provider}/${event.modelId}`,
+      });
     },
     // 四件事拆成四个可单独喂假 step 的观察者（`step-observers.ts`，docs/27 · D-05）。
     // 这里只剩「把 AI SDK 的 step 映射成 StepFacts」这一层适配 —— 那个 step 类型没人能手搓，
     // 而记账 / 广播 / 上下文 / 校准真正需要的只有十来个字段。
     onStepEnd: (step) => {
-      const stepNumber = wrapUpMode ? mainStepCount + step.stepNumber : step.stepNumber;
-      if (!wrapUpMode) mainStepCount = Math.max(mainStepCount, step.stepNumber + 1);
-      const facts: StepFacts = { stepNumber, servedModelId: servedModelId ?? step.model.modelId,
-        usage: { inputTokens: step.usage.inputTokens ?? 0, outputTokens: step.usage.outputTokens ?? 0,
-          cacheReadTokens: step.usage.inputTokenDetails.cacheReadTokens ?? 0, cacheWriteTokens: step.usage.inputTokenDetails.cacheWriteTokens ?? 0,
+      const stepNumber = wrapUpMode
+        ? mainStepCount + step.stepNumber
+        : step.stepNumber;
+      if (!wrapUpMode)
+        mainStepCount = Math.max(mainStepCount, step.stepNumber + 1);
+      const facts: StepFacts = {
+        stepNumber,
+        servedModelId: servedModelId ?? step.model.modelId,
+        usage: {
+          inputTokens: step.usage.inputTokens ?? 0,
+          outputTokens: step.usage.outputTokens ?? 0,
+          cacheReadTokens: step.usage.inputTokenDetails.cacheReadTokens ?? 0,
+          cacheWriteTokens: step.usage.inputTokenDetails.cacheWriteTokens ?? 0,
           // `inputTokens` 是 total（超集），计价要用这一份互斥的。三家 provider 一致，见 `pricedInputTokens`。
-          noCacheTokens: step.usage.inputTokenDetails.noCacheTokens ?? undefined,
-          reasoningTokens: step.usage.outputTokenDetails.reasoningTokens ?? 0 },
-        latencyMs: step.performance.responseTimeMs, finishReason: step.finishReason,
-        toolCalls: step.toolCalls.map((call) => ({ toolCallId: call.toolCallId, toolName: call.toolName, input: call.input })),
+          noCacheTokens:
+            step.usage.inputTokenDetails.noCacheTokens ?? undefined,
+          reasoningTokens: step.usage.outputTokenDetails.reasoningTokens ?? 0,
+        },
+        latencyMs: step.performance.responseTimeMs,
+        finishReason: step.finishReason,
+        toolCalls: step.toolCalls.map((call) => ({
+          toolCallId: call.toolCallId,
+          toolName: call.toolName,
+          input: call.input,
+        })),
         toolResults: stepToolResults(step.content),
-        requestBody: (step.request as { body?: unknown } | undefined)?.body };
+        requestBody: (step.request as { body?: unknown } | undefined)?.body,
+      };
       // 收尾判据取自**最后一步**，所以每步都覆写而不是累积。`sawToolCall` 反过来要累积：
       // 判的是「这一轮到底做过事没有」，只有做过事才值得补一句结论。
-      lastStepHadText = step.text.trim() !== '';
+      lastStepHadText = step.text.trim() !== "";
       if (step.toolCalls.length) sawToolCall = true;
       // `turns.steps` 此前没有任何写入方（全库 steps>0 的行数为 0），WebUI 轮次列表与
       // `turn.finished` 事件里这个数永远是 0 —— 本次排查因此只能去翻 blob 还原步骤。
@@ -1244,9 +2097,29 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
        * 所以这里用 `end()` 的 override 改列（`summary` 是列不是载荷）。
        */
       const fellBack = facts.servedModelId !== step.model.modelId;
-      stepSpans.get(stepNumber)?.end({ model: step.model, servedProvider: resolved.info.providerId, servedModelId: resolved.info.modelId, alias: resolved.alias,
-        usage: step.usage, cost: resolved.cost, request: bodyForLog(step.request, dependencies.config.logs.captureBodies), response: bodyForLog(step.response, dependencies.config.logs.captureBodies) },
-        undefined, { summary: `${resolved.info.providerId}/${resolved.info.modelId}${fellBack ? ` ← fallback from ${step.model.modelId}` : ''}`, ...(fellBack ? { level: 'warn' as const } : {}) });
+      stepSpans.get(stepNumber)?.end(
+        {
+          model: step.model,
+          servedProvider: resolved.info.providerId,
+          servedModelId: resolved.info.modelId,
+          alias: resolved.alias,
+          usage: step.usage,
+          cost: resolved.cost,
+          request: bodyForLog(
+            step.request,
+            dependencies.config.logs.captureBodies,
+          ),
+          response: bodyForLog(
+            step.response,
+            dependencies.config.logs.captureBodies,
+          ),
+        },
+        undefined,
+        {
+          summary: `${resolved.info.providerId}/${resolved.info.modelId}${fellBack ? ` ← fallback from ${step.model.modelId}` : ""}`,
+          ...(fellBack ? { level: "warn" as const } : {}),
+        },
+      );
       /**
        * **模型给了非法工具参数时，`ToolRegistry.execute` 根本没被调到。** 校验在 AI SDK 内部
        * （`AI_InvalidToolInputError`），于是 `tool.call` 计数是 0，唯一痕迹是上下文里那条
@@ -1254,13 +2127,36 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
        * 2026-08-18 打崩进程的事故起点正是 `get_message({messageId:0})`（docs/28 · L-LOG-03）。
        */
       for (const raw of step.content as readonly unknown[]) {
-        const part = raw as { type?: string; toolName?: string; toolCallId?: string; error?: unknown };
-        if (part?.type !== 'tool-error') continue;
-        const message = part.error instanceof Error ? `${part.error.name}: ${part.error.message}` : String(part.error);
-        dependencies.log.event({ level: 'warn', kind: 'tool.error', summary: `${part.toolName ?? 'unknown'}: ${message}`.slice(0, 300),
-          traceId: turn.turnId, ...(stepSpans.get(stepNumber) ? { parentSpanId: stepSpans.get(stepNumber)!.id } : {}),
-          chatId: turn.chatId, userId: turn.initiatorUserId, key: turn.key,
-          data: { tool: part.toolName ?? null, toolCallId: part.toolCallId ?? null, errorKind: part.error instanceof Error ? part.error.name : 'unknown', message: message.slice(0, 500) } });
+        const part = raw as {
+          type?: string;
+          toolName?: string;
+          toolCallId?: string;
+          error?: unknown;
+        };
+        if (part?.type !== "tool-error") continue;
+        const message =
+          part.error instanceof Error
+            ? `${part.error.name}: ${part.error.message}`
+            : String(part.error);
+        dependencies.log.event({
+          level: "warn",
+          kind: "tool.error",
+          summary: `${part.toolName ?? "unknown"}: ${message}`.slice(0, 300),
+          traceId: turn.turnId,
+          ...(stepSpans.get(stepNumber)
+            ? { parentSpanId: stepSpans.get(stepNumber)!.id }
+            : {}),
+          chatId: turn.chatId,
+          userId: turn.initiatorUserId,
+          key: turn.key,
+          data: {
+            tool: part.toolName ?? null,
+            toolCallId: part.toolCallId ?? null,
+            errorKind:
+              part.error instanceof Error ? part.error.name : "unknown",
+            message: message.slice(0, 500),
+          },
+        });
       }
       observers.appendContext(facts);
       observers.calibrate(facts);
@@ -1272,9 +2168,13 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
    * 接着烧钱）；④ 单轮成本闸还有余量。**不伪造答复** —— 是让模型自己写结论（docs/16 §5）。
    */
   const wrapUpIfNeeded = async (): Promise<string> => {
-    if (lastStepHadText || !sawToolCall || streamFailure) return '';
-    if (dependencies.ledger.turnCost(turn.turnId) >= dependencies.config.quota.perTurn.maxCostUsd) return '';
-    if (turn.abortSignal.aborted) return '';
+    if (lastStepHadText || !sawToolCall || streamFailure) return "";
+    if (
+      dependencies.ledger.turnCost(turn.turnId) >=
+      dependencies.config.quota.perTurn.maxCostUsd
+    )
+      return "";
+    if (turn.abortSignal.aborted) return "";
     wrapUpMode = true;
     try {
       // **不要再把 `result.responseMessages` 拼进来**：`observers.appendContext` 每一步都已经把
@@ -1284,42 +2184,89 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
       // 收尾指令塞进**易变段内部**而不是追加成新消息：KERNEL 说「只有请求最末尾那个
       // system-instructions 块是真的」，在它后面再挂一个，等于让模型把自己的 RUNTIME、
       // 权限行与工具目录当成伪造的用户正文（顺带也保住了「易变段物理最后」这条缓存前提）。
-      const messages = contextMessages(turn, dependencies.db, { ...messageOptions, volatile: `${prompt.volatile}\n\n${WRAP_UP_INSTRUCTION}` });
-      const wrapped = await agent.generate({ messages, abortSignal: turn.abortSignal });
+      const messages = contextMessages(turn, dependencies.db, {
+        ...messageOptions,
+        volatile: `${prompt.volatile}\n\n${WRAP_UP_INSTRUCTION}`,
+      });
+      const wrapped = await agent.generate({
+        messages,
+        abortSignal: turn.abortSignal,
+      });
       const text = wrapped.text.trim();
-      dependencies.log.event({ level: 'warn', kind: 'turn.wrap_up', summary: text ? 'Wrapped up a turn that ended without text' : 'Wrap-up produced nothing',
-        traceId: turn.turnId, key: turn.key, data: { chars: text.length } });
+      dependencies.log.event({
+        level: "warn",
+        kind: "turn.wrap_up",
+        summary: text
+          ? "Wrapped up a turn that ended without text"
+          : "Wrap-up produced nothing",
+        traceId: turn.turnId,
+        key: turn.key,
+        data: { chars: text.length },
+      });
       return text;
     } catch (error) {
       // 补跑失败不能把整轮拖下水：旁白已经发出去了，这里抛等于让用户既看到回复又收到一句「这轮没成」。
-      dependencies.log.event({ level: 'warn', kind: 'turn.wrap_up', summary: 'Wrap-up call failed', traceId: turn.turnId, key: turn.key,
-        data: { error: error instanceof Error ? error.message.slice(0, 300) : String(error).slice(0, 300) } });
-      return '';
-    } finally { wrapUpMode = false; }
+      dependencies.log.event({
+        level: "warn",
+        kind: "turn.wrap_up",
+        summary: "Wrap-up call failed",
+        traceId: turn.turnId,
+        key: turn.key,
+        data: {
+          error:
+            error instanceof Error
+              ? error.message.slice(0, 300)
+              : String(error).slice(0, 300),
+        },
+      });
+      return "";
+    } finally {
+      wrapUpMode = false;
+    }
   };
   try {
     if (streaming) {
-      const result = await agent.stream({ messages: contextMessages(turn, dependencies.db, messageOptions), abortSignal: turn.abortSignal });
+      const result = await agent.stream({
+        messages: contextMessages(turn, dependencies.db, messageOptions),
+        abortSignal: turn.abortSignal,
+      });
       let settled = false;
-      const finish = (text: string): string => { if (!settled && mainRun) dependencies.agents?.finish(mainRun, text); settled = true; return text; };
-      const fail = (error: unknown): never => { if (!settled && mainRun) dependencies.agents?.fail(mainRun, error instanceof Error ? error.message : String(error)); settled = true; throw error; };
+      const finish = (text: string): string => {
+        if (!settled && mainRun) dependencies.agents?.finish(mainRun, text);
+        settled = true;
+        return text;
+      };
+      const fail = (error: unknown): never => {
+        if (!settled && mainRun)
+          dependencies.agents?.fail(
+            mainRun,
+            error instanceof Error ? error.message : String(error),
+          );
+        settled = true;
+        throw error;
+      };
       // `final` 必须挂在**流结束**上而不是直接挂 `result.text`：收尾补跑发生在流耗尽之后，
       // 而 `result.text` 在那之前就 resolve 了 —— 直接挂的话每次都读到补跑之前的空串。
       let streamDone!: () => void;
-      const drained = new Promise<void>((resolve) => { streamDone = resolve; });
-      let wrapUp = '';
-      let delivered = (): string => '';
+      const drained = new Promise<void>((resolve) => {
+        streamDone = resolve;
+      });
+      let wrapUp = "";
+      let delivered = (): string => "";
       // 空正文 + 捕获到步骤失败 = 上游挂了，不是模型没话说。把真正的原因抛出去，
       // 让轮次记成 failed 并给用户一句能看懂的话，而不是含糊的「没吐出正文」。
-      const final = drained.then(() => result.text).then((text) => {
-        if (!text.trim() && streamFailure) throw streamFailure;
-        // `result.text` 是 AI SDK v7 的**最后一步**正文，不是全轮拼接。最后一步以工具调用收尾时
-        // 它就是空串，此前 `bot.ts` 于是回落到「把过程旁白当答复」（本次事故）。
-        // 补跑到了就用**整条发出去的文本**（旁白 + 分隔 + 结论），不是只用结论那一段：归档与
-        // 上下文存的必须是用户屏幕上那条消息，否则下一轮模型看不见自己的旁白，用户一句
-        // 「你上面第二段说的」就无从对应。
-        return text.trim() ? text : delivered();
-      }).then(finish, fail);
+      const final = drained
+        .then(() => result.text)
+        .then((text) => {
+          if (!text.trim() && streamFailure) throw streamFailure;
+          // `result.text` 是 AI SDK v7 的**最后一步**正文，不是全轮拼接。最后一步以工具调用收尾时
+          // 它就是空串，此前 `bot.ts` 于是回落到「把过程旁白当答复」（本次事故）。
+          // 补跑到了就用**整条发出去的文本**（旁白 + 分隔 + 结论），不是只用结论那一段：归档与
+          // 上下文存的必须是用户屏幕上那条消息，否则下一轮模型看不见自己的旁白，用户一句
+          // 「你上面第二段说的」就无从对应。
+          return text.trim() ? text : delivered();
+        })
+        .then(finish, fail);
       /**
        * **`final` 必须在创建处就被认领。**
        *
@@ -1335,68 +2282,124 @@ async function runMainAgentInternal(turn: RuntimeTurnContext, dependencies: Main
        * （已被观测过的 promise 再 await 一样抛）。
        */
       void final.catch(() => undefined);
-      let emitted = '';
-      const stream = stepSeparatedText(result.stream as AsyncIterable<StreamPartLike>, async () => {
-        /**
-         * **一步都没跑完 = 上游给了个空流，不是模型没话说。** `fallback-model` 的 `reporting()`
-         * 只在 `doStream` **抛**的时候报 `onExhausted`；中转站 200 收下、流里 0 步就关闭那一路
-         * 既不抛也不触发 `idleGuarded`，于是 `streamFailure` 恒为 null、日志里一条 `model.error`
-         * 都没有，用户看到的只有沉默。补上这一条之后它走的是下面那条既有的 `broken` 路：
-         * 轮次记 failed、用户拿到能看懂的原因、日志有 `model.error`。
-         * 必须排在 `wrapUpIfNeeded` **之前** —— 那里第一道闸就在读 `streamFailure`。
-         */
-        if (mainStepCount === 0 && !turn.abortSignal.aborted) noteStreamFailure(new Error('upstream_no_output'));
-        // `wrapUpIfNeeded` 自己吞掉所有异常，这里不会因为它而把流记成 interrupted。
-        try { wrapUp = await wrapUpIfNeeded(); } finally { streamDone(); }
-        /**
-         * **断掉的轮次必须让投递侧看见。** 步骤级失败与轮次中止都不会让 `result.stream` 抛：
-         * AI SDK 把它们吞进内部 onError，流照常正常结束，而 `result.text` 还是**上一步**的正文
-         * —— 于是「已经吐过内容之后断掉」这一路在 `bot.ts` 眼里和正常收尾一模一样：用户既没有
-         * 「（生成中断）」也没有超时提示，`turns` 那行还记成 committed。实测
-         * logs/2026-08-18 · B8F92Z：600 秒到点 abort（`model.error timeout`），3 分钟后
-         * `turn.end turn committed`。这里抛出去 = `TelegramOutput.consume` 的 `interrupted`，
-         * 也就是 docs/04 §5.3 说的那条「已输出部分内容后失败」的路。
-         *
-         * 抛之前先走 `fail`：`streamDone()` 已经放开了 `drained`，`final` 那条链下一个微任务就要
-         * 用 `finish` 把 agent run 记成完成 —— 不在同一个同步块里把 `settled` 抢下来，
-         * `agent_runs` 会说这次子运行成功了。丢掉的 `wrapUp` 恒为空串（断掉时 `wrapUpIfNeeded`
-         * 第一道闸就返回了）。
-         */
-        const broken = turn.abortSignal.aborted ? turn.abortSignal.reason ?? 'aborted' : streamFailure;
-        if (broken) fail(broken instanceof Error ? broken : new Error(String(broken)));
-        // 「图片降级了」那句提示走**同一条**收尾通道（`docs/08 §7.2` 要求它在回复末尾）：
-        // 另开一条 core→telegram 的管子只为了追加一行文本，两边都要多一个概念。
-        if (visionDegraded) return wrapUp ? `${wrapUp}\n\n${VISION_UNSUPPORTED_NOTICE}` : VISION_UNSUPPORTED_NOTICE;
-        return wrapUp;
-      }, (chunk) => { emitted += chunk; }, noteStreamFailure);
+      let emitted = "";
+      const stream = stepSeparatedText(
+        result.stream as AsyncIterable<StreamPartLike>,
+        async () => {
+          /**
+           * **一步都没跑完 = 上游给了个空流，不是模型没话说。** `fallback-model` 的 `reporting()`
+           * 只在 `doStream` **抛**的时候报 `onExhausted`；中转站 200 收下、流里 0 步就关闭那一路
+           * 既不抛也不触发 `idleGuarded`，于是 `streamFailure` 恒为 null、日志里一条 `model.error`
+           * 都没有，用户看到的只有沉默。补上这一条之后它走的是下面那条既有的 `broken` 路：
+           * 轮次记 failed、用户拿到能看懂的原因、日志有 `model.error`。
+           * 必须排在 `wrapUpIfNeeded` **之前** —— 那里第一道闸就在读 `streamFailure`。
+           */
+          if (mainStepCount === 0 && !turn.abortSignal.aborted)
+            noteStreamFailure(new Error("upstream_no_output"));
+          // `wrapUpIfNeeded` 自己吞掉所有异常，这里不会因为它而把流记成 interrupted。
+          try {
+            wrapUp = await wrapUpIfNeeded();
+          } finally {
+            streamDone();
+          }
+          /**
+           * **断掉的轮次必须让投递侧看见。** 步骤级失败与轮次中止都不会让 `result.stream` 抛：
+           * AI SDK 把它们吞进内部 onError，流照常正常结束，而 `result.text` 还是**上一步**的正文
+           * —— 于是「已经吐过内容之后断掉」这一路在 `bot.ts` 眼里和正常收尾一模一样：用户既没有
+           * 「（生成中断）」也没有超时提示，`turns` 那行还记成 committed。实测
+           * logs/2026-08-18 · B8F92Z：600 秒到点 abort（`model.error timeout`），3 分钟后
+           * `turn.end turn committed`。这里抛出去 = `TelegramOutput.consume` 的 `interrupted`，
+           * 也就是 docs/04 §5.3 说的那条「已输出部分内容后失败」的路。
+           *
+           * 抛之前先走 `fail`：`streamDone()` 已经放开了 `drained`，`final` 那条链下一个微任务就要
+           * 用 `finish` 把 agent run 记成完成 —— 不在同一个同步块里把 `settled` 抢下来，
+           * `agent_runs` 会说这次子运行成功了。丢掉的 `wrapUp` 恒为空串（断掉时 `wrapUpIfNeeded`
+           * 第一道闸就返回了）。
+           */
+          const broken = turn.abortSignal.aborted
+            ? (turn.abortSignal.reason ?? "aborted")
+            : streamFailure;
+          if (broken)
+            fail(broken instanceof Error ? broken : new Error(String(broken)));
+          // 「图片降级了」那句提示走**同一条**收尾通道（`docs/08 §7.2` 要求它在回复末尾）：
+          // 另开一条 core→telegram 的管子只为了追加一行文本，两边都要多一个概念。
+          if (visionDegraded)
+            return wrapUp
+              ? `${wrapUp}\n\n${VISION_UNSUPPORTED_NOTICE}`
+              : VISION_UNSUPPORTED_NOTICE;
+          return wrapUp;
+        },
+        (chunk) => {
+          emitted += chunk;
+        },
+        noteStreamFailure,
+      );
       // 尾部只要真的追加过东西（补跑的结论、或者那句看不了图的提示），`final` 就该是**整条发出去
       // 的文本**而不是最后一步的正文 —— 归档与上下文存的必须和用户屏幕上一致。
-      delivered = () => (wrapUp || visionDegraded ? emitted : '');
+      delivered = () => (wrapUp || visionDegraded ? emitted : "");
       // `interrupt()` 也要放开 `drained`：被打断那条路（`bot.ts` 里的 `void generated.final.catch()`）
       // 不会再去把生成器读完，不放的话那个 promise 永远悬着。
-      return { stream, final, interrupt: () => { streamDone(); if (!settled && mainRun) dependencies.agents?.fail(mainRun, 'stream_interrupted'); settled = true; } };
+      return {
+        stream,
+        final,
+        interrupt: () => {
+          streamDone();
+          if (!settled && mainRun)
+            dependencies.agents?.fail(mainRun, "stream_interrupted");
+          settled = true;
+        },
+      };
     }
-    const result = await agent.generate({ messages: contextMessages(turn, dependencies.db, messageOptions), abortSignal: turn.abortSignal });
+    const result = await agent.generate({
+      messages: contextMessages(turn, dependencies.db, messageOptions),
+      abortSignal: turn.abortSignal,
+    });
     // 非流式（定时任务走这条）同样吃 `result.text` = 最后一步正文那条语义：以工具调用收尾的
     // 定时任务此前会空正文 → `model_returned_empty`，整条任务静默失败。
     // 非流式（定时任务）也要带那句提示：这条路同样可能收到图（被回复的那条消息里那张）。
-    const withVisionNotice = (text: string): string => (visionDegraded && text.trim() ? `${text}\n\n${VISION_UNSUPPORTED_NOTICE}` : text);
+    const withVisionNotice = (text: string): string =>
+      visionDegraded && text.trim()
+        ? `${text}\n\n${VISION_UNSUPPORTED_NOTICE}`
+        : text;
     if (!result.text.trim()) {
       const wrapUp = withVisionNotice(await wrapUpIfNeeded());
-      if (wrapUp) { if (mainRun) dependencies.agents?.finish(mainRun, wrapUp); return wrapUp; }
+      if (wrapUp) {
+        if (mainRun) dependencies.agents?.finish(mainRun, wrapUp);
+        return wrapUp;
+      }
     }
     if (!result.text.trim() && streamFailure) throw streamFailure;
     const answer = withVisionNotice(result.text);
     if (mainRun) dependencies.agents?.finish(mainRun, answer);
     return answer;
   } catch (error) {
-    if (mainRun) dependencies.agents?.fail(mainRun, error instanceof Error ? error.message : String(error));
+    if (mainRun)
+      dependencies.agents?.fail(
+        mainRun,
+        error instanceof Error ? error.message : String(error),
+      );
     for (const span of stepSpans.values()) span.end(undefined, error);
     const info = initialInfo;
-    dependencies.ledger.record({ turnId: turn.turnId, chatId: turn.chatId, userId: turn.initiatorUserId, providerId: info.providerId,
-      modelId: info.modelId, modelAlias: alias, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0,
-      reasoningTokens: 0, priceIn: info.priceIn, priceOut: info.priceOut, priceCacheRead: info.priceCacheRead,
-      priceCacheWrite: info.priceCacheWrite, latencyMs: 0, ok: false, errorKind: error instanceof Error ? error.name : 'unknown' });
+    dependencies.ledger.record({
+      turnId: turn.turnId,
+      chatId: turn.chatId,
+      userId: turn.initiatorUserId,
+      providerId: info.providerId,
+      modelId: info.modelId,
+      modelAlias: alias,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      reasoningTokens: 0,
+      priceIn: info.priceIn,
+      priceOut: info.priceOut,
+      priceCacheRead: info.priceCacheRead,
+      priceCacheWrite: info.priceCacheWrite,
+      latencyMs: 0,
+      ok: false,
+      errorKind: error instanceof Error ? error.name : "unknown",
+    });
     throw error;
   }
 }

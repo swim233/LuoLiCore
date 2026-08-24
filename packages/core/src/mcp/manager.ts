@@ -1,18 +1,24 @@
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { minimatch } from 'minimatch';
-import { z } from 'zod';
-import { jsonSchemaToZod } from './schema.js';
-import { McpOAuthProvider, beginMcpAuthorization, completeMcpAuthorization, looksLikeAuthFailure, type PendingAuthorizations } from './oauth.js';
-import { KeyedMutex } from '../turn/keyed-mutex.js';
-import type { Role } from '@luoli/shared';
-import type { ToolRegistry } from '../tools/registry.js';
-import type { Config, LogSink } from '../index.js';
-import type { McpAuthRepository, Sqlite } from '@luoli/db';
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { minimatch } from "minimatch";
+import { z } from "zod";
+import { jsonSchemaToZod } from "./schema.js";
+import {
+  McpOAuthProvider,
+  beginMcpAuthorization,
+  completeMcpAuthorization,
+  looksLikeAuthFailure,
+  type PendingAuthorizations,
+} from "./oauth.js";
+import { KeyedMutex } from "../turn/keyed-mutex.js";
+import type { Role } from "@luoli/shared";
+import type { ToolRegistry } from "../tools/registry.js";
+import type { Config, LogSink } from "../index.js";
+import type { McpAuthRepository, Sqlite } from "@luoli/db";
 
 export interface McpServerAuthConfig {
-  mode: 'none' | 'bearer' | 'oauth';
+  mode: "none" | "bearer" | "oauth";
   scope?: string | undefined;
   clientId?: string | undefined;
   issuer?: string | undefined;
@@ -25,7 +31,7 @@ export interface McpServerAuthConfig {
  */
 export interface McpServerConfig {
   name: string;
-  transport: 'stdio' | 'http';
+  transport: "stdio" | "http";
   command?: string | undefined;
   args?: string[] | undefined;
   env?: Record<string, string> | undefined;
@@ -60,34 +66,59 @@ export interface McpAuthDependencies {
  * token 一直用下去；界面上那台 server 还显示「已连接」。
  */
 function fingerprint(server: ServerConfig, authVersion: number): string {
-  return JSON.stringify([server.transport, server.command ?? null, server.args ?? [], server.env ?? {}, server.url ?? null, server.headers ?? {}, server.auth?.mode ?? 'none', authVersion]);
+  return JSON.stringify([
+    server.transport,
+    server.command ?? null,
+    server.args ?? [],
+    server.env ?? {},
+    server.url ?? null,
+    server.headers ?? {},
+    server.auth?.mode ?? "none",
+    authVersion,
+  ]);
 }
 
 /** SDK 没从 exports 里放出 `Transport` 接口，而这里只需要这三个面 —— stdio 与 streamable-http
  *  两个 transport 都有。挂 onclose/onerror 要在 `client.connect()` **之前**：
  *  `Protocol.connect()` 会把已存在的那两个回调串到自己前面（sdk 1.30 `shared/protocol.js`），
  *  所以先挂不会被顶掉，反过来（connect 之后再挂）才会把 SDK 自己的清理覆盖掉。 */
-type McpTransport = { close(): Promise<void>; onclose?: () => void; onerror?: (error: Error) => void };
+type McpTransport = {
+  close(): Promise<void>;
+  onclose?: () => void;
+  onerror?: (error: Error) => void;
+};
 
 /**
  * `reconcile()` 与 `connect()` 各占一个键空间。**必须不同** —— `reconcile()` 持锁期间会走到
  * `connect()` 去取 `server:<name>`，同键就是自己等自己。server 名过 `^[a-z0-9][a-z0-9_-]{0,63}$`，
  * 撞不上带 `~` / `:` 的这两种键。
  */
-const RECONCILE_KEY = '~reconcile';
+const RECONCILE_KEY = "~reconcile";
 const connectKey = (name: string): string => `server:${name}`;
 
 /** 超时后拒绝，但不取消底层操作 —— MCP SDK 的 connect 没有 abort 入口。调用方随即把这台
  *  server 记成 down，并且**当场把 transport 关掉**（否则 `mcp-health` 每 5 分钟就给一台
  *  「spawn 得起来但握不上手」的 server 留一个子进程，docs/28 · L-EXT-03）。 */
-async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+async function withTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+  label: string,
+): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    return await Promise.race([promise, new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
-      timer.unref?.();
-    })]);
-  } finally { if (timer) clearTimeout(timer); }
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`${label} timed out after ${ms}ms`)),
+          ms,
+        );
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 export class McpManager {
@@ -96,7 +127,15 @@ export class McpManager {
    * 也关不掉。所以 `alive` / `#transports` 不算 `docs/01 §3.1` 说的那种「进程内状态当唯一真相」——
    * 真相仍在 `mcp.servers` 配置与 `mcp_servers` 表里，这里只是本实例握着的那几条连接。
    */
-  readonly #clients = new Map<string, { client: Client; transport: McpTransport; fingerprint: string; alive: boolean }>();
+  readonly #clients = new Map<
+    string,
+    {
+      client: Client;
+      transport: McpTransport;
+      fingerprint: string;
+      alive: boolean;
+    }
+  >();
   /** 所有建过、还没关完的 transport。`close()` 关它而不是只关 `#clients`：握手超时被丢掉的、
    *  被顶替的、竞态泄漏的都不在 `#clients` 里，而 SDK 的 `StdioClientTransport` **不 unref**
    *  子进程 —— 剩一条 refed handle 就够让 `shutdown()` 回不去（docs/28 · L-EXT-03）。 */
@@ -108,14 +147,31 @@ export class McpManager {
    *  后者才值得告警 —— 否则每次正常关停都刷一条「连接意外断开」。 */
   readonly #intentional = new WeakSet<McpTransport>();
   readonly #mutex = new KeyedMutex();
-  readonly #tools = new Map<string, { name: string; description: string; inputSchema: Record<string, unknown>; minRole: Role; call: (input: unknown) => Promise<unknown> }>();
-  readonly #config: () => Readonly<Config['mcp']>;
+  readonly #tools = new Map<
+    string,
+    {
+      name: string;
+      description: string;
+      inputSchema: Record<string, unknown>;
+      minRole: Role;
+      call: (input: unknown) => Promise<unknown>;
+    }
+  >();
+  readonly #config: () => Readonly<Config["mcp"]>;
   /** config 传 getter 时每次 reconcile 都取最新值：吃启动快照的话，新增 MCP server 必须重启，
    *  `/api/mcp/:name/reconnect` 重连的也永远是启动时那份列表（docs/20 · W-CFG-02）。 */
-  constructor(private readonly db: Sqlite, config: Readonly<Config['mcp']> | (() => Readonly<Config['mcp']>), private readonly log: LogSink, private registry?: ToolRegistry, private readonly authDeps?: McpAuthDependencies) {
-    this.#config = typeof config === 'function' ? config : () => config;
+  constructor(
+    private readonly db: Sqlite,
+    config: Readonly<Config["mcp"]> | (() => Readonly<Config["mcp"]>),
+    private readonly log: LogSink,
+    private registry?: ToolRegistry,
+    private readonly authDeps?: McpAuthDependencies,
+  ) {
+    this.#config = typeof config === "function" ? config : () => config;
   }
-  bindRegistry(registry: ToolRegistry): void { this.registry = registry; }
+  bindRegistry(registry: ToolRegistry): void {
+    this.registry = registry;
+  }
 
   /** 这台 server 现在这一版凭据的号。没接凭据库时恒为 0 —— 指纹里也就等于没有这一项。 */
   #authVersion(name: string): number {
@@ -123,45 +179,97 @@ export class McpManager {
   }
 
   #providerFor(server: ServerConfig): McpOAuthProvider {
-    if (!this.authDeps) throw new Error(`${server.name} 配了 auth.mode=oauth，但这个运行时没有凭据库（缺 LUOLI_MASTER_KEY？）`);
+    if (!this.authDeps)
+      throw new Error(
+        `${server.name} 配了 auth.mode=oauth，但这个运行时没有凭据库（缺 LUOLI_MASTER_KEY？）`,
+      );
     this.authDeps.store.ensureOAuth(server.name, server.auth?.scope ?? null);
-    return new McpOAuthProvider(server.name, this.authDeps.store, this.authDeps.pending, {
-      publicUrl: this.authDeps.publicUrl(),
-      ...(server.auth?.scope ? { scope: server.auth.scope } : {}),
-      ...(server.auth?.clientId ? { clientId: server.auth.clientId } : {}),
-    });
+    return new McpOAuthProvider(
+      server.name,
+      this.authDeps.store,
+      this.authDeps.pending,
+      {
+        publicUrl: this.authDeps.publicUrl(),
+        ...(server.auth?.scope ? { scope: server.auth.scope } : {}),
+        ...(server.auth?.clientId ? { clientId: server.auth.clientId } : {}),
+      },
+    );
   }
 
   /**
    * 开一次授权。返回授权 URL 给界面 —— 人点了才去，`reconcile()` 自己不弹浏览器。
    * 已经有可用 token 时 SDK 直接回 `'AUTHORIZED'`，这时顺手重连一次就行。
    */
-  async authorize(server: ServerConfig): Promise<{ status: 'AUTHORIZED' | 'REDIRECT'; authorizationUrl: string | null; expiresAt: number | null }> {
-    if (server.transport !== 'http' || !server.url) throw new Error(`${server.name} 不是 http transport，没有 OAuth 可走`);
+  async authorize(
+    server: ServerConfig,
+  ): Promise<{
+    status: "AUTHORIZED" | "REDIRECT";
+    authorizationUrl: string | null;
+    expiresAt: number | null;
+  }> {
+    if (server.transport !== "http" || !server.url)
+      throw new Error(`${server.name} 不是 http transport，没有 OAuth 可走`);
     const provider = this.#providerFor(server);
-    if (!provider.redirectUrl) throw new Error('还没配 `webui.publicUrl`，OAuth 回调没有可注册的地址 —— 去设置页填上它再登录。');
-    const status = await beginMcpAuthorization(provider, server.url, server.auth?.scope);
+    if (!provider.redirectUrl)
+      throw new Error(
+        "还没配 `webui.publicUrl`，OAuth 回调没有可注册的地址 —— 去设置页填上它再登录。",
+      );
+    const status = await beginMcpAuthorization(
+      provider,
+      server.url,
+      server.auth?.scope,
+    );
     const entry = this.authDeps!.pending.peek(server.name);
-    this.log.event({ level: 'info', kind: 'mcp.auth', summary: `${server.name} ${status === 'AUTHORIZED' ? '已有可用凭据' : '开始授权'}`, data: { server: server.name, status } });
-    return { status, authorizationUrl: entry?.authorizationUrl ?? null, expiresAt: entry?.expiresAt ?? null };
+    this.log.event({
+      level: "info",
+      kind: "mcp.auth",
+      summary: `${server.name} ${status === "AUTHORIZED" ? "已有可用凭据" : "开始授权"}`,
+      data: { server: server.name, status },
+    });
+    return {
+      status,
+      authorizationUrl: entry?.authorizationUrl ?? null,
+      expiresAt: entry?.expiresAt ?? null,
+    };
   }
 
   /** 回调那一步：用 code 换 token，成功后单台重连。 */
-  async completeAuthorization(server: ServerConfig, code: string): Promise<'AUTHORIZED' | 'REDIRECT'> {
-    if (server.transport !== 'http' || !server.url) throw new Error(`${server.name} 不是 http transport，没有 OAuth 可走`);
-    const status = await completeMcpAuthorization(this.#providerFor(server), server.url, code);
-    this.log.event({ level: status === 'AUTHORIZED' ? 'info' : 'warn', kind: 'mcp.auth', summary: `${server.name} 换取 token ${status === 'AUTHORIZED' ? '成功' : '未完成'}`, data: { server: server.name, status } });
+  async completeAuthorization(
+    server: ServerConfig,
+    code: string,
+  ): Promise<"AUTHORIZED" | "REDIRECT"> {
+    if (server.transport !== "http" || !server.url)
+      throw new Error(`${server.name} 不是 http transport，没有 OAuth 可走`);
+    const status = await completeMcpAuthorization(
+      this.#providerFor(server),
+      server.url,
+      code,
+    );
+    this.log.event({
+      level: status === "AUTHORIZED" ? "info" : "warn",
+      kind: "mcp.auth",
+      summary: `${server.name} 换取 token ${status === "AUTHORIZED" ? "成功" : "未完成"}`,
+      data: { server: server.name, status },
+    });
     return status;
   }
 
   /** 注销：凭据全清、pending 清、当场断开。下一次 reconcile 会把它重新记成 `needs_auth`。 */
   async signOut(server: ServerConfig): Promise<void> {
     if (!this.authDeps) return;
-    this.authDeps.store.invalidate(server.name, 'all');
+    this.authDeps.store.invalidate(server.name, "all");
     this.authDeps.pending.forget(server.name);
     const existing = this.#clients.get(server.name);
-    if (existing) { this.#clients.delete(server.name); await this.#discard(existing.transport, existing.client); }
-    this.log.event({ level: 'info', kind: 'mcp.auth', summary: `${server.name} 已注销`, data: { server: server.name } });
+    if (existing) {
+      this.#clients.delete(server.name);
+      await this.#discard(existing.transport, existing.client);
+    }
+    this.log.event({
+      level: "info",
+      kind: "mcp.auth",
+      summary: `${server.name} 已注销`,
+      data: { server: server.name },
+    });
   }
 
   /**
@@ -171,7 +279,9 @@ export class McpManager {
    * （docs/28 · L-EXT-03）。
    */
   async connect(server: ServerConfig): Promise<Client> {
-    return this.#mutex.run(connectKey(server.name), () => this.#connect(server));
+    return this.#mutex.run(connectKey(server.name), () =>
+      this.#connect(server),
+    );
   }
 
   async #connect(server: ServerConfig): Promise<Client> {
@@ -180,40 +290,92 @@ export class McpManager {
     // 指纹相同还不够，得判活性：子进程被 kill -9 之后这条缓存永远命中，而拿死 client 调
     // `listTools()` 必抛 —— cron 与 `/api/mcp/:name/reconnect` 就都成了同一条死路，那个
     // 「重连」按钮结构上点不动任何东西（docs/28 · L-EXT-02）。
-    if (existing && existing.fingerprint === print && existing.alive) return existing.client;
+    if (existing && existing.fingerprint === print && existing.alive)
+      return existing.client;
     // 换指纹的、以及已经判死的那条，都从这里走：**先关再建**。死了就直接从 `#clients` 删掉的话，
     // 下一次 connect 看到的是空位，于是又 spawn 一个，而上一个的 handle 已经没人拿得到了。
-    if (existing) { this.#clients.delete(server.name); await this.#discard(existing.transport, existing.client); }
-    const client = new Client({ name: 'luolicore', version: '0.1.0' });
-    const transport: McpTransport = server.transport === 'stdio'
-      // **`stderr: 'pipe'`**：SDK 的默认是 `'inherit'`，于是一台 server 打印的
-      // 「打开这个链接授权」「缺 XXX_TOKEN」直接写进 bot 进程的 stderr —— 不进 LogSink、
-      // 不落库、界面上一个字都没有，而这恰好是「为什么它连不上」最常见的答案所在。
-      ? new StdioClientTransport({ command: server.command!, args: server.args ?? [], stderr: 'pipe', ...(server.env ? { env: server.env } : {}) })
-      : new StreamableHTTPClientTransport(new URL(server.url!), this.#httpOptions(server));
-    if (server.transport === 'stdio') this.#pipeStderr(server.name, transport);
+    if (existing) {
+      this.#clients.delete(server.name);
+      await this.#discard(existing.transport, existing.client);
+    }
+    const client = new Client({ name: "luolicore", version: "0.1.0" });
+    const transport: McpTransport =
+      server.transport === "stdio"
+        ? // **`stderr: 'pipe'`**：SDK 的默认是 `'inherit'`，于是一台 server 打印的
+          // 「打开这个链接授权」「缺 XXX_TOKEN」直接写进 bot 进程的 stderr —— 不进 LogSink、
+          // 不落库、界面上一个字都没有，而这恰好是「为什么它连不上」最常见的答案所在。
+          new StdioClientTransport({
+            command: server.command!,
+            args: server.args ?? [],
+            stderr: "pipe",
+            ...(server.env ? { env: server.env } : {}),
+          })
+        : new StreamableHTTPClientTransport(
+            new URL(server.url!),
+            this.#httpOptions(server),
+          );
+    if (server.transport === "stdio") this.#pipeStderr(server.name, transport);
     this.#transports.add(transport);
     transport.onclose = () => this.#markDead(server.name, transport);
     // **只有 onclose 判死。** transport 的 onerror 也会为「一行读不动的 JSON」「stdin 写失败」
     // 触发，把它一律当死会让一台健康的 server 每 5 分钟被重启一次，而重启本身就是泄漏的来源。
-    transport.onerror = (error) => this.log.event({ level: 'warn', kind: 'mcp.error', summary: `${server.name}: ${error.message}`, data: { server: server.name } });
+    transport.onerror = (error) =>
+      this.log.event({
+        level: "warn",
+        kind: "mcp.error",
+        summary: `${server.name}: ${error.message}`,
+        data: { server: server.name },
+      });
     // `mcp.connectTimeoutMs`：握手本身也要有上界。一台 stdio server 卡在启动里（等一个不存在的
     // 凭据、DNS 打不通）会让 `reconcile()` 永远回不来，而 reconcile 在启动路径上 —— 整个进程起不来。
     // `server.timeoutMs` 管的是 callTool，两者不是一回事。
     const connectTimeoutMs = this.#config().connectTimeoutMs;
     try {
-      await withTimeout(client.connect(transport as Parameters<Client['connect']>[0]), connectTimeoutMs, `${server.name} connect`);
-      this.#clients.set(server.name, { client, transport, fingerprint: print, alive: true });
-      const tools = await withTimeout(client.listTools(), connectTimeoutMs, `${server.name} listTools`);
-      this.db.prepare(`INSERT INTO mcp_servers(name,transport,command,args_json,env_json,url,headers_json,min_role,enabled,tool_allow_json,tool_deny_json,timeout_ms,state,tools_json,connected_at,updated_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET state='up',tools_json=excluded.tools_json,connected_at=excluded.connected_at,updated_at=excluded.updated_at,last_error=NULL`)
-        .run(server.name, server.transport, server.command ?? null, JSON.stringify(server.args ?? []), JSON.stringify(server.env ?? {}), server.url ?? null, JSON.stringify(server.headers ?? {}), server.minRole ?? this.#config().defaultMinRole,
-          server.enabled === false ? 0 : 1, JSON.stringify(server.toolAllow ?? []), JSON.stringify(server.toolDeny ?? []), server.timeoutMs ?? 30_000, 'up', JSON.stringify(tools.tools), Date.now(), Date.now());
+      await withTimeout(
+        client.connect(transport as Parameters<Client["connect"]>[0]),
+        connectTimeoutMs,
+        `${server.name} connect`,
+      );
+      this.#clients.set(server.name, {
+        client,
+        transport,
+        fingerprint: print,
+        alive: true,
+      });
+      const tools = await withTimeout(
+        client.listTools(),
+        connectTimeoutMs,
+        `${server.name} listTools`,
+      );
+      this.db
+        .prepare(
+          `INSERT INTO mcp_servers(name,transport,command,args_json,env_json,url,headers_json,min_role,enabled,tool_allow_json,tool_deny_json,timeout_ms,state,tools_json,connected_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET state='up',tools_json=excluded.tools_json,connected_at=excluded.connected_at,updated_at=excluded.updated_at,last_error=NULL`,
+        )
+        .run(
+          server.name,
+          server.transport,
+          server.command ?? null,
+          JSON.stringify(server.args ?? []),
+          JSON.stringify(server.env ?? {}),
+          server.url ?? null,
+          JSON.stringify(server.headers ?? {}),
+          server.minRole ?? this.#config().defaultMinRole,
+          server.enabled === false ? 0 : 1,
+          JSON.stringify(server.toolAllow ?? []),
+          JSON.stringify(server.toolDeny ?? []),
+          server.timeoutMs ?? 30_000,
+          "up",
+          JSON.stringify(tools.tools),
+          Date.now(),
+          Date.now(),
+        );
       return client;
     } catch (error) {
       // 失败的那一条当场收掉，但**不 await**：stdio 的 close 要走 stdin.end → SIGTERM → SIGKILL
       // 三级（SDK 里各 2 秒），而 reconcile 在启动路径上。`#closing` 替 `close()` 记着这份 promise。
-      if (this.#clients.get(server.name)?.transport === transport) this.#clients.delete(server.name);
+      if (this.#clients.get(server.name)?.transport === transport)
+        this.#clients.delete(server.name);
       void this.#discard(transport, client);
       throw error;
     }
@@ -223,17 +385,30 @@ export class McpManager {
    * http transport 的构造参数。凭据在这里注入，**不经过配置** —— `mcp.servers` 要进
    * `config_revisions` 与配置导出，而按键名判密的那条正则匹配不到 `Authorization`。
    */
-  #httpOptions(server: ServerConfig): { requestInit?: { headers: Record<string, string> }; authProvider?: McpOAuthProvider } | undefined {
-    const mode = server.auth?.mode ?? 'none';
+  #httpOptions(
+    server: ServerConfig,
+  ):
+    | {
+        requestInit?: { headers: Record<string, string> };
+        authProvider?: McpOAuthProvider;
+      }
+    | undefined {
+    const mode = server.auth?.mode ?? "none";
     const headers = { ...(server.headers ?? {}) };
-    if (mode === 'bearer') {
+    if (mode === "bearer") {
       const token = this.authDeps?.store.bearerToken(server.name);
       // 拿不到就**不编一个空 Bearer 发出去**：那样对方回的是「token 无效」，而真相是本地没有
       // 这一份（没配、或者换过 LUOLI_MASTER_KEY 解不开了）。让它照常撞 401，然后被记成 needs_auth。
       if (token) headers.Authorization = `Bearer ${token}`;
     }
-    if (mode === 'oauth') return { authProvider: this.#providerFor(server), ...(Object.keys(headers).length ? { requestInit: { headers } } : {}) };
-    return Object.keys(headers).length ? { requestInit: { headers } } : undefined;
+    if (mode === "oauth")
+      return {
+        authProvider: this.#providerFor(server),
+        ...(Object.keys(headers).length ? { requestInit: { headers } } : {}),
+      };
+    return Object.keys(headers).length
+      ? { requestInit: { headers } }
+      : undefined;
   }
 
   /**
@@ -244,17 +419,27 @@ export class McpManager {
    * 逐行而不是整块：一条 500 KB 的栈会把日志行撑爆，而 `LogSink` 的载荷是要落盘的。
    */
   #pipeStderr(name: string, transport: McpTransport): void {
-    const stream = (transport as { stderr?: { on(event: 'data', listener: (chunk: Buffer) => void): void } }).stderr;
+    const stream = (
+      transport as {
+        stderr?: { on(event: "data", listener: (chunk: Buffer) => void): void };
+      }
+    ).stderr;
     if (!stream) return;
-    let buffered = '';
-    stream.on('data', (chunk) => {
-      buffered += chunk.toString('utf8');
-      const lines = buffered.split('\n');
+    let buffered = "";
+    stream.on("data", (chunk) => {
+      buffered += chunk.toString("utf8");
+      const lines = buffered.split("\n");
       // 最后一段可能是半行，留到下一块。上界 8 KB：一台不打换行的 server 不该让这个缓冲无界涨。
-      buffered = (lines.pop() ?? '').slice(-8192);
+      buffered = (lines.pop() ?? "").slice(-8192);
       for (const line of lines) {
         const text = line.trim();
-        if (text) this.log.event({ level: 'warn', kind: 'mcp.stderr', summary: `${name}: ${text.slice(0, 2000)}`, data: { server: name } });
+        if (text)
+          this.log.event({
+            level: "warn",
+            kind: "mcp.stderr",
+            summary: `${name}: ${text.slice(0, 2000)}`,
+            data: { server: name },
+          });
       }
     });
   }
@@ -266,34 +451,79 @@ export class McpManager {
     // 已经关了，`close()` 不用再管它；留在集合里只会让它无界增长。
     this.#transports.delete(transport);
     if (this.#intentional.has(transport)) return;
-    this.log.event({ level: 'warn', kind: 'mcp.disconnect', summary: `${name} 连接断开，下一次 reconcile 会重连`, data: { server: name } });
+    this.log.event({
+      level: "warn",
+      kind: "mcp.disconnect",
+      summary: `${name} 连接断开，下一次 reconcile 会重连`,
+      data: { server: name },
+    });
   }
 
   /** 关一条连接。`client` 在时走 `client.close()`（顺带做 SDK 侧的 pending-request 清理）。 */
   #discard(transport: McpTransport, client?: Client): Promise<void> {
     this.#intentional.add(transport);
     const done = (async () => {
-      try { await (client ? client.close() : transport.close()); }
-      catch { /* 关不掉的（子进程已消失、http 已断）照旧要从账上摘掉 */ }
-      finally { this.#transports.delete(transport); }
+      try {
+        await (client ? client.close() : transport.close());
+      } catch {
+        /* 关不掉的（子进程已消失、http 已断）照旧要从账上摘掉 */
+      } finally {
+        this.#transports.delete(transport);
+      }
     })();
     this.#closing.add(done);
     void done.finally(() => this.#closing.delete(done));
     return done;
   }
 
-  async discover(server: ServerConfig): Promise<Array<{ name: string; description: string; inputSchema: Record<string, unknown>; minRole: Role; call: (input: unknown) => Promise<unknown> }>> {
+  async discover(
+    server: ServerConfig,
+  ): Promise<
+    Array<{
+      name: string;
+      description: string;
+      inputSchema: Record<string, unknown>;
+      minRole: Role;
+      call: (input: unknown) => Promise<unknown>;
+    }>
+  > {
     const client = await this.connect(server);
-    const tools = (await client.listTools()).tools.filter((tool) => !(server.toolAllow?.length) || server.toolAllow.some((pattern) => minimatch(tool.name, pattern)))
-      .filter((tool) => !server.toolDeny?.some((pattern) => minimatch(tool.name, pattern)));
-    return tools.map((entry) => ({ name: `mcp__${server.name}__${entry.name}`, description: entry.description ?? `MCP ${server.name}/${entry.name}`, inputSchema: entry.inputSchema as Record<string, unknown>, minRole: (server.minRole as Role | undefined) ?? this.#config().defaultMinRole,
+    const tools = (await client.listTools()).tools
+      .filter(
+        (tool) =>
+          !server.toolAllow?.length ||
+          server.toolAllow.some((pattern) => minimatch(tool.name, pattern)),
+      )
+      .filter(
+        (tool) =>
+          !server.toolDeny?.some((pattern) => minimatch(tool.name, pattern)),
+      );
+    return tools.map((entry) => ({
+      name: `mcp__${server.name}__${entry.name}`,
+      description: entry.description ?? `MCP ${server.name}/${entry.name}`,
+      inputSchema: entry.inputSchema as Record<string, unknown>,
+      minRole:
+        (server.minRole as Role | undefined) ?? this.#config().defaultMinRole,
       call: async (input) => {
         const started = performance.now();
         // timeoutMs 此前只存进 mcp_servers 表，从没用来限制 callTool：一台卡住的 MCP server
         // 能把整轮拖到轮次超时（docs/20 · W-MCP-01）。
-        try { return await client.callTool({ name: entry.name, arguments: input as Record<string, unknown> }, undefined, { timeout: server.timeoutMs ?? 30_000 }); }
-        finally { this.log.event({ level: 'info', kind: 'tool.mcp', summary: `${server.name}/${entry.name}`, durationMs: Math.round(performance.now() - started) }); }
-      } }));
+        try {
+          return await client.callTool(
+            { name: entry.name, arguments: input as Record<string, unknown> },
+            undefined,
+            { timeout: server.timeoutMs ?? 30_000 },
+          );
+        } finally {
+          this.log.event({
+            level: "info",
+            kind: "tool.mcp",
+            summary: `${server.name}/${entry.name}`,
+            durationMs: Math.round(performance.now() - started),
+          });
+        }
+      },
+    }));
   }
 
   /**
@@ -309,7 +539,11 @@ export class McpManager {
   async #reconcile(): Promise<void> {
     const config = this.#config();
     const wanted = config.enabled
-      ? new Set((config.servers as unknown as ServerConfig[]).filter((server) => server.enabled !== false).map((server) => server.name))
+      ? new Set(
+          (config.servers as unknown as ServerConfig[])
+            .filter((server) => server.enabled !== false)
+            .map((server) => server.name),
+        )
       : new Set<string>();
     // 从配置里移除或被停用的 server 必须断开：只 unregister 工具的话，stdio 子进程会一直挂着，
     // 而下一次 reconcile 又会把它当成「已连接」复用（docs/20 · W-MCP-01）。
@@ -317,33 +551,63 @@ export class McpManager {
       if (wanted.has(name)) continue;
       this.#clients.delete(name);
       await this.#discard(entry.transport, entry.client);
-      this.db.prepare("UPDATE mcp_servers SET state='disabled',updated_at=? WHERE name=?").run(Date.now(), name);
-      this.log.event({ level: 'info', kind: 'mcp.disconnect', summary: `${name} removed from configuration`, data: { server: name } });
+      this.db
+        .prepare(
+          "UPDATE mcp_servers SET state='disabled',updated_at=? WHERE name=?",
+        )
+        .run(Date.now(), name);
+      this.log.event({
+        level: "info",
+        kind: "mcp.disconnect",
+        summary: `${name} removed from configuration`,
+        data: { server: name },
+      });
     }
-    const targets = config.enabled ? (config.servers as unknown as ServerConfig[]).filter((server) => server.enabled !== false) : [];
+    const targets = config.enabled
+      ? (config.servers as unknown as ServerConfig[]).filter(
+          (server) => server.enabled !== false,
+        )
+      : [];
     // 配置里已经没有的 server，它的凭据不该永远留着（照 `SkillLoader.scan()` 末尾清陈行的做法）。
     // 判据用**整份 servers** 而不是 `targets`：停用一台 server 不该把它的 token 一起丢掉，
     // 否则「停一下再开」等于要人重新登录一次。
-    this.authDeps?.store.prune((config.servers as unknown as ServerConfig[]).map((server) => server.name));
+    this.authDeps?.store.prune(
+      (config.servers as unknown as ServerConfig[]).map(
+        (server) => server.name,
+      ),
+    );
     // **先并行 discover 到临时表，全部落定之后才在一个同步段里换掉注册表。** 反过来（先
     // `unregisterBySource` 再逐台串行 await）会给模型开一段「一个 MCP 工具都没有」的窗口，
     // 每台最长 `connectTimeoutMs`（默认 15s），而 `mcp.healthCheckCron` 默认 5 分钟就开一次
     // （docs/28 · L-EXT-05）。并行还顺带把启动时的总等待从「累加」变成「取最大」。
-    const settled = await Promise.allSettled(targets.map((server) => this.discover(server)));
-    this.registry?.unregisterBySource('mcp');
+    const settled = await Promise.allSettled(
+      targets.map((server) => this.discover(server)),
+    );
+    this.registry?.unregisterBySource("mcp");
     this.#tools.clear();
     for (const [index, result] of settled.entries()) {
       const server = targets[index]!;
-      if (result.status === 'rejected') { this.#recordDown(server, result.reason); continue; }
+      if (result.status === "rejected") {
+        this.#recordDown(server, result.reason);
+        continue;
+      }
       // **schema 转换也在这个 try 里。** 它此前在循环外统一做，于是一台 server 的畸形
       // `inputSchema` 会让异常从 `reconcile()` 抛出去：`POST /api/mcp` 500，而
       // `main.ts` 的 `await mcp.reconcile()` 在启动路径上 —— 整个进程起不来（docs/27 · C-04）。
       // 单条工具转换失败就退回宽松放行那一个工具，别拖着同一台 server 的其余工具。
       try {
         for (const entry of result.value) this.#tools.set(entry.name, entry);
-        if (this.registry) for (const entry of result.value) this.#register(entry);
-        this.log.event({ level: 'info', kind: 'mcp.connect', summary: `${server.name} connected`, data: { server: server.name, transport: server.transport } });
-      } catch (error) { this.#recordDown(server, error); }
+        if (this.registry)
+          for (const entry of result.value) this.#register(entry);
+        this.log.event({
+          level: "info",
+          kind: "mcp.connect",
+          summary: `${server.name} connected`,
+          data: { server: server.name, transport: server.transport },
+        });
+      } catch (error) {
+        this.#recordDown(server, error);
+      }
     }
   }
 
@@ -353,21 +617,50 @@ export class McpManager {
    * `Error POSTing to endpoint: <原始响应体>`，从里面读不出该做什么。
    */
   #recordDown(server: ServerConfig, error: unknown): void {
-    const authFailure = server.transport === 'http' && looksLikeAuthFailure(error);
-    const state = authFailure ? 'needs_auth' : 'down';
-    const message = authFailure ? this.#authHint(server) : error instanceof Error ? error.message : String(error);
-    this.db.prepare(`INSERT INTO mcp_servers(name,transport,min_role,enabled,timeout_ms,state,last_error,updated_at) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET state=excluded.state,last_error=excluded.last_error,updated_at=excluded.updated_at`).run(server.name, server.transport, server.minRole ?? this.#config().defaultMinRole, 1, server.timeoutMs ?? 30_000, state, message, Date.now());
-    this.log.event({ level: 'warn', kind: authFailure ? 'mcp.auth' : 'mcp.error', summary: `${server.name}: ${message}`, data: { server: server.name, ...(authFailure ? { authMode: server.auth?.mode ?? 'none' } : {}) } });
+    const authFailure =
+      server.transport === "http" && looksLikeAuthFailure(error);
+    const state = authFailure ? "needs_auth" : "down";
+    const message = authFailure
+      ? this.#authHint(server)
+      : error instanceof Error
+        ? error.message
+        : String(error);
+    this.db
+      .prepare(
+        `INSERT INTO mcp_servers(name,transport,min_role,enabled,timeout_ms,state,last_error,updated_at) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET state=excluded.state,last_error=excluded.last_error,updated_at=excluded.updated_at`,
+      )
+      .run(
+        server.name,
+        server.transport,
+        server.minRole ?? this.#config().defaultMinRole,
+        1,
+        server.timeoutMs ?? 30_000,
+        state,
+        message,
+        Date.now(),
+      );
+    this.log.event({
+      level: "warn",
+      kind: authFailure ? "mcp.auth" : "mcp.error",
+      summary: `${server.name}: ${message}`,
+      data: {
+        server: server.name,
+        ...(authFailure ? { authMode: server.auth?.mode ?? "none" } : {}),
+      },
+    });
   }
 
   /** 「要登录」这一档要说清**下一步做什么**，而下一步取决于 `auth.mode` 配的是哪一种。 */
   #authHint(server: ServerConfig): string {
     switch (server.auth?.mode) {
-      case 'oauth': return '这台 server 要求登录。在扩展页点〔登录〕走一遍浏览器授权。';
-      case 'bearer': return this.authDeps?.store.bearerToken(server.name)
-        ? '这台 server 拒收了保存的 token（过期或被撤销）。在扩展页重新填一次。'
-        : '这台 server 要求登录，而本地没有保存 token。在扩展页填一个。';
-      default: return '这台 server 要求登录，而它的 auth.mode 是 none。编辑它，选 bearer（填 token）或 oauth（浏览器授权）。';
+      case "oauth":
+        return "这台 server 要求登录。在扩展页点〔登录〕走一遍浏览器授权。";
+      case "bearer":
+        return this.authDeps?.store.bearerToken(server.name)
+          ? "这台 server 拒收了保存的 token（过期或被撤销）。在扩展页重新填一次。"
+          : "这台 server 要求登录，而本地没有保存 token。在扩展页填一个。";
+      default:
+        return "这台 server 要求登录，而它的 auth.mode 是 none。编辑它，选 bearer（填 token）或 oauth（浏览器授权）。";
     }
   }
 
@@ -376,27 +669,57 @@ export class McpManager {
    * （docs/20 · W-MCP-01）。而转换本身也可能抛（畸形 schema、zod 拒收的字面量），所以降级的
    * 粒度是**一个工具** —— 整台 server 的其余工具照常带着精确 schema 进目录（docs/27 · C-04）。
    */
-  #register(entry: { name: string; description: string; inputSchema: Record<string, unknown>; minRole: Role; call: (input: unknown) => Promise<unknown> }): void {
+  #register(entry: {
+    name: string;
+    description: string;
+    inputSchema: Record<string, unknown>;
+    minRole: Role;
+    call: (input: unknown) => Promise<unknown>;
+  }): void {
     let inputSchema: z.ZodTypeAny;
-    try { inputSchema = jsonSchemaToZod(entry.inputSchema); }
-    catch (error) {
+    try {
+      inputSchema = jsonSchemaToZod(entry.inputSchema);
+    } catch (error) {
       inputSchema = z.record(z.unknown());
-      this.log.event({ level: 'warn', kind: 'mcp.error', summary: `${entry.name} 的入参 schema 转换失败，已退回宽松放行`, data: { tool: entry.name, error: error instanceof Error ? error.message : String(error) } });
+      this.log.event({
+        level: "warn",
+        kind: "mcp.error",
+        summary: `${entry.name} 的入参 schema 转换失败，已退回宽松放行`,
+        data: {
+          tool: entry.name,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      });
     }
-    this.registry!.registerExternal({ name: entry.name, description: entry.description, inputSchema, minRole: entry.minRole, source: 'mcp', execute: entry.call });
+    this.registry!.registerExternal({
+      name: entry.name,
+      description: entry.description,
+      inputSchema,
+      minRole: entry.minRole,
+      source: "mcp",
+      execute: entry.call,
+    });
   }
 
-  toolEntries(): Array<{ name: string; description: string; inputSchema: Record<string, unknown>; minRole: Role; call: (input: unknown) => Promise<unknown> }> {
+  toolEntries(): Array<{
+    name: string;
+    description: string;
+    inputSchema: Record<string, unknown>;
+    minRole: Role;
+    call: (input: unknown) => Promise<unknown>;
+  }> {
     return [...this.#tools.values()];
   }
 
   async close(): Promise<void> {
-    for (const entry of [...this.#clients.values()]) void this.#discard(entry.transport, entry.client);
+    for (const entry of [...this.#clients.values()])
+      void this.#discard(entry.transport, entry.client);
     this.#clients.clear();
     // `#clients` 之外还挂着的那些：握手超时被丢掉的、被顶替的、竞态泄漏的。漏掉一条就是漏掉
     // 一个 refed 的 stdio 子进程，而 `shutdown()` 只设 `process.exitCode` —— event loop 不空，
     // 进程就是不退（实测 >100 秒，docs/28 · L-EXT-03）。
-    for (const transport of [...this.#transports]) void this.#discard(transport);
+    for (const transport of [...this.#transports])
+      void this.#discard(transport);
     await Promise.all([...this.#closing]);
   }
 }
