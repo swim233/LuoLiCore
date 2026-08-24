@@ -1,5 +1,5 @@
-import { isAbsolute, relative, resolve, sep } from 'node:path';
-import { readAppKv, writeAppKv, type Sqlite } from '@luoli/db';
+import { isAbsolute, relative, resolve, sep } from "node:path";
+import { readAppKv, writeAppKv, type Sqlite } from "@luoli/db";
 
 /**
  * 一次性修复：把 `agent_runs.result_full_ref` 里的存量**绝对**路径改写成相对当前结果目录的 ref
@@ -13,7 +13,7 @@ import { readAppKv, writeAppKv, type Sqlite } from '@luoli/db';
  * 的证据，`MaintenanceService.gcFiles()` 的错配保护要靠它拒绝清理，让人先看一眼再决定。
  * 悄悄把它们也改成相对路径等于把证据擦掉，然后 gc 会照着删 —— 那就是这一条缺陷本身。
  */
-export const AGENT_RESULT_REF_REPAIR_KEY = 'repair:agent-result-refs:v1';
+export const AGENT_RESULT_REF_REPAIR_KEY = "repair:agent-result-refs:v1";
 
 export interface AgentResultRefRepair {
   /** 带 ref 的行数。 */
@@ -28,21 +28,42 @@ export interface AgentResultRefRepair {
   sample?: string;
 }
 
-export function repairAgentResultRefs(db: Sqlite, agentResultsDir: string): AgentResultRefRepair | null {
+export function repairAgentResultRefs(
+  db: Sqlite,
+  agentResultsDir: string,
+): AgentResultRefRepair | null {
   if (readAppKv<boolean>(db, AGENT_RESULT_REF_REPAIR_KEY)) return null;
   const root = resolve(agentResultsDir);
   const prefix = root.endsWith(sep) ? root : root + sep;
-  const rows = db.prepare('SELECT id,result_full_ref AS ref FROM agent_runs WHERE result_full_ref IS NOT NULL').all() as Array<{ id: string; ref: string }>;
-  const result: AgentResultRefRepair = { scanned: rows.length, rewritten: 0, foreign: 0, relative: 0 };
-  const update = db.prepare('UPDATE agent_runs SET result_full_ref=? WHERE id=?');
+  const rows = db
+    .prepare(
+      "SELECT id,result_full_ref AS ref FROM agent_runs WHERE result_full_ref IS NOT NULL",
+    )
+    .all() as Array<{ id: string; ref: string }>;
+  const result: AgentResultRefRepair = {
+    scanned: rows.length,
+    rewritten: 0,
+    foreign: 0,
+    relative: 0,
+  };
+  const update = db.prepare(
+    "UPDATE agent_runs SET result_full_ref=? WHERE id=?",
+  );
   db.transaction(() => {
     for (const row of rows) {
-      if (!isAbsolute(row.ref)) { result.relative += 1; continue; }
-      if (!row.ref.startsWith(prefix)) { result.foreign += 1; result.sample ??= row.ref; continue; }
+      if (!isAbsolute(row.ref)) {
+        result.relative += 1;
+        continue;
+      }
+      if (!row.ref.startsWith(prefix)) {
+        result.foreign += 1;
+        result.sample ??= row.ref;
+        continue;
+      }
       update.run(relative(root, row.ref), row.id);
       result.rewritten += 1;
     }
-    writeAppKv(db, AGENT_RESULT_REF_REPAIR_KEY, true, 'startup');
+    writeAppKv(db, AGENT_RESULT_REF_REPAIR_KEY, true, "startup");
   })();
   return result;
 }

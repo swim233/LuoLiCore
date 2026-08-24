@@ -1,5 +1,5 @@
-import { GrammyError, type Bot } from 'grammy';
-import type { Update } from 'grammy/types';
+import { GrammyError, type Bot } from "grammy";
+import type { Update } from "grammy/types";
 
 /**
  * 并发的 long polling 驱动。
@@ -40,7 +40,7 @@ export interface UpdatePollerOptions {
   maxInFlight: number;
   /** long poll 的挂起秒数。 */
   timeoutSeconds?: number;
-  onError: (error: unknown, phase: 'fetch' | 'handle') => void;
+  onError: (error: unknown, phase: "fetch" | "handle") => void;
   /** 401 / 409：token 不该由本进程轮询，重试只会和另一个实例互相抢。 */
   onFatal: (error: unknown) => void;
 }
@@ -53,14 +53,23 @@ export class UpdatePoller {
   readonly #inFlight = new Set<Promise<void>>();
   readonly #maxInFlight: number;
 
-  constructor(private readonly bot: Bot, private readonly options: UpdatePollerOptions) {
+  constructor(
+    private readonly bot: Bot,
+    private readonly options: UpdatePollerOptions,
+  ) {
     this.#maxInFlight = Math.max(1, Math.trunc(options.maxInFlight));
   }
 
-  get inFlight(): number { return this.#inFlight.size; }
-  get running(): boolean { return this.#running; }
+  get inFlight(): number {
+    return this.#inFlight.size;
+  }
+  get running(): boolean {
+    return this.#running;
+  }
   /** 下一次 `getUpdates` 的 offset。测试与运维排查用。 */
-  get offset(): number { return this.#offset; }
+  get offset(): number {
+    return this.#offset;
+  }
 
   /** 不返回 Promise：循环自己吞掉所有错误，调用方没有可 await 的失败。 */
   start(): void {
@@ -79,7 +88,10 @@ export class UpdatePoller {
     this.#loop = null;
     // 与 grammY 的 `stop()` 一致：确认 offset，重启后不会把已经派发过的 update 再收一遍
     // （去重表挡得住，但那意味着重启后要先空跑一批 update 才轮到新消息）。
-    if (this.#offset > 0) await this.bot.api.getUpdates({ offset: this.#offset, limit: 1, timeout: 0 }).catch(() => undefined);
+    if (this.#offset > 0)
+      await this.bot.api
+        .getUpdates({ offset: this.#offset, limit: 1, timeout: 0 })
+        .catch(() => undefined);
   }
 
   /** 等在途 handler 收尾，语义与 `TurnRegistry.drain` 一致：宽限期内没排空就返回 false。 */
@@ -87,7 +99,10 @@ export class UpdatePoller {
     const deadline = Date.now() + graceMs;
     // 这里的等待不能认 abort 信号：`stop()` 之后信号已经是 aborted，认了就退化成忙等。
     while (this.#inFlight.size && Date.now() < deadline) {
-      await Promise.race([...this.#inFlight, sleep(Math.min(intervalMs, Math.max(1, deadline - Date.now())))]);
+      await Promise.race([
+        ...this.#inFlight,
+        sleep(Math.min(intervalMs, Math.max(1, deadline - Date.now()))),
+      ]);
     }
     return this.#inFlight.size === 0;
   }
@@ -95,10 +110,15 @@ export class UpdatePoller {
   async #run(): Promise<void> {
     // 先摘 webhook：设过 webhook 的 token 上 `getUpdates` 会一直 409，而 409 在下面是致命错误。
     // `drop_pending_updates` 也只有这一处能生效（Bot API 把它挂在 deleteWebhook 上）。
-    await this.bot.api.deleteWebhook({ drop_pending_updates: this.options.dropPendingUpdates ?? false }, this.#signal())
-      .catch((error: unknown) => this.options.onError(error, 'fetch'));
+    await this.bot.api
+      .deleteWebhook(
+        { drop_pending_updates: this.options.dropPendingUpdates ?? false },
+        this.#signal(),
+      )
+      .catch((error: unknown) => this.options.onError(error, "fetch"));
     while (this.#running) {
-      while (this.#running && this.#inFlight.size >= this.#maxInFlight) await Promise.race(this.#inFlight);
+      while (this.#running && this.#inFlight.size >= this.#maxInFlight)
+        await Promise.race(this.#inFlight);
       if (!this.#running) break;
       const updates = await this.#fetch();
       if (!updates) break;
@@ -112,20 +132,38 @@ export class UpdatePoller {
   }
 
   async #fetch(): Promise<Update[] | null> {
-    const limit = Math.min(MAX_BATCH, Math.max(1, this.#maxInFlight - this.#inFlight.size));
+    const limit = Math.min(
+      MAX_BATCH,
+      Math.max(1, this.#maxInFlight - this.#inFlight.size),
+    );
     while (this.#running) {
       try {
-        return await this.bot.api.getUpdates({ offset: this.#offset, limit, timeout: this.options.timeoutSeconds ?? 30,
-          ...(this.options.allowedUpdates ? { allowed_updates: [...this.options.allowedUpdates] as never } : {}) }, this.#signal());
+        return await this.bot.api.getUpdates(
+          {
+            offset: this.#offset,
+            limit,
+            timeout: this.options.timeoutSeconds ?? 30,
+            ...(this.options.allowedUpdates
+              ? { allowed_updates: [...this.options.allowedUpdates] as never }
+              : {}),
+          },
+          this.#signal(),
+        );
       } catch (error) {
         if (!this.#running) return null;
-        if (error instanceof GrammyError && (error.error_code === 401 || error.error_code === 409)) {
+        if (
+          error instanceof GrammyError &&
+          (error.error_code === 401 || error.error_code === 409)
+        ) {
           this.#running = false;
           this.options.onFatal(error);
           return null;
         }
-        this.options.onError(error, 'fetch');
-        const retryAfter = error instanceof GrammyError && error.error_code === 429 ? error.parameters.retry_after : undefined;
+        this.options.onError(error, "fetch");
+        const retryAfter =
+          error instanceof GrammyError && error.error_code === 429
+            ? error.parameters.retry_after
+            : undefined;
         await this.#backoff((retryAfter ?? RETRY_SECONDS) * 1000);
       }
     }
@@ -133,7 +171,9 @@ export class UpdatePoller {
   }
 
   #dispatch(update: Update): void {
-    const task = this.bot.handleUpdate(update).catch((error: unknown) => this.options.onError(error, 'handle'));
+    const task = this.bot
+      .handleUpdate(update)
+      .catch((error: unknown) => this.options.onError(error, "handle"));
     this.#inFlight.add(task);
     void task.finally(() => this.#inFlight.delete(task));
   }
@@ -147,14 +187,23 @@ export class UpdatePoller {
   #backoff(ms: number): Promise<void> {
     const signal = this.#controller.signal;
     return new Promise<void>((resolve) => {
-      const wake = (): void => { clearTimeout(timer); resolve(); };
-      const timer = setTimeout(() => { signal.removeEventListener('abort', wake); resolve(); }, ms);
+      const wake = (): void => {
+        clearTimeout(timer);
+        resolve();
+      };
+      const timer = setTimeout(() => {
+        signal.removeEventListener("abort", wake);
+        resolve();
+      }, ms);
       timer.unref?.();
-      signal.addEventListener('abort', wake, { once: true });
+      signal.addEventListener("abort", wake, { once: true });
     });
   }
 }
 
 function sleep(ms: number): Promise<void> {
-  return new Promise<void>((resolve) => { const timer = setTimeout(resolve, ms); timer.unref?.(); });
+  return new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
 }

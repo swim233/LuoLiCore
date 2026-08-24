@@ -1,8 +1,16 @@
-import type { Bot } from 'grammy';
-import { deliveryOrder, holdReply, segmentTelegramText, sendWithFallback, splitTelegramText, type ParseFallbackInfo, type ParseMode } from './output.js';
+import type { Bot } from "grammy";
+import {
+  deliveryOrder,
+  holdReply,
+  segmentTelegramText,
+  sendWithFallback,
+  splitTelegramText,
+  type ParseFallbackInfo,
+  type ParseMode,
+} from "./output.js";
 
 export interface StreamOutputOptions {
-  mode: 'stream' | 'once';
+  mode: "stream" | "once";
   replyDelayMs: number;
   /** 首个 chunk 到达后再攒这么久才发第一条，见下面 `consume` 里两道窗口的注释。 */
   bufferMs: number;
@@ -20,7 +28,7 @@ export interface StreamOutputOptions {
   /** `output.placeholderTexts`：占位消息的备选文案。空数组（或全是空白行）= 不发占位消息。 */
   placeholderTexts?: readonly string[];
   /** `output.placeholderPick` / `output.placeholderIndex`：随机挑一条，还是恒用下标指的那条。 */
-  placeholderPick?: 'random' | 'fixed';
+  placeholderPick?: "random" | "fixed";
   placeholderIndex?: number;
 }
 
@@ -42,10 +50,14 @@ const TYPING_QUIET_MS = 15_000;
  * 这也是关掉占位消息的唯一途径（`placeholderAfterMs` 是 positive，填不了 0）。
  * `fixed` 的下标越界回落到第一条 —— 改短了列表不该让占位消息整个消失。
  */
-export function pickPlaceholder(texts: readonly string[] | undefined, pick: 'random' | 'fixed' | undefined, index: number | undefined): string | null {
+export function pickPlaceholder(
+  texts: readonly string[] | undefined,
+  pick: "random" | "fixed" | undefined,
+  index: number | undefined,
+): string | null {
   const candidates = (texts ?? []).map((entry) => entry.trim()).filter(Boolean);
   if (!candidates.length) return null;
-  if (pick === 'fixed') return candidates[index ?? 0] ?? candidates[0]!;
+  if (pick === "fixed") return candidates[index ?? 0] ?? candidates[0]!;
   return candidates[Math.floor(Math.random() * candidates.length)]!;
 }
 
@@ -60,7 +72,7 @@ export function pickPlaceholder(texts: readonly string[] | undefined, pick: 'ran
  * `edit` 与 `action` 是**一轮聚合成一条**：一次流式回复能编辑几十次，逐次记只是噪声。
  */
 export interface TelegramDeliveryEvent {
-  kind: 'send' | 'edit' | 'action';
+  kind: "send" | "edit" | "action";
   ok: boolean;
   ms: number;
   /** `send`：这一条的 message_id。`edit`：最后一次编辑的那一条。 */
@@ -69,12 +81,16 @@ export interface TelegramDeliveryEvent {
   /** `edit` / `action` 聚合了多少次。 */
   count?: number;
   /** `send` 的来路：流式首发、`once` 档、收尾补发。 */
-  path?: 'stream' | 'once' | 'final';
+  path?: "stream" | "once" | "final";
   error?: string;
 }
 
 export class TelegramOutput {
-  constructor(private readonly bot: Bot, private readonly chatId: string, private readonly options: StreamOutputOptions, private readonly onDeliveryError?: (error: unknown) => void,
+  constructor(
+    private readonly bot: Bot,
+    private readonly chatId: string,
+    private readonly options: StreamOutputOptions,
+    private readonly onDeliveryError?: (error: unknown) => void,
     /** 起算点是用户那条消息的到达时刻，不是这个对象被构造的时刻：模型本来就想了 3 秒时不该再压 2 秒。 */
     private readonly since: number = Date.now(),
     /**
@@ -88,7 +104,8 @@ export class TelegramOutput {
      * （下面两处 `splitTelegramText`）直接绕过去了 —— 于是「@ 全群上限」在每个流式轮次都没生效，
      * 尽管 `bot.ts` 的注释写着它「在投递侧收口」。
      */
-    private readonly sanitize?: (text: string) => string) {}
+    private readonly sanitize?: (text: string) => string,
+  ) {}
 
   /**
    * 解析失败降级成纯文本时回调一次（`tg.parse_fallback`）。做成可赋值字段而不是第八个构造参数：
@@ -104,7 +121,11 @@ export class TelegramOutput {
 
   /** 观测不许打断投递：这个回调的实现方是 `LogSink.event`（保证不抛），但契约上不该赌它。 */
   #emit(event: TelegramDeliveryEvent): void {
-    try { this.onDelivery?.(event); } catch { /* 记不上日志也不能让这条消息发不出去 */ }
+    try {
+      this.onDelivery?.(event);
+    } catch {
+      /* 记不上日志也不能让这条消息发不出去 */
+    }
   }
 
   /**
@@ -113,7 +134,7 @@ export class TelegramOutput {
    * 此前四处 send 写死 MarkdownV2、而 `edit` 读 options，`none` 档于是满屏 `\-`。
    */
   private get parseMode(): ParseMode {
-    return this.options.parseMode ?? 'MarkdownV2';
+    return this.options.parseMode ?? "MarkdownV2";
   }
 
   /** 每次刷新都要过的那一道。渲染前做，因为 `capMentions` 数的是正文里的 `@`，不是转义后的。 */
@@ -126,10 +147,19 @@ export class TelegramOutput {
    * 归档口径不变（`bot.ts` 存的仍是模型原话，而这里的 `finalText` 已经过了 `capMentions` 与插件
    * 钩子）。见 `segmentTelegramText`（docs/28 · L-TG-03）。
    */
-  async send(text: string, replyToMessageId?: number): Promise<{ messageIds: number[]; segments: string[] }> {
+  async send(
+    text: string,
+    replyToMessageId?: number,
+  ): Promise<{ messageIds: number[]; segments: string[] }> {
     await holdReply(this.since, this.options.replyDelayMs);
-    const finalText = this.guard(this.beforeSend ? await this.beforeSend(text) : text);
-    const { rendered, archived } = segmentTelegramText(finalText, this.options.maxChars, this.parseMode);
+    const finalText = this.guard(
+      this.beforeSend ? await this.beforeSend(text) : text,
+    );
+    const { rendered, archived } = segmentTelegramText(
+      finalText,
+      this.options.maxChars,
+      this.parseMode,
+    );
     const ids: number[] = [];
     // 这一批分段按 chat 串行（docs/28 · L-TG-02）：`holdReply` 那一觉睡在锁外面 —— 拿着锁睡等于
     // 让并发轮次白排 `replyDelayMs`。
@@ -140,21 +170,51 @@ export class TelegramOutput {
         const at = Date.now();
         // 这一档抛出去（由上层记成 turn 失败），但**失败也要落投递侧那一行**（`docs/10 §2` 的失败
         // 档 warn）：不落的话「这一轮发了什么」只剩没有 traceId 的 `tg.api`（docs/28 · L-LOG-02）。
-        const message = await sendWithFallback(this.bot.api, this.chatId, part, index === 0 && replyToMessageId ? { reply_parameters: { message_id: replyToMessageId } } : {}, this.parseMode, this.onParseFallback)
-          .catch((error: unknown) => {
-            this.#emit({ kind: 'send', ok: false, ms: Date.now() - at, chars: part.length, path: 'once', error: error instanceof Error ? error.message : String(error) });
-            throw error;
+        const message = await sendWithFallback(
+          this.bot.api,
+          this.chatId,
+          part,
+          index === 0 && replyToMessageId
+            ? { reply_parameters: { message_id: replyToMessageId } }
+            : {},
+          this.parseMode,
+          this.onParseFallback,
+        ).catch((error: unknown) => {
+          this.#emit({
+            kind: "send",
+            ok: false,
+            ms: Date.now() - at,
+            chars: part.length,
+            path: "once",
+            error: error instanceof Error ? error.message : String(error),
           });
+          throw error;
+        });
         ids.push(message.message_id);
-        this.#emit({ kind: 'send', ok: true, ms: Date.now() - at, messageId: message.message_id, chars: part.length, path: 'once' });
+        this.#emit({
+          kind: "send",
+          ok: true,
+          ms: Date.now() - at,
+          messageId: message.message_id,
+          chars: part.length,
+          path: "once",
+        });
       }
     });
     return { messageIds: ids, segments: rendered.length > 1 ? archived : [] };
   }
 
   /** `segments` 的语义见 `send()` 上面那条注释：逐段归档，只在真的分片时非空。 */
-  async consume(stream: AsyncIterable<string>, replyToMessageId?: number): Promise<{ text: string; messageIds: number[]; interrupted: boolean; segments: string[] }> {
-    let text = '';
+  async consume(
+    stream: AsyncIterable<string>,
+    replyToMessageId?: number,
+  ): Promise<{
+    text: string;
+    messageIds: number[];
+    interrupted: boolean;
+    segments: string[];
+  }> {
+    let text = "";
     const messageIds: number[] = [];
     let interrupted = false;
     let lastEdit = 0;
@@ -194,38 +254,62 @@ export class TelegramOutput {
     let editMs = 0;
     let lastEditChars = 0;
     let lastEditMessageId: number | undefined;
-    const typing = this.options.typingWhileWorking === false ? null
-      : setInterval(() => {
-        if (typingInFlight || bodyInFlight > 0) return;
-        const now = Date.now();
-        // 首条消息发出**之前** typing 是唯一的「我在干活」信号，节拍照旧 4 秒。之后放宽，而且刚有
-        // 正文落地时整拍跳过 —— 屏幕上的字在长本来就是最好的 typing。
-        if (messageIds.length && now - Math.max(lastTypingAt, lastBodyAt) < TYPING_QUIET_MS) return;
-        lastTypingAt = now;
-        typingInFlight = true;
-        actionCount += 1;
-        void this.bot.api.sendChatAction(this.chatId, 'typing').catch(() => undefined).finally(() => { typingInFlight = false; actionMs += Date.now() - now; });
-      }, TYPING_TICK_MS);
+    const typing =
+      this.options.typingWhileWorking === false
+        ? null
+        : setInterval(() => {
+            if (typingInFlight || bodyInFlight > 0) return;
+            const now = Date.now();
+            // 首条消息发出**之前** typing 是唯一的「我在干活」信号，节拍照旧 4 秒。之后放宽，而且刚有
+            // 正文落地时整拍跳过 —— 屏幕上的字在长本来就是最好的 typing。
+            if (
+              messageIds.length &&
+              now - Math.max(lastTypingAt, lastBodyAt) < TYPING_QUIET_MS
+            )
+              return;
+            lastTypingAt = now;
+            typingInFlight = true;
+            actionCount += 1;
+            void this.bot.api
+              .sendChatAction(this.chatId, "typing")
+              .catch(() => undefined)
+              .finally(() => {
+                typingInFlight = false;
+                actionMs += Date.now() - now;
+              });
+          }, TYPING_TICK_MS);
     const edit = async (messageId: number, rendered: string): Promise<void> => {
       const at = Date.now();
       editCount += 1;
       lastEditChars = rendered.length;
       lastEditMessageId = messageId;
       try {
-        if (this.parseMode === 'none') { await this.bot.api.editMessageText(this.chatId, messageId, rendered); return; }
-        await this.bot.api.editMessageText(this.chatId, messageId, rendered, { parse_mode: this.parseMode });
+        if (this.parseMode === "none") {
+          await this.bot.api.editMessageText(this.chatId, messageId, rendered);
+          return;
+        }
+        await this.bot.api.editMessageText(this.chatId, messageId, rendered, {
+          parse_mode: this.parseMode,
+        });
       } catch (error) {
-        const description = error instanceof Error ? error.message : String(error);
+        const description =
+          error instanceof Error ? error.message : String(error);
         if (/message is not modified|429/i.test(description)) return;
         // 与 `sendWithFallback` 同一跳，同一条 warn。这里不用给纯文本重编辑再包一层：
         // 两个调用点（下面 163 / 179）都过 `deliver()`，第二次失败会走 `onDeliveryError`。
         if (/parse entities/i.test(description)) {
           await this.bot.api.editMessageText(this.chatId, messageId, rendered);
-          this.onParseFallback?.({ chars: rendered.length, error: description, phase: 'edit' });
+          this.onParseFallback?.({
+            chars: rendered.length,
+            error: description,
+            phase: "edit",
+          });
           return;
         }
         throw error;
-      } finally { editMs += Date.now() - at; }
+      } finally {
+        editMs += Date.now() - at;
+      }
     };
     /**
      * `tg.edit` / `tg.action` 一轮各只落一条（`docs/10 §1`）。三个 return 点都要经过这里 ——
@@ -233,21 +317,45 @@ export class TelegramOutput {
      * （被打断、只发了占位、`once` 档）。
      */
     const flushAggregates = (): void => {
-      if (editCount) this.#emit({ kind: 'edit', ok: true, ms: editMs, count: editCount, chars: lastEditChars, ...(lastEditMessageId === undefined ? {} : { messageId: lastEditMessageId }) });
-      if (actionCount) this.#emit({ kind: 'action', ok: true, ms: actionMs, count: actionCount });
+      if (editCount)
+        this.#emit({
+          kind: "edit",
+          ok: true,
+          ms: editMs,
+          count: editCount,
+          chars: lastEditChars,
+          ...(lastEditMessageId === undefined
+            ? {}
+            : { messageId: lastEditMessageId }),
+        });
+      if (actionCount)
+        this.#emit({
+          kind: "action",
+          ok: true,
+          ms: actionMs,
+          count: actionCount,
+        });
     };
     // 投递失败不等于生成中断：把两者混为一谈会让网络抖动被记成 stream_interrupted，
     // 并给用户一句本不该出现的「（生成中断）」（docs/19-review-round4.md · R-TG-02）。
     const deliver = async <T>(action: () => Promise<T>): Promise<T | null> => {
-      try { return await action(); }
-      catch (error) { this.onDeliveryError?.(error); return null; }
+      try {
+        return await action();
+      } catch (error) {
+        this.onDeliveryError?.(error);
+        return null;
+      }
     };
     // 正文投递（占位、send、edit）：`bodyInFlight` 在途期间上面那个 typing 整拍跳过，`lastBodyAt`
     // 让刚落地之后的那几拍也跳过。**排队时间也算在途** —— 被 `apiThrottler` 压着的正文正是要护的那一段。
     const body = async <T>(action: () => Promise<T>): Promise<T | null> => {
       bodyInFlight += 1;
-      try { return await deliver(action); }
-      finally { bodyInFlight -= 1; lastBodyAt = Date.now(); }
+      try {
+        return await deliver(action);
+      } finally {
+        bodyInFlight -= 1;
+        lastBodyAt = Date.now();
+      }
     };
     // `output.placeholderAfterMs`：上游迟迟不吐第一个 chunk 时先占个位。这条消息就是后面被
     // 编辑的那一条 —— 另发一条会让用户先看到「正在想…」再看到答案分两条躺在那里。
@@ -255,33 +363,76 @@ export class TelegramOutput {
     const placeholderAfterMs = this.options.placeholderAfterMs ?? 0;
     // 文案在定时器**外面**挑好：随机档要是挑在回调里，这条消息的内容就和后面的 lastRenderedLength
     // 分处两个时刻，而且没法在挑不出文案时省掉整个 setTimeout。
-    const placeholderText = pickPlaceholder(this.options.placeholderTexts, this.options.placeholderPick, this.options.placeholderIndex);
-    if (this.options.mode === 'stream' && placeholderAfterMs > 0 && placeholderText) {
-      placeholder = setTimeout(() => void (async () => {
-        if (messageIds.length || text) return;
-        const at = Date.now();
-        const sent = await body(() => sendWithFallback(this.bot.api, this.chatId, placeholderText, replyToMessageId ? { reply_parameters: { message_id: replyToMessageId } } : {}, this.parseMode, this.onParseFallback));
-        // 基线归 0 而不是占位文案的长度：`lastRenderedLength` 量的是「答复已经渲染了多少字」，
-        // 占位消息里一个字都不是答复。记成文案长度的话，一句十来个字的文案会让第一次编辑多等
-        // 十来个字才够 minDeltaChars —— 占位消息挂着的时间反倒随文案变长。原先写死的 1 是它
-        // 还只能是「…」时两种读法恰好重合的产物。
-        if (sent) { messageIds.push(sent.message_id); lastRenderedLength = 0; lastEdit = Date.now(); }
-        this.#emit({ kind: 'send', ok: sent !== null, ms: Date.now() - at, ...(sent ? { messageId: sent.message_id } : {}), chars: placeholderText.length, path: 'stream' });
-      })(), placeholderAfterMs);
+    const placeholderText = pickPlaceholder(
+      this.options.placeholderTexts,
+      this.options.placeholderPick,
+      this.options.placeholderIndex,
+    );
+    if (
+      this.options.mode === "stream" &&
+      placeholderAfterMs > 0 &&
+      placeholderText
+    ) {
+      placeholder = setTimeout(
+        () =>
+          void (async () => {
+            if (messageIds.length || text) return;
+            const at = Date.now();
+            const sent = await body(() =>
+              sendWithFallback(
+                this.bot.api,
+                this.chatId,
+                placeholderText,
+                replyToMessageId
+                  ? { reply_parameters: { message_id: replyToMessageId } }
+                  : {},
+                this.parseMode,
+                this.onParseFallback,
+              ),
+            );
+            // 基线归 0 而不是占位文案的长度：`lastRenderedLength` 量的是「答复已经渲染了多少字」，
+            // 占位消息里一个字都不是答复。记成文案长度的话，一句十来个字的文案会让第一次编辑多等
+            // 十来个字才够 minDeltaChars —— 占位消息挂着的时间反倒随文案变长。原先写死的 1 是它
+            // 还只能是「…」时两种读法恰好重合的产物。
+            if (sent) {
+              messageIds.push(sent.message_id);
+              lastRenderedLength = 0;
+              lastEdit = Date.now();
+            }
+            this.#emit({
+              kind: "send",
+              ok: sent !== null,
+              ms: Date.now() - at,
+              ...(sent ? { messageId: sent.message_id } : {}),
+              chars: placeholderText.length,
+              path: "stream",
+            });
+          })(),
+        placeholderAfterMs,
+      );
       placeholder.unref?.();
     }
     try {
       // 开轮那一发照旧无条件送出：`docs/08 §5.2` 要的是「看起来是在打字而不是卡住」，而这一刻
       // 屏幕上一个字都没有，typing 是唯一的信号。记下时刻，好让首条消息发出后的第一拍也认这个起点。
-      if (this.options.typingWhileWorking !== false) { lastTypingAt = Date.now(); actionCount += 1; await deliver(() => this.bot.api.sendChatAction(this.chatId, 'typing')); actionMs += Date.now() - lastTypingAt; }
+      if (this.options.typingWhileWorking !== false) {
+        lastTypingAt = Date.now();
+        actionCount += 1;
+        await deliver(() => this.bot.api.sendChatAction(this.chatId, "typing"));
+        actionMs += Date.now() - lastTypingAt;
+      }
       const iterator = stream[Symbol.asyncIterator]();
       for (;;) {
         let step: IteratorResult<string>;
-        try { step = await iterator.next(); }
-        catch { interrupted = true; break; }
+        try {
+          step = await iterator.next();
+        } catch {
+          interrupted = true;
+          break;
+        }
         if (step.done) break;
         text += step.value;
-        if (this.options.mode === 'once') continue;
+        if (this.options.mode === "once") continue;
         // 纯空白的累积文本一次都不许发：`SENTENCE_END` 的白名单里有 `\n`，于是一段只有换行的
         // 累积会命中「一句话说完了」被刷出去，而 `sendWithFallback` 只降级 `parse entities` 那一类
         // —— Telegram 的 `400: text must be non-empty` 直接穿到 `onDeliveryError`
@@ -293,29 +444,71 @@ export class TelegramOutput {
         // 锚点是上游第一个 chunk。只看前者时，模型思考一旦超过 replyDelayMs（几乎总是如此），
         // 首个 chunk 就会被原样发出去 —— 用户先收到一条只有一个字的消息，剩下的全靠编辑补，
         // 这正是「先发一个字再编辑」的来源。攒到的文本不会丢：流在窗口内就结束时下面走 send()。
-        if (Date.now() < Math.max(this.since + this.options.replyDelayMs, firstChunkAt + this.options.bufferMs)) continue;
+        if (
+          Date.now() <
+          Math.max(
+            this.since + this.options.replyDelayMs,
+            firstChunkAt + this.options.bufferMs,
+          )
+        )
+          continue;
         // `output.flushOnSentence`：一句话说完就刷，不等满 intervalMs。代价是编辑次数上升
         // （docs/14 T10），收益是长回复读起来是一句一句出来的，而不是一段一段跳。
-        const atSentenceEnd = this.options.flushOnSentence === true && SENTENCE_END.test(text);
-        if (messageIds.length && !atSentenceEnd && Date.now() - lastEdit < this.options.intervalMs) continue;
-        const rendered = splitTelegramText(this.guard(text), this.options.maxChars, this.parseMode);
+        const atSentenceEnd =
+          this.options.flushOnSentence === true && SENTENCE_END.test(text);
+        if (
+          messageIds.length &&
+          !atSentenceEnd &&
+          Date.now() - lastEdit < this.options.intervalMs
+        )
+          continue;
+        const rendered = splitTelegramText(
+          this.guard(text),
+          this.options.maxChars,
+          this.parseMode,
+        );
         const before = messageIds.length;
         while (messageIds.length < rendered.length) {
           const index = messageIds.length;
           const at = Date.now();
-          const sent = await body(() => sendWithFallback(this.bot.api, this.chatId, rendered[index]!, index === 0 && replyToMessageId ? { reply_parameters: { message_id: replyToMessageId } } : {}, this.parseMode, this.onParseFallback));
-          this.#emit({ kind: 'send', ok: sent !== null, ms: Date.now() - at, ...(sent ? { messageId: sent.message_id } : {}), chars: rendered[index]!.length, path: 'stream' });
+          const sent = await body(() =>
+            sendWithFallback(
+              this.bot.api,
+              this.chatId,
+              rendered[index]!,
+              index === 0 && replyToMessageId
+                ? { reply_parameters: { message_id: replyToMessageId } }
+                : {},
+              this.parseMode,
+              this.onParseFallback,
+            ),
+          );
+          this.#emit({
+            kind: "send",
+            ok: sent !== null,
+            ms: Date.now() - at,
+            ...(sent ? { messageId: sent.message_id } : {}),
+            chars: rendered[index]!.length,
+            path: "stream",
+          });
           if (!sent) break;
           messageIds.push(sent.message_id);
         }
         const current = rendered.at(-1)!;
         // 刚发出去的那条消息已经带着全文，紧接着再编辑一次是纯粹的抖动（还白占一次编辑配额）：
         // 把它算作一次「刷新」，下一次编辑照样要等满 intervalMs。
-        if (messageIds.length > before) { lastRenderedLength = [...current].length; lastEdit = Date.now(); continue; }
+        if (messageIds.length > before) {
+          lastRenderedLength = [...current].length;
+          lastEdit = Date.now();
+          continue;
+        }
         // 首条压根没发出去（限流、被拉黑）时没有可编辑的目标：下一个 chunk 重试发送，而不是拿
         // undefined 当 message_id 去调 editMessageText。
         if (!messageIds.length) continue;
-        if ((atSentenceEnd || Date.now() - lastEdit >= this.options.intervalMs) && [...current].length - lastRenderedLength >= this.options.minDeltaChars) {
+        if (
+          (atSentenceEnd || Date.now() - lastEdit >= this.options.intervalMs) &&
+          [...current].length - lastRenderedLength >= this.options.minDeltaChars
+        ) {
           await body(() => edit(messageIds.at(-1)!, current));
           lastRenderedLength = [...current].length;
           lastEdit = Date.now();
@@ -336,7 +529,8 @@ export class TelegramOutput {
      *   一条只有「（生成中断）」的消息，用户看不出发生了什么，而 `bot.ts` 还会把这条空壳当成
      *   「有内容的一轮」提交进上下文。这种情况该走失败那条路 —— 那里有能看懂的原因。
      */
-    const closing = text + (interrupted && text.trim() ? '\n\n（生成中断）' : '');
+    const closing =
+      text + (interrupted && text.trim() ? "\n\n（生成中断）" : "");
     /**
      * **一个字都没吐出来时，已经发出去的占位消息要摘掉。** 上面那个后缀不加，于是 `closing` 是空串、
      * `splitTelegramText('')` 是空数组、下面那个收尾循环一次调用都不发 —— 「正在想…」就永久停在
@@ -346,32 +540,66 @@ export class TelegramOutput {
      * 返回空 `messageIds` 是同一件事的另一半：归档侧按它落 out 行，留着就是一行空正文的机器人消息。
      */
     if (interrupted && !closing.trim() && messageIds.length) {
-      for (const messageId of messageIds) await deliver(() => this.bot.api.deleteMessage(this.chatId, messageId));
+      for (const messageId of messageIds)
+        await deliver(() => this.bot.api.deleteMessage(this.chatId, messageId));
       flushAggregates();
       return { text: closing, interrupted, messageIds: [], segments: [] };
     }
-    if (this.options.mode === 'once' || !messageIds.length) {
+    if (this.options.mode === "once" || !messageIds.length) {
       const once = await this.send(closing, replyToMessageId);
       flushAggregates();
-      return { text: closing, interrupted, messageIds: once.messageIds, segments: once.segments };
+      return {
+        text: closing,
+        interrupted,
+        messageIds: once.messageIds,
+        segments: once.segments,
+      };
     }
     // 定稿这一次才跑插件的 `beforeSend`（每帧都跑等于把钩子的语义从「一条消息一次」改成
     // 「一次编辑一次」）。改写只影响发出去的文本，`text` 仍是模型的原话 —— 归档与上下文存原话。
-    const { rendered, archived } = segmentTelegramText(this.guard(this.beforeSend ? await this.beforeSend(closing) : closing), this.options.maxChars, this.parseMode);
+    const { rendered, archived } = segmentTelegramText(
+      this.guard(this.beforeSend ? await this.beforeSend(closing) : closing),
+      this.options.maxChars,
+      this.parseMode,
+    );
     // 定稿这一批分段按 chat 串行（docs/28 · L-TG-02）：**只盖这一批**，上面流中途的增量编辑一律
     // 在锁外 —— 盖到那里会让同一个群里的并发轮次变成实质串行。
     await deliveryOrder.run(this.chatId, async () => {
       // 收尾也要走 deliver + 降级：这里抛出去会把一轮已经发出大半的回复整个记成 failed（docs/20 · W-TG-04）。
       for (let index = 0; index < rendered.length; index += 1) {
-        if (index < messageIds.length) { await deliver(() => edit(messageIds[index]!, rendered[index]!)); continue; }
+        if (index < messageIds.length) {
+          await deliver(() => edit(messageIds[index]!, rendered[index]!));
+          continue;
+        }
         const at = Date.now();
-        const sent = await deliver(() => sendWithFallback(this.bot.api, this.chatId, rendered[index]!, {}, this.parseMode, this.onParseFallback));
-        this.#emit({ kind: 'send', ok: sent !== null, ms: Date.now() - at, ...(sent ? { messageId: sent.message_id } : {}), chars: rendered[index]!.length, path: 'final' });
+        const sent = await deliver(() =>
+          sendWithFallback(
+            this.bot.api,
+            this.chatId,
+            rendered[index]!,
+            {},
+            this.parseMode,
+            this.onParseFallback,
+          ),
+        );
+        this.#emit({
+          kind: "send",
+          ok: sent !== null,
+          ms: Date.now() - at,
+          ...(sent ? { messageId: sent.message_id } : {}),
+          chars: rendered[index]!.length,
+          path: "final",
+        });
         if (!sent) break;
         messageIds.push(sent.message_id);
       }
     });
     flushAggregates();
-    return { text: closing, interrupted, messageIds, segments: rendered.length > 1 ? archived : [] };
+    return {
+      text: closing,
+      interrupted,
+      messageIds,
+      segments: rendered.length > 1 ? archived : [],
+    };
   }
 }

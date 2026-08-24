@@ -1,7 +1,15 @@
-import { gzipSync } from 'node:zlib';
-import { mkdirSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve, sep } from 'node:path';
-import type { Sqlite } from '@luoli/db';
+import { gzipSync } from "node:zlib";
+import {
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, join, resolve, sep } from "node:path";
+import type { Sqlite } from "@luoli/db";
 
 /** 落在磁盘上、由 DB 行指路的两棵 blob 目录。给不出路径的那一棵就不扫（测试里常只给一棵）。 */
 export interface BlobDirectories {
@@ -31,16 +39,27 @@ export interface RetentionDays {
 }
 
 export class MaintenanceService {
-  constructor(private readonly db: Sqlite, private readonly databasePath: string, private readonly backupKeep: number, private readonly retentionDays: number, private readonly logsDir = './logs', private readonly blobs: BlobDirectories = {},
-    private readonly gzipAfterDays = 0, private readonly scheduleRetentionDays = 30, private readonly retention: RetentionDays = {}) {}
+  constructor(
+    private readonly db: Sqlite,
+    private readonly databasePath: string,
+    private readonly backupKeep: number,
+    private readonly retentionDays: number,
+    private readonly logsDir = "./logs",
+    private readonly blobs: BlobDirectories = {},
+    private readonly gzipAfterDays = 0,
+    private readonly scheduleRetentionDays = 30,
+    private readonly retention: RetentionDays = {},
+  ) {}
 
-  backup(label = 'manual'): string {
-    const directory = resolve(dirname(this.databasePath), 'backup');
+  backup(label = "manual"): string {
+    const directory = resolve(dirname(this.databasePath), "backup");
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     const path = join(directory, `luoli-${Date.now()}-${label}.db`);
     // 绑参数而不是自己转义引号：`VACUUM INTO` 收 SQL 表达式（同 `db/database.ts`，docs/27 · T-05）。
-    this.db.prepare('VACUUM INTO ?').run(path);
-    const backups = readdirSync(directory).map((name) => join(directory, name)).sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs);
+    this.db.prepare("VACUUM INTO ?").run(path);
+    const backups = readdirSync(directory)
+      .map((name) => join(directory, name))
+      .sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs);
     for (const expired of backups.slice(this.backupKeep)) unlinkSync(expired);
     return path;
   }
@@ -55,12 +74,12 @@ export class MaintenanceService {
    * 而 `db.vacuumCron`（周）比 `general.maintenanceCron`（日）稀疏，指望后者兜是指望不上的。
    */
   vacuum(): void {
-    this.db.exec('VACUUM');
+    this.db.exec("VACUUM");
     this.checkpoint();
   }
 
   checkpoint(): void {
-    this.db.pragma('wal_checkpoint(TRUNCATE)');
+    this.db.pragma("wal_checkpoint(TRUNCATE)");
   }
 
   /**
@@ -71,20 +90,39 @@ export class MaintenanceService {
   #gzipOldLogs(cutoffDay: string): number {
     let compressed = 0;
     let days: string[];
-    try { days = readdirSync(this.logsDir, { withFileTypes: true }).filter((entry) => entry.isDirectory() && /^\d{4}-\d{2}-\d{2}$/.test(entry.name) && entry.name < cutoffDay).map((entry) => entry.name); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0; throw error; }
+    try {
+      days = readdirSync(this.logsDir, { withFileTypes: true })
+        .filter(
+          (entry) =>
+            entry.isDirectory() &&
+            /^\d{4}-\d{2}-\d{2}$/.test(entry.name) &&
+            entry.name < cutoffDay,
+        )
+        .map((entry) => entry.name);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0;
+      throw error;
+    }
     for (const day of days) {
       const directory = join(this.logsDir, day);
       let entries: string[];
-      try { entries = readdirSync(directory); } catch { continue; }
+      try {
+        entries = readdirSync(directory);
+      } catch {
+        continue;
+      }
       for (const name of entries) {
-        if (!name.endsWith('.jsonl') && !/\.jsonl\.\d+$/.test(name)) continue;
+        if (!name.endsWith(".jsonl") && !/\.jsonl\.\d+$/.test(name)) continue;
         const path = join(directory, name);
         try {
-          writeFileSync(`${path}.gz`, gzipSync(readFileSync(path)), { mode: 0o600 });
+          writeFileSync(`${path}.gz`, gzipSync(readFileSync(path)), {
+            mode: 0o600,
+          });
           unlinkSync(path);
           compressed += 1;
-        } catch { /* 读不到或写不进就跳过：压缩是省盘，不是正确性 */ }
+        } catch {
+          /* 读不到或写不进就跳过：压缩是省盘，不是正确性 */
+        }
       }
     }
     return compressed;
@@ -94,43 +132,94 @@ export class MaintenanceService {
     const logCutoff = now - this.retentionDays * 86_400_000;
     const updateCutoff = now - 7 * 86_400_000;
     const approvalsCutoff = now - 90 * 86_400_000;
-    const logs = this.db.prepare('DELETE FROM log_events WHERE ts<?').run(logCutoff).changes;
-    const updates = this.db.prepare('DELETE FROM processed_updates WHERE ts<?').run(updateCutoff).changes;
-    const sessions = this.db.prepare('DELETE FROM sessions WHERE expires_at<?').run(now).changes;
-    const approvals = this.db.prepare("DELETE FROM approvals WHERE requested_at<? AND state!='pending'").run(approvalsCutoff).changes;
-    this.db.prepare("UPDATE approvals SET state='expired' WHERE state='pending' AND expires_at<?").run(now);
+    const logs = this.db
+      .prepare("DELETE FROM log_events WHERE ts<?")
+      .run(logCutoff).changes;
+    const updates = this.db
+      .prepare("DELETE FROM processed_updates WHERE ts<?")
+      .run(updateCutoff).changes;
+    const sessions = this.db
+      .prepare("DELETE FROM sessions WHERE expires_at<?")
+      .run(now).changes;
+    const approvals = this.db
+      .prepare(
+        "DELETE FROM approvals WHERE requested_at<? AND state!='pending'",
+      )
+      .run(approvalsCutoff).changes;
+    this.db
+      .prepare(
+        "UPDATE approvals SET state='expired' WHERE state='pending' AND expires_at<?",
+      )
+      .run(now);
     const cutoffDay = new Date(logCutoff).toISOString().slice(0, 10);
     let logDirectories = 0;
     try {
       for (const day of readdirSync(this.logsDir, { withFileTypes: true })) {
-        if (!day.isDirectory() || !/^\d{4}-\d{2}-\d{2}$/.test(day.name) || day.name >= cutoffDay) continue;
-        rmSync(join(this.logsDir, day.name), { recursive: true, force: true }); logDirectories += 1;
+        if (
+          !day.isDirectory() ||
+          !/^\d{4}-\d{2}-\d{2}$/.test(day.name) ||
+          day.name >= cutoffDay
+        )
+          continue;
+        rmSync(join(this.logsDir, day.name), { recursive: true, force: true });
+        logDirectories += 1;
       }
-    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
     // 子 agent 的全文结果是调试产物，和日志同龄同命：按 `logs.retentionDays` 过期。
     // 只清文件、把 `result_full_ref` 置空，`result_summary` 留着 —— 摘要是上下文里已经引用过的
     // 东西，删了会让历史轮次的引述变成悬空（docs/22 · I-09）。
     let agentResults = 0;
-    for (const row of this.db.prepare("SELECT id,result_full_ref AS path FROM agent_runs WHERE result_full_ref IS NOT NULL AND finished_at IS NOT NULL AND finished_at<?").all(logCutoff) as Array<{ id: string; path: string }>) {
+    for (const row of this.db
+      .prepare(
+        "SELECT id,result_full_ref AS path FROM agent_runs WHERE result_full_ref IS NOT NULL AND finished_at IS NOT NULL AND finished_at<?",
+      )
+      .all(logCutoff) as Array<{ id: string; path: string }>) {
       // ref 是相对 `blobs.agentResults` 的（存量绝对路径行 resolve 后是它自己）。
-      try { rmSync(resolve(this.blobs.agentResults ?? '.', row.path), { force: true }); } catch { continue; }
-      this.db.prepare('UPDATE agent_runs SET result_full_ref=NULL WHERE id=?').run(row.id);
+      try {
+        rmSync(resolve(this.blobs.agentResults ?? ".", row.path), {
+          force: true,
+        });
+      } catch {
+        continue;
+      }
+      this.db
+        .prepare("UPDATE agent_runs SET result_full_ref=NULL WHERE id=?")
+        .run(row.id);
       agentResults += 1;
     }
     // 已结束的定时任务行（完成 / 取消）按 `schedule.retentionDays` 清。**活跃的永不删** ——
     // 一条还在排的任务被清掉的表现是「bot 突然不再提醒了」，而库里什么痕迹都没有。
-    const schedules = this.db.prepare("DELETE FROM scheduled_jobs WHERE state<>'active' AND updated_at<?")
+    const schedules = this.db
+      .prepare(
+        "DELETE FROM scheduled_jobs WHERE state<>'active' AND updated_at<?",
+      )
       .run(now - this.scheduleRetentionDays * 86_400_000).changes;
     // 四张派生数据表的保留期（`maintenance.retention.*`，docs/27 · R-05）。0 = 不清，所以
     // `expire` 在天数为 0 / 未给时**一行都不动** —— 默认沉默地删数据比不删危险得多。
     const expire = (days: number | undefined, sql: string): number =>
-      days && days > 0 ? this.db.prepare(sql).run(now - days * 86_400_000).changes : 0;
-    const usage = expire(this.retention.usage, 'DELETE FROM usage_ledger WHERE ts<?');
+      days && days > 0
+        ? this.db.prepare(sql).run(now - days * 86_400_000).changes
+        : 0;
+    const usage = expire(
+      this.retention.usage,
+      "DELETE FROM usage_ledger WHERE ts<?",
+    );
     // `updated_at` 而不是 bucket 字符串：当前账期的行每轮都在更新，不可能落在保留期之外，
     // 而按 bucket 解析日期得先知道它是日还是月账期 —— 那是两套格式。
-    const quotaCounters = expire(this.retention.quotaCounters, 'DELETE FROM quota_counters WHERE updated_at<?');
-    const configRevisions = expire(this.retention.configRevisions, 'DELETE FROM config_revisions WHERE ts<?');
-    const memoryRevisions = expire(this.retention.memoryRevisions, 'DELETE FROM memory_revisions WHERE ts<?');
+    const quotaCounters = expire(
+      this.retention.quotaCounters,
+      "DELETE FROM quota_counters WHERE updated_at<?",
+    );
+    const configRevisions = expire(
+      this.retention.configRevisions,
+      "DELETE FROM config_revisions WHERE ts<?",
+    );
+    const memoryRevisions = expire(
+      this.retention.memoryRevisions,
+      "DELETE FROM memory_revisions WHERE ts<?",
+    );
     // 媒体文件按 `media.retentionDays` 过期（docs/14 §2 Q9-a）：**删文件、留行**。行删掉的话
     // 历史消息里那条「[图片]」会连同 mime/尺寸/已提取正文一起消失，上下文与检索结果都缺一块。
     // `download_state='expired'` 是刻意的：只把 `local_path` 置空会和「下载失败」（'failed'）
@@ -139,11 +228,21 @@ export class MaintenanceService {
     let mediaFiles = 0;
     if (this.retention.media && this.retention.media > 0) {
       const mediaCutoff = now - this.retention.media * 86_400_000;
-      const forget = this.db.prepare("UPDATE attachments SET local_path=NULL,download_state='expired' WHERE id=?");
-      for (const row of this.db.prepare('SELECT id,local_path AS path FROM attachments WHERE local_path IS NOT NULL AND created_at<?').all(mediaCutoff) as Array<{ id: string; path: string }>) {
+      const forget = this.db.prepare(
+        "UPDATE attachments SET local_path=NULL,download_state='expired' WHERE id=?",
+      );
+      for (const row of this.db
+        .prepare(
+          "SELECT id,local_path AS path FROM attachments WHERE local_path IS NOT NULL AND created_at<?",
+        )
+        .all(mediaCutoff) as Array<{ id: string; path: string }>) {
         // force:true 不为「文件已经不在了」抛错 —— 那种行同样该标成 expired，否则每天扫一遍
         // 都要再试一次这条永远删不掉的路径。
-        try { rmSync(row.path, { force: true }); } catch { continue; }
+        try {
+          rmSync(row.path, { force: true });
+        } catch {
+          continue;
+        }
         forget.run(row.id);
         mediaFiles += 1;
       }
@@ -153,32 +252,71 @@ export class MaintenanceService {
        * 「这张图取自哪」的文本，行没了读出侧照旧交回占位文本（`hydrateAttachment` 的
        * `missing` 分支）。留一堆 `local_path=NULL` 的行只是让 `gcFiles` 与这里都得多绕一次。
        */
-      const webAssets = this.db.prepare('SELECT id,local_path AS path FROM web_assets WHERE created_at<?').all(mediaCutoff) as Array<{ id: string; path: string | null }>;
-      const drop = this.db.prepare('DELETE FROM web_assets WHERE id=?');
+      const webAssets = this.db
+        .prepare(
+          "SELECT id,local_path AS path FROM web_assets WHERE created_at<?",
+        )
+        .all(mediaCutoff) as Array<{ id: string; path: string | null }>;
+      const drop = this.db.prepare("DELETE FROM web_assets WHERE id=?");
       /**
        * **按文件分组，而不是按行删文件。** 文件名取内容哈希，所以同一张图被取两次时两行共享同一份
        * 字节（`docs/03 §2.4`）。见行就删文件会把**还在保留期内**那行的图一起弄没 —— 表现不是报错，
        * 是那张图提前变成「[图片已不可用：附件文件已丢失]」。这种情况下行照删、字节留给那一行。
        * 删不掉的文件则把行留到下次（与上面 `attachments` 同一条：宁可重试，不留孤儿）。
        */
-      const referencedLater = this.db.prepare('SELECT 1 FROM web_assets WHERE local_path=? AND created_at>=? LIMIT 1').pluck();
+      const referencedLater = this.db
+        .prepare(
+          "SELECT 1 FROM web_assets WHERE local_path=? AND created_at>=? LIMIT 1",
+        )
+        .pluck();
       const expiredByPath = new Map<string, string[]>();
       for (const row of webAssets) {
-        if (!row.path) { drop.run(row.id); continue; }
-        expiredByPath.set(row.path, [...expiredByPath.get(row.path) ?? [], row.id]);
+        if (!row.path) {
+          drop.run(row.id);
+          continue;
+        }
+        expiredByPath.set(row.path, [
+          ...(expiredByPath.get(row.path) ?? []),
+          row.id,
+        ]);
       }
       for (const [path, ids] of expiredByPath) {
         if (!referencedLater.get(path, mediaCutoff)) {
-          try { rmSync(path, { force: true }); } catch { continue; }
+          try {
+            rmSync(path, { force: true });
+          } catch {
+            continue;
+          }
           mediaFiles += 1;
         }
         for (const id of ids) drop.run(id);
       }
     }
     // 压缩在删除之后：已经过保留期的目录整个没了，没必要先压再删。
-    const compressed = this.gzipAfterDays > 0 ? this.#gzipOldLogs(new Date(now - this.gzipAfterDays * 86_400_000).toISOString().slice(0, 10)) : 0;
+    const compressed =
+      this.gzipAfterDays > 0
+        ? this.#gzipOldLogs(
+            new Date(now - this.gzipAfterDays * 86_400_000)
+              .toISOString()
+              .slice(0, 10),
+          )
+        : 0;
     this.checkpoint();
-    return { logs, logDirectories, updates, sessions, approvals, agentResults, schedules, compressed, usage, quotaCounters, configRevisions, memoryRevisions, mediaFiles };
+    return {
+      logs,
+      logDirectories,
+      updates,
+      sessions,
+      approvals,
+      agentResults,
+      schedules,
+      compressed,
+      usage,
+      quotaCounters,
+      configRevisions,
+      memoryRevisions,
+      mediaFiles,
+    };
   }
 
   /**
@@ -187,8 +325,15 @@ export class MaintenanceService {
    * 此前这个端点直接返回 `not_implemented`，两棵目录因此只涨不落（docs/22 · I-09）。
    */
   gcFiles(): Record<string, number | string[]> {
-    const sweep = (directory: string | undefined, referenced: Set<string>, table: string): { removed: number; bytes: number; refused?: string } => {
-      const result: { removed: number; bytes: number; refused?: string } = { removed: 0, bytes: 0 };
+    const sweep = (
+      directory: string | undefined,
+      referenced: Set<string>,
+      table: string,
+    ): { removed: number; bytes: number; refused?: string } => {
+      const result: { removed: number; bytes: number; refused?: string } = {
+        removed: 0,
+        bytes: 0,
+      };
       if (!directory) return result;
       /**
        * **fail-closed 的错配保护**：`referenced` 是空的、而目录里有文件，几乎只有一个成因 ——
@@ -204,7 +349,11 @@ export class MaintenanceService {
         const probe = (current: string): void => {
           if (hasFiles) return;
           let entries;
-          try { entries = readdirSync(current, { withFileTypes: true }); } catch { return; }
+          try {
+            entries = readdirSync(current, { withFileTypes: true });
+          } catch {
+            return;
+          }
           for (const entry of entries) {
             if (hasFiles) return;
             if (entry.isDirectory()) probe(join(current, entry.name));
@@ -240,21 +389,37 @@ export class MaintenanceService {
        * 剩下会走到这里的绝对路径行就是启动期归一化刻意留下的、要人先看一眼的那些。
        */
       const prefix = root.endsWith(sep) ? root : root + sep;
-      const outside = [...referenced].filter((path) => !path.startsWith(prefix));
+      const outside = [...referenced].filter(
+        (path) => !path.startsWith(prefix),
+      );
       if (outside.length) {
-        result.refused = `${table} 里有 ${outside.length}/${referenced.size} 行指向 ${root} 之外（例如 ${outside[0]}）—— 库与这棵目录很可能来自两套部署，或者目录搬过而库里的行没跟着改。`
-          + `拒绝清理：那些行在这棵目录里护不住任何文件，照着删会把本该留下的数据当孤儿删空。`
-          + `确认之后要么把这些行的路径改到当前目录，要么把 LUOLI_DATA_DIR / media.dir 指回原处，再跑一次。`;
+        result.refused =
+          `${table} 里有 ${outside.length}/${referenced.size} 行指向 ${root} 之外（例如 ${outside[0]}）—— 库与这棵目录很可能来自两套部署，或者目录搬过而库里的行没跟着改。` +
+          `拒绝清理：那些行在这棵目录里护不住任何文件，照着删会把本该留下的数据当孤儿删空。` +
+          `确认之后要么把这些行的路径改到当前目录，要么把 LUOLI_DATA_DIR / media.dir 指回原处，再跑一次。`;
         return result;
       }
       const walk = (current: string): void => {
         let entries;
-        try { entries = readdirSync(current, { withFileTypes: true }); } catch { return; }
+        try {
+          entries = readdirSync(current, { withFileTypes: true });
+        } catch {
+          return;
+        }
         for (const entry of entries) {
           const path = join(current, entry.name);
-          if (entry.isDirectory()) { walk(path); continue; }
+          if (entry.isDirectory()) {
+            walk(path);
+            continue;
+          }
           if (!entry.isFile() || referenced.has(path)) continue;
-          try { result.bytes += statSync(path).size; unlinkSync(path); result.removed += 1; } catch { /* 竞态删除或无权限，跳过 */ }
+          try {
+            result.bytes += statSync(path).size;
+            unlinkSync(path);
+            result.removed += 1;
+          } catch {
+            /* 竞态删除或无权限，跳过 */
+          }
         }
       };
       walk(root);
@@ -264,20 +429,51 @@ export class MaintenanceService {
     // `agent_runs.result_full_ref` 相对结果目录），磁盘遍历给的是绝对路径，不归一化的话每个
     // 文件都会被判成孤儿——那是把整棵媒体目录删空。**存相对路径的那一半是保护而不是共犯**：
     // 归一化用的 base 与 walk 的 root 同源，目录整体搬走也不会对不上（docs/28 · L-OPS-06）。
-    const referenced = (column: string, table: string, base = '.'): Set<string> =>
-      new Set((this.db.prepare(`SELECT ${column} FROM ${table} WHERE ${column} IS NOT NULL`).pluck().all() as string[]).map((path) => resolve(base, path)));
+    const referenced = (
+      column: string,
+      table: string,
+      base = ".",
+    ): Set<string> =>
+      new Set(
+        (
+          this.db
+            .prepare(
+              `SELECT ${column} FROM ${table} WHERE ${column} IS NOT NULL`,
+            )
+            .pluck()
+            .all() as string[]
+        ).map((path) => resolve(base, path)),
+      );
     /**
      * **`media.dir` 下现在有两张表在引用文件**：`attachments`（Telegram 附件）与 `web_assets`
      * （`web_fetch` / MCP 抓回来的图）。少并一张的表现不是报错，是那张表的文件被静静当孤儿删掉
      * —— 这个坑本仓踩过两次（docs/25 §10 删掉 76 个真实附件、docs/28 · L-OPS-06 删掉 74 份全文）。
      */
-    const mediaRefs = new Set([...referenced('local_path', 'attachments'), ...referenced('local_path', 'web_assets')]);
-    const files = sweep(this.blobs.files, mediaRefs, 'attachments/web_assets');
-    const results = sweep(this.blobs.agentResults, referenced('result_full_ref', 'agent_runs', this.blobs.agentResults ?? '.'), 'agent_runs');
-    const refused = [files.refused, results.refused].filter((reason): reason is string => Boolean(reason));
+    const mediaRefs = new Set([
+      ...referenced("local_path", "attachments"),
+      ...referenced("local_path", "web_assets"),
+    ]);
+    const files = sweep(this.blobs.files, mediaRefs, "attachments/web_assets");
+    const results = sweep(
+      this.blobs.agentResults,
+      referenced(
+        "result_full_ref",
+        "agent_runs",
+        this.blobs.agentResults ?? ".",
+      ),
+      "agent_runs",
+    );
+    const refused = [files.refused, results.refused].filter(
+      (reason): reason is string => Boolean(reason),
+    );
     // 拒绝的理由必须交回给调用方：静静地「删了 0 个」会让运维以为目录本来就是干净的。
-    return { files: files.removed, fileBytes: files.bytes, agentResults: results.removed, agentResultBytes: results.bytes,
-      ...(refused.length ? { refused } : {}) };
+    return {
+      files: files.removed,
+      fileBytes: files.bytes,
+      agentResults: results.removed,
+      agentResultBytes: results.bytes,
+      ...(refused.length ? { refused } : {}),
+    };
   }
 
   rebuildFts(): void {

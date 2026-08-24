@@ -1,12 +1,12 @@
-import { createRouter, createWebHistory } from 'vue-router';
-import LoginView from '../views/LoginView.vue';
-import ConsoleView from '../views/ConsoleView.vue';
+import { createRouter, createWebHistory } from "vue-router";
+import LoginView from "../views/LoginView.vue";
+import ConsoleView from "../views/ConsoleView.vue";
 
 export const router = createRouter({
   history: createWebHistory(),
   routes: [
-    { path: '/login', component: LoginView },
-    { path: '/setup', component: LoginView, props: { setup: true } },
-    { path: '/', component: ConsoleView },
+    { path: "/login", component: LoginView },
+    { path: "/setup", component: LoginView, props: { setup: true } },
+    { path: "/", component: ConsoleView },
   ],
 });

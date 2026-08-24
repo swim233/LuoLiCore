@@ -1,6 +1,6 @@
-import { ulid } from 'ulid';
-import type { Role } from '@luoli/shared';
-import type { LogSink } from '../log/sink.js';
+import { ulid } from "ulid";
+import type { Role } from "@luoli/shared";
+import type { LogSink } from "../log/sink.js";
 
 /**
  * 一条阻塞式人机提示的通用原语（`docs/05 §6.1`）：**发一条带选项的消息、等人点、把结果回灌给
@@ -13,7 +13,7 @@ import type { LogSink } from '../log/sink.js';
  */
 
 /** `callback_data` 的命名空间。`c:` 已被 `/cancel` 占用；这里是 ask。 */
-export const PROMPT_CALLBACK_PREFIX = 'a:';
+export const PROMPT_CALLBACK_PREFIX = "a:";
 /**
  * Bot API 给 `callback_data` 的上界是 **64 字节**。`a:` + ULID(26) + `:` + 一位下标 = 30 字节，
  * 留着的余量足够，但**不许把任意长度的东西塞进去**（工具名、审批 id 之外的什么串）——
@@ -33,17 +33,20 @@ export const PROMPT_MAX_OPTIONS = 8;
 /** 有界：无界 Map 记「最近裁决过什么」正是 `docs/reviews/27 · R-07` 那一类。 */
 const RECENT_MAX = 256;
 
-export interface PromptOption { id: string; label: string }
+export interface PromptOption {
+  id: string;
+  label: string;
+}
 
 /** 谁在等这条提示。审批已接；另两档留着接线（`docs/00 §2.2`），语义未定之前不许有第二个实现。 */
-export type PromptKind = 'approval' | 'acp_permission' | 'agent_ask';
+export type PromptKind = "approval" | "acp_permission" | "agent_ask";
 
 export interface PromptRequest {
   kind: PromptKind;
   chatId: string;
   threadId: number | null;
   /** `owner` = 有效角色必须是 owner；`initiator` = 发起人自己或 owner。判据在 `resolve()`。 */
-  decidableBy: 'owner' | 'initiator';
+  decidableBy: "owner" | "initiator";
   initiatorUserId: string;
   text: string;
   options: readonly PromptOption[];
@@ -59,7 +62,7 @@ export interface PromptRequest {
 }
 
 export interface PromptOutcome {
-  status: 'chosen' | 'expired' | 'cancelled';
+  status: "chosen" | "expired" | "cancelled";
   optionId?: string;
   /** `user:<tgId>`。落库时当 `decided_by`。 */
   actor?: string;
@@ -73,7 +76,10 @@ export interface PromptPost {
   text: string;
   buttons: readonly { label: string; token: string }[];
 }
-export interface PromptTarget { chatId: string; messageId: number }
+export interface PromptTarget {
+  chatId: string;
+  messageId: number;
+}
 
 export interface PromptChannel {
   /**
@@ -100,17 +106,17 @@ export interface PromptChannel {
 }
 
 export type PromptResolution =
-  | { status: 'accepted'; kind: PromptKind; optionId: string; label: string }
+  | { status: "accepted"; kind: PromptKind; optionId: string; label: string }
   /** 本进程记得这条已经被点过了。与 `unknown` 是两句不同的话。 */
-  | { status: 'settled' }
+  | { status: "settled" }
   /** `claim` 说底下那条请求已经不是 pending 了（另一条通道先到，或已过期）。 */
-  | { status: 'stale' }
+  | { status: "stale" }
   /** 查不到 `promptId`：进程重启过，或早已被最近裁决表淘汰。**只有这一支该顺手把键盘撤掉** —— 没有等待者会替它撤。 */
-  | { status: 'unknown' }
+  | { status: "unknown" }
   /** 提示还挂着，但这个下标上没有选项。只有伪造的 `callback_data` 到得了这里，所以**一个字节都不许动**
    *  —— 当成 `unknown` 处理的话，一次伪造就能把一条活着的提示的键盘撕掉，那条审批的 Telegram 侧就哑了。 */
-  | { status: 'invalid' }
-  | { status: 'forbidden'; required: 'owner' | 'initiator' };
+  | { status: "invalid" }
+  | { status: "forbidden"; required: "owner" | "initiator" };
 
 export interface PromptHandle {
   promptId: string;
@@ -125,13 +131,16 @@ export function promptToken(promptId: string, index: number): string {
   return `${PROMPT_CALLBACK_PREFIX}${promptId}:${index}`;
 }
 /** `promptId` 里不会有 `:`（ULID），但按最后一个冒号切仍然更稳 —— 别让 token 格式变成暗契约。 */
-export function parsePromptToken(data: string): { promptId: string; index: number } | null {
+export function parsePromptToken(
+  data: string,
+): { promptId: string; index: number } | null {
   if (!data.startsWith(PROMPT_CALLBACK_PREFIX)) return null;
   const rest = data.slice(PROMPT_CALLBACK_PREFIX.length);
-  const cut = rest.lastIndexOf(':');
+  const cut = rest.lastIndexOf(":");
   if (cut <= 0 || cut === rest.length - 1) return null;
   const index = Number(rest.slice(cut + 1));
-  if (!Number.isInteger(index) || index < 0 || index >= PROMPT_MAX_OPTIONS) return null;
+  if (!Number.isInteger(index) || index < 0 || index >= PROMPT_MAX_OPTIONS)
+    return null;
   return { promptId: rest.slice(0, cut), index };
 }
 
@@ -150,62 +159,126 @@ export class PendingPrompts {
    * `docs/reviews/27 · R-07`。`landed` **永不 reject**（失败折成 `false`）：调用方拿它当
    * 「这次收尾真落地了吗」的凭据，而一个会抛的凭据只会变成 unhandledRejection。
    */
-  readonly #dismissed = new Map<string, { rewritten: boolean; landed: Promise<boolean> }>();
+  readonly #dismissed = new Map<
+    string,
+    { rewritten: boolean; landed: Promise<boolean> }
+  >();
 
-  constructor(private readonly channel: PromptChannel, private readonly log?: LogSink) {}
+  constructor(
+    private readonly channel: PromptChannel,
+    private readonly log?: LogSink,
+  ) {}
 
-  available(chatId?: string): boolean { return this.channel.available(chatId); }
+  available(chatId?: string): boolean {
+    return this.channel.available(chatId);
+  }
 
   ask(request: PromptRequest): PromptHandle {
     const promptId = ulid();
     const options = request.options.slice(0, PROMPT_MAX_OPTIONS);
-    if (!options.length) throw new Error('prompt requires at least one option');
+    if (!options.length) throw new Error("prompt requires at least one option");
     if (options.length !== request.options.length) {
-      this.log?.event({ level: 'warn', kind: 'prompt.options_capped', summary: `${request.kind} 的选项超过 ${PROMPT_MAX_OPTIONS} 个，已截断`, chatId: request.chatId, data: { kind: request.kind, given: request.options.length } });
+      this.log?.event({
+        level: "warn",
+        kind: "prompt.options_capped",
+        summary: `${request.kind} 的选项超过 ${PROMPT_MAX_OPTIONS} 个，已截断`,
+        chatId: request.chatId,
+        data: { kind: request.kind, given: request.options.length },
+      });
     }
     let settled = false;
     let target: PromptTarget | null = null;
     // `finish` 收到的那个 dismiss 意图要留住：投递落地时它才拿得到 target，而 `dispose()` 明确
     // 要求**不撤**（那几次编辑会被紧随其后的 `bot.stop()` 掐断）。只看 `settled` 就把它撤了。
     let dismissWhenPosted = true;
-    const { promise: outcome, resolve: settleOutcome } = Promise.withResolvers<PromptOutcome>();
-    const { promise: posted, resolve: settlePosted } = Promise.withResolvers<PromptTarget | null>();
+    const { promise: outcome, resolve: settleOutcome } =
+      Promise.withResolvers<PromptOutcome>();
+    const { promise: posted, resolve: settlePosted } =
+      Promise.withResolvers<PromptTarget | null>();
     const finish = (result: PromptOutcome, dismiss: boolean): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      request.abortSignal?.removeEventListener('abort', onAbort);
+      request.abortSignal?.removeEventListener("abort", onAbort);
       this.#waiters.delete(promptId);
       dismissWhenPosted = dismiss;
-      if (result.status === 'chosen' && result.optionId) this.#remember(promptId, options.find((option) => option.id === result.optionId)?.label ?? result.optionId);
+      if (result.status === "chosen" && result.optionId)
+        this.#remember(
+          promptId,
+          options.find((option) => option.id === result.optionId)?.label ??
+            result.optionId,
+        );
       // 投递还没落地时 target 还是 null —— 下面 post 的 then 里会补这一次撤销。
       if (dismiss && target) this.#dismiss(target);
       settleOutcome(result);
     };
-    const onAbort = (): void => finish({ status: 'cancelled' }, true);
-    const timer = setTimeout(() => finish({ status: 'expired' }, true), request.ttlMs + PROMPT_TTL_GRACE_MS);
+    const onAbort = (): void => finish({ status: "cancelled" }, true);
+    const timer = setTimeout(
+      () => finish({ status: "expired" }, true),
+      request.ttlMs + PROMPT_TTL_GRACE_MS,
+    );
     timer.unref?.();
-    if (request.abortSignal?.aborted) { settlePosted(null); finish({ status: 'cancelled' }, false); return { promptId, outcome, posted, cancel: () => undefined }; }
-    const text = request.text.length > PROMPT_TEXT_MAX ? `${request.text.slice(0, PROMPT_TEXT_MAX - 1)}…` : request.text;
-    const buttons = options.map((option, index) => ({ label: option.label, token: promptToken(promptId, index) }));
+    if (request.abortSignal?.aborted) {
+      settlePosted(null);
+      finish({ status: "cancelled" }, false);
+      return { promptId, outcome, posted, cancel: () => undefined };
+    }
+    const text =
+      request.text.length > PROMPT_TEXT_MAX
+        ? `${request.text.slice(0, PROMPT_TEXT_MAX - 1)}…`
+        : request.text;
+    const buttons = options.map((option, index) => ({
+      label: option.label,
+      token: promptToken(promptId, index),
+    }));
     // 上界断言排在注册等待者**之前**：抛在后面会留下一个没人收尾的等待者与一个活着的 timer。
     // token 是本文件算的，越界只会是本文件的 bug，而它的表现是「按钮已经在屏幕上了，点下去 400」。
-    for (const button of buttons) if (Buffer.byteLength(button.token, 'utf8') > PROMPT_CALLBACK_MAX_BYTES) { clearTimeout(timer); throw new Error(`prompt callback token too long: ${button.token.length}`); }
-    request.abortSignal?.addEventListener('abort', onAbort, { once: true });
+    for (const button of buttons)
+      if (Buffer.byteLength(button.token, "utf8") > PROMPT_CALLBACK_MAX_BYTES) {
+        clearTimeout(timer);
+        throw new Error(
+          `prompt callback token too long: ${button.token.length}`,
+        );
+      }
+    request.abortSignal?.addEventListener("abort", onAbort, { once: true });
     this.#waiters.set(promptId, { request, options, finish });
-    void Promise.resolve(this.channel.post({ kind: request.kind, chatId: request.chatId, threadId: request.threadId, text, buttons })).then((result) => {
-      target = result;
-      settlePosted(result);
-      // 发出去之前就被裁决/取消掉了（WebUI 抢先、轮次 abort）：这条键盘一出生就该撤。
-      if (result && settled && dismissWhenPosted) this.#dismiss(result);
-    }).catch((error: unknown) => {
-      settlePosted(null);
-      this.log?.event({ level: 'warn', kind: 'prompt.post_failed', summary: `${request.kind} 提示发不出去`, chatId: request.chatId, data: { kind: request.kind, error: error instanceof Error ? error.message : String(error) } });
-      // 发不出去就没有等待的意义了 —— 但**发起方的语义不由这里决定**：审批那边照旧等它自己的
-      // TTL / WebUI 裁决，这里只是把这条 outcome 收尾，免得留一个永不 settle 的 Promise。
-      finish({ status: 'cancelled' }, false);
-    });
-    return { promptId, outcome, posted, cancel: () => finish({ status: 'cancelled' }, true) };
+    void Promise.resolve(
+      this.channel.post({
+        kind: request.kind,
+        chatId: request.chatId,
+        threadId: request.threadId,
+        text,
+        buttons,
+      }),
+    )
+      .then((result) => {
+        target = result;
+        settlePosted(result);
+        // 发出去之前就被裁决/取消掉了（WebUI 抢先、轮次 abort）：这条键盘一出生就该撤。
+        if (result && settled && dismissWhenPosted) this.#dismiss(result);
+      })
+      .catch((error: unknown) => {
+        settlePosted(null);
+        this.log?.event({
+          level: "warn",
+          kind: "prompt.post_failed",
+          summary: `${request.kind} 提示发不出去`,
+          chatId: request.chatId,
+          data: {
+            kind: request.kind,
+            error: error instanceof Error ? error.message : String(error),
+          },
+        });
+        // 发不出去就没有等待的意义了 —— 但**发起方的语义不由这里决定**：审批那边照旧等它自己的
+        // TTL / WebUI 裁决，这里只是把这条 outcome 收尾，免得留一个永不 settle 的 Promise。
+        finish({ status: "cancelled" }, false);
+      });
+    return {
+      promptId,
+      outcome,
+      posted,
+      cancel: () => finish({ status: "cancelled" }, true),
+    };
   }
 
   /**
@@ -225,19 +298,26 @@ export class PendingPrompts {
    * 点击会回 `unknown`。那是 fail-safe 的一侧（不会伪造出一次批准，库里那一行照旧等自己的 TTL），
    * 但话说错了 —— 要横向扩展得先把这条通道搬到库上或加一层路由。
    */
-  resolve(token: string, actor: { userId: string; role: Role; chatId: string }): PromptResolution {
+  resolve(
+    token: string,
+    actor: { userId: string; role: Role; chatId: string },
+  ): PromptResolution {
     const parsed = parsePromptToken(token);
-    if (!parsed) return { status: 'unknown' };
+    if (!parsed) return { status: "unknown" };
     const waiter = this.#waiters.get(parsed.promptId);
-    if (!waiter) return this.#recent.has(parsed.promptId) ? { status: 'settled' } : { status: 'unknown' };
-    if (waiter.request.chatId !== actor.chatId) return { status: 'unknown' };
+    if (!waiter)
+      return this.#recent.has(parsed.promptId)
+        ? { status: "settled" }
+        : { status: "unknown" };
+    if (waiter.request.chatId !== actor.chatId) return { status: "unknown" };
     const { request } = waiter;
-    const allowed = request.decidableBy === 'owner'
-      ? actor.role === 'owner'
-      : actor.role === 'owner' || actor.userId === request.initiatorUserId;
-    if (!allowed) return { status: 'forbidden', required: request.decidableBy };
+    const allowed =
+      request.decidableBy === "owner"
+        ? actor.role === "owner"
+        : actor.role === "owner" || actor.userId === request.initiatorUserId;
+    if (!allowed) return { status: "forbidden", required: request.decidableBy };
     const option = waiter.options[parsed.index];
-    if (!option) return { status: 'invalid' };
+    if (!option) return { status: "invalid" };
     const who = `user:${actor.userId}`;
     // **先记账再 claim。** `claim` 会同步走进发起方的收尾逻辑（审批那条路会顺手把这条提示的键盘
     // 撤掉），中途再回来读注册表就晚了 —— 「这条被点过」这件事没人记得的话，同一条消息第二次点
@@ -247,18 +327,35 @@ export class PendingPrompts {
     this.#remember(parsed.promptId, option.label);
     if (request.claim && !request.claim(option.id, who)) {
       // 库里那一行已经不是 pending 了：另一条通道先到，或已过期。
-      waiter.finish({ status: 'cancelled' }, true);
-      return { status: 'stale' };
+      waiter.finish({ status: "cancelled" }, true);
+      return { status: "stale" };
     }
-    waiter.finish({ status: 'chosen', optionId: option.id, actor: who }, true);
-    this.log?.event({ level: 'info', kind: 'prompt.resolved', summary: `${request.kind} → ${option.id}`, chatId: request.chatId, userId: actor.userId, data: { kind: request.kind, optionId: option.id, decidableBy: request.decidableBy } });
-    return { status: 'accepted', kind: request.kind, optionId: option.id, label: option.label };
+    waiter.finish({ status: "chosen", optionId: option.id, actor: who }, true);
+    this.log?.event({
+      level: "info",
+      kind: "prompt.resolved",
+      summary: `${request.kind} → ${option.id}`,
+      chatId: request.chatId,
+      userId: actor.userId,
+      data: {
+        kind: request.kind,
+        optionId: option.id,
+        decidableBy: request.decidableBy,
+      },
+    });
+    return {
+      status: "accepted",
+      kind: request.kind,
+      optionId: option.id,
+      label: option.label,
+    };
   }
 
   /** 关停：清 timer、把等待者收尾。**不撤键盘** —— 那几次编辑会被紧随其后的 `bot.stop()` 掐断，
    *  而残留键盘由下一次启动那趟扫描负责（`docs/05 §6.1`），两条路里那一条才是可靠的。 */
   dispose(): void {
-    for (const waiter of [...this.#waiters.values()]) waiter.finish({ status: 'cancelled' }, false);
+    for (const waiter of [...this.#waiters.values()])
+      waiter.finish({ status: "cancelled" }, false);
     this.#waiters.clear();
   }
 
@@ -269,7 +366,9 @@ export class PendingPrompts {
    * （审批是 `approvals.tg_message_id`），而销待办的前提是那次编辑真的回来了。返回的 Promise
    * 永不 reject。
    */
-  dismiss(target: PromptTarget, text?: string): Promise<boolean> { return this.#dismiss(target, text); }
+  dismiss(target: PromptTarget, text?: string): Promise<boolean> {
+    return this.#dismiss(target, text);
+  }
 
   /**
    * 同一条键盘被要求收尾两次是**常态**而不是异常：发起方拿着自己的句柄收（审批的
@@ -289,17 +388,31 @@ export class PendingPrompts {
     // 去重命中时交回**那一次**的结果，而不是一个凭空的 false：调用方拿它去销待办，谎报失败会让
     // 一条已经收拾干净的消息永远留在待办队列里，每次启动都被重编辑一遍。
     if (known && (known.rewritten || text === undefined)) return known.landed;
-    const landed = Promise.resolve(this.channel.settle(target, text)).then(() => true).catch((error: unknown) => {
-      this.log?.event({ level: 'debug', kind: 'prompt.settle_failed', summary: 'prompt settle failed', chatId: target.chatId, data: { messageId: target.messageId, rewrote: text !== undefined, error: error instanceof Error ? error.message : String(error) } });
-      return false;
-    });
+    const landed = Promise.resolve(this.channel.settle(target, text))
+      .then(() => true)
+      .catch((error: unknown) => {
+        this.log?.event({
+          level: "debug",
+          kind: "prompt.settle_failed",
+          summary: "prompt settle failed",
+          chatId: target.chatId,
+          data: {
+            messageId: target.messageId,
+            rewrote: text !== undefined,
+            error: error instanceof Error ? error.message : String(error),
+          },
+        });
+        return false;
+      });
     this.#dismissed.set(key, { rewritten: text !== undefined, landed });
-    while (this.#dismissed.size > RECENT_MAX) this.#dismissed.delete(this.#dismissed.keys().next().value!);
+    while (this.#dismissed.size > RECENT_MAX)
+      this.#dismissed.delete(this.#dismissed.keys().next().value!);
     return landed;
   }
 
   #remember(promptId: string, label: string): void {
     this.#recent.set(promptId, label);
-    while (this.#recent.size > RECENT_MAX) this.#recent.delete(this.#recent.keys().next().value!);
+    while (this.#recent.size > RECENT_MAX)
+      this.#recent.delete(this.#recent.keys().next().value!);
   }
 }

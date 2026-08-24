@@ -1,9 +1,21 @@
-import type { Sqlite } from './database.js';
+import type { Sqlite } from "./database.js";
 
 function redactArchivePayload(value: unknown): unknown {
-  if (typeof value === 'string') return value.replace(/\bsk-[A-Za-z0-9_-]{16,}\b|Bearer\s+\S+|\b\d{8,10}:[A-Za-z0-9_-]{35}\b/gi, '«redacted»');
+  if (typeof value === "string")
+    return value.replace(
+      /\bsk-[A-Za-z0-9_-]{16,}\b|Bearer\s+\S+|\b\d{8,10}:[A-Za-z0-9_-]{35}\b/gi,
+      "«redacted»",
+    );
   if (Array.isArray(value)) return value.map(redactArchivePayload);
-  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, nested]) => [key, /api[_-]?key|secret|token|password|credential/i.test(key) ? '«redacted»' : redactArchivePayload(nested)]));
+  if (value && typeof value === "object")
+    return Object.fromEntries(
+      Object.entries(value).map(([key, nested]) => [
+        key,
+        /api[_-]?key|secret|token|password|credential/i.test(key)
+          ? "«redacted»"
+          : redactArchivePayload(nested),
+      ]),
+    );
   return value;
 }
 export interface ArchivedMessage {
@@ -11,8 +23,8 @@ export interface ArchivedMessage {
   chatId: string;
   messageThreadId: number | null;
   tgMessageId: number;
-  direction: 'in' | 'out';
-  fromKind: 'user' | 'bot' | 'system';
+  direction: "in" | "out";
+  fromKind: "user" | "bot" | "system";
   fromUserId: string | null;
   fromName: string | null;
   fromUsername: string | null;
@@ -39,7 +51,10 @@ export interface ArchivedMessage {
  */
 export type AppendedMessage = ArchivedMessage & { inserted: boolean };
 
-export interface AppendMessageInput extends Omit<ArchivedMessage, 'id' | 'triggered' | 'triggerReason'> {
+export interface AppendMessageInput extends Omit<
+  ArchivedMessage,
+  "id" | "triggered" | "triggerReason"
+> {
   tgUpdateId?: number | null;
   raw: unknown;
   triggered?: boolean;
@@ -69,7 +84,7 @@ export interface AppendMessageInput extends Omit<ArchivedMessage, 'id' | 'trigge
  * 保留 —— 于是 `a_b` 变成 `LIKE '%a_b%'`，`axb` 也会命中（docs/27 · C-06）。不是注入（值是绑定
  * 参数），只影响检索精度。**转义了就必须配 `ESCAPE '\'`**，三条 LIKE 语句都带着它。
  */
-const escapeLike = (value: string): string => value.replace(/[\\%_]/g, '\\$&');
+const escapeLike = (value: string): string => value.replace(/[\\%_]/g, "\\$&");
 /** 上面那句转义的另一半。加新的 LIKE 查询时跟着带上，否则 `\` 会被当成普通字符。 */
 export const LIKE_ESCAPE = " ESCAPE '\\'";
 /**
@@ -83,11 +98,22 @@ export type ArchiveQuery = ({ fts: string } | { like: string }) & {
 export function archiveQuery(raw: string): ArchiveQuery {
   const tokens = [...new Set(raw.split(/[^\p{L}\p{N}_]+/u).filter(Boolean))];
   const matchable = tokens.filter((token) => [...token].length >= 3);
-  if (matchable.length) return { fts: matchable.map((token) => `"${token.replaceAll('"', '""')}"`).join(' OR '), dropped: tokens.filter((token) => [...token].length < 3) };
-  const longest = [...tokens].sort((left, right) => [...right].length - [...left].length)[0];
+  if (matchable.length)
+    return {
+      fts: matchable
+        .map((token) => `"${token.replaceAll('"', '""')}"`)
+        .join(" OR "),
+      dropped: tokens.filter((token) => [...token].length < 3),
+    };
+  const longest = [...tokens].sort(
+    (left, right) => [...right].length - [...left].length,
+  )[0];
   // LIKE 那条路只用最长的一个词，其余同样没参与 —— 一并报出去。此时全部词都短于 3 码点，
   // 所以调用方那句「短于 3 个字」的措辞在两条路上都成立。
-  return { like: `%${escapeLike(longest ?? raw)}%`, dropped: tokens.filter((token) => token !== longest) };
+  return {
+    like: `%${escapeLike(longest ?? raw)}%`,
+    dropped: tokens.filter((token) => token !== longest),
+  };
 }
 
 /**
@@ -97,7 +123,13 @@ export function archiveQuery(raw: string): ArchiveQuery {
  * 那一刻的 `messages.id`。挂在这里而不是在工具层过滤返回值 —— 那样 `limit:20` 会先取到 20 条
  * 再被削成 3 条，模型看到的是「一共只有 3 条」。
  */
-export interface SearchFilters { from?: string | null; after?: number | null; before?: number | null; kind?: string | null; minId?: number | null }
+export interface SearchFilters {
+  from?: string | null;
+  after?: number | null;
+  before?: number | null;
+  kind?: string | null;
+  minId?: number | null;
+}
 /**
  * 过滤条件一律写成 `@x IS NULL OR …` 的常量 SQL，而不是按传了哪几个参数拼串：语句文本固定
  * 才能吃到 better-sqlite3 的预编译缓存，而「没传的参数不出现在 SQL 里」还得在绑定侧同步剔掉
@@ -109,73 +141,151 @@ function filterClause(prefix: string): string {
     AND (@kind IS NULL OR ${prefix}kind = @kind) AND (@minId IS NULL OR ${prefix}id > @minId)`;
 }
 function filterParameters(filters: SearchFilters): Required<SearchFilters> {
-  return { from: filters.from?.replace(/^@/, '') ?? null, after: filters.after ?? null, before: filters.before ?? null, kind: filters.kind ?? null,
-    minId: filters.minId ?? null };
+  return {
+    from: filters.from?.replace(/^@/, "") ?? null,
+    after: filters.after ?? null,
+    before: filters.before ?? null,
+    kind: filters.kind ?? null,
+    minId: filters.minId ?? null,
+  };
 }
 
 const MESSAGE_COLUMNS = `m.id,m.chat_id AS chatId,m.message_thread_id AS messageThreadId,m.tg_message_id AS tgMessageId,m.direction,
   m.from_kind AS fromKind,m.from_user_id AS fromUserId,m.from_name AS fromName,m.from_username AS fromUsername,m.kind,m.text,m.tg_date AS tgDate,
   m.triggered,m.trigger_reason AS triggerReason,m.turn_id AS turnId,m.reply_to_tg_message_id AS replyToTgMessageId`;
-const messageQuery = (prefix = '') => prefix ? MESSAGE_COLUMNS : MESSAGE_COLUMNS.replaceAll('m.', '');
+const messageQuery = (prefix = "") =>
+  prefix ? MESSAGE_COLUMNS : MESSAGE_COLUMNS.replaceAll("m.", "");
 const withMedia = (row: ArchivedMessage | null): ArchivedMessage | null => {
   if (!row) return null;
-  const parts = (row as ArchivedMessage & { mediaPartsJson?: string | null }).mediaPartsJson;
+  const parts = (row as ArchivedMessage & { mediaPartsJson?: string | null })
+    .mediaPartsJson;
   // 坏 JSON 当「这条消息没有媒体」：这个函数在每一条消息的读出路径上，抛出去会让整次检索、
   // 整次归档读取失败，而丢一条附件只是那条消息少了张图（docs/27 · T-06）。
-  if (parts) { try { row.mediaParts = JSON.parse(parts) as unknown[]; } catch { /* 手工改库或历史坏行 */ } }
+  if (parts) {
+    try {
+      row.mediaParts = JSON.parse(parts) as unknown[];
+    } catch {
+      /* 手工改库或历史坏行 */
+    }
+  }
   delete (row as ArchivedMessage & { mediaPartsJson?: string }).mediaPartsJson;
   return row;
 };
 export class ArchiveRepository {
   constructor(private readonly db: Sqlite) {}
 
-  scope(chatId: string, threadId: number | null = null): ScopedArchiveRepository {
+  scope(
+    chatId: string,
+    threadId: number | null = null,
+  ): ScopedArchiveRepository {
     return new ScopedArchiveRepository(this.db, chatId, threadId);
   }
 
   adminSearchAll(query: string, limit = 50): ArchivedMessage[] {
     const parsed = archiveQuery(query);
-    const rows = 'like' in parsed
-      ? this.db.prepare(`SELECT ${messageQuery()},media_parts_json AS mediaPartsJson FROM messages WHERE deleted_at IS NULL AND text LIKE ?${LIKE_ESCAPE} ORDER BY tg_date DESC LIMIT ?`).all(parsed.like, limit) as ArchivedMessage[]
-      : this.db.prepare(`SELECT ${messageQuery('m')},m.media_parts_json AS mediaPartsJson FROM messages_fts f JOIN messages m ON m.id=f.rowid WHERE messages_fts MATCH ? AND m.deleted_at IS NULL ORDER BY bm25(messages_fts),m.tg_date DESC LIMIT ?`).all(parsed.fts, limit) as ArchivedMessage[];
+    const rows =
+      "like" in parsed
+        ? (this.db
+            .prepare(
+              `SELECT ${messageQuery()},media_parts_json AS mediaPartsJson FROM messages WHERE deleted_at IS NULL AND text LIKE ?${LIKE_ESCAPE} ORDER BY tg_date DESC LIMIT ?`,
+            )
+            .all(parsed.like, limit) as ArchivedMessage[])
+        : (this.db
+            .prepare(
+              `SELECT ${messageQuery("m")},m.media_parts_json AS mediaPartsJson FROM messages_fts f JOIN messages m ON m.id=f.rowid WHERE messages_fts MATCH ? AND m.deleted_at IS NULL ORDER BY bm25(messages_fts),m.tg_date DESC LIMIT ?`,
+            )
+            .all(parsed.fts, limit) as ArchivedMessage[]);
     return rows.map((row) => withMedia(row)!);
   }
 
   /** 命中总数。分页页码依赖它：拿「已取回条数」当 total 的话，翻到后面页数会漂（docs/20 · W-API-03）。 */
   adminSearchCount(query: string): number {
     const parsed = archiveQuery(query);
-    return 'like' in parsed
-      ? this.db.prepare(`SELECT COUNT(*) FROM messages WHERE deleted_at IS NULL AND text LIKE ?${LIKE_ESCAPE}`).pluck().get(parsed.like) as number
-      : this.db.prepare('SELECT COUNT(*) FROM messages_fts f JOIN messages m ON m.id=f.rowid WHERE messages_fts MATCH ? AND m.deleted_at IS NULL').pluck().get(parsed.fts) as number;
+    return "like" in parsed
+      ? (this.db
+          .prepare(
+            `SELECT COUNT(*) FROM messages WHERE deleted_at IS NULL AND text LIKE ?${LIKE_ESCAPE}`,
+          )
+          .pluck()
+          .get(parsed.like) as number)
+      : (this.db
+          .prepare(
+            "SELECT COUNT(*) FROM messages_fts f JOIN messages m ON m.id=f.rowid WHERE messages_fts MATCH ? AND m.deleted_at IS NULL",
+          )
+          .pluck()
+          .get(parsed.fts) as number);
   }
 }
 
 export class ScopedArchiveRepository {
-  constructor(private readonly db: Sqlite, readonly chatId: string, readonly threadId: number | null) {}
+  constructor(
+    private readonly db: Sqlite,
+    readonly chatId: string,
+    readonly threadId: number | null,
+  ) {}
 
   append(input: AppendMessageInput): AppendedMessage {
-    const info = this.db.prepare(`INSERT OR IGNORE INTO messages(chat_id,message_thread_id,tg_message_id,tg_update_id,direction,from_kind,
+    const info = this.db
+      .prepare(
+        `INSERT OR IGNORE INTO messages(chat_id,message_thread_id,tg_message_id,tg_update_id,direction,from_kind,
       from_user_id,from_name,from_username,reply_to_tg_message_id,media_group_id,kind,text,raw_json,media_parts_json,tg_date,received_at,
       triggered,trigger_reason,turn_id,revision,claimed_at) VALUES (@chatId,@messageThreadId,@tgMessageId,@tgUpdateId,@direction,@fromKind,
       @fromUserId,@fromName,@fromUsername,@replyToTgMessageId,@mediaGroupId,@kind,@text,@rawJson,@mediaPartsJson,@tgDate,@receivedAt,
-      @triggered,@triggerReason,@turnId,@revision,@claimedAt)`).run({ ...input, tgUpdateId: input.tgUpdateId ?? null,
-        replyToTgMessageId: input.replyToTgMessageId ?? null, mediaGroupId: input.mediaGroupId ?? null,
-        rawJson: JSON.stringify(redactArchivePayload(input.raw)), mediaPartsJson: input.mediaParts ? JSON.stringify(input.mediaParts) : null, receivedAt: Date.now(), triggered: input.triggered ? 1 : 0,
-        triggerReason: input.triggerReason ?? null, turnId: input.turnId ?? null, revision: input.revision ?? 0,
+      @triggered,@triggerReason,@turnId,@revision,@claimedAt)`,
+      )
+      .run({
+        ...input,
+        tgUpdateId: input.tgUpdateId ?? null,
+        replyToTgMessageId: input.replyToTgMessageId ?? null,
+        mediaGroupId: input.mediaGroupId ?? null,
+        rawJson: JSON.stringify(redactArchivePayload(input.raw)),
+        mediaPartsJson: input.mediaParts
+          ? JSON.stringify(input.mediaParts)
+          : null,
+        receivedAt: Date.now(),
+        triggered: input.triggered ? 1 : 0,
+        triggerReason: input.triggerReason ?? null,
+        turnId: input.turnId ?? null,
+        revision: input.revision ?? 0,
         // claimed_by_turn 留空：这条消息已经被消费掉了，但不属于任何在途轮次，abortTurn 的 releaseClaims 不该把它放回去。
-        claimedAt: input.claimed ? Date.now() : null });
-    if (info.changes) return Object.assign(this.byId(Number(info.lastInsertRowid))!, { inserted: true });
-    return Object.assign(withMedia(this.db.prepare(`SELECT ${messageQuery()},media_parts_json AS mediaPartsJson FROM messages WHERE chat_id=? AND tg_message_id=? AND revision=?`).get(this.chatId, input.tgMessageId, input.revision ?? 0) as ArchivedMessage)!, { inserted: false });
+        claimedAt: input.claimed ? Date.now() : null,
+      });
+    if (info.changes)
+      return Object.assign(this.byId(Number(info.lastInsertRowid))!, {
+        inserted: true,
+      });
+    return Object.assign(
+      withMedia(
+        this.db
+          .prepare(
+            `SELECT ${messageQuery()},media_parts_json AS mediaPartsJson FROM messages WHERE chat_id=? AND tg_message_id=? AND revision=?`,
+          )
+          .get(
+            this.chatId,
+            input.tgMessageId,
+            input.revision ?? 0,
+          ) as ArchivedMessage,
+      )!,
+      { inserted: false },
+    );
   }
 
   /** 最新 revision 的那一行：编辑过的消息会有多行，引用时要拿用户此刻看到的那一版。 */
   byTgMessageId(tgMessageId: number): ArchivedMessage | null {
-    return withMedia(this.db.prepare(`SELECT ${messageQuery()},media_parts_json AS mediaPartsJson FROM messages
-      WHERE chat_id=? AND tg_message_id=? AND deleted_at IS NULL ORDER BY revision DESC LIMIT 1`).get(this.chatId, tgMessageId) as ArchivedMessage | undefined ?? null);
+    return withMedia(
+      (this.db
+        .prepare(
+          `SELECT ${messageQuery()},media_parts_json AS mediaPartsJson FROM messages
+      WHERE chat_id=? AND tg_message_id=? AND deleted_at IS NULL ORDER BY revision DESC LIMIT 1`,
+        )
+        .get(this.chatId, tgMessageId) as ArchivedMessage | undefined) ?? null,
+    );
   }
 
   attachMedia(id: number, parts: unknown[]): void {
-    this.db.prepare('UPDATE messages SET media_parts_json=? WHERE id=?').run(JSON.stringify(parts), id);
+    this.db
+      .prepare("UPDATE messages SET media_parts_json=? WHERE id=?")
+      .run(JSON.stringify(parts), id);
   }
 
   /**
@@ -184,34 +294,78 @@ export class ScopedArchiveRepository {
    * 等于凭空消失 —— 编辑消息踩过同一个坑（docs/20 · W-TG-05）。
    */
   demoteToBackground(id: number): void {
-    this.db.prepare("UPDATE messages SET triggered=0,trigger_reason=NULL WHERE id=? AND chat_id=? AND turn_id IS NULL").run(id, this.chatId);
+    this.db
+      .prepare(
+        "UPDATE messages SET triggered=0,trigger_reason=NULL WHERE id=? AND chat_id=? AND turn_id IS NULL",
+      )
+      .run(id, this.chatId);
   }
 
   /** @param minId 回忆隔断的下限（`context.recallBarrier`）：0 = 不设限，见 `SearchFilters.minId`。 */
   byId(id: number, minId = 0): ArchivedMessage | null {
-    return withMedia(this.db.prepare(`SELECT ${messageQuery()},media_parts_json AS mediaPartsJson FROM messages WHERE chat_id = ? AND id = ? AND id > ?`).get(this.chatId, id, minId) as ArchivedMessage | undefined ?? null);
+    return withMedia(
+      (this.db
+        .prepare(
+          `SELECT ${messageQuery()},media_parts_json AS mediaPartsJson FROM messages WHERE chat_id = ? AND id = ? AND id > ?`,
+        )
+        .get(this.chatId, id, minId) as ArchivedMessage | undefined) ?? null,
+    );
   }
 
   /** 本会话归档里最大的 `messages.id`。清空上下文时拿它当回忆隔断的水位（`ContextEngine.reset`）。 */
   maxMessageId(): number {
-    return (this.db.prepare('SELECT COALESCE(MAX(id),0) AS value FROM messages WHERE chat_id = ? AND (? IS NULL OR message_thread_id = ?)')
-      .pluck().get(this.chatId, this.threadId, this.threadId) ?? 0) as number;
+    return (this.db
+      .prepare(
+        "SELECT COALESCE(MAX(id),0) AS value FROM messages WHERE chat_id = ? AND (? IS NULL OR message_thread_id = ?)",
+      )
+      .pluck()
+      .get(this.chatId, this.threadId, this.threadId) ?? 0) as number;
   }
 
-  search(query: string, limit = 20, filters: SearchFilters = {}): ArchivedMessage[] {
-    const thread = this.threadId === null ? '' : ' AND message_thread_id = @threadId';
+  search(
+    query: string,
+    limit = 20,
+    filters: SearchFilters = {},
+  ): ArchivedMessage[] {
+    const thread =
+      this.threadId === null ? "" : " AND message_thread_id = @threadId";
     const columns = `id,chat_id AS chatId,message_thread_id AS messageThreadId,tg_message_id AS tgMessageId,direction,
       from_kind AS fromKind,from_user_id AS fromUserId,from_name AS fromName,from_username AS fromUsername,kind,text,tg_date AS tgDate,triggered,trigger_reason AS triggerReason`;
     const parsed = archiveQuery(query);
-    const bound = { chatId: this.chatId, threadId: this.threadId, limit, ...filterParameters(filters) };
-    const rows = 'like' in parsed ? this.db.prepare(`SELECT ${columns},media_parts_json AS mediaPartsJson FROM messages WHERE chat_id = @chatId${thread} AND deleted_at IS NULL AND text LIKE @query${LIKE_ESCAPE}${filterClause('')} ORDER BY tg_date DESC LIMIT @limit`).all({ ...bound, query: parsed.like }) as ArchivedMessage[]
-      : this.db.prepare(`SELECT ${messageQuery('m')},m.media_parts_json AS mediaPartsJson FROM messages_fts f JOIN messages m ON m.id=f.rowid WHERE m.chat_id = @chatId${thread ? ' AND m.message_thread_id = @threadId' : ''} AND messages_fts MATCH @query AND m.deleted_at IS NULL${filterClause('m.')} ORDER BY bm25(messages_fts),m.tg_date DESC LIMIT @limit`).all({ ...bound, query: parsed.fts }) as ArchivedMessage[];
+    const bound = {
+      chatId: this.chatId,
+      threadId: this.threadId,
+      limit,
+      ...filterParameters(filters),
+    };
+    const rows =
+      "like" in parsed
+        ? (this.db
+            .prepare(
+              `SELECT ${columns},media_parts_json AS mediaPartsJson FROM messages WHERE chat_id = @chatId${thread} AND deleted_at IS NULL AND text LIKE @query${LIKE_ESCAPE}${filterClause("")} ORDER BY tg_date DESC LIMIT @limit`,
+            )
+            .all({ ...bound, query: parsed.like }) as ArchivedMessage[])
+        : (this.db
+            .prepare(
+              `SELECT ${messageQuery("m")},m.media_parts_json AS mediaPartsJson FROM messages_fts f JOIN messages m ON m.id=f.rowid WHERE m.chat_id = @chatId${thread ? " AND m.message_thread_id = @threadId" : ""} AND messages_fts MATCH @query AND m.deleted_at IS NULL${filterClause("m.")} ORDER BY bm25(messages_fts),m.tg_date DESC LIMIT @limit`,
+            )
+            .all({ ...bound, query: parsed.fts }) as ArchivedMessage[]);
     return rows.map((row) => withMedia(row)!);
   }
 
   recent(limit = 50, minId = 0): ArchivedMessage[] {
-    const rows = this.db.prepare(`SELECT ${messageQuery()},media_parts_json AS mediaPartsJson FROM messages WHERE chat_id = ?
-      AND (? IS NULL OR message_thread_id = ?) AND deleted_at IS NULL AND id > ? ORDER BY id DESC LIMIT ?`).all(this.chatId, this.threadId, this.threadId, minId, limit) as ArchivedMessage[];
+    const rows = this.db
+      .prepare(
+        `SELECT ${messageQuery()},media_parts_json AS mediaPartsJson FROM messages WHERE chat_id = ?
+      AND (? IS NULL OR message_thread_id = ?) AND deleted_at IS NULL AND id > ? ORDER BY id DESC LIMIT ?`,
+      )
+      .all(
+        this.chatId,
+        this.threadId,
+        this.threadId,
+        minId,
+        limit,
+      ) as ArchivedMessage[];
     return rows.map((row) => withMedia(row)!);
   }
 
@@ -223,15 +377,36 @@ export class ScopedArchiveRepository {
    * 一律按 id 升序交回：`recent()` 那种「最新在最前」在 `direction:'after'` 上会让读出来的
    * 一段反着念，而模型是照顺序理解对话的。
    */
-  window(input: { anchorId?: number | null | undefined; anchorDate?: number | null | undefined; direction?: 'before' | 'after' | 'around' | undefined; limit?: number | undefined; minId?: number | null | undefined }): ArchivedMessage[] {
+  window(input: {
+    anchorId?: number | null | undefined;
+    anchorDate?: number | null | undefined;
+    direction?: "before" | "after" | "around" | undefined;
+    limit?: number | undefined;
+    minId?: number | null | undefined;
+  }): ArchivedMessage[] {
     const limit = input.limit ?? 50;
     const floor = input.minId ?? 0;
-    const anchor = input.anchorId ?? (input.anchorDate === null || input.anchorDate === undefined ? null : this.#anchorAt(input.anchorDate));
+    const anchor =
+      input.anchorId ??
+      (input.anchorDate === null || input.anchorDate === undefined
+        ? null
+        : this.#anchorAt(input.anchorDate));
     if (anchor === null) return this.recent(limit, floor).reverse();
-    if (input.direction === 'after') return this.#slice('id >= @anchor', 'ASC', limit, anchor, floor);
-    if (input.direction !== 'around') return this.#slice('id <= @anchor', 'DESC', limit, anchor, floor).reverse();
+    if (input.direction === "after")
+      return this.#slice("id >= @anchor", "ASC", limit, anchor, floor);
+    if (input.direction !== "around")
+      return this.#slice(
+        "id <= @anchor",
+        "DESC",
+        limit,
+        anchor,
+        floor,
+      ).reverse();
     const before = Math.floor((limit - 1) / 2);
-    return [...this.#slice('id < @anchor', 'DESC', before, anchor, floor).reverse(), ...this.#slice('id >= @anchor', 'ASC', limit - before, anchor, floor)];
+    return [
+      ...this.#slice("id < @anchor", "DESC", before, anchor, floor).reverse(),
+      ...this.#slice("id >= @anchor", "ASC", limit - before, anchor, floor),
+    ];
   }
 
   /**
@@ -241,15 +416,42 @@ export class ScopedArchiveRepository {
    */
   #anchorAt(date: number): number | null {
     const bound = { chatId: this.chatId, threadId: this.threadId, date };
-    return (this.db.prepare('SELECT id FROM messages WHERE chat_id = @chatId AND (@threadId IS NULL OR message_thread_id = @threadId) AND deleted_at IS NULL AND tg_date >= @date ORDER BY tg_date, id LIMIT 1').pluck().get(bound)
-      ?? this.db.prepare('SELECT id FROM messages WHERE chat_id = @chatId AND (@threadId IS NULL OR message_thread_id = @threadId) AND deleted_at IS NULL ORDER BY id DESC LIMIT 1').pluck().get(bound) ?? null) as number | null;
+    return (this.db
+      .prepare(
+        "SELECT id FROM messages WHERE chat_id = @chatId AND (@threadId IS NULL OR message_thread_id = @threadId) AND deleted_at IS NULL AND tg_date >= @date ORDER BY tg_date, id LIMIT 1",
+      )
+      .pluck()
+      .get(bound) ??
+      this.db
+        .prepare(
+          "SELECT id FROM messages WHERE chat_id = @chatId AND (@threadId IS NULL OR message_thread_id = @threadId) AND deleted_at IS NULL ORDER BY id DESC LIMIT 1",
+        )
+        .pluck()
+        .get(bound) ??
+      null) as number | null;
   }
 
-  #slice(comparison: string, order: 'ASC' | 'DESC', limit: number, anchor: number, minId = 0): ArchivedMessage[] {
+  #slice(
+    comparison: string,
+    order: "ASC" | "DESC",
+    limit: number,
+    anchor: number,
+    minId = 0,
+  ): ArchivedMessage[] {
     if (limit <= 0) return [];
-    const rows = this.db.prepare(`SELECT ${messageQuery()},media_parts_json AS mediaPartsJson FROM messages
+    const rows = this.db
+      .prepare(
+        `SELECT ${messageQuery()},media_parts_json AS mediaPartsJson FROM messages
       WHERE chat_id = @chatId AND (@threadId IS NULL OR message_thread_id = @threadId) AND deleted_at IS NULL AND id > @minId AND ${comparison}
-      ORDER BY id ${order} LIMIT @limit`).all({ chatId: this.chatId, threadId: this.threadId, anchor, limit, minId }) as ArchivedMessage[];
+      ORDER BY id ${order} LIMIT @limit`,
+      )
+      .all({
+        chatId: this.chatId,
+        threadId: this.threadId,
+        anchor,
+        limit,
+        minId,
+      }) as ArchivedMessage[];
     return rows.map((row) => withMedia(row)!);
   }
 
@@ -258,33 +460,67 @@ export class ScopedArchiveRepository {
    * 不通用，把 Telegram 那个当 `#id` 交给模型，它照着 `get_message` 回查会取到另一条消息。
    * 一次查完整批而不是逐条查 —— 一页 50 条就是 50 次查询。
    */
-  archiveIdsByTgMessageIds(tgMessageIds: readonly number[]): Map<number, number> {
+  archiveIdsByTgMessageIds(
+    tgMessageIds: readonly number[],
+  ): Map<number, number> {
     if (!tgMessageIds.length) return new Map();
-    const placeholders = tgMessageIds.map(() => '?').join(',');
-    const rows = this.db.prepare(`SELECT tg_message_id AS tg, MAX(id) AS id FROM messages WHERE chat_id = ?
+    const placeholders = tgMessageIds.map(() => "?").join(",");
+    const rows = this.db
+      .prepare(
+        `SELECT tg_message_id AS tg, MAX(id) AS id FROM messages WHERE chat_id = ?
       AND (? IS NULL OR message_thread_id = ?) AND tg_message_id IN (${placeholders}) AND deleted_at IS NULL
-      GROUP BY tg_message_id`).all(this.chatId, this.threadId, this.threadId, ...tgMessageIds) as Array<{ tg: number; id: number }>;
+      GROUP BY tg_message_id`,
+      )
+      .all(
+        this.chatId,
+        this.threadId,
+        this.threadId,
+        ...tgMessageIds,
+      ) as Array<{ tg: number; id: number }>;
     return new Map(rows.map((row) => [row.tg, row.id]));
   }
 
-  claimBackground(afterId: number, throughId: number, max: number, turnId: string): { rows: ArchivedMessage[]; omitted: number } {
+  claimBackground(
+    afterId: number,
+    throughId: number,
+    max: number,
+    turnId: string,
+  ): { rows: ArchivedMessage[]; omitted: number } {
     return this.db.transaction(() => {
-      const all = this.db.prepare(`SELECT ${messageQuery()},media_parts_json AS mediaPartsJson FROM messages WHERE chat_id = ?
+      const all = this.db
+        .prepare(
+          `SELECT ${messageQuery()},media_parts_json AS mediaPartsJson FROM messages WHERE chat_id = ?
         AND (? IS NULL OR message_thread_id = ?) AND id > ? AND id <= ? AND claimed_at IS NULL
         AND direction='in' AND from_kind='user' AND triggered=0 AND deleted_at IS NULL AND NOT EXISTS (
           SELECT 1 FROM principals p WHERE p.kind='user' AND p.tg_id=messages.from_user_id AND p.role='blocked'
-        ) ORDER BY id`).all(this.chatId, this.threadId, this.threadId, afterId, throughId) as ArchivedMessage[];
+        ) ORDER BY id`,
+        )
+        .all(
+          this.chatId,
+          this.threadId,
+          this.threadId,
+          afterId,
+          throughId,
+        ) as ArchivedMessage[];
       for (const row of all) withMedia(row);
       const rows = max === 0 ? [] : all.slice(-max);
       if (rows.length) {
-        const placeholders = rows.map(() => '?').join(',');
-        this.db.prepare(`UPDATE messages SET claimed_at=?,claimed_by_turn=? WHERE chat_id=? AND claimed_at IS NULL AND id IN (${placeholders})`).run(Date.now(), turnId, this.chatId, ...rows.map((row) => row.id));
+        const placeholders = rows.map(() => "?").join(",");
+        this.db
+          .prepare(
+            `UPDATE messages SET claimed_at=?,claimed_by_turn=? WHERE chat_id=? AND claimed_at IS NULL AND id IN (${placeholders})`,
+          )
+          .run(Date.now(), turnId, this.chatId, ...rows.map((row) => row.id));
       }
       return { rows, omitted: all.length - rows.length };
     })();
   }
 
   releaseClaims(turnId: string): number {
-    return this.db.prepare('UPDATE messages SET claimed_at=NULL,claimed_by_turn=NULL WHERE claimed_by_turn=?').run(turnId).changes;
+    return this.db
+      .prepare(
+        "UPDATE messages SET claimed_at=NULL,claimed_by_turn=NULL WHERE claimed_by_turn=?",
+      )
+      .run(turnId).changes;
   }
 }

@@ -1,4 +1,4 @@
-import sharp from 'sharp';
+import sharp from "sharp";
 
 export interface NormalizedImage {
   path: string;
@@ -20,9 +20,25 @@ export interface NormalizedImage {
  * 输入输出同名，sharp 直接抛 `Cannot use same file for input and output`，catch 把它记成
  * 「处理失败」，多模态输入 100% 不可用。
  */
-export async function normalizeImage(source: Buffer | string, target: string, maxEdge: number): Promise<NormalizedImage> {
-  const info = await sharp(source).rotate()
-    .resize({ width: maxEdge, height: maxEdge, fit: 'inside', withoutEnlargement: true })
-    .jpeg({ quality: 85 }).toFile(target);
-  return { path: target, bytes: info.size, width: info.width, height: info.height };
+export async function normalizeImage(
+  source: Buffer | string,
+  target: string,
+  maxEdge: number,
+): Promise<NormalizedImage> {
+  const info = await sharp(source)
+    .rotate()
+    .resize({
+      width: maxEdge,
+      height: maxEdge,
+      fit: "inside",
+      withoutEnlargement: true,
+    })
+    .jpeg({ quality: 85 })
+    .toFile(target);
+  return {
+    path: target,
+    bytes: info.size,
+    width: info.width,
+    height: info.height,
+  };
 }

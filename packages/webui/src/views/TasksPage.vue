@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import TasksCard from '../components/tasks/TasksCard.vue';
-import SchedulesCard from '../components/tasks/SchedulesCard.vue';
-import ApprovalsCard from '../components/tasks/ApprovalsCard.vue';
-import type { ChatOption } from '../components/tasks/types';
+import TasksCard from "../components/tasks/TasksCard.vue";
+import SchedulesCard from "../components/tasks/SchedulesCard.vue";
+import ApprovalsCard from "../components/tasks/ApprovalsCard.vue";
+import type { ChatOption } from "../components/tasks/types";
 
 /**
  * 「任务与审批」页 —— 三张卡竖排：任务 → 定时任务 → 审批。
@@ -27,17 +27,33 @@ defineProps<{
  * 不切到这一页也得看得见）。
  * `open-turn` / `open-trace`：任务详情里那两个跳转的出口，B2 接上行内入口后就通了。
  */
-defineEmits<{ 'approvals-changed': []; 'open-turn': [string]; 'open-trace': [string] }>();
+defineEmits<{
+  "approvals-changed": [];
+  "open-turn": [string];
+  "open-trace": [string];
+}>();
 </script>
 
 <template>
   <section class="surface page-surface">
-    <header><div><p class="eyebrow">WORK QUEUE</p><h2>任务与审批</h2><p>在此处查看子 agent 任务、管理定时任务、审批高风险调用</p></div></header>
+    <header>
+      <div>
+        <p class="eyebrow">WORK QUEUE</p>
+        <h2>任务与审批</h2>
+        <p>在此处查看子 agent 任务、管理定时任务、审批高风险调用</p>
+      </div>
+    </header>
     <div class="card-stack">
-      <TasksCard :tick="tick" @open-turn="$emit('open-turn', $event)" @open-trace="$emit('open-trace', $event)" />
+      <TasksCard
+        :tick="tick"
+        @open-turn="$emit('open-turn', $event)"
+        @open-trace="$emit('open-trace', $event)"
+      />
       <SchedulesCard :tick="tick" :chats="chats" />
       <ApprovalsCard
-        :tick="tick" :approval-rules-empty="approvalRulesEmpty" :conditional-tool-names="conditionalToolNames"
+        :tick="tick"
+        :approval-rules-empty="approvalRulesEmpty"
+        :conditional-tool-names="conditionalToolNames"
         @changed="$emit('approvals-changed')"
       />
     </div>

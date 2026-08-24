@@ -1,8 +1,8 @@
-import { createHash } from 'node:crypto';
-import type { Sqlite } from './database.js';
+import { createHash } from "node:crypto";
+import type { Sqlite } from "./database.js";
 
-export type CustomToolRuntime = 'bash' | 'python';
-export type CustomToolScope = 'chat' | 'global';
+export type CustomToolRuntime = "bash" | "python";
+export type CustomToolScope = "chat" | "global";
 
 export interface CustomTool {
   name: string;
@@ -11,7 +11,7 @@ export interface CustomTool {
   paramsJson: string;
   runtime: CustomToolRuntime;
   body: string;
-  minRole: 'trusted' | 'owner';
+  minRole: "trusted" | "owner";
   scope: CustomToolScope;
   ownerChatId: string | null;
   timeoutMs: number | null;
@@ -26,9 +26,17 @@ export interface CustomTool {
 }
 
 export interface NewCustomTool {
-  name: string; description: string; paramsJson: string; runtime: CustomToolRuntime; body: string;
-  minRole: 'trusted' | 'owner'; scope: CustomToolScope; ownerChatId: string | null; timeoutMs: number | null;
-  createdBy: string; createdTurn: string | null;
+  name: string;
+  description: string;
+  paramsJson: string;
+  runtime: CustomToolRuntime;
+  body: string;
+  minRole: "trusted" | "owner";
+  scope: CustomToolScope;
+  ownerChatId: string | null;
+  timeoutMs: number | null;
+  createdBy: string;
+  createdTurn: string | null;
 }
 
 const COLUMNS = `name,description,params_json AS paramsJson,runtime,body,min_role AS minRole,scope,owner_chat_id AS ownerChatId,
@@ -39,8 +47,16 @@ const COLUMNS = `name,description,params_json AS paramsJson,runtime,body,min_rol
  * 只覆盖**参与执行语义**的那几列。描述与 minRole 不进哈希：改描述不该让本轮正在跑的调用失败，
  * 而 minRole 的变化由 `admit()` 每次重新判，不需要靠哈希兜。
  */
-export function customToolHash(input: Pick<NewCustomTool, 'paramsJson' | 'runtime' | 'body' | 'timeoutMs'>): string {
-  return createHash('sha256').update([input.runtime, input.timeoutMs ?? '', input.paramsJson, input.body].join('\0')).digest('hex');
+export function customToolHash(
+  input: Pick<NewCustomTool, "paramsJson" | "runtime" | "body" | "timeoutMs">,
+): string {
+  return createHash("sha256")
+    .update(
+      [input.runtime, input.timeoutMs ?? "", input.paramsJson, input.body].join(
+        "\0",
+      ),
+    )
+    .digest("hex");
 }
 
 /**
@@ -56,19 +72,32 @@ export class CustomToolRepository {
   constructor(private readonly db: Sqlite) {}
 
   get(name: string): CustomTool | null {
-    return (this.db.prepare(`SELECT ${COLUMNS} FROM custom_tools WHERE name=?`).get(name) as CustomTool | undefined) ?? null;
+    return (
+      (this.db
+        .prepare(`SELECT ${COLUMNS} FROM custom_tools WHERE name=?`)
+        .get(name) as CustomTool | undefined) ?? null
+    );
   }
 
   list(): CustomTool[] {
-    return this.db.prepare(`SELECT ${COLUMNS} FROM custom_tools ORDER BY name`).all() as CustomTool[];
+    return this.db
+      .prepare(`SELECT ${COLUMNS} FROM custom_tools ORDER BY name`)
+      .all() as CustomTool[];
   }
 
   listEnabled(): CustomTool[] {
-    return this.db.prepare(`SELECT ${COLUMNS} FROM custom_tools WHERE enabled=1 ORDER BY name`).all() as CustomTool[];
+    return this.db
+      .prepare(
+        `SELECT ${COLUMNS} FROM custom_tools WHERE enabled=1 ORDER BY name`,
+      )
+      .all() as CustomTool[];
   }
 
   count(): number {
-    return this.db.prepare('SELECT COUNT(*) FROM custom_tools').pluck().get() as number;
+    return this.db
+      .prepare("SELECT COUNT(*) FROM custom_tools")
+      .pluck()
+      .get() as number;
   }
 
   /**
@@ -77,17 +106,30 @@ export class CustomToolRepository {
    * **条数不能省**：删掉一行不会推高 `MAX(updated_at)`，只看时间戳的话一次删除永远同步不过去。
    */
   fingerprint(): string {
-    const row = this.db.prepare('SELECT COUNT(*) AS n, COALESCE(MAX(updated_at),0) AS at FROM custom_tools').get() as { n: number; at: number };
+    const row = this.db
+      .prepare(
+        "SELECT COUNT(*) AS n, COALESCE(MAX(updated_at),0) AS at FROM custom_tools",
+      )
+      .get() as { n: number; at: number };
     return `${row.n}:${row.at}`;
   }
 
   /** 改了正文 / 参数 / runtime / 超时就打回未启用，并清掉复审时间戳。 */
-  upsert(input: NewCustomTool): { tool: CustomTool; created: boolean; reset: boolean } {
+  upsert(input: NewCustomTool): {
+    tool: CustomTool;
+    created: boolean;
+    reset: boolean;
+  } {
     const now = Date.now();
     const hash = customToolHash(input);
     const existing = this.get(input.name);
-    const reset = existing !== null && existing.definitionHash !== hash && existing.enabled === 1;
-    this.db.prepare(`INSERT INTO custom_tools(name,description,params_json,runtime,body,min_role,scope,owner_chat_id,timeout_ms,
+    const reset =
+      existing !== null &&
+      existing.definitionHash !== hash &&
+      existing.enabled === 1;
+    this.db
+      .prepare(
+        `INSERT INTO custom_tools(name,description,params_json,runtime,body,min_role,scope,owner_chat_id,timeout_ms,
         enabled,definition_hash,created_by,created_turn,reviewed_at,last_error,created_at,updated_at)
       VALUES (@name,@description,@paramsJson,@runtime,@body,@minRole,@scope,@ownerChatId,@timeoutMs,0,@hash,@createdBy,@createdTurn,NULL,NULL,@now,@now)
       ON CONFLICT(name) DO UPDATE SET description=excluded.description,params_json=excluded.params_json,runtime=excluded.runtime,
@@ -95,22 +137,34 @@ export class CustomToolRepository {
         timeout_ms=excluded.timeout_ms,last_error=NULL,updated_at=excluded.updated_at,
         enabled=CASE WHEN custom_tools.definition_hash=excluded.definition_hash THEN custom_tools.enabled ELSE 0 END,
         reviewed_at=CASE WHEN custom_tools.definition_hash=excluded.definition_hash THEN custom_tools.reviewed_at ELSE NULL END,
-        definition_hash=excluded.definition_hash`)
+        definition_hash=excluded.definition_hash`,
+      )
       .run({ ...input, hash, now });
     return { tool: this.get(input.name)!, created: existing === null, reset };
   }
 
   /** 启停由运维走。启用顺手盖 `reviewed_at` —— 「有人看过这段正文」就是这个时间戳的全部含义。 */
   setEnabled(name: string, enabled: boolean): boolean {
-    return this.db.prepare('UPDATE custom_tools SET enabled=?,reviewed_at=CASE WHEN ? THEN ? ELSE reviewed_at END,updated_at=? WHERE name=?')
-      .run(enabled ? 1 : 0, enabled ? 1 : 0, Date.now(), Date.now(), name).changes === 1;
+    return (
+      this.db
+        .prepare(
+          "UPDATE custom_tools SET enabled=?,reviewed_at=CASE WHEN ? THEN ? ELSE reviewed_at END,updated_at=? WHERE name=?",
+        )
+        .run(enabled ? 1 : 0, enabled ? 1 : 0, Date.now(), Date.now(), name)
+        .changes === 1
+    );
   }
 
   markError(name: string, error: string | null): void {
-    this.db.prepare('UPDATE custom_tools SET last_error=?,updated_at=? WHERE name=?').run(error, Date.now(), name);
+    this.db
+      .prepare("UPDATE custom_tools SET last_error=?,updated_at=? WHERE name=?")
+      .run(error, Date.now(), name);
   }
 
   remove(name: string): boolean {
-    return this.db.prepare('DELETE FROM custom_tools WHERE name=?').run(name).changes === 1;
+    return (
+      this.db.prepare("DELETE FROM custom_tools WHERE name=?").run(name)
+        .changes === 1
+    );
   }
 }

@@ -1,8 +1,11 @@
-import { estimateStructureTokens, type RuntimeTurnContext } from '@luoli/shared';
-import type { UsageLedger } from '../ledger/usage.js';
-import type { QuotaGuard, QuotaReservation } from '../ledger/quota.js';
-import type { LogSink } from '../log/sink.js';
-import type { ContextEngine } from '../context/engine.js';
+import {
+  estimateStructureTokens,
+  type RuntimeTurnContext,
+} from "@luoli/shared";
+import type { UsageLedger } from "../ledger/usage.js";
+import type { QuotaGuard, QuotaReservation } from "../ledger/quota.js";
+import type { LogSink } from "../log/sink.js";
+import type { ContextEngine } from "../context/engine.js";
 
 /**
  * 一步模型调用结束时要做的四件事，拆成四个可单独喂假 step 的观察者。
@@ -20,11 +23,23 @@ export interface StepFacts {
   /** 这一步**实际出力**的模型 id。链内 fallback 换的是模型不是别名，所以它不一定是链首。 */
   servedModelId: string;
   /** `inputTokens` 是 AI SDK 的 `inputTokens.total` —— **超集**，含 cacheRead。计价走 `noCacheTokens`。 */
-  usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; noCacheTokens?: number | undefined; reasoningTokens: number };
+  usage: {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheWriteTokens: number;
+    noCacheTokens?: number | undefined;
+    reasoningTokens: number;
+  };
   latencyMs: number;
   finishReason: string | undefined;
   toolCalls: Array<{ toolCallId: string; toolName: string; input: unknown }>;
-  toolResults: Array<{ toolCallId: string; toolName: string; part: unknown; preview: string }>;
+  toolResults: Array<{
+    toolCallId: string;
+    toolName: string;
+    part: unknown;
+    preview: string;
+  }>;
   /** **真正发出去的那份请求体。** 校准的两端必须是同一个东西，见 `calibrate`。 */
   requestBody: unknown;
 }
@@ -40,13 +55,20 @@ export interface PricedModel {
 }
 
 /** `record()` 算出来、后面两个观察者都要读的那三件事。 */
-export interface StepResolution { info: PricedModel; alias: string; cost: number }
+export interface StepResolution {
+  info: PricedModel;
+  alias: string;
+  cost: number;
+}
 
 export interface StepObserverDependencies {
   ledger: UsageLedger;
-  registry: { infoByModelId(modelId: string): PricedModel | null; aliasOf(modelId: string, prefer?: string): string | null };
-  context: Pick<ContextEngine, 'appendDelta' | 'calibrate'>;
-  log: Pick<LogSink, 'publish' | 'event'>;
+  registry: {
+    infoByModelId(modelId: string): PricedModel | null;
+    aliasOf(modelId: string, prefer?: string): string | null;
+  };
+  context: Pick<ContextEngine, "appendDelta" | "calibrate">;
+  log: Pick<LogSink, "publish" | "event">;
   quota?: QuotaGuard | undefined;
   reservation?: QuotaReservation | null;
   tokenRatioAlpha: number;
@@ -67,38 +89,91 @@ export interface StepObservers {
   calibrate(facts: StepFacts): void;
 }
 
-export function createStepObservers(turn: RuntimeTurnContext, dependencies: StepObserverDependencies): StepObservers {
+export function createStepObservers(
+  turn: RuntimeTurnContext,
+  dependencies: StepObserverDependencies,
+): StepObservers {
   return {
     record(facts) {
-      const info = dependencies.registry.infoByModelId(facts.servedModelId) ?? dependencies.fallbackInfo;
+      const info =
+        dependencies.registry.infoByModelId(facts.servedModelId) ??
+        dependencies.fallbackInfo;
       // 按别名分组的用量报表要的是**别名**，而链内 fallback 换的是模型：按「是不是链首」判会把
       // 第二个候选记成 low，而它可能根本不是降档（docs/20 · W-LEDGER-01）。
-      const alias = dependencies.registry.aliasOf(facts.servedModelId, dependencies.aliasForStep(facts.stepNumber)) ?? 'unknown';
-      const cost = dependencies.ledger.record({ turnId: turn.turnId, chatId: turn.chatId, userId: turn.initiatorUserId,
-        providerId: info.providerId, modelId: info.modelId, modelAlias: alias,
-        inputTokens: facts.usage.inputTokens, outputTokens: facts.usage.outputTokens,
-        cacheReadTokens: facts.usage.cacheReadTokens, cacheWriteTokens: facts.usage.cacheWriteTokens,
+      const alias =
+        dependencies.registry.aliasOf(
+          facts.servedModelId,
+          dependencies.aliasForStep(facts.stepNumber),
+        ) ?? "unknown";
+      const cost = dependencies.ledger.record({
+        turnId: turn.turnId,
+        chatId: turn.chatId,
+        userId: turn.initiatorUserId,
+        providerId: info.providerId,
+        modelId: info.modelId,
+        modelAlias: alias,
+        inputTokens: facts.usage.inputTokens,
+        outputTokens: facts.usage.outputTokens,
+        cacheReadTokens: facts.usage.cacheReadTokens,
+        cacheWriteTokens: facts.usage.cacheWriteTokens,
         noCacheTokens: facts.usage.noCacheTokens,
-        reasoningTokens: facts.usage.reasoningTokens, priceIn: info.priceIn, priceOut: info.priceOut,
-        priceCacheRead: info.priceCacheRead, priceCacheWrite: info.priceCacheWrite, latencyMs: facts.latencyMs,
-        ...(facts.finishReason ? { finishReason: facts.finishReason } : {}), ok: true });
-      if (dependencies.quota && dependencies.reservation) dependencies.quota.commit(dependencies.reservation, cost);
+        reasoningTokens: facts.usage.reasoningTokens,
+        priceIn: info.priceIn,
+        priceOut: info.priceOut,
+        priceCacheRead: info.priceCacheRead,
+        priceCacheWrite: info.priceCacheWrite,
+        latencyMs: facts.latencyMs,
+        ...(facts.finishReason ? { finishReason: facts.finishReason } : {}),
+        ok: true,
+      });
+      if (dependencies.quota && dependencies.reservation)
+        dependencies.quota.commit(dependencies.reservation, cost);
       return { info, alias, cost };
     },
     broadcast(facts, resolved) {
-      dependencies.log.publish('usage', { turnId: turn.turnId, model: resolved.info.modelId, alias: dependencies.aliasForStep(facts.stepNumber),
-        in: facts.usage.inputTokens, out: facts.usage.outputTokens, costUsd: resolved.cost });
-      if (facts.toolCalls.length) dependencies.log.publish('turn.progress', { turnId: turn.turnId, phase: 'tools', step: facts.stepNumber, note: facts.toolCalls.map((call) => call.toolName).join(', ') });
+      dependencies.log.publish("usage", {
+        turnId: turn.turnId,
+        model: resolved.info.modelId,
+        alias: dependencies.aliasForStep(facts.stepNumber),
+        in: facts.usage.inputTokens,
+        out: facts.usage.outputTokens,
+        costUsd: resolved.cost,
+      });
+      if (facts.toolCalls.length)
+        dependencies.log.publish("turn.progress", {
+          turnId: turn.turnId,
+          phase: "tools",
+          step: facts.stepNumber,
+          note: facts.toolCalls.map((call) => call.toolName).join(", "),
+        });
     },
     appendContext(facts) {
       for (const call of facts.toolCalls) {
-        dependencies.context.appendDelta(turn, { id: `call:${call.toolCallId}`, role: 'assistant', origin: 'tool_call',
-          parts: [{ type: 'tool-call', toolCallId: call.toolCallId, toolName: call.toolName, input: call.input }],
-          textPreview: `${call.toolName}(${JSON.stringify(call.input).slice(0, 180)})`, pruneLevel: 2 });
+        dependencies.context.appendDelta(turn, {
+          id: `call:${call.toolCallId}`,
+          role: "assistant",
+          origin: "tool_call",
+          parts: [
+            {
+              type: "tool-call",
+              toolCallId: call.toolCallId,
+              toolName: call.toolName,
+              input: call.input,
+            },
+          ],
+          textPreview: `${call.toolName}(${JSON.stringify(call.input).slice(0, 180)})`,
+          pruneLevel: 2,
+        });
       }
       for (const result of facts.toolResults) {
-        dependencies.context.appendDelta(turn, { id: `result:${result.toolCallId}`, role: 'tool', origin: 'tool_result',
-          parts: [result.part], textPreview: result.preview, pruneLevel: 1 });
+        dependencies.context.appendDelta(turn, {
+          id: `result:${result.toolCallId}`,
+          role: "tool",
+          origin: "tool_result",
+          parts: [result.part],
+          textPreview: result.preview,
+          pruneLevel: 1,
+        });
       }
     },
     /**
@@ -109,13 +184,28 @@ export function createStepObservers(turn: RuntimeTurnContext, dependencies: Step
      * 请求体来估：同一把尺子量同一段内容，得到的才是分词器差异本身。
      */
     calibrate(facts) {
-      const estimatedInput = facts.requestBody === undefined ? 0 : estimateStructureTokens(facts.requestBody);
+      const estimatedInput =
+        facts.requestBody === undefined
+          ? 0
+          : estimateStructureTokens(facts.requestBody);
       const realInput = facts.usage.inputTokens;
       // 小样本的相对误差被常数项主导，校准它只会引入噪声。
       if (estimatedInput < 200 || realInput <= 0) return;
-      const ratio = dependencies.context.calibrate(turn.key, realInput, estimatedInput, dependencies.tokenRatioAlpha);
+      const ratio = dependencies.context.calibrate(
+        turn.key,
+        realInput,
+        estimatedInput,
+        dependencies.tokenRatioAlpha,
+      );
       if (Math.abs(realInput / estimatedInput - 1) > 0.2) {
-        dependencies.log.event({ level: 'warn', kind: 'ctx.token_calibration', summary: `token ratio ${ratio.toFixed(3)}`, traceId: turn.turnId, key: turn.key, data: { estimatedInput, realInput, ratio } });
+        dependencies.log.event({
+          level: "warn",
+          kind: "ctx.token_calibration",
+          summary: `token ratio ${ratio.toFixed(3)}`,
+          traceId: turn.turnId,
+          key: turn.key,
+          data: { estimatedInput, realInput, ratio },
+        });
       }
     },
   };

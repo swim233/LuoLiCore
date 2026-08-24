@@ -1,12 +1,19 @@
-import { appendFileSync, existsSync, mkdirSync, renameSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
-import { ulid } from 'ulid';
-import type { OperationsRepository } from '@luoli/db';
-import type { EventBus } from '../events.js';
-import { redact } from '../secrets.js';
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  renameSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { ulid } from "ulid";
+import type { OperationsRepository } from "@luoli/db";
+import type { EventBus } from "../events.js";
+import { redact } from "../secrets.js";
 
 export interface LogEvent {
-  level: 'debug' | 'info' | 'warn' | 'error';
+  level: "debug" | "info" | "warn" | "error";
   kind: string;
   summary: string;
   traceId?: string;
@@ -20,20 +27,28 @@ export interface LogEvent {
 }
 
 const CATEGORY_BY_PREFIX: Record<string, string> = {
-  model: 'model', tool: 'tool', sandbox: 'tool', approval: 'tool', system: 'system',
-  config: 'system', maintenance: 'system', webui: 'system', plugin: 'system', mcp: 'system',
+  model: "model",
+  tool: "tool",
+  sandbox: "tool",
+  approval: "tool",
+  system: "system",
+  config: "system",
+  maintenance: "system",
+  webui: "system",
+  plugin: "system",
+  mcp: "system",
 };
 const LEVEL_RANK = { debug: 0, info: 1, warn: 2, error: 3 } as const;
 /** 广播阈值与合并窗口刻意不做成配置项：这两个值一旦调松（广播 debug、或把窗口调到 0），
  *  「每来一条事件前端重拉一次」就会变成自我 DDoS（docs/21 §3 · G-SSE-01）。 */
-const BROADCAST_MIN_LEVEL: LogEvent['level'] = 'info';
+const BROADCAST_MIN_LEVEL: LogEvent["level"] = "info";
 const COALESCE_MS = 200;
 
 export interface LogSinkOptions {
-  level?: LogEvent['level'];
+  level?: LogEvent["level"];
   maxFileMb?: number;
   bodyMaxBytes?: number;
-  console?: 'pretty' | 'json' | 'off';
+  console?: "pretty" | "json" | "off";
   events?: EventBus;
 }
 
@@ -42,7 +57,7 @@ export interface LogSinkOptions {
 export interface LogBroadcast {
   id: number;
   ts: number;
-  level: LogEvent['level'];
+  level: LogEvent["level"];
   kind: string;
   traceId: string | null;
   summary: string;
@@ -59,7 +74,7 @@ export interface LogBroadcast {
  */
 export interface SpanOverride {
   summary?: string;
-  level?: LogEvent['level'];
+  level?: LogEvent["level"];
 }
 
 export interface LogSpan {
@@ -68,25 +83,44 @@ export interface LogSpan {
 }
 
 export class LogSink {
-  #level: LogEvent['level'];
+  #level: LogEvent["level"];
   readonly #maxFileBytes: number;
   readonly #bodyMaxBytes: number;
-  readonly #console: 'pretty' | 'json' | 'off';
+  readonly #console: "pretty" | "json" | "off";
   readonly #events: EventBus | null;
-  readonly #pending = new Map<string, { timer: ReturnType<typeof setTimeout>; event: LogBroadcast; merged: number }>();
+  readonly #pending = new Map<
+    string,
+    {
+      timer: ReturnType<typeof setTimeout>;
+      event: LogBroadcast;
+      merged: number;
+    }
+  >();
   readonly #lastBroadcast = new Map<string, number>();
-  readonly #files = new Map<string, { bytes: number; buffer: string; timer: ReturnType<typeof setTimeout> | null }>();
+  readonly #files = new Map<
+    string,
+    {
+      bytes: number;
+      buffer: string;
+      timer: ReturnType<typeof setTimeout> | null;
+    }
+  >();
   private secrets: string[];
-  constructor(private readonly repository: OperationsRepository, private readonly directory: string, secrets: string[] = [], options: LogSinkOptions = {}) {
+  constructor(
+    private readonly repository: OperationsRepository,
+    private readonly directory: string,
+    secrets: string[] = [],
+    options: LogSinkOptions = {},
+  ) {
     this.secrets = secrets;
-    this.#level = options.level ?? 'debug';
+    this.#level = options.level ?? "debug";
     this.#maxFileBytes = (options.maxFileMb ?? 128) * 1024 * 1024;
     this.#bodyMaxBytes = options.bodyMaxBytes ?? 262_144;
-    this.#console = options.console ?? 'off';
+    this.#console = options.console ?? "off";
     this.#events = options.events ?? null;
   }
 
-  setLevel(level: LogEvent['level']): void {
+  setLevel(level: LogEvent["level"]): void {
     this.#level = level;
   }
   /** `logs.redactPatterns`：追加到内置脱敏规则上的正则源串。热更新时整份换掉。 */
@@ -104,19 +138,38 @@ export class LogSink {
   #reporting = false;
 
   #reportWriteFailure(error: unknown): void {
-    try { process.stderr.write(`[log] 写入失败：${error instanceof Error ? error.message : String(error)}\n`); } catch { /* stderr 也不可用 */ }
+    try {
+      process.stderr.write(
+        `[log] 写入失败：${error instanceof Error ? error.message : String(error)}\n`,
+      );
+    } catch {
+      /* stderr 也不可用 */
+    }
     if (this.#reporting) return;
     this.#reporting = true;
-    try { this.onWriteFailure?.(error); } catch { /* 告警链路自己坏了也不能再炸一次 */ }
-    finally { this.#reporting = false; }
+    try {
+      this.onWriteFailure?.(error);
+    } catch {
+      /* 告警链路自己坏了也不能再炸一次 */
+    } finally {
+      this.#reporting = false;
+    }
   }
 
-  #file(path: string): { bytes: number; buffer: string; timer: ReturnType<typeof setTimeout> | null } {
+  #file(path: string): {
+    bytes: number;
+    buffer: string;
+    timer: ReturnType<typeof setTimeout> | null;
+  } {
     let state = this.#files.get(path);
     if (!state) {
       let bytes = 0;
-      try { bytes = existsSync(path) ? statSync(path).size : 0; } catch { /* 首次写时重试 */ }
-      state = { bytes, buffer: '', timer: null };
+      try {
+        bytes = existsSync(path) ? statSync(path).size : 0;
+      } catch {
+        /* 首次写时重试 */
+      }
+      state = { bytes, buffer: "", timer: null };
       this.#files.set(path, state);
     }
     return state;
@@ -130,10 +183,18 @@ export class LogSink {
   #flushFile(path: string): void {
     const state = this.#files.get(path);
     if (!state?.buffer) return;
-    if (state.timer) { clearTimeout(state.timer); state.timer = null; }
-    const content = state.buffer; state.buffer = '';
-    try { appendFileSync(path, content, { mode: 0o600 }); state.bytes += Buffer.byteLength(content); }
-    catch (error) { this.#reportWriteFailure(error); }
+    if (state.timer) {
+      clearTimeout(state.timer);
+      state.timer = null;
+    }
+    const content = state.buffer;
+    state.buffer = "";
+    try {
+      appendFileSync(path, content, { mode: 0o600 });
+      state.bytes += Buffer.byteLength(content);
+    } catch (error) {
+      this.#reportWriteFailure(error);
+    }
   }
 
   #writeLine(path: string, line: string, urgent: boolean): void {
@@ -141,16 +202,27 @@ export class LogSink {
       mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
       let state = this.#file(path);
       const bytes = Buffer.byteLength(line);
-      if (state.bytes + Buffer.byteLength(state.buffer) + bytes >= this.#maxFileBytes) {
+      if (
+        state.bytes + Buffer.byteLength(state.buffer) + bytes >=
+        this.#maxFileBytes
+      ) {
         this.#flushFile(path);
-        let suffix = 1; while (existsSync(`${path}.${suffix}`)) suffix += 1;
+        let suffix = 1;
+        while (existsSync(`${path}.${suffix}`)) suffix += 1;
         if (existsSync(path)) renameSync(path, `${path}.${suffix}`);
-        state = { bytes: 0, buffer: '', timer: null }; this.#files.set(path, state);
+        state = { bytes: 0, buffer: "", timer: null };
+        this.#files.set(path, state);
       }
       state.buffer += line;
-      if (urgent || Buffer.byteLength(state.buffer) >= 65_536) this.#flushFile(path);
-      else if (!state.timer) { state.timer = setTimeout(() => this.#flushFile(path), 200); state.timer.unref?.(); }
-    } catch (error) { this.#reportWriteFailure(error); }
+      if (urgent || Buffer.byteLength(state.buffer) >= 65_536)
+        this.#flushFile(path);
+      else if (!state.timer) {
+        state.timer = setTimeout(() => this.#flushFile(path), 200);
+        state.timer.unref?.();
+      }
+    } catch (error) {
+      this.#reportWriteFailure(error);
+    }
   }
 
   /** 结构化事件（`turn.*` / `usage` / `quota` / `task.updated`）与日志是同一条观测流，
@@ -163,17 +235,35 @@ export class LogSink {
   /** 同一 `kind` 在 COALESCE_MS 内只留最后一条，并带上被合并的条数：一次工具风暴里
    *  `tool.call` 能在几十毫秒内来上百条，不合并的话前端每条都要重拉一次数据。 */
   #broadcast(event: LogBroadcast): void {
-    if (!this.#events || LEVEL_RANK[event.level] < LEVEL_RANK[BROADCAST_MIN_LEVEL]) return;
+    if (
+      !this.#events ||
+      LEVEL_RANK[event.level] < LEVEL_RANK[BROADCAST_MIN_LEVEL]
+    )
+      return;
     const pending = this.#pending.get(event.kind);
-    if (pending) { pending.event = event; pending.merged += 1; return; }
-    const wait = COALESCE_MS - (Date.now() - (this.#lastBroadcast.get(event.kind) ?? 0));
-    if (wait <= 0) { this.#lastBroadcast.set(event.kind, Date.now()); this.#events.emit('log', event); return; }
+    if (pending) {
+      pending.event = event;
+      pending.merged += 1;
+      return;
+    }
+    const wait =
+      COALESCE_MS - (Date.now() - (this.#lastBroadcast.get(event.kind) ?? 0));
+    if (wait <= 0) {
+      this.#lastBroadcast.set(event.kind, Date.now());
+      this.#events.emit("log", event);
+      return;
+    }
     const timer = setTimeout(() => {
       const entry = this.#pending.get(event.kind);
       this.#pending.delete(event.kind);
       if (!entry) return;
       this.#lastBroadcast.set(event.kind, Date.now());
-      this.#events?.emit('log', entry.merged > 1 ? { ...entry.event, merged: entry.merged } : entry.event);
+      this.#events?.emit(
+        "log",
+        entry.merged > 1
+          ? { ...entry.event, merged: entry.merged }
+          : entry.event,
+      );
     }, wait);
     // 尾部那一条不该把进程留住：CLI 与测试里 LogSink 常常是最后一个活着的句柄。
     timer.unref?.();
@@ -190,28 +280,46 @@ export class LogSink {
   event(input: LogEvent): number {
     if (LEVEL_RANK[input.level] < LEVEL_RANK[this.#level]) return 0;
     const safe = redact(input, this.secrets, this.redactPatterns);
-    const prefix = input.kind.split('.')[0] ?? 'turn';
-    const category = CATEGORY_BY_PREFIX[prefix] ?? 'turn';
+    const prefix = input.kind.split(".")[0] ?? "turn";
+    const category = CATEGORY_BY_PREFIX[prefix] ?? "turn";
     const day = new Date().toISOString().slice(0, 10);
     let data = safe.data;
     let fileRef: string | undefined;
     if (data !== undefined) {
       const serialized = JSON.stringify(data);
       if (Buffer.byteLength(serialized) > this.#bodyMaxBytes) {
-        fileRef = join(day, 'blobs', `${Date.now()}-${ulid()}.json`);
+        fileRef = join(day, "blobs", `${Date.now()}-${ulid()}.json`);
         const blobPath = resolve(this.directory, fileRef);
-        try { mkdirSync(dirname(blobPath), { recursive: true, mode: 0o700 }); writeFileSync(blobPath, serialized, { mode: 0o600 }); }
-        catch (error) { this.#reportWriteFailure(error); fileRef = undefined; }
-        data = fileRef ? { fileRef, bytes: Buffer.byteLength(serialized) } : { omitted: true, bytes: Buffer.byteLength(serialized) };
+        try {
+          mkdirSync(dirname(blobPath), { recursive: true, mode: 0o700 });
+          writeFileSync(blobPath, serialized, { mode: 0o600 });
+        } catch (error) {
+          this.#reportWriteFailure(error);
+          fileRef = undefined;
+        }
+        data = fileRef
+          ? { fileRef, bytes: Buffer.byteLength(serialized) }
+          : { omitted: true, bytes: Buffer.byteLength(serialized) };
       }
     }
     const path = join(this.directory, day, `${category}.jsonl`);
     const stored = { ...safe, data };
     const ts = Date.now();
-    const line = JSON.stringify({ ts, ...stored, ...(fileRef ? { fileRef } : {}) });
-    this.#writeLine(path, `${line}\n`, input.level === 'error' || input.kind === 'system.crash');
-    if (this.#console === 'json') process.stdout.write(`${line}\n`);
-    else if (this.#console === 'pretty') process.stdout.write(`${new Date().toISOString()} ${input.level.toUpperCase()} ${input.kind} ${input.summary}\n`);
+    const line = JSON.stringify({
+      ts,
+      ...stored,
+      ...(fileRef ? { fileRef } : {}),
+    });
+    this.#writeLine(
+      path,
+      `${line}\n`,
+      input.level === "error" || input.kind === "system.crash",
+    );
+    if (this.#console === "json") process.stdout.write(`${line}\n`);
+    else if (this.#console === "pretty")
+      process.stdout.write(
+        `${new Date().toISOString()} ${input.level.toUpperCase()} ${input.kind} ${input.summary}\n`,
+      );
     // **入库失败一律不往外抛。** 这个方法的调用点全在 catch 块、`.catch()` 回调、以及
     // `main.ts` 的 crash handler 里 —— 让它抛等于把「日志写不进去」升级成「轮次失败」，
     // 再升级成「crash handler 自己抛，`process.exit(1)` 走不到」。关停竞态里这是必然发生的：
@@ -219,11 +327,25 @@ export class LogSink {
     // 已经跑过。同一个类里所有文件写早就走 `#reportWriteFailure` 了，只有这一行是裸的。
     // 返回 0 与「级别不够」那条同一个约定（本方法开头），调用方本来就不该拿它当真 id。
     let id: number;
-    try { id = this.repository.insertLog({ ...stored, ...(fileRef ? { fileRef } : {}) }); }
-    catch (error) { this.#reportWriteFailure(error); return 0; }
+    try {
+      id = this.repository.insertLog({
+        ...stored,
+        ...(fileRef ? { fileRef } : {}),
+      });
+    } catch (error) {
+      this.#reportWriteFailure(error);
+      return 0;
+    }
     // 广播必须在入库成功之后：前端拿这个 id 去 `/api/logs/:id` 拉详情，播一个 0 等于
     // 在日志页塞一条点不开的行。
-    this.#broadcast({ id, ts, level: input.level, kind: input.kind, traceId: input.traceId ?? null, summary: safe.summary });
+    this.#broadcast({
+      id,
+      ts,
+      level: input.level,
+      kind: input.kind,
+      traceId: input.traceId ?? null,
+      summary: safe.summary,
+    });
     return id;
   }
 
@@ -238,7 +360,7 @@ export class LogSink {
    *
    * `end()` 的第三个参数只改 `summary` / `level` 两**列**（载荷的合并契约一个字不动），见 `SpanOverride`。
    */
-  span(input: Omit<LogEvent, 'spanId'>): LogSpan {
+  span(input: Omit<LogEvent, "spanId">): LogSpan {
     const id = ulid();
     const started = performance.now();
     let ended = false;
@@ -247,25 +369,39 @@ export class LogSink {
       end: (data?: unknown, error?: unknown, override?: SpanOverride) => {
         if (ended) return;
         ended = true;
-        const level = override?.level ?? (error ? 'error' : input.level);
+        const level = override?.level ?? (error ? "error" : input.level);
         const merged = mergeSpanData(input.data, data, error);
-        this.event({ ...input, level, ...(override?.summary === undefined ? {} : { summary: override.summary }),
-          spanId: id, data: merged, durationMs: Math.round(performance.now() - started) });
+        this.event({
+          ...input,
+          level,
+          ...(override?.summary === undefined
+            ? {}
+            : { summary: override.summary }),
+          spanId: id,
+          data: merged,
+          durationMs: Math.round(performance.now() - started),
+        });
       },
     };
   }
 }
 
-const plain = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
+const plain = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
 
 /**
  * 非对象的结束值挂在 `result` 下而不是顶掉开始那份：调用方给的是字符串/数组时，
  * 合并没有意义，但开始时的上下文（工具参数、step 号）仍然是排障要看的东西。
  */
 function mergeSpanData(open: unknown, close: unknown, error: unknown): unknown {
-  const head = open === undefined ? undefined : plain(open) ? open : { context: open };
-  const tail = close === undefined ? undefined : plain(close) ? close : { result: close };
-  const failure = error === undefined ? undefined : { error: error instanceof Error ? error.message : String(error) };
+  const head =
+    open === undefined ? undefined : plain(open) ? open : { context: open };
+  const tail =
+    close === undefined ? undefined : plain(close) ? close : { result: close };
+  const failure =
+    error === undefined
+      ? undefined
+      : { error: error instanceof Error ? error.message : String(error) };
   if (!head && !tail && !failure) return undefined;
   return { ...(head ?? {}), ...(tail ?? {}), ...(failure ?? {}) };
 }

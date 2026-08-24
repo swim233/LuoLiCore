@@ -19,19 +19,19 @@
 export function slotsOf(text: string): string[] {
   const out: string[] = [];
   for (let at = 0; at < text.length; at += 1) {
-    if (text.startsWith('{{', at)) {
-      const end = text.indexOf('}}', at + 2);
+    if (text.startsWith("{{", at)) {
+      const end = text.indexOf("}}", at + 2);
       if (end < 0) break;
       out.push(text.slice(at, end + 2));
       at = end + 1;
       continue;
     }
-    if (!text.startsWith('${', at)) continue;
+    if (!text.startsWith("${", at)) continue;
     let depth = 0;
     let cursor = at + 1;
     for (; cursor < text.length; cursor += 1) {
-      if (text[cursor] === '{') depth += 1;
-      else if (text[cursor] === '}' && --depth === 0) break;
+      if (text[cursor] === "{") depth += 1;
+      else if (text[cursor] === "}" && --depth === 0) break;
     }
     // 括号不闭合（或者 `}` 藏在字符串里）就到此为止：宁可少认一个占位，也不要交出一段残句。
     if (depth !== 0) break;
@@ -41,8 +41,10 @@ export function slotsOf(text: string): string[] {
   return out;
 }
 
-const escapeRe = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-const countOf = (text: string, needle: string): number => (needle ? text.split(needle).length - 1 : 0);
+const escapeRe = (text: string): string =>
+  text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const countOf = (text: string, needle: string): number =>
+  needle ? text.split(needle).length - 1 : 0;
 
 /**
  * 把大括号内侧的空白收成记录里那个样子：`{{n}}` / `{{  n  }}` → `{{ n }}`。
@@ -53,10 +55,13 @@ const countOf = (text: string, needle: string): number => (needle ? text.split(n
 export function canonicalSlots(text: string, slots: readonly string[]): string {
   let out = text;
   for (const slot of new Set(slots)) {
-    const curly = slot.startsWith('{{');
+    const curly = slot.startsWith("{{");
     const inner = curly ? slot.slice(2, -2).trim() : slot.slice(2, -1).trim();
     if (!inner) continue;
-    const loose = new RegExp(`${curly ? '\\{\\{' : '\\$\\{'}\\s*${escapeRe(inner)}\\s*${curly ? '\\}\\}' : '\\}'}`, 'g');
+    const loose = new RegExp(
+      `${curly ? "\\{\\{" : "\\$\\{"}\\s*${escapeRe(inner)}\\s*${curly ? "\\}\\}" : "\\}"}`,
+      "g",
+    );
     out = out.replace(loose, slot);
   }
   return out;
@@ -69,9 +74,15 @@ export function canonicalSlots(text: string, slots: readonly string[]): string {
  * 这种一句话里同一个占位出现两次的，只留一个照样是坏的（第二处会变成字面量 `agents/.md`），
  * 而 `includes` 检查不出来。多写一个不算错 —— 那个表达式再算一次而已。
  */
-export function missingSlots(text: string, original: string, slots: readonly string[]): string[] {
+export function missingSlots(
+  text: string,
+  original: string,
+  slots: readonly string[],
+): string[] {
   const next = canonicalSlots(text, slots);
-  return [...new Set(slots)].filter((slot) => countOf(next, slot) < countOf(original, slot));
+  return [...new Set(slots)].filter(
+    (slot) => countOf(next, slot) < countOf(original, slot),
+  );
 }
 
 /**
@@ -81,11 +92,15 @@ export function missingSlots(text: string, original: string, slots: readonly str
  * `texts` 与 `values` 按**源码顺序**一一对应（插桩时一起传出来的），但替换是**按文本**做的：
  * 于是人把占位挪到句首、或者一句里同一个占位出现两次，都还对。
  */
-export function fillSlots(text: string, texts: readonly string[], values: readonly unknown[]): string {
+export function fillSlots(
+  text: string,
+  texts: readonly string[],
+  values: readonly unknown[],
+): string {
   let out = canonicalSlots(text, texts);
   for (const [index, slot] of texts.entries()) {
     if (index >= values.length) break;
-    out = out.split(slot).join(String(values[index] ?? ''));
+    out = out.split(slot).join(String(values[index] ?? ""));
   }
   return out;
 }

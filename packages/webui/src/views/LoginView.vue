@@ -1,15 +1,15 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue';
-import { useRouter, useRoute } from 'vue-router';
-import UiButton from '../ui/UiButton.vue';
-import { auth } from '../api/client';
+import { onMounted, ref } from "vue";
+import { useRouter, useRoute } from "vue-router";
+import UiButton from "../ui/UiButton.vue";
+import { auth } from "../api/client";
 
 const props = defineProps<{ setup?: boolean }>();
 const router = useRouter();
 const route = useRoute();
-const password = ref('');
-const token = ref(String(route.query.t ?? ''));
-const error = ref('');
+const password = ref("");
+const token = ref(String(route.query.t ?? ""));
+const error = ref("");
 const loading = ref(false);
 const exchanging = ref(false);
 
@@ -18,7 +18,7 @@ const exchanging = ref(false);
 async function enter(csrf: string | undefined): Promise<void> {
   if (csrf) auth.csrf = csrf;
   auth.authenticated = true;
-  await router.push('/');
+  await router.push("/");
 }
 
 /**
@@ -35,12 +35,23 @@ onMounted(async () => {
   exchanging.value = true;
   loading.value = true;
   try {
-    const response = await fetch('/api/auth/token', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: token.value }) });
-    const result = await response.json() as { ok: boolean; data?: { csrf: string }; error?: { message: string } };
-    if (!result.ok) throw new Error(result.error?.message ?? `请求失败：HTTP ${response.status}`);
+    const response = await fetch("/api/auth/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: token.value }),
+    });
+    const result = (await response.json()) as {
+      ok: boolean;
+      data?: { csrf: string };
+      error?: { message: string };
+    };
+    if (!result.ok)
+      throw new Error(
+        result.error?.message ?? `请求失败：HTTP ${response.status}`,
+      );
     await enter(result.data?.csrf);
   } catch (cause) {
-    error.value = `${cause instanceof Error ? cause.message : '请求失败'}——一次性登录链接 5 分钟有效、且只能用一次。在私聊里重新发 /webui 换一条，或直接用下面的口令登录。`;
+    error.value = `${cause instanceof Error ? cause.message : "请求失败"}——一次性登录链接 5 分钟有效、且只能用一次。在私聊里重新发 /webui 换一条，或直接用下面的口令登录。`;
   } finally {
     exchanging.value = false;
     loading.value = false;
@@ -49,15 +60,27 @@ onMounted(async () => {
 
 async function submit(): Promise<void> {
   loading.value = true;
-  error.value = '';
+  error.value = "";
   try {
-    const endpoint = props.setup ? '/api/setup' : '/api/auth/login';
-    const response = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(props.setup ? { token: token.value, password: password.value } : { password: password.value }) });
-    const result = await response.json() as { ok: boolean; data?: { csrf: string }; error?: { message: string } };
-    if (!result.ok) throw new Error(result.error?.message ?? '请求失败');
+    const endpoint = props.setup ? "/api/setup" : "/api/auth/login";
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(
+        props.setup
+          ? { token: token.value, password: password.value }
+          : { password: password.value },
+      ),
+    });
+    const result = (await response.json()) as {
+      ok: boolean;
+      data?: { csrf: string };
+      error?: { message: string };
+    };
+    if (!result.ok) throw new Error(result.error?.message ?? "请求失败");
     await enter(result.data?.csrf);
   } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : '请求失败';
+    error.value = cause instanceof Error ? cause.message : "请求失败";
   } finally {
     loading.value = false;
   }
@@ -72,31 +95,61 @@ async function submit(): Promise<void> {
       <h1>「Hello World」<br /><span>你好 世界</span></h1>
       <p>在此处管理你的助手</p>
       <div class="trust-row">
-        <span class="u-display-none"><i class="pi pi-shield" /> Session + CSRF</span>
+        <span class="u-display-none"
+          ><i class="pi pi-shield" /> Session + CSRF</span
+        >
         <span class="u-display-none"><i class="pi pi-lock" /> 密钥不回显</span>
-        <span class="u-display-none"><i class="pi pi-eye-slash" /> 全链路脱敏</span>
+        <span class="u-display-none"
+          ><i class="pi pi-eye-slash" /> 全链路脱敏</span
+        >
       </div>
     </section>
     <form class="auth-card" @submit.prevent="submit">
       <div>
-        <p class="eyebrow">{{ props.setup ? 'FIRST RUN' : 'OWNER ACCESS' }}</p>
-        <h2>{{ props.setup ? '初始化控制台' : '欢迎回来' }}</h2>
-        <p>{{ props.setup ? '使用终端输出的一次性 token 设置管理员密码。' : '输入管理员密码继续。' }}</p>
+        <p class="eyebrow">{{ props.setup ? "FIRST RUN" : "OWNER ACCESS" }}</p>
+        <h2>{{ props.setup ? "初始化控制台" : "欢迎回来" }}</h2>
+        <p>
+          {{
+            props.setup
+              ? "使用终端输出的一次性 token 设置管理员密码。"
+              : "输入管理员密码继续。"
+          }}
+        </p>
       </div>
       <label v-if="props.setup">
         <span>Setup token</span>
-        <input v-model="token" autocomplete="one-time-code">
+        <input v-model="token" autocomplete="one-time-code" />
       </label>
       <label>
         <span>管理员密码</span>
-        <input v-model="password" type="password" autocomplete="current-password">
+        <input
+          v-model="password"
+          type="password"
+          autocomplete="current-password"
+        />
       </label>
       <!-- 兑换期间说清正在做什么：否则界面只是一个转着的按钮，而这一步可能失败并落回口令框 -->
-      <p v-if="exchanging" class="callout" data-exchanging><i class="pi pi-spin pi-spinner" aria-hidden="true" />正在用一次性登录链接换取会话…</p>
+      <p v-if="exchanging" class="callout" data-exchanging>
+        <i
+          class="pi pi-spin pi-spinner"
+          aria-hidden="true"
+        />正在用一次性登录链接换取会话…
+      </p>
       <!-- 登录失败是表单内校验，留在原地；写操作的成败才走右上角通知（docs/09 §6） -->
-      <p v-if="error" class="callout error"><i class="pi pi-times-circle" aria-hidden="true" />{{ error }}</p>
-      <UiButton type="submit" :loading="loading" fluid :label="props.setup ? '完成初始化' : '进入控制台'" icon="pi pi-arrow-right" icon-pos="right" />
-      <small><i class="pi pi-info-circle" /> WebUI 默认监听 127.0.0.1:8787</small>
+      <p v-if="error" class="callout error">
+        <i class="pi pi-times-circle" aria-hidden="true" />{{ error }}
+      </p>
+      <UiButton
+        type="submit"
+        :loading="loading"
+        fluid
+        :label="props.setup ? '完成初始化' : '进入控制台'"
+        icon="pi pi-arrow-right"
+        icon-pos="right"
+      />
+      <small
+        ><i class="pi pi-info-circle" /> WebUI 默认监听 127.0.0.1:8787</small
+      >
     </form>
   </main>
 </template>

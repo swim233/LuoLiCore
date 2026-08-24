@@ -1,4 +1,4 @@
-import type { Sqlite } from './database.js';
+import type { Sqlite } from "./database.js";
 
 export interface SandboxContainer {
   chatId: string;
@@ -18,8 +18,14 @@ export interface SandboxContainer {
 }
 
 export interface NewSandboxContainer {
-  chatId: string; name: string; containerId: string | null; image: string; specHash: string;
-  hasSetsid: boolean; expiresAt: number; hardExpiresAt: number | null;
+  chatId: string;
+  name: string;
+  containerId: string | null;
+  image: string;
+  specHash: string;
+  hasSetsid: boolean;
+  expiresAt: number;
+  hardExpiresAt: number | null;
 }
 
 const COLUMNS = `chat_id AS chatId,name,container_id AS containerId,image,spec_hash AS specHash,has_setsid AS hasSetsid,
@@ -39,23 +45,37 @@ export class SandboxContainerRepository {
 
   create(input: NewSandboxContainer): SandboxContainer {
     const now = Date.now();
-    this.db.prepare(`INSERT INTO sandbox_containers(chat_id,name,container_id,image,spec_hash,has_setsid,created_at,last_used_at,expires_at,hard_expires_at)
-      VALUES (@chatId,@name,@containerId,@image,@specHash,@hasSetsid,@now,@now,@expiresAt,@hardExpiresAt)`)
+    this.db
+      .prepare(
+        `INSERT INTO sandbox_containers(chat_id,name,container_id,image,spec_hash,has_setsid,created_at,last_used_at,expires_at,hard_expires_at)
+      VALUES (@chatId,@name,@containerId,@image,@specHash,@hasSetsid,@now,@now,@expiresAt,@hardExpiresAt)`,
+      )
       .run({ ...input, hasSetsid: input.hasSetsid ? 1 : 0, now });
     return this.byChat(input.chatId)!;
   }
 
   byChat(chatId: string): SandboxContainer | null {
-    return (this.db.prepare(`SELECT ${COLUMNS} FROM sandbox_containers WHERE chat_id=?`).get(chatId) as SandboxContainer | undefined) ?? null;
+    return (
+      (this.db
+        .prepare(`SELECT ${COLUMNS} FROM sandbox_containers WHERE chat_id=?`)
+        .get(chatId) as SandboxContainer | undefined) ?? null
+    );
   }
 
   /** 跨会话：回收对账与 `container_list` / WebUI 面板。 */
   list(): SandboxContainer[] {
-    return this.db.prepare(`SELECT ${COLUMNS} FROM sandbox_containers ORDER BY last_used_at DESC`).all() as SandboxContainer[];
+    return this.db
+      .prepare(
+        `SELECT ${COLUMNS} FROM sandbox_containers ORDER BY last_used_at DESC`,
+      )
+      .all() as SandboxContainer[];
   }
 
   count(): number {
-    return this.db.prepare('SELECT COUNT(*) FROM sandbox_containers').pluck().get() as number;
+    return this.db
+      .prepare("SELECT COUNT(*) FROM sandbox_containers")
+      .pluck()
+      .get() as number;
   }
 
   /**
@@ -63,24 +83,43 @@ export class SandboxContainerRepository {
    * 不因活跃延长，否则它就不是上限（docs/05 §5.5）。
    */
   touch(chatId: string, expiresAt: number): void {
-    this.db.prepare('UPDATE sandbox_containers SET last_used_at=?,expires_at=?,exec_count=exec_count+1 WHERE chat_id=?')
+    this.db
+      .prepare(
+        "UPDATE sandbox_containers SET last_used_at=?,expires_at=?,exec_count=exec_count+1 WHERE chat_id=?",
+      )
       .run(Date.now(), expiresAt, chatId);
   }
 
   /** `container_keep`：改到期时刻 / 钉住。两者都可单独给。 */
-  keep(chatId: string, patch: { expiresAt?: number; pinned?: boolean }): boolean {
+  keep(
+    chatId: string,
+    patch: { expiresAt?: number; pinned?: boolean },
+  ): boolean {
     const current = this.byChat(chatId);
     if (!current) return false;
-    this.db.prepare('UPDATE sandbox_containers SET expires_at=?,pinned=? WHERE chat_id=?')
-      .run(patch.expiresAt ?? current.expiresAt, (patch.pinned ?? current.pinned !== 0) ? 1 : 0, chatId);
+    this.db
+      .prepare(
+        "UPDATE sandbox_containers SET expires_at=?,pinned=? WHERE chat_id=?",
+      )
+      .run(
+        patch.expiresAt ?? current.expiresAt,
+        (patch.pinned ?? current.pinned !== 0) ? 1 : 0,
+        chatId,
+      );
     return true;
   }
 
   noteError(chatId: string, error: string | null): void {
-    this.db.prepare('UPDATE sandbox_containers SET last_error=? WHERE chat_id=?').run(error, chatId);
+    this.db
+      .prepare("UPDATE sandbox_containers SET last_error=? WHERE chat_id=?")
+      .run(error, chatId);
   }
 
   remove(chatId: string): boolean {
-    return this.db.prepare('DELETE FROM sandbox_containers WHERE chat_id=?').run(chatId).changes > 0;
+    return (
+      this.db
+        .prepare("DELETE FROM sandbox_containers WHERE chat_id=?")
+        .run(chatId).changes > 0
+    );
   }
 }

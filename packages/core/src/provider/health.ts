@@ -1,9 +1,9 @@
-import { generateText } from 'ai';
-import type { LanguageModel } from 'ai';
-import type { Sqlite } from '@luoli/db';
-import { AttemptDeadline } from '../agent/fallback-model.js';
-import { redact } from '../secrets.js';
-import type { LogSink } from '../log/sink.js';
+import { generateText } from "ai";
+import type { LanguageModel } from "ai";
+import type { Sqlite } from "@luoli/db";
+import { AttemptDeadline } from "../agent/fallback-model.js";
+import { redact } from "../secrets.js";
+import type { LogSink } from "../log/sink.js";
 
 /**
  * provider 健康检查（`docs/04 §5.3` 最后一条）。**这条以前压根没实现**：`main.ts` 那个
@@ -30,7 +30,9 @@ export const PROVIDER_PROBE_TIMEOUT_MS = 15_000;
 
 export interface ProbeSource {
   /** 该 provider 的一个**裸**候选（不能是 `aliasModel` 包过的：那一层自己会 fallback，探测就永远探不出问题）。 */
-  probeCandidate(providerId: string): { model: LanguageModel; modelId: string } | null;
+  probeCandidate(
+    providerId: string,
+  ): { model: LanguageModel; modelId: string } | null;
 }
 
 export interface ProviderHealthOutcome {
@@ -41,25 +43,43 @@ export interface ProviderHealthOutcome {
   /** 这次失败是否计入连续失败计数。4xx（非认证）为 false。 */
   counted: boolean;
   failures: number;
-  state: 'up' | 'down' | 'unchanged';
+  state: "up" | "down" | "unchanged";
   ms: number;
   error?: string;
 }
 
 /** 探测与调用路径共用同一个计数器，所以规则只有这一份。`immediate` 给 401/403。 */
-export function recordProviderFailure(db: Sqlite, providerId: string, reason: string, failuresToDown: number, immediate = false): { failures: number; down: boolean } {
+export function recordProviderFailure(
+  db: Sqlite,
+  providerId: string,
+  reason: string,
+  failuresToDown: number,
+  immediate = false,
+): { failures: number; down: boolean } {
   const now = Date.now();
-  const failures = ((db.prepare('SELECT health_fail_count FROM providers WHERE id=?').pluck().get(providerId) as number | undefined) ?? 0) + 1;
+  const failures =
+    ((db
+      .prepare("SELECT health_fail_count FROM providers WHERE id=?")
+      .pluck()
+      .get(providerId) as number | undefined) ?? 0) + 1;
   const down = immediate || failures >= failuresToDown;
-  if (down) db.prepare("UPDATE providers SET health_fail_count=?,health_state='down',health_checked_at=?,health_error=? WHERE id=?").run(failures, now, reason.slice(0, 500), providerId);
+  if (down)
+    db.prepare(
+      "UPDATE providers SET health_fail_count=?,health_state='down',health_checked_at=?,health_error=? WHERE id=?",
+    ).run(failures, now, reason.slice(0, 500), providerId);
   // 还没到阈值时**不碰 health_state**：一次抖动不该让 provider 从链里消失，而
   // `health_checked_at` 是冷却期的起点，提前推它会让真的 down 之后的冷却算错。
-  else db.prepare('UPDATE providers SET health_fail_count=?,health_error=? WHERE id=?').run(failures, reason.slice(0, 500), providerId);
+  else
+    db.prepare(
+      "UPDATE providers SET health_fail_count=?,health_error=? WHERE id=?",
+    ).run(failures, reason.slice(0, 500), providerId);
   return { failures, down };
 }
 
 export function recordProviderSuccess(db: Sqlite, providerId: string): void {
-  db.prepare("UPDATE providers SET health_fail_count=0,health_state='up',health_checked_at=?,health_error=NULL WHERE id=?").run(Date.now(), providerId);
+  db.prepare(
+    "UPDATE providers SET health_fail_count=0,health_state='up',health_checked_at=?,health_error=NULL WHERE id=?",
+  ).run(Date.now(), providerId);
 }
 
 /**
@@ -71,21 +91,39 @@ export function recordProviderSuccess(db: Sqlite, providerId: string): void {
  * 返回是否真的改过 —— 调用方拿它决定要不要动进程内那份 `#down`。
  */
 export function recordProviderServed(db: Sqlite, providerId: string): boolean {
-  return db.prepare(`UPDATE providers SET health_fail_count=0,health_state='up',health_checked_at=?,health_error=NULL
-    WHERE id=? AND (health_fail_count<>0 OR COALESCE(health_state,'up')<>'up')`).run(Date.now(), providerId).changes > 0;
+  return (
+    db
+      .prepare(
+        `UPDATE providers SET health_fail_count=0,health_state='up',health_checked_at=?,health_error=NULL
+    WHERE id=? AND (health_fail_count<>0 OR COALESCE(health_state,'up')<>'up')`,
+      )
+      .run(Date.now(), providerId).changes > 0
+  );
 }
 
 function errorStatus(error: unknown): number | null {
   // 与 `fallback-model.ts` 的同名判据一致。那边是私有的，为一个三行判据把中间件层反向导进
   // provider 层不值得（provider → agent → provider 的循环）。
-  return error && typeof error === 'object' && 'statusCode' in error && typeof error.statusCode === 'number' ? error.statusCode : null;
+  return error &&
+    typeof error === "object" &&
+    "statusCode" in error &&
+    typeof error.statusCode === "number"
+    ? error.statusCode
+    : null;
 }
 
 export async function runProviderHealthCheck(
-  deps: { db: Sqlite; models: ProbeSource; log: LogSink; keyFor?: (providerId: string) => string | null },
+  deps: {
+    db: Sqlite;
+    models: ProbeSource;
+    log: LogSink;
+    keyFor?: (providerId: string) => string | null;
+  },
   options: { timeoutMs: number; failuresToDown: number },
 ): Promise<ProviderHealthOutcome[]> {
-  const rows = deps.db.prepare('SELECT id,name FROM providers WHERE enabled=1').all() as Array<{ id: string; name: string }>;
+  const rows = deps.db
+    .prepare("SELECT id,name FROM providers WHERE enabled=1")
+    .all() as Array<{ id: string; name: string }>;
   const outcomes: ProviderHealthOutcome[] = [];
   for (const row of rows) {
     const candidate = deps.models.probeCandidate(row.id);
@@ -99,34 +137,129 @@ export async function runProviderHealthCheck(
     // 那条「到点后既 abort 底层请求也停止等待」）。
     const deadline = new AttemptDeadline(undefined);
     try {
-      await deadline.guard(generateText({ model: candidate.model, prompt: 'ping', maxOutputTokens: 1, maxRetries: 0, abortSignal: deadline.signal }), options.timeoutMs, 'probe');
-    } catch (error) { failure = error; }
+      await deadline.guard(
+        generateText({
+          model: candidate.model,
+          prompt: "ping",
+          maxOutputTokens: 1,
+          maxRetries: 0,
+          abortSignal: deadline.signal,
+        }),
+        options.timeoutMs,
+        "probe",
+      );
+    } catch (error) {
+      failure = error;
+    }
     const ms = Date.now() - started;
     if (!failure) {
       recordProviderSuccess(deps.db, row.id);
-      outcomes.push({ providerId: row.id, name: row.name, modelId: candidate.modelId, ok: true, counted: false, failures: 0, state: 'up', ms });
-      deps.log.event({ level: 'info', kind: 'provider.health', summary: `${row.name} 探测正常`, data: { provider: row.name, providerId: row.id, modelId: candidate.modelId, state: 'up', ms } });
+      outcomes.push({
+        providerId: row.id,
+        name: row.name,
+        modelId: candidate.modelId,
+        ok: true,
+        counted: false,
+        failures: 0,
+        state: "up",
+        ms,
+      });
+      deps.log.event({
+        level: "info",
+        kind: "provider.health",
+        summary: `${row.name} 探测正常`,
+        data: {
+          provider: row.name,
+          providerId: row.id,
+          modelId: candidate.modelId,
+          state: "up",
+          ms,
+        },
+      });
       continue;
     }
     const status = errorStatus(failure);
-    const raw = failure instanceof Error ? `${failure.name}: ${failure.message}` : String(failure);
-    const reason = redact(raw.replace(/\s+/g, ' ').trim(), [deps.keyFor?.(row.id) ?? ''].filter(Boolean)).slice(0, 500);
+    const raw =
+      failure instanceof Error
+        ? `${failure.name}: ${failure.message}`
+        : String(failure);
+    const reason = redact(
+      raw.replace(/\s+/g, " ").trim(),
+      [deps.keyFor?.(row.id) ?? ""].filter(Boolean),
+    ).slice(0, 500);
     const auth = status === 401 || status === 403;
     const counted = auth || status === null || status >= 500;
     if (!counted) {
       // **答了话就算活着，所以计数归零。** 不归零的话：探测模型常年 400（`max_tokens` 下界之类）
       // 而调用路径偶尔攒一次超时，几天下来也能凑够三次，把一个一直好着的 provider 判死。
       // `health_state` / `health_checked_at` 不动：一次 400 只证明网关在答话，不证明这个模型能用。
-      deps.db.prepare('UPDATE providers SET health_fail_count=0,health_error=? WHERE id=?').run(reason, row.id);
-      outcomes.push({ providerId: row.id, name: row.name, modelId: candidate.modelId, ok: false, counted: false, failures: 0, state: 'unchanged', ms, error: reason });
-      deps.log.event({ level: 'warn', kind: 'provider.health', summary: `${row.name} 探测被拒（${status}），不计入连续失败`, data: { provider: row.name, providerId: row.id, modelId: candidate.modelId, state: 'unchanged', status, ms, error: reason } });
+      deps.db
+        .prepare(
+          "UPDATE providers SET health_fail_count=0,health_error=? WHERE id=?",
+        )
+        .run(reason, row.id);
+      outcomes.push({
+        providerId: row.id,
+        name: row.name,
+        modelId: candidate.modelId,
+        ok: false,
+        counted: false,
+        failures: 0,
+        state: "unchanged",
+        ms,
+        error: reason,
+      });
+      deps.log.event({
+        level: "warn",
+        kind: "provider.health",
+        summary: `${row.name} 探测被拒（${status}），不计入连续失败`,
+        data: {
+          provider: row.name,
+          providerId: row.id,
+          modelId: candidate.modelId,
+          state: "unchanged",
+          status,
+          ms,
+          error: reason,
+        },
+      });
       continue;
     }
-    const recorded = recordProviderFailure(deps.db, row.id, reason, options.failuresToDown, auth);
-    outcomes.push({ providerId: row.id, name: row.name, modelId: candidate.modelId, ok: false, counted: true, failures: recorded.failures, state: recorded.down ? 'down' : 'unchanged', ms, error: reason });
-    deps.log.event({ level: recorded.down ? 'error' : 'warn', kind: 'provider.health',
-      summary: recorded.down ? `${row.name} 连续失败 ${recorded.failures} 次，已标 down` : `${row.name} 探测失败（${recorded.failures}/${options.failuresToDown}）`,
-      data: { provider: row.name, providerId: row.id, modelId: candidate.modelId, state: recorded.down ? 'down' : 'unchanged', status, failures: recorded.failures, ms, error: reason } });
+    const recorded = recordProviderFailure(
+      deps.db,
+      row.id,
+      reason,
+      options.failuresToDown,
+      auth,
+    );
+    outcomes.push({
+      providerId: row.id,
+      name: row.name,
+      modelId: candidate.modelId,
+      ok: false,
+      counted: true,
+      failures: recorded.failures,
+      state: recorded.down ? "down" : "unchanged",
+      ms,
+      error: reason,
+    });
+    deps.log.event({
+      level: recorded.down ? "error" : "warn",
+      kind: "provider.health",
+      summary: recorded.down
+        ? `${row.name} 连续失败 ${recorded.failures} 次，已标 down`
+        : `${row.name} 探测失败（${recorded.failures}/${options.failuresToDown}）`,
+      data: {
+        provider: row.name,
+        providerId: row.id,
+        modelId: candidate.modelId,
+        state: recorded.down ? "down" : "unchanged",
+        status,
+        failures: recorded.failures,
+        ms,
+        error: reason,
+      },
+    });
   }
   return outcomes;
 }

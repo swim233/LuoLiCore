@@ -1,21 +1,29 @@
-import { Cron } from 'croner';
-import { ulid } from 'ulid';
-import type { Role, RuntimeTurnContext } from '@luoli/shared';
-import { minRole } from '@luoli/shared';
-import { contextKey, type AppendedMessage, type ArchiveRepository, type ScheduleRepository, type ScheduledJob, type Sqlite, type TurnRepository } from '@luoli/db';
-import { resolveEffectiveRole } from '../access.js';
-import type { TurnFailureStreak } from '../alerts.js';
-import type { Config } from '../config/schema.js';
-import { perChatConfig } from '../config/index.js';
-import type { ContextEngine } from '../context/engine.js';
-import type { LogSink } from '../log/sink.js';
-import type { MemoryStore } from '../memory/store.js';
-import type { QuotaGuard, QuotaReservation } from '../ledger/quota.js';
-import type { Scheduler } from '../scheduler.js';
-import type { TelegramToolBridge } from '../tools/builtins.js';
-import type { ToolRegistry } from '../tools/registry.js';
-import type { TurnConcurrency } from '../turn/concurrency.js';
-import type { TurnRegistry } from '../turn/registry.js';
+import { Cron } from "croner";
+import { ulid } from "ulid";
+import type { Role, RuntimeTurnContext } from "@luoli/shared";
+import { minRole } from "@luoli/shared";
+import {
+  contextKey,
+  type AppendedMessage,
+  type ArchiveRepository,
+  type ScheduleRepository,
+  type ScheduledJob,
+  type Sqlite,
+  type TurnRepository,
+} from "@luoli/db";
+import { resolveEffectiveRole } from "../access.js";
+import type { TurnFailureStreak } from "../alerts.js";
+import type { Config } from "../config/schema.js";
+import { perChatConfig } from "../config/index.js";
+import type { ContextEngine } from "../context/engine.js";
+import type { LogSink } from "../log/sink.js";
+import type { MemoryStore } from "../memory/store.js";
+import type { QuotaGuard, QuotaReservation } from "../ledger/quota.js";
+import type { Scheduler } from "../scheduler.js";
+import type { TelegramToolBridge } from "../tools/builtins.js";
+import type { ToolRegistry } from "../tools/registry.js";
+import type { TurnConcurrency } from "../turn/concurrency.js";
+import type { TurnRegistry } from "../turn/registry.js";
 
 /**
  * 合成触发消息的 `tg_message_id` 保留段。
@@ -35,7 +43,8 @@ export const SYNTHETIC_TG_MESSAGE_ID_BASE = 2_000_000_000;
  * `silent` 与 `committed` 必须分成两档：静默按设计就是安静的，混进 `committed` 之后
  * 「这条任务其实一直在静默」在库里再无痕迹（docs/02 §10.5 的四层分辨手段之一）。
  */
-export type ScheduledRunState = 'committed' | 'silent' | 'failed' | 'skipped' | 'missed' | 'cancelled';
+export type ScheduledRunState =
+  "committed" | "silent" | "failed" | "skipped" | "missed" | "cancelled";
 
 /**
  * 连续静默多少次之后 `schedule.silent` 从 info 升 warn。
@@ -69,7 +78,7 @@ export interface ScheduledJobRunnerDependencies {
    * **不提交** —— 钱花了、上下文没留下（docs/28 · L-SCH-01）。
    */
   telegram(): TelegramToolBridge | null;
-  roleOf(kind: 'user' | 'chat', tgId: string): Role | null;
+  roleOf(kind: "user" | "chat", tgId: string): Role | null;
   /**
    * 连续失败计数。**与 Telegram 轮次共用同一份**（装配方建一个传两处）：这条告警说的是
    * 「这个部署坏了」，而它此前只存在于 `createTelegramBot` 的闭包里 —— 上游变黑洞时，
@@ -80,7 +89,10 @@ export interface ScheduledJobRunnerDependencies {
    * `mode:'agent'` 的实际执行，签名照 `main.ts` 的 `onTurn` —— 装配方在那里注入
    * `runMainAgent`（非流式：定时轮次没有人盯着屏幕，也没有 Telegram 流消费者）。
    */
-  runAgent(turn: RuntimeTurnContext, reservation: QuotaReservation | null): Promise<string>;
+  runAgent(
+    turn: RuntimeTurnContext,
+    reservation: QuotaReservation | null,
+  ): Promise<string>;
   approvals?: { releaseTurn(turnId: string): void };
   plugins?: { hook(name: string, payload: unknown): Promise<unknown> };
   estimateTurnCost?(inputTokens: number, key: string): number | null;
@@ -109,7 +121,9 @@ export class ScheduledJobRunner {
    * （docs/28 · L-SCH-01）。`telegram()` 那道判据仍在 `fire()` 里兜着 —— 这一条是为了让手动
    * 触发**在响应里就能说清为什么没跑**，而不是回 `started:true` 然后往日志里写一条 skipped。
    */
-  get loaded(): boolean { return this.#loaded; }
+  get loaded(): boolean {
+    return this.#loaded;
+  }
 
   /**
    * 进程启动时把库里的活跃任务装回 cron。
@@ -119,16 +133,32 @@ export class ScheduledJobRunner {
    * 跟 `telegram.dropPendingOnStart` 是同一个取舍。
    */
   load(): { registered: number; missed: number } {
-    let registered = 0; let missed = 0;
+    let registered = 0;
+    let missed = 0;
     this.#loaded = true;
     for (const job of this.dependencies.jobs.listActive()) {
       const skew = this.#missedSince(job);
       if (skew) {
         missed += 1;
-        this.dependencies.log.event({ level: 'warn', kind: 'schedule.missed', summary: `定时任务 ${job.name} 在停机期间错过了触发`, chatId: job.chatId, key: job.key,
-          data: { job: job.id, name: job.name, expected: skew.toISOString(), mode: job.mode, catchUp: false } });
+        this.dependencies.log.event({
+          level: "warn",
+          kind: "schedule.missed",
+          summary: `定时任务 ${job.name} 在停机期间错过了触发`,
+          chatId: job.chatId,
+          key: job.key,
+          data: {
+            job: job.id,
+            name: job.name,
+            expected: skew.toISOString(),
+            mode: job.mode,
+            catchUp: false,
+          },
+        });
         // 一次性任务的触发点已经过去了，留着 active 只会在库里永远挂着一条不会响的任务。
-        if (job.runAt !== null) { this.dependencies.jobs.finish(job.id, 'done', 'missed'); continue; }
+        if (job.runAt !== null) {
+          this.dependencies.jobs.finish(job.id, "done", "missed");
+          continue;
+        }
       }
       if (this.register(job)) registered += 1;
     }
@@ -142,45 +172,85 @@ export class ScheduledJobRunner {
     const when = job.runAt === null ? job.cron! : new Date(job.runAt);
     if (job.runAt !== null && job.runAt <= Date.now()) return false;
     try {
-      this.dependencies.scheduler.add(when, () => this.fire(job.id), name, { timezone: job.timezone, ...(job.runAt === null ? {} : { maxRuns: 1 }) });
+      this.dependencies.scheduler.add(when, () => this.fire(job.id), name, {
+        timezone: job.timezone,
+        ...(job.runAt === null ? {} : { maxRuns: 1 }),
+      });
       return true;
     } catch (error) {
       // 坏表达式在创建时就被挡了，走到这里说明库里那行是手改的或跨版本残留 —— 停掉它并说出来。
-      this.dependencies.jobs.finish(job.id, 'cancelled', 'failed');
-      this.dependencies.log.event({ level: 'error', kind: 'schedule.failed', summary: `定时任务 ${job.name} 无法注册，已停用`, chatId: job.chatId, key: job.key,
-        data: { job: job.id, cron: job.cron, runAt: job.runAt, error: error instanceof Error ? error.message : String(error) } });
+      this.dependencies.jobs.finish(job.id, "cancelled", "failed");
+      this.dependencies.log.event({
+        level: "error",
+        kind: "schedule.failed",
+        summary: `定时任务 ${job.name} 无法注册，已停用`,
+        chatId: job.chatId,
+        key: job.key,
+        data: {
+          job: job.id,
+          cron: job.cron,
+          runAt: job.runAt,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      });
       return false;
     }
   }
 
-  unregister(id: string): boolean { return this.dependencies.scheduler.remove(jobCronName(id)); }
+  unregister(id: string): boolean {
+    return this.dependencies.scheduler.remove(jobCronName(id));
+  }
 
-  nextRun(id: string): Date | null { return this.dependencies.scheduler.nextRun(jobCronName(id)); }
+  nextRun(id: string): Date | null {
+    return this.dependencies.scheduler.nextRun(jobCronName(id));
+  }
 
   /** 一次触发。任何异常都在这里收口 —— croner 的 `catch` 与 `Scheduler.onError` 之外再兜一层。 */
   async fire(id: string): Promise<void> {
     const job = this.dependencies.jobs.byId(id);
-    if (!job || job.state !== 'active') { this.unregister(id); return; }
+    if (!job || job.state !== "active") {
+      this.unregister(id);
+      return;
+    }
     const live = this.dependencies.config();
-    if (!live.schedule.enabled) { this.#skip(job, 'schedule.disabled'); return; }
+    if (!live.schedule.enabled) {
+      this.#skip(job, "schedule.disabled");
+      return;
+    }
     const { role, userRole, chatRole } = this.#effectiveRole(job, live);
     // 创建之后被降级/拉黑的人不该继续借 bot 的手花钱。blocked 是永久判定 —— 停掉任务；
     // 只是掉到 trusted 以下（`schedule_create` 的 minRole）则跳过这一次，权限回来了任务还在。
-    if (role === 'blocked') {
-      this.dependencies.jobs.finish(job.id, 'cancelled', 'cancelled');
+    if (role === "blocked") {
+      this.dependencies.jobs.finish(job.id, "cancelled", "cancelled");
       this.unregister(job.id);
       // **文案按实际命中的那一侧写。** 判据是 `min(用户角色, 会话角色)`，而这里此前写死「创建者
       // 已被封禁」—— 封的是会话时同样这么说，运维会去查错的对象（docs/28 · L-SCH-04）。
       // `minRole` 的定义保证了：有效角色是 blocked 而用户不是，那一定是会话这一侧。
-      const culprit = userRole === 'blocked' ? `创建者 user:${job.createdBy}` : `会话 chat:${job.chatId}`;
-      this.dependencies.log.event({ level: 'warn', kind: 'schedule.cancelled', summary: `定时任务 ${job.name} 的${culprit}已被封禁，任务已停用`, chatId: job.chatId, key: job.key, data: { job: job.id, role, userRole, chatRole } });
+      const culprit =
+        userRole === "blocked"
+          ? `创建者 user:${job.createdBy}`
+          : `会话 chat:${job.chatId}`;
+      this.dependencies.log.event({
+        level: "warn",
+        kind: "schedule.cancelled",
+        summary: `定时任务 ${job.name} 的${culprit}已被封禁，任务已停用`,
+        chatId: job.chatId,
+        key: job.key,
+        data: { job: job.id, role, userRole, chatRole },
+      });
       return;
     }
-    if (minRole(role, 'trusted') !== 'trusted') { this.#skip(job, 'role_downgraded', { role, userRole, chatRole }); return; }
+    if (minRole(role, "trusted") !== "trusted") {
+      this.#skip(job, "role_downgraded", { role, userRole, chatRole });
+      return;
+    }
     // **这道判据必须排在 `#run` 之前**（配额预留、并发闸、`openTurn` 都在里面）：发不出去的
     // 一轮开了也是白开，模型钱花掉、上下文一个字都留不下（docs/28 · L-SCH-01）。
     const bridge = this.dependencies.telegram();
-    if (!bridge) { this.#skip(job, 'telegram_unavailable'); return; }
+    if (!bridge) {
+      this.#skip(job, "telegram_unavailable");
+      return;
+    }
     await this.#run(job, role, live, bridge);
   }
 
@@ -189,28 +259,55 @@ export class ScheduledJobRunner {
     return turn.rootSpanId ? { parentSpanId: turn.rootSpanId } : {};
   }
 
-  async #run(job: ScheduledJob, role: Role, live: Readonly<Config>, bridge: TelegramToolBridge): Promise<void> {
+  async #run(
+    job: ScheduledJob,
+    role: Role,
+    live: Readonly<Config>,
+    bridge: TelegramToolBridge,
+  ): Promise<void> {
     const chatConfig = perChatConfig(live, job.key);
-    const isPrivate = !job.chatId.startsWith('-');
+    const isPrivate = !job.chatId.startsWith("-");
     // notify 不调模型，所以不占额度；agent 走和用户轮次完全相同的配额闸。
-    const reservation = job.mode === 'agent' ? this.#reserve(job, role, live) : null;
-    if (job.mode === 'agent' && live.quota.enabled && !reservation) { this.#skip(job, 'quota_exceeded'); return; }
+    const reservation =
+      job.mode === "agent" ? this.#reserve(job, role, live) : null;
+    if (job.mode === "agent" && live.quota.enabled && !reservation) {
+      this.#skip(job, "quota_exceeded");
+      return;
+    }
     const pendingId = `job_${ulid()}`;
-    const pending = this.dependencies.registry.register({ id: pendingId, key: job.key, chatId: job.chatId, userId: job.createdBy, role }, live.concurrency.turnTimeoutMs);
+    const pending = this.dependencies.registry.register(
+      {
+        id: pendingId,
+        key: job.key,
+        chatId: job.chatId,
+        userId: job.createdBy,
+        role,
+      },
+      live.concurrency.turnTimeoutMs,
+    );
     let release: (() => void) | null = null;
     // 与 `bot.ts` 同一条判据（docs/28 · L-LOG-01）：只在真的排过队时记 `turn.queued`，
     // `turn.start` 一律带 `waitedMs`。定时轮次撞上并发闸的概率不比用户轮次低 —— 它们常常同时到点。
     const queuedAt = Date.now();
     const wasQueued = !this.dependencies.concurrency.available(job.key);
-    const queueSnapshot = { active: this.dependencies.concurrency.active, queued: this.dependencies.concurrency.queued };
-    try { release = await this.dependencies.concurrency.acquire(job.key, pending.controller.signal); }
-    catch (error) {
+    const queueSnapshot = {
+      active: this.dependencies.concurrency.active,
+      queued: this.dependencies.concurrency.queued,
+    };
+    try {
+      release = await this.dependencies.concurrency.acquire(
+        job.key,
+        pending.controller.signal,
+      );
+    } catch (error) {
       this.dependencies.registry.finish(pendingId);
       if (reservation) this.dependencies.quota.release(reservation);
-      this.#skip(job, 'turn_queue_rejected', { error: error instanceof Error ? error.message : String(error) });
+      this.#skip(job, "turn_queue_rejected", {
+        error: error instanceof Error ? error.message : String(error),
+      });
       return;
     }
-    let turn: Awaited<ReturnType<ContextEngine['openTurn']>>;
+    let turn: Awaited<ReturnType<ContextEngine["openTurn"]>>;
     let triggerMessageId: number;
     try {
       // 合成触发消息：`[定时任务 <名字>] <正文>` 作为一条 from_kind='system' 的入站消息落进归档，
@@ -220,17 +317,50 @@ export class ScheduledJobRunner {
       triggerMessageId = trigger.id;
       // 群名从库里读：这条路没有 Telegram update 可取，而 RUNTIME 的「会话」行要它。
       // 权威副本是 `principals` 的 `chat:<id>`（`upsertSeen` 每条消息刷新一次 `display_name`）。
-      const chatTitle = this.dependencies.db.prepare("SELECT display_name FROM principals WHERE kind='chat' AND tg_id=?").pluck().get(job.chatId) as string | null;
+      const chatTitle = this.dependencies.db
+        .prepare(
+          "SELECT display_name FROM principals WHERE kind='chat' AND tg_id=?",
+        )
+        .pluck()
+        .get(job.chatId) as string | null;
       // `silenceable` 只从这里进来（docs/02 §10.5）：其余造 turn 的地方一处都不传，于是「模型
       // 能宣布不投递」这件事结构上只可能发生在开了 allow_silent 的定时轮次上。
-      turn = await this.dependencies.context.openTurn({ chatId: job.chatId, threadId: job.threadId, key: job.key, initiatorUserId: job.createdBy,
-        effectiveRole: role, isPrivate, trigger, ...(chatTitle ? { chatTitle } : {}), ...(job.allowSilent ? { silenceable: true } : {}),
-        abortSignal: pending.controller.signal, config: chatConfig });
+      turn = await this.dependencies.context.openTurn({
+        chatId: job.chatId,
+        threadId: job.threadId,
+        key: job.key,
+        initiatorUserId: job.createdBy,
+        effectiveRole: role,
+        isPrivate,
+        trigger,
+        ...(chatTitle ? { chatTitle } : {}),
+        ...(job.allowSilent ? { silenceable: true } : {}),
+        abortSignal: pending.controller.signal,
+        config: chatConfig,
+      });
       this.dependencies.registry.finish(pendingId);
-      const tracked = this.dependencies.registry.register({ id: turn.turnId, key: job.key, chatId: job.chatId, userId: job.createdBy, role }, live.concurrency.turnTimeoutMs);
+      const tracked = this.dependencies.registry.register(
+        {
+          id: turn.turnId,
+          key: job.key,
+          chatId: job.chatId,
+          userId: job.createdBy,
+          role,
+        },
+        live.concurrency.turnTimeoutMs,
+      );
       Object.assign(turn, { abortSignal: tracked.controller.signal });
-      this.dependencies.turns.create({ id: turn.turnId, key: job.key, chatId: job.chatId, threadId: job.threadId, userId: job.createdBy, role,
-        triggerMessageId, triggerReason: 'schedule', baseCommitId: turn.baseCommitId });
+      this.dependencies.turns.create({
+        id: turn.turnId,
+        key: job.key,
+        chatId: job.chatId,
+        threadId: job.threadId,
+        userId: job.createdBy,
+        role,
+        triggerMessageId,
+        triggerReason: "schedule",
+        baseCommitId: turn.baseCommitId,
+      });
     } catch (error) {
       this.dependencies.registry.finish(pendingId);
       release();
@@ -239,71 +369,249 @@ export class ScheduledJobRunner {
       return;
     }
     const waitedMs = Date.now() - queuedAt;
-    this.dependencies.log.event({ level: 'info', kind: 'schedule.fired', summary: `定时任务 ${job.name} 触发`, traceId: turn.turnId, ...this.#parent(turn), chatId: job.chatId, userId: job.createdBy, key: job.key,
-      data: { job: job.id, name: job.name, mode: job.mode, role, runCount: job.runCount } });
-    if (wasQueued) this.dependencies.log.event({ level: 'info', kind: 'turn.queued', summary: `Turn ${turn.turnId} waited ${waitedMs}ms in queue`,
-      traceId: turn.turnId, ...this.#parent(turn), chatId: job.chatId, userId: job.createdBy, key: job.key, durationMs: waitedMs, data: { ...queueSnapshot, waitedMs } });
-    this.dependencies.log.event({ level: 'info', kind: 'turn.start', summary: `Turn ${turn.turnId} started`, traceId: turn.turnId, ...(turn.rootSpanId ? { spanId: turn.rootSpanId } : {}), chatId: job.chatId, userId: job.createdBy, key: job.key, data: { role, triggerReason: 'schedule', waitedMs } });
-    this.dependencies.log.publish('turn.started', { turnId: turn.turnId, key: job.key, chatId: job.chatId, user: job.createdBy, role, triggerReason: 'schedule', at: Date.now() });
+    this.dependencies.log.event({
+      level: "info",
+      kind: "schedule.fired",
+      summary: `定时任务 ${job.name} 触发`,
+      traceId: turn.turnId,
+      ...this.#parent(turn),
+      chatId: job.chatId,
+      userId: job.createdBy,
+      key: job.key,
+      data: {
+        job: job.id,
+        name: job.name,
+        mode: job.mode,
+        role,
+        runCount: job.runCount,
+      },
+    });
+    if (wasQueued)
+      this.dependencies.log.event({
+        level: "info",
+        kind: "turn.queued",
+        summary: `Turn ${turn.turnId} waited ${waitedMs}ms in queue`,
+        traceId: turn.turnId,
+        ...this.#parent(turn),
+        chatId: job.chatId,
+        userId: job.createdBy,
+        key: job.key,
+        durationMs: waitedMs,
+        data: { ...queueSnapshot, waitedMs },
+      });
+    this.dependencies.log.event({
+      level: "info",
+      kind: "turn.start",
+      summary: `Turn ${turn.turnId} started`,
+      traceId: turn.turnId,
+      ...(turn.rootSpanId ? { spanId: turn.rootSpanId } : {}),
+      chatId: job.chatId,
+      userId: job.createdBy,
+      key: job.key,
+      data: { role, triggerReason: "schedule", waitedMs },
+    });
+    this.dependencies.log.publish("turn.started", {
+      turnId: turn.turnId,
+      key: job.key,
+      chatId: job.chatId,
+      user: job.createdBy,
+      role,
+      triggerReason: "schedule",
+      at: Date.now(),
+    });
     try {
-      const answer = job.mode === 'notify' ? job.payload : (await this.dependencies.runAgent(turn, reservation)).trim();
+      const answer =
+        job.mode === "notify"
+          ? job.payload
+          : (await this.dependencies.runAgent(turn, reservation)).trim();
       // 空正文当成失败：发不出去（splitTelegramText('') 是空数组）、还会往上下文里留一条
       // 谁都解释不了的空消息（docs/16 §5「摘除比伪造安全」）。
       // **这道闸对静默一样不放松。** 静默 + 空正文 = 上下文里一个字都没留，而「模型下一轮知道
       // 自己查过了」正是静默这件事的全部目的（docs/02 §10.5）。
-      if (!answer) throw new Error('model_returned_empty');
+      if (!answer) throw new Error("model_returned_empty");
       // `notify` 恒为 false：那条路不调模型，没有任何人够得着 `turn.silenced`。
       const silenced = turn.silenced === true;
       if (!silenced) {
-        const sent = await bridge.sendMessage({ chatId: job.chatId, threadId: job.threadId, turnId: turn.turnId, ...(turn.rootSpanId ? { parentSpanId: turn.rootSpanId } : {}) }, answer) as { ok?: boolean; error?: string };
-        if (sent.ok === false) throw new Error(`delivery_failed:${sent.error ?? 'unknown'}`);
+        const sent = (await bridge.sendMessage(
+          {
+            chatId: job.chatId,
+            threadId: job.threadId,
+            turnId: turn.turnId,
+            ...(turn.rootSpanId ? { parentSpanId: turn.rootSpanId } : {}),
+          },
+          answer,
+        )) as { ok?: boolean; error?: string };
+        if (sent.ok === false)
+          throw new Error(`delivery_failed:${sent.error ?? "unknown"}`);
       } else {
         // `job.silentStreak` 是这次触发**之前**的值，下面那句 markRun 才会 +1 —— 日志里要的是
         // 「这是连续第几次」，所以先加。
         const streak = job.silentStreak + 1;
-        this.dependencies.log.event({ level: streak >= SILENT_STREAK_WARN ? 'warn' : 'info', kind: 'schedule.silent',
-          summary: `定时任务 ${job.name} 本轮不用汇报（连续第 ${streak} 次）`, traceId: turn.turnId, ...this.#parent(turn),
-          chatId: job.chatId, userId: job.createdBy, key: job.key,
+        this.dependencies.log.event({
+          level: streak >= SILENT_STREAK_WARN ? "warn" : "info",
+          kind: "schedule.silent",
+          summary: `定时任务 ${job.name} 本轮不用汇报（连续第 ${streak} 次）`,
+          traceId: turn.turnId,
+          ...this.#parent(turn),
+          chatId: job.chatId,
+          userId: job.createdBy,
+          key: job.key,
           // `?? null` 而不是条件展开：这条日志是「这条任务是不是从此再也不说话了」的唯一可读凭据，
           // 字段恒在才 grep 得动、才过滤得了。缺席的 reason 说明置位方只置了一半（见 `silenceReason`）。
-          data: { job: job.id, name: job.name, mode: job.mode, streak, warnAt: SILENT_STREAK_WARN, reason: turn.silenceReason ?? null } });
+          data: {
+            job: job.id,
+            name: job.name,
+            mode: job.mode,
+            streak,
+            warnAt: SILENT_STREAK_WARN,
+            reason: turn.silenceReason ?? null,
+          },
+        });
       }
       // **两条路在这里合流，`appendDelta` / `commitTurn` 必须在合流点之后。** 把它们挪进上面那个
       // 分支里（或者干脆 `if (silenced) return`）正好复刻 docs/02 §10.1 当初否掉的方案：省下的是
       // 一次 commit，代价是一次说不清的失忆 —— 用户第二天问「昨天你查的怎么样」而模型一脸茫然。
-      this.dependencies.context.appendDelta(turn, { id: turn.turnId, role: 'assistant', origin: 'assistant', parts: [{ type: 'text', text: answer }], textPreview: answer.slice(0, 240), pruneLevel: 0 });
+      this.dependencies.context.appendDelta(turn, {
+        id: turn.turnId,
+        role: "assistant",
+        origin: "assistant",
+        parts: [{ type: "text", text: answer }],
+        textPreview: answer.slice(0, 240),
+        pruneLevel: 0,
+      });
       const committed = await this.dependencies.context.commitTurn(turn);
       // `turns.finish` **仍记 `committed`**：那一轮确实提交了，静默是投递侧的事。分辨手段在
       // `scheduled_jobs.last_state` 与 `schedule.silent` 那一行上，不在这里再造一个轮次状态。
-      const settled = this.dependencies.turns.finish(turn.turnId, { state: 'committed', commitId: committed.commit.id, rebased: committed.rebased });
-      await this.dependencies.plugins?.hook('afterCommit', { turn, committed });
+      const settled = this.dependencies.turns.finish(turn.turnId, {
+        state: "committed",
+        commitId: committed.commit.id,
+        rebased: committed.rebased,
+      });
+      await this.dependencies.plugins?.hook("afterCommit", { turn, committed });
       // `silenced` 进 `turn.end` 的 data：不然一条完整的 trace 里凭空少了 `tg.send`，看的人无从解释。
-      this.dependencies.log.event({ level: 'info', kind: 'turn.end', summary: 'turn committed', traceId: turn.turnId, ...this.#parent(turn), chatId: job.chatId, userId: job.createdBy, key: job.key, data: { state: 'committed', rebased: committed.rebased, waitedMs, schedule: job.id, ...(silenced ? { silenced: true } : {}) } });
-      this.dependencies.log.publish('turn.finished', { turnId: turn.turnId, key: job.key, chatId: job.chatId, state: 'committed', steps: settled?.steps ?? 0, toolCalls: settled?.toolCalls ?? 0, costUsd: settled?.costUsd ?? 0, rebased: committed.rebased, durationMs: settled?.durationMs ?? 0 });
+      this.dependencies.log.event({
+        level: "info",
+        kind: "turn.end",
+        summary: "turn committed",
+        traceId: turn.turnId,
+        ...this.#parent(turn),
+        chatId: job.chatId,
+        userId: job.createdBy,
+        key: job.key,
+        data: {
+          state: "committed",
+          rebased: committed.rebased,
+          waitedMs,
+          schedule: job.id,
+          ...(silenced ? { silenced: true } : {}),
+        },
+      });
+      this.dependencies.log.publish("turn.finished", {
+        turnId: turn.turnId,
+        key: job.key,
+        chatId: job.chatId,
+        state: "committed",
+        steps: settled?.steps ?? 0,
+        toolCalls: settled?.toolCalls ?? 0,
+        costUsd: settled?.costUsd ?? 0,
+        rebased: committed.rebased,
+        durationMs: settled?.durationMs ?? 0,
+      });
       this.dependencies.memory.flush(turn.turnId);
       // `last_error` 在静默这一路上恒为 NULL（markRun 不给 error），这是把「静默」与
       // 「failed / skipped」分开的第二层手段。`silent_streak` 由 markRun 就地 +1。
-      this.dependencies.jobs.markRun(job.id, { state: silenced ? 'silent' : 'committed' });
+      this.dependencies.jobs.markRun(job.id, {
+        state: silenced ? "silent" : "committed",
+      });
       // 与 Telegram 轮次共用同一份计数（docs/28 · L-SCH-02）：成功一次归零，跨会话。
       // **静默照旧算成功**：这一轮跑完了、提交了，只是没什么可说的。
       this.dependencies.failures?.succeeded();
     } catch (error) {
       // 超时不是取消（`docs/04 §5.3` 的三档，同 `bot.ts`）。定时任务这条路上尤其明显：**没有人会去
       // 取消一个自己触发的任务**，记成 cancelled 等于「上游黑着的那几天里，每次触发都安静地算不了数」。
-      const timedOut = turn.abortSignal.reason === 'timeout';
+      const timedOut = turn.abortSignal.reason === "timeout";
       const cancelled = turn.abortSignal.aborted && !timedOut;
       // 同 `bot.ts` 那条：`abortTurn` 抛出去会让下面的 `turns.finish` 不执行，那行永久卡在
       // `state='running'`。清理是尽力而为，**记状态不是**。
-      try { await this.dependencies.context.abortTurn(turn, cancelled ? 'cancelled' : 'failed', error); }
-      catch (cleanup) { this.dependencies.log.event({ level: 'error', kind: 'ctx.abort', summary: 'abortTurn failed; turn still recorded as ended', traceId: turn.turnId, chatId: job.chatId, key: job.key, data: { error: cleanup instanceof Error ? cleanup.message : String(cleanup), schedule: job.id } }); }
-      const settled = this.dependencies.turns.finish(turn.turnId, cancelled
-        ? { state: 'cancelled', cancelReason: String(turn.abortSignal.reason ?? 'cancelled') }
-        : { state: 'failed', error: timedOut ? 'turn_timeout' : error instanceof Error ? error.message : String(error), ...(timedOut ? { cancelReason: 'timeout' } : {}) });
-      this.dependencies.log.event({ level: cancelled ? 'warn' : 'error', kind: 'turn.end', summary: cancelled ? 'turn cancelled' : timedOut ? 'turn timed out' : error instanceof Error ? error.message : 'turn failed', traceId: turn.turnId, ...this.#parent(turn), chatId: job.chatId, userId: job.createdBy, key: job.key, data: { state: cancelled ? 'cancelled' : 'failed', waitedMs, schedule: job.id } });
-      this.dependencies.log.publish('turn.finished', { turnId: turn.turnId, key: job.key, chatId: job.chatId, state: cancelled ? 'cancelled' : 'failed', steps: settled?.steps ?? 0, toolCalls: settled?.toolCalls ?? 0, costUsd: settled?.costUsd ?? 0, rebased: false, durationMs: settled?.durationMs ?? 0 });
+      try {
+        await this.dependencies.context.abortTurn(
+          turn,
+          cancelled ? "cancelled" : "failed",
+          error,
+        );
+      } catch (cleanup) {
+        this.dependencies.log.event({
+          level: "error",
+          kind: "ctx.abort",
+          summary: "abortTurn failed; turn still recorded as ended",
+          traceId: turn.turnId,
+          chatId: job.chatId,
+          key: job.key,
+          data: {
+            error: cleanup instanceof Error ? cleanup.message : String(cleanup),
+            schedule: job.id,
+          },
+        });
+      }
+      const settled = this.dependencies.turns.finish(
+        turn.turnId,
+        cancelled
+          ? {
+              state: "cancelled",
+              cancelReason: String(turn.abortSignal.reason ?? "cancelled"),
+            }
+          : {
+              state: "failed",
+              error: timedOut
+                ? "turn_timeout"
+                : error instanceof Error
+                  ? error.message
+                  : String(error),
+              ...(timedOut ? { cancelReason: "timeout" } : {}),
+            },
+      );
+      this.dependencies.log.event({
+        level: cancelled ? "warn" : "error",
+        kind: "turn.end",
+        summary: cancelled
+          ? "turn cancelled"
+          : timedOut
+            ? "turn timed out"
+            : error instanceof Error
+              ? error.message
+              : "turn failed",
+        traceId: turn.turnId,
+        ...this.#parent(turn),
+        chatId: job.chatId,
+        userId: job.createdBy,
+        key: job.key,
+        data: {
+          state: cancelled ? "cancelled" : "failed",
+          waitedMs,
+          schedule: job.id,
+        },
+      });
+      this.dependencies.log.publish("turn.finished", {
+        turnId: turn.turnId,
+        key: job.key,
+        chatId: job.chatId,
+        state: cancelled ? "cancelled" : "failed",
+        steps: settled?.steps ?? 0,
+        toolCalls: settled?.toolCalls ?? 0,
+        costUsd: settled?.costUsd ?? 0,
+        rebased: false,
+        durationMs: settled?.durationMs ?? 0,
+      });
       // 同 `bot.ts` 的两个出口：取消不算故障，超时算 —— 而「上游变黑洞、每次定时触发都超时」
       // 正是这条告警最该覆盖的场景，也正是它此前一次都不响的那个（docs/28 · L-SCH-02）。
-      if (!cancelled) this.dependencies.failures?.failed(timedOut ? 'turn_timeout' : error instanceof Error ? error.message : String(error));
+      if (!cancelled)
+        this.dependencies.failures?.failed(
+          timedOut
+            ? "turn_timeout"
+            : error instanceof Error
+              ? error.message
+              : String(error),
+        );
       this.#failed(job, error, turn.turnId);
     } finally {
       this.dependencies.tools.releaseTurn(turn.turnId);
@@ -313,7 +621,10 @@ export class ScheduledJobRunner {
       release();
       if (reservation) this.dependencies.quota.release(reservation);
       // 一次性任务跑完就收摊，成败都不重试：重试一个「提醒我 15:00 开会」在 15:05 才发出去没有意义。
-      if (job.runAt !== null) { this.dependencies.jobs.finish(job.id, 'done'); this.unregister(job.id); }
+      if (job.runAt !== null) {
+        this.dependencies.jobs.finish(job.id, "done");
+        this.unregister(job.id);
+      }
     }
   }
 
@@ -329,14 +640,34 @@ export class ScheduledJobRunner {
    */
   #appendTrigger(job: ScheduledJob): AppendedMessage {
     const scoped = this.dependencies.archive.scope(job.chatId, job.threadId);
-    const highest = this.dependencies.db.prepare('SELECT MAX(tg_message_id) FROM messages WHERE chat_id=? AND tg_message_id>=?')
-      .pluck().get(job.chatId, SYNTHETIC_TG_MESSAGE_ID_BASE) as number | null;
-    const tgMessageId = Math.max(SYNTHETIC_TG_MESSAGE_ID_BASE, (highest ?? 0) + 1);
-    const appended = scoped.append({ chatId: job.chatId, messageThreadId: job.threadId, tgMessageId, direction: 'in', fromKind: 'system',
-      fromUserId: job.createdBy, fromName: '定时任务', fromUsername: null, kind: 'text',
-      text: `[定时任务 ${job.name}] ${job.payload}`, tgDate: Date.now(), raw: { schedule: { id: job.id, name: job.name, mode: job.mode } },
-      triggered: true, triggerReason: 'schedule' });
-    if (!appended.inserted) throw new Error(`schedule_trigger_conflict:${tgMessageId}`);
+    const highest = this.dependencies.db
+      .prepare(
+        "SELECT MAX(tg_message_id) FROM messages WHERE chat_id=? AND tg_message_id>=?",
+      )
+      .pluck()
+      .get(job.chatId, SYNTHETIC_TG_MESSAGE_ID_BASE) as number | null;
+    const tgMessageId = Math.max(
+      SYNTHETIC_TG_MESSAGE_ID_BASE,
+      (highest ?? 0) + 1,
+    );
+    const appended = scoped.append({
+      chatId: job.chatId,
+      messageThreadId: job.threadId,
+      tgMessageId,
+      direction: "in",
+      fromKind: "system",
+      fromUserId: job.createdBy,
+      fromName: "定时任务",
+      fromUsername: null,
+      kind: "text",
+      text: `[定时任务 ${job.name}] ${job.payload}`,
+      tgDate: Date.now(),
+      raw: { schedule: { id: job.id, name: job.name, mode: job.mode } },
+      triggered: true,
+      triggerReason: "schedule",
+    });
+    if (!appended.inserted)
+      throw new Error(`schedule_trigger_conflict:${tgMessageId}`);
     return appended;
   }
 
@@ -345,50 +676,108 @@ export class ScheduledJobRunner {
    * （docs/28 · L-SCH-04），而判据本身仍只有 `resolveEffectiveRole` 一份 —— 在这里把默认值
    * 那套规则再算一遍就是第二份判据。`chatRole` 是**库里存的**那个，null 表示走了默认。
    */
-  #effectiveRole(job: ScheduledJob, live: Readonly<Config>): { role: Role; userRole: Role; chatRole: Role | null } {
-    const userRole = this.dependencies.roleOf('user', job.createdBy) ?? live.access.defaultUserRole;
-    const chatRole = this.dependencies.roleOf('chat', job.chatId);
-    return { role: resolveEffectiveRole({ userRole, ...(chatRole ? { chatRole } : {}), isPrivate: !job.chatId.startsWith('-'), defaultChatRole: live.access.defaultChatRole }), userRole, chatRole };
+  #effectiveRole(
+    job: ScheduledJob,
+    live: Readonly<Config>,
+  ): { role: Role; userRole: Role; chatRole: Role | null } {
+    const userRole =
+      this.dependencies.roleOf("user", job.createdBy) ??
+      live.access.defaultUserRole;
+    const chatRole = this.dependencies.roleOf("chat", job.chatId);
+    return {
+      role: resolveEffectiveRole({
+        userRole,
+        ...(chatRole ? { chatRole } : {}),
+        isPrivate: !job.chatId.startsWith("-"),
+        defaultChatRole: live.access.defaultChatRole,
+      }),
+      userRole,
+      chatRole,
+    };
   }
 
-  #reserve(job: ScheduledJob, role: Role, live: Readonly<Config>): ReturnType<QuotaGuard['reserve']> | null {
+  #reserve(
+    job: ScheduledJob,
+    role: Role,
+    live: Readonly<Config>,
+  ): ReturnType<QuotaGuard["reserve"]> | null {
     if (!live.quota.enabled) return null;
     const roleLimits = live.quota.perUser.byRole[role];
-    const estimatedTokens = Math.max(this.dependencies.context.windowTokens(job.key) + live.prompt.maxTokens, 1000);
-    const estimate = this.dependencies.estimateTurnCost?.(estimatedTokens, job.key) ?? null;
-    return this.dependencies.quota.reserve({ chatId: job.chatId, userId: job.createdBy,
-      estimateUsd: Math.max(live.quota.minReserveUsd, estimate ?? live.quota.minReserveUsd),
-      limits: { globalDaily: live.quota.global.daily, globalMonthly: live.quota.global.monthly,
-        chatDaily: live.quota.perChat.daily, chatMonthly: live.quota.perChat.monthly,
-        userDaily: roleLimits?.daily ?? live.quota.perUser.daily, userMonthly: roleLimits?.monthly ?? live.quota.perUser.monthly } });
+    const estimatedTokens = Math.max(
+      this.dependencies.context.windowTokens(job.key) + live.prompt.maxTokens,
+      1000,
+    );
+    const estimate =
+      this.dependencies.estimateTurnCost?.(estimatedTokens, job.key) ?? null;
+    return this.dependencies.quota.reserve({
+      chatId: job.chatId,
+      userId: job.createdBy,
+      estimateUsd: Math.max(
+        live.quota.minReserveUsd,
+        estimate ?? live.quota.minReserveUsd,
+      ),
+      limits: {
+        globalDaily: live.quota.global.daily,
+        globalMonthly: live.quota.global.monthly,
+        chatDaily: live.quota.perChat.daily,
+        chatMonthly: live.quota.perChat.monthly,
+        userDaily: roleLimits?.daily ?? live.quota.perUser.daily,
+        userMonthly: roleLimits?.monthly ?? live.quota.perUser.monthly,
+      },
+    });
   }
 
   /** 跳过一次触发：任务留着，下次照常。计一次 run 好让 `schedule_list` 能看出它在打空转。 */
-  #skip(job: ScheduledJob, reason: string, data: Record<string, unknown> = {}): void {
-    this.dependencies.jobs.markRun(job.id, { state: 'skipped', error: reason });
-    this.dependencies.log.event({ level: 'warn', kind: 'schedule.skipped', summary: `定时任务 ${job.name} 本次跳过：${reason}`, chatId: job.chatId, key: job.key,
-      data: { job: job.id, name: job.name, reason, ...data } });
+  #skip(
+    job: ScheduledJob,
+    reason: string,
+    data: Record<string, unknown> = {},
+  ): void {
+    this.dependencies.jobs.markRun(job.id, { state: "skipped", error: reason });
+    this.dependencies.log.event({
+      level: "warn",
+      kind: "schedule.skipped",
+      summary: `定时任务 ${job.name} 本次跳过：${reason}`,
+      chatId: job.chatId,
+      key: job.key,
+      data: { job: job.id, name: job.name, reason, ...data },
+    });
   }
 
   #failed(job: ScheduledJob, error: unknown, turnId?: string): void {
     const message = error instanceof Error ? error.message : String(error);
-    this.dependencies.jobs.markRun(job.id, { state: 'failed', error: message });
-    this.dependencies.log.event({ level: 'error', kind: 'schedule.failed', summary: `定时任务 ${job.name} 失败：${message}`, ...(turnId ? { traceId: turnId } : {}),
-      chatId: job.chatId, key: job.key, data: { job: job.id, name: job.name, error: message } });
+    this.dependencies.jobs.markRun(job.id, { state: "failed", error: message });
+    this.dependencies.log.event({
+      level: "error",
+      kind: "schedule.failed",
+      summary: `定时任务 ${job.name} 失败：${message}`,
+      ...(turnId ? { traceId: turnId } : {}),
+      chatId: job.chatId,
+      key: job.key,
+      data: { job: job.id, name: job.name, error: message },
+    });
   }
 
   /** 上一次触发（或创建）之后是否有一个已经过去的触发点。返回那个时刻，没有则 null。 */
   #missedSince(job: ScheduledJob): Date | null {
     const now = Date.now();
-    if (job.runAt !== null) return job.runAt <= now ? new Date(job.runAt) : null;
+    if (job.runAt !== null)
+      return job.runAt <= now ? new Date(job.runAt) : null;
     try {
       const since = new Date(job.lastRunAt ?? job.createdAt);
-      const expected = new Cron(job.cron!, { timezone: job.timezone }).nextRun(since);
+      const expected = new Cron(job.cron!, { timezone: job.timezone }).nextRun(
+        since,
+      );
       return expected && expected.getTime() <= now ? expected : null;
-    } catch { return null; }
+    } catch {
+      return null;
+    }
   }
 }
 
 /** 工具侧与装配侧共用：会话键的算法只有一份。 */
-export const scheduleContextKey = (chatId: string, threadId: number | null, scope: 'chat' | 'thread'): string =>
-  contextKey({ chatId, messageThreadId: threadId }, scope);
+export const scheduleContextKey = (
+  chatId: string,
+  threadId: number | null,
+  scope: "chat" | "thread",
+): string => contextKey({ chatId, messageThreadId: threadId }, scope);

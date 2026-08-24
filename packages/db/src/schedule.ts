@@ -1,7 +1,7 @@
-import type { Sqlite } from './database.js';
+import type { Sqlite } from "./database.js";
 
-export type ScheduledJobMode = 'agent' | 'notify';
-export type ScheduledJobState = 'active' | 'done' | 'cancelled';
+export type ScheduledJobMode = "agent" | "notify";
+export type ScheduledJobState = "active" | "done" | "cancelled";
 
 export interface ScheduledJob {
   id: string;
@@ -30,8 +30,17 @@ export interface ScheduledJob {
 }
 
 export interface NewScheduledJob {
-  id: string; key: string; chatId: string; threadId: number | null; createdBy: string; name: string;
-  mode: ScheduledJobMode; cron: string | null; runAt: number | null; timezone: string; payload: string;
+  id: string;
+  key: string;
+  chatId: string;
+  threadId: number | null;
+  createdBy: string;
+  name: string;
+  mode: ScheduledJobMode;
+  cron: string | null;
+  runAt: number | null;
+  timezone: string;
+  payload: string;
   /** 可选（默认 0）：这一位是后加的，既有调用方一处都不用改。 */
   allowSilent?: boolean;
 }
@@ -68,23 +77,40 @@ export class ScheduleRepository {
   /** 重名（同会话、同为活跃）会撞 `ux_sched_name` 抛 SQLITE_CONSTRAINT —— 调用方要把它翻成 `{ok:false}`。 */
   create(input: NewScheduledJob): ScheduledJob {
     const now = Date.now();
-    this.db.prepare(`INSERT INTO scheduled_jobs(id,key,chat_id,thread_id,created_by,name,mode,cron,run_at,timezone,payload,allow_silent,state,created_at,updated_at)
-      VALUES (@id,@key,@chatId,@threadId,@createdBy,@name,@mode,@cron,@runAt,@timezone,@payload,@allowSilent,'active',@now,@now)`)
+    this.db
+      .prepare(
+        `INSERT INTO scheduled_jobs(id,key,chat_id,thread_id,created_by,name,mode,cron,run_at,timezone,payload,allow_silent,state,created_at,updated_at)
+      VALUES (@id,@key,@chatId,@threadId,@createdBy,@name,@mode,@cron,@runAt,@timezone,@payload,@allowSilent,'active',@now,@now)`,
+      )
       .run({ ...input, allowSilent: input.allowSilent ? 1 : 0, now });
     return this.byId(input.id)!;
   }
 
   byId(id: string): ScheduledJob | null {
-    return (this.db.prepare(`SELECT ${COLUMNS} FROM scheduled_jobs WHERE id=?`).get(id) as ScheduledJob | undefined) ?? null;
+    return (
+      (this.db
+        .prepare(`SELECT ${COLUMNS} FROM scheduled_jobs WHERE id=?`)
+        .get(id) as ScheduledJob | undefined) ?? null
+    );
   }
 
   byName(key: string, name: string): ScheduledJob | null {
-    return (this.db.prepare(`SELECT ${COLUMNS} FROM scheduled_jobs WHERE key=? AND name=? AND state='active'`).get(key, name) as ScheduledJob | undefined) ?? null;
+    return (
+      (this.db
+        .prepare(
+          `SELECT ${COLUMNS} FROM scheduled_jobs WHERE key=? AND name=? AND state='active'`,
+        )
+        .get(key, name) as ScheduledJob | undefined) ?? null
+    );
   }
 
   /** 装载用：跨会话取全部活跃任务，只有进程启动时的 `ScheduledJobRunner.load()` 该调它。 */
   listActive(): ScheduledJob[] {
-    return this.db.prepare(`SELECT ${COLUMNS} FROM scheduled_jobs WHERE state='active' ORDER BY created_at`).all() as ScheduledJob[];
+    return this.db
+      .prepare(
+        `SELECT ${COLUMNS} FROM scheduled_jobs WHERE state='active' ORDER BY created_at`,
+      )
+      .all() as ScheduledJob[];
   }
 
   /**
@@ -92,24 +118,46 @@ export class ScheduleRepository {
    * 工具侧一律走 `listByKey`，会话隔离在那一层是硬边界。
    */
   listAll(limit = 500): ScheduledJob[] {
-    return this.db.prepare(`SELECT ${COLUMNS} FROM scheduled_jobs
-      ORDER BY (state='active') DESC,COALESCE(last_run_at,created_at) DESC LIMIT ?`).all(limit) as ScheduledJob[];
+    return this.db
+      .prepare(
+        `SELECT ${COLUMNS} FROM scheduled_jobs
+      ORDER BY (state='active') DESC,COALESCE(last_run_at,created_at) DESC LIMIT ?`,
+      )
+      .all(limit) as ScheduledJob[];
   }
 
   /** 本会话的任务：活跃的在前，结束的按最近排，供 `schedule_list` 与 WebUI 用。 */
   listByKey(key: string, limit = 50): ScheduledJob[] {
-    return this.db.prepare(`SELECT ${COLUMNS} FROM scheduled_jobs WHERE key=?
-      ORDER BY (state='active') DESC,COALESCE(last_run_at,created_at) DESC LIMIT ?`).all(key, limit) as ScheduledJob[];
+    return this.db
+      .prepare(
+        `SELECT ${COLUMNS} FROM scheduled_jobs WHERE key=?
+      ORDER BY (state='active') DESC,COALESCE(last_run_at,created_at) DESC LIMIT ?`,
+      )
+      .all(key, limit) as ScheduledJob[];
   }
 
   countActive(key: string): number {
-    return this.db.prepare("SELECT COUNT(*) FROM scheduled_jobs WHERE key=? AND state='active'").pluck().get(key) as number;
+    return this.db
+      .prepare(
+        "SELECT COUNT(*) FROM scheduled_jobs WHERE key=? AND state='active'",
+      )
+      .pluck()
+      .get(key) as number;
   }
 
   /** 返回是否真的改动了一行：调用方要能区分「取消掉了」和「本来就没有 / 已经结束了」。 */
-  finish(id: string, state: Exclude<ScheduledJobState, 'active'>, lastState?: string): boolean {
-    return this.db.prepare("UPDATE scheduled_jobs SET state=?,last_state=COALESCE(?,last_state),updated_at=? WHERE id=? AND state='active'")
-      .run(state, lastState ?? null, Date.now(), id).changes === 1;
+  finish(
+    id: string,
+    state: Exclude<ScheduledJobState, "active">,
+    lastState?: string,
+  ): boolean {
+    return (
+      this.db
+        .prepare(
+          "UPDATE scheduled_jobs SET state=?,last_state=COALESCE(?,last_state),updated_at=? WHERE id=? AND state='active'",
+        )
+        .run(state, lastState ?? null, Date.now(), id).changes === 1
+    );
   }
 
   /**
@@ -118,10 +166,21 @@ export class ScheduleRepository {
    * `silent_streak` 用一句 `CASE` **就地**算：读一次再写回去在多实例下就是丢更新
    * （docs/01 §3.1 那张表的第一行），而这条计数正是「这条任务已经安静了多久」的唯一凭据。
    */
-  markRun(id: string, input: { state: string; error?: string; at?: number }): void {
-    this.db.prepare(`UPDATE scheduled_jobs SET run_count=run_count+1,last_run_at=@at,last_state=@state,last_error=@error,
-      silent_streak=CASE WHEN @state='silent' THEN silent_streak+1 ELSE 0 END,updated_at=@at WHERE id=@id`)
-      .run({ id, at: input.at ?? Date.now(), state: input.state, error: input.error ?? null });
+  markRun(
+    id: string,
+    input: { state: string; error?: string; at?: number },
+  ): void {
+    this.db
+      .prepare(
+        `UPDATE scheduled_jobs SET run_count=run_count+1,last_run_at=@at,last_state=@state,last_error=@error,
+      silent_streak=CASE WHEN @state='silent' THEN silent_streak+1 ELSE 0 END,updated_at=@at WHERE id=@id`,
+      )
+      .run({
+        id,
+        at: input.at ?? Date.now(),
+        state: input.state,
+        error: input.error ?? null,
+      });
   }
 
   /**
@@ -131,12 +190,29 @@ export class ScheduleRepository {
   update(id: string, patch: ScheduledJobPatch): ScheduledJob | null {
     const assignments: string[] = [];
     const values: Record<string, unknown> = { id, now: Date.now() };
-    if (patch.name !== undefined) { assignments.push('name=@name'); values.name = patch.name; }
-    if (patch.payload !== undefined) { assignments.push('payload=@payload'); values.payload = patch.payload; }
-    if (patch.allowSilent !== undefined) { assignments.push('allow_silent=@allowSilent'); values.allowSilent = patch.allowSilent ? 1 : 0; }
-    if (patch.trigger !== undefined) { assignments.push('cron=@cron', 'run_at=@runAt'); values.cron = patch.trigger.cron; values.runAt = patch.trigger.runAt; }
+    if (patch.name !== undefined) {
+      assignments.push("name=@name");
+      values.name = patch.name;
+    }
+    if (patch.payload !== undefined) {
+      assignments.push("payload=@payload");
+      values.payload = patch.payload;
+    }
+    if (patch.allowSilent !== undefined) {
+      assignments.push("allow_silent=@allowSilent");
+      values.allowSilent = patch.allowSilent ? 1 : 0;
+    }
+    if (patch.trigger !== undefined) {
+      assignments.push("cron=@cron", "run_at=@runAt");
+      values.cron = patch.trigger.cron;
+      values.runAt = patch.trigger.runAt;
+    }
     if (!assignments.length) return null;
-    const changed = this.db.prepare(`UPDATE scheduled_jobs SET ${assignments.join(',')},updated_at=@now WHERE id=@id AND state='active'`).run(values).changes;
+    const changed = this.db
+      .prepare(
+        `UPDATE scheduled_jobs SET ${assignments.join(",")},updated_at=@now WHERE id=@id AND state='active'`,
+      )
+      .run(values).changes;
     return changed === 1 ? this.byId(id) : null;
   }
 
@@ -148,11 +224,18 @@ export class ScheduleRepository {
    * 一条不存在的任务。
    */
   remove(id: string): boolean {
-    return this.db.prepare('DELETE FROM scheduled_jobs WHERE id=?').run(id).changes === 1;
+    return (
+      this.db.prepare("DELETE FROM scheduled_jobs WHERE id=?").run(id)
+        .changes === 1
+    );
   }
 
   /** 保留清理：结束的行留 `schedule.retentionDays` 天，活跃的永不删。 */
   purge(before: number): number {
-    return this.db.prepare("DELETE FROM scheduled_jobs WHERE state<>'active' AND updated_at<?").run(before).changes;
+    return this.db
+      .prepare(
+        "DELETE FROM scheduled_jobs WHERE state<>'active' AND updated_at<?",
+      )
+      .run(before).changes;
   }
 }

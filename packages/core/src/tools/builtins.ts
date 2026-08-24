@@ -1,14 +1,58 @@
-import { z } from 'zod';
-import { mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-import type { AgentManager, Config, ContextEngine, FileTools, MemoryStore, ModelRegistry, QuotaGuard, QuotaReservation, Sandbox, SkillLoader, ToolRegistry, UsageLedger, LogSink } from '@luoli/core';
-import { DEFAULT_WEB_RETRY, NOTE_PREFIX, acpFailure, acpPermissionGate, arbitrateAsk, builtinPolicy, captureImage, enabledAcpAgents, numberLines, readSlice, resolveAcpTarget, runHarness, runSubAgent, selfAuthoringDenyGlobs, webFetch, webSearch, type AcpApprovalBroker, type AcpManager, type AcpSettings, type WebAssetStore, type WebMediaSink, type WebRetryOptions } from '@luoli/core';
-import type { ArchiveRepository, ArchivedMessage, ScopedArchiveRepository } from '@luoli/db';
-import { archiveQuery } from '@luoli/db';
-import { citeArchivedMessages } from './cite.js';
-import { registerScheduleTools, type ScheduleToolDependencies } from './schedule.js';
-import type { Role } from '@luoli/shared';
-import type { ToolExecutionContext } from './registry.js';
+import { z } from "zod";
+import { mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import type {
+  AgentManager,
+  Config,
+  ContextEngine,
+  FileTools,
+  MemoryStore,
+  ModelRegistry,
+  QuotaGuard,
+  QuotaReservation,
+  Sandbox,
+  SkillLoader,
+  ToolRegistry,
+  UsageLedger,
+  LogSink,
+} from "@luoli/core";
+import {
+  DEFAULT_WEB_RETRY,
+  NOTE_PREFIX,
+  acpFailure,
+  acpPermissionGate,
+  arbitrateAsk,
+  builtinPolicy,
+  captureImage,
+  enabledAcpAgents,
+  numberLines,
+  readSlice,
+  resolveAcpTarget,
+  runHarness,
+  runSubAgent,
+  selfAuthoringDenyGlobs,
+  webFetch,
+  webSearch,
+  type AcpApprovalBroker,
+  type AcpManager,
+  type AcpSettings,
+  type WebAssetStore,
+  type WebMediaSink,
+  type WebRetryOptions,
+} from "@luoli/core";
+import type {
+  ArchiveRepository,
+  ArchivedMessage,
+  ScopedArchiveRepository,
+} from "@luoli/db";
+import { archiveQuery } from "@luoli/db";
+import { citeArchivedMessages } from "./cite.js";
+import {
+  registerScheduleTools,
+  type ScheduleToolDependencies,
+} from "./schedule.js";
+import type { Role } from "@luoli/shared";
+import type { ToolExecutionContext } from "./registry.js";
 
 /** 一次投递的落点。thread 必须跟着走，否则话题群里的追发会掉到「General」去。 */
 export interface TelegramTarget {
@@ -31,9 +75,21 @@ export interface TelegramTarget {
  */
 export interface TelegramToolBridge {
   sendMessage(target: TelegramTarget, text: string): Promise<object>;
-  sendPhoto(target: TelegramTarget, absolutePath: string, caption?: string): Promise<object>;
-  sendFile(target: TelegramTarget, absolutePath: string, caption?: string): Promise<object>;
-  react(target: TelegramTarget, messageId: number, emoji: string): Promise<object>;
+  sendPhoto(
+    target: TelegramTarget,
+    absolutePath: string,
+    caption?: string,
+  ): Promise<object>;
+  sendFile(
+    target: TelegramTarget,
+    absolutePath: string,
+    caption?: string,
+  ): Promise<object>;
+  react(
+    target: TelegramTarget,
+    messageId: number,
+    emoji: string,
+  ): Promise<object>;
   pin(target: TelegramTarget, messageId: number): Promise<object>;
   /**
    * ACP 的进度卡片（`docs/05 §3.5.2`）。**这一个是可选的，与上面五个刻意不同** ——
@@ -44,14 +100,24 @@ export interface TelegramToolBridge {
    * 返回 `null` = 这个会话上开不出卡片。**渲染选项由调用方从本轮 `turn.config` 取**，不是这里读
    * 全局快照：`output.*` 在 `PER_CHAT_OVERRIDE_ALLOWLIST` 里，读快照就是把会话级覆盖静默丢掉。
    */
-  openProgressCard?(target: { chatId: string; threadId: number | null; turnId?: string; parentSpanId?: string }, options: {
-    parseMode: 'MarkdownV2' | 'HTML' | 'none'; maxMessageChars: number; intervalMs: number;
-    /** 那台 agent 的 `name`，进卡片表头。不给就退化成一句「外部 agent」。 */
-    agent?: string;
-    /** 会话 root（realpath）。卡片拿它把 agent 报上来的绝对路径相对化 —— 不给就每行多一条长路径。 */
-    dir?: string;
-    thoughts?: boolean;
-  }): Promise<AcpProgressCard | null>;
+  openProgressCard?(
+    target: {
+      chatId: string;
+      threadId: number | null;
+      turnId?: string;
+      parentSpanId?: string;
+    },
+    options: {
+      parseMode: "MarkdownV2" | "HTML" | "none";
+      maxMessageChars: number;
+      intervalMs: number;
+      /** 那台 agent 的 `name`，进卡片表头。不给就退化成一句「外部 agent」。 */
+      agent?: string;
+      /** 会话 root（realpath）。卡片拿它把 agent 报上来的绝对路径相对化 —— 不给就每行多一条长路径。 */
+      dir?: string;
+      thoughts?: boolean;
+    },
+  ): Promise<AcpProgressCard | null>;
 }
 
 /**
@@ -65,7 +131,14 @@ export interface AcpProgressCard {
    * 终帧。**归档只在这里发生一次** —— `ScopedArchiveRepository.append` 是 `INSERT OR IGNORE`，
    * 首帧就归档等于把「正在启动…」永久钉进 `messages` 与 FTS。
    */
-  close(final: { stopReason?: string; error?: string; files: number; failures: number; toolCalls: number; costUsd?: number }): Promise<string>;
+  close(final: {
+    stopReason?: string;
+    error?: string;
+    files: number;
+    failures: number;
+    toolCalls: number;
+    costUsd?: number;
+  }): Promise<string>;
 }
 
 /**
@@ -75,21 +148,33 @@ export interface AcpProgressCard {
  */
 const UPLOAD_TIMEOUT_MS = 300_000;
 /** `python` 的脚本落点（doc §3.3）。带前导点，所以默认不会出现在 `list_dir` / `glob` 里。 */
-const PYTHON_TMP_DIR = '.luoli-tmp';
+const PYTHON_TMP_DIR = ".luoli-tmp";
 
-const target = (context: ToolExecutionContext): TelegramTarget =>
-  ({ chatId: context.turn.chatId, threadId: context.turn.threadId, turnId: context.turn.turnId, ...(context.parentSpanId ? { parentSpanId: context.parentSpanId } : {}) });
+const target = (context: ToolExecutionContext): TelegramTarget => ({
+  chatId: context.turn.chatId,
+  threadId: context.turn.threadId,
+  turnId: context.turn.turnId,
+  ...(context.parentSpanId ? { parentSpanId: context.parentSpanId } : {}),
+});
 /** 取本轮那份合并后的配置：运维在 WebUI 改了上限，下一轮就该生效（`tools.tg` 在热更新白名单里）。 */
-const tgLimits = (context: ToolExecutionContext): Config['tools']['tg'] => (context.turn.config as Readonly<Config>).tools.tg;
+const tgLimits = (context: ToolExecutionContext): Config["tools"]["tg"] =>
+  (context.turn.config as Readonly<Config>).tools.tg;
 
 /**
  * 追发预算按**调用次数**扣，成功与否都算：上限防的是刷屏，而失败重试同样在刷屏。
  * 计数挂在 turn 上而不是模块级 Map —— 轮次对象随轮次消亡，不需要谁去清理。
  */
-function claimExtraMessage(context: ToolExecutionContext): { ok: false; error: string; hint: string } | null {
+function claimExtraMessage(
+  context: ToolExecutionContext,
+): { ok: false; error: string; hint: string } | null {
   const max = tgLimits(context).maxExtraMessagesPerTurn;
   const used = context.turn.extraMessages ?? 0;
-  if (used >= max) return { ok: false, error: 'extra_message_limit_exceeded', hint: `本轮最多追发 ${max} 条（tools.tg.maxExtraMessagesPerTurn）；正文请直接写进回复。` };
+  if (used >= max)
+    return {
+      ok: false,
+      error: "extra_message_limit_exceeded",
+      hint: `本轮最多追发 ${max} 条（tools.tg.maxExtraMessagesPerTurn）；正文请直接写进回复。`,
+    };
   Object.assign(context.turn, { extraMessages: used + 1 });
   return null;
 }
@@ -100,10 +185,12 @@ function claimExtraMessage(context: ToolExecutionContext): { ok: false; error: s
  * 会解析成一个年份，于是它读到一段完全不相干的记录，还以为那就是自己要的位置。
  * 解析失败交回 `false`，让调用方给出一句能照着改的错误，而不是悄悄退回「最近 N 条」。
  */
-function resolveAnchor(anchor: number | string | undefined): { anchorId?: number; anchorDate?: number } | false {
+function resolveAnchor(
+  anchor: number | string | undefined,
+): { anchorId?: number; anchorDate?: number } | false {
   if (anchor === undefined) return {};
-  if (typeof anchor === 'number') return { anchorId: anchor };
-  const trimmed = anchor.trim().replace(/^#/, '');
+  if (typeof anchor === "number") return { anchorId: anchor };
+  const trimmed = anchor.trim().replace(/^#/, "");
   if (/^\d+$/.test(trimmed)) return { anchorId: Number(trimmed) };
   const parsed = Date.parse(trimmed);
   return Number.isNaN(parsed) ? false : { anchorDate: parsed };
@@ -116,9 +203,15 @@ function parseMoment(value: string | undefined): number | null | false {
 }
 
 /** 三个列表型检索工具共用的渲染（doc §3.2 的 `#id [时间] 发言人: 正文` 一行一条）。 */
-function cite(messages: readonly ArchivedMessage[], context: ToolExecutionContext, scope: ScopedArchiveRepository): string[] {
-  return citeArchivedMessages(messages, { timezone: (context.turn.config as Readonly<Config>).general.timezone,
-    resolveReplies: (ids) => scope.archiveIdsByTgMessageIds(ids) });
+function cite(
+  messages: readonly ArchivedMessage[],
+  context: ToolExecutionContext,
+  scope: ScopedArchiveRepository,
+): string[] {
+  return citeArchivedMessages(messages, {
+    timezone: (context.turn.config as Readonly<Config>).general.timezone,
+    resolveReplies: (ids) => scope.archiveIdsByTgMessageIds(ids),
+  });
 }
 
 /**
@@ -129,46 +222,96 @@ function cite(messages: readonly ArchivedMessage[], context: ToolExecutionContex
  */
 function droppedTokenNote(query: string): { note?: string } {
   const dropped = archiveQuery(query).dropped;
-  return dropped.length ? { note: `以下词短于 3 个字、trigram 索引检索不到，本次未参与检索：${dropped.join('、')}。需要按它们找就把它们单独作为 query 再查一次（单独查会走逐字匹配）。` } : {};
+  return dropped.length
+    ? {
+        note: `以下词短于 3 个字、trigram 索引检索不到，本次未参与检索：${dropped.join("、")}。如果有需要，请单独作为 query 再查一次。`,
+      }
+    : {};
 }
 
 /** workspace 内的绝对路径 + 大小闸门。越界、不存在、超限三种都要在调 API 之前变成 `ok:false`。 */
-function resolveOutgoingFile(context: ToolExecutionContext, files: FileTools, path: string): { ok: false; error: string; hint?: string } | { ok: true; absolute: string } {
+function resolveOutgoingFile(
+  context: ToolExecutionContext,
+  files: FileTools,
+  path: string,
+):
+  { ok: false; error: string; hint?: string } | { ok: true; absolute: string } {
   let absolute: string;
-  try { absolute = files.resolve(path); }
-  catch (error) { return { ok: false, error: error instanceof Error ? error.message : 'path_invalid', hint: '只能发工作目录内的文件。' }; }
-  if (!files.exists(path)) return { ok: false, error: 'file_not_found', hint: path };
+  try {
+    absolute = files.resolve(path);
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : "path_invalid",
+      hint: "只能发工作目录内的文件。",
+    };
+  }
+  if (!files.exists(path))
+    return { ok: false, error: "file_not_found", hint: path };
   const bytes = statSync(absolute).size;
   const limit = tgLimits(context).maxFileSendMb * 1024 * 1024;
-  if (bytes > limit) return { ok: false, error: 'file_too_large', hint: `${(bytes / 1024 / 1024).toFixed(1)}MB 超过 ${tgLimits(context).maxFileSendMb}MB 上限（tools.tg.maxFileSendMb）` };
+  if (bytes > limit)
+    return {
+      ok: false,
+      error: "file_too_large",
+      hint: `${(bytes / 1024 / 1024).toFixed(1)}MB 超过 ${tgLimits(context).maxFileSendMb}MB 上限（tools.tg.maxFileSendMb）`,
+    };
   return { ok: true, absolute };
 }
 
-export function registerBuiltins(registry: ToolRegistry, dependencies: { db: import('@luoli/db').Sqlite; filesFor: (workspace: string, role: Role) => FileTools; sandbox: Sandbox; archive: ArchiveRepository; context: ContextEngine; memory: MemoryStore; skills: SkillLoader; agents: AgentManager; models: ModelRegistry; ledger: UsageLedger; log: LogSink; quota?: QuotaGuard; telegram: TelegramToolBridge | null; schedule: ScheduleToolDependencies; maxWebBytes: number; maxAsksPerRun?: number; web?: WebRetryOptions; webSearch?: { provider: '' | 'brave' | 'serper' | 'tavily' | 'exa'; apiKey: string };
-  /**
-   * 抓回来的图片往哪去。**可选**：不给就走「只报类型与大小」那一档 —— 不假装读到了内容
-   * （测试与不配 vision 的部署都落在这里）。`visionAvailable` 每次调用现算，因为它要看的是
-   * **本轮**这个别名支不支持看图，而别名可以被 `set_model` 换掉。
-   *
-   * 收整个 `ToolExecutionContext` 而不只是 `turn`：子 agent 的别名不在 turn 上（它是
-   * `runSubAgent` 的局部变量，经 `agentAlias` 带过来），而这张图要交给的正是它（`docs/04 §5.2`）。
-   */
-  webMedia?: { assets: WebAssetStore; visionAvailable: (context: ToolExecutionContext) => boolean };
-  /**
-   * ACP 客户端（M13）。**可选**：没有它 `spawn_acp` 照旧注册（`main.ts` 那条
-   * 「每个 `TOOL_POLICY` 条目都已注册」的启动断言要求无条件注册）但 `available()` 恒假，
-   * 于是它连模型的工具目录都不进。分段用例不需要起一个真管着子进程的 manager。
-   */
-  acp?: AcpManager;
-  /**
-   * 审批 broker。**只有 ACP 的逐条 permission 用它**（`docs/05 §3.5.3`）：工具自己那道审批走的是
-   * `ToolRegistry` 手里的同一个对象，这里要的是「不是工具调用、但走同一条链」那两个动作。
-   *
-   * **可选，而它的缺席是一道真的门**：`permissionMode === 'ask'` 且没有它时 `spawn_acp` 直接不进
-   * 工具目录（照 `allowedDirs` 为空的同一形态）—— 一个叫 `ask` 的默认值实际在放行，正是
-   * `docs/reviews/16 §5` 说的伪造一道门。
-   */
-  approvals?: AcpApprovalBroker }): void {
+export function registerBuiltins(
+  registry: ToolRegistry,
+  dependencies: {
+    db: import("@luoli/db").Sqlite;
+    filesFor: (workspace: string, role: Role) => FileTools;
+    sandbox: Sandbox;
+    archive: ArchiveRepository;
+    context: ContextEngine;
+    memory: MemoryStore;
+    skills: SkillLoader;
+    agents: AgentManager;
+    models: ModelRegistry;
+    ledger: UsageLedger;
+    log: LogSink;
+    quota?: QuotaGuard;
+    telegram: TelegramToolBridge | null;
+    schedule: ScheduleToolDependencies;
+    maxWebBytes: number;
+    maxAsksPerRun?: number;
+    web?: WebRetryOptions;
+    webSearch?: {
+      provider: "" | "brave" | "serper" | "tavily" | "exa";
+      apiKey: string;
+    };
+    /**
+     * 抓回来的图片往哪去。**可选**：不给就走「只报类型与大小」那一档 —— 不假装读到了内容
+     * （测试与不配 vision 的部署都落在这里）。`visionAvailable` 每次调用现算，因为它要看的是
+     * **本轮**这个别名支不支持看图，而别名可以被 `set_model` 换掉。
+     *
+     * 收整个 `ToolExecutionContext` 而不只是 `turn`：子 agent 的别名不在 turn 上（它是
+     * `runSubAgent` 的局部变量，经 `agentAlias` 带过来），而这张图要交给的正是它（`docs/04 §5.2`）。
+     */
+    webMedia?: {
+      assets: WebAssetStore;
+      visionAvailable: (context: ToolExecutionContext) => boolean;
+    };
+    /**
+     * ACP 客户端（M13）。**可选**：没有它 `spawn_acp` 照旧注册（`main.ts` 那条
+     * 「每个 `TOOL_POLICY` 条目都已注册」的启动断言要求无条件注册）但 `available()` 恒假，
+     * 于是它连模型的工具目录都不进。分段用例不需要起一个真管着子进程的 manager。
+     */
+    acp?: AcpManager;
+    /**
+     * 审批 broker。**只有 ACP 的逐条 permission 用它**（`docs/05 §3.5.3`）：工具自己那道审批走的是
+     * `ToolRegistry` 手里的同一个对象，这里要的是「不是工具调用、但走同一条链」那两个动作。
+     *
+     * **可选，而它的缺席是一道真的门**：`permissionMode === 'ask'` 且没有它时 `spawn_acp` 直接不进
+     * 工具目录（照 `allowedDirs` 为空的同一形态）—— 一个叫 `ask` 的默认值实际在放行，正是
+     * `docs/reviews/16 §5` 说的伪造一道门。
+     */
+    approvals?: AcpApprovalBroker;
+  },
+): void {
   const web = dependencies.web ?? DEFAULT_WEB_RETRY;
   /**
    * 本次调用的图片落地口。**每次调用现建**：`visionAvailable` 判的是本轮**当前**别名的能力位，
@@ -179,11 +322,30 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
   const webMediaSink = (context: ToolExecutionContext): WebMediaSink | null => {
     const media = dependencies.webMedia;
     if (!media) return null;
-    return { capture: (input) => captureImage({ assets: media.assets, appendDelta: (turn, message) => dependencies.context.appendDelta(turn, message as never),
-      visionAvailable: () => media.visionAvailable(context), log: dependencies.log,
-      // 子 agent 那一档：父轮只留文字痕迹、张数按 run 自己数、「注入过图」置在它身上（docs/04 §5.2）。
-      ...(context.subAgent ? { subAgent: { name: context.subAgent.name, images: context.subAgent.images, onInjected: context.subAgent.onMediaInjected } } : {}) },
-    context.turn, input) };
+    return {
+      capture: (input) =>
+        captureImage(
+          {
+            assets: media.assets,
+            appendDelta: (turn, message) =>
+              dependencies.context.appendDelta(turn, message as never),
+            visionAvailable: () => media.visionAvailable(context),
+            log: dependencies.log,
+            // 子 agent 那一档：父轮只留文字痕迹、张数按 run 自己数、「注入过图」置在它身上（docs/04 §5.2）。
+            ...(context.subAgent
+              ? {
+                  subAgent: {
+                    name: context.subAgent.name,
+                    images: context.subAgent.images,
+                    onInjected: context.subAgent.onMediaInjected,
+                  },
+                }
+              : {}),
+          },
+          context.turn,
+          input,
+        ),
+    };
   };
   // 跟 `telegram` 同样是必填：漏传一个 key 就让五个工具永久消失，而
   // 「TOOL_POLICY ↔ 注册表」的启动断言只看注册没注册，一个字都不会报。
@@ -214,18 +376,33 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
    * 已经取消的对话继续烧 token，而没有任何人还在等它的结果（`timeoutMs: null`，注册表那道兜底
    * 的 race 也不会砍它）。
    */
-  const acquireSlot = async (turnId: string, limit: number, abortSignal: AbortSignal): Promise<boolean> => {
+  const acquireSlot = async (
+    turnId: string,
+    limit: number,
+    abortSignal: AbortSignal,
+  ): Promise<boolean> => {
     if (abortSignal.aborted) return false;
-    if ((running.get(turnId) ?? 0) < limit) { running.set(turnId, (running.get(turnId) ?? 0) + 1); return true; }
+    if ((running.get(turnId) ?? 0) < limit) {
+      running.set(turnId, (running.get(turnId) ?? 0) + 1);
+      return true;
+    }
     const queue = waiting.get(turnId) ?? [];
     waiting.set(turnId, queue);
     const admitted = await new Promise<boolean>((resolve) => {
-      const admit = (): void => { abortSignal.removeEventListener('abort', drop); resolve(true); };
+      const admit = (): void => {
+        abortSignal.removeEventListener("abort", drop);
+        resolve(true);
+      };
       // 出队时把自己从队列里摘掉，否则 releaseSlot 会把一个已经放弃的等待者当成「唤醒了一个」，
       // 而真正在排队的那个继续等 —— 槽位就这么漏掉一个。
-      const drop = (): void => { const at = queue.indexOf(admit); if (at >= 0) queue.splice(at, 1); collectSlots(turnId); resolve(false); };
+      const drop = (): void => {
+        const at = queue.indexOf(admit);
+        if (at >= 0) queue.splice(at, 1);
+        collectSlots(turnId);
+        resolve(false);
+      };
       queue.push(admit);
-      abortSignal.addEventListener('abort', drop, { once: true });
+      abortSignal.addEventListener("abort", drop, { once: true });
     });
     if (!admitted) return false;
     running.set(turnId, (running.get(turnId) ?? 0) + 1);
@@ -235,63 +412,248 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
     running.set(turnId, Math.max(0, (running.get(turnId) ?? 1) - 1));
     const next = waiting.get(turnId)?.shift();
     if (next) next();
-    else { waiting.delete(turnId); if (!running.get(turnId)) running.delete(turnId); }
+    else {
+      waiting.delete(turnId);
+      if (!running.get(turnId)) running.delete(turnId);
+    }
   };
   // 两个 web 工具自带预算（单次 timeoutMs × 最多 retries+1 次 + 退避），整体会比
   // `tools.defaultTimeoutMs` 长。给注册表报一份自己的账，别让兜底那道 race 在重试走完前先砍掉。
   const webBudgetMs = (web.retries + 1) * web.timeoutMs + 5000;
-  registry.register({ name: 'read_file', description: '读取工作目录或 skill:// 资源，支持 offset/limit 分页（知道路径要看内容时用它，不要为此起 bash 里的 cat/head）。正文每行带 `行号<TAB>` 前缀，那只是给你定位用的坐标，不是文件内容：写回文件时（edit_file 的 oldString/newString、write_file 的 content）一律不能带它。', inputSchema: z.object({ path: z.string(), offset: z.number().int().nonnegative().optional(), limit: z.number().int().positive().optional() }), policy: builtinPolicy('read_file'), sourcePriority: 100, untrustedOutput: true,
+  registry.register({
+    name: "read_file",
+    description:
+      "读取工作目录或 skill:// 资源，支持 offset/limit 分页（知道路径要看内容时用它，不要为此起 bash 里的 cat/head）。正文每行带 `行号<TAB>` 前缀，那只是给你定位用的坐标，不是文件内容：写回文件时（edit_file 的 oldString/newString、write_file 的 content）一律不能带它。",
+    inputSchema: z.object({
+      path: z.string(),
+      offset: z.number().int().nonnegative().optional(),
+      limit: z.number().int().positive().optional(),
+    }),
+    policy: builtinPolicy("read_file"),
+    sourcePriority: 100,
+    untrustedOutput: true,
     execute: (input, context) => {
-      if (!input.path.startsWith('skill://')) return dependencies.filesFor(context.workspace, context.turn.effectiveRole).read(input.path, input.offset, input.limit);
-      const path = dependencies.skills.resolveResource(input.path, context.turn.effectiveRole);
+      if (!input.path.startsWith("skill://"))
+        return dependencies
+          .filesFor(context.workspace, context.turn.effectiveRole)
+          .read(input.path, input.offset, input.limit);
+      const path = dependencies.skills.resolveResource(
+        input.path,
+        context.turn.effectiveRole,
+      );
       // 目录判据这一支得自己判：它压根不经过 `FileTools`（理由那一份在 `FileTools.#isDirectory` 上，
       // 一句话是「目录的 size 在 btrfs 上是 0，于是 readSync 从不被调用、EISDIR 永远不抛」）。
       // 不把 `readSlice` 改成会抛：那个函数还有别的调用方。错误码与那边同一个。
       let directory = false;
-      try { directory = statSync(path).isDirectory(); } catch { /* 不存在：readSlice 随后照旧如实抛 ENOENT */ }
-      if (directory) return { ok: false, error: 'path_is_directory', hint: `${input.path} 是目录不是文件；这个 skill 里有哪些文件看 load_skill 交回的 files 清单` };
+      try {
+        directory = statSync(path).isDirectory();
+      } catch {
+        /* 不存在：readSlice 随后照旧如实抛 ENOENT */
+      }
+      if (directory)
+        return {
+          ok: false,
+          error: "path_is_directory",
+          hint: `${input.path} 是目录不是文件；这个 skill 里有哪些文件看 load_skill 交回的 files 清单`,
+        };
       const offset = input.offset ?? 0;
       // skill 资源同样受 `tools.fs.maxReadBytes` 管。此前这一支写死 256KB 且照收模型传的任意
       // `limit`，于是 skill 目录里一个大文件能整份读进来 —— 两条读路径的预算必须是同一份，
       // 现在连读法也是同一份（`readSlice` 定位读，docs/27 · R-02）。
-      const budget = (context.turn.config as Readonly<Config>).tools.fs.maxReadBytes;
-      const slice = readSlice(path, offset, Math.min(input.limit ?? budget, budget));
+      const budget = (context.turn.config as Readonly<Config>).tools.fs
+        .maxReadBytes;
+      const slice = readSlice(
+        path,
+        offset,
+        Math.min(input.limit ?? budget, budget),
+      );
       const more = offset + slice.read < slice.size;
-      return { ok: true, path: input.path, content: numberLines(slice.content, slice.firstLine), offset, bytes: Buffer.byteLength(slice.content), truncated: more, nextOffset: more ? offset + slice.read : null };
-    } });
-  registry.register({ name: 'list_dir', description: '列出工作目录下有什么（只想知道目录结构时用它，不要为此起 bash）。depth 默认 1，别一上来就摊开五层。', inputSchema: z.object({ path: z.string().default('.'), depth: z.number().int().min(1).max(5).default(1) }), policy: builtinPolicy('list_dir'), sourcePriority: 100,
-    execute: (input, context) => dependencies.filesFor(context.workspace, context.turn.effectiveRole).list(input.path, input.depth) });
-  registry.register({ name: 'glob', description: '按文件名形状找文件（知道名字或后缀、不知道在哪时用它；知道内容里有什么字就用 grep）。', inputSchema: z.object({ pattern: z.string(), path: z.string().default('.') }), policy: builtinPolicy('glob'), sourcePriority: 100, untrustedOutput: true,
-    execute: (input, context) => dependencies.filesFor(context.workspace, context.turn.effectiveRole).glob(input.pattern, input.path) });
-  registry.register({ name: 'grep', description: '按内容搜工作目录里的文本（知道要找什么字、不知道在哪个文件时用它，不要为此起 bash 里的 rg/grep）。glob 限定文件名，contextLines 附带命中行前后各若干行。', inputSchema: z.object({ pattern: z.string(), path: z.string().default('.'), glob: z.string().optional(), contextLines: z.number().int().min(0).max(10).default(0), ignoreCase: z.boolean().default(false) }), policy: builtinPolicy('grep'), sourcePriority: 100, untrustedOutput: true,
-    execute: (input, context) => dependencies.filesFor(context.workspace, context.turn.effectiveRole).grep(input.pattern, input.path, input.ignoreCase, input.glob, input.contextLines) });
-  registry.register({ name: 'write_file', description: '原子写入工作目录文件，覆盖前自动备份。', inputSchema: z.object({ path: z.string(), content: z.string() }), policy: builtinPolicy('write_file'), sourcePriority: 100,
-    approvalTargetExists: (input, context) => dependencies.filesFor(context.workspace, context.turn.effectiveRole).exists((input as { path: string }).path),
-    execute: (input, context) => dependencies.filesFor(context.workspace, context.turn.effectiveRole).write(input.path, input.content) });
-  registry.register({ name: 'edit_file', description: '以唯一 oldString 修改文件。', inputSchema: z.object({ path: z.string(), oldString: z.string(), newString: z.string(), replaceAll: z.boolean().default(false) }), policy: builtinPolicy('edit_file'), sourcePriority: 100,
+      return {
+        ok: true,
+        path: input.path,
+        content: numberLines(slice.content, slice.firstLine),
+        offset,
+        bytes: Buffer.byteLength(slice.content),
+        truncated: more,
+        nextOffset: more ? offset + slice.read : null,
+      };
+    },
+  });
+  registry.register({
+    name: "list_dir",
+    description: "列出工作目录的文件内容",
+    inputSchema: z.object({
+      path: z.string().default("."),
+      depth: z.number().int().min(1).max(5).default(1),
+    }),
+    policy: builtinPolicy("list_dir"),
+    sourcePriority: 100,
+    execute: (input, context) =>
+      dependencies
+        .filesFor(context.workspace, context.turn.effectiveRole)
+        .list(input.path, input.depth),
+  });
+  registry.register({
+    name: "glob",
+    description:
+      "按文件名形状找文件（知道名字或后缀、不知道在哪时用它；知道内容里有什么字就用 grep）。",
+    inputSchema: z.object({
+      pattern: z.string(),
+      path: z.string().default("."),
+    }),
+    policy: builtinPolicy("glob"),
+    sourcePriority: 100,
+    untrustedOutput: true,
+    execute: (input, context) =>
+      dependencies
+        .filesFor(context.workspace, context.turn.effectiveRole)
+        .glob(input.pattern, input.path),
+  });
+  registry.register({
+    name: "grep",
+    description:
+      "按内容搜工作目录里的文本（知道要找什么字、不知道在哪个文件时用它，不要为此起 bash 里的 rg/grep）。glob 限定文件名，contextLines 附带命中行前后各若干行。",
+    inputSchema: z.object({
+      pattern: z.string(),
+      path: z.string().default("."),
+      glob: z.string().optional(),
+      contextLines: z.number().int().min(0).max(10).default(0),
+      ignoreCase: z.boolean().default(false),
+    }),
+    policy: builtinPolicy("grep"),
+    sourcePriority: 100,
+    untrustedOutput: true,
+    execute: (input, context) =>
+      dependencies
+        .filesFor(context.workspace, context.turn.effectiveRole)
+        .grep(
+          input.pattern,
+          input.path,
+          input.ignoreCase,
+          input.glob,
+          input.contextLines,
+        ),
+  });
+  registry.register({
+    name: "write_file",
+    description: "写入工作目录文件，覆盖前会自动备份。",
+    inputSchema: z.object({ path: z.string(), content: z.string() }),
+    policy: builtinPolicy("write_file"),
+    sourcePriority: 100,
+    approvalTargetExists: (input, context) =>
+      dependencies
+        .filesFor(context.workspace, context.turn.effectiveRole)
+        .exists((input as { path: string }).path),
+    execute: (input, context) =>
+      dependencies
+        .filesFor(context.workspace, context.turn.effectiveRole)
+        .write(input.path, input.content),
+  });
+  registry.register({
+    name: "edit_file",
+    description: "以唯一 oldString 修改文件。",
+    inputSchema: z.object({
+      path: z.string(),
+      oldString: z.string(),
+      newString: z.string(),
+      replaceAll: z.boolean().default(false),
+    }),
+    policy: builtinPolicy("edit_file"),
+    sourcePriority: 100,
     // 与 `write_file` 同一个判据（`when: 'target_exists'`）：edit 的最后一步就是 write，
     // 而它作用的对象**总是**一个已存在的文件（docs/27 · C-03）。
-    approvalTargetExists: (input, context) => dependencies.filesFor(context.workspace, context.turn.effectiveRole).exists((input as { path: string }).path),
-    execute: (input, context) => dependencies.filesFor(context.workspace, context.turn.effectiveRole).edit(input.path, input.oldString, input.newString, input.replaceAll) });
-  registry.register({ name: 'delete_file', description: '将文件移入回收站，不物理删除。删目录要显式 recursive:true，且只允许作用在二级及更深的路径。', inputSchema: z.object({ path: z.string(), recursive: z.boolean().default(false) }), policy: builtinPolicy('delete_file'), sourcePriority: 100,
-    execute: (input, context) => dependencies.filesFor(context.workspace, context.turn.effectiveRole).remove(input.path, input.recursive) });
-  registry.register({ name: 'move_file', description: '移动工作目录文件，不覆盖目标。', inputSchema: z.object({ from: z.string(), to: z.string() }), policy: builtinPolicy('move_file'), sourcePriority: 100,
-    approvalTargetExists: (input, context) => dependencies.filesFor(context.workspace, context.turn.effectiveRole).exists((input as { to: string }).to),
-    execute: (input, context) => dependencies.filesFor(context.workspace, context.turn.effectiveRole).move(input.from, input.to) });
+    approvalTargetExists: (input, context) =>
+      dependencies
+        .filesFor(context.workspace, context.turn.effectiveRole)
+        .exists((input as { path: string }).path),
+    execute: (input, context) =>
+      dependencies
+        .filesFor(context.workspace, context.turn.effectiveRole)
+        .edit(input.path, input.oldString, input.newString, input.replaceAll),
+  });
+  registry.register({
+    name: "delete_file",
+    description:
+      "将文件移入回收站，不物理删除。删目录要显式 recursive:true，且只允许作用在二级及更深的路径。",
+    inputSchema: z.object({
+      path: z.string(),
+      recursive: z.boolean().default(false),
+    }),
+    policy: builtinPolicy("delete_file"),
+    sourcePriority: 100,
+    execute: (input, context) =>
+      dependencies
+        .filesFor(context.workspace, context.turn.effectiveRole)
+        .remove(input.path, input.recursive),
+  });
+  registry.register({
+    name: "move_file",
+    description: "移动工作目录文件，不覆盖目标。",
+    inputSchema: z.object({ from: z.string(), to: z.string() }),
+    policy: builtinPolicy("move_file"),
+    sourcePriority: 100,
+    approvalTargetExists: (input, context) =>
+      dependencies
+        .filesFor(context.workspace, context.turn.effectiveRole)
+        .exists((input as { to: string }).to),
+    execute: (input, context) =>
+      dependencies
+        .filesFor(context.workspace, context.turn.effectiveRole)
+        .move(input.from, input.to),
+  });
   // `timeoutMs: null` = 这个工具自己管超时。sandbox.run 会按 `tools.exec.maxTimeoutMs`（默认 300s）
   // kill 进程，比 `tools.defaultTimeoutMs` 长得多；套上兜底那道 race 只会把正常的长命令砍成
   // `tool_timeout`，而进程还在后台跑着。
   // `timeoutMs` 的上界写进 schema（doc §3.3）：`sandbox.run` 反正会按 `maxTimeoutMs` 夹一次，
   // 但夹在里面模型就永远不知道自己要的 30 分钟被改成了 5 分钟，然后据此去解释「命令没跑完」。
-  const bashSchema = (max: number) => z.object({ command: z.string(), timeoutMs: z.number().int().positive().max(max).optional(), description: z.string() });
-  const pythonSchema = (max: number) => z.object({ code: z.string(), timeoutMs: z.number().int().positive().max(max).optional(), description: z.string() });
-  const execMax = (context: ToolExecutionContext): number => (context.turn.config as Readonly<Config>).tools.exec.maxTimeoutMs;
-  registry.register({ name: 'bash', description: '在工作目录执行命令；非 owner 必须使用可用沙箱。留给真正需要执行的事（跑脚本、装依赖、处理数据）：读文件用 read_file、搜内容用 grep、找文件用 glob、看目录用 list_dir —— 那些工具带路径拦截、分页和统一的引用格式，用 cat/rg/ls 绕过去出错时也更难说清坏在哪一步。', inputSchema: bashSchema(300_000), inputSchemaFor: (context) => bashSchema(execMax(context)), policy: builtinPolicy('bash'), sourcePriority: 100, timeoutMs: null,
-    available: (role, context) => dependencies.sandbox.plan(role, context.workspace).allowed,
+  const bashSchema = (max: number) =>
+    z.object({
+      command: z.string(),
+      timeoutMs: z.number().int().positive().max(max).optional(),
+      description: z.string(),
+    });
+  const pythonSchema = (max: number) =>
+    z.object({
+      code: z.string(),
+      timeoutMs: z.number().int().positive().max(max).optional(),
+      description: z.string(),
+    });
+  const execMax = (context: ToolExecutionContext): number =>
+    (context.turn.config as Readonly<Config>).tools.exec.maxTimeoutMs;
+  registry.register({
+    name: "bash",
+    description:
+      "在工作目录执行命令；非 owner 必须使用可用沙箱。留给真正需要执行的事（跑脚本、装依赖、处理数据）：读文件用 read_file、搜内容用 grep、找文件用 glob、看目录用 list_dir —— 那些工具带路径拦截、分页和统一的引用格式，用 cat/rg/ls 绕过去出错时也更难说清坏在哪一步。",
+    inputSchema: bashSchema(300_000),
+    inputSchemaFor: (context) => bashSchema(execMax(context)),
+    policy: builtinPolicy("bash"),
+    sourcePriority: 100,
+    timeoutMs: null,
+    available: (role, context) =>
+      dependencies.sandbox.plan(role, context.workspace).allowed,
     // `chatId` 显式传：持久容器按会话分（docs/05 §5.5），不传就退回一次性容器。
-    execute: async (input, context) => dependencies.sandbox.run(input.command, context.turn.effectiveRole, context.workspace, context.turn.abortSignal, input.timeoutMs, context.turn.turnId, { chatId: context.turn.chatId }) });
-  registry.register({ name: 'python', description: '在工作目录执行 Python 代码；非 owner 必须使用可用沙箱。留给真正需要计算或处理数据的事：单纯读文件 / 搜内容 / 列目录一律走 read_file / grep / glob / list_dir。', inputSchema: pythonSchema(300_000), inputSchemaFor: (context) => pythonSchema(execMax(context)), policy: builtinPolicy('python'), sourcePriority: 100, timeoutMs: null,
-    available: (role, context) => dependencies.sandbox.plan(role, context.workspace).allowed,
+    execute: async (input, context) =>
+      dependencies.sandbox.run(
+        input.command,
+        context.turn.effectiveRole,
+        context.workspace,
+        context.turn.abortSignal,
+        input.timeoutMs,
+        context.turn.turnId,
+        { chatId: context.turn.chatId },
+      ),
+  });
+  registry.register({
+    name: "python",
+    description:
+      "在工作目录执行 Python 代码；非 owner 必须使用可用沙箱。留给真正需要计算或处理数据的事：单纯读文件 / 搜内容 / 列目录一律走 read_file / grep / glob / list_dir。",
+    inputSchema: pythonSchema(300_000),
+    inputSchemaFor: (context) => pythonSchema(execMax(context)),
+    policy: builtinPolicy("python"),
+    sourcePriority: 100,
+    timeoutMs: null,
+    available: (role, context) =>
+      dependencies.sandbox.plan(role, context.workspace).allowed,
     execute: async (input, context) => {
       // 落成临时文件再跑（doc §3.3），不用 heredoc：`python3 - <<'PY'` 里正文只要出现一行 `PY`
       // 就把脚本从那里截断，而 stdin 整条被 heredoc 占着 —— 脚本里的 `input()` 读到的是自己
@@ -306,100 +668,312 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
       const name = `${crypto.randomUUID()}.py`;
       mkdirSync(directory, { recursive: true, mode: 0o700 });
       writeFileSync(join(directory, name), input.code, { mode: 0o600 });
-      try { return await dependencies.sandbox.run(`python3 ${JSON.stringify(`${PYTHON_TMP_DIR}/${name}`)}`, context.turn.effectiveRole, context.workspace, context.turn.abortSignal, input.timeoutMs, context.turn.turnId, { chatId: context.turn.chatId }); }
-      finally { try { rmSync(join(directory, name)); } catch { /* 沙箱里删掉了、或整个 workspace 被清了 */ } }
-    } });
+      try {
+        return await dependencies.sandbox.run(
+          `python3 ${JSON.stringify(`${PYTHON_TMP_DIR}/${name}`)}`,
+          context.turn.effectiveRole,
+          context.workspace,
+          context.turn.abortSignal,
+          input.timeoutMs,
+          context.turn.turnId,
+          { chatId: context.turn.chatId },
+        );
+      } finally {
+        try {
+          rmSync(join(directory, name));
+        } catch {
+          /* 沙箱里删掉了、或整个 workspace 被清了 */
+        }
+      }
+    },
+  });
   // 四个 `tools.archive.*Limit` 从这里生效。走 `inputSchemaFor` 而不是注册期固定：那是**每轮**
   // 取一次 `turn.config`，所以热更新和 perChat 覆盖都能落到模型看到的那份 schema 上。
-  const archiveLimits = (context: ToolExecutionContext): Config['tools']['archive'] => (context.turn.config as Readonly<Config>).tools.archive;
+  const archiveLimits = (
+    context: ToolExecutionContext,
+  ): Config["tools"]["archive"] =>
+    (context.turn.config as Readonly<Config>).tools.archive;
   /**
    * 回忆隔断（`context.recallBarrier`）：清空上下文那一刻的 `messages.id`，0 = 不设限。
    * 下限灌进 SQL 而不是过滤返回值 —— 后者会让 `limit:20` 先取满再被削短，模型看到的是
    * 「一共只有这么几条」。开关每次调用现读，所以改完下一次工具调用就生效。
    */
   const recallFloor = (context: ToolExecutionContext): number =>
-    (context.turn.config as Readonly<Config>).context.recallBarrier ? dependencies.context.recallFloor(context.turn.key) : 0;
+    (context.turn.config as Readonly<Config>).context.recallBarrier
+      ? dependencies.context.recallFloor(context.turn.key)
+      : 0;
   /**
    * **隔断削短了结果就必须说出来。** 不说的话模型拿到的是一段没有更早历史的归档，而它会把这个
    * 当成「本来就没有」——照 `droppedTokenNote` 同一条先例（沉默的降级等于假象）。
    */
-  const barrierNote = (floor: number): { recallBarrier?: string } => floor > 0
-    ? { recallBarrier: `上下文在 #${floor} 之后被清空过，那之前的消息不在检索范围内（context.recallBarrier 开着）。用户提起更早的事，请让他重说一次。` }
-    : {};
-  const limitField = (fallback: number, max: number) => z.number().int().min(1).max(max).default(Math.min(fallback, max));
-  const searchSchema = (limits: { defaultSearchLimit: number; maxSearchLimit: number }) =>
-    z.object({ query: z.string(), from: z.string().optional(), after: z.string().optional(), before: z.string().optional(), kind: z.string().optional(),
-      limit: limitField(limits.defaultSearchLimit, limits.maxSearchLimit) });
-  const adminSearchSchema = (limits: { defaultSearchLimit: number; maxSearchLimit: number }) =>
-    z.object({ query: z.string(), limit: limitField(limits.defaultSearchLimit, limits.maxSearchLimit) });
-  const readSchema = (limits: { defaultReadLimit: number; maxReadLimit: number }) =>
-    z.object({ anchor: z.union([z.number().int().positive(), z.string().min(1)]).optional(), direction: z.enum(['before', 'after', 'around']).default('before'),
-      limit: limitField(limits.defaultReadLimit, limits.maxReadLimit) });
-  registry.register({ name: 'search_messages', description: '在当前会话内搜索聊天记录；可按发言人、时间区间、消息类型过滤。', inputSchema: searchSchema({ defaultSearchLimit: 20, maxSearchLimit: 100 }),
-    inputSchemaFor: (context) => searchSchema(archiveLimits(context)), policy: builtinPolicy('search_messages'), sourcePriority: 100, untrustedOutput: true,
+  const barrierNote = (floor: number): { recallBarrier?: string } =>
+    floor > 0
+      ? {
+          recallBarrier: `上下文在 #${floor} 之后被清空过，那之前的消息不在检索范围内。如果用户提起更早的事，请让他重说一次。`,
+        }
+      : {};
+  const limitField = (fallback: number, max: number) =>
+    z.number().int().min(1).max(max).default(Math.min(fallback, max));
+  const searchSchema = (limits: {
+    defaultSearchLimit: number;
+    maxSearchLimit: number;
+  }) =>
+    z.object({
+      query: z.string(),
+      from: z.string().optional(),
+      after: z.string().optional(),
+      before: z.string().optional(),
+      kind: z.string().optional(),
+      limit: limitField(limits.defaultSearchLimit, limits.maxSearchLimit),
+    });
+  const adminSearchSchema = (limits: {
+    defaultSearchLimit: number;
+    maxSearchLimit: number;
+  }) =>
+    z.object({
+      query: z.string(),
+      limit: limitField(limits.defaultSearchLimit, limits.maxSearchLimit),
+    });
+  const readSchema = (limits: {
+    defaultReadLimit: number;
+    maxReadLimit: number;
+  }) =>
+    z.object({
+      anchor: z
+        .union([z.number().int().positive(), z.string().min(1)])
+        .optional(),
+      direction: z.enum(["before", "after", "around"]).default("before"),
+      limit: limitField(limits.defaultReadLimit, limits.maxReadLimit),
+    });
+  registry.register({
+    name: "search_messages",
+    description:
+      "在当前会话内搜索聊天记录；可按发言人、时间区间、消息类型过滤。",
+    inputSchema: searchSchema({ defaultSearchLimit: 20, maxSearchLimit: 100 }),
+    inputSchemaFor: (context) => searchSchema(archiveLimits(context)),
+    policy: builtinPolicy("search_messages"),
+    sourcePriority: 100,
+    untrustedOutput: true,
     execute: (input, context) => {
       const after = parseMoment(input.after);
       const before = parseMoment(input.before);
-      if (after === false || before === false) return { ok: false, error: 'invalid_time_filter', hint: 'after / before 要写成 ISO 时间，例如 2026-08-14 或 2026-08-14T10:02:00Z' };
-      const scope = dependencies.archive.scope(context.turn.chatId, context.turn.threadId);
+      if (after === false || before === false)
+        return {
+          ok: false,
+          error: "invalid_time_filter",
+          hint: "after / before 要写成 ISO 时间，例如 2026-08-14 或 2026-08-14T10:02:00Z",
+        };
+      const scope = dependencies.archive.scope(
+        context.turn.chatId,
+        context.turn.threadId,
+      );
       const floor = recallFloor(context);
-      const messages = cite(scope.search(input.query, input.limit, { from: input.from ?? null, after, before, kind: input.kind ?? null, minId: floor || null }), context, scope);
-      return { ok: true, messages, ...droppedTokenNote(input.query), ...barrierNote(floor) };
-    } });
-  registry.register({ name: 'read_messages', description: '按顺序读取当前会话聊天记录。anchor 可以是消息 id 或 ISO 时间，direction 决定往哪边读；不给 anchor 就是最近若干条。', inputSchema: readSchema({ defaultReadLimit: 50, maxReadLimit: 200 }),
-    inputSchemaFor: (context) => readSchema(archiveLimits(context)), policy: builtinPolicy('read_messages'), sourcePriority: 100, untrustedOutput: true,
+      const messages = cite(
+        scope.search(input.query, input.limit, {
+          from: input.from ?? null,
+          after,
+          before,
+          kind: input.kind ?? null,
+          minId: floor || null,
+        }),
+        context,
+        scope,
+      );
+      return {
+        ok: true,
+        messages,
+        ...droppedTokenNote(input.query),
+        ...barrierNote(floor),
+      };
+    },
+  });
+  registry.register({
+    name: "read_messages",
+    description:
+      "按顺序读取当前会话聊天记录。anchor 可以是消息 id 或 ISO 时间，direction 参数用于决定查询方向是更早还是更晚的聊天记录；不给 anchor 就是最近若干条。",
+    inputSchema: readSchema({ defaultReadLimit: 50, maxReadLimit: 200 }),
+    inputSchemaFor: (context) => readSchema(archiveLimits(context)),
+    policy: builtinPolicy("read_messages"),
+    sourcePriority: 100,
+    untrustedOutput: true,
     execute: (input, context) => {
       const anchor = resolveAnchor(input.anchor);
-      if (anchor === false) return { ok: false, error: 'invalid_anchor', hint: 'anchor 要么是消息 id（如 12841 或 #12841），要么是 ISO 时间（如 2026-08-14T10:02:00Z）' };
-      const scope = dependencies.archive.scope(context.turn.chatId, context.turn.threadId);
+      if (anchor === false)
+        return {
+          ok: false,
+          error: "invalid_anchor",
+          hint: "anchor 要么是消息 id（如 12841 或 #12841），要么是 ISO 时间（如 2026-08-14T10:02:00Z）",
+        };
+      const scope = dependencies.archive.scope(
+        context.turn.chatId,
+        context.turn.threadId,
+      );
       const floor = recallFloor(context);
-      return { ok: true, messages: cite(scope.window({ ...anchor, direction: input.direction, limit: input.limit, minId: floor }), context, scope), ...barrierNote(floor) };
-    } });
-  registry.register({ name: 'get_message', description: '读取当前会话的单条归档消息。', inputSchema: z.object({ messageId: z.number().int().positive() }), policy: builtinPolicy('get_message'), sourcePriority: 100, untrustedOutput: true,
+      return {
+        ok: true,
+        messages: cite(
+          scope.window({
+            ...anchor,
+            direction: input.direction,
+            limit: input.limit,
+            minId: floor,
+          }),
+          context,
+          scope,
+        ),
+        ...barrierNote(floor),
+      };
+    },
+  });
+  registry.register({
+    name: "get_message",
+    description: "读取当前会话的单条归档消息。",
+    inputSchema: z.object({ messageId: z.number().int().positive() }),
+    policy: builtinPolicy("get_message"),
+    sourcePriority: 100,
+    untrustedOutput: true,
     execute: (input, context) => {
       const floor = recallFloor(context);
-      const message = dependencies.archive.scope(context.turn.chatId, context.turn.threadId).byId(input.messageId, floor);
+      const message = dependencies.archive
+        .scope(context.turn.chatId, context.turn.threadId)
+        .byId(input.messageId, floor);
       // 被隔断挡住时**不能**回 `message: null`：那和「这条消息不存在」长得一模一样，而模型会据此
       // 换个 id 再试一遍。如实说是被挡住的（「摘除比伪造安全」，docs/16 §5）。
-      if (!message && floor > 0 && input.messageId <= floor) return { ok: false, error: 'recall_barrier', hint: barrierNote(floor).recallBarrier };
+      if (!message && floor > 0 && input.messageId <= floor)
+        return {
+          ok: false,
+          error: "recall_barrier",
+          hint: barrierNote(floor).recallBarrier,
+        };
       return { ok: true, message };
-    } });
+    },
+  });
   // 跨会话检索**不给**过滤参数：`adminSearchAll` 不认它们，而收下一个参数再默默忽略比没有这个
   // 参数更糟 —— 模型会以为自己已经按人过滤过了（「摘除比伪造安全」，docs/16 §5）。
-  registry.register({ name: 'admin_search_messages', description: '跨会话搜索聊天记录，仅 owner。', inputSchema: adminSearchSchema({ defaultSearchLimit: 20, maxSearchLimit: 100 }),
-    inputSchemaFor: (context) => adminSearchSchema(archiveLimits(context)), policy: builtinPolicy('admin_search_messages'), sourcePriority: 100, untrustedOutput: true,
+  registry.register({
+    name: "admin_search_messages",
+    description: "跨会话搜索聊天记录，仅 owner。",
+    inputSchema: adminSearchSchema({
+      defaultSearchLimit: 20,
+      maxSearchLimit: 100,
+    }),
+    inputSchemaFor: (context) => adminSearchSchema(archiveLimits(context)),
+    policy: builtinPolicy("admin_search_messages"),
+    sourcePriority: 100,
+    untrustedOutput: true,
     // 跨会话的行不带 thread 作用域，回复标记换不出归档 id，所以只带 `[chat:<id>]` 不带 `↩︎`。
     // 短词丢弃的 note 与 `search_messages` 同办：跨会话检索走的是同一个 `archiveQuery`，
     // 只在其中一个工具上说出来，等于让 owner 那条路继续拿到「我全查过了」的假象。
-    execute: (input, context) => ({ ok: true, messages: citeArchivedMessages(dependencies.archive.adminSearchAll(input.query, input.limit),
-      { timezone: (context.turn.config as Readonly<Config>).general.timezone, withChat: true }), ...droppedTokenNote(input.query) }) });
+    execute: (input, context) => ({
+      ok: true,
+      messages: citeArchivedMessages(
+        dependencies.archive.adminSearchAll(input.query, input.limit),
+        {
+          timezone: (context.turn.config as Readonly<Config>).general.timezone,
+          withChat: true,
+        },
+      ),
+      ...droppedTokenNote(input.query),
+    }),
+  });
   // 只回摘要（窗口区间 / 条数 / tokens / 认领水位）。带上整份历史时输出会被 `maxOutputBytes`
   // 从中间截断，模型拿到的是一段掐断的 JSON —— 前半是最早的历史、后半是 commit 列表，
   // 既烧 token 又没有信息（docs/27 · R-03）。逐条历史在 WebUI 的会话页。
-  registry.register({ name: 'context_stats', description: '读取当前上下文窗口和提交状态的摘要（窗口 ordinal 区间、消息数、tokens、背景认领水位）。不含逐条历史。', inputSchema: z.object({}), policy: builtinPolicy('context_stats'), sourcePriority: 100,
-    execute: (_input, context) => ({ ok: true, ...dependencies.context.stats(context.turn.key) }) });
-  const memoryScopeSchema = (isPrivate: boolean) => z.object({ scope: isPrivate ? z.enum(['pubmemory', 'primemory']) : z.enum(['pubmemory']) });
-  registry.register({ name: 'memory_read', description: '读取公开记忆或当前用户私有记忆。', inputSchema: memoryScopeSchema(true),
-    inputSchemaFor: (context) => memoryScopeSchema(context.turn.isPrivate), policy: builtinPolicy('memory_read'), sourcePriority: 100,
-    execute: (input, context) => ({ ok: true, content: dependencies.memory.read(input.scope, input.scope === 'primemory' ? context.turn.initiatorUserId : null, context.turn.effectiveRole, context.turn.initiatorUserId, context.turn.isPrivate).content }) });
-  const memoryWriteSchema = (isPrivate: boolean) => z.object({ scope: isPrivate ? z.enum(['pubmemory', 'primemory']) : z.enum(['pubmemory']), section: z.string(), content: z.string().max(2000), reason: z.string() });
-  registry.register({ name: 'memory_write', description: '把长期有效事实写入公开或当前用户私有记忆，一轮结束时批量落盘。', inputSchema: memoryWriteSchema(true),
-    inputSchemaFor: (context) => memoryWriteSchema(context.turn.isPrivate), policy: builtinPolicy('memory_write'), sourcePriority: 100,
+  registry.register({
+    name: "context_stats",
+    description:
+      "读取当前上下文窗口和提交状态的摘要（窗口 ordinal 区间、消息数、tokens、上下文窗口）。",
+    inputSchema: z.object({}),
+    policy: builtinPolicy("context_stats"),
+    sourcePriority: 100,
+    execute: (_input, context) => ({
+      ok: true,
+      ...dependencies.context.stats(context.turn.key),
+    }),
+  });
+  const memoryScopeSchema = (isPrivate: boolean) =>
+    z.object({
+      scope: isPrivate
+        ? z.enum(["pubmemory", "primemory"])
+        : z.enum(["pubmemory"]),
+    });
+  registry.register({
+    name: "memory_read",
+    description: "读取公开记忆或当前用户私有记忆。",
+    inputSchema: memoryScopeSchema(true),
+    inputSchemaFor: (context) => memoryScopeSchema(context.turn.isPrivate),
+    policy: builtinPolicy("memory_read"),
+    sourcePriority: 100,
+    execute: (input, context) => ({
+      ok: true,
+      content: dependencies.memory.read(
+        input.scope,
+        input.scope === "primemory" ? context.turn.initiatorUserId : null,
+        context.turn.effectiveRole,
+        context.turn.initiatorUserId,
+        context.turn.isPrivate,
+      ).content,
+    }),
+  });
+  const memoryWriteSchema = (isPrivate: boolean) =>
+    z.object({
+      scope: isPrivate
+        ? z.enum(["pubmemory", "primemory"])
+        : z.enum(["pubmemory"]),
+      section: z.string(),
+      content: z.string().max(2000),
+      reason: z.string(),
+    });
+  registry.register({
+    name: "memory_write",
+    description:
+      "把决定写入的记忆写入公开或当前用户私有记忆，一轮对话结束的时候批量写入。",
+    inputSchema: memoryWriteSchema(true),
+    inputSchemaFor: (context) => memoryWriteSchema(context.turn.isPrivate),
+    policy: builtinPolicy("memory_write"),
+    sourcePriority: 100,
     // `memory.pubWriteRequiresApproval`：全局单份 PUBMEMORY 会流到所有会话与所有私聊（docs/14 T4），
     // 开了它之后每一次公开记忆写入都要 owner 点头。私有记忆不受管 —— 那是写给用户自己的。
-    approvalFor: (input, context) => input.scope === 'pubmemory' && (context.turn.config as Readonly<Config>).memory.pubWriteRequiresApproval ? 'always' : null,
+    approvalFor: (input, context) =>
+      input.scope === "pubmemory" &&
+      (context.turn.config as Readonly<Config>).memory.pubWriteRequiresApproval
+        ? "always"
+        : null,
     execute: (input, context) => {
       const memory = (context.turn.config as Readonly<Config>).memory;
-      return dependencies.memory.queueWrite({ scope: input.scope, subject: input.scope === 'primemory' ? context.turn.initiatorUserId : null,
-        section: input.section, lines: input.content.split('\n').filter(Boolean), actor: 'model', turnId: context.turn.turnId,
-        chatId: context.turn.chatId, userId: context.turn.initiatorUserId, requireSourceTag: memory.requireSourceTag },
-      context.turn.effectiveRole, context.turn.isPrivate, memory.pubWriteMinRole);
-    } });
-  registry.register({ name: 'load_skill', description: '渐进式载入 Skill 正文与资源清单。', inputSchema: z.object({ name: z.string() }), policy: builtinPolicy('load_skill'), sourcePriority: 80,
+      return dependencies.memory.queueWrite(
+        {
+          scope: input.scope,
+          subject:
+            input.scope === "primemory" ? context.turn.initiatorUserId : null,
+          section: input.section,
+          lines: input.content.split("\n").filter(Boolean),
+          actor: "model",
+          turnId: context.turn.turnId,
+          chatId: context.turn.chatId,
+          userId: context.turn.initiatorUserId,
+          requireSourceTag: memory.requireSourceTag,
+        },
+        context.turn.effectiveRole,
+        context.turn.isPrivate,
+        memory.pubWriteMinRole,
+      );
+    },
+  });
+  registry.register({
+    name: "load_skill",
+    description: "渐进式载入 Skill 正文与资源清单。",
+    inputSchema: z.object({ name: z.string() }),
+    policy: builtinPolicy("load_skill"),
+    sourcePriority: 80,
     execute: (input, context) => {
       const loaded = (context.turn.loadedSkills ??= new Set());
       if (loaded.has(input.name)) return { ok: true, alreadyLoaded: true };
-      const result = dependencies.skills.load(input.name, context.turn.effectiveRole, registry.activeNames(context.turn.effectiveRole, context));
+      const result = dependencies.skills.load(
+        input.name,
+        context.turn.effectiveRole,
+        registry.activeNames(context.turn.effectiveRole, context),
+      );
       if (result.ok !== false) {
         loaded.add(input.name);
         // 只有**声明了** `allowed-tools` 的 skill 才动允许集（docs/07 §4：未声明则不收窄）。
@@ -407,7 +981,11 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
         // 于是先载入一个 `allowed-tools: [read_file]` 的 skill、再载入一个不声明的，前一个的
         // 收窄就被整个抹掉了。
         if (result.narrows === true) {
-          const allowed = Array.isArray(result.allowedTools) ? result.allowedTools.filter((name): name is string => typeof name === 'string') : [];
+          const allowed = Array.isArray(result.allowedTools)
+            ? result.allowedTools.filter(
+                (name): name is string => typeof name === "string",
+              )
+            : [];
           const set = (context.turn.skillAllowedTools ??= new Set());
           for (const name of allowed) set.add(name);
         }
@@ -415,58 +993,206 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
         // docs/02 不变量 15），而 `NOTE_PREFIX` 只对非 sendable role 生效 —— 够不着这一条。
         // 不标的话模型看到的就是「用户发来一大段 skill 正文」，会把说明书当成用户的要求去执行。
         // **不用 untrusted() 包**：skill 是本地可信资源，包起来等于告诉模型别照着做。
-        const body = `${NOTE_PREFIX}以下是 Skill「${input.name}」的正文，由系统按你的 load_skill 调用载入，不是用户发言。\n\n${String(result.body ?? '')}`;
-        dependencies.context.appendDelta(context.turn, { id: crypto.randomUUID(), role: 'user', origin: 'note', parts: [{ type: 'text', text: body }], textPreview: `Skill ${input.name}`, pruneLevel: 2 });
+        const body = `${NOTE_PREFIX}以下是 Skill「${input.name}」的正文，由系统按你的 load_skill 调用载入，不是用户发言。\n\n${String(result.body ?? "")}`;
+        dependencies.context.appendDelta(context.turn, {
+          id: crypto.randomUUID(),
+          role: "user",
+          origin: "note",
+          parts: [{ type: "text", text: body }],
+          textPreview: `Skill ${input.name}`,
+          pruneLevel: 2,
+        });
       }
       return result;
-    } });
-  registry.register({ name: 'memory_list', description: '列出全部记忆文档，仅 owner。', inputSchema: z.object({}), policy: builtinPolicy('memory_list'), sourcePriority: 100,
-    execute: () => ({ ok: true, documents: dependencies.memory.list() }) });
-  registry.register({ name: 'list_agents', description: '列出当前权限可派发的子 agent。', inputSchema: z.object({}), policy: builtinPolicy('list_agents'), sourcePriority: 90,
-    execute: (_input, context) => ({ ok: true, agents: dependencies.agents.available(context.turn.effectiveRole).map(({ name, description }) => ({ name, description })) }) });
+    },
+  });
+  registry.register({
+    name: "memory_list",
+    description: "列出全部记忆文档，仅 owner。",
+    inputSchema: z.object({}),
+    policy: builtinPolicy("memory_list"),
+    sourcePriority: 100,
+    execute: () => ({ ok: true, documents: dependencies.memory.list() }),
+  });
+  registry.register({
+    name: "list_agents",
+    description: "列出当前权限可派发的子 agent。",
+    inputSchema: z.object({}),
+    policy: builtinPolicy("list_agents"),
+    sourcePriority: 90,
+    execute: (_input, context) => ({
+      ok: true,
+      agents: dependencies.agents
+        .available(context.turn.effectiveRole)
+        .map(({ name, description }) => ({ name, description })),
+    }),
+  });
   // 子 agent 是完整的一条 agent 循环（自己的步数上限、自己的模型超时），墙钟按分钟算：兜底那道
   // race 会在它跑到一半时返回 tool_timeout，而子 agent 还在继续花钱。它的边界是 quota 与 maxSteps。
-  registry.register({ name: 'spawn_agent', description: '派发独立上下文子 agent；task 必须自包含。', inputSchema: z.object({ agent: z.string(), task: z.string().min(10), context: z.string().optional(), modelAlias: z.string().optional(), label: z.string().optional() }), policy: builtinPolicy('spawn_agent'), sourcePriority: 90, timeoutMs: null,
+  registry.register({
+    name: "spawn_agent",
+    description: "派发独立上下文子 agent；task 必须自包含。",
+    inputSchema: z.object({
+      agent: z.string(),
+      task: z.string().min(10),
+      context: z.string().optional(),
+      modelAlias: z.string().optional(),
+      label: z.string().optional(),
+    }),
+    policy: builtinPolicy("spawn_agent"),
+    sourcePriority: 90,
+    timeoutMs: null,
     execute: async (input, context) => {
       const perTurn = (context.turn.config as Readonly<Config>).quota.perTurn;
-      if (dependencies.ledger.turnCost(context.turn.turnId) >= perTurn.maxCostUsd) return { ok: false, error: 'turn_budget_exhausted' };
-      const parent = context.agentRunId ? dependencies.agents.byId(context.agentRunId) : dependencies.agents.createMain(context.turn.turnId, context.turn.effectiveRole, 'main');
-      if (!parent) return { ok: false, error: 'parent_agent_unavailable' };
-      const { run, definition } = dependencies.agents.spawn(parent, input.agent, input.task, input.modelAlias);
+      if (
+        dependencies.ledger.turnCost(context.turn.turnId) >= perTurn.maxCostUsd
+      )
+        return { ok: false, error: "turn_budget_exhausted" };
+      const parent = context.agentRunId
+        ? dependencies.agents.byId(context.agentRunId)
+        : dependencies.agents.createMain(
+            context.turn.turnId,
+            context.turn.effectiveRole,
+            "main",
+          );
+      if (!parent) return { ok: false, error: "parent_agent_unavailable" };
+      const { run, definition } = dependencies.agents.spawn(
+        parent,
+        input.agent,
+        input.task,
+        input.modelAlias,
+      );
       const taskId = crypto.randomUUID();
       const title = input.label ?? definition.name;
-      dependencies.db.prepare("INSERT INTO tasks(id,turn_id,agent_run_id,chat_id,user_id,title,state,created_at,updated_at) VALUES (?,?,?,?,?,?,'running',?,?)")
-        .run(taskId, context.turn.turnId, run.id, context.turn.chatId, context.turn.initiatorUserId, title, Date.now(), Date.now());
-      dependencies.log.publish('task.updated', { id: taskId, turnId: context.turn.turnId, title, state: 'running', progress: null });
+      dependencies.db
+        .prepare(
+          "INSERT INTO tasks(id,turn_id,agent_run_id,chat_id,user_id,title,state,created_at,updated_at) VALUES (?,?,?,?,?,?,'running',?,?)",
+        )
+        .run(
+          taskId,
+          context.turn.turnId,
+          run.id,
+          context.turn.chatId,
+          context.turn.initiatorUserId,
+          title,
+          Date.now(),
+          Date.now(),
+        );
+      dependencies.log.publish("task.updated", {
+        id: taskId,
+        turnId: context.turn.turnId,
+        title,
+        state: "running",
+        progress: null,
+      });
       const live = context.turn.config as Readonly<Config>;
-      if (!await acquireSlot(context.turn.turnId, live.agent.maxConcurrentSubagents, context.turn.abortSignal)) {
-        dependencies.agents.fail(run, 'turn_cancelled');
-        dependencies.db.prepare("UPDATE tasks SET state='failed',result_summary=?,updated_at=?,finished_at=? WHERE id=?").run('turn_cancelled', Date.now(), Date.now(), taskId);
-        dependencies.log.publish('task.updated', { id: taskId, turnId: context.turn.turnId, title, state: 'failed', progress: null });
-        return { ok: false, error: 'turn_cancelled', taskId, runId: run.id };
+      if (
+        !(await acquireSlot(
+          context.turn.turnId,
+          live.agent.maxConcurrentSubagents,
+          context.turn.abortSignal,
+        ))
+      ) {
+        dependencies.agents.fail(run, "turn_cancelled");
+        dependencies.db
+          .prepare(
+            "UPDATE tasks SET state='failed',result_summary=?,updated_at=?,finished_at=? WHERE id=?",
+          )
+          .run("turn_cancelled", Date.now(), Date.now(), taskId);
+        dependencies.log.publish("task.updated", {
+          id: taskId,
+          turnId: context.turn.turnId,
+          title,
+          state: "failed",
+          progress: null,
+        });
+        return { ok: false, error: "turn_cancelled", taskId, runId: run.id };
       }
       try {
         // provider 重试设置与配额预留都从本轮取：子 agent 的花费必须落进主 agent 那份预留，
         // 否则配额只看得见主 agent（docs/20 · W-QUOTA-01）。
-        const result = await runSubAgent(run, definition, input.task, input.context, context.turn, { db: dependencies.db, agents: dependencies.agents, registry: dependencies.models, tools: registry, ledger: dependencies.ledger, log: dependencies.log, workspace: context.workspace,
-          provider: { maxRetries: live.provider.maxRetries, retryBaseMs: live.provider.retryBaseMs, retryMaxMs: live.provider.retryMaxMs,
-            requestTimeoutMs: live.provider.requestTimeoutMs, streamIdleTimeoutMs: live.provider.streamIdleTimeoutMs },
-          // 子 agent 那一整段挂在**本次** `spawn_agent` 的 `tool.call` 之下（`docs/10 §7` 第 4 条）。
-          // `context` 已经是 `execute()` 浅拷贝过的那一份，所以同一步里并排的几个 spawn 各带自己的父。
-          ...(context.parentSpanId ? { parentSpanId: context.parentSpanId } : {}),
-          ...(dependencies.quota ? { quota: dependencies.quota } : {}), reservation: (context.turn.reservation as QuotaReservation | undefined) ?? null }, input.modelAlias);
-        dependencies.db.prepare("UPDATE tasks SET state='done',result_summary=?,updated_at=?,finished_at=? WHERE id=?").run(result.summary, Date.now(), Date.now(), taskId);
-        dependencies.log.publish('task.updated', { id: taskId, turnId: context.turn.turnId, title, state: 'done', progress: null });
-        return { ok: true, taskId, runId: run.id, agent: definition.name, ...result };
+        const result = await runSubAgent(
+          run,
+          definition,
+          input.task,
+          input.context,
+          context.turn,
+          {
+            db: dependencies.db,
+            agents: dependencies.agents,
+            registry: dependencies.models,
+            tools: registry,
+            ledger: dependencies.ledger,
+            log: dependencies.log,
+            workspace: context.workspace,
+            provider: {
+              maxRetries: live.provider.maxRetries,
+              retryBaseMs: live.provider.retryBaseMs,
+              retryMaxMs: live.provider.retryMaxMs,
+              requestTimeoutMs: live.provider.requestTimeoutMs,
+              streamIdleTimeoutMs: live.provider.streamIdleTimeoutMs,
+            },
+            // 子 agent 那一整段挂在**本次** `spawn_agent` 的 `tool.call` 之下（`docs/10 §7` 第 4 条）。
+            // `context` 已经是 `execute()` 浅拷贝过的那一份，所以同一步里并排的几个 spawn 各带自己的父。
+            ...(context.parentSpanId
+              ? { parentSpanId: context.parentSpanId }
+              : {}),
+            ...(dependencies.quota ? { quota: dependencies.quota } : {}),
+            reservation:
+              (context.turn.reservation as QuotaReservation | undefined) ??
+              null,
+          },
+          input.modelAlias,
+        );
+        dependencies.db
+          .prepare(
+            "UPDATE tasks SET state='done',result_summary=?,updated_at=?,finished_at=? WHERE id=?",
+          )
+          .run(result.summary, Date.now(), Date.now(), taskId);
+        dependencies.log.publish("task.updated", {
+          id: taskId,
+          turnId: context.turn.turnId,
+          title,
+          state: "done",
+          progress: null,
+        });
+        return {
+          ok: true,
+          taskId,
+          runId: run.id,
+          agent: definition.name,
+          ...result,
+        };
       } catch (error) {
-        dependencies.db.prepare("UPDATE tasks SET state='failed',result_summary=?,updated_at=?,finished_at=? WHERE id=?").run(error instanceof Error ? error.message : String(error), Date.now(), Date.now(), taskId);
-        dependencies.log.publish('task.updated', { id: taskId, turnId: context.turn.turnId, title, state: 'failed', progress: null });
-        return { ok: false, error: error instanceof Error ? error.message : 'subagent_failed', taskId, runId: run.id };
+        dependencies.db
+          .prepare(
+            "UPDATE tasks SET state='failed',result_summary=?,updated_at=?,finished_at=? WHERE id=?",
+          )
+          .run(
+            error instanceof Error ? error.message : String(error),
+            Date.now(),
+            Date.now(),
+            taskId,
+          );
+        dependencies.log.publish("task.updated", {
+          id: taskId,
+          turnId: context.turn.turnId,
+          title,
+          state: "failed",
+          progress: null,
+        });
+        return {
+          ok: false,
+          error: error instanceof Error ? error.message : "subagent_failed",
+          taskId,
+          runId: run.id,
+        };
       } finally {
         releaseSlot(context.turn.turnId);
         progressBroadcast.delete(run.id);
       }
-    } });
+    },
+  });
   /**
    * M11 · 起一个外部 harness CLI 改宿主上的仓库（docs/14 §2 Q8）。三道门：
    * `available()` 判**仅 owner + 仅私聊 + 目录白名单非空**（三者任一不成立，工具根本不进模型的
@@ -474,23 +1200,58 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
    * `timeoutMs: null` —— 它自己有 `agent.harness.timeoutMs`，注册表那道 60s 兜底 race 会在
    * harness 跑到一半时判 `tool_timeout`，而那个进程还在改文件。
    */
-  registry.register({ name: 'spawn_harness', description: '在允许的仓库目录里起一个外部 coding harness（Claude Code / Codex）执行任务；仅 owner、仅私聊。', inputSchema: z.object({ task: z.string().min(10), dir: z.string() }), policy: builtinPolicy('spawn_harness'), sourcePriority: 90, timeoutMs: null, untrustedOutput: true,
+  registry.register({
+    name: "spawn_harness",
+    description:
+      "在允许的仓库目录里起一个外部 coding harness（Claude Code / Codex / omp）执行任务；仅 owner、且仅私聊。",
+    inputSchema: z.object({ task: z.string().min(10), dir: z.string() }),
+    policy: builtinPolicy("spawn_harness"),
+    sourcePriority: 90,
+    timeoutMs: null,
+    untrustedOutput: true,
     available: (role, context) => {
       const harness = (context.turn.config as Readonly<Config>).agent.harness;
-      return role === 'owner' && context.turn.isPrivate && harness.allowedDirs.length > 0;
+      return (
+        role === "owner" &&
+        context.turn.isPrivate &&
+        harness.allowedDirs.length > 0
+      );
     },
     execute: async (input, context) => {
       const harness = (context.turn.config as Readonly<Config>).agent.harness;
       // `available()` 已经判过一遍，这里再判一次：热更新可能在注册与执行之间把目录名单清空，
       // 而模型完全可能沿用上一步的工具名（禁用必须是硬边界，CLAUDE.md）。
-      if (!context.turn.isPrivate || context.turn.effectiveRole !== 'owner') return { ok: false, error: 'harness_forbidden', hint: '仅 owner 在私聊里可用' };
+      if (!context.turn.isPrivate || context.turn.effectiveRole !== "owner")
+        return {
+          ok: false,
+          error: "harness_forbidden",
+          hint: "仅 owner 在私聊里可用",
+        };
       const started = Date.now();
-      const result = await runHarness(input.task, input.dir, harness, context.turn.abortSignal);
-      dependencies.log.event({ level: result.ok ? 'info' : 'warn', kind: 'agent.harness', summary: `harness ${result.ok ? 'ok' : result.error} · ${result.dir ?? input.dir}`,
-        traceId: context.turn.turnId, chatId: context.turn.chatId, userId: context.turn.initiatorUserId,
-        data: { dir: result.dir ?? input.dir, command: harness.command, exitCode: result.exitCode, timedOut: result.timedOut, ms: Date.now() - started } });
+      const result = await runHarness(
+        input.task,
+        input.dir,
+        harness,
+        context.turn.abortSignal,
+      );
+      dependencies.log.event({
+        level: result.ok ? "info" : "warn",
+        kind: "agent.harness",
+        summary: `harness ${result.ok ? "ok" : result.error} · ${result.dir ?? input.dir}`,
+        traceId: context.turn.turnId,
+        chatId: context.turn.chatId,
+        userId: context.turn.initiatorUserId,
+        data: {
+          dir: result.dir ?? input.dir,
+          command: harness.command,
+          exitCode: result.exitCode,
+          timedOut: result.timedOut,
+          ms: Date.now() - started,
+        },
+      });
       return result;
-    } });
+    },
+  });
   /**
    * M13 · 起一台本机编码 agent 改宿主上的仓库，走 ACP 协议（`docs/05 §3.5`）。
    *
@@ -500,14 +1261,21 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
    * `timeoutMs: null` —— 它自己有 `agents[].timeoutMs`，注册表那道 60s 兜底 race 会在 agent
    * 跑到一半时判 `tool_timeout`，而那个进程还在改文件。
    */
-  const acpSettings = (context: ToolExecutionContext): AcpSettings => (context.turn.config as Readonly<Config>).agent.acp;
+  const acpSettings = (context: ToolExecutionContext): AcpSettings =>
+    (context.turn.config as Readonly<Config>).agent.acp;
   /**
    * 多 agent 时给 `agent` 参数加一个枚举，**单 agent 部署 schema 逐字节不变** ——
    * 一个只有一台 agent 的部署不该因为这个特性多出一个模型必须填的参数。
    */
-  const acpInputSchema = (names: readonly string[]): z.ZodType<{ task: string; dir: string; agent?: string }> =>
+  const acpInputSchema = (
+    names: readonly string[],
+  ): z.ZodType<{ task: string; dir: string; agent?: string }> =>
     names.length > 1
-      ? z.object({ task: z.string().min(10), dir: z.string(), agent: z.enum(names as unknown as [string, ...string[]]) })
+      ? z.object({
+          task: z.string().min(10),
+          dir: z.string(),
+          agent: z.enum(names as unknown as [string, ...string[]]),
+        })
       : z.object({ task: z.string().min(10), dir: z.string() });
   /**
    * `permissionMode === 'ask'` 但运行时没有审批 broker 时**整个工具不进目录**（照 `allowedDirs`
@@ -515,14 +1283,32 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
    * **`ask` 不是默认档**（默认 `auto`，`docs/14 §2 Q8-c`），所以这道闸只对主动配了它的部署生效；
    * 而落在 `available()` 上比落在 `execute()` 上好：模型不会去试一个必然被拒的调用。
    */
-  const acpPermissionReady = (acp: AcpSettings): boolean => acp.permissionMode !== 'ask' || Boolean(dependencies.approvals);
-  registry.register({ name: 'spawn_acp', description: '在允许的仓库目录里让一台本机编码 agent（经 ACP 协议驱动）执行任务；仅 owner、仅私聊。它自带一整套工具（读写改文件、跑 shell 命令）并会真的改仓库 —— 任务要写成自包含的一段话，说清目标、约束和验收方式（例如「改完跑 pnpm test」）。',
-    inputSchema: acpInputSchema([]), inputSchemaFor: (context) => acpInputSchema(enabledAcpAgents(acpSettings(context)).map((agent) => agent.name)),
-    policy: builtinPolicy('spawn_acp'), sourcePriority: 90, timeoutMs: null, untrustedOutput: true,
+  const acpPermissionReady = (acp: AcpSettings): boolean =>
+    acp.permissionMode !== "ask" || Boolean(dependencies.approvals);
+  registry.register({
+    name: "spawn_acp",
+    description:
+      "在允许的仓库目录里让一台本机code agent（经 ACP 协议驱动）执行任务；仅 owner、仅私聊。它自带一整套工具（读写改文件、跑 shell 命令）并会真的改仓库 —— 任务要写成自包含的一段话，说清目标、约束和验收方式（例如「改完跑 pnpm test」）。",
+    inputSchema: acpInputSchema([]),
+    inputSchemaFor: (context) =>
+      acpInputSchema(
+        enabledAcpAgents(acpSettings(context)).map((agent) => agent.name),
+      ),
+    policy: builtinPolicy("spawn_acp"),
+    sourcePriority: 90,
+    timeoutMs: null,
+    untrustedOutput: true,
     available: (role, context) => {
       const acp = acpSettings(context);
-      return Boolean(dependencies.acp) && role === 'owner' && context.turn.isPrivate && acp.enabled && acp.allowedDirs.length > 0
-        && acp.agents.some((agent) => agent.enabled) && acpPermissionReady(acp);
+      return (
+        Boolean(dependencies.acp) &&
+        role === "owner" &&
+        context.turn.isPrivate &&
+        acp.enabled &&
+        acp.allowedDirs.length > 0 &&
+        acp.agents.some((agent) => agent.enabled) &&
+        acpPermissionReady(acp)
+      );
     },
     execute: async (input, context) => {
       // `available()` 已经判过一遍，这里再判一次：热更新可能在注册与执行之间把整块关掉或把目录
@@ -530,11 +1316,12 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
       // 整块开关与目录名单由 `AcpManager.run` 判（`acp_disabled`），这里只判它判不到的那两样。
       // 文案走 `acpFailure` 而不是就地写一句：`ACP_ERROR_HINTS` 是**唯一**来源，工具壳自己抄一份
       // 的话「先改文档」就只能验到 manager 那一半（`docs/05 §3.5.1` 那张表是它们共同的文档来源）。
-      if (!dependencies.acp) return acpFailure('acp_unavailable');
-      if (!context.turn.isPrivate || context.turn.effectiveRole !== 'owner') return acpFailure('acp_forbidden');
+      if (!dependencies.acp) return acpFailure("acp_unavailable");
+      if (!context.turn.isPrivate || context.turn.effectiveRole !== "owner")
+        return acpFailure("acp_forbidden");
       const live = context.turn.config as Readonly<Config>;
       const acp = acpSettings(context);
-      if (!acpPermissionReady(acp)) return acpFailure('acp_unavailable');
+      if (!acpPermissionReady(acp)) return acpFailure("acp_unavailable");
       const approvals = dependencies.approvals;
       /**
        * 进度卡片。**渲染选项从本轮配置取** —— `output.*` 在 `PER_CHAT_OVERRIDE_ALLOWLIST` 里，
@@ -545,166 +1332,524 @@ export function registerBuiltins(registry: ToolRegistry, dependencies: { db: imp
       // 一遍的话，「屏幕上说的目录」与「真的在跑的目录」就是两个可以分叉的答案；而 `dir` 是卡片把
       // agent 报上来的绝对路径相对化的基点（不给它就每行退回一条长路径，小预算下多丢一整段）。
       // 拿不到（准入不过）时不填：`run()` 随即会用同一个判据交回那条失败。
-      const target = resolveAcpTarget({ task: input.task, dir: input.dir, ...(input.agent ? { agent: input.agent } : {}) }, acp);
-      const card = await dependencies.telegram?.openProgressCard?.(
-        // `turnId` 是卡片那两条 `tg.send` / `tg.edit` span 的 traceId —— 不给就又是一张平表
-        // （`docs/28 · L-LOG-02`）。`parentSpanId` 让它们挂在本次 `tool.call` 之下。
-        { chatId: context.turn.chatId, threadId: context.turn.threadId, turnId: context.turn.turnId,
-          ...(context.parentSpanId ? { parentSpanId: context.parentSpanId } : {}) },
-        { parseMode: live.output.parseMode, maxMessageChars: live.output.maxMessageChars, intervalMs: acp.progressIntervalMs,
-          ...(target.ok ? { agent: target.agent.name, dir: target.root } : {}) }).catch(() => null) ?? null;
-      const result = await dependencies.acp.run({ task: input.task, dir: input.dir, ...(input.agent ? { agent: input.agent } : {}) }, acp, {
-        abortSignal: context.turn.abortSignal,
-        // 与注册表 `#normalizeOutput` 量的是同一个上界（`main.ts` 把它接成 `tools.exec.maxOutputBytes`），
-        // 交给 manager 去减固定字段的余量 —— 让「按构造有界」这件事有一个真实的被除数。
-        outputBudgetBytes: live.tools.exec.maxOutputBytes,
-        /**
-         * 反向调用面的宿主侧闸门。**jail 不复用 `dependencies.filesFor`** —— 那份的 root 是
-         * `data/workspace/<chatId>`（`docs/14 Q8-b`），而 `tools.fs.allowHostFsForOwner` 一开它就是
-         * `/`：ACP 的边界必须是**这次被批准的那个仓库目录**。`denyGlobs` 照旧生效（绝对路径 glob，
-         * 不依赖 root），自撰写通道那两条也一起带上 —— 一台外部 agent 更没有理由能改已启用的 plugin。
-         */
-        host: {
-          fs: { denyGlobs: [...live.tools.fs.denyGlobs, ...selfAuthoringDenyGlobs({ skillsDir: live.skills.dir, pluginsDir: live.plugins.dir })],
-            maxReadBytes: live.tools.fs.maxReadBytes, maxWriteBytes: live.tools.fs.maxWriteBytes, backupDir: live.tools.fs.backupDir },
-          exec: { maxTimeoutMs: live.tools.exec.maxTimeoutMs, maxOutputBytes: live.tools.exec.maxOutputBytes },
-          // 终端**宿主直跑**，所以申报前先问一次。`bypassRoles: ['owner']` 下这一问对 ACP 恒为
-          // `'host'`；运维把 owner 从 bypassRoles 里拿掉时，terminal 能力当场不申报（而不是申报了
-          // 每次 create 都失败）。
-          plan: (root) => dependencies.sandbox.plan(context.turn.effectiveRole, root),
+      const target = resolveAcpTarget(
+        {
+          task: input.task,
+          dir: input.dir,
+          ...(input.agent ? { agent: input.agent } : {}),
         },
-        hooks: {
-          ...(card ? { onUpdate: (notification) => card.push(notification) } : {}),
-          // 只有 `ask` 那一档会被调（manager 判的），所以这里无条件给：给了而 mode 是 auto/deny 时
-          // 它一次都不会被调到，而把 mode 判据抄到这里就等于同一个判据有两份。
-          ...(approvals ? { permission: (binding) => acpPermissionGate({ approvals, context, log: dependencies.log, ...binding }) } : {}),
+        acp,
+      );
+      const card =
+        (await dependencies.telegram
+          ?.openProgressCard?.(
+            // `turnId` 是卡片那两条 `tg.send` / `tg.edit` span 的 traceId —— 不给就又是一张平表
+            // （`docs/28 · L-LOG-02`）。`parentSpanId` 让它们挂在本次 `tool.call` 之下。
+            {
+              chatId: context.turn.chatId,
+              threadId: context.turn.threadId,
+              turnId: context.turn.turnId,
+              ...(context.parentSpanId
+                ? { parentSpanId: context.parentSpanId }
+                : {}),
+            },
+            {
+              parseMode: live.output.parseMode,
+              maxMessageChars: live.output.maxMessageChars,
+              intervalMs: acp.progressIntervalMs,
+              ...(target.ok
+                ? { agent: target.agent.name, dir: target.root }
+                : {}),
+            },
+          )
+          .catch(() => null)) ?? null;
+      const result = await dependencies.acp.run(
+        {
+          task: input.task,
+          dir: input.dir,
+          ...(input.agent ? { agent: input.agent } : {}),
         },
-        trace: { traceId: context.turn.turnId, chatId: context.turn.chatId, userId: context.turn.initiatorUserId, key: context.turn.key },
-      });
+        acp,
+        {
+          abortSignal: context.turn.abortSignal,
+          // 与注册表 `#normalizeOutput` 量的是同一个上界（`main.ts` 把它接成 `tools.exec.maxOutputBytes`），
+          // 交给 manager 去减固定字段的余量 —— 让「按构造有界」这件事有一个真实的被除数。
+          outputBudgetBytes: live.tools.exec.maxOutputBytes,
+          /**
+           * 反向调用面的宿主侧闸门。**jail 不复用 `dependencies.filesFor`** —— 那份的 root 是
+           * `data/workspace/<chatId>`（`docs/14 Q8-b`），而 `tools.fs.allowHostFsForOwner` 一开它就是
+           * `/`：ACP 的边界必须是**这次被批准的那个仓库目录**。`denyGlobs` 照旧生效（绝对路径 glob，
+           * 不依赖 root），自撰写通道那两条也一起带上 —— 一台外部 agent 更没有理由能改已启用的 plugin。
+           */
+          host: {
+            fs: {
+              denyGlobs: [
+                ...live.tools.fs.denyGlobs,
+                ...selfAuthoringDenyGlobs({
+                  skillsDir: live.skills.dir,
+                  pluginsDir: live.plugins.dir,
+                }),
+              ],
+              maxReadBytes: live.tools.fs.maxReadBytes,
+              maxWriteBytes: live.tools.fs.maxWriteBytes,
+              backupDir: live.tools.fs.backupDir,
+            },
+            exec: {
+              maxTimeoutMs: live.tools.exec.maxTimeoutMs,
+              maxOutputBytes: live.tools.exec.maxOutputBytes,
+            },
+            // 终端**宿主直跑**，所以申报前先问一次。`bypassRoles: ['owner']` 下这一问对 ACP 恒为
+            // `'host'`；运维把 owner 从 bypassRoles 里拿掉时，terminal 能力当场不申报（而不是申报了
+            // 每次 create 都失败）。
+            plan: (root) =>
+              dependencies.sandbox.plan(context.turn.effectiveRole, root),
+          },
+          hooks: {
+            ...(card
+              ? { onUpdate: (notification) => card.push(notification) }
+              : {}),
+            // 只有 `ask` 那一档会被调（manager 判的），所以这里无条件给：给了而 mode 是 auto/deny 时
+            // 它一次都不会被调到，而把 mode 判据抄到这里就等于同一个判据有两份。
+            ...(approvals
+              ? {
+                  permission: (binding) =>
+                    acpPermissionGate({
+                      approvals,
+                      context,
+                      log: dependencies.log,
+                      ...binding,
+                    }),
+                }
+              : {}),
+          },
+          trace: {
+            traceId: context.turn.turnId,
+            chatId: context.turn.chatId,
+            userId: context.turn.initiatorUserId,
+            key: context.turn.key,
+          },
+        },
+      );
       // 终帧。`close` 永不 throw（契约），但 `await` 它是刻意的：归档只在这一次发生，而工具返回之后
       // 这一轮就开始收尾了。返回值是适配层自己的凭据，core 不解释它。
       if (card) {
-        await card.close({ ...(result.stopReason ? { stopReason: result.stopReason } : {}), ...(result.error ? { error: result.error } : {}),
-          files: result.filesWritten ?? 0, failures: result.failures ?? 0, toolCalls: result.toolCalls ?? 0,
-          ...(result.costUsd === undefined ? {} : { costUsd: result.costUsd }) });
+        await card.close({
+          ...(result.stopReason ? { stopReason: result.stopReason } : {}),
+          ...(result.error ? { error: result.error } : {}),
+          files: result.filesWritten ?? 0,
+          failures: result.failures ?? 0,
+          toolCalls: result.toolCalls ?? 0,
+          ...(result.costUsd === undefined ? {} : { costUsd: result.costUsd }),
+        });
       }
       return result;
-    } });
-  registry.register({ name: 'read_agent_result', description: '分页读取子 agent 完整结果。', inputSchema: z.object({ runId: z.string(), offset: z.number().int().nonnegative().default(0), limit: z.number().int().positive().max(262_144).default(65_536) }), policy: builtinPolicy('read_agent_result'), sourcePriority: 90,
-    execute: (input) => ({ ok: true, ...dependencies.agents.result(input.runId, input.offset, input.limit) }) });
+    },
+  });
+  registry.register({
+    name: "read_agent_result",
+    description: "分页读取子 agent 完整结果。",
+    inputSchema: z.object({
+      runId: z.string(),
+      offset: z.number().int().nonnegative().default(0),
+      limit: z.number().int().positive().max(262_144).default(65_536),
+    }),
+    policy: builtinPolicy("read_agent_result"),
+    sourcePriority: 90,
+    execute: (input) => ({
+      ok: true,
+      ...dependencies.agents.result(input.runId, input.offset, input.limit),
+    }),
+  });
   // `timeoutMs: null`：仲裁自己有硬期限（`agent.askTimeoutMs`），再叠一层 `tools.defaultTimeoutMs`
   // 的 60s race 只会让默认配置下的仲裁在跑到一半时被判 `tool_timeout`，而模型调用继续花钱。
-  registry.register({ name: 'ask_parent', description: '向父 agent 提问；仅子 agent 可用。', inputSchema: z.object({ question: z.string(), options: z.array(z.string()).default([]), default: z.string().optional() }), policy: builtinPolicy('ask_parent'), sourcePriority: 90, timeoutMs: null,
-    available: (_role, context) => context.agentKind === 'sub', execute: async (input, context) => {
-      const run = context.agentRunId ? dependencies.agents.byId(context.agentRunId) : null;
-      const parent = run?.parentRunId ? dependencies.agents.byId(run.parentRunId) : null;
-      if (!run || !parent) return { ok: false, error: 'parent_agent_unavailable' };
-      const count = dependencies.db.prepare("SELECT COUNT(*) FROM agent_messages WHERE from_run_id=? AND kind='ask'").pluck().get(run.id) as number;
-      if (count >= (dependencies.maxAsksPerRun ?? 5)) return { ok: false, error: 'agent_ask_limit_exceeded' };
+  registry.register({
+    name: "ask_parent",
+    description: "向父 agent 提问；仅子 agent 可用。",
+    inputSchema: z.object({
+      question: z.string(),
+      options: z.array(z.string()).default([]),
+      default: z.string().optional(),
+    }),
+    policy: builtinPolicy("ask_parent"),
+    sourcePriority: 90,
+    timeoutMs: null,
+    available: (_role, context) => context.agentKind === "sub",
+    execute: async (input, context) => {
+      const run = context.agentRunId
+        ? dependencies.agents.byId(context.agentRunId)
+        : null;
+      const parent = run?.parentRunId
+        ? dependencies.agents.byId(run.parentRunId)
+        : null;
+      if (!run || !parent)
+        return { ok: false, error: "parent_agent_unavailable" };
+      const count = dependencies.db
+        .prepare(
+          "SELECT COUNT(*) FROM agent_messages WHERE from_run_id=? AND kind='ask'",
+        )
+        .pluck()
+        .get(run.id) as number;
+      if (count >= (dependencies.maxAsksPerRun ?? 5))
+        return { ok: false, error: "agent_ask_limit_exceeded" };
       const askId = dependencies.agents.ask(run, parent, input);
       const live = context.turn.config as Readonly<Config>;
       // 一次请示是一个 span（`docs/10 §1` 的 span H）：仲裁的模型调用与 `agent.answer` 都挂在它之下。
       // 父是本次 `ask_parent` 的 `tool.call` —— 请示在实现里就是一次工具调用，图里那条 `parent=E`
       // 少画了中间这一跳。
-      const askSpan = dependencies.log.span({ level: 'info', kind: 'agent.ask', summary: `${run.agentName} → ${parent.agentName}`,
-        traceId: context.turn.turnId, ...(context.parentSpanId ? { parentSpanId: context.parentSpanId } : {}),
-        chatId: context.turn.chatId, userId: context.turn.initiatorUserId, key: context.turn.key,
-        data: { askId, fromRun: run.id, toRun: parent.id, options: input.options?.length ?? 0 } });
+      const askSpan = dependencies.log.span({
+        level: "info",
+        kind: "agent.ask",
+        summary: `${run.agentName} → ${parent.agentName}`,
+        traceId: context.turn.turnId,
+        ...(context.parentSpanId ? { parentSpanId: context.parentSpanId } : {}),
+        chatId: context.turn.chatId,
+        userId: context.turn.initiatorUserId,
+        key: context.turn.key,
+        data: {
+          askId,
+          fromRun: run.id,
+          toRun: parent.id,
+          options: input.options?.length ?? 0,
+        },
+      });
       /** 三条降级路径共用：`agent.answer` 挂在 `agent.ask` 之下，`source` 说清是谁答的。 */
-      const answered = (source: 'arbiter' | 'rule' | 'timeout', answer: string | null): void => {
+      const answered = (
+        source: "arbiter" | "rule" | "timeout",
+        answer: string | null,
+      ): void => {
         dependencies.agents.answer(askId, answer, source);
         askSpan.end({ source, answered: answer !== null });
-        dependencies.log.event({ level: 'info', kind: 'agent.answer', summary: `${parent.agentName} → ${run.agentName} (${source})`,
-          traceId: context.turn.turnId, parentSpanId: askSpan.id, chatId: context.turn.chatId, userId: context.turn.initiatorUserId, key: context.turn.key,
-          data: { askId, fromRun: parent.id, toRun: run.id, source, chars: answer?.length ?? 0 } });
+        dependencies.log.event({
+          level: "info",
+          kind: "agent.answer",
+          summary: `${parent.agentName} → ${run.agentName} (${source})`,
+          traceId: context.turn.turnId,
+          parentSpanId: askSpan.id,
+          chatId: context.turn.chatId,
+          userId: context.turn.initiatorUserId,
+          key: context.turn.key,
+          data: {
+            askId,
+            fromRun: parent.id,
+            toRun: run.id,
+            source,
+            chars: answer?.length ?? 0,
+          },
+        });
       };
       // 父 agent 仲裁（docs/14 A7）。此前这里返回 `ask_parent_not_implemented` —— 那是正确的降级
       // （更早的版本拿子 agent 自己的 options[0] 当答复并返回 ok:true，等于伪造「请示已获批」，
       // docs/19 · R-TOOL-01），但它让三个配置键长期挂着。现在真的问一次 low 档模型。
       if (live.agent.askArbiter) {
-        const task = dependencies.db.prepare('SELECT task_input AS task FROM agent_runs WHERE id=?').pluck().get(run.id) as string | undefined;
-        const verdict = await arbitrateAsk(parent, { question: input.question, options: input.options ?? [], agentName: run.agentName, task: task ?? '' }, context.turn,
-          { registry: dependencies.models, ledger: dependencies.ledger, log: dependencies.log, ...(dependencies.quota ? { quota: dependencies.quota } : {}),
-            reservation: (context.turn.reservation as QuotaReservation | undefined) ?? null, parentSpanId: askSpan.id,
-            provider: { maxRetries: live.provider.maxRetries, retryBaseMs: live.provider.retryBaseMs, retryMaxMs: live.provider.retryMaxMs,
-              requestTimeoutMs: live.provider.requestTimeoutMs, streamIdleTimeoutMs: live.provider.streamIdleTimeoutMs } },
-          { timeoutMs: live.agent.askTimeoutMs });
-        if (verdict.ok) { answered('arbiter', verdict.answer); return { ok: true, askId, answer: verdict.answer, source: 'arbiter' }; }
+        const task = dependencies.db
+          .prepare("SELECT task_input AS task FROM agent_runs WHERE id=?")
+          .pluck()
+          .get(run.id) as string | undefined;
+        const verdict = await arbitrateAsk(
+          parent,
+          {
+            question: input.question,
+            options: input.options ?? [],
+            agentName: run.agentName,
+            task: task ?? "",
+          },
+          context.turn,
+          {
+            registry: dependencies.models,
+            ledger: dependencies.ledger,
+            log: dependencies.log,
+            ...(dependencies.quota ? { quota: dependencies.quota } : {}),
+            reservation:
+              (context.turn.reservation as QuotaReservation | undefined) ??
+              null,
+            parentSpanId: askSpan.id,
+            provider: {
+              maxRetries: live.provider.maxRetries,
+              retryBaseMs: live.provider.retryBaseMs,
+              retryMaxMs: live.provider.retryMaxMs,
+              requestTimeoutMs: live.provider.requestTimeoutMs,
+              streamIdleTimeoutMs: live.provider.streamIdleTimeoutMs,
+            },
+          },
+          { timeoutMs: live.agent.askTimeoutMs },
+        );
+        if (verdict.ok) {
+          answered("arbiter", verdict.answer);
+          return { ok: true, askId, answer: verdict.answer, source: "arbiter" };
+        }
         // 仲裁没成不是静默事件：它花了钱或者本该花钱，而子 agent 接下来会按「没人应答」走。
         // `escalationRequested` 是刻意记出来的：`askEscalateToUser` 仍未接线（转人工要一条阻塞式
         // 人机通道，docs/25 §8 那个缺口还开着），运维把它打开却什么都没发生时，日志里得有一行。
-        dependencies.log.event({ level: verdict.reason === 'cancelled' ? 'info' : 'warn', kind: 'agent.ask_unarbitrated', summary: `ask_parent arbitration ${verdict.reason}`,
-          traceId: context.turn.turnId, parentSpanId: askSpan.id, chatId: context.turn.chatId, data: { askId, agentRunId: run.id, reason: verdict.reason, detail: verdict.detail, escalationRequested: live.agent.askEscalateToUser } });
+        dependencies.log.event({
+          level: verdict.reason === "cancelled" ? "info" : "warn",
+          kind: "agent.ask_unarbitrated",
+          summary: `ask_parent arbitration ${verdict.reason}`,
+          traceId: context.turn.turnId,
+          parentSpanId: askSpan.id,
+          chatId: context.turn.chatId,
+          data: {
+            askId,
+            agentRunId: run.id,
+            reason: verdict.reason,
+            detail: verdict.detail,
+            escalationRequested: live.agent.askEscalateToUser,
+          },
+        });
       }
       // 降级顺序：仲裁 → 子 agent 自带的 default → 明说没人应答。**不伪造答复**（docs/16 §5）。
-      if (input.default !== undefined) { answered('rule', input.default); return { ok: true, askId, answer: input.default, source: 'default' }; }
-      answered('timeout', null);
-      return { ok: false, error: 'ask_parent_unanswered', hint: live.agent.askArbiter ? '仲裁没能给出答复；请在 task 里自带决策依据，或调用时提供 default' : '仲裁已关闭（agent.askArbiter=false）；请在 task 里自带决策依据，或调用时提供 default', askId };
-    } });
-  registry.register({ name: 'report_progress', description: '报告子 agent 当前进度。', inputSchema: z.object({ status: z.string(), current: z.number().optional(), total: z.number().optional(), detail: z.string().optional() }), policy: builtinPolicy('report_progress'), sourcePriority: 90,
-    available: (_role, context) => context.agentKind === 'sub', execute: (input, context) => {
-      const run = context.agentRunId ? dependencies.agents.byId(context.agentRunId) : null;
-      if (!run) return { ok: false, error: 'agent_run_unavailable' };
+      if (input.default !== undefined) {
+        answered("rule", input.default);
+        return { ok: true, askId, answer: input.default, source: "default" };
+      }
+      answered("timeout", null);
+      return {
+        ok: false,
+        error: "ask_parent_unanswered",
+        hint: live.agent.askArbiter
+          ? "仲裁没能给出答复；请在 task 里自带决策依据，或调用时提供 default"
+          : "仲裁已关闭（agent.askArbiter=false）；请在 task 里自带决策依据，或调用时提供 default",
+        askId,
+      };
+    },
+  });
+  registry.register({
+    name: "report_progress",
+    description: "报告子 agent 当前进度。",
+    inputSchema: z.object({
+      status: z.string(),
+      current: z.number().optional(),
+      total: z.number().optional(),
+      detail: z.string().optional(),
+    }),
+    policy: builtinPolicy("report_progress"),
+    sourcePriority: 90,
+    available: (_role, context) => context.agentKind === "sub",
+    execute: (input, context) => {
+      const run = context.agentRunId
+        ? dependencies.agents.byId(context.agentRunId)
+        : null;
+      if (!run) return { ok: false, error: "agent_run_unavailable" };
       dependencies.agents.progress(run, input);
       // 落一条 debug：`docs/10 §2` 给 `agent.progress` 定的字段就是 phase + done/total。它不受
       // 下面那道 SSE 节流管 —— 节流护的是浏览器连接，日志侧本来就按 `logs.level` 分档。
-      dependencies.log.event({ level: 'debug', kind: 'agent.progress', summary: `${run.agentName}: ${input.status}`, traceId: context.turn.turnId,
-        ...(context.parentSpanId ? { parentSpanId: context.parentSpanId } : {}), key: context.turn.key,
-        data: { agentRunId: run.id, phase: input.status, done: input.current ?? null, total: input.total ?? null } });
+      dependencies.log.event({
+        level: "debug",
+        kind: "agent.progress",
+        summary: `${run.agentName}: ${input.status}`,
+        traceId: context.turn.turnId,
+        ...(context.parentSpanId ? { parentSpanId: context.parentSpanId } : {}),
+        key: context.turn.key,
+        data: {
+          agentRunId: run.id,
+          phase: input.status,
+          done: input.current ?? null,
+          total: input.total ?? null,
+        },
+      });
       // `agent.progressThrottleMs`：库里那行照常更新（它是当前状态，谁读谁看最新的），但 SSE 只在
       // 节流窗口外广播。一个爱汇报的子 agent 每步喊一次，够把 WebUI 的事件流刷成进度条。
-      const throttleMs = (context.turn.config as Readonly<Config>).agent.progressThrottleMs;
+      const throttleMs = (context.turn.config as Readonly<Config>).agent
+        .progressThrottleMs;
       const last = progressBroadcast.get(run.id) ?? 0;
       const now = Date.now();
       if (now - last >= throttleMs) {
         progressBroadcast.set(run.id, now);
-        dependencies.log.publish('task.updated', { id: null, runId: run.id, turnId: context.turn.turnId, state: 'running', progress: input });
+        dependencies.log.publish("task.updated", {
+          id: null,
+          runId: run.id,
+          turnId: context.turn.turnId,
+          state: "running",
+          progress: input,
+        });
       }
       return { ok: true };
-    } });
+    },
+  });
   // 措辞必须写明「只有本轮」：这个覆盖不跨轮持久（docs/04 §5.2、AC-AGENT-007），而模型据此对
   // 用户说过「切好啦，现在是 vision 模型」——下一轮（真正带图那一轮）早就回到默认别名了
   // （logs/2026-08-18 22:15）。含图轮次现在会自动切 vision，模型不需要自己动手。
-  registry.register({ name: 'set_model', description: '为**当前这一轮剩下的步骤**切换模型别名；本轮结束即失效，不跨轮保留，也不需要用它来看图（含图轮次系统会自动切到 vision）。',
-    inputSchema: z.object({ alias: z.enum(['main', 'high', 'low', 'vision']) }), policy: builtinPolicy('set_model'), sourcePriority: 90,
-    execute: (input, context) => { Object.assign(context.turn, { modelAliasOverride: input.alias }); return { ok: true, alias: input.alias, scope: 'this_turn_only', note: '本轮结束后自动回到默认别名，不要告诉用户已经永久切换。' }; } });
-  registry.register({ name: 'web_search', description: '搜索公开网络；瞬时失败（超时/5xx/429）会自动重试。', inputSchema: z.object({ query: z.string(), limit: z.number().int().min(1).max(10).default(5) }), policy: builtinPolicy('web_search'), sourcePriority: 100, untrustedOutput: true, timeoutMs: webBudgetMs,
-    available: () => Boolean(dependencies.webSearch?.provider && dependencies.webSearch.apiKey), execute: (input, context) => webSearch(dependencies.webSearch!.provider as 'brave' | 'serper' | 'tavily' | 'exa', dependencies.webSearch!.apiKey, input.query, input.limit ?? 5, context.turn.abortSignal, web, dependencies.maxWebBytes) });
-  registry.register({ name: 'send_message', description: '向当前会话追发一条消息（正文请直接写进回复，这个工具用于分段或中间产物）。', inputSchema: z.object({ text: z.string().min(1) }), policy: builtinPolicy('send_message'), sourcePriority: 100,
-    available: () => Boolean(dependencies.telegram), execute: async (input, context) => claimExtraMessage(context) ?? dependencies.telegram!.sendMessage(target(context), input.text) });
-  registry.register({ name: 'send_photo', description: '把工作目录内的图片发到当前会话。', inputSchema: z.object({ photo: z.string(), caption: z.string().optional() }), policy: builtinPolicy('send_photo'), sourcePriority: 100, timeoutMs: UPLOAD_TIMEOUT_MS,
-    available: () => Boolean(dependencies.telegram), execute: async (input, context) => {
-      const file = resolveOutgoingFile(context, dependencies.filesFor(context.workspace, context.turn.effectiveRole), input.photo);
+  registry.register({
+    name: "set_model",
+    description:
+      "为**当前这一轮剩下的步骤**切换模型别名；本轮结束即失效，不跨轮保留。",
+    inputSchema: z.object({ alias: z.enum(["main", "high", "low", "vision"]) }),
+    policy: builtinPolicy("set_model"),
+    sourcePriority: 90,
+    execute: (input, context) => {
+      Object.assign(context.turn, { modelAliasOverride: input.alias });
+      return {
+        ok: true,
+        alias: input.alias,
+        scope: "this_turn_only",
+        note: "本轮结束后自动回到默认别名，不要告诉用户已经永久切换。",
+      };
+    },
+  });
+  registry.register({
+    name: "web_search",
+    description: "搜索公开网络；瞬时失败（超时/5xx/429）会自动重试。",
+    inputSchema: z.object({
+      query: z.string(),
+      limit: z.number().int().min(1).max(10).default(5),
+    }),
+    policy: builtinPolicy("web_search"),
+    sourcePriority: 100,
+    untrustedOutput: true,
+    timeoutMs: webBudgetMs,
+    available: () =>
+      Boolean(
+        dependencies.webSearch?.provider && dependencies.webSearch.apiKey,
+      ),
+    execute: (input, context) =>
+      webSearch(
+        dependencies.webSearch!.provider as
+          "brave" | "serper" | "tavily" | "exa",
+        dependencies.webSearch!.apiKey,
+        input.query,
+        input.limit ?? 5,
+        context.turn.abortSignal,
+        web,
+        dependencies.maxWebBytes,
+      ),
+  });
+  registry.register({
+    name: "send_message",
+    description:
+      "向当前会话追发一条消息（正文请直接写进回复，这个工具用于分段或中间产物）。",
+    inputSchema: z.object({ text: z.string().min(1) }),
+    policy: builtinPolicy("send_message"),
+    sourcePriority: 100,
+    available: () => Boolean(dependencies.telegram),
+    execute: async (input, context) =>
+      claimExtraMessage(context) ??
+      dependencies.telegram!.sendMessage(target(context), input.text),
+  });
+  registry.register({
+    name: "send_photo",
+    description: "把工作目录内的图片发到当前会话。",
+    inputSchema: z.object({
+      photo: z.string(),
+      caption: z.string().optional(),
+    }),
+    policy: builtinPolicy("send_photo"),
+    sourcePriority: 100,
+    timeoutMs: UPLOAD_TIMEOUT_MS,
+    available: () => Boolean(dependencies.telegram),
+    execute: async (input, context) => {
+      const file = resolveOutgoingFile(
+        context,
+        dependencies.filesFor(context.workspace, context.turn.effectiveRole),
+        input.photo,
+      );
       if (!file.ok) return file;
-      return claimExtraMessage(context) ?? dependencies.telegram!.sendPhoto(target(context), file.absolute, input.caption);
-    } });
-  registry.register({ name: 'react', description: '给消息加 emoji reaction；不填 messageId 就点触发本轮的那条消息。', inputSchema: z.object({ messageId: z.number().int().positive().optional(), emoji: z.string() }), policy: builtinPolicy('react'), sourcePriority: 100,
-    available: () => Boolean(dependencies.telegram), execute: async (input, context) => {
+      return (
+        claimExtraMessage(context) ??
+        dependencies.telegram!.sendPhoto(
+          target(context),
+          file.absolute,
+          input.caption,
+        )
+      );
+    },
+  });
+  registry.register({
+    name: "react",
+    description:
+      "给消息加 emoji reaction；不填 messageId 就点触发本轮的那条消息。",
+    inputSchema: z.object({
+      messageId: z.number().int().positive().optional(),
+      emoji: z.string(),
+    }),
+    policy: builtinPolicy("react"),
+    sourcePriority: 100,
+    available: () => Boolean(dependencies.telegram),
+    execute: async (input, context) => {
       const messageId = input.messageId ?? context.turn.triggerTgMessageId;
-      if (!messageId) return { ok: false, error: 'message_id_required', hint: '本轮没有触发消息，请先用 read_messages 取到 tgMessageId。' };
-      return dependencies.telegram!.react(target(context), messageId, input.emoji);
-    } });
-  registry.register({ name: 'send_file', description: '把工作目录内的文件作为文档发到当前会话。', inputSchema: z.object({ file: z.string(), caption: z.string().optional() }), policy: builtinPolicy('send_file'), sourcePriority: 100, timeoutMs: UPLOAD_TIMEOUT_MS,
-    available: () => Boolean(dependencies.telegram), execute: async (input, context) => {
-      const file = resolveOutgoingFile(context, dependencies.filesFor(context.workspace, context.turn.effectiveRole), input.file);
+      if (!messageId)
+        return {
+          ok: false,
+          error: "message_id_required",
+          hint: "本轮没有触发消息，请先用 read_messages 取到 tgMessageId。",
+        };
+      return dependencies.telegram!.react(
+        target(context),
+        messageId,
+        input.emoji,
+      );
+    },
+  });
+  registry.register({
+    name: "send_file",
+    description: "把工作目录内的文件作为文档发到当前会话。",
+    inputSchema: z.object({ file: z.string(), caption: z.string().optional() }),
+    policy: builtinPolicy("send_file"),
+    sourcePriority: 100,
+    timeoutMs: UPLOAD_TIMEOUT_MS,
+    available: () => Boolean(dependencies.telegram),
+    execute: async (input, context) => {
+      const file = resolveOutgoingFile(
+        context,
+        dependencies.filesFor(context.workspace, context.turn.effectiveRole),
+        input.file,
+      );
       if (!file.ok) return file;
-      return claimExtraMessage(context) ?? dependencies.telegram!.sendFile(target(context), file.absolute, input.caption);
-    } });
-  registry.register({ name: 'pin_message', description: '置顶当前会话的消息；不填 messageId 就置顶触发本轮的那条。', inputSchema: z.object({ messageId: z.number().int().positive().optional() }), policy: builtinPolicy('pin_message'), sourcePriority: 100,
-    available: () => Boolean(dependencies.telegram), execute: async (input, context) => {
+      return (
+        claimExtraMessage(context) ??
+        dependencies.telegram!.sendFile(
+          target(context),
+          file.absolute,
+          input.caption,
+        )
+      );
+    },
+  });
+  registry.register({
+    name: "pin_message",
+    description: "置顶指定的消息；不填 messageId 就置顶触发本轮的那条。",
+    inputSchema: z.object({
+      messageId: z.number().int().positive().optional(),
+    }),
+    policy: builtinPolicy("pin_message"),
+    sourcePriority: 100,
+    available: () => Boolean(dependencies.telegram),
+    execute: async (input, context) => {
       const messageId = input.messageId ?? context.turn.triggerTgMessageId;
-      if (!messageId) return { ok: false, error: 'message_id_required', hint: '本轮没有触发消息，请先用 read_messages 取到 tgMessageId。' };
+      if (!messageId)
+        return {
+          ok: false,
+          error: "message_id_required",
+          hint: "本轮没有触发消息，请先用 read_messages 取到 tgMessageId。",
+        };
       return dependencies.telegram!.pin(target(context), messageId);
-    } });
-  registry.register({ name: 'web_fetch', description: '获取公开 HTTP/HTTPS 页面；拒绝私网和元数据地址。瞬时失败（超时/5xx/429）会自动重试。', inputSchema: z.object({ url: z.string().url() }), policy: builtinPolicy('web_fetch'), sourcePriority: 100, untrustedOutput: true,
+    },
+  });
+  registry.register({
+    name: "web_fetch",
+    description:
+      "获取公开 HTTP/HTTPS 页面；拒绝私有地址和docker私有地址还有元数据地址。瞬时失败（超时/5xx/429）会自动重试。",
+    inputSchema: z.object({ url: z.string().url() }),
+    policy: builtinPolicy("web_fetch"),
+    sourcePriority: 100,
+    untrustedOutput: true,
     // `limited` 只在配了 allowlist 时才有 web_fetch（docs/05 §4）：没有白名单就等于把整个互联网
     // 交给权限最低的那档人，而这个工具的输出会直接进上下文。fail-closed 走 `available()`，
     // 所以工具**根本不进目录**，模型不会去试一个必然被拒的调用。
-    available: (role, context) => role !== 'limited' || (context.turn.config as Readonly<Config>).tools.web.allowlist.length > 0,
+    available: (role, context) =>
+      role !== "limited" ||
+      (context.turn.config as Readonly<Config>).tools.web.allowlist.length > 0,
     // 域名白/黑名单从本轮配置取（`tools.web` 在 perChat 白名单里不在，所以就是全局那份，
     // 但仍然走 turn.config —— 热更新后下一轮生效，不用重启）。
-    timeoutMs: webBudgetMs, execute: (input, context) => {
+    timeoutMs: webBudgetMs,
+    execute: (input, context) => {
       const live = (context.turn.config as Readonly<Config>).tools.web;
-      return webFetch(input.url, dependencies.maxWebBytes, context.turn.abortSignal, web, { allowlist: live.allowlist, denylist: live.denylist }, webMediaSink(context));
-    } });
+      return webFetch(
+        input.url,
+        dependencies.maxWebBytes,
+        context.turn.abortSignal,
+        web,
+        { allowlist: live.allowlist, denylist: live.denylist },
+        webMediaSink(context),
+      );
+    },
+  });
 }
