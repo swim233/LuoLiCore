@@ -165,7 +165,10 @@ with_parent 0`，浏览器里展开一条 trace，13 个节点的 `marginLeft` �
 | `webui.disabled` | warn | `webui.enabled=false`：整个 HTTP 面不监听，**审批也就没有裁决通道** |
 | `config.changed` | info | keys[] |
 | `config.invalid` | warn / error | 启动与热重载时的配置问题：缺 `main` 别名、唤醒词不会生效、一个触发源都没开、持久化覆盖被剔除（`dropped[]`）。这些都不中止启动 —— 补配置要用的 WebUI 不能被配置错误带走 |
-| `maintenance.cleanup` / `maintenance.vacuum` | info | 每日维护与 VACUUM 的结果 |
+| `maintenance.cleanup` / `maintenance.vacuum` | info | 每日维护与 VACUUM 的结果。**这一族由 `MaintenanceService` 自己发**，不由调用方发 —— cron 与 `POST /api/maintenance/:action` 是同一个动作的两个入口，日志落在包装层的年代，从 WebUI 跑只剩一条「方法 + 路径」的 `webui.action`（docs/29 · `M-LOG-01`） |
+| `maintenance.backup` | info | path, label, kept, removed —— `VACUUM INTO` 出一份备份，并按 `db.backupKeep` 淘汰旧的 |
+| `maintenance.gc_files` | info / **warn** | files, fileBytes, agentResults, agentResultBytes, refused[] —— 孤儿 blob 清理。**被拒时是 warn**：`refused` 唯一的触发条件是「库与目录来自两套部署」，正是该立刻停手的那一种，混在 info 里等于把它藏起来 |
+| `maintenance.rebuild_fts` | info | ms —— 重建 `messages_fts` |
 | `maintenance.repair` | warn | 一次性数据修复留下的痕迹（计价口径重算、子 agent 结果路径归一化）。它只在真的改过东西时才落 |
 | `scheduler.failed` | error | error —— 五个维护 cron 里某一个抛了（用户任务那一路走 `schedule.failed`） |
 | `schedule.created` | info | job, name, cron, mode —— 从 WebUI 新建了一条定时任务（工具那一路的痕迹在 `tool.call` 里） |

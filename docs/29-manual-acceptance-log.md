@@ -143,6 +143,7 @@ LUOLI_DATA_DIR=/home/swim/code/LuoLiCore-staging/data-acc pnpm ac:seed --passwor
 - 第一批（改动最小的八条）：`M-WEB-07` `M-WEB-08` `M-WEB-09` `M-WEB-12` `M-WEB-13`
   `M-TG-01` `M-TG-04` `M-TG-06`
 - 第二批（中等的五条）：`M-WEB-10` `M-WEB-11` `M-TG-03` `M-TG-05` `M-QUOTA-01`
+- 第四批：`M-LOG-01`
 - 第三批：`M-WEB-01`（`ConsoleView.vue` 里最后 11 处裸 `window.confirm`）。
   `docs/00` 原先记着「跟着拆页面一起收」—— **那条判断作废**：换 `askConfirm` 是逐个函数的
   局部改动，跟未来把这一页拆成子 SFC 不冲突（函数搬走时那行 import 跟着搬），
@@ -161,7 +162,7 @@ LUOLI_DATA_DIR=/home/swim/code/LuoLiCore-staging/data-acc pnpm ac:seed --passwor
 | `M-WEB-04` | `AC-WEB-016` | 权限矩阵视图不存在（详见 §3 豁免登记）。列在这里是因为它同时是一条 WebUI 控制面缺口，不只是一条测不了的验收项 | 已转 [21](./21-webui-coverage-gaps.md) |
 | `M-SEC-01` | `AC-SEC-011` | **数据库备份文件是 0644，不是条目要求的 0600** —— 一份全局可读的整库快照 | 已转 [00 §2.3](./00-state.md) |
 | `M-OPS-01` | （无对应条目）| **第二个实例一启动就 `docker rm -f` 掉第一个实例的持久容器** —— `#sweepOrphans` 的 known 集是空的，而 `luoli.managed=1` 这个标签不带实例身份 | 已转 [00 §2.3](./00-state.md) |
-| `M-LOG-01` | `AC-DB-006` · `AC-WEB-021` · `AC-WEB-037` | WebUI 跑维护操作只留一条 `webui.action`（方法 + 路径），**不落带结果的 `maintenance.*`**；cron 那条路才落 | 已转 [00 §2.3](./00-state.md) |
+| `M-LOG-01` | `AC-DB-006` · `AC-WEB-021` · `AC-WEB-037` | WebUI 跑维护操作只留一条 `webui.action`（方法 + 路径），**不落带结果的 `maintenance.*`**；cron 那条路才落 | **已修** · 日志挪进 `MaintenanceService` 本身，cron 与端点两条路留下同一份凭据；顺带 `cleanup()` 的 checkpoint 挪到那条日志之后，「跑完 WAL 是 0」对调用方才真的成立〔`tests/maintenance.gc.test.ts`〕 |
 | `M-WEB-06` | `AC-WEB-011`（`raw_json` 那半）| **WebUI 里没有看 `raw_json` 的入口**：`packages/webui/src` 与 `packages/server/src` 各零命中，`GET /api/messages` 也不回这个字段。列一直在写、也一直被 `get_message` 工具读，只是界面够不着 | 已转 [00 §2.3](./00-state.md) |
 | `M-SNAP-01` | `AC-WEB-047` · `AC-WEB-011`（附件那半）| **不是产品缺陷**：`attachments.local_path` 存相对路径，快照跨部署根复制后解析到媒体目录之外，被路径包含检查挡下（`404 附件路径不在媒体目录内`）。那道检查是对的；影响是这两条在这份快照上验不了，要用新收到的附件。**2026-08-27 已用新附件绕过，两条的附件那半都验过了** | 不转（装置问题），但「搬过部署目录后历史附件集体打不开且界面无提示」值得产品定夺 |
 | `M-LOG-02` | `AC-LOG-003`（「是否沙箱」那半）| **`sandbox.run` 的 `spanId` / `parentSpanId` 都是 null**，Trace 视图按 `parentSpanId` 算缩进，于是它被画在 0px、和 `turn.start` 同级 —— 一轮里 3 次沙箱执行对应 3 次 `tool.call`，只能按时间戳猜配对。而 `tool.call` 自己的载荷里既没有沙箱字段也没有审批字段 | 已转 [00 §2.3](./00-state.md) |

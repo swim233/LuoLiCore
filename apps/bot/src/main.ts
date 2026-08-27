@@ -495,6 +495,9 @@ const maintenance = new MaintenanceService(
     memoryRevisions: config.maintenance.retention.memoryRevisionDays,
     media: config.media.retentionDays,
   },
+  // `maintenance.*` 由服务自己落，不再由下面那两条 cron 的包装层落 —— 否则从 WebUI 那个入口
+  // 跑同一个动作就只剩一条「方法 + 路径」的 webui.action（docs/29 · M-LOG-01）。
+  log,
 );
 const scheduler = new Scheduler((name, error) =>
   log.event({
@@ -504,31 +507,14 @@ const scheduler = new Scheduler((name, error) =>
     data: { error: error instanceof Error ? error.message : String(error) },
   }),
 );
+// 两条 cron 都不再自己落日志：`maintenance.cleanup` / `maintenance.vacuum` 由服务内部发，
+// 于是 cron 与 `POST /api/maintenance/:action` 两条路留下的凭据一模一样。
 scheduler.add(
   config.general.maintenanceCron,
-  () => {
-    const result = maintenance.cleanup();
-    log.event({
-      level: "info",
-      kind: "maintenance.cleanup",
-      summary: "Scheduled cleanup complete",
-      data: result,
-    });
-  },
+  () => void maintenance.cleanup(),
   "maintenance",
 );
-scheduler.add(
-  config.db.vacuumCron,
-  () => {
-    maintenance.vacuum();
-    log.event({
-      level: "info",
-      kind: "maintenance.vacuum",
-      summary: "Scheduled VACUUM complete",
-    });
-  },
-  "vacuum",
-);
+scheduler.add(config.db.vacuumCron, () => maintenance.vacuum(), "vacuum");
 scheduler.add(
   config.memory.compactCron,
   () => {

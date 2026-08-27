@@ -231,16 +231,17 @@ describe('AC-DB-006 · 维护任务跑完要留下痕迹', () => {
     for (const daysAgo of [40, 1]) { mkdirSync(resolve(logsDir, day(daysAgo)), { recursive: true }); writeFileSync(resolve(logsDir, day(daysAgo), 'system.jsonl'), '{}\n'); }
     expect(statSync(wal).size, '装置本身就没往 WAL 里写过东西，checkpoint 那条断言会白过').toBeGreaterThan(0);
     const log = new LogSink(new OperationsRepository(db), logsDir, [], { level: 'info', console: 'off' });
-    const maintenance = new MaintenanceService(db, path, 2, 30, logsDir);
+    // 日志由**服务自己**发，不由这条 cron 的包装层发 —— 包装层落的年代，同一个动作从
+    // `POST /api/maintenance/:action` 跑就只剩一条「方法 + 路径」的 webui.action（docs/29 · M-LOG-01）。
+    const maintenance = new MaintenanceService(db, path, 2, 30, logsDir, {}, 0, 30, {}, log);
     const failures: unknown[] = [];
     const scheduler = new Scheduler((_name, error) => failures.push(error));
     let walAfterCleanup = -1;
+    // 现在可以在 `cleanup()` 返回之后量：那条 `maintenance.cleanup` 是在 checkpoint **之前**写的，
+    // 所以「跑完这一刻 WAL 是 0」对调用方真的成立，不再是「取样时机挑对了」。
     scheduler.add('0 4 * * *', () => {
-      const result = maintenance.cleanup();
-      // 取样只能在这里：`cleanup()` 的最后一句就是 checkpoint，而紧接着这条日志自己又要写库 ——
-      // 触发之后再量到的是「那一行有多大」，不是 checkpoint 到底有没有生效。
+      maintenance.cleanup();
       walAfterCleanup = statSync(wal).size;
-      log.event({ level: 'info', kind: 'maintenance.cleanup', summary: 'Scheduled cleanup complete', data: result });
     }, 'maintenance');
     await scheduler.trigger('maintenance');
     scheduler.stop(); log.close();
@@ -258,6 +259,37 @@ describe('AC-DB-006 · 维护任务跑完要留下痕迹', () => {
     // `turn` 那个兜底，于是维护记录散进轮次日志里，按类别翻日志的人再也找不到它。
     expect(readFileSync(resolve(logsDir, day(0), 'system.jsonl'), 'utf8')).toContain('"kind":"maintenance.cleanup"');
     expect(existsSync(resolve(logsDir, day(0), 'turn.jsonl'))).toBe(false);
+    closeDatabase(db);
+  });
+
+  /**
+   * 上面那条走的是 cron，`POST /api/maintenance/:action` 走的是直接调用。日志落在**服务内部**
+   * 之后两条路自动一致 —— 此前它落在 cron 的包装层，于是从 WebUI 跑完全看不到结果
+   * （docs/29 · `M-LOG-01`）。这里直接调方法，也就是端点走的那条路。
+   */
+  it('直接调用（= WebUI 那条路）同样留下带结果的 maintenance.*，被拒是 warn', () => {
+    const { db, path } = database('maint-log-parity');
+    const logsDir = directory('maint-log-parity-logs');
+    const oldRoot = directory('maint-log-parity-old');
+    const newRoot = directory('maint-log-parity-new');
+    writeFileSync(resolve(newRoot, 'orphan.txt'), 'nobody points here');
+    seedAgentRun(db, 'r-old', resolve(oldRoot, 'r-old.txt'));
+    const log = new LogSink(new OperationsRepository(db), logsDir, [], { level: 'info', console: 'off' });
+    const maintenance = new MaintenanceService(db, path, 2, 30, logsDir, { agentResults: newRoot }, 0, 30, {}, log);
+    maintenance.backup('manual');
+    maintenance.rebuildFts();
+    expect(maintenance.gcFiles().refused).toHaveLength(1);
+    log.close();
+    const rows = db.prepare("SELECT kind,level,data_json FROM log_events WHERE kind LIKE 'maintenance.%' ORDER BY id")
+      .all() as Array<{ kind: string; level: string; data_json: string | null }>;
+    expect(rows.map((row) => row.kind)).toEqual(['maintenance.backup', 'maintenance.rebuild_fts', 'maintenance.gc_files']);
+    // 备份那条要说清落在哪 —— 「备份成功」而不给路径，出事时没人找得到那份文件。
+    expect(JSON.parse(rows[0]!.data_json!)).toMatchObject({ label: 'manual', kept: 2 });
+    expect(String((JSON.parse(rows[0]!.data_json!) as { path: string }).path)).toContain('backup');
+    // 被拒不能是 info：它唯一的触发条件是「库与目录来自两套部署」，混在 info 里等于把它藏起来。
+    expect(rows[2]!.level).toBe('warn');
+    expect(JSON.parse(rows[2]!.data_json!)).toMatchObject({ agentResults: 0 });
+    expect(existsSync(resolve(newRoot, 'orphan.txt')), '判不准哪些是孤儿时不该动手').toBe(true);
     closeDatabase(db);
   });
 });
