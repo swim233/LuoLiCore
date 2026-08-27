@@ -40,11 +40,11 @@
 
 按「挡着别人 / 单独可做」分组。**每条都实测过**，括号里是核对时的实际值。
 
-> **2026-08-27**：手测缺陷的头三批修复（`fix/manual-acceptance-batch1`）收掉了 §2.3 里的十四条，
+> **2026-08-27**：手测缺陷的头四批修复（`fix/manual-acceptance-batch1`）收掉了 §2.3 里的十五条，
 > 按 §4 的规矩已从本文删除；「怎么发现的 / 怎么修的」留在
 > [`29 §4`](./29-manual-acceptance-log.md)。**它们挂着的验收项仍是 `[ ]`** ——
 > `(手动)` 条目要勾得有一场新的手测台账，见 `docs/13` 与 `tests/acceptance.test.ts`。
-> 剩下的手测缺陷（`M-WEB-02` `M-WEB-06` `M-WEB-14` `M-LOG-01` `M-MEM-01` `M-TG-02`）
+> 剩下的手测缺陷（`M-WEB-02` `M-WEB-06` `M-WEB-14` `M-MEM-01` `M-TG-02`）
 > 仍在下面各表里。
 
 ### 2.1 结构性的三条（[`reviews/27` §8](./reviews/27-full-scope-review.md) 的 `Z4`/`Z5`，需求方拍板留到下一轮）
@@ -93,6 +93,7 @@ Bot API 调用），照 `TelegramToolBridge` 的形状注入、presence 即开�
 
 | 欠什么 | 实测 | 备注 |
 |---|---|---|
+| **`docs/10 §2` 那道「日志 kind 双向一致」的闸已经瞎了** | `tests/docs.test.ts` 的 `emittedKinds()` 用 `/kind: '([^']+)'/`（**写死单引号**）扫源码，而 `b7e24ae` 把源码格式化成了双引号 —— 于是「表里写了但源码一处都没发」的差集恒等于整张表、`NON_LOG_KINDS` 整份变成陈账。它表现成两条红，看起来像「格式化撞了 grep 断言」这种噪声，实际是**这道闸从此什么都挡不住**：新增一个没写进文档的 kind 不会再变红 | 2026-08-27 修 `M-LOG-01` 时撞上的。把引号改成 `['"]` 之后剩三条**真**信号：①`tg.action` 在发但数不进来（`bot.ts:1857` 是**三分支嵌套三元**，而抽取只认两分支）；②③`NON_LOG_KINDS` 的 `status` / `network` 同因（`fallback-model.ts:150` 也是三分支）。**修法不是再打一个正则补丁** —— 广扫 `kind:` 本来就会捞到 ACP 权限档、SQL 串、类型联合（试过一版宽松匹配，误报 43 条），要么把扫描锚到 `.event({` / `.span({` 上（那样 `NON_LOG_KINDS` 整份该废掉），要么解析 AST。是一次单独的改动，本轮只记不动 |
 | **`PUT /api/sandbox` 收下 schema 里不存在的键并落进 `config_kv`** | `PUT /api/sandbox {"notAKey":123}` 回 **200**，`config_kv` 里多出一行 `sandbox.notAKey = 123`。成因是两层都不挡：端点无条件给每个键加 `sandbox.` 前缀（`app.ts:3336-3338`），而 `configSchema` 的 `z.object` 没有 `.strict()`，`safeParse` 把未知键**静默剥掉**后返回 success —— 于是校验通过，`writeConfigRows` 写的却是**原始**那份 dotted 条目 | 补 `M-WEB-10` 的用例时量出来的（2026-08-27）。`CLAUDE.md` 点名的那个雷：「`config_kv` 的每一行都会被 `loadConfig` 当成配置覆盖层解析」。目前不至于炸 —— `loadConfig` 对非法路径逐条剔除并经 `onInvalidOverride` 上报 —— 所以这是**一条静默积累的垃圾**而不是启动失败。同类的 `PUT /api/config` 走的是 `mergeDotted` + 白名单，不受影响。修法：写库前先拿 dotted 键对 schema 路径核一遍，未知键回 `invalid_key`（`invalidKey()` 已经在那儿了） |
 | **`/usage` 的 `minRole` 与 `docs/08 §8` 对不上** | 那张表写的是 `all \| limited \| 本会话/本人用量；owner 看全局`，命令注册表里是 `minRole: "owner"`（`bot.ts` 命令表）。放宽是权限变更，不当作缺陷顺手改 | 需求方 2026-08-27 拍板：**先不管**，后期在 WebUI 单开一个 tab 统一管理所有命令（届时一并解决权限与文档口径）。记在这里是为了那时不必重新发现它 |
 | trace 树上还有三处**知情的**不对称（第十轮整改留下的） | ①`sandbox.run` 只有 `traceId`、没有 `parentSpanId`，在 trace 里是 depth 0 —— 要挂到 `bash` 那次 `tool.call` 之下得给 `Sandbox.run` 加一个参数再从三条工具路径各穿一遍，而 `docs/10 §1` 那张图本来也没有它；②`tool.error` **只覆盖主 agent**：子 agent 的 `onStepEnd` 不走 `stepToolResults`，同一个盲区在那边还开着（事故起点在主路径，`docs/10 §2` 那行也没承诺子 agent）；③运维禁用某个工具时 `tool.disabled` 与 `tool.denied` **同时落两行**（前者是既有 kind + 既有断言，后者是统一流水） | 三条都在 `docs/10 §2` 的表里写明了边界，所以不是「以为有其实没有」。②是唯一有实际排障代价的一条：子 agent 反复用错工具参数仍然只在上下文里留一条下一轮就被抹掉的 `error-text`。③要合成一条的话 `tests/regression.round9.test.ts` 那条 `warn: true` 断言要跟着改 |
@@ -138,7 +139,6 @@ Bot API 调用），照 `TelegramToolBridge` 的形状注入、presence 即开�
 | **「查看他人的私有记忆会被记录」在 WebUI 这条路上不成立** | `memory.owner_read_private` 只在 `MemoryStore.read()`（`memory/store.ts:125`）里发 —— 那是 `memory_read` 工具那条路。WebUI 的 `GET /api/prompts/:id` 照 `memory_docs.path` 直接读文件，绕过整个 `MemoryStore`，**一条日志都不落**（连 `memory.read` 都没有）。而提示词页那张卡的副标题写着「某个用户私有；**查看他人的这份会被记录**」。条目后半句「用户 B 的记忆页显示『最近被 owner 查看于…』」全仓零命中，从未实现。同一组端点的 `PUT /api/prompts/:id` 还能改他人的私有记忆 | S3 手测（[29 · `M-MEM-01`](./29-manual-acceptance-log.md)），`AC-MEM-011` 因此挂。造了个「用户 B」的 PRIMEMORY 夹具后用 owner 身份点开，全文进了可编辑 textarea 而日志为空 |
 | **被编辑的消息进模型时不带任何「这是编辑」的标记** | 把那一轮的完整请求体捞出来，`instructions` 与 `messages` 里搜「编辑 / edited / revision / 修改过」**四个词全部零命中**。两条编辑以裸 `[user]` 形态出现 —— 没有 `<group-message>` 包裹、没有时间戳、没有 RUNTIME 提示，与一条刚发来的新消息完全无法区分 | S4 手测（[29 · `M-TG-02`](./29-manual-acceptance-log.md)），`AC-TG-010` 因此挂。**上下文那一层是对的**：已提交的 ordinal 一字未被改写，编辑版本以 `origin=background` 追加成新条目（只追加模型守住了）。缺的是**告诉模型这是一次编辑**。后果直接写在回复里：模型把五分钟前那条 `早` 的编辑当成刚说的话，回了「早呀早呀」 |
 | **`/forgetme` 的备份目录 `.forgotten` 无人清理，`forgetMeRetentionDays` 名不副实** | `forgetPrivate`（`memory/store.ts:342-351`）在该值 > 0 时把原文备份到 `<memory.dir>/.forgotten/<uid>/<时间戳>.md`，但**全仓没有任何代码删过 `.forgotten`**（`grep -rn forgotten` 只有 `store.ts` 那两处）。这个键只决定「写不写备份」，不决定留多久 —— 一个要求「忘掉我」的用户，数据被无限期保留 | S4 手测读码查到（[29 · `M-MEM-02`](./29-manual-acceptance-log.md)）。**`/forgetme` 命令本身已于 2026-08-27 由需求方定为移除**，`AC-MEM-012` 随之不再验（走 [29 §3](./29-manual-acceptance-log.md) 豁免登记）—— 但这个悬着的目录要跟着一起处置。另有两处小账：没有任何恢复入口（`docs/06:426` 的「30 天内 owner 可恢复」= 手工拷文件）；`docs/11:230` 的 `forgetMeRetentionDays: 30` 是那一页上少数没有「热更新 / 需重启」标注的行（它是构造参数，属需重启） |
-| WebUI 跑维护操作**不落带结果的 `maintenance.*`** | `POST /api/maintenance/:action`（`app.ts:5437`）直接调 `MaintenanceService` 的五个方法然后 `ctx.json` 返回，而 `MaintenanceService` 自己一条日志都不发 —— `maintenance.*` 是 `main.ts` 那五条 cron 的包装层落的。同一个操作两个入口，可观测性不一样 | **不是「零痕迹」**：`app.use('/api/*')` 那道审计中间件会给每个非 GET 落一条 `webui.action`（`summary` 是 `方法 + 路径`）。缺的是**带结果的那一条** —— 清了多少行、回收了多少字节、`gc-files` 为什么 `refused`，这些只在 cron 路径上看得见。影响 `AC-DB-006`（「日志有 `maintenance.*`」按入口而定）与 `AC-WEB-021`/`037`（「有结果反馈与日志」）。修法是把日志挪进 `MaintenanceService` 本身，两条路径就自动一致 |
 
 ---
 

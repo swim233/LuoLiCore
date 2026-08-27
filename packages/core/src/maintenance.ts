@@ -10,6 +10,7 @@ import {
 } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import type { Sqlite } from "@luoli/db";
+import type { LogSink } from "./log/sink.js";
 
 /** 落在磁盘上、由 DB 行指路的两棵 blob 目录。给不出路径的那一棵就不扫（测试里常只给一棵）。 */
 export interface BlobDirectories {
@@ -49,6 +50,14 @@ export class MaintenanceService {
     private readonly gzipAfterDays = 0,
     private readonly scheduleRetentionDays = 30,
     private readonly retention: RetentionDays = {},
+    /**
+     * 日志在**这一层**发，不在调用方。此前 `maintenance.*` 是 `main.ts` 那五条 cron 的包装层落的，
+     * 而 `POST /api/maintenance/:action` 直接调这些方法就返回 —— 同一个操作从两个入口跑，
+     * 可观测性不一样：从 WebUI 跑只剩审计中间件那条「方法 + 路径」的 `webui.action`，
+     * 清了多少行、回收了多少字节、`gc-files` 为什么 `refused` 一概看不到（docs/29 · M-LOG-01）。
+     * 落在这里之后两条路自动一致，将来第三个入口也不用再抄一遍。
+     */
+    private readonly log?: LogSink,
   ) {}
 
   backup(label = "manual"): string {
@@ -60,7 +69,14 @@ export class MaintenanceService {
     const backups = readdirSync(directory)
       .map((name) => join(directory, name))
       .sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs);
-    for (const expired of backups.slice(this.backupKeep)) unlinkSync(expired);
+    const expired = backups.slice(this.backupKeep);
+    for (const stale of expired) unlinkSync(stale);
+    this.log?.event({
+      level: "info",
+      kind: "maintenance.backup",
+      summary: `Backup written to ${path}`,
+      data: { path, label, kept: this.backupKeep, removed: expired.length },
+    });
     return path;
   }
 
@@ -74,8 +90,15 @@ export class MaintenanceService {
    * 而 `db.vacuumCron`（周）比 `general.maintenanceCron`（日）稀疏，指望后者兜是指望不上的。
    */
   vacuum(): void {
+    const startedAt = Date.now();
     this.db.exec("VACUUM");
     this.checkpoint();
+    this.log?.event({
+      level: "info",
+      kind: "maintenance.vacuum",
+      summary: "VACUUM complete",
+      durationMs: Date.now() - startedAt,
+    });
   }
 
   checkpoint(): void {
@@ -301,8 +324,7 @@ export class MaintenanceService {
               .slice(0, 10),
           )
         : 0;
-    this.checkpoint();
-    return {
+    const result = {
       logs,
       logDirectories,
       updates,
@@ -317,6 +339,16 @@ export class MaintenanceService {
       memoryRevisions,
       mediaFiles,
     };
+    this.log?.event({
+      level: "info",
+      kind: "maintenance.cleanup",
+      summary: "Cleanup complete",
+      data: result,
+    });
+    // checkpoint 放在这条日志**之后**：它自己也是一次写入，先 checkpoint 的话跑完这一刻 WAL 里
+    // 正好躺着这一行，「把 WAL 收回 0」在调用方看来就不成立（AC-DB-006 量的就是返回之后那一刻）。
+    this.checkpoint();
+    return result;
   }
 
   /**
@@ -467,16 +499,34 @@ export class MaintenanceService {
       (reason): reason is string => Boolean(reason),
     );
     // 拒绝的理由必须交回给调用方：静静地「删了 0 个」会让运维以为目录本来就是干净的。
-    return {
+    const result = {
       files: files.removed,
       fileBytes: files.bytes,
       agentResults: results.removed,
       agentResultBytes: results.bytes,
       ...(refused.length ? { refused } : {}),
     };
+    // 被拒是 warn 而不是 info：它唯一的触发条件是「库与目录来自两套部署」，正是运维最该立刻
+    // 停手的那一种，混在 info 里等于把它藏起来（同 WebUI 那条不自动消失的 Toast）。
+    this.log?.event({
+      level: refused.length ? "warn" : "info",
+      kind: "maintenance.gc_files",
+      summary: refused.length
+        ? `Orphan sweep refused: ${refused.join("; ")}`
+        : `Swept ${files.removed + results.removed} orphan files`,
+      data: result,
+    });
+    return result;
   }
 
   rebuildFts(): void {
+    const startedAt = Date.now();
     this.db.exec("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')");
+    this.log?.event({
+      level: "info",
+      kind: "maintenance.rebuild_fts",
+      summary: "FTS index rebuilt",
+      durationMs: Date.now() - startedAt,
+    });
   }
 }
