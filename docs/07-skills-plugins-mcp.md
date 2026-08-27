@@ -178,7 +178,7 @@ activeTools = (常驻 ∪ 本轮已展开) ∩ skill 允许集 ∩ 开轮冻结�
 
 - Skill 目录在 fs jail 之外（`skills/` 与 `data/workspace/` 是不同的根）。
 - `load_skill` 返回 `dir` 后，`read_file` 允许以 `skill://<name>/<relPath>` 形式访问该 skill 目录（**只读**）。实现上在 `resolveJailed` 前拦截该 scheme，映射到 `skills/<name>/`，并禁止 `..`。
-- Skill 附属脚本要在沙箱里跑：`load_skill` 时自动把 `skills/<name>/` 以只读方式挂载到容器 `/skill`（docker 模式）或拷贝到 `workspace/.luoli-skill/<name>/`（jail 模式）。
+- Skill 附属脚本要在沙箱里跑：`load_skill` 时自动把 `skills/<name>/` 以只读方式挂载到容器 `/skill`（docker 模式）。
 
 ### 2.5 装一个 skill 包（zip / 目录）
 

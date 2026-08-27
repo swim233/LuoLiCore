@@ -162,6 +162,35 @@ describe('MCP runtime', () => {
     await manager.close(); closeDatabase(db);
   });
 
+  /**
+   * `server.timeoutMs` 曾经只落进 `mcp_servers` 表，从没传给 `callTool`（docs/20 · W-MCP-01）：
+   * 一台握手正常、却在某一次调用上不回话的 server 于是把整轮拖到 `concurrency.turnTimeoutMs`
+   * （默认 600_000ms），用户侧表现是「工具调完之后 bot 再也不说话」。所以这条只能用真子进程 +
+   * 真墙钟量：断言失败发生在 `timeoutMs` 的量级上，而不是轮次超时的量级上。
+   */
+  it('卡住的 MCP server 在 timeoutMs 之后失败，而不是把整轮拖到轮次超时', async () => {
+    const database = './data/mcp-calltimeout.test.db';
+    for (const suffix of ['', '-wal', '-shm']) rmSync(`${database}${suffix}`, { force: true });
+    const db = openDatabase(database); migrateDatabase(db);
+    const log = new LogSink(new OperationsRepository(db), './data/mcp-runtime-logs');
+    const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, mcp: { enabled: true, servers: [{ name: 'stuck', transport: 'stdio', command: process.execPath, args: [resolve('tests/fixtures/mcp-server-hang.mjs')], enabled: true, timeoutMs: 400 }] } });
+    const registry = new ToolRegistry(log, { request: async () => true }, { maxRegistered: 80, maxCallsPerTurn: 40, maxConsecutiveErrors: 3 });
+    const manager = new McpManager(db, config.mcp, log, registry);
+    await manager.reconcile();
+    // 卡的是这一次调用而不是这台 server 连不上：握手与 listTools 都通了，工具照常进了目录。
+    expect(registry.names()).toEqual(['mcp__stuck__hang']);
+    expect(db.prepare("SELECT state FROM mcp_servers WHERE name='stuck'").pluck().get()).toBe('up');
+    const started = Date.now();
+    await expect(manager.toolEntries()[0]!.call({ text: 'hi' })).rejects.toThrow(/timed out/i);
+    const elapsed = Date.now() - started;
+    expect(elapsed).toBeGreaterThanOrEqual(380); // 真等满了 timeoutMs，不是握手就失败了
+    expect(elapsed).toBeLessThan(5_000); // 轮次超时 600_000、工具层兜底 60_000，两者都够不着这里
+    // 模型侧拿回的是一条失败的工具结果，于是它还能换个做法；挂死的话这一步永远不 settle。
+    const context: ToolExecutionContext = { turn: { turnId: 't', key: 'k', chatId: 'c', threadId: null, initiatorUserId: 'u', effectiveRole: 'trusted', isPrivate: false, baseCommitId: null, snapshot: { messages: [], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 0 }, delta: [], abortSignal: new AbortController().signal, config: {} }, workspace: '.', agentKind: 'main' };
+    expect(await registry.execute('mcp__stuck__hang', { text: 'hi' }, context)).toMatchObject({ ok: false, error: expect.stringMatching(/timed out/i) });
+    await manager.close(); closeDatabase(db);
+  }, 20_000);
+
   /** 先 `unregisterBySource('mcp')` 再逐台串行 await 的话，每台最长 `connectTimeoutMs` 的那段
    *  窗口里模型的工具目录一个 MCP 工具都没有，而 `mcp.healthCheckCron` 默认 5 分钟开一次
    *  （docs/28 · L-EXT-05）。 */

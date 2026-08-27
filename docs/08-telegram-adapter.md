@@ -416,10 +416,11 @@ HTML 那一档的切口回退是必需的，不是保险：`<a href="…">` 与 
 
 ```
 用户: @bot 帮我把 /workspace/logs 里所有 error 归类统计
-bot:  ⏳ 已接收，正在处理…                      [取消]        ← 占位消息(placeholder)
-      ⏳ 检索中（12/40 文件）                    [取消]        ← report_progress 触发编辑
-      ⏳ 分析中（researcher）                    [取消]
+bot:  ⏳ 已接收，正在处理…                                    ← 占位消息(placeholder)
+      ⏳ 检索中（12/40 文件）                                  ← report_progress 触发编辑
+      ⏳ 分析中（researcher）
       ✅ 共 3 类 error，最多的是 …（正文）                     ← 定稿（编辑同一条消息）
+用户: /cancel                                                 ← 取消入口是命令，不是按钮
 ```
 
 - **何时出现占位消息**：`spawn_agent` 被调用，或首个 chunk 迟于 `output.placeholderAfterMs`（默认 4000ms）。日常聊天不会看到它。
@@ -430,8 +431,17 @@ bot:  ⏳ 已接收，正在处理…                      [取消]        ← �
   占位消息发出后渲染基线记 0 而不是文案长度：`lastRenderedLength` 量的是「答复渲染了多少字」，
   占位消息里一个字都不是答复；记成文案长度会让长文案把第一次编辑推后十几个字。
 - 进度来源：`report_progress` 工具、`spawn_agent` 的 `yield`、内部阶段事件（快照、模型调用、工具执行）。节流 `agent.progressThrottleMs`（默认 3000）。
-- 取消按钮：`callback_data = 'c:<turnId>'`（≤64 字节）。点击后：
-  - 校验点击者 = turn 发起人 或 owner，否则 `answerCallbackQuery({text:'只有发起人或管理员可以取消', show_alert:true})`；
+- **取消入口是 `/cancel` 命令**，不是占位消息上的按钮 —— 那个按钮从来没有实现过，本节此前的
+  示意图画着它（2026-08-25 改掉）。缺的**只是键盘**：`c:<turnId>` 那条 callback 通道整条是活的
+  （handler、发起人/owner 判据、收尾那次写「⛔ 已取消」的 `editMessageText` 都在），而
+  `TelegramOutput` / `TelegramStreamOutput` 一处 `reply_markup` 都没有 —— 全仓只有 `prompts.ts`
+  （审批）与 `acp-card.ts`（§6.1）挂键盘，后者是这条通道**唯一的真生产者**。
+  要给占位消息补上键盘不是加一行 `reply_markup`：`report_progress` 每次编辑占位消息都得把键盘
+  一起带上（不带等于把它撤掉），而那些编辑要排 `telegram.throttle.perChatPerMinute` 的队。
+  这属 D17 占位消息规格，没做之前不要在别处假设按钮存在。
+- 取消的语义（两个入口共用一条路）：
+  - 校验触发者 = turn 发起人 或 owner，否则回「只有发起人或管理员可以取消」
+    （按钮那条路走 `answerCallbackQuery({show_alert:true})`）；
   - 调 `turnRunner.cancel(turnId, 'user')` → `AbortController.abort()` → 级联子 agent、`docker kill` 沙箱容器；
   - 编辑消息为「⛔ 已取消」，按 `cancel.commitPartial`（默认 false）决定是否提交部分 delta（[02 §3.5](./02-context-engine.md#35-取消cancel)）。
 - `/tasks`：列出本会话 `state='running'` 的任务（id、标题、已运行时长、进度）。`/cancel [id]`：无 id 时取消本人最近一个在途 turn。

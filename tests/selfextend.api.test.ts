@@ -23,7 +23,7 @@ function harness(name: string) {
   const operations = new OperationsRepository(db); const events = new EventBus();
   const log = new LogSink(operations, `./data/${name}-logs`); const archive = new ArchiveRepository(db);
   const registry = new ToolRegistry(log, { request: async () => true }, { maxRegistered: 200, maxCallsPerTurn: 50, maxConsecutiveErrors: 10 });
-  const sandbox = new Sandbox(() => ({ mode: 'jail', bypassRoles: ['owner'], dockerBin: 'docker', image: 'x', network: 'none',
+  const sandbox = new Sandbox(() => ({ mode: 'docker', bypassRoles: ['owner'], dockerBin: 'docker', image: 'x', network: 'none',
     memoryMb: 256, cpus: 1, pidsLimit: 64, readOnlyRoot: false, tmpfsMb: 16, workspaceDir: `${root}/workspace`, hostWorkspaceDir: '',
     defaultTimeoutMs: 10_000, maxTimeoutMs: 30_000, maxOutputBytes: 65_536 }));
   const repo = new CustomToolRepository(db);

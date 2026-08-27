@@ -234,7 +234,7 @@ Q13-c 那道闸是这套东西的**主闸**，不是审批。四个写工具虽�
 | T6 | **背景消息进上下文 ⇒ token 成本明显上升**：活跃群里每轮可能多几千 token | D6（你明确选择） | `background.maxPerTurn` 可调（你已要求做成配置项）+ prompt cache 抵消一部分 + 轮后裁剪兜住上限 |
 | T7 | **单库单文件 ⇒ 隔离靠代码纪律，不是物理边界** | D7 | Repository 层类型强制 + 跨会话白名单 + CI 的 SQL 扫描测试（AC-DB-003） |
 | T8 | **owner 宿主直跑代码 = 完整机器权限**。任何能让 owner 的轮次执行工具的注入路径都是完整的机器沦陷 | D10（你明确选择） | owner 在非受信群里角色被抿平为群角色（D9 的取交集正是为此）；`allowHostFsForOwner` 默认关；高危命令仍走审批 |
-| T9 | **jail 模式不是安全边界** | D10 的 mode 选项 | 文档与 WebUI 明确警示；默认推荐 docker |
+| T9 | ~~jail 模式不是安全边界~~ → **已摘除**：jail 档已从 `sandbox.mode` 移除，只剩 `none \| docker`；「看起来像隔离、实际不是隔离」这个选项本身就是风险来源 | D10 的 mode 选项 | ~~文档与 WebUI 明确警示~~ → 选项没了，警示也就不必存在；真正的隔离只有 docker 一档，`none` 是 fail-closed 而不是「弱隔离」 |
 | T10 | **流式编辑会消耗大量 Bot API 调用**：一条长回复可能编辑 20+ 次 | D18 | 节流 1.5s + 最小增量 24 字符 + 429 时跳过；`output.mode='once'` 可关 |
 | T11 | **`prepareStep` 每 step 重算工具集 ⇒ 工具描述 token 每 step 都发一遍**，而 TOOL CATALOG 块与 provider 的 tools 数组里那两份描述是重复的 | 安全需要 | **目录按需暴露**（`tools.catalog.*`，[05 §3.12](./05-tools-and-permissions.md) / [07 §5](./07-skills-plugins-mcp.md#5-三者的统一注册流程)）：默认只下发常驻集，外部工具折叠成每组一行、靠 `search_tools` 检索展开；外加目录块去重（`residentDescriptions`）把重复的那一份摘掉。prompt cache 与 `tools.maxRegistered` **退居兜底** —— 前者只在前缀不分叉时有效，后者是静默截断（截断本身现在会在 RUNTIME 块告知，见 `AC-TOOL-020`）|
 | T12 | **子 agent 摘要回灌 ⇒ 主 agent 看不到细节**，可能重复提问或误解 | AI SDK subagent 模式 + 上下文预算 | `read_agent_result` 可按需读全文；`resultMaxChars` 可调。⚠ **但那个句柄跨不过一次裁剪**：`agentresult://<runId>` 躺在工具结果里，而 level 1 降级把 `tool-result` 的 output **整体**换成 `[已省略工具结果]`（`packages/db/src/context.ts` 的 `elidePart`），改写还是持久化的 —— 降级之后模型手里没有 `runId` 可传，「可按需读全文」就只在**本轮与降级前**成立。要跨轮可靠只有一条路：让子 agent 的结论进主 agent 的**回复正文**（那条消息 `pruneLevel: 0`）|

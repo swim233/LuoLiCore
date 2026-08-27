@@ -595,7 +595,7 @@ tools:
 
 # ============================================================ sandbox（D10）
 sandbox:
-  mode: docker                    # 热更新 · none | jail | docker
+  mode: docker                    # 热更新 · none | docker
   bypassRoles: [owner]            # 热更新 · ★ owner 宿主直跑
   image: luoli-sandbox:latest     # 热更新
   network: none                   # 热更新 · none | bridge

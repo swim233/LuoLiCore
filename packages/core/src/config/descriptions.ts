@@ -323,7 +323,7 @@ export const CONFIG_DESCRIPTIONS: Record<string, string> = {
   sandbox:
     "执行类工具（bash / python）跑在哪儿。工具页有沙箱卡片，还能探测当前是否真的可用。",
   "sandbox.mode":
-    "执行类工具的隔离方式：none 直接在宿主跑（危险）、jail 只做路径隔离、docker 每次起一次性容器。",
+    "执行类工具的隔离方式：none 关掉执行类工具（bypassRoles 里的角色仍直接在宿主跑）、docker 每次起一次性容器。",
   "sandbox.bypassRoles":
     "哪些角色不受沙箱约束、直接在宿主上执行。★ 写进这个名单的人等于拿到了宿主 shell。",
   "sandbox.image": "docker 模式使用的镜像。",
@@ -331,7 +331,7 @@ export const CONFIG_DESCRIPTIONS: Record<string, string> = {
   "sandbox.memoryMb": "沙箱容器的内存上限（MB）。",
   "sandbox.cpus": "沙箱容器的 CPU 配额（核数，可以是小数）。",
   "sandbox.pidsLimit":
-    "沙箱能额外开多少进程，用来挡 fork 炸弹。docker 模式是容器的 --pids-limit；jail 模式按「当前系统占用 + 这个数」折算成 ulimit -u。owner 等 bypassRoles 角色不受它约束。",
+    "沙箱能额外开多少进程，用来挡 fork 炸弹。docker 模式是容器的 --pids-limit。owner 等 bypassRoles 角色不受它约束。",
   "sandbox.readOnlyRoot":
     "容器根文件系统是否只读（只有工作目录与 tmpfs 可写）。",
   "sandbox.tmpfsMb": "挂给容器的 tmpfs 大小（MB）。",

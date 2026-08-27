@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { HANDLED_COMMANDS, matchTrigger } from '@luoli/telegram';
-import { checkWakeword, configSchema } from '@luoli/core';
+import { checkWakeword, configSchema, rejectedWakewords } from '@luoli/core';
 
 function context(text: string, chatType: 'group' | 'channel' = 'group') {
   return { chat: { id: 1, type: chatType }, message: { text, entities: text.startsWith('/') ? [{ type: 'bot_command', offset: 0, length: text.split(' ')[0]!.length }] : [] } } as never;
@@ -86,6 +86,39 @@ describe('Telegram trigger matching', () => {
       expect(matchTrigger(context('Nori 在吗'), { ...off, wakewords: [pattern] }, 1, 'mybot')).toBe('wakeword');
     }
   });
+  /**
+   * 不会生效的唤醒词是**逐条**跳过，不是整份作废：同一份里可用的那几条照常触发，坏的那几条
+   * 连编译都不进行（`checkWakeword` 先判形态再 `new RE2`）。而跳过是静默的 —— 用户能看到的
+   * 只有「bot 不理我」，所以启动时那条 `config.invalid` 必须把被跳过的模式**逐条**列出来，
+   * 光说「有 N 条不生效」等于让运维自己一条条试。
+   *
+   * 写入端那一半在 `config.api.test.ts`（`PUT /api/config` 与 `PATCH /api/chats/:key` 都拿
+   * 同一个 `rejectedWakewords` 当场拒收并把原因写进 `invalid_wakeword` 的 message）。
+   */
+  it('skips unusable wakewords one by one and names them in the startup warning', () => {
+    const off = { ...trigger, private: false, mention: false, reply: false, command: false, wakewordMinLength: 2 };
+    // 三种不生效的形态：太短、RE2 编译不过（反向引用）、超过 128 字符的正则。
+    const wakewords = ['x', '^(a)\\1', `^${'a'.repeat(200)}`, 'nori'];
+    const started = performance.now();
+    expect(matchTrigger(context('x 一个字的唤醒词'), { ...off, wakewords }, 1, 'mybot')).toBeNull();
+    expect(matchTrigger(context(`${'a'.repeat(300)}!`), { ...off, wakewords }, 1, 'mybot')).toBeNull();
+    // 坏邻居不影响好邻居 —— 一条写歪的模式让整份唤醒词失效才是最难查的那种失效。
+    expect(matchTrigger(context('nori 在吗'), { ...off, wakewords }, 1, 'mybot')).toBe('wakeword');
+    expect(performance.now() - started).toBeLessThan(200);
+    const rejected = rejectedWakewords(wakewords, 2);
+    expect(rejected).toHaveLength(3);
+    expect(rejected[0]).toBe('「x」短于 wakewordMinLength=2');
+    expect(rejected[1]).toContain('RE2');
+    expect(rejected[2]).toContain('128');
+    expect(rejected.join('\n'), '可用的那条不该出现在被跳过的名单里').not.toContain('nori');
+    const main = readFileSync('apps/bot/src/main.ts', 'utf8');
+    const at = main.indexOf('rejectedWakewords(');
+    expect(at, '启动时不再校验唤醒词 —— 被跳过的那几条从此一声不吭').toBeGreaterThan(0);
+    const startup = main.slice(at, at + 500);
+    expect(startup).toMatch(/kind:\s*["']config\.invalid["']/);
+    expect(startup, '名单本身要进 data，只报条数等于没报').toMatch(/data:\s*\{\s*rejected:/);
+  });
+
   it('matches nested quantifiers through the linear engine without blocking', () => {
     const started = performance.now();
     expect(matchTrigger(context(`${'a'.repeat(4095)}!`), { ...trigger, private: false, mention: false, reply: false, command: false, wakewords: ['^(a+)+$'] }, 1, 'mybot')).toBeNull();

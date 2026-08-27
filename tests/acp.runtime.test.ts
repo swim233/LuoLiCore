@@ -60,7 +60,7 @@ const run = (manager: AcpManager, acp: AcpSettings, task = '把 probe.txt 里的
  * 宿主侧闸门。`plan` 的答案由用例给 —— `degraded` 那几条 note 的产生条件全挂在它上面
  * （`reason` 更是用例可控的任意长度，那正是「一条 note 里嵌着不可控长度的字符串」的形态）。
  */
-const host = (mode: 'host' | 'jail' | 'docker' = 'host', reason?: string) => ({
+const host = (mode: 'none' | 'host' | 'docker' = 'host', reason?: string) => ({
   fs: { denyGlobs: [] as string[], maxReadBytes: 262_144, maxWriteBytes: 5_242_880, backupDir: '.luoli-bak' },
   exec: { maxTimeoutMs: 5000, maxOutputBytes: 65_536 },
   plan: () => ({ mode, ...(reason ? { reason } : {}) }),
@@ -567,7 +567,7 @@ describe('ACP · 进程与连接生命周期', () => {
     // `plan.reason` 由沙箱那侧给，长度不可控（这条 note 里还嵌得进 jail 构造失败的 `error.message`）。
     // 失败路径 + 最小预算是最紧的那一档：hint、detail、stderr 与 degraded 要一起装得下。
     const result = await run(manager, settings({}, { tools: ['bash'] }), '写一大堆',
-      { outputBudgetBytes: 4096, host: host('jail', '长'.repeat(3000)) });
+      { outputBudgetBytes: 4096, host: host('docker', '长'.repeat(3000)) });
     expect(result).toMatchObject({ ok: false, error: 'acp_max_tokens' });
     // 上界是 `DEGRADED_NOTE_BYTES`（384 字节）与 `DEGRADED_MAX_NOTES`（4 条）。按**字节**量而不是
     // 码元：这几句全是中文，按码元切出来是三倍。

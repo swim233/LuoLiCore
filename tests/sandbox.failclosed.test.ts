@@ -24,19 +24,18 @@ describe('sandbox fail-closed visibility', () => {
   // 事故中在 WebUI 把 docker 改成 none 想切断执行类工具，返回 200、GET /api/sandbox 显示已改，
   // 而 bash/python 照跑不误 —— 吃启动快照的后果（docs/20 · W-CFG-02）。
   it('follows sandbox.mode and bypassRoles through a hot reload', () => {
-    let live: SandboxConfig = { ...sandboxConfig, mode: 'jail', bypassRoles: ['owner'] };
-    const warnings: string[] = [];
-    const sandbox = new Sandbox(() => live, true, false, (message) => warnings.push(message));
+    let live: SandboxConfig = { ...sandboxConfig, mode: 'docker', bypassRoles: ['owner'] };
+    const sandbox = new Sandbox(() => live, true, false);
     const registry = new ToolRegistry(log, broker, { maxRegistered: 10, maxCallsPerTurn: 10, maxConsecutiveErrors: 3 });
     registry.register({ name: 'bash', description: '', inputSchema: z.object({ command: z.string() }), policy: { minRole: 'trusted', approval: 'never', scope: 'sandbox', source: 'builtin' }, sourcePriority: 1, available: (role, context) => sandbox.plan(role, context.workspace).allowed, execute: () => ({ ok: true }) });
     const context = { turn, workspace: '.', agentKind: 'main' as const };
     expect(registry.activeNames('trusted', context)).toContain('bash');
-    // jail 不是安全边界，plan() 要说出来（docs/05 §5.2 · W-SBX-02）。
-    expect(warnings.join('\n')).toContain('jail');
     live = { ...live, mode: 'none' as const };
     expect(registry.activeNames('trusted', context)).not.toContain('bash');
     expect(sandbox.plan('trusted').allowed).toBe(false);
-    live = { ...live, mode: 'jail' as const, bypassRoles: [] };
+    // 被拒那一档的 mode 要说实话：沙箱未启用就是 'none'，不是随便挑一个执行模式的名字。
+    expect(sandbox.plan('trusted').mode).toBe('none');
+    live = { ...live, mode: 'docker' as const, bypassRoles: [] };
     expect(sandbox.plan('owner').allowed).toBe(true);
   });
 
@@ -54,18 +53,17 @@ describe('sandbox fail-closed visibility', () => {
   });
 });
 
-// bypassRoles 命中时 plan 给的是 'host' —— 「不受沙箱约束」。run() 曾经只分 docker / 非 docker
-// 两支，于是 owner 也吃了 jail 的 ulimit 前缀，私聊里每条 bash 都回 `fork: 资源暂时不可用`。
-// 这两条都必须让命令真的 fork（管道），否则 bash 会把末条命令直接 exec 掉，根本测不到。
-describe('sandbox host execution bypasses the jail limits', () => {
+// bypassRoles 命中时 plan 给的是 'host' —— 「不受沙箱约束」：直接 spawn `/bin/sh`，不套任何前缀，
+// 也不进容器。run() 曾经只分 docker / 非 docker 两支，于是 owner 也吃了非 docker 那支的资源限制，
+// 私聊里每条 bash 都回 `fork: 资源暂时不可用`，看起来像沙箱坏了，实际上 owner 压根不该进沙箱。
+// 这条必须让命令真的 fork（管道），否则 bash 会把末条命令直接 exec 掉，根本测不到。
+describe('sandbox host execution bypasses the sandbox', () => {
   const workspace = resolve('./data/sandbox-host.test');
-  // pidsLimit 取默认的 128 而不是 fixture 里的 8：基线是 spawn 前采样一次的，可用余量就是 pidsLimit
-  // 本身，而 vitest 自己在不停起停线程 —— 设 8 的话这条用例会真的 fork 失败（docs/05 §5.4）。
-  const jailable = { ...sandboxConfig, mode: 'jail' as const, workspaceDir: './data/sandbox-host.test', memoryMb: 1024, pidsLimit: 128, maxOutputBytes: 65_536, defaultTimeoutMs: 20_000, maxTimeoutMs: 20_000 };
+  const bypassing = { ...sandboxConfig, mode: 'docker' as const, workspaceDir: './data/sandbox-host.test', memoryMb: 1024, maxOutputBytes: 65_536, defaultTimeoutMs: 20_000, maxTimeoutMs: 20_000 };
   afterAll(() => rmSync(workspace, { recursive: true, force: true }));
 
-  it('runs an owner pipeline on the host without a ulimit prologue', async () => {
-    const sandbox = new Sandbox(jailable);
+  it('runs an owner pipeline on the host, outside the sandbox', async () => {
+    const sandbox = new Sandbox(bypassing);
     expect(sandbox.plan('owner').mode).toBe('host');
     const result = await sandbox.run('/bin/echo a | /bin/cat', 'owner', workspace, new AbortController().signal);
     expect(result.stderr).not.toMatch(/fork/);
@@ -80,29 +78,17 @@ describe('sandbox host execution bypasses the jail limits', () => {
    */
   it('每次执行都交出一条 sandbox.run，被拒那一档带 denied', async () => {
     const runs: Array<Record<string, unknown>> = [];
-    const sandbox = new Sandbox(jailable, true, false, undefined, undefined, (event) => runs.push({ ...event }));
+    const sandbox = new Sandbox(bypassing, true, false, undefined, undefined, (event) => runs.push({ ...event }));
     const result = await sandbox.run('/bin/echo hi', 'owner', workspace, new AbortController().signal, 20_000, 'turn-42');
     expect(result.ok).toBe(true);
     expect(runs).toHaveLength(1);
     expect(runs[0]).toMatchObject({ turnId: 'turn-42', role: 'owner', mode: 'host', ok: true, exitCode: 0, killed: false, oom: false, truncated: false });
     expect(runs[0]!.durationMs).toEqual(expect.any(Number));
     // mode=none 时非 owner 被拒：这条路本来一个字都不落。
-    const closed = new Sandbox({ ...jailable, mode: 'none' as const, bypassRoles: [] }, true, false, undefined, undefined, (event) => runs.push({ ...event }));
+    const closed = new Sandbox({ ...bypassing, mode: 'none' as const, bypassRoles: [] }, true, false, undefined, undefined, (event) => runs.push({ ...event }));
     expect((await closed.run('true', 'trusted', workspace, new AbortController().signal, 1000, 'turn-43')).ok).toBe(false);
-    expect(runs[1]).toMatchObject({ turnId: 'turn-43', role: 'trusted', ok: false, exitCode: null });
+    expect(runs[1]).toMatchObject({ turnId: 'turn-43', role: 'trusted', ok: false, exitCode: null, mode: 'none' });
     expect(String(runs[1]!.denied)).toContain('沙箱未启用');
-  });
-
-  // ulimit -u 是 RLIMIT_NPROC，按 UID 全局的**任务数**算（线程，不是进程，也不是当前进程树）。
-  // 直接取 pidsLimit 的话宿主上早就超了，子 shell 一次 fork 都做不成。
-  it('raises the jail nproc ceiling above the host baseline instead of using pidsLimit verbatim', async () => {
-    const sandbox = new Sandbox(jailable);
-    expect(sandbox.plan('trusted').mode).toBe('jail');
-    const limit = await sandbox.run('ulimit -u', 'trusted', workspace, new AbortController().signal);
-    expect(Number(limit.stdout.trim())).toBeGreaterThan(jailable.pidsLimit);
-    const piped = await sandbox.run('/bin/echo a | /bin/cat', 'trusted', workspace, new AbortController().signal);
-    expect(piped.stderr).not.toMatch(/fork/);
-    expect(piped.stdout.trim()).toBe('a');
   });
 });
 
@@ -114,8 +100,8 @@ describe('sandbox output cap', () => {
   afterAll(() => rmSync(workspace, { recursive: true, force: true }));
 
   it('kills the child once a single stream passes twice the cap, and says so in the hint', async () => {
-    // owner 走 bypassRoles → 宿主直跑，不套 ulimit（`-f` 是文件大小，管不到管道，但少一层变量）。
-    const sandbox = new Sandbox({ ...sandboxConfig, mode: 'jail', workspaceDir: './data/sandbox-cap.test' });
+    // owner 走 bypassRoles → 宿主直跑，与 mode 取哪一档无关。
+    const sandbox = new Sandbox({ ...sandboxConfig, mode: 'none', workspaceDir: './data/sandbox-cap.test' });
     const result = await sandbox.run(`while :; do echo ${'A'.repeat(32)}; done`, 'owner', workspace, new AbortController().signal);
     expect(result.killed).toBe(true);
     expect(result.truncated).toBe(true);
@@ -181,5 +167,27 @@ describe('sandbox host path mapping', () => {
     const result = await sandbox.run('true', 'trusted', resolve('data/elsewhere'), new AbortController().signal);
     expect(result.ok).toBe(false);
     expect(result.stderr).toMatch(/workspaceDir/);
+  });
+});
+
+// 一次性容器名（docs/05 §5.3 写的是 `luoli-sbx-<turnId>-<n>`）。旧实现是 `luoli-sbx-${Date.now()}`：
+// 并发上限 8 的同一毫秒里起两个容器就撞名，`docker run --name` 冲突让第二个直接失败，而 /cancel
+// 想按 turn 找容器也无从找起（docs/20 · W-SBX-01）。`<n>` 因此必须是递增序号而不是时钟。
+describe('sandbox 一次性容器命名', () => {
+  const root = './data/sandbox-name.test';
+  const workspace = resolve(root, 'chat-1');
+  afterAll(() => rmSync(resolve(root), { recursive: true, force: true }));
+
+  it('同一 turn 并发起多个容器时容器名带 turnId 且序号不撞', async () => {
+    // dockerBin 换成 echo：命名发生在 spawn 之前，不必真起容器，argv 原样打回 stdout。
+    const sandbox = new Sandbox({ ...sandboxConfig, mode: 'docker', dockerBin: '/bin/echo', workspaceDir: root }, true, false);
+    const signal = new AbortController().signal;
+    // 同一个 turnId、同一个 tick 发出去：命名在 run() 里是同步做完的，四次调用落在同一毫秒。
+    const results = await Promise.all(Array.from({ length: 4 }, () => sandbox.run('true', 'trusted', workspace, signal, 1000, 'turn-abc')));
+    const names = results.map((result) => /--name (\S+)/.exec(result.stdout)?.[1] ?? '');
+    for (const name of names) expect(name).toMatch(/^luoli-sbx-turn-abc-\d+$/);
+    expect(new Set(names).size).toBe(4);
+    // 尾段是序号不是时钟 —— `Date.now()` 是 13 位，这条才是「同一毫秒不撞名」的成因。
+    for (const name of names) expect(Number(name.slice('luoli-sbx-turn-abc-'.length))).toBeLessThan(1000);
   });
 });

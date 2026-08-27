@@ -9,8 +9,10 @@ const recordingLog = (events: Array<{ kind: string }>): LogSink =>
   ({ event: (entry: { kind: string }) => events.push(entry), publish: () => undefined, span: () => ({ id: 's', end: () => undefined }) } as unknown as LogSink);
 
 /**
- * `sandbox.mode: 'jail'` —— owner 命中 `bypassRoles` 走宿主直跑（正是需求方拍板的形态，
- * 自定义工具与 bash 一视同仁，docs/14 T19），trusted 走 ulimit 那一支。都不依赖机器上有 docker。
+ * `sandbox.mode: 'docker'` —— owner 命中 `bypassRoles` 走宿主直跑（正是需求方拍板的形态，
+ * 自定义工具与 bash 一视同仁，docs/14 T19），trusted 的工具照旧进目录。**这里的用例只以 owner
+ * 身份真的执行**，所以不依赖机器上有 docker；换成 `none` 反而不行 —— 那会让 trusted 的
+ * `plan()` 直接被拒，「trusted 拿得到 custom_floored」那条断言就成了假绿。
  */
 function harness(name: string, overrides: Record<string, unknown> = {}) {
   const path = `./data/${name}.test.db`;
@@ -20,7 +22,7 @@ function harness(name: string, overrides: Record<string, unknown> = {}) {
   mkdirSync(workspace, { recursive: true });
   const db = openDatabase(path);
   migrateDatabase(db);
-  let config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, sandbox: { mode: 'jail' },
+  let config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, sandbox: { mode: 'docker' },
     tools: { selfExtend: { enabled: true, customTools: { enabled: true, ...(overrides.customTools ?? {}) } }, ...(overrides.tools ?? {}) } }) as Config;
   const registry = new ToolRegistry(log, { request: async () => true }, { maxRegistered: 200, maxCallsPerTurn: 50, maxConsecutiveErrors: 10 },
     [], undefined);
@@ -68,7 +70,7 @@ describe('self-authored custom tools', () => {
     // 运维把它放宽到 limited：`effectivePolicy()` 认这条覆盖，但 `available()` 里的地板不认 ——
     // 一个自定义工具就是一段 shell，放给 limited 等于绕过 `TOOL_POLICY.bash.minRole`（docs/09 §3.7
     // 立的第一条不变量：覆盖绕不过 available()）。目录与准入两侧都要挡。
-    h.reconfigure({ access: { bootstrapOwnerId: '1' }, sandbox: { mode: 'jail' },
+    h.reconfigure({ access: { bootstrapOwnerId: '1' }, sandbox: { mode: 'docker' },
       tools: { selfExtend: { enabled: true, customTools: { enabled: true } }, overrides: { custom_floored: { minRole: 'limited' } } } });
     const limited = h.contextFor({ effectiveRole: 'limited' });
     expect(h.registry.activeNames('limited', limited)).not.toContain('custom_floored');
@@ -197,7 +199,7 @@ describe('self-authored custom tools', () => {
     const h = harness('custom-master');
     define(h, { name: 'gone', description: 'x', runtime: 'bash', body: 'true' });
     expect(h.registry.activeNames('owner', h.context)).toContain('custom_gone');
-    h.reconfigure({ access: { bootstrapOwnerId: '1' }, sandbox: { mode: 'jail' }, tools: { selfExtend: { enabled: false } } });
+    h.reconfigure({ access: { bootstrapOwnerId: '1' }, sandbox: { mode: 'docker' }, tools: { selfExtend: { enabled: false } } });
     h.manager.syncIfChanged();
     expect(h.registry.has('custom_gone')).toBe(false);
     closeDatabase(h.db);

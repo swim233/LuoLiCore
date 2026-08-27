@@ -17,10 +17,10 @@ function harness(name: string, selfExtend: Record<string, unknown> = {}) {
   migrateDatabase(db);
   // `media.dir` 必须指到用例自己的根下：默认是 `./data/files`，也就是**真实的附件库** ——
   // `install_skill` 的 source 白名单里有它，用例往那儿写 fixture 等于污染真实数据。
-  let config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, sandbox: { mode: 'jail' }, media: { dir: `${root}/files` },
+  let config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, sandbox: { mode: 'docker' }, media: { dir: `${root}/files` },
     tools: { selfExtend: { enabled: true, customTools: { enabled: true }, skills: { enabled: true }, plugins: { enabled: true }, mcp: { enabled: true }, ...selfExtend } } }) as Config;
   const registry = new ToolRegistry(log, { request: async () => true }, { maxRegistered: 200, maxCallsPerTurn: 50, maxConsecutiveErrors: 10 });
-  const sandbox = new Sandbox(() => ({ mode: 'jail', bypassRoles: ['owner'], dockerBin: 'docker', image: 'x', network: 'none',
+  const sandbox = new Sandbox(() => ({ mode: 'docker', bypassRoles: ['owner'], dockerBin: 'docker', image: 'x', network: 'none',
     memoryMb: 256, cpus: 1, pidsLimit: 64, readOnlyRoot: false, tmpfsMb: 16, workspaceDir: `${root}/workspace`, hostWorkspaceDir: '',
     defaultTimeoutMs: 10_000, maxTimeoutMs: 30_000, maxOutputBytes: 65_536 }));
   const skills = new SkillLoader(db, `${root}/skills`);

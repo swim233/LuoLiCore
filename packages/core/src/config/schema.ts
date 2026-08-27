@@ -762,7 +762,7 @@ export const configSchema = z
       .default({}),
     sandbox: z
       .object({
-        mode: z.enum(["none", "jail", "docker"]).default("docker"),
+        mode: z.enum(["none", "docker"]).default("docker"),
         bypassRoles: z.array(role).default(["owner"]),
         image: z.string().default("luoli-sandbox:latest"),
         network: z.enum(["none", "bridge"]).default("none"),

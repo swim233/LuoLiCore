@@ -1,5 +1,5 @@
 import { rmSync } from 'node:fs';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { OperationsRepository, closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
 import { AlertDispatcher, CONSECUTIVE_TURN_FAILURE_ALERT, LogSink, QuotaGuard, TurnFailureStreak, configSchema, hostMatches } from '@luoli/core';
 import { capMentions } from '@luoli/telegram';
@@ -135,6 +135,52 @@ describe('quota.warnAtRatio / lastRejection', () => {
     // 超限时要说得出是哪一档挡的 —— global 超限才私聊 owner。
     expect(guard.reserve({ chatId: 'c', userId: 'u', estimateUsd: 5, limits })).toBeNull();
     expect(guard.lastRejection).toMatchObject({ scope: 'global', window: 'day', limit: 1 });
+    closeDatabase(db);
+  });
+});
+
+/**
+ * AC-QUOTA-008。判据两半，后半才是重点：额度用光的那一刻**每一条**进来的消息都撞上同一条
+ * global 拒绝（`bot.ts` 在 `!reservation` 分支里逐条 fire），不去重就是把 owner 的私聊刷成日志流。
+ * 「30 分钟」不是写死的常量而是 `alerts.dedupeMinutes` 的默认值 —— 断言跟着这个值走，
+ * 运维调大它判据也跟着走，但默认值本身漂了要有人喊。
+ */
+describe('quota_global_exceeded', () => {
+  it('global 超限私聊 owner，去重窗口内不重复、窗口过了才再响一次', async () => {
+    const { db, log } = harness('alerts-quota-global');
+    const guard = new QuotaGuard(db, 'UTC');
+    const limits = { globalDaily: 1, globalMonthly: null, chatDaily: null, chatMonthly: null, userDaily: null, userMonthly: null };
+    const reservation = guard.reserve({ chatId: 'c', userId: 'u', estimateUsd: 0.1, limits })!;
+    guard.commit(reservation, 0.95);
+    expect(guard.reserve({ chatId: 'c', userId: 'u', estimateUsd: 0.5, limits })).toBeNull();
+    const rejection = guard.lastRejection!;
+    expect(rejection.scope).toBe('global');
+    // `bot.ts` 那条路上的三道闸，任一被默认关掉这条判据就是空的。
+    const defaults = configSchema.parse({});
+    expect(defaults.quota.onExceeded.notifyOwner).toBe(true);
+    expect(defaults.alerts.notifyOwner).toBe(true);
+    expect(defaults.alerts.dedupeMinutes).toBe(30);
+    const sent: string[] = [];
+    const alerts = new AlertDispatcher(() => configSchema.parse({ alerts: { on: ['quota_global_exceeded'] } }).alerts,
+      log, { owner: (text) => { sent.push(text); } });
+    const money = (value: number): string => `$${value.toFixed(2)}`;
+    // 照抄 bot.ts 的载荷：去重键取 `rejection.window`，day 与 month 两档要能各响一次。
+    const raise = (): Promise<void> => alerts.raise('quota_global_exceeded',
+      `全局额度用尽：${rejection.window} 窗口已用 ${money(rejection.spent)} / ${money(rejection.limit)}`,
+      { window: rejection.window, spent: rejection.spent, limit: rejection.limit }, rejection.window);
+    vi.useFakeTimers();
+    try {
+      await raise();
+      expect(sent).toHaveLength(1);
+      expect(sent[0]).toContain('全局额度用尽');
+      expect(sent[0]).toContain(money(rejection.limit));
+      vi.setSystemTime(Date.now() + defaults.alerts.dedupeMinutes * 60_000 - 1000);
+      await raise();
+      expect(sent).toHaveLength(1);
+      vi.setSystemTime(Date.now() + 2000);
+      await raise();
+      expect(sent).toHaveLength(2);
+    } finally { vi.useRealTimers(); }
     closeDatabase(db);
   });
 });

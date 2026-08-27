@@ -29,6 +29,7 @@
 | [13-acceptance-criteria.md](./13-acceptance-criteria.md) | **验收文档**：可逐条勾选的验收用例 | QA / 验收 |
 | [14-open-questions.md](./14-open-questions.md) | 未确认项、默认假设、已知取舍。**§2 的 Q1–Q12 已于 2026-08-18 全部答复**（此前挂了九轮），开头那张表是结论速查 | 全体 |
 | [21-webui-coverage-gaps.md](./21-webui-coverage-gaps.md) | **WebUI 控制面覆盖缺口**：口径是「运行时有这个能力，但运维在 WebUI 里够不着」。动 WebUI 或从 `KNOWN_UNIMPLEMENTED_CONFIG_KEYS` 摘键之前先扫一眼 §1 的复算方法与 §5 的「不是缺口」清单 | 全体 / 运维 |
+| [29-manual-acceptance-log.md](./29-manual-acceptance-log.md) | **手动验收台账**：13 里 `(手动)` 那些条目的装置、逐场剧本与实测记录。给它们打勾必须在这里留一条带证据指针的小节（`tests/acceptance.test.ts` 焊着）。**编号 29 归本文，复审层下一个用 30** | QA / 验收 |
 
 ### 0.1 复审层（`reviews/`，已冻结）
 
@@ -92,7 +93,7 @@ Telegram ──► 准入(白名单/角色) ──► 归档(DB, 按 chat 隔离
 | D7 | 存储 | **单 SQLite 库 + `chat_id` 分区 + FTS5**，数据访问层强制注入 chat 过滤 | [03](./03-data-model.md) |
 | D8 | 上下文粒度 | 默认整群共享（`contextScope='chat'`）；可切换按论坛 topic 隔离（`'thread'`）。`message_thread_id` 始终入库 | [02](./02-context-engine.md#2-上下文键) |
 | D9 | 权限模型 | **分级角色 owner > trusted > limited > blocked**；`effective = min(role(user), role(chat))` | [05](./05-tools-and-permissions.md#2-角色与判定) |
-| D10 | 沙箱 | **可开关**：`mode = none \| jail \| docker`；`bypassRoles=['owner']`（owner 宿主直跑）；非 owner 无沙箱时**工具直接禁用（fail-closed）** | [05](./05-tools-and-permissions.md#5-沙箱) |
+| D10 | 沙箱 | **可开关**：`mode = none \| docker`；`bypassRoles=['owner']`（owner 宿主直跑）；非 owner 无沙箱时**工具直接禁用（fail-closed）** | [05](./05-tools-and-permissions.md#5-沙箱) |
 | D11 | 私有记忆 | **每用户一份** `memory/private/<userId>/PRIMEMORY.md`；owner 可读写全部；群聊永不注入 | [06](./06-prompt-and-memory.md#3-作用域与注入矩阵) |
 | D12 | 公开记忆 | **全局单一份** `memory/PUBMEMORY.md`（所有会话共享）；写入需 `pubWriteMinRole`（默认 `trusted`） | [06](./06-prompt-and-memory.md#3-作用域与注入矩阵) |
 | D13 | Agent 通信 | **双向**：subagent 可 `ask_parent` 阻塞提问、`report_progress` 上报；`maxDepth=3` + 环路检测 + 待答超时 | [04](./04-agents-and-providers.md#4-agent-间通信) |
@@ -201,8 +202,8 @@ pnpm build && pnpm start      # 生产
 `packages/*/dist/`** 的混龄产物。这种状态下 `pnpm start` 不报错，它安静地跑一半新一半旧，
 比构建硬失败难查得多。
 
-不装 docker 也能跑，但执行类工具（`bash` 等）只剩 `sandbox.mode: none | jail` 两个选项，
-且 `jail` 不是安全边界（[05 §5.4](./05-tools-and-permissions.md)）。注意 `bypassRoles` 在
+不装 docker 也能跑，但执行类工具（`bash` 等）只剩 `sandbox.mode: none` 一个选项 ——
+也就是对非 owner 角色 fail-closed 地整体消失。注意 `bypassRoles` 在
 `Sandbox.plan()` 里先于 `mode` 判断 —— 即使 `mode: none`，owner 触发的命令仍在宿主直跑，
 要彻底关掉得同时清空 `sandbox.bypassRoles`。
 

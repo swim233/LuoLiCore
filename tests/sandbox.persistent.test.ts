@@ -228,7 +228,7 @@ describe('持久容器 · RUNTIME 块的措辞', () => {
   it('持久化开着时说清常驻 / 剩余 / 出不出网，关着时一个字不变', () => {
     const persistent = config().persistent;
     expect(sandboxLabel('docker', { ...persistent, enabled: false }, { state: 'none' })).toBe('docker');
-    expect(sandboxLabel('jail', persistent, { state: 'none' })).toBe('jail');
+    expect(sandboxLabel('none', persistent, { state: 'none' })).toBe('none');
     const ttl = sandboxLabel('docker', persistent, { state: 'ttl', remainingMs: 23 * 3_600_000 });
     expect(ttl).toContain('常驻容器');
     expect(ttl).toContain('23 小时后回收');
