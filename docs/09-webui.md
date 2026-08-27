@@ -213,6 +213,13 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
 - **单条操作**：有 `turnId` 的消息可打开该轮实际调用；`[软删除]` 二次确认后调用
   `DELETE /api/messages/:id`，只设置 `deleted_at`，上下文提交、turn 与附件不级联删除；消息检索、
   turn 列表与详情均不再回显已删正文。
+- **原始载荷（已实现）**：检索结果行上的 `[原始载荷]` 打开 `GET /api/messages/:id` 带回的
+  `rawJson`，按 JSON 缩进渲染 —— 排查「Telegram 到底发过来什么」（entities 解析错、媒体组只到
+  一半）唯一看得到真相的地方。**只在单条详情里发，列表端点不带**：一页 50 条各带一份完整
+  update，光检索一次就是几 MB。界面上要写明**这是入库时 `redactArchivePayload` 过的那份**
+  （形似 API key / Bearer token / bot token 的字符串，以及键名含 `secret`/`token`/`password`
+  的字段已被替换成 `«redacted»`），不是原始 update 的逐字副本 —— 照着一份被改写过的载荷排查，
+  比没有载荷更误事。
 
 ### 3.4 提示词（Prompts）
 
@@ -898,7 +905,7 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
 | `GET /api/chats/:key/commits` | commit 时间线 |
 | `POST /api/chats/:key/commits/:id/checkout` | 回滚 done 指针 |
 | `POST /api/chats/:key/reset` `POST /api/chats/:key/undo` | 等价 `/new` `/undo` |
-| `GET /api/messages` `GET /api/messages/:id` `DELETE /api/messages/:id` | 消息检索（`?q=` 走 FTS）。列表结果里 `turnId` 会回填：触发消息自己不带 `turn_id`（只有回复落盘才写那一列），但检索命中后最想点开的正是它那一轮，所以按 `turns.trigger_message_id` 反查补上。每条还带 `attachments:[{id, kind, mime, fileName, sizeBytes, width, height, durationSec, downloadState, downloadError, extractState, hasLocal}]`（按 `message_id` 一次 IN 查询归组）—— **不返回 `local_path`**：磁盘路径对界面没用，泄漏出去只是白送一份部署布局 |
+| `GET /api/messages` `GET /api/messages/:id` `DELETE /api/messages/:id` | 消息检索（`?q=` 走 FTS）。列表结果里 `turnId` 会回填：触发消息自己不带 `turn_id`（只有回复落盘才写那一列），但检索命中后最想点开的正是它那一轮，所以按 `turns.trigger_message_id` 反查补上。每条还带 `attachments:[{id, kind, mime, fileName, sizeBytes, width, height, durationSec, downloadState, downloadError, extractState, hasLocal}]`（按 `message_id` 一次 IN 查询归组）—— **不返回 `local_path`**：磁盘路径对界面没用，泄漏出去只是白送一份部署布局。单条详情**另带 `rawJson`**（脱敏后的原始 Telegram 载荷，见 §3.3）；**列表不带** —— 一页 50 条各一份完整 update |
 | `GET /api/turns` | 最近的模型对话，按 turn 聚合：`?page=1&size=20`（size 上限 100）→ `{items, total, page, size}`。每项带触发消息正文（`prompt`）与该轮 bot 回复（`reply`，按内容去重）、状态、步数/工具数/token/花费，以及触发消息上的 `attachments`（形状同 `GET /api/messages`，另带 `promptMessageId`）。分页走 SQL `LIMIT/OFFSET` |
 | `GET /api/turns/:id/detail` | 一次对话的**实际调用载荷**：`{turn, captureBodies, events:[{id, ts, level, kind, summary, spanId, parentSpanId, durationMs, text, bytes, truncated, fileRef}], contextMessages:[{ordinal, id, role, origin, pruneLevel, pruneApplied, textPreview, tokens, createdAt, text, bytes, truncated, fileRef}]}`。`events` 是 `log_events` 里 `trace_id = turn id` 的全部 span（上限 500 条，按时间序）；`text` 是格式化后的 `data_json`，单条超过 120k 字符截断并置 `truncated`。超过 `logs.bodyMaxBytes` 的载荷已被 `LogSink` 挪进 `logs/<day>/blobs/*.json`，这里**解引用后再返回**（不然详情里只剩一行 `{"fileRef":…}`）；blob 已被保留策略清掉时 `text=null` 且保留 `fileRef`。turn 不存在返回 404。`contextMessages` 是该轮写进 `context_messages` 的消息（按 `(key, turn_id)` 取，上限 500），`text` 是**原始 `parts_json`** —— 不走 `ContextRepository.messages()`，那条路会跑 `elidePart` 把降级过的行改写成占位符。这是工具输入对历史轮次唯一有效的来源 |
 | `GET /api/logs/:id` | 单条日志事件的详情（日志页点开一行）：整行 camelCase（`id, ts, level, kind, traceId, spanId, parentSpanId, chatId, userId, key, summary, durationMs`） + `{text, bytes, truncated, fileRef}`（与 `GET /api/turns/:id/detail` 共用 `detailPayload`：120k 截断 + blob 解引用）。**注册在 `/api/logs/blob` 与 `/api/logs/trace/:traceId` 之后**（Hono 按注册序匹配，`:id` 放前面会把那两条整个吃掉），非数字 id 直接 404 |
@@ -1003,11 +1010,16 @@ event: extensions.changed data: {kind: 'skill'}
 `log` 由 `LogSink` 自己发。
 
 - 单连接多主题。心跳注释 `: ping` 每 20s，防中间代理断连；断线由浏览器 `EventSource` 自动重连。
+  **重连之后前端要自己补拉一次** —— 断线期间的事件不会重放，只把左下角的 pill 点回「系统在线」
+  等于让界面拿着旧数字说自己是实时的，比断着更糟（断着至少界面自己说了它不新鲜）。补拉走
+  下面那套定向刷新的判据，不另起一份；**首次连上不补**（`load()` 刚跑完那 18 个端点）。
 - **`log` 事件只带摘要**（不含 `data`），`debug` 不广播，同一 `kind` 在 200 ms 内合并成一条并带
   `merged: n` —— 细节与理由见 [10 §3](./10-logging-and-observability.md#3-落盘格式)。
 - **前端按事件类型定向刷新**，不是收到任何事件就重跑一次全量 `load()`（那是一次 18 个端点）：
   每种事件映射到固定的几组数据，且只刷当前页面看得见的那几组，同组 400 ms 内合并一次；
-  切换页面时 `watch(active)` 补拉。`turn.progress` 直接用载荷更新在途表，不回查。
+  **因为看不见而被跳过的组要记下来**，切到看得见它的页面时由 `watch(active)` 补掉 ——
+  不记的话那一页显示的是离开那一刻的快照，而重连补拉也只救得了运维当时正盯着的那一页。
+  `turn.progress` 直接用载荷更新在途表，不回查。
 - 正在编辑的表单（触发、输出节奏、配额、沙箱）有 dirty 标记，`config.changed` 触发的重载不会回写覆盖。
 - SSE 连接需 session cookie；未鉴权直接 401。
 
