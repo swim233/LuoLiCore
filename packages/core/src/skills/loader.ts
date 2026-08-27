@@ -79,6 +79,13 @@ export interface SkillWriteInput {
   description?: string | undefined;
   body?: string | undefined;
   allowedTools?: string[] | undefined;
+  /**
+   * 装载侧一直是全的（写 frontmatter、据它把「所需工具不在本轮工具集里」的 skill 挡在目录外），
+   * 而这里此前没有这个字段 —— WebUI 表单有那一栏、请求体里也真的发了，服务端回 200「已保存」，
+   * 文件里没有：看起来像用户自己没填（docs/29 · M-WEB-11）。它是**门控**字段，丢了等于
+   * WebUI 建出来的 skill 永远进得了目录，哪怕它教的工具这一轮压根不可用。
+   */
+  requiresTools?: string[] | undefined;
   minRole?: Role | undefined;
   model?: string | null | undefined;
   enabled?: boolean | undefined;
@@ -87,7 +94,7 @@ interface NormalizedSkillWriteInput {
   description: string;
   body: string;
   allowedTools: string[];
-  /** 写入端不暴露它（没有入口能设），但改一份已有 skill 时必须原样带回去，否则一次编辑就把它抹了。 */
+  /** 不给就沿用已有的那份 —— 改一份已有 skill 时不带回去，一次编辑就把它抹了。 */
   requiresTools: string[];
   minRole: Role;
   model: string | null;
@@ -297,7 +304,7 @@ export class SkillLoader {
       description: input.description,
       body: input.body,
       allowedTools: input.allowedTools ?? [],
-      requiresTools: [],
+      requiresTools: input.requiresTools ?? [],
       minRole: input.minRole ?? this.#defaultMinRole(),
       model: input.model ?? null,
       enabled: input.enabled ?? true,
@@ -313,7 +320,7 @@ export class SkillLoader {
       description: input.description ?? current.description,
       body: input.body ?? current.body,
       allowedTools: input.allowedTools ?? current.allowedTools ?? [],
-      requiresTools: current.requiresTools ?? [],
+      requiresTools: input.requiresTools ?? current.requiresTools ?? [],
       minRole: input.minRole ?? current.minRole,
       model: input.model === undefined ? (current.model ?? null) : input.model,
       enabled: input.enabled ?? current.enabled,
@@ -349,6 +356,12 @@ export class SkillLoader {
         input.allowedTools.some((entry) => typeof entry !== "string"))
     )
       throw new Error("invalid_skill_allowed_tools");
+    if (
+      input.requiresTools !== undefined &&
+      (!Array.isArray(input.requiresTools) ||
+        input.requiresTools.some((entry) => typeof entry !== "string"))
+    )
+      throw new Error("invalid_skill_requires_tools");
     if (input.minRole !== undefined && !(input.minRole in VALID_ROLES))
       throw new Error("invalid_skill_min_role");
     if (

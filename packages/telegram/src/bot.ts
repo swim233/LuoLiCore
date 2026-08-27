@@ -1,3 +1,4 @@
+import { statSync } from "node:fs";
 import { Bot } from "grammy";
 import { autoRetry } from "@grammyjs/auto-retry";
 import { apiThrottler } from "@grammyjs/transformer-throttler";
@@ -14,6 +15,7 @@ import type {
   QuotaReservation,
   TurnConcurrency,
   TurnRegistry,
+  UsageLedger,
 } from "@luoli/core";
 import {
   KeyedMutex,
@@ -99,6 +101,10 @@ export interface TelegramDependencies {
    */
   failures?: TurnFailureStreak;
   log: LogSink;
+  /** 用量合计（`/usage`）。缺它时那条命令明说不可用 —— 不要拿 `turns` 顶上，那两份数对不齐。 */
+  ledger?: UsageLedger;
+  /** 进程起于何时。`/ping` 的上线时长要它；缺它时那一行显示「未知」而不是编一个。 */
+  startedAt?: number;
   botInfo?: UserFromGetMe;
   /**
    * 「本进程正在关停吗」。装配方给 `() => shuttingDown`。
@@ -163,13 +169,69 @@ interface TelegramIngress {
   triggerReason: string | null;
 }
 
+/** 人读的时长。`/ping` 的上线时长、`/tasks` 的已运行、`ago()` 都走它。 */
+function duration(ms: number): string {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const units: Array<[number, string]> = [
+    [Math.floor(seconds / 86_400), "天"],
+    [Math.floor((seconds % 86_400) / 3600), "小时"],
+    [Math.floor((seconds % 3600) / 60), "分"],
+  ];
+  return units
+    .filter(([value]) => value > 0)
+    .map(([value, unit]) => `${value}${unit}`)
+    .join("");
+}
+
 /** 聊天里读的相对时间，粗到分钟就够；精确值一律另给一个能和库里对上的字段（`/ctx` 给 commit seq）。 */
 function ago(at: number): string {
-  const seconds = Math.max(0, Math.round((Date.now() - at) / 1000));
-  if (seconds < 60) return `${seconds}s 前`;
-  if (seconds < 3600) return `${Math.round(seconds / 60)} 分钟前`;
-  if (seconds < 86_400) return `${Math.round(seconds / 3600)} 小时前`;
-  return `${Math.round(seconds / 86_400)} 天前`;
+  return `${duration(Date.now() - at)}前`;
+}
+
+/** `data/` 下这个库真正占的磁盘 —— `-wal` 常常比主库还大，只报主库等于少报一大截。 */
+function databaseBytes(path: string): number {
+  let total = 0;
+  for (const suffix of ["", "-wal", "-shm"]) {
+    try {
+      total += statSync(`${path}${suffix}`).size;
+    } catch {
+      /* checkpoint 之后 -wal / -shm 可以不存在 */
+    }
+  }
+  return total;
+}
+
+const megabytes = (bytes: number): string =>
+  `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+
+const thousands = (value: number): string =>
+  value >= 1_000_000
+    ? `${(value / 1_000_000).toFixed(1)}M`
+    : value >= 1000
+      ? `${(value / 1000).toFixed(1)}K`
+      : String(value);
+
+/** `tasks.progress_json` 是 `report_progress` 原样存下的 `{status,current,total,detail}`。 */
+function progressText(raw: string | null): string {
+  if (!raw) return "尚无进度";
+  try {
+    const payload = JSON.parse(raw) as {
+      status?: string;
+      current?: number;
+      total?: number;
+      detail?: string;
+    };
+    const ratio =
+      typeof payload.current === "number" && typeof payload.total === "number"
+        ? ` ${payload.current}/${payload.total}`
+        : "";
+    return [`${payload.status ?? "进行中"}${ratio}`, payload.detail]
+      .filter(Boolean)
+      .join(" · ");
+  } catch {
+    return "进度读不出来";
+  }
 }
 
 function pluginText(result: unknown[], original: string): string {
@@ -663,12 +725,26 @@ export async function createTelegramBot(
       ctx.reply(text),
     );
     if (!access) return;
-    const detail =
-      access.effectiveRole === "owner"
-        ? `\n${JSON.stringify(dependencies.operations.dashboard())}`
-        : "";
+    // 四样都要算（docs/08 §8「版本、上线时长、模型别名、DB 大小」）。此前只有版本，owner 多出来的
+    // 那坨是 `JSON.stringify(dashboard())` —— 运维总览，和健康检查要的四样毫无交集，而且原样吐
+    // JSON 正是 W-TG-02 给 `/ctx`、`/tasks` 修掉的反模式。用量看 `/usage`（docs/29 · M-TG-03）。
+    const key = contextKey(
+      {
+        chatId: String(ctx.chat.id),
+        messageThreadId: ctx.message?.message_thread_id ?? null,
+      },
+      config.context.scope,
+    );
+    // 会话别名压过配置层，和真正开轮时的判据同一条（main.ts 的 estimateTurnCost 也是这么算的）。
+    const alias =
+      readAppKv<string>(dependencies.db, modelAliasKey(key)) ??
+      perChatConfig(currentConfig(), key).agent.main.modelAlias;
     await ctx.reply(
-      `LuoLiCore ${process.env.npm_package_version ?? "dev"}\n运行正常\n有效权限：${access.effectiveRole}${detail}`,
+      `LuoLiCore ${process.env.npm_package_version ?? "dev"}\n运行正常\n` +
+        `上线时长：${dependencies.startedAt ? duration(Date.now() - dependencies.startedAt) : "未知（装配方没给 startedAt）"}\n` +
+        `模型别名：${alias}\n` +
+        `DB 大小：${megabytes(databaseBytes(dependencies.db.name))}（含 -wal / -shm）\n` +
+        `有效权限：${access.effectiveRole}`,
     );
   });
   /**
@@ -796,11 +872,28 @@ export async function createTelegramBot(
         : `上下文 ${key} 还是空的，还没有提交过任何一轮。`,
     );
   });
+  /**
+   * **两样都列。** `turns` 是「我发的那句还在不在跑」，`tasks` 是 `spawn_agent` 派出去的子 agent ——
+   * 同一个「任务」在 Telegram 和 WebUI「任务与审批」页此前各指其中一样，实测撞上过
+   * （docs/29 · M-TG-05）。标题与进度只有 `tasks` 那张表上有，turns 行上没有也不该有。
+   */
   bot.command("tasks", async (ctx) => {
-    const tasks = dependencies.turns.active(String(ctx.chat.id)) as Array<{
+    const chatId = String(ctx.chat.id);
+    const turns = dependencies.turns.active(chatId) as Array<{
       id: string;
       state: string;
       started_at?: number;
+    }>;
+    const tasks = dependencies.db
+      .prepare(
+        "SELECT id,title,state,progress_json AS progress,created_at AS createdAt FROM tasks WHERE chat_id=? AND state='running' ORDER BY created_at",
+      )
+      .all(chatId) as Array<{
+      id: string;
+      title: string;
+      state: string;
+      progress: string | null;
+      createdAt: number;
     }>;
     if (
       !(await requireRole(ctx.update.update_id, "limited", (text) =>
@@ -808,16 +901,31 @@ export async function createTelegramBot(
       ))
     )
       return;
+    const sections: string[] = [];
+    if (turns.length)
+      sections.push(
+        `在途轮次 ${turns.length} 个：\n${turns
+          .slice(0, 20)
+          .map(
+            (turn) =>
+              `${turn.id.slice(0, 12)} ${turn.state}${turn.started_at ? ` · 已运行 ${duration(Date.now() - turn.started_at)}` : ""}`,
+          )
+          .join("\n")}`,
+      );
+    if (tasks.length)
+      sections.push(
+        `子 agent 任务 ${tasks.length} 个：\n${tasks
+          .slice(0, 20)
+          .map(
+            (task) =>
+              `${task.id.slice(0, 12)}「${task.title}」· 已运行 ${duration(Date.now() - task.createdAt)} · ${progressText(task.progress)}`,
+          )
+          .join("\n")}`,
+      );
     await ctx.reply(
-      tasks.length
-        ? `在途任务 ${tasks.length} 个：\n${tasks
-            .slice(0, 20)
-            .map(
-              (task) =>
-                `${task.id.slice(0, 12)} ${task.state}${task.started_at ? ` 已运行 ${Math.round((Date.now() - task.started_at) / 1000)}s` : ""}`,
-            )
-            .join("\n")}`
-        : "当前没有在途任务。",
+      sections.length
+        ? sections.join("\n\n")
+        : "当前没有在途轮次，也没有派出去的子 agent 任务。",
     );
   });
   bot.command("model", async (ctx) => {
@@ -1156,8 +1264,37 @@ export async function createTelegramBot(
       ))
     )
       return;
-    const report = dependencies.operations.dashboard();
-    await ctx.reply(`当前累计用量：${JSON.stringify(report)}`);
+    // 读 `usage_ledger` 而不是 `turns`：试跑（`agents.createDryRun()`）写 ledger 却不建 turns 行，
+    // 于是只要在 WebUI 上试跑过一次，「`/usage` = 用量页 = ledger 聚合」就永久对不上
+    // （docs/29 · M-QUOTA-01）。顺带不再原样吐 `dashboard()` JSON —— 那是运维总览不是用量报表。
+    if (!dependencies.ledger) {
+      await ctx.reply(
+        "用量账本没接上（装配方没给 ledger），这条命令暂时不可用 —— 去 WebUI 用量页看。",
+      );
+      return;
+    }
+    const requested = ctx.match.trim() || "today";
+    if (!["today", "month"].includes(requested)) {
+      await ctx.reply("用法：/usage [today|month]");
+      return;
+    }
+    const window = requested === "month" ? "month" : "day";
+    const timezone = config.general.timezone;
+    const chatId = String(ctx.chat.id);
+    const line = (
+      label: string,
+      filter: Parameters<UsageLedger["summary"]>[2],
+    ): string => {
+      const row = dependencies.ledger!.summary(window, timezone, filter);
+      return `${label} $${row.costUsd.toFixed(6)} · ${row.turns} 轮 · ${thousands(row.inputTokens)} in / ${thousands(row.outputTokens)} out`;
+    };
+    await ctx.reply(
+      `用量 · ${window === "day" ? "今天" : "本月"}（${timezone}）\n` +
+        `${line("全局", {})}\n` +
+        `${line("本会话", { chatId })}\n` +
+        `${line("本人", { userId: String(ctx.from?.id ?? "") })}\n` +
+        "口径：usage_ledger，与 WebUI 用量页同一份；不含 ACP 外部花费（docs/03 §2.7）。",
+    );
   });
 
   bot.on("message", async (ctx) => {

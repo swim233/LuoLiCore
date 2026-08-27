@@ -212,4 +212,26 @@ describe('skill runtime', () => {
     expect(reloaded.remove('new-skill')).toBe(false);
     closeDatabase(db);
   });
+
+  /**
+   * 装载侧一直是全的（写 frontmatter、据它把「所需工具不在本轮工具集里」的 skill 挡出目录），
+   * 而写入侧根本没有这个字段：表单发了、服务端回 200、文件里没有，看起来像用户自己没填
+   * （docs/29 · M-WEB-11）。它是**门控**字段 —— 丢了等于建出来的 skill 永远进得了目录，
+   * 哪怕它教的工具这一轮压根不可用，而那正是这个字段存在的理由。
+   */
+  it('requires-tools 写得进去，也不会被一次不带它的编辑抹掉', () => {
+    const { db } = setup();
+    const skills = new SkillLoader(db, './data/skill-runtime-skills', () => 'limited');
+    skills.scan();
+    expect(skills.create('gated-skill', { description: 'Gated', body: 'Body', requiresTools: ['bash'] })).toMatchObject({ requiresTools: ['bash'] });
+    // 门控真的生效：bash 不在本轮工具集里时它连目录都不进。
+    expect(skills.catalog('limited', ['read_file']).map((entry) => entry.name)).not.toContain('gated-skill');
+    expect(skills.catalog('limited', ['read_file', 'bash']).map((entry) => entry.name)).toContain('gated-skill');
+    // 只改一句正文不该把门控抹掉 —— 这是 allowedTools 早就有的待遇。
+    expect(skills.update('gated-skill', { body: 'Second body' })).toMatchObject({ requiresTools: ['bash'] });
+    // 给了就以给的为准，包括清空。
+    expect(skills.update('gated-skill', { requiresTools: [] }).requiresTools ?? []).toEqual([]);
+    expect(() => skills.update('gated-skill', { requiresTools: [1] as unknown as string[] })).toThrow('invalid_skill_requires_tools');
+    closeDatabase(db);
+  });
 });

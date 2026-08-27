@@ -3327,6 +3327,11 @@ export function createServer(
       ok: true,
       data: {
         config: publicConfig(currentConfig().sandbox),
+        // 它不在 `sandbox.*` 那棵子树下，但管的是同一件事的另一半：谁能绕过隔离。此前沙箱页上
+        // 没有任何入口（`grep allowHostFsForOwner packages/webui/src` 零命中），只能从「全部配置」
+        // 里被 SchemaForm 渲染成一个普通开关，拨一下就生效（docs/29 · M-WEB-10）。
+        // 只读出来 —— 写回照旧走 `PUT /api/config`，那条路上有白名单与 `runtimeConfigSchema`。
+        allowHostFsForOwner: currentConfig().tools.fs.allowHostFsForOwner,
         plan: dependencies.sandbox?.plan("owner"),
       },
     }),
@@ -4209,6 +4214,7 @@ export function createServer(
     description: body.description as string | undefined,
     body: body.body as string | undefined,
     allowedTools: body.allowedTools as string[] | undefined,
+    requiresTools: body.requiresTools as string[] | undefined,
     minRole: body.minRole as Role | undefined,
     model: body.model as string | null | undefined,
     enabled: body.enabled as boolean | undefined,
