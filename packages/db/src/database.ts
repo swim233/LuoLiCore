@@ -1,5 +1,11 @@
 import Database from "better-sqlite3";
-import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+} from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -47,6 +53,9 @@ export function migrateDatabase(
       // `VACUUM INTO` 收的是 SQL 表达式，所以能绑参数。这里的 path 不含外部输入，
       // 但「自己转义 SQL 引号」不该是仓库里留着的先例（docs/27 · T-05）。
       db.prepare("VACUUM INTO ?").run(path);
+      // 同 `MaintenanceService.backup()`：`VACUUM INTO` 建的文件是 `0666 & ~umask`，
+      // 默认落成 0644 —— 一份全局可读的整库快照（docs/29 · `M-SEC-01`）。
+      chmodSync(path, 0o600);
     }
   }
   for (const name of pending) {

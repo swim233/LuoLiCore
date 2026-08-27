@@ -1,5 +1,6 @@
 import { gzipSync } from "node:zlib";
 import {
+  chmodSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -66,6 +67,10 @@ export class MaintenanceService {
     const path = join(directory, `luoli-${Date.now()}-${label}.db`);
     // 绑参数而不是自己转义引号：`VACUUM INTO` 收 SQL 表达式（同 `db/database.ts`，docs/27 · T-05）。
     this.db.prepare("VACUUM INTO ?").run(path);
+    // `VACUUM INTO` 建出来的文件走 SQLite 自己的 `0666 & ~umask` —— 常见 umask 下就是 **0644**，
+    // 一份全局可读的整库快照（docs/29 · `M-SEC-01`）。目录的 0700 只挡住同机其他用户遍历，
+    // 而权限位会跟着文件走：备份一旦被复制、打包、同步出去，那道目录闸就不在了。
+    chmodSync(path, 0o600);
     const backups = readdirSync(directory)
       .map((name) => join(directory, name))
       .sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs);

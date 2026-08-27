@@ -879,6 +879,11 @@ image 都改不动了；没有这一列，运维在 WebUI 换了镜像之后所�
 - 启动时自动执行未应用的迁移（账本表 `__drizzle_migrations`，名字是早期 Drizzle 方案留下的），失败则**拒绝启动**并打印待手动处理的 SQL。
 - 破坏性变更（改列类型、删列）走「新表 + 拷贝 + 改名」，且必须在 `docs/migrations/` 附回滚说明。
 - 每次迁移前自动备份：`data/backup/luoli-<ts>-pre-<NNNN>.db`（`VACUUM INTO`），保留最近 `db.backupKeep`（默认 5）份。
+  **备份文件必须 `chmodSync(path, 0o600)`**，`backup/` 目录 0700：`VACUUM INTO` 建出来的文件走
+  SQLite 自己的 `0666 & ~umask`，常见 umask 下就是 0644 —— 一份全局可读的整库快照
+  （`AC-SEC-011`，[29 · `M-SEC-01`](./29-manual-acceptance-log.md)）。目录那道 0700 只挡住同机其他
+  用户遍历，而**权限位跟着文件走**：备份被复制 / 打包 / 同步出去之后就只剩文件自己那一位。
+  两个生产者（迁移前这一次、`MaintenanceService.backup()`）都要补，只补一处等于没补。
 
 ## 4. 保留与清理（后台定时任务）
 
