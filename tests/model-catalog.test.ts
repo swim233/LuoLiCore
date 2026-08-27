@@ -238,6 +238,23 @@ describe('WebUI 拉取与导入链路', () => {
     closeDatabase(db);
   });
 
+  // 「已有价格 = 人手填的」这个假定是错的：导入时从目录带进来的价格同样非空。按下 [补齐元数据] 之后
+  // 数字一个没动，出处却从「厂商官方价」被静默改写成「手工填写」，且旧值没留 —— AC-WEB-013c 要的
+  // 那份「这价能不能信」一键归零（docs/29 · M-WEB-09）。
+  it('补齐元数据不把导入来的定价出处改写成 manual', async () => {
+    const { db, config, catalog } = harness();
+    const { app, headers } = server(catalog, db, config);
+    const now = Date.now();
+    db.prepare("INSERT INTO providers(id,name,kind,base_url,enabled,created_at,updated_at) VALUES('p','relay','openai-compatible','https://gw.internal/v1',1,?,?)").run(now, now);
+    await app.request('/api/models/import', { method: 'POST', headers, body: JSON.stringify({ providerId: 'p',
+      models: [{ modelId: 'claude-opus-5', contextWindow: 400_000, maxOutput: 64_000, priceIn: 5, priceOut: 25 }] }) });
+    const sourceOf = (): unknown => (JSON.parse((db.prepare('SELECT capabilities_json AS capabilities FROM models').get() as { capabilities: string }).capabilities) as { catalog: { priceSource: unknown } }).catalog.priceSource;
+    expect(sourceOf()).toBe('official');
+    await app.request('/api/models/enrich', { method: 'POST', headers, body: JSON.stringify({}) });
+    expect(sourceOf()).toBe('official');
+    closeDatabase(db);
+  });
+
   it('补齐已有模型只填空着的价格，手改价之后来源翻成 manual', async () => {
     const { db, config, catalog } = harness();
     const { app, headers } = server(catalog, db, config);
@@ -251,7 +268,7 @@ describe('WebUI 拉取与导入链路', () => {
     expect(rows[0]!.priceIn).toBe(5);
     // 窗口是运维可能按预算调小过的，不给 overwrite 就不动。
     expect(rows[0]!.contextWindow).toBe(128_000);
-    // 已经手填过价格的那行不被覆盖，来源标 manual。
+    // 已经手填过价格的那行不被覆盖，来源标 manual（这行的能力块是空的，从没记过出处 = 只可能是手填的）。
     expect(rows[1]!.priceIn).toBe(9.9);
     expect((JSON.parse(rows[1]!.capabilities) as { catalog: { priceSource: string } }).catalog.priceSource).toBe('manual');
 

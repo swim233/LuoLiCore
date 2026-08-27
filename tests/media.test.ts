@@ -92,6 +92,24 @@ describe('Telegram media processing', () => {
     closeDatabase(db);
   });
 
+  // 占位符是模型唯一看得见的东西。`file.kind` 直接拼出去是英文的 `voice`，而语音的 file_name 恒为空
+  // ——`[voice  9s]`，两个空格来自那个空槽（docs/29 · M-TG-06）。同一个文件里 PDF 走的是「文档」。
+  it('语音的占位符是中文的 [语音 12s]，下不下载都一样', async () => {
+    const { db, archive } = harness('media-voice');
+    const ogg = Buffer.from('OggS-not-really');
+    vi.stubGlobal('fetch', async () => new Response(ogg, { status: 200 }));
+    const api = { getFile: async () => ({ file_path: 'voice/file_9.oga' }) } as unknown as Api;
+    const archived = archive.scope('chat', null).append({ chatId: 'chat', messageThreadId: null, tgMessageId: 9, direction: 'in', fromKind: 'user',
+      fromUserId: 'user', fromName: 'User', fromUsername: null, kind: 'voice', text: null, tgDate: Date.now(), raw: {}, triggered: true, triggerReason: 'private' });
+    const voice = { voice: { file_id: 'f9', file_unique_id: 'u9', duration: 12, mime_type: 'audio/ogg', file_size: ogg.length } };
+    expect(await new TelegramMedia(api, 'token', db, config).process(voice, archived))
+      .toEqual([{ type: 'text', text: '[语音 12s]' }]);
+    // downloadVoice=false 那条早就是中文的，两条路必须给出同一句话，否则改配置会换掉模型看到的东西。
+    expect(await new TelegramMedia(api, 'token', db, { ...config, downloadVoice: false }).process(voice, archived))
+      .toEqual([{ type: 'text', text: '[语音 12s]' }]);
+    closeDatabase(db);
+  });
+
   it('文档提取成功时 download 与 extract 各落一条', async () => {
     const { db, archive } = harness('media-extract');
     const events: Array<{ level: string; kind: string; data?: unknown }> = [];

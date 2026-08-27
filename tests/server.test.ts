@@ -95,6 +95,20 @@ describe('server security', () => {
     closeDatabase(db);
   });
 
+  // 401 会让客户端的 `api()` 无条件 `location.assign("/login")`：填错当前口令的人被踢出控制台，
+  // 「当前口令错误」一个字都渲染不出来，同页未保存的表单一并丢掉，而 session 根本没失效
+  // （docs/29 · M-WEB-13）。403 = 登录是好的、错的是表单里那一格。
+  it('填错当前口令回 403 而不是 401，session 照旧有效', async () => {
+    const { app, db, operations } = await appHarness();
+    const session = operations.createSession(1);
+    const headers = { cookie: `luoli_sid=${session.id}`, 'x-csrf-token': session.csrf, 'content-type': 'application/json' };
+    const response = await app.request('/api/auth/password', { method: 'POST', headers, body: JSON.stringify({ current: 'wrong-password', next: 'next-password-123' }) });
+    expect(response.status).toBe(403);
+    expect(await response.json()).toMatchObject({ ok: false, error: { code: 'invalid_credentials' } });
+    expect((await app.request('/api/auth/me', { headers: { cookie: `luoli_sid=${session.id}` } })).status).toBe(200);
+    closeDatabase(db);
+  });
+
   // 热重载落地之后不能再认那份闭包里的口令：`/api/auth/password` 写完到 configStore 换上新值
   // 之间有个窗口，覆盖位只能覆盖这个窗口。无条件缓存 = V-AUTH-02 原样复发，只是换了个入口
   // （PUT /api/config 写 passwordHash 返回 200、落库、登录还认旧的，docs/24 · R-AUTH-01）。

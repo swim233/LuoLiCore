@@ -52,6 +52,18 @@ describe('Telegram trigger matching', () => {
     const privateCommand = { chat: { id: 1, type: 'private' }, message: { text: '/new', entities: [{ type: 'bot_command', offset: 0, length: 4 }] } } as never;
     expect(matchTrigger(privateCommand, trigger, 1, 'mybot')).toBe('command');
   });
+  /**
+   * 编辑消息的内容在 `ctx.editedMessage`，`ctx.message` 是 undefined —— `matchTrigger` 只读后者时
+   * 对任何 `edited_message` 恒返回 null，`bot.ts` 那条 `trigger.skipped` 于是一条都落不下
+   * （docs/29 · M-TG-01）。归档不受影响（`triggered:false` 是写死的），坏的只是那条凭据。
+   */
+  it('takes an explicit message so edited updates can be judged too', () => {
+    const edited = { chat: { id: 1, type: 'private' }, editedMessage: { text: '洛璃在吗', entities: [], edit_date: 1 } } as never;
+    expect(matchTrigger(edited, trigger, 1, 'mybot')).toBeNull();
+    expect(matchTrigger(edited, trigger, 1, 'mybot', (edited as { editedMessage: unknown }).editedMessage as never)).toBe('private');
+    // 不给第五个参数时一个字都不变：普通消息照旧走 ctx.message。
+    expect(matchTrigger(context('/new'), trigger, 1, 'mybot')).toBe('command');
+  });
   it('rejects channels by default and ignores too-short wakewords', () => {
     expect(matchTrigger(context('洛璃', 'channel'), trigger, 1, 'mybot')).toBeNull();
     expect(matchTrigger(context('x'), { ...trigger, private: false, mention: false, reply: false, command: false, wakewords: ['x'], wakewordMinLength: 2 }, 1, 'mybot')).toBeNull();

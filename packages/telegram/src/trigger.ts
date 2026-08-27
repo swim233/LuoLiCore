@@ -71,14 +71,19 @@ export function commandNameOf(
     : null;
 }
 
+/**
+ * `message` 显式传入：编辑消息的内容在 `ctx.editedMessage` 而不是 `ctx.message`，只读后者的话
+ * 对任何 `edited_message` 更新都恒返回 null —— `bot.ts` 那条 `trigger.skipped` 于是成了死代码，
+ * 一条都落不下（docs/29 · M-TG-01）。不给就沿用 `ctx.message`，普通消息路径一个字都不用改。
+ */
 export function matchTrigger(
   ctx: Context,
   config: TriggerConfig,
   botId: number,
   botUsername: string,
+  message: Context["message"] = ctx.message,
 ): TriggerReason | null {
   const chat = ctx.chat;
-  const message = ctx.message;
   if (!chat || !message) return null;
   if (chat.type === "channel" && !config.channels) return null;
   const text = message.text ?? message.caption ?? "";
