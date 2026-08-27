@@ -143,6 +143,10 @@ LUOLI_DATA_DIR=/home/swim/code/LuoLiCore-staging/data-acc pnpm ac:seed --passwor
 - 第一批（改动最小的八条）：`M-WEB-07` `M-WEB-08` `M-WEB-09` `M-WEB-12` `M-WEB-13`
   `M-TG-01` `M-TG-04` `M-TG-06`
 - 第二批（中等的五条）：`M-WEB-10` `M-WEB-11` `M-TG-03` `M-TG-05` `M-QUOTA-01`
+- 第三批：`M-WEB-01`（`ConsoleView.vue` 里最后 11 处裸 `window.confirm`）。
+  `docs/00` 原先记着「跟着拆页面一起收」—— **那条判断作废**：换 `askConfirm` 是逐个函数的
+  局部改动，跟未来把这一页拆成子 SFC 不冲突（函数搬走时那行 import 跟着搬），
+  而拖着它等于让 `AC-WEB-023` / `AC-WEB-055` 无限期挂着
 
 **修好不等于能勾** —— `(手动)` 条目要勾必须有一场新的手测台账（`### <编号>` +
 `〔手测 YYYY-MM-DD · S<n>〕`），所以这十三条挂着的验收项仍是 `[ ]`，等 `## S9 · 修复回归场`。
@@ -151,7 +155,7 @@ LUOLI_DATA_DIR=/home/swim/code/LuoLiCore-staging/data-acc pnpm ac:seed --passwor
 
 | 编号 | 条目 | 一句话 | 处置 |
 |---|---|---|---|
-| `M-WEB-01` | `AC-WEB-023` · `AC-WEB-055` | `ConsoleView.vue` 里还有 12 处裸 `window.confirm()`，而抽出去的 `TasksCard` / `SchedulesCard` / `ExtensionsPage` 已统一走 `ui/confirm.ts`。于是「反馈全是右上角同一种 Toast」不成立，「深浅两套主题下无 OS 绘制控件」也不成立 —— 那 12 个就是 OS 对话框。这是 `D-02`（ConsoleView 没拆完）的直接残留 | 已转 [00 §2.3](./00-state.md) |
+| `M-WEB-01` | `AC-WEB-023` · `AC-WEB-055` | `ConsoleView.vue` 里还有 12 处裸 `window.confirm()`，而抽出去的 `TasksCard` / `SchedulesCard` / `ExtensionsPage` 已统一走 `ui/confirm.ts`。于是「反馈全是右上角同一种 Toast」不成立，「深浅两套主题下无 OS 绘制控件」也不成立 —— 那 12 个就是 OS 对话框。这是 `D-02`（ConsoleView 没拆完）的直接残留 | **已修** · 11 处全部换成 `ui/confirm.ts` 的 `askConfirm`（第 12 处是沙箱那个 `mode=none`，随 `M-WEB-10` 一起换掉了）〔`tests/webui/console.render.test.ts`〕 |
 | `M-WEB-02` | `AC-WEB-007`（后半） | SSE 断线重连只有 `onopen` 置 `connected=true`，**不触发补拉**。浏览器原生 `EventSource` 会自己重连，但断线期间错过的事件不会回来 —— 「数据补齐」这一半没有实现 | 已转 [00 §2.3](./00-state.md) |
 | ~~`M-WEB-03`~~ | `AC-WEB-025` | ~~归档检索翻页：搜索分支仍是内存切片，条目点名测的「翻到后面几页」落在没改的那一半上~~ **2026-08-26 S2 实测推翻，见下** | 需从 [00 §2.3](./00-state.md) 撤下 |
 | `M-WEB-04` | `AC-WEB-016` | 权限矩阵视图不存在（详见 §3 豁免登记）。列在这里是因为它同时是一条 WebUI 控制面缺口，不只是一条测不了的验收项 | 已转 [21](./21-webui-coverage-gaps.md) |
