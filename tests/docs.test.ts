@@ -1,6 +1,6 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { TOOL_POLICY } from '@luoli/core';
+import { KNOWN_UNIMPLEMENTED_CONFIG_KEYS, TOOL_POLICY, configJsonSchema, configSchemaLeafPaths } from '@luoli/core';
 import { describe, expect, it } from 'vitest';
 
 /**
@@ -19,11 +19,24 @@ import { describe, expect, it } from 'vitest';
 
 const SRC_ROOTS = ['packages', 'apps', 'tests', 'scripts'];
 const SKIP_DIRS = new Set(['node_modules', 'dist', '.git']);
-/** 状态标记位置的 🚧：行首，或表格单元格开头。行内的（「在 docs/11 标 🚧」这类叙述）不算。 */
-const STATUS_MARKER = /^\s*(?:\|\s*)?🚧/;
-/** 活文档里允许挂 🚧 的两处：配置手册的未接线表，与当前态清单。 */
-const MARKER_ALLOWED = new Set(['docs/00-state.md', 'docs/11-config-reference.md']);
+/**
+ * 状态标记位置的 🚧：行首，或**任意**表格单元格的开头。行内的（「在 docs/11 标 🚧」这类叙述）不算。
+ *
+ * 原来只认行首与第一格，于是 `docs/21` 那四条未接线缺口因为写在表格**最后一格**，整份文档的活账
+ * 事实上不在任何判据的视野里 —— 一道判据管不到它本该管的地方，和没有这道判据是同一个答案。
+ */
+const STATUS_MARKER = /(?:^|\|)\s*🚧/;
+/** `🚧「…」` 是**引文**（复审报告引当时文档的原话，见 `reviews/25 §1`），不是活标记。 */
+const MARKER_QUOTED = /🚧\s*[「"“]/;
+/** 活文档里允许挂 🚧 的三处：配置手册的未接线表、当前态清单、WebUI 缺口台账。 */
+const MARKER_ALLOWED = new Set([
+  'docs/00-state.md',
+  'docs/11-config-reference.md',
+  'docs/21-webui-coverage-gaps.md',
+]);
 const FROZEN_HEADER = '❄️ **已冻结（';
+/** 复审条目编号的形状：`W-CFG-02` `L-OPS-01` `AC-SEC-011` —— 至少一个连字符。 */
+const ENTRY_ID = /\b[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+\b/g;
 
 function walk(dir: string): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
@@ -60,14 +73,46 @@ describe('文档溯源', () => {
     // 只认 `· ` 之后的编号——那是既有的引用约定（`docs/22 · V-SSRF-01`）。不要求编号落在
     // 紧邻的那份文档里：`docs/05 §5.2 · W-SBX-02` 是「规格出处 · 复审条目」的混合形态，
     // `docs/22 · N-CFG-02 一脉` 是跨轮旁引，两种都合法。要保证的只是**条目还存在**。
-    const corpus = docs.map((doc) => doc.text).join('\n');
+    //
+    // 判据按**词**比，不是按子串。此前用 `corpus.includes(id)`，于是 `S-01` 被 `L-OPS-01` 满足、
+    // `I-01` 被 `D-UI-01` 满足、`T-02`–`T-05` 被 `L-EXT-02`–`05` 满足 —— `reviews/27` 整个
+    // `S-*`/`T-*` 家族与 `reviews/22` 整个 `I-*` 家族因此一条都没被保护住：删掉它们判据照样绿，
+    // 而注释已经指空。改成词边界之后当天零悬空（既有引用全部真的指得着），**收紧不花任何代价**，
+    // 买的是「哪天真删了会响」。
+    const defined = new Set<string>();
+    for (const { text } of docs) for (const match of text.matchAll(ENTRY_ID)) defined.add(match[0]);
     const dangling: string[] = [];
     for (const { path, text } of sources) {
       for (const match of text.matchAll(/·\s*([A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+)/g)) {
-        if (!corpus.includes(match[1]!)) dangling.push(`${path} → ${match[1]}`);
+        if (!defined.has(match[1]!)) dangling.push(`${path} → ${match[1]}`);
       }
     }
     expect(dangling, '这些条目编号已从文档里消失，注释成了空凭据').toEqual([]);
+  });
+
+  /**
+   * 缺口台账的编号唯一性。**这条是补的，不是预防的** —— `G-API-15` 与 `G-API-16` 曾各自定义两次，
+   * 指着毫不相干的两件事，而 `app.ts` / `SchedulesCard.vue` / `schedule.api.test.ts` 三处注释写着
+   * `G-API-16`、光看编号分不出指哪一条。
+   *
+   * 只判 `docs/21` 内部：跨文件「撞号」绝大多数是**跨轮复列**（`16` 复列 `15` 的批次、`23`/`24`
+   * 复核 `22` 的条目），那是既定工作流，拿去当撞号会报出 78 条噪声。而冻结层里真正的撞号
+   * （`R-TG-01` 在 `19` 与 `24`、`G-EXT-0x` 在 `15` 与 `21`）**改不了也测不了**，只能记 ——
+   * 记在 `docs/README §0.1` 的警示表里，引用时必须带文档号。
+   */
+  it('docs/21 的缺口编号在文档内唯一', () => {
+    const rows = new Map<string, number[]>();
+    const ledger = docs.find((doc) => doc.path === 'docs/21-webui-coverage-gaps.md');
+    expect(ledger, 'docs/21 不见了').toBeTruthy();
+    for (const [index, line] of ledger!.text.split('\n').entries()) {
+      const id = /^\|\s*\*{0,2}`?(G-[A-Z]+-\d+)`?\*{0,2}\s*\|/.exec(line)?.[1];
+      if (!id) continue;
+      if (!rows.has(id)) rows.set(id, []);
+      rows.get(id)!.push(index + 1);
+    }
+    expect(rows.size, '一个 G-* 表行都没解析出来，判据坏了').toBeGreaterThan(40);
+    const dup = [...rows].filter(([, lines]) => lines.length > 1).map(([id, l]) => `${id} → 行 ${l.join(', ')}`);
+    expect(dup, '同一个缺口编号登记了两次 —— 源码注释引它时分不出指哪一条，给后来那条换个新号').toEqual([]);
   });
 });
 
@@ -344,9 +389,42 @@ describe('文档分层', () => {
     for (const { path, text } of docs) {
       if (MARKER_ALLOWED.has(path)) continue;
       for (const [index, line] of text.split('\n').entries()) {
-        if (STATUS_MARKER.test(line)) stray.push(`${path}:${index + 1}`);
+        if (STATUS_MARKER.test(line) && !MARKER_QUOTED.test(line)) stray.push(`${path}:${index + 1}`);
       }
     }
     expect(stray, `🚧 是活账；历史文档要写成过去时，新的未接线项归到 ${[...MARKER_ALLOWED].join(' / ')}`).toEqual([]);
+  });
+});
+
+/**
+ * `docs/21 §1` 那张复算表与代码的一致性。
+ *
+ * 这一条也是补的：`KNOWN_UNIMPLEMENTED_CONFIG_KEYS` 的条数在 `docs/21` 里曾有**三个版本**
+ * （§1 的 67、§5 的 70、§7 的 67），而代码里是 10 —— 差 6.7 倍，持续了九天，没有一处判据在看。
+ * 对照组就在同一个仓库：`docs/11 §2.0.1` 的同一份清单被 `tests/config.test.ts` 双向焊着，
+ * 同期从 65 条压到 10 条、每次增减都对得上。**差别不是纪律，是有没有闸。**
+ *
+ * 计数快照写进文档就得可核对。核不了的（历史快照）折进 `<details>` 并标死日期，别摆在现值的位置上。
+ */
+describe('docs/21 §1 的复算表与代码一致', () => {
+  const ledger = readFileSync('docs/21-webui-coverage-gaps.md', 'utf8');
+  const claim = (label: string): number => {
+    const row = new RegExp(`\\|\\s*${label}[^|]*\\|\\s*\\*\\*(\\d+)\\*\\*\\s*〔实测〕`).exec(ledger);
+    expect(row, `docs/21 §1 找不到「${label}」那一行的 \`**<数>** 〔实测〕\` 形态`).toBeTruthy();
+    return Number(row![1]);
+  };
+
+  it('未接线配置键的条数与 KNOWN_UNIMPLEMENTED_CONFIG_KEYS 相等', () => {
+    expect(claim('运行时从不读')).toBe(KNOWN_UNIMPLEMENTED_CONFIG_KEYS.length);
+  });
+
+  it('schema 叶子总数与 configSchemaLeafPaths 相等', () => {
+    expect(claim('schema 叶子总数')).toBe(configSchemaLeafPaths(configJsonSchema()).length);
+  });
+
+  it('已接线数 = 叶子 − 未接线 − perChat', () => {
+    const leaves = configSchemaLeafPaths(configJsonSchema());
+    const perChat = leaves.filter((path) => path.startsWith('perChat')).length;
+    expect(claim('\\*\\*已接线\\*\\*')).toBe(leaves.length - KNOWN_UNIMPLEMENTED_CONFIG_KEYS.length - perChat);
   });
 });
