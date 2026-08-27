@@ -82,39 +82,103 @@ const LOG_DOC = 'docs/10-logging-and-observability.md';
 /** 表格所在的那一节。`## 3.` 之后是落盘格式，不再有 kind 表。 */
 const KIND_SECTION = /^## 2\. 事件种类[\s\S]*?(?=^## 3\.)/m;
 /**
- * 源码里带 `kind:` 但**不是** `LogEvent.kind` 的那些。每一条都要说清出处 —— 这份名单是
- * 「新增一个非日志 kind 时该往哪加」的唯一说明，而它自己也是判据：不在这里、又不在文档表里，
- * 就是红的。**不要只信这份名单**，加 `kind:` 字面量时自己再穷举一遍。
+ * 从 `at` 处那个引号开始，返回字符串 / 模板串结束引号的下标。
+ * 模板串里的 `${...}` 能嵌任意代码（括号、花括号、别的引号），整段跳过。
  */
-const NON_LOG_KINDS = new Map<string, string>([
-  ['user', 'principals.kind（`PrincipalRepository.upsertSeen`）'],
-  ['chat', 'principals.kind（同上）'],
-  ['text', 'messages.kind（归档出站消息）'],
-  ['photo', 'messages.kind（`media.ts` 的 `fileFrom`）'],
-  ['turn', 'context_commits.kind'],
-  ['manual', 'context_commits.kind（`insertControl`）'],
-  ['reset', 'context_commits.kind（同上）'],
-  ['regex', 'WakewordKind'],
-  ['contains', 'WakewordKind'],
-  ['timeout', 'CandidateFailure.kind（`fallback-model.ts`）'],
-  ['status', 'CandidateFailure.kind（同上，嵌套三元）'],
-  ['network', 'CandidateFailure.kind（同上，嵌套三元）'],
-  ['skill', "`extensions.changed` 的载荷（`events.emit('extensions.changed', { kind: 'skill' })`）"],
-  ['quota_global_exceeded', 'AlertKind'],
-  ['consecutive_turn_failures', 'AlertKind'],
-  ['approval', "PromptRequest.kind（`main.ts` 装配审批那条 inline keyboard 提示时的 `kind: 'approval'`，docs/05 §6.1）"],
-  // 一条审批是怎么收场的（`ApprovalOutcome.kind`，`approvals.ts` + `telegram/src/prompts.ts` 的
-  // `staleApprovalOutcome`）。回执正文照这五档换（docs/05 §6.1 · AC-APV-004），一个都不是日志事件
-  // —— 真正落库的那两条是 `approval.decided` 与 `approval.expired`。
-  ['approved', 'ApprovalOutcome.kind'],
-  ['denied', 'ApprovalOutcome.kind（同上）'],
-  ['expired', 'ApprovalOutcome.kind（同上；`staleApprovalOutcome` 的三元里也有一支）'],
-  ['cancelled', 'ApprovalOutcome.kind（同上）'],
-  ['stale', 'ApprovalOutcome.kind（同上，启动扫描那一趟）'],
-  ['send', 'TelegramDeliveryEvent.kind（`stream-output.ts`；落库时才映射成 `tg.send`）'],
-  ['edit', 'TelegramDeliveryEvent.kind（同上 → `tg.edit`）'],
-  ['action', 'TelegramDeliveryEvent.kind（同上 → `tg.action`）'],
-]);
+function skipString(text: string, at: number): number {
+  const quote = text[at];
+  for (let index = at + 1; index < text.length; index += 1) {
+    if (text[index] === '\\') { index += 1; continue; }
+    if (text[index] === quote) return index;
+    if (quote === '`' && text[index] === '$' && text[index + 1] === '{') {
+      let depth = 1; index += 2;
+      for (; index < text.length && depth; index += 1) {
+        if (text[index] === '{') depth += 1;
+        else if (text[index] === '}') depth -= 1;
+        else if (text[index] === '"' || text[index] === "'" || text[index] === '`') index = skipString(text, index);
+      }
+      index -= 1;
+    }
+  }
+  return text.length;
+}
+
+/** 从 `index` 起该跳过多少：字符串、行注释、块注释各自的长度；不是这三种回 0。 */
+function skippable(text: string, index: number): number {
+  const char = text[index]!;
+  if (char === '"' || char === "'" || char === '`') return skipString(text, index) - index + 1;
+  if (char === '/' && text[index + 1] === '/') { const nl = text.indexOf('\n', index); return nl < 0 ? text.length - index : nl - index; }
+  if (char === '/' && text[index + 1] === '*') { const close = text.indexOf('*/', index); return close < 0 ? text.length - index : close + 2 - index; }
+  return 0;
+}
+
+/**
+ * `open` 处那个 `{` 对应的对象字面量全文。
+ * 裸数花括号会被字符串里的括号带偏（`summary: \`Turn ${id} started (queued)\`` 就有一对），
+ * 所以字符串、模板串、两种注释都要跳过。
+ */
+function objectAt(text: string, open: number): string {
+  let depth = 0;
+  for (let index = open; index < text.length; index += 1) {
+    const skip = skippable(text, index);
+    if (skip) { index += skip - 1; continue; }
+    const char = text[index]!;
+    if (char === '{') depth += 1;
+    else if (char === '}') { depth -= 1; if (!depth) return text.slice(open, index + 1); }
+  }
+  return '';
+}
+
+/** 对象字面量的**顶层**属性 → 属性值原文。嵌到 `data: {...}` 里的同名键不算。 */
+function topLevelProps(object: string): Map<string, string> {
+  const props = new Map<string, string>();
+  let depth = 0;
+  for (let index = 0; index < object.length; index += 1) {
+    const skip = skippable(object, index);
+    if (skip) { index += skip - 1; continue; }
+    const char = object[index]!;
+    if (char === '{' || char === '[' || char === '(') { depth += 1; continue; }
+    if (char === '}' || char === ']' || char === ')') { depth -= 1; continue; }
+    if (depth !== 1) continue;
+    const name = /^([A-Za-z_$][\w$]*)\s*:/.exec(object.slice(index));
+    if (!name) continue;
+    const from = index + name[0].length;
+    let cursor = from;
+    let inner = 0;
+    for (; cursor < object.length; cursor += 1) {
+      const nested = skippable(object, cursor);
+      if (nested) { cursor += nested - 1; continue; }
+      const at = object[cursor]!;
+      if (at === '{' || at === '[' || at === '(') inner += 1;
+      else if (at === '}' || at === ']' || at === ')') { if (!inner) break; inner -= 1; }
+      else if (at === ',' && !inner) break;
+    }
+    props.set(name[1]!, object.slice(from, cursor));
+    index = cursor - 1;
+  }
+  return props;
+}
+
+/**
+ * 一段 `kind:` 取值里所有**可能落库**的字符串。
+ *
+ * 只收处在三元**结果位**上的那些 —— 判据是前一个非空白字符是 `?` / `:` / 什么都没有。
+ * 不这样收的话，`event.kind === "send" ? "tg.send" : …` 里的比较操作数 `"send"` 也会被当成
+ * 一个日志 kind（这正是重做这道闸时第一版误报的两条）。嵌套三元天然被覆盖：每一支的结果
+ * 都紧跟着 `?` 或 `:`。
+ */
+function kindsIn(value: string): string[] {
+  const kinds: string[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index]!;
+    if (char !== '"' && char !== "'" && char !== '`') continue;
+    const close = skipString(value, index);
+    const before = value.slice(0, index).trimEnd();
+    if (!before || before.endsWith('?') || before.endsWith(':')) kinds.push(value.slice(index + 1, close));
+    index = close;
+  }
+  return kinds;
+}
 
 function documentedKinds(): Set<string> {
   const section = KIND_SECTION.exec(readFileSync(LOG_DOC, 'utf8'))?.[0];
@@ -129,6 +193,19 @@ function documentedKinds(): Set<string> {
   return kinds;
 }
 
+/**
+ * 源码里真正发出去的 `LogEvent.kind`。
+ *
+ * 判据是**对象的形状**而不是调用点的名字：顶层同时有 `level` 与 `kind` 的对象字面量就是一条
+ * `LogEvent`。先试过锚到 `.event({` / `.span({`，漏掉了 `alerts.ts` 里的 `this.#log({...})` ——
+ * 而那正是「换个写法就绕过这道闸」的形状。形状判据对调用点写法免疫。
+ *
+ * 此前是全文扫 `kind: '...'`，两个毛病：一是捞到一堆根本不是日志的 kind（`principals.kind`、
+ * `messages.kind`、`ApprovalOutcome.kind`、`WakewordKind`……），要靠一份手写的排除名单擦屁股，
+ * 而那份名单自己又要一条断言去保它不腐烂；二是**引号写死成单引号**，于是 `b7e24ae` 把源码
+ * 格式化成双引号之后差集恒等于整张表，这道闸从此什么都不挡（docs/29 · 补 `M-LOG-01` 时量出来的）。
+ * 按形状取之后排除名单整份废掉了：不是日志的 `kind:` 压根进不来。
+ */
 function emittedKinds(): Map<string, string> {
   const found = new Map<string, string>();
   const roots = ['packages', 'apps'];
@@ -136,13 +213,24 @@ function emittedKinds(): Map<string, string> {
   expect(files.length, '没扫到任何源文件，路径判据坏了').toBeGreaterThan(20);
   for (const path of files) {
     const text = readFileSync(path, 'utf8');
-    for (const match of text.matchAll(/kind: '([^']+)'/g)) if (!found.has(match[1]!)) found.set(match[1]!, path);
-    // 三元发出点（`bot.ts` 的 `trigger.matched|skipped` 与 `quota.check|exceeded`），
-    // 以及 `fallback-model.ts` 那个嵌套三元 —— 两个分支都要被解析出来。
-    for (const match of text.matchAll(/kind: [^,}\n]*\? *'([^']+)' *: *'([^']+)'/g)) {
-      for (const kind of [match[1]!, match[2]!]) if (!found.has(kind)) found.set(kind, path);
+    for (let index = 0; index < text.length; index += 1) {
+      const skip = skippable(text, index);
+      if (skip) { index += skip - 1; continue; }
+      if (text[index] !== '{') continue;
+      // 不跳过整个对象：`LogEvent` 也可能嵌在别的对象里，里层那个要单独被扫到。
+      const props = topLevelProps(objectAt(text, index));
+      const kind = props.get('kind');
+      if (kind === undefined) continue;
+      // 两个判据取并集，各自补对方的盲点：
+      // - **形状**（顶层同时有 `level` 与 `kind`）认得出 `alerts.ts` 的 `this.#log({...})`；
+      // - **发出点**认得出 `main.ts` 的 `log.event({ kind: 'sandbox.container.created', ...shared })`
+      //   —— 那里的 `level` 藏在展开里，形状判据看不见。
+      const emitter = /[.#]?\b(?:event|span|log)\(\s*$/.test(text.slice(Math.max(0, index - 40), index));
+      if (!props.has('level') && !emitter) continue;
+      for (const one of kindsIn(kind)) if (!found.has(one)) found.set(one, path);
     }
   }
+  expect(found.size, '一个发出点都没解析出来 —— 判据坏了').toBeGreaterThan(20);
   return found;
 }
 
@@ -156,18 +244,15 @@ describe('日志 kind 与 docs/10 §2 双向一致', () => {
 
   it('源码发的每个 kind 表里都有一行', () => {
     const documented = documentedKinds();
-    const stray = [...emittedKinds()].filter(([kind]) => !documented.has(kind) && !NON_LOG_KINDS.has(kind))
+    const stray = [...emittedKinds()].filter(([kind]) => !documented.has(kind))
       .map(([kind, path]) => `${kind}（${path}）`).sort();
-    expect(stray, `这些 kind 在发但 ${LOG_DOC} §2 没写。是日志事件就补一行（level + 关键字段），`
-      + '不是的话补进 `NON_LOG_KINDS` 并写清出处').toEqual([]);
+    expect(stray, `这些 kind 作为 LogEvent 发出去了（顶层同时有 level 与 kind），但 ${LOG_DOC} §2 没写 ——`
+      + '补一行（level + 关键字段）').toEqual([]);
   });
 
-  it('排除名单里的每一条都还在源码里出现', () => {
-    const emitted = emittedKinds();
-    const stale = [...NON_LOG_KINDS.keys()].filter((kind) => !emitted.has(kind));
-    // 与上面两条同一个道理：一份没人再用的排除名单会静静放过一个真正该被记录的 kind。
-    expect(stale, '这些非日志 kind 已经从源码里消失，从 NON_LOG_KINDS 里删掉').toEqual([]);
-  });
+  // 此前这里还有第三条「排除名单里的每一条都还在源码里出现」，保的是那份手写的 `NON_LOG_KINDS`
+  // 不腐烂。锚到 `.event({` / `.span({` 之后名单整份废掉了 —— 不是日志的 `kind:` 压根进不来，
+  // 于是也不再需要一条断言去保一份排除名单。**少一份要人维护的名单，就少一处会悄悄过期的判据。**
 });
 
 /**

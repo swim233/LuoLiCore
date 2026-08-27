@@ -41,6 +41,13 @@ pnpm start                    # 跑 dist 产物（生产）
 
 测试直接对真实 SQLite 跑（`./data/*.test.db`），每个用例自己 `rmSync` 清库，不要引入 mock 层。
 
+**读源码文本来断言的用例一律走 `tests/support/source.ts` 的 `source()` / `code()` / `codeIndex()`**
+（判据长在源码结构上、行为化装不起来的那些：「关停路径仍然调 `abortAll`」「处理器装在 `serve()`
+之前」「命令白名单与 `/help` 同步」）。那个读取口把引号归一成 `"`、把空白压平，**断言两侧都要过**。
+自己 `readFileSync` + `toContain("...'x'...")` 的写法在 `b7e24ae`（一次纯格式化）之后集体变红过
+十条 —— 而红着的判据与恒真的判据，对「谁来守住这件事」是同一个答案。需要按行判断时才自己读原文，
+并在注释里写明为什么。
+
 ## 架构
 
 pnpm workspace，依赖方向严格单向：`shared → db → core → {telegram, server} → apps/bot`。

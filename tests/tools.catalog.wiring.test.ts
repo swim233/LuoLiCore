@@ -649,7 +649,7 @@ describe('deferred tool catalog · maxRegistered 截断告知', () => {
     const block = volatileOf(steps[0]!);
     expect(block).toContain('工具目录已截断：共注册 4 个，按来源优先级仅保留前 2 个，其余本轮不可用（tools.maxRegistered）。');
     // 开关真的生效了 —— 否则上面那条断言什么都没证明。
-    expect(block).not.toContain('上下文水位：');
+    expect(block).not.toContain('上下文容量：');
     expect(block).not.toContain('工作目录：');
     closeDatabase(db);
   });

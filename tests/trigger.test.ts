@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { code, source } from './support/source.js';
 import { HANDLED_COMMANDS, matchTrigger } from '@luoli/telegram';
 import { checkWakeword, configSchema, rejectedWakewords } from '@luoli/core';
 
@@ -19,9 +20,9 @@ describe('Telegram trigger matching', () => {
   // 白名单和 handler 分成两份就会漂移：`/start` `/help` `/ask` `/whois` `/webui` 曾经全在白名单里
   // 而一个 handler 都没有，判成 command 之后被直接丢弃（docs/20 · W-TG-01）。
   it('keeps the command whitelist, the registered handlers and /help in sync', () => {
-    const source = readFileSync('packages/telegram/src/bot.ts', 'utf8');
-    const registered = new Set([...source.matchAll(/bot\.command\('([a-z_]+)'/g)].map((match) => match[1]!));
-    const documented = new Set([...source.matchAll(/\{ name: '([a-z_]+)', minRole:/g)].map((match) => match[1]!));
+    const bot = source('packages/telegram/src/bot.ts');
+    const registered = new Set([...bot.matchAll(/bot\.command\("([a-z_]+)"/g)].map((match) => match[1]!));
+    const documented = new Set([...bot.matchAll(/\{ name: "([a-z_]+)", minRole:/g)].map((match) => match[1]!));
     expect([...registered].sort()).toEqual([...HANDLED_COMMANDS].sort());
     expect([...documented].sort()).toEqual([...HANDLED_COMMANDS].sort());
   });
@@ -32,15 +33,15 @@ describe('Telegram trigger matching', () => {
    * ——上一轮就是因为「名字留在白名单里但服务端没写」才把它整个摘掉的（docs/20 · W-TG-01）。
    */
   it('keeps /webui wired on both sides', () => {
-    const bot = readFileSync('packages/telegram/src/bot.ts', 'utf8');
-    const server = readFileSync('packages/server/src/app.ts', 'utf8');
+    const bot = source('packages/telegram/src/bot.ts');
+    const server = source('packages/server/src/app.ts');
     expect(HANDLED_COMMANDS.has('webui')).toBe(true);
-    expect(bot).toContain("bot.command('webui'");
-    expect(bot).toContain('issueLoginToken');
-    expect(server).toContain("app.post('/api/auth/token'");
-    expect(server).toContain('export function issueLoginToken');
+    expect(bot).toContain(code("bot.command('webui'"));
+    expect(bot).toContain(code('issueLoginToken'));
+    expect(server).toContain(code("app.post('/api/auth/token'"));
+    expect(server).toContain(code('export function issueLoginToken'));
     // 换 session 的端点必须在鉴权中间件的放行名单里，否则它自己就要求先登录。
-    expect(server).toContain("ctx.req.path === '/api/auth/token'");
+    expect(server).toContain(code("ctx.req.path === '/api/auth/token'"));
   });
   it('routes /ask into the AI flow and leaves unknown slash text alone', () => {
     // doc 08 §8：/ask 等价 @bot，是唯一进 AI 流程的命令。

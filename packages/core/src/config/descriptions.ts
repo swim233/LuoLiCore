@@ -137,7 +137,7 @@ export const CONFIG_DESCRIPTIONS: Record<string, string> = {
   "prompt.runtimeBlock.showQuota":
     "RUNTIME 块里是否告诉模型当前配额用量，让它自己收着点。",
   "prompt.runtimeBlock.showContextWatermark":
-    "RUNTIME 块里是否告诉模型上下文水位，提示它「快满了，别再翻旧账」。",
+    "RUNTIME 块里是否告诉模型上下文容量（已用条数 / tokens 与各自上限），提示它「快满了，别再翻旧账」。",
   "prompt.runtimeBlock.showWorkspace":
     "RUNTIME 块里是否告诉模型工作目录的路径。",
 

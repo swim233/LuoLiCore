@@ -2,10 +2,11 @@ import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { parse as parseSfc, compileScript, compileTemplate } from 'vue/compiler-sfc';
 import ts from 'typescript';
-import { BROWSER_FILES, UTILITIES, applyChanges, basisOf, elements, extractAll, extractFile, restore as restoreFiles, translateOf, type Change, type ElementInfo } from '../scripts/copy/extract.js';
+import { BROWSER_FILES, UTILITIES, applyChanges, basisOf, duplicateIds, elements, extractAll, extractFile, restore as restoreFiles, translateOf, type Change, type ElementInfo } from '../scripts/copy/extract.js';
 import { copyEditPlugin, instrument } from '../scripts/copy/plugin.js';
 import { rewind, snapshot, steps } from '../scripts/copy/history.js';
 import { fillSlots, slotsOf } from '../scripts/copy/slots.js';
+import { code, source } from './support/source.js';
 
 /**
  * 文案改写工具链的两条防线。
@@ -296,8 +297,21 @@ describe('贴边 / 对齐 / 间距：工具类 token', () => {
 
 describe('抽取出来的条目形状', () => {
   const entries = extractAll();
+  /**
+   * 这条真逮到过一次：6 位十六进制是 24 bit，而现在有 2700 条文案 —— 生日问题下撞号概率约 20%，
+   * 而 `applyChanges` 的 `new Map([id, entry])` 撞号时静默留下后写入的那条，**在面板里改前一句
+   * 会把后一句的源码区间覆盖掉**（实测 `aa826d` 上重合的是 `sandbox.bypassRoles` 与
+   * `approval.skipForOwner` 两条配置说明）。位数与撞号兜底两条各断一次：只留前者是概率论，
+   * 只留后者是等着它再撞。
+   */
   it('id 唯一', () => {
+    const dupes = [...duplicateIds(entries)];
+    expect(dupes, dupes.map((id) => `${id}: ${entries.filter((entry) => entry.id === id).map((entry) => entry.core.slice(0, 20)).join(' / ')}`).join('\n')).toEqual([]);
     expect(new Set(entries.map((entry) => entry.id)).size).toBe(entries.length);
+  });
+  it('id 位宽够用 —— 收窄回去等于把撞号概率抬回两成', () => {
+    // 2700 条 × 24 bit ≈ 20% 撞号；48 bit 下同样规模约 1.3e-8。
+    for (const entry of entries.slice(0, 5)) expect(entry.id).toMatch(/^[0-9a-f]{12}$/);
   });
   it('每条的 raw 都能在源码的记录位置上原样找到', () => {
     const cache = new Map<string, string>();
@@ -648,12 +662,12 @@ describe('带占位符的文案', () => {
 
   it('面板与落盘用的是同一份判据', () => {
     // 各写一份的结果是面板说「可以保存」而落盘拒绝（或者反过来拦住本来能存的）。
-    const panel = readFileSync('scripts/copy/runtime/CopyPanel.vue', 'utf8');
-    expect(panel).toContain("from '../slots.js'");
+    const panel = source('scripts/copy/runtime/CopyPanel.vue');
+    expect(panel).toContain(code("from '../slots.js'"));
     // 面板此前是自己 `row.slots.filter(slot => !override.includes(slot))` —— 只查「在不在」，
     // 与落盘那侧的个数判据不一致，而不一致的表现是按钮亮着、保存被拒。
     expect(panel).not.toMatch(/row\.slots\.filter/);
-    expect(readFileSync('scripts/copy/runtime/boot.ts', 'utf8')).toContain("from '../slots.js'");
+    expect(source('scripts/copy/runtime/boot.ts')).toContain(code("from '../slots.js'"));
   });
 });
 
@@ -663,10 +677,12 @@ describe('带占位符的文案', () => {
  */
 describe('面板自己', () => {
   const file = 'scripts/copy/runtime/CopyPanel.vue';
-  const source = readFileSync(file, 'utf8');
+  // 编译要**原文**（`parseSfc` 量的是真实 offset），读码断言要归一化后的那份 —— 两份各取所需。
+  const raw = readFileSync(file, 'utf8');
+  const text = source(file);
 
   it('解析、编译都没有错误', () => {
-    const { descriptor, errors } = parseSfc(source, { filename: file });
+    const { descriptor, errors } = parseSfc(raw, { filename: file });
     expect(errors.map(String)).toEqual([]);
     expect(compileScript(descriptor, { id: file }).content.length).toBeGreaterThan(0);
     const compiled = compileTemplate({ id: file, filename: file, source: descriptor.template?.content ?? '' });
@@ -678,34 +694,35 @@ describe('面板自己', () => {
    * 三条都是**静默丢东西**的形状，值得一条读码断言挡着。
    */
   it('保存之后只清落地的那些，被拒的留在面板上', () => {
-    expect(source).toContain('const stuck = new Set(result.stuck ?? [])');
-    expect(source).toMatch(/if \(stuck\.has\(entry\.id \?\? entry\.key \?\? ''\)\) kept\[slot\] = entry/);
-    // 无条件清空是此前的坏法，别再出现。
-    expect(source).not.toMatch(/staged\.value = \{\};\s*\n\s*undoStack\.value = \[\];\s*\n\s*committed/);
+    expect(text).toContain(code('const stuck = new Set(result.stuck ?? [])'));
+    expect(text).toContain(code("if (stuck.has(entry.id ?? entry.key ?? '')) kept[slot] = entry"));
+    // 无条件清空是此前的坏法，别再出现。压平之后换行也是空格，所以这里不再写 `\n`。
+    expect(text).not.toMatch(/staged\.value = \{\}; undoStack\.value = \[\]; committed/);
   });
 
   it('退历史之前先丢掉未保存的', () => {
     // 退完源码是另一份了，留着的暂存态记的 offset 与元素 key 全是旧的。
-    expect(source).toMatch(/async function rewind[\s\S]{0,200}?if \(dirty\.value\) discardAll\(\)/);
+    expect(text).toMatch(/async function rewind[\s\S]{0,200}?if \(dirty\.value\) discardAll\(\)/);
   });
 
   it('元素级的暂存按元素记，不按行记', () => {
     // 185 个元素被 2 条以上文案共用（472 条）。按行记的话，A 行点了隐藏、B 行仍显示未选中，
     // 两行都点过之后保存时的合并顺序决定结果 —— 不确定。
     for (const kind of ['class', 'style', 'remove', 'basis']) {
-      expect(source, `${kind} 的 slot 键还挂在行 id 上`).not.toContain(`\`${kind}:\${row.id}`);
+      expect(text, `${kind} 的 slot 键还挂在行 id 上`).not.toContain(code(`\`${kind}:\${row.id}`));
     }
-    expect(source).toContain('`class:${row.owner}:${group}`');
-    expect(source).toContain('`remove:${row.owner}`');
+    expect(text).toContain(code('`class:${row.owner}:${group}`'));
+    expect(text).toContain(code('`remove:${row.owner}`'));
   });
 
   it('面板的档位表与 UTILITIES 的 prefix 一一对应', () => {
     // 两边对不上的表现是：面板点了有反应（DOM 上加了 class），保存之后没反应（源码里那个 token
     // 没有 CSS 规则）—— 预览与结果不一致是这套工具最伤的一种坏法。
     for (const spec of Object.values(UTILITIES)) {
-      expect(source, `面板里没有 ${spec.prefix}`).toContain(`prefix: '${spec.prefix}'`);
+      expect(text, `面板里没有 ${spec.prefix}`).toContain(code(`prefix: '${spec.prefix}'`));
     }
-    for (const found of source.matchAll(/prefix: '(u-[a-z-]+)'/g)) {
+    // 归一化之后引号恒为 `"`，所以这里写双引号 —— 换 prettier 配置不再复发。
+    for (const found of text.matchAll(/prefix: "(u-[a-z-]+)"/g)) {
       expect(Object.values(UTILITIES).map((spec) => spec.prefix)).toContain(found[1]);
     }
   });

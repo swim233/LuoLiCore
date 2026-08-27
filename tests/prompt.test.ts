@@ -86,7 +86,7 @@ describe('runtime block', () => {
     expect(runtimeBlock({ ...base, role: 'owner' })).not.toContain('上下文：');
     const cleared = runtimeBlock({ ...base, role: 'owner', contextCleared: '刚被清空。', show: { contextWatermark: false } });
     expect(cleared).toContain('上下文：刚被清空。');
-    expect(cleared).not.toContain('上下文水位：');
+    expect(cleared).not.toContain('上下文容量：');
   });
 
   // TOOL CATALOG 与这一行同源（都是 active(role, ctx)）。目录开着时重复一遍等于每轮白付一份易变段的钱；

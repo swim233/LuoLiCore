@@ -208,7 +208,7 @@ export class PromptAssembler {
 
 /**
  * 三个 `prompt.runtimeBlock.*` 开关在这里生效：关掉的行整行不出现，而不是出现一行空值 ——
- * 「上下文水位：」后面跟着空白比不写更让模型犯迷糊。`showQuota` 还依赖调用方真的给得出额度
+ * 「上下文容量：」后面跟着空白比不写更让模型犯迷糊。`showQuota` 还依赖调用方真的给得出额度
  * （WebUI 的提示词预览没有本轮预留，那时这一行本来就不该有）。
  */
 export function runtimeBlock(input: {
