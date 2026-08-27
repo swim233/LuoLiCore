@@ -73,7 +73,7 @@ NODE_ENV=production
 | 键 | 摘除理由 | 想要这件事的话改哪儿 |
 |---|---|---|
 | `general.locale` | i18n 在 [14 §4](./14-open-questions.md) 明确「第一版不做」，运行时从不读它 | 真做 i18n 时与 `webui/src/i18n` 一起加回来 |
-| `approval.allowInitiator` | WebUI 只有一个 owner 身份（[14](./14-open-questions.md) A15），裁决权下放不到发起人，当前架构里没有能实现它的落点 | 先答 [14 §2](./14-open-questions.md) Q7（WebUI 多用户） |
+| `approval.allowInitiator` | WebUI 只有一个 owner 身份（[14](./14-open-questions.md) A15），裁决权下放不到发起人，当前架构里没有能实现它的落点 | **不做**。[14 §2](./14-open-questions.md) Q7（WebUI 多用户）已于 2026-08-18 答复为「确定不做」，这一条随之失去落点；键本身也已从 schema 摘除（`config/schema.ts` 那句注释）。此行留作沿革记录 |
 | `quota.perTurn.maxToolCalls` | 真正生效的是 `tools.maxCallsPerTurn` | `tools.maxCallsPerTurn` |
 | `quota.perTurn.maxSubagents` | 真正生效的是 `agent.maxSubagentsPerTurn` | `agent.maxSubagentsPerTurn` |
 | `quota.perTurn.maxDurationMs` | 真正生效的是 `concurrency.turnTimeoutMs` | `concurrency.turnTimeoutMs` |

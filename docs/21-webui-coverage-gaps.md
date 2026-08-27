@@ -41,6 +41,22 @@ schema 自动表单，可写覆盖率达到 151/151（第三轮接线两项后�
 扣掉 `KNOWN_UNIMPLEMENTED_CONFIG_KEYS` 与 `perChat`（它是覆盖层容器不是配置项），
 再和页面上实际能写的键取差集。
 
+**当前值（2026-08-27 复算，跑的就是上面那套方法）：**
+
+| | 数量 |
+|---|---|
+| schema 叶子总数 | **283** |
+| 运行时从不读（`KNOWN_UNIMPLEMENTED_CONFIG_KEYS`） | **10** —— 权威在 [11 §2.0.1](./11-config-reference.md)，由 `tests/config.test.ts` 双向焊住 |
+| `perChat`（覆盖层容器，不是配置项） | 1 |
+| **已接线** | **272** |
+
+⚠ **下面那张 2026-08-18 的表在 2026-08-27 之前一直被当成现值读，而它的「67」当时已经是「10」。**
+同一个数字在本文里曾有三个版本（§1 的 67、§5 的 70、§7 的 67），全部对着代码里的 10。
+教训写在这儿而不是删掉：**这类计数快照必须标死日期，且不许在别处复述** —— 复述的那两处
+（§5、§7）没有一处标了日期，于是它们比表本身更像现值。现在三处都指回 [11 §2.0.1](./11-config-reference.md)。
+
+<details><summary>2026-08-18 的历史快照（分项拆解，勿当现值读）</summary>
+
 | | 数量（2026-08-18 复算） |
 |---|---|
 | schema 叶子总数 | 240（+14：M12 的 `tools.selfExtend.*` 整块） |
@@ -55,6 +71,8 @@ schema 自动表单，可写覆盖率达到 151/151（第三轮接线两项后�
 | ├ 其中环境变量钉住、界面刻意不给改 | 5（G-CFG-03；`envPinned`） |
 | ├ 其中只读（要 argon2 哈希，走改口令表单） | 1（`webui.passwordHash`） |
 | └ **仍然只能改 `config.yaml`** | **0** |
+
+</details>
 
 五项已从白名单摘掉（真接了线）：`approval.ttlMs` 随可等待审批被 `DatabaseApprovalBroker.request`
 读起来（G-API-12）；`mcp.enabled` 本来就是 `McpManager.reconcile` 的总开关（当初进白名单是错判）；
@@ -324,7 +342,7 @@ SPA fallback（`app.get('*')` 返回 `index.html`，200），所以 **`GET /api/
 | 工具的 `scope` 只读 | `scope` 在运行时不参与任何判定，只是给人看的标签 —— 做成可写等于放一个改了没效果的开关。`source` 同理，它由注册方式决定 |
 | ~~工具的 `minRole` / `approval` 只读~~ **已推翻** | 原理由是「单一策略源 `TOOL_POLICY` 注册期 fail-closed，从界面调低最低角色 = 权限矩阵有两份会漂移的真相」。现按运维诉求开放为覆盖层（`tools.overrides.<name>.minRole` / `.approval` / `.timeoutMs`）：`TOOL_POLICY` 降级为默认值与对照基准，界面同时显示「代码默认」与「当前生效」，**放宽需二次确认**（409 `relax_requires_confirmation`）并在表上留标记。漂移风险用三条性质压住 —— 覆盖绕不过 `available()`、`approvalFor` 抬档只升不降、合并逻辑（`effectiveToolPolicy`）只有一份且 registry 与服务端共用。仅全局，不进 `perChat` 白名单。见 docs/09 §3.7 |
 | 模型别名不能指向不存在的模型、别名链不能为空 | `PUT /api/aliases/:alias` 的校验，不是缺口 |
-| 70 个 `KNOWN_UNIMPLEMENTED_CONFIG_KEYS` | 运行时没接线，**不该**有控件。接线时从白名单里摘掉，同时补控件、改 `docs/11` 的 🚧 清单、复算 §1 的数字 |
+| `KNOWN_UNIMPLEMENTED_CONFIG_KEYS` 里的键（**条数一律看 [11 §2.0.1](./11-config-reference.md)，别在这儿记数**） | 运行时没接线，**不该**有控件。接线时从白名单里摘掉，同时补控件、改 `docs/11` 的 🚧 清单、复算 §1 的数字 |
 | `ACP_DIR_WAIT_MS`（30 s，M13） | 它是 `acp/manager.ts` 里的**模块常量**，压根不是配置项 —— 目录互斥的等待上界。本文的口径是「运行时有这个能力而界面够不着」，而这里没有可够的东西：要它可配就先加配置键（连带 `docs/11` 一行、`CONFIG_DESCRIPTIONS` 一条、以及「等锁等多久」这件事到底该不该给运维调的判断） |
 
 ---
@@ -391,10 +409,15 @@ G-API-10/11/12 与 G-SRV-02/03/04 均已完成；按本文「运行时已有、W
 
 ### 6.3 新增缺口（第十轮活体测试整改后）
 
+> **2026-08-27 重编号**：这两条原本占的是 `G-API-15` / `G-API-16`，与 §8.1 / §8.2 撞号 —— 同一个编号
+> 指着两件毫不相干的事，而 `app.ts:3889`、`SchedulesCard.vue:24`、`schedule.api.test.ts:9` 三处注释写着
+> `G-API-16`、**光看编号分不出指哪一条**。改这一对（源码零引用，只有 `docs/00` 引），§8 那对保持不动。
+> 编号唯一性现在由 `tests/docs.test.ts` 焊住。
+
 | 编号 | 运行时已有 | 界面缺什么 | 状态 |
 |---|---|---|---|
-| **G-API-15** | `POST /api/plugins/:name/reload` 回 `hotReloadReliable` + `warning`：跑在 tsx（`pnpm dev`）下时热重载**静默跑旧代码**，reconcile 每次都真跑、`onLoad` 每次打印的都是第一版（`docs/28 · L-EXT-04`） | ~~扩展页仍只弹「已重载」~~ | ✅ 已接（`PluginCards.vue` + `ExtensionsPage.reloadPlugin`：`hotReloadReliable === false` 时弹**不自动消失**的 warn，并在卡片上常驻一条提示） |
-| **G-API-16** | `mcp_servers.state` 在子进程被 `kill -9` 之后最长 5 分钟才被下一次 `mcp-health` reconcile 纠正 —— 期间界面显示 `up` 而那台 server 的工具已经不在模型目录里（`docs/28 · L-EXT-02` 的残留） | ~~扩展页没有「这一行可能是陈旧的」提示~~。**底层那件事没修也修不了**：不是在 `onclose` 里写库就能解决（那个回调从子进程的 `'close'` 事件同步跑，`closeDatabase()` 之后一条泄漏子进程自然死亡会让裸 `db.prepare` 抛在 handler 里 → `uncaughtException`），要秒级反映得先给它加一个「库还开着吗」的判据 | ✅ 界面这一半已接（`McpTable.vue`：「上次核对」列 + 超过一个 `healthCheckCron` 周期就标「可能已陈旧」。判据用 `updated_at` 而不是去解 cron 表达式）。**运行时那一半仍然开着**，见 [00 §2.3](./00-state.md) |
+| **G-API-26** | `POST /api/plugins/:name/reload` 回 `hotReloadReliable` + `warning`：跑在 tsx（`pnpm dev`）下时热重载**静默跑旧代码**，reconcile 每次都真跑、`onLoad` 每次打印的都是第一版（`docs/28 · L-EXT-04`） | ~~扩展页仍只弹「已重载」~~ | ✅ 已接（`PluginCards.vue` + `ExtensionsPage.reloadPlugin`：`hotReloadReliable === false` 时弹**不自动消失**的 warn，并在卡片上常驻一条提示） |
+| **G-API-27** | `mcp_servers.state` 在子进程被 `kill -9` 之后最长 5 分钟才被下一次 `mcp-health` reconcile 纠正 —— 期间界面显示 `up` 而那台 server 的工具已经不在模型目录里（`docs/28 · L-EXT-02` 的残留） | ~~扩展页没有「这一行可能是陈旧的」提示~~。**底层那件事没修也修不了**：不是在 `onclose` 里写库就能解决（那个回调从子进程的 `'close'` 事件同步跑，`closeDatabase()` 之后一条泄漏子进程自然死亡会让裸 `db.prepare` 抛在 handler 里 → `uncaughtException`），要秒级反映得先给它加一个「库还开着吗」的判据 | ✅ 界面这一半已接（`McpTable.vue`：「上次核对」列 + 超过一个 `healthCheckCron` 周期就标「可能已陈旧」。判据用 `updated_at` 而不是去解 cron 表达式）。**运行时那一半仍然开着**，见 [00 §2.3](./00-state.md) |
 
 ### 6.4 新增缺口（扩展页重设计 + MCP 登录这一轮）
 
@@ -409,7 +432,8 @@ G-API-10/11/12 与 G-SRV-02/03/04 均已完成；按本文「运行时已有、W
 
 口径推进：前三轮问「有没有控件」，这一轮问「**这个控件说话算数吗**」。查法是拿 `configJsonSchema()`
 的 226 个叶子 × `SchemaForm` 的真实渲染规则（`$ref` 解析、secret 正则、未接线过滤）× 六个写入端点
-× 运行时真实读取路径逐条对齐，再单独复核 67 个未接线键有没有误判（**没有**：逐个全链路 grep 过）。
+× 运行时真实读取路径逐条对齐，再单独复核当时那 67 个未接线键有没有误判（**没有**：逐个全链路 grep 过）。
+（那个 67 是**第四轮当时**的数，现值见 §1 顶部与 [11 §2.0.1](./11-config-reference.md)。）
 
 | 改动 | 文件 |
 |---|---|

@@ -27,20 +27,38 @@
 | [11-config-reference.md](./11-config-reference.md) | 全量配置项参考（含默认值与热更新语义） | 全体 |
 | [12-implementation-plan.md](./12-implementation-plan.md) | M0–M10 分阶段实施指导与出口条件 | 全体 |
 | [13-acceptance-criteria.md](./13-acceptance-criteria.md) | **验收文档**：可逐条勾选的验收用例 | QA / 验收 |
-| [14-open-questions.md](./14-open-questions.md) | 未确认项、默认假设、已知取舍。**§2 的 Q1–Q12 已于 2026-08-18 全部答复**（此前挂了九轮），开头那张表是结论速查 | 全体 |
+| [14-open-questions.md](./14-open-questions.md) | 未确认项、默认假设、已知取舍。**§2 的 Q1–Q13 已全部答复且全部落地**（Q1–Q12 于 2026-08-18，Q13 随 M12），开头那张表是结论速查。§3 的 `T*` 编号被源码当凭据引用（`T17` 6 处、`T19` 4 处），**不得重编号** | 全体 |
 | [21-webui-coverage-gaps.md](./21-webui-coverage-gaps.md) | **WebUI 控制面覆盖缺口**：口径是「运行时有这个能力，但运维在 WebUI 里够不着」。动 WebUI 或从 `KNOWN_UNIMPLEMENTED_CONFIG_KEYS` 摘键之前先扫一眼 §1 的复算方法与 §5 的「不是缺口」清单 | 全体 / 运维 |
 | [29-manual-acceptance-log.md](./29-manual-acceptance-log.md) | **手动验收台账**：13 里 `(手动)` 那些条目的装置、逐场剧本与实测记录。给它们打勾必须在这里留一条带证据指针的小节（`tests/acceptance.test.ts` 焊着）。**编号 29 归本文，复审层下一个用 30** | QA / 验收 |
 
 ### 0.1 复审层（`reviews/`，已冻结）
 
-这九轮复审记录**当轮**的发现与整改，写完即冻结、不再更新 —— 想知道**现在**还欠什么，看
-[`00-state.md`](./00-state.md)，不要读这里的结论。它们留着有两个理由：条目编号（`W-CFG-02`、
-`S-01` 之类）是源码注释的溯源凭据（`tests/docs.test.ts` 会数）；每条的复现方式与根因分析是下一轮不重复踩坑的依据。
-**这些文件不得重编号、不得删条目。**
+这**十轮**复审（13 份文件：十份报告 + 三份整改/复核）记录**当轮**的发现与整改，写完即冻结、不再更新 ——
+想知道**现在**还欠什么，看 [`00-state.md`](./00-state.md)，不要读这里的结论。它们留着有两个理由：
+条目编号（`W-CFG-02`、`S-01` 之类）是源码注释的溯源凭据（源码里 503 处引用）；每条的复现方式与根因分析
+是下一轮不重复踩坑的依据。**这些文件不得重编号、不得删条目。**
+
+⚠ **这条规矩靠人守，`tests/docs.test.ts` 只兜住一部分。** 实测：13 份里定义了 288 个编号，而「删掉这一条
+就报错」只对 **18 个（6.3%）**成立 —— 判据用裸子串匹配（`S-01` 被 `L-OPS-01` 满足、`I-01` 被 `D-UI-01`
+满足，于是 `27` 的 `S-*`/`T-*` 与 `22` 的 `I-*` 两整个家族没有保护），只认 `· 编号` 形式，且正则要求带
+连字符（`Z4`/`Z5` 不在覆盖内）。反方向完全没有：`reviews/` 里 288 个编号有 **154 个源码从未引用过**。
+
+⚠ **编号命名空间没有唯一性约束，已经撞过两次**，且两边都有活引用、测试对同名异义完全免疫：
+
+| 撞号 | 一边 | 另一边 |
+|---|---|---|
+| `R-TG-01` | [19](./reviews/19-review-round4.md) —— IANA 时区非法值让群聊全灭（`tests/regression.round4.test.ts:75` 指这条） | [24](./reviews/24-review-round6-verification.md) —— `splitTelegramText` 5001 码点丢 1105 个（`packages/telegram/src/output.ts:590` 写 `docs/24 · R-TG-01` 指这条） |
+| `G-EXT-01`–`05` · `G-SBX-01` | [15](./reviews/15-gap-review.md) 的扩展生态 / 沙箱缺口 | [21 §9](./21-webui-coverage-gaps.md) 的装 skill 包缺口（源码那两处 `G-EXT-05` 指的是 **21** 的） |
+
+引这两组编号时**必须带文档号**（`docs/24 · R-TG-01`），裸写指不清。
+
+⚠ **`27-full-scope-review.md` 含 3 个字面 NUL 字节**（`C-07` 条目在讲 `safeRender` 的 `\0<n>\0` 占位符），
+`file` 判它为 `data`，**普通 `grep` 会静默跳过整份文件** —— 查它的编号要用 `grep -a`。这份承载 108 处引用，
+是这套「编号即凭据」机制里最容易被漏查的一份。
 
 | 文档 | 那一轮做了什么 |
 |---|---|
-| [15-gap-review.md](./reviews/15-gap-review.md) | 第一轮：实现与 01–13 号文档的差异，13 P0 / 39 P1 / 19 P2 + 逐条修改指导 |
+| [15-gap-review.md](./reviews/15-gap-review.md) | 第一轮：实现与 01–13 号文档的差异，13 P0 / 39 P1 / 19 P2 + 逐条修改指导。⚠ P0 的条数**这份文件里有三个版本**（引言「12 项」/ §0 总览表「13」/ §1 实际 15 个 `### G-` 小节）——冻结层不改，核对以 §1 的小节为准。它定义的 74 个 `G-*` 编号**源码零引用**，且 6 个与 [21](./21-webui-coverage-gaps.md) 撞名 |
 | [16-remediation-plan.md](./reviews/16-remediation-plan.md) | 第一轮的修复批次 R0–R6 与回归测试清单 |
 | [17-followup-review.md](./reviews/17-followup-review.md) | 第二轮：复验第一轮 13 项 P0 + 独立新排查 |
 | [18-review-round3.md](./reviews/18-review-round3.md) | 第三轮：复验第二轮 + 形状断言建议 |
@@ -50,8 +68,9 @@
 | [23-review-round6-remediation-report.md](./reviews/23-review-round6-remediation-report.md) | 第六轮整改方提交的完成报告。**编号与 22 有错位**，核对时以 22 的原始编号为准，见 [24](./reviews/24-review-round6-verification.md) §1.2 |
 | [24-review-round6-verification.md](./reviews/24-review-round6-verification.md) | 第六轮整改的复核与返修：24 项里 5 项没修对，含一次把 14 个控制台页面改空白。**改渲染层或改「没有 X 时怎么办」之前先看 §0** |
 | [25-round7-remediation.md](./reviews/25-round7-remediation.md) | 第七轮：把当时 25 份文档里的 🚧 / 「未实现」标记逐条回代码核对。含一条**误报纠正**（`I-05`）—— 复审报告也会错 |
-| [26-round8-tool-review.md](./reviews/26-round8-tool-review.md) | 第八轮：工具系统专项，`tools/` + 当时的 31 个内建工具（现为 33 个）。主题是「边界只写了一半」。**动 `packages/core/src/tools/` 之前先看 §6**（记了查过没问题的地方） |
-| [27-full-scope-review.md](./reviews/27-full-scope-review.md) | 第九轮：全量源码，但**判据换成外部标准**（OWASP Top 10 / SOLID / JS·TS 实践）而非需求文档。主题是「同一件事有两套判据」。§7 列了查过没问题的 13 个面 |
+| [26-round8-tool-review.md](./reviews/26-round8-tool-review.md) | 第八轮：工具系统专项，`tools/` + 当时的 31 个内建工具（`TOOL_POLICY` 现为 **54** 个）。主题是「边界只写了一半」。**动 `packages/core/src/tools/` 之前先看 §6**（记了查过没问题的地方） |
+| [27-full-scope-review.md](./reviews/27-full-scope-review.md) | 第九轮：全量源码，但**判据换成外部标准**（OWASP Top 10 / SOLID / JS·TS 实践）而非需求文档。主题是「同一件事有两套判据」。§7 列了查过没问题的 13 个面。§8 的 `Z4`/`Z5` 批次是 [`00 §2.1`](./00-state.md) 结构性三条的出处。⚠ 含 NUL 字节，`grep` 要加 `-a` |
+| [28-round10-live-system-test.md](./reviews/28-round10-live-system-test.md) | **第十轮：停机活体测试**——换的是手段不是判据（真进程 / 真 Telegram / 真 docker / 真时钟 / 真上游），只找单元测试**结构性**看不见的问题。**全库被源码引用最多的一份（167 处）。** §6「跑过没问题的」是读码复审给不出来的那一节，§8 记了排除掉的 8 条假象——**下一轮沿用同一套装置前先读这两节** |
 
 ---
 

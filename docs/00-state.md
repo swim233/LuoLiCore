@@ -32,7 +32,7 @@
 | 验收条目的勾选状态 | [13](./13-acceptance-criteria.md)（当前 **326 / 522**） | `tests/acceptance.test.ts` —— `(自动)` 要点名真实用例文件、`(手动)` 要点名日期与场次且 [29](./29-manual-acceptance-log.md) 里真有那一条，签署表分子分母自动核对 |
 | 某条手动验收项谁在哪天跑的 | [29](./29-manual-acceptance-log.md)（装置 / 逐场剧本 / 实测值 / 豁免登记） | 同上 —— 打了勾而台账里没有对应小节会报错 |
 | WebUI 控制面够不着什么 | [21](./21-webui-coverage-gaps.md) | 无自动约束（人工复算，方法见其 §1） |
-| 某行代码为什么长这样 | [`reviews/`](./reviews/) 里的条目编号 | `tests/docs.test.ts` —— 编号被源码注释大量引用，删了或改了会报错 |
+| 某行代码为什么长这样 | [`reviews/`](./reviews/) 里的条目编号 | `tests/docs.test.ts` —— **保护是部分的，不要当成全覆盖**：源码里 503 处引用、`reviews/` 里 288 个编号，而「删掉这一条就报错」实测只对 **18 个（6.3%）**成立。三层松弛：判据用 `corpus.includes()` 裸子串（`S-01` 被 `L-OPS-01` 满足、`I-01` 被 `D-UI-01` 满足，于是 `27` 的 `S-*`/`T-*` 与 `22` 的 `I-*` 两整个家族没有保护）、只认 `· 编号` 形式（裸写的 `` `L-OPS-01` `` 不进判据）、正则要求带连字符（`Z4`/`Z5`、`T17`、`A27` 全在覆盖外）。且是**单向**的：文档里多出零引用条目查不出来 |
 
 ---
 
@@ -40,16 +40,15 @@
 
 按「挡着别人 / 单独可做」分组。**每条都实测过**，括号里是核对时的实际值。
 
-> **2026-08-27**：手测缺陷的十一批修复（`fix/manual-acceptance-batch1`）收掉了 §2.3 里的二十五条，
-> 按 §4 的规矩已从本文删除，「怎么发现的 / 怎么修的」留在
-> [`29 §4`](./29-manual-acceptance-log.md)。**它们挂着的验收项仍是 `[ ]`** —— `(手动)` 条目要勾
-> 得有一场新的手测台账，见 `docs/13` 与 `tests/acceptance.test.ts`。
+> **2026-08-27**：手测缺陷（[`29 §4`](./29-manual-acceptance-log.md) 那张表）的 **28 条已全部处置完毕**。
+> 25 条修好了，按 §4 的规矩已从本文删除，「怎么发现的 / 怎么修的」留在那张表里；另 3 条各有归宿：
+> `M-WEB-04` 转 [21](./21-webui-coverage-gaps.md)、`M-WEB-03` 已被实测推翻、`M-SNAP-01` 是装置问题。
+> **它们挂着的验收项仍是 `[ ]`** —— `(手动)` 条目要勾得有一场新的手测台账（`## S9 · 修复回归场`），
+> 见 `docs/13` 与 `tests/acceptance.test.ts`。那 19 条待回归的清单现成躺在 `29` 的场内小节里。
 >
-> **那张表的 28 条里还有 3 条欠着，仍在下面 §2.3 的表里**：
-> `M-WEB-05`（带模型的 provider 删不掉）、
-> `M-LOG-02`（`sandbox.run` 挂不进调用树）、`M-MEM-02`（`.forgotten` 无人清理）。
-> 另三条各有归宿：`M-WEB-04` 转 [21](./21-webui-coverage-gaps.md)、`M-WEB-03` 已被实测推翻、
-> `M-SNAP-01` 是装置问题。
+> ⚠ 这条注记本身踩过一次坑：三条已修的缺陷在这里挂了三天没删（`M-WEB-05` / `M-LOG-02` / `M-MEM-02`），
+> 而**没有任何判据会因此变红** —— `tests/acceptance.test.ts` 只核本文的两个数字（勾选分子分母），
+> §2 整个是裸的手工区。补闸的形态见 §4 末尾那条。
 
 ### 2.1 结构性的三条（[`reviews/27` §8](./reviews/27-full-scope-review.md) 的 `Z4`/`Z5`，需求方拍板留到下一轮）
 
@@ -99,9 +98,9 @@ Bot API 调用），照 `TelegramToolBridge` 的形状注入、presence 即开�
 |---|---|---|
 | **`PUT /api/sandbox` 收下 schema 里不存在的键并落进 `config_kv`** | `PUT /api/sandbox {"notAKey":123}` 回 **200**，`config_kv` 里多出一行 `sandbox.notAKey = 123`。成因是两层都不挡：端点无条件给每个键加 `sandbox.` 前缀（`app.ts:3336-3338`），而 `configSchema` 的 `z.object` 没有 `.strict()`，`safeParse` 把未知键**静默剥掉**后返回 success —— 于是校验通过，`writeConfigRows` 写的却是**原始**那份 dotted 条目 | 补 `M-WEB-10` 的用例时量出来的（2026-08-27）。`CLAUDE.md` 点名的那个雷：「`config_kv` 的每一行都会被 `loadConfig` 当成配置覆盖层解析」。目前不至于炸 —— `loadConfig` 对非法路径逐条剔除并经 `onInvalidOverride` 上报 —— 所以这是**一条静默积累的垃圾**而不是启动失败。同类的 `PUT /api/config` 走的是 `mergeDotted` + 白名单，不受影响。修法：写库前先拿 dotted 键对 schema 路径核一遍，未知键回 `invalid_key`（`invalidKey()` 已经在那儿了） |
 | **`/usage` 的 `minRole` 与 `docs/08 §8` 对不上** | 那张表写的是 `all \| limited \| 本会话/本人用量；owner 看全局`，命令注册表里是 `minRole: "owner"`（`bot.ts` 命令表）。放宽是权限变更，不当作缺陷顺手改 | 需求方 2026-08-27 拍板：**先不管**，后期在 WebUI 单开一个 tab 统一管理所有命令（届时一并解决权限与文档口径）。记在这里是为了那时不必重新发现它 |
-| trace 树上还有三处**知情的**不对称（第十轮整改留下的） | ①`sandbox.run` 只有 `traceId`、没有 `parentSpanId`，在 trace 里是 depth 0 —— 要挂到 `bash` 那次 `tool.call` 之下得给 `Sandbox.run` 加一个参数再从三条工具路径各穿一遍，而 `docs/10 §1` 那张图本来也没有它；②`tool.error` **只覆盖主 agent**：子 agent 的 `onStepEnd` 不走 `stepToolResults`，同一个盲区在那边还开着（事故起点在主路径，`docs/10 §2` 那行也没承诺子 agent）；③运维禁用某个工具时 `tool.disabled` 与 `tool.denied` **同时落两行**（前者是既有 kind + 既有断言，后者是统一流水） | 三条都在 `docs/10 §2` 的表里写明了边界，所以不是「以为有其实没有」。②是唯一有实际排障代价的一条：子 agent 反复用错工具参数仍然只在上下文里留一条下一轮就被抹掉的 `error-text`。③要合成一条的话 `tests/regression.round9.test.ts` 那条 `warn: true` 断言要跟着改 |
-| `pnpm dev`（tsx）下 plugin 热重载**永远跑旧代码**，且修不了 | tsx 的 ESM loader 按文件路径缓存、忽略 URL 上的 `?v=`，于是 `PluginManager` 的 cache-busting 整体失效：11 次 reload 每次都真跑 reconcile（`onLoad`/`onUnload` 都调、DB 更新、无 `load_error`），而**每次 `onLoad` 打印的都是 v1**。最小复现：`node probe.mjs` → `v1 → v2`；`node --import tsx/loader probe.mjs` → `v1 → v1` | **不假装修好**（`docs/16 §5`）：启动落一条 `plugin.hot_reload_unreliable` warn、reload 端点的响应带同一句话、`docs/07 §3.2` 与 `CLAUDE.md` 各写一句。生产（`pnpm start` 跑 `dist/` 的纯 node）不受影响，但 `plugins.watch` 的既定用途正是「本机写 plugin」—— 唯一该用它的场景恰好是它失效的场景。界面上现在显示了：reload 的响应带 `hotReloadReliable`，为假时弹**不自动消失**的 warn 并在 plugin 卡片上常驻一条提示（`G-API-15` 已闭合）。**底层那件事仍然修不了** —— 这一条留在这里是因为它是「不假装修好」的活样本 |
-| MCP 子进程死后 `mcp_servers.state` 最长 5 分钟才纠正 | 判活性已经修好（死 client 不再被缓存命中，cron 与「重连」按钮都真的能重连），但库里那一行要等下一次 `mcp-health` reconcile 才从 `up` 改过来 | **不是在 `onclose` 里写库就能解决**：那个回调从子进程的 `'close'` 事件同步跑，`closeDatabase()` 之后一条泄漏子进程自然死亡会让裸 `db.prepare` 抛在 handler 里 → `uncaughtException`（`LogSink.event` 保证不抛，所以那条路只记日志）。要秒级反映得先给它加一个「库还开着吗」的判据。**界面这一半本轮补了**：MCP 表多一列「上次核对」，超过一个 `healthCheckCron` 周期就标「可能已陈旧」（`G-API-16` 的界面部分闭合）—— 陈旧还在，但读得出来了 |
+| trace 树上还有两处**知情的**不对称（第十轮整改留下的） | ①`tool.error` **只覆盖主 agent**：子 agent 的 `onStepEnd` 不走 `stepToolResults`，同一个盲区在那边还开着（事故起点在主路径，`docs/10 §2` 那行也没承诺子 agent）；②运维禁用某个工具时 `tool.disabled` 与 `tool.denied` **同时落两行**（前者是既有 kind + 既有断言，后者是统一流水）。〔原来还有第三处 —— `sandbox.run` 没有 `parentSpanId`、在 trace 里是 depth 0 —— **已修**（`M-LOG-02`，`sandbox/index.ts` 的 `run()` 收 `parentSpanId`，三条工具路径各穿一遍）〕 | 两条都在 `docs/10 §2` 的表里写明了边界，所以不是「以为有其实没有」。①是唯一有实际排障代价的一条：子 agent 反复用错工具参数仍然只在上下文里留一条下一轮就被抹掉的 `error-text`。②要合成一条的话 `tests/regression.round9.test.ts` 那条 `warn: true` 断言要跟着改 |
+| `pnpm dev`（tsx）下 plugin 热重载**永远跑旧代码**，且修不了 | tsx 的 ESM loader 按文件路径缓存、忽略 URL 上的 `?v=`，于是 `PluginManager` 的 cache-busting 整体失效：11 次 reload 每次都真跑 reconcile（`onLoad`/`onUnload` 都调、DB 更新、无 `load_error`），而**每次 `onLoad` 打印的都是 v1**。最小复现：`node probe.mjs` → `v1 → v2`；`node --import tsx/loader probe.mjs` → `v1 → v1` | **不假装修好**（`docs/16 §5`）：启动落一条 `plugin.hot_reload_unreliable` warn、reload 端点的响应带同一句话、`docs/07 §3.2` 与 `CLAUDE.md` 各写一句。生产（`pnpm start` 跑 `dist/` 的纯 node）不受影响，但 `plugins.watch` 的既定用途正是「本机写 plugin」—— 唯一该用它的场景恰好是它失效的场景。界面上现在显示了：reload 的响应带 `hotReloadReliable`，为假时弹**不自动消失**的 warn 并在 plugin 卡片上常驻一条提示（`G-API-26` 已闭合）。**底层那件事仍然修不了** —— 这一条留在这里是因为它是「不假装修好」的活样本 |
+| MCP 子进程死后 `mcp_servers.state` 最长 5 分钟才纠正 | 判活性已经修好（死 client 不再被缓存命中，cron 与「重连」按钮都真的能重连），但库里那一行要等下一次 `mcp-health` reconcile 才从 `up` 改过来 | **不是在 `onclose` 里写库就能解决**：那个回调从子进程的 `'close'` 事件同步跑，`closeDatabase()` 之后一条泄漏子进程自然死亡会让裸 `db.prepare` 抛在 handler 里 → `uncaughtException`（`LogSink.event` 保证不抛，所以那条路只记日志）。要秒级反映得先给它加一个「库还开着吗」的判据。**界面这一半本轮补了**：MCP 表多一列「上次核对」，超过一个 `healthCheckCron` 周期就标「可能已陈旧」（`G-API-27` 的界面部分闭合）—— 陈旧还在，但读得出来了 |
 | 分段回复的归档文本在**真的切开时**是近似字面 | 段与 `message_id` 的对应是**精确**的；不精确的是字面形态：渲染在分片之前、分片点是渲染后码点数组上的下标，反推源文本下标要把 offset 穿过两个递归渲染器（`**粗**`→`*粗*`、`###` 降级、列表符替换都不是 1:1）。只有一片时（绝大多数消息）那一片就是整条源文本，口径一字未变 | 切开时按 `toPlainText` 逐段反推 —— 它本来就是解析失败降级时**真正发出去**的那一份。要字面也精确得单独给 `safeRender` 加一张 offset map，而它的空行保真是有 55 条用例焊住的既有契约（`tests/output.render.test.ts`），不该为这件事去动它 |
 | `health` 事件没有周期心跳 | 只在 provider 测试与 MCP 重连后 emit（`app.ts:727` / `1400`） | **有意为之**：顶栏新鲜度依据业务事件，不把连接状态伪装成周期健康检查。要改先想清楚这一点 |
 | 工具策略覆盖层刚落地，`TOOL_POLICY` 不再是唯一真相 | `tools.overrides.<name>` 现在收 `enabled` / `minRole` / `approval` / `timeoutMs`；合并只有一份（`effectiveToolPolicy`，`packages/core/src/tools/policy.ts`），registry 与 `GET /api/tools` 共用 | 这是对 [09 §3.7](./09-webui.md) 旧决定的**有意推翻**（原文见 [21 §5](./21-webui-coverage-gaps.md) 那条「已推翻」）。改工具权限相关代码前先看那三条不变量：覆盖绕不过 `available()`、`approvalFor` 抬档只升不降、`timeoutMs: null` 的工具不吃超时覆盖。**读 minRole/approval 一律走 `ToolRegistry.effectivePolicy()`**，直接读 `tool.policy` 就是绕过覆盖层 |
@@ -156,3 +155,9 @@ Bot API 调用），照 `TelegramToolBridge` 的形状注入、presence 即开�
 - **做完一轮复审** → 报告写进 [`reviews/`](./reviews/)，加 frozen header，然后**把结论折进本文**。
   报告本身从此不再改 —— 它的条目编号是源码注释的凭据（`tests/docs.test.ts` 焊住）。
 - **§1 那四张表永远不要抄到这里来**。想知道具体哪 10 个配置键、哪 272 条验收项，点进去看。
+- **§2 的每一条都要带一个活性探针**（`⟨探针：…⟩`），由 `tests/docs.test.ts` 执行。
+  探针是一句 grep：`⟨探针：<相对路径> !~ <正则>⟩` 断言那个文件里**找不到**这个模式。
+  一条欠账被补完，模式就会出现，探针当场变红 —— 于是「修好了但忘了从 §2 删掉」不再可能。
+  这是本文 2026-08-27 那次漏删（三条已修缺陷在 §2 挂了三天）之后加的：那次**一个判据都没响**，
+  而 §2 恰恰是全库最需要保鲜的一节。写不出探针的条目（纯语义欠账、跨文件的「没接线」）
+  写 `⟨探针：无 —— 理由⟩`，测试放行但要求理由不为空 —— **一条都不许沉默地跳过**。
