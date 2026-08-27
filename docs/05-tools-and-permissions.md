@@ -1244,7 +1244,7 @@ sandbox:
 
 ```
 docker run -d --init --name luoli-box-<sanitized chatId> \
-  --label luoli.managed=1 --label luoli.chat=<chatId> --label luoli.spec=<hash> \
+  --label luoli.managed=1 --label luoli.instance=<hash> --label luoli.chat=<chatId> --label luoli.spec=<hash> \
   --network=<persistent.network> --memory=..m --memory-swap=..m --cpus=.. --pids-limit=.. \
   --cap-drop=ALL --security-opt=no-new-privileges --user=1000:1000 --read-only \
   --tmpfs=/tmp:rw,size=..m,noexec \
@@ -1282,9 +1282,20 @@ docker run -d --init --name luoli-box-<sanitized chatId> \
 2. **spec 漂移即重建**。`luoli.spec` 标签与当前配置算出的 hash 不符 → 销毁，下次用到时懒加载。
    覆盖 image / memory / cpus / pidsLimit / network 的改动；没有这一条，「我在 WebUI 改了镜像」
    对所有已存在的容器永远不生效。
-3. **对账**。DB 有行而容器没了 → 删行；带 `luoli.managed=1` 标签的容器 DB 里没有 → 孤儿，`rm -f`；
-   已退出的容器 → 记下退出码到 `last_error` 再删。**进程启动时先对账而不是全杀** ——
+3. **对账**。DB 有行而容器没了 → 删行；**带 `luoli.instance=<我的指纹>` 而 DB 里没有** → 孤儿，
+   `rm -f`；已退出的容器 → 记下退出码到 `last_error` 再删。**进程启动时先对账而不是全杀** ——
    24h 的 TTL 要能扛住一次重启。
+
+   ⚠ **`luoli.instance` 不是装饰，是这条对账的安全边界。** 它是**库文件绝对路径**的 sha1 前 12 位
+   —— 「哪些容器是我的」正是由「哪个库存着它们的行」定义的，而同一个库上只可能有一个进程
+   （`acquireInstanceLock`）。此前判据只有「带 `luoli.managed=1` 且不在我库里」，而那个标签不带
+   实例身份，于是在同一台宿主上起第二个实例就等于 `docker rm -f` 掉在位实例**正在用**的全部
+   持久容器（[29 · `M-OPS-01`](./29-manual-acceptance-log.md) 实测撞上过）。最锋利的是
+   `persistent.enabled=false` 那一支 —— 那里 known 集直接是空的，「起一个默认配置的实例」就等于
+   清空整台宿主。**认不出主人的一律不碰**：带 `luoli.managed=1` 却没有 `luoli.instance` 的容器
+   （加这个标签之前建的）只计进 `legacy` 并把对账日志抬成 warn，一个都不删 —— 删掉别人正在用的
+   容器不可逆，漏掉一个停着的孤儿只是占点盘。发指纹而不是路径本身：标签谁都 `docker inspect`
+   得到，白送一份部署布局没必要。
 
 真相在 DB + docker 两边互为校验，不是进程内的一张 Map（[01 §3.1](./01-architecture.md)）。
 

@@ -25,10 +25,14 @@ const ROOT = resolve('./data/containers-live.test');
 const CHAT = '-100777';
 const OTHER = '-100778';
 const dbPath = './data/containers-live.test.db';
+/** 「第二个实例」那条用例用的另一张库 —— 实例身份取的是库路径指纹，所以两个实例就是两张库。 */
+const otherDbPath = './data/containers-live-second.test.db';
+/** 库里没有、只在宿主上的那个探针容器。 */
+const ORPHAN = 'luoli-box-orphan-test';
 /** 用例自己收尾：留下的容器会占着宿主的内存直到有人手动 `docker rm -f`。 */
 const purge = (): void => {
-  for (const chatId of [CHAT, OTHER]) {
-    try { execFileSync('docker', ['rm', '-f', containerNameFor(chatId)], { stdio: 'ignore', timeout: 20_000 }); } catch { /* 本来就没有 */ }
+  for (const name of [...[CHAT, OTHER].map(containerNameFor), ORPHAN]) {
+    try { execFileSync('docker', ['rm', '-f', name], { stdio: 'ignore', timeout: 20_000 }); } catch { /* 本来就没有 */ }
   }
 };
 
@@ -173,14 +177,56 @@ describe.skipIf(!dockerReady)('持久容器 · 真 docker', () => {
     expect(counts.gone + counts.idle + counts.hard + counts.respec + counts.exited).toBe(0);
     expect(restarted.repo.byChat(CHAT)?.name).toBe(name);
     execFileSync('docker', ['inspect', name], { stdio: 'ignore', timeout: 10_000 });
-    // 库里没有、却带着 luoli.managed 标签的那个是孤儿（上一次崩在建容器与落库之间）。
-    execFileSync('docker', ['run', '-d', '--name', 'luoli-box-orphan-test', '--label', 'luoli.managed=1', IMAGE, 'sleep', 'infinity'], { stdio: 'ignore', timeout: 60_000 });
+    // 库里没有、带着 luoli.managed **且是我这个实例的**那个才是孤儿（上一次崩在建容器与落库之间）。
+    const mine = restarted.manager.instanceLabel;
+    execFileSync('docker', ['run', '-d', '--name', ORPHAN, '--label', 'luoli.managed=1', '--label', `luoli.instance=${mine}`, IMAGE, 'sleep', 'infinity'], { stdio: 'ignore', timeout: 60_000 });
     const swept = await restarted.manager.reap();
     expect(swept.orphans).toBe(1);
     expect(swept.adopted).toBe(1);
-    expect(() => execFileSync('docker', ['inspect', 'luoli-box-orphan-test'], { stdio: 'ignore', timeout: 10_000 })).toThrow();
+    expect(() => execFileSync('docker', ['inspect', ORPHAN], { stdio: 'ignore', timeout: 10_000 })).toThrow();
     closeDatabase(restarted.db);
   }, 180_000);
+
+  /**
+   * `docs/29 · M-OPS-01`：**第二个实例一启动就 `docker rm -f` 掉第一个实例正在用的持久容器。**
+   *
+   * 成因是 `luoli.managed=1` 这个标签**不带实例身份**，而 `#sweepOrphans` 的判据只有
+   * 「带这个标签且不在我库里」。最锋利的是 `persistent.enabled=false` 那一支：known 集直接是
+   * 空的，于是「起一个默认配置的实例」就等于清空宿主上所有 luoli 持久容器。实测撞上过 ——
+   * 跑 docker 用例期间起 `pnpm dev`，那些活容器当场没了。
+   *
+   * 两个实例 = 两个库，所以这里开第二张库。判据落在**容器还在不在**上，不只是计数器。
+   */
+  it('另一个实例的容器一个都不碰，认不出主人的也不碰', async () => {
+    const { db, repo, manager } = fresh();
+    await manager.exec({ chatId: CHAT, mountedWorkspace: workspaceFor(CHAT), command: 'true', timeoutMs: 30_000, abortSignal: new AbortController().signal });
+    const name = repo.byChat(CHAT)!.name;
+    // 加实例标签之前建的容器：认不出主人，同样一个都不碰（删掉别人正在用的是不可逆的，
+    // 漏掉一个停着的孤儿只是占点盘）。
+    execFileSync('docker', ['run', '-d', '--name', ORPHAN, '--label', 'luoli.managed=1', IMAGE, 'sleep', 'infinity'], { stdio: 'ignore', timeout: 60_000 });
+
+    for (const persistent of [true, false]) {
+      // 第二个实例：另一张库 → 另一个 `luoli.instance`。它的库里一条容器行都没有。
+      for (const suffix of ['', '-wal', '-shm']) rmSync(`${otherDbPath}${suffix}`, { force: true });
+      const second = openDatabase(otherDbPath);
+      migrateDatabase(second);
+      const intruder = new ContainerManager(second, new SandboxContainerRepository(second), () => ({ ...runtimeConfig(), persistent: { ...runtimeConfig().persistent, enabled: persistent } }));
+      expect(intruder.instanceLabel, '两张库应当给出两个不同的实例标签').not.toBe(manager.instanceLabel);
+      const counts = await intruder.reap();
+      expect(counts.orphans, `persistent=${persistent} 时删了别人的容器`).toBe(0);
+      expect(counts.foreign).toBe(1);
+      expect(counts.legacy).toBe(1);
+      // 真判据：两个容器都还在宿主上。
+      execFileSync('docker', ['inspect', name], { stdio: 'ignore', timeout: 10_000 });
+      execFileSync('docker', ['inspect', ORPHAN], { stdio: 'ignore', timeout: 10_000 });
+      closeDatabase(second);
+    }
+    // 在位那个实例照旧认领得到自己的容器。
+    expect((await manager.reap()).adopted).toBe(1);
+    execFileSync('docker', ['inspect', name], { stdio: 'ignore', timeout: 10_000 });
+    for (const suffix of ['', '-wal', '-shm']) rmSync(`${otherDbPath}${suffix}`, { force: true });
+    closeDatabase(db);
+  }, 240_000);
 
   /** 沙箱配置改了要真的生效：spec 指纹对不上的容器由回收销毁，下次用时按新配置重建。 */
   it('改了资源限制之后旧容器被重建', async () => {

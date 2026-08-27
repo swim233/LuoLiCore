@@ -845,8 +845,9 @@ Telegram 消息号，从这个高位段按会话取 `MAX+1`。别在这个区间
 
 ```sql
 -- 一行 = 一个会话常驻的沙箱容器。**这张表不是真相的唯一副本**：docker 那边同样有
--- luoli.managed=1 标签，两边每个 reapCron tick 对一次账（DB 有行容器没了 → 删行；
--- 有标签的容器 DB 里没有 → 孤儿 rm -f）。进程重启后先对账而不是全杀，24h 的 TTL 要扛得住重启。
+-- luoli.managed=1 与 luoli.instance=<库路径指纹> 两个标签，两边每个 reapCron tick 对一次账
+-- （DB 有行容器没了 → 删行；带**我的** instance 标签而 DB 里没有 → 孤儿 rm -f；别人的、
+-- 以及认不出主人的一个都不碰，见 docs/05 §5.5）。进程重启后先对账而不是全杀，24h 的 TTL 要扛得住重启。
 CREATE TABLE sandbox_containers (
   chat_id         TEXT PRIMARY KEY,      -- 按 chatId 而非 contextKey：workspace 就是按 chatId 分的
   name            TEXT NOT NULL UNIQUE,  -- luoli-box-<sanitized chatId>，docker 容器名

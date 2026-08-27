@@ -894,11 +894,13 @@ sandbox.bindContainers(containers);
  */
 const reapContainers = async (): Promise<void> => {
   const result = await containers.reap();
+  // `legacy` 非零 = 宿主上有带 `luoli.managed=1` 却没有实例标签的容器（加这个标签之前建的）。
+  // 认不出主人所以一个都没动，得有人去看一眼 —— 全部重建过一轮之后它自然归零。
   log.event({
-    level: result.orphans > 0 ? "warn" : "info",
+    level: result.orphans > 0 || result.legacy > 0 ? "warn" : "info",
     kind: "sandbox.container.reconciled",
     summary: "Sandbox container reap complete",
-    data: result,
+    data: { ...result, instance: containers.instanceLabel },
   });
 };
 scheduler.add(

@@ -116,7 +116,7 @@ with_parent 0`，浏览器里展开一条 trace，13 个节点的 `marginLeft` �
 | `sandbox.container.created` | info | chatId, name, image, specHash, ms, hasSetsid —— 给某个会话建了一个持久容器（[05 §5.5](./05-tools-and-permissions.md)）。`hasSetsid=false` 意味着**取消杀不干净整个进程组**，排障时先看这一位 |
 | `sandbox.container.reaped` | info | chatId, name, reason(`idle`/`hard`/`respec`/`reset`/`orphan`/`exited`), aliveProcs, ageMs —— 销毁一个持久容器。**`aliveProcs` 是这一行存在的理由**：容器一没，那个会话里跑着的 server 就没了，而用户看到的只是「它突然不工作了」 |
 | `sandbox.container.limit` | warn | chatId, used, max —— 撞上 `sandbox.persistent.maxContainers`，**没建**并把错交回模型。不退回一次性容器，所以这一行是运维侧唯一的信号 |
-| `sandbox.container.reconciled` | info（有孤儿时 **warn**） | adopted, dropped, orphans, exited —— 每个 `reapCron` tick 与启动时的 DB ↔ docker 双向对账。`orphans>0` 表示有带 `luoli.managed` 标签却不在库里的容器被 `rm -f` 了 |
+| `sandbox.container.reconciled` | info（`orphans` 或 `legacy` 非零时 **warn**） | adopted, dropped, orphans, exited, foreign, legacy, instance —— 每个 `reapCron` tick 与启动时的 DB ↔ docker 双向对账。`orphans>0` = 带**我这个实例**的 `luoli.instance` 标签却不在库里的容器被 `rm -f` 了；`foreign` = 别的实例的容器（多实例部署里正常，一个都不碰）；`legacy` = 带 `luoli.managed=1` 却没有 `luoli.instance` 的（加这个标签之前建的），认不出主人所以同样不碰，**要人处置所以抬成 warn**，全部重建过一轮之后自然归零 |
 | `sandbox.container.exec` | info（`ok=false` 时 **warn**） | chatId, name, exitCode, ms, background, killed —— 持久容器里的一次 `docker exec`，**只有 `container_*` 工具那条路会落**（`bash` / `python` 走 `Sandbox.run`，记的仍是 `sandbox.run`）。两者并列而不是互相取代：`sandbox.run` 记「工具要执行一段命令」，这一条记「owner 点名往某个会话的容器里执行」 |
 | `approval.pending` / `approval.decided` | info（拒绝与过期 **warn**） | id, tool, risk, channel, actor, expiresAt, ms。`pending` 是「已经推给 owner，等裁决」那一刻（文档此前叫 `approval.requested`，实现里从来是 `pending`） |
 | `approval.expired` | warn | id, risk —— `ttlMs` 到点没人裁决，按拒绝处理 |
