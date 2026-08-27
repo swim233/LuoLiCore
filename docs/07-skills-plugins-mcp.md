@@ -596,8 +596,8 @@ server 打印的授权链接直接写进 bot 进程的 stderr，然后握手 15 
 #### stdio server：帮不上，但别把它说的话丢掉
 
 一台 stdio server 的「登录」是它自己在带外做的 —— 它继承 `HOME`，所以 `~/.mcp-auth`
-这类磁盘缓存本来就能用（照 harness 的先例：`docs/12` 的「harness 自己的登录态不进本项目的
-`config_kv`」）。我们能做的就是 `stderr: 'pipe'`，逐行进 `LogSink`（新 kind `mcp.stderr`，
+这类磁盘缓存本来就能用（照 `spawn_harness` 的先例：**harness 自己的登录态不进本项目的
+`config_kv`** —— 那是它自己的凭据，我们既不管理也不代存，见 [05 §3.5](./05-tools-and-permissions.md)）。我们能做的就是 `stderr: 'pipe'`，逐行进 `LogSink`（新 kind `mcp.stderr`，
 warn 级，单行截到 2 KB，缓冲上界 8 KB）。这一条独立于 OAuth，是这一整块里最便宜的一半。
 
 #### 清理

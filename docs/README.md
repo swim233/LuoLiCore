@@ -25,7 +25,6 @@
 | [09-webui.md](./09-webui.md) | 管理端页面、REST/SSE API、鉴权 | 前端 / 后端 |
 | [10-logging-and-observability.md](./10-logging-and-observability.md) | 独立日志、trace 模型、成本记账、配额 | 后端 / 运维 |
 | [11-config-reference.md](./11-config-reference.md) | 全量配置项参考（含默认值与热更新语义） | 全体 |
-| [12-implementation-plan.md](./12-implementation-plan.md) | M0–M10 分阶段实施指导与出口条件 | 全体 |
 | [13-acceptance-criteria.md](./13-acceptance-criteria.md) | **验收文档**：可逐条勾选的验收用例 | QA / 验收 |
 | [14-open-questions.md](./14-open-questions.md) | 未确认项、默认假设、已知取舍。**§2 的 Q1–Q13 已全部答复且全部落地**（Q1–Q12 于 2026-08-18，Q13 随 M12），开头那张表是结论速查。§3 的 `T*` 编号被源码当凭据引用（`T17` 6 处、`T19` 4 处），**不得重编号** | 全体 |
 | [21-webui-coverage-gaps.md](./21-webui-coverage-gaps.md) | **WebUI 控制面覆盖缺口**：口径是「运行时有这个能力，但运维在 WebUI 里够不着」。动 WebUI 或从 `KNOWN_UNIMPLEMENTED_CONFIG_KEYS` 摘键之前先扫一眼 §1 的复算方法与 §5 的「不是缺口」清单 | 全体 / 运维 |
@@ -125,7 +124,7 @@ Telegram ──► 准入(白名单/角色) ──► 归档(DB, 按 chat 隔离
 | D20 | 技术栈 | TypeScript / Node 22 / pnpm workspace / **AI SDK v7** / **grammY** / **better-sqlite3 + 原生 SQL（无 ORM 查询层）** / Hono / Vite + Vue 3（自建 UI 层）/ vitest。**原定 Drizzle ORM，实现阶段改为手写 SQL**：查询层要强制注入 chat 作用域过滤（D7），自己写比绕过 ORM 更直接；迁移相应改为手写 `NNNN_*.sql` + 自研执行器。账本表名 `__drizzle_migrations` 是那一版留下的名字，不代表还在用 | [01](./01-architecture.md#5-技术栈) |
 | D21 | 定时 / 主动发言 | **做**（[14 §2 Q4](./14-open-questions.md) 已答复）：`mode='agent'` 起完整轮次、`mode='notify'` 只发预写文本；产出**照常进上下文**；停机错过**不补跑**；`minRole=trusted` 且落点绑死本会话 | [02 §10](./02-context-engine.md#10-定时轮次的上下文归属) |
 | D22 | 子 agent 的 md 定义 | **做**（[14 §2 Q5](./14-open-questions.md)）：`agents/<name>.md` 是**只读**来源，DB / WebUI 同名定义覆盖它；加载失败报错而不是静默跳过 | [04](./04-agents-and-providers.md) |
-| D23 | `HarnessAgent` | **做，排 [M11](./12-implementation-plan.md)**（[14 §2 Q8](./14-open-questions.md)）：仅 owner 且仅私聊、目录限白名单（默认空 = 关闭）、起 harness 整体走一次审批。它内部的工具调用**不受本系统权限模型约束**（T17） | [12 · M11](./12-implementation-plan.md) |
+| D23 | `HarnessAgent` | **做，已落地**（[14 §2 Q8](./14-open-questions.md)）：仅 owner 且仅私聊、目录限白名单（默认空 = 关闭）、起 harness 整体走一次审批。它内部的工具调用**不受本系统权限模型约束**（T17） | [05 §3.5](./05-tools-and-permissions.md) |
 | D24 | 保留策略 | **媒体文件 90 天**（`media.retentionDays`，0 = 不清）删文件留元数据；`messages` / `context_messages` / `turns` / `tasks` **永久**（[14 §2 Q9](./14-open-questions.md)） | [03 §4](./03-data-model.md) |
 | D25 | `ask_parent` 应答 | **实现 low 档仲裁**（[14](./14-open-questions.md) A7）：`agent.askArbiter` / `askTimeoutMs` 接线，不再返回 `ask_parent_not_implemented`。降级顺序 仲裁 → `default` → `ask_parent_unanswered`。**转人工（`askEscalateToUser`）仍未实现** —— 阻塞式人机通道本身已落地（`PendingPrompts`，[05 §6.1](./05-tools-and-permissions.md)），欠的是「问谁 / 选项从哪儿来 / 等人期间的并发槽与超时怎么算」这三条语义 | [04 §3.4](./04-agents-and-providers.md) |
 
