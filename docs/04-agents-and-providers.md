@@ -835,7 +835,7 @@ AI SDK v7 号称还提供 `WorkflowAgent`（确定性编排）与 `HarnessAgent`
 
 - **不使用 `WorkflowAgent`**：本系统的编排逻辑（turn 生命周期、上下文提交）在我们自己的 `TurnRunner` 里，语义更强；把它塞进 WorkflowAgent 反而丢失对 commit/rebase 的控制。
 - ⚠️ **`HarnessAgent` 这个抽象不存在。** `ai@7` 里只有 `ToolLoopAgent`（[14 §2](./14-open-questions.md) Q8
-  与 [12 · M11](./12-implementation-plan.md) 都点了这一处错）。所以 M11 落地的不是「接一个 SDK 类」，
+  点了这一处错）。所以 `HarnessAgent` 落地的不是「接一个 SDK 类」，
   而是 `spawn_harness`：起一个外部 CLI 子进程（`claude -p "<任务>"` / `codex exec "<任务>"`），
   任务正文作为 argv 最后一项、不经 shell，把输出收回来。它**不是**一个子 agent 定义 ——
   没有 `agents[].kind: 'harness'` 这个东西，权限与门在 `TOOL_POLICY` 与 `available()` 上

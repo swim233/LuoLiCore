@@ -100,19 +100,52 @@ describe('文档溯源', () => {
    * （`R-TG-01` 在 `19` 与 `24`、`G-EXT-0x` 在 `15` 与 `21`）**改不了也测不了**，只能记 ——
    * 记在 `docs/README §0.1` 的警示表里，引用时必须带文档号。
    */
-  it('docs/21 的缺口编号在文档内唯一', () => {
-    const rows = new Map<string, number[]>();
+  /**
+   * 台账正文（`## 1.` 之后）。`## 0.` 那几节是**索引**，按定义就是副本，不参与「唯一性」判据 ——
+   * 拿副本当定义的话，一张为了「不必从头翻」而加的索引表反而会把整道闸判红。
+   */
+  const ledgerBody = (): string => {
     const ledger = docs.find((doc) => doc.path === 'docs/21-webui-coverage-gaps.md');
     expect(ledger, 'docs/21 不见了').toBeTruthy();
-    for (const [index, line] of ledger!.text.split('\n').entries()) {
+    const at = ledger!.text.indexOf('\n## 1.');
+    expect(at, 'docs/21 里找不到 `## 1.` —— 索引与台账的分界线没了，判据坏了').toBeGreaterThan(0);
+    return ledger!.text.slice(at);
+  };
+  /** 台账里的定义行：表格第一格就是编号。返回 编号 → 该行的状态格。 */
+  const ledgerRows = (): Map<string, { lines: number[]; last: string }> => {
+    const rows = new Map<string, { lines: number[]; last: string }>();
+    for (const [index, line] of ledgerBody().split('\n').entries()) {
       const id = /^\|\s*\*{0,2}`?(G-[A-Z]+-\d+)`?\*{0,2}\s*\|/.exec(line)?.[1];
       if (!id) continue;
-      if (!rows.has(id)) rows.set(id, []);
-      rows.get(id)!.push(index + 1);
+      const cells = line.split('|').map((cell) => cell.trim()).filter(Boolean);
+      const entry = rows.get(id) ?? { lines: [], last: cells.at(-1) ?? '' };
+      entry.lines.push(index + 1);
+      rows.set(id, entry);
     }
+    return rows;
+  };
+
+  it('docs/21 的缺口编号在文档内唯一', () => {
+    const rows = ledgerRows();
     expect(rows.size, '一个 G-* 表行都没解析出来，判据坏了').toBeGreaterThan(40);
-    const dup = [...rows].filter(([, lines]) => lines.length > 1).map(([id, l]) => `${id} → 行 ${l.join(', ')}`);
+    const dup = [...rows].filter(([, r]) => r.lines.length > 1).map(([id, r]) => `${id} → 行 ${r.lines.join(', ')}`);
     expect(dup, '同一个缺口编号登记了两次 —— 源码注释引它时分不出指哪一条，给后来那条换个新号').toEqual([]);
+  });
+
+  /**
+   * `docs/21 §0`「现在还开着什么」那张索引表必须等于台账里所有**未闭合**的行。
+   *
+   * 索引是副本，而这份文档自己的教训就是「同一个事实有两份副本，迟早会漂」—— 加索引是为了
+   * 让最新的缺口不再排在第 800 多行没人翻得到（`G-UI-05` / `G-UI-06` 都出过这事），
+   * 但一张会过期的索引比没有索引更坏：它看起来权威。所以它由这条断言维持。
+   */
+  it('docs/21 §0 的「还开着」索引与台账一致', () => {
+    const open = [...ledgerRows()].filter(([, r]) => !r.last.includes('✅')).map(([id]) => id).sort();
+    const ledger = docs.find((doc) => doc.path === 'docs/21-webui-coverage-gaps.md')!.text;
+    const index = ledger.slice(0, ledger.indexOf('\n## 1.'));
+    const listed = [...new Set([...index.matchAll(/^\|\s*`(G-[A-Z]+-\d+)`\s*\|/gm)].map((m) => m[1]!))].sort();
+    expect(listed, 'docs/21 §0 那张「现在还开着什么」与台账对不上 —— '
+      + `台账里未闭合的是 [${open.join(', ')}]。闭合一条就要从 §0 摘掉，新增一条就要加进去`).toEqual(open);
   });
 });
 
@@ -493,5 +526,34 @@ describe('docs/00 §2 的每一条都带活性探针', () => {
       .map(({ line }) => PROBE.exec(line)?.groups?.why?.trim())
       .filter((why): why is string => why !== undefined && why.length < 8);
     expect(thin, '「写不出探针」得说清楚为什么 —— 一句话，不是一个词').toEqual([]);
+  });
+});
+
+/**
+ * 文档之间的相对链接不许指空。
+ *
+ * 这条是补的：实测四条断链，且都不是新的 —— `./05-tools.md`（真名是 `05-tools-and-permissions.md`）、
+ * `./07-skills-and-extensions.md`（真名是 `07-skills-plugins-mcp.md`）、
+ * `./reviews/24-review-round9.md`（那份是 round6-verification，压根没有 round9）。文件早就改过名，
+ * 而链接留在原地。
+ *
+ * 为什么此前挡不住：「源码注释里的 `docs/NN` 都指得着」那条只看**源码**，且只看两位数编号；
+ * 文档之间的 markdown 链接一条都不在它的视野里。而删一份文档正是最容易制造这种断链的动作 ——
+ * 本轮删掉实施计划那份时，四份文档里的入站链接全靠手工 grep 才清干净。
+ *
+ * 只判 `.md` 的相对链接：外链验不了，锚点（`#节名`）的解析规则各家不同，都不进判据。
+ */
+describe('文档之间的链接都指得着', () => {
+  it('相对 markdown 链接没有指空的', () => {
+    const dangling: string[] = [];
+    for (const { path, text } of docs) {
+      const dir = path.slice(0, path.lastIndexOf('/'));
+      for (const [index, line] of text.split('\n').entries()) {
+        for (const match of line.matchAll(/\]\((\.\/[^)#\s]+\.md)/g)) {
+          if (!existsSync(join(dir, match[1]!))) dangling.push(`${path}:${index + 1} → ${match[1]}`);
+        }
+      }
+    }
+    expect(dangling, '这些链接指着不存在的文档 —— 文件改过名或被删了，链接要跟着走').toEqual([]);
   });
 });

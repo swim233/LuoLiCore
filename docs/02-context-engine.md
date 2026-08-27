@@ -511,7 +511,7 @@ type MaterializeResult = {
   没记过水位的旧 `reset` 再也补不上了。
 - **下限灌进 SQL，不在工具层过滤返回值。** 后者会让 `limit:20` 先取满再被削短，模型看到的是
   「一共只有这么几条」。削短了要在结果里说出来（`recallBarrier` 字段），照
-  [`droppedTokenNote`](./05-tools.md) 那条先例：沉默的降级等于假象。单条被挡住时回
+  [`droppedTokenNote`](./05-tools-and-permissions.md) 那条先例：沉默的降级等于假象。单条被挡住时回
   `ok:false, error:'recall_barrier'`，**不能**回 `message: null` —— 那和「这条消息不存在」长得一样，
   模型会换个 id 再试一遍。
 - **两扇门一起关。** `claimBackground` 认的是 `claim_watermark` 到触发消息之间那一段，与窗口无关；

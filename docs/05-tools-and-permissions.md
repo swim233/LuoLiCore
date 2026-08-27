@@ -396,6 +396,13 @@ profile 说了算（那里面可能写着别的值），而运维在界面上往
 此后永久」** —— 一条 `session/load` 带着当初被批过的 `cwd` 重新进那个目录，而这一次没有任何人
 点头。`fork` / `resume` 同理。所以本版不做追问，也没有 `acp_follow_up` 工具。
 
+**连接也不走 SDK 那两个现成壳子，两处都是刻意的。** ① `connectWith(stream, op)` 在 `op` resolve 的
+那一刻就把连接关掉，等于把连接寿命绑死在一个回调作用域上；而这条连接要横跨 initialize →
+`session/new` → `session/prompt`，还得能被那个作用域**外面**关掉（关停路径一条、「子进程自己死了」
+一条）。② `ActiveSession` / `buildSession` 把 `session/update` 灌进一个**无界**异步队列，而喂它的是
+一台我们不信任其输出量的子进程 —— 实测一个 86 秒的任务就吐了 263 条 update。上界只能由我们自己给，
+就是下面那两道。
+
 **目录互斥。** 两条并发轮次在同一个 `cwd` 各起一个 agent 改同一个仓库是实打实的危险，所以按
 `realpath` 硬互斥（`turn/keyed-mutex.ts`）。等待**有界且可取消**（默认 30 秒）：外层工具是
 `timeoutMs: null`，让第二个调用干等十五分钟等于把并发保护变成并发阻塞。等不到回
@@ -423,6 +430,13 @@ profile 说了算（那里面可能写着别的值），而运维在界面上往
   两个 fd 一直握着。那时 agent 早被 SIGKILL 收掉，我们却在等一个永远不来的事件 —— `shutdown()`
   就钉在这里（`docs/28 · L-EXT-03` 那个形态）。所以 SIGKILL 之后再给一档宽限，到点自己 destroy
   三条管道并返回。
+
+**子进程整个是我们的账，而且刻意不 `unref`。** ACP SDK 只管 stdio 上的 JSON-RPC：既不 spawn 也不做
+`initialize`（与 MCP 正好相反 —— 那边 `StdioClientTransport` 自己起进程，[07 §4.3](./07-skills-plugins-mcp.md)）。
+但在 `unref` 这一位上两条路取同一档：`unref` 是拿「进程退不出去」换「退出时把一台正在改文件的 agent
+连账都不记地丢掉」，后者更贵。所以 `AcpManager` 照 `McpManager` 的形状留 `#children`，`close()` 逐条
+收，`main.ts` 的 `shutdown()` 里紧挨着 `await mcp.close()` 等它 —— 关停要么等到子进程真死（那个等待的
+绝对上界见上一条），要么就别说自己关停完了。
 
 **`maxCostUsd` 是 ACP 花费唯一的闸。** agent 烧的是它自己那份 provider 凭据，`usage_ledger`、
 `quota.*` 与 `quota.perTurn.maxCostUsd` 一个都看不见它；判据是 `usage_update` 的 `cost.amount`
@@ -539,6 +553,11 @@ kind 就是往 [10 §2](./10-logging-and-observability.md) 那张被双向焊住
 
 agent 反过来调我们的七个 method。**能力申报与这七个处理器必须落在同一个提交里**（§3.5.1 那段），
 先申报后实现的中间态里，每一次 `fs/read_text_file` 都是一次挂死。
+
+**这是一条排期硬约束，不是「最好一起做」。** 两个方向的代价不对称：先申报后实现，agent 每发一次
+请求就挂死一次，而它此刻正握着一个写了一半的文件；反过来（七个处理器都写好了但先不申报），agent
+退回自己碰磁盘，最坏是白写几天。排期就照这个方向定 —— 拆任务时这两件事不许分进两个提交，哪怕它们
+看起来是互不相干的两块代码。
 
 **边界是一个新建的 `PathJail`，root = `realpathSync(dir)`，而同一个字面量也是 `session/new` 的
 `cwd` 与子进程的 cwd。** 三处必须是同一个字面量：`resolveHarnessDir` 只做 `resolve()`，路径中间有

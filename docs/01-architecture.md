@@ -166,38 +166,51 @@ LuoLiCore/
 │   │   ├── context/engine.ts       ★ ContextEngine：openTurn / commitTurn / materialize / prune
 │   │   ├── turn/                   concurrency.ts · keyed-mutex.ts · registry.ts
 │   │   ├── agent/                  manager · runtime · subagent · harness · ask-arbiter ·
-│   │   │                           definitions · fallback-model · step-observers
+│   │   │                           definitions · fallback-model · step-observers · result-refs
+│   │   ├── acp/                    ACP 客户端（规格见 docs/05 §3.5）：schema · errors · process ·
+│   │   │                           manager · session · fs · terminals · permission · runs
+│   │   │                           —— 切法见树下第二条注
 │   │   ├── prompt/                 assembler.ts · documents.ts
-│   │   ├── provider/               catalog · model-catalog · store（密钥加密）· alias-settings
+│   │   ├── provider/               catalog · model-catalog · store（密钥加密）· alias-settings · health
 │   │   ├── tools/                  registry.ts（注册 · 权限过滤 · 执行包装）· policy.ts（审批档位）
-│   │   │                           builtins.ts（33 个内建工具）· files.ts · web.ts · schedule.ts
-│   │   │                           jail.ts（PathJail）· cite.ts
-│   │   ├── sandbox/index.ts        none · docker
+│   │   │                           builtins.ts（34 个内建工具）· files.ts · web.ts · schedule.ts
+│   │   │                           jail.ts（PathJail）· cite.ts · containers.ts（容器管理工具）
+│   │   │                           authoring.ts · custom.ts（自我扩展 M12）
+│   │   │                           catalog-meta.ts（目录折叠与 `search_tools`）
+│   │   ├── sandbox/                index.ts（none · docker）· containers.ts（持久容器）·
+│   │   │                           exec-stream.ts（`collectProcess` 的字节上界与就地 kill）
 │   │   ├── approval/rules.ts       审批规则匹配（`approvals.ts` 是 broker，在 src 根）
+│   │   ├── interaction/prompts.ts  阻塞式人机通道（PendingPrompts）
 │   │   ├── memory/store.ts         MemoryStore
-│   │   ├── skills/loader.ts        SKILL.md 解析与渐进式披露
+│   │   ├── media/                  normalize.ts（图片归一）· web-assets.ts（网页取回的资产）
+│   │   ├── skills/                 loader.ts（SKILL.md 解析与渐进式披露）· package.ts（装 skill 包）
 │   │   ├── plugins/manager.ts      Plugin 加载器 · 钩子分发
-│   │   ├── mcp/                    manager.ts · schema.ts
+│   │   ├── mcp/                    manager.ts · schema.ts · oauth.ts · persist.ts
 │   │   ├── schedule/               create.ts（建任务的唯一校验）· runner.ts
-│   │   ├── ledger/                 usage.ts 记账 · quota.ts QuotaGuard
+│   │   ├── ledger/                 usage.ts 记账 · quota.ts QuotaGuard · repair.ts（一次性重算）
 │   │   ├── log/sink.ts             LogSink（JSONL）· trace/span · 脱敏
 │   │   ├── net/outbound.ts         全仓库唯一一条出网路径（SSRF 防护）
-│   │   ├── config/                 schema.ts（zod）· index.ts（三层合并）· descriptions · wakeword
+│   │   ├── config/                 schema.ts（zod）· index.ts（三层合并）· descriptions ·
+│   │   │                           wakeword · redact.ts（脱敏口径，只有这一份）
 │   │   └── *.ts                    access · approvals · alerts · events · maintenance ·
 │   │                               scheduler · secrets
 │   ├── db/
 │   │   ├── migrations/             手写 SQL，`NNNN_*.sql` 按文件名顺序执行（**提交后不可修改**）
 │   │   └── src/                    database.ts（连接 · PRAGMA · 迁移执行器）
 │   │                               archive · context · config · principals · schedule · operations
+│   │                               custom-tools · mcp-auth · sandbox
 │   │                               —— 强制 chat 作用域的 Repository，全部手写 SQL
+│   │                               instance-lock.ts —— 不是仓储，是进程级互斥（见 §3.1）
 │   ├── telegram/src/               bot.ts（grammY · transformer 限流 · 入口按 chat 串行）
 │   │                               polling.ts（并发有界的 long polling 驱动）
 │   │                               trigger.ts · media.ts · reply.ts · tools.ts
+│   │                               prompts.ts（人机通道的 Telegram 侧）· acp-card.ts（ACP 进度卡片）
 │   │                               output.ts · stream-output.ts（流式 · 分片 · MarkdownV2 降级）
-│   ├── server/src/                 app.ts（Hono · session · CSRF · 全部 105 条 /api 路由）
+│   ├── server/src/                 app.ts（Hono · session · CSRF · 全部 `/api` 路由，当前 121 条）
 │   │                               events.ts（SSE `/api/events`）
 │   ├── webui/src/                  Vite + Vue 3（构建产物由 server 托管）
-│   │   ├── views/                  ConsoleView.vue · LoginView.vue
+│   │   ├── views/                  ConsoleView.vue · ExtensionsPage.vue · TasksPage.vue · LoginView.vue
+│   │   ├── components/             extensions/ · tasks/（从 ConsoleView 抽出去的纯呈现子组件）
 │   │   ├── ui/                     自建组件原语（无 UI 框架）+ SchemaForm 自动生成配置表单
 │   │   ├── api/client.ts           router/index.ts   styles.css
 │   ├── plugin-sdk/src/index.ts     Plugin 作者用的类型入口
@@ -222,9 +235,23 @@ LuoLiCore/
     └── sandbox.Dockerfile          沙箱镜像（python + 常用 CLI，无网络）
 ```
 
-> 这棵树画的是**现状**，不是目标结构。两处正在改的：`server/src/app.ts` 一个文件装着全部 105 条
+> 这棵树画的是**现状**，不是目标结构。两处正在改的：`server/src/app.ts` 一个文件装着全部 `/api`
 > 路由与大量裸 SQL（`docs/00 §2.1` 的 `D-01` / `D-04`），`webui/src/views/ConsoleView.vue`
-> 单文件 2882 行（`D-02`）。它们**还没有**被拆成 `routes/` 与页面组件 —— 别照着想象中的结构找文件。
+> 仍是全仓最长的单文件（`D-02`；扩展页与任务页已经抽出去了，剩下的部分还没拆成页面组件）。
+> **行数与条数别在这里写死** —— 现值记在 `docs/00 §2.1` 那两行的实测列里，两处各写一份必然漂。
+
+> `acp/` 那九个文件的切法有讲究，不是按「一个类一个文件」随手分的：
+> - **`schema.ts` 不 import 任何 SDK 运行时**（只有 zod）。`config/schema.ts` 要 import 它，而后者又被
+>   `scripts/config-schema.ts` 与 WebUI 吃进去 —— 那条链上多拖一个 SDK 运行时，`pnpm config:schema`
+>   与前端构建就都得为一台可能根本没启用的外部 agent 付账。
+> - **`errors.ts` 一处定义、三处共用**（manager / session / 工具壳）。二十多个错误码连着面向模型的
+>   hint 文案，散成三份会慢慢漂，而 [05 §3.5](./05-tools-and-permissions.md) 是它们唯一的文档来源
+>   —— 文案有三份的时候「先改文档」就再也验不动了。
+> - **`process.ts` 同样不 import SDK**：spawn、argv、env 策略、Node↔Web stream 桥、stderr 环形缓冲与
+>   半行缓冲的上界、`stdin.end → SIGTERM → 5s → SIGKILL` 这条梯子都是纯逻辑，量一次 argv 的用例不该
+>   为此把整个 SDK 拖进来。
+> - 反向能力那三块各占一个文件（`fs.ts` / `terminals.ts` / `permission.ts`），因为它们当初就是三个
+>   并行的工作面 —— 接口契约先钉住、三块各改各的文件、谁也不动对方的。
 
 ---
 
