@@ -1,6 +1,7 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { code, source } from './support/source.js';
 import { CONFIG_DESCRIPTIONS, CONFIG_ENUM_NOTES, HOT_RELOADABLE_CONFIG_KEYS, KNOWN_UNIMPLEMENTED_CONFIG_KEYS, PER_CHAT_NON_SCHEMA_KEYS, PER_CHAT_OVERRIDE_ALLOWLIST, configJsonSchema, configSchemaLeafPaths, configSchema, loadConfig } from '@luoli/core';
 
 function sourceFiles(directory: string): string[] {
@@ -69,10 +70,10 @@ describe('config schema', () => {
 
   it('explicitly classifies every known unimplemented configuration leaf', () => {
     expect(new Set(KNOWN_UNIMPLEMENTED_CONFIG_KEYS).size).toBe(KNOWN_UNIMPLEMENTED_CONFIG_KEYS.length);
-    const schema = readFileSync('packages/core/src/config/schema.ts', 'utf8');
+    const schema = source('packages/core/src/config/schema.ts');
     const docLines = readFileSync('docs/11-config-reference.md', 'utf8').split('\n');
     for (const key of KNOWN_UNIMPLEMENTED_CONFIG_KEYS) {
-      expect(schema, key).toContain(`'${key}'`);
+      expect(schema, key).toContain(code(`'${key}'`));
       // 光"文档里出现过这个键"是空断言——doc 11 是配置手册，每个键本来就都在。必须真的标了 🚧。
       expect(docLines.filter((line) => line.includes(`\`${key}\``) && line.includes('🚧')), `${key} 需要在 docs/11 标注 🚧`).not.toHaveLength(0);
     }

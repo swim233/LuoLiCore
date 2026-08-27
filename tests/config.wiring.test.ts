@@ -111,11 +111,11 @@ describe('prompt.includeToolCatalog / prompt.runtimeBlock.*', () => {
       tools: ['read_file'], agents: [], contextMessages: 3, contextTokens: 100, maxMessages: 200, maxTokens: 32_000,
       quota: '本轮已用 $0.0100', workspace: '/w', sandbox: 'docker' };
     const full = runtimeBlock(input);
-    expect(full).toContain('上下文水位：');
+    expect(full).toContain('上下文容量：');
     expect(full).toContain('额度：');
     expect(full).toContain('工作目录：');
     const bare = runtimeBlock({ ...input, show: { quota: false, contextWatermark: false, workspace: false } });
-    for (const line of ['上下文水位：', '额度：', '工作目录：']) expect(bare).not.toContain(line);
+    for (const line of ['上下文容量：', '额度：', '工作目录：']) expect(bare).not.toContain(line);
     // 关掉的行整行消失，而不是留一个空值。
     expect(bare.split('\n').every((line) => line.trim() !== '' && !line.endsWith('：'))).toBe(true);
     // 给不出额度时那一行本来就不该有（WebUI 的提示词预览没有本轮预留）。

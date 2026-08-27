@@ -3,6 +3,7 @@ import { rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { code, codeIndex, source } from './support/source.js';
 
 /**
  * SIGTERM 退出路径（docs/24 §3 点名的两处测试空白之一）。两条腿，覆盖面**不一样**，
@@ -114,18 +115,17 @@ describe('SIGTERM 退出路径', () => {
     rmSync(dataDir, { recursive: true, force: true });
   }, 90_000);
 
-  it('关停路径仍然中断排不空的在途轮次', async () => {
-    const { readFileSync } = await import('node:fs');
-    const source = readFileSync(resolve('apps/bot/src/main.ts'), 'utf8');
+  it('关停路径仍然中断排不空的在途轮次', () => {
+    const main = source('apps/bot/src/main.ts');
     // `drain()` 只是等。宽限期内没排空的轮次必须被主动 abort，否则要么把进程拖到 systemd 的
     // SIGKILL，要么在退出后留下 running 行等下次 recoverAfterCrash 认领（docs/24 · R-OPS-01）。
-    expect(source).toContain("turnRegistry.abortAll('shutdown')");
+    expect(main).toContain(code("turnRegistry.abortAll('shutdown')"));
     // `drain` 的返回值必须被用上：`await turnRegistry.drain(graceMs)` 丢弃返回值正是那次回归的形态。
-    expect(source).toMatch(/if\s*\(!\(await turnRegistry\.drain\(/);
+    expect(main).toMatch(/if\s*\(!\(await turnRegistry\.drain\(/);
     // 收尾三件也一并钉住（同一次回归里被换掉的）：带 checkpoint 的关库、事件名、skills 的 await。
-    expect(source).toContain('closeDatabase(db)');
-    expect(source).toContain("kind: 'system.stop'");
-    expect(source).toContain('await skills.close()');
+    expect(main).toContain(code('closeDatabase(db)'));
+    expect(main).toContain(code("kind: 'system.stop'"));
+    expect(main).toContain(code('await skills.close()'));
   });
 
   /**
@@ -137,21 +137,22 @@ describe('SIGTERM 退出路径', () => {
    * 源码级断言而不是真实进程：那个窗口只有 1 秒上下，靠 race 去打它的测试会是本仓最不稳的
    * 一条。装配顺序反过来是**静态**的事实，钉住它就够了。
    */
-  it('关停 / 重启 / 崩溃处理器都装在 HTTP 开始监听之前', async () => {
-    const { readFileSync } = await import('node:fs');
-    const source = readFileSync(resolve('apps/bot/src/main.ts'), 'utf8');
-    const listen = source.indexOf('http = config.webui.enabled ? serve(');
+  it('关停 / 重启 / 崩溃处理器都装在 HTTP 开始监听之前', () => {
+    const main = source('apps/bot/src/main.ts');
+    const listen = codeIndex(main, 'http = config.webui.enabled ? serve(');
     expect(listen, '找不到 HTTP 监听那一行 —— 这条断言的锚点没了').toBeGreaterThan(0);
     for (const marker of ['const restart = async (reason: string)', 'const shutdown = async (signal: string)',
       "process.once('SIGTERM'", "process.once('SIGINT'", "process.on('uncaughtException'", "process.on('unhandledRejection'"]) {
-      const at = source.indexOf(marker);
+      const at = codeIndex(main, marker);
       expect(at, `找不到 ${marker}`).toBeGreaterThan(0);
       expect(at, `${marker} 排在 serve() 之后 —— 启动窗口里它不可用`).toBeLessThan(listen);
     }
     // `http` 必须是 `let`：改回 `const` 只是把 TDZ 从 `restart` 挪到 `http` 上。
-    expect(source).toMatch(/^let http: /m);
+    // 压平之后没有行首可锚，所以正反各断一次 —— 比原先那条 `/^let http: /m` 还紧一格。
+    expect(main).toContain(code('let http:'));
+    expect(main).not.toContain(code('const http:'));
     // webhook 模式那个 throw 也要在监听之前 —— 否则 `/api/health` 会先回一整个窗口的 ok。
-    expect(source.indexOf("is not implemented; only polling is supported")).toBeLessThan(listen);
+    expect(codeIndex(main, 'is not implemented; only polling is supported')).toBeLessThan(listen);
   });
 
   /**
@@ -164,18 +165,17 @@ describe('SIGTERM 退出路径', () => {
    * error 了。降级本身（`span().end()` 的 level 覆盖）由 `log.span.test.ts` 钉住，这里钉的是**接线**：
    * 判据要真的从装配方传进来，否则 transformer 永远不知道「我们正在关停」。
    */
-  it('关停判据从 main.ts 传进 Telegram transformer，且只对 abort 生效', async () => {
-    const { readFileSync } = await import('node:fs');
-    const main = readFileSync(resolve('apps/bot/src/main.ts'), 'utf8');
-    expect(main, 'main.ts 没把关停判据传给 createTelegramBot').toContain('stopping: () => shuttingDown');
-    const bot = readFileSync(resolve('packages/telegram/src/bot.ts'), 'utf8');
+  it('关停判据从 main.ts 传进 Telegram transformer，且只对 abort 生效', () => {
+    const main = source('apps/bot/src/main.ts');
+    expect(main, 'main.ts 没把关停判据传给 createTelegramBot').toContain(code('stopping: () => shuttingDown'));
+    const bot = source('packages/telegram/src/bot.ts');
     // transformer 那一段：判据是 `stopping() && isAbortLike(error)` —— 关停期间**真的**出 API 故障
     // （发最后一条消息被拒）照旧记 error，这是收窄不是放行。
-    expect(bot).toContain("dependencies.stopping?.() === true && isAbortLike(error)");
-    expect(bot).toContain("reason: 'shutdown'");
-    expect(bot).toMatch(/\{ level: 'info', summary: `\$\{method\} aborted during shutdown` \}/);
+    expect(bot).toContain(code('dependencies.stopping?.() === true && isAbortLike(error)'));
+    expect(bot).toContain(code("reason: 'shutdown'"));
+    expect(bot).toContain(code("{ level: 'info', summary: `${method} aborted during shutdown` }"));
     // `stopping` 必须是可选的：缺它时行为与从前一致（测试与不装 Telegram 的部署）。
-    expect(bot).toMatch(/stopping\?: \(\) => boolean;/);
+    expect(bot).toContain(code('stopping?: () => boolean;'));
   });
 
   /**

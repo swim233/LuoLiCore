@@ -1,7 +1,8 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Bot } from 'grammy';
 import { describe, expect, it } from 'vitest';
+import { code, codeIndex, source } from './support/source.js';
 import { ArchiveRepository, ScheduleRepository, closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
 import { AgentManager, AgentResultStore, FileTools, KNOWN_UNIMPLEMENTED_CONFIG_KEYS, MaintenanceService, PathJail, TOOL_POLICY, ToolRegistry, UsageLedger, configSchema, mergeAgentDefinitions, registerBuiltins, resolveHarnessDir, runHarness, scanAgentFiles } from '@luoli/core';
 import { TelegramOutput } from '@luoli/telegram';
@@ -127,13 +128,13 @@ describe('Q10 · 回复一律引用触发消息，且只有第一条分片带', 
     // 这条路只有「onTurn 交回字符串」时才走 —— 例如「尚未配置可用模型」。要把它跑起来得装配
     // 整个 bot 依赖树，所以这里断言源码：`docs/25 §6` 的同一种取舍（测不到的空话不如源码断言）。
     // 它此前不带引用，于是那句提示在群里飘着，没人知道它在回谁。
-    const source = readFileSync(resolve('packages/telegram/src/bot.ts'), 'utf8');
+    const bot = source(resolve('packages/telegram/src/bot.ts'));
     // 锚点跟着实现走：这条路现在用 `segmentTelegramText`（分片 + 逐段归档，docs/28 · L-TG-03），
-    // 而且整批分段包在 `deliveryOrder.run` 里（docs/28 · L-TG-02）—— 找不到锚点时 `indexOf` 给 -1、
+    // 而且整批分段包在 `deliveryOrder.run` 里（docs/28 · L-TG-02）—— 找不到锚点时 `codeIndex` 给 -1、
     // `slice(-1)` 只剩最后一个字符，断言会红而不是静默失效。
-    const anchor = source.indexOf('const segmented = segmentTelegramText(outgoing');
+    const anchor = codeIndex(bot, 'const segmented = segmentTelegramText(');
     expect(anchor).toBeGreaterThan(0);
-    expect(source.slice(anchor, anchor + 600)).toContain('reply_parameters: { message_id: message.message_id }');
+    expect(bot.slice(anchor, anchor + 600)).toContain(code('reply_parameters: { message_id: message.message_id }'));
   });
 });
 

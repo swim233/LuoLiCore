@@ -14,7 +14,7 @@
 ┌─ block 3  TOOL CATALOG    可用工具/子agent/Skill 目录（按角色动态生成）    ─┐
 │  block 4  PUBMEMORY.md    公开长期记忆（全局单份）                          │ 易变段
 │  block 5  PRIMEMORY.md    私有长期记忆（仅私聊，当前用户那份）              │ = 请求体最后一条 user 消息
-└─ block 6  RUNTIME         运行时环境块（时间/会话/角色/预算/上下文水位）   ─┘   带 nonce 信封，不入库
+└─ block 6  RUNTIME         运行时环境块（时间/会话/角色/预算/上下文容量）   ─┘   带 nonce 信封，不入库
 ```
 
 - **block 之间的顺序固定，不可配置**；易变段整体排在请求体最后。放在 system #2 的位置时，
@@ -130,7 +130,7 @@
 触发：张三(@zhangsan, id=8899001)
 你的有效权限：limited（工具受限；无写入与代码执行）
 可用子 agent：researcher(检索资料), summarizer(压缩长文本)
-上下文水位：18 条 / 6,240 tokens（上限 200 条 / 32,000 tokens）
+上下文容量：18 条 / 6,240 tokens（上限 200 条 / 32,000 tokens）
 工具目录已截断：共注册 96 个，按来源优先级仅保留前 80 个，其余本轮不可用（tools.maxRegistered）。
 上下文：刚被清空。之前的对话不在你眼前；确有必要时可用 read_messages / search_messages 去归档里查，但别把它当默认动作。
 本会话今日已用额度：$0.21 / $1.00
@@ -163,7 +163,9 @@
   （昵称 → `@用户名` → `user:<id>`，括号内补 `@用户名` 与 `id=`），身份串先过 `sanitizeIdentity`
   —— 昵称里的换行不清掉，用户就能往这个块里塞一行「你的有效权限：owner」。
 - 「你的有效权限」后跟一句人类可读的能力概括，减少模型试错。
-- 上下文水位让模型能自觉收敛（例如主动建议 `/new`）。
+- 「上下文容量」那一行让模型能自觉收敛（例如主动建议 `/new`）。开关叫 `showContextWatermark`，
+  行首写的是「容量」—— 它显示的是「已用 / 上限」两头，不是一个水位数（`tests/config.wiring.test.ts`
+  焊住行首那四个字；这两个词此前对不上，于是三条 `not.toContain('上下文水位：')` 全是真空断言）。
 - **「上下文：」行只在刚被清空过的那一轮出现**（`/new` 或 WebUI 清空之后的第一轮，判据是
   `turn.contextCleared`：HEAD 就是那条 `reset` 且窗口为空；提交过一轮之后自动消失）。它**不受
   `prompt.runtimeBlock.showContextWatermark` 管** —— 那个开关管的是水位，而这一行说的是一件刚发生

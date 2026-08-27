@@ -1,5 +1,6 @@
-import { readFileSync, rmSync } from 'node:fs';
+import { rmSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { code, codeIndex, source } from './support/source.js';
 import { z } from 'zod';
 import type { LanguageModel } from 'ai';
 import { ArchiveRepository, OperationsRepository, closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
@@ -201,14 +202,17 @@ describe('trace 是一棵真的树', () => {
    */
   it('两个开轮入口都把 turn.start 的 spanId 设成 trace 根', () => {
     for (const path of ['packages/telegram/src/bot.ts', 'packages/core/src/schedule/runner.ts']) {
-      const source = readFileSync(path, 'utf8');
-      const line = source.split('\n').find((text) => text.includes("kind: 'turn.start'"));
-      expect(line, `${path} 里找不到 turn.start`).toBeTruthy();
-      expect(line, `${path} 的 turn.start 没有把 spanId 设成 turn.rootSpanId`).toContain('spanId: turn.rootSpanId');
-      expect(line, `${path} 的 turn.start 没带 waitedMs`).toContain('waitedMs');
+      const text = source(path);
+      const at = codeIndex(text, "kind: 'turn.start'");
+      expect(at, `${path} 里找不到 turn.start`).toBeGreaterThan(0);
+      // 取一个窗口而不是「同一行」：那次 `.event({...})` 本来就跨着七八行，「同一行」这个判据
+      // 只在 `kind` 与 `spanId` 恰好挤在一起时成立 —— 换个 printWidth 就不成立了。
+      const call = text.slice(at, at + 500);
+      expect(call, `${path} 的 turn.start 没有把 spanId 设成 turn.rootSpanId`).toContain(code('spanId: turn.rootSpanId'));
+      expect(call, `${path} 的 turn.start 没带 waitedMs`).toContain(code('waitedMs'));
       // `turn.queued` 只在真的排过队时才落 —— 无条件记等于每轮多一行 info（docs/10 §2）。
-      expect(source).toContain("kind: 'turn.queued'");
-      expect(source).toContain('.available(');
+      expect(text).toContain(code("kind: 'turn.queued'"));
+      expect(text).toContain(code('.available('));
     }
   });
 });

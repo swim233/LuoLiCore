@@ -145,8 +145,18 @@ export type UtilityGroup = keyof typeof UTILITIES;
 const read = (path: string): string => readFileSync(path, "utf8");
 const lineOf = (text: string, offset: number): number =>
   text.slice(0, offset).split("\n").length;
+/**
+ * 条目 / 元素的稳定 id。取 `(file, raw, nth)` 而不是 `(file, offset)` 是有意的：offset 每次保存
+ * 都会变，而面板的 `store.overrides[id]` 要跨一次保存活下来。
+ *
+ * **12 位十六进制，不是 6 位。** 6 位是 24 bit，而这个仓库现在抽出 2700 条文案 —— 生日问题下
+ * 撞号概率约 **20%**，也就是「迟早会撞」而不是「几乎不会」。而它真撞过：`sandbox.bypassRoles`
+ * 与 `approval.skipForOwner` 两条配置说明在 `aa826d` 上重合，`applyChanges` 那个
+ * `new Map([id, entry])` 于是把前者静默盖掉，**在面板里改前一句会把后一句的源码区间覆盖掉**。
+ * 12 位是 48 bit，同样规模下撞号概率约 1.3e-8。撞号本身仍由下面 `duplicateIds()` 兜底。
+ */
 const id6 = (...parts: string[]): string =>
-  createHash("sha1").update(parts.join(" ")).digest("hex").slice(0, 6);
+  createHash("sha1").update(parts.join(" ")).digest("hex").slice(0, 12);
 /** 展示用：内部换行与缩进压成单空格，否则一条模板正文会占五行。 */
 const flat = (text: string): string => text.replace(/\s+/g, " ").trim();
 
@@ -873,6 +883,16 @@ export function extractFile(file: string): Entry[] {
   return dropNested(sink.entries);
 }
 
+/** 出现不止一次的 id。空集是常态 —— 非空说明 `id6` 的位数不够用了。 */
+export function duplicateIds(entries: Entry[]): Set<string> {
+  const seen = new Set<string>();
+  const twice = new Set<string>();
+  for (const entry of entries)
+    if (seen.has(entry.id)) twice.add(entry.id);
+    else seen.add(entry.id);
+  return twice;
+}
+
 export function extractAll(): Entry[] {
   const sink: Sink = { entries: [], seen: new Map(), withPins: true };
   extractVue(sink, "packages/webui/src/App.vue", "ui-");
@@ -1111,7 +1131,15 @@ export function applyChanges(changes: Change[]): {
   stuck: string[];
   before: Record<string, string>;
 } {
-  const entries = new Map(extractAll().map((entry) => [entry.id, entry]));
+  const all = extractAll();
+  const entries = new Map(all.map((entry) => [entry.id, entry]));
+  /**
+   * 撞号的 id 一律**拒绝**，不猜。`new Map` 撞号时留下的是后写入的那一条，而两条 entry 的
+   * `offset`/`end` 指着源码里完全不同的两段 —— 按错的那段 splice 进去，人改的是 A、被改写的是 B，
+   * 而 A 原文还在。这正是「摘除比伪造安全」要挡的形状（docs/16 §5）：宁可这次存不上。
+   * 12 位 hash 之后这里实际上不该再命中，留着是因为静默写错比拒绝贵得多。
+   */
+  const collided = duplicateIds(all);
   const byFile = new Map<string, Change[]>();
   for (const change of changes)
     byFile.set(change.file, [...(byFile.get(change.file) ?? []), change]);
@@ -1154,6 +1182,13 @@ export function applyChanges(changes: Change[]): {
     };
     for (const change of list) {
       if (change.kind === "text") {
+        if (collided.has(change.id)) {
+          refused.push(
+            `${change.id}：这个 id 被两条文案共用，改哪一条都可能写到另一条上，不改`,
+          );
+          stuck.push(change.id);
+          continue;
+        }
         const entry = entries.get(change.id);
         if (!entry || entry.file !== file) {
           refused.push(`${change.id}：源码里找不着这一条（重新扫描一次）`);
