@@ -592,19 +592,20 @@ async function inspectCommit(id: unknown): Promise<void> { if (!selectedChat.val
  * （实测清空后模型第一步就把 20 条历史捞了回来）。判据取自服务端刚写下的那条 commit 的
  * `meta.advancedClaims`（`context.recallBarrier` 的落地痕迹），不在前端另猜一次配置。
  */
-async function resetContext(): Promise<void> {
+function resetContext(): void {
   const chat = selectedChat.value;
   if (!chat) return;
-  if (!confirm(`清空「${chatIdentity(chat).name}」的上下文窗口？下一轮起模型看不到之前的对话；消息与提交历史都还在，可以用「回滚到此」走回来。`)) return;
-  try {
-    const commit = await api<Record<string, unknown>>(`/api/chats/${encodeURIComponent(chat.key)}/reset`, { method: 'POST' });
-    let barred = false;
-    try { barred = (JSON.parse(String(commit.meta ?? '{}')) as { advancedClaims?: unknown }).advancedClaims === true; } catch { /* 老 commit 没有 meta */ }
-    pushToast({ severity: 'success', summary: '上下文窗口已清空',
-      detail: `${chatIdentity(chat).name} · ${barred ? '归档检索也挡在这一刻之后了' : '下一轮从零开始；模型仍可用 read_messages 翻更早的消息（context.recallBarrier 可关掉这条路）'}` });
-    await inspectChat(chat);
-    await load();
-  } catch (error) { toastError('清空上下文窗口失败', error); }
+  askConfirm(`清空「${chatIdentity(chat).name}」的上下文窗口？`, '下一轮起模型看不到之前的对话；消息与提交历史都还在，可以用「回滚到此」走回来。', async () => {
+    try {
+      const commit = await api<Record<string, unknown>>(`/api/chats/${encodeURIComponent(chat.key)}/reset`, { method: 'POST' });
+      let barred = false;
+      try { barred = (JSON.parse(String(commit.meta ?? '{}')) as { advancedClaims?: unknown }).advancedClaims === true; } catch { /* 老 commit 没有 meta */ }
+      pushToast({ severity: 'success', summary: '上下文窗口已清空',
+        detail: `${chatIdentity(chat).name} · ${barred ? '归档检索也挡在这一刻之后了' : '下一轮从零开始；模型仍可用 read_messages 翻更早的消息（context.recallBarrier 可关掉这条路）'}` });
+      await inspectChat(chat);
+      await load();
+    } catch (error) { toastError('清空上下文窗口失败', error); }
+  });
 }
 /** 等同 /undo：done 指针退回父 commit。被跳过的 commit 仍留在时间线上，可以再「回滚到此」走回去。 */
 async function undoContext(): Promise<void> {
@@ -735,10 +736,11 @@ async function saveAlias(): Promise<void> {
     await load();
   } catch (error) { toastError('保存别名失败', error); }
 }
-async function removeAlias(alias: string): Promise<void> {
-  if (!confirm(`删除别名 ${alias}？引用它的地方会退回 main。`)) return;
-  try { await api(`/api/aliases/${encodeURIComponent(alias)}`, { method: 'DELETE' }); pushToast({ severity: 'success', summary: `别名 ${alias} 已删除` }); await load(); }
-  catch (error) { toastError('删除别名失败', error); }
+function removeAlias(alias: string): void {
+  askConfirm(`删除别名 ${alias}？`, '引用它的地方会退回 main。', async () => {
+    try { await api(`/api/aliases/${encodeURIComponent(alias)}`, { method: 'DELETE' }); pushToast({ severity: 'success', summary: `别名 ${alias} 已删除` }); await load(); }
+    catch (error) { toastError('删除别名失败', error); }
+  });
 }
 function messageMeta(message: Record<string, unknown>): Record<string, unknown> { return message.meta && typeof message.meta === 'object' ? message.meta as Record<string, unknown> : {}; }
 
@@ -776,16 +778,17 @@ async function searchArchive(): Promise<void> {
   finally { searching.value = false; }
 }
 function clearSearch(): void { searchHits.value = null; searchTerm.value = ''; }
-async function softDeleteMessage(id: number, label: string): Promise<void> {
-  if (!confirm(`软删除${label}？归档正文会从检索与对话列表隐藏；上下文提交、turn 与附件不会被删除。`)) return;
-  try {
-    const result = await api<{ changes: number }>(`/api/messages/${id}`, { method: 'DELETE' });
-    if (searchHits.value) searchHits.value = searchHits.value.filter((entry) => entry.id !== id);
-    await loadConversations();
-    pushToast(result.changes
-      ? { severity: 'success', summary: '归档消息已软删除', detail: `message #${id}` }
-      : { severity: 'warn', summary: '消息已经被删除', detail: `message #${id}` });
-  } catch (error) { toastError('软删除失败', error); }
+function softDeleteMessage(id: number, label: string): void {
+  askConfirm(`软删除${label}？`, '归档正文会从检索与对话列表隐藏；上下文提交、turn 与附件不会被删除。', async () => {
+    try {
+      const result = await api<{ changes: number }>(`/api/messages/${id}`, { method: 'DELETE' });
+      if (searchHits.value) searchHits.value = searchHits.value.filter((entry) => entry.id !== id);
+      await loadConversations();
+      pushToast(result.changes
+        ? { severity: 'success', summary: '归档消息已软删除', detail: `message #${id}` }
+        : { severity: 'warn', summary: '消息已经被删除', detail: `message #${id}` });
+    } catch (error) { toastError('软删除失败', error); }
+  });
 }
 
 // ── 对话详情：这一轮实际发给上游的 JSON ──────────────────────────────────────
@@ -1071,11 +1074,13 @@ async function removeAgent(name: string): Promise<void> {
   // 那个 .md。假装删掉、刷新后它又回来，比直接说清楚糟得多。
   if (current?.source === 'file') { pushToast({ severity: 'warn', summary: `${name} 来自文件定义`, detail: '删除 agents/ 目录下对应的 .md 文件，或在这里编辑它建一份覆盖' }); return; }
   const revert = current?.source === 'file-overridden';
-  if (!confirm(revert
-    ? `删除 ${name} 的配置覆盖？删掉之后回到 agents/${name}.md 里那份定义。`
-    : `删除子 Agent ${name}？正在引用它的 spawn_agent 调用会直接报「未知子 agent」。`)) return;
-  try { await writeAgents(configAgents().filter((entry) => entry.name !== name), revert ? `${name} 的覆盖已删除` : `Agent ${name} 已删除`, revert ? '回到文件里那份定义' : '写入 agent.agents 覆盖层'); agentDialog.value = false; }
-  catch (error) { toastError('删除 Agent 失败', error); }
+  askConfirm(
+    revert ? `删除 ${name} 的配置覆盖？` : `删除子 Agent ${name}？`,
+    revert ? `删掉之后回到 agents/${name}.md 里那份定义。` : '正在引用它的 spawn_agent 调用会直接报「未知子 agent」。',
+    async () => {
+      try { await writeAgents(configAgents().filter((entry) => entry.name !== name), revert ? `${name} 的覆盖已删除` : `Agent ${name} 已删除`, revert ? '回到文件里那份定义' : '写入 agent.agents 覆盖层'); agentDialog.value = false; }
+      catch (error) { toastError('删除 Agent 失败', error); }
+    });
 }
 type AgentDryRunEvent =
   | { type: 'step'; step: number; finishReason: string; text: string; toolCalls: unknown[]; toolResults: unknown[] }
@@ -1256,16 +1261,17 @@ async function saveQuota(): Promise<void> {
   } catch (error) { toastError('保存配额失败', error); }
   finally { quotaSaving.value = false; }
 }
-async function resetQuota(row?: QuotaCounter): Promise<void> {
+function resetQuota(row?: QuotaCounter): void {
   const target = row ? `${counterTitle(row)} · ${row.bucket}` : '全部计数器';
-  if (!confirm(`重置${target}？已经花掉的钱不会退回，只是这个窗口的计数从零开始 —— 之前被挡住的人立刻又能发起对话。`)) return;
-  quotaResetting.value = row ? counterKey(row) : 'all';
-  try {
-    const result = await api<{ changes: number }>('/api/quota/reset', { method: 'POST', body: row ? JSON.stringify({ scope: row.scope, subject: row.subject, window: row.window, bucket: row.bucket }) : '{}' });
-    pushToast({ severity: 'success', summary: `已重置 ${result.changes} 行计数`, detail: `${target} · 已写审计日志` });
-    await loadQuota();
-  } catch (error) { toastError('重置计数器失败', error); }
-  finally { quotaResetting.value = ''; }
+  askConfirm(`重置${target}？`, '已经花掉的钱不会退回，只是这个窗口的计数从零开始 —— 之前被挡住的人立刻又能发起对话。', async () => {
+    quotaResetting.value = row ? counterKey(row) : 'all';
+    try {
+      const result = await api<{ changes: number }>('/api/quota/reset', { method: 'POST', body: row ? JSON.stringify({ scope: row.scope, subject: row.subject, window: row.window, bucket: row.bucket }) : '{}' });
+      pushToast({ severity: 'success', summary: `已重置 ${result.changes} 行计数`, detail: `${target} · 已写审计日志` });
+      await loadQuota();
+    } catch (error) { toastError('重置计数器失败', error); }
+    finally { quotaResetting.value = ''; }
+  });
 }
 
 // ── 沙箱：mode 决定 exec 类工具跑在哪儿，配错了要么全落空要么直接跑在宿主上 ──────────────
@@ -1308,15 +1314,16 @@ async function testApprovalRule(): Promise<void> {
  * 「探测可用性」同一个口径，所以按钮旁边的说明要写清楚这一点。
  * 只 pull 不 build（build 是部署动作，不是控制台按钮）。
  */
-async function pullSandboxImage(): Promise<void> {
-  if (!confirm('拉取沙箱镜像？镜像名取自**已保存**的 sandbox.image；几百 MB 的镜像可能要几分钟，这期间这个请求一直挂着。')) return;
-  pullingImage.value = true;
-  try {
-    const result = await api<{ image: string }>('/api/sandbox/image', { method: 'POST', body: '{}' });
-    pushToast({ severity: 'success', summary: '镜像已拉取', detail: result.image, life: 8000 });
-    await probeSandbox();
-  } catch (error) { toastError('拉取镜像失败', error); }
-  finally { pullingImage.value = false; }
+function pullSandboxImage(): void {
+  askConfirm('拉取沙箱镜像？', '镜像名取自「已保存」的 sandbox.image；几百 MB 的镜像可能要几分钟，这期间这个请求一直挂着。', async () => {
+    pullingImage.value = true;
+    try {
+      const result = await api<{ image: string }>('/api/sandbox/image', { method: 'POST', body: '{}' });
+      pushToast({ severity: 'success', summary: '镜像已拉取', detail: result.image, life: 8000 });
+      await probeSandbox();
+    } catch (error) { toastError('拉取镜像失败', error); }
+    finally { pullingImage.value = false; }
+  });
 }
 // 这份列表是 `sandbox.mode` 枚举的第二份手抄（不从 config.schema.json 派生，也没有测试焊住），
 // 改 schema 时要一起改 —— 对不上的表现是下拉里选得出一个后端会 400 掉的值。
@@ -1403,19 +1410,20 @@ async function loadContainers(): Promise<void> {
   }
 }
 /** 「重置」的代价要写在确认框里：容器里跑着的进程会一起没（照「立即触发」那条的写法）。 */
-async function resetContainer(row: ContainerRow, wipe: boolean): Promise<void> {
+function resetContainer(row: ContainerRow, wipe: boolean): void {
   const who = row.chatLabel ?? row.chatId;
   const cost = wipe
     ? `\n\n⚠ 同时会把「${who}」工作区里的文件全部挪进 .luoli-trash（不真删，但模型和文件工具都看不到了）。`
     : '\n\n工作区里的文件一个都不动。';
-  if (!confirm(`重置「${who}」的容器？容器里装的东西和正在跑的后台进程会一起没。${cost}`)) return;
-  containerBusy.value = row.chatId;
-  try {
-    await api(`/api/containers/${encodeURIComponent(row.chatId)}${wipe ? '?wipe=1' : ''}`, { method: 'DELETE' });
-    pushToast({ severity: 'success', summary: `已重置「${who}」的容器`, detail: wipe ? '工作区文件已挪进 .luoli-trash' : '工作区文件未改动' });
-    await loadContainers();
-  } catch (error) { toastError('重置容器失败', error); }
-  finally { containerBusy.value = ''; }
+  askConfirm(`重置「${who}」的容器？`, `容器里装的东西和正在跑的后台进程会一起没。${cost}`, async () => {
+    containerBusy.value = row.chatId;
+    try {
+      await api(`/api/containers/${encodeURIComponent(row.chatId)}${wipe ? '?wipe=1' : ''}`, { method: 'DELETE' });
+      pushToast({ severity: 'success', summary: `已重置「${who}」的容器`, detail: wipe ? '工作区文件已挪进 .luoli-trash' : '工作区文件未改动' });
+      await loadContainers();
+    } catch (error) { toastError('重置容器失败', error); }
+    finally { containerBusy.value = ''; }
+  });
 }
 async function keepContainer(row: ContainerRow, patch: { hours?: number; pin?: boolean }): Promise<void> {
   containerBusy.value = row.chatId;
@@ -1534,14 +1542,15 @@ const importFile = ref<HTMLInputElement | null>(null);
  * `[重启进程]`。二次确认里必须写明「没有 supervisor 就不会自己回来」—— 这是一个可能让整个
  * 部署下线的按钮，措辞含糊比不给按钮更糟。
  */
-async function restartProcess(): Promise<void> {
-  if (!confirm('重启进程？在途轮次会被排空或中断。\n\n如果这个部署没有 systemd / docker 这类 supervisor，进程不会自动拉起——你需要手工把它启回来。')) return;
-  restarting.value = true;
-  try {
-    await api('/api/restart', { method: 'POST', body: '{}' });
-    pushToast({ severity: 'warn', summary: '已请求重启', detail: '控制台会断开；由 supervisor 拉起后刷新页面即可。', life: 12_000 });
-  } catch (error) { toastError('重启失败', error); }
-  finally { restarting.value = false; }
+function restartProcess(): void {
+  askConfirm('重启进程？', '在途轮次会被排空或中断。\n\n如果这个部署没有 systemd / docker 这类 supervisor，进程不会自动拉起 —— 你需要手工把它启回来。', async () => {
+    restarting.value = true;
+    try {
+      await api('/api/restart', { method: 'POST', body: '{}' });
+      pushToast({ severity: 'warn', summary: '已请求重启', detail: '控制台会断开；由 supervisor 拉起后刷新页面即可。', life: 12_000 });
+    } catch (error) { toastError('重启失败', error); }
+    finally { restarting.value = false; }
+  });
 }
 /** 导出下载成 JSON 文件。内容由服务端脱敏，前端只负责存盘。 */
 async function exportConfig(): Promise<void> {
@@ -1571,34 +1580,36 @@ async function importConfig(event: Event): Promise<void> {
   catch (error) { toastError('这个文件不是合法 JSON', error); return; }
   const keys = Object.keys(parsed.overrides ?? {});
   if (!keys.length) { pushToast({ severity: 'warn', summary: '文件里没有 overrides', detail: '导出文件的结构是 { overrides: { 点分键: 值 } }' }); return; }
-  if (!confirm(`导入 ${keys.length} 条配置覆盖？\n\n按键覆盖现有值，不会删除文件里没有的那些。校验不过则整批不写。`)) return;
-  try {
-    const result = await api<{ keys: string[]; skipped: string[]; subsumed: string[] }>('/api/config/import', { method: 'POST', body: JSON.stringify(parsed) });
-    await REFRESH_LOADERS.config();
-    pushToast({ severity: 'success', summary: `已导入 ${result.keys.length} 项`,
-      detail: [result.skipped.length ? `${result.skipped.length} 项被环境变量锁定，已跳过：${result.skipped.join('、')}` : '',
-        result.subsumed.length ? `${result.subsumed.length} 条更细的覆盖被整块写入作废：${result.subsumed.join('、')}` : ''].filter(Boolean).join('\n') || '全部生效', life: 12_000 });
-  } catch (error) { toastError('导入失败', error); }
+  askConfirm(`导入 ${keys.length} 条配置覆盖？`, '按键覆盖现有值，不会删除文件里没有的那些。校验不过则整批不写。', async () => {
+    try {
+      const result = await api<{ keys: string[]; skipped: string[]; subsumed: string[] }>('/api/config/import', { method: 'POST', body: JSON.stringify(parsed) });
+      await REFRESH_LOADERS.config();
+      pushToast({ severity: 'success', summary: `已导入 ${result.keys.length} 项`,
+        detail: [result.skipped.length ? `${result.skipped.length} 项被环境变量锁定，已跳过：${result.skipped.join('、')}` : '',
+          result.subsumed.length ? `${result.subsumed.length} 条更细的覆盖被整块写入作废：${result.subsumed.join('、')}` : ''].filter(Boolean).join('\n') || '全部生效', life: 12_000 });
+    } catch (error) { toastError('导入失败', error); }
+  });
 }
-async function runMaintenance(action: string, label: string): Promise<void> {
+function runMaintenance(action: string, label: string): void {
   // gc-files 是**删文件**，别和「整理一下」混在同一句确认语里：运维需要知道它删什么、不删什么。
   const warning = action === 'gc-files'
     ? '只删没有任何数据库行指向的孤儿文件；在用的媒体与子 agent 结果一个都不动。这不是保留策略，不会让在用的附件变少。'
     : '大库上可能耗时较久，期间写入会被阻塞。';
-  if (!confirm(`执行「${label}」？${warning}`)) return;
-  maintenanceBusy.value = action;
-  try {
-    const result = await api<unknown>(`/api/maintenance/${action}`, { method: 'POST', body: '{}' });
-    // `refused` 是 fail-closed 的拒绝，不是「完成」。`gc-files` 的唯一触发条件是「库与目录来自两套
-    // 部署」—— 正是运维最该立刻停手的那一种（docs/25 §10 记的误删 76 个附件 + 90 份子 agent 全文
-    // 就是它防住的）。渲染成绿色「完成」+ 一行 JSON 尾巴 + 8 秒自动消失，等于把它藏起来
-    // （docs/28 · L-WEB-03）。`life: 0` 走 pushToast 的「不自动消失」分支，要人手点掉。
-    const refused = (result as { refused?: unknown } | null)?.refused;
-    const reasons = Array.isArray(refused) ? refused.map(String) : refused ? [String(refused)] : [];
-    if (reasons.length) { pushToast({ severity: 'warn', summary: `${label} 已拒绝`, detail: [...reasons, JSON.stringify(result)].join('\n'), life: 0 }); return; }
-    pushToast({ severity: 'success', summary: `${label} 完成`, detail: typeof result === 'string' ? result : JSON.stringify(result), life: 8000 });
-  } catch (error) { toastError(`${label} 失败`, error); }
-  finally { maintenanceBusy.value = ''; }
+  askConfirm(`执行「${label}」？`, warning, async () => {
+    maintenanceBusy.value = action;
+    try {
+      const result = await api<unknown>(`/api/maintenance/${action}`, { method: 'POST', body: '{}' });
+      // `refused` 是 fail-closed 的拒绝，不是「完成」。`gc-files` 的唯一触发条件是「库与目录来自两套
+      // 部署」—— 正是运维最该立刻停手的那一种（docs/25 §10 记的误删 76 个附件 + 90 份子 agent 全文
+      // 就是它防住的）。渲染成绿色「完成」+ 一行 JSON 尾巴 + 8 秒自动消失，等于把它藏起来
+      // （docs/28 · L-WEB-03）。`life: 0` 走 pushToast 的「不自动消失」分支，要人手点掉。
+      const refused = (result as { refused?: unknown } | null)?.refused;
+      const reasons = Array.isArray(refused) ? refused.map(String) : refused ? [String(refused)] : [];
+      if (reasons.length) { pushToast({ severity: 'warn', summary: `${label} 已拒绝`, detail: [...reasons, JSON.stringify(result)].join('\n'), life: 0 }); return; }
+      pushToast({ severity: 'success', summary: `${label} 完成`, detail: typeof result === 'string' ? result : JSON.stringify(result), life: 8000 });
+    } catch (error) { toastError(`${label} 失败`, error); }
+    finally { maintenanceBusy.value = ''; }
+  });
 }
 
 // ── 依赖健康：总览页那张卡以前是四行写死的字，与运行时无关 ──────────────────────────
@@ -1640,16 +1651,17 @@ async function loadActiveTurns(): Promise<void> {
   catch { activeTurns.value = []; }
 }
 /** 取消是 abort 信号不是删除：该轮会落成 cancelled，已发出的消息与上下文都还在。 */
-async function cancelTurn(turn: ActiveTurn): Promise<void> {
-  if (!confirm(`取消 ${turnWho(turn)} 的这一轮？模型调用会被中断，该轮记成 cancelled；已经发出去的消息不会撤回。`)) return;
-  cancellingTurn.value = turn.id;
-  try {
-    const result = await api<{ cancelled: boolean }>(`/api/turns/${encodeURIComponent(turn.id)}/cancel`, { method: 'POST', body: '{}' });
-    pushToast(result.cancelled ? { severity: 'success', summary: '已发出取消信号', detail: `${turn.id.slice(0, 12)} · 该轮会记成 cancelled` }
-      : { severity: 'warn', summary: '这一轮已经结束了', detail: '取消信号没有作用对象，界面稍后会自己刷新' });
-    await loadActiveTurns();
-  } catch (error) { toastError('取消失败', error); }
-  finally { cancellingTurn.value = ''; }
+function cancelTurn(turn: ActiveTurn): void {
+  askConfirm(`取消 ${turnWho(turn)} 的这一轮？`, '模型调用会被中断，该轮记成 cancelled；已经发出去的消息不会撤回。', async () => {
+    cancellingTurn.value = turn.id;
+    try {
+      const result = await api<{ cancelled: boolean }>(`/api/turns/${encodeURIComponent(turn.id)}/cancel`, { method: 'POST', body: '{}' });
+      pushToast(result.cancelled ? { severity: 'success', summary: '已发出取消信号', detail: `${turn.id.slice(0, 12)} · 该轮会记成 cancelled` }
+        : { severity: 'warn', summary: '这一轮已经结束了', detail: '取消信号没有作用对象，界面稍后会自己刷新' });
+      await loadActiveTurns();
+    } catch (error) { toastError('取消失败', error); }
+    finally { cancellingTurn.value = ''; }
+  });
 }
 
 // 任务的取消、审批的裁决、定时任务的建 / 停 / 触发整段搬进 `components/tasks/` 那三张卡：

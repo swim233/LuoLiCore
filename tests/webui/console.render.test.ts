@@ -1,7 +1,8 @@
+import { readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { mount, type VueWrapper } from '@vue/test-utils';
 import { toasts } from '../../packages/webui/src/ui/toast';
-import { confirmBox, dismissConfirm } from '../../packages/webui/src/ui/confirm';
+import { confirmBox, dismissConfirm, runConfirmed } from '../../packages/webui/src/ui/confirm';
 
 /**
  * 控制台的**渲染**防线。
@@ -276,12 +277,16 @@ describe('ConsoleView 渲染', () => {
    * 90 份子 agent 全文就是它防住的）。
    */
   it('维护动作返回 refused 时是 warn 且不自动消失', async () => {
-    vi.stubGlobal('confirm', () => true);
+    dismissConfirm();
     toasts.splice(0, toasts.length);
     const { default: ConsoleView } = await import('../../packages/webui/src/views/ConsoleView.vue');
     const wrapper = mount(ConsoleView, { attachTo: document.body });
     await settle(wrapper);
-    await (wrapper.vm as unknown as { runMaintenance(action: string, label: string): Promise<void> }).runMaintenance('gc-files', '清理孤儿文件');
+    // 确认走 `ui/confirm.ts` 而不是 `window.confirm`（后者在 happy-dom 里根本没有实现，
+    // 这条用例此前靠 `vi.stubGlobal('confirm', …)` 顶着 —— 那正是 `M-WEB-01` 的影子）。
+    (wrapper.vm as unknown as { runMaintenance(action: string, label: string): void }).runMaintenance('gc-files', '清理孤儿文件');
+    expect(confirmBox.value.open).toBe(true);
+    await runConfirmed();
     await settle(wrapper);
     const toast = toasts.at(-1)!;
     expect(toast.severity).toBe('warn');
@@ -290,7 +295,8 @@ describe('ConsoleView 渲染', () => {
     expect(toast.life).toBeLessThanOrEqual(0);
     expect(toast.detail).toContain('两套部署');
     // 对照组：不带 refused 的动作照旧是绿色「完成」。
-    await (wrapper.vm as unknown as { runMaintenance(action: string, label: string): Promise<void> }).runMaintenance('vacuum', 'VACUUM');
+    (wrapper.vm as unknown as { runMaintenance(action: string, label: string): void }).runMaintenance('vacuum', 'VACUUM');
+    await runConfirmed();
     await settle(wrapper);
     expect(toasts.at(-1)).toMatchObject({ severity: 'success', summary: 'VACUUM 完成' });
     wrapper.unmount();
@@ -541,6 +547,23 @@ describe('ConsoleView 渲染', () => {
     const keys = (wrapper.vm as unknown as { navigation: ReadonlyArray<readonly [string, string, string]> }).navigation.map(([key]) => key);
     expect(keys).toEqual([...NAV_KEYS]);
     wrapper.unmount();
+  });
+
+  /**
+   * `AC-WEB-023`（反馈全是右上角同一种 Toast）与 `AC-WEB-055`（两套主题下无 OS 绘制控件）
+   * 都被同一件事挡着：`ConsoleView.vue` 里此前还剩 12 处裸 `window.confirm()`，而抽出去的
+   * `TasksCard` / `SchedulesCard` / `ExtensionsPage` 早就统一走 `ui/confirm.ts` 了
+   * （`D-02` 拆页面没拆完的直接残留，docs/29 · `M-WEB-01`）。裸的那个由操作系统绘制、
+   * 同步阻塞、在 happy-dom 里根本没有实现 —— 靠 `vi.stubGlobal` 才测得动本身就是信号。
+   */
+  it('ConsoleView 不再用原生对话框：confirm / alert / prompt 一个都不剩', () => {
+    const source = readFileSync('packages/webui/src/views/ConsoleView.vue', 'utf8');
+    // `askConfirm(` 是大写 C，不会被下面这几个模式误伤。
+    for (const native of [/(^|[^a-zA-Z.])confirm\s*\(/, /(^|[^a-zA-Z.])alert\s*\(/, /window\s*\.\s*(confirm|alert|prompt)\s*\(/]) {
+      const hit = source.split('\n').find((line) => native.test(line));
+      expect(hit, `还留着原生对话框：${hit}`).toBeUndefined();
+    }
+    expect(source).toContain("from '../ui/confirm'");
   });
 
   /**
