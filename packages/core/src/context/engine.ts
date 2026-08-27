@@ -157,15 +157,20 @@ export function renderArchivedMessage(
   const reply = message.replyToName
     ? ` ↩︎回复 ${escapeForgedSpeakerPrefixes(message.replyToName)}`
     : "";
+  // 编辑过的消息必须自带标记。不标的话它以裸 `[user]` 形态进上下文，和一条刚发来的新消息**完全
+  // 无法区分** —— 实测模型把一条五分钟前的 `早` 被编辑后当成刚说的话，回了「早呀早呀」
+  // （docs/29 · `M-TG-02`）。时间戳那一格是 `edit_date`，它只说明「改于何时」，说不出「这是改的」。
+  const edited = (message.revision ?? 0) > 0 ? " · 已编辑" : "";
   // 被回复的消息在私聊里也必须带前缀：私聊没有 `[名字 时间]`，不标的话模型看到的是「用户连发了两条」，
   // 而不是「用户指着上面那条问」——尤其当上面那条只有一张图的时候。
   // 半角方括号是**有意的**：`escapeForgedSpeakerPrefixes` 把正文里形如 `[… H:MM]` 的串改写成全角，
   // 于是这个前缀与 `[名字 时间]` 共用同一条防伪规则 —— 用全角写反而会和「已被转义」的形态撞上。
   const text = quoted
-    ? `[↩︎ 被回复的消息 ${speakerName(message, showUsername)}${time}] ${body}`
+    ? `[↩︎ 被回复的消息 ${speakerName(message, showUsername)}${time}${edited}] ${body}`
     : isPrivate
-      ? escaped
-      : `[${speakerName(message, showUsername)}${time}${reply}] ${body}`;
+      ? // 私聊没有 `[名字 时间]` 那一格，标记只能自己起一个前缀 —— 而私聊正是这条缺陷被实测到的地方。
+        `${edited ? "[已编辑] " : ""}${escaped}`
+      : `[${speakerName(message, showUsername)}${time}${reply}${edited}] ${body}`;
   const output: NewContextMessage = {
     id: ulid(),
     role: "user",

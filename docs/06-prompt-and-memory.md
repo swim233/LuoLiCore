@@ -422,6 +422,7 @@ memory_list: tool({           // owner only
 ### 5.3 隐私细节
 
 - `memory/private/<userId>/` 目录权限 `0700`。
-- owner 读取他人私有记忆时**记 `warn` 级日志**（`kind='memory.owner_read_private'`，含 targetUserId），并在 WebUI 该用户记忆页显示「最近被 owner 查看于 …」。这是对「owner 可读全部」（D11）的问责设计。
+- owner 读取他人私有记忆时**记 `warn` 级日志**（`kind='memory.owner_read_private'`，`user_id` 是**被看的那个人**、`data` 里带 `targetUserId` / `actor` / `op`），并在那个人自己的 `/memory` 回执末尾显示「最近被 owner 查看于 …」。这是对「owner 可读全部」（D11）的问责设计 —— **给被看的人看，不是给 owner 看**：只落一条只有 owner 在控制台上翻得到的日志，那是记录不是问责。
+  三条路共用 `MemoryStore.auditPrivateAccess()` 这一个发出点：`memory_read` 工具、WebUI 的 `GET /api/prompts/:id`（它照 `memory_docs.path` 直接读文件，不经过 `MemoryStore.read()`）、以及 `PUT /api/prompts/:id`（改比看更重，`op='write'`）。owner 看自己那份不记。
 - 用户可用 `/forgetme` 命令（私聊）删除自己的 PRIMEMORY（写一条 revision 后清空，30 天内 owner 可恢复）。
 - `/memory` 命令（私聊）向用户展示自己的 PRIMEMORY 全文。

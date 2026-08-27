@@ -1,8 +1,8 @@
-import { rmSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { ArchiveRepository, OperationsRepository, PrincipalRepository, closeDatabase, migrateDatabase, modelAliasKey, openDatabase, readAppKv, writeAppKv } from '@luoli/db';
 import type { Sqlite } from '@luoli/db';
-import { ContextEngine, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceService, PromptDocuments, ProviderStore, Secrets, configSchema } from '@luoli/core';
+import { ContextEngine, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceService, MemoryStore, PromptDocuments, ProviderStore, Secrets, configSchema } from '@luoli/core';
 import { createServer } from '@luoli/server';
 import { assignDotted, sortOverrideKeys } from '@luoli/shared';
 
@@ -15,7 +15,7 @@ function harness() {
   const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, webui: { passwordHash: 'secret-hash' }, memory: { dir: './data/config-prompts' } });
   const operations = new OperationsRepository(db); const events = new EventBus(); const log = new LogSink(operations, './data/config-write-logs'); const archive = new ArchiveRepository(db);
   const promptDocuments = new PromptDocuments(db, './data/config-prompts'); promptDocuments.ensure();
-  const app = createServer({ config, db, operations, principals: new PrincipalRepository(db), archive, context: new ContextEngine(db, archive), providers: new ProviderStore(db, new Secrets('x'.repeat(32))), approvals: new DatabaseApprovalBroker(db, config, events, log), maintenance: new MaintenanceService(db, path, 2, 30), promptDocuments, events, log, configSchema: {}, startedAt: Date.now(), setup: undefined });
+  const app = createServer({ config, db, operations, principals: new PrincipalRepository(db), archive, context: new ContextEngine(db, archive), providers: new ProviderStore(db, new Secrets('x'.repeat(32))), approvals: new DatabaseApprovalBroker(db, config, events, log), maintenance: new MaintenanceService(db, path, 2, 30), promptDocuments, memory: new MemoryStore(db, './data/config-prompts', 1500, 3000, 2, 0, log), events, log, configSchema: {}, startedAt: Date.now(), setup: undefined });
   const session = operations.createSession(1); const headers = { cookie: `luoli_sid=${session.id}`, 'x-csrf-token': session.csrf, 'content-type': 'application/json' };
   return { app, db, headers };
 }
@@ -376,6 +376,38 @@ describe('config API validation', () => {
     const rollback = await app.request('/api/prompts/assist:global/rollback', { method: 'POST', headers, body: JSON.stringify({ revisionId }) });
     expect(rollback.status).toBe(200);
     expect((await app.request('/api/prompts/assist:global', { headers: { cookie: headers.cookie } })).status).toBe(200);
+    closeDatabase(db);
+  });
+
+  /**
+   * 提示词页那张卡的副标题写着「查看他人的这份会被记录」，而这条路**根本不经过 `MemoryStore`**：
+   * `GET /api/prompts/:id` 照 `memory_docs.path` 直接读文件，一条日志都不落（连 `memory.read`
+   * 都没有），而同一组端点的 `PUT` 还能改别人那份（docs/29 · `M-MEM-01`）。
+   */
+  it('看 / 改他人的私有记忆都留痕，看自己那份不留', async () => {
+    const { app, db, headers } = harness();
+    const seed = db.prepare("INSERT INTO memory_docs(id,scope,subject,path,bytes,tokens,content_hash,updated_at) VALUES (?,'primemory',?,?,0,0,'seed',?)");
+    mkdirSync('./data/config-prompts', { recursive: true });
+    for (const subject of ['b', '1']) {
+      writeFileSync(`./data/config-prompts/PRIMEMORY.${subject}.md`, '# 私有记忆\n');
+      seed.run(`primemory:${subject}`, subject, `./data/config-prompts/PRIMEMORY.${subject}.md`, Date.now());
+    }
+    const audits = (): Array<{ userId: string | null; op: string }> => (db
+      .prepare("SELECT user_id AS userId,data_json AS data FROM log_events WHERE kind='memory.owner_read_private' ORDER BY id")
+      .all() as Array<{ userId: string | null; data: string }>)
+      .map((row) => ({ userId: row.userId, op: String((JSON.parse(row.data) as { op: string }).op) }));
+
+    expect((await app.request('/api/prompts/primemory:b', { headers: { cookie: headers.cookie } })).status).toBe(200);
+    expect(audits()).toEqual([{ userId: 'b', op: 'read' }]);
+    expect((await app.request('/api/prompts/primemory:b', { method: 'PUT', headers, body: JSON.stringify({ content: '# 私有记忆\n\n改过\n' }) })).status).toBe(200);
+    expect(audits().at(-1)).toEqual({ userId: 'b', op: 'write' });
+    // owner 看自己那份不记：`bootstrapOwnerId` 是 '1'。全记的话这条日志会被自己的噪声淹掉。
+    expect((await app.request('/api/prompts/primemory:1', { headers: { cookie: headers.cookie } })).status).toBe(200);
+    expect(audits()).toHaveLength(2);
+    // 读不到文件时回 404，那不是一次「查看」，不该留痕。
+    seed.run('primemory:gone', 'gone', './data/config-prompts/PRIMEMORY.gone.md', Date.now());
+    expect((await app.request('/api/prompts/primemory:gone', { headers: { cookie: headers.cookie } })).status).toBe(404);
+    expect(audits()).toHaveLength(2);
     closeDatabase(db);
   });
 });

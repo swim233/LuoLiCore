@@ -108,6 +108,53 @@ export class MemoryStore {
     mkdirSync(directory, { recursive: true, mode: 0o700 });
   }
 
+  /**
+   * 「查看他人的私有记忆会被记录」（D11 的问责设计，`docs/06 §425`）的**唯一发出点**。
+   *
+   * 单拎出来是因为 WebUI 那条路根本不经过 `read()`：`GET /api/prompts/:id` 照 `memory_docs.path`
+   * 直接读文件，绕过整个 MemoryStore，于是那条路上一条日志都没有 —— 而提示词页那张卡的副标题
+   * 正写着这句话（docs/29 · `M-MEM-01`）。改这条约束时只需要改这一处。
+   *
+   * `userId` 落的是**被看的那个人**，不是看的人：`lastOwnerRead()` 与用户自己的 `/memory`
+   * 都按它查。看的人在 `data.actor` 里。
+   */
+  auditPrivateAccess(
+    targetUserId: string | null,
+    actor: string,
+    op: "read" | "write",
+  ): void {
+    this.log?.event({
+      level: "warn",
+      kind: "memory.owner_read_private",
+      summary: `Owner ${op === "read" ? "read" : "edited"} another user private memory`,
+      ...(targetUserId ? { userId: targetUserId } : {}),
+      data: { targetUserId, actor, op },
+    });
+  }
+
+  /**
+   * 「最近被 owner 查看于 …」的数据源。**问责要让被看的那个人自己看得见**，所以 `/memory`
+   * 读它 —— 只落一条日志、只有 owner 在控制台上翻得到，那是记录不是问责。
+   * 按日志查而不是给 `memory_docs` 加一列：这件事本来就有保留期，而迁移是不可回退的。
+   */
+  lastOwnerRead(userId: string): { ts: number; op: string } | null {
+    const row = this.db
+      .prepare(
+        "SELECT ts,data_json AS data FROM log_events WHERE kind='memory.owner_read_private' AND user_id=? ORDER BY ts DESC LIMIT 1",
+      )
+      .get(userId) as { ts: number; data: string | null } | undefined;
+    if (!row) return null;
+    let op = "read";
+    try {
+      op = String(
+        (JSON.parse(row.data ?? "{}") as { op?: unknown }).op ?? "read",
+      );
+    } catch {
+      /* 老行没有 op */
+    }
+    return { ts: row.ts, op };
+  }
+
   read(
     scope: "assist" | "character" | "pubmemory" | "primemory",
     subject: string | null,
@@ -120,12 +167,7 @@ export class MemoryStore {
       if (subject !== actorUserId && actorRole !== "owner")
         throw new Error("private_memory_forbidden");
       if (subject !== actorUserId)
-        this.log?.event({
-          level: "warn",
-          kind: "memory.owner_read_private",
-          summary: "Owner read another user private memory",
-          data: { targetUserId: subject },
-        });
+        this.auditPrivateAccess(subject, actorUserId ?? "unknown", "read");
     }
     const document = this.readRaw(scope, subject);
     this.log?.event({

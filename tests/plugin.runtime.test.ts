@@ -63,6 +63,31 @@ describe('plugin runtime', () => {
     await manager.close(); closeDatabase(db);
   });
 
+  /**
+   * `version` 与 `provides_json` 这两列建表时就有、扩展页也一直认真读（`pluginProvides` 把它渲染成
+   * 「2 个工具 · 1 个 hook」），而在这之前**没有任何一条 SQL 写过它们** —— 于是每张卡片都说
+   * 「没有声明任何 tool / hook / command」，哪怕这份 plugin 已经注册了工具（docs/29 · `M-WEB-14`）。
+   */
+  it('装载成功写下 version 与 provides_json，装不起来就清空它', async () => {
+    const { db, manager } = setup();
+    writeFileSync('./data/plugin-runtime-plugins/alpha/plugin.js',
+      "export default { name:'alpha', version:'2.1.0', hooks:{ ping: () => 'a', beforeTurn: () => undefined }, tools: () => ({ echo: { description:'echo', inputSchema:{}, execute: input => input } }) };");
+    await manager.reconcile();
+    const row = () => db.prepare('SELECT version,provides_json AS provides,load_error AS error FROM plugins WHERE name=?')
+      .get('alpha') as { version: string | null; provides: string | null; error: string | null };
+    expect(row().version).toBe('2.1.0');
+    // 写的是**这一次真的装载到的**东西，不是清单里的声明。
+    expect(JSON.parse(row().provides!)).toEqual({ tools: ['echo'], hooks: ['ping', 'beforeTurn'] });
+    // 没声明 version 的照旧是 null，不要编一个出来。
+    expect((db.prepare('SELECT version FROM plugins WHERE name=?').get('beta') as { version: string | null }).version).toBeNull();
+    // 装不起来就什么都没提供：留着上一次的清单，卡片会一边显红一边说「1 个工具」。
+    writeFileSync('./data/plugin-runtime-plugins/alpha/plugin.js', 'export default { name:');
+    await manager.reconcile();
+    expect(row().error).toBeTruthy();
+    expect(row().provides).toBeNull();
+    await manager.close(); closeDatabase(db);
+  });
+
   it('discovers files as disabled rows before any database seed', async () => {
     const database = './data/plugin-discovery.test.db'; const directory = './data/plugin-discovery-plugins';
     for (const suffix of ['', '-wal', '-shm']) rmSync(`${database}${suffix}`, { force: true });

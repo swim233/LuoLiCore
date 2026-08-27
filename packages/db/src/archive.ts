@@ -34,6 +34,12 @@ export interface ArchivedMessage {
   triggered: number;
   triggerReason: string | null;
   turnId?: string | null;
+  /**
+   * 同一条 Telegram 消息的第几版：0 是原文，>0 是编辑。**读出侧必须带着它** —— 渲染进上下文时
+   * 要靠它标「已编辑」，否则一条五分钟前的话被改一下，在模型眼里和刚发的新消息完全一样
+   * （docs/29 · `M-TG-02`）。现场构造的消息（适配层）没有这一列，按 0 处理。
+   */
+  revision?: number;
   replyToTgMessageId?: number | null;
   mediaParts?: unknown[];
   /** 被回复者的显示名。只在适配层现场构造的消息上出现（Telegram update 里带着），不落库。 */
@@ -152,7 +158,7 @@ function filterParameters(filters: SearchFilters): Required<SearchFilters> {
 
 const MESSAGE_COLUMNS = `m.id,m.chat_id AS chatId,m.message_thread_id AS messageThreadId,m.tg_message_id AS tgMessageId,m.direction,
   m.from_kind AS fromKind,m.from_user_id AS fromUserId,m.from_name AS fromName,m.from_username AS fromUsername,m.kind,m.text,m.tg_date AS tgDate,
-  m.triggered,m.trigger_reason AS triggerReason,m.turn_id AS turnId,m.reply_to_tg_message_id AS replyToTgMessageId`;
+  m.triggered,m.trigger_reason AS triggerReason,m.turn_id AS turnId,m.revision,m.reply_to_tg_message_id AS replyToTgMessageId`;
 const messageQuery = (prefix = "") =>
   prefix ? MESSAGE_COLUMNS : MESSAGE_COLUMNS.replaceAll("m.", "");
 const withMedia = (row: ArchivedMessage | null): ArchivedMessage | null => {
