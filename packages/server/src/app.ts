@@ -3559,10 +3559,22 @@ export function createServer(
         .all(),
     }),
   );
+  /** 控制台是 owner 单口令的，所以「谁在看」只有一个答案；判据是**看的是不是别人那份**。 */
+  const auditPrimemoryAccess = (
+    row: { scope?: unknown; subject?: unknown },
+    op: "read" | "write",
+  ): void => {
+    if (row.scope !== "primemory") return;
+    const subject = typeof row.subject === "string" ? row.subject : null;
+    if (subject && subject === currentConfig().access.bootstrapOwnerId) return;
+    dependencies.memory?.auditPrivateAccess(subject, "webui", op);
+  };
   app.get("/api/prompts/:id", (ctx) => {
     const row = dependencies.db
       .prepare("SELECT * FROM memory_docs WHERE id=?")
-      .get(ctx.req.param("id")) as { path?: string } | undefined;
+      .get(ctx.req.param("id")) as
+      | { path?: string; scope?: string; subject?: string | null }
+      | undefined;
     if (!row?.path)
       return ctx.json(apiError("not_found", "文档不存在", 404).body, 404);
     // `memory_docs.path` 今天只由本进程写，但「库里的路径值可信」是一个会随时间失效的假设
@@ -3579,6 +3591,8 @@ export function createServer(
         404,
       );
     }
+    // 读成功之后才记：文件读不到时回 404，那不是一次「查看」（docs/29 · M-MEM-01）。
+    auditPrimemoryAccess(row, "read");
     return ctx.json({ ok: true, data: { ...row, content } });
   });
   app.get("/api/prompts/:id/revisions", (ctx) =>
@@ -3608,6 +3622,8 @@ export function createServer(
         apiError("invalid_content", "content 必须是字符串").body,
         400,
       );
+    // 改别人的私有记忆比看更重，同样要留痕（`memory_revisions` 记的是内容变更，这条记的是「谁」）。
+    auditPrimemoryAccess(row, "write");
     dependencies.promptDocuments.save(
       row.scope,
       row.subject,

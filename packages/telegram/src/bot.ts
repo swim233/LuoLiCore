@@ -1062,7 +1062,17 @@ export async function createTelegramBot(
       access.userId,
       true,
     );
-    await ctx.reply(document.content || "尚无私有记忆。");
+    // 「owner 看过你的私有记忆」这件事要让**被看的人**看得见：只落一条日志、只有 owner 在控制台上
+    // 翻得到的话，那是记录不是问责（D11，`docs/06 §425`；docs/29 · M-MEM-01）。
+    const seen = dependencies.memory.lastOwnerRead(access.userId);
+    await ctx.reply(
+      [
+        document.content || "尚无私有记忆。",
+        seen
+          ? `\n—— 最近被 owner ${seen.op === "write" ? "改动" : "查看"}于 ${ago(seen.ts)}`
+          : "",
+      ].join(""),
+    );
   });
   bot.command("forgetme", async (ctx) => {
     const access = await requireRole(ctx.update.update_id, "limited", (text) =>

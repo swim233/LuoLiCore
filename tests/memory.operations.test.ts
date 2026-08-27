@@ -26,6 +26,14 @@ describe('memory operations', () => {
     expect((content.match(/^## /gm) ?? []).length).toBeLessThanOrEqual(2);
     expect((db.prepare('SELECT diff FROM memory_revisions ORDER BY ts DESC LIMIT 1').pluck().get() as string)).toContain('@@');
     expect((db.prepare("SELECT COUNT(*) FROM log_events WHERE kind='memory.owner_read_private'").pluck().get() as number)).toBe(1);
+    // `user_id` 落的是**被看的那个人**，不是看的人 —— `lastOwnerRead` 与用户自己的 `/memory` 按它查。
+    // 问责要让被看的人看得见：只落一条只有 owner 翻得到的日志，那是记录不是问责（docs/29 · M-MEM-01）。
+    expect(db.prepare("SELECT user_id FROM log_events WHERE kind='memory.owner_read_private'").pluck().get()).toBe('u1');
+    expect(memory.lastOwnerRead('u1')).toMatchObject({ op: 'read' });
+    expect(memory.lastOwnerRead('someone-else')).toBeNull();
+    // WebUI 那条路不经过 read()，但发出点是同一个 —— 改别人那份记 op='write'，比看更重。
+    memory.auditPrivateAccess('u1', 'webui', 'write');
+    expect(memory.lastOwnerRead('u1')).toMatchObject({ op: 'write' });
     expect(memory.forgetPrivate('u1')).toBe(true);
     expect(memory.read('primemory', 'u1', 'limited', 'u1', true).content).toBe('# 私有记忆\n');
     closeDatabase(db);

@@ -214,15 +214,31 @@ export class PluginManager {
             )
             .run(definitionRole, name);
         this.#plugins.set(name, plugin);
+        // `version` 与 `provides_json` 这两列建表时就有、扩展页也一直认真读（`pluginProvides`），
+        // 而在此之前**没有任何一条 SQL 写过它们** —— 于是每张 plugin 卡片都说「没有声明任何
+        // tool / hook / command」，哪怕这份 plugin 已经注册了两个工具、模型目录里都列出来了
+        // （docs/29 · M-WEB-14）。写的是这一次真的装载到的东西，不是清单里的声明。
         this.db
           .prepare(
-            "UPDATE plugins SET load_error=NULL,updated_at=? WHERE name=?",
+            "UPDATE plugins SET version=?,provides_json=?,load_error=NULL,updated_at=? WHERE name=?",
           )
-          .run(Date.now(), name);
+          .run(
+            plugin.version ?? null,
+            JSON.stringify({
+              tools: Object.keys(plugin.tools),
+              hooks: Object.keys(plugin.hooks),
+            }),
+            Date.now(),
+            name,
+          );
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
+        // 装不起来就什么都没提供：留着上一次的 `provides_json`，卡片会一边显红一边说
+        // 「2 个工具」，而那两个工具这一轮一个都不在。
         this.db
-          .prepare("UPDATE plugins SET load_error=?,updated_at=? WHERE name=?")
+          .prepare(
+            "UPDATE plugins SET provides_json=NULL,load_error=?,updated_at=? WHERE name=?",
+          )
           .run(message, Date.now(), name);
         // `load_error` 那一列只有扩展页在读。加载失败与钩子失败同一个 kind（对运维是同一件事：
         // 「这个 plugin 没在干活」），靠 `phase` 分开 —— 与 `agent.file_invalid` 对称。
@@ -316,7 +332,7 @@ export class PluginManager {
           plugin.enabled = false;
           this.db
             .prepare(
-              "UPDATE plugins SET enabled=0,load_error=?,updated_at=? WHERE name=?",
+              "UPDATE plugins SET enabled=0,provides_json=NULL,load_error=?,updated_at=? WHERE name=?",
             )
             .run(message, Date.now(), plugin.name);
           // 自动禁用是「运维不点就永远不会恢复」的状态：不告警的话，一个 plugin 悄悄下线，

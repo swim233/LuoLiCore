@@ -40,12 +40,11 @@
 
 按「挡着别人 / 单独可做」分组。**每条都实测过**，括号里是核对时的实际值。
 
-> **2026-08-27**：手测缺陷的头四批修复（`fix/manual-acceptance-batch1`）收掉了 §2.3 里的十五条，
+> **2026-08-27**：手测缺陷的头五批修复（`fix/manual-acceptance-batch1`）收掉了 §2.3 里的十八条，
 > 按 §4 的规矩已从本文删除；「怎么发现的 / 怎么修的」留在
 > [`29 §4`](./29-manual-acceptance-log.md)。**它们挂着的验收项仍是 `[ ]`** ——
 > `(手动)` 条目要勾得有一场新的手测台账，见 `docs/13` 与 `tests/acceptance.test.ts`。
-> 剩下的手测缺陷（`M-WEB-02` `M-WEB-06` `M-WEB-14` `M-MEM-01` `M-TG-02`）
-> 仍在下面各表里。
+> 只剩两条：`M-WEB-02`（SSE 重连不补拉）与 `M-WEB-06`（没有看 `raw_json` 的入口），都在下面各表里。
 
 ### 2.1 结构性的三条（[`reviews/27` §8](./reviews/27-full-scope-review.md) 的 `Z4`/`Z5`，需求方拍板留到下一轮）
 
@@ -135,9 +134,6 @@ Bot API 调用），照 `TelegramToolBridge` 的形状注入、presence 即开�
 | **带模型的 provider 在界面里删不掉** | `app.delete('/api/providers/:id')`（`app.ts:1899`）是一句没有 try/catch 的裸 `DELETE FROM providers WHERE id=?`，而 `models.provider_id` 的外键 on-delete 是 **`NO ACTION`** —— 只要这个 provider 名下还有一个模型行就抛 `SqliteError: FOREIGN KEY constraint failed`，出到 500。界面上是一条 `删除失败 / 服务端出错，已记录（ref: N）`，**说不出原因**；审计中间件那条 `webui.action` 照常记一行，看起来像删成功了。连带一格：WebUI **没有删模型的入口**（`ConsoleView.vue` 里 `/api/models` 只有 GET/POST/PATCH/import/enrich），所以「先删模型再删 provider」这条自救路径也不存在 | S1 手测撞上（[29 · `M-WEB-05`](./29-manual-acceptance-log.md)），当时想造「别名链里的模型已删除」那个状态。修法两选一：`DELETE` 外面包一层、撞外键回 409 并把「还有 N 个模型」写进 message；或者同一事务里先删 `models` 再删 `providers` —— 后者要先想清楚 `model_aliases` 里指过来的链怎么办（那张表存 JSON、没有外键，删完就是悬空的 `missing` 段）。删模型的入口属 [21](./21-webui-coverage-gaps.md) 的口径 |
 | **WebUI 没有看 `raw_json` 的入口** | 列一直在写（`archive.ts` 的 `append` 存 `redactArchivePayload(input.raw)`）、也一直被 `get_message` 工具读，但 `grep -rn "raw_json\|rawJson" packages/webui/src` 与 `packages/server/src/app.ts` **各零命中**，`GET /api/messages` 回的消息对象里没有这个字段。检索结果行上那个 `<>` 是「查看这条消息所在轮次的实际调用」（turn detail），不是原始载荷 | `AC-WEB-011` 的第三句判据因此挂（[29 · `M-WEB-06`](./29-manual-acceptance-log.md)）。运维排查「Telegram 到底发过来什么」（比如 entities 解析错的消息）在界面上没有任何入口。属 [21](./21-webui-coverage-gaps.md) 的口径。修法很小：单条详情带上 `rawJson`，检索行加一个「原始载荷」展开 —— **注意它是脱敏后的那份**，不是原始 update 的逐字副本 |
 | **`sandbox.run` 挂不进调用树** | `SandboxRunEvent`（`packages/core/src/sandbox/index.ts:62`）有 `turnId` 但**没有 `spanId` / `parentSpanId`** —— 注释自承「`turnId` 让它进得了那一轮的 trace」，进得了 trace 却进不了树。Trace 视图按 `parentSpanId` 算缩进，于是它被画在 **0px**、与 `turn.start` 同级。实测一条轮次里 3 次 `tool.call python` 各对应一条 `sandbox.run`，界面上只能按时间戳猜配对；并发沙箱调用时连时间戳都不够 | S2 手测量出（[29 · `M-LOG-02`](./29-manual-acceptance-log.md)）。这同时是 `AC-LOG-003`「展开任一 `tool.call` 能看出是否沙箱、是否经审批」判不过的直接原因 —— `tool.call` 的载荷（`tools/registry.ts:892`）只有 `{input}`，两个字段都不在。修法二选一：给 `SandboxRunEvent` 加可选 `parentSpanId` 由 `builtins.ts` 那几处调用方传进来；或者在 `tool.call` 载荷里回填 `sandbox:{mode,image}` 摘要 —— 后者更小，且能顺带把「是否经审批」一起补上 |
-| **`plugins.provides_json` 从来没人写，扩展页对每份 plugin 都说「没有声明任何 tool / hook / command」** | 这一列 `0001_init.sql:177` 就有，WebUI 认真读它（`extensions/types.ts:167-172` + `PluginCards.vue:67`），`PluginCards.vue:11` 的注释还写着「端点一直在发」。但 `packages/core` 与 `packages/server` 里所有 `UPDATE plugins SET` 只碰 `min_role` / `load_error` / `enabled` / `config_json` / `updated_at`。`version` 同病 | S3 手测（[29 · `M-WEB-14`](./29-manual-acceptance-log.md)）。实测 `acc-probe` 已加载并注册了两个工具、模型目录里都列出来了，卡片照旧显示那句 `v-else`。不挂条目（工具确实可用），但界面在这一格上说反话 |
-| **「查看他人的私有记忆会被记录」在 WebUI 这条路上不成立** | `memory.owner_read_private` 只在 `MemoryStore.read()`（`memory/store.ts:125`）里发 —— 那是 `memory_read` 工具那条路。WebUI 的 `GET /api/prompts/:id` 照 `memory_docs.path` 直接读文件，绕过整个 `MemoryStore`，**一条日志都不落**（连 `memory.read` 都没有）。而提示词页那张卡的副标题写着「某个用户私有；**查看他人的这份会被记录**」。条目后半句「用户 B 的记忆页显示『最近被 owner 查看于…』」全仓零命中，从未实现。同一组端点的 `PUT /api/prompts/:id` 还能改他人的私有记忆 | S3 手测（[29 · `M-MEM-01`](./29-manual-acceptance-log.md)），`AC-MEM-011` 因此挂。造了个「用户 B」的 PRIMEMORY 夹具后用 owner 身份点开，全文进了可编辑 textarea 而日志为空 |
-| **被编辑的消息进模型时不带任何「这是编辑」的标记** | 把那一轮的完整请求体捞出来，`instructions` 与 `messages` 里搜「编辑 / edited / revision / 修改过」**四个词全部零命中**。两条编辑以裸 `[user]` 形态出现 —— 没有 `<group-message>` 包裹、没有时间戳、没有 RUNTIME 提示，与一条刚发来的新消息完全无法区分 | S4 手测（[29 · `M-TG-02`](./29-manual-acceptance-log.md)），`AC-TG-010` 因此挂。**上下文那一层是对的**：已提交的 ordinal 一字未被改写，编辑版本以 `origin=background` 追加成新条目（只追加模型守住了）。缺的是**告诉模型这是一次编辑**。后果直接写在回复里：模型把五分钟前那条 `早` 的编辑当成刚说的话，回了「早呀早呀」 |
 | **`/forgetme` 的备份目录 `.forgotten` 无人清理，`forgetMeRetentionDays` 名不副实** | `forgetPrivate`（`memory/store.ts:342-351`）在该值 > 0 时把原文备份到 `<memory.dir>/.forgotten/<uid>/<时间戳>.md`，但**全仓没有任何代码删过 `.forgotten`**（`grep -rn forgotten` 只有 `store.ts` 那两处）。这个键只决定「写不写备份」，不决定留多久 —— 一个要求「忘掉我」的用户，数据被无限期保留 | S4 手测读码查到（[29 · `M-MEM-02`](./29-manual-acceptance-log.md)）。**`/forgetme` 命令本身已于 2026-08-27 由需求方定为移除**，`AC-MEM-012` 随之不再验（走 [29 §3](./29-manual-acceptance-log.md) 豁免登记）—— 但这个悬着的目录要跟着一起处置。另有两处小账：没有任何恢复入口（`docs/06:426` 的「30 天内 owner 可恢复」= 手工拷文件）；`docs/11:230` 的 `forgetMeRetentionDays: 30` 是那一页上少数没有「热更新 / 需重启」标注的行（它是构造参数，属需重启） |
 
 ---
