@@ -265,7 +265,7 @@ const COLUMNS = {
   hits: [{ key: 'tgDate', header: '时间', width: '12rem' }, { key: 'chatId', header: '会话', width: '9rem' }, { key: 'from', header: '发言人', width: '10rem' }, { key: 'text', header: '内容' }, { key: 'detail', header: '操作', width: '8rem' }],
   usage: [{ key: 'ts', header: '时间', width: '13rem' }, { key: 'model_alias', header: '别名' }, { key: 'input_tokens', header: '输入' }, { key: 'output_tokens', header: '输出' }, { key: 'cost_usd', header: '成本' }],
   principals: [{ key: 'kind', header: '类型' }, { key: 'displayName', header: '显示名' }, { key: 'tgId', header: 'Telegram ID' }, { key: 'role', header: '角色', width: '9rem' }, { key: 'username', header: '用户名' }],
-  models: [{ key: 'model_id', header: '模型 ID' }, { key: 'provider_id', header: 'Provider' }, { key: 'context_window', header: '窗口' }, { key: 'capabilities', header: '能力' }, { key: 'price_in', header: '输入价格' }, { key: 'price_out', header: '输出价格' }, { key: 'enabled', header: '启用', width: '6rem' }],
+  models: [{ key: 'model_id', header: '模型 ID' }, { key: 'provider_id', header: 'Provider' }, { key: 'context_window', header: '窗口' }, { key: 'capabilities', header: '能力' }, { key: 'price_in', header: '输入价格' }, { key: 'price_out', header: '输出价格' }, { key: 'enabled', header: '启用', width: '6rem' }, { key: 'actions', header: '', width: '4rem' }],
   aliases: [{ key: 'alias', header: '别名', width: '12%' }, { key: 'purpose', header: '用途', width: '27%' }, { key: 'chain', header: 'Fallback 链', width: '31%' }, { key: 'settings', header: '采样参数', width: '20%' }, { key: 'actions', header: '', width: '10%' }],
   logs: [{ key: 'ts', header: '时间', width: '13rem' }, { key: 'level', header: '级别', width: '7rem' }, { key: 'kind', header: '事件' }, { key: 'summary', header: '摘要' }, { key: 'data_bytes', header: '载荷', width: '6rem' }, { key: 'trace_id', header: 'Trace' }],
   // tasks / schedules / approvals 三套跟着那三张卡搬进 `components/tasks/types.ts`。
@@ -697,7 +697,41 @@ async function importCatalog(): Promise<void> {
     await load();
   } catch (error) { toastError('导入模型失败', error); }
 }
-async function removeProvider(id: string): Promise<void> { try { await api(`/api/providers/${encodeURIComponent(id)}`, { method: 'DELETE' }); pushToast({ severity: 'success', summary: 'Provider 已删除' }); } catch (error) { toastError('删除失败', error); } await load(); }
+/**
+ * 删 provider。名下还有模型时服务端回 **409 `provider_has_models`** —— 那不是错误，是一个岔口：
+ * 「删掉这个 provider」与「连同它名下 N 行调好定价与能力位的模型一起删掉」不是同一个决定，
+ * 所以这里把 409 接住换成一次确认，而不是弹一句红的了事（此前是裸 `DELETE` 撞外键 → 500
+ * 「服务端出错，已记录」，说不出原因，docs/29 · M-WEB-05）。
+ */
+async function deleteProvider(id: string, cascade: boolean): Promise<void> {
+  const done = await api<{ models: number; aliases: Array<{ alias: string; emptied: boolean }> }>(
+    `/api/providers/${encodeURIComponent(id)}${cascade ? '?cascade=1' : ''}`, { method: 'DELETE' });
+  const emptied = done.aliases?.filter((entry) => entry.emptied).map((entry) => entry.alias) ?? [];
+  pushToast({ severity: emptied.length ? 'warn' : 'success', summary: 'Provider 已删除',
+    detail: [done.models ? `连同 ${done.models} 个模型` : '', emptied.length ? `别名 ${emptied.join('、')} 的链已空，整条删掉了` : ''].filter(Boolean).join(' · ') || undefined,
+    life: emptied.length ? 0 : 4000 });
+  await load();
+}
+function removeProvider(id: string): void {
+  void (async () => {
+    try { await deleteProvider(id, false); }
+    catch (error) {
+      if (!(error instanceof ApiError) || error.code !== 'provider_has_models') { toastError('删除失败', error); return; }
+      askConfirm('这个 Provider 名下还有模型', `${error.message}\n\n连同删除会一并删掉那些模型行（窗口、能力标记、调好的定价都在里面），并把别名链里指过来的段清掉 —— 链被清空的别名整行删除。这一步不可撤销。`,
+        async () => { try { await deleteProvider(id, true); } catch (nested) { toastError('删除失败', nested); } });
+    }
+  })();
+}
+function removeModel(id: string, label: string): void {
+  askConfirm(`删除模型 ${label}？`, '这一行的窗口、能力标记与定价都会没掉；别名链里指向它的段一并清掉，链被清空的别名整行删除。不可撤销。', async () => {
+    try {
+      const done = await api<{ aliases: Array<{ alias: string; emptied: boolean }> }>(`/api/models/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      const emptied = done.aliases?.filter((entry) => entry.emptied).map((entry) => entry.alias) ?? [];
+      pushToast({ severity: emptied.length ? 'warn' : 'success', summary: '模型已删除', detail: emptied.length ? `别名 ${emptied.join('、')} 的链已空，整条删掉了` : label, life: emptied.length ? 0 : 4000 });
+      await load();
+    } catch (error) { toastError('删除模型失败', error); }
+  });
+}
 function editModel(model?: Record<string, unknown>): void { modelForm.value = model ? { id: String(model.id), providerId: String(model.provider_id), modelId: String(model.model_id), displayName: String(model.display_name ?? ''), contextWindow: Number(model.context_window), maxOutput: Number(model.max_output), priceIn: Number(model.price_in ?? 0), priceOut: Number(model.price_out ?? 0), priceCacheRead: Number(model.price_cache_read ?? 0), priceCacheWrite: Number(model.price_cache_write ?? 0), enabled: Boolean(model.enabled), sort: Number(model.sort ?? 0), vision: manualVision(model) } : { id: '', providerId: providers.value[0]?.id ?? '', modelId: '', displayName: '', contextWindow: 128000, maxOutput: 8192, priceIn: 0, priceOut: 0, priceCacheRead: 0, priceCacheWrite: 0, enabled: true, sort: 0, vision: 'follow' }; modelDialog.value = true; }
 async function saveModel(): Promise<void> {
   const { vision, ...form } = modelForm.value;
@@ -2543,6 +2577,8 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             <template #capabilities="{ data }"><span v-if="capabilityTags(storedMeta(data)).length || manualVision(data) !== 'follow'" class="cap-tags"><UiTag v-for="tag in capabilityTags(storedMeta(data))" :key="tag" :value="tag" severity="secondary" /><UiTag v-if="manualVision(data) !== 'follow'" :value="manualVision(data) === 'on' ? '手标 · 能看图' : '手标 · 看不了图'" :severity="manualVision(data) === 'on' ? 'info' : 'warn'" title="运维手动标过这个模型的看图能力，压过 models.dev 的判断；「补齐元数据」不会撤销它" /></span><small v-else class="catalog-sub">未知</small></template>
             <template #price_in="{ data }"><span>{{ data.price_in ?? '—' }}</span><small v-if="storedPriceSource(data)" class="catalog-sub">{{ storedPriceSource(data) === 'manual' ? '手工填写' : MATCH_LABELS[String(storedPriceSource(data))]?.label ?? '' }}</small><small v-else-if="data.price_in === null" class="catalog-sub match-third-party">缺定价 · 花费按 0 记账</small></template>
             <template #enabled="{ data }"><UiTag :value="data.enabled ? '启用' : '停用'" :severity="data.enabled ? 'success' : 'secondary'" /></template>
+            <!-- 行本身是「点开编辑」，所以这颗按钮必须 @click.stop —— 不然点删除会同时弹出编辑框 -->
+            <template #actions="{ data }"><UiButton size="small" variant="text" severity="danger" icon="pi pi-trash" :aria-label="`删除模型 ${data.model_id}`" @click.stop="removeModel(String(data.id), String(data.model_id))" /></template>
           </DataGrid>
           <div class="registry-heading"><div><h3>别名路由</h3><p class="section-note">代码里只出现别名，不出现具体模型 id。每个别名指向一条有序的 fallback 链：前一个模型不可用就顺延到下一个。下面六个是内建别名，<code>main</code> 必须配。</p></div><UiButton size="small" variant="outlined" label="添加自定义别名" @click="editAlias()" /></div>
           <DataGrid :rows="aliasRows" :columns="COLUMNS.aliases" data-key="alias">
