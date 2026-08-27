@@ -1899,7 +1899,7 @@ export async function createTelegramBot(
         else {
           const final = await generated.final;
           answer = consumed.text.trim() ? consumed.text : final;
-          // 这条回落此前一个字都不落日志（docs/00 §2.3）。它意味着「最后一步没有正文」——
+          // 这条回落此前一个字都不落日志（docs/04 §2 那节收尾补跑）。它意味着「最后一步没有正文」——
           // 而流里攒到的很可能只是工具调用之间的过程旁白，被当成了答复提交进上下文（本次事故）。
           // 收尾补跑（runtime 的 `wrapUpIfNeeded`）能救大多数，救不了的至少要在日志里留下痕迹。
           if (!final.trim())

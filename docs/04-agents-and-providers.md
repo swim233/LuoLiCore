@@ -143,6 +143,28 @@ for await (const chunk of res.textStream) out.push(chunk);   // → Telegram 流
 
 > `instructions` 与 `messages` 分离，正好实现需求中「头部消息固定为系统提示词，中间为动态上下文」。**不要**把系统提示词塞进 `messages[0]`，否则会被裁剪逻辑与 provider 缓存策略误伤。
 
+### 最后一步没有正文：收尾补跑（`wrapUpIfNeeded`）
+
+AI SDK v7 的 `result.text` 是**最后一步的正文**，不是全轮拼接 —— 模型以工具调用或纯 reasoning
+收尾时它就是空串，而那一轮该说的话还没说。`runMainAgentInternal` 因此追加**一次**禁工具的模型
+调用让模型自己写结论。**四道闸全过才跑**：① 最后一步没有正文；② 这一轮真的调过工具；
+③ `streamFailure` 为空（上游已经挂了，再跑一次只是接着烧钱）；④ 单轮成本闸
+（`quota.perTurn.maxCostUsd`）还有余量。轮次已经 abort 的一律不跑。
+
+- **「一次」是硬判据，不是靠成本闸兜住的。** 补跑调的是 `agent.generate(...)` —— 也就是整个
+  `ToolLoopAgent` 循环，不是一次裸调用：上游在 `tools:[]` 的请求里**仍然返回 tool_calls** 时，
+  收尾阶段又跑满了 12 步（`steps=24`，[28 · L-AGT-01](./reviews/28-round10-live-system-test.md)）。
+  所以判据挂在 `stopWhen` 上（`wrapUpMode && steps.length >= 1`），`perTurn.maxCostUsd` 只是兜底。
+- **不伪造答复**（[16 §5](./reviews/16-remediation-plan.md)）：补跑是让模型自己说，不是替它编一句。
+  补不出来就回落到流里攒到的文本并记 `turn.no_final_text`（[08 §5.2](./08-telegram-adapter.md)），
+  补跑本身记一条 `turn.wrap_up` warn（[10 §2](./10-logging-and-observability.md)）。补跑自己抛出的
+  异常一律吞掉：旁白已经在屏幕上了，在这里抛等于让用户既看到回复又收到一句「这轮没成」。
+- **定时任务那条路吃的是同一个语义**，所以它一并被修好了：`runMainAgent`（非流式）取的也是
+  「最后一步正文」，以工具调用收尾就是空正文 → `model_returned_empty` → 记 `failed` 并回滚整轮，
+  而任务其实已经把事做完了 —— 一次说不清的静默失败。
+- 与静默任务的相互作用（`stay_silent` 收工正好命中前两道闸，每次静默要多付一次模型调用，且刻意
+  **不为它开跳过分支**）见 [02 §10.5](./02-context-engine.md)。
+
 ### 2.1 Prompt 缓存
 
 请求体的**物理**顺序是缓存的唯一判据：所有 provider 的前缀缓存都从第 0 个字节开始逐字节比对，
@@ -553,7 +575,10 @@ shim 去翻译 Responses 语义，代价有两项，都是实测出来的：
 - 轮次包含图片且当前模型 `capabilities.vision=false` → `prepareStep` 自动切 `vision`。判据在轮次级算
   一次（判据是 `isImagePart`，与 `capImages` 共用一份），能力取自
   `capabilities_json.vision`（`ModelRegistry.supportsVision`，别名不存在时恒为 false —— `info()` 走
-  `#pick` 会静默回落到 `main`）。
+  `#pick` 会静默回落到 `main`）。**这件事指望不上模型自己发现**：看不见图的模型不知道自己看不见。
+  实测那一轮它去 `cp` 那个文件、用 python 读尺寸、开了个本地 http 服务器、又拿 agent-browser 截图，
+  绕 11 步也没看到那张图，末了还调 `set_model('vision')` 对用户说「切好啦」（logs/2026-08-18 22:15；
+  那个覆盖只在当轮生效，见本节最后一条）。所以判据在 `prepareStep` 里，不在提示词里。
   **「包含图片」的取样范围由 `media.visionScope` 决定**（默认 `window` = `snapshot + delta`，即整个
   上下文窗口）。`window` 的代价是一张图会把它之后的每一轮都钉在 vision 别名上：实测一个私聊里
   4 条带图消息留在窗口内，此后每一轮纯文本都记 `vision_required`（`logs/2026-08-19`），而一个能看图的
@@ -597,13 +622,25 @@ shim 去翻译 Responses 语义，代价有两项，都是实测出来的：
   **能力位可以被人工推翻。** `capabilities_json.vision` 是按**模型名**从 models.dev 抄来的，而中转站
   照抄官方模型名却不真的转发图片是常态：那种模型照常 200 返回、usage 里没有 `image_tokens`，然后
   凭上下文瞎猜图里有什么，而抄来的 `vision:true` 让这一轮**不切**别名 —— 于是「模型看不见图却不
-  知道自己看不见」这个形态从另一头又回来了一次（实测 `logs/2026-08-19`：同一家网关的 `grok-4.5`
-  四次全错、`grok-4.3` 正确且 usage 里有 `image_tokens`。**那一个模型上游已于 2026-08-19 修好**，
-  例子留着是因为**判据**可复用 —— 看 usage 的 `prompt_tokens_details` 里有没有 `image_tokens`，
-  不看目录写了什么）。目录改不了那个事实，所以运维能在 WebUI
+  知道自己看不见」这个形态从另一头又回来了一次。目录改不了那个事实，所以运维能在 WebUI
   的模型行上标记这一位（`PATCH /api/models/:id` 的 `capabilities`，落 `capabilities_json.manual`，
   见 [09 §3.5](./09-webui.md) 与 [03](./03-data-model.md) 的形状说明）。标记压过目录，且
   **「补齐元数据」不会撤销它**。反向也能标（目录说不行、这家网关其实行）。
+
+  **怎么认出一个撒谎的能力位**（形态与判据，会随下一家网关复发，2026-08-19 实测那一次的记录）：
+  症状是用户发了图、模型连着几轮回与图无关的内容。**先证链路是好的再怪模型** ——
+  `logs/2026-08-19/blobs/` 里 11 份带图请求逐份解开，`image_url` 形状对、base64 解回来是完整可看的
+  JPEG、`provider.fallback` 那条 `vision_required` 也记了，每一环都干净，坏的只可能是末端那个模型。
+  **然后拿一张三色块合成图直接打探针**，判据是 usage 的 `prompt_tokens_details` 里**有没有
+  `image_tokens`**，不是模型答得对不对、更不是目录写了什么：该网关的 `grok-4.5` 四次全错且每次
+  错法不同，`prompt_tokens` 恒为 2266（图片进没进请求体对它一个 token 都没影响），每次还烧
+  600–2500 个 reasoning token 瞎猜；同一家的
+  `grok-4.3` 一次就对，usage 里明明白白写着 `image_tokens: 42`。**那一个模型上游已于 2026-08-19 修好**
+  （该网关此后真的转发图片），本部署此刻没有需要标记的模型 —— 留在这里的是探针与判据本身。
+
+  **另一半仍然是配置，上面那套机制一条都管不着。** `vision` 别名链的顺序本身就能把一个瞎模型排在
+  含图轮次的最前面：那时判据只问「当前别名能不能看图」，答案为真就到此为止，切换不发生、降级不
+  发生、`provider.fallback` 也不记。这条一直够得着（改链序即可），只是没人知道要去排它。
 - 模型可用 `set_model` 工具（`minRole=trusted`）为**当轮**指定别名，写入 `turn.runtime.modelAliasOverride`；不跨轮持久。
   工具的 description 与返回值都写明这一点（返回 `scope: 'this_turn_only'`）：模型曾据此对用户说
   「切好啦，现在是 vision 模型」，而下一轮（真正带图那一轮）早就回到默认别名了。
@@ -672,7 +709,11 @@ fallbackModel(chain, cfg) 语义：
   - **这一路必须由流自己抛出来。** 步骤级失败与轮次 abort 都不会让 AI SDK 的 `result.stream` 抛（它把错误吞进内部 onError，流照常正常结束，`result.text` 还是上一步的正文），所以 `streamMainAgent` 在流耗尽时显式检查一次「这一轮是不是断的」并抛出去 —— 不抛的话投递侧看不出区别，轮次会以 committed 收尾，用户既没有「(生成中断)」也没有超时提示（实测 `logs/2026-08-18` · B8F92Z：600 秒到点 abort，3 分钟后 `turn.end turn committed`）。
   - 收尾那一条消息**仍然要发出去**，所以一轮的墙钟可以超出 `turnTimeoutMs` 一个 API 调用的时间（群聊里由 `telegram.throttle.perChatPerMinute` 的队列决定）。这是有意的：内容已经在屏幕上，标记必须跟上去。
 - 健康检查：每 `provider.healthCheckCron`（默认 10 分钟）对启用的 provider 发一次 1-token 探测；连续失败 3 次标 `health_state='down'`，WebUI 显示并从 fallback 链临时跳过（`down` 状态 30 分钟后自动重试）。
-  实现在 `packages/core/src/provider/health.ts`，计数落 `providers.health_fail_count`（0009）。三条补充：
+  实现在 `packages/core/src/provider/health.ts`，计数落 `providers.health_fail_count`（0009）。
+  **粒度是 provider，不是模型**：状态挂在 `providers` 行上（`health_state` / `health_fail_count`），
+  一个 provider 被判 `down`，它名下**所有**模型一起从各自的别名链里消失（本部署 ksm-api 判 down 会
+  连带 `high` 的链首）。这是现在的口径，要改成按模型判就得先改这一节、再加一张表 —— 别在实现里
+  悄悄分叉出第二种粒度。三条补充：
   - **判据是「上游还答不答」，不是「这个模型这次答得对不对」**：超时 / 网络错 / 5xx 计入连续失败；
     401/403 当场标 `down`（与调用路径的 `onUnavailable`、WebUI「测试连接」一致）；**其余 4xx 不计**，
     只记一条 warn —— 上游答了话就说明它活着，拿探测模型的参数问题（`max_tokens` 下界、模型名换了）
@@ -708,11 +749,17 @@ fallbackModel(chain, cfg) 语义：
     整个 provider 名下所有模型行。只标命中的那一行的话，同一个凭据被拒的 provider 在一条链上挂了
     两个模型时，第二个不被跳过 —— 而 401 在中间件里是短路 `throw`，这一轮既白烧一次注定 401 的
     往返，也不会继续往下 fallback。
+  - **调用路径上判 down 不当场 `rebuild()`**：轮次中途换掉 `#chains` 会让这一步的记账反查不到真正
+    服务它的那一行（价格落回链首）。代价是明知的 —— 这一次要是把**最后一个** provider 标成了 down，
+    `all_providers_down` 告警要等下一次 cron 才响（那条尾巴在 `main.ts` 的 `rebuildModels`）。
+    本次调用内跳过失效候选靠 `isDown`，链本身等下一次 rebuild 收拾。
   - 探测**要花钱、也依赖至少配了一个启用模型**（这两点与 §5.4「测试连接」刻意相反：那一个用模型目录
     接口，不花钱、不管模型配没配）。一个启用模型都没有的 provider 不在任何链里，跳过不探。
   少了这一条时的表现见 `logs/2026-08-18`：ksm-api 变成黑洞之后，链首每一步都要重新熬满
   `3 × requestTimeoutMs`（实测 363 秒 × 每一步），而一轮只有 `concurrency.turnTimeoutMs`（600 秒）
-  —— 三个轮次全部以「这一轮太久没有进展」收尾，而库里那行 `health_state` 直到最后仍是 `up`。
+  —— 三个轮次全部以「这一轮太久没有进展」收尾（一轮 600 秒最多够走一步），而库里那行
+  `health_state` 直到最后仍是 `up`：那一段时间里**没有任何一处记住「上游连上了但不返回」**。
+  上面这几条判据的回归在 `tests/provider.health.test.ts`。
 
 ### 5.4 密钥管理
 

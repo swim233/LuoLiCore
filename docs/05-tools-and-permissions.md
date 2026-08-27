@@ -354,7 +354,8 @@ bash: tool({
 
 #### 3.5.1 `spawn_acp`（M13）
 
-同一件事换成协议。`spawn_harness` 是「拼一条 argv、把任务当最后一项、把 stdout 收回来」；
+同一件事换成协议（两条路的分工见 [04 §6.2](./04-agents-and-providers.md)）。
+`spawn_harness` 是「拼一条 argv、把任务当最后一项、把 stdout 收回来」；
 `spawn_acp` 是「起一台 ACP（Agent Client Protocol）server、走 stdio 上的 JSON-RPC 驱动它」。
 参数 `{task, dir}`（多 agent 部署另加一个 `agent`，取值是启用的 agent 名字的枚举；**单 agent
 部署 schema 逐字节不变** —— 只有一台 agent 的部署不该因此多出一个模型必须填的参数）。
@@ -366,6 +367,11 @@ bash: tool({
 | 准入 | 仅 `owner` **且仅私聊**，且 `agent.acp.enabled`，且 `allowedDirs` 非空，且至少一台 agent 启用 | `available()` —— 任一不成立时工具**不进模型的工具目录** |
 | 目录 | 只能在 `agent.acp.allowedDirs` 列出的路径或其子目录里跑（复用 `resolveHarnessDir`，逐段比较）；**空名单 = 功能关闭** | `available()` + `AcpManager.run()` 各判一次（热更新可能在两者之间清空名单） |
 | 审批 | `approval: 'always'` —— 起这台 agent 这一个动作走一次审批 | `TOOL_POLICY` |
+
+**出厂两道都是关的**：`agent.acp.enabled` 默认 `false`、`allowedDirs` 默认空
+（[11](./11-config-reference.md) 的 `agent.acp`），任一不成立时 `spawn_acp` 连模型的工具目录都不进。
+而打开之后的默认姿态是**「整趟交给它」**（`permissionMode: auto` + `agents[].approvalMode: yolo`），
+两个默认值各自的理由见下面那两段 —— **别把「整块默认关」读成「打开之后默认逐条拦」**。
 
 **为什么档位不能更松。** 相比 harness，ACP 这条路我们**看得见**它内部做了什么（`session/update`
 一路报过来：思考、工具调用、用量，进度卡片就在逐条渲染），而看得见不等于拦得住 ——
@@ -459,7 +465,8 @@ profile 说了算（那里面可能写着别的值），而运维在界面上往
 一次都没有发生。换成 `approvalMode: yolo` 之后同一条命令立刻走通，跑的是我们的终端。
 **卡住它的是 agent 自己内部那道审批，不是能力申报、也不是我们的回答。**
 
-第二个条件因此是 `approvalMode: yolo`，而**它现在就是默认值**（需求方拍板：整趟交给它）。
+第二个条件因此是 `approvalMode: yolo`，而**它现在就是默认值**（需求方 2026-08-22 拍板：整趟交给它，
+同一次也定下 `permissionMode: auto`）。
 把默认值定在这一档不是「反正批过一次了」，而是另两档下 `bash` **可证明用不了**：留一个用不了的
 工具在默认 `tools` 里，模型会试、失败、然后绕路或编一个理由（「摘除比伪造安全」，`docs/16 §5`）。
 `always-ask` 更不能当默认 —— 它另有一个可复现的 edit 故障：文件没被改、`fs/write_text_file` 一次
@@ -481,7 +488,12 @@ profile 说了算（那里面可能写着别的值），而运维在界面上往
 **错误契约**（与 `harness_*` 那张表同一个体例；`ok: false` 时 `error` 恒为下表之一，
 `hint` 面向模型 —— 它要能用自己的话向用户解释为什么没做成，或者据此改一次参数）。
 文案的**唯一来源**是 `packages/core/src/acp/errors.ts` 的 `ACP_ERROR_HINTS`：manager、session
-与工具壳三处共用同一份，散成三份的话「先改文档」就再也验不动了。
+与工具壳三处共用同一份，散成三份的话「先改文档」就再也验不动了。而「只有一份文案」本身不构成
+保证 —— **下面这 24 个错误码与 `ACP_ERROR_HINTS` 双向焊住**（`tests/acp.runtime.test.ts`，照 §4 那张矩阵与
+[10 §2](./10-logging-and-observability.md) 那张 kind 表的先例）：少一行 = 模型交回一个手册里查不到的
+错误码，多一行 = 手册写了一个永远不会出现的档。判据同样**只认表格第一列**，因为其余列的正文里会
+引用别的错误码（`acp_line_too_long` 那行就提到 `acp_connection_lost`），认全表等于让「文档里提到过」
+变成「表里有」。
 
 | `error` | 何时 | 判在哪 |
 |---|---|---|
@@ -826,6 +838,26 @@ data, mimeType}]}` 被换成 `media` + 一句文本标记。不做这一步的�
 `install_skill` 不在这一档：一个包带着 `scripts/` 与 `bin/`，「纯文本」这个前提不成立
 （[07 §6.1](./07-skills-plugins-mcp.md)）。两者共用 `tools.selfExtend.skills.enabled` 一个开关。
 
+**这条纪律的另一半是把落点对 fs 工具关死**：`selfAuthoringDenyGlobs()` 从 `skills.dir` /
+`plugins.dir` 推出两条绝对路径 glob，叠在运维那份 `tools.fs.denyGlobs` 之上（`main.ts` 的
+`filesFor`），于是 `write_file` 绕不过 `writeSource` 去改一个**已启用** plugin 的源码。由目录配置推
+而不是写死进 schema 默认值，理由在 [07 §6.2](./07-skills-plugins-mcp.md)；「以 `/**` 结尾的同时拒绝
+那个目录本身」对这两条一并生效（§3.1，少了它 `move_file` 能把整棵树搬到名单之外）。
+
+⚠ **它只叠在 fs 工具的 `PathJail` 上，挡不住 owner 的 `bash`。** `sandbox.bypassRoles` 默认含
+`owner`，owner 的命令在宿主上直跑、压根不经 `resolve()`，一句 `unzip -d skills/ pkg.zip` 没有任何
+东西拦（同 §5.2 与 [14 T19](./14-open-questions.md)：`denyGlobs` 只被 `PathJail` 执行，沙箱不看它）。
+**这不算一道漏掉的门** —— owner 的宿主 `bash` 本来就等价于完整机器读写权限
+（[14 T8](./14-open-questions.md)），deny-glob 防的从来是 `write_file` 那条更安静的路：不留命令正文、
+不经启用闸的改写。它值得写在这里是因为推出来的那两个判断：
+
+- **模型其实一直有这条野路子，只是不知道。** 够得着 `skills/` 与「知道那棵树该长什么样、
+  该进哪张表」是两回事，缺了后者它就在工作目录里自己凑一套能跑但不是 skill 的东西
+  （[07 §2.5](./07-skills-plugins-mcp.md) 那次实测）。
+- **所以补的是 `install_skill` 这条带校验的通道，而不是放开 deny-glob。** 放开等于把「随便写进
+  `skills/`」变成一个受支持的动作，那棵树的正确性从此没有一处负责；通道则把同一件事收进一个有
+  解包判据、装了一半整棵回滚、落 `skills` 表的入口（[07 §6.5](./07-skills-plugins-mcp.md)）。
+
 **八个工具一律无条件注册，开关放在 `available()` 里。** 按配置跳过注册会撞上 `main.ts` 那条
 「每个 `TOOL_POLICY` 条目都必须已注册」的启动断言 —— 表现是关掉这个功能之后进程起不来。
 
@@ -1128,6 +1160,38 @@ fail-closed，但那是巧合不是设计（docs/20 · W-TOOL-01）。
    要真的不给就用 `tools.overrides.<name>.enabled=false` 或 `toolDeny`
    （[07 §4.1](./07-skills-plugins-mcp.md#41-配置) 写了这两层的分工），不要用折叠。
 
+### 4.1 运维覆盖层（`tools.overrides.<name>`）
+
+上面那张表是默认值，**本次生效的策略是它叠上运维在工具页写的覆盖** —— `TOOL_POLICY` 不再是唯一
+真相。四项可写：`enabled` / `minRole` / `approval` / `timeoutMs`（`source` 与 `scope` 只读，后者在运行时
+不参与任何判定，做成可写等于放一个改了没效果的开关）。界面那一侧的规矩 —— 同时显示「代码默认」与
+「当前生效」、放宽（`minRole` 调低或审批降档）要 `confirmRelax` 二次确认 —— 在
+[09 §3.7](./09-webui.md)；本节只写运行时这一侧、改代码时要守的东西。这一层是对旧决定的**有意推翻**，
+原文与理由见 [21 §5](./21-webui-coverage-gaps.md) 那条「已推翻」。
+
+**读 `minRole` / `approval` 一律走 `ToolRegistry.effectivePolicy()`，直接读 `tool.policy` 就是绕过覆盖层。**
+这两个字段各有两处消费点（目录过滤 `active()` 与准入复查 `admit()`/`execute()`；审批基准与
+`approvalFor` 抬档），漏掉任何一处的表现都一样：界面上关严了，运行时没有。另两项不经
+`effectiveToolPolicy`，各自落在自己的消费点上 —— `enabled` 是 `disabledByOperator()`（目录过滤 +
+`execute()` 二次硬拦截回 `tool_disabled_by_operator`，见上一段），`timeoutMs` 落在 §8.1 那道单次调用
+超时上。**覆盖只有全局一层，不进 `perChat` 覆盖白名单**（[11 §2.1](./11-config-reference.md)）：进了
+的话一个会话就能给自己把工具权限调低，而那张白名单正是拦住这件事的东西。
+
+三条性质，改工具权限相关的代码之前逐条对：
+
+- **覆盖绕不过 `available()`。** 它只动「角色闸」与「审批闸」两道。`spawn_harness` / `spawn_acp` 的
+  owner + 仅私聊、自定义工具那道「不得低于 `bash`」的地板、容器族的 owner 地板、`stay_silent` 与
+  `search_tools` 的轮次形态判据都写在 `available()` 里（脚注 ‡ § ¶ ‖ ※ ◇ ◆），把 `minRole` 覆盖成
+  `limited` 一个都开不出来。反过来说，一道该守住的闸只要写在注册的 `minRole` 上，一次覆盖就能放开它。
+- **`approvalFor` 抬档只升不降。** 覆盖设的是**基准档**，`ToolRegistry` 取基准与 `approvalFor` 两者中
+  最严的一档：把 `memory_write` 这类工具的基准改成 `never`，它靠 `approvalFor` 把自己抬进审批的那些
+  输入照旧要审批。方向是刻意的 —— 运维可以替一个不审批的工具收紧，不能替一个工具把它自己认定的
+  高危输入放过去。
+- **`timeoutMs: null` 的工具不吃超时覆盖。** `bash` / `python` / `spawn_agent` / `spawn_harness` /
+  `spawn_acp` / `container_exec` / `ask_parent` 与全部 `custom_*` 各有自己的硬期限（§8.1、§5.5），
+  从外面再套一层 race 会在它们自己的超时之前把调用砍掉。判 `null` 那一支在 `execute()` 里排在读覆盖
+  **之前**：工具页对这几行置灰是界面礼貌，运行时这一支是不信界面的那道兜底。
+
 ---
 
 ## 5. 沙箱
@@ -1314,7 +1378,9 @@ docker exec --user=1000:1000 --workdir=/workspace -e HOME=/workspace [-e extraEn
   **`kill` 后面不能写 `--`**：dash 的内建 `kill` 不认这个分隔符，`kill -KILL -- -123` 直接
   `Illegal number: -` 退 2，于是取消整条静静失效 —— 表现是 `/cancel` 之后那条命令一直跑到
   自己的 timeout 才结束。这条是活体测试逮到的：`docker exec` 的**客户端**会一直挂到容器里那个
-  进程真的退出为止，所以「取消要当场返回」这件事，墙钟本身就是判据（`sandbox.containers.docker.test.ts`）；
+  进程真的退出为止，所以「取消要当场返回」这件事，墙钟本身就是判据（`sandbox.containers.docker.test.ts`）。
+  ⚠ **那份用例是 `describe.skipIf(!dockerReady)`，机器上没有 docker 时整份 skip** —— 这一档读码看不见、
+  不带 docker 的那趟 CI 也看不见，绿不等于这条路跑过；动取消这一段要在有 docker 的机器上真跑一遍；
 - 镜像里没有 `setsid` 时（自带镜像有，自定义镜像未必）退化成只杀 pidfile 里那一个 pid，
   **并在日志里写明子进程可能残留** —— 不假装取消干净了。
 

@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { KNOWN_UNIMPLEMENTED_CONFIG_KEYS, TOOL_POLICY, configJsonSchema, configSchemaLeafPaths } from '@luoli/core';
 import { describe, expect, it } from 'vitest';
@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 /**
  * 让文档库的「活 / 死」分层说话算数。
  *
- * 背景：`docs/reviews/` 那九轮复审是历史快照，但它们**删不掉** —— 大量源码注释拿条目编号
+ * 背景：`docs/reviews/` 那十轮复审是历史快照，但它们**删不掉** —— 大量源码注释拿条目编号
  * （`docs/20 · W-SEC-02` 那种）当「这行为什么长这样」的凭据。凭据的问题在于它没有任何东西
  * 保证还指得着：删一条、改一次编号、挪一个文件，注释就静静变成一句空话，而空话看起来和
  * 真凭据一模一样。前两条断言把这件事焊住。
@@ -426,5 +426,72 @@ describe('docs/21 §1 的复算表与代码一致', () => {
     const leaves = configSchemaLeafPaths(configJsonSchema());
     const perChat = leaves.filter((path) => path.startsWith('perChat')).length;
     expect(claim('\\*\\*已接线\\*\\*')).toBe(leaves.length - KNOWN_UNIMPLEMENTED_CONFIG_KEYS.length - perChat);
+  });
+});
+
+/**
+ * `docs/00 §2`（还欠什么）的**活性探针**。
+ *
+ * 这一条补的是一次真实的漏删：`M-WEB-05` / `M-LOG-02` / `M-MEM-02` 三条缺陷修完之后，`docs/00 §2`
+ * 里仍然写着「还欠着」，挂了三天 —— **而没有任何判据会因此变红**。`tests/acceptance.test.ts` 只核
+ * 本文的两个数字（勾选分子分母），§2 那张表整个是裸的手工区，而它恰恰是全库最需要保鲜的一节：
+ * 别人开工前读的就是它。
+ *
+ * 探针的形状是一句**必须无命中**的 grep：`⟨探针：<路径> !~ <正则>⟩`。一条欠账被补完，那个模式就会
+ * 出现在源码里，探针当场变红 —— 于是「修好了但忘了从 §2 删掉」不再可能。它是**绊线不是证明**：
+ * 报红只说明「这条可能已经补完了，回来看一眼」，不说明补得对。误报的代价是重看一行，
+ * 而沉默腐烂的代价是别人照着一份过期的清单决定做什么。
+ *
+ * 写不出探针的（纯语义欠账、跨文件的「没接线」、以及「有意为之 / 修不了」那几条）写
+ * `⟨探针：无 —— 理由⟩`，测试放行但要求理由不为空。**一条都不许沉默地跳过** —— 「写不出探针」和
+ * 「忘了写」在判据眼里必须长得不一样，这正是上一轮 `NON_LOG_KINDS` 那份手写排除名单的教训。
+ */
+describe('docs/00 §2 的每一条都带活性探针', () => {
+  const text = readFileSync('docs/00-state.md', 'utf8');
+  const section = /\n## 2\. 还欠什么\n[\s\S]*?(?=\n## 3\.)/.exec(text)?.[0];
+  const rows = (section ?? '')
+    .split('\n')
+    .map((line, index) => ({ line, no: index }))
+    .filter(({ line }) => line.startsWith('| ') && !/^\|\s*-{3}/.test(line) && !/^\|\s*(?:编号|欠什么)\s*\|/.test(line));
+  const PROBE = /⟨探针：(?:无\s*——\s*(?<why>[^⟩]+)|(?<path>[^\s|!⟩]+)\s*!~\s*(?<pattern>[^⟩]+))⟩/;
+
+  it('§2 那一节找得到，且行数没有塌掉', () => {
+    expect(section, 'docs/00 里找不到「## 2. 还欠什么」那一节 —— 判据坏了或标题改了').toBeTruthy();
+    expect(rows.length, '§2 一行表格都没解析出来，判据坏了').toBeGreaterThan(5);
+  });
+
+  it('每一行要么有探针，要么写明为什么写不出探针', () => {
+    const naked = rows.filter(({ line }) => !PROBE.test(line)).map(({ line }) => line.slice(0, 60));
+    expect(naked, '这些欠账没挂探针 —— 补完之后没有任何东西会提醒你把它从 §2 删掉。'
+      + '写 ⟨探针：<路径> !~ <正则>⟩，或 ⟨探针：无 —— 理由⟩').toEqual([]);
+  });
+
+  it('探针指的文件都还在', () => {
+    const missing: string[] = [];
+    for (const { line } of rows) {
+      const path = PROBE.exec(line)?.groups?.path;
+      if (path && !existsSync(path)) missing.push(path);
+    }
+    expect(missing, '探针指着不存在的文件 —— 代码挪过位置了，探针要跟着走').toEqual([]);
+  });
+
+  it('探针全部无命中 —— 有命中说明那条欠账可能已经补完了', () => {
+    const tripped: string[] = [];
+    for (const { line } of rows) {
+      const { path, pattern } = PROBE.exec(line)?.groups ?? {};
+      if (!path || !pattern || !existsSync(path)) continue;
+      if (new RegExp(pattern.trim()).test(readFileSync(path, 'utf8'))) {
+        tripped.push(`${path} 里已经有 /${pattern.trim()}/ —— ${line.split('|')[1]?.trim().slice(0, 50)}`);
+      }
+    }
+    expect(tripped, '探针响了：这几条欠账看起来已经被补完，回 docs/00 §2 核一遍 —— '
+      + '真补完了就整行删掉（§4 的规矩），没补完就把探针改准').toEqual([]);
+  });
+
+  it('「无探针」的理由不许敷衍', () => {
+    const thin = rows
+      .map(({ line }) => PROBE.exec(line)?.groups?.why?.trim())
+      .filter((why): why is string => why !== undefined && why.length < 8);
+    expect(thin, '「写不出探针」得说清楚为什么 —— 一句话，不是一个词').toEqual([]);
   });
 });

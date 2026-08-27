@@ -184,10 +184,17 @@ activeTools = (常驻 ∪ 本轮已展开) ∩ skill 允许集 ∩ 开轮冻结�
 
 §2.1 的格式一开始就允许附属文件，但**在这之前没有任何途径把它们放进去**：`write_skill`
 的入参只有 `body: string`，`SkillLoader` 也只写一个 `SKILL.md`；`write_file` / `edit_file`
-被 `selfAuthoringDenyGlobs()` 对 `skills/**` 关死。实测代价见 [00 §2](./00-state.md)：
-用户在 Telegram 丢了一个带 `scripts/` + `bin/`（4.9 MB ELF）的音乐 skill 包，模型把它解到
-**工作目录**、一路 `bash scripts/invoke.sh` 用了起来 —— 能用，但它不是一个 skill：
-不进目录、不进 `skills` 表、扩展页看不见、`load_skill` 与 `skill://` 都够不着。
+被 `selfAuthoringDenyGlobs()` 对 `skills/**` 关死。实测代价（`logs/2026-08-18/tool.jsonl`
+ts 1787036340–1787036441）：用户在 Telegram 丢了一个带 `scripts/` + `bin/`（4.9 MB ELF）的音乐
+skill 包，模型把它解到**工作目录**、一路 `bash scripts/invoke.sh` 用了起来 —— 能用，
+但它不是一个 skill：不进目录、不进 `skills` 表、扩展页看不见、`load_skill` 与 `skill://` 都够不着。
+
+**那一整段里一次 `write_skill` 都没有，因为它不知道有这个工具。** `tools.selfExtend.skills.enabled`
+出厂 `false` 且没人开过，被开关关掉的工具不进模型的工具目录，而**一个缺席的工具在模型侧没有任何
+解释** —— 「这条通道存在但关着」这句话它拿不到，于是自己在工作区里凑了一套。运维侧那一半补上了
+（扩展页的通道闸提示条，指名道姓说出真正关着的那个键，[09 §3.8](./09-webui.md)）；模型侧至今只有
+§5 末尾 `maxRegistered` 截断那条 RUNTIME 告知算先例。§6.3 记的是反过来那一半：说明书讲了一个
+它没有的工具。
 
 `installSkillPackage()`（`packages/core/src/skills/package.ts`）是这条通道的唯一实现，
 模型侧的 `install_skill`（§6.5）与 WebUI 的 `POST /api/skills/package`（[09 §3.8](./09-webui.md)）
@@ -520,6 +527,9 @@ mcp:
 server 打印的授权链接直接写进 bot 进程的 stderr，然后握手 15 秒超时判死、`mcp-health` 每 5 分钟
 再来一次，无退避无上限。
 
+界面那一半（要登录的行排最前、〔登录〕/〔注销〕两个动作、凭据只露末 4 位）在
+[09 §3.8.1](./09-webui.md#381-需要登录的-mcp-server)。
+
 #### 凭据存哪儿：`mcp_auth` 表，不在配置里
 
 `migrations/0011_mcp_auth.sql` + `packages/db/src/mcp-auth.ts`（`McpAuthRepository`）。
@@ -596,6 +606,13 @@ warn 级，单行截到 2 KB，缓冲上界 8 KB）。这一条独立于 OAuth�
 做法）。判据用**整份 `servers`** 而不是「本次要连的那些」—— 停用一台 server 不该把它的 token
 一起丢掉，否则「停一下再开」等于要人重新登录一次。
 
+#### 回路怎么焊住
+
+`tests/mcp.oauth.test.ts` 对着 `tests/fixtures/mcp-oauth-server.ts` 跑 —— 一台自带授权服务器的
+受保护 MCP server，**没有 mock**：PKCE 真的验（`code_challenge_method=S256`）、`code` 与 `state`
+都是一次性的、access token 过期真的走 refresh 换新的且授权端点一次都不再被打。三层里任何一层的
+形状写错这里都会红。条目见 [13 AC-MCP-013…021](./13-acceptance-criteria.md)。
+
 ---
 
 ## 5. 三者的统一注册流程
@@ -665,8 +682,9 @@ plugin 60 > MCP 40 > 自定义 30），记 `warn` 日志并在 RUNTIME 块告知
 
 ## 6. 自我扩展：模型给自己写工具 / skill / plugin / 装 MCP（M12）
 
-`docs/14 §2 Q13` 拍板后加的。四条通道复用的都是本文前面已有的运行时机制，模型侧只是多了七个工具
-（清单与权限档见 [05 §3.10](./05-tools-and-permissions.md)）。
+`docs/14 §2 Q13` 拍板后加的。四条通道复用的都是本文前面已有的运行时机制，模型侧只是多了八个工具
+（清单与权限档见 [05 §3.10](./05-tools-and-permissions.md)）。**`tools.selfExtend.*` 出厂全关**
+（一个主闸 + 四个子闸）：打开之后模型才能写自定义工具 / skill / plugin、登记 MCP server。
 
 ### 6.1 一条共同的纪律
 
@@ -692,6 +710,14 @@ plugin 60 > MCP 40 > 自定义 30），记 `warn` 日志并在 RUNTIME 块告知
 `custom_tools` 靠 `definition_hash` 判，plugin 靠 `PluginManager.writeSource` 里的内容比对
 （那条不变量必须住在 manager 里：`reconcile()` 用 `sha256(文件+配置)` 当 ESM 的 cache-busting 签名，
 改一个**已启用** plugin 的文件之后下一次 reconcile 就把新代码 import 进本进程了）。
+
+**这条纪律的边界要读准：启用闸防的是「只有工具的模型」，不防一段已经在宿主上跑起来的脚本。**
+`tools.selfExtend.customTools.requireSandbox` 出厂关着，此时一个自定义工具就是调用者的 `bash`
+（owner 还命中 `sandbox.bypassRoles`），因而能直接写 `data/luoli.db` —— `tools.fs.denyGlobs` 只被
+`PathJail` 执行，沙箱不看它，上面那张表里的 `enabled` 对它不成其为闸。**动这一块之前先读
+[14 T18/T19](./14-open-questions.md)**：门总共只有四道（角色地板 + 沙箱判据 + 会话作用域 + 启用闸，
+逐道挡什么见 [05 §3.10](./05-tools-and-permissions.md)），别以为脚本跑起来之后还有第五道；而
+**授权时点与执行时点是分离的** —— 正文是若干轮之前写下的、写进了 SQLite，而 SQLite 不在提示词里。
 
 ### 6.2 自定义工具
 
