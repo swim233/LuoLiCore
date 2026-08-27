@@ -1711,6 +1711,10 @@ if (process.env.BOT_TOKEN) {
       registry: turnRegistry,
       concurrency: turnConcurrency,
       log,
+      // `/usage` 读它而不是 `turns`：试跑写 ledger 但不建 turns 行（docs/29 · M-QUOTA-01）。
+      ledger,
+      // `/ping` 的上线时长。与 `createServer` 收的是同一个值。
+      startedAt,
       alerts,
       failures: turnFailures,
       issueLoginToken: () => issueLoginToken(),

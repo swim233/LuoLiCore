@@ -172,6 +172,20 @@ describe('config API validation', () => {
     closeDatabase(db);
   });
 
+  // `tools.fs.allowHostFsForOwner` 不在 `sandbox.*` 下（PUT /api/sandbox 会给每个键加前缀），
+  // 但它管的是同一件事的另一半：谁能绕过隔离。沙箱页要能看见它，所以 GET 得把它带上
+  // ——此前那一页上 grep 都是零命中，只能从「全部配置」里拨（docs/29 · M-WEB-10）。
+  it('沙箱详情带上 allowHostFsForOwner，写回仍走配置那条路', async () => {
+    const { app, db, headers } = harness();
+    const detail = await data<{ allowHostFsForOwner: boolean; config: Record<string, unknown> }>(await app.request('/api/sandbox', { headers: { cookie: headers.cookie } }));
+    expect(detail.allowHostFsForOwner).toBe(false);
+    // 写回**没有**跟着搬去 `PUT /api/sandbox`：那条路给每个键加 `sandbox.` 前缀，
+    // 塞进去只会造出一个 schema 里不存在的 `sandbox.allowHostFsForOwner`。照旧走配置那条路。
+    expect((await app.request('/api/config', { method: 'PUT', headers, body: JSON.stringify({ 'tools.fs.allowHostFsForOwner': true }) })).status).toBe(200);
+    expect(db.prepare("SELECT value_json FROM config_kv WHERE key='tools.fs.allowHostFsForOwner'").pluck().get()).toBe('true');
+    closeDatabase(db);
+  });
+
   // 被环境变量钉住的键写进 config_kv 也会在下次 loadConfig 时被盖回去：拒收，而不是假成功。
   it('refuses to write config keys that the environment pins', async () => {
     const { app, db, headers } = harness();

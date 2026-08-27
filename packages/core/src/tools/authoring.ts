@@ -189,6 +189,12 @@ export function registerAuthoringTools(
         .array(z.string())
         .optional()
         .describe("声明了就会收窄；不确定就别给"),
+      requiresTools: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "这份 skill 离了就没法用的工具。声明了就是门控：这些工具本轮不可用时它连目录都不进",
+        ),
       minRole: z
         .enum(["limited", "trusted", "owner"])
         .optional()
@@ -226,6 +232,7 @@ export function registerAuthoringTools(
         body: input.body,
         minRole: (input.minRole ?? floor) as Role,
         ...(input.allowedTools ? { allowedTools: input.allowedTools } : {}),
+        ...(input.requiresTools ? { requiresTools: input.requiresTools } : {}),
         ...(input.enabled === undefined ? {} : { enabled: input.enabled }),
       };
       try {

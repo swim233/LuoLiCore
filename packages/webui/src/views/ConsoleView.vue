@@ -20,6 +20,7 @@ import UiLineChart from '../ui/UiLineChart.vue';
 import UiBarChart from '../ui/UiBarChart.vue';
 import UiRing from '../ui/UiRing.vue';
 import { pushToast, toastError } from '../ui/toast';
+import { askConfirm } from '../ui/confirm';
 import type { Attachment, GridColumn, TagSeverity } from '../ui/types';
 import { api, ApiError, apiStream, hydrateSession } from '../api/client';
 
@@ -1271,7 +1272,7 @@ async function resetQuota(row?: QuotaCounter): Promise<void> {
 interface SandboxForm { mode: string; network: string; image: string; dockerBin: string; workspaceDir: string; hostWorkspaceDir: string;
   memoryMb: number | null; cpus: number | null; pidsLimit: number | null; tmpfsMb: number | null; readOnlyRoot: boolean; bypassRoles: string[];
   persistent: { enabled: boolean; idleTtlMs: number | null; maxLifetimeMs: number | null; maxContainers: number | null; network: string; reapCron: string } }
-interface SandboxPayload { config: Record<string, unknown>; plan?: { allowed: boolean; mode: string; reason?: string } }
+interface SandboxPayload { config: Record<string, unknown>; allowHostFsForOwner?: boolean; plan?: { allowed: boolean; mode: string; reason?: string } }
 const sandbox = ref<SandboxPayload | null>(null);
 const sandboxForm = ref<SandboxForm>({ mode: 'docker', network: 'none', image: '', dockerBin: 'docker', workspaceDir: '', hostWorkspaceDir: '',
   memoryMb: 512, cpus: 1, pidsLimit: 128, tmpfsMb: 64, readOnlyRoot: true, bypassRoles: ['owner'],
@@ -1279,6 +1280,9 @@ const sandboxForm = ref<SandboxForm>({ mode: 'docker', network: 'none', image: '
 // 界面按小时收，配置按毫秒存 —— 「24」比「86400000」好核对得多，而 schema 那边保持 Ms 后缀的一致性。
 const HOUR_MS = 3_600_000;
 const hoursOf = (ms: number | null): number => Math.round((ms ?? 0) / HOUR_MS * 10) / 10;
+/** `tools.fs.allowHostFsForOwner` 不在 `sandbox.*` 下，所以它有自己的表单位与自己的写回路径。 */
+const hostFsForOwner = ref(false);
+const hostFsSaved = ref(false);
 const sandboxDirty = ref(false);
 const sandboxSaving = ref(false);
 const sandboxProbing = ref(false);
@@ -1324,6 +1328,8 @@ function syncSandbox(payload: SandboxPayload): void {
   // `persistent` 要单独合一层：浅铺会把整个嵌套对象换成后端那份，旧部署里它可能缺字段。
   sandboxForm.value = { ...sandboxForm.value, ...config, bypassRoles: [...(config.bypassRoles ?? [])],
     persistent: { ...sandboxForm.value.persistent, ...(config.persistent ?? {}) } };
+  hostFsSaved.value = Boolean(payload.allowHostFsForOwner);
+  hostFsForOwner.value = hostFsSaved.value;
 }
 async function loadSandbox(): Promise<void> {
   try { const payload = await api<SandboxPayload>('/api/sandbox'); sandbox.value = payload; syncSandbox(payload); }
@@ -1334,18 +1340,45 @@ function toggleBypassRole(role: string): void {
   sandboxForm.value.bypassRoles = current.includes(role) ? current.filter((entry) => entry !== role) : [...current, role];
   markSandboxDirty();
 }
-async function saveSandbox(): Promise<void> {
+/**
+ * 这一格上有三个开关能把沙箱边界整个拆掉，而此前**只有 `mode = none` 有闸**，而且用的还是裸的
+ * `window.confirm`（`M-WEB-01` 说的那批）。另外两个 —— 把 owner 之外的角色放进 `bypassRoles`、
+ * 打开 `allowHostFsForOwner` —— 拨一下、点保存，两次点击就没了（docs/29 · M-WEB-10）。
+ * 三个同等危险，所以三个共用同一道闸，而且逐条把代价写出来：只说「确定？」等于没说。
+ */
+function sandboxDangers(): string[] {
   const form = sandboxForm.value;
-  if (form.mode === 'none' && !confirm('mode = none 之后，exec 类工具直接在宿主进程的权限下执行任意命令，沙箱那一层完全消失。确定？')) return;
+  const dangers: string[] = [];
+  if (form.mode === 'none')
+    dangers.push('· mode = none：exec 类工具以 bot 进程的权限直接在宿主上执行模型给出的命令，沙箱那一层完全消失。');
+  const extra = form.bypassRoles.filter((role) => role !== 'owner');
+  if (extra.length)
+    dangers.push(`· ${extra.join(' / ')} 进了 bypassRoles：这些人能让模型在宿主上执行任意命令，和 owner 一样。`);
+  // 只在「从关到开」时问 —— 关掉它是收紧，不该也拦一道。
+  if (hostFsForOwner.value && !hostFsSaved.value)
+    dangers.push('· allowHostFsForOwner：文件工具对 owner 不再限制在工作区内，等于把宿主整个文件系统交给模型（含 .env 与本库）。');
+  return dangers;
+}
+async function saveSandbox(): Promise<void> {
+  const dangers = sandboxDangers();
+  if (!dangers.length) { await commitSandbox(); return; }
+  askConfirm('这一步会拆掉沙箱边界', `${dangers.join('\n')}\n\n保存后热更新立刻生效，下一次工具调用就按新配置执行。`, commitSandbox);
+}
+async function commitSandbox(): Promise<void> {
+  const form = sandboxForm.value;
   sandboxSaving.value = true;
   try {
     await api('/api/sandbox', { method: 'PUT', body: JSON.stringify({ mode: form.mode, network: form.network, image: form.image, dockerBin: form.dockerBin,
       workspaceDir: form.workspaceDir, hostWorkspaceDir: form.hostWorkspaceDir, memoryMb: form.memoryMb, cpus: form.cpus, pidsLimit: form.pidsLimit,
       tmpfsMb: form.tmpfsMb, readOnlyRoot: form.readOnlyRoot, bypassRoles: form.bypassRoles, persistent: form.persistent }) });
+    // 它不在 sandbox.* 下，`PUT /api/sandbox` 会给每个键加 `sandbox.` 前缀 —— 只能走配置那条路。
+    if (hostFsForOwner.value !== hostFsSaved.value)
+      await api('/api/config', { method: 'PUT', body: JSON.stringify({ 'tools.fs.allowHostFsForOwner': hostFsForOwner.value }) });
     sandboxDirty.value = false;
     pushToast({ severity: 'success', summary: '沙箱配置已保存', detail: '热更新已生效，下一次工具调用即按新配置执行' });
     await loadSandbox();
     await loadContainers();
+    await load();
   } catch (error) { toastError('保存沙箱配置失败', error); }
   finally { sandboxSaving.value = false; }
 }
@@ -2246,7 +2279,17 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
               <div class="trigger-switches">
                 <UiCheckbox v-for="role in ROLES" :key="role" :model-value="sandboxForm.bypassRoles.includes(role)" :label="role" @change="toggleBypassRole(role)" />
               </div>
-              <p v-if="sandboxForm.bypassRoles.some((role) => role !== 'owner')" class="field-note wake-issue"><i class="pi pi-exclamation-triangle" />owner 之外的角色也在绕过名单里：这些人能让模型在宿主上执行任意命令。</p>
+              <p v-if="sandboxForm.bypassRoles.some((role) => role !== 'owner')" class="field-note wake-issue"><i class="pi pi-exclamation-triangle" />owner 之外的角色也在绕过名单里：这些人能让模型在宿主上执行任意命令。保存时会再问一次。</p>
+            </div>
+            <!-- `tools.fs.allowHostFsForOwner` 与上面那些不在同一棵配置子树下，但它是同一件事的另一半：
+                 沙箱管「命令跑在哪儿」，它管「文件工具看得见哪儿」。此前沙箱页上没有它的任何入口，
+                 只能从「设置 → 全部配置」里被渲染成一个普通开关（docs/29 · M-WEB-10）。 -->
+            <div class="wide">
+              <UiSwitch v-model="hostFsForOwner" label="owner 的文件工具可以读写宿主全盘（allowHostFsForOwner）" @change="markSandboxDirty" />
+              <p class="field-note" :class="hostFsForOwner ? 'wake-issue' : ''">
+                <i v-if="hostFsForOwner" class="pi pi-exclamation-triangle" />
+                关着时 owner 的文件工具也被限制在工作目录里。<b>打开等于把宿主整个文件系统交给模型</b> —— 含 <code>.env</code> 与本仓库自身。保存时会再问一次。
+              </p>
             </div>
           </div>
           <div class="registry-heading">

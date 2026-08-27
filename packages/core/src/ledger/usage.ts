@@ -119,6 +119,53 @@ export class UsageLedger {
   }
 
   /**
+   * 一个本地窗口内的合计，`/usage` 用。**和 `report()` 读同一张表、用同一个时区修饰符** ——
+   * 此前 `/usage` 读的是 `turns`，而试跑（`agents.createDryRun()`）写 ledger 却不建 turns 行，
+   * 于是只要在 WebUI 上试跑过一次，「`/usage` = 用量页 = ledger 聚合」就永久不成立
+   * （实测差 0.0001008 美元，精确对应两行 `turn_id=dryrun:…`，docs/29 · M-QUOTA-01）。
+   *
+   * 窗口两侧都在 SQL 里用同一个表达式算，不在 JS 侧折算出 from/to 再传进来 —— 那样两边的
+   * 日界靠两份实现各自算对，正是 `report()` 上面那段注释在说的事。
+   */
+  summary(
+    window: "day" | "month",
+    timezone: string,
+    filter: { chatId?: string; userId?: string } = {},
+  ): {
+    costUsd: number;
+    turns: number;
+    inputTokens: number;
+    outputTokens: number;
+  } {
+    const format = window === "day" ? "%Y-%m-%d" : "%Y-%m";
+    const modifier = sqliteTimezoneModifier(timezone);
+    const conditions = [
+      "strftime(?,ts/1000,'unixepoch',?)=strftime(?,'now',?)",
+    ];
+    const parameters: unknown[] = [format, modifier, format, modifier];
+    if (filter.chatId !== undefined) {
+      conditions.push("chat_id=?");
+      parameters.push(filter.chatId);
+    }
+    if (filter.userId !== undefined) {
+      conditions.push("user_id=?");
+      parameters.push(filter.userId);
+    }
+    return this.db
+      .prepare(
+        `SELECT COALESCE(SUM(cost_usd),0) AS costUsd,COUNT(DISTINCT turn_id) AS turns,
+      COALESCE(SUM(input_tokens),0) AS inputTokens,COALESCE(SUM(output_tokens),0) AS outputTokens
+      FROM usage_ledger WHERE ${conditions.join(" AND ")}`,
+      )
+      .get(...parameters) as {
+      costUsd: number;
+      turns: number;
+      inputTokens: number;
+      outputTokens: number;
+    };
+  }
+
+  /**
    * @param timezone 按**本地日**分桶。此前这里是裸的 `strftime('%Y-%m-%d', ts/1000, 'unixepoch')`
    *   —— UTC —— 而总览趋势（`OperationsRepository.dashboard`）与配额窗口（`quotaBucket`）都按
    *   `general.timezone` 分日：东八区部署里「用量报表的 8 月 18 日」是本地 18 日 08:00 到 19 日

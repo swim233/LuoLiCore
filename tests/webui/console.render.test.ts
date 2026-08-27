@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { mount, type VueWrapper } from '@vue/test-utils';
 import { toasts } from '../../packages/webui/src/ui/toast';
+import { confirmBox, dismissConfirm } from '../../packages/webui/src/ui/confirm';
 
 /**
  * 控制台的**渲染**防线。
@@ -46,7 +47,10 @@ const RESPONSES: Record<string, unknown> = {
     { id: 'chat:555', kind: 'chat', tgId: '555', role: 'owner', displayName: '主人', username: 'owner', chatType: 'private' },
     { id: 'chat:-100777', kind: 'chat', tgId: '-100777', role: 'trusted', displayName: '绒布球聚集地', username: null, chatType: 'supergroup' },
   ],
-  '/api/sandbox': { mode: 'docker', bypassRoles: ['owner'], plan: { allowed: true, mode: 'docker' } },
+  // 真实形状是 `{config, allowHostFsForOwner, plan}`：扁平那份让 `syncSandbox` 里的
+  // `payload.config.bypassRoles` 读在 undefined 上，整张表单静默停在出厂默认值。
+  '/api/sandbox': { config: { mode: 'docker', bypassRoles: ['owner'], persistent: { enabled: false } }, allowHostFsForOwner: false,
+    plan: { allowed: true, mode: 'docker' } },
   // 扁平字段是生效值，`defaults` 是代码里那份 —— 少了 defaults，工具页弹窗的「代码默认」绑定读到 undefined。
   '/api/tools': { bash: { minRole: 'trusted', approval: 'conditional', scope: 'global', source: 'builtin', enabled: true,
     timeoutMs: null, selfManagedTimeout: true, defaults: { minRole: 'trusted', approval: 'conditional', timeoutMs: null }, relaxed: [] },
@@ -536,6 +540,39 @@ describe('ConsoleView 渲染', () => {
     // 从此没人渲染过 —— 加导航项时必须同时加进这里。
     const keys = (wrapper.vm as unknown as { navigation: ReadonlyArray<readonly [string, string, string]> }).navigation.map(([key]) => key);
     expect(keys).toEqual([...NAV_KEYS]);
+    wrapper.unmount();
+  });
+
+  /**
+   * 沙箱卡片上有三个开关能把隔离整个拆掉，而此前**只有 `mode=none` 有闸**，另外两个
+   * （`bypassRoles` 进了 owner 之外的角色、`allowHostFsForOwner`）拨一下、点保存就没了；
+   * `allowHostFsForOwner` 甚至在这一页上根本没有控件（docs/29 · M-WEB-10）。
+   * 断言的是「闸在不在、说没说清代价」，不是具体文案。
+   */
+  it('沙箱页三种拆边界的改动都要过同一道确认，逐条写明代价', async () => {
+    dismissConfirm();
+    const { default: ConsoleView } = await import('../../packages/webui/src/views/ConsoleView.vue');
+    const wrapper = mount(ConsoleView, { attachTo: document.body });
+    const vm = wrapper.vm as unknown as { active: string; hostFsForOwner: boolean; sandboxForm: { mode: string; bypassRoles: string[] };
+      saveSandbox: () => Promise<void> };
+    vm.active = 'tools';
+    await settle(wrapper);
+    // 控件本身要在这一页上 —— 此前只能从「设置 → 全部配置」里够到它。
+    expect(wrapper.text()).toContain('allowHostFsForOwner');
+
+    // 什么都没拆时不该拦：多余的确认框会把这道闸训练成「一路回车」。
+    await vm.saveSandbox();
+    expect(confirmBox.value.open).toBe(false);
+
+    vm.sandboxForm.mode = 'none';
+    vm.sandboxForm.bypassRoles = ['owner', 'trusted'];
+    vm.hostFsForOwner = true;
+    await settle(wrapper);
+    await vm.saveSandbox();
+    expect(confirmBox.value.open).toBe(true);
+    for (const cost of ['mode = none', 'trusted', 'allowHostFsForOwner'])
+      expect(confirmBox.value.detail, `确认框没说 ${cost} 的代价`).toContain(cost);
+    dismissConfirm();
     wrapper.unmount();
   });
 });
