@@ -54,7 +54,25 @@ export interface ReapCounts {
   gone: number;
   orphans: number;
   adopted: number;
+  /** 带 `luoli.instance` 且不是我的：另一个实例的容器，一个都不碰。多实例部署里这个数是正常的。 */
+  foreign: number;
+  /** 带 `luoli.managed=1` 但**没有** `luoli.instance`：加实例标签之前建的，认不出主人，同样不碰。
+   *  它要人处置，所以注册点见到非零会把这条对账日志抬成 warn。全部重建过一轮之后自然归零。 */
+  legacy: number;
 }
+
+/**
+ * 这个实例的身份，进 `luoli.instance` 标签。
+ *
+ * 取**库文件绝对路径**的指纹：「哪些容器是我的」正是由「哪个库存着它们的行」定义的，
+ * 而同一个库上只可能有一个进程（`acquireInstanceLock`）—— 这两句合起来才让「只扫自己那一份」
+ * 成为一个真判据，而不是一个约定。
+ *
+ * 发指纹而不是路径本身：标签任何人 `docker inspect` 都读得到，白送一份部署布局没必要
+ * （同 `GET /api/messages` 不回 `local_path` 的理由）。
+ */
+export const instanceLabelOf = (databasePath: string): string =>
+  createHash("sha1").update(databasePath).digest("hex").slice(0, 12);
 
 export interface ContainerEvent {
   /** 字段名是 `type` 而不是 `kind`：`tests/docs.test.ts` 把源码里的 `kind:` 字面量与
@@ -203,13 +221,22 @@ export type PrepareFailure = { ok: false; error: string; hint?: string };
  */
 export class ContainerManager {
   readonly #mutex = new KeyedMutex();
+  /** 见 `instanceLabelOf`。构造时算一次 —— 库路径在进程生命周期内不变。 */
+  readonly #instance: string;
 
   constructor(
     private readonly db: Sqlite,
     private readonly repo: SandboxContainerRepository,
     private readonly config: () => ContainerRuntimeConfig,
     private readonly onEvent?: (event: ContainerEvent) => void,
-  ) {}
+  ) {
+    this.#instance = instanceLabelOf(db.name);
+  }
+
+  /** 这个实例给自己容器打的 `luoli.instance` 标签值。 */
+  get instanceLabel(): string {
+    return this.#instance;
+  }
 
   enabled(): boolean {
     return this.config().persistent.enabled;
@@ -340,6 +367,8 @@ export class ContainerManager {
       name,
       "--label",
       "luoli.managed=1",
+      "--label",
+      `luoli.instance=${this.#instance}`,
       "--label",
       `luoli.chat=${chatId}`,
       "--label",
@@ -754,6 +783,8 @@ export class ContainerManager {
       gone: 0,
       orphans: 0,
       adopted: 0,
+      foreign: 0,
+      legacy: 0,
     };
     if (!config.persistent.enabled) {
       // 关掉开关不该让已有容器无人认领地留在宿主上 —— 但也不能只删容器留下库里的行。
@@ -797,7 +828,17 @@ export class ContainerManager {
     );
   }
 
-  /** 带 `luoli.managed=1` 标签却不在库里的容器：上一次进程崩在建容器与落库之间留下的。 */
+  /**
+   * 我自己的、却不在库里的容器：上一次进程崩在建容器与落库之间留下的。
+   *
+   * **判据里那个 `luoli.instance` 不是装饰。** 此前这里只问「带 `luoli.managed=1` 且不在我库里」，
+   * 而那个标签**不带实例身份** —— 于是在同一台宿主上起第二个实例（哪怕它 `persistent.enabled`
+   * 是关的，见 `reap()` 开头那一支：known 集直接是空的）就等于 `docker rm -f` 掉在位实例
+   * **正在用**的全部持久容器，连带里面跑着的后台进程。实测撞上过。
+   *
+   * 认不出主人的一律**不碰**：删掉别人正在用的容器是不可逆的，而漏掉一个停着的孤儿只是占点盘。
+   * 一次性容器（`docker run --rm`）不打这个标签，本来就不在这条路上。
+   */
   async #sweepOrphans(
     counts: ReapCounts,
     known: Set<string>,
@@ -808,14 +849,23 @@ export class ContainerManager {
       "--filter",
       "label=luoli.managed=1",
       "--format",
-      "{{.Names}}",
+      '{{.Names}}\t{{.Label "luoli.instance"}}',
     ]);
     if (listed.code !== 0) return counts;
-    for (const name of listed.stdout
+    for (const line of listed.stdout
       .split("\n")
-      .map((line) => line.trim())
+      .map((entry) => entry.trim())
       .filter(Boolean)) {
-      if (known.has(name)) continue;
+      const [name, instance = ""] = line.split("\t");
+      if (!name || known.has(name)) continue;
+      if (!instance) {
+        counts.legacy += 1;
+        continue;
+      }
+      if (instance !== this.#instance) {
+        counts.foreign += 1;
+        continue;
+      }
       await this.#docker(["rm", "-f", name]);
       counts.orphans += 1;
     }

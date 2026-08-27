@@ -262,7 +262,7 @@
 | [x] AC-SBX-016 (自动) ★ | 持久容器里起一个后台任务（`background`），隔一次 exec 再看 | 进程还活着（`docker top` 数得到），输出在 `.luoli-logs/<name>.log` 里可回读。**不重定向就会被 SIGPIPE 打死** —— exec 一结束管道就关 | 〔sandbox.containers.docker.test.ts〕
 | [x] AC-SBX-017 (自动) ★ | 持久容器里一条命令跑到一半被取消 | **当场**返回（墙钟本身是判据）、`killed=true`、那个进程组真的没了，而**容器与别人的后台进程照常活着**。`docker kill <容器>` 在这一档等于销毁整个会话的环境；`kill -KILL -- -<pgid>` 会被 dash 拒掉，取消静静失效 | 〔sandbox.containers.docker.test.ts〕
 | [x] AC-SBX-018 (自动) ★ | 容器到期被回收 | 容器与库里那行都没了，而 `/workspace` 里的文件**一个都不动**；下一次执行新建一个，并在结果里带一句「上一个被回收了」的旁白（[06 §1](./06-prompt-and-memory.md)） | 〔sandbox.containers.docker.test.ts〕
-| [x] AC-SBX-019 (自动) ★ | 进程重启后跑一次对账 | 在用的容器被**认领**而不是全杀（24h TTL 要扛得住重启）；带 `luoli.managed` 标签却不在库里的孤儿被 `rm -f` | 〔sandbox.containers.docker.test.ts〕
+| [x] AC-SBX-019 (自动) ★ | 进程重启后跑一次对账 | 在用的容器被**认领**而不是全杀（24h TTL 要扛得住重启）；带**本实例** `luoli.instance` 标签却不在库里的孤儿被 `rm -f`（别的实例的、以及认不出主人的一个都不碰） | 〔sandbox.containers.docker.test.ts〕
 | [x] AC-SBX-020 (自动) | 改了 image / 内存 / 网络等容器形态参数 | spec 指纹对不上的容器被回收，下次用时按新配置重建 —— 否则「界面上改了但没生效」 | 〔sandbox.containers.docker.test.ts〕
 | [x] AC-SBX-021 (自动) ★ | 钉住一个容器，再让它撞上 `maxLifetimeMs` | 钉住豁免闲置回收，**豁免不了绝对上限**（豁免了它就不是上限）；`maxLifetimeMs: 0` = 不设上限而不是立刻过期 | 〔sandbox.persistent.test.ts〕
 | [x] AC-SBX-022 (自动) ★ | 撞上 `sandbox.persistent.maxContainers` | 直接报 `sandbox_container_limit` 并落一条 warn，**不悄悄退回一次性容器**；库里不多出行 | 〔sandbox.persistent.test.ts〕

@@ -137,9 +137,9 @@ LUOLI_DATA_DIR=/home/swim/code/LuoLiCore-staging/data-acc pnpm ac:seed --passwor
 下面这些是**开跑之前**就从代码判定出来的（前四条排场次时读实现读出来的，后三条是补用例时量出来的）（排场次时逐条读了实现），记在这里是为了让执行者
 知道它们会挂、不必在现场纠结：条目保持 `[ ]`，判定为缺陷而不是「没测」。
 
-**2026-08-27**，七批修复按代价从小到大收掉二十一条，末列标 **已修**，同时按
-[`00 §4`](./00-state.md) 的规矩从 `docs/00 §2.3` 删掉了对应行。下表 28 条里，**没标已修的 7 条
-不是同一回事**：`M-OPS-01` / `M-WEB-05` / `M-LOG-02` / `M-MEM-02` 这 4 条**仍然欠着**，
+**2026-08-27**，八批修复按代价从小到大收掉二十二条，末列标 **已修**，同时按
+[`00 §4`](./00-state.md) 的规矩从 `docs/00 §2.3` 删掉了对应行。下表 28 条里，**没标已修的 6 条
+不是同一回事**：`M-WEB-05` / `M-LOG-02` / `M-MEM-02` 这 3 条**仍然欠着**，
 行还在 `docs/00 §2.3` 的表里；另 3 条各有归宿 —— `M-WEB-04` 转
 [21](./21-webui-coverage-gaps.md)、`M-WEB-03` 已被实测推翻、`M-SNAP-01` 是装置问题。
 
@@ -154,6 +154,7 @@ LUOLI_DATA_DIR=/home/swim/code/LuoLiCore-staging/data-acc pnpm ac:seed --passwor
 - 第五批：`M-WEB-14` `M-MEM-01` `M-TG-02`
 - 第六批（手测那批最后两条，各要动端点或数据通路）：`M-WEB-02` `M-WEB-06`
 - 第七批：`M-SEC-01`（备份文件 0644 —— 唯一一条安全项，两行 `chmodSync`）
+- 第八批：`M-OPS-01`（第二个实例清空在位实例的持久容器）
 
 **修好不等于能勾** —— `(手动)` 条目要勾必须有一场新的手测台账（`### <编号>` +
 `〔手测 YYYY-MM-DD · S<n>〕`），所以这二十条挂着的验收项仍是 `[ ]`，等 `## S9 · 修复回归场`。
@@ -168,7 +169,7 @@ LUOLI_DATA_DIR=/home/swim/code/LuoLiCore-staging/data-acc pnpm ac:seed --passwor
 | ~~`M-WEB-03`~~ | `AC-WEB-025` | ~~归档检索翻页：搜索分支仍是内存切片，条目点名测的「翻到后面几页」落在没改的那一半上~~ **2026-08-26 S2 实测推翻，见下** | 需从 [00 §2.3](./00-state.md) 撤下 |
 | `M-WEB-04` | `AC-WEB-016` | 权限矩阵视图不存在（详见 §3 豁免登记）。列在这里是因为它同时是一条 WebUI 控制面缺口，不只是一条测不了的验收项 | 已转 [21](./21-webui-coverage-gaps.md) |
 | `M-SEC-01` | `AC-SEC-011` | **数据库备份文件是 0644，不是条目要求的 0600** —— 一份全局可读的整库快照 | **已修** · 两个生产者（`MaintenanceService.backup()` 与迁移前那次 `pre-NNNN`）各补一行 `chmodSync(path, 0o600)`；这条此前**没有提交断言**，现在两条路各断言一次〔`tests/migration.backup.test.ts`〕 |
-| `M-OPS-01` | （无对应条目）| **第二个实例一启动就 `docker rm -f` 掉第一个实例的持久容器** —— `#sweepOrphans` 的 known 集是空的，而 `luoli.managed=1` 这个标签不带实例身份 | 已转 [00 §2.3](./00-state.md) |
+| `M-OPS-01` | （无对应条目）| **第二个实例一启动就 `docker rm -f` 掉第一个实例的持久容器** —— `#sweepOrphans` 的 known 集是空的，而 `luoli.managed=1` 这个标签不带实例身份 | **已修** · 容器多打一个 `luoli.instance=<库路径指纹>`，对账只收自己那一份；别的实例的记 `foreign`、认不出主人的记 `legacy`，两类一个都不碰（后者把对账日志抬成 warn 等人处置）〔`tests/sandbox.containers.docker.test.ts`〕 |
 | `M-LOG-01` | `AC-DB-006` · `AC-WEB-021` · `AC-WEB-037` | WebUI 跑维护操作只留一条 `webui.action`（方法 + 路径），**不落带结果的 `maintenance.*`**；cron 那条路才落 | **已修** · 日志挪进 `MaintenanceService` 本身，cron 与端点两条路留下同一份凭据；顺带 `cleanup()` 的 checkpoint 挪到那条日志之后，「跑完 WAL 是 0」对调用方才真的成立〔`tests/maintenance.gc.test.ts`〕 |
 | `M-WEB-06` | `AC-WEB-011`（`raw_json` 那半）| **WebUI 里没有看 `raw_json` 的入口**：`packages/webui/src` 与 `packages/server/src` 各零命中，`GET /api/messages` 也不回这个字段。补修时查清了一件更硬的事：这一列**全仓没有一处读过它**（`get_message` 也没有 —— `archive.ts` 的 `MESSAGE_COLUMNS` 里就没这一列），从 `0001_init.sql` 起写了三千多行，一次都没被看过 | **已修** · `GET /api/messages/:id` 带上 `rawJson`（列表照旧不带：一页 50 条各一份 update），检索结果行加一个「原始载荷」入口，界面上写明它是脱敏后的那份〔`tests/api.contract.test.ts` `tests/webui/console.render.test.ts`〕 |
 | `M-SNAP-01` | `AC-WEB-047` · `AC-WEB-011`（附件那半）| **不是产品缺陷**：`attachments.local_path` 存相对路径，快照跨部署根复制后解析到媒体目录之外，被路径包含检查挡下（`404 附件路径不在媒体目录内`）。那道检查是对的；影响是这两条在这份快照上验不了，要用新收到的附件。**2026-08-27 已用新附件绕过，两条的附件那半都验过了** | 不转（装置问题），但「搬过部署目录后历史附件集体打不开且界面无提示」值得产品定夺 |
@@ -349,6 +350,16 @@ S1 跑 `AC-WEB-014b` 时想造「链里的模型已删除」那个状态，撞�
 
 根因是标签**不带实例身份**。跑本轮之前的规避：**验收实例、docker 用例、生产，三者不要同时开着**；
 S7 那一场尤其要先确认没有别的实例在跑。
+
+**2026-08-27 已修**：容器多打一个 `luoli.instance=<库路径绝对路径的 sha1 前 12 位>`。取库路径是因为
+「哪些容器是我的」正是由「哪个库存着它们的行」定义的，而同一个库上只可能有一个进程
+（`acquireInstanceLock`）—— 这两句合起来才让「只扫自己那一份」成为判据而不是约定。对账时
+别的实例的容器记 `foreign`、带 `luoli.managed=1` 却**没有** `luoli.instance` 的（加这个标签之前
+建的）记 `legacy`，两类**一个都不碰**：删掉别人正在用的容器不可逆，漏掉一个停着的孤儿只是占点盘。
+`legacy` 非零会把 `sandbox.container.reconciled` 抬成 warn 等人处置，全部重建过一轮之后自然归零。
+用例在 `tests/sandbox.containers.docker.test.ts`，`persistent` 开与关两支各验一次（关的那支正是
+最锋利的：known 集直接是空的），判据落在**容器还在不在**上而不只是计数器。
+上面那条规避从此不必要 —— 但它挡的是标签，不是并发，三者同时开仍然会抢同一个 bot token。
 
 ### M-LOG-01 · WebUI 跑维护操作看不到结果
 
