@@ -137,10 +137,11 @@ LUOLI_DATA_DIR=/home/swim/code/LuoLiCore-staging/data-acc pnpm ac:seed --passwor
 下面这些是**开跑之前**就从代码判定出来的（前四条排场次时读实现读出来的，后三条是补用例时量出来的）（排场次时逐条读了实现），记在这里是为了让执行者
 知道它们会挂、不必在现场纠结：条目保持 `[ ]`，判定为缺陷而不是「没测」。
 
-**2026-08-27**，六批修复按代价从小到大收掉二十条，末列标 **已修**，同时按
-[`00 §4`](./00-state.md) 的规矩从 `docs/00 §2.3` 删掉了对应行。下表里没标已修的四条各有归宿：
-`M-WEB-04` 转 [21](./21-webui-coverage-gaps.md)、`M-WEB-03` 已被实测推翻、`M-SNAP-01` 是装置
-问题、`M-MEM-02` 随 `/forgetme` 的移除一起处置。
+**2026-08-27**，七批修复按代价从小到大收掉二十一条，末列标 **已修**，同时按
+[`00 §4`](./00-state.md) 的规矩从 `docs/00 §2.3` 删掉了对应行。下表 28 条里，**没标已修的 7 条
+不是同一回事**：`M-OPS-01` / `M-WEB-05` / `M-LOG-02` / `M-MEM-02` 这 4 条**仍然欠着**，
+行还在 `docs/00 §2.3` 的表里；另 3 条各有归宿 —— `M-WEB-04` 转
+[21](./21-webui-coverage-gaps.md)、`M-WEB-03` 已被实测推翻、`M-SNAP-01` 是装置问题。
 
 - 第一批（改动最小的八条）：`M-WEB-07` `M-WEB-08` `M-WEB-09` `M-WEB-12` `M-WEB-13`
   `M-TG-01` `M-TG-04` `M-TG-06`
@@ -151,7 +152,8 @@ LUOLI_DATA_DIR=/home/swim/code/LuoLiCore-staging/data-acc pnpm ac:seed --passwor
   而拖着它等于让 `AC-WEB-023` / `AC-WEB-055` 无限期挂着
 - 第四批：`M-LOG-01`
 - 第五批：`M-WEB-14` `M-MEM-01` `M-TG-02`
-- 第六批（最后两条，各要动端点或数据通路）：`M-WEB-02` `M-WEB-06`
+- 第六批（手测那批最后两条，各要动端点或数据通路）：`M-WEB-02` `M-WEB-06`
+- 第七批：`M-SEC-01`（备份文件 0644 —— 唯一一条安全项，两行 `chmodSync`）
 
 **修好不等于能勾** —— `(手动)` 条目要勾必须有一场新的手测台账（`### <编号>` +
 `〔手测 YYYY-MM-DD · S<n>〕`），所以这二十条挂着的验收项仍是 `[ ]`，等 `## S9 · 修复回归场`。
@@ -165,7 +167,7 @@ LUOLI_DATA_DIR=/home/swim/code/LuoLiCore-staging/data-acc pnpm ac:seed --passwor
 | `M-WEB-02` | `AC-WEB-007`（后半） | SSE 断线重连只有 `onopen` 置 `connected=true`，**不触发补拉**。浏览器原生 `EventSource` 会自己重连，但断线期间错过的事件不会回来 —— 「数据补齐」这一半没有实现。S8 实测：断 20 秒再连上，总览的归档消息数停在旧值 15 秒以上，最后是**一条无关事件碰巧到达**才把数字带对的 | **已修** · 重连后按 `scheduleRefresh` 那一套（同一份可见性过滤 + 400ms 合并）补拉全部十二组，首次连上不补；顺带把「切过去时 `watch(active)` 会补一次」变成真的 —— 那句注释此前只对五个具体 loader 成立〔`tests/webui/console.render.test.ts`〕 |
 | ~~`M-WEB-03`~~ | `AC-WEB-025` | ~~归档检索翻页：搜索分支仍是内存切片，条目点名测的「翻到后面几页」落在没改的那一半上~~ **2026-08-26 S2 实测推翻，见下** | 需从 [00 §2.3](./00-state.md) 撤下 |
 | `M-WEB-04` | `AC-WEB-016` | 权限矩阵视图不存在（详见 §3 豁免登记）。列在这里是因为它同时是一条 WebUI 控制面缺口，不只是一条测不了的验收项 | 已转 [21](./21-webui-coverage-gaps.md) |
-| `M-SEC-01` | `AC-SEC-011` | **数据库备份文件是 0644，不是条目要求的 0600** —— 一份全局可读的整库快照 | 已转 [00 §2.3](./00-state.md) |
+| `M-SEC-01` | `AC-SEC-011` | **数据库备份文件是 0644，不是条目要求的 0600** —— 一份全局可读的整库快照 | **已修** · 两个生产者（`MaintenanceService.backup()` 与迁移前那次 `pre-NNNN`）各补一行 `chmodSync(path, 0o600)`；这条此前**没有提交断言**，现在两条路各断言一次〔`tests/migration.backup.test.ts`〕 |
 | `M-OPS-01` | （无对应条目）| **第二个实例一启动就 `docker rm -f` 掉第一个实例的持久容器** —— `#sweepOrphans` 的 known 集是空的，而 `luoli.managed=1` 这个标签不带实例身份 | 已转 [00 §2.3](./00-state.md) |
 | `M-LOG-01` | `AC-DB-006` · `AC-WEB-021` · `AC-WEB-037` | WebUI 跑维护操作只留一条 `webui.action`（方法 + 路径），**不落带结果的 `maintenance.*`**；cron 那条路才落 | **已修** · 日志挪进 `MaintenanceService` 本身，cron 与端点两条路留下同一份凭据；顺带 `cleanup()` 的 checkpoint 挪到那条日志之后，「跑完 WAL 是 0」对调用方才真的成立〔`tests/maintenance.gc.test.ts`〕 |
 | `M-WEB-06` | `AC-WEB-011`（`raw_json` 那半）| **WebUI 里没有看 `raw_json` 的入口**：`packages/webui/src` 与 `packages/server/src` 各零命中，`GET /api/messages` 也不回这个字段。补修时查清了一件更硬的事：这一列**全仓没有一处读过它**（`get_message` 也没有 —— `archive.ts` 的 `MESSAGE_COLUMNS` 里就没这一列），从 `0001_init.sql` 起写了三千多行，一次都没被看过 | **已修** · `GET /api/messages/:id` 带上 `rawJson`（列表照旧不带：一页 50 条各一份 update），检索结果行加一个「原始载荷」入口，界面上写明它是脱敏后的那份〔`tests/api.contract.test.ts` `tests/webui/console.render.test.ts`〕 |

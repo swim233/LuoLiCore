@@ -1,8 +1,9 @@
-import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import Database from 'better-sqlite3';
 import { describe, expect, it } from 'vitest';
 import { closeDatabase, migrateDatabase, openDatabase, recoverAfterCrash } from '@luoli/db';
+import { MaintenanceService } from '@luoli/core';
 
 describe('migration backup', () => {
   it('creates a pre-migration backup before applying a pending migration', () => {
@@ -44,6 +45,32 @@ describe('migration backup', () => {
     restored.close();
     // 主库那边两条都上了：`pre-` 是「迁移之前」的快照，不是「迁移失败」的残骸。
     expect(db.prepare("SELECT count(*) FROM sqlite_master WHERE name IN ('seven','eight')").pluck().get()).toBe(2);
+    closeDatabase(db);
+  });
+
+  /**
+   * `AC-SEC-011`。这条此前**没有提交断言**，而只勾「目录 0700」那半会让整条被判通过 ——
+   * 备份仍然人人可读（docs/29 · `M-SEC-01`，S1 实测生产 `data/backup/*.db` 全是 `-rw-r--r--`）。
+   * 成因是 `VACUUM INTO` 建出来的文件走 SQLite 自己的 `0666 & ~umask`，两处调用点之后都没有
+   * `chmodSync`。目录的 0700 只挡住同机其他用户遍历，**而权限位跟着文件走** —— 备份一旦被复制、
+   * 打包、同步出去，那道目录闸就不在了。所以这里**两个生产者各断言一次**：只焊住一处，
+   * 另一处照旧产出 0644。
+   */
+  it('AC-SEC-011：两条路写出来的备份都是 0600，目录仍是 0700', () => {
+    const database = './data/ac-sec-011/luoli.db'; const migrations = './data/ac-sec-011/migrations';
+    rmSync(dirname(database), { recursive: true, force: true }); mkdirSync(migrations, { recursive: true });
+    writeFileSync(`${migrations}/0001_init.sql`, 'CREATE TABLE one(id INTEGER);');
+    const db = openDatabase(database); migrateDatabase(db, migrations);
+    writeFileSync(`${migrations}/0002_next.sql`, 'CREATE TABLE two(id INTEGER);');
+    migrateDatabase(db, migrations);
+    const directory = resolve(dirname(database), 'backup');
+    const mode = (name: string): number => statSync(resolve(directory, name)).mode & 0o777;
+    const migrationBackup = readdirSync(directory).find((name) => name.includes('-pre-0002.db'))!;
+    expect(mode(migrationBackup), '迁移前那份备份是全局可读的').toBe(0o600);
+    // 另一个生产者：维护任务 / WebUI 的 `[立即备份]` 走的是 `MaintenanceService.backup()`。
+    const written = new MaintenanceService(db, database, 5, 30).backup('test');
+    expect(statSync(written).mode & 0o777, '维护任务写出来的备份是全局可读的').toBe(0o600);
+    expect(statSync(directory).mode & 0o777).toBe(0o700);
     closeDatabase(db);
   });
 
