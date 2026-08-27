@@ -488,7 +488,7 @@
                 "showContextWatermark": {
                   "type": "boolean",
                   "default": true,
-                  "description": "RUNTIME 块里是否告诉模型上下文水位，提示它「快满了，别再翻旧账」。"
+                  "description": "RUNTIME 块里是否告诉模型上下文容量（已用条数 / tokens 与各自上限），提示它「快满了，别再翻旧账」。"
                 },
                 "showWorkspace": {
                   "type": "boolean",
@@ -554,12 +554,6 @@
               "type": "boolean",
               "default": true,
               "description": "写入记忆时是否强制带来源标注（谁、在哪条消息里说的），方便事后追责与撤销。"
-            },
-            "forgetMeRetentionDays": {
-              "type": "integer",
-              "minimum": 0,
-              "default": 30,
-              "description": "用户请求「忘记我」之后，数据在被真正清除前还保留多少天（给误操作留后悔期）。"
             }
           },
           "additionalProperties": false,

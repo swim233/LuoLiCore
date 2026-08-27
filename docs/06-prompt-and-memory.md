@@ -426,5 +426,13 @@ memory_list: tool({           // owner only
 - `memory/private/<userId>/` 目录权限 `0700`。
 - owner 读取他人私有记忆时**记 `warn` 级日志**（`kind='memory.owner_read_private'`，`user_id` 是**被看的那个人**、`data` 里带 `targetUserId` / `actor` / `op`），并在那个人自己的 `/memory` 回执末尾显示「最近被 owner 查看于 …」。这是对「owner 可读全部」（D11）的问责设计 —— **给被看的人看，不是给 owner 看**：只落一条只有 owner 在控制台上翻得到的日志，那是记录不是问责。
   三条路共用 `MemoryStore.auditPrivateAccess()` 这一个发出点：`memory_read` 工具、WebUI 的 `GET /api/prompts/:id`（它照 `memory_docs.path` 直接读文件，不经过 `MemoryStore.read()`）、以及 `PUT /api/prompts/:id`（改比看更重，`op='write'`）。owner 看自己那份不记。
-- 用户可用 `/forgetme` 命令（私聊）删除自己的 PRIMEMORY（写一条 revision 后清空，30 天内 owner 可恢复）。
+- ~~用户可用 `/forgetme` 命令（私聊）删除自己的 PRIMEMORY~~ —— **2026-08-27 由需求方定为移除，已删干净**
+  （命令、`MemoryStore.forgetPrivate()`、`memory.forgetMeRetentionDays` 配置键、`AC-MEM-012` 一并摘掉）。
+  代价照实说：**用户从此没有自助删除私有记忆的入口**，只能由 owner 代劳（WebUI 提示词页的
+  `PUT /api/prompts/:id`，那条路的问责见上一条）。`/forgetme` 此前的 minRole 是 `limited`，
+  所以对普通用户这是一次可感的降级，不是无损摘除。
+  ⚠ **`<memory.dir>/.forgotten/` 自 2026-08-27 起无人写入也无人读取**（此前也从来没人读过 ——
+  `forgetMeRetentionDays` 只决定写不写备份、不决定留多久，全仓没有一行删过它）。里面躺着的是
+  用户曾要求删除的私有记忆**正文**，请自行处置。`tests/repo-hygiene.test.ts` 仍然焊着「这个目录
+  不许进版本库」那一条 —— 目录没了、那条断言留着，因为它防的是「哪天又有人往那儿写」。
 - `/memory` 命令（私聊）向用户展示自己的 PRIMEMORY 全文。

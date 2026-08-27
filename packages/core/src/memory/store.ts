@@ -95,7 +95,6 @@ export class MemoryStore {
     private readonly softLimit: number,
     private readonly hardLimit: number,
     private readonly maxSections = 12,
-    private readonly forgetRetentionDays = 30,
     private readonly log?: {
       event(input: {
         level: "info" | "warn";
@@ -367,39 +366,6 @@ export class MemoryStore {
       tokens: number;
     }>;
   }
-  forgetPrivate(userId: string, actor = `user:${userId}`): boolean {
-    const document = this.readRaw("primemory", userId);
-    if (!document.content) return false;
-    const write: PendingWrite = {
-      scope: "primemory",
-      subject: userId,
-      section: "forgetme",
-      lines: [],
-      actor,
-      turnId: "",
-      chatId: userId,
-      userId,
-    };
-    this.persist(document, "# 私有记忆\n", write, "forget");
-    if (this.forgetRetentionDays > 0) {
-      const backup = resolve(
-        this.directory,
-        ".forgotten",
-        userId,
-        `${Date.now()}.md`,
-      );
-      mkdirSync(dirname(backup), { recursive: true, mode: 0o700 });
-      writeFileSync(backup, document.content, { mode: 0o600 });
-    }
-    this.log?.event({
-      level: "info",
-      kind: "memory.write",
-      summary: "Private memory forgotten",
-      data: { scope: "primemory", subject: userId, op: "forget" },
-    });
-    return true;
-  }
-
   private readRaw(
     scope: MemoryDocument["scope"],
     subject: string | null,

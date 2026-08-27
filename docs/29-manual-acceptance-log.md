@@ -137,11 +137,10 @@ LUOLI_DATA_DIR=/home/swim/code/LuoLiCore-staging/data-acc pnpm ac:seed --passwor
 下面这些是**开跑之前**就从代码判定出来的（前四条排场次时读实现读出来的，后三条是补用例时量出来的）（排场次时逐条读了实现），记在这里是为了让执行者
 知道它们会挂、不必在现场纠结：条目保持 `[ ]`，判定为缺陷而不是「没测」。
 
-**2026-08-27**，十批修复按代价从小到大收掉二十四条，末列标 **已修**，同时按
-[`00 §4`](./00-state.md) 的规矩从 `docs/00 §2.3` 删掉了对应行。下表 28 条里，**没标已修的 4 条
-不是同一回事**：只剩 `M-MEM-02` **仍然欠着**（等 `/forgetme` 的移除一起处置），
-行还在 `docs/00 §2.3` 的表里；另 3 条各有归宿 —— `M-WEB-04` 转
-[21](./21-webui-coverage-gaps.md)、`M-WEB-03` 已被实测推翻、`M-SNAP-01` 是装置问题。
+**2026-08-27**，十一批修复按代价从小到大收掉二十五条，末列标 **已修**，同时按
+[`00 §4`](./00-state.md) 的规矩从 `docs/00 §2.3` 删掉了对应行。**下表 28 条已全部处置完** ——
+没标已修的 3 条各有归宿：`M-WEB-04` 转 [21](./21-webui-coverage-gaps.md)、`M-WEB-03` 已被实测
+推翻、`M-SNAP-01` 是装置问题。
 
 - 第一批（改动最小的八条）：`M-WEB-07` `M-WEB-08` `M-WEB-09` `M-WEB-12` `M-WEB-13`
   `M-TG-01` `M-TG-04` `M-TG-06`
@@ -157,6 +156,7 @@ LUOLI_DATA_DIR=/home/swim/code/LuoLiCore-staging/data-acc pnpm ac:seed --passwor
 - 第八批：`M-OPS-01`（第二个实例清空在位实例的持久容器）
 - 第九批：`M-WEB-05`（带模型的 provider 在界面里删不掉）
 - 第十批：`M-LOG-02`（`sandbox.run` 挂不进调用树）
+- 第十一批：`M-MEM-02`（`/forgetme` 整套移除；`.forgotten` 按需求方的决定不动，只写进文档）
 
 **修好不等于能勾** —— `(手动)` 条目要勾必须有一场新的手测台账（`### <编号>` +
 `〔手测 YYYY-MM-DD · S<n>〕`），所以这二十条挂着的验收项仍是 `[ ]`，等 `## S9 · 修复回归场`。
@@ -192,7 +192,7 @@ LUOLI_DATA_DIR=/home/swim/code/LuoLiCore-staging/data-acc pnpm ac:seed --passwor
 | `M-TG-05` | `AC-TASK-007` | **`/tasks` 少「标题」与「进度」**：模板只有 `${id.slice(0,12)} ${state} 已运行 Ns`（`bot.ts:795-800`）。根子在数据源 —— `turns.active(chatId)` 返回的是 **turns** 行，那上面既没标题也没进度；要给出这两样得改读 `tasks` 表并接 `agent.progressThrottleMs` 那条进度通道。**顺带一个语义分歧**：`/tasks` 列 turns，而 WebUI「任务与审批」页列 tasks（`spawn_agent` 派发的），同一个词在两个界面指两样东西，实测撞上过（一条正在跑的轮次 `/tasks` 认它、任务页里不存在） | **已修** · 两样都列：在途轮次（turns）+ 子 agent 任务（tasks，带标题与 `report_progress` 的进度）〔`tests/access.commands.test.ts`〕 |
 | `M-TG-06` | `AC-TG-008`（第二句）| **语音的上下文占位符走英文兜底，中文那条默认不可达**。`media.ts:174-179` 的 `[语音 Ns]` **只在 `downloadVoice === false` 时**才走到；默认 `true` 时语音被下载，落到 `:328-333` 的通用兜底 `` `[${file.kind} ${file.name ?? ""}${duration ? ` ${duration}s` : ""}]` ``——`file.kind` 是原始英文 `voice`、`file.name` 对语音是空，于是模型看到 **`[voice  9s]`**（两个连续空格来自那个空的文件名槽）。同一个文件里 PDF 走的是中文「文档」、超限走的是「超出下载限制」，中英混用只在这一个分支上 | **已修** · 四个兜底分支统一走 `placeholder()`（中文 kind + 空槽不占位）〔`tests/media.test.ts`〕|
 | `M-QUOTA-01` | `AC-QUOTA-011` | **`/usage` 读的是 `turns` 而不是 `usage_ledger`，于是「三方一致」跑过一次 WebUI 试跑就永久不成立**。实测：WebUI 用量页与 `usage_ledger` 都是 `26.178607`，`/usage` 是 `26.1785064808`，差 `0.0001008` —— 精确定位到**两行** `turn_id=dryrun:…`、`chat_id=webui-dryrun` 的 ledger 行（`agents.createDryRun()` 写 ledger 但不建 `turns` 行）。逐 turn 比对零差异，全部误差就是这两行。条目原文只给 ACP 外部花费开了口子，没给试跑开；而且两种分歧形状不同：ACP 是「三方都不含」，试跑是「ledger 含、`/usage` 不含」。附带：`/usage` 与 `/ping` 返回的是**同一份 `dashboard()` payload**，`/usage` 只多了「当前累计用量：」六个字 —— 它不是用量报表，是运维总览 | **已修** · 新增 `UsageLedger.summary()`，与 `report()` 同表同时区口径；`/usage` 改读它并支持 `[today \| month]`〔`tests/access.commands.test.ts`〕 |
-| `M-MEM-02` | `AC-MEM-012`（需求已变更，不再验）| **`/forgetme` 的备份目录 `.forgotten` 无人清理，`forgetMeRetentionDays` 名不副实**。`forgetPrivate`（`store.ts:342-351`）在该值 > 0 时把原文备份到 `<memory.dir>/.forgotten/<uid>/<时间戳>.md`，但**全仓没有任何代码删过 `.forgotten`**（`grep -rn forgotten` 只有 `store.ts` 那两处）—— 这个键只决定「写不写备份」，不决定留多久。一个要求「忘掉我」的用户，数据被无限期保留。另有两处小账：**没有任何恢复入口**（`docs/06:426` 的「30 天内 owner 可恢复」= 手工拷文件）；`docs/11:230` 的 `forgetMeRetentionDays: 30` 是那一页上少数没有「热更新 / 需重启」标注的行（它是构造参数，属需重启）。**命令本身已定为移除**（2026-08-27 需求方拍板），但这个悬着的目录得跟着一起处置 | 已转 [00 §2.3](./00-state.md) |
+| `M-MEM-02` | `AC-MEM-012`（需求已变更，不再验）| **`/forgetme` 的备份目录 `.forgotten` 无人清理，`forgetMeRetentionDays` 名不副实**。`forgetPrivate`（`store.ts:342-351`）在该值 > 0 时把原文备份到 `<memory.dir>/.forgotten/<uid>/<时间戳>.md`，但**全仓没有任何代码删过 `.forgotten`**（`grep -rn forgotten` 只有 `store.ts` 那两处）—— 这个键只决定「写不写备份」，不决定留多久。一个要求「忘掉我」的用户，数据被无限期保留。另有两处小账：**没有任何恢复入口**（`docs/06:426` 的「30 天内 owner 可恢复」= 手工拷文件）；`docs/11:230` 的 `forgetMeRetentionDays: 30` 是那一页上少数没有「热更新 / 需重启」标注的行（它是构造参数，属需重启）。**命令本身已定为移除**（2026-08-27 需求方拍板），但这个悬着的目录得跟着一起处置 | **已处置** · `/forgetme` 整套删干净（命令 / `forgetPrivate()` / `memory.forgetMeRetentionDays` / 四处文档 / `AC-MEM-012`）。`.forgotten` 里**已有的备份不动**（需求方 2026-08-27 定），只在 [06 §6](./06-prompt-and-memory.md) 写明它自此无人写入也无人读取、里面是用户曾要求删除的正文。⚠ 代价照实记：**用户从此没有自助删除私有记忆的入口**，只能由 owner 代劳 |
 | `M-WEB-05` | （无对应条目）| **只要 provider 名下还有一个模型行，`[删除 Provider]` 就必然失败**：`DELETE /api/providers/:id` 是一句没有 try/catch 的裸 `DELETE`，撞 `models.provider_id` 的外键（`NO ACTION`）后抛 `SqliteError` 出到 500，界面上只剩一句「服务端出错，已记录（ref: N）」。而 WebUI 又**没有删模型的入口** —— 这条路在界面里走不通（端点 `DELETE /api/models/:id` 其实一直有，缺的只是界面那颗按钮） | **已修** · 默认回 `409 provider_has_models`、`?cascade=1` 才连坐（一个事务），界面上 409 换成一次写明代价的确认；模型表补行内〔删除〕。两条路共用一份别名清理：指过来的 id 清掉、链空的别名整行删并留 warn `model.alias_emptied`〔`tests/api.contract.test.ts`〕 |
 
 ### M-WEB-06 · WebUI 没有看 `raw_json` 的入口

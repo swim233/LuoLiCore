@@ -699,7 +699,6 @@ media:
 | `/tasks` | all | limited | 在途任务列表 |
 | `/model [alias]` | all | trusted | 查看/固定本会话模型别名 |
 | `/memory` | private | limited | 查看自己的私有记忆 |
-| `/forgetme` | private | limited | 清空自己的私有记忆（可 30 天内恢复） |
 | `/whoami` | all | limited | 自己的 user/chat 角色与有效权限 |
 | `/whois <id>` | all | owner | 查某主体的角色 |
 | `/grant <user\|chat> <id> <role>` | all | owner | 授权 |

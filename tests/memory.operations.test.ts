@@ -12,7 +12,7 @@ function harness() {
   const db = openDatabase(database);
   migrateDatabase(db);
   const log = new LogSink(new OperationsRepository(db), './data/memory-operations-logs');
-  return { db, memory: new MemoryStore(db, directory, 100, 3000, 2, 0, log) };
+  return { db, memory: new MemoryStore(db, directory, 100, 3000, 2, log) };
 }
 
 describe('memory operations', () => {
@@ -34,8 +34,6 @@ describe('memory operations', () => {
     // WebUI 那条路不经过 read()，但发出点是同一个 —— 改别人那份记 op='write'，比看更重。
     memory.auditPrivateAccess('u1', 'webui', 'write');
     expect(memory.lastOwnerRead('u1')).toMatchObject({ op: 'write' });
-    expect(memory.forgetPrivate('u1')).toBe(true);
-    expect(memory.read('primemory', 'u1', 'limited', 'u1', true).content).toBe('# 私有记忆\n');
     closeDatabase(db);
   });
 

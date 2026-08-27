@@ -510,7 +510,6 @@ export const configSchema = z
         compactCron: z.string().default("0 3 * * 0"),
         autoApplyCompaction: z.boolean().default(false),
         requireSourceTag: z.boolean().default(true),
-        forgetMeRetentionDays: z.number().int().nonnegative().default(30),
       })
       .default({}),
     agent: z

@@ -33,7 +33,6 @@ export const HANDLED_COMMANDS: ReadonlySet<string> = new Set([
   "tasks",
   "model",
   "memory",
-  "forgetme",
   "whoami",
   "whois",
   "grant",

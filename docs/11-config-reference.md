@@ -227,7 +227,6 @@ memory:
   compactCron: '0 3 * * 0'        # 需重启
   autoApplyCompaction: false      # 热更新 · false 时压缩结果需 owner 审阅
   requireSourceTag: true          # 热更新 · 强制写入来源标注
-  forgetMeRetentionDays: 30
 
 # ============================================================ agent（D13）
 agent:
