@@ -58,7 +58,16 @@ const RESPONSES: Record<string, unknown> = {
     web_fetch: { minRole: 'owner', approval: 'never', scope: 'global', source: 'builtin', enabled: true,
       timeoutMs: 45_000, selfManagedTimeout: false, defaults: { minRole: 'limited', approval: 'never', timeoutMs: 60_000 }, relaxed: [] } },
   '/api/turns': { items: [], total: 0, page: 1, size: 20 },
-  '/api/messages': { items: [], total: 0, page: 1, size: 50 },
+  // 归档检索的命中行。此前一律回 `{items: []}`，于是这一页那三个行内动作（看轮次、看原始载荷、
+  // 软删除）从来没被渲染过一次。
+  '/api/messages': { total: 1, page: 1, size: 50, items: [
+    { id: 9001, chatId: '-1001', direction: 'in', fromName: '主人', fromUsername: 'owner', kind: 'text',
+      text: '看看这条到底发来了什么', tgDate: Date.now() - 60_000, turnId: 'turn_aaaaaaaaaaaa', attachments: [] }] },
+  // `raw_json` 只在单条详情里发（列表一页 50 条各带一份 update）。这里是入库时脱敏之后的那份 ——
+  // 键名带 api_key 的字段进库时就已经是 «redacted» 了。
+  '/api/messages/9001': { id: 9001, chatId: '-1001', tgMessageId: 4242, kind: 'text', tgDate: Date.now() - 60_000,
+    text: '看看这条到底发来了什么',
+    rawJson: JSON.stringify({ message_id: 4242, entities: [{ type: 'bold', offset: 0, length: 2 }], api_key: '«redacted»' }) },
   // 任务与审批都是分页信封。审批那份的 `pending` 是**服务端全表**计数（不是这一页里数出来的）：
   // 左侧导航角标读它，翻页时不该变（`AC-WEB-049`）。这里刻意让 `pending` 大于本页的 pending 行数，
   // 「从当前页数一遍」那种写法会立刻对不上。
@@ -160,7 +169,12 @@ function responseFor(url: string): unknown {
   return listLike.includes(path) ? [] : {};
 }
 
+/** 建出来的那几根 SSE 管子。重连补拉那条用例要能亲手扳 `onerror` / `onopen`。 */
+interface FakeEventSource { onopen?: () => void; onerror?: () => void; emit(type: string, data?: unknown): void }
+const eventSources: FakeEventSource[] = [];
+
 function stubFetch(): void {
+  eventSources.length = 0;
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
     // SSE 那根管子在 happy-dom 里没有 EventSource 语义，返回一条空流即可 —— 实时刷新不是这里要测的。
@@ -168,9 +182,11 @@ function stubFetch(): void {
     return new Response(JSON.stringify({ ok: true, data: responseFor(url) }), { status: 200, headers: { 'content-type': 'application/json' } });
   }));
   vi.stubGlobal('EventSource', class {
-    constructor() { /* 只要构造得出来，onopen/onmessage 永不触发也不影响首屏 */ }
+    listeners = new Map<string, (event: unknown) => void>();
+    constructor() { eventSources.push(this as unknown as FakeEventSource); }
     close(): void { /* noop */ }
-    addEventListener(): void { /* noop */ }
+    addEventListener(type: string, fn: (event: unknown) => void): void { this.listeners.set(type, fn); }
+    emit(type: string, data: unknown = {}): void { this.listeners.get(type)?.({ data: JSON.stringify(data) }); }
   });
 }
 
@@ -596,6 +612,111 @@ describe('ConsoleView 渲染', () => {
     for (const cost of ['mode = none', 'trusted', 'allowHostFsForOwner'])
       expect(confirmBox.value.detail, `确认框没说 ${cost} 的代价`).toContain(cost);
     dismissConfirm();
+    wrapper.unmount();
+  });
+
+  /**
+   * `AC-WEB-011` 的第三句判据要「`raw_json` 可查看」。`messages.raw_json` 从 `0001_init.sql`
+   * 起就在写，而在这之前**全仓没有一处读它** —— 连 `get_message` 都没有，界面上更够不着
+   * （docs/29 · `M-WEB-06`）。运维排查「Telegram 到底发过来什么」（比如 entities 解析错的
+   * 消息，正文里一点异常都看不出来）此前没有任何入口。
+   */
+  it('检索结果行能打开这条消息的原始载荷，并说明它是脱敏后的那份', async () => {
+    const { default: ConsoleView } = await import('../../packages/webui/src/views/ConsoleView.vue');
+    const wrapper = mount(ConsoleView, { attachTo: document.body });
+    const vm = wrapper.vm as unknown as { active: string; query: string; rawDialog: boolean; searchArchive: () => Promise<void> };
+    vm.active = 'messages';
+    await settle(wrapper);
+    vm.query = '发来了什么';
+    await vm.searchArchive();
+    await settle(wrapper);
+
+    const entry = wrapper.find('[aria-label="查看这条消息的原始载荷"]');
+    expect(entry.exists(), '检索结果行上没有看原始载荷的入口').toBe(true);
+    await entry.trigger('click');
+    await settle(wrapper);
+    expect(vm.rawDialog).toBe(true);
+    // UiModal 是 Teleport 到 body 的，`wrapper.text()` 看不到它。
+    const shown = document.body.textContent ?? '';
+    expect(shown, '载荷没有按 JSON 缩进渲染出来').toContain('"message_id": 4242');
+    expect(shown, 'entities 正是要看的那一类，没渲染出来').toContain('entities');
+    // 「这是脱敏后的那份」必须写在界面上：照着一份被改写过的载荷排查，比没有载荷更误事。
+    expect(shown).toContain('«redacted»');
+    expect(shown).toContain('脱敏');
+    wrapper.unmount();
+  });
+
+  /** 打过的 URL（去掉查询串）。断言的是「补没补拉」，不是具体参数。 */
+  const fetchedPaths = (): string[] =>
+    (fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls.map((call) => String(call[0]).split('?')[0]!);
+  /** 等过 400ms 的合并窗，再把 loader 那一串 await 走完。 */
+  async function waitRefresh(wrapper: VueWrapper): Promise<void> {
+    await new Promise((resolve) => { setTimeout(resolve, 520); });
+    await settle(wrapper);
+  }
+  /** SSE 管子是 `onMounted` 里那串 await 走完之后才建的，`settle` 的六轮不一定够 —— 抢在它之前
+   *  取到的会是上一条用例留下的管子，而那根管子的监听器指着一个已经卸载的组件。 */
+  async function sseChannel(wrapper: VueWrapper): Promise<FakeEventSource> {
+    for (let round = 0; round < 30 && eventSources.length === 0; round += 1) await settle(wrapper);
+    const source = eventSources.at(-1);
+    if (!source) throw new Error('SSE 管子没建起来');
+    return source;
+  }
+
+  /**
+   * `AC-WEB-007` 的后半「数据补齐」。浏览器原生 `EventSource` 自己会重连（前半一直成立），
+   * 但**断线那几秒里发生的事件不会重放**，而此前 `onopen` 只把左下角的 pill 点回「系统在线」——
+   * S8 实测断 20 秒再连上，总览的归档消息数停在旧值 15 秒以上，直到下一条无关事件碰巧到达
+   * 才对上（docs/29 · `M-WEB-02`）。**pill 亮着而数字是假的，比断着更糟**：断着至少界面自己
+   * 说了它不新鲜。
+   */
+  it('SSE 重连后补拉当前页看得见的那几组，首次连上不补', async () => {
+    const { default: ConsoleView } = await import('../../packages/webui/src/views/ConsoleView.vue');
+    eventSources.length = 0;
+    const wrapper = mount(ConsoleView, { attachTo: document.body });
+    const source = await sseChannel(wrapper);
+
+    // 首次连上不该补：`load()` 刚跑完那一串端点，再来一遍纯属白打。
+    const beforeFirst = fetchedPaths().length;
+    source.onopen?.();
+    await waitRefresh(wrapper);
+    expect(fetchedPaths().length, '首次 onopen 就补拉了一遍').toBe(beforeFirst);
+
+    source.onerror?.();
+    source.onopen?.();
+    const beforeReconnect = fetchedPaths().length;
+    await waitRefresh(wrapper);
+    const backfilled = fetchedPaths().slice(beforeReconnect);
+    // 总览这一页看得见的三组：dashboard / logs / activeTurns。
+    for (const path of ['/api/dashboard', '/api/health/detail', '/api/logs', '/api/turns/active'])
+      expect(backfilled, `重连后没补 ${path}`).toContain(path);
+    wrapper.unmount();
+  });
+
+  /**
+   * 补拉走的是 `scheduleRefresh` 那一套可见性过滤，所以看不见的组当场被跳过 —— 而
+   * `REFRESH_VISIBILITY` 上方那句「切过去时 watch(active) 会补一次」此前只对
+   * `loadActiveTurns` 等五个具体 loader 成立，对这十二组一条都不成立。少了这一半，
+   * 重连补拉只救得了运维当时正盯着的那一页。
+   */
+  it('看不见而被跳过的组记成陈的，切到看得见它的页面时补掉', async () => {
+    const { default: ConsoleView } = await import('../../packages/webui/src/views/ConsoleView.vue');
+    eventSources.length = 0;
+    const wrapper = mount(ConsoleView, { attachTo: document.body });
+    const vm = wrapper.vm as unknown as { active: string };
+    const source = await sseChannel(wrapper);
+
+    // 停在总览时来一条用量事件：`usage` 组只有用量页看得见，这一下被跳过（`dashboard` 组照刷）。
+    const before = fetchedPaths().length;
+    source.emit('usage');
+    await waitRefresh(wrapper);
+    expect(fetchedPaths().slice(before)).toContain('/api/dashboard');
+    expect(fetchedPaths().slice(before), '不可见的组不该当场刷').not.toContain('/api/usage');
+
+    vm.active = 'usage';
+    await settle(wrapper);
+    await waitRefresh(wrapper);
+    expect(fetchedPaths().slice(before), '切到用量页没有把错过的那一次补上').toContain('/api/usage');
     wrapper.unmount();
   });
 });

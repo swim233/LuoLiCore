@@ -137,34 +137,38 @@ LUOLI_DATA_DIR=/home/swim/code/LuoLiCore-staging/data-acc pnpm ac:seed --passwor
 下面这些是**开跑之前**就从代码判定出来的（前四条排场次时读实现读出来的，后三条是补用例时量出来的）（排场次时逐条读了实现），记在这里是为了让执行者
 知道它们会挂、不必在现场纠结：条目保持 `[ ]`，判定为缺陷而不是「没测」。
 
-**2026-08-27**，两批修复共收掉十三条，末列标 **已修**，同时按 [`00 §4`](./00-state.md) 的规矩
-从 `docs/00 §2.3` 删掉了对应行：
+**2026-08-27**，六批修复按代价从小到大收掉二十条，末列标 **已修**，同时按
+[`00 §4`](./00-state.md) 的规矩从 `docs/00 §2.3` 删掉了对应行。下表里没标已修的四条各有归宿：
+`M-WEB-04` 转 [21](./21-webui-coverage-gaps.md)、`M-WEB-03` 已被实测推翻、`M-SNAP-01` 是装置
+问题、`M-MEM-02` 随 `/forgetme` 的移除一起处置。
 
 - 第一批（改动最小的八条）：`M-WEB-07` `M-WEB-08` `M-WEB-09` `M-WEB-12` `M-WEB-13`
   `M-TG-01` `M-TG-04` `M-TG-06`
 - 第二批（中等的五条）：`M-WEB-10` `M-WEB-11` `M-TG-03` `M-TG-05` `M-QUOTA-01`
-- 第五批：`M-WEB-14` `M-MEM-01` `M-TG-02`
-- 第四批：`M-LOG-01`
 - 第三批：`M-WEB-01`（`ConsoleView.vue` 里最后 11 处裸 `window.confirm`）。
   `docs/00` 原先记着「跟着拆页面一起收」—— **那条判断作废**：换 `askConfirm` 是逐个函数的
   局部改动，跟未来把这一页拆成子 SFC 不冲突（函数搬走时那行 import 跟着搬），
   而拖着它等于让 `AC-WEB-023` / `AC-WEB-055` 无限期挂着
+- 第四批：`M-LOG-01`
+- 第五批：`M-WEB-14` `M-MEM-01` `M-TG-02`
+- 第六批（最后两条，各要动端点或数据通路）：`M-WEB-02` `M-WEB-06`
 
 **修好不等于能勾** —— `(手动)` 条目要勾必须有一场新的手测台账（`### <编号>` +
-`〔手测 YYYY-MM-DD · S<n>〕`），所以这十三条挂着的验收项仍是 `[ ]`，等 `## S9 · 修复回归场`。
-补第二批的用例时另外量出一条新缺陷（`PUT /api/sandbox` 收下 schema 外的键并落库），
-已记进 `docs/00 §2.3`；它不是手测发现的，所以不在下表里。
+`〔手测 YYYY-MM-DD · S<n>〕`），所以这二十条挂着的验收项仍是 `[ ]`，等 `## S9 · 修复回归场`。
+补用例时另外量出两条新缺陷（`PUT /api/sandbox` 收下 schema 外的键并落库；
+`tests/docs.test.ts` 那道日志 kind 双向一致的闸已经瞎了），都记进了 `docs/00 §2.3`；
+它们不是手测发现的，所以不在下表里。
 
 | 编号 | 条目 | 一句话 | 处置 |
 |---|---|---|---|
 | `M-WEB-01` | `AC-WEB-023` · `AC-WEB-055` | `ConsoleView.vue` 里还有 12 处裸 `window.confirm()`，而抽出去的 `TasksCard` / `SchedulesCard` / `ExtensionsPage` 已统一走 `ui/confirm.ts`。于是「反馈全是右上角同一种 Toast」不成立，「深浅两套主题下无 OS 绘制控件」也不成立 —— 那 12 个就是 OS 对话框。这是 `D-02`（ConsoleView 没拆完）的直接残留 | **已修** · 11 处全部换成 `ui/confirm.ts` 的 `askConfirm`（第 12 处是沙箱那个 `mode=none`，随 `M-WEB-10` 一起换掉了）〔`tests/webui/console.render.test.ts`〕 |
-| `M-WEB-02` | `AC-WEB-007`（后半） | SSE 断线重连只有 `onopen` 置 `connected=true`，**不触发补拉**。浏览器原生 `EventSource` 会自己重连，但断线期间错过的事件不会回来 —— 「数据补齐」这一半没有实现 | 已转 [00 §2.3](./00-state.md) |
+| `M-WEB-02` | `AC-WEB-007`（后半） | SSE 断线重连只有 `onopen` 置 `connected=true`，**不触发补拉**。浏览器原生 `EventSource` 会自己重连，但断线期间错过的事件不会回来 —— 「数据补齐」这一半没有实现。S8 实测：断 20 秒再连上，总览的归档消息数停在旧值 15 秒以上，最后是**一条无关事件碰巧到达**才把数字带对的 | **已修** · 重连后按 `scheduleRefresh` 那一套（同一份可见性过滤 + 400ms 合并）补拉全部十二组，首次连上不补；顺带把「切过去时 `watch(active)` 会补一次」变成真的 —— 那句注释此前只对五个具体 loader 成立〔`tests/webui/console.render.test.ts`〕 |
 | ~~`M-WEB-03`~~ | `AC-WEB-025` | ~~归档检索翻页：搜索分支仍是内存切片，条目点名测的「翻到后面几页」落在没改的那一半上~~ **2026-08-26 S2 实测推翻，见下** | 需从 [00 §2.3](./00-state.md) 撤下 |
 | `M-WEB-04` | `AC-WEB-016` | 权限矩阵视图不存在（详见 §3 豁免登记）。列在这里是因为它同时是一条 WebUI 控制面缺口，不只是一条测不了的验收项 | 已转 [21](./21-webui-coverage-gaps.md) |
 | `M-SEC-01` | `AC-SEC-011` | **数据库备份文件是 0644，不是条目要求的 0600** —— 一份全局可读的整库快照 | 已转 [00 §2.3](./00-state.md) |
 | `M-OPS-01` | （无对应条目）| **第二个实例一启动就 `docker rm -f` 掉第一个实例的持久容器** —— `#sweepOrphans` 的 known 集是空的，而 `luoli.managed=1` 这个标签不带实例身份 | 已转 [00 §2.3](./00-state.md) |
 | `M-LOG-01` | `AC-DB-006` · `AC-WEB-021` · `AC-WEB-037` | WebUI 跑维护操作只留一条 `webui.action`（方法 + 路径），**不落带结果的 `maintenance.*`**；cron 那条路才落 | **已修** · 日志挪进 `MaintenanceService` 本身，cron 与端点两条路留下同一份凭据；顺带 `cleanup()` 的 checkpoint 挪到那条日志之后，「跑完 WAL 是 0」对调用方才真的成立〔`tests/maintenance.gc.test.ts`〕 |
-| `M-WEB-06` | `AC-WEB-011`（`raw_json` 那半）| **WebUI 里没有看 `raw_json` 的入口**：`packages/webui/src` 与 `packages/server/src` 各零命中，`GET /api/messages` 也不回这个字段。列一直在写、也一直被 `get_message` 工具读，只是界面够不着 | 已转 [00 §2.3](./00-state.md) |
+| `M-WEB-06` | `AC-WEB-011`（`raw_json` 那半）| **WebUI 里没有看 `raw_json` 的入口**：`packages/webui/src` 与 `packages/server/src` 各零命中，`GET /api/messages` 也不回这个字段。补修时查清了一件更硬的事：这一列**全仓没有一处读过它**（`get_message` 也没有 —— `archive.ts` 的 `MESSAGE_COLUMNS` 里就没这一列），从 `0001_init.sql` 起写了三千多行，一次都没被看过 | **已修** · `GET /api/messages/:id` 带上 `rawJson`（列表照旧不带：一页 50 条各一份 update），检索结果行加一个「原始载荷」入口，界面上写明它是脱敏后的那份〔`tests/api.contract.test.ts` `tests/webui/console.render.test.ts`〕 |
 | `M-SNAP-01` | `AC-WEB-047` · `AC-WEB-011`（附件那半）| **不是产品缺陷**：`attachments.local_path` 存相对路径，快照跨部署根复制后解析到媒体目录之外，被路径包含检查挡下（`404 附件路径不在媒体目录内`）。那道检查是对的；影响是这两条在这份快照上验不了，要用新收到的附件。**2026-08-27 已用新附件绕过，两条的附件那半都验过了** | 不转（装置问题），但「搬过部署目录后历史附件集体打不开且界面无提示」值得产品定夺 |
 | `M-LOG-02` | `AC-LOG-003`（「是否沙箱」那半）| **`sandbox.run` 的 `spanId` / `parentSpanId` 都是 null**，Trace 视图按 `parentSpanId` 算缩进，于是它被画在 0px、和 `turn.start` 同级 —— 一轮里 3 次沙箱执行对应 3 次 `tool.call`，只能按时间戳猜配对。而 `tool.call` 自己的载荷里既没有沙箱字段也没有审批字段 | 已转 [00 §2.3](./00-state.md) |
 | `M-WEB-13` | `AC-WEB-056` | **填错当前口令会被踢出控制台，而且看不到任何原因。** `POST /api/auth/password` 对错误的当前口令回 **401 `invalid_credentials`**（`app.ts:1007-1010`），而 `api()` 对**任何** 401 都无条件 `location.assign("/login")`（`webui/src/api/client.ts:32-33`）—— 于是页面整个跳走，「当前口令错误」那句 Toast 一个字都没渲染出来，同一页上其它未保存的表单一并丢掉。**而 session 根本没失效**：实测在登录页上直接打 `GET /api/auth/me`，回 `200 {"role":"owner"}`，那次跳转是假的。401 在这里是「输入的内容不对」不是「你的登录过期了」，两种语义共用一个码，客户端只按后者处理。`/api/auth/login` 同样回 401，但它已经在 `/login` 上所以被那个 `pathname !== "/login"` 挡住了 —— 改口令是唯一的受害者 | **已修** · 换成 403（session 是好的、错的是表单里那一格）〔`tests/server.test.ts`〕|
@@ -196,9 +200,11 @@ LUOLI_DATA_DIR=/home/swim/code/LuoLiCore-staging/data-acc pnpm ac:seed --passwor
 - `GET /api/messages` 回的消息对象里没有这个字段（实测逐 key 列过）
 
 列是有的、也一直在写（`packages/db/src/archive.ts` 的 `append` 存
-`JSON.stringify(redactArchivePayload(input.raw))`，`messageQuery()` 也 SELECT 它），
-只是**只有工具那条路读得到**（`get_message`）。运维想看「Telegram 到底发过来什么」——
-比如排查一条 entities 解析错的消息 —— 界面上没有任何地方能看。
+`JSON.stringify(redactArchivePayload(input.raw))`）—— **但没有任何一条路读得到**。
+补修时才查清这一层：`messageQuery()` 展开的 `MESSAGE_COLUMNS` 里**根本没有 `raw_json`**，
+所以 `get_message` 工具拿到的那条消息上也没有它。这一列从 `0001_init.sql` 起就在写，
+写了几千行，**一次都没被读过**。运维想看「Telegram 到底发过来什么」—— 比如排查一条
+entities 解析错的消息，正文里一点异常都看不出来 —— 界面上没有任何地方能看。
 
 这属于 [21](./21-webui-coverage-gaps.md) 的口径（运行时有能力而界面够不着）。
 修法很小：`/api/messages` 的单条详情里带上 `rawJson`，检索结果行加一个「原始载荷」的展开。

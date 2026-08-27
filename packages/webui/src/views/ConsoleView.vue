@@ -778,6 +778,30 @@ async function searchArchive(): Promise<void> {
   finally { searching.value = false; }
 }
 function clearSearch(): void { searchHits.value = null; searchTerm.value = ''; }
+// ── 一条归档消息的原始载荷（docs/29 · M-WEB-06）─────────────────────────────────
+// `messages.raw_json` 从 `0001_init.sql` 起就在写，而在这之前**全仓没有一处读它**（连
+// `get_message` 都没有：`MESSAGE_COLUMNS` 里就没这一列）—— 排查「Telegram 到底发过来什么」
+// 在界面上没有任何入口。渲染的是入库时脱敏过的那份，不是原始 update 的逐字副本。
+interface MessageRaw { id: number; chatId: string; tgMessageId: number; kind: string; tgDate: number; text: string | null; rawJson: string | null }
+const rawDialog = ref(false);
+const rawLoading = ref(false);
+const rawDetail = ref<MessageRaw | null>(null);
+/** 坏 JSON 原样显示而不是显示成「没有载荷」：手工改过库的行也得看得见（「摘除比伪造安全」）。 */
+const rawPretty = computed(() => {
+  const stored = rawDetail.value?.rawJson;
+  if (!stored) return '';
+  try { return JSON.stringify(JSON.parse(stored), null, 2); } catch { return stored; }
+});
+async function inspectRaw(id: number): Promise<void> {
+  rawDialog.value = true; rawLoading.value = true; rawDetail.value = null;
+  try { rawDetail.value = await api<MessageRaw>(`/api/messages/${id}`); }
+  catch (error) { toastError('读取原始载荷失败', error); rawDialog.value = false; }
+  finally { rawLoading.value = false; }
+}
+async function copyRaw(): Promise<void> {
+  try { await navigator.clipboard.writeText(rawPretty.value); pushToast({ severity: 'success', summary: '原始载荷已复制', detail: `message #${rawDetail.value?.id}` }); }
+  catch (error) { toastError('复制失败', error); }
+}
 function softDeleteMessage(id: number, label: string): void {
   askConfirm(`软删除${label}？`, '归档正文会从检索与对话列表隐藏；上下文提交、turn 与附件不会被删除。', async () => {
     try {
@@ -1728,11 +1752,25 @@ const sinceLastEvent = computed(() => {
   return seconds < 60 ? `${seconds} 秒前` : seconds < 3600 ? `${Math.floor(seconds / 60)} 分钟前` : `${Math.floor(seconds / 3600)} 小时前`;
 });
 const refreshTimers = new Map<RefreshGroup, ReturnType<typeof setTimeout>>();
+/** 补拉用的全集。取 `Object.keys` 而不是手抄一份 —— 抄的那份迟早漏掉新加的组，而漏掉的表现是
+ *  「那一块的数字断线之后再也不对」，没有任何报错。 */
+const ALL_REFRESH_GROUPS = Object.keys(REFRESH_LOADERS) as RefreshGroup[];
+/** 因为当前页看不见而被跳过的组。上面那句「切过去时 watch(active) 会补一次」此前只对
+ *  `loadActiveTurns` 等五个具体 loader 成立，对这十二组一条都不成立：切过去看到的是**离开那一刻
+ *  的快照**。记下来，等切到看得见它的页面再补 —— 也是重连补拉能覆盖到别的页面的唯一途径。 */
+const staleGroups = new Set<RefreshGroup>();
 function scheduleRefresh(groups: readonly RefreshGroup[]): void {
   for (const group of groups) {
-    if (refreshTimers.has(group) || !REFRESH_VISIBILITY[group].includes(active.value)) continue;
+    if (!REFRESH_VISIBILITY[group].includes(active.value)) { staleGroups.add(group); continue; }
+    staleGroups.delete(group);
+    if (refreshTimers.has(group)) continue;
     refreshTimers.set(group, setTimeout(() => { refreshTimers.delete(group); void REFRESH_LOADERS[group]().catch(() => undefined); }, REFRESH_DEBOUNCE_MS));
   }
+}
+/** 切页时把这一页看得见、而错过了刷新的那几组补上。 */
+function drainStaleRefresh(): void {
+  const pending = [...staleGroups].filter((group) => REFRESH_VISIBILITY[group].includes(active.value));
+  if (pending.length) scheduleRefresh(pending);
 }
 
 // ── 全量配置表单：由 config.schema.json 自动生成（docs/09 §3.13、docs/21 §1.1）──────────
@@ -1930,6 +1968,7 @@ watch(active, (value) => {
   if (value === 'settings') void loadConfigSchema();
   // 切回来时补一次：不可见的分组在事件到达时被跳过了，直接显示会是离开那一刻的快照。
   if (value === 'dashboard') void loadActiveTurns();
+  drainStaleRefresh();
 });
 /**
  * MCP OAuth 回调的落点。那一跳是**浏览器地址栏**而不是 fetch，所以服务端只能把结果编进 URL；
@@ -1964,8 +2003,18 @@ onMounted(async () => {
   reportMcpAuthResult();
   void loadActiveTurns();
   const events = new EventSource('/api/events');
-  events.onopen = () => { connected.value = true; };
-  events.onerror = () => { connected.value = false; };
+  // 断线期间的事件不会重放，所以重连之后必须自己补拉一次（docs/29 · `M-WEB-02`）。实测断 20 秒
+  // 再连上，总览的「归档消息」停在旧值十几秒，直到下一条无关事件碰巧到达才对上 ——
+  // **pill 已经亮回「系统在线」而数字是假的，比断着更糟**：断着至少界面自己说了它不新鲜。
+  // 首次连上不补：`load()` 刚跑完那 18 个端点。
+  let everDropped = false;
+  events.onopen = () => {
+    connected.value = true;
+    if (!everDropped) return;
+    everDropped = false;
+    scheduleRefresh(ALL_REFRESH_GROUPS);
+  };
+  events.onerror = () => { connected.value = false; everDropped = true; };
   for (const [type, groups] of Object.entries(EVENT_REFRESH)) {
     events.addEventListener(type, (message) => {
       lastEventAt.value = Date.now();
@@ -2197,7 +2246,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
               <template #tgDate="{ data }">{{ new Date(data.tgDate).toLocaleString() }}</template>
               <template #from="{ data }"><UiTag :value="data.direction === 'out' ? 'bot' : 'user'" :severity="data.direction === 'out' ? 'info' : 'secondary'" /> {{ data.fromName ?? data.fromUsername ?? '—' }}</template>
               <template #text="{ data }"><span class="hit-text">{{ data.text ?? `[${data.kind}]` }}</span><AttachmentStrip :items="data.attachments ?? []" /></template>
-              <template #detail="{ data }"><div class="section-actions"><UiButton v-if="data.turnId" size="small" variant="text" icon="pi pi-code" aria-label="查看这条消息所在轮次的实际调用" @click="openDetail(data.turnId)" /><UiButton size="small" variant="text" severity="danger" icon="pi pi-trash" aria-label="软删除这条归档消息" @click="softDeleteMessage(data.id, '这条归档消息')" /></div></template>
+              <template #detail="{ data }"><div class="section-actions"><UiButton v-if="data.turnId" size="small" variant="text" icon="pi pi-code" aria-label="查看这条消息所在轮次的实际调用" @click="openDetail(data.turnId)" /><UiButton size="small" variant="text" icon="pi pi-database" aria-label="查看这条消息的原始载荷" @click="inspectRaw(data.id)" /><UiButton size="small" variant="text" severity="danger" icon="pi pi-trash" aria-label="软删除这条归档消息" @click="softDeleteMessage(data.id, '这条归档消息')" /></div></template>
             </DataGrid>
           </template>
           <template v-else>
@@ -2863,6 +2912,27 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
         <UiButton v-if="logDetail?.traceId && !/^(cmd|job)_/.test(logDetail.traceId)" variant="text" icon="pi pi-comments" label="看这一轮详情" @click="logDialog = false; openDetail(logDetail!.traceId!)" />
         <UiButton variant="text" label="关闭" @click="logDialog = false" />
       </template>
+    </UiModal>
+    <UiModal v-model:visible="rawDialog" :title="rawDetail ? `原始载荷 · 归档 #${rawDetail.id}` : '原始载荷'" width="min(1120px, 96vw)">
+      <p v-if="rawLoading" class="empty"><i class="pi pi-spin pi-spinner" aria-hidden="true" /> 读取这条消息…</p>
+      <template v-else-if="rawDetail">
+        <div class="detail-summary">
+          <span><small>会话</small><code>{{ rawDetail.chatId }}</code></span>
+          <span><small>Telegram 编号</small><code>{{ rawDetail.tgMessageId }}</code></span>
+          <span><small>类型</small><code>{{ rawDetail.kind }}</code></span>
+          <span><small>时间</small><b>{{ new Date(rawDetail.tgDate).toLocaleString() }}</b></span>
+        </div>
+        <p class="detail-summary-text">{{ rawDetail.text || `[${rawDetail.kind}]` }}</p>
+        <div class="detail-payload">
+          <div class="detail-actions">
+            <UiButton size="small" variant="text" icon="pi pi-copy" label="复制 JSON" :disabled="!rawPretty" @click="copyRaw()" />
+            <small class="detail-truncated">这是入库时脱敏过的那份：形似 API key / Bearer token / bot token 的字符串，以及键名含 secret、token、password 的字段，都已被替换成 «redacted»。不是 Telegram 原始 update 的逐字副本。</small>
+          </div>
+          <pre v-if="rawPretty" v-text="rawPretty" />
+          <p v-else class="empty">这条消息没有存下原始载荷。</p>
+        </div>
+      </template>
+      <template #footer><UiButton variant="text" label="关闭" @click="rawDialog = false" /></template>
     </UiModal>
     <UiModal v-model:visible="bulkDialog" title="批量导入主体">
       <div class="form-grid">

@@ -382,6 +382,29 @@ describe('documented API surface', () => {
     closeDatabase(db);
   });
 
+  /**
+   * `AC-WEB-011` 的第三句判据要「`raw_json` 可查看」。这一列从 `0001_init.sql` 起就在写，而在
+   * 这之前**全仓没有一处读它** —— 连 `get_message` 都没有（`MESSAGE_COLUMNS` 里就没这一列），
+   * 于是「Telegram 到底发过来什么」在界面上没有任何入口（docs/29 · `M-WEB-06`）。
+   * 只在单条详情里发：列表一页 50 条各带一份完整 update，光检索一次就是几 MB。
+   */
+  it('serves the redacted raw payload on the single-message detail, never in the list', async () => {
+    const { app, db, headers } = harness();
+    const archived = new ArchiveRepository(db).scope('chat').append({ chatId: 'chat', messageThreadId: null, tgMessageId: 92, direction: 'in', fromKind: 'user',
+      fromUserId: 'user', fromName: 'User', fromUsername: null, kind: 'text', text: 'raw-payload-probe', tgDate: Date.now(), triggered: true, triggerReason: 'mention',
+      raw: { message_id: 92, text: 'raw-payload-probe', entities: [{ type: 'bold', offset: 0, length: 3 }], api_key: `sk-${'a'.repeat(20)}` } });
+    const detail = await (await app.request(`/api/messages/${archived.id}`, { headers: { cookie: headers.cookie } })).json() as { data: { rawJson: string | null } };
+    const raw = JSON.parse(detail.data.rawJson ?? 'null') as Record<string, unknown>;
+    // entities 正是运维要看的那一类：解析错的消息在正文里看不出任何异常。
+    expect(raw.entities).toEqual([{ type: 'bold', offset: 0, length: 3 }]);
+    // 发的是入库时脱敏过的那份，不是原始 update 的逐字副本。
+    expect(raw.api_key).toBe('«redacted»');
+    const listed = await (await app.request('/api/messages?q=raw-payload-probe', { headers: { cookie: headers.cookie } })).text();
+    expect(listed).toContain('raw-payload-probe');
+    expect(listed, '列表端点把整份 update 也带上了').not.toContain('rawJson');
+    closeDatabase(db);
+  });
+
   it('persists MCP CRUD and writes Skill source files through management routes', async () => {
     const skillsDir = './data/api-contract-skills';
     rmSync(skillsDir, { recursive: true, force: true });

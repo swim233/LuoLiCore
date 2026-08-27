@@ -2788,10 +2788,14 @@ export function createServer(
       },
     });
   });
+  // `raw_json` 只在**单条**详情里发，不进列表：一页 50 条各带一份完整 Telegram update，
+  // 光是检索一次就得几 MB。这一列从 `0001_init.sql` 起就在写，而在这之前全仓没有一处读过它
+  // （连 `get_message` 也没有 —— `MESSAGE_COLUMNS` 里就没这一列），界面上够不着任何入口
+  // （docs/29 · `M-WEB-06`）。发出去的是入库时 `redactArchivePayload` 过的那份。
   app.get("/api/messages/:id", (ctx) => {
     const row = dependencies.db
       .prepare(
-        "SELECT id,chat_id AS chatId,message_thread_id AS threadId,tg_message_id AS tgMessageId,direction,from_kind AS fromKind,from_user_id AS fromUserId,from_name AS fromName,from_username AS fromUsername,kind,text,tg_date AS tgDate,triggered,trigger_reason AS triggerReason,turn_id AS turnId,revision,deleted_at AS deletedAt FROM messages WHERE id=?",
+        "SELECT id,chat_id AS chatId,message_thread_id AS threadId,tg_message_id AS tgMessageId,direction,from_kind AS fromKind,from_user_id AS fromUserId,from_name AS fromName,from_username AS fromUsername,kind,text,tg_date AS tgDate,triggered,trigger_reason AS triggerReason,turn_id AS turnId,revision,deleted_at AS deletedAt,raw_json AS rawJson FROM messages WHERE id=?",
       )
       .get(Number(ctx.req.param("id")));
     return row
