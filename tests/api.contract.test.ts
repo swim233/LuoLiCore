@@ -405,6 +405,60 @@ describe('documented API surface', () => {
     closeDatabase(db);
   });
 
+  /**
+   * `docs/29 · M-WEB-05`：此前 `DELETE /api/providers/:id` 是一句没有 try/catch 的裸 `DELETE`，
+   * 撞 `models.provider_id` 那个 `NO ACTION` 外键之后抛 `SqliteError` 出到 **500** ——
+   * 界面上只剩一句「服务端出错，已记录」，说不出原因，而审计那条 `webui.action` 照常记一行，
+   * 看起来像删成功了。而 WebUI 当时也没有删模型的入口，「先删模型再删 provider」这条自救
+   * 路径同样不存在。
+   *
+   * 现在两个动词分开（照 `schedules` 的 `DELETE` vs `purge`）：默认 409，`?cascade=1` 才连坐。
+   */
+  it('refuses to delete a provider that still has models, and cascades only when asked', async () => {
+    const { app, db, headers } = harness();
+    const now = Date.now();
+    db.prepare("INSERT INTO providers(id,name,kind,base_url,api_key_enc,enabled,created_at,updated_at) VALUES ('p1','P','openai','http://x',NULL,1,?,?)").run(now, now);
+    for (const [id, model] of [['m1', 'a'], ['m2', 'b']] as const)
+      db.prepare("INSERT INTO models(id,provider_id,model_id,context_window,max_output,capabilities_json,enabled,sort,created_at,updated_at) VALUES (?,'p1',?,1000,100,'{}',1,0,?,?)").run(id, model, now, now);
+    // `high` 还剩一个候选 → 链变短；`vision` 只指着被删的那个 → 整行删掉并留 warn。
+    db.prepare("INSERT INTO model_aliases(alias,model_ids_json,updated_at) VALUES ('high',?,?)").run(JSON.stringify(['m1', 'kept']), now);
+    db.prepare("INSERT INTO model_aliases(alias,model_ids_json,updated_at) VALUES ('vision',?,?)").run(JSON.stringify(['m2']), now);
+
+    const refused = await app.request('/api/providers/p1', { method: 'DELETE', headers });
+    expect(refused.status, '名下还有模型时不该删得掉').toBe(409);
+    expect(await refused.json()).toMatchObject({ ok: false, error: { code: 'provider_has_models' } });
+    // 拒绝就是一个字节都没动 —— 一半删掉一半留着比 500 更糟。
+    expect(db.prepare('SELECT COUNT(*) FROM providers').pluck().get()).toBe(1);
+    expect(db.prepare('SELECT COUNT(*) FROM models').pluck().get()).toBe(2);
+
+    const cascaded = await app.request('/api/providers/p1?cascade=1', { method: 'DELETE', headers });
+    expect(cascaded.status).toBe(200);
+    expect(await cascaded.json()).toMatchObject({ ok: true, data: { changes: 1, models: 2 } });
+    expect(db.prepare('SELECT COUNT(*) FROM providers').pluck().get()).toBe(0);
+    expect(db.prepare('SELECT COUNT(*) FROM models').pluck().get()).toBe(0);
+    // 别名链：指过来的 id 清掉，链空了的整行删掉。
+    expect(db.prepare("SELECT model_ids_json FROM model_aliases WHERE alias='high'").pluck().get()).toBe(JSON.stringify(['kept']));
+    expect(db.prepare("SELECT COUNT(*) FROM model_aliases WHERE alias='vision'").pluck().get()).toBe(0);
+    // 运行时对「链空掉」是哑的（不注册、`#pick` 回退到 main），所以那条 warn 是唯一凭据。
+    const warned = db.prepare("SELECT data_json FROM log_events WHERE kind='model.alias_emptied'").pluck().all() as string[];
+    expect(warned).toHaveLength(1);
+    expect(JSON.parse(warned[0]!)).toMatchObject({ alias: 'vision' });
+    closeDatabase(db);
+  });
+
+  it('prunes alias chains when a single model is deleted', async () => {
+    const { app, db, headers } = harness();
+    const now = Date.now();
+    db.prepare("INSERT INTO providers(id,name,kind,base_url,api_key_enc,enabled,created_at,updated_at) VALUES ('p1','P','openai','http://x',NULL,1,?,?)").run(now, now);
+    db.prepare("INSERT INTO models(id,provider_id,model_id,context_window,max_output,capabilities_json,enabled,sort,created_at,updated_at) VALUES ('m1','p1','a',1000,100,'{}',1,0,?,?)").run(now, now);
+    db.prepare("INSERT INTO model_aliases(alias,model_ids_json,updated_at) VALUES ('vision',?,?)").run(JSON.stringify(['m1']), now);
+    // 同一种悬空状态换个门进来照样发生 —— 而这道门（模型表的行内〔删除〕）才是天天用的那个。
+    expect((await app.request('/api/models/m1', { method: 'DELETE', headers })).status).toBe(200);
+    expect(db.prepare("SELECT COUNT(*) FROM model_aliases WHERE alias='vision'").pluck().get()).toBe(0);
+    expect(db.prepare("SELECT COUNT(*) FROM log_events WHERE kind='model.alias_emptied'").pluck().get()).toBe(1);
+    closeDatabase(db);
+  });
+
   it('persists MCP CRUD and writes Skill source files through management routes', async () => {
     const skillsDir = './data/api-contract-skills';
     rmSync(skillsDir, { recursive: true, force: true });

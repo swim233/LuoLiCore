@@ -1899,12 +1899,103 @@ export function createServer(
       );
     }
   });
+  /**
+   * 别名链里指向这些模型的 id 一并清掉；清空的别名整行删掉并各留一条 warn。
+   *
+   * `model_aliases.model_ids_json` 存的是 JSON 数组、**没有外键**，所以删模型不会自动带走它们。
+   * 运行时对悬空 id 是**静默过滤**的（`runtime.ts` 那条 `.filter(Boolean)`），链空掉的别名根本
+   * 不注册、`#pick` 直接回退到 `main` —— 留着它等于在界面上摆一个看起来还在、实际早已不生效的
+   * 假别名。删掉，并把「这个别名没了」写成 warn 当唯一凭据（同 `schedule.purged` 那条先例）。
+   *
+   * **必须在删模型那个事务里跑**：分两次的话中间崩一下，留下的正是那些悬空 id。
+   */
+  const pruneAliases = (
+    modelIds: readonly string[],
+  ): Array<{ alias: string; removed: string[]; emptied: boolean }> => {
+    if (!modelIds.length) return [];
+    const gone = new Set(modelIds);
+    const touched: Array<{
+      alias: string;
+      removed: string[];
+      emptied: boolean;
+    }> = [];
+    const rows = dependencies.db
+      .prepare("SELECT alias,model_ids_json AS modelIds FROM model_aliases")
+      .all() as Array<{ alias: string; modelIds: string }>;
+    for (const row of rows) {
+      let chain: string[];
+      // 手工改过库或历史坏行：坏 JSON 不该让整次删除失败，跳过它（那一行本来就已经不生效）。
+      try {
+        chain = JSON.parse(row.modelIds) as string[];
+      } catch {
+        continue;
+      }
+      if (!Array.isArray(chain)) continue;
+      const kept = chain.filter((id) => !gone.has(id));
+      if (kept.length === chain.length) continue;
+      const removed = chain.filter((id) => gone.has(id));
+      if (kept.length)
+        dependencies.db
+          .prepare(
+            "UPDATE model_aliases SET model_ids_json=?, updated_at=? WHERE alias=?",
+          )
+          .run(JSON.stringify(kept), Date.now(), row.alias);
+      else
+        dependencies.db
+          .prepare("DELETE FROM model_aliases WHERE alias=?")
+          .run(row.alias);
+      touched.push({ alias: row.alias, removed, emptied: !kept.length });
+    }
+    return touched;
+  };
+  /**
+   * **默认拒绝，`?cascade=1` 才连坐。** 此前这里是一句没有 try/catch 的裸 `DELETE`，撞
+   * `models.provider_id` 那个 `NO ACTION` 外键之后抛 `SqliteError` 出到 500 —— 界面上只剩一句
+   * 「服务端出错，已记录」，**说不出原因**，而审计中间件那条 `webui.action` 照常记一行，
+   * 看起来像删成功了（docs/29 · `M-WEB-05`）。
+   *
+   * 两个动词分开是照 `schedules` 那条先例（`DELETE` 软取消 vs `POST …/purge` 硬删）：
+   * 「删掉这个 provider」与「连同它名下 12 行调好定价与能力位的模型一起删掉」不是同一个决定。
+   */
   app.delete("/api/providers/:id", (ctx) => {
-    const changes = dependencies.db
-      .prepare("DELETE FROM providers WHERE id=?")
-      .run(ctx.req.param("id")).changes;
+    const id = ctx.req.param("id");
+    const models = dependencies.db
+      .prepare("SELECT id FROM models WHERE provider_id=?")
+      .pluck()
+      .all(id) as string[];
+    if (models.length && ctx.req.query("cascade") !== "1")
+      return ctx.json(
+        apiError(
+          "provider_has_models",
+          `还有 ${models.length} 个模型指向这个 provider。先删掉它们，或者用 ?cascade=1 连同删除。`,
+          409,
+        ).body,
+        409,
+      );
+    let aliases: Array<{ alias: string; removed: string[]; emptied: boolean }> =
+      [];
+    const changes = dependencies.db.transaction(() => {
+      aliases = pruneAliases(models);
+      if (models.length)
+        dependencies.db
+          .prepare("DELETE FROM models WHERE provider_id=?")
+          .run(id);
+      return dependencies.db
+        .prepare("DELETE FROM providers WHERE id=?")
+        .run(id).changes;
+    })();
+    for (const entry of aliases.filter((one) => one.emptied))
+      dependencies.log.event({
+        level: "warn",
+        kind: "model.alias_emptied",
+        summary: `Alias ${entry.alias} lost every model and was removed`,
+        data: { alias: entry.alias, removed: entry.removed, provider: id },
+      });
     dependencies.rebuildModels?.();
-    return ctx.json({ ok: true, data: { changes } });
+    return ctx.json({
+      ok: true,
+      data: { changes, models: models.length, aliases },
+    });
   });
   app.post("/api/providers/:id/test", async (ctx) => {
     const body = await ctx.req
@@ -3030,12 +3121,27 @@ export function createServer(
     dependencies.rebuildModels?.();
     return ctx.json({ ok: true, data: { changes } });
   });
+  // 别名清理走与 provider 级联删同一条路：不然同一种悬空状态换个门进来照样发生，
+  // 而这道门（模型表的行内〔删除〕）才是运维天天用的那个。
   app.delete("/api/models/:id", (ctx) => {
-    const changes = dependencies.db
-      .prepare("DELETE FROM models WHERE id=?")
-      .run(ctx.req.param("id")).changes;
+    const id = ctx.req.param("id");
+    let aliases: Array<{ alias: string; removed: string[]; emptied: boolean }> =
+      [];
+    const changes = dependencies.db.transaction(() => {
+      aliases = pruneAliases([id]);
+      return dependencies.db
+        .prepare("DELETE FROM models WHERE id=?")
+        .run(id).changes;
+    })();
+    for (const entry of aliases.filter((one) => one.emptied))
+      dependencies.log.event({
+        level: "warn",
+        kind: "model.alias_emptied",
+        summary: `Alias ${entry.alias} lost every model and was removed`,
+        data: { alias: entry.alias, removed: entry.removed, model: id },
+      });
     dependencies.rebuildModels?.();
-    return ctx.json({ ok: true, data: { changes } });
+    return ctx.json({ ok: true, data: { changes, aliases } });
   });
   app.post("/api/principals/bulk", async (ctx) => {
     const body = await ctx.req.json<{
