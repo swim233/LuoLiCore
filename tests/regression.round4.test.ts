@@ -131,7 +131,7 @@ describe('R-MEM-01 记忆段合并', () => {
     rmSync(directory, { recursive: true, force: true }); mkdirSync(directory, { recursive: true });
     const db = openDatabase(path); migrateDatabase(db);
     writeFileSync(`${directory}/PUBMEMORY.md`, ['# 公开记忆', '', '- 开头的裸条目', ...Array.from({ length: 13 }, (_, index) => `## 段${index}\n- 条目${index}`)].join('\n'));
-    const store = new MemoryStore(db, directory, 100_000, 200_000, 12, 30);
+    const store = new MemoryStore(db, directory, 100_000, 200_000, 12);
     store.queueWrite({ scope: 'pubmemory', subject: null, section: '新增', lines: ['一条新记忆'], actor: 'test', turnId: 't1', chatId: 'c', userId: 'u' }, 'owner', false, 'trusted');
     store.flush('t1');
     const content = store.read('pubmemory', null, 'owner').content;

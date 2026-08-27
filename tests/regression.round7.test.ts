@@ -130,7 +130,7 @@ describe('I-05 · 落盘前按新内容复核去重与硬上限', () => {
     for (const suffix of ['', '-wal', '-shm']) rmSync(`${database}${suffix}`, { force: true });
     rmSync(directory, { recursive: true, force: true });
     const db = openDatabase(database); migrateDatabase(db);
-    const memory = new MemoryStore(db, directory, 100_000, 300_000, 12, 0);
+    const memory = new MemoryStore(db, directory, 100_000, 300_000, 12);
     const write = (turnId: string) => memory.queueWrite({ scope: 'pubmemory', subject: null, section: '偏好',
       lines: ['他喝手冲不加糖'], actor: 'test', turnId, chatId: 'c', userId: 'u' }, 'owner', false, 'trusted');
     // 两轮各自在**同一份快照**上通过了去重（PUBMEMORY 是全局单份），随后先后落盘。
@@ -153,7 +153,7 @@ describe('I-05 · 落盘前按新内容复核去重与硬上限', () => {
     // 谁先落盘谁写成，后落盘的那条在 flush 里才第一次看到「文档已经这么大了」。
     const bulk = 'X'.repeat(4000); const other = 'Y'.repeat(4000);
     const hardLimit = estimateTextTokens(bulk) + 200;
-    const memory = new MemoryStore(db, directory, hardLimit, hardLimit, 12, 0);
+    const memory = new MemoryStore(db, directory, hardLimit, hardLimit, 12);
     const queue = (turnId: string, section: string, line: string) => memory.queueWrite({ scope: 'pubmemory', subject: null, section,
       lines: [line], actor: 'test', turnId, chatId: 'c', userId: 'u' }, 'owner', false, 'trusted');
     expect(queue('t1', 'A', other)).toMatchObject({ ok: true, pending: true });

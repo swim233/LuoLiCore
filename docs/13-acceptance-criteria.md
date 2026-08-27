@@ -379,7 +379,6 @@
 | [ ] AC-MEM-009 (自动) | 超 `softLimitTokens` | 触发异步压缩，结果落 `memory/.pending/`，WebUI 出现待审 diff；原文件未变 |
 | [ ] AC-MEM-010 (自动) | 一轮内 3 次 `memory_write` | 只有 1 次落盘（轮末批量），文件内容含 3 条 |
 | [ ] AC-MEM-011 (手动) | owner 在 WebUI 查看用户 B 的 PRIMEMORY | 有 `memory.owner_read_private` warn 日志；用户 B 的记忆页显示「最近被 owner 查看于…」 |
-| [ ] AC-MEM-012 (手动) | 用户私聊 `/forgetme` | 自己的 PRIMEMORY 清空；revision 保留；30 天内 owner 可恢复 |
 | [x] AC-MEM-013 (手动) | WebUI 编辑 ASSIST.md 保存 | 下一轮生效；有 diff 版本；可回滚 | 〔手测 2026-08-27 · S3〕
 
 ## 8. 日志与成本 AC-LOG
@@ -655,12 +654,12 @@
 | Agent 与 Provider | | 33 / 46 | | | |
 | 工具/沙箱/审批 | | 60 / 94 | | | |
 | Subagent 与任务 | | 28 / 45 | | | |
-| 记忆 | | 3 / 13 | | | |
+| 记忆 | | 3 / 12 | | | |
 | 日志与成本 | | 11 / 30 | | | |
 | 扩展生态 | | 38 / 53 | | | |
 | WebUI | | 51 / 89 | `AC-WEB-016`（权限矩阵视图从未实现，详见 [29 §3](./29-manual-acceptance-log.md)） | | |
 | 安全 | | 17 / 31 | | | |
 | 运维 | | 2 / 10 | `AC-OPS-005` 后半（首次启动向导从未实现）、`AC-OPS-006`（`pnpm smoke` 走完全链路是开发任务，前置 `D-04`）；两条详见 [29 §3](./29-manual-acceptance-log.md) | | |
-| **合计** | | **326 / 523** | | | |
+| **合计** | | **326 / 522** | | | |
 
 **整体通过条件**：全部 ★ 项通过 + 非 ★ 项通过率 ≥ 95% + 所有豁免项经需求方书面确认。

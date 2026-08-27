@@ -621,12 +621,6 @@ export async function createTelegramBot(
       description: "查看自己的私有记忆（仅私聊）",
     },
     {
-      name: "forgetme",
-      minRole: "limited",
-      usage: "/forgetme",
-      description: "清空自己的私有记忆（仅私聊）",
-    },
-    {
       name: "whoami",
       minRole: "limited",
       usage: "/whoami",
@@ -1072,21 +1066,6 @@ export async function createTelegramBot(
           ? `\n—— 最近被 owner ${seen.op === "write" ? "改动" : "查看"}于 ${ago(seen.ts)}`
           : "",
       ].join(""),
-    );
-  });
-  bot.command("forgetme", async (ctx) => {
-    const access = await requireRole(ctx.update.update_id, "limited", (text) =>
-      ctx.reply(text),
-    );
-    if (!access) return;
-    if (!access.isPrivate) {
-      await ctx.reply("请在私聊中执行 /forgetme。");
-      return;
-    }
-    await ctx.reply(
-      dependencies.memory.forgetPrivate(access.userId)
-        ? "已清空你的私有记忆；版本记录按保留策略保存。"
-        : "尚无私有记忆。",
     );
   });
   bot.command("cancel", async (ctx) => {

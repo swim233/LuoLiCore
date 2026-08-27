@@ -90,7 +90,7 @@ schema 自动表单，可写覆盖率达到 151/151（第三轮接线两项后�
 | `provider` | 9 | `maxRetries` `retryBaseMs` `retryMaxMs` `healthCheckCron` `catalog.enabled` `catalog.url` `catalog.cacheFile` `catalog.ttlHours` `catalog.timeoutMs` |
 | `webui` | 8 | `host` `port` `sessionTtlHours` `passwordHash` `trustProxy` `allowOrigins` `loginRateLimit.attempts` `loginRateLimit.windowMinutes` |
 | `agent` | 7 | `main.modelAlias` `main.maxSteps` `main.downgradeAfterStep` `maxDepth` `maxSubagentsPerTurn` `askTimeoutMs` `maxAsksPerRun` |
-| `memory` | 7 | `dir` `pubWriteMinRole` `softLimitTokens` `hardLimitTokens` `maxSections` `compactCron` `forgetMeRetentionDays` |
+| `memory` | 6 | `dir` `pubWriteMinRole` `softLimitTokens` `hardLimitTokens` `maxSections` `compactCron` |
 | `media` | 7 | `dir` `maxImageBytes` `maxDocBytes` `maxImageEdge` `extract.enabled` `extract.maxChars` `extract.inlineChars` |
 | `logs` | 7 | `level` `dir` `captureBodies` `bodyMaxBytes` `maxFileMb` `retentionDays` `console` |
 | `telegram` | 6 | `mode` `allowedUpdates` `allowBots` `strictCommandSuffix` `throttle.globalPerSecond` `throttle.perChatPerMinute` |

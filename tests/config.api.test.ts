@@ -15,7 +15,7 @@ function harness() {
   const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, webui: { passwordHash: 'secret-hash' }, memory: { dir: './data/config-prompts' } });
   const operations = new OperationsRepository(db); const events = new EventBus(); const log = new LogSink(operations, './data/config-write-logs'); const archive = new ArchiveRepository(db);
   const promptDocuments = new PromptDocuments(db, './data/config-prompts'); promptDocuments.ensure();
-  const app = createServer({ config, db, operations, principals: new PrincipalRepository(db), archive, context: new ContextEngine(db, archive), providers: new ProviderStore(db, new Secrets('x'.repeat(32))), approvals: new DatabaseApprovalBroker(db, config, events, log), maintenance: new MaintenanceService(db, path, 2, 30), promptDocuments, memory: new MemoryStore(db, './data/config-prompts', 1500, 3000, 2, 0, log), events, log, configSchema: {}, startedAt: Date.now(), setup: undefined });
+  const app = createServer({ config, db, operations, principals: new PrincipalRepository(db), archive, context: new ContextEngine(db, archive), providers: new ProviderStore(db, new Secrets('x'.repeat(32))), approvals: new DatabaseApprovalBroker(db, config, events, log), maintenance: new MaintenanceService(db, path, 2, 30), promptDocuments, memory: new MemoryStore(db, './data/config-prompts', 1500, 3000, 2, log), events, log, configSchema: {}, startedAt: Date.now(), setup: undefined });
   const session = operations.createSession(1); const headers = { cookie: `luoli_sid=${session.id}`, 'x-csrf-token': session.csrf, 'content-type': 'application/json' };
   return { app, db, headers };
 }

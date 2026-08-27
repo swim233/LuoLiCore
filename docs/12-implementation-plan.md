@@ -128,7 +128,7 @@
 - `memory_read` / `memory_write` / `memory_list`；scope 收窄与工具不注册逻辑。
 - 去重、soft/hard limit、来源标注、轮末批量落盘。
 - 自动压缩（`low` 模型 → `.pending/` → 待审）。
-- 命令 `/memory` `/forgetme`；owner 读他人私有记忆的告警日志。
+- 命令 `/memory`（`/forgetme` 已于 2026-08-27 移除，见 [06 §6](./06-prompt-and-memory.md)）；owner 读他人私有记忆的告警日志。
 
 **出口条件**
 - 私聊说「记住我不吃香菜」→ 写入 `private/<uid>/PRIMEMORY.md`，含来源标注。

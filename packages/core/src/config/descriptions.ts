@@ -157,8 +157,6 @@ export const CONFIG_DESCRIPTIONS: Record<string, string> = {
     "压缩结果是否自动生效。关着时压缩产物要 owner 在 WebUI 审阅后才落盘。",
   "memory.requireSourceTag":
     "写入记忆时是否强制带来源标注（谁、在哪条消息里说的），方便事后追责与撤销。",
-  "memory.forgetMeRetentionDays":
-    "用户请求「忘记我」之后，数据在被真正清除前还保留多少天（给误操作留后悔期）。",
 
   agent: "主 agent 与子 agent 的运行边界。子 agent 的具体定义在 Agent 页编辑。",
   "agent.main.modelAlias":

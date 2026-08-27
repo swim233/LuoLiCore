@@ -326,7 +326,6 @@ const memory = new MemoryStore(
   config.memory.softLimitTokens,
   config.memory.hardLimitTokens,
   config.memory.maxSections,
-  config.memory.forgetMeRetentionDays,
   log,
 );
 // 第四个参数：扫描结果真的变了才广播。没有它，扩展页只能靠 `health` 事件顺带刷新 ——
