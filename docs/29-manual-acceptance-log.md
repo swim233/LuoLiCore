@@ -137,9 +137,9 @@ LUOLI_DATA_DIR=/home/swim/code/LuoLiCore-staging/data-acc pnpm ac:seed --passwor
 下面这些是**开跑之前**就从代码判定出来的（前四条排场次时读实现读出来的，后三条是补用例时量出来的）（排场次时逐条读了实现），记在这里是为了让执行者
 知道它们会挂、不必在现场纠结：条目保持 `[ ]`，判定为缺陷而不是「没测」。
 
-**2026-08-27**，九批修复按代价从小到大收掉二十三条，末列标 **已修**，同时按
-[`00 §4`](./00-state.md) 的规矩从 `docs/00 §2.3` 删掉了对应行。下表 28 条里，**没标已修的 5 条
-不是同一回事**：`M-LOG-02` / `M-MEM-02` 这 2 条**仍然欠着**，
+**2026-08-27**，十批修复按代价从小到大收掉二十四条，末列标 **已修**，同时按
+[`00 §4`](./00-state.md) 的规矩从 `docs/00 §2.3` 删掉了对应行。下表 28 条里，**没标已修的 4 条
+不是同一回事**：只剩 `M-MEM-02` **仍然欠着**（等 `/forgetme` 的移除一起处置），
 行还在 `docs/00 §2.3` 的表里；另 3 条各有归宿 —— `M-WEB-04` 转
 [21](./21-webui-coverage-gaps.md)、`M-WEB-03` 已被实测推翻、`M-SNAP-01` 是装置问题。
 
@@ -156,6 +156,7 @@ LUOLI_DATA_DIR=/home/swim/code/LuoLiCore-staging/data-acc pnpm ac:seed --passwor
 - 第七批：`M-SEC-01`（备份文件 0644 —— 唯一一条安全项，两行 `chmodSync`）
 - 第八批：`M-OPS-01`（第二个实例清空在位实例的持久容器）
 - 第九批：`M-WEB-05`（带模型的 provider 在界面里删不掉）
+- 第十批：`M-LOG-02`（`sandbox.run` 挂不进调用树）
 
 **修好不等于能勾** —— `(手动)` 条目要勾必须有一场新的手测台账（`### <编号>` +
 `〔手测 YYYY-MM-DD · S<n>〕`），所以这二十条挂着的验收项仍是 `[ ]`，等 `## S9 · 修复回归场`。
@@ -174,7 +175,7 @@ LUOLI_DATA_DIR=/home/swim/code/LuoLiCore-staging/data-acc pnpm ac:seed --passwor
 | `M-LOG-01` | `AC-DB-006` · `AC-WEB-021` · `AC-WEB-037` | WebUI 跑维护操作只留一条 `webui.action`（方法 + 路径），**不落带结果的 `maintenance.*`**；cron 那条路才落 | **已修** · 日志挪进 `MaintenanceService` 本身，cron 与端点两条路留下同一份凭据；顺带 `cleanup()` 的 checkpoint 挪到那条日志之后，「跑完 WAL 是 0」对调用方才真的成立〔`tests/maintenance.gc.test.ts`〕 |
 | `M-WEB-06` | `AC-WEB-011`（`raw_json` 那半）| **WebUI 里没有看 `raw_json` 的入口**：`packages/webui/src` 与 `packages/server/src` 各零命中，`GET /api/messages` 也不回这个字段。补修时查清了一件更硬的事：这一列**全仓没有一处读过它**（`get_message` 也没有 —— `archive.ts` 的 `MESSAGE_COLUMNS` 里就没这一列），从 `0001_init.sql` 起写了三千多行，一次都没被看过 | **已修** · `GET /api/messages/:id` 带上 `rawJson`（列表照旧不带：一页 50 条各一份 update），检索结果行加一个「原始载荷」入口，界面上写明它是脱敏后的那份〔`tests/api.contract.test.ts` `tests/webui/console.render.test.ts`〕 |
 | `M-SNAP-01` | `AC-WEB-047` · `AC-WEB-011`（附件那半）| **不是产品缺陷**：`attachments.local_path` 存相对路径，快照跨部署根复制后解析到媒体目录之外，被路径包含检查挡下（`404 附件路径不在媒体目录内`）。那道检查是对的；影响是这两条在这份快照上验不了，要用新收到的附件。**2026-08-27 已用新附件绕过，两条的附件那半都验过了** | 不转（装置问题），但「搬过部署目录后历史附件集体打不开且界面无提示」值得产品定夺 |
-| `M-LOG-02` | `AC-LOG-003`（「是否沙箱」那半）| **`sandbox.run` 的 `spanId` / `parentSpanId` 都是 null**，Trace 视图按 `parentSpanId` 算缩进，于是它被画在 0px、和 `turn.start` 同级 —— 一轮里 3 次沙箱执行对应 3 次 `tool.call`，只能按时间戳猜配对。而 `tool.call` 自己的载荷里既没有沙箱字段也没有审批字段 | 已转 [00 §2.3](./00-state.md) |
+| `M-LOG-02` | `AC-LOG-003`（「是否沙箱」那半）| **`sandbox.run` 的 `spanId` / `parentSpanId` 都是 null**，Trace 视图按 `parentSpanId` 算缩进，于是它被画在 0px、和 `turn.start` 同级 —— 一轮里 3 次沙箱执行对应 3 次 `tool.call`，只能按时间戳猜配对。而 `tool.call` 自己的载荷里既没有沙箱字段也没有审批字段 | **已修** · 三条工具路径把 `context.parentSpanId`（registry 早就传下来的那个 `tool.call` span id）递进 `Sandbox.run` 的 options，事件原样回声，于是 `sandbox.run` 成为那次 `tool.call` 的子行；`tool.call` 的载荷补 `approval`。「是否沙箱」由子行回答而不是复制一份字段进来 —— 沙箱是三条路共用的底层，复制就有两个真相〔`tests/log.trace.test.ts`〕 |
 | `M-WEB-13` | `AC-WEB-056` | **填错当前口令会被踢出控制台，而且看不到任何原因。** `POST /api/auth/password` 对错误的当前口令回 **401 `invalid_credentials`**（`app.ts:1007-1010`），而 `api()` 对**任何** 401 都无条件 `location.assign("/login")`（`webui/src/api/client.ts:32-33`）—— 于是页面整个跳走，「当前口令错误」那句 Toast 一个字都没渲染出来，同一页上其它未保存的表单一并丢掉。**而 session 根本没失效**：实测在登录页上直接打 `GET /api/auth/me`，回 `200 {"role":"owner"}`，那次跳转是假的。401 在这里是「输入的内容不对」不是「你的登录过期了」，两种语义共用一个码，客户端只按后者处理。`/api/auth/login` 同样回 401，但它已经在 `/login` 上所以被那个 `pathname !== "/login"` 挡住了 —— 改口令是唯一的受害者 | **已修** · 换成 403（session 是好的、错的是表单里那一格）〔`tests/server.test.ts`〕|
 | `M-WEB-14` | `AC-WEB-066` · `AC-PLG-002`（撞上）| **`plugins.provides_json` 从来没人写，于是扩展页对每一份 plugin 都说「没有声明任何 tool / hook / command」。** 这一列在 `0001_init.sql:177` 就有，WebUI 认真读它（`extensions/types.ts:167-172` 解析、`PluginCards.vue:67` 渲染成「它往运行时加了 N 个工具」的 chips），`PluginCards.vue:11` 的注释还写着「端点一直在发（`provides_json`）」—— 但 `packages/core` 与 `packages/server` 里所有 `UPDATE plugins SET` 只碰 `min_role` / `load_error` / `enabled` / `config_json` / `updated_at`，**没有一处写 `provides_json`**。实测：`acc-probe` 已加载、注册了两个工具、模型目录里都列出来了，卡片照旧显示那句 `v-else` 的「没有声明任何 tool / hook / command。」`version` 同病（plugin 声明 `0.2.0`，库里 `null`） | **已修** · 装载成功时写下 `version` 与 `provides_json`（这一次真的装载到的 tools / hooks），装不起来或被自动禁用就清空它〔`tests/plugin.runtime.test.ts`〕 |
 | `M-MEM-01` | `AC-MEM-011` | **「查看他人的这份会被记录」是句空话 —— WebUI 这条路一个字都不记。** `memory.owner_read_private` 只在 `MemoryStore.read()`（`store.ts:125`）里发，那是**工具**那条路；WebUI 的 `GET /api/prompts/:id` 直接照 `memory_docs.path` 读文件，绕过整个 `MemoryStore`。实测给「用户 B」造一份 PRIMEMORY 后用 owner 身份点开：全文照常显示在可编辑的 textarea 里，**日志里连一条 `memory.read` 都没有**，更不用说那条 warn。而提示词页那张卡自己的副标题写着「私有记忆 7000000001 · block 5 · **某个用户私有；查看他人的这份会被记录**」—— 界面把这个保证说出了口，路径上却没有兑现。条目后半句「用户 B 的记忆页显示『最近被 owner 查看于…』」全仓零命中，从未实现。顺带：同一组端点的 `PUT /api/prompts/:id` 还能**改**他人的私有记忆 | **已修** · 三条路共用 `MemoryStore.auditPrivateAccess()` 一个发出点（`memory_read` 工具、`GET`/`PUT /api/prompts/:id`），`user_id` 落被看的那个人；`/memory` 末尾显示「最近被 owner 查看于 …」—— 问责要给被看的人看〔`tests/memory.operations.test.ts` `tests/config.api.test.ts`〕 |

@@ -823,6 +823,9 @@ const sandbox = new Sandbox(
       kind: "sandbox.run",
       summary: `${run.mode}${run.denied ? ` denied: ${run.denied}` : ` exit ${run.exitCode ?? "null"}`}`,
       ...(run.turnId === "adhoc" ? {} : { traceId: run.turnId }),
+      // 挂到调用它的那次 `tool.call` 之下。缺席（非轮次调用 / 探测）时照旧只有 traceId ——
+      // 少了这一项它在 Trace 视图里画在 depth 0，与 `turn.start` 同级（docs/29 · M-LOG-02）。
+      ...(run.parentSpanId ? { parentSpanId: run.parentSpanId } : {}),
       durationMs: run.durationMs,
       data: {
         mode: run.mode,

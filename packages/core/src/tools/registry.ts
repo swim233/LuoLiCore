@@ -889,7 +889,17 @@ export class ToolRegistry {
         chatId: context.turn.chatId,
         userId: context.turn.initiatorUserId,
         key: context.turn.key,
-        data: { input: parsed.data },
+        // `AC-LOG-003` 要「展开任一 `tool.call` 能看出…是否经审批」，而此前这份载荷只有 `{input}`。
+        // 走到这里时被拒的那条早已 return，所以 `granted` 恒真 —— 写出来是为了让这一行**自己**
+        // 说得清，而不是要读的人先懂控制流。「是否沙箱」由挂在这条 span 之下的 `sandbox.run`
+        // 子行回答（`parentSpanId` 那条链，docs/10 §1）：沙箱是三条工具路径共用的底层，
+        // 把它的事实复制一份进这里就会有两个真相。
+        data: {
+          input: parsed.data,
+          approval: decision.needed
+            ? { required: true, risk: decision.risk, granted: true }
+            : { required: false },
+        },
       });
       // 挂住的工具调用会挂住整轮：AI SDK 的 toolMs 只是把一个信号递给 execute()，工具不认它就等于
       // 没有超时。这里改成硬 race —— 到点就把失败交回模型，让它换个做法，而不是让用户对着沉默
