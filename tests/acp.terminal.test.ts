@@ -53,7 +53,7 @@ function settings(acp: Record<string, unknown> = {}, agent: Record<string, unkno
   } } }).agent.acp;
 }
 /** `plan` 的答案由用例给：这一节要量的正是「答案不是 host 时会怎样」。 */
-const host = (mode: 'host' | 'jail' | 'docker' = 'host') => ({
+const host = (mode: 'none' | 'host' | 'docker' = 'host') => ({
   fs: { denyGlobs: [] as string[], maxReadBytes: 262_144, maxWriteBytes: 5_242_880, backupDir: '.luoli-bak' },
   exec: { maxTimeoutMs: 5000, maxOutputBytes: 65_536 },
   plan: () => ({ mode, ...(mode === 'host' ? {} : { reason: '沙箱未启用，执行类工具已禁用' }) }),

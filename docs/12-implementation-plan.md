@@ -87,7 +87,7 @@
 - `tools/policy.ts`（`TOOL_POLICY` 单一数据源）+ `tools/registry.ts`（11 步执行包装，[05 §8](./05-tools-and-permissions.md#8-toolregistry-执行包装统一横切)）。
 - fs 工具 + `resolveJailed`（realpath + denyGlobs）+ trash/backup。
 - 检索工具（`search_messages` / `read_messages` / `get_message` / `admin_search_messages` / `context_stats`）+ FTS trigram 回退。
-- exec 工具 + `sandbox`（none/jail/docker 三实现 + `plan()` 策略矩阵 + fail-closed）。
+- exec 工具 + `sandbox`（none/docker 两实现 + `plan()` 策略矩阵 + fail-closed）。
 - web 工具 + SSRF 防护。
 - Telegram 侧工具。
 - 审批流（`approvals` 表 + Telegram inline 按钮 + 超时）。
@@ -258,7 +258,7 @@ Harness 抽象。所以这不是「接一个 SDK 类」，而是**起一个外�
   做 `reconcile` / `syncIfChanged` / `validate` / `available` / `execute`。
 - `registerExternal` 扩容：`source` 加 `'custom'`，接受 `available?` 与 `timeoutMs`
   —— 那几道闸（角色地板、沙箱判据、会话作用域）只能安放在 `available()` 里。
-- `Sandbox.run` 加可选 `extraEnv`：docker 走 `-e` 的 argv、宿主/jail 走 `spawn` options，
+- `Sandbox.run` 加可选 `extraEnv`：docker 走 `-e` 的 argv、宿主走 `spawn` options，
   两条都不经过 shell 解析。参数因此永远不会被拼进命令串。
 - 七个工具在 `tools/authoring.ts` 注册，**无条件注册、靠 `available()` 关**。
 - 四份随包发的说明书 skill（`skills/writing-*`、`skills/installing-mcp`），走渐进式披露。

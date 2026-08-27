@@ -10,6 +10,20 @@ describe('provider retry policy', () => {
     expect(retryDelay(1, null, 1000, 30_000)).toBeGreaterThanOrEqual(1600);
   });
 
+  /**
+   * AC-PROV-016 / docs/20 · W-PROV-01。旧实现拿 `sha256(String(attempt))` 当抖动源 —— 对同一个
+   * attempt 它是**常量**，于是并发的几十次重试全退避到同一毫秒再一起打过去，等于没有抖动。
+   * 判据因此是「同一个 attempt 反复求值互不相同」，光断区间是断不出这个 bug 的。
+   */
+  it('同一个 attempt 反复求值互不相同：抖动是真随机，不是 attempt 的函数', () => {
+    const samples = Array.from({ length: 200 }, () => retryDelay(3, null, 1000, 30_000));
+    expect(new Set(samples).size).toBeGreaterThan(50);
+    // 真随机也得留在这一档的合法区间里（基数 ±20%），否则「抖动」就成了乱数。
+    const base = 1000 * 2 ** 3;
+    expect(Math.min(...samples)).toBeGreaterThanOrEqual(base * 0.8);
+    expect(Math.max(...samples)).toBeLessThanOrEqual(base * 1.2);
+  });
+
   it('estimates reservations from configured input and output prices', () => {
     const registry = Object.create(ModelRegistry.prototype) as ModelRegistry;
     expect(registry.estimateModel({ priceIn: 2, priceOut: 10, maxOutput: 2000 }, 4000)).toBeCloseTo(0.018, 12);

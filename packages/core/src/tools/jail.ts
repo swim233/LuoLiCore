@@ -22,6 +22,12 @@ export function selfAuthoringDenyGlobs(directories: {
   );
 }
 
+/**
+ * fs 工具（与 ACP 的 `fs/*`、终端 cwd）的路径边界。**和 `sandbox.mode` 没有任何关系** ——
+ * 那个键管的是执行类工具怎么被隔离（`none | docker`），而这里是「哪些路径解析得出来」，
+ * 在任何一档沙箱设置下都照样生效，`resolve()` 在每一次文件调用的正路上。
+ * 名字撞了而已：`sandbox.mode` 曾有一档叫 `jail`，已经删掉，别把这个类当成它的残留。
+ */
 export class PathJail {
   /**
    * 相对路径的解析基点，也是 `FileTools` 回给模型的路径的相对基点 —— **不是**可达边界。

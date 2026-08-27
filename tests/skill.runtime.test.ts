@@ -151,6 +151,49 @@ describe('skill runtime', () => {
     closeDatabase(db);
   });
 
+  /**
+   * `AC-SKL-006`：写坏一份 frontmatter，坏的**只能是它自己**。
+   *
+   * 三半都要断，缺一半都不算：坏的那份在表里留下 `load_error`（扩展页的红是从这一列来的，
+   * `SkillList.vue` 的 `broken` class）且目录 / `load` / `skill://` 三条路都够不着；同一个
+   * 目录下好的那份照常在目录里、照常载得进来；而 `scan()` 自己不抛 —— per-skill catch 一旦
+   * 漏掉一种异常，一份手抖写坏的 SKILL.md 就是整台 bot 起不来。
+   */
+  it('一份 frontmatter 写坏只坏它自己：那份显红且不可用，同目录其他 skill 与装载器照常', () => {
+    const database = './data/skill-broken-frontmatter.test.db';
+    const skillsDir = './data/skill-broken-frontmatter-skills';
+    for (const suffix of ['', '-wal', '-shm']) rmSync(`${database}${suffix}`, { force: true });
+    rmSync(skillsDir, { recursive: true, force: true });
+    mkdirSync(`${skillsDir}/healthy`, { recursive: true });
+    writeFileSync(`${skillsDir}/healthy/SKILL.md`, '---\nname: healthy\ndescription: 好的那份\nmin-role: limited\nallowed-tools: [read_file]\n---\n正文\n');
+    writeFileSync(`${skillsDir}/healthy/reference.txt`, 'reference');
+    // 最常见的那种手抖：`allowed-tools` 忘了写成数组。zod 在这里抛，落进 per-skill catch。
+    mkdirSync(`${skillsDir}/rotten`, { recursive: true });
+    writeFileSync(`${skillsDir}/rotten/SKILL.md`, '---\nname: rotten\ndescription: 坏的那份\nmin-role: limited\nallowed-tools: read_file\n---\n正文\n');
+    const db = openDatabase(database); migrateDatabase(db);
+    const skills = new SkillLoader(db, skillsDir);
+    let scanned: ReturnType<SkillLoader['scan']> = [];
+    expect(() => { scanned = skills.scan(); }).not.toThrow();
+    expect(scanned.map((skill) => skill.name).sort()).toEqual(['healthy', 'rotten']);
+    // 显红：那一行还在表里（运维得看见它坏了），但 enabled=0 且 load_error 有话说。
+    expect(db.prepare('SELECT name,enabled,load_error AS error FROM skills ORDER BY name').all()).toMatchObject([
+      { name: 'healthy', enabled: 1, error: null }, { name: 'rotten', enabled: 0 },
+    ]);
+    expect((db.prepare("SELECT load_error AS error FROM skills WHERE name='rotten'").get() as { error: string }).error).toBeTruthy();
+    // 不可用：目录里没有它，凭名字硬来也载不进来，`skill://` 同样够不着。
+    expect(skills.catalog('owner').map((entry) => entry.name)).toEqual(['healthy']);
+    expect(skills.load('rotten', 'owner', ['read_file'])).toMatchObject({ ok: false });
+    expect(() => skills.resolveResource('skill://rotten/SKILL.md', 'owner')).toThrow('skill_unavailable');
+    // 而好的那份一切照常 —— 这一半才是判据的重点。
+    expect(skills.catalog('limited')).toEqual([{ name: 'healthy', description: '好的那份' }]);
+    expect(skills.load('healthy', 'limited', ['read_file', 'bash'])).toMatchObject({ ok: true, allowedTools: ['read_file'] });
+    expect(skills.resolveResource('skill://healthy/reference.txt', 'limited')).toContain('reference.txt');
+    // 装载器整体还活着：写端点照旧能建新的，坏的那份也没把后来的扫描带塌。
+    expect(skills.create('later', { description: '后来的', body: '正文' })).toMatchObject({ name: 'later', enabled: true });
+    expect(skills.scan().map((skill) => skill.name).sort()).toEqual(['healthy', 'later', 'rotten']);
+    closeDatabase(db);
+  });
+
   it('creates, edits, rescans, and removes SKILL.md through the loader', () => {
     const { db } = setup();
     const skills = new SkillLoader(db, './data/skill-runtime-skills', () => 'limited');

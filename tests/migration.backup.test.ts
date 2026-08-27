@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+import Database from 'better-sqlite3';
 import { describe, expect, it } from 'vitest';
 import { closeDatabase, migrateDatabase, openDatabase, recoverAfterCrash } from '@luoli/db';
 
@@ -13,6 +14,36 @@ describe('migration backup', () => {
     migrateDatabase(db, migrations);
     const backups = readdirSync(resolve(dirname(database), 'backup')).filter((name) => name.includes('-pre-0002.db'));
     expect(backups).toHaveLength(1); expect(existsSync(resolve(dirname(database), 'backup', backups[0]!))).toBe(true);
+    closeDatabase(db);
+  });
+
+  /**
+   * `AC-DB-005`。上一条只核对文件名，而**「有一个文件」不等于「备份成功了」** —— `VACUUM INTO`
+   * 中途断电 / 盘满留下的同样是一个存在的文件，恢复的时候才发现它是半截的。所以这里真的开一个
+   * 连接跑查询，并核对它是**迁移前**那一刻的库：备份里没有这次要建的表、`__drizzle_migrations`
+   * 里也没有这一条，名字里那个 `pre-NNNN` 才对得上。编号取的是**待执行队列的第一条**，不是
+   * 已应用的最大号也不是队尾 —— 恢复时要回到的正是它执行之前那个点。
+   */
+  it('AC-DB-005：备份名带即将执行那条迁移的编号，且能被 sqlite3 打开、查得出迁移前的数据', () => {
+    const database = './data/ac-db-005/luoli.db'; const migrations = './data/ac-db-005/migrations';
+    rmSync(dirname(database), { recursive: true, force: true }); mkdirSync(migrations, { recursive: true });
+    writeFileSync(`${migrations}/0001_init.sql`, 'CREATE TABLE one(id INTEGER); INSERT INTO one(id) VALUES (7);');
+    const db = openDatabase(database); migrateDatabase(db, migrations);
+    writeFileSync(`${migrations}/0007_seven.sql`, 'CREATE TABLE seven(id INTEGER);');
+    writeFileSync(`${migrations}/0008_eight.sql`, 'CREATE TABLE eight(id INTEGER);');
+    migrateDatabase(db, migrations);
+    const directory = resolve(dirname(database), 'backup');
+    const all = readdirSync(directory);
+    const backups = all.filter((name) => /^luoli-\d+-pre-0007\.db$/.test(name));
+    expect(backups, `backup/ 里是 ${all.join()}`).toHaveLength(1);
+    const restored = new Database(resolve(directory, backups[0]!), { readonly: true });
+    expect(restored.pragma('integrity_check', { simple: true })).toBe('ok');
+    expect(restored.prepare('SELECT id FROM one').pluck().get()).toBe(7);
+    expect(restored.prepare('SELECT name FROM __drizzle_migrations ORDER BY name').pluck().all()).toEqual(['0001_init.sql']);
+    expect(restored.prepare("SELECT count(*) FROM sqlite_master WHERE name IN ('seven','eight')").pluck().get()).toBe(0);
+    restored.close();
+    // 主库那边两条都上了：`pre-` 是「迁移之前」的快照，不是「迁移失败」的残骸。
+    expect(db.prepare("SELECT count(*) FROM sqlite_master WHERE name IN ('seven','eight')").pluck().get()).toBe(2);
     closeDatabase(db);
   });
 

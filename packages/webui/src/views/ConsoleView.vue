@@ -1314,7 +1314,9 @@ async function pullSandboxImage(): Promise<void> {
   } catch (error) { toastError('拉取镜像失败', error); }
   finally { pullingImage.value = false; }
 }
-const SANDBOX_MODES = [{ value: 'docker', label: 'docker · 每次调用起一个一次性容器' }, { value: 'jail', label: 'jail · 仅限制工作目录，同进程执行' }, { value: 'none', label: 'none · 不隔离，直接在宿主上跑' }];
+// 这份列表是 `sandbox.mode` 枚举的第二份手抄（不从 config.schema.json 派生，也没有测试焊住），
+// 改 schema 时要一起改 —— 对不上的表现是下拉里选得出一个后端会 400 掉的值。
+const SANDBOX_MODES = [{ value: 'docker', label: 'docker · 每次调用起一个一次性容器' }, { value: 'none', label: 'none · 关掉执行类工具（bypassRoles 仍宿主直跑）' }];
 function markSandboxDirty(): void { sandboxDirty.value = true; }
 function syncSandbox(payload: SandboxPayload): void {
   if (sandboxDirty.value) return;
@@ -2228,7 +2230,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
           <div v-if="sandbox?.plan && !sandbox.plan.allowed" class="danger-banner"><i class="pi pi-exclamation-triangle" />当前配置下沙箱对 owner 都不可用：{{ sandbox.plan.reason ?? '未知原因' }} —— 需要沙箱的工具会直接失败。</div>
           <p v-if="sandboxProbe" :class="['callout', sandboxProbe.available ? '' : 'warn']"><i :class="sandboxProbe.available ? 'pi pi-check-circle' : 'pi pi-times-circle'" />探测结果（打的是<b>已保存</b>的那份配置）：{{ sandboxProbe.available ? `可用 · ${sandboxProbe.mode ?? sandboxForm.mode}` : sandboxProbe.error ?? '不可用' }}</p>
           <div class="form-grid">
-            <label>模式<UiSelect v-model="sandboxForm.mode" :options="SANDBOX_MODES" @change="markSandboxDirty" /><small class="field-note">docker 之外的两档不读下面的镜像与资源限制。</small></label>
+            <label>模式<UiSelect v-model="sandboxForm.mode" :options="SANDBOX_MODES" @change="markSandboxDirty" /><small class="field-note">none 不读下面的镜像与资源限制，而且非 bypassRoles 的角色连执行类工具都拿不到。</small></label>
             <label>容器网络<UiSelect v-model="sandboxForm.network" :options="[{ value: 'none', label: 'none · 断网' }, { value: 'bridge', label: 'bridge · 可出网' }]" :disabled="sandboxForm.mode !== 'docker'" @change="markSandboxDirty" /><small class="field-note">改成 bridge 等于允许模型生成的代码访问网络与内网。</small></label>
             <label>镜像<input v-model="sandboxForm.image" :disabled="sandboxForm.mode !== 'docker'" @input="markSandboxDirty"></label>
             <label>docker 可执行文件<input v-model="sandboxForm.dockerBin" :disabled="sandboxForm.mode !== 'docker'" @input="markSandboxDirty"></label>

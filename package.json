@@ -16,6 +16,7 @@
     "test:watch": "vitest",
     "smoke": "tsx scripts/smoke.ts",
     "db:migrate": "tsx --env-file-if-exists=.env scripts/migrate.ts",
+    "ac:seed": "tsx --env-file-if-exists=.env scripts/acceptance/seed.ts",
     "config:schema": "tsx scripts/config-schema.ts",
     "copy:stats": "tsx scripts/copy/stats.ts",
     "webui:build": "vite build --config packages/webui/vite.config.ts",

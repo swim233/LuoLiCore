@@ -1,7 +1,7 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { CONFIG_DESCRIPTIONS, CONFIG_ENUM_NOTES, HOT_RELOADABLE_CONFIG_KEYS, KNOWN_UNIMPLEMENTED_CONFIG_KEYS, PER_CHAT_NON_SCHEMA_KEYS, PER_CHAT_OVERRIDE_ALLOWLIST, configJsonSchema, configSchemaLeafPaths, configSchema } from '@luoli/core';
+import { CONFIG_DESCRIPTIONS, CONFIG_ENUM_NOTES, HOT_RELOADABLE_CONFIG_KEYS, KNOWN_UNIMPLEMENTED_CONFIG_KEYS, PER_CHAT_NON_SCHEMA_KEYS, PER_CHAT_OVERRIDE_ALLOWLIST, configJsonSchema, configSchemaLeafPaths, configSchema, loadConfig } from '@luoli/core';
 
 function sourceFiles(directory: string): string[] {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
@@ -35,6 +35,29 @@ describe('config schema', () => {
     expect(() => configSchema.parse({ webui: { host: '0.0.0.0', passwordHash: '' } })).toThrow(/password/);
     expect(() => configSchema.parse({ perChat: { chat: { access: { defaultUserRole: 'owner' } } } })).toThrow(/allowlist/);
     expect(() => configSchema.parse({ general: { timezone: 'Asia/Shangahi' } })).toThrow(/IANA/);
+  });
+
+  /**
+   * `access.bootstrapOwnerId` 是整套授权的**起点**：`principals` 表的第一行由 `ensureOwner` 按它写，
+   * 而此后「谁能授权别人」全从那一行长出来。空着照常启动的话，跑起来的是一个谁都指挥不动、
+   * 也没有任何人能把自己提成 owner 的进程 —— 那不是降级运行，是一个只能重装的部署。
+   * 校验落在 `loadConfig` 而不是 schema 里：空串本身是合法值（`requireOwner: false` 的调用方要它）。
+   */
+  it('refuses to start without an owner id, and takes one from either layer', async () => {
+    const path = 'config/no-such-config.test.yaml';
+    const saved = process.env.LUOLI_OWNER_ID;
+    delete process.env.LUOLI_OWNER_ID;
+    try {
+      await expect(loadConfig({ path })).rejects.toThrow(/bootstrapOwnerId/);
+      await expect(loadConfig({ path })).rejects.toThrow(/LUOLI_OWNER_ID is required/);
+      // 拒的是「没有 owner」，不是「没有那个环境变量」：配置层写了同样放行。
+      expect((await loadConfig({ path, overrides: { access: { bootstrapOwnerId: '424242' } } })).access.bootstrapOwnerId).toBe('424242');
+      process.env.LUOLI_OWNER_ID = '515151';
+      expect((await loadConfig({ path })).access.bootstrapOwnerId).toBe('515151');
+    } finally {
+      if (saved === undefined) delete process.env.LUOLI_OWNER_ID;
+      else process.env.LUOLI_OWNER_ID = saved;
+    }
   });
 
   it('applies documented defaults', () => {

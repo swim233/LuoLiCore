@@ -75,9 +75,13 @@ describe('config API validation', () => {
     expect(linear.status).toBe(200);
     const incompatible = await app.request('/api/config', { method: 'PUT', headers, body: JSON.stringify({ 'trigger.wakewords': ['洛璃', '^(?=璃)'] }) });
     expect(incompatible.status).toBe(400);
-    expect((await incompatible.json() as { error: { code: string; message: string } }).error).toMatchObject({ code: 'invalid_wakeword' });
+    // 拒绝要**说明原因**，而且要点名是哪一条：一份唤醒词里坏的通常只有一条，只回个 code
+    // 等于让运维把整份逐条删着试。
+    expect((await incompatible.json() as { error: { code: string; message: string } }).error)
+      .toMatchObject({ code: 'invalid_wakeword', message: expect.stringContaining('「^(?=璃)」') });
     const tooShort = await app.request('/api/config', { method: 'PUT', headers, body: JSON.stringify({ 'trigger.wakewords': ['璃'] }) });
     expect(tooShort.status).toBe(400);
+    expect((await tooShort.json() as { error: { message: string } }).error.message).toContain('wakewordMinLength');
     const ok = await app.request('/api/config', { method: 'PUT', headers, body: JSON.stringify({ 'trigger.wakewords': ['洛璃', '^璃酱[，,、 ]'] }) });
     expect(ok.status).toBe(200);
     expect(db.prepare("SELECT value_json FROM config_kv WHERE key='trigger.wakewords'").pluck().get()).toBe('["洛璃","^璃酱[，,、 ]"]');

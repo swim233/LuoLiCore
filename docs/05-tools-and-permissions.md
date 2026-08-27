@@ -842,10 +842,10 @@ sh ".luoli-tmp/<uuid>.sh" ".luoli-tmp/<uuid>.json"
 
 相对路径在宿主（`cwd=workspace`）与容器（`-w /workspace`）下指同一个文件。脚本有两条取参通道：
 `$1`（= `$LUOLI_PARAMS`，参数 JSON 文件）与 `$LUOLI_ARG_<参数名大写>`（顶层标量参数）。
-后者走 `Sandbox.run` 的 `extraEnv`：docker 是 `-e k=v` 的 argv，宿主 / jail 是 `spawn` 的 options，
+后者走 `Sandbox.run` 的 `extraEnv`：docker 是 `-e k=v` 的 argv，宿主是 `spawn` 的 options，
 **两条路都不经过 shell 解析**。键名白名单 `^LUOLI_ARG_[A-Z0-9_]+$` 是那道闸 —— 没有它，一个叫
 `path` 的参数就变成了 `PATH`。`Sandbox.run` 原有的三键 env 白名单不变，新 env 叠在上面，所以
-`BOT_TOKEN` / `LUOLI_MASTER_KEY` 仍然到不了脚本里（§5.3）。
+`BOT_TOKEN` / `LUOLI_MASTER_KEY` 仍然到不了脚本里（宿主那份白名单见 §5.2，docker 的 `-e` 见 §5.3）。
 
 **框架保证的是「注入不进脚本」，不保证脚本安全使用参数。** `curl "https://api/$1"` 里的 `$1`
 来自群消息就是作者的 bug，与直接用 `bash` 拼命令同类。这句话同时写在 `define_tool` 的工具描述里。
@@ -1136,7 +1136,7 @@ fail-closed，但那是巧合不是设计（docs/20 · W-TOOL-01）。
 
 ```yaml
 sandbox:
-  mode: docker            # none | jail | docker
+  mode: docker            # none | docker
   bypassRoles: [owner]    # 这些角色直接在宿主执行
   image: luoli-sandbox:latest
   network: none           # none | bridge
@@ -1155,8 +1155,7 @@ sandbox:
 |---|---|---|
 | `docker`（一次性，默认） | 每次调用 `docker run --rm`，挂载 `data/workspace/<chatId>` 到 `/workspace` | 强 |
 | `docker` + `persistent.enabled` | 每个会话一个常驻容器，调用走 `docker exec`；到期回收（§5.5） | 强，但容器内状态跨轮次留存 |
-| `jail` | 宿主子进程，`cwd=workspace`，`env` 白名单，命令/模块黑名单，`ulimit`，超时 kill 进程组 | 弱（仅防误操作） |
-| `none` | 不隔离 | 无 |
+| `none` | 执行类工具直接不可用（fail-closed）；`bypassRoles` 里的角色仍在宿主直跑（§5.2） | 无 |
 
 **两档 `docker` 的隔离参数完全相同**（同一套 `--cap-drop=ALL` / `--read-only` / `--user=1000:1000` /
 cgroup 限额），差别只有三处：容器活多久、`/tmp` 与容器可写层跨不跨轮次、以及默认出不出网。
@@ -1166,7 +1165,6 @@ cgroup 限额），差别只有三处：容器活多久、`/tmp` 与容器可写
 ```
 role ∈ bypassRoles                      → 宿主执行（cwd=workspace，恒定；allowHostFsForOwner 只放开 fs 工具的边界，不动执行的 cwd）
 role ∉ bypassRoles ∧ mode='docker'      → 容器执行
-role ∉ bypassRoles ∧ mode='jail'        → jail 执行（日志 level=warn 提示隔离较弱）
 role ∉ bypassRoles ∧ mode='none'        → ✗ 拒绝：{ allowed:false, reason:'沙箱未启用，执行类工具已禁用' }
 mode='docker' ∧ docker 不可用            → ✗ 拒绝（fail-closed），WebUI 显红；owner 仍可 bypass
 mode='docker' ∧ 本进程在容器内 ∧ 未配 hostWorkspaceDir → ✗ 拒绝（见 5.3 路径映射）；owner 仍可 bypass
@@ -1174,11 +1172,16 @@ mode='docker' ∧ 本进程在容器内 ∧ 未配 hostWorkspaceDir → ✗ 拒�
 
 > **这是 D10 的精确落地**：沙箱可开关；owner 直跑；非 owner 在无沙箱时**工具消失而非降级**。
 
-**`host` 不是「弱一点的 jail」，是「不进沙箱」。** `run()` 必须按 `plan.mode` 三分支，
-`host` 一支只有 `cwd` + env 白名单，**不套 §5.4 的 ulimit 前缀**。曾经这里只分
-「docker / 非 docker」两支，于是 bypassRoles 命中的 owner 也吃了 jail 的 `ulimit -u`，
-私聊里每条 `bash` 都回 `fork: 资源暂时不可用`（见下方 `-u` 的坑），看起来像沙箱坏了，
-实际上 owner 压根不该进沙箱。
+**`host` 就是「不进沙箱」** —— `plan.mode` 只剩两支（`host` | `docker`），加上非 bypassRoles
+撞 `mode='none'` 的那条拒绝。`host` 一支给的是「宿主直跑，但别把密钥和孤儿进程漏出去」，
+只有两件事，**不套任何前缀**（命令原样交给 `sh`）：
+
+- `spawn('/bin/sh', ['-c', cmd], { cwd: workspace, detached: true })`，超时与取消
+  `process.kill(-pid, 'SIGKILL')` 杀整个进程组 —— `detached` 就是为了让这一下有个组可杀。
+- `env` 只透传白名单：`PATH LANG HOME TZ`，且 `HOME=workspace`；**移除**所有
+  `*_TOKEN` `*_KEY` `*_SECRET` `LUOLI_*` `BOT_TOKEN`。自定义工具的 `LUOLI_ARG_*` 是**叠加**在
+  这份白名单之上的（`Sandbox.run` 的 `extraEnv` 参数，§3.10），白名单本身不放宽 ——
+  那几个密钥仍然进不了脚本。
 
 ### 5.3 Docker 执行细节
 
@@ -1215,26 +1218,7 @@ docker run --rm \
   §5.5 那一档是个日常问题，`docker top` 又只有 owner 的 `container_inspect` 够得着。
   注意 `ps` 缺席时 `ps … | grep -c` 照样打印 `0` —— 拿它写断言会得到一条永远为真的用例。
 
-### 5.4 jail 模式细节
-
-- `spawn(cmd, { cwd: workspace, shell: '/bin/sh', detached: true })`，超时 `process.kill(-pid, 'SIGKILL')` 杀整个进程组。
-- `env` 只透传白名单：`PATH LANG HOME TZ`，且 `HOME=workspace`；**移除**所有 `*_TOKEN` `*_KEY` `*_SECRET` `LUOLI_*` `BOT_TOKEN`。
-  自定义工具的 `LUOLI_ARG_*` 是**叠加**在这份白名单之上的（`Sandbox.run` 的 `extraEnv` 参数，§3.10），
-  白名单本身不放宽 —— 那几个密钥仍然进不了脚本。
-- `ulimit -v`（虚拟内存）、`-t`（CPU 秒）、`-f`（文件大小）、`-u`（进程数）通过包一层 `sh -c 'ulimit ...; exec ...'` 设置。
-  **只有 `mode='jail'` 套这一层**；`role ∈ bypassRoles` 走的 `host` 一支不套（见 §5.2）。
-- **`-u` 不能直接取 `pidsLimit`。** 它对应 RLIMIT_NPROC，内核按 **UID 全局的任务数**计数——数的是
-  **线程**不是进程，也不是当前进程树。宿主上一个桌面会话轻松四千多个线程，设成 128 的后果是子 shell
-  连一次 fork 都做不成：bash 打五行 `fork: retry: Resource temporarily unavailable`，重试约 15 秒后以
-  254 退出。所以按「当前 `/proc` 里该 UID 的任务数 + `pidsLimit`」设：fork 炸弹最多再撑 `pidsLimit` 个，
-  正常命令照跑。读不到 `/proc`（非 Linux）时**不设这一条**，而不是退回一个注定 fork 失败的值。
-- **jail 模式下 `pidsLimit` 不要设得很小。** 基线是 spawn 前采样一次的，采样到 fork 之间系统自己的
-  线程数也在动，可用余量就是 `pidsLimit` 本身：设 128（默认）很稳，设 8 则机器一忙就退化成上面那种
-  必然 fork 失败。要真正精确的进程数上限用 `mode='docker'` 的 `--pids-limit`，那是 cgroup 记账、
-  只算容器内的进程。
-  > 这条坑在测试里很难自己冒出来：`ulimit -u 1; /bin/echo hi` 是**通过**的——脚本最后一条命令被
-  > bash 直接 `exec` 掉，根本没 fork。要复现必须让它真的 fork（管道、后台任务、非末条命令）。
-- 明确记录在文档与 WebUI：**jail 不是安全边界**，仅适合「只有你自己和完全可信的人用」的部署。
+> §5.4 原为「jail 模式细节」，随 jail 档一起摘除；§5.5 的编号在仓库里有二十余处引用，故不重排。
 
 ### 5.5 持久容器（`sandbox.persistent`）
 
@@ -1333,7 +1317,7 @@ docker exec --user=1000:1000 --workdir=/workspace -e HOME=/workspace [-e extraEn
 **`persistent.network` 与 `sandbox.network` 是两个键**，前者管持久容器（默认 `bridge`），
 后者管一次性容器（保持 `none`）。一个开关不能悄悄改两件事，而不能出网的持久容器基本没有意义。
 
-打开 `enabled` 且 `network: bridge` 时**启动打一条 warn**，形状照 `plan()` 里 jail 那一条：
+打开 `enabled` 且 `network: bridge` 时**启动打一条 warn**，按「变了才再说一次」去重：
 bridge 实测能直达公网与宿主 `172.17.0.1`（[reviews/28](./reviews/28-round10-live-system-test.md)），
 而 §5.3 里那个「注入 HTTP_PROXY 指向可审计出站代理」至今没有实现。这是一句必须说出口的话，
 不是一个可以靠默认值糊过去的取舍。

@@ -1,6 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
-import { userInfo } from "node:os";
+import { existsSync, mkdirSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import type { Role } from "@luoli/shared";
 import type {
@@ -19,36 +18,8 @@ function detectContainer(): boolean {
   return existsSync("/.dockerenv") || existsSync("/run/.containerenv");
 }
 
-/**
- * `ulimit -u` 对应 RLIMIT_NPROC，内核按 **UID 全局的任务数**计数 —— 而且数的是**线程**不是进程，
- * 也不是当前进程树。直接设成 `pidsLimit` 的后果是宿主上该用户的线程数早就远超它（一个桌面会话
- * 轻松四千多），于是子 shell 连一次 fork 都做不成：bash 打五行
- * `fork: retry: Resource temporarily unavailable`，重试约 15 秒后以 254 退出。
- * 所以按「当前占用 + pidsLimit」设：fork 炸弹最多再撑 pidsLimit 个任务，正常命令照跑。
- * 计数与 spawn 之间必然有窗口，但 jail 本就不是安全边界（§5.4），松一点好过必然失败。
- * 读不到 /proc（非 Linux）时返回 null —— 宁可不设这一条，也不要设成一个注定 fork 失败的值。
- */
-function nprocCeiling(pidsLimit: number): number | null {
-  try {
-    const uid = userInfo().uid;
-    let tasks = 0;
-    for (const entry of readdirSync("/proc")) {
-      if (!/^\d+$/.test(entry)) continue;
-      try {
-        if (statSync(`/proc/${entry}`).uid !== uid) continue;
-        tasks += readdirSync(`/proc/${entry}/task`).length;
-      } catch {
-        /* 进程在遍历途中退出 */
-      }
-    }
-    return tasks + pidsLimit;
-  } catch {
-    return null;
-  }
-}
-
 export interface SandboxConfig {
-  mode: "none" | "jail" | "docker";
+  mode: "none" | "docker";
   bypassRoles: Role[];
   dockerBin: string;
   /** 本进程视角的 workspace 根，用来把 run() 收到的绝对路径换算成相对路径。 */
@@ -91,7 +62,12 @@ const PERSISTENT_OFF: PersistentSandboxConfig = {
 export interface SandboxRunEvent {
   turnId: string;
   role: Role;
-  mode: "host" | "jail" | "docker";
+  /**
+   * `none` 不是一种执行方式，而是「沙箱未启用、这次被拒」—— 那一档只会跟着 `denied` 一起出现。
+   * 这一档此前借用了另一个执行模式的名字，于是日志、`/api/health/detail`、`GET /api/sandbox`
+   * 三处一致地报了个假模式 —— 宁可让这个联合多一个成员，也不要在观测面上说谎。
+   */
+  mode: "none" | "host" | "docker";
   image: string | null;
   exitCode: number | null;
   durationMs: number;
@@ -108,7 +84,6 @@ export class Sandbox {
   readonly #inContainer: boolean;
   readonly #cfg: () => SandboxConfig;
   readonly #warn: ((message: string) => void) | undefined;
-  #warnedMode: string | null = null;
   #warnedEgress = false;
   #seq = 0;
   #containers: ContainerManager | null = null;
@@ -173,7 +148,7 @@ export class Sandbox {
   }
 
   /** `mode='docker'` + 持久化开着 + 这个角色不 bypass 时，这一轮该落进会话的常驻容器。 */
-  #usesPersistent(mode: "host" | "jail" | "docker"): boolean {
+  #usesPersistent(mode: "none" | "host" | "docker"): boolean {
     return (
       mode === "docker" &&
       this.#persistent().enabled &&
@@ -271,7 +246,7 @@ export class Sandbox {
     error?: string;
   }> {
     if (this.#cfg().mode !== "docker")
-      return { available: this.#cfg().mode === "jail", mode: this.#cfg().mode };
+      return { available: false, mode: this.#cfg().mode };
     const mapping = this.#mappingError();
     if (mapping) return { available: false, mode: "docker", error: mapping };
     const result = await new Promise<{ available: boolean; error?: string }>(
@@ -326,14 +301,14 @@ export class Sandbox {
   plan(
     role: Role,
     _workspace = ".",
-  ): { allowed: boolean; mode: "host" | "jail" | "docker"; reason?: string } {
+  ): { allowed: boolean; mode: "none" | "host" | "docker"; reason?: string } {
     const mode = this.#cfg().mode;
     if (this.#cfg().bypassRoles.includes(role))
       return { allowed: true, mode: "host" };
     if (mode === "none")
       return {
         allowed: false,
-        mode: "jail",
+        mode: "none",
         reason: "沙箱未启用，执行类工具已禁用",
       };
     if (mode === "docker" && this.#dockerAvailable === false)
@@ -349,14 +324,8 @@ export class Sandbox {
         mode: "docker",
         reason: `${mapping}，执行类工具已禁用`,
       };
-    // jail 只是 ulimit + 目录隔离，不是安全边界（docs/05 §5.2）。模式变了才再说一次，避免刷屏。
-    if (mode === "jail" && this.#warnedMode !== "jail")
-      this.#warn?.(
-        "sandbox.mode=jail：只有 ulimit + 工作目录隔离，同机逃逸手段一概挡不住，不要当成安全边界",
-      );
-    this.#warnedMode = mode;
     // 持久容器默认出网，而 §5.3 里那个「可审计出站代理」至今没实现 —— 这是一句必须说出口的话，
-    // 不能靠默认值糊过去。与 jail 那条同样按「变了才再说一次」去重。
+    // 不能靠默认值糊过去。按「变了才再说一次」去重：plan() 在每条命令上都跑，照实说会刷屏。
     const egress =
       mode === "docker" &&
       this.#persistent().enabled &&
@@ -372,25 +341,8 @@ export class Sandbox {
   }
 
   /**
-   * jail 的 ulimit 前缀。**只有 `plan.mode === 'jail'` 能套上**：bypassRoles 命中时 plan 给的是
-   * `'host'`，意思就是「这个角色不受沙箱约束」（§5.2）。曾经 run() 只分 docker / 非 docker 两支，
-   * 于是 owner 的每条命令都吃了这段 ulimit —— 表现是私聊里 bash 一律
-   * `fork: 资源暂时不可用`，看起来像「沙箱坏了」，实际上 owner 压根不该进沙箱。
-   */
-  #jailed(command: string, timeoutMs: number): string {
-    const limits = [
-      `-v ${Math.ceil(this.#cfg().memoryMb * 1024)}`,
-      `-t ${Math.ceil(timeoutMs / 1000)}`,
-      `-f ${Math.ceil(this.#cfg().maxOutputBytes / 512)}`,
-    ];
-    const nproc = nprocCeiling(this.#cfg().pidsLimit);
-    if (nproc !== null) limits.push(`-u ${nproc}`);
-    return `ulimit ${limits.join(" ")}; exec /bin/sh -c ${JSON.stringify(command)}`;
-  }
-
-  /**
    * @param options.extraEnv 追加给子进程的环境变量。**三条路都不经过 shell 解析** —— docker
-   *   （一次性与持久）走 `-e k=v` 的 argv，宿主/jail 走 `spawn` 的 options —— 所以这是把模型
+   *   （一次性与持久）走 `-e k=v` 的 argv，宿主走 `spawn` 的 options —— 所以这是把模型
    *   给的值交进脚本时唯一不需要做引号决策的通道。键名白名单在调用方（`CustomToolManager`）
    *   那一层，这里只负责「叠加在既有三键白名单之上」：`BOT_TOKEN` / `LUOLI_MASTER_KEY` 仍然进不来。
    * @param options.chatId 这一次执行属于哪个会话。**显式传，不从 workspace 路径反推** ——
@@ -540,19 +492,13 @@ export class Sandbox {
             persistent ? persistent.argv : dockerArgs,
             { stdio: ["ignore", "pipe", "pipe"] },
           )
-        : spawn(
-            "/bin/sh",
-            [
-              "-c",
-              plan.mode === "jail" ? this.#jailed(command, timeout) : command,
-            ],
-            {
-              cwd: workspace,
-              env: { ...env, HOME: workspace, ...extraEnv },
-              detached: true,
-              stdio: ["ignore", "pipe", "pipe"],
-            },
-          );
+        : // 剩下的只有 `plan.mode === 'host'`（bypassRoles）：`none` 走不到这里，plan 不放行。
+          spawn("/bin/sh", ["-c", command], {
+            cwd: workspace,
+            env: { ...env, HOME: workspace, ...extraEnv },
+            detached: true,
+            stdio: ["ignore", "pipe", "pipe"],
+          });
     const result = await collectProcess(child, {
       timeoutMs: timeout,
       maxOutputBytes: this.#cfg().maxOutputBytes,

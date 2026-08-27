@@ -125,7 +125,7 @@ export interface AcpHostAccess {
    * 申报了每次 create 都失败是最坏的形态：agent 会反复试，而它每次拿到的都是一个它没法据此改变
    * 行为的错。fail-closed 落在申报那一刻。
    */
-  plan(root: string): { mode: 'host' | 'jail' | 'docker'; reason?: string };
+  plan(root: string): { mode: 'none' | 'host' | 'docker'; reason?: string };
 }
 
 export interface AcpRunOptions {

@@ -21,7 +21,7 @@
 ├───────────────────────────────────────────────────────────────────────────┤
 │ L2  能力层 Capability                                                     │
 │  ToolRegistry    内建工具 · Skill · Plugin · MCP 统一注册与权限过滤        │
-│  Sandbox         none / jail / docker 三种执行隔离                         │
+│  Sandbox         none / docker 两种执行隔离                                │
 │  MemoryStore     ASSIST/CHARACTER/PUBMEMORY/PRIMEMORY 读写与版本           │
 ├───────────────────────────────────────────────────────────────────────────┤
 │ L1  状态层 State                                                          │
@@ -172,7 +172,7 @@ LuoLiCore/
 │   │   ├── tools/                  registry.ts（注册 · 权限过滤 · 执行包装）· policy.ts（审批档位）
 │   │   │                           builtins.ts（33 个内建工具）· files.ts · web.ts · schedule.ts
 │   │   │                           jail.ts（PathJail）· cite.ts
-│   │   ├── sandbox/index.ts        none · jail · docker
+│   │   ├── sandbox/index.ts        none · docker
 │   │   ├── approval/rules.ts       审批规则匹配（`approvals.ts` 是 broker，在 src 根）
 │   │   ├── memory/store.ts         MemoryStore
 │   │   ├── skills/loader.ts        SKILL.md 解析与渐进式披露
@@ -242,7 +242,7 @@ LuoLiCore/
 | 校验 | **zod** | 工具 `inputSchema`、配置 schema、API body |
 | 日志 | 自建 `LogSink`（JSONL）+ `pino` 作控制台输出 | 见 [10](./10-logging-and-observability.md) |
 | 测试 | **vitest** + `@grammyjs/...` 无需真实 API 的 stub + 内存 SQLite | 见 [13](./13-acceptance-criteria.md) |
-| 沙箱 | Docker CLI（`docker run --rm`）/ 进程内 jail | 见 [05](./05-tools-and-permissions.md#5-沙箱) |
+| 沙箱 | Docker CLI（`docker run --rm`） | 见 [05](./05-tools-and-permissions.md#5-沙箱) |
 
 ### 版本锁定原则
 

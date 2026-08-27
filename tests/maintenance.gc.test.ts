@@ -1,8 +1,8 @@
-import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { relative, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { closeDatabase, migrateDatabase, openDatabase, readAppKv } from '@luoli/db';
-import { AGENT_RESULT_REF_REPAIR_KEY, AgentResultStore, MaintenanceService, repairAgentResultRefs } from '@luoli/core';
+import { OperationsRepository, closeDatabase, migrateDatabase, openDatabase, readAppKv } from '@luoli/db';
+import { AGENT_RESULT_REF_REPAIR_KEY, AgentResultStore, LogSink, MaintenanceService, Scheduler, repairAgentResultRefs } from '@luoli/core';
 
 /**
  * 第十轮活体测试里维护那一批（`docs/reviews/28` 的 `L-OPS-05` / `L-OPS-06`）。
@@ -209,6 +209,55 @@ describe('L-OPS-06 · result_full_ref 存相对路径', () => {
     expect(backOnOld).toMatchObject({ agentResults: 0 });
     expect(backOnOld.refused).toBeUndefined();
     expect(existsSync(resolve(oldRoot, 'r1.txt'))).toBe(true);
+    closeDatabase(db);
+  });
+});
+
+/**
+ * `AC-DB-006`。四样东西缺哪一样都表现成同一句抱怨：「盘一直在涨，而日志里什么都没有」。
+ * 所以不直接调 `cleanup()`，而是照 `main.ts` 的 `general.maintenanceCron` 那条接线过一遍
+ * `Scheduler` —— `trigger()` 也正是 WebUI「立即触发」走的那条路。
+ */
+describe('AC-DB-006 · 维护任务跑完要留下痕迹', () => {
+  it('AC-DB-006：一次触发清掉过期日志与 processed_updates、把 WAL 收回 0，并落一条 maintenance.cleanup', async () => {
+    const { db, path } = database('maint-ac006');
+    const logsDir = directory('maint-ac006-logs');
+    const now = Date.now(); const wal = `${path}-wal`;
+    const day = (daysAgo: number): string => new Date(now - daysAgo * 86_400_000).toISOString().slice(0, 10);
+    const logRow = db.prepare("INSERT INTO log_events(ts,level,kind,summary) VALUES (?,'info',?,'x')");
+    logRow.run(now - 40 * 86_400_000, 'system.expired'); logRow.run(now - 86_400_000, 'system.fresh');
+    const update = db.prepare('INSERT INTO processed_updates(update_id,ts) VALUES (?,?)');
+    update.run(1, now - 10 * 86_400_000); update.run(2, now - 86_400_000);
+    for (const daysAgo of [40, 1]) { mkdirSync(resolve(logsDir, day(daysAgo)), { recursive: true }); writeFileSync(resolve(logsDir, day(daysAgo), 'system.jsonl'), '{}\n'); }
+    expect(statSync(wal).size, '装置本身就没往 WAL 里写过东西，checkpoint 那条断言会白过').toBeGreaterThan(0);
+    const log = new LogSink(new OperationsRepository(db), logsDir, [], { level: 'info', console: 'off' });
+    const maintenance = new MaintenanceService(db, path, 2, 30, logsDir);
+    const failures: unknown[] = [];
+    const scheduler = new Scheduler((_name, error) => failures.push(error));
+    let walAfterCleanup = -1;
+    scheduler.add('0 4 * * *', () => {
+      const result = maintenance.cleanup();
+      // 取样只能在这里：`cleanup()` 的最后一句就是 checkpoint，而紧接着这条日志自己又要写库 ——
+      // 触发之后再量到的是「那一行有多大」，不是 checkpoint 到底有没有生效。
+      walAfterCleanup = statSync(wal).size;
+      log.event({ level: 'info', kind: 'maintenance.cleanup', summary: 'Scheduled cleanup complete', data: result });
+    }, 'maintenance');
+    await scheduler.trigger('maintenance');
+    scheduler.stop(); log.close();
+    expect(failures).toEqual([]);
+    expect(walAfterCleanup).toBe(0);
+    expect(db.prepare('SELECT kind FROM log_events WHERE kind LIKE ? ORDER BY ts').pluck().all('system.%')).toEqual(['system.fresh']);
+    expect(db.prepare('SELECT update_id FROM processed_updates').pluck().all()).toEqual([2]);
+    expect(existsSync(resolve(logsDir, day(40)))).toBe(false);
+    expect(existsSync(resolve(logsDir, day(1), 'system.jsonl'))).toBe(true);
+    const recorded = db.prepare("SELECT data_json FROM log_events WHERE kind='maintenance.cleanup'").get() as { data_json: string } | undefined;
+    expect(recorded, '库里没有 maintenance.* 那条 —— 跑过一次维护在日志里没有任何凭据').toBeDefined();
+    // 计数要真的进载荷：`data` 丢了的话日志里只剩一句 complete，运维看不出这次到底清了什么。
+    expect(JSON.parse(recorded!.data_json)).toMatchObject({ logs: 1, updates: 1, logDirectories: 1 });
+    // `maintenance` 是 `CATEGORY_BY_PREFIX` 认得的前缀，落 system.jsonl；不认得的前缀会掉进
+    // `turn` 那个兜底，于是维护记录散进轮次日志里，按类别翻日志的人再也找不到它。
+    expect(readFileSync(resolve(logsDir, day(0), 'system.jsonl'), 'utf8')).toContain('"kind":"maintenance.cleanup"');
+    expect(existsSync(resolve(logsDir, day(0), 'turn.jsonl'))).toBe(false);
     closeDatabase(db);
   });
 });

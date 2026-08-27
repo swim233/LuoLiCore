@@ -1,9 +1,14 @@
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
-import { HOT_RELOAD_UNRELIABLE_HINT, LogSink, PluginManager, ToolRegistry, isHotReloadReliable } from '@luoli/core';
+import { ContextEngine, HOT_RELOAD_UNRELIABLE_HINT, LogSink, MemoryStore, PluginManager, QuotaGuard, ToolRegistry, TurnConcurrency, TurnRegistry, configSchema, isHotReloadReliable } from '@luoli/core';
 import type { ToolExecutionContext } from '@luoli/core';
-import { OperationsRepository } from '@luoli/db';
+import { ArchiveRepository, OperationsRepository, PrincipalRepository, TurnRepository } from '@luoli/db';
+import { createTelegramBot } from '@luoli/telegram';
+
+const botInfo = { id: 1, is_bot: true as const, first_name: 'Bot', username: 'mybot', can_join_groups: true, can_read_all_group_messages: false, supports_inline_queries: false, can_connect_to_business: false, has_main_web_app: false, has_topics_enabled: false, allows_users_to_create_topics: false, can_manage_bots: false, supports_join_request_queries: false };
+const privateUpdate = (id: number, text: string): never => ({ update_id: id, message: { message_id: id, date: Math.floor(Date.now() / 1000),
+  chat: { id: 500, type: 'private', first_name: 'User' }, from: { id: 500, is_bot: false, first_name: 'User' }, text } }) as never;
 
 function setup() {
   const database = './data/plugin-runtime.test.db';
@@ -119,6 +124,52 @@ describe('plugin runtime', () => {
     expect(rows[0]!.ms).toBeGreaterThanOrEqual(200);
     await slow.manager.close(); closeDatabase(slow.db);
   });
+
+  /**
+   * `AC-PLG-008`：`onMessage` 回 `{drop:true}` 的那条消息**既不入库也不开轮**。
+   *
+   * 两半都要断。只挡触发的话消息照旧进 `messages` 表，下一轮以背景发言的身份被 `claimBackground`
+   * 读回上下文里 —— 「这条别让它看见」在用户那边看着生效了，在模型那边一个字没少。反过来只挡入库
+   * 也不行：一条不在库里的消息照样能把轮次开起来，然后模型对着一条查不到出处的话回答。
+   */
+  it('onMessage 回 {drop:true} 的消息不入库也不开轮，同一条路上不 drop 的照常', async () => {
+    const name = 'plugin-drop-message';
+    const database = `./data/${name}.test.db`;
+    const directory = `./data/${name}-plugins`;
+    for (const suffix of ['', '-wal', '-shm']) rmSync(`${database}${suffix}`, { force: true });
+    for (const path of [directory, `./data/${name}-logs`, `./data/${name}-memory`]) rmSync(path, { recursive: true, force: true });
+    mkdirSync(`${directory}/dropper`, { recursive: true });
+    // 按正文挑着 drop：同一个插件、同一条钩子里出两种答复，正对照就不必换一套装配。
+    writeFileSync(`${directory}/dropper/plugin.js`,
+      "export default { name:'dropper', hooks:{ onMessage: (ctx) => ({ drop: String(ctx.message?.text ?? '').includes('别看') }) } };");
+    const db = openDatabase(database); migrateDatabase(db);
+    db.prepare('INSERT INTO plugins(name,path,min_role,enabled,config_json,updated_at) VALUES (?,?,?,1,?,?)')
+      .run('dropper', `${directory}/dropper/plugin.js`, 'trusted', '{}', Date.now());
+    const manager = new PluginManager(db, directory, 1000, 3);
+    await manager.reconcile();
+    const config = configSchema.parse({ access: { defaultUserRole: 'trusted', defaultChatRole: 'trusted', bootstrapOwnerId: '1' },
+      quota: { enabled: false }, output: { mode: 'once', replyDelayMs: 0 } });
+    const archive = new ArchiveRepository(db); const operations = new OperationsRepository(db);
+    const opened: string[] = [];
+    const bot = await createTelegramBot('12345678:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', {
+      config, db, principals: new PrincipalRepository(db), archive, operations, context: new ContextEngine(db, archive), turns: new TurnRepository(db),
+      quota: new QuotaGuard(db, 'UTC'), memory: new MemoryStore(db, `./data/${name}-memory`, 1500, 3000), registry: new TurnRegistry(),
+      concurrency: new TurnConcurrency(config.concurrency), log: new LogSink(operations, `./data/${name}-logs`), botInfo, plugins: manager,
+      onTurn: async (turn) => { opened.push(turn.turnId); return '好的'; } });
+    bot.api.config.use((async (_prev: unknown, method: string, payload: Record<string, unknown>) => ({ ok: true,
+      result: method === 'sendMessage' || method === 'editMessageText'
+        ? { message_id: 900, date: 0, chat: { id: 500, type: 'private' }, text: String(payload.text ?? '') } : true })) as never);
+    // 私聊，本来必触发。drop 之后归档表整张空 —— 连 `direction='out'` 都不该有，因为轮次压根没开。
+    await bot.handleUpdate(privateUpdate(1, '这条别看'));
+    expect(db.prepare('SELECT COUNT(*) FROM messages').pluck().get()).toBe(0);
+    expect(opened).toEqual([]);
+    expect(db.prepare('SELECT COUNT(*) FROM turns').pluck().get()).toBe(0);
+    // 正对照：同一个插件回 `{drop:false}` 的那条，两件事都照常发生。
+    await bot.handleUpdate(privateUpdate(2, '这条可以看'));
+    expect(db.prepare("SELECT text FROM messages WHERE direction='in'").pluck().all()).toEqual(['这条可以看']);
+    expect(opened).toHaveLength(1);
+    await manager.close(); closeDatabase(db);
+  }, 20_000);
 
   /**
    * tsx 的 ESM loader 按路径缓存模块、忽略 `?v=`，于是 `pnpm dev` 下 reload 每次都回 ok 而跑的

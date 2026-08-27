@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { rmSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 /**
@@ -18,12 +19,17 @@ import { describe, expect, it } from 'vitest';
  */
 
 const PORT = 8799;
+/** 崩溃那条用例自己一个端口：它要连起两个进程，与上面那条共用端口的话「谁在听」会变成竞态。 */
+const CRASH_PORT = 8801;
 const GRACE_MS = 2000;
 
 interface Started { child: ReturnType<typeof spawn>; stderr: string[]; stdout: string[] }
 
-async function startBot(dataDir: string): Promise<Started> {
-  const child = spawn(process.execPath, ['--import', 'tsx', resolve('apps/bot/src/main.ts')], {
+/** @param options.imports 额外的 `--import`，排在入口之前 —— 崩溃那条用例靠它把扳机塞进真进程。 */
+async function startBot(dataDir: string, options: { port?: number; imports?: readonly string[] } = {}): Promise<Started> {
+  const port = options.port ?? PORT;
+  const imports = (options.imports ?? []).flatMap((path) => ['--import', pathToFileURL(path).href]);
+  const child = spawn(process.execPath, ['--import', 'tsx', ...imports, resolve('apps/bot/src/main.ts')], {
     env: {
       ...process.env,
       // **BOT_TOKEN 必须为空**：给了真 token 的话这个测试进程会抢走 getUpdates 的长轮询，
@@ -48,13 +54,26 @@ async function startBot(dataDir: string): Promise<Started> {
   for (;;) {
     if (child.exitCode !== null) throw new Error(`bot 启动就退出了（code ${child.exitCode}）：\n${stderr.join('')}${stdout.join('')}`);
     try {
-      const response = await fetch(`http://127.0.0.1:${PORT}/api/health`);
+      const response = await fetch(`http://127.0.0.1:${port}/api/health`);
       if (response.ok) break;
     } catch { /* 还没起来 */ }
-    if (Date.now() > deadline) throw new Error(`bot 在 40s 内没有开始监听：\n${stderr.join('')}${stdout.join('')}`);
+    if (Date.now() > deadline) {
+      // 留下它的话，下一次跑这份用例时 `/api/health` 会当场答应 —— 而那个 ok 来自上一次跑剩的
+      // 进程，新起的那个还在启动、端口也还没抢到，于是断言全打在错的进程上。
+      child.kill('SIGKILL');
+      throw new Error(`bot 在 40s 内没有开始监听：\n${stderr.join('')}${stdout.join('')}`);
+    }
     await new Promise((settle) => setTimeout(settle, 200));
   }
   return { child, stdout, stderr };
+}
+
+/** SIGKILL 掉还活着的那些，并等端口真的松手 —— 断言失败时也要收干净（同上）。 */
+async function reap(children: readonly ReturnType<typeof spawn>[]): Promise<void> {
+  for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+  const deadline = Date.now() + 5000;
+  while (children.some((child) => child.exitCode === null && child.signalCode === null) && Date.now() < deadline)
+    await new Promise((settle) => setTimeout(settle, 50));
 }
 
 describe('SIGTERM 退出路径', () => {
@@ -234,4 +253,109 @@ describe('SIGTERM 退出路径', () => {
     // 就成了「我不跑，但我顺手把你弄坏了」。
     expect(source.indexOf('acquireInstanceLock(')).toBeLessThan(source.indexOf('recoverAfterCrash(db)'));
   });
+});
+
+/**
+ * `system.crash` 与 `system.unhandled_rejection` 的**行为**契约（`docs/10 §2` 的事件表）。
+ * 「两种都不允许在日志里不留痕迹」是这一条的全部：曾经有一次 uncaught 的流错误把进程直接带走、
+ * 日志里一个字都没有，排查只能靠翻 `turns` 表猜「最后一条 `turn.start` 之后发生了什么」。
+ *
+ * **真进程**：那两个处理器焊在 `apps/bot/src/main.ts` 模块顶层，没有可单独 import 的导出，
+ * 而照抄一份到测试里等于测了个假的。所以起真进程，`--import` 一个只负责扣扳机的 fixture
+ * （`tests/fixtures/fatal-trigger.mjs`，它不复刻处理器），再去看 stderr、看落盘的
+ * `system.jsonl`、看进程死没死。
+ */
+describe('崩溃与未处理的 rejection', () => {
+  it('unhandledRejection 只留证据不退出，uncaughtException 落 system.crash 后才退出，下次启动照常收尾', async () => {
+    const { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } = await import('node:fs');
+    const { closeDatabase, openDatabase } = await import('@luoli/db');
+    const dataDir = resolve('./data/crash-test');
+    const logsDir = resolve(dataDir, 'logs');
+    rmSync(dataDir, { recursive: true, force: true });
+    mkdirSync(dataDir, { recursive: true });
+    // `logs.dir` 默认是 cwd 下的 `./logs` —— 与本机在跑的那个 bot 共用一棵目录，断言会读到别人的行。
+    //
+    // **`sandbox.dockerBin` 必须指到一个必然失败的东西上。** 启动时那次 `void reapContainers()`
+    // 在 `sandbox.persistent.enabled=false`（默认）下会走 `#sweepOrphans(counts, new Set())`：
+    // 宿主上每一个带 `luoli.managed=1` 标签的容器都不在它那张空表里，于是挨个 `docker rm -f`。
+    // 这个用例起两次进程，等于把 `sandbox.containers.docker.test.ts` 正在用的容器杀两次。
+    writeFileSync(resolve(dataDir, 'config.yaml'),
+      `general:\n  shutdown:\n    graceMs: ${GRACE_MS}\nwebui:\n  port: ${CRASH_PORT}\nlogs:\n  dir: ${logsDir}\nsandbox:\n  mode: none\n  dockerBin: /bin/false\n`);
+    /** 落盘的 system.jsonl。按 UTC 日期分目录，所以扫目录而不是自己算「今天」（跨零点会算错）。 */
+    interface Line { level: string; kind: string; data?: { event?: string; detail?: string } }
+    const systemLog = (): Line[] => (existsSync(logsDir) ? readdirSync(logsDir, { withFileTypes: true }) : [])
+      .filter((entry) => entry.isDirectory()).map((entry) => resolve(logsDir, entry.name, 'system.jsonl'))
+      .filter((path) => existsSync(path))
+      // 只收完整的行：urgent 那一档是 appendFileSync，读的时候可能正撞上别人写到一半。
+      .flatMap((path) => readFileSync(path, 'utf8').split('\n').filter((line) => line.startsWith('{') && line.endsWith('}'))
+        .map((line) => JSON.parse(line) as Line));
+
+    // 起过的进程一律登记：断言中途红了也要收干净，否则它会带着 8801 端口活到下一次跑这份用例。
+    const running: Array<ReturnType<typeof spawn>> = [];
+    try {
+      const crashed = await startBot(dataDir, { port: CRASH_PORT, imports: [resolve('tests/fixtures/fatal-trigger.mjs')] });
+      running.push(crashed.child);
+      // 等 `close` 而不是 `exit`：**子进程写给管道的 stderr 是异步的**，`exit` 那一刻最后一批
+      // 还可能没送到父进程手上，而「stderr 上有没有崩溃原因」正是这条要断言的东西之一。
+      let exited: { code: number | null; signal: NodeJS.Signals | null } | null = null;
+      crashed.child.once('close', (code, signal) => { exited = { code, signal }; });
+
+      // 第一枪：unhandledRejection。日志与 stderr 两边都等 —— 同上，前者是 appendFileSync
+      // 立刻落盘，后者要过一趟管道，只等前者的话 stderr 那条断言会随机打空。
+      const wrote = (marker: string): boolean => crashed.stderr.join('').includes(marker);
+      const rejectionDeadline = Date.now() + 20_000;
+      crashed.child.kill('SIGUSR2');
+      while (!(systemLog().some((line) => line.kind === 'system.unhandled_rejection') && wrote('[unhandled] unhandledRejection:'))
+        && Date.now() < rejectionDeadline) await new Promise((settle) => setTimeout(settle, 100));
+      const rejection = systemLog().find((line) => line.kind === 'system.unhandled_rejection');
+      expect(rejection, `一个泄漏的 promise 在日志里一个字都没留下\n${crashed.stderr.join('')}`).toBeDefined();
+      expect(rejection!.level).toBe('error');
+      expect(rejection!.data?.event).toBe('unhandledRejection');
+      // detail 是 stack 而不是一句 message —— 没有栈这条日志只说明「有个 promise 挂了」。
+      expect(rejection!.data?.detail).toContain('luoli-fatal-fixture-rejection');
+      expect(rejection!.data?.detail).toMatch(/\n\s+at /);
+      expect(wrote('[unhandled] unhandledRejection:'), 'stderr 上没有那条 rejection').toBe(true);
+      // **进程不退出**：rejection 是某一次调用的失败，不是进程级不可恢复状态。上一版两者共用一个
+      // 处理器一律 exit(1)，代价是一条私聊里泄漏的一个 promise 带走了当时所有并发轮次。
+      expect(exited, 'unhandledRejection 把进程带走了').toBeNull();
+      expect((await fetch(`http://127.0.0.1:${CRASH_PORT}/api/health`)).ok, 'rejection 之后 HTTP 面不再服务').toBe(true);
+
+      // 第二枪：uncaughtException。
+      crashed.child.kill('SIGUSR2');
+      const exitDeadline = Date.now() + 30_000;
+      while (!exited && Date.now() < exitDeadline) await new Promise((settle) => setTimeout(settle, 50));
+      if (!exited) throw new Error(`uncaughtException 之后 30s 仍未退出\n${crashed.stderr.join('')}`);
+      const outcome = exited as { code: number | null; signal: NodeJS.Signals | null };
+      expect(outcome.code, `退出码不是 1\n${crashed.stderr.join('')}`).toBe(1);
+      expect(wrote('[crash] uncaughtException:'), 'stderr 上没有崩溃原因 —— 日志写不进去时它是最后一道').toBe(true);
+      // 这一行是在 `process.exit(1)` **之前**写完的：`system.crash` 在 LogSink 里走 urgent
+      // （appendFileSync 立刻落盘），靠那个 200ms 的缓冲定时器的话进程已经没了。
+      const crash = systemLog().find((line) => line.kind === 'system.crash');
+      expect(crash, '崩溃在日志里一个字都没留下').toBeDefined();
+      expect(crash!.level).toBe('error');
+      expect(crash!.data?.event).toBe('uncaughtException');
+      expect(crash!.data?.detail).toContain('luoli-fatal-fixture-exception');
+      expect(crash!.data?.detail).toMatch(/\n\s+at /);
+
+      // 崩溃路径不自己收尾（那正是它崩了的意思）：库里留下的在途轮次交给下一次启动的 recoverAfterCrash。
+      const dbPath = resolve(dataDir, 'luoli.db');
+      const seed = openDatabase(dbPath);
+      seed.prepare("INSERT INTO turns(id,key,chat_id,initiator_user_id,effective_role,state,queued_at,started_at) VALUES('turn-crashed','chat:1','1','2','trusted','running',?,?)")
+        .run(Date.now(), Date.now());
+      closeDatabase(seed);
+      const restarted = await startBot(dataDir, { port: CRASH_PORT });
+      running.push(restarted.child);
+      const after = openDatabase(dbPath);
+      const row = after.prepare("SELECT state, error FROM turns WHERE id='turn-crashed'").get() as { state: string; error: string } | undefined;
+      // 不走 closeDatabase：那里的 `wal_checkpoint(TRUNCATE)` 会跟在位实例抢。
+      after.close();
+      expect(row, '在途轮次没被判死 —— 它会一直挂在 running 上').toMatchObject({ state: 'failed', error: 'process_restarted' });
+      expect(systemLog().some((line) => line.kind === 'system.recovered'), '一次非正常重启 reap 了什么在日志里没有痕迹').toBe(true);
+      // 崩溃没走 shutdown，锁文件留在原地；下一个实例按「主人已经死了」接手，而不是被永久锁在外面。
+      expect(restarted.stdout.join('')).toContain('[lock] 接手了');
+    } finally {
+      await reap(running);
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  }, 180_000);
 });

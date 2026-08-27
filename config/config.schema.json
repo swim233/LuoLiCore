@@ -1414,11 +1414,10 @@
               "type": "string",
               "enum": [
                 "none",
-                "jail",
                 "docker"
               ],
               "default": "docker",
-              "description": "执行类工具的隔离方式：none 直接在宿主跑（危险）、jail 只做路径隔离、docker 每次起一次性容器。"
+              "description": "执行类工具的隔离方式：none 关掉执行类工具（bypassRoles 里的角色仍直接在宿主跑）、docker 每次起一次性容器。"
             },
             "bypassRoles": {
               "type": "array",
@@ -1460,7 +1459,7 @@
               "type": "integer",
               "exclusiveMinimum": 0,
               "default": 128,
-              "description": "沙箱能额外开多少进程，用来挡 fork 炸弹。docker 模式是容器的 --pids-limit；jail 模式按「当前系统占用 + 这个数」折算成 ulimit -u。owner 等 bypassRoles 角色不受它约束。"
+              "description": "沙箱能额外开多少进程，用来挡 fork 炸弹。docker 模式是容器的 --pids-limit。owner 等 bypassRoles 角色不受它约束。"
             },
             "readOnlyRoot": {
               "type": "boolean",
