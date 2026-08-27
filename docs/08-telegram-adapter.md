@@ -254,6 +254,23 @@ sendChatAction('typing')  → 每 4s 续期，直到首条消息发出；之后�
   回一句 `model_returned_empty` 对应的说明 + ref。空正文发不出去（`splitTelegramText('')` 是空数组），
   照旧提交等于让用户面对彻底的沉默，还在上下文里留一条谁都解释不了的空消息，下一轮照样带给模型
   （[16 §5](./reviews/16-remediation-plan.md) 「摘除比伪造安全」）。
+- **一轮被掐断（`/cancel`、`concurrency.turnTimeoutMs` 到点、上游中途挂）时，收尾那一条消息仍然
+  要发出去。** 已经在屏幕上的半截正文补一个 `\n\n（生成中断）`，且**交回 `bot.ts` 去归档与提交的
+  那一份带同一个后缀** —— 两处口径分家的话，用户看到「中断」而上下文里是一句看起来说完了的话，
+  下一轮模型不知道自己被打断过（`once` 档与「首条压根没发出去」那次曾经只给发出去的那份加）。
+  一个字都没吐出来时**不补**：一条只有「（生成中断）」的消息谁也看不懂，而 `bot.ts` 还会把这个
+  空壳当成「有内容的一轮」提交进上下文。这一档改为把已经发出去的**占位消息删掉**并交回空
+  `messageIds` —— 不删的话「⏳ …」就永久停在屏幕上（`closing` 是空串 → `splitTelegramText('')`
+  是空数组 → 收尾循环一次调用都不发），而归档侧还会按它落一行空正文的出站消息。能看懂的原因
+  走失败那条路（§9 那句超时文案）。收尾状态**不是** `cancelled` 一档包干，见
+  [04 §5.3](./04-agents-and-providers.md#53-fallback-与重试) 的三档，以及「投递侧凭什么看得见
+  这一轮是断的」。
+  - 这一次 `editMessageText`（或 `deleteMessage`）照样要排 `telegram.throttle.perChatPerMinute`
+    的队，**所以一轮的墙钟可以超出 `turnTimeoutMs` 一个 API 调用的时间** —— 这是有意的取舍：
+    内容已经在屏幕上，标记必须跟上去。此前超的是 3 分钟：那时 typing 还是 4 秒一拍的
+    fire-and-forget（15/分钟），同一个群两轮并行就把 20/分钟 吃干净，队里排的全是**已经过期的**
+    typing 而收尾那条排在最后（logs/2026-08-18 · B8F92Z）。上面「typing 给正文让路」最早就是
+    为这个来的，`L-TG-04` 是同一个病换了个规模再发一次。
 - **归档（`messages.text`）与上下文一律存「真正发出去的那份」，即流里攒到的全文**；
   `generated.final` 只当失败信号用。它是 AI SDK 的 `result.text` = **最后一步**的正文，而多步轮次
   发出去的是「旁白段落 + 结论」整条消息 —— 拿 `final` 落库的话，屏幕上有三段而 `read_messages`
@@ -289,18 +306,26 @@ sendChatAction('typing')  → 每 4s 续期，直到首条消息发出；之后�
   没有这一层时，用户收到的「回复」就是工具调用之间的过程旁白，而且它会被提交进上下文
   （logs/2026-08-18 · turn `01M09QBZVK…`）。
 - **跨 step 的正文之间恰好一个空行**，由 `stepSeparatedText` 归一化，不看模型自己写了什么。
+  **这条判据改错过两次，而且错在相反的方向 —— 动投递节奏之前先把这一段读完。** 第一版
   `result.textStream` 只透出 `text-delta`，step 边界在 `toTextStream` 里就丢了，投递侧那一行
-  `text +=` 于是把每一步的旁白无缝粘成一段；改成从 `result.stream` 走之后，反过来又出现空行爆炸
-  —— 模型被提示词教成每一步都以 `\n\n\n` 收尾，纯工具步的「正文」就是 `\n\n\n`，一条 11 步的回复
-  开头 10 个换行、中段 12 连换行（logs/2026-08-18 · turn `01M0AKMXG4…`）。所以判据是**扣住尾部
-  空白 + 到点补齐**：
+  `text +=` 于是把六句旁白无缝粘成一段（logs/2026-08-18 · turn `01M09QBZVK…`）；改成从
+  `result.stream` 走、在 step 边界上「缺了就补 `\n\n`」之后，**反过来空行爆炸** —— 提示词里那条
+  「段间空一行」把模型教成每一步都以 `\n\n\n` 收尾，纯工具步的「正文」就是 `\n\n\n`，一条 11 步的
+  回复开头 10 个换行、中段 12 连换行，而**那一轮补分隔的逻辑一个分隔符都没插**：模型自己带的空白
+  已经满足了「缺了才补」那个条件，爆掉的空行全是原样透传过去的（logs/2026-08-18 ·
+  turn `01M0AKMXG4…`）。代价也不止在屏幕上 —— 落库的那条 assistant part 连开头 10 个换行一起存了，
+  下一轮照原样带给模型。所以判据是**扣住尾部空白 + 到点补齐**，不是「缺了就补」：
   - 一段正文的尾部空白先扣住不发，跨过 step 边界就丢掉，换成恰好一个 `\n\n`；没跨过边界就原样
     发出去 —— 同一步内的增量、列表缩进、围栏代码块里的空行一个字都不动。
   - 纯空白的「正文」不算说过话：不透传、不触发分隔（连续多个纯工具步只补一个空行）。
   - 第一段非空白正文之前什么都不发，流结束时扣住的尾部空白丢弃 —— 整条消息首尾无空白。
   - 流里的 `error` 部件也从这里透出去（`onError` → `streamFailure`），不再被静默跳过。
-  见 `stepSeparatedText` 与 `tests/agent.stream-separator.test.ts`。渲染器侧**不做**收窄：
-  `safeRender` 的空行保真是既有契约（`tests/output.render.test.ts`）。
+  见 `stepSeparatedText` 与 `tests/agent.stream-separator.test.ts`（含那条 11 步真实序列的端到端
+  断言 —— **改投递节奏或换 AI SDK 大版本先跑它**，上面两次翻车都是从这一层的语义变化开始的）。
+  渲染器侧**不做**收窄：`safeRender` 的空行保真是既有契约（`tests/output.render.test.ts`）。
+  提示词侧跟着这一版一起反转过，现在要求「只写那一句，不要自己加空行」（KERNEL 与 `ASSIST.md`，
+  [06 §1.1 / §2.2](./06-prompt-and-memory.md)）—— 但那只是让模型少给一点，**不是判据**：
+  归一化必须扛得住模型给什么。
 - 编辑遇 `400 message is not modified` → 忽略。
 - 编辑遇 `429` → **跳过本次增量**（不排队），下次节流窗口再试。
 - 编辑遇 `400 can't parse entities` → 用 `parse_mode: undefined` 重试一次；再失败则把内容作为 `.md` 文档发出并回复一句摘要。
@@ -445,7 +470,12 @@ bot:  ⏳ 已接收，正在处理…                                    ← 占
   - 调 `turnRunner.cancel(turnId, 'user')` → `AbortController.abort()` → 级联子 agent、`docker kill` 沙箱容器；
   - 编辑消息为「⛔ 已取消」，按 `cancel.commitPartial`（默认 false）决定是否提交部分 delta（[02 §3.5](./02-context-engine.md#35-取消cancel)）。
 - `/tasks`：列出本会话 `state='running'` 的任务（id、标题、已运行时长、进度）。`/cancel [id]`：无 id 时取消本人最近一个在途 turn。
-- 任务超时 `concurrency.turnTimeoutMs`（默认 10 分钟）→ 视为 cancelled，消息编辑为「⛔ 超时中止」。
+- 任务超时 `concurrency.turnTimeoutMs`（默认 10 分钟）→ **记 `failed` 而不是 `cancelled`**
+  （超时是故障，要计入 `consecutive_turn_failures`；[04 §5.3](./04-agents-and-providers.md#53-fallback-与重试)
+  的三档）。用户那边分两处：屏幕上的半截正文补「（生成中断）」、一个字都没有时占位消息删掉（§5.2），
+  另发一句「这一轮太久没有进展，已经停下了。(ref: …)」（§9）—— **记账上算故障，对用户仍不说
+  「已取消」**：没点过取消的人收到「已取消」只会以为自己误触了。ACP 卡片那条路另有终帧
+  「⛔ 超时中止」（§6.1）。
 
 ### 6.1 ACP 运行的进度卡片
 
@@ -537,8 +567,8 @@ bot:  ⏳ 已接收，正在处理…                                    ← 占
   「⏳ 正在启动…」永久钉进 `messages` 与 `messages_fts`。`close()` 交回的那份文本才是归档用的
   （卡片只负责交回文本与 `messageId`，真的落库在调用方）。终帧不含思考行。
 - **取消要留终帧。** `/cancel` 与 `turnTimeoutMs` 时必须收到最后一次编辑（`⛔ 已取消 · 已改动 N
-  个文件`），照 [00](./00-state.md) 那条「`turnTimeoutMs` 是硬边界，但收尾那一条消息还是要发出去」
-  的既定取舍：屏幕上停着一张「现在 · ✏️ 改 …」的卡片而进程已经没了，用户没有任何办法判断它是
+  个文件`），照 §5.2 那条「`turnTimeoutMs` 是硬边界，但收尾那一条消息还是要发出去」的既定取舍：
+  屏幕上停着一张「现在 · ✏️ 改 …」的卡片而进程已经没了，用户没有任何办法判断它是
   死了还是还在跑。所以 `close()` **永不 throw**，且中途 `push` 全部失败（限流、被拉黑）之后照样能
   渲染出一帧 —— 首帧没发出去时它走 `sendMessage` 而不是 `editMessageText`。
 - **终帧必须把取消键盘撤掉。** `close()` 之后那一轮已经收尾（`registry.finish` 把它从 `TurnRegistry`
@@ -743,6 +773,7 @@ media:
 | 在途轮次达 `quota.rateLimit.concurrentPerUser` | `我同时最多接 2 件事，你手上的还没说完。等它收尾再说这条。`（这一句不受 `quota.onExceeded.reply` 管：它不是额度，等手上那轮说完就能继续） |
 | 权限不足（用户显式要求高危操作） | `这个操作需要更高权限，找管理员吧。` |
 | 上下文过大中止 | `这轮内容太多，我先停下。用 /new 开个新话题，或把任务拆小些。` |
+| 轮次超时（`concurrency.turnTimeoutMs`） | `这一轮太久没有进展，已经停下了。(ref: 01J8…)`（**不说「已取消」** —— 没点过取消的人会以为自己误触了；已经在屏幕上的半截正文另有「（生成中断）」，见 §5.2） |
 | 未捕获异常 | `出了点问题，已记录。(ref: 01J8…)` |
 
 所有这些同时写 `log_events(level='error'|'warn')`，`ref` = `turn_id` 前 12 位，owner 可在 WebUI 用它直接检索完整 trace。

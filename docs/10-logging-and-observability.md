@@ -101,7 +101,7 @@ with_parent 0`，浏览器里展开一条 trace，13 个节点的 `marginLeft` �
 | `provider.catalog` | info/warn | outcome, models, error —— models.dev 的模型目录拉取结果（[04 §5.4.1](./04-agents-and-providers.md)） |
 | `tool.call` | info | **input**（工具参数）, **approval**（`{required:false}` 或 `{required:true, risk, granted:true}`）, output, ms, ok；失败时 input + error。`approval` 是 `AC-LOG-003`「能看出是否经审批」的落点 —— 别处无从得知：不需要审批的调用在 `approvals` 表里根本没有行，「没找到行」与「这张表没记上」长得一模一样。走到建 span 这一步时被拒的那条早已 return，所以 `granted` 恒真；写出来是为了让这一行**自己**说得清，而不是要读的人先懂控制流。一个 span 只落一行，所以开始时的 `input` 与结束时的 `output` 是**合并**进同一行的 —— `LogSink.span().end()` 曾经用结束载荷整体顶掉开始那份，于是这一行只有 `output`，WebUI 的对话详情因此永远看不到工具输入（`tests/log.span.test.ts`） |
 | `tool.denied` | warn | tool, reason, role, error —— **准入闸的每一次拒绝一行**。`reason` 穷举：`unknown_tool` / `disabled_after_errors` / `disabled_by_operator` / `role` / `subagent` / `unavailable` / `allowlist` / `skill_narrowed` / `rate`（`tools.maxCallsPerTurn`）/ `approval`。`ToolRegistry.admit()` 刻意是**只读**判定（不写状态、不记日志），所以这一行由 `execute()` 记。此前整批闸门全是静默的：实测 45 次调用恰好 40 条 `tool.call`，超出的**零日志**，模型侧只收到一句不带 hint 的 `tool_call_limit_exceeded`（[reviews/28](./reviews/28-round10-live-system-test.md) · L-LOG-01） |
-| `tool.error` | warn | tool, toolCallId, errorKind, message —— 模型给了**非法工具参数**：校验发生在 AI SDK 内部（`AI_InvalidToolInputError`），`ToolRegistry.execute` 根本没被调到，于是 `tool.call` 计数是 0，唯一痕迹是上下文里那条 `output.type='error-text'` 的 tool-result，而它下一轮就被 `prune_level=1` 抹掉。这一行从 `stepToolResults` 收到的 `tool-error` part 上记。2026-08-18 打崩进程的事故起点正是 `get_message({messageId:0})`（[reviews/28](./reviews/28-round10-live-system-test.md) · L-LOG-03）。注册表自己的入参校验失败（`inputSchemaFor` 收窄过的那一档）走同一个 kind，`errorKind='invalid_input'` |
+| `tool.error` | warn | tool, toolCallId, errorKind, message —— 模型给了**非法工具参数**：校验发生在 AI SDK 内部（`AI_InvalidToolInputError`），`ToolRegistry.execute` 根本没被调到，于是 `tool.call` 计数是 0，唯一痕迹是上下文里那条 `output.type='error-text'` 的 tool-result，而它下一轮就被 `prune_level=1` 抹掉。这一行从 `stepToolResults` 收到的 `tool-error` part 上记。2026-08-18 打崩进程的事故起点正是 `get_message({messageId:0})`（[reviews/28](./reviews/28-round10-live-system-test.md) · L-LOG-03）。注册表自己的入参校验失败（`inputSchemaFor` 收窄过的那一档）走同一个 kind，`errorKind='invalid_input'`。⚠ **这一行只覆盖主 agent**：子 agent 的 `onStepEnd` 不走 `stepToolResults`，同一个盲区在那边还开着 —— 子 agent 反复用错工具参数只会在上下文里留一条下一轮就被抹掉的 `error-text`，日志里一个字都没有。事故起点在主路径，所以先补的是主路径；这条边界是知情的，记在 [`00 §2`](./00-state.md) |
 | `tool.disabled` | warn | tool —— 运维在 WebUI 关掉的工具被调用（目录之外的第二道硬拦截）。这一档**同时**记 `tool.denied`：那一条是统一的拒绝流水，这一条是运维视角的凭据 |
 | `tool.disabled_after_errors` | warn | tool, failures —— 同一工具连续失败到 `tools.maxConsecutiveErrors`，本轮停用。这条是排障时区分「模型没试」和「试了被拦」的唯一凭据 |
 | `tool.registry_truncated` | warn | total, visible —— 可用工具数超过 `tools.maxRegistered`，目录被截断 |
@@ -185,7 +185,7 @@ with_parent 0`，浏览器里展开一条 trace，13 个节点的 `marginLeft` �
 | `system.start` / `system.stop` | info（Telegram 入口禁用时 **warn**） | name, webui, providerSecrets / signal |
 | `system.restart` | warn | reason —— WebUI 按下的「重启进程」。**没有 supervisor 时进程不会自己回来** |
 | `system.recovered` | warn | turns, tasks, agentRuns, claims, reservations —— 上一个进程没有正常收尾，`recoverAfterCrash` 判死了这些。此前它一个字都不落，一次非正常重启 reap 了什么只能靠翻 `turns` 表反推（[reviews/28](./reviews/28-round10-live-system-test.md) · L-OPS-04） |
-| `ctx.orphan_tool_call` | warn | toolCallIds[] —— 读出侧给「没有配对结果的 tool-call」补了结果。**这条会话的历史是坏的** |
+| `ctx.orphan_tool_call` | warn | toolCallIds[] —— 读出侧给「没有配对结果的 tool-call」补了结果。**这条会话的历史是坏的**：补的那条占位结果是每次物化现补的，库里那几条 parts 一个字都没改，所以这一行会**一直响**到那条被裁出窗口或 `/new` 为止（2026-08-18 那次事故留下的孤儿至今还在 `data/luoli.db` 里，ordinal 508）。反复出现不是噪声，是「这条会话正靠读出侧兜底活着」的读数 —— 没有那层兜底的那一版，同一条会话每一轮都崩 |
 | `alert.raised` | error | alert, …告警自己的载荷 —— 一条告警被触发（[§6](#6-健康检查与告警)）。**它不挡在投递前面**：`db_write_failed` 的触发源就是「库写不进去」 |
 | `alert.deliver_failed` | warn | alert, error —— owner 私聊或 webhook 发不出去。告警链路自己坏了不能再炸一次 |
 | `system.crash` | error | event（`uncaughtException`）, detail（stack）—— 进程即将退出 |
@@ -211,6 +211,18 @@ catch 一次都没跑到，`model.error` 也来不及写，事后只能靠 `turn
 那个窗口已经堵上了（`void final.catch(...)`），但「一个悬着的 promise = 整个进程」这条兑换率本身
 就不该存在：rejection 是**某一次调用**的失败，不是进程级不可恢复状态（那才是 `uncaughtException`
 的语义）。轮次侧该记 failed 的自有它自己的路。
+
+**那两次「上游 0 步返回」不是运气不好 —— 请求体从上一轮起就是畸形的，而畸形是我们自己写进去的。**
+起点是一次工具输入校验失败（`get_message({messageId: 0})` 撞 `z.number().int().positive()`）：AI SDK 的
+`step.toolResults` 是 `content.filter(p => p.type === 'tool-result')`，`tool-error` part 被整个滤掉，
+于是只有 tool-call 进了 delta。**产生它的那一轮日志全绿** —— 11 步全成功、`turn.end` 是 committed，
+因为 SDK 自己的 `responseMessages` 把错误转成合法的 tool-result 发上线了；孤儿是从**下一轮**起
+才随每次请求发出去的，此后该会话每一次调用都是 200 收下、0 步关闭（`turns` 里那两行
+`failed / process_restarted / steps=0`）。所以「哪一轮坏的」与「哪一轮崩的」不是同一轮，
+中间隔着多少轮取决于用户什么时候再说一句话 —— 排障时按时间倒着翻只会翻到一片正常。
+`tool.error` 这一行就是前者留下的唯一痕迹（上下文里那条 `error-text` 下一轮就被 `prune_level=1`
+抹掉），`ctx.orphan_tool_call` 则是此后每一轮的。收口的另外三层（写入侧收 `tool-error`、`commitTurn` 的
+配对断言、读出侧补结果）在 [02 §9](./02-context-engine.md#9-实现红线清单code-review-必查) 第 20 条。
 
 ## 3. 落盘格式
 
