@@ -163,6 +163,15 @@ interface TelegramIngress {
   triggerReason: string | null;
 }
 
+/** 聊天里读的相对时间，粗到分钟就够；精确值一律另给一个能和库里对上的字段（`/ctx` 给 commit seq）。 */
+function ago(at: number): string {
+  const seconds = Math.max(0, Math.round((Date.now() - at) / 1000));
+  if (seconds < 60) return `${seconds}s 前`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)} 分钟前`;
+  if (seconds < 86_400) return `${Math.round(seconds / 3600)} 小时前`;
+  return `${Math.round(seconds / 86_400)} 天前`;
+}
+
 function pluginText(result: unknown[], original: string): string {
   let text = original;
   for (const entry of result) {
@@ -774,11 +783,16 @@ export async function createTelegramBot(
       messageCount: number;
       tokens: number;
       claimWatermark: number;
+      lastPrune: { seq: number; at: number } | null;
+      lastRebase: { seq: number; at: number } | null;
     };
     const commit = stats.commit;
+    // 报 seq 而不是时间戳一个人扛：seq 能直接和 `context_commits` 对上，相对时间只是给人读的。
+    const marker = (row: { seq: number; at: number } | null): string =>
+      row ? `第 ${row.seq} 次提交（${ago(row.at)}）` : "还没有过";
     await ctx.reply(
       commit
-        ? `上下文 ${key}\ncommit ${commit.id.slice(0, 12)}（第 ${commit.seq} 次）\n窗口 ordinal ${commit.windowStart}–${commit.headOrdinal}\n${stats.messageCount} 条消息 / 约 ${stats.tokens} tokens（上限 ${config.context.limit.maxMessages} 条 / ${config.context.limit.tokens} tokens）\n完整时间线见 WebUI：http://${config.webui.host}:${config.webui.port}/chats/${encodeURIComponent(key)}`
+        ? `上下文 ${key}\ncommit ${commit.id.slice(0, 12)}（第 ${commit.seq} 次）\n窗口 ordinal ${commit.windowStart}–${commit.headOrdinal}\n${stats.messageCount} 条消息 / 约 ${stats.tokens} tokens（上限 ${config.context.limit.maxMessages} 条 / ${config.context.limit.tokens} tokens）\n背景认领水位 tg#${stats.claimWatermark}\n最近 prune：${marker(stats.lastPrune)}\n最近 rebase：${marker(stats.lastRebase)}\n完整时间线见 WebUI：http://${config.webui.host}:${config.webui.port}/chats/${encodeURIComponent(key)}`
         : `上下文 ${key} 还是空的，还没有提交过任何一轮。`,
     );
   });
@@ -1015,6 +1029,7 @@ export async function createTelegramBot(
       },
       bot.botInfo.id,
       bot.botInfo.username,
+      message,
     );
     if (wouldTrigger)
       dependencies.log.event({

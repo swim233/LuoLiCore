@@ -1005,10 +1005,13 @@ export function createServer(
     } catch {
       valid = false;
     }
+    // 403 而不是 401：session 是好的，错的是表单里那一格。客户端 `api()` 对任何 401 都
+    // `location.assign("/login")`——回 401 的话页面整个跳走，「当前口令错误」一个字都渲染不出来，
+    // 同页其它未保存的表单一并丢掉，而登录其实根本没过期（docs/29 · M-WEB-13）。
     if (!valid)
       return ctx.json(
-        apiError("invalid_credentials", "当前口令错误", 401).body,
-        401,
+        apiError("invalid_credentials", "当前口令错误", 403).body,
+        403,
       );
     const nextHash = await argon2.hash(body.next, {
       type: argon2.argon2id,
@@ -2015,6 +2018,21 @@ export function createServer(
         fetchedAt,
       },
     });
+  /** 这一行现在记着的定价出处（`official` / `provider` / `manual`）；没记过或块坏了都算不知道。 */
+  const recordedPriceSource = (capabilities: string | null): string | null => {
+    try {
+      const catalog = (
+        JSON.parse(capabilities ?? "{}") as {
+          catalog?: { priceSource?: unknown };
+        }
+      ).catalog;
+      return typeof catalog?.priceSource === "string"
+        ? catalog.priceSource
+        : null;
+    } catch {
+      return null;
+    }
+  };
   app.get("/api/providers/:id/models", async (ctx) => {
     const probe = await providerProbe(ctx.req.param("id"));
     if (!probe)
@@ -2311,9 +2329,14 @@ export function createServer(
           keep(row.priceCacheWrite, meta.priceCacheWrite),
         ];
         const filled = row.priceIn === null && nextPrices[0] !== null;
+        // 既有价格不一定是人手填的：导入时从 models.dev 带进来的行同样非空，而这里此前一律标
+        // `manual` —— 数字没被动，出处却被静默改写，`AC-WEB-013c` 要的「这价能不能信」一键归零
+        // 且不可逆（docs/29 · M-WEB-09）。价格没变就沿用原来的出处；从没记过出处的行早于目录
+        // 导入，只可能是手填的。
         const priceSource =
           row.priceIn !== null
-            ? "manual"
+            ? (recordedPriceSource(row.capabilities as string | null) ??
+              "manual")
             : nextPrices[0] !== null
               ? meta.match
               : null;
@@ -4542,8 +4565,10 @@ export function createServer(
     const existing = [...currentConfig().mcp.servers];
     if (typeof body.name !== "string")
       return ctx.json(apiError("invalid_mcp_name", "name 必填").body, 400);
+    // 409 让前端能把它和校验错误分开提示 —— skills 那条路一直是这么做的，MCP 这边此前回的是
+    // 400，和 `invalid_mcp` 挤在同一个 status 上（docs/29 · M-WEB-12）。
     if (existing.some((server) => server.name === body.name))
-      return ctx.json(apiError("conflict", "同名 MCP server 已存在").body, 400);
+      return ctx.json(apiError("conflict", "同名 MCP server 已存在").body, 409);
     if (redactedKeys({ server: body }).length)
       return ctx.json(
         apiError(

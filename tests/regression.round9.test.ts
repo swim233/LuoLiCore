@@ -102,7 +102,9 @@ describe('R-03 · context_stats 默认不带整段历史', () => {
     const db = openDatabase(path); migrateDatabase(db);
     const engine = new ContextEngine(db, new ArchiveRepository(db));
     const summary = engine.stats('chat:1');
-    expect(Object.keys(summary).sort()).toEqual(['claimWatermark', 'commit', 'key', 'messageCount', 'tokens']);
+    // 键集写死是这条断言的全部力气所在：R-03 防的是「有人顺手往摘要里塞回整段历史」。
+    // lastPrune / lastRebase 是 `/ctx` 要的两个标记（AC-CTX-027），各自只有 seq + 时间戳。
+    expect(Object.keys(summary).sort()).toEqual(['claimWatermark', 'commit', 'key', 'lastPrune', 'lastRebase', 'messageCount', 'tokens']);
     const timeline = engine.stats('chat:1', { timeline: true });
     expect(timeline).toHaveProperty('messages');
     expect(timeline).toHaveProperty('commits');

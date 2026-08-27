@@ -544,6 +544,20 @@ export class ContextRepository {
       .all(this.key, base?.seq ?? 0) as CommitRow[];
   }
 
+  /**
+   * 最近一次 prune / rebase。两者都只在 commit 行上留痕（`kind='prune'` / `rebased=1`），`/ctx`
+   * 要报它们就得单独查 —— `head()` 只看得到当前那一条（`AC-CTX-027`）。
+   */
+  latestCommitOf(what: "prune" | "rebase"): CommitRow | null {
+    return (
+      (this.db
+        .prepare(
+          `SELECT ${COMMIT_COLUMNS} FROM context_commits WHERE key=? AND ${what === "prune" ? "kind='prune'" : "rebased=1"} ORDER BY seq DESC LIMIT 1`,
+        )
+        .get(this.key) as CommitRow | undefined) ?? null
+    );
+  }
+
   commits(limit = 100): CommitRow[] {
     return this.db
       .prepare(

@@ -469,9 +469,14 @@ async function clearChatModelAlias(): Promise<void> {
   const chat = selectedChat.value;
   if (!chat) return;
   try {
-    await api(`/api/chats/${encodeURIComponent(chat.key)}/model-alias`, { method: 'DELETE' });
+    // 服务端老实回 `cleared`，此前它被丢在地上：视图陈旧（另一个标签页 / 另一个运维 / 期间从
+    // Telegram 侧 `/model` 清掉了）时按下去，`app_kv` 里本来就没有行，界面照样报「已清除」
+    // ——「摘除比伪造安全」的反面（docs/29 · M-WEB-07）。
+    const { cleared } = await api<{ cleared: boolean }>(`/api/chats/${encodeURIComponent(chat.key)}/model-alias`, { method: 'DELETE' });
     chatModelAlias.value = null;
-    pushToast({ severity: 'success', summary: '已清除会话模型别名', detail: '这个会话回到覆盖层 / 全局的 agent.main.modelAlias，下一轮生效' });
+    pushToast(cleared
+      ? { severity: 'success', summary: '已清除会话模型别名', detail: '这个会话回到覆盖层 / 全局的 agent.main.modelAlias，下一轮生效' }
+      : { severity: 'info', summary: '这个会话本来就没有别名', detail: '别处已经清过了；它一直在用覆盖层 / 全局的 agent.main.modelAlias' });
   } catch (error) { toastError('清除会话模型别名失败', error); }
 }
 async function inspectTrace(traceId: string | null): Promise<void> { if (!traceId) return; traceDetail.value = await api<LogRow[]>(`/api/logs/trace/${encodeURIComponent(traceId)}`); }
@@ -552,8 +557,16 @@ const PROMPT_SCOPES: Record<string, PromptMeta> = {
 const promptMeta = (scope: unknown): PromptMeta => PROMPT_SCOPES[String(scope)] ?? { label: String(scope ?? '未知'), icon: 'pi pi-file', purpose: '未归类的文档', severity: 'secondary' };
 const promptRank = (scope: unknown): number => { const index = Object.keys(PROMPT_SCOPES).indexOf(String(scope)); return index === -1 ? Object.keys(PROMPT_SCOPES).length : index; };
 const promptCards = computed(() => [...prompts.value].sort((left, right) => promptRank(left.scope) - promptRank(right.scope) || String(left.id).localeCompare(String(right.id))));
-async function inspectPrompt(row: Record<string, unknown>): Promise<void> { selectedPrompt.value = await api<Record<string, unknown>>(`/api/prompts/${encodeURIComponent(String(row.id))}`); promptContent.value = String(selectedPrompt.value.content ?? ''); promptRevisions.value = await api<Array<Record<string, unknown>>>(`/api/prompts/${encodeURIComponent(String(row.id))}/revisions`); }
 // 下面这组上下文/提示词操作以前用顶栏静态横幅报成功、失败则什么都不显示；现在统一走同一个通知通道（AC-WEB-023）。
+// `inspectPrompt` 曾是漏网的那个：没有 catch，`api()` 抛出的 promise 无人接手，点卡片纹丝不动，
+// 权限 / 路径 / 文件被删一律表现成「点了没反应」（docs/29 · M-WEB-08）。
+async function inspectPrompt(row: Record<string, unknown>): Promise<void> {
+  try {
+    selectedPrompt.value = await api<Record<string, unknown>>(`/api/prompts/${encodeURIComponent(String(row.id))}`);
+    promptContent.value = String(selectedPrompt.value.content ?? '');
+    promptRevisions.value = await api<Array<Record<string, unknown>>>(`/api/prompts/${encodeURIComponent(String(row.id))}/revisions`);
+  } catch (error) { toastError('打开提示词失败', error); }
+}
 async function savePrompt(): Promise<void> {
   if (!selectedPrompt.value) return;
   const id = String(selectedPrompt.value.id);

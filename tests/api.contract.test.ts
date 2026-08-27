@@ -411,6 +411,10 @@ describe('documented API surface', () => {
     expect(createMcp.status).toBe(201);
     expect(config.snapshot().mcp.servers).toMatchObject([{ name: 'disabled-fixture', transport: 'stdio', enabled: false }]);
     expect(await (await app.request('/api/mcp', { headers: { cookie: headers.cookie } })).text()).toContain('disabled-fixture');
+    // 和上面 skills 那条同一个道理，MCP 这边此前回的是 400，和 `invalid_mcp` 挤在一起（docs/29 · M-WEB-12）。
+    const duplicateMcp = await app.request('/api/mcp', { method: 'POST', headers, body: JSON.stringify({ name: 'disabled-fixture', transport: 'stdio', command: process.execPath }) });
+    expect(duplicateMcp.status).toBe(409);
+    expect(await duplicateMcp.json()).toMatchObject({ ok: false, error: { code: 'conflict' } });
     expect((await app.request('/api/mcp/disabled-fixture', { method: 'PATCH', headers, body: JSON.stringify({ minRole: 'owner' }) })).status).toBe(200);
     expect(config.snapshot().mcp.servers[0]?.minRole).toBe('owner');
     expect((await app.request('/api/mcp/disabled-fixture', { method: 'DELETE', headers })).status).toBe(200);

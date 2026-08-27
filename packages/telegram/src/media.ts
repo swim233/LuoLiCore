@@ -65,6 +65,25 @@ interface TelegramFile {
   kind: string;
 }
 
+/**
+ * 上下文占位符里的文件种类。`file.kind` 是 Telegram 的原始英文，直接拼进去模型看到的是
+ * `[voice  9s]` —— 而同一个文件里 PDF 走的是「文档」、超限走的是「超出下载限制」，中英混用只发生在
+ * 这几个兜底分支上（docs/29 · M-TG-06）。语音的 `file.name` 恒为空，那两个连续空格就是空槽留下的，
+ * 所以拼接一律走 `placeholder()` 而不是模板串。
+ */
+const KIND_LABEL: Record<string, string> = {
+  photo: "图片",
+  document: "文档",
+  voice: "语音",
+  audio: "音频",
+  sticker: "贴纸",
+};
+const placeholder = (
+  file: TelegramFile,
+  ...tail: Array<string | false>
+): string =>
+  `[${[KIND_LABEL[file.kind] ?? file.kind, file.name, file.duration ? `${file.duration}s` : "", ...tail].filter(Boolean).join(" ")}]`;
+
 function fileFrom(message: Record<string, unknown>): TelegramFile | null {
   if (Array.isArray(message.photo) && message.photo.length) {
     const photo = message.photo.at(-1) as Record<string, unknown>;
@@ -171,12 +190,7 @@ export class TelegramMedia {
       this.#download(voiceId, archived, file, "skipped", startedAt, {
         reason: "download_voice_disabled",
       });
-      return [
-        {
-          type: "text",
-          text: `[语音${file.duration ? ` ${file.duration}s` : ""}]`,
-        },
-      ];
+      return [{ type: "text", text: placeholder(file) }];
     }
     const limit = this.#asImage(file)
       ? this.config.maxImageBytes
@@ -197,12 +211,7 @@ export class TelegramMedia {
         reason: "size_limit",
         limit,
       });
-      return [
-        {
-          type: "text",
-          text: `[${file.kind} ${file.name ?? ""} 超出下载限制]`,
-        },
-      ];
+      return [{ type: "text", text: placeholder(file, "超出下载限制") }];
     }
     try {
       const remote = await this.api.getFile(file.fileId);
@@ -325,19 +334,14 @@ export class TelegramMedia {
             text: `[文档 ${file.name ?? file.uniqueId}]\n${untrusted(`file:${file.name ?? file.uniqueId}`, [...extracted].slice(0, this.config.extract.inlineChars).join(""))}`,
           },
         ];
-      return [
-        {
-          type: "text",
-          text: `[${file.kind} ${file.name ?? ""}${file.duration ? ` ${file.duration}s` : ""}]`,
-        },
-      ];
+      return [{ type: "text", text: placeholder(file) }];
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.insert(id, archived, file, null, "failed", message, null, "failed");
       this.#download(id, archived, file, "failed", startedAt, {
         error: message.slice(0, 300),
       });
-      return [{ type: "text", text: `[${file.kind} 处理失败]` }];
+      return [{ type: "text", text: placeholder(file, "处理失败") }];
     }
   }
 

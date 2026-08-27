@@ -35,6 +35,12 @@ describe('context pruning', () => {
     expect(repo.messages(head)[0]?.role).not.toBe('tool');
     expect((h.db.prepare('SELECT COUNT(*) AS count FROM context_messages').get() as { count: number }).count).toBe(30);
     expect(head.tokensTotal).toBeLessThanOrEqual(4000);
+    // `/ctx` 要报「最近一次 prune / rebase」，而两者都只在 commit 行上留痕 —— `head()` 只看得到
+    // 当前那一条，摘要里没有的话命令侧就无处可取（AC-CTX-027，docs/29 · M-TG-04）。
+    const summary = h.engine.stats('chat:chat') as { lastPrune: { seq: number } | null; lastRebase: unknown };
+    expect(summary.lastPrune?.seq).toBe(h.db.prepare("SELECT MAX(seq) FROM context_commits WHERE key='chat:chat' AND kind='prune'").pluck().get());
+    // 没有并发轮次就没有 rebase：两个标记各查各的，不能一个有值就都当有。
+    expect(summary.lastRebase).toBeNull();
     closeDatabase(h.db);
   });
 

@@ -712,12 +712,20 @@ export class ContextEngine {
     const repo = new ScopedContextRepository(this.db, key);
     const head = repo.head();
     const context = repo.context();
+    const marker = (
+      what: "prune" | "rebase",
+    ): { seq: number; at: number } | null => {
+      const row = repo.latestCommitOf(what);
+      return row ? { seq: row.seq, at: row.createdAt } : null;
+    };
     const summary = {
       key,
       commit: head,
       claimWatermark: context?.claimWatermark ?? 0,
       messageCount: head?.msgCount ?? 0,
       tokens: head?.tokensTotal ?? 0,
+      lastPrune: marker("prune"),
+      lastRebase: marker("rebase"),
     };
     if (!options.timeline) return summary;
     const messages = repo
