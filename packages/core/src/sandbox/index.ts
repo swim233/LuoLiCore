@@ -77,6 +77,17 @@ export interface SandboxRunEvent {
   truncated: boolean;
   /** 被拒（沙箱未启用 / docker 不可用 / 路径映射不成立）时的原因，正常执行是 undefined。 */
   denied?: string;
+  /**
+   * 这次执行挂在哪条 span 之下 —— 调用方给的那个 `tool.call` span id（`docs/10 §1`）。
+   *
+   * 此前只有 `turnId`，注释还自承「`turnId` 让它进得了那一轮的 trace」：**进得了 trace 却进不了
+   * 树**。Trace 视图按 `parentSpanId` 算缩进，于是 `sandbox.run` 被画在 0px、与 `turn.start` 同级，
+   * 一轮里 3 次 `tool.call python` 对应的 3 条 `sandbox.run` 只能按时间戳猜配对 —— 并发沙箱调用
+   * 时连时间戳都不够（docs/29 · `M-LOG-02`）。
+   *
+   * 非轮次调用（探测、`turnId='adhoc'`）没有父，缺席即可。
+   */
+  parentSpanId?: string;
 }
 
 export class Sandbox {
@@ -359,6 +370,8 @@ export class Sandbox {
     options: {
       extraEnv?: Readonly<Record<string, string>>;
       chatId?: string;
+      /** 调用方那条 `tool.call` span 的 id。见 `SandboxRunEvent.parentSpanId`。 */
+      parentSpanId?: string;
     } = {},
   ): Promise<SandboxResult> {
     const extraEnv = options.extraEnv;
@@ -388,6 +401,9 @@ export class Sandbox {
         oom: false,
         truncated: false,
         denied: reason,
+        ...(options.parentSpanId
+          ? { parentSpanId: options.parentSpanId }
+          : {}),
       });
       return {
         ok: false,
@@ -529,6 +545,7 @@ export class Sandbox {
       killed: result.killed,
       oom: result.oom,
       truncated: result.truncated,
+      ...(options.parentSpanId ? { parentSpanId: options.parentSpanId } : {}),
     });
     return persistent?.note ? { ...result, note: persistent.note } : result;
   }

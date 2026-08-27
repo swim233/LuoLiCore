@@ -632,6 +632,8 @@ export function registerBuiltins(
     available: (role, context) =>
       dependencies.sandbox.plan(role, context.workspace).allowed,
     // `chatId` 显式传：持久容器按会话分（docs/05 §5.5），不传就退回一次性容器。
+    // `parentSpanId` 是 registry 传进来的**本次 `tool.call`** 的 span id —— 不递下去的话
+    // `sandbox.run` 在 trace 里落在 depth 0，一轮里几次执行只能按时间戳猜配对（docs/29 · M-LOG-02）。
     execute: async (input, context) =>
       dependencies.sandbox.run(
         input.command,
@@ -640,7 +642,12 @@ export function registerBuiltins(
         context.turn.abortSignal,
         input.timeoutMs,
         context.turn.turnId,
-        { chatId: context.turn.chatId },
+        {
+          chatId: context.turn.chatId,
+          ...(context.parentSpanId
+            ? { parentSpanId: context.parentSpanId }
+            : {}),
+        },
       ),
   });
   registry.register({
@@ -676,7 +683,12 @@ export function registerBuiltins(
           context.turn.abortSignal,
           input.timeoutMs,
           context.turn.turnId,
-          { chatId: context.turn.chatId },
+          {
+            chatId: context.turn.chatId,
+            ...(context.parentSpanId
+              ? { parentSpanId: context.parentSpanId }
+              : {}),
+          },
         );
       } finally {
         try {

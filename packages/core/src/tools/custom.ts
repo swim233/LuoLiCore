@@ -257,6 +257,10 @@ export class CustomToolManager {
         {
           extraEnv: { LUOLI_PARAMS: paramsPath, ...environmentFor(input) },
           chatId: context.turn.chatId,
+          // 见 `builtins.ts` 的 bash：不递下去 `sandbox.run` 就挂不进这次 `tool.call` 之下。
+          ...(context.parentSpanId
+            ? { parentSpanId: context.parentSpanId }
+            : {}),
         },
       );
       return { ...result, tool: tool.name };

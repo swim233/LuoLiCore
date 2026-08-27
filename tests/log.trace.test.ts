@@ -4,8 +4,8 @@ import { code, codeIndex, source } from './support/source.js';
 import { z } from 'zod';
 import type { LanguageModel } from 'ai';
 import { ArchiveRepository, OperationsRepository, closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
-import { AgentManager, AgentResultStore, ContextEngine, LogSink, PromptAssembler, PromptDocuments, ToolRegistry, UsageLedger, configSchema, runMainAgent, runSubAgent } from '@luoli/core';
-import type { ApprovalBroker, ModelRegistry, ToolExecutionContext } from '@luoli/core';
+import { AgentManager, AgentResultStore, ContextEngine, LogSink, PromptAssembler, PromptDocuments, Sandbox, ToolRegistry, UsageLedger, configSchema, registerBuiltins, runMainAgent, runSubAgent } from '@luoli/core';
+import type { ApprovalBroker, ModelRegistry, SandboxRunEvent, ToolExecutionContext } from '@luoli/core';
 
 /**
  * trace **是一棵树**这件事的唯一防线。
@@ -168,6 +168,19 @@ describe('trace 是一棵真的树', () => {
     closeDatabase(db);
   });
 
+  /**
+   * `AC-LOG-003` 要「展开任一 `tool.call` 能看出…是否经审批」，而这份载荷此前只有 `{input}` ——
+   * 两个字段一个都不在。「是否沙箱」由挂在它之下的 `sandbox.run` 子行回答（上一条用例）；
+   * 「是否经审批」在别处**无从得知**：不需要审批的调用在 `approvals` 表里根本没有行，
+   * 「没找到行」与「这张表没记上」长得一模一样。
+   */
+  it('tool.call 的载荷说得出这次要不要审批', async () => {
+    const { db } = await runTracedTurn('log-trace-approval');
+    const payload = db.prepare("SELECT data_json AS data FROM log_events WHERE kind='tool.call'").pluck().get() as string;
+    expect(JSON.parse(payload)).toMatchObject({ approval: { required: false } });
+    closeDatabase(db);
+  });
+
   it('模型给非法工具参数时落一条 tool.error，而 tool.call 一条都不多', async () => {
     const { db, rows } = await runTracedTurn('log-trace-tool-error');
     // AI SDK 在内部就把 `{q: 42}` 拒了（`AI_InvalidToolInputError`），`ToolRegistry.execute` 没被调到 ——
@@ -200,6 +213,42 @@ describe('trace 是一棵真的树', () => {
    * 所以这一条是源码级断言（先例：`regression.round10.test.ts` 的「非流式兜底路径也带引用」）。
    * 判据本身很硬：根 span 只能由 `turn.start` 声明，否则整棵树没有根。
    */
+  /**
+   * `docs/29 · M-LOG-02`：`sandbox.run` 有 `turnId` 但**没有 `parentSpanId`** —— 注释自承
+   * 「`turnId` 让它进得了那一轮的 trace」，进得了 trace 却**进不了树**。Trace 视图按
+   * `parentSpanId` 算缩进，于是它被画在 0px、与 `turn.start` 同级；一轮里 3 次 `tool.call python`
+   * 对应的 3 条 `sandbox.run` 只能按时间戳猜配对，并发沙箱调用时连时间戳都不够。
+   *
+   * 走的是**真的** `registerBuiltins` + 真的 `Sandbox`：自己在用例里拼一个 `sandbox.run(...)`
+   * 只能证明 `Sandbox` 会回声这个字段，证明不了 `bash` 那条路真的把它递了下去 —— 而漏掉的
+   * 正是「递下去」这一步。
+   */
+  it('sandbox.run 挂在调用它的那次 tool.call 之下，而不是 depth 0', async () => {
+    const runs: SandboxRunEvent[] = [];
+    const spans: string[] = [];
+    let seq = 0;
+    // 记下每条 span 的 id：判据是「`sandbox.run` 的父 = 那次 `tool.call` 自己的 span」，
+    // 而 `tool.call` 是这里唯一会开的 span。
+    const log = { span: () => { const id = `span-${seq += 1}`; spans.push(id); return { id, end: () => undefined }; }, event: () => undefined } as unknown as LogSink;
+    // owner + bypassRoles 含 owner = 直接在宿主上跑，不需要 docker。
+    const sandbox = new Sandbox({ mode: 'none', bypassRoles: ['owner'], dockerBin: 'docker', image: 'none', network: 'none',
+      memoryMb: 128, cpus: 1, pidsLimit: 16, readOnlyRoot: true, tmpfsMb: 8, workspaceDir: './data', hostWorkspaceDir: '',
+      defaultTimeoutMs: 10_000, maxTimeoutMs: 10_000, maxOutputBytes: 4096 }, false, false, undefined, undefined, (event) => runs.push(event));
+    const registry = new ToolRegistry(log, { request: async () => true } as ApprovalBroker, { maxRegistered: 200, maxCallsPerTurn: 10, maxConsecutiveErrors: 3 });
+    // `schedule.deliverable` 是 `available()` 里被无条件调的 —— 缺了它 `active()` 整个抛，
+    // 而那个抛在 `#eligible` 里被吞掉，表现是 `bash` 静静地不在目录里。
+    registerBuiltins(registry, { sandbox, log, schedule: { deliverable: () => false } } as never);
+    const turn = { turnId: 'trace-sandbox', key: 'chat:1', chatId: '1', threadId: null, initiatorUserId: '2', effectiveRole: 'owner',
+      isPrivate: true, baseCommitId: null, config: configSchema.parse({ access: { bootstrapOwnerId: '1' } }),
+      snapshot: { messages: [], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 0 }, delta: [], abortSignal: new AbortController().signal };
+    const done = await registry.execute('bash', { command: 'echo trace-probe', description: '探针' }, { turn, workspace: './data', agentKind: 'main' } as never);
+    expect(done, `bash 没跑起来：${JSON.stringify(done)}`).toMatchObject({ ok: true });
+
+    expect(spans, '这次调用没开出 tool.call 的 span').toHaveLength(1);
+    expect(runs, '沙箱一次都没被调到').toHaveLength(1);
+    expect(runs[0]!.parentSpanId, 'sandbox.run 仍然没有父 —— 在 Trace 视图里会画在 depth 0').toBe(spans[0]);
+  }, 30_000);
+
   it('两个开轮入口都把 turn.start 的 spanId 设成 trace 根', () => {
     for (const path of ['packages/telegram/src/bot.ts', 'packages/core/src/schedule/runner.ts']) {
       const text = source(path);
