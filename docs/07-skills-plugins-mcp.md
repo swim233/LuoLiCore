@@ -68,7 +68,7 @@ version: 1.0.0
 |---|---|---|---|
 | `name` | ✓ | — | kebab-case，全局唯一，与目录名一致 |
 | `description` | ✓ | — | **决定模型何时加载它**。必须写清「做什么 + 什么时候用」。上限 500 字符 |
-| `allowed-tools` | ✗ | 继承角色白名单 | 载入后**收窄**可用工具（只能是角色白名单的子集，不能扩权） |
+| `allowed-tools` | ✗ | 继承角色白名单 | 载入后**收窄**可用工具（只能是角色白名单的子集，不能扩权）。**空列表 `[]` 等同于不写这个字段**（＝不收窄），见 §2.2 |
 | `requires-tools` | ✗ | — | 这份 skill 讲的是怎么用哪几个工具。**它们不在本轮可用集里时整份 skill 不进目录**，`load_skill` 也拒（`skill_requires_unavailable_tools`）。与 `allowed-tools` 方向相反：那个是「载入后只准用这些」，这个是「这些不在就别看我」 |
 | `min-role` | ✗ | `trusted` | 低于此角色的用户完全看不到该 skill |
 | `model` | ✗ | — | 载入后建议切换的模型别名（写入 RUNTIME 块建议，模型可用 `set_model` 采纳） |
@@ -113,6 +113,17 @@ load_skill: tool({
   无条件把它并进本轮允许集 —— 于是先载入一个 `allowed-tools: [read_file]` 的 skill、再载入一个
   不声明的，前一个的收窄就被整个抹掉了。所以 `load()` 另外交回一个 `narrows` 标志，只有它为真
   才动允许集：调用方分不清「收窄到这些」和「没收窄，这些是全部」，就必然会犯这个错。
+
+  **`allowed-tools: []` 归到「未声明」这一档，而不是「收窄到零个工具」。** 判据要写成
+  「列表非空才算声明」（`meta['allowed-tools']?.length`），空数组在 JS 里是 truthy，写成
+  `if (meta['allowed-tools'])` 就落进了声明那一档 —— 于是交集恒为空，`load_skill` 对任何角色
+  都回 `skill_tools_unavailable`（owner 也一样，因为 `[].includes(x)` 与角色无关），而这份 skill
+  照旧挂在目录里等模型去撞。**写入侧同样不许生成这个值**：`SkillLoader.write()` 只在列表非空时
+  才落 `allowed-tools` 这一行（与 `requires-tools` 同一条规矩），否则 WebUI 扩展页那个留空的
+  「允许工具」框（placeholder 写着「留空 = 沿用当前角色全部可用工具」）与 `write_skill` 不给这个
+  参数的调用，都会把 `[]` 写进 frontmatter —— 实测代价是一份 `install_skill` 装好的 skill 在扩展页
+  点一次保存就废掉，以及 `write_skill` 写出的 skill 从落盘那一刻起就没能载入过一次。
+  「清空已有的 `allowed-tools`」仍然靠传 `[]` 表达：那一档写盘时省掉这一行，语义正是「不再收窄」。
 
   **核心工具集 = `load_skill` · `send_message` · `report_progress` · `context_stats`**
   （单一数据源：`packages/core/tools/policy.ts` 的 `SKILL_NARROWING_EXEMPT`，`prepareStep` 与

@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
 import { SkillLoader } from '@luoli/core';
@@ -88,6 +88,28 @@ describe('skill runtime', () => {
   it('fails the load when allowed-tools intersects to nothing', () => {
     const { db, skills } = setup();
     expect(skills.load('safe-skill', 'limited', ['bash', 'web_search'])).toMatchObject({ ok: false, error: 'skill_tools_unavailable' });
+    closeDatabase(db);
+  });
+
+  /**
+   * 而 `allowed-tools: []` 是「没声明」，不是「收窄到零个工具」（docs/07 §2.2）。空数组在 JS 里
+   * truthy，判据写成真值判断就落进声明那一档 —— 交集恒为空，于是上一条用例那个拒绝对**任何角色**
+   * 都成立（`[].includes(x)` 与角色无关，owner 拿满工具照样被拒），而这份 skill 还挂在目录里
+   * 等模型一次次去撞。实测代价：一份 `install_skill` 装好的 skill 在扩展页点一次保存就此废掉，
+   * 此后九天 6 次 `load_skill` 全败，hint 里那对括号是空的 —— 空的正是「声明了哪些」。
+   */
+  it('把 allowed-tools: [] 当成未声明，而不是收窄到零个工具', () => {
+    const { db, skills } = setup();
+    mkdirSync('./data/skill-runtime-skills/empty-allow', { recursive: true });
+    writeFileSync('./data/skill-runtime-skills/empty-allow/SKILL.md',
+      '---\nname: empty-allow\ndescription: 空列表\nmin-role: limited\nallowed-tools: []\n---\n正文\n');
+    skills.scan();
+    expect(skills.read('empty-allow')!.allowedTools).toBeUndefined();
+    expect(skills.catalog('limited').map((entry) => entry.name)).toContain('empty-allow');
+    expect(skills.load('empty-allow', 'limited', ['read_file', 'bash']))
+      .toMatchObject({ ok: true, narrows: false, allowedTools: ['read_file', 'bash'] });
+    // 反向：真声明了、真一个都不可用，仍然必须失败 —— 上一条用例守的东西没被这次放宽掉。
+    expect(skills.load('safe-skill', 'limited', ['bash'])).toMatchObject({ ok: false, error: 'skill_tools_unavailable' });
     closeDatabase(db);
   });
 
@@ -232,6 +254,30 @@ describe('skill runtime', () => {
     // 给了就以给的为准，包括清空。
     expect(skills.update('gated-skill', { requiresTools: [] }).requiresTools ?? []).toEqual([]);
     expect(() => skills.update('gated-skill', { requiresTools: [1] as unknown as string[] })).toThrow('invalid_skill_requires_tools');
+    closeDatabase(db);
+  });
+
+  /**
+   * 读出侧认了「空 = 未声明」还不够，写入侧不许再生产这个值。`allowed-tools` 此前是无条件写的
+   * （紧挨着的 `requires-tools` 一直有 `.length` 守卫），于是两条路都在往盘上刻空列表：
+   * `write_skill` 不给这个参数（它的 schema 自己写着「不确定就别给」）建出来的 skill 落盘即死，
+   * WebUI 扩展页那个留空的「允许工具」框——placeholder 写着「留空 = 沿用当前角色全部可用工具」
+   * ——按一次保存就把一份好好的 skill 改成谁都载不进来。
+   */
+  it('不落空的 allowed-tools，而传 [] 是清空收窄不是锁死', () => {
+    const { db } = setup();
+    const skills = new SkillLoader(db, './data/skill-runtime-skills', () => 'limited');
+    skills.scan();
+    expect(skills.create('fresh-skill', { description: 'Fresh', body: 'Body' }).allowedTools).toBeUndefined();
+    expect(readFileSync('./data/skill-runtime-skills/fresh-skill/SKILL.md', 'utf8')).not.toContain('allowed-tools');
+    expect(skills.load('fresh-skill', 'limited', ['read_file'])).toMatchObject({ ok: true, narrows: false });
+    // 声明了就照常收窄 —— 这次放宽的只有空列表那一档。
+    expect(skills.update('fresh-skill', { allowedTools: ['read_file'] })).toMatchObject({ allowedTools: ['read_file'] });
+    expect(skills.load('fresh-skill', 'limited', ['read_file', 'bash']))
+      .toMatchObject({ ok: true, narrows: true, allowedTools: ['read_file'] });
+    // 给了 `[]` = 清空收窄，回到不收窄那一档，而不是把这份 skill 锁死。
+    expect(skills.update('fresh-skill', { allowedTools: [] }).allowedTools).toBeUndefined();
+    expect(skills.load('fresh-skill', 'limited', ['read_file', 'bash'])).toMatchObject({ ok: true, narrows: false });
     closeDatabase(db);
   });
 });
