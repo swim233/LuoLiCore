@@ -58,6 +58,7 @@ export interface SkillDefinition {
   description: string;
   body: string;
   dir: string;
+  /** 只在**声明了且非空**时出现：`allowed-tools: []` 归到「未声明」那一档（docs/07 §2.2）。 */
   allowedTools?: string[];
   /**
    * 这份 skill 讲的是怎么用哪几个工具。**它们不在本轮可用集里时，这份 skill 整个不出现在目录里。**
@@ -93,6 +94,7 @@ export interface SkillWriteInput {
 interface NormalizedSkillWriteInput {
   description: string;
   body: string;
+  /** 空数组 = 不声明（`write()` 不落这一行），不是「收窄到零个工具」—— docs/07 §2.2。 */
   allowedTools: string[];
   /** 不给就沿用已有的那份 —— 改一份已有 skill 时不带回去，一次编辑就把它抹了。 */
   requiresTools: string[];
@@ -176,8 +178,12 @@ export class SkillLoader {
           enabled: meta.enabled,
           files,
         };
-        if (meta["allowed-tools"]) skill.allowedTools = meta["allowed-tools"];
-        if (meta["requires-tools"])
+        // `?.length` 而不是真值判断：`allowed-tools: []` 是「没声明」，不是「收窄到零个工具」
+        // （docs/07 §2.2）。空数组在 JS 里 truthy，写成 `if (meta[...])` 就落进声明那一档，
+        // 于是 `load()` 里的交集恒为空、任何角色都载不进来。
+        if (meta["allowed-tools"]?.length)
+          skill.allowedTools = meta["allowed-tools"];
+        if (meta["requires-tools"]?.length)
           skill.requiresTools = meta["requires-tools"];
         if (meta.model) skill.model = meta.model;
         this.#skills.set(skill.name, skill);
@@ -384,10 +390,15 @@ export class SkillLoader {
     const data: Record<string, unknown> = {
       name,
       description: input.description,
-      "allowed-tools": input.allowedTools,
       "min-role": input.minRole,
       enabled: input.enabled,
     };
+    // 与 `requires-tools` 同一条规矩：空列表**不落这一行**。此前它是无条件写的，于是
+    // WebUI 扩展页那个留空的「允许工具」框（placeholder：「留空 = 沿用当前角色全部可用工具」）
+    // 与不给这个参数的 `write_skill`，都会把 `allowed-tools: []` 写进 frontmatter ——
+    // 一份装好的 skill 在扩展页点一次保存就废掉，而模型自己写的那份从落盘起就没载入过一次。
+    // 传 `[]` 依然是「清空已有的收窄」：省掉这一行表达的正是「不再收窄」。
+    if (input.allowedTools.length) data["allowed-tools"] = input.allowedTools;
     if (input.requiresTools.length)
       data["requires-tools"] = input.requiresTools;
     if (input.model) data.model = input.model;
@@ -444,7 +455,9 @@ export class SkillLoader {
         error: "skill_requires_unavailable_tools",
         hint: `${name} 描述skill如何使用 ${missing.join(" / ")}，本次不可用原因应为设置工具被禁用，先别照它做。`,
       };
-    const narrowed = skill.allowedTools
+    // 同 `scan()`：判据是「列表非空」而不是真值。空列表走 `null` 这一支（＝不收窄），
+    // 否则下面那条空交集的拒绝会把它一起拒掉 —— 而它声明的工具一个也没有，怎么改配置都救不回来。
+    const narrowed = skill.allowedTools?.length
       ? roleTools.filter((tool) => skill.allowedTools!.includes(tool))
       : null;
     // 交集为空 = 这个 skill 声明的工具在本轮一个都用不了，此时**必须让载入失败**而不是交出一个空集：
