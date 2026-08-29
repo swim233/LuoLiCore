@@ -124,7 +124,7 @@ const passwordHashFromEnvironment = process.env.WEBUI_PASSWORD
   : null;
 const reportRejectedKey = (key: string): void =>
   void process.stderr.write(
-    `[config] 拒绝了 config_kv 里的非法键：${key}（清理：DELETE FROM config_kv WHERE key='${key.replaceAll("'", "''")}';）\n`,
+    `[config] 已拒绝 config_kv 中的非法键：${key}（清理命令：DELETE FROM config_kv WHERE key='${key.replaceAll("'", "''")}';）\n`,
   );
 const envOverlay = (
   overrides: Record<string, unknown>,
@@ -150,7 +150,7 @@ const droppedOverrides: string[] = [];
 const reportInvalidOverride = (dropped: string[], messages: string[]): void => {
   droppedOverrides.push(...dropped);
   process.stderr.write(
-    `[config] 已忽略 ${dropped.length} 条非法的持久化覆盖：\n  ${messages.join("\n  ")}\n` +
+    `[config] 已忽略 ${dropped.length} 条非法持久化覆盖：\n  ${messages.join("\n  ")}\n` +
       `[config] 清理命令：DELETE FROM config_kv WHERE key IN (${dropped.map((key) => `'${key.replaceAll("'", "''")}'`).join(", ")});\n`,
   );
 };
@@ -177,16 +177,16 @@ migrateDatabase(db);
 const instanceLock = acquireInstanceLock(config.db.path);
 if (!instanceLock.ok) {
   process.stderr.write(
-    `[lock] 另一个实例正在使用这个库（pid ${instanceLock.holder.pid}@${instanceLock.holder.host}，` +
-      `起于 ${new Date(instanceLock.holder.startedAt).toISOString()}）。\n` +
-      `[lock] 同库双实例会互相清掉在途轮次与消息认领，所以这里拒绝启动。要换实例先停掉那一个；\n` +
-      `[lock] 确认它已经死了但锁还在，删掉 ${config.db.path}.lock 再试（旁边的 .lock.<n> 可一并删）。\n`,
+    `[lock] 另一个实例正在使用该数据库（pid ${instanceLock.holder.pid}@${instanceLock.holder.host}，` +
+      `启动于 ${new Date(instanceLock.holder.startedAt).toISOString()}）。\n` +
+      `[lock] 同库双实例会相互清除在途轮次与消息认领，因此拒绝启动。更换实例前请先停止在位实例；\n` +
+      `[lock] 确认在位进程已退出而锁文件仍在时，删除 ${config.db.path}.lock 后重启（同目录的 .lock.<n> 可一并删除）。\n`,
   );
   process.exit(1);
 }
 if (instanceLock.lock.stolenFrom)
   process.stdout.write(
-    `[lock] 接手了 pid ${instanceLock.lock.stolenFrom} 留下的锁 —— 上一次不是正常退出。\n`,
+    `[lock] 已接管 pid ${instanceLock.lock.stolenFrom} 遗留的锁：上一次进程非正常退出。\n`,
   );
 // 报出来而不是静静收尾：`LogSink` 到下面才建得起来，所以先走 stdout，等 sink 有了再补一条
 // `system.recovered`。此前它返回 void 也不记日志，一次非正常重启之后 reap 了什么只能靠翻
@@ -195,7 +195,7 @@ const recovered = recoverAfterCrash(db);
 const recoveredAny = Object.values(recovered).some((count) => count > 0);
 if (recoveredAny)
   process.stdout.write(
-    `[recover] 上一个进程没有正常收尾：判死 ${recovered.turns} 条轮次 / ${recovered.tasks} 条任务 / ${recovered.agentRuns} 条子 agent，` +
+    `[recover] 上一个进程非正常退出：标记失败 ${recovered.turns} 条轮次 / ${recovered.tasks} 条任务 / ${recovered.agentRuns} 条子 agent，` +
       `释放 ${recovered.claims} 条消息认领，清零 ${recovered.reservations} 行在途预留。\n`,
   );
 // 一次性数据修复而不是迁移：迁移文件提交后不可修改，而这件事要用 TS 侧的估算器重算 parts。
@@ -215,7 +215,7 @@ if (ledgerRepair?.rewritten)
   process.stdout.write(
     `[ledger] 已按新计价口径重算 ${ledgerRepair.rewritten} 条用量（受影响 ${ledgerRepair.affected} 条、跳过 ${ledgerRepair.skipped} 条），` +
       `合计 $${ledgerRepair.before.toFixed(6)} → $${ledgerRepair.after.toFixed(6)}；同时重算 ${ledgerRepair.turns} 条轮次与 ${ledgerRepair.counters} 行配额计数` +
-      `${ledgerRepair.countersStale ? `（另有 ${ledgerRepair.countersStale} 行明细已过保留期，算不回来）` : ""}。\n`,
+      `${ledgerRepair.countersStale ? `（另有 ${ledgerRepair.countersStale} 行明细已过保留期，无法重算）` : ""}。\n`,
   );
 const principals = new PrincipalRepository(db);
 principals.ensureOwner(config.access.bootstrapOwnerId);
@@ -260,14 +260,14 @@ if (recoveredAny)
   log.event({
     level: "warn",
     kind: "system.recovered",
-    summary: `上一个进程没有正常收尾：判死 ${recovered.turns} 条轮次`,
+    summary: `上一个进程非正常退出：标记失败 ${recovered.turns} 条轮次`,
     data: recovered,
   });
 if (ledgerRepair?.rewritten)
   log.event({
     level: "warn",
     kind: "maintenance.repair",
-    summary: `按新计价口径重算了 ${ledgerRepair.rewritten} 条用量`,
+    summary: `已按新计价口径重算 ${ledgerRepair.rewritten} 条用量`,
     data: ledgerRepair,
   });
 // 告警要早于沙箱、plugin、模型注册表建起来：那三处的构造参数里就挂着告警回调。
@@ -316,8 +316,8 @@ if (!modelRegistry.aliases().includes("main")) {
     summary: "Required model alias main is unavailable",
   });
   process.stderr.write(
-    "[config] 缺少必需的 main 模型别名：服务照常启动，但所有轮次都会以 model alias unavailable 失败。\n" +
-      `[config] 去 WebUI（http://${config.webui.host}:${config.webui.port} → Provider 页）配置 provider / 模型 / main 别名，保存后即时生效，无需重启。\n`,
+    "[config] 缺少必需的 main 模型别名：服务仍会启动，但所有轮次都会以 model alias unavailable 失败。\n" +
+      `[config] 请在 WebUI（http://${config.webui.host}:${config.webui.port} → Provider 页）配置 provider / 模型 / main 别名，保存后即时生效，无需重启。\n`,
   );
 }
 const memory = new MemoryStore(
@@ -364,12 +364,12 @@ const agentResultsDir = process.env.LUOLI_DATA_DIR
 const resultRefs = repairAgentResultRefs(db, agentResultsDir);
 if (resultRefs?.rewritten)
   process.stdout.write(
-    `[agents] 已把 ${resultRefs.rewritten} 行子 agent 结果路径归一化成相对 ${agentResultsDir} 的 ref（另有 ${resultRefs.relative} 行本来就是）。\n`,
+    `[agents] 已将 ${resultRefs.rewritten} 行子 agent 结果路径归一化为相对 ${agentResultsDir} 的 ref（另有 ${resultRefs.relative} 行已是相对 ref）。\n`,
   );
 if (resultRefs?.foreign) {
   process.stderr.write(
-    `[agents] ${resultRefs.foreign} 行子 agent 结果路径指向另一个部署根（例如 ${resultRefs.sample}），原样留下。\n` +
-      `[agents] gc-files 会因此拒绝清理子 agent 结果目录 —— 先确认这个库与 ${agentResultsDir} 是不是同一个部署的。\n`,
+    `[agents] ${resultRefs.foreign} 行子 agent 结果路径指向另一个部署根（例如 ${resultRefs.sample}），已原样保留。\n` +
+      `[agents] gc-files 会因此拒绝清理子 agent 结果目录，请先确认该数据库与 ${agentResultsDir} 属于同一部署。\n`,
   );
   log.event({
     level: "warn",
@@ -435,7 +435,7 @@ if (config.plugins.enabled) {
     log.event({
       level: "warn",
       kind: "plugin.hot_reload_unreliable",
-      summary: "这个运行时下 plugin 热重载不可靠：重载会成功但仍跑旧代码",
+      summary: "当前运行时下 plugin 热重载不可靠：重载返回成功但仍执行旧代码",
       data: { entry: process.argv[1] ?? null },
     });
     process.stderr.write(`[plugins] ${plugins.hotReloadWarning}\n`);
@@ -536,32 +536,32 @@ scheduler.add(config.mcp.healthCheckCron, () => mcp.reconcile(), "mcp-health");
 const promptAssembler = new PromptAssembler();
 const promptDocuments = new PromptDocuments(db, config.memory.dir);
 promptDocuments.ensure();
-// 审批回执发给**发起人所在的会话**（`docs/22 · D-APPR-01`）：有裁决通道时这一轮会静静挂满
-// ttlMs，用户看到的是 bot 收了消息然后沉默三分钟。bot 要到最后才建得起来，所以这里吃 getter
-// ——`TelegramPromptChannel` 的 presence 就是这条通道的开关（`docs/05 §6.1`）。
-// `decidable` 是这条通道的真判据。有效角色 = min(用户角色, 会话角色)（D9，`docs/05 §2.2` 那张表），
-// 所以 `decidableBy:'owner'` 只在**会话本身也是 owner 档**的地方满足得了 —— 一个 `trusted` 群里连
-// owner 本人都是 `trusted`，那儿的按钮谁都点不动。少了这一问，可用性就比可裁决性宽一档：库里挂上
-// pending 行、屏幕上贴出一排点不动的按钮，然后这一轮干等满 ttlMs（`docs/22 · D-APPR-01` 换了个来路）。
-// 私聊按 §2.2 的 ★ 继承用户角色，而 owner 的私聊 chatId 就是他的 userId。
+// 审批回执有裁决通道时这一轮会静静挂满 ttlMs，用户看到的是 bot 收了消息然后沉默三分钟
+// （`docs/22 · D-APPR-01`）。bot 要到最后才建得起来，所以这里吃 getter ——`TelegramPromptChannel`
+// 的 presence 就是这条通道的开关（`docs/05 §6.1`）。
+//
+// `decidable` 是这条通道的真判据，而现在它只认一个会话：**owner 私聊**。群内的有效角色封顶
+// `trusted`，`decidableBy:'owner'` 在任何群里都无人可点 —— 不管那个群挂的是什么会话角色。
+// 于是「按发起人会话投递」这条路整条走不通了：按钮贴在群里就是一排点不动的按钮，而
+// `resolve()` 的会话绑定（`waiter.request.chatId === actor.chatId`）会把每一次点击都判成
+// unknown。带按钮的那条因此改发 owner 私聊，发起人会话只留一条纯文本报信（见下面的
+// `notifyInitiator`）；私聊的有效角色就是用户自身的角色，绑定与裁决权在那里天然成立。
+// owner 的私聊 chatId 就是他的 userId，也就是 `bootstrapOwnerId`。
 const approvalPrompts = new PendingPrompts(
   new TelegramPromptChannel({
     bot: () => bot,
     log,
-    decidable: (chatId) => {
-      const access = configStore.snapshot().access;
-      return (
-        chatId === access.bootstrapOwnerId ||
-        (principals.roleOf("chat", chatId) ?? access.defaultChatRole) ===
-          "owner"
-      );
-    },
+    decidable: (chatId) =>
+      chatId === configStore.snapshot().access.bootstrapOwnerId,
   }),
   log,
 );
 // 回执上挂 inline keyboard：**裁决权只给 owner**（`approval.allowInitiator` 已永久摘除，docs/14 A26），按下去走
 // `claim` → `approval.decide(..., 'telegram')`，也就是与 WebUI 共用那句
 // `UPDATE … WHERE state='pending' AND expires_at>?` —— 两条通道之间唯一的原子抢夺点。
+// 带按钮的那条发**owner 私聊**，发起人会话只留一条纯文本报信：群内有效角色封顶 `trusted`，
+// 群里的按钮谁都点不动。`PendingPrompts.ask` 的 `chatId` 同时是投递目标与裁决绑定
+// （`resolve()` 校验 `waiter.request.chatId === actor.chatId`），换成私聊 id 之后两者一起跟着走。
 // 正文不传 `parse_mode`：键盘挂在一条消息上，MarkdownV2 一 400 就会被 `sendWithFallback` 重发一遍，
 // 屏幕上于是有两条各带一套按钮的消息。
 const approval = new DatabaseApprovalBroker(
@@ -580,23 +580,58 @@ const approval = new DatabaseApprovalBroker(
     const seconds = Math.round(pending.ttlMs / 1000);
     const thread =
       pending.threadId === null ? {} : { message_thread_id: pending.threadId };
-    // 这个会话里按钮点不动（`decidable` 为假）时**不贴按钮**，只报信 —— 走到这儿说明 WebUI 那条
-    // SSE 通道在，否则上面那道闸已经当场拒了。贴一排点不动的按钮比不贴更糟。
-    if (!approvalPrompts.available(pending.chatId)) {
+    const owner = configStore.snapshot().access.bootstrapOwnerId;
+    // 没配 owner 的部署（`loadConfig` 会拒绝启动，但配置热更新后这个值理论上仍可为空）退回原会话：
+    // 与 broker 那道可用性闸同一口径，两处必须一起改，否则闸放行的会话与投递的会话不是一个。
+    const target = owner || pending.chatId;
+    const sameChat = target === pending.chatId;
+    // 按钮点不动（`decidable` 为假，即 bot 没起来或 owner 私聊发不了）时**不贴按钮**，只报信 ——
+    // 走到这儿说明 WebUI 那条 SSE 通道在，否则上面那道闸已经当场拒了。贴一排点不动的按钮比不贴更糟。
+    if (!approvalPrompts.available(target)) {
       await bot.api.sendMessage(
         pending.chatId,
-        `⏳ ${pending.tool} 是${risk}操作，要 owner 在 WebUI 的审批页批准。${seconds} 秒内没人处理就会自动拒绝，我会接着往下说。`,
+        `⏳ ${pending.tool} 属于${risk}操作，需 owner 在 WebUI 审批页批准。${seconds} 秒内未处理将自动拒绝，我会继续本轮。`,
         thread,
       );
       return;
     }
+    // 发起人会话里那条只报信、不带按钮，也**不写倒计时、不带任何状态**：它没有 `settle` 句柄，
+    // 收场时无人回来改它 —— 写了倒计时就等于在群里留下一句迟早不成立的话（`docs/21 §12`）。
+    if (!sameChat)
+      await bot.api
+        .sendMessage(
+          pending.chatId,
+          `⏳ ${pending.tool} 属于${risk}操作，已请求 owner 批准，结果随本轮回复给出。`,
+          thread,
+        )
+        .catch(() => undefined);
+    // owner 私聊里那条脱离了原会话上下文：只给工具名的话，他要批的是「哪个群、谁发起、干什么」
+    // 三样全不知道。显示名与 id 一起给 —— 显示名是用户自己填的，同名冒充只需改一次昵称。
+    const initiatorName = db
+      .prepare(
+        "SELECT display_name FROM principals WHERE kind='user' AND tg_id=?",
+      )
+      .pluck()
+      .get(pending.requesterUserId) as string | null | undefined;
+    const rawInput = JSON.stringify(pending.input);
+    const inputLine =
+      !rawInput || rawInput === "{}" || rawInput === "null"
+        ? ""
+        : `入参：${rawInput.length > 300 ? `${rawInput.slice(0, 300)}…` : rawInput}\n`;
+    // owner 自己私聊里触发时「来源 / 发起人」两项都是他自己，整行省掉。
+    const sourceLine = sameChat
+      ? ""
+      : `来源：${pending.chatTitle ?? pending.chatId} · 发起人 ${initiatorName ? `${initiatorName}（${pending.requesterUserId}）` : pending.requesterUserId}\n`;
     const handle = approvalPrompts.ask({
       kind: "approval",
-      chatId: pending.chatId,
-      threadId: pending.threadId,
+      chatId: target,
+      // 私聊没有 forum thread，把群的 threadId 带过去 Telegram 直接 400。
+      threadId: sameChat ? pending.threadId : null,
       decidableBy: "owner",
       initiatorUserId: pending.requesterUserId,
-      text: `⏳ ${pending.tool} 是${risk}操作，要 owner 批准 —— 就在下面点，或去 WebUI 的审批页。${seconds} 秒内没人处理就会自动拒绝，我会接着往下说。`,
+      text:
+        `⏳ ${pending.tool} 属于${risk}操作，需你批准。\n${sourceLine}${inputLine}` +
+        `点击下方按钮，或前往 WebUI 审批页。${seconds} 秒内未处理将自动拒绝，我会继续本轮。`,
       options: [
         { id: "approve", label: "批准" },
         { id: "deny", label: "拒绝" },
@@ -606,17 +641,30 @@ const approval = new DatabaseApprovalBroker(
         approval.decide(pending.id, optionId === "approve", actor, "telegram"),
     });
     const posted = await handle.posted;
-    // `tg_message_id` 落库是为了下次启动能把残留回执收掉（`staleKeyboards`）；`settle` 让 Telegram
-    // 点了 / WebUI 抢先裁决 / TTL 到点 / 轮次取消时那两个按钮当场消失 —— 留着就是下一次误点 ——
-    // **并且把正文换成结局**：上面那句「${seconds} 秒内没人处理就会自动拒绝」这时已经不成立，
-    // 让它停在屏幕上就是 `docs/21 §12` 那类「界面在说谎」（`AC-APV-004`）。撤键盘与改正文合成
-    // 一次 `editMessageText`（见 `TelegramPromptChannel.settle`），两次调用要排两回 20/分钟 的队。
-    // `settle` 交回「那次编辑真落地了吗」——`tg_message_id` 只在为真时才清（待办队列不是历史记录）。
+    // owner 从没跟 bot 说过话时 Telegram 拒发私聊（403）。不改往群里贴按钮 —— 那儿谁都点不动 ——
+    // 只补一条说清楚该去哪儿；WebUI 也没通道时由 `#receiptUndeliverable` 当场拒，这条不会发出。
+    if (!posted && !sameChat)
+      await bot.api
+        .sendMessage(
+          pending.chatId,
+          `⏳ ${pending.tool} 属于${risk}操作，需 owner 在 WebUI 审批页批准。${seconds} 秒内未处理将自动拒绝，我会继续本轮。`,
+          thread,
+        )
+        .catch(() => undefined);
+    // `tg_message_id` 落库是为了下次启动能把残留回执收掉（`staleKeyboards`），`tg_chat_id` 与它同写：
+    // 回执落在 owner 私聊而 `approvals.chat_id` 是发起人会话，少了这一列那趟扫描会拿群 id 配私聊的
+    // message_id。`settle` 让 Telegram 点了 / WebUI 抢先裁决 / TTL 到点 / 轮次取消时那两个按钮当场
+    // 消失 —— 留着就是下一次误点 —— **并且把正文换成结局**：上面那句「${seconds} 秒内没人处理就会
+    // 自动拒绝」这时已经不成立，让它停在屏幕上就是 `docs/21 §12` 那类「界面在说谎」（`AC-APV-004`）。
+    // 撤键盘与改正文合成一次 `editMessageText`（见 `TelegramPromptChannel.settle`），两次调用要排两回
+    // 20/分钟 的队。`settle` 交回「那次编辑真落地了吗」——`tg_message_id` 只在为真时才清
+    // （待办队列不是历史记录）。
     //
-    // `delivered: false`：这条带按钮的回执**发不出去**。上面那道可用性闸是按这个会话点得动才放行的，
+    // `delivered: false`：这条带按钮的回执**发不出去**。上面那道可用性闸是按 owner 私聊点得动才放行的，
     // 所以走到这儿时 Telegram 可能是唯一的通道 —— 由 broker 两边一起判（`#receiptUndeliverable`）。
     return posted
       ? {
+          tgChatId: posted.chatId,
           tgMessageId: posted.messageId,
           settle: (outcome) =>
             approvalPrompts.dismiss(
@@ -646,12 +694,12 @@ else if (!config.approval.rules.length) {
   log.event({
     level: "warn",
     kind: "approval.no_rules",
-    summary: `approval.enabled=true 但规则表是空的：${conditional.length} 个 conditional 工具等于 never`,
+    summary: `approval.enabled=true 但规则表为空：${conditional.length} 个 conditional 工具等同于 never`,
     data: { conditional },
   });
   process.stderr.write(
-    `[approval] 审批已启用但 approval.rules 是空的 —— 0 条规则时 conditional 等于 never，${conditional.join(" / ")} 全部不经审批直接执行。\n` +
-      "[approval] 去 WebUI（审批页）加规则，或在 config/config.yaml 的 approval.rules 里写（那里有注释示例）。\n",
+    `[approval] 审批已启用但 approval.rules 为空：0 条规则时 conditional 等同于 never，${conditional.join(" / ")} 全部不经审批直接执行。\n` +
+      "[approval] 请在 WebUI 审批页添加规则，或写入 config/config.yaml 的 approval.rules（其中附有注释示例）。\n",
   );
 }
 // 唤醒词在匹配时被静默跳过、或四个开关全关，表现都只是「bot 不理我」——启动时先把它说出来（docs/11 §启动校验）。
@@ -694,7 +742,7 @@ if (overlongLongTools.length) {
   log.event({
     level: "warn",
     kind: "config.invalid",
-    summary: `${overlongLongTools.length} 个长工具的 timeoutMs 大于 concurrency.turnTimeoutMs（${config.concurrency.turnTimeoutMs}），那部分预算从来不会生效`,
+    summary: `${overlongLongTools.length} 个长工具的 timeoutMs 大于 concurrency.turnTimeoutMs（${config.concurrency.turnTimeoutMs}），超出部分不会生效`,
     data: {
       turnTimeoutMs: config.concurrency.turnTimeoutMs,
       overlong: overlongLongTools.map((agent) => ({
@@ -1132,6 +1180,9 @@ const previewPrompt = (
     )
     .get(key) as { userId: string } | undefined;
   // 群名也从这一行取：RUNTIME 的「会话」行要它，而预览必须逐字等于下一轮真正发出去的那一份。
+  // 私聊查不到是**预期**的，不要回落去查 `kind='user'`：私聊不占 `chat:` 行，而 `chatTitle` 的契约
+  // 就是「群名 / 频道名，私聊无此值」（`packages/shared`），`chatDescription` 对私聊直接输出「私聊」、
+  // 根本不读这个值。填上对方显示名等于破坏契约。`isPrivate` 那一侧另有 Telegram id 正负号的回落。
   const principal = db
     .prepare(
       "SELECT chat_type AS chatType, display_name AS title FROM principals WHERE kind='chat' AND tg_id=?",
@@ -1750,8 +1801,8 @@ if (process.env.BOT_TOKEN) {
       data: { phase: "init", fatal: false },
     });
     process.stderr.write(
-      `[telegram] 建不起 bot（token 失效、被撤销，或网络不通）：${message}\n` +
-        `[telegram] Telegram 入口已禁用，WebUI 照常启动 —— 去 http://${config.webui.host}:${config.webui.port} 换掉 BOT_TOKEN 再重启。\n`,
+      `[telegram] bot 初始化失败（token 失效、已撤销，或网络不可达）：${message}\n` +
+        `[telegram] Telegram 入口已禁用，WebUI 正常启动；请在 http://${config.webui.host}:${config.webui.port} 更换 BOT_TOKEN 后重启。\n`,
     );
   }
 }
@@ -1797,7 +1848,7 @@ if (bot) {
           data: { fatal: true },
         });
         process.stderr.write(
-          `[telegram] 轮询被 Telegram 拒绝（token 失效或另有实例在拉同一个 bot）：${error instanceof Error ? error.message : String(error)}\n`,
+          `[telegram] 轮询被 Telegram 拒绝（token 失效，或另有实例正在轮询同一个 bot）：${error instanceof Error ? error.message : String(error)}\n`,
         );
         void shutdown("telegram:fatal").then(() => {
           process.exitCode = 1;

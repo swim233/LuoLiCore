@@ -28,29 +28,29 @@ import type { TurnRegistry } from "../turn/registry.js";
 /**
  * 合成触发消息的 `tg_message_id` 保留段。
  *
- * `openTurn` 的 `trigger` 必须是一条真实归档行，而 `messages.tg_message_id` 是 `NOT NULL`
- * 且有 `UNIQUE(chat_id, tg_message_id, revision)`。用负数会排在全部真实消息之前，
- * 把 `claimThroughMessageId` 的背景认领窗口整个搞坏；用 `MAX+1` 则可能撞上下一条真实消息，
- * 而 `append` 是 `INSERT OR IGNORE` —— 撞了会静静把真实用户消息丢掉。所以取一个真实
- * Telegram 消息号永远到不了的高位段（每会话计数，见 `#allocateTriggerId`）。
+ * `openTurn` 的 `trigger` 必须是一条真实归档行，而 `messages.tg_message_id` 为 `NOT NULL`
+ * 且有 `UNIQUE(chat_id, tg_message_id, revision)`。使用负数会使其排在全部真实消息之前，
+ * 破坏 `claimThroughMessageId` 的背景认领窗口；使用 `MAX+1` 则可能与下一条真实消息冲突，
+ * 而 `append` 是 `INSERT OR IGNORE` —— 冲突时会静默丢弃真实用户消息。因此选取一个真实
+ * Telegram 消息号永远无法到达的高位段（按会话计数，见 `#allocateTriggerId`）。
  */
 export const SYNTHETIC_TG_MESSAGE_ID_BASE = 2_000_000_000;
 
 /**
- * 一次触发的最终状态，落在 `scheduled_jobs.last_state` 上。
+ * 一次触发的最终状态，写入 `scheduled_jobs.last_state`。
  *
- * **这个联合类型就是那一列的取值权威** —— 迁移 0013 说明了为什么列上没有 CHECK。
- * `silent` 与 `committed` 必须分成两档：静默按设计就是安静的，混进 `committed` 之后
- * 「这条任务其实一直在静默」在库里再无痕迹（docs/02 §10.5 的四层分辨手段之一）。
+ * 该联合类型即该列取值的权威定义 —— 迁移 0013 说明了该列为何没有 CHECK 约束。
+ * `silent` 与 `committed` 必须分为两档：静默按设计不产生输出，并入 `committed` 后
+ * 该任务持续处于静默这一事实在库中不再留下任何痕迹（docs/02 §10.5 的四层分辨手段之一）。
  */
 export type ScheduledRunState =
   "committed" | "silent" | "failed" | "skipped" | "missed" | "cancelled";
 
 /**
- * 连续静默多少次之后 `schedule.silent` 从 info 升 warn。
+ * 连续静默多少次后 `schedule.silent` 由 info 提升为 warn。
  *
- * 代码常量而不是配置键（照 `PROVIDER_FAILURES_TO_DOWN` 的先例）：这是「这台定时器已经只烧钱
- * 不说话了」的发现机制，不是运维要按部署调的策略 —— 而多一个配置键就多一处能被调到永远不响。
+ * 采用代码常量而非配置键（沿用 `PROVIDER_FAILURES_TO_DOWN` 的先例）：这是发现定时器只产生费用
+ * 而无输出的机制，不是需按部署调整的策略 —— 而每多一个配置键就多一处可被调到永不触发的位置。
  */
 export const SILENT_STREAK_WARN = 10;
 
@@ -69,25 +69,25 @@ export interface ScheduledJobRunnerDependencies {
   log: LogSink;
   config(): Readonly<Config>;
   /**
-   * 懒取：工具在 bot 建起来之前就注册好了，投递通道要到 `createTelegramBot` 之后才有。
+   * 惰性取值：工具在 bot 构造之前即完成注册，而投递通道要到 `createTelegramBot` 之后才存在。
    *
-   * **装配方必须让它在 bot 真的起来之后才非空。** 它此前给的是那个「有 `BOT_TOKEN` 就立刻
-   * 非空」的外层对象，于是下面 `fire()` 里那条 `telegram_unavailable` 的 skip 分支是死代码：
-   * HTTP 从 `serve()` 起就在监听，启动窗口内经 `POST /api/schedules/:id/trigger` 手动触发的
-   * 任务会正常开轮、跑完模型、记账，最后以 `delivery_failed:telegram_unavailable` 收尾且
-   * **不提交** —— 钱花了、上下文没留下（docs/28 · L-SCH-01）。
+   * 装配方必须保证它在 bot 真正启动之后才非空。它此前提供的是只要有 `BOT_TOKEN` 就立即非空的
+   * 外层对象，导致下方 `fire()` 中的 `telegram_unavailable` skip 分支成为死代码：
+   * HTTP 从 `serve()` 起即开始监听，启动窗口内经 `POST /api/schedules/:id/trigger` 手动触发的
+   * 任务会正常开轮、执行模型调用、记账，最后以 `delivery_failed:telegram_unavailable` 收尾且
+   * 不提交 —— 产生了费用而上下文中没有留下任何记录（docs/28 · L-SCH-01）。
    */
   telegram(): TelegramToolBridge | null;
   roleOf(kind: "user" | "chat", tgId: string): Role | null;
   /**
-   * 连续失败计数。**与 Telegram 轮次共用同一份**（装配方建一个传两处）：这条告警说的是
-   * 「这个部署坏了」，而它此前只存在于 `createTelegramBot` 的闭包里 —— 上游变黑洞时，
-   * 没人聊天的部署里每次定时触发都超时，一次告警都不响（docs/28 · L-SCH-02）。
+   * 连续失败计数。与 Telegram 轮次共用同一份（装配方创建一个并传入两处）：该告警表达的是
+   * 本部署已故障，而它此前只存在于 `createTelegramBot` 的闭包中 —— 上游无响应时，
+   * 无人聊天的部署中每次定时触发都超时，却一次告警都不触发（docs/28 · L-SCH-02）。
    */
   failures?: TurnFailureStreak;
   /**
-   * `mode:'agent'` 的实际执行，签名照 `main.ts` 的 `onTurn` —— 装配方在那里注入
-   * `runMainAgent`（非流式：定时轮次没有人盯着屏幕，也没有 Telegram 流消费者）。
+   * `mode:'agent'` 的实际执行，签名与 `main.ts` 的 `onTurn` 一致 —— 装配方在那里注入
+   * `runMainAgent`（非流式：定时轮次无人实时查看，也没有 Telegram 流消费者）。
    */
   runAgent(
     turn: RuntimeTurnContext,
@@ -103,10 +103,10 @@ const jobCronName = (id: string): string => `job:${id}`;
 /**
  * 定时任务的执行器。
  *
- * 轮次的开法严格照 `packages/telegram/src/bot.ts` 的那条路（配额 → 并发闸 → openTurn →
- * turns.create → 产出 → appendDelta → commitTurn），只砍掉流式、占位消息与 inline `/cancel`
- * —— 定时轮次没有人盯着屏幕。**`turnRegistry.register` 一步不能砍**：不注册的轮次既不可
- * `/cancel`、也不出现在 `GET /api/turns/active` 里，卡住之后运维完全看不见它。
+ * 开启轮次的流程严格沿用 `packages/telegram/src/bot.ts` 的路径（配额 → 并发闸 → openTurn →
+ * turns.create → 产出 → appendDelta → commitTurn），仅去除流式输出、占位消息与 inline `/cancel`
+ * —— 定时轮次无人实时查看。`turnRegistry.register` 这一步不可省略：未注册的轮次既无法
+ * `/cancel`，也不出现在 `GET /api/turns/active` 中，一旦卡住运维完全无法观察到它。
  */
 export class ScheduledJobRunner {
   #loaded = false;
@@ -114,23 +114,23 @@ export class ScheduledJobRunner {
   constructor(private readonly dependencies: ScheduledJobRunnerDependencies) {}
 
   /**
-   * `load()` 跑过没有 —— 也就是「投递通道已经具备」。
+   * `load()` 是否已执行 —— 即投递通道是否已具备。
    *
-   * `POST /api/schedules/:id/trigger` 拿它挡启动窗口：HTTP 从 `serve()` 起就在监听，而 `load()`
-   * 要等 bot 起来（装配方的注释一直是对的），所以 cron 触发本来就安全，漏的只有那条手动触发
-   * （docs/28 · L-SCH-01）。`telegram()` 那道判据仍在 `fire()` 里兜着 —— 这一条是为了让手动
-   * 触发**在响应里就能说清为什么没跑**，而不是回 `started:true` 然后往日志里写一条 skipped。
+   * `POST /api/schedules/:id/trigger` 用它拦截启动窗口：HTTP 从 `serve()` 起即开始监听，而 `load()`
+   * 需等待 bot 启动（装配方的注释一直正确），因此 cron 触发本就安全，遗漏的只有手动触发
+   * （docs/28 · L-SCH-01）。`telegram()` 的判据仍在 `fire()` 中兜底 —— 本条是为了让手动
+   * 触发在响应中即可说明未执行的原因，而不是返回 `started:true` 后在日志中写一条 skipped。
    */
   get loaded(): boolean {
     return this.#loaded;
   }
 
   /**
-   * 进程启动时把库里的活跃任务装回 cron。
+   * 进程启动时将库中的活跃任务重新装载到 cron。
    *
-   * 停机期间错过的**不补跑**（需求方决策）：一次性任务过期直接置 `done` 并记 `schedule.missed`，
-   * 周期任务只记一条 warn 然后照常排下一次。9 点补跑一条 4 点的早报比不发更让人困惑，
-   * 跟 `telegram.dropPendingOnStart` 是同一个取舍。
+   * 停机期间错过的任务不补跑（需求方决策）：一次性任务过期直接置为 `done` 并记录 `schedule.missed`，
+   * 周期任务只记录一条 warn 后照常安排下一次。在 9 点补发一条 4 点的早报比不发更令人困惑，
+   * 与 `telegram.dropPendingOnStart` 是同一取舍。
    */
   load(): { registered: number; missed: number } {
     let registered = 0;
@@ -154,7 +154,7 @@ export class ScheduledJobRunner {
             catchUp: false,
           },
         });
-        // 一次性任务的触发点已经过去了，留着 active 只会在库里永远挂着一条不会响的任务。
+        // 一次性任务的触发时间已过，保留 active 只会在库中长期留下一条永不触发的任务。
         if (job.runAt !== null) {
           this.dependencies.jobs.finish(job.id, "done", "missed");
           continue;
@@ -165,7 +165,7 @@ export class ScheduledJobRunner {
     return { registered, missed };
   }
 
-  /** 注册（或重新注册）一个任务的 cron。返回 false 表示这条任务已经不该再排了。 */
+  /** 注册（或重新注册）一个任务的 cron。返回 false 表示该任务不应再被安排。 */
   register(job: ScheduledJob): boolean {
     const name = jobCronName(job.id);
     this.dependencies.scheduler.remove(name);
@@ -178,7 +178,7 @@ export class ScheduledJobRunner {
       });
       return true;
     } catch (error) {
-      // 坏表达式在创建时就被挡了，走到这里说明库里那行是手改的或跨版本残留 —— 停掉它并说出来。
+      // 非法表达式在创建时即被拦截，执行到此说明库中该行经手工修改或为跨版本残留 —— 停用并记录。
       this.dependencies.jobs.finish(job.id, "cancelled", "failed");
       this.dependencies.log.event({
         level: "error",
@@ -205,7 +205,7 @@ export class ScheduledJobRunner {
     return this.dependencies.scheduler.nextRun(jobCronName(id));
   }
 
-  /** 一次触发。任何异常都在这里收口 —— croner 的 `catch` 与 `Scheduler.onError` 之外再兜一层。 */
+  /** 一次触发。所有异常在此收口 —— 在 croner 的 `catch` 与 `Scheduler.onError` 之外再兜一层。 */
   async fire(id: string): Promise<void> {
     const job = this.dependencies.jobs.byId(id);
     if (!job || job.state !== "active") {
@@ -218,14 +218,15 @@ export class ScheduledJobRunner {
       return;
     }
     const { role, userRole, chatRole } = this.#effectiveRole(job, live);
-    // 创建之后被降级/拉黑的人不该继续借 bot 的手花钱。blocked 是永久判定 —— 停掉任务；
-    // 只是掉到 trusted 以下（`schedule_create` 的 minRole）则跳过这一次，权限回来了任务还在。
+    // 创建后被降级或拉黑的用户不应继续通过 bot 产生费用。blocked 是永久判定 —— 停用该任务；
+    // 仅降至 trusted 以下（`schedule_create` 的 minRole）则跳过本次，权限恢复后任务仍在。
     if (role === "blocked") {
       this.dependencies.jobs.finish(job.id, "cancelled", "cancelled");
       this.unregister(job.id);
-      // **文案按实际命中的那一侧写。** 判据是 `min(用户角色, 会话角色)`，而这里此前写死「创建者
-      // 已被封禁」—— 封的是会话时同样这么说，运维会去查错的对象（docs/28 · L-SCH-04）。
-      // `minRole` 的定义保证了：有效角色是 blocked 而用户不是，那一定是会话这一侧。
+      // 文案需按实际命中的一侧生成。判据是「私聊只看用户角色，群 / 频道取两侧较高者再封顶
+      // trusted」，而此处此前写死为创建者已被封禁 —— 被封的是会话时同样如此表述，会导致运维
+      // 排查错误的对象（docs/28 · L-SCH-04）。取较高者不影响这条推理：`blocked` 是任一侧一票
+      // 否决且先于抬升判定，因此有效角色为 blocked 而用户角色不是时，必定是会话一侧命中。
       const culprit =
         userRole === "blocked"
           ? `创建者 user:${job.createdBy}`
@@ -244,8 +245,8 @@ export class ScheduledJobRunner {
       this.#skip(job, "role_downgraded", { role, userRole, chatRole });
       return;
     }
-    // **这道判据必须排在 `#run` 之前**（配额预留、并发闸、`openTurn` 都在里面）：发不出去的
-    // 一轮开了也是白开，模型钱花掉、上下文一个字都留不下（docs/28 · L-SCH-01）。
+    // 该判据必须排在 `#run` 之前（配额预留、并发闸、`openTurn` 均在其中）：无法投递的轮次
+    // 即使开启也没有意义，会产生模型费用而上下文中不留任何记录（docs/28 · L-SCH-01）。
     const bridge = this.dependencies.telegram();
     if (!bridge) {
       this.#skip(job, "telegram_unavailable");
@@ -254,7 +255,7 @@ export class ScheduledJobRunner {
     await this.#run(job, role, live, bridge);
   }
 
-  /** 轮次级事件挂在 trace 根之下（`docs/10 §1`）。 */
+  /** 轮次级事件挂在 trace 根节点之下（`docs/10 §1`）。 */
   #parent(turn: RuntimeTurnContext): { parentSpanId?: string } {
     return turn.rootSpanId ? { parentSpanId: turn.rootSpanId } : {};
   }
@@ -267,7 +268,7 @@ export class ScheduledJobRunner {
   ): Promise<void> {
     const chatConfig = perChatConfig(live, job.key);
     const isPrivate = !job.chatId.startsWith("-");
-    // notify 不调模型，所以不占额度；agent 走和用户轮次完全相同的配额闸。
+    // notify 不调用模型，因此不占用额度；agent 走与用户轮次完全相同的配额闸。
     const reservation =
       job.mode === "agent" ? this.#reserve(job, role, live) : null;
     if (job.mode === "agent" && live.quota.enabled && !reservation) {
@@ -286,8 +287,8 @@ export class ScheduledJobRunner {
       live.concurrency.turnTimeoutMs,
     );
     let release: (() => void) | null = null;
-    // 与 `bot.ts` 同一条判据（docs/28 · L-LOG-01）：只在真的排过队时记 `turn.queued`，
-    // `turn.start` 一律带 `waitedMs`。定时轮次撞上并发闸的概率不比用户轮次低 —— 它们常常同时到点。
+    // 与 `bot.ts` 使用同一判据（docs/28 · L-LOG-01）：只有确实排队时才记录 `turn.queued`，
+    // `turn.start` 一律携带 `waitedMs`。定时轮次触发并发闸的概率不低于用户轮次 —— 它们常同时到期。
     const queuedAt = Date.now();
     const wasQueued = !this.dependencies.concurrency.available(job.key);
     const queueSnapshot = {
@@ -310,21 +311,24 @@ export class ScheduledJobRunner {
     let turn: Awaited<ReturnType<ContextEngine["openTurn"]>>;
     let triggerMessageId: number;
     try {
-      // 合成触发消息：`[定时任务 <名字>] <正文>` 作为一条 from_kind='system' 的入站消息落进归档，
-      // 这样上下文里就是一次正常对话，用户能直接接着 bot 的回答说下去（需求方决策：照常进上下文）。
-      // **不包 untrusted()**：这条文本是 owner/trusted 自己排的任务，包起来等于告诉模型别理它。
+      // 合成触发消息：`[定时任务 <名字>] <正文>` 作为一条 from_kind='system' 的入站消息写入归档，
+      // 使上下文中呈现为一次正常对话，用户可直接接续 bot 的回答（需求方决策：照常进入上下文）。
+      // 不使用 untrusted() 包裹：该文本是 owner 或 trusted 自行创建的任务，包裹等于告知模型忽略它。
       const trigger = this.#appendTrigger(job);
       triggerMessageId = trigger.id;
-      // 群名从库里读：这条路没有 Telegram update 可取，而 RUNTIME 的「会话」行要它。
-      // 权威副本是 `principals` 的 `chat:<id>`（`upsertSeen` 每条消息刷新一次 `display_name`）。
+      // 群名从库中读取：该路径没有 Telegram update 可用，而 RUNTIME 的会话行需要它。
+      // 权威副本是 `principals` 中的 `chat:<id>`（`upsertSeen` 每条消息刷新一次 `display_name`）。
+      // 私聊查不到是预期结果、不是待修的 bug：私聊不占 `chat:` 行，而 `chatTitle` 的契约就是
+      // 「群名 / 频道名，私聊无此值」（`chatDescription` 对私聊直接返回「私聊」，根本不读它）。
+      // 回落去查同 id 的 `user:` 行会把对方的显示名漏进提示词。
       const chatTitle = this.dependencies.db
         .prepare(
           "SELECT display_name FROM principals WHERE kind='chat' AND tg_id=?",
         )
         .pluck()
         .get(job.chatId) as string | null;
-      // `silenceable` 只从这里进来（docs/02 §10.5）：其余造 turn 的地方一处都不传，于是「模型
-      // 能宣布不投递」这件事结构上只可能发生在开了 allow_silent 的定时轮次上。
+      // `silenceable` 只从此处传入（docs/02 §10.5）：其余构造 turn 的位置一律不传，因此模型可以
+      // 声明不投递这一能力在结构上只可能出现在启用 allow_silent 的定时轮次中。
       turn = await this.dependencies.context.openTurn({
         chatId: job.chatId,
         threadId: job.threadId,
@@ -424,12 +428,12 @@ export class ScheduledJobRunner {
         job.mode === "notify"
           ? job.payload
           : (await this.dependencies.runAgent(turn, reservation)).trim();
-      // 空正文当成失败：发不出去（splitTelegramText('') 是空数组）、还会往上下文里留一条
-      // 谁都解释不了的空消息（docs/16 §5「摘除比伪造安全」）。
-      // **这道闸对静默一样不放松。** 静默 + 空正文 = 上下文里一个字都没留，而「模型下一轮知道
-      // 自己查过了」正是静默这件事的全部目的（docs/02 §10.5）。
+      // 空正文视为失败：无法发送（splitTelegramText('') 返回空数组），且会在上下文中留下一条
+      // 无法解释的空消息（docs/16 §5 摘除比伪造安全）。
+      // 该闸门对静默同样不放宽。静默加空正文等于上下文中没有任何记录，而让模型在下一轮知晓自己
+      // 已执行过查询正是静默机制的全部目的（docs/02 §10.5）。
       if (!answer) throw new Error("model_returned_empty");
-      // `notify` 恒为 false：那条路不调模型，没有任何人够得着 `turn.silenced`。
+      // `notify` 恒为 false：该路径不调用模型，没有任何执行方能够置位 `turn.silenced`。
       const silenced = turn.silenced === true;
       if (!silenced) {
         const sent = (await bridge.sendMessage(
@@ -444,8 +448,8 @@ export class ScheduledJobRunner {
         if (sent.ok === false)
           throw new Error(`delivery_failed:${sent.error ?? "unknown"}`);
       } else {
-        // `job.silentStreak` 是这次触发**之前**的值，下面那句 markRun 才会 +1 —— 日志里要的是
-        // 「这是连续第几次」，所以先加。
+        // `job.silentStreak` 是本次触发之前的值，下方的 markRun 才会加 1 —— 日志需要表达这是连续
+        // 第几次，因此此处先加。
         const streak = job.silentStreak + 1;
         this.dependencies.log.event({
           level: streak >= SILENT_STREAK_WARN ? "warn" : "info",
@@ -456,8 +460,8 @@ export class ScheduledJobRunner {
           chatId: job.chatId,
           userId: job.createdBy,
           key: job.key,
-          // `?? null` 而不是条件展开：这条日志是「这条任务是不是从此再也不说话了」的唯一可读凭据，
-          // 字段恒在才 grep 得动、才过滤得了。缺席的 reason 说明置位方只置了一半（见 `silenceReason`）。
+          // 使用 `?? null` 而非条件展开：该日志是判断任务是否从此不再产生输出的唯一可读凭据，
+          // 字段恒存在才便于 grep 与过滤。reason 缺失说明置位方只完成了一半（见 `silenceReason`）。
           data: {
             job: job.id,
             name: job.name,
@@ -468,9 +472,9 @@ export class ScheduledJobRunner {
           },
         });
       }
-      // **两条路在这里合流，`appendDelta` / `commitTurn` 必须在合流点之后。** 把它们挪进上面那个
-      // 分支里（或者干脆 `if (silenced) return`）正好复刻 docs/02 §10.1 当初否掉的方案：省下的是
-      // 一次 commit，代价是一次说不清的失忆 —— 用户第二天问「昨天你查的怎么样」而模型一脸茫然。
+      // 两条路径在此合流，`appendDelta` / `commitTurn` 必须位于合流点之后。将它们移入上方分支
+      // （或直接写成 `if (silenced) return`）正好复现 docs/02 §10.1 当初否决的方案：节省的是
+      // 一次 commit，代价是一次无法解释的记忆缺失 —— 用户次日询问查询结果而模型完全没有相关记录。
       this.dependencies.context.appendDelta(turn, {
         id: turn.turnId,
         role: "assistant",
@@ -480,15 +484,15 @@ export class ScheduledJobRunner {
         pruneLevel: 0,
       });
       const committed = await this.dependencies.context.commitTurn(turn);
-      // `turns.finish` **仍记 `committed`**：那一轮确实提交了，静默是投递侧的事。分辨手段在
-      // `scheduled_jobs.last_state` 与 `schedule.silent` 那一行上，不在这里再造一个轮次状态。
+      // `turns.finish` 仍记录 `committed`：该轮确实已提交，静默属于投递侧的行为。区分手段在
+      // `scheduled_jobs.last_state` 与 `schedule.silent` 那一行，不在此处新增一种轮次状态。
       const settled = this.dependencies.turns.finish(turn.turnId, {
         state: "committed",
         commitId: committed.commit.id,
         rebased: committed.rebased,
       });
       await this.dependencies.plugins?.hook("afterCommit", { turn, committed });
-      // `silenced` 进 `turn.end` 的 data：不然一条完整的 trace 里凭空少了 `tg.send`，看的人无从解释。
+      // `silenced` 写入 `turn.end` 的 data：否则完整 trace 中会缺少 `tg.send`，读取者无从解释。
       this.dependencies.log.event({
         level: "info",
         kind: "turn.end",
@@ -518,21 +522,21 @@ export class ScheduledJobRunner {
         durationMs: settled?.durationMs ?? 0,
       });
       this.dependencies.memory.flush(turn.turnId);
-      // `last_error` 在静默这一路上恒为 NULL（markRun 不给 error），这是把「静默」与
-      // 「failed / skipped」分开的第二层手段。`silent_streak` 由 markRun 就地 +1。
+      // `last_error` 在静默路径上恒为 NULL（markRun 不传 error），这是区分静默与
+      // failed / skipped 的第二层手段。`silent_streak` 由 markRun 就地加 1。
       this.dependencies.jobs.markRun(job.id, {
         state: silenced ? "silent" : "committed",
       });
-      // 与 Telegram 轮次共用同一份计数（docs/28 · L-SCH-02）：成功一次归零，跨会话。
-      // **静默照旧算成功**：这一轮跑完了、提交了，只是没什么可说的。
+      // 与 Telegram 轮次共用同一份计数（docs/28 · L-SCH-02）：成功一次即归零，跨会话生效。
+      // 静默同样计为成功：该轮已执行完成并提交，只是没有需要输出的内容。
       this.dependencies.failures?.succeeded();
     } catch (error) {
-      // 超时不是取消（`docs/04 §5.3` 的三档，同 `bot.ts`）。定时任务这条路上尤其明显：**没有人会去
-      // 取消一个自己触发的任务**，记成 cancelled 等于「上游黑着的那几天里，每次触发都安静地算不了数」。
+      // 超时不等于取消（`docs/04 §5.3` 的三档，同 `bot.ts`）。定时任务路径上尤为明显：不会有人去
+      // 取消一个自动触发的任务，记为 cancelled 等于在上游故障期间每次触发都被静默地判为无效。
       const timedOut = turn.abortSignal.reason === "timeout";
       const cancelled = turn.abortSignal.aborted && !timedOut;
-      // 同 `bot.ts` 那条：`abortTurn` 抛出去会让下面的 `turns.finish` 不执行，那行永久卡在
-      // `state='running'`。清理是尽力而为，**记状态不是**。
+      // 同 `bot.ts` 中的处理：`abortTurn` 抛出会使下方的 `turns.finish` 不执行，该行永久停留在
+      // `state='running'`。清理是尽力而为，而状态记录不是。
       try {
         await this.dependencies.context.abortTurn(
           turn,
@@ -602,8 +606,8 @@ export class ScheduledJobRunner {
         rebased: false,
         durationMs: settled?.durationMs ?? 0,
       });
-      // 同 `bot.ts` 的两个出口：取消不算故障，超时算 —— 而「上游变黑洞、每次定时触发都超时」
-      // 正是这条告警最该覆盖的场景，也正是它此前一次都不响的那个（docs/28 · L-SCH-02）。
+      // 与 `bot.ts` 的两个出口一致：取消不计为故障，超时计入 —— 而上游无响应导致每次定时触发都
+      // 超时，正是该告警最应覆盖的场景，也正是它此前从未触发的场景（docs/28 · L-SCH-02）。
       if (!cancelled)
         this.dependencies.failures?.failed(
           timedOut
@@ -620,7 +624,7 @@ export class ScheduledJobRunner {
       this.dependencies.registry.finish(turn.turnId);
       release();
       if (reservation) this.dependencies.quota.release(reservation);
-      // 一次性任务跑完就收摊，成败都不重试：重试一个「提醒我 15:00 开会」在 15:05 才发出去没有意义。
+      // 一次性任务执行完即结束，成功与否都不重试：15:00 的会议提醒在 15:05 才发出已无意义。
       if (job.runAt !== null) {
         this.dependencies.jobs.finish(job.id, "done");
         this.unregister(job.id);
@@ -631,12 +635,12 @@ export class ScheduledJobRunner {
   /**
    * 从保留高位段分配一个 `tg_message_id`。
    *
-   * `append` 是 `INSERT OR IGNORE`：撞号会静静返回既有那一行，于是这一轮的触发消息其实是
-   * 上一次的那条，`claimThroughMessageId` 与 `turns.trigger_message_id` 一起错位。所以
-   * 分配完必须核对返回值，不等就抛 —— 静默走下去比失败难查得多。
+   * `append` 是 `INSERT OR IGNORE`：id 冲突时会静默返回既有行，导致本轮的触发消息实际上是
+   * 上一次的那条，`claimThroughMessageId` 与 `turns.trigger_message_id` 一并错位。因此
+   * 分配后必须核对返回值，不一致即抛出 —— 静默继续执行比直接失败更难排查。
    *
-   * **判 `inserted` 而不是比 `tgMessageId`。** 后者是这条核对此前的写法，而回读那一行是按入参
-   * 的 id 查的 —— 返回值的 `tgMessageId` 恒等于分配值，比较永远为假（docs/28 · L-SCH-03）。
+   * 判定 `inserted` 而非比较 `tgMessageId`。后者是本次核对此前的写法，而回读那一行是按入参的
+   * id 查询的 —— 返回值的 `tgMessageId` 恒等于分配值，比较永远不成立（docs/28 · L-SCH-03）。
    */
   #appendTrigger(job: ScheduledJob): AppendedMessage {
     const scoped = this.dependencies.archive.scope(job.chatId, job.threadId);
@@ -672,9 +676,10 @@ export class ScheduledJobRunner {
   }
 
   /**
-   * 有效角色 = min(用户角色, 会话角色)。两侧一起交回去：告警文案要说清是**哪一侧**命中的
-   * （docs/28 · L-SCH-04），而判据本身仍只有 `resolveEffectiveRole` 一份 —— 在这里把默认值
-   * 那套规则再算一遍就是第二份判据。`chatRole` 是**库里存的**那个，null 表示走了默认。
+   * 有效角色：私聊只看用户角色；群 / 频道任一侧 blocked 即 blocked，否则取两侧较高者再封顶
+   * trusted（docs/05 §2.2）。两侧一并返回：告警文案需说明是哪一侧命中
+   * （docs/28 · L-SCH-04），而判据本身仍只有 `resolveEffectiveRole` 一份 —— 在此重新计算默认值
+   * 规则即构成第二份判据。`chatRole` 是库中存储的值，null 表示使用了默认值。
    */
   #effectiveRole(
     job: ScheduledJob,
@@ -727,7 +732,7 @@ export class ScheduledJobRunner {
     });
   }
 
-  /** 跳过一次触发：任务留着，下次照常。计一次 run 好让 `schedule_list` 能看出它在打空转。 */
+  /** 跳过一次触发：任务保留，下次照常执行。计一次 run，使 `schedule_list` 能看出它在空转。 */
   #skip(
     job: ScheduledJob,
     reason: string,
@@ -758,7 +763,7 @@ export class ScheduledJobRunner {
     });
   }
 
-  /** 上一次触发（或创建）之后是否有一个已经过去的触发点。返回那个时刻，没有则 null。 */
+  /** 上一次触发（或创建）之后是否存在已过去的触发时间点。存在则返回该时刻，否则返回 null。 */
   #missedSince(job: ScheduledJob): Date | null {
     const now = Date.now();
     if (job.runAt !== null)
@@ -775,7 +780,7 @@ export class ScheduledJobRunner {
   }
 }
 
-/** 工具侧与装配侧共用：会话键的算法只有一份。 */
+/** 工具侧与装配侧共用：会话键的计算方式只有一份实现。 */
 export const scheduleContextKey = (
   chatId: string,
   threadId: number | null,

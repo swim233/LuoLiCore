@@ -32,27 +32,41 @@ owner   > trusted > limited > blocked
 ### 2.2 有效角色
 
 ```ts
-effectiveRole = minRole(role(user), role(chat))
+effectiveRole =
+  私聊                       → role(user)
+  群 / 频道，任一侧 blocked   → blocked
+  群 / 频道，其余             → minRole(maxRole(role(user), role(chat)), 'trusted')
 
 role(user): principals['user:<id>'].role ?? cfg.access.defaultUserRole   // 默认 blocked
-role(chat): 
-  - 私聊（chat.type='private'）: 
-      principals['chat:<id>'].role ?? role(user)      // ★ 私聊默认继承用户角色
-  - 群聊/频道:
-      principals['chat:<id>'].role ?? cfg.access.defaultChatRole         // 默认 blocked
+role(chat): principals['chat:<id>'].role ?? cfg.access.defaultChatRole   // 默认 blocked
+            // 私聊不查这一行 —— `kind='chat'` 今后恒为群 / 频道，私聊只占 `user:` 一行
 ```
+
+**群 / 频道那一行的 `role` 是下限，不是上限**（2026-08-30 拍板）。把一个群设成 `trusted` 等于把
+群里**每个已登记成员**抬到 `trusted`；陌生人不受影响 —— `defaultUserRole` 出厂 `blocked`，而
+`blocked` 任一侧一票否决。
 
 结果矩阵：
 
 | role(user) | role(chat) | effective | 典型场景 |
 |---|---|---|---|
-| owner | owner (私聊) | **owner** | 你自己的私聊 → 全功能 |
-| owner | trusted (群) | trusted | 你在受信群里 → 代码走沙箱，防群内注入借权 |
-| owner | limited (群) | limited | 你在只读群里 |
-| trusted | owner | trusted | 受信朋友私聊 |
-| limited | trusted | limited | 普通成员在受信群 |
+| owner | 私聊 | **owner** | 你自己的私聊 → 全功能 |
+| owner | owner 群 | **trusted** | 群内封顶 —— 防群内注入借权 |
+| owner | trusted 群 | trusted | 你在受信群里 → 代码走沙箱 |
+| owner | limited 群 | **trusted** | 取较高者之后再封顶 |
+| trusted | limited 群 | **trusted** | 群角色是下限，不再压低用户 |
+| limited | trusted 群 | **trusted** | 受信群把已登记成员抬到 trusted |
+| limited | limited 群 | limited | 普通成员在只读群 |
 | 任意 | blocked | **blocked** | 群未授权 → 整群静默 |
 | blocked | 任意 | **blocked** | 用户被拉黑 |
+
+两条不变量：
+
+1. **`effectiveRole === 'owner'` ⟹ `isPrivate`。** 群 / 频道里封顶 `trusted`，任何一条群消息都换不到
+   owner 档。**「防群内注入借权」这条理由照旧成立**，只是从此由「封顶 trusted」承担，而不再由旧规则
+   里那次取最小值承担。
+2. **群 / 频道里的有效角色只可能是 `blocked` / `limited` / `trusted`。** 宿主执行、自撰写工具、
+   跨会话检索这些 owner 档的能力在群里一律不可达，与用户自己是谁无关。
 
 ### 2.3 白名单管理
 
@@ -65,6 +79,11 @@ role(chat):
     放行它只会写出一条永远匹配不到任何消息的主体行，而命令还回「已设置」。
     `POST /api/principals/bulk` 用的是同一个 `TG_ID_PATTERN`：这道闸此前只修了 HTTP 那一侧
     （docs/27 · C-05，与 docs/26 同主题）。
+  - **`kind='chat'` 恒为群 / 频道**（§2.2）：`/grant chat <正数 id>` 与 `POST /api/principals/bulk`
+    的 `kind=chat` 正数 id 一律拒收（HTTP 那侧 400）—— 正数 id 是一个用户，写成 `chat:` 行只会
+    躺在表里不参与任何判定。放行一个人只需 `/grant user <id> <role>`，私聊不再需要第二行。
+  - **群 / 频道那行不收 `owner`**（同两条路，HTTP 那侧 400）：群里封顶 `trusted`，写进去零效果，
+    而界面上它看起来是「这个群有 owner 权限」。
   - 引导：首次启动时 `access.bootstrapOwnerId`（env `LUOLI_OWNER_ID`）写入一条 owner 记录；**若未配置则 bot 拒绝启动**（避免出现无主 bot）。
     这条记录**只在不存在时插入**（`PrincipalRepository.ensureOwner`）：显示名与 username 归 Telegram 那边同步，
     每次启动覆盖一遍等于把真名冲成占位符。
@@ -110,7 +129,7 @@ O(文件)（与 `read_file` 同一形状，docs/27 · R-02）。BOM 不吃掉（
 是因为它的返回形状里有 `truncated` + `nextOffset` 两个字段把这件事说出口；这条路的调用方（全量覆盖
 的写端 —— 将来要接上来的外部编码 agent 的 `fs/read_text_file` / `fs/write_text_file` 就是这个形状）
 响应形状里**没有** truncated 的位置，截断了没有任何地方能说出口，而「截断的正文 + 全量覆盖」=
-静静删掉文件的后半部分。`hint` 里交回文件字节数、以及「从第 X 行起这份预算读到第 Y 行就用满了」，
+静静删掉文件的后半部分。`hint` 里交回文件字节数、以及「从第 X 行起，该预算在读到第 Y 行时耗尽」，
 模型据此自己开 `line` + `limit`；分窗读的结果带 `endLine` / `eof`，「这只是一段」是**能**说出口的，
 所以分窗合法而截断不合法。总行数不数 —— 数它要整份扫一遍文件，那正是这条路存在的理由。
 「不交回被截断的正文」这条落在**产生侧**（`readLineWindow` 在 `overflow` 时正文就是空串），不靠调用方
@@ -230,7 +249,7 @@ function resolveJailed(p: string, root: string, base = root): string {
 
 | 工具 | minRole | 说明 |
 |---|---|---|
-| `search_messages` | limited | `{query, from?, after?, before?, kind?, limit?}` — FTS5 检索。`from` 同时认 tg 用户 id 与 `@username`（前导 `@` 会被抹掉）；`after`/`before` 是 ISO 时间，解析不出来交回 `invalid_time_filter` 而不是当没传；`kind` 精确匹配消息类型。四个过滤条件都写成 `@x IS NULL OR …` 的常量 SQL 而不是按传了哪几个拼串：语句文本固定才吃得到预编译缓存，而「没传的参数不出现在 SQL 里」还得在绑定侧同步剔掉，漏一处就是一个运行时的 `missing named parameter`。**强制**限定当前 context key 的 chat。`query` 由模型写，绝不能原样进 `MATCH`：FTS5 的 `\|` `"` `*` `:` `-` `^` `()` 和 AND/OR/NOT/NEAR 都是语法，模型写一句 `名字\|我是\|叫\|谁` 就把整次调用打成 `fts5: syntax error`，它只能瞎改参数重试。`archiveQuery()` 先切词：有 ≥3 字的词就逐个加引号 OR 起来走 FTS（trigram 匹配不了更短的词），一个都没有（中文两字词几乎全在这一档）就退回 LIKE，且用最长的那个词而不是原串 —— 原串里还带着运算符，`LIKE '%名字\|我是%'` 永远匹配不到东西。**没参与检索的词必须回报**：`archiveQuery()` 把它们放在 `dropped` 里，本工具转成结果里的 `note`（「以下词短于 3 个字…单独查一次」）。丢弃是正确降级（trigram 匹配不了 <3 码点），沉默不是 —— `search_messages("名字 李小明")` 只按 `李小明` 查过，而模型据此判定「没有这回事」（[28 · L-DB-01](./reviews/28-round10-live-system-test.md)） |
+| `search_messages` | limited | `{query, from?, after?, before?, kind?, limit?}` — FTS5 检索。`from` 同时认 tg 用户 id 与 `@username`（前导 `@` 会被抹掉）；`after`/`before` 是 ISO 时间，解析不出来交回 `invalid_time_filter` 而不是当没传；`kind` 精确匹配消息类型。四个过滤条件都写成 `@x IS NULL OR …` 的常量 SQL 而不是按传了哪几个拼串：语句文本固定才吃得到预编译缓存，而「没传的参数不出现在 SQL 里」还得在绑定侧同步剔掉，漏一处就是一个运行时的 `missing named parameter`。**强制**限定当前 context key 的 chat。`query` 由模型写，绝不能原样进 `MATCH`：FTS5 的 `\|` `"` `*` `:` `-` `^` `()` 和 AND/OR/NOT/NEAR 都是语法，模型写一句 `名字\|我是\|叫\|谁` 就把整次调用打成 `fts5: syntax error`，它只能瞎改参数重试。`archiveQuery()` 先切词：有 ≥3 字的词就逐个加引号 OR 起来走 FTS（trigram 匹配不了更短的词），一个都没有（中文两字词几乎全在这一档）就退回 LIKE，且用最长的那个词而不是原串 —— 原串里还带着运算符，`LIKE '%名字\|我是%'` 永远匹配不到东西。**没参与检索的词必须回报**：`archiveQuery()` 把它们放在 `dropped` 里，本工具转成结果里的 `note`（「以下词短于 3 个字…重新检索一次」）。丢弃是正确降级（trigram 匹配不了 <3 码点），沉默不是 —— `search_messages("名字 李小明")` 只按 `李小明` 查过，而模型据此判定「没有这回事」（[28 · L-DB-01](./reviews/28-round10-live-system-test.md)） |
 | `read_messages` | limited | 「按顺序读取聊天记录」：`{anchor?, direction?, limit?}`。`anchor` 可为 message id（`12841` 或 `#12841`）或 ISO 时间；`direction: 'before'\|'after'\|'around'`（默认 `before`，`around` 两侧各一半）；不给 `anchor` 就是最近若干条；默认 limit 50、上限 200。**一律按 id 升序交回** —— `recent()` 那种「最新在最前」会让 `direction:'after'` 读出来的一段反着念。数字串一律按 id 认而不是当日期：模型十有八九把 `#12841` 里的数字当字符串递过来，而 `Date.parse('12841')` 在某些运行时会解析成一个年份，于是它读到一段完全不相干的记录还以为那就是自己要的位置。解析不出来交回 `invalid_anchor`，**不悄悄退回「最近 N 条」** |
 | `get_message` | limited | `{messageId}` — 单条详情（含附件元数据、回复链） |
 | `admin_search_messages` | **owner** | 跨全部 chat 检索；返回结果附 `chat_id`。**不给** `search_messages` 那组过滤参数：`adminSearchAll` 不认它们，而收下一个参数再默默忽略比没有这个参数更糟 —— 模型会以为自己已经按人过滤过了（「摘除比伪造安全」，[16 §5](./reviews/16-remediation-plan.md)） |
@@ -299,7 +318,7 @@ bash: tool({
   子进程当场被 SIGKILL**，多出来的字节连读都不读。没有这一道就等于没有上界 —— 一条
   `yes` / verbose 构建能一直吐到进程吃满内存。
 - 被这一道杀掉的调用，结果里带 `truncated: true` 与一条 `hint`（「输出已截断且进程已被终止，
-  把输出收窄再来，别原样重试」）。`ok` **只看退出码**：被 SIGKILL 的进程退出码不是 0，所以
+  请收窄输出后重新执行，不要原样重试」）。`ok` **只看退出码**：被 SIGKILL 的进程退出码不是 0，所以
   照常记失败；而「子进程已自己退出 0、最后一批输出在 `close` 之前才 flush 完」的竞态里 kill 打空，
   那一次仍记 `ok: true` —— 不能因为截断把一次成功调用改判成失败（docs/28 · L-TOOL-01）。
 - 结果里的 `killed` 对「输出超限 / 超时 / 被取消」三种原因**不可分**：三条路走的是同一个 `kill()`。
@@ -467,7 +486,7 @@ profile 说了算（那里面可能写着别的值），而运维在界面上往
 唯一会撞上界的是嵌着 jail 构造失败 `error.message` 的那条，那是不可控长度的）、**最多 4 条**
 （`#surface` 能产出的 note 总数；不写「今天最多同时出现两条」那个算出来的数字，加一条 note 就悄悄
 失效）。字段位置**排在 `output` / `stderr` 之前** —— 结果的字段顺序有意义，万一还是被截了，
-被 `elideMiddleBytes` 吃掉的绝不该是「它执行不了」这句话。
+被 `elideMiddleBytes` 吃掉的绝不该是「该工具无法执行」这句话。
 
 **`bash` 在默认 `tools` 里，而让它真能跑命令要两个条件 —— 出厂默认两个都满足。**
 
@@ -708,7 +727,7 @@ agent 写的 JSON，一个我们不认识的 kind 更可能是新增的危险动
 | `html` | `text/html` / `application/xhtml+xml`，或无类型头而正文开头像 HTML | 抽取后的正文 + `title` + `extracted:'text'` |
 | `text` | `text/*`、`application/json`、`+json` / `+xml` 后缀族、js/xml/ndjson | 正文原样 |
 | `image` | `image/*` | 归一化后放进上下文（见下）；没有能看图的模型时只报 `mediaType` 与 `bytes` |
-| `binary` | 其余有类型头的，或无类型头而字节里有 NUL / 大量非法 UTF-8 | 只报 `mediaType` 与 `bytes`，**不带正文**，并写明「不要猜它的内容」 |
+| `binary` | 其余有类型头的，或无类型头而字节里有 NUL / 大量非法 UTF-8 | 只报 `mediaType` 与 `bytes`，**不带正文**，并写明「不要推测其内容」 |
 
 `content-type` 撒谎的站点最坏也只降到 `text` 档（正文原样交出去，仍可读），不会变成乱码。
 
@@ -753,7 +772,7 @@ data, mimeType}]}` 被换成 `media` + 一句文本标记。不做这一步的�
 | `send_message` | limited | 主动追发一条消息（用于分段长回复、发中间产物）；超长按 `output.maxMessageChars` 切分 |
 | `send_file` | trusted | 把 workspace 内文件作为文档发出；路径走 jail；大小 ≤ `tools.tg.maxFileSendMb`（默认 50MB） |
 | `send_photo` | limited | 同上，图片 |
-| `react` | limited | 给消息加 emoji reaction；**不传 `messageId` 就点触发本轮的那条**（上下文里没有 message id，必填等于每次都要先跑一趟 `read_messages`） |
+| `react` | limited | 为消息添加 emoji reaction；**不传 `messageId` 就点触发本轮的那条**（上下文里没有 message id，必填等于每次都要先跑一趟 `read_messages`） |
 | `pin_message` | trusted | 置顶（需 bot 有权限）；`messageId` 同样可省 |
 
 - **三个发送类工具共用一份每轮预算** `tools.tg.maxExtraMessagesPerTurn`（默认 3）。按**调用次数**扣、
@@ -776,7 +795,7 @@ data, mimeType}]}` 被换成 `media` + 一句文本标记。不做这一步的�
 
 | 工具 | minRole | 说明 |
 |---|---|---|
-| `schedule_create` | trusted | 排一个定时任务。`cron`（五段式，周期）与 `at`（本地时间，一次性）二者给一个；`mode='agent'` 到点起一轮完整对话执行 `text`，`mode='notify'` 到点原样发出 `text`（不调模型）；`silent` 开这条任务的静默权（见下） |
+| `schedule_create` | trusted | 创建一个定时任务。`cron`（五段式，周期）与 `at`（本地时间，一次性）二者取其一；`mode='agent'` 到点起一轮完整对话执行 `text`，`mode='notify'` 到点原样发出 `text`（不调模型）；`silent` 开这条任务的静默权（见下） |
 | `schedule_update` | trusted | 改本会话里一个**活跃**任务：`name` 定位，`newName` / `text` / `cron` / `at` / `silent` 各自可选，给几改几。**改不了 `mode`**（见下） |
 | `schedule_list` | trusted | 列出**本会话**的任务：活跃的在前，带 `nextRun` 与上一次的结果 |
 | `schedule_cancel` | trusted | 按名字取消本会话的一个活跃任务 |
@@ -1190,7 +1209,7 @@ fail-closed，但那是巧合不是设计（docs/20 · W-TOOL-01）。
 
 **读 `minRole` / `approval` 一律走 `ToolRegistry.effectivePolicy()`，直接读 `tool.policy` 就是绕过覆盖层。**
 这两个字段各有两处消费点（目录过滤 `active()` 与准入复查 `admit()`/`execute()`；审批基准与
-`approvalFor` 抬档），漏掉任何一处的表现都一样：界面上关严了，运行时没有。另两项不经
+`approvalFor` 提档），漏掉任何一处的表现都一样：界面上关严了，运行时没有。另两项不经
 `effectiveToolPolicy`，各自落在自己的消费点上 —— `enabled` 是 `disabledByOperator()`（目录过滤 +
 `execute()` 二次硬拦截回 `tool_disabled_by_operator`，见上一段），`timeoutMs` 落在 §8.1 那道单次调用
 超时上。**覆盖只有全局一层，不进 `perChat` 覆盖白名单**（[11 §2.1](./11-config-reference.md)）：进了
@@ -1198,12 +1217,12 @@ fail-closed，但那是巧合不是设计（docs/20 · W-TOOL-01）。
 
 三条性质，改工具权限相关的代码之前逐条对：
 
-- **覆盖绕不过 `available()`。** 它只动「角色闸」与「审批闸」两道。`spawn_harness` / `spawn_acp` 的
+- **覆盖不绕过 `available()`。** 它仅作用于「角色判定」与「审批判定」两处。`spawn_harness` / `spawn_acp` 的
   owner + 仅私聊、自定义工具那道「不得低于 `bash`」的地板、容器族的 owner 地板、`stay_silent` 与
   `search_tools` 的轮次形态判据都写在 `available()` 里（脚注 ‡ § ¶ ‖ ※ ◇ ◆），把 `minRole` 覆盖成
-  `limited` 一个都开不出来。反过来说，一道该守住的闸只要写在注册的 `minRole` 上，一次覆盖就能放开它。
-- **`approvalFor` 抬档只升不降。** 覆盖设的是**基准档**，`ToolRegistry` 取基准与 `approvalFor` 两者中
-  最严的一档：把 `memory_write` 这类工具的基准改成 `never`，它靠 `approvalFor` 把自己抬进审批的那些
+  `limited` 一个都开不出来。反过来说，该守住的边界只要写在注册的 `minRole` 上，一次覆盖就能放开它。
+- **`approvalFor` 只提档、不降档。** 覆盖设定的是**基准档位**，`ToolRegistry` 取基准与 `approvalFor` 两者中
+  最严的一档：把 `memory_write` 这类工具的基准改为 `never`，它靠 `approvalFor` 提档进审批的那些
   输入照旧要审批。方向是刻意的 —— 运维可以替一个不审批的工具收紧，不能替一个工具把它自己认定的
   高危输入放过去。
 - **`timeoutMs: null` 的工具不吃超时覆盖。** `bash` / `python` / `spawn_agent` / `spawn_harness` /
@@ -1433,7 +1452,8 @@ bridge 实测能直达公网与宿主 `172.17.0.1`（[reviews/28](./reviews/28-r
   │     │
   │     ├─ role=owner ∧ approval.skipForOwner     → 直接执行（记日志 auto_approved）
   │     └─ 其它情况 → 写 approvals(state=pending) + 广播 approval.pending
-  │                 + 给发起人发回执（正文 + inline keyboard〔批准〕〔拒绝〕）
+  │                 + 往 owner 私聊发审批消息（正文 + inline keyboard〔批准〕〔拒绝〕）
+  │                 + 往发起人会话发一条报信（不含倒计时、不含状态、不挂按钮）
   │           ├─ WebUI owner 批准/拒绝  → 落 approved/denied，decision_channel='webui'
   │           ├─ Telegram owner 点按钮  → 落 approved/denied，decision_channel='telegram'
   │           ├─ ttlMs 到期            → 不执行，落 state=expired
@@ -1446,37 +1466,39 @@ bridge 实测能直达公网与宿主 `172.17.0.1`（[reviews/28](./reviews/28-r
 `approval.rememberWithinTurn` 只在同一 turn、同一工具与同一输入上复用裁决。
 
 **两条裁决通道：WebUI 与 Telegram。** WebUI 的任务与审批页通过 SSE 收到 `approval.pending`，
-owner 调 `POST /api/approvals/:id/decide`；Telegram 侧发起人回执本身就带 inline keyboard，owner
-点〔批准〕/〔拒绝〕走 `callback_query` 那条路，落库时 `decision_channel='telegram'`。两条通道
-写的是**同一行**，`decide` 的 `UPDATE … WHERE state='pending' AND expires_at>?` 就是它们之间的
-原子抢夺点 —— 先到的那一次改到行，后到的那一次改不到，等待者只被唤醒一次。
+owner 调 `POST /api/approvals/:id/decide`；Telegram 侧的完整审批消息**发到 owner 私聊**
+（`access.bootstrapOwnerId`），owner 点〔批准〕/〔拒绝〕走 `callback_query` 那条路，落库时
+`decision_channel='telegram'`。两条通道写的是**同一行**，`decide` 的
+`UPDATE … WHERE state='pending' AND expires_at>?` 就是它们之间的原子抢夺点 —— 先到的那一次
+改到行，后到的那一次改不到，等待者只被唤醒一次。
 两条通道的裁决权都只给 owner（`approval.allowInitiator` 已从 schema **永久摘除** ——
 [14 §2](./14-open-questions.md) A26 / Q7 定了不做 WebUI 多用户，裁决权没有能下放到发起人的落点）。
 Telegram 侧判的是**有效角色** `resolveEffectiveRole`，不是裸的用户角色。
 
-> ⚠ **这条判据把 Telegram 通道限死在「会话本身也是 owner 档」的地方。** 有效角色是
-> `min(用户角色, 会话角色)`（[§2.2](#22-有效角色) 那张表），所以在一个 `trusted` 群里连 owner
-> 本人都是 `trusted` —— `decidableBy:'owner'` 在那儿**无人可满足**。而审批基本只在群里发生
-> （`skipForOwner` 默认真，owner 自己的私聊会直接放行），**所以按钮的实际适用面是 owner 的私聊
-> 与 owner 档的群**，别处仍然只能去 WebUI 裁决。
+> **投递目标与来源会话是两件事（2026-08-30 拍板，取代 2026-08-21 那次「不做」）。** 群 / 频道里
+> 有效角色封顶 `trusted`（[§2.2](#22-有效角色) 不变量 1），`decidableBy:'owner'` 在群里**无人可满足**；
+> 而审批基本只在群里发生（`skipForOwner` 默认真，owner 自己的私聊会直接放行）。这不是可以靠
+> 放宽角色判据糊过去的 —— 那一档正是「防群内注入借权」（§2.2）。**换的是投递目标，不是角色判据**：
 >
-> 这不是可以靠放宽角色判据糊过去的：那一档正是「防群内注入借权」（§2.2）。可用性判据因此
-> **按会话**问（`PendingPrompts.available(chatId)`），点不动的会话不算一条通道 —— 不问的话就会
-> 挂上一条 pending 行、贴一排点不动的按钮、再干等满 `ttlMs`。owner 本人在那种会话里点到按钮时
-> 收到的也不是「只有 owner 能裁决」那句谎，而是「你在这个会话里的权限是 `<角色>`，去 WebUI 裁决」。
+> - **owner 私聊收完整审批消息**：工具名、风险、**来源会话**、**发起人**、**入参摘要**、时限，
+>   底下挂〔批准〕〔拒绝〕。owner 私聊里 `effectiveRole === 'owner'` 恒成立，所以按钮在**任何来源**
+>   的审批上都点得动。收场回执（撤键盘 + 换正文，见下）也落在这里。
+> - **发起人会话只留一条报信**：说明这次调用已提交 owner 审批。**不含倒计时、不含状态** ——
+>   因此它不需要收场编辑，也不会在超时之后变成一句谎话。这与「回执正文换成结局」是同一个目标
+>   （[21 §12](./21-webui-coverage-gaps.md)「界面在说谎」那一类）的两种做法：这一条从「事后改正文」
+>   换成「一开始就不说会过期的话」。
+> - **owner 私聊不可达时不往群里贴点不动的按钮。** owner 从没跟 bot 说过话、把 bot 拉黑、或
+>   `bootstrapOwnerId` 指着一个到不了的会话时 Bot API 回 403（`AlertDispatcher` 有同一个已知缺口）：
+>   发起人会话照发那条报信，Telegram 这条通道算不可用；WebUI 那条也没有时**当场拒**，走下面那条
+>   「两条通道都没有时不等」。这条原则本身不变 —— 挂一排点不动的按钮比没有按钮更坏。
 >
-> **另一条路已经拍板否掉了（2026-08-21）：不做「裁决提示发 owner 私聊 + 发起人会话只留报信回执」。**
-> 那样按钮在任何来源的审批上都点得动，代价是每条审批**两条消息**、以及 owner 从没跟 bot 说过话时的
-> 403（`AlertDispatcher` 有同一个已知缺口）。否掉的实质理由是**这个缺口挡不住任何已规划的功能**：
-> `HarnessAgent` / ACP 那条路本身就是 **owner + 仅私聊**（[14 §2](./14-open-questions.md) Q8-a、
-> D23），所以它的逐条 permission（§3.5.3，机制已接、默认档不用它）恰好落在按钮能用的那个格子里；而群里的审批本来就有 WebUI
-> 那条通道，且群成员看得见的回执已经说清了「去 WebUI 的审批页」。
-> **所以「按钮只在 owner 私聊与 owner 档群里出现」是记录在案的边界，不是待办。** 哪天真要覆盖任意
-> 来源，代价就是上面那两条，别当成一次纯增量。
+> 代价是每条审批**两条消息**、以及那个 403，这是拍板时认下的账。`approvals` 因此多一列
+> **`tg_chat_id`**：回执所在的会话（owner 私聊）与 `approvals.chat_id`（发起人所在会话）**不是同一个**，
+> 收场编辑与启动时那趟 `staleKeyboards()` 都要按它去找那条消息。
 
 **两条通道都没有时当场拒绝，不等。** `request()` 的判据是「WebUI 没有 SSE 裁决通道
-（`EventBus.channelCount === 0`）**且** Telegram 侧的提示通道对**这个会话**不可用
-（`PendingPrompts.available(chatId)` 为假：bot 没起来，或那个会话里没人满足得了 `decidableBy`）」。
+（`EventBus.channelCount === 0`）**且** Telegram 侧的提示通道不可用
+（`PendingPrompts.available(ownerChatId)` 为假：bot 没起来，或 owner 私聊送不到）」。
 两者皆无就直接返回 `{approved:false, hint:'…当前没有可用的审批通道…'}`
 并记一条 `approval.unavailable`，**不插 pending 行、不 await**。否则这一轮会白占 `concurrency` 槽、
 配额预留和 `turnTimeoutMs` 预算干等满 `ttlMs`（默认 180 秒），而 Telegram 侧一个字都没有 ——
@@ -1484,13 +1506,13 @@ Telegram 侧判的是**有效角色** `resolveEffectiveRole`，不是裸的用�
 WebUI 那一半的判据必须是「裁决通道」而不是「订阅者」：进程自己的 `config.changed` 订阅者常驻，
 拿 `subscriberCount` 判断会让这段永远走不到（[22](./reviews/22-review-round6.md) · `D-APPR-01`、
 [24](./reviews/24-review-round6-verification.md) · `R-APPR-01`）。Telegram 那一半的判据是
-「**bot 起来了，且这个会话里点得动**」而不是「有人正在看」—— 后者根本测不出来，而 owner 的手机推送
-不需要他此刻盯着屏幕；「点得动」那一问的理由见上面那个警示块。
+「**bot 起来了，且 owner 私聊送得到**」而不是「有人正在看」—— 后者根本测不出来，而 owner 的手机推送
+不需要他此刻盯着屏幕；投递目标为什么是 owner 私聊而不是发起人会话，见上面那个说明块。
 **只漏掉 Telegram 这一半，新通道在没人开浏览器的部署里就永远走不到**：那种部署恰好是它唯一有用的场景。
 
-**这道闸判的是「放行那一刻」，投递那一下才死的要再判一次。** 闸放行之后回执才发，而
-`sendMessage` 可能被 Telegram 拒收（bot 被拉黑、群里没有发言权、429 耗尽）—— 那一刻屏幕上一个字
-都没有，如果 WebUI 也没有 SSE 通道，这次审批就没有任何人能裁决它，却照旧挂满 `ttlMs`。
+**这道闸判的是「放行那一刻」，投递那一下才死的要再判一次。** 闸放行之后那条**发往 owner 私聊**的
+审批消息才发，而 `sendMessage` 可能被 Telegram 拒收（owner 把 bot 拉黑、403、429 耗尽）—— 那一刻
+没有任何人拿得到按钮，如果 WebUI 也没有 SSE 通道，这次审批就没有任何人能裁决它，却照旧挂满 `ttlMs`。
 **那正是 [20](./reviews/20-review-round5.md) §0.0 裁决要消灭的形态换了个来路**，所以它走同一条口径：
 `ApprovalReceipt.delivered === false` 且 `channelCount === 0` 时当场落定并交回同一句
 「当前没有可用的审批通道」（`DatabaseApprovalBroker.#receiptUndeliverable`）。两边都要看 ——
@@ -1499,21 +1521,24 @@ WebUI 还挂着 SSE 时投递失败只是锦上添花那一半没了，审批照
 system` 在这张表里已经是「轮次被取消」的意思，而 `state` 的取值受 CHECK 约束
 （`pending|approved|denied|expired`），说得清「窗口结束、没人裁决」的只有 `expired`；真正说清缘由
 的是那条 `approval.unavailable` warn（`data.reason='receipt_undeliverable'` 分开两条来路）。
-**发起人回执**（第七轮补上）：挂起 pending 行之后，立刻往**发起人所在的会话**发一句
-「`<工具>` 是<风险>操作，要 owner 批准。就在下面点，或去 WebUI 的审批页。N 秒内没人处理就会自动拒绝」，
-底下挂两个按钮。此前有通道时这一轮会静静挂满 `ttlMs`（默认 180 秒），Telegram 那边一个字都没有
-—— 用户看到的是 bot 收了消息然后沉默三分钟（[22](./reviews/22-review-round6.md) · `D-APPR-01`）。
+**两条消息，各说各的一半**（第七轮补上发起人这一半，2026-08-30 把按钮那一半挪走）：挂起 pending
+行之后，往 owner 私聊发那条带按钮的完整审批消息（工具名、风险、来源会话、发起人、入参摘要、
+时限），同时往**发起人所在的会话**发一条报信 —— 说明这次调用已提交 owner 审批、可去 WebUI 审批页
+查看，**不写倒计时也不写状态**，不挂按钮。此前没有发起人那一半时，有通道的那一轮会静静挂满
+`ttlMs`（默认 180 秒），Telegram 那边一个字都没有 —— 用户看到的是 bot 收了消息然后沉默三分钟
+（[22](./reviews/22-review-round6.md) · `D-APPR-01`）。
 
-**收场之后回执正文换成结局**（`AC-APV-004`）：撤键盘的同一次 `editMessageText` 里把「N 秒内没人
-处理就会自动拒绝」换成实际发生的事。五种收场读起来各不相同 —— 「owner 在 Telegram 点的」
-「owner 在 WebUI 的审批页裁的」「窗口到点没人裁决」「这一轮被取消了」「赶上进程重启、已作废」
+**收场之后 owner 私聊那条回执正文换成结局**（`AC-APV-004`）：撤键盘的同一次 `editMessageText` 里把
+时限那句换成实际发生的事。五种收场读起来各不相同 —— 「owner 在 Telegram 裁决」
+「owner 在 WebUI 审批页裁决」「审批窗口已超时、无人裁决」「本轮被取消」「进程重启后已作废」
 （最后一种是启动扫描那一趟写的）。文案说的是 `decision_channel` 而**不是** `decided_by`：后者在
-Telegram 那条路上是 `user:<tgId>`，一串数字对群里其他人什么都不是，还顺手把 owner 的 Telegram id
+Telegram 那条路上是 `user:<tgId>`，一串数字什么都不是，还顺手把 owner 的 Telegram id
 抖了出去；而裁决权只给 owner，「谁」本来就是常量。细节见 [§6.1](#61-阻塞式人机通道pendingprompts)。
+**发起人会话那条报信不参与收场**：它一开始就没说会过期的话，没有可以变成谎话的字。
 
-三条约束：**先落库再通知**（通知失败也不会留下一个没人知道的等待）；**回执失败不影响审批本身**
+三条约束：**先落库再通知**（通知失败也不会留下一个没人知道的等待）；**投递失败不影响审批本身**
 （Telegram 拒发不该把一次高危调用从「等人批」变成「整轮失败」，改正文那一次编辑同样适用这条 ——
-失败一律吞掉记 debug）；**没有裁决通道时不发回执**（那一条本来就当场拒绝，再发一句「等 owner 批」
+失败一律吞掉记 debug）；**没有裁决通道时两条消息都不发**（那一条本来就当场拒绝，再发一句「等 owner 批」
 是骗人）。
 
 风险规则（`approval.rules`，正则匹配后触发审批，可在 WebUI 编辑）：
@@ -1553,7 +1578,7 @@ approval:
       risk: medium
 ```
 
-- 审批消息展示：工具名、`description` 字段、**完整输入的代码块**（超 1000 字截断 + 「在 WebUI 查看全文」链接）、发起人、会话、风险等级、剩余时限。
+- 审批消息（发往 owner 私聊）展示：工具名、`description` 字段、**完整输入的代码块**（超 1000 字截断 + 「在 WebUI 查看全文」链接）、发起人、**来源会话**、风险等级、剩余时限。
 - 同一 turn 内相同工具+相同输入的重复请求：命中 `approval.rememberWithinTurn`（默认 `true`）则复用上一次决定。
 - 所有决定落 `approvals` 表 + 日志（`kind='approval.decided'`）。
 
@@ -1582,11 +1607,12 @@ approval:
   这是一处**进程内状态**（`docs/01 §3.1`）：真跑多实例时，落在没有这个等待者的实例上的点击会回
   `unknown`。那是 fail-safe 的一侧（伪造不出一次批准，库里那一行照旧等自己的 TTL），但话说错了
   —— 要横向扩展得先把这条通道搬到库上，或者按 chat 路由。
-- **点击要绑会话**：`resolve()` 要求 `actor.chatId` 等于提示所在的会话，对不上按「查不到」处理。
-  按钮就在那条消息上，正常点击不可能来自别处；而传进来的 `role` 是**按 callback 所在的会话**算出的
-  有效角色 —— 不绑会话的话，一个人在自己是 owner 的那个群里对着另一个会话的 `promptId` 发一次
-  callback（非官方客户端能构造任意 `callback_data`）就能替那个会话裁决。ULID 猜不出来只让它不实用，
-  不让它不成立。
+- **点击要绑会话**：`resolve()` 要求 `actor.chatId` 等于提示所在的会话（审批那条路上就是 owner 私聊，
+  `approvals.tg_chat_id`），对不上按「查不到」处理。按钮就在那条消息上，正常点击不可能来自别处；
+  而传进来的 `role` 是**按 callback 所在的会话**算出的有效角色 —— 不绑会话的话，一个人对着另一个
+  会话的 `promptId` 发一次 callback（非官方客户端能构造任意 `callback_data`）就能替那个会话裁决。
+  ULID 猜不出来只让它不实用，不让它不成立。角色那道闸照旧独立判：越权点击回 `forbidden` +
+  `show_alert`，且**不消耗**这条提示。
 - **先 `answerCallbackQuery` 再** fire-and-forget 编辑键盘（那个顺序在 `bot.ts` 的 `a:` 分支里，
   不在 `resolve()` 里）：超约 15 秒不答，客户端上就是一个转不停的圈。撤键盘的 400（消息被用户删了、
   或同一条键盘被撤第二次）一律吞掉记 debug。**只有「查不到 promptId」那一支该由调用方顺手撤键盘**
@@ -1595,7 +1621,7 @@ approval:
 - **裁决落定 / 过期时撤键盘并把正文换成结局，而且是同一次 `editMessageText`**
   （省略 `reply_markup` 就等于把键盘撤掉）。分成「撤键盘 + 改正文」两次要在 `perChatPerMinute`
   那 20 个槽位里排两回队，而它们说的是同一件事。**为什么必须改正文**：只撤按钮的话那条消息停在
-  「N 秒内没人处理就会自动拒绝」上，而那句话此刻已经不成立 —— [21 §12](./21-webui-coverage-gaps.md)
+  「N 秒内未处理将自动拒绝」上，而那句话此刻已经不成立 —— [21 §12](./21-webui-coverage-gaps.md)
   「界面在说谎」专门清过这一类，[13](./13-acceptance-criteria.md) 的 `AC-APV-004` 要的也是这个。
   文案由发起方给（审批是 `approvalSettledText()`，`packages/telegram/src/prompts.ts`），注册表只负责
   发出去 —— 结局是发起方的语义，注册表连「批准」和「拒绝」的区别都不该懂。
@@ -1606,7 +1632,8 @@ approval:
   一条没有按钮。正文硬截断到 700 字符，`parse_mode` 不传 —— 任何 `*` `_` `[` 都会让 MarkdownV2
   400，而 `sendWithFallback` 的降级会把消息重发一遍、键盘状态就乱了。
 - **启动时收拾残留回执**：`approvals` 里 `tg_message_id IS NOT NULL` 的行逐条收尾（撤键盘 + 换正文，
-  同上那一次编辑），然后把这一列清空（`DatabaseApprovalBroker.staleKeyboards()`，排在
+  同上那一次编辑；消息在 `tg_chat_id` 那个会话里，**不是** `chat_id`），然后把这两列一起清空
+  （`DatabaseApprovalBroker.staleKeyboards()`，排在
   `poller.start()` **之前** —— 拉到的第一条 update 就可能往那一列写一行，而这趟扫描认不出
   「这一行是刚写的」）。这是那一列存在的意义 —— 它是「屏幕上还有一排点不动的按钮」的待办队列，
   不是历史记录：**裁决落定时也要清掉**（键盘那时已经撤了），不清的话一个长跑进程攒下的每一条审批

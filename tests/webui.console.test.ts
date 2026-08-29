@@ -75,29 +75,34 @@ describe('console endpoints', () => {
   });
 
   /**
-   * 一个私聊占两行，而角色列此前各显示各的：只把 `chat:X` 改成 trusted、`user:X` 还停在
-   * limited 时，界面写着 trusted 而模型每一轮都说 limited，两边都没错（docs/21 · G-UI-03）。
-   * 判据只有服务端这一份，所以断言落在 `GET /api/principals` 的字段上。
+   * 守两件事（docs/05 §2.2）。其一：`GET /api/principals` 不再合成 `effectiveRole` —— 私聊只占
+   * `user:X` 一行，那一行的角色就是有效角色；群那行是下限而非有效角色，成员各不相同，编一个
+   * 确定值出来比不给更坏。其二：写入端拒收两类在全库零效果的 chat 主体（正数 id = 私聊、
+   * chat 行的 owner 档），否则界面能改出一个改了不生效的角色。
+   * 迁移 0015 负责清掉旧库里的私聊 `chat:` 行，读端不做过滤 —— 这里就用一行残留断言这一点。
    */
-  it('reports the effective role of a private pair, not just each row on its own', async () => {
+  it('主体表原样返回，不再合成有效角色；chat 主体拒收正数 id 与 owner', async () => {
     const { app, db, principals, headers } = harness('principals-effective');
     principals.upsertSeen({ id: 'user:7', kind: 'user', tgId: '7', role: 'limited', displayName: '某人', username: null, chatType: null });
+    // 旧库残留的私聊 chat 行：API 照旧原样返回它，只是不再据此算什么。
     principals.upsertSeen({ id: 'chat:7', kind: 'chat', tgId: '7', role: 'trusted', displayName: '某人', username: null, chatType: 'private' });
-    // 群那行的角色是上限而不是有效角色 —— 成员各不相同，编一个确定值出来比不给更坏。
     principals.upsertSeen({ id: 'chat:-100', kind: 'chat', tgId: '-100', role: 'trusted', displayName: '某群', username: null, chatType: 'supergroup' });
-    // 只见过一边（还没私聊过的群友）也配不上对。
-    principals.upsertSeen({ id: 'user:9', kind: 'user', tgId: '9', role: 'trusted', displayName: '群友', username: null, chatType: null });
-    const rows = await body<Array<{ id: string; role: string; effectiveRole: string | null }>>(await app.request('/api/principals', { headers }));
+    const rows = await body<Array<{ id: string; role: string; effectiveRole?: unknown }>>(await app.request('/api/principals', { headers }));
     const byId = new Map(rows.map((row) => [row.id, row]));
-    // 配得上对的两行报同一个 min()，而且都不等于 chat 那行自己的 role —— 界面靠这个差出红字。
-    expect(byId.get('user:7')).toMatchObject({ role: 'limited', effectiveRole: 'limited' });
-    expect(byId.get('chat:7')).toMatchObject({ role: 'trusted', effectiveRole: 'limited' });
-    expect(byId.get('chat:-100')).toMatchObject({ role: 'trusted', effectiveRole: null });
-    expect(byId.get('user:9')).toMatchObject({ role: 'trusted', effectiveRole: null });
-    // 补上另一半之后不一致消失：这正是那次事故的修法。
-    principals.setRole('user:7', 'trusted', 'test');
-    const fixed = new Map((await body<Array<{ id: string; effectiveRole: string | null }>>(await app.request('/api/principals', { headers }))).map((row) => [row.id, row.effectiveRole]));
-    expect([fixed.get('user:7'), fixed.get('chat:7')]).toEqual(['trusted', 'trusted']);
+    expect(byId.get('user:7')).toMatchObject({ role: 'limited' });
+    expect(byId.get('chat:7')).toMatchObject({ role: 'trusted' });
+    expect(byId.get('chat:-100')).toMatchObject({ role: 'trusted' });
+    for (const row of rows) expect(row).not.toHaveProperty('effectiveRole');
+    // 群里的有效角色封顶 trusted，chat 行的 owner 在全库零效果。
+    expect((await app.request('/api/principals/chat:-100', { method: 'PATCH', headers, body: JSON.stringify({ role: 'owner' }) })).status).toBe(400);
+    expect((await app.request('/api/principals/roles', { method: 'POST', headers, body: JSON.stringify({ ids: ['chat:-100'], role: 'owner' }) })).status).toBe(400);
+    // 正数 id 是私聊，不占 chat 行 —— 建出来只是一行永远不参与判定的死数据。
+    expect((await app.request('/api/principals/bulk', { method: 'POST', headers, body: JSON.stringify({ kind: 'chat', ids: ['7'], role: 'trusted' }) })).status).toBe(400);
+    expect((await app.request('/api/principals/chat:7', { method: 'PATCH', headers, body: JSON.stringify({ role: 'trusted' }) })).status).toBe(400);
+    // user 主体的 owner 与群主体的 trusted 照旧放行。
+    expect((await app.request('/api/principals/user:7', { method: 'PATCH', headers, body: JSON.stringify({ role: 'owner' }) })).status).toBe(200);
+    expect((await app.request('/api/principals/bulk', { method: 'POST', headers, body: JSON.stringify({ kind: 'chat', ids: ['-1001'], role: 'trusted' }) })).status).toBe(200);
+    expect(principals.roleOf('user', '7')).toBe('owner');
     closeDatabase(db);
   });
 

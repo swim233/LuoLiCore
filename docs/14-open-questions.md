@@ -19,7 +19,7 @@
 |---|---|---|
 | A1 | Telegram 接入默认**长轮询**，Webhook 作为配置项（无需公网 HTTPS） | `telegram.mode` |
 | A2 | 文档与 WebUI 界面语言为**中文**，代码标识符与日志字段为英文 | 先做 i18n（§4 里明确不做）：`webui/src/i18n` + 重新引入已摘除的 `general.locale`。留一个运行时不读的语言开关只会让人以为改了有用 |
-| A3 | 默认角色为 **blocked**（纯白名单准入，白名单语义即默认拒绝） | `access.defaultUserRole` / `defaultChatRole` |
+| A3 | 默认角色为 **blocked**（纯白名单准入，白名单语义即默认拒绝）。2026-08-30 把会话角色从上限翻成下限之后这条**不变** —— `blocked` 是任一侧一票否决且先于抬升判定，所以 `defaultChatRole=blocked` 仍表示「未登记的群整群静默」 | `access.defaultUserRole` / `defaultChatRole`。⚠ 抬 `defaultChatRole` 是抬**下限**：设成 `trusted` 等于把每个未被单独拉黑的成员在任何未登记的群里都抬到 `trusted` |
 | A4 | `blocked` 主体的消息**不入库** | `access.archiveBlocked=true` 改为入库不响应 |
 | A5 | 论坛 topic 默认**不隔离**（`scope='chat'`，同一群聊共享一个上下文） | `context.scope='thread'` |
 | A6 | 命令消息（除 `/ask`）**不进上下文** —— 避免 `/new`、`/ctx` 之类污染对话 | `commands.archiveToContext=true` |
@@ -88,7 +88,7 @@ Q1–Q13 之外没覆盖到的两件事各有去处：**关键词触发的主动
 | T5 | **owner 能读所有人的私有记忆** | D11（你明确选择） | 每次读取记 warn 日志 + 在该用户记忆页显示「最近被 owner 查看」 |
 | T6 | **背景消息进上下文 ⇒ token 成本明显上升**：活跃群里每轮可能多几千 token | D6（你明确选择） | `background.maxPerTurn` 可调（你已要求做成配置项）+ prompt cache 抵消一部分 + 轮后裁剪兜住上限 |
 | T7 | **单库单文件 ⇒ 隔离靠代码纪律，不是物理边界** | D7 | Repository 层类型强制 + 跨会话白名单 + CI 的 SQL 扫描测试（AC-DB-003） |
-| T8 | **owner 宿主直跑代码 = 完整机器权限**。任何能让 owner 的轮次执行工具的注入路径都是完整的机器沦陷 | D10（你明确选择） | owner 在非受信群里角色被抿平为群角色（D9 的取交集正是为此）；`allowHostFsForOwner` 默认关；高危命令仍走审批 |
+| T8 | **owner 宿主直跑代码 = 完整机器权限**。任何能让 owner 的轮次执行工具的注入路径都是完整的机器沦陷 | D10（你明确选择） | **owner 只在私聊成立**：群 / 频道里的有效角色一律封顶 `trusted`（D9，2026-08-30 拍板），`effectiveRole === 'owner'` ⟹ `isPrivate` —— 群里的发言是任何人都能写的文本，够不着 owner 档的宿主直跑；`allowHostFsForOwner` 默认关；高危命令仍走审批 |
 | T9 | **已随 `sandbox.mode` 的 `jail` 档一起摘除**（commit `99a87c8`）：只剩 `none \| docker` | D10 的 mode 选项 | 「看起来像隔离、实际不是隔离」这个选项本身就是风险来源；真隔离只有 docker 一档，`none` 是 fail-closed 而不是「弱隔离」 |
 | T10 | **流式编辑会消耗大量 Bot API 调用**：一条长回复可能编辑 20+ 次 | D18 | 节流 1.5s + 最小增量 24 字符 + 429 时跳过；`output.mode='once'` 可关 |
 | T11 | **`prepareStep` 每 step 重算工具集 ⇒ 工具描述 token 每 step 都发一遍**，而 TOOL CATALOG 块与 provider 的 tools 数组里那两份描述是重复的 | 安全需要 | **目录按需暴露**（`tools.catalog.*`，[05 §3.12](./05-tools-and-permissions.md) / [07 §5](./07-skills-plugins-mcp.md#5-三者的统一注册流程)）：默认只下发常驻集，外部工具折叠成每组一行、靠 `search_tools` 检索展开；外加目录块去重（`residentDescriptions`）把重复的那一份摘掉。prompt cache 与 `tools.maxRegistered` **退居兜底** —— 前者只在前缀不分叉时有效，后者是静默截断（截断本身现在会在 RUNTIME 块告知，见 `AC-TOOL-020`）|

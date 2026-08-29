@@ -3,34 +3,34 @@ import type { Role } from "@luoli/shared";
 import type { LogSink } from "../log/sink.js";
 
 /**
- * 一条阻塞式人机提示的通用原语（`docs/05 §6.1`）：**发一条带选项的消息、等人点、把结果回灌给
- * 正在等的调用方**。三个消费者共用它 —— inline keyboard 审批（已接）、`agent.askEscalateToUser`
- * 转人工、以及将来 ACP 的逐条 permission。所以 `kind` 与 `decidableBy` 从一开始就在签名里：
- * 事后再加这两个维度会改到所有调用点。
+ * 阻塞式人机提示的通用原语（`docs/05 §6.1`）：发送一条带选项的消息、等待用户点击、将结果回传给
+ * 正在等待的调用方。三个使用方共用它 —— inline keyboard 审批（已接入）、`agent.askEscalateToUser`
+ * 转人工，以及后续 ACP 的逐条 permission。因此 `kind` 与 `decidableBy` 自始即在签名中：
+ * 事后补充这两个维度会改动全部调用点。
  *
- * 依赖方向是 `core → telegram` **不允许**，所以这里只定 `PromptChannel`，实现在
- * `packages/telegram/src/prompts.ts`，由 `main.ts` 注入（照 `TelegramToolBridge` 那个形状）。
+ * 依赖方向 `core → telegram` 不被允许，因此此处只定义 `PromptChannel`，实现位于
+ * `packages/telegram/src/prompts.ts`，由 `main.ts` 注入（形态同 `TelegramToolBridge`）。
  */
 
-/** `callback_data` 的命名空间。`c:` 已被 `/cancel` 占用；这里是 ask。 */
+/** `callback_data` 的命名空间。`c:` 已被 `/cancel` 占用；此处用于 ask。 */
 export const PROMPT_CALLBACK_PREFIX = "a:";
 /**
- * Bot API 给 `callback_data` 的上界是 **64 字节**。`a:` + ULID(26) + `:` + 一位下标 = 30 字节，
- * 留着的余量足够，但**不许把任意长度的东西塞进去**（工具名、审批 id 之外的什么串）——
- * 超了 Telegram 直接 400，而那一刻按钮已经在屏幕上了。`tests/interaction.prompts.test.ts` 焊住它。
+ * Bot API 对 `callback_data` 的上界是 64 字节。`a:` + ULID(26) + `:` + 一位下标 = 30 字节，
+ * 余量充足，但不得放入任意长度的内容（工具名，或审批 id 之外的其它字符串）——
+ * 超出时 Telegram 直接返回 400，而此时按钮已显示在界面上。`tests/interaction.prompts.test.ts` 约束它。
  */
 export const PROMPT_CALLBACK_MAX_BYTES = 64;
-/** 键盘挂在一条消息上，被 `segmentTelegramText` 切开就有一段没有按钮 —— 所以正文硬截断而不是分段。 */
+/** 键盘挂在单条消息上，被 `segmentTelegramText` 分段后会有一段没有按钮 —— 因此正文硬截断而非分段。 */
 export const PROMPT_TEXT_MAX = 700;
 /**
- * `PendingPrompts` 自己那个 timer 比发起方的 TTL 长这么多。**TTL 的唯一所有者是发起方**
- * （审批是 `DatabaseApprovalBroker`：它已经有 timer + 落库 `expired` + SSE 广播），这里这一个
- * 只负责把点不动的按钮收掉。两边都写 expired 就有两份真相。
+ * `PendingPrompts` 自身 timer 相对发起方 TTL 的额外时长。TTL 的唯一所有者是发起方
+ * （审批为 `DatabaseApprovalBroker`：它已具备 timer、写库 `expired` 与 SSE 广播），此处的 timer
+ * 只负责回收已失效的按钮。两侧都写入 expired 会产生两份真相来源。
  */
 export const PROMPT_TTL_GRACE_MS = 5_000;
-/** 下标压在一位数以内，`callback_data` 的长度因此是常量。超出的选项会被砍掉并记一条 warn。 */
+/** 下标限制在一位数以内，`callback_data` 的长度因此为常量。超出的选项会被裁剪并记录一条 warn。 */
 export const PROMPT_MAX_OPTIONS = 8;
-/** 有界：无界 Map 记「最近裁决过什么」正是 `docs/reviews/27 · R-07` 那一类。 */
+/** 容量有界：用无界 Map 记录最近的裁决结果正属 `docs/reviews/27 · R-07` 一类问题。 */
 const RECENT_MAX = 256;
 
 export interface PromptOption {
@@ -38,14 +38,14 @@ export interface PromptOption {
   label: string;
 }
 
-/** 谁在等这条提示。审批已接；另两档留着接线（`docs/00 §2.2`），语义未定之前不许有第二个实现。 */
+/** 该提示的等待方。审批已接入；另两档待接线（`docs/00 §2.2`），语义确定前不允许出现第二个实现。 */
 export type PromptKind = "approval" | "acp_permission" | "agent_ask";
 
 export interface PromptRequest {
   kind: PromptKind;
   chatId: string;
   threadId: number | null;
-  /** `owner` = 有效角色必须是 owner；`initiator` = 发起人自己或 owner。判据在 `resolve()`。 */
+  /** `owner` 表示有效角色必须为 owner；`initiator` 表示发起人本人或 owner。判据见 `resolve()`。 */
   decidableBy: "owner" | "initiator";
   initiatorUserId: string;
   text: string;
@@ -53,10 +53,10 @@ export interface PromptRequest {
   ttlMs: number;
   abortSignal?: AbortSignal;
   /**
-   * 把这一次点击落成事实；返回 false 表示「底下那条请求已经不属于点的人了」（被另一条通道裁决过、
-   * 或已过期）。审批传 `DatabaseApprovalBroker.decide` —— 那句
-   * `UPDATE … WHERE state='pending' AND expires_at>?` 是 WebUI 与 Telegram 之间**唯一**的原子
-   * 抢夺点，而注册表这边的 `settled` 标志只挡得住本进程内对同一条消息的重复点。
+   * 将本次点击落定为事实；返回 false 表示底层请求已不再属于点击者（已被另一条通道裁决，
+   * 或已过期）。审批场景传入 `DatabaseApprovalBroker.decide` —— 其中的
+   * `UPDATE … WHERE state='pending' AND expires_at>?` 是 WebUI 与 Telegram 之间唯一的原子
+   * 竞争点，而注册表侧的 `settled` 标志只能阻止本进程内对同一条消息的重复点击。
    */
   claim?: (optionId: string, actor: string) => boolean;
 }
@@ -64,11 +64,11 @@ export interface PromptRequest {
 export interface PromptOutcome {
   status: "chosen" | "expired" | "cancelled";
   optionId?: string;
-  /** `user:<tgId>`。落库时当 `decided_by`。 */
+  /** `user:<tgId>`。写库时作为 `decided_by`。 */
   actor?: string;
 }
 
-/** 投递层拿到的东西：它不需要懂 kind 之外的任何语义，token 已经算好了。 */
+/** 传给投递层的数据：它无需理解 kind 之外的任何语义，token 已计算完成。 */
 export interface PromptPost {
   kind: PromptKind;
   chatId: string;
@@ -83,46 +83,46 @@ export interface PromptTarget {
 
 export interface PromptChannel {
   /**
-   * 判据是「**bot 起来了**」而不是「有人正在看」—— 后者根本测不出来，而 owner 的手机推送不需要
-   * 他此刻盯着屏幕。审批的可用性判据读的就是这个（`docs/05 §6`）。
+   * 判据是 bot 已启动，而不是有人正在查看 —— 后者无法检测，且 owner 的手机推送不要求其此刻
+   * 盯着屏幕。审批的可用性判据读取的正是该值（`docs/05 §6`）。
    *
-   * **给了 `chatId` 就还要答「那个会话里点得动吗」。** 有效角色是 `min(用户角色, 会话角色)`
-   * （D9，`docs/05 §2.2` 那张表），所以 `decidableBy:'owner'` 在一个 `trusted` 群里**无人可满足**
-   * —— 连 owner 本人在那儿也是 `trusted`。不答这一问的话可用性就比可裁决性宽：库里挂上 pending
-   * 行、屏幕上贴出一排点不动的按钮，然后这一轮干等满 `ttlMs` —— 正是 `docs/22 · D-APPR-01`
-   * 要消灭的形态，只是换了个来路。
+   * 传入 `chatId` 时还需回答该会话中是否可裁决。群内的有效角色封顶 `trusted`，
+   * `decidableBy:'owner'` 在任何群里都无人可满足，因此审批提示只投递到 owner 私聊 ——
+   * 传入的必须是提示**实际落地**的那个会话。不做这一判定时可用性会宽于可裁决性：库中挂上
+   * pending 行、界面上显示一排无法点击的按钮，随后本轮空等满 `ttlMs` —— 正是
+   * `docs/22 · D-APPR-01` 要消除的形态，只是来源不同。
    */
   available(chatId?: string): boolean;
   post(post: PromptPost): Promise<PromptTarget | null>;
   /**
-   * 收尾一条提示。消息被删掉时的 400 由实现自己吞掉 —— 没有哪个等待者该因此受影响。
+   * 收尾一条提示。消息被删除时的 400 由实现自身吞掉 —— 不应有任何等待者因此受影响。
    *
-   * **给了 `text` 就连正文一起换掉，而且是同一次 API 调用。** 只撤键盘的话那条消息会停在
-   * 「N 秒内没人处理就会自动拒绝」上，而那句话此刻已经不成立 —— `docs/21 §12`「界面在说谎」
-   * 专门清过这一类。分成「撤键盘 + 改正文」两次调用则要在 `perChatPerMinute` 那 20 个槽位里
-   * 排两回队，而它们说的是同一件事。不知道结局是什么（启动时那趟扫描之外没有这种情形）才不传。
+   * 传入 `text` 时连同正文一并替换，且在同一次 API 调用中完成。仅撤除键盘的话该消息会停留在
+   * 超时将自动拒绝的表述上，而该表述此刻已不成立 —— `docs/21 §12` 的界面失真专项清理过这一类。
+   * 拆成撤键盘与改正文两次调用则需在 `perChatPerMinute` 的 20 个槽位中排队两次，
+   * 而两者表达的是同一件事。只有在无法确定结局时（除启动扫描外不存在该情形）才不传。
    */
   settle(target: PromptTarget, text?: string): Promise<void>;
 }
 
 export type PromptResolution =
   | { status: "accepted"; kind: PromptKind; optionId: string; label: string }
-  /** 本进程记得这条已经被点过了。与 `unknown` 是两句不同的话。 */
+  /** 本进程已记录该条被点击过。与 `unknown` 表达的是不同的含义。 */
   | { status: "settled" }
-  /** `claim` 说底下那条请求已经不是 pending 了（另一条通道先到，或已过期）。 */
+  /** `claim` 表明底层请求已不再是 pending（另一条通道先到达，或已过期）。 */
   | { status: "stale" }
-  /** 查不到 `promptId`：进程重启过，或早已被最近裁决表淘汰。**只有这一支该顺手把键盘撤掉** —— 没有等待者会替它撤。 */
+  /** 查不到 `promptId`：进程曾重启，或已被最近裁决表淘汰。只有该分支应顺带撤除键盘 —— 没有等待者会代为撤除。 */
   | { status: "unknown" }
-  /** 提示还挂着，但这个下标上没有选项。只有伪造的 `callback_data` 到得了这里，所以**一个字节都不许动**
-   *  —— 当成 `unknown` 处理的话，一次伪造就能把一条活着的提示的键盘撕掉，那条审批的 Telegram 侧就哑了。 */
+  /** 提示仍存在，但该下标上没有选项。只有伪造的 `callback_data` 能到达此处，因此不做任何修改
+   *  —— 若按 `unknown` 处理，一次伪造即可撤除一条有效提示的键盘，该审批的 Telegram 侧随即失效。 */
   | { status: "invalid" }
   | { status: "forbidden"; required: "owner" | "initiator" };
 
 export interface PromptHandle {
   promptId: string;
-  /** 永不 reject。发不出去时以 `cancelled` 收尾。 */
+  /** 永不 reject。无法发送时以 `cancelled` 收尾。 */
   outcome: Promise<PromptOutcome>;
-  /** 投递结果。发起方要它去落 `approvals.tg_message_id`（启动时收拾残留键盘的待办队列）。 */
+  /** 投递结果。发起方据此写入 `approvals.tg_message_id`（启动时处理残留键盘的待办队列）。 */
   posted: Promise<PromptTarget | null>;
   cancel(): void;
 }
@@ -130,7 +130,7 @@ export interface PromptHandle {
 export function promptToken(promptId: string, index: number): string {
   return `${PROMPT_CALLBACK_PREFIX}${promptId}:${index}`;
 }
-/** `promptId` 里不会有 `:`（ULID），但按最后一个冒号切仍然更稳 —— 别让 token 格式变成暗契约。 */
+/** `promptId` 中不含 `:`（ULID），但按最后一个冒号切分更稳妥 —— 避免 token 格式成为隐式契约。 */
 export function parsePromptToken(
   data: string,
 ): { promptId: string; index: number } | null {
@@ -152,12 +152,12 @@ interface Waiter {
 
 export class PendingPrompts {
   readonly #waiters = new Map<string, Waiter>();
-  /** promptId → 上次选中的 label。只为了把「已经处理过了」与「已过期（进程重启过）」分开讲。 */
+  /** promptId → 上次选中的 label。仅用于区分已处理与已过期（进程曾重启）两种情形。 */
   readonly #recent = new Map<string, string>();
   /**
-   * 已经收尾过的消息 → 那次收尾的形态与结果。两张表都有界 —— 无界地记「最近发生过什么」正是
-   * `docs/reviews/27 · R-07`。`landed` **永不 reject**（失败折成 `false`）：调用方拿它当
-   * 「这次收尾真落地了吗」的凭据，而一个会抛的凭据只会变成 unhandledRejection。
+   * 已收尾的消息 → 该次收尾的形态与结果。两张表容量均有界 —— 无界地记录近期事件正属
+   * `docs/reviews/27 · R-07`。`landed` 永不 reject（失败折算为 `false`）：调用方将其作为
+   * 收尾是否真正生效的凭据，而会抛出的凭据只会变成 unhandledRejection。
    */
   readonly #dismissed = new Map<
     string,
@@ -188,8 +188,8 @@ export class PendingPrompts {
     }
     let settled = false;
     let target: PromptTarget | null = null;
-    // `finish` 收到的那个 dismiss 意图要留住：投递落地时它才拿得到 target，而 `dispose()` 明确
-    // 要求**不撤**（那几次编辑会被紧随其后的 `bot.stop()` 掐断）。只看 `settled` 就把它撤了。
+    // `finish` 收到的 dismiss 意图需保留：只有投递落地时才能获得 target，而 `dispose()` 明确
+    // 要求不撤除（那几次编辑会被随后的 `bot.stop()` 中断）。仅依据 `settled` 判定会误撤。
     let dismissWhenPosted = true;
     const { promise: outcome, resolve: settleOutcome } =
       Promise.withResolvers<PromptOutcome>();
@@ -208,7 +208,7 @@ export class PendingPrompts {
           options.find((option) => option.id === result.optionId)?.label ??
             result.optionId,
         );
-      // 投递还没落地时 target 还是 null —— 下面 post 的 then 里会补这一次撤销。
+      // 投递尚未落地时 target 仍为 null —— 下方 post 的 then 中会补上这次撤除。
       if (dismiss && target) this.#dismiss(target);
       settleOutcome(result);
     };
@@ -231,8 +231,8 @@ export class PendingPrompts {
       label: option.label,
       token: promptToken(promptId, index),
     }));
-    // 上界断言排在注册等待者**之前**：抛在后面会留下一个没人收尾的等待者与一个活着的 timer。
-    // token 是本文件算的，越界只会是本文件的 bug，而它的表现是「按钮已经在屏幕上了，点下去 400」。
+    // 上界断言排在注册等待者之前：置于其后抛出会遗留一个无人收尾的等待者与一个仍在运行的 timer。
+    // token 由本文件计算，越界只可能是本文件的缺陷，其表现是按钮已显示而点击后返回 400。
     for (const button of buttons)
       if (Buffer.byteLength(button.token, "utf8") > PROMPT_CALLBACK_MAX_BYTES) {
         clearTimeout(timer);
@@ -254,7 +254,7 @@ export class PendingPrompts {
       .then((result) => {
         target = result;
         settlePosted(result);
-        // 发出去之前就被裁决/取消掉了（WebUI 抢先、轮次 abort）：这条键盘一出生就该撤。
+        // 发送前即已被裁决或取消（WebUI 抢先、轮次 abort）：该键盘创建后即应撤除。
         if (result && settled && dismissWhenPosted) this.#dismiss(result);
       })
       .catch((error: unknown) => {
@@ -262,15 +262,15 @@ export class PendingPrompts {
         this.log?.event({
           level: "warn",
           kind: "prompt.post_failed",
-          summary: `${request.kind} 提示发不出去`,
+          summary: `${request.kind} 提示投递失败`,
           chatId: request.chatId,
           data: {
             kind: request.kind,
             error: error instanceof Error ? error.message : String(error),
           },
         });
-        // 发不出去就没有等待的意义了 —— 但**发起方的语义不由这里决定**：审批那边照旧等它自己的
-        // TTL / WebUI 裁决，这里只是把这条 outcome 收尾，免得留一个永不 settle 的 Promise。
+        // 无法发送即无等待意义 —— 但发起方的语义不由此处决定：审批侧仍等待其自身的
+        // TTL 或 WebUI 裁决，此处只是收尾该 outcome，避免留下一个永不 settle 的 Promise。
         finish({ status: "cancelled" }, false);
       });
     return {
@@ -282,21 +282,25 @@ export class PendingPrompts {
   }
 
   /**
-   * 一次点击。**同步返回**，好让调用方（`packages/telegram/src/bot.ts` 的 `a:` 分支）能先
-   * `answerCallbackQuery` 再去 fire-and-forget 编辑键盘 —— 超约 15 秒不答，客户端上就是一个
-   * 转不停的圈。撤键盘这一跳不在本函数里。
+   * 处理一次点击。同步返回，以便调用方（`packages/telegram/src/bot.ts` 的 `a:` 分支）先执行
+   * `answerCallbackQuery` 再以 fire-and-forget 方式编辑键盘 —— 超过约 15 秒未响应，客户端上会
+   * 持续显示加载状态。撤除键盘不在本函数内完成。
    *
-   * 顺序是「本进程记得吗 → 会话对得上吗 → 角色够吗 → 底下那条请求还在吗」：角色不够时
-   * **等待者一动不动**，而不是被一次越权点击消耗掉。
+   * 判定顺序为：本进程是否已记录 → 会话是否匹配 → 角色是否满足 → 底层请求是否仍存在。
+   * 角色不满足时等待者保持不变，而不是被一次越权点击消耗掉。
    *
-   * **`actor.chatId` 必须等于提示所在的会话。** 按钮就在那条消息上，正常点击不可能来自别处；
-   * 而 `role` 是**按 callback 所在的会话**算出来的有效角色 —— 不绑会话的话，一个人在自己是
-   * owner 的群里对着另一个会话的 promptId 发一次 callback（非官方客户端能构造任意
-   * `callback_data`）就能替那个会话裁决。ULID 猜不出来只是让它不实用，不是让它不成立。
+   * `actor.chatId` 必须等于提示所在的会话。按钮位于该条消息上，正常点击不可能来自别处；
+   * 而 `role` 是按 callback 所在会话计算出的有效角色 —— 不绑定会话的话，用户针对另一会话的
+   * promptId 发送一次 callback（非官方客户端可构造任意 `callback_data`）即可代该会话裁决。
+   * ULID 难以猜测只是降低可行性，并不消除该问题。
    *
-   * 注册表是**进程内**的（`docs/01 §3.1`）：将来真跑多实例时，落在没有这个等待者的实例上的
-   * 点击会回 `unknown`。那是 fail-safe 的一侧（不会伪造出一次批准，库里那一行照旧等自己的 TTL），
-   * 但话说错了 —— 要横向扩展得先把这条通道搬到库上或加一层路由。
+   * 这条绑定同时把 `decidableBy:'owner'` 落到了实处：审批提示只投递到 owner 私聊，而私聊的
+   * 有效角色就是用户自身的角色（群内封顶 `trusted`），因此能通过会话绑定的点击必然来自 owner
+   * 本人的私聊。投递目标即裁决绑定，两者是同一个 `request.chatId`。
+   *
+   * 注册表是进程内的（`docs/01 §3.1`）：将来实际运行多实例时，落到没有该等待者的实例上的
+   * 点击会返回 `unknown`。那是 fail-safe 的一侧（不会伪造出一次批准，库中该行仍等待自身 TTL），
+   * 但结论表述不准确 —— 横向扩展前需先将该通道迁移到数据库或增加一层路由。
    */
   resolve(
     token: string,
@@ -319,14 +323,14 @@ export class PendingPrompts {
     const option = waiter.options[parsed.index];
     if (!option) return { status: "invalid" };
     const who = `user:${actor.userId}`;
-    // **先记账再 claim。** `claim` 会同步走进发起方的收尾逻辑（审批那条路会顺手把这条提示的键盘
-    // 撤掉），中途再回来读注册表就晚了 —— 「这条被点过」这件事没人记得的话，同一条消息第二次点
-    // 回的是「已过期（进程重启过）」而不是「已经处理过了」。这次点击无论 claim 成不成都算消耗掉：
-    // 是同一个人点同一条消息，重来一次的答案不会变。
+    // 先记录再 claim。`claim` 会同步进入发起方的收尾逻辑（审批路径会顺带撤除该提示的键盘），
+    // 之后再回来读取注册表已经过晚 —— 若无人记录该条已被点击，同一条消息第二次点击返回的会是
+    // 已过期（进程曾重启）而非已处理。本次点击无论 claim 是否成功都计为已消耗：
+    // 同一用户点击同一条消息，重复一次的结果不会改变。
     this.#waiters.delete(parsed.promptId);
     this.#remember(parsed.promptId, option.label);
     if (request.claim && !request.claim(option.id, who)) {
-      // 库里那一行已经不是 pending 了：另一条通道先到，或已过期。
+      // 库中该行已不是 pending：另一条通道先到达，或已过期。
       waiter.finish({ status: "cancelled" }, true);
       return { status: "stale" };
     }
@@ -351,8 +355,8 @@ export class PendingPrompts {
     };
   }
 
-  /** 关停：清 timer、把等待者收尾。**不撤键盘** —— 那几次编辑会被紧随其后的 `bot.stop()` 掐断，
-   *  而残留键盘由下一次启动那趟扫描负责（`docs/05 §6.1`），两条路里那一条才是可靠的。 */
+  /** 关停：清除 timer、收尾等待者。不撤除键盘 —— 那几次编辑会被随后的 `bot.stop()` 中断，
+   *  而残留键盘由下一次启动时的扫描处理（`docs/05 §6.1`），两条路径中后者才可靠。 */
   dispose(): void {
     for (const waiter of [...this.#waiters.values()])
       waiter.finish({ status: "cancelled" }, false);
@@ -360,10 +364,10 @@ export class PendingPrompts {
   }
 
   /**
-   * 收尾一条别人手上的提示（发起方的句柄、启动时那趟残留扫描）；失败一律吞掉（消息可能早被删了）。
+   * 收尾由其它持有方管理的提示（发起方的句柄、启动时的残留扫描）；失败一律吞掉（消息可能已被删除）。
    *
-   * **返回「这次收尾真落地了吗」**，而不是 void：调用方那边常有一份「屏幕上还有按钮」的待办要销
-   * （审批是 `approvals.tg_message_id`），而销待办的前提是那次编辑真的回来了。返回的 Promise
+   * 返回该次收尾是否真正生效，而非 void：调用方通常有一份界面上仍有按钮的待办需要销除
+   * （审批为 `approvals.tg_message_id`），而销除待办的前提是该次编辑确实成功返回。返回的 Promise
    * 永不 reject。
    */
   dismiss(target: PromptTarget, text?: string): Promise<boolean> {
@@ -371,22 +375,22 @@ export class PendingPrompts {
   }
 
   /**
-   * 同一条键盘被要求收尾两次是**常态**而不是异常：发起方拿着自己的句柄收（审批的
-   * `ApprovalReceipt.settle`，它知道结局是什么因而带得出正文），注册表这边收尾时也收（它只知道
-   * 「不必再点了」）。第二次编辑在 Telegram 那边是一个 `message is not modified` 400，吞得掉但白占
-   * 一格 `perChatPerMinute` 预算 —— 那个桶正是投递侧要抢的（`docs/28 · L-TG-01` 那一串）。
+   * 同一条键盘被要求收尾两次是常态而非异常：发起方持自身句柄收尾（审批的
+   * `ApprovalReceipt.settle`，它知晓结局因而能给出正文），注册表侧收尾时也会执行一次（它只知道
+   * 无需再点击）。第二次编辑在 Telegram 侧返回 `message is not modified` 400，可以吞掉但会占用
+   * 一格 `perChatPerMinute` 预算 —— 该配额正是投递侧需要争取的（`docs/28 · L-TG-01` 一系列）。
    *
-   * 所以去重只挡**同档或降档**的第二次：撤过键盘之后又来了一份正文仍然要编辑。正常时序里带正文的
-   * 那条先到（发起方的 `settle` 句柄与 `tg_message_id` 是同一个 `.then` 里置上的，而任何真实裁决都
-   * 隔着一次网络往返），于是全程只有一次编辑；但那是时序而不是不变量 —— 收尾在句柄落地**之前**就
-   * 到达时（轮次开轮即被 abort、TTL 压到毫秒），宁可多花一次 `perChatPerMinute` 预算补上那次编辑，
-   * 也不能把「N 秒内没人处理就会自动拒绝」留在屏幕上（`docs/21 §12`）。
+   * 因此去重只拦截同档或降档的第二次：撤除键盘之后再收到带正文的收尾仍需执行编辑。正常时序下带
+   * 正文的那条先到达（发起方的 `settle` 句柄与 `tg_message_id` 在同一个 `.then` 中设置，而任何真实
+   * 裁决都需经过一次网络往返），因此全程只有一次编辑；但那是时序而非不变量 —— 收尾在句柄落地之前
+   * 到达时（轮次开启即被 abort、TTL 压缩至毫秒级），宁可多消耗一次 `perChatPerMinute` 预算补上该次
+   * 编辑，也不能把超时将自动拒绝的表述留在界面上（`docs/21 §12`）。
    */
   #dismiss(target: PromptTarget, text?: string): Promise<boolean> {
     const key = `${target.chatId}:${target.messageId}`;
     const known = this.#dismissed.get(key);
-    // 去重命中时交回**那一次**的结果，而不是一个凭空的 false：调用方拿它去销待办，谎报失败会让
-    // 一条已经收拾干净的消息永远留在待办队列里，每次启动都被重编辑一遍。
+    // 去重命中时返回该次的实际结果，而不是构造一个 false：调用方据此销除待办，错误上报失败会使
+    // 一条已处理完毕的消息永久留在待办队列中，每次启动都被重新编辑一遍。
     if (known && (known.rewritten || text === undefined)) return known.landed;
     const landed = Promise.resolve(this.channel.settle(target, text))
       .then(() => true)

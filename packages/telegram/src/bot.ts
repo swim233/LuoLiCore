@@ -45,7 +45,7 @@ import {
   sendWithFallback,
   type ParseFallbackInfo,
 } from "./output.js";
-import { promptAckText, promptDeniedByChat } from "./prompts.js";
+import { promptAckText } from "./prompts.js";
 import { archiveQuotedMessage, attachMedia, messageKind } from "./reply.js";
 import { TelegramOutput } from "./stream-output.js";
 
@@ -67,9 +67,9 @@ export interface TelegramDependencies {
   approvals?: { releaseTurn(turnId: string): void };
   /**
    * 阻塞式人机通道的等待者注册表（`docs/05 §6.1`，core 的 `PendingPrompts`）。inline keyboard
-   * 审批那批回调（`a:` 前缀）从这里查等待者；缺它时那批回调一律回「已过期」—— 但那时也不会有
-   * 谁发出带按钮的消息。**裁决本身不在这里做**：`PromptRequest.claim` 才是原子抢夺点
-   * （审批传的是 `DatabaseApprovalBroker.decide`）。
+   * 审批类回调（`a:` 前缀）从此处查找等待者；缺省时该类回调一律回「已过期」—— 但此时也不会有
+   * 任何带按钮的消息发出。裁决本身不在此处执行：`PromptRequest.claim` 才是原子抢占点
+   * （审批传入的是 `DatabaseApprovalBroker.decide`）。
    */
   prompts?: {
     resolve(
@@ -83,9 +83,9 @@ export interface TelegramDependencies {
     reservation: QuotaReservation | null,
   ) => Promise<string | MainAgentStreamResult>;
   estimateTurnCost?: (inputTokens: number, key: string) => number | null;
-  /** 签发一次性登录 token（`@luoli/server` 的 `issueLoginToken`）。缺它时 `/webui` 明说不可用。 */
+  /** 签发一次性登录 token（`@luoli/server` 的 `issueLoginToken`）。缺省时 `/webui` 明确回复不可用。 */
   issueLoginToken?: () => { token: string; expiresAt: number };
-  /** 告警分发。缺它时这几条只落日志 —— 别让「装配方没给」变成静默崩溃。 */
+  /** 告警分发。缺省时这几条仅写入日志 —— 装配方未提供不应导致静默崩溃。 */
   alerts?: {
     fire(
       kind: "quota_global_exceeded" | "consecutive_turn_failures",
@@ -95,34 +95,34 @@ export interface TelegramDependencies {
     ): void;
   };
   /**
-   * 连续失败计数。**装配方建一份传给所有开轮次的入口**（这里与 `ScheduledJobRunner`）——
-   * 它此前是本文件的一个闭包变量，于是定时轮次的失败一次都不计入，「上游变黑洞」在没人聊天的
-   * 部署里一次告警都不响（docs/28 · L-SCH-02）。缺它时退回本地一份，行为与从前一致。
+   * 连续失败计数。装配方创建一份并传给所有开轮次的入口（本文件与 `ScheduledJobRunner`）——
+   * 它此前是本文件的闭包变量，导致定时轮次的失败完全不计入，「上游不可用」在无人聊天的
+   * 部署中不会触发任何告警（docs/28 · L-SCH-02）。缺省时退回本地实例，行为与此前一致。
    */
   failures?: TurnFailureStreak;
   log: LogSink;
-  /** 用量合计（`/usage`）。缺它时那条命令明说不可用 —— 不要拿 `turns` 顶上，那两份数对不齐。 */
+  /** 用量合计（`/usage`）。缺省时该命令明确回复不可用 —— 不以 `turns` 替代，两份数据口径不一致。 */
   ledger?: UsageLedger;
-  /** 进程起于何时。`/ping` 的上线时长要它；缺它时那一行显示「未知」而不是编一个。 */
+  /** 进程启动时刻。`/ping` 的上线时长依赖它；缺省时该行显示「未知」而非编造值。 */
   startedAt?: number;
   botInfo?: UserFromGetMe;
   /**
-   * 「本进程正在关停吗」。装配方给 `() => shuttingDown`。
+   * 本进程是否正在关停。装配方传入 `() => shuttingDown`。
    *
-   * `UpdatePoller.stop()` abort 掉在途的 `getUpdates`，`#fetch` 的 catch 确实吞掉了它 —— 但
-   * `tg.api` 的 span 在更低一层（下面那个 transformer）已经记成 error 了。生产库 42 条
-   * `tg.api` error **42/42** 落在某次 `system.stop` 的 3 秒内（56 次关停），也就是说这个部署至今
-   * 没有过一次真实的 Telegram API 故障，而日志里躺着 42 条 error 级噪声：真出故障时与正常重启
-   * 长得一模一样（docs/28 · L-TG-01）。缺它时行为与从前一致。
+   * `UpdatePoller.stop()` 会 abort 在途的 `getUpdates`，`#fetch` 的 catch 确实吞掉了该异常 —— 但
+   * `tg.api` 的 span 在更低一层（下方的 transformer）已记为 error。生产库中 42 条
+   * `tg.api` error 全部（42/42）落在某次 `system.stop` 的 3 秒内（共 56 次关停），即该部署至今
+   * 未发生过一次真实的 Telegram API 故障，而日志中存在 42 条 error 级噪声：真实故障与正常重启
+   * 在日志上无法区分（docs/28 · L-TG-01）。缺省时行为与此前一致。
    */
   stopping?: () => boolean;
 }
 
 /**
- * 这个错误是不是「被 abort 掉了」。判据要窄 —— 只有**关停期间**的 abort 才降级成 info，
- * 关停期间真发生的 API 故障（发最后一条消息被拒）照旧是 error。
+ * 判定该错误是否为 abort。判据需收窄 —— 只有关停期间的 abort 才降级为 info，
+ * 关停期间真实发生的 API 故障（发送最后一条消息被拒）仍记为 error。
  *
- * grammY 把 fetch 的失败包成 `HttpError`（`error` 或 `cause` 上挂原始异常），所以要往下钻几层。
+ * grammY 将 fetch 失败包装为 `HttpError`（原始异常挂在 `error` 或 `cause` 上），因此需逐层下钻。
  */
 function isAbortLike(error: unknown, depth = 0): boolean {
   if (depth > 3 || !error || typeof error !== "object") return false;
@@ -140,24 +140,24 @@ function isAbortLike(error: unknown, depth = 0): boolean {
   );
 }
 
-// 运维态失败（模型没配、缺定价）不能并进「出了点问题」：用户重试多少次都不会好，
-// 得说清楚该由谁去做什么（docs/08 §9）。其余错误仍不暴露内部细节，只给 ref。
+// 运维态失败（模型未配置、缺少定价）不能并入通用错误提示：用户重试多少次都不会成功，
+// 需明确说明由谁执行何种操作（docs/08 §9）。其余错误仍不暴露内部细节，只给出 ref。
 function failureText(error: unknown, reference: string): string {
   const message = error instanceof Error ? error.message : String(error);
   const name = error instanceof Error ? error.name : "";
-  // 上游挂了和「模型没话说」得分开讲：前者重试有用，后者重试没用。
+  // 上游不可用与模型无输出需分别处理：前者重试有效，后者重试无效。
   if (
     /RetryError|APICallError/i.test(name) ||
     /Failed after \d+ attempts/i.test(message)
   )
-    return `模型服务暂时连不上（上游重试已耗尽），过一会儿再试。(ref: ${reference})`;
+    return `模型服务不可用（上游重试已耗尽），请稍后重试。(ref: ${reference})`;
   if (message.startsWith("model alias unavailable"))
-    return `模型还没配置好，得管理员在 WebUI 里配上 provider 和 main 别名。(ref: ${reference})`;
+    return `模型未配置，需管理员在 WebUI 配置 provider 与 main 别名。(ref: ${reference})`;
   if (message === "model_pricing_required")
-    return `当前模型没配价格，管理员补上定价才能用。(ref: ${reference})`;
+    return `当前模型缺少定价，需管理员补充定价后可用。(ref: ${reference})`;
   if (message === "model_returned_empty")
-    return `模型这轮没吐出任何正文，我不知道该回你什么。再说一次试试？(ref: ${reference})`;
-  return `出了点问题，已记录。(ref: ${reference})`;
+    return `模型本轮未返回任何正文，请重新发送。(ref: ${reference})`;
+  return `处理失败，已记录。(ref: ${reference})`;
 }
 interface TelegramIngress {
   archived: ArchivedMessage;
@@ -169,7 +169,7 @@ interface TelegramIngress {
   triggerReason: string | null;
 }
 
-/** 人读的时长。`/ping` 的上线时长、`/tasks` 的已运行、`ago()` 都走它。 */
+/** 时长的可读格式化。`/ping` 的上线时长、`/tasks` 的已运行时长、`ago()` 均使用它。 */
 function duration(ms: number): string {
   const seconds = Math.max(0, Math.round(ms / 1000));
   if (seconds < 60) return `${seconds}s`;
@@ -184,19 +184,19 @@ function duration(ms: number): string {
     .join("");
 }
 
-/** 聊天里读的相对时间，粗到分钟就够；精确值一律另给一个能和库里对上的字段（`/ctx` 给 commit seq）。 */
+/** 聊天中展示的相对时间，精度到分钟即可；精确值一律另给可与库中对应的字段（`/ctx` 给 commit seq）。 */
 function ago(at: number): string {
   return `${duration(Date.now() - at)}前`;
 }
 
-/** `data/` 下这个库真正占的磁盘 —— `-wal` 常常比主库还大，只报主库等于少报一大截。 */
+/** `data/` 下该数据库实际占用的磁盘 —— `-wal` 常大于主库，只统计主库会显著低估。 */
 function databaseBytes(path: string): number {
   let total = 0;
   for (const suffix of ["", "-wal", "-shm"]) {
     try {
       total += statSync(`${path}${suffix}`).size;
     } catch {
-      /* checkpoint 之后 -wal / -shm 可以不存在 */
+      /* checkpoint 之后 -wal / -shm 可能不存在 */
     }
   }
   return total;
@@ -212,7 +212,7 @@ const thousands = (value: number): string =>
       ? `${(value / 1000).toFixed(1)}K`
       : String(value);
 
-/** `tasks.progress_json` 是 `report_progress` 原样存下的 `{status,current,total,detail}`。 */
+/** `tasks.progress_json` 是 `report_progress` 原样写入的 `{status,current,total,detail}`。 */
 function progressText(raw: string | null): string {
   if (!raw) return "尚无进度";
   try {
@@ -230,7 +230,7 @@ function progressText(raw: string | null): string {
       .filter(Boolean)
       .join(" · ");
   } catch {
-    return "进度读不出来";
+    return "进度解析失败";
   }
 }
 
@@ -292,10 +292,10 @@ export async function createTelegramBot(
       out: { minTime: 1000 },
     }),
   );
-  // **传输层**那一行（`docs/10 §2` 的 `tg.api`）：它拿不到 turn/chat 上下文，所以既没有 traceId
-  // 也说不出发了什么。「这一轮发了什么」由投递层的 `tg.send` / `tg.edit` / `tg.action` 回答
-  // （docs/28 · L-LOG-02）。装的位置在 `autoRetry` 与 `apiThrottler` **之后** = 最外层，
-  // 所以这里的 `durationMs` 含节流排队与全部重试退避。
+  // 传输层日志（`docs/10 §2` 的 `tg.api`）：该层取不到 turn/chat 上下文，因此既无 traceId
+  // 也无法说明发送内容。「本轮发出了什么」由投递层的 `tg.send` / `tg.edit` / `tg.action` 回答
+  // （docs/28 · L-LOG-02）。安装位置在 `autoRetry` 与 `apiThrottler` 之后即最外层，
+  // 因此此处的 `durationMs` 包含节流排队与全部重试退避。
   bot.api.config.use(async (prev, method, payload, signal) => {
     const span = dependencies.log.span({
       level: "info",
@@ -308,8 +308,8 @@ export async function createTelegramBot(
       span.end({ ok: true });
       return result;
     } catch (error) {
-      // 关停时被中止的长轮询不是故障（docs/28 · L-TG-01）：记 info + `reason:'shutdown'`，
-      // 好让「真的出过 Telegram 故障吗」这个问题按 `level='error'` 就能回答。
+      // 关停时被中止的长轮询不属于故障（docs/28 · L-TG-01）：记为 info + `reason:'shutdown'`，
+      // 使「是否发生过真实的 Telegram 故障」可直接按 `level='error'` 查询得到答案。
       if (dependencies.stopping?.() === true && isAbortLike(error)) {
         span.end(
           {
@@ -332,38 +332,38 @@ export async function createTelegramBot(
     dependencies.log,
   );
   const ingress = new Map<number, TelegramIngress>();
-  /** `trigger.cooldownMsPerUser` 的按人时间戳。有界淘汰见使用处。 */
+  /** `trigger.cooldownMsPerUser` 的按用户时间戳。有界淘汰见使用处。 */
   const triggerCooldown = new Map<string, number>();
-  /** `concurrency.coalesceSameUserMs` 的在等窗口，键是 `${chatId}:${userId}`。同一个键最多一个。 */
+  /** `concurrency.coalesceSameUserMs` 的等待窗口，键为 `${chatId}:${userId}`。同一键最多一项。 */
   const coalescing = new Map<string, { supersede: () => void }>();
   /**
-   * 跨会话计数：连续失败说明的是「这个部署坏了」，不是「这个群坏了」（docs/10 §6）。
-   * 两个失败出口（抛出去的、以及「吐过内容之后断掉」的）共用同一份，免得两边阈值走岔；
-   * 定时轮次也往同一份里记 —— 前提是装配方把 `failures` 传进来（docs/28 · L-SCH-02）。
+   * 跨会话计数：连续失败反映的是部署级故障，而非单个群的问题（docs/10 §6）。
+   * 两个失败出口（向外抛出的、以及产出内容后中断的）共用同一实例，避免两侧阈值不一致；
+   * 定时轮次也写入同一实例 —— 前提是装配方传入了 `failures`（docs/28 · L-SCH-02）。
    */
   const failures =
     dependencies.failures ?? new TurnFailureStreak(dependencies.alerts);
   /**
-   * 入口段（认领 update → 归档 → 挂媒体）按 chat 串行。
+   * 入口段（认领 update → 归档 → 挂载媒体）按 chat 串行。
    *
-   * update 现在是**并发**派发的（`UpdatePoller`），而归档顺序就是上下文顺序 ——
-   * `claimBackground` 与 `recent` 都按 `messages.id` 排。这一段里有真实的异步等待
-   * （`onMessage` 钩子、媒体下载），两条同 chat 的消息一起进来就可能在库里倒序，
-   * 表现是模型看到的对话顺序和用户打字的顺序不一样。
+   * update 现为并发派发（`UpdatePoller`），而归档顺序即上下文顺序 ——
+   * `claimBackground` 与 `recent` 均按 `messages.id` 排序。该段内存在真实的异步等待
+   * （`onMessage` 钩子、媒体下载），同一 chat 的两条消息同时进入时可能在库中乱序，
+   * 表现为模型看到的对话顺序与用户实际发送顺序不一致。
    *
-   * 非 message 的 update 连 `next()` 一起锁在里面：编辑走的 `MAX(revision)+1` 是
-   * 读-改-写，同一条消息的两次编辑并发跑会算出同一个 revision。
+   * 非 message 类型的 update 连同 `next()` 一并纳入锁内：编辑使用的 `MAX(revision)+1` 是
+   * 读-改-写序列，同一条消息的两次编辑并发执行会算出相同的 revision。
    *
-   * 锁只盖入口段，**轮次在锁外跑** —— 那才是要并行的部分（`concurrency.perKey`）。
+   * 锁只覆盖入口段，轮次在锁外执行 —— 那才是需要并行的部分（`concurrency.perKey`）。
    */
   const ingressOrder = new KeyedMutex();
   bot.use(async (ctx, next) => {
     const from = ctx.from;
     const chat = ctx.chat;
     const message = ctx.message;
-    // 归档在锁内、挂媒体在锁外。前者定的是上下文顺序（`messages.id` 序），后者会去解析用户上传的
-    // 文件 —— 一个畸形 PDF 挂在锁里就是「这个会话之后的每条消息既不归档也不触发，日志里连一条
-    // turn.start 都没有」，而挂住不算抛错、`bot.catch` 也不会说话（docs/27 · R-01）。
+    // 归档在锁内、挂载媒体在锁外。前者确定上下文顺序（`messages.id` 序），后者会解析用户上传的
+    // 文件 —— 畸形 PDF 在锁内挂起会导致该会话此后每条消息既不归档也不触发，日志中没有任何
+    // turn.start，而挂起不构成异常抛出，`bot.catch` 也不会记录（docs/27 · R-01）。
     const pending: Array<{ payload: Message; row: ArchivedMessage }> = [];
     let scopedArchive: ScopedArchiveRepository | null = null;
     const admitted = await ingressOrder.run(
@@ -413,17 +413,21 @@ export async function createTelegramBot(
           username: from.username ?? null,
           chatType: null,
         });
-        dependencies.principals.upsertSeen({
-          id: `chat:${chatId}`,
-          kind: "chat",
-          tgId: chatId,
-          role:
-            storedChatRole ??
-            (isPrivate ? userRole : config.access.defaultChatRole),
-          displayName: ("title" in chat ? chat.title : from.first_name) ?? null,
-          username: "username" in chat ? (chat.username ?? null) : null,
-          chatType: chat.type,
-        });
+        // 私聊不占 `chat:` 行（docs/05 §2.2）：私聊的角色只由 `user:` 那行决定，而
+        // `upsertSeen` 的 ON CONFLICT 分支刻意不动 role —— 首次私聊写下的 `chat:<正数>` 行会把
+        // 出厂 `defaultUserRole` 冻死在那里，此后把 `user:` 提到 trusted 也不生效，必须再改一次
+        // `chat:` 行才行。这条是一次真实事故的来源。
+        if (!isPrivate)
+          dependencies.principals.upsertSeen({
+            id: `chat:${chatId}`,
+            kind: "chat",
+            tgId: chatId,
+            role: storedChatRole ?? config.access.defaultChatRole,
+            displayName:
+              ("title" in chat ? chat.title : from.first_name) ?? null,
+            username: "username" in chat ? (chat.username ?? null) : null,
+            chatType: chat.type,
+          });
         if (
           from.is_bot &&
           !config.telegram.allowBots.includes(from.username ?? "")
@@ -437,8 +441,8 @@ export async function createTelegramBot(
           userId,
           data: { updateId: ctx.update.update_id, type: "message" },
         });
-        // 触发判定要看会话级覆盖（docs/08 §4）：唤醒词是 perChat 白名单里的键，只读全局快照的话
-        // WebUI/API 写进去的会话唤醒词能存住却永远匹配不上。key 用全局 scope 算，与 openTurn 保持一致。
+        // 触发判定需读取会话级覆盖（docs/08 §4）：唤醒词属于 perChat 白名单键，只读全局快照会导致
+        // WebUI/API 写入的会话唤醒词可以保存但永远匹配不上。key 按全局 scope 计算，与 openTurn 一致。
         const triggerConfig = perChatConfig(
           currentConfig(),
           contextKey(
@@ -446,8 +450,8 @@ export async function createTelegramBot(
             config.context.scope,
           ),
         ).trigger;
-        // 判定整个交给 matchTrigger：裸 `/` 前缀一律当命令的话，白名单和 `trigger.command` 开关都被绕开，
-        // 私聊里一句「/home/app 这个目录满了」会石沉大海（docs/20 · W-TG-01）。
+        // 判定完全交由 matchTrigger：若将裸 `/` 前缀一律视为命令，白名单与 `trigger.command` 开关都被绕过，
+        // 私聊中的「/home/app 这个目录满了」会得不到任何响应（docs/20 · W-TG-01）。
         const triggerReason = matchTrigger(
           ctx,
           {
@@ -487,8 +491,8 @@ export async function createTelegramBot(
             fromUsername: from.username ?? null,
             kind: messageKind(message as unknown as Record<string, unknown>),
             text: message.text ?? message.caption ?? null,
-            // reply_to / media_group 的列建表时就有，但一直没人往里写 —— 「回复了谁」是这条消息语义的一部分，
-            // 丢了它，事后无论从库里还是从上下文里都看不出用户当时在指着哪一条说话。
+            // reply_to / media_group 两列建表时即存在，但此前从未写入 —— 回复对象是该消息语义的一部分，
+            // 缺失后无论从库中还是从上下文中都无法判断用户当时指向的是哪一条消息。
             replyToTgMessageId: message.reply_to_message?.message_id ?? null,
             mediaGroupId: message.media_group_id ?? null,
             tgDate: message.date * 1000,
@@ -533,8 +537,8 @@ export async function createTelegramBot(
         };
       },
     );
-    // 锁外：`blocked` 主体（`archiveBlocked` 打开时也归档）同样要补媒体，所以这一步先于 `admitted` 判定。
-    // 仍在 `next()` 之前 —— openTurn 物化快照时 parts 必须已经挂上。
+    // 锁外：`blocked` 主体（`archiveBlocked` 开启时同样归档）也需补挂媒体，故本步先于 `admitted` 判定。
+    // 仍位于 `next()` 之前 —— openTurn 物化快照时 parts 必须已挂载完成。
     if (scopedArchive)
       for (const item of pending)
         await attachMedia(media, scopedArchive, item.payload, item.row);
@@ -559,7 +563,7 @@ export async function createTelegramBot(
     return access;
   };
 
-  // 命令表就是 /help 的内容，也是 HANDLED_COMMANDS 的对照物（tests/trigger.test.ts 断言三者一致）。
+  // 命令表即 /help 的内容，也是 HANDLED_COMMANDS 的对照来源（tests/trigger.test.ts 断言三者一致）。
   const COMMANDS: Array<{
     name: string;
     minRole: Role;
@@ -570,7 +574,7 @@ export async function createTelegramBot(
       name: "start",
       minRole: "limited",
       usage: "/start",
-      description: "自我介绍与你当前的权限",
+      description: "身份说明与当前权限",
     },
     {
       name: "help",
@@ -588,7 +592,7 @@ export async function createTelegramBot(
       name: "new",
       minRole: "limited",
       usage: "/new",
-      description: "开新话题（窗口清零，历史保留）",
+      description: "清空上下文窗口（保留历史）",
     },
     {
       name: "undo",
@@ -618,13 +622,13 @@ export async function createTelegramBot(
       name: "memory",
       minRole: "limited",
       usage: "/memory",
-      description: "查看自己的私有记忆（仅私聊）",
+      description: "查看私有记忆（仅私聊）",
     },
     {
       name: "whoami",
       minRole: "limited",
       usage: "/whoami",
-      description: "自己的角色与有效权限",
+      description: "角色与有效权限",
     },
     {
       name: "usage",
@@ -636,7 +640,7 @@ export async function createTelegramBot(
       name: "webui",
       minRole: "owner",
       usage: "/webui",
-      description: "生成一次性控制台登录链接（仅私聊，5 分钟有效）",
+      description: "一次性控制台登录链接（仅私聊，5 分钟有效）",
     },
     {
       name: "model",
@@ -648,7 +652,7 @@ export async function createTelegramBot(
       name: "whois",
       minRole: "owner",
       usage: "/whois <id>",
-      description: "查某个主体的角色",
+      description: "查询主体角色",
     },
     {
       name: "grant",
@@ -669,8 +673,8 @@ export async function createTelegramBot(
     );
     if (!access) return;
     await ctx.reply(
-      `我是 ${bot.botInfo.first_name}。直接说话就行；群里 @我、回复我、或用唤醒词都能叫我。\n` +
-        `你当前的权限：${access.effectiveRole}。\n发 /help 看可用命令。`,
+      `我是 ${bot.botInfo.first_name}。直接发送消息即可对话；群聊中 @我、回复我或使用唤醒词均可触发。\n` +
+        `你当前的权限：${access.effectiveRole}。\n发送 /help 查看可用命令。`,
     );
   });
   bot.command("help", async (ctx) => {
@@ -695,7 +699,7 @@ export async function createTelegramBot(
     const parsed = parsePrincipal(ctx.match);
     if (!parsed) {
       await ctx.reply(
-        "用法：/whois <id>，或 /whois <user|chat> <id> —— id 必须是 Telegram 数字 id。",
+        "用法：/whois <id>，或 /whois <user|chat> <id>。id 必须是 Telegram 数字 id。",
       );
       return;
     }
@@ -719,9 +723,9 @@ export async function createTelegramBot(
       ctx.reply(text),
     );
     if (!access) return;
-    // 四样都要算（docs/08 §8「版本、上线时长、模型别名、DB 大小」）。此前只有版本，owner 多出来的
-    // 那坨是 `JSON.stringify(dashboard())` —— 运维总览，和健康检查要的四样毫无交集，而且原样吐
-    // JSON 正是 W-TG-02 给 `/ctx`、`/tasks` 修掉的反模式。用量看 `/usage`（docs/29 · M-TG-03）。
+    // 四项都要输出（docs/08 §8「版本、上线时长、模型别名、DB 大小」）。此前只有版本，owner 额外
+    // 看到的是 `JSON.stringify(dashboard())` —— 那是运维总览，与健康检查所需的四项没有交集，且原样
+    // 输出 JSON 正是 W-TG-02 为 `/ctx`、`/tasks` 修复过的反模式。用量查询用 `/usage`（docs/29 · M-TG-03）。
     const key = contextKey(
       {
         chatId: String(ctx.chat.id),
@@ -729,25 +733,25 @@ export async function createTelegramBot(
       },
       config.context.scope,
     );
-    // 会话别名压过配置层，和真正开轮时的判据同一条（main.ts 的 estimateTurnCost 也是这么算的）。
+    // 会话别名优先于配置层，与实际开轮时的判据一致（main.ts 的 estimateTurnCost 同样如此计算）。
     const alias =
       readAppKv<string>(dependencies.db, modelAliasKey(key)) ??
       perChatConfig(currentConfig(), key).agent.main.modelAlias;
     await ctx.reply(
       `LuoLiCore ${process.env.npm_package_version ?? "dev"}\n运行正常\n` +
-        `上线时长：${dependencies.startedAt ? duration(Date.now() - dependencies.startedAt) : "未知（装配方没给 startedAt）"}\n` +
+        `上线时长：${dependencies.startedAt ? duration(Date.now() - dependencies.startedAt) : "未知"}\n` +
         `模型别名：${alias}\n` +
         `DB 大小：${megabytes(databaseBytes(dependencies.db.name))}（含 -wal / -shm）\n` +
         `有效权限：${access.effectiveRole}`,
     );
   });
   /**
-   * 一次性登录链接（docs/09 §2.3）。**只在 owner 私聊里给** —— 群里发出来等于把 owner 全权限
-   * 递给屏幕前的所有人，而这条链接换的是一个不需要口令的 session。
+   * 一次性登录链接（docs/09 §2.3）。仅在 owner 私聊中提供 —— 在群内发出等于将 owner 全部权限
+   * 交给所有可见者，而该链接可兑换一个无需口令的 session。
    *
-   * 链接自己不进归档：`/webui` 是 `HANDLED_COMMANDS`，命令消息本来就不进上下文（docs/14 A6），
-   * 但回复是 bot 发的，所以这里显式不走 `scoped.append` —— 一个能登录的 URL 落进消息表，
-   * 泄露面比口令还大。
+   * 链接本身不进归档：`/webui` 属于 `HANDLED_COMMANDS`，命令消息本就不进上下文（docs/14 A6），
+   * 但回复由 bot 发出，因此此处显式不调用 `scoped.append` —— 可登录的 URL 写入消息表，
+   * 泄露面大于口令本身。
    */
   bot.command("webui", async (ctx) => {
     const access = await requireRole(ctx.update.update_id, "owner", (text) =>
@@ -755,19 +759,19 @@ export async function createTelegramBot(
     );
     if (!access) return;
     if (!access.isPrivate) {
-      await ctx.reply("这个命令只在私聊里用 —— 登录链接不该出现在群里。");
+      await ctx.reply("该命令仅限私聊使用：登录链接不应出现在群聊中。");
       return;
     }
     const base = currentConfig().webui.publicUrl.trim().replace(/\/$/, "");
     if (!base) {
       await ctx.reply(
-        "还没配 `webui.publicUrl`，生成不出可点的链接。去设置页填上对外可访问的地址（例如 https://luoli.example.com）。",
+        "未配置 `webui.publicUrl`，无法生成链接。请在设置页填写对外可访问的地址（例如 https://luoli.example.com）。",
       );
       return;
     }
     const issued = dependencies.issueLoginToken?.();
     if (!issued) {
-      await ctx.reply("这个部署没装配 WebUI，登录链接不可用。");
+      await ctx.reply("本部署未启用 WebUI，登录链接不可用。");
       return;
     }
     dependencies.log.event({
@@ -777,7 +781,7 @@ export async function createTelegramBot(
       userId: access.userId,
     });
     await ctx.reply(
-      `${base}/login?t=${issued.token}\n\n5 分钟内有效、只能用一次，进程重启即失效。别转发。`,
+      `${base}/login?t=${issued.token}\n\n5 分钟内有效、仅可使用一次，进程重启后失效。请勿转发。`,
       { link_preview_options: { is_disabled: true } },
     );
   });
@@ -795,16 +799,16 @@ export async function createTelegramBot(
       ))
     )
       return;
-    // `context.recallBarrier` 开着时清空还要推背景认领水位（`ContextEngine.reset` 的 docstring）。
+    // `context.recallBarrier` 开启时，清空还需推进背景认领水位（见 `ContextEngine.reset` 的 docstring）。
     const barrier = currentConfig().context.recallBarrier;
     dependencies.context.reset(key, `command:${ctx.from?.id ?? "unknown"}`, {
       advanceClaims: barrier,
     });
-    // 回执要跟着开关说实话：隔断关着时「历史记录仍保留」意味着模型照样能用 read_messages 翻回来。
+    // 回执需与开关状态一致：隔断关闭时，「历史记录仍保留」意味着模型仍可通过 read_messages 检索。
     await ctx.reply(
       barrier
-        ? "已开启新话题。历史消息仍在库里，但这之前的内容我不会再去翻了。"
-        : "已开启新话题，历史记录仍保留（我仍可用 read_messages 去查更早的消息）。",
+        ? "已清空上下文窗口。历史消息仍保留在数据库中，此前的内容不再进入上下文。"
+        : "已清空上下文窗口，历史记录仍保留（我仍可通过 read_messages 检索更早的消息）。",
     );
   });
   bot.command("undo", async (ctx) => {
@@ -827,8 +831,8 @@ export async function createTelegramBot(
         : "没有可撤销的提交。",
     );
   });
-  // 摘要而不是整份 JSON：stats() 带着窗口内全部消息及其 parts，活跃会话轻松越过 Telegram 的
-  // 4096 字符上限，API 400 之后用户看到的是彻底的沉默（docs/20 · W-TG-02）。完整数据看 WebUI。
+  // 输出摘要而非完整 JSON：stats() 包含窗口内全部消息及其 parts，活跃会话极易超过 Telegram 的
+  // 4096 字符上限，API 返回 400 后用户看到的是完全无响应（docs/20 · W-TG-02）。完整数据见 WebUI。
   bot.command("ctx", async (ctx) => {
     const key = contextKey(
       {
@@ -857,19 +861,19 @@ export async function createTelegramBot(
       lastRebase: { seq: number; at: number } | null;
     };
     const commit = stats.commit;
-    // 报 seq 而不是时间戳一个人扛：seq 能直接和 `context_commits` 对上，相对时间只是给人读的。
+    // 输出 seq 而不仅是时间戳：seq 可直接与 `context_commits` 对应，相对时间仅供阅读。
     const marker = (row: { seq: number; at: number } | null): string =>
-      row ? `第 ${row.seq} 次提交（${ago(row.at)}）` : "还没有过";
+      row ? `第 ${row.seq} 次提交（${ago(row.at)}）` : "无";
     await ctx.reply(
       commit
-        ? `上下文 ${key}\ncommit ${commit.id.slice(0, 12)}（第 ${commit.seq} 次）\n窗口 ordinal ${commit.windowStart}–${commit.headOrdinal}\n${stats.messageCount} 条消息 / 约 ${stats.tokens} tokens（上限 ${config.context.limit.maxMessages} 条 / ${config.context.limit.tokens} tokens）\n背景认领水位 tg#${stats.claimWatermark}\n最近 prune：${marker(stats.lastPrune)}\n最近 rebase：${marker(stats.lastRebase)}\n完整时间线见 WebUI：http://${config.webui.host}:${config.webui.port}/chats/${encodeURIComponent(key)}`
-        : `上下文 ${key} 还是空的，还没有提交过任何一轮。`,
+        ? `上下文 ${key}\ncommit ${commit.id.slice(0, 12)}（第 ${commit.seq} 次）\n窗口 ordinal ${commit.windowStart}–${commit.headOrdinal}\n${stats.messageCount} 条消息 / 约 ${stats.tokens} tokens（上限 ${config.context.limit.maxMessages} 条 / ${config.context.limit.tokens} tokens）\n背景认领位点 tg#${stats.claimWatermark}\n最近 prune：${marker(stats.lastPrune)}\n最近 rebase：${marker(stats.lastRebase)}\n完整时间线见 WebUI：http://${config.webui.host}:${config.webui.port}/chats/${encodeURIComponent(key)}`
+        : `上下文 ${key} 为空，尚无提交。`,
     );
   });
   /**
-   * **两样都列。** `turns` 是「我发的那句还在不在跑」，`tasks` 是 `spawn_agent` 派出去的子 agent ——
-   * 同一个「任务」在 Telegram 和 WebUI「任务与审批」页此前各指其中一样，实测撞上过
-   * （docs/29 · M-TG-05）。标题与进度只有 `tasks` 那张表上有，turns 行上没有也不该有。
+   * 两类都要列出。`turns` 表示用户发出的那轮是否仍在执行，`tasks` 表示 `spawn_agent` 派发的子 agent ——
+   * 同一个「任务」在 Telegram 与 WebUI「任务与审批」页此前各指其中一类，实测出现过混淆
+   * （docs/29 · M-TG-05）。标题与进度只存在于 `tasks` 表，turns 行没有也不应有。
    */
   bot.command("tasks", async (ctx) => {
     const chatId = String(ctx.chat.id);
@@ -919,7 +923,7 @@ export async function createTelegramBot(
     await ctx.reply(
       sections.length
         ? sections.join("\n\n")
-        : "当前没有在途轮次，也没有派出去的子 agent 任务。",
+        : "当前无在途轮次，也无子 agent 任务。",
     );
   });
   bot.command("model", async (ctx) => {
@@ -945,7 +949,7 @@ export async function createTelegramBot(
       await ctx.reply("未知模型别名。可选：main / high / low / vision");
       return;
     }
-    // 写 app_kv 而不是 config_kv：config_kv 的每一行都会被当成配置覆盖层解析（docs/19 · R-CFG-01）。
+    // 写入 app_kv 而非 config_kv：config_kv 的每一行都会被当作配置覆盖层解析（docs/19 · R-CFG-01）。
     writeAppKv(
       dependencies.db,
       modelAliasKey(key),
@@ -963,16 +967,39 @@ export async function createTelegramBot(
       return;
     const userId = String(ctx.from?.id ?? "");
     const chatId = String(ctx.chat.id);
+    const isPrivate = ctx.chat.type === "private";
     const user =
       dependencies.principals.roleOf("user", userId) ??
       config.access.defaultUserRole;
-    const chat =
-      dependencies.principals.roleOf("chat", chatId) ??
-      (ctx.chat.type === "private" ? user : config.access.defaultChatRole);
+    // 私聊没有会话角色可言（docs/05 §2.2），报一个出来就是凭空多一档看着能改的东西。
+    const chat = isPrivate
+      ? null
+      : (dependencies.principals.roleOf("chat", chatId) ??
+        config.access.defaultChatRole);
+    const effective = resolveEffectiveRole({
+      userRole: user,
+      ...(chat ? { chatRole: chat } : {}),
+      isPrivate,
+      defaultChatRole: config.access.defaultChatRole,
+    });
     await ctx.reply(
-      `user=${user} chat=${chat} effective=${resolveEffectiveRole({ userRole: user, chatRole: chat, isPrivate: ctx.chat.type === "private", defaultChatRole: config.access.defaultChatRole })}`,
+      isPrivate
+        ? `user=${user} effective=${effective}`
+        : `user=${user} chat=${chat} effective=${effective}`,
     );
   });
+  /**
+   * `chat` 主体的两条硬约束（docs/05 §2.2），`/grant` 与 `/revoke` 共用一份。私聊已不占
+   * `chat:` 行，正数 id 写进去只是一行永不参与判定的死数据；而群内有效角色封顶 trusted，
+   * chat 行的 owner 档在全库零效果 —— 收下它等于让命令回执与 WebUI 一起说谎。
+   */
+  const chatSubjectError = (tgId: string, role?: string): string | null => {
+    if (!tgId.startsWith("-"))
+      return "chat 主体只能是群 / 频道，ID 以 -100 开头。私聊改用 user 主体。";
+    return role === "owner"
+      ? "chat 主体不能设为 owner：群 / 频道内的有效权限封顶 trusted。"
+      : null;
+  };
   bot.command("grant", async (ctx) => {
     if (
       !(await requireRole(ctx.update.update_id, "owner", (text) =>
@@ -982,8 +1009,8 @@ export async function createTelegramBot(
       return;
     const parts = ctx.match.trim().split(/\s+/).filter(Boolean);
     const role = parts.at(-1) ?? "";
-    // 主体串交给 `parsePrincipal`：此前 `/grant user @alice owner` 一路通过，写出一条
-    // `tg_id='@alice'` 的主体行 —— 永远匹配不到任何消息，命令还回「已设置」（docs/27 · C-05）。
+    // 主体串交由 `parsePrincipal` 解析：此前 `/grant user @alice owner` 会全程通过，写出一条
+    // `tg_id='@alice'` 的主体行 —— 永远匹配不到任何消息，而命令仍回复「已设置」（docs/27 · C-05）。
     const parsed =
       parts.length >= 2 ? parsePrincipal(parts.slice(0, -1).join(" ")) : null;
     if (
@@ -991,9 +1018,16 @@ export async function createTelegramBot(
       !["owner", "trusted", "limited", "blocked"].includes(role)
     ) {
       await ctx.reply(
-        "用法：/grant <user|chat> <id> <role> —— id 必须是 Telegram 数字 id（群/频道为负数）。",
+        "用法：/grant <user|chat> <id> <role>。id 必须是 Telegram 数字 id（群/频道为负数）。",
       );
       return;
+    }
+    if (parsed.kind === "chat") {
+      const denied = chatSubjectError(parsed.tgId, role);
+      if (denied) {
+        await ctx.reply(denied);
+        return;
+      }
     }
     dependencies.principals.upsertSeen(
       {
@@ -1024,12 +1058,19 @@ export async function createTelegramBot(
     const parsed = parsePrincipal(ctx.match);
     if (!parsed) {
       await ctx.reply(
-        "用法：/revoke <user|chat> <id>，或 /revoke <id>（两种主体都试）。",
+        "用法：/revoke <user|chat> <id>，或 /revoke <id>（两类主体均尝试）。",
       );
       return;
     }
-    // 裸 id 两种主体都试。`/grant` 收的是 `<kind> <id>`，而这里此前只收完整主体 id ——
-    // 于是 `/revoke 123456`（owner 最可能敲的写法）静默无效，只回一句「主体不存在」。
+    if (parsed.kind === "chat") {
+      const denied = chatSubjectError(parsed.tgId);
+      if (denied) {
+        await ctx.reply(denied);
+        return;
+      }
+    }
+    // 裸 id 时两种主体都尝试。`/grant` 接收的是 `<kind> <id>`，而此处此前只接收完整主体 id ——
+    // 导致 `/revoke 123456`（owner 最常用的写法）静默失效，仅回复「主体不存在」。
     const targets = parsed.kind
       ? [parsed.id]
       : [`user:${parsed.tgId}`, `chat:${parsed.tgId}`];
@@ -1046,7 +1087,7 @@ export async function createTelegramBot(
     );
     if (!access) return;
     if (!access.isPrivate) {
-      await ctx.reply("私有记忆只能在私聊查看。");
+      await ctx.reply("私有记忆仅限私聊查看。");
       return;
     }
     const document = dependencies.memory.read(
@@ -1056,8 +1097,8 @@ export async function createTelegramBot(
       access.userId,
       true,
     );
-    // 「owner 看过你的私有记忆」这件事要让**被看的人**看得见：只落一条日志、只有 owner 在控制台上
-    // 翻得到的话，那是记录不是问责（D11，`docs/06 §425`；docs/29 · M-MEM-01）。
+    // owner 查看过用户私有记忆这一事实必须对被查看者可见：若仅写入一条只有 owner 能在控制台
+    // 检索到的日志，那只是记录而非问责（D11，`docs/06 §425`；docs/29 · M-MEM-01）。
     const seen = dependencies.memory.lastOwnerRead(access.userId);
     await ctx.reply(
       [
@@ -1080,7 +1121,7 @@ export async function createTelegramBot(
       !id ||
       !dependencies.registry.cancel(id, access.userId, access.effectiveRole)
     ) {
-      await ctx.reply("没有可取消的任务，或你无权取消。");
+      await ctx.reply("没有可取消的任务，或无取消权限。");
       return;
     }
     await ctx.reply("⛔ 已取消");
@@ -1108,9 +1149,9 @@ export async function createTelegramBot(
         "SELECT COALESCE(MAX(revision),-1)+1 AS revision FROM messages WHERE chat_id=? AND tg_message_id=?",
       )
       .get(chatId, message.message_id) as { revision: number };
-    // 编辑永远不开新轮次（`trigger.ignoreEditedAsTrigger` 因此标 🚧）。但也绝不能记成 triggered=1：
-    // claimBackground 只认领 triggered=0 的消息，被判成触发却没人开轮次的编辑等于凭空消失
-    // ——既不回应、也不进背景上下文（docs/20 · W-TG-05）。统一按背景消息归档。
+    // 编辑永不开启新轮次（`trigger.ignoreEditedAsTrigger` 因此标 🚧）。同时也绝不能记为 triggered=1：
+    // claimBackground 只认领 triggered=0 的消息，被判为触发却无人开轮次的编辑将完全丢失
+    // —— 既不回应也不进入背景上下文（docs/20 · W-TG-05）。统一按背景消息归档。
     const editedTrigger = perChatConfig(
       currentConfig(),
       contextKey(
@@ -1162,22 +1203,24 @@ export async function createTelegramBot(
     const member = ctx.myChatMember;
     const chatId = String(member.chat.id);
     const active = !["left", "kicked"].includes(member.new_chat_member.status);
-    dependencies.principals.upsertSeen(
-      {
-        id: `chat:${chatId}`,
-        kind: "chat",
-        tgId: chatId,
-        role:
-          dependencies.principals.roleOf("chat", chatId) ??
-          config.access.defaultChatRole,
-        displayName:
-          ("title" in member.chat ? member.chat.title : null) ?? null,
-        username:
-          "username" in member.chat ? (member.chat.username ?? null) : null,
-        chatType: member.chat.type,
-      },
-      "telegram:my_chat_member",
-    );
+    // 同主路径：私聊不占 `chat:` 行（docs/05 §2.2）。用户 block/unblock 机器人也会走到这里。
+    if (member.chat.type !== "private")
+      dependencies.principals.upsertSeen(
+        {
+          id: `chat:${chatId}`,
+          kind: "chat",
+          tgId: chatId,
+          role:
+            dependencies.principals.roleOf("chat", chatId) ??
+            config.access.defaultChatRole,
+          displayName:
+            ("title" in member.chat ? member.chat.title : null) ?? null,
+          username:
+            "username" in member.chat ? (member.chat.username ?? null) : null,
+          chatType: member.chat.type,
+        },
+        "telegram:my_chat_member",
+      );
     dependencies.log.event({
       level: "info",
       kind: "tg.membership",
@@ -1189,16 +1232,19 @@ export async function createTelegramBot(
   bot.on("callback_query:data", async (ctx) => {
     const data = ctx.callbackQuery.data;
     const userId = String(ctx.from.id);
-    // `a:` = 阻塞式人机提示（审批的 inline keyboard、将来的转人工与 ACP permission，docs/05 §6.1）。
-    // **判的是有效角色**（D9：min(用户角色, 会话角色)）—— 下面 `c:` 那条只取用户角色是既有的窄
-    // 口径，别照抄：会话被降级到 limited 的群里，owner 也不该在那儿按下批准。
+    // `a:` 表示阻塞式人机提示（审批的 inline keyboard、后续的转人工与 ACP permission，docs/05 §6.1）。
+    // 判据为**本条 callback 所在会话**的有效角色（D9，docs/05 §2.2），不是裸的用户角色 ——
+    // 下方 `c:` 分支只取用户角色，是既有的窄口径，不要照搬。按钮如今只落在 owner 私聊里
+    // （那里有效角色恒为 owner），所以走到这儿的越权点击只可能来自伪造的 `callback_data`；
+    // 照会话算仍是必需的，它与 `PendingPrompts.resolve` 的会话绑定合起来才挡得住「在自己是
+    // owner 的群里替另一个会话裁决」。
     if (data.startsWith(PROMPT_CALLBACK_PREFIX)) {
       const chat = ctx.chat;
-      // 会话认不出来（消息不可达）就当查不到这条提示 —— 有效角色是**按这个会话**算的，
-      // 会话对不上时那个判据本身就没有意义（`PendingPrompts.resolve` 的会话绑定同一条理由）。
+      // 会话无法识别（消息不可达）时按查不到该提示处理 —— 有效角色是按会话计算的，
+      // 会话不匹配时该判据本身失去意义（同 `PendingPrompts.resolve` 会话绑定的理由）。
       if (!chat) {
         await ctx.answerCallbackQuery({
-          text: "认不出这条消息所在的会话，请重新发起。",
+          text: "无法识别该消息所属的会话，请重新发起。",
           show_alert: true,
         });
         return;
@@ -1221,15 +1267,12 @@ export async function createTelegramBot(
         role: effectiveRole,
         chatId: String(chat.id),
       }) ?? { status: "unknown" as const };
-      // **先答再编辑。** 超约 15 秒不给 answerCallbackQuery，客户端上就是一个转不停的圈；而撤键盘
-      // 是 fire-and-forget 的（`PendingPrompts` 收尾时自己会撤，见那里的去重）。查不到等待者的那一
-      // 种（进程重启过）没人替它撤，所以这里补一次 —— 不补的话那排按钮永远留在屏幕上。
-      // **只有 `unknown` 该撤**：`invalid`（提示还挂着、只是下标上没这个选项）走这一步的话，
-      // 一次伪造的 `callback_data` 就能把一条活着的提示的键盘撕掉。
-      await ctx.answerCallbackQuery(
-        promptDeniedByChat(resolution, userRole, effectiveRole) ??
-          promptAckText(resolution),
-      );
+      // 先应答再编辑。超过约 15 秒未调用 answerCallbackQuery，客户端会持续显示加载状态；而撤键盘
+      // 是 fire-and-forget 的（`PendingPrompts` 收尾时会自行撤除，见该处的去重逻辑）。查不到等待者
+      // 的情形（进程曾重启）无人代为撤除，因此此处补一次 —— 否则按钮会永久留在屏幕上。
+      // 只有 `unknown` 应当撤除：若 `invalid`（提示仍存在、仅该下标无对应选项）也执行这一步，
+      // 一次伪造的 `callback_data` 即可撤除一条有效提示的键盘。
+      await ctx.answerCallbackQuery(promptAckText(resolution));
       if (resolution.status === "unknown")
         void ctx.editMessageReplyMarkup().catch(() => undefined);
       return;
@@ -1253,13 +1296,11 @@ export async function createTelegramBot(
       ))
     )
       return;
-    // 读 `usage_ledger` 而不是 `turns`：试跑（`agents.createDryRun()`）写 ledger 却不建 turns 行，
-    // 于是只要在 WebUI 上试跑过一次，「`/usage` = 用量页 = ledger 聚合」就永久对不上
-    // （docs/29 · M-QUOTA-01）。顺带不再原样吐 `dashboard()` JSON —— 那是运维总览不是用量报表。
+    // 读取 `usage_ledger` 而非 `turns`：试跑（`agents.createDryRun()`）写入 ledger 但不创建 turns 行，
+    // 因此只要在 WebUI 上试跑过一次，「`/usage` = 用量页 = ledger 聚合」即永久不一致
+    // （docs/29 · M-QUOTA-01）。同时不再原样输出 `dashboard()` JSON —— 那是运维总览而非用量报表。
     if (!dependencies.ledger) {
-      await ctx.reply(
-        "用量账本没接上（装配方没给 ledger），这条命令暂时不可用 —— 去 WebUI 用量页看。",
-      );
+      await ctx.reply("用量账本未接入，该命令不可用。请在 WebUI 用量页查看。");
       return;
     }
     const requested = ctx.match.trim() || "today";
@@ -1282,7 +1323,7 @@ export async function createTelegramBot(
         `${line("全局", {})}\n` +
         `${line("本会话", { chatId })}\n` +
         `${line("本人", { userId: String(ctx.from?.id ?? "") })}\n` +
-        "口径：usage_ledger，与 WebUI 用量页同一份；不含 ACP 外部花费（docs/03 §2.7）。",
+        "口径：usage_ledger，与 WebUI 用量页一致；不含 ACP 外部支出。",
     );
   });
 
@@ -1297,9 +1338,9 @@ export async function createTelegramBot(
       access;
     const message = ctx.message;
     if (!triggerReason || triggerReason === "command") return;
-    // `trigger.cooldownMsPerUser`：同一个人连着 @ 好几句时，只开第一轮。**被压住的那条不会消失**
-    // ——它已经以 triggered=0 落库（下面这行改的就是这个），所以下一轮的背景认领会把它带进上下文。
-    // 与 `quota.rateLimit` 是两件事：那个按小时算配额，这个按秒防连点。
+    // `trigger.cooldownMsPerUser`：同一用户连续 @ 多次时只开启第一轮。被抑制的消息不会丢失
+    // —— 它已以 triggered=0 落库（下方代码即执行该降级），因此下一轮的背景认领会将其纳入上下文。
+    // 与 `quota.rateLimit` 是两件事：后者按小时计配额，本项按秒抑制连续触发。
     const cooldownMs = config.trigger.cooldownMsPerUser;
     if (cooldownMs > 0) {
       const last = triggerCooldown.get(userId) ?? 0;
@@ -1318,10 +1359,10 @@ export async function createTelegramBot(
         return;
       }
       triggerCooldown.set(userId, receivedAt);
-      // 有界：一个群里换一批人说话就是一批新键，不清的话这张表只涨不落。
-      // 只删过期项**挡不住上界**：`cooldownMsPerUser` 较大时，短时间内超过 4096 个不同发言人
-      // 一个都不过期，这张表照样越过上界继续涨（docs/27 · R-07）。所以清完还超的话按插入序
-      // （Map 的迭代序）再淘汰最旧的那些 —— 它们本来也是最接近过期的。
+      // 需有界：群内换一批发言者即产生一批新键，不清理则该表只增不减。
+      // 仅删除过期项无法保证上界：`cooldownMsPerUser` 较大时，短时间内超过 4096 个不同发言者
+      // 均未过期，该表仍会突破上界继续增长（docs/27 · R-07）。因此清理后仍超限时按插入序
+      // （Map 的迭代序）淘汰最旧的若干项 —— 它们本就是最接近过期的。
       if (triggerCooldown.size > 4096) {
         for (const [key, at] of triggerCooldown)
           if (receivedAt - at >= cooldownMs) triggerCooldown.delete(key);
@@ -1329,11 +1370,11 @@ export async function createTelegramBot(
           triggerCooldown.delete(triggerCooldown.keys().next().value!);
       }
     }
-    // `concurrency.coalesceSameUserMs`：同一个人在窗口内连着说，只为**最后一条**开轮次。
-    // 先到的那几条降级成背景消息 —— 它们的正文照样进这一轮的上下文（`claimBackground` 认领），
-    // 只是渲染成 `[名字 时间] …` 而不是触发消息。这与 docs/02 §215 早先设想的「追加进同一份
-    // delta」不是一回事：往**已经在跑**的轮次里塞新的 user 消息会撞上 `finalized` 后禁止
-    // `appendDelta` 的不变量，那是上下文引擎的红线。默认 0（关）。
+    // `concurrency.coalesceSameUserMs`：同一用户在窗口内连续发言时，只为最后一条开启轮次。
+    // 先到的若干条降级为背景消息 —— 其正文仍进入本轮上下文（由 `claimBackground` 认领），
+    // 只是渲染为 `[名字 时间] …` 而非触发消息。这与 docs/02 §215 早期设想的「追加进同一份
+    // delta」不同：向已在执行的轮次注入新的 user 消息会违反 `finalized` 后禁止
+    // `appendDelta` 的不变量，那是上下文引擎的红线。默认 0（关闭）。
     const coalesceMs = config.concurrency.coalesceSameUserMs;
     if (coalesceMs > 0) {
       const coalesceKey = `${chatId}:${userId}`;
@@ -1369,8 +1410,8 @@ export async function createTelegramBot(
         return;
       }
     }
-    // `inFlight` 走进程内的注册表而不是 `turns` 表：从这里到 `registry.register` 之间**没有 await**，
-    // 所以这个判据是真的能挡住同一个人两条并发消息的（docs/27 · R-04）。
+    // `inFlight` 读取进程内注册表而非 `turns` 表：从此处到 `registry.register` 之间没有 await，
+    // 因此该判据确实能拦截同一用户的两条并发消息（docs/27 · R-04）。
     if (
       !dependencies.quota.canStart({
         chatId,
@@ -1381,14 +1422,14 @@ export async function createTelegramBot(
         inFlight: dependencies.registry.countForUser(userId),
       })
     ) {
-      // 判成触发却没人开轮次的消息必须降级成背景（同 `cooldownMsPerUser` 那一路，docs/20 · W-TG-05）：
-      // `claimBackground` 只认领 `triggered=0`，留着 1 的话这条消息既没被回答、也进不了下一轮的上下文。
+      // 判为触发但未开启轮次的消息必须降级为背景（同 `cooldownMsPerUser` 路径，docs/20 · W-TG-05）：
+      // `claimBackground` 只认领 `triggered=0`，保留 1 会使该消息既得不到回应也无法进入下一轮上下文。
       dependencies.archive
         .scope(chatId, message.message_thread_id ?? null)
         .demoteToBackground(archived.id);
-      // `concurrentPerUser` 挡下来的不是额度：这个人手上还有轮次在跑，说完就能接着说。入口串行的
-      // 年代这一档碰不到，所以一直和额度共用同一句文案 —— 而「今天的额度用完了」会让人当天不再尝试。
-      // 这句不受 `onExceeded.reply` 管：那个开关是给「额度用光」用的，而这里沉默等于 bot 装没看见。
+      // `concurrentPerUser` 拦截的不是额度：该用户仍有轮次在执行，结束后即可继续。入口串行时期
+      // 这一档不可能触发，因此长期与额度共用同一文案 —— 而「今天的额度用完了」会使用户当天不再尝试。
+      // 本条不受 `onExceeded.reply` 控制：该开关用于额度耗尽场景，此处沉默等同于 bot 不响应。
       const rejection = dependencies.quota.lastStartRejection;
       if (rejection === "concurrent") {
         dependencies.log.event({
@@ -1400,16 +1441,16 @@ export async function createTelegramBot(
           data: { concurrentPerUser: config.quota.rateLimit.concurrentPerUser },
         });
         await ctx.reply(
-          `我同时最多接 ${config.quota.rateLimit.concurrentPerUser} 件事，你手上的还没说完。等它收尾再说这条。`,
+          `我同时最多处理 ${config.quota.rateLimit.concurrentPerUser} 轮，你的上一轮尚未结束。等它结束后再发送。`,
         );
       } else if (rejection === "rate_user" || rejection === "rate_chat") {
-        // **频率这一档也不是额度。** 上面那个论证一字不改地适用：真人看到的原话是「今天的额度
-        // 用完了（已用 —/—），下个额度窗口 重置。」而真实原因是「这一小时开了 30 轮」，与金额
-        // 无关，占位符还直接漏了出去（docs/28 · L-QUOTA-02）。窗口是**滚动**一小时
-        // （`canStart` 数的是 `started_at >= now-1h`），所以说的是「等最早那一轮滚出窗口」而不是
-        // 「整点重置」—— 后者会让人在 59 分时白等。
-        // 同样不受 `onExceeded.reply` 管，理由与并发那档一致：那个开关是给「额度用光」用的
-        // （沉默意味着「今天别再来了」），而频率拒绝沉默等于 bot 对一句正常的话装没看见。
+        // 频率这一档同样不是额度。上述论证完全适用：用户实际看到的是「今天的额度
+        // 用完了（已用 —/—），下个额度窗口 重置。」而真实原因是「本小时已开启 30 轮」，与金额
+        // 无关，且占位符原样泄露给了用户（docs/28 · L-QUOTA-02）。窗口是滚动一小时
+        // （`canStart` 统计的是 `started_at >= now-1h`），因此表述为「等待最早一轮滚出窗口」而非
+        // 「整点重置」—— 后者会让用户在 59 分时无谓等待。
+        // 同样不受 `onExceeded.reply` 控制，理由与并发档一致：该开关用于额度耗尽场景
+        // （沉默意味着当天不必再尝试），而频率拒绝时沉默等同于 bot 对正常请求不响应。
         const perChat = rejection === "rate_chat";
         const limit = perChat
           ? config.quota.rateLimit.turnsPerChatPerHour
@@ -1422,15 +1463,15 @@ export async function createTelegramBot(
           userId,
           data: { rejection, limit },
         });
-        // 说「到上限了」而不是「开了 N 轮」：判据是 `count >= limit`，运维中途调小限额时 count
-        // 会大于 limit，报一个算不准的数字比不报更糟。
+        // 表述为「已达上限」而非「已开启 N 轮」：判据是 `count >= limit`，运维中途调小限额时 count
+        // 会大于 limit，给出不准确的数字比不给更差。
         await ctx.reply(
-          `${perChat ? "这个会话" : "你"}最近一小时开的轮次到频率上限了（每小时 ${limit} 轮，按${perChat ? "会话" : "人"}算，与额度无关）。` +
-            "等最早那一轮满一小时滚出窗口就能接着说，最多再等一小时。",
+          `${perChat ? "这个会话" : "你"}最近一小时的轮次已达频率上限（每小时 ${limit} 轮，按${perChat ? "会话" : "人"}算，与额度无关）。` +
+            "最早一轮满一小时移出滚动窗口后即可继续，最长等待一小时。",
         );
       } else {
-        // `canStart` 只有那三档，走到这里说明有人加了第四档却没跟这里对齐。**别再套额度文案** ——
-        // 那正是上面两处注释在说的事（占位符会原样漏给用户，而原因根本不是金额）。
+        // `canStart` 只有那三档，执行到此说明新增了第四档但未同步本处。不要复用额度文案 ——
+        // 上面两处注释已说明原因（占位符会原样泄露给用户，且真实原因与金额无关）。
         dependencies.log.event({
           level: "warn",
           kind: "quota.check",
@@ -1439,7 +1480,7 @@ export async function createTelegramBot(
           userId,
           data: { rejection },
         });
-        await ctx.reply("现在接不了这条，过一会儿再说。");
+        await ctx.reply("当前无法处理该请求，请稍后重试。");
       }
       return;
     }
@@ -1453,16 +1494,16 @@ export async function createTelegramBot(
       config.context.scope,
     );
     const roleLimits = config.quota.perUser.byRole[effectiveRole];
-    // 预留额按「这一轮大概会发出去多少」估：窗口现有水位 + 系统提示词的预算上限。
-    // 之前是 `limit.tokens / 4` 这个与本会话无关的常数，空会话高估、长会话严重低估（docs/17 · N-QUOTA-01）。
+    // 预留额按本轮预计发送量估算：窗口当前水位 + 系统提示词的预算上限。
+    // 此前使用 `limit.tokens / 4` 这一与会话无关的常数，空会话高估、长会话严重低估（docs/17 · N-QUOTA-01）。
     const estimatedTokens = Math.max(
       dependencies.context.windowTokens(key) + config.prompt.maxTokens,
       1000,
     );
     const modelEstimate =
       dependencies.estimateTurnCost?.(estimatedTokens, key) ?? null;
-    // 拒绝也要把这条消息降级成背景（同频率 / 冷却 / 合并三条路，docs/20 · W-TG-05）：留着
-    // `triggered=1` 的话它既没被回答、`claimBackground` 也认领不到，模型下一轮压根不知道有人说过话。
+    // 拒绝时同样要将该消息降级为背景（同频率 / 冷却 / 合并三条路径，docs/20 · W-TG-05）：保留
+    // `triggered=1` 会使它既得不到回应、也无法被 `claimBackground` 认领，模型下一轮无从得知有人发言。
     if (
       config.quota.enabled &&
       config.quota.requirePricing &&
@@ -1491,10 +1532,10 @@ export async function createTelegramBot(
           },
         })
       : null;
-    // **额度关着的时候一条都不落。** 这个三元此前只看 `reservation` 是不是空，而
-    // `quota.enabled=false` 时它恒为空 —— 于是每一轮都记一条 `warn quota.exceeded`
-    // 「Quota reservation rejected」而轮次照常开（logs/2026-08-18：31 轮里 30 条）。`docs/10` 给这个 kind 定的
-    // 字段是 `scope/subject/spent/limit`，额度关着时四个都不存在；而排障时第一眼看到的就是它。
+    // 额度关闭时不记录任何一条。该三元表达式此前只判断 `reservation` 是否为空，而
+    // `quota.enabled=false` 时它恒为空 —— 导致每一轮都记录一条 `warn quota.exceeded`
+    // 「Quota reservation rejected」而轮次照常开启（logs/2026-08-18：31 轮中有 30 条）。`docs/10` 为该 kind
+    // 定义的字段是 `scope/subject/spent/limit`，额度关闭时四者均不存在；而排障时首先看到的正是它。
     if (config.quota.enabled) {
       dependencies.log.event({
         level: reservation ? "info" : "warn",
@@ -1508,8 +1549,8 @@ export async function createTelegramBot(
       });
     }
     if (config.quota.enabled && !reservation) {
-      // 拒绝的原因分档：global 超限是「整个部署停摆」，必须让 owner 知道；chat / user 超限只是
-      // 这个人/这个群用完了（docs/10 §6 的 quota_global_exceeded）。
+      // 拒绝原因分档：global 超限意味着整个部署停止服务，必须通知 owner；chat / user 超限仅表示
+      // 该用户或该群的额度已用尽（docs/10 §6 的 quota_global_exceeded）。
       const rejection = dependencies.quota.lastRejection;
       const money = (value: number): string => `$${value.toFixed(2)}`;
       if (
@@ -1527,12 +1568,12 @@ export async function createTelegramBot(
           rejection.window,
         );
       }
-      // 同上：没开成轮次的触发消息一律降级成背景，否则额度用光那一天说的话全部凭空消失。
+      // 同上：未成功开启轮次的触发消息一律降级为背景，否则额度耗尽当天的全部发言都会丢失。
       scoped.demoteToBackground(archived.id);
-      // **金额这一档是 `onExceeded.reply` 唯一管得着的地方**（docs/11 的 quota 段）：关掉它的语义是
-      // 「额度用光了就别再回话」。频率与并发那两档各有自己的文案且不受它管，理由见上面两处注释。
-      // 分档文案那次整改把 `main` 上唯一的读点（那个 `else if`）删掉了，而金额档从来没读过它 ——
-      // 于是这个开关存得住、WebUI 还在写、运行时零效果。
+      // 金额档是 `onExceeded.reply` 唯一生效的位置（docs/11 的 quota 段）：关闭它的语义是
+      // 额度耗尽后不再回复。频率与并发两档各有独立文案且不受其控制，理由见上方两处注释。
+      // 分档文案那次调整删除了 `main` 上唯一的读取点（那个 `else if`），而金额档从未读取过它 ——
+      // 导致该开关可以保存、WebUI 仍在写入，但运行时无任何效果。
       if (config.quota.onExceeded.reply) {
         await ctx.reply(
           config.quota.onExceeded.message
@@ -1552,9 +1593,9 @@ export async function createTelegramBot(
       config.concurrency.turnTimeoutMs,
     );
     let release: (() => void) | null = null;
-    // 「排队了多久」此前完全不可观测：`turn.start` 在**拿到槽位之后**才发、且不带等待时长，于是
-    // 「bot 半天不回」是排队还是上游慢，日志里分不出来（docs/28 · L-LOG-01）。判据用只读的
-    // `available()` —— 无条件记 `turn.queued` 等于每轮多一行 info，而「排过队」才是要找的那件事。
+    // 排队时长此前完全不可观测：`turn.start` 在获取槽位之后才发出且不携带等待时长，因此
+    // 「bot 长时间无响应」是排队还是上游慢，日志中无法区分（docs/28 · L-LOG-01）。判据使用只读的
+    // `available()` —— 无条件记录 `turn.queued` 等于每轮多一行 info，而需要定位的是发生过排队的轮次。
     const queuedAt = Date.now();
     const wasQueued = !dependencies.concurrency.available(key);
     const queueSnapshot = {
@@ -1569,7 +1610,7 @@ export async function createTelegramBot(
     } catch (error) {
       dependencies.registry.finish(pendingId);
       if (reservation) dependencies.quota.release(reservation);
-      // 同上：队列满/被取消也是「触发了但没轮次」，不降级这条消息就彻底丢了。
+      // 同上：队列已满或被取消同样属于「已触发但无轮次」，不降级该消息就会彻底丢失。
       dependencies.archive
         .scope(chatId, message.message_thread_id ?? null)
         .demoteToBackground(archived.id);
@@ -1593,8 +1634,8 @@ export async function createTelegramBot(
       );
       return;
     }
-    // openTurn 之后到大 try 之间的每一行都可能抛（非法时区、坏形状快照、DB 约束）。放在 try 外面时
-    // 抛出会永久泄漏并发槽与配额预留，该会话在 perKey 次触发后彻底卡死（docs/19 · R-BOT-01）。
+    // openTurn 之后到外层 try 之间的每一行都可能抛出（非法时区、形状异常的快照、DB 约束）。若置于
+    // try 之外，抛出会永久泄漏并发槽与配额预留，该会话在 perKey 次触发后完全卡死（docs/19 · R-BOT-01）。
     let turn: RuntimeTurnContext;
     try {
       turn = await dependencies.context.openTurn({
@@ -1640,12 +1681,12 @@ export async function createTelegramBot(
         key,
         data: { state: "setup_failed" },
       });
-      await ctx.reply("出了点问题，已记录。");
+      await ctx.reply("处理失败，已记录。");
       return;
     }
     const waitedMs = Date.now() - queuedAt;
-    // `turn.queued` 排在 `turn.start` 之前、并且已经知道等了多久：turnId 要到 `openTurn` 之后才有，
-    // 而一条没有 traceId 的排队记录归不进这一轮（`docs/10 §2`）。
+    // `turn.queued` 先于 `turn.start` 记录，且此时已知等待时长：turnId 在 `openTurn` 之后才产生，
+    // 而没有 traceId 的排队记录无法归属到本轮（`docs/10 §2`）。
     if (wasQueued)
       dependencies.log.event({
         level: "info",
@@ -1659,7 +1700,7 @@ export async function createTelegramBot(
         durationMs: waitedMs,
         data: { ...queueSnapshot, waitedMs },
       });
-    // `spanId` = 这条 trace 的根：其余轮次级 span 都挂在它之下（`docs/10 §1`）。
+    // `spanId` 为该 trace 的根：其余轮次级 span 均挂载于其下（`docs/10 §1`）。
     dependencies.log.event({
       level: "info",
       kind: "turn.start",
@@ -1671,7 +1712,7 @@ export async function createTelegramBot(
       key,
       data: { role: effectiveRole, triggerReason, waitedMs },
     });
-    // 总览页的在途 turn 表只有这一个数据来源：`GET /api/turns/active` 给首屏，之后靠这三种事件增量更新。
+    // 总览页的在途 turn 表仅有这一个数据来源：`GET /api/turns/active` 提供首屏，之后由这三类事件增量更新。
     dependencies.log.publish("turn.started", {
       turnId: turn.turnId,
       key,
@@ -1686,13 +1727,13 @@ export async function createTelegramBot(
         ? await dependencies.onTurn(turn, reservation)
         : "尚未配置可用模型。请在 WebUI 中添加 Provider、模型和 main 别名。";
       let answer: string;
-      /** 流吐过内容之后才断掉（`/cancel`、`turnTimeoutMs`、上游中途挂）。见下面收尾那一段。 */
+      /** 流已产出内容后才中断（`/cancel`、`turnTimeoutMs`、上游中途断开）。见下方收尾段。 */
       let broken = false;
-      // doc 11 §2.1 把 output.* 列进 perChat 白名单，投递侧却一直读的是全局快照 —— 会话级
-      // 的 mode/节奏覆盖存得住、也过了校验，就是永远不生效。取本轮那份合并后的配置。
+      // doc 11 §2.1 将 output.* 列入 perChat 白名单，但投递侧长期读取全局快照 —— 会话级的
+      // mode/节奏覆盖可以保存且能通过校验，但永远不生效。此处取本轮合并后的配置。
       const outputConfig = perChatConfig(currentConfig(), key).output;
-      // 解析失败降级成纯文本这一跳此前一个字都不落，于是行内代码那个 bug 只能靠翻下一次模型调用的
-      // context blob 反推（docs/00 §2.3）。两条投递路径共用这一个回调。
+      // 解析失败降级为纯文本这一跳此前无任何日志，导致行内代码相关的缺陷只能通过翻查下一次模型调用的
+      // context blob 反推（docs/00 §2.3）。两条投递路径共用该回调。
       const onParseFallback = (info: ParseFallbackInfo): void =>
         void dependencies.log.event({
           level: "warn",
@@ -1714,17 +1755,17 @@ export async function createTelegramBot(
               generated,
             )
           : generated;
-        // `output.maxMentions` 在**投递侧**收口：提示词里说好不要 @全群不是边界，这里才是。
+        // `output.maxMentions` 在投递侧收口：提示词中的约定不构成边界，此处才是。
         const outgoing = capMentions(hooked, outputConfig.maxMentions);
         await holdReply(receivedAt, outputConfig.replyDelayMs);
-        // 引用触发消息：与流式那条路（`TelegramOutput.consume`）必须一致。此前这条兜底路径不带
-        // 引用，于是「尚未配置可用模型」这类提示在群里飘着，没人知道它在回谁（docs/14 §2 Q10）。
-        // **只有第一条分片带**，否则一条长回复会在群里刷出一串引用块。
-        // 分片要跟着 parseMode 走：三档各有自己的渲染器，按一档渲染再按另一档声明发出去，
-        // 用户看到的就是转义符本身（docs/08 §5.3）。
-        // 这条兜底路径同样要有投递侧的 span：它是 `onTurn` 缺省时那句提示与非流式产出走的路
-        // （`docs/10 §2` 的 `tg.send`，docs/28 · L-LOG-02）。**失败那一档照落（warn）**：这里抛
-        // 出去只会记成整轮失败，而「这一轮发了什么、哪一段没发出去」是这条日志唯一回答得了的事。
+        // 引用触发消息：必须与流式路径（`TelegramOutput.consume`）一致。此前该兜底路径不携带
+        // 引用，导致「尚未配置可用模型」一类提示在群内孤立出现，无法判断其回复对象（docs/14 §2 Q10）。
+        // 只有第一条分片携带引用，否则一条长回复会在群内产生一串引用块。
+        // 分片需与 parseMode 保持一致：三档各有独立渲染器，按一档渲染再按另一档声明发送，
+        // 用户看到的将是转义符本身（docs/08 §5.3）。
+        // 该兜底路径同样需要投递侧 span：它是 `onTurn` 缺省时的提示与非流式产出所走的路径
+        // （`docs/10 §2` 的 `tg.send`，docs/28 · L-LOG-02）。失败档同样记录（warn）：此处抛出
+        // 只会记为整轮失败，而本轮发出了什么、哪一段未发出，只有该日志能够回答。
         const logSend = (
           ok: boolean,
           ms: number,
@@ -1747,8 +1788,8 @@ export async function createTelegramBot(
           outputConfig.maxMessageChars,
           outputConfig.parseMode,
         );
-        // 这一批分段按 chat 串行（docs/28 · L-TG-02）：段与段之间那个空档里挤进别的轮次的
-        // `sendMessage` 时，用户看到的是「最后一段在后面几条回复之后才冒出来」。
+        // 本批分段按 chat 串行（docs/28 · L-TG-02）：若在段与段之间插入其他轮次的
+        // `sendMessage`，用户看到的将是最后一段出现在后续若干条回复之后。
         await deliveryOrder.run(chatId, async () => {
           for (const [index, part] of segmented.rendered.entries()) {
             const sentAt = Date.now();
@@ -1772,11 +1813,11 @@ export async function createTelegramBot(
               messageId: sent.message_id,
               chars: part.length,
             });
-            // 归档存**渲染前**的正文，与流式那条路（下面存 `answer`）一致。存 `part` 的话
-            // `messages.text` 里躺的是 MarkdownV2 转义后的文本 —— WebUI 会话页和 `read_messages`
-            // 看到的 bot 发言带一串 `\-` `\.`，同一张表里两条路径两种内容。**分片时每个
-            // `message_id` 存自己那一段**（`segmentTelegramText`，docs/28 · L-TG-03）：此前这里给
-            // 每一段都存一份完整全文，三段的回复在 `messages` 与 `messages_fts` 里各躺三份。
+            // 归档写入渲染前的正文，与流式路径（下方写入 `answer`）一致。若写入 `part`，
+            // `messages.text` 中存放的将是 MarkdownV2 转义后的文本 —— WebUI 会话页与 `read_messages`
+            // 看到的 bot 发言会带有一串 `\-` `\.`，同一张表内两条路径两种内容。分片时每个
+            // `message_id` 写入其对应段（`segmentTelegramText`，docs/28 · L-TG-03）：此前此处为
+            // 每一段都写入完整全文，三段的回复在 `messages` 与 `messages_fts` 中各存三份。
             scoped.append({
               chatId,
               messageThreadId: message.message_thread_id ?? null,
@@ -1827,8 +1868,8 @@ export async function createTelegramBot(
               },
             }),
           receivedAt,
-          // 插件钩子只在定稿时跑一次；`capMentions` 是每帧都要过的那一道 —— 拆成两个回调之前
-          // 它俩合在这个 async 闭包里，而流式编辑路径压根不调它，「@ 全群上限」于是形同虚设。
+          // 插件钩子只在定稿时执行一次；`capMentions` 需每帧执行 —— 拆分为两个回调之前
+          // 两者合并在同一个 async 闭包内，而流式编辑路径不会调用它，导致 @ 全群上限完全失效。
           async (text) =>
             dependencies.plugins
               ? pluginText(
@@ -1840,7 +1881,7 @@ export async function createTelegramBot(
         );
         output.onParseFallback = onParseFallback;
         // 投递层的语义 span（`docs/10 §1` 的 span K/L/M）。`tg.edit` / `tg.action` 由
-        // `TelegramOutput` 聚合成一条，这里只负责把它落成日志行。
+        // `TelegramOutput` 聚合为一条，此处只负责将其写成日志行。
         output.onDelivery = (event) =>
           void dependencies.log.event({
             level: event.ok ? "debug" : "warn",
@@ -1878,30 +1919,30 @@ export async function createTelegramBot(
         );
         if (consumed.interrupted) {
           broken = true;
-          // `interrupt()` 先放开 `drained`，否则下面那个 await 会永远悬着（流中途抛的时候
-          // `streamDone()` 所在的收尾回调压根没跑到）。
+          // `interrupt()` 需先释放 `drained`，否则下方的 await 会永久挂起（流中途抛出时
+          // `streamDone()` 所在的收尾回调不会执行）。
           generated.interrupt();
-          // **一个字都没投出去时不能把原因吞掉。** 真正的错误在 `final` 那条链上（`streamFailure`）；
-          // 这里 `answer = ''` 会让整轮以含糊的 `model_returned_empty` 收尾，而那正是 runtime 那份
-          // `onExhausted` 要避免的事 —— 用户该看到「模型服务暂时连不上」而不是「没吐出正文」。
+          // 未投递任何内容时不能吞掉失败原因。真正的错误在 `final` 链上（`streamFailure`）；
+          // 此处 `answer = ''` 会使整轮以含糊的 `model_returned_empty` 收尾，而那正是 runtime 的
+          // `onExhausted` 要避免的情况 —— 用户应看到「模型服务不可用」而非「未返回任何正文」。
           if (!consumed.text.trim()) answer = await generated.final;
           else {
             void generated.final.catch(() => undefined);
             answer = consumed.text;
           }
         }
-        // **归档与上下文一律存「真正发出去的那份」**，也就是流里攒到的全文。
-        // `generated.final` 是 AI SDK 的 `result.text` = **最后一步**的正文，而多步轮次发给用户的是
-        // 「旁白段落 + 结论」整条消息 —— 拿 final 落库的话，屏幕上有三段、`read_messages` 与
-        // WebUI 会话页只有最后一段，下一轮模型也看不见自己的旁白，用户一句「你上面第二段说的」
-        // 就无从对应。实测两轮真实多步（logs/2026-08-18 验证轮）都是这个差异。
-        // final 仍然留着当**失败信号**：它为空意味着最后一步没吐正文，那条 warn 照记。
+        // 归档与上下文一律写入实际发出的内容，即流中累积的全文。
+        // `generated.final` 是 AI SDK 的 `result.text`，即最后一步的正文，而多步轮次发送给用户的是
+        // 「过程说明 + 结论」的整条消息 —— 若以 final 落库，屏幕上有三段而 `read_messages` 与
+        // WebUI 会话页只有最后一段，下一轮模型也看不到自身的过程说明，用户引用「上面第二段」时
+        // 无法对应。实测两轮真实多步（logs/2026-08-18 验证轮）均存在该差异。
+        // final 仍保留作为失败信号：其为空意味着最后一步未产出正文，对应的 warn 照常记录。
         else {
           const final = await generated.final;
           answer = consumed.text.trim() ? consumed.text : final;
-          // 这条回落此前一个字都不落日志（docs/04 §2 那节收尾补跑）。它意味着「最后一步没有正文」——
-          // 而流里攒到的很可能只是工具调用之间的过程旁白，被当成了答复提交进上下文（本次事故）。
-          // 收尾补跑（runtime 的 `wrapUpIfNeeded`）能救大多数，救不了的至少要在日志里留下痕迹。
+          // 该回落路径此前无任何日志（docs/04 §2 的收尾补跑一节）。它意味着最后一步没有正文 ——
+          // 而流中累积的很可能只是工具调用之间的过程说明，被当作答复提交进了上下文（本次故障）。
+          // 收尾补跑（runtime 的 `wrapUpIfNeeded`）可覆盖大部分场景，无法覆盖的至少要在日志中留痕。
           if (!final.trim())
             dependencies.log.event({
               level: "warn",
@@ -1918,11 +1959,11 @@ export async function createTelegramBot(
               },
             });
         }
-        // **分段时每个 `message_id` 存自己那一段**（docs/28 · L-TG-03）：此前这个循环给每一段都存
-        // `answer`，一条 9469 字切成 3 条的回复于是在 `messages` 里躺三行 9469 字、`messages_fts`
-        // 三份，`search_messages` 把同一条回复搜出三次。`segments` 只在真的分片时非空 —— 单条那一路
-        // 存的仍是模型原话（`answer`），而 `segments` 出自改写并渲染之后的文本。
-        // 上下文侧不动：下面 `appendDelta` 仍是一条整全文。
+        // 分段时每个 `message_id` 写入其对应段（docs/28 · L-TG-03）：此前该循环为每一段都写入
+        // `answer`，一条 9469 字切成 3 条的回复因此在 `messages` 中占三行各 9469 字、`messages_fts`
+        // 存三份，`search_messages` 会将同一条回复搜出三次。`segments` 仅在实际分片时非空 —— 单条
+        // 路径写入的仍是模型原文（`answer`），而 `segments` 来自改写并渲染之后的文本。
+        // 上下文侧不变：下方 `appendDelta` 仍写入一条完整全文。
         for (const [index, messageId] of consumed.messageIds.entries())
           scoped.append({
             chatId,
@@ -1941,9 +1982,9 @@ export async function createTelegramBot(
             turnId: turn.turnId,
           });
       }
-      // 空正文既发不出去（splitTelegramText('') 是空数组，用户看到的是彻底的沉默），
-      // 又会把一条空的 assistant 消息留进上下文。当成失败处理：至少用户知道这轮没成，
-      // 而且下一轮的 prompt 里不会多一条谁都解释不了的空消息（docs/16 §5「摘除比伪造安全」）。
+      // 空正文既无法发出（splitTelegramText('') 返回空数组，用户看到的是完全无响应），
+      // 又会向上下文写入一条空的 assistant 消息。按失败处理：至少用户能得知本轮未成功，
+      // 且下一轮 prompt 中不会多出一条无法解释的空消息（docs/16 §5「摘除比伪造安全」）。
       if (!answer.trim()) throw new Error("model_returned_empty");
       dependencies.context.appendDelta(turn, {
         id: turn.turnId,
@@ -1955,22 +1996,22 @@ export async function createTelegramBot(
       });
       const committed = await dependencies.context.commitTurn(turn);
       /**
-       * **流吐过内容之后才断掉的轮次：delta 照常提交，但状态不许记成 committed。** 这正是
-       * docs/04 §5.3 点名要「在实现中显式处理」的那条 —— §1「delta 不提交」规则的唯一例外：
-       * 内容已经在用户屏幕上，上下文必须与用户所见一致，可这一轮确实没跑完。
+       * 已产出内容后才中断的轮次：delta 照常提交，但状态不得记为 committed。这正是
+       * docs/04 §5.3 明确要求在实现中显式处理的一条 —— §1「delta 不提交」规则的唯一例外：
+       * 内容已呈现在用户屏幕上，上下文必须与用户所见一致，但本轮确实未执行完成。
        *
-       * 此前这里只有一条 committed 分支，于是 `turnTimeoutMs` 到点被 abort、而前面某一步已经吐过
-       * 旁白的轮次，会以「成功」收尾：用户没有任何提示、`turns` 那行是 committed、
+       * 此前此处只有一条 committed 分支，导致 `turnTimeoutMs` 到期被 abort、且前序步骤已产出
+       * 过程说明的轮次会以成功状态收尾：用户没有任何提示、`turns` 行记为 committed、
        * `consecutiveFailures` 还被清零（实测 logs/2026-08-18 · B8F92Z：19:13:03 `model.error
-       * timeout` = 600 秒到点，19:16:04 `turn.end turn committed`）。「（生成中断）」那个后缀由
-       * `TelegramOutput.consume` 在同一条 `interrupted` 上加。
+       * timeout` 即 600 秒到期，19:16:04 `turn.end turn committed`）。「（生成中断）」后缀由
+       * `TelegramOutput.consume` 依据同一个 `interrupted` 添加。
        */
       /**
-       * **超时不是取消。** 两者都是 abort，可判据只看 `aborted` 的话，`turnTimeoutMs` 到点的轮次
-       * 会记 `cancelled` 并被下面的 `failures.failed` 跳过 —— 于是「每一轮都卡满十分钟」这种最该响的
-       * 故障一次告警都不响（`logs/2026-08-18`：三十来轮全记 cancelled，`consecutiveFailures`
-       * 一次没涨）。`docs/04 §5.3` 现在把收尾分三档：`/cancel` → cancelled；超时 → failed 且计入；
-       * 上游自己挂 → failed。用户可见文案仍按 `reason` 分（收到「已取消」的人会以为自己误触了）。
+       * 超时不等同于取消。两者都表现为 abort，但若判据只看 `aborted`，`turnTimeoutMs` 到期的轮次
+       * 会记为 `cancelled` 并被下方的 `failures.failed` 跳过 —— 导致「每轮都耗满十分钟」这类最需要
+       * 告警的故障不会触发任何告警（`logs/2026-08-18`：三十余轮全部记为 cancelled，`consecutiveFailures`
+       * 始终为 0）。`docs/04 §5.3` 现将收尾分为三档：`/cancel` → cancelled；超时 → failed 且计入；
+       * 上游中断 → failed。用户可见文案仍按 `reason` 区分（收到「已取消」会误以为是自己触发的）。
        */
       const timedOut = turn.abortSignal.reason === "timeout";
       const cancelled = broken && turn.abortSignal.aborted && !timedOut;
@@ -1979,8 +2020,8 @@ export async function createTelegramBot(
         state,
         commitId: committed.commit.id,
         rebased: committed.rebased,
-        // 超时那一档两个字段都带：`cancel_reason='timeout'` 说清是谁掐的，`error` 让它在失败列表里
-        // 与「上游中途挂了」分得开。
+        // 超时档两个字段都写：`cancel_reason='timeout'` 表明中断来源，`error` 使其在失败列表中
+        // 可与上游中途断开区分开。
         ...(cancelled || timedOut
           ? { cancelReason: String(turn.abortSignal.reason ?? "cancelled") }
           : {}),
@@ -2018,15 +2059,15 @@ export async function createTelegramBot(
         rebased: committed.rebased,
         durationMs: settled?.durationMs ?? 0,
       });
-      // 工具真的跑过、结果也进了已提交的上下文：记忆写入跟着提交走，否则上下文说「写好了」而库里没有。
+      // 工具已实际执行且结果已进入已提交的上下文：记忆写入随提交一并落库，否则上下文声称已写入而库中没有。
       dependencies.memory.flush(turn.turnId);
-      // 断掉的一轮不清零（它不是一次成功），但也只有 `failed` 才计入连续失败 —— 取消不算故障，
+      // 中断的轮次不清零计数（它不是一次成功），但只有 `failed` 才计入连续失败 —— 取消不算故障，
       // 超时算（`docs/04 §5.3` 的三档）。
       if (!broken) failures.succeeded();
       else if (!cancelled)
         failures.failed(timedOut ? "turn_timeout" : "stream_interrupted");
-      // `quota.warnAtRatio`：跨过预警线时在回复后补一句，每个 bucket 只提示一次（docs/10 §5.4）。
-      // 提示挂在成功那一轮的后面而不是单独发一条：多一条消息在群里是噪音。
+      // `quota.warnAtRatio`：越过预警线时在回复后追加一句，每个 bucket 只提示一次（docs/10 §5.4）。
+      // 提示附在成功轮次之后而非单独发送：群内多一条消息即为噪声。
       if (reservation) {
         const warning = dependencies.quota.warning(
           reservation,
@@ -2040,14 +2081,14 @@ export async function createTelegramBot(
             .catch(() => undefined);
       }
     } catch (error) {
-      // 与上面那一路同一份判据：超时是故障，不是取消（`docs/04 §5.3`）。这条路上的表现更直接 ——
-      // 一个字都没投递出去的超时轮次此前也记 cancelled，于是上游变黑洞时连续失败告警永不触发。
+      // 与上方路径共用同一判据：超时属于故障而非取消（`docs/04 §5.3`）。本路径上的影响更直接 ——
+      // 未投递任何内容的超时轮次此前同样记为 cancelled，导致上游不可用时连续失败告警永不触发。
       const timedOut = turn.abortSignal.reason === "timeout";
       const cancelled = turn.abortSignal.aborted && !timedOut;
-      // `abortTurn` 也在写库（`releaseClaims`，`cancel.commitPartial` 开着时还会跑一整个
-      // `commitTurn`）。它抛出去的话下面这行就不执行了，`turns` 那行会一直是 `state='running'`
-      // —— `GET /api/turns/active` 与总览页的 running 计数在整个进程生命周期内都是错的，
-      // 直到下次重启的 `recoverAfterCrash` 才收拾。清理是尽力而为，**记状态不是**。
+      // `abortTurn` 同样会写库（`releaseClaims`，`cancel.commitPartial` 开启时还会执行完整的
+      // `commitTurn`）。若它向外抛出，下一行将不会执行，`turns` 行会长期停留在 `state='running'`
+      // —— `GET /api/turns/active` 与总览页的 running 计数在整个进程生命周期内都是错误的，
+      // 直到下次重启的 `recoverAfterCrash` 才会修正。清理属于尽力而为，状态记录不是。
       try {
         await dependencies.context.abortTurn(
           turn,
@@ -2113,8 +2154,8 @@ export async function createTelegramBot(
         rebased: false,
         durationMs: settled?.durationMs ?? 0,
       });
-      // 连续 5 轮失败是「整个部署坏了」的信号（docs/10 §6）。取消不算 —— 用户点了取消不是故障；
-      // 超时算，而且它正是那个信号最该覆盖的场景（上游变黑洞时每一轮都走这条路）。
+      // 连续 5 轮失败是部署级故障的信号（docs/10 §6）。取消不计入 —— 用户主动取消不属于故障；
+      // 超时计入，且它正是该信号最需要覆盖的场景（上游不可用时每一轮都走这条路径）。
       if (!cancelled)
         failures.failed(
           timedOut
@@ -2123,11 +2164,11 @@ export async function createTelegramBot(
               ? error.message
               : String(error),
         );
-      // 记账上超时算故障，**对用户仍是另一句话**：没点过取消的人收到「已取消」只会以为自己误触了，
-      // 而收到一句通用的失败提示也说不出「这一轮卡了十分钟」。
+      // 统计上超时计为故障，但对用户仍使用独立文案：未执行过取消的用户收到「已取消」会误以为是
+      // 自己触发的，而通用失败提示也无法说明本轮已耗时十分钟。
       await ctx.reply(
         timedOut
-          ? `这一轮太久没有进展，已经停下了。(ref: ${turn.turnId.slice(0, 12)})`
+          ? `本轮长时间无进展，已终止。(ref: ${turn.turnId.slice(0, 12)})`
           : cancelled
             ? "对话已取消"
             : failureText(error, turn.turnId.slice(0, 12)),

@@ -7,7 +7,7 @@
 > 想知道现在的状态只看本文。反过来，本文**不重抄**别处已经由测试焊住的清单，只指过去：
 > 同一个事实有两份副本，迟早会漂。上一次漂的代价是「未接线配置键」在四个地方有三个数字。
 >
-> 核对时间：**2026-08-27**（§2 的体例清理：从 35 行里搬走 18 行不是欠账的，剩下的每条挂上活性探针，
+> 核对时间：**2026-08-30**（权限模型改口径 + 审批按钮改发 owner 私聊，见下）／2026-08-27（§2 的体例清理：从 35 行里搬走 18 行不是欠账的，剩下的每条挂上活性探针，
 > 见 §4 末两条；同一批还纠正了本文与 [21](./21-webui-coverage-gaps.md) / [README](./README.md) 里
 > 六处对不上代码的数字）／2026-08-25（手动验收台账 [29](./29-manual-acceptance-log.md) 开张 —— 排场次时逐条回代码核对，
 > §2.3 末尾那四条是这次数出来的）／2026-08-21（定时任务静默 / 编辑 / 硬删 + 任务与审批页补齐）／2026-08-20（扩展页重设计 + MCP 登录落地）／2026-08-19（第九轮整改后 + M12 自我扩展落地 + 8-18 两次进程崩溃的收口
@@ -21,6 +21,22 @@
 > 写入侧与读出侧的边界（trace 那条读出侧修过一次，修完之后正确地读着一个永远是 NULL 的列）、
 > 以及被整体替换掉的依赖（所有既有用例都把 `bot.api` 换掉，节流器从没进过测试回路）。
 > **下一轮要找同一类东西，先读那份报告的 §6（跑过没问题的）与 §8（排除掉的 8 条假象）。**
+>
+> **2026-08-30 · 有效角色改口径（不是欠账，登记在此是因为它改掉了别处一批既有表述）。**
+> 判据仍只有一份（`packages/core/src/access.ts` 的 `resolveEffectiveRole`），规格在
+> [05 §2.2](./05-tools-and-permissions.md#2-角色与判定)，配置语义在 [11](./11-config-reference.md) 的
+> `access` 段：私聊 = `role(user)`；群 / 频道任一侧 `blocked` 即 `blocked`，其余取
+> `min(max(role(user), role(chat)), 'trusted')`。三处变化 ——
+> ①**会话角色从上限翻成下限**（取两侧较高者：把群的授信借给没单独登记的成员，而不是把成员拖回默认档）；
+> ②**群内封顶 `trusted`**，由此得两条不变量：`effectiveRole === 'owner'` ⟹ `isPrivate`，
+> 群里的有效角色只可能是 `blocked` / `limited` / `trusted` —— 旧的取小规则原本要守的
+> 「防群内注入借权」（[14 §3](./14-open-questions.md) T8）由这条接手；
+> ③**私聊只占 `principals` 的 `user:` 一行**，不再写也不再读 `chat:<正数 id>`（迁移
+> `0015_principals_drop_private_chat.sql` 删存量并把 `kind='chat' AND role='owner'` 的行降为
+> `trusted`；`/grant chat <正数 id>` 与把群设成 `owner` 一律拒收）。
+> `blocked` 是任一侧一票否决且**先于**抬升判定，所以 `access.defaultChatRole` 出厂 `blocked`
+> 仍表示「未登记的群整群静默」、`defaultUserRole` 出厂 `blocked` 仍保证陌生人不会因为进了受信群
+> 而提权 —— 抬升语义没有把它变成一扇默认敞开的门。审批按钮的落点随之改到 owner 私聊，见 §2.2。
 
 ---
 
@@ -31,7 +47,7 @@
 | 问题 | 权威 | 由什么焊住 |
 |---|---|---|
 | 哪些配置键还没接线 | [11 §2.0.1](./11-config-reference.md)（当前 10 条，每条写明为什么留着） | `tests/config.test.ts` —— 白名单每条必须在 `docs/11` 标记，且标注要跟着 `HOT_RELOADABLE_CONFIG_KEYS` |
-| 验收条目的勾选状态 | [13](./13-acceptance-criteria.md)（当前 **326 / 522**） | `tests/acceptance.test.ts` —— `(自动)` 要点名真实用例文件、`(手动)` 要点名日期与场次且 [29](./29-manual-acceptance-log.md) 里真有那一条，签署表分子分母自动核对 |
+| 验收条目的勾选状态 | [13](./13-acceptance-criteria.md)（当前 **325 / 522**） | `tests/acceptance.test.ts` —— `(自动)` 要点名真实用例文件、`(手动)` 要点名日期与场次且 [29](./29-manual-acceptance-log.md) 里真有那一条，签署表分子分母自动核对 |
 | 某条手动验收项谁在哪天跑的 | [29](./29-manual-acceptance-log.md)（装置 / 逐场剧本 / 实测值 / 豁免登记） | 同上 —— 打了勾而台账里没有对应小节会报错 |
 | WebUI 控制面够不着什么 | [21](./21-webui-coverage-gaps.md) | 无自动约束（人工复算，方法见其 §1） |
 | 某行代码为什么长这样 | [`reviews/`](./reviews/) 里的条目编号 | `tests/docs.test.ts` —— **保护是部分的，不要当成全覆盖**：源码里 503 处引用、`reviews/` 里 288 个编号，而「删掉这一条就报错」实测只对 **18 个（6.3%）**成立。三层松弛：判据用 `corpus.includes()` 裸子串（`S-01` 被 `L-OPS-01` 满足、`I-01` 被 `D-UI-01` 满足，于是 `27` 的 `S-*`/`T-*` 与 `22` 的 `I-*` 两整个家族没有保护）、只认 `· 编号` 形式（裸写的 `` `L-OPS-01` `` 不进判据）、正则要求带连字符（`Z4`/`Z5`、`T17`、`A27` 全在覆盖外）。且是**单向**的：文档里多出零引用条目查不出来 |
@@ -77,25 +93,34 @@
 Bot API 调用），照 `TelegramToolBridge` 的形状注入、presence 即开关。规格在
 [05 §6.1](./05-tools-and-permissions.md)，用例在 `tests/interaction.prompts.test.ts`。
 
-- **Telegram inline keyboard 审批 —— 已落地，适用面是拍板过的边界。** 发起人回执上挂
-  〔批准〕〔拒绝〕，owner 点了走 `callback_query` 的 `a:` 命名空间，落库 `decision_channel='telegram'`。
-  判 owner 用的是**有效角色**（`resolveEffectiveRole`），不是 `/cancel` 那条只取用户角色的窄口径。
-  `request()` 的可用性判据跟着改成「WebUI 没有 SSE 通道 **且** Telegram 通道对这个会话也不可用」
-  才当场拒 —— 只改一半的话新通道在没人开浏览器的部署里永远走不到，而那正是它唯一有用的场景。
-  那道闸判的是**放行那一刻**：回执发不出去（bot 被拉黑 / 429）而 WebUI 也没有 SSE 时，走同一条
-  「无通道」口径当场拒，不留一条谁都裁决不了的 pending 行干等 180 秒（`AC-APV-012`）。
-  启动时扫 `approvals` 里 `tg_message_id IS NOT NULL` 的行收尾并清列（那一列此前全库零写入），
-  裁决落定时也清 —— 但**只在那次编辑真回来之后**：它是待办队列不是历史记录。收尾 = 撤键盘 + 把
-  正文换成结局的**同一次** `editMessageText`（`AC-APV-004`）。
-  **适用面（2026-08-21 拍板，不是欠账）**：有效角色 = min(用户角色, 会话角色)，所以在一个 `trusted`
-  群里连 owner 本人都是 `trusted`，`decidableBy:'owner'` 在那儿无人可满足；而审批基本只在群里发生
-  （`skipForOwner` 默认真）。于是按钮**只在 owner 的私聊与 owner 档的群里出现**，别处退回
-  「去 WebUI 批」的纯文本回执（可用性判据按会话问，所以不会挂出点不动的按钮、也不会干等满 ttlMs）。
-  「裁决提示发 owner 私聊 + 发起人会话只留报信回执」那套**已明确否掉** —— 代价是每条审批两条消息
-  + owner 从没跟 bot 说过话时的 403，而这个缺口挡不住任何已规划的功能：ACP / `HarnessAgent` 那条路
-  本身就是 owner + 仅私聊（[14 §2](./14-open-questions.md) Q8-a），它的逐条 permission（机制已接、
-  **默认档不用它**，[05 §3.5.3](./05-tools-and-permissions.md)）正好落在按钮能用的格子里。理由与代价见
-  [05 §6](./05-tools-and-permissions.md) 那个警示块。
+- **Telegram inline keyboard 审批 —— 已落地，裁决入口在 owner 私聊（2026-08-30 拍板）。**
+  〔批准〕〔拒绝〕发往 `access.bootstrapOwnerId` 的私聊，owner 点了走 `callback_query` 的
+  `a:` 命名空间，落库 `decision_channel='telegram'`；**发起人会话只留一条不含倒计时、不含状态的
+  纯文本报信**（因此没有要收的场，不需要收场编辑）。判 owner 用的是**有效角色**
+  （`resolveEffectiveRole`），不是 `/cancel` 那条只取用户角色的窄口径 —— 新规则下
+  `effectiveRole === 'owner'` ⟹ `isPrivate`，而按钮本来就发在私聊里，两者对得上。
+  `request()` 的可用性判据是「WebUI 没有 SSE 通道 **且** Telegram 通道也不可用」才当场拒 ——
+  只改一半的话新通道在没人开浏览器的部署里永远走不到，而那正是它唯一有用的场景。
+  那道闸判的是**放行那一刻**：回执发不出去（owner 私聊不可达 / bot 被拉黑 / 429）而 WebUI 也没有
+  SSE 时，由 `#receiptUndeliverable` 走同一条「无通道」口径当场拒，不留一条谁都裁决不了的 pending
+  行干等 180 秒（`AC-APV-012` 的形状不变）。
+  启动时扫 `approvals` 里 `tg_message_id IS NOT NULL` 的行收尾并清列，裁决落定时也清 —— 但
+  **只在那次编辑真回来之后**：它是待办队列不是历史记录。收尾 = 撤键盘 + 把正文换成结局的
+  **同一次** `editMessageText`（`AC-APV-004`），撤的目标取 `COALESCE(tg_chat_id, chat_id)`
+  （迁移 `0016`）—— 那条带按钮的消息在 owner 私聊里，而 `chat_id` 记的是发起人会话，少这一列
+  就是拿群 id 配私聊的 message_id 去编辑，全部 400。
+  **这次推翻的是 2026-08-21 那次适用面拍板**：当时的前提是「会话角色是**上限**，所以 `trusted`
+  群里连 owner 本人也只有 `trusted`」，于是按钮只在 owner 的私聊与 owner 档的群里出现。
+  权限模型改口径之后那个前提没了 —— 群内一律封顶 `trusted`，`decidableBy:'owner'` 在**任何**群里
+  都无人可满足，按钮留在发起人会话里只能是一排点不动的东西（而审批基本只在群里发生，
+  `skipForOwner` 默认真）。
+  **当初否掉它的两条代价仍然成立，各有兜底**：①每条审批两条消息（owner 私聊那条带按钮的 +
+  发起人会话那条报信的）—— 报信那条无状态无倒计时，所以多出来的是一条消息，不是一条消息加一串
+  编辑；②owner 从没跟 bot 说过话时私聊发不出去（403）—— 此时**不往群里贴点不动的按钮**，只发报信，
+  审批退回 WebUI，连 SSE 也没有就走上面那条「无通道」当场拒。这两条都不挡任何已规划的功能：
+  ACP / `HarnessAgent` 那条路本身就是 owner + 仅私聊（[14 §2](./14-open-questions.md) Q8-a），
+  它的逐条 permission（机制已接、**默认档不用它**，[05 §3.5.3](./05-tools-and-permissions.md)）
+  正好落在按钮能用的格子里。理由与代价见 [05 §6](./05-tools-and-permissions.md) 那个警示块。
 - **`agent.askEscalateToUser`（转人工）—— 仍未接线**，仍留在 [11 §2.0.1](./11-config-reference.md)
   的 🚧 白名单里。通道不再是障碍（`PromptRequest.kind` 里已留 `agent_ask` 这一档），欠的是语义：
   问谁（子 agent 的发起人还是 owner）、选项从哪儿来（自由文本答复 vs 固定选项）、以及等人期间
@@ -116,7 +141,7 @@ Bot API 调用），照 `TelegramToolBridge` 的形状注入、presence 即开�
 | [08 §6](./08-telegram-adapter.md) 的占位消息上那个 `[取消]` 按钮**从来没有实现过** —— 这一轮才有了第一个生产者，而它挂在别的消息上 | 那一节的示意图里三行占位消息各带一个 `[取消]`，`callback_data = 'c:<turnId>'`。判据那一侧全是真的：`bot.ts:452` 的 handler 在、`TurnRegistry.cancel` 的「发起人或 owner」判据在、收尾那次 `editMessageText` 写「⛔ 已取消」也在（`bot.ts:832`）。**缺的只是键盘本身**：`output.ts` / `stream-output.ts` 一处 `reply_markup` 都没有，全仓 `reply_markup` 只出现在 `prompts.ts`（审批）与 M13 的 `acp-card.ts`。所以 M13 之前那条 handler 是**活着但不可达**的代码 —— 全仓零个 `c:` 生产者 | M13 的 ACP 进度卡片是第一个真生产者（[08 §6.1](./08-telegram-adapter.md) 规则 8），它复用同一条通道而不是新开一种 callback。**因此那条判据路径至今没有被真的点过一次** —— 第一次真实 ACP 调用时值得手点一下。占位消息那一侧要不要补键盘是 D17 占位消息规格的事，比这一条大：`report_progress` 编辑占位消息时得把键盘一起带上（不带就等于撤掉），而那要排 `perChatPerMinute` 的队 ⟨探针：packages/telegram/src/stream-output.ts !~ reply_markup⟩ |
 | `trigger.channels` 点不亮：频道消息一条都进不来 | 频道消息是 `channel_post` 更新，而 `packages/telegram/src/bot.ts` 里没有这个处理器（`bot.on('message')` 不匹配它），`telegram.allowedUpdates` 的默认值里也没有它。`trigger.ts:45` 那半条判断（`chat.type === 'channel' && !config.channels → null`）因此永远等不到输入 | 不是「以为有其实没有」：那个更新类型在 WebUI 的复选框里标着「无处理器」，配置手册也写了。真要接得先定频道语义 —— 频道里没有「@ 谁」，打开等于对每条频道消息都表态（`descriptions.ts` 里那句话），而 `my_chat_member` 之外还要处理 `channel_post` 的作者身份（频道消息可以没有 `from`） ⟨探针：packages/telegram/src/bot.ts !~ channel_post⟩ |
 | **一条被开关关掉的通道，模型无从知道它存在** | `tools.selfExtend.*` 出厂全关，于是 `write_skill` 压根不在模型的工具目录里 —— **而它拿不到任何说明为什么没有**。实测后果（[07 §2.5](./07-skills-plugins-mcp.md)）：用户丢了一个 skill 包，模型解到工作目录一路 `bash scripts/invoke.sh` 用了起来，全程没有一次 `write_skill`（`logs/2026-08-18/tool.jsonl` ts 1787036340–1787036441）。**已闭合的是另外两件事**：通道本身（`install_skill`）与运维侧的提示条（[21 · `G-EXT-07`](./21-webui-coverage-gaps.md)）；模型侧至今没有对策 | 形状上已有先例：`tools.maxRegistered` 截断时会在 RUNTIME 块告知（`prompt/assembler.ts:282`），那条从此是承诺而不是欠账。同样的办法对「被闸关掉的通道」适用，但**要先定边界** —— 把所有关着的开关都报给模型等于给它一张「去求人开这些」的清单。也可以明确拍板「不做」，那就从这里删掉 ⟨探针：packages/core/src/prompt/assembler.ts !~ selfExtend⟩ |
-| 验收条目 196 条未勾 | 其中人工条目一律保持未勾（要人签字，不是测试的事）；其余是没有对应 vitest 用例的 `(自动)` 条目 | 勾选形式由 `tests/acceptance.test.ts` 定死，勾之前先写用例 ⟨探针：无 —— 由 tests/acceptance.test.ts 焊住（分子分母自动核对），本文只指过去⟩ |
+| 验收条目 197 条未勾 | 其中人工条目一律保持未勾（要人签字，不是测试的事）；其余是没有对应 vitest 用例的 `(自动)` 条目 | 勾选形式由 `tests/acceptance.test.ts` 定死，勾之前先写用例 ⟨探针：无 —— 由 tests/acceptance.test.ts 焊住（分子分母自动核对），本文只指过去⟩ |
 | 10 条配置键未接线 | 见 [11 §2.0.1](./11-config-reference.md)，每条写明「暂时没做」还是「不该在这一层做」 | 摘键之前先看 [21 §1](./21-webui-coverage-gaps.md) 的复算方法 ⟨探针：无 —— 由 tests/config.test.ts 与 docs/11 §2.0.1 双向焊住，本文只指过去⟩ |
 | **`data/workspace/<chatId>` 至今没有任何回收**，而持久容器不改变这一点 | `MaintenanceService` 一行都没管它，唯一的可见性是 `GET /api/health` 的 `workspaceBytes`。容器到期被回收**不动这里的文件**（那是 `container_reset` 默认不清文件的同一条取舍：容器是环境，workspace 是数据）| 要清只能人工，或用 `container_reset` 的 `wipeWorkspace` 单会话清（挪进 `.luoli-trash`，不真删）。真要做全局回收，判据不能是「多久没动」—— 一个季度不说话的群，它的工作区仍然是它的资料 ⟨探针：packages/core/src/maintenance.ts !~ gcWorkspace⟩ |
 | `web_fetch` 现在会抽标题 / 链接 / 图片，图片也真的进上下文 —— **JS 渲染与反爬仍然没有** | 此前三样东西是「页面上有、模型看不见」：`<title>`（`head` 整棵在 `DROP_TAGS` 里）、`<a href>` 的地址（只留锚文本，模型没法顺着页面走，只能退回 `web_search` 再搜一遍）、`<img>` 的 alt 与 src（`img` 既不在 `DROP_TAGS` 也不在 `BLOCK_TAGS`，扫到它一个字都不 push）。另外**非 HTML 响应被无条件 `toString('utf8')`**：`image/png` 之类产出最多 2MB 乱码再被 64KB 截断塞进上下文，比「取不到」更糟 —— 整个工具输出预算烧在噪声上，而模型以为自己读到了页面。而图片走不通是**三处各自独立**地挡着：抽取层丢掉 img、工具结果被 `JSON.stringify` + 截断 + 包成不可信文本、`isImagePart` 只认顶层 part 所以 vision 切换 / `capImages` / `degradeImages` 一个都认不出它。同一条管道让 **MCP 的截图也是坏的**（`browser_screenshot` 变成一坨截半 base64） | 规格在 [05 §3.6](./05-tools-and-permissions.md)，红线进了 [02 §9](./02-context-engine.md) 第 21/22 条，表在 [03 §2.4](./03-data-model.md)（`web_assets`）。三处最容易踩：① **`gcFiles()` 的 `referenced` 现在要并两张表** —— 漏一张的表现不是报错，是那张表的文件被静默当孤儿删掉（本仓踩过两次）；② **图片有两条通道**，跨轮靠 `webasset://` 顶层 part、本轮靠骑在工具结果上的 `media`，缺一条就是「这一轮看不见」或「下一轮看不见」，而 base64 **绝不许**落进 `parts_json`（`tool-result` 不在 `OPAQUE_PART_TYPES` 里，硬截断会把它切半，而截断结果是持久化的）；③ **vision 判据是轮首快照**，轮内注入的图靠 `turn.mediaInjected` 补，改成「每步重扫 messages」不管用（扫的是同一个认不出它的判据）。**仍然欠的**：JS 渲染（SPA 只能取到空壳）与反爬（UA 是 `LuoLiCore/0.1`，不少站点直接 403）。形态已经定了 —— 接一台浏览器 MCP 而**不是**把渲染引擎接进 `web_fetch`（那会绕开 `guardedFetch` 整套 SSRF 防护，而它还执行页面 JS，URL 预校验挡不住页面自己去打元数据地址），候选与那一整套警告见 [07 §4.4.1](./07-skills-plugins-mcp.md)。值不值得深度集成没拍板 ⟨探针：packages/core/src/tools/web.ts !~ renderJs⟩ |

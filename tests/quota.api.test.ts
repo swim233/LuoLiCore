@@ -36,7 +36,8 @@ describe('GET /api/quota', () => {
     expect(body.data.buckets.day).toBe(today());
     const global = body.data.counters.find((row) => row.scope === 'global')!;
     expect(global).toMatchObject({ limit: 5, current: true, limitApprox: false });
-    // 这个人是 trusted，byRole 覆盖掉 perUser.daily=0.5；有效角色可能更低，所以同时标 limitApprox。
+    // 这个人是 trusted，byRole 覆盖掉 perUser.daily=0.5；群里的有效角色取两档中较高者再封顶
+    // trusted，未必等于用户自己这一档，所以同时标 limitApprox。
     const user = body.data.counters.find((row) => row.scope === 'user' && row.current)!;
     expect(user).toMatchObject({ limit: 2, limitApprox: true, role: 'trusted', label: '小明' });
     expect(body.data.counters.filter((row) => !row.current)).toHaveLength(1);

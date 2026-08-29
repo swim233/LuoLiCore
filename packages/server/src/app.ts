@@ -75,7 +75,6 @@ import {
   persistMcpServers as persistMcpServersShared,
   publicConfig,
   relaxedFields,
-  resolveEffectiveRole,
   revisionJson,
 } from "@luoli/core";
 import type {
@@ -147,7 +146,7 @@ export interface ServerDependencies {
   approvals: DatabaseApprovalBroker;
   rebuildModels?: () => void;
   maintenance: MaintenanceService;
-  /** 用量聚合（`GET /api/usage/report`）。缺它时那个端点回空数组而不是 500 —— 明细表照常。 */
+  /** 用量聚合（`GET /api/usage/report`）。缺它时该端点返回空数组而不是 500，明细表照常。 */
   ledger?: {
     report(
       from: number,
@@ -159,9 +158,9 @@ export interface ServerDependencies {
   /** `POST /api/restart` 的落点。优雅关闭那套在 apps/bot，服务器包只负责把请求转过去。 */
   restart?: (reason: string) => Promise<void> | void;
   /**
-   * 定时任务的运行时（`ScheduleRepository` + `ScheduledJobRunner`）。缺它时那四个端点回
-   * `schedule_unavailable`，界面据此说「这个部署没接定时任务运行时」——**不是显示零条任务**：
-   * 空列表和「读不到」在运维眼里是两回事（docs/16 §5「摘除比伪造安全」）。
+   * 定时任务的运行时（`ScheduleRepository` + `ScheduledJobRunner`）。缺它时那四个端点返回
+   * `schedule_unavailable`，界面据此提示该部署未接入定时任务运行时，而不是显示零条任务：
+   * 空列表与读不到对运维是两种结论（docs/16 §5：摘除比伪造安全）。
    */
   schedules?: {
     jobs: ScheduleRepository;
@@ -180,19 +179,19 @@ export interface ServerDependencies {
   plugins?: PluginManager;
   mcp?: McpManager;
   /**
-   * MCP 凭据库与待授权表。缺它时四条 auth 端点一律 `mcp_auth_unavailable`（缺
-   * `LUOLI_MASTER_KEY` 的部署就是这样）—— 不假装保存成功，照 `PUT /api/quota` 回
+   * MCP 凭据库与待授权表。缺它时四条 auth 端点一律返回 `mcp_auth_unavailable`（缺
+   * `LUOLI_MASTER_KEY` 的部署即此形态）：不伪造保存成功，参照 `PUT /api/quota` 返回
    * `not_implemented` 的先例。
    */
   mcpAuth?: { store: McpAuthRepository; pending: PendingAuthorizations };
   agents?: AgentManager;
   /**
-   * 工具注册表。缺它时 `GET /api/tools` 退回「`TOOL_POLICY` + 覆盖层」那份静态表 —— 少了
-   * MCP / plugin 注册进来的工具和每个工具声明的超时，但策略与启停仍然是对的。
+   * 工具注册表。缺它时 `GET /api/tools` 退回 `TOOL_POLICY` 加覆盖层那份静态表：少了
+   * MCP / plugin 注册进来的工具与每个工具声明的超时，但策略与启停仍然正确。
    */
   tools?: ToolRegistry;
-  /** 自撰写工具的库与注册器。缺它时 `/api/custom-tools` 一律 `not_implemented` —— 空列表和
-   *  「这个部署压根没装」在运维眼里是两回事（docs/16 §5「摘除比伪造安全」）。 */
+  /** 自撰写工具的库与注册器。缺它时 `/api/custom-tools` 一律返回 `not_implemented`：空列表与
+   *  该部署未安装对运维是两种结论（docs/16 §5：摘除比伪造安全）。 */
   customTools?: CustomToolRepository;
   customToolManager?: CustomToolManager;
   turnRegistry?: TurnRegistry;
@@ -237,9 +236,9 @@ const apiError = (
 ) => ({ body: { ok: false as const, error: { code, message } }, status });
 
 /**
- * 展开一律走 `assignDotted`：裸的 `cursor[part]` 遇到 `__proto__` 会在**校验之前**污染 `Object.prototype`，
- * 之后每一次 `safeParse` 都会失败，一次合法登录态的请求就能把配置面板永久打死（docs/20 · W-CFG-01）。
- * 被拒的键必须 400，不能跳过后当成功 —— 写入端是这条路径的最后一道闸。
+ * 展开一律走 `assignDotted`：裸 `cursor[part]` 遇到 `__proto__` 会在校验之前污染 `Object.prototype`，
+ * 此后每一次 `safeParse` 都会失败，一次已登录请求即可让配置面板永久不可用（docs/20 · W-CFG-01）。
+ * 被拒的键必须返回 400，不得跳过后按成功处理：写入端是这条路径的最后一道闸。
  */
 function mergeDotted(
   base: unknown,
@@ -253,13 +252,13 @@ function mergeDotted(
 const invalidKey = (result: { ok: false; key: string }) =>
   apiError("invalid_config_key", `非法配置键：${result.key}`);
 /**
- * 配置校验失败的统一信封。**原因必须拼进 `message`**：`details` 一直挂在这儿，而前端的 toast 只念
- * `message` —— 界面上就只剩一句「配置校验失败」，看不出是哪一格、更看不出为什么。跨字段的那几条
- * （`memory.softLimitTokens` 与硬上限、`concurrency.perKey` 与全局并发）因此变成哑巴 400：
- * 报错说的是「你改的这一格和另一格冲突」，而运维连是哪两格都不知道。
+ * 配置校验失败的统一信封。原因必须拼进 `message`：`details` 一直都在，而前端的 toast 只读取
+ * `message`，界面上只剩一句配置校验失败，既看不出是哪一项、也看不出原因。跨字段的那几条
+ * （`memory.softLimitTokens` 与硬上限、`concurrency.perKey` 与全局并发）因此退化为无信息的 400：
+ * 报错内容是所改项与另一项冲突，而运维无从得知是哪两项。
  *
- * 只拼前两条：一次改一格时它就是全部；整棵树提交（YAML / 导入）时拼十条只会把 toast 撑成一堵墙，
- * 余下的仍在 `details` 里 —— 那一份是结构化的，能按 path 定位到具体控件。
+ * 只拼前两条：一次改一项时它即是全部；整棵树提交（YAML / 导入）时拼十条会把 toast 撑得过长，
+ * 其余仍在 `details` 里，那一份是结构化的，可按 path 定位到具体控件。
  */
 const invalidConfig = (
   summary: string,
@@ -294,13 +293,13 @@ const invalidConfig = (
   };
 };
 /**
- * 一棵配置树里的**叶子路径**。`PUT /api/config/yaml` 的落库粒度：按顶层段落库时 zod 已经把每个
- * `.default()` 填满，写回去的是填满之后那整棵子树，一次「一个字不改」的往返就把那一刻的代码默认值
- * 永久钉死（docs/28 · L-WEB-02）。
+ * 一棵配置树里的叶子路径，即 `PUT /api/config/yaml` 的落库粒度。按顶层段落库时 zod 已把每个
+ * `.default()` 填满，写回的是填满之后的整棵子树，一次未作任何修改的往返即把当时的代码默认值
+ * 永久固定（docs/28 · L-WEB-02）。
  *
- * 两条刻意的取舍：**数组当叶子** —— `approval.rules` / `mcp.servers` / `agent.agents` 是整块语义，
- * 逐个下标落库既没人这么读、也会被 `sortOverrideKeys` 拼回原样；**空对象不产生叶子** —— 它表达的是
- * 「这里什么都不覆盖」，而写成一行 `{}` 会让 `writeConfigRows` 顺手删掉同一子树下的密钥行，
+ * 两条刻意的取舍：数组按叶子处理 —— `approval.rules` / `mcp.servers` / `agent.agents` 是整块语义，
+ * 逐下标落库既无人这样读取，也会被 `sortOverrideKeys` 拼回原样；空对象不产生叶子 —— 它表达的是
+ * 此处不做任何覆盖，而写成一行 `{}` 会让 `writeConfigRows` 连带删除同一子树下的密钥行，
  * 那正是 docs/28 · L-WEB-04 的形态。
  */
 function configLeafPaths(node: unknown, prefix = ""): string[] {
@@ -325,13 +324,13 @@ function page<T>(
 /**
  * 四个分页端点（`/api/messages`、`/api/turns`、`/api/approvals`、`/api/tasks`）共用的 `?page=`/`?size=` 解析。
  *
- * 各自原地写 `Math.min(max, Math.max(1, Number(ctx.req.query('size') ?? 50)))` 拦不住脏输入：
+ * 各端点原地写 `Math.min(max, Math.max(1, Number(ctx.req.query('size') ?? 50)))` 拦不住非法输入：
  * `Number('abc')` 是 `NaN`，而 `Math.max(1, NaN)` / `Math.min(200, NaN)` 返回的仍是 `NaN`。
- * `NaN` 喂给 better-sqlite3 的绑定参数**不是「当成 0」**，是整条查询抛 `TypeError: datatype mismatch`——
- * 于是一个手滑的 query 把端点打成 500 而不是回一页默认结果。小数同理（`size=1.5` 落到 `LIMIT` 上一样炸）。
+ * `NaN` 作为 better-sqlite3 的绑定参数不会被当成 0，而是整条查询抛 `TypeError: datatype mismatch`，
+ * 于是一个写错的 query 会把端点打成 500 而不是返回一页默认结果。小数同理（`size=1.5` 落到 `LIMIT` 上同样报错）。
  *
- * 非法值一律回退默认而不是回 400：分页参数是界面拼出来的，坏 query 该退化成第一页，
- * 不该让整块列表变成错误态。**每个端点的 `defaultSize`/`maxSize` 是它自己的**，这里只统一解析规则。
+ * 非法值一律回退默认而不是返回 400：分页参数由界面拼出，非法 query 应退化为第一页，
+ * 而不应让整块列表进入错误态。每个端点的 `defaultSize`/`maxSize` 各自独立，这里只统一解析规则。
  */
 function pageParams(
   ctx: Context,
@@ -373,9 +372,9 @@ function contentDisposition(name: string): string {
 }
 
 /**
- * 系统信息里的三个占用（docs/09 §3.1）：DB 本体、WAL、workspace。**只统计不清理** ——
- * 这张卡片是「该不该去点维护操作」的判据，自己动手会让它变成一个有副作用的读端点。
- * 目录递归有深度上界：workspace 里放着模型自己造的目录树，一个软链自指就能让这次请求不返回。
+ * 系统信息里的三个占用（docs/09 §3.1）：DB 本体、WAL、workspace。只统计不清理：
+ * 这张卡片是判断是否需要执行维护操作的依据，自行清理会让它变成带副作用的读端点。
+ * 目录递归有深度上界：workspace 里存放模型自建的目录树，一个自指软链即可让这次请求不返回。
  */
 function directorySize(root: string, depth = 0): number {
   if (depth > 8) return 0;
@@ -409,8 +408,10 @@ function fileSize(path: string): number {
 }
 
 /**
- * 用量聚合按 chat / user 分组时 bucket 是裸 id，运维认不出 `-1002492583774` 是哪个群。
- * 反查规则与会话页那份一致：登记过就用显示名，没登记过就说清楚是「未登记」而不是留空。
+ * 用量聚合按 chat / user 分组时 bucket 是裸 id，运维无法判断 `-1002492583774` 对应哪个群。
+ * 反查规则与会话页一致：已登记的用显示名，未登记的明确标注为未登记，而不是留空。
+ * `scope='chat'` 且 id 为正数时回落到 `kind='user'`：私聊已不占 `chat:` 行（docs/05 §2.2），
+ * 只查 chat 的话每一条私聊用量都会显示成「未登记会话」。
  */
 function principalLabel(
   db: Sqlite,
@@ -418,11 +419,13 @@ function principalLabel(
   tgId: string | null,
 ): string | null {
   if (!tgId) return null;
-  const row = db
-    .prepare(
-      "SELECT display_name AS name,username FROM principals WHERE kind=? AND tg_id=?",
-    )
-    .get(kind, tgId) as
+  const lookup = db.prepare(
+    "SELECT display_name AS name,username FROM principals WHERE kind=? AND tg_id=?",
+  );
+  const row = (lookup.get(kind, tgId) ??
+    (kind === "chat" && !tgId.startsWith("-")
+      ? lookup.get("user", tgId)
+      : undefined)) as
     { name: string | null; username: string | null } | undefined;
   if (row?.name)
     return row.username ? `${row.name} (@${row.username})` : row.name;
@@ -430,13 +433,13 @@ function principalLabel(
 }
 
 /**
- * `approvals.decided_by` → 人读得懂的裁决者。三种写法（[03](../../../docs/03-data-model.md) 的
- * `approvals` 段）里只有 `user:<tgId>` 需要反查 —— `owner`（WebUI，那一面只有一个 owner 身份）与
- * `system`（TTL / 轮次取消 / 启动扫描）本来就是话。
+ * 把 `approvals.decided_by` 转成可读的裁决者。三种写法（[03](../../../docs/03-data-model.md) 的
+ * `approvals` 段）里只有 `user:<tgId>` 需要反查：`owner`（WebUI 一侧只有一个 owner 身份）与
+ * `system`（TTL / 轮次取消 / 启动扫描）本身即可读。
  *
- * 格式的解析走 `parsePrincipal`（三个 Telegram 命令与 `POST /api/principals/bulk` 共用的那一份），
- * **不在这里手写 `slice(5)`**：`user:<id>` 就是主体串的格式，多一份解析就多一处会漂的地方。
- * 反查不到时交回 `null` 而不是原串 —— 前端已经在显示原串了，这一列只负责「查得到就给个名字」。
+ * 格式解析走 `parsePrincipal`（三个 Telegram 命令与 `POST /api/principals/bulk` 共用的那一份），
+ * 不在这里手写 `slice(5)`：`user:<id>` 是主体串的格式，多一份解析就多一处会失配的位置。
+ * 反查不到时返回 `null` 而不是原串：前端已在显示原串，这一列只负责在查得到时补一个名字。
  */
 function decidedByLabel(db: Sqlite, decidedBy: unknown): string | null {
   if (typeof decidedBy !== "string") return null;
@@ -466,12 +469,12 @@ function safeRef(root: string, reference: string): string {
   return absolute;
 }
 /**
- * 库里存下来的那种路径的包含性校验。与 `safeRef` 的区别只在一点：**先绝对化再判包含**，
+ * 对库里存储的那类路径做包含性校验。与 `safeRef` 只有一点不同：先绝对化再判包含，
  * 不把它当成相对 `root` 的引用 —— `attachments.local_path` 是 `join('./data/files', chatId, …)`
- * 这种相对 cwd 的路径，交给 `safeRef` 会被拼成 `<root>/data/files/…`，一个都对不上。
+ * 这种相对 cwd 的路径，交给 `safeRef` 会被拼成 `<root>/data/files/…`，全部无法匹配。
  *
- * 这两列今天只由本进程写，所以这是纵深防御；但「DB 里的路径值可信」是一个会随时间失效的假设
- * ——导入、迁移、手工修库都能改它，而同一个文件里读日志目录早就是过闸的（docs/27 · S-07）。
+ * 这两列目前只由本进程写入，因此这属于纵深防御；但 DB 里的路径值可信是一个会随时间失效的假设：
+ * 导入、迁移、手工修库都能改动它，而同一个文件里读日志目录早已经过闸（docs/27 · S-07）。
  */
 function storedPathWithin(root: string, stored: string): string {
   const absolute = resolve(stored);
@@ -482,11 +485,11 @@ function storedPathWithin(root: string, stored: string): string {
 }
 
 /**
- * 登录限流的桶键与 `sessions.ip` 的来源。**`trustProxy` 为假时一个请求头都不看** ——
- * 桶键要是请求头，限流的代价就只是「再换一个头值」：docs/18 · N-WEB-02 那一轮的修复原文写的是
- * 「`trustProxy` 为假时恒返回 `local`」，后来丢了这一半，于是 docs/27 · S-01 实测 12 次轮换
- * `X-Real-IP` 全部 401、一次 429 都没有。直连时只认连接的远端地址；拿不到（`app.request()`
- * 这类没有底层 socket 的调用）就全落进同一个 `local` 桶 —— fail-closed 的那一侧是「一起锁」。
+ * 登录限流的桶键与 `sessions.ip` 的来源。`trustProxy` 为假时不读取任何请求头：
+ * 桶键若取自请求头，绕过限流的代价只是换一个头值。docs/18 · N-WEB-02 那一轮的修复原文写明
+ * `trustProxy` 为假时恒返回 `local`，后来丢了这一半，于是 docs/27 · S-01 实测 12 次轮换
+ * `X-Real-IP` 全部 401、一次 429 都没有。直连时只取连接的远端地址；取不到时（`app.request()`
+ * 这类没有底层 socket 的调用）全部落进同一个 `local` 桶，fail-closed 的方向是一并锁定。
  */
 function requestIp(ctx: Context, config: Readonly<Config>): string {
   if (config.webui.trustProxy) {
@@ -542,14 +545,14 @@ export function createServer(
     blocked: true,
   };
   /**
-   * 配置写入的唯一出口：落 `config_kv` + `config_revisions`，并**删掉被这次写入吞掉的后代行**。
-   * 覆盖层按点分深度应用（`sortOverrideKeys`：更具体的路径赢），所以写 `tools.overrides` 整块时若
-   * 库里还留着此前逐项写下的 `tools.overrides.<name>`，那一项会把整块的对应位置局部否掉 ——
-   * 界面上表现为「JSON 里明明写着开着，刷新回来还是关的」。祖先键代表整棵子树，后代行因此作废；
-   * 作废也要进变更历史，否则历史会瞒下「你那条逐项覆盖是谁弄掉的」。
-   * 顺带把六个写入点的四条重复语句收成一处：`PUT /api/sandbox` 此前只写 `config_kv` 不写
-   * `config_revisions`，沙箱 mode / bypassRoles 这种安全相关改动压根不进「变更历史」。
-   * `prune` 是显式删除集（只有叶子粒度的 YAML 端点用得上），和被吞并的后代行走同一个事务。
+   * 配置写入的唯一出口：写入 `config_kv` 与 `config_revisions`，并删除被本次写入覆盖的后代行。
+   * 覆盖层按点分深度应用（`sortOverrideKeys`：更具体的路径优先），因此写 `tools.overrides` 整块时若
+   * 库里仍留着此前逐项写下的 `tools.overrides.<name>`，该项会局部否决整块里的对应位置，
+   * 界面上表现为 JSON 里写着开启、刷新回来仍是关闭。祖先键代表整棵子树，后代行因此作废；
+   * 作废同样要进变更历史，否则历史里查不出逐项覆盖是被谁清除的。
+   * 同时把六个写入点的四条重复语句收敛到一处：`PUT /api/sandbox` 此前只写 `config_kv` 不写
+   * `config_revisions`，沙箱 mode / bypassRoles 这类安全相关改动完全不进变更历史。
+   * `prune` 是显式删除集（只有叶子粒度的 YAML 端点用得上），与被覆盖的后代行走同一个事务。
    */
   const writeConfigRows = (
     entries: Array<[string, unknown]>,
@@ -570,17 +573,17 @@ export function createServer(
         .all() as Array<{ key: string; value: string }>
     ).map((row) => ({ key: row.key, value: JSON.parse(row.value) as unknown }));
   /**
-   * 「这一行是密钥，不参与 YAML 往返」的唯一判据。`GET` 用它决定整行跳过哪些，`PUT` 用它决定哪些
-   * 旧键永不删 —— 两次是**独立请求**，`PUT` 必须自己重算一次而不能信客户端交回来的 `skipped`
-   * （docs/28 · L-WEB-04）。整块写入（`mcp.servers`）里也可能埋着密钥字段，`publicConfig` 会把它们
-   * 变成占位符，那种块同样不能出现在往返里。
+   * 判定某一行是密钥、不参与 YAML 往返的唯一依据。`GET` 用它决定整行跳过哪些，`PUT` 用它决定哪些
+   * 旧键永不删除；两者是独立请求，`PUT` 必须自行重算一次，不能采信客户端交回的 `skipped`
+   * （docs/28 · L-WEB-04）。整块写入（`mcp.servers`）里也可能包含密钥字段，`publicConfig` 会把它们
+   * 替换成占位符，这类块同样不能出现在往返里。
    */
   const secretConfigRow = (key: string, value: unknown): boolean =>
     looksSecret(key, value) ||
     JSON.stringify(publicConfig(value)).includes("«redacted»");
   /**
-   * 被环境变量钉住的键一律拒收，而不是写库之后让 `loadConfig` 悄悄交回 env 的值。
-   * 祖先写入（`webui` 整块）同样命中：它对那个叶子照样不会生效。
+   * 被环境变量固定的键一律拒收，而不是写库之后由 `loadConfig` 静默返回 env 的值。
+   * 祖先写入（`webui` 整块）同样命中：它对那个叶子同样不会生效。
    */
   const envConflicts = (keys: string[]): Array<{ key: string; env: string }> =>
     envPinnedConfigKeys().filter((pinned) =>
@@ -594,12 +597,12 @@ export function createServer(
   const envPinnedError = (conflicts: Array<{ key: string; env: string }>) =>
     apiError(
       "config_pinned_by_env",
-      `${conflicts.map((entry) => `${entry.key} 由环境变量 ${entry.env} 决定`).join("；")} —— 改这里不会生效，请改环境变量后重启`,
+      `${conflicts.map((entry) => `${entry.key} 由环境变量 ${entry.env} 决定`).join("；")}。此处修改不生效，请修改环境变量后重启进程`,
     );
   /**
-   * `«redacted»` 是 `GET /api/config` 的脱敏占位符，不是任何配置项的合法值。原样发回来只可能是
-   * 界面把读出来的脱敏值当真值又提交了一遍（`mcp.servers` 那种整块 JSON 里就嵌着它）——
-   * 收下就等于把真密钥替换成这五个字，且 `config_kv` 里那行会一直赢。
+   * `«redacted»` 是 `GET /api/config` 的脱敏占位符，不是任何配置项的合法值。原样回传只可能是
+   * 界面把读出来的脱敏值当真值又提交了一遍（`mcp.servers` 那种整块 JSON 里就嵌着它）：
+   * 接受它等于把真实密钥替换成这个占位符，且 `config_kv` 里那一行会持续生效。
    */
   const redactedKeys = (body: Record<string, unknown>): string[] =>
     Object.entries(body)
@@ -607,11 +610,11 @@ export function createServer(
         JSON.stringify(value ?? null).includes("«redacted»"),
       )
       .map(([key]) => key);
-  // 与 `install_mcp` 工具共用同一份校验与写入（`persistMcpServers`，core）：抄两份的必然结果是
-  // WebUI 建得出来的 server 工具建不出来，或者反过来。
-  // `reconciled: ['mcp']`：这三个端点每一个都在写完之后自己 `await dependencies.mcp.reconcile()`
-  // （响应里要给出真实 state），所以 `main.ts` 的订阅者不能再跑一次 —— 两条重叠的 reconcile 会
-  // 各 spawn 一个 stdio 子进程（`ConfigChangedEvent`，docs/28 · L-EXT-03）。
+  // 与 `install_mcp` 工具共用同一份校验与写入（`persistMcpServers`，core）：各写一份的必然结果是
+  // WebUI 能建出的 server 工具建不出来，或者相反。
+  // `reconciled: ['mcp']`：这三个端点都会在写完之后自行 `await dependencies.mcp.reconcile()`
+  // （响应里要给出真实 state），因此 `main.ts` 的订阅者不能再执行一次：两次重叠的 reconcile 会
+  // 各自 spawn 一个 stdio 子进程（`ConfigChangedEvent`，docs/28 · L-EXT-03）。
   const persistMcpServers = (
     servers: unknown[],
   ):
@@ -634,9 +637,9 @@ export function createServer(
       servers,
       "webui",
     );
-  // 刚写进 config_kv、但 config.changed 的重载还没落到 configStore 的那一份口令。只在「快照仍是
-  // 写入前那个值」时顶上；快照一旦变成别的（比如 PUT /api/config 又改了一次），立刻交回配置——
-  // 无条件缓存就是 V-AUTH-02 换个位置复发：写入返回 200，登录还认旧的（docs/24 · R-AUTH-01）。
+  // 刚写入 config_kv、但 config.changed 的重载尚未落到 configStore 的那一份口令。仅在快照仍是
+  // 写入前那个值时生效；快照一旦变成别的值（例如 PUT /api/config 又改了一次），立即回退到配置：
+  // 无条件缓存即 V-AUTH-02 在另一处复发：写入返回 200，登录仍按旧值校验（docs/24 · R-AUTH-01）。
   let pendingHash: { next: string; previous: string } | null = null;
   const activePasswordHash = (): string => {
     const stored = currentConfig().webui.passwordHash;
@@ -678,10 +681,10 @@ export function createServer(
   });
   /**
    * 请求体上界。`ctx.req.json()` 把整份请求体读进内存，而 `/api/setup` 与两条登录端点注册在鉴权
-   * 中间件**之前** —— 未登录就能推一个任意大的请求体进来（docs/27 · S-05）。`login` 那条
-   * `password.length > 1024` 的检查发生在 `await ctx.req.json()` 之后，挡不住这件事。
-   * 挂在 Origin 闸之后、所有路由之前：`bodyLimit` 也要在真正读体之前拦，装在具体端点上就晚了。
-   * 三条业务上就大的端点各自放宽，其余一律 1 MiB —— 上界要按端点给，不是找一个「都够用」的数。
+   * 中间件之前：未登录即可推入任意大小的请求体（docs/27 · S-05）。`login` 那条
+   * `password.length > 1024` 的检查发生在 `await ctx.req.json()` 之后，拦不住这件事。
+   * 挂在 Origin 闸之后、所有路由之前：`bodyLimit` 同样要在真正读体之前拦截，装在具体端点上已经太晚。
+   * 三条业务上确实较大的端点各自放宽，其余一律 1 MiB：上界要按端点给定，而不是取一个通用值。
    */
   const DEFAULT_BODY_LIMIT = 1_048_576;
   const WIDE_BODY_LIMITS: Array<[RegExp, number]> = [
@@ -709,10 +712,10 @@ export function createServer(
     return created;
   };
   /**
-   * 装 skill 包这条走配置而不是常量：`skills.package.maxTotalBytes` 默认 64 MiB，而这里的默认
-   * 上界是 1 MiB —— 不接过来的话，一个 4.9 MB 的包在读到端点之前就被 413 掉了，而那条错误里
-   * 一个字都不会提到「去把上限调大」。多给 1 MiB 是 multipart 信封的余量，好让报错来自
-   * 端点里那句说得清楚的，而不是这道闸。
+   * 装 skill 包这条取配置而不是常量：`skills.package.maxTotalBytes` 默认 64 MiB，而这里的默认
+   * 上界是 1 MiB。不接入配置时，一个 4.9 MB 的包在到达端点之前即被 413 拒绝，而该错误里
+   * 不会提示应调大上限。额外的 1 MiB 是 multipart 信封的余量，使报错来自端点里那条明确的提示，
+   * 而不是这道闸。
    */
   const bodyLimitFor = (path: string): number =>
     path === "/api/skills/package"
@@ -723,9 +726,9 @@ export function createServer(
     limiterFor(bodyLimitFor(ctx.req.path))(ctx, next),
   );
 
-  // 无鉴权的那份只回存活状态。provider 列表（含 baseUrl）、MCP 服务器、沙箱 plan、在途轮次数
-  // 都是内部拓扑：默认绑 127.0.0.1 时影响有限，但 `webui.host` 一放开就是无鉴权信息泄露
-  // （docs/20 · W-API-01）。详细信息移到鉴权后的 /api/health/detail。
+  // 无鉴权的那份只返回存活状态。provider 列表（含 baseUrl）、MCP 服务器、沙箱 plan、在途轮次数
+  // 都属于内部拓扑：默认绑定 127.0.0.1 时影响有限，但 `webui.host` 一旦放开即构成无鉴权信息泄露
+  // （docs/20 · W-API-01）。详细信息移到鉴权之后的 /api/health/detail。
   app.get("/api/health", (ctx) => {
     let dbOk = true;
     try {
@@ -883,9 +886,9 @@ export function createServer(
   });
 
   /**
-   * Telegram `/webui` 发来的一次性登录（docs/09 §2.3）。token **存在内存里**：进程重启即失效，
-   * 而且它就该是这个语义 —— 一条能换取 owner 全权限 session 的链接落进数据库或日志，
-   * 泄露面比口令本身还大。所以这里也**不记 token 本身**，只记用掉/失败这件事。
+   * Telegram `/webui` 发来的一次性登录（docs/09 §2.3）。token 保存在内存里：进程重启即失效，
+   * 这也正是它应有的语义 —— 一条能换取 owner 全权限 session 的链接若落进数据库或日志，
+   * 暴露面大于口令本身。因此这里也不记录 token 本身，只记录使用成功或失败。
    *
    * 三道闸：单次使用（取出即删）、5 分钟过期、常量时间比较。
    */
@@ -935,10 +938,10 @@ export function createServer(
   });
 
   app.use("/api/*", async (ctx, next) => {
-    // MCP 的 OAuth 回调进白名单，**不是偷懒**：session cookie 是 `SameSite=Strict`，
-    // 而这一跳是授权服务器发起的跨站重定向 —— 浏览器不会带上它，要求登录态等于这条路走不通。
-    // 准入判据换成 OAuth 自己的 `state`：32 字节随机、单次使用、10 分钟 TTL、只存在进程内
-    // （`PendingAuthorizations`）。没有有效 state 的请求在那里就被拒了。
+    // MCP 的 OAuth 回调进白名单是必要的而非从简：session cookie 是 `SameSite=Strict`，
+    // 而这一跳是授权服务器发起的跨站重定向，浏览器不会携带它，要求登录态即等于这条路走不通。
+    // 准入判据改用 OAuth 自身的 `state`：32 字节随机、单次使用、10 分钟 TTL、只存在进程内
+    // （`PendingAuthorizations`）。没有有效 state 的请求在那里即被拒绝。
     if (
       ctx.req.path === "/api/health" ||
       ctx.req.path === "/api/auth/login" ||
@@ -975,14 +978,14 @@ export function createServer(
     const body = await ctx.req
       .json<{ current?: string; next?: string }>()
       .catch((): { current?: string; next?: string } => ({}));
-    // WEBUI_PASSWORD 在环境里时，改口令写得进 config_kv、当前进程也认新口令，但重启后 envOverlay
-    // 会把 env 那份哈希再盖回来 —— 那是「改了口令以为安全了」的最坏形态，宁可当场拒绝（摘除比伪造安全）。
+    // WEBUI_PASSWORD 在环境变量里时，改口令能写进 config_kv、当前进程也认新口令，但重启后 envOverlay
+    // 会用 env 那份哈希覆盖回来：这是改了口令却仍不安全的最坏形态，因此当场拒绝（摘除比伪造安全）。
     const pinned = envConflicts(["webui.passwordHash"]);
     if (pinned.length)
       return ctx.json(
         apiError(
           "password_pinned_by_env",
-          "口令由环境变量 WEBUI_PASSWORD 固定：在这里改，重启后会被环境变量盖回去。请改环境变量（或清掉它后再用这里）。",
+          "口令由环境变量 WEBUI_PASSWORD 固定：此处修改在重启后会被环境变量覆盖。请修改该环境变量，或清除后再使用此表单。",
           409,
         ).body,
         409,
@@ -1005,9 +1008,9 @@ export function createServer(
     } catch {
       valid = false;
     }
-    // 403 而不是 401：session 是好的，错的是表单里那一格。客户端 `api()` 对任何 401 都
-    // `location.assign("/login")`——回 401 的话页面整个跳走，「当前口令错误」一个字都渲染不出来，
-    // 同页其它未保存的表单一并丢掉，而登录其实根本没过期（docs/29 · M-WEB-13）。
+    // 返回 403 而不是 401：session 有效，出错的是表单里那一项。客户端 `api()` 对任何 401 都执行
+    // `location.assign("/login")`，返回 401 会让页面整体跳转，当前口令错误无法渲染出来，
+    // 同页其他未保存的表单一并丢失，而登录实际并未过期（docs/29 · M-WEB-13）。
     if (!valid)
       return ctx.json(
         apiError("invalid_credentials", "当前口令错误", 403).body,
@@ -1125,13 +1128,13 @@ export function createServer(
   app.get("/api/config", (ctx) =>
     ctx.json({ ok: true, data: publicConfig(currentConfig()) }),
   );
-  // 带上热更新前缀：不在 hotReloadable 里的键保存后需要重启才生效，WebUI 据此显示待重启徽标
-  // ——「保存成功」但运行时没变，是 docs/20 · W-CFG-02 里最误导的一类。
-  // 三件套一律放进 `data`：统一信封的客户端只解 `data`，挂在信封顶层的兄弟键会被静默丢掉 ——
-  // 自动生成的表单正是靠这两份前缀表判断「热更新 / 需重启」与「未接线」的。
-  // `envPinned` 是第三份前缀表：这些键的 config_kv 行会被 env 层压掉，表单据此禁控件并点名环境变量。
-  // `enumNotes` 是第四份：一格里的取值不等价时（`telegram.allowedUpdates` 23 个取值只有 4 个有
-  // 处理器）逐个取值给一句话，否则界面上那 23 个复选框长得一模一样。同样只能挂在 `data` 里。
+  // 带上热更新前缀：不在 hotReloadable 里的键保存后需重启才生效，WebUI 据此显示待重启标记。
+  // 保存成功但运行时未变，是 docs/20 · W-CFG-02 里最具误导性的一类。
+  // 三件套一律放进 `data`：统一信封的客户端只解析 `data`，挂在信封顶层的兄弟键会被静默丢弃，
+  // 自动生成的表单正是依据这两份前缀表判断热更新 / 需重启与未接线。
+  // `envPinned` 是第三份前缀表：这些键的 config_kv 行会被 env 层覆盖，表单据此禁用控件并标明环境变量。
+  // `enumNotes` 是第四份：同一项内取值不等价时（`telegram.allowedUpdates` 23 个取值只有 4 个有
+  // 处理器）逐个取值给出说明，否则界面上那 23 个复选框完全相同。同样只能挂在 `data` 里。
   app.get("/api/config/schema", (ctx) =>
     ctx.json({
       ok: true,
@@ -1144,8 +1147,8 @@ export function createServer(
       },
     }),
   );
-  // 不安全或过短的唤醒词在匹配时被静默跳过（trigger.ts）。收下这种模式等于让运维以为配好了，
-  // 实际表现是「bot 不理我」，所以写入端直接挡回去；只在这次写操作真的动了唤醒词时校验。
+  // 不安全或过短的唤醒词在匹配时被静默跳过（trigger.ts）。接受这种模式会让运维误认为配置已生效，
+  // 实际表现为 bot 不响应，因此写入端直接拒绝；只在本次写操作确实改动了唤醒词时校验。
   app.post("/api/config/wakewords/check", async (ctx) => {
     const body = await ctx.req.json<{
       wakewords?: unknown;
@@ -1182,7 +1185,7 @@ export function createServer(
       return ctx.json(
         apiError(
           "redacted_placeholder",
-          `${redacted.join("、")} 的值里含脱敏占位符 «redacted» —— 那不是真值，写进去会把真密钥覆盖掉`,
+          `${redacted.join("、")} 的值含脱敏占位符 «redacted»，写入会覆盖真实密钥`,
         ).body,
         400,
       );
@@ -1210,16 +1213,16 @@ export function createServer(
           400,
         );
     }
-    // 落库的是**校验后**的值，不是请求体原值：zod 的默认值与强制转换否则不会进 `config_kv`，
-    // 下次启动重放覆盖层拿到的就是另一份东西（docs/22 · I-06）。键仍以请求体为准 ——
-    // 「只发真正改过的那几项」是这个端点的契约，不能顺手把整棵树写下去。
+    // 落库的是校验后的值，而不是请求体原值：否则 zod 的默认值与强制转换不会进入 `config_kv`，
+    // 下次启动重放覆盖层得到的是另一份配置（docs/22 · I-06）。键仍以请求体为准：
+    // 只发送实际改动的那几项是这个端点的契约，不能连带把整棵树写下去。
     const rows: Array<[string, unknown]> = Object.keys(body).map((key) => [
       key,
       readDotted(parsed.data, key),
     ]);
-    // JSON 里表达不出 undefined，所以校验后取不到值只有一个原因：这个路径不在 schema 里，被 zod
-    // 整段剥掉了。此前这种键会照样落进 `config_kv`，`loadConfig` 下次启动再逐条剔除并告警 ——
-    // 那是兜底不是许可（CLAUDE.md）。当场拒掉，别让「保存成功」把垃圾键留在库里。
+    // JSON 无法表达 undefined，因此校验后取不到值只有一个原因：该路径不在 schema 里，被 zod
+    // 整段剥除。此前这类键仍会落进 `config_kv`，由 `loadConfig` 下次启动逐条剔除并告警，
+    // 而那是兜底不是许可（CLAUDE.md）。这里当场拒绝，避免保存成功把无效键留在库里。
     const unknownKeys = rows
       .filter(([, value]) => value === undefined)
       .map(([key]) => key);
@@ -1233,14 +1236,14 @@ export function createServer(
       );
     const subsumed = writeConfigRows(rows, "webui");
     dependencies.events.emit("config.changed", { keys: Object.keys(body) });
-    // `subsumed` 交回前端点名：整块写入作废掉的逐项覆盖必须说出来，否则运维只会看到「保存成功」，
-    // 而工具页上某个开关的状态被这次保存悄悄改掉了。
+    // `subsumed` 交回前端逐条列出：整块写入作废的逐项覆盖必须明示，否则运维只看到保存成功，
+    // 而工具页上某个开关的状态已被这次保存静默改变。
     return ctx.json({ ok: true, data: { keys: Object.keys(body), subsumed } });
   });
   /**
-   * `modelAlias` 是 Telegram `/model` 写进 `app_kv` 的那份会话别名，它**压过** WebUI 能改的
+   * `modelAlias` 是 Telegram `/model` 写入 `app_kv` 的那份会话别名，它优先于 WebUI 可改的
    * `perChat.<key>.agent.main.modelAlias` 与全局 `agent.main.modelAlias`（`runtime.ts` 先读它）。
-   * 界面上此前只有一行小字提到这件事，运维改了全局别名却不生效时无从下手 —— 现在能看见也能清掉。
+   * 界面上此前只有一行小字说明，运维改了全局别名却不生效时无从排查；现在可见且可清除。
    */
   app.get("/api/chats/:key", (ctx) => {
     const key = ctx.req.param("key");
@@ -1298,16 +1301,16 @@ export function createServer(
     }),
   );
   /**
-   * 配置导出（docs/09 §3.13）。导的是 **`config_kv` 里的覆盖层**，不是合并后的全量配置 ——
-   * 全量里绝大多数是代码默认值，导进另一个部署等于把那一刻的默认值全部钉死，此后升级
-   * 再也拿不到新默认。密钥类键（`publicConfig` 那套判据）直接**不导出**而不是导成
-   * `«redacted»`：导成占位符的话，导入端会把真密钥覆盖成一个字面量。
+   * 配置导出（docs/09 §3.13）。导出的是 `config_kv` 里的覆盖层，而不是合并后的全量配置：
+   * 全量里绝大多数是代码默认值，导入另一个部署等于把当时的默认值全部固定，此后升级
+   * 无法获得新的默认值。密钥类键（`publicConfig` 那套判据）不导出，而不是导成
+   * `«redacted»`：导成占位符会让导入端把真实密钥覆盖成一个字面量。
    */
   app.get("/api/config/export", (ctx) => {
     const overrides: Record<string, unknown> = {};
     const skipped: string[] = [];
-    // 判据与 YAML 那条路共用 `secretConfigRow`：整块写入（`mcp.servers`）里也可能埋着密钥字段，
-    // 而两份各自演化的判据最终必然在其中一条路上把真密钥漏出去。
+    // 判据与 YAML 那条路共用 `secretConfigRow`：整块写入（`mcp.servers`）里也可能包含密钥字段，
+    // 而两份各自演化的判据最终必然在其中一条路径上泄露真实密钥。
     for (const row of persistedConfigRows()) {
       if (secretConfigRow(row.key, row.value)) {
         skipped.push(row.key);
@@ -1321,11 +1324,11 @@ export function createServer(
     });
   });
   /**
-   * `[原始 YAML]` 模式（docs/09 §3.13）。**解析在服务端**：`loadConfig` 用的就是这个 YAML
-   * 解析器，放到前端等于让两处方言各自漂移（缩进 tab、锚点、`yes/no` 当布尔这些边角都有差异），
-   * 而「界面上过了、启动时炸了」是最难查的一类。顺带省掉前端 40KB 的 yaml bundle。
+   * `[原始 YAML]` 模式（docs/09 §3.13）。解析在服务端进行：`loadConfig` 用的就是这个 YAML
+   * 解析器，放到前端会让两处方言各自漂移（缩进 tab、锚点、`yes/no` 当布尔这些边角都有差异），
+   * 而界面校验通过、启动时失败是最难排查的一类。同时省掉前端 40KB 的 yaml bundle。
    *
-   * GET 渲染的是**覆盖层**而不是合并后的全量 —— 与导出同一个理由：全量里绝大多数是代码默认值。
+   * GET 渲染的是覆盖层而不是合并后的全量，理由与导出相同：全量里绝大多数是代码默认值。
    */
   app.get("/api/config/yaml", (ctx) => {
     const tree: Record<string, unknown> = {};
@@ -1337,11 +1340,11 @@ export function createServer(
       }
       assignDotted(tree, row.key, row.value);
     }
-    // 被跳过的键在 YAML **顶部生成注释**逐条点名：此前界面上只有一个 `skipped` 数组，运维看不出
-    // 「我提交的这份少了什么」，而提交一份少了 `webui.passwordHash` 的树曾经等于把口令哈希删掉
-    // （docs/28 · L-WEB-04）。注释拼在 `YAML.stringify` 的结果**前面** —— 进配置树就是一个键了。
+    // 被跳过的键在 YAML 顶部生成注释逐条列出：此前界面上只有一个 `skipped` 数组，运维看不出
+    // 所提交的这份缺了什么，而提交一份缺少 `webui.passwordHash` 的树曾等同于删除口令哈希
+    // （docs/28 · L-WEB-04）。注释拼在 `YAML.stringify` 结果之前：写进配置树就会变成一个键。
     const banner = skipped.length
-      ? `# 这份 YAML 里不含以下 ${skipped.length} 个密钥类键（值一律不回显）：\n${skipped.map((key) => `#   ${key}\n`).join("")}# 它们保持原值：提交这份 YAML 不会删掉它们，删掉这段注释也不会。\n`
+      ? `# 这份 YAML 不含以下 ${skipped.length} 个密钥类键（值不回显）：\n${skipped.map((key) => `#   ${key}\n`).join("")}# 它们保持原值：提交这份 YAML 不会删除它们，删除这段注释也不会。\n`
       : "";
     return ctx.json({
       ok: true,
@@ -1359,7 +1362,7 @@ export function createServer(
     try {
       tree = YAML.parse(body.yaml) ?? {};
     } catch (error) {
-      // yaml 的错误自带 linePos —— 把行号交回去，界面才能「错误定位到行」。
+      // yaml 的错误自带 linePos：把行号交回去，界面才能把错误定位到行。
       const cause = error as {
         message?: string;
         linePos?: Array<{ line: number; col: number }>;
@@ -1391,14 +1394,14 @@ export function createServer(
         invalidConfig("配置校验失败", parsed.error.issues).body,
         400,
       );
-    // 落库粒度是**提交的那棵树的叶子**（`configLeafPaths`），不是顶层段：按段落库时写回去的是
-    // zod 把 `.default()` 填满之后那整棵子树，一次「一个字不改」的往返就把生效覆盖叶子从 73 涨到
-    // 171、把那一刻的代码默认值永久钉死（docs/28 · L-WEB-02）。键取自**提交的树**、值取自
-    // `parsed.data` —— 后者保住「落库的是校验后的值」这条既有契约（同 `PUT /api/config` 的注释）。
+    // 落库粒度是所提交那棵树的叶子（`configLeafPaths`），而不是顶层段：按段落库时写回的是
+    // zod 把 `.default()` 填满之后的整棵子树，一次未作任何修改的往返即把生效覆盖叶子从 73 增至
+    // 171，并把当时的代码默认值永久固定（docs/28 · L-WEB-02）。键取自所提交的树、值取自
+    // `parsed.data`，后者保持落库的是校验后的值这条既有契约（同 `PUT /api/config` 的注释）。
     const sections = Object.keys(tree as Record<string, unknown>);
     const leaves = configLeafPaths(tree);
-    // env 钉住的也按叶子跳过：此前是含被钉键的**整个顶层段**一起跳过，一条 `LUOLI_WEBUI_HOST`
-    // 就能让 `webui` 段其余的键在这条路上全都存不进去。
+    // 被 env 固定的键同样按叶子跳过：此前是把含该键的整个顶层段一起跳过，一条 `LUOLI_WEBUI_HOST`
+    // 即可让 `webui` 段其余的键在这条路径上全部无法保存。
     const pinnedConflicts = envConflicts(leaves);
     const applicable = leaves.filter(
       (leaf) =>
@@ -1424,8 +1427,8 @@ export function createServer(
         ).body,
         400,
       );
-    // 「这份 YAML 是所提交段落的全量视图」此前靠 `writeConfigRows` 删掉祖先键的后代行来实现；
-    // 叶子粒度之后没有祖先键可依赖了，删除必须显式算出来，否则从 YAML 里删掉一个键什么也不会发生。
+    // 这份 YAML 是所提交段落的全量视图，此前依靠 `writeConfigRows` 删除祖先键的后代行实现；
+    // 改为叶子粒度后没有祖先键可依赖，删除必须显式计算，否则从 YAML 里删掉一个键不会产生任何效果。
     const written = new Set(applicable);
     const submitted = new Set(sections);
     const pinnedNames = new Set(
@@ -1436,9 +1439,9 @@ export function createServer(
     for (const row of persistedConfigRows()) {
       if (!submitted.has(row.key.split(".")[0]!) || written.has(row.key))
         continue;
-      // 密钥行与被 env 钉住的键**永不删**：前者压根没出现在运维手上那棵树里（`GET` 整行跳过），
-      // 把「树里没有」当成「运维删掉了」就是 docs/28 · L-WEB-04 —— 一次往返擦掉 `webui.passwordHash`、
-      // 进程静静掉回 setup-token 形态。
+      // 密钥行与被 env 固定的键永不删除：前者本就不出现在运维那棵树里（`GET` 整行跳过），
+      // 把树里没有当作运维删除即 docs/28 · L-WEB-04：一次往返清除 `webui.passwordHash`，
+      // 进程静默退回 setup-token 形态。
       if (secretConfigRow(row.key, row.value) || pinnedNames.has(row.key)) {
         preserved.push(row.key);
         continue;
@@ -1461,9 +1464,9 @@ export function createServer(
     });
   });
   /**
-   * 配置导入：走和 `PUT /api/config` 完全一样的校验与落库路径（点分键 → mergeDotted →
-   * `runtimeConfigSchema` → `writeConfigRows`），只是一次多条。**不是恢复快照** ——
-   * 导入不删除现有覆盖行，只按键覆盖；要清空得自己去改那几项。
+   * 配置导入：走与 `PUT /api/config` 完全一致的校验与落库路径（点分键 → mergeDotted →
+   * `runtimeConfigSchema` → `writeConfigRows`），只是一次处理多条。它不是恢复快照：
+   * 导入不删除现有覆盖行，只按键覆盖；需要清空时要单独改那几项。
    */
   app.post("/api/config/import", async (ctx) => {
     const body = await ctx.req
@@ -1479,7 +1482,7 @@ export function createServer(
     const keys = Object.keys(overrides);
     if (!keys.length)
       return ctx.json({ ok: true, data: { keys: [], skipped: [] } });
-    // 被 env 钉住的键不该让整次导入失败：跳过并点名，比让人先去删环境变量再导一次好。
+    // 被 env 固定的键不应导致整次导入失败：跳过并逐条列出，优于要求先删环境变量再重新导入。
     const conflicts = envConflicts(keys);
     const pinned = new Set(conflicts.map((entry) => entry.key));
     const applicable = keys.filter(
@@ -1526,10 +1529,10 @@ export function createServer(
   });
   /**
    * 工具页那张表。扁平的 `minRole` / `approval` / `scope` / `source` / `enabled` / `timeoutMs`
-   * 一律是**生效值**（旧消费点因此不用改），`defaults` 是代码里那份，`relaxed` 是比默认更松的
-   * 字段名 —— 两者都给才看得出「我现在偏离了多少」（docs/09 §3.7）。
+   * 一律是生效值（既有消费点因此无需改动），`defaults` 是代码里那份，`relaxed` 是比默认更宽松的
+   * 字段名；两者都给出才能看出当前偏离默认的程度（docs/09 §3.7）。
    *
-   * 有注册表就问它（合并逻辑只有一份，还能顺带列出 MCP / plugin 的工具）；没有就退回静态表。
+   * 有注册表时向它查询（合并逻辑只有一份，还能一并列出 MCP / plugin 的工具）；没有则退回静态表。
    */
   app.get("/api/tools", (ctx) => {
     const overrides = currentConfig().tools.overrides;
@@ -1549,8 +1552,8 @@ export function createServer(
                 approval: entry.defaults.approval,
                 timeoutMs: entry.defaultTimeoutMs,
               },
-              // 这个工具此刻是常驻还是折叠（`tools.catalog.*`，docs/05 §3.12）。它**不是**启停开关的
-              // 另一种说法：折叠工具照旧可执行，只是模型默认看不见 schema、要先 `search_tools` 展开。
+              // 这个工具当前是常驻还是折叠（`tools.catalog.*`，docs/05 §3.12）。它不是启停开关的
+              // 另一种表述：折叠工具照旧可执行，只是模型默认看不到 schema，要先 `search_tools` 展开。
               deferred: entry.deferred,
               relaxed: entry.relaxed,
             },
@@ -1586,52 +1589,46 @@ export function createServer(
     });
   });
   /**
-   * 每行多回一个 `effectiveRole` —— 模型系统提示里那个 `role`（docs/21 · G-UI-03）。一个私聊
-   * 占两行（`user:X` + `chat:X`），显示名与 tg_id 一模一样，此前界面上 `min()` 的结果一处都不显示，
-   * 于是「只改了 `chat:X`」与「改对了」长得完全一样。**配对本身就是「这是私聊」的判据**：
-   * Telegram 用户 id 恒正、群 / 频道 id 恒负，两边同时在表里就只可能是一对私聊 —— 不再引第三份
-   * 「先信 chat_type，缺了看正负号」。群 / 频道回 null：那一行的角色是上限，成员各不相同。
+   * `chat` 主体的两条硬约束（docs/05 §2.2），四条写入路径共用一份 —— 与 `/grant` 的
+   * `chatSubjectError` 同源，端点自己抄一遍的话 WebUI 迟早能建出命令建不出来的主体行。
+   * 私聊已不占 `chat:` 行，正数 id 写进去只是一行永不参与判定的死数据；而群 / 频道内的有效角色
+   * 封顶 trusted，chat 行的 owner 档在全库零效果，收下它等于让表格说谎。
    */
-  app.get("/api/principals", (ctx) => {
-    const rows = dependencies.principals.list();
-    const { defaultChatRole } = currentConfig().access;
-    const roles = new Map(
-      rows.map((row) => [`${row.kind}:${row.tgId}`, row.role]),
-    );
-    return ctx.json({
-      ok: true,
-      data: rows.map((row) => {
-        const userRole = roles.get(`user:${row.tgId}`),
-          chatRole = roles.get(`chat:${row.tgId}`);
-        return {
-          ...row,
-          effectiveRole:
-            userRole && chatRole
-              ? resolveEffectiveRole({
-                  userRole,
-                  chatRole,
-                  isPrivate: true,
-                  defaultChatRole,
-                })
-              : null,
-        };
-      }),
-    });
-  });
+  const chatSubjectError = (tgId: string, role?: unknown) =>
+    !tgId.startsWith("-")
+      ? apiError(
+          "invalid_chat_id",
+          "chat 主体只能是群 / 频道，ID 以 -100 开头。私聊改用 user 主体。",
+        )
+      : role === "owner"
+        ? apiError(
+            "invalid_role",
+            "chat 主体不能设为 owner：群 / 频道内的有效权限封顶 trusted。",
+          )
+        : null;
+  /**
+   * 原样返回主体行，不再合成任何有效角色（docs/05 §2.2）。私聊只占 `user:X` 一行，那一行的
+   * 角色就是有效角色，没有第二个数可报；群 / 频道行的角色是**下限**而非有效角色 —— 群里每个
+   * 成员各不相同，编一个确定值出来比不给更坏。
+   */
+  app.get("/api/principals", (ctx) =>
+    ctx.json({ ok: true, data: dependencies.principals.list() }),
+  );
   app.patch("/api/principals/:id", async (ctx) => {
     const body = await ctx.req.json<{
       role: "owner" | "trusted" | "limited" | "blocked";
     }>();
-    const changed = dependencies.principals.setRole(
-      ctx.req.param("id"),
-      body.role,
-      "webui",
-    );
+    const id = ctx.req.param("id");
+    const denied = id.startsWith("chat:")
+      ? chatSubjectError(id.slice(5), body.role)
+      : null;
+    if (denied) return ctx.json(denied.body, denied.status);
+    const changed = dependencies.principals.setRole(id, body.role, "webui");
     dependencies.log.event({
       level: "info",
       kind: "webui.action",
       summary: "principal role changed",
-      data: { id: ctx.req.param("id"), role: body.role },
+      data: { id, role: body.role },
     });
     return ctx.json({ ok: true, data: { changed } });
   });
@@ -1728,21 +1725,21 @@ export function createServer(
     }
   });
   /**
-   * 能力位里**运行时真的会读**的那几个 —— 目前只有 `vision`（`ModelRegistry.supportsVision`，
-   * 含图轮次据它自动切 `vision` 别名，见 `docs/04 §5.2`）。其余能力位只喂 WebUI 的徽章，放开它们
-   * 等于给运维一个「关掉工具」的开关而代码照旧把工具目录发上去 —— 假开关比没开关糟
-   * （`reviews/16` §5「摘除比伪造安全」）。**运行时开始读某个能力位时，才把它加进这里。**
+   * 能力位里运行时会实际读取的那几个，目前只有 `vision`（`ModelRegistry.supportsVision`，
+   * 含图轮次据它自动切换 `vision` 别名，见 `docs/04 §5.2`）。其余能力位只用于 WebUI 的标记，放开
+   * 它们等于给运维一个关闭工具的开关，而代码照旧发送工具目录：无效开关比不提供开关更糟
+   * （`reviews/16` §5：摘除比伪造安全）。运行时开始读取某个能力位时，再把它加进这里。
    */
   const OVERRIDABLE_CAPABILITIES = ["vision"] as const;
   /**
-   * 把 owner 的能力标记合进 `capabilities_json`。**生效值写顶层** —— 运行时与界面徽章都读那里，
-   * 不必各自再懂一层「人工优先于目录」；而「这是人标的」记在 `manual` 里：`enrich` / `import`
-   * 拿目录那份整块覆盖能力位，不留下这个意图的话一次「补齐元数据」就把标记静默撤销了。
+   * 把 owner 的能力标记合并进 `capabilities_json`。生效值写在顶层：运行时与界面标记都读那里，
+   * 无需各自再实现一层人工优先于目录的规则；而人工标记这一事实记在 `manual` 里：`enrich` / `import`
+   * 会用目录那份整块覆盖能力位，不保留该意图时一次补齐元数据即静默撤销标记。
    *
-   * `null` = 取消标记：只摘掉 `manual` 的键，顶层维持现状（这里不做目录查询，撤销不该依赖出网），
-   * 下一次「补齐元数据」再按目录重填 —— 界面上那行提示写的就是这件事。
+   * `null` 表示取消标记：只移除 `manual` 里的键，顶层维持现状（这里不做目录查询，撤销不应依赖出网），
+   * 下一次补齐元数据再按目录重新填充，界面上那行提示说明的即是此行为。
    *
-   * @returns 新的 JSON 串；这次 patch 一个字段都没动到时回 `null`，调用方据此跳过 UPDATE。
+   * @returns 新的 JSON 串；本次 patch 未改动任何字段时返回 `null`，调用方据此跳过 UPDATE。
    */
   const applyManualCapabilities = (
     current: string | null,
@@ -1780,7 +1777,7 @@ export function createServer(
     else delete block.manual;
     return JSON.stringify(block);
   };
-  /** 把某一行现存的人工标记盖回新算出来的能力块（`enrich` 用）。坏 JSON 一律当「没有标记」。 */
+  /** 把某一行现存的人工标记覆盖回新算出的能力块（`enrich` 用）。损坏的 JSON 一律视为没有标记。 */
   const keepManualCapabilities = (
     next: string,
     current: string | null,
@@ -1835,9 +1832,9 @@ export function createServer(
       typeof body.id === "string" && body.id
         ? body.id
         : randomBytes(16).toString("hex");
-    // 手工建的行没有目录来源，`capabilities` 整块就是人说的 —— 其中可覆盖的那几个位同时记进
-    // `manual`，否则第一次「补齐元数据」就把它们按目录改掉了。（这里不校验键名：这条路也承载
-    // 备份导入的完整能力块；「标记」那个手势只在 PATCH 上，那里才逐键挡。）
+    // 手工建的行没有目录来源，`capabilities` 整块均由人工给出，其中可覆盖的那几位同时记入
+    // `manual`，否则第一次补齐元数据就会按目录改写它们。（这里不校验键名：这条路径同时承载
+    // 备份导入的完整能力块；标记这一操作只在 PATCH 上，由那里逐键拦截。）
     const declared =
       body.capabilities &&
       typeof body.capabilities === "object" &&
@@ -1900,14 +1897,14 @@ export function createServer(
     }
   });
   /**
-   * 别名链里指向这些模型的 id 一并清掉；清空的别名整行删掉并各留一条 warn。
+   * 别名链里指向这些模型的 id 一并清除；被清空的别名整行删除并各留一条 warn。
    *
-   * `model_aliases.model_ids_json` 存的是 JSON 数组、**没有外键**，所以删模型不会自动带走它们。
-   * 运行时对悬空 id 是**静默过滤**的（`runtime.ts` 那条 `.filter(Boolean)`），链空掉的别名根本
-   * 不注册、`#pick` 直接回退到 `main` —— 留着它等于在界面上摆一个看起来还在、实际早已不生效的
-   * 假别名。删掉，并把「这个别名没了」写成 warn 当唯一凭据（同 `schedule.purged` 那条先例）。
+   * `model_aliases.model_ids_json` 存的是 JSON 数组且没有外键，因此删模型不会自动清理它们。
+   * 运行时对悬空 id 是静默过滤的（`runtime.ts` 那条 `.filter(Boolean)`），链为空的别名不会注册、
+   * `#pick` 直接回退到 `main`，保留它等于在界面上展示一个看似还在、实际早已不生效的别名。
+   * 因此删掉它，并把该别名已删除写成 warn 作为唯一凭据（参照 `schedule.purged` 的先例）。
    *
-   * **必须在删模型那个事务里跑**：分两次的话中间崩一下，留下的正是那些悬空 id。
+   * 必须在删模型的那个事务内执行：分两次时中途崩溃，留下的正是这些悬空 id。
    */
   const pruneAliases = (
     modelIds: readonly string[],
@@ -1924,7 +1921,7 @@ export function createServer(
       .all() as Array<{ alias: string; modelIds: string }>;
     for (const row of rows) {
       let chain: string[];
-      // 手工改过库或历史坏行：坏 JSON 不该让整次删除失败，跳过它（那一行本来就已经不生效）。
+      // 手工改过库或历史损坏行：损坏的 JSON 不应让整次删除失败，跳过它（那一行本就不生效）。
       try {
         chain = JSON.parse(row.modelIds) as string[];
       } catch {
@@ -1949,13 +1946,13 @@ export function createServer(
     return touched;
   };
   /**
-   * **默认拒绝，`?cascade=1` 才连坐。** 此前这里是一句没有 try/catch 的裸 `DELETE`，撞
-   * `models.provider_id` 那个 `NO ACTION` 外键之后抛 `SqliteError` 出到 500 —— 界面上只剩一句
-   * 「服务端出错，已记录」，**说不出原因**，而审计中间件那条 `webui.action` 照常记一行，
-   * 看起来像删成功了（docs/29 · `M-WEB-05`）。
+   * 默认拒绝，`?cascade=1` 才级联删除。此前这里是一条没有 try/catch 的裸 `DELETE`，触发
+   * `models.provider_id` 那个 `NO ACTION` 外键后抛出 `SqliteError` 并返回 500，界面上只剩一句
+   * 服务端出错、已记录，给不出原因，而审计中间件那条 `webui.action` 照常记一行，
+   * 表现为删除成功（docs/29 · `M-WEB-05`）。
    *
-   * 两个动词分开是照 `schedules` 那条先例（`DELETE` 软取消 vs `POST …/purge` 硬删）：
-   * 「删掉这个 provider」与「连同它名下 12 行调好定价与能力位的模型一起删掉」不是同一个决定。
+   * 两个动词分开是参照 `schedules` 的先例（`DELETE` 软取消与 `POST …/purge` 硬删）：
+   * 删掉这个 provider 与连同它名下 12 行已调好定价与能力位的模型一起删掉，不是同一个决定。
    */
   app.delete("/api/providers/:id", (ctx) => {
     const id = ctx.req.param("id");
@@ -1967,7 +1964,7 @@ export function createServer(
       return ctx.json(
         apiError(
           "provider_has_models",
-          `还有 ${models.length} 个模型指向这个 provider。先删掉它们，或者用 ?cascade=1 连同删除。`,
+          `还有 ${models.length} 个模型指向该 provider。请先删除这些模型，或使用 ?cascade=1 级联删除。`,
           409,
         ).body,
         409,
@@ -2005,9 +2002,9 @@ export function createServer(
     if (!probe)
       return ctx.json(apiError("not_found", "Provider 不存在", 404).body, 404);
     const { row, result, adhoc } = probe;
-    // 只有测「库里那份配置」才动健康状态：拿临时 key 试错不该把线上 provider 摘掉。
-    // 成功写回 up 是 markProviderDown 之后唯一的人工恢复路径；而 404/超时/5xx 不写 down ——
-    // 网关缺 /models 不等于对话不可用，据此摘掉 provider 会把能用的模型链整条打断。
+    // 只有测试库里那份配置才改动健康状态：用临时 key 试错不应摘除线上 provider。
+    // 成功写回 up 是 markProviderDown 之后唯一的人工恢复路径；而 404/超时/5xx 不写 down：
+    // 网关缺少 /models 不等于对话不可用，据此摘除 provider 会中断可用的模型链。
     if (!adhoc) {
       const now = Date.now();
       if (result.reachable)
@@ -2083,9 +2080,9 @@ export function createServer(
       },
     };
   };
-  /** capabilities_json 里那份元数据快照：能力布尔值 + 思考档位 + 模态 + 这次匹配的来龙去脉。
-   *  `priceSource` 记的是「这一行的价格是谁给的」，owner 手改价格后会翻成 manual —— 界面上的
-   *  「官方价」徽标必须能被推翻，否则改完价还显示官方价就是在骗人。 */
+  /** capabilities_json 里那份元数据快照：能力布尔值、思考档位、模态，以及本次匹配的来源信息。
+   *  `priceSource` 记录这一行的价格由谁给出，owner 手工改价后会翻成 manual：界面上的
+   *  官方价标记必须可被推翻，否则改价后仍显示官方价即是错误信息。 */
   const capabilityBlock = (
     meta: ModelMetadata,
     fetchedAt: number | null,
@@ -2109,7 +2106,7 @@ export function createServer(
         fetchedAt,
       },
     });
-  /** 这一行现在记着的定价出处（`official` / `provider` / `manual`）；没记过或块坏了都算不知道。 */
+  /** 这一行当前记录的定价出处（`official` / `provider` / `manual`）；未记录或块损坏均视为未知。 */
   const recordedPriceSource = (capabilities: string | null): string | null => {
     try {
       const catalog = (
@@ -2274,7 +2271,7 @@ export function createServer(
         entry && typeof entry.modelId === "string" ? entry.modelId.trim() : "";
       if (!modelId)
         return ctx.json(
-          apiError("model_invalid", "每一项都必须带非空的 modelId").body,
+          apiError("model_invalid", "每一项必须包含非空 modelId").body,
           400,
         );
       entries.push({
@@ -2295,7 +2292,7 @@ export function createServer(
     }
     // 能力与定价出处一律在服务端重新解析：请求体里的 capabilities 是客户端说的，落库的必须是目录里实际有的那条。
     const catalog = await catalogMeta();
-    // 已存在的 (provider,model) 跳过而不是覆盖 —— 覆盖会把调好的定价冲掉；补齐已有行走 /api/models/enrich。
+    // 已存在的 (provider,model) 跳过而不是覆盖：覆盖会冲掉已调好的定价；补齐已有行走 /api/models/enrich。
     const insert = dependencies.db
       .prepare(`INSERT INTO models(id,provider_id,model_id,display_name,context_window,max_output,capabilities_json,price_in,price_out,price_cache_read,price_cache_write,enabled,sort,created_at,updated_at)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,1,0,?,?) ON CONFLICT(provider_id,model_id) DO NOTHING`);
@@ -2352,9 +2349,9 @@ export function createServer(
       },
     });
   });
-  /** 已经导入过的模型行补元数据：能力块照写（**但人工标记盖回去** —— 能力块不再是纯信息，
-   *  `vision` 有运行时行为），定价只填空着的那几个，
-   *  窗口/最大输出默认不动 —— 运维可能按自己的预算调小过，覆盖要显式 overwrite。 */
+  /** 为已导入的模型行补充元数据：能力块照写，但人工标记要覆盖回去（能力块不再是纯信息，
+   *  `vision` 具有运行时行为）；定价只填补为空的那几项；
+   *  窗口与最大输出默认不动：运维可能按自身预算调小过，覆盖需显式 overwrite。 */
   app.post("/api/models/enrich", async (ctx) => {
     const body = await ctx.req
       .json<{ ids?: unknown; overwrite?: unknown }>()
@@ -2420,10 +2417,10 @@ export function createServer(
           keep(row.priceCacheWrite, meta.priceCacheWrite),
         ];
         const filled = row.priceIn === null && nextPrices[0] !== null;
-        // 既有价格不一定是人手填的：导入时从 models.dev 带进来的行同样非空，而这里此前一律标
-        // `manual` —— 数字没被动，出处却被静默改写，`AC-WEB-013c` 要的「这价能不能信」一键归零
-        // 且不可逆（docs/29 · M-WEB-09）。价格没变就沿用原来的出处；从没记过出处的行早于目录
-        // 导入，只可能是手填的。
+        // 既有价格不一定是人工填写的：导入时从 models.dev 带进来的行同样非空，而这里此前一律标为
+        // `manual`，数字未变而出处被静默改写，`AC-WEB-013c` 关注的价格可信度被一次操作清零
+        // 且不可逆（docs/29 · M-WEB-09）。价格未变时沿用原有出处；从未记录过出处的行早于目录
+        // 导入，只可能是人工填写的。
         const priceSource =
           row.priceIn !== null
             ? (recordedPriceSource(row.capabilities as string | null) ??
@@ -2496,7 +2493,7 @@ export function createServer(
       return ctx.json(
         apiError(
           "alias_invalid",
-          "fallback 链至少要有一个模型；要移除别名请用 DELETE",
+          "fallback 链至少包含一个模型；移除别名请使用 DELETE",
         ).body,
         400,
       );
@@ -2551,8 +2548,8 @@ export function createServer(
     dependencies.rebuildModels?.();
     return ctx.json({ ok: true });
   });
-  // 触发消息自己不带 turn_id（只有回复落盘时才写那一列），可「这条消息触发的那一轮到底发了什么」
-  // 恰恰是检索结果里最想点开的东西 —— 回填一次，让搜索命中也能跳到对话详情。
+  // 触发消息自身不带 turn_id（只有回复落盘时才写那一列），而这条消息触发的那一轮发生了什么，
+  // 恰是检索结果里最需要展开的内容，因此回填一次，让搜索命中也能跳转到对话详情。
   const attachTurnIds = (rows: unknown[]): unknown[] => {
     const items = rows as Array<Record<string, unknown>>;
     const pending = items
@@ -2572,9 +2569,9 @@ export function createServer(
       if (!row.turnId) row.turnId = owners.get(Number(row.id)) ?? null;
     return items;
   };
-  // 图片与文件此前在管理端完全不可见：消息行不带 attachment id，界面上也就没有任何地方能点开
-  // （docs/21 · G-API-08）。一次 IN 查询按 message_id 归组，不返回 local_path ——
-  // 磁盘路径对界面没用，泄漏出去只是白送一份部署布局。
+  // 图片与文件此前在管理端完全不可见：消息行不带 attachment id，界面上也就没有可展开的入口
+  // （docs/21 · G-API-08）。一次 IN 查询按 message_id 归组，不返回 local_path：
+  // 磁盘路径对界面没有用途，暴露出去只会泄露部署布局。
   const withAttachments = (rows: unknown[]): unknown[] => {
     const items = rows as Array<Record<string, unknown>>;
     const ids = [
@@ -2647,8 +2644,8 @@ export function createServer(
       },
     });
   });
-  // 消息页默认看的是「最近几次模型对话」而不是逐条消息流：一次 turn 的提问与回答分散在多行里，
-  // 按行翻页读不出对话的样子。分页走 SQL 的 LIMIT/OFFSET，turns 表可能很大，不整表拉回来再切。
+  // 消息页默认展示最近几次模型对话而不是逐条消息流：一次 turn 的提问与回答分散在多行，
+  // 按行翻页无法还原对话结构。分页走 SQL 的 LIMIT/OFFSET，turns 表可能很大，不整表读回再切分。
   app.get("/api/turns", (ctx) => {
     const {
       page: pageNumber,
@@ -2769,7 +2766,7 @@ export function createServer(
     });
     return ctx.json({ ok: true, data: { cancelled } });
   });
-  // 「这一轮到底往上游发了什么」只有日志里那一份：turns 表存的是统计，messages 表存的是最终文本。
+  // 本轮向上游发送了什么，只有日志里那一份记录：turns 表存的是统计，messages 表存的是最终文本。
   // trace_id 就是 turn id，把该轮的 span 连同 data 一起读出来即可；超过 logs.bodyMaxBytes 的 data
   // 已经被 LogSink 挪进 logs/<day>/blobs/*.json，不跟着解引用的话详情里只剩一行 {"fileRef":…}。
   const DETAIL_MAX_CHARS = 120_000;
@@ -2838,7 +2835,7 @@ export function createServer(
       .get(id) as Record<string, unknown> | undefined;
     if (!turn)
       return ctx.json(
-        apiError("not_found", "这一轮不存在（可能已被日志/数据清理）", 404)
+        apiError("not_found", "该轮次不存在（可能已被日志/数据清理）", 404)
           .body,
         404,
       );
@@ -2852,11 +2849,11 @@ export function createServer(
       ...row,
       ...detailPayload(data),
     }));
-    // 工具输入的第二个来源，也是**唯一对历史轮次有效**的那个：`log_events` 按 logs.retentionDays 清，
-    // 且 `logs.captureBodies=false` 时压根不带请求体，而 `context_messages.parts_json` 永久保留。
-    // 刻意不走 `ContextRepository.messages()` —— 那条路会跑 elidePart，把降级过的行改写成
-    // `{elided:true}`。分级降级只翻 prune_applied 标志位、原始 parts 一直在（docs/02 §裁剪）,
-    // 所以这里直读列，并把 prune 状态一起送出去：界面要能说「模型已经看不到这段参数，但它长这样」。
+    // 工具输入的第二个来源，也是唯一对历史轮次有效的那个：`log_events` 按 logs.retentionDays 清理，
+    // 且 `logs.captureBodies=false` 时不带请求体，而 `context_messages.parts_json` 永久保留。
+    // 刻意不走 `ContextRepository.messages()`：那条路会执行 elidePart，把降级过的行改写成
+    // `{elided:true}`。分级降级只翻转 prune_applied 标志位、原始 parts 始终保留（docs/02 §裁剪）,
+    // 因此这里直接读列，并把 prune 状态一并送出：界面要能说明模型已看不到这段参数，以及它的原文。
     const contextRows = dependencies.db
       .prepare(
         `SELECT ordinal,id,role,origin,prune_level AS pruneLevel,prune_applied AS pruneApplied,
@@ -2879,10 +2876,10 @@ export function createServer(
       },
     });
   });
-  // `raw_json` 只在**单条**详情里发，不进列表：一页 50 条各带一份完整 Telegram update，
-  // 光是检索一次就得几 MB。这一列从 `0001_init.sql` 起就在写，而在这之前全仓没有一处读过它
-  // （连 `get_message` 也没有 —— `MESSAGE_COLUMNS` 里就没这一列），界面上够不着任何入口
-  // （docs/29 · `M-WEB-06`）。发出去的是入库时 `redactArchivePayload` 过的那份。
+  // `raw_json` 只在单条详情里返回，不进列表：一页 50 条各带一份完整 Telegram update，
+  // 一次检索即需传输数 MB。这一列从 `0001_init.sql` 起就在写，而在此之前全仓没有一处读过它
+  // （`get_message` 也没有，`MESSAGE_COLUMNS` 里就没有这一列），界面上没有任何入口
+  // （docs/29 · `M-WEB-06`）。返回的是入库时经 `redactArchivePayload` 处理过的那份。
   app.get("/api/messages/:id", (ctx) => {
     const row = dependencies.db
       .prepare(
@@ -3011,14 +3008,14 @@ export function createServer(
     };
     const entries = Object.entries(body).filter(([key]) => map[key]);
     /**
-     * 能力标记：中转站照抄官方模型名却不真的转发图片时，`capabilities_json` 抄来的
-     * `vision:true` 会让含图轮次**不切** `vision` 别名，图就留在一个看不见它的模型上
-     * （实测 `logs/2026-08-19`：同一家网关的 grok-4.5 收下 image_url、200 返回、
-     * usage 里没有 image_tokens，四次全在瞎猜；同一家的 grok-4.3 正常）。目录改不了那个事实，
-     * 所以要给运维一条推翻它的路 —— 这是本条唯一的存在理由。
+     * 能力标记：中转站照搬官方模型名却不实际转发图片时，`capabilities_json` 里继承的
+     * `vision:true` 会让含图轮次不切换到 `vision` 别名，图片留在一个读不到它的模型上
+     * （实测 `logs/2026-08-19`：同一家网关的 grok-4.5 接收 image_url、返回 200，
+     * usage 里没有 image_tokens，四次回复均为推测；同一家的 grok-4.3 正常）。目录改变不了该事实，
+     * 因此要给运维一条推翻它的途径，这是本项存在的唯一理由。
      *
-     * 白名单外的键**报错而不是静静吞掉**：让人以为标了「不支持工具」就不会发工具目录，
-     * 比不给这个选项糟得多。
+     * 白名单之外的键报错而不是静默忽略：让人误以为标记了不支持工具就不会发送工具目录，
+     * 比不提供这个选项更糟。
      */
     const patch =
       body.capabilities &&
@@ -3034,7 +3031,7 @@ export function createServer(
         return ctx.json(
           apiError(
             "model_invalid",
-            `只有 ${OVERRIDABLE_CAPABILITIES.join(" / ")} 能人工标记；${stray.join("、")} 运行时不读，标了也不会改变行为`,
+            `只有 ${OVERRIDABLE_CAPABILITIES.join(" / ")} 支持人工标记；${stray.join("、")} 运行时不读取，标记后不影响行为`,
           ).body,
           400,
         );
@@ -3063,7 +3060,7 @@ export function createServer(
         .prepare(`UPDATE models SET ${sql},updated_at=? WHERE id=?`)
         .run(...values, Date.now(), ctx.req.param("id")).changes;
     }
-    // 手改过价格之后还挂着「官方价」徽标就是在骗人：把出处翻成 manual，界面据此改标。
+    // 手工改价后仍显示官方价标记即是错误信息：把出处翻成 manual，界面据此更新标记。
     if (changes && entries.some(([key]) => key.startsWith("price"))) {
       const row = dependencies.db
         .prepare(
@@ -3109,7 +3106,7 @@ export function createServer(
             )
             .run(next, Date.now(), ctx.req.param("id")).changes,
         );
-        // 这条标记会改变含图轮次走哪个模型，值得单独留一行 —— 中间件那条只记方法与路径。
+        // 这条标记会改变含图轮次使用哪个模型，需单独留一行：中间件那条只记方法与路径。
         dependencies.log.event({
           level: "info",
           kind: "webui.action",
@@ -3121,8 +3118,8 @@ export function createServer(
     dependencies.rebuildModels?.();
     return ctx.json({ ok: true, data: { changes } });
   });
-  // 别名清理走与 provider 级联删同一条路：不然同一种悬空状态换个门进来照样发生，
-  // 而这道门（模型表的行内〔删除〕）才是运维天天用的那个。
+  // 别名清理与 provider 级联删除走同一条路径：否则同一种悬空状态换一个入口仍会发生，
+  // 而这个入口（模型表的行内〔删除〕）才是运维日常使用的那个。
   app.delete("/api/models/:id", (ctx) => {
     const id = ctx.req.param("id");
     let aliases: Array<{ alias: string; removed: string[]; emptied: boolean }> =
@@ -3178,7 +3175,7 @@ export function createServer(
     ];
     if (!ids.length)
       return ctx.json(
-        apiError("invalid_ids", "ids 至少要有一个 Telegram 数字 ID").body,
+        apiError("invalid_ids", "ids 至少包含一个 Telegram 数字 ID").body,
         400,
       );
     if (ids.length > 500)
@@ -3197,6 +3194,11 @@ export function createServer(
         ).body,
         400,
       );
+    if (kind === "chat")
+      for (const tgId of ids) {
+        const denied = chatSubjectError(tgId, role);
+        if (denied) return ctx.json(denied.body, denied.status);
+      }
     // upsertSeen 的 ON CONFLICT 分支刻意不动 role（避免每条消息把手工设的角色冲掉），
     // 所以只调它的话已存在的主体会「导入成功」却什么都没变 —— 角色必须再走一次 setRole。
     // 已存在的行也不能再走一次 upsertSeen：这里的 displayName/username 只有 null，
@@ -3263,14 +3265,20 @@ export function createServer(
     ];
     if (!ids.length)
       return ctx.json(
-        apiError("invalid_ids", "ids 至少要有一个主体 id").body,
+        apiError("invalid_ids", "ids 至少包含一个主体 id").body,
         400,
       );
     if (ids.length > 500)
       return ctx.json(
-        apiError("invalid_ids", "单次最多改 500 个主体").body,
+        apiError("invalid_ids", "单次最多修改 500 个主体").body,
         400,
       );
+    for (const id of ids) {
+      const denied = id.startsWith("chat:")
+        ? chatSubjectError(id.slice(5), role)
+        : null;
+      if (denied) return ctx.json(denied.body, denied.status);
+    }
     // 不存在的 id 单独报回去而不是静默跳过：勾选来自表格，出现缺失说明这一批和库里对不上了。
     const missing: string[] = [];
     let changed = 0;
@@ -3313,14 +3321,14 @@ export function createServer(
     const key = `tools.overrides.${name}`;
     const pinned = envConflicts([key]);
     if (pinned.length) return ctx.json(envPinnedError(pinned).body, 400);
-    // 一个 key 就是 `config_kv` 里一条整叶 JSON，所以必须**先读当前覆盖再整体写回**：只写请求里
-    // 带来的那个字段，会把同一条 JSON 里其余的覆盖一起抹掉（点一下启停就丢掉刚调好的 minRole）。
-    // 三个策略字段显式给 `null` = 恢复默认，也就是从这条 JSON 里删掉它。
+    // 一个 key 对应 `config_kv` 里一条整叶 JSON，因此必须先读当前覆盖再整体写回：只写请求里
+    // 携带的那个字段，会一并抹掉同一条 JSON 里其余的覆盖（一次启停操作即丢失刚调好的 minRole）。
+    // 三个策略字段显式给 `null` 表示恢复默认，即从这条 JSON 里删掉它。
     //
-    // 基准优先取**库里那一行**而不是 `currentConfig()`：`config.changed` 之后的重载是异步的
-    // （`main.ts` 里 `void loadConfig(...).then(...)`），连着改两次的话第二次会读到重载前的旧快照，
-    // 把第一次的改动原样覆盖掉。没有那一行时才回落到快照 —— 覆盖也可能来自 config.yaml 或
-    // `tools.overrides` 整块那一层，那两层只有快照看得见。
+    // 基准优先取库里那一行而不是 `currentConfig()`：`config.changed` 之后的重载是异步的
+    // （`main.ts` 里 `void loadConfig(...).then(...)`），连续改两次时第二次会读到重载前的旧快照，
+    // 把第一次的改动原样覆盖。没有那一行时才回落到快照：覆盖也可能来自 config.yaml 或
+    // `tools.overrides` 整块那一层，这两层只有快照能看到。
     const persisted = dependencies.db
       .prepare("SELECT value_json AS value FROM config_kv WHERE key=?")
       .get(key) as { value: string } | undefined;
@@ -3379,8 +3387,8 @@ export function createServer(
       if (body.timeoutMs === null) delete next.timeoutMs;
       else next.timeoutMs = body.timeoutMs;
     }
-    // 放宽（minRole 调低 / 审批降档）要二次确认。**校验在落库之前**：没确认时一个字都不写，
-    // 否则「先存了再问」的确认框只是事后通知（docs/09 §3.7）。超时与启停不在其列。
+    // 放宽（minRole 调低 / 审批降档）要二次确认。校验在落库之前：未确认时不写入任何内容，
+    // 否则先保存再询问的确认框只是事后通知（docs/09 §3.7）。超时与启停不在其列。
     const relaxed = relaxedFields(base, next);
     if (relaxed.length && body.confirmRelax !== true) {
       const effective = effectiveToolPolicy(base, next);
@@ -3389,7 +3397,7 @@ export function createServer(
           ok: false,
           error: {
             code: "relax_requires_confirmation",
-            message: `${name} 的${relaxed.map((field) => (field === "minRole" ? "最低角色" : "审批策略")).join(" 与 ")}比代码里的默认更松，需要二次确认`,
+            message: `${name} 的${relaxed.map((field) => (field === "minRole" ? "最低角色" : "审批策略")).join(" 与 ")}宽于代码内置默认，需要二次确认`,
             details: relaxed.map((field) => ({
               path: field,
               from: base[field],
@@ -3437,10 +3445,10 @@ export function createServer(
       ok: true,
       data: {
         config: publicConfig(currentConfig().sandbox),
-        // 它不在 `sandbox.*` 那棵子树下，但管的是同一件事的另一半：谁能绕过隔离。此前沙箱页上
-        // 没有任何入口（`grep allowHostFsForOwner packages/webui/src` 零命中），只能从「全部配置」
-        // 里被 SchemaForm 渲染成一个普通开关，拨一下就生效（docs/29 · M-WEB-10）。
-        // 只读出来 —— 写回照旧走 `PUT /api/config`，那条路上有白名单与 `runtimeConfigSchema`。
+        // 它不在 `sandbox.*` 那棵子树下，但控制的是同一件事的另一半：谁可以绕过隔离。此前沙箱页上
+        // 没有任何入口（`grep allowHostFsForOwner packages/webui/src` 零命中），只能在全部配置里
+        // 被 SchemaForm 渲染成一个普通开关，切换一次即生效（docs/29 · M-WEB-10）。
+        // 这里只读出来，写回照旧走 `PUT /api/config`，那条路径上有白名单与 `runtimeConfigSchema`。
         allowHostFsForOwner: currentConfig().tools.fs.allowHostFsForOwner,
         plan: dependencies.sandbox?.plan("owner"),
       },
@@ -3458,7 +3466,7 @@ export function createServer(
       return ctx.json(
         apiError(
           "redacted_placeholder",
-          `${redacted.join("、")} 的值里含脱敏占位符 «redacted»`,
+          `${redacted.join("、")} 的值含脱敏占位符 «redacted»`,
         ).body,
         400,
       );
@@ -3484,8 +3492,8 @@ export function createServer(
     }),
   );
   /**
-   * 会话级持久容器（docs/09 §3.7，语义见 docs/05 §5.5）。三个端点共用这一道：运行时没装配时
-   * 回 `not_implemented` 而**不是空列表** —— 「读不到」和「一个都没有」在运维眼里是两回事。
+   * 会话级持久容器（docs/09 §3.7，语义见 docs/05 §5.5）。三个端点共用这一道：运行时未装配时
+   * 返回 `not_implemented` 而不是空列表：读不到与一个都没有对运维是两种结论。
    */
   const containersOr501 = (): ContainerManager | null =>
     dependencies.sandbox?.containers() ?? null;
@@ -3531,11 +3539,11 @@ export function createServer(
       return ctx.json(
         apiError(
           "workspace_unmappable",
-          "这个会话的工作目录换算不到宿主路径，建不了容器",
+          "该会话的工作目录无法映射到宿主路径，无法创建容器",
         ).body,
         400,
       );
-    // `?wipe=1` 才动文件。**「换环境」和「删数据」是两件事**，默认那一档一个文件都不碰
+    // `?wipe=1` 才改动文件。更换环境与删除数据是两件事，默认那一档不触碰任何文件
     // （同 `container_reset` 的默认值，docs/05 §3.11）。
     if (ctx.req.query("wipe") === "1") {
       const stamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -3548,14 +3556,14 @@ export function createServer(
       });
       if ("error" in wipe)
         return ctx.json(
-          apiError(wipe.error, wipe.hint ?? "清理工作区失败，容器也没动").body,
+          apiError(wipe.error, wipe.hint ?? "清理工作区失败，容器未变更").body,
           400,
         );
       if (!wipe.ok)
         return ctx.json(
           apiError(
             "workspace_wipe_failed",
-            `文件没能挪进回收站，容器也没动：${wipe.stderr.slice(0, 400)}`,
+            `文件未能移入回收站，容器未变更：${wipe.stderr.slice(0, 400)}`,
           ).body,
           400,
         );
@@ -3589,7 +3597,7 @@ export function createServer(
     });
     if (!kept.ok)
       return ctx.json(
-        apiError(kept.error, kept.hint ?? "改不了到期时间").body,
+        apiError(kept.error, kept.hint ?? "无法修改到期时间").body,
         404,
       );
     return ctx.json({
@@ -3602,9 +3610,9 @@ export function createServer(
     });
   });
   /**
-   * 拉取沙箱镜像（docs/09 §3.7）。**只做 pull，不做 build** —— build 要有 Dockerfile 上下文、
-   * 会跑任意构建指令、耗时以分钟计，那是部署动作不是控制台按钮。镜像名取自当前配置，
-   * 不收请求体里的名字：让 owner 从界面上指定任意镜像等于绕开 `sandbox.image` 这道配置。
+   * 拉取沙箱镜像（docs/09 §3.7）。只执行 pull，不执行 build：build 需要 Dockerfile 上下文、
+   * 会运行任意构建指令、耗时以分钟计，属于部署动作而非控制台按钮。镜像名取自当前配置，
+   * 不接受请求体里的名字：允许 owner 在界面上指定任意镜像等于绕开 `sandbox.image` 这道配置。
    */
   app.post("/api/sandbox/image", async (ctx) => {
     if (!dependencies.sandbox)
@@ -3617,7 +3625,7 @@ export function createServer(
       return ctx.json(
         apiError(
           "sandbox_not_docker",
-          `当前 sandbox.mode=${config.mode}，没有镜像可拉`,
+          `当前 sandbox.mode=${config.mode}，无镜像可拉取`,
         ).body,
         400,
       );
@@ -3630,9 +3638,9 @@ export function createServer(
         );
   });
   /**
-   * 审批规则的逐行试跑（docs/09 §3.7）：拿一条样例输入过一遍**运行时那份** `ApprovalRules`，
-   * 回报哪几条命中、最终风险档位。在界面上自己再实现一遍匹配必然与运行时漂移 —— 而「以为配了
-   * 审批其实永不命中」正是这条规则最容易出的错。
+   * 审批规则的逐行试跑（docs/09 §3.7）：用一条样例输入过一遍运行时那份 `ApprovalRules`，
+   * 返回命中的规则与最终风险档位。在界面上另行实现一遍匹配必然与运行时漂移，而配置了审批
+   * 却永不命中正是这条规则最常见的错误。
    */
   app.post("/api/approvals/test", async (ctx) => {
     const body = await ctx.req
@@ -3669,7 +3677,7 @@ export function createServer(
         .all(),
     }),
   );
-  /** 控制台是 owner 单口令的，所以「谁在看」只有一个答案；判据是**看的是不是别人那份**。 */
+  /** 控制台是 owner 单口令的，因此查看者只有一个；判据是所查看的是否为他人那一份。 */
   const auditPrimemoryAccess = (
     row: { scope?: unknown; subject?: unknown },
     op: "read" | "write",
@@ -3697,11 +3705,11 @@ export function createServer(
       );
     } catch {
       return ctx.json(
-        apiError("not_found", "文档文件读不到或不在记忆目录内", 404).body,
+        apiError("not_found", "文档文件无法读取，或不在记忆目录内", 404).body,
         404,
       );
     }
-    // 读成功之后才记：文件读不到时回 404，那不是一次「查看」（docs/29 · M-MEM-01）。
+    // 读取成功之后才记录：文件读不到时返回 404，那不算一次查看（docs/29 · M-MEM-01）。
     auditPrimemoryAccess(row, "read");
     return ctx.json({ ok: true, data: { ...row, content } });
   });
@@ -3808,15 +3816,15 @@ export function createServer(
     }
   });
   /**
-   * 审批列表。此前是硬 `LIMIT 200` —— 撞上限就是静默截断，界面上看不出还有没有别的。
+   * 审批列表。此前是硬编码 `LIMIT 200`，触顶即静默截断，界面上看不出是否还有更多。
    *
-   * 三处不能挪：
-   * - **过期扫描留在 `COUNT` 与 `SELECT` 之前**。夹在两者中间的话，`total` 数的是扫描前那一刻、
-   *   页内容是扫描后那一刻，两个数字对不上而且没人能解释。
-   * - **`pending` 是全表计数，不是本页里数出来的**。左侧导航那个角标读的就是它，要求「不必切到
-   *   任务页就看得见」（`AC-WEB-049`）—— 按页数的话翻到第 2 页角标就掉了，这是整次分页改造里
-   *   唯一一处会**静默造成功能退化**的地方。
-   * - 排序是 `(state='pending') DESC, requested_at DESC`：待办永远在第一页。`ix_approvals_state`
+   * 三处不能调整：
+   * - 过期扫描必须留在 `COUNT` 与 `SELECT` 之前。夹在两者之间时，`total` 统计的是扫描前的状态、
+   *   页内容是扫描后的状态，两个数字不一致且无法解释。
+   * - `pending` 是全表计数，而不是本页统计出来的。左侧导航那个角标读的就是它，要求不切到任务页
+   *   也能看见（`AC-WEB-049`）：按页统计时翻到第 2 页角标即归零，这是整次分页改造里唯一一处会
+   *   静默导致功能退化的位置。
+   * - 排序是 `(state='pending') DESC, requested_at DESC`：待办始终在第一页。`ix_approvals_state`
    *   覆盖这个前缀。
    */
   app.get("/api/approvals", (ctx) => {
@@ -3840,8 +3848,8 @@ export function createServer(
         .pluck()
         .get(),
     );
-    // 列表收窄成显式列（原先是 `SELECT *`）：列集与 `ApprovalRow` 逐字对齐，多一列少一列都该在这里
-    // 看得见。**没有新增语句** —— 就是原来那一条，只是不再靠 `*` 猜。
+    // 列表收窄为显式列（原先是 `SELECT *`）：列集与 `ApprovalRow` 逐字对齐，多一列或少一列都能在
+    // 这里看出来。没有新增语句，仍是原来那一条，只是不再依赖 `*` 推断。
     const items = (
       dependencies.db
         .prepare(
@@ -3851,10 +3859,10 @@ export function createServer(
         .all(size, offset) as Array<Record<string, unknown>>
     )
       // `decided_by` 有三种写法（`user:<tgId>` / `owner` / `system`，[03] 的 approvals 段）。
-      // `user:<tgId>` 是 Telegram 那条裁决通道带来的**新**格式，而这一页的用途正是事后查「这条是
-      // 谁批的」—— 一串数字答不了那个问题。反查规则只有服务端这一份（`principalLabel`，与任务页
-      // 和定时任务页同一个 helper）：**前端不许自己拆 `user:` 前缀**，那会把格式变成前后端各存
-      // 一半的暗契约，下一种写法出现时前端会静静把它渲染成乱码。
+      // `user:<tgId>` 是 Telegram 那条裁决通道引入的新格式，而这一页的用途正是事后查询由谁批准，
+      // 一串数字回答不了该问题。反查规则只有服务端这一份（`principalLabel`，与任务页和定时任务页
+      // 使用同一个 helper）：前端不得自行拆解 `user:` 前缀，那会让格式变成前后端各存一半的隐式
+      // 契约，出现下一种写法时前端会静默渲染出错误内容。
       .map((row) => ({
         ...row,
         decidedByLabel: decidedByLabel(dependencies.db, row.decided_by),
@@ -3886,11 +3894,11 @@ export function createServer(
     });
   });
   /**
-   * 定时任务面板（docs/21 · `G-API-16`）。此前运维在 WebUI 里既看不到这个部署有哪些任务在排、
-   * 也停不掉任何一条 —— 止损只能去 Telegram 让 bot 跑 `schedule_cancel`。
+   * 定时任务面板（docs/21 · `G-API-16`）。此前运维在 WebUI 里既看不到部署中有哪些任务在排、
+   * 也停不掉任何一条，止损只能在 Telegram 让 bot 执行 `schedule_cancel`。
    *
-   * **建任务与工具共用 `createScheduledJob`**：两边各写一遍校验的话，WebUI 迟早能建出工具
-   * 建不出来的任务（比如每分钟一次的 agent 轮次）。
+   * 建任务与工具共用 `createScheduledJob`：两边各写一遍校验时，WebUI 迟早会建出工具建不出来的
+   * 任务（例如每分钟一次的 agent 轮次）。
    */
   const scheduleRuntime = (): NonNullable<
     ServerDependencies["schedules"]
@@ -3905,8 +3913,8 @@ export function createServer(
     creatorLabel: principalLabel(dependencies.db, "user", job.createdBy),
     createdAt: job.createdAt,
     updatedAt: job.updatedAt,
-    // `silent` 由 `scheduledJobView` 给（DB 列 `allow_silent`）；连续静默次数只有面板看得见，
-    // 它是「这条任务是不是已经变成一台只烧钱不说话的定时器」的唯一凭据（docs/02 §10.5）。
+    // `silent` 由 `scheduledJobView` 提供（DB 列 `allow_silent`）；连续静默次数只有面板可见，
+    // 它是判断该任务是否已变成持续消耗配额却从不投递的唯一凭据（docs/02 §10.5）。
     silentStreak: job.silentStreak,
     ...scheduledJobView(
       job,
@@ -3930,8 +3938,8 @@ export function createServer(
           truncated: false,
         },
       });
-    // 不分页（行数有界，DataGrid 自己切片），但 `listAll` 有 500 条上限 —— 撞上去必须说出来。
-    // 静默截断的表现是「我明明建过那条任务，面板上找不到」，而界面没有任何理由怀疑自己看到的不全。
+    // 不分页（行数有界，DataGrid 自行切片），但 `listAll` 有 500 条上限，触顶时必须明确告知。
+    // 静默截断的表现是已创建的任务在面板上找不到，而界面没有任何依据判断自己看到的不完整。
     const jobs = runtime.jobs.listAll();
     const total = Number(
       dependencies.db
@@ -3976,7 +3984,7 @@ export function createServer(
       .get(key) as { chatId: string; threadId: number | null } | undefined;
     if (!target)
       return ctx.json(
-        apiError("chat_not_found", "会话不存在：只能给已经有上下文的会话排任务")
+        apiError("chat_not_found", "会话不存在：只能为已有上下文的会话创建任务")
           .body,
         400,
       );
@@ -3989,21 +3997,22 @@ export function createServer(
       );
     const live = currentConfig();
     // WebUI 只有 owner 一个身份（docs/14 A15），所以任务归属 `access.bootstrapOwnerId`。
-    // 它仍然要过 D9：触发时按 min(用户角色, 会话角色) 重算，在不受信的群里不会因为「owner 建的」而提权。
+    // 它仍然要过 D9：触发时重算有效角色（群里任一侧 blocked 即 blocked，否则取两侧较高者封顶
+    // trusted），落在群里的任务不会因为「owner 建的」而拿到 owner。
     const createdBy = live.access.bootstrapOwnerId;
     if (!createdBy)
       return ctx.json(
         apiError(
           "owner_unset",
-          "没有配 access.bootstrapOwnerId：任务需要一个归属身份才能在触发时重算权限",
+          "未配置 access.bootstrapOwnerId：任务需要归属主体才能在触发时重算权限",
         ).body,
         400,
       );
     const result = createScheduledJob(
       runtime.jobs,
       runtime.runner,
-      // `silent` 是对外线上的名字（DB 列 `allow_silent`）。收它是契约里那条「命名收敛」的一半 ——
-      // 不收的话 WebUI 建不出静默任务，而弹窗上那个开关会静静地什么都不做。
+      // `silent` 是对外使用的名称（DB 列 `allow_silent`）。接受它是契约里命名收敛的一半：
+      // 不接受时 WebUI 建不出静默任务，而弹窗上那个开关不会产生任何效果。
       {
         name: String(body.name ?? ""),
         mode,
@@ -4043,19 +4052,19 @@ export function createServer(
     return ctx.json({ ok: true, data: scheduleRow(result.job) });
   });
   /**
-   * 改一条活跃任务。**校验与 `schedule_update` 工具共用 `updateScheduledJob`** —— 理由同建任务
-   * 那条：两边各写一遍的话，WebUI 迟早能改出工具改不出来的任务。
+   * 修改一条活跃任务。校验与 `schedule_update` 工具共用 `updateScheduledJob`，理由同建任务那条：
+   * 两边各写一遍时，WebUI 迟早会改出工具改不出来的任务。
    *
-   * **`gateEnabled` 是建与改唯一不共用的那道闸**：总开关（`schedule.enabled`）关着时这条路放行，
-   * 而 `POST /api/schedules` 仍回 `schedule_disabled`。不对称是有意的 —— 拒掉编辑等于「要修一条
-   * 跑飞的任务，得先把总开关打开」，而那一下会把所有任务一起重新武装（理由与出处见
+   * `gateEnabled` 是建与改唯一不共用的那道闸：总开关（`schedule.enabled`）关着时这条路放行，
+   * 而 `POST /api/schedules` 仍返回 `schedule_disabled`。该不对称是有意的：拒绝编辑意味着要修正
+   * 一条异常任务必须先打开总开关，而那一步会把所有任务一起重新武装（理由与出处见
    * `updateScheduledJob` 的注释与 docs/09 §3.10.1）。
    *
-   * body 里的 `name` 是**新名字**（HTTP 已经用 `:id` 定位了）；工具那边 `name` 是定位符、`newName`
-   * 才是新名字（docs/09 §4）。`key`/`chatId`/`threadId`/`createdBy`/`mode` 一个都不读：前四样是
-   * 会话隔离与「触发时按谁重算角色」的锚点，收下就等于给了一个把任务搬进任意群、或换个人担保的
-   * 原语（同 `POST /api/schedules` 反查 `contexts` 的理由）；`mode` 会同时翻转 `payload` 的语义与
-   * 花不花钱。只发这几样时落进 `nothing_to_update`，不是假成功。
+   * body 里的 `name` 是新名称（HTTP 已用 `:id` 定位）；工具一侧 `name` 是定位符、`newName` 才是
+   * 新名称（docs/09 §4）。`key`/`chatId`/`threadId`/`createdBy`/`mode` 一律不读取：前四项是
+   * 会话隔离与触发时重算有效角色的锚点，接受它们等于提供了把任务迁入任意群、或更换担保人的
+   * 原语（同 `POST /api/schedules` 反查 `contexts` 的理由）；`mode` 会同时改变 `payload` 的语义与
+   * 是否产生费用。只发这几项时落进 `nothing_to_update`，而不是返回假成功。
    */
   app.patch("/api/schedules/:id", async (ctx) => {
     const runtime = scheduleRuntime();
@@ -4138,14 +4147,14 @@ export function createServer(
     return ctx.json({ ok: true, data: { cancelled: changed, name: job.name } });
   });
   /**
-   * 硬删一行（`ScheduleRepository.remove`，**不是**按保留期清理的 `purge(before)`）。与上面那条
-   * 软取消是两件事：停掉的行还在列表上、还能看见它跑过多少次，删掉的什么都不剩。
+   * 硬删一行（`ScheduleRepository.remove`，不是按保留期清理的 `purge(before)`）。它与上面那条
+   * 软取消是两件事：停用的行仍在列表上、仍能看到触发次数，删除的不留任何记录。
    *
-   * **顺序不能反**：active 的先 `runner.unregister` 再删行。反过来的话，删行到下一次 cron 之间
-   * 那条任务在 `Scheduler` 里还排着，而界面上已经看不见它了。
+   * 顺序不能颠倒：active 的先 `runner.unregister` 再删行。顺序颠倒时，删行到下一次 cron 之间
+   * 那条任务仍排在 `Scheduler` 里，而界面上已不可见。
    *
-   * 日志记 **warn**：硬删一条 active 任务之后「bot 突然不再提醒了」在库里再无痕迹，这一行就是
-   * 那个痕迹（`schedule.cancelled` 同理）。
+   * 日志记 warn：硬删一条 active 任务后，bot 停止提醒在库里不留痕迹，这一行即是那个痕迹
+   * （`schedule.cancelled` 同理）。
    */
   app.post("/api/schedules/:id/purge", (ctx) => {
     const runtime = scheduleRuntime();
@@ -4183,10 +4192,10 @@ export function createServer(
     return ctx.json({ ok: true, data: { removed, name: job.name, wasActive } });
   });
   /**
-   * 立即触发一次。**不等它跑完**：`mode='agent'` 的一次触发是一整轮真实模型调用，
-   * 同步等下去会把这个请求挂到 `concurrency.turnTimeoutMs`。所以先回响应（同
-   * `POST /api/restart` 的做法），结果落在这一行的 `lastState` / `lastError` 与日志里。
-   * 不影响下一次的正常触发 —— cron 那边的计时器没被动过。
+   * 立即触发一次，不等待它执行完成：`mode='agent'` 的一次触发是一整轮真实模型调用，
+   * 同步等待会把这个请求挂到 `concurrency.turnTimeoutMs`。因此先返回响应（与
+   * `POST /api/restart` 做法相同），结果记录在这一行的 `lastState` / `lastError` 与日志里。
+   * 不影响下一次的正常触发：cron 一侧的计时器未被改动。
    */
   app.post("/api/schedules/:id/trigger", (ctx) => {
     const runtime = scheduleRuntime();
@@ -4195,14 +4204,14 @@ export function createServer(
         apiError("not_implemented", "这个部署没有装配定时任务运行时", 500).body,
         500,
       );
-    // 启动窗口：HTTP 从 `serve()` 起就在监听，而 runner 的 `load()` 要等 bot 起来 —— 这中间触发
-    // 一条任务会开一整轮、跑完模型、记完账，最后以 `delivery_failed:telegram_unavailable` 收尾且
-    // 不提交（docs/28 · L-SCH-01）。**理由要写进响应**，否则界面上只剩一句「触发失败」。
+    // 启动窗口：HTTP 自 `serve()` 起即在监听，而 runner 的 `load()` 要等 bot 启动完成。该窗口内触发
+    // 一条任务会开出完整轮次、调用模型并计费，最终以 `delivery_failed:telegram_unavailable` 收尾且
+    // 不提交（docs/28 · L-SCH-01）。原因必须写进响应，否则界面上只剩一句触发失败。
     if (!runtime.runner.loaded)
       return ctx.json(
         apiError(
           "not_ready",
-          "定时任务运行时还没装载完（Telegram 投递通道未就绪），过几秒再试；这个部署没有配可用的 BOT_TOKEN 时手动触发一直不可用",
+          "定时任务运行时尚未装载完成（Telegram 投递通道未就绪），请稍后重试；未配置可用 BOT_TOKEN 的部署无法手动触发",
           400,
         ).body,
         400,
@@ -4213,7 +4222,7 @@ export function createServer(
       return ctx.json(apiError("not_found", "任务不存在", 404).body, 404);
     if (job.state !== "active")
       return ctx.json(
-        apiError("not_active", `这条任务是 ${job.state}，不会再触发`, 409).body,
+        apiError("not_active", `任务状态为 ${job.state}，不会再触发`, 409).body,
         409,
       );
     dependencies.log.event({
@@ -4230,36 +4239,34 @@ export function createServer(
         manual: true,
       },
     });
-    void runtime.runner
-      .fire(id)
-      .catch((error: unknown) =>
-        dependencies.log.event({
-          level: "error",
-          kind: "schedule.failed",
-          summary: `手动触发 ${job.name} 失败`,
-          chatId: job.chatId,
-          key: job.key,
-          data: {
-            job: id,
-            error: error instanceof Error ? error.message : String(error),
-          },
-        }),
-      );
+    void runtime.runner.fire(id).catch((error: unknown) =>
+      dependencies.log.event({
+        level: "error",
+        kind: "schedule.failed",
+        summary: `手动触发 ${job.name} 失败`,
+        chatId: job.chatId,
+        key: job.key,
+        data: {
+          job: id,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      }),
+    );
     return ctx.json({
       ok: true,
       data: { started: true, name: job.name, mode: job.mode },
     });
   });
   /**
-   * **不是 `SELECT *`**：那会把 `path`（宿主文件系统路径）、`content_hash` 与整份
-   * `frontmatter_json` 一起发给前端。
+   * 这里不用 `SELECT *`：那会把 `path`（宿主文件系统路径）、`content_hash` 与整份
+   * `frontmatter_json` 一并发给前端。
    *
-   * `requires_tools` 是从 `frontmatter_json` 里**只取那一个字段**再发出去，不是把整份 frontmatter
-   * 放行回去。它值得摆在列表上：`requires-tools` 没被满足的 skill 压根不进模型的目录
-   * （`SkillLoader.catalog()`），而 `tools.selfExtend.*` 出厂全关 —— 于是一份说明书在这一页上
-   * 显示「可用」，模型那边却永远看不见它。实测代价记在 `packages/core/src/skills/loader.ts` 的
-   * `requires-tools` 注释里（模型读到「用 install_mcp 装 MCP」，去调却没有这个工具，
-   * 于是花了八分钟用 bash 逆向代码库、从 sessions 表取 owner 会话去打 WebUI）。
+   * `requires_tools` 是从 `frontmatter_json` 里只取该字段再发出，而不是放行整份 frontmatter。
+   * 它需要出现在列表上：`requires-tools` 未被满足的 skill 不会进入模型的目录
+   * （`SkillLoader.catalog()`），而 `tools.selfExtend.*` 出厂全部关闭，于是一份说明文档在这一页上
+   * 显示为可用，模型一侧却始终不可见。实测代价记录在 `packages/core/src/skills/loader.ts` 的
+   * `requires-tools` 注释里（模型读到用 install_mcp 装 MCP，调用时却没有这个工具，
+   * 于是花了八分钟用 bash 逆向代码库、从 sessions 表取 owner 会话去访问 WebUI）。
    */
   app.get("/api/skills", (ctx) => {
     const rows = dependencies.db
@@ -4313,9 +4320,9 @@ export function createServer(
       : ctx.json(apiError("not_found", "Skill 不存在", 404).body, 404);
   });
   /**
-   * 随包发的四份说明书**只放行启停**。`write_skill` 从一开始就拒改它们（模型把自己的说明书
-   * 改坏之后，下一次它就是照着改坏的那份写的），而这一侧此前能改能删 —— 同一条不变量只焊住了一半。
-   * 停用是正当的运维动作，所以只挡「改 `enabled` 以外的字段」和删除。
+   * 随包发布的四份说明文档只允许启停。`write_skill` 从一开始就拒绝修改它们（模型改坏自己的说明
+   * 文档后，下一次就会照着改坏的那份写），而这一侧此前可改可删，同一条不变量只覆盖了一半。
+   * 停用属于正当运维动作，因此只拦截修改 `enabled` 以外的字段与删除。
    */
   const reservedSkill = (
     ctx: Context<ServerEnv>,
@@ -4328,7 +4335,7 @@ export function createServer(
     return ctx.json(
       apiError(
         "skill_reserved",
-        `${name} 是随包发的说明书，只能启停，不能改正文或删除`,
+        `${name} 是随包发的说明文档，只能启停，不能改正文或删除`,
         403,
       ).body,
       403,
@@ -4392,7 +4399,7 @@ export function createServer(
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : "Skill 新建失败";
-      // 重名是「这个名字已经被占了」而不是「你发的东西不合法」：409 让前端能把它和校验错误分开提示。
+      // 重名表示名称已被占用，而不是请求不合法：返回 409 使前端能把它与校验错误分开提示。
       return message === "skill_already_exists"
         ? ctx.json(
             apiError("conflict", `Skill ${body.name} 已存在`, 409).body,
@@ -4402,11 +4409,11 @@ export function createServer(
     }
   });
   /**
-   * 装一个 skill 包（docs/07 §2.5）。**与 `install_skill` 工具共用 `installSkillPackage`** ——
-   * 端点自己抄一遍解包逻辑的话，两条路迟早在校验上分叉，而那里的每一条都是安全判据。
+   * 安装一个 skill 包（docs/07 §2.5）。与 `install_skill` 工具共用 `installSkillPackage`：
+   * 端点自行实现一遍解包逻辑时，两条路径迟早在校验上分叉，而那里的每一条都是安全判据。
    *
-   * 上传的 zip 落在 `<skillsDir>/.uploads/` 而不是 `os.tmpdir()`：装的目标就在同一个卷上，
-   * 而且点号开头的目录 `SkillLoader.scan()` 不看。用完即删。
+   * 上传的 zip 落在 `<skillsDir>/.uploads/` 而不是 `os.tmpdir()`：安装目标在同一个卷上，
+   * 且点号开头的目录 `SkillLoader.scan()` 不扫描。用完即删。
    */
   app.post("/api/skills/package", async (ctx) => {
     if (!dependencies.skills)
@@ -4468,8 +4475,8 @@ export function createServer(
           : error.code === "skill_reserved"
             ? 403
             : 400;
-      // 包根有歧义时**必须把候选带回去**：前端要拿它渲染一个「装哪一个」的选择，
-      // 只回一句「有歧义」等于让运维自己去猜 subdir 该填什么。
+      // 包根有歧义时必须返回候选：前端要用它渲染一个选择安装哪一个的界面，
+      // 只返回存在歧义等于让运维自行推测 subdir 该填什么。
       return ctx.json(
         {
           ok: false as const,
@@ -4538,9 +4545,9 @@ export function createServer(
     await dependencies.plugins?.reconcile();
     return ctx.json({ ok: true, data: { changes } });
   });
-  // 重载在 tsx（`pnpm dev`）下装得像成功了、实际一直跑旧代码，而这是修不掉的（tsx 的 loader
-  // 按路径缓存、忽略 cache-busting 查询串）。回 200 就必须把这件事带在响应里，否则界面上
-  // 「已重载」是一句假话（docs/28 · L-EXT-04）。与启动告警共用同一句 `hotReloadWarning`。
+  // 重载在 tsx（`pnpm dev`）下表现为成功、实际一直运行旧代码，且无法修复（tsx 的 loader
+  // 按路径缓存、忽略 cache-busting 查询串）。返回 200 时必须在响应里说明这一点，否则界面上的
+  // 已重载是错误信息（docs/28 · L-EXT-04）。与启动告警共用同一句 `hotReloadWarning`。
   app.post("/api/plugins/:name/reload", async (ctx) => {
     await dependencies.plugins?.reconcile();
     const warning = dependencies.plugins?.hotReloadWarning ?? null;
@@ -4553,8 +4560,8 @@ export function createServer(
       },
     });
   });
-  // 「启用前先看过源码」是 plugin 那道闸的**全部**内容（进程内全信任 = root，docs/14 A27），
-  // 而模型现在能往 `plugins/` 里写文件了 —— 没有这个读端点，那句话就只是口号。
+  // 启用前先审阅源码是 plugin 那道闸的全部内容（进程内完全信任，等同 root，docs/14 A27），
+  // 而模型现在可以往 `plugins/` 里写文件：没有这个读端点，该要求无法执行。
   app.get("/api/plugins/:name/source", (ctx) => {
     if (!dependencies.plugins)
       return ctx.json(
@@ -4568,7 +4575,7 @@ export function createServer(
         : ctx.json({ ok: true, data: { name: ctx.req.param("name"), source } });
     } catch {
       return ctx.json(
-        apiError("invalid_plugin_name", "名字要是 kebab-case").body,
+        apiError("invalid_plugin_name", "名称必须是 kebab-case").body,
         400,
       );
     }
@@ -4598,9 +4605,8 @@ export function createServer(
     }
   });
   /**
-   * 自撰写工具的复审面。与工具页那条 `PATCH /api/tools/:name` 是**两个动词**：这里管
-   * 「这个工具存不存在、审没审过」，那边管「现在开着没有」。合并的话，一次运维停用会看起来像
-   * 把复审记录也撤了。
+   * 自撰写工具的复审面。它与工具页那条 `PATCH /api/tools/:name` 是两个动词：这里管该工具是否
+   * 存在、是否已复审，那边管当前是否启用。合并两者时，一次运维停用会表现为复审记录也被撤销。
    */
   app.get("/api/custom-tools", (ctx) => {
     if (!dependencies.customTools)
@@ -4616,8 +4622,8 @@ export function createServer(
         apiError("not_implemented", "这个部署没有装配自撰写工具", 500).body,
         500,
       );
-    // 只收 `enabled`。`scope` / `minRole` 归模型那侧的定义（改了要重新复审），从这里改会让
-    // `definition_hash` 与模型以为的那份定义脱节 —— 声明一个读不到的字段比不声明更糟。
+    // 只接受 `enabled`。`scope` / `minRole` 属于模型一侧的定义（修改后需重新复审），从这里改会让
+    // `definition_hash` 与模型认定的那份定义脱节：声明一个不会被读取的字段比不声明更糟。
     const body = await ctx.req
       .json<{ enabled?: boolean }>()
       .catch(() => ({}) as { enabled?: boolean });
@@ -4667,8 +4673,8 @@ export function createServer(
       } catch {
         tools = [];
       }
-      // `auth` 只回**没有密文**的那一份（`McpAuthRepository.get` 的返回类型保证这件事），
-      // 外加一条「授权链接还在等着」——刷新页面之后〔登录〕按钮还得能点。
+      // `auth` 只返回不含密文的那一份（由 `McpAuthRepository.get` 的返回类型保证），
+      // 外加一条授权链接仍在等待的状态：刷新页面后〔登录〕按钮仍要可用。
       const credential = dependencies.mcpAuth?.store.get(server.name) ?? null;
       const pending = dependencies.mcpAuth?.pending.peek(server.name) ?? null;
       return {
@@ -4705,7 +4711,7 @@ export function createServer(
       return ctx.json(
         apiError(
           "redacted_placeholder",
-          "env / headers 里含脱敏占位符 «redacted»，那不是真值",
+          "env / headers 含脱敏占位符 «redacted»，写入会覆盖真实凭据",
         ).body,
         400,
       );
@@ -4747,7 +4753,7 @@ export function createServer(
       return ctx.json(
         apiError(
           "redacted_placeholder",
-          "env / headers 里含脱敏占位符 «redacted»，那不是真值",
+          "env / headers 含脱敏占位符 «redacted»，写入会覆盖真实凭据",
         ).body,
         400,
       );
@@ -4797,8 +4803,8 @@ export function createServer(
     return ctx.json({ ok: true, data: { removed: true } });
   });
   /**
-   * 四条 auth 端点共用的前置：凭据库在不在、这台 server 在不在、是不是 http。
-   * 返回的是**收窄到 http 那一支**的 server —— `auth` 只长在那一支上，判别联合不收窄就读不到它。
+   * 四条 auth 端点共用的前置检查：凭据库是否存在、这台 server 是否存在、是否为 http。
+   * 返回的是收窄到 http 那一支的 server：`auth` 只存在于该分支，判别联合不收窄就读不到它。
    */
   type HttpMcpServer = Extract<
     Config["mcp"]["servers"][number],
@@ -4811,7 +4817,7 @@ export function createServer(
       return {
         error: apiError(
           "mcp_auth_unavailable",
-          "这个部署没接 MCP 凭据库（通常是缺 LUOLI_MASTER_KEY）：凭据存不下来，所以这里不假装保存成功。",
+          "这个部署未接入 MCP 凭据库（通常是缺 LUOLI_MASTER_KEY）：凭据无法存储，不返回保存成功。",
           500,
         ),
       };
@@ -4824,7 +4830,7 @@ export function createServer(
       return {
         error: apiError(
           "mcp_auth_stdio",
-          "stdio server 的登录由它自己在带外完成（它的 stderr 现在会进日志）—— 这里没有可走的授权流程。",
+          "stdio server 的登录在带外自行完成（其 stderr 会进日志），此处没有可用的授权流程。",
           400,
         ),
       };
@@ -4832,9 +4838,9 @@ export function createServer(
   };
 
   /**
-   * 开一次授权。回授权 URL 给界面，**由人去点** —— reconcile 自己弹浏览器是另一种毛病。
-   * `webui.publicUrl` 没配时这里就断掉：`redirect_uri` 一旦注册进对方那里就不好改，
-   * 编一个 127.0.0.1 的地址等于把这次授权变成一条注册完就废掉的死路。
+   * 发起一次授权。把授权 URL 返回给界面，由用户点击：reconcile 自行打开浏览器是另一类问题。
+   * `webui.publicUrl` 未配置时在此中止：`redirect_uri` 一旦注册到对方就难以修改，
+   * 构造一个 127.0.0.1 的地址会让这次授权在注册完成后即失效。
    */
   app.post("/api/mcp/:name/auth/start", async (ctx) => {
     const target = mcpAuthTarget(ctx.req.param("name"));
@@ -4844,7 +4850,7 @@ export function createServer(
       return ctx.json(
         apiError(
           "mcp_auth_mode",
-          "这台 server 的 auth.mode 不是 oauth。要走浏览器授权先把它改成 oauth；只有一个静态 token 的话用 PUT /api/mcp/:name/auth。",
+          "该 server 的 auth.mode 不是 oauth。浏览器授权需先改为 oauth；仅有静态 token 时改用 PUT /api/mcp/:name/auth。",
         ).body,
         400,
       );
@@ -4864,9 +4870,9 @@ export function createServer(
   });
 
   /**
-   * 授权服务器把人重定向回来的那一跳。**判据只有 `state`**：单次使用、10 分钟、进程内。
-   * 成功之后单台重连，然后 302 回控制台 —— 这一跳的落点是浏览器地址栏，不是 fetch，
-   * 所以回 JSON 的话人看到的是一屏花括号。
+   * 授权服务器重定向回来的那一跳。判据只有 `state`：单次使用、10 分钟有效、仅存在于进程内。
+   * 成功后单台重连，然后 302 回控制台：这一跳的落点是浏览器地址栏而不是 fetch，
+   * 返回 JSON 会让用户看到一屏原始数据。
    */
   app.get(MCP_OAUTH_CALLBACK_PATH, async (ctx) => {
     const state = ctx.req.query("state");
@@ -4878,7 +4884,7 @@ export function createServer(
         302,
       );
     if (!dependencies.mcpAuth || !dependencies.mcp) return back("unavailable");
-    // 先把 state 消费掉，再看别的 —— 一条回来过的 state 不该因为后面某个判据失败而留着能重放。
+    // 先消费 state 再做其他判断：已回调过的 state 不应因后续某个判据失败而保留、可被重放。
     const pending = state ? dependencies.mcpAuth.pending.take(state) : null;
     if (!pending) {
       dependencies.log.event({
@@ -4926,7 +4932,7 @@ export function createServer(
     }
   });
 
-  /** 静态 bearer token。**写入即加密**，此后任何读路径都不回它 —— 界面上只看得到末 4 位。 */
+  /** 静态 bearer token。写入即加密，此后任何读路径都不返回它，界面上只能看到末 4 位。 */
   app.put("/api/mcp/:name/auth", async (ctx) => {
     const target = mcpAuthTarget(ctx.req.param("name"));
     if ("error" in target)
@@ -4941,7 +4947,7 @@ export function createServer(
       return ctx.json(
         apiError(
           "redacted_placeholder",
-          "token 是脱敏占位符 «redacted»，那不是真值",
+          "token 是脱敏占位符 «redacted»，非真实凭据",
         ).body,
         400,
       );
@@ -4949,7 +4955,7 @@ export function createServer(
       return ctx.json(
         apiError(
           "mcp_auth_mode",
-          "这台 server 的 auth.mode 不是 bearer。先把它改成 bearer 再填 token。",
+          "该 server 的 auth.mode 不是 bearer。请先改为 bearer 再填写 token。",
         ).body,
         400,
       );
@@ -4957,7 +4963,7 @@ export function createServer(
       target.server.name,
       body.token.trim(),
     );
-    // 凭据版本推高了，指纹跟着变 —— 这一次 reconcile 必然重连而不是复用旧连接。
+    // 凭据版本提升后指纹随之变化，本次 reconcile 必然重连而不是复用旧连接。
     await dependencies.mcp!.reconcile();
     const row = dependencies.db
       .prepare("SELECT state,last_error AS error FROM mcp_servers WHERE name=?")
@@ -4980,7 +4986,7 @@ export function createServer(
     });
   });
 
-  /** 注销。凭据清空但保留那一行的 `mode` —— 「用 OAuth 但没登录」与「压根不需要登录」是两回事。 */
+  /** 注销。清空凭据但保留那一行的 `mode`：使用 OAuth 但未登录与不需要登录是两种状态。 */
   app.delete("/api/mcp/:name/auth", async (ctx) => {
     const target = mcpAuthTarget(ctx.req.param("name"));
     if ("error" in target)
@@ -5029,9 +5035,9 @@ export function createServer(
       },
     });
   });
-  // 文件定义（`agents/<name>.md`）与配置定义合并后一起交出去，每条带 `source`（docs/14 §2 Q5-b）：
-  // 界面上要能一眼看出哪条来自文件、哪条被 WebUI 覆盖过。**只回不可编辑的事实，不回文件路径**。
-  // 合并逻辑与 `main.ts` 共用 `mergeAgentDefinitions` —— 端点自己抄一遍的话，WebUI 迟早会显示出
+  // 文件定义（`agents/<name>.md`）与配置定义合并后一并返回，每条带 `source`（docs/14 §2 Q5-b）：
+  // 界面上要能直接看出哪条来自文件、哪条被 WebUI 覆盖过。只返回不可编辑的事实，不返回文件路径。
+  // 合并逻辑与 `main.ts` 共用 `mergeAgentDefinitions`：端点自行实现一遍时，WebUI 迟早会展示出
   // 一份运行时并不生效的名单。
   app.get("/api/agents", (ctx) => {
     const config = currentConfig();
@@ -5053,9 +5059,9 @@ export function createServer(
           : "file"
         : "config",
     }));
-    // 解析失败的文件不混进这张表（它们没有可展示的定义），走日志：启动与每次配置热更新时
-    // `main.ts` 各记一条 `agent.file_invalid` error + 一行 stderr。**没有文件监听** —— 光改
-    // agents/ 下的 .md 不会自动重扫，要么改一次配置要么重启。
+    // 解析失败的文件不进入这张表（它们没有可展示的定义），改走日志：启动与每次配置热更新时
+    // `main.ts` 各记一条 `agent.file_invalid` error 与一行 stderr。没有文件监听：只改
+    // agents/ 下的 .md 不会自动重新扫描，需要改一次配置或重启。
     for (const failure of scan.errors)
       dependencies.log.event({
         level: "error",
@@ -5167,12 +5173,12 @@ export function createServer(
     }
   });
   /**
-   * 单条日志事件的详情（日志页点开一行）。**必须注册在 `/api/logs/blob` 与
-   * `/api/logs/trace/:traceId` 之后** —— Hono 按注册序匹配，`:id` 放前面会把那两条整个吃掉。
-   * 非数字 id 直接 404，别让 `blob` / `trace` 这种字符串走进 `Number()` 变成 NaN 查询。
+   * 单条日志事件的详情（日志页展开一行）。必须注册在 `/api/logs/blob` 与
+   * `/api/logs/trace/:traceId` 之后：Hono 按注册顺序匹配，`:id` 放在前面会把那两条完全覆盖。
+   * 非数字 id 直接 404，避免 `blob` / `trace` 这类字符串进入 `Number()` 变成 NaN 查询。
    *
-   * 列表刻意不带载荷（`OperationsRepository.logs` 的注释），所以正文只有这条路能拿到，
-   * 并且跟对话详情共用 `detailPayload`：同一套 blob 解引用与截断语义（docs/10 §读出侧必须解引用）。
+   * 列表刻意不带载荷（见 `OperationsRepository.logs` 的注释），因此正文只有这条路径能取到，
+   * 且与对话详情共用 `detailPayload`：同一套 blob 解引用与截断语义（docs/10 §读出侧必须解引用）。
    */
   app.get("/api/logs/:id", (ctx) => {
     const raw = ctx.req.param("id");
@@ -5188,8 +5194,7 @@ export function createServer(
       (Record<string, unknown> & { data: string | null }) | undefined;
     if (!row)
       return ctx.json(
-        apiError("not_found", "这条日志不存在（可能已被保留策略清理）", 404)
-          .body,
+        apiError("not_found", "该日志不存在（可能已被保留策略清理）", 404).body,
         404,
       );
     const { data, fileRefColumn, ...rest } = row;
@@ -5246,9 +5251,9 @@ export function createServer(
     }),
   );
   /**
-   * 用量的时间范围 + 维度聚合（docs/09 §3.11）。**聚合逻辑早就写好了**——
-   * `UsageLedger.report(from,to,groupBy)` 六个维度一个不少，只是从来没有端点调过它，
-   * 界面上因此只有一张不分维度的明细表。这里就是把那条路接上。
+   * 用量的时间范围与维度聚合（docs/09 §3.11）。聚合逻辑早已实现：
+   * `UsageLedger.report(from,to,groupBy)` 六个维度齐全，只是从未有端点调用它，
+   * 界面上因此只有一张不分维度的明细表。这里把那条路径接上。
    */
   app.get("/api/usage/report", (ctx) => {
     const groupBy = ctx.req.query("groupBy") ?? "day";
@@ -5318,8 +5323,8 @@ export function createServer(
     turns: number;
     updatedAt: number;
   }
-  /** 「花了多少」在 quota_counters 里，「上限是多少」在配置里，两边只有 (scope,window) 能对上。
-   *  分开返回等于让界面自己再实现一遍 bot.ts 的取值规则（含 byRole 覆盖），所以在这里就合成好。 */
+  /** 已用量在 quota_counters 里，上限在配置里，两者只有 (scope,window) 可以对应。
+   *  分开返回等于让界面另行实现一遍 bot.ts 的取值规则（含 byRole 覆盖），因此在这里合成完毕。 */
   app.get("/api/quota", (ctx) => {
     const config = currentConfig();
     const now = new Date();
@@ -5352,10 +5357,15 @@ export function createServer(
       ).map((entry) => [`${entry.kind}:${entry.tgId}`, entry]),
     );
     const counters = rows.map((row) => {
+      // 私聊的 chat 桶回落到 `user:` 行：私聊已不占 `chat:` 行（docs/05 §2.2），只查 chat 的话
+      // 每一条私聊用量的名字与角色都是空的。
       const principal =
         row.scope === "global"
           ? null
-          : (principals.get(`${row.scope}:${row.subject}`) ?? null);
+          : (principals.get(`${row.scope}:${row.subject}`) ??
+            (row.scope === "chat" && !row.subject.startsWith("-")
+              ? (principals.get(`user:${row.subject}`) ?? null)
+              : null));
       const base =
         row.scope === "global"
           ? config.quota.global
@@ -5368,7 +5378,8 @@ export function createServer(
         (row.scope === "user"
           ? override?.[row.window === "day" ? "daily" : "monthly"]
           : undefined) ?? base[row.window === "day" ? "daily" : "monthly"];
-      // 有效角色是 min(用户角色, 会话角色)：这里只看得到用户自己那一档，配了 byRole 时实际生效的可能更低。
+      // 群里的有效角色取用户与会话两档中较高者再封顶 trusted，可能高于用户自己这一档：
+      // 这里只看得到用户那一档，配了 byRole 时实际套用的限额未必是这一行报的这个。
       return {
         ...row,
         current: buckets[row.window] === row.bucket,
@@ -5379,7 +5390,7 @@ export function createServer(
         username: principal?.username ?? null,
       };
     });
-    // 缺定价的模型花费按 0 记账 —— 配额页把限额说得再准，这些轮次也不会被计进去。
+    // 缺少定价的模型按 0 记账：配额页的限额再准确，这些轮次也不会被计入。
     const unpriced = dependencies.db
       .prepare(
         "SELECT provider_id AS providerId,model_id AS modelId FROM models WHERE enabled=1 AND (price_in IS NULL OR price_out IS NULL) ORDER BY provider_id,model_id LIMIT 20",
@@ -5432,8 +5443,8 @@ export function createServer(
     dependencies.events.emit("config.changed", { keys: Object.keys(dotted) });
     return ctx.json({ ok: true, data: { keys: Object.keys(dotted) } });
   });
-  // 不带 body 仍然是「全部清零」（旧行为）；带 scope/subject/window/bucket 时只删那一行 ——
-  // 一个人撞满了当日额度，没有理由把全局与其他所有人的当月计数一起抹掉。
+  // 不带 body 仍是全部清零（既有行为）；带 scope/subject/window/bucket 时只删那一行：
+  // 某个人用满当日额度，没有理由把全局与其他所有人的当月计数一并清空。
   app.post("/api/quota/reset", async (ctx) => {
     const body = await ctx.req
       .json<Record<string, unknown>>()
@@ -5465,10 +5476,10 @@ export function createServer(
   /**
    * `spawn_agent` 派发出去的子 agent 任务（docs/09 §3.12）。
    *
-   * **列表不发 `progress_json`**：`AgentManager.progress` 每一帧都覆盖同一列，一行能有几 KB，
-   * 而列表上只显示标题与状态 —— 同 `GET /api/logs` 不发 `data_json` 的理由。要看进度走详情。
-   * `chatLabel`/`userLabel` 在服务端补：裸 id 认不出是哪个群（docs/09 §3.11 明确显示名在服务端
-   * 反查，前端不实现第二份规则）。排序把 running 顶到第一页 —— 在跑的那几条才是要盯的。
+   * 列表不返回 `progress_json`：`AgentManager.progress` 每一帧都覆盖同一列，一行可达数 KB，
+   * 而列表上只显示标题与状态，理由同 `GET /api/logs` 不返回 `data_json`。查看进度走详情。
+   * `chatLabel`/`userLabel` 在服务端补齐：裸 id 无法辨认是哪个群（docs/09 §3.11 明确显示名在服务端
+   * 反查，前端不实现第二份规则）。排序把 running 置于第一页：正在运行的那几条才是关注对象。
    */
   app.get("/api/tasks", (ctx) => {
     const {
@@ -5504,13 +5515,13 @@ export function createServer(
     });
   });
   /**
-   * 单条任务的只读详情。`progress_json` 与 `result_summary` 运行时一直在写，界面上从来没出现过
-   * （docs/21 §8）。两条 join 是排障要的那一半：任务本身只记标题与状态，「跑了几步、花了多少钱、
-   * 为什么失败」在 `turns` 上，「哪个 agent、哪个别名」在 `agent_runs` 上。
+   * 单条任务的只读详情。`progress_json` 与 `result_summary` 运行时一直在写，但界面上从未展示
+   * （docs/21 §8）。两条 join 提供排障所需的另一半：任务本身只记标题与状态，执行了几步、花费多少、
+   * 失败原因在 `turns` 上，属于哪个 agent、哪个别名在 `agent_runs` 上。
    *
-   * `progress` 是解析后的那一份，**不再把原始 JSON 串一起发**（同一份东西发两遍，而前端只会读
-   * 其中一份）。解不出来时给 null 而不是原样回一串 —— 那一列只由 `AgentManager` 写，解不出来
-   * 意味着库被人动过，界面照着渲染只会更难查。
+   * `progress` 是解析后的那一份，不再同时发送原始 JSON 串（同一份数据发两遍，而前端只读其中
+   * 一份）。解析失败时返回 null 而不是原样回传字符串：那一列只由 `AgentManager` 写入，解析失败
+   * 意味着库被外部改动过，界面照原样渲染只会增加排查难度。
    */
   app.get("/api/tasks/:id", (ctx) => {
     const row = dependencies.db
@@ -5565,10 +5576,10 @@ export function createServer(
     });
   });
   /**
-   * 删的是**记录**，不是取消通道：这里没有 `POST /api/tasks/:id/cancel`（docs/09 §4），取消一条
-   * 在跑的子 agent 要走 `POST /api/turns/:id/cancel`。所以 `running` 一律 409 —— 把行删掉不会让
-   * 那个 agent 停下来，只会让它变成一条谁都看不见的在途任务。404 的口径同
-   * `DELETE /api/custom-tools/:name`：什么都没删掉时不回 200，否则界面会对着一个错 id 弹「已删除」。
+   * 删除的是记录，而不是取消通道：这里没有 `POST /api/tasks/:id/cancel`（docs/09 §4），取消一条
+   * 正在运行的子 agent 要走 `POST /api/turns/:id/cancel`。因此 `running` 一律返回 409：删除行不会
+   * 让那个 agent 停下来，只会让它变成一条不可见的在途任务。404 的口径同
+   * `DELETE /api/custom-tools/:name`：未删除任何内容时不返回 200，否则界面会对一个错误 id 提示已删除。
    */
   app.delete("/api/tasks/:id", (ctx) => {
     const id = ctx.req.param("id");
@@ -5581,7 +5592,7 @@ export function createServer(
       return ctx.json(
         apiError(
           "task_running",
-          "这条任务还在跑：删记录不会让它停下来，先去对应轮次上取消",
+          "任务仍在执行：删除记录不会终止它，请在对应轮次上取消",
           409,
         ).body,
         409,
@@ -5610,12 +5621,12 @@ export function createServer(
       : ctx.json({ ok: true, data: result });
   });
   /**
-   * `[重启进程]`（docs/09 §3.13）。**先回响应再退出** —— 在同一个 tick 里 `process.exit` 会让
-   * 这次请求连响应都收不到，界面上表现成「点了没反应」。走 `dependencies.restart` 而不是
-   * 直接 `process.exit`：优雅关闭的那套（排空轮次、刷日志、WAL checkpoint）在 `main.ts` 里，
-   * 服务器包不该也不能重实现一遍。
+   * `[重启进程]`（docs/09 §3.13）。先返回响应再退出：在同一个 tick 内 `process.exit` 会让
+   * 这次请求收不到响应，界面上表现为点击无反应。走 `dependencies.restart` 而不是
+   * 直接 `process.exit`：优雅关闭那一套（排空轮次、刷日志、WAL checkpoint）在 `main.ts` 里，
+   * 服务器包不应也不能重复实现。
    *
-   * **没有 supervisor 时进程不会自己回来** —— 界面上的二次确认必须写明这一点。
+   * 没有 supervisor 时进程不会自行恢复，界面上的二次确认必须写明这一点。
    */
   app.post("/api/restart", (ctx) => {
     if (!dependencies.restart)
@@ -5630,7 +5641,7 @@ export function createServer(
       ok: true,
       data: {
         restarting: true,
-        note: "没有 systemd / docker 这类 supervisor 时进程不会自动拉起",
+        note: "无 systemd / docker 等 supervisor 时进程不会自动重启",
       },
     });
   });
@@ -5689,23 +5700,22 @@ export function createServer(
     });
   });
   /**
-   * I-13 的**另一半**。那一轮修的是「未匹配的 `/api/*` 拿到 200 + index.html，前端在
-   * `response.json()` 处抛 SyntaxError，报错与真实原因毫无关系」；下面那行 `app.all` 就是它。
-   * 但端点里**抛出来**的异常走的是 Hono 的默认处理器 —— 实测回的是
-   * `text/plain "Internal Server Error"`，同一个病在 500 上原样复发：界面上看到的是
-   * `Unexpected token 'I'`，而不是任何人话。这个部署里最常见的触发方式是坏请求体：
-   * 39 处 `ctx.req.json()` 有 17 处没有自己的 `.catch()`。
+   * I-13 的另一半。那一轮修的是未匹配的 `/api/*` 返回 200 与 index.html，前端在
+   * `response.json()` 处抛 SyntaxError，报错与真实原因无关；下面那行 `app.all` 即是它。
+   * 但端点内抛出的异常走的是 Hono 的默认处理器，实测返回的是
+   * `text/plain "Internal Server Error"`，同一问题在 500 上原样复现：界面上看到的是
+   * `Unexpected token 'I'`，而不是可读的错误信息。这个部署里最常见的触发方式是非法请求体：
+   * 39 处 `ctx.req.json()` 里有 17 处没有自己的 `.catch()`。
    *
    * 三个分支，顺序有意义：
-   * - `HTTPException`（`bodyLimit` 之类中间件扔的）原样交回，与 Hono 默认处理器一致 ——
-   *   它们自己已经带好了状态码和响应体。
-   * - `SyntaxError` = `ctx.req.json()` 里那次 `JSON.parse` 崩了。**这一条把那 17 个站点
-   *   一次性收口**，也不会在下一个新端点上重新漏一遍：逐个加 `.catch()` 修的是今天，
-   *   这里修的是这一类。
-   * - 其余一律 500，**异常消息不进响应** —— 它可能带库路径、SQL、密钥片段。全文只落
-   *   `webui.error` 那一行，回给前端的只有它的 id（`ref:`，与 `bot.ts` 给用户的形状一致）。
+   * - `HTTPException`（`bodyLimit` 这类中间件抛出的）原样返回，与 Hono 默认处理器一致：
+   *   它们本身已带好状态码与响应体。
+   * - `SyntaxError` 对应 `ctx.req.json()` 里那次 `JSON.parse` 失败。这一条把那 17 处一次性收口，
+   *   也不会在下一个新端点上重新遗漏：逐个添加 `.catch()` 只修当下，这里修的是这一类。
+   * - 其余一律 500，异常消息不进响应：它可能包含库路径、SQL、密钥片段。全文只落
+   *   `webui.error` 那一行，返回给前端的只有它的 id（`ref:`，与 `bot.ts` 给用户的形状一致）。
    *
-   * 非 `/api/` 路径回纯文本：给静态资源套 JSON 信封只会让浏览器拿到一份它不认识的东西。
+   * 非 `/api/` 路径返回纯文本：给静态资源套 JSON 信封只会让浏览器收到无法解析的内容。
    */
   app.onError((error, ctx) => {
     if (typeof error === "object" && error !== null && "getResponse" in error)
@@ -5736,13 +5746,13 @@ export function createServer(
     );
   });
   const webRoot = fileURLToPath(new URL("../../webui/dist", import.meta.url));
-  // 未匹配的 /api/* 必须在静态兜底**之前**拦下来：否则它们拿到 200 + index.html，前端的 `api()`
-  // 在 `response.json()` 处抛 SyntaxError，报错信息与真实原因（路径写错了）毫无关系（docs/22 · I-13）。
+  // 未匹配的 /api/* 必须在静态兜底之前拦下：否则它们会拿到 200 与 index.html，前端的 `api()`
+  // 在 `response.json()` 处抛 SyntaxError，报错信息与真实原因（路径写错）无关（docs/22 · I-13）。
   app.all("/api/*", (ctx) =>
     ctx.json(
       apiError(
         "not_found",
-        `没有这个端点：${ctx.req.method} ${new URL(ctx.req.url).pathname}`,
+        `端点不存在：${ctx.req.method} ${new URL(ctx.req.url).pathname}`,
         404,
       ).body,
       404,
@@ -5758,8 +5768,8 @@ export function createServer(
 }
 
 /**
- * 一次性登录 token 的内存表。**导出的是签发函数而不是这张表** —— 让装配方直接往里塞
- * 等于多一个能凭空造 owner session 的入口。
+ * 一次性登录 token 的内存表。导出的是签发函数而不是这张表：允许装配方直接写入，
+ * 等于多出一个可以凭空创建 owner session 的入口。
  */
 const loginTokens = new Map<string, { expiresAt: number }>();
 
@@ -5771,7 +5781,7 @@ export function issueLoginToken(ttlMs = 5 * 60_000): {
   const now = Date.now();
   for (const [value, entry] of loginTokens)
     if (entry.expiresAt <= now) loginTokens.delete(value);
-  // 有界：`/webui` 被连点时不该让这张表无限涨。最多留 16 个未用的。
+  // 有界：`/webui` 被连续调用时不应让这张表无限增长，最多保留 16 个未使用的。
   while (loginTokens.size >= 16)
     loginTokens.delete(loginTokens.keys().next().value!);
   const token = randomBytes(32).toString("base64url");

@@ -53,7 +53,7 @@
 | §10 标记模型能力 | `G-API-17` | 2026-08-19 |
 | §11 会话级持久容器 | `G-SBX-01`–`03` | 2026-08-19 |
 | §12 界面在说谎的三处 | `G-UI-01` `G-UI-02` `G-CFG-08` | 2026-08-19 |
-| §13 界面不显示 `min()` | `G-UI-03` | 2026-08-20 |
+| §13 界面不显示合成出来的有效角色 | `G-UI-03` | 2026-08-20（2026-08-30 结案） |
 | §15 任务卡与定时任务编辑 | `G-API-21` `G-API-22` | 2026-08-21 |
 | §17 Telegram 审批裁决通道 | `G-API-24` | 2026-08-21 |
 | §18 ACP | `G-UI-04` | 2026-08-22 |
@@ -389,7 +389,7 @@ SPA fallback（`app.get('*')` 返回 `index.html`，200），所以 **`GET /api/
 | `GET /api/messages/:id`、`GET /api/chats/:key/commits` | 列表端点已经返回同样的字段，单条端点是给外部集成留的 |
 | `GET /api/models/catalog` | `GET /api/providers/:id/models` 的响应里已经带 `catalog` 状态块 |
 | 工具的 `scope` 只读 | `scope` 在运行时不参与任何判定，只是给人看的标签 —— 做成可写等于放一个改了没效果的开关。`source` 同理，它由注册方式决定 |
-| ~~工具的 `minRole` / `approval` 只读~~ **已推翻** | 原理由是「单一策略源 `TOOL_POLICY` 注册期 fail-closed，从界面调低最低角色 = 权限矩阵有两份会漂移的真相」。现按运维诉求开放为覆盖层（`tools.overrides.<name>.minRole` / `.approval` / `.timeoutMs`）：`TOOL_POLICY` 降级为默认值与对照基准，界面同时显示「代码默认」与「当前生效」，**放宽需二次确认**（409 `relax_requires_confirmation`）并在表上留标记。漂移风险用三条性质压住 —— 覆盖绕不过 `available()`、`approvalFor` 抬档只升不降、合并逻辑（`effectiveToolPolicy`）只有一份且 registry 与服务端共用。仅全局，不进 `perChat` 白名单。见 docs/09 §3.7 |
+| ~~工具的 `minRole` / `approval` 只读~~ **已推翻** | 原理由是「单一策略源 `TOOL_POLICY` 注册期 fail-closed，从界面调低最低角色 = 权限矩阵有两份会漂移的真相」。现按运维诉求开放为覆盖层（`tools.overrides.<name>.minRole` / `.approval` / `.timeoutMs`）：`TOOL_POLICY` 降级为默认值与对照基准，界面同时显示「代码默认」与「当前生效」，**放宽需二次确认**（409 `relax_requires_confirmation`）并在表上留标记。漂移风险用三条性质压住 —— 覆盖不绕过 `available()`、`approvalFor` 只提档不降档、合并逻辑（`effectiveToolPolicy`）只有一份且 registry 与服务端共用。仅全局，不进 `perChat` 白名单。见 docs/09 §3.7 |
 | 模型别名不能指向不存在的模型、别名链不能为空 | `PUT /api/aliases/:alias` 的校验，不是缺口 |
 | `KNOWN_UNIMPLEMENTED_CONFIG_KEYS` 里的键（**条数一律看 [11 §2.0.1](./11-config-reference.md)，别在这儿记数**） | 运行时没接线，**不该**有控件。接线时从白名单里摘掉，同时补控件、改 `docs/11` 的 🚧 清单、复算 §1 的数字 |
 | `ACP_DIR_WAIT_MS`（30 s，M13） | 它是 `acp/manager.ts` 里的**模块常量**，压根不是配置项 —— 目录互斥的等待上界。本文的口径是「运行时有这个能力而界面够不着」，而这里没有可够的东西：要它可配就先加配置键（连带 `docs/11` 一行、`CONFIG_DESCRIPTIONS` 一条、以及「等锁等多久」这件事到底该不该给运维调的判断） |
@@ -403,13 +403,17 @@ G-API-10/11/12 与 G-SRV-02/03/04 均已完成；按本文「运行时已有、W
 
 - ~~`POST /api/maintenance/gc-files` 仍显式返回 `not_implemented`，界面继续不提供按钮。~~
   → 第五轮已实现并补上按钮（`G-SRV-05`）。
-- ~~Telegram inline keyboard 审批仍未实现（裁决只能在 WebUI 做）~~ → **已实现**：发起人回执本身
-  就带〔批准〕〔拒绝〕，owner 点了落 `decision_channel='telegram'`（[05 §6.1](./05-tools-and-permissions.md)）。
-  回执正文在收场时换成结局（撤键盘的同一次 `editMessageText`），不留那句已经不成立的倒计时 ——
-  正是本文 §12「界面在说谎」那一类。待审角标照旧挂在导航上（§4.6）。
-  **按钮的适用面是拍板过的边界**：有效角色 = min(用户角色, 会话角色)，所以它只在 owner 的私聊与
-  owner 档的群里出现，别处退回「去 WebUI 批」的纯文本回执。这**不是**本清单口径下的缺口
-  （运行时能力与 WebUI 控制面都在），是一条记录在案的取舍。
+- ~~Telegram inline keyboard 审批仍未实现（裁决只能在 WebUI 做）~~ → **已实现**：带〔批准〕〔拒绝〕的
+  审批消息**发到 owner 私聊**（`access.bootstrapOwnerId`），owner 点了落 `decision_channel='telegram'`
+  （[05 §6](./05-tools-and-permissions.md)）。那条消息在收场时换成结局（撤键盘的同一次
+  `editMessageText`），不留那句已经不成立的倒计时 —— 正是本文 §12「界面在说谎」那一类。
+  待审角标照旧挂在导航上（§4.6）。
+  **投递目标是拍板过的边界（2026-08-30 改，取代 2026-08-21 那次「不做」）**：群 / 频道里有效角色
+  封顶 `trusted`，`decidableBy:'owner'` 在群里无人可满足，所以换的是投递目标而不是角色判据 ——
+  按钮因此在**任何来源**的审批上都点得动；发起人会话只留一条**不含倒计时、不含状态**的报信，
+  它不需要收场编辑，也就不会过期成谎话。owner 私聊不可达（403）时不往群里贴点不动的按钮，
+  只留那条报信；WebUI 也没有通道时当场拒。代价是每条审批两条消息。这**不是**本清单口径下的缺口
+  （运行时能力与 WebUI 控制面都在）。
   两条裁决通道都没有时不等待，当场拒绝并把原因交给模型（[22](./reviews/22-review-round6.md) · `D-APPR-01`、
   [24](./reviews/24-review-round6-verification.md) · `R-APPR-01`）。
 
@@ -556,9 +560,9 @@ G-API-10/11/12 与 G-SRV-02/03/04 均已完成；按本文「运行时已有、W
 | ID | 缺的是什么 | 优先级 | 状态 |
 |---|---|---|---|
 | G-EXT-01 | **装不了多文件 skill**。`docs/07 §2.1` 的格式一开始就允许附属文件，`SkillDefinition.files` 与 `skill://` 也是为它准备的，但没有任何途径把它们放进去：`write_skill` 只收 `body: string`，fs 工具对 `skills/**` 关死 | P1 | ✅ 本轮补（`installSkillPackage` + `install_skill` + `POST /api/skills/package`） |
-| G-EXT-02 | `skills.source` 是死列 —— schema 有、`persist()` 从不写、WebUI 从不读，所有行都是默认值 `local`。装包进来的和随包发的四份说明书在界面上分不开 | P2 | ✅ 本轮补（`bundled`/`package`/`local` + 来源徽标 + 未审阅徽标） |
+| G-EXT-02 | `skills.source` 是死列 —— schema 有、`persist()` 从不写、WebUI 从不读，所有行都是默认值 `local`。装包进来的和随包发的四份说明文档在界面上分不开 | P2 | ✅ 本轮补（`bundled`/`package`/`local` + 来源徽标 + 未审阅徽标） |
 | G-EXT-03 | **陈行永不清理**。`persist()` 只 upsert，唯一会删行的是 `SkillLoader.remove()`；盘上删掉一个 skill 目录，那一行永远留在表里、永远显示在扩展页 | P2 | ✅ 本轮补（`scan()` 末尾清理，`ENOENT` 那支不清） |
-| G-EXT-04 | 随包那四份说明书 WebUI 侧**能改能删**。`write_skill` 从一开始就拒改它们，同一条不变量只焊住了一半 | P2 | ✅ 本轮补（`DELETE` 与「改 `enabled` 以外任何字段」回 403） |
+| G-EXT-04 | 随包那四份说明文档 WebUI 侧**能改能删**。`write_skill` 从一开始就拒改它们，同一条不变量只焊住了一半 | P2 | ✅ 本轮补（`DELETE` 与「改 `enabled` 以外任何字段」回 403） |
 | G-EXT-05 | `skills` 的变更不进 SSE。`EVENT_REFRESH` 里没有对应事件，扩展页只靠 `health` 顺带刷新 —— 从 Telegram 装进来的东西要等下一次健康检查才出现（`docs/07 §2.3` 写着广播 `EventBus('skills.changed')`，而那个 emit 从来没有实现过） | P2 | ✅ 本轮补（`extensions.changed`，只在 `name → content_hash` 真变时发） |
 | G-EXT-06 | `GET /api/skills` 是 `SELECT *`，把 `path`（宿主文件系统路径）、`content_hash`、整份 `frontmatter_json` 全发给前端，而 `interface Extension` 只声明了 5 个字段 | P3 | ✅ 本轮补（收窄到 7 列） |
 | G-EXT-07 | 通道关着时界面上没有任何解释。`tools.selfExtend.skills.enabled` 默认 `false`，而扩展页只给 MCP 做了总开关提示条 | P3 | ✅ 本轮补（skills 侧同形状的提示条） |
@@ -683,7 +687,7 @@ G-API-10/11/12 与 G-SRV-02/03/04 均已完成；按本文「运行时已有、W
 
 ---
 
-## 13. 界面不显示 `min()` 的结果（2026-08-20）
+## 13. 界面不显示合成出来的有效角色（2026-08-20）
 
 又一条本文 [§1.2](#12-假控件界面上能点运行时不读) 的形态，且与 [§12](#12-界面在说谎的三处2026-08-19)
 的 G-UI-01 同源：**服务端已经算得出来的判据，界面咽了回去**。起因同样是一次实际使用 ——
@@ -691,27 +695,35 @@ G-API-10/11/12 与 G-SRV-02/03/04 均已完成；按本文「运行时已有、W
 
 | 编号 | 运行时的事实 | 界面此前给的 | 状态 |
 |---|---|---|---|
-| **G-UI-03** | 一个私聊在 `principals` 里占两行（`user:X` + `chat:X`），有效角色 = `resolveEffectiveRole` = `min(两行)`，模型系统提示里那个 `role` 就是它 | 两行的显示名与 tg_id 完全一样、只差一个类型标签，角色列各显示各的 `role`，`min()` 的结果**一处都不显示**；`list()` 又按 `updated_at DESC` 排，刚 PATCH 过的那行必然置顶 —— 于是「只改了 `chat:X`」与「改对了」长得一模一样 | ✅ 本轮修 |
+| **G-UI-03** | 一个私聊在 `principals` 里占两行（`user:X` + `chat:X`），有效角色由 `resolveEffectiveRole` 合成，模型系统提示里那个 `role` 就是它 | 两行的显示名与 tg_id 完全一样、只差一个类型标签，角色列各显示各的 `role`，合成的结果**一处都不显示**；`list()` 又按 `updated_at DESC` 排，刚 PATCH 过的那行必然置顶 —— 于是「只改了 `chat:X`」与「改对了」长得一模一样 | ✅ 本轮修；**2026-08-30 结案**（见下） |
 
 实测那次：`user:1445849516` 停在 `limited`（被一次批量降权扫进去），`chat:1445849516` 前后被
 PATCH 成 `trusted` 三次而 `user:` 那行一次都没被点到，期间 10 轮 `turn.start` 全部记着
 `role=limited`。对照组是同期另一个人 —— 两行都改了，所以他一直是对的；差别只在于有没有人
 记得改第二行。弹窗里那句「要放行这个人，改 `user:X` 那行更直接」当时**已经在了**，没挡住。
 
-改法与四处取舍：
+当时的改法与四处取舍：
 
 - **算在服务端。** `GET /api/principals` 每行多回一个 `effectiveRole`，用 core 的
   `resolveEffectiveRole` 算。前端不重算第二份 —— 与 G-UI-01 把类型判据合并成一份是同一条规矩。
 - **配对本身就是判据，不看第三次 `chat_type`。** Telegram 用户 id 恒正、群 / 频道 id 恒负，
   `user:X` 与 `chat:X` 同时在表里就只可能是一对私聊。再引一次「先信 `chat_type`，缺了看正负号」
   等于把那条判据抄成第三份。
-- **群 / 频道回 `null`，不回它自己的 `role`。** 那一行是上限，每个成员的有效角色各不相同；
+- **群 / 频道回 `null`，不回它自己的 `role`。** 那一行对每个成员的含义都不同；
   给一个看起来确定的值是「摘除比伪造安全」的反面（[16 §5](./reviews/16-remediation-plan.md)）。
 - **只在不一致时出红字。** 这一页有几十行，逐行挂一个「有效 X」是噪声；要显眼的是「你以为改了
   但没生效」这一种行。
 
-**留了一条没做**：弹窗里「同时把 `user:X` 也改成同一角色」的一键补齐。本轮先把判据显出来 ——
-一键补齐会替运维改第二个主体，语义上要单独定（批量改角色那条路要不要一起补齐？），下一轮做。
+**已随 2026-08-30 的权限模型改动结案。** 新规则下**私聊不再占两行**（`kind='chat'` 恒为群 / 频道，
+`user:` 那一行就是全部），产生这条缺口的形态本身不存在了：改哪一行与改对了是同一件事。因此
+`GET /api/principals` 的 `effectiveRole` 与角色列下面那行红字**一并删掉** —— 群 / 频道那一行现在是
+**下限**（把成员抬到那一档，封顶 `trusted`，[05 §2.2](./05-tools-and-permissions.md#22-有效角色)），
+每个成员的有效角色仍各不相同，服务端合不出一个对谁都成立的值；界面上少一个合成字段，比留一个
+只在旧库残留行上才有意义的字段更诚实。**编号与上面那段事故记录保留**：源码在引它，而那次
+「两边各自都没错、合起来是错的」仍是这类界面缺口的样本。
+
+**留下的那条没做也随之作废**：弹窗里「同时把 `user:X` 也改成同一角色」的一键补齐 —— 没有第二行
+要补齐了。
 
 ---
 

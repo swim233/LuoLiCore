@@ -133,23 +133,28 @@ describe('持久容器 · 按名字定位会话', () => {
 
 describe('持久容器 · 会话名取自 principals', () => {
   /**
-   * 群取 `chat:<id>` 的 `display_name`，**私聊要优先取 `user:<id>`** —— `chat:<id>` 对私聊
-   * 只存了 `first_name`。与 WebUI 的 `chatIdentity()` 同一套 join；两处漂开的表现是
-   * 「界面上叫这个名字，跟模型说这个名字它找不到」。
+   * 群取 `chat:<id>` 的 `display_name`；**私聊从 `contexts` 枚举、名字取 `user:<id>`** ——
+   * 私聊已不占 `chat:` 行（docs/05 §2.2），聊过哪些私聊的权威来源只剩上下文表。fixture 因此
+   * 由「插一行 `chat:<正数>`」改为「建一条私聊上下文」，`chat:` 那行连插都不该再插。
+   * 与 WebUI 的 `chatIdentity()` 同一套 join；两处漂开的表现是「界面上叫这个名字，跟模型说这个
+   * 名字它找不到」。
    */
-  it('私聊取 user 那一行的全名，群取 chat 那一行的标题', () => {
+  it('私聊从 contexts 出、名字取 user 那一行，群取 chat 那一行的标题', () => {
     const path = './data/containers-names.test.db';
     for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
     const db = openDatabase(path);
     migrateDatabase(db);
     const insert = db.prepare("INSERT INTO principals(id,kind,tg_id,role,display_name,username,chat_type,first_seen_at,updated_at) VALUES (?,?,?,'trusted',?,?,?,0,0)");
     insert.run('chat:-1001', 'chat', '-1001', '隆福饭搭子', null, 'supergroup');
-    insert.run('chat:8899001', 'chat', '8899001', '阿', null, 'private');
     insert.run('user:8899001', 'user', '8899001', '阿离', 'ali', null);
+    // 同一个私聊在 thread scope 下会有多行上下文，候选表里只该出现一次。
+    const context = db.prepare("INSERT INTO contexts(key,chat_id,thread_id,scope,created_at,updated_at) VALUES (?,?,?,?,0,0)");
+    context.run('chat:8899001', '8899001', null, 'chat');
+    context.run('thread:8899001:5', '8899001', 5, 'thread');
+    context.run('chat:-1001', '-1001', null, 'chat');
     const candidates = chatCandidates(db);
     expect(candidates.find((entry) => entry.chatId === '-1001')).toEqual({ chatId: '-1001', label: '隆福饭搭子', type: 'group' });
-    // 取到的是 `阿离 (@ali)` 而不是 chat 行里那个 first_name「阿」。
-    expect(candidates.find((entry) => entry.chatId === '8899001')).toEqual({ chatId: '8899001', label: '阿离 (@ali)', type: 'private' });
+    expect(candidates.filter((entry) => entry.chatId === '8899001')).toEqual([{ chatId: '8899001', label: '阿离 (@ali)', type: 'private' }]);
     closeDatabase(db);
   });
 });

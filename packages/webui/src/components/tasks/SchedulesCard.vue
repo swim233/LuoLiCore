@@ -23,25 +23,25 @@ import {
 /**
  * 定时任务卡（docs/21 · G-API-16）。
  *
- * `GET /api/schedules` **不分页**：行数有界，DataGrid 自己客户端切片。撞 `listAll` 上限时
- * 信封里的 `truncated` 会为真 —— 那种情况要说出来，不静默截断。
+ * `GET /api/schedules` 不分页：行数有界，DataGrid 在客户端切片。触及 `listAll` 上限时
+ * 信封里的 `truncated` 为真，该情况必须提示，不做静默截断。
  *
  * 普通 `<script setup>`，不 `return` 任何东西（docs/24 · R-UI-01）。
  */
 const props = defineProps<{ tick: number; chats: ChatOption[] }>();
 
 /**
- * 连续静默到这个次数之后日志升 warn。**与服务端 `runner.ts` 的 `SILENT_STREAK_WARN` 是同一个 10**，
- * 这里写字面量而不是 import —— webui 不依赖 core，改那边的常量时要顺手改这一行。
- * 一条「只烧钱不说话的定时器」在界面上的唯一痕迹就是它。
+ * 连续静默达到该次数后日志升级为 warn。与服务端 `runner.ts` 的 `SILENT_STREAK_WARN` 同为 10，
+ * 这里写字面量而不是 import：webui 不依赖 core，修改那边的常量时需同步这一行。
+ * 一条持续消耗配额却不产出投递的定时任务，在界面上的唯一痕迹就是它。
  */
 const SILENT_STREAK_WARN = 10;
 const MODE_OPTIONS = [
-  { value: "notify", label: "notify · 只发预写文本，不调模型" },
-  { value: "agent", label: "agent · 起一轮完整对话（花钱）" },
+  { value: "notify", label: "notify · 只发预写文本" },
+  { value: "agent", label: "agent · 一轮完整对话（产生费用）" },
 ];
 
-/** 编辑态下这四格是只读的，每一格都要说出为什么 —— 见模板里各自的 `field-note`。 */
+/** 编辑态下这四格只读，每一格都需说明原因，见模板中各自的 `field-note`。 */
 interface ScheduleForm {
   isNew: boolean;
   id: string;
@@ -87,17 +87,17 @@ const scheduleBusy = ref("");
 const scheduleDialog = ref(false);
 const scheduleSaving = ref(false);
 const scheduleForm = ref<ScheduleForm>({ ...BLANK });
-/** 编辑时那一行的原样。`PATCH` 只发**改动过的**字段：都发一遍的话，「我只改了一句正文」会连带
- *  把 cron 重新校验一次，运维把 `minIntervalMinutes` 从 5 调到 60 之后就再也存不下去了。 */
+/** 编辑前该行的原始值。`PATCH` 只发送改动过的字段：全部发送会导致仅修改正文时也重新校验 cron，
+ *  运维把 `minIntervalMinutes` 从 5 调到 60 之后该任务将无法再保存。 */
 const scheduleOriginal = ref<ScheduleJob | null>(null);
 
-/** 已经停掉的任务改了也不会再响 —— 表单整体只读，出口只剩 footer 那个删除。 */
+/** 已停用的任务即使修改也不会再触发，因此表单整体只读，出口只保留 footer 的删除。 */
 const editable = computed(
   () => scheduleForm.value.isNew || scheduleForm.value.state === "active",
 );
 
-// 归一化而不是直接塞：形状对不上的响应（老版本服务端、代理截断）不该让整页崩在
-// DataGrid 的 rows 上。渲染防线就是为这类事建的（docs/24 · R-UI-01）。
+// 归一化而不是直接赋值：形状不匹配的响应（旧版服务端、代理截断）不应使整页在
+// DataGrid 的 rows 上崩溃。渲染防线正是为此建立的（docs/24 · R-UI-01）。
 async function reload(): Promise<void> {
   const next = await api<Partial<ScheduleList>>("/api/schedules");
   schedules.value = {
@@ -110,7 +110,7 @@ async function reload(): Promise<void> {
     ...(next?.truncated ? { truncated: true } : {}),
   };
 }
-/** 没装配运行时的部署会回 `available:false`，界面据此说明白，而不是显示零条任务 —— 所以这里吞掉失败。 */
+/** 未装配运行时的部署返回 `available:false`，界面据此给出说明而不是显示零条任务，因此这里吞掉失败。 */
 const refresh = (): void => {
   void reload().catch(() => undefined);
 };
@@ -125,9 +125,9 @@ function openScheduleDialog(): void {
   scheduleDialog.value = true;
 }
 /**
- * 编辑。**`at` 必须走 `toWallClock`**：`scheduledJobView` 发的是 `toISOString()` 的 UTC 瞬时，
- * 而这格输入框收的是行上时区的墙钟。直接回填 ISO 的话，`Asia/Shanghai` 上一个「早八点」的任务
- * 会显示成 `…T00:00:00.000Z`，人顺手改成 `08:00` 再存 —— 任务被静默挪后 8 小时，两次操作各自都不报错。
+ * 编辑。`at` 必须经 `toWallClock` 转换：`scheduledJobView` 发送的是 `toISOString()` 的 UTC 瞬时，
+ * 而该输入框接收的是行上时区的墙钟。直接回填 ISO 时，`Asia/Shanghai` 上一个早八点的任务
+ * 会显示为 `…T00:00:00.000Z`，用户顺手改成 `08:00` 再保存，任务被静默推后 8 小时，两次操作均不报错。
  */
 function editSchedule(job: ScheduleJob): void {
   scheduleOriginal.value = job;
@@ -150,7 +150,7 @@ function editSchedule(job: ScheduleJob): void {
   };
   scheduleDialog.value = true;
 }
-// notify 不调模型，没有谁能调 `stay_silent` —— 切过去时把开关一起归零，免得存下一个运行时不读的真值。
+// notify 不调用模型，没有调用方能触发 `stay_silent`，切换时一并归零该开关，避免存入一个运行时不读的真值。
 watch(
   () => scheduleForm.value.mode,
   (mode) => {
@@ -158,7 +158,7 @@ watch(
   },
 );
 
-/** 只把改动过的字段装进 `PATCH`。触发方式换了向（cron ↔ at）时那一项一定要发，另一列由服务端置 NULL。 */
+/** 只把改动过的字段放入 `PATCH`。触发方式切换（cron ↔ at）时该项必须发送，另一列由服务端置 NULL。 */
 function patchFor(form: ScheduleForm): Record<string, unknown> {
   const before = scheduleOriginal.value;
   const patch: Record<string, unknown> = {};
@@ -174,23 +174,29 @@ function patchFor(form: ScheduleForm): Record<string, unknown> {
   return patch;
 }
 /**
- * **只做格式校验**：非空与墙钟形状。`interval_too_short` / `at_in_the_past` / `too_many_jobs` /
- * `duplicate_name` / `invalid_cron` 一律让服务端回 —— 建与改的校验只有一份，抄第二份的那一天
- * WebUI 就能建出工具建不出来的任务。cron 在这里**不解析**。
+ * 只做格式校验：非空与墙钟形状。`interval_too_short` / `at_in_the_past` / `too_many_jobs` /
+ * `duplicate_name` / `invalid_cron` 一律由服务端返回。建与改的校验只有一份，一旦在此复制第二份，
+ * WebUI 就能创建出工具无法创建的任务。cron 在这里不解析。
  */
 function formatComplaint(
   body: Record<string, unknown>,
 ): { summary: string; detail: string } | null {
   if ("name" in body && !String(body.name).trim())
-    return { summary: "任务名不能为空", detail: "同一会话内唯一，取消时用它" };
+    return {
+      summary: "任务名不能为空",
+      detail: "同一会话内唯一，取消时按名字指定",
+    };
   if ("text" in body && !String(body.text).trim())
-    return { summary: "正文不能为空", detail: "这条任务到点之后要拿它做事" };
+    return { summary: "正文不能为空", detail: "任务触发时使用这段正文" };
   if ("cron" in body && !String(body.cron).trim())
-    return { summary: "cron 表达式不能为空", detail: "写得对不对由服务端判" };
+    return {
+      summary: "cron 表达式不能为空",
+      detail: "合法性由服务端校验",
+    };
   if ("at" in body && !WALL_CLOCK_RE.test(String(body.at)))
     return {
-      summary: "时间格式不对",
-      detail: "要填 2026-08-19T08:00 这个形状",
+      summary: "时间格式无效",
+      detail: "格式为 2026-08-19T08:00",
     };
   return null;
 }
@@ -199,12 +205,12 @@ async function submitSchedule(): Promise<void> {
   if (form.isNew && !form.key) {
     pushToast({
       severity: "warn",
-      summary: "先选一个会话",
-      detail: "只能给已经有上下文的会话排任务",
+      summary: "请先选择会话",
+      detail: "任务只能绑定已有上下文的会话",
     });
     return;
   }
-  // `key` / `chatId` / `mode` / `createdBy` 只在新建时出现在 body 里：`PATCH` 一个都不收。
+  // `key` / `chatId` / `mode` / `createdBy` 只在新建时出现在 body 中，`PATCH` 一个都不接收。
   const body: Record<string, unknown> = form.isNew
     ? {
         key: form.key,
@@ -232,7 +238,7 @@ async function submitSchedule(): Promise<void> {
     pushToast({
       severity: "success",
       summary: form.isNew
-        ? `已排上「${saved.name}」`
+        ? `已创建「${saved.name}」`
         : `已保存「${saved.name}」`,
       detail: saved.nextRun
         ? `下一次：${new Date(saved.nextRun).toLocaleString()}`
@@ -243,7 +249,7 @@ async function submitSchedule(): Promise<void> {
     scheduleDialog.value = false;
     await reload();
   } catch (error) {
-    toastError(form.isNew ? "建定时任务失败" : "保存定时任务失败", error);
+    toastError(form.isNew ? "创建定时任务失败" : "保存定时任务失败", error);
   } finally {
     scheduleSaving.value = false;
   }
@@ -251,7 +257,7 @@ async function submitSchedule(): Promise<void> {
 function cancelSchedule(job: ScheduleJob): void {
   askConfirm(
     `停掉「${job.name}」？`,
-    "停掉后不再触发；任务行按 schedule.retentionDays 保留，之后同名任务可以重建。",
+    "不再触发；任务行按 schedule.retentionDays 保留，可重建同名任务。",
     async () => {
       scheduleBusy.value = job.id;
       try {
@@ -264,12 +270,12 @@ function cancelSchedule(job: ScheduleJob): void {
             ? {
                 severity: "success",
                 summary: `已停用「${job.name}」`,
-                detail: "调度器里也摘掉了",
+                detail: "已从调度器移除",
               }
             : {
                 severity: "warn",
-                summary: "这条本来就已经停了",
-                detail: "状态会在下次刷新时归位",
+                summary: "这条任务已处于停用状态",
+                detail: "状态将在下次刷新时同步",
               },
         );
         await reload();
@@ -282,17 +288,17 @@ function cancelSchedule(job: ScheduleJob): void {
   );
 }
 /**
- * 硬删。入口只在弹窗 footer 最左 —— 与行内那个「停掉」并排放两个红按钮必然误点，而这两件事
- * 差得很远：停掉的行还在、还看得见历史，删掉的整行连同运行历史一起没了。
+ * 硬删。入口只在弹窗 footer 最左侧：与行内的「停掉」并排放两个红色按钮极易误点，而两者语义相差很大，
+ * 停用后行仍保留、历史仍可查看，删除则连同整行与运行历史一并移除。
  */
 function purgeSchedule(): void {
   const { id, originalName } = scheduleForm.value;
-  // 这张弹窗**开着**问：确认框与它都 Teleport 到 body 且同属 `.ui-overlay`，`ConfirmHost` 在
-  // `App.vue` 里先挂载所以锚点在前 —— 层级由 `styles.css` 里那条 `:has(.confirm-detail)` 解决，
-  // 不靠「先把这张收掉」绕开。收掉之后人就看不见自己要删的是哪一条了。
+  // 保持该弹窗打开状态下确认：确认框与它都 Teleport 到 body 且同属 `.ui-overlay`，`ConfirmHost` 在
+  // `App.vue` 中先挂载因此锚点在前，层级由 `styles.css` 中的 `:has(.confirm-detail)` 解决，
+  // 而不是先关闭该弹窗绕开。关闭之后用户就无法看到自己要删除的是哪一条。
   askConfirm(
     `永久删除「${originalName}」？`,
-    "这一行连同它的运行历史一起没了，模型的 schedule_list 也看不到；跟「停掉」不是一回事 —— 停掉只是不再触发，行还留着。",
+    "任务与运行历史一并删除，schedule_list 不再列出。「停掉」仅停触发、记录仍在。",
     async () => {
       try {
         await api<{ removed: boolean }>(
@@ -303,7 +309,7 @@ function purgeSchedule(): void {
           severity: "success",
           summary: `已永久删除「${originalName}」`,
         });
-        // 删成功才收：失败时这张留着，人还能再试一次或者改主意去「停掉」（同 TasksCard 的删除）。
+        // 删除成功后才关闭：失败时保留该弹窗，用户可以重试或改为执行停用（与 TasksCard 的删除一致）。
         scheduleDialog.value = false;
         await reload();
       } catch (error) {
@@ -312,15 +318,15 @@ function purgeSchedule(): void {
     },
   );
 }
-/** 立即触发。代价必须写在确认框里：agent 模式点一下就是一次真实模型调用，而且真的会发消息出去。 */
+/** 立即触发。代价必须写在确认框中：agent 模式下点击一次即为一次真实模型调用，且会实际发出消息。 */
 function triggerSchedule(job: ScheduleJob): void {
   const cost =
     job.mode === "agent"
-      ? "这会真的跑一轮模型调用（花钱）"
-      : "这会真的发一条消息";
+      ? "立即执行一轮真实模型调用（产生费用）"
+      : "立即发送一条消息";
   askConfirm(
     `立即触发「${job.name}」？`,
-    `${cost}，落点是「${job.chatLabel ?? job.chatId}」。不影响下一次的正常触发。`,
+    `${cost}，目标会话「${job.chatLabel ?? job.chatId}」。不影响下一次触发。`,
     async () => {
       scheduleBusy.value = job.id;
       try {
@@ -328,11 +334,11 @@ function triggerSchedule(job: ScheduleJob): void {
           `/api/schedules/${encodeURIComponent(job.id)}/trigger`,
           { method: "POST", body: "{}" },
         );
-        // 不等它跑完：agent 模式一次触发是一整轮。结果落在这一行的「上一次」上。
+        // 不等待执行完成：agent 模式一次触发为一整轮，结果反映在该行的「上一次」列。
         pushToast({
           severity: "success",
           summary: `已触发「${job.name}」`,
-          detail: "不等它跑完；结果看这一行的「上一次」，或去日志页看这一轮",
+          detail: "不等待完成；结果见本行「上一次」或日志页。",
         });
         await reload();
       } catch (error) {
@@ -354,11 +360,10 @@ watch(() => props.tick, refresh);
       <div>
         <h3>定时任务</h3>
         <p class="section-note">
-          模型用 <code>schedule_create</code> 排的、或在这里建的周期 /
-          一次性任务。到点<b>起一条完整轮次</b>并提交，所以产出照常进那个会话的上下文；<code
-            >notify</code
-          >
-          模式只发预写文本、不调模型。停机期间错过的<b>不补跑</b>，只在日志里留一条
+          周期 / 一次性任务，由
+          <code>schedule_create</code>
+          或在此处创建。触发时<b>开启一条完整轮次</b>并提交；<code>notify</code>
+          模式只发预写文本。错过的触发<b>不补跑</b>，仅记一条
           <code>schedule.missed</code>。
         </p>
       </div>
@@ -374,26 +379,25 @@ watch(() => props.tick, refresh);
       <i
         class="pi pi-exclamation-triangle"
         aria-hidden="true"
-      />这个部署没有装配定时任务运行时，这里读不到任何任务（<b>不是「一条都没有」</b>）。
+      />未装配定时任务运行时，列表不可读取（<b>而非任务数为零</b>）。
     </p>
     <p v-else-if="!schedules.enabled" class="callout warn">
       <i class="pi pi-pause" aria-hidden="true" /><code>schedule.enabled</code>
-      是关的：下面的任务都留在库里但不会触发，每次跳过记一条
+      已关闭：任务保留但不触发，每次跳过记一条
       <code>schedule.skipped</code>。
     </p>
     <p v-else-if="!chats.length" class="callout warn">
       <i
         class="pi pi-info-circle"
         aria-hidden="true"
-      />还没有任何会话上下文，建不了任务 —— 任务要挂在一个真实会话上（先让 bot
-      在某个会话里说过一次话）。
+      />还没有任何会话上下文。任务须绑定 bot 至少响应过一次的会话。
     </p>
     <DataGrid
       :rows="schedules.jobs"
       :columns="SCHEDULE_COLUMNS"
       data-key="id"
       paginate
-      empty="还没有定时任务"
+      empty="暂无"
     >
       <template #name="{ data }"
         ><div class="alias-name">
@@ -404,7 +408,7 @@ watch(() => props.tick, refresh);
       <template #chatLabel="{ data }"
         ><span>{{ data.chatLabel ?? data.chatId }}</span
         ><small class="alias-empty"
-          >建于 {{ data.creatorLabel ?? data.createdBy }}</small
+          >创建者 {{ data.creatorLabel ?? data.createdBy }}</small
         ></template
       >
       <template #mode="{ data }"
@@ -413,13 +417,13 @@ watch(() => props.tick, refresh);
           :severity="data.mode === 'agent' ? 'warn' : 'secondary'"
           :title="
             data.mode === 'agent'
-              ? '每次触发都是一轮真实模型调用'
+              ? '每次触发一轮真实模型调用'
               : '只发预写文本，不调模型'
           " /><UiTag
           v-if="data.silent"
           value="静默"
           severity="secondary"
-          title="模型这一轮没什么可说时可以不投递，正文照常进上下文"
+          title="无内容可发时不投递，正文仍进上下文"
       /></template>
       <template #trigger="{ data }"
         ><code v-if="data.cron">{{ data.cron }}</code
@@ -460,13 +464,12 @@ watch(() => props.tick, refresh);
             data.lastError
           }}</small>
         </template>
-        <small v-else class="alias-empty">还没跑过</small>
+        <small v-else class="alias-empty">尚未执行过</small>
         <!-- 连续静默：这条任务可能已经变成一台只烧钱不说话的定时器，界面上要一直说着。 -->
         <small
           v-if="(data.silentStreak ?? 0) >= SILENT_STREAK_WARN"
           class="detail-truncated"
-          >连着 {{ data.silentStreak }} 次都没发出东西 ——
-          去看看它是不是已经没事可做了。</small
+          >已连续 {{ data.silentStreak }} 次未发出消息</small
         >
       </template>
       <template #state="{ data }"
@@ -512,9 +515,9 @@ watch(() => props.tick, refresh);
       <i
         class="pi pi-exclamation-triangle"
         aria-hidden="true"
-      />任务太多，这里只列出了前 {{ schedules.jobs.length }} 条，还有
+      />超出上限，仅列出前 {{ schedules.jobs.length }} 条，另有
       {{ Math.max(0, (schedules.total ?? 0) - schedules.jobs.length) }}
-      条没显示。
+      条未显示。
     </p>
 
     <UiModal
@@ -531,13 +534,11 @@ watch(() => props.tick, refresh);
           <i
             class="pi pi-ban"
             aria-hidden="true"
-          />这条任务已经不在排了，改什么都不会再响 —— 这里只能看，或者永久删掉。
+          />已停用，修改不会使其重新触发。仅可查看或永久删除。
         </p>
         <p v-if="scheduleForm.isNew" class="wide field-note">
-          任务归属 <b>owner</b>（<code>access.bootstrapOwnerId</code>）—— WebUI
-          只有这一个身份。触发时仍按
-          <code>min(用户角色, 会话角色)</code>
-          重算，所以在不受信的群里不会因为「是 owner 建的」而提权。
+          任务归属
+          <b>owner</b>（<code>access.bootstrapOwnerId</code>）。触发时按有效角色重算。
         </p>
         <label
           >会话
@@ -552,8 +553,7 @@ watch(() => props.tick, refresh);
           <template v-else>
             <input data-field="chat" :value="scheduleForm.chatLabel" disabled />
             <small class="field-note"
-              >会话是隔离锚点，建好之后换不了 —— 服务端也不收客户端给的会话
-              id，它从上下文里反查。要换会话就在那边新建一条。</small
+              >隔离锚点，创建后不可更改；换会话请另建任务。</small
             >
           </template>
         </label>
@@ -563,7 +563,7 @@ watch(() => props.tick, refresh);
             data-field="name"
             :disabled="!editable"
             maxlength="64"
-            placeholder="同一会话内唯一，取消时用它"
+            placeholder="同一会话内唯一，取消时按名字指定"
         /></label>
         <label
           >模式
@@ -574,8 +574,7 @@ watch(() => props.tick, refresh);
             :options="MODE_OPTIONS"
           />
           <small v-if="!scheduleForm.isNew" class="field-note"
-            >下面那格正文的语义随模式翻转（任务描述 ↔
-            待发原文），花不花钱也跟着变，所以建好之后换不了。</small
+            >决定正文语义与费用，创建后不可更改。</small
           >
         </label>
         <label
@@ -593,7 +592,7 @@ watch(() => props.tick, refresh);
             v-model="scheduleForm.cron"
             data-field="cron"
             :disabled="!editable"
-            placeholder="0 8 * * * = 每天早八点"
+            placeholder="0 8 * * * = 每天 8 点"
         /></label>
         <label v-else>
           时间<input
@@ -605,8 +604,7 @@ watch(() => props.tick, refresh);
           <small
             v-if="!scheduleForm.isNew && !scheduleForm.at"
             class="field-note"
-            >这一行的时区认不出来，原来那个时间没法换算成墙钟填进去 ——
-            要改的话请重填一遍。</small
+            >时区无法识别，原时间未回填，请重新填写。</small
           >
         </label>
         <label v-if="!scheduleForm.isNew">
@@ -615,9 +613,7 @@ watch(() => props.tick, refresh);
             :value="scheduleForm.timezone"
             disabled
           />
-          <small class="field-note"
-            >任务的含义锚在建它时的那个时区上，改了等于换一条任务。</small
-          >
+          <small class="field-note">任务含义锚定于此，不可更改。</small>
         </label>
         <label v-if="!scheduleForm.isNew">
           创建者<input
@@ -626,8 +622,7 @@ watch(() => props.tick, refresh);
             disabled
           />
           <small class="field-note"
-            >每次触发都按 <code>min(用户角色, 会话角色)</code> 重算一遍 ——
-            这一格要是能改，它就成了一个提权把手。</small
+            >每次触发按有效角色重算；可写即提权入口。</small
           >
         </label>
         <div v-if="!scheduleForm.isNew">
@@ -645,28 +640,27 @@ watch(() => props.tick, refresh);
                 .severity
             "
           />
-          <p class="field-note">停用 / 完成都是终局：这一格只看，不改。</p>
+          <p class="field-note">停用 / 完成都是终态，只读。</p>
         </div>
         <p class="wide field-note">
           <template v-if="scheduleForm.isNew"
             >时间按 <code>general.timezone</code>（<b>{{
               schedules.timezone || "未知"
             }}</b
-            >）解释，不是浏览器时区。</template
+            >）解释，非浏览器时区。</template
           >
           <template v-else
-            >时间按<b>这一行自己的时区</b>（<b>{{
+            >时间按<b>该任务自身的时区</b>（<b>{{
               scheduleForm.timezone || "未知"
             }}</b
-            >）解释，不是浏览器时区，也不是
-            <code>general.timezone</code>。</template
+            >）解释，非浏览器时区、非 <code>general.timezone</code>。</template
           >
           <template v-if="schedules.settings"
-            >两次触发间隔不能小于
+            >间隔不小于
             {{ schedules.settings.minIntervalMinutes }} 分钟，单会话最多
             {{ schedules.settings.maxPerChat }} 个活跃任务。</template
           >
-          一次性任务的时间必须在将来 —— 错过的触发点不会补跑。
+          一次性任务的时间须在将来，错过不补跑。
         </p>
         <div class="wide">
           <UiSwitch
@@ -677,18 +671,17 @@ watch(() => props.tick, refresh);
           />
           <p class="field-note">
             <template v-if="scheduleForm.mode === 'notify'"
-              ><code>notify</code> 不调模型，没有谁能替这一轮宣布不发 ——
-              这个开关对它没有意义。</template
+              ><code>notify</code> 不调模型，该开关无效。</template
             >
             <template v-else
-              >打开之后，模型这一轮没什么可说时可以宣布不投递：<b>消息不发，正文照常进上下文</b>，所以它下一轮知道自己查过了。连着静默太多次会在这条任务的行上说出来。</template
+              >启用后模型可声明不投递：<b>消息不发，正文仍进上下文</b>。连续静默超阈值时列表会提示。</template
             >
           </p>
         </div>
         <label class="wide"
           >{{
             scheduleForm.mode === "agent"
-              ? "任务描述（给模型看）"
+              ? "任务描述（提供给模型）"
               : "要发出的正文"
           }}<textarea
             v-model="scheduleForm.text"
@@ -718,7 +711,7 @@ watch(() => props.tick, refresh);
           :loading="scheduleSaving"
           :disabled="!editable"
           icon="pi pi-check"
-          :label="scheduleForm.isNew ? '排上' : '保存'"
+          :label="scheduleForm.isNew ? '创建' : '保存'"
           @click="submitSchedule()"
         />
       </template>

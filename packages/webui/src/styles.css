@@ -389,8 +389,6 @@ code { font-family: var(--font-mono); font-size: .82rem; }
 .catalog-sub { display: block; margin-top: 2px; color: var(--muted); font-size: .7rem; line-height: 1.35; }
 .catalog-sub.match-provider { color: var(--green); }
 .catalog-sub.match-third-party, .catalog-sub.match-none { color: var(--amber); }
-/* 主体页角色列：库里那个 role 与 min() 之后真正生效的那个不一致时才出（docs/21 · G-UI-03）。 */
-.catalog-sub.role-shadowed { color: var(--rose); }
 .cap-tags { display: flex; flex-wrap: wrap; gap: 4px; }
 /* MCP server 的工具清单条数没有上限（agent-browser 一家就 70 个）。不封高的话这张卡片能长到
    1700px，而 grid 会把同排的每张卡片一起拉到那个高度 —— 一台 server 足以毁掉整页排版。

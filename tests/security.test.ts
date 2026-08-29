@@ -4,12 +4,29 @@ import { describe, expect, it } from 'vitest';
 import { FileTools, PathJail, TOOL_POLICY, ToolRegistry, configSchema, renderArchivedMessage, selfAuthoringDenyGlobs, type LogSink } from '@luoli/core';
 import { resolveEffectiveRole } from '@luoli/core';
 import { formatSpeakerIdentity, sanitizeIdentity, untrusted } from '@luoli/shared';
+import type { Role } from '@luoli/shared';
 
 describe('security boundaries', () => {
-  it('takes the lower user/chat role', () => {
-    expect(resolveEffectiveRole({ userRole: 'owner', chatRole: 'limited', isPrivate: false, defaultChatRole: 'blocked' })).toBe('limited');
-    expect(resolveEffectiveRole({ userRole: 'limited', chatRole: 'trusted', isPrivate: false, defaultChatRole: 'blocked' })).toBe('limited');
-    expect(resolveEffectiveRole({ userRole: 'owner', isPrivate: true, defaultChatRole: 'blocked' })).toBe('owner');
+  it('私聊只看用户角色，群里取两侧较高者再封顶 trusted', () => {
+    const role = (userRole: Role, chatRole: Role | null, isPrivate: boolean): Role =>
+      resolveEffectiveRole({ userRole, ...(chatRole ? { chatRole } : {}), isPrivate, defaultChatRole: 'blocked' });
+    // 封顶 trusted 守的是 docs/05 §2.2 那条「防群内注入借权」：群里的发言谁都写得出，owner 档
+    // 的工具（自撰写、spawn_*）不该由它够得着。因此 `effectiveRole === 'owner'` ⟹ `isPrivate`，
+    // 群里的有效角色只可能是 blocked / limited / trusted。
+    expect(role('owner', 'owner', false)).toBe('trusted');
+    expect(role('owner', 'limited', false)).toBe('trusted');
+    // 会话角色是下限而非上限：群的授信把未单独登记的成员抬上来，这是本次改动要修的那个格子。
+    expect(role('limited', 'trusted', false)).toBe('trusted');
+    // 两侧都够不到 trusted 时抬无可抬，抬升不会凭空造出授信。
+    expect(role('limited', 'limited', false)).toBe('limited');
+    // blocked 任一侧一票否决，先于取较高者判定 —— 拉黑仍是拉黑，两个方向都要挡。
+    expect(role('owner', 'blocked', false)).toBe('blocked');
+    expect(role('blocked', 'owner', false)).toBe('blocked');
+    // 私聊只看用户角色：这是 owner 唯一成立的场合，且 chatRole 即使存在也被忽略。
+    expect(role('owner', null, true)).toBe('owner');
+    expect(role('trusted', 'owner', true)).toBe('trusted');
+    // 未登记的群走 defaultChatRole（出厂 blocked），因而仍是整群静默。
+    expect(role('owner', null, false)).toBe('blocked');
   });
 
   it('enforces role policy for dangerous tools', () => {

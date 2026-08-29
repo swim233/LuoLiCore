@@ -184,7 +184,7 @@ LUOLI_DATA_DIR=/home/swim/code/LuoLiCore-staging/data-acc pnpm ac:seed --passwor
 | `M-WEB-10` | `AC-WEB-017` · `AC-WEB-071` | **权限模型里最锋利的两格都没有闸**。① `tools.fs.allowHostFsForOwner`（说明文字自称「★ 危险：等于把宿主的文件系统交给模型」）在 WebUI 里**只是「全部配置」里一个普通开关** —— `packages/webui/src` 对它零命中，沙箱页上没有；拨开关无确认、点保存无确认，`PUT /api/config` 直接 200。**两次点击、零阻力**。② 给 `sandbox.bypassRoles` 加 `trusted`（卡片自称「完全绕过沙箱，直接在宿主上执行 —— 这是整套权限模型里最锋利的一格」）同样无警示无确认：`saveSandbox`（`ConsoleView.vue:1326`）的守卫只有 `if (form.mode === 'none' && !confirm(…))`。两条判据都点名要求确认/警示 | **已修** · 沙箱页新增 `allowHostFsForOwner` 控件（`GET /api/sandbox` 带出该键），三种拆边界的改动共用一道 `ui/confirm.ts` 的确认并逐条写明代价，`mode=none` 那句原生 `window.confirm` 一并挪过来〔`tests/webui/console.render.test.ts` `tests/config.api.test.ts`〕 |
 | `M-WEB-09` | `AC-WEB-013c`（撞上）| **`[补齐元数据]` 把定价出处写坏**：`app.ts:2313-2318` 的 `priceSource = row.priceIn !== null ? "manual" : …` —— 只要行里已有价格就**一律记成「手工填写」**，而那个价格很可能是导入时从 models.dev 带进来的 `official` / `provider`。实测 `gpt-5.6-sol` 的 `priceSource` 被 `official` → `manual`（`match` 仍是 `official`、价格仍是 5/30），模型表那一行从「厂商官方价」变成「手工填写」。Toast 说的「已有价格不会被覆盖」对数字成立、对标签不成立 | **已修** · 价格没变就沿用原出处，没记过出处的才当手填〔`tests/model-catalog.test.ts`〕|
 | `M-WEB-08` | `AC-WEB-012b`（撞上）| **提示词打不开时一点提示都没有**：`inspectPrompt`（`ConsoleView.vue:555`）**没有 try/catch**，`api()` 抛出的 promise 无人接手 —— 点卡片编辑器纹丝不动，没有 toast、没有错误行。紧邻的第 556 行注释恰好写着这组操作「以前失败则什么都不显示；现在统一走同一个通知通道（AC-WEB-023）」，`inspectPrompt` 是**漏网的那个**。修法一行：跟邻居一样包 `try/catch { toastError('打开提示词失败', error) }` | **已修** · 无自动化（Vue 交互），待手测回归 |
-| `M-WEB-07` | `AC-WEB-058`（最后一句）| **`[清除会话别名]` 谎报成功**：端点老实回 `{"cleared":false}`，`clearChatModelAlias`（`ConsoleView.vue:472-474`）却把 `data.cleared` 丢在地上，无条件弹「已清除会话模型别名」。按钮有 `v-if="chatModelAlias"` 兜着，所以只在**视图陈旧**时够得着（两个标签页 / 两个运维 / 期间从 Telegram 侧清掉了）。修法是一行：读 `cleared`，false 时换成 info「这个会话本来就没有别名」 | **已修** · 无自动化（Vue 交互），待手测回归 |
+| `M-WEB-07` | `AC-WEB-058`（最后一句）| **`[清除会话别名]` 谎报成功**：端点老实回 `{"cleared":false}`，`clearChatModelAlias`（`ConsoleView.vue:472-474`）却把 `data.cleared` 丢在地上，无条件弹「已清除会话模型别名」。按钮有 `v-if="chatModelAlias"` 兜着，所以只在**视图陈旧**时够得着（两个标签页 / 两个运维 / 期间从 Telegram 侧清掉了）。修法是一行：读 `cleared`，false 时换成 info「这个会话没有会话级别名」 | **已修** · 无自动化（Vue 交互），待手测回归 |
 | `M-TG-01` | `AC-TG-018`（第三句）| **编辑消息的 `trigger.skipped` 日志是死代码**。`bot.ts:1018-1026` 那段 `if (wouldTrigger) log trigger.skipped` 是 W-TG-05 补的、`level: "info"`，而 `matchTrigger`（`trigger.ts:78-80`）开头就是 `const message = ctx.message; if (!chat || !message) return null;` —— `edited_message` 更新上 grammY 的 `ctx.message` 是 **undefined**（内容在 `ctx.editedMessage`），于是 `wouldTrigger` **恒为假**，那条日志对任何编辑消息都不可达。实测两次编辑一条都没落，全库仅有的 4 条 `trigger.skipped` 都是 8-19 的 `level=debug` 旧行。归档不受影响（`append` 里 `triggered: false` 是写死的），坏的只是可观测性 —— 但 W-TG-05 加它就是为了让「编辑为什么没开轮」有个凭据 | **已修** · `matchTrigger` 收一个显式 message 参数，`edited_message` 那条路传 `ctx.editedMessage`〔`tests/trigger.test.ts`〕|
 | `M-TG-02` | `AC-TG-010`（第三句）| **被编辑的消息进模型时不带任何「这是编辑」的标记**。实测把那一轮完整请求体捞出来，`instructions` 与 `messages` 里搜「编辑 / edited / revision / 修改过」四个词**全部零命中**；两条编辑以裸 `[user]` 形态出现，没有 `<group-message>` 包裹、没有时间戳、没有 RUNTIME 提示，与刚发来的新消息完全无法区分。后果直接写在回复里：模型把五分钟前那条 `早` 的编辑当成刚说的话，回了「早呀早呀」。上下文的只追加语义是对的（原 ordinal 未被改写，编辑版本以 `origin=background` 追加），缺的是**告诉模型这是一次编辑** | **已修** · `ArchivedMessage` 带上 `revision`，渲染时标「已编辑」（私聊起自己的前缀），内核提示词加一句说明它是什么意思〔`tests/security.test.ts`〕 |
 | `M-TG-03` | `AC-TG-001` | **`/ping` 四样里少三样**：只有版本，**上线时长、模型别名、DB 大小全无**。owner 多出来的那坨是 `JSON.stringify(operations.dashboard())`，而 `dashboard()`（`packages/db/src/operations.ts:142-198`）返回的是 `{turns, messages, providers, trend}` —— 运维总览，与健康检查要的四样毫无交集。三样都得新算：uptime 要在 `main.ts` 记启动时刻、别名读 `config.agent.main.modelAlias`（含 `app_kv` 会话覆盖）、DB 大小 `statSync` 且要含 `-wal` | **已修** · 四样补齐（新增 `startedAt` 依赖），`dashboard()` 的 JSON 摘掉〔`tests/access.commands.test.ts`〕 |
@@ -496,7 +496,7 @@ console log + 别名还原 SQL）。日志行号指的是 `<data-acc>/logs/2026-
 启动侧也有一条：`system.jsonl:1` `ERROR config.invalid Required model alias main is unavailable`，
 外加控制台两行中文指路。别名配回去之后横幅当场消失（删掉 `main` 再出现，见下一条）。
 
-**一处值得单记的观察，不属于本条判据**：`main` 不可用时**总览页照旧说「早上好，系统状态稳定。」**，
+**一处值得单记的观察，不属于本条判据**：`main` 不可用时**总览页照旧说「系统状态稳定」**，
 「依赖健康」里的「模型注册表」还是绿的 `2 / 2 可用`（它数的是 provider，不是别名）。唯一的痕迹
 是「最近错误」列表里那条 `ERROR config.invalid`。也就是说，运维如果只看总览，会看不出这台
 bot 现在一轮都跑不了。这一格没有对应的验收条目，先记在这里。
@@ -629,7 +629,7 @@ $14.399122 → $7.672436`，同时重算 152 条轮次与 5 行配额计数 —�
 
 | 条目 | 缺的那一半 | 已经能验的那一半 |
 |---|---|---|
-| `AC-WEB-006` | 行随 `turn.started`/`finished` 实时增删、第 N 步走字、`[取消]` 落 `cancelled` | **崩溃残留不出现**：往 `turns` 插一行 `state='running'` 后，总览的在途表照旧「当前没有正在跑的轮次。」、右上角徽标仍是「空闲」（行确实来自进程内 `TurnRegistry`）。合成行已删 |
+| `AC-WEB-006` | 行随 `turn.started`/`finished` 实时增删、第 N 步走字、`[取消]` 落 `cancelled` | **崩溃残留不出现**：往 `turns` 插一行 `state='running'` 后，总览的在途表照旧「当前没有执行中的轮次。」、右上角徽标仍是「空闲」（行确实来自进程内 `TurnRegistry`）。合成行已删 |
 | `AC-WEB-019` | 待审经 SSE 出现、批准/拒绝生效 | 无（库里那 3 行 approvals 是历史，不是 pending） |
 | `AC-WEB-043` | 对 running 任务点取消 | 无 |
 | `AC-WEB-049` | 出现一条待审 → 角标计数 → 裁决后消失 | 无 |
@@ -689,10 +689,10 @@ Telegram 侧。先拿 `rig-selfcheck` 试了一次（~5 秒，太短），随后
   （截图 `AC-WEB-006-inflight-row.png`）。
 - **逐秒走字的已用时长** ✅ 同一行三秒内 `20 秒 → 23 秒`，后来 `57 秒`。
 - **行来自进程内 `TurnRegistry`，`turns` 表里崩溃残留的 `running` 行不会出现** ✅ 单独造过：
-  往 `turns` 插一行 `id='ACC-STALE-RUNNING-001', state='running'`，总览照旧「当前没有正在跑的轮次。」、
+  往 `turns` 插一行 `id='ACC-STALE-RUNNING-001', state='running'`，总览照旧「当前没有执行中的轮次。」、
   徽标「空闲」。端点自己也写明了（`app.ts:2592` 的注释 + `dependencies.turnRegistry.list()`）。合成行已删。
 - **`[取消]` 让该轮落成 `cancelled`** ✅ 二次确认「取消 萝莉赛高 | Roam 的这一轮？模型调用会被中断，
-  该轮记成 cancelled；已经发出去的消息不会撤回。」→ Toast「已发出取消信号 · 01M0ZBWDPK1F ·
+  该轮记成 cancelled；已发送的消息不会撤回。」→ Toast「已发出取消信号 · 01M0ZBWDPK1F ·
   该轮会记成 cancelled」→ 库里 `turns.state='cancelled'`、`cancel_reason='user'`，
   `logs/2026-08-26/turn.jsonl` 有 `turn.cancel · turn cancelled from webui · {"cancelled":true}`。
 - **上下文与已发消息不动** ✅ 该轮 `abortTurn`，没有产生 commit；`context_commits` 里
@@ -700,7 +700,7 @@ Telegram 侧。先拿 `rig-selfcheck` 试了一次（~5 秒，太短），随后
 - **对已结束的轮次回 `{cancelled:false}` 并提示「这一轮已经结束了」** ✅ 拿已 committed 的
   `01M0ZBTMYDH99SAR8B0Z4SPXH6` 再 POST 一次 `/api/turns/:id/cancel` → `200 {"cancelled":false}`；
   前端对应分支在 `ConsoleView.vue:1603`：warn Toast「这一轮已经结束了 / 取消信号没有作用对象，
-  界面稍后会自己刷新」。
+  界面稍后自动刷新」。
 
 顺带确认的两件事：测试 bot **能**给 owner 私聊投递（`tg.api sendMessage ok:true`）；
 `acc-longrun` 这条任务留在库里没删，后面 `AC-WEB-043` / 日志那几条还要用它。
@@ -765,7 +765,7 @@ Telegram 侧。先拿 `rig-selfcheck` 试了一次（~5 秒，太短），随后
 
 对象是自己造出来的那条含子 agent 的轮次 `01M0ZC697VAXPTRYW1Y3RQ218H`（见下条）。
 入口：消息页任一回合的 `[查看详情]` → 「对话详情」对话框，底部还有一个
-`[在日志页看这条 trace]`。
+`[在日志页查看该 trace]`。
 
 - **展开一次真实 turn 的全部 span** ✅ 头部一行汇总（已完成 · chat:5568996608 · 发起人 定时任务 ·
   步数/工具 10·9 · TOKEN 155974/1770 · 花费 $0.0181 · 耗时 234224 ms），下面五个分组筛选
@@ -872,15 +872,15 @@ ctx.commit / ctx.prune / turn.end  parent=01M0ZC697X
 - **保存后 chip 列表出现对应点分项** ✅ `PATCH /api/chats/chat:1445849516` 写
   `{output:{replyDelayMs:1234}}` → 面板上出现 chip `output.replyDelayMs 1234`
   （截图 `AC-WEB-045-override-chip.png`）。
-- **`[✕]` 取消覆盖后回到全局值、空掉的中间层一并收掉** ✅ 按钮 `aria-label="取消这一项覆盖"`，
+- **`[✕]` 取消覆盖后回到全局值、空掉的中间层一并收掉** ✅ 按钮 `aria-label="取消该项覆盖"`，
   点完 Toast「已取消覆盖 output.replyDelayMs · 这一项回到全局值，下一轮生效」，
   再读 `/api/config` 时 `perChat` 是 `{"chat:1445849516":{}}` —— 空掉的 `output` 那层确实被收掉了。
 - **越界路径 400** ✅ 同一个 PATCH 里混进 `sandbox.mode` →
   `400 invalid_config`，message 与 `details[0].path` 都点名
   `perChat.chat:1445849516.sandbox.mode —— path is not in perChat override allowlist`。
 - **`context.scope` 带「改了等于把这条覆盖作废」的警告** ✅ `:1697`：
-  「⚠️ 改成 thread 之后，这个会话的后续消息会落到 `thread:<chat>:<topic>` 这个新 key 上 ——
-  而覆盖是按 key 存的，等于这条覆盖把自己作废了」。
+  「⚠️ 改成 thread 之后，这个会话的后续消息会落到 `thread:<chat>:<topic>` 这个新 key 上；
+  覆盖按 key 存储，这条覆盖随即失效」。
 
 收尾把测试留下的 `perChat.chat:1445849516`（空对象）那行也删了。
 
@@ -916,7 +916,7 @@ ctx.commit / ctx.prune / turn.end  parent=01M0ZC697X
 **过**，三句判据逐条：
 
 - **二次确认写明「归档正文从检索与对话列表隐藏，上下文提交、turn 与附件不动」** ✅ 原文
-  「软删除这条归档消息？归档正文会从检索与对话列表隐藏；上下文提交、turn 与附件不会被删除。」
+  「软删除该归档消息？归档正文会从检索与对话列表隐藏；上下文提交、turn 与附件不会被删除。」
 - **删后 `GET /api/messages?q=` 搜不到** ✅ 软删 `message #837` 后同一个查询 `total` 从 1 变 **0**；
   附件行仍在（`attachments` 里那条没动）。
 - **`GET /api/turns` 与 turn detail 的 prompt join 也不再回显** ✅ 这一句单独用一条**带 `turn_id` 的
@@ -1050,7 +1050,7 @@ Toast 那一侧本身是对的：这一场里所有成功/失败反馈（`上下
 
 - **不必切到任务页就看得见** ✅ 全程停在**总览页**没动，`pending` 变 1 之后那一次轮询里，
   左侧导航按钮的 DOM 从 `<span>任务与审批</span><!---->` 变成
-  `<span>任务与审批</span><span class="nav-badge" title="1 个调用正等待裁决">1</span>`。
+  `<span>任务与审批</span><span class="nav-badge" title="1 个调用等待审批">1</span>`。
 - **红色角标并计数** ✅ 计数 `1`，与服务端 `GET /api/approvals` 的 `pending` 一致
   （那一半「取全表 pending 不是当前页数出来的」已由用例焊住，见 §5）。
 - **点进去可 `[批准执行]` / `[拒绝]`，裁决后角标即时消失** ✅ 两个按钮都在；点完角标当场回到
@@ -1111,13 +1111,13 @@ S3 走设置页时会再正面点一次。
 **过**，两句判据逐条：
 
 - **`quota.enabled` 关闭时的红条** ✅ 页面顶部 `danger-banner`：「`quota.enabled` 已关闭：所有金额
-  限额都不再判定，任何人都能一直发起对话把钱花完。频率限制（下面那组）不受这个开关影响，仍然生效。」
+  限额不再判定，任何人可无限发起对话产生费用。频率限制（下方一组）不受该开关影响，仍然生效。」
   右上角另有一个 `配额已关闭` 的红徽标。
 - **缺定价告警条并列出模型** ✅ 基线下 `unpricedTotal` 是 0（没有条），
   于是把 `deepseek-v4-flash`（`54a7cd923e3b…`，启用中）的 `price_in`/`price_out` 置 NULL，
   刷新后 `unpricedTotal` 变 1、`unpriced=[{providerId:"0c84a9fe…",modelId:"deepseek-v4-flash"}]`，
-  页面出现第二条 `danger-banner`：「有 **1** 个启用中的模型没有定价，走它们的轮次 **花费按 0 记账**，
-  限额配得再准也拦不住 —— **deepseek-v4-flash** [去补定价]」。**模型名确实列出来了。**
+  页面出现第二条 `danger-banner`：「有 **1** 个启用中的模型缺少定价，使用它们的轮次 **花费按 0 记账**，
+  限额无法拦截：**deepseek-v4-flash** [补齐定价]」。**模型名确实列出来了。**
   定价已改回 `0.14 / 0.28`。
 
 ### AC-WEB-028
@@ -1125,15 +1125,15 @@ S3 走设置页时会再正面点一次。
 **过**，四句判据逐条（都在 `chat:1445849516`「Il Harper」上做的，14 条消息、7 个 commit）：
 
 - **两个按钮只在选中会话后的 commit 卡片里出现** ✅ 未选会话时整张「提交与 HEAD」卡片不渲染。
-- **各自写明等价于 `/undo` 与 `/new`** ✅ 卡片正文：「两个动作都不删消息，只挪 done 指针：
-  撤回上一次提交等同 Telegram 的 `/undo`，清空上下文窗口等同 `/new`。走错了用下面时间线上的
-  「回滚到此」再走回来。」
+- **各自写明等价于 `/undo` 与 `/new`** ✅ 卡片正文：「两个动作都不删除消息，只移动 done 指针：
+  撤回上一次提交等同 Telegram 的 `/undo`，清空上下文窗口等同 `/new`。如需回退，使用下方时间线的
+  「回滚到此」。」
 - **HEAD 已是首个 commit 时撤回按钮禁用** ✅ 连点 7 次「撤回上一次提交」，HEAD 依次
   `01M0ASN9 → 01M0ASKR → 01M0ASGR → 01M0ASG8 → 01M0ASFV → 01M0ASFA → 01M0ASE2`，
   到 `01M0ASE2`（该 key 的首个 commit）时按钮 `disabled=true`，第 8 次点不动。
 - **清空前二次确认** ✅ 文案：「清空「Il Harper」的上下文窗口？下一轮起模型看不到之前的对话；
-  消息与提交历史都还在，可以用「回滚到此」走回来。」确认后 Toast 还补了一句「模型仍可用
-  `read_messages` 翻更早的消息（`context.recallBarrier` 可关掉这条路）」。
+  消息与提交历史保留，可用「回滚到此」回退。」确认后 Toast 还补了一句「模型仍可用
+  `read_messages` 读取更早的消息（`context.recallBarrier` 可关闭）」。
 - **两者都不删消息，可用同卡片的 `[回滚到此]` 走回来** ✅ 清空写出的是一条
   `kind='reset'` commit（`01M0ZB4DT6Q3`，`window_start=15 > head_ordinal=14`，即空窗口，
   `meta={"archiveFloor":1677,"advancedClaims":false}`），而 `context_messages` 与 `messages`
@@ -1174,7 +1174,7 @@ S3 走设置页时会再正面点一次。
   正是 `ConsoleView.vue:2159` 那条注释要的效果。
 - **`download_state` 不是 `done` 的行打徽标且不给下载链接** ✅ 用 `message #24` 那条
   `failed` 附件验（截图 `AC-WEB-047-hit-failed-badge.png`）：徽标 `下载失败`，
-  `title` 是「这条附件没有落盘 —— 模型当时看到的也只是一句「处理失败」占位文本」，
+  `title` 是「附件未写入磁盘，模型当时读到的是「处理失败」占位文本」，
   chip 上 `a.attachment-download` **不存在**。它 mime 是 `image/jpeg`（光栅图）却也**没画缩略图**，
   因为 `inlineable` 先要过 `ready` —— 不给一个必然 404 的 `<img>`。
   `pending` 这个取值**不可达**：写端只写 `skipped`/`done`/`failed`（`media.ts:161/171/196/242/266/336`），
@@ -1190,8 +1190,8 @@ S3 走设置页时会再正面点一次。
 `app_kv['modelAlias:chat:5568996608'] = "high"`，`updated_by='command:5568996608'`。
 
 - **覆盖面板上方出现黄色提示，写明被 `/model` 钉在 `high`** ✅ 琥珀色 callout
-  （文字与边框都是 `rgb(241,182,91)`），原文「这个会话被 Telegram 的 `/model` 钉在别名 **high** 上
-  （存在 `app_kv`，不是配置覆盖层）。它**压过**下面的 `agent.main.modelAlias` 与全局值。」
+  （文字与边框都是 `rgb(241,182,91)`），原文「该会话已被 Telegram 的 `/model` 固定为别名 **high**
+  （存储在 `app_kv`，不是配置覆盖层）。它**优先于**下面的 `agent.main.modelAlias` 与全局值。」
   位置在 PER-CHAT OVERRIDE 面板顶部、「编辑覆盖项」之上（截图 `AC-WEB-058-banner.png`）。
 - **压过 `agent.main.modelAlias` 的会话级与全局值** ✅ 没有只信注释，**跑了三臂真轮次**对照
   （都是同一条一句话定时任务，`runtime.ts:1415` 那条 `??` 链的三个位置各占一次）：
@@ -1294,18 +1294,18 @@ Telegram 之前，跑完把配置恢复到验收基线或直接记下改了什�
 
   | 类型 | block 与用途 |
   |---|---|
-  | 人格 | `block 1 · 人格设定，决定说话的样子；带会话后缀的是该会话专属覆盖` |
+  | 人格 | `block 1 · 人格设定，决定回复风格；带会话后缀的是该会话专属覆盖` |
   | 助理守则 | `block 2 · 回答风格与业务约束，所有会话共用` |
   | 公共记忆 | `block 4 · 所有人可见的长期记忆，模型可用 memory_write 写` |
   | 私有记忆 | `block 5 · 某个用户私有；查看他人的这份会被记录` |
 
 - **`全局` 或所属会话/用户** ✅ 前三张是 `全局` 灰标，私有记忆那张是琥珀色 `5568996608`。
 - **字节 / token / 更新时间** ✅ 例：`21,269 字节 · 5,736 tok · 2026/8/27 11:19:34`。
-- **选中高亮；未选中时右侧是提示卡片** ✅ 未选中时右侧是 `选一份文档开始编辑 / 可在版本管理中进行回滚`；
+- **选中高亮；未选中时右侧是提示卡片** ✅ 未选中时右侧是 `选择一份文档开始编辑 / 版本记录支持回滚`；
   点中后该卡加 `.active`，边框 `rgb(42,49,64) → rgb(154,124,244)`、底色 `rgb(23,27,36) → rgb(45,36,80)`，
   其余三张不变。
 - **PRIMEMORY 打开时有「查看会被记录」的醒目提示** ✅ 琥珀 callout + 锁图标：
-  「这是某个用户的私有记忆，查看与修改都会写进 `memory_revisions` 审计（docs/06 §5.3）。」
+  「该文档是某个用户的私有记忆，查看与修改都会写入 `memory_revisions` 审计（docs/06 §5.3）。」
   （截图 `AC-WEB-012b-primemory-callout.png`）
 
 ⚠️ 这一句**一开始验不出来**：点私有记忆卡片编辑器纹丝不动。抓包发现
@@ -1444,7 +1444,7 @@ after : v2.cny95hPhMto6eq_Ey46zTA.JwyX9yYGviPC55MN.8OKRluctIwzd0E3_grCgYgpeunbJH
 对 `ksm-api` 拉取，上游给出 **24 个模型**（`已选 0 · 列出 24 / 共 24`）：
 
 - **每行给出窗口/最大输出并标明来源** ✅ 24 行里 **19 行 `来自 models.dev`**、
-  **5 行 `上游与目录都没给，用默认值`**。第三种「来自上游」这份装置上出不来 ——
+  **5 行 `上游与目录均无数据，使用默认值`**。第三种「来自上游」这份装置上出不来 ——
   ksm.moe 的 `/models` 不回窗口字段，所以没有一行能标它。
 - **价格 + 定价出处徽标** ✅ 三种都见到了：`$0.14 / $0.28 · 厂商官方价 · deepseek`、
   `— · 无官方价 · 第三方输入价 $0–$0.02（2 家），需手填`、`— · 目录里没有`。
@@ -1455,8 +1455,8 @@ after : v2.cny95hPhMto6eq_Ey46zTA.JwyX9yYGviPC55MN.8OKRluctIwzd0E3_grCgYgpeunbJH
 - **目录不可用时说明原因并提示要手填，而不是留一片空白** ✅ 这一句是**造出来**验的：
   先试过把 4.1 MB 的缓存文件写坏 —— 没用，目录在**进程内存里**，界面照旧显示 7348。
   于是走 `PUT /api/config {provider.catalog.enabled:false}`（热重载），横幅立刻变成
-  「**模型元数据目录已关闭（`provider.catalog.enabled`），只能拿到上游 /models 给的那点信息。**」
-  —— 点名了配置键；24 行全部退化成 `128000 / 8192 · 上游与目录都没给，用默认值` +
+  「**模型元数据目录已关闭（`provider.catalog.enabled`），仅能使用上游 /models 返回的字段。**」
+  —— 点名了配置键；24 行全部退化成 `128000 / 8192 · 上游与目录均无数据，使用默认值` +
   `— · 目录里没有` + `目录里没有这个模型`，**没有一格是空的**。测完改回 `true`，
   顺手删掉 `config_kv` 里那条与默认值相同的残留覆盖行。
 
@@ -1472,8 +1472,8 @@ after : v2.cny95hPhMto6eq_Ey46zTA.JwyX9yYGviPC55MN.8OKRluctIwzd0E3_grCgYgpeunbJH
 - **缺定价的行明确标「花费按 0 记账」** ✅ 编辑框造不出 NULL（`UiNumber` 的 `min=0`
   把空值收敛成 `0`，存出来是 `0 · 手工填写` 而不是缺定价），所以改用**导入**：
   从拉取对话框导入 `codex-auto-review`（目录里查不到价），导入 Toast 自己就说
-  「已导入 1 个模型 / 0 个带上了价格，1 个没有可信的官方价、价格留空 ——
-  不补齐的话这些模型的花费按 0 记账。」；模型表那一行随即显示琥珀色
+  「已导入 1 个模型 / 0 个已带价格，1 个没有可信的官方价、价格留空；
+  未补齐前这些模型的成本按 0 记账。」；模型表那一行随即显示琥珀色
   **`— · 缺定价 · 花费按 0 记账`**（`rgb(241,182,91)`）。
 - **`[补齐元数据]` 报出「补齐 N / 新填价格 M / K 个查不到需手填」** ✅ Toast 原文
   「**补齐了 5 / 10 个模型 · 新填价格 0 个，5 个在 models.dev 上查不到，需要手填。已有价格不会被覆盖。**」
@@ -1603,7 +1603,7 @@ after : v2.cny95hPhMto6eq_Ey46zTA.JwyX9yYGviPC55MN.8OKRluctIwzd0E3_grCgYgpeunbJH
   `GET /api/sandbox` 立刻回新值。
 - **`[探测可用性]` 打的是已保存的那份配置并回显结果** ✅ `POST /api/sandbox/probe` 回
   `{"available":true,"mode":"docker"}`，卡片上那条 callout 自己把话说明白了：
-  **「探测结果（打的是已保存的那份配置）：可用 · docker」** —— 括号里那半句正是判据要的。
+  **「探测结果（使用已保存的那份配置）：可用 · docker」** —— 括号里那半句正是判据要的。
 - **`mode=none` 保存前二次确认** ✅ 拦下来的原文：
   「**mode = none 之后，exec 类工具直接在宿主进程的权限下执行任意命令，沙箱那一层完全消失。确定？**」
   （实现是 `saveSandbox` 里的原生 `window.confirm`，也就是 `M-WEB-01` 数的那 12 个之一）。
@@ -1613,8 +1613,8 @@ after : v2.cny95hPhMto6eq_Ey46zTA.JwyX9yYGviPC55MN.8OKRluctIwzd0E3_grCgYgpeunbJH
   `saveSandbox`（`ConsoleView.vue:1326`）的守卫只有一条 `if (form.mode === 'none' && !confirm(…))`，
   `toggleBypassRole` 只是改数组 + `markSandboxDirty()`。详见 §4 `M-WEB-10`。
 
-  这一格的分量卡片自己写着：「`bypassRoles` 里的角色**完全绕过**沙箱，直接在宿主上执行 ——
-  **这是整套权限模型里最锋利的一格**」。
+  这一格的分量卡片自己写着：「`bypassRoles` 中的角色**完全绕过**沙箱，直接在宿主上执行，
+  **是权限模型中风险最高的一档**」。
 
 **收摊**：`bypassRoles` 已改回 `["owner"]`、`mode` 已改回 `docker`、`network` 仍 `bridge`。
 
@@ -1623,7 +1623,7 @@ after : v2.cny95hPhMto6eq_Ey46zTA.JwyX9yYGviPC55MN.8OKRluctIwzd0E3_grCgYgpeunbJH
 **挂 —— 两句里一句过。**
 
 - **显示 docker 可用性** ✅ 沙箱卡片上常驻一条
-  「探测结果（打的是已保存的那份配置）：**可用 · docker**」，`[探测可用性]` 打
+  「探测结果（使用已保存的那份配置）：**可用 · docker**」，`[探测可用性]` 打
   `POST /api/sandbox/probe` 拿 `{"available":true,"mode":"docker"}` 回填。
 - **开 `allowHostFsForOwner` 有红色二次确认** ❌ **没有任何确认，红色的也没有**。而且
   **沙箱页上根本没有这个控件** —— `grep -rn allowHostFsForOwner packages/webui/src` **零命中**，
@@ -1901,7 +1901,7 @@ after : v2.cny95hPhMto6eq_Ey46zTA.JwyX9yYGviPC55MN.8OKRluctIwzd0E3_grCgYgpeunbJH
 | enum | `output.mode` / `sandbox.mode` | `UiSelect`（`role=combobox`） | 默认 stream / 默认 docker |
 | stringList | `trigger.wakewords` / `tools.fs.denyGlobs` | `textarea rows=3` | 默认 1 条 / 默认 11 条 · 一行一条 |
 | multiEnum | `telegram.allowedUpdates` | **23 个复选框** | 默认 `["message","edited_message",…` |
-| json | `tools.overrides` | `textarea rows=6` | 默认 `{}` · 「工具页可逐个启停 ——…」 |
+| json | `tools.overrides` | `textarea rows=6` | 默认 `{}` · 「工具页可逐项启停；…」 |
 | secret | `tools.web.searchApiKey` | `input[password]` | 只写字段：不回显、留空表示不改 |
 | envPinned | `webui.passwordHash` | `input[text] disabled` | 当前值由环境变量 `WEBUI_PASSWORD` 决定… |
 
@@ -1995,11 +1995,11 @@ after : v2.cny95hPhMto6eq_Ey46zTA.JwyX9yYGviPC55MN.8OKRluctIwzd0E3_grCgYgpeunbJH
 
 | 按钮 | confirm 文案 | 结果 Toast |
 |---|---|---|
-| 立即备份 DB | 执行「立即备份 DB」？大库上可能耗时较久，期间写入会被阻塞。 | `toast success`「立即备份 DB 完成 / `…/data/backup/luoli-1787808556197-manual.db`」 |
+| 立即备份 DB | 执行「立即备份 DB」？数据库较大时可能耗时较久，期间写入会被阻塞。 | `toast success`「立即备份 DB 完成 / `…/data/backup/luoli-1787808556197-manual.db`」 |
 | VACUUM | 同上 | `toast success`「VACUUM 完成 / ok」 |
 | 清理过期日志 | 同上 | `toast success` + 全量计数 JSON（见下） |
-| 清理孤儿文件 | **执行「清理孤儿文件」？只删没有任何数据库行指向的孤儿文件；在用的媒体与子 agent 结果一个都不动。这不是保留策略，不会让在用的附件变少。** | `toast warn`「清理孤儿文件 **已拒绝**」 |
-| 重建 FTS 索引 | 大库上可能耗时较久… | `toast success`「重建 FTS 索引 完成 / ok」 |
+| 清理孤儿文件 | **执行「清理孤儿文件」？只删除没有任何数据库行指向的孤儿文件；在用的媒体与子 agent 结果不受影响。这不是保留策略，不会减少在用的附件。** | `toast warn`「清理孤儿文件 **已拒绝**」 |
+| 重建 FTS 索引 | 数据库较大时可能耗时较久… | `toast success`「重建 FTS 索引 完成 / ok」 |
 
 `gc-files` 的确认语和另外四个**不是同一句**（`ConsoleView.vue:1539-1541` 给它单独写了一段），
 这一点在界面上看得见。
@@ -2099,9 +2099,9 @@ after : v2.cny95hPhMto6eq_Ey46zTA.JwyX9yYGviPC55MN.8OKRluctIwzd0E3_grCgYgpeunbJH
 
   | 字段 | 界面上的锚点说明 |
   |---|---|
-  | 防秒回等待 | 从**用户那条消息到达**算起。模型本来就想了这么久时不再额外压时间。0 = 立刻回。 |
-  | 首帧缓冲 | 从**上游第一个 chunk 到达**算起，攒够这么久再发第一条。窗口内的文本只攒不发不会丢；流在窗口内就结束则立刻发出。 |
-  | 编辑间隔 | 两次 `editMessageText` 之间的最小间隔。首条发出也算一次刷新，下一次编辑同样要等满。 |
+  | 防秒回等待 | 从**用户消息到达**时刻算起。模型耗时已超过该值时不再额外延迟。0 = 立即回复。 |
+  | 首帧缓冲 | 从**上游首个 chunk 到达**算起，缓冲该时长后发送首条。窗口内的文本只缓冲不发送，不会丢失；流在窗口内结束则立即发出。 |
+  | 编辑间隔 | 两次 `editMessageText` 之间的最小间隔。首条发送也计为一次刷新，下一次编辑同样需等满该间隔。 |
 
 - **日志 SSE 刷新不冲掉未保存的表单** ✅ 这一条按**比条目更狠**的方式验的。设置页上
   `log` 事件压根不触发刷新（`EVENT_REFRESH.log = ['logs','dashboard']`，两组的
@@ -2137,11 +2137,11 @@ after : v2.cny95hPhMto6eq_Ey46zTA.JwyX9yYGviPC55MN.8OKRluctIwzd0E3_grCgYgpeunbJH
 
 - **`WEBUI_PASSWORD` 在环境里时整个表单换成一条告警** ✅ 两层都对，不是只把按钮灰掉：
   - 界面：「维护」tab 下 `修改登录口令` 抬头还在，底下**没有任何 `input[type=password]`**，
-    整块换成 `callout warn`：「口令由环境变量 `WEBUI_PASSWORD` 固定：在这里改能改到当前进程，
-    但重启后会被环境变量盖回去。要真正换口令，请改这个环境变量（或清掉它，让口令回到 `config_kv` 管）。」
+    整块换成 `callout warn`：「口令由环境变量 `WEBUI_PASSWORD` 固定：此处修改仅作用于当前进程，
+    重启后被环境变量覆盖。要永久更换口令，请修改该环境变量，或清除它以将口令交回 `config_kv` 管理。」
   - 端点：拿**正确**的当前口令直接打 `POST /api/auth/password`，回
-    **409 `password_pinned_by_env`**（「口令由环境变量 `WEBUI_PASSWORD` 固定：在这里改，重启后会被
-    环境变量盖回去。请改环境变量（或清掉它后再用这里）。」）—— 前端摘掉表单不是唯一的闸。
+    **409 `password_pinned_by_env`**（「口令由环境变量 `WEBUI_PASSWORD` 固定：此处修改在重启后会被
+    环境变量覆盖。请修改该环境变量，或清除后再使用此表单。」）—— 前端摘掉表单不是唯一的闸。
 
   这同时也把 `AC-CFG-016` 的那半句（env 钉住口令）落在了实处。
 
@@ -2171,8 +2171,8 @@ after : v2.cny95hPhMto6eq_Ey46zTA.JwyX9yYGviPC55MN.8OKRluctIwzd0E3_grCgYgpeunbJH
   283 个叶子里发出去的只有改过的 3 个，`tools.web.searchApiKey` 不在其中。
 - **把读出来的 `«redacted»` 原样提交，前后端都拒绝** ✅ 两侧分开验：
   - 后端：`PUT /api/config {"tools.web.searchApiKey":"«redacted»"}` →
-    **400 `redacted_placeholder`**「`tools.web.searchApiKey` 的值里含脱敏占位符 `«redacted»`
-    —— 那不是真值，写进去会把真密钥覆盖掉」。
+    **400 `redacted_placeholder`**「`tools.web.searchApiKey` 的值含脱敏占位符 `«redacted»`，
+    写入会覆盖真实密钥」。
   - 前端：整块 JSON / 字符串数组那一路由 `SchemaForm.problems`（`SchemaForm.vue:489-495`）
     在**保存按钮上**就挡住（`mcp.servers` 的 env / headers 属于这一类）。
 - **变更历史两侧脱敏** ✅ 写入那行 `新 "«redacted»"`、清空那行 `旧 "«redacted»" 新 ""`，
@@ -2374,7 +2374,7 @@ WEBUI_PASSWORD= BOT_TOKEN=<测试 bot> LUOLI_DATA_DIR=… LUOLI_CONFIG=… pnpm 
 
   | 表单状态 | `[更新口令]` | 旁边那句话 |
   |---|---|---|
-  | 空 | 禁用 | 要先验证当前口令 |
+  | 空 | 禁用 | 需先验证当前口令 |
   | 新口令 10 字符 | 禁用 | **新口令至少 12 个字符** |
   | 两次不一致 | 禁用 | **两次输入的新口令不一致** |
   | 三项都合法 | 可点 | 会吊销除当前会话之外的所有登录态。 |
@@ -2393,7 +2393,7 @@ WEBUI_PASSWORD= BOT_TOKEN=<测试 bot> LUOLI_DATA_DIR=… LUOLI_CONFIG=… pnpm 
   `GET /api/auth/me`，回的是 `200 {"role":"owner"}`。也就是说那次跳转是假的。详见 §4 `M-WEB-13`。
 - **正确改完后其余 session 全部吊销、当前 session 仍在** ✅ 改之前库里 9 条 session，改完**只剩 1 条**，
   而且正是当前这条（`7Mprp…`，13:59:13 建的）。Toast：`toast success`
-  「登录口令已更新 / 其余会话已全部吊销（当前这个还在）；新口令即时生效，不用重启」。
+  「登录口令已更新 / 其余会话已全部吊销（当前会话保留）；新口令即时生效，无需重启」。
 - **不用重启即可用新口令登录** ✅ 同一个进程里立刻打 `POST /api/auth/login`：
   新口令回 `ok:true`，**旧口令回 `invalid_credentials`**。
 - **`config_revisions` 里两侧都是 `«redacted»`** ✅ 连改两次，两行分别是：
@@ -2989,8 +2989,8 @@ W-PROMPT-01 要修的「人格静默消失、日志里一个字都没有」现�
 
 二次确认弹窗原文（截图 `acceptance-evidence/s4-media/ac-web-043-confirm.png`）：
 
-> **取消任务「tick-sleep」？** 它没有独立的取消句柄，实际取消的是所属的整轮 **01M112GD1YAV** ——
-> 同一轮里的其他子 agent 也会一起停。
+> **取消任务「tick-sleep」？** 它没有独立的取消句柄，实际取消的是所属的整轮 **01M112GD1YAV**；
+> 同一轮里的其他子 agent 也会一并终止。
 
 条目要的三句话一句不少，**而且它把真实的 turn id 写进了确认文案** —— 运维点下去之前知道自己在停哪一轮。
 点「确认」之后：
@@ -3142,8 +3142,10 @@ DB 覆盖层会悄悄压过它。**本场用 `DELETE FROM config_kv` 把这三�
 
 两处要当心：
 
-- **`AC-APV-001` 的按钮只在 owner 私聊与 owner 档群里出现**，`trusted` 群里退回「去 WebUI 批」的
-  纯文本回执 —— 两种形态都算通过，挂出点不动的按钮才算失败。
+- **`AC-APV-001` 要同时看两个会话**：带〔批准〕〔拒绝〕的完整审批消息发在 **owner 私聊**里
+  （2026-08-30 拍板），`trusted` 群里只留一条不含倒计时、不含状态的报信。所以这一条要在群里发起、
+  切到 owner 私聊点按钮，再回群里确认那条报信**没有被编辑过**。挂出点不动的按钮、或让群里那条
+  带上会过期的倒计时，都算失败。
 - `AC-TASK-005` / `AC-ACL-006` 要**第二个真账号**。
 - `AC-QUOTA-008` 手测要验的正是 `bot.ts` 里把配额拒绝接到告警的那个 `if`（`alerts.test.ts` 已经
   焊住了它两边）。

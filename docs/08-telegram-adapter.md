@@ -43,7 +43,7 @@ bot.api.config.use(loggingTransformer);          // 自建：每次 Bot API 调�
 1. errorBoundary            捕获全部异常 → 日志 → 不让进程挂
 2. traceContext             生成 update span，注入 ctx.trace
 3. dedupUpdate              processed_updates 表去重（重启后仍有效）
-4. resolvePrincipals        role(user) / role(chat) / effective；写 ctx.access
+4. resolvePrincipals        role(user) / role(chat)（私聊没有）/ effective；写 ctx.access
 5. accessGate               effective=blocked → 记 access.denied 日志，return（不入库、不回复）
 6. ignoreSelfAndBots        from.is_bot 且不在 telegram.allowBots → return
 7. commandRouter            命令（/new /ctx ...）在此分流处理，不进 AI 流程
@@ -67,20 +67,29 @@ if (!(await db.updates.tryInsert(ctx.update.update_id))) { log.debug('dup update
 ### 2.2 主体解析
 
 ```ts
-const userId = String(ctx.from?.id ?? '');
-const chatId = String(ctx.chat?.id ?? '');
-const uRole  = await principals.roleOf('user', userId);
-const cRole  = ctx.chat?.type === 'private' ? (await principals.roleOf('chat', chatId) ?? uRole)
-                                            : await principals.roleOf('chat', chatId);
-ctx.access = { userId, chatId, userRole: uRole, chatRole: cRole,
-               effective: minRole(uRole, cRole), isPrivate: ctx.chat?.type === 'private' };
+const userId    = String(ctx.from?.id ?? '');
+const chatId    = String(ctx.chat?.id ?? '');
+const isPrivate = ctx.chat?.type === 'private';
+const uRole     = await principals.roleOf('user', userId);   // 缺行 → access.defaultUserRole
+// 私聊今后**不读也不写** chat: 那一行（迁移 0015 已把存量删掉），chatRole 因此是 undefined。
+const cRole     = isPrivate ? undefined : await principals.roleOf('chat', chatId);
+ctx.access = { userId, chatId, userRole: uRole, chatRole: cRole, isPrivate,
+               // 会话角色是**下限**不是上限：群里取两侧较高者，再封顶 trusted；任一侧 blocked 一票否决。
+               effective: isPrivate ? uRole
+                        : (uRole === 'blocked' || cRole === 'blocked') ? 'blocked'
+                        : minRole(maxRole(uRole, cRole!), 'trusted') };
 ```
 
-同时 upsert `principals` 的 `display_name`/`username`/`chat_type`（保持 WebUI 可读性），但**不改 role**。
+两条由此成立的不变量：**`effective === 'owner'` ⟹ `isPrivate`**；群/频道里的有效角色只可能是
+`blocked` / `limited` / `trusted`。这正是旧的取小规则原本要守的那条「防群内注入借权」
+（[14 §3](./14-open-questions.md) T8），换成封顶之后守得更直接。
+
+同时 upsert `principals` 的 `display_name`/`username`/`chat_type`（保持 WebUI 可读性），但**不改 role**；
+私聊只 upsert `user:` 那一行。
 
 ### 2.3 `my_chat_member`
 
-- bot 被加入新群 → 自动插入 `principals['chat:<id>']` 为 `access.defaultChatRole`（默认 blocked），并**私聊通知 owner**：「已被加入群「X」(id)，当前角色 blocked，是否授权？」附 inline `[授权 limited] [授权 trusted] [忽略]`。
+- bot 被加入新群 → 自动插入 `principals['chat:<id>']` 为 `access.defaultChatRole`（默认 blocked），并**私聊通知 owner**：「已被加入群「X」(id)，当前角色 blocked，是否授权？」附 inline `[授权 limited] [授权 trusted] [忽略]`。会话角色是**下限**：授 `trusted` 等于把这个群里每个已登记成员都抬到 `trusted`（封顶也是 `trusted`），所以那两个按钮里没有 `owner` 档。
 - bot 被移出 → 标记 `principals.note='removed at <ts>'`，不删数据。
 
 ---
@@ -155,7 +164,7 @@ trigger:
   `^(?i)nori`（RE2 支持内联标志）——不替作者改语义，也保住「我就是要区分大小写」这个表达能力。
   判成正则的前缀有两种：`^` 与 `(?i)` 这类内联标志组，两种拼法都认（`(?:` 不会被误判）。
 - **频道消息**（`chat.type='channel'`）：默认不参与（`trigger.channels=false`）。
-- 匿名管理员发言（`sender_chat` 存在，`from` 为群本身）：`from_user_id` 记为 `chat:<id>`，角色取该 chat 的角色，`from_name` = 群名 + `(匿名管理员)`。
+- 匿名管理员发言（`sender_chat` 存在，`from` 为群本身）：`from_user_id` 记为 `chat:<id>`，角色取该 chat 的角色，`from_name` = 群名 + `(匿名管理员)`。**两侧角色同源**（用户侧就是这个群），所以新规则下的有效角色仍等于该群的角色，且不可能是 `owner`（群行不接受 owner）—— 「取两侧较高者」在这里抬不动任何东西。
 - **反循环**：`from.is_bot === true` 一律不触发（即使 @了我们），除非 `telegram.allowBots` 里显式列出该 bot 的 username。
 
 ---
@@ -473,7 +482,7 @@ bot:  ⏳ 已接收，正在处理…                                    ← 占
 - 任务超时 `concurrency.turnTimeoutMs`（默认 10 分钟）→ **记 `failed` 而不是 `cancelled`**
   （超时是故障，要计入 `consecutive_turn_failures`；[04 §5.3](./04-agents-and-providers.md#53-fallback-与重试)
   的三档）。用户那边分两处：屏幕上的半截正文补「（生成中断）」、一个字都没有时占位消息删掉（§5.2），
-  另发一句「这一轮太久没有进展，已经停下了。(ref: …)」（§9）—— **记账上算故障，对用户仍不说
+  另发一句「本轮长时间无进展，已终止。(ref: …)」（§9）—— **记账上算故障，对用户仍不说
   「已取消」**：没点过取消的人收到「已取消」只会以为自己误触了。ACP 卡片那条路另有终帧
   「⛔ 超时中止」（§6.1）。
 
@@ -568,7 +577,7 @@ bot:  ⏳ 已接收，正在处理…                                    ← 占
   （卡片只负责交回文本与 `messageId`，真的落库在调用方）。终帧不含思考行。
 - **取消要留终帧。** `/cancel` 与 `turnTimeoutMs` 时必须收到最后一次编辑（`⛔ 已取消 · 已改动 N
   个文件`），照 §5.2 那条「`turnTimeoutMs` 是硬边界，但收尾那一条消息还是要发出去」的既定取舍：
-  屏幕上停着一张「现在 · ✏️ 改 …」的卡片而进程已经没了，用户没有任何办法判断它是
+  屏幕上停着一张「当前 · ✏️ 编辑 …」的卡片而进程已经没了，用户没有任何办法判断它是
   死了还是还在跑。所以 `close()` **永不 throw**，且中途 `push` 全部失败（限流、被拉黑）之后照样能
   渲染出一帧 —— 首帧没发出去时它走 `sendMessage` 而不是 `editMessageText`。
 - **终帧必须把取消键盘撤掉。** `close()` 之后那一轮已经收尾（`registry.finish` 把它从 `TurnRegistry`
@@ -594,14 +603,14 @@ bot:  ⏳ 已接收，正在处理…                                    ← 占
   ✓ 补 openProgressCard 与用例
   ▶ 更新 docs/08 的新节
   ○ 跑 typecheck 与 lint · ○ 贴一份真实渲染输出  … 还有 1 项
-现在 · ✏️ 给 TelegramTools 补 openProgressCard · packages/telegram/src/tools.ts
+当前 · ✏️ 给 TelegramTools 补 openProgressCard · packages/telegram/src/tools.ts
 改动 3 个文件
   ± packages/telegram/src/tools.ts +44 −3
   ± packages/telegram/src/index.ts +1
   + tests/acp.card.test.ts +180
 ⚠ 失败 1 次 · 最近：跑 pnpm lint
-工具 14 次
-  读 6 · 改 4 · 跑 3 · 搜 1
+工具调用 14 次
+  读取 6 · 编辑 4 · 执行 3 · 搜索 1
                     [⛔ 取消]        ← inline keyboard，callback_data = 'c:<turnId>'；终帧撤掉
 ```
 
@@ -672,11 +681,11 @@ media:
   它自己上一句变得没有依据，而拒绝给了它一个能读懂的下一步。
 - 若当前别名模型 `capabilities.vision=false` → `prepareStep` 切 `vision` 别名（优先级见 [04 §5.2](./04-agents-and-providers.md#52-内建别名语义)：
   vision 压过 `downgradeAfterStep` 与 `set_model`）。一个能看图的别名都没有时才降级：
-  图片整体换成 `[图片：当前模型不支持看图，本轮没能查看]`，并在回复末尾追加
-  「（当前模型不支持看图，这张图我没能真的看到。）」。
+  图片整体换成 `[图片：当前模型不支持看图，本轮未能查看]`，并在回复末尾追加
+  「（当前模型不支持看图，这张图未能查看。）」。
 - 「这一轮含图」算到哪里由 `media.visionScope` 决定（默认 `window` = 整个上下文窗口，见
   [04 §5.2](./04-agents-and-providers.md#52-内建别名语义)）。`turn` 档只算本轮新进来的图，历史图在
-  当步别名看不了图时换成 `[图片：更早轮次里的图，当前模型不看图。要看的话请用户重新发一次或引用那条消息]`
+  当步别名看不了图时换成 `[图片：更早轮次的图片，当前模型不支持看图。如需查看，请用户重新发送或引用那条消息]`
   —— 这一档**不追加**上面那句回复末尾的提示：用户这一轮发的是纯文本，向他道歉一张他没发的图很怪。
   **不许把不透明 part 原样发给一个不认它的模型**：宽容的 provider 静默忽略、严格的直接 400，
   而模型不知道自己没看见图 —— 实测它会去 cp 文件、python 读尺寸、开本地 http 服务器、
@@ -722,16 +731,16 @@ media:
 | `/start` | all | limited | 欢迎语 + 能力简介 + 当前权限 |
 | `/help` | all | limited | 命令列表（按角色过滤） |
 | `/ask <text>` | all | limited | 显式触发（等价 @bot）。**唯一进 AI 流程的命令**，`matchTrigger` 为它返回 `'ask'` 而不是 `'command'`，因此不在 `HANDLED_COMMANDS` 里 |
-| `/new` | all | limited | 开新话题（窗口清零，历史保留）。回执跟着 `context.recallBarrier` 分岔：隔断关着时明说「我仍可用 read_messages 去查更早的消息」，开着时说「这之前的内容我不会再去翻了」—— 两句话描述的是两种不同的清空（[02 §7.1](./02-context-engine.md)） |
+| `/new` | all | limited | 清空上下文窗口（保留历史）。回执跟着 `context.recallBarrier` 分岔：隔断关着时明说「我仍可通过 read_messages 检索更早的消息」，开着时说「此前的内容不再进入上下文」—— 两句话描述的是两种不同的清空（[02 §7.1](./02-context-engine.md)） |
 | `/undo` | all | limited | 撤销上一轮（done 回退一个 commit） |
 | `/ctx` | all | limited | 上下文状态；`/ctx export` 导出（owner） |
 | `/cancel [id]` | all | limited | 取消在途 turn |
 | `/tasks` | all | limited | 在途任务列表 |
 | `/model [alias]` | all | trusted | 查看/固定本会话模型别名 |
 | `/memory` | private | limited | 查看自己的私有记忆 |
-| `/whoami` | all | limited | 自己的 user/chat 角色与有效权限 |
-| `/whois <id>` | all | owner | 查某主体的角色 |
-| `/grant <user\|chat> <id> <role>` | all | owner | 授权 |
+| `/whoami` | all | limited | 自己的用户角色与有效权限；**群里**另报会话角色，**私聊不报** —— 私聊没有会话角色这一行（[05 §2.2](./05-tools-and-permissions.md#2-角色与判定)），报一个虚构的值只会让人去改一行不存在的记录 |
+| `/whois <id>` | all | owner | 查询主体角色 |
+| `/grant <user\|chat> <id> <role>` | all | owner | 授权。两条拒收：`chat` + **正数 id**（私聊只占 `user:` 一行，写出来的行谁都读不到）、`chat` + `owner`（群内封顶 `trusted`，owner 档零效果）|
 | `/revoke <id>` | all | owner | 降为 blocked |
 | `/usage [today\|month]` | all | limited | 本会话/本人用量；owner 看全局 |
 | `/webui` | owner | 私聊 | 生成一次性控制台登录链接（5 分钟有效、单次使用、进程重启失效）。**群里直接拒绝** —— 登录链接出现在群里等于把 owner 权限递给屏幕前所有人。没配 `webui.publicUrl` 时明说生成不出来，而不是发一条打不开的链接。命令 / handler / 服务端端点三者由 CI 断言锁死（[09 §2.3](./09-webui.md#23-telegram-一次性登录链接)） |
@@ -765,16 +774,16 @@ media:
 
 | 情况 | 文案 |
 |---|---|
-| 模型全部失败 | `模型暂时不可用，稍后再试。(ref: 01J8…)` |
-| 模型未配置（缺 `main` 别名等，见 [04 §5.2](./04-agents-and-providers.md#52-内建别名语义)） | `模型还没配置好，得管理员在 WebUI 里配上 provider 和 main 别名。(ref: 01J8…)` |
-| 模型缺定价（`quota.requirePricing`） | `当前模型没配价格，管理员补上定价才能用。(ref: 01J8…)` |
+| 模型全部失败 | `模型服务不可用（上游重试已耗尽），请稍后重试。(ref: 01J8…)` |
+| 模型未配置（缺 `main` 别名等，见 [04 §5.2](./04-agents-and-providers.md#52-内建别名语义)） | `模型未配置，需管理员在 WebUI 配置 provider 与 main 别名。(ref: 01J8…)` |
+| 模型缺定价（`quota.requirePricing`） | `当前模型缺少定价，需管理员补充定价后可用。(ref: 01J8…)` |
 | 配额超限 | `今天的额度用完了（$1.00/$1.00），明天 00:00 重置。` |
 | 排队已满 | `我这边排队满了，等会儿再叫我。` |
-| 在途轮次达 `quota.rateLimit.concurrentPerUser` | `我同时最多接 2 件事，你手上的还没说完。等它收尾再说这条。`（这一句不受 `quota.onExceeded.reply` 管：它不是额度，等手上那轮说完就能继续） |
+| 在途轮次达 `quota.rateLimit.concurrentPerUser` | `我同时最多处理 2 轮，你的上一轮尚未结束。等它结束后再发送。`（这一句不受 `quota.onExceeded.reply` 管：它不是额度，等手上那轮说完就能继续） |
 | 权限不足（用户显式要求高危操作） | `这个操作需要更高权限，找管理员吧。` |
 | 上下文过大中止 | `这轮内容太多，我先停下。用 /new 开个新话题，或把任务拆小些。` |
-| 轮次超时（`concurrency.turnTimeoutMs`） | `这一轮太久没有进展，已经停下了。(ref: 01J8…)`（**不说「已取消」** —— 没点过取消的人会以为自己误触了；已经在屏幕上的半截正文另有「（生成中断）」，见 §5.2） |
-| 未捕获异常 | `出了点问题，已记录。(ref: 01J8…)` |
+| 轮次超时（`concurrency.turnTimeoutMs`） | `本轮长时间无进展，已终止。(ref: 01J8…)`（**不说「已取消」** —— 没点过取消的人会以为自己误触了；已经在屏幕上的半截正文另有「（生成中断）」，见 §5.2） |
+| 未捕获异常 | `处理失败，已记录。(ref: 01J8…)` |
 
 所有这些同时写 `log_events(level='error'|'warn')`，`ref` = `turn_id` 前 12 位，owner 可在 WebUI 用它直接检索完整 trace。
 

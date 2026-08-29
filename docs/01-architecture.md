@@ -53,8 +53,10 @@
 Telegram Update
   │
   ├─(1) grammY middleware: dedupUpdate(update_id)            → 重复直接丢弃
-  ├─(2) resolvePrincipals: role(user), role(chat)
-  │       effective = min(...)   若 = blocked → 记 log 后静默丢弃（不回复）
+  ├─(2) resolvePrincipals: role(user), role(chat)（私聊没有 role(chat)）
+  │       effective = 私聊 ? role(user)
+  │                        : min(max(role(user), role(chat)), 'trusted')   任一侧 blocked → blocked
+  │                       若 = blocked → 记 log 后静默丢弃（不回复）
   ├─(3) mediaGroupDebounce(1.5s)                              → 合并同 media_group_id
   ├─(4) downloadAttachments → data/files/<chatId>/...         → 抽取文档文本
   ├─(5) Archive.append(messages 行 + attachments 行 + FTS)    ★ 无论是否触发都入库

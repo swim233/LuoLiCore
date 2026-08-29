@@ -100,7 +100,10 @@ WebUI 的写端点必须走 `runtimeConfigSchema.safeParse(mergeDotted(...))` �
 
 ### 权限与工具
 
-角色 `owner > trusted > limited > blocked`，有效角色 = min(用户角色, 会话角色)。
+角色 `owner > trusted > limited > blocked`。有效角色：私聊 = 用户角色；群 / 频道任一侧 `blocked`
+即 `blocked`，否则取两侧**较高者**再**封顶 `trusted`**（2026-08-30 改口径，`docs/05 §2.2`）。
+群角色是**下限**不是上限，而封顶保住了旧规则要守的「防群内注入借权」—— 由此
+`effectiveRole === 'owner'` ⟹ `isPrivate`。私聊只占 `principals` 的 `user:` 一行。
 工具在 `packages/core/src/tools/registry.ts` 注册，权限在注册期 fail-closed
 （`available(role, ctx)` 返回 false 的工具连注册表的合格集 `active()` 都进不去，因而既不进模型的
 工具目录、也过不了 `execute()` 的复查）。沙箱 `none | docker`，`bypassRoles: ['owner']`。

@@ -43,10 +43,10 @@ export const TOOL_POLICY = {
     scope: "workspace",
     source: "builtin",
   },
-  // `edit_file` 与 `write_file` **同档**。`FileTools.edit()` 最后一步就是 `return this.write(...)`，
-  // 而它可以把整份文件换掉（`oldString` 取全文、或 `replaceAll`）；`write_file` 带
-  // `approvalTargetExists` 说明「覆盖已存在的文件要审批」正是设计意图，而 `edit_file` 恰好**只**
-  // 作用于已存在的文件 —— 标成 never 等于给覆盖审批留了一条绕道（docs/27 · C-03）。
+  // `edit_file` 与 `write_file` 同档。`FileTools.edit()` 最后一步即 `return this.write(...)`，
+  // 且可替换整份文件（`oldString` 取全文或 `replaceAll`）；`write_file` 带
+  // `approvalTargetExists` 表明覆盖已存在的文件需审批正是设计意图，而 `edit_file` 只作用于
+  // 已存在的文件 —— 标为 never 等于为覆盖审批留下一条绕行路径（docs/27 · C-03）。
   edit_file: {
     minRole: "trusted",
     approval: "conditional",
@@ -209,20 +209,20 @@ export const TOOL_POLICY = {
     scope: "chat",
     source: "builtin",
   },
-  // 折叠工具的检索入口（docs/07 §5）。与 `load_skill` 同档同族：两个都是渐进披露的元工具
-  // （一个展开 skill 正文、一个展开工具 schema），所以门槛取最低的 `limited` —— 它自己什么都
-  // 做不了，只把「本轮你还能调什么」如实报出来，而检索域是从 `active()` 派生的，角色过滤已经
-  // 在上游做完了（limited 枚举不到 owner 工具的描述）。**开关不在这一栏上**：折叠集为空时
-  // `available()` 让它整个不进目录（纯内建部署的提示词逐字节不变）。
+  // 折叠工具的检索入口（docs/07 §5）。与 `load_skill` 同档同族：两者都是渐进披露的元工具
+  // （分别展开 skill 正文与工具 schema），因此门槛取最低的 `limited` —— 它本身不执行任何动作，
+  // 只如实报告本轮可调用的工具，且检索域派生自 `active()`，角色过滤已在上游完成
+  // （limited 枚举不到 owner 工具的描述）。开关不在该字段上：折叠集为空时
+  // `available()` 使其整体不进目录（纯内建部署的提示词逐字节不变）。
   search_tools: {
     minRole: "limited",
     approval: "never",
     scope: "global",
     source: "builtin",
   },
-  // 定时任务是唯一能让 bot 在没人说话时主动花钱的能力，所以起点是 trusted 而不是 limited；
-  // 作用域是 chat 而不是 global —— 落点绑死本会话，工具参数里没有 chatId（docs/05 §8）。
-  // list / cancel / update 同样收在 trusted：能看见任务名就能看见别人排了什么。
+  // 定时任务是唯一能让 bot 在无人交互时主动产生花费的能力，因此起点取 trusted 而非 limited；
+  // 作用域为 chat 而非 global —— 落点绑定本会话，工具参数中不含 chatId（docs/05 §8）。
+  // list / cancel / update 同样收在 trusted：能看到任务名即能看到他人排入的内容。
   schedule_create: {
     minRole: "trusted",
     approval: "never",
@@ -247,43 +247,44 @@ export const TOOL_POLICY = {
     scope: "chat",
     source: "builtin",
   },
-  // 「本轮不用汇报」（docs/02 §10.5）。角色档与 `schedule_create` 对齐——能排一条静默任务的人
-  // 才可能触发一条静默轮次——但**真正的边界不在这一栏上**：两道闸（`agentKind==='main'` 且
-  // 本轮 `silenceable`）焊在 `available()` 里，运维把 `tools.overrides.stay_silent.minRole`
-  // 调到 limited 也开不出来（docs/05 §4 脚注 ¶，同自定义工具与容器那两道地板）。
+  // 本轮不投递（docs/02 §10.5）。角色档与 `schedule_create` 对齐 —— 能排入静默任务的角色
+  // 才可能触发静默轮次 —— 但真正的边界不在该字段上：两道闸（`agentKind==='main'` 且
+  // 本轮 `silenceable`）固化在 `available()` 中，运维把 `tools.overrides.stay_silent.minRole`
+  // 调到 limited 也无法开启（docs/05 §4 脚注 ¶，同自定义工具与容器的两道下限）。
   stay_silent: {
     minRole: "trusted",
     approval: "never",
     scope: "chat",
     source: "builtin",
   },
-  // M11 · 起一个外部 harness CLI（Claude Code / Codex）改宿主上的仓库（docs/14 §2 Q8）。
-  // `owner` + `approval: 'always'` 是这张表能表达的最严档位，另外两道门（仅私聊、目录白名单）
-  // 在 `available()` 里 —— 它们判的是本轮上下文与配置，不是角色。
-  // **它内部的工具调用不受这套策略约束**（docs/14 T17）：本系统看不见 harness 的内部行为。
+  // M11 · 启动外部 harness CLI（Claude Code / Codex）修改宿主上的仓库（docs/14 §2 Q8）。
+  // `owner` + `approval: 'always'` 是本表可表达的最严档位，另外两道门（仅私聊、目录白名单）
+  // 位于 `available()` —— 它们判定的是本轮上下文与配置，而非角色。
+  // 其内部的工具调用不受本策略约束（docs/14 T17）：本系统无法观测 harness 的内部行为。
   spawn_harness: {
     minRole: "owner",
     approval: "always",
     scope: "global",
     source: "agent",
   },
-  // M13 · 同一件事换成协议（ACP）而不是 argv：起一台本机编码 agent 改宿主上的仓库。
-  // 档位与 `spawn_harness` **逐字相同**，而且必须相同 —— 两者的风险面是同一个（`docs/14` T17），
-  // 差别只在「它的内部动作我们看得见多少」，而看得见不等于拦得住 —— `session/request_permission`
-  // 现在真的接到审批链上了（`docs/05 §3.5.3`），而那**不是**放松这一档的理由：它只看得见 agent
-  // 选择问过来的那些动作，`ast_edit` / `eval` / `computer` 压根不经这条链。用可观测性换权限是错的方向。
+  // M13 · 同一能力改用协议（ACP）而非 argv：启动一台本机编码 agent 修改宿主上的仓库。
+  // 档位与 `spawn_harness` 完全相同，且必须相同 —— 两者风险面一致（`docs/14` T17），
+  // 差别仅在内部动作的可观测程度，而可观测不等于可拦截 —— `session/request_permission`
+  // 现已接入审批链（`docs/05 §3.5.3`），但那不构成放宽本档的理由：它只能观测 agent
+  // 主动询问的动作，`ast_edit` / `eval` / `computer` 不经该链路。以可观测性换取权限是错误方向。
   spawn_acp: {
     minRole: "owner",
     approval: "always",
     scope: "global",
     source: "agent",
   },
-  // M12 · 自我扩展（docs/07 §6）。八条全部 `owner`，理由同 `spawn_harness`：`resolveEffectiveRole`
-  // 会把不受信群里的 owner 压平，所以这一档实际含义是「owner 且在 owner 信任的会话里」。
+  // M12 · 自我扩展（docs/07 §6）。八条全部为 `owner`，理由同 `spawn_harness`：`resolveEffectiveRole`
+  // 只在私聊里给得出 owner（群 / 频道一律封顶 trusted，docs/05 §2.2），因此该档的实际含义是
+  // 「owner 且身处私聊」—— 群里再高的授信也够不到这八条，群内注入自然也够不到。
   //
-  // 五个写工具是 `approval: 'always'`。owner 因 `approval.skipForOwner`（默认 true）通常无感，
-  // 但这一档在表里是诚实的，并且给了运维一个真实的杠杆：关掉 `skipForOwner` 之后每一次自撰写
-  // 都要点头。**它不是这套东西的主闸** —— 主闸是「落库即禁用，owner 在 WebUI 点开」。
+  // 五个写工具为 `approval: 'always'`。owner 因 `approval.skipForOwner`（默认 true）通常无感知，
+  // 但该档在表中如实反映策略，并为运维提供真实杠杆：关闭 `skipForOwner` 后每次自撰写
+  // 都需确认。它不是本机制的主闸 —— 主闸是落库即禁用、由 owner 在 WebUI 启用。
   define_tool: {
     minRole: "owner",
     approval: "always",
@@ -332,11 +333,11 @@ export const TOOL_POLICY = {
     scope: "global",
     source: "builtin",
   },
-  // 会话级持久容器的管理（docs/05 §3.11）。六条全部 `owner`，理由同上；另外两道门
-  // （持久化没开时整族不进目录、`chat` 参数的会话解析）在 `available()` / `execute()` 里。
+  // 会话级持久容器的管理（docs/05 §3.11）。六条全部为 `owner`，理由同上；另外两道门
+  // （持久化未开启时整族不进目录、`chat` 参数的会话解析）位于 `available()` / `execute()`。
   //
-  // **这是本表里唯一一族收落点参数的工具**（§8「参数里没有 chatId」的例外），所以那道
-  // owner 地板必须同时焊在 `available()` 里 —— 运维改得动 `minRole`，改不动 `available()`。
+  // 这是本表中唯一一族接收落点参数的工具（§8 参数中不含 chatId 的例外），因此 owner 下限
+  // 必须同时固化在 `available()` 中 —— 运维可修改 `minRole`，但无法修改 `available()`。
   container_list: {
     minRole: "owner",
     approval: "never",
@@ -378,19 +379,19 @@ export const TOOL_POLICY = {
 export type ToolName = keyof typeof TOOL_POLICY;
 
 /**
- * docs/07 §4 收窄公式里的「核心工具集」：skill 的 `allowed-tools` 收窄不到这几个。
+ * docs/07 §4 收窄公式中的核心工具集：skill 的 `allowed-tools` 不能收窄掉这几个。
  *
- * `allowed-tools` 表达的是「这件事要用哪些工具」，不是「这一轮不许再干别的」。一个
- * `allowed-tools: [bash]` 的 skill 曾经把 `send_message` / `report_progress` / `context_stats`
- * 一起关掉，于是模型跑完 skill 连一句话都追发不出去、子 agent 连进度都报不了。
+ * `allowed-tools` 表达的是完成该任务需要哪些工具，而非本轮禁止其他行为。一个
+ * `allowed-tools: [bash]` 的 skill 曾同时关闭 `send_message` / `report_progress` / `context_stats`，
+ * 导致模型执行完 skill 后无法追发消息、子 agent 无法上报进度。
  *
- * 这不是放权：skill 的 `allowed-tools` 只能是角色白名单的子集（docs/07 §2），豁免这几个
- * 交回去的仍然是该角色本来就有的东西。
+ * 这不构成放权：skill 的 `allowed-tools` 只能是角色白名单的子集（docs/07 §2），豁免这几个
+ * 归还的仍是该角色本就具备的能力。
  *
- * `search_tools` 在列的理由与 `load_skill` 同一条：元能力不是作业工具。一个
- * `allowed-tools: [bash]` 的 skill 把检索入口一起关掉之后，模型既看不见折叠工具的 schema、
- * 又没有办法问「我还能调什么」—— 而收窄本身照旧生效（展开过的工具仍被 `admit()` 挡住，
- * `search_tools` 因此必须如实回一个 `status: 'narrowed'`）。
+ * `search_tools` 在列的理由与 `load_skill` 相同：元能力不属于作业工具。一个
+ * `allowed-tools: [bash]` 的 skill 若同时关闭检索入口，模型既看不到折叠工具的 schema，
+ * 也无法查询本轮可调用的工具 —— 而收窄本身照常生效（已展开的工具仍被 `admit()` 拦截，
+ * `search_tools` 因此必须如实返回 `status: 'narrowed'`）。
  */
 export const SKILL_NARROWING_EXEMPT: readonly ToolName[] = [
   "load_skill",
@@ -401,20 +402,20 @@ export const SKILL_NARROWING_EXEMPT: readonly ToolName[] = [
 ];
 
 /**
- * 目录折叠（`tools.catalog.*`，docs/07 §5）永远不折叠的那两个 —— 渐进披露的**入口**。
+ * 目录折叠（`tools.catalog.*`，docs/07 §5）永不折叠的两个工具 —— 渐进披露的入口。
  *
- * 折叠它们等于把梯子收走：`load_skill` 被折叠时模型看不见怎么载入 skill 正文，`search_tools`
- * 被折叠时连「有哪些折叠工具」都问不出来，而折叠摘要行里那句「用 search_tools 展开」指向一个
- * 它发不出调用的名字。所以运维用 `tools.catalog.defer` 点名这两个时**静默不生效**。
+ * 折叠它们会切断入口：`load_skill` 被折叠时模型无从得知如何载入 skill 正文，`search_tools`
+ * 被折叠时无法查询存在哪些折叠工具，而折叠摘要行中「用 search_tools 展开」将指向一个
+ * 无法调用的名字。因此运维用 `tools.catalog.defer` 点名这两个时静默不生效。
  */
 export const DEFER_EXEMPT: readonly ToolName[] = ["search_tools", "load_skill"];
 
 /**
- * 运维在工具页按下的那一份覆盖（`tools.overrides.<name>`，docs/09 §3.7）。
+ * 运维在工具页保存的覆盖项（`tools.overrides.<name>`，docs/09 §3.7）。
  *
- * 后三项都是可缺席的，**没有默认值**：字段不在 = 用代码里那份。给它们写死一个默认值等于把每一条
- * 历史覆盖行钉在写它那天的策略上 —— 此后 `TOOL_POLICY` 怎么改都推不动这些工具，而覆盖层本来
- * 只该表达「这台机器上我要偏离多少」。
+ * 后三项均可缺席且无默认值：字段不存在即采用代码中的取值。为它们写死默认值等于把每一条
+ * 历史覆盖固定在写入当天的策略上 —— 此后 `TOOL_POLICY` 的修改无法影响这些工具，而覆盖层
+ * 只应表达本机相对默认策略的偏移量。
  */
 export interface ToolOverride {
   enabled?: boolean | undefined;
@@ -423,7 +424,7 @@ export interface ToolOverride {
   timeoutMs?: number | undefined;
 }
 
-/** `never < conditional < always`，数字越大越严。与 `APPROVAL_POLICIES` 的下标同序。 */
+/** `never < conditional < always`，数值越大越严格。与 `APPROVAL_POLICIES` 的下标同序。 */
 export function approvalRank(policy: ApprovalPolicy): number {
   return APPROVAL_POLICIES.indexOf(policy);
 }
@@ -431,8 +432,8 @@ export function approvalRank(policy: ApprovalPolicy): number {
 /**
  * 代码默认 + 运维覆盖 → 本次生效的策略。
  *
- * **只有这一份合并实现**，`ToolRegistry` 与 `GET /api/tools` 共用。分成两份必然漂移，而漂移的
- * 表现是界面上显示的权限和运行时判的不是一回事 —— 运维照着面板以为自己关严了。
+ * 合并实现只有这一份，`ToolRegistry` 与 `GET /api/tools` 共用。拆成两份必然漂移，漂移的
+ * 表现是界面显示的权限与运行时判定不一致 —— 运维依据面板误认为已收紧。
  */
 export function effectiveToolPolicy(
   base: ToolPolicyEntry,
@@ -447,10 +448,10 @@ export function effectiveToolPolicy(
 }
 
 /**
- * 覆盖里哪些字段**比代码默认更松**。空数组 = 纯收紧、或者根本没动。
+ * 覆盖中哪些字段比代码默认更宽松。空数组表示纯收紧或未变更。
  *
- * `timeoutMs` 不在其列：它是资源旋钮不是权限闸，照样进审计但不该拦着人改。`enabled` 同样不算 ——
- * 启停一直是这个面板的既有能力，把「重新启用」也做成要确认只会让人对确认框脱敏。
+ * `timeoutMs` 不在其列：它是资源参数而非权限闸，仍进审计但不应阻碍修改。`enabled` 同样不计 ——
+ * 启停一直是该面板的既有能力，把重新启用也设为需确认只会削弱确认框的有效性。
  */
 export function relaxedFields(
   base: ToolPolicyEntry,

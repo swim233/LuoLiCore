@@ -110,7 +110,7 @@ Telegram ──► 准入(白名单/角色) ──► 归档(DB, 按 chat 隔离
 | D6 | 背景消息 | **未触发的群消息进入上下文**，带 `[发言人 时间]` 前缀；单轮次注入条数上限可配置 | [02](./02-context-engine.md#4-背景消息认领) |
 | D7 | 存储 | **单 SQLite 库 + `chat_id` 分区 + FTS5**，数据访问层强制注入 chat 过滤 | [03](./03-data-model.md) |
 | D8 | 上下文粒度 | 默认整群共享（`contextScope='chat'`）；可切换按论坛 topic 隔离（`'thread'`）。`message_thread_id` 始终入库 | [02](./02-context-engine.md#2-上下文键) |
-| D9 | 权限模型 | **分级角色 owner > trusted > limited > blocked**；`effective = min(role(user), role(chat))` | [05](./05-tools-and-permissions.md#2-角色与判定) |
+| D9 | 权限模型 | **分级角色 owner > trusted > limited > blocked**；私聊 `effective = role(user)`，群/频道 `effective = min(max(role(user), role(chat)), 'trusted')` —— 会话角色是**下限**（把群里已登记的成员整体抬上来），封顶 `trusted`（`owner` 只在私聊成立），任一侧 `blocked` 一票否决（2026-08-30 拍板） | [05](./05-tools-and-permissions.md#2-角色与判定) |
 | D10 | 沙箱 | **可开关**：`mode = none \| docker`；`bypassRoles=['owner']`（owner 宿主直跑）；非 owner 无沙箱时**工具直接禁用（fail-closed）** | [05](./05-tools-and-permissions.md#5-沙箱) |
 | D11 | 私有记忆 | **每用户一份** `memory/private/<userId>/PRIMEMORY.md`；owner 可读写全部；群聊永不注入 | [06](./06-prompt-and-memory.md#3-作用域与注入矩阵) |
 | D12 | 公开记忆 | **全局单一份** `memory/PUBMEMORY.md`（所有会话共享）；写入需 `pubWriteMinRole`（默认 `trusted`） | [06](./06-prompt-and-memory.md#3-作用域与注入矩阵) |
@@ -243,6 +243,6 @@ pnpm build && pnpm start      # 生产
 | **background message（背景消息）** | 群里未触发 bot 的普通消息 |
 | **claim（认领）** | 把尚未进入上下文的原始消息折入某个 turn 的 delta |
 | **principal（主体）** | 可被授予角色的对象：user 或 chat |
-| **effective role（有效角色）** | `min(role(user), role(chat))` |
+| **effective role（有效角色）** | 私聊 = `role(user)`；群/频道 = `min(max(role(user), role(chat)), 'trusted')`，任一侧 `blocked` 则为 `blocked`。会话角色取的是下限不是上限，群内封顶 `trusted` |
 | **agent run** | 一次 agent 实例的执行（主 agent 或 subagent） |
 | **trace** | 以 `turn_id` 为根的一整棵调用树（模型调用、工具调用、subagent） |

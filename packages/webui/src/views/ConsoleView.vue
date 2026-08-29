@@ -26,16 +26,15 @@ import { api, ApiError, apiStream, hydrateSession } from '../api/client';
 
 interface TrendPoint { day: string; messages: number; turns: number; costUsd: number }
 interface Dashboard { turns: { total: number; running: number; failed: number; cost: number }; messages: { total: number }; providers: { total: number; enabled: number }; trend?: TrendPoint[] }
-/** `effectiveRole` 是服务端算的 min(user, chat)，只有私聊配得上对的那两行有值（docs/21 · G-UI-03）。 */
-interface Principal { id: string; kind: string; tgId: string; role: string; displayName: string | null; username: string | null; chatType: string | null; effectiveRole: string | null }
+interface Principal { id: string; kind: string; tgId: string; role: string; displayName: string | null; username: string | null; chatType: string | null }
 interface Provider { id: string; name: string; kind: string; baseUrl?: string | null; apiKeyHint: string | null; enabled: number; healthState: string | null; healthError?: string | null }
 interface ProviderTest { reachable: boolean; code: string; message: string; status: number | null; latencyMs: number; models: number }
 interface CatalogMeta { match: 'provider' | 'official' | 'third-party' | 'none'; catalogProviderId: string | null; catalogProviderName: string | null; catalogModelId: string | null; normalized: boolean; priceRange: { min: number; max: number; providers: number } | null; capabilities: Record<string, boolean>; reasoningControl: string | null; reasoningEfforts: string[]; modalities: { input: string[]; output: string[] }; knowledge: string | null; releaseDate: string | null }
 interface CatalogModel { modelId: string; displayName: string | null; contextWindow: number | null; maxOutput: number | null; limitSource: string | null; priceIn: number | null; priceOut: number | null; priceCacheRead: number | null; priceCacheWrite: number | null; meta: CatalogMeta | null }
 interface CatalogStatus { enabled: boolean; available: boolean; stale: boolean; ageMs: number | null; ttlHours: number; models?: number; providers?: number; fetchedAt?: number; error?: string | null; outcome?: string }
-/** `/api/logs` 直出 `log_events` 的列名，所以这里是 snake_case。曾经只声明了前 6 个，
- *  于是 trace 视图读 `node.parentSpanId` / `node.durationMs` 永远是 undefined ——
- *  树不缩进、每个节点都显示 0 ms，而 .vue 模板不进 `tsc --noEmit`，没人挡得住。 */
+/** `/api/logs` 直接输出 `log_events` 的列名，因此这里是 snake_case。此前只声明了前 6 个，
+ *  于是 trace 视图读 `node.parentSpanId` / `node.durationMs` 恒为 undefined：
+ *  树不缩进、每个节点都显示 0 ms，而 .vue 模板不进 `tsc --noEmit`，没有检查能拦住。 */
 interface LogRow { id: number; ts: number; level: string; kind: string; summary: string; trace_id: string | null;
   span_id: string | null; parent_span_id: string | null; chat_id: string | null; user_id: string | null; key: string | null;
   duration_ms: number | null; file_ref: string | null; data_bytes: number | null }
@@ -47,8 +46,8 @@ interface Conversation { id: string; key: string; chatId: string; userId: string
   steps: number; toolCalls: number; inputTokens: number; outputTokens: number; costUsd: number; error: string | null; rebased: number; promptMessageId: number | null;
   prompt: string | null; promptKind: string | null; fromName: string | null; fromUsername: string | null; reply: string; attachments: Attachment[] }
 interface MessageHit { id: number; chatId: string; direction: string; fromName: string | null; fromUsername: string | null; kind: string; text: string | null; tgDate: number; turnId: string | null; attachments: Attachment[] }
-// 扁平字段是**生效值**，`defaults` 是代码里 `TOOL_POLICY` 那份，`relaxed` 列出比默认更松的字段。
-// 两者都要显示：只给一个的话运维看不出自己偏离了多少（docs/09 §3.7）。
+// 扁平字段是生效值，`defaults` 是代码里 `TOOL_POLICY` 那份，`relaxed` 列出比默认更宽松的字段。
+// 两者都要显示：只给一个时运维看不出当前偏离默认的程度（docs/09 §3.7）。
 interface ToolPolicy { minRole: string; approval: string; scope: string; source: string; enabled: boolean; timeoutMs: number | null;
   selfManagedTimeout: boolean; defaults: { minRole: string; approval: string; timeoutMs: number | null }; relaxed: string[] }
 // `source`：config = 只在 agent.agents 里；file = 只在 agents/<name>.md 里；
@@ -67,8 +66,8 @@ const plugins = ref<PluginRow[]>([]);
 const mcp = ref<McpRow[]>([]);
 const customTools = ref<CustomToolRow[]>([]);
 const agents = ref<AgentDefinition[]>([]);
-// 任务 / 审批 / 定时任务三份行数据整段搬进 `TasksPage.vue` 的三张卡 —— 它们各自握着服务端
-// 分页的游标，行留在这一层的话页码就没地方放（`loadConversations` 同形）。
+// 任务 / 审批 / 定时任务三份行数据整体移入 `TasksPage.vue` 的三张卡：它们各自持有服务端
+// 分页的游标，行留在这一层时页码没有存放位置（`loadConversations` 同形）。
 const prompts = ref<Array<Record<string, unknown>>>([]);
 const config = ref<Record<string, unknown>>({});
 const botName = ref('LuoLiCore');
@@ -79,8 +78,8 @@ const wakewordStatus = ref<Array<{ pattern: string; kind: string; ok: boolean; r
 const newWakeword = ref('');
 const triggerDirty = ref(false);
 const triggerSaving = ref(false);
-/** `placeholderTexts` 在表单里是「一行一条」的文本域，不是数组：每敲一个字都要求它是合法数组
- *  的话，删到只剩半行就没法继续编辑了。进出各转一次，落库的仍是数组。 */
+/** `placeholderTexts` 在表单里是每行一条的文本域而不是数组：若要求每次输入后都是合法数组，
+ *  删到只剩半行即无法继续编辑。进出各转换一次，落库的仍是数组。 */
 interface OutputForm { mode: string; replyDelayMs: number; streamBufferMs: number; streamIntervalMs: number; streamMinDeltaChars: number; placeholderAfterMs: number; placeholderTexts: string; placeholderPick: string; placeholderIndex: number }
 const outputForm = ref<OutputForm>({ mode: 'stream', replyDelayMs: 2000, streamBufferMs: 2000, streamIntervalMs: 2000, streamMinDeltaChars: 24, placeholderAfterMs: 4000, placeholderTexts: '…', placeholderPick: 'random', placeholderIndex: 0 });
 const outputDirty = ref(false);
@@ -103,12 +102,12 @@ const providerForm = ref({ id: '', name: '', kind: 'openai', baseUrl: '', apiKey
 const modelDialog = ref(false);
 const modelForm = ref({ id: '', providerId: '', modelId: '', displayName: '', contextWindow: 128000, maxOutput: 8192, priceIn: 0, priceOut: 0, priceCacheRead: 0, priceCacheWrite: 0, enabled: true, sort: 0, vision: 'follow' as VisionMark });
 const aliasDialog = ref(false);
-// 别名的用途只写在 docs/04 里，运维在这个页面上是看不到的——六个内建别名常驻表格并带用途说明。
+// 别名的用途只写在 docs/04 里，运维在这个页面上看不到，因此六个内建别名常驻表格并附用途说明。
 const ALIAS_GUIDE: Array<{ alias: string; purpose: string; tier: string }> = [
-  { alias: 'main', purpose: '主 Agent 的默认模型，日常对话都走它', tier: '中高档，对话质量优先' },
+  { alias: 'main', purpose: '主 Agent 的默认模型，用于日常对话', tier: '中高档，对话质量优先' },
   { alias: 'high', purpose: '复杂推理、代码类子 agent', tier: '最强模型' },
   { alias: 'low', purpose: '摘要、记忆压缩，以及超过 agent.main.downgradeAfterStep 后的自动降档', tier: '最便宜可用' },
-  { alias: 'vision', purpose: '含图片的轮次；当前模型不支持看图时自动切到这里', tier: '支持 vision' },
+  { alias: 'vision', purpose: '含图片的轮次；当前模型不支持看图时自动切换到该别名', tier: '支持 vision' },
   { alias: 'title', purpose: '生成任务标题与会话摘要', tier: '最便宜' },
   { alias: 'embed', purpose: '（预留）向量检索，目前没有代码路径使用', tier: 'embedding 模型' },
 ];
@@ -120,9 +119,9 @@ interface AliasRow { alias: string; purpose: string; tier: string; state: 'ok' |
 const ALIAS_NAME_PATTERN = /^[a-z][a-z0-9_-]{0,31}$/;
 const ALIAS_STATE_TAG: Record<AliasRow['state'], { label: string; severity: TagSeverity; hint: string }> = {
   ok: { label: '', severity: 'secondary', hint: '' },
-  absent: { label: '未配置', severity: 'secondary', hint: '还没建这个别名' },
-  empty: { label: '链为空', severity: 'danger', hint: '别名存在但没有指向任何模型，等于没配' },
-  broken: { label: '不可用', severity: 'danger', hint: '链里的模型都已删除或已停用' },
+  absent: { label: '未配置', severity: 'secondary', hint: '该别名尚未创建' },
+  empty: { label: '链为空', severity: 'danger', hint: '未指向任何模型，视同未配置' },
+  broken: { label: '不可用', severity: 'danger', hint: '链中模型已全部删除或停用' },
 };
 function providerLabel(id: string): string { return providers.value.find((entry) => entry.id === id)?.name ?? id; }
 const modelOptions = computed<ModelOption[]>(() => models.value.map((model) => ({ id: String(model.id), label: `${providerLabel(String(model.provider_id))} / ${String(model.model_id)}`, enabled: Boolean(model.enabled) })));
@@ -136,7 +135,7 @@ const aliasRows = computed<AliasRow[]>(() => {
       const model = models.value.find((entry) => String(entry.id) === id);
       return { id, label: model ? `${providerLabel(String(model.provider_id))} / ${String(model.model_id)}` : id, state: !model ? 'missing' : model.enabled ? 'ok' : 'disabled' } as ChainSegment;
     });
-    // 「有这一行」不等于「能用」：空链和整链失效在 registry 里同样是没有这个别名。
+    // 存在这一行不等于可用：空链与整链失效在 registry 里同样表现为没有这个别名。
     const state = !row ? 'absent' : !chain.length ? 'empty' : chain.some((segment) => segment.state === 'ok') ? 'ok' : 'broken';
     return { alias: name, purpose: guide?.purpose ?? '自定义别名', tier: guide?.tier ?? '', state, validName: ALIAS_NAME_PATTERN.test(name), description: String(row?.description ?? ''),
       chain, settings: row?.settings_json ? JSON.parse(String(row.settings_json)) as Record<string, unknown> : {} };
@@ -153,7 +152,7 @@ const aliasForm = ref({ alias: 'main', custom: '', description: '', isNew: true,
 const aliasChain = ref<ModelOption[]>([]);
 const aliasSettings = ref(emptySettings());
 const aliasName = computed(() => aliasForm.value.alias === '__custom__' ? aliasForm.value.custom.trim() : aliasForm.value.alias);
-const aliasNameHint = computed(() => ALIAS_GUIDE.find((entry) => entry.alias === aliasName.value)?.purpose ?? '自定义别名只有被配置项（如 agent.agents.*.modelAlias）引用时才会被用到。');
+const aliasNameHint = computed(() => ALIAS_GUIDE.find((entry) => entry.alias === aliasName.value)?.purpose ?? '仅在被配置项（如 agent.agents.*.modelAlias）引用时生效');
 const testingProvider = ref('');
 const catalogDialog = ref(false);
 const catalogProviderId = ref('');
@@ -168,10 +167,10 @@ const catalogRefreshing = ref(false);
 const enriching = ref(false);
 // 价格出处必须写在行上：同一个模型在不同网关的价差可以到几倍，看不到出处就没法判断该不该信这个数字。
 const MATCH_LABELS: Record<string, { label: string; severity: string; hint: string }> = {
-  provider: { label: 'provider 自报价', severity: 'success', hint: '这个 provider 在 models.dev 里有条目，价格取自它自己公布的报价 —— 也就是你实际被扣的钱' },
-  official: { label: '厂商官方价', severity: 'info', hint: '这个 provider 在 models.dev 里没有条目（自建中转），价格取自模型厂商自家的官方定价' },
-  'third-party': { label: '无官方价', severity: 'warn', hint: '厂商侧查不到这个模型（已下架或开源权重模型），只有第三方托管报价 —— 价格不落库，需要手填' },
-  none: { label: '目录里没有', severity: 'secondary', hint: 'models.dev 上没有这个模型，窗口与价格都要手填' },
+  provider: { label: 'provider 自报价', severity: 'success', hint: '取自 models.dev 收录的该 provider 报价，即实际计费价' },
+  official: { label: '厂商官方价', severity: 'info', hint: 'models.dev 未收录该 provider，价格取自厂商官方定价' },
+  'third-party': { label: '无官方价', severity: 'warn', hint: '仅有第三方托管报价，价格不写入数据库，需手填' },
+  none: { label: '目录未收录', severity: 'secondary', hint: 'models.dev 未收录该模型，窗口与价格均需手填' },
 };
 const catalogAge = computed(() => {
   const status = catalogStatus.value;
@@ -180,16 +179,16 @@ const catalogAge = computed(() => {
   return hours < 1 ? '刚刚更新' : hours < 48 ? `${Math.round(hours)} 小时前更新` : `${Math.round(hours / 24)} 天前更新`;
 });
 /**
- * 「这个模型到底看不看得见图」是 `capabilities_json` 里**唯一有运行时行为**的能力位：含图轮次
- * 据它自动切 `vision` 别名。而它是从 models.dev 按模型名抄来的 —— 中转站照抄官方模型名却不真的
- * 转发图片时，抄来的 `vision:true` 让那一轮**不切**别名，图就留在一个看不见它的模型上。
- * 所以这里给的是「跟随目录 / 人工强制」的三态；标记落在 `capabilities_json.manual.vision`。
+ * 模型是否读得到图片，是 `capabilities_json` 里唯一具有运行时行为的能力位：含图轮次
+ * 据它自动切换 `vision` 别名。而它来自 models.dev 按模型名的匹配，中转站照搬官方模型名却不实际
+ * 转发图片时，继承的 `vision:true` 会让那一轮不切换别名，图片留在一个读不到它的模型上。
+ * 因此这里提供跟随目录 / 人工强制的三态；标记落在 `capabilities_json.manual.vision`。
  */
 type VisionMark = 'follow' | 'on' | 'off';
 const VISION_MARKS: Array<{ value: VisionMark; label: string }> = [
   { value: 'follow', label: '跟随目录判断（默认）' },
-  { value: 'on', label: '强制：这个模型能看图' },
-  { value: 'off', label: '强制：这个模型看不了图' },
+  { value: 'on', label: '强制：能看图' },
+  { value: 'off', label: '强制：看不了图' },
 ];
 /** 已入库那一行上人工标记的看图能力；没标过是 `follow`。徽标与表单共用这一份判据。 */
 const manualVision = (model: Record<string, unknown>): VisionMark => {
@@ -246,11 +245,11 @@ const navigation = [
 ] as const;
 const currentLabel = computed(() => navigation.find(([key]) => key === active.value)?.[2] ?? '总览');
 /**
- * 每一条 pending 都对应一个正卡在工具调用上的真实轮次，所以角标挂在导航上而不是只在任务页里。
+ * 每一条 pending 都对应一个正阻塞在工具调用上的真实轮次，因此角标挂在导航上而不是只在任务页里。
  *
- * `/api/approvals` 分页之后，这个数**不能再从当前页数出来**：翻到第 2 页角标就会变，
- * 而 `AC-WEB-049` 要的是「不必切到任务页就看得见还有几个人在等」。信封里的 `pending` 是
- * 服务端全表 `COUNT(*)`，所以这里只取一行、只读那个字段。
+ * `/api/approvals` 分页之后，这个数不能再由当前页统计得出：翻到第 2 页角标就会变化，
+ * 而 `AC-WEB-049` 要求不切到任务页也能看到还有几条在等待。信封里的 `pending` 是
+ * 服务端全表 `COUNT(*)`，因此这里只取一行、只读该字段。
  */
 const pendingApprovals = ref(0);
 async function loadApprovalBadge(): Promise<void> {
@@ -270,13 +269,13 @@ const COLUMNS = {
   logs: [{ key: 'ts', header: '时间', width: '13rem' }, { key: 'level', header: '级别', width: '7rem' }, { key: 'kind', header: '事件' }, { key: 'summary', header: '摘要' }, { key: 'data_bytes', header: '载荷', width: '6rem' }, { key: 'trace_id', header: 'Trace' }],
   // tasks / schedules / approvals 三套跟着那三张卡搬进 `components/tasks/types.ts`。
   containers: [{ key: 'chat', header: '会话' }, { key: 'name', header: '容器', width: '14rem' }, { key: 'used', header: '上次用 / 次数', width: '13rem' }, { key: 'expires', header: '还剩', width: '8rem' }, { key: 'actions', header: '', width: '17rem' }],
-  activeTurns: [{ key: 'who', header: '发起人' }, { key: 'chat', header: '会话' }, { key: 'progress', header: '当前动作' }, { key: 'stats', header: '步数 / 花费', width: '11rem' }, { key: 'elapsed', header: '已用时长', width: '8rem' }, { key: 'actions', header: '', width: '6rem' }],
+  activeTurns: [{ key: 'who', header: '发起人' }, { key: 'chat', header: '会话' }, { key: 'progress', header: '当前动作' }, { key: 'stats', header: '步数 / 成本', width: '11rem' }, { key: 'elapsed', header: '已用时长', width: '8rem' }, { key: 'actions', header: '', width: '6rem' }],
   catalog: [{ key: 'modelId', header: '模型 ID' }, { key: 'limits', header: '窗口 / 最大输出', width: '11rem' }, { key: 'price', header: '价格 / M token', width: '13rem' }, { key: 'capabilities', header: '能力' }, { key: 'status', header: '状态', width: '7rem' }],
   fallback: [{ key: 'kind', header: '关联事件' }, { key: 'summary', header: '最近状态' }, { key: 'level', header: '级别' }],
 } satisfies Record<string, GridColumn[]>;
 
 async function load(): Promise<void> {
-  // 位置解构：左右两串必须一一对齐，错一位就是整片数据错位（而且类型全是 `any` 级的，没人会拦）。
+  // 位置解构：左右两串必须逐项对齐，错一位即整片数据错位（且类型均为 `any` 级，没有检查能拦住）。
   [dashboard.value, principals.value, providers.value, logs.value, chats.value, usage.value, skills.value, plugins.value, mcp.value, customTools.value, agents.value, tools.value, prompts.value, config.value, models.value, aliases.value, health.value] = await Promise.all([
     api<Dashboard>('/api/dashboard'), api<Principal[]>('/api/principals'), api<Provider[]>('/api/providers'), api<LogRow[]>('/api/logs'),
     api<Chat[]>('/api/chats'), api<Usage[]>('/api/usage'), api<SkillRow[]>('/api/skills'), api<PluginRow[]>('/api/plugins'), api<McpRow[]>('/api/mcp'),
@@ -298,8 +297,8 @@ async function load(): Promise<void> {
   syncOutput();
   syncBotName();
 }
-/** `general.name` 从这里生效：侧栏品牌名与浏览器标签都跟着改。运维给 bot 起了名字却在控制台
- *  上看到「LuoLiCore」，那这个键就还是没接线（docs/20 · W-CFG-02 点名的正是它）。 */
+/** `general.name` 从这里生效：侧栏品牌名与浏览器标签页标题都随之变化。运维为 bot 设置了名称
+ *  却在控制台上看到「LuoLiCore」，说明这个键仍未接线（docs/20 · W-CFG-02 指的正是它）。 */
 function syncBotName(): void {
   const name = ((config.value.general as { name?: string } | undefined)?.name ?? '').trim();
   botName.value = name || 'LuoLiCore';
@@ -365,21 +364,21 @@ function syncOutput(): void {
 function markOutputDirty(): void { outputDirty.value = true; }
 type OutputNumber = 'replyDelayMs' | 'streamBufferMs' | 'streamIntervalMs' | 'streamMinDeltaChars' | 'placeholderAfterMs' | 'placeholderIndex';
 function changeOutputNumber(field: OutputNumber, value: number | null): void { outputForm.value[field] = value ?? 0; markOutputDirty(); }
-/** 保存时就滤掉空行，落库的数组因此没有空洞 —— placeholderIndex 数的是「去掉空行后的第几条」，
- *  两边对不上的话界面上数出来的那一条和实际发出去的会差一位。 */
+/** 保存时即过滤空行，落库的数组因此没有空洞：placeholderIndex 计的是去掉空行后的序号，
+ *  两侧不一致时界面上显示的那一条与实际发出的会相差一位。 */
 const placeholderList = computed(() => outputForm.value.placeholderTexts.split('\n').map((line) => line.trim()).filter(Boolean));
 const placeholderPreview = computed(() => {
   const list = placeholderList.value;
-  if (!list.length) return '列表为空：不发占位消息 —— 这也是关掉它的唯一途径，「等待多久发」填不了 0。';
-  if (outputForm.value.placeholderPick !== 'fixed') return `随机：每轮从这 ${list.length} 条里挑一条。`;
-  // 越界回落到**第一条**，跟 pickPlaceholder 一致 —— 这里写成 clamp 到末条的话，界面预告的和
-  // 实际发出去的会是两条不同的文案。
+  if (!list.length) return '列表为空：不发送占位消息，这是唯一停用方式（延迟不接受 0）。';
+  if (outputForm.value.placeholderPick !== 'fixed') return `随机：每轮从 ${list.length} 条中选一条。`;
+  // 越界回落到第一条，与 pickPlaceholder 一致：这里若写成 clamp 到末条，界面预览的与
+  // 实际发出的会是两条不同的文案。
   const raw = outputForm.value.placeholderIndex;
   const index = raw >= 0 && raw < list.length ? raw : 0;
-  return `固定：恒发「${list[index]}」${index === raw ? '' : `（下标 ${raw} 越界，回落到第一条）`}`;
+  return `固定：始终发送「${list[index]}」${index === raw ? '' : `（下标 ${raw} 越界，回落到第一条）`}`;
 });
-/** 模型元数据没有「留空 = 不设置」这一档（窗口、价格都是必填的 number）：清空按 0 收，让服务端那道
- *  zod 去判这值合不合法 —— 比把 null 塞进 JSON body 强，那边只会回一条对不上界面的路径报错。 */
+/** 模型元数据没有留空即不设置这一档（窗口、价格都是必填的 number）：清空按 0 处理，由服务端那道
+ *  zod 判定该值是否合法；这优于把 null 放进 JSON body，后者只会返回一条与界面对不上的路径报错。 */
 type ModelNumber = 'contextWindow' | 'maxOutput' | 'sort' | 'priceIn' | 'priceOut' | 'priceCacheRead' | 'priceCacheWrite';
 function changeModelNumber(field: ModelNumber, value: number | null): void { modelForm.value[field] = value ?? 0; }
 function changeCatalogDefault(field: 'contextWindow' | 'maxOutput', value: number | null): void { catalogDefaults.value[field] = value ?? 0; }
@@ -470,29 +469,29 @@ async function clearChatModelAlias(): Promise<void> {
   const chat = selectedChat.value;
   if (!chat) return;
   try {
-    // 服务端老实回 `cleared`，此前它被丢在地上：视图陈旧（另一个标签页 / 另一个运维 / 期间从
-    // Telegram 侧 `/model` 清掉了）时按下去，`app_kv` 里本来就没有行，界面照样报「已清除」
-    // ——「摘除比伪造安全」的反面（docs/29 · M-WEB-07）。
+    // 服务端如实返回 `cleared`，此前该字段未被使用：视图陈旧时（另一个标签页、另一个运维，或期间
+    // 从 Telegram 侧 `/model` 清除过）点下去，`app_kv` 里本就没有行，界面仍提示已清除，
+    // 这与摘除比伪造安全相反（docs/29 · M-WEB-07）。
     const { cleared } = await api<{ cleared: boolean }>(`/api/chats/${encodeURIComponent(chat.key)}/model-alias`, { method: 'DELETE' });
     chatModelAlias.value = null;
     pushToast(cleared
-      ? { severity: 'success', summary: '已清除会话模型别名', detail: '这个会话回到覆盖层 / 全局的 agent.main.modelAlias，下一轮生效' }
-      : { severity: 'info', summary: '这个会话本来就没有别名', detail: '别处已经清过了；它一直在用覆盖层 / 全局的 agent.main.modelAlias' });
+      ? { severity: 'success', summary: '已清除会话模型别名', detail: '回到覆盖层 / 全局的 agent.main.modelAlias，下一轮生效' }
+      : { severity: 'info', summary: '该会话没有会话级别名', detail: '当前使用覆盖层 / 全局的 agent.main.modelAlias' });
   } catch (error) { toastError('清除会话模型别名失败', error); }
 }
 async function inspectTrace(traceId: string | null): Promise<void> { if (!traceId) return; traceDetail.value = await api<LogRow[]>(`/api/logs/trace/${encodeURIComponent(traceId)}`); }
 
 /**
- * 按 `parentSpanId` 链算真实 depth（`docs/10 §1`「WebUI Trace 视图按 `parent_span_id` 重建树」）。
+ * 按 `parentSpanId` 链计算真实 depth（`docs/10 §1`：WebUI Trace 视图按 `parent_span_id` 重建树）。
  *
- * 此前 trace 视图**不是树**，是 `marginLeft: node.parent_span_id ? '24px' : '0'` —— 只有一级。
- * 那个写法在 `parent_span_id` 全库为 NULL 的年代看不出问题（13 个节点全是 `0px`），
- * 现在父边真的连上了，一级缩进会把 `agent.run` 下面那三层压成同一层（docs/28 · L-LOG-04）。
+ * 此前 trace 视图不是树，而是 `marginLeft: node.parent_span_id ? '24px' : '0'`，只有一级。
+ * 该写法在 `parent_span_id` 全库为 NULL 的时期看不出问题（13 个节点全是 `0px`），
+ * 现在父边已真正连上，一级缩进会把 `agent.run` 下面那三层压成同一层（docs/28 · L-LOG-04）。
  *
- * **环与悬挂父都要兜住**：一次查询只取 500 行，子 span 的父完全可能不在这一页里；而一条坏数据
- * （父指回自己、或两个 span 互指）不该把整个视图打成空白。两者一律按 depth 0 渲染 ——
- * `.vue` 模板不进 `tsc --noEmit`（本文件开头那段注释自陈过这件事害过人），所以判据由
- * `tests/webui/console.render.test.ts` 焊住。
+ * 环与悬挂父都要处理：一次查询只取 500 行，子 span 的父完全可能不在这一页里；而一条损坏数据
+ * （父指向自身，或两个 span 互指）不应让整个视图变成空白。两者一律按 depth 0 渲染。
+ * `.vue` 模板不进 `tsc --noEmit`（本文件开头那段注释已说明该问题造成过故障），因此判据由
+ * `tests/webui/console.render.test.ts` 约束。
  */
 const TRACE_MAX_DEPTH = 12;
 function traceDepths<T extends { span_id?: string | null; spanId?: string | null; parent_span_id?: string | null; parentSpanId?: string | null }>(nodes: readonly T[]): number[] {
@@ -507,7 +506,7 @@ function traceDepths<T extends { span_id?: string | null; spanId?: string | null
     if (own) seen.add(own);
     let parent = parentOf(node);
     while (parent && depth < TRACE_MAX_DEPTH) {
-      if (seen.has(parent)) return 0;            // 环：这一段数据是坏的，别缩进
+      if (seen.has(parent)) return 0;            // 环：这一段数据已损坏，不缩进
       const next = bySpan.get(parent);
       if (!next) break;                          // 悬挂父（不在这一页里）：按当前深度收尾
       seen.add(parent);
@@ -520,9 +519,9 @@ function traceDepths<T extends { span_id?: string | null; spanId?: string | null
 /** `traceDepths` 的结果按下标对齐 `traceDetail`，模板直接按 index 取。 */
 const traceIndent = computed(() => traceDepths(traceDetail.value));
 /**
- * 日志行的详情。此前点一行只会去重建 trace，`trace_id` 为空的那些（`system.start`、
- * `config.changed`、`maintenance.*`、`webui.action`）点了**什么都不发生**；有 trace 的也只得到
- * 一串 kind/summary，`data_json` 从没露过面。载荷单取一次而不是从列表行里拿 —— 列表已经不带它了。
+ * 日志行的详情。此前点击一行只会重建 trace，`trace_id` 为空的那些（`system.start`、
+ * `config.changed`、`maintenance.*`、`webui.action`）点击后没有任何反应；有 trace 的也只得到
+ * 一串 kind/summary，`data_json` 从未展示。载荷单独取一次而不是从列表行取：列表已不携带它。
  */
 interface LogDetail { id: number; ts: number; level: string; kind: string; summary: string; traceId: string | null; spanId: string | null;
   parentSpanId: string | null; chatId: string | null; userId: string | null; key: string | null; durationMs: number | null;
@@ -550,17 +549,17 @@ async function copyLogDetail(): Promise<void> {
 // 认不出哪块是人格、哪块是助理守则，也看不出它进的是 prompt 的第几个 block。改成卡片，把用途写在脸上。
 interface PromptMeta { label: string; icon: string; purpose: string; severity: TagSeverity }
 const PROMPT_SCOPES: Record<string, PromptMeta> = {
-  character: { label: '人格', icon: 'pi pi-user', purpose: 'block 1 · 人格设定，决定说话的样子；带会话后缀的是该会话专属覆盖', severity: 'info' },
+  character: { label: '人格', icon: 'pi pi-user', purpose: 'block 1 · 人格设定；带会话后缀的是该会话专属覆盖', severity: 'info' },
   assist: { label: '助理守则', icon: 'pi pi-book', purpose: 'block 2 · 回答风格与业务约束，所有会话共用', severity: 'secondary' },
-  pubmemory: { label: '公共记忆', icon: 'pi pi-globe', purpose: 'block 4 · 所有人可见的长期记忆，模型可用 memory_write 写', severity: 'success' },
-  primemory: { label: '私有记忆', icon: 'pi pi-lock', purpose: 'block 5 · 某个用户私有；查看他人的这份会被记录', severity: 'warn' },
+  pubmemory: { label: '公共记忆', icon: 'pi pi-globe', purpose: 'block 4 · 公共长期记忆，模型经 memory_write 写入', severity: 'success' },
+  primemory: { label: '私有记忆', icon: 'pi pi-lock', purpose: 'block 5 · 用户私有；查看他人的会被记录', severity: 'warn' },
 };
 const promptMeta = (scope: unknown): PromptMeta => PROMPT_SCOPES[String(scope)] ?? { label: String(scope ?? '未知'), icon: 'pi pi-file', purpose: '未归类的文档', severity: 'secondary' };
 const promptRank = (scope: unknown): number => { const index = Object.keys(PROMPT_SCOPES).indexOf(String(scope)); return index === -1 ? Object.keys(PROMPT_SCOPES).length : index; };
 const promptCards = computed(() => [...prompts.value].sort((left, right) => promptRank(left.scope) - promptRank(right.scope) || String(left.id).localeCompare(String(right.id))));
-// 下面这组上下文/提示词操作以前用顶栏静态横幅报成功、失败则什么都不显示；现在统一走同一个通知通道（AC-WEB-023）。
-// `inspectPrompt` 曾是漏网的那个：没有 catch，`api()` 抛出的 promise 无人接手，点卡片纹丝不动，
-// 权限 / 路径 / 文件被删一律表现成「点了没反应」（docs/29 · M-WEB-08）。
+// 下面这组上下文 / 提示词操作此前用顶栏静态横幅报成功、失败时不显示任何内容；现在统一走同一个通知通道（AC-WEB-023）。
+// `inspectPrompt` 曾是遗漏的那个：没有 catch，`api()` 抛出的 promise 无人处理，点击卡片没有反应，
+// 权限、路径、文件被删一律表现为点击无反应（docs/29 · M-WEB-08）。
 async function inspectPrompt(row: Record<string, unknown>): Promise<void> {
   try {
     selectedPrompt.value = await api<Record<string, unknown>>(`/api/prompts/${encodeURIComponent(String(row.id))}`);
@@ -586,22 +585,22 @@ async function checkoutCommit(id: unknown): Promise<void> {
 }
 async function inspectCommit(id: unknown): Promise<void> { if (!selectedChat.value) return; inspectedSnapshot.value = await api<Record<string, unknown>>(`/api/chats/${encodeURIComponent(selectedChat.value.key)}/context?commit=${encodeURIComponent(String(id))}`); }
 /**
- * 等同 Telegram 的 /new：插一条 reset commit 把窗口起点推到最新 ordinal 之后，消息一条不删。
+ * 等同 Telegram 的 /new：插入一条 reset commit 把窗口起点推到最新 ordinal 之后，不删除任何消息。
  *
- * 回执要说清**清空的是窗口还是记忆**：归档表不受窗口约束，`read_messages` 照旧翻得到清空之前的话
- * （实测清空后模型第一步就把 20 条历史捞了回来）。判据取自服务端刚写下的那条 commit 的
- * `meta.advancedClaims`（`context.recallBarrier` 的落地痕迹），不在前端另猜一次配置。
+ * 回执要说明清空的是窗口还是记忆：归档表不受窗口约束，`read_messages` 照旧读得到清空之前的内容
+ * （实测清空后模型第一步就取回了 20 条历史）。判据取自服务端刚写下的那条 commit 的
+ * `meta.advancedClaims`（`context.recallBarrier` 的落地痕迹），不在前端另行推断配置。
  */
 function resetContext(): void {
   const chat = selectedChat.value;
   if (!chat) return;
-  askConfirm(`清空「${chatIdentity(chat).name}」的上下文窗口？`, '下一轮起模型看不到之前的对话；消息与提交历史都还在，可以用「回滚到此」走回来。', async () => {
+  askConfirm(`清空「${chatIdentity(chat).name}」的上下文窗口？`, '此前对话不再进入上下文；消息与提交历史保留，可用「回滚到此」回退。', async () => {
     try {
       const commit = await api<Record<string, unknown>>(`/api/chats/${encodeURIComponent(chat.key)}/reset`, { method: 'POST' });
       let barred = false;
       try { barred = (JSON.parse(String(commit.meta ?? '{}')) as { advancedClaims?: unknown }).advancedClaims === true; } catch { /* 老 commit 没有 meta */ }
       pushToast({ severity: 'success', summary: '上下文窗口已清空',
-        detail: `${chatIdentity(chat).name} · ${barred ? '归档检索也挡在这一刻之后了' : '下一轮从零开始；模型仍可用 read_messages 翻更早的消息（context.recallBarrier 可关掉这条路）'}` });
+        detail: `${chatIdentity(chat).name} · ${barred ? '归档检索同样以此刻为界' : '模型仍可用 read_messages 读取更早的消息（context.recallBarrier 可关闭）'}` });
       await inspectChat(chat);
       await load();
     } catch (error) { toastError('清空上下文窗口失败', error); }
@@ -613,7 +612,7 @@ async function undoContext(): Promise<void> {
   if (!chat) return;
   try {
     const moved = await api<Record<string, unknown> | null>(`/api/chats/${encodeURIComponent(chat.key)}/undo`, { method: 'POST' });
-    if (!moved) { pushToast({ severity: 'warn', summary: '没有可撤回的提交', detail: '当前 HEAD 已经是这个会话的第一个 commit' }); return; }
+    if (!moved) { pushToast({ severity: 'warn', summary: '没有可撤回的提交', detail: '当前 HEAD 已是第一个 commit' }); return; }
     pushToast({ severity: 'success', summary: '已撤回上一次提交', detail: `HEAD → ${String(moved.id).slice(0, 12)}` });
     await inspectChat(chat);
     await load();
@@ -640,7 +639,7 @@ async function testProvider(provider: Provider): Promise<void> {
 }
 async function testProviderDraft(): Promise<void> {
   const form = providerForm.value;
-  if (!form.id) { pushToast({ severity: 'warn', summary: '请先保存 Provider', detail: '新建的 Provider 还没有 id，保存后即可用当前 key 测试', life: 6000 }); return; }
+  if (!form.id) { pushToast({ severity: 'warn', summary: '请先保存 Provider', detail: '保存后即可用当前 key 测试', life: 6000 }); return; }
   testingProvider.value = form.id;
   try { toastProbe(form.name, await api<ProviderTest>(`/api/providers/${encodeURIComponent(form.id)}/test`, { method: 'POST', body: JSON.stringify({ kind: form.kind, baseUrl: form.baseUrl, apiKey: form.apiKey || undefined }) })); }
   catch (error) { toastError('测试请求失败', error); }
@@ -653,12 +652,12 @@ async function openCatalog(providerId?: string): Promise<void> {
 }
 async function loadCatalog(): Promise<void> {
   catalogSelection.value = []; catalogError.value = '';
-  if (!catalogProviderId.value) { catalogModels.value = []; catalogError.value = '还没有配置任何 Provider'; return; }
+  if (!catalogProviderId.value) { catalogModels.value = []; catalogError.value = '尚无 Provider'; return; }
   catalogLoading.value = true;
   try {
     const result = await api<{ models: CatalogModel[]; catalog: CatalogStatus }>(`/api/providers/${encodeURIComponent(catalogProviderId.value)}/models`);
     catalogModels.value = result.models; catalogStatus.value = result.catalog;
-    if (!catalogModels.value.length) catalogError.value = '上游返回了空的模型列表';
+    if (!catalogModels.value.length) catalogError.value = '上游未返回模型';
   } catch (error) { catalogModels.value = []; catalogError.value = error instanceof Error ? error.message : '拉取失败'; toastError('拉取模型列表失败', error); }
   finally { catalogLoading.value = false; }
 }
@@ -668,8 +667,8 @@ async function refreshCatalog(): Promise<void> {
   try {
     const status = await api<CatalogStatus>('/api/models/catalog/refresh', { method: 'POST', body: '{}' });
     catalogStatus.value = status;
-    if (status.outcome === 'stale') pushToast({ severity: 'warn', summary: '刷新失败，继续用本地缓存', detail: status.error ?? '', life: 7000 });
-    else pushToast({ severity: 'success', summary: status.outcome === 'not-modified' ? 'models.dev 上没有更新' : `目录已更新：${status.models ?? 0} 个模型`, detail: `${status.providers ?? 0} 家 provider` });
+    if (status.outcome === 'stale') pushToast({ severity: 'warn', summary: '刷新失败，沿用本地缓存', detail: status.error ?? '', life: 7000 });
+    else pushToast({ severity: 'success', summary: status.outcome === 'not-modified' ? 'models.dev 无更新' : `目录已更新：${status.models ?? 0} 个模型`, detail: `${status.providers ?? 0} 家 provider` });
     if (catalogDialog.value) await loadCatalog();
   } catch (error) { toastError('刷新模型目录失败', error); }
   finally { catalogRefreshing.value = false; }
@@ -680,7 +679,7 @@ async function enrichModels(): Promise<void> {
   try {
     const result = await api<{ scanned: number; updated: number; priced: number; unmatched: number }>('/api/models/enrich', { method: 'POST', body: '{}' });
     pushToast({ severity: result.updated ? 'success' : 'warn', summary: `补齐了 ${result.updated} / ${result.scanned} 个模型`,
-      detail: `新填价格 ${result.priced} 个${result.unmatched ? `，${result.unmatched} 个在 models.dev 上查不到，需要手填` : ''}。已有价格不会被覆盖。`, life: 8000 });
+      detail: `新填价格 ${result.priced} 个${result.unmatched ? `，${result.unmatched} 个 models.dev 查不到，需手填` : ''}。`, life: 8000 });
     await load();
   } catch (error) { toastError('补齐模型元数据失败', error); }
   finally { enriching.value = false; }
@@ -692,23 +691,23 @@ async function importCatalog(): Promise<void> {
     const result = await api<{ inserted: number; skipped: number; priced: number }>('/api/models/import', { method: 'POST', body: JSON.stringify({ providerId: catalogProviderId.value, models: chosen, contextWindow: catalogDefaults.value.contextWindow, maxOutput: catalogDefaults.value.maxOutput }) });
     const blank = result.inserted - result.priced;
     pushToast({ severity: result.inserted ? 'success' : 'warn', summary: `已导入 ${result.inserted} 个模型`,
-      detail: `${result.skipped ? `${result.skipped} 个已存在，已跳过。` : ''}${result.priced} 个带上了价格${blank ? `，${blank} 个没有可信的官方价、价格留空 —— 不补齐的话这些模型的花费按 0 记账` : ''}。`, life: 8000 });
+      detail: `${result.skipped ? `${result.skipped} 个已存在，已跳过。` : ''}${result.priced} 个已带价格${blank ? `，${blank} 个价格留空，未补齐前成本按 0 记账` : ''}。`, life: 8000 });
     catalogSelection.value = [];
     await load();
   } catch (error) { toastError('导入模型失败', error); }
 }
 /**
- * 删 provider。名下还有模型时服务端回 **409 `provider_has_models`** —— 那不是错误，是一个岔口：
- * 「删掉这个 provider」与「连同它名下 N 行调好定价与能力位的模型一起删掉」不是同一个决定，
- * 所以这里把 409 接住换成一次确认，而不是弹一句红的了事（此前是裸 `DELETE` 撞外键 → 500
- * 「服务端出错，已记录」，说不出原因，docs/29 · M-WEB-05）。
+ * 删除 provider。名下仍有模型时服务端返回 409 `provider_has_models`，这不是错误而是一个分支：
+ * 删除这个 provider 与连同它名下 N 行已调好定价与能力位的模型一起删除，不是同一个决定，
+ * 因此这里接住 409 并转成一次确认，而不是直接提示失败（此前是裸 `DELETE` 触发外键约束返回 500
+ * 服务端出错、已记录，给不出原因，docs/29 · M-WEB-05）。
  */
 async function deleteProvider(id: string, cascade: boolean): Promise<void> {
   const done = await api<{ models: number; aliases: Array<{ alias: string; emptied: boolean }> }>(
     `/api/providers/${encodeURIComponent(id)}${cascade ? '?cascade=1' : ''}`, { method: 'DELETE' });
   const emptied = done.aliases?.filter((entry) => entry.emptied).map((entry) => entry.alias) ?? [];
   pushToast({ severity: emptied.length ? 'warn' : 'success', summary: 'Provider 已删除',
-    detail: [done.models ? `连同 ${done.models} 个模型` : '', emptied.length ? `别名 ${emptied.join('、')} 的链已空，整条删掉了` : ''].filter(Boolean).join(' · ') || undefined,
+    detail: [done.models ? `连同 ${done.models} 个模型` : '', emptied.length ? `别名 ${emptied.join('、')} 的链已空，整条别名已删除` : ''].filter(Boolean).join(' · ') || undefined,
     life: emptied.length ? 0 : 4000 });
   await load();
 }
@@ -717,17 +716,17 @@ function removeProvider(id: string): void {
     try { await deleteProvider(id, false); }
     catch (error) {
       if (!(error instanceof ApiError) || error.code !== 'provider_has_models') { toastError('删除失败', error); return; }
-      askConfirm('这个 Provider 名下还有模型', `${error.message}\n\n连同删除会一并删掉那些模型行（窗口、能力标记、调好的定价都在里面），并把别名链里指过来的段清掉 —— 链被清空的别名整行删除。这一步不可撤销。`,
+      askConfirm('该 Provider 名下仍有模型', `${error.message}\n\n将一并删除这些模型行，并清除别名链中指向它们的段；链被清空的别名整行删除。不可撤销。`,
         async () => { try { await deleteProvider(id, true); } catch (nested) { toastError('删除失败', nested); } });
     }
   })();
 }
 function removeModel(id: string, label: string): void {
-  askConfirm(`删除模型 ${label}？`, '这一行的窗口、能力标记与定价都会没掉；别名链里指向它的段一并清掉，链被清空的别名整行删除。不可撤销。', async () => {
+  askConfirm(`删除模型 ${label}？`, '别名链中指向它的段一并清除，链被清空的别名整行删除。不可撤销。', async () => {
     try {
       const done = await api<{ aliases: Array<{ alias: string; emptied: boolean }> }>(`/api/models/${encodeURIComponent(id)}`, { method: 'DELETE' });
       const emptied = done.aliases?.filter((entry) => entry.emptied).map((entry) => entry.alias) ?? [];
-      pushToast({ severity: emptied.length ? 'warn' : 'success', summary: '模型已删除', detail: emptied.length ? `别名 ${emptied.join('、')} 的链已空，整条删掉了` : label, life: emptied.length ? 0 : 4000 });
+      pushToast({ severity: emptied.length ? 'warn' : 'success', summary: '模型已删除', detail: emptied.length ? `别名 ${emptied.join('、')} 的链已空，整条别名已删除` : label, life: emptied.length ? 0 : 4000 });
       await load();
     } catch (error) { toastError('删除模型失败', error); }
   });
@@ -736,8 +735,8 @@ function editModel(model?: Record<string, unknown>): void { modelForm.value = mo
 async function saveModel(): Promise<void> {
   const { vision, ...form } = modelForm.value;
   const mark = vision === 'follow' ? null : vision === 'on';
-  // 改已有行时 `follow` 要发 `null`（= 取消标记）而不是省略这个键，否则「标错了想撤回」在界面上
-  // 做不到 —— 省略与「跟随目录」在服务端是两件事。新建时反过来：没标就别在能力块里留个空键。
+  // 改已有行时 `follow` 要发 `null`（表示取消标记）而不是省略这个键，否则标错后无法在界面上撤回：
+  // 省略与跟随目录在服务端是两种语义。新建时相反：未标记时不在能力块里留空键。
   const body = form.id ? { ...form, capabilities: { vision: mark } } : mark === null ? form : { ...form, capabilities: { vision: mark } };
   try { await api(form.id ? `/api/models/${encodeURIComponent(form.id)}` : '/api/models', { method: form.id ? 'PATCH' : 'POST', body: JSON.stringify(body) }); modelDialog.value = false; pushToast({ severity: 'success', summary: '模型配置已保存', detail: form.modelId }); await load(); } catch (error) { toastError('保存模型失败', error); }
 }
@@ -771,7 +770,7 @@ async function saveAlias(): Promise<void> {
   } catch (error) { toastError('保存别名失败', error); }
 }
 function removeAlias(alias: string): void {
-  askConfirm(`删除别名 ${alias}？`, '引用它的地方会退回 main。', async () => {
+  askConfirm(`删除别名 ${alias}？`, '引用该别名的位置回退到 main。', async () => {
     try { await api(`/api/aliases/${encodeURIComponent(alias)}`, { method: 'DELETE' }); pushToast({ severity: 'success', summary: `别名 ${alias} 已删除` }); await load(); }
     catch (error) { toastError('删除别名失败', error); }
   });
@@ -813,14 +812,14 @@ async function searchArchive(): Promise<void> {
 }
 function clearSearch(): void { searchHits.value = null; searchTerm.value = ''; }
 // ── 一条归档消息的原始载荷（docs/29 · M-WEB-06）─────────────────────────────────
-// `messages.raw_json` 从 `0001_init.sql` 起就在写，而在这之前**全仓没有一处读它**（连
-// `get_message` 都没有：`MESSAGE_COLUMNS` 里就没这一列）—— 排查「Telegram 到底发过来什么」
-// 在界面上没有任何入口。渲染的是入库时脱敏过的那份，不是原始 update 的逐字副本。
+// `messages.raw_json` 从 `0001_init.sql` 起就在写，而在此之前全仓没有一处读它（`get_message`
+// 也没有：`MESSAGE_COLUMNS` 里就没有这一列），排查 Telegram 实际发来了什么在界面上
+// 没有任何入口。渲染的是入库时脱敏过的那份，不是原始 update 的逐字副本。
 interface MessageRaw { id: number; chatId: string; tgMessageId: number; kind: string; tgDate: number; text: string | null; rawJson: string | null }
 const rawDialog = ref(false);
 const rawLoading = ref(false);
 const rawDetail = ref<MessageRaw | null>(null);
-/** 坏 JSON 原样显示而不是显示成「没有载荷」：手工改过库的行也得看得见（「摘除比伪造安全」）。 */
+/** 损坏的 JSON 原样显示而不是显示为没有载荷：手工改过库的行同样要可见（摘除比伪造安全）。 */
 const rawPretty = computed(() => {
   const stored = rawDetail.value?.rawJson;
   if (!stored) return '';
@@ -837,14 +836,14 @@ async function copyRaw(): Promise<void> {
   catch (error) { toastError('复制失败', error); }
 }
 function softDeleteMessage(id: number, label: string): void {
-  askConfirm(`软删除${label}？`, '归档正文会从检索与对话列表隐藏；上下文提交、turn 与附件不会被删除。', async () => {
+  askConfirm(`软删除${label}？`, '归档正文从检索与对话列表隐藏；上下文提交、turn 与附件保留。', async () => {
     try {
       const result = await api<{ changes: number }>(`/api/messages/${id}`, { method: 'DELETE' });
       if (searchHits.value) searchHits.value = searchHits.value.filter((entry) => entry.id !== id);
       await loadConversations();
       pushToast(result.changes
         ? { severity: 'success', summary: '归档消息已软删除', detail: `message #${id}` }
-        : { severity: 'warn', summary: '消息已经被删除', detail: `message #${id}` });
+        : { severity: 'warn', summary: '该消息已被删除', detail: `message #${id}` });
     } catch (error) { toastError('软删除失败', error); }
   });
 }
@@ -853,7 +852,7 @@ function softDeleteMessage(id: number, label: string): void {
 // 只有日志里那一份是真的：turns 表存统计、messages 表存最终文本，两者都看不出请求体长什么样。
 interface DetailEvent { id: number; ts: number; level: string; kind: string; summary: string; spanId: string | null; parentSpanId: string | null; durationMs: number | null;
   text: string | null; bytes: number; truncated: boolean; fileRef: string | null }
-/** 这一轮写进上下文的消息，`parts` 是**原始** parts_json（没跑过 elidePart）。 */
+/** 这一轮写进上下文的消息，`parts` 是原始 parts_json（未经过 elidePart）。 */
 interface DetailContextMessage { ordinal: number; id: string; role: string; origin: string; pruneLevel: number; pruneApplied: boolean;
   textPreview: string | null; tokens: number; createdAt: number; text: string | null; bytes: number; truncated: boolean; fileRef: string | null }
 interface TurnDetail { turn: Record<string, unknown>; captureBodies: boolean; events: DetailEvent[]; contextMessages: DetailContextMessage[] }
@@ -876,9 +875,9 @@ function eventGroup(kind: string): Exclude<DetailGroup, 'all' | 'parts'> {
 const detailEvents = computed(() => detailGroup.value === 'parts' ? []
   : (detail.value?.events ?? []).filter((entry) => detailGroup.value === 'all' || eventGroup(entry.kind) === detailGroup.value));
 /**
- * 对话详情里的缩进：depth 按**整轮**的父链算（`detail.events` 那一份完整列表），不是按当前分组
- * 算 —— 分组把中间层滤掉之后，`agent.run` 之下的 `model.call` 会因为找不到父而落回 depth 0，
- * 那正是「看起来是树、其实是平表」的另一种形态（docs/28 · L-LOG-04）。
+ * 对话详情里的缩进：depth 按整轮的父链计算（`detail.events` 那份完整列表），而不是按当前分组
+ * 计算：分组过滤掉中间层之后，`agent.run` 之下的 `model.call` 会因找不到父而回落到 depth 0，
+ * 那正是形似树、实为平表的另一种形态（docs/28 · L-LOG-04）。
  */
 const detailDepths = computed(() => {
   const depths = traceDepths(detail.value?.events ?? []);
@@ -887,8 +886,8 @@ const detailDepths = computed(() => {
 const detailParts = computed(() => (detail.value?.contextMessages ?? []).filter((entry) => entry.origin === 'tool_call' || entry.origin === 'tool_result'));
 const detailCount = (group: DetailGroup): number => group === 'parts' ? detailParts.value.length
   : (detail.value?.events ?? []).filter((entry) => group === 'all' || eventGroup(entry.kind) === group).length;
-/** 1024 进制。原来只到 MB，而系统信息里的 DB 与 workspace 占用都能到 GB —— 停在 MB 会出现
- *  「12800.0 MB」这种读不出量级的数字。undefined 显示成 —（端点没给，不是 0 字节）。 */
+/** 1024 进制。此前只到 MB，而系统信息里的 DB 与 workspace 占用都可能达到 GB：停在 MB 会出现
+ *  12800.0 MB 这种难以判断量级的数字。undefined 显示为 —（端点未返回，而不是 0 字节）。 */
 function formatBytes(bytes: number | undefined): string {
   if (bytes === undefined) return '—';
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -911,7 +910,7 @@ async function openDetail(turnId: string): Promise<void> {
 }
 function toggleEvent(id: number): void { const next = new Set(expandedEvents.value); if (next.has(id)) next.delete(id); else next.add(id); expandedEvents.value = next; }
 function togglePart(ordinal: number): void { const next = new Set(expandedParts.value); if (next.has(ordinal)) next.delete(ordinal); else next.add(ordinal); expandedParts.value = next; }
-/** 复制的必须是完整那份：界面上显示的可能被 DETAIL_MAX_CHARS 截过，粘出去就不是合法 JSON 了。 */
+/** 复制的必须是完整那份：界面上显示的可能被 DETAIL_MAX_CHARS 截断，粘贴出去即不是合法 JSON。 */
 async function copyEvent(event: DetailEvent): Promise<void> {
   try {
     let text = event.text ?? '';
@@ -921,24 +920,23 @@ async function copyEvent(event: DetailEvent): Promise<void> {
   } catch (error) { toastError('复制失败', error); }
 }
 
-// ── 主体：用户 / 私聊 / 群与频道分开看，角色改动走二级菜单 ────────────────────────
+// ── 主体：用户 / 群与频道分开看，角色改动走二级菜单 ────────────────────────
 /**
- * `principals.kind` 只有 `user` / `chat` 两个取值，而 `chat` 是「一个 Telegram 会话」**不是「群」**
- * —— 每个私聊也有一行 `chat:<用户 id>`（`bot.ts` 每条消息都 upsert）。此前这一页把 kind 直接当标签
- * 用，于是私聊在这里一律显示成「群聊」，实测库里 5 行 chat 主体有 4 行是 private。
- * 判据与会话页的 `chatIdentity()` 同一套：先信 `chat_type`，缺失时回落到 Telegram 的 id 正负号。
+ * `principals.kind` 只有 `user` / `chat` 两个取值，而 `chat` 表示一个 Telegram 会话，不等于群。
+ * 私聊如今只占 `user:` 一行，但旧库里仍可能留着 `chat:<用户 id>` 的残留行 —— 此前这一页把 kind
+ * 直接当标签使用，于是私聊在这里一律显示为群聊，实测库里 5 行 chat 主体中有 4 行是 private。
+ * 判据与会话页的 `chatIdentity()` 一致：先取 `chat_type`，缺失时回落到 Telegram 的 id 正负号。
  */
 const isPrivatePrincipal = (entry: Principal): boolean => (entry.chatType ? entry.chatType === 'private' : !entry.tgId.startsWith('-'));
 const principalKindLabel = (entry: Principal): string => (entry.kind === 'chat'
   ? CHAT_TYPE_LABELS[String(entry.chatType)] ?? (isPrivatePrincipal(entry) ? '私聊' : '群 / 频道')
   : '用户');
-const PRINCIPAL_KINDS = [['all', '全部'], ['user', '用户'], ['private', '私聊'], ['group', '群与频道']] as const;
+const PRINCIPAL_KINDS = [['all', '全部'], ['user', '用户'], ['group', '群与频道']] as const;
 type PrincipalKind = (typeof PRINCIPAL_KINDS)[number][0];
 const matchesPrincipalKind = (entry: Principal, kind: PrincipalKind): boolean => kind === 'all' ? true
-  : kind === 'user' ? entry.kind === 'user'
-    : entry.kind === 'chat' && isPrivatePrincipal(entry) === (kind === 'private');
+  : kind === 'user' ? entry.kind === 'user' : entry.kind === 'chat';
 const ROLES = ['owner', 'trusted', 'limited', 'blocked'];
-const ROLE_HINTS: Record<string, string> = { owner: '不受审批与沙箱限制，可读写所有配置', trusted: '可用写文件、执行代码等高风险工具（按审批策略）', limited: '只读类工具，日常对话', blocked: '消息不触发轮次；archiveBlocked 关闭时连归档都不做' };
+const ROLE_HINTS: Record<string, string> = { owner: '不受审批与沙箱限制，可读写所有配置', trusted: '可使用写文件、执行代码等高风险工具（按审批策略）', limited: '只读类工具，日常对话', blocked: '消息不触发轮次；archiveBlocked 关闭时不写入归档' };
 const principalKind = ref<PrincipalKind>('all');
 const visiblePrincipals = computed(() => principalKind.value === 'all' ? principals.value : principals.value.filter((entry) => matchesPrincipalKind(entry, principalKind.value)));
 // 引导 owner（access.bootstrapOwnerId）是 bot 的实际主人：这一行改成 blocked 就没人能在 Telegram 里管它了。
@@ -951,7 +949,9 @@ const principalCount = (kind: PrincipalKind): number => kind === 'all' ? princip
 const principalDialog = ref(false);
 const principalSaving = ref(false);
 // `chatType` 也要进来：弹窗里那行「类型」现在按它显示，缺了它每个会话都会掉进 id 正负号那条回落。
-const principalForm = ref<Principal & { originalRole: string }>({ id: '', kind: 'user', tgId: '', role: 'limited', displayName: null, username: null, chatType: null, effectiveRole: null, originalRole: 'limited' });
+const principalForm = ref<Principal & { originalRole: string }>({ id: '', kind: 'user', tgId: '', role: 'limited', displayName: null, username: null, chatType: null, originalRole: 'limited' });
+// 群 / 频道封顶 trusted：选 owner 零效果，服务端也会 400。旧库里的残留 owner 行仍要显示得出来，故保留原值那一档。
+const principalRoleOptions = computed(() => ROLES.filter((role) => role !== 'owner' || principalForm.value.kind !== 'chat' || principalForm.value.originalRole === 'owner'));
 function editPrincipal(row: Principal): void { principalForm.value = { ...row, originalRole: row.role }; principalDialog.value = true; }
 async function savePrincipal(): Promise<void> {
   const form = principalForm.value;
@@ -971,6 +971,8 @@ const roleDialog = ref(false);
 const roleSaving = ref(false);
 const roleBulkForm = ref({ role: 'limited' });
 const selectionHitsOwnerSeat = computed(() => principalSelection.value.some((entry) => entry.id === ownerPrincipalId.value));
+// 混选时以更严的一侧为准：一批里只要有 chat，整批就不给 owner（服务端对 chat 行同样返回 400）。
+const roleBulkOptions = computed(() => (principalSelection.value.some((entry) => entry.kind === 'chat') ? ROLES.filter((role) => role !== 'owner') : ROLES));
 watch(principalKind, () => { principalSelection.value = []; });
 function openRoleBulk(): void { roleBulkForm.value = { role: 'limited' }; roleDialog.value = true; }
 async function saveRoleBulk(): Promise<void> {
@@ -981,7 +983,7 @@ async function saveRoleBulk(): Promise<void> {
     roleDialog.value = false;
     principalSelection.value = [];
     pushToast({ severity: result.missing.length ? 'warn' : 'success', summary: `${result.changed} 个主体已改为 ${roleBulkForm.value.role}`,
-      detail: result.missing.length ? `${result.missing.length} 个 id 在库里找不到，已跳过` : '下一轮生效，已写审计日志', life: 7000 });
+      detail: result.missing.length ? `${result.missing.length} 个 id 在数据库中不存在，已跳过` : '下一轮生效，已写审计日志', life: 7000 });
     await load();
   } catch (error) { toastError('批量改角色失败', error); }
   finally { roleSaving.value = false; }
@@ -990,7 +992,8 @@ const bulkDialog = ref(false);
 const bulkSaving = ref(false);
 const bulkForm = ref({ ids: '', kind: 'user', role: 'limited' });
 const bulkIds = computed(() => [...new Set(bulkForm.value.ids.split(/[\s,;，、]+/).map((entry) => entry.trim()).filter(Boolean))]);
-const bulkBadIds = computed(() => bulkIds.value.filter((id) => !/^-?\d{1,20}$/.test(id)));
+// kind=chat 的正数 id 服务端返回 400（私聊不再占 `chat:` 行）：在这里就拦下，否则整批导入只报一句 400。
+const bulkBadIds = computed(() => bulkIds.value.filter((id) => !/^-?\d{1,20}$/.test(id) || (bulkForm.value.kind === 'chat' && !id.startsWith('-'))));
 function openBulk(): void { bulkForm.value = { ids: '', kind: 'user', role: 'limited' }; bulkDialog.value = true; }
 async function saveBulk(): Promise<void> {
   bulkSaving.value = true;
@@ -1005,7 +1008,7 @@ async function saveBulk(): Promise<void> {
 
 // ── 工具：代码里的 TOOL_POLICY 是默认值，这里写的是覆盖层（docs/09 §3.7）────────
 const TOOL_SOURCE_LABEL: Record<string, string> = { builtin: '内建', agent: '子 Agent', plugin: 'Plugin', mcp: 'MCP', custom: '自定义' };
-const APPROVAL_LABEL: Record<string, string> = { never: '不需要', always: '每次都要', conditional: '按规则判定' };
+const APPROVAL_LABEL: Record<string, string> = { never: '不需要', always: '每次审批', conditional: '按规则判定' };
 const SCOPE_LABEL: Record<string, string> = { workspace: '工作区文件', chat: '当前会话', private: '用户私有', global: '全局', sandbox: '沙箱执行', telegram: 'Telegram' };
 const ROLE_OPTIONS = ['blocked', 'limited', 'trusted', 'owner'].map((value) => ({ value, label: value }));
 const APPROVAL_OPTIONS = ['never', 'conditional', 'always'].map((value) => ({ value, label: `${value}（${APPROVAL_LABEL[value]}）` }));
@@ -1018,7 +1021,7 @@ interface ToolForm { name: string; minRole: string; approval: string; scope: str
   selfManagedTimeout: boolean; defaults: { minRole: string; approval: string; timeoutMs: number | null }; original: ToolPolicy }
 const toolForm = ref<ToolForm>({ name: '', minRole: 'limited', approval: 'never', scope: '', source: '', enabled: true, timeoutMs: null,
   selfManagedTimeout: false, defaults: { minRole: 'limited', approval: 'never', timeoutMs: null }, original: {} as ToolPolicy });
-/** 「比代码默认更松」的判据在前端只是**提示**，真正拦截在服务端（409）—— 两处都判是因为界面要在点保存之前就把红条摆出来。 */
+/** 比代码默认更宽松这一判据在前端只作提示，真正的拦截在服务端（409）；两处都判是因为界面要在保存前就给出警示。 */
 const ROLE_RANK = ['blocked', 'limited', 'trusted', 'owner'];
 const APPROVAL_RANK = ['never', 'conditional', 'always'];
 const toolFormRelaxed = computed(() => {
@@ -1064,15 +1067,15 @@ async function saveTool(confirmRelax = false): Promise<void> {
     toolDialog.value = false;
     const relaxed = toolFormRelaxed.value;
     // 先按响应里的生效值就地更新那一行，再 load()。`config.changed` 之后的重载是异步的
-    // （`main.ts` 里 `void loadConfig(...).then(...)`），紧接着的 `GET /api/tools` 可能还读的是旧快照
-    // —— 那会表现成「保存成功，可表格里还是原样」，也就是 docs/21 · G-CFG-02 那种观感。
+    // （`main.ts` 里 `void loadConfig(...).then(...)`），紧随其后的 `GET /api/tools` 可能仍读到旧快照，
+    // 表现为保存成功但表格未变化，即 docs/21 · G-CFG-02 描述的现象。
     const row = tools.value[form.name];
     if (row) tools.value[form.name] = { ...row, ...saved.effective, enabled: form.enabled, timeoutMs: form.timeoutMs, relaxed: saved.relaxed };
     pushToast({ severity: relaxed.length ? 'warn' : 'success', summary: `${form.name} 的策略已更新`,
-      detail: relaxed.length ? `${relaxed.join(' 与 ')}比代码默认更松，这条改动已记进日志与配置变更历史` : '下一次工具调用即生效（tools.overrides 是热更新键）' });
+      detail: relaxed.length ? `${relaxed.join(' 与 ')}比代码默认更松，已记入日志与配置变更历史` : '下一次工具调用即生效（tools.overrides 热更新）' });
     await load();
   } catch (error) {
-    // 服务端在放宽时先回 409 且**一个字都没落库**，确认后带 confirmRelax 重发才写入。
+    // 服务端在放宽时先返回 409 且不写入任何内容，确认后带 confirmRelax 重发才落库。
     if (error instanceof ApiError && error.code === 'relax_requires_confirmation') {
       toolRelaxDetails.value = (error.details as Array<{ path: string; from: string; to: string }> | undefined) ?? [];
       toolRelaxDialog.value = true;
@@ -1096,9 +1099,9 @@ function toggleAgentTool(name: string): void {
   agentForm.value.tools = current.includes(name) ? current.filter((entry) => entry !== name) : [...current, name];
 }
 /**
- * 只有**配置来源**的那些条目才写回 `agent.agents`。`/api/agents` 交回的是文件与配置合并后的
- * 名单，整张写回去等于把每一条 `agents/<name>.md` 悄悄复制进 DB 覆盖层 —— 从此改文件不再生效，
- * 而界面上什么都看不出来（docs/14 §2 Q5-a：文件是只读来源）。
+ * 只有来自配置的那些条目才写回 `agent.agents`。`/api/agents` 返回的是文件与配置合并后的
+ * 名单，整张写回等于把每一条 `agents/<name>.md` 复制进 DB 覆盖层：此后改文件不再生效，
+ * 而界面上没有任何提示（docs/14 §2 Q5-a：文件是只读来源）。
  */
 const configAgents = (): AgentDefinition[] => agents.value.filter((entry) => entry.source !== 'file')
   .map(({ source: _source, ...entry }) => entry);
@@ -1113,13 +1116,13 @@ async function saveAgent(): Promise<void> {
   const name = form.name.trim();
   if (!name) { pushToast({ severity: 'warn', summary: '请填 Agent 名称' }); return; }
   if (agentNameTaken.value) { pushToast({ severity: 'warn', summary: `已存在名为 ${name} 的 Agent` }); return; }
-  if (!form.instructions.trim()) { pushToast({ severity: 'warn', summary: '请填 instructions', detail: '子 agent 的系统提示词为空时模型没有任何职责说明' }); return; }
+  if (!form.instructions.trim()) { pushToast({ severity: 'warn', summary: '请填 instructions', detail: '为空时子 agent 没有任何职责说明' }); return; }
   const entry: AgentDefinition = { name, description: form.description, modelAlias: form.modelAlias, maxSteps: form.maxSteps, minRole: form.minRole,
     tools: form.tools, resultMaxChars: form.resultMaxChars, instructions: form.instructions, injectMemory: form.injectMemory };
   const base = configAgents();
   const next = base.map((existing) => existing.name === form.originalName ? entry : existing);
-  // 改一条来自文件的定义 = 在配置层建一份覆盖（它此后显示成 file-overridden）。这正是
-  // 「文件只读 / DB 赢」该有的入口 —— 把它禁掉的话，那条优先级规则在界面上根本用不上。
+  // 修改一条来自文件的定义即在配置层建立一份覆盖（它此后显示为 file-overridden）。这正是
+  // 文件只读、DB 优先这条规则应有的入口：禁用它会让该优先级规则在界面上无法使用。
   if (form.isNew || !base.some((existing) => existing.name === form.originalName)) next.push(entry);
   agentSaving.value = true;
   try { await writeAgents(next, form.isNew ? 'Agent 已创建' : 'Agent 已保存', `${name} · 热更新已生效`); agentDialog.value = false; }
@@ -1128,15 +1131,15 @@ async function saveAgent(): Promise<void> {
 }
 async function removeAgent(name: string): Promise<void> {
   const current = agents.value.find((entry) => entry.name === name);
-  // 纯文件定义在 WebUI 里删不掉：这个按钮能改的只有 `agent.agents` 覆盖层，写回去删不掉磁盘上
-  // 那个 .md。假装删掉、刷新后它又回来，比直接说清楚糟得多。
-  if (current?.source === 'file') { pushToast({ severity: 'warn', summary: `${name} 来自文件定义`, detail: '删除 agents/ 目录下对应的 .md 文件，或在这里编辑它建一份覆盖' }); return; }
+  // 纯文件定义在 WebUI 里无法删除：这个按钮只能修改 `agent.agents` 覆盖层，写回不会删除磁盘上
+  // 那个 .md。伪装成删除成功、刷新后它重新出现，比直接说明更糟。
+  if (current?.source === 'file') { pushToast({ severity: 'warn', summary: `${name} 来自文件定义`, detail: '删除 agents/ 下对应的 .md 文件，或在此编辑创建配置覆盖' }); return; }
   const revert = current?.source === 'file-overridden';
   askConfirm(
     revert ? `删除 ${name} 的配置覆盖？` : `删除子 Agent ${name}？`,
-    revert ? `删掉之后回到 agents/${name}.md 里那份定义。` : '正在引用它的 spawn_agent 调用会直接报「未知子 agent」。',
+    revert ? `删除后回到 agents/${name}.md 中的定义。` : '引用它的 spawn_agent 调用将返回「未知子 agent」。',
     async () => {
-      try { await writeAgents(configAgents().filter((entry) => entry.name !== name), revert ? `${name} 的覆盖已删除` : `Agent ${name} 已删除`, revert ? '回到文件里那份定义' : '写入 agent.agents 覆盖层'); agentDialog.value = false; }
+      try { await writeAgents(configAgents().filter((entry) => entry.name !== name), revert ? `${name} 的覆盖已删除` : `Agent ${name} 已删除`, revert ? '回到文件中的定义' : '写入 agent.agents 覆盖层'); agentDialog.value = false; }
       catch (error) { toastError('删除 Agent 失败', error); }
     });
 }
@@ -1210,15 +1213,15 @@ const QUOTA_UNIMPLEMENTED_HINTS: Record<string, string> = {};
 const QUOTA_SCOPE_LABELS: Record<string, string> = { global: '全局', chat: '会话', user: '用户' };
 const quota = ref<QuotaPayload | null>(null);
 /**
- * 总览页那两个环：**只画 global 档的当前 day / month**。chat / user 是按主体分的很多行，
- * 挤在总览上读不出任何东西 —— 那是配额页的表要干的事。
- * `limit === null` 时环不画，只写「不限」（见 UiRing）。
+ * 总览页那两个环只绘制 global 档的当前 day / month。chat / user 是按主体拆分的多行数据，
+ * 放在总览上读不出有效信息，那属于配额页表格的职责。
+ * `limit === null` 时不绘制环，只显示「不限」（见 UiRing）。
  */
 // ── 用量聚合：时间范围 + 维度（docs/09 §3.11）────────────────────────────────────
 interface UsageReportRow { bucket: string | null; costUsd: number; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; calls: number; successes: number; label?: string | null }
-// `UiSelect` 是**只认字符串**的选择器（内部 `String(...)` 归一化、emit 也是 string）。
-// 这里的天数因此存成字符串，用的时候再 Number()：给它传数字会让 prop 类型校验报警，
-// 而且 `picked` 的 `===` 比对也对不上（"7" !== 7），下拉框显示成空。
+// `UiSelect` 只接受字符串（内部用 `String(...)` 归一化，emit 也是 string）。
+// 这里的天数因此存为字符串，使用时再 Number()：传入数字会触发 prop 类型校验警告，
+// 且 `picked` 的 `===` 比较也不成立（"7" !== 7），下拉框显示为空。
 const USAGE_RANGES = [{ label: '近 7 天', value: '7' }, { label: '近 30 天', value: '30' }, { label: '近 90 天', value: '90' }];
 const USAGE_DIMENSIONS = [{ label: '按天', value: 'day' }, { label: '按会话', value: 'chat' }, { label: '按用户', value: 'user' },
   { label: '按模型', value: 'model' }, { label: '按别名', value: 'alias' }, { label: '按 agent', value: 'agent' }, { label: '按 provider', value: 'provider' }];
@@ -1235,8 +1238,8 @@ const usageTotals = computed(() => {
   return { cost: rows.reduce((sum, row) => sum + row.costUsd, 0), calls, successRate: calls ? `${Math.round((successes / calls) * 100)}%` : '—',
     inputTokens, cacheRead, hitRate: inputTokens ? `${Math.round((cacheRead / inputTokens) * 100)}%` : '—' };
 });
-/** 命中率按桶算，不是把总数一除 —— 一个大桶会把其它桶的表现整个盖掉，而这一页正是用来
- *  分辨「哪一家上游 / 哪个模型的缓存是真的」。同理，没有输入的桶给 0 而不是跳过。 */
+/** 命中率按桶计算，而不是用总数相除：一个大桶会掩盖其他桶的表现，而这一页正是用于
+ *  区分哪一家上游、哪个模型的缓存确实生效。同理，无输入的桶记 0 而不是跳过。 */
 const usageCacheRows = computed(() => usageReport.value.map((row) => ({
   label: row.label ?? String(row.bucket ?? '—'),
   value: row.inputTokens ? Math.round((row.cacheReadTokens ?? 0) / row.inputTokens * 100) : 0,
@@ -1270,7 +1273,7 @@ function counterTitle(row: QuotaCounter): string {
   return row.label || `未登记${row.scope === 'chat' ? '会话' : '用户'} ${row.subject}`;
 }
 const spent = (row: QuotaCounter): number => row.costUsd + row.reservedUsd;
-/** 分母是 cost + reserved：在途那一轮已经把额度占住了，只画已结算的会让「明明还有钱却被拒」看起来像 bug。 */
+/** 分母是 cost + reserved：在途那一轮已占用额度，只绘制已结算部分会让额度充足却被拒绝看起来像缺陷。 */
 const counterRatio = (row: QuotaCounter): number => (row.limit ? Math.min(1, spent(row) / row.limit) : 0);
 const money = (value: number): string => `$${value.toFixed(4)}`;
 function markQuotaDirty(): void { quotaDirty.value = true; }
@@ -1313,7 +1316,7 @@ async function saveQuota(): Promise<void> {
       'rateLimit.turnsPerUserPerHour': form.turnsPerUserPerHour, 'rateLimit.turnsPerChatPerHour': form.turnsPerChatPerHour,
       'rateLimit.concurrentPerUser': form.concurrentPerUser, 'onExceeded.reply': form.reply, 'onExceeded.message': form.message }) });
     quotaDirty.value = false;
-    pushToast({ severity: 'success', summary: '配额已保存', detail: '热更新已生效，下一条消息即按新限额判定' });
+    pushToast({ severity: 'success', summary: '配额已保存', detail: '下一条消息即按新限额判定' });
     await loadQuota();
     await load();
   } catch (error) { toastError('保存配额失败', error); }
@@ -1321,7 +1324,7 @@ async function saveQuota(): Promise<void> {
 }
 function resetQuota(row?: QuotaCounter): void {
   const target = row ? `${counterTitle(row)} · ${row.bucket}` : '全部计数器';
-  askConfirm(`重置${target}？`, '已经花掉的钱不会退回，只是这个窗口的计数从零开始 —— 之前被挡住的人立刻又能发起对话。', async () => {
+  askConfirm(`重置${target}？`, '仅将该窗口计数清零，费用不退回；此前被拒的用户可立即发起对话。', async () => {
     quotaResetting.value = row ? counterKey(row) : 'all';
     try {
       const result = await api<{ changes: number }>('/api/quota/reset', { method: 'POST', body: row ? JSON.stringify({ scope: row.scope, subject: row.subject, window: row.window, bucket: row.bucket }) : '{}' });
@@ -1341,7 +1344,7 @@ const sandbox = ref<SandboxPayload | null>(null);
 const sandboxForm = ref<SandboxForm>({ mode: 'docker', network: 'none', image: '', dockerBin: 'docker', workspaceDir: '', hostWorkspaceDir: '',
   memoryMb: 512, cpus: 1, pidsLimit: 128, tmpfsMb: 64, readOnlyRoot: true, bypassRoles: ['owner'],
   persistent: { enabled: false, idleTtlMs: 86400000, maxLifetimeMs: 0, maxContainers: 16, network: 'bridge', reapCron: '*/5 * * * *' } });
-// 界面按小时收，配置按毫秒存 —— 「24」比「86400000」好核对得多，而 schema 那边保持 Ms 后缀的一致性。
+// 界面按小时接收、配置按毫秒存储：24 比 86400000 更易核对，而 schema 一侧保持 Ms 后缀的一致性。
 const HOUR_MS = 3_600_000;
 const hoursOf = (ms: number | null): number => Math.round((ms ?? 0) / HOUR_MS * 10) / 10;
 /** `tools.fs.allowHostFsForOwner` 不在 `sandbox.*` 下，所以它有自己的表单位与自己的写回路径。 */
@@ -1368,12 +1371,12 @@ async function testApprovalRule(): Promise<void> {
   finally { ruleTesting.value = false; }
 }
 /**
- * `docker pull <sandbox.image>`。**镜像名取自已保存的那份配置**，不是表单里的值 —— 与
- * 「探测可用性」同一个口径，所以按钮旁边的说明要写清楚这一点。
- * 只 pull 不 build（build 是部署动作，不是控制台按钮）。
+ * `docker pull <sandbox.image>`。镜像名取自已保存的那份配置，而不是表单里的值，与
+ * 探测可用性口径一致，因此按钮旁边的说明要写明这一点。
+ * 只执行 pull 不执行 build（build 属于部署动作，不是控制台按钮）。
  */
 function pullSandboxImage(): void {
-  askConfirm('拉取沙箱镜像？', '镜像名取自「已保存」的 sandbox.image；几百 MB 的镜像可能要几分钟，这期间这个请求一直挂着。', async () => {
+  askConfirm('拉取沙箱镜像？', '镜像名取自已保存的 sandbox.image；可能耗时数分钟。', async () => {
     pullingImage.value = true;
     try {
       const result = await api<{ image: string }>('/api/sandbox/image', { method: 'POST', body: '{}' });
@@ -1383,9 +1386,9 @@ function pullSandboxImage(): void {
     finally { pullingImage.value = false; }
   });
 }
-// 这份列表是 `sandbox.mode` 枚举的第二份手抄（不从 config.schema.json 派生，也没有测试焊住），
-// 改 schema 时要一起改 —— 对不上的表现是下拉里选得出一个后端会 400 掉的值。
-const SANDBOX_MODES = [{ value: 'docker', label: 'docker · 每次调用起一个一次性容器' }, { value: 'none', label: 'none · 关掉执行类工具（bypassRoles 仍宿主直跑）' }];
+// 这份列表是 `sandbox.mode` 枚举的第二份副本（不从 config.schema.json 派生，也没有测试约束），
+// 改 schema 时要同步修改：不一致的表现是下拉里能选出一个后端会返回 400 的值。
+const SANDBOX_MODES = [{ value: 'docker', label: 'docker · 每次调用启动一个一次性容器' }, { value: 'none', label: 'none · 停用执行类工具（bypassRoles 仍在宿主直接执行）' }];
 function markSandboxDirty(): void { sandboxDirty.value = true; }
 function syncSandbox(payload: SandboxPayload): void {
   if (sandboxDirty.value) return;
@@ -1406,28 +1409,28 @@ function toggleBypassRole(role: string): void {
   markSandboxDirty();
 }
 /**
- * 这一格上有三个开关能把沙箱边界整个拆掉，而此前**只有 `mode = none` 有闸**，而且用的还是裸的
- * `window.confirm`（`M-WEB-01` 说的那批）。另外两个 —— 把 owner 之外的角色放进 `bypassRoles`、
- * 打开 `allowHostFsForOwner` —— 拨一下、点保存，两次点击就没了（docs/29 · M-WEB-10）。
- * 三个同等危险，所以三个共用同一道闸，而且逐条把代价写出来：只说「确定？」等于没说。
+ * 这一格上有三个开关可以完全解除沙箱边界，而此前只有 `mode = none` 设了确认，且用的是裸
+ * `window.confirm`（`M-WEB-01` 提到的那批）。另外两个 —— 把 owner 之外的角色加入 `bypassRoles`、
+ * 打开 `allowHostFsForOwner` —— 切换后点保存，两次点击即生效（docs/29 · M-WEB-10）。
+ * 三者危险程度相同，因此共用同一道确认，并逐条写明代价：只询问是否确定等于没有说明。
  */
 function sandboxDangers(): string[] {
   const form = sandboxForm.value;
   const dangers: string[] = [];
   if (form.mode === 'none')
-    dangers.push('· mode = none：exec 类工具以 bot 进程的权限直接在宿主上执行模型给出的命令，沙箱那一层完全消失。');
+    dangers.push('· mode = none：exec 类工具以 bot 进程权限在宿主直接执行模型给出的命令，沙箱隔离失效。');
   const extra = form.bypassRoles.filter((role) => role !== 'owner');
   if (extra.length)
-    dangers.push(`· ${extra.join(' / ')} 进了 bypassRoles：这些人能让模型在宿主上执行任意命令，和 owner 一样。`);
-  // 只在「从关到开」时问 —— 关掉它是收紧，不该也拦一道。
+    dangers.push(`· ${extra.join(' / ')} 已加入 bypassRoles：这些角色可让模型在宿主执行任意命令。`);
+  // 只在从关闭切到开启时询问：关掉它属于收紧，不应同样拦一道。
   if (hostFsForOwner.value && !hostFsSaved.value)
-    dangers.push('· allowHostFsForOwner：文件工具对 owner 不再限制在工作区内，等于把宿主整个文件系统交给模型（含 .env 与本库）。');
+    dangers.push('· allowHostFsForOwner：owner 的文件工具不再限于工作区，模型可访问整个宿主文件系统（含 .env 与本库）。');
   return dangers;
 }
 async function saveSandbox(): Promise<void> {
   const dangers = sandboxDangers();
   if (!dangers.length) { await commitSandbox(); return; }
-  askConfirm('这一步会拆掉沙箱边界', `${dangers.join('\n')}\n\n保存后热更新立刻生效，下一次工具调用就按新配置执行。`, commitSandbox);
+  askConfirm('此操作将移除沙箱边界', `${dangers.join('\n')}\n\n保存后立即生效。`, commitSandbox);
 }
 async function commitSandbox(): Promise<void> {
   const form = sandboxForm.value;
@@ -1440,7 +1443,7 @@ async function commitSandbox(): Promise<void> {
     if (hostFsForOwner.value !== hostFsSaved.value)
       await api('/api/config', { method: 'PUT', body: JSON.stringify({ 'tools.fs.allowHostFsForOwner': hostFsForOwner.value }) });
     sandboxDirty.value = false;
-    pushToast({ severity: 'success', summary: '沙箱配置已保存', detail: '热更新已生效，下一次工具调用即按新配置执行' });
+    pushToast({ severity: 'success', summary: '沙箱配置已保存', detail: '下一次工具调用即按新配置执行' });
     await loadSandbox();
     await loadContainers();
     await load();
@@ -1451,8 +1454,8 @@ async function commitSandbox(): Promise<void> {
 interface ContainerRow { chatId: string; chatLabel: string | null; name: string; image: string; createdAt: number; lastUsedAt: number;
   expiresAt: number; hardExpiresAt: number | null; pinned: boolean; execCount: number; hasSetsid: boolean; lastError: string | null }
 interface ContainerPayload { enabled: boolean; used: number; max: number; containers: ContainerRow[] }
-/** `available: false` = 这个部署没装配持久容器运行时。**和「一个容器都没有」是两回事**，
- *  面板上必须分开说（同定时任务那一节，docs/16 §5「摘除比伪造安全」）。 */
+/** `available: false` 表示该部署未装配持久容器运行时，与一个容器都没有是两种状态，
+ *  面板上必须分别表述（同定时任务那一节，docs/16 §5：摘除比伪造安全）。 */
 const containers = ref<ContainerPayload & { available: boolean }>({ available: true, enabled: false, used: 0, max: 0, containers: [] });
 const containerBusy = ref('');
 async function loadContainers(): Promise<void> {
@@ -1467,17 +1470,17 @@ async function loadContainers(): Promise<void> {
     toastError('加载容器列表失败', error);
   }
 }
-/** 「重置」的代价要写在确认框里：容器里跑着的进程会一起没（照「立即触发」那条的写法）。 */
+/** 重置的代价要写进确认框：容器里正在运行的进程会一并终止（照立即触发那条的写法）。 */
 function resetContainer(row: ContainerRow, wipe: boolean): void {
   const who = row.chatLabel ?? row.chatId;
   const cost = wipe
-    ? `\n\n⚠ 同时会把「${who}」工作区里的文件全部挪进 .luoli-trash（不真删，但模型和文件工具都看不到了）。`
-    : '\n\n工作区里的文件一个都不动。';
-  askConfirm(`重置「${who}」的容器？`, `容器里装的东西和正在跑的后台进程会一起没。${cost}`, async () => {
+    ? `\n\n⚠ 同时将「${who}」工作区内的文件移入 .luoli-trash（文件保留，模型不再可见）。`
+    : '\n\n工作区内的文件不受影响。';
+  askConfirm(`重置「${who}」的容器？`, `容器内安装的内容与正在运行的后台进程将一并丢失。${cost}`, async () => {
     containerBusy.value = row.chatId;
     try {
       await api(`/api/containers/${encodeURIComponent(row.chatId)}${wipe ? '?wipe=1' : ''}`, { method: 'DELETE' });
-      pushToast({ severity: 'success', summary: `已重置「${who}」的容器`, detail: wipe ? '工作区文件已挪进 .luoli-trash' : '工作区文件未改动' });
+      pushToast({ severity: 'success', summary: `已重置「${who}」的容器`, detail: wipe ? '工作区文件已移入 .luoli-trash' : '工作区文件未改动' });
       await loadContainers();
     } catch (error) { toastError('重置容器失败', error); }
     finally { containerBusy.value = ''; }
@@ -1500,7 +1503,7 @@ function containerExpiry(row: ContainerRow): string {
   return hours >= 1 ? `${hours} 小时` : `${Math.max(1, Math.round(ms / 60000))} 分钟`;
 }
 
-/** 探测打的是**库里已保存的那份**配置：表单里改了还没存，探出来的仍是旧 mode。 */
+/** 探测使用的是库里已保存的那份配置：表单已改但未保存时，探测结果仍是旧 mode。 */
 async function probeSandbox(): Promise<void> {
   sandboxProbing.value = true;
   try {
@@ -1511,15 +1514,15 @@ async function probeSandbox(): Promise<void> {
   finally { sandboxProbing.value = false; }
 }
 
-// ── 扩展：四类的行数据留在这一层（`load()` 拉、SSE 刷），版式与写操作整段搬进 ExtensionsPage.vue。
-//    此前它们被 `extensionRows` 拼成一个数组塞进同一个卡片网格，八个动作按钮靠 `item.kind` 分流 ——
-//    代价是每一类只显示得出四类的交集（docs/09 §3.8 那一节因此被重写）。
-// `approvalRulesEmpty` 与 `conditionalToolNames` 留在这里：它们服务的是「任务与审批」页。
+// ── 扩展：四类的行数据留在这一层（`load()` 拉取、SSE 刷新），版式与写操作整体移入 ExtensionsPage.vue。
+//    此前它们被 `extensionRows` 拼成一个数组放进同一个卡片网格，八个动作按钮按 `item.kind` 分流，
+//    代价是每一类只能显示四类的交集（docs/09 §3.8 那一节因此被重写）。
+// `approvalRulesEmpty` 与 `conditionalToolNames` 留在这里：它们服务于「任务与审批」页。
 /**
- * 「审批已启用」+ 空规则表 = 门开着。`ApprovalRules.evaluate()` 在规则表为空时恒回
+ * 审批已启用且规则表为空时，审批实际不生效。`ApprovalRules.evaluate()` 在规则表为空时恒返回
  * `needed:false`，于是 `conditional` 档的工具（bash / python / write_file / edit_file /
- * move_file / memory_write）一个都不经审批 —— 而这一页此前只显示一个开着的开关，
- * 工具页那张表还写着「条件审批」（docs/27 · S-02，启动时也有一条 warn）。
+ * move_file / memory_write）全部不经审批，而这一页此前只显示一个处于开启状态的开关，
+ * 工具页那张表仍标注为条件审批（docs/27 · S-02，启动时也有一条 warn）。
  */
 const approvalRulesEmpty = computed(() => {
   const approval = (config.value.approval ?? {}) as { enabled?: boolean; rules?: unknown[] };
@@ -1528,11 +1531,11 @@ const approvalRulesEmpty = computed(() => {
 const conditionalToolNames = computed(() => toolRows.value.filter((row) => row.approval === 'conditional').map((row) => row.name).join(' / '));
 
 /**
- * 设置页的四个二级 tab（docs/09 §3.13）。此前是一条长滚动：八个区块并排，分组全折叠时首屏 4430 px，
- * 「全部配置」点一次全部展开是 28075 px —— 而这八块是四类访问频率差两三个数量级的东西
- * （日常旋钮 / 全量表单 / 运维动作 / 逃生舱），在页面上却权重完全相同。
- * 改这里时连同 `tests/webui/console.render.test.ts` 的 `SETTINGS_TABS` 一起改：那条用例逐个切过去
- * 断言有内容，少一个分支等于那个 tab 从此没人渲染过。
+ * 设置页的四个二级 tab（docs/09 §3.13）。此前是单条长滚动：八个区块并排，分组全折叠时首屏 4430 px，
+ * 全部配置展开一次是 28075 px，而这八块属于访问频率相差两三个数量级的四类内容
+ * （日常调节项 / 全量表单 / 运维动作 / 应急入口），在页面上权重却完全相同。
+ * 修改这里时要同步改 `tests/webui/console.render.test.ts` 的 `SETTINGS_TABS`：那条用例逐个切换并
+ * 断言有内容，缺一个分支即该 tab 不再被渲染验证。
  */
 const SETTINGS_TABS = [
   ['common', '常用', '触发与唤醒词、输出节奏'],
@@ -1541,16 +1544,16 @@ const SETTINGS_TABS = [
   ['advanced', '高级', '原始 YAML 覆盖层与合并结果'],
 ] as const;
 const settingsTab = ref<(typeof SETTINGS_TABS)[number][0]>('common');
-/** 合并结果默认收起：它和「全部配置」是同一份数据的两种视图，常驻只会占掉一屏并让人以为那才是真正的配置源。 */
+/** 合并结果默认收起：它与全部配置是同一份数据的两种视图，常驻展开会占掉一屏并使人误认为那是配置来源。 */
 const mergedConfigOpen = ref(false);
 
 // ── 维护：备份 / VACUUM / 清日志 / 清孤儿 / 重建 FTS ───────────────────────────────────
 const MAINTENANCE_ACTIONS = [
-  { action: 'backup', label: '立即备份 DB', icon: 'pi pi-database', hint: '走 VACUUM INTO 写一份完整快照到 db.path 旁边，保留 db.backupKeep 份' },
-  { action: 'vacuum', label: 'VACUUM', icon: 'pi pi-compress', hint: '整理页面碎片、回收空间。库大时会阻塞写入' },
-  { action: 'cleanup-logs', label: '清理过期日志', icon: 'pi pi-eraser', hint: '按 logs.retentionDays 删掉过期的 log_events、blobs/ 与子 agent 全文结果' },
-  { action: 'gc-files', label: '清理孤儿文件', icon: 'pi pi-trash', hint: '只删没有任何 DB 行指向的文件（下载中途崩溃、local_path 被换掉留下的）。不是过期策略：在用的媒体一个都不动' },
-  { action: 'rebuild-fts', label: '重建 FTS 索引', icon: 'pi pi-sync', hint: '消息检索结果不对（漏命中/命中已删消息）时重建' },
+  { action: 'backup', label: '立即备份 DB', icon: 'pi pi-database', hint: '快照写入 db.path 同级目录，保留 db.backupKeep 份' },
+  { action: 'vacuum', label: 'VACUUM', icon: 'pi pi-compress', hint: '回收空间；数据库较大时会阻塞写入' },
+  { action: 'cleanup-logs', label: '清理过期日志', icon: 'pi pi-eraser', hint: '按 logs.retentionDays 删除 log_events、blobs/ 与子 agent 全文结果' },
+  { action: 'gc-files', label: '清理孤儿文件', icon: 'pi pi-trash', hint: '仅删除没有任何 DB 行指向的文件；在用的媒体不受影响' },
+  { action: 'rebuild-fts', label: '重建 FTS 索引', icon: 'pi pi-sync', hint: '消息检索结果异常时重建' },
 ] as const;
 const maintenanceBusy = ref('');
 const restarting = ref(false);
@@ -1577,13 +1580,13 @@ async function saveYaml(): Promise<void> {
   try {
     const result = await api<{ keys: string[]; skipped: string[]; pruned: string[]; preserved: string[]; subsumed: string[] }>('/api/config/yaml', { method: 'PUT', body: JSON.stringify({ yaml: yamlText.value }) });
     await REFRESH_LOADERS.config();
-    // 「个配置项」而不是「个配置段」：落库粒度是叶子（docs/28 · L-WEB-02）。删掉的键要单独点名 ——
-    // 这条路现在真的会删行，而运维得看得见自己删了什么；保住的密钥行同样要说，否则「我提交的
-    // 那份里没有 passwordHash」这件事在界面上仍然不可见（docs/28 · L-WEB-04）。
+    // 计数单位是配置项而不是配置段：落库粒度是叶子（docs/28 · L-WEB-02）。删除的键要单独列出，
+    // 因为这条路径现在确实会删行，运维需要看到自己删了什么；保留的密钥行同样要说明，否则所提交
+    // 的那份缺少 passwordHash 这件事在界面上仍不可见（docs/28 · L-WEB-04）。
     pushToast({ severity: 'success', summary: `已保存 ${result.keys.length} 个配置项`,
       detail: [result.skipped.length ? `${result.skipped.length} 项被环境变量锁定，已跳过：${result.skipped.join('、')}` : '',
         result.pruned.length ? `${result.pruned.length} 个键已从覆盖层删除：${result.pruned.join('、')}` : '',
-        result.preserved.length ? `${result.preserved.length} 个密钥类键未参与这次往返，保持原值：${result.preserved.join('、')}` : '',
+        result.preserved.length ? `${result.preserved.length} 个密钥类键保持原值：${result.preserved.join('、')}` : '',
         result.subsumed.length ? `${result.subsumed.length} 条更细的覆盖被整块写入作废：${result.subsumed.join('、')}` : ''].filter(Boolean).join('\n') || '全部生效', life: 12_000 });
   } catch (error) {
     // 语法错误带行号、校验错误带路径：把它们留在编辑器旁边，而不是让 Toast 一闪而过。
@@ -1597,15 +1600,15 @@ async function saveYaml(): Promise<void> {
 }
 const importFile = ref<HTMLInputElement | null>(null);
 /**
- * `[重启进程]`。二次确认里必须写明「没有 supervisor 就不会自己回来」—— 这是一个可能让整个
- * 部署下线的按钮，措辞含糊比不给按钮更糟。
+ * `[重启进程]`。二次确认里必须写明没有 supervisor 时进程不会自行恢复：这是一个可能让整个
+ * 部署下线的按钮，措辞含糊比不提供按钮更糟。
  */
 function restartProcess(): void {
-  askConfirm('重启进程？', '在途轮次会被排空或中断。\n\n如果这个部署没有 systemd / docker 这类 supervisor，进程不会自动拉起 —— 你需要手工把它启回来。', async () => {
+  askConfirm('重启进程？', '在途轮次会被排空或中断。\n\n没有 supervisor（systemd / docker）时不会自动拉起，需手工启动。', async () => {
     restarting.value = true;
     try {
       await api('/api/restart', { method: 'POST', body: '{}' });
-      pushToast({ severity: 'warn', summary: '已请求重启', detail: '控制台会断开；由 supervisor 拉起后刷新页面即可。', life: 12_000 });
+      pushToast({ severity: 'warn', summary: '已请求重启', detail: '控制台会断开，拉起后刷新页面。', life: 12_000 });
     } catch (error) { toastError('重启失败', error); }
     finally { restarting.value = false; }
   });
@@ -1635,10 +1638,10 @@ async function importConfig(event: Event): Promise<void> {
   if (!file) return;
   let parsed: { overrides?: Record<string, unknown> };
   try { parsed = JSON.parse(await file.text()) as { overrides?: Record<string, unknown> }; }
-  catch (error) { toastError('这个文件不是合法 JSON', error); return; }
+  catch (error) { toastError('该文件不是合法 JSON', error); return; }
   const keys = Object.keys(parsed.overrides ?? {});
-  if (!keys.length) { pushToast({ severity: 'warn', summary: '文件里没有 overrides', detail: '导出文件的结构是 { overrides: { 点分键: 值 } }' }); return; }
-  askConfirm(`导入 ${keys.length} 条配置覆盖？`, '按键覆盖现有值，不会删除文件里没有的那些。校验不过则整批不写。', async () => {
+  if (!keys.length) { pushToast({ severity: 'warn', summary: '文件中没有 overrides', detail: '导出文件的结构是 { overrides: { 点分键: 值 } }' }); return; }
+  askConfirm(`导入 ${keys.length} 条配置覆盖？`, '按键覆盖现有值，不删除文件中未包含的键。校验不通过则整批不写入。', async () => {
     try {
       const result = await api<{ keys: string[]; skipped: string[]; subsumed: string[] }>('/api/config/import', { method: 'POST', body: JSON.stringify(parsed) });
       await REFRESH_LOADERS.config();
@@ -1649,18 +1652,18 @@ async function importConfig(event: Event): Promise<void> {
   });
 }
 function runMaintenance(action: string, label: string): void {
-  // gc-files 是**删文件**，别和「整理一下」混在同一句确认语里：运维需要知道它删什么、不删什么。
+  // gc-files 会删除文件，不能与常规整理混在同一句确认文案里：运维需要知道它删除什么、保留什么。
   const warning = action === 'gc-files'
-    ? '只删没有任何数据库行指向的孤儿文件；在用的媒体与子 agent 结果一个都不动。这不是保留策略，不会让在用的附件变少。'
-    : '大库上可能耗时较久，期间写入会被阻塞。';
+    ? '仅删除没有任何数据库行指向的孤儿文件；在用的媒体与子 agent 结果不受影响。'
+    : '数据库较大时会阻塞写入。';
   askConfirm(`执行「${label}」？`, warning, async () => {
     maintenanceBusy.value = action;
     try {
       const result = await api<unknown>(`/api/maintenance/${action}`, { method: 'POST', body: '{}' });
-      // `refused` 是 fail-closed 的拒绝，不是「完成」。`gc-files` 的唯一触发条件是「库与目录来自两套
-      // 部署」—— 正是运维最该立刻停手的那一种（docs/25 §10 记的误删 76 个附件 + 90 份子 agent 全文
-      // 就是它防住的）。渲染成绿色「完成」+ 一行 JSON 尾巴 + 8 秒自动消失，等于把它藏起来
-      // （docs/28 · L-WEB-03）。`life: 0` 走 pushToast 的「不自动消失」分支，要人手点掉。
+      // `refused` 是 fail-closed 的拒绝，不是完成。`gc-files` 的唯一触发条件是库与目录来自两套
+      // 部署，正是运维应立即停止操作的情形（docs/25 §10 记录的误删 76 个附件与 90 份子 agent 全文
+      // 即由它拦下）。渲染成绿色的完成、加一行 JSON 并在 8 秒后自动消失，等于把它隐藏
+      // （docs/28 · L-WEB-03）。`life: 0` 走 pushToast 的不自动消失分支，需人工关闭。
       const refused = (result as { refused?: unknown } | null)?.refused;
       const reasons = Array.isArray(refused) ? refused.map(String) : refused ? [String(refused)] : [];
       if (reasons.length) { pushToast({ severity: 'warn', summary: `${label} 已拒绝`, detail: [...reasons, JSON.stringify(result)].join('\n'), life: 0 }); return; }
@@ -1710,12 +1713,12 @@ async function loadActiveTurns(): Promise<void> {
 }
 /** 取消是 abort 信号不是删除：该轮会落成 cancelled，已发出的消息与上下文都还在。 */
 function cancelTurn(turn: ActiveTurn): void {
-  askConfirm(`取消 ${turnWho(turn)} 的这一轮？`, '模型调用会被中断，该轮记成 cancelled；已经发出去的消息不会撤回。', async () => {
+  askConfirm(`取消 ${turnWho(turn)} 的当前轮次？`, '模型调用将被中断，该轮记为 cancelled；已发送的消息不会撤回。', async () => {
     cancellingTurn.value = turn.id;
     try {
       const result = await api<{ cancelled: boolean }>(`/api/turns/${encodeURIComponent(turn.id)}/cancel`, { method: 'POST', body: '{}' });
       pushToast(result.cancelled ? { severity: 'success', summary: '已发出取消信号', detail: `${turn.id.slice(0, 12)} · 该轮会记成 cancelled` }
-        : { severity: 'warn', summary: '这一轮已经结束了', detail: '取消信号没有作用对象，界面稍后会自己刷新' });
+        : { severity: 'warn', summary: '这一轮已经结束了', detail: '取消信号没有作用对象，界面稍后自动刷新' });
       await loadActiveTurns();
     } catch (error) { toastError('取消失败', error); }
     finally { cancellingTurn.value = ''; }
@@ -1726,8 +1729,8 @@ function cancelTurn(turn: ActiveTurn): void {
 // 三者的端点、分页游标、弹窗与 busy 态零交集，留在这一层只会互相挡道。
 
 // ── SSE：首屏之后界面的数据新鲜度全靠这里（docs/21 · G-SSE-01）───────────────────
-// 事件到达**不再无脑重跑 `load()`**（那是一次 18 个端点）：按事件类型只刷相关的那几组，
-// 且只刷当前页面看得见的。服务端已按 kind 合并过一轮，这一层挡的是「多个 kind 同时来」。
+// 事件到达后不再无条件重跑 `load()`（那是一次 18 个端点请求）：按事件类型只刷新相关的那几组，
+// 且只刷新当前页面可见的部分。服务端已按 kind 合并过一轮，这一层处理的是多个 kind 同时到达。
 type RefreshGroup = 'dashboard' | 'logs' | 'chats' | 'usage' | 'quota' | 'tasks' | 'approvals' | 'extensions' | 'config' | 'activeTurns' | 'schedules' | 'containers';
 const REFRESH_DEBOUNCE_MS = 400;
 const lastEventAt = ref(0);
@@ -1740,9 +1743,9 @@ const REFRESH_LOADERS: Record<RefreshGroup, () => Promise<void>> = {
   chats: async () => { chats.value = await api<Chat[]>('/api/chats'); },
   usage: async () => { [usage.value] = await Promise.all([api<Usage[]>('/api/usage'), loadUsageReport()]); },
   quota: loadQuota,
-  // 任务页那三组只发一个脉冲：行数据、页码与 busy 态都在三张卡自己手里，父层再拉一次
-  // 只会把运维翻到的页码打回第一页。组名、下面的 EVENT_REFRESH 映射、400ms 合并与
-  // REFRESH_VISIBILITY 的可见性过滤一个字不改 —— 变的只是「刷新」这个动作本身。
+  // 任务页那三组只发一个脉冲：行数据、页码与 busy 态都由三张卡自行持有，父层再拉取一次
+  // 只会把运维翻到的页码重置为第一页。组名、下面的 EVENT_REFRESH 映射、400ms 合并与
+  // REFRESH_VISIBILITY 的可见性过滤均不改动，变的只是刷新这个动作本身。
   tasks: async () => { tick.value += 1; },
   // 审批多一步：导航角标是全表 pending，不切到任务页也得跟着变（AC-WEB-049），
   // 而它只有这一层拉得到。卡片没挂载时 tick 空转，代价是零。
@@ -1754,14 +1757,14 @@ const REFRESH_LOADERS: Record<RefreshGroup, () => Promise<void>> = {
   activeTurns: loadActiveTurns,
   containers: loadContainers,
 };
-// 哪些页面看得见这一组。看不见就不刷 —— 切过去时 watch(active) 会补一次。
+// 哪些页面可见这一组。不可见时不刷新，切到该页时 watch(active) 会补一次。
 const REFRESH_VISIBILITY: Record<RefreshGroup, readonly string[]> = {
   dashboard: ['dashboard'], logs: ['dashboard', 'logs'], chats: ['chats'], usage: ['usage'], quota: ['quota'],
   tasks: ['tasks'], extensions: ['extensions', 'dashboard'], activeTurns: ['dashboard'], schedules: ['tasks'],
   // 容器面板在工具页的沙箱块下方 —— 只有那一页看得见。
   containers: ['tools'],
-  // 待审批不做页面过滤：一条 pending 会把某个真实轮次卡住最多 approval.ttlMs，
-  // 只在任务页刷新等于「运维不切到那一页就永远不知道有人在等」。事件本身很稀疏（命中规则才发）。
+  // 待审批不做页面过滤：一条 pending 会阻塞某个真实轮次最长 approval.ttlMs，
+  // 只在任务页刷新意味着运维不切到那一页就无从得知有请求在等待。该事件本身很稀疏（命中规则才发）。
   approvals: ['dashboard', 'chats', 'messages', 'prompts', 'providers', 'principals', 'tools', 'extensions', 'agents', 'logs', 'usage', 'quota', 'tasks', 'settings'],
   // 配置变了影响设置页、工具页、Agent 页，也影响会话页的覆盖显示；这个事件本身很稀疏，不做页面过滤。
   config: ['dashboard', 'chats', 'messages', 'prompts', 'providers', 'principals', 'tools', 'extensions', 'agents', 'logs', 'usage', 'quota', 'tasks', 'settings'],
@@ -1786,12 +1789,12 @@ const sinceLastEvent = computed(() => {
   return seconds < 60 ? `${seconds} 秒前` : seconds < 3600 ? `${Math.floor(seconds / 60)} 分钟前` : `${Math.floor(seconds / 3600)} 小时前`;
 });
 const refreshTimers = new Map<RefreshGroup, ReturnType<typeof setTimeout>>();
-/** 补拉用的全集。取 `Object.keys` 而不是手抄一份 —— 抄的那份迟早漏掉新加的组，而漏掉的表现是
- *  「那一块的数字断线之后再也不对」，没有任何报错。 */
+/** 补拉用的全集。取 `Object.keys` 而不是另写一份：另写的那份迟早会漏掉新增的组，而遗漏的表现是
+ *  该区块的数字在断线后不再正确，且没有任何报错。 */
 const ALL_REFRESH_GROUPS = Object.keys(REFRESH_LOADERS) as RefreshGroup[];
-/** 因为当前页看不见而被跳过的组。上面那句「切过去时 watch(active) 会补一次」此前只对
- *  `loadActiveTurns` 等五个具体 loader 成立，对这十二组一条都不成立：切过去看到的是**离开那一刻
- *  的快照**。记下来，等切到看得见它的页面再补 —— 也是重连补拉能覆盖到别的页面的唯一途径。 */
+/** 因当前页不可见而被跳过的组。上面那句切到该页时 watch(active) 会补一次，此前只对
+ *  `loadActiveTurns` 等五个具体 loader 成立，对这十二组均不成立：切过去看到的是离开那一刻的
+ *  快照。这里记录下来，等切到可见它的页面再补，这也是重连补拉能覆盖其他页面的唯一途径。 */
 const staleGroups = new Set<RefreshGroup>();
 function scheduleRefresh(groups: readonly RefreshGroup[]): void {
   for (const group of groups) {
@@ -1824,8 +1827,8 @@ async function loadConfigSchema(): Promise<void> {
 // 名单摆到界面上，少一项等于运维够不着，多一项等于让人白填一遍再吃 400。
 const PER_CHAT_ALLOWLIST = ['trigger', 'output', 'context.scope', 'context.limit', 'context.active', 'context.background', 'agent.main', 'memory.pubWriteMinRole'] as const;
 const PER_CHAT_NOTES: Record<string, string> = {
-  'context.scope': '⚠️ 改成 thread 之后，这个会话的后续消息会落到 thread:<chat>:<topic> 这个新 key 上 —— 而覆盖是按 key 存的，等于这条覆盖把自己作废了',
-  'agent.main.modelAlias': '只换这个会话的主模型；Telegram 侧的 /model 写的是另一份（app_kv 的会话别名），两者都在时以 /model 为准 —— 上面那条黄色提示就是它，可以直接清掉',
+  'context.scope': '⚠️ 改为 thread 后，后续消息落到新 key thread:<chat>:<topic>，本条覆盖随即失效',
+  'agent.main.modelAlias': '仅更换该会话的主模型；与 Telegram 侧 /model 并存时以 /model 为准，上方提示可直接清除',
 };
 const chatOverrides = computed<Record<string, unknown>>(() => {
   const key = selectedChat.value?.key;
@@ -1839,7 +1842,7 @@ function flattenOverrides(node: unknown, prefix = ''): Array<{ path: string; val
   return Object.entries(node).flatMap(([key, child]) => flattenOverrides(child, prefix ? `${prefix}.${key}` : key));
 }
 const chatOverrideRows = computed(() => flattenOverrides(chatOverrides.value));
-/** 表单里显示的是这个会话**实际生效**的值（全局 + 覆盖），跟 `perChatConfig` 在运行时做的合并一致。 */
+/** 表单里显示的是这个会话实际生效的值（全局与覆盖合并后），与 `perChatConfig` 运行时的合并一致。 */
 function deepMerge(base: unknown, patch: unknown): unknown {
   if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return patch;
   if (!base || typeof base !== 'object' || Array.isArray(base)) return structuredClone(patch);
@@ -1880,11 +1883,11 @@ async function saveChatOverrides(changes: Record<string, unknown>): Promise<void
   finally { chatOverrideSaving.value = false; }
 }
 /**
- * `perChat.<key>.character`：会话级人格文件名。它在白名单里、也真的被运行时读了
- * （`assembleMainPrompt` → `PromptDocuments.paths`），但**不是 schema 叶子键**
- * （`perChat` 是 `z.record(z.unknown())`），所以 schema 驱动的 `SchemaForm` 渲染不出它
- * —— 给一个单独的输入框，而不是让运维只能打 curl（docs/27 · C-08）。
- * 服务端只认「纯文件名 + .md」，不合格时静默退回全局 `CHARACTER.md`，所以这里也照同一条说明。
+ * `perChat.<key>.character`：会话级人格文件名。它在白名单里，运行时也确实读取
+ * （`assembleMainPrompt` → `PromptDocuments.paths`），但不是 schema 叶子键
+ * （`perChat` 是 `z.record(z.unknown())`），因此 schema 驱动的 `SchemaForm` 渲染不出它。
+ * 这里提供一个单独的输入框，避免运维只能使用 curl（docs/27 · C-08）。
+ * 服务端只接受纯文件名加 `.md`，不合格时静默回退到全局 `CHARACTER.md`，此处沿用同一条说明。
  */
 const chatCharacter = ref('');
 const chatCharacterSaving = ref(false);
@@ -1909,7 +1912,7 @@ async function dropChatOverride(path: string): Promise<void> {
     // 空掉的中间层要一起收掉，否则覆盖对象里会留下一串 `{}`，看起来还配着什么。
     for (const [parent, part] of trail.reverse()) if (!Object.keys(parent[part] as Record<string, unknown>).length) delete parent[part];
     await writeChatOverrides(next);
-    pushToast({ severity: 'success', summary: `已取消覆盖 ${path}`, detail: '这一项回到全局值，下一轮生效' });
+    pushToast({ severity: 'success', summary: `已取消覆盖 ${path}`, detail: '该项回到全局值，下一轮生效' });
     await REFRESH_LOADERS.config();
   } catch (error) { toastError('取消覆盖失败', error); }
 }
@@ -1923,15 +1926,15 @@ async function saveSchemaConfig(changes: Record<string, unknown>): Promise<void>
     // 落库是同步的，但 bot 进程要等 `config.changed` 才 loadConfig()：下面那次 GET 可能还是旧值，
     // 不把表单基线推上去的话，保存完按钮还挂着「保存 N 项改动」。
     schemaForm.value?.commit(keys);
-    // 「保存成功但运行时没变」是最误导的一类反馈（docs/20 · W-CFG-02）：需重启的键要说出来。
+    // 保存成功但运行时未变是最具误导性的一类反馈（docs/20 · W-CFG-02）：需重启的键要明确列出。
     pushToast({ severity: cold.length ? 'warn' : 'success', summary: `已保存 ${keys.length} 项配置`,
-      detail: cold.length ? `其中 ${cold.length} 项要重启进程才生效：${cold.slice(0, 4).join('、')}${cold.length > 4 ? ' 等' : ''}` : '全部是热更新项，已即时生效', life: cold.length ? 9000 : 5000 });
+      detail: cold.length ? `其中 ${cold.length} 项需重启进程才生效：${cold.slice(0, 4).join('、')}${cold.length > 4 ? ' 等' : ''}` : '全部是热更新项，已即时生效', life: cold.length ? 9000 : 5000 });
     // 整块写入会作废同一子树下更细的那些覆盖行（例如工具页逐个点出来的 tools.overrides.<name>）。
     // 不说出来的话，运维只会看到「保存成功」，而某个工具的开关被这次保存顺手改掉了。
     const subsumed = result?.subsumed ?? [];
     if (subsumed.length) {
-      pushToast({ severity: 'warn', summary: `顺带作废了 ${subsumed.length} 条更细的覆盖`,
-        detail: `${subsumed.slice(0, 4).join('、')}${subsumed.length > 4 ? ' 等' : ''} —— 它们已被这次的整块写入取代，请确认工具页上的开关状态`, life: 12000 });
+      pushToast({ severity: 'warn', summary: `已作废 ${subsumed.length} 条更细的覆盖`,
+        detail: `${subsumed.slice(0, 4).join('、')}${subsumed.length > 4 ? ' 等' : ''}；已被本次整块写入取代，请确认工具页的开关状态`, life: 12000 });
     }
     await REFRESH_LOADERS.config();
   } catch (error) { toastError('保存配置失败', error); }
@@ -1947,10 +1950,10 @@ const passwordSaving = ref(false);
 const passwordPinnedEnv = computed(() => configSchema.value?.envPinned.find((entry) => entry.key === 'webui.passwordHash')?.env ?? null);
 const passwordProblem = computed(() => {
   const form = passwordForm.value;
-  if (!form.current) return '要先验证当前口令';
+  if (!form.current) return '需先验证当前口令';
   if (form.next.length < 12) return '新口令至少 12 个字符';
   if (form.next !== form.confirm) return '两次输入的新口令不一致';
-  if (form.next === form.current) return '新口令和当前口令一样';
+  if (form.next === form.current) return '新口令与当前口令相同';
   return '';
 });
 async function savePassword(): Promise<void> {
@@ -1959,7 +1962,7 @@ async function savePassword(): Promise<void> {
   try {
     await api('/api/auth/password', { method: 'POST', body: JSON.stringify({ current: passwordForm.value.current, next: passwordForm.value.next }) });
     passwordForm.value = { current: '', next: '', confirm: '' };
-    pushToast({ severity: 'success', summary: '登录口令已更新', detail: '其余会话已全部吊销（当前这个还在）；新口令即时生效，不用重启', life: 9000 });
+    pushToast({ severity: 'success', summary: '登录口令已更新', detail: '其余会话已全部吊销（当前会话保留），即时生效', life: 9000 });
   } catch (error) { toastError('修改口令失败', error); }
   finally { passwordSaving.value = false; }
 }
@@ -2005,9 +2008,9 @@ watch(active, (value) => {
   drainStaleRefresh();
 });
 /**
- * MCP OAuth 回调的落点。那一跳是**浏览器地址栏**而不是 fetch，所以服务端只能把结果编进 URL；
- * 不在这里读出来的话，人被重定向回来只看到一个多了查询串的控制台首页 —— 「授权到底成没成」
- * 一个字都没有。读完就把参数擦掉（`replaceState`），否则刷新一次会再弹一遍同一条。
+ * MCP OAuth 回调的落点。那一跳落在浏览器地址栏而不是 fetch，因此服务端只能把结果编进 URL；
+ * 不在这里读取时，用户被重定向回来只会看到一个多了查询串的控制台首页，没有任何授权结果提示。
+ * 读取后立即清除参数（`replaceState`），否则刷新一次会重复提示同一条。
  */
 function reportMcpAuthResult(): void {
   const params = new URLSearchParams(window.location.search);
@@ -2015,15 +2018,15 @@ function reportMcpAuthResult(): void {
   if (!status) return;
   const detail = params.get('detail') ?? '';
   const messages: Record<string, { severity: 'success' | 'warn' | 'error'; summary: string; detail: string }> = {
-    ok: { severity: 'success', summary: `${detail || 'MCP server'} 授权完成`, detail: '凭据已加密存下，这台 server 已经重连。发起授权的那个标签可以关掉了。' },
-    denied: { severity: 'warn', summary: '授权被拒绝或取消', detail: detail ? `对方回的是 ${detail}` : '对方没有给出授权码。' },
-    bad_state: { severity: 'error', summary: '这条回调不认', detail: 'state 无效、已用过或已过期（10 分钟）。回扩展页重新点一次〔登录〕。' },
-    incomplete: { severity: 'warn', summary: '换取 token 没有完成', detail: '看日志里的 mcp.auth 事件。' },
-    failed: { severity: 'error', summary: '换取 token 失败', detail: detail || '看日志里的 mcp.auth 事件。' },
-    not_found: { severity: 'error', summary: '这台 server 已经不在配置里了', detail: '授权期间它被删掉或改名了。' },
-    unavailable: { severity: 'error', summary: '这个部署没接 MCP 凭据库', detail: '通常是缺 LUOLI_MASTER_KEY。' },
+    ok: { severity: 'success', summary: `${detail || 'MCP server'} 授权完成`, detail: '凭据已加密存储，server 已重连；发起授权的标签页可关闭。' },
+    denied: { severity: 'warn', summary: '授权被拒绝或取消', detail: detail ? `授权服务返回 ${detail}` : '授权服务未返回授权码。' },
+    bad_state: { severity: 'error', summary: '回调无效', detail: 'state 无效、已使用或已过期（10 分钟）。请返回扩展页重新点击〔登录〕。' },
+    incomplete: { severity: 'warn', summary: '换取 token 未完成', detail: '查看日志中的 mcp.auth 事件。' },
+    failed: { severity: 'error', summary: '换取 token 失败', detail: detail || '查看日志中的 mcp.auth 事件。' },
+    not_found: { severity: 'error', summary: '这台 server 已不在配置中', detail: '授权期间已被删除或改名。' },
+    unavailable: { severity: 'error', summary: '这个部署未接入 MCP 凭据库', detail: '通常是缺少 LUOLI_MASTER_KEY。' },
   };
-  const message = messages[status] ?? { severity: 'warn' as const, summary: `MCP 授权返回了 ${status}`, detail };
+  const message = messages[status] ?? { severity: 'warn' as const, summary: `MCP 授权返回 ${status}`, detail };
   pushToast({ ...message, life: message.severity === 'success' ? 8000 : 0 });
   params.delete('mcpAuth');
   params.delete('detail');
@@ -2037,10 +2040,10 @@ onMounted(async () => {
   reportMcpAuthResult();
   void loadActiveTurns();
   const events = new EventSource('/api/events');
-  // 断线期间的事件不会重放，所以重连之后必须自己补拉一次（docs/29 · `M-WEB-02`）。实测断 20 秒
-  // 再连上，总览的「归档消息」停在旧值十几秒，直到下一条无关事件碰巧到达才对上 ——
-  // **pill 已经亮回「系统在线」而数字是假的，比断着更糟**：断着至少界面自己说了它不新鲜。
-  // 首次连上不补：`load()` 刚跑完那 18 个端点。
+  // 断线期间的事件不会重放，因此重连之后必须自行补拉一次（docs/29 · `M-WEB-02`）。实测断开 20 秒
+  // 后重连，总览的归档消息停在旧值十几秒，直到下一条无关事件到达才更新：
+  // 状态指示已恢复为系统在线而数字仍是旧的，比保持断开更糟，断开时界面至少表明了数据不新鲜。
+  // 首次连接不补拉：`load()` 刚执行完那 18 个端点。
   let everDropped = false;
   events.onopen = () => {
     connected.value = true;
@@ -2074,7 +2077,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
       <nav aria-label="主导航">
         <button v-for="item in navigation" :key="item[0]" type="button" :class="{ active: active === item[0] }" @click="active = item[0]">
           <i :class="item[1]" aria-hidden="true" /><span>{{ item[2] }}</span>
-          <span v-if="item[0] === 'tasks' && pendingApprovals" class="nav-badge" :title="`${pendingApprovals} 个调用正等待裁决`">{{ pendingApprovals }}</span>
+          <span v-if="item[0] === 'tasks' && pendingApprovals" class="nav-badge" :title="`${pendingApprovals} 个调用等待审批`">{{ pendingApprovals }}</span>
         </button>
       </nav>
       <!-- 监听地址读配置：写死成 127.0.0.1:8787 的话，改过 host/port 的部署会看到一个假地址 -->
@@ -2098,7 +2101,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
         <Transition name="page" mode="out-in">
         <div v-if="active === 'dashboard'" key="dashboard">
           <section class="hero-row">
-            <div><p class="eyebrow">LIVE OVERVIEW</p><h2>早上好，系统状态<span>稳定。</span></h2><p>在此处查看您所有数据流</p></div>
+            <div><p class="eyebrow">LIVE OVERVIEW</p><h2>系统状态<span>稳定</span></h2><p>实时指标与依赖状态</p></div>
             <UiButton label="打开实时日志" icon="pi pi-wave-pulse" @click="active = 'logs'" />
           </section>
           <section class="metric-grid">
@@ -2110,14 +2113,14 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
           <!-- 在途 turn 表（docs/09 §3.1）：数据来自进程内的 TurnRegistry，首屏拉一次，
                之后 turn.started / turn.progress / turn.finished 三种事件增量更新。 -->
           <section class="surface in-flight">
-            <header><div><p class="eyebrow">IN FLIGHT</p><h3>在途 turn</h3><p class="section-note">显示所有进行中的对话</p></div>
+            <header><div><p class="eyebrow">IN FLIGHT</p><h3>在途 turn</h3><p class="section-note">进行中的轮次列表</p></div>
               <UiTag :value="activeTurns.length ? `${activeTurns.length} 轮进行中` : '空闲'" :severity="activeTurns.length ? 'info' : 'secondary'" /></header>
-            <DataGrid :rows="activeTurns" :columns="COLUMNS.activeTurns" data-key="id" empty="当前没有正在跑的轮次。">
+            <DataGrid :rows="activeTurns" :columns="COLUMNS.activeTurns" data-key="id" empty="暂无">
               <template #who="{ data }"><b>{{ turnWho(data) }}</b><UiTag :value="data.role" :severity="roleSeverity(data.role)" /></template>
               <template #chat="{ data }"><code>{{ data.key }}</code></template>
               <template #progress="{ data }">
                 <span v-if="turnProgress[data.id]">第 {{ turnProgress[data.id].step }} 步 · {{ turnProgress[data.id].phase === 'tools' ? '工具' : '模型' }} <small>{{ turnProgress[data.id].note }}</small></span>
-                <small v-else class="alias-empty">刚开始，还没有步骤事件</small>
+                <small v-else class="alias-empty">尚无步骤事件</small>
               </template>
               <template #stats="{ data }">{{ data.steps }} 步 · ${{ Number(data.costUsd || 0).toFixed(4) }}</template>
               <template #elapsed="{ data }">{{ elapsed(data.startedAt) }}</template>
@@ -2127,12 +2130,12 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
           <section class="dashboard-grid">
             <!-- 最近**错误**（level≥warn，10 条），点一行直接跳到那条 trace。此前这里是不分级别
                  的最近 6 条，实际上永远被 info 刷满 —— 一张「最近错误」卡片看不到错误（docs/09 §3.1）。 -->
-            <article class="surface"><header><div><p class="eyebrow">RECENT ERRORS</p><h3>最近错误</h3><p class="section-note">点击以查看具体日志</p></div><UiButton variant="text" label="查看全部" icon="pi pi-arrow-right" icon-pos="right" @click="active = 'logs'" /></header>
+            <article class="surface"><header><div><p class="eyebrow">RECENT ERRORS</p><h3>最近错误</h3><p class="section-note">点击任一行打开对应 trace</p></div><UiButton variant="text" label="查看全部" icon="pi pi-arrow-right" icon-pos="right" @click="active = 'logs'" /></header>
               <div class="log-list">
                 <button v-for="row in recentErrors" :key="row.id" type="button" class="log-row" @click="openTrace(row.trace_id)">
                   <span :class="['level', row.level]">{{ row.level }}</span><code>{{ row.kind }}</code><p>{{ row.summary }}</p><time>{{ new Date(row.ts).toLocaleTimeString() }}</time>
                 </button>
-                <div v-if="!recentErrors.length" class="empty">最近没有 warn 以上的事件。</div>
+                <div v-if="!recentErrors.length" class="empty">暂无</div>
               </div>
             </article>
             <!-- 这四行以前是写死的字（沙箱恒显示「Docker」，与 sandbox.mode 无关）。数据一律来自 /api/health/detail。 -->
@@ -2146,27 +2149,27 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
               <div class="health-row"><span>MCP</span><UiTag v-if="!health?.mcp.length" value="未配置" severity="secondary" /><UiTag v-else :value="mcpDown ? `${mcpDown} 个异常` : `${health.mcp.length} 个就绪`" :severity="mcpDown ? 'danger' : 'success'" /></div>
               <div class="health-row"><span>沙箱</span><UiTag :value="health?.sandbox ? `${health.sandbox.mode ?? '未知'}${health.sandbox.allowed ? '' : ' · 不可用'}` : '未装配'" :severity="!health?.sandbox ? 'secondary' : health.sandbox.allowed ? 'info' : 'danger'" :title="health?.sandbox?.reason ?? ''" /></div>
               <!-- 占用只统计不清理：这三行是「该不该去点维护操作」的判据（docs/09 §3.1）。 -->
-              <div class="health-row"><span>DB / WAL</span><UiTag :value="`${formatBytes(health?.db.bytes)} / ${formatBytes(health?.db.walBytes)}`" severity="secondary" title="WAL 明显偏大时点一次 VACUUM 或等下次维护任务的 checkpoint" /></div>
-              <div class="health-row"><span>workspace 占用</span><UiTag :value="formatBytes(health?.db.workspaceBytes)" severity="secondary" title="模型在会话工作目录里造的文件；清理走「清理孤儿文件」或手工删" /></div>
+              <div class="health-row"><span>DB / WAL</span><UiTag :value="`${formatBytes(health?.db.bytes)} / ${formatBytes(health?.db.walBytes)}`" severity="secondary" title="WAL 偏大时执行 VACUUM，或等下次维护 checkpoint" /></div>
+              <div class="health-row"><span>workspace 占用</span><UiTag :value="formatBytes(health?.db.workspaceBytes)" severity="secondary" title="模型在会话工作目录生成的文件，用「清理孤儿文件」清理" /></div>
             </article>
           </section>
           <section class="dashboard-grid">
-            <article class="surface"><header><div><p class="eyebrow">TREND</p><h3>活跃</h3><p class="section-note">显示近七天的活跃数据</p></div></header>
+            <article class="surface"><header><div><p class="eyebrow">TREND</p><h3>活跃</h3><p class="section-note">近七天的消息与轮次</p></div></header>
               <UiLineChart v-if="dashboard.trend?.length" :labels="dashboard.trend.map((point) => point.day.slice(5))"
                 :series="[{ name: '消息', values: dashboard.trend.map((point) => point.messages) }, { name: '轮次', values: dashboard.trend.map((point) => point.turns) }]" />
-              <div v-else class="empty">还没有数据。</div>
+              <div v-else class="empty">暂无数据</div>
             </article>
             <article class="surface"><header><div><p class="eyebrow">QUOTA</p><h3>额度</h3><p class="section-note">当前 bucket · 详见配额页</p></div></header>
               <div class="ring-row">
                 <UiRing v-for="ring in quotaRings" :key="ring.label" :spent="ring.spent" :limit="ring.limit" :label="ring.label" :warn-at-ratio="ring.warnAtRatio" />
-                <div v-if="!quotaRings.length" class="empty">配额已关闭或还没有计数。</div>
+                <div v-if="!quotaRings.length" class="empty">配额已关闭或无计数</div>
               </div>
             </article>
           </section>
         </div>
 
         <section v-else-if="active === 'chats'" key="chats" class="surface page-surface">
-          <header><div><p class="eyebrow">CONTEXTS</p><h2>会话上下文</h2><p>在此处管理所有会话与上下文</p></div><UiTag :value="`${chats.length} 个会话`" severity="secondary" /></header>
+          <header><div><p class="eyebrow">CONTEXTS</p><h2>会话上下文</h2><p>会话列表与上下文窗口</p></div><UiTag :value="`${chats.length} 个会话`" severity="secondary" /></header>
           <div class="chat-cards">
             <button v-for="(entry, index) in chatCards" :key="entry.chat.key" type="button" :style="{ animationDelay: `${Math.min(index, 11) * 40}ms` }"
               :class="['chat-card', entry.isPrivate ? 'private' : 'group', { active: selectedChat?.key === entry.chat.key }]" @click="inspectChat(entry.chat)">
@@ -2181,35 +2184,35 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
                 <UiTag v-if="entry.chat.scope === 'thread'" :value="`话题 ${entry.chat.threadId}`" severity="secondary" />
               </small>
             </button>
-            <p v-if="!chats.length" class="empty-card">还没有任何会话。bot 收到第一条消息后会在这里出现。</p>
+            <p v-if="!chats.length" class="empty-card">暂无会话</p>
           </div>
           <!-- 会话级覆盖：`PATCH /api/chats/:key` 此前只能用 curl 打（docs/21 · G-API-09） -->
           <article v-if="selectedChat" class="surface chat-overrides">
             <header>
               <div><p class="eyebrow">PER-CHAT OVERRIDE</p><h3>只对「{{ selectedChatIdentity?.name }}」生效的设置</h3>
-                <p class="section-note">覆盖优先于设置页的全局值，<b>下一轮开始生效</b>。可改的范围是 <code>docs/11 §2.1</code> 的白名单（触发 / 输出 / 上下文窗口 / 主 Agent / 公共记忆写入角色）—— 白名单是安全边界，越界的路径服务端会直接 400。</p></div>
+                <p class="section-note">覆盖优先于全局值，<b>下一轮生效</b>。可改范围：触发 / 输出 / 上下文窗口 / 主 Agent / 公共记忆写入角色，越界返回 400。</p></div>
               <UiTag :value="chatOverrideRows.length ? `${chatOverrideRows.length} 项覆盖中` : '全部继承全局'" :severity="chatOverrideRows.length ? 'info' : 'secondary'" />
             </header>
             <div v-if="chatOverrideRows.length" class="override-list">
               <span v-for="row in chatOverrideRows" :key="row.path" class="override-chip">
                 <code>{{ row.path }}</code><b>{{ typeof row.value === 'object' ? JSON.stringify(row.value) : String(row.value) }}</b>
-                <button type="button" aria-label="取消这一项覆盖" title="取消覆盖，回到全局值" @click="dropChatOverride(row.path)"><i class="pi pi-times" /></button>
+                <button type="button" aria-label="取消该项覆盖" title="取消覆盖，恢复全局值" @click="dropChatOverride(row.path)"><i class="pi pi-times" /></button>
               </span>
             </div>
             <!-- /model 写的是 app_kv 而不是配置覆盖层，却压过下面的 agent.main.modelAlias：
                  不摆出来的话，「改了模型别名不生效」在界面上完全无迹可寻。 -->
             <p v-if="chatModelAlias" class="callout warn">
               <i class="pi pi-exclamation-triangle" aria-hidden="true" />
-              这个会话被 Telegram 的 <code>/model</code> 钉在别名 <b>{{ chatModelAlias }}</b> 上（存在 <code>app_kv</code>，不是配置覆盖层）。它<b>压过</b>下面的 <code>agent.main.modelAlias</code> 与全局值。
+              该会话已被 Telegram 的 <code>/model</code> 固定为别名 <b>{{ chatModelAlias }}</b>（存储在 <code>app_kv</code>），<b>优先于</b>下面的 <code>agent.main.modelAlias</code> 与全局值。
               <UiButton size="small" variant="text" severity="danger" label="清除会话别名" @click="clearChatModelAlias" />
             </p>
             <!-- character 不是 schema 叶子键（perChat 是 z.record），SchemaForm 渲染不出它 -->
             <div class="chat-character">
               <label>会话人格文件
-                <input v-model="chatCharacter" placeholder="CHARACTER.md（留空 = 用全局人格）" spellcheck="false">
+                <input v-model="chatCharacter" placeholder="CHARACTER.md（留空 = 使用全局人格）" spellcheck="false">
               </label>
               <UiButton size="small" variant="outlined" label="保存" :loading="chatCharacterSaving" @click="saveChatCharacter" />
-              <p class="field-note"><code>memory/</code> 下的替代人设文件名。只收纯文件名（<code>.md</code> 结尾、不含目录与 <code>..</code>）—— 它会被当成路径段用；写别的会**静默退回全局 <code>CHARACTER.md</code>** 而不是报错，免得一个拼错的文件名让整个会话开不了轮次。</p>
+              <p class="field-note"><code>memory/</code> 下的替代人设文件名，仅接受纯文件名（<code>.md</code> 结尾、不含目录与 <code>..</code>）。其他取值<b>静默退回全局 <code>CHARACTER.md</code></b>。</p>
             </div>
             <UiButton variant="text" :icon="chatOverrideOpen ? 'pi pi-chevron-up' : 'pi pi-chevron-down'" :label="chatOverrideOpen ? '收起' : '编辑覆盖项'" @click="chatOverrideOpen = !chatOverrideOpen" />
             <!-- 控件里显示的是这个会话实际生效的值（全局 + 覆盖）；改动才会写进覆盖层 -->
@@ -2221,7 +2224,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
           <div v-if="selectedChat" class="context-workbench">
             <article class="context-viewer">
               <header>
-                <div><p class="eyebrow">MESSAGE WINDOW</p><h3>{{ selectedChatIdentity?.name }}</h3><p class="section-note">按时间倒序，最新的一条在最上面。灰显的条目已被移出窗口：它们还在库里，但下一轮不会发给模型。</p></div>
+                <div><p class="eyebrow">MESSAGE WINDOW</p><h3>{{ selectedChatIdentity?.name }}</h3><p class="section-note">按时间倒序。灰显条目已移出窗口，下一轮不发给模型。</p></div>
                 <UiTag :value="`窗口内 ${inWindowCount} / ${contextMessages.length}`" severity="info" />
               </header>
               <ol>
@@ -2237,19 +2240,19 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
                       <span v-if="message.speaker" class="who">{{ message.speaker }}</span>
                       <small class="context-msg-meta">{{ messageTime(message) }} · {{ message.tokens }} tok · L{{ message.pruneLevel }}</small>
                     </div>
-                    <span :class="['context-msg-text', { structured: !message.textPreview }]">{{ message.textPreview || '[图片 / 文件等非文本内容，展开看完整 parts]' }}</span>
+                    <span :class="['context-msg-text', { structured: !message.textPreview }]">{{ message.textPreview || '[非文本内容，展开查看 parts]' }}</span>
                   </button>
                   <pre v-if="expandedMessages.has(String(message.id))" v-text="JSON.stringify(message, null, 2)" />
                   <small v-if="messageMeta(message).unseenOrdinals">未见 ordinal {{ messageMeta(message).unseenOrdinals }}</small>
                 </li>
-                <li v-if="!contextMessages.length" class="empty">这个会话还没有落过消息。</li>
+                <li v-if="!contextMessages.length" class="empty">暂无消息</li>
               </ol>
             </article>
             <article class="commit-timeline">
               <header><div><p class="eyebrow">COMMIT GRAPH</p><h3>提交与 HEAD</h3></div><UiTag v-if="contextHead" :value="`HEAD ${String(contextHead.id).slice(0, 8)}`" severity="secondary" /></header>
               <div class="head-actions">
-                <p class="field-title">改这个会话的 HEAD</p>
-                <p>两个动作都不删消息，只挪 <code>done</code> 指针：撤回上一次提交等同 Telegram 的 <code>/undo</code>，清空上下文窗口等同 <code>/new</code>。走错了用下面时间线上的「回滚到此」再走回来。</p>
+                <p class="field-title">修改该会话的 HEAD</p>
+                <p>只移动 <code>done</code> 指针，不删除消息：撤回上一次提交 = <code>/undo</code>，清空上下文窗口 = <code>/new</code>。回退用下方「回滚到此」。</p>
                 <div class="row">
                   <UiButton variant="outlined" icon="pi pi-undo" label="撤回上一次提交" :disabled="!canUndoContext" @click="undoContext" />
                   <UiButton variant="outlined" severity="danger" icon="pi pi-refresh" label="清空上下文窗口" @click="resetContext" />
@@ -2261,26 +2264,26 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
                   <div><b>{{ commit.kind }}<UiTag v-if="contextHead && commit.id === contextHead.id" value="当前 HEAD" severity="success" /></b><code>{{ String(commit.id).slice(0, 12) }}</code><small>窗口 {{ commit.windowStart }} → {{ commit.headOrdinal }} · {{ commit.tokensTotal }} tokens</small><small v-if="commit.rebased">Rebased over {{ commit.rebaseOver }}</small><small v-if="commit.meta">{{ commit.meta }}</small></div>
                   <div class="commit-actions"><UiButton size="small" variant="text" label="快照" @click="inspectCommit(commit.id)" /><UiButton size="small" variant="outlined" label="回滚到此" :disabled="Boolean(contextHead && commit.id === contextHead.id)" @click="checkoutCommit(commit.id)" /></div>
                 </li>
-                <li v-if="!commits.length" class="empty">还没有提交过任何 commit。</li>
+                <li v-if="!commits.length" class="empty">暂无 commit</li>
               </ol>
               <pre v-if="inspectedSnapshot" class="snapshot-preview" v-text="JSON.stringify(inspectedSnapshot, null, 2)" />
             </article>
           </div>
         </section>
         <section v-else-if="active === 'messages'" key="messages" class="surface page-surface">
-          <header><div><p class="eyebrow">ARCHIVE</p><h2>消息与对话</h2><p>按回合列出最近的模型对话，当前显示 {{ CONVERSATION_PAGE_SIZE }} 次</p></div></header>
+          <header><div><p class="eyebrow">ARCHIVE</p><h2>消息与对话</h2><p>最近的模型对话，每页 {{ CONVERSATION_PAGE_SIZE }} 次</p></div></header>
           <div class="search-row">
-            <label class="search grow"><i class="pi pi-search" /><input v-model="query" placeholder="输入关键词搜索中文或英文消息" @keyup.enter="searchArchive"></label>
+            <label class="search grow"><i class="pi pi-search" /><input v-model="query" placeholder="搜索归档消息" @keyup.enter="searchArchive"></label>
             <UiButton label="搜索归档" icon="pi pi-search" :loading="searching" @click="searchArchive" />
             <UiButton v-if="searchHits" variant="outlined" label="返回最近对话" icon="pi pi-arrow-left" @click="clearSearch" />
           </div>
           <template v-if="searchHits">
-            <div class="registry-heading"><div><h3>归档检索结果</h3><p class="section-note">「{{ searchTerm }}」命中 {{ searchHits.length }} 条（跨会话，最多 50 条）。正文一律纯文本渲染。</p></div></div>
-            <DataGrid :rows="searchHits" :columns="COLUMNS.hits" data-key="id" paginate empty="没有命中任何消息">
+            <div class="registry-heading"><div><h3>归档检索结果</h3><p class="section-note">「{{ searchTerm }}」命中 {{ searchHits.length }} 条（跨会话，最多 50 条）。</p></div></div>
+            <DataGrid :rows="searchHits" :columns="COLUMNS.hits" data-key="id" paginate empty="无命中">
               <template #tgDate="{ data }">{{ new Date(data.tgDate).toLocaleString() }}</template>
               <template #from="{ data }"><UiTag :value="data.direction === 'out' ? 'bot' : 'user'" :severity="data.direction === 'out' ? 'info' : 'secondary'" /> {{ data.fromName ?? data.fromUsername ?? '—' }}</template>
               <template #text="{ data }"><span class="hit-text">{{ data.text ?? `[${data.kind}]` }}</span><AttachmentStrip :items="data.attachments ?? []" /></template>
-              <template #detail="{ data }"><div class="section-actions"><UiButton v-if="data.turnId" size="small" variant="text" icon="pi pi-code" aria-label="查看这条消息所在轮次的实际调用" @click="openDetail(data.turnId)" /><UiButton size="small" variant="text" icon="pi pi-database" aria-label="查看这条消息的原始载荷" @click="inspectRaw(data.id)" /><UiButton size="small" variant="text" severity="danger" icon="pi pi-trash" aria-label="软删除这条归档消息" @click="softDeleteMessage(data.id, '这条归档消息')" /></div></template>
+              <template #detail="{ data }"><div class="section-actions"><UiButton v-if="data.turnId" size="small" variant="text" icon="pi pi-code" aria-label="查看该消息所在轮次的调用详情" @click="openDetail(data.turnId)" /><UiButton size="small" variant="text" icon="pi pi-database" aria-label="查看该消息的原始载荷" @click="inspectRaw(data.id)" /><UiButton size="small" variant="text" severity="danger" icon="pi pi-trash" aria-label="软删除该归档消息" @click="softDeleteMessage(data.id, '该归档消息')" /></div></template>
             </DataGrid>
           </template>
           <template v-else>
@@ -2299,7 +2302,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
                     <p class="conversation-prompt"><i class="pi pi-user" aria-hidden="true" /><span>{{ turn.prompt || `[${turn.promptKind ?? '无正文'}]` }}</span></p>
                     <!-- 触发消息带的图片 / 文件：不显示的话「[photo]」这类卡片看不出用户到底发了什么 -->
                     <AttachmentStrip :items="turn.attachments ?? []" />
-                    <p class="conversation-reply"><i class="pi pi-sparkles" aria-hidden="true" /><span>{{ turn.reply || (turn.error ? `（失败：${turn.error}）` : '（没有回复落盘）') }}</span></p>
+                    <p class="conversation-reply"><i class="pi pi-sparkles" aria-hidden="true" /><span>{{ turn.reply || (turn.error ? `（失败：${turn.error}）` : '（无回复）') }}</span></p>
                     <small class="conversation-meta">{{ turn.steps }} 步 · {{ turn.toolCalls }} 次工具 · {{ turn.inputTokens }}/{{ turn.outputTokens }} tok · ${{ Number(turn.costUsd || 0).toFixed(4) }}</small>
                   </button>
                   <div class="conversation-side"><UiButton size="small" variant="outlined" icon="pi pi-code" label="查看详情" @click="openDetail(turn.id)" /><UiButton v-if="turn.promptMessageId" size="small" variant="text" severity="danger" icon="pi pi-trash" aria-label="软删除本轮提问" @click="softDeleteMessage(turn.promptMessageId, '本轮提问')" /></div>
@@ -2311,7 +2314,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
                 </div>
               </li>
               <li v-if="conversationLoading" class="empty"><i class="pi pi-spin pi-spinner" aria-hidden="true" /> 加载中…</li>
-              <li v-else-if="!conversations.length" class="empty">还没有任何模型对话。bot 收到第一条触发消息后会出现在这里。</li>
+              <li v-else-if="!conversations.length" class="empty">暂无对话</li>
             </ol>
             <footer v-if="conversationTotal" class="grid-pager">
               <span>共 {{ conversationTotal }} 次对话 · 第 {{ conversationPage }} / {{ conversationPages }} 页</span>
@@ -2320,102 +2323,102 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             </footer>
           </template>
         </section>
-        <section v-else-if="active === 'tools'" key="tools" class="surface page-surface"><header><div><p class="eyebrow">TOOL POLICY</p><h2>工具与权限</h2><p>代码里的 <code>TOOL_POLICY</code> 是默认值，这里改的是覆盖层。点任一行改启停 / 最低角色 / 审批 / 超时 —— 放宽会二次确认。</p></div><div class="header-tags"><UiTag v-if="overriddenToolCount" :value="`${overriddenToolCount} 项策略已覆盖`" severity="info" /><UiTag :value="`${toolRows.filter((row) => row.enabled).length} / ${toolRows.length} 启用`" :severity="toolRows.every((row) => row.enabled) ? 'secondary' : 'warn'" /></div></header>
+        <section v-else-if="active === 'tools'" key="tools" class="surface page-surface"><header><div><p class="eyebrow">TOOL POLICY</p><h2>工具与权限</h2><p>此处修改 <code>TOOL_POLICY</code> 的覆盖层。点击任一行可改启停 / 最低角色 / 审批 / 超时；放宽需二次确认。</p></div><div class="header-tags"><UiTag v-if="overriddenToolCount" :value="`${overriddenToolCount} 项策略已覆盖`" severity="info" /><UiTag :value="`${toolRows.filter((row) => row.enabled).length} / ${toolRows.length} 启用`" :severity="toolRows.every((row) => row.enabled) ? 'secondary' : 'warn'" /></div></header>
           <DataGrid :rows="toolRows" :columns="COLUMNS.tools" data-key="name" paginate :page-size="15" clickable @row-click="editTool">
             <template #name="{ data }"><code>{{ data.name }}</code></template>
             <template #source="{ data }">{{ TOOL_SOURCE_LABEL[data.source] ?? data.source }}</template>
             <template #minRole="{ data }"><UiTag :value="data.minRole" :severity="roleSeverity(data.minRole)" /><i v-if="data.defaults && data.minRole !== data.defaults.minRole" class="pi pi-pencil overridden" :title="`代码默认 ${data.defaults.minRole}`" /></template>
             <template #approval="{ data }">{{ APPROVAL_LABEL[data.approval] ?? data.approval }}<i v-if="data.defaults && data.approval !== data.defaults.approval" class="pi pi-pencil overridden" :title="`代码默认 ${data.defaults.approval}`" /></template>
             <template #scope="{ data }">{{ SCOPE_LABEL[data.scope] ?? data.scope }}</template>
-            <template #enabled="{ data }"><UiTag :value="data.enabled ? '启用' : '已停用'" :severity="data.enabled ? 'success' : 'danger'" /><UiTag v-if="data.relaxed?.length" value="已放宽" severity="danger" :title="`${data.relaxed.join('、')} 比代码默认更松`" /></template>
+            <template #enabled="{ data }"><UiTag :value="data.enabled ? '启用' : '已停用'" :severity="data.enabled ? 'success' : 'danger'" /><UiTag v-if="data.relaxed?.length" value="已放宽" severity="danger" :title="`${data.relaxed.join('、')} 比代码默认更宽松`" /></template>
           </DataGrid>
           <div class="registry-heading">
-            <div><h3>审批规则试跑</h3><p class="section-note">拿一条样例输入过一遍<b>运行时那份</b> <code>ApprovalRules</code>：哪几条命中、为什么没命中、最终风险档位。规则本身在「全部配置」的 <code>approval.rules</code> 里编辑 —— 在这里再实现一遍匹配必然与运行时漂移，而「以为配了审批其实永不命中」正是这条配置最容易出的错。</p></div>
+            <div><h3>审批规则试跑</h3><p class="section-note">以样例输入执行<b>运行时的</b> <code>ApprovalRules</code>。规则在「全部配置」的 <code>approval.rules</code> 中编辑。</p></div>
             <UiButton size="small" variant="outlined" icon="pi pi-play" label="试跑" :loading="ruleTesting" :disabled="!ruleTestTool" @click="testApprovalRule" />
           </div>
           <div class="form-grid">
             <label>工具名<UiSelect v-model="ruleTestTool" :options="Object.keys(tools).map((name) => ({ value: name, label: name }))" filter aria-label="工具名" /></label>
-            <label>样例输入（JSON）<textarea v-model="ruleTestInput" rows="3" spellcheck="false" placeholder='{"command":"rm -rf /"}' /><small class="field-note">规则里的 <code>pattern</code> 匹配的是这份输入的 JSON 序列化结果，所以键名也在匹配范围内。</small></label>
+            <label>样例输入（JSON）<textarea v-model="ruleTestInput" rows="3" spellcheck="false" placeholder='{"command":"rm -rf /"}' /><small class="field-note"><code>pattern</code> 匹配该输入的 JSON 序列化结果，含键名。</small></label>
           </div>
           <div v-if="ruleTestResult" class="rule-test-result">
             <p :class="['callout', ruleTestResult.needed ? 'warn' : '']">
               <i :class="ruleTestResult.needed ? 'pi pi-shield' : 'pi pi-check-circle'" />
-              {{ ruleTestResult.needed ? `需要审批 · 风险 ${ruleTestResult.risk}` : '不需要审批（没有规则命中）' }}
-              <span v-if="ruleTestResult.runtimeDependent">。其中有规则用了 <code>when: target_exists</code>，最终是否需要审批取决于运行时「目标是否存在」——试跑给不出这个答案。</span>
+              {{ ruleTestResult.needed ? `需要审批 · 风险 ${ruleTestResult.risk}` : '不需要审批（无规则命中）' }}
+              <span v-if="ruleTestResult.runtimeDependent">。存在 <code>when: target_exists</code> 规则，试跑无法判定。</span>
             </p>
             <ol class="rule-report"><li v-for="entry in ruleTestResult.rules" :key="entry.index" :class="{ matched: entry.matched }"><UiTag :value="entry.matched ? '命中' : '未命中'" :severity="entry.matched ? 'warn' : 'secondary'" /><code>#{{ entry.index }}</code><span>{{ entry.reason }}</span></li></ol>
-            <p v-if="!ruleTestResult.rules.length" class="empty">还没有配置任何审批规则。</p>
+            <p v-if="!ruleTestResult.rules.length" class="empty">暂无审批规则</p>
           </div>
           <div class="registry-heading">
-            <div><h3>沙箱</h3><p class="section-note">决定 <code>exec</code> 类工具跑在哪儿。<code>bypassRoles</code> 里的角色<b>完全绕过</b>沙箱，直接在宿主上执行 —— 这是整套权限模型里最锋利的一格。保存后热更新，下一次工具调用即生效。</p></div>
+            <div><h3>沙箱</h3><p class="section-note">决定 <code>exec</code> 类工具的执行位置，保存后热更新。<code>bypassRoles</code> 中的角色<b>完全绕过</b>沙箱，直接在宿主执行。</p></div>
             <div class="section-actions">
               <UiButton size="small" variant="outlined" icon="pi pi-bolt" label="探测可用性" :loading="sandboxProbing" @click="probeSandbox" />
               <UiButton size="small" variant="outlined" icon="pi pi-cloud-download" label="拉取镜像" :loading="pullingImage" :disabled="sandboxForm.mode !== 'docker'" @click="pullSandboxImage" />
               <UiButton size="small" icon="pi pi-save" label="保存沙箱" :loading="sandboxSaving" :disabled="!sandboxDirty" @click="saveSandbox" />
             </div>
           </div>
-          <div v-if="sandboxForm.mode === 'none'" class="danger-banner"><i class="pi pi-exclamation-triangle" /><code>mode = none</code>：exec 类工具不做任何隔离，以 bot 进程的权限直接在宿主上执行模型给出的命令。</div>
-          <div v-if="sandbox?.plan && !sandbox.plan.allowed" class="danger-banner"><i class="pi pi-exclamation-triangle" />当前配置下沙箱对 owner 都不可用：{{ sandbox.plan.reason ?? '未知原因' }} —— 需要沙箱的工具会直接失败。</div>
-          <p v-if="sandboxProbe" :class="['callout', sandboxProbe.available ? '' : 'warn']"><i :class="sandboxProbe.available ? 'pi pi-check-circle' : 'pi pi-times-circle'" />探测结果（打的是<b>已保存</b>的那份配置）：{{ sandboxProbe.available ? `可用 · ${sandboxProbe.mode ?? sandboxForm.mode}` : sandboxProbe.error ?? '不可用' }}</p>
+          <div v-if="sandboxForm.mode === 'none'" class="danger-banner"><i class="pi pi-exclamation-triangle" /><code>mode = none</code>：exec 类工具不隔离，以 bot 进程权限在宿主执行模型给出的命令。</div>
+          <div v-if="sandbox?.plan && !sandbox.plan.allowed" class="danger-banner"><i class="pi pi-exclamation-triangle" />沙箱对 owner 也不可用：{{ sandbox.plan.reason ?? '未知原因' }}。需要沙箱的工具将失败。</div>
+          <p v-if="sandboxProbe" :class="['callout', sandboxProbe.available ? '' : 'warn']"><i :class="sandboxProbe.available ? 'pi pi-check-circle' : 'pi pi-times-circle'" />探测结果（基于<b>已保存</b>的配置）：{{ sandboxProbe.available ? `可用 · ${sandboxProbe.mode ?? sandboxForm.mode}` : sandboxProbe.error ?? '不可用' }}</p>
           <div class="form-grid">
-            <label>模式<UiSelect v-model="sandboxForm.mode" :options="SANDBOX_MODES" @change="markSandboxDirty" /><small class="field-note">none 不读下面的镜像与资源限制，而且非 bypassRoles 的角色连执行类工具都拿不到。</small></label>
-            <label>容器网络<UiSelect v-model="sandboxForm.network" :options="[{ value: 'none', label: 'none · 断网' }, { value: 'bridge', label: 'bridge · 可出网' }]" :disabled="sandboxForm.mode !== 'docker'" @change="markSandboxDirty" /><small class="field-note">改成 bridge 等于允许模型生成的代码访问网络与内网。</small></label>
+            <label>模式<UiSelect v-model="sandboxForm.mode" :options="SANDBOX_MODES" @change="markSandboxDirty" /><small class="field-note">none 下非 bypassRoles 的角色无法获得执行类工具。</small></label>
+            <label>容器网络<UiSelect v-model="sandboxForm.network" :options="[{ value: 'none', label: 'none · 断网' }, { value: 'bridge', label: 'bridge · 可出网' }]" :disabled="sandboxForm.mode !== 'docker'" @change="markSandboxDirty" /><small class="field-note">bridge 下模型生成的代码可访问公网与内网。</small></label>
             <label>镜像<input v-model="sandboxForm.image" :disabled="sandboxForm.mode !== 'docker'" @input="markSandboxDirty"></label>
             <label>docker 可执行文件<input v-model="sandboxForm.dockerBin" :disabled="sandboxForm.mode !== 'docker'" @input="markSandboxDirty"></label>
-            <label>工作目录<input v-model="sandboxForm.workspaceDir" @input="markSandboxDirty"><small class="field-note">本进程看到的路径，文件工具也用它。</small></label>
-            <label>宿主工作目录<input v-model="sandboxForm.hostWorkspaceDir" placeholder="非容器部署留空" :disabled="sandboxForm.mode !== 'docker'" @input="markSandboxDirty"><small class="field-note">bot 自己跑在容器里时必填：<code>-v</code> 用的是<b>宿主</b>路径，留空会挂到一个不存在的目录上，沙箱与文件工具从此看到两个世界。</small></label>
+            <label>工作目录<input v-model="sandboxForm.workspaceDir" @input="markSandboxDirty"><small class="field-note">本进程内的路径，文件工具使用同一路径。</small></label>
+            <label>宿主工作目录<input v-model="sandboxForm.hostWorkspaceDir" placeholder="非容器部署留空" :disabled="sandboxForm.mode !== 'docker'" @input="markSandboxDirty"><small class="field-note">bot 运行在容器内时必填：<code>-v</code> 使用<b>宿主</b>路径，留空会挂载到不存在的目录。</small></label>
             <label>内存上限（MB）<UiNumber :model-value="sandboxForm.memoryMb" :min="16" :step="64" :disabled="sandboxForm.mode !== 'docker'" @update:model-value="sandboxForm.memoryMb = $event; markSandboxDirty()" /></label>
             <label>CPU 核数<UiNumber :model-value="sandboxForm.cpus" :min="0.1" :step="0.5" :disabled="sandboxForm.mode !== 'docker'" @update:model-value="sandboxForm.cpus = $event; markSandboxDirty()" /></label>
             <label>进程数上限<UiNumber :model-value="sandboxForm.pidsLimit" :min="1" :disabled="sandboxForm.mode !== 'docker'" @update:model-value="sandboxForm.pidsLimit = $event; markSandboxDirty()" /></label>
             <label>tmpfs（MB）<UiNumber :model-value="sandboxForm.tmpfsMb" :min="1" :step="16" :disabled="sandboxForm.mode !== 'docker'" @update:model-value="sandboxForm.tmpfsMb = $event; markSandboxDirty()" /></label>
-            <UiSwitch v-model="sandboxForm.readOnlyRoot" class="wide" label="根文件系统只读（只有工作目录与 tmpfs 可写）" :disabled="sandboxForm.mode !== 'docker'" @change="markSandboxDirty" />
+            <UiSwitch v-model="sandboxForm.readOnlyRoot" class="wide" label="根文件系统只读（仅工作目录与 tmpfs 可写）" :disabled="sandboxForm.mode !== 'docker'" @change="markSandboxDirty" />
             <div class="wide">
-              <p class="field-title">绕过沙箱的角色<small>勾中的角色，exec 类工具直接在宿主上跑。</small></p>
+              <p class="field-title">绕过沙箱的角色<small>勾选的角色，exec 类工具直接在宿主执行。</small></p>
               <div class="trigger-switches">
                 <UiCheckbox v-for="role in ROLES" :key="role" :model-value="sandboxForm.bypassRoles.includes(role)" :label="role" @change="toggleBypassRole(role)" />
               </div>
-              <p v-if="sandboxForm.bypassRoles.some((role) => role !== 'owner')" class="field-note wake-issue"><i class="pi pi-exclamation-triangle" />owner 之外的角色也在绕过名单里：这些人能让模型在宿主上执行任意命令。保存时会再问一次。</p>
+              <p v-if="sandboxForm.bypassRoles.some((role) => role !== 'owner')" class="field-note wake-issue"><i class="pi pi-exclamation-triangle" />owner 之外的角色也在绕过名单中：可让模型在宿主执行任意命令。保存时二次确认。</p>
             </div>
             <!-- `tools.fs.allowHostFsForOwner` 与上面那些不在同一棵配置子树下，但它是同一件事的另一半：
                  沙箱管「命令跑在哪儿」，它管「文件工具看得见哪儿」。此前沙箱页上没有它的任何入口，
                  只能从「设置 → 全部配置」里被渲染成一个普通开关（docs/29 · M-WEB-10）。 -->
             <div class="wide">
-              <UiSwitch v-model="hostFsForOwner" label="owner 的文件工具可以读写宿主全盘（allowHostFsForOwner）" @change="markSandboxDirty" />
+              <UiSwitch v-model="hostFsForOwner" label="owner 的文件工具可读写宿主全盘（allowHostFsForOwner）" @change="markSandboxDirty" />
               <p class="field-note" :class="hostFsForOwner ? 'wake-issue' : ''">
                 <i v-if="hostFsForOwner" class="pi pi-exclamation-triangle" />
-                关着时 owner 的文件工具也被限制在工作目录里。<b>打开等于把宿主整个文件系统交给模型</b> —— 含 <code>.env</code> 与本仓库自身。保存时会再问一次。
+                <b>开启后模型可访问宿主全部文件系统</b>，含 <code>.env</code> 与本仓库。保存时二次确认。
               </p>
             </div>
           </div>
           <div class="registry-heading">
-            <div><h3>持久容器</h3><p class="section-note">开着的时候，<b>每个群 / 私聊有一个常驻容器</b>，执行走 <code>docker exec</code> 而不是每次新起一个 —— 跑着的后台进程能活到下一轮。工作区文件本来就是按会话持久的，这里管的是容器本身。只在 <code>mode = docker</code> 下有意义。</p></div>
+            <div><h3>持久容器</h3><p class="section-note">启用后<b>每个群 / 私聊各有一个常驻容器</b>，执行走 <code>docker exec</code>，后台进程可保留到下一轮。仅在 <code>mode = docker</code> 下生效。</p></div>
           </div>
-          <div v-if="sandboxForm.persistent.enabled" class="danger-banner"><i class="pi pi-exclamation-triangle" />持久容器<b>默认能出网</b>（下面单独那个「持久容器网络」，与上面的容器网络不是同一个键）：<code>bridge</code> 下容器可直达公网与宿主，而可审计的出站代理并没有实现。</div>
+          <div v-if="sandboxForm.persistent.enabled" class="danger-banner"><i class="pi pi-exclamation-triangle" />持久容器<b>默认可出网</b>：<code>bridge</code> 下容器可直接访问公网与宿主。</div>
           <div class="form-grid">
             <UiSwitch v-model="sandboxForm.persistent.enabled" class="wide" label="启用会话级持久容器" :disabled="sandboxForm.mode !== 'docker'" @change="markSandboxDirty" />
-            <label>闲置多久回收（小时）<UiNumber :model-value="hoursOf(sandboxForm.persistent.idleTtlMs)" :min="0.1" :step="1" :disabled="!sandboxForm.persistent.enabled" @update:model-value="sandboxForm.persistent.idleTtlMs = Math.round(($event ?? 0) * 3600000); markSandboxDirty()" /><small class="field-note">每执行一次就重新计时，所以一直在用的会话容器可以活很久。</small></label>
-            <label>最长存活（小时）<UiNumber :model-value="hoursOf(sandboxForm.persistent.maxLifetimeMs)" :min="0" :step="24" :disabled="!sandboxForm.persistent.enabled" @update:model-value="sandboxForm.persistent.maxLifetimeMs = Math.round(($event ?? 0) * 3600000); markSandboxDirty()" /><small class="field-note"><b>0 = 不设上限。</b>从创建算起，不因活跃延长；「钉住」豁免不了这一条。</small></label>
-            <label>容器数上限<UiNumber :model-value="sandboxForm.persistent.maxContainers" :min="1" :disabled="!sandboxForm.persistent.enabled" @update:model-value="sandboxForm.persistent.maxContainers = $event; markSandboxDirty()" /><small class="field-note">撞上限时新会话的执行类工具<b>直接报错</b>，不会悄悄退回一次性容器。</small></label>
-            <label>持久容器网络<UiSelect v-model="sandboxForm.persistent.network" :options="[{ value: 'none', label: 'none · 断网' }, { value: 'bridge', label: 'bridge · 可出网' }]" :disabled="!sandboxForm.persistent.enabled" @change="markSandboxDirty" /><small class="field-note">与上面那个「容器网络」是<b>两个键</b>：那个管一次性容器，这个管持久容器。</small></label>
-            <label>回收频率（cron）<input v-model="sandboxForm.persistent.reapCron" :disabled="!sandboxForm.persistent.enabled" @input="markSandboxDirty"><small class="field-note">五段式。到期回收与「库 ↔ docker」对账都在这条上。</small></label>
+            <label>闲置回收时长（小时）<UiNumber :model-value="hoursOf(sandboxForm.persistent.idleTtlMs)" :min="0.1" :step="1" :disabled="!sandboxForm.persistent.enabled" @update:model-value="sandboxForm.persistent.idleTtlMs = Math.round(($event ?? 0) * 3600000); markSandboxDirty()" /><small class="field-note">每次执行后重新计时，持续使用的容器不回收。</small></label>
+            <label>最长存活（小时）<UiNumber :model-value="hoursOf(sandboxForm.persistent.maxLifetimeMs)" :min="0" :step="24" :disabled="!sandboxForm.persistent.enabled" @update:model-value="sandboxForm.persistent.maxLifetimeMs = Math.round(($event ?? 0) * 3600000); markSandboxDirty()" /><small class="field-note"><b>0 = 不设上限。</b>从创建算起，不因活跃延长；「钉住」无效。</small></label>
+            <label>容器数上限<UiNumber :model-value="sandboxForm.persistent.maxContainers" :min="1" :disabled="!sandboxForm.persistent.enabled" @update:model-value="sandboxForm.persistent.maxContainers = $event; markSandboxDirty()" /><small class="field-note">达到上限时，新会话的执行类工具<b>直接报错</b>。</small></label>
+            <label>持久容器网络<UiSelect v-model="sandboxForm.persistent.network" :options="[{ value: 'none', label: 'none · 断网' }, { value: 'bridge', label: 'bridge · 可出网' }]" :disabled="!sandboxForm.persistent.enabled" @change="markSandboxDirty" /><small class="field-note">与上方「容器网络」是<b>两个键</b>，分别作用于一次性与持久容器。</small></label>
+            <label>回收频率（cron）<input v-model="sandboxForm.persistent.reapCron" :disabled="!sandboxForm.persistent.enabled" @input="markSandboxDirty"><small class="field-note">五段式。到期回收与「数据库 ↔ docker」对账由它触发。</small></label>
           </div>
-          <p class="callout"><i class="pi pi-info-circle" />关掉这个开关<b>不会立刻销毁已有容器</b>：它们由下一次回收对账收走，在那之前 <code>docker ps</code> 里还看得见。</p>
+          <p class="callout"><i class="pi pi-info-circle" />关闭该开关<b>不会立即销毁已有容器</b>：由下一次回收对账清理，在此之前 <code>docker ps</code> 仍可见。</p>
           <div class="registry-heading">
-            <div><h4>当前容器</h4><p class="section-note">「重置」= 销毁并立刻重建，容器里跑着的进程会一起没；工作区文件默认不动。</p></div>
+            <div><h4>当前容器</h4><p class="section-note">「重置」= 销毁并重建，容器内进程终止；工作区文件默认保留。</p></div>
             <UiTag :value="containers.available ? `${containers.used} / ${containers.max}` : '未装配'" :severity="containers.available && containers.used >= containers.max ? 'danger' : 'secondary'" />
           </div>
-          <p v-if="!containers.available" class="callout warn"><i class="pi pi-exclamation-triangle" />这个部署没有装配持久容器运行时，这里读不到任何容器（<b>不是「一个都没有」</b>）。</p>
-          <p v-else-if="!containers.enabled" class="callout"><i class="pi pi-info-circle" />持久容器没开着。下面列出的是还没被回收的存量容器（如果有）。</p>
-          <DataGrid :rows="containers.containers" :columns="COLUMNS.containers" data-key="chatId" empty="现在没有持久容器">
+          <p v-if="!containers.available" class="callout warn"><i class="pi pi-exclamation-triangle" />该部署未装配持久容器运行时，无可显示的容器（<b>不等于容器数为 0</b>）。</p>
+          <p v-else-if="!containers.enabled" class="callout"><i class="pi pi-info-circle" />持久容器未启用，下方为尚未回收的存量容器。</p>
+          <DataGrid :rows="containers.containers" :columns="COLUMNS.containers" data-key="chatId" empty="暂无容器">
             <template #chat="{ data }"><div class="alias-name"><b>{{ data.chatLabel ?? `未登记会话 ${data.chatId}` }}</b></div><small class="hit-text">{{ data.chatId }}<template v-if="data.lastError"> · <span class="wake-issue">{{ data.lastError }}</span></template></small></template>
-            <template #name="{ data }"><code>{{ data.name }}</code><small class="alias-empty">{{ data.image }}<template v-if="!data.hasSetsid"> · 无 setsid（取消杀不干净子进程）</template></small></template>
+            <template #name="{ data }"><code>{{ data.name }}</code><small class="alias-empty">{{ data.image }}<template v-if="!data.hasSetsid"> · 无 setsid（取消时无法终止子进程）</template></small></template>
             <template #used="{ data }"><span>{{ new Date(data.lastUsedAt).toLocaleString() }}</span><small class="alias-empty">共 {{ data.execCount }} 次执行</small></template>
             <template #expires="{ data }"><UiTag :value="containerExpiry(data)" :severity="data.pinned ? 'info' : 'secondary'" /></template>
             <template #actions="{ data }"><div class="section-actions">
               <UiButton size="small" variant="outlined" :icon="data.pinned ? 'pi pi-lock-open' : 'pi pi-lock'" :label="data.pinned ? '取消钉住' : '钉住'" :loading="containerBusy === data.chatId" @click="keepContainer(data, { pin: !data.pinned })" />
               <UiButton size="small" variant="outlined" icon="pi pi-clock" label="+24h" :loading="containerBusy === data.chatId" @click="keepContainer(data, { hours: 24 })" />
               <UiButton size="small" variant="outlined" severity="danger" label="重置" :loading="containerBusy === data.chatId" @click="resetContainer(data, false)" />
-              <UiButton size="small" variant="outlined" severity="danger" icon="pi pi-trash" title="重置并把工作区文件挪进 .luoli-trash" :loading="containerBusy === data.chatId" @click="resetContainer(data, true)" />
+              <UiButton size="small" variant="outlined" severity="danger" icon="pi pi-trash" title="重置并将工作区文件移入 .luoli-trash" :loading="containerBusy === data.chatId" @click="resetContainer(data, true)" />
             </div></template>
           </DataGrid>
         </section>
@@ -2427,11 +2430,11 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
           :skills="skills" :plugins="plugins" :mcp="mcp" :custom-tools="customTools" :config="config"
           @refresh="load"
         />
-        <section v-else-if="active === 'agents'" key="agents" class="surface page-surface"><header><div><p class="eyebrow">AGENT TOPOLOGY</p><h2>子 Agent</h2><p>独立上下文、权限不高于父 Agent，结果全文独立落盘。点任一行编辑，保存即热更新。</p></div><UiButton label="新建 Agent" icon="pi pi-plus" @click="editAgent()" /></header>
-          <DataGrid :rows="agents" :columns="COLUMNS.agents" data-key="name" clickable empty="没有配置子 Agent。模型只有在这里配了 agent 才能用 spawn_agent 派发。" @row-click="editAgent">
+        <section v-else-if="active === 'agents'" key="agents" class="surface page-surface"><header><div><p class="eyebrow">AGENT TOPOLOGY</p><h2>子 Agent</h2><p>独立上下文、权限不高于父 Agent，结果全文单独存储。点击任一行编辑，保存即热更新。</p></div><UiButton label="新建 Agent" icon="pi pi-plus" @click="editAgent()" /></header>
+          <DataGrid :rows="agents" :columns="COLUMNS.agents" data-key="name" clickable empty="暂无子 Agent" @row-click="editAgent">
             <template #name="{ data }"><code>{{ data.name }}</code>
-              <UiTag v-if="data.source === 'file'" value="来自文件" severity="info" :title="`定义在 agents/${data.name}.md；在这里编辑会建一份配置覆盖`" />
-              <UiTag v-else-if="data.source === 'file-overridden'" value="覆盖了文件" severity="warn" :title="`agents/${data.name}.md 里也有一份定义，运行时用的是这份配置`" />
+              <UiTag v-if="data.source === 'file'" value="来自文件" severity="info" :title="`定义在 agents/${data.name}.md；在此编辑将创建一份配置覆盖`" />
+              <UiTag v-else-if="data.source === 'file-overridden'" value="覆盖了文件" severity="warn" :title="`agents/${data.name}.md 中也有一份定义，运行时使用当前配置`" />
             </template>
             <template #minRole="{ data }"><UiTag :value="data.minRole" :severity="roleSeverity(data.minRole)" /></template>
             <template #modelAlias="{ data }"><code>{{ data.modelAlias }}</code></template>
@@ -2465,37 +2468,37 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             </article>
           </div>
           <h3 class="usage-detail-title">明细</h3>
-          <DataGrid :rows="usage" :columns="COLUMNS.usage" data-key="id" paginate empty="还没有产生用量">
+          <DataGrid :rows="usage" :columns="COLUMNS.usage" data-key="id" paginate empty="暂无用量">
             <template #ts="{ data }">{{ new Date(data.ts).toLocaleString() }}</template>
             <template #cost_usd="{ data }">${{ Number(data.cost_usd).toFixed(4) }}</template>
           </DataGrid>
         </section>
 
         <section v-else-if="active === 'quota'" key="quota" class="surface page-surface">
-          <header><div><p class="eyebrow">SPEND LIMITS</p><h2>配额</h2><p>限额是配置项（热更新，下一条消息即生效）；计数器是 <code>quota_counters</code> 里的实时值。开轮次时先按估算预留，结束后按实际花费结算。</p></div><UiTag :value="quotaForm.enabled ? '配额生效中' : '配额已关闭'" :severity="quotaForm.enabled ? 'success' : 'danger'" /></header>
-          <div v-if="!quotaForm.enabled" class="danger-banner"><i class="pi pi-exclamation-triangle" /><code>quota.enabled</code> 已关闭：所有金额限额都不再判定，任何人都能一直发起对话把钱花完。频率限制（下面那组）不受这个开关影响，仍然生效。</div>
-          <div v-if="quota && quota.unpricedTotal" class="danger-banner"><i class="pi pi-exclamation-triangle" />有 <b>{{ quota.unpricedTotal }}</b> 个启用中的模型没有定价，走它们的轮次<b>花费按 0 记账</b>，限额配得再准也拦不住 —— <code>{{ quota.unpriced.map((entry) => entry.modelId).join('、') }}</code><UiButton size="small" variant="text" label="去补定价" @click="active = 'providers'" /></div>
+          <header><div><p class="eyebrow">SPEND LIMITS</p><h2>配额</h2><p>限额是配置项（热更新）；计数器是 <code>quota_counters</code> 中的实时值。开启轮次按估算预留，结束后按实际结算。</p></div><UiTag :value="quotaForm.enabled ? '配额生效中' : '配额已关闭'" :severity="quotaForm.enabled ? 'success' : 'danger'" /></header>
+          <div v-if="!quotaForm.enabled" class="danger-banner"><i class="pi pi-exclamation-triangle" /><code>quota.enabled</code> 已关闭：所有金额限额不再判定。频率限制不受该开关影响，仍然生效。</div>
+          <div v-if="quota && quota.unpricedTotal" class="danger-banner"><i class="pi pi-exclamation-triangle" />有 <b>{{ quota.unpricedTotal }}</b> 个启用中的模型缺少定价，这些轮次<b>花费按 0 记账</b>，限额无法拦截：<code>{{ quota.unpriced.map((entry) => entry.modelId).join('、') }}</code><UiButton size="small" variant="text" label="补齐定价" @click="active = 'providers'" /></div>
 
           <div class="registry-heading">
-            <div><h3>限额</h3><p class="section-note">金额留空 = 不限。三层同时判定，任一层超了就拒：全局 → 会话 → 用户。预留在轮次结束后按实际花费结算，进程被 kill 时残留的预留量由启动清理归零。</p></div>
+            <div><h3>限额</h3><p class="section-note">金额留空 = 不限。三层同时判定，任一层超限即拒绝：全局 → 会话 → 用户。</p></div>
             <UiButton size="small" icon="pi pi-save" label="保存配额" :loading="quotaSaving" :disabled="!quotaDirty" @click="saveQuota" />
           </div>
           <div class="form-grid">
             <div class="trigger-switches">
               <UiSwitch v-model="quotaForm.enabled" label="启用金额配额" @change="markQuotaDirty" />
-              <UiSwitch v-model="quotaForm.requirePricing" label="模型缺定价时拒绝开轮次" @change="markQuotaDirty" />
+              <UiSwitch v-model="quotaForm.requirePricing" label="模型缺少定价时拒绝开启轮次" @change="markQuotaDirty" />
             </div>
-            <label>最小预留（美元）<UiNumber :model-value="quotaForm.minReserveUsd" :min="0" :step="0.01" @update:model-value="quotaForm.minReserveUsd = $event; markQuotaDirty()" /><small class="field-note">开轮次时至少占住这么多额度。估算值比它低时按它算，免得一堆小轮次并发挤穿限额。</small></label>
-            <p class="field-note wide"><code>requirePricing</code> 对 owner 不生效：owner 的轮次即便模型没定价也照常开，只是那一轮记 0 美元。</p>
-            <p class="field-title wide">按范围的金额上限<small>bucket 按 <code>{{ quota?.timezone ?? 'general.timezone' }}</code> 切换：日 = 当地自然日，月 = 当地自然月。</small></p>
+            <label>最小预留（美元）<UiNumber :model-value="quotaForm.minReserveUsd" :min="0" :step="0.01" @update:model-value="quotaForm.minReserveUsd = $event; markQuotaDirty()" /><small class="field-note">估算低于该值时按该值预留。</small></label>
+            <p class="field-note wide"><code>requirePricing</code> 对 owner 不生效，该轮记 0 美元。</p>
+            <p class="field-title wide">按范围的金额上限<small>bucket 按 <code>{{ quota?.timezone ?? 'general.timezone' }}</code> 切换的当地自然日 / 月。</small></p>
             <label>全局 · 每日<UiNumber :model-value="quotaForm.globalDaily" :min="0" :step="0.5" placeholder="不限" @update:model-value="quotaForm.globalDaily = $event; markQuotaDirty()" /></label>
             <label>全局 · 每月<UiNumber :model-value="quotaForm.globalMonthly" :min="0" :step="5" placeholder="不限" @update:model-value="quotaForm.globalMonthly = $event; markQuotaDirty()" /></label>
             <label>单会话 · 每日<UiNumber :model-value="quotaForm.chatDaily" :min="0" :step="0.5" placeholder="不限" @update:model-value="quotaForm.chatDaily = $event; markQuotaDirty()" /></label>
             <label>单会话 · 每月<UiNumber :model-value="quotaForm.chatMonthly" :min="0" :step="5" placeholder="不限" @update:model-value="quotaForm.chatMonthly = $event; markQuotaDirty()" /></label>
             <label>单用户 · 每日<UiNumber :model-value="quotaForm.userDaily" :min="0" :step="0.5" placeholder="不限" @update:model-value="quotaForm.userDaily = $event; markQuotaDirty()" /></label>
             <label>单用户 · 每月<UiNumber :model-value="quotaForm.userMonthly" :min="0" :step="5" placeholder="不限" @update:model-value="quotaForm.userMonthly = $event; markQuotaDirty()" /></label>
-            <p class="field-note wide">推荐 <code>单用户 ≤ 单会话 ≤ 全局</code>（[11 §约束]）。反过来配不会被拒，只是内层那道闸永远先撞上。</p>
-            <p class="field-title wide">按角色覆盖单用户额度<small>留空 = 用上面那组单用户的值。</small></p>
+            <p class="field-note wide">推荐 <code>单用户 ≤ 单会话 ≤ 全局</code>。</p>
+            <p class="field-title wide">按角色覆盖单用户额度<small>留空 = 沿用上方单用户的值。</small></p>
             <div class="wide quota-roles">
               <div v-for="role in ROLES" :key="role" class="quota-role">
                 <UiTag :value="role" :severity="roleSeverity(role)" />
@@ -2503,27 +2506,27 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
                 <label>每月<UiNumber :model-value="quotaForm.byRole[role].monthly" :min="0" :step="5" placeholder="继承" @update:model-value="quotaForm.byRole[role].monthly = $event; markQuotaDirty()" /></label>
               </div>
             </div>
-            <p class="field-note wide"><i class="pi pi-info-circle" />覆盖只能填<b>具体金额</b>，填不出「这个角色不限」：运行时取的是 <code>byRole[role].daily ?? perUser.daily</code>，<code>null</code> 同样回落到上面那格。要让某个角色不限，得把单用户那格也清空。判定用的是<b>有效角色</b>（min(用户角色, 会话角色)），所以同一个人在不同群里可能落到不同档。</p>
-            <p class="field-title wide">单轮上限<small>一轮之内的硬闸，与上面按天/按月的额度是两回事。</small></p>
-            <label>单轮成本上限（美元）<UiNumber :model-value="quotaForm.maxCostUsd" :min="0.001" :step="0.1" @update:model-value="quotaForm.maxCostUsd = $event; markQuotaDirty()" /><small class="field-note">撞上之后不是直接掐断，而是把工具目录清空、强制模型收尾输出 —— 半截答复比没有答复好。子 agent 的花费一并计入。</small></label>
+            <p class="field-note wide"><i class="pi pi-info-circle" />覆盖只能填<b>具体金额</b>：<code>null</code> 回落到单用户额度，解除限制需同时清空单用户输入框。判定使用<b>有效角色</b>。</p>
+            <p class="field-title wide">单轮上限<small>单轮内的硬限制，与上方日 / 月额度独立。</small></p>
+            <label>单轮成本上限（美元）<UiNumber :model-value="quotaForm.maxCostUsd" :min="0.001" :step="0.1" @update:model-value="quotaForm.maxCostUsd = $event; markQuotaDirty()" /><small class="field-note">触发后清空工具目录并强制收尾；子 agent 花费一并计入。</small></label>
             <label>单轮步数上限<UiNumber :model-value="quotaForm.maxSteps" :min="1" :max="200" @update:model-value="quotaForm.maxSteps = $event; markQuotaDirty()" /><small class="field-note">与 <code>agent.main.maxSteps</code> 取较小者生效。</small></label>
-            <p class="field-title wide">频率限制<small>按最近 1 小时的 turns 表统计，<b>不受上面的「启用金额配额」开关影响</b>。</small></p>
+            <p class="field-title wide">频率限制<small>按最近 1 小时的 turns 表统计，<b>不受上方「启用金额配额」开关影响</b>。</small></p>
             <label>每人每小时轮次<UiNumber :model-value="quotaForm.turnsPerUserPerHour" :min="1" @update:model-value="quotaForm.turnsPerUserPerHour = $event; markQuotaDirty()" /></label>
             <label>每会话每小时轮次<UiNumber :model-value="quotaForm.turnsPerChatPerHour" :min="1" @update:model-value="quotaForm.turnsPerChatPerHour = $event; markQuotaDirty()" /></label>
             <label>单用户并发轮次<UiNumber :model-value="quotaForm.concurrentPerUser" :min="1" @update:model-value="quotaForm.concurrentPerUser = $event; markQuotaDirty()" /></label>
             <p class="field-title wide">超限时</p>
-            <UiSwitch v-model="quotaForm.reply" class="wide" @change="markQuotaDirty">在群里回一条说明<small class="field-note">关掉的话被拒的人什么都收不到，只有日志里有一条 <code>quota.exceeded</code>。</small></UiSwitch>
-            <label class="wide">提示文案<textarea v-model="quotaForm.message" rows="2" spellcheck="false" @input="markQuotaDirty" /><small class="field-note"><i class="pi pi-exclamation-triangle" /><code>{spent}</code> / <code>{limit}</code> 会被替换成 <code>—</code>，<code>{resetAt}</code> 被替换成「下个额度窗口」—— 占位符目前拿不到真实数字，别把话写成「已用 {spent}」那样依赖它们。</small></label>
+            <UiSwitch v-model="quotaForm.reply" class="wide" @change="markQuotaDirty">在群内回复一条说明<small class="field-note">关闭后被拒用户无提示，仅记一条 <code>quota.exceeded</code>。</small></UiSwitch>
+            <label class="wide">提示文案<textarea v-model="quotaForm.message" rows="2" spellcheck="false" @input="markQuotaDirty" /><small class="field-note"><i class="pi pi-exclamation-triangle" /><code>{spent}</code> / <code>{limit}</code> 将被替换为 <code>—</code>，<code>{resetAt}</code> 替换为「下个额度窗口」。</small></label>
             <div v-if="quota?.unimplemented.length" class="wide quota-unimplemented">
-              <p class="field-title"><i class="pi pi-ban" />下面这些配额项在 schema 里有，但<b>运行时没有任何代码读它们</b>，所以这里不给控件</p>
+              <p class="field-title"><i class="pi pi-ban" />schema 中存在但<b>运行时没有代码读取</b>的配额项</p>
               <ul><li v-for="key in quota.unimplemented" :key="key"><code>{{ key }}</code><span>{{ QUOTA_UNIMPLEMENTED_HINTS[key] ?? '未接线' }}</span></li></ul>
             </div>
           </div>
 
           <div class="registry-heading">
-            <div><h3>当前计数器</h3><p class="section-note">当前 bucket：日 <code>{{ quota?.buckets.day ?? '—' }}</code> · 月 <code>{{ quota?.buckets.month ?? '—' }}</code>。<b>已用</b>是已结算花费 + 在途预留，判定用的就是这个和。</p></div>
+            <div><h3>当前计数器</h3><p class="section-note">当前 bucket：日 <code>{{ quota?.buckets.day ?? '—' }}</code> · 月 <code>{{ quota?.buckets.month ?? '—' }}</code>。<b>已用</b> = 已结算花费 + 在途预留。</p></div>
             <div class="section-actions">
-              <UiCheckbox v-if="staleCounters" v-model="quotaShowHistory" :label="`连历史 bucket 一起看（${staleCounters} 行）`" />
+              <UiCheckbox v-if="staleCounters" v-model="quotaShowHistory" :label="`含历史 bucket（${staleCounters} 行）`" />
               <UiButton size="small" variant="outlined" icon="pi pi-refresh" aria-label="刷新计数器" :loading="quotaLoading" @click="loadQuota" />
               <UiButton size="small" variant="outlined" severity="danger" icon="pi pi-trash" label="全部清零" :loading="quotaResetting === 'all'" :disabled="!quota?.counters.length" @click="resetQuota()" />
             </div>
@@ -2534,9 +2537,9 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
                 <UiTag :value="QUOTA_SCOPE_LABELS[row.scope]" :severity="row.scope === 'global' ? 'info' : row.scope === 'chat' ? 'secondary' : 'primary'" />
                 <b>{{ counterTitle(row) }}</b>
                 <UiTag v-if="row.role" :value="row.role" :severity="roleSeverity(row.role)" />
-                <UiTag v-if="!row.current" value="历史窗口" severity="secondary" title="这一行不属于当前 bucket，不参与判定，留着只是账" />
+                <UiTag v-if="!row.current" value="历史窗口" severity="secondary" title="不属于当前 bucket，不参与判定" />
                 <code>{{ row.window === 'day' ? '日' : '月' }} {{ row.bucket }}</code>
-                <UiButton variant="text" size="small" severity="danger" icon="pi pi-trash" aria-label="重置这一行" :loading="quotaResetting === counterKey(row)" @click="resetQuota(row)" />
+                <UiButton variant="text" size="small" severity="danger" icon="pi pi-trash" aria-label="重置该行计数" :loading="quotaResetting === counterKey(row)" @click="resetQuota(row)" />
               </div>
               <div class="quota-meter"><span :style="{ width: `${counterRatio(row) * 100}%` }" /></div>
               <div class="quota-counter-foot">
@@ -2544,12 +2547,12 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
                 <small v-if="row.reservedUsd > 0">其中在途预留 {{ money(row.reservedUsd) }}</small>
                 <small>{{ row.turns }} 轮 · {{ new Date(row.updatedAt).toLocaleString() }}</small>
               </div>
-              <small v-if="row.limitApprox" class="field-note">这一档取自该用户自己的角色；实际判定用有效角色（min(用户, 会话)），在低权限会话里上限可能更低。</small>
+              <small v-if="row.limitApprox" class="field-note">该档位取自用户自身角色；实际判定使用有效角色。</small>
             </article>
-            <article v-if="!visibleCounters.length" class="empty-card"><i class="pi pi-gauge" /><h3>{{ quota?.counters.length ? '当前窗口还没有产生花费' : '还没有任何计数' }}</h3><p>{{ quota?.counters.length ? `有 ${staleCounters} 行属于历史 bucket，勾上上面那个开关可以看到。` : '有轮次跑起来之后，这里按 全局 / 会话 / 用户 × 日 / 月 六个维度记账。' }}</p></article>
+            <article v-if="!visibleCounters.length" class="empty-card"><i class="pi pi-gauge" /><h3>{{ quota?.counters.length ? '当前窗口无花费' : '暂无计数' }}</h3><p>{{ quota?.counters.length ? `${staleCounters} 行属于历史 bucket，勾选上方可查看。` : '按 全局 / 会话 / 用户 × 日 / 月 六个维度记账。' }}</p></article>
           </div>
         </section>
-        <section v-else-if="active === 'principals'" key="principals" class="surface page-surface"><header><div><p class="eyebrow">ACCESS CONTROL</p><h2>主体与权限</h2><p>effectiveRole 始终取用户与会话角色的较低者 —— 一个私聊占 <code>user:</code> 与 <code>chat:</code> 两行，只改一行时角色列会标出实际生效的那个。点任一行改角色。</p></div><UiButton label="批量导入" icon="pi pi-upload" @click="openBulk" /></header>
+        <section v-else-if="active === 'principals'" key="principals" class="surface page-surface"><header><div><p class="eyebrow">ACCESS CONTROL</p><h2>主体与权限</h2><p>有效角色取用户与群角色的较高者，群内封顶 trusted；任一方为 blocked 则不响应。点击一行修改角色。</p></div><UiButton label="批量导入" icon="pi pi-upload" @click="openBulk" /></header>
           <nav class="subtabs" aria-label="主体类型">
             <button v-for="[key, label] in PRINCIPAL_KINDS" :key="key" type="button" :class="{ active: principalKind === key }" @click="principalKind = key">{{ label }}<span>{{ principalCount(key) }}</span></button>
           </nav>
@@ -2558,38 +2561,37 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             <UiButton size="small" variant="text" label="清空勾选" @click="principalSelection = []" />
             <UiButton size="small" icon="pi pi-user-edit" label="批量改角色" @click="openRoleBulk" />
           </div>
-          <DataGrid v-model:selection="principalSelection" :rows="visiblePrincipals" :columns="COLUMNS.principals" data-key="id" paginate :page-size="12" clickable :empty="principalKind === 'group' ? '还没有见过任何群 / 频道' : principalKind === 'private' ? '还没有见过任何私聊会话' : principalKind === 'user' ? '还没有见过任何用户' : '还没有任何主体'" @row-click="editPrincipal">
+          <DataGrid v-model:selection="principalSelection" :rows="visiblePrincipals" :columns="COLUMNS.principals" data-key="id" paginate :page-size="12" clickable :empty="principalKind === 'group' ? '暂无群 / 频道' : principalKind === 'user' ? '暂无用户' : '暂无主体'" @row-click="editPrincipal">
             <!-- kind 只有 user / chat 两个取值，而 chat 涵盖私聊 —— 标签按 chat_type 出（docs/21 · G-UI-01） -->
             <template #kind="{ data }"><UiTag :value="principalKindLabel(data)" :severity="data.kind === 'user' ? 'secondary' : isPrivatePrincipal(data) ? 'warn' : 'info'" /></template>
-            <template #displayName="{ data }"><span class="alias-name">{{ data.displayName ?? '—' }}<UiTag v-if="data.id === ownerPrincipalId" value="引导 OWNER" severity="success" title="access.bootstrapOwnerId 指向的这一行；改掉它的角色，Telegram 那边就没人能管 bot 了" /></span></template>
+            <template #displayName="{ data }"><span class="alias-name">{{ data.displayName ?? '—' }}<UiTag v-if="data.id === ownerPrincipalId" value="引导 OWNER" severity="success" title="access.bootstrapOwnerId 指向的主体；修改其角色后，Telegram 侧将无人可管理 bot" /></span></template>
             <template #username="{ data }">{{ data.username ? `@${data.username}` : '—' }}</template>
-            <!-- 私聊占两行而 min() 的结果此前一处都不显示：只改了一半看起来和改对了一样（docs/21 · G-UI-03） -->
-            <template #role="{ data }"><UiTag :value="data.role" :severity="roleSeverity(data.role)" /><small v-if="data.effectiveRole && data.effectiveRole !== data.role" class="catalog-sub role-shadowed" :title="`另一半是 ${data.kind === 'user' ? 'chat' : 'user'}:${data.tgId}（${data.effectiveRole}）—— 有效角色取两行里较低的那个，模型看到的是 ${data.effectiveRole}`">实际 {{ data.effectiveRole }}</small></template>
+            <template #role="{ data }"><UiTag :value="data.role" :severity="roleSeverity(data.role)" /></template>
           </DataGrid>
         </section>
         <section v-else-if="active === 'providers'" key="providers" class="surface page-surface">
-          <header><div><p class="eyebrow">MODEL REGISTRY</p><h2>Provider、模型与别名</h2><p>在此处管理您的 Provider 与模型，修改实时生效</p></div><UiButton label="添加 Provider" icon="pi pi-plus" @click="editProvider()" /></header>
-          <div v-if="modelMissingMain" class="danger-banner"><i class="pi pi-exclamation-triangle" />没有可用的 <code>main</code> 别名（未配置、链为空或链里的模型都不可用），所有轮次都会失败。见下方「别名路由」。</div>
+          <header><div><p class="eyebrow">MODEL REGISTRY</p><h2>Provider、模型与别名</h2><p>管理 Provider 与模型，修改实时生效</p></div><UiButton label="添加 Provider" icon="pi pi-plus" @click="editProvider()" /></header>
+          <div v-if="modelMissingMain" class="danger-banner"><i class="pi pi-exclamation-triangle" />没有可用的 <code>main</code> 别名，所有轮次都会失败。见下方「别名路由」。</div>
           <div class="provider-grid"><article v-for="provider in providers" :key="provider.id"><div class="provider-head"><div class="provider-tags"><UiTag :value="provider.enabled ? '启用' : '停用'" :severity="provider.enabled ? 'success' : 'secondary'" /><UiTag v-if="provider.healthState" :value="provider.healthState === 'up' ? '连通' : '不可用'" :severity="provider.healthState === 'up' ? 'success' : 'danger'" /></div><div class="card-actions"><UiButton variant="text" size="small" icon="pi pi-bolt" aria-label="测试连接" :loading="testingProvider === provider.id" @click="testProvider(provider)" /><UiButton variant="text" size="small" icon="pi pi-cloud-download" aria-label="从该 Provider 拉取模型" @click="openCatalog(provider.id)" /><UiButton variant="text" size="small" icon="pi pi-pencil" aria-label="编辑 Provider" @click="editProvider(provider)" /><UiButton variant="text" size="small" severity="danger" icon="pi pi-trash" aria-label="删除 Provider" @click="removeProvider(provider.id)" /></div></div><h3>{{ provider.name }}</h3><p>{{ provider.kind }}</p><code>{{ provider.apiKeyHint ?? '未设置密钥' }}</code><small v-if="provider.healthError" class="provider-error">{{ provider.healthError }}</small></article></div>
-          <div class="registry-heading"><div><h3>模型</h3><p class="section-note">窗口、最大输出、能力与定价来自 models.dev 的本地缓存目录，导入时自动带入；<code>补齐元数据</code>只填空着的价格，已填的不会被覆盖。目录按模型名匹配，中转站会撒谎 —— 点开任一行可以手动标记它的<b>看图能力</b>，标记压过目录，且不会被<code>补齐元数据</code>撤销。</p></div><div class="section-actions"><UiButton size="small" variant="outlined" icon="pi pi-cloud-download" label="从 Provider 拉取" :disabled="!providers.length" @click="openCatalog()" /><UiButton size="small" variant="outlined" icon="pi pi-sparkles" label="补齐元数据" :disabled="!models.length" :loading="enriching" @click="enrichModels" /><UiButton size="small" variant="outlined" label="添加模型" @click="editModel()" /></div></div>
-          <DataGrid :rows="models" :columns="COLUMNS.models" data-key="id" clickable empty="还没有导入任何模型" @row-click="editModel">
+          <div class="registry-heading"><div><h3>模型</h3><p class="section-note">元数据来自 models.dev 本地缓存，导入时带入；<code>补齐元数据</code>仅填空缺价格。点击任一行可手动标记<b>看图能力</b>，优先于目录且不被<code>补齐元数据</code>撤销。</p></div><div class="section-actions"><UiButton size="small" variant="outlined" icon="pi pi-cloud-download" label="从 Provider 拉取" :disabled="!providers.length" @click="openCatalog()" /><UiButton size="small" variant="outlined" icon="pi pi-sparkles" label="补齐元数据" :disabled="!models.length" :loading="enriching" @click="enrichModels" /><UiButton size="small" variant="outlined" label="添加模型" @click="editModel()" /></div></div>
+          <DataGrid :rows="models" :columns="COLUMNS.models" data-key="id" clickable empty="暂无模型" @row-click="editModel">
             <template #provider_id="{ data }">{{ providerLabel(String(data.provider_id)) }}</template>
-            <template #capabilities="{ data }"><span v-if="capabilityTags(storedMeta(data)).length || manualVision(data) !== 'follow'" class="cap-tags"><UiTag v-for="tag in capabilityTags(storedMeta(data))" :key="tag" :value="tag" severity="secondary" /><UiTag v-if="manualVision(data) !== 'follow'" :value="manualVision(data) === 'on' ? '手标 · 能看图' : '手标 · 看不了图'" :severity="manualVision(data) === 'on' ? 'info' : 'warn'" title="运维手动标过这个模型的看图能力，压过 models.dev 的判断；「补齐元数据」不会撤销它" /></span><small v-else class="catalog-sub">未知</small></template>
+            <template #capabilities="{ data }"><span v-if="capabilityTags(storedMeta(data)).length || manualVision(data) !== 'follow'" class="cap-tags"><UiTag v-for="tag in capabilityTags(storedMeta(data))" :key="tag" :value="tag" severity="secondary" /><UiTag v-if="manualVision(data) !== 'follow'" :value="manualVision(data) === 'on' ? '手标 · 能看图' : '手标 · 看不了图'" :severity="manualVision(data) === 'on' ? 'info' : 'warn'" title="手动标记优先于 models.dev，「补齐元数据」不会撤销" /></span><small v-else class="catalog-sub">未知</small></template>
             <template #price_in="{ data }"><span>{{ data.price_in ?? '—' }}</span><small v-if="storedPriceSource(data)" class="catalog-sub">{{ storedPriceSource(data) === 'manual' ? '手工填写' : MATCH_LABELS[String(storedPriceSource(data))]?.label ?? '' }}</small><small v-else-if="data.price_in === null" class="catalog-sub match-third-party">缺定价 · 花费按 0 记账</small></template>
             <template #enabled="{ data }"><UiTag :value="data.enabled ? '启用' : '停用'" :severity="data.enabled ? 'success' : 'secondary'" /></template>
             <!-- 行本身是「点开编辑」，所以这颗按钮必须 @click.stop —— 不然点删除会同时弹出编辑框 -->
             <template #actions="{ data }"><UiButton size="small" variant="text" severity="danger" icon="pi pi-trash" :aria-label="`删除模型 ${data.model_id}`" @click.stop="removeModel(String(data.id), String(data.model_id))" /></template>
           </DataGrid>
-          <div class="registry-heading"><div><h3>别名路由</h3><p class="section-note">代码里只出现别名，不出现具体模型 id。每个别名指向一条有序的 fallback 链：前一个模型不可用就顺延到下一个。下面六个是内建别名，<code>main</code> 必须配。</p></div><UiButton size="small" variant="outlined" label="添加自定义别名" @click="editAlias()" /></div>
+          <div class="registry-heading"><div><h3>别名路由</h3><p class="section-note">别名指向一条有序的 fallback 链，前一个模型不可用时顺延。下方六个是内建别名，<code>main</code> 必须配置。</p></div><UiButton size="small" variant="outlined" label="添加自定义别名" @click="editAlias()" /></div>
           <DataGrid :rows="aliasRows" :columns="COLUMNS.aliases" data-key="alias">
-            <template #alias="{ data }"><div class="alias-name"><code>{{ data.alias }}</code><UiTag v-if="data.state !== 'ok'" :value="ALIAS_STATE_TAG[data.state].label" :severity="ALIAS_STATE_TAG[data.state].severity" :title="ALIAS_STATE_TAG[data.state].hint" /><UiTag v-if="!data.validName" value="名称不合法" severity="warn" title="别名只能是小写字母开头的 [a-z0-9_-]；这一行只能删掉重建" /></div></template>
+            <template #alias="{ data }"><div class="alias-name"><code>{{ data.alias }}</code><UiTag v-if="data.state !== 'ok'" :value="ALIAS_STATE_TAG[data.state].label" :severity="ALIAS_STATE_TAG[data.state].severity" :title="ALIAS_STATE_TAG[data.state].hint" /><UiTag v-if="!data.validName" value="名称不合法" severity="warn" title="别名须以小写字母开头且只含 [a-z0-9_-]；该行只能删除后重建" /></div></template>
             <template #purpose="{ data }"><p class="alias-purpose">{{ data.purpose }}</p><small v-if="data.tier">建议档位：{{ data.tier }}</small><small v-if="data.description">{{ data.description }}</small></template>
             <template #chain="{ data }"><div v-if="data.chain.length" class="alias-chain"><span v-for="(segment, index) in data.chain" :key="segment.id" :class="['alias-seg', segment.state]" :title="segment.state === 'missing' ? '模型记录已删除' : segment.state === 'disabled' ? '模型已停用，会被跳过' : ''">{{ index + 1 }}. {{ segment.label }}</span></div><small v-else class="alias-empty">{{ data.alias === 'main' ? '没有可用模型时所有轮次都会失败' : '缺失时按 main → high → low 回退' }}</small></template>
             <template #settings="{ data }"><small class="alias-settings">{{ settingsSummary(data.settings) }}</small></template>
             <template #actions="{ data }"><div class="card-actions"><UiButton variant="text" size="small" :icon="data.state === 'absent' ? 'pi pi-plus' : 'pi pi-pencil'" :aria-label="data.state === 'absent' ? '配置别名' : '编辑别名'" @click="editAlias(data)" /><UiButton v-if="data.state !== 'absent'" variant="text" size="small" severity="danger" icon="pi pi-trash" aria-label="删除别名" @click="removeAlias(data.alias)" /></div></template>
           </DataGrid>
         </section>
-        <section v-else-if="active === 'logs'" key="logs" class="surface page-surface"><header><div><p class="eyebrow">OBSERVABILITY</p><h2>日志与 Trace</h2><p>点击任一行看这条事件的完整载荷；详情里可以再展开它所属的整条 trace。</p></div><UiTag :value="connected ? '实时' : '重连中'" :severity="connected ? 'success' : 'warn'" /></header>
+        <section v-else-if="active === 'logs'" key="logs" class="surface page-surface"><header><div><p class="eyebrow">OBSERVABILITY</p><h2>日志与 Trace</h2><p>点击任一行查看完整载荷，详情中可展开整条 trace。</p></div><UiTag :value="connected ? '实时' : '重连中'" :severity="connected ? 'success' : 'warn'" /></header>
           <DataGrid :rows="logs" :columns="COLUMNS.logs" data-key="id" paginate clickable empty="暂无日志" @row-click="openLogDetail($event)">
             <template #ts="{ data }">{{ new Date(data.ts).toLocaleString() }}</template>
             <template #level="{ data }"><span :class="['level', data.level]">{{ data.level }}</span></template>
@@ -2597,7 +2599,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
           </DataGrid>
           <article v-if="traceDetail.length" class="inspector"><header><b>Trace {{ traceDetail[0]?.trace_id }}</b><UiTag :value="`${traceDetail.length} spans`" /></header><ol><li v-for="(node, index) in traceDetail" :key="node.id" :style="{ marginLeft: `${(traceIndent[index] ?? 0) * 24}px` }"><code>{{ node.kind }}</code><span>{{ node.summary }}</span><small>{{ node.duration_ms ?? 0 }} ms</small></li></ol></article>
         </section>
-        <section v-else-if="active === 'prompts'" key="prompts" class="surface page-surface"><header><div><p class="eyebrow">PROMPT WORKSPACE</p><h2>提示词编辑与版本</h2><p class="u-size-sm" style="--u-base: 14px">在此处管理提示词与长期记忆</p></div><UiButton label="预览组装" icon="pi pi-eye" @click="openPromptPreview" /></header>
+        <section v-else-if="active === 'prompts'" key="prompts" class="surface page-surface"><header><div><p class="eyebrow">PROMPT WORKSPACE</p><h2>提示词编辑与版本</h2><p class="u-size-sm" style="--u-base: 14px">提示词与长期记忆管理</p></div><UiButton label="预览组装" icon="pi pi-eye" @click="openPromptPreview" /></header>
           <div class="prompt-workbench">
             <div class="prompt-cards">
               <button v-for="doc in promptCards" :key="String(doc.id)" type="button" :class="['prompt-card', { active: String(selectedPrompt?.id ?? '') === String(doc.id) }]" @click="inspectPrompt(doc)">
@@ -2606,18 +2608,18 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
                 <UiTag :value="doc.subject ? String(doc.subject) : '全局'" :severity="promptMeta(doc.scope).severity" />
                 <p>{{ promptMeta(doc.scope).purpose }}</p>
                 <code>{{ doc.id }}</code>
-                <small>{{ Number(doc.bytes ?? 0).toLocaleString() }} 字节 · {{ Number(doc.tokens ?? 0).toLocaleString() }} tok · {{ doc.updated_at ? new Date(Number(doc.updated_at)).toLocaleString() : '未落盘' }}</small>
+                <small>{{ Number(doc.bytes ?? 0).toLocaleString() }} 字节 · {{ Number(doc.tokens ?? 0).toLocaleString() }} tok · {{ doc.updated_at ? new Date(Number(doc.updated_at)).toLocaleString() : '未写入' }}</small>
               </button>
-              <p v-if="!promptCards.length" class="empty">没有可编辑的提示词文档。首次启动会从 <code>memory/</code> 目录扫出 CHARACTER / ASSIST / PUBMEMORY。</p>
+              <p v-if="!promptCards.length" class="empty">暂无提示词文档。首次启动时从 <code>memory/</code> 扫描 CHARACTER / ASSIST / PUBMEMORY。</p>
             </div>
             <article v-if="selectedPrompt" class="editor-panel">
               <header><div><b>{{ selectedPrompt.id }}</b><small>{{ promptMeta(selectedPrompt.scope).label }} · {{ selectedPrompt.path }}</small></div><UiButton label="保存版本" icon="pi pi-save" @click="savePrompt" /></header>
-              <p v-if="selectedPrompt.scope === 'primemory'" class="callout warn"><i class="pi pi-lock" aria-hidden="true" />这是某个用户的私有记忆，查看与修改都会写进 <code>memory_revisions</code> 审计（docs/06 §5.3）。</p>
+              <p v-if="selectedPrompt.scope === 'primemory'" class="callout warn"><i class="pi pi-lock" aria-hidden="true" />私有记忆：查看与修改均写入 <code>memory_revisions</code> 审计。</p>
               <textarea v-model="promptContent" spellcheck="false" aria-label="提示词内容" />
               <h3>版本记录</h3>
-              <ol class="revision-list"><li v-for="revision in promptRevisions" :key="String(revision.id)"><div><code>{{ String(revision.id).slice(0, 12) }}</code><small>{{ revision.actor }} · {{ new Date(Number(revision.ts)).toLocaleString() }}</small></div><UiButton size="small" variant="text" label="回滚" @click="rollbackPrompt(revision.id)" /></li><li v-if="!promptRevisions.length" class="empty">还没有保存过任何版本。</li></ol>
+              <ol class="revision-list"><li v-for="revision in promptRevisions" :key="String(revision.id)"><div><code>{{ String(revision.id).slice(0, 12) }}</code><small>{{ revision.actor }} · {{ new Date(Number(revision.ts)).toLocaleString() }}</small></div><UiButton size="small" variant="text" label="回滚" @click="rollbackPrompt(revision.id)" /></li><li v-if="!promptRevisions.length" class="empty">暂无版本</li></ol>
             </article>
-            <article v-else class="editor-panel empty-card"><i class="pi pi-align-left" aria-hidden="true" /><h3>选一份文档开始编辑</h3><p>可在版本管理中进行回滚</p></article>
+            <article v-else class="editor-panel empty-card"><i class="pi pi-align-left" aria-hidden="true" /><h3>选择一份文档开始编辑</h3><p>版本记录支持回滚</p></article>
           </div>
         </section>
         <!-- 任务页整段搬进 `TasksPage.vue`（三张卡竖排：任务 → 定时任务 → 审批，docs/09 §3.10.1）。
@@ -2638,7 +2640,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
                「高级」反过来必须 v-if：它要把整份合并配置 stringify 一遍（docs/09 §3.13）。 -->
           <div v-show="settingsTab === 'common'" data-settings-tab="common">
           <div class="registry-heading">
-            <div><h3>触发与唤醒词</h3><p class="section-note">决定哪条消息会开轮次。五个来源取并集，命中任一条就触发；群里没有任何一条命中时，消息只作为背景发言存档。保存后热更新，下一条消息即生效。</p></div>
+            <div><h3>触发与唤醒词</h3><p class="section-note">五个来源取并集，命中任一条即开启轮次；群内无命中的消息仅作背景发言存档。保存后热更新。</p></div>
             <UiButton size="small" icon="pi pi-save" label="保存触发设置" :loading="triggerSaving" :disabled="!triggerDirty" @click="saveTrigger" />
           </div>
           <div class="form-grid">
@@ -2651,7 +2653,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
               <UiCheckbox v-model="triggerForm.channels" label="频道消息" @change="markTriggerDirty" />
             </div>
             <div class="wide">
-              <p class="field-title">唤醒词<small>不以 ^ 开头 = 包含匹配，忽略大小写（nori 同时匹配 Nori）；以 ^ 开头 = 正则（u 标志，只扫描消息前 4096 字符），按你写的大小写求值，要忽略就写 ^(?i)nori。私聊不看唤醒词。</small></p>
+              <p class="field-title">唤醒词<small>不以 ^ 开头 = 包含匹配，忽略大小写；以 ^ 开头 = 正则（u 标志，仅扫描前 4096 字符），大小写敏感，需忽略写 ^(?i)nori。私聊不判定唤醒词。</small></p>
               <div class="wake-list">
                 <span v-for="entry in wakewordStatus" :key="entry.pattern" :class="['wake-chip', { bad: !entry.ok }]" :title="entry.reason ?? ''">
                   <code>{{ entry.pattern }}</code>
@@ -2659,74 +2661,74 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
                   <UiTag v-if="!entry.ok" value="不生效" severity="danger" />
                   <button type="button" aria-label="删除唤醒词" @click="removeWakeword(entry.pattern)"><i class="pi pi-times" /></button>
                 </span>
-                <span v-if="!triggerForm.wakewords.length" class="alias-empty">没有唤醒词：群里只能靠 @ 提及、回复或命令触发。</span>
+                <span v-if="!triggerForm.wakewords.length" class="alias-empty">未配置唤醒词：群内仅能 @ 提及、回复或命令触发。</span>
               </div>
-              <p v-for="entry in wakewordStatus.filter((item) => !item.ok)" :key="`bad-${entry.pattern}`" class="field-note wake-issue"><i class="pi pi-exclamation-triangle" />「{{ entry.pattern }}」{{ entry.reason }} —— 匹配时会被跳过，保存也会被拒绝。</p>
+              <p v-for="entry in wakewordStatus.filter((item) => !item.ok)" :key="`bad-${entry.pattern}`" class="field-note wake-issue"><i class="pi pi-exclamation-triangle" />「{{ entry.pattern }}」{{ entry.reason }}。匹配时跳过，保存也会被拒绝。</p>
               <div class="wake-add"><input v-model="newWakeword" placeholder="例如 洛璃 或 ^璃酱[，,、 ]" @keyup.enter="addWakeword"><UiButton size="small" variant="outlined" icon="pi pi-plus" label="添加" @click="addWakeword" /></div>
             </div>
-            <label>唤醒词最短长度<UiNumber :model-value="triggerForm.wakewordMinLength" :min="1" :max="32" @update:model-value="changeWakewordMinLength" /><small class="field-note">短于这个长度的唤醒词整条忽略（按 ^ 之后的字符数算），避免单字误触发。</small></label>
+            <label>唤醒词最短长度<UiNumber :model-value="triggerForm.wakewordMinLength" :min="1" :max="32" @update:model-value="changeWakewordMinLength" /><small class="field-note">短于该长度的唤醒词整条忽略（按 ^ 之后的字符数计）。</small></label>
             <div class="switch-column">
-              <UiSwitch v-model="triggerForm.requireTextAfterMention" label="只 @ 不说话时不触发" @change="markTriggerDirty" />
+              <UiSwitch v-model="triggerForm.requireTextAfterMention" label="仅 @ 而无正文时不触发" @change="markTriggerDirty" />
               <!-- 这一格在 KNOWN_UNIMPLEMENTED_CONFIG_KEYS 里：编辑消息一律按背景消息归档，
                    开关存得下但运行时没人读（docs/20 · W-TG-05）。不能让它看起来像个能用的开关。 -->
-              <UiSwitch v-model="triggerForm.ignoreEditedAsTrigger" disabled>编辑旧消息不重新触发<UiTag value="未接线" severity="secondary" title="编辑消息当前一律按背景消息归档，这个开关运行时没有任何代码读它" /></UiSwitch>
+              <UiSwitch v-model="triggerForm.ignoreEditedAsTrigger" disabled>编辑旧消息不重新触发<UiTag value="未接线" severity="secondary" title="编辑消息按背景消息归档，运行时无代码读取该开关" /></UiSwitch>
             </div>
-            <p class="field-note wide">会话级覆盖（<code>perChat.&lt;contextKey&gt;.trigger</code>）优先于这里的全局值，入口在<b>会话页</b>选中某个会话之后的「只对这个会话生效的设置」。</p>
+            <p class="field-note wide">会话级覆盖（<code>perChat.&lt;contextKey&gt;.trigger</code>）优先于全局值，入口在<b>会话页</b>。</p>
           </div>
           <div class="registry-heading">
-            <div><h3>输出节奏</h3><p class="section-note">决定一条回复怎么送出去。流式模式下先攒一段再发第一条，之后按固定节拍编辑同一条消息 —— 攒的时长设成 0 就会退回「先发一个字、剩下靠编辑补」的观感。模型迟迟不开口时先顶上去的<b>等待文案</b>也在这里配。保存后下一轮生效。</p></div>
+            <div><h3>输出节奏</h3><p class="section-note">流式模式先缓冲再发首条，之后按固定间隔编辑同一条消息。<b>等待文案</b>也在此配置，保存后下一轮生效。</p></div>
             <UiButton size="small" icon="pi pi-save" label="保存输出节奏" :loading="outputSaving" :disabled="!outputDirty" @click="saveOutput" />
           </div>
           <div class="form-grid">
-            <label>模式<UiSelect v-model="outputForm.mode" :options="[{ value: 'stream', label: 'stream · 边生成边编辑' }, { value: 'once', label: 'once · 生成完一次性发出' }]" @change="markOutputDirty" /><small class="field-note">once 模式下面三项编辑相关的设置不起作用。</small></label>
-            <label>防秒回等待（毫秒）<UiNumber :model-value="outputForm.replyDelayMs" :min="0" :max="30000" :step="500" @update:model-value="changeOutputNumber('replyDelayMs', $event)" /><small class="field-note">从<b>用户那条消息到达</b>算起。模型本来就想了这么久时不再额外压时间。0 = 立刻回。</small></label>
-            <label>首帧缓冲（毫秒）<UiNumber :model-value="outputForm.streamBufferMs" :min="0" :max="30000" :step="500" @update:model-value="changeOutputNumber('streamBufferMs', $event)" /><small class="field-note">从<b>上游第一个 chunk 到达</b>算起，攒够这么久再发第一条。窗口内的文本只攒不发不会丢；流在窗口内就结束则立刻发出。</small></label>
-            <label>编辑间隔（毫秒）<UiNumber :model-value="outputForm.streamIntervalMs" :min="200" :max="30000" :step="500" @update:model-value="changeOutputNumber('streamIntervalMs', $event)" /><small class="field-note">两次 editMessageText 之间的最小间隔。首条发出也算一次刷新，下一次编辑同样要等满。</small></label>
-            <label>最小增量（字）<UiNumber :model-value="outputForm.streamMinDeltaChars" :min="1" :max="2000" @update:model-value="changeOutputNumber('streamMinDeltaChars', $event)" /><small class="field-note">和上一项是<b>同时满足</b>才编辑：到点了但只多出两三个字就先不动，免得撞 Telegram 的编辑频率限制。收尾那次编辑不受这两项约束。</small></label>
-            <label class="wide">等待文案<textarea v-model="outputForm.placeholderTexts" rows="4" spellcheck="false" placeholder="一行一条，例如：&#10;让我想想…&#10;稍等，正在查" @input="markOutputDirty" /><small class="field-note">模型迟迟不吐第一个字时先发出去顶住的那条消息 —— <b>它就是后面被编辑成答复的那一条</b>，不会多出一条躺在那里。一行一条；空行会在保存时滤掉。只在 stream 模式下发。</small></label>
-            <label>挑选方式<UiSelect v-model="outputForm.placeholderPick" :options="[{ value: 'random', label: '随机 · 每轮从备选里挑一条' }, { value: 'fixed', label: '固定 · 恒用下标指的那条' }]" @change="markOutputDirty" /><small class="field-note">备选只有一条时两者没区别。</small></label>
-            <label>固定用第几条<UiNumber :model-value="outputForm.placeholderIndex" :min="0" :disabled="outputForm.placeholderPick !== 'fixed'" @update:model-value="changeOutputNumber('placeholderIndex', $event)" /><small class="field-note">0 起，数的是上面文本域里<b>去掉空行后</b>的第几行。越界回落到第一条。</small></label>
-            <label>等待多久发（毫秒）<UiNumber :model-value="outputForm.placeholderAfterMs" :min="1" :step="500" @update:model-value="changeOutputNumber('placeholderAfterMs', $event)" /><small class="field-note">从开始生成算起。这么久还没有内容可发才发占位消息 —— 日常几秒就答完的对话压根不会出现它。</small></label>
+            <label>模式<UiSelect v-model="outputForm.mode" :options="[{ value: 'stream', label: 'stream · 边生成边编辑' }, { value: 'once', label: 'once · 生成完一次性发出' }]" @change="markOutputDirty" /><small class="field-note">once 模式下，下方三项编辑设置不生效。</small></label>
+            <label>防秒回等待（毫秒）<UiNumber :model-value="outputForm.replyDelayMs" :min="0" :max="30000" :step="500" @update:model-value="changeOutputNumber('replyDelayMs', $event)" /><small class="field-note">从<b>用户消息到达</b>算起，模型耗时已超过该值时不额外延迟。0 = 立即回复。</small></label>
+            <label>首帧缓冲（毫秒）<UiNumber :model-value="outputForm.streamBufferMs" :min="0" :max="30000" :step="500" @update:model-value="changeOutputNumber('streamBufferMs', $event)" /><small class="field-note">从<b>上游首个 chunk 到达</b>算起，缓冲该时长后发送首条；流在窗口内结束则立即发出。</small></label>
+            <label>编辑间隔（毫秒）<UiNumber :model-value="outputForm.streamIntervalMs" :min="200" :max="30000" :step="500" @update:model-value="changeOutputNumber('streamIntervalMs', $event)" /><small class="field-note">两次 editMessageText 之间的最小间隔；首条发送也计为一次刷新。</small></label>
+            <label>最小增量（字）<UiNumber :model-value="outputForm.streamMinDeltaChars" :min="1" :max="2000" @update:model-value="changeOutputNumber('streamMinDeltaChars', $event)" /><small class="field-note">与上一项<b>同时满足</b>才执行编辑；收尾那次编辑不受两项约束。</small></label>
+            <label class="wide">等待文案<textarea v-model="outputForm.placeholderTexts" rows="4" spellcheck="false" placeholder="一行一条，例如：&#10;让我想想…&#10;稍等，正在查" @input="markOutputDirty" /><small class="field-note">一行一条，空行保存时过滤。<b>后续答复编辑同一条消息</b>，仅在 stream 模式下发送。</small></label>
+            <label>挑选方式<UiSelect v-model="outputForm.placeholderPick" :options="[{ value: 'random', label: '随机 · 每轮从备选中选取' }, { value: 'fixed', label: '固定 · 始终使用指定下标' }]" @change="markOutputDirty" /></label>
+            <label>固定使用的下标<UiNumber :model-value="outputForm.placeholderIndex" :min="0" :disabled="outputForm.placeholderPick !== 'fixed'" @update:model-value="changeOutputNumber('placeholderIndex', $event)" /><small class="field-note">从 0 起，按<b>去除空行后</b>的行序计数；越界回落到第一条。</small></label>
+            <label>等待文案延迟（毫秒）<UiNumber :model-value="outputForm.placeholderAfterMs" :min="1" :step="500" @update:model-value="changeOutputNumber('placeholderAfterMs', $event)" /><small class="field-note">从开始生成算起，超过该时长仍无内容可发时才发送。</small></label>
             <p class="wide" :class="placeholderList.length ? 'field-note' : 'callout warn'"><i v-if="!placeholderList.length" class="pi pi-info-circle" aria-hidden="true" />{{ placeholderPreview }}</p>
-            <p class="field-note wide">会话级覆盖（<code>perChat.&lt;contextKey&gt;.output</code>）优先于这里的全局值。</p>
+            <p class="field-note wide">会话级覆盖（<code>perChat.&lt;contextKey&gt;.output</code>）优先于全局值。</p>
           </div>
           </div>
           <div v-show="settingsTab === 'maintenance'" data-settings-tab="maintenance">
           <div class="registry-heading">
-            <div><h3>修改登录口令</h3><p class="section-note">WebUI 只有一个身份（owner）。改完<b>立即生效、其余会话全部吊销</b>，不用重启进程。忘了当前口令只能线下 <code>pnpm webui:passwd</code> 生成哈希写进 <code>config.yaml</code>。</p></div>
+            <div><h3>修改登录口令</h3><p class="section-note">修改后<b>立即生效，其余会话全部吊销</b>。遗忘时用 <code>pnpm webui:passwd</code> 离线生成哈希写入 <code>config.yaml</code>。</p></div>
           </div>
           <p v-if="passwordPinnedEnv" class="callout warn">
             <i class="pi pi-lock" aria-hidden="true" />
-            口令由环境变量 <code>{{ passwordPinnedEnv }}</code> 固定：在这里改能改到当前进程，但重启后会被环境变量盖回去。要真正换口令，请改这个环境变量（或清掉它，让口令回到 <code>config_kv</code> 管）。
+            口令由环境变量 <code>{{ passwordPinnedEnv }}</code> 固定：此处修改重启后被覆盖。永久更换需改该环境变量，清除后交回 <code>config_kv</code> 管理。
           </p>
           <div v-else class="form-grid">
-            <label>当前口令<input v-model="passwordForm.current" type="password" autocomplete="current-password" placeholder="用于确认是你本人"></label>
+            <label>当前口令<input v-model="passwordForm.current" type="password" autocomplete="current-password" placeholder="用于身份确认"></label>
             <label>新口令<input v-model="passwordForm.next" type="password" autocomplete="new-password" placeholder="至少 12 个字符"></label>
-            <label>再输一次<input v-model="passwordForm.confirm" type="password" autocomplete="new-password" placeholder="两次要一致"></label>
+            <label>确认新口令<input v-model="passwordForm.confirm" type="password" autocomplete="new-password" placeholder="需与上方一致"></label>
             <div class="wide password-actions">
               <UiButton icon="pi pi-key" label="更新口令" :loading="passwordSaving" :disabled="Boolean(passwordProblem)" @click="savePassword" />
-              <small class="field-note">{{ passwordProblem || '会吊销除当前会话之外的所有登录态。' }}</small>
+              <small class="field-note">{{ passwordProblem || '吊销其余全部登录态。' }}</small>
             </div>
           </div>
-          <div class="registry-heading"><div><h3>维护操作</h3><p class="section-note">都是同步执行的：大库上会阻塞写入，跑的时候 bot 那边的消息会排队。</p></div></div>
+          <div class="registry-heading"><div><h3>维护操作</h3><p class="section-note">同步执行：大库上阻塞写入，bot 侧消息将排队。</p></div></div>
           <div class="maintenance-grid">
             <article v-for="item in MAINTENANCE_ACTIONS" :key="item.action">
               <div><b><i :class="item.icon" aria-hidden="true" /> {{ item.label }}</b><small>{{ item.hint }}</small></div>
               <UiButton size="small" variant="outlined" label="执行" :loading="maintenanceBusy === item.action" :disabled="Boolean(maintenanceBusy)" @click="runMaintenance(item.action, item.label)" />
             </article>
             <article class="danger">
-              <div><b><i class="pi pi-refresh" aria-hidden="true" /> 重启进程</b><small>走和 SIGTERM 一样的优雅关闭（排空在途轮次、刷日志、WAL checkpoint）。<b>没有 systemd / docker 这类 supervisor 时进程不会自己回来</b></small></div>
+              <div><b><i class="pi pi-refresh" aria-hidden="true" /> 重启进程</b><small>等同 SIGTERM 的优雅关闭。<b>没有 systemd / docker 等 supervisor 时，进程不会自动重启</b></small></div>
               <UiButton size="small" variant="outlined" severity="danger" label="重启" :loading="restarting" :disabled="Boolean(maintenanceBusy)" @click="restartProcess" />
             </article>
           </div>
-          <div class="registry-heading"><div><h3>导出 / 导入配置</h3><p class="section-note">导的是 <code>config_kv</code> 里的<b>覆盖层</b>，不是合并后的全量 —— 全量里绝大多数是代码默认值，导进另一个部署等于把那一刻的默认值钉死。密钥类键直接不导出（不是导成 <code>«redacted»</code>：那样导入端会把真密钥覆盖成一个字面量）。导入按键覆盖，<b>不删除</b>现有覆盖行。</p></div>
+          <div class="registry-heading"><div><h3>导出 / 导入配置</h3><p class="section-note">导出 <code>config_kv</code> 中的<b>覆盖层</b>。密钥类键不导出，也不导出为 <code>«redacted»</code>。导入按键覆盖，<b>不删除</b>现有覆盖行。</p></div>
             <div class="section-actions"><UiButton size="small" variant="outlined" icon="pi pi-download" label="导出" :loading="exportBusy" @click="exportConfig" /><UiButton size="small" variant="outlined" icon="pi pi-upload" label="导入" @click="importFile?.click()" /></div>
           </div>
           <input ref="importFile" type="file" accept="application/json,.json" hidden @change="importConfig">
           </div>
           <div v-show="settingsTab === 'all'" data-settings-tab="all">
           <div class="registry-heading">
-            <div><h3>全部配置</h3><p class="section-note">由 <code>config/config.schema.json</code> 自动生成 —— 控件形态、默认值、取值范围与每一项的作用说明全部取自 schema，不在前端维护第二份清单。搜索框同时匹配键名与说明。热更新项保存即生效，需重启项会在保存后的提示里点名。密钥字段是<b>只写</b>的（不回显，留空表示不改）；标「环境变量锁定」的键由环境变量最终决定，写进来也会被盖回去，所以不给改。</p></div>
+            <div><h3>全部配置</h3><p class="section-note">由 <code>config/config.schema.json</code> 自动生成。热更新项保存即生效，需重启项在保存后的提示中列出。密钥字段<b>只写</b>（留空 = 不修改）；标「环境变量锁定」的键由环境变量最终决定。</p></div>
             <UiButton size="small" variant="text" icon="pi pi-history" label="变更历史" @click="openConfigRevisions" />
           </div>
           <SchemaForm v-if="configSchema" ref="schemaForm" :schema="configSchema.schema" :value="config" :hot-reloadable="configSchema.hotReloadable" :unimplemented="configSchema.unimplemented" :env-pinned="configSchema.envPinned" :enum-notes="configSchema.enumNotes" :saving="schemaSaving" @save="saveSchemaConfig" />
@@ -2734,22 +2736,22 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
           </div>
           <div v-if="settingsTab === 'advanced'" data-settings-tab="advanced">
           <div class="registry-heading">
-            <div><h3>原始 YAML</h3><p class="section-note">直接编辑<b>覆盖层</b>（<code>config_kv</code>），不是合并后的全量 —— 全量里绝大多数是代码默认值。解析与校验都在服务端（和启动时那份 <code>loadConfig</code> 用同一个解析器，不会「界面上过了、启动时炸了」），语法错误会给出行号。落库<b>按叶子</b>（点分键）覆盖，不是按顶层段 —— 按段写回等于把那一刻的代码默认值整棵钉死。段里删掉一个键，那一行会真的从覆盖层消失；整个顶层段删掉则什么都不动。</p></div>
+            <div><h3>原始 YAML</h3><p class="section-note">直接编辑<b>覆盖层</b>（<code>config_kv</code>），语法错误会给出行号。写库<b>按叶子</b>（点分键）覆盖：段内删键即从覆盖层移除，删整个顶层段不做改动。</p></div>
             <div class="section-actions"><UiButton size="small" variant="text" :icon="yamlMode ? 'pi pi-times' : 'pi pi-code'" :label="yamlMode ? '收起' : '编辑 YAML'" @click="toggleYamlMode" /><UiButton v-if="yamlMode" size="small" icon="pi pi-save" label="保存 YAML" :loading="yamlSaving" @click="saveYaml" /></div>
           </div>
           <template v-if="yamlMode">
-            <p v-if="yamlSkipped.length" class="callout warn"><i class="pi pi-key" />{{ yamlSkipped.length }} 个密钥类键没有出现在下面（不回显也不会被这次保存清掉）：<code>{{ yamlSkipped.join('、') }}</code></p>
+            <p v-if="yamlSkipped.length" class="callout warn"><i class="pi pi-key" />{{ yamlSkipped.length }} 个密钥类键未显示（不回显，也不会被本次保存清除）：<code>{{ yamlSkipped.join('、') }}</code></p>
             <p v-if="yamlError" class="callout warn"><i class="pi pi-exclamation-triangle" />{{ yamlError }}</p>
             <textarea v-model="yamlText" class="yaml-editor" rows="24" spellcheck="false" aria-label="原始 YAML 覆盖层" />
           </template>
           <div class="registry-heading">
-            <div><h3>合并后的完整配置</h3><p class="section-note"><code>config.yaml</code> → DB 覆盖层 → 环境变量三层合并的结果，只读 ——「全部配置」那张表单改的就是这份 JSON 里的值。<b>默认收起</b>：它和那张表单是同一份数据的两种视图，而能改的是表单那一份。</p></div>
+            <div><h3>合并后的完整配置</h3><p class="section-note"><code>config.yaml</code> → DB 覆盖层 → 环境变量三层合并的结果，只读；「全部配置」表单修改的即为该 JSON 中的值。</p></div>
             <UiButton size="small" variant="text" :icon="mergedConfigOpen ? 'pi pi-chevron-up' : 'pi pi-chevron-down'" :label="mergedConfigOpen ? '收起' : '展开'" @click="mergedConfigOpen = !mergedConfigOpen" />
           </div>
           <pre v-if="mergedConfigOpen" class="config-preview" v-text="JSON.stringify(config, null, 2)" />
           </div>
         </section>
-        <section v-else key="fallback" class="surface page-surface"><header><div><p class="eyebrow">{{ currentLabel.toUpperCase() }}</p><h2>{{ currentLabel }}</h2><p>该页读取统一安全 API；写操作必须携带 Session 与 CSRF token，并记录 webui.action 审计。</p></div></header><DataGrid :rows="logs.slice(0, 12)" :columns="COLUMNS.fallback" data-key="id" empty="暂无事件" /></section>
+        <section v-else key="fallback" class="surface page-surface"><header><div><p class="eyebrow">{{ currentLabel.toUpperCase() }}</p><h2>{{ currentLabel }}</h2><p>写操作须携带 Session 与 CSRF token，并记录 webui.action 审计。</p></div></header><DataGrid :rows="logs.slice(0, 12)" :columns="COLUMNS.fallback" data-key="id" empty="暂无事件" /></section>
         </Transition>
       </div>
     </section>
@@ -2768,14 +2770,14 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
       </div>
       <div v-if="catalogError" class="danger-banner"><i class="pi pi-exclamation-triangle" />{{ catalogError }}</div>
       <div class="catalog-status">
-        <template v-if="catalogStatus && !catalogStatus.enabled"><i class="pi pi-info-circle" />模型元数据目录已关闭（<code>provider.catalog.enabled</code>），只能拿到上游 <code>/models</code> 给的那点信息。</template>
-        <template v-else-if="catalogStatus?.available"><i class="pi pi-database" />元数据来自 models.dev 本地缓存：{{ catalogStatus.models }} 个模型 / {{ catalogStatus.providers }} 家 provider · {{ catalogAge }}<span v-if="catalogStatus.stale"> · 已过期，下次拉取时会自动续期</span></template>
-        <template v-else><i class="pi pi-exclamation-triangle" />还没有本地元数据缓存{{ catalogStatus?.error ? `（${catalogStatus.error}）` : '' }}，窗口与价格都需要手填。</template>
+        <template v-if="catalogStatus && !catalogStatus.enabled"><i class="pi pi-info-circle" />模型元数据目录已关闭（<code>provider.catalog.enabled</code>），仅用上游 <code>/models</code> 字段。</template>
+        <template v-else-if="catalogStatus?.available"><i class="pi pi-database" />models.dev 本地缓存：{{ catalogStatus.models }} 个模型 / {{ catalogStatus.providers }} 家 provider · {{ catalogAge }}<span v-if="catalogStatus.stale"> · 已过期，下次拉取时刷新</span></template>
+        <template v-else><i class="pi pi-exclamation-triangle" />尚无本地元数据缓存{{ catalogStatus?.error ? `（${catalogStatus.error}）` : '' }}，窗口与价格需手填。</template>
         <UiButton variant="text" size="small" icon="pi pi-sync" label="刷新目录" :loading="catalogRefreshing" @click="refreshCatalog" />
       </div>
-      <DataGrid v-model:selection="catalogSelection" :rows="catalogRows" :columns="COLUMNS.catalog" data-key="modelId" :loading="catalogLoading" :selectable="(row) => !catalogExists(row)" scroll-height="46vh" empty="上游没有返回可导入的模型">
+      <DataGrid v-model:selection="catalogSelection" :rows="catalogRows" :columns="COLUMNS.catalog" data-key="modelId" :loading="catalogLoading" :selectable="(row) => !catalogExists(row)" scroll-height="46vh" empty="暂无可导入模型">
         <template #modelId="{ data }"><code>{{ data.modelId }}</code><small v-if="data.displayName" class="catalog-sub">{{ data.displayName }}</small></template>
-        <template #limits="{ data }">{{ data.contextWindow ?? catalogDefaults.contextWindow }} / {{ data.maxOutput ?? catalogDefaults.maxOutput }}<small v-if="!data.contextWindow" class="catalog-sub">上游与目录都没给，用默认值</small><small v-else-if="data.limitSource === 'models.dev'" class="catalog-sub">来自 models.dev</small></template>
+        <template #limits="{ data }">{{ data.contextWindow ?? catalogDefaults.contextWindow }} / {{ data.maxOutput ?? catalogDefaults.maxOutput }}<small v-if="!data.contextWindow" class="catalog-sub">无数据，用默认值</small><small v-else-if="data.limitSource === 'models.dev'" class="catalog-sub">来自 models.dev</small></template>
         <template #price="{ data }">
           <span>{{ priceText(data) }}</span>
           <small v-if="data.meta" :class="['catalog-sub', `match-${data.meta.match}`]" :title="MATCH_LABELS[data.meta.match].hint">{{ MATCH_LABELS[data.meta.match].label }}<template v-if="data.meta.catalogProviderId && data.meta.match !== 'third-party'"> · {{ data.meta.catalogProviderId }}</template></small>
@@ -2784,7 +2786,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
         <template #capabilities="{ data }"><span v-if="capabilityTags(data.meta).length" class="cap-tags"><UiTag v-for="tag in capabilityTags(data.meta)" :key="tag" :value="tag" severity="secondary" /></span><small v-else class="catalog-sub">目录里没有这个模型</small></template>
         <template #status="{ data }"><UiTag v-if="catalogExists(data)" value="已在库" severity="secondary" /><UiTag v-else value="可导入" severity="info" /></template>
       </DataGrid>
-      <p class="catalog-hint">窗口、能力与思考档位来自 models.dev；价格只在能确定出处时才带入 —— <b>provider 自报价</b>（这家网关自己公布的价）优先，其次是<b>厂商官方价</b>；只有第三方托管报价的模型价格一律留空（<code>docs/04 §5.4.1</code>），不补齐的话这些模型的花费按 0 记账。</p>
+      <p class="catalog-hint">窗口、能力与思考档位来自 models.dev。价格优先取 <b>provider 自报价</b>，其次<b>厂商官方价</b>；仅有第三方报价的留空，未补齐按 0 记账。</p>
       <template #footer><span class="catalog-count">已选 {{ catalogSelection.length }} · 列出 {{ catalogRows.length }} / 共 {{ catalogModels.length }}</span><UiButton variant="text" label="关闭" @click="catalogDialog = false" /><UiButton label="导入所选" icon="pi pi-download" :disabled="!catalogSelection.length" @click="importCatalog" /></template>
     </UiModal>
     <UiModal v-model:visible="modelDialog" title="模型配置" width="min(680px, 94vw)">
@@ -2800,18 +2802,18 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
         <label>缓存读取价格<UiNumber :model-value="modelForm.priceCacheRead" :min="0" :step="0.01" @update:model-value="changeModelNumber('priceCacheRead', $event)" /></label>
         <label>缓存写入价格<UiNumber :model-value="modelForm.priceCacheWrite" :min="0" :step="0.01" @update:model-value="changeModelNumber('priceCacheWrite', $event)" /></label>
         <UiSwitch v-model="modelForm.enabled" class="wide" label="启用" />
-        <label class="wide">看图能力（含图轮次据它选模型）<UiSelect v-model="modelForm.vision" :options="VISION_MARKS" option-label="label" option-value="value" /><small class="field-note">能力标签是按<b>模型名</b>在 models.dev 上匹配来的，而中转站常常照抄官方模型名却不真的转发图片 —— 那种模型照常 200 返回、usage 里没有 <code>image_tokens</code>，然后凭上下文瞎猜图里有什么。<b>这是能力块里唯一有运行时行为的一位</b>：标成「看不了图」之后含图轮次会自动切到 <code>vision</code> 别名（<code>docs/04 §5.2</code>），标成「能看图」则相反 —— 那一轮就留在它自己身上。怎么判断：拿一张三色块图问它颜色，答错就是看不见。取消标记后这一行维持现值，下一次<code>补齐元数据</code>按目录重填。</small></label>
+        <label class="wide">看图能力<UiSelect v-model="modelForm.vision" :options="VISION_MARKS" option-label="label" option-value="value" /><small class="field-note"><b>能力块中唯一影响运行时行为的一项</b>：标成「看不了图」后，含图轮次切到 <code>vision</code> 别名。判定：三色块图问颜色，答错即不支持。取消标记后维持现值，下次<code>补齐元数据</code>按目录重填。</small></label>
       </div>
       <template #footer><UiButton variant="text" label="取消" @click="modelDialog = false" /><UiButton label="保存模型" @click="saveModel" /></template>
     </UiModal>
     <UiModal v-model:visible="aliasDialog" :title="`别名 ${aliasName || '（未命名）'}`" width="min(860px, 94vw)">
       <div class="form-grid">
         <label>别名<UiSelect v-model="aliasForm.alias" :options="[...ALIAS_GUIDE.map((entry) => entry.alias), '__custom__']" :option-label="(value) => value === '__custom__' ? '自定义…' : value" /></label>
-        <label v-if="aliasForm.alias === '__custom__'">自定义别名<input v-model="aliasForm.custom" placeholder="小写字母开头，[a-z0-9_-]，≤32 位"></label>
+        <label v-if="aliasForm.alias === '__custom__'">自定义别名<input v-model="aliasForm.custom" placeholder="小写字母开头，[a-z0-9_-]，≤32 字符"></label>
         <p class="wide field-note">{{ aliasNameHint }}</p>
-        <p v-if="aliasForm.droppedModels" class="wide callout warn"><i class="pi pi-exclamation-triangle" aria-hidden="true" />原链里有 {{ aliasForm.droppedModels }} 个模型记录已不存在，保存后会从链里去掉。</p>
-        <div class="wide"><p class="field-title">Fallback 模型链</p><p class="field-note">把左边的模型加入右侧链，拖拽或用上下箭头排顺序。排在前面的先用，不可用（429/5xx 重试耗尽）才顺延到下一个；停用的模型会被跳过。</p><ChainPicker v-model="aliasChain" :options="modelOptions" /></div>
-        <p class="wide field-title">采样参数<small>留空 = 不下发该字段，用 provider 默认值；只在这个别名被选中的那一步生效</small></p>
+        <p v-if="aliasForm.droppedModels" class="wide callout warn"><i class="pi pi-exclamation-triangle" aria-hidden="true" />原链中 {{ aliasForm.droppedModels }} 个模型记录已不存在，保存后移除。</p>
+        <div class="wide"><p class="field-title">Fallback 模型链</p><p class="field-note">把左侧模型加入右侧链，拖拽或上下箭头调序。靠前者优先，不可用（429/5xx 重试耗尽）时顺延，已停用的跳过。</p><ChainPicker v-model="aliasChain" :options="modelOptions" /></div>
+        <p class="wide field-title">采样参数<small>留空 = 不下发该字段，使用 provider 默认值；仅在该别名被选中的步骤生效</small></p>
         <label>温度 temperature<UiNumber v-model="aliasSettings.temperature" :min="0" :max="2" :step="0.1" placeholder="0 – 2" /></label>
         <label>最大输出 maxOutputTokens<UiNumber v-model="aliasSettings.maxOutputTokens" :min="1" :step="256" placeholder="不超过模型自身上限" /></label>
         <label>推理档位 reasoning<UiSelect v-model="aliasSettings.reasoning" :options="REASONING_OPTIONS" show-clear placeholder="不下发" /></label>
@@ -2819,7 +2821,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
           <summary><i class="pi pi-chevron-right" aria-hidden="true" />高级</summary>
           <div class="form-grid"><label>topP<UiNumber v-model="aliasSettings.topP" :min="0" :max="1" :step="0.05" placeholder="0 – 1，与温度二选一" /></label><label>topK<UiNumber v-model="aliasSettings.topK" :min="1" placeholder="≥ 1 的整数" /></label><label>存在惩罚 presencePenalty<UiNumber v-model="aliasSettings.presencePenalty" :min="-1" :max="1" :step="0.1" placeholder="-1 – 1" /></label><label>重复惩罚 frequencyPenalty<UiNumber v-model="aliasSettings.frequencyPenalty" :min="-1" :max="1" :step="0.1" placeholder="-1 – 1" /></label><label>seed<UiNumber v-model="aliasSettings.seed" :step="1" placeholder="整数，部分 provider 支持" /></label><label>停止序列 stopSequences<textarea v-model="aliasSettings.stopSequences" rows="3" placeholder="每行一条，最多 8 条" /></label></div>
         </details>
-        <label class="wide">说明（只给运维看）<input v-model="aliasForm.description"></label>
+        <label class="wide">说明（仅运维可见）<input v-model="aliasForm.description"></label>
       </div>
       <template #footer><UiButton variant="text" label="取消" @click="aliasDialog = false" /><UiButton :label="aliasForm.isNew ? '创建别名' : '保存别名'" @click="saveAlias" /></template>
     </UiModal>
@@ -2829,27 +2831,26 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
         <label>Telegram ID<input :value="principalForm.tgId" disabled></label>
         <label>显示名<input :value="principalForm.displayName ?? '—'" disabled></label>
         <label>用户名<input :value="principalForm.username ? `@${principalForm.username}` : '—'" disabled></label>
-        <label class="wide">角色<UiSelect v-model="principalForm.role" :options="ROLES" /></label>
+        <label class="wide">角色<UiSelect v-model="principalForm.role" :options="principalRoleOptions" /></label>
         <p class="wide field-note">{{ ROLE_HINTS[principalForm.role] }}</p>
-        <p v-if="principalForm.kind === 'chat' && !isPrivatePrincipal(principalForm)" class="wide field-note">会话角色只是上限：群里某个人的有效角色 = min(他自己的角色, 这个群的角色)。</p>
-        <p v-else-if="principalForm.kind === 'chat'" class="wide field-note">这是一条<b>私聊会话</b>：有效角色仍取 min(用户角色, 这一行)，而对面只有一个人 —— 要放行或封掉这个人，改 <code>user:{{ principalForm.tgId }}</code> 那一行更直接。</p>
+        <p v-if="principalForm.kind === 'chat'" class="wide field-note">群角色是下限：成员有效角色不低于此，最高到 trusted。</p>
         <p v-if="principalForm.role === 'owner' && principalForm.originalRole !== 'owner'" class="wide callout warn"><i class="pi pi-exclamation-triangle" aria-hidden="true" />owner 跳过审批与沙箱（<code>sandbox.bypassRoles</code>），可以在会话里直接执行宿主命令。</p>
       </div>
       <template #footer><UiButton variant="text" label="取消" @click="principalDialog = false" /><UiButton label="保存角色" :loading="principalSaving" :disabled="principalForm.role === principalForm.originalRole" @click="savePrincipal" /></template>
     </UiModal>
     <UiModal v-model:visible="roleDialog" title="批量修改角色">
       <div class="form-grid">
-        <p class="wide field-note">对勾选的 <b>{{ principalSelection.length }}</b> 个主体统一设角色。只改已存在的行，不会新建 —— 还没跟 bot 说过话的人走「批量导入」。</p>
-        <label>目标角色<UiSelect v-model="roleBulkForm.role" :options="ROLES" /></label>
+        <p class="wide field-note">对勾选的 <b>{{ principalSelection.length }}</b> 个主体统一设置角色。仅改已有主体，新增请用「批量导入」。</p>
+        <label>目标角色<UiSelect v-model="roleBulkForm.role" :options="roleBulkOptions" /></label>
         <p class="wide field-note">{{ ROLE_HINTS[roleBulkForm.role] }}</p>
         <div class="wide selection-preview">
           <span v-for="entry in principalSelection.slice(0, 24)" :key="entry.id" class="wake-chip"><UiTag :value="entry.kind === 'user' ? '人' : isPrivatePrincipal(entry) ? '私聊' : '群'" :severity="entry.kind === 'user' ? 'secondary' : isPrivatePrincipal(entry) ? 'warn' : 'info'" /><code>{{ entry.displayName || entry.username || entry.tgId }}</code><UiTag :value="entry.role" :severity="roleSeverity(entry.role)" /></span>
           <small v-if="principalSelection.length > 24" class="alias-empty">…等 {{ principalSelection.length }} 个</small>
         </div>
-        <p v-if="roleBulkForm.role === 'owner'" class="wide callout warn"><i class="pi pi-exclamation-triangle" aria-hidden="true" />owner 跳过审批与沙箱（<code>sandbox.bypassRoles</code>），可以在会话里直接执行宿主命令。一次给这么多人不是常规操作。</p>
-        <p v-if="selectionHitsOwnerSeat && roleBulkForm.role !== 'owner'" class="wide callout error"><i class="pi pi-times-circle" aria-hidden="true" />这批里包含 <code>access.bootstrapOwnerId</code> 指向的引导 owner。降级之后 Telegram 那边就没人能管 bot 了，只能改配置再重启。</p>
+        <p v-if="roleBulkForm.role === 'owner'" class="wide callout warn"><i class="pi pi-exclamation-triangle" aria-hidden="true" />owner 跳过审批与沙箱（<code>sandbox.bypassRoles</code>），可以在会话里直接执行宿主命令。</p>
+        <p v-if="selectionHitsOwnerSeat && roleBulkForm.role !== 'owner'" class="wide callout error"><i class="pi pi-times-circle" aria-hidden="true" />本批包含 <code>access.bootstrapOwnerId</code> 指向的引导 owner。降级后 Telegram 侧无人可管理 bot，只能改配置并重启恢复。</p>
       </div>
-      <template #footer><UiButton variant="text" label="取消" @click="roleDialog = false" /><UiButton label="改这些人的角色" icon="pi pi-user-edit" :loading="roleSaving" :disabled="!principalSelection.length" @click="saveRoleBulk" /></template>
+      <template #footer><UiButton variant="text" label="取消" @click="roleDialog = false" /><UiButton label="批量设置角色" icon="pi pi-user-edit" :loading="roleSaving" :disabled="!principalSelection.length" @click="saveRoleBulk" /></template>
     </UiModal>
     <UiModal v-model:visible="detailDialog" :title="`对话详情 ${detailTurnId.slice(0, 12)}`" width="min(1120px, 96vw)">
       <p v-if="detailLoading" class="empty"><i class="pi pi-spin pi-spinner" aria-hidden="true" /> 读取该轮日志…</p>
@@ -2864,7 +2865,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
           <span><small>耗时</small><b>{{ detail.turn.finishedAt && detail.turn.startedAt ? `${Number(detail.turn.finishedAt) - Number(detail.turn.startedAt)} ms` : '—' }}</b></span>
         </div>
         <p v-if="detail.turn.error" class="callout error"><i class="pi pi-times-circle" aria-hidden="true" />{{ detail.turn.error }}</p>
-        <p v-if="!detail.captureBodies" class="callout warn"><i class="pi pi-exclamation-triangle" aria-hidden="true" /><code>logs.captureBodies</code> 是关的：这一轮的 span 里不会有请求体与响应体，只剩用量与耗时。</p>
+        <p v-if="!detail.captureBodies" class="callout warn"><i class="pi pi-exclamation-triangle" aria-hidden="true" /><code>logs.captureBodies</code> 已关闭：span 不含请求体与响应体，仅保留用量与耗时。</p>
         <nav class="subtabs" aria-label="事件分组">
           <button v-for="[key, label] in DETAIL_GROUPS" :key="key" type="button" :class="{ active: detailGroup === key }" @click="detailGroup = key">{{ label }}<span>{{ detailCount(key) }}</span></button>
         </nav>
@@ -2880,12 +2881,12 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             </button>
             <div v-if="expandedParts.has(part.ordinal)" class="detail-payload">
               <!-- 降级过的行必须说清：库里参数还在，但模型这一轮看到的是 {elided:true}。 -->
-              <p v-if="part.pruneApplied" class="callout warn"><i class="pi pi-exclamation-triangle" aria-hidden="true" />这条已被裁剪降级（level {{ part.pruneLevel }}）：模型现在看到的是占位符，下面是库里保留的原始 parts。</p>
+              <p v-if="part.pruneApplied" class="callout warn"><i class="pi pi-exclamation-triangle" aria-hidden="true" />本条已裁剪降级（level {{ part.pruneLevel }}）：模型看到的是占位符，下方是库中原始 parts。</p>
               <pre v-if="part.text" v-text="part.text" />
-              <p v-else class="empty">这条消息没有 parts。</p>
+              <p v-else class="empty">无 parts</p>
             </div>
           </li>
-          <li v-if="!detailParts.length" class="empty">这一轮没有工具调用。这一组读的是 <code>context_messages</code> 的原始 parts，不受 <code>logs.retentionDays</code> 与 <code>logs.captureBodies</code> 影响。</li>
+          <li v-if="!detailParts.length" class="empty">本轮无工具调用</li>
         </ol>
         <ol v-else class="detail-events">
           <li v-for="event in detailEvents" :key="event.id" :style="{ marginLeft: `${(detailDepths.get(event.id) ?? 0) * 18}px` }">
@@ -2901,17 +2902,17 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
               <div class="detail-actions">
                 <UiButton size="small" variant="text" icon="pi pi-copy" label="复制 JSON" :disabled="!event.bytes" @click="copyEvent(event)" />
                 <a v-if="event.bytes" class="ui-btn text small" :href="`/api/logs/${event.id}/data`" :download="`${event.kind}-${event.id}.json`"><i class="pi pi-download" aria-hidden="true" />下载完整 JSON</a>
-                <small v-if="event.truncated" class="detail-truncated">下面只渲染前 120k 字符；完整载荷 {{ formatBytes(event.bytes) }}，用上面的复制或下载取。</small>
+                <small v-if="event.truncated" class="detail-truncated">仅渲染前 120k 字符；完整载荷 {{ formatBytes(event.bytes) }}，用上方复制或下载获取。</small>
               </div>
               <pre v-if="event.text" v-text="event.text" />
               <p v-else-if="event.fileRef" class="empty">载荷文件 <code>{{ event.fileRef }}</code> 已被日志保留策略清理。</p>
-              <p v-else class="empty">这条事件没有载荷。</p>
+              <p v-else class="empty">无载荷</p>
             </div>
           </li>
-          <li v-if="!detailEvents.length" class="empty">这一组没有事件。日志按 <code>logs.retentionDays</code> 清理，旧轮次的 span 可能已经不在了。</li>
+          <li v-if="!detailEvents.length" class="empty">本组没有事件。日志按 <code>logs.retentionDays</code> 清理，旧 span 可能已删除。</li>
         </ol>
       </template>
-      <template #footer><span class="catalog-count">trace <code>{{ detailTurnId }}</code></span><UiButton variant="outlined" icon="pi pi-sitemap" label="在日志页看这条 trace" @click="detailDialog = false; active = 'logs'; inspectTrace(detailTurnId)" /><UiButton variant="text" label="关闭" @click="detailDialog = false" /></template>
+      <template #footer><span class="catalog-count">trace <code>{{ detailTurnId }}</code></span><UiButton variant="outlined" icon="pi pi-sitemap" label="在日志页查看该 trace" @click="detailDialog = false; active = 'logs'; inspectTrace(detailTurnId)" /><UiButton variant="text" label="关闭" @click="detailDialog = false" /></template>
     </UiModal>
     <UiModal v-model:visible="logDialog" :title="logDetail ? `日志详情 ${logDetail.kind}` : '日志详情'" width="min(1120px, 96vw)">
       <p v-if="logLoading" class="empty"><i class="pi pi-spin pi-spinner" aria-hidden="true" /> 读取这条事件…</p>
@@ -2933,19 +2934,19 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
           <div class="detail-actions">
             <UiButton size="small" variant="text" icon="pi pi-copy" label="复制 JSON" :disabled="!logDetail.bytes" @click="copyLogDetail()" />
             <a v-if="logDetail.bytes" class="ui-btn text small" :href="`/api/logs/${logDetail.id}/data`" :download="`${logDetail.kind}-${logDetail.id}.json`"><i class="pi pi-download" aria-hidden="true" />下载完整 JSON</a>
-            <small v-if="logDetail.truncated" class="detail-truncated">下面只渲染前 120k 字符；完整载荷 {{ formatBytes(logDetail.bytes) }}，用上面的复制或下载取。</small>
+            <small v-if="logDetail.truncated" class="detail-truncated">仅渲染前 120k 字符；完整载荷 {{ formatBytes(logDetail.bytes) }}，用上方复制或下载获取。</small>
           </div>
           <pre v-if="logDetail.text" v-text="logDetail.text" />
           <p v-else-if="logDetail.fileRef" class="empty">载荷文件 <code>{{ logDetail.fileRef }}</code> 已被日志保留策略清理。</p>
-          <p v-else class="empty">这条事件没有载荷。</p>
+          <p v-else class="empty">无载荷</p>
         </div>
       </template>
       <template #footer>
         <span v-if="logDetail?.traceId" class="catalog-count">trace <code>{{ logDetail.traceId }}</code></span>
-        <span v-else class="catalog-count">这条事件不属于任何 trace</span>
+        <span v-else class="catalog-count">无 trace</span>
         <UiButton v-if="logDetail?.traceId" variant="outlined" icon="pi pi-sitemap" label="展开整条 trace" @click="inspectTrace(logDetail!.traceId); logDialog = false" />
         <!-- `cmd_*` / `job_*` 的 trace 不是轮次（docs/10 §1），点过去只会 404。 -->
-        <UiButton v-if="logDetail?.traceId && !/^(cmd|job)_/.test(logDetail.traceId)" variant="text" icon="pi pi-comments" label="看这一轮详情" @click="logDialog = false; openDetail(logDetail!.traceId!)" />
+        <UiButton v-if="logDetail?.traceId && !/^(cmd|job)_/.test(logDetail.traceId)" variant="text" icon="pi pi-comments" label="查看该轮详情" @click="logDialog = false; openDetail(logDetail!.traceId!)" />
         <UiButton variant="text" label="关闭" @click="logDialog = false" />
       </template>
     </UiModal>
@@ -2962,22 +2963,22 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
         <div class="detail-payload">
           <div class="detail-actions">
             <UiButton size="small" variant="text" icon="pi pi-copy" label="复制 JSON" :disabled="!rawPretty" @click="copyRaw()" />
-            <small class="detail-truncated">这是入库时脱敏过的那份：形似 API key / Bearer token / bot token 的字符串，以及键名含 secret、token、password 的字段，都已被替换成 «redacted»。不是 Telegram 原始 update 的逐字副本。</small>
+            <small class="detail-truncated">入库时脱敏后的副本：形似 API key / Bearer token / bot token 的字符串，以及键名含 secret、token、password 的字段，均替换为 «redacted»。</small>
           </div>
           <pre v-if="rawPretty" v-text="rawPretty" />
-          <p v-else class="empty">这条消息没有存下原始载荷。</p>
+          <p v-else class="empty">未存储原始载荷</p>
         </div>
       </template>
       <template #footer><UiButton variant="text" label="关闭" @click="rawDialog = false" /></template>
     </UiModal>
     <UiModal v-model:visible="bulkDialog" title="批量导入主体">
       <div class="form-grid">
-        <p class="wide field-note">把一批 Telegram <b>数字 ID</b> 一次性登记成主体并统一设角色：还没跟 bot 说过话的人也能提前放行或拉黑。已存在的主体只改角色，不动显示名。</p>
-        <label>类型<UiSelect v-model="bulkForm.kind" :options="[{ value: 'user', label: '用户' }, { value: 'chat', label: '会话（群 / 频道 / 私聊）' }]" /></label>
+        <p class="wide field-note">批量登记 Telegram <b>数字 ID</b> 为主体并统一设角色，未与 bot 交互过的用户也可提前授权或封禁。已存在的主体仅改角色。</p>
+        <label>类型<UiSelect v-model="bulkForm.kind" :options="[{ value: 'user', label: '用户' }, { value: 'chat', label: '会话（群 / 频道）' }]" /></label>
         <label>角色<UiSelect v-model="bulkForm.role" :options="ROLES" /></label>
         <p class="wide field-note">{{ ROLE_HINTS[bulkForm.role] }}</p>
-        <label class="wide">ID 列表<textarea v-model="bulkForm.ids" rows="7" placeholder="每行一个，或用空格/逗号分隔：&#10;123456789&#10;-1001234567890" /></label>
-        <p v-if="bulkBadIds.length" class="wide callout error"><i class="pi pi-times-circle" aria-hidden="true" />不是合法的 Telegram 数字 ID：{{ bulkBadIds.slice(0, 5).join('、') }}{{ bulkBadIds.length > 5 ? ` 等 ${bulkBadIds.length} 个` : '' }}。群/频道 ID 以 <code>-100</code> 开头，@用户名不行。</p>
+        <label class="wide">ID 列表<textarea v-model="bulkForm.ids" rows="7" placeholder="每行一个，或以空格 / 逗号分隔：&#10;123456789&#10;-1001234567890" /></label>
+        <p v-if="bulkBadIds.length" class="wide callout error"><i class="pi pi-times-circle" aria-hidden="true" />以下 ID 不合法：{{ bulkBadIds.slice(0, 5).join('、') }}{{ bulkBadIds.length > 5 ? ` 等 ${bulkBadIds.length} 个` : '' }}。群/频道 ID 以 <code>-100</code> 开头，不支持 @用户名。</p>
         <p v-else-if="bulkIds.length" class="wide field-note">已解析 {{ bulkIds.length }} 个 ID。</p>
       </div>
       <template #footer><UiButton variant="text" label="取消" @click="bulkDialog = false" /><UiButton label="导入并设角色" icon="pi pi-upload" :loading="bulkSaving" :disabled="!bulkIds.length || bulkBadIds.length > 0" @click="saveBulk" /></template>
@@ -2986,7 +2987,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
       <div class="form-grid">
         <label>来源<input :value="TOOL_SOURCE_LABEL[toolForm.source] ?? toolForm.source" disabled></label>
         <label>作用域<input :value="SCOPE_LABEL[toolForm.scope] ?? toolForm.scope" disabled></label>
-        <p class="wide field-note">来源由注册方式决定；作用域在运行时不参与任何判定（它是给人看的标签），所以这两项只读 —— 做成可写等于放一个改了没效果的开关。</p>
+        <p class="wide field-note">来源与作用域为只读标签</p>
         <label>最低角色
           <UiSelect v-model="toolForm.minRole" :options="ROLE_OPTIONS" aria-label="最低角色" />
           <small class="field-note">代码默认 <code>{{ toolForm.defaults.minRole }}</code><UiButton v-if="toolForm.minRole !== toolForm.defaults.minRole" size="small" variant="text" label="恢复默认" @click="resetToolField('minRole')" /></small>
@@ -2996,57 +2997,57 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
           <small class="field-note">代码默认 <code>{{ toolForm.defaults.approval }}</code><UiButton v-if="toolForm.approval !== toolForm.defaults.approval" size="small" variant="text" label="恢复默认" @click="resetToolField('approval')" /></small>
         </label>
         <label>单次超时（毫秒）
-          <UiNumber v-if="!toolForm.selfManagedTimeout" v-model="toolForm.timeoutMs" :min="1" :step="1000" placeholder="留空 = 用默认" aria-label="单次超时" />
-          <input v-else value="工具自管" disabled>
+          <UiNumber v-if="!toolForm.selfManagedTimeout" v-model="toolForm.timeoutMs" :min="1" :step="1000" placeholder="留空 = 使用默认值" aria-label="单次超时" />
+          <input v-else value="工具自行管理" disabled>
           <small class="field-note">
-            <template v-if="toolForm.selfManagedTimeout">这个工具自己管超时（<code>timeoutMs: null</code>），从外面套一层会在它自己的期限之前把调用砍掉，所以不可覆盖。</template>
+            <template v-if="toolForm.selfManagedTimeout">该工具自行管理超时（<code>timeoutMs: null</code>），不可覆盖。</template>
             <template v-else>代码默认 <code>{{ toolForm.defaults.timeoutMs ?? '继承 tools.defaultTimeoutMs' }}</code><UiButton v-if="toolForm.timeoutMs !== toolForm.defaults.timeoutMs" size="small" variant="text" label="恢复默认" @click="resetToolField('timeoutMs')" /></template>
           </small>
         </label>
-        <p class="wide field-note">覆盖只动<b>角色闸</b>与<b>审批闸</b>这两道，<b>绕不过 <code>available()</code></b>：<code>spawn_harness</code> 仍然只有 owner 且只在私聊，<code>web_fetch</code> 对 <code>limited</code> 的 allowlist 判定同理。<code>approvalFor</code> 的抬档也不受影响 —— 覆盖设的是基准档，<code>memory_write</code> 这类工具把基准改成 <code>never</code> 也照样抬。</p>
-        <p v-if="toolFormRelaxed.length" class="wide callout warn"><i class="pi pi-exclamation-triangle" aria-hidden="true" /><b>{{ toolFormRelaxed.join(' 与 ') }}比代码默认更松。</b>保存时会要求二次确认，并在日志与配置变更历史里各留一条记录。</p>
+        <p class="wide field-note">覆盖仅作用于<b>角色判定</b>与<b>审批判定</b>这两处，<b>不绕过 <code>available()</code></b>。覆盖设定的是基准档位，<code>approvalFor</code> 的提档不受影响。</p>
+        <p v-if="toolFormRelaxed.length" class="wide callout warn"><i class="pi pi-exclamation-triangle" aria-hidden="true" /><b>{{ toolFormRelaxed.join(' 与 ') }}比代码默认更松。</b>保存时需二次确认，并在日志与配置变更历史各留一条记录。</p>
         <UiSwitch v-model="toolForm.enabled" class="wide" label="对所有会话启用" />
-        <p class="wide field-note">停用是硬边界：工具既不进模型的工具目录，<code>execute()</code> 也会二次拦截并返回 <code>tool_disabled_by_operator</code>（模型可能沿用上一步的工具名）。</p>
+        <p class="wide field-note">停用为强制约束：该工具不进入模型的工具目录，<code>execute()</code> 二次拦截并返回 <code>tool_disabled_by_operator</code>。</p>
       </div>
       <template #footer><UiButton variant="text" label="取消" @click="toolDialog = false" /><UiButton label="保存" :severity="toolFormRelaxed.length ? 'danger' : 'primary'" :loading="toolSaving" :disabled="!toolFormDirty" @click="saveTool(false)" /></template>
     </UiModal>
     <UiModal v-model:visible="toolRelaxDialog" title="确认放宽工具权限">
-      <p class="callout warn"><i class="pi pi-exclamation-triangle" aria-hidden="true" /><b><code>{{ toolForm.name }}</code> 的下列策略比代码里的默认更松。</b></p>
+      <p class="callout warn"><i class="pi pi-exclamation-triangle" aria-hidden="true" /><b><code>{{ toolForm.name }}</code> 的下列策略比代码默认更松。</b></p>
       <ul class="relax-list"><li v-for="item in toolRelaxDetails" :key="item.path"><code>{{ item.path }}</code>：<b>{{ item.from }}</b> → <b>{{ item.to }}</b></li></ul>
-      <p class="field-note">确认之前一个字都没落库。放宽之后，这个工具对更低角色可见 / 更少地要求人点头 —— 但它仍然过 <code>available()</code> 那道闸。</p>
-      <template #footer><UiButton variant="text" label="取消" @click="toolRelaxDialog = false" /><UiButton label="我知道后果，仍然放宽" severity="danger" :loading="toolSaving" @click="saveTool(true)" /></template>
+      <p class="field-note">放宽后该工具对更低角色可见 / 更少触发人工审批，仍需通过 <code>available()</code> 判定。</p>
+      <template #footer><UiButton variant="text" label="取消" @click="toolRelaxDialog = false" /><UiButton label="确认放宽" severity="danger" :loading="toolSaving" @click="saveTool(true)" /></template>
     </UiModal>
     <UiModal v-model:visible="agentDialog" :title="agentForm.isNew ? '新建子 Agent' : `子 Agent ${agentForm.originalName}`" width="min(860px, 94vw)">
       <div class="form-grid">
-        <label>名称<input v-model="agentForm.name" :disabled="!agentForm.isNew" placeholder="模型用这个名字调 spawn_agent"></label>
+        <label>名称<input v-model="agentForm.name" :disabled="!agentForm.isNew" placeholder="模型以此名称调用 spawn_agent"></label>
         <label>模型别名<UiSelect v-model="agentForm.modelAlias" :options="aliasRows.map((row) => row.alias)" /></label>
         <p v-if="agentNameTaken" class="wide callout error"><i class="pi pi-times-circle" aria-hidden="true" />已存在同名 Agent。</p>
-        <label class="wide">职责描述<input v-model="agentForm.description" placeholder="写给模型看：什么时候该派这个 agent"></label>
+        <label class="wide">职责描述<input v-model="agentForm.description" placeholder="写给模型：何时派发该 agent"></label>
         <label>最低角色<UiSelect v-model="agentForm.minRole" :options="ROLES" /></label>
         <label>步数上限<UiNumber v-model="agentForm.maxSteps" :min="1" :max="64" /></label>
         <label>结果最大字符<UiNumber v-model="agentForm.resultMaxChars" :min="200" :step="500" /></label>
         <UiSwitch v-model="agentForm.injectMemory" class="wide" label="注入记忆文档（PUBMEMORY / PRIMEMORY）" />
-        <p class="wide field-note">子 agent 的有效角色 = min(父 agent 角色, 这里的最低角色)，永远不会比派发它的人权限更高。</p>
+        <p class="wide field-note">子 agent 的有效角色 = min(父 agent 角色, 此处的最低角色)。</p>
         <div class="wide">
-          <p class="field-title">可用工具<small>全不勾 = 不额外限制，沿用父 agent 在当前角色下的工具目录</small></p>
+          <p class="field-title">可用工具<small>全不勾选 = 沿用父 agent 当前角色下的工具目录</small></p>
           <div class="tool-picker">
             <UiCheckbox v-for="row in toolRows" :key="row.name" :class="{ off: !row.enabled }" :model-value="agentForm.tools.includes(row.name)" @change="toggleAgentTool(row.name)">
               <code>{{ row.name }}</code><small v-if="!row.enabled">已停用</small>
             </UiCheckbox>
           </div>
         </div>
-        <label class="wide">instructions<textarea v-model="agentForm.instructions" rows="9" placeholder="这个子 agent 的系统提示词" /></label>
+        <label class="wide">instructions<textarea v-model="agentForm.instructions" rows="9" placeholder="该子 agent 的系统提示词" /></label>
       </div>
       <template #footer>
         <UiButton v-if="!agentForm.isNew" variant="outlined" severity="danger" icon="pi pi-trash" label="删除" @click="removeAgent(agentForm.originalName)" />
         <UiButton variant="text" label="取消" @click="agentDialog = false" /><UiButton :label="agentForm.isNew ? '创建 Agent' : '保存 Agent'" :loading="agentSaving" @click="saveAgent" />
       </template>
     </UiModal>
-    <UiModal v-model:visible="promptPreviewDialog" title="预览完整提示词组装" width="min(1080px, 96vw)">
+    <UiModal v-model:visible="promptPreviewDialog" title="预览提示词组装" width="min(1080px, 96vw)">
       <div class="form-grid">
         <label class="wide">会话<UiSelect v-model="promptPreviewForm.key" :options="promptPreviewChats" placeholder="选择会话" /></label>
         <label>有效角色<UiSelect v-model="promptPreviewForm.role" :options="ROLES" /></label>
-        <p class="field-note">工具、Skill、子 Agent 与私有记忆会按这份角色和会话实时筛选。</p>
+        <p class="field-note">工具、Skill、子 Agent 与私有记忆按该角色与会话实时筛选。</p>
       </div>
       <template v-if="promptPreview">
         <div class="preview-summary"><b>{{ promptPreview.totalTokens.toLocaleString() }} tokens</b><span>上下文 {{ promptPreview.context.messages }} 条 / {{ promptPreview.context.tokens.toLocaleString() }} tokens</span></div>
@@ -3062,12 +3063,12 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
           </li>
         </ol>
       </template>
-      <p v-else class="empty">选择会话和角色后运行组装。这里与真实轮次共用 <code>assembleMainPrompt()</code>，不是上下文占位数据。</p>
+      <p v-else class="empty">选择会话与角色后运行组装。预览与真实轮次共用 <code>assembleMainPrompt()</code>。</p>
       <template #footer><UiButton variant="text" label="关闭" @click="promptPreviewDialog = false" /><UiButton label="运行组装" icon="pi pi-play" :loading="promptPreviewLoading" @click="runPromptPreview" /></template>
     </UiModal>
     <UiModal v-model:visible="agentDryRunDialog" :title="`试跑 Agent ${agentDryRunName}`" width="min(980px, 96vw)">
-      <div class="form-grid"><label class="wide">任务<textarea v-model="agentDryRunTask" rows="5" :disabled="agentDryRunRunning" placeholder="这次试跑要完成的具体任务；不会写入任何会话上下文" /></label></div>
-      <p class="callout warn"><i class="pi pi-exclamation-triangle" />试跑会调用真实模型与该 Agent 可用的真实工具，产生实际费用和工具副作用；结果只写 agent_runs / usage ledger，不进入会话上下文。</p>
+      <div class="form-grid"><label class="wide">任务<textarea v-model="agentDryRunTask" rows="5" :disabled="agentDryRunRunning" placeholder="这次试跑要完成的具体任务" /></label></div>
+      <p class="callout warn"><i class="pi pi-exclamation-triangle" />试跑调用真实模型与真实工具，产生实际费用与副作用；结果只写 agent_runs / usage ledger，不进入会话上下文。</p>
       <div v-if="agentDryRunEvents.length" class="dryrun-summary"><b>${{ agentDryRunCost.toFixed(4) }}</b><span>{{ agentDryRunEvents.filter((event) => event.type === 'step').length }} 步</span></div>
       <ol class="dryrun-events">
         <li v-for="(event, index) in agentDryRunEvents" :key="index" :class="event.type">
@@ -3076,12 +3077,12 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
           <template v-else-if="event.type === 'final'"><header><UiTag value="完成" severity="success" /><code>{{ event.fullRef }}</code></header><pre v-text="event.summary" /></template>
           <template v-else><header><UiTag value="失败" severity="danger" /><span>{{ event.message }}</span></header></template>
         </li>
-        <li v-if="agentDryRunRunning" class="empty"><i class="pi pi-spin pi-spinner" /> Agent 正在运行，步骤会持续追加…</li>
+        <li v-if="agentDryRunRunning" class="empty"><i class="pi pi-spin pi-spinner" /> Agent 运行中…</li>
       </ol>
       <template #footer><UiButton v-if="agentDryRunRunning" severity="danger" variant="outlined" label="取消试跑" @click="cancelAgentDryRun" /><UiButton variant="text" label="关闭" :disabled="agentDryRunRunning" @click="agentDryRunDialog = false" /><UiButton label="开始试跑" icon="pi pi-play" :loading="agentDryRunRunning" :disabled="!agentDryRunTask.trim()" @click="runAgentDryRun" /></template>
     </UiModal>
     <UiModal v-model:visible="revisionsDialog" title="配置变更历史" width="min(960px, 96vw)">
-      <p class="callout"><i class="pi pi-info-circle" />每一次经 WebUI 写入的配置覆盖都记在 <code>config_revisions</code> 里（最近 500 条）。密钥类字段在写入时就已存成 <code>«redacted»</code>。</p>
+      <p class="callout"><i class="pi pi-info-circle" />经 WebUI 写入的配置覆盖记入 <code>config_revisions</code>，保留最近 500 条。密钥类字段存为 <code>«redacted»</code>。</p>
       <ol class="revision-list wide-list">
         <li v-for="row in configRevisions" :key="row.id">
           <div><code>{{ row.key }}</code><small>{{ row.actor }} · {{ new Date(row.ts).toLocaleString() }}</small>
@@ -3089,7 +3090,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             <small class="revision-diff"><b>新</b> {{ revisionValue(row.new_json, 'new') }}</small>
           </div>
         </li>
-        <li v-if="!configRevisions.length && !revisionsLoading" class="empty">还没有经 WebUI 写过任何配置覆盖。</li>
+        <li v-if="!configRevisions.length && !revisionsLoading" class="empty">暂无变更记录</li>
       </ol>
     </UiModal>
     <UiDrawer v-model:visible="mobileMenu" :title="botName"><nav class="mobile-nav"><button v-for="item in navigation" :key="item[0]" type="button" @click="active = item[0]; mobileMenu = false"><i :class="item[1]" />{{ item[2] }}<span v-if="item[0] === 'tasks' && pendingApprovals" class="nav-badge">{{ pendingApprovals }}</span></button></nav></UiDrawer>

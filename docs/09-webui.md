@@ -87,7 +87,7 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
 - token **存内存**，进程重启即失效，而且这就是它该有的语义：一条能换取 owner 全权限 session 的
   链接落进数据库或日志，泄露面比口令本身还大。所以服务端**不记 token 本身**，只记「用掉/失败」。
 - 三道闸：单次使用（取出即删，错的 token 也不留给人反复试）、5 分钟过期、签发表有界（最多 16 个未用）。
-- 群里不给：`/webui` 在非私聊里直接回「这个命令只在私聊里用」——登录链接出现在群里等于把 owner
+- 群里不给：`/webui` 在非私聊里直接回「该命令仅限私聊使用」——登录链接出现在群里等于把 owner
   权限递给屏幕前所有人。
 - `webui.publicUrl` 没配时**明说生成不出来**，而不是发一条打不开的链接。
 - **前端那一跳在 `LoginView` 的 `onMounted` 里**：非 setup 分支且 query 带 `t` 时先兑换，成功照
@@ -151,7 +151,7 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
   控件里显示的是这个会话**实际生效**的值（全局 + 覆盖），改动才写进覆盖层；覆盖在下一轮生效。
   `PATCH` 是**整体替换**而不是合并，所以界面每次都把完整的覆盖对象发回去。
   `context.scope` 这一项带警告：改成 `thread` 之后该会话的后续消息落到新的 contextKey 上，
-  而覆盖是按 key 存的 —— 等于这条覆盖把自己作废了。
+  而覆盖按 key 存储，这条覆盖随即失效。
   覆盖 chip 上方还有一条**会话模型别名**提示（已实现）：Telegram 的 `/model` 写的是 `app_kv` 的
   `modelAlias:<contextKey>`，它**压过**这里的 `agent.main.modelAlias` 与全局值（`runtime.ts` 先读它）。
   它存在时给黄色提示 + `[清除会话别名]`（`DELETE /api/chats/:key/model-alias`）—— 否则「改了模型别名
@@ -248,11 +248,11 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
   表头的 `[补齐元数据]` 对**已入库**的模型重跑一次匹配：能力块照写（**但人工标记盖回去**，见下），
   **价格只填空着的**（已填的不覆盖），窗口/最大输出默认不动（运维可能按预算调小过），走 `POST /api/models/enrich`。
 - **看图能力可以人工标记**（模型编辑对话框里的三态下拉：`跟随目录判断` / `强制：能看图` / `强制：看不了图`）。
-  为什么要有这个：能力标签是按**模型名**在 models.dev 上匹配来的，而中转站照抄官方模型名却不真的
-  转发图片是常态 —— 那种模型照常 200 返回、usage 里没有 `image_tokens`，然后凭上下文瞎猜图里有什么，
+  为什么要有这个：能力标签是按**模型名**在 models.dev 上匹配得到，而中转站照抄官方模型名但不
+  转发图片是常态 —— 那种模型照常 200 返回、usage 里没有 `image_tokens`，按上下文推测图片内容，
   而抄来的 `vision:true` 让含图轮次**不切** `vision` 别名（[04 §5.2](./04-agents-and-providers.md)）。
-  三件事写在控件旁边：**这是能力块里唯一有运行时行为的一位**（其余标签只影响界面，所以不给开关 ——
-  假开关比没开关糟）；判断方法（拿一张三色块图问它颜色，答错就是看不见）；取消标记后该行维持现值、
+  三件事写在控件旁边：**这是能力块中唯一影响运行时行为的一项**（其余标签只影响界面，所以不给开关 ——
+  假开关比没开关糟）；判定方法（用一张三色块图询问颜色，答错即为不支持）；取消标记后该行维持现值、
   下一次 `[补齐元数据]` 再按目录重填。标过的行在能力列上多一枚 `手标 · 能看图` / `手标 · 看不了图` 徽标。
 - `[从 Provider 拉取模型]`：选 provider → 调 `GET /api/providers/:id/models` 拿上游模型目录 → 带搜索框的多选表格（**不做白名单过滤**，上游返回什么就列什么；已在库中的行灰显且不可勾选）→ 勾选若干 → `POST /api/models/import` 批量落库。
   每行同时展示窗口/最大输出、价格、能力标签与**定价出处徽标**，数据来自 models.dev 的本地缓存目录（[04 §5.4.1](./04-agents-and-providers.md#541-模型元数据目录modelsdev)）：
@@ -275,23 +275,27 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
 
 ### 3.6 主体与权限（Principals）
 - 表格：kind、tg_id、显示名/username、角色、首次出现、最后活跃、消息数、今日花费、备注。
-- **子导航分四档**（全部 / 用户 / 私聊 / 群与频道，每项带计数）：三者的语义不同 ——
-  会话角色只是上限，群里某人的有效角色 = min(他自己的角色, 该群的角色)，混在一张表里看不出来。
-- **`kind` 不是类型标签。** 库里它只有 `user` / `chat` 两个取值，而 `chat` 是「一个 Telegram 会话」
-  **不是「群」**：每个私聊也有一行 `chat:<用户 id>`。类型一律按 `principals.chat_type` 显示
-  （私聊 / 普通群 / 超级群 / 频道），缺失时回落到 Telegram id 的正负号 —— 与会话页的
-  `chatIdentity()` 同一套判据，两处不许各写一份（[21 · G-UI-01](./21-webui-coverage-gaps.md)）。
-- **角色列同时给出有效角色。** 一个私聊在库里是两行（`user:X` 与 `chat:X`），显示名与 tg_id
-  一模一样、只差一个类型标签，而 `list()` 按 `updated_at DESC` 排，刚改过的那行必然置顶 ——
-  于是「只改了 `chat:X`」与「改对了」在界面上长得完全一样（[21 · G-UI-03](./21-webui-coverage-gaps.md)）。
-  `GET /api/principals` 每行多回一个 `effectiveRole`，**由服务端用 `resolveEffectiveRole` 算**，
-  前端不重算第二份。配对本身就是「这是一对私聊」的判据：Telegram 用户 id 恒正、群 / 频道 id 恒负，
-  `user:X` 与 `chat:X` 同时在表里就只可能是私聊，不需要再看一次 `chat_type`。
-  群 / 频道那行回 `null` —— 它的角色是上限不是有效角色，每个成员各不相同，编一个确定值出来
-  比不给更坏。`effectiveRole` 与本行 `role` 不一致时，角色列下面多一行红字「实际 <角色>」；
-  一致时不出，这一页有几十行，逐行挂一个「有效 X」是噪声。
+- **子导航分三档**（全部 / 用户 / 群与频道，每项带计数）：两者的语义不同 —— 用户那一行是这个人
+  自己的角色，群 / 频道那一行是**下限**（把群设成 `trusted` 等于把群里每个已登记成员抬到 `trusted`，
+  封顶也是 `trusted`，[05 §2.2](./05-tools-and-permissions.md#22-有效角色)），混在一张表里看不出来。
+  此前是四档（多一个「私聊」）—— 2026-08-30 之后私聊只占 `user:` 一行，那一档已无内容可分。
+- **`kind` 不是类型标签。** 库里它只有 `user` / `chat` 两个取值。`chat` 今后**恒为群 / 频道**
+  （私聊只占 `user:` 一行，`/grant chat <正数 id>` 与 bulk 的同类请求一律 400），但**旧库里可能还有
+  残留的私聊 `chat:` 行**，所以类型一律按 `principals.chat_type` 显示（私聊 / 普通群 / 超级群 / 频道），
+  缺失时回落到 Telegram id 的正负号 —— 与会话页的 `chatIdentity()` 同一套判据，两处不许各写一份
+  （[21 · G-UI-01](./21-webui-coverage-gaps.md)）。这条判据**保留**：拿 `kind` 当标签会把残留的
+  私聊行标成群聊。
+- **不显示有效角色，也不再有那行红字。** `GET /api/principals` **不返回 `effectiveRole`**，角色列
+  下面那行「实际 &lt;角色&gt;」删掉。它是为了一个已经不存在的形态存在的：私聊此前在库里占两行
+  （`user:X` 与 `chat:X`），只改一行时「改了」与「改对了」长得一模一样
+  （[21 · G-UI-03](./21-webui-coverage-gaps.md) —— 该条已随 2026-08-30 的权限模型改动结案）。
+  现在私聊只有一行，改它就是改对了；而群 / 频道那一行是下限，每个成员的有效角色各不相同，
+  服务端本来就合成不出一个确定值。合成一个出来是「摘除比伪造安全」的反面。
 - 点任一行打开二级菜单（`UiModal`）：只读展示 kind / tg_id / 显示名 / username，
-  角色下拉可改并写明该角色意味着什么；升到 `owner` 时额外警示「跳过审批与沙箱」。
+  角色下拉可改并写明该角色意味着什么。**群 / 频道那一行的说明是「下限，最高到 `trusted`」**：
+  它把群里每个已登记成员抬到这一档，而群内封顶 `trusted`。
+  **`kind='chat'` 时角色下拉不给 `owner`** —— 群里封顶 `trusted`，选它零效果，却看起来像「这个群有
+  owner 权限」；服务端同样 400。`kind='user'` 升到 `owner` 时额外警示「跳过审批与沙箱」。
   保存走 `PATCH /api/principals/:id`，下一轮生效并写审计日志。
 - **表格每行带勾选框**，选中若干行后表格上方出现批量条（已勾选数 + `[清空勾选]` + `[批量改角色]`）：
   对话框里选目标角色、列出被选中的主体（类型 / 名字 / 当前角色）、写明该角色意味着什么，
@@ -303,7 +307,7 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
   已存在的行一个字段都不动 —— 早先它走 `upsertSeen`，每次重启都把真名冲回 `Owner` / 空用户名。
   顶栏右上角显示的也是这一行的真实显示名与 `@username`（不再是写死的 `OW`），点一下跳到主体页。
 - `[批量导入]`：粘贴 Telegram **数字 ID** 列表（换行/空格/逗号分隔，去重）+ 类型 + 目标角色，
-  一次性登记还没跟 bot 说过话的人。前端先标出非法 ID（`@username`、非数字），
+  一次性登记未与 bot 交互过的用户。前端先标出非法 ID（`@username`、非数字），
   服务端再校验一次；**已存在的主体必须真的改角色** —— `upsertSeen` 的 `ON CONFLICT` 分支
   刻意不动 `role`（避免每条消息把手工设的角色冲掉），只调它会「导入成功」却什么都没变，
   所以写入端对已存在的行**改为只调 `setRole`**（连 `upsertSeen` 都不再调：它的 `ON CONFLICT`
@@ -338,12 +342,12 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
     `PATCH` 在没有 `confirmRelax:true` 的情况下返回 `409 relax_requires_confirmation` 并列出
     哪几个字段、从什么放宽到什么；界面据此弹确认框，并在工具表上给该行留「已放宽」标记。
     收紧与恢复默认直接保存。超时不算放宽（资源旋钮不是权限闸），照样进审计但不拦。
-  - **覆盖只动「角色闸」与「审批闸」这两道，绕不过 `available()`。** `spawn_harness` 在
+  - **覆盖仅作用于「角色判定」与「审批判定」这两处，不绕过 `available()`。** `spawn_harness` 在
     `available()` 里硬判 `role === 'owner' && isPrivate`，把它的 minRole 覆盖成 `limited`
-    照样开不出来；`web_fetch` 对 `limited` 的 allowlist 判定同理。这一点要写在弹窗里 ——
+    仍然开不出来；`web_fetch` 对 `limited` 的 allowlist 判定同理。这一点要写在弹窗里 ——
     否则运维会以为调低 minRole 就等于放开了那个工具。
-  - **`approvalFor` 的抬档不受覆盖影响**：覆盖设的是**基准档**，`memory_write` 这类靠
-    `approvalFor` 把自己抬进审批的工具，基准改成 `never` 也照样抬（`ToolRegistry` 取最严者）。
+  - **`approvalFor` 的提档不受覆盖影响**：覆盖设定的是**基准档位**，`memory_write` 这类靠
+    `approvalFor` 提档进审批的工具，基准改为 `never` 也仍会提档（`ToolRegistry` 取最严者）。
   - `timeoutMs` 只对声明了超时的工具有效。`bash` / `python` / `spawn_agent` / `spawn_harness` /
     `ask_parent` 以及全部 `custom_*` 声明的是 `timeoutMs: null`（它们各自有自己的硬期限），界面对
     这几个置灰并注明原因 —— 从外面给它们套一层 race 会在它们自己的超时之前把调用砍掉。
@@ -420,7 +424,7 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
 - **来源脊**：每行左侧 3px，`bundled` 灰 / `local` 主色 / `package` 青 / 模型自撰 琥珀 /
   加载失败 玫红。**「未审阅」有自己的形态**（虚线边框 + 琥珀脊）而不只是换一个标签的字 ——
   「没人看过」和「有人看过之后关掉」是两回事，混成一个标签运维就分不清哪些在等自己。
-- **待你处理**：页顶一条，数三类在等人的东西（未审阅的包 / 未复审的脚本 / 要登录的 server /
+- **等待处理**：页顶一条，数三类在等人的东西（未审阅的包 / 未复审的脚本 / 要登录的 server /
   加载或连接失败）。点一下跳到对应分段。归零时降级成一句灰字，不放庆祝文案。
 
 四类各自的版式与「说是之前要看什么」：
@@ -429,15 +433,15 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
   （「这个包往我机器上放了什么」是启用它之前唯一要回答的问题）。行上摆 name、description、
   来源徽标、`min-role`、`requires-tools`、`allowed-tools`、上次变更。
   **`requires-tools` 必须摆出来**：这几个工具不在本轮工具集里时这份 skill 压根不进模型目录
-  （`SkillLoader.catalog()`），而 `tools.selfExtend.*` 出厂全关 —— 于是一份说明书在这一页上
+  （`SkillLoader.catalog()`），而 `tools.selfExtend.*` 出厂全关 —— 于是一份说明文档在这一页上
   显示「可用」，模型那边却永远看不见它。`GET /api/skills` 因此多回 `requires_tools` 与
   `allowed_tools` 两列（**只取那两个字段，不放行整份 `frontmatter_json`**，G-EXT-06 的口径不变）。
-  可 `[新建]`、`[编辑]`/`[读一遍]`、启停、删除、`[装 Skill 包]`。
-  **随包那四份说明书只放行启停**：改正文 / 描述 / 删除回 403 `skill_reserved`，界面上那个删除
+  可 `[新建]`、`[编辑]`/`[查看正文]`、启停、删除、`[装 Skill 包]`。
+  **随包那四份说明文档只放行启停**：改正文 / 描述 / 删除回 403 `skill_reserved`，界面上那个删除
   按钮因此根本不渲染（摆一个点下去必然报错的按钮比不给更难排查）。
   `skills.enabled` 关着时页顶给提示条并带 `[打开总开关]`。
 - **MCP**（连接表）—— 要看的是**活没活、谁的、挂了哪些工具、登录了没有**。列：server（名 + url
-  或命令行）、状态、凭据、工具条数、最低角色、上次核对、动作。要登录 / 连不上的行排在最前并
+  或命令行）、状态、凭据、工具条数、最低角色、上次核对、动作。要登录 / 连接失败的行排在最前并
   整行浅琥珀底。详见 [§3.8.1](#381-需要登录的-mcp-server)。
   - **工具清单从行内挪进抽屉**（`UiDrawer`）。此前它是一个封高的内嵌滚动区：条数没有上限
     （一台 agent-browser 就发现 64–70 个），不封高的话一台 server 足以把整页拉到 1700px；
@@ -454,14 +458,14 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
     都会推）而不是去解 cron 表达式。
 - **Plugins**（代码物件卡）—— 要看的是**源码**，所以主动作是 `[看源码]`
   （`GET /api/plugins/:name/source`；没有它，「启用前先看过源码」就只是句口号）。
-  卡片上摆 `provides_json` 解出来的「它往运行时加了 N 个工具 / M 个 hook」—— 那是 MCP 工具条数的
+  卡片上摆 `provides_json` 解出来的「向运行时注册 N 个工具 / M 个 hook」—— 那是 MCP 工具条数的
   plugin 对应物，端点一直在发而界面一直没读。启用要二次确认（全信任、无沙箱）。
   `[重载]` 之后**按 `hotReloadReliable` 分流**：跑在 tsx（`pnpm dev`）下时热重载静默跑旧代码，
   这时弹的是不自动消失的 warn 并在卡片上常驻一条提示，而不是一句「已重载」。
   `DELETE /api/plugins/:name` 连目录带库里那行一起删。
 - **自定义工具**（待复审队列）—— 要看的是**脚本正文与参数**，未审阅的排在最前。行上直接摆
-  runtime、作用域、超时、由谁写下，不用点开才看得到。**正文与参数在这里是只读的**：顺手改一行
-  会让 `definition_hash` 与模型以为的那份定义脱节，要改就让模型改，或者直接删。
+  runtime、作用域、超时、由谁创建，不用点开才看得到。**正文与参数在这里是只读的**：顺手改一行
+  会让 `definition_hash` 与模型以为的那份定义脱节，要改就让模型改或直接删。
   启用一段模型写的脚本记 **warn** 级 `webui.action`，跟放宽工具权限同一档。
 
 **通道闸提示条要指名道姓说出真正关着的那个键。** 判据是「`tools.selfExtend.enabled` 主闸或
@@ -563,7 +567,7 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
 - **点任一行看这条事件的详情（已实现）**：`GET /api/logs/:id` → `UiModal`。上半是元信息栅格
   （时间 / 级别 / kind / 摘要 / trace / span / parent span / chat / user / key / 耗时 / 载荷大小），
   下半是格式化后的 `data_json`，带 `[复制 JSON]` 与 `[下载完整 JSON]`（走 `GET /api/logs/:id/data` 取未截断那份）。
-  footer 两个跳转：`[展开整条 trace]` 与 `[看这一轮详情]`（`cmd_*` / `job_*` 的 trace 不是轮次，不给这个按钮）。
+  footer 两个跳转：`[展开整条 trace]` 与 `[查看该轮详情]`（`cmd_*` / `job_*` 的 trace 不是轮次，不给这个按钮）。
   此前点一行只会去重建 trace，而 `trace_id` 为空的那些（`system.start`、`config.changed`、
   `maintenance.*`、`webui.action`）**点了什么都不发生** —— `log_events` 的 15 列里界面只用到 5 列。
 - 列表列：时间 / 级别 / 事件 / 摘要 / **载荷**（`data_bytes`）/ Trace。载荷正文不在列表里
@@ -577,13 +581,13 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
 
 - **一个弹窗管新建与编辑**（`isNew` 分支）。`[新建定时任务]` 与行内 `[编辑]` 打开的是同一个
   `UiModal`：会话下拉（只列已有上下文的会话）、任务名、模式、触发方式（cron / 一次性）、正文、
-  静默开关。正文的标签跟着模式变（agent 是「任务描述（给模型看）」，notify 是「要发出的正文」）。
+  静默开关。正文的标签跟着模式变（agent 是「任务描述（提供给模型）」，notify 是「要发出的正文」）。
   **一个会话都没有时新建按钮禁用并给一条说明** —— 空下拉配「填完才报错」是最难受的那种表单。
 - **编辑时四个字段只读，每个只读都有理由**，且理由要写在控件旁边而不是只留在这份文档里：
   **会话**（隔离锚点，`POST` 连客户端给的 `chatId` 都不收）、**模式**（正文语义与花不花钱随它
   一起翻转，见 [05 §3.8](./05-tools-and-permissions.md)）、**时区**（任务含义锚在创建时那个时区上，
-  [03 §2.12](./03-data-model.md)）、**创建者**（每次触发按 `min(用户角色, 会话角色)` 重算，
-  做成可写就是一个提权把手）。要换这四样只能取消重建 —— 代价是 `run_count` 与运行历史归零，
+  [03 §2.12](./03-data-model.md)）、**创建者**（每次触发都按他的**有效角色**重算，
+  [05 §2.2](./05-tools-and-permissions.md#22-有效角色)；做成可写就是一个提权把手）。要换这四样只能取消重建 —— 代价是 `run_count` 与运行历史归零，
   而那正好是「这已经是另一条任务了」的诚实表达。
 - ⚠ **一次性任务的 `at` 回填必须走墙钟折算，不能直接填 ISO。** `GET` 发的是 `toISOString()` 的
   UTC 瞬时，而表单收的是**任务行上那个时区**的墙钟串（`YYYY-MM-DDTHH:mm`）。直接回填的话，
@@ -656,8 +660,10 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
   每行给出 `cost_usd` / `reserved_usd` / `turns`、所属 bucket 是否是**当前窗口**、以及**合成好的上限**。
   上限不由前端拼：`(scope, window)` 到配置的取值规则（含 `perUser.byRole` 覆盖）与 `bot.ts` 同源，
   在服务端算完再返回。chat / user 行按 `principals` 反查显示名与角色 —— 只显示裸 Telegram ID 认不出是谁。
-  有效角色是 `min(用户角色, 会话角色)`，服务端只看得到用户自己那一档，因此配了 `byRole` 时
-  user 行的上限标 `limitApprox`，界面上以「≈」提示实际生效的可能更低。
+  有效角色要连会话一起算，而计数器行上只有用户自己那一档：群里取的是两者较高者再封顶 `trusted`
+  （[05 §2.2](./05-tools-and-permissions.md#22-有效角色)），所以实际生效的那档**可能比这里高**
+  （受信群把 `limited` 成员抬成 `trusted`），也可能因为群 `blocked` 而根本轮不到。因此配了 `byRole`
+  时 user 行的上限标 `limitApprox`，界面上以「≈」提示这是按用户角色算出来的近似值。
 - **`[重置]`**（已实现）：`POST /api/quota/reset`。不带 body 是全表清零；行内按钮带
   `{scope, subject, window, bucket}` 只删那一行 —— 一个人撞满当日额度，没有理由把全局与其他所有人的
   当月计数一起抹掉。两种都写 `webui.action` 审计。
@@ -755,7 +761,7 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
   （[08 §5.2](./08-telegram-adapter.md#52-流式算法)）。保存同样走 `PUT /api/config` 的点分键，
   下一轮回复生效；在途那一轮沿用开轮时的值。同样有未保存改动时不被 SSE 刷新回写。
   同一张卡片下半截是**等待文案**：`placeholderTexts`（一行一条的文本域，保存时滤掉空行后落成数组）、
-  `placeholderPick`（随机 / 固定）、`placeholderIndex`（固定用第几条，`pick != fixed` 时禁用）与
+  `placeholderPick`（随机 / 固定）、`placeholderIndex`（固定使用的下标，`pick != fixed` 时禁用）与
   `placeholderAfterMs`。下面一行实时预告「这一轮会发哪条」，因为随机档看不出配的对不对；
   **文本域清空时那行换成 warn callout**，说明占位消息已经关掉 —— `placeholderAfterMs` 的 schema 是
   `positive()`，填不了 0，清空列表是唯一的关闭途径（[11 output](./11-config-reference.md)）。
@@ -835,7 +841,7 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
     删掉**不删任何东西**：「这一段我不管」与「这一段清空」在提交的树里区分不出来，宁可不删。
   - **密钥类行不参与往返，也永不被删**。`GET` 对 `looksSecret` 为真的行整行跳过（与导出同一套判据：
     叶子段像密钥 + 值是非空字符串），并在 YAML **顶部生成一段注释**逐条列出它们，写明「保持原值，
-    删掉这段注释也不会删掉它们」—— 界面上此前只有一个 `skipped` 数组，运维看不出「我提交的这份少了
+    删除这段注释也不会删除它们」—— 界面上此前只有一个 `skipped` 数组，运维看不出「我提交的这份少了
     什么」。`PUT` 那一侧按同一份判据**自己重算一次**（`GET`/`PUT` 是两次独立请求，不能信客户端），
     把它们连同 `envPinnedConfigKeys()` 一起排除在删除集之外。
     此前 `webui.passwordHash` 就是这样被一次往返擦掉的：`PUT` 拿到的树里没有它 → zod 补上默认值 `''`
@@ -926,8 +932,8 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
 | `POST /api/models/import` | 从上游目录批量落库：`{providerId, models:[{modelId, displayName?, contextWindow?, maxOutput?, priceIn?, priceOut?, priceCacheRead?, priceCacheWrite?}], contextWindow?, maxOutput?}`，单次上限 200 条。**能力块与定价出处一律在服务端重新解析**（请求体里的 capabilities 是客户端说的，落库的必须是目录里实际有的那条）。已存在的 `(provider_id, model_id)` 跳过而不是覆盖（不能把已调好的定价冲掉），返回 `{inserted, skipped, priced, ids}` |
 | `POST /api/models/enrich` | 给已入库的模型补元数据：`{ids?: string[], overwrite?: boolean}`（不给 `ids` 就是全部）。能力块照写；**价格只填 `NULL` 的那几个**，已有价格保留并把出处标成 `manual`；窗口/最大输出只有 `overwrite:true` 才覆盖。返回 `{scanned, updated, priced, unmatched}`；目录完全不可用时 `502 catalog_unavailable`（不能拿空值把现有行洗掉） |
 | `GET/PUT/DELETE /api/aliases[/:alias]` | 别名、fallback 链与采样参数。`PUT` 校验别名名（`^[a-z][a-z0-9_-]{0,31}$`）、链非空且模型存在、`settings` 过 `aliasSettingsSchema`（[04 §5.2.1](./04-agents-and-providers.md#521-别名参数settings_json)），任一不过返回 `alias_invalid` + 具体路径 |
-| `GET/PATCH /api/principals[/:id]` | 主体与角色。`GET` 的每一行除库里那份 `role` 外还带 `effectiveRole`：`user:X` 与 `chat:X` 配得上对时是两者的 `resolveEffectiveRole` 结果（即模型系统提示里那个 `role`），配不上对（只见过一边、或本行是群 / 频道）时为 `null` —— 群的角色是上限不是有效角色 |
-| `POST /api/principals/bulk` | 批量登记主体：`{ids:[…], kind: user\|chat, role}`，单次上限 500。ID 必须是 Telegram 数字 ID（`^-?\d{1,20}$`），非法 ID 或非法角色返回 400。已存在的主体**只补一次 `setRole`，不再走 `upsertSeen`**（`ON CONFLICT` 分支不动 role 但会照写 `display_name`/`username`，而这里手上只有 `null`，等于把 Telegram 同步来的真名清空），返回 `{count, created, updated}` |
+| `GET/PATCH /api/principals[/:id]` | 主体与角色。`GET` **只回库里那份 `role`，不再合成 `effectiveRole`**（2026-08-30：私聊只占 `user:` 一行，没有需要靠合成才看得出来的形态；群 / 频道那一行是下限，合不出一个对每个成员都成立的值）。`PATCH` 对 `kind='chat'` 的行拒收 `role='owner'`（群内封顶 `trusted`，写进去零效果）—— 400 `invalid_role_for_chat` |
+| `POST /api/principals/bulk` | 批量登记主体：`{ids:[…], kind: user\|chat, role}`，单次上限 500。ID 必须是 Telegram 数字 ID（`^-?\d{1,20}$`），非法 ID 或非法角色返回 400。**`kind='chat'` 另拒两样：正数 ID（那是一个用户，`chat:` 行今后恒为群 / 频道）与 `role='owner'`（群内封顶 `trusted`），两者都 400** —— 与 `/grant chat` 同一份判据（[05 §2.3](./05-tools-and-permissions.md)）。已存在的主体**只补一次 `setRole`，不再走 `upsertSeen`**（`ON CONFLICT` 分支不动 role 但会照写 `display_name`/`username`，而这里手上只有 `null`，等于把 Telegram 同步来的真名清空），返回 `{count, created, updated}` |
 | `POST /api/principals/roles` | 勾选批量改角色：`{ids:[主体 id…], role}`，单次上限 500。**只改已存在的行，不新建**（新建走 `/api/principals/bulk`，那边收的是 Telegram 数字 ID）；库里找不到的 id 原样回报而不是静默跳过，返回 `{count, changed, missing}` |
 | `GET /api/tools` `PATCH /api/tools/:name` | 工具启停与策略覆盖。`GET` 每个工具回**生效值**（`minRole`/`approval`/`scope`/`source`/`enabled`/`timeoutMs`）外加 `defaults`（代码里那份）、`relaxed`（比默认更松的字段名）、`selfManagedTimeout`、`deferred`（这台机器的 `tools.catalog.*` 下它属不属于折叠族；没装配注册表的静态兜底分支一律 false，见 §3.7）。`PATCH` 收 `{enabled?, minRole?, approval?, timeoutMs?, confirmRelax?}`，三个策略字段给 `null` = 恢复默认；**先读当前覆盖再整体写回** `tools.overrides.<name>`（一个 key 一条整叶 JSON，只写变动的那个字段会把其余的抹掉）。放宽且无 `confirmRelax` 时 `409 relax_requires_confirmation`。被禁用的工具从工具目录消失，且 `ToolRegistry.execute` 会二次拦截并返回 `tool_disabled_by_operator`。未知工具名返回 404 |
 | `GET/PUT /api/sandbox` `POST /api/sandbox/probe` `POST /api/sandbox/image` | 沙箱配置、探测、拉取镜像（只 pull 不 build；镜像名取自已保存的配置） |
@@ -953,7 +959,7 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
 | `GET /api/logs` `GET /api/logs/:id` `GET /api/logs/trace/:traceId` `GET /api/logs/blob?ref=` | 日志 |
 | `GET /api/usage` | 用量明细（`usage_ledger`，最近 1000 条） |
 | `GET /api/usage/report?groupBy&from&to` | 用量聚合。`groupBy` ∈ `day\|chat\|user\|model\|alias\|agent`，非法值 400；`chat`/`user` 的行带回 `label`（服务端反查 `principals`） |
-| `GET /api/quota` | 配额页的全部数据：`{quota, timezone, buckets:{day,month}, counters:[…], unpriced:[…], unpricedTotal, unimplemented:[…]}`。`counters` 是 `quota_counters` 全表（上限 500 行）**加上服务端合成的 `limit`**：`(scope, window)` 到配置的取值规则含 `perUser.byRole` 覆盖，让前端自己拼等于把 `bot.ts` 的规则实现两遍。`current` 标记该行是否落在当前 bucket；chat/user 行按 `principals` 反查 `role`/`label`/`username`；配了 `byRole` 时 user 行带 `limitApprox`（有效角色取 `min(用户, 会话)`，服务端只看得到前者）。`unimplemented` 转发 `KNOWN_UNIMPLEMENTED_CONFIG_KEYS` 里 `quota.` 开头的那几项，界面据此不给控件 |
+| `GET /api/quota` | 配额页的全部数据：`{quota, timezone, buckets:{day,month}, counters:[…], unpriced:[…], unpricedTotal, unimplemented:[…]}`。`counters` 是 `quota_counters` 全表（上限 500 行）**加上服务端合成的 `limit`**：`(scope, window)` 到配置的取值规则含 `perUser.byRole` 覆盖，让前端自己拼等于把 `bot.ts` 的规则实现两遍。`current` 标记该行是否落在当前 bucket；chat/user 行按 `principals` 反查 `role`/`label`/`username`；配了 `byRole` 时 user 行带 `limitApprox`（有效角色要连会话一起算 —— 群里取较高者再封顶 `trusted`，所以实际那档可能比这里高，服务端在这张表上只看得到用户自己那一档）。`unimplemented` 转发 `KNOWN_UNIMPLEMENTED_CONFIG_KEYS` 里 `quota.` 开头的那几项，界面据此不给控件 |
 | `PUT /api/quota` | body 是**相对 `quota` 的点分键**（`{"global.daily": 5}` → `quota.global.daily`），与 `PUT /api/sandbox` 一致。展开走 `assignDotted`、整体过 `configSchema`，落 `config_kv` + `config_revisions` 并广播 `config.changed`（与 `PUT /api/config` 同一套校验与审计）。非法键 400 `invalid_config_key`，校验失败 400 `invalid_config` + 逐条 `details` |
 | `POST /api/quota/reset` | 重置计数器。不带 body = 全表清零；带 `{scope, subject?, window?, bucket?}` 只删匹配的行（**给了任一过滤条件就必须给 `scope`**，否则 400 `invalid_filter` —— 只按 `bucket` 删会跨 scope 误伤）。返回 `{changes}` |
 | `GET /api/tasks` | 任务列表（`tasks` 表）：`?page=&size=` → `{items, total, page, size}`，排序「`state='running'` 优先，其余 `updated_at` 倒序」。**行里不带 `progress_json`**（那是详情的事，列表一次上百行带着它只是往浏览器推死重量），**加 `chatLabel` / `userLabel`**（服务端 `principalLabel` 反查，前端不实现第二份规则，同 `GET /api/usage/report`）。**没有 `POST /api/tasks/:id/cancel`**：子 agent 跑在父轮次的 abort 信号下，没有独立的取消句柄，界面上的任务 `[取消]` 打的是下面那条轮次取消 —— 造一个只能取消整轮的 task 端点等于起个会误导人的名字 |

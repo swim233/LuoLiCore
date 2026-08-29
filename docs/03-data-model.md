@@ -47,10 +47,13 @@ CREATE TABLE principals (
   id           TEXT PRIMARY KEY,          -- 'user:8899001' | 'chat:-1001234567'
   kind         TEXT NOT NULL CHECK (kind IN ('user','chat')),
   tg_id        TEXT NOT NULL,
+  -- kind='chat' 的行**恒为群 / 频道**（tg_id 恒负），且**不允许 owner**：群内有效角色封顶 trusted
+  -- （05 §2.2），owner 档在全库零效果，留着只会让 WebUI 的主体页说一个不存在的谎。写入侧
+  -- （`/grant`、WebUI、批量导入）一律拒收 `chat` + `owner`，迁移 0015 把存量降为 trusted。
   role         TEXT NOT NULL CHECK (role IN ('owner','trusted','limited','blocked')),
   display_name TEXT,
   username     TEXT,
-  chat_type    TEXT,                      -- private|group|supergroup|channel（kind='chat' 时）
+  chat_type    TEXT,                      -- group|supergroup|channel（kind='chat' 时）
   note         TEXT,
   first_seen_at INTEGER NOT NULL,
   updated_at   INTEGER NOT NULL,
@@ -61,6 +64,8 @@ CREATE INDEX ix_principals_role ON principals(role);
 ```
 
 未登记主体的默认角色来自配置 `access.defaultUserRole` / `access.defaultChatRole`（默认均为 `blocked`）。首次见到的主体会以默认角色**自动插入一行**（`updated_by='bootstrap'`），方便在 WebUI 里直接改。
+
+**私聊只占 `user:` 一行**（2026-08-30 拍板，迁移 `0015_principals_drop_private_chat.sql`）。私聊的有效角色就是 `role(user)`，不再读 `chat:<正数 id>`，那种行也不再写。旧库里每个私聊都还有一行：`upsertSeen` 的 `ON CONFLICT` 分支刻意不动 `role`，于是它的角色被首见时的 `defaultUserRole` 冻结 ——「把 `user:` 提到 `trusted` 却不生效、必须再改一次 `chat:`」这个事故就出在它身上。迁移按 `chat_type='private' OR tg_id NOT LIKE '-%'` 取并集删除（`chat_type` 是 Telegram 给的权威值，而 `/grant chat <正数>` 写出的行没有它；Telegram 的群/频道 id 恒负，正数即私聊）。`/grant chat <正数 id>` 今后一律拒收。
 
 ### 2.2 原始消息归档
 
@@ -678,6 +683,7 @@ CREATE TABLE approvals (
   risk         TEXT NOT NULL,            -- low|medium|high
   state        TEXT NOT NULL CHECK (state IN ('pending','approved','denied','expired')),
   tg_message_id INTEGER,
+  tg_chat_id   TEXT,                      -- 迁移 0016，可空，见下
   requested_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
   decided_by TEXT, decided_at INTEGER, decision_channel TEXT
   -- decision_channel: telegram|webui|system|acp
@@ -708,11 +714,19 @@ CREATE TABLE approvals (
   -- 后等裁决 / TTL / 轮次取消（docs/24 · R-APPR-01）。两条都没有时不写 pending，当场 state='denied',
   -- decided_by='system', decision_channel='system' —— 让模型立刻知道审批不可用，而不是干等满
   -- approval.ttlMs（[05 §6]）。
-  -- tg_message_id: 发起人回执那条消息的编号，**是「屏幕上还有一排点不动的按钮」的待办队列，不是
-  -- 历史记录**：投递落地时写，裁决落定**且那次收尾编辑真回来了**才清，启动时把剩下的逐条收尾
-  -- （撤键盘 + 把正文换成结局）再整列清空（`DatabaseApprovalBroker.staleKeyboards()`）。
+  -- tg_message_id: **那条带〔批准〕〔拒绝〕按钮的消息**的编号，**是「屏幕上还有一排点不动的按钮」
+  -- 的待办队列，不是历史记录**：投递落地时写，裁决落定**且那次收尾编辑真回来了**才清，启动时把
+  -- 剩下的逐条收尾（撤键盘 + 把正文换成结局）再整列清空（`DatabaseApprovalBroker.staleKeyboards()`）。
   -- 所以稳态下它几乎总是 NULL。**清列的前提是收尾已落地** —— 编辑没回来就等于这条还没办完，
   -- 抢在前面清的表现是消息被删 / 网络抖 / 429 各来一次，那排按钮就永久没人收。
+  -- 发起人会话里那条纯文本报信**不进这一列**：它不含倒计时也不含状态，压根没有要收的场。
+  -- tg_chat_id: 上面那条消息所在的会话（迁移 0016）。2026-08-30 起按钮发 owner 私聊
+  -- （`access.bootstrapOwnerId`），**回执所在会话不再等于 chat_id** —— 后者记的是**发起人会话**
+  -- （审计要回答「这次调用发生在哪」），两者语义不同，不能合成一列。少这一列的话重启时
+  -- `staleKeyboards()` 会拿发起人会话 id 去配私聊里的 message_id 调 `editMessageText`：
+  -- 群里那个 id 上没有这条消息，撤键盘全部 400，上一次进程留下的那排按钮永远点得动。
+  -- **可空**：本次改动之前写下的行没有这一列，读出侧用 `COALESCE(tg_chat_id, chat_id)` 回落 ——
+  -- 那些行当初的投递目标正是 chat_id。规格见 [05 §6.1]。
 );
 CREATE INDEX ix_approvals_state ON approvals(state, requested_at);
 
@@ -763,7 +777,7 @@ CREATE TABLE scheduled_jobs (
   key         TEXT NOT NULL,             -- context key，会话隔离边界
   chat_id     TEXT NOT NULL,
   thread_id   INTEGER,
-  created_by  TEXT NOT NULL,             -- 创建者 tg user id；每次触发按它重算有效角色
+  created_by  TEXT NOT NULL,             -- 创建者 tg user id；每次触发按「它 + 本会话」重算有效角色（02 §10.4）
   name        TEXT NOT NULL,             -- 同会话内活跃唯一：取消时给的是名字
   mode        TEXT NOT NULL CHECK (mode IN ('agent','notify')),
   cron        TEXT,                      -- 与 run_at 二者其一
@@ -897,7 +911,7 @@ image 都改不动了；没有这一列，运维在 WebUI 换了镜像之后所�
 | `usage_ledger` | `maintenance.retention.usageDays` = 400 | 按 ts 直接删。**`usage_daily` 聚合表没有实现**，所以超期就是没有了 —— 要长期账目请在保留期内导出（docs/27 · R-05） |
 | `quota_counters` | `maintenance.retention.quotaCounterDays` = 400 | 按 `updated_at` 删过期账期的行；当前账期每轮都在更新，落不进保留期之外 |
 | `config_revisions` | `maintenance.retention.configRevisionDays` = 180 | 按 ts 删。删的是审计记录，不影响当前配置（`config_kv` 不动） |
-| `memory_revisions` | `maintenance.retention.memoryRevisionDays` = 180 | 按 ts 删。删掉之后回滚不到比它更早的版本 |
+| `memory_revisions` | `maintenance.retention.memoryRevisionDays` = 180 | 按 ts 删。删除之后无法回滚到更早的版本 |
 | `turns` / `tasks` | 永久 | **刻意不给保留期**：它们是 trace 的骨架（`/api/turns/:id/detail` 靠 turn 行把日志、用量与上下文串起来），删掉等于历史轮次凭空消失。[14 §2 Q9-c](./14-open-questions.md) 已确认永久保留，不再是未决问题 |
 | `agent_runs` / `agent_messages`（**行**） | 永久 | 同上：子 run 与 ask/answer 是那条 trace 的另一半，`turns` 留着而它们被清掉的话，「这一轮里哪个子 agent 干了什么」凭空消失。**但行永久不代表全文永久** —— `result_full_ref` 指向的文件按 `logs.retentionDays` 过期：删文件、把该列置空、`result_summary` 留着（摘要是历史轮次已经引述过的东西，删了会让那些引述变成悬空，`docs/22 · I-09`）。ACP 那种行结构上落不进这一路，它的 `result_full_ref` 恒 NULL（只有 `result_summary`）|
 | `processed_updates` | 7 天 | 定期删 |

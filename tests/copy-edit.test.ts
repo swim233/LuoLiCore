@@ -11,15 +11,15 @@ import { code, source } from './support/source.js';
 /**
  * 文案改写工具链的两条防线。
  *
- * 一是**生产为零**：dev 文案面板要给每一句文案包一层 `__LUOLI_C__`，这件事只许发生在
- * `COPY_EDIT=1` 的 dev server 上。两道闩 —— 插件在没有那个环境变量时返回 `false`（Vite 忽略
- * 假值插件），返回的插件又带 `apply: 'serve'`。少了任何一道，一次误带环境变量的 `pnpm build`
- * 就能把插桩打进线上产物。
+ * 其一是生产环境零插桩：dev 文案面板会给每一句文案包一层 `__LUOLI_C__`，该行为只允许发生在
+ * `COPY_EDIT=1 `的 dev server 上。共两道闩：插件在缺少该环境变量时返回 `false`（Vite 忽略
+ * 假值插件），返回的插件又带 `apply: 'serve'`。缺少任意一道，一次误带环境变量的 `pnpm build`
+ * 就会把插桩打入线上产物。
  *
- * 二是**插桩不能把源码弄坏**。这里踩过两次：`` `${x ?? '请求失败'}……` `` 里内外两条条目范围重叠，
- * 替换内层之后外层 offset 错位，切出一段语法不成立的东西；以及 `placeholder='…&#10;…'` 里的
- * HTML 实体会被模板解析器先解码成真换行，把 JS 字符串截断。两次都是「测试全绿而界面白屏」的形状，
- * 所以这条断言逐个文件真的解析一遍。
+ * 其二是插桩不得破坏源码。此处出现过两次问题：`` `${x ?? '请求失败'}……` `` 中内外两条条目范围重叠，
+ * 替换内层后外层 offset 错位，切出一段语法不成立的代码；以及 `placeholder='…&#10;…'` 中的
+ * HTML 实体会被模板解析器先解码为真实换行，从而截断 JS 字符串。两次都属于测试全部通过而界面白屏的形态，
+ * 因此本断言对每个文件实际解析一遍。
  */
 describe('dev 文案面板不进生产', () => {
   it('没有 COPY_EDIT=1 时插件不存在', () => {
@@ -33,12 +33,12 @@ describe('dev 文案面板不进生产', () => {
     process.env.COPY_EDIT = '1';
     const plugin = copyEditPlugin();
     expect(plugin).not.toBe(false);
-    // `apply: 'serve'` 是第二道闩：`vite build` 阶段这个插件根本不参与。
+    // `apply: 'serve'` 是第二道闩：`vite build` 阶段该插件不参与。
     expect(plugin && typeof plugin === 'object' ? plugin.apply : null).toBe('serve');
     if (before === undefined) delete process.env.COPY_EDIT; else process.env.COPY_EDIT = before;
   });
   it('运行时那两个文件在 webui 源码树之外，产物里够不着', () => {
-    // 生产构建只从 `packages/webui/src` 出发；面板与 `__LUOLI_C__` 都在 `scripts/` 下，
+    // 生产构建只从 `packages/webui/src` 开始；面板与 `__LUOLI_C__` 都位于 `scripts/` 下，
     // 唯一的引用是插件在 dev 时注入的那一行 import。
     for (const file of BROWSER_FILES) {
       expect(readFileSync(file, 'utf8')).not.toContain('scripts/copy/runtime');
@@ -60,8 +60,8 @@ describe('插桩后的源码仍然解析得动', () => {
           const compiled = compileTemplate({ id: file, filename: file, source: descriptor.template.content,
             compilerOptions: script.bindings ? { bindingMetadata: script.bindings } : {} });
           expect(compiled.errors.map((error) => String(error))).toEqual([]);
-          // **这一条是主防线**：`_ctx.__LUOLI_C__` 意味着模板编译没把它当组件作用域里的东西，
-          // 渲染当场抛 TypeError、那一页整块空白 —— 而解析和编译都不会报错。
+          // 这一条是主要防线：`_ctx.__LUOLI_C__` 表示模板编译未将其视为组件作用域内的标识符，
+          // 渲染时会立即抛出 TypeError、整页空白，而解析与编译阶段都不报错。
           expect(compiled.code).not.toContain('_ctx.__LUOLI_C__');
         }
         return;
@@ -78,7 +78,7 @@ describe('点界面回跳：data-copy-id 挂在元素上', () => {
   const owners = new Map([...elements(file).values()].map((info) => [info.key, info.attrInsert]));
   const instrumented = instrument(source, extractFile(file), owners);
   it('挂在原有元素上，而不是新包一层', () => {
-    // 包一层 span 会撞上 12 处 `+ .`、8 处 `:nth-child`、4 处 `:last-child` —— 属性不会。
+    // 包一层 span 会影响 12 处 `+ .`、8 处 `:nth-child` 与 4 处 `:last-child`，而使用属性不会。
     expect(instrumented).toContain('data-copy-id="');
     const before = (source.match(/<span/g) ?? []).length;
     const after = (instrumented.match(/<span/g) ?? []).length;
@@ -93,13 +93,13 @@ describe('点界面回跳：data-copy-id 挂在元素上', () => {
 });
 
 /**
- * 下面这几组用**真的源码文件**当夹具（写进去、断言、再写回来）—— 不引 mock 层是这个仓库的既定做法，
- * 而且插桩与落回的判据全是「源码此刻长什么样」，夹具一假就什么都验不到。
+ * 下面这几组用真实源码文件作为夹具（写入、断言、再写回）：不引入 mock 层是本仓库的既定做法，
+ * 且插桩与落回的判据都基于源码的当前内容，夹具一旦伪造就无法验证任何东西。
  *
- * 代价要挡住一处：快照必须**每条用例开始时现读**，不能在模块加载时读一次。人有可能正开着
- * `COPY_EDIT=1` 的面板改这两个文件（实测就是这样：跑测试期间 ConsoleView 上多出两句新文案），
- * 而模块加载时那一份快照会在 `afterEach` 里把人刚存下的东西**静静写回去**。
- * 反方向不用管：保存落在用例执行中间时，`applyChanges` 会因为「原文与记录对不上」拒绝，不会写坏。
+ * 有一处代价需要处理：快照必须在每条用例开始时实时读取，不能在模块加载时读取一次。用户可能正打开
+ * `COPY_EDIT=1` 的面板修改这两个文件（实测确实如此：运行测试期间 ConsoleView 上新增了两句文案），
+ * 而模块加载时的快照会在 `afterEach` 中静默覆盖用户刚保存的内容。
+ * 反方向无需处理：保存发生在用例执行中途时，`applyChanges` 会因原文与记录不匹配而拒绝，不会写坏文件。
  */
 describe('自由拖拽定位：偏移写成元素自己的 translate', () => {
   const file = 'packages/webui/src/views/LoginView.vue';
@@ -119,7 +119,7 @@ describe('自由拖拽定位：偏移写成元素自己的 translate', () => {
   it('拖过再归位 = 一个字节都没变', () => {
     expect(drag(pick().key, 12, -4).applied).toBe(1);
     expect(readFileSync(file, 'utf8')).toContain('style="translate: 12px -4px"');
-    // 归位要连整个 style 属性一起摘掉，不能留下 `style=""`。
+    // 归位时需连同整个 style 属性一并移除，不能留下 `style=""`。
     expect(drag(nowAt()!.key, 0, 0).applied).toBe(1);
     expect(readFileSync(file, 'utf8')).toBe(restore);
   });
@@ -144,7 +144,7 @@ describe('自由拖拽定位：偏移写成元素自己的 translate', () => {
   });
 
   it('偏移写的是 translate 而不是 transform', () => {
-    // `transform` 被按压反馈（scale(.97)）、rise-in 入场、页面过渡用着 —— 内联 transform 会把它们顶掉。
+    // `transform` 已被按压反馈（scale(.97)）、rise-in 入场与页面过渡使用，内联 transform 会覆盖它们。
     expect(drag(pick().key, 5, 5).applied).toBe(1);
     const text = readFileSync(file, 'utf8');
     expect(text).toContain('style="translate:');
@@ -200,7 +200,7 @@ describe('贴边 / 对齐 / 间距：工具类 token', () => {
     expect(mid).toContain('class="u-gap-y-2"');
     const again = [...elements(file).values()].find((info) => info.classAttr?.value === 'u-gap-y-2');
     expect(set(again!.key, 'gapy', '').applied).toBe(1);
-    // 留下一个 `class=""` 就等于往源码里塞垃圾；要么干净地回去，要么别动。
+    // 留下一个 `class=""` 等于向源码写入无用内容；要么完全还原，要么不做改动。
     expect(readFileSync(file, 'utf8')).toBe(restore);
   });
 
@@ -233,9 +233,9 @@ describe('贴边 / 对齐 / 间距：工具类 token', () => {
   });
 
   /**
-   * 字号档踩过一次：一开始写的是 `font-size: 1.12em`，而 `em` 在 `font-size` 上是**父级**的字号
-   * —— 实测一个 64px 的 `<h1>`（父级 16px）点「大」缩到 17.9px，与按钮上写的字相反。
-   * 现在是「基准 × 倍数」，基准由面板量元素自己的字号写进 `--u-base`。这三条把它焊住。
+   * 字号档位曾出过一次问题：最初写的是 `font-size: 1.12em`，而 `em` 用于 `font-size` 时取父级字号，
+   * 实测一个 64px 的 `<h1>`（父级 16px）选择放大后缩至 17.9px，与按钮标注的效果相反。
+   * 现在改为基准乘以倍数，基准由面板测量元素自身字号后写入 `--u-base`。这三条用例固定该行为。
    */
   it('字号档是基准乘倍数，不是父级相对', () => {
     const css = readFileSync('packages/webui/src/styles.css', 'utf8');
@@ -252,7 +252,7 @@ describe('贴边 / 对齐 / 间距：工具类 token', () => {
       { kind: 'basis', file, key: target.key, px: 13.34 },
     ]);
     expect(wrote.refused).toEqual([]);
-    // 随行件不计数：点一下字号是一件事，不是两件。
+    // 附属项不计数：调整一次字号属于一次操作，而非两次。
     expect(wrote.applied).toBe(1);
     const text = readFileSync(file, 'utf8');
     expect(text).toContain('class="u-size-lg"');
@@ -267,7 +267,7 @@ describe('贴边 / 对齐 / 间距：工具类 token', () => {
   });
 
   it('同一个元素上的两组档位一次保存都落到位', () => {
-    // 逐条落刀的老写法在这里会插出两个 class 属性，或者把后一条判成重叠丢掉。
+    // 逐条写入的旧写法在此会插入两个 class 属性，或把后一条判为重叠而丢弃。
     const target = withoutClass();
     const result = applyChanges([
       { kind: 'class', file, key: target.key, group: 'size', value: 'lg' },
@@ -284,7 +284,7 @@ describe('贴边 / 对齐 / 间距：工具类 token', () => {
   });
 
   it('每个 token 在 styles.css 里都真的有规则，且带 !important', () => {
-    // 没有规则的 token = 面板上点了没反应；没有 !important = 被既有的高特异性规则压掉，同样没反应。
+    // 没有对应规则的 token 表现为面板点击无响应；缺少 !important 则会被既有的高特异性规则覆盖，同样无响应。
     const css = readFileSync('packages/webui/src/styles.css', 'utf8');
     for (const [group, spec] of Object.entries(UTILITIES)) {
       for (const value of spec.values) {
@@ -298,11 +298,11 @@ describe('贴边 / 对齐 / 间距：工具类 token', () => {
 describe('抽取出来的条目形状', () => {
   const entries = extractAll();
   /**
-   * 这条真逮到过一次：6 位十六进制是 24 bit，而现在有 2700 条文案 —— 生日问题下撞号概率约 20%，
-   * 而 `applyChanges` 的 `new Map([id, entry])` 撞号时静默留下后写入的那条，**在面板里改前一句
-   * 会把后一句的源码区间覆盖掉**（实测 `aa826d` 上重合的是 `sandbox.bypassRoles` 与
-   * `approval.skipForOwner` 两条配置说明）。位数与撞号兜底两条各断一次：只留前者是概率论，
-   * 只留后者是等着它再撞。
+   * 这条断言确实拦截过一次问题：6 位十六进制为 24 bit，而当前有 2700 条文案，按生日问题估算碰撞概率约 20%，
+   * 而 `applyChanges` 的 `new Map([id, entry])` 在碰撞时静默保留后写入的那条，导致在面板中修改前一句
+   * 会覆盖后一句的源码区间（实测 `aa826d` 上重合的是 `sandbox.bypassRoles` 与
+   * `approval.skipForOwner` 两条配置说明）。位数与碰撞兜底各断言一次：只保留前者属于概率估计，
+   * 只保留后者则是等待再次碰撞。
    */
   it('id 唯一', () => {
     const dupes = [...duplicateIds(entries)];
@@ -310,7 +310,7 @@ describe('抽取出来的条目形状', () => {
     expect(new Set(entries.map((entry) => entry.id)).size).toBe(entries.length);
   });
   it('id 位宽够用 —— 收窄回去等于把撞号概率抬回两成', () => {
-    // 2700 条 × 24 bit ≈ 20% 撞号；48 bit 下同样规模约 1.3e-8。
+    // 2700 条在 24 bit 下碰撞概率约 20%；48 bit 下同等规模约为 1.3e-8。
     for (const entry of entries.slice(0, 5)) expect(entry.id).toMatch(/^[0-9a-f]{12}$/);
   });
   it('每条的 raw 都能在源码的记录位置上原样找到', () => {
@@ -321,7 +321,7 @@ describe('抽取出来的条目形状', () => {
     }
   });
   it('同一个文件里没有互相包住的条目', () => {
-    // 重叠 = 落回时按过期 offset 切源码。`dropNested` 挡的就是这个。
+    // 重叠意味着落回时按已失效的 offset 切分源码，`dropNested` 拦截的正是这一情形。
     const byFile = new Map<string, typeof entries>();
     for (const entry of entries) byFile.set(entry.file, [...(byFile.get(entry.file) ?? []), entry]);
     for (const [file, rows] of byFile) {
@@ -339,7 +339,7 @@ describe('手动保存与撤销', () => {
   beforeEach(() => { original = readFileSync(file, 'utf8'); });
   afterEach(() => writeFileSync(file, original));
 
-  /** 三种改动落在同一个文件的不同位置：文案 / 工具类 / 拖拽偏移。 */
+  /** 三种改动落在同一文件的不同位置：文案、工具类与拖拽偏移。 */
   const batch = (): Change[] => {
     const entry = extractFile(file).find((row) => row.zone === 'template' && row.place === 'text' && !row.slots.length);
     const box = [...elements(file).values()].find((info) => info.classAttr && !info.styleAttr && info.attrInsert > 0);
@@ -353,7 +353,7 @@ describe('手动保存与撤销', () => {
   };
 
   it('一次保存里三种改动都落到位，互不错位', () => {
-    // 关键不变量：所有 offset 都是对着同一份原文量的，逐条写盘会让后面的全漂掉。
+    // 关键不变量：所有 offset 都相对同一份原文测量，逐条写盘会让后续 offset 全部失效。
     const result = applyChanges(batch());
     expect(result.refused).toEqual([]);
     expect(result.applied).toBe(3);
@@ -376,7 +376,7 @@ describe('手动保存与撤销', () => {
   });
 
   it('保存前源码一个字节都没动 —— 面板上的一切都只是预览', () => {
-    // `applyChanges` 是全仓唯一的写入口；不调它，读多少次抽取都不该改文件。
+    // `applyChanges` 是全仓唯一的写入入口；不调用它时，无论抽取多少次都不应修改文件。
     extractFile(file);
     elements(file);
     extractAll();
@@ -393,8 +393,8 @@ describe('手动保存与撤销', () => {
 });
 
 /**
- * 真删是这套工具里唯一**不可逆于源码之内**的动作：文案改错了还看得见，元素摘走了就只剩历史栈。
- * 所以它的三条否决判据要有断言 —— 它们各自对应一种「保存之后才炸」的形态。
+ * 实际删除是这套工具中唯一在源码层面不可逆的操作：文案改错仍然可见，元素被移除后只能依赖历史栈恢复。
+ * 因此它的三条否决判据需要断言覆盖，它们分别对应一种保存之后才会出错的形态。
  */
 describe('删除元素', () => {
   const file = 'packages/webui/src/views/LoginView.vue';
@@ -455,8 +455,8 @@ describe('删除元素', () => {
   });
 
   it('落在删除范围里的改动被吃掉，且计数不重复', () => {
-    // 删一个容器 + 改它里面的一句话 = 一处改动，不是两处。计数不扣回来的话，
-    // 「写回 2 处」里有一处其实从未发生过。
+    // 删除一个容器并修改其中一句文案算作一处改动，而非两处。计数不扣减时，
+    // 写回 2 处中会有一处实际从未发生。
     const rows = extractFile(file);
     const container = [...elements(file).values()].find((info) => !info.guards.length && info.parent
       && rows.some((row) => row.offset > info.range.start && row.end < info.range.end
@@ -476,7 +476,7 @@ describe('删除元素', () => {
   });
 });
 
-/** 保存历史：逐次快照 + 往回退任意一步。 */
+/** 保存历史：逐次快照并支持回退任意步数。 */
 describe('保存历史', () => {
   const file = 'packages/webui/src/views/LoginView.vue';
   let original = '';
@@ -492,7 +492,7 @@ describe('保存历史', () => {
     delete process.env.LUOLI_COPY_HISTORY;
   });
 
-  /** 改一句文案并存一层，返回这一层的 id。 */
+  /** 修改一句文案并保存一层，返回该层的 id。 */
   const commit = (value: string): string => {
     const entry = extractFile(file).find((row) => row.zone === 'template' && row.place === 'text' && !row.slots.length)!;
     const result = applyChanges([{ kind: 'text', file, id: entry.id, value }]);
@@ -521,7 +521,7 @@ describe('保存历史', () => {
   });
 
   it('往回退两步一次到位，且退掉的层不再留着', () => {
-    // 同一个文件在两层里都被碰过，要写回的是**最早那一份**。取最新那一份就等于什么都没退。
+    // 同一文件在两层中都被修改过，应写回最早的那一份。取最新的那一份等同于未回退。
     const first = commit('第一次');
     commit('第二次');
     expect(rewind(first).ok).toBe(true);
@@ -559,8 +559,8 @@ describe('保存历史', () => {
 });
 
 /**
- * 带占位符的那 282 条。它们是最容易被改坏、且坏了不报错的一批 —— 少一个占位，界面上就是一个
- * 消失的数字或名字，而模板照样编译、测试照样绿。
+ * 带占位符的那 282 条。它们最容易被改坏且出错后不报错：缺少一个占位符时，界面上会
+ * 少一个数字或名称，而模板仍能编译、测试仍会通过。
  */
 describe('带占位符的文案', () => {
   const file = 'packages/webui/src/views/ConsoleView.vue';
@@ -575,8 +575,8 @@ describe('带占位符的文案', () => {
   const single = () => entryOf((row) => row.place === 'text' && row.slots.length === 1);
 
   it('嵌套的 ${} 按括号数，不切在第一个右括号上', () => {
-    // 原先是 `\$\{[^}]*\}`，切出来的是残句。拿残句做「在不在」的检查看不出问题，
-    // 拿它生成代码（把占位的当前值传给运行时）会当场把源码切坏 —— 实测坏了 4 个文件。
+    // 原先是 `\$\{[^}]*\}`，切分结果是不完整的片段。用不完整片段做存在性检查看不出问题，
+    // 用它生成代码（把占位符的当前值传给运行时）会直接切坏源码，实测破坏了 4 个文件。
     expect(slotsOf('恒发「${list[i]}」${i === raw ? \'\' : `（下标 ${raw} 越界）`}'))
       .toEqual(['${list[i]}', '${i === raw ? \'\' : `（下标 ${raw} 越界）`}']);
     expect(slotsOf('共 {{ n }} 条 · {{ m }} 次')).toEqual(['{{ n }}', '{{ m }}']);
@@ -597,15 +597,21 @@ describe('带占位符的文案', () => {
   });
 
   it('同一个占位出现两次时，只留一个照样拒绝', () => {
-    // `删除 ${name} 的配置覆盖？…回到 agents/${name}.md` —— 只留一个的话，第二处会变成
-    // 字面量 `agents/.md`。判据必须是**个数**，`includes` 检查不出来。
+    // `删除 ${name} 的配置覆盖？…回到 agents/${name}.md` 中若只保留一个占位符，第二处会变成
+    // 字面量 `agents/.md`。判据必须基于个数，`includes` 无法检出。
+    // 源码中此刻没有这样一句（最后一条随主体页角色列的红字一起删除，`effectiveRole` 已下线），
+    // 因此先自己造一句：多写一个占位符是允许的，把它减回一个必须被拒。
+    const seed = single();
+    expect(applyChanges([{ kind: 'text', file, id: seed.id, value: `${seed.core}${seed.slots[0]!}` }]).applied).toBe(1);
     const entry = entryOf((row) => new Set(row.slots).size !== row.slots.length);
-    // 要挑**重复的那一个**：这条里还有几个只出现一次的占位，拿它们做这个实验是空转。
+    // 需要选取重复出现的那一个：本条中还有几个只出现一次的占位符，用它们验证没有意义。
     const slot = entry.slots.find((each, index) => entry.slots.indexOf(each) !== index)!;
     const once = entry.core.split(slot).join('X').replace('X', slot);
     expect(once.split(slot).length - 1).toBeLessThan(entry.core.split(slot).length - 1);
+    const after = readFileSync(file, 'utf8');
     expect(applyChanges([{ kind: 'text', file, id: entry.id, value: once }]).refused.join()).toContain('少了插值');
-    expect(readFileSync(file, 'utf8')).toBe(original);
+    // 被拒的那次一个字节都不许写下去（原文是上一步造出来的那份，`afterEach` 再还原回源码）。
+    expect(readFileSync(file, 'utf8')).toBe(after);
   });
 
   it('大括号内侧的空白顺手收成记录里那个样子', () => {
@@ -615,7 +621,7 @@ describe('带占位符的文案', () => {
     expect(squeezed).not.toBe(entry.core);
     const result = applyChanges([{ kind: 'text', file, id: entry.id, value: squeezed }]);
     expect(result.refused).toEqual([]);
-    // 落盘的是收过的那份 —— 否则源码里会攒出四种写法的同一个占位。
+    // 落盘的是规整后的版本，否则源码中会出现同一占位符的四种写法。
     expect(readFileSync(file, 'utf8')).toContain(slot);
   });
 
@@ -629,7 +635,7 @@ describe('带占位符的文案', () => {
   });
 
   it('插桩把占位的当前值一起传给运行时', () => {
-    // 没有这一串，改一句带占位的话时页面上显示的是字面的 `{{ n }}` 而不是那个数。
+    // 缺少这一段时，修改一句带占位符的文案后页面上显示的是字面的 `{{ n }}` 而非实际数值。
     const entry = single();
     const expression = entry.slots[0]!.slice(2, -2).trim();
     const instrumented = instrument(readFileSync(file, 'utf8'), [entry]);
@@ -641,15 +647,15 @@ describe('带占位符的文案', () => {
     expect(fillSlots('{{ n }} —— 共这么多', ['{{ n }}'], [7])).toBe('7 —— 共这么多');
     expect(fillSlots('删 ${name} → agents/${name}.md', ['${name}', '${name}'], ['ops', 'ops']))
       .toBe('删 ops → agents/ops.md');
-    // 大括号内侧空白不齐的也要填得上，否则预览会突然显示字面占位。
+    // 大括号内侧空白不一致的同样要能填充，否则预览会显示字面占位符。
     expect(fillSlots('一共 {{n}} 回', ['{{ n }}'], [3])).toBe('一共 3 回');
-    // 值没传够时剩下的原样留着 —— 宁可显示占位，也不要显示 "undefined"。
+    // 提供的值不足时剩余占位符原样保留：宁可显示占位符，也不显示 "undefined"。
     expect(fillSlots('{{ a }} / {{ b }}', ['{{ a }}', '{{ b }}'], [1])).toBe('1 / {{ b }}');
   });
 
   it('被拒的那几条会指名道姓交回来 —— 面板据此留住人刚打的字', () => {
-    // 只有给人看的句子（`refused`）时，面板认不出该留哪几条暂存，于是此前是无条件清空：
-    // 「拒绝 3 处」= 那三处既没落盘、打的字也没了。`stuck` 记的是没落地的目标。
+    // 只有供人阅读的说明（`refused`）时，面板无法判断应保留哪几条暂存，因此此前是无条件清空：
+    // 拒绝 3 处意味着那三处既未落盘、已输入的内容也丢失。`stuck` 记录的是未生效的目标。
     const good = single();
     const bad = entryOf((row) => row.place === 'text' && row.slots.length === 1 && row.id !== good.id);
     const result = applyChanges([
@@ -661,23 +667,23 @@ describe('带占位符的文案', () => {
   });
 
   it('面板与落盘用的是同一份判据', () => {
-    // 各写一份的结果是面板说「可以保存」而落盘拒绝（或者反过来拦住本来能存的）。
+    // 各写一份的结果是面板提示可以保存而落盘拒绝，或反过来拦截本可保存的内容。
     const panel = source('scripts/copy/runtime/CopyPanel.vue');
     expect(panel).toContain(code("from '../slots.js'"));
-    // 面板此前是自己 `row.slots.filter(slot => !override.includes(slot))` —— 只查「在不在」，
-    // 与落盘那侧的个数判据不一致，而不一致的表现是按钮亮着、保存被拒。
+    // 面板此前自行执行 `row.slots.filter(slot => !override.includes(slot))`，只做存在性检查，
+    // 与落盘侧的个数判据不一致，表现为按钮可用但保存被拒。
     expect(panel).not.toMatch(/row\.slots\.filter/);
     expect(source('scripts/copy/runtime/boot.ts')).toContain(code("from '../slots.js'"));
   });
 });
 
 /**
- * 面板自己也会白屏。它不在 `BROWSER_FILES` 里（不是产品代码），所以上面那条「插桩后仍能解析」
- * 的循环覆盖不到它 —— 而它一坏，整个改写工具就没了，且 `tsc --noEmit` 不看 `.vue`。
+ * 面板自身同样可能白屏。它不在 `BROWSER_FILES` 中（不属于产品代码），因此上面那条插桩后仍可解析
+ * 的循环覆盖不到它；而它一旦损坏，整个改写工具即不可用，且 `tsc --noEmit` 不检查 `.vue`。
  */
 describe('面板自己', () => {
   const file = 'scripts/copy/runtime/CopyPanel.vue';
-  // 编译要**原文**（`parseSfc` 量的是真实 offset），读码断言要归一化后的那份 —— 两份各取所需。
+  // 编译需要原文（`parseSfc` 依据真实 offset），读码断言需要归一化后的版本，两者各自取用。
   const raw = readFileSync(file, 'utf8');
   const text = source(file);
 
@@ -690,24 +696,24 @@ describe('面板自己', () => {
   });
 
   /**
-   * 面板里那三条只能靠读源码来焊 —— 它们是浏览器侧的行为，而这套测试不起浏览器。
-   * 三条都是**静默丢东西**的形状，值得一条读码断言挡着。
+   * 面板中的那三条只能通过读取源码固定：它们属于浏览器侧行为，而本测试不启动浏览器。
+   * 三条都属于静默丢失内容的形态，值得用一条读码断言拦截。
    */
   it('保存之后只清落地的那些，被拒的留在面板上', () => {
     expect(text).toContain(code('const stuck = new Set(result.stuck ?? [])'));
     expect(text).toContain(code("if (stuck.has(entry.id ?? entry.key ?? '')) kept[slot] = entry"));
-    // 无条件清空是此前的坏法，别再出现。压平之后换行也是空格，所以这里不再写 `\n`。
+    // 无条件清空是此前的错误做法，不应再出现。空白压平后换行也变为空格，因此这里不再写 `\n`。
     expect(text).not.toMatch(/staged\.value = \{\}; undoStack\.value = \[\]; committed/);
   });
 
   it('退历史之前先丢掉未保存的', () => {
-    // 退完源码是另一份了，留着的暂存态记的 offset 与元素 key 全是旧的。
+    // 回退后源码已变更，保留的暂存状态中记录的 offset 与元素 key 全部失效。
     expect(text).toMatch(/async function rewind[\s\S]{0,200}?if \(dirty\.value\) discardAll\(\)/);
   });
 
   it('元素级的暂存按元素记，不按行记', () => {
-    // 185 个元素被 2 条以上文案共用（472 条）。按行记的话，A 行点了隐藏、B 行仍显示未选中，
-    // 两行都点过之后保存时的合并顺序决定结果 —— 不确定。
+    // 185 个元素被 2 条以上文案共用（共 472 条）。若按行记录，A 行已选择隐藏而 B 行仍显示未选中，
+    // 两行都操作过之后保存时的合并顺序决定最终结果，属于不确定行为。
     for (const kind of ['class', 'style', 'remove', 'basis']) {
       expect(text, `${kind} 的 slot 键还挂在行 id 上`).not.toContain(code(`\`${kind}:\${row.id}`));
     }
@@ -716,12 +722,12 @@ describe('面板自己', () => {
   });
 
   it('面板的档位表与 UTILITIES 的 prefix 一一对应', () => {
-    // 两边对不上的表现是：面板点了有反应（DOM 上加了 class），保存之后没反应（源码里那个 token
-    // 没有 CSS 规则）—— 预览与结果不一致是这套工具最伤的一种坏法。
+    // 两侧不一致的表现是：面板点击有响应（DOM 上添加了 class），保存后无响应（源码中该 token
+    // 没有对应的 CSS 规则）。预览与结果不一致是这套工具最严重的一种缺陷。
     for (const spec of Object.values(UTILITIES)) {
       expect(text, `面板里没有 ${spec.prefix}`).toContain(code(`prefix: '${spec.prefix}'`));
     }
-    // 归一化之后引号恒为 `"`，所以这里写双引号 —— 换 prettier 配置不再复发。
+    // 归一化之后引号恒为 `"`，因此这里使用双引号，更换 prettier 配置也不会复发。
     for (const found of text.matchAll(/prefix: "(u-[a-z-]+)"/g)) {
       expect(Object.values(UTILITIES).map((spec) => spec.prefix)).toContain(found[1]);
     }

@@ -127,11 +127,21 @@ telegram:
     perChatPerMinute: 20
 
 # ============================================================ access（权限，D9）
+# 有效角色（唯一判据 `resolveEffectiveRole`，规格在 05 §2.2）：
+#   私聊              → role(user)，私聊不登记 chat: 主体行
+#   群/频道 任一侧 blocked → blocked（一票否决）
+#   群/频道 其余      → min(max(role(user), role(chat)), 'trusted')
+# 会话角色是**下限**不是上限，且群内封顶 trusted —— owner 只在私聊成立。
 access:
-  defaultUserRole: blocked        # 热更新 · owner|trusted|limited|blocked
-  defaultChatRole: blocked        # 热更新
+  defaultUserRole: blocked        # 热更新 · owner|trusted|limited|blocked · 未登记用户的角色。
+                                  #   出厂 blocked：陌生人不会因为进了一个受信群就被抬上来。
+  defaultChatRole: blocked        # 热更新 · 未登记群/频道的角色，取值同上。**这是下限**：
+                                  #   设成 trusted 等于把每个未被单独拉黑的成员抬到 trusted。
+                                  #   出厂 blocked = 未登记的群整群静默（blocked 一票否决）。
+                                  #   私聊不读这一项。群行不接受 owner（封顶 trusted，写了也没用）
   archiveBlocked: false           # 热更新 · blocked 主体的消息是否仍入库
-  bootstrapOwnerId: ''            # 需重启 · 通常由 LUOLI_OWNER_ID 提供
+  bootstrapOwnerId: ''            # 需重启 · 通常由 LUOLI_OWNER_ID 提供。除引导 owner 主体行外，
+                                  #   还是 Telegram 审批按钮的投递目标（08 §2.2 / 05 §6.1）
 
 # ============================================================ trigger（D5）
 trigger:
@@ -167,9 +177,9 @@ context:
     minKeepTurns: 1               # 热更新 · 裁剪时至少保留的最近轮次数
   active:                         # 活跃期：把裁剪推迟到缓存本来就已过期的时刻（02 §5.1.1）
     windowMs: 0                   # 热更新 · 距上一轮提交多久之内算「仍在活跃期」；0 = 关闭（滑动窗口，每轮顺延）
-    tokens: 128000                # 热更新 · 活跃期内允许涨到的 token 天花板（撞到就裁回 limit.tokens）
-    maxMessages: 1000             # 热更新 · 活跃期内允许涨到的条数天花板（撞到就裁回 limit.maxMessages）
-  hardCapRatio: 0.85              # 热更新 · 轮内硬天花板 = 模型窗口 × 该比例
+    tokens: 128000                # 热更新 · 活跃期内允许增长到的 token 上限（触发后裁回 limit.tokens）
+    maxMessages: 1000             # 热更新 · 活跃期内允许增长到的条数上限（触发后裁回 limit.maxMessages）
+  hardCapRatio: 0.85              # 热更新 · 轮内硬上限 = 模型窗口 × 该比例
   background:                     # D6：未触发的群消息进入上下文
     enabled: true                 # 热更新
     maxPerTurn: 20                # 热更新 · ★ 需求方明确要求可配置
@@ -184,7 +194,7 @@ context:
   # 热更新 · 清空上下文（/new 与 WebUI「清空上下文窗口」）之后，归档检索要不要也挡在那一刻之后。
   # 关（默认）= 只挪 done 指针：窗口空了，而 read_messages / search_messages / get_message 读的是
   #   messages 归档表、不受窗口约束 —— 实测清空后模型第一步就 read_messages 把 20 条历史整段捞回来，
-  #   那份工具结果又落进新窗口（logs/2026-08-19 · 01M0CKK6W018B5KS9613SNEX5J）。清空于是形同没生效。
+  #   那份工具结果又落进新窗口（logs/2026-08-19 · 01M0CKK6W018B5KS9613SNEX5J）。清空实际不生效。
   # 开 = 清空那一刻的 messages.id 记进 reset commit 的 meta.archiveFloor，三个归档工具只看得到它
   #   之后的消息（被挡住时如实回 recall_barrier，不伪装成「这条不存在」）；同时把背景认领水位一并
   #   推到那里，否则清空前那些没被认领的群发言会从另一扇门进新窗口。owner 的
@@ -219,7 +229,7 @@ memory:
   dir: ./memory                   # 需重启
   pubWriteMinRole: trusted        # 热更新 · ★ D12 安全阀。memory_write 读的是本轮那份合并配置
                                   #   （turn.config），所以 perChat 覆盖真的生效；而 configSchema 只放行
-                                  #   比全局**更严格**的值，往松了改会被校验器挡下（22 · D-CFG-01）
+                                  #   比全局**更严格**的值，放宽会被校验器拒绝（22 · D-CFG-01）
   pubWriteRequiresApproval: false # 热更新 · 多群部署建议 true
   softLimitTokens: 1500           # 需重启 · 超出触发异步压缩（MemoryStore 构造时吃的是快照）
   hardLimitTokens: 3000           # 需重启 · 超出拒绝写入
@@ -298,13 +308,13 @@ agent:
                                   #   总数，所以规矩的 agent 永远撞不到它；撞上界时下一次 create 回一个说得清
                                   #   下一步的错，而不是排队或静默复用
     progressIntervalMs: 5000      # 热更新 · Telegram 进度卡片两次编辑之间的最小间隔。
-                                  #   ⚠ **小于 1000 会被卡片按 1000 处理**（那是发送侧那个桶的 minTime）——
+                                  #   ⚠ **小于 1000 时按 1000 处理**（那是发送侧那个桶的 minTime）——
                                   #   schema 上这一项只是 positive()，填 200 不会被拒但也不会生效，运维会
                                   #   以为生效了。ACP 是 owner + 仅私聊，所以 perChatPerMinute 那 20 条不管
                                   #   它（私聊走的是只管 1 秒最小间隔的那个桶，08 §6.1）；真正要让出的是
                                   #   正文流式输出的节拍。调大了卡片看着像卡住
     maxCostUsd: 0                 # 热更新 · 单次调用的花费上界（USD，0 = 不限）。**这是 ACP 花费的唯一闸门**
-                                  #   —— agent 烧的是它自己那份 provider 凭据，usage_ledger、quota.* 与
+                                  #   —— agent 使用它自己的 provider 凭据，usage_ledger、quota.* 与
                                   #   quota.perTurn.maxCostUsd 全都看不见它。判据取 usage_update 的 cost.amount
                                   #   （累计值），撞线走 session/cancel；已经落盘的文件改动**不回滚**。
                                   #   那笔钱现在**落库了**：agent_runs.external_cost_usd / external_usage_json
@@ -409,21 +419,21 @@ provider:
   healthCheckCron: '*/10 * * * *' # 需重启
   healthDownCooldownMinutes: 30   # 热更新 · 判成 down 的 provider 冷却这么久后重新参与模型链
   requestTimeoutMs: 120000        # 热更新 · 单次尝试「发出请求 → 拿到响应头」的上限。到点后只中止
-                                  #   这一次尝试（重试与别名 fallback 照常走），并且**不再等** ——
+                                  #   这一次尝试（重试与别名 fallback 不受影响），并且**不再等** ——
                                   #   provider 实现不认 abort 时光中止是没用的（04 §5.3）
   streamIdleTimeoutMs: 60000      # 热更新 · 流开着但不吐字的上限。整体超时管不了这种情况：连接是活的，
                                   #   只是一个 token 都不来。只计「在等下一个 chunk」的时间，本轮正在
                                   #   跑工具不算。中途断掉不重试（正文可能已经发出去一半）
   allowPrivateBaseUrl: false      # 热更新 · ★ 允许 provider 探测 / 模型目录打到私网地址与非常规端口。
                                   #   默认关：`POST /api/providers/:id/test` 收请求体里的 baseUrl，
-                                  #   开着等于把管理端变成一个带鉴权的 SSRF 代理（22 · V-SSRF-01）。
+                                  #   启用后管理端等同于一个带鉴权的 SSRF 代理（22 · V-SSRF-01）。
                                   #   自建网关跑在内网是合理场景，但必须运维显式打开。
   catalog:                        # 热更新 · 模型元数据目录（models.dev），见 04 §5.4.1
-    enabled: true                 # 热更新 · 关掉之后拉取模型只剩上游 /models 给的那点信息
+    enabled: true                 # 热更新 · 关闭后拉取模型只能得到上游 /models 返回的信息
     url: https://models.dev/api.json
     cacheFile: ./data/cache/models.dev.json   # 热更新 · 缓存文件；etag 与拉取时间在 app_kv
     ttlHours: 168                 # 热更新 · 超过这个年龄才出网，且带 If-None-Match（304 只有几百字节）
-    timeoutMs: 30000              # 热更新 · 单次拉取超时；失败时降级用旧缓存
+    timeoutMs: 30000              # 热更新 · 单次拉取超时；失败时降级使用旧缓存
 
 # ============================================================ tools（D10）
 tools:
@@ -436,17 +446,17 @@ tools:
   maxConsecutiveErrors: 3         # 热更新 · 同一工具连续失败到这个数就在本轮停用；之后再调返回
                                   #   `tool_disabled_after_errors`（成功一次即清零，见 05 §8.1）
   defaultTimeoutMs: 60000         # 热更新 · 单次工具调用的默认墙钟上限，到点返回 `tool_timeout` 给模型。
-                                  #   bash/python/spawn_agent 与两个 web 工具自己管超时，不受这一项约束
+                                  #   bash/python/spawn_agent 与两个 web 工具自行管理超时，不受这一项约束
   overrides: {}                   # 热更新 · 逐个工具的运维覆盖层，键为工具名。工具页是它的入口（09 §3.7）
                                   #   <name>.enabled     缺省 true；false = 硬边界（目录里没有 + execute 二次拦截）
                                   #   <name>.minRole     覆盖 TOOL_POLICY 的最低角色
-                                  #   <name>.approval    覆盖审批基准档：never | conditional | always
+                                  #   <name>.approval    覆盖审批基准档位：never | conditional | always
                                   #   <name>.timeoutMs   覆盖该工具的单次超时（毫秒）
                                   # 后三项**没有默认值**：字段缺席 = 沿用代码里 `TOOL_POLICY` / 工具自己声明的那份。
                                   #   写死一个默认值等于把每条历史覆盖行钉在写它那天的策略上，此后改代码推不动它们。
-                                  # 三条不变量：① 覆盖只动角色闸与审批闸，绕不过 `available()`（`spawn_harness`
-                                  #   仍然只有 owner 且只在私聊）；② `approvalFor` 的抬档只升不降，基准改成 never
-                                  #   也照样抬；③ `timeoutMs: null` 的工具（bash/python/spawn_agent/spawn_harness/
+                                  # 三条不变量：① 覆盖仅作用于角色判定与审批判定，不绕过 `available()`（`spawn_harness`
+                                  #   仍限 owner 且仅在私聊）；② `approvalFor` 只提档、不降档，基准改为 never
+                                  #   也仍会提档；③ `timeoutMs: null` 的工具（bash/python/spawn_agent/spawn_harness/
                                   #   ask_parent）不吃超时覆盖 —— 它们各有自己的硬期限，套外层 race 会提前砍断。
                                   # 「放宽（minRole 调低 / 审批降档）需二次确认」是 `PATCH /api/tools/:name` 的
                                   #   端点行为（409 `relax_requires_confirmation`），**不是 schema 约束** ——
@@ -472,9 +482,9 @@ tools:
                                   #   启用它，折叠集就非空，这是预期行为而不是回归
     defer: []                     # 热更新 · 额外折叠的工具名 glob（minimatch，与 mcp 的 toolAllow /
                                   #   tools.fs.denyGlobs 同一套），一行一条。内建与 agent 族默认常驻，
-                                  #   只有被这里点名才折叠。命中豁免表（`search_tools` / `load_skill`）的
-                                  #   模式**静默不生效**：把展开的入口自己折叠掉就再没人能展开了
-    resident: []                  # 热更新 · 强制常驻的 glob 白名单，一行一条。优先级最高，压得过上面两项
+                                  #   只有在这里列出才折叠。命中豁免表（`search_tools` / `load_skill`）的
+                                  #   模式**静默不生效**：折叠展开入口之后就无法再展开任何工具
+    resident: []                  # 热更新 · 强制常驻的 glob 白名单，一行一条。优先级最高，覆盖上面两项
                                   #   （典型用法：折叠某台 MCP server 的同时把它两三个常用工具留在目录里）
     residentDescriptions: true    # 热更新 · 常驻段带不带每个工具的描述。false = 只列一行名字清单：描述由
                                   #   API 的 tools 字段权威携带，而那份在请求体头部、属**缓存前缀**，
@@ -571,7 +581,7 @@ tools:
       requireSandbox: false       # 热更新 · 打开后沙箱不生效时（owner 命中 bypassRoles，或 mode=none）
                                   #   自定义工具一律不可用，此时它**严格弱于** bash。默认关是 Q13-d 的
                                   #   拍板（与 bash 一视同仁），代价见 14 T19
-      maxTools: 20                # 热更新 · 数量上限，撞上之后 define_tool 在定义期就报错
+      maxTools: 20                # 热更新 · 数量上限，达到上限后 define_tool 在定义期就报错
       maxBodyChars: 8000          # 热更新 · 单个脚本正文的字符上限
       defaultMinRole: owner       # 热更新 · 模型没指定时新工具的最低调用角色。无论怎么配都不低于 bash 的门槛
       timeoutMs: 60000            # 热更新 · 没指定超时时的默认值，最终仍封顶在 tools.exec.maxTimeoutMs
@@ -584,12 +594,12 @@ tools:
                                   #   装包时同样按它抬高包里写的那个值
     mcp:
       enabled: false              # 热更新 · 允许 install_mcp 登记 server。落地一律 enabled:false，要 owner 点开
-      allowTransports: [stdio, http]  # 热更新 · ★ stdio 是一条模型发明的命令行，启用后以 bot 进程的身份跑在
-                                  #   沙箱之外。只留 http 可以把这一类整体挡掉
+      allowTransports: [stdio, http]  # 热更新 · ★ stdio 的命令行由模型生成，启用后以 bot 进程的身份运行在
+                                  #   沙箱之外。只保留 http 可以整体禁止该类型
     plugins:
       enabled: false              # 热更新 · ★ 允许 write_plugin 写 plugins/<name>/plugin.js。plugin 在 bot
-                                  #   进程里全信任运行 = root（14 A27）；写下来的文件一律禁用，
-                                  #   只有 owner 在扩展页读过源码才能启用
+                                  #   进程里全信任运行 = root（14 A27）；写入的文件一律禁用，
+                                  #   需 owner 在扩展页阅读源码之后才能启用
       maxBodyChars: 200000        # 热更新 · 单个 plugin.js 的字符上限
 
 # ============================================================ sandbox（D10）
@@ -607,7 +617,7 @@ sandbox:
   hostWorkspaceDir: ''            # 需重启 · 同一目录的宿主视角路径；本进程也在宿主上跑时留空
   dockerBin: docker
   persistent:                     # 会话级持久容器（05 §5.5）；只在 mode: docker 下有意义
-    enabled: false                # 热更新 · ★ 打开后每个会话一个常驻容器，且默认能出网
+    enabled: false                # 热更新 · ★ 启用后每个会话一个常驻容器，且默认能出网
     idleTtlMs: 86400000           # 热更新 · 滑动 24h：每次执行重新计时
     maxLifetimeMs: 0              # 热更新 · 绝对上限，从创建算起；0 = 不设
     maxContainers: 16             # 热更新 · 撞上限直接报错，不退回一次性容器
@@ -622,7 +632,7 @@ sandbox:
 
 **`persistent.network` 与 `sandbox.network` 是两个键，不要合并着看。** 上面那个管一次性容器
 （默认 `none`），这个管持久容器（默认 `bridge`）。分开是因为一个开关不能悄悄改两件事，
-而一个不能出网的持久容器基本没有意义 —— 持久化本来就是为「后台进程 + 出网」做的。
+而不能出网的持久容器用途有限 —— 持久化本来就是为「后台进程 + 出网」做的。
 `enabled: true` 且 `network: bridge` 时**启动会打一条 warn**：bridge 实测能直达公网与宿主
 `172.17.0.1`，而 [05 §5.3](./05-tools-and-permissions.md) 里那个「注入 HTTP_PROXY 指向可审计
 出站代理」至今没有实现。
@@ -681,9 +691,9 @@ approval:
 # ============================================================ output（D18）
 output:
   mode: stream                    # 热更新 · stream | once（可 perChat 覆盖）
-  replyDelayMs: 2000              # 热更新 · 距离用户那条消息至少等这么久才发第一条回复（0 = 立刻回）；
+  replyDelayMs: 2000              # 热更新 · 距离用户那条消息至少等待该时长才发第一条回复（0 = 立刻回）；
                                   # 窗口内流式产出的文本只攒不发，typing 动作照常
-  streamBufferMs: 2000            # 热更新 · 收到上游第一个 chunk 后再攒这么久才发第一条（0 = 首个
+  streamBufferMs: 2000            # 热更新 · 收到上游第一个 chunk 后再缓冲该时长才发第一条（0 = 首个
                                   # chunk 到就发）。锚点与 replyDelayMs 不同，两者取晚的那个
   streamIntervalMs: 2000          # 热更新 · 两次消息编辑之间的最小间隔
   streamMinDeltaChars: 24         # 热更新 · 与上一项同时满足才编辑
@@ -695,7 +705,7 @@ output:
   placeholderAfterMs: 4000        # 热更新 · 上游这么久还没吐第一个 chunk 就先发一条占位（就是后面被编辑的那条）
   placeholderTexts: ['…']         # 热更新 · 占位消息的备选文案，可多条（可 perChat 覆盖）。
                                   # **空数组 = 不发占位消息** —— placeholderAfterMs 是 positive，
-                                  # 填不了 0，这是关掉它的唯一途径。空白行在挑选时滤掉
+                                  # 不接受 0，这是关闭占位消息的唯一方式。空白行在挑选时滤掉
   placeholderPick: random         # 热更新 · random = 每轮随机挑一条；fixed = 恒用 placeholderIndex 那条
   placeholderIndex: 0             # 热更新 · fixed 用第几条，0 起，按去掉空行后的列表算；越界回落到第一条
   maxMentions: 3                  # 热更新 · 一条消息最多几个 @用户名，多的去掉 @ 只留名字；0 = 不限
@@ -716,9 +726,9 @@ media:
   # window（默认，一直以来的行为）= 整个上下文窗口（snapshot + delta）。代价是**一张图会把它之后的
   #   每一轮都钉在 vision 别名上**：实测一个私聊里 4 条带图消息留在窗口内，此后每一轮纯文本都记
   #   provider.fallback … vision_required（logs/2026-08-19），而一个能看图的别名都没配时，那些轮次的
-  #   回复末尾还会挂一句「这张图我没能真的看到」—— 用户那一轮根本没发图。
+  #   回复末尾还会挂一句「这张图未能查看」—— 用户那一轮根本没发图。
   # turn = 只算本轮新进来的图（触发消息、被回复的那条、本轮认领的群背景发言）。更早轮次留在窗口里的
-  #   图片：这一轮真落在看不了图的模型上时才整体换成占位文本（换的文本写明「重新发一次或引用那条
+  #   图片：这一轮真落在看不了图的模型上时才整体换成占位文本（换的文本写明「重新发送或引用那条
   #   消息」，那两种都会被算成本轮的图），落在能看图的模型上则原样带着 —— 「再看一遍上面那张图」
   #   在 vision 模型上仍然可用。降档到 low 的那一步同样按当步别名兜一次。记一条 ctx.image_placeholder
   visionScope: window
@@ -788,10 +798,10 @@ mcp:
 #     调它既不改变任何行为、也没有可观察的效果 —— 给一个运维看不见效果的数一个配置键，
 #     比没有这个键更糟（docs/20 · W-CFG-02）。真要改就改常量并说明为什么。
 schedule:
-  # 总开关。关掉之后已有任务留在库里但不再触发（每次跳过记一条 schedule.skipped），不会被删。
+  # 总开关。关闭后已有任务保留在库里但不再触发（每次跳过记一条 schedule.skipped），不会被删除。
   enabled: true                   # 热更新 · 每次触发时现读
-  maxPerChat: 20                  # 热更新 · 单会话活跃任务上限，超了 schedule_create 直接拒绝
-  # cron 两次触发之间的最小间隔。cron 最细能到每分钟，而 agent 模式下那就是每分钟一次真实模型调用。
+  maxPerChat: 20                  # 热更新 · 单会话活跃任务上限，超出后 schedule_create 直接拒绝
+  # cron 两次触发之间的最小间隔。cron 粒度最细到每分钟，而 agent 模式下即每分钟一次真实模型调用。
   # **这一项与 maxPerChat 就是定时轮次的频率闸**：定时轮次不计入 quota.rateLimit 的按小时次数
   # （docs/28 · L-QUOTA-02），所以这两个值是「机器一天最多开多少轮」的唯一上界。
   # 金额那一侧仍由 quota 的 daily / monthly / perTurn 兜着。
@@ -878,8 +888,9 @@ quota:
 # ============================================================ webui（D15）
 webui:
   # 关掉之后整个 HTTP 面不监听。代价要说清楚：**审批只剩 Telegram 那一条裁决通道**
-  # （回执上的 inline keyboard，docs/05 §6.1）—— 连 `BOT_TOKEN` 都没有时两条通道都没有，
-  # 命中审批规则的调用会被当场拒绝（docs/24 · R-APPR-01）。
+  # （发到 owner 私聊的那条 inline keyboard，docs/05 §6.1）—— 连 `BOT_TOKEN` 都没有、
+  # 或 owner 从没跟 bot 私聊过（私聊投递 403）时两条通道都没有，命中审批规则的调用会被
+  # 当场拒绝（docs/24 · R-APPR-01）。
   enabled: true                   # 需重启
   host: 127.0.0.1                 # 需重启 · ★ 默认回环
   port: 8787                      # 需重启
@@ -891,7 +902,7 @@ webui:
   sessionTtlHours: 168            # 热更新 · 只影响此后新建的会话，已签发的不变
   passwordHash: ''                # 热更新 · 由首次启动向导、设置页的改口令表单或 `pnpm webui:passwd` 写入
   trustProxy: false               # 热更新 · **false 时一个请求头都不看**，见下
-  trustedProxyHops: 1             # 热更新 · 反代自己追加的跳数。XFF 按这个数**从右往左**取：
+  trustedProxyHops: 1             # 热更新 · 反代追加的跳数。XFF 按这个数**从右往左**取：
                                   #   最左那一跳是客户端自己写的，取它等于限速形同虚设
                                   #   （每次换一个 X-Forwarded-For 就是一个新桶，22 · V-AUTH-01）。
                                   # trustProxy=false（默认，直连）时**只认连接的远端地址**：
