@@ -1,6 +1,6 @@
 <script setup lang="ts">
-// 开关某一项能力（启用 provider、停用工具、根文件系统只读）用这个；从一组里挑几个用 UiCheckbox。
-// 分界不是审美偏好：开关读作「这个东西现在是开着还是关着」，勾选框读作「这一项在不在我选的集合里」。
+// 开关某项能力（启用 provider、停用工具、根文件系统只读）使用该组件；从一组中选取多项使用 UiCheckbox。
+// 这一区分不是审美偏好：开关表达某个对象当前是否启用，勾选框表达某一项是否在已选集合中。
 import { computed } from "vue";
 
 const props = withDefaults(
@@ -19,7 +19,7 @@ const emit = defineEmits<{
   change: [boolean];
 }>();
 
-/** `label` 是固定文案；`onLabel` / `offLabel` 是「已开启 / 已关闭」这种跟着状态走的说明，二选一。 */
+/** `label` 为固定文案；`onLabel` / `offLabel` 是随状态变化的说明文案，两者二选一。 */
 const text = computed(
   () => props.label || (props.modelValue ? props.onLabel : props.offLabel),
 );

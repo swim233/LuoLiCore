@@ -36,7 +36,7 @@ export interface SubAgentDependencies {
   ledger: UsageLedger;
   log: LogSink;
   workspace: string;
-  /** 缺省时退回裸模型（无重试、无 fallback、无上游超时）—— 调用方应当传，主 agent 路径已经传了。 */
+  /** 缺省时退回裸模型（无重试、无 fallback、无上游超时）；调用方应当传，主 agent 路径已经传了。 */
   provider?: {
     maxRetries: number;
     retryBaseMs: number;
@@ -48,9 +48,9 @@ export interface SubAgentDependencies {
   reservation?: QuotaReservation | null;
   onEvent?: (event: SubAgentRuntimeEvent) => void | Promise<void>;
   /**
-   * 派发它的那次 `tool.call` 的 span id（`spawn_agent` 从 `ToolExecutionContext.parentSpanId` 拿）。
-   * `docs/10 §7` 第 4 条：「子 agent 的 span 挂在派发它的 `tool.call` 之下」。
-   * 缺省（试跑、直接调用）时 `agent.run` 就是本 trace 的一个根。
+   * 派发它的那次 `tool.call` 的 span id（`spawn_agent` 从 `ToolExecutionContext.parentSpanId` 取）。
+   * 依据 `docs/10 §7` 第 4 条：子 agent 的 span 挂在派发它的 `tool.call` 之下。
+   * 缺省（试跑、直接调用）时 `agent.run` 即为本 trace 的一个根。
    */
   parentSpanId?: string;
 }
@@ -66,8 +66,8 @@ export async function runSubAgent(
 ): Promise<{ summary: string; fullRef: string; truncated: boolean }> {
   const alias = modelAlias ?? definition.modelAlias;
   // 与主 agent 同一套包装：直接 resolve() 拿到的是裸模型，重试与 fallback 链一次都不会走。
-  // **按别名建，而不是只建一个**：vision 切换要换掉当步的模型，而换过去那个同样得带着重试与
-  // fallback 链（主 agent 那边的 `wrappedFor` 就是这个理由，docs/20 · W-AGENT-01）。
+  // 按别名建而不是只建一个：vision 切换要替换当步的模型，替换后的模型同样需要重试与
+  // fallback 链（主 agent 侧 `wrappedFor` 同理，docs/20 · W-AGENT-01）。
   const modelFor = (name: string): LanguageModel =>
     dependencies.provider
       ? aliasModel(dependencies.registry, name, {
@@ -103,7 +103,7 @@ export async function runSubAgent(
             dependencies.log.event({
               level: "warn",
               kind: "provider.fallback",
-              summary: `${from.id} 试完仍失败，换 ${to.id}`,
+              summary: `${from.id} 重试用尽仍失败，切换至 ${to.id}`,
               traceId: turn.turnId,
               data: {
                 alias: name,
@@ -113,9 +113,9 @@ export async function runSubAgent(
                 reason: "candidate_exhausted",
               },
             }),
-          // 与主 agent 同一条：每次失败落一行、只有超时计入连续失败、一次调用一个候选只记一次
-          // （`docs/04 §5.3`）。子 agent 走的是同一批 provider，漏在这里等于「主轮不再卡了，
-          // researcher 还在每一步熬满超时」；而按尝试记又会让一次慢调用（子 agent 全走非流式）判死它。
+          // 与主 agent 同一规则：每次失败落一行、只有超时计入连续失败、一次调用一个候选只记一次
+          // （`docs/04 §5.3`）。子 agent 走的是同一批 provider，此处漏记的表现是主轮不再阻塞而
+          // 子 agent 每一步仍耗满超时；按尝试计数则会让一次慢调用（子 agent 全走非流式）误判该候选失效。
           onCandidateFailed: (candidate, failure) => {
             dependencies.log.event({
               level: "warn",
@@ -167,21 +167,21 @@ export async function runSubAgent(
       : dependencies.registry.resolve(name);
   const model = modelFor(alias);
   /**
-   * **子 agent 也要有 vision 切换。** 它常跑在 `low` 上，而它自己 `web_fetch` 回来的图骑在工具
-   * 结果上进下一步的请求体 —— 此前这里一条判据都没有，那张图直接落在一个瞎模型上
-   * （`docs/08 §7.2` 禁的正是这件事；`degradeImageParts` 那道兜底也救不了它：`isImagePart`
-   * 只认顶层 part，认不出藏在 tool-result 里的那张图，`docs/02 §9` 红线 22）。
+   * 子 agent 同样需要 vision 切换。它常跑在 `low` 上，而它自己 `web_fetch` 取回的图片挂在工具
+   * 结果上进入下一步的请求体；此处缺少判据时该图片会落到不具备视觉能力的模型上
+   * （`docs/08 §7.2` 禁止的正是这件事；`degradeImageParts` 兜底也覆盖不到：`isImagePart`
+   * 只识别顶层 part，识别不出嵌在 tool-result 里的图片，`docs/02 §9` 红线 22）。
    *
-   * 候选只有 `{自己这个别名, vision}` 两个 —— 比主 agent 少一个「降档前那个别名」，因为子 agent
-   * 没有 `downgradeAfterStep` 那种机械降档：它看不了图只可能是它**就是被指定成**这个别名的，
-   * 那么把 `spawn_agent` 明确指定的别名偷偷换成定义里那个不是修复而是另一种意外。
-   * 注入侧问的必须是同一个集合（`ToolExecutionContext.agentAlias` + `vision`）—— 两边不一致
-   * 就会出现「存下来了却没人能看」或者「本可以看却如实说了看不了」。
+   * 候选集只有 `{当前别名, vision}` 两个，比主 agent 少一个降档前的别名，因为子 agent
+   * 没有 `downgradeAfterStep` 那类机械降档：它不具备视觉能力只可能源于它被显式指定为该别名，
+   * 此时把 `spawn_agent` 指定的别名替换成定义里的别名不是修复而是另一种错配。
+   * 注入侧必须查询同一集合（`ToolExecutionContext.agentAlias` + `vision`）；两侧不一致
+   * 会导致图片已存储却无模型可读，或模型本可读图却声明不支持。
    */
   /**
-   * 判据是**这次 run 自己**注入过图（`toolContext.subAgent.onMediaInjected`），不是父轮那个
-   * `turn.mediaInjected` —— 父轮的图不在子 agent 的 messages 里（它只拿到任务文本），跟着切
-   * 等于白付一次贵别名的钱；反过来子 agent 的图也不该把父轮钉到 vision 上。
+   * 判据是本次 run 自身注入过图片（`toolContext.subAgent.onMediaInjected`），而非父轮的
+   * `turn.mediaInjected`：父轮的图片不在子 agent 的 messages 里（它只接收任务文本），跟随切换
+   * 只会多付一次高价别名的开销；反向同理，子 agent 的图片也不应把父轮固定到 vision 上。
    */
   let mediaImages = 0;
   let mediaInjected = false;
@@ -190,14 +190,14 @@ export async function runSubAgent(
       return null;
     return dependencies.registry.supportsVision("vision") ? "vision" : null;
   };
-  /** 当步实际用的别名。记账与日志按它落 —— 切过去却按定义里那个记，钱就算到了没跑的模型上。 */
+  /** 当步实际使用的别名。记账与日志以它为准；已切换却按定义里的别名记账会把费用计到未执行的模型上。 */
   let stepAlias = alias;
   let visionSwitchLogged = false;
   const allow = new Set(definition.tools);
   /**
-   * `docs/10 §1` 的 span E：子 agent 那一整段的容器，它的 id 就是内部 `model.call` / `tool.call`
-   * 的父。**span 只在结束时才落库**，所以派出去那一刻另记一条 `agent.spawn` —— 一个卡住的
-   * 子 agent 否则在日志里完全不存在（docs/28 · L-LOG-01）。
+   * `docs/10 §1` 的 span E：子 agent 整段执行的容器，它的 id 是内部 `model.call` / `tool.call`
+   * 的父。span 只在结束时才落库，因此派发瞬间另记一条 `agent.spawn`；否则卡住的
+   * 子 agent 在日志里不留任何痕迹（docs/28 · L-LOG-01）。
    */
   const parent = dependencies.parentSpanId
     ? { parentSpanId: dependencies.parentSpanId }
@@ -230,9 +230,9 @@ export async function runSubAgent(
     key: turn.key,
     data: { runId: run.id, name: definition.name, depth: run.depth, alias },
   });
-  // 内部的工具调用挂在 `agent.run` 之下（`docs/10 §1` 里 `tool.call span G parent=E`）。
-  // `subAgent` 那一组是给图片路径用的（`docs/04 §5.2`）：按**它自己**的别名问能力位（问主轮
-  // 别名等于问了个无关的模型）、父轮那条痕迹要写清是谁取的、张数与「注入过图」都按这次 run 记。
+  // 内部的工具调用挂在 `agent.run` 之下（`docs/10 §1` 的 `tool.call span G parent=E`）。
+  // `subAgent` 这一组服务于图片路径（`docs/04 §5.2`）：按子 agent 自身的别名查询能力位（按主轮
+  // 别名查询等于查询了无关模型）、父轮痕迹要记明取图方、张数与是否注入过图均按本次 run 计。
   const toolContext: ToolExecutionContext = {
     turn,
     workspace: dependencies.workspace,
@@ -250,8 +250,8 @@ export async function runSubAgent(
       },
     },
   };
-  // 与主 agent 共用 `toolSetFor`：`toModelOutput`（带图的工具结果）这类钩子加漏一处的表现是
-  // 「主 agent 能看图、子 agent 不能」，而且要真跑一次带图的子 agent 才看得见。
+  // 与主 agent 共用 `toolSetFor`：`toModelOutput`（带图的工具结果）这类钩子若只加一处，表现为
+  // 主 agent 能读图而子 agent 不能，且只有实际运行一次带图的子 agent 才会暴露。
   const toolSet = toolSetFor(
     dependencies.tools,
     dependencies.tools.active(run.effectiveRole, toolContext, definition.tools),
@@ -265,10 +265,10 @@ export async function runSubAgent(
   const maxSteps = Math.min(definition.maxSteps, perTurn.maxSteps);
   let stepNumber = 0;
   let spentUsd = 0;
-  // 与主 agent 同理：重试归 fallbackLanguageModel，SDK 那层再叠一遍等于把一次故障的墙钟乘三。
-  // 子 agent 此前只拿到 `definition.instructions`（配置里通常是一句话），既不知道
-  // `<untrusted-content>` 的边界语义，也不知道工具报错该重试几次 —— 而它跑的是同一批工具、
-  // 读的是同一批网页。`docs/06 §3.1` 的注入矩阵早写着这里该有 `KERNEL(精简)`。
+  // 与主 agent 同理：重试由 fallbackLanguageModel 负责，SDK 层再叠一遍会把单次故障的墙钟耗时乘三。
+  // 子 agent 此前只拿到 `definition.instructions`（配置里通常是一句话），既不掌握
+  // `<untrusted-content>` 的边界语义，也不知道工具报错该重试几次，而它使用同一批工具、
+  // 读取同一批网页。`docs/06 §3.1` 的注入矩阵要求此处提供 `KERNEL(精简)`。
   const instructions = `${SUBAGENT_KERNEL}\n\n${definition.instructions}`;
   const agent = new ToolLoopAgent({
     model,
@@ -304,7 +304,7 @@ export async function runSubAgent(
           },
         });
       }
-      // 采样参数跟着当步别名走（`docs/04 §5.2.1`）：换了模型还按原别名的参数下发是另一种错配。
+      // 采样参数跟随当步别名（`docs/04 §5.2.1`）：切换模型后仍按原别名的参数下发是另一种错配。
       return {
         ...stopped,
         model: modelFor(seeing),
@@ -337,7 +337,7 @@ export async function runSubAgent(
         outputTokens: step.usage.outputTokens ?? 0,
         cacheReadTokens: step.usage.inputTokenDetails.cacheReadTokens ?? 0,
         cacheWriteTokens: step.usage.inputTokenDetails.cacheWriteTokens ?? 0,
-        // `inputTokens` 是 total（超集）；计价用这一份互斥的（`pricedInputTokens`，docs/10 §4.1）。
+        // `inputTokens` 是 total（超集）；计价使用互斥的那一份（`pricedInputTokens`，docs/10 §4.1）。
         noCacheTokens: step.usage.inputTokenDetails.noCacheTokens ?? undefined,
         reasoningTokens: step.usage.outputTokenDetails.reasoningTokens ?? 0,
         priceIn: info.priceIn,
@@ -348,8 +348,8 @@ export async function runSubAgent(
         finishReason: step.finishReason,
         ok: true,
       });
-      // 只 record 不 commit 的话，用量报表看得见这笔花费、配额却拦不住它：日/月计数器只在
-      // commit() 里递增，一轮十个子 agent 可以在账本上「免费」跑掉（docs/20 · W-QUOTA-01）。
+      // 只 record 不 commit 时，用量报表能看到这笔花费而配额拦不住它：日/月计数器只在
+      // commit() 里递增，一轮十个子 agent 会在账本上不计费用地跑完（docs/20 · W-QUOTA-01）。
       if (dependencies.quota && dependencies.reservation)
         dependencies.quota.commit(dependencies.reservation, cost);
       dependencies.db
@@ -363,9 +363,9 @@ export async function runSubAgent(
           run.id,
         );
       spentUsd += cost;
-      // 子 agent 的模型调用此前**一条日志都没有**：只有 `usage_ledger` 里那一行，而
-      // `docs/10 §1` 画着 `model.call span F parent=E`，`AC-LOG-001` 的期望链也点名它。
-      // 用 event 而不是 span：这条路只有 `onStepEnd` 一个钩子，耗时取 SDK 报的 `responseTimeMs`。
+      // 子 agent 的模型调用此前没有任何日志，只在 `usage_ledger` 留一行，而
+      // `docs/10 §1` 定义了 `model.call span F parent=E`，`AC-LOG-001` 的期望链也点名它。
+      // 用 event 而非 span：这条路只有 `onStepEnd` 一个钩子，耗时取 SDK 报告的 `responseTimeMs`。
       dependencies.log.event({
         level: "info",
         kind: "model.call",
@@ -412,7 +412,7 @@ export async function runSubAgent(
     },
   });
   const content = context ? `${task}\n\n---\n参考资料:\n${context}` : task;
-  /** `agent.end` 与 `agent.run` 的收尾共用同一份数字，两条一起落 —— 缺一条树上就少一个端点。 */
+  /** `agent.end` 与 `agent.run` 的收尾共用同一份数据，两条一起落库；缺一条 trace 树上就少一个端点。 */
   const settle = (ok: boolean, extra: Record<string, unknown>): void => {
     const payload = {
       runId: run.id,

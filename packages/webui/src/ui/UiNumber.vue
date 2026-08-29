@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // 数字步进：外框接管聚焦态，中间是原生 `type=number`（键盘上下键、数字键盘、`min`/`max`/`step`
-// 校验都是它的），两侧是自绘的加减。原生那对上下箭头在 Chrome 只有 hover 才露、Firefox 常驻，
-// 尺寸也调不动 —— 由 CSS 关掉。
+// 校验均由它提供），两侧为自绘的加减按钮。原生的上下箭头在 Chrome 仅 hover 时显示、Firefox 常驻，
+// 尺寸也无法调整，因此由 CSS 关闭。
 import { computed, onBeforeUnmount, ref } from "vue";
 
 const props = withDefaults(
@@ -31,7 +31,7 @@ const atMax = computed(
     props.modelValue >= props.max,
 );
 
-/** 清空输入框要还原成 null 而不是 0：采样参数留空 = 用 provider 默认（docs/04 §5.2.1）。 */
+/** 清空输入框应还原为 null 而不是 0：采样参数留空表示使用 provider 默认值（docs/04 §5.2.1）。 */
 function onInput(event: Event): void {
   const raw = (event.target as HTMLInputElement).value.trim();
   const parsed = Number(raw);
@@ -48,12 +48,12 @@ const places = (value: number): number => {
 };
 function nudge(direction: 1 | -1): void {
   if (props.disabled) return;
-  // 空值起步时第一下停在下限本身而不是「下限 + 一格」：点 + 要的是最小的合法值。
+  // 从空值开始时第一步停在下限本身而不是下限加一格：点击加号期望得到最小的合法值。
   const next =
     props.modelValue === null
       ? (props.min ?? 0)
       : props.modelValue + direction * props.step;
-  // 0.1 + 0.2 = 0.30000000000000004，按 step 与当前值里较长的那个小数位收一次，否则温度点两下就成了脏值。
+  // 0.1 + 0.2 = 0.30000000000000004，按 step 与当前值中较长的小数位收敛一次，否则温度点两次即产生脏值。
   const digits = Math.min(
     10,
     Math.max(places(props.step), places(props.modelValue ?? 0)),
@@ -69,7 +69,7 @@ function nudge(direction: 1 | -1): void {
   );
 }
 
-// 长按连发：编辑间隔那种 step=500、跨度 0–30000 的格子，一下一下点要点六十次。
+// 长按连发：编辑间隔这类 step=500、跨度 0–30000 的输入项，逐次点击需要六十次。
 let repeat = 0;
 function stop(): void {
   if (repeat) {
@@ -86,7 +86,7 @@ function hold(direction: 1 | -1): void {
   repeat = window.setTimeout(() => {
     repeat = window.setInterval(() => nudge(direction), 60);
   }, 400);
-  // 同一个函数引用重复注册是空操作，所以这里最多各挂一个；`once` 保证正常抬手后自己摘掉。
+  // 同一函数引用重复注册为空操作，因此这里各自最多注册一个；`once` 保证正常抬起后自动移除。
   window.addEventListener("pointerup", stop, { once: true });
   window.addEventListener("pointercancel", stop, { once: true });
 }

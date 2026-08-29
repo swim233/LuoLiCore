@@ -10,13 +10,13 @@ import {
 } from "./types";
 
 /**
- * MCP server 是**别人进程上的一条活的连接**。所以这一段是表而不是卡片：要比较的是状态、
- * 凭据、工具条数、上次核对时间这几列，而一行一行竖着排才比得出来。
+ * MCP server 是指向外部进程的一条活动连接。因此这一段采用表格而不是卡片：需要横向比较状态、
+ * 凭据、工具条数、上次核对时间这几列，逐行排列才便于对比。
  *
- * 工具清单不再摊在行里。条数没有上限（一台 agent-browser 就发现 64–70 个），此前它是一个封高的
- * 内嵌滚动区 —— 封高之后清单里读不出总数，所以又在副标题补了「N 个工具」。这里改成条数进列、
- * 清单进抽屉：既读得出总数，也读得到每个工具的描述（那份描述由对面那台 server 写，
- * 是提示注入面之一，值得能看见）。
+ * 工具清单不再展开在行内。条数没有上限（单台 agent-browser 即可发现 64–70 个），此前它是一个限高的
+ * 内嵌滚动区，限高后无法读出总数，因而又在副标题补充了工具条数。这里改为条数进列、
+ * 清单进抽屉：既能读出总数，也能读到每个工具的描述（该描述由对端 server 提供，
+ * 属于提示注入面之一，需要可见）。
  */
 const props = defineProps<{
   rows: McpRow[];
@@ -47,9 +47,9 @@ const stateOf = (
 const authMode = (row: McpRow): "none" | "bearer" | "oauth" =>
   (row.auth?.mode as "none" | "bearer" | "oauth" | undefined) ?? "none";
 /**
- * 「这一行可能是陈旧的」。`mcp_servers.state` 由 `mcp-health` 每 5 分钟对一次账，子进程被
- * `kill -9` 之后最长 5 分钟才从 `up` 改过来 —— 期间界面写着「已连接」而那台 server 的工具
- * 已经不在模型目录里了。判据用 `updated_at`（每次成功 reconcile 都会推）而不是去解 cron。
+ * 标记该行数据可能陈旧。`mcp_servers.state` 由 `mcp-health` 每 5 分钟核对一次，子进程被
+ * `kill -9` 后最长 5 分钟才会从 `up` 改写，期间界面显示已连接而该 server 的工具
+ * 已不在模型目录中。判据使用 `updated_at`（每次成功 reconcile 都会推进）而不是解析 cron。
  */
 const stale = (row: McpRow): boolean =>
   row.enabled !== 0 &&
@@ -123,7 +123,7 @@ const sorted = (): McpRow[] =>
               <small v-if="row.credential?.authorized">{{
                 untilTime(row.credential.expiresAt)
               }}</small>
-              <small v-else class="ext-muted">还没有凭据</small>
+              <small v-else class="ext-muted">尚无凭据</small>
             </template>
           </td>
           <td>
@@ -141,7 +141,7 @@ const sorted = (): McpRow[] =>
           <td>
             {{ relativeTime(row.updated_at) }}
             <small v-if="row.connected_at"
-              >连接建立于 {{ relativeTime(row.connected_at) }}</small
+              >建立于 {{ relativeTime(row.connected_at) }}</small
             >
           </td>
           <td class="ext-col-actions">
@@ -210,10 +210,9 @@ const sorted = (): McpRow[] =>
     </table>
     <article v-else class="ext-empty">
       <i class="pi pi-server" aria-hidden="true" />
-      <h3>还没有 MCP server</h3>
+      <h3>尚无 MCP server</h3>
       <p>
-        MCP server 把它自己的工具动态挂进模型的目录 ——
-        本地进程（stdio）或者一个远端地址（Streamable HTTP）都行。<br />远端那种常常要登录：登记完之后这一行会显示<b>要登录</b>，点〔登录〕走一遍浏览器授权。
+        工具动态注册进模型目录，传输为 stdio 或 Streamable HTTP。<br />状态列显示<b>要登录</b>时，点击〔登录〕完成浏览器授权。
       </p>
     </article>
   </div>

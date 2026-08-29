@@ -1,23 +1,23 @@
 <script setup lang="ts">
 /**
- * dev 文案面板 —— 一张浮在真界面之上的**校样**。左边是产品，这里列出本屏真的渲染过的每一句。
+ * dev 文案面板：浮在真实界面之上的校对视图。左侧是产品界面，这里列出本屏实际渲染过的每一句。
  *
- * 「本屏」靠渲染期收集而不是靠 DOM 扫描：属性里的 `title` / `aria-label` / `placeholder`、以及
- * toast 的文字都不在 DOM 文本里，扫 DOM 一律看不见。
+ * 本屏的判定依靠渲染期收集而不是 DOM 扫描：属性里的 `title` / `aria-label` / `placeholder`，以及
+ * toast 的文字都不在 DOM 文本里，扫描 DOM 无法发现。
  *
- * **一切改动都只是暂存**：改文案走内存覆盖层，版式 / 偏移 / 隐藏 / 删除走 DOM 预览。源码一个字节
- * 都不动，直到按〔保存〕—— 那一刻所有暂存改动一次写完（见 `extract.ts` 的 `applyChanges`：
- * offset 全是对着同一份原文量的，逐条写盘会让后面的全漂掉）。撤销分两级：未保存的逐步退
- * （Ctrl+Z），已保存的按历史栈往回退任意一步（`history.ts`）。
+ * 所有改动都只是暂存：改文案走内存覆盖层，版式 / 偏移 / 隐藏 / 删除走 DOM 预览。源码不发生任何
+ * 变化，直到点击〔保存〕，那一刻所有暂存改动一次写完（见 `extract.ts` 的 `applyChanges`：
+ * offset 均基于同一份原文测量，逐条写盘会让后续全部偏移）。撤销分两级：未保存的逐步回退
+ * （Ctrl+Z），已保存的按历史栈回退任意一步（`history.ts`）。
  *
- * 两条设计上的约束，改这个文件时守住：
+ * 两条设计约束，修改这个文件时需保持：
  *
- * - **每一条的预览用它在页面上真实的计算样式渲染**（`refreshType`）。这是整个面板存在的理由：
- *   在 13px 通用无衬线里判断不了一个 `.68rem` 抬头的字距对不对。改字号 / 字重时预览跟着变，
- *   看到的就是保存后的样子。
- * - **面板自己的样式不能被产品的 CSS 拽着走**。`styles.css` 有 `button, input, select, textarea
- *   { font: inherit }` 与 `body` 上的字体 —— 而人正在改的就是那套 CSS。所以根节点显式重置，
- *   所有规则留在 `.cp*` 前缀下。
+ * - 每一条的预览使用它在页面上真实的计算样式渲染（`refreshType`）。这是整个面板存在的理由：
+ *   在 13px 通用无衬线字体下判断不了一个 `.68rem` 标题的字距是否合适。改字号 / 字重时预览同步变化，
+ *   所见即保存后的效果。
+ * - 面板自身的样式不能受产品 CSS 影响。`styles.css` 里有 `button, input, select, textarea
+ *   { font: inherit }` 与 `body` 上的字体，而正在修改的就是那套 CSS。因此根节点显式重置，
+ *   所有规则限定在 `.cp*` 前缀下。
  */
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { missingSlots as missing } from "../slots.js";
@@ -51,8 +51,8 @@ interface Step {
 }
 
 /**
- * 与 `extract.ts` 的 `UTILITIES` 一一对应（`tests/copy-edit.test.ts` 焊住 prefix 一致）。
- * 档位固定，不开任意数值 —— 尺度一旦按句微调，两周之后这套界面的节奏就碎了。
+ * 与 `extract.ts` 的 `UTILITIES` 一一对应（`tests/copy-edit.test.ts` 约束 prefix 一致）。
+ * 档位固定、不开放任意数值：尺度一旦逐句微调，界面整体的节奏很快就不再一致。
  */
 const GROUPS = {
   push: {
@@ -122,7 +122,7 @@ type Group = keyof typeof GROUPS;
 interface Staged {
   slot: string;
   kind: "text" | "class" | "style" | "remove" | "basis";
-  /** 文案改动指向条目；版式 / 偏移 / 删除指向**元素**。两者的 slot 键也因此不同。 */
+  /** 文案改动指向条目；版式 / 偏移 / 删除指向元素。两者的 slot 键因此不同。 */
   id?: string;
   key?: string;
   group?: Group;
@@ -155,8 +155,8 @@ const typeCss = ref<Record<string, string>>({});
 
 // ── 浮窗：位置 / 尺寸 / 贴边，全部记在 localStorage ──────────────────────
 /**
- * 浮窗形态。`dock` 是「贴回右侧」那一档 —— 脱开之后面板会盖住正在编辑的那一块，而改排版时
- * 恰恰要看见页面全貌，所以这两种形态都要留着，一键切换。
+ * 浮窗形态。`dock` 是贴回右侧那一档：脱开后面板会遮住正在编辑的区域，而调整排版时需要看到
+ * 页面全貌，因此两种形态都保留，支持一键切换。
  */
 interface Frame {
   mode: "float" | "dock";
@@ -175,7 +175,7 @@ const fallback = (): Frame => ({
 });
 const frame = ref<Frame>(fallback());
 const dragMode = ref<"" | "move" | "size">("");
-/** 收进视口。窗口缩小、或换了台屏幕之后，存下来的位置可能整个在视口外 —— 那时面板等于消失了。 */
+/** 收进视口。窗口缩小或更换显示器后，保存的位置可能完全落在视口之外，此时面板不可见。 */
 function clamp(next: Frame): Frame {
   const w = Math.min(Math.max(next.w, 320), window.innerWidth);
   const h = Math.min(Math.max(next.h, 240), window.innerHeight);
@@ -214,7 +214,7 @@ const onResize = (): void => {
 onMounted(() => window.addEventListener("resize", onResize));
 onUnmounted(() => window.removeEventListener("resize", onResize));
 
-/** 拖标题栏移动 / 拖右下角改尺寸。**只认标题栏与那个把手** —— 内容区起手会与「拖动页面元素」打架。 */
+/** 拖标题栏移动、拖右下角改尺寸。只响应标题栏与那个把手：从内容区起拖会与拖动页面元素冲突。 */
 function grab(event: PointerEvent, what: "move" | "size"): void {
   if (event.button !== 0) return;
   if (what === "move" && (event.target as HTMLElement).closest("button"))
@@ -262,7 +262,7 @@ async function loadMeta(): Promise<void> {
   );
   meta.value = Object.fromEntries(payload.entries.map((row) => [row.id, row]));
   boxes.value = payload.elements;
-  // 占位符原文交给运行时：它手里只有表达式的**值**（按同一个顺序），换回去要靠这份文本。
+  // 占位符原文交给运行时：运行时只持有表达式的值（顺序一致），还原需要这份文本。
   for (const key of Object.keys(store.slots)) delete store.slots[key];
   for (const row of payload.entries)
     if (row.slots.length) store.slots[row.id] = row.slots;
@@ -305,16 +305,16 @@ const dirty = computed(
       .length,
 );
 /**
- * 少了哪些占位。判据与落盘侧**同一份**（`../slots.js`）—— 各写一份的必然结果是面板说「可以保存」
- * 而落盘拒绝，或者反过来面板拦住本来能存的东西。
+ * 缺少哪些占位。判据与落盘侧共用同一份（`../slots.js`）：各写一份的必然结果是面板提示可以保存
+ * 而落盘拒绝，或者反过来面板拦下本可保存的内容。
  */
 const missingSlots = (row: Meta): string[] => {
   const typed = store.overrides[row.id]?.trim();
   return typed ? missing(typed, row.core, row.slots) : [];
 };
 /**
- * 有没有条目缺占位。判据看**暂存了什么**，不看当前看得见什么 —— 按视图算的话，改坏一条之后
- * 搜索一下把它筛掉，保存键就又亮了（落盘那侧仍会拒绝，但界面等于骗了人一次）。
+ * 是否有条目缺少占位。判据取决于暂存了什么，而不是当前可见什么：按视图计算时，改坏一条后
+ * 用搜索把它过滤掉，保存按钮就会重新可用（落盘一侧仍会拒绝，但界面已给出了错误反馈）。
  */
 const blocked = computed(() =>
   Object.values(staged.value).some((entry) => {
@@ -326,8 +326,8 @@ const blocked = computed(() =>
 const boxOf = (row: Meta): Box | null =>
   row.owner ? (boxes.value[row.owner] ?? null) : null;
 /**
- * 这一行有没有未保存的改动。**文案按行、版式按元素** —— 后者在源码上就是一个元素，
- * 而 185 个元素被两条以上文案共用（472 条），按行记的话两行会各记一份、状态互相看不见。
+ * 这一行是否有未保存的改动。文案按行记录、版式按元素记录：后者在源码上就是一个元素，
+ * 而 185 个元素被两条以上文案共用（472 条），按行记录时两行各记一份且状态互不可见。
  */
 const touched = (row: Meta): boolean =>
   Object.keys(staged.value).some(
@@ -335,7 +335,7 @@ const touched = (row: Meta): boolean =>
       slot.split(":")[1] === row.id ||
       (row.owner ? slot.split(":")[1] === row.owner : false),
   );
-/** 一个元素上挂着的那几条文案 id —— 元素级的预览要靠它们的 `data-copy-id` 找到 DOM 节点。 */
+/** 一个元素上关联的那几条文案 id：元素级预览依靠它们的 `data-copy-id` 定位 DOM 节点。 */
 const idsOf = (owner: string): string[] =>
   Object.values(meta.value)
     .filter((row) => row.owner === owner)
@@ -343,10 +343,10 @@ const idsOf = (owner: string): string[] =>
 
 // ── 暂存：改的全是 DOM 预览，源码一个字节都不动，直到按保存 ────────────────
 /**
- * 记一步，并让撤销栈能退回来。
+ * 记录一步，并使撤销栈可以回退。
  *
- * `coalesce` 给连续打字用：同一个输入框每敲一个键都压一步的话，撤销一次只退一个字符，
- * 按十下才回到上一句 —— 所以同一个 slot 的连续编辑并成一步。
+ * `coalesce` 用于连续输入：同一个输入框每次按键都压入一步时，撤销一次只回退一个字符，
+ * 需按十次才能回到上一句，因此同一个 slot 的连续编辑合并为一步。
  */
 function stage(next: Staged, coalesce = false): void {
   const last = undoStack.value[undoStack.value.length - 1];
@@ -354,7 +354,7 @@ function stage(next: Staged, coalesce = false): void {
     undoStack.value.push({ slot: next.slot, before: staged.value[next.slot] });
   staged.value = { ...staged.value, [next.slot]: next };
 }
-/** 撤掉某个 slot 的暂存态。**也要进撤销栈** —— 「取消删除」自己也是一步，退得回来。 */
+/** 撤销某个 slot 的暂存态。它同样进入撤销栈：取消删除本身也是一步，可以回退。 */
 function unstage(slot: string): void {
   undoStack.value.push({ slot, before: staged.value[slot] });
   const next = { ...staged.value };
@@ -371,8 +371,8 @@ function paint(slot: string): void {
     else delete store.overrides[target ?? ""];
     return;
   }
-  // 元素级的 slot 记的是元素 key，而 DOM 上挂的是**条目 id** —— 用这个元素上所有条目的
-  // 选择器一起找。（同一个元素可能被两条文案共用，任一条都能定位到它。）
+  // 元素级的 slot 记录的是元素 key，而 DOM 上挂的是条目 id，因此用该元素上所有条目的
+  // 选择器一并查找。（同一个元素可能被两条文案共用，任一条都能定位到它。）
   const selector = idsOf(target ?? "")
     .map((each) => `[data-copy-id~="${each}"]`)
     .join(",");
@@ -386,8 +386,8 @@ function paint(slot: string): void {
     return;
   }
   if (kind === "remove") {
-    // 预览就是**真的看不见**，而不是打个叉：删掉一个 flex 子元素会让旁边几个重新排，
-    // 而那正是按下保存之前唯一需要看清的东西。面板那一行仍在，随时能取消。
+    // 预览的效果是元素真正不可见，而不是加一个标记：删掉一个 flex 子元素会让相邻元素重新排列，
+    // 而那正是保存之前唯一需要确认的内容。面板那一行仍在，随时可以取消。
     for (const node of nodes) node.classList.toggle("cp-ghost", Boolean(entry));
     return;
   }
@@ -430,8 +430,8 @@ function discardAll(): void {
 }
 
 /**
- * 抄一份选中条目在页面上的真实排版。字号收在 11–30px 之间 —— 一个 1.55rem 的大数字照原样
- * 铺进 400px 宽的面板会把整行撑掉，而判断字重与字距不需要原尺寸。
+ * 复制选中条目在页面上的真实排版。字号限制在 11–30px：一个 1.55rem 的大号数字原样
+ * 放进 400px 宽的面板会撑破整行，而判断字重与字距并不需要原始尺寸。
  */
 function refreshType(row: Meta): void {
   const node = document.querySelector<HTMLElement>(
@@ -459,8 +459,8 @@ function focus(row: Meta): void {
   focused.value = row.id;
   confirming.value = "";
   refreshType(row);
-  // 展开之后那一条会长出六行控件，很容易整块落在可视区之外 —— 选中一条却看不见它的控件
-  // 是「点了没反应」的一种。`nearest` 不做无谓的滚动。
+  // 展开后那一条会增加六行控件，很容易整块落在可视区之外：选中一条却看不到它的控件
+  // 属于点击无反应的一种。`nearest` 不做多余的滚动。
   void nextTick(() =>
     document
       .querySelector(`#luoli-copy-panel [data-row="${row.id}"]`)
@@ -495,10 +495,10 @@ watch(store.picked, async (ids) => {
 });
 
 /**
- * 间距该调「左间距」还是「上间距」，看**真实容器怎么排**。
+ * 间距调整左间距还是上间距，取决于真实容器的排列方向。
  *
- * 这套界面里 86 处 `display: flex` + 95 处 `display: grid`，只有 5 处 `flex-direction: column`
- * —— 横排容器里「与上一块的距离」是水平方向的，写成「上间距」就是在说谎。
+ * 这套界面里有 86 处 `display: flex` 与 95 处 `display: grid`，只有 5 处 `flex-direction: column`：
+ * 横向排列的容器中与上一块的距离是水平方向的，标注为上间距即与实际不符。
  */
 function axis(row: Meta): "gapx" | "gapy" {
   const node = row.owner
@@ -609,14 +609,14 @@ async function save(): Promise<void> {
         }>,
     );
     /**
-     * 落地的清掉（源码已经是新的，留着只会跟新基线打架），**没落地的留住**。
+     * 已落盘的清除（源码已更新，保留只会与新基线冲突），未落盘的保留。
      *
-     * 这里此前是无条件清空：服务端答「拒绝 3 处」时，那三处既没落盘、人刚打的字也没了 ——
-     * 对一个卖点是「你的改动很安全」的工具，这是最不该有的坏法。`stuck` 就是为此加的：
-     * `refused` 只是给人看的句子，认不出该留哪几条。
+     * 这里此前是无条件清空：服务端返回拒绝 3 处时，那三处既未落盘、用户刚输入的内容也一并丢失。
+     * 对一个以改动安全为前提的工具，这是最不应出现的失败方式。`stuck` 即为此新增：
+     * `refused` 只是给人阅读的说明，无法据它判断应保留哪几条。
      *
-     * **不清 `seen`**：清了之后，这一屏上没被改动、因此不会重渲染的那些句子会整批从列表里消失，
-     * 得切一页再切回来才回得来。改过的那几条 id 变了，`live` 按 meta 过滤时自己就掉了。
+     * 不清除 `seen`：清除后，本屏上未被改动、因此不会重新渲染的那些句子会整批从列表消失，
+     * 需切换页面再切回才能恢复。已修改的那几条 id 发生变化，`live` 按 meta 过滤时会自行排除。
      */
     const stuck = new Set(result.stuck ?? []);
     const kept: Record<string, Staged> = {};
@@ -645,10 +645,10 @@ async function save(): Promise<void> {
 }
 
 /**
- * 退到某一步保存之前。不给 id 就是退最近一步。
+ * 回退到某一步保存之前。不传 id 即回退最近一步。
  *
- * **先把未保存的丢掉**：退完源码是另一份了，留着的暂存态记的 offset 与元素 key 全是旧的，
- * 下一次保存会被整批拒 —— 而那种「按了保存什么都没发生」最难看懂。
+ * 先丢弃未保存的内容：回退后源码已是另一份，保留的暂存态里记录的 offset 与元素 key 均为旧值，
+ * 下一次保存会被整批拒绝，而点击保存后没有任何变化是最难排查的一种表现。
  */
 async function rewind(to?: string): Promise<void> {
   if (dirty.value) discardAll();
@@ -690,8 +690,8 @@ function tune(row: Meta, group: Group, value: string): void {
   if (!boxOf(row)) return;
   const slot = `class:${row.owner}:${group}`;
   const next = current(row, group) === value ? "" : value;
-  // 字号档要连基准一起写：档位是「基准 × 倍数」，而基准得量元素**自己**现在多大。见 styles.css
-  // 里 `.u-size-*` 那段注释。取消档位时基准一并摘掉，否则源码里留一条没人读的声明。
+  // 字号档要连同基准一起写：档位是基准乘以倍数，而基准需要测量元素自身当前的尺寸。见 styles.css
+  // 里 `.u-size-*` 那段注释。取消档位时一并移除基准，否则源码里会留下一条不会被读取的声明。
   if (group === "size") {
     const px = next ? basisFor(row) : null;
     stage({ slot: `basis:${row.owner}`, kind: "basis", key: row.owner, px });
@@ -701,10 +701,10 @@ function tune(row: Meta, group: Group, value: string): void {
   paint(slot);
 }
 /**
- * 字号基准：源码里已经存着就用那个（它才是元素的原始尺寸），否则**当场量一次**。
+ * 字号基准：源码里已存在时使用它（那才是元素的原始尺寸），否则当场测量一次。
  *
- * 量之前要把已挂上的 `u-size-*` 与 `--u-base` 摘掉再读 —— 带着上一档去量，第二次点「大」
- * 就是在放大过的尺寸上再放大，四个档位会随点击次数漂走。
+ * 测量前要先移除已挂上的 `u-size-*` 与 `--u-base`：带着上一档测量时，第二次点击放大
+ * 会在已放大的尺寸上继续放大，四个档位会随点击次数偏移。
  */
 function basisFor(row: Meta): number | null {
   const stored = boxOf(row)?.basis ?? null;
@@ -745,8 +745,8 @@ function offsetTo(row: Meta, dx: number, dy: number, coalesce = false): void {
   paint(slot);
 }
 /**
- * 真删：从模板里摘走这个元素。**否决权在服务端**（`ElementInfo.guards`），这里只是不给按 ——
- * 判据要跟着 AST 走，而面板手里只有它交过来的那几句话。
+ * 实际删除：从模板里移除这个元素。否决权在服务端（`ElementInfo.guards`），这里只是禁用按钮：
+ * 判据需要基于 AST，而面板只持有服务端交回的那几项信息。
  */
 const removing = (row: Meta): boolean =>
   Boolean(staged.value[`remove:${row.owner}`]);
@@ -764,7 +764,7 @@ function remove(row: Meta): void {
   confirming.value = "";
   message.value = `已标记删除 <${box.tag}>${box.inner > 1 ? `（连带 ${box.inner} 条文案）` : ""} —— 按〔保存〕才真的动源码`;
 }
-/** 界面上拖完一下 —— boot.ts 把结果放进 `dragged`，这里接住并暂存。 */
+/** 界面上完成一次拖拽后：boot.ts 把结果写入 `dragged`，这里接收并暂存。 */
 watch(store.dragged, (hit) => {
   if (!hit) return;
   store.dragged.value = null;
@@ -785,8 +785,8 @@ watch(message, (value) => {
 });
 
 /**
- * Ctrl/Cmd+Z 退一步。**输入框里不拦** —— 在文本域里按撤销，人要的是退掉刚打的字符，
- * 那由浏览器自己处理；拦下来会让打字体验很怪。
+ * Ctrl/Cmd+Z 回退一步。输入框内不拦截：在文本域里按撤销时，用户要的是撤回刚输入的字符，
+ * 交由浏览器处理；拦截会破坏输入体验。
  */
 onMounted(() => {
   const onKey = (event: KeyboardEvent): void => {
@@ -1262,16 +1262,16 @@ onMounted(() => {
 
 <style scoped>
 /**
- * 面板的样子：一张浮在产品上的校样。
+ * 面板的外观：浮在产品之上的一层校对视图。
  *
- * 取舍记在这里，免得下次重做时又绕一遍：
- * - **恒为暗色**，不跟随产品的浅/深主题。它是工具而不是产品的一部分（devtools 的惯例），
- *   浅色面板浮在浅色页面上会分不清哪一层是哪一层。
- * - 数据一律用 `--font-mono`（产品自托管的 Fira Code，已经加载好了）：行号、offset、tag、时间。
- *   正文与控件用 `--font-sans`。这让工具和产品同源，又不假装自己是产品。
- * - 强调色只有一个（琥珀 `#ffb020`）：选中、暂存、危险三种状态靠形状与位置区分，不靠再加颜色。
+ * 取舍记录在此，避免下次重做时重复讨论：
+ * - 恒为暗色，不跟随产品的浅色 / 深色主题。它是工具而不是产品的一部分（devtools 的惯例），
+ *   浅色面板浮在浅色页面上难以区分层次。
+ * - 数据一律用 `--font-mono`（产品自托管的 Fira Code，已加载）：行号、offset、tag、时间。
+ *   正文与控件用 `--font-sans`。这使工具与产品同源，同时不与产品混淆。
+ * - 强调色只有一个（琥珀 `#ffb020`）：选中、暂存、危险三种状态靠形状与位置区分，不增加颜色。
  * - `font` / `color` 在根节点上显式写全：产品的 `button, input, select, textarea { font: inherit }`
- *   够得着这里，而人正在改的就是那套 CSS。
+ *   会影响到这里，而正在修改的就是那套 CSS。
  */
 .cp,
 .cp-fab {
@@ -1379,7 +1379,7 @@ onMounted(() => {
   font: 600 13px/1 var(--sans);
   letter-spacing: 0.04em;
 }
-/* 抓手：告诉人「这条边才能拖」。三道短线，不占地方也不用图标字体。 */
+/* 抓手：标明只有这条边可拖动。三道短线，不占空间也不依赖图标字体。 */
 .cp-grip {
   width: 9px;
   height: 13px;
@@ -1416,10 +1416,10 @@ onMounted(() => {
   color: var(--text);
 }
 
-/* 视图与工具是两件事，所以长得不一样：
-   - 视图是**筛选**（看哪一批），做成一个分段控件 —— 一个控件里的两档，不是两个平级按钮；
-   - 工具是**模式**（点击页面时会发生什么），做成一条带标签的虚线工具条。
-   此前它们是五枚一模一样的等宽药丸叠在一起，看不出哪个会改变鼠标行为。 */
+/* 视图与工具是两类东西，因此外观不同：
+   - 视图是筛选（查看哪一批），做成分段控件，即一个控件里的两档而不是两个平级按钮；
+   - 工具是模式（点击页面时会发生什么），做成一条带标签的虚线工具条。
+   此前它们是五枚外观相同的等宽药丸并排，无法区分哪个会改变鼠标行为。 */
 .cp-bar {
   display: flex;
   gap: 6px;
@@ -1562,14 +1562,14 @@ onMounted(() => {
 
 /* ── 条目 ─────────────────────────────────────────────────────────────── */
 /**
- * 这一段是面板的**签名**：左边一道贯穿全列的沟槽，行号坐在沟槽上，改动标记落在页边 ——
- * 一张校样该有的样子。行号是源码行号，所以「面板里这一条」与「编辑器里那一行」是同一个坐标。
+ * 这一段是面板的标志性版式：左侧一道贯穿全列的沟槽，行号位于沟槽上，改动标记落在页边，
+ * 与校样的排布一致。行号取自源码，因此面板里的一条与编辑器里的一行是同一个坐标。
  *
- * 沟槽线画成 `.cp-list` 的背景渐变而不是每行一条 `border-left`：溢出容器的背景铺在 padding box
- * 上、**不随内容滚动**，于是那道线是连续的一条，而不是被行间距切断的一截一截。
+ * 沟槽线绘制为 `.cp-list` 的背景渐变而不是每行一条 `border-left`：溢出容器的背景铺在 padding box
+ * 上、不随内容滚动，因此那道线是连续的，而不会被行间距切断成多段。
  */
-/* 底部那道渐隐是**信息**而不是装饰：展开一条会长出六行控件，列表几乎总有下文，
-   而一条被硬切在窗口边缘的按钮行看上去像坏了。 */
+/* 底部那道渐隐承载信息而不是装饰：展开一条会增加六行控件，列表几乎总有后续内容，
+   而被窗口边缘直接截断的按钮行看起来像渲染异常。 */
 .cp-list {
   flex: 1;
   overflow-y: auto;
@@ -1637,7 +1637,7 @@ onMounted(() => {
   font: 10.5px/1.4 var(--mono);
   word-break: break-all;
 }
-/* 行号坐在沟槽上，脱离文档流 —— 它是坐标而不是这一行文字的一部分。 */
+/* 行号位于沟槽上并脱离文档流：它是坐标，不是这一行文字的组成部分。 */
 .cp-line {
   position: absolute;
   left: 4px;
@@ -1662,7 +1662,7 @@ onMounted(() => {
   color: #f0b45f;
   cursor: help;
 }
-/* 这一行是**校样**：选中时用它在页面上真实的字体、字号、字重、字距渲染。 */
+/* 这一行是校样：选中时用它在页面上真实的字体、字号、字重、字距渲染。 */
 .cp-now {
   margin: 0;
   color: #d7d1e2;
@@ -1693,7 +1693,7 @@ onMounted(() => {
   color: var(--bad);
   font-size: 11px;
 }
-/* 占位符一直摊在那儿，不是只在改坏之后才出现 —— 人得先知道有什么必须留着，再动手改。 */
+/* 占位符始终展示，而不是改坏之后才出现：需要先知道哪些必须保留，再进行修改。 */
 .cp-slots {
   display: flex;
   flex-wrap: wrap;
@@ -1945,7 +1945,7 @@ onMounted(() => {
   cursor: default;
 }
 
-/* 右下角那块把手：两道斜线，比一个图标更像「可以拽」。 */
+/* 右下角那块把手：两道斜线，比图标更能表明可拖拽。 */
 .cp-size {
   position: absolute;
   right: 0;
@@ -1963,8 +1963,8 @@ onMounted(() => {
   );
 }
 
-/* 入场只在挂载那一下：列表每次筛选都抖一遍会很吵。错开量封顶 180ms —— 300 条逐个错开的话
-   最后一条要等五秒才出现，那不是编排，那是卡。 */
+/* 入场动画只在挂载时执行一次：列表每次筛选都重放会造成干扰。错开量上限 180ms：300 条逐个错开时
+   最后一条需等待五秒才出现，那已不是编排效果而是卡顿。 */
 .cp.boot .cp-list section {
   animation: cp-row 0.26s cubic-bezier(0.2, 0.8, 0.2, 1) both;
   animation-delay: min(calc(var(--i, 0) * 16ms), 180ms);

@@ -4,12 +4,12 @@ import UiTag from "../../ui/UiTag.vue";
 import { pluginProvides, relativeTime, type PluginRow } from "./types";
 
 /**
- * Plugin 是**在 bot 进程里全信任跑的代码，没有沙箱**。这一段因此不装作和另外三类一样：
- * 每张卡片顶上一句风险陈述，主动作是〔看源码〕而不是〔启用〕—— 启用前先看过源码，这句话
- * 要么有一个入口，要么就只是句口号（`GET /api/plugins/:name/source` 就是为它加的）。
+ * Plugin 在 bot 进程内以全信任方式运行，没有沙箱隔离。这一段因此与另外三类区别对待：
+ * 每张卡片顶部给出风险说明，主动作是查看源码而不是启用。启用前先查看源码这条要求
+ * 必须有对应入口才能成立（`GET /api/plugins/:name/source` 正是为此添加）。
  *
- * `provides` 摆在卡片上：那是 plugin 侧的「N 个工具」，端点一直在发（`provides_json`）而
- * 界面一直没读 —— 于是「启用它会往模型目录里加什么」在这一页上读不出来。
+ * `provides` 展示在卡片上：它是 plugin 侧提供的能力条数，端点一直在发送（`provides_json`）而
+ * 界面此前未读取，导致启用后会向模型目录添加什么内容在这一页上无法得知。
  */
 const props = defineProps<{
   rows: PluginRow[];
@@ -48,7 +48,11 @@ const sorted = (): PluginRow[] =>
           />
           <UiTag
             :value="
-              row.enabled === 0 ? '停用' : row.load_error ? '加载失败' : '在跑'
+              row.enabled === 0
+                ? '停用'
+                : row.load_error
+                  ? '加载失败'
+                  : '运行中'
             "
             :severity="
               row.enabled === 0
@@ -61,11 +65,11 @@ const sorted = (): PluginRow[] =>
         </h3>
         <p class="ext-note-warn">
           <i class="pi pi-exclamation-triangle" aria-hidden="true" />在 bot
-          进程里<b>全信任</b>运行，没有沙箱。启用等于把这段代码当成本项目自己的代码。
+          进程内<b>全信任</b>运行，无沙箱，与本项目代码同一信任级别。
         </p>
         <code v-if="row.load_error">{{ row.load_error }}</code>
         <div v-if="pluginProvides(row).length" class="ext-chips">
-          <small>它往运行时加了</small>
+          <small>向运行时注册</small>
           <UiTag
             v-for="entry in pluginProvides(row)"
             :key="entry"
@@ -73,9 +77,7 @@ const sorted = (): PluginRow[] =>
             severity="info"
           />
         </div>
-        <p v-else class="ext-muted">
-          这份 plugin 没有声明任何 tool / hook / command。
-        </p>
+        <p v-else class="ext-muted">未声明 tool / hook / command</p>
         <p v-if="hotReloadWarning" class="ext-note-warn">
           <i class="pi pi-info-circle" aria-hidden="true" />{{
             hotReloadWarning
@@ -122,11 +124,10 @@ const sorted = (): PluginRow[] =>
     </article>
     <article v-if="!rows.length" class="ext-empty">
       <i class="pi pi-box" aria-hidden="true" />
-      <h3>还没有 plugin</h3>
+      <h3>尚无 plugin</h3>
       <p>
-        plugin 是 <code>plugins/&lt;名字&gt;/plugin.js</code>：能注册工具、挂
-        hook、加命令，代价是它跟本项目自己的代码同一个信任级别。<br />模型也能写
-        plugin（<code>tools.selfExtend.plugins</code>），写下来一律是停用状态，等人读过源码。
+        plugin 是 <code>plugins/&lt;名字&gt;/plugin.js</code>：可注册工具、hook
+        与命令，与本项目代码同一信任级别。<br />模型亦可编写（<code>tools.selfExtend.plugins</code>），一律为停用状态，启用前需人工复核源码。
       </p>
     </article>
   </div>

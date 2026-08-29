@@ -9,17 +9,17 @@ export interface FallbackCandidate {
   model: V4LanguageModel;
   id: string;
   /**
-   * `models.id`（唯一）。**标 down 这种破坏性操作不能靠 `id`（= `model_id`）反查**：同一个
-   * `model_id` 可以挂在两个 provider 下（本部署 `deepseek-v4-flash` 就同时在 ksm-api 与
-   * deepseek-official 上），按名字反查会把健康的那一个判死。
+   * `models.id`（唯一）。标记 down 属破坏性操作，不能依据 `id`（即 `model_id`）反查：同一个
+   * `model_id` 可挂在两个 provider 下（本部署的 `deepseek-v4-flash` 同时存在于 ksm-api 与
+   * deepseek-official），按名字反查会误判健康的那一个。
    */
   rowId?: string;
 }
 
 /**
- * 超时自己一个类型，而不是让调用方去认 message。`kind` 决定这次失败要不要往「连续失败」上记
- * （docs/04 §5.3）：只有超时算「上游变黑洞」，429/5xx 是上游在说话、401/403 是配置问题。
- * message 保持 `<label>_timeout_<ms>ms` 不变 —— 已有用例断在它上面，日志摘要也靠它区分两种超时。
+ * 超时使用独立类型，而不要求调用方解析 message。`kind` 决定本次失败是否计入连续失败
+ * （docs/04 §5.3）：只有超时视为上游无响应，429/5xx 表示上游有响应、401/403 属配置问题。
+ * message 保持 `<label>_timeout_<ms>ms` 不变 —— 既有用例断言于此，日志摘要也据此区分两类超时。
  */
 export class ProviderTimeoutError extends Error {
   constructor(label: string, ms: number) {
@@ -29,13 +29,13 @@ export class ProviderTimeoutError extends Error {
 }
 
 export interface CandidateFailure {
-  /** 这一次是该候选的第几次尝试（0 起）。 */
+  /** 本次是该候选的第几次尝试（从 0 起）。 */
   attempt: number;
   kind: "timeout" | "status" | "network";
   status: number | null;
-  /** 同一个候选还会再试一次。 */
+  /** 同一候选还将再尝试一次。 */
   willRetry: boolean;
-  /** 不再试这个候选，而链上还有下一个。两者都是 false = 这次失败会把整条链带走。 */
+  /** 不再尝试该候选，且链上仍有下一个。两者均为 false 表示本次失败将终止整条链。 */
   willFallback: boolean;
   elapsedMs: number;
   error: unknown;
@@ -46,33 +46,33 @@ export interface FallbackOptions {
   retryBaseMs: number;
   retryMaxMs: number;
   /**
-   * 单次尝试从发出请求到拿到响应头的上限（`provider.requestTimeoutMs`）。上游不设超时时这一步
-   * 可以永远不返回：AI SDK 不管，`http`/`fetch` 默认也不管，唯一兜底是 10 分钟的
-   * `concurrency.turnTimeoutMs` —— 表现就是「工具调完之后 bot 再也不说话」，日志里连一行都没有
-   * （logs/2026-08-17 有 7 轮只有 turn.start 没有 turn.end，最后一条都停在这一步）。
+   * 单次尝试从发出请求到收到响应头的上限（`provider.requestTimeoutMs`）。上游不设超时时该步骤
+   * 可能永不返回：AI SDK 不处理，`http`/`fetch` 默认也不处理，唯一兜底是 10 分钟的
+   * `concurrency.turnTimeoutMs` —— 表现为工具调用完成后 bot 不再输出，且日志中没有任何记录
+   * （logs/2026-08-17 有 7 轮只有 turn.start 没有 turn.end，最后一条均停在此步）。
    */
   requestTimeoutMs?: number;
   /**
-   * 流开着但不吐字的上限（`provider.streamIdleTimeoutMs`）。整体超时管不了这种情况：连接是活的，
-   * 只是一个 token 都不来。只计「我们在等下一个 chunk」的时间 —— 消费侧慢（正在跑工具）不算。
+   * 流已建立但无输出的上限（`provider.streamIdleTimeoutMs`）。整体超时无法覆盖该情形：连接存活，
+   * 但没有任何 token 到达。只统计等待下一个 chunk 的时间 —— 消费侧慢（正在执行工具）不计入。
    */
   streamIdleTimeoutMs?: number;
   abortSignal?: AbortSignal;
   /**
-   * 已经被判成 `down` 的候选（`docs/04 §5.3`「从 fallback 链临时跳过」）。**每次调用现问一遍**，
-   * 所以同一轮里刚被记满三次的链首，下一步就不再被尝试 —— 等下一次 `rebuild()` 才生效的话，
-   * 一轮 12 步每步都要重新熬满 `(maxRetries+1) × requestTimeoutMs`（本次事故：363 秒 × 每一步）。
+   * 已被判定为 `down` 的候选（`docs/04 §5.3`「从 fallback 链临时跳过」）。每次调用实时查询，
+   * 因此同一轮内刚记满三次的链首在下一步即不再被尝试 —— 若等到下一次 `rebuild()` 才生效，
+   * 一轮 12 步中每步都要耗满 `(maxRetries+1) × requestTimeoutMs`（本次事故为每步 363 秒）。
    *
-   * **最后一个候选永不跳过**：全链都被标 down 时宁可发一次注定失败的请求，也不能一个都不发 ——
-   * 那样调用方拿到的是「模型没话说」，而不是一个能看懂的上游故障。
+   * 最后一个候选永不跳过：整条链均被标记 down 时，宁可发出一次注定失败的请求，也不能不发 ——
+   * 否则调用方得到的是模型无输出，而非一个可识别的上游故障。
    */
   isDown?: (candidate: FallbackCandidate) => boolean;
-  /** `to` 报的是**真正会被尝试的**下一个候选（跳过已 down 的），不是链数组里的下一个。 */
+  /** `to` 报告的是实际会被尝试的下一个候选（跳过已 down 的），而非链数组中的下一项。 */
   onFallback?: (from: FallbackCandidate, to: FallbackCandidate) => void;
   /**
-   * 某个候选因为已经被判成 `down` 而**压根没试**。少了这一条，链 A→B→C 而 B 已 down 时日志里
-   * 只有「A → C」（或者更糟：改之前是「A → B」而实际服务的是 C），跳过这件事没有任何痕迹，
-   * 而「哪个 provider 现在不在服务」正是排障第一眼要看的（docs/10 · `provider.fallback`）。
+   * 某个候选因已被判定为 `down` 而未被尝试。缺少该事件时，链 A→B→C 且 B 已 down 的情况下日志中
+   * 只有 A → C（更早的实现更糟：记为 A → B 而实际服务的是 C），跳过行为不留任何痕迹，
+   * 而当前哪个 provider 不在服务正是排障时首先要确认的（docs/10 · `provider.fallback`）。
    */
   onSkipped?: (
     candidate: FallbackCandidate,
@@ -80,27 +80,27 @@ export interface FallbackOptions {
   ) => void;
   onUnavailable?: (candidate: FallbackCandidate, error: unknown) => void;
   /**
-   * 每一次失败的尝试报一份（`docs/10` 给 `model.error` 定的 `retryAttempt` / `willFallback` 就是它）。
-   * 少了这一条，「三次尝试熬满超时再 fallback」在日志里是一段什么都没有的空白：本次事故的
-   * 363 秒里只有开头的 `turn.start` 和结尾的 `provider.fallback`，中间要靠
-   * `3 × requestTimeoutMs + 退避` 的算术反推。
+   * 每次失败的尝试报告一份（`docs/10` 为 `model.error` 定义的 `retryAttempt` / `willFallback` 即此）。
+   * 缺少该事件时，三次尝试耗满超时后再 fallback 的过程在日志中是一段空白：本次事故的
+   * 363 秒内只有开头的 `turn.start` 与结尾的 `provider.fallback`，中间过程需按
+   * `3 × requestTimeoutMs + 退避` 反推。
    *
-   * **调用方自己 abort 的那一次不报**（`/cancel`、`turnTimeoutMs`）：那不是 provider 的故障，
-   * 记上去会把健康的 provider 往 `down` 上推。
+   * 调用方主动 abort 的那次不报告（`/cancel`、`turnTimeoutMs`）：那不是 provider 故障，
+   * 记录会将健康的 provider 推向 `down`。
    */
   onCandidateFailed?: (
     candidate: FallbackCandidate,
     failure: CandidateFailure,
   ) => void;
   /**
-   * 整条链都试完仍然失败、或流开到一半断掉时最后一次报告。AI SDK 会把步骤级失败吞进内部的
-   * onError，让 `result.text` 安静地解析成空串 —— 不在这里抓一份，一次彻底的上游故障
-   * 和「模型没话说」在调用方眼里就长得一模一样。
+   * 整条链尝试完毕仍失败、或流在中途断开时的最后一次报告。AI SDK 会把步骤级失败吞入内部的
+   * onError，使 `result.text` 静默解析为空串 —— 若不在此处捕获，彻底的上游故障
+   * 与模型无输出在调用方看来完全相同。
    */
   onExhausted?: (error: unknown) => void;
   /**
-   * 实际服务了这一次调用的候选。包装之后 `step.model.modelId` 恒等于链首，
-   * 不报一份的话，fallback 到第二个模型的那些步会被按链首的价格与别名记账（docs/20 · W-LEDGER-01）。
+   * 实际服务本次调用的候选。包装之后 `step.model.modelId` 恒等于链首，
+   * 若不报告，fallback 到第二个模型的步骤会按链首的价格与别名计费（docs/20 · W-LEDGER-01）。
    */
   onServed?: (candidate: FallbackCandidate) => void;
 }
@@ -162,8 +162,8 @@ function describeFailure(
 }
 
 /**
- * 每次尝试自己的中止预算：调用方的信号（用户取消 / 轮次超时）与我们的超时合成一个，交给 provider。
- * 到点后 abort 的是**这一次尝试**，所以重试与链内 fallback 照常走；调用方的信号则是终点。
+ * 每次尝试各自的中止预算：调用方的信号（用户取消 / 轮次超时）与本模块的超时合并后交给 provider。
+ * 超时后 abort 的是本次尝试，因此重试与链内 fallback 照常进行；调用方的信号则是终止条件。
  */
 export class AttemptDeadline {
   readonly #controller = new AbortController();
@@ -175,9 +175,9 @@ export class AttemptDeadline {
       : this.#controller.signal;
   }
   /**
-   * 到点后两件事都要做：abort 底层请求（释放连接），**以及停止等待**。只 abort 是不够的 ——
-   * provider 实现不认这个 signal（第三方网关、自定义 fetch、SDK 版本差异）时那个 promise
-   * 永远不 settle，我们就还是原地挂着。丢下的那次调用交给 GC，它晚到的拒绝已经被 race 接住。
+   * 超时后两件事都要做：abort 底层请求以释放连接，以及停止等待。仅 abort 不足够 ——
+   * provider 实现不响应该 signal（第三方网关、自定义 fetch、SDK 版本差异）时该 promise
+   * 永不 settle，调用仍会阻塞。被放弃的那次调用交由 GC 回收，其迟到的拒绝已被 race 接住。
    */
   async guard<T>(
     work: PromiseLike<T>,
@@ -212,10 +212,10 @@ export class AttemptDeadline {
 }
 
 /**
- * 流级看门狗。计时只在「已经向 provider 要下一个 chunk、还没拿到」期间跑：`pull` 只有在消费侧
- * 真的来取时才被调用，所以本轮正在执行工具、或投递侧在节流，都不会被误判成上游卡死。
- * 到点后除了让这条流报错，还要 abort 底层请求 —— 否则连接留着，进程退出前都不会释放。
- * 中途失败一律不重试：文字可能已经发出去一半，重发等于让用户看到两遍。
+ * 流级看门狗。计时仅在已向 provider 请求下一个 chunk 但尚未收到期间进行：`pull` 只有在消费侧
+ * 实际取数时才被调用，因此本轮正在执行工具或投递侧正在节流都不会被误判为上游阻塞。
+ * 超时后除使该流报错外，还要 abort 底层请求 —— 否则连接会保留至进程退出。
+ * 中途失败一律不重试：文本可能已发出一部分，重发会导致用户看到两遍。
  */
 function idleGuarded<T>(
   stream: ReadableStream<T>,
@@ -241,8 +241,8 @@ function idleGuarded<T>(
         if (next.done) controller.close();
         else controller.enqueue(next.value);
       } catch (error) {
-        // 用户自己取消掉的那一次不算故障：报上去会在日志里留一条 model.error，也会让空正文的
-        // 轮次以「上游挂了」而不是「已取消」收尾。
+        // 用户主动取消的那次不计为故障：上报会在日志中留下一条 model.error，并使空正文的
+        // 轮次以上游故障而非已取消收尾。
         if (!caller?.aborted) onFailure?.(error);
         controller.error(error);
         void reader.cancel(error).catch(() => undefined);
@@ -271,10 +271,10 @@ export function fallbackLanguageModel(
     }
   };
   /**
-   * 跳过已 down 的之后**真正会被尝试的**下一个候选。`onFallback` 的 `to` 必须报这个：链 A→B→C
-   * 而 B 已 down 时报 B，日志就写着「A → B」而实际服务的是 C —— 这个中间件存在的一半理由就是
-   * 让那 363 秒的空白变得可读，报错的链路比不报更糟。跳过判据与下面两个循环共用一份，
-   * 包括「最后一个候选永不跳过」。
+   * 跳过已 down 的候选后实际会被尝试的下一个。`onFallback` 的 `to` 必须报告该值：链 A→B→C
+   * 且 B 已 down 时若报 B，日志记为 A → B 而实际服务的是 C —— 本中间件存在的理由之一即是
+   * 使那 363 秒的空白可读，报告错误的链路比不报告更糟。跳过判据与下方两个循环共用一份，
+   * 包括最后一个候选永不跳过这一条。
    */
   const nextServable = (index: number): FallbackCandidate | undefined => {
     for (let next = index + 1; next < candidates.length; next += 1) {
@@ -308,7 +308,7 @@ export function fallbackLanguageModel(
               return result;
             } catch (error) {
               last = error;
-              // 调用方的信号已经断了（用户 /cancel、轮次超时）：再试就是替一个没人等的轮次占着槽位。
+              // 调用方的信号已中止（用户 /cancel、轮次超时）：继续尝试等于为无人等待的轮次占用槽位。
               if (params.abortSignal?.aborted) throw error;
               const status = statusCode(error);
               const willRetry =
@@ -361,14 +361,14 @@ export function fallbackLanguageModel(
             const deadline = new AttemptDeadline(params.abortSignal);
             const startedAt = Date.now();
             try {
-              // guard 覆盖「发出请求到拿到响应头」；之后盯的是「有没有下一个 chunk」，换 idleGuarded。
+              // guard 覆盖发出请求到收到响应头的阶段；此后监控的是下一个 chunk 是否到达，改用 idleGuarded。
               const result = (await deadline.guard(
                 model.doStream({ ...params, abortSignal: deadline.signal }),
                 options.requestTimeoutMs,
                 "request",
               )) as Awaited<ReturnType<V4LanguageModel["doStream"]>>;
               options.onServed?.(candidate);
-              // 流中途空转也是「上游变黑洞」，同样要记账 —— 但那时已经 return 了，报告只能从流里出来。
+              // 流中途空转同样属于上游无响应，也要计入 —— 但此时已 return，报告只能由流内发出。
               return {
                 ...result,
                 stream: idleGuarded(

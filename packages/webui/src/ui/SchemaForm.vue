@@ -19,8 +19,8 @@ const props = withDefaults(
     hotReloadable: string[];
     unimplemented: string[];
     saving: boolean;
-    /** 只渲染这些前缀下的叶子（会话级覆盖白名单）。**不裁剪 schema 文档本身** —— 裁掉 `access`
-     *  之类的分支会让 `memory.pubWriteMinRole` 那种指过去的 `$ref` 解析不到。 */
+    /** 只渲染这些前缀下的叶子（会话级覆盖白名单）。不裁剪 schema 文档本身：裁掉 `access`
+     *  这类分支会让 `memory.pubWriteMinRole` 这种指向它的 `$ref` 无法解析。 */
     include?: readonly string[];
     /** 被环境变量钉住的键：写得进 config_kv，但 env 层会在加载时盖回去，所以这里只展示不给改。 */
     envPinned?: ReadonlyArray<{ key: string; env: string }>;
@@ -75,25 +75,23 @@ type Node = Record<string, unknown>;
 const SKIP_PATHS = new Set(["perChat"]);
 /** 有专用面板的键：这里照样能改，但得说清楚哪儿有更好的入口，否则两处都改会互相覆盖。 */
 const DEDICATED: Record<string, string> = {
-  trigger: "设置页上方有专用面板（带唤醒词可用性校验）",
+  trigger: "设置页上方有专用面板",
   output: "设置页上方有专用面板",
-  quota: "「配额」页有专用面板，还能看实时计数器",
-  sandbox: "工具页有沙箱卡片，还能探测可用性",
-  "tools.overrides":
-    "工具页可逐个启停 —— 在这里整块写会取代那边逐项点出来的开关",
+  quota: "「配额」页有专用面板",
+  sandbox: "工具页有沙箱卡片",
+  "tools.overrides": "工具页可逐项启停；在此写入会覆盖逐项开关",
   "agent.agents": "Agent 页有专用编辑器",
-  "mcp.servers": "扩展页有 MCP 表单：那里不脱敏，能改 env / headers 里的密钥",
-  "approval.rules":
-    "字段与正则在写入时就校验（写错的规则运行时永不命中，等于这道门没关）",
+  "mcp.servers": "扩展页有 MCP 表单：不脱敏，可改 env / headers 密钥",
+  "approval.rules": "写入时校验字段与正则；写错则审批不生效",
 };
 const SECRET_SEGMENT = /key|secret|token|password/i;
 const REDACTED = "«redacted»";
 /**
- * 真正只读的密钥字段。密钥整体一度全是只读的，代价是 `tools.web.searchApiKey` 在 WebUI 里
- * **压根配不了** —— 而 `web_search` 的 `available()` 要求 provider 与 key 同时有值，于是可写的
- * `tools.web.searchProvider` 成了个空开关（选了也不会有工具进目录）。现在密钥改成「只写」：
- * 不回显、留空表示不改。只有这一个例外留着只读 —— 它要的是 argon2 哈希而不是口令，
- * 在这里敲明文等于把自己锁在门外，改口令走设置页那个表单。
+ * 真正只读的密钥字段。密钥曾整体只读，代价是 `tools.web.searchApiKey` 在 WebUI 里无法配置，
+ * 而 `web_search` 的 `available()` 要求 provider 与 key 同时有值，于是可写的
+ * `tools.web.searchProvider` 成为一个无效开关（选中后也不会有工具进入目录）。现在密钥改为只写：
+ * 不回显，留空表示不修改。只有这一项保持只读：它需要的是 argon2 哈希而不是明文口令，
+ * 在这里输入明文会导致无法登录，改口令走设置页那个表单。
  */
 const READ_ONLY_PATHS = new Set(["webui.passwordHash"]);
 
@@ -119,10 +117,10 @@ const text = (value: unknown): string =>
   typeof value === "string" ? value : "";
 
 /**
- * `raw` 必须是**未解析**的那个节点：zodToJsonSchema 对复用的 zod 实例发 `$ref`，并把 `default`
- * 与（我们注入的）`description` 放在 `$ref` 的兄弟位置。跟着 `$ref` 走再读，拿到的是被指向的那个键
- * 的值 —— `quota.perChat.daily` 会显示成「默认 5」（真值 1），`memory.pubWriteMinRole` 显示成
- * 「默认 blocked」（真值 trusted），说明文字也会串成同一句。
+ * `raw` 必须是未解析的那个节点：zodToJsonSchema 对复用的 zod 实例生成 `$ref`，并把 `default`
+ * 与注入的 `description` 放在 `$ref` 的同级位置。跟随 `$ref` 后再读，取到的是被指向那个键的值：
+ * `quota.perChat.daily` 会显示为默认 5（实际值 1），`memory.pubWriteMinRole` 显示为
+ * 默认 blocked（实际值 trusted），说明文字也会串成同一句。
  */
 function classify(document_: Node, raw: Node, path: string): Field {
   const node = resolve(document_, raw);
@@ -311,14 +309,14 @@ const changedPaths = computed(
   () => new Set(changed.value.map((field) => field.path)),
 );
 /**
- * 「这个部署到底改过什么」：当前值 ≠ schema 的 `default`。实测一个真实部署 243 个叶子里只有 21 个
- * 偏离默认值，而在此之前界面上答不出这一条 —— 「原始 YAML」给的是**覆盖层不是差异集**
+ * 该部署实际改过哪些配置：当前值不等于 schema 的 `default`。实测一个真实部署 243 个叶子里只有 21 个
+ * 偏离默认值，而在此之前界面上给不出这一结论：原始 YAML 给出的是覆盖层而不是差异集
  * （专用面板保存时整组写回，`config_kv` 里大半行的值与默认值相同）。
  *
- * 两处「判不出来就不标」，都不是保守而是别撒谎：`defaultValue` 取的是 `classify` 里那个**未解析**
- * 节点上的值（跟着 `$ref` 走会拿到被指向那个键的默认值，`memory.pubWriteMinRole` 会在没人动过它的
- * 时候被标成非默认）；值本身缺失时同理 —— 那说明这份 value 不完整，不是有人改过。
- * 与「待保存」是两件事：待保存 = 这次编辑还没提交，非默认 = 已经生效的值不是代码默认值。
+ * 两处判定不出时不标记，理由不是保守而是避免给出错误结论：`defaultValue` 取的是 `classify` 里那个
+ * 未解析节点上的值（跟随 `$ref` 会取到被指向那个键的默认值，`memory.pubWriteMinRole` 会在未被修改时
+ * 被标为非默认）；值本身缺失时同理，那说明这份 value 不完整，而不是被修改过。
+ * 它与待保存是两件事：待保存表示本次编辑尚未提交，非默认表示已生效的值不是代码默认值。
  */
 function isNonDefault(field: Field): boolean {
   if (field.defaultValue === undefined) return false;
@@ -371,7 +369,7 @@ const hidden = computed(
     fields.value.length -
     groups.value.reduce((sum, group) => sum + group.entries.length, 0),
 );
-// 筛完还要再点开八个分组才看得见结果，那这个筛选等于没做 —— 搜索与「只看非默认值」都自动展开。
+// 筛选后仍需展开八个分组才能看到结果，该筛选即无实际作用，因此搜索与只看非默认值都自动展开。
 watch(search, (needle) => {
   if (needle.trim())
     openGroups.value = new Set(groups.value.map((group) => group.name));
@@ -414,8 +412,8 @@ const asList = (path: string): string[] =>
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean);
-/** 勾选按 **schema 里 enum 的顺序**重建，不按点击顺序：否则两次勾出同一组会得到两个不同的数组，
- *  而「有没有改过」是拿字符串比的。 */
+/** 勾选结果按 schema 里 enum 的顺序重建，而不是按点击顺序：否则两次勾选同一组会得到两个不同的数组，
+ *  而是否修改过是按字符串比较的。 */
 function toggleOption(field: Field, option: string, on: boolean): void {
   const chosen = new Set(asList(field.path));
   if (on) chosen.add(option);
@@ -437,20 +435,20 @@ const badge = (
     ? {
         label: "环境变量锁定",
         severity: "info",
-        hint: `由 ${field.pinnedEnv} 决定：写进 config_kv 也会在下次加载时被 env 层盖回去，所以这里不给改`,
+        hint: `值由 ${field.pinnedEnv} 决定，此处不可编辑`,
       }
     : !field.wired
       ? {
           label: "未接线",
           severity: "secondary",
-          hint: "在 KNOWN_UNIMPLEMENTED_CONFIG_KEYS 里：存得下，运行时没有任何代码读它",
+          hint: "可写入，运行时无代码读取",
         }
       : field.hot
         ? { label: "热更新", severity: "success", hint: "保存即生效，无需重启" }
         : {
             label: "需重启",
             severity: "warn",
-            hint: "写进 config_kv 了，但运行时要重启才会读到新值",
+            hint: "已写入 config_kv，进程重启后生效",
           };
 /** 默认值只是一行脚注：`tools.fs.denyGlobs` 那种九条 glob 的数组原样铺出来会盖过说明本身。 */
 function defaultText(field: Field): string {
@@ -490,9 +488,7 @@ const problems = computed(() =>
       (field.kind === "json" || field.kind === "stringList") &&
       String(value).includes(REDACTED)
     )
-      return [
-        `${field.path}：含 «redacted» 占位符，改这里会把真值覆盖成字面量`,
-      ];
+      return [`${field.path}：含 «redacted»，保存会以字面量覆盖真值`];
     if (field.kind === "json") {
       try {
         JSON.parse(String(value));
@@ -502,7 +498,7 @@ const problems = computed(() =>
       }
     }
     if (field.kind === "number" && value === null && !field.nullable)
-      return [`${field.path}：这一项不能留空`];
+      return [`${field.path}：该项不能留空`];
     return [];
   }),
 );
@@ -560,12 +556,12 @@ defineExpose({ commit });
       <label class="search grow"
         ><i class="pi pi-search" /><input
           v-model="search"
-          placeholder="搜键名或说明，例如 沙箱、防秒回、logs."
+          placeholder="搜索键名或说明"
       /></label>
       <UiCheckbox
         v-model="nonDefaultOnly"
         :label="`只看非默认值（${nonDefaultCount}）`"
-        title="当前值和代码默认值不一样的那几项 —— 也就是这个部署真正改过的。没有默认值的叶子判不出来，不算在内"
+        title="当前值与代码默认值不同的项。无默认值的叶子不计入"
       />
       <UiCheckbox v-model="hotOnly" label="只看热更新项" />
       <UiCheckbox v-model="showUnwired" label="显示未接线项" />
@@ -602,15 +598,9 @@ defineExpose({ commit });
       <i class="pi pi-exclamation-triangle" />{{ problems.join("；") }}
     </p>
     <p class="section-note">
-      共 {{ fields.length }} 个 schema 叶子，其中
-      <b>{{ nonDefaultCount }}</b> 项的当前值不是代码默认值（左侧带色条）<span
-        v-if="hidden"
-        >；当前筛掉 {{ hidden }} 个</span
-      >。每格的说明来自 schema 的 <code>description</code> （唯一来源是 core 的
-      <code>CONFIG_DESCRIPTIONS</code>）。写入走
-      <code>PUT /api/config</code> 的点分键，整体过一次
-      <code>configSchema</code> 校验后落 <code>config_kv</code> +
-      <code>config_revisions</code>；<b>只发真正改过的那几项</b>。
+      共 {{ fields.length }} 个 schema 叶子，<b>{{ nonDefaultCount }}</b>
+      项非默认值<span v-if="hidden">，筛掉 {{ hidden }} 个</span>。写入走
+      <code>PUT /api/config</code>，<b>仅提交实际变更的项</b>。
     </p>
     <section
       v-for="group in groups"
@@ -632,10 +622,7 @@ defineExpose({ commit });
           :value="`${group.dirty} 项待保存`"
           severity="warn"
         />
-        <span
-          v-if="group.nonDefault"
-          class="count nd"
-          title="这一组里当前值和代码默认值不一样的项数"
+        <span v-if="group.nonDefault" class="count nd" title="本组非默认值项数"
           >{{ group.nonDefault }} 项非默认</span
         >
         <span class="count">{{ group.entries.length }} 项</span>
@@ -683,9 +670,9 @@ defineExpose({ commit });
               disabled
             />
             <small class="field-note"
-              >当前值由环境变量 <code>{{ field.pinnedEnv }}</code> 决定：写进
-              <code>config_kv</code> 也会在下次加载时被盖回去，所以这里不给改 ——
-              要改就改环境变量后重启。</small
+              >值由环境变量
+              <code>{{ field.pinnedEnv }}</code>
+              决定，修改需更新该变量并重启。</small
             >
           </template>
           <template v-else-if="field.readOnly">
@@ -696,9 +683,8 @@ defineExpose({ commit });
               disabled
             />
             <small class="field-note"
-              >这一格要的是 argon2
-              哈希而不是口令：改口令用本页上方的「修改登录口令」，或
-              <code>pnpm webui:passwd</code> 后写进
+              >需 argon2 哈希，不是明文口令。改口令用上方「修改登录口令」，或
+              <code>pnpm webui:passwd</code> 后写入
               <code>config.yaml</code>。</small
             >
           </template>
@@ -739,9 +725,9 @@ defineExpose({ commit });
               />
             </span>
             <small class="field-note"
-              >只写字段：不回显、留空表示不改。也可以填
+              >只写字段：不回显，留空表示不改。支持
               <code>${env:NAME}</code>
-              形式的引用，加载时替换成该环境变量的值。</small
+              引用。</small
             >
           </template>
           <div v-else-if="field.kind === 'multiEnum'" class="enum-choices">
@@ -806,7 +792,7 @@ defineExpose({ commit });
       </div>
     </section>
     <p v-if="!groups.length" class="empty-card">
-      <i class="pi pi-filter-slash" aria-hidden="true" /> 没有匹配的配置项。
+      <i class="pi pi-filter-slash" aria-hidden="true" /> 暂无匹配
     </p>
   </div>
 </template>

@@ -20,7 +20,7 @@ watch(
     else window.removeEventListener("keydown", onKeydown);
   },
 );
-// 对话框在 v-if 里被销毁时不会走上面的 watch，监听器和 body 上的锁得自己收
+// 对话框在 v-if 中被销毁时不会触发上面的 watch，监听器与 body 上的锁需在此自行清理
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", onKeydown);
   document.body.classList.remove("modal-open");

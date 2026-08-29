@@ -1,6 +1,6 @@
 <script setup lang="ts">
-// 从一组里挑几个（工具多选、绕过角色、表格行选中）或筛选视图时用这个；开关某一项能力用 UiSwitch。
-// 原生 input 留在 DOM 里 —— 键盘、`<label>` 关联、`:checked` / `:indeterminate` 全靠它，只是挪出视野。
+// 从一组中选取多项（工具多选、绕过角色、表格行选中）或筛选视图时使用该组件；开关某项能力使用 UiSwitch。
+// 原生 input 保留在 DOM 中：键盘操作、`<label>` 关联、`:checked` / `:indeterminate` 均依赖它，只是移出视觉范围。
 import { onMounted, ref, watch } from "vue";
 
 const props = withDefaults(
@@ -18,8 +18,8 @@ const emit = defineEmits<{
   change: [boolean];
 }>();
 
-// indeterminate 只有 IDL 属性没有 HTML attribute，`:indeterminate` 这个伪类只认前者：只能挂载后写进去，
-// 而且每次 checked 变化都要补一次 —— 浏览器在用户点击时会自己把它清成 false。
+// indeterminate 只有 IDL 属性而没有 HTML attribute，`:indeterminate` 伪类只识别前者：只能在挂载后写入，
+// 且每次 checked 变化都需重新设置，浏览器会在用户点击时将其置为 false。
 const input = ref<HTMLInputElement | null>(null);
 const apply = (): void => {
   if (input.value) input.value.indeterminate = props.indeterminate;

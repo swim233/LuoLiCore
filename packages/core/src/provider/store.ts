@@ -63,7 +63,7 @@ export class ProviderStore {
       .all();
   }
 
-  /** `includeDisabled` 只给「测试连接」用：停用的 provider 也要能在启用前先探一次。 */
+  /** `includeDisabled` 仅供测试连接使用：已停用的 provider 也要能在启用前先探测一次。 */
   key(id: string, includeDisabled = false): string | null {
     const row = this.db
       .prepare(
@@ -102,7 +102,7 @@ export class ProviderStore {
 
 /**
  * 抖动必须是真随机：`sha256(attempt)` 对同一个 attempt 是常量，所有并发请求会退避到同一时刻
- * 再一起打过去，等于没有抖动（docs/20 · W-PROV-01）。
+ * 再一起发出，等同于没有抖动（docs/20 · W-PROV-01）。
  */
 export function retryDelay(
   attempt: number,
@@ -116,11 +116,11 @@ export function retryDelay(
 }
 
 /**
- * 退避必须可中断：轮次被取消或整轮超时之后还躺在 setTimeout 里，等于替一个没人等的轮次占着槽位。
+ * 退避必须可中断：轮次被取消或整轮超时后仍停留在 setTimeout 中，等于为一个无人等待的轮次占用槽位。
  *
- * **监听器要摘。** `{ once: true }` 只在真的 abort 时自摘，而正常退避走完（绝大多数情况）监听器
- * 会留在**轮次**那个信号上 —— 一轮里几十次重试就是几十个永不触发的监听器，直到轮次结束
- * （docs/27 · R-07）。同 `net/outbound.ts` 的 `abortable`。
+ * 监听器必须移除。`{ once: true }` 只在确实 abort 时自动移除，而退避正常结束（绝大多数情况）时监听器
+ * 会残留在轮次的那个信号上：一轮内数十次重试即累积数十个永不触发的监听器，直到轮次结束
+ * （docs/27 · R-07）。与 `net/outbound.ts` 的 `abortable` 同理。
  */
 export async function abortablePause(
   ms: number,

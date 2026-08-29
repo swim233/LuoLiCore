@@ -3,8 +3,8 @@ import type { Sqlite } from "./database.js";
 /**
  * `mcp_auth` 的唯一访问入口（裸 SQL 不出 `packages/db`，docs/00 §2.1 D-01）。
  *
- * 加解密由调用方注入：`Secrets` 住在 `packages/core`，而依赖方向是 `shared → db → core`，
- * 这里 import 它就成了反向依赖。接口只要两个方法，`ProviderStore` 用的也是同一个 `Secrets`。
+ * 加解密由调用方注入：`Secrets` 位于 `packages/core`，而依赖方向是 `shared → db → core`，
+ * 在此 import 会形成反向依赖。接口只需两个方法，`ProviderStore` 使用的也是同一个 `Secrets`。
  */
 export interface SecretCodec {
   readonly available: boolean;
@@ -14,16 +14,16 @@ export interface SecretCodec {
 
 export type McpAuthMode = "bearer" | "oauth";
 
-/** 界面与 API 拿到的那一份：**没有任何密文**，也不含 verifier 与 discovery。 */
+/** 提供给界面与 API 的视图：不含任何密文，也不含 verifier 与 discovery。 */
 export interface McpAuthPublic {
   server: string;
   mode: McpAuthMode;
   scope: string | null;
-  /** bearer 的末 4 位。oauth 没有可显示的片段，恒为 null。 */
+  /** bearer 的末 4 位。oauth 无可展示片段，恒为 null。 */
   hint: string | null;
   expiresAt: number | null;
   authorizedAt: number | null;
-  /** 有没有一份能用的凭据。oauth 下为 false 表示「登记了但还没授权」。 */
+  /** 是否存在可用凭据。oauth 模式下为 false 表示已登记但未授权。 */
   authorized: boolean;
   version: number;
   updatedAt: number;
@@ -44,7 +44,7 @@ interface Row {
   updatedAt: number;
 }
 
-/** `#write` 的入参。`'key' in patch` 才算「要改这一列」，所以显式的 `null` 与「不动」是两回事。 */
+/** `#write` 的入参。以 `'key' in patch` 判断是否修改该列，因此显式 `null` 与「保持不变」是两种语义。 */
 type AuthPatch = Partial<{
   secretEnc: string | null;
   clientEnc: string | null;
@@ -60,7 +60,7 @@ const COLUMNS = `server,mode,secret_enc AS secretEnc,client_enc AS clientEnc,ver
   discovery_json AS discoveryJson,scope,hint,expires_at AS expiresAt,authorized_at AS authorizedAt,
   version,updated_at AS updatedAt`;
 
-/** 末 4 位。太短的 token 一个字符都不给 —— 露出「全部」等于没脱敏。 */
+/** 取末 4 位。过短的 token 不展示任何字符：暴露全部内容等于未脱敏。 */
 function hintOf(token: string): string | null {
   return token.length >= 8 ? token.slice(-4) : null;
 }
@@ -101,8 +101,8 @@ export class McpAuthRepository {
   }
 
   /**
-   * 「凭据现在是第几版」—— 进 `McpManager` 的连接指纹。没有行时是 0，所以「从没配过」与
-   * 「配过第一版」在指纹上分得开。
+   * 当前凭据版本号，参与 `McpManager` 的连接指纹。无对应行时返回 0，使「从未配置」与「已配置第一版」
+   * 在指纹上可区分。
    */
   version(server: string): number {
     return (
@@ -113,7 +113,7 @@ export class McpAuthRepository {
     );
   }
 
-  /** 一次写入把 `version` 推一格。所有写路径都走这里，漏一条就等于漏一次强制重连。 */
+  /** 每次写入使 `version` 加一。所有写路径都经过这里，遗漏一条即遗漏一次强制重连。 */
   #write(server: string, mode: McpAuthMode, patch: AuthPatch): void {
     const existing = this.#row(server);
     const now = Date.now();
@@ -153,7 +153,7 @@ export class McpAuthRepository {
       .run(merged);
   }
 
-  /** 静态 bearer token。写入即加密，此后任何读路径都不回明文（除了 `bearerToken()`）。 */
+  /** 静态 bearer token。写入即加密，此后除 `bearerToken()` 外的读路径都不返回明文。 */
   setBearer(server: string, token: string): void {
     this.#write(server, "bearer", {
       secretEnc: this.secrets.encrypt(token),
@@ -167,7 +167,7 @@ export class McpAuthRepository {
     });
   }
 
-  /** 连接时取。解不开就当没有 —— 换过 `LUOLI_MASTER_KEY` 的部署应该看到「要登录」而不是崩在握手里。 */
+  /** 连接时读取。解密失败按无凭据处理：更换过 `LUOLI_MASTER_KEY` 的部署应看到「需要登录」而非握手崩溃。 */
   bearerToken(server: string): string | null {
     const row = this.#row(server);
     if (!row || row.mode !== "bearer" || !row.secretEnc) return null;
@@ -178,7 +178,7 @@ export class McpAuthRepository {
     }
   }
 
-  /** OAuth：把这台 server 登记成 oauth 模式（还没有任何 token）。 */
+  /** OAuth：将该 server 登记为 oauth 模式，此时尚无任何 token。 */
   ensureOAuth(server: string, scope: string | null): void {
     const row = this.#row(server);
     if (row?.mode === "oauth") return;
@@ -251,8 +251,8 @@ export class McpAuthRepository {
   }
 
   /**
-   * 按 scope 作废。`'all'` 保留那一行（`mode` 还有用：界面要能区分「这台用 OAuth 但没登录」
-   * 与「这台压根不需要登录」），只把凭据清空并推高 `version` —— 于是下一次 reconcile 必然重连。
+   * 按 scope 作废凭据。`'all'` 保留该行（`mode` 仍有用：界面需区分「使用 OAuth 但未登录」与
+   * 「无需登录」），只清空凭据并递增 `version`，使下一次 reconcile 必定重连。
    */
   invalidate(
     server: string,
@@ -286,7 +286,7 @@ export class McpAuthRepository {
     this.#write(server, row.mode, patch);
   }
 
-  /** 整行删掉：`auth.mode` 改回 `none` 或 server 被删时用。 */
+  /** 删除整行：`auth.mode` 改回 `none` 或 server 被移除时调用。 */
   remove(server: string): boolean {
     return (
       this.db.prepare("DELETE FROM mcp_auth WHERE server=?").run(server)
@@ -294,7 +294,7 @@ export class McpAuthRepository {
     );
   }
 
-  /** 配置里已经没有的 server，它的凭据不该永远留着（照 `SkillLoader.scan()` 末尾清陈行的做法）。 */
+  /** 清理配置中已不存在的 server 的凭据，做法与 `SkillLoader.scan()` 末尾清理陈旧行一致。 */
   prune(keep: readonly string[]): number {
     if (!keep.length)
       return this.db.prepare("DELETE FROM mcp_auth").run().changes;

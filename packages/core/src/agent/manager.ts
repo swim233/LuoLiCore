@@ -39,7 +39,7 @@ export class AgentManager {
       this.#definitions.set(definition.name, definition);
   }
 
-  /** 定义只在构造时读一次；WebUI 改完 agent 若不重建这张表，运维看到的是「保存成功但派发的还是旧的」。 */
+  /** 定义只在构造时读取一次；WebUI 修改 agent 后若不重建这张表，运维看到的是保存成功但派发的仍是旧定义。 */
   replaceDefinitions(definitions: readonly AgentDefinition[]): void {
     this.#definitions.clear();
     for (const definition of definitions)
@@ -60,8 +60,8 @@ export class AgentManager {
     offset = 0,
     limit = 65_536,
   ): { content: string; nextOffset: number | null } {
-    // 列里存的是相对结果目录的 ref（docs/28 · L-OPS-06），拼接在 `AgentResultStore` 里做 ——
-    // 那里才知道当前配置指向哪棵目录。
+    // 列中存放的是相对结果目录的 ref（docs/28 · L-OPS-06），路径拼接在 `AgentResultStore` 中完成，
+    // 只有那里知道当前配置指向哪个目录。
     const row = this.db
       .prepare(
         "SELECT result_full_ref AS ref FROM agent_runs WHERE id=? AND state='done'",
@@ -165,17 +165,17 @@ export class AgentManager {
     if (roleRank(parent.effectiveRole) < roleRank(definition.minRole))
       throw new Error("当前用户权限不足以派发该子 agent");
     /**
-     * ACP 行（M13，`packages/core/src/acp/runs.ts`）不占这个名额。`maxSubagentsPerTurn` 管的是
-     * **本系统自己的 fan-out 成本** —— 每个子 agent 都是一次我们付钱的模型调用；而 `spawn_acp`
-     * 有它自己那三道门（owner + 仅私聊、目录白名单、每次审批）加目录互斥加 `agent.acp.maxCostUsd`，
-     * 从来不共用这个数。旧口径（数行、不看 `agent_name`）的问题不只是「多占一个」：那一行是
-     * **跑完之后**才一次性插入的，所以它只压得住同一轮里排在它后面的 `spawn_agent` —— 一个依赖
-     * 调用顺序的上界，比「占」与「不占」两种一致的选择都更坏（docs/03 §2.7）。
+     * ACP 行（M13，`packages/core/src/acp/runs.ts`）不占用这个名额。`maxSubagentsPerTurn` 约束的是
+     * 本系统自身的 fan-out 成本，每个子 agent 都是一次本系统付费的模型调用；而 `spawn_acp`
+     * 有自己的三道门（owner 且仅私聊、目录白名单、每次审批）加目录互斥加 `agent.acp.maxCostUsd`，
+     * 从不共用这个数值。旧口径（只数行、不看 `agent_name`）的问题不止于多占一个名额：那一行是
+     * 执行结束后才一次性插入的，因此它只能限制同一轮中排在其后的 `spawn_agent`，形成一个依赖
+     * 调用顺序的上界，比占用与不占用两种一致做法都更糟（docs/03 §2.7）。
      *
-     * 前缀与别名**两个都中**才排除：`agent.agents[].name` 是裸 `z.string()`（`agents/<name>.md`
-     * 那条路的正则挡得住冒号，DB / WebUI 那条挡不住），运维真能建一个叫 `acp:x` 的子 agent ——
-     * 要它同时把 `modelAlias` 也写成 `external` 才会被漏数。`GLOB` 而不是 `LIKE`：后者在 SQLite 里
-     * ASCII 大小写不敏感，会把 `ACP:x` 一起排掉。
+     * 前缀与别名两者同时命中才排除：`agent.agents[].name` 是裸 `z.string()`（`agents/<name>.md`
+     * 那条路的正则能挡住冒号，DB 与 WebUI 那条挡不住），运维确实可以建一个名为 `acp:x` 的子 agent，
+     * 只有它同时把 `modelAlias` 也写成 `external` 才会被漏计。用 `GLOB` 而非 `LIKE`：后者在 SQLite 中
+     * 对 ASCII 大小写不敏感，会把 `ACP:x` 一并排除。
      */
     const count = this.db
       .prepare(
@@ -222,8 +222,8 @@ export class AgentManager {
     const definition = this.#definitions.get(run.agentName);
     const limit = definition?.resultMaxChars ?? 4000;
     const summary = [...result].slice(0, limit).join("");
-    // 落库的是相对 ref，交给模型的是 `agentresult://<runId>`：模型那一份是句柄不是路径，
-    // 两者从来不是同一个东西（docs/28 · L-OPS-06）。
+    // 落库的是相对 ref，返回给模型的是 `agentresult://<runId>`：模型侧拿到的是句柄而非路径，
+    // 两者始终不是同一个东西（docs/28 · L-OPS-06）。
     const ref = this.results.put(run.id, result);
     this.db
       .prepare(

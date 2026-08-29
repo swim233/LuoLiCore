@@ -6,7 +6,7 @@ import {
 } from "@luoli/shared";
 import type { Sqlite } from "./database.js";
 
-/** `log_events` 的全部列减去 `data_json`，外加它的字节数 —— 列表要的是摘要，不是载荷。 */
+/** `log_events` 的全部列去掉 `data_json`，改为其字节数：列表需要的是摘要而非载荷。 */
 const LOG_COLUMNS = `id,ts,level,kind,trace_id,span_id,parent_span_id,chat_id,user_id,key,agent_run_id,summary,file_ref,duration_ms,
   COALESCE(length(data_json),0) AS data_bytes`;
 
@@ -24,10 +24,10 @@ export class OperationsRepository {
   }
 
   /**
-   * `fileRef`：超过 `logs.bodyMaxBytes` 的载荷被挪进 `logs/<day>/blobs/*.json` 之后的引用。
-   * 它此前只藏在 `data_json` 里，`log_events.file_ref` 这一列**从来没被写过** —— 而 doc 03 的
-   * DDL 里就有它，按那份 DDL 去查库的人会以为「没有 file_ref 就是没有大载荷」。
-   * 两处都写：`data_json` 保持原样（解引用的路径认的是它），列也填上，让 DDL 说话算数。
+   * `fileRef`：超过 `logs.bodyMaxBytes` 的载荷被移入 `logs/<day>/blobs/*.json` 后的引用。
+   * 此前它只写在 `data_json` 内，`log_events.file_ref` 列从未被写入，而 docs/03 的 DDL 中已有该列，
+   * 按 DDL 查库的人会误以为「无 file_ref 即无大载荷」。
+   * 两处都写：`data_json` 保持原样（解引用路径读的是它），同时填充该列，使 DDL 与实现一致。
    */
   insertLog(input: {
     level: string;
@@ -67,12 +67,12 @@ export class OperationsRepository {
   }
 
   /**
-   * @param minLevel 只取这个级别及以上。总览页的「最近错误」卡片要的是 `warn` 以上
-   *   （docs/09 §3.1）—— 不分级别地取最近几条，结果几乎总是被 info 刷满，那张卡片就白挂了。
+   * @param minLevel 只取该级别及以上。总览页的「最近错误」卡片需要 `warn` 以上（docs/09 §3.1）：
+   *   不分级别地取最近若干条时结果几乎总被 info 占满，该卡片形同虚设。
    *
-   * **不返回 `data_json`，只给它的字节数。** 这里原本是 `SELECT *`：一条 `model.call` 的载荷能到
-   * `logs.bodyMaxBytes`（默认 256 KB），列表一次最多 1000 行 —— 日志页每次刷新都在往浏览器推
-   * 几十 MB，而界面只用得上摘要那几列。要正文走 `GET /api/logs/:id`（带 blob 解引用与截断）。
+   * 不返回 `data_json`，只返回其字节数。此处原为 `SELECT *`：一条 `model.call` 的载荷可达
+   * `logs.bodyMaxBytes`（默认 256 KB），列表单次最多 1000 行，日志页每次刷新都会向浏览器推送
+   * 数十 MB，而界面只用得到摘要列。需要正文时走 `GET /api/logs/:id`（含 blob 解引用与截断）。
    */
   logs(
     limit = 100,
@@ -133,11 +133,11 @@ export class OperationsRepository {
   }
 
   /**
-   * @param timezone 趋势按**本地日**分桶。用 UTC 分桶的话，东八区的运维会看到每天的量在
-   *   早上八点断开 —— 与配额 bucket（`quotaBucket`）用同一个时区口径。
+   * @param timezone 趋势按本地日分桶。按 UTC 分桶时，东八区的运维会看到每天的量在早上八点断开。
+   *   与配额 bucket（`quotaBucket`）采用同一时区口径。
    *
-   * 四张指标卡是累计值，趋势是近 `days` 天的逐日量（docs/09 §3.1）。缺的那些天补 0 而不是跳过：
-   * 折线图上「那天没有点」和「那天是 0」看起来是两回事。
+   * 四张指标卡是累计值，趋势是近 `days` 天的逐日量（docs/09 §3.1）。缺失的日期补 0 而不是跳过：
+   * 折线图上「该日无数据点」与「该日为 0」是两种不同的呈现。
    */
   dashboard(timezone = "UTC", days = 7): Record<string, unknown> {
     const turns = this.db
@@ -155,8 +155,8 @@ export class OperationsRepository {
       .get();
     const now = Date.now();
     const since = now - days * 86_400_000;
-    // **分桶在 SQL 里做。** 这是总览页反复刷新的端点，此前把近 7 天的每一行（messages + turns）
-    // 都取回来在 JS 里数 —— 而它要的只是 7 个计数（docs/27 · R-06）。偏移与用量报表共用
+    // 分桶在 SQL 内完成。这是总览页反复刷新的端点，此前会把近 7 天的每一行（messages + turns）
+    // 全部取回 JS 计数，而它只需要 7 个计数值（docs/27 · R-06）。偏移量与用量报表共用
     // `sqliteTimezoneModifier`，两个页面的日界因此按构造一致（docs/27 · C-02）。
     const modifier = sqliteTimezoneModifier(timezone, new Date(now));
     const offset = timezoneOffsetMinutes(timezone, new Date(now));
@@ -164,7 +164,7 @@ export class OperationsRepository {
       string,
       { day: string; messages: number; turns: number; costUsd: number }
     >();
-    // 缺的那些天补 0 而不是跳过：折线图上「那天没有点」和「那天是 0」看起来是两回事。
+    // 缺失的日期补 0 而不是跳过：折线图上「该日无数据点」与「该日为 0」是两种不同的呈现。
     for (let index = days - 1; index >= 0; index -= 1) {
       const name = localDayName(now - index * 86_400_000, offset);
       buckets.set(name, { day: name, messages: 0, turns: 0, costUsd: 0 });
@@ -241,8 +241,8 @@ export class TurnRepository {
       );
   }
 
-  /** 回一份结算后的统计：`turn.finished` 事件要的 steps/花费/耗时都在这一行上，
-   *  调用方再查一次等于每轮多一条 SELECT，而 RETURNING 是白送的。 */
+  /** 返回结算后的统计：`turn.finished` 事件需要的 steps / 花费 / 耗时都在这一行上，
+   *  调用方另行查询等于每轮多一条 SELECT，而 RETURNING 无额外开销。 */
   finish(
     id: string,
     input: {
@@ -290,8 +290,8 @@ export class TurnRepository {
       .run(id);
   }
   /**
-   * 主 agent 的步数。`MAX` 而不是赋值：收尾补跑（docs/06 · runtime `wrapUpIfNeeded`）会再走一次
-   * `onStepEnd`，而它的 `stepNumber` 从 0 重新起 —— 直接赋值会把已经数到 10 的轮次改回 1。
+   * 主 agent 的步数。用 `MAX` 而非直接赋值：收尾补跑（docs/06 · runtime `wrapUpIfNeeded`）会再次触发
+   * `onStepEnd`，其 `stepNumber` 从 0 重新计数，直接赋值会把已计到 10 的轮次改回 1。
    */
   countStep(id: string, steps: number): void {
     this.db

@@ -9,40 +9,40 @@ import type { PermissionOption, PermissionOptionKind, RequestPermissionRequest, 
 /**
  * M13 · `session/request_permission` → 本系统的审批链（`docs/05 §3.5.3`）。
  *
- * `agent.acp.permissionMode` 三档里只有 `ask` 走这里：`auto` / `deny` 是「不问人」的两档，
- * 它们由 `floorPermission` 在 manager 里直接答（**给了这个 gate 就完全取代地板，两者不串联**
- * —— 串起来的话「谁先答」变成一个要看代码才知道的问题）。
+ * `agent.acp.permissionMode` 三档中只有 `ask` 走此处：`auto` / `deny` 是不询问人工的两档，
+ * 由 `floorPermission` 在 manager 中直接应答（提供该 gate 即完全取代下限逻辑，两者不串联
+ * —— 串联会使应答优先级成为必须查阅代码才能确定的问题）。
  */
 
 /**
- * `approvals.tool_name` 恒为这一个，**不按 `kind` 拆成 `acp:edit` 这类名字**。
+ * `approvals.tool_name` 恒为该值，不按 `kind` 拆分为 `acp:edit` 之类的名字。
  *
- * `ApprovalRules` 的 pattern 是对 `JSON.stringify(input)` 求值的，而这条路的 input 里就有
- * `"kind":"execute"` —— 已经够精准。多一批工具名换来的是：WebUI 工具页上多出一批点不进去的行、
- * `tools.overrides` 的键空间里多出一批运维改了也没用的键（那张表只认注册过的工具）。
+ * `ApprovalRules` 的 pattern 对 `JSON.stringify(input)` 求值，而本路径的 input 中已包含
+ * `"kind":"execute"`，精度足够。增加一批工具名带来的后果是：WebUI 工具页多出一批不可操作的行、
+ * `tools.overrides` 的键空间多出一批修改无效的键（该表只识别已注册的工具）。
  */
 export const ACP_PERMISSION_TOOL_NAME = 'acp_permission';
 /**
- * `approvals.decision_channel` 的第四个取值（前三个是 `telegram` / `webui` / `system`，见
- * `docs/03` 的 `approvals` 段）。**它标的是「这条结论从哪条路来的」，不是「谁下的」** —— 后者在
- * `decided_by` 里，会话内 always 命中时写 `acp:always`。两列同值的话，按通道分桶的查询会多出一个
- * 取值域外的桶，而审批卡那一格渲染的正是 `decided_by · decision_channel`。
+ * `approvals.decision_channel` 的第四个取值（前三个为 `telegram` / `webui` / `system`，见
+ * `docs/03` 的 `approvals` 段）。它标记结论的来源通道而非决策主体 —— 后者记录在
+ * `decided_by`，会话内 always 命中时写 `acp:always`。两列取相同值会使按通道分桶的查询多出一个
+ * 取值域外的桶，而审批卡该字段渲染的正是 `decided_by · decision_channel`。
  */
 export const ACP_DECISION_CHANNEL = 'acp';
 
 /**
- * `toolCall.kind` → 审批风险档，**与本系统同类工具对齐**（`docs/05 §4` 那张矩阵）：
+ * `toolCall.kind` → 审批风险档，与本系统同类工具对齐（`docs/05 §4` 的矩阵）：
  *
- * - `execute` → high：`bash` / `spawn_harness` 那一族，`spawn_acp` 自己就是 `approval: 'always'`
- * - `delete` → high：`delete_file` 是 `always`
- * - `edit` / `move` → medium：`edit_file` / `move_file` 是 `conditional`
+ * - `execute` → high：对应 `bash` / `spawn_harness` 一族，`spawn_acp` 自身即 `approval: 'always'`
+ * - `delete` → high：`delete_file` 为 `always`
+ * - `edit` / `move` → medium：`edit_file` / `move_file` 为 `conditional`
  * - `read` / `search` / `fetch` / `think` → low
- * - **其余（含 `switch_mode`、`other`、以及 agent 压根没给 kind）→ medium，不猜低档。**
- *   这一层的输入是外部 agent 写的 JSON：一个我们不认识的 kind 更可能是新增的危险动作，
- *   而不是一次无害的读。
+ * - 其余（含 `switch_mode`、`other`，以及 agent 未提供 kind）→ medium，不下调档位。
+ *   本层的输入是外部 agent 生成的 JSON：未识别的 kind 更可能是新增的高风险动作，
+ *   而非一次无害的读取。
  *
- * 路径落在 jail 之外、或撞上 `tools.fs.denyGlobs` 时**一律抬到 high** —— 那时它要动的东西
- * 已经出了这次会话该碰的范围，kind 说什么都不重要了。
+ * 路径落在 jail 之外或命中 `tools.fs.denyGlobs` 时一律提升为 high —— 此时操作对象
+ * 已超出本次会话应触及的范围，kind 的取值不再具有参考价值。
  */
 export function acpPermissionRisk(kind: ToolKind | null | undefined, outsideJail: boolean): ApprovalRisk {
   if (outsideJail) return 'high';
@@ -54,7 +54,7 @@ export function acpPermissionRisk(kind: ToolKind | null | undefined, outsideJail
   }
 }
 
-/** 审批链上这条路需要的两个动作。`DatabaseApprovalBroker` 实现它。 */
+/** 审批链上本路径所需的两个动作。由 `DatabaseApprovalBroker` 实现。 */
 export interface AcpApprovalBroker {
   requestExternal(request: ExternalApprovalRequest): Promise<ApprovalVerdict>;
   recordDecided(request: ExternalApprovalRequest & { approved: boolean; decidedBy: string; channel: string }): void;
@@ -63,17 +63,17 @@ export interface AcpApprovalBroker {
 export interface AcpPermissionGateOptions {
   approvals: AcpApprovalBroker;
   context: ToolExecutionContext;
-  /** agent 名字，只进日志。 */
+  /** agent 名字，仅用于日志。 */
   agent: string;
-  /** 本次会话的 jail。**只用来判「这条路径在边界内吗 / 撞 denyGlobs 了吗」，不读写。** */
+  /** 本次会话的 jail。仅用于判定路径是否在边界内、是否命中 denyGlobs，不做读写。 */
   jail: PathJail;
   log: LogSink;
   /**
-   * agent 一个能表达我们这次结论的档都没给时调它一次 —— 实现是 `session/cancel`。
+   * agent 未提供任何可表达本次结论的档位时调用一次 —— 实现为 `session/cancel`。
    *
-   * **不能回 `{outcome:'cancelled'}` 糊过去**：那个词在协议里的意思是「client 取消了这一轮」，
-   * 撒这个谎会让 agent 把一次「人拒绝了」记成「用户取消了」，而它接下来的行为完全不同
-   * （前者该停、后者该等下一条指令）。
+   * 不能以 `{outcome:'cancelled'}` 敷衍：该值在协议中的含义是 client 取消了本轮，
+   * 如此应答会使 agent 把人工拒绝记录为用户取消，而两者对应的后续行为完全不同
+   * （前者应停止，后者应等待下一条指令）。
    */
   onUnanswerable: () => void;
 }
@@ -81,21 +81,21 @@ export interface AcpPermissionGateOptions {
 const OPTION_KIND_ORDER = { allow: ['allow_once', 'allow_always'], reject: ['reject_once', 'reject_always'] } as const satisfies Record<string, readonly PermissionOptionKind[]>;
 
 /**
- * 一次工具调用（= 一条 ACP 会话）的权限闸。**返回的函数直接接成 `AcpClientHooks` 那个位置。**
+ * 一次工具调用（即一条 ACP 会话）的权限闸。返回的函数直接接入 `AcpClientHooks` 的对应位置。
  *
- * `always` 那份记忆是**这个闭包的局部变量**，所以它的作用域恰好是一次 `spawn_acp` 调用 ——
- * 与会话不落库是同一条纪律（`manager.ts` 顶部那段：存下来就把「一次审批」偷偷变成「此后永久」）。
+ * `always` 的记忆是该闭包的局部变量，作用域恰为一次 `spawn_acp` 调用 ——
+ * 与会话不落库属同一条纪律（`manager.ts` 顶部：持久化会把一次审批变成此后永久授权）。
  */
 export function acpPermissionGate(options: AcpPermissionGateOptions): (request: RequestPermissionRequest, signal: AbortSignal) => Promise<RequestPermissionResponse> {
   /**
-   * `allow_always` / `reject_always` 的落点。**只在内存里，绝不落成 `approval.rules`。**
+   * `allow_always` / `reject_always` 的落点。仅存于内存，绝不写入 `approval.rules`。
    *
-   * 那张表是运维面的配置：pattern 走 RE2 且 ≤128 字符（`ApprovalRules`），硬塞一条绝对路径进去
-   * 多半直接编译不过；更要紧的是它会进 `config_revisions` 与配置导出 —— 一次点击变成一条**永久
-   * 全局**授权，而按下去的人以为自己只是放过了眼前这一步。
+   * 该表是运维面的配置：pattern 走 RE2 且长度 ≤128（`ApprovalRules`），写入绝对路径多半
+   * 无法编译通过；更重要的是它会进入 `config_revisions` 与配置导出 —— 一次点击将变成永久
+   * 全局授权，而操作者的预期只是放行当前这一步。
    *
-   * 键 = `kind` + 第一条路径所在的**目录**：agent 在同一个目录里连着改十个文件是常态，
-   * 而「换个目录」值得再问一次。
+   * 键取 `kind` + 第一条路径所在目录：agent 在同一目录内连续修改十个文件属常态，
+   * 而切换目录值得再次询问。
    */
   const always = new Map<string, 'allow' | 'reject'>();
   const { approvals, context, jail, log } = options;
@@ -110,9 +110,9 @@ export function acpPermissionGate(options: AcpPermissionGateOptions): (request: 
     const paths = (request.toolCall.locations ?? []).map((location) => location.path).filter((path): path is string => typeof path === 'string' && path.length > 0);
     const outside = paths.some((path) => !insideJail(path));
     const risk = acpPermissionRisk(kind, outside);
-    // `toolCallId` 进 input 是刻意的：`approval.rememberWithinTurn` 的记忆键含 input，
-    // 不带一个每次都变的字段的话，agent 对同一个文件的第二次请求会拿到第一次的答案 ——
-    // 而「批了之后它又改了一次」正是这一层要看得见的东西。
+    // `toolCallId` 进入 input 是刻意设计：`approval.rememberWithinTurn` 的记忆键包含 input，
+    // 若不带每次变化的字段，agent 对同一文件的第二次请求会复用第一次的结论 ——
+    // 而批准后再次修改正是本层需要暴露的行为。
     const input = { agent: options.agent, kind: kind ?? null, title: request.toolCall.title ?? null,
       paths, outsideJail: outside, toolCallId: request.toolCall.toolCallId };
     const base: ExternalApprovalRequest = { toolName: ACP_PERMISSION_TOOL_NAME, input, context, risk, exemptOwnerSkip: true };
@@ -122,25 +122,25 @@ export function acpPermissionGate(options: AcpPermissionGateOptions): (request: 
       OPTION_KIND_ORDER[bucket].map((wanted) => request.options.find((entry) => entry.kind === wanted)).find((entry) => entry !== undefined);
 
     const record = (approved: boolean, decidedBy: string): void => {
-      // `channel` 是通道不是主体：`decidedBy` 那个 `acp:always` 说的是「谁裁的」，而通道列的取值域是
-      // `telegram` / `webui` / `system` / `acp`。两列写同一个字符串会让审批卡把它印两遍（docs/21 §18）。
+      // `channel` 表示通道而非主体：`decidedBy` 中的 `acp:always` 表示决策方，而通道列的取值域为
+      // `telegram` / `webui` / `system` / `acp`。两列写入相同字符串会使审批卡重复显示（docs/21 §18）。
       try { approvals.recordDecided({ ...base, approved, decidedBy, channel: ACP_DECISION_CHANNEL }); }
-      catch (error) { log.event({ level: 'warn', kind: 'approval.receipt_failed', summary: 'acp always-decision 落库失败', traceId: context.turn.turnId, data: { error: error instanceof Error ? error.message : String(error) } }); }
+      catch (error) { log.event({ level: 'warn', kind: 'approval.receipt_failed', summary: 'acp always 决策写入数据库失败', traceId: context.turn.turnId, data: { error: error instanceof Error ? error.message : String(error) } }); }
     };
 
-    /** 把「批 / 拒」翻成一个 optionId。翻不出来就是翻不出来 —— 绝不换一个档凑。 */
+    /** 把批准 / 拒绝映射为一个 optionId。无法映射时如实失败 —— 绝不改用其他档位替代。 */
     const answer = (approved: boolean, decidedBy: string): RequestPermissionResponse => {
       const chosen = option(approved ? 'allow' : 'reject');
       if (!chosen) {
-        // 表达不出结论的两种形态都在这里：拒绝但没有 reject 档（常见），批准但没有 allow 档（罕见，
-        // 但同样不能拿 reject 冒充「批了」）。回一个 JSON-RPC error + 立刻取消这一轮。
+        // 结论无法表达的两种形态均在此处理：拒绝但无 reject 档（常见），批准但无 allow 档（罕见，
+        // 但同样不能以 reject 冒充批准）。返回 JSON-RPC error 并立即取消本轮。
         options.onUnanswerable();
         throw RequestError.invalidParams({ toolCallId: request.toolCall.toolCallId, options: request.options.map((entry) => entry.kind) },
-          `本次权限请求的结论是「${approved ? '批准' : '拒绝'}」，而 options 里没有能表达它的档（收到的是 ${request.options.map((entry) => entry.kind).join(' / ') || '空数组'}）。这一轮已按协议取消。`);
+          `本次权限请求的结论为「${approved ? '批准' : '拒绝'}」，但 options 中没有可表达该结论的档位（收到：${request.options.map((entry) => entry.kind).join(' / ') || '空数组'}）。本轮已按协议取消。`);
       }
-      // 我们选中的是 `*_always` 那一档 —— 也就是**已经告诉 agent「以后都这样」**。此后对同一个
-      // (kind, 目录) 再问一次是纯粹的表演：答案已经给出去了。记进会话内存，下一次直接照答，
-      // 但审计行照旧一条一条落。
+      // 此处选中的是 `*_always` 档，即已告知 agent 后续同样处理。此后对同一
+      // (kind, 目录) 再次询问没有意义：结论已经给出。记入会话内存，下次直接按此应答，
+      // 但审计行仍逐条写入。
       if (chosen.kind === 'allow_always' || chosen.kind === 'reject_always') always.set(key, approved ? 'allow' : 'reject');
       log.event({ level: approved ? 'info' : 'warn', kind: 'acp.permission',
         summary: `${options.agent} 请求权限（${kind ?? 'other'}）→ ${approved ? '批准' : '拒绝'}${decidedBy === 'acp:always' ? '（会话内 always）' : ''}`,
@@ -152,14 +152,14 @@ export function acpPermissionGate(options: AcpPermissionGateOptions): (request: 
 
     const remembered = always.get(key);
     if (remembered) {
-      // **命中也要落一条 `approvals` 行。** 不落的话「批了一次之后它改了 40 个文件」在审计里
-      // 只剩最初那一条，而 always 这一档恰恰是最需要被数出来的。
+      // 命中缓存同样写入一条 `approvals` 行。否则一次批准后修改 40 个文件在审计中
+      // 只剩最初那一条，而 always 档恰恰最需要被统计。
       record(remembered === 'allow', 'acp:always');
       return answer(remembered === 'allow', 'acp:always');
     }
 
-    // `signal` 在这条请求被取消 / 连接关闭时触发。**必须 settle** —— 不 settle 的话 SDK 那侧
-    // 留着一个永不应答的请求，而 agent 就挂在那儿（那正是「先申报后实现」那一版的形态）。
+    // `signal` 在该请求被取消或连接关闭时触发。必须 settle —— 否则 SDK 侧会留下
+    // 一个永不应答的请求，agent 将持续阻塞（即先申报后实现那一版的表现）。
     let onAbort!: () => void;
     const cancelled = new Promise<'cancelled'>((resolve) => {
       onAbort = () => resolve('cancelled');
@@ -168,7 +168,7 @@ export function acpPermissionGate(options: AcpPermissionGateOptions): (request: 
     let verdict: ApprovalVerdict | 'cancelled';
     try { verdict = await Promise.race([approvals.requestExternal(base), cancelled]); }
     finally { signal.removeEventListener('abort', onAbort); }
-    // 这一档 `cancelled` 是**真话**：协议里它的意思正是「client 取消了这次请求」，而这里确实是。
+    // 该档使用 `cancelled` 是准确的：协议中其含义正是 client 取消了本次请求，此处确实如此。
     if (verdict === 'cancelled') {
       log.event({ level: 'info', kind: 'acp.permission', summary: `${options.agent} 请求权限（${kind ?? 'other'}）→ 取消`,
         traceId: context.turn.turnId, chatId: context.turn.chatId, userId: context.turn.initiatorUserId, key: context.turn.key,

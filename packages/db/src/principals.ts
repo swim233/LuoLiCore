@@ -34,9 +34,9 @@ export class PrincipalRepository {
   }
 
   /**
-   * 引导 owner 每次启动都要存在，但显示名与用户名只能由 Telegram 那边写进来：
-   * 走 upsertSeen 的话 ON CONFLICT 会拿占位的 'Owner'/null 覆盖真名，重启一次主体页就打回占位符。
-   * 已存在的行一律不动（含 role）—— 与 upsertSeen 一致，不把手工改过的角色冲掉。
+   * 引导 owner 每次启动都必须存在，但显示名与用户名只能由 Telegram 侧写入：
+   * 走 upsertSeen 时 ON CONFLICT 会用占位的 'Owner'/null 覆盖真实姓名，重启一次主体页即退回占位符。
+   * 已存在的行一律不修改（含 role），与 upsertSeen 一致，避免覆盖手工调整过的角色。
    */
   ensureOwner(tgId: string): void {
     const now = Date.now();

@@ -24,8 +24,8 @@ export class TurnConcurrency {
   get active(): number { return this.#activeGlobal; }
   get queued(): number { return this.#queue.length; }
   /**
-   * 这一刻 `acquire` 会不会**立刻**放行。只读判据，两个开轮入口拿它决定要不要记一条
-   * `turn.queued`：无条件记等于每轮多一行 info，而「排过队」才是排障要找的那件事
+   * 当前时刻 `acquire` 是否会立即放行。只读判据，两个开轮入口据此决定是否记录一条
+   * `turn.queued`：无条件记录等于每轮多一行 info，而实际发生过排队才是排障需要的信息
    * （`docs/10 §2` 的 `turn.queued`，docs/28 · L-LOG-01）。
    */
   available(key: string): boolean { return this.#canRun(key); }

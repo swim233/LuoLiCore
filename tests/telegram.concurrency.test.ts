@@ -6,14 +6,14 @@ import { ContextEngine, LogSink, MemoryStore, QuotaGuard, TurnConcurrency, TurnR
 import { UpdatePoller, createTelegramBot } from '@luoli/telegram';
 
 /**
- * 「同时处理多条消息」这件事在两层上都会被卡住，两层都得有断言：
+ * 同时处理多条消息会在两层被阻塞，两层都需要断言：
  *
- * 1. **入口**：grammY 内建的 `bot.start()` 逐条串行喂 update，所以 `TurnConcurrency` 的
- *    global / perKey / queueMax 永远争用不到 —— 上一轮实测「阻塞」就是这一层。`UpdatePoller`
- *    并发派发，并且**有界**（在途到顶就不再拉）。
- * 2. **轮次**：入口并发之后，同一个会话里 `perKey` 个轮次要真的同时在跑；而并发派发不许把
- *    同一个 chat 的归档顺序打乱 —— `claimBackground` 按 `messages.id` 排，倒序等于模型看到的
- *    对话顺序和用户打字的顺序不一样。
+ * 1. 入口：grammY 内建的 `bot.start()` 逐条串行投喂 update，因此 `TurnConcurrency` 的
+ *    global / perKey / queueMax 永远争用不到，上一轮实测的阻塞即出自这一层。`UpdatePoller`
+ *    并发派发，且有界（在途数量到顶即停止拉取）。
+ * 2. 轮次：入口并发之后，同一会话里 `perKey` 个轮次要确实同时在跑；而并发派发不得打乱
+ *    同一 chat 的归档顺序，`claimBackground` 按 `messages.id` 排序，顺序颠倒会使模型看到的
+ *    对话顺序与用户输入顺序不一致。
  */
 
 const botInfo = { id: 1, is_bot: true as const, first_name: 'Bot', username: 'mybot', can_join_groups: true, can_read_all_group_messages: false, supports_inline_queries: false, can_connect_to_business: false, has_main_web_app: false, has_topics_enabled: false, allows_users_to_create_topics: false, can_manage_bots: false, supports_join_request_queries: false };
@@ -36,9 +36,9 @@ interface FetchCall { offset?: number; limit?: number; timeout?: number; allowed
 type FakeSignal = { aborted: boolean; addEventListener(type: 'abort', listener: () => void, options?: { once?: boolean }): void };
 
 /**
- * 假 Bot：只实现 `UpdatePoller` 用到的三个入口。批次用完之后 `getUpdates` 挂着不返回
- * （模拟 long poll），直到 `stop()` abort —— 不带 signal 的那次调用是 `stop()` 的 offset 确认，
- * 立刻返回空。
+ * 假 Bot：只实现 `UpdatePoller` 用到的三个入口。批次耗尽后 `getUpdates` 挂起不返回
+ * （模拟 long poll），直到 `stop()` 触发 abort；不带 signal 的那次调用是 `stop()` 的 offset 确认，
+ * 立即返回空。
  */
 function fakeBot(batches: Array<Array<{ update_id: number }>>, handle: (updateId: number) => Promise<void>): { bot: Bot; calls: FetchCall[]; commits: FetchCall[]; fail: (error: unknown) => void } {
   const calls: FetchCall[] = [];
@@ -82,8 +82,8 @@ describe('UpdatePoller：并发派发 update', () => {
     gate.resolve();
     expect(await poller.drain(2000)).toBe(true);
     await poller.stop();
-    // 停机要把 offset 交回 Telegram，否则重启后先空跑一批已经处理过的 update（去重表挡得住，
-    // 但那一批里的新消息要等它们过完）。
+    // 停机时要把 offset 提交回 Telegram，否则重启后会先空跑一批已处理过的 update（去重表能挡住，
+    // 但该批次里的新消息要等它们处理完）。
     expect(commits).toEqual([{ offset: 4, limit: 1, timeout: 0 }]);
   });
 
@@ -105,8 +105,8 @@ describe('UpdatePoller：并发派发 update', () => {
   });
 
   it('handler 抛错只上报不中断循环', async () => {
-    // grammY 只在自家轮询里把中间件错误路由到 bot.catch。自己派发就得自己接：漏一个就是
-    // unhandledRejection，而 main.ts 那条路径会直接带走整个进程。
+    // grammY 只在自身轮询里把中间件错误路由到 bot.catch。自行派发就必须自行捕获：漏掉一个即产生
+    // unhandledRejection，而 main.ts 那条路径会直接终止整个进程。
     const errors: string[] = [];
     const started: number[] = [];
     const { bot } = fakeBot([[{ update_id: 1 }], [{ update_id: 2 }]], async (id) => {
@@ -156,7 +156,7 @@ function telegramFixture(name: string, overrides: Record<string, unknown>,
     ...(dependencies.plugins ? { plugins: dependencies.plugins } : {}),
     ...(dependencies.onTurn ? { onTurn: (turn) => dependencies.onTurn!(turn.turnId) } : {}),
   }).then((bot) => {
-    // 整个 Bot API 短路掉：测试不打网络。发出去的正文留一份 —— 拒绝时用户看到的那句话本身
+    // 整个 Bot API 被短路：测试不访问网络。发出的正文保留一份，因为拒绝时用户看到的文案本身
     // 就是判据（docs/28 · L-QUOTA-02）。
     const replies: string[] = [];
     bot.api.config.use((async (_prev: unknown, method: string, payload: { text?: string }) => {
@@ -186,7 +186,7 @@ describe('同一会话的多条消息并行成轮', () => {
       { onTurn: async (turnId) => { started.push(turnId); await gate.promise; return `回答 ${turnId.slice(0, 6)}`; } });
     const inflight = [1, 2, 3].map((id) => bot.handleUpdate(privateUpdate(id, `第 ${id} 条`)));
     await until(() => started.length === 3, '三轮同时在跑');
-    // 三轮都已经进了 turns 表且都是 running —— 串行的话这里只会有 1 行。
+    // 三轮都已写入 turns 表且状态为 running：若为串行，这里只会有 1 行。
     const running = db.prepare("SELECT COUNT(*) AS count FROM turns WHERE state='running'").pluck().get() as number;
     expect(running).toBe(3);
     gate.resolve();
@@ -207,15 +207,15 @@ describe('同一会话的多条消息并行成轮', () => {
     expect(started).toHaveLength(1);
     gate.resolve();
     await Promise.all(inflight);
-    // 排队的两条最终都跑完了：`queueMax` 之内不许丢消息。
+    // 排队的两条最终都执行完成：`queueMax` 之内不得丢弃消息。
     const committed = db.prepare("SELECT COUNT(*) AS count FROM turns WHERE state='committed'").pluck().get() as number;
     expect(committed).toBe(3);
     closeDatabase(db);
   }, 20_000);
 
   it('同一个 chat 的归档顺序不被并发派发打乱', async () => {
-    // 入口段里有真实的异步等待（这里用 onMessage 钩子模拟慢的媒体下载）：没有那把按 chat 的锁，
-    // 后到的消息会先落库，`claimBackground` 按 id 排出来的对话顺序就是倒的。
+    // 入口段存在真实的异步等待（这里用 onMessage 钩子模拟慢速媒体下载）：没有按 chat 的锁时，
+    // 后到的消息会先落库，`claimBackground` 按 id 排出的对话顺序即为颠倒的。
     const { bot, db } = await telegramFixture('tg-ingress-order', {}, {
       plugins: { hook: async (name, ...arguments_) => {
         const context = arguments_[0] as { message?: { text?: string } } | undefined;
@@ -231,9 +231,9 @@ describe('同一会话的多条消息并行成轮', () => {
 });
 
 /**
- * 那个三元此前只看 `reservation` 是不是空，而额度关着时它恒为空 —— 于是每一轮都记一条
- * `warn quota.exceeded`「Quota reservation rejected」而轮次照常开（logs/2026-08-18：31 轮里 30 条）。
- * 排障时第一眼看到的就是它，而真正的故障在 363 秒后才落第一行。
+ * 那个三元此前只判断 `reservation` 是否为空，而额度关闭时它恒为空，于是每一轮都记一条
+ * `warn quota.exceeded`「Quota reservation rejected」而轮次照常开启（logs/2026-08-18：31 轮里 30 条）。
+ * 排障时首先看到的就是它，而真正的故障在 363 秒后才落下第一行。
  */
 describe('额度这条警报只在真的被拒时响', () => {
   it('quota.enabled=false 的一轮一条都不落', async () => {
@@ -245,20 +245,20 @@ describe('额度这条警报只在真的被拒时响', () => {
   }, 20_000);
 
   /**
-   * 真人看到的原话：**「今天的额度用完了（已用 —/—），下个额度窗口 重置。」** 而真实原因是
-   * 「这一小时你已经开了 30 轮」，与金额无关，占位符还原样漏了出去（docs/28 · L-QUOTA-02）。
-   * 紧邻的 `concurrent` 分支早就论证过这么做的危害（「会让人当天不再尝试」），同一个论证适用于
-   * 频率这一档。**这句不受 `onExceeded.reply` 管**：那个开关是给「额度用光」用的。
+   * 用户实际看到的文案是「今天的额度用完了（已用 —/—），下个额度窗口 重置。」，而真实原因是
+   * 本小时内已开启 30 轮，与金额无关，占位符还原样输出了（docs/28 · L-QUOTA-02）。
+   * 相邻的 `concurrent` 分支已论证过这么做的危害（会导致用户当天不再尝试），同一论证适用于
+   * 频率这一档。这句不受 `onExceeded.reply` 控制：那个开关用于额度耗尽的场景。
    */
   it('频率拒绝给的是频率文案，不是额度文案，也不漏占位符', async () => {
-    // 限额取 2、第 3 条被拒 —— 照 `AC-QUOTA-012` 写的那个场景，别让用例与验收条目各说一套。
+    // 限额取 2、第 3 条被拒，照 `AC-QUOTA-012` 描述的场景写，避免用例与验收条目不一致。
     const { bot, db, replies } = await telegramFixture('tg-rate-user-message',
       { quota: { enabled: false, rateLimit: { turnsPerUserPerHour: 2, turnsPerChatPerHour: 100, concurrentPerUser: 3 }, onExceeded: { reply: false } } },
       { onTurn: async () => '好' });
     await bot.handleUpdate(privateUpdate(1, '第一句'));
     await bot.handleUpdate(privateUpdate(2, '第二句'));
     await bot.handleUpdate(privateUpdate(3, '第三句'));
-    // 第三条被频率闸挡住：没有第三个轮次，但用户拿到了一句说得清的话。
+    // 第三条被频率闸拦下：没有第三个轮次，但用户收到了原因明确的提示。
     expect(db.prepare('SELECT COUNT(*) AS count FROM turns').pluck().get()).toBe(2);
     const last = replies.at(-1)!;
     expect(last).toContain('频率上限');
@@ -272,7 +272,7 @@ describe('额度这条警报只在真的被拒时响', () => {
   }, 20_000);
 
   /**
-   * 定时任务的轮次不再计入按小时的频率闸：它不是「人在刷」，而本轮测试用定时任务跑的 38 轮
+   * 定时任务的轮次不再计入按小时的频率闸：它不属于用户主动请求，而本轮测试里定时任务跑的 38 轮
    * 把 owner 自己挡在了门外（docs/28 · L-QUOTA-02）。金额额度照旧全部生效。
    */
   it('同一小时里的定时轮次不占创建者的频率额度', async () => {
@@ -296,16 +296,16 @@ describe('额度这条警报只在真的被拒时响', () => {
     expect(db.prepare("SELECT COUNT(*) AS count FROM log_events WHERE kind='quota.exceeded'").pluck().get()).toBe(1);
     expect(db.prepare('SELECT COUNT(*) AS count FROM turns').pluck().get()).toBe(0);
     expect(replies.at(-1)).toContain('额度用完了');
-    // 没开成轮次的触发消息一律降级成背景（docs/20 · W-TG-05）：金额这一档此前留着 `triggered=1`，
-    // 于是额度用光那天说的每一句话既没被回答、也再没进过任何一轮的上下文。
+    // 未成功开轮的触发消息一律降级为背景（docs/20 · W-TG-05）：金额这一档此前保留 `triggered=1`，
+    // 于是额度耗尽当天的每一句发言既未被回答，也再未进入任何一轮的上下文。
     expect(db.prepare('SELECT triggered FROM messages WHERE tg_message_id=1').pluck().get()).toBe(0);
     closeDatabase(db);
   }, 20_000);
 
   /**
-   * `quota.onExceeded.reply=false` 的语义是「额度用光了就别再回话」，而**金额这一档是它唯一管得着
-   * 的地方**（频率与并发各有自己的文案）。分档文案那次整改把 `main` 上唯一的读点删掉了，而金额档
-   * 从来没读过它 —— 于是这个开关存得住、WebUI 还在写、运行时零效果。
+   * `quota.onExceeded.reply=false` 的语义是额度耗尽后不再回复，而金额这一档是它唯一生效的位置
+   * （频率与并发各有独立文案）。分档文案那次整改删掉了 `main` 上唯一的读取点，而金额档
+   * 从未读取过它，于是这个开关可写入、WebUI 仍在写，运行时无任何效果。
    */
   it('onExceeded.reply=false 时金额超额一句都不回，而拒绝照旧记账并降级', async () => {
     const { bot, db, replies } = await telegramFixture('tg-quota-silent',

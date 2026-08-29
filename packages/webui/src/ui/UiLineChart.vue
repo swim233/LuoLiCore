@@ -1,10 +1,10 @@
 <script setup lang="ts">
 /**
- * 折线 / 面积图。自建 SVG 而不是引图表库：全站已经摘掉 PrimeVue，再拉一个几百 KB 的
- * 依赖只为画两条线不划算，而 WebUI 的 CSP 也不允许从 CDN 取。
+ * 折线 / 面积图。自建 SVG 而不引入图表库：全站已移除 PrimeVue，为绘制两条线再引入
+ * 数百 KB 的依赖不划算，且 WebUI 的 CSP 不允许从 CDN 获取。
  *
- * 一条线一个 series，y 轴共用同一个量程（两条线量级差很多时看不出小的那条 —— 那正是
- * 「token 数」与「花费」放一起会遇到的情况，所以调用方要么分两张图，要么自己归一化）。
+ * 一条线对应一个 series，y 轴共用同一量程（两条线量级相差较大时较小的一条不可辨认，
+ * 这正是 token 数与花费放在一起时的情况，因此调用方需分成两张图或自行归一化）。
  */
 import { computed } from "vue";
 
@@ -13,7 +13,7 @@ const props = withDefaults(
     labels: string[];
     series: Array<{ name: string; values: number[]; color?: string }>;
     height?: number;
-    /** y 轴数值的显示格式。默认按整数千分位。 */
+    /** y 轴数值的显示格式。默认使用整数千分位。 */
     format?: (value: number) => string;
   }>(),
   { height: 160 },
@@ -27,7 +27,7 @@ const format = (value: number): string =>
 
 const maximum = computed(() => {
   const all = props.series.flatMap((entry) => entry.values);
-  // 全 0 时给一个 1 的量程：否则每个点都贴在底边，看起来像「没有数据」而不是「都是 0」。
+  // 全为 0 时给出 1 的量程：否则所有点贴在底边，看起来像没有数据而不是数值均为 0。
   return Math.max(1, ...all);
 });
 
@@ -62,7 +62,7 @@ const paths = computed(() =>
   })),
 );
 
-/** 三条水平参考线（0 / 中 / 最大）。更多只会让这么矮的图变糊。 */
+/** 三条水平参考线（0、中值、最大值）。数量再多会使这种高度的图表难以辨读。 */
 const gridlines = computed(() =>
   [0, maximum.value / 2, maximum.value].map((value) => ({
     value,
@@ -70,7 +70,7 @@ const gridlines = computed(() =>
     label: format(value),
   })),
 );
-/** 标签太密时只画首尾与中间那个：7 天全画得下，30 天就挤成一团。 */
+/** 标签过密时只绘制首、尾与中间三个：7 天可全部绘制，30 天会相互重叠。 */
 const ticks = computed(() =>
   props.labels.map((label, index) => ({
     label,

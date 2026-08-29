@@ -8,10 +8,10 @@ import type { RuntimeTurnContext } from '@luoli/shared';
 /**
  * M13 · `session/request_permission` → 真审批（`docs/05 §3.5.3`）。
  *
- * **真 SQLite、真审批 broker、真 fixture agent，没有 mock 层。** 这一整块最容易「通过得毫无意义」：
- * 去掉 `exemptOwnerSkip` 之后每一次 permission 都变成静默的 `approved: true`，而一条只断言
- * 「最后拿到了 allow」的用例照旧全绿。所以关键几条的判据都是**库里那一行**（pending 出现过、
- * `approvals` 涨了几条、`decided_by` 是什么），不是最终那个 outcome。
+ * 真 SQLite、真审批 broker、真 fixture agent，没有 mock 层。这一整块最容易出现通过但无意义：
+ * 去掉 `exemptOwnerSkip` 之后每一次 permission 都变成静默的 `approved: true`，而只断言最终
+ * 拿到 allow 的用例照旧全绿。因此关键几条的判据都落在库里那一行（pending 是否出现过、
+ * `approvals` 增加了几条、`decided_by` 是什么），而不是最终那个 outcome。
  */
 const FIXTURE = resolve('tests/fixtures/acp-agent.mjs');
 const ROOT = resolve('data/acp-perm-work');
@@ -39,8 +39,8 @@ const rows = (): ApprovalRow[] => (db
 const pending = (): ApprovalRow[] => rows().filter((row) => row.state === 'pending');
 
 /**
- * `skipForOwner` **默认真而这里显式写真**：这一节的全部意义就是「owner-only 的路径上审批仍然生效」，
- * 而那只有在这个开关开着时才是一句有内容的话。
+ * `skipForOwner` 默认为真，这里显式写真：本节的意义在于 owner-only 的路径上审批仍然生效，
+ * 而该结论只有在这个开关开着时才成立。
  */
 function harness(options: { permissionMode?: 'ask' | 'auto' | 'deny'; channel?: boolean; ttlMs?: number } = {}) {
   for (const suffix of ['', '-wal', '-shm']) rmSync(`${DB_PATH}${suffix}`, { force: true });
@@ -52,8 +52,8 @@ function harness(options: { permissionMode?: 'ask' | 'auto' | 'deny'; channel?: 
       agents: [{ name: 'fixture', command: FIXTURE, profile: '', tools: [], handshakeTimeoutMs: 4000, timeoutMs: 8000 }] } } });
   const log = new LogSink(new OperationsRepository(db), './data/acp-perm-logs');
   const bus = new EventBus();
-  // 真的挂一条裁决通道（WebUI 的 SSE）：不挂的话走的是「两条通道都没有 → 当场拒」那一支，
-  // 测的就不是这些用例想测的东西了。
+  // 确实挂一条裁决通道（WebUI 的 SSE）：不挂时走的是两条通道都没有即当场拒绝那一支，
+  // 测到的就不是这些用例的目标。
   if (options.channel !== false) bus.subscribe(() => undefined, { channel: true });
   const broker = new DatabaseApprovalBroker(db, config, bus, log);
   const abort = new AbortController();
@@ -107,13 +107,13 @@ describe('ACP 逐条审批 · 往返', () => {
     askScript();
     const manager = new AcpManager(fakeLog);
     const pendingRun = run(manager, subject);
-    // **判据是 pending 那一行真的出现过。** 去掉 `exemptOwnerSkip` 之后这里会一行都没有，而
-    // 「最后拿到了 allow」照旧成立 —— 那正是这一整块能被静默摘掉又全绿的形态。
+    // 判据是 pending 那一行确实出现过。去掉 `exemptOwnerSkip` 之后这里一行都不会有，而
+    // 最终拿到 allow 照旧成立，那正是这一整块被静默摘除后仍然全绿的形态。
     await waitUntil(() => pending().length === 1);
     const row = pending()[0]!;
     expect(row.tool).toBe(ACP_PERMISSION_TOOL_NAME);
-    // input 里带着足够精准的判据，所以不必为每种 kind 编一个假工具名（`approval.rules` 只吃
-    // 名字 + `JSON.stringify(input)`）。
+    // input 里已带足够精确的判据，因此不必为每种 kind 构造一个假工具名（`approval.rules` 只接受
+    // 名字加 `JSON.stringify(input)`）。
     expect(JSON.parse(row.input)).toMatchObject({ agent: 'fixture', kind: 'execute', outsideJail: false });
     expect(row.risk).toBe('high');
     expect(subject.broker.decide(row.id, true, 'owner', 'webui')).toBe(true);
@@ -131,11 +131,11 @@ describe('ACP 逐条审批 · 往返', () => {
     const pendingRun = run(manager, subject);
     await waitUntil(() => pending().length === 1);
     subject.broker.decide(pending()[0]!.id, false, 'owner', 'webui');
-    // 拒掉一步不等于整轮失败：agent 收到 reject 之后自己决定怎么办（换个做法、或者报告做不了）。
+    // 拒绝一步不等于整轮失败：agent 收到 reject 后自行决定后续处理（换一种做法，或报告无法完成）。
     expect(await pendingRun).toMatchObject({ ok: true });
     expect(methods().some((line) => line.includes('"optionId":"reject_once"'))).toBe(true);
     expect(rows()[0]).toMatchObject({ state: 'denied' });
-    // 拒绝那一次记 warn —— 「它想干什么、我们没让」值得在日志里有一行。
+    // 拒绝那一次记 warn：请求了什么动作、被拒绝，这件事需要在日志里留一行。
     expect(events.some((event) => event.kind === 'acp.permission' && event.level === 'warn')).toBe(true);
     await manager.close();
   });
@@ -144,13 +144,13 @@ describe('ACP 逐条审批 · 往返', () => {
     for (const kind of ['execute', 'delete'] as const) expect(acpPermissionRisk(kind, false)).toBe('high');
     for (const kind of ['edit', 'move'] as const) expect(acpPermissionRisk(kind, false)).toBe('medium');
     for (const kind of ['read', 'search', 'fetch', 'think'] as const) expect(acpPermissionRisk(kind, false)).toBe('low');
-    // 这一层的输入是外部 agent 写的 JSON：一个我们不认识的 kind 更可能是新增的危险动作，
-    // 而不是一次无害的读。**不猜低档。**
+    // 这一层的输入是外部 agent 写的 JSON：无法识别的 kind 更可能是新增的危险动作，
+    // 而不是一次无害的读，因此不向低档推断。
     expect(acpPermissionRisk('switch_mode', false)).toBe('medium');
     expect(acpPermissionRisk('other', false)).toBe('medium');
     expect(acpPermissionRisk(undefined, false)).toBe('medium');
     expect(acpPermissionRisk(null, false)).toBe('medium');
-    // 越界压过一切：那时它要动的东西已经出了这次会话该碰的范围，kind 说什么都不重要了。
+    // 越界优先级最高：此时目标已超出本次会话可触及的范围，kind 是什么已不重要。
     for (const kind of ['read', 'think', undefined] as const) expect(acpPermissionRisk(kind, true)).toBe('high');
   });
 
@@ -161,8 +161,8 @@ describe('ACP 逐条审批 · 往返', () => {
     const pendingRun = run(manager, subject);
     await waitUntil(() => pending().length === 1);
     const row = pending()[0]!;
-    // `read` 本来是 low。抬成 high 的判据是路径，而 `outsideJail` 要在 input 里说得出来 ——
-    // 审批页上那一行得让人看出「它要读的是仓库外的东西」。
+    // `read` 原本是 low，抬成 high 的判据是路径，而 `outsideJail` 必须能在 input 里表达出来：
+    // 审批页上那一行要让人看出读取目标位于仓库之外。
     expect(row.risk).toBe('high');
     expect(JSON.parse(row.input)).toMatchObject({ outsideJail: true, paths: ['/etc/passwd'] });
     subject.broker.decide(row.id, false, 'owner', 'webui');
@@ -178,7 +178,7 @@ describe('ACP 逐条审批 · 不问人的那两档', () => {
       askScript();
       const manager = new AcpManager(fakeLog);
       expect(await run(manager, subject)).toMatchObject({ ok: true });
-      // 给了 hook 也不该被调到：`ask` 之外那两档由 `floorPermission` 直接答，两者**不串联**。
+      // 即使提供 hook 也不应被调用：`ask` 之外那两档由 `floorPermission` 直接给出结论，两者不串联。
       expect(rows()).toHaveLength(0);
       expect(methods().some((line) => line.includes(permissionMode === 'auto' ? '"optionId":"allow_once"' : '"optionId":"reject_once"'))).toBe(true);
       await manager.close();
@@ -189,32 +189,32 @@ describe('ACP 逐条审批 · 不问人的那两档', () => {
 describe('ACP 逐条审批 · always 只活在这一次调用里', () => {
   it('第二条不再挂 pending，但**照旧落一条 approvals 行**', async () => {
     const subject = harness();
-    // agent 给的是 `*_always` 那一档 —— 也就是我们一旦选中就已经告诉它「以后都这样」。
+    // agent 给的是 `*_always` 那一档：一旦选中即等于告知它此后按同样方式处理。
     askScript({ kinds: 'allow_always,reject_always', count: 2 });
     const manager = new AcpManager(fakeLog);
     const pendingRun = run(manager, subject);
     await waitUntil(() => pending().length === 1);
     subject.broker.decide(pending()[0]!.id, true, 'owner', 'webui');
     expect(await pendingRun).toMatchObject({ ok: true });
-    // 第二次同 (kind, 目录) 不再问人 —— 答案已经给出去了，再问一次是纯粹的表演。
+    // 第二次相同的 (kind, 目录) 不再询问：答案已经给出，重复询问没有意义。
     expect(methods().filter((line) => line.startsWith('permission:'))).toHaveLength(2);
     expect(pending()).toHaveLength(0);
-    // **但审计行照旧一条一条落。** 不落的话「批了一次之后它改了 40 个文件」在审计里只剩最初那一条，
-    // 而 always 恰恰是最需要被数出来的那一档。
+    // 但审计行仍逐条落库。不落库时，一次批准之后修改了 40 个文件在审计里只剩最初那一条，
+    // 而 always 恰恰是最需要被计数的那一档。
     const all = rows();
     expect(all).toHaveLength(2);
     expect(all[0]).toMatchObject({ state: 'approved', decidedBy: 'owner', channel: 'webui' });
-    // 通道与主体是两列：`acp:always` 说的是「谁裁的」，通道是 `acp`。两列同值时审批卡把同一个
-    // 字符串印两遍，而按通道分桶的查询会多出一个取值域外的桶（docs/21 §18）。
+    // 通道与主体是两列：`acp:always` 表示裁决者，通道是 `acp`。两列同值时审批卡会重复渲染同一个
+    // 字符串，而按通道分桶的查询会多出一个取值域外的桶（docs/21 §18）。
     expect(all[1]).toMatchObject({ state: 'approved', decidedBy: 'acp:always', channel: 'acp' });
     await manager.close();
   });
 
   /**
-   * ⚠️ 这一条与 `approval.rememberWithinTurn` **不是同一件事**，而两者很容易互相顶掉：那一份按
-   * `turnId + toolName + JSON.stringify(input)` 记，**跨调用同轮照旧命中**。所以 fixture 的
-   * `toolCallId` 带 pid（真 agent 本来也每次一个新 id）—— 不带的话第二次调用命中的是它，
-   * 而这条用例就变成在量另一个机制。
+   * 这一条与 `approval.rememberWithinTurn` 不是同一件事，而两者很容易相互覆盖：那一份按
+   * `turnId + toolName + JSON.stringify(input)` 记录，同轮跨调用照旧命中。因此 fixture 的
+   * `toolCallId` 带 pid（真实 agent 本身也是每次一个新 id）：不带时第二次调用命中的是它，
+   * 这条用例就变成在测量另一个机制。
    */
   it('always 那份记忆是这次调用的局部变量 —— 下一次调用照旧从头问', async () => {
     const subject = harness();
@@ -226,7 +226,7 @@ describe('ACP 逐条审批 · always 只活在这一次调用里', () => {
       subject.broker.decide(pending()[0]!.id, true, 'owner', 'webui');
       expect(await pendingRun).toMatchObject({ ok: true });
     }
-    // 存下来就把「一次审批」偷偷改成「一次审批、此后永久」—— 与会话不落库是同一条纪律。
+    // 存下来即把一次审批改成一次审批并永久生效，与会话不落库属于同一条纪律。
     expect(rows().filter((row) => row.decidedBy === 'owner')).toHaveLength(2);
     expect(rows().filter((row) => row.decidedBy === 'acp:always')).toHaveLength(0);
     await manager.close();
@@ -236,15 +236,15 @@ describe('ACP 逐条审批 · always 只活在这一次调用里', () => {
 describe('ACP 逐条审批 · 答不出来与被取消', () => {
   it('agent 一个 reject 档都没给时回 error + 取消整轮，**不假装是取消**', async () => {
     const subject = harness();
-    // 只给 allow：我们的结论是「拒绝」，而它给的选项里没有一个能表达这句话。
+    // 只给 allow：本方结论是拒绝，而它提供的选项中没有一个能表达该结论。
     askScript({ kinds: 'allow_once' });
     const manager = new AcpManager(fakeLog);
     const pendingRun = run(manager, subject);
     await waitUntil(() => pending().length === 1);
     subject.broker.decide(pending()[0]!.id, false, 'owner', 'webui');
     const result = await pendingRun;
-    // `cancelled` 在协议里的意思是「client 取消了这一轮」。把「人拒绝了」说成那个，会让 agent
-    // 记错这一轮到底发生了什么（前者该停、后者该等下一条指令）。所以是一个 JSON-RPC error。
+    // `cancelled` 在协议里的含义是 client 取消了这一轮。把人工拒绝表述成它，会让 agent
+    // 误判本轮实际发生的事（前者应停止，后者应等待下一条指令）。因此这里返回 JSON-RPC error。
     expect(methods().some((line) => line.startsWith('permission_error:'))).toBe(true);
     expect(methods().some((line) => line.startsWith('permission:'))).toBe(false);
     expect(result).toMatchObject({ ok: false, error: 'acp_permission_unanswerable' });
@@ -253,8 +253,8 @@ describe('ACP 逐条审批 · 答不出来与被取消', () => {
   });
 
   it('signal 触发时必须 settle，且这一档回 cancelled 是真话', async () => {
-    // 直接量那个处理器：`signal` 在请求被取消 / 连接关闭时触发，不 settle 的话 SDK 那侧留着一个
-    // 永不应答的请求，而 agent 就挂在那儿 —— 那正是「先申报后实现」那一版的形态。
+    // 直接测量那个处理器：`signal` 在请求被取消或连接关闭时触发，不 settle 时 SDK 一侧会留下一个
+    // 永不应答的请求，agent 随之挂起，那正是先申报后实现那一版的形态。
     const subject = harness();
     const root = realpathSync(ROOT);
     const never = { requestExternal: () => new Promise<never>(() => undefined), recordDecided: () => undefined };
@@ -264,7 +264,7 @@ describe('ACP 逐条审批 · 答不出来与被取消', () => {
     const answered = gate({ sessionId: 's', toolCall: { toolCallId: 't', kind: 'edit' },
       options: [{ optionId: 'ok', name: 'Allow', kind: 'allow_once' }, { optionId: 'no', name: 'Reject', kind: 'reject_once' }] } as never, controller.signal);
     controller.abort();
-    // 这一档 `cancelled` 是真话：协议里它的意思正是「client 取消了这次请求」，而这里确实是。
+    // 这一档使用 `cancelled` 是准确的：协议里它的含义正是 client 取消了这次请求，而此处确实如此。
     expect(await answered).toEqual({ outcome: { outcome: 'cancelled' } });
     // 已经 abort 过的 signal 也要立刻 settle，而不是等一个永远不来的事件。
     expect(await gate({ sessionId: 's', toolCall: { toolCallId: 't2', kind: 'edit' },
@@ -279,8 +279,8 @@ describe('ACP 逐条审批 · 答不出来与被取消', () => {
     await waitUntil(() => pending().length === 1);
     subject.abort.abort();
     const result = await pendingRun;
-    // 审批那一侧认 `turn.abortSignal`（既有行为），所以等待者不会挂满 ttlMs；而这一轮本身
-    // 因为被取消而不算成功 —— 「协议说它正常结束」与「人按了取消」冲突时，后者赢。
+    // 审批一侧识别 `turn.abortSignal`（既有行为），因此等待者不会挂满 ttlMs；而本轮因被取消
+    // 不算成功：协议报告正常结束与用户执行取消冲突时，以后者为准。
     expect(rows()[0]).toMatchObject({ state: 'denied', decidedBy: 'system' });
     expect(result).toMatchObject({ ok: false, error: 'acp_cancelled' });
     await manager.close();
@@ -292,7 +292,7 @@ describe('ACP 逐条审批 · 答不出来与被取消', () => {
     const manager = new AcpManager(fakeLog);
     const started = performance.now();
     expect(await run(manager, subject)).toMatchObject({ ok: true });
-    // 判据是**时间**：走「挂一条 pending 再等」那条路的话这里要 60 秒。
+    // 判据是耗时：若走挂一条 pending 再等待那条路径，这里需要 60 秒。
     expect(performance.now() - started).toBeLessThan(20_000);
     expect(rows()).toHaveLength(0);
     expect(methods().some((line) => line.includes('"optionId":"reject_once"'))).toBe(true);

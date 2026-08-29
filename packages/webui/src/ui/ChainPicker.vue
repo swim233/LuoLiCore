@@ -13,8 +13,8 @@ const props = withDefaults(
   }>(),
   {
     sourceHeader: "可选模型",
-    targetHeader: "fallback 链（按顺序）",
-    empty: "还没有选任何模型",
+    targetHeader: "fallback 链",
+    empty: "尚未选择模型",
   },
 );
 const emit = defineEmits<{ "update:modelValue": [ChainItem[]] }>();
@@ -65,7 +65,7 @@ function onDrop(index: number): void {
             <i class="pi pi-arrow-right" aria-hidden="true" />
           </button>
         </li>
-        <li v-if="!available.length" class="chain-empty">没有更多可选模型</li>
+        <li v-if="!available.length" class="chain-empty">暂无</li>
       </ul>
     </section>
     <section class="chain-col">

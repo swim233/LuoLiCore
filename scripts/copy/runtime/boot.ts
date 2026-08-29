@@ -1,34 +1,34 @@
 /**
- * dev 文案面板的入口。只被 `scripts/copy/plugin.ts` 在 `COPY_EDIT=1` 的 dev server 上注入到
- * `main.ts` 的**最前面** —— 必须先于 `App.vue` 求值，因为组件模块顶层的标签表在 import 期就会
- * 调 `__LUOLI_C__`。
+ * dev 文案面板的入口。只由 `scripts/copy/plugin.ts` 在 `COPY_EDIT=1` 的 dev server 上注入到
+ * `main.ts` 的最前面：必须先于 `App.vue` 求值，因为组件模块顶层的标签表在 import 期即会
+ * 调用 `__LUOLI_C__`。
  *
- * 刻意放在 `packages/webui/src` 之外：生产构建里没有任何一处引用得到这个路径，插件本身也带
- * `apply: 'serve'`，两道闩都断了才谈得上「不影响 release」。
+ * 刻意放在 `packages/webui/src` 之外：生产构建中没有任何位置能引用到该路径，插件自身也带
+ * `apply: 'serve'`，两道闸同时成立才能保证不影响发布产物。
  */
 import { createApp, reactive, ref } from "vue";
 import { fillSlots } from "../slots.js";
 import CopyPanel from "./CopyPanel.vue";
 
-/** 改写中的文案。reactive 的缺键读取也会被追踪，所以后填一个 key 能触发用到它的组件重渲染。 */
+/** 改写中的文案。reactive 对缺失键的读取同样会被追踪，因此后续填入某个 key 可触发相关组件重渲染。 */
 const overrides = reactive<Record<string, string>>({});
-/** 这次会话里**真的渲染过**的条目，按第一次出现的顺序。渲染期不能碰响应式状态，所以放普通 Map。 */
+/** 本次会话中实际渲染过的条目，按首次出现顺序排列。渲染期不能修改响应式状态，因此使用普通 Map。 */
 const seen = new Map<string, string>();
 const tick = ref(0);
 let pending = false;
 
-/** 点选模式：界面上点哪句，面板就跳到那一条。Alt+点击 随时可用，不必先开模式。 */
+/** 点选模式：点击界面上的某句文案，面板即定位到对应条目。Alt+点击 随时可用，无需先开启模式。 */
 const picking = ref(false);
 const picked = ref<string[]>([]);
-/** 拖拽模式：按住界面上的一句话直接拖。落下时面板负责写回源码。 */
+/** 拖拽模式：按住界面上的某句文案直接拖动，释放时由面板写回源码。 */
 const dragging = ref(false);
 const dragged = ref<{ id: string; dx: number; dy: number } | null>(null);
-/** 正在拖的那一下：仅用于面板显示实时读数，不落盘。 */
+/** 当前正在进行的拖拽：仅用于面板显示实时读数，不写入磁盘。 */
 const dragLive = ref<{ id: string; dx: number; dy: number } | null>(null);
 
 /**
- * 每条条目的占位符原文，按源码顺序。面板加载 `/__copy/entries` 之后填进来 ——
- * 插桩那侧只知道**表达式的值**（按同一个顺序传进来），不知道人在面板里看到的是 `{{ n }}` 还是 `${n}`。
+ * 每条条目的占位符原文，按源码顺序排列。面板加载 `/__copy/entries` 之后填入：
+ * 插桩侧只知道表达式的值（按同一顺序传入），不知道面板中显示的是 `{{ n }}` 还是 `${n}`。
  */
 const slots: Record<string, string[]> = {};
 
@@ -50,14 +50,14 @@ declare global {
 }
 
 /**
- * 覆盖层里那句话是**带占位的模板**（`一共 {{ n }} 回`），而页面要显示的是填好的那句。
- * 所以拿到覆盖之后按 `slots` 把占位换成这一次渲染的真实值 —— 逐条按**文本**替换而不是按位置，
- * 于是人把占位挪到句首、或者一句里出现两次，都还对。
+ * 覆盖层中的文案是带占位符的模板（`一共 {{ n }} 回`），而页面需要显示填充后的结果。
+ * 因此取得覆盖后按 `slots` 将占位符替换为本次渲染的真实值，逐条按文本替换而不是按位置替换，
+ * 这样占位符被移到句首或在同一句中出现两次时结果仍然正确。
  */
 window.__LUOLI_C__ = (id, original, values) => {
   if (!seen.has(id)) {
     seen.set(id, original);
-    // 渲染过程中改响应式状态会被 Vue 警告、还可能自激。攒到下一帧再让面板去读。
+    // 渲染过程中修改响应式状态会触发 Vue 警告并可能形成自激循环，因此累积到下一帧再由面板读取。
     if (!pending) {
       pending = true;
       requestAnimationFrame(() => {
@@ -86,13 +86,13 @@ window.__LUOLI_COPY__ = {
 };
 
 /**
- * 自由拖拽。按住带 `data-copy-id` 的元素移动鼠标，实时改它的 `translate`，松手交给面板落盘。
+ * 自由拖拽。按住带 `data-copy-id` 的元素移动鼠标，实时修改其 `translate`，释放后由面板写入磁盘。
  *
- * 偏移是**累加**在已有值上的（源码里可能已经写着一个 `translate`），所以起手先读一次当前值。
- * 用 `translate` 而不是 `transform`：`transform` 被按压反馈、入场动画、页面过渡用着，
- * 内联写上去会把它们整条顶掉；`translate` 是独立变换属性，与 `transform` 叠加。
+ * 偏移量累加在已有值之上（源码中可能已存在 `translate`），因此开始时先读取一次当前值。
+ * 使用 `translate` 而不是 `transform`：`transform` 已被按压反馈、入场动画、页面过渡占用，
+ * 内联写入会整体覆盖它们；`translate` 是独立的变换属性，与 `transform` 叠加生效。
  *
- * 按住 Shift 锁定单轴 —— 只想水平挪的时候，手不稳会带出几像素的竖直偏移。
+ * 按住 Shift 锁定单轴：仅需水平移动时，手部抖动会引入数像素的竖直偏移。
  */
 document.addEventListener(
   "mousedown",
@@ -130,7 +130,7 @@ document.addEventListener(
       node.style.outline = outline;
       const live = dragLive.value;
       dragLive.value = null;
-      // 没真的动过就不落盘 —— 一次误点不该在源码里留下 `translate: 0px 0px`。
+      // 未实际移动时不写入磁盘：一次误点不应在源码中留下 `translate: 0px 0px`。
       if (live && (live.dx !== from.x || live.dy !== from.y))
         dragged.value = live;
     };
@@ -139,7 +139,7 @@ document.addEventListener(
   },
   true,
 );
-/** 拖拽模式下屏蔽点击，否则松手那一下会顺带触发按钮、切页、提交表单。 */
+/** 拖拽模式下屏蔽点击，否则释放动作会连带触发按钮、切页或提交表单。 */
 document.addEventListener(
   "click",
   (event) => {
@@ -153,9 +153,9 @@ document.addEventListener(
 );
 
 /**
- * 捕获阶段拦点击：插件给带文案的元素挂了 `data-copy-id`，往上找最近的一个就知道点的是哪几句。
- * 点选模式下要 `preventDefault` + `stopPropagation` —— 不拦的话这一下会顺带触发按钮、切页、
- * 提交表单，人是来指字的，不是来操作的。
+ * 在捕获阶段拦截点击：插件为带文案的元素挂载了 `data-copy-id`，向上查找最近的一个即可确定点击对象。
+ * 点选模式下需 `preventDefault` 与 `stopPropagation`：不拦截会连带触发按钮、切页或
+ * 提交表单，而此时的操作意图是选取文案而不是执行功能。
  */
 document.addEventListener(
   "click",
@@ -172,7 +172,7 @@ document.addEventListener(
   },
   true,
 );
-/** Esc 退出点选 / 拖动，免得鼠标被「黏住」。 */
+/** Esc 退出点选与拖动模式，避免鼠标操作被持续拦截。 */
 document.addEventListener(
   "keydown",
   (event) => {

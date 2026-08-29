@@ -1,13 +1,13 @@
 /**
  * dev 文案面板的 Vite 插件：把源码里每一句用户可见的文案包一层 `__LUOLI_C__('id', 原文)`，
- * 于是面板里改字能即时反映到真界面上，按〔保存〕再由 `applyEdits` 写回源码。
+ * 于是面板里修改文字可即时反映到真实界面上，点击〔保存〕再由 `applyEdits` 写回源码。
  *
- * **生产为零，两道闩**：① `copyEditPlugin()` 在 `COPY_EDIT !== '1'` 时直接返回 `false`
- * （Vite 会忽略假值插件）；② 返回的插件带 `apply: 'serve'`，`vite build` 阶段不参与。
- * 运行时那两个文件在 `packages/webui/src` 之外，生产构建里没有任何引用路径指向它们。
- * `tests/copy-edit.test.ts` 把这三件事焊住。
+ * 生产构建中完全不启用，有两道闸：① `copyEditPlugin()` 在 `COPY_EDIT !== '1'` 时直接返回 `false`
+ * （Vite 会忽略假值插件）；② 返回的插件带 `apply: 'serve'`，不参与 `vite build` 阶段。
+ * 运行时那两个文件位于 `packages/webui/src` 之外，生产构建里没有任何引用路径指向它们。
+ * `tests/copy-edit.test.ts` 约束这三件事。
  *
- * 插桩只做 dev，**不改变语义**：`__LUOLI_C__` 没有覆盖时原样返回第二个参数。
+ * 插桩只在 dev 生效且不改变语义：没有覆盖时 `__LUOLI_C__` 原样返回第二个参数。
  */
 import { readFileSync } from "node:fs";
 import { relative, resolve } from "node:path";
@@ -32,10 +32,10 @@ const BOOT = resolve("scripts/copy/runtime/boot.ts");
 const CALL = "__LUOLI_C__";
 
 /**
- * 双引号属性里塞 JS：`"` 只能走实体，`'` 走 JS 转义。
+ * 在双引号属性里写 JS：`"` 只能用实体，`'` 用 JS 转义。
  *
- * **换行必须转义**：HTML 属性值本来可以跨行（`title="第一句\n  第二句"` 在源码里是真换行），
- * 而 Vue 把属性值当 JS 表达式解析 —— 裸换行落在 `'...'` 里就是 `Unterminated string constant`。
+ * 换行必须转义：HTML 属性值本可跨行（`title="第一句\n  第二句"` 在源码里是真实换行），
+ * 而 Vue 把属性值按 JS 表达式解析，裸换行落在 `'...'` 里即产生 `Unterminated string constant`。
  */
 const inAttr = (text: string): string =>
   text
@@ -50,22 +50,22 @@ const inTemplate = (text: string): string =>
   text.replaceAll("\\", "\\\\").replaceAll("`", "\\`").replaceAll("$", "\\$");
 
 /**
- * HTML 实体在属性值与文本位置都会被模板解析器**先解码**，之后才当 JS 表达式解析。
- * `placeholder='一行一条：&#10;让我想想…'` 解码出来是个真换行，落在 `'...'` 里就是
- * `Unterminated string constant`。这种不插桩 —— 面板里仍然列得到、改得动，只是没有即时预览。
+ * HTML 实体在属性值与文本位置都会被模板解析器先解码，之后才按 JS 表达式解析。
+ * `placeholder='一行一条：&#10;让我想想…'` 解码后是真实换行，落在 `'...'` 里即产生
+ * `Unterminated string constant`。这类不插桩：面板里仍可列出与修改，只是没有即时预览。
  */
 const HAS_ENTITY = /&(?:[a-z][a-z0-9]{1,10}|#\d{1,5}|#x[0-9a-f]{1,4});/i;
 
 /**
- * 占位符的**当前值**也要交给运行时，否则改一句带占位的话时预览是坏的。
+ * 占位符的当前值同样要传给运行时，否则修改带占位的句子时预览不正确。
  *
- * 插桩后传给 `__LUOLI_C__` 的第二个参数是**已经算好**的整句（`` `共 ${n} 条` `` 求值后是「共 42 条」），
- * 而面板里人写的是带占位的模板（`一共 {{ n }} 回`）。没有第三个参数时运行时只能把那份覆盖原样交回去
- * —— 页面上就显示字面的 `{{ n }}`，而带占位的那 282 条恰恰是最需要看清真实字长的（数字、名字、路径）。
- * 所以按源码顺序把表达式再传一遍，运行时按 `slots` 逐个换回去。
+ * 插桩后传给 `__LUOLI_C__` 的第二个参数是已求值的整句（`` `共 ${n} 条` `` 求值后是「共 42 条」），
+ * 而面板里编辑的是带占位的模板（`一共 {{ n }} 回`）。没有第三个参数时，运行时只能把覆盖原样返回，
+ * 页面上会显示字面的 `{{ n }}`，而带占位的那 282 条恰恰最需要看到真实字长（数字、名字、路径）。
+ * 因此按源码顺序把表达式再传一遍，运行时按 `slots` 逐个替换回去。
  *
- * 代价是那些表达式**求值两次**。这里的表达式全是取值/格式化（`data.steps`、`Number(x).toFixed(4)`），
- * 没有副作用；真出现有副作用的表达式，它在模板里被求值两次本身就已经是个 bug 了。
+ * 代价是这些表达式会求值两次。这里的表达式均为取值或格式化（`data.steps`、`Number(x).toFixed(4)`），
+ * 没有副作用；若出现有副作用的表达式，它在模板里被求值两次本身就已是缺陷。
  */
 const slotExprs = (raw: string): string[] =>
   raw.startsWith("`")
@@ -74,11 +74,11 @@ const slotExprs = (raw: string): string[] =>
         .map((slot) => slot.slice(2, -1).trim())
     : [];
 /**
- * 那串表达式**拼起来语法成立吗**。
+ * 判断那串表达式拼接后语法是否成立。
  *
- * 最后一道闩，而且是必需的：这些表达式是从源码切出来的，切歪一个字符就会生成一段编译不过的
- * 东西，而插桩坏掉的表现是整页空白。`new Function` 只解析不执行 —— 表达式里的组件作用域变量
- * 在这里当然不存在，那不影响语法判定。切歪了就退回不传值（预览显示字面占位），不把源码弄坏。
+ * 这是最后一道闸，且是必需的：这些表达式从源码切出，偏移一个字符即生成无法编译的内容，
+ * 而插桩失败的表现是整页空白。`new Function` 只解析不执行，表达式里的组件作用域变量
+ * 在这里不存在，不影响语法判定。切分错误时退回不传值（预览显示字面占位），不破坏源码。
  */
 function parses(values: readonly string[]): boolean {
   if (!values.length) return false;
@@ -112,12 +112,12 @@ function textToCall(id: string, raw: string): string | null {
 }
 
 /**
- * 模板里的 `__LUOLI_C__(…)` 必须落在**组件作用域**里。
+ * 模板里的 `__LUOLI_C__(…)` 必须位于组件作用域内。
  *
- * Vue 的模板编译会把不认识的标识符前缀成 `_ctx.xxx` —— 而它是 `window` 上的全局，`_ctx` 上
- * 当然没有，渲染当场抛 TypeError，表现是那个页面整块空白（仓库里 `console.render.test.ts`
- * 开头记的正是这类事故）。`<script setup>` 的顶层 const 会被暴露给模板，所以补一行绑定即可；
- * 全仓 24 个 SFC 都是 `<script setup>`，`tests/copy-edit.test.ts` 会盯着这条不变。
+ * Vue 的模板编译会给未识别的标识符加上 `_ctx.` 前缀，而它是 `window` 上的全局，`_ctx` 上
+ * 不存在，渲染时立即抛 TypeError，表现为该页面整块空白（`console.render.test.ts` 开头记录的
+ * 正是这类故障）。`<script setup>` 的顶层 const 会暴露给模板，因此补一行绑定即可；
+ * 全仓 24 个 SFC 都是 `<script setup>`，`tests/copy-edit.test.ts` 约束这一点。
  */
 function bindInScope(text: string): string {
   const tag = /<script\b[^>]*\bsetup\b[^>]*>/.exec(text);
@@ -134,11 +134,11 @@ interface Splice {
 }
 
 /**
- * 导出只为 `tests/copy-edit.test.ts`：插桩过的每个文件都必须还能被 Vue / TS 解析。
+ * 导出仅供 `tests/copy-edit.test.ts` 使用：插桩后的每个文件都必须仍能被 Vue / TS 解析。
  *
- * `owners` 是元素 key → `<tag` 之后的插入点。有它才能给元素挂上 `data-copy-id`，
- * 让「点界面上的字回跳到面板」成立。**用属性而不是包一层 span**：这个仓库有 12 处 `+ .` 相邻
- * 选择器、8 处 `:nth-child`、4 处 `:last-child`，多套一层元素会把布局改掉，加个属性不会。
+ * `owners` 是元素 key 到 `<tag` 之后插入点的映射。有它才能给元素挂上 `data-copy-id`，
+ * 使点击界面上的文字跳回面板成立。使用属性而不是包一层 span：这个仓库有 12 处 `+ .` 相邻
+ * 选择器、8 处 `:nth-child`、4 处 `:last-child`，多一层元素会改变布局，增加属性不会。
  */
 export function instrument(
   source: string,
@@ -233,10 +233,10 @@ export function copyEditPlugin(): Plugin | false {
   let cache: Entry[] | null = null;
   const all = (): Entry[] => (cache ??= extractAll());
   /**
-   * 面板要知道每个元素当前挂着什么：工具类档位、拖拽偏移，以及**删不删得动**。
+   * 面板需要知道每个元素当前挂了什么：工具类档位、拖拽偏移，以及是否可删除。
    *
-   * `inner` 是「删了它会连带吃掉几句文案」。这个数必须在按钮旁边显示出来 —— 删一个 `<p>` 和删
-   * 一个装着 14 句话的 `<section>` 在界面上长得一模一样，而后者按下去是不可挽回的一大片。
+   * `inner` 表示删除它会连带移除多少句文案。这个数必须显示在按钮旁边：删除一个 `<p>` 与删除
+   * 一个包含 14 句话的 `<section>` 在界面上外观相同，而后者一次点击即造成大范围不可恢复的删除。
    */
   const boxes = (): Record<string, unknown> => {
     const out: Record<string, unknown> = {};
@@ -335,8 +335,8 @@ export function copyEditPlugin(): Plugin | false {
         response.end(JSON.stringify({ entries: rows, elements: boxes() }));
       });
       /**
-       * 保存：面板攒起来的**全部**暂存改动（文案 / 贴边间距 / 拖拽偏移）一次写完。
-       * 在这之前源码一个字节都没动过 —— 面板上的一切都只是 DOM 预览。
+       * 保存：面板累积的全部暂存改动（文案 / 贴边间距 / 拖拽偏移）一次写完。
+       * 在此之前源码没有任何变化，面板上的一切都只是 DOM 预览。
        */
       server.middlewares.use("/__copy/save", (request, response) => {
         response.setHeader("Content-Type", "application/json; charset=utf-8");
@@ -358,8 +358,8 @@ export function copyEditPlugin(): Plugin | false {
               return;
             }
             const result = applyChanges(changes);
-            // 快照存的是**改动前**那一份，所以它必须在这一刻记下来（`applyChanges` 已经写完盘了，
-            // 但它把原文交回来了）。存不下（比如一处都没落地）就不留空层。
+            // 快照保存的是改动前那一份，因此必须在此刻记录（`applyChanges` 已写盘完成，
+            // 但它返回了原文）。无法保存时（例如一处都未落盘）不留空层。
             const step = snapshot(result.before, result.applied);
             cache = null;
             response.end(
@@ -390,10 +390,10 @@ export function copyEditPlugin(): Plugin | false {
         response.end(JSON.stringify({ steps: steps() }));
       });
       /**
-       * 退到某一步保存**之前**。不带 `to` 就是退最近一步。
+       * 回退到某一步保存之前。不带 `to` 即回退最近一步。
        *
-       * 请求体可以是空的（面板的「撤销上次保存」那个按钮就不带体），所以解析失败一律当 `{}`
-       * 而不是 400 —— 这条路上「没有说退到哪」是合法输入，不是错误。
+       * 请求体可以为空（面板的撤销上次保存按钮就不带请求体），因此解析失败一律按 `{}` 处理
+       * 而不是返回 400：这条路径上未指定回退目标是合法输入，不是错误。
        */
       server.middlewares.use("/__copy/revert", (request, response) => {
         response.setHeader("Content-Type", "application/json; charset=utf-8");

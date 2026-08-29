@@ -7,13 +7,13 @@ import type { Role, RuntimeTurnContext } from '@luoli/shared';
 /**
  * 工具目录按需暴露（`docs/05 §3.12` 五条不变量、`docs/07 §5` 折叠判据四档）的 registry 层。
  *
- * 这块的危险与 `tools.overrides.test.ts` 那份同形但方向相反：覆盖层怕「只在两处判定的一处生效」，
- * 折叠怕「几处各算一遍算得不一样」—— 提示词的常驻段、折叠摘要段、`prepareStep` 的可见集、
- * `search_tools` 的检索域全部必须从同一次 `#eligible()` 派生。所以分区断言一律拿 `active()` 当
- * 基准对齐，而不是各自数个数：数个数的测试在两份判据漂移时照样全绿。
+ * 本模块的风险与 `tools.overrides.test.ts` 同形但方向相反：覆盖层的风险是仅在两处判定中的一处生效，
+ * 折叠的风险是多处各自计算得出不同结果。提示词的常驻段、折叠摘要段、`prepareStep` 的可见集与
+ * `search_tools` 的检索域必须全部由同一次 `#eligible()` 派生。因此分区断言一律以 `active()` 为
+ * 基准对齐，而非各自统计数量：统计数量的测试在两份判据漂移时仍会通过。
  *
- * 全程不开 DB、不经模型。折叠只是**可见性**，权限判定一个字未改（不变量 1），能在这一层判完的
- * 就不该拉起一整轮；而经模型的那条路压根到不了 `execute()`（见 `AC-TOOL-048` 那组用例的注释）。
+ * 全程不启用数据库、不经过模型。折叠只影响可见性，权限判定完全未变（不变量 1），能在这一层判定完成的
+ * 就不应启动完整轮次；而经模型的路径根本到不了 `execute()`（见 `AC-TOOL-048` 那组用例的注释）。
  */
 
 const events: LogEvent[] = [];
@@ -28,12 +28,12 @@ interface SearchResult {
 }
 
 /**
- * `catalog` 给 `undefined` = **limits 里整段不给**（全仓十来处手工构造 `ToolRegistry` 的测试就是
- * 这个形状，缺省必须等于改动前的行为）；给 `{}` = 一份 schema 默认值。
+ * `catalog` 传 `undefined` 表示 limits 中整段不提供（全仓十余处手工构造 `ToolRegistry` 的测试即
+ * 此形态，缺省必须等同于改动前的行为）；传 `{}` 表示使用一份 schema 默认值。
  *
- * 而**配置里那份恒存在**：`search_tools` 从 `turn.config` 读 `maxExpandedPerTurn`，registry 的
- * limits 与 turn 的 config 必须由同一次 `configSchema.parse` 派生 —— 两处对不上时护栏的分子和
- * 分母不是一回事，而这种错在单条用例里看起来完全正常。
+ * 而配置中的那份始终存在：`search_tools` 从 `turn.config` 读取 `maxExpandedPerTurn`，registry 的
+ * limits 与 turn 的 config 必须由同一次 `configSchema.parse` 派生；两处不一致时护栏的分子与
+ * 分母来自不同来源，而这种错误在单条用例中表现完全正常。
  */
 function harness(input: { catalog?: Record<string, unknown>; maxRegistered?: number; overrides?: Record<string, ToolOverride>; approval?: ApprovalBroker } = {}) {
   const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, tools: { catalog: input.catalog ?? {} } });
@@ -57,7 +57,7 @@ function external(registry: ToolRegistry, name: string, source: 'mcp' | 'plugin'
   registry.registerExternal({ name, description: extra.description ?? 'd', inputSchema: schema, minRole: extra.minRole ?? 'limited', source, execute: noop,
     ...(extra.approval ? { approval: extra.approval } : {}) });
 }
-/** 内建 100 / agent 90 / load_skill 80 与 `EXTERNAL_SOURCE_PRIORITY` 一致，排序才反映真实部署。 */
+/** 内建 100、agent 90、load_skill 80 与 `EXTERNAL_SOURCE_PRIORITY` 一致，排序才能反映真实部署。 */
 function mixed(registry: ToolRegistry): void {
   builtin(registry, 'read_file', 100, '读一个文件');
   builtin(registry, 'bash', 100, '跑一段 shell');
@@ -73,8 +73,8 @@ function mixed(registry: ToolRegistry): void {
 const search = async (registry: ToolRegistry, context: ToolExecutionContext, input: Record<string, unknown>): Promise<SearchResult> =>
   await registry.execute('search_tools', input, context) as SearchResult;
 const found = (result: SearchResult): string[] => (result.matches ?? []).map((match) => match.name).sort();
-/** 顺序断言用子序列而不是相等：`activeNamesForStep` 必须是 `active()` 那个有序数组的过滤结果，
- *  把两个分区拼回去会重排 provider 的 tools 数组 —— 每步改一次请求体第 0 段（`docs/04 §2.1`）。 */
+/** 顺序断言使用子序列而非相等：`activeNamesForStep` 必须是 `active()` 那个有序数组的过滤结果，
+ *  把两个分区重新拼接会重排 provider 的 tools 数组，导致每步都改动请求体第 0 段（`docs/04 §2.1`）。 */
 function subsequence(small: readonly string[], big: readonly string[]): boolean {
   let index = 0;
   for (const name of big) if (name === small[index]) index += 1;
@@ -108,7 +108,7 @@ describe('工具目录按需暴露 · 分区与判据', () => {
     const { registry, contextFor } = harness({ catalog: { deferExternal: false, defer: ['bash'] } });
     mixed(registry);
     const view = registry.activeView('owner', contextFor('owner'));
-    // `defer` 点了 `bash` 也不生效：判据第一档在最前面，后面几档压根不跑。
+    // `defer` 指定 `bash` 也不生效：判据第一档位于最前，后续档位不再执行。
     expect(view.deferred).toEqual([]);
     expect(registry.hasDeferrable('owner')).toBe(false);
   });
@@ -117,7 +117,7 @@ describe('工具目录按需暴露 · 分区与判据', () => {
     const { registry, contextFor } = harness({ catalog: { defer: ['search_tools', 'load_skill', '*'] } });
     mixed(registry);
     const view = registry.activeView('owner', contextFor('owner'));
-    // `*` 把别的全折叠了，梯子那两级照旧常驻 —— 折叠了检索通道就再没有路径能把工具取回来。
+    // `*` 折叠了其余全部，而检索通道的两级仍然常驻：折叠检索通道后将无路径可取回工具。
     expect(view.resident.map((tool) => tool.name)).toEqual(['load_skill', 'search_tools']);
     expect(view.deferred.map((tool) => tool.name)).not.toContain('search_tools');
     expect(view.deferred.map((tool) => tool.name)).not.toContain('load_skill');
@@ -131,7 +131,7 @@ describe('工具目录按需暴露 · 分区与判据', () => {
     expect(resident).toContain('bash');
     expect(resident).toContain('mcp__alpha__one');
     expect(resident).toContain('mcp__alpha__two');
-    // plugin / custom 不在 `resident` 里就照第五档默认折叠 —— 白名单捞回来的只有它点到的那几个。
+    // plugin 与 custom 不在 `resident` 中时按第五档默认折叠，白名单只恢复其显式列出的那几个。
     expect(view.deferred.map((tool) => tool.name)).toEqual(['plug_thing', 'mcp__beta__one', 'custom_thing']);
   });
 
@@ -149,14 +149,14 @@ describe('工具目录按需暴露 · 分区与判据', () => {
   });
 
   /**
-   * 组 key 从既有命名空间派生。`mcp__<server>__<tool>` 按**第一个** `__` 断开，与
-   * `mcp/manager.ts` 那边拼名字的是同一个约定：server 名允许下划线，所以 `mcp__a_b__t` 的组是
-   * `mcp:a_b`（非贪婪 `(.+?)__` 要一直吃到真正的双下划线）；而 `mcp__a__b__t` 的组是 `mcp:a`
-   * —— 「a 这台 server 上有个叫 b__t 的工具」和「a__b 这台 server」在名字层面本来就分不开，
-   * 认拼接方的约定比编一个假 server 名安全。认不出前缀时退回整族一组 `mcp`。
+   * 组 key 由既有命名空间派生。`mcp__<server>__<tool>` 按第一个 `__` 切分，与
+   * `mcp/manager.ts` 中拼接名称的约定一致：server 名允许包含下划线，因此 `mcp__a_b__t` 的组为
+   * `mcp:a_b`（非贪婪的 `(.+?)__` 需匹配到真正的双下划线）；而 `mcp__a__b__t` 的组为 `mcp:a`。
+   * server a 上有一个名为 b__t 的工具与 server a__b 在名称层面本就无法区分，
+   * 遵循拼接方的约定比推断一个不存在的 server 名更安全。无法识别前缀时退回整族一组 `mcp`。
    *
-   * agent 来源也落进 `builtin` 组：`docs/07 §5` 那份组 key 清单里没有 `agent` 这一档，而两者在
-   * 判据第四档里本来就同一条路（默认常驻、被 defer 点名才折叠）。
+   * agent 来源同样归入 `builtin` 组：`docs/07 §5` 的组 key 清单中没有 `agent` 这一档，而两者在
+   * 判据第四档中本就走同一路径（默认常驻，被 defer 显式指定才折叠）。
    */
   it('#groupKey 从既有命名空间派生，含 server 名带下划线的情形', () => {
     const { registry, contextFor } = harness({ catalog: { defer: ['bash', 'spawn_agent'] } });
@@ -182,7 +182,7 @@ describe('工具目录按需暴露 · 分区与判据', () => {
   it('组的顺序 = 首次出现顺序（sourcePriority desc, name asc）', () => {
     const { registry, contextFor } = harness({ catalog: {} });
     mixed(registry);
-    // plugin 60 > mcp 40 > custom 30。摘要行属提示词易变段，无谓的重排等于每步改一次提示词。
+    // 优先级为 plugin 60、mcp 40、custom 30。摘要行属于提示词易变段，无意义的重排等于每步改动一次提示词。
     expect(registry.activeView('owner', contextFor('owner')).groups.map((group) => group.key))
       .toEqual(['plugin', 'mcp:alpha', 'mcp:beta', 'custom']);
   });
@@ -195,8 +195,8 @@ describe('工具目录按需暴露 · 分区与判据', () => {
     expect(view.truncated).toEqual({ total: 10, visible: 6 });
     const active = registry.activeNames('owner', context);
     expect(active).toHaveLength(6);
-    // 分区在截断**之后**做：摘要里报一个开轮冻结的 toolSet 里没有的名字，模型去展开它就是
-    // 一次 AI SDK 层的运行时报错，而模型完全不知道自己被砍掉了什么。
+    // 分区在截断之后执行：摘要中报出开轮冻结的 toolSet 里不存在的名字时，模型展开它会触发
+    // AI SDK 层的运行时报错，而模型无从得知哪些工具被截断。
     for (const group of view.groups) for (const name of group.names) expect(active).toContain(name);
     expect(view.groups).toEqual([{ key: 'plugin', names: ['plug_thing'], total: 1 }]);
   });
@@ -207,7 +207,7 @@ describe('工具目录按需暴露 · 分区与判据', () => {
     builtin(registry, 'bash', 100);
     builtin(registry, 'load_skill', 80);
     registerCatalogTools(registry, { log });
-    // 纯内建部署：折叠集恒为空 ⇒ 整个元工具不进目录，提示词逐字节不变。
+    // 纯内建部署下折叠集恒为空，整个元工具不进入目录，提示词逐字节不变。
     expect(registry.hasDeferrable('owner')).toBe(false);
     expect(registry.activeNames('owner', contextFor('owner'))).not.toContain('search_tools');
     external(registry, 'mcp__alpha__one', 'mcp');
@@ -216,9 +216,9 @@ describe('工具目录按需暴露 · 分区与判据', () => {
   });
 
   /**
-   * `hasDeferrable` 刻意不走 `activeView()`：那条路是 `activeView()` → `#eligible()` →
-   * `tool.available?.()` → `search_tools.available()` → 又一次 `activeView()`，一个真实的无限
-   * 递归环，表现是开轮直接栈溢出。它只遍历 `#tools` 自己判三件事，一次 `available()` 都不调。
+   * `hasDeferrable` 有意不经过 `activeView()`：那条路径为 `activeView()` → `#eligible()` →
+   * `tool.available?.()` → `search_tools.available()` → 再次 `activeView()`，构成真实的无限
+   * 递归，表现为开轮时直接栈溢出。它只遍历 `#tools` 自行判定三件事，不调用任何 `available()`。
    */
   it('search_tools 已注册时取数不递归爆栈', () => {
     const { registry, contextFor } = harness({ catalog: {} });
@@ -238,19 +238,19 @@ describe('工具目录按需暴露 · 分区与判据', () => {
     expect(view.deferred).toEqual([]);
     expect(view.groups).toEqual([]);
     expect(registry.hasDeferrable('owner')).toBe(false);
-    // 不许出现「看得见折叠摘要却没法展开」：三处都从同一个判据派生，所以按步可见集必须等于全集。
+    // 不允许出现可见到折叠摘要却无法展开的情形：三处都由同一判据派生，因此按步可见集必须等于全集。
     expect(registry.activeNamesForStep('owner', context)).toEqual(registry.activeNames('owner', context));
     expect(registry.describe().every((entry) => entry.deferred === false)).toBe(true);
   });
 
   /**
-   * 不变量 3 的**另一种收梯子的写法**：工具页把 `enabled` / `minRole` / 审批 / 超时四项放在同一行上
-   * （docs/09 §3.7），把 `search_tools` 的 `minRole` 抬到 owner 与把它关掉是同一件事 —— 对一个
-   * trusted 会话来说梯子一样不存在。此前只判了 `enabled`，于是 trusted 那一档正好落在被明文禁止的
-   * 形态上：折叠摘要照渲染、`search_tools` 被 `#eligible()` 的 minRole 闸滤掉、连 `repairToolCall`
-   * 的自愈也一起失效（它的闸 ③ 正是「`search_tools` 本步发不出去」）。
+   * 不变量 3 的另一种移除检索通道的写法：工具页把 `enabled`、`minRole`、审批与超时四项放在同一行
+   * （docs/09 §3.7），把 `search_tools` 的 `minRole` 提升到 owner 与关闭它效果相同，对
+   * trusted 会话而言检索通道同样不存在。此前只判定了 `enabled`，因此 trusted 档位恰好落入被明确禁止的
+   * 形态：折叠摘要正常渲染、`search_tools` 被 `#eligible()` 的 minRole 闸过滤，连 `repairToolCall`
+   * 的自愈也一并失效（它的闸 ③ 正是本步无法下发 `search_tools`）。
    *
-   * owner 那一档必须**照旧折叠**：抬 minRole 是收给 owner 用，不是关掉折叠。
+   * owner 档位必须保持折叠：提升 minRole 是限定为 owner 使用，而非关闭折叠。
    */
   it('运维把 search_tools 的 minRole 抬到 owner ⇒ 够不到它的角色整目录回退常驻', () => {
     const { registry, contextFor } = harness({ catalog: {}, overrides: { search_tools: { enabled: true, minRole: 'owner' } } });
@@ -261,7 +261,7 @@ describe('工具目录按需暴露 · 分区与判据', () => {
     expect(registry.activeView('trusted', trusted).groups).toEqual([]);
     expect(registry.hasDeferrable('trusted')).toBe(false);
     expect(registry.activeNamesForStep('trusted', trusted)).toEqual(registry.activeNames('trusted', trusted));
-    // owner 够得到梯子，所以对它折叠照旧成立 —— 回退是按角色的，不是全局的。
+    // owner 可以访问检索通道，因此对它折叠仍然成立：回退按角色生效，而非全局生效。
     const owner = contextFor('owner');
     expect(registry.activeNames('owner', owner)).toContain('search_tools');
     expect(registry.activeView('owner', owner).deferred.map((tool) => tool.name)).toContain('mcp__alpha__one');
@@ -287,7 +287,7 @@ describe('工具目录按需暴露 · activeNamesForStep', () => {
     const context = contextFor('owner');
     expect(registry.activeNamesForStep('owner', context, new Set(['mcp__alpha__two']), ['bash', 'mcp__alpha__two']))
       .toEqual(['bash', 'mcp__alpha__two']);
-    // 展开过的工具被收窄挡住 ⇒ 本步不可见。这一条塌掉的表现是 skill 的 allowed-tools 形同虚设。
+    // 已展开的工具被收窄拦截时本步不可见。该条失效的表现是 skill 的 allowed-tools 不起作用。
     expect(registry.activeNamesForStep('owner', context, new Set(['mcp__alpha__two']), ['bash'])).toEqual(['bash']);
   });
 });
@@ -299,7 +299,7 @@ describe('工具目录按需暴露 · search_tools', () => {
     const context = contextFor('owner');
     expect(found(await search(registry, context, { query: '文字' }))).toEqual(['mcp__alpha__one', 'mcp__alpha__two']);
     expect(found(await search(registry, context, { names: ['mcp__beta__one'] }))).toEqual(['mcp__beta__one']);
-    // 给了两个通道不该让结果更少：每一个都是「找到它」的一种办法。
+    // 提供两个通道不应使结果减少：每个通道都是一种检索方式。
     expect(found(await search(registry, context, { query: '文字', names: ['mcp__beta__one'] })))
       .toEqual(['mcp__alpha__one', 'mcp__alpha__two', 'mcp__beta__one']);
   });
@@ -312,7 +312,7 @@ describe('工具目录按需暴露 · search_tools', () => {
     expect(found(await search(registry, context, { group: 'mcp:beta' }))).toEqual(['mcp__beta__one']);
     expect(found(await search(registry, context, { query: 'mcp__alpha__*', group: 'mcp:beta' })))
       .toEqual(['mcp__alpha__one', 'mcp__alpha__two', 'mcp__beta__one']);
-    // 不存在的组回空集而不是整份目录 —— 编错一个组名不该等于「把目录再抄一遍」。
+    // 不存在的组返回空集而非整份目录：写错一个组名不应等同于重复输出整个目录。
     const nope = await search(registry, context, { group: 'mcp:nope' });
     expect(nope.ok).toBe(true);
     expect(found(nope)).toEqual([]);
@@ -327,7 +327,7 @@ describe('工具目录按需暴露 · search_tools', () => {
     expect(fallback.matches).toHaveLength(8);
     expect(fallback.omitted).toBe(4);
     expect((await search(registry, context, { query: 'mcp__many__*', limit: 3 })).omitted).toBe(9);
-    // 上限焊在 schema 里：一次展开二十个已经把「按需」的意义用完了。
+    // 上限固定在 schema 中：一次展开二十个已经失去按需展开的意义。
     expect(await search(registry, context, { query: 'mcp__many__*', limit: 21 })).toMatchObject({ ok: false, error: 'invalid_input' });
   });
 
@@ -337,7 +337,7 @@ describe('工具目录按需暴露 · search_tools', () => {
     external(registry, 'mcp__alpha__open', 'mcp', { description: '谁都能用' });
     registerCatalogTools(registry, { log });
     const context = contextFor('limited');
-    // 断 `ok` 而不只断空集：一次被拒的调用同样给不出名字，那样这条用例什么都没证明。
+    // 断言 `ok` 而不仅断言空集：一次被拒绝的调用同样不返回名字，那样本用例不具备说明力。
     const blind = await search(registry, context, { query: 'hunter2' });
     expect(blind.ok).toBe(true);
     expect(found(blind)).toEqual([]);
@@ -353,8 +353,8 @@ describe('工具目录按需暴露 · search_tools', () => {
     external(registry, 'mcp__alpha__wordy', 'mcp', { description: `第一行\n第二行\u0007控制\t制表${'あ'.repeat(400)}` });
     registerCatalogTools(registry, { log });
     const match = (await search(registry, contextFor('owner'), { names: ['mcp__alpha__wordy'] })).matches![0]!;
-    // tool result 永久留在上下文里（`context_messages` 只追加），抄一份 4KB 的 MCP 描述进来等于
-    // 给这一整段会话每轮都记一次账；完整 schema 下一步由 provider 的 tools 数组权威送达。
+    // tool result 会永久留在上下文中（`context_messages` 只追加），写入一份 4KB 的 MCP 描述等于
+    // 让这段会话每轮都为它付一次 token；完整 schema 下一步由 provider 的 tools 数组权威送达。
     expect(match.description.length).toBeLessThanOrEqual(240);
     expect(match.description).not.toContain('\n');
     expect(match.description).not.toContain('\u0007');
@@ -368,9 +368,9 @@ describe('工具目录按需暴露 · search_tools', () => {
     const first = await search(registry, context, { names: ['mcp__alpha__one'] });
     expect(first.matches![0]!.status).toBe('expanded');
     expect(first.matches![0]!.group).toBe('mcp:alpha');
-    // 同一轮再搜一次：已展开过的报 already_active，不再占一格额度。
+    // 同一轮再次检索：已展开的报 already_active，不再占用额度。
     expect((await search(registry, context, { names: ['mcp__alpha__one'] })).matches![0]!.status).toBe('already_active');
-    // 常驻工具报 already_active 而不是留空 group：形状统一，模型不用猜缺字段的含义。
+    // 常驻工具报 already_active 而非留空 group：结构统一，模型无需推测缺失字段的含义。
     const resident = (await search(registry, context, { names: ['bash'] })).matches![0]!;
     expect(resident.status).toBe('already_active');
     expect(resident.group).toBe('resident');
@@ -379,10 +379,10 @@ describe('工具目录按需暴露 · search_tools', () => {
   });
 
   /**
-   * 被收窄挡住的**照样记进 `expandedTools`**，只是仍然调不动。少了这一笔就是一个死循环的一半：
-   * 另一半在 `agent/runtime.ts` 的 `repairToolCall`，它靠「原名不在 `expandedTools` 里」判这次
-   * 硬调值不值得改写成一次检索 —— 折叠且被收窄的工具如果永远进不了这个集合，就会走成
-   * 「调 X → NoSuchToolError → 改写成检索 → narrowed → 再调 X → …」一路烧到步数上限。
+   * 被收窄拦截的同样记入 `expandedTools`，只是仍然不可调用。缺这一笔即构成死循环的一半：
+   * 另一半在 `agent/runtime.ts` 的 `repairToolCall`，它依据原名是否在 `expandedTools` 中判断本次
+   * 强行调用是否值得改写为一次检索；折叠且被收窄的工具若永远进不了该集合，就会形成
+   * 调用 X → NoSuchToolError → 改写为检索 → narrowed → 再调用 X 的循环，直至耗尽步数上限。
    */
   it('收窄挡住的工具照样记进 expandedTools', async () => {
     const { registry, contextFor } = harness({ catalog: {} });
@@ -390,7 +390,7 @@ describe('工具目录按需暴露 · search_tools', () => {
     const context = contextFor('owner', { skillAllowedTools: new Set(['bash']) });
     expect((await search(registry, context, { names: ['mcp__alpha__two'] })).matches![0]!.status).toBe('narrowed');
     expect([...context.turn.expandedTools!]).toEqual(['mcp__alpha__two']);
-    // 记上了照旧调不动：`admit()` 的 skill_narrowed 与检索里那份判据逐字对齐。
+    // 记入后仍然不可调用：`admit()` 的 skill_narrowed 与检索中的判据逐字一致。
     const admitted = registry.admit('mcp__alpha__two', context);
     expect(admitted.ok).toBe(false);
     expect(admitted.ok === false && admitted.error).toBe('tool_not_in_allowlist');
@@ -404,7 +404,7 @@ describe('工具目录按需暴露 · search_tools', () => {
     const denied = await search(registry, context, { names: ['mcp__alpha__two'] });
     expect(denied).toMatchObject({ ok: false, error: 'expansion_limit' });
     expect(denied.hint).toContain('names');
-    // 护栏在**写之前**判：漏在写之后的话额度形同虚设，而每一次展开都把请求体第 0 段改一遍。
+    // 护栏在写入之前判定：若置于写入之后额度将失效，而每一次展开都会改动请求体第 0 段。
     expect([...context.turn.expandedTools!]).toEqual(['mcp__alpha__one']);
   });
 
@@ -416,7 +416,7 @@ describe('工具目录按需暴露 · search_tools', () => {
     const admitted = registry.admit('search_tools', sub);
     expect(admitted.ok).toBe(false);
     expect(admitted.ok === false && admitted.error).toBe('tool_unavailable');
-    // 子 agent 与主轮共享同一个 turn 对象，让它调就是往父轮的 expandedTools 里写状态。
+    // 子 agent 与主轮共享同一个 turn 对象，允许它调用即向父轮的 expandedTools 写入状态。
     expect(registry.activeNames('owner', contextFor('owner'))).toContain('search_tools');
   });
 
@@ -436,18 +436,18 @@ describe('工具目录按需暴露 · search_tools', () => {
     mixed(registry);
     const result = await search(registry, contextFor('owner'), {});
     expect(result).toMatchObject({ ok: false, error: 'invalid_input' });
-    expect(result.hint).toContain('至少给一个');
+    expect(result.hint).toContain('至少提供一个');
   });
 });
 
 /**
- * `AC-TOOL-048`：折叠**不参与准入**。
+ * `AC-TOOL-048`：折叠不参与准入。
  *
- * ⚠ 这里刻意不写经模型的端到端断言。`generateText` 先按本步 `activeTools` 把 toolSet 过一遍再
- * `parseToolCall`，于是同一次调用在解析阶段就撞 `NoSuchToolError`，压根到不了
- * `ToolRegistry.execute()` —— 那是 AI SDK 的**可达性收缩**，不是本系统的一道闸
- * （`docs/05 §3.12` 不变量 1 与 §4 末尾把「权限边界」与「SDK 的可达性收缩」分成两层写了）。
- * 拿它当边界测，换一次 SDK 大版本这条断言就变成一句假话。
+ * ⚠ 这里有意不编写经模型的端到端断言。`generateText` 会先按本步 `activeTools` 过滤 toolSet 再
+ * 执行 `parseToolCall`，因此同一次调用在解析阶段即触发 `NoSuchToolError`，根本到不了
+ * `ToolRegistry.execute()`。那属于 AI SDK 的可达性收缩，而非本系统的一道闸
+ * （`docs/05 §3.12` 不变量 1 与 §4 末尾已把权限边界与 SDK 的可达性收缩分为两层表述）。
+ * 把它当作边界来测试时，一次 SDK 大版本更新即会让该断言失去意义。
  */
 describe('工具目录按需暴露 · 折叠不参与准入（AC-TOOL-048）', () => {
   const asked: string[] = [];
@@ -459,7 +459,7 @@ describe('工具目录按需暴露 · 折叠不参与准入（AC-TOOL-048）', (
     mixed(registry);
     external(registry, 'mcp__alpha__risky', 'mcp', { approval: 'always' });
     const context = contextFor('owner');
-    // 先确认它真的处在折叠态、且不在本步可见集里 —— 否则这条用例什么都没测到。
+    // 先确认它确实处于折叠态且不在本步可见集中，否则本用例不具备验证意义。
     expect(registry.activeView('owner', context).deferred.map((tool) => tool.name)).toContain('mcp__alpha__risky');
     expect(registry.activeNamesForStep('owner', context)).not.toContain('mcp__alpha__risky');
     expect(await registry.execute('mcp__alpha__risky', {}, context)).toMatchObject({ ok: true });
@@ -498,8 +498,8 @@ describe('工具目录按需暴露 · describe()', () => {
     expect(rows.get('read_file')).toBe(false);
     expect(rows.get('search_tools')).toBe(false);
     expect(rows.get('load_skill')).toBe(false);
-    // 静态判的含义：这张表答的是「这个工具在这台机器的配置下属于折叠族吗」，而 owner-only 的
-    // 折叠工具对 limited 来说压根不在它那份 active() 里 —— 两个问题不是一回事。
+    // 静态判定的含义：该表回答的是某工具在本机配置下是否属于折叠族，而 owner-only 的
+    // 折叠工具对 limited 而言根本不在其 active() 中，两者是不同的问题。
     const plain = harness();
     mixed(plain.registry);
     expect(plain.registry.describe().every((entry) => entry.deferred === false)).toBe(true);

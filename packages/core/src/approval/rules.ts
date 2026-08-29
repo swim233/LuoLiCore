@@ -21,16 +21,16 @@ interface ApprovalRule {
 }
 
 /**
- * 上界与 `checkWakeword` 对齐（`config/wakeword.ts`）。求值对象是模型给的工具参数，
- * 长模式在 RE2 下也要多花编译时间，而审批规则从来不需要一条 128 字符以上的正则。
+ * 上界与 `checkWakeword` 对齐（`config/wakeword.ts`）。求值对象是模型给出的工具参数，
+ * 长模式在 RE2 下同样增加编译时间，而审批规则不需要超过 128 字符的正则。
  */
 export const APPROVAL_PATTERN_MAX_CHARS = 128;
 /**
- * **RE2 而不是 `new RegExp`。** `pattern` 来自配置（owner 面），但求值对象是模型/用户内容：
- * 一条形状不巧的规则（`(a+)+`、`(\w+\s?)*$`）撞上一段合适的输入就是指数回溯，而这是单线程
- * 进程 —— 卡住的是整个 bot（所有会话的轮次、WebUI、SSE 心跳）。同一条教训在 `grep`
- * （docs/19 · T-TOOL-01）与唤醒词（`config/wakeword.ts`）两处都已经换成 RE2，这里是最后一处
- * （docs/27 · S-03）。`(?i)` 前缀 RE2 原生支持，所以不再自己剥。
+ * 使用 RE2 而非 `new RegExp`。`pattern` 来自配置（owner 侧），但求值对象是模型或用户内容：
+ * 一条构造不当的规则（`(a+)+`、`(\w+\s?)*$`）遇到匹配的输入即产生指数级回溯，而这是单线程
+ * 进程，阻塞的是整个 bot（所有会话的轮次、WebUI、SSE 心跳）。同一教训在 `grep`
+ * （docs/19 · T-TOOL-01）与唤醒词（`config/wakeword.ts`）两处已改用 RE2，这里是最后一处
+ * （docs/27 · S-03）。`(?i)` 前缀 RE2 原生支持，因此不再自行剥离。
  */
 export function compilePattern(source: string): RE2 | null {
   if ([...source].length > APPROVAL_PATTERN_MAX_CHARS) return null;
@@ -41,8 +41,8 @@ export function compilePattern(source: string): RE2 | null {
   }
 }
 /**
- * 写入端校验（`configSchema` 的 `approvalRuleSchema`）用的判据，与 `compilePattern` 共用一份实现：
- * 分成两份必然漂移，而漂移的表现是面板收下一条运行时永不命中的规则 —— 门看着是关的，其实开着。
+ * 写入端校验（`configSchema` 的 `approvalRuleSchema`）使用的判据，与 `compilePattern` 共用一份实现：
+ * 拆成两份必然漂移，漂移的表现是面板接受了一条运行时永不命中的规则，看似已设限实则未生效。
  */
 export function checkApprovalPattern(
   source: string,
@@ -72,7 +72,7 @@ function isRule(value: unknown): value is ApprovalRule {
 
 export class ApprovalRules {
   readonly #rules: Array<{ rule: ApprovalRule; pattern: RE2 | null }>;
-  /** 试跑要按同一份编译结果逐条报告命中原因；`evaluate` 只回最终判定，说不出「为什么没命中」。 */
+  /** 试跑需按同一份编译结果逐条报告命中原因；`evaluate` 只返回最终判定，无法说明未命中的原因。 */
   get compiled(): ReadonlyArray<{ rule: ApprovalRule; pattern: RE2 | null }> {
     return this.#rules;
   }
@@ -122,13 +122,13 @@ function riskRank(risk: ApprovalRisk): number {
 }
 
 /**
- * 规则试跑：拿一条样例输入过一遍规则表，逐条回报命中与否和**为什么没命中**。
- * 与 `evaluate` 共用 `#rules` 的编译结果（同一个 `ApprovalRules` 实例），所以界面上看到的
- * 判定就是运行时的判定 —— 在前端再实现一份匹配必然漂移，而「以为配了审批其实永不命中」
- * 正是这条配置最容易出的错（docs/09 §3.7）。
+ * 规则试跑：用一条样例输入过一遍规则表，逐条报告是否命中以及未命中的原因。
+ * 与 `evaluate` 共用 `#rules` 的编译结果（同一个 `ApprovalRules` 实例），因此界面上看到的
+ * 判定即运行时判定；在前端另行实现一份匹配必然漂移，而误以为已配置审批实则永不命中
+ * 正是这项配置最常见的错误（docs/09 §3.7）。
  *
- * `when: 'target_exists'` 在试跑里一律记成「取决于运行时」：它要问工具「这个目标现在存在吗」，
- * 而试跑没有真实的执行上下文。含糊其辞比编一个答案好。
+ * `when: 'target_exists'` 在试跑中一律记为取决于运行时：它需要询问工具该目标当前是否存在，
+ * 而试跑没有真实的执行上下文。保留不确定性优于给出一个编造的答案。
  */
 export function testApprovalRules(
   rules: readonly unknown[],
@@ -162,7 +162,7 @@ export function testApprovalRules(
       report.push({
         index,
         matched: false,
-        reason: "正则编译失败，这条规则在运行时永不命中",
+        reason: "正则编译失败，该规则在运行时永不命中",
       });
       continue;
     }

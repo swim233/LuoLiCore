@@ -1,6 +1,6 @@
 /**
  * 唤醒词的可用性判定。运行时匹配（telegram/trigger.ts）与写入端校验（WebUI）必须共用这一份：
- * 分成两份实现会漂移，面板收下一个运行时永远匹配不上的模式，用户只能看到「bot 不理我」。
+ * 拆成两份实现会漂移，面板会接受一个运行时永不匹配的模式，用户看到的表现是 bot 无响应。
  */
 import { RE2 } from "re2-wasm";
 
@@ -14,9 +14,9 @@ export type WakewordCheck =
   | { ok: false; kind: WakewordKind; reason: string };
 
 /**
- * 「这是正则」的判据。`^` 开头是主规则；`(?i)` 这类内联标志开头的也算——它是写「大小写不敏感的
- * 正则」最自然的拼法，当成包含匹配的话用户拿到的是一个永远匹配不上、面板还标着「包含」的模式，
- * 正是这个文件要挡的那种失败。`(?:` 不会被误判：冒号不在字符类里。
+ * 判定输入是否为正则。以 `^` 开头是主规则；以 `(?i)` 这类内联标志开头的同样计入，因为它是书写
+ * 大小写不敏感正则最自然的形式，若按包含匹配处理，用户得到的是一个永不匹配、面板却标为包含的模式，
+ * 正是本文件要拦截的失败类型。`(?:` 不会被误判：冒号不在字符类内。
  */
 const REGEX_PREFIX = /^(?:\^|\(\?[a-zA-Z-]+\))/;
 
@@ -43,14 +43,14 @@ export function checkWakeword(
 }
 
 /**
- * 运行时匹配。**contains 型忽略大小写**：手机输入法会把句首的 `nori` 自动改成 `Nori`，
- * 大小写敏感的话唤醒词就成了一条只在特定拼写下生效的暗规则，用户只看到「bot 时灵时不灵」。
- * 正则型按作者写的大小写走，要不敏感就自己写 `^(?i)nori` —— 不替作者改语义，也保住了
- * 「我就是要区分大小写」这个表达能力。
+ * 运行时匹配。contains 型忽略大小写：手机输入法会把句首的 `nori` 自动改成 `Nori`，
+ * 若大小写敏感，唤醒词就成了只在特定拼写下生效的隐式规则，用户看到的表现是 bot 时而无响应。
+ * 正则型按作者书写的大小写处理，需要不敏感时自行写 `^(?i)nori`：不替作者改变语义，
+ * 同时保留区分大小写这一表达能力。
  */
 export function matchesWakeword(checked: WakewordCheck, text: string): boolean {
   if (!checked.ok) return false;
-  // 正则只看开头这一段（RE2 是线性的，但没必要扫完超长消息）；contains 是 O(n) 的 includes，扫全文没有代价。
+  // 正则只匹配开头这一段（RE2 为线性时间，但无需扫描超长消息）；contains 是 O(n) 的 includes，全文扫描无额外代价。
   if (checked.kind === "regex")
     return checked.regex.test(text.slice(0, WAKEWORD_SCAN_LIMIT));
   return text.toLocaleLowerCase().includes(checked.folded);

@@ -27,7 +27,7 @@ const pageCount = computed(() =>
     ? Math.max(1, Math.ceil(props.rows.length / props.pageSize))
     : 1,
 );
-// SSE 事件会让列表在原地重拉，这里只把页码夹回合法区间；直接重置会让人翻到第 3 页就被弹回第 1 页。
+// SSE 事件会使列表原地重新拉取，这里只把页码收敛回合法区间；直接重置会导致翻到第 3 页即被弹回第 1 页。
 watch(pageCount, (count) => {
   if (page.value >= count) page.value = count - 1;
 });
@@ -56,7 +56,7 @@ const allPicked = computed(
   () =>
     pickable.value.length > 0 && pickable.value.every((row) => isPicked(row)),
 );
-// 选了一部分时表头给横杠而不是空框：模型目录一页 20 行、勾了 3 行，空框读起来像「一个都没选」。
+// 部分选中时表头显示横杠而不是空框：模型目录一页 20 行、勾选 3 行时，空框会被理解为未选中任何项。
 const somePicked = computed(
   () => !allPicked.value && pickable.value.some((row) => isPicked(row)),
 );

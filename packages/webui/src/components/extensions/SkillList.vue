@@ -10,12 +10,12 @@ import {
 } from "./types";
 
 /**
- * Skill 是**模型会照着做的散文**。所以这一段做成阅读式列表而不是卡片网格：描述要一眼读得完，
- * 而卡片网格会把同排每张卡片拉到最高那张的高度，一份长描述就能把邻居撑成散开的空盒子
- * （`styles.css` 的 `.provider-grid article` 那条注释记着这件事）。
+ * Skill 的内容是模型将直接遵循的说明文本。因此这一段采用阅读式列表而不是卡片网格：描述需要连续阅读，
+ * 而卡片网格会把同排每张卡片拉伸到最高一张的高度，一份长描述即可使相邻卡片出现大量空白
+ * （`styles.css` 中 `.provider-grid article` 的注释记录了这一点）。
  *
- * 说是之前要看的东西：正文；装包进来的还要看它带了哪些文件。所以「编辑」是主动作，
- * 而它同时是「读」的入口 —— 这一页没有第二个能看到正文的地方。
+ * 启用前需要查看的内容是正文，安装包引入的还需查看其包含哪些文件。因此「编辑」是主动作，
+ * 同时也是阅读入口，这一页没有第二个可查看正文的位置。
  */
 const props = defineProps<{
   rows: SkillRow[];
@@ -32,7 +32,7 @@ const provenance = (row: SkillRow): ProvenanceKind =>
       : "local";
 const sorted = (): SkillRow[] =>
   [...props.rows].sort((left, right) => {
-    // 在等人处理的排最前。这一页真正的活儿就是这几行。
+    // 待处理项排在最前：这一页的主要操作对象就是这几行。
     const weight = (row: SkillRow): number =>
       skillPendingReview(row) ? 0 : row.load_error ? 1 : 2;
     return weight(left) - weight(right) || left.name.localeCompare(right.name);
@@ -59,14 +59,13 @@ const sorted = (): SkillRow[] =>
           />
         </h3>
         <p v-if="row.description">{{ row.description }}</p>
-        <p v-else class="ext-muted">
-          没有写描述 ——
-          模型在目录里看到的就是这一行，空着等于它不知道什么时候该读这份。
-        </p>
+        <p v-else class="ext-muted">未填写描述</p>
         <code v-if="row.load_error">{{ row.load_error }}</code>
         <p v-if="skillPendingReview(row)" class="ext-note-warn">
-          <i class="pi pi-eye" aria-hidden="true" />装进来之后还没被启用过 ——
-          点〔读一遍〕看过 SKILL.md 与它带的文件清单再决定。
+          <i
+            class="pi pi-eye"
+            aria-hidden="true"
+          />安装后从未启用。点击〔查看正文〕复核 SKILL.md 与附属文件清单。
         </p>
         <div v-if="row.requires_tools?.length" class="ext-chips">
           <small>需要工具</small>
@@ -76,9 +75,7 @@ const sorted = (): SkillRow[] =>
             :value="tool"
             severity="info"
           />
-          <small class="ext-muted"
-            >这几个工具不在本轮工具集里时，这份 skill 压根不进模型的目录</small
-          >
+          <small class="ext-muted">缺少任一项则不进入模型目录</small>
         </div>
         <div v-if="row.allowed_tools?.length" class="ext-chips">
           <small>收窄到</small>
@@ -108,7 +105,7 @@ const sorted = (): SkillRow[] =>
             size="small"
             variant="text"
             icon="pi pi-book"
-            :label="row.source === 'bundled' ? '读一遍' : '编辑'"
+            :label="row.source === 'bundled' ? '查看正文' : '编辑'"
             @click="$emit('edit', row)"
           />
           <UiButton
@@ -125,11 +122,11 @@ const sorted = (): SkillRow[] =>
     </article>
     <article v-if="!rows.length" class="ext-empty">
       <i class="pi pi-book" aria-hidden="true" />
-      <h3>还没有 skill</h3>
+      <h3>尚无 skill</h3>
       <p>
-        skill 是一份 <code>SKILL.md</code>：平时只占模型目录里一行标题，被
-        <code>load_skill</code> 拉起来时才注入正文。<br />用〔新建
-        Skill〕自己写一份，或者〔装 Skill 包〕从一个 zip 装一整棵目录进来。
+        skill 是一份 <code>SKILL.md</code>，正文由
+        <code>load_skill</code> 加载时注入。<br />〔新建 Skill〕创建单份，〔装
+        Skill 包〕从 zip 安装整个目录。
       </p>
     </article>
   </div>

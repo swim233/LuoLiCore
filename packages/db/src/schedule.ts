@@ -11,7 +11,7 @@ export interface ScheduledJob {
   createdBy: string;
   name: string;
   mode: ScheduledJobMode;
-  /** 与 `runAt` 二者其一：周期任务给 cron 表达式，一次性任务给绝对时间。 */
+  /** 与 `runAt` 二选一：周期任务填 cron 表达式，一次性任务填绝对时间。 */
   cron: string | null;
   runAt: number | null;
   timezone: string;
@@ -21,9 +21,9 @@ export interface ScheduledJob {
   lastRunAt: number | null;
   lastState: string | null;
   lastError: string | null;
-  /** 0/1：这条任务允许模型宣布「本轮不用汇报」（迁移 0013，docs/02 §10.5）。 */
+  /** 0/1：该任务允许模型声明本轮不投递（迁移 0013，docs/02 §10.5）。 */
   allowSilent: number;
-  /** 连续静默次数。任何非 silent 的触发结果归零；`SILENT_STREAK_WARN` 之后 `schedule.silent` 升 warn。 */
+  /** 连续静默次数。任何非 silent 的触发结果将其归零；超过 `SILENT_STREAK_WARN` 后 `schedule.silent` 升为 warn。 */
   silentStreak: number;
   createdAt: number;
   updatedAt: number;
@@ -41,21 +41,21 @@ export interface NewScheduledJob {
   runAt: number | null;
   timezone: string;
   payload: string;
-  /** 可选（默认 0）：这一位是后加的，既有调用方一处都不用改。 */
+  /** 可选，默认 0：该字段是后加的，既有调用方无需修改。 */
   allowSilent?: boolean;
 }
 
 /**
- * `update` 的补丁。给出的字段才写，缺席的原样保留 —— 「只改了一句正文」不该顺手把触发时间
- * 也重新算一遍（`updateScheduledJob` 那条红线）。
+ * `update` 的补丁：只写入给出的字段，缺席字段保持原值。仅修改正文不应连带重算触发时间
+ * （`updateScheduledJob` 的约束）。
  */
 export interface ScheduledJobPatch {
   name?: string;
   payload?: string;
   allowSilent?: boolean;
   /**
-   * 触发方式**整块**换。表上有 `CHECK ((cron IS NULL) + (run_at IS NULL) = 1)`，做成两个各自
-   * 独立的可选字段的话，「从 at 改成 cron」那一步一定炸：写 cron 时 run_at 还在，两列都非空。
+   * 触发方式整块替换。表上有约束 `CHECK ((cron IS NULL) + (run_at IS NULL) = 1)`，若拆成两个独立的
+   * 可选字段，「从 at 改为 cron」必然违反约束：写入 cron 时 run_at 仍在，两列同时非空。
    */
   trigger?: { cron: string; runAt: null } | { cron: null; runAt: number };
 }
@@ -67,14 +67,14 @@ const COLUMNS = `id,key,chat_id AS chatId,thread_id AS threadId,created_by AS cr
 /**
  * `scheduled_jobs` 的唯一访问入口。
  *
- * **每个读方法都吃 `key`**（除了装载用的 `listActive`）：会话隔离在这一层强制，跟
- * `ScopedArchiveRepository` 同样的理由 —— 工具侧只要漏传一次 key，一个群成员就能列出、
- * 取消别的会话的任务（docs/05 §8：工具的 inputSchema 里没有 chatId 这类字段）。
+ * 每个读方法都要求传入 `key`（装载用的 `listActive` 除外）：会话隔离在这一层强制，理由同
+ * `ScopedArchiveRepository`。工具侧只要漏传一次 key，群成员就能列出并取消其他会话的任务
+ * （docs/05 §8：工具的 inputSchema 中没有 chatId 一类字段）。
  */
 export class ScheduleRepository {
   constructor(private readonly db: Sqlite) {}
 
-  /** 重名（同会话、同为活跃）会撞 `ux_sched_name` 抛 SQLITE_CONSTRAINT —— 调用方要把它翻成 `{ok:false}`。 */
+  /** 同会话内活跃任务重名会违反 `ux_sched_name` 并抛 SQLITE_CONSTRAINT，调用方需将其转为 `{ok:false}`。 */
   create(input: NewScheduledJob): ScheduledJob {
     const now = Date.now();
     this.db
@@ -104,7 +104,7 @@ export class ScheduleRepository {
     );
   }
 
-  /** 装载用：跨会话取全部活跃任务，只有进程启动时的 `ScheduledJobRunner.load()` 该调它。 */
+  /** 装载用：跨会话取全部活跃任务，仅供进程启动时的 `ScheduledJobRunner.load()` 调用。 */
   listActive(): ScheduledJob[] {
     return this.db
       .prepare(
@@ -114,7 +114,7 @@ export class ScheduleRepository {
   }
 
   /**
-   * **跨会话**取全部任务，活跃的在前。只给 WebUI 的运维面板用（单 owner 身份，docs/14 A15）——
+   * 跨会话取全部任务，活跃的排在前面。仅供 WebUI 运维面板使用（单 owner 身份，docs/14 A15）。
    * 工具侧一律走 `listByKey`，会话隔离在那一层是硬边界。
    */
   listAll(limit = 500): ScheduledJob[] {
@@ -126,7 +126,7 @@ export class ScheduleRepository {
       .all(limit) as ScheduledJob[];
   }
 
-  /** 本会话的任务：活跃的在前，结束的按最近排，供 `schedule_list` 与 WebUI 用。 */
+  /** 本会话的任务：活跃的在前，已结束的按时间倒序，供 `schedule_list` 与 WebUI 使用。 */
   listByKey(key: string, limit = 50): ScheduledJob[] {
     return this.db
       .prepare(
@@ -145,7 +145,7 @@ export class ScheduleRepository {
       .get(key) as number;
   }
 
-  /** 返回是否真的改动了一行：调用方要能区分「取消掉了」和「本来就没有 / 已经结束了」。 */
+  /** 返回是否真的更新了一行：调用方需要区分「已取消」与「不存在或已结束」。 */
   finish(
     id: string,
     state: Exclude<ScheduledJobState, "active">,
@@ -161,10 +161,10 @@ export class ScheduleRepository {
   }
 
   /**
-   * 一次触发的结果。`lastError` 显式置 null 而不是 COALESCE：上一次的错误不该粘在这一次成功上。
+   * 记录一次触发的结果。`lastError` 显式置 null 而非 COALESCE：上一次的错误不应残留在本次成功上。
    *
-   * `silent_streak` 用一句 `CASE` **就地**算：读一次再写回去在多实例下就是丢更新
-   * （docs/01 §3.1 那张表的第一行），而这条计数正是「这条任务已经安静了多久」的唯一凭据。
+   * `silent_streak` 用一句 `CASE` 就地计算：读出后再写回在多实例下会丢更新（docs/01 §3.1 表首行），
+   * 而该计数是判断任务已静默多久的唯一凭据。
    */
   markRun(
     id: string,
@@ -184,8 +184,8 @@ export class ScheduleRepository {
   }
 
   /**
-   * 改一条**活跃**任务。0 changes（不存在或已结束）返回 null —— 调用方要能把它翻成 409，
-   * 而不是回一个假成功。给了什么改什么：缺席的列一个字不碰。
+   * 修改一条活跃任务。changes 为 0（不存在或已结束）时返回 null，调用方据此返回 409 而非假成功。
+   * 只写入给出的字段，缺席的列不做修改。
    */
   update(id: string, patch: ScheduledJobPatch): ScheduledJob | null {
     const assignments: string[] = [];
@@ -217,11 +217,11 @@ export class ScheduleRepository {
   }
 
   /**
-   * 硬删指定的一行（含活跃的）。**与 `purge(before)` 是两件事** —— 那个按保留期清理已结束的
-   * 任务，名字撞了写错一次就是全库已结束任务被清空。
+   * 硬删除指定行（含活跃任务）。与 `purge(before)` 是两个不同操作：后者按保留期清理已结束的任务，
+   * 两者混淆一次即导致全库已结束任务被清空。
    *
-   * 活跃行的调用方必须**先** `runner.unregister(id)`：cron 留着而行没了，下一次触发扫到的是
-   * 一条不存在的任务。
+   * 删除活跃行的调用方必须先调用 `runner.unregister(id)`：cron 仍注册而行已删除时，
+   * 下次触发扫到的是一条不存在的任务。
    */
   remove(id: string): boolean {
     return (
@@ -230,7 +230,7 @@ export class ScheduleRepository {
     );
   }
 
-  /** 保留清理：结束的行留 `schedule.retentionDays` 天，活跃的永不删。 */
+  /** 保留期清理：已结束的行保留 `schedule.retentionDays` 天，活跃行永不删除。 */
   purge(before: number): number {
     return this.db
       .prepare(

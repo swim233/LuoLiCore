@@ -50,11 +50,11 @@ export function migrateDatabase(
         directory,
         `luoli-${Date.now()}-pre-${pending[0]!.slice(0, 4)}.db`,
       );
-      // `VACUUM INTO` 收的是 SQL 表达式，所以能绑参数。这里的 path 不含外部输入，
-      // 但「自己转义 SQL 引号」不该是仓库里留着的先例（docs/27 · T-05）。
+      // `VACUUM INTO` 接受 SQL 表达式，因此可以绑定参数。此处的 path 不含外部输入，
+      // 但手工转义 SQL 引号不应作为本仓的先例保留（docs/27 · T-05）。
       db.prepare("VACUUM INTO ?").run(path);
-      // 同 `MaintenanceService.backup()`：`VACUUM INTO` 建的文件是 `0666 & ~umask`，
-      // 默认落成 0644 —— 一份全局可读的整库快照（docs/29 · `M-SEC-01`）。
+      // 同 `MaintenanceService.backup()`：`VACUUM INTO` 创建的文件权限为 `0666 & ~umask`，
+      // 默认为 0644，即一份全局可读的整库快照（docs/29 · `M-SEC-01`）。
       chmodSync(path, 0o600);
     }
   }
@@ -69,7 +69,7 @@ export function migrateDatabase(
   }
 }
 
-/** 一次非正常重启到底 reap 了什么。**必须报出来** —— 见 `recoverAfterCrash` 的注释。 */
+/** 一次非正常重启回收了哪些资源。必须上报，理由见 `recoverAfterCrash` 的注释。 */
 export interface CrashRecovery {
   turns: number;
   tasks: number;
@@ -80,15 +80,15 @@ export interface CrashRecovery {
 }
 
 /**
- * **返回计数而不是 void。** 这个函数在 `main.ts` 里比 `LogSink` 早 26 行被调用，结构上没法自己
- * 记日志，于是一次非正常重启之后「reap 了几条 turn / task / agent_run、释放了多少认领、清了
- * 多少预留」在日志里一个字都没有 —— `docs/00 §2` 自述 8-18 那两次崩溃「只能靠 `turns` 表里两行
- * `process_restarted` 反推」，正是这条造成的（`docs/reviews/28 · L-OPS-04`）。
- * 调用方拿这份计数先 `process.stdout.write`，等 sink 建好之后再补一条 `system.recovered`。
+ * 返回计数而非 void。本函数在 `main.ts` 中比 `LogSink` 早 26 行调用，结构上无法自行记日志，
+ * 因此一次非正常重启后「回收了几条 turn / task / agent_run、释放了多少认领、清理了多少预留」
+ * 在日志中完全缺失。`docs/00 §2` 记录的 8-18 那两次崩溃只能靠 `turns` 表里两行 `process_restarted`
+ * 反推，成因即此（`docs/reviews/28 · L-OPS-04`）。
+ * 调用方先用 `process.stdout.write` 输出该计数，待 sink 建立后补记一条 `system.recovered`。
  *
- * **它假定「进程启动 ⇒ 上一个进程已死」**，而保证这件事的是 `acquireInstanceLock`
- * （`L-OPS-01`：在它之前，第二个实例启动会把在位实例正在跑的轮次就地判死）。
- * 调用顺序因此是 open → migrate → **拿锁** → recover。
+ * 本函数假定「进程启动即上一个进程已终止」，该前提由 `acquireInstanceLock` 保证
+ * （`L-OPS-01`：在此之前，第二个实例启动会把在位实例正在执行的轮次就地判为失败）。
+ * 因此调用顺序为 open → migrate → 获取锁 → recover。
  */
 export function recoverAfterCrash(db: Sqlite): CrashRecovery {
   const now = Date.now();

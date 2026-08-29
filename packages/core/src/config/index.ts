@@ -49,16 +49,16 @@ function deepFreeze<T>(value: T): Readonly<T> {
 }
 
 /**
- * 被环境变量**最终决定**的配置键。env 层在持久化覆盖层之后合并，所以这些键的 `config_kv` 行
- * 一律无效：WebUI 写得进去、`config_revisions` 也记下了，下一次 `loadConfig` 照旧交回 env 的值。
- * 表单据此把它们禁掉并点名该改哪个环境变量（`GET /api/config/schema` 的 `envPinned`），写入端直接 400
- * —— 「保存成功但运行时没变」是 docs/20 · W-CFG-02 里最误导的一类，不能再新造一批。
- * `appliedIn: 'bot'` 的两条由 `apps/bot/src/main.ts` 的 `envOverlay` 叠（口令要先过 argon2），
- * 钉住配置的效果与这里的一样；`tests/config.persistence.test.ts` 逐条断言 env 真的压过覆盖层。
+ * 由环境变量最终决定的配置键。env 层在持久化覆盖层之后合并，因此这些键的 `config_kv` 行
+ * 一律无效：WebUI 写得进去、`config_revisions` 也记录了，下一次 `loadConfig` 仍返回 env 的值。
+ * 表单据此禁用它们并指明应修改哪个环境变量（`GET /api/config/schema` 的 `envPinned`），写入端直接 400：
+ * 保存成功但运行时未变是 docs/20 · W-CFG-02 中最具误导性的一类，不能再新增。
+ * `appliedIn: 'bot'` 的两条由 `apps/bot/src/main.ts` 的 `envOverlay` 叠加（口令要先过 argon2），
+ * 钉住配置的效果与此处相同；`tests/config.persistence.test.ts` 逐条断言 env 确实压过覆盖层。
  */
 export const ENV_PINNED_CONFIG_KEYS = [
   { key: "db.path", env: "LUOLI_DATA_DIR", appliedIn: "loadConfig" },
-  // 媒体目录跟着数据目录走，否则库与附件会分属两套部署，而 `gcFiles()` 判孤儿只看库（docs/25 §10）。
+  // 媒体目录跟随数据目录，否则数据库与附件会分属两套部署，而 `gcFiles()` 判定孤儿只看数据库（docs/25 §10）。
   { key: "media.dir", env: "LUOLI_DATA_DIR", appliedIn: "loadConfig" },
   {
     key: "access.bootstrapOwnerId",
@@ -78,7 +78,7 @@ export const ENV_PINNED_CONFIG_KEYS = [
   appliedIn: "loadConfig" | "bot";
 }>;
 
-/** 当前进程里真的被钉住的那几条（环境变量为空/未设时不算）。 */
+/** 当前进程中实际被钉住的那几条（环境变量为空或未设置时不计）。 */
 export function envPinnedConfigKeys(
   environment: NodeJS.ProcessEnv = process.env,
 ): Array<{ key: string; env: string }> {
@@ -91,11 +91,11 @@ export interface ConfigLoadOptions {
   path?: string;
   overrides?: Record<string, unknown>;
   requireOwner?: boolean;
-  /** 覆盖层里被剔除的非法路径。调用方应当把它记进日志——静默丢弃配置和静默崩溃一样糟。 */
+  /** 覆盖层中被剔除的非法路径。调用方应当记入日志：静默丢弃配置与静默崩溃同样严重。 */
   onInvalidOverride?: (dropped: string[], messages: string[]) => void;
 }
 
-/** 从 overrides 里摘掉一条路径；顺带清掉因此变空的父节点，保证重试时形状真的变了。 */
+/** 从 overrides 中移除一条路径，并清理因此变空的父节点，确保重试时结构确实改变。 */
 function removeOverridePath(
   root: Record<string, unknown>,
   path: ReadonlyArray<string | number>,
@@ -118,8 +118,8 @@ function removeOverridePath(
 }
 
 /**
- * 把 `perChat[key]` 的覆盖并到基础配置上。写入端在 schema 里受白名单约束，
- * 所以这里可以直接深合并。没有覆盖时原样返回，不产生额外对象。
+ * 把 `perChat[key]` 的覆盖合并到基础配置上。写入端在 schema 中受白名单约束，
+ * 因此这里可以直接深合并。无覆盖时原样返回，不产生额外对象。
  */
 export function perChatConfig(
   config: Readonly<Config>,
@@ -136,7 +136,7 @@ export function dottedOverrides(
   onRejected?: (key: string) => void,
 ): Record<string, unknown> {
   const root: Record<string, unknown> = {};
-  // 与 `readPersistedConfig` 同一套顺序：先浅后深，更具体的路径赢（见 `sortOverrideKeys`）。
+  // 与 `readPersistedConfig` 顺序一致：先浅后深，更具体的路径优先（见 `sortOverrideKeys`）。
   for (const row of sortOverrideKeys(rows))
     if (
       !assignDotted(
@@ -163,14 +163,14 @@ export async function loadConfig(
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
-  // 这几条与 `ENV_PINNED_CONFIG_KEYS` 里 appliedIn:'loadConfig' 的那几条一一对应，改一处要改两处。
+  // 这几条与 `ENV_PINNED_CONFIG_KEYS` 中 appliedIn:'loadConfig' 的那几条一一对应，修改时两处同步。
   const envLayer: Record<string, unknown> = {};
   if (process.env.LUOLI_DATA_DIR) {
     envLayer.db = { path: resolve(process.env.LUOLI_DATA_DIR, "luoli.db") };
-    // **媒体目录必须跟着库走。** 只搬 `db.path` 而让 `media.dir` 留在 cwd 相对的默认值上，
-    // 就会出现「库在 A、附件在 B」这种两套部署混在一起的状态 —— 而 `gcFiles()` 判孤儿的依据
-    // 正是「库里有没有行指向它」，于是它会把 B 里的用户数据全当孤儿删掉。
-    // 第七轮的验证过程里真的这么删掉过 76 个附件和 90 份子 agent 全文（docs/25 §10）。
+    // 媒体目录必须跟随数据库。只迁移 `db.path` 而让 `media.dir` 停留在相对 cwd 的默认值上，
+    // 会出现数据库在 A、附件在 B 的混合部署状态，而 `gcFiles()` 判定孤儿的依据
+    // 正是数据库中是否有行指向它，于是它会把 B 中的用户数据全部当作孤儿删除。
+    // 第七轮验证过程中曾因此删除 76 个附件和 90 份子 agent 全文（docs/25 §10）。
     envLayer.media = { dir: resolve(process.env.LUOLI_DATA_DIR, "files") };
   }
   if (process.env.LUOLI_OWNER_ID)
@@ -181,18 +181,18 @@ export async function loadConfig(
     };
   const overrides = structuredClone(options.overrides ?? {});
   /**
-   * **`${env:NAME}` 只在文件层展开。** 此前展开发生在三层合并**之后**，于是 DB 覆盖层
-   * （`config_kv`，WebUI 可写）里的 `${env:LUOLI_MASTER_KEY}` 也会被展开 —— 而 `GET /api/config`
-   * 的脱敏是按**键名**判的，往 `general.timezone` 这类键里写它就能让主密钥明文出现在响应、
-   * 导出文件和 `config_revisions` 里（docs/27 · S-06）。这不是提权（能写配置的已经是 owner），
-   * 但它破掉了「主密钥只在进程内、只用于解密 provider key」这条性质。
-   * 覆盖层里的 `${env:…}` 从此原样保留 —— 一个字面量字符串什么也做不到。
+   * `${env:NAME}` 只在文件层展开。此前展开发生在三层合并之后，于是 DB 覆盖层
+   * （`config_kv`，WebUI 可写）中的 `${env:LUOLI_MASTER_KEY}` 也会被展开，而 `GET /api/config`
+   * 的脱敏按键名判定，向 `general.timezone` 这类键写入它即可让主密钥明文出现在响应、
+   * 导出文件和 `config_revisions` 中（docs/27 · S-06）。这不构成提权（能写配置的已是 owner），
+   * 但它破坏了主密钥只存在于进程内、只用于解密 provider key 这一性质。
+   * 覆盖层中的 `${env:…}` 此后原样保留，一个字面量字符串不产生任何效果。
    */
   const fileLayer = substituteEnvironment(file);
   const compose = (): unknown =>
     deepMerge(deepMerge(fileLayer, overrides), envLayer);
-  // 持久化覆盖层来自 WebUI / 命令写入，可能带着历史遗留的非法路径。整层丢弃太粗暴、直接抛出会让
-  // 进程再也起不来（docs/19-review-round4.md · R-CFG-01），所以逐条摘掉出问题的路径后重试。
+  // 持久化覆盖层来自 WebUI 或命令写入，可能包含历史遗留的非法路径。整层丢弃过于粗暴，直接抛出会让
+  // 进程无法启动（docs/19-review-round4.md · R-CFG-01），因此逐条移除出问题的路径后重试。
   let parsed = configSchema.safeParse(compose());
   const dropped: string[] = [];
   const messages: string[] = [];

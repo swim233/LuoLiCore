@@ -5,8 +5,8 @@ const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308]);
 import { isIP, type LookupFunction } from "node:net";
 
 const DEFAULT_PORTS = new Set([80, 443, 8080, 8443]);
-// `x-subscription-token` 是 Brave 搜索 API 的 key 头（`tools/web.ts`）。跨源重定向摘认证头这件事
-// 只按名单判，名单漏一个头就等于那一个凭据能被 302 带走。
+// `x-subscription-token` 是 Brave 搜索 API 的 key 头（`tools/web.ts`）。跨源重定向剥离认证头
+// 只按名单判定，名单遗漏一个头即意味着该凭据可被 302 带走。
 const AUTH_HEADER =
   /^(authorization|proxy-authorization|x-api-key|x-goog-api-key|api-key|x-subscription-token)$/i;
 
@@ -71,9 +71,9 @@ export function privateAddress(address: string): boolean {
 }
 
 /**
- * `dns.lookup` 不认 AbortSignal（getaddrinfo 取消不了）。不在这里拦一道，解析不动的域名会把
- * 预算全耗在 DNS 上 —— 对调用方来说和「连上之后不吐字」是同一种卡死。剩下那次查询自己跑完后
- * 结果被丢掉即可。
+ * `dns.lookup` 不支持 AbortSignal（getaddrinfo 无法取消）。此处不拦一道，解析不出的域名会把
+ * 预算全部消耗在 DNS 上，对调用方而言与连上之后无响应是同一种阻塞。剩余的那次查询自行完成后
+ * 丢弃结果即可。
  */
 async function abortable<T>(
   work: Promise<T>,
@@ -84,8 +84,8 @@ async function abortable<T>(
     signal.reason instanceof Error ? signal.reason : new Error("aborted");
   if (signal.aborted) throw reason();
   let onAbort!: () => void;
-  // 监听器必须收回：不带 timeoutMs 的调用方传进来的往往是**整轮**那个信号，一次调用留一个
-  // 永不触发的监听器，一轮里几十次抓取就是几十个。
+  // 监听器必须回收：不带 timeoutMs 的调用方传入的往往是整轮的信号，一次调用残留一个
+  // 永不触发的监听器，一轮内数十次抓取即累积数十个。
   const aborted = new Promise<never>((_, reject) => {
     onAbort = (): void => reject(reason());
     signal.addEventListener("abort", onAbort, { once: true });
@@ -118,8 +118,8 @@ async function safeTarget(
   if (!policy.allowPrivate && !(policy.allowedPorts ?? DEFAULT_PORTS).has(port))
     throw new Error("port_blocked");
   const hostname = url.hostname.replace(/^\[|\]$/g, "");
-  // 域名策略在 DNS 之前判，而且**每一跳重定向都会再走一遍这里** —— 否则 allowlist 只挡得住
-  // 第一跳，一个放行域名的 302 就能把请求带去任何地方（docs/22 · V-SSRF-01 同一处教训）。
+  // 域名策略在 DNS 之前判定，且每一跳重定向都会重新经过这里；否则 allowlist 只能拦住
+  // 第一跳，一个放行域名的 302 即可把请求引向任意地址（docs/22 · V-SSRF-01 同一教训）。
   if (policy.denyHosts?.length && hostMatches(hostname, policy.denyHosts))
     throw new Error("host_denied");
   if (policy.allowHosts?.length && !hostMatches(hostname, policy.allowHosts))
@@ -155,15 +155,15 @@ export interface OutboundPolicy {
   maxRedirects?: number;
   maxBytes?: number;
   timeoutMs?: number;
-  /** `tools.web.allowlist`：非空时**只有**命中的域名放行（白名单语义）。 */
+  /** `tools.web.allowlist`：非空时仅放行命中的域名（白名单语义）。 */
   allowHosts?: readonly string[];
-  /** `tools.web.denylist`：命中即拒，**优先于** allowlist。 */
+  /** `tools.web.denylist`：命中即拒绝，优先级高于 allowlist。 */
   denyHosts?: readonly string[];
 }
 
 /**
  * 域名 glob 匹配：`example.com` 精确匹配，`*.example.com` 匹配任意子域（不含裸域）。
- * 大小写不敏感，尾点归一化 —— `EXAMPLE.COM.` 和 `example.com` 是同一个主机。
+ * 大小写不敏感，尾点归一化：`EXAMPLE.COM.` 与 `example.com` 是同一主机。
  */
 export function hostMatches(
   hostname: string,
@@ -189,10 +189,10 @@ function requestOnce(
   const { promise, resolve, reject } = Promise.withResolvers<GuardedResponse>();
   const headers = Object.fromEntries(new Headers(init.headers).entries());
   headers.host = target.url.host;
-  // Node ≥20 的 autoSelectFamily 默认开，net.connect 用 `{ all: true }` 调 lookup，此时回调要的是
-  // 数组；回传字符串会让它读到 `addresses[0].address === undefined`，抛 `Invalid IP address: undefined`。
-  // 表现是 web_fetch 在现代 Node 上 100% 失败，而 tests/web.test.ts 只覆盖了 SSRF 拒绝路径，
-  // 放行路径一次都没真正跑过，所以这条一直没被发现。
+  // Node ≥20 的 autoSelectFamily 默认开启，net.connect 以 `{ all: true }` 调用 lookup，此时回调需要
+  // 数组；回传字符串会让它读到 `addresses[0].address === undefined`，抛出 `Invalid IP address: undefined`。
+  // 表现为 web_fetch 在较新 Node 上全部失败，而 tests/web.test.ts 只覆盖了 SSRF 拒绝路径，
+  // 放行路径从未真正执行过，因此该缺陷长期未被发现。
   const lookupPinned: LookupFunction = (_hostname, options, callback) => {
     if (options.all)
       callback(null, [{ address: target.address, family: target.family }]);
@@ -273,10 +273,10 @@ function requestOnce(
 }
 
 /**
- * `timeoutMs` 覆盖整次抓取（DNS + 全部重定向跳），因为 `http.request` 默认**没有任何超时**：
- * 目标主机不回 SYN、或者连上之后一个字节都不发时，这个 promise 永远不 settle。调用它的
- * `web_fetch` 又是在一轮对话里同步等着的，唯一兜底是 10 分钟的 `concurrency.turnTimeoutMs`
- * —— 用户看到的就是 bot 收了消息然后再也不说话（logs/2026-08-17 有多轮死在这一类等待上）。
+ * `timeoutMs` 覆盖整次抓取（DNS 与全部重定向跳），因为 `http.request` 默认没有任何超时：
+ * 目标主机不回 SYN、或连接建立后不发送任何字节时，该 promise 永远不 settle。调用它的
+ * `web_fetch` 在一轮对话中同步等待，唯一兜底是 10 分钟的 `concurrency.turnTimeoutMs`，
+ * 用户看到的表现是 bot 接收消息后不再响应（logs/2026-08-17 有多轮阻塞于此类等待）。
  */
 export async function guardedFetch(
   raw: string,

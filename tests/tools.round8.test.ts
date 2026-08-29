@@ -8,8 +8,8 @@ import type { ApprovalBroker, LogSink } from '@luoli/core';
 import type { RuntimeTurnContext } from '@luoli/shared';
 
 /**
- * 第八轮：工具系统专项复审的回归用例。每一条钉的都是一个**实测过的**失败形态，而不是
- * 「读代码觉得不对」—— 用例名写的就是那个形态。
+ * 第八轮：工具系统专项复审的回归用例。每一条固定的都是一个实测过的失败形态，而不是
+ * 读代码推测出的问题，用例名即那个形态。
  */
 
 function jail(name: string, maxRead = 1024): { root: string; files: FileTools } {
@@ -25,9 +25,9 @@ describe('R8-FS-01 · 目录遍历：软链成环与越界软链都不该毁掉�
     mkdirSync(`${root}/a/b`, { recursive: true });
     writeFileSync(`${root}/a/b/f.txt`, 'x');
     symlinkSync('.', `${root}/loop`);
-    // 旧实现：depth 只挡层数不挡重复 —— 这棵三条目的树列出 17 条，其中 5 条 path 是空串
-    // （`loop` 的 realpath 就是搜索根，`relative(root, root)` = ''），而模型拿空串去 read_file
-    // 就读到了目录本身。
+    // 旧实现：depth 只限层数不去重，这棵三条目的树列出 17 条，其中 5 条 path 是空串
+    // （`loop` 的 realpath 即搜索根，`relative(root, root)` 为 ''），模型拿空串调 read_file
+    // 会读到目录本身。
     const out = files.list('.', 5) as { entries: Array<{ path: string; type: string }>; truncated: boolean; skipped: number };
     expect(out.entries.map((entry) => entry.path).sort()).toEqual(['a', 'a/b', 'a/b/f.txt', 'loop']);
     expect(out.entries.find((entry) => entry.path === 'loop')).toMatchObject({ type: 'directory' });
@@ -39,8 +39,8 @@ describe('R8-FS-01 · 目录遍历：软链成环与越界软链都不该毁掉�
     writeFileSync(`${root}/keep.txt`, 'needle');
     symlinkSync('/etc', `${root}/escape`);
     symlinkSync('/nowhere-at-all', `${root}/broken`);
-    // 旧实现：`jail.resolve` 对越界软链抛 path_outside_workspace，而遍历里那一抛没人接 ——
-    // 整次 list/glob/grep 返回 ok:false，同目录另外几百个好文件一并看不见。docs/22 · I-03
+    // 旧实现：`jail.resolve` 对越界软链抛 path_outside_workspace，而遍历中的这次抛出无人捕获，
+    // 整次 list/glob/grep 返回 ok:false，同目录另外几百个正常文件一并不可见。docs/22 · I-03
     // 只修了断链（statSync 抛 ENOENT）那半边。
     expect(files.list('.', 1)).toMatchObject({ ok: true, entries: [{ path: 'keep.txt' }], skipped: 2 });
     expect(files.glob('*.txt', '.')).toMatchObject({ ok: true, matches: ['keep.txt'], skipped: 2 });
@@ -52,8 +52,8 @@ describe('R8-FS-01 · 目录遍历：软链成环与越界软链都不该毁掉�
     for (let index = 0; index < 500; index += 1) writeFileSync(`${root}/f${index}.txt`, 'hit');
     const globbed = files.glob('*.txt', '.') as { matches: string[]; truncated: boolean };
     expect(globbed.matches).toHaveLength(500);
-    // 旧实现：`truncated: matches.length >= 500` —— 恰好 500 条也报截断，模型于是去缩范围
-    // 重查一次本来已经完整的结果，而且会以为自己没看全。
+    // 旧实现：`truncated: matches.length >= 500`，恰好 500 条也报截断，模型据此缩小范围
+    // 重查一次本已完整的结果，并会认为自己没看全。
     expect(globbed.truncated).toBe(false);
     writeFileSync(`${root}/f500.txt`, 'hit');
     expect(files.glob('*.txt', '.')).toMatchObject({ truncated: true });
@@ -65,8 +65,8 @@ describe('R8-FS-02 · grep：跳过的条数必须交出去', () => {
     const { root, files } = jail('grep-skip', 64);   // 预算 64B ⇒ 上限 256B
     writeFileSync(`${root}/big.txt`, 'needle\n'.repeat(200));
     writeFileSync(`${root}/small.txt`, 'needle\n');
-    // 旧实现：skipped 恒为 0，模型据此判断「这就是全部命中」—— 而 §3.1 立的规矩是
-    // 「条数必须交出去，否则模型会以为自己看全了」。
+    // 旧实现：skipped 恒为 0，模型据此判定这就是全部命中，而 §3.1 的规定是条数必须交出去，
+    // 否则模型会认为自己已看全。
     expect(files.grep('needle', '.')).toMatchObject({ ok: true, matches: [{ path: 'small.txt' }], skipped: 1 });
   });
 
@@ -86,7 +86,7 @@ describe('R8-FS-03 · read_file 的行号与 edit_file 的对照', () => {
     const { root, files } = jail('numbered', 8);
     writeFileSync(`${root}/f.txt`, 'aaa\nbbb\nccc\nddd\n');
     expect(files.read('f.txt', 0, 8)).toMatchObject({ content: '1\taaa\n2\tbbb', firstLine: 1, truncated: true, nextOffset: 8 });
-    // 起点按 offset 之前的换行数算。旧实现没有行号，接上之后若从 1 重数，模型据此定位就全错了。
+    // 起点按 offset 之前的换行数计算。旧实现没有行号，续读时若从 1 重新计数，模型据此定位会全错。
     expect(files.read('f.txt', 8, 8)).toMatchObject({ content: '3\tccc\n4\tddd', firstLine: 3 });
   });
 
@@ -114,8 +114,8 @@ describe('R8-FS-04 · delete_file 删目录 = rm -r，要两道闸', () => {
     const { root, files } = jail('delete-dir');
     mkdirSync(`${root}/one/two/three`, { recursive: true });
     writeFileSync(`${root}/one/two/three/f.txt`, 'x');
-    // 旧实现：schema 里压根没有 recursive，而 rename 一个目录就是把整棵树搬走 —— 一次
-    // 已批准的 delete_file 能搬掉半个工作目录，审批弹窗上只看得到一个路径。
+    // 旧实现：schema 里没有 recursive，而 rename 一个目录就是把整棵树移走，一次已批准的
+    // delete_file 能移走半个工作目录，而审批弹窗上只显示一个路径。
     expect(files.remove('one')).toMatchObject({ ok: false, error: 'path_is_directory' });
     expect(files.remove('one', true)).toMatchObject({ ok: false, error: 'recursive_delete_too_shallow' });
     expect(files.remove('one/two', true)).toMatchObject({ ok: true, recursive: true });
@@ -145,12 +145,12 @@ describe('R8-REG-01 · 熔断计数要覆盖最常见的两种失败', () => {
     const registry = new ToolRegistry(log, { request: async () => true } as ApprovalBroker, limits);
     registry.register({ name: 'strict', description: '', inputSchema: z.object({ n: z.number() }), policy, sourcePriority: 1, execute: () => ({ ok: true }) });
     const context = { turn: turnOf(), workspace: '.', agentKind: 'main' as const };
-    // 旧实现：invalid_input 一次都不计 —— 实测同一个错误的调用连发 5 次全部照收，唯一的
-    // 边界是 maxSteps，而那对用户就是「bot 忙了半分钟然后说做不到」。
+    // 旧实现：invalid_input 完全不计数，实测同一个错误调用连发 5 次全部被接受，唯一的边界是
+    // maxSteps，在用户侧表现为 bot 忙了半分钟后回复无法完成。
     expect(await registry.execute('strict', { n: 'bad' }, context)).toMatchObject({ error: 'invalid_input' });
     expect(await registry.execute('strict', { n: 'bad' }, context)).toMatchObject({ error: 'invalid_input' });
     expect(await registry.execute('strict', { n: 'bad' }, context)).toMatchObject({ error: 'tool_disabled_after_errors' });
-    // 门槛是**连续**失败：熔断前成功一次就该清零。
+    // 门槛是连续失败：熔断前成功一次即应清零。
     const fresh = { turn: turnOf({ turnId: 't2' }), workspace: '.', agentKind: 'main' as const };
     expect(await registry.execute('strict', { n: 'bad' }, fresh)).toMatchObject({ error: 'invalid_input' });
     expect(await registry.execute('strict', { n: 1 }, fresh)).toMatchObject({ ok: true });
@@ -161,7 +161,7 @@ describe('R8-REG-01 · 熔断计数要覆盖最常见的两种失败', () => {
     const registry = new ToolRegistry(log, { request: async () => false } as ApprovalBroker, limits);
     registry.register({ name: 'gated', description: '', inputSchema: z.object({}), policy: { ...policy, approval: 'always' }, sourcePriority: 1, execute: () => ({ ok: true }) });
     const context = { turn: turnOf(), workspace: '.', agentKind: 'main' as const };
-    // 每一次被拒的重试都是一条推给 owner 的审批通知。旧实现连发 6 次全部照收。
+    // 每一次被拒的重试都会向 owner 推送一条审批通知。旧实现连发 6 次全部被接受。
     expect(await registry.execute('gated', {}, context)).toMatchObject({ error: '未获批准' });
     expect(await registry.execute('gated', {}, context)).toMatchObject({ error: '未获批准' });
     expect(await registry.execute('gated', {}, context)).toMatchObject({ error: 'tool_disabled_after_errors' });
@@ -176,8 +176,8 @@ describe('R8-SKILL-01 · skill 的 allowed-tools 收窄不到核心工具集', (
     }
     const context = { turn: turnOf({ skillAllowedTools: new Set(['bash']) }), workspace: '.', agentKind: 'main' as const };
     expect(await registry.execute('bash', {}, context)).toMatchObject({ ok: true, ran: 'bash' });
-    // 旧实现：只豁免 load_skill，于是一个 `allowed-tools: [bash]` 的 skill 让模型跑完之后
-    // 连一句话都追发不出去。
+    // 旧实现：只豁免 load_skill，于是一个 `allowed-tools: [bash]` 的 skill 会导致模型执行完成后
+    // 无法追发任何一条消息。
     expect(await registry.execute('send_message', {}, context)).toMatchObject({ ok: true, ran: 'send_message' });
     expect(await registry.execute('read_file', {}, context)).toMatchObject({ error: 'tool_not_in_allowlist' });
     expect(SKILL_NARROWING_EXEMPT).toContain('send_message');
@@ -196,8 +196,8 @@ describe('R8-SKILL-01 · skill 的 allowed-tools 收窄不到核心工具集', (
     const loader = new SkillLoader(db, directory, 'limited');
     loader.scan();
     expect(loader.load('narrow', 'limited', ['read_file', 'bash'])).toMatchObject({ narrows: true, allowedTools: ['read_file'] });
-    // 旧实现：这一档交回的 allowedTools 等于「当前全部可用工具」，而调用方无条件并进本轮
-    // 允许集 —— 先载入 narrow 再载入 open，narrow 的收窄就被整个抹掉了。
+    // 旧实现：这一档返回的 allowedTools 等于当前全部可用工具，而调用方无条件并入本轮允许集，
+    // 于是先载入 narrow 再载入 open 时，narrow 的收窄被整体抹掉。
     expect(loader.load('open', 'limited', ['read_file', 'bash'])).toMatchObject({ narrows: false });
     closeDatabase(db);
   });
@@ -220,8 +220,8 @@ describe('R8-WEB-01 · web_fetch 抓回来的 HTML 要抽成正文', () => {
 
   it('一堆开标签而没有闭标签时仍是线性的，不回溯', () => {
     // 正则版（`<script[^>]*>[\s\S]*?</script>`）在这个形状上是 O(n²)：25 万个起点各扫到结尾。
-    // 与 docs/24 · R-SEC-01（grep 换 RE2）同一条教训 —— 接受任意输入就必须有线性上界。
-    // **属性解析加进来之后这条尤其要绿**：`attribute` 只许在已被 `>` 界定的那一个标签里扫。
+    // 与 docs/24 · R-SEC-01（grep 换 RE2）是同一条结论：接受任意输入就必须有线性上界。
+    // 属性解析加入之后这条尤其要通过：`attribute` 只允许在已被 `>` 界定的那一个标签内扫描。
     const started = performance.now();
     expect(extractHtml(`${'<script>'.repeat(80_000)}tail`).text).toBe('');
     expect(extractHtml(`${'<div><p><span>'.repeat(60_000)}tail`).text).toContain('tail');
@@ -232,18 +232,18 @@ describe('R8-WEB-01 · web_fetch 抓回来的 HTML 要抽成正文', () => {
 });
 
 /**
- * 抽成纯文本之后还剩三处在丢东西 —— 模型看不见页面上明明有的标题、链接地址与图片。
- * 这三条各自是「取回来了但读不到」的一个分支，见 `tools/web.ts · extractHtml` 的注释。
+ * 抽成纯文本之后仍有三处在丢失信息：模型看不到页面上确实存在的标题、链接地址与图片。
+ * 这三条各自对应取回来了但读不到的一个分支，见 `tools/web.ts · extractHtml` 的注释。
  */
 describe('web_fetch 抽取层：标题 / 链接 / 图片不能再丢', () => {
   it('`<title>` 要留下来 —— head 整棵被丢，标题此前永远到不了模型', () => {
     const page = extractHtml('<html><head><meta name="x" content="y"><title>洛璃 &amp; 核心</title><script>var a=1</script></head><body><p>正文</p></body></html>');
     expect(page.title).toBe('洛璃 & 核心');
-    // head 里其余的东西照旧是噪声，不许跟着标题一起进来。
+    // head 里其余内容仍属噪声，不得随标题一起进入正文。
     expect(page.text).not.toContain('var a');
     expect(page.text).not.toContain('content="y"');
     expect(page.text).toContain('正文');
-    // 标题只走 title 字段，不重复塞进正文。
+    // 标题只走 title 字段，不重复写入正文。
     expect(page.text).not.toContain('洛璃');
   });
 
@@ -263,7 +263,7 @@ describe('web_fetch 抽取层：标题 / 链接 / 图片不能再丢', () => {
     const page = extractHtml('<a href="#top">回顶部</a><a href="javascript:void(0)">假链接</a><a href="data:text/html;base64,AAAA">内联</a>', 'https://a.example/');
     expect(page.links).toBe(0);
     expect(page.text).not.toContain('(');
-    // 锚文本本身照旧要留：它是页面上真实存在的字。
+    // 锚文本本身仍需保留：它是页面上真实存在的文字。
     expect(page.text).toContain('回顶部');
     expect(page.text).toContain('假链接');
   });
@@ -278,14 +278,14 @@ describe('web_fetch 抽取层：标题 / 链接 / 图片不能再丢', () => {
     const page = extractHtml('<img src="/a.png" alt="一只猫"><img data-src="/b.png" alt="占位"><img alt="没有地址">', 'https://a.example/p/');
     expect(page.text).toContain('![一只猫](https://a.example/a.png)');
     expect(page.text).toContain('![占位](https://a.example/b.png)');
-    // 没有可用地址时至少把 alt 留下：模型得知道「这里有张图」才可能决定要不要再取一次。
+    // 没有可用地址时至少保留 alt：模型需要知道此处有一张图，才能决定是否再取一次。
     expect(page.text).toContain('[图：没有地址]');
   });
 
   it('属性值的三种写法都认，未闭合的 `<a>` 也要补上右括号', () => {
     expect(extractHtml(`<a href='/single'>甲</a>`, 'https://a.example/').text).toContain('[甲](https://a.example/single)');
     expect(extractHtml('<a href=/bare>乙</a>', 'https://a.example/').text).toContain('[乙](https://a.example/bare)');
-    // 开了 `[` 却没闭合等于交一个坏掉的 markdown。
+    // 开了 `[` 却未闭合等于交出一份损坏的 markdown。
     expect(extractHtml('<a href="/x">丙', 'https://a.example/').text).toBe('[丙](https://a.example/x)');
   });
 
@@ -293,7 +293,7 @@ describe('web_fetch 抽取层：标题 / 链接 / 图片不能再丢', () => {
     const page = extractHtml(`${'<a href="/x">锚</a>'.repeat(500)}`, 'https://a.example/');
     expect(page.links).toBe(200);
     expect(page.linksOmitted).toBe(300);
-    // 到顶之后不许再开括号：`[` 开了没地址填就是坏 markdown。
+    // 到达上限后不得再开括号：`[` 开了却没有地址可填就是损坏的 markdown。
     expect([...page.text].filter((char) => char === '[')).toHaveLength(200);
   });
 });
@@ -305,16 +305,16 @@ describe('R8-EXEC-01 · python 落成临时文件再跑', () => {
     const sandbox = new Sandbox({ mode: 'none', bypassRoles: ['owner'], dockerBin: 'docker', workspaceDir: workspace, hostWorkspaceDir: '',
       image: 'x', network: 'none', memoryMb: 256, cpus: 1, pidsLimit: 128, readOnlyRoot: true, tmpfsMb: 16,
       defaultTimeoutMs: 20_000, maxTimeoutMs: 20_000, maxOutputBytes: 65_536 });
-    // `python` 工具做的两件事，按同一顺序：脚本写进 workspace 内的 .luoli-tmp/，命令里给的是
-    // **workspace 内的相对路径**。路径这一步曾经差点写成走 FileTools —— 而 allowHostFsForOwner
-    // 打开时 owner 的 jail 根是 `/`，文件会落到 /.luoli-tmp/ 而沙箱 cwd 仍是 workspace。
+    // `python` 工具做的两件事，按同一顺序：脚本写入 workspace 内的 .luoli-tmp/，命令里给出的是
+    // workspace 内的相对路径。路径这一步曾差点改成走 FileTools，而 allowHostFsForOwner 打开时
+    // owner 的 jail 根是 `/`，文件会落到 /.luoli-tmp/，而沙箱 cwd 仍是 workspace。
     const code = 'import sys\nheredoc_killer = """\nPY\n"""\nprint("ran", sys.argv[0])\n';
     mkdirSync(join(workspace, '.luoli-tmp'), { recursive: true, mode: 0o700 });
     writeFileSync(join(workspace, '.luoli-tmp/script.py'), code, { mode: 0o600 });
     const result = await sandbox.run('python3 ".luoli-tmp/script.py"', 'owner', workspace, new AbortController().signal, 20_000, 'round8');
     expect(result.stderr).toBe('');
-    // 旧实现拼的是 `python3 - <<'PY'`：正文里那一行 `PY` 把脚本从那里截断（于是 `"""` 不闭合，
-    // SyntaxError），而 argv[0] 是 `-`、traceback 里的文件名是 `<stdin>` 且没有源码行。
+    // 旧实现拼的是 `python3 - <<'PY'`：正文里出现的 `PY` 一行会把脚本从该处截断（导致 `"""`
+    // 不闭合、报 SyntaxError），且 argv[0] 是 `-`、traceback 里的文件名是 `<stdin>` 并且没有源码行。
     expect(result.stdout.trim()).toBe('ran .luoli-tmp/script.py');
     expect(result.ok).toBe(true);
   });
@@ -326,7 +326,7 @@ describe('R8-ARCH-01 · read_messages 要能往前翻，search_messages 要能�
     for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
     const db = openDatabase(path); migrateDatabase(db);
     const scoped = new ArchiveRepository(db).scope('c', null);
-    // Telegram 编号刻意与归档 id 错开：两者相等时「回复标记换没换过来」这条断言什么都测不到。
+    // Telegram 编号刻意与归档 id 错开：两者相等时，回复标记是否正确转换这条断言测不到任何东西。
     for (let index = 1; index <= 10; index += 1) {
       scoped.append({ chatId: 'c', messageThreadId: null, tgMessageId: index + 100, direction: 'in', fromKind: 'user',
         fromUserId: index % 2 ? '111' : '222', fromName: 'n', fromUsername: index % 2 ? 'alice' : 'bob',
@@ -353,7 +353,7 @@ describe('R8-ARCH-01 · read_messages 要能往前翻，search_messages 要能�
   it('ISO 时间锚点落到该时刻起的第一条消息上', () => {
     const { db, scoped } = archive();
     expect(scoped.window({ anchorDate: 7000, direction: 'after', limit: 2 }).map((row) => row.text)).toEqual(['记录 7 needle', '记录 8 needle']);
-    // 时刻晚于最后一条：落到最后一条，而不是空手而归。
+    // 时刻晚于最后一条时落到最后一条，而不是返回空结果。
     expect(scoped.window({ anchorDate: 99_000, direction: 'before', limit: 1 }).map((row) => row.text)).toEqual(['记录 10 needle']);
     closeDatabase(db);
   });
@@ -365,7 +365,7 @@ describe('R8-ARCH-01 · read_messages 要能往前翻，search_messages 要能�
     const rows = scoped.window({ limit: 1 });
     const [line] = citeArchivedMessages(rows, { timezone: 'Asia/Shanghai', resolveReplies: (ids) => scoped.archiveIdsByTgMessageIds(ids) });
     const replied = scoped.recent(20).find((row) => row.tgMessageId === 107)!;
-    // 归档 id 与 Telegram 编号不是一套：原样渲染 `↩︎#107` 的话模型 get_message(107) 什么都取不到。
+    // 归档 id 与 Telegram 编号不是同一套：原样渲染 `↩︎#107` 时模型调 get_message(107) 取不到内容。
     expect(replied.id).toBe(7);
     expect(line).toBe(`#${rows[0]!.id} [1970-01-01 08:00] 张三(@zhangsan): 多行 ⏎ 正文   ↩︎#7`);
     // 一行一条：多行正文不能在结果里伪造出别人的发言。

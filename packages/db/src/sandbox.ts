@@ -10,7 +10,7 @@ export interface SandboxContainer {
   createdAt: number;
   lastUsedAt: number;
   expiresAt: number;
-  /** `sandbox.persistent.maxLifetimeMs` 为 0 时是 null —— 0 一律是「不设上限」（docs/11）。 */
+  /** `sandbox.persistent.maxLifetimeMs` 为 0 时取 null：0 统一表示不设上限（docs/11）。 */
   hardExpiresAt: number | null;
   pinned: number;
   execCount: number;
@@ -35,10 +35,10 @@ const COLUMNS = `chat_id AS chatId,name,container_id AS containerId,image,spec_h
 /**
  * `sandbox_containers` 的唯一访问入口。
  *
- * 与 `ScopedArchiveRepository` / `ScheduleRepository` 的形状一致：**逐会话的方法都吃 `chatId`
- * 且谓词字面写在 SQL 里**（`tests/db.isolation.test.ts` 扫的是源码里的 SQL 字面量，藏进模板
- * 变量就扫不到）。跨会话的三个（`list` / `dueFor` / `staleSpec`）是回收与运维面板专用 ——
- * 容器管理工具整族 owner-only 且用途本身就是跨会话运维（docs/05 §3.11）。
+ * 与 `ScopedArchiveRepository` / `ScheduleRepository` 形状一致：逐会话的方法都要求传入 `chatId`，
+ * 且谓词以字面量写在 SQL 中（`tests/db.isolation.test.ts` 扫描的是源码里的 SQL 字面量，
+ * 藏进模板变量后无法检出）。跨会话的三个方法（`list` / `dueFor` / `staleSpec`）专供回收与运维面板：
+ * 容器管理工具整族为 owner-only，其用途本身就是跨会话运维（docs/05 §3.11）。
  */
 export class SandboxContainerRepository {
   constructor(private readonly db: Sqlite) {}
@@ -62,7 +62,7 @@ export class SandboxContainerRepository {
     );
   }
 
-  /** 跨会话：回收对账与 `container_list` / WebUI 面板。 */
+  /** 跨会话查询：用于回收对账与 `container_list` / WebUI 面板。 */
   list(): SandboxContainer[] {
     return this.db
       .prepare(
@@ -79,8 +79,8 @@ export class SandboxContainerRepository {
   }
 
   /**
-   * 一次执行之后推进滑动到期。**`hard_expires_at` 不动** —— 绝对上限从创建那一刻算起，
-   * 不因活跃延长，否则它就不是上限（docs/05 §5.5）。
+   * 一次执行后推进滑动到期时间。`hard_expires_at` 不变：绝对上限自创建时刻起算，不因活跃而延长，
+   * 否则它就不成其为上限（docs/05 §5.5）。
    */
   touch(chatId: string, expiresAt: number): void {
     this.db
@@ -90,7 +90,7 @@ export class SandboxContainerRepository {
       .run(Date.now(), expiresAt, chatId);
   }
 
-  /** `container_keep`：改到期时刻 / 钉住。两者都可单独给。 */
+  /** `container_keep`：修改到期时刻或设置钉住，两者可分别单独传入。 */
   keep(
     chatId: string,
     patch: { expiresAt?: number; pinned?: boolean },

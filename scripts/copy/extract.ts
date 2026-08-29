@@ -1,12 +1,12 @@
 /**
  * 用户可见文案的抽取与落回。dev 文案面板（`scripts/copy/plugin.ts`）与体检脚本（`stats.ts`）
- * 共用这一份 —— **id 必须两边一致**，否则面板里保存的东西对不上源码里的位置。
+ * 共用这一份实现，id 必须两侧一致，否则面板中保存的内容对不上源码中的位置。
  *
- * 为什么走 AST 而不是正则：文案有一半藏在插值与属性里（`:label="\`${n} 轮进行中\`"`、
- * `empty="当前没有正在跑的轮次。"`、`title="..."`），而带中文的行里又混着大量注释。
- * Vue 的模板 AST + TS 的 script AST 能把这两件事分清。
+ * 采用 AST 而非正则的原因：文案有一半位于插值与属性中（`:label="\`${n} 轮进行中\`"`、
+ * `empty="当前没有正在跑的轮次。"`、`title="..."`），而含中文的行里又混有大量注释。
+ * Vue 的模板 AST 与 TS 的 script AST 能区分这两者。
  *
- * 这里**不是** i18n 层：源码始终是唯一真相，抽出来的东西只在改写期间存在。
+ * 这里不是 i18n 层：源码始终是唯一真相，抽取结果只在改写期间存在。
  */
 import { createHash } from "node:crypto";
 import { readFileSync, readdirSync, writeFileSync } from "node:fs";
@@ -15,11 +15,11 @@ import { parse as parseSfc } from "vue/compiler-sfc";
 import ts from "typescript";
 import { canonicalSlots, missingSlots, slotsOf } from "./slots.js";
 
-// 占位符判据由 `slots.ts` 独占（浏览器侧的面板也 import 它）—— 这里只转手出去。
+// 占位符判据由 `slots.ts` 独占（浏览器侧的面板也 import 它），这里只做转发。
 export { canonicalSlots, missingSlots, slotsOf } from "./slots.js";
 
 const HAN = /[㐀-䶿一-鿿豈-﫿]/;
-/** 属性里会被人读到的那些。`:foo` / `v-bind:foo` 同名走同一张表。 */
+/** 属性中会被用户读到的那些。`:foo` 与 `v-bind:foo` 同名，共用同一张表。 */
 const COPY_ATTRS = new Set([
   "label",
   "empty",
@@ -41,16 +41,16 @@ const COPY_ATTRS = new Set([
   "suffix",
   "prefix",
 ]);
-/** 图标类名、路径、枚举值这类长得像散文的 ASCII 串。命中即不算文案。 */
+/** 图标类名、路径、枚举值这类形似自然语言的 ASCII 串。命中即判定为非文案。 */
 const NOT_COPY = /^(pi |\/|https?:|#|[a-z0-9_.-]+$|[A-Za-z-]+\/[A-Za-z-]+)/;
 
-/** 一条文案在源码里是什么形态 —— 决定 dev 面板怎么给它插桩。 */
+/** 一条文案在源码中的形态，决定 dev 面板如何为它插桩。 */
 export type Place =
   /** JS 字符串 / 模板串（script 块里，或模板表达式内部）。 */
   | "literal"
-  /** 模板里的一段文字，可能夹着 `{{ }}`。 */
+  /** 模板中的一段文字，可能夹带 `{{ }}`。 */
   | "text"
-  /** 静态属性 `label="…"`；插桩时要连属性名一起换成 `:label`。 */
+  /** 静态属性 `label="…"`；插桩时需连同属性名一并改为 `:label`。 */
   | "attr";
 
 export interface Entry {
@@ -64,40 +64,40 @@ export interface Entry {
   where: string;
   place: Place;
   /**
-   * 在模板块里还是在 script 块里。dev 面板据此决定怎么引用注入的函数：模板里必须是**组件作用域**
-   * 里的名字（Vue 会把别的标识符前缀成 `_ctx.`），而 script 里必须走 `window.` —— `defineProps()`
-   * 与 `withDefaults()` 会被提升到 setup 之外，引用局部 const 直接编译失败。
+   * 位于模板块还是 script 块。dev 面板据此决定如何引用注入的函数：模板中必须使用组件作用域
+   * 内的名字（Vue 会给其他标识符加上 `_ctx.` 前缀），而 script 中必须走 `window.`，因为 `defineProps()`
+   * 与 `withDefaults()` 会被提升到 setup 之外，引用局部 const 会直接编译失败。
    */
   zone: "template" | "script";
-  /** 源码里那一段的原样文本（含引号 / 含缩进），落回时拿它跟当前源码核对。 */
+  /** 源码中该段的原始文本（含引号与缩进），落回时用它与当前源码核对。 */
   raw: string;
-  /** 展示用的那一句 —— raw 去掉引号与首尾空白之后的正文。 */
+  /** 展示用的正文，即 raw 去除引号与首尾空白之后的内容。 */
   core: string;
-  /** 改写时必须原样保留的插值。空数组 = 纯静态串。 */
+  /** 改写时必须原样保留的插值。空数组表示纯静态串。 */
   slots: string[];
   /** `place: 'attr'` 才有：`name="value"` 整段的范围与属性名。 */
   attr?: { offset: number; end: number; name: string };
-  /** 模板条目所属的那个元素（`elements()` 的 key）。点界面回跳与「换位置」都靠它。 */
+  /** 模板条目所属的元素（`elements()` 的 key）。界面回跳与调整位置都依赖它。 */
   owner?: string;
   pinned: string[];
 }
 
-/** 一个模板元素，以及往它身上写位置信息需要的落点。 */
+/** 一个模板元素，以及向它写入位置信息所需的落点。 */
 export interface ElementInfo {
   key: string;
   file: string;
   tag: string;
-  /** `<tag` 之后的位置，dev 面板往这儿插 `data-copy-id` / 新建 `class` 与 `style`。 */
+  /** `<tag` 之后的位置，dev 面板在此插入 `data-copy-id`，或新建 `class` 与 `style`。 */
   attrInsert: number;
   parent: string | null;
-  /** 整个元素在源码里的范围（含开闭标签）。真删走它。 */
+  /** 整个元素在源码中的范围（含开闭标签）。实际删除依据它。 */
   range: { start: number; end: number };
   /**
-   * 真删的**否决理由**。非空即不许删 —— 判据在 `walkElements` 里算，理由要能念给人听，
-   * 因为面板会把它原样显示出来（「删不了，因为……」比灰掉一个按钮有用）。
+   * 实际删除的否决理由。非空即禁止删除。判据在 `walkElements` 中计算，理由必须可读，
+   * 因为面板会原样展示它：给出不能删除的原因比直接禁用按钮更有价值。
    */
   guards: string[];
-  /** 静态 `class="…"` 的范围与内容。没有这个属性时为 undefined（工具类要新插一个）。 */
+  /** 静态 `class="…"` 的范围与内容。该属性不存在时为 undefined（工具类需新插入一个）。 */
   classAttr?: {
     offset: number;
     end: number;
@@ -105,7 +105,7 @@ export interface ElementInfo {
     valueEnd: number;
     value: string;
   };
-  /** 静态 `style="…"`，同上。拖拽偏移写在这里。 */
+  /** 静态 `style="…"`，同上。拖拽偏移写入这里。 */
   styleAttr?: {
     offset: number;
     end: number;
@@ -116,19 +116,19 @@ export interface ElementInfo {
 }
 
 /**
- * 面板往模板 `class` 里写的 token，一组一个互斥值，空值即清掉这一组。
+ * 面板写入模板 `class` 的 token，每组一个互斥值，空值即清除该组。
  *
- * 为什么是工具类而不是改结构：贴边、字号这些本来就是 CSS 的事，换序表达不了「贴到容器右边缘」。
- * 而工具类可逆（去掉 token 就回到原样）、不动 DOM 结构、也不会让 `.top-actions .search`
+ * 采用工具类而非修改结构的原因：贴边、字号本就属于 CSS 范畴，调整顺序无法表达贴到容器右边缘。
+ * 而工具类可逆（移除 token 即恢复原样）、不改动 DOM 结构，也不会让 `.top-actions .search`
  * 这类后代选择器失配。
  *
- * **字号是「基准 × 倍数」，倍数在 class 里、基准在内联 `--u-base` 里**（见 `basisOf`）。
- * 不是绝对档：这套界面的字号是 8 个各不相同的 rem 值（`.68` / `.7` / `.76` / `.78` / `.8` /
- * `.82` / `.84` / `.95`），没有统一刻度，同一个绝对「小」档给标题和给脚注会把层级压平。
- * 也**不能**写成 `1.12em`：`em` 在 `font-size` 上是父级的字号，一个 64px 的 `<h1>` 点「大」
- * 会缩到 17.9px。字重反过来：`font-weight` 本身就是刻度，所以直接给 400/500/600/700。
+ * 字号采用基准乘以倍数的方式，倍数写在 class 中、基准写在内联 `--u-base` 中（见 `basisOf`）。
+ * 不使用绝对档位：这套界面的字号是 8 个各不相同的 rem 值（`.68` / `.7` / `.76` / `.78` / `.8` /
+ * `.82` / `.84` / `.95`），没有统一刻度，同一个绝对小档同时用于标题与脚注会压平层级。
+ * 也不能写成 `1.12em`：`em` 用于 `font-size` 时取父级字号，一个 64px 的 `<h1>` 选择放大
+ * 会缩至 17.9px。字重相反：`font-weight` 本身即为刻度，因此直接给出 400/500/600/700。
  *
- * `display` 只有一个值：它是「隐藏」这个动作的落点，点第二下即清掉（与其它组同一套语义）。
+ * `display` 只有一个值：它是隐藏这一动作的落点，再次点击即清除（与其他组语义一致）。
  */
 export const UTILITIES = {
   push: { prefix: "u-push", values: ["start", "center", "end"] },
@@ -146,18 +146,18 @@ const read = (path: string): string => readFileSync(path, "utf8");
 const lineOf = (text: string, offset: number): number =>
   text.slice(0, offset).split("\n").length;
 /**
- * 条目 / 元素的稳定 id。取 `(file, raw, nth)` 而不是 `(file, offset)` 是有意的：offset 每次保存
- * 都会变，而面板的 `store.overrides[id]` 要跨一次保存活下来。
+ * 条目与元素的稳定 id。取 `(file, raw, nth)` 而非 `(file, offset)` 是有意为之：offset 每次保存
+ * 都会变化，而面板的 `store.overrides[id]` 需要跨越一次保存继续有效。
  *
- * **12 位十六进制，不是 6 位。** 6 位是 24 bit，而这个仓库现在抽出 2700 条文案 —— 生日问题下
- * 撞号概率约 **20%**，也就是「迟早会撞」而不是「几乎不会」。而它真撞过：`sandbox.bypassRoles`
- * 与 `approval.skipForOwner` 两条配置说明在 `aa826d` 上重合，`applyChanges` 那个
- * `new Map([id, entry])` 于是把前者静默盖掉，**在面板里改前一句会把后一句的源码区间覆盖掉**。
- * 12 位是 48 bit，同样规模下撞号概率约 1.3e-8。撞号本身仍由下面 `duplicateIds()` 兜底。
+ * 使用 12 位十六进制而非 6 位。6 位为 24 bit，而本仓库当前抽出 2700 条文案，按生日问题估算
+ * 碰撞概率约 20%，属于必然会发生而非几乎不会发生。实际也确已发生：`sandbox.bypassRoles`
+ * 与 `approval.skipForOwner` 两条配置说明在 `aa826d` 上重合，`applyChanges` 中的
+ * `new Map([id, entry])` 于是静默覆盖了前者，导致在面板中修改前一句会覆盖后一句的源码区间。
+ * 12 位为 48 bit，同等规模下碰撞概率约 1.3e-8。碰撞本身仍由下方 `duplicateIds()` 兜底。
  */
 const id6 = (...parts: string[]): string =>
   createHash("sha1").update(parts.join(" ")).digest("hex").slice(0, 12);
-/** 展示用：内部换行与缩进压成单空格，否则一条模板正文会占五行。 */
+/** 展示用：将内部换行与缩进压缩为单个空格，否则一条模板正文会占五行。 */
 const flat = (text: string): string => text.replace(/\s+/g, " ").trim();
 
 function looksLikeCopy(text: string, fromTextNode: boolean): boolean {
@@ -165,15 +165,15 @@ function looksLikeCopy(text: string, fromTextNode: boolean): boolean {
   if (!value || /^[\d\s.,:;·/|$%+-]*$/.test(value)) return false;
   if (HAN.test(value)) return true;
   if (NOT_COPY.test(value)) return false;
-  // 纯 ASCII 的只收「像话」的：`LIVE OVERVIEW`、`CONTROL PLANE` 这类小标题在文本节点里，
-  // 属性里则要求带空格 —— 免得把 `severity="secondary"` 收进来。
+  // 纯 ASCII 的只收自然语言形态的：`LIVE OVERVIEW`、`CONTROL PLANE` 这类小标题位于文本节点中，
+  // 属性中则要求含空格，以免把 `severity="secondary"` 收进来。
   return (
     /[A-Za-z]{2}/.test(value) &&
     (fromTextNode ? value.length >= 3 : / /.test(value))
   );
 }
 
-// ── 钉住关系：改这句话会连带动到文档与测试。懒算，插件那侧用不上。 ──────────
+// ── 钉住关系：修改这句话会连带影响文档与测试。惰性计算，插件侧用不到。 ──────────
 let pinIndex: {
   docs: Map<string, string[]>;
   tests: Map<string, string[]>;
@@ -186,7 +186,7 @@ const walkDir = (dir: string): string[] =>
         ? [join(dir, e.name)]
         : [],
   );
-/** 只收**断言里**的串。夹具里的中文（`text: '早上好'`）跟界面文案无关，混进来会让「钉住」全是误报。 */
+/** 只收断言中的串。夹具中的中文（`text: '早上好'`）与界面文案无关，混入会让钉住关系全是误报。 */
 const ASSERTED =
   /(?:toContain|toBe|toMatch|toHaveText|toContainEqual|toStrictEqual|toEqual)\(\s*(?:'([^'\n]{2,80})'|"([^"\n]{2,80})")/g;
 function pins(): { docs: Map<string, string[]>; tests: Map<string, string[]> } {
@@ -217,7 +217,7 @@ function pins(): { docs: Map<string, string[]>; tests: Map<string, string[]> } {
   pinIndex = { docs, tests };
   return pinIndex;
 }
-/** 断言常写 `toContain('要登录')` 而源码那句更长，所以正反两个方向都要看。 */
+/** 断言常写作 `toContain('要登录')` 而源码中的句子更长，因此正反两个方向都要匹配。 */
 function pinsFor(core: string, want: boolean): string[] {
   if (!want) return [];
   const { docs, tests } = pins();
@@ -230,7 +230,7 @@ function pinsFor(core: string, want: boolean): string[] {
 }
 
 // ── script 侧：TS AST ────────────────────────────────────────────────────
-/** 一个串的「在哪」：从它往上走到顶层声明，把属性名 / 调用名串起来。 */
+/** 一个串的位置信息：从它向上追溯到顶层声明，拼接沿途的属性名与调用名。 */
 function describeTs(node: ts.Node): { top: string; where: string } {
   const trail: string[] = [];
   let top = "top";
@@ -339,12 +339,12 @@ interface TplHit {
   owner: string;
   attr?: { offset: number; end: number; name: string };
 }
-/** `v-if="active === 'quota'"` 这类分支决定了下面那一片属于哪个页面。 */
+/** `v-if="active === 'quota'"` 这类分支决定其下区域属于哪个页面。 */
 const pageOf = (exp: string): string | null =>
   /(?:active|tab|section|settingsTab|segment)\s*===\s*'([a-z0-9_-]+)'/.exec(
     exp,
   )?.[1] ?? null;
-/** 对话框里的文案在模板根上，判不出属于哪一页 —— 用它自己的抬头当身份，另立一份。 */
+/** 对话框文案位于模板根上，无法判定属于哪一页，因此用其自身标题作为标识，单独归为一类。 */
 const CONTAINERS = new Set(["UiModal", "UiDrawer"]);
 function containerName(node: any): string | null {
   if (!CONTAINERS.has(node.tag)) return null;
@@ -372,7 +372,7 @@ function containerName(node: any): string | null {
 const elementKey = (file: string, tag: string, start: number): string =>
   id6("el", file, tag, String(start));
 
-/** 模板里所有元素，连同「整块挪走」需要的范围。key 只在源码不变期间稳定，改动后要重新抽。 */
+/** 模板中的所有元素，以及整体移除所需的范围。key 只在源码未变期间稳定，改动后需重新抽取。 */
 function walkElements(
   file: string,
   fileText: string,
@@ -380,8 +380,8 @@ function walkElements(
 ): Map<string, ElementInfo> {
   const map = new Map<string, ElementInfo>();
   /**
-   * 静态属性的范围。**只认静态那一个** —— `:class` / `:style` 是表达式，往里塞东西就得改代码。
-   * 元素只有动态绑定时新插一个静态的，Vue 会把两者合并。
+   * 静态属性的范围，只识别静态形式：`:class` / `:style` 是表达式，向其中写入需要改动代码。
+   * 元素只有动态绑定时新插入一个静态属性，Vue 会将两者合并。
    */
   const attrOf = (node: any, name: string): ElementInfo["classAttr"] => {
     const hit = (node.props ?? []).find(
@@ -403,12 +403,12 @@ function walkElements(
       (p: any) => p.type === NT.DIRECTIVE && p.name === name,
     );
   /**
-   * 真删的三条否决判据。都是**保存之后才会炸**的形态，所以宁可在这里就不许删。
+   * 实际删除的三条否决判据。三者都是保存之后才会出错的形态，因此在这里直接禁止删除。
    *
-   * ① `v-else` / `v-else-if` 相邻：删掉前面那个 `v-if`，紧跟着的 `v-else` 当场是编译错误，
-   *    表现是整页白屏。全仓 40 处 `v-else-if` + 41 处 `v-else`。
-   * ② 带 `ref`：脚本里 `xxx.value!.focus()` 这类写法会在运行时炸。全仓 12 处。
-   * ③ 唯一根节点：模板根只剩空的，组件从此渲染不出任何东西。
+   * ① `v-else` / `v-else-if` 相邻：删除前面的 `v-if` 后，紧随其后的 `v-else` 立即产生编译错误，
+   *    表现为整页白屏。全仓有 40 处 `v-else-if` 与 41 处 `v-else`。
+   * ② 带 `ref`：脚本中 `xxx.value!.focus()` 这类写法会在运行时报错。全仓 12 处。
+   * ③ 唯一根节点：模板根变为空，组件从此无法渲染出任何内容。
    */
   const guardsOf = (
     node: any,
@@ -455,7 +455,7 @@ function walkElements(
     for (const [index, kid] of kids.entries()) {
       if (kid.type !== NT.ELEMENT) continue;
       const start = kid.loc.start.offset;
-      // `<tag` 之后：核对一下源码真的以这个 tag 开头，对不上就不给它 attrInsert（宁可不插桩）。
+      // `<tag` 之后：核对源码确实以该 tag 开头，不匹配时不提供 attrInsert，宁可不插桩。
       const named =
         fileText.slice(start + 1, start + 1 + kid.tag.length) === kid.tag;
       const key = elementKey(file, kid.tag, start);
@@ -529,9 +529,9 @@ function scanTemplate(
     owner: string,
   ): void => {
     if (node.type === NT.TEXT) {
-      // **raw 必须是源码切片，不能用 `node.content`**：Vue 的解析器对文本节点做过空白压缩
-      // （换行 + 缩进被并成一个空格），拿 content 去核对源码会整条对不上 —— 表现是这些句子
-      // 在落回时被静静拒绝，谁也改不动它们。
+      // raw 必须取自源码切片，不能使用 `node.content`：Vue 的解析器对文本节点做过空白压缩
+      // （换行与缩进被合并为一个空格），用 content 核对源码会整条不匹配，表现为这些句子
+      // 在落回时被静默拒绝，无法修改。
       const raw = fileText.slice(node.loc.start.offset, node.loc.end.offset);
       if (looksLikeCopy(raw, true)) {
         hits.push({
@@ -566,9 +566,9 @@ function scanTemplate(
       }
       const nested = containerName(node) ?? box;
       const mine = elementKey(file, node.tag, node.loc.start.offset);
-      // 「总计 {{ n }} 次」在 AST 里是三个兄弟节点。逐个出条目的话只剩「总计」和「次」两截，
-      // 既看不出中间是什么，也没法改成「已经跑过 n 轮」。所以整串文字 + 插值合成一条来改。
-      // 插值里自己带中文的（三元的两种状态）不合并 —— 那两句本该分开改。
+      // 总计 {{ n }} 次在 AST 中是三个兄弟节点。逐个生成条目只会得到总计与次两段，
+      // 既看不出中间内容，也无法整体改写为其他表述。因此把整串文字与插值合成一条处理。
+      // 插值自身含中文的（三元表达式的两种状态）不合并，那两句本应分别修改。
       const inline: any[] = node.children ?? [];
       const mergeable =
         inline.length > 1 &&
@@ -704,7 +704,7 @@ function extractVue(sink: Sink, file: string, surfacePrefix: string): void {
   const short = file.split("/").pop() ?? file;
   let pageIdents = new Map<string, Set<string>>();
   if (descriptor.template?.ast) {
-    // compiler-sfc 的模板 AST 用的是整份文件的 offset；这里校一次，不成立就整块跳过而不是错位写回。
+    // compiler-sfc 的模板 AST 使用整份文件的 offset；这里校验一次，不成立时整块跳过而非错位写回。
     const children = descriptor.template.ast.children as Array<{
       type: number;
       content?: string;
@@ -743,7 +743,7 @@ function extractVue(sink: Sink, file: string, surfacePrefix: string): void {
       block.loc.start.offset,
       short,
     )) {
-      // 顶层声明只被一个页面引用时，就把它归到那一页 —— 否则进 shared，免得一页的稿子看不全。
+      // 顶层声明仅被一个页面引用时归入该页面，否则归入 shared，以免单页文案不完整。
       const owners = [...pageIdents]
         .filter(([, bag]) => bag.has(hit.top))
         .map(([page]) => page);
@@ -820,7 +820,7 @@ function extractTs(
   }
 }
 
-/** 浏览器里跑得到的那些文件 —— dev 面板只能给它们做即时预览。 */
+/** 可在浏览器中运行的那些文件，dev 面板只能为它们提供即时预览。 */
 export const BROWSER_FILES = [
   "packages/webui/src/App.vue",
   "packages/webui/src/views/ConsoleView.vue",
@@ -845,12 +845,12 @@ export const BROWSER_FILES = [
 ];
 
 /**
- * 去掉被别的条目**整段包住**的那些。
+ * 移除被其他条目整段包含的那些。
  *
  * `` `${cause instanceof Error ? cause.message : '请求失败'}——一次性登录链接 5 分钟有效……` ``
- * 这一句里，TS AST 会同时给出外层模板串和内层的 `'请求失败'`。两条范围重叠 —— 插桩时替换掉内层，
- * 外层记下的 offset 就错位了，替出来的是一段语法都不成立的东西（LoginView 那次就是这样）。
- * 留外层：那才是人读到的整句，内层只是它的一个片段。
+ * 这一句中，TS AST 会同时给出外层模板串与内层的 `'请求失败'`。两者范围重叠：插桩时替换内层后，
+ * 外层记录的 offset 即错位，替换结果是一段语法不成立的代码（LoginView 那次即如此）。
+ * 保留外层：它才是用户读到的完整句子，内层只是其中一个片段。
  */
 function dropNested(entries: Entry[]): Entry[] {
   return entries.filter(
@@ -865,7 +865,7 @@ function dropNested(entries: Entry[]): Entry[] {
   );
 }
 
-/** 单个文件的条目。dev 面板按文件插桩时用，不算「钉住」（那要扫 docs 与 tests，太贵）。 */
+/** 单个文件的条目，供 dev 面板按文件插桩使用，不计算钉住关系（那需要扫描 docs 与 tests，开销过大）。 */
 export function extractFile(file: string): Entry[] {
   const sink: Sink = { entries: [], seen: new Map(), withPins: false };
   const prefix = file.includes("/views/ConsoleView")
@@ -883,7 +883,7 @@ export function extractFile(file: string): Entry[] {
   return dropNested(sink.entries);
 }
 
-/** 出现不止一次的 id。空集是常态 —— 非空说明 `id6` 的位数不够用了。 */
+/** 出现多于一次的 id。空集是常态，非空说明 `id6` 的位数已不够用。 */
 export function duplicateIds(entries: Entry[]): Set<string> {
   const seen = new Set<string>();
   const twice = new Set<string>();
@@ -968,7 +968,7 @@ export function extractAll(): Entry[] {
   return [...byFile.values()].flatMap(dropNested);
 }
 
-/** 一个 SFC 里的所有模板元素。key 只在源码不变期间稳定 —— 每次改动之后要重新问一遍。 */
+/** 一个 SFC 中的所有模板元素。key 只在源码未变期间稳定，每次改动后需重新获取。 */
 export function elements(file: string): Map<string, ElementInfo> {
   if (!file.endsWith(".vue")) return new Map();
   const fileText = read(file);
@@ -977,7 +977,7 @@ export function elements(file: string): Map<string, ElementInfo> {
   return walkElements(file, fileText, descriptor.template.ast);
 }
 
-/** 元素当前的拖拽偏移（源码里 `style="translate: …"` 那一条）。没有就是 0,0。 */
+/** 元素当前的拖拽偏移（源码中 `style="translate: …"` 那一条）。不存在时为 0,0。 */
 export function translateOf(info: ElementInfo): { dx: number; dy: number } {
   const found = /(?:^|;)\s*translate\s*:\s*(-?[\d.]+)px\s+(-?[\d.]+)px/.exec(
     info.styleAttr?.value ?? "",
@@ -985,13 +985,13 @@ export function translateOf(info: ElementInfo): { dx: number; dy: number } {
   return { dx: Number(found?.[1] ?? 0), dy: Number(found?.[2] ?? 0) };
 }
 /**
- * 字号档的**基准**（源码里 `style="--u-base: 13.3px"` 那一条）。没有就是 null。
+ * 字号档位的基准（源码中 `style="--u-base: 13.3px"` 那一条）。不存在时为 null。
  *
- * 为什么字号需要一个存下来的基准：`.u-size-lg { font-size: 1.12em }` 里的 `em` 是**父级**的
- * 字号，不是元素自己的 —— 实测这个界面上一个 64px 的 `<h1>`（父级 16px）点「大」会缩到 17.9px，
- * 与按钮上写的字正好相反。所以档位是「基准 × 倍数」：基准由面板量一次元素**自己**的字号存进
- * 内联样式，倍数由 class 决定。这样点两次不会叠加（倍数是替换的），而 CSS 里没有任何单位能
- * 表达「我自己现在这么大的 1.12 倍」。
+ * 字号需要存储基准的原因：`.u-size-lg { font-size: 1.12em }` 中的 `em` 取的是父级
+ * 字号而非元素自身字号。实测该界面上一个 64px 的 `<h1>`（父级 16px）选择放大后会缩至 17.9px，
+ * 与按钮标注的效果相反。因此档位定义为基准乘以倍数：基准由面板测量元素自身字号一次并写入
+ * 内联样式，倍数由 class 决定。这样连续点击不会叠加（倍数是替换的），而 CSS 中没有任何单位能
+ * 表达元素当前字号的 1.12 倍。
  */
 export function basisOf(info: ElementInfo): number | null {
   const found = /(?:^|;)\s*--u-base\s*:\s*([\d.]+)px/.exec(
@@ -1016,8 +1016,8 @@ export function utilitiesOf(
   return out;
 }
 
-// ── 算新属性值：纯函数，一个字节都不落盘 ──────────────────────────────────
-/** 工具类：同组互斥，空值即清掉这一组。 */
+// ── 计算新属性值：纯函数，不写入任何文件 ──────────────────────────────────
+/** 工具类：同组互斥，空值即清除该组。 */
 export function classValue(
   current: string,
   group: UtilityGroup,
@@ -1035,10 +1035,10 @@ export function classValue(
   return tokens.join(" ");
 }
 /**
- * 内联样式：按名字设 / 清若干条声明，别的原样保留、顺序不变。值为 null 即摘掉那一条。
+ * 内联样式：按名称设置或清除若干条声明，其余原样保留、顺序不变。值为 null 即移除该条。
  *
- * 同一个元素上可能同时有拖拽偏移与字号基准，**必须一次算完**：两条各算一次的话，第二条是
- * 拿源码里那个（已经过期的）值算的，落刀时又指向同一段源码 —— 后一条被判重叠丢掉。
+ * 同一元素上可能同时存在拖拽偏移与字号基准，必须一次性计算完成：分两次计算时，第二次基于
+ * 源码中已过期的值，写入时又指向同一段源码，导致后一条被判为重叠而丢弃。
  */
 export function styleValue(
   current: string,
@@ -1057,15 +1057,15 @@ export function styleValue(
   return kept.join("; ");
 }
 /**
- * 拖拽偏移写成元素自己的 `translate`。
+ * 拖拽偏移写入元素自身的 `translate`。
  *
- * **为什么是独立的 `translate` 属性而不是 `transform`**：`styles.css` 里 16 处
- * `transform: translate`、10 处 `scale`、3 处 `rotate` —— 按钮按压反馈（`scale(.97)`）、
- * 入场动画（`rise-in`）、页面过渡都在用 `transform`。写内联 `transform` 会把它们整条顶掉；
- * 而 `translate` 是独立的变换属性，与 `transform` **叠加**而不是互斥，全仓一处未用。
+ * 使用独立的 `translate` 属性而非 `transform` 的原因：`styles.css` 中有 16 处
+ * `transform: translate`、10 处 `scale`、3 处 `rotate`，按钮按压反馈（`scale(.97)`）、
+ * 入场动画（`rise-in`）、页面过渡都在使用 `transform`。写入内联 `transform` 会整条覆盖它们；
+ * 而 `translate` 是独立的变换属性，与 `transform` 叠加而非互斥，全仓未使用。
  *
- * 偏移是**固定像素**：这套界面有响应式断点，换个宽度它还偏这么多 —— 小幅微调正是想要的效果，
- * 大幅位移则确实会在别的宽度下错位。`0,0` 视为归位，连声明一起摘掉（返回 null）。
+ * 偏移采用固定像素：这套界面存在响应式断点，切换宽度后偏移量不变。小幅微调正是预期效果，
+ * 大幅位移则确实会在其他宽度下错位。`0,0` 视为归位，连同声明一并移除（返回 null）。
  */
 export const translateValue = (dx: number, dy: number): string | null =>
   Math.round(dx) === 0 && Math.round(dy) === 0
@@ -1073,8 +1073,8 @@ export const translateValue = (dx: number, dy: number): string | null =>
     : `${Math.round(dx)}px ${Math.round(dy)}px`;
 
 /**
- * 删除的落刀范围。整行只有这个元素时**连缩进与行尾换行一起摘掉** —— 只删元素本身会留下一行
- * 空白缩进，删三处就是三行，比留着那个元素更难看。与别的内容同行时只摘元素自己那一段。
+ * 删除的作用范围。整行只有该元素时，连同缩进与行尾换行一并移除：只删元素本身会留下一行
+ * 空白缩进，删除三处即产生三行空白，效果比保留该元素更差。与其他内容同行时只移除元素自身那一段。
  */
 function lineWise(
   text: string,
@@ -1089,10 +1089,10 @@ function lineWise(
   return { at: lineStart, to: range.end };
 }
 
-// ── 落盘：全仓唯一的写入口 ────────────────────────────────────────────────
-/** 一件待保存的改动。三种形态各自指向源码里的一个位置。 */
+// ── 落盘：全仓唯一的写入入口 ────────────────────────────────────────────────
+/** 一项待保存的改动。三种形态各自指向源码中的一个位置。 */
 export type Change =
-  /** 改一句文案。`id` 是 `extractAll()` 的条目 id。 */
+  /** 修改一句文案。`id` 是 `extractAll()` 的条目 id。 */
   | { kind: "text"; file: string; id: string; value: string }
   /** 贴边 / 对齐 / 间距 / 字号 / 字重 / 斜体 / 隐藏。`key` 是 `elements()` 的元素 key。 */
   | {
@@ -1104,9 +1104,9 @@ export type Change =
     }
   /** 自由拖拽的偏移。 */
   | { kind: "style"; file: string; key: string; dx: number; dy: number }
-  /** 字号档的基准（见 `basisOf`）。`px` 为 null 时连声明一起摘掉。 */
+  /** 字号档位的基准（见 `basisOf`）。`px` 为 null 时连同声明一并移除。 */
   | { kind: "basis"; file: string; key: string; px: number | null }
-  /** 真的把这个元素从模板里摘走。`ElementInfo.guards` 非空时一律拒绝。 */
+  /** 将该元素从模板中实际移除。`ElementInfo.guards` 非空时一律拒绝。 */
   | { kind: "remove"; file: string; key: string };
 
 interface Splice {
@@ -1116,14 +1116,14 @@ interface Splice {
 }
 
 /**
- * 把一批暂存改动写回源码。**这是唯一会写文件的地方** —— 面板上的编辑、贴边、拖拽都只改 DOM 预览，
- * 按了保存才走到这儿。
+ * 把一批暂存改动写回源码。这是唯一写文件的位置：面板上的编辑、贴边、拖拽都只修改 DOM 预览，
+ * 点击保存后才执行到这里。
  *
- * 为什么要一次性算完再一次性写：所有 offset 都是对着**同一份原文**量的。逐条写盘的话，第一条写完
- * 后面所有 offset（以及元素 key）就全漂了，第二条要么找不着位置、要么切错地方。所以每个文件只读一次、
- * 把改动折成互不重叠的 splice、按 offset 降序一次过写完。
+ * 一次性计算完再一次性写入的原因：所有 offset 都是相对同一份原文测量的。逐条写盘时，第一条写入后
+ * 其后所有 offset（以及元素 key）全部失效，第二条要么找不到位置、要么切在错误位置。因此每个文件只读一次、
+ * 将改动折算成互不重叠的 splice、按 offset 降序一次写完。
  *
- * 返回改动前的文件内容，供「撤销上次保存」用。
+ * 返回改动前的文件内容，供撤销上次保存使用。
  */
 export function applyChanges(changes: Change[]): {
   applied: number;
@@ -1134,10 +1134,10 @@ export function applyChanges(changes: Change[]): {
   const all = extractAll();
   const entries = new Map(all.map((entry) => [entry.id, entry]));
   /**
-   * 撞号的 id 一律**拒绝**，不猜。`new Map` 撞号时留下的是后写入的那一条，而两条 entry 的
-   * `offset`/`end` 指着源码里完全不同的两段 —— 按错的那段 splice 进去，人改的是 A、被改写的是 B，
-   * 而 A 原文还在。这正是「摘除比伪造安全」要挡的形状（docs/16 §5）：宁可这次存不上。
-   * 12 位 hash 之后这里实际上不该再命中，留着是因为静默写错比拒绝贵得多。
+   * 碰撞的 id 一律拒绝，不做推测。`new Map` 碰撞时保留的是后写入的那一条，而两条 entry 的
+   * `offset`/`end` 指向源码中完全不同的两段：按错误的那段 splice 后，用户修改的是 A、实际被改写的是 B，
+   * 而 A 的原文仍在。这正是摘除比伪造安全要防的形态（docs/16 §5）：宁可本次保存失败。
+   * 改用 12 位 hash 之后这里实际上不应再命中，保留它是因为静默写错的代价远高于拒绝。
    */
   const collided = duplicateIds(all);
   const byFile = new Map<string, Change[]>();
@@ -1145,9 +1145,9 @@ export function applyChanges(changes: Change[]): {
     byFile.set(change.file, [...(byFile.get(change.file) ?? []), change]);
   const refused: string[] = [];
   /**
-   * **没落地的那些改动指向哪儿**（文案条目 id / 元素 key）。`refused` 是给人看的句子，
-   * 面板拿它没法知道该留住哪几条暂存 —— 而清错的代价是人刚打的字凭空消失。
-   * 被删除范围吃掉的不算：那些改动本来就没意义了，留着只会挡下一次保存。
+   * 未生效的改动分别指向何处（文案条目 id 与元素 key）。`refused` 是供人阅读的说明，
+   * 面板无法据此判断应保留哪几条暂存，而清除错误的代价是用户刚输入的内容丢失。
+   * 被删除范围覆盖的不计入：那些改动已无意义，保留只会阻碍下一次保存。
    */
   const stuck: string[] = [];
   const before: Record<string, string> = {};
@@ -1156,11 +1156,11 @@ export function applyChanges(changes: Change[]): {
     const text = read(file);
     const els = elements(file);
     const splices: Splice[] = [];
-    /** 同一个元素上新插的 `class` 与 `style` 落在同一个点，要合成一条，否则第二条会被判成重叠丢掉。 */
+    /** 同一元素上新插入的 `class` 与 `style` 落在同一位置，需合成一条，否则第二条会被判为重叠而丢弃。 */
     const inserts = new Map<number, string[]>();
-    /** 真删单独攒着：它的范围会整段吃掉别的改动，得在排序之前先把那些摘掉。 */
+    /** 实际删除单独收集：它的范围会整段覆盖其他改动，需在排序之前先移除那些改动。 */
     const removals: Array<{ at: number; to: number; key: string }> = [];
-    /** 元素 key → 这个元素上攒着的 class 档位与内联声明。折算在循环之后统一做。 */
+    /** 元素 key → 该元素上累积的 class 档位与内联声明。折算在循环之后统一进行。 */
     const patches = new Map<
       string,
       {
@@ -1195,8 +1195,8 @@ export function applyChanges(changes: Change[]): {
           stuck.push(change.id);
           continue;
         }
-        // 大括号内侧的空白顺手收成记录里那个样子（`{{n}}` → `{{ n }}`），落盘的就是收过的那份 ——
-        // 否则源码里会攒出四种写法的同一个占位。
+        // 大括号内侧的空白统一规整为记录中的形式（`{{n}}` → `{{ n }}`），落盘的即规整后的版本，
+        // 否则源码中会出现同一占位的四种写法。
         const next = canonicalSlots(
           change.value.trim().replace(/\\n/g, "\n"),
           entry.slots,
@@ -1262,7 +1262,7 @@ export function applyChanges(changes: Change[]): {
         applied += 1;
         continue;
       }
-      // 档位必须是这一组里真有的那几个 —— 写进去一个 `u-gap-x-99` 就是往源码里塞一个没有规则的 token。
+      // 档位必须是该组中确实存在的那几个：写入一个 `u-gap-x-99` 等于向源码塞入一个没有规则的 token。
       if (
         change.kind === "class" &&
         change.value &&
@@ -1281,15 +1281,15 @@ export function applyChanges(changes: Change[]): {
         patch.style["--u-base"] = change.px
           ? `${Math.round(change.px * 10) / 10}px`
           : null;
-      // `basis` 不计数：它是字号档的随行件，不是人做的第三件事。计了的话点一下字号会报「写回 2 处」。
+      // `basis` 不计入计数：它是字号档位的附属项，而非用户的第三项操作。计入后调整一次字号会报告写回 2 处。
       if (change.kind !== "basis") applied += 1;
     }
     /**
-     * 每个元素、每个属性**折成一份最终值再落一次刀**。
+     * 每个元素、每个属性折算出一份最终值后只写入一次。
      *
-     * 逐条落刀是错的：一个元素同时改字号与字重（面板上很常见）会算出两次 `class` 值，各自
-     * 都是拿源码里那个旧值算的，落刀时又都指向同一段源码 —— 要么后一条被判重叠丢掉，要么在
-     * 元素上插出两个 `class` 属性。同一个元素上的 `translate` 与 `--u-base` 同理。
+     * 逐条写入是错误的：一个元素同时修改字号与字重（面板上很常见）会计算出两次 `class` 值，两者
+     * 都基于源码中的旧值，写入时又都指向同一段源码，结果要么后一条被判为重叠而丢弃，要么在
+     * 元素上插入两个 `class` 属性。同一元素上的 `translate` 与 `--u-base` 同理。
      */
     for (const { info, classes, style } of patches.values()) {
       const write = (
@@ -1311,7 +1311,7 @@ export function applyChanges(changes: Change[]): {
           return;
         }
         if (!value) {
-          // 清空时连属性一起摘掉（含前面那个空格），这样「设了再清」能回到一模一样的源码。
+          // 清空时连同属性一并移除（含前面的空格），这样设置后再清除能回到完全相同的源码。
           const from =
             text[existing.offset - 1] === " "
               ? existing.offset - 1
@@ -1339,10 +1339,10 @@ export function applyChanges(changes: Change[]): {
         );
     }
     /**
-     * 删除的范围会把落在它里面的改动整段吃掉（同一元素里的一句文案、它自己的工具类）。
-     * 那些改动已经没有意义了 —— **静静丢掉，但要把计数扣回来**，否则「写回 3 处」里有两处
-     * 其实是同一次删除。AST 范围要么包含要么互斥，所以只需要判包含。
-     * 嵌套删除同理：删了父级就不必再删子级，只留最外层那一个。
+     * 删除的范围会整段覆盖落在其中的改动（同一元素内的一句文案、它自身的工具类）。
+     * 那些改动已无意义，直接丢弃，但需要相应扣减计数，否则写回 3 处中会有两处
+     * 实际来自同一次删除。AST 范围要么包含要么互斥，因此只需判断包含关系。
+     * 嵌套删除同理：删除父级后无需再删子级，只保留最外层的那一个。
      */
     const outer = removals.filter(
       (each) =>
@@ -1384,7 +1384,7 @@ export function applyChanges(changes: Change[]): {
   return { applied, refused, stuck, before };
 }
 
-/** 「撤销上次保存」：把整批文件按快照写回去。 */
+/** 撤销上次保存：将整批文件按快照写回。 */
 export function restore(snapshot: Record<string, string>): string[] {
   const done: string[] = [];
   for (const [file, text] of Object.entries(snapshot)) {

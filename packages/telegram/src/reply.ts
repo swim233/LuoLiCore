@@ -1,7 +1,7 @@
 import type { Message } from "grammy/types";
 import type { ArchivedMessage, ScopedArchiveRepository } from "@luoli/db";
 
-/** `TelegramMedia.process` 的最小形状，测试里可以换成不出网的替身。 */
+/** `TelegramMedia.process` 的最小接口，测试中可替换为不发起网络请求的实现。 */
 export interface MediaProcessor {
   process(
     payload: Record<string, unknown>,
@@ -34,9 +34,9 @@ export function displayName(from: Message["from"]): string | null {
 }
 
 /**
- * 挂媒体是**幂等的补写**：归档行已经落库，这一步只是把 parts 补上去。调用方据此把它放在
- * 按 chat 串行的入口锁**外面** —— 它会调 pdf-parse / mammoth / sharp 解析用户上传的文件，
- * 挂在锁里等于一个畸形 PDF 就能让那个会话之后的每条消息都不再归档（docs/27 · R-01）。
+ * 挂载媒体是幂等的补写：归档行已经落库，本步骤只补充 parts。调用方据此把它放在按 chat 串行的入口锁
+ * 之外：它会调用 pdf-parse / mammoth / sharp 解析用户上传的文件，放在锁内会导致一个畸形 PDF 就能让
+ * 该会话此后的每条消息都无法归档（docs/27 · R-01）。
  */
 export async function attachMedia(
   media: MediaProcessor,
@@ -57,10 +57,10 @@ export async function attachMedia(
 /**
  * 取出被回复的那条消息，必要时现场归档 + 下载它的媒体。
  *
- * 这条链路以前根本不存在：回复一张图唤醒 bot，模型看到的只有「这张图描述了什么」几个字 ——
- * 图既不在上下文窗口里，也不会被背景认领（`claimBackground` 只覆盖水位到触发消息之间那一段），
- * 而在 `access.defaultUserRole=blocked` 的群里它压根没进过归档。关键事实是 Telegram 的 update
- * **自带被回复消息的完整副本**（含 file_id），所以「库里没有」不等于「拿不到」（docs/08 §7.4）。
+ * 此前该链路不存在：用户回复一张图片唤醒 bot 时，模型只能看到文字部分。图片既不在上下文窗口内，
+ * 也不会被背景认领（`claimBackground` 只覆盖水位到触发消息之间的区间），而在
+ * `access.defaultUserRole=blocked` 的群里它根本没有进过归档。关键前提是 Telegram 的 update 自带被回复
+ * 消息的完整副本（含 file_id），因此「库中没有」不等于「无法获取」（docs/08 §7.4）。
  */
 export async function resolveQuotedMessage(
   dependencies: { media: MediaProcessor; botId: number },
@@ -80,9 +80,9 @@ export async function resolveQuotedMessage(
 }
 
 /**
- * 上面那件事的**同步一半**：归档行落库（含把被回复者的名字挂到触发消息上），不下载媒体。
- * 拆开只为一件事 —— 归档顺序必须在入口锁内（`messages.id` 序就是上下文序），而下载/解析必须
- * 在锁外（docs/27 · R-01）。`resolveQuotedMessage` 是这两半的组合，两条路径共用同一份实现。
+ * 上述流程的同步部分：归档行落库（含把被回复者的名字挂到触发消息上），不下载媒体。
+ * 拆分的唯一原因是：归档顺序必须在入口锁内（`messages.id` 顺序即上下文顺序），而下载与解析必须在锁外
+ * （docs/27 · R-01）。`resolveQuotedMessage` 是两部分的组合，两条路径共用同一实现。
  */
 export function archiveQuotedMessage(
   botId: number,
@@ -91,7 +91,7 @@ export function archiveQuotedMessage(
   trigger: ArchivedMessage,
 ): { row: ArchivedMessage; payload: Message } | null {
   const replied = message.reply_to_message;
-  // 跨会话引用（关联频道、external_reply）不属于这个 context key，拉进来只会污染上下文。
+  // 跨会话引用（关联频道、external_reply）不属于当前 context key，引入只会污染上下文。
   if (!replied || replied.chat.id !== message.chat.id) return null;
   const repliedName = displayName(replied.from);
   if (repliedName) trigger.replyToName = repliedName;
@@ -110,14 +110,14 @@ export function archiveQuotedMessage(
       fromUsername: replied.from?.username ?? null,
       kind: messageKind(replied as unknown as Record<string, unknown>),
       text: replied.text ?? replied.caption ?? null,
-      // Telegram 只展开一层 reply_to_message，被回复消息自己回复了谁这里拿不到。
+      // Telegram 只展开一层 reply_to_message，无法得知被回复消息自身回复了谁。
       replyToTgMessageId: null,
       mediaGroupId: replied.media_group_id ?? null,
       tgDate: replied.date * 1000,
       raw: replied,
       triggered: false,
       triggerReason: null,
-      // 本轮就把它送进上下文了；不标成已消费的话，下一轮 claimBackground 会把它当新的背景发言再认领一次。
+      // 本轮已将其送入上下文；不标记为已消费时，下一轮 claimBackground 会把它当作新的背景消息重复认领。
       claimed: true,
     });
   return { row, payload: replied };

@@ -5,8 +5,8 @@ import { OperationsRepository, closeDatabase, migrateDatabase, openDatabase, rea
 import { AGENT_RESULT_REF_REPAIR_KEY, AgentResultStore, LogSink, MaintenanceService, Scheduler, repairAgentResultRefs } from '@luoli/core';
 
 /**
- * 第十轮活体测试里维护那一批（`docs/reviews/28` 的 `L-OPS-05` / `L-OPS-06`）。
- * 两条都是「单测结构性看不见」的形状：一条要看 WAL 文件的字节数，一条要让库与目录来自两套部署。
+ * 第十轮活体测试中维护那一批（`docs/reviews/28` 的 `L-OPS-05` / `L-OPS-06`）。
+ * 两条都属于单元测试结构性看不见的形态：一条要看 WAL 文件的字节数，一条要让库与目录来自两套部署。
  */
 
 function database(name: string) {
@@ -27,10 +27,10 @@ const seedAgentRun = (db: ReturnType<typeof openDatabase>, id: string, ref: stri
 
 describe('L-OPS-05 · VACUUM 之后必须 checkpoint', () => {
   /**
-   * `VACUUM` 在 WAL 模式下把整库重写一遍进 WAL，所以跑完这一刻 WAL 有整库那么大。实测 37MB 的
-   * 库上 `POST /api/maintenance/vacuum` 期间 WAL 冲到 39,325,432 字节、**84 秒后仍是 38MB** ——
-   * 一个「收缩主库」的动作让占盘翻倍，而 `db.vacuumCron` 是周日 5 点，于是这么挂约 23 小时。
-   * 判据只能是 WAL 文件的字节数：库里的行数一个都不会变。
+   * `VACUUM` 在 WAL 模式下把整库重写进 WAL，因此执行完成的那一刻 WAL 与整库等大。实测 37MB 的
+   * 库上 `POST /api/maintenance/vacuum` 期间 WAL 涨到 39,325,432 字节，84 秒后仍为 38MB：
+   * 一个收缩主库的动作使占盘翻倍，而 `db.vacuumCron` 是周日 5 点，该状态会持续约 23 小时。
+   * 判据只能是 WAL 文件的字节数：库里的行数不会发生变化。
    */
   it('WAL 被 truncate 到 0 字节，而不是以整库大小挂着', () => {
     const { db, path } = database('maint28-vacuum');
@@ -50,10 +50,10 @@ describe('L-OPS-05 · VACUUM 之后必须 checkpoint', () => {
 
 describe('L-OPS-06 · gcFiles 的错配保护要挡住部分错配', () => {
   /**
-   * 此前的守卫只覆盖 `if (!referenced.size)` —— 只挡「一条带路径的行都没有」这种**全错配**，
-   * 而它 docstring 自己描述的场景（`LUOLI_DATA_DIR` 指到别处）产生的是**部分错配**：
-   * `referenced` 非空，守卫结构性地不可能触发。实测 `agent_runs` 269 行带 ref、其中 161 行指向
-   * 另一个部署根，被删的正是「盘上在新根、库里记着旧根」那 74 份。
+   * 此前的守卫只覆盖 `if (!referenced.size)`，仅能挡住一条带路径的行都没有这种全量错配，
+   * 而它 docstring 自身描述的场景（`LUOLI_DATA_DIR` 指向别处）产生的是部分错配：
+   * `referenced` 非空，守卫结构上不可能触发。实测 `agent_runs` 269 行带 ref，其中 161 行指向
+   * 另一个部署根，被删的正是盘上在新根、库里记着旧根的那 74 份。
    */
   it('库里有行指向另一个根时拒绝清理，目标目录里的文件一个都不动', () => {
     const { db, path } = database('maint28-gc-partial');
@@ -72,7 +72,7 @@ describe('L-OPS-06 · gcFiles 的错配保护要挡住部分错配', () => {
     const reason = String((result.refused as string[])[0]);
     expect(reason).toContain('1/2');
     expect(reason).toContain(resolve(oldRoot, 'r-old.txt'));
-    // 这两条断言才是这个用例的全部意义：连真孤儿都不删 —— 判不准哪些是孤儿时不该动手。
+    // 这两条断言才是这个用例的意义所在：连真孤儿也不删，判不准哪些是孤儿时不应执行删除。
     expect(existsSync(survivor)).toBe(true);
     expect(existsSync(resolve(newRoot, 'r-orphan.txt'))).toBe(true);
     closeDatabase(db);
@@ -100,7 +100,7 @@ describe('L-OPS-06 · gcFiles 的错配保护要挡住部分错配', () => {
 
   /**
    * 反面：正常部署不能被这道保护误伤。`local_path` 的 cwd 相对路径、结果目录的相对 ref、
-   * 子目录里的文件三种形态都算「目录内」。
+   * 子目录里的文件，这三种形态都算目录内。
    */
   it('全部 ref 都落在目录内时照常清孤儿，不报 refused', () => {
     const { db, path } = database('maint28-gc-happy');
@@ -133,12 +133,12 @@ describe('L-OPS-06 · result_full_ref 存相对路径', () => {
     const original = directory('maint28-ref-original');
     const ref = new AgentResultStore(original).put('r1', '完整结果');
     expect(ref).toBe('r1.txt');
-    // 「搬过一次目录」在这里就是：同一个 ref，换一个 store 去读。
+    // 搬过一次目录在这里的形态是：同一个 ref，换一个 store 去读。
     writeFileSync(resolve(moved, 'r1.txt'), '完整结果');
     expect(new AgentResultStore(moved).read(ref, 0, 100).content).toBe('完整结果');
     // 存量绝对路径行（归一化时指向别的根、原样留下的那些）照旧能读。
     expect(new AgentResultStore(moved).read(resolve(original, 'r1.txt'), 0, 100).content).toBe('完整结果');
-    // 文件真没了才回那句「已按保留期清理」，而不是抛一个与原因无关的 ENOENT。
+    // 文件确实不存在时才返回「已按保留期清理」，而不是抛一个与原因无关的 ENOENT。
     expect(new AgentResultStore(moved).read('r-gone.txt', 0, 100).content).toContain('保留期');
   });
 
@@ -155,9 +155,9 @@ describe('L-OPS-06 · result_full_ref 存相对路径', () => {
   });
 
   /**
-   * 存量归一化：**只动前缀恰好是当前目录的那些**。指向另一个根的行原样留下 —— 那是「库与目录
-   * 来自两套部署」的唯一信号，`gcFiles()` 要靠它拒绝清理。悄悄一起改成相对路径等于把证据擦掉，
-   * 然后 gc 会照着删，那就是这条缺陷本身。
+   * 存量归一化只处理前缀恰好是当前目录的那些行。指向另一个根的行原样保留：它是库与目录来自
+   * 两套部署的唯一信号，`gcFiles()` 依靠它拒绝清理。一并改成相对路径等于抹掉证据，
+   * 随后 gc 会照常删除，那正是这条缺陷本身。
    */
   it('一次性归一化改写本根的绝对路径，指向别的根的原样留下并报出来', () => {
     const { db } = database('maint28-ref-repair');
@@ -178,8 +178,8 @@ describe('L-OPS-06 · result_full_ref 存相对路径', () => {
   });
 
   /**
-   * 归一化之后同一棵目录搬到别处，gc 不再误判 —— 这条是 `L-OPS-06` 的完整闭环：
-   * 报告实测被删的正是「盘上在新根、库里记着旧根」那批全文。
+   * 归一化之后同一棵目录搬到别处，gc 不再误判。这条是 `L-OPS-06` 的完整闭环：
+   * 报告实测被删的正是盘上在新根、库里记着旧根的那批全文。
    */
   it('归一化之后换根，ref 仍然指得到，gc 不再把它们当孤儿', () => {
     const { db, path } = database('maint28-ref-rootswap');
@@ -187,19 +187,19 @@ describe('L-OPS-06 · result_full_ref 存相对路径', () => {
     const newRoot = directory('maint28-ref-rootswap-new');
     const ref = new AgentResultStore(oldRoot).put('r1', '完整结果');
     seedAgentRun(db, 'r1', resolve(oldRoot, 'r1.txt'));   // 旧写法：绝对路径
-    // 换根 = 文件跟着搬过去，库里那一行还记着旧位置。
+    // 换根意味着文件随之迁移，而库里那一行仍记着旧位置。
     writeFileSync(resolve(newRoot, 'r1.txt'), '完整结果');
     rmSync(resolve(oldRoot, 'r1.txt'));
     const service = (dir: string) => new MaintenanceService(db, path, 2, 30, './data/maint28-ref-rootswap-logs', { agentResults: dir });
-    // 归一化之前：这就是那次误删的形状 —— 现在被挡下来。
+    // 归一化之前：这正是那次误删的形态，现在被挡下。
     expect(service(newRoot).gcFiles().refused).toHaveLength(1);
-    // 归一化只认「前缀恰好是当前目录」的行；这里模拟运维照 refused 的提示把行改到当前目录之后再跑
-    // （门闸行清掉才跑得起第二次 —— 生产上这一步是运维自己做的，所以修复不会偷偷重跑）。
+    // 归一化只认前缀恰好是当前目录的行；这里模拟运维按 refused 的提示把行改到当前目录之后再执行
+    // （清掉门闸行才能跑第二次，生产上这一步由运维自行完成，因此修复不会自动重跑）。
     db.prepare('DELETE FROM app_kv WHERE key=?').run(AGENT_RESULT_REF_REPAIR_KEY);
     db.prepare("UPDATE agent_runs SET result_full_ref=? WHERE id='r1'").run(resolve(newRoot, 'r1.txt'));
     expect(repairAgentResultRefs(db, newRoot)).toMatchObject({ rewritten: 1, foreign: 0 });
     expect(db.prepare("SELECT result_full_ref FROM agent_runs WHERE id='r1'").pluck().get()).toBe(ref);
-    // 从此这一行免疫换根：同一个 ref 在两棵目录下都解析得到，gc 都不会把它当孤儿。
+    // 此后这一行不再受换根影响：同一个 ref 在两棵目录下都能解析，gc 不会把它当作孤儿。
     const afterSwap = service(newRoot).gcFiles();
     expect(afterSwap).toMatchObject({ agentResults: 0 });
     expect(afterSwap.refused).toBeUndefined();
@@ -214,9 +214,9 @@ describe('L-OPS-06 · result_full_ref 存相对路径', () => {
 });
 
 /**
- * `AC-DB-006`。四样东西缺哪一样都表现成同一句抱怨：「盘一直在涨，而日志里什么都没有」。
- * 所以不直接调 `cleanup()`，而是照 `main.ts` 的 `general.maintenanceCron` 那条接线过一遍
- * `Scheduler` —— `trigger()` 也正是 WebUI「立即触发」走的那条路。
+ * `AC-DB-006`。四项中缺任何一项，表现都是同一种：占盘持续增长，而日志里没有任何记录。
+ * 因此这里不直接调 `cleanup()`，而是照 `main.ts` 的 `general.maintenanceCron` 那条接线走一遍
+ * `Scheduler`，`trigger()` 也正是 WebUI 立即触发所走的路径。
  */
 describe('AC-DB-006 · 维护任务跑完要留下痕迹', () => {
   it('AC-DB-006：一次触发清掉过期日志与 processed_updates、把 WAL 收回 0，并落一条 maintenance.cleanup', async () => {
@@ -231,14 +231,14 @@ describe('AC-DB-006 · 维护任务跑完要留下痕迹', () => {
     for (const daysAgo of [40, 1]) { mkdirSync(resolve(logsDir, day(daysAgo)), { recursive: true }); writeFileSync(resolve(logsDir, day(daysAgo), 'system.jsonl'), '{}\n'); }
     expect(statSync(wal).size, '装置本身就没往 WAL 里写过东西，checkpoint 那条断言会白过').toBeGreaterThan(0);
     const log = new LogSink(new OperationsRepository(db), logsDir, [], { level: 'info', console: 'off' });
-    // 日志由**服务自己**发，不由这条 cron 的包装层发 —— 包装层落的年代，同一个动作从
-    // `POST /api/maintenance/:action` 跑就只剩一条「方法 + 路径」的 webui.action（docs/29 · M-LOG-01）。
+    // 日志由服务自身发出，而不是由这条 cron 的包装层发出：由包装层落库时，同一个动作从
+    // `POST /api/maintenance/:action` 执行只剩一条仅含方法与路径的 webui.action（docs/29 · M-LOG-01）。
     const maintenance = new MaintenanceService(db, path, 2, 30, logsDir, {}, 0, 30, {}, log);
     const failures: unknown[] = [];
     const scheduler = new Scheduler((_name, error) => failures.push(error));
     let walAfterCleanup = -1;
-    // 现在可以在 `cleanup()` 返回之后量：那条 `maintenance.cleanup` 是在 checkpoint **之前**写的，
-    // 所以「跑完这一刻 WAL 是 0」对调用方真的成立，不再是「取样时机挑对了」。
+    // 现在可以在 `cleanup()` 返回之后测量：那条 `maintenance.cleanup` 写在 checkpoint 之前，
+    // 因此执行完成时 WAL 为 0 对调用方确实成立，而不是取样时机恰好合适。
     scheduler.add('0 4 * * *', () => {
       maintenance.cleanup();
       walAfterCleanup = statSync(wal).size;
@@ -253,19 +253,19 @@ describe('AC-DB-006 · 维护任务跑完要留下痕迹', () => {
     expect(existsSync(resolve(logsDir, day(1), 'system.jsonl'))).toBe(true);
     const recorded = db.prepare("SELECT data_json FROM log_events WHERE kind='maintenance.cleanup'").get() as { data_json: string } | undefined;
     expect(recorded, '库里没有 maintenance.* 那条 —— 跑过一次维护在日志里没有任何凭据').toBeDefined();
-    // 计数要真的进载荷：`data` 丢了的话日志里只剩一句 complete，运维看不出这次到底清了什么。
+    // 计数必须进入载荷：`data` 缺失时日志里只剩一条 complete，运维看不出这次清理了什么。
     expect(JSON.parse(recorded!.data_json)).toMatchObject({ logs: 1, updates: 1, logDirectories: 1 });
-    // `maintenance` 是 `CATEGORY_BY_PREFIX` 认得的前缀，落 system.jsonl；不认得的前缀会掉进
-    // `turn` 那个兜底，于是维护记录散进轮次日志里，按类别翻日志的人再也找不到它。
+    // `maintenance` 是 `CATEGORY_BY_PREFIX` 识别的前缀，落 system.jsonl；无法识别的前缀会落入
+    // `turn` 那个兜底，于是维护记录散进轮次日志，按类别检索的人再也找不到它。
     expect(readFileSync(resolve(logsDir, day(0), 'system.jsonl'), 'utf8')).toContain('"kind":"maintenance.cleanup"');
     expect(existsSync(resolve(logsDir, day(0), 'turn.jsonl'))).toBe(false);
     closeDatabase(db);
   });
 
   /**
-   * 上面那条走的是 cron，`POST /api/maintenance/:action` 走的是直接调用。日志落在**服务内部**
-   * 之后两条路自动一致 —— 此前它落在 cron 的包装层，于是从 WebUI 跑完全看不到结果
-   * （docs/29 · `M-LOG-01`）。这里直接调方法，也就是端点走的那条路。
+   * 上面那条走 cron，`POST /api/maintenance/:action` 走直接调用。日志落在服务内部之后两条路
+   * 自动一致；此前它落在 cron 的包装层，于是从 WebUI 执行完全看不到结果
+   * （docs/29 · `M-LOG-01`）。这里直接调用方法，也就是端点所走的路径。
    */
   it('直接调用（= WebUI 那条路）同样留下带结果的 maintenance.*，被拒是 warn', () => {
     const { db, path } = database('maint-log-parity');
@@ -283,10 +283,10 @@ describe('AC-DB-006 · 维护任务跑完要留下痕迹', () => {
     const rows = db.prepare("SELECT kind,level,data_json FROM log_events WHERE kind LIKE 'maintenance.%' ORDER BY id")
       .all() as Array<{ kind: string; level: string; data_json: string | null }>;
     expect(rows.map((row) => row.kind)).toEqual(['maintenance.backup', 'maintenance.rebuild_fts', 'maintenance.gc_files']);
-    // 备份那条要说清落在哪 —— 「备份成功」而不给路径，出事时没人找得到那份文件。
+    // 备份那条要写明落点：只报备份成功而不给路径，出问题时没人找得到那份文件。
     expect(JSON.parse(rows[0]!.data_json!)).toMatchObject({ label: 'manual', kept: 2 });
     expect(String((JSON.parse(rows[0]!.data_json!) as { path: string }).path)).toContain('backup');
-    // 被拒不能是 info：它唯一的触发条件是「库与目录来自两套部署」，混在 info 里等于把它藏起来。
+    // 被拒不能记为 info：它唯一的触发条件是库与目录来自两套部署，混在 info 里等于把它藏起来。
     expect(rows[2]!.level).toBe('warn');
     expect(JSON.parse(rows[2]!.data_json!)).toMatchObject({ agentResults: 0 });
     expect(existsSync(resolve(newRoot, 'orphan.txt')), '判不准哪些是孤儿时不该动手').toBe(true);

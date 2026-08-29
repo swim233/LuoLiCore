@@ -13,9 +13,9 @@ import { guardedFetch, type GuardedResponse } from "../net/outbound.js";
 import type { Sqlite } from "@luoli/db";
 
 /**
- * 上游的 `/models` 只给模型名（Google 额外给窗口/输出），窗口、最大输出、定价、输入模态、
- * 可用思考档位一概没有 —— 这些事实来自 models.dev 的公共目录（`api.json`，185 家 provider /
- * 6586 条），拉一次缓存到磁盘，之后靠 ETag 条件请求续期（docs/04 §5.4.1）。
+ * 上游的 `/models` 只给模型名（Google 额外给窗口与输出），窗口、最大输出、定价、输入模态、
+ * 可用思考档位一概没有；这些事实来自 models.dev 的公共目录（`api.json`，185 家 provider /
+ * 6586 条），拉取一次缓存到磁盘，之后靠 ETag 条件请求续期（docs/04 §5.4.1）。
  */
 export interface ModelCapabilities {
   vision: boolean;
@@ -31,10 +31,10 @@ export interface CatalogPrice {
   priceCacheRead: number | null;
   priceCacheWrite: number | null;
 }
-/** `provider`＝我们这个 provider 在 models.dev 里有条目，用它自报价（这才是实际被扣的钱）；
- *  `official`＝对不上（自建中转网关），退回模型厂商自家条目取官方价；
- *  `third-party`＝厂商侧查不到（旧型号已下架 / 开源权重模型），只有第三方托管价 —— 价格一律留空，
- *  只把区间摆出来让 owner 自己填。伪造一个价会让配额按错的数字算（docs/04 §5.5）。 */
+/** `provider`＝该 provider 在 models.dev 中有条目，用它自报的价格（这才是实际扣费依据）；
+ *  `official`＝匹配不上（自建中转网关），退回模型厂商自家条目取官方价；
+ *  `third-party`＝厂商侧查不到（旧型号已下架、开源权重模型），只有第三方托管价，价格一律留空，
+ *  只给出区间由 owner 自行填写。伪造价格会让配额按错误数字计算（docs/04 §5.5）。 */
 export type CatalogMatch = "provider" | "official" | "third-party" | "none";
 export interface PriceRange {
   min: number;
@@ -106,8 +106,8 @@ const strings = (value: unknown): string[] =>
     ? value.filter((entry): entry is string => typeof entry === "string")
     : [];
 
-/** `:free` / `@20250929` / `-latest` / 日期后缀都是同一个模型的别名；剥掉之后才对得上厂商目录里的那条。
- *  剥出来的结果会以 `catalogModelId` 回给界面，运维能看出这一行是靠哪个 key 匹配上的。 */
+/** `:free` / `@20250929` / `-latest` 与日期后缀都是同一模型的别名；剥离后才能匹配厂商目录中的条目。
+ *  剥离结果以 `catalogModelId` 回传给界面，运维可据此看出该行是靠哪个 key 匹配上的。 */
 function variants(modelId: string): string[] {
   const out = [modelId];
   const push = (value: string): void => {
@@ -131,15 +131,15 @@ export class CatalogIndex {
       models: Map<string, RawModel>;
     }
   >();
-  /** models.dev 有 159/185 家带 `api` 字段，baseUrl → provider id 的映射直接从数据里长出来，
-   *  不需要手写域名表。同域名的多家（api.z.ai 的普通版与 coding 版）按路径最长前缀区分。 */
+  /** models.dev 有 159/185 家带 `api` 字段，baseUrl → provider id 的映射直接由数据生成，
+   *  无需手写域名表。同域名的多家（api.z.ai 的普通版与 coding 版）按路径最长前缀区分。 */
   readonly endpoints: Array<{
     host: string;
     path: string;
     providerId: string;
   }> = [];
-  /** 网关一律把第三方模型写成 `anthropic/claude-sonnet-4-5`，前缀就是厂商归属的社区共识；
-   *  多数投票能把 `claude-sonnet-4-5 → anthropic` 这类裸 id 定位到厂商自家条目。 */
+  /** 网关一律把第三方模型写成 `anthropic/claude-sonnet-4-5`，该前缀即厂商归属的社区共识；
+   *  多数投票可把 `claude-sonnet-4-5 → anthropic` 这类裸 id 定位到厂商自家条目。 */
   readonly owners = new Map<string, Map<string, number>>();
   readonly occurrences = new Map<string, Occurrence[]>();
   readonly modelCount: number;
@@ -188,7 +188,7 @@ export class CatalogIndex {
             providerId,
           });
         } catch {
-          /* 目录里的 api 字段偶有非 URL，忽略这一条即可 */
+          /* 目录中的 api 字段偶有非 URL，忽略该条即可 */
         }
       }
     }
@@ -212,10 +212,10 @@ export class CatalogIndex {
         );
         if (hit) return hit.providerId;
       } catch {
-        /* baseUrl 是运维手填的，非法就当没填 */
+        /* baseUrl 由运维手填，非法时视为未填 */
       }
     }
-    // 一方 provider（openai/anthropic/google/xai）在 models.dev 里没有 `api` 字段，靠 kind 兜底。
+    // 一方 provider（openai/anthropic/google/xai）在 models.dev 中没有 `api` 字段，由 kind 兜底。
     const byKind: Record<string, string> = {
       openai: "openai",
       anthropic: "anthropic",
@@ -313,7 +313,7 @@ function describe(
     releaseDate: text(model.release_date),
   };
 }
-/** 每次返回新对象：调用方会往里塞界面用的字段，共享一份 EMPTY 会串到别的行上。 */
+/** 每次返回新对象：调用方会写入界面用的字段，共享同一份 EMPTY 会污染其他行。 */
 const empty = (): ModelMetadata => describe("none", null, false, null, false);
 
 function rangeOf(list: Occurrence[]): PriceRange | null {
@@ -330,9 +330,9 @@ function rangeOf(list: Occurrence[]): PriceRange | null {
 }
 
 /**
- * 第三方托管的同名模型连窗口都不一样（990 个跨 provider 同名模型里 479 个 context 不同），
- * 逐字段取众数会拼出一行现实中不存在的配置。挑一条「最多家认同」的条目整体带出来，
- * 并列时按 provider id 排序保证结果稳定 —— 否则同一份缓存两次拉取给出的行会不一样。
+ * 第三方托管的同名模型连窗口都不同（990 个跨 provider 同名模型中 479 个 context 不同），
+ * 逐字段取众数会拼出一行现实中不存在的配置。改为整体选取认同家数最多的条目，
+ * 并列时按 provider id 排序以保证结果稳定；否则同一份缓存两次拉取给出的行会不一致。
  */
 function representative(list: Occurrence[]): Occurrence {
   const votes = new Map<string, number>();
@@ -420,7 +420,7 @@ export class ModelCatalog {
     };
   }
 
-  /** 并发的两个「拉取模型」不该各下一次 3.7MB。 */
+  /** 并发的两次拉取模型不应各下载一次 3.7MB。 */
   async ensure(force = false): Promise<CatalogLoad> {
     if (this.#inflight) return this.#inflight;
     const task = this.#load(force).finally(() => {
@@ -454,7 +454,7 @@ export class ModelCatalog {
       );
       this.#lastError = null;
       if (result.notModified && cached) {
-        // 304 只有几百字节：内容没变，把 fetchedAt 往前推一格，下一个 TTL 周期内不再出网。
+        // 304 只有几百字节：内容未变，将 fetchedAt 前推一格，下一个 TTL 周期内不再出网。
         const next: CatalogState = { ...state!, fetchedAt: Date.now() };
         writeAppKv(this.db, STATE_KEY, next, "catalog");
         return {
@@ -483,8 +483,8 @@ export class ModelCatalog {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.#lastError = message;
-      // 出网失败但盘上还有一份旧的：降级用旧的，别让「拉取模型」整个失败 —— 元数据过期几天
-      // 远好过运维在没有窗口和价格的情况下手填一整页。
+      // 出网失败但磁盘上仍有旧副本：降级使用旧副本，不让整个拉取失败。元数据过期几天
+      // 远好于运维在缺少窗口与价格的情况下手填一整页。
       return cached
         ? { index: cached, outcome: "stale", state, error: message }
         : { index: null, outcome: "unavailable", state, error: message };
@@ -577,8 +577,8 @@ export class ModelCatalog {
   #write(path: string, body: string): void {
     mkdirSync(dirname(path), { recursive: true });
     const temporary = `${path}.tmp`;
-    // 先写临时文件再 rename：写到一半被 SIGTERM 打断的话，留在盘上的会是一份解析不了的 JSON，
-    // 之后每次启动都得重新下 3.7MB。
+    // 先写临时文件再 rename：写到一半被 SIGTERM 打断时，留在磁盘上的会是一份无法解析的 JSON，
+    // 此后每次启动都要重新下载 3.7MB。
     try {
       writeFileSync(temporary, body, "utf8");
       renameSync(temporary, path);
@@ -593,8 +593,8 @@ export class ModelCatalog {
   }
 
   /**
-   * provider 能对上 models.dev 的条目就用它自报价；对不上退回厂商官方价；两者都没有时
-   * 只给窗口/能力和第三方价区间，价格留空（docs/04 §5.4.1）。
+   * provider 能匹配到 models.dev 条目时用它自报的价格；匹配不上退回厂商官方价；两者都没有时
+   * 只给窗口、能力与第三方价区间，价格留空（docs/04 §5.4.1）。
    */
   lookup(
     index: CatalogIndex | null,
@@ -656,7 +656,7 @@ export class ModelCatalog {
     for (const form of bareForms) {
       const list = index.occurrences.get(form);
       if (!list?.length) continue;
-      // 只有第三方托管价：窗口/能力照给，价格留空并把区间摆出来 —— 拿哪一家的价都是猜。
+      // 只有第三方托管价：窗口与能力照常给出，价格留空并给出区间，取任何一家的价格都是猜测。
       return describe(
         "third-party",
         representative(list),

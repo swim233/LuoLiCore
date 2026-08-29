@@ -16,10 +16,10 @@ import {
 export interface ScheduleToolDependencies {
   jobs: ScheduleRepository;
   runner: ScheduledJobRunner;
-  /** 有没有投递通道（Telegram 入口）。没有的话这四个 `schedule_*` 整体不进目录 —— 排一个到点
-   *  发不出去的任务，表现是每次触发只往日志里写一条 skipped，模型和用户都不知道。
-   *  **`stay_silent` 不看这一条**：它的判据是本轮的 `silenceable`，而 runner 在投递通道
-   *  不在时压根不开轮（docs/02 §10.1 最后一条）。 */
+  /** 是否存在投递通道（Telegram 入口）。不存在时这四个 `schedule_*` 整体不进目录：排一个到点
+   *  发不出去的任务，表现为每次触发只往日志写一条 skipped，模型和用户都无从知晓。
+   *  `stay_silent` 不看这一条：它的判据是本轮的 `silenceable`，而 runner 在投递通道
+   *  缺失时不会开轮（docs/02 §10.1 最后一条）。 */
   deliverable(): boolean;
 }
 
@@ -28,20 +28,20 @@ const settings = (context: ToolExecutionContext): Config["schedule"] =>
 const timezoneOf = (context: ToolExecutionContext): string =>
   (context.turn.config as Readonly<Config>).general.timezone;
 
-/** 建与改共用同一句：两处写法一旦分叉，模型看到的就是两个开关（docs/02 §10.5 ①）。 */
+/** 建与改共用同一句描述：两处写法一旦分叉，模型看到的就是两个开关（docs/02 §10.5 ①）。 */
 const SILENT_FIELD =
-  "stay_silent: 默认关，仅对 mode=agent 有效。开启后到点不输出汇报，但产出入上下文；mode=notify 下无效且拒传。";
+  "stay_silent: 默认关闭，仅对 mode=agent 有效。开启后触发时不输出汇报，但产出写入上下文；mode=notify 下无效且拒绝传入。";
 
 /**
- * 定时任务那四个工具，外加只在静默轮次里存在的 `stay_silent`（docs/05 §3.8）。
+ * 定时任务的四个工具，外加只在静默轮次中存在的 `stay_silent`（docs/05 §3.8）。
  *
- * **`inputSchema` 里没有 `chatId` / `userId` / `key`**（docs/05 §8）：落点一律取自
- * `context.turn`。收下一个 chatId 参数就等于给任何 trusted 群成员一个跨会话写原语 ——
- * 他可以让 bot 每小时往别的群里发东西，而那个群里没人能解释这消息哪来的。
+ * `inputSchema` 里没有 `chatId` / `userId` / `key`（docs/05 §8）：落点一律取自
+ * `context.turn`。接受 chatId 参数等于给任何 trusted 群成员一个跨会话写原语：
+ * 他可以让 bot 每小时向其他群发消息，而那个群里无人能解释消息来源。
  * 同理 `list` / `cancel` / `update` 都按 `context.turn.key` 过滤，不接受任务 id。
  *
  * 校验与落库走 `createScheduledJob` / `updateScheduledJob`，与 WebUI 的
- * `POST /api/schedules`、`PATCH /api/schedules/:id` 是同一份。
+ * `POST /api/schedules`、`PATCH /api/schedules/:id` 共用同一份。
  */
 export function registerScheduleTools(
   registry: ToolRegistry,
@@ -50,14 +50,14 @@ export function registerScheduleTools(
   registry.register({
     name: "schedule_create",
     description:
-      '排一个定时任务。cron 与 at 二者给一个：cron 是周期任务（五段式，如 "0 8 * * *" 每天早八点），at 是一次性任务（本地时间，如 "2026-08-18T15:00"）。' +
-      "mode=agent 时 text 是给你自己的任务描述，会调用触发对话；mode=notify 时 text 会被原样发出，不调用模型，适合纯提醒。任务只作用于当前会话。",
+      '创建一个定时任务。cron 与 at 二者取其一：cron 是周期任务（五段式，如 "0 8 * * *" 即每天 08:00），at 是一次性任务（本地时间，如 "2026-08-18T15:00"）。' +
+      "mode=agent 时 text 是写给你的任务描述，触发时会发起一次对话；mode=notify 时 text 会被原样发出，不调用模型，适合纯提醒。任务只作用于当前会话。",
     inputSchema: z.object({
       name: z
         .string()
         .min(1)
         .max(64)
-        .describe("任务名，同一会话内唯一，取消时用它"),
+        .describe("任务名，同一会话内唯一，取消时使用该名称"),
       mode: z
         .enum(["agent", "notify"])
         .describe(
@@ -79,8 +79,8 @@ export function registerScheduleTools(
         .describe("一次性任务的时间，本地时区，形如 2026-08-18T15:00"),
       silent: z.boolean().optional().describe(SILENT_FIELD),
     }),
-    // 上限随配置走，让模型看到的 schema 就是真实上限（docs/26 §5）。**新字段两份都要加**：
-    // 这一份才是模型真正看到的，只加上面那份等于这个开关对模型不存在。
+    // 上限随配置走，让模型看到的 schema 即真实上限（docs/26 §5）。新字段两份都要加：
+    // 这一份才是模型实际看到的，只加上面那份等于该开关对模型不存在。
     inputSchemaFor: (context) =>
       z.object({
         name: z.string().min(1).max(64),
@@ -116,17 +116,17 @@ export function registerScheduleTools(
   registry.register({
     name: "schedule_update",
     description:
-      "用于修改当前会话里一个活跃的定时任务（按名字找）。newName / text / cron / at / silent 修改其中给出的字段，没有就保留原样" +
-      "如：两个时间字段都不给就是「触发时间不动」。cron 与 at 只能给一个，给了就是换触发方式；at 按这条任务自己的时区读，不是你现在这个时区。" +
-      "不能修改 mode，要换模式需要取消重建，要和用户确认。",
+      "用于修改当前会话中一个活跃的定时任务（按名称定位）。newName / text / cron / at / silent 只修改其中给出的字段，未给出的保留原值。" +
+      "例如两个时间字段都不给即表示触发时间不变。cron 与 at 只能给其一，给出即表示更换触发方式；at 按该任务自身的时区解析，不是你当前所在的时区。" +
+      "不能修改 mode，更换模式需取消后重建，并需与用户确认。",
     inputSchema: z.object({
-      name: z.string().min(1).max(64).describe("要改哪一个：任务现在的名字"),
+      name: z.string().min(1).max(64).describe("定位目标任务：任务当前的名称"),
       newName: z
         .string()
         .min(1)
         .max(64)
         .optional()
-        .describe("改名，同一会话内仍要唯一；改成它现在这个名字不算重名"),
+        .describe("新名称，同一会话内仍需唯一；改为其当前名称不算重名"),
       text: z
         .string()
         .min(1)
@@ -137,7 +137,7 @@ export function registerScheduleTools(
         .string()
         .min(1)
         .optional()
-        .describe("换成一次性任务，按任务自己的时区，形如 2026-08-18T15:00"),
+        .describe("换成一次性任务，按任务自身的时区，形如 2026-08-18T15:00"),
       silent: z.boolean().optional().describe(SILENT_FIELD),
     }),
     inputSchemaFor: (context) =>
@@ -157,17 +157,17 @@ export function registerScheduleTools(
     sourcePriority: 100,
     available: () => dependencies.deliverable(),
     execute: (input, context) => {
-      // 只按 (key, name) 找：拿 id 直接改等于让别的会话的任务也能被点掉。
-      // HTTP 那一侧用 `:id` 定位是另一回事（owner 单身份的跨会话面板），所以那边 body 里的
+      // 只按 (key, name) 定位：按 id 直接改会让其他会话的任务也能被改动。
+      // HTTP 侧用 `:id` 定位是另一回事（owner 单身份的跨会话面板），因此那边 body 里的
       // `name` 是新名字，这边 `name` 是定位符、`newName` 才是新名字（docs/05 §3.8）。
       const job = dependencies.jobs.byName(context.turn.key, input.name);
       if (!job)
         return {
           ok: false,
           error: "not_found",
-          hint: `这个会话里没有叫「${input.name}」的活跃任务，用 schedule_list 看看`,
+          hint: `本会话中没有名为「${input.name}」的活跃任务，使用 schedule_list 查看`,
         };
-      // 缺席就原样传 undefined：`updateScheduledJob` 按「给没给」决定校验哪几道，在这里
+      // 缺席时原样传 undefined：`updateScheduledJob` 按字段是否给出决定校验哪几道，在这里
       // 用旧值补齐等于每次改正文都重算一遍触发间隔（docs/05 §3.8 那条红线）。
       const result = updateScheduledJob(
         dependencies.jobs,
@@ -191,7 +191,7 @@ export function registerScheduleTools(
   registry.register({
     name: "schedule_list",
     description:
-      "列出当前会话的定时任务，按活跃任务倒序展示，同时会展示上次触发结果与下次触发时间。",
+      "列出当前会话的定时任务，按活跃任务倒序展示，并给出上次触发结果与下次触发时间。",
     inputSchema: z.object({}),
     policy: builtinPolicy("schedule_list"),
     sourcePriority: 100,
@@ -214,19 +214,19 @@ export function registerScheduleTools(
 
   registry.register({
     name: "schedule_cancel",
-    description: "按名字取消当前会话里某个定时任务。已经结束的任务不用取消。",
+    description: "按名称取消当前会话中的某个定时任务。已结束的任务无需取消。",
     inputSchema: z.object({ name: z.string().min(1).max(64) }),
     policy: builtinPolicy("schedule_cancel"),
     sourcePriority: 100,
     available: () => dependencies.deliverable(),
     execute: (input, context) => {
-      // 只按 (key, name) 找：拿 id 直接删等于让别的会话的任务也能被点掉。
+      // 只按 (key, name) 定位：按 id 直接删会让其他会话的任务也能被删除。
       const job = dependencies.jobs.byName(context.turn.key, input.name);
       if (!job)
         return {
           ok: false,
           error: "not_found",
-          hint: `这个会话里没有叫「${input.name}」的活跃任务，用 schedule_list 看看`,
+          hint: `本会话中没有名为「${input.name}」的活跃任务，使用 schedule_list 查看`,
         };
       dependencies.jobs.finish(job.id, "cancelled");
       dependencies.runner.unregister(job.id);
@@ -235,9 +235,9 @@ export function registerScheduleTools(
   });
 
   /**
-   * 「这一轮不用汇报」（docs/02 §10.5）。**注册无条件**：`main.ts` 那条启动断言要求
+   * 声明本轮无需汇报（docs/02 §10.5）。注册是无条件的：`main.ts` 的启动断言要求
    * `TOOL_POLICY` 的每个键都注册过，包在 `if` 里的表现是关掉某个开关之后进程起不来。
-   * 该不该出现由 `available()` 说了算。
+   * 是否出现由 `available()` 决定。
    */
   registry.register({
     name: "stay_silent",
@@ -253,27 +253,27 @@ export function registerScheduleTools(
     policy: builtinPolicy("stay_silent"),
     sourcePriority: 100,
     // 两道闸。`silenceable` 的唯一置位方是 `ScheduledJobRunner`，缺席即假，于是 Telegram 轮次、
-    // 提示词预览、agent 隔离试跑全部 fail-closed；主 agent 那道不是冗余 —— **子 agent 拿到的是
-    // 父轮的同一个 turn 对象**（`agent/subagent.ts` 的 `runSubAgent` 直接收 `turn`），少了它，
-    // 一个 researcher 就能替整轮闭嘴，而派它出去的主 agent 全程不知情。
-    // 写在 `available()` 而不是像 `memory_write` 那样硬编码进 `registry.ts` 的 `admit()`：
-    // `admit()` 本来就会复查一遍 `available()`，一处判据同时管住目录过滤与硬拦截。
+    // 提示词预览、agent 隔离试跑全部 fail-closed；主 agent 那道不是冗余：子 agent 拿到的是
+    // 父轮同一个 turn 对象（`agent/subagent.ts` 的 `runSubAgent` 直接接收 `turn`），缺了它，
+    // 一个 researcher 就能替整轮静默，而派发它的主 agent 全程不知情。
+    // 写在 `available()` 而非像 `memory_write` 那样硬编码进 `registry.ts` 的 `admit()`：
+    // `admit()` 本就会复查一遍 `available()`，一处判据同时管住目录过滤与硬拦截。
     available: (_role, context) =>
       context.agentKind === "main" && context.turn.silenceable === true,
     execute: (input, context) => {
-      // **两个键必须一起置**：只置 `silenced` 会让每条 `schedule.silent` 的 `reason` 恒为 null，
-      // 而那是这条任务「是不是从此再也不说话了」唯一可读的凭据。轮次对象随轮次消亡，
+      // 两个键必须一起置：只置 `silenced` 会让每条 `schedule.silent` 的 `reason` 恒为 null，
+      // 而它是判断这条任务是否已长期静默的唯一可读凭据。轮次对象随轮次消亡，
       // 不引入新的进程内表（同 `builtins.ts` 的 `claimExtraMessage`）。
       Object.assign(context.turn, {
         silenced: true,
         silenceReason: input.reason,
       });
-      // 带工具调用的那一步通常没有正文，而「没正文 + 调过工具」正好命中 `wrapUpIfNeeded` 的
-      // 前两道闸 —— 不 nudge 的话每次静默都要多付一次模型调用（docs/02 §10.5 ⑤）。
+      // 带工具调用的那一步通常没有正文，而无正文且调过工具正好命中 `wrapUpIfNeeded` 的
+      // 前两道闸：不 nudge 时每次静默都要多付一次模型调用（docs/02 §10.5 ⑤）。
       return {
         ok: true,
         silenced: true,
-        hint: "这一轮不会发出去了。现在就把这次的结论写下来（就写在这一步的正文里）—— 它只进上下文，下一轮的你要靠它知道自己查过什么。",
+        hint: "本轮不会发出。请立即写下本次结论（写在本步正文中）—— 它只进入上下文，你在下一轮据此判断自己查过什么。",
       };
     },
   });

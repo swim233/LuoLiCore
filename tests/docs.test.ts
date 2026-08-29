@@ -4,38 +4,38 @@ import { KNOWN_UNIMPLEMENTED_CONFIG_KEYS, TOOL_POLICY, configJsonSchema, configS
 import { describe, expect, it } from 'vitest';
 
 /**
- * 让文档库的「活 / 死」分层说话算数。
+ * 使文档库的活层与冻结层分层真正生效。
  *
- * 背景：`docs/reviews/` 那十轮复审是历史快照，但它们**删不掉** —— 大量源码注释拿条目编号
- * （`docs/20 · W-SEC-02` 那种）当「这行为什么长这样」的凭据。凭据的问题在于它没有任何东西
- * 保证还指得着：删一条、改一次编号、挪一个文件，注释就静静变成一句空话，而空话看起来和
- * 真凭据一模一样。前两条断言把这件事焊住。
+ * 背景：`docs/reviews/` 那十轮复审是历史快照，但它们不可删除，因为大量源码注释以条目编号
+ * （如 `docs/20 · W-SEC-02`）作为某段实现为何如此的溯源凭据。凭据的问题在于没有任何机制
+ * 保证它仍能指向有效目标：删除一条、更改一次编号、移动一个文件，注释就静默变为空引用，而空引用
+ * 与真实凭据在外观上完全相同。前两条断言固定这一点。
  *
- * 第三条管的是另一个方向：🚧 是「还没接线」的信号，运维和下一轮复审都靠 grep 它来数账。
- * 一旦历史快照里也留着 🚧，grep 出来的就是活账混着九轮的鬼影 —— 第七轮就是这么被迫
- * 「把 25 份文档里所有 🚧 逐条查干净」的（`docs/reviews/25`）。所以状态标记位置的 🚧
- * 只允许出现在活文档里，复审层要么不写，要么写成过去时。
+ * 第三条针对另一个方向：🚧 表示尚未接线，运维与下一轮复审都依靠 grep 它来统计欠账。
+ * 一旦历史快照中也保留 🚧，grep 结果就会把活账与九轮历史混在一起：第七轮正因此被迫
+ * 逐条清查 25 份文档中的所有 🚧（`docs/reviews/25`）。因此状态标记位置的 🚧
+ * 只允许出现在活文档中，复审层要么不写，要么写成过去时。
  */
 
 const SRC_ROOTS = ['packages', 'apps', 'tests', 'scripts'];
 const SKIP_DIRS = new Set(['node_modules', 'dist', '.git']);
 /**
- * 状态标记位置的 🚧：行首，或**任意**表格单元格的开头。行内的（「在 docs/11 标 🚧」这类叙述）不算。
+ * 状态标记位置的 🚧：行首，或任意表格单元格的开头。行内出现的（如在 docs/11 标 🚧 这类叙述）不计入。
  *
- * 原来只认行首与第一格，于是 `docs/21` 那四条未接线缺口因为写在表格**最后一格**，整份文档的活账
- * 事实上不在任何判据的视野里 —— 一道判据管不到它本该管的地方，和没有这道判据是同一个答案。
+ * 原先只识别行首与第一格，导致 `docs/21` 那四条未接线缺口因写在表格最后一格，整份文档的活账
+ * 实际上不在任何判据的覆盖范围内；一道判据覆盖不到它应覆盖的位置，与不存在该判据等价。
  */
 const STATUS_MARKER = /(?:^|\|)\s*🚧/;
-/** `🚧「…」` 是**引文**（复审报告引当时文档的原话，见 `reviews/25 §1`），不是活标记。 */
+/** `🚧「…」` 是引文（复审报告引用当时文档的原话，见 `reviews/25 §1`），不是活标记。 */
 const MARKER_QUOTED = /🚧\s*[「"“]/;
-/** 活文档里允许挂 🚧 的三处：配置手册的未接线表、当前态清单、WebUI 缺口台账。 */
+/** 活文档中允许出现 🚧 的三处：配置手册的未接线表、当前态清单、WebUI 缺口台账。 */
 const MARKER_ALLOWED = new Set([
   'docs/00-state.md',
   'docs/11-config-reference.md',
   'docs/21-webui-coverage-gaps.md',
 ]);
 const FROZEN_HEADER = '❄️ **已冻结（';
-/** 复审条目编号的形状：`W-CFG-02` `L-OPS-01` `AC-SEC-011` —— 至少一个连字符。 */
+/** 复审条目编号的形态：`W-CFG-02`、`L-OPS-01`、`AC-SEC-011`，至少含一个连字符。 */
 const ENTRY_ID = /\b[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+\b/g;
 
 function walk(dir: string): string[] {
@@ -70,15 +70,15 @@ describe('文档溯源', () => {
   });
 
   it('源码注释里引用的复审条目编号都还在文档里', () => {
-    // 只认 `· ` 之后的编号——那是既有的引用约定（`docs/22 · V-SSRF-01`）。不要求编号落在
-    // 紧邻的那份文档里：`docs/05 §5.2 · W-SBX-02` 是「规格出处 · 复审条目」的混合形态，
-    // `docs/22 · N-CFG-02 一脉` 是跨轮旁引，两种都合法。要保证的只是**条目还存在**。
+    // 只解析 `· ` 之后的编号，那是既有的引用约定（`docs/22 · V-SSRF-01`）。不要求编号位于
+    // 紧邻的那份文档中：`docs/05 §5.2 · W-SBX-02` 是规格出处加复审条目的混合形态，
+    // `docs/22 · N-CFG-02 一脉` 是跨轮旁引，两者都合法。需要保证的只是条目仍然存在。
     //
-    // 判据按**词**比，不是按子串。此前用 `corpus.includes(id)`，于是 `S-01` 被 `L-OPS-01` 满足、
-    // `I-01` 被 `D-UI-01` 满足、`T-02`–`T-05` 被 `L-EXT-02`–`05` 满足 —— `reviews/27` 整个
-    // `S-*`/`T-*` 家族与 `reviews/22` 整个 `I-*` 家族因此一条都没被保护住：删掉它们判据照样绿，
-    // 而注释已经指空。改成词边界之后当天零悬空（既有引用全部真的指得着），**收紧不花任何代价**，
-    // 买的是「哪天真删了会响」。
+    // 判据按词比对而非按子串。此前使用 `corpus.includes(id)`，导致 `S-01` 被 `L-OPS-01` 满足、
+    // `I-01` 被 `D-UI-01` 满足、`T-02`–`T-05` 被 `L-EXT-02`–`05` 满足，`reviews/27` 的整个
+    // `S-*`/`T-*` 家族与 `reviews/22` 的整个 `I-*` 家族因此完全未被保护：删除它们判据依然通过，
+    // 而注释已指向空。改为词边界后当天悬空数为零（既有引用全部有效），收紧没有任何代价，
+    // 换来的是删除时会触发失败。
     const defined = new Set<string>();
     for (const { text } of docs) for (const match of text.matchAll(ENTRY_ID)) defined.add(match[0]);
     const dangling: string[] = [];
@@ -91,18 +91,18 @@ describe('文档溯源', () => {
   });
 
   /**
-   * 缺口台账的编号唯一性。**这条是补的，不是预防的** —— `G-API-15` 与 `G-API-16` 曾各自定义两次，
-   * 指着毫不相干的两件事，而 `app.ts` / `SchedulesCard.vue` / `schedule.api.test.ts` 三处注释写着
-   * `G-API-16`、光看编号分不出指哪一条。
+   * 缺口台账的编号唯一性。这条是事后补上的而非预防性的：`G-API-15` 与 `G-API-16` 曾各自定义两次，
+   * 指向毫不相干的两件事，而 `app.ts` / `SchedulesCard.vue` / `schedule.api.test.ts` 三处注释都写着
+   * `G-API-16`，仅凭编号无法区分指向哪一条。
    *
-   * 只判 `docs/21` 内部：跨文件「撞号」绝大多数是**跨轮复列**（`16` 复列 `15` 的批次、`23`/`24`
-   * 复核 `22` 的条目），那是既定工作流，拿去当撞号会报出 78 条噪声。而冻结层里真正的撞号
-   * （`R-TG-01` 在 `19` 与 `24`、`G-EXT-0x` 在 `15` 与 `21`）**改不了也测不了**，只能记 ——
-   * 记在 `docs/README §0.1` 的警示表里，引用时必须带文档号。
+   * 只在 `docs/21` 内部判定：跨文件重号绝大多数是跨轮复列（`16` 复列 `15` 的批次、`23`/`24`
+   * 复核 `22` 的条目），属于既定工作流，按重号处理会产生 78 条噪声。而冻结层中真正的重号
+   * （`R-TG-01` 出现在 `19` 与 `24`、`G-EXT-0x` 出现在 `15` 与 `21`）既不能修改也无法测试，只能记录：
+   * 记在 `docs/README §0.1` 的警示表中，引用时必须带文档号。
    */
   /**
-   * 台账正文（`## 1.` 之后）。`## 0.` 那几节是**索引**，按定义就是副本，不参与「唯一性」判据 ——
-   * 拿副本当定义的话，一张为了「不必从头翻」而加的索引表反而会把整道闸判红。
+   * 台账正文（`## 1.` 之后）。`## 0.` 那几节是索引，按定义即副本，不参与唯一性判定：
+   * 把副本当作定义时，一张为便于查阅而添加的索引表反而会让整道闸失败。
    */
   const ledgerBody = (): string => {
     const ledger = docs.find((doc) => doc.path === 'docs/21-webui-coverage-gaps.md');
@@ -111,7 +111,7 @@ describe('文档溯源', () => {
     expect(at, 'docs/21 里找不到 `## 1.` —— 索引与台账的分界线没了，判据坏了').toBeGreaterThan(0);
     return ledger!.text.slice(at);
   };
-  /** 台账里的定义行：表格第一格就是编号。返回 编号 → 该行的状态格。 */
+  /** 台账中的定义行：表格第一格即编号。返回编号到该行状态格的映射。 */
   const ledgerRows = (): Map<string, { lines: number[]; last: string }> => {
     const rows = new Map<string, { lines: number[]; last: string }>();
     for (const [index, line] of ledgerBody().split('\n').entries()) {
@@ -133,11 +133,11 @@ describe('文档溯源', () => {
   });
 
   /**
-   * `docs/21 §0`「现在还开着什么」那张索引表必须等于台账里所有**未闭合**的行。
+   * `docs/21 §0` 的当前未闭合项索引表必须等于台账中所有未闭合的行。
    *
-   * 索引是副本，而这份文档自己的教训就是「同一个事实有两份副本，迟早会漂」—— 加索引是为了
-   * 让最新的缺口不再排在第 800 多行没人翻得到（`G-UI-05` / `G-UI-06` 都出过这事），
-   * 但一张会过期的索引比没有索引更坏：它看起来权威。所以它由这条断言维持。
+   * 索引是副本，而这份文档自身的教训就是同一事实存在两份副本必然漂移。添加索引是为了
+   * 让最新的缺口不再排在第 800 多行而无人查阅（`G-UI-05` 与 `G-UI-06` 都出现过该问题），
+   * 但一张会过期的索引比没有索引更糟：它看起来具有权威性。因此由这条断言维持其正确性。
    */
   it('docs/21 §0 的「还开着」索引与台账一致', () => {
     const open = [...ledgerRows()].filter(([, r]) => !r.last.includes('✅')).map(([id]) => id).sort();
@@ -150,18 +150,18 @@ describe('文档溯源', () => {
 });
 
 /**
- * `docs/10 §2` 那张 kind 表与实现的**双向**焊接。
+ * `docs/10 §2` 的 kind 表与实现之间的双向固定。
  *
- * 背景：上一轮实测「表里写了源码零发出 19 个、源码在发表里没有约 35 个（含全库 78% 的
- * `tg.api`）」，而 `docs/13` 的 `AC-LOG-001` 按字面永远不可能通过（docs/28 · L-LOG-01）。
- * 两个方向都要挡：只挡一边的话，「文档写了没实现」和「实现了没写」各能漂回去一半。
+ * 背景：上一轮实测表中记录而源码从未发出的有 19 个、源码在发出而表中缺失的约 35 个（含全库 78% 的
+ * `tg.api`），而 `docs/13` 的 `AC-LOG-001` 按字面永远无法通过（docs/28 · L-LOG-01）。
+ * 两个方向都要拦截：只拦一侧时，文档记录而未实现与已实现而未记录各能漂移回去一半。
  */
 const LOG_DOC = 'docs/10-logging-and-observability.md';
 /** 表格所在的那一节。`## 3.` 之后是落盘格式，不再有 kind 表。 */
 const KIND_SECTION = /^## 2\. 事件种类[\s\S]*?(?=^## 3\.)/m;
 /**
- * 从 `at` 处那个引号开始，返回字符串 / 模板串结束引号的下标。
- * 模板串里的 `${...}` 能嵌任意代码（括号、花括号、别的引号），整段跳过。
+ * 从 `at` 处的引号开始，返回字符串或模板串结束引号的下标。
+ * 模板串中的 `${...}` 可嵌入任意代码（括号、花括号、其他引号），整段跳过。
  */
 function skipString(text: string, at: number): number {
   const quote = text[at];
@@ -181,7 +181,7 @@ function skipString(text: string, at: number): number {
   return text.length;
 }
 
-/** 从 `index` 起该跳过多少：字符串、行注释、块注释各自的长度；不是这三种回 0。 */
+/** 从 `index` 起应跳过的长度：字符串、行注释、块注释各自的长度；不属于这三类时返回 0。 */
 function skippable(text: string, index: number): number {
   const char = text[index]!;
   if (char === '"' || char === "'" || char === '`') return skipString(text, index) - index + 1;
@@ -191,9 +191,9 @@ function skippable(text: string, index: number): number {
 }
 
 /**
- * `open` 处那个 `{` 对应的对象字面量全文。
- * 裸数花括号会被字符串里的括号带偏（`summary: \`Turn ${id} started (queued)\`` 就有一对），
- * 所以字符串、模板串、两种注释都要跳过。
+ * `open` 处的 `{` 所对应的对象字面量全文。
+ * 单纯计数花括号会被字符串中的括号干扰（`summary: \`Turn ${id} started (queued)\`` 就含有一对），
+ * 因此字符串、模板串与两种注释都要跳过。
  */
 function objectAt(text: string, open: number): string {
   let depth = 0;
@@ -207,7 +207,7 @@ function objectAt(text: string, open: number): string {
   return '';
 }
 
-/** 对象字面量的**顶层**属性 → 属性值原文。嵌到 `data: {...}` 里的同名键不算。 */
+/** 对象字面量的顶层属性到属性值原文的映射。嵌套在 `data: {...}` 中的同名键不计入。 */
 function topLevelProps(object: string): Map<string, string> {
   const props = new Map<string, string>();
   let depth = 0;
@@ -238,12 +238,12 @@ function topLevelProps(object: string): Map<string, string> {
 }
 
 /**
- * 一段 `kind:` 取值里所有**可能落库**的字符串。
+ * 一段 `kind:` 取值中所有可能落库的字符串。
  *
- * 只收处在三元**结果位**上的那些 —— 判据是前一个非空白字符是 `?` / `:` / 什么都没有。
- * 不这样收的话，`event.kind === "send" ? "tg.send" : …` 里的比较操作数 `"send"` 也会被当成
- * 一个日志 kind（这正是重做这道闸时第一版误报的两条）。嵌套三元天然被覆盖：每一支的结果
- * 都紧跟着 `?` 或 `:`。
+ * 只收取处于三元表达式结果位的那些，判据是前一个非空白字符为 `?`、`:` 或不存在。
+ * 否则 `event.kind === "send" ? "tg.send" : …` 中的比较操作数 `"send"` 也会被当作
+ * 一个日志 kind（这正是重做该闸时第一版误报的两条）。嵌套三元自然被覆盖：每一支的结果
+ * 都紧跟在 `?` 或 `:` 之后。
  */
 function kindsIn(value: string): string[] {
   const kinds: string[] = [];
@@ -264,7 +264,7 @@ function documentedKinds(): Set<string> {
   const kinds = new Set<string>();
   for (const line of section!.split('\n')) {
     if (!line.startsWith('|')) continue;
-    // 只认**第一列**：其余列的正文里大量引用别的 kind（`model.error` 那行就提到 `provider.fallback`）。
+    // 只解析第一列：其余列的正文中大量引用其他 kind（`model.error` 那行就提到了 `provider.fallback`）。
     const first = line.slice(1).split('|')[0] ?? '';
     for (const match of first.matchAll(/`([^`]+)`/g)) kinds.add(match[1]!);
   }
@@ -272,17 +272,17 @@ function documentedKinds(): Set<string> {
 }
 
 /**
- * 源码里真正发出去的 `LogEvent.kind`。
+ * 源码中实际发出的 `LogEvent.kind`。
  *
- * 判据是**对象的形状**而不是调用点的名字：顶层同时有 `level` 与 `kind` 的对象字面量就是一条
- * `LogEvent`。先试过锚到 `.event({` / `.span({`，漏掉了 `alerts.ts` 里的 `this.#log({...})` ——
- * 而那正是「换个写法就绕过这道闸」的形状。形状判据对调用点写法免疫。
+ * 判据是对象的形状而非调用点的名称：顶层同时具有 `level` 与 `kind` 的对象字面量即一条
+ * `LogEvent`。先前尝试过锚定 `.event({` / `.span({`，遗漏了 `alerts.ts` 中的 `this.#log({...})`，
+ * 而那正属于换一种写法即绕过该闸的形态。形状判据不受调用点写法影响。
  *
- * 此前是全文扫 `kind: '...'`，两个毛病：一是捞到一堆根本不是日志的 kind（`principals.kind`、
- * `messages.kind`、`ApprovalOutcome.kind`、`WakewordKind`……），要靠一份手写的排除名单擦屁股，
- * 而那份名单自己又要一条断言去保它不腐烂；二是**引号写死成单引号**，于是 `b7e24ae` 把源码
- * 格式化成双引号之后差集恒等于整张表，这道闸从此什么都不挡（docs/29 · 补 `M-LOG-01` 时量出来的）。
- * 按形状取之后排除名单整份废掉了：不是日志的 `kind:` 压根进不来。
+ * 此前是全文扫描 `kind: '...'`，存在两个问题：一是捞出大量并非日志的 kind（`principals.kind`、
+ * `messages.kind`、`ApprovalOutcome.kind`、`WakewordKind` 等），需要一份手写排除名单弥补，
+ * 而该名单自身又需要一条断言保证不失效；二是引号写死为单引号，于是 `b7e24ae` 把源码
+ * 格式化为双引号之后差集恒等于整张表，该闸从此不再拦截任何内容（补 `M-LOG-01` 时测得，docs/29）。
+ * 改为按形状提取后排除名单整份废除：非日志的 `kind:` 根本不会进入。
  */
 function emittedKinds(): Map<string, string> {
   const found = new Map<string, string>();
@@ -295,14 +295,14 @@ function emittedKinds(): Map<string, string> {
       const skip = skippable(text, index);
       if (skip) { index += skip - 1; continue; }
       if (text[index] !== '{') continue;
-      // 不跳过整个对象：`LogEvent` 也可能嵌在别的对象里，里层那个要单独被扫到。
+      // 不跳过整个对象：`LogEvent` 也可能嵌套在其他对象中，内层那个需要被单独扫描到。
       const props = topLevelProps(objectAt(text, index));
       const kind = props.get('kind');
       if (kind === undefined) continue;
-      // 两个判据取并集，各自补对方的盲点：
-      // - **形状**（顶层同时有 `level` 与 `kind`）认得出 `alerts.ts` 的 `this.#log({...})`；
-      // - **发出点**认得出 `main.ts` 的 `log.event({ kind: 'sandbox.container.created', ...shared })`
-      //   —— 那里的 `level` 藏在展开里，形状判据看不见。
+      // 两个判据取并集，各自弥补对方的盲区：
+      // - 形状判据（顶层同时具有 `level` 与 `kind`）能识别 `alerts.ts` 的 `this.#log({...})`；
+      // - 发出点判据能识别 `main.ts` 的 `log.event({ kind: 'sandbox.container.created', ...shared })`，
+      //   那里的 `level` 位于展开对象中，形状判据无法识别。
       const emitter = /[.#]?\b(?:event|span|log)\(\s*$/.test(text.slice(Math.max(0, index - 40), index));
       if (!props.has('level') && !emitter) continue;
       for (const one of kindsIn(kind)) if (!found.has(one)) found.set(one, path);
@@ -328,40 +328,40 @@ describe('日志 kind 与 docs/10 §2 双向一致', () => {
       + '补一行（level + 关键字段）').toEqual([]);
   });
 
-  // 此前这里还有第三条「排除名单里的每一条都还在源码里出现」，保的是那份手写的 `NON_LOG_KINDS`
-  // 不腐烂。锚到 `.event({` / `.span({` 之后名单整份废掉了 —— 不是日志的 `kind:` 压根进不来，
-  // 于是也不再需要一条断言去保一份排除名单。**少一份要人维护的名单，就少一处会悄悄过期的判据。**
+  // 此前这里还有第三条断言，要求排除名单中的每一条仍在源码中出现，用于保证手写的 `NON_LOG_KINDS`
+  // 不失效。改为锚定 `.event({` / `.span({` 之后该名单整份废除：非日志的 `kind:` 根本不会进入，
+  // 因此也不再需要一条断言去维护排除名单。少一份需人工维护的名单，即少一处会静默过期的判据。
 });
 
 /**
- * `docs/05 §4` 那张「权限矩阵（权威表）」与 `TOOL_POLICY` 的双向焊接（`docs/13` · AC-TOOL-001a）。
+ * `docs/05 §4` 的权限矩阵（权威表）与 `TOOL_POLICY` 之间的双向固定（`docs/13` · AC-TOOL-001a）。
  *
- * 背景：表尾曾写着「CI 有一致性测试（AC-TOOL-001）」，而那条测试从来没有存在过 —— 声称的保证
- * 比没有保证更糟：这张表一度漏掉九个工具（`context_stats` `memory_list` `list_agents`
+ * 背景：表尾曾声明 CI 有一致性测试（AC-TOOL-001），而那条测试从未存在。声称存在的保证
+ * 比没有保证更糟：这张表一度遗漏九个工具（`context_stats` `memory_list` `list_agents`
  * `read_agent_result` `ask_parent` `report_progress` `load_skill` `install_skill` `spawn_harness`）
- * 而没有任何人被绊倒。它是**权威表**，运维和下一轮复审都拿它当工具全集读，漏一行等于那个工具的
- * 权限档从此没人复核过。另一条（`TOOL_POLICY` ↔ 实际注册表）由 `main.ts` 的启动断言管。
+ * 而未被任何人发现。它是权威表，运维与下一轮复审都将其视为工具全集，遗漏一行即意味着该工具的
+ * 权限档从未被复核。另一侧（`TOOL_POLICY` 与实际注册表）由 `main.ts` 的启动断言负责。
  *
- * 判据故意收得很窄：**只解析 §4 那一节、只看表格的第一列**。放宽任何一头断言就废掉 ——
- * 整份文件 grep 会让 §3.x 散文里的一次提名就算「表里有」；而六条脚注也落在节内，它们逐条引用
- * 工具名（`TOOL_POLICY.bash.minRole`、`tools.overrides.stay_silent.minRole`），第一列判据把
- * 这些排掉。同族的 kind 表断言（上面）是同一个理由。
+ * 判据有意收窄：只解析 §4 那一节、只读取表格第一列。放宽任一侧断言即失效：
+ * 对整份文件 grep 会让 §3.x 正文中的一次提及也算作表中存在；而六条脚注同样位于该节内，它们逐条引用
+ * 工具名（`TOOL_POLICY.bash.minRole`、`tools.overrides.stay_silent.minRole`），第一列判据将
+ * 这些排除。同类的 kind 表断言（见上）出于同一理由。
  */
 const TOOL_DOC = 'docs/05-tools-and-permissions.md';
 const MATRIX_SECTION = /^## 4\. 权限矩阵（权威表）[\s\S]*?(?=^## 5\.)/m;
 /**
- * 表里的写法 → `TOOL_POLICY` 的键。**只有记忆这一族**，三条同一个理由：公开与私有记忆的权限档
- * 不同（私有多一道「仅私聊·仅本人」，公开写另受 `memory.pubWriteMinRole` 约束），表里因此按
- * 作用域分三行写；而策略表只有 `memory_read` / `memory_write` 两个键，那层差异在 `available()`
- * 里，不在这一栏上。**往这张映射里加东西之前先想清楚**：它每多一条，断言就少认一个工具名 ——
- * 用它去把测试弄绿等于把这条断言拆掉。
+ * 表中的写法到 `TOOL_POLICY` 键的映射。只有记忆这一族，三条出于同一理由：公开与私有记忆的权限档
+ * 不同（私有多一道仅私聊且仅本人的限制，公开写另受 `memory.pubWriteMinRole` 约束），表中因此按
+ * 作用域分三行书写；而策略表只有 `memory_read` 与 `memory_write` 两个键，那层差异位于 `available()`
+ * 中，不在这一栏上。向该映射添加条目前需谨慎：每增加一条，断言就少覆盖一个工具名，
+ * 用它让测试通过等同于拆除这条断言。
  */
 const MATRIX_ALIASES = new Map<string, readonly string[]>([
   ['memory_read(pub)', ['memory_read']],
   ['memory_write(pub)', ['memory_write']],
   ['memory_read/write(pri)', ['memory_read', 'memory_write']],
 ]);
-/** 工具名的形状。第一列里不合形状的是斜杠命令与通配（`/grant` `/revoke` `custom_*`）。 */
+/** 工具名的形态。第一列中不符合该形态的是斜杠命令与通配（`/grant`、`/revoke`、`custom_*`）。 */
 const TOOL_NAME = /^[a-z][a-z0-9_]*$/;
 
 function matrixSection(): string {
@@ -392,16 +392,16 @@ describe('TOOL_POLICY 与 docs/05 §4 双向一致', () => {
   });
 
   it('表里的每个工具名都是 TOOL_POLICY 的键', () => {
-    // 反方向只判「形状像工具名」的格子：同一列里还有 `custom_*` 这种通配、`/grant` `/revoke`
-    // 这种斜杠命令，而 `Skill` / `Plugin 工具` / `MCP 工具` /「（任何工具 / 任何回复）」几行连
-    // 反引号都没有，本来就不进判据。分类行是这张表的既有形态（它同时也是「非内建工具怎么判」
-    // 的说明），所以这一向靠形状容忍它们，而不是靠一份会被人往里塞名字的白名单。
+    // 反方向只判定形态符合工具名的单元格：同一列中还有 `custom_*` 这类通配、`/grant` 与 `/revoke`
+    // 这类斜杠命令，而 `Skill`、`Plugin 工具`、`MCP 工具` 以及任何工具、任何回复几行连
+    // 反引号都没有，本就不进入判据。分类行是这张表的既有形态（同时也是非内建工具如何判定
+    // 的说明），因此该方向依靠形态容忍它们，而不是依靠一份可被随意添加名字的白名单。
     const stray = [...matrixTools()].filter((name) => TOOL_NAME.test(name) && !(name in TOOL_POLICY)).sort();
     expect(stray, `${TOOL_DOC} §4 列了这些工具，但 TOOL_POLICY 里没有 —— 删工具或改名时表要一起改`).toEqual([]);
   });
 
   it('别名映射里的每一条表里都还写着', () => {
-    // 与 NON_LOG_KINDS 那条同一个道理：一条没人再用的别名会静静放过一个真该被列出的工具名。
+    // 与 NON_LOG_KINDS 那条同理：一条已无人使用的别名会静默放过一个本应被列出的工具名。
     const section = matrixSection();
     const stale = [...MATRIX_ALIASES.keys()].filter((alias) => !section.includes(`\`${alias}\``));
     expect(stale, '这些写法已从 §4 消失，从 MATRIX_ALIASES 里删掉').toEqual([]);
@@ -430,14 +430,14 @@ describe('文档分层', () => {
 });
 
 /**
- * `docs/21 §1` 那张复算表与代码的一致性。
+ * `docs/21 §1` 的复算表与代码之间的一致性。
  *
- * 这一条也是补的：`KNOWN_UNIMPLEMENTED_CONFIG_KEYS` 的条数在 `docs/21` 里曾有**三个版本**
- * （§1 的 67、§5 的 70、§7 的 67），而代码里是 10 —— 差 6.7 倍，持续了九天，没有一处判据在看。
- * 对照组就在同一个仓库：`docs/11 §2.0.1` 的同一份清单被 `tests/config.test.ts` 双向焊着，
- * 同期从 65 条压到 10 条、每次增减都对得上。**差别不是纪律，是有没有闸。**
+ * 这一条同样是事后补上的：`KNOWN_UNIMPLEMENTED_CONFIG_KEYS` 的条数在 `docs/21` 中曾有三个版本
+ * （§1 为 67、§5 为 70、§7 为 67），而代码中是 10，相差 6.7 倍并持续九天，没有任何判据覆盖。
+ * 对照组就在同一仓库：`docs/11 §2.0.1` 的同一份清单被 `tests/config.test.ts` 双向固定，
+ * 同期从 65 条压缩到 10 条，每次增减都保持一致。差别不在于执行纪律，而在于有没有断言。
  *
- * 计数快照写进文档就得可核对。核不了的（历史快照）折进 `<details>` 并标死日期，别摆在现值的位置上。
+ * 计数快照写入文档就必须可核对。无法核对的（历史快照）折叠进 `<details>` 并标注固定日期，不要放在当前值的位置。
  */
 describe('docs/21 §1 的复算表与代码一致', () => {
   const ledger = readFileSync('docs/21-webui-coverage-gaps.md', 'utf8');
@@ -463,21 +463,21 @@ describe('docs/21 §1 的复算表与代码一致', () => {
 });
 
 /**
- * `docs/00 §2`（还欠什么）的**活性探针**。
+ * `docs/00 §2`（未完成事项）的活性探针。
  *
- * 这一条补的是一次真实的漏删：`M-WEB-05` / `M-LOG-02` / `M-MEM-02` 三条缺陷修完之后，`docs/00 §2`
- * 里仍然写着「还欠着」，挂了三天 —— **而没有任何判据会因此变红**。`tests/acceptance.test.ts` 只核
- * 本文的两个数字（勾选分子分母），§2 那张表整个是裸的手工区，而它恰恰是全库最需要保鲜的一节：
- * 别人开工前读的就是它。
+ * 这一条补的是一次真实的遗漏：`M-WEB-05` / `M-LOG-02` / `M-MEM-02` 三条缺陷修复完成后，`docs/00 §2`
+ * 中仍标注为未完成并持续三天，而没有任何判据会因此失败。`tests/acceptance.test.ts` 只核对
+ * 本文的两个数字（勾选分子分母），§2 那张表完全是手工维护区，而它恰恰是全库最需要保持时效的一节：
+ * 其他人开工前读的正是它。
  *
- * 探针的形状是一句**必须无命中**的 grep：`⟨探针：<路径> !~ <正则>⟩`。一条欠账被补完，那个模式就会
- * 出现在源码里，探针当场变红 —— 于是「修好了但忘了从 §2 删掉」不再可能。它是**绊线不是证明**：
- * 报红只说明「这条可能已经补完了，回来看一眼」，不说明补得对。误报的代价是重看一行，
- * 而沉默腐烂的代价是别人照着一份过期的清单决定做什么。
+ * 探针的形式是一句必须无命中的 grep：`⟨探针：<路径> !~ <正则>⟩`。一条欠账被补齐后，该模式就会
+ * 出现在源码中，探针立即失败，于是已修复但忘记从 §2 删除不再可能发生。它是绊线而非证明：
+ * 失败只说明该条可能已完成、需要回来确认，并不说明完成得正确。误报的代价是重新查看一行，
+ * 而静默过期的代价是他人依据一份失效的清单决定工作内容。
  *
- * 写不出探针的（纯语义欠账、跨文件的「没接线」、以及「有意为之 / 修不了」那几条）写
- * `⟨探针：无 —— 理由⟩`，测试放行但要求理由不为空。**一条都不许沉默地跳过** —— 「写不出探针」和
- * 「忘了写」在判据眼里必须长得不一样，这正是上一轮 `NON_LOG_KINDS` 那份手写排除名单的教训。
+ * 写不出探针的（纯语义欠账、跨文件的未接线，以及有意为之或无法修复的那几条）写作
+ * `⟨探针：无 —— 理由⟩`，测试放行但要求理由非空。不允许任何一条静默跳过：写不出探针与
+ * 忘记编写在判据层面必须有区别，这正是上一轮 `NON_LOG_KINDS` 手写排除名单的教训。
  */
 describe('docs/00 §2 的每一条都带活性探针', () => {
   const text = readFileSync('docs/00-state.md', 'utf8');
@@ -530,18 +530,18 @@ describe('docs/00 §2 的每一条都带活性探针', () => {
 });
 
 /**
- * 文档之间的相对链接不许指空。
+ * 文档之间的相对链接不得指向不存在的目标。
  *
- * 这条是补的：实测四条断链，且都不是新的 —— `./05-tools.md`（真名是 `05-tools-and-permissions.md`）、
- * `./07-skills-and-extensions.md`（真名是 `07-skills-plugins-mcp.md`）、
- * `./reviews/24-review-round9.md`（那份是 round6-verification，压根没有 round9）。文件早就改过名，
- * 而链接留在原地。
+ * 这条是事后补上的：实测存在四条断链且都不是新增的，包括 `./05-tools.md`（实际文件名为 `05-tools-and-permissions.md`）、
+ * `./07-skills-and-extensions.md`（实际文件名为 `07-skills-plugins-mcp.md`）、
+ * `./reviews/24-review-round9.md`（该文件是 round6-verification，不存在 round9）。文件早已改名，
+ * 而链接仍保持原样。
  *
- * 为什么此前挡不住：「源码注释里的 `docs/NN` 都指得着」那条只看**源码**，且只看两位数编号；
- * 文档之间的 markdown 链接一条都不在它的视野里。而删一份文档正是最容易制造这种断链的动作 ——
- * 本轮删掉实施计划那份时，四份文档里的入站链接全靠手工 grep 才清干净。
+ * 此前无法拦截的原因：源码注释中的 `docs/NN` 均可解析那条断言只检查源码，且只识别两位数编号，
+ * 文档之间的 markdown 链接完全不在其覆盖范围内。而删除一份文档正是最容易造成此类断链的操作：
+ * 本轮删除实施计划那份文档时，四份文档中的入站链接全靠手工 grep 才清理干净。
  *
- * 只判 `.md` 的相对链接：外链验不了，锚点（`#节名`）的解析规则各家不同，都不进判据。
+ * 只判定 `.md` 的相对链接：外链无法验证，锚点（`#节名`）的解析规则各实现不一，均不进入判据。
  */
 describe('文档之间的链接都指得着', () => {
   it('相对 markdown 链接没有指空的', () => {

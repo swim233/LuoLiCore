@@ -44,9 +44,9 @@ export class TurnRegistry {
   }
 
   /**
-   * 这个人在途的轮次数（跨会话）。`quota.rateLimit.concurrentPerUser` 的权威判据 ——
-   * `turns` 表那一行要到 `openTurn` 之后才写，而 `canStart` 与它之间隔着配额预留、并发闸排队
-   * 与整个 `openTurn`；并发派发之后同一个人的两条消息可以同时通过检查（docs/27 · R-04）。
+   * 该用户在途的轮次数（跨会话），是 `quota.rateLimit.concurrentPerUser` 的权威判据：
+   * `turns` 表那一行要到 `openTurn` 之后才写入，而 `canStart` 与它之间隔着配额预留、并发闸排队
+   * 与整个 `openTurn`；并发派发之后同一用户的两条消息可以同时通过检查（docs/27 · R-04）。
    */
   countForUser(userId: string): number {
     let count = 0;

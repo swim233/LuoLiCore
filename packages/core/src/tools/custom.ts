@@ -16,15 +16,15 @@ import type { Sandbox } from "../sandbox/index.js";
 import { TOOL_POLICY } from "./policy.js";
 import type { ToolExecutionContext, ToolRegistry } from "./registry.js";
 
-/** 脚本与参数文件的落点，与 `python` 内建共用同一个目录。 */
+/** 脚本与参数文件的落点，与 `python` 内建共用同一目录。 */
 const TMP_DIR = ".luoli-tmp";
 const NAME_PATTERN = /^[a-z][a-z0-9_]{1,40}$/;
-/** 注册名的命名空间。docs/05 §3.9 已经占了 `skill_` / `<plugin>_` / `mcp__`。 */
+/** 注册名的命名空间。docs/05 §3.9 已占用 `skill_` / `<plugin>_` / `mcp__`。 */
 export const CUSTOM_TOOL_PREFIX = "custom_";
 const MAX_DESCRIPTION_CHARS = 200;
 const MAX_PARAM_PROPERTIES = 12;
 const MAX_PARAM_DEPTH = 4;
-/** 环境变量总量上界：`E2BIG` 是真实的失败模式，而它的表现是「脚本根本没跑起来」。 */
+/** 环境变量总量上界：`E2BIG` 是真实的失败模式，表现为脚本未能启动。 */
 const MAX_ENV_BYTES = 32_768;
 
 export interface CustomToolDefineInput {
@@ -40,9 +40,9 @@ export interface CustomToolDefineInput {
 type CustomToolConfig = Config["tools"]["selfExtend"];
 
 /**
- * 参数的嵌套层数。**只数 `properties` / `items` 这两跳**，不数 JSON Schema 自己的关键字层级 ——
- * 后者会把一份平铺的 `{type:'object',properties:{x:{...}}}` 数成 2 层，于是 `MAX_PARAM_DEPTH: 4`
- * 实际只允许一层嵌套，而报错信息还告诉模型「最多 4 层」。它照着那句话重试，再被拒一次。
+ * 参数的嵌套层数。只统计 `properties` / `items` 两跳，不统计 JSON Schema 自身的关键字层级 ——
+ * 后者会把平铺的 `{type:'object',properties:{x:{...}}}` 计为 2 层，使 `MAX_PARAM_DEPTH: 4`
+ * 实际只允许一层嵌套，而错误信息仍告知模型上限为 4 层，模型据此重试并再次被拒。
  */
 function paramDepth(node: unknown, depth = 1): number {
   if (!node || typeof node !== "object") return depth;
@@ -59,7 +59,7 @@ function paramDepth(node: unknown, depth = 1): number {
   return deepest;
 }
 
-/** 描述会进每一轮的 TOOL CATALOG，所以压成单行并截断 —— 控制字符还能伪造目录里的分隔。 */
+/** 描述会进入每一轮的 TOOL CATALOG，因此压为单行并截断 —— 控制字符还可伪造目录中的分隔。 */
 function normalizeDescription(value: string): string {
   return value
     .replaceAll(/[\u0000-\u001F\u007F]+/g, " ")
@@ -69,12 +69,12 @@ function normalizeDescription(value: string): string {
 }
 
 /**
- * 模型自撰写工具的注册与执行。形状照 `McpManager`：真相在 SQLite，进程内这份只是缓存，
- * 每次 `reconcile()` 都能从库里重建（docs/01 §3.1 单实例纪律）。
+ * 模型自撰写工具的注册与执行。结构参照 `McpManager`：真相存于 SQLite，进程内的副本仅为缓存，
+ * 每次 `reconcile()` 均可从库中重建（docs/01 §3.1 单实例纪律）。
  *
- * **授权时点与执行时点是分离的**（docs/14 T18）—— 模型调 `bash` 时命令正文在转录里、在人眼前；
- * 调 `custom_backup` 时提示词里只有 `{"target":"/etc"}`，正文是若干轮之前写下的。这个类里的
- * 每一道闸都是这句话的推论。
+ * 授权时点与执行时点是分离的（docs/14 T18）—— 模型调用 `bash` 时命令正文在转录中可见；
+ * 调用 `custom_backup` 时提示词里只有 `{"target":"/etc"}`，正文写于若干轮之前。本类中的
+ * 每一道闸都由此推导而来。
  */
 export class CustomToolManager {
   #fingerprint = "";
@@ -102,8 +102,8 @@ export class CustomToolManager {
   }
 
   /**
-   * 每轮开始时调一次。指纹没变就什么都不做 —— 重扫本身不贵，但重扫会换掉注册表里那批对象，
-   * 而本轮的 `toolSet` 已经在 `runMainAgentInternal` 里冻结了。
+   * 每轮开始时调用一次。指纹未变则不做任何事 —— 重扫本身开销不大，但会替换注册表中的对象，
+   * 而本轮的 `toolSet` 已在 `runMainAgentInternal` 中冻结。
    */
   syncIfChanged(): void {
     const fingerprint = `${this.enabled() ? "1" : "0"}:${this.repo.fingerprint()}`;
@@ -118,8 +118,8 @@ export class CustomToolManager {
       return;
     }
     for (const tool of this.repo.listEnabled()) {
-      // 每行各自 try：一份畸形的 params 不能把其余工具一起带走，更不能从这里抛到启动路径上
-      // （docs/27 · C-04 是同一个教训的 MCP 版本）。
+      // 每行独立 try：一份畸形的 params 不应影响其余工具，更不应从此处抛到启动路径
+      // （docs/27 · C-04 是同一问题的 MCP 版本）。
       try {
         this.#register(tool);
         if (tool.lastError) this.repo.markError(tool.name, null);
@@ -138,10 +138,10 @@ export class CustomToolManager {
   }
 
   /**
-   * 指纹**必须在注册循环之后取**：循环里的 `markError`（写 `last_error`，成功时清空）会推高
-   * `updated_at`。在循环之前记的话，记下的永远是一个已经过时的值 —— 于是每一轮的
-   * `syncIfChanged()` 都判成「变了」，把全部自定义工具重新注册一遍、再写一次 `markError`，
-   * 一个注册失败的工具就能让这件事每轮发生一次，永远收敛不了。
+   * 指纹必须在注册循环之后取：循环中的 `markError`（写 `last_error`，成功时清空）会推高
+   * `updated_at`。若在循环之前记录，记下的始终是过时的值 —— 每一轮的
+   * `syncIfChanged()` 都会判为已变更，重新注册全部自定义工具并再次写入 `markError`，
+   * 一个注册失败的工具即可使该过程每轮重复且无法收敛。
    */
   #stamp(): void {
     this.#fingerprint = `${this.enabled() ? "1" : "0"}:${this.repo.fingerprint()}`;
@@ -158,12 +158,12 @@ export class CustomToolManager {
       inputSchema,
       minRole: tool.minRole,
       scope: tool.scope === "chat" ? "chat" : "global",
-      // `always` 而不是 `conditional`：默认的 `approval.rules` 是空数组，conditional 在那种配置下
-      // 等于 never（`main.ts` 启动时就为此打了一行警告）。
+      // 取 `always` 而非 `conditional`：默认的 `approval.rules` 为空数组，conditional 在该配置下
+      // 等同于 never（`main.ts` 启动时已为此输出一行警告）。
       approval: "always",
       source: "custom",
-      // 自己管超时：`Sandbox.run` 按 `tools.exec.maxTimeoutMs` kill，外面再套一层 race 只会在脚本
-      // 正常跑完之前把调用砍掉，而进程还在后台跑着。
+      // 自行管理超时：`Sandbox.run` 按 `tools.exec.maxTimeoutMs` 终止进程，外层再套一层 race 只会在
+      // 脚本正常结束前中断调用，而进程仍在后台运行。
       timeoutMs: null,
       available: (role, context) => this.#available(tool, role, context),
       execute: (input, context) => this.#execute(tool, input, context),
@@ -172,15 +172,15 @@ export class CustomToolManager {
   }
 
   /**
-   * 三道闸，运维的 `tools.overrides` 一道都绕不过（它只动 `effectivePolicy()` 的角色与审批档，
-   * 碰不到 `available()`，docs/09 §3.7）：
+   * 三道闸，运维的 `tools.overrides` 无法绕过任何一道（它只影响 `effectivePolicy()` 的角色与审批档，
+   * 不涉及 `available()`，docs/09 §3.7）：
    *
-   * 1. **角色地板**：不得低于 `bash`。一个自定义工具就是一段 shell，把它开给 `limited`
+   * 1. 角色下限：不得低于 `bash`。自定义工具本质是一段 shell，开放给 `limited`
    *    等于绕过 `TOOL_POLICY.bash.minRole`。
-   * 2. **沙箱可用性**：与 `bash` / `python` 同一个判据；`requireSandbox` 再往上加一档，
-   *    连 owner 的宿主直跑也不给（默认关，见 docs/14 T19）。
-   * 3. **会话作用域**：`scope='chat'` 的工具只在它被写下的那个会话里可见 —— owner 私聊里写的
-   *    脚本不该自动变成任意群里 trusted 成员的可调用项。
+   * 2. 沙箱可用性：与 `bash` / `python` 同一判据；`requireSandbox` 再收紧一档，
+   *    连 owner 的宿主直跑也不允许（默认关闭，见 docs/14 T19）。
+   * 3. 会话作用域：`scope='chat'` 的工具仅在其定义所在会话中可见 —— owner 私聊中编写的
+   *    脚本不应自动成为任意群组中 trusted 成员的可调用项。
    */
   #available(
     tool: CustomTool,
@@ -197,37 +197,37 @@ export class CustomToolManager {
   }
 
   /**
-   * 参数**绝不拼进命令串**：正文与参数各落一个文件，命令串里只剩两个 uuid（字符集 `[0-9a-f-]`）。
-   * 相对路径在宿主（`cwd=workspace`）与容器（`-w /workspace`）下指的是同一个文件。
+   * 参数绝不拼接进命令串：正文与参数各落一个文件，命令串中只保留两个 uuid（字符集 `[0-9a-f-]`）。
+   * 相对路径在宿主（`cwd=workspace`）与容器（`-w /workspace`）下指向同一个文件。
    *
-   * 顶层标量参数额外给一份 `LUOLI_ARG_*` 环境变量，走 `spawn` options / `docker -e` —— 两条路
-   * 都不经过 shell 解析。前缀白名单是那道闸：没有它，一个叫 `path` 的参数就变成了 `PATH`。
+   * 顶层标量参数额外提供一份 `LUOLI_ARG_*` 环境变量，走 `spawn` options / `docker -e` —— 两条路径
+   * 均不经 shell 解析。前缀白名单构成该闸：缺少它时，一个名为 `path` 的参数会变成 `PATH`。
    */
   async #execute(
     tool: CustomTool,
     input: unknown,
     context: ToolExecutionContext,
   ): Promise<object> {
-    // 注册发生在开轮，执行发生在若干步之后 —— 这中间它可能被改掉、被停用、被删掉。**三种要分开报**：
-    // 都说成「定义变了」的话，模型会去 `list_tools` 看见定义原封不动，然后原样重试。
+    // 注册发生在开轮，执行发生在若干步之后 —— 期间它可能被修改、停用或删除。三种情形须分别报告：
+    // 若统一报为定义已变更，模型会通过 `list_tools` 看到定义未变，随即原样重试。
     const row = this.repo.get(tool.name);
     if (!row)
       return {
         ok: false,
         error: "custom_tool_removed",
-        hint: `${tool.name} 在本轮中途被删掉了，不要执行。`,
+        hint: `${tool.name} 在本轮中途被删除，不要执行。`,
       };
     if (row.enabled !== 1)
       return {
         ok: false,
         error: "custom_tool_disabled",
-        hint: `${tool.name} 在本轮中途被停用了，不要执行；换个办法或如实告诉用户。`,
+        hint: `${tool.name} 在本轮中途被停用，不要执行；改用其他方式或如实告知用户。`,
       };
     if (row.definitionHash !== tool.definitionHash)
       return {
         ok: false,
         error: "custom_tool_redefined",
-        hint: `${tool.name} 的定义在本轮中途变了，不要执行；重新看一下它现在是什么样。`,
+        hint: `${tool.name} 的定义在本轮中途已变更，不要执行；重新查看它当前的定义。`,
       };
     const directory = join(context.workspace, TMP_DIR);
     const id = randomUUID();
@@ -257,7 +257,7 @@ export class CustomToolManager {
         {
           extraEnv: { LUOLI_PARAMS: paramsPath, ...environmentFor(input) },
           chatId: context.turn.chatId,
-          // 见 `builtins.ts` 的 bash：不递下去 `sandbox.run` 就挂不进这次 `tool.call` 之下。
+          // 参见 `builtins.ts` 的 bash：不向下传递则 `sandbox.run` 无法挂在本次 `tool.call` 之下。
           ...(context.parentSpanId
             ? { parentSpanId: context.parentSpanId }
             : {}),
@@ -269,12 +269,12 @@ export class CustomToolManager {
         try {
           rmSync(join(directory, file));
         } catch {
-          /* 沙箱里删掉了、或整个 workspace 被清了 */
+          /* 文件已在沙箱内被删除，或整个 workspace 已被清理 */
         }
     }
   }
 
-  /** 定义期校验。返回错误码而不是抛：调用方要把它原样交回模型，让它自己改了再来。 */
+  /** 定义期校验。返回错误码而不抛出：调用方需将其原样交回模型，由模型修正后重试。 */
   validate(input: CustomToolDefineInput):
     | { ok: false; error: string; hint: string }
     | {
@@ -299,7 +299,7 @@ export class CustomToolManager {
       return {
         ok: false,
         error: "invalid_description",
-        hint: "描述不能为空 —— 模型下一轮只能靠它决定要不要调这个工具。",
+        hint: "描述不能为空 —— 模型下一轮只能据此判断是否调用这个工具。",
       };
     const body = input.body.trim();
     if (!body)
@@ -308,7 +308,7 @@ export class CustomToolManager {
       return {
         ok: false,
         error: "body_too_long",
-        hint: `正文上限 ${config.maxBodyChars} 字符，现在 ${body.length}。`,
+        hint: `正文上限 ${config.maxBodyChars} 字符，当前 ${body.length}。`,
       };
     const params = input.params ?? { type: "object", properties: {} };
     if (!params || typeof params !== "object" || Array.isArray(params))
@@ -338,7 +338,7 @@ export class CustomToolManager {
       return {
         ok: false,
         error: "params_too_deep",
-        hint: `参数 schema 最多 ${MAX_PARAM_DEPTH} 层（顶层对象算 1 层，它下面的每个对象 / 数组元素各算一层）。`,
+        hint: `参数 schema 最多 ${MAX_PARAM_DEPTH} 层（顶层对象算 1 层，其下每个对象 / 数组元素各算一层）。`,
       };
     try {
       jsonSchemaToZod(params);
@@ -350,8 +350,8 @@ export class CustomToolManager {
       };
     }
     const registeredName = this.registeredName(name);
-    // 与既有工具重名要在定义期就说清楚：`registerExternal` 那边只会 warn 一行然后返回 false，
-    // 而模型看到的会是「定义成功了但工具从来没出现过」。
+    // 与既有工具重名须在定义期明确报出：`registerExternal` 一侧只输出一行 warn 并返回 false，
+    // 模型观察到的现象是定义成功但工具始终未出现。
     const conflict = this.#registry
       ?.describe()
       .find(
@@ -362,13 +362,13 @@ export class CustomToolManager {
       return {
         ok: false,
         error: "name_taken",
-        hint: `${registeredName} 已被 ${conflict.defaults.source} 占用，换个名字。`,
+        hint: `${registeredName} 已被 ${conflict.defaults.source} 占用，请更换名字。`,
       };
     if (!this.repo.get(name) && this.repo.count() >= config.maxTools) {
       return {
         ok: false,
         error: "custom_tool_limit",
-        hint: `自定义工具上限 ${config.maxTools} 个，先用 delete_tool 删一个再来。`,
+        hint: `自定义工具上限 ${config.maxTools} 个，先使用 delete_tool 删除一个再重试。`,
       };
     }
     const minRole = input.minRole ?? config.defaultMinRole;
@@ -391,8 +391,8 @@ export class CustomToolManager {
   }
 
   /**
-   * 定义（或改写）一个工具。**落库即禁用**，除非运维显式打开 `autoEnable` —— 网页 / 群聊注入
-   * → `define_tool` → owner 因 `skipForOwner` 无感放行 → 立刻成为持久能力，这条链里本来没有人。
+   * 定义或改写一个工具。落库即禁用，除非运维显式开启 `autoEnable` —— 网页 / 群聊注入
+   * → `define_tool` → owner 因 `skipForOwner` 无感放行 → 立即成为持久能力，该链路中没有人工环节。
    */
   define(input: CustomToolDefineInput, context: ToolExecutionContext): object {
     const checked = this.validate(input);
@@ -428,8 +428,8 @@ export class CustomToolManager {
       enabled: live.enabled === 1,
       hint:
         live.enabled === 1
-          ? "已启用，下一轮就能调用。"
-          : `${reset ? "正文变了，已打回未启用。" : "已保存，但还没启用。"}owner 要在 WebUI 的扩展页看过正文再点启用，之后下一轮才会出现在工具目录里。`,
+          ? "已启用，下一轮即可调用。"
+          : `${reset ? "正文已变更，已打回未启用。" : "已保存，但尚未启用。"}owner 需在 WebUI 的扩展页复核正文后点击启用，之后下一轮才会出现在工具目录中。`,
     };
   }
 
@@ -442,7 +442,7 @@ export class CustomToolManager {
       return {
         ok: false,
         error: "not_found",
-        hint: `没有叫 ${plain} 的自定义工具，先用 list_tools 看看。`,
+        hint: `不存在名为 ${plain} 的自定义工具，先使用 list_tools 查看。`,
       };
     this.reconcile();
     this.log.event({
@@ -456,7 +456,7 @@ export class CustomToolManager {
     return { ok: true, removed: plain };
   }
 
-  /** 列表交回给模型：带上 `enabled` 与作用域，否则它看不出「定义了却调不到」是为什么。 */
+  /** 返回给模型的列表：带上 `enabled` 与作用域，否则模型无法判断已定义却不可调用的原因。 */
   list(context: ToolExecutionContext): object {
     return {
       ok: true,
@@ -477,8 +477,8 @@ export class CustomToolManager {
 }
 
 /**
- * 顶层标量参数 → `LUOLI_ARG_*`。非标量只留在 JSON 文件里：把一个数组塞进环境变量就得选一种
- * 分隔符，而任何分隔符都会在某个值里出现。
+ * 顶层标量参数 → `LUOLI_ARG_*`。非标量仅保留在 JSON 文件中：将数组放入环境变量须选定一种
+ * 分隔符，而任何分隔符都可能出现在某个值中。
  */
 export function environmentFor(input: unknown): Record<string, string> {
   if (!input || typeof input !== "object" || Array.isArray(input)) return {};
@@ -489,14 +489,14 @@ export function environmentFor(input: unknown): Record<string, string> {
       continue;
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
     const name = `LUOLI_ARG_${key.toUpperCase()}`;
-    // 大小写只差一个字母的两个参数（`path` / `Path`）会撞成同一个变量名。先到先得而不是后来者
-    // 覆盖：至少「脚本读到的是哪一个」是确定的，而两个值都还在参数 JSON 文件里。
+    // 仅大小写不同的两个参数（`path` / `Path`）会映射到同一变量名。取先到先得而非后者覆盖：
+    // 至少脚本读到的是哪一个是确定的，且两个值都仍保留在参数 JSON 文件中。
     if (name in out) continue;
     const serialized = String(value);
-    // NUL 在 `spawn` 的 env 里会抛 ERR_INVALID_ARG_VALUE，整个调用直接失败而不是少一个变量。
+    // NUL 在 `spawn` 的 env 中会抛出 ERR_INVALID_ARG_VALUE，导致整个调用失败而非少一个变量。
     if (serialized.includes("\0")) continue;
-    // 按**字节**算：`E2BIG` 数的是字节，而 `.length` 数的是 UTF-16 码元 —— 一份中文参数会被
-    // 少算三倍左右，预算就不再是预算了。
+    // 按字节计算：`E2BIG` 统计的是字节，而 `.length` 统计 UTF-16 码元 —— 中文参数会被
+    // 少计约三倍，预算随之失效。
     bytes += Buffer.byteLength(name) + Buffer.byteLength(serialized) + 2;
     if (bytes > MAX_ENV_BYTES) break;
     out[name] = serialized;

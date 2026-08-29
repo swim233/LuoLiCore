@@ -85,7 +85,7 @@ describe('self-authoring tools', () => {
     // 只能写得更严，不能更松：写松了等于把这段正文推给更多人的上下文。
     expect(await h.registry.execute('write_skill', { name: 'wide', description: 'x', body: 'y', minRole: 'limited' }, context))
       .toMatchObject({ ok: false, error: 'min_role_too_low' });
-    // 随包发的说明书是模型下一次写工具时要读的那份文档，改坏了它就照着改坏的写。
+    // 随包发的说明文档是模型下一次写工具时要读的那份文档，改坏了它就照着改坏的写。
     expect(await h.registry.execute('write_skill', { name: 'writing-tools', description: 'x', body: 'y' }, context))
       .toMatchObject({ ok: false, error: 'skill_reserved' });
     // 同名再写一次 = 更新，不是新建。退休靠 enabled:false（没有删除工具）。

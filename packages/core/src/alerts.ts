@@ -4,7 +4,7 @@ import { guardedFetch } from "./net/outbound.js";
 
 /**
  * 六类告警（[10 §6](../../../docs/10-logging-and-observability.md)）。`alerts.on` 是这六个字符串
- * 的子集 —— 写别的进去不会报错，只是永远匹配不上，所以写入端与文档都按这张表说话。
+ * 的子集：写入其他值不会报错，只是永远匹配不上，因此写入端与文档都以这张表为准。
  */
 export const ALERT_KINDS = [
   "quota_global_exceeded",
@@ -17,14 +17,14 @@ export const ALERT_KINDS = [
 export type AlertKind = (typeof ALERT_KINDS)[number];
 
 export interface AlertDelivery {
-  /** 私聊 owner。装配方（apps/bot）在 Telegram 可用时才给，缺它时只剩 webhook 与日志。 */
+  /** 私聊 owner。装配方（apps/bot）仅在 Telegram 可用时提供，缺失时只剩 webhook 与日志。 */
   owner?(text: string): Promise<void> | void;
 }
 
-/** docs/10 §6 写的就是「连续 5 个 turn 失败」。 */
+/** docs/10 §6 的原文即连续 5 个 turn 失败。 */
 export const CONSECUTIVE_TURN_FAILURE_ALERT = 5;
 
-/** `TurnFailureStreak` 只用得上 `fire` 这一个方法，声明成结构类型好让测试塞假的进来。 */
+/** `TurnFailureStreak` 只用到 `fire` 一个方法，声明成结构类型以便测试注入替身。 */
 export interface TurnFailureAlertSink {
   fire(
     kind: "consecutive_turn_failures",
@@ -37,14 +37,14 @@ export interface TurnFailureAlertSink {
 /**
  * 连续失败计数（`consecutive_turn_failures`，docs/10 §6）。
  *
- * **跨会话计数**：连续失败说明的是「这个部署坏了」，不是「这个群坏了」。**成功一次归零，
- * 达到阈值才 fire。** 计入判据由调用方定，两条既有的不许弄丢（`docs/04 §5.3` 的三档）：
- * 超时是故障、要计入；用户 `/cancel` 不算。
+ * 跨会话计数：连续失败反映的是整个部署故障，而非单个群故障。成功一次即归零，
+ * 达到阈值才 fire。计入判据由调用方决定，两条既有规则不能丢失（`docs/04 §5.3` 的三档）：
+ * 超时属于故障、需计入；用户 `/cancel` 不计入。
  *
- * 从 `createTelegramBot` 的闭包里提出来是因为它**只**存在于那里：定时轮次一次都不记，于是
- * 「上游变黑洞、每次定时触发都超时」这类故障在没人聊天的部署里一次告警都不响
- * （docs/28 · L-SCH-02）。装配方建**一份**传给所有开轮次的入口 —— 每条入口各持一份的话，
- * 两份各卡在 3 次，而这个部署已经全线不通了。
+ * 从 `createTelegramBot` 的闭包中提出来，是因为它此前只存在于那里：定时轮次一次都不记，于是
+ * 上游无响应、每次定时触发都超时这类故障在无人聊天的部署里一次告警都不会触发
+ * （docs/28 · L-SCH-02）。装配方建一份实例传给所有开轮次的入口；每条入口各持一份时，
+ * 两份各停在 3 次，而该部署实际已全线不可用。
  */
 export class TurnFailureStreak {
   #count = 0;
@@ -72,14 +72,14 @@ export class TurnFailureStreak {
 /**
  * 告警分发：去重 → 私聊 owner → webhook。
  *
- * **一律不抛**。告警是「出事时才走的那条路」，让它自己把调用方炸掉是最糟的形态 ——
- * 调用点全在 catch 块和失败分支里。
+ * 一律不抛异常。告警只在故障发生时才走，让它把调用方一并打断是最糟的形态：
+ * 调用点全部位于 catch 块和失败分支中。
  *
  * webhook 走 `net/outbound.ts`：那是全仓库唯一一条出网路径（`docs/22 · V-SSRF-01` / `I-14`），
- * 在这里另开一个裸 `fetch` 等于让运维可配的 URL 直接打内网。
+ * 在此另开一个裸 `fetch` 等于让运维可配的 URL 直接访问内网。
  */
 export class AlertDispatcher {
-  /** `${kind}:${key}` → 上次真的发出去的时刻。有界淘汰在 `#remember` 里。 */
+  /** `${kind}:${key}` → 上一次实际发出的时刻。有界淘汰实现在 `#remember` 中。 */
   readonly #sent = new Map<string, number>();
 
   constructor(
@@ -90,8 +90,8 @@ export class AlertDispatcher {
   ) {}
 
   /**
-   * @param key 去重键的后缀。同一类告警但不同对象（两个 plugin 各自被禁用）要能各发一次，
-   *            所以默认拿 kind 自己去重的行为必须可以被覆盖。
+   * @param key 去重键的后缀。同类告警的不同对象（两个 plugin 分别被禁用）需要各发一次，
+   *            因此默认按 kind 自身去重的行为必须可覆盖。
    */
   async raise(
     kind: AlertKind,
@@ -135,8 +135,8 @@ export class AlertDispatcher {
     }
     if (config.webhookUrl) {
       try {
-        // 告警 webhook 常常就架在内网（Alertmanager、自建 bot）——`allowPrivate` 因此跟着
-        // `provider.allowPrivateBaseUrl` 那个开关走，由装配方传进来，而不是在这里写死。
+        // 告警 webhook 常架设在内网（Alertmanager、自建 bot），因此 `allowPrivate` 跟随
+        // `provider.allowPrivateBaseUrl` 开关，由装配方传入，而不是在此写死。
         await guardedFetch(
           config.webhookUrl,
           {
@@ -165,11 +165,11 @@ export class AlertDispatcher {
   }
 
   /**
-   * **记不下来也要发。** `db_write_failed` 这一条的触发源就是「库写不进去」
-   * （`LogSink.onWriteFailure` → `fire`），所以落库绝不能挡在投递前面：挡住的话，库坏了
-   * 唯一该响的那条告警一定不响，而 `fire()` 的 `.catch()` 会把它咽得无声无息。
-   * 另外两处调用点在 catch 块里，抛出去会让类头上那句「一律不抛」失效。
-   * `LogSink.event` 现在自己也不抛了，但这条不变量不该依赖那边的实现（docs/10 §6）。
+   * 落库失败也要投递。`db_write_failed` 的触发源正是数据库写入失败
+   * （`LogSink.onWriteFailure` → `fire`），因此落库绝不能挡在投递之前：挡住时，数据库故障下
+   * 唯一该触发的告警必定不触发，而 `fire()` 的 `.catch()` 会把它静默吞掉。
+   * 另外两处调用点位于 catch 块中，抛出会让类头声明的一律不抛失效。
+   * `LogSink.event` 现已自身不抛，但这条不变量不应依赖那侧的实现（docs/10 §6）。
    */
   #log(event: Parameters<LogSink["event"]>[0]): void {
     try {
@@ -179,7 +179,7 @@ export class AlertDispatcher {
     }
   }
 
-  /** 同步版本：给不能 await 的调用点（事件回调、finally 块）。失败照样吞掉。 */
+  /** 同步版本：供不能 await 的调用点使用（事件回调、finally 块）。失败同样吞掉。 */
   fire(
     kind: AlertKind,
     summary: string,
@@ -192,7 +192,7 @@ export class AlertDispatcher {
   #remember(key: string, at: number): void {
     this.#sent.set(key, at);
     if (this.#sent.size <= 512) return;
-    // 去重表按 plugin 名 / provider id 这类东西展开，不设上界就是一条慢泄漏。
+    // 去重表按 plugin 名、provider id 这类维度展开，不设上界即为一处慢泄漏。
     const cutoff = at - this.config().dedupeMinutes * 60_000;
     for (const [entry, when] of this.#sent)
       if (when < cutoff) this.#sent.delete(entry);

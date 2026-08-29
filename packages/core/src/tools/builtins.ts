@@ -54,24 +54,24 @@ import {
 import type { Role } from "@luoli/shared";
 import type { ToolExecutionContext } from "./registry.js";
 
-/** 一次投递的落点。thread 必须跟着走，否则话题群里的追发会掉到「General」去。 */
+/** 一次投递的目标位置。thread 必须一并传递，否则话题群中的追发会落到 General。 */
 export interface TelegramTarget {
   chatId: string;
   threadId: number | null;
   turnId: string;
-  /** 这次投递该挂在哪个 span 之下（`docs/10 §1`）。工具路径给的是本次 `tool.call` 的 span id。 */
+  /** 本次投递应挂在哪个 span 之下（`docs/10 §1`）。工具路径传入的是本次 `tool.call` 的 span id。 */
   parentSpanId?: string;
 }
 
 /**
- * Telegram 侧工具的适配层契约（实现在 `packages/telegram/src/tools.ts`）。core 只负责本轮语义
- * ——jail 解析、大小与条数上限、messageId 缺省——真正的 API 调用、emoji 白名单、发出去之后
- * 写回归档都在适配层。
+ * Telegram 侧工具的适配层契约（实现位于 `packages/telegram/src/tools.ts`）。core 只负责本轮语义
+ * ——jail 解析、大小与条数上限、messageId 缺省——真正的 API 调用、emoji 白名单、发送后写回归档
+ * 均在适配层。
  *
- * 依赖里这一项**故意是必填的**（没有 Telegram 入口就显式传 `null`）：它曾经是可选的，于是
- * `main.ts` 少传一个 key 就让五个工具永久消失 —— `available()` 判的就是它在不在，而
- * `TOOL_POLICY ↔ 注册表` 的启动断言只看「注册没注册」，一个字都没报，模型答「我没有这个功能」。
- * 写成必填之后，同样的遗漏是一个编译错误。
+ * 依赖中该项刻意设为必填（没有 Telegram 入口时显式传 `null`）：它此前是可选的，于是
+ * `main.ts` 少传一个 key 就使五个工具永久消失 —— `available()` 判定的正是它是否存在，而
+ * `TOOL_POLICY ↔ 注册表` 的启动断言只检查是否注册，不会给出任何提示，模型则回答不具备该功能。
+ * 改为必填后，同样的遗漏会成为编译错误。
  */
 export interface TelegramToolBridge {
   sendMessage(target: TelegramTarget, text: string): Promise<object>;
@@ -92,13 +92,13 @@ export interface TelegramToolBridge {
   ): Promise<object>;
   pin(target: TelegramTarget, messageId: number): Promise<object>;
   /**
-   * ACP 的进度卡片（`docs/05 §3.5.2`）。**这一个是可选的，与上面五个刻意不同** ——
-   * presence 就是开关：拿不到（没有 Telegram 入口、或适配层这一版还没实现）时 `spawn_acp` 照旧跑，
-   * 只是屏幕上没有中途的动静。上面五个是必填的理由不适用于它：漏传那五个会让工具**永久消失**而
-   * 启动断言只看注册没注册；这一个漏了只是少一层呈现，工具本身照旧在目录里、照旧能用。
+   * ACP 的进度卡片（`docs/05 §3.5.2`）。该项为可选，与上面五个刻意不同 —— 存在即启用：
+   * 拿不到时（没有 Telegram 入口，或适配层本版尚未实现）`spawn_acp` 照常运行，只是屏幕上没有
+   * 中间进度。上面五个设为必填的理由不适用于它：漏传那五个会使工具永久消失而启动断言只检查是否
+   * 注册；本项遗漏只是少一层呈现，工具本身仍在目录中且可正常使用。
    *
-   * 返回 `null` = 这个会话上开不出卡片。**渲染选项由调用方从本轮 `turn.config` 取**，不是这里读
-   * 全局快照：`output.*` 在 `PER_CHAT_OVERRIDE_ALLOWLIST` 里，读快照就是把会话级覆盖静默丢掉。
+   * 返回 `null` 表示该会话无法创建卡片。渲染选项由调用方从本轮 `turn.config` 读取，而非在此读取
+   * 全局快照：`output.*` 位于 `PER_CHAT_OVERRIDE_ALLOWLIST` 中，读快照会静默丢弃会话级覆盖。
    */
   openProgressCard?(
     target: {
@@ -111,9 +111,9 @@ export interface TelegramToolBridge {
       parseMode: "MarkdownV2" | "HTML" | "none";
       maxMessageChars: number;
       intervalMs: number;
-      /** 那台 agent 的 `name`，进卡片表头。不给就退化成一句「外部 agent」。 */
+      /** 该 agent 的 `name`，用于卡片表头。不提供时退化为「外部 agent」。 */
       agent?: string;
-      /** 会话 root（realpath）。卡片拿它把 agent 报上来的绝对路径相对化 —— 不给就每行多一条长路径。 */
+      /** 会话 root（realpath）。卡片据此将 agent 上报的绝对路径相对化 —— 不提供则每行多一条长路径。 */
       dir?: string;
       thoughts?: boolean;
     },
@@ -121,15 +121,15 @@ export interface TelegramToolBridge {
 }
 
 /**
- * 一张在途的 ACP 进度卡片。**两个方法都永不 throw** —— 一次改文案绝不能把一次正在改仓库的调用
- * 变成失败（同「回执失败不影响审批本身」那条纪律）。
+ * 一张在途的 ACP 进度卡片。两个方法均不抛出异常 —— 一次文案更新绝不能使一次正在修改仓库的调用
+ * 失败（同回执失败不影响审批本身这条纪律）。
  */
 export interface AcpProgressCard {
-  /** 一条 `session/update` 原件。节流、渲染、去重都在适配层。 */
+  /** 一条 `session/update` 原文。节流、渲染、去重均在适配层完成。 */
   push(notification: unknown): void;
   /**
-   * 终帧。**归档只在这里发生一次** —— `ScopedArchiveRepository.append` 是 `INSERT OR IGNORE`，
-   * 首帧就归档等于把「正在启动…」永久钉进 `messages` 与 FTS。
+   * 终帧。归档只在此处发生一次 —— `ScopedArchiveRepository.append` 是 `INSERT OR IGNORE`，
+   * 在首帧归档等于把「正在启动…」永久写入 `messages` 与 FTS。
    */
   close(final: {
     stopReason?: string;
@@ -142,12 +142,12 @@ export interface AcpProgressCard {
 }
 
 /**
- * 上传的耗时跟文件大小走（`tools.tg.maxFileSendMb` 默认 50MB），拿 `tools.defaultTimeoutMs`
- * 的 60s 去卡它等于把正常的大文件上传砍成 `tool_timeout`。给一个够宽但仍然有限的预算 ——
- * 「没有上限」在这条链上就是卡死一整轮。
+ * 上传耗时与文件大小相关（`tools.tg.maxFileSendMb` 默认 50MB），用 `tools.defaultTimeoutMs`
+ * 的 60s 限制它等于把正常的大文件上传判为 `tool_timeout`。给出一个足够宽但仍有限的预算 ——
+ * 在这条链路上取消上限即意味着整轮阻塞。
  */
 const UPLOAD_TIMEOUT_MS = 300_000;
-/** `python` 的脚本落点（doc §3.3）。带前导点，所以默认不会出现在 `list_dir` / `glob` 里。 */
+/** `python` 的脚本存放位置（doc §3.3）。带前导点，因此默认不会出现在 `list_dir` / `glob` 中。 */
 const PYTHON_TMP_DIR = ".luoli-tmp";
 
 const target = (context: ToolExecutionContext): TelegramTarget => ({
@@ -156,13 +156,13 @@ const target = (context: ToolExecutionContext): TelegramTarget => ({
   turnId: context.turn.turnId,
   ...(context.parentSpanId ? { parentSpanId: context.parentSpanId } : {}),
 });
-/** 取本轮那份合并后的配置：运维在 WebUI 改了上限，下一轮就该生效（`tools.tg` 在热更新白名单里）。 */
+/** 读取本轮合并后的配置：运维在 WebUI 修改上限后，下一轮即应生效（`tools.tg` 在热更新白名单内）。 */
 const tgLimits = (context: ToolExecutionContext): Config["tools"]["tg"] =>
   (context.turn.config as Readonly<Config>).tools.tg;
 
 /**
- * 追发预算按**调用次数**扣，成功与否都算：上限防的是刷屏，而失败重试同样在刷屏。
- * 计数挂在 turn 上而不是模块级 Map —— 轮次对象随轮次消亡，不需要谁去清理。
+ * 追发预算按调用次数扣减，成功与否均计入：上限防的是刷屏，而失败重试同样构成刷屏。
+ * 计数挂在 turn 上而非模块级 Map —— 轮次对象随轮次释放，无需额外清理。
  */
 function claimExtraMessage(
   context: ToolExecutionContext,
@@ -173,17 +173,17 @@ function claimExtraMessage(
     return {
       ok: false,
       error: "extra_message_limit_exceeded",
-      hint: `本轮最多追发 ${max} 条（tools.tg.maxExtraMessagesPerTurn）；正文请直接写进回复。`,
+      hint: `本轮最多追发 ${max} 条（tools.tg.maxExtraMessagesPerTurn）；正文请直接写入回复。`,
     };
   Object.assign(context.turn, { extraMessages: used + 1 });
   return null;
 }
 
 /**
- * `read_messages` 的 `anchor`：消息 id 或 ISO 时间（docs/05 §3.2）。数字串一律按 id 认 ——
- * 模型十有八九把上下文里 `#12841` 的数字当字符串递过来，而 `Date.parse('12841')` 在某些运行时
- * 会解析成一个年份，于是它读到一段完全不相干的记录，还以为那就是自己要的位置。
- * 解析失败交回 `false`，让调用方给出一句能照着改的错误，而不是悄悄退回「最近 N 条」。
+ * `read_messages` 的 `anchor`：消息 id 或 ISO 时间（docs/05 §3.2）。数字串一律按 id 识别 ——
+ * 模型大概率会把上下文中 `#12841` 的数字作为字符串传入，而 `Date.parse('12841')` 在部分运行时
+ * 会解析为年份，导致它读到完全不相关的记录，却认为那正是目标位置。
+ * 解析失败返回 `false`，由调用方给出可据以修正的错误，而不是静默退回最近 N 条。
  */
 function resolveAnchor(
   anchor: number | string | undefined,
@@ -195,14 +195,14 @@ function resolveAnchor(
   const parsed = Date.parse(trimmed);
   return Number.isNaN(parsed) ? false : { anchorDate: parsed };
 }
-/** `search_messages` 的 after / before。`undefined`（没传）与解析失败必须分开，后者要报错。 */
+/** `search_messages` 的 after / before。`undefined`（未传）与解析失败必须区分，后者需报错。 */
 function parseMoment(value: string | undefined): number | null | false {
   if (value === undefined) return null;
   const parsed = Date.parse(value.trim());
   return Number.isNaN(parsed) ? false : parsed;
 }
 
-/** 三个列表型检索工具共用的渲染（doc §3.2 的 `#id [时间] 发言人: 正文` 一行一条）。 */
+/** 三个列表型检索工具共用的渲染（doc §3.2 的 `#id [时间] 发言人: 正文`，一行一条）。 */
 function cite(
   messages: readonly ArchivedMessage[],
   context: ToolExecutionContext,
@@ -215,21 +215,21 @@ function cite(
 }
 
 /**
- * 短词进不了 trigram 索引，剔掉是**正确降级**（`archiveQuery` 的 docstring 写明了理由）——
- * 但不说出来就是「我按你写的都查了」的假象：`search_messages("名字 李小明")` 只按 `李小明`
- * 检索过，而模型据此判定「没有这回事」（docs/28 · L-DB-01）。给的是可操作的下一步，
- * 不是一句免责声明。两个检索工具共用一份文案 —— 各写一份的结果是其中一个以后忘了改。
+ * 短词无法进入 trigram 索引，剔除属于正确降级（理由见 `archiveQuery` 的 docstring）——
+ * 但不告知即构成已按输入完整检索的假象：`search_messages("名字 李小明")` 实际只按 `李小明`
+ * 检索，而模型据此判定不存在相关记录（docs/28 · L-DB-01）。此处给出的是可操作的下一步，
+ * 而非免责声明。两个检索工具共用一份文案 —— 各写一份的结果是其中一份日后被遗漏修改。
  */
 function droppedTokenNote(query: string): { note?: string } {
   const dropped = archiveQuery(query).dropped;
   return dropped.length
     ? {
-        note: `以下词短于 3 个字、trigram 索引检索不到，本次未参与检索：${dropped.join("、")}。如果有需要，请单独作为 query 再查一次。`,
+        note: `以下词短于 3 个字、trigram 索引无法检索，本次未参与检索：${dropped.join("、")}。如有需要，请单独作为 query 重新检索一次。`,
       }
     : {};
 }
 
-/** workspace 内的绝对路径 + 大小闸门。越界、不存在、超限三种都要在调 API 之前变成 `ok:false`。 */
+/** workspace 内的绝对路径与大小闸门。越界、不存在、超限三种都需在调用 API 之前转为 `ok:false`。 */
 function resolveOutgoingFile(
   context: ToolExecutionContext,
   files: FileTools,
@@ -243,7 +243,7 @@ function resolveOutgoingFile(
     return {
       ok: false,
       error: error instanceof Error ? error.message : "path_invalid",
-      hint: "只能发工作目录内的文件。",
+      hint: "只能发送工作目录内的文件。",
     };
   }
   if (!files.exists(path))
@@ -284,40 +284,40 @@ export function registerBuiltins(
       apiKey: string;
     };
     /**
-     * 抓回来的图片往哪去。**可选**：不给就走「只报类型与大小」那一档 —— 不假装读到了内容
-     * （测试与不配 vision 的部署都落在这里）。`visionAvailable` 每次调用现算，因为它要看的是
-     * **本轮**这个别名支不支持看图，而别名可以被 `set_model` 换掉。
+     * 抓取到的图片的去向。可选：不提供时走只报告类型与大小的档位 —— 不伪装成已读取内容
+     * （测试与未配置 vision 的部署均落在此处）。`visionAvailable` 每次调用实时计算，因为它判定的是
+     * 本轮当前别名是否支持图像，而别名可被 `set_model` 更换。
      *
-     * 收整个 `ToolExecutionContext` 而不只是 `turn`：子 agent 的别名不在 turn 上（它是
-     * `runSubAgent` 的局部变量，经 `agentAlias` 带过来），而这张图要交给的正是它（`docs/04 §5.2`）。
+     * 接收整个 `ToolExecutionContext` 而非仅 `turn`：子 agent 的别名不在 turn 上（它是
+     * `runSubAgent` 的局部变量，经 `agentAlias` 传入），而该图片正是要交给它（`docs/04 §5.2`）。
      */
     webMedia?: {
       assets: WebAssetStore;
       visionAvailable: (context: ToolExecutionContext) => boolean;
     };
     /**
-     * ACP 客户端（M13）。**可选**：没有它 `spawn_acp` 照旧注册（`main.ts` 那条
-     * 「每个 `TOOL_POLICY` 条目都已注册」的启动断言要求无条件注册）但 `available()` 恒假，
-     * 于是它连模型的工具目录都不进。分段用例不需要起一个真管着子进程的 manager。
+     * ACP 客户端（M13）。可选：缺失时 `spawn_acp` 仍会注册（`main.ts` 中每个 `TOOL_POLICY` 条目
+     * 都已注册的启动断言要求无条件注册），但 `available()` 恒为假，因此它不会进入模型的工具目录。
+     * 分段用例无需启动一个真正管理子进程的 manager。
      */
     acp?: AcpManager;
     /**
-     * 审批 broker。**只有 ACP 的逐条 permission 用它**（`docs/05 §3.5.3`）：工具自己那道审批走的是
-     * `ToolRegistry` 手里的同一个对象，这里要的是「不是工具调用、但走同一条链」那两个动作。
+     * 审批 broker。只有 ACP 的逐条 permission 使用它（`docs/05 §3.5.3`）：工具自身的审批走的是
+     * `ToolRegistry` 持有的同一对象，此处需要的是非工具调用但走同一链路的那两个动作。
      *
-     * **可选，而它的缺席是一道真的门**：`permissionMode === 'ask'` 且没有它时 `spawn_acp` 直接不进
-     * 工具目录（照 `allowedDirs` 为空的同一形态）—— 一个叫 `ask` 的默认值实际在放行，正是
-     * `docs/reviews/16 §5` 说的伪造一道门。
+     * 可选，而它的缺失构成一道真实的门：`permissionMode === 'ask'` 且缺失时，`spawn_acp` 直接不进入
+     * 工具目录（与 `allowedDirs` 为空同形态）—— 名为 `ask` 的默认值实际放行，正是
+     * `docs/reviews/16 §5` 所述的伪造一道门。
      */
     approvals?: AcpApprovalBroker;
   },
 ): void {
   const web = dependencies.web ?? DEFAULT_WEB_RETRY;
   /**
-   * 本次调用的图片落地口。**每次调用现建**：`visionAvailable` 判的是本轮**当前**别名的能力位，
-   * 而 `set_model` 能在轮内把它换掉；建一次存起来等于把第一步那个答案冻住。
+   * 本次调用的图片落地入口。每次调用实时构造：`visionAvailable` 判定的是本轮当前别名的能力位，
+   * 而 `set_model` 可在轮内更换它；构造一次并缓存等于把第一步的结果固定下来。
    *
-   * 与 MCP 的截图共用 `captureImage`（`media/web-assets.ts`）—— 两份实现就是两种行为。
+   * 与 MCP 的截图共用 `captureImage`（`media/web-assets.ts`）—— 两份实现即两种行为。
    */
   const webMediaSink = (context: ToolExecutionContext): WebMediaSink | null => {
     const media = dependencies.webMedia;
@@ -331,7 +331,7 @@ export function registerBuiltins(
               dependencies.context.appendDelta(turn, message as never),
             visionAvailable: () => media.visionAvailable(context),
             log: dependencies.log,
-            // 子 agent 那一档：父轮只留文字痕迹、张数按 run 自己数、「注入过图」置在它身上（docs/04 §5.2）。
+            // 子 agent 档位：父轮只保留文字记录、张数按 run 自行统计、已注入图片标志置于其自身（docs/04 §5.2）。
             ...(context.subAgent
               ? {
                   subAgent: {
@@ -347,23 +347,23 @@ export function registerBuiltins(
         ),
     };
   };
-  // 跟 `telegram` 同样是必填：漏传一个 key 就让五个工具永久消失，而
-  // 「TOOL_POLICY ↔ 注册表」的启动断言只看注册没注册，一个字都不会报。
+  // 与 `telegram` 同样为必填：漏传一个 key 即使五个工具永久消失，而
+  // 「TOOL_POLICY ↔ 注册表」的启动断言只检查是否注册，不会给出任何提示。
   registerScheduleTools(registry, dependencies.schedule);
-  /** 每个 agent_run 上一次向 SSE 广播进度的时刻（`agent.progressThrottleMs`）。 */
+  /** 每个 agent_run 上一次向 SSE 广播进度的时间（`agent.progressThrottleMs`）。 */
   const progressBroadcast = new Map<string, number>();
   /**
-   * `agent.maxConcurrentSubagents`：同一轮里**同时在跑**的子 agent 数上限。
-   * 模型可以在一步里并排发多个 `spawn_agent`，每个都是一次真实的模型调用 —— 不设闸的话
-   * 一步就能把 provider 的并发配额和本机内存一起打满。这与 `agent.maxSubagentsPerTurn`
-   * 是两件事：那个数的是一轮**总共**派过几个，这个数的是此刻同时有几个在跑。
+   * `agent.maxConcurrentSubagents`：同一轮内同时运行的子 agent 数上限。
+   * 模型可在一步中并行发出多个 `spawn_agent`，每个都是一次真实的模型调用 —— 不设闸门时
+   * 一步即可耗尽 provider 的并发配额与本机内存。它与 `agent.maxSubagentsPerTurn` 是两回事：
+   * 后者统计一轮累计派发数量，本项统计当前同时运行的数量。
    */
   const running = new Map<string, number>();
   const waiting = new Map<string, Array<() => void>>();
   /**
-   * 一轮里排队的 `spawn_agent` **全部**被 abort（`/cancel`）时，`releaseSlot` 一次都不会被调到，
-   * 于是 `waiting` 里留下一个空数组条目、`running` 可能留下一个 0，进程生命周期内不回收
-   * （docs/27 · R-07）。`drop` 那条 abort 路径顺手清一次：队列空了、没有在跑的，就把两个键都删掉。
+   * 一轮内排队的 `spawn_agent` 全部被 abort（`/cancel`）时，`releaseSlot` 一次都不会被调用，
+   * 于是 `waiting` 中残留一个空数组条目、`running` 可能残留一个 0，在进程生命周期内不被回收
+   * （docs/27 · R-07）。`drop` 的 abort 路径顺带清理一次：队列为空且无运行中任务时，删除两个键。
    */
   const collectSlots = (turnId: string): void => {
     if (waiting.get(turnId)?.length || running.get(turnId)) return;
@@ -371,10 +371,9 @@ export function registerBuiltins(
     running.delete(turnId);
   };
   /**
-   * 拿到槽位返回 true。排队时**必须认 abortSignal**：这个 promise 原本只由 `releaseSlot` 唤醒，
-   * 于是 `/cancel` 之后排在后面的 `spawn_agent` 照样会醒过来、照样真的去派一个子 agent —— 一轮
-   * 已经取消的对话继续烧 token，而没有任何人还在等它的结果（`timeoutMs: null`，注册表那道兜底
-   * 的 race 也不会砍它）。
+   * 获得槽位时返回 true。排队时必须识别 abortSignal：该 promise 原本只由 `releaseSlot` 唤醒，
+   * 因此 `/cancel` 之后排在后面的 `spawn_agent` 仍会被唤醒并真正派发一个子 agent —— 已取消的
+   * 会话继续消耗 token，而无人等待其结果（`timeoutMs: null`，注册表的兜底 race 也不会终止它）。
    */
   const acquireSlot = async (
     turnId: string,
@@ -393,8 +392,8 @@ export function registerBuiltins(
         abortSignal.removeEventListener("abort", drop);
         resolve(true);
       };
-      // 出队时把自己从队列里摘掉，否则 releaseSlot 会把一个已经放弃的等待者当成「唤醒了一个」，
-      // 而真正在排队的那个继续等 —— 槽位就这么漏掉一个。
+      // 出队时需将自身从队列中移除，否则 releaseSlot 会把已放弃的等待者计为一次成功唤醒，
+      // 而真正排队的等待者继续等待 —— 由此漏掉一个槽位。
       const drop = (): void => {
         const at = queue.indexOf(admit);
         if (at >= 0) queue.splice(at, 1);
@@ -417,13 +416,13 @@ export function registerBuiltins(
       if (!running.get(turnId)) running.delete(turnId);
     }
   };
-  // 两个 web 工具自带预算（单次 timeoutMs × 最多 retries+1 次 + 退避），整体会比
-  // `tools.defaultTimeoutMs` 长。给注册表报一份自己的账，别让兜底那道 race 在重试走完前先砍掉。
+  // 两个 web 工具自带预算（单次 timeoutMs × 最多 retries+1 次，加退避），总时长会超过
+  // `tools.defaultTimeoutMs`。向注册表上报自身预算，避免兜底 race 在重试完成前终止调用。
   const webBudgetMs = (web.retries + 1) * web.timeoutMs + 5000;
   registry.register({
     name: "read_file",
     description:
-      "读取工作目录或 skill:// 资源，支持 offset/limit 分页（知道路径要看内容时用它，不要为此起 bash 里的 cat/head）。正文每行带 `行号<TAB>` 前缀，那只是给你定位用的坐标，不是文件内容：写回文件时（edit_file 的 oldString/newString、write_file 的 content）一律不能带它。",
+      "读取工作目录或 skill:// 资源，支持 offset/limit 分页（已知路径需查看内容时使用本工具，不要为此调用 bash 的 cat/head）。正文每行带 `行号<TAB>` 前缀，那是用于定位的行号，不是文件内容：写回文件时（edit_file 的 oldString/newString、write_file 的 content）一律不能带它。",
     inputSchema: z.object({
       path: z.string(),
       offset: z.number().int().nonnegative().optional(),
@@ -441,25 +440,25 @@ export function registerBuiltins(
         input.path,
         context.turn.effectiveRole,
       );
-      // 目录判据这一支得自己判：它压根不经过 `FileTools`（理由那一份在 `FileTools.#isDirectory` 上，
-      // 一句话是「目录的 size 在 btrfs 上是 0，于是 readSync 从不被调用、EISDIR 永远不抛」）。
-      // 不把 `readSlice` 改成会抛：那个函数还有别的调用方。错误码与那边同一个。
+      // 目录判定分支需自行处理：它完全不经过 `FileTools`（理由见 `FileTools.#isDirectory`，
+      // 概括为目录的 size 在 btrfs 上为 0，因而 readSync 从不被调用、EISDIR 永不抛出）。
+      // 不将 `readSlice` 改为抛出：该函数还有其它调用方。错误码与那一侧保持一致。
       let directory = false;
       try {
         directory = statSync(path).isDirectory();
       } catch {
-        /* 不存在：readSlice 随后照旧如实抛 ENOENT */
+        /* 不存在：readSlice 随后照常如实抛出 ENOENT */
       }
       if (directory)
         return {
           ok: false,
           error: "path_is_directory",
-          hint: `${input.path} 是目录不是文件；这个 skill 里有哪些文件看 load_skill 交回的 files 清单`,
+          hint: `${input.path} 是目录不是文件；该 skill 中有哪些文件请查看 load_skill 返回的 files 清单`,
         };
       const offset = input.offset ?? 0;
-      // skill 资源同样受 `tools.fs.maxReadBytes` 管。此前这一支写死 256KB 且照收模型传的任意
-      // `limit`，于是 skill 目录里一个大文件能整份读进来 —— 两条读路径的预算必须是同一份，
-      // 现在连读法也是同一份（`readSlice` 定位读，docs/27 · R-02）。
+      // skill 资源同样受 `tools.fs.maxReadBytes` 约束。此前该分支写死 256KB 且接受模型传入的任意
+      // `limit`，导致 skill 目录中的大文件可被整份读入 —— 两条读取路径的预算必须一致，
+      // 现在读取方式也已统一（`readSlice` 定位读取，docs/27 · R-02）。
       const budget = (context.turn.config as Readonly<Config>).tools.fs
         .maxReadBytes;
       const slice = readSlice(
@@ -496,7 +495,7 @@ export function registerBuiltins(
   registry.register({
     name: "glob",
     description:
-      "按文件名形状找文件（知道名字或后缀、不知道在哪时用它；知道内容里有什么字就用 grep）。",
+      "按文件名模式查找文件（已知文件名或后缀、未知所在位置时使用本工具；已知内容中的文字则使用 grep）。",
     inputSchema: z.object({
       pattern: z.string(),
       path: z.string().default("."),
@@ -512,7 +511,7 @@ export function registerBuiltins(
   registry.register({
     name: "grep",
     description:
-      "按内容搜工作目录里的文本（知道要找什么字、不知道在哪个文件时用它，不要为此起 bash 里的 rg/grep）。glob 限定文件名，contextLines 附带命中行前后各若干行。",
+      "按内容检索工作目录中的文本（已知要查找的文字、未知所在文件时使用本工具，不要为此调用 bash 的 rg/grep）。glob 限定文件名，contextLines 附带命中行前后各若干行。",
     inputSchema: z.object({
       pattern: z.string(),
       path: z.string().default("."),
@@ -560,8 +559,8 @@ export function registerBuiltins(
     }),
     policy: builtinPolicy("edit_file"),
     sourcePriority: 100,
-    // 与 `write_file` 同一个判据（`when: 'target_exists'`）：edit 的最后一步就是 write，
-    // 而它作用的对象**总是**一个已存在的文件（docs/27 · C-03）。
+    // 与 `write_file` 使用同一判据（`when: 'target_exists'`）：edit 的最后一步即 write，
+    // 而其作用对象始终是一个已存在的文件（docs/27 · C-03）。
     approvalTargetExists: (input, context) =>
       dependencies
         .filesFor(context.workspace, context.turn.effectiveRole)
@@ -574,7 +573,7 @@ export function registerBuiltins(
   registry.register({
     name: "delete_file",
     description:
-      "将文件移入回收站，不物理删除。删目录要显式 recursive:true，且只允许作用在二级及更深的路径。",
+      "将文件移入回收站，不物理删除。删除目录需显式传入 recursive:true，且只允许作用于二级及更深的路径。",
     inputSchema: z.object({
       path: z.string(),
       recursive: z.boolean().default(false),
@@ -601,11 +600,11 @@ export function registerBuiltins(
         .filesFor(context.workspace, context.turn.effectiveRole)
         .move(input.from, input.to),
   });
-  // `timeoutMs: null` = 这个工具自己管超时。sandbox.run 会按 `tools.exec.maxTimeoutMs`（默认 300s）
-  // kill 进程，比 `tools.defaultTimeoutMs` 长得多；套上兜底那道 race 只会把正常的长命令砍成
-  // `tool_timeout`，而进程还在后台跑着。
-  // `timeoutMs` 的上界写进 schema（doc §3.3）：`sandbox.run` 反正会按 `maxTimeoutMs` 夹一次，
-  // 但夹在里面模型就永远不知道自己要的 30 分钟被改成了 5 分钟，然后据此去解释「命令没跑完」。
+  // `timeoutMs: null` 表示该工具自行管理超时。sandbox.run 会按 `tools.exec.maxTimeoutMs`（默认 300s）
+  // 终止进程，远长于 `tools.defaultTimeoutMs`；叠加兜底 race 只会把正常的长命令判为
+  // `tool_timeout`，而进程仍在后台运行。
+  // `timeoutMs` 的上界写入 schema（doc §3.3）：`sandbox.run` 无论如何都会按 `maxTimeoutMs` 夹取一次，
+  // 但仅在内部夹取会使模型无从得知所请求的 30 分钟被改为 5 分钟，进而据此解释命令未执行完。
   const bashSchema = (max: number) =>
     z.object({
       command: z.string(),
@@ -623,7 +622,7 @@ export function registerBuiltins(
   registry.register({
     name: "bash",
     description:
-      "在工作目录执行命令；非 owner 必须使用可用沙箱。留给真正需要执行的事（跑脚本、装依赖、处理数据）：读文件用 read_file、搜内容用 grep、找文件用 glob、看目录用 list_dir —— 那些工具带路径拦截、分页和统一的引用格式，用 cat/rg/ls 绕过去出错时也更难说清坏在哪一步。",
+      "在工作目录执行命令；非 owner 必须使用可用沙箱。仅用于确需执行的操作（运行脚本、安装依赖、处理数据）：读取文件使用 read_file、检索内容使用 grep、查找文件使用 glob、列出目录使用 list_dir —— 这些工具带路径拦截、分页与统一的引用格式，改用 cat/rg/ls 绕过时出错后也更难定位是哪一步失败。",
     inputSchema: bashSchema(300_000),
     inputSchemaFor: (context) => bashSchema(execMax(context)),
     policy: builtinPolicy("bash"),
@@ -631,9 +630,9 @@ export function registerBuiltins(
     timeoutMs: null,
     available: (role, context) =>
       dependencies.sandbox.plan(role, context.workspace).allowed,
-    // `chatId` 显式传：持久容器按会话分（docs/05 §5.5），不传就退回一次性容器。
-    // `parentSpanId` 是 registry 传进来的**本次 `tool.call`** 的 span id —— 不递下去的话
-    // `sandbox.run` 在 trace 里落在 depth 0，一轮里几次执行只能按时间戳猜配对（docs/29 · M-LOG-02）。
+    // `chatId` 显式传入：持久容器按会话划分（docs/05 §5.5），不传则退回一次性容器。
+    // `parentSpanId` 是 registry 传入的本次 `tool.call` 的 span id —— 不向下传递的话，
+    // `sandbox.run` 在 trace 中位于 depth 0，一轮内多次执行只能按时间戳推测配对（docs/29 · M-LOG-02）。
     execute: async (input, context) =>
       dependencies.sandbox.run(
         input.command,
@@ -653,7 +652,7 @@ export function registerBuiltins(
   registry.register({
     name: "python",
     description:
-      "在工作目录执行 Python 代码；非 owner 必须使用可用沙箱。留给真正需要计算或处理数据的事：单纯读文件 / 搜内容 / 列目录一律走 read_file / grep / glob / list_dir。",
+      "在工作目录执行 Python 代码；非 owner 必须使用可用沙箱。仅用于确需计算或处理数据的操作：单纯读取文件 / 检索内容 / 列出目录一律使用 read_file / grep / glob / list_dir。",
     inputSchema: pythonSchema(300_000),
     inputSchemaFor: (context) => pythonSchema(execMax(context)),
     policy: builtinPolicy("python"),
@@ -662,15 +661,15 @@ export function registerBuiltins(
     available: (role, context) =>
       dependencies.sandbox.plan(role, context.workspace).allowed,
     execute: async (input, context) => {
-      // 落成临时文件再跑（doc §3.3），不用 heredoc：`python3 - <<'PY'` 里正文只要出现一行 `PY`
-      // 就把脚本从那里截断，而 stdin 整条被 heredoc 占着 —— 脚本里的 `input()` 读到的是自己
-      // 的后半截，`sys.argv[0]` 是 `-`，traceback 里的文件名是 `<stdin>` 且没有源码行。
+      // 写入临时文件后执行（doc §3.3），不使用 heredoc：`python3 - <<'PY'` 中正文只要出现一行 `PY`
+      // 就会从该处截断脚本，而 stdin 整条被 heredoc 占用 —— 脚本中的 `input()` 读到的是脚本自身
+      // 的后半部分，`sys.argv[0]` 为 `-`，traceback 中的文件名为 `<stdin>` 且没有源码行。
       //
-      // 路径按 **workspace** 拼，不走 `filesFor`：`tools.fs.allowHostFsForOwner` 打开时 owner 的
-      // jail 根是 `/`，`.luoli-tmp/x.py` 会落到 `/.luoli-tmp/` 去，而沙箱的 cwd 仍是 workspace ——
-      // 写得进去也跑不到（还大概率因为 `/` 不可写直接失败）。这个路径是本工具自己生成的，
-      // 不经模型的手，所以不需要那层 jail；交给沙箱的则是 workspace 内的相对路径，宿主与容器
-      // （cwd=/workspace）两种形态下都指同一个文件。
+      // 路径基于 workspace 拼接，不经 `filesFor`：`tools.fs.allowHostFsForOwner` 开启时 owner 的
+      // jail 根为 `/`，`.luoli-tmp/x.py` 会落到 `/.luoli-tmp/`，而沙箱的 cwd 仍为 workspace ——
+      // 即使能写入也无法执行（且大概率因 `/` 不可写而直接失败）。该路径由本工具自身生成，
+      // 不经模型输入，因此不需要那层 jail；传给沙箱的是 workspace 内的相对路径，在宿主与容器
+      // （cwd=/workspace）两种形态下指向同一个文件。
       const directory = join(context.workspace, PYTHON_TMP_DIR);
       const name = `${crypto.randomUUID()}.py`;
       mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -694,34 +693,34 @@ export function registerBuiltins(
         try {
           rmSync(join(directory, name));
         } catch {
-          /* 沙箱里删掉了、或整个 workspace 被清了 */
+          /* 已在沙箱内被删除，或整个 workspace 已被清理 */
         }
       }
     },
   });
-  // 四个 `tools.archive.*Limit` 从这里生效。走 `inputSchemaFor` 而不是注册期固定：那是**每轮**
-  // 取一次 `turn.config`，所以热更新和 perChat 覆盖都能落到模型看到的那份 schema 上。
+  // 四个 `tools.archive.*Limit` 由此生效。经 `inputSchemaFor` 而非注册期固定：后者每轮读取一次
+  // `turn.config`，因此热更新与 perChat 覆盖都能作用于模型看到的那份 schema。
   const archiveLimits = (
     context: ToolExecutionContext,
   ): Config["tools"]["archive"] =>
     (context.turn.config as Readonly<Config>).tools.archive;
   /**
-   * 回忆隔断（`context.recallBarrier`）：清空上下文那一刻的 `messages.id`，0 = 不设限。
-   * 下限灌进 SQL 而不是过滤返回值 —— 后者会让 `limit:20` 先取满再被削短，模型看到的是
-   * 「一共只有这么几条」。开关每次调用现读，所以改完下一次工具调用就生效。
+   * 回忆隔断（`context.recallBarrier`）：清空上下文时刻的 `messages.id`，0 表示不设限。
+   * 下限写入 SQL 而非过滤返回值 —— 后者会使 `limit:20` 先取满再被削减，模型看到的结果是总数
+   * 仅有这几条。开关每次调用实时读取，因此修改后下一次工具调用即生效。
    */
   const recallFloor = (context: ToolExecutionContext): number =>
     (context.turn.config as Readonly<Config>).context.recallBarrier
       ? dependencies.context.recallFloor(context.turn.key)
       : 0;
   /**
-   * **隔断削短了结果就必须说出来。** 不说的话模型拿到的是一段没有更早历史的归档，而它会把这个
-   * 当成「本来就没有」——照 `droppedTokenNote` 同一条先例（沉默的降级等于假象）。
+   * 隔断削减了结果时必须明确告知。不告知的话模型得到的是一段缺少更早历史的归档，而它会将其
+   * 理解为本就不存在 —— 沿用 `droppedTokenNote` 的同一先例（静默降级等同于制造假象）。
    */
   const barrierNote = (floor: number): { recallBarrier?: string } =>
     floor > 0
       ? {
-          recallBarrier: `上下文在 #${floor} 之后被清空过，那之前的消息不在检索范围内。如果用户提起更早的事，请让他重说一次。`,
+          recallBarrier: `上下文在 #${floor} 之后被清空过，此前的消息不在检索范围内。如果用户提及更早的内容，请用户重新描述一次。`,
         }
       : {};
   const limitField = (fallback: number, max: number) =>
@@ -773,7 +772,7 @@ export function registerBuiltins(
         return {
           ok: false,
           error: "invalid_time_filter",
-          hint: "after / before 要写成 ISO 时间，例如 2026-08-14 或 2026-08-14T10:02:00Z",
+          hint: "after / before 需写成 ISO 时间，例如 2026-08-14 或 2026-08-14T10:02:00Z",
         };
       const scope = dependencies.archive.scope(
         context.turn.chatId,
@@ -802,7 +801,7 @@ export function registerBuiltins(
   registry.register({
     name: "read_messages",
     description:
-      "按顺序读取当前会话聊天记录。anchor 可以是消息 id 或 ISO 时间，direction 参数用于决定查询方向是更早还是更晚的聊天记录；不给 anchor 就是最近若干条。",
+      "按顺序读取当前会话聊天记录。anchor 可以是消息 id 或 ISO 时间，direction 参数用于决定查询方向是更早还是更晚的聊天记录；不传 anchor 则读取最近若干条。",
     inputSchema: readSchema({ defaultReadLimit: 50, maxReadLimit: 200 }),
     inputSchemaFor: (context) => readSchema(archiveLimits(context)),
     policy: builtinPolicy("read_messages"),
@@ -849,8 +848,8 @@ export function registerBuiltins(
       const message = dependencies.archive
         .scope(context.turn.chatId, context.turn.threadId)
         .byId(input.messageId, floor);
-      // 被隔断挡住时**不能**回 `message: null`：那和「这条消息不存在」长得一模一样，而模型会据此
-      // 换个 id 再试一遍。如实说是被挡住的（「摘除比伪造安全」，docs/16 §5）。
+      // 被隔断拦截时不能返回 `message: null`：该结果与消息不存在完全相同，模型会据此更换 id 重试。
+      // 需如实说明是被拦截（摘除比伪造安全，docs/16 §5）。
       if (!message && floor > 0 && input.messageId <= floor)
         return {
           ok: false,
@@ -860,8 +859,8 @@ export function registerBuiltins(
       return { ok: true, message };
     },
   });
-  // 跨会话检索**不给**过滤参数：`adminSearchAll` 不认它们，而收下一个参数再默默忽略比没有这个
-  // 参数更糟 —— 模型会以为自己已经按人过滤过了（「摘除比伪造安全」，docs/16 §5）。
+  // 跨会话检索不提供过滤参数：`adminSearchAll` 不支持它们，而接受参数后静默忽略比不提供该参数
+  // 更糟 —— 模型会认为自己已按人过滤（摘除比伪造安全，docs/16 §5）。
   registry.register({
     name: "admin_search_messages",
     description: "跨会话搜索聊天记录，仅 owner。",
@@ -873,9 +872,9 @@ export function registerBuiltins(
     policy: builtinPolicy("admin_search_messages"),
     sourcePriority: 100,
     untrustedOutput: true,
-    // 跨会话的行不带 thread 作用域，回复标记换不出归档 id，所以只带 `[chat:<id>]` 不带 `↩︎`。
-    // 短词丢弃的 note 与 `search_messages` 同办：跨会话检索走的是同一个 `archiveQuery`，
-    // 只在其中一个工具上说出来，等于让 owner 那条路继续拿到「我全查过了」的假象。
+    // 跨会话的行不带 thread 作用域，回复标记无法解析为归档 id，因此只带 `[chat:<id>]` 不带 `↩︎`。
+    // 短词丢弃的说明与 `search_messages` 处理一致：跨会话检索使用同一个 `archiveQuery`，
+    // 只在其中一个工具上说明，等于让 owner 路径继续得到已完整检索的假象。
     execute: (input, context) => ({
       ok: true,
       messages: citeArchivedMessages(
@@ -888,9 +887,9 @@ export function registerBuiltins(
       ...droppedTokenNote(input.query),
     }),
   });
-  // 只回摘要（窗口区间 / 条数 / tokens / 认领水位）。带上整份历史时输出会被 `maxOutputBytes`
-  // 从中间截断，模型拿到的是一段掐断的 JSON —— 前半是最早的历史、后半是 commit 列表，
-  // 既烧 token 又没有信息（docs/27 · R-03）。逐条历史在 WebUI 的会话页。
+  // 只返回摘要（窗口区间 / 条数 / tokens / 认领水位）。附带完整历史时输出会被 `maxOutputBytes`
+  // 从中间截断，模型得到的是被截断的 JSON —— 前半是最早的历史、后半是 commit 列表，
+  // 既消耗 token 又没有信息量（docs/27 · R-03）。逐条历史在 WebUI 的会话页查看。
   registry.register({
     name: "context_stats",
     description:
@@ -939,13 +938,13 @@ export function registerBuiltins(
   registry.register({
     name: "memory_write",
     description:
-      "把决定写入的记忆写入公开或当前用户私有记忆，一轮对话结束的时候批量写入。",
+      "将决定记录的记忆写入公开记忆或当前用户私有记忆，在一轮对话结束时批量写入。",
     inputSchema: memoryWriteSchema(true),
     inputSchemaFor: (context) => memoryWriteSchema(context.turn.isPrivate),
     policy: builtinPolicy("memory_write"),
     sourcePriority: 100,
-    // `memory.pubWriteRequiresApproval`：全局单份 PUBMEMORY 会流到所有会话与所有私聊（docs/14 T4），
-    // 开了它之后每一次公开记忆写入都要 owner 点头。私有记忆不受管 —— 那是写给用户自己的。
+    // `memory.pubWriteRequiresApproval`：全局唯一的 PUBMEMORY 会流向所有会话与所有私聊（docs/14 T4），
+    // 开启后每一次公开记忆写入都需 owner 批准。私有记忆不受约束 —— 它是写给用户自己的。
     approvalFor: (input, context) =>
       input.scope === "pubmemory" &&
       (context.turn.config as Readonly<Config>).memory.pubWriteRequiresApproval
@@ -988,10 +987,10 @@ export function registerBuiltins(
       );
       if (result.ok !== false) {
         loaded.add(input.name);
-        // 只有**声明了** `allowed-tools` 的 skill 才动允许集（docs/07 §4：未声明则不收窄）。
-        // 此前这里无条件并入 loader 交回的 `allowedTools`，而那一档等于「当前全部可用工具」——
-        // 于是先载入一个 `allowed-tools: [read_file]` 的 skill、再载入一个不声明的，前一个的
-        // 收窄就被整个抹掉了。
+        // 只有声明了 `allowed-tools` 的 skill 才修改允许集（docs/07 §4：未声明则不收窄）。
+        // 此前此处无条件并入 loader 返回的 `allowedTools`，而该值等于当前全部可用工具 ——
+        // 于是先载入一个 `allowed-tools: [read_file]` 的 skill、再载入一个未声明的，前者的
+        // 收窄会被完全抹除。
         if (result.narrows === true) {
           const allowed = Array.isArray(result.allowedTools)
             ? result.allowedTools.filter(
@@ -1001,10 +1000,10 @@ export function registerBuiltins(
           const set = (context.turn.skillAllowedTools ??= new Set());
           for (const name of allowed) set.add(name);
         }
-        // 带来源标注：`role` 只能是 user/assistant/tool（provider 拒收 messages 里的 system，
-        // docs/02 不变量 15），而 `NOTE_PREFIX` 只对非 sendable role 生效 —— 够不着这一条。
-        // 不标的话模型看到的就是「用户发来一大段 skill 正文」，会把说明书当成用户的要求去执行。
-        // **不用 untrusted() 包**：skill 是本地可信资源，包起来等于告诉模型别照着做。
+        // 附带来源标注：`role` 只能是 user/assistant/tool（provider 拒收 messages 中的 system，
+        // docs/02 不变量 15），而 `NOTE_PREFIX` 只对非 sendable role 生效 —— 覆盖不到这一条。
+        // 不标注的话，模型看到的是用户发来的一大段 skill 正文，会把说明文档当作用户要求去执行。
+        // 不使用 untrusted() 包裹：skill 属于本地可信资源，包裹它等于告知模型不要遵循其内容。
         const body = `${NOTE_PREFIX}以下是 Skill「${input.name}」的正文，由系统按你的 load_skill 调用载入，不是用户发言。\n\n${String(result.body ?? "")}`;
         dependencies.context.appendDelta(context.turn, {
           id: crypto.randomUUID(),
@@ -1039,8 +1038,8 @@ export function registerBuiltins(
         .map(({ name, description }) => ({ name, description })),
     }),
   });
-  // 子 agent 是完整的一条 agent 循环（自己的步数上限、自己的模型超时），墙钟按分钟算：兜底那道
-  // race 会在它跑到一半时返回 tool_timeout，而子 agent 还在继续花钱。它的边界是 quota 与 maxSteps。
+  // 子 agent 是一条完整的 agent 循环（自有步数上限与模型超时），墙钟耗时按分钟计：兜底 race
+  // 会在其运行中途返回 tool_timeout，而子 agent 仍在继续产生费用。它的边界是 quota 与 maxSteps。
   registry.register({
     name: "spawn_agent",
     description: "派发独立上下文子 agent；task 必须自包含。",
@@ -1121,8 +1120,8 @@ export function registerBuiltins(
         return { ok: false, error: "turn_cancelled", taskId, runId: run.id };
       }
       try {
-        // provider 重试设置与配额预留都从本轮取：子 agent 的花费必须落进主 agent 那份预留，
-        // 否则配额只看得见主 agent（docs/20 · W-QUOTA-01）。
+        // provider 重试设置与配额预留均取自本轮：子 agent 的花费必须计入主 agent 的预留，
+        // 否则配额只能统计到主 agent（docs/20 · W-QUOTA-01）。
         const result = await runSubAgent(
           run,
           definition,
@@ -1144,8 +1143,8 @@ export function registerBuiltins(
               requestTimeoutMs: live.provider.requestTimeoutMs,
               streamIdleTimeoutMs: live.provider.streamIdleTimeoutMs,
             },
-            // 子 agent 那一整段挂在**本次** `spawn_agent` 的 `tool.call` 之下（`docs/10 §7` 第 4 条）。
-            // `context` 已经是 `execute()` 浅拷贝过的那一份，所以同一步里并排的几个 spawn 各带自己的父。
+            // 子 agent 整段挂在本次 `spawn_agent` 的 `tool.call` 之下（`docs/10 §7` 第 4 条）。
+            // `context` 已是 `execute()` 浅拷贝的副本，因此同一步内并行的多个 spawn 各自持有其父 span。
             ...(context.parentSpanId
               ? { parentSpanId: context.parentSpanId }
               : {}),
@@ -1206,16 +1205,16 @@ export function registerBuiltins(
     },
   });
   /**
-   * M11 · 起一个外部 harness CLI 改宿主上的仓库（docs/14 §2 Q8）。三道门：
-   * `available()` 判**仅 owner + 仅私聊 + 目录白名单非空**（三者任一不成立，工具根本不进模型的
-   * 工具目录，而不是进了目录再报错）；`TOOL_POLICY` 判 owner + 每次都审批；`runHarness` 判目录。
-   * `timeoutMs: null` —— 它自己有 `agent.harness.timeoutMs`，注册表那道 60s 兜底 race 会在
-   * harness 跑到一半时判 `tool_timeout`，而那个进程还在改文件。
+   * M11 · 启动外部 harness CLI 修改宿主上的仓库（docs/14 §2 Q8）。三道门：
+   * `available()` 判定仅 owner、仅私聊、目录白名单非空（三者任一不成立时工具不进入模型的工具
+   * 目录，而不是进入目录后再报错）；`TOOL_POLICY` 判定 owner 与每次审批；`runHarness` 判定目录。
+   * `timeoutMs: null` —— 它自有 `agent.harness.timeoutMs`，注册表的 60s 兜底 race 会在
+   * harness 运行中途判为 `tool_timeout`，而该进程仍在修改文件。
    */
   registry.register({
     name: "spawn_harness",
     description:
-      "在允许的仓库目录里起一个外部 coding harness（Claude Code / Codex / omp）执行任务；仅 owner、且仅私聊。",
+      "在允许的仓库目录中启动一个外部 coding harness（Claude Code / Codex / omp）执行任务；仅 owner、且仅私聊。",
     inputSchema: z.object({ task: z.string().min(10), dir: z.string() }),
     policy: builtinPolicy("spawn_harness"),
     sourcePriority: 90,
@@ -1231,13 +1230,13 @@ export function registerBuiltins(
     },
     execute: async (input, context) => {
       const harness = (context.turn.config as Readonly<Config>).agent.harness;
-      // `available()` 已经判过一遍，这里再判一次：热更新可能在注册与执行之间把目录名单清空，
-      // 而模型完全可能沿用上一步的工具名（禁用必须是硬边界，CLAUDE.md）。
+      // `available()` 已判定过一次，此处再判定一次：热更新可能在注册与执行之间清空目录名单，
+      // 而模型可能沿用上一步的工具名（禁用必须是硬边界，CLAUDE.md）。
       if (!context.turn.isPrivate || context.turn.effectiveRole !== "owner")
         return {
           ok: false,
           error: "harness_forbidden",
-          hint: "仅 owner 在私聊里可用",
+          hint: "仅 owner 在私聊中可用",
         };
       const started = Date.now();
       const result = await runHarness(
@@ -1265,19 +1264,19 @@ export function registerBuiltins(
     },
   });
   /**
-   * M13 · 起一台本机编码 agent 改宿主上的仓库，走 ACP 协议（`docs/05 §3.5`）。
+   * M13 · 启动一台本机编码 agent 修改宿主上的仓库，走 ACP 协议（`docs/05 §3.5`）。
    *
-   * 三道门与 `spawn_harness` **1:1 相同**，而且必须相同 —— 风险面是同一个（`docs/14` T17）：
-   * `available()` 判仅 owner + 仅私聊 + 整块开着 + 目录白名单非空 + 至少一台启用的 agent；
-   * `TOOL_POLICY` 判 owner + 每次审批；`AcpManager.run` 再判一次目录。
-   * `timeoutMs: null` —— 它自己有 `agents[].timeoutMs`，注册表那道 60s 兜底 race 会在 agent
-   * 跑到一半时判 `tool_timeout`，而那个进程还在改文件。
+   * 三道门与 `spawn_harness` 完全一致，且必须一致 —— 风险面相同（`docs/14` T17）：
+   * `available()` 判定仅 owner、仅私聊、整块启用、目录白名单非空、至少一台已启用的 agent；
+   * `TOOL_POLICY` 判定 owner 与每次审批；`AcpManager.run` 再判定一次目录。
+   * `timeoutMs: null` —— 它自有 `agents[].timeoutMs`，注册表的 60s 兜底 race 会在 agent
+   * 运行中途判为 `tool_timeout`，而该进程仍在修改文件。
    */
   const acpSettings = (context: ToolExecutionContext): AcpSettings =>
     (context.turn.config as Readonly<Config>).agent.acp;
   /**
-   * 多 agent 时给 `agent` 参数加一个枚举，**单 agent 部署 schema 逐字节不变** ——
-   * 一个只有一台 agent 的部署不该因为这个特性多出一个模型必须填的参数。
+   * 存在多台 agent 时为 `agent` 参数添加枚举，单 agent 部署的 schema 逐字节不变 ——
+   * 只有一台 agent 的部署不应因该特性多出一个模型必须填写的参数。
    */
   const acpInputSchema = (
     names: readonly string[],
@@ -1290,17 +1289,17 @@ export function registerBuiltins(
         })
       : z.object({ task: z.string().min(10), dir: z.string() });
   /**
-   * `permissionMode === 'ask'` 但运行时没有审批 broker 时**整个工具不进目录**（照 `allowedDirs`
-   * 为空的同一形态）。一个叫 `ask` 的档实际在放行，正是 `docs/reviews/16 §5` 说的伪造一道门；
-   * **`ask` 不是默认档**（默认 `auto`，`docs/14 §2 Q8-c`），所以这道闸只对主动配了它的部署生效；
-   * 而落在 `available()` 上比落在 `execute()` 上好：模型不会去试一个必然被拒的调用。
+   * `permissionMode === 'ask'` 但运行时没有审批 broker 时，整个工具不进入目录（与 `allowedDirs`
+   * 为空同形态）。名为 `ask` 的档位实际放行，正是 `docs/reviews/16 §5` 所述的伪造一道门；
+   * `ask` 不是默认档（默认为 `auto`，`docs/14 §2 Q8-c`），因此该闸门只对主动配置它的部署生效；
+   * 且置于 `available()` 优于置于 `execute()`：模型不会去尝试一个必然被拒绝的调用。
    */
   const acpPermissionReady = (acp: AcpSettings): boolean =>
     acp.permissionMode !== "ask" || Boolean(dependencies.approvals);
   registry.register({
     name: "spawn_acp",
     description:
-      "在允许的仓库目录里让一台本机code agent（经 ACP 协议驱动）执行任务；仅 owner、仅私聊。它自带一整套工具（读写改文件、跑 shell 命令）并会真的改仓库 —— 任务要写成自包含的一段话，说清目标、约束和验收方式（例如「改完跑 pnpm test」）。",
+      "在允许的仓库目录中让一台本机 code agent（经 ACP 协议驱动）执行任务；仅 owner、仅私聊。它自带一整套工具（读写与修改文件、执行 shell 命令）并会实际修改仓库 —— 任务需写成自包含的一段话，说明目标、约束与验收方式（例如「改完跑 pnpm test」）。",
     inputSchema: acpInputSchema([]),
     inputSchemaFor: (context) =>
       acpInputSchema(
@@ -1323,11 +1322,11 @@ export function registerBuiltins(
       );
     },
     execute: async (input, context) => {
-      // `available()` 已经判过一遍，这里再判一次：热更新可能在注册与执行之间把整块关掉或把目录
-      // 名单清空，而模型完全可能沿用上一步的工具名（禁用必须是硬边界，CLAUDE.md）。
-      // 整块开关与目录名单由 `AcpManager.run` 判（`acp_disabled`），这里只判它判不到的那两样。
-      // 文案走 `acpFailure` 而不是就地写一句：`ACP_ERROR_HINTS` 是**唯一**来源，工具壳自己抄一份
-      // 的话「先改文档」就只能验到 manager 那一半（`docs/05 §3.5.1` 那张表是它们共同的文档来源）。
+      // `available()` 已判定过一次，此处再判定一次：热更新可能在注册与执行之间关闭整块功能或清空
+      // 目录名单，而模型可能沿用上一步的工具名（禁用必须是硬边界，CLAUDE.md）。
+      // 整块开关与目录名单由 `AcpManager.run` 判定（`acp_disabled`），此处只判定它覆盖不到的两项。
+      // 文案经 `acpFailure` 生成而非就地编写：`ACP_ERROR_HINTS` 是唯一来源，工具壳自行复制一份的话，
+      // 先改文档的纪律就只能验证到 manager 那一半（`docs/05 §3.5.1` 的表是二者共同的文档来源）。
       if (!dependencies.acp) return acpFailure("acp_unavailable");
       if (!context.turn.isPrivate || context.turn.effectiveRole !== "owner")
         return acpFailure("acp_forbidden");
@@ -1336,14 +1335,14 @@ export function registerBuiltins(
       if (!acpPermissionReady(acp)) return acpFailure("acp_unavailable");
       const approvals = dependencies.approvals;
       /**
-       * 进度卡片。**渲染选项从本轮配置取** —— `output.*` 在 `PER_CHAT_OVERRIDE_ALLOWLIST` 里，
-       * 读全局快照就是把会话级覆盖静默丢掉（`main.ts` 里那几个读快照的 getter 是既有 bug 类）。
-       * 拿不到卡片（没有 Telegram 入口 / 适配层没实现 / 这个会话开不出来）就照旧跑，presence 即开关。
+       * 进度卡片。渲染选项取自本轮配置 —— `output.*` 位于 `PER_CHAT_OVERRIDE_ALLOWLIST` 中，
+       * 读取全局快照会静默丢弃会话级覆盖（`main.ts` 中若干读快照的 getter 属于既有缺陷）。
+       * 无法获得卡片时（没有 Telegram 入口 / 适配层未实现 / 该会话无法创建）照常运行，存在即启用。
        */
-      // agent 名字与目录走 `resolveAcpTarget` —— 与 `AcpManager.run` **同一个**判据。卡片自己再算
-      // 一遍的话，「屏幕上说的目录」与「真的在跑的目录」就是两个可以分叉的答案；而 `dir` 是卡片把
-      // agent 报上来的绝对路径相对化的基点（不给它就每行退回一条长路径，小预算下多丢一整段）。
-      // 拿不到（准入不过）时不填：`run()` 随即会用同一个判据交回那条失败。
+      // agent 名称与目录经 `resolveAcpTarget` 解析 —— 与 `AcpManager.run` 使用同一判据。卡片自行再算
+      // 一遍会使屏幕显示的目录与实际运行的目录成为两个可能分叉的答案；而 `dir` 是卡片将 agent 上报的
+      // 绝对路径相对化的基点（不提供时每行退回长路径，在预算较小时会额外丢失一整段）。
+      // 无法获得（准入未通过）时不填写：`run()` 随后会用同一判据返回该失败。
       const target = resolveAcpTarget(
         {
           task: input.task,
@@ -1355,8 +1354,8 @@ export function registerBuiltins(
       const card =
         (await dependencies.telegram
           ?.openProgressCard?.(
-            // `turnId` 是卡片那两条 `tg.send` / `tg.edit` span 的 traceId —— 不给就又是一张平表
-            // （`docs/28 · L-LOG-02`）。`parentSpanId` 让它们挂在本次 `tool.call` 之下。
+            // `turnId` 是卡片两条 `tg.send` / `tg.edit` span 的 traceId —— 不提供则退化为平铺结构
+            // （`docs/28 · L-LOG-02`）。`parentSpanId` 使它们挂在本次 `tool.call` 之下。
             {
               chatId: context.turn.chatId,
               threadId: context.turn.threadId,
@@ -1384,14 +1383,14 @@ export function registerBuiltins(
         acp,
         {
           abortSignal: context.turn.abortSignal,
-          // 与注册表 `#normalizeOutput` 量的是同一个上界（`main.ts` 把它接成 `tools.exec.maxOutputBytes`），
-          // 交给 manager 去减固定字段的余量 —— 让「按构造有界」这件事有一个真实的被除数。
+          // 与注册表 `#normalizeOutput` 使用同一上界（`main.ts` 将其接为 `tools.exec.maxOutputBytes`），
+          // 由 manager 扣减固定字段的占用 —— 使按构造有界这一保证有一个真实的基数。
           outputBudgetBytes: live.tools.exec.maxOutputBytes,
           /**
-           * 反向调用面的宿主侧闸门。**jail 不复用 `dependencies.filesFor`** —— 那份的 root 是
-           * `data/workspace/<chatId>`（`docs/14 Q8-b`），而 `tools.fs.allowHostFsForOwner` 一开它就是
-           * `/`：ACP 的边界必须是**这次被批准的那个仓库目录**。`denyGlobs` 照旧生效（绝对路径 glob，
-           * 不依赖 root），自撰写通道那两条也一起带上 —— 一台外部 agent 更没有理由能改已启用的 plugin。
+           * 反向调用面的宿主侧闸门。jail 不复用 `dependencies.filesFor` —— 那份的 root 是
+           * `data/workspace/<chatId>`（`docs/14 Q8-b`），而 `tools.fs.allowHostFsForOwner` 开启后其 root
+           * 即为 `/`：ACP 的边界必须是本次被批准的那个仓库目录。`denyGlobs` 照常生效（绝对路径 glob，
+           * 不依赖 root），自撰写通道的两条也一并带上 —— 外部 agent 更不应能修改已启用的 plugin。
            */
           host: {
             fs: {
@@ -1410,8 +1409,8 @@ export function registerBuiltins(
               maxTimeoutMs: live.tools.exec.maxTimeoutMs,
               maxOutputBytes: live.tools.exec.maxOutputBytes,
             },
-            // 终端**宿主直跑**，所以申报前先问一次。`bypassRoles: ['owner']` 下这一问对 ACP 恒为
-            // `'host'`；运维把 owner 从 bypassRoles 里拿掉时，terminal 能力当场不申报（而不是申报了
+            // 终端在宿主直接运行，因此申报前先查询一次。`bypassRoles: ['owner']` 下该查询对 ACP 恒为
+            // `'host'`；运维将 owner 从 bypassRoles 中移除时，terminal 能力立即不再申报（而不是申报后
             // 每次 create 都失败）。
             plan: (root) =>
               dependencies.sandbox.plan(context.turn.effectiveRole, root),
@@ -1420,8 +1419,8 @@ export function registerBuiltins(
             ...(card
               ? { onUpdate: (notification) => card.push(notification) }
               : {}),
-            // 只有 `ask` 那一档会被调（manager 判的），所以这里无条件给：给了而 mode 是 auto/deny 时
-            // 它一次都不会被调到，而把 mode 判据抄到这里就等于同一个判据有两份。
+            // 只有 `ask` 档位会被调用（由 manager 判定），因此此处无条件提供：提供后若 mode 为 auto/deny，
+            // 它不会被调用，而将 mode 判据复制到此处等于同一判据存在两份。
             ...(approvals
               ? {
                   permission: (binding) =>
@@ -1442,8 +1441,8 @@ export function registerBuiltins(
           },
         },
       );
-      // 终帧。`close` 永不 throw（契约），但 `await` 它是刻意的：归档只在这一次发生，而工具返回之后
-      // 这一轮就开始收尾了。返回值是适配层自己的凭据，core 不解释它。
+      // 终帧。`close` 按契约不抛出异常，但此处 `await` 是刻意的：归档只在这一次发生，而工具返回后
+      // 本轮即进入收尾。返回值是适配层自身的凭据，core 不做解释。
       if (card) {
         await card.close({
           ...(result.stopReason ? { stopReason: result.stopReason } : {}),
@@ -1472,8 +1471,8 @@ export function registerBuiltins(
       ...dependencies.agents.result(input.runId, input.offset, input.limit),
     }),
   });
-  // `timeoutMs: null`：仲裁自己有硬期限（`agent.askTimeoutMs`），再叠一层 `tools.defaultTimeoutMs`
-  // 的 60s race 只会让默认配置下的仲裁在跑到一半时被判 `tool_timeout`，而模型调用继续花钱。
+  // `timeoutMs: null`：仲裁自有硬期限（`agent.askTimeoutMs`），再叠加一层 `tools.defaultTimeoutMs`
+  // 的 60s race 只会使默认配置下的仲裁在运行中途被判为 `tool_timeout`，而模型调用继续产生费用。
   registry.register({
     name: "ask_parent",
     description: "向父 agent 提问；仅子 agent 可用。",
@@ -1505,9 +1504,9 @@ export function registerBuiltins(
         return { ok: false, error: "agent_ask_limit_exceeded" };
       const askId = dependencies.agents.ask(run, parent, input);
       const live = context.turn.config as Readonly<Config>;
-      // 一次请示是一个 span（`docs/10 §1` 的 span H）：仲裁的模型调用与 `agent.answer` 都挂在它之下。
-      // 父是本次 `ask_parent` 的 `tool.call` —— 请示在实现里就是一次工具调用，图里那条 `parent=E`
-      // 少画了中间这一跳。
+      // 一次请示对应一个 span（`docs/10 §1` 的 span H）：仲裁的模型调用与 `agent.answer` 均挂在其下。
+      // 父节点是本次 `ask_parent` 的 `tool.call` —— 请示在实现上即一次工具调用，图中的 `parent=E`
+      // 遗漏了中间这一跳。
       const askSpan = dependencies.log.span({
         level: "info",
         kind: "agent.ask",
@@ -1524,7 +1523,7 @@ export function registerBuiltins(
           options: input.options?.length ?? 0,
         },
       });
-      /** 三条降级路径共用：`agent.answer` 挂在 `agent.ask` 之下，`source` 说清是谁答的。 */
+      /** 三条降级路径共用：`agent.answer` 挂在 `agent.ask` 之下，`source` 标明应答方。 */
       const answered = (
         source: "arbiter" | "rule" | "timeout",
         answer: string | null,
@@ -1549,9 +1548,9 @@ export function registerBuiltins(
           },
         });
       };
-      // 父 agent 仲裁（docs/14 A7）。此前这里返回 `ask_parent_not_implemented` —— 那是正确的降级
-      // （更早的版本拿子 agent 自己的 options[0] 当答复并返回 ok:true，等于伪造「请示已获批」，
-      // docs/19 · R-TOOL-01），但它让三个配置键长期挂着。现在真的问一次 low 档模型。
+      // 父 agent 仲裁（docs/14 A7）。此前此处返回 `ask_parent_not_implemented` —— 那是正确的降级
+      // （更早的版本以子 agent 自身的 options[0] 作为答复并返回 ok:true，等于伪造请示已获批，
+      // docs/19 · R-TOOL-01），但它使三个配置键长期未接线。现在会实际调用一次 low 档模型。
       if (live.agent.askArbiter) {
         const task = dependencies.db
           .prepare("SELECT task_input AS task FROM agent_runs WHERE id=?")
@@ -1589,9 +1588,9 @@ export function registerBuiltins(
           answered("arbiter", verdict.answer);
           return { ok: true, askId, answer: verdict.answer, source: "arbiter" };
         }
-        // 仲裁没成不是静默事件：它花了钱或者本该花钱，而子 agent 接下来会按「没人应答」走。
-        // `escalationRequested` 是刻意记出来的：`askEscalateToUser` 仍未接线（转人工要一条阻塞式
-        // 人机通道，docs/25 §8 那个缺口还开着），运维把它打开却什么都没发生时，日志里得有一行。
+        // 仲裁失败不是静默事件：它已产生费用或本应产生费用，而子 agent 随后会按无人应答处理。
+        // `escalationRequested` 是刻意记录的：`askEscalateToUser` 仍未接线（转人工需要一条阻塞式
+        // 人机通道，docs/25 §8 的缺口仍存在），运维开启它却无任何效果时，日志中需有对应记录。
         dependencies.log.event({
           level: verdict.reason === "cancelled" ? "info" : "warn",
           kind: "agent.ask_unarbitrated",
@@ -1608,7 +1607,7 @@ export function registerBuiltins(
           },
         });
       }
-      // 降级顺序：仲裁 → 子 agent 自带的 default → 明说没人应答。**不伪造答复**（docs/16 §5）。
+      // 降级顺序：仲裁 → 子 agent 自带的 default → 明确说明无人应答。不伪造答复（docs/16 §5）。
       if (input.default !== undefined) {
         answered("rule", input.default);
         return { ok: true, askId, answer: input.default, source: "default" };
@@ -1618,8 +1617,8 @@ export function registerBuiltins(
         ok: false,
         error: "ask_parent_unanswered",
         hint: live.agent.askArbiter
-          ? "仲裁没能给出答复；请在 task 里自带决策依据，或调用时提供 default"
-          : "仲裁已关闭（agent.askArbiter=false）；请在 task 里自带决策依据，或调用时提供 default",
+          ? "仲裁未能给出答复；请在 task 中自带决策依据，或在调用时提供 default"
+          : "仲裁已关闭（agent.askArbiter=false）；请在 task 中自带决策依据，或在调用时提供 default",
         askId,
       };
     },
@@ -1642,8 +1641,8 @@ export function registerBuiltins(
         : null;
       if (!run) return { ok: false, error: "agent_run_unavailable" };
       dependencies.agents.progress(run, input);
-      // 落一条 debug：`docs/10 §2` 给 `agent.progress` 定的字段就是 phase + done/total。它不受
-      // 下面那道 SSE 节流管 —— 节流护的是浏览器连接，日志侧本来就按 `logs.level` 分档。
+      // 记录一条 debug：`docs/10 §2` 为 `agent.progress` 定义的字段即 phase 与 done/total。它不受
+      // 下方 SSE 节流约束 —— 节流保护的是浏览器连接，日志侧本就按 `logs.level` 分级。
       dependencies.log.event({
         level: "debug",
         kind: "agent.progress",
@@ -1658,8 +1657,8 @@ export function registerBuiltins(
           total: input.total ?? null,
         },
       });
-      // `agent.progressThrottleMs`：库里那行照常更新（它是当前状态，谁读谁看最新的），但 SSE 只在
-      // 节流窗口外广播。一个爱汇报的子 agent 每步喊一次，够把 WebUI 的事件流刷成进度条。
+      // `agent.progressThrottleMs`：库中该行照常更新（它表示当前状态，读取方总是看到最新值），但 SSE
+      // 只在节流窗口外广播。一个高频汇报的子 agent 每步上报一次，足以把 WebUI 的事件流刷成进度条。
       const throttleMs = (context.turn.config as Readonly<Config>).agent
         .progressThrottleMs;
       const last = progressBroadcast.get(run.id) ?? 0;
@@ -1677,13 +1676,13 @@ export function registerBuiltins(
       return { ok: true };
     },
   });
-  // 措辞必须写明「只有本轮」：这个覆盖不跨轮持久（docs/04 §5.2、AC-AGENT-007），而模型据此对
-  // 用户说过「切好啦，现在是 vision 模型」——下一轮（真正带图那一轮）早就回到默认别名了
-  // （logs/2026-08-18 22:15）。含图轮次现在会自动切 vision，模型不需要自己动手。
+  // 文案必须写明仅本轮生效：该覆盖不跨轮持久（docs/04 §5.2、AC-AGENT-007），而模型曾据此告知
+  // 用户已切换到 vision 模型 —— 下一轮（真正带图的那一轮）早已回到默认别名
+  // （logs/2026-08-18 22:15）。含图轮次现在会自动切换 vision，模型无需自行操作。
   registry.register({
     name: "set_model",
     description:
-      "为**当前这一轮剩下的步骤**切换模型别名；本轮结束即失效，不跨轮保留。",
+      "为**当前这一轮剩余的步骤**切换模型别名；本轮结束即失效，不跨轮保留。",
     inputSchema: z.object({ alias: z.enum(["main", "high", "low", "vision"]) }),
     policy: builtinPolicy("set_model"),
     sourcePriority: 90,
@@ -1693,7 +1692,7 @@ export function registerBuiltins(
         ok: true,
         alias: input.alias,
         scope: "this_turn_only",
-        note: "本轮结束后自动回到默认别名，不要告诉用户已经永久切换。",
+        note: "本轮结束后自动回到默认别名，不要告知用户已永久切换。",
       };
     },
   });
@@ -1727,7 +1726,7 @@ export function registerBuiltins(
   registry.register({
     name: "send_message",
     description:
-      "向当前会话追发一条消息（正文请直接写进回复，这个工具用于分段或中间产物）。",
+      "向当前会话追发一条消息（正文请直接写入回复，本工具用于分段或中间产物）。",
     inputSchema: z.object({ text: z.string().min(1) }),
     policy: builtinPolicy("send_message"),
     sourcePriority: 100,
@@ -1738,7 +1737,7 @@ export function registerBuiltins(
   });
   registry.register({
     name: "send_photo",
-    description: "把工作目录内的图片发到当前会话。",
+    description: "将工作目录内的图片发送到当前会话。",
     inputSchema: z.object({
       photo: z.string(),
       caption: z.string().optional(),
@@ -1767,7 +1766,7 @@ export function registerBuiltins(
   registry.register({
     name: "react",
     description:
-      "给消息加 emoji reaction；不填 messageId 就点触发本轮的那条消息。",
+      "为消息添加 emoji reaction；不填 messageId 则作用于触发本轮的那条消息。",
     inputSchema: z.object({
       messageId: z.number().int().positive().optional(),
       emoji: z.string(),
@@ -1781,7 +1780,7 @@ export function registerBuiltins(
         return {
           ok: false,
           error: "message_id_required",
-          hint: "本轮没有触发消息，请先用 read_messages 取到 tgMessageId。",
+          hint: "本轮没有触发消息，请先使用 read_messages 获取 tgMessageId。",
         };
       return dependencies.telegram!.react(
         target(context),
@@ -1792,7 +1791,7 @@ export function registerBuiltins(
   });
   registry.register({
     name: "send_file",
-    description: "把工作目录内的文件作为文档发到当前会话。",
+    description: "将工作目录内的文件作为文档发送到当前会话。",
     inputSchema: z.object({ file: z.string(), caption: z.string().optional() }),
     policy: builtinPolicy("send_file"),
     sourcePriority: 100,
@@ -1817,7 +1816,7 @@ export function registerBuiltins(
   });
   registry.register({
     name: "pin_message",
-    description: "置顶指定的消息；不填 messageId 就置顶触发本轮的那条。",
+    description: "置顶指定的消息；不填 messageId 则置顶触发本轮的那条。",
     inputSchema: z.object({
       messageId: z.number().int().positive().optional(),
     }),
@@ -1830,7 +1829,7 @@ export function registerBuiltins(
         return {
           ok: false,
           error: "message_id_required",
-          hint: "本轮没有触发消息，请先用 read_messages 取到 tgMessageId。",
+          hint: "本轮没有触发消息，请先使用 read_messages 获取 tgMessageId。",
         };
       return dependencies.telegram!.pin(target(context), messageId);
     },
@@ -1838,19 +1837,19 @@ export function registerBuiltins(
   registry.register({
     name: "web_fetch",
     description:
-      "获取公开 HTTP/HTTPS 页面；拒绝私有地址和docker私有地址还有元数据地址。瞬时失败（超时/5xx/429）会自动重试。",
+      "获取公开 HTTP/HTTPS 页面；拒绝私有地址、docker 私有地址与元数据地址。瞬时失败（超时/5xx/429）会自动重试。",
     inputSchema: z.object({ url: z.string().url() }),
     policy: builtinPolicy("web_fetch"),
     sourcePriority: 100,
     untrustedOutput: true,
-    // `limited` 只在配了 allowlist 时才有 web_fetch（docs/05 §4）：没有白名单就等于把整个互联网
-    // 交给权限最低的那档人，而这个工具的输出会直接进上下文。fail-closed 走 `available()`，
-    // 所以工具**根本不进目录**，模型不会去试一个必然被拒的调用。
+    // `limited` 只在配置了 allowlist 时才拥有 web_fetch（docs/05 §4）：没有白名单等于把整个互联网
+    // 开放给权限最低的角色，而该工具的输出会直接进入上下文。fail-closed 落在 `available()`，
+    // 因此工具不会进入目录，模型不会去尝试一个必然被拒绝的调用。
     available: (role, context) =>
       role !== "limited" ||
       (context.turn.config as Readonly<Config>).tools.web.allowlist.length > 0,
-    // 域名白/黑名单从本轮配置取（`tools.web` 在 perChat 白名单里不在，所以就是全局那份，
-    // 但仍然走 turn.config —— 热更新后下一轮生效，不用重启）。
+    // 域名白名单与黑名单取自本轮配置（`tools.web` 不在 perChat 白名单中，因此就是全局那份，
+    // 但仍经 turn.config 读取 —— 热更新后下一轮生效，无需重启）。
     timeoutMs: webBudgetMs,
     execute: (input, context) => {
       const live = (context.turn.config as Readonly<Config>).tools.web;

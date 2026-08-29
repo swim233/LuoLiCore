@@ -17,11 +17,11 @@ export interface TriggerConfig {
 }
 
 /**
- * 已注册 handler 的命令名。判成 `command` 的消息不进 AI 流程，只剩各自的 handler 能回话——
- * 名字列在这里却没有 handler，用户发出去就石沉大海（`/start` 曾经就是这样，docs/20 · W-TG-01）。
- * `tests/trigger.test.ts` 断言这个集合与 `bot.ts` 里 `bot.command(...)` 注册的名字一一对应。
- * 例外只有 `/ask`：它按 doc 08 §8 等价于 @bot，走 AI 流程而不是 handler，所以不在这里。
- * `/webui`（一次性登录链接）与 `/wake`（会话唤醒词）已摘除，改在 WebUI 做（docs/08 §8 🚧）。
+ * 已注册 handler 的命令名。判定为 `command` 的消息不进入 AI 流程，只能由各自的 handler 响应；
+ * 名字列在此处却没有 handler 时，用户发出的命令不会得到任何回复（`/start` 曾出现该问题，
+ * docs/20 · W-TG-01）。`tests/trigger.test.ts` 断言本集合与 `bot.ts` 中 `bot.command(...)` 注册的名字
+ * 一一对应。唯一例外是 `/ask`：按 docs/08 §8 它等价于 @bot，走 AI 流程而非 handler，故不在此列。
+ * `/webui`（一次性登录链接）与 `/wake`（会话唤醒词）已移除，改由 WebUI 提供（docs/08 §8 🚧）。
  */
 export const HANDLED_COMMANDS: ReadonlySet<string> = new Set([
   "start",
@@ -39,12 +39,12 @@ export const HANDLED_COMMANDS: ReadonlySet<string> = new Set([
   "revoke",
   "usage",
   "ping",
-  // `/webui` 与 `POST /api/auth/token` + `issueLoginToken` 三者绑死：少任何一个，命令都会石沉大海
-  // （docs/20 · W-TG-01 就是这么来的）。`tests/api.contract.test.ts` 有一条断言把三者锁在一起。
+  // `/webui`、`POST /api/auth/token` 与 `issueLoginToken` 三者互相依赖：缺任何一个，该命令都不会有
+  // 回复（docs/20 · W-TG-01 即由此产生）。`tests/api.contract.test.ts` 有一条断言把三者锁在一起。
   "webui",
 ]);
 
-/** offset 0 的 `bot_command` 实体解析出的命令名（小写、去掉 `@suffix`）。不是命令、或后缀不匹配时返回 null。 */
+/** 从 offset 0 的 `bot_command` 实体解析命令名（转小写、去掉 `@suffix`）。非命令或后缀不匹配时返回 null。 */
 export function commandNameOf(
   text: string,
   entities: ReadonlyArray<{ type: string; offset: number; length: number }>,
@@ -71,9 +71,9 @@ export function commandNameOf(
 }
 
 /**
- * `message` 显式传入：编辑消息的内容在 `ctx.editedMessage` 而不是 `ctx.message`，只读后者的话
- * 对任何 `edited_message` 更新都恒返回 null —— `bot.ts` 那条 `trigger.skipped` 于是成了死代码，
- * 一条都落不下（docs/29 · M-TG-01）。不给就沿用 `ctx.message`，普通消息路径一个字都不用改。
+ * `message` 需显式传入：编辑消息的内容位于 `ctx.editedMessage` 而非 `ctx.message`，只读后者会使任何
+ * `edited_message` 更新恒返回 null，`bot.ts` 中的 `trigger.skipped` 因此成为不可达代码，一条都记不下
+ * （docs/29 · M-TG-01）。不传时沿用 `ctx.message`，普通消息路径无需改动。
  */
 export function matchTrigger(
   ctx: Context,
@@ -87,8 +87,8 @@ export function matchTrigger(
   if (chat.type === "channel" && !config.channels) return null;
   const text = message.text ?? message.caption ?? "";
   const entities = message.entities ?? message.caption_entities ?? [];
-  // 命令必须先判，私聊分支在它前面的话 `/new` 会被当成普通对话：既开一轮，又跑 handler。
-  // 反过来，裸的 `/` 前缀不能一律当命令——私聊里一句「/home/app 这个目录满了」应当照常回答。
+  // 命令必须先判定：私聊分支若排在前面，`/new` 会被当作普通对话，既开一轮又执行 handler。
+  // 反之，裸 `/` 前缀不能一律视为命令：私聊中的「/home/app 这个目录满了」应当正常回答。
   const command = commandNameOf(
     text,
     entities,
@@ -96,7 +96,7 @@ export function matchTrigger(
     config.strictCommandSuffix,
   );
   if (command !== null) {
-    // `/ask <text>`：doc 08 §8 明确它等价于 @bot，是唯一进 AI 流程的命令。
+    // `/ask <text>`：docs/08 §8 明确其等价于 @bot，是唯一进入 AI 流程的命令。
     if (config.command && command === "ask") return "ask";
     if (HANDLED_COMMANDS.has(command)) return config.command ? "command" : null;
   }

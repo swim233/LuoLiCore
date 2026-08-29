@@ -5,9 +5,9 @@ import argon2 from "argon2";
 export const MIN_PASSWORD_LENGTH = 12;
 
 /**
- * 与 `apps/bot/src/main.ts` 的 `envOverlay`（`WEBUI_PASSWORD` → `webui.passwordHash`）同一组参数。
- * 两处算出来的哈希必须可互换，所以别名的参数只此一份 —— 抄一份的代价是某天两条路的
- * memoryCost 不一样，而验证是通过的，没人会发现。
+ * 与 `apps/bot/src/main.ts` 的 `envOverlay`（`WEBUI_PASSWORD` → `webui.passwordHash`）使用同一组参数。
+ * 两处计算出的哈希必须可互换，因此参数只保留这一份：复制第二份的后果是两条路径的
+ * memoryCost 出现差异，而校验仍然通过，该问题不会被发现。
  */
 export const hashWebuiPassword = (password: string): Promise<string> =>
   argon2.hash(password, {
@@ -18,8 +18,8 @@ export const hashWebuiPassword = (password: string): Promise<string> =>
   });
 
 /**
- * 这个文件同时是 CLI（`pnpm webui:passwd`）与被 import 的模块（`scripts/acceptance/seed.ts`）。
- * 不判「是不是我自己被直接跑起来的」的话，import 一次就会在加载期因为缺 `argv[2]` 抛出来。
+ * 该文件同时作为 CLI（`pnpm webui:passwd`）与被 import 的模块（`scripts/acceptance/seed.ts`）。
+ * 不判断是否为直接执行时，一次 import 会在加载期因缺少 `argv[2]` 抛出异常。
  */
 if (
   process.argv[1] !== undefined &&

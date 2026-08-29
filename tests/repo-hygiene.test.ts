@@ -7,7 +7,7 @@ import { BUNDLED_SKILLS } from '@luoli/core';
  *
  * `skills/` / `plugins/` / `memory/` 都是**运行时目录**：模型能往里写（`write_skill` /
  * `install_skill` / `write_plugin` / `memory_write`），装包能往里放几 MB 的二进制，
- * 而随包发的那几份说明书是版本库的内容。这条边界只写在 `.gitignore` 里，没有任何断言 ——
+ * 而随包发的那几份说明文档是版本库的内容。这条边界只写在 `.gitignore` 里，没有任何断言 ——
  * 于是它必然会漂：加第五份随包 skill 而忘了改白名单，表现是**它悄悄不进版本库**，
  * 而 `git status` 干干净净，一次提交、一次 `docker build` 都不会报任何东西。
  */
@@ -33,7 +33,7 @@ describe('版本库卫生', () => {
     for (const name of BUNDLED_SKILLS) {
       expect(existsSync(`skills/${name}/SKILL.md`), `skills/${name}/SKILL.md 不在盘上，而 .gitignore 把它当随包的放行了`).toBe(true);
       // `sourceOf()` 靠 `.package.json` 的有无区分 package 与 local；随包那几份多出这个文件的话，
-      // 它们会被判成 `package` —— 界面上那个「未审阅」徽标会挂在四份说明书上。
+      // 它们会被判成 `package` —— 界面上那个「未审阅」徽标会挂在四份说明文档上。
       expect(existsSync(`skills/${name}/.package.json`), `skills/${name} 里有 .package.json，它会被 sourceOf() 判成装包进来的`).toBe(false);
     }
   });

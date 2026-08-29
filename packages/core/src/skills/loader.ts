@@ -26,12 +26,12 @@ const VALID_ROLES: Record<Role, true> = {
 };
 
 /**
- * 随包提交在 `skills/` 里的四份说明书 —— 模型写 plugin / 定义工具 / 装 MCP 之前要读的那份文档。
- * 它们经 `load_skill` 渐进式取用，所以平时只占目录里四行。`write_skill` 与 `install_skill`
- * 都拒绝覆写它们、WebUI 也只放行启停：模型把自己的说明书改掉之后，下一次它就是照着改坏的那份写的。
+ * 随包提交在 `skills/` 中的四份说明文档 —— 模型编写 plugin / 定义工具 / 安装 MCP 前需阅读的文档。
+ * 它们经 `load_skill` 渐进披露，平时只占目录中四行。`write_skill` 与 `install_skill`
+ * 均拒绝覆写它们，WebUI 也只放行启停：模型改写自身说明文档后，后续将依据被改坏的版本工作。
  *
- * **住在 loader 里而不是 `tools/authoring.ts`**：`persist()` 要靠它把 `source` 判成 `bundled`，
- * 而 authoring 反过来 import loader —— 放在那边就是一个 import 环。
+ * 定义在 loader 而非 `tools/authoring.ts`：`persist()` 依赖它把 `source` 判定为 `bundled`，
+ * 而 authoring 反向 import loader —— 放在那边会形成 import 环。
  */
 export const BUNDLED_SKILLS = [
   "writing-tools",
@@ -39,7 +39,7 @@ export const BUNDLED_SKILLS = [
   "writing-plugins",
   "installing-mcp",
 ] as const;
-/** 装包时留下的痕迹（来源、时间、原档 sha256）。它在不在，决定 `source` 是 `package` 还是 `local`。 */
+/** 安装包时留下的记录（来源、时间、原档 sha256）。其存在与否决定 `source` 取 `package` 还是 `local`。 */
 export const SKILL_PACKAGE_MARKER = ".package.json";
 
 export const frontmatterSchema = z.object({
@@ -58,16 +58,16 @@ export interface SkillDefinition {
   description: string;
   body: string;
   dir: string;
-  /** 只在**声明了且非空**时出现：`allowed-tools: []` 归到「未声明」那一档（docs/07 §2.2）。 */
+  /** 仅在声明且非空时出现：`allowed-tools: []` 归入未声明一档（docs/07 §2.2）。 */
   allowedTools?: string[];
   /**
-   * 这份 skill 讲的是怎么用哪几个工具。**它们不在本轮可用集里时，这份 skill 整个不出现在目录里。**
+   * 该 skill 讲解的是若干工具的用法。这些工具不在本轮可用集内时，整份 skill 不出现在目录中。
    *
-   * `allowed-tools` 是「载入后收窄到这些」，方向相反。少了这一条的实测代价：四份自撰写说明书
-   * 只被 `min-role: owner` 挡着，而它们讲的 `install_mcp` / `define_tool` 受
-   * `tools.selfExtend.*` 控制、出厂是关的 —— 模型读到说明书、找不到工具，然后花了八分钟
-   * 用 `bash` 逆向代码库、自己拿 sessions 表里的 owner 会话去打 WebUI API 把事办了。
-   * 目录里出现一份「教你用一个你没有的工具」的说明书，比没有这份说明书糟。
+   * `allowed-tools` 表示载入后收窄到这些工具，方向相反。缺少本字段的实测代价：四份自撰写说明文档
+   * 仅被 `min-role: owner` 拦截，而其讲解的 `install_mcp` / `define_tool` 受
+   * `tools.selfExtend.*` 控制且出厂关闭 —— 模型读到说明文档却找不到工具，随后耗费八分钟
+   * 用 `bash` 逆向代码库、取 sessions 表中的 owner 会话直接调用 WebUI API 完成任务。
+   * 目录中出现一份讲解不可用工具的说明文档，劣于没有这份说明文档。
    */
   requiresTools?: string[];
   minRole: Role;
@@ -81,10 +81,10 @@ export interface SkillWriteInput {
   body?: string | undefined;
   allowedTools?: string[] | undefined;
   /**
-   * 装载侧一直是全的（写 frontmatter、据它把「所需工具不在本轮工具集里」的 skill 挡在目录外），
-   * 而这里此前没有这个字段 —— WebUI 表单有那一栏、请求体里也真的发了，服务端回 200「已保存」，
-   * 文件里没有：看起来像用户自己没填（docs/29 · M-WEB-11）。它是**门控**字段，丢了等于
-   * WebUI 建出来的 skill 永远进得了目录，哪怕它教的工具这一轮压根不可用。
+   * 装载侧一直完整（写入 frontmatter，并据此把所需工具不在本轮工具集内的 skill 排除出目录），
+   * 而此处此前缺少该字段 —— WebUI 表单有对应栏位、请求体也确实发送，服务端返回 200 已保存，
+   * 文件中却没有：表现为用户未填写（docs/29 · M-WEB-11）。它是门控字段，丢失即意味着
+   * WebUI 建出的 skill 永远能进目录，即便其讲解的工具本轮完全不可用。
    */
   requiresTools?: string[] | undefined;
   minRole?: Role | undefined;
@@ -94,9 +94,9 @@ export interface SkillWriteInput {
 interface NormalizedSkillWriteInput {
   description: string;
   body: string;
-  /** 空数组 = 不声明（`write()` 不落这一行），不是「收窄到零个工具」—— docs/07 §2.2。 */
+  /** 空数组表示不声明（`write()` 不写该行），而非收窄到零个工具 —— docs/07 §2.2。 */
   allowedTools: string[];
-  /** 不给就沿用已有的那份 —— 改一份已有 skill 时不带回去，一次编辑就把它抹了。 */
+  /** 缺省时沿用已有值 —— 编辑既有 skill 时若不回传，一次编辑即会清空该字段。 */
   requiresTools: string[];
   minRole: Role;
   model: string | null;
@@ -108,11 +108,11 @@ export class SkillLoader {
 
   readonly #defaultMinRole: () => Role;
   readonly #onChange: (() => void) | undefined;
-  /** 上一次扫描的 `name → content_hash`，用来判断这一次是不是真的变了（见 `scan()` 末尾）。 */
+  /** 上一次扫描的 `name → content_hash`，用于判定本次是否实际发生变更（见 `scan()` 末尾）。 */
   #signature = new Map<string, string>();
   /**
-   * @param log 可选。`scan()` 的 per-skill catch 此前只写 `skills.load_error` 那一列，而那一列
-   *   只有扩展页在读 —— 「我加的那个 skill 为什么不存在」在日志里一个字都没有，与
+   * @param log 可选。`scan()` 的 per-skill catch 此前只写 `skills.load_error` 列，而该列
+   *   仅扩展页读取 —— 新增的 skill 未生效这一问题在日志中没有任何记录，与
    *   `agent.file_invalid` 不对称（docs/28 · L-LOG-01）。
    */
   constructor(
@@ -133,8 +133,8 @@ export class SkillLoader {
   scan(): SkillDefinition[] {
     this.#skills.clear();
     let entries: Dirent[] = [];
-    // ENOENT 与其余错误必须分开：目录不存在是「一个 skill 都没有」，而权限错误 / EIO 是
-    // 「读不到」——后者绝不能一路走到下面的清理，那等于把整张表当成「盘上真的空了」删空。
+    // ENOENT 与其余错误必须区分：目录不存在表示没有任何 skill，而权限错误 / EIO 表示读取失败 ——
+    // 后者绝不能进入下方的清理逻辑，否则等于按磁盘为空的结论清空整张表。
     let readable = true;
     try {
       entries = readdirSync(this.directory, { withFileTypes: true });
@@ -142,11 +142,11 @@ export class SkillLoader {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       readable = false;
     }
-    // **只认真正的子目录，且跳过点号开头的。** `.staging-*` / `.backups/` 靠这一条才能住在
-    // `skills/` 里（装包要同分区 `renameSync` 落位，docs/07 §2.5）；顺带也修掉了一个独立的老问题：
-    // 在这之前 `skills/` 下随便一个 `.DS_Store` 都会被当成 skill 目录扫出一行 `load_error`。
-    // 符号链接同样不认（`Dirent.isDirectory()` 对它为假）：`resolveResource()` 的包含判断走
-    // `resolve()` 而不是 `realpath`，一个指向别处的软链接等于给 `skill://` 开了条出口。
+    // 只接受真正的子目录，且跳过点号开头的项。`.staging-*` / `.backups/` 依赖此条才能置于
+    // `skills/` 内（安装包需同分区 `renameSync` 落位，docs/07 §2.5）；同时修复了一个既有问题：
+    // 此前 `skills/` 下任一 `.DS_Store` 都会被当作 skill 目录并产生一行 `load_error`。
+    // 符号链接同样不接受（`Dirent.isDirectory()` 对其为假）：`resolveResource()` 的包含判断走
+    // `resolve()` 而非 `realpath`，指向外部的符号链接等于为 `skill://` 开出一条逃逸路径。
     const directories = entries
       .filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
       .map((entry) => entry.name);
@@ -178,9 +178,9 @@ export class SkillLoader {
           enabled: meta.enabled,
           files,
         };
-        // `?.length` 而不是真值判断：`allowed-tools: []` 是「没声明」，不是「收窄到零个工具」
-        // （docs/07 §2.2）。空数组在 JS 里 truthy，写成 `if (meta[...])` 就落进声明那一档，
-        // 于是 `load()` 里的交集恒为空、任何角色都载不进来。
+        // 用 `?.length` 而非真值判断：`allowed-tools: []` 表示未声明，而非收窄到零个工具
+        // （docs/07 §2.2）。空数组在 JS 中为 truthy，写成 `if (meta[...])` 会落入已声明一档，
+        // 导致 `load()` 中的交集恒为空、任何角色都无法载入。
         if (meta["allowed-tools"]?.length)
           skill.allowedTools = meta["allowed-tools"];
         if (meta["requires-tools"]?.length)
@@ -203,9 +203,9 @@ export class SkillLoader {
         this.persist(skill, path, "", {});
       }
     }
-    // **`skills` 是盘上那批文件的读模型，不是真相**（docs/03 §2.10）。`persist()` 只 upsert，
-    // 所以在这之前盘上删掉一个 skill 目录，那一行会永远留在表里、永远显示在扩展页 ——
-    // 唯一会删行的是 `remove()`，而它只覆盖「从 WebUI/工具删」这一条路。
+    // `skills` 表是磁盘文件的读模型而非真相来源（docs/03 §2.10）。`persist()` 只做 upsert，
+    // 因此此前直接删除磁盘上的 skill 目录时，对应行会长期留在表中并持续显示在扩展页 ——
+    // 唯一删除行的是 `remove()`，而它只覆盖从 WebUI 或工具删除这一条路径。
     if (readable) this.prune([...this.#skills.keys()]);
     const signature = new Map(
       [...this.#skills].map(([name, skill]) => [
@@ -218,9 +218,9 @@ export class SkillLoader {
       [...signature].some(
         ([name, value]) => this.#signature.get(name) !== value,
       );
-    // **只在这一份 skill 真的变了时才落 `skill.load`**：watcher 一次保存能连发好几个事件，
-    // 而装一个包要写几十个文件 —— 逐次记等于把一次 `install_skill` 写成几十行（`docs/10 §2`）。
-    // 签名就是「盘上那份 + 启停 + 解析结果」，与广播用的是同一份判据。
+    // 仅在该 skill 实际变更时落 `skill.load`：watcher 一次保存会连发多个事件，
+    // 而安装一个包需写入数十个文件 —— 逐次记录会把一次 `install_skill` 放大为数十行（`docs/10 §2`）。
+    // 签名取磁盘内容 + 启停状态 + 解析结果，与广播使用同一份判据。
     for (const [name, value] of signature) {
       if (this.#signature.get(name) === value) continue;
       const skill = this.#skills.get(name)!;
@@ -242,8 +242,8 @@ export class SkillLoader {
       });
     }
     this.#signature = signature;
-    // watcher 的 100ms 去抖之外再挡一层：装一个包要写几十个文件，每一次写盘都广播的话，
-    // 一次安装就是几十条 SSE + 几十次「WebUI 重新拉四个端点」。
+    // 在 watcher 的 100ms 去抖之外再加一层：安装一个包需写入数十个文件，若每次写盘都广播，
+    // 一次安装会产生数十条 SSE 及数十轮 WebUI 端点重拉。
     if (changed) this.#onChange?.();
     return [...this.#skills.values()];
   }
@@ -393,11 +393,11 @@ export class SkillLoader {
       "min-role": input.minRole,
       enabled: input.enabled,
     };
-    // 与 `requires-tools` 同一条规矩：空列表**不落这一行**。此前它是无条件写的，于是
-    // WebUI 扩展页那个留空的「允许工具」框（placeholder：「留空 = 沿用当前角色全部可用工具」）
-    // 与不给这个参数的 `write_skill`，都会把 `allowed-tools: []` 写进 frontmatter ——
-    // 一份装好的 skill 在扩展页点一次保存就废掉，而模型自己写的那份从落盘起就没载入过一次。
-    // 传 `[]` 依然是「清空已有的收窄」：省掉这一行表达的正是「不再收窄」。
+    // 与 `requires-tools` 规则一致：空列表不写该行。此前为无条件写入，导致
+    // WebUI 扩展页留空的「允许工具」输入框（placeholder：留空表示沿用当前角色全部可用工具）
+    // 与省略该参数的 `write_skill` 都会把 `allowed-tools: []` 写进 frontmatter ——
+    // 已安装的 skill 在扩展页点一次保存即失效，而模型自行编写的那份自落盘起从未载入。
+    // 传 `[]` 仍表示清空既有收窄：省略该行表达的正是不再收窄。
     if (input.allowedTools.length) data["allowed-tools"] = input.allowedTools;
     if (input.requiresTools.length)
       data["requires-tools"] = input.requiresTools;
@@ -414,8 +414,8 @@ export class SkillLoader {
   }
 
   /**
-   * @param availableTools 本轮真正可用的工具名。给了就按 `requires-tools` 过滤；不给（WebUI 预览
-   *   之外没有这种调用点）则不过滤 —— 少一个参数不该让整份目录消失。
+   * @param availableTools 本轮实际可用的工具名。提供时按 `requires-tools` 过滤；缺省时
+   *   （除 WebUI 预览外无此类调用点）不过滤 —— 少一个参数不应使整份目录消失。
    */
   catalog(
     role: Role,
@@ -444,8 +444,8 @@ export class SkillLoader {
       return { ok: false, error: `Skill 不存在或已禁用: ${name}` };
     if (roleRank(role) < roleRank(skill.minRole))
       return { ok: false, error: "权限不足" };
-    // 目录里已经按 `requires-tools` 滤过一遍，这里再挡一次：模型完全可以凭上一轮记住的名字
-    // 直接 `load_skill` 过来（`admit()` 那套「目录过滤不是边界」的同一个道理）。
+    // 目录已按 `requires-tools` 过滤过一次，此处再拦一次：模型可凭上一轮记住的名字
+    // 直接调用 `load_skill`（与 `admit()` 中目录过滤不构成边界同理）。
     const missing = (skill.requiresTools ?? []).filter(
       (tool) => !roleTools.includes(tool),
     );
@@ -453,26 +453,26 @@ export class SkillLoader {
       return {
         ok: false,
         error: "skill_requires_unavailable_tools",
-        hint: `${name} 描述skill如何使用 ${missing.join(" / ")}，本次不可用原因应为设置工具被禁用，先别照它做。`,
+        hint: `${name} 描述 ${missing.join(" / ")} 的用法，本轮不可用的原因应为该工具已在设置中禁用，暂不要按其说明操作。`,
       };
-    // 同 `scan()`：判据是「列表非空」而不是真值。空列表走 `null` 这一支（＝不收窄），
-    // 否则下面那条空交集的拒绝会把它一起拒掉 —— 而它声明的工具一个也没有，怎么改配置都救不回来。
+    // 同 `scan()`：判据是列表非空而非真值。空列表走 `null` 分支（即不收窄），
+    // 否则会被下方空交集的拒绝一并拒掉 —— 而它未声明任何工具，调整配置也无法恢复。
     const narrowed = skill.allowedTools?.length
       ? roleTools.filter((tool) => skill.allowedTools!.includes(tool))
       : null;
-    // 交集为空 = 这个 skill 声明的工具在本轮一个都用不了，此时**必须让载入失败**而不是交出一个空集：
-    // 下游把空集并进 `turn.skillAllowedTools` 之后，`admit()` 判的是 `skillAllowedTools?.size &&`
-    // —— size 0 是 falsy，整条收窄被跳过，于是「收窄到零个工具」在运行时等于「完全不收窄」，
-    // 一个 `allowed-tools: [nonexistent]` 的 skill 反而拿到该角色的全部工具。
+    // 交集为空表示该 skill 声明的工具本轮全部不可用，此时必须使载入失败而非返回空集：
+    // 下游把空集并入 `turn.skillAllowedTools` 后，`admit()` 的判据是 `skillAllowedTools?.size &&`
+    // —— size 0 为 falsy，整条收窄被跳过，收窄到零个工具在运行时等同于完全不收窄，
+    // 一个 `allowed-tools: [nonexistent]` 的 skill 反而获得该角色的全部工具。
     if (narrowed !== null && narrowed.length === 0)
       return {
         ok: false,
         error: "skill_tools_unavailable",
-        hint: `${name} 声明的 allowed-tools 在本轮一个都不可用（${skill.allowedTools!.join(" / ")}），换个办法或先让运维启用这些工具。`,
+        hint: `${name} 声明的 allowed-tools 本轮全部不可用（${skill.allowedTools!.join(" / ")}），请改用其他方式，或先由运维启用这些工具。`,
       };
-    // `narrows` 必须单独交出去：未声明 `allowed-tools` 的 skill **不收窄**（docs/07 §4），而
-    // `allowedTools` 在这一档等于「当前全部可用工具」。调用方分不清这两件事，就会把它并进
-    // 本轮允许集 —— 于是后载入一个不声明的 skill 正好抹掉前一个 skill 的收窄。
+    // `narrows` 必须单独返回：未声明 `allowed-tools` 的 skill 不收窄（docs/07 §4），而
+    // `allowedTools` 在该档等于当前全部可用工具。调用方若无法区分二者，就会将其并入
+    // 本轮允许集 —— 后续载入一个未声明的 skill 会抹掉前一个 skill 的收窄。
     return {
       ok: true,
       name,
@@ -502,9 +502,9 @@ export class SkillLoader {
   }
 
   /**
-   * `source` 此前是死列：schema 有、这里从不写、WebUI 从不读，于是每一行都是默认值 `local`，
-   * 界面上分不出「随包发的说明书」「装进来的包」「手写的」。`plugin` 那个旧取值从来没有过
-   * 写入方（plugin 不贡献 skill），一并换掉（docs/03 §2.10）。
+   * `source` 此前是无效列：schema 中存在、此处从不写入、WebUI 从不读取，因而每行都是默认值
+   * `local`，界面无法区分随包发布的说明文档、安装的包与手写的 skill。旧取值 `plugin` 从未有过
+   * 写入方（plugin 不贡献 skill），一并替换（docs/03 §2.10）。
    */
   private sourceOf(name: string): string {
     if ((BUNDLED_SKILLS as readonly string[]).includes(name)) return "bundled";

@@ -2,8 +2,8 @@ import { z } from "zod";
 
 /**
  * 别名采样参数白名单（docs/04 §5.2.1）。写入端点与 ModelRegistry 共用这一份：
- * 白名单外的键在 PUT 时就报错，不能让人以为写进去了、其实运行时被丢掉。
- * 字段名与 AI SDK 的 LanguageModelCallOptions 对齐，才能整份摊进 prepareStep 的返回值。
+ * 白名单之外的键在 PUT 时即报错，避免用户误以为已写入而运行时被丢弃。
+ * 字段名与 AI SDK 的 LanguageModelCallOptions 对齐，才能整份展开进 prepareStep 的返回值。
  */
 export const aliasSettingsSchema = z
   .object({
@@ -44,19 +44,19 @@ export const aliasSettingsSchema = z
   })
   .strict();
 
-/** zod 推出来的可选属性带 `| undefined`，在 exactOptionalPropertyTypes 下摊不进 AI SDK 的调用选项。 */
+/** zod 推导出的可选属性带 `| undefined`，在 exactOptionalPropertyTypes 下无法展开进 AI SDK 的调用选项。 */
 type ParsedAliasSettings = z.infer<typeof aliasSettingsSchema>;
 export type AliasSettings = {
   [K in keyof ParsedAliasSettings]?: NonNullable<ParsedAliasSettings[K]>;
 };
 
-/** 别名名同时是 URL path 段和模型的 `/model <alias>` 参数，控制在保守字符集内。 */
+/** 别名同时作为 URL path 段与模型的 `/model <alias>` 参数，限制在保守字符集内。 */
 export const ALIAS_NAME_PATTERN = /^[a-z][a-z0-9_-]{0,31}$/;
 
 export const BUILTIN_ALIASES = [
   {
     alias: "main",
-    purpose: "主 Agent 的默认模型，日常对话都走它",
+    purpose: "主 Agent 的默认模型，用于日常对话",
     tier: "中高档，对话质量优先",
   },
   { alias: "high", purpose: "复杂推理、代码类子 agent", tier: "最强模型" },
@@ -68,7 +68,7 @@ export const BUILTIN_ALIASES = [
   },
   {
     alias: "vision",
-    purpose: "含图片的轮次；当前模型不支持看图时自动切到这里",
+    purpose: "含图片的轮次；当前模型不支持看图时自动切换至该别名",
     tier: "支持 vision",
   },
   { alias: "title", purpose: "生成任务标题、会话摘要", tier: "最便宜" },
@@ -79,7 +79,7 @@ export const BUILTIN_ALIASES = [
   },
 ] as const;
 
-/** 解析落库的 `settings_json`；写入端点已经挡过一道，这里解析不出来就当没配。 */
+/** 解析已落库的 `settings_json`；写入端点已校验过一道，这里解析失败即视为未配置。 */
 export function parseAliasSettings(json: string | null): AliasSettings | null {
   if (!json) return null;
   try {
@@ -91,7 +91,7 @@ export function parseAliasSettings(json: string | null): AliasSettings | null {
   }
 }
 
-/** 落库前把空值抹掉：留空 = 不下发该字段，而不是下发一个 0 或空数组。 */
+/** 落库前清除空值：留空表示不下发该字段，而非下发 0 或空数组。 */
 export function pruneAliasSettings(
   input: Record<string, unknown>,
 ): Record<string, unknown> {

@@ -13,8 +13,8 @@ const error = ref("");
 const loading = ref(false);
 const exchanging = ref(false);
 
-/** 登录成功后的收尾。三处（口令、setup、一次性 token）必须一致：漏掉 csrf 那一步的表现是进得去、
- *  但每个写操作都 403。 */
+/** 登录成功后的收尾。三处（口令、setup、一次性 token）必须一致：遗漏 csrf 一步的表现是可以登录，
+ *  但每个写操作都返回 403。 */
 async function enter(csrf: string | undefined): Promise<void> {
   if (csrf) auth.csrf = csrf;
   auth.authenticated = true;
@@ -22,13 +22,13 @@ async function enter(csrf: string | undefined): Promise<void> {
 }
 
 /**
- * Telegram `/webui` 那条一次性登录链接的兑换（docs/09 §2.3）。**这一跳此前压根不存在**：
- * `route.query.t` 早就读进来了，但只有 setup 分支发它，登录分支只 POST `{ password }` ——
- * 于是 `/login?t=…` 渲染的是普通口令框，服务端端点、bot 那一侧、CI 断言全都活着而整条功能是死的
+ * Telegram `/webui` 一次性登录链接的兑换（docs/09 §2.3）。此前这一步完全缺失：
+ * `route.query.t` 早已读入，但只有 setup 分支发送它，登录分支仅 POST `{ password }`，
+ * 因此 `/login?t=…` 渲染的是普通口令框，服务端端点、bot 侧与 CI 断言均正常而整条功能不可用
  * （docs/28 · L-WEB-01）。
  *
- * 失败必须把服务端的原因显示出来：token 是 5 分钟一次性的，**过期与已用过是常态**，
- * 一句「请求失败」会让人以为链接坏了或服务挂了。失败即降级成口令框（fail-closed）。
+ * 失败必须展示服务端给出的原因：token 为 5 分钟一次性，过期与已使用属于常见情况，
+ * 仅提示请求失败会让用户误以为链接损坏或服务不可用。失败即降级为口令框（fail-closed）。
  */
 onMounted(async () => {
   if (props.setup || !token.value) return;
@@ -51,7 +51,7 @@ onMounted(async () => {
       );
     await enter(result.data?.csrf);
   } catch (cause) {
-    error.value = `${cause instanceof Error ? cause.message : "请求失败"}——一次性登录链接 5 分钟有效、且只能用一次。在私聊里重新发 /webui 换一条，或直接用下面的口令登录。`;
+    error.value = `${cause instanceof Error ? cause.message : "请求失败"}。链接 5 分钟有效且仅可用一次，在私聊重新发送 /webui 获取新链接。`;
   } finally {
     exchanging.value = false;
     loading.value = false;
@@ -93,7 +93,7 @@ async function submit(): Promise<void> {
       <div class="brand-mark">L</div>
       <p class="eyebrow">Welcome To LuoLiCore</p>
       <h1>「Hello World」<br /><span>你好 世界</span></h1>
-      <p>在此处管理你的助手</p>
+      <p>管理会话、工具、模型与配额</p>
       <div class="trust-row">
         <span class="u-display-none"
           ><i class="pi pi-shield" /> Session + CSRF</span
@@ -107,7 +107,7 @@ async function submit(): Promise<void> {
     <form class="auth-card" @submit.prevent="submit">
       <div>
         <p class="eyebrow">{{ props.setup ? "FIRST RUN" : "OWNER ACCESS" }}</p>
-        <h2>{{ props.setup ? "初始化控制台" : "欢迎回来" }}</h2>
+        <h2>{{ props.setup ? "初始化控制台" : "管理员登录" }}</h2>
         <p>
           {{
             props.setup
@@ -130,10 +130,7 @@ async function submit(): Promise<void> {
       </label>
       <!-- 兑换期间说清正在做什么：否则界面只是一个转着的按钮，而这一步可能失败并落回口令框 -->
       <p v-if="exchanging" class="callout" data-exchanging>
-        <i
-          class="pi pi-spin pi-spinner"
-          aria-hidden="true"
-        />正在用一次性登录链接换取会话…
+        <i class="pi pi-spin pi-spinner" aria-hidden="true" />正在兑换登录链接…
       </p>
       <!-- 登录失败是表单内校验，留在原地；写操作的成败才走右上角通知（docs/09 §6） -->
       <p v-if="error" class="callout error">

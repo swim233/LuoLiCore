@@ -202,7 +202,7 @@ describe('装 skill 包', () => {
     closeDatabase(db);
   });
 
-  it('拒绝覆写随包发的四份说明书', async () => {
+  it('拒绝覆写随包发的四份说明文档', async () => {
     const { db, zipAt, install } = setup();
     await expect(install(zipAt('reserved.zip', [{ name: 'x/SKILL.md', content: SKILL_MD }]), { name: 'writing-tools' }))
       .rejects.toThrow('skill_reserved');

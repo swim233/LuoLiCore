@@ -17,9 +17,9 @@ import type { ArchivedMessage, Sqlite } from "@luoli/db";
 import { untrusted } from "@luoli/shared";
 
 /**
- * 按**码点**截断，但先按 UTF-16 下标粗截一刀：一个码点最多占 2 个 UTF-16 单元，所以前
- * `maxChars` 个码点必然落在前 `maxChars*2` 个单元里。粗截可能切开一对代理对，而随后按码点
- * 取满 `maxChars` 时那个落单的半字符必然被丢掉 —— 粗截只在原串更长时才发生。
+ * 按码点截断，先按 UTF-16 下标做一次粗截：单个码点最多占 2 个 UTF-16 单元，故前 `maxChars`
+ * 个码点必然落在前 `maxChars*2` 个单元内。粗截可能切开代理对，但随后按码点取满 `maxChars`
+ * 时落单的半字符必被丢弃 —— 粗截仅在原串更长时发生。
  */
 function truncateCodePoints(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;
@@ -27,12 +27,12 @@ function truncateCodePoints(text: string, maxChars: number): string {
 }
 
 /**
- * 文档解析的墙钟上限。`pdf-parse` / `mammoth` 对用户上传的文件都没有任何预算，而这一步曾经跑在
- * 按 chat 串行的入口锁里：一个畸形 PDF（解析器活锁、压缩炸弹）让 `attachMedia` 永不返回，那个
- * 会话之后的每条消息就既不归档也不触发，日志里连一条 `turn.start` 都没有（docs/27 · R-01）。
+ * 文档解析的墙钟上限。`pdf-parse` / `mammoth` 对用户上传的文件没有任何预算约束，而该步骤曾运行在
+ * 按 chat 串行的入口锁内：一个畸形 PDF（解析器活锁、压缩炸弹）使 `attachMedia` 永不返回，
+ * 该会话此后的每条消息既不归档也不触发，日志中没有任何 `turn.start`（docs/27 · R-01）。
  *
- * **这道闸只挡「等」，不挡「算」**：解析器在 await 之间挂住时它有效；一个纯 CPU 的紧循环会把
- * 事件循环整个占住，`Promise.race` 那一侧根本轮不到。算的那一半由字节闸门挡（见 `process`）。
+ * 本闸只约束等待，不约束计算：解析器在 await 之间挂起时有效；纯 CPU 紧循环会独占事件循环，
+ * `Promise.race` 的定时器一侧不会得到调度。计算侧由字节闸门约束（见 `process`）。
  */
 const EXTRACT_TIMEOUT_MS = 20_000;
 async function withDeadline<T>(
@@ -66,10 +66,10 @@ interface TelegramFile {
 }
 
 /**
- * 上下文占位符里的文件种类。`file.kind` 是 Telegram 的原始英文，直接拼进去模型看到的是
- * `[voice  9s]` —— 而同一个文件里 PDF 走的是「文档」、超限走的是「超出下载限制」，中英混用只发生在
- * 这几个兜底分支上（docs/29 · M-TG-06）。语音的 `file.name` 恒为空，那两个连续空格就是空槽留下的，
- * 所以拼接一律走 `placeholder()` 而不是模板串。
+ * 上下文占位符中的文件种类。`file.kind` 是 Telegram 的原始英文，直接拼接会使模型看到
+ * `[voice  9s]`，而同一文件中 PDF 输出「文档」、超限输出「超出下载限制」，中英混用仅出现在
+ * 这几个兜底分支（docs/29 · M-TG-06）。语音的 `file.name` 恒为空，连续两个空格即由该空槽产生，
+ * 因此拼接统一走 `placeholder()` 而非模板串。
  */
 const KIND_LABEL: Record<string, string> = {
   photo: "图片",
@@ -121,9 +121,9 @@ function fileFrom(message: Record<string, unknown>): TelegramFile | null {
 
 export class TelegramMedia {
   /**
-   * @param log 可选。`media.download` / `media.extract` 是 `docs/10 §2` 里写了而实现里一直没有的
-   *   两条：一张 20MB 的图被 `maxImageBytes` 挡掉、一个 PDF 解析超时，此前只落在 `attachments`
-   *   那两列错误里（docs/28 · L-LOG-01）。**没有 traceId** —— 这一段跑在开轮之前。
+   * @param log 可选。`media.download` / `media.extract` 是 `docs/10 §2` 已规定而实现长期缺失的
+   *   两条日志：20MB 图片被 `maxImageBytes` 拦截、PDF 解析超时，此前只记录在 `attachments`
+   *   的两列错误字段中（docs/28 · L-LOG-01）。无 traceId —— 该段运行在开轮之前。
    */
   constructor(
     private readonly api: Api,
@@ -158,7 +158,7 @@ export class TelegramMedia {
     });
   }
 
-  /** 贴纸是不是当图片看。默认否 —— 贴纸多半是表情噪音，每张按 1500 token 记会把群聊上下文吃穿。 */
+  /** 贴纸是否按图片处理。默认否：贴纸多为表情噪音，每张按 1500 token 计会耗尽群聊上下文预算。 */
   #asImage(file: TelegramFile): boolean {
     return (
       file.kind === "photo" ||
@@ -173,8 +173,8 @@ export class TelegramMedia {
     const file = fileFrom(message);
     if (!file) return [];
     const startedAt = performance.now();
-    // `downloadVoice=false`：语音一律不下载（第一版不做 STT，见 docs/14 A13，下下来也只是占磁盘）。
-    // 仍然落一条 attachments 行，好让「这里有条语音」在归档与界面上看得见。
+    // `downloadVoice=false`：语音一律不下载（首版不实现 STT，见 docs/14 A13，下载后仅占用磁盘）。
+    // 仍写入一行 attachments，使归档与界面能显示此处存在语音消息。
     if (file.kind === "voice" && !this.config.downloadVoice) {
       const voiceId = ulid();
       this.insert(
@@ -220,9 +220,9 @@ export class TelegramMedia {
         (file.kind === "photo" ? ".jpg" : ".bin");
       const directory = join(this.config.dir, archived.chatId);
       mkdirSync(directory, { recursive: true, mode: 0o700 });
-      // photo 的 extension 恒为 .jpg（file.name 是 undefined，remote.file_path 固定是 photos/file_N.jpg），
-      // 归一化输出也是 .jpg —— 两者同名时 sharp 直接抛 "Cannot use same file for input and output"，
-      // catch 把它记成「处理失败」，多模态输入 100% 不可用（docs/20 · W-MEDIA-01）。
+      // photo 的 extension 恒为 .jpg（file.name 为 undefined，remote.file_path 固定为 photos/file_N.jpg），
+      // 归一化输出同为 .jpg —— 两者同名时 sharp 抛出 "Cannot use same file for input and output"，
+      // 被 catch 记为处理失败，多模态输入完全不可用（docs/20 · W-MEDIA-01）。
       const path = join(
         directory,
         this.#asImage(file)
@@ -234,9 +234,9 @@ export class TelegramMedia {
       );
       if (!response.ok) throw new Error(`download_http_${response.status}`);
       const payload = Buffer.from(await response.arrayBuffer());
-      // 上面那道闸判的是 Telegram **声明**的 `file_size`，而它可以缺省（`?? 0` 一路放行）。
-      // 落盘前按真实字节数再判一次：解析器的 CPU 开销跟着字节走，而 `EXTRACT_TIMEOUT_MS`
-      // 挡不住纯 CPU 的紧循环（docs/27 · R-01）。
+      // 上一道闸判定的是 Telegram 声明的 `file_size`，该字段可缺省（`?? 0` 会全部放行）。
+      // 落盘前按真实字节数再判定一次：解析器的 CPU 开销与字节数成正比，而 `EXTRACT_TIMEOUT_MS`
+      // 无法约束纯 CPU 紧循环（docs/27 · R-01）。
       if (payload.length > limit) {
         this.insert(
           id,
@@ -264,14 +264,14 @@ export class TelegramMedia {
       let localPath = path;
       if (this.#asImage(file)) {
         localPath = join(directory, `${file.uniqueId}.jpg`);
-        // 归一化只有一份（`@luoli/core` 的 `normalizeImage`）：这里与 `web_fetch` / MCP 抓回来的图
-        // 各写一遍 sharp 链的话，「Telegram 的图归一化了、网页的图没有」是必然会出现的第二种形状。
+        // 归一化实现只保留一份（`@luoli/core` 的 `normalizeImage`）：若此处与 `web_fetch` / MCP
+        // 各自实现一遍 sharp 链，必然出现「Telegram 图片已归一化、网页图片未归一化」的分叉。
         await normalizeImage(path, localPath, this.config.maxImageEdge);
         rmSync(path, { force: true });
       }
-      // 提取失败**不算**下载失败：文件已经在盘上了，记成 failed 会让 local_path 变成 NULL、
-      // 盘上那份变成 gcFiles 眼里的孤儿。`attachments` 没有 extract_error 列（迁移提交后不可
-      // 修改），所以原因带前缀写进唯一那个错误列 —— `download_state='done'` 已经说清了是哪一步。
+      // 提取失败不计为下载失败：文件已落盘，记为 failed 会使 local_path 变为 NULL，
+      // 盘上的文件成为 gcFiles 视角下的孤儿。`attachments` 没有 extract_error 列（迁移提交后
+      // 不可修改），故原因带前缀写入唯一的错误列 —— `download_state='done'` 已表明失败发生在哪一步。
       this.#download(id, archived, file, "done", startedAt, {
         realBytes: payload.length,
       });
@@ -314,8 +314,8 @@ export class TelegramMedia {
         extracted,
         extractState,
       );
-      // `image` part 在 AI SDK v7 已废弃（SDK 内部就是转成 file 再发，顺带每张图打一条
-      // DeprecationWarning）。读出侧 `contextMessages` 兜历史 part，写入侧从这里就产出新形状。
+      // `image` part 在 AI SDK v7 已废弃（SDK 内部转为 file 后再发送，并对每张图输出一条
+      // DeprecationWarning）。读出侧由 `contextMessages` 兼容历史 part，写入侧自此处直接产出新形状。
       if (this.#asImage(file))
         return [
           { type: "file", ref: `attachment://${id}`, mediaType: "image/jpeg" },
@@ -324,7 +324,7 @@ export class TelegramMedia {
         return [
           {
             type: "text",
-            text: `[文档 ${file.name ?? file.uniqueId}：正文读不出来（${extractError}）]`,
+            text: `[文档 ${file.name ?? file.uniqueId}：正文提取失败（${extractError}）]`,
           },
         ];
       if (extracted)
@@ -346,10 +346,10 @@ export class TelegramMedia {
   }
 
   /**
-   * 文本文件不整份读进内存再展开：`media.maxDocBytes` 默认 20 MB，而 `maxChars` 默认 40 000 ——
-   * 此前 `[...readFileSync(path,'utf8')]` 为了取 4 万个码点先造两千万元素的数组（docs/22 · I-07）。
-   * 每个码点最多 4 字节，所以前 `maxChars` 个码点必然落在前 `maxChars*4` 字节里。
-   * `StringDecoder` 负责末尾那个被字节边界切开的字符：它会攒着不吐，不会留下 U+FFFD。
+   * 文本文件不整份读入内存再展开：`media.maxDocBytes` 默认 20 MB，而 `maxChars` 默认 40 000 ——
+   * 此前 `[...readFileSync(path,'utf8')]` 为取 4 万个码点先构造两千万元素的数组（docs/22 · I-07）。
+   * 单个码点最多 4 字节，故前 `maxChars` 个码点必然落在前 `maxChars*4` 字节内。
+   * 末尾被字节边界切开的字符由 `StringDecoder` 处理：它会暂存不输出，不会产生 U+FFFD。
    */
   private readHead(path: string, maxChars: number): string {
     const handle = openSync(path, "r");
@@ -371,8 +371,8 @@ export class TelegramMedia {
   ): Promise<string | null> {
     if (!this.config.extract.enabled) return null;
     const maxChars = this.config.extract.maxChars;
-    // 内置这批是「肯定是纯文本」的最小集；`media.extract.codeExtensions` 往上加，不替换 ——
-    // 配错一个扩展名就把 .md 的提取关掉，那种失败运维要过很久才会发现。
+    // 内置集合是可确定为纯文本的最小集；`media.extract.codeExtensions` 为追加而非替换 ——
+    // 若配置写错一个扩展名即关闭 .md 的提取，此类失败运维需要很久才能发现。
     const textExtensions = new Set([
       ".json",
       ".csv",

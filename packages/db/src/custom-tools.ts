@@ -7,7 +7,7 @@ export type CustomToolScope = "chat" | "global";
 export interface CustomTool {
   name: string;
   description: string;
-  /** 参数的 JSON Schema（object 型）。注册时经 `jsonSchemaToZod` 转成 zod 交给模型。 */
+  /** 参数的 JSON Schema（object 型）。注册时经 `jsonSchemaToZod` 转为 zod 后交给模型。 */
   paramsJson: string;
   runtime: CustomToolRuntime;
   body: string;
@@ -44,8 +44,8 @@ const COLUMNS = `name,description,params_json AS paramsJson,runtime,body,min_rol
   reviewed_at AS reviewedAt,last_error AS lastError,created_at AS createdAt,updated_at AS updatedAt`;
 
 /**
- * 只覆盖**参与执行语义**的那几列。描述与 minRole 不进哈希：改描述不该让本轮正在跑的调用失败，
- * 而 minRole 的变化由 `admit()` 每次重新判，不需要靠哈希兜。
+ * 只覆盖参与执行语义的列。描述与 minRole 不参与哈希：修改描述不应使本轮正在执行的调用失败，
+ * 而 minRole 的变化由 `admit()` 每次重新判定，无需依赖哈希兜底。
  */
 export function customToolHash(
   input: Pick<NewCustomTool, "paramsJson" | "runtime" | "body" | "timeoutMs">,
@@ -62,11 +62,11 @@ export function customToolHash(
 /**
  * `custom_tools` 的唯一访问入口（裸 SQL 不出 `packages/db`，docs/00 §2.1 D-01）。
  *
- * `upsert` 的返回值带 `reset`：调用方要能把「新建」「只改了描述」「改了正文所以被打回未启用」
- * 三种情形分开告诉模型 —— 模型定义完一个工具却在下一轮找不到它时，得知道是被闸挡住了。
+ * `upsert` 的返回值带 `reset`：调用方需要向模型区分「新建」「仅修改描述」「修改正文因而被重置为未启用」
+ * 三种情形。模型定义完一个工具却在下一轮找不到它时，必须能知道是被闸拦下的。
  *
- * 执行前的漂移检查走 `get()` 而不是一个「只取已启用的哈希」的窄方法：那样的话「被停用」与
- * 「定义变了」会挤成同一个信号，模型收到「定义变了」去查、看见定义原封不动、然后原样重试。
+ * 执行前的漂移检查走 `get()` 而非「只取已启用项哈希」的窄方法：后者会把「已停用」与「定义已变更」
+ * 合并为同一信号，模型收到「定义已变更」后去核查、发现定义未变、于是原样重试。
  */
 export class CustomToolRepository {
   constructor(private readonly db: Sqlite) {}
@@ -101,9 +101,9 @@ export class CustomToolRepository {
   }
 
   /**
-   * 「现在这一份定义集是什么样」的廉价指纹，`CustomToolManager.syncIfChanged` 用它决定要不要重扫。
+   * 当前定义集的廉价指纹，`CustomToolManager.syncIfChanged` 据此决定是否重扫。
    *
-   * **条数不能省**：删掉一行不会推高 `MAX(updated_at)`，只看时间戳的话一次删除永远同步不过去。
+   * 行数不可省略：删除一行不会推高 `MAX(updated_at)`，只看时间戳时删除操作永远同步不到。
    */
   fingerprint(): string {
     const row = this.db
@@ -114,7 +114,7 @@ export class CustomToolRepository {
     return `${row.n}:${row.at}`;
   }
 
-  /** 改了正文 / 参数 / runtime / 超时就打回未启用，并清掉复审时间戳。 */
+  /** 正文 / 参数 / runtime / 超时发生变更时重置为未启用，并清除复审时间戳。 */
   upsert(input: NewCustomTool): {
     tool: CustomTool;
     created: boolean;
@@ -143,7 +143,7 @@ export class CustomToolRepository {
     return { tool: this.get(input.name)!, created: existing === null, reset };
   }
 
-  /** 启停由运维走。启用顺手盖 `reviewed_at` —— 「有人看过这段正文」就是这个时间戳的全部含义。 */
+  /** 启停由运维执行。启用时写入 `reviewed_at`，该时间戳的含义就是「有人复核过这段正文」。 */
   setEnabled(name: string, enabled: boolean): boolean {
     return (
       this.db

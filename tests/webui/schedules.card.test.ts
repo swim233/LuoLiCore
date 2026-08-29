@@ -7,26 +7,26 @@ import { confirmBox, dismissConfirm, runConfirmed } from '../../packages/webui/s
 import { toasts } from '../../packages/webui/src/ui/toast';
 
 /**
- * 定时任务卡的**判据**防线（`.vue` 模板不进 `tsc --noEmit`，这些分支只能在这里焊）。
+ * 定时任务卡的判据防线（`.vue` 模板不进 `tsc --noEmit`，这些分支只能在这里约束）。
  *
- * 这张卡上有一处「两次操作各自都不报错、结果却是错的」：`GET /api/schedules` 发的 `at` 是
- * `toISOString()` 的 **UTC 瞬时**，而 `POST`/`PATCH` 收的是**任务行上那个时区的墙钟**。
- * 直接把 ISO 回填进输入框的话，`Asia/Shanghai` 上一个「早八点」的任务显示成 `…T00:00:00.000Z`，
- * 人顺手改成 `08:00` 再存 —— 任务被静默挪后 8 小时。第一条用例就是它。
+ * 这张卡上有一处两次操作各自都不报错、结果却错误的路径：`GET /api/schedules` 发的 `at` 是
+ * `toISOString()` 的 UTC 瞬时，而 `POST`/`PATCH` 接收的是任务行所记时区的墙钟。
+ * 直接把 ISO 回填进输入框时，`Asia/Shanghai` 上一个早八点的任务显示为 `…T00:00:00.000Z`，
+ * 运维改成 `08:00` 再保存，任务被静默推后 8 小时。第一条用例覆盖的就是它。
  *
- * 其余几条守的是「编辑弹窗不许长出提权把手」：会话 / 模式 / 时区 / 创建者四格只读，
- * `PATCH` 的 body 里一个 `key`/`chatId`/`mode` 都不许出现。
+ * 其余几条约束的是编辑弹窗不得引入提权入口：会话 / 模式 / 时区 / 创建者四格只读，
+ * `PATCH` 的 body 里不得出现 `key`/`chatId`/`mode`。
  */
 
 const CHATS = [{ key: 'chat:c1' }, { key: 'chat:c2' }];
 
-/** 三行盖住三种形态：cron + 不静默 / 一次性 + 静默且连续静默超阈值 / 已停用。 */
+/** 三行覆盖三种形态：cron 且不静默 / 一次性且静默并超过连续静默阈值 / 已停用。 */
 function jobs(): unknown[] {
   return [
     { id: 'j1', key: 'chat:c1', chatId: 'c1', threadId: null, createdBy: '555', name: '每日早报', mode: 'agent', state: 'active',
       chatLabel: '阿离', creatorLabel: '主人', cron: '0 8 * * *', timezone: 'UTC', payload: '汇总昨天群里聊了什么', runCount: 2,
       nextRun: '2026-08-22T00:00:00.000Z', lastRunAt: 1_787_000_000_000, lastState: 'committed', silent: false, silentStreak: 0 },
-    // `at` 是 UTC 瞬时，行上的时区是 Asia/Shanghai —— 回填必须是 2026-08-19T08:00。
+    // `at` 是 UTC 瞬时，行上的时区是 Asia/Shanghai，因此回填必须是 2026-08-19T08:00。
     { id: 'j2', key: 'chat:c2', chatId: 'c2', threadId: null, createdBy: '555', name: '中午查一次更新', mode: 'agent', state: 'active',
       chatLabel: '隆福饭搭子', creatorLabel: '主人', at: '2026-08-19T00:00:00.000Z', timezone: 'Asia/Shanghai',
       payload: '有更新就说，没有就静默', runCount: 12, silent: true, silentStreak: 12,
@@ -39,7 +39,7 @@ function jobs(): unknown[] {
 const ENVELOPE = (): unknown => ({ available: true, enabled: true, timezone: 'UTC',
   settings: { maxPerChat: 20, minIntervalMinutes: 5, maxPayloadChars: 2000 }, jobs: jobs(), total: 3, truncated: false });
 
-/** 写操作回一行「保存后的样子」就够：卡片只拿它的 `name` / `nextRun` 拼提示。 */
+/** 写操作只需返回保存后的那一行：卡片只用它的 `name` / `nextRun` 拼提示。 */
 function stubFetch(): void {
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
@@ -61,7 +61,7 @@ function lastWrite(method: string): { url: string; body: Record<string, unknown>
 async function settle(wrapper: VueWrapper): Promise<void> {
   for (let round = 0; round < 6; round += 1) { await Promise.resolve(); await wrapper.vm.$nextTick(); }
 }
-/** `UiModal` / `UiSelect` 都 Teleport 到 body —— 摊平回组件树里才查得到。 */
+/** `UiModal` / `UiSelect` 都 Teleport 到 body，需摊平回组件树才查得到。 */
 async function open(): Promise<VueWrapper> {
   const wrapper = mount(SchedulesCard, { props: { tick: 0, chats: CHATS }, global: { stubs: { teleport: true } } });
   await settle(wrapper);
@@ -85,15 +85,15 @@ describe('定时任务卡', () => {
   beforeEach(() => { stubFetch(); dismissConfirm(); toasts.splice(0, toasts.length); });
 
   /**
-   * **这批改动里最容易做错的一处。** 回填走 `toWallClock(job.at, job.timezone)`：
+   * 本批改动中最易出错的一处。回填走 `toWallClock(job.at, job.timezone)`：
    * UTC 的 `2026-08-19T00:00Z` 在 `Asia/Shanghai` 上是 `2026-08-19T08:00`。
-   * 直接塞 ISO 的话这一格会显示 `2026-08-19T00:00:00.000Z`，而两次操作各自都不报错。
+   * 直接填入 ISO 时这一格会显示 `2026-08-19T00:00:00.000Z`，而两次操作各自都不报错。
    */
   it('编辑一次性任务时，at 按行上的时区折算成墙钟回填', async () => {
     const wrapper = await open();
     await edit(wrapper, '中午查一次更新');
     expect(fieldValue(wrapper, 'at')).toBe('2026-08-19T08:00');
-    // 反过来：绝不能是 ISO 瞬时那一串。
+    // 反向断言：不能是 ISO 瞬时那一串。
     expect(fieldValue(wrapper, 'at')).not.toContain('Z');
     wrapper.unmount();
   });
@@ -106,7 +106,7 @@ describe('定时任务卡', () => {
       expect(control.exists(), `编辑弹窗里没有 ${field} 这一格`).toBe(true);
       expect(control.attributes('disabled'), `${field} 这一格是可写的`).toBeDefined();
     }
-    // 会话那一格显示的是 chatLabel，不是裸 key —— 认不出会话的话这条只读说明就没意义。
+    // 会话那一格显示的是 chatLabel 而不是裸 key：辨认不出会话时，这条只读说明就失去意义。
     expect(fieldValue(wrapper, 'chat')).toBe('隆福饭搭子');
     expect(fieldValue(wrapper, 'timezone')).toBe('Asia/Shanghai');
     expect(fieldValue(wrapper, 'creator')).toBe('主人');
@@ -121,9 +121,9 @@ describe('定时任务卡', () => {
   });
 
   /**
-   * `PATCH` 的 body 是**改了什么发什么**，而且一个 `key`/`chatId`/`mode` 都不许出现。
-   * 全字段重发不只是多余：服务端会连带重新校验触发时间，于是运维把 `minIntervalMinutes`
-   * 从 5 调到 60 之后，「我只改了一句正文」会以 `interval_too_short` 失败。
+   * `PATCH` 的 body 只发送实际修改的字段，且不得出现 `key`/`chatId`/`mode`。
+   * 全字段重发不只是冗余：服务端会连带重新校验触发时间，于是运维把 `minIntervalMinutes`
+   * 从 5 调到 60 之后，只改正文的请求会以 `interval_too_short` 失败。
    */
   it('保存走 PATCH，body 里没有 key / chatId / mode，且只带改动过的字段', async () => {
     const wrapper = await open();
@@ -150,7 +150,7 @@ describe('定时任务卡', () => {
     wrapper.unmount();
   });
 
-  /** 格式校验就到「非空 / 形状对不对」为止，而且**不发请求**。cron 一律不解析。 */
+  /** 格式校验只做非空与形状检查，且不发请求。cron 一律不解析。 */
   it('时间格式不对时不发请求，只出一条提示', async () => {
     const wrapper = await open();
     await edit(wrapper, '中午查一次更新');
@@ -181,7 +181,7 @@ describe('定时任务卡', () => {
   it('静默那一行带「静默」标签，连续静默超过阈值时行上常驻一条提示', async () => {
     const wrapper = await open();
     const silent = rowOf(wrapper, '中午查一次更新');
-    // 模式列（第 3 格）：`lastState='silent'` 在「上一次」那一列也写着「静默」，所以要指名道姓查这一格。
+    // 模式列（第 3 格）：`lastState='silent'` 在「上一次」那一列同样显示静默，因此必须精确定位这一格。
     expect(silent.findAll('td')[2]!.text()).toContain('静默');
     expect(rowOf(wrapper, '每日早报').findAll('td')[2]!.text()).not.toContain('静默');
     expect(silent.text()).toContain('12');
@@ -192,8 +192,8 @@ describe('定时任务卡', () => {
   });
 
   /**
-   * 硬删只在弹窗 footer 里。**行内一个「删除」都不能有** —— 与「停掉」两个红按钮并排必然误点，
-   * 而这两件事差得很远：停掉的行还在，删掉的连运行历史一起没了。
+   * 硬删只出现在弹窗 footer 中，行内不得有任何删除入口：与「停掉」两个红按钮并排必然误触，
+   * 而两者差别很大：停用后行仍在，删除会连同运行历史一并清除。
    */
   it('硬删走 /purge，且行内没有任何删除入口', async () => {
     const wrapper = await open();
@@ -206,7 +206,7 @@ describe('定时任务卡', () => {
     await wrapper.findAll('.modal-foot button').find((entry) => entry.text() === '永久删除')!.trigger('click');
     await settle(wrapper);
     expect(confirmBox.value.open, '硬删没有走二次确认').toBe(true);
-    // 二次确认必须与「停掉」划清界线：说的是运行历史一起没了，不是「行还留着」。
+    // 二次确认必须与「停掉」明确区分：文案说明运行历史一并删除，而不是行仍保留。
     expect(confirmBox.value.title).toContain('永久删除');
     expect(confirmBox.value.detail).toContain('运行历史');
     expect(confirmBox.value.detail).not.toContain('retentionDays');
@@ -219,12 +219,12 @@ describe('定时任务卡', () => {
   });
 
   /**
-   * **两层弹窗的层级。** 所有遮罩都是同一个 `.ui-overlay`（同一个 z-index），同层只能靠 DOM
-   * 顺序分胜负；而 `ConfirmHost` 在 `App.vue` 里最先挂载，teleport 锚点排在所有页内弹窗**之前**。
-   * 于是「编辑弹窗里点〔永久删除〕」弹出的确认框反而被那张编辑弹窗盖住 —— 点了像什么都没发生。
+   * 两层弹窗的层级。所有遮罩都是同一个 `.ui-overlay`（同一个 z-index），同层只能由 DOM 顺序
+   * 决定先后；而 `ConfirmHost` 在 `App.vue` 里最先挂载，teleport 锚点排在所有页内弹窗之前。
+   * 于是在编辑弹窗里点〔永久删除〕弹出的确认框反被那张编辑弹窗遮住，表现为点击后没有反应。
    *
-   * 修法是 `styles.css` 里给确认框的遮罩单独抬一层，而不是「先把编辑弹窗关掉再问」（关掉之后
-   * 人就看不见自己要删的是哪一条了）。两半都要焊：DOM 上确认框带着那个钩子，CSS 上那个钩子更高。
+   * 修法是在 `styles.css` 里给确认框的遮罩单独提升一层，而不是先关闭编辑弹窗再询问（关闭后
+   * 用户看不到要删除的是哪一条）。两侧都要约束：DOM 上确认框带该钩子，CSS 上该钩子层级更高。
    */
   it('编辑弹窗开着时点〔永久删除〕，确认框在最上层', async () => {
     document.body.innerHTML = '';
@@ -247,7 +247,7 @@ describe('定时任务卡', () => {
     // 复现：确认框在 DOM 里排在前面，所以同 z-index 时它就是被盖住的那一张。
     expect(box!.compareDocumentPosition(editor) & Node.DOCUMENT_POSITION_FOLLOWING,
       '确认框已经排在编辑弹窗之后了 —— 这条用例的前提没了，下面那半 CSS 断言要重写').toBeTruthy();
-    // 另一半在 CSS 里：钩子命中的那条规则必须真的比普通遮罩高。
+    // 另一半在 CSS 里：钩子命中的那条规则的层级必须高于普通遮罩。
     const css = readFileSync('packages/webui/src/styles.css', 'utf8');
     const base = /^\.ui-overlay\s*\{[^}]*z-index:\s*(\d+)/m.exec(css);
     const raised = /^\.ui-overlay:has\(\.confirm-detail\)\s*\{[^}]*z-index:\s*(\d+)/m.exec(css);
@@ -255,7 +255,7 @@ describe('定时任务卡', () => {
     expect(raised, 'styles.css 里没有给确认框抬层的那条规则').not.toBeNull();
     expect(Number(raised![1]), '确认框的遮罩没有比普通弹窗高').toBeGreaterThan(Number(base![1]));
 
-    // 删成功之后编辑弹窗才收 —— 失败时它要留着，人还能改主意去「停掉」。
+    // 删除成功之后编辑弹窗才关闭：失败时保持打开，用户仍可改为执行「停掉」。
     await runConfirmed();
     await settle(wrapper);
     expect(lastWrite('POST').url).toBe('/api/schedules/j1/purge');
@@ -264,7 +264,7 @@ describe('定时任务卡', () => {
     host.unmount();
   });
 
-  /** 「停掉」「立即触发」也一并换成共享确认框：`window.confirm` 在这套控制台上不受控，happy-dom 里更是没有实现。 */
+  /** 「停掉」「立即触发」同样改用共享确认框：`window.confirm` 在这套控制台上不可控，happy-dom 里未实现。 */
   it('停掉与立即触发都走共享确认框，不用 window.confirm', async () => {
     const nativeConfirm = vi.fn(() => true);
     vi.stubGlobal('confirm', nativeConfirm);
@@ -280,8 +280,8 @@ describe('定时任务卡', () => {
 
     await button('立即触发').trigger('click');
     await settle(wrapper);
-    // agent 模式的代价要写在确认框里：点一下就是一次真实模型调用。
-    expect(confirmBox.value.detail).toContain('花钱');
+    // agent 模式的代价要写进确认框：点击一次即产生一次真实模型调用。
+    expect(confirmBox.value.detail).toContain('产生费用');
     await runConfirmed();
     await settle(wrapper);
     expect(lastWrite('POST').url).toBe('/api/schedules/j1/trigger');
@@ -289,14 +289,14 @@ describe('定时任务卡', () => {
     wrapper.unmount();
   });
 
-  /** 新建那一路一个字没变：`key` / `mode` 照发，`silent` 是这次新加的一项。 */
+  /** 新建那条路径未作改动：`key` / `mode` 照常发送，`silent` 是本次新增的一项。 */
   it('新建仍然发 POST，body 带 key / mode / silent', async () => {
     const wrapper = await open();
     await wrapper.findAll('button').find((entry) => entry.text().includes('新建定时任务'))!.trigger('click');
     await settle(wrapper);
     await wrapper.find('[data-field="name"]').setValue('每天中午看一眼');
     await wrapper.find('[data-field="text"]').setValue('有更新就说');
-    await wrapper.findAll('.modal-foot button').find((entry) => entry.text() === '排上')!.trigger('click');
+    await wrapper.findAll('.modal-foot button').find((entry) => entry.text() === '创建')!.trigger('click');
     await settle(wrapper);
     const { url, body } = lastWrite('POST');
     expect(url).toBe('/api/schedules');
@@ -304,7 +304,7 @@ describe('定时任务卡', () => {
     wrapper.unmount();
   });
 
-  /** `notify` 不调模型，没有谁能宣布不投递 —— 那个开关必须是置灰的，不是「存得下但运行时不读」。 */
+  /** `notify` 不调用模型，没有调用方能声明不投递，因此该开关必须置灰，而不是可写入但运行时不读取。 */
   it('notify 模式下静默开关置灰', async () => {
     const wrapper = await open();
     await wrapper.findAll('button').find((entry) => entry.text().includes('新建定时任务'))!.trigger('click');

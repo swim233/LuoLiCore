@@ -17,18 +17,18 @@ import {
 } from "./types";
 
 /**
- * 任务卡（`tasks` 表 —— `spawn_agent` 派发的子 agent 任务）。
+ * 任务卡（`tasks` 表，即 `spawn_agent` 派发的子 agent 任务）。
  *
- * **分页游标和 loader 待在一起。** 这一页三张卡的端点、游标、弹窗、busy 态零交集，把 `page`
- * 提到父层只会重新制造一个争用点（`ConsoleView` 里 `loadConversations` 同形）。父层只发
- * `tick` 这一个「该重拉了」的脉冲。
+ * 分页游标与 loader 放在一起。这一页三张卡的端点、游标、弹窗、busy 态没有交集，把 `page`
+ * 提升到父层只会重新制造一个争用点（`ConsoleView` 中 `loadConversations` 同形）。父层只发送
+ * `tick` 这一个重新拉取的脉冲。
  *
- * 普通 `<script setup>`，**不 `return` 任何东西**：上一次把控制台拆成子视图时，子 SFC 的
- * `setup` 返回了一个只有 `get` 陷阱的 Proxy，而 Vue 解析模板绑定走 `hasOwn(setupState, key)`
- * —— 14 个页面全渲染成空白而三条绿灯都亮着（docs/24 · R-UI-01）。
+ * 普通 `<script setup>`，不 `return` 任何东西：上一次把控制台拆成子视图时，子 SFC 的
+ * `setup` 返回了一个只有 `get` 陷阱的 Proxy，而 Vue 解析模板绑定走 `hasOwn(setupState, key)`，
+ * 导致 14 个页面全部渲染为空白而三条健康检查仍通过（docs/24 · R-UI-01）。
  */
 const props = defineProps<{ tick: number }>();
-/** 两个跳转的出口：父层已经接到 `ConsoleView` 的 `openDetail` / `openTrace` 上。 */
+/** 两个跳转出口：父层已接到 `ConsoleView` 的 `openDetail` / `openTrace` 上。 */
 const emit = defineEmits<{ "open-turn": [string]; "open-trace": [string] }>();
 
 const PAGE_SIZE = 20;
@@ -39,12 +39,12 @@ const loading = ref(false);
 const pages = computed(() => Math.max(1, Math.ceil(total.value / PAGE_SIZE)));
 
 /**
- * 归一化而不是直接塞：形状对不上的响应（老版本服务端、代理截断）不该让整页崩在 DataGrid 的
- * `rows` 上。渲染防线就是为这类事建的（docs/24 · R-UI-01）。
+ * 归一化而不是直接赋值：形状不匹配的响应（旧版服务端、代理截断）不应使整页在 DataGrid 的
+ * `rows` 上崩溃。渲染防线正是为此建立的（docs/24 · R-UI-01）。
  *
- * `reload()` **不把 `page` 复位成 1** —— SSE 事件会让列表在原地重拉，跟着复位等于运维翻到
- * 第 3 页就被弹回第 1 页。只有一种例外：删掉末页最后一行之后服务端会回一页空，停在那儿看起来
- * 像「任务全没了」，所以往回退一页。`page > last` 保证最多多拉一次就收敛。
+ * `reload()` 不把 `page` 复位为 1：SSE 事件会让列表原地重新拉取，一并复位意味着运维翻到
+ * 第 3 页就会被弹回第 1 页。唯一的例外是删除末页最后一行后服务端会返回空页，停留在该页看起来
+ * 像任务全部消失，因此回退一页。`page > last` 保证最多多拉取一次即收敛。
  */
 async function reload(target = page.value): Promise<void> {
   loading.value = true;
@@ -68,8 +68,8 @@ async function reload(target = page.value): Promise<void> {
 }
 
 const cancelling = ref("");
-/** 任务没有独立的取消句柄：`spawn_agent` 的子 agent 跑在父轮次的 abort 信号下，
- *  取消一条任务只能取消它所属的整轮 —— 说清楚再动手，别让人以为只停了这一个子 agent。 */
+/** 任务没有独立的取消句柄：`spawn_agent` 的子 agent 运行在父轮次的 abort 信号下，
+ *  取消一条任务只能取消其所属的整轮。需先说明清楚，避免误认为只停止了这一个子 agent。 */
 function cancelTaskTurn(task: TaskRow): void {
   const turnId = String(task.turn_id ?? "");
   if (!turnId) {
@@ -82,7 +82,7 @@ function cancelTaskTurn(task: TaskRow): void {
   }
   askConfirm(
     `取消任务「${String(task.title ?? turnId)}」？`,
-    `它没有独立的取消句柄，实际取消的是所属的整轮 ${turnId.slice(0, 12)} —— 同一轮里的其他子 agent 也会一起停。`,
+    `实际取消的是所属整轮 ${turnId.slice(0, 12)}；同一轮里的其他子 agent 也会一并终止。`,
     async () => {
       cancelling.value = turnId;
       try {
@@ -99,12 +99,12 @@ function cancelTaskTurn(task: TaskRow): void {
               }
             : {
                 severity: "warn",
-                summary: "这一轮已经结束了",
-                detail: "任务状态会在下次刷新时归位",
+                summary: "这一轮已结束",
+                detail: "任务状态将在下次刷新时同步",
               },
         );
         await reload();
-        // 弹窗开着时那份详情已经过期了：footer 上「取消整轮」该不该在，读的就是它的 `state`。
+        // 弹窗打开期间该份详情已过期：footer 上「取消整轮」是否显示，读取的正是它的 `state`。
         if (detail.value?.id === task.id) await loadDetail(task.id);
       } catch (error) {
         toastError("取消失败", error);
@@ -116,12 +116,12 @@ function cancelTaskTurn(task: TaskRow): void {
 }
 
 /**
- * 只读详情。`progress_json` 与 `result_summary` 两列运行时一直在写，界面上从来没出现过
- * （docs/21 §8）；列表不发它们（一帧进度可以有几 KB），所以单取一次。
+ * 只读详情。`progress_json` 与 `result_summary` 两列运行时持续写入，但界面上此前从未展示
+ * （docs/21 §8）；列表不发送它们（单帧进度可达数 KB），因此单独获取一次。
  */
 interface TaskDetail extends TaskRow {
   placeholder_tg_message_id: number | null;
-  /** 已经解析过的那一份 —— 服务端不再把原始 JSON 串一起发。解不出来时是 `null`。 */
+  /** 已解析的那一份，服务端不再一并发送原始 JSON 串。解析失败时为 `null`。 */
   progress: unknown;
   turn: {
     state: string;
@@ -160,7 +160,7 @@ async function openDetail(task: TaskRow): Promise<void> {
   await loadDetail(String(task.id));
 }
 
-/** 进度那一格既可能是一段字符串，也可能是 `AgentManager` 写下的一个对象。 */
+/** 进度字段既可能是一段字符串，也可能是 `AgentManager` 写入的一个对象。 */
 const progressText = computed(() => {
   const value = detail.value?.progress;
   if (value === null || value === undefined) return "";
@@ -170,13 +170,13 @@ const taskState = (state: string): { label: string; severity: TagSeverity } =>
   TASK_STATES[state] ?? { label: state, severity: "secondary" };
 
 /**
- * 删的是**记录**，不是取消通道：把行删掉不会让那个 agent 停下来，只会让它变成一条谁都看不见的
- * 在途任务 —— 所以服务端对 `running` 一律 409，界面这边也不给按。
+ * 删除的是记录而不是取消通道：删除行不会使该 agent 停止，只会让它变成一条不可见的
+ * 在途任务，因此服务端对 `running` 一律返回 409，界面上同样禁用该按钮。
  */
 function removeTask(task: TaskDetail): void {
   askConfirm(
     `永久删除任务「${task.title}」？`,
-    "只删这一条任务记录；这一轮、agent run、会话上下文、以及已经发出去的消息一概不动，也撤不回来。",
+    "只删除这一条任务记录；轮次、agent run、上下文与已发消息不受影响，无法撤销。",
     async () => {
       try {
         await api(`/api/tasks/${encodeURIComponent(task.id)}`, {
@@ -185,7 +185,7 @@ function removeTask(task: TaskDetail): void {
         pushToast({
           severity: "success",
           summary: `任务「${task.title}」已永久删除`,
-          detail: "只删掉了这一条记录",
+          detail: "仅删除了这一条记录",
         });
         detailDialog.value = false;
         await reload();
@@ -193,9 +193,8 @@ function removeTask(task: TaskDetail): void {
         if (error instanceof ApiError && error.code === "task_running") {
           pushToast({
             severity: "warn",
-            summary: "这条任务还在跑",
-            detail:
-              "删掉记录不会让它停下来 —— 先取消它所属的整轮，等状态归位再删。",
+            summary: "这条任务仍在运行",
+            detail: "删除记录不会终止运行，请先取消所属整轮。",
           });
           return;
         }
@@ -220,9 +219,10 @@ watch(
   <article class="surface">
     <h3>任务</h3>
     <p class="section-note">
-      任务由 <code>spawn_agent</code> 派发，跟着它所属的那一轮活着。子 agent
-      没有独立的取消句柄，<b>「取消」取消的是整轮</b> —— 同一轮里的其他子 agent
-      也会一起停。点任意一行看这条任务的进度与结果。
+      任务由
+      <code>spawn_agent</code>
+      派发，生命周期绑定所属轮次。<b>「取消」取消的是整轮</b>：同一轮的其他子
+      agent 一并终止。点击一行查看详情。
     </p>
     <DataGrid
       :rows="rows"
@@ -230,7 +230,7 @@ watch(
       data-key="id"
       clickable
       :loading="loading"
-      empty="没有在途或历史任务"
+      empty="暂无"
       @row-click="openDetail"
     >
       <template #state="{ data }"
@@ -289,7 +289,7 @@ watch(
       width="min(1120px, 96vw)"
     >
       <p v-if="detailLoading" class="empty">
-        <i class="pi pi-spin pi-spinner" aria-hidden="true" /> 读取这条任务…
+        <i class="pi pi-spin pi-spinner" aria-hidden="true" /> 正在读取任务详情…
       </p>
       <template v-else-if="detail">
         <div class="detail-summary">
@@ -337,7 +337,7 @@ watch(
                 ? durationText(
                     Number(detail.finished_at) - Number(detail.created_at),
                   )
-                : "还在跑"
+                : "未结束"
             }}</b></span
           >
           <span v-if="detail.turn"
@@ -382,22 +382,20 @@ watch(
                `process_restarted` 同理）。所以回退永远轮不到，加了只是暗示一种不存在的分岔。 -->
           <div class="detail-actions">
             <b>结果摘要</b
-            ><small class="alias-empty"
-              >子 agent 交回来的那一段，也是父 agent 读到的那一段。</small
-            >
+            ><small class="alias-empty">子 agent 的返回内容。</small>
           </div>
           <pre v-if="detail.result_summary" v-text="detail.result_summary" />
-          <p v-else class="empty">这条任务还没有写下结果摘要。</p>
+          <p v-else class="empty">暂无</p>
         </div>
         <div class="detail-payload">
           <div class="detail-actions">
             <b>最后一条进度</b
             ><small class="alias-empty"
-              >每报一次进度都覆盖同一格，所以这里只剩最后那一帧，看不到中间过程；任务跑完之后这一格不再更新。</small
+              >仅保留最后一帧，任务结束后不再更新。</small
             >
           </div>
           <pre v-if="progressText" v-text="progressText" />
-          <p v-else class="empty">这条任务没有留下进度。</p>
+          <p v-else class="empty">暂无</p>
         </div>
       </template>
       <template #footer>
@@ -420,7 +418,7 @@ watch(
           v-if="detail?.turn_id"
           variant="text"
           icon="pi pi-comments"
-          label="看这一轮详情"
+          label="查看该轮详情"
           @click="
             detailDialog = false;
             emit('open-turn', detail!.turn_id);
@@ -430,7 +428,7 @@ watch(
           v-if="detail?.turn_id"
           variant="outlined"
           icon="pi pi-sitemap"
-          label="在日志页看这条 trace"
+          label="在日志页查看该 trace"
           @click="
             detailDialog = false;
             emit('open-trace', detail!.turn_id);

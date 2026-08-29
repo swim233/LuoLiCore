@@ -14,15 +14,15 @@ import { collectProcess } from "./exec-stream.js";
 export interface PersistentSandboxConfig {
   enabled: boolean;
   idleTtlMs: number;
-  /** 0 = 不设绝对上限（docs/11：本仓库里 0 一律是「不清」）。 */
+  /** 0 表示不设绝对上限（docs/11：本仓库中 0 一律表示不清理）。 */
   maxLifetimeMs: number;
   maxContainers: number;
-  /** **与 `sandbox.network` 是两个键**：那个管一次性容器，这个管持久容器。 */
+  /** 与 `sandbox.network` 是两个独立键：前者管理一次性容器，本项管理持久容器。 */
   network: "none" | "bridge";
   reapCron: string;
 }
 
-/** `ContainerManager` 从 `SandboxConfig` 里真正用到的那部分，避免它反向依赖 `Sandbox`。 */
+/** `ContainerManager` 实际使用的 `SandboxConfig` 子集，避免它反向依赖 `Sandbox`。 */
 export interface ContainerRuntimeConfig {
   dockerBin: string;
   image: string;
@@ -45,7 +45,7 @@ export type ContainerReapReason =
   | "exited"
   | "gone";
 
-/** 一次回收 tick 的结果。注册点把它原样落进日志（照 `MaintenanceService.cleanup()` 的约定）。 */
+/** 一次回收 tick 的结果。注册点将其原样写入日志（沿用 `MaintenanceService.cleanup()` 的约定）。 */
 export interface ReapCounts {
   idle: number;
   hard: number;
@@ -54,30 +54,30 @@ export interface ReapCounts {
   gone: number;
   orphans: number;
   adopted: number;
-  /** 带 `luoli.instance` 且不是我的：另一个实例的容器，一个都不碰。多实例部署里这个数是正常的。 */
+  /** 带 `luoli.instance` 且非本实例：属于其它实例的容器，一律不处理。多实例部署中该数值正常。 */
   foreign: number;
-  /** 带 `luoli.managed=1` 但**没有** `luoli.instance`：加实例标签之前建的，认不出主人，同样不碰。
-   *  它要人处置，所以注册点见到非零会把这条对账日志抬成 warn。全部重建过一轮之后自然归零。 */
+  /** 带 `luoli.managed=1` 但没有 `luoli.instance`：在引入实例标签之前创建，无法识别归属，同样不处理。
+   *  需人工处置，因此注册点发现非零时会将该对账日志提升为 warn。全部重建一轮后自然归零。 */
   legacy: number;
 }
 
 /**
- * 这个实例的身份，进 `luoli.instance` 标签。
+ * 本实例的身份标识，写入 `luoli.instance` 标签。
  *
- * 取**库文件绝对路径**的指纹：「哪些容器是我的」正是由「哪个库存着它们的行」定义的，
- * 而同一个库上只可能有一个进程（`acquireInstanceLock`）—— 这两句合起来才让「只扫自己那一份」
- * 成为一个真判据，而不是一个约定。
+ * 取库文件绝对路径的指纹：哪些容器属于本实例，正是由哪个库存储它们的行来定义的，
+ * 而同一个库上只可能存在一个进程（`acquireInstanceLock`）—— 两者结合才使只扫描自身那一份
+ * 成为真实判据，而不仅是一项约定。
  *
- * 发指纹而不是路径本身：标签任何人 `docker inspect` 都读得到，白送一份部署布局没必要
- * （同 `GET /api/messages` 不回 `local_path` 的理由）。
+ * 发布指纹而非路径本身：标签任何人执行 `docker inspect` 都可读取，无需额外泄露部署布局
+ * （理由同 `GET /api/messages` 不返回 `local_path`）。
  */
 export const instanceLabelOf = (databasePath: string): string =>
   createHash("sha1").update(databasePath).digest("hex").slice(0, 12);
 
 export interface ContainerEvent {
-  /** 字段名是 `type` 而不是 `kind`：`tests/docs.test.ts` 把源码里的 `kind:` 字面量与
-   *  `docs/10 §2` 那张表**双向**焊死，而这几个值不是日志 kind（日志 kind 由装配方拼成
-   *  `sandbox.container.*` 的字面量再发）。占用 `kind` 只会让那道断言多一条永远解释不清的豁免。 */
+  /** 字段名取 `type` 而非 `kind`：`tests/docs.test.ts` 将源码中的 `kind:` 字面量与
+   *  `docs/10 §2` 的表双向绑定，而这几个值不是日志 kind（日志 kind 由装配方拼接为
+   *  `sandbox.container.*` 的字面量后再发出）。占用 `kind` 只会给该断言增加一条难以解释的豁免。 */
   type: "created" | "reaped" | "limit" | "exec";
   chatId?: string;
   name?: string;
@@ -86,13 +86,13 @@ export interface ContainerEvent {
   durationMs?: number;
 }
 
-/** 容器里放后台进程日志的目录，相对 `/workspace`。`container_logs` 与 `background` 共用这一个约定。 */
+/** 容器内存放后台进程日志的目录，相对 `/workspace`。`container_logs` 与 `background` 共用该约定。 */
 export const BACKGROUND_LOG_DIR = ".luoli-logs";
 
 /**
- * 后台日志名。**这是拼进 shell 的路径片段**，所以字符集在这里就焊死：`..` 或 `/` 溜进去
- * 等于让模型往工作区之外写文件。工具层的 zod 也会挡一道，这里是第二道（同 §3.11 的
- * 「目录过滤不是边界」）。
+ * 后台日志名。该值会被拼接进 shell 路径，因此字符集在此处即固定：`..` 或 `/` 进入
+ * 等于允许模型向工作区之外写文件。工具层的 zod 也会拦截一次，此处是第二道
+ * （同 §3.11 所述目录过滤不构成边界）。
  */
 export function sanitizeLogName(raw: string): string {
   const cleaned = raw
@@ -101,17 +101,17 @@ export function sanitizeLogName(raw: string): string {
     .replace(/^[.-]+/, "");
   return cleaned.slice(0, 64) || "task";
 }
-/** 容器里放 exec 进程组 pid 的目录。在 tmpfs 上，不落进用户的工作区。 */
+/** 容器内存放 exec 进程组 pid 的目录。位于 tmpfs 上，不写入用户的工作区。 */
 const EXEC_PID_DIR = "/tmp/.luoli-exec";
 const DOCKER_CALL_TIMEOUT_MS = 20_000;
-/** 建容器要拉起一个进程，比一次 `docker inspect` 慢得多，但也不能没有上界（croner 的 `protect:true`
- *  会让一次不返回的回收把整条 cron 永久打死）。 */
+/** 创建容器需启动一个进程，远慢于一次 `docker inspect`，但同样必须设上界（croner 的 `protect:true`
+ *  会使一次不返回的回收永久阻塞整条 cron）。 */
 const DOCKER_CREATE_TIMEOUT_MS = 60_000;
 
 /**
- * docker 容器名的合法字符集是 `[a-zA-Z0-9][a-zA-Z0-9_.-]*`。chatId 常为负数（`-100123`），
- * 而 WebUI 试跑的 turnId 里还有冒号（`dryrun:<ulid>`）—— 后者是一个**既有 bug**：docker 模式下
- * 那条路的 `bash` 一直以 `invalid name` 收场，而不是一个沙箱层的错误。两处共用这一道。
+ * docker 容器名的合法字符集为 `[a-zA-Z0-9][a-zA-Z0-9_.-]*`。chatId 常为负数（`-100123`），
+ * 而 WebUI 试跑的 turnId 中还含冒号（`dryrun:<ulid>`）—— 后者属既有缺陷：docker 模式下
+ * 该路径的 `bash` 一直以 `invalid name` 结束，而不是给出沙箱层的错误。两处共用这一处理。
  */
 export function sanitizeDockerToken(raw: string): string {
   const replaced = raw.replace(/^-/, "n").replace(/[^a-zA-Z0-9_.-]/g, "-");
@@ -123,9 +123,9 @@ export function containerNameFor(chatId: string): string {
 }
 
 /**
- * 容器一旦跑起来，`--memory` / `--network` / image 都改不动了。把它们的指纹写进 label，
- * 与当前配置不符的容器由回收销毁、下次用时懒加载 —— 没有这一条，运维在 WebUI 换了镜像之后
- * 所有已存在的容器会一直用旧的，而界面上显示的是新的。
+ * 容器一旦运行，`--memory` / `--network` / image 均无法修改。将它们的指纹写入 label，
+ * 与当前配置不符的容器由回收流程销毁、下次使用时惰性重建 —— 缺少这一条时，运维在 WebUI 更换
+ * 镜像后，所有已存在的容器会继续使用旧镜像，而界面显示的是新镜像。
  */
 export function specHashOf(config: ContainerRuntimeConfig): string {
   const spec = [
@@ -141,8 +141,8 @@ export function specHashOf(config: ContainerRuntimeConfig): string {
 }
 
 /**
- * 到期判定。**钉住只豁免滑动那一档** —— 豁免了绝对上限它就不是上限了（docs/05 §5.5）。
- * 纯函数，`tests/sandbox.persistent.test.ts` 直接打它。
+ * 到期判定。钉住只豁免滑动 TTL 这一档 —— 若同时豁免绝对上限，该上限即不再成立（docs/05 §5.5）。
+ * 纯函数，`tests/sandbox.persistent.test.ts` 直接测试它。
  */
 export function reapReasonFor(
   row: Pick<SandboxContainer, "expiresAt" | "hardExpiresAt" | "pinned">,
@@ -153,7 +153,7 @@ export function reapReasonFor(
   return row.expiresAt <= now ? "idle" : null;
 }
 
-/** `maxLifetimeMs: 0` = 不设上限 → `hard_expires_at` 存 NULL，而不是 `createdAt + 0`。 */
+/** `maxLifetimeMs: 0` 表示不设上限 → `hard_expires_at` 写入 NULL，而不是 `createdAt + 0`。 */
 export function hardExpiryFor(
   createdAt: number,
   maxLifetimeMs: number,
@@ -162,10 +162,10 @@ export function hardExpiryFor(
 }
 
 /**
- * RUNTIME 块里「工作目录」那一行括号内的措辞（docs/06 §1）。
+ * RUNTIME 块中工作目录一行括号内的表述（docs/06 §1）。
  *
- * **剩余时间是近似值**：滑动 TTL 每次执行都会重置，写一个精确到分钟的值只会让模型据此
- * 做时间规划，然后发现自己算错了。持久化没开时原样交回 mode —— 那一档措辞不变。
+ * 剩余时间是近似值：滑动 TTL 每次执行都会重置，给出精确到分钟的值只会使模型据此
+ * 制定时间计划，随后发现计算不准。未启用持久化时原样返回 mode —— 该档位表述不变。
  */
 export function sandboxLabel(
   mode: string,
@@ -179,10 +179,10 @@ export function sandboxLabel(
       : expiry.state === "none"
         ? `闲置约 ${Math.round(persistent.idleTtlMs / 3_600_000)} 小时后回收`
         : `约 ${Math.max(1, Math.round(expiry.remainingMs / 3_600_000))} 小时后回收，每次执行重新计时`;
-  return `${mode} · 常驻容器（${life}；装的包和跑着的进程都留到下一轮，后台任务记得把输出重定向到文件）· ${persistent.network === "bridge" ? "可出网" : "无网络"}`;
+  return `${mode} · 常驻容器（${life}；已安装的包与运行中的进程保留至下一轮，后台任务需将输出重定向到文件）· ${persistent.network === "bridge" ? "可出网" : "无网络"}`;
 }
 
-/** 没有容器 / 钉住不回收 / 还剩这么久。三种状态在措辞上完全不同，压成一个数字就得靠猜。 */
+/** 无容器 / 已钉住不回收 / 剩余时长。三种状态的表述完全不同，压缩为一个数字只能靠推测。 */
 export type ContainerExpiryHint =
   | { state: "none" }
   | { state: "pinned" }
@@ -194,18 +194,18 @@ const REAP_NOTE: Record<ContainerReapReason, string> = {
   hard: "达到容器最长存活时间被回收",
   respec: "沙箱配置已修改，旧容器已按新配置重建",
   reset: "被 owner 重置",
-  disabled: "持久容器功能被关掉了",
-  orphan: "与记录对不上，已清理",
-  exited: "自己退出了",
+  disabled: "因持久容器功能停用而被销毁",
+  orphan: "与记录不一致，已清理",
+  exited: "已自行退出",
   gone: "已丢失",
 };
 
 export interface PreparedExec {
   ok: true;
   argv: string[];
-  /** 取消 / 超时 / 输出超限时调它：打容器里那个进程组，**不打容器**。 */
+  /** 取消、超时或输出超限时调用：终止容器内的进程组，而不是容器本身。 */
   cancel: () => void;
-  /** 执行结束后推进滑动到期。失败也要调（用过就是用过）。 */
+  /** 执行结束后推进滑动到期时间。失败时同样要调用（使用过即计入）。 */
   settle: () => void;
   note?: string;
 }
@@ -215,13 +215,13 @@ export type PrepareFailure = { ok: false; error: string; hint?: string };
 /**
  * 会话级持久容器的生命周期（docs/05 §5.5）。
  *
- * **真相在 DB 与 docker 两边，互为校验**：DB 存 docker 存不下的东西（滑动到期、钉住、spec 指纹
- * —— label 建完就改不了），docker 存「它到底还在不在」。进程内不留任何一份权威副本
- * （`docs/01 §3.1`），所以重启之后先对账而不是全杀，24h 的 TTL 才扛得住一次重启。
+ * 状态由 DB 与 docker 两侧共同持有并互相校验：DB 存储 docker 无法存储的信息（滑动到期、钉住、
+ * spec 指纹 —— label 创建后不可修改），docker 存储容器当前是否存在。进程内不保留任何权威副本
+ * （`docs/01 §3.1`），因此重启后先执行对账而非全部销毁，24h 的 TTL 才能跨越一次重启。
  */
 export class ContainerManager {
   readonly #mutex = new KeyedMutex();
-  /** 见 `instanceLabelOf`。构造时算一次 —— 库路径在进程生命周期内不变。 */
+  /** 见 `instanceLabelOf`。构造时计算一次 —— 库路径在进程生命周期内不变。 */
   readonly #instance: string;
 
   constructor(
@@ -233,7 +233,7 @@ export class ContainerManager {
     this.#instance = instanceLabelOf(db.name);
   }
 
-  /** 这个实例给自己容器打的 `luoli.instance` 标签值。 */
+  /** 本实例为自身容器设置的 `luoli.instance` 标签值。 */
   get instanceLabel(): string {
     return this.#instance;
   }
@@ -253,11 +253,11 @@ export class ContainerManager {
     };
   }
 
-  /** RUNTIME 块那一行要区分的三种状态（见 `sandboxLabel`）。 */
+  /** RUNTIME 块该行需要区分的三种状态（见 `sandboxLabel`）。 */
   expiryHintFor(chatId: string, now = Date.now()): ContainerExpiryHint {
     const row = this.repo.byChat(chatId);
     if (!row) return { state: "none" };
-    // 钉住豁免滑动那一档，但豁免不了绝对上限 —— 两者都没有才是真的「不回收」。
+    // 钉住豁免滑动 TTL，但无法豁免绝对上限 —— 两者都不存在时才是真正的不回收。
     if (row.pinned && row.hardExpiresAt === null) return { state: "pinned" };
     const deadline = row.pinned
       ? row.hardExpiresAt!
@@ -265,12 +265,12 @@ export class ContainerManager {
     return { state: "ttl", remainingMs: Math.max(0, deadline - now) };
   }
 
-  /** 发事件不许打断执行：这一层的调用点在返回结果的正路上。 */
+  /** 事件发送不得中断执行：本层的调用点位于返回结果的主路径上。 */
   #emit(event: ContainerEvent): void {
     try {
       this.onEvent?.(event);
     } catch {
-      /* 观测不该把一次成功的执行变成失败 */
+      /* 观测行为不应使一次成功的执行变为失败 */
     }
   }
 
@@ -322,9 +322,9 @@ export class ContainerManager {
   }
 
   /**
-   * 容器现在到底在不在、spec 对不对。**每次执行前都问一次** —— 一次 `docker inspect` 约几十毫秒，
-   * 而 `docker run` 是几百毫秒，省掉它的代价是「容器被 OOM 杀了而我们还在往里 exec」。
-   * 顺带在这里就发现 spec 漂移，不用等下一次 `reapCron`。
+   * 检查容器当前是否存在、spec 是否匹配。每次执行前都检查一次 —— 一次 `docker inspect` 约几十
+   * 毫秒，而 `docker run` 需数百毫秒，省略它的代价是容器已被 OOM 终止而仍在向其 exec。
+   * 同时可在此发现 spec 漂移，无需等待下一次 `reapCron`。
    */
   async #probe(
     name: string,
@@ -351,12 +351,12 @@ export class ContainerManager {
       return {
         ok: false,
         error: "sandbox_container_limit",
-        hint: `持久容器已达上限（${used}/${max}）。这个会话没有容器，也不会退回一次性容器 —— 用 container_list 看哪些可以回收，或调高 sandbox.persistent.maxContainers。`,
+        hint: `持久容器已达上限（${used}/${max}）。当前会话无容器，且不会退回一次性容器。使用 container_list 查看可回收的容器，或调高 sandbox.persistent.maxContainers。`,
       };
     }
     const name = containerNameFor(chatId);
     const specHash = specHashOf(config);
-    // 同名残留（上一次进程崩在建了容器还没落库那一刻）先清掉，否则 --name 冲突让这里永远失败。
+    // 先清理同名残留（上一次进程在创建容器后、写库前崩溃所致），否则 --name 冲突会使此处始终失败。
     await this.#docker(["rm", "-f", name]);
     const started = performance.now();
     const args = [
@@ -403,8 +403,8 @@ export class ContainerManager {
           `docker run 以 ${created.code} 退出`,
       };
     }
-    // 取消要杀整个进程组，而那依赖 setsid。自带镜像有（python:3.12-slim 的 util-linux），
-    // 自定义镜像未必 —— 探一次并记下来，没有它时取消只能杀一个 pid，那件事必须说出口。
+    // 取消需终止整个进程组，而这依赖 setsid。自带镜像具备（python:3.12-slim 的 util-linux），
+    // 自定义镜像未必具备 —— 探测一次并记录，缺少它时取消只能终止单个 pid，该限制必须明确告知。
     const probe = await this.#docker([
       "exec",
       name,
@@ -448,8 +448,8 @@ export class ContainerManager {
   }
 
   /**
-   * 拿到这个会话可用的容器；没有 / 死了 / spec 漂了就重建。**按 chatId 串行** ——
-   * 同一会话并发两轮否则会 `--name` 撞车，第二个直接失败。
+   * 获取该会话可用的容器；不存在、已终止或 spec 漂移时重建。按 chatId 串行执行 ——
+   * 否则同一会话并发两轮会导致 `--name` 冲突，第二个直接失败。
    */
   async ensure(
     chatId: string,
@@ -481,16 +481,16 @@ export class ContainerManager {
       return {
         ok: true,
         row: created.row,
-        note: `这个会话的容器是刚新建的：上一个${REAP_NOTE[marker.reason]}。容器里之前装的东西、跑着的后台进程都不在了（/workspace 里的文件不受影响）。`,
+        note: `当前会话的容器为新建：上一个${REAP_NOTE[marker.reason]}。此前安装的软件与运行中的后台进程均已丢失（/workspace 中的文件不受影响）。`,
       };
     });
   }
 
   /**
-   * 把一次执行翻译成 `docker exec` 的 argv + 一个「只杀进程不杀容器」的取消钩子。
+   * 将一次执行转换为 `docker exec` 的 argv，并附带一个只终止进程而不终止容器的取消钩子。
    *
-   * **`docker kill <容器名>` 在这一档是错的**：一次性容器里它等于「取消这条命令」，持久容器里
-   * 它等于「销毁这个群的整个环境」，而 `/cancel` 与超时走的是同一个 `kill()`（docs/05 §5.5）。
+   * 在该档位下 `docker kill <容器名>` 是错误的：在一次性容器中它等同于取消该命令，在持久容器中
+   * 它等同于销毁该会话的整个环境，而 `/cancel` 与超时走的是同一个 `kill()`（docs/05 §5.5）。
    */
   async prepareExec(input: {
     chatId: string;
@@ -530,12 +530,12 @@ export class ContainerManager {
       ok: true,
       argv,
       cancel: () => {
-        // 打进程组。杀不干净也不去动容器 —— 宁可留一个跑飞的进程，也不能因为一次取消
-        // 就把别人的后台服务连根拔掉。
+        // 终止进程组。即使未完全终止也不处理容器 —— 宁可残留一个失控进程，也不能因一次取消
+        // 而销毁他人的后台服务。
         //
-        // **`kill` 后面不能写 `--`。** dash 的内建 kill 不认这个分隔符，`kill -KILL -- -123`
-        // 直接 `Illegal number: -` 退 2，于是取消整条静静失效 —— 表现是 `/cancel` 之后那条
-        // 命令一直跑到自己的 timeout 才结束（实测于 `sandbox.containers.docker.test.ts`）。
+        // `kill` 之后不能写 `--`。dash 的内建 kill 不识别该分隔符，`kill -KILL -- -123`
+        // 会直接以 `Illegal number: -` 退出码 2 结束，导致整条取消静默失效 —— 表现为 `/cancel`
+        // 之后该命令一直运行到自身 timeout 才结束（实测于 `sandbox.containers.docker.test.ts`）。
         const target = `$(cat ${EXEC_PID_DIR}/${execId} 2>/dev/null || echo 0)`;
         const signal = row.hasSetsid
           ? `kill -KILL -${target} 2>/dev/null`
@@ -559,11 +559,11 @@ export class ContainerManager {
   }
 
   /**
-   * 容器里那一层包装。三件事：把进程组 id 落进 pidfile（取消要用）、套上硬期限、
-   * 后台任务重定向到文件。
+   * 容器内的包装层，负责三件事：将进程组 id 写入 pidfile（取消时使用）、施加硬期限、
+   * 将后台任务重定向到文件。
    *
-   * **后台任务的重定向不是方便而是必需**：exec 一结束管道就关，后台进程下一次写 stdout
-   * 吃 SIGPIPE 就死了 —— 「起了个 server，下一轮发现它不在」正是这么来的。
+   * 后台任务的重定向是必需项而非便利功能：exec 结束后管道即关闭，后台进程下一次写入 stdout
+   * 会收到 SIGPIPE 而终止 —— 启动一个 server 后下一轮发现它已消失正是由此产生。
    */
   #wrap(
     row: SandboxContainer,
@@ -576,18 +576,18 @@ export class ContainerManager {
     const record = `mkdir -p ${EXEC_PID_DIR}; echo $$ > ${pidFile}`;
     if (background) {
       const log = `${BACKGROUND_LOG_DIR}/${sanitizeLogName(background.name)}.log`;
-      // 后台那一档不套 `timeout`：它的期限是容器的 TTL，不是这一次调用的。
+      // 后台档位不施加 `timeout`：它的期限是容器的 TTL，而非本次调用的期限。
       const script = `mkdir -p ${BACKGROUND_LOG_DIR}; ${record}; ${row.hasSetsid ? "setsid " : ""}sh -c ${shellQuote(command)} >> ${log} 2>&1 & echo "$!"`;
       return ["sh", "-c", script];
     }
     const inner = `${record}; exec timeout -s KILL ${Math.ceil(timeoutMs / 1000)} sh -c ${shellQuote(command)}`;
-    // `setsid -w` 让被执行的命令成为会话首进程（`$$` 即 pgid），`-w` 保证退出码原样透传。
+    // `setsid -w` 使被执行的命令成为会话首进程（`$$` 即 pgid），`-w` 保证退出码原样透传。
     return row.hasSetsid
       ? ["setsid", "-w", "sh", "-c", inner]
       : ["sh", "-c", inner];
   }
 
-  /** 一次不经 `Sandbox.run` 的直接执行（`container_*` 工具走这条：它要指定会话，而不是当前轮次的）。 */
+  /** 不经 `Sandbox.run` 的直接执行（`container_*` 工具走此路径：它需指定会话，而非当前轮次）。 */
   async exec(input: {
     chatId: string;
     mountedWorkspace: string;
@@ -625,7 +625,7 @@ export class ContainerManager {
     return prepared.note ? { ...result, note: prepared.note } : result;
   }
 
-  /** 容器里在跑什么 + 吃多少 + 后台日志有哪些。三条 docker 调用，任一失败都只让那一段缺席。 */
+  /** 容器内运行的进程、资源占用与后台日志列表。三次 docker 调用，任一失败只导致对应段缺失。 */
   async inspect(chatId: string): Promise<
     | {
         ok: true;
@@ -641,7 +641,7 @@ export class ContainerManager {
       return {
         ok: false,
         error: "container_not_found",
-        hint: "这个会话现在没有容器。用 container_list 看有哪些容器，或者执行命令以新建容器。",
+        hint: "当前会话无容器。使用 container_list 查看已有容器，或执行命令以新建容器。",
       };
     const [processes, stats, logs] = await Promise.all([
       this.#docker(["top", row.name, "-eo", "pid,ppid,etime,pcpu,pmem,args"]),
@@ -665,15 +665,15 @@ export class ContainerManager {
       row,
       processes: (processes.code === 0
         ? processes.stdout
-        : `读不到进程表：${processes.stderr.trim()}`
+        : `进程表读取失败：${processes.stderr.trim()}`
       ).slice(0, 8000),
       stats: (stats.code === 0
         ? stats.stdout
-        : `读不到资源用量：${stats.stderr.trim()}`
+        : `资源用量读取失败：${stats.stderr.trim()}`
       ).trim(),
       logs: (logs.code === 0
         ? logs.stdout
-        : `读不到日志目录：${logs.stderr.trim()}`
+        : `日志目录读取失败：${logs.stderr.trim()}`
       ).slice(0, 4000),
     };
   }
@@ -682,8 +682,8 @@ export class ContainerManager {
     row: SandboxContainer,
     reason: ContainerReapReason,
   ): Promise<number> {
-    // 销毁前数一下还剩几个非 PID1 进程：容器一没，那个会话里跑着的 server 就没了，
-    // 而用户看到的只是「它突然不工作了」。
+    // 销毁前统计剩余的非 PID1 进程数：容器一旦销毁，该会话中运行的 server 即消失，
+    // 而用户看到的只是它突然停止工作。
     let aliveProcs = 0;
     if (reason !== "gone") {
       const top = await this.#docker(["top", row.name, "-eo", "pid"], 5000);
@@ -692,8 +692,8 @@ export class ContainerManager {
     }
     await this.#docker(["rm", "-f", row.name]);
     this.repo.remove(row.chatId);
-    // 下一次为这个会话建容器时把这句话交给模型（docs/06 §1）—— 它没有别的途径知道
-    // 自己起的后台进程为什么不见了。
+    // 下一次为该会话创建容器时将该说明传给模型（docs/06 §1）—— 它没有其它途径得知
+    // 自己启动的后台进程为何消失。
     writeAppKv(
       this.db,
       reapMarkerKey(row.chatId),
@@ -714,7 +714,7 @@ export class ContainerManager {
     return aliveProcs;
   }
 
-  /** `container_reset` / WebUI 的「重置」：销毁并立刻重建。**不动 `/workspace` 的文件**。 */
+  /** `container_reset` 与 WebUI 的重置操作：销毁并立即重建。不修改 `/workspace` 中的文件。 */
   async reset(
     chatId: string,
     mountedWorkspace: string,
@@ -723,7 +723,7 @@ export class ContainerManager {
       const existing = this.repo.byChat(chatId);
       if (existing) await this.#destroy(existing, "reset");
       else await this.#docker(["rm", "-f", containerNameFor(chatId)]);
-      // 刚销毁的那条标记不该变成「上一个被回收了」的旁白 —— 重置是 owner 自己按的。
+      // 刚销毁的标记不应转为上一个容器被回收的提示 —— 重置是 owner 主动执行的操作。
       deleteAppKv(this.db, reapMarkerKey(chatId));
       return this.#create(chatId, mountedWorkspace);
     });
@@ -748,9 +748,9 @@ export class ContainerManager {
       return {
         ok: false,
         error: "container_not_found",
-        hint: "这个会话现在没有容器。",
+        hint: "当前会话无容器。",
       };
-    // 续期钳在绝对上限内：钉住与续期都豁免不了 hard_expires_at（docs/05 §5.5）。
+    // 续期被限制在绝对上限内：钉住与续期都无法豁免 hard_expires_at（docs/05 §5.5）。
     const requested =
       patch.hours === undefined
         ? undefined
@@ -769,9 +769,9 @@ export class ContainerManager {
   }
 
   /**
-   * 回收 + 对账。每个 tick 三件事，返回各自的条数交给注册点原样落日志。
+   * 回收与对账。每个 tick 执行三项工作，返回各自的条数由注册点原样写入日志。
    *
-   * **启动时也跑这个，而不是全杀** —— 24h 的 TTL 要扛得住一次进程重启。
+   * 启动时同样执行本流程而非全部销毁 —— 24h 的 TTL 需能跨越一次进程重启。
    */
   async reap(now = Date.now()): Promise<ReapCounts> {
     const config = this.config();
@@ -787,8 +787,8 @@ export class ContainerManager {
       legacy: 0,
     };
     if (!config.persistent.enabled) {
-      // 关掉开关不该让已有容器无人认领地留在宿主上 —— 但也不能只删容器留下库里的行。
-      // 走正常的销毁路径，然后再扫一遍标签兜住那些库里本来就没有的。
+      // 关闭开关不应使已有容器无人管理地留在宿主上 —— 但也不能只删除容器而保留库中的行。
+      // 走正常的销毁路径，随后再扫描一遍标签，覆盖库中原本就不存在的那些。
       for (const row of this.repo.list()) {
         await this.#destroy(row, "disabled");
         counts.gone += 1;
@@ -829,15 +829,15 @@ export class ContainerManager {
   }
 
   /**
-   * 我自己的、却不在库里的容器：上一次进程崩在建容器与落库之间留下的。
+   * 属于本实例但不在库中的容器：上一次进程在创建容器与写库之间崩溃所遗留的。
    *
-   * **判据里那个 `luoli.instance` 不是装饰。** 此前这里只问「带 `luoli.managed=1` 且不在我库里」，
-   * 而那个标签**不带实例身份** —— 于是在同一台宿主上起第二个实例（哪怕它 `persistent.enabled`
-   * 是关的，见 `reap()` 开头那一支：known 集直接是空的）就等于 `docker rm -f` 掉在位实例
-   * **正在用**的全部持久容器，连带里面跑着的后台进程。实测撞上过。
+   * 判据中的 `luoli.instance` 不是可选项。此前此处只判定带 `luoli.managed=1` 且不在本库中，
+   * 而该标签不含实例身份 —— 于是在同一宿主上启动第二个实例（即使其 `persistent.enabled`
+   * 为关闭，见 `reap()` 开头的分支：known 集为空）即等同于 `docker rm -f` 删除在位实例
+   * 正在使用的全部持久容器，连同其中运行的后台进程。实际已发生过。
    *
-   * 认不出主人的一律**不碰**：删掉别人正在用的容器是不可逆的，而漏掉一个停着的孤儿只是占点盘。
-   * 一次性容器（`docker run --rm`）不打这个标签，本来就不在这条路上。
+   * 无法识别归属的一律不处理：删除他人正在使用的容器不可逆，而遗漏一个已停止的孤儿只占用磁盘。
+   * 一次性容器（`docker run --rm`）不设置该标签，本就不在此路径上。
    */
   async #sweepOrphans(
     counts: ReapCounts,
@@ -869,12 +869,12 @@ export class ContainerManager {
       await this.#docker(["rm", "-f", name]);
       counts.orphans += 1;
     }
-    // 对账那一行由调用方（`sandbox-reap` 那条 cron）落 —— 这里再发一次就是同一件事记两遍。
+    // 对账日志由调用方（`sandbox-reap` 那条 cron）记录 —— 此处再发一次即同一事件重复记录两遍。
     return counts;
   }
 }
 
-/** 单引号包裹 + 内部单引号转义。命令串只经过这一层进 `sh -c`，不做别的拼接。 */
+/** 单引号包裹并转义内部单引号。命令串只经该层进入 `sh -c`，不做其它拼接。 */
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }

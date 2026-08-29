@@ -6,7 +6,7 @@ import { FileTools, PathJail, TOOL_POLICY, ToolRegistry, configSchema, registerB
 import { TelegramTools, type ParseMode } from '@luoli/telegram';
 import type { Bot } from 'grammy';
 
-/** 投递侧的 `tg.send` 要真的落下来（docs/28 · L-LOG-02），所以这里收事件而不是丢掉。 */
+/** 投递侧的 `tg.send` 要确实落库（docs/28 · L-LOG-02），因此这里收集事件而不是丢弃。 */
 const logged: Array<{ kind: string; level?: string; traceId?: string; parentSpanId?: string; data?: unknown }> = [];
 const log = { event: (event: { kind: string; level?: string; traceId?: string; parentSpanId?: string; data?: unknown }) => { logged.push(event); return 1; },
   publish: () => undefined, span: () => ({ id: 's', end: () => undefined }) } as unknown as LogSink;
@@ -41,7 +41,7 @@ function harness(name: string, options: { wired?: boolean; fail?: string; config
   const telegram = new TelegramTools({ bot: () => bot, archive, maxMessageChars: () => 3900, maxMentions: () => 5,
     parseMode: () => options.parseMode ?? 'MarkdownV2', log });
   const registry = new ToolRegistry(log, { request: async () => true }, { maxRegistered: 200, maxCallsPerTurn: 50, maxConsecutiveErrors: 10 });
-  // 定时任务的投递也靠 Telegram，所以它跟 telegram 一族同生共死：`deliverable` 跟着 `wired` 走。
+  // 定时任务的投递同样依赖 Telegram，因此它与 telegram 一族共存亡：`deliverable` 跟随 `wired`。
   const schedule = { jobs: new ScheduleRepository(db), deliverable: () => options.wired !== false,
     runner: { register: () => true, unregister: () => true, nextRun: () => null } };
   registerBuiltins(registry, { archive, sandbox: { plan: () => ({ allowed: true }) },
@@ -57,9 +57,9 @@ function harness(name: string, options: { wired?: boolean; fail?: string; config
 
 describe('telegram side tools', () => {
   /**
-   * 这条是本轮真正的回归：五个工具一直好好地注册着，`TOOL_POLICY ↔ 注册表` 的启动断言也一直过，
-   * 但 `main.ts` 从来没传过 `telegram` 依赖，于是它们永远进不了模型的工具目录 —— 模型说
-   * 「我没有这个功能」是对的。注册 ≠ 模型看得见，断言必须落在 `activeNames` 上。
+   * 这条是本轮真正的回归：五个工具一直正常注册，`TOOL_POLICY ↔ 注册表` 的启动断言也一直通过，
+   * 但 `main.ts` 从未传过 `telegram` 依赖，于是它们永远进不了模型的工具目录，模型回复不具备该
+   * 功能是准确的。已注册不等于模型可见，断言必须落在 `activeNames` 上。
    */
   it('keeps the whole telegram family out of the catalog until the bridge is wired', () => {
     const family = ['send_message', 'send_photo', 'send_file', 'react', 'pin_message'];
@@ -71,26 +71,26 @@ describe('telegram side tools', () => {
     const wired = harness('tg-tools-wired');
     const active = new Set(wired.registry.activeNames('owner', wired.context));
     expect(family.filter((name) => !active.has(name))).toEqual([]);
-    // 依赖齐全时，主 agent 能看到的应当就是策略表的全集减去：子 agent 专用的那两个，
-    // `spawn_harness` —— 这个 harness 是**默认关闭**的（`agent.harness.allowedDirs` 为空），
-    // 而且这条 turn 是群聊（`isPrivate: false`）。两个条件各自都足以把它挡在目录之外，
-    // 这正是 docs/14 §2 Q8-a/b 要的：不进目录，而不是进了目录再报错。
+    // 依赖齐全时，主 agent 可见的集合应当是策略表全集减去以下几族：子 agent 专用的那两个；
+    // `spawn_harness` —— 这个 harness 默认关闭（`agent.harness.allowedDirs` 为空），
+    // 且这条 turn 是群聊（`isPrivate: false`），两个条件各自都足以把它挡在目录之外，
+    // 这正是 docs/14 §2 Q8-a/b 的要求：不进目录，而不是进了目录再报错。
     // 接着八个是自我扩展那一族：它们由 `registerAuthoringTools` 注册（这个 harness 只装了
-    // builtins），而且 `tools.selfExtend.enabled` 出厂就是关的 —— 两条各自都足以让它们缺席。
-    // 最后六个是容器管理（docs/05 §3.11）：由 `registerContainerTools` 注册，而且
-    // `sandbox.persistent.enabled` 出厂也是关的 —— 同样两条各自都够。
-    // 夹在中间的 `stay_silent` 缺席的理由与上面几族都不同：它注册着、角色也够（owner ≥ trusted），
+    // builtins），且 `tools.selfExtend.enabled` 出厂关闭，两条各自都足以让它们缺席。
+    // 最后六个是容器管理（docs/05 §3.11）：由 `registerContainerTools` 注册，且
+    // `sandbox.persistent.enabled` 出厂同样关闭，两条各自都足够。
+    // 夹在中间的 `stay_silent` 缺席理由与上述几族都不同：它已注册、角色也满足（owner ≥ trusted），
     // 挡住它的是 `available()` 里那两道轮次形态闸 —— 这条 turn 没有 `silenceable`，而它的唯一
-    // 置位方是 `ScheduledJobRunner`（docs/02 §10.5 ②）。**一条普通轮次看得见它就是这次改动最坏
-    // 的失败形态**：模型可以对着正在等回话的人宣布不汇报。四个 `schedule_*` 则都在目录里
+    // 置位方是 `ScheduledJobRunner`（docs/02 §10.5 ②）。普通轮次看得见它就是这次改动最坏的
+    // 失败形态：模型可以对正在等待回复的人宣布不汇报。四个 `schedule_*` 则都在目录里
     // （`deliverable()` 为真），`schedule_update` 因此不出现在这张缺席表上。
-    // `search_tools` 缺席的理由又是一档新的：它注册着（这个 harness 只装 builtins，连注册都没有），
-    // 而**就算注册了它也不该在**——这条 turn 的折叠集是空的（没有 MCP / plugin / custom 工具），
-    // `hasDeferrable()` 为假于是整个元工具不进目录。这正是 docs/07 §5 承诺的「纯内建部署的提示词
-    // 逐字节不变」：折叠机制在没有东西可折叠时必须完全隐身（`AC-TOOL-049`）。
-    // `spawn_acp` 缺席的理由与 `spawn_harness` 同一条（三道门任一不成立就不进目录），外加一条
+    // `search_tools` 缺席的理由又是另一档：真实部署里它是注册着的（这个 harness 只装 builtins，
+    // 连注册都没有），而即便注册了它也不该在 —— 这条 turn 的折叠集为空（没有 MCP / plugin /
+    // custom 工具），`hasDeferrable()` 为假，于是整个元工具不进目录。这正是 docs/07 §5 承诺的
+    // 纯内建部署提示词逐字节不变：折叠机制在没有可折叠对象时必须完全隐身（`AC-TOOL-049`）。
+    // `spawn_acp` 缺席的理由与 `spawn_harness` 同源（三道门任一不成立就不进目录），另加一条
     // 独有的：这个 harness 没传 `acp` 依赖，而 `available()` 判的第一项就是它在不在 —— 没有 ACP
-    // 客户端的部署里这个工具根本不该露面（同 telegram 那五个与 `deliverable()` 的关系）。
+    // 客户端的部署里这个工具不应出现（与 telegram 那五个和 `deliverable()` 的关系相同）。
     expect(Object.keys(TOOL_POLICY).filter((name) => !active.has(name))).toEqual(['ask_parent', 'report_progress', 'search_tools', 'stay_silent', 'spawn_harness', 'spawn_acp',
       'define_tool', 'delete_tool', 'list_tools', 'write_skill', 'install_skill', 'write_plugin', 'install_mcp', 'list_mcp',
       'container_list', 'container_exec', 'container_reset', 'container_inspect', 'container_keep', 'container_logs']);
@@ -100,7 +100,7 @@ describe('telegram side tools', () => {
   it('reacts to the trigger message by default and normalises variation selectors', async () => {
     const h = harness('tg-tools-react');
     expect(await h.registry.execute('react', { emoji: '👍' }, h.context)).toMatchObject({ ok: true, messageId: 4321 });
-    // `❤️`（带 U+FE0F）与 Telegram 认的 `❤` 是两个字符串；按字面比会把最常用的几个判成不支持。
+    // `❤️`（带 U+FE0F）与 Telegram 接受的 `❤` 是两个字符串；按字面比较会把最常用的几个判为不支持。
     expect(await h.registry.execute('react', { messageId: 99, emoji: '❤️' }, h.context)).toMatchObject({ ok: true, emoji: '❤' });
     expect(h.calls.map((call) => call.arguments_[1])).toEqual([4321, 99]);
     closeDatabase(h.db);
@@ -129,7 +129,7 @@ describe('telegram side tools', () => {
     expect(await h.registry.execute('send_message', { text: '第二条' }, h.context)).toMatchObject({ ok: true });
     expect(await h.registry.execute('send_message', { text: '第三条' }, h.context)).toMatchObject({ ok: false, error: 'extra_message_limit_exceeded' });
     expect(h.calls).toHaveLength(2);
-    // 不回写归档的话，模型自己追发过的内容下一轮就从上下文和 read_messages 里消失了。
+    // 不回写归档时，模型自己追发的内容下一轮就会从上下文和 read_messages 里消失。
     const rows = h.archive.scope('1', null).recent(10);
     expect(rows.map((row) => ({ direction: row.direction, fromKind: row.fromKind, text: row.text, turnId: row.turnId })))
       .toEqual([{ direction: 'out', fromKind: 'bot', text: '第二条', turnId: 't1' }, { direction: 'out', fromKind: 'bot', text: '第一条', turnId: 't1' }]);
@@ -137,9 +137,9 @@ describe('telegram side tools', () => {
   });
 
   it('archives the pre-render text, not the MarkdownV2-escaped payload', async () => {
-    // 发出去的是渲染后的（行内代码要变成 code 实体），存下来的必须是渲染前的 —— 三条出站路径
-    // （这里、`bot.ts` 的非流式兜底、`TelegramOutput`）在 `messages.text` 里放的得是同一种东西，
-    // 否则 WebUI 会话页和 `read_messages` 看到的 bot 发言一半带着 `\-` `\.` 这类转义符。
+    // 发出去的是渲染后的文本（行内代码转成 code 实体），存下来的必须是渲染前的：三条出站路径
+    // （这里、`bot.ts` 的非流式兜底、`TelegramOutput`）写入 `messages.text` 的须是同一种内容，
+    // 否则 WebUI 会话页与 `read_messages` 看到的 bot 发言会有一半带着 `\-` `\.` 这类转义符。
     const h = harness('tg-tools-archive-raw');
     expect(await h.registry.execute('send_message', { text: '用 `pnpm i` 装 1.2-beta' }, h.context)).toMatchObject({ ok: true });
     expect(h.calls[0]!.arguments_[1]).toBe('用 `pnpm i` 装 1\\.2\\-beta');
@@ -148,9 +148,9 @@ describe('telegram side tools', () => {
   });
 
   /**
-   * `docs/28 · L-TG-03`：分段投递时三条出站路径都给**每一段**存了一份完整全文（实测一条 9469 字的
-   * 回复在 `messages` 里躺三行 9469 字），连带 `messages_fts` 三份 → `search_messages` 把同一条
-   * 回复搜出三次。这条路还额外差一道：归档存的是**未经 `capMentions`** 的原文。
+   * `docs/28 · L-TG-03`：分段投递时三条出站路径都为每一段存了一份完整全文（实测一条 9469 字的
+   * 回复在 `messages` 里占三行、各 9469 字），连带 `messages_fts` 也是三份，`search_messages`
+   * 会把同一条回复搜出三次。这条路还额外缺一步：归档存的是未经 `capMentions` 的原文。
    */
   it('archives each segment on its own row, capped mentions included', async () => {
     const h = harness('tg-tools-segments');
@@ -164,8 +164,8 @@ describe('telegram side tools', () => {
   });
 
   it('archives the capped text, not the raw one with every mention still in it', async () => {
-    // 三条出站路径都该在 `messages.text` 里放「真正发出去的那份」。这条路此前存收口前的原文，
-    // 于是 `read_messages` 与 WebUI 里躺的 @ 数量比群里实际出现的多（maxMentions=5）。
+    // 三条出站路径都应在 `messages.text` 里放实际发出去的那份。这条路此前存的是收口前的原文，
+    // 于是 `read_messages` 与 WebUI 里的 @ 数量多于群里实际出现的数量（maxMentions=5）。
     const h = harness('tg-tools-cap-archive');
     const text = '@alpha1 @bravo2 @charlie3 @delta44 @echo555 @foxtrot6 收到';
     expect(await h.registry.execute('send_message', { text }, h.context)).toMatchObject({ ok: true });
@@ -189,10 +189,10 @@ describe('telegram side tools', () => {
   });
 
   /**
-   * `tg.api` 那条在 grammY 的 transformer 里，**拿不到 turn 上下文**：生产库 9745 条里
+   * `tg.api` 那条位于 grammY 的 transformer 内，取不到 turn 上下文：生产库 9745 条中
    * `trace_id IS NULL` 的是 9745 条，按 trace 归轮的结果每一轮都是 0，而 `data` 只有
-   * `{method, ok}` —— 没有 chars、没有 messageId（docs/28 · L-LOG-02）。所以语义 span 在
-   * 投递层发，而这里知道 turnId 与本次 `tool.call` 的 span。
+   * `{method, ok}`，既无 chars 也无 messageId（docs/28 · L-LOG-02）。因此语义 span 在
+   * 投递层发出，而这里能拿到 turnId 与本次 `tool.call` 的 span。
    */
   it('每条追发都落一条带 traceId 的 tg.send，父是本次 tool.call 的 span', async () => {
     const h = harness('tg-tools-log');
@@ -200,7 +200,7 @@ describe('telegram side tools', () => {
     expect(await h.registry.execute('send_message', { text: '追发一条' }, h.context)).toMatchObject({ ok: true });
     const sends = logged.filter((event) => event.kind === 'tg.send');
     expect(sends).toHaveLength(1);
-    // `execute()` 浅拷贝 context 时把 `tool.call` 的 span id 塞了进去，`target()` 再原样带下来。
+    // `execute()` 浅拷贝 context 时写入了 `tool.call` 的 span id，`target()` 再原样带下来。
     expect(sends[0]).toMatchObject({ traceId: 't1', parentSpanId: 's' });
     expect(sends[0]!.data).toMatchObject({ method: 'sendMessage', ok: true, messageId: 11, chars: 4, path: 'tool' });
     closeDatabase(h.db);
@@ -212,8 +212,8 @@ describe('telegram side tools', () => {
     const result = await h.registry.execute('pin_message', {}, h.context) as { ok: boolean; error: string; hint: string };
     expect(result).toMatchObject({ ok: false, error: 'telegram_api_error' });
     expect(result.hint).toContain('not enough rights');
-    // **吞掉的那一跳要自己落一行**（`docs/10 §2` 的 `tg.send` 失败档 warn）：上游报错在这里被换成
-    // `ok:false` 交回模型，不落的话「发不出去」在带 traceId 的日志里一个字都没有 —— 只剩没有
+    // 被吞掉的那一跳要自行落一行（`docs/10 §2` 的 `tg.send` 失败档 warn）：上游报错在这里被换成
+    // `ok:false` 交回模型，不落库时投递失败在带 traceId 的日志里没有任何记录，只剩下没有
     // turn 上下文的 `tg.api`（docs/28 · L-LOG-02）。此前五个调用点全硬写 `ok: true`，失败档不可达。
     const sends = logged.filter((event) => event.kind === 'tg.send');
     expect(sends).toHaveLength(1);

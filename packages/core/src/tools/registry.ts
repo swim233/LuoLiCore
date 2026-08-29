@@ -21,26 +21,26 @@ export interface ToolExecutionContext {
   agentKind: "main" | "sub";
   agentRunId?: string;
   /**
-   * 子 agent 专属的那几样，主 agent 的上下文里恒为 `undefined`。工具侧此前对子 agent 一无所知
-   * （别名、名字、张数都是 `runSubAgent` 的局部变量），而图片路径这三样都要用（`docs/04 §5.2`）。
+   * 子 agent 专有的字段，在主 agent 的上下文中恒为 `undefined`。工具侧此前对子 agent 一无所知
+   * （别名、名称、张数均为 `runSubAgent` 的局部变量），而图片路径需要这三项（`docs/04 §5.2`）。
    */
   subAgent?: {
-    /** 它自己的模型别名 —— 图片能不能进上下文按**它**问，问主轮别名等于问了个无关的模型。 */
+    /** 子 agent 自身的模型别名 —— 图片能否进入上下文按它判定，按主轮别名判定即查询了无关的模型。 */
     alias: string;
-    /** 它的名字。父轮那条文字痕迹要写清是谁取的（「你派出的 researcher 取过一张图」）。 */
+    /** 子 agent 的名称。父轮的文字记录需写明获取方（例如所派出的 researcher 取过一张图）。 */
     name: string;
-    /** 本次 run 已经注入过几张图。父轮 delta 里没有它们，`maxImagesPerTurn` 只能按 run 自己数。 */
+    /** 本次 run 已注入的图片数。父轮 delta 中不含它们，`maxImagesPerTurn` 只能按 run 自行统计。 */
     images: () => number;
-    /** 「本 run 注入过图」置位 —— vision 切换要落在**看到这张图**的那个 agent 上。 */
+    /** 置位本 run 已注入图片 —— vision 切换应作用于实际接收该图片的那个 agent。 */
     onMediaInjected: () => void;
   };
   allow?: ReadonlySet<string>;
   /**
-   * 这次工具调用该挂在哪个 span 之下（`docs/10 §1`）。主 agent 由 `onStepStart` 写进这一项
-   * （那一步的 `model.call` span），子 agent 写的是自己那条 `agent.run`。
+   * 本次工具调用应挂在哪个 span 之下（`docs/10 §1`）。主 agent 由 `onStepStart` 写入该项
+   * （该步的 `model.call` span），子 agent 写入自身的 `agent.run`。
    *
-   * `execute()` 之后它被**浅拷贝**换成本次 `tool.call` 的 span id 再交给 `tool.execute` ——
-   * 改共享对象的话，同一步里并排的多个 `spawn_agent` 会互相顶掉父边。
+   * `execute()` 之后它经浅拷贝替换为本次 `tool.call` 的 span id 再传给 `tool.execute` ——
+   * 若修改共享对象，同一步内并行的多个 `spawn_agent` 会互相覆盖父边。
    */
   parentSpanId?: string;
 }
@@ -53,18 +53,18 @@ export interface RegisteredTool<I = unknown> {
   policy: ToolPolicyEntry;
   sourcePriority: number;
   untrustedOutput?: boolean;
-  /** 单次调用的墙钟上限；缺省用 `tools.defaultTimeoutMs`，`null` 表示这个工具自己管超时。 */
+  /** 单次调用的墙钟上限；默认使用 `tools.defaultTimeoutMs`，`null` 表示该工具自行管理超时。 */
   timeoutMs?: number | null;
   available?(role: Role, context: ToolExecutionContext): boolean;
   approvalTargetExists?(input: unknown, context: ToolExecutionContext): boolean;
-  /** 按本轮配置把自己抬进审批。只能抬高不能放低，见 `execute` 里的合并规则。 */
+  /** 按本轮配置将自身提升至审批档位。只能提高不能降低，合并规则见 `execute`。 */
   approvalFor?(input: I, context: ToolExecutionContext): ApprovalPolicy | null;
   execute(input: I, context: ToolExecutionContext): Promise<object> | object;
 }
 
 /**
- * 准入被拒的档位（落在 `tool.denied` 的 `reason` 上，`docs/10 §2` 列了同一份穷举）。
- * `approval` 不是 `admit()` 给的 —— 审批发生在准入之后，由 `execute()` 自己记。
+ * 准入被拒的分类（写入 `tool.denied` 的 `reason`，`docs/10 §2` 列出同一份枚举）。
+ * `approval` 不由 `admit()` 产生 —— 审批发生在准入之后，由 `execute()` 自行记录。
  */
 export type ToolDenyReason =
   | "unknown_tool"
@@ -78,7 +78,7 @@ export type ToolDenyReason =
   | "rate"
   | "approval";
 
-/** `hint` 是给模型看的：被拒时它需要知道「为什么」才能用自己的话回复，而不是干巴巴一句「未获批准」。 */
+/** `hint` 面向模型：被拒时它需要知道原因才能组织回复，而不是仅给出一句未获批准。 */
 export interface ApprovalVerdict {
   approved: boolean;
   hint?: string;
@@ -94,11 +94,11 @@ export interface ApprovalBroker {
 }
 
 /**
- * `tools.catalog.*` 的形状（docs/07 §5）。**这里独立声明而不 import 配置类型** —— 注册表不认
- * `Config`，`ToolLimits` 一直是「运行时给我这几个数」的窄契约。
+ * `tools.catalog.*` 的形状（docs/07 §5）。此处独立声明而不 import 配置类型 —— 注册表不依赖
+ * `Config`，`ToolLimits` 始终是一份由运行时提供若干数值的窄契约。
  *
- * 每一项都 optional，且**整段缺席 = 一律不折叠**：全仓约十处手工构造 `ToolRegistry` 的测试
- * （`tests/mcp.runtime.test.ts` 那份 limits 等）都不给这一段，缺省必须是改动前的行为。
+ * 每一项均为 optional，且整段缺失即一律不折叠：全仓约十处手工构造 `ToolRegistry` 的测试
+ * （如 `tests/mcp.runtime.test.ts` 的 limits）都不提供该段，默认行为必须与改动前一致。
  */
 export interface ToolCatalogLimits {
   deferExternal?: boolean;
@@ -108,9 +108,9 @@ export interface ToolCatalogLimits {
   maxExpandedPerTurn?: number;
 }
 /**
- * 折叠组的摘要素材。`names` 是**完整**清单（已在截断后的集合内），`total = names.length` ——
- * 「每组超 12 个只列前 10 + 等 N 个」是提示层的排版，由渲染方按这两项自己决定，注册表不预先砍掉
- * 名字：砍在这里的话检索的 `group` 通道就再也列不全那一组了。
+ * 折叠组的摘要素材。`names` 是完整清单（已位于截断后的集合内），`total = names.length` ——
+ * 每组超过 12 个只列前 10 个并标注总数属于提示层排版，由渲染方依据这两项自行决定，注册表不预先
+ * 裁剪名字：在此裁剪会使检索的 `group` 通道无法列全该组。
  */
 export interface DeferredToolGroup {
   key: string;
@@ -118,9 +118,9 @@ export interface DeferredToolGroup {
   total: number;
 }
 /**
- * 目录的折叠视图。`resident ∪ deferred` **恰好等于** `active()`（同一次 `#eligible()` 的产物二分，
- * 不漏不重）—— 提示词的两段、`prepareStep` 的集合、检索的域全部从这一份派生，才不会出现
- * 「摘要里报了一个 toolSet 里没有的名字」。
+ * 目录的折叠视图。`resident ∪ deferred` 恰好等于 `active()`（对同一次 `#eligible()` 的结果二分，
+ * 不遗漏不重复）—— 提示词的两段、`prepareStep` 的集合、检索的域全部由这一份派生，才不会出现
+ * 摘要中报出 toolSet 中不存在的名字。
  */
 export interface ToolCatalogView {
   resident: RegisteredTool[];
@@ -138,12 +138,12 @@ interface ToolLimits {
   catalog?: ToolCatalogLimits;
 }
 
-/** 注册期之后才出现的工具来源。`builtin` / `agent` 是编译期的，不走 `registerExternal`。 */
+/** 注册期之后才出现的工具来源。`builtin` / `agent` 属编译期，不经 `registerExternal`。 */
 export type ExternalToolSource = "plugin" | "mcp" | "custom";
 /**
  * 目录溢出（`tools.maxRegistered`）时的截断优先级：内建 100 > agent 90 > load_skill 80 >
- * plugin 60 > mcp 40 > custom 30。自撰写的排最后 —— 模型可以一口气造二十个，让它先挤掉
- * 运维显式配的 MCP 是错的方向。
+ * plugin 60 > mcp 40 > custom 30。自撰写工具排在最后 —— 模型可一次创建二十个，让它优先挤掉
+ * 运维显式配置的 MCP 是错误的方向。
  */
 const EXTERNAL_SOURCE_PRIORITY: Record<ExternalToolSource, number> = {
   plugin: 60,
@@ -152,20 +152,20 @@ const EXTERNAL_SOURCE_PRIORITY: Record<ExternalToolSource, number> = {
 };
 
 /**
- * 工具输出里骑着的图片（`web_fetch` 抓回来的图、MCP 的截图）。
+ * 附着在工具输出中的图片（`web_fetch` 抓取的图、MCP 的截图）。
  *
- * **序列化之前就要摘出去。** 一张 base64 图有几百 KB，留在 JSON 里是双重损坏：
- * ① 它自己撞上 `tools.maxOutputBytes`（64KB）被 `elideMiddleBytes` 从中间截半，而截半的
- * base64 会被 provider 整个拒收；② 就算不截，它也会把模型真正要读的那几行挤出预算。
- * 摘出来之后由 `toolModelOutput` 交给 provider 的多模态 tool-result 形状（`agent/runtime.ts`）。
+ * 必须在序列化之前摘除。一张 base64 图片有数百 KB，留在 JSON 中会造成两重损坏：
+ * ① 它自身触及 `tools.maxOutputBytes`（64KB）被 `elideMiddleBytes` 从中间截断，而截断的
+ * base64 会被 provider 整体拒收；② 即使未被截断，它也会挤占模型真正需要读取的内容的预算。
+ * 摘除后由 `toolModelOutput` 转为 provider 的多模态 tool-result 形状（`agent/runtime.ts`）。
  */
 export interface ToolMedia {
   mediaType: string;
   data: string;
 }
 /**
- * 外部工具（MCP / plugin）交回的图片往哪去。实现是 `media/web-assets.ts` 的 `captureImage`
- * —— 与 `web_fetch` 同一条路径，所以「存哪、怎么归一化、vision 不可用时怎么如实说」只有一份。
+ * 外部工具（MCP / plugin）返回图片的去向。实现为 `media/web-assets.ts` 的 `captureImage`
+ * —— 与 `web_fetch` 同一路径，因此存储位置、归一化方式、vision 不可用时的说明都只有一份。
  */
 export interface ToolMediaSink {
   capture(
@@ -192,7 +192,7 @@ export function splitToolMedia(output: object): {
           typeof (entry as ToolMedia).data === "string",
       )
     : [];
-  // 一条都不合形状时**原样交回**：`media` 有可能只是某个工具自己的普通字段。
+  // 无任何一条符合形状时原样返回：`media` 可能只是某个工具自身的普通字段。
   return values.length
     ? { media: values, rest }
     : { media: [], rest: output as Record<string, unknown> };
@@ -205,9 +205,9 @@ class ToolTimeout extends Error {
   }
 }
 /**
- * 超时之后只能「不再等」：没有办法真正取消一个任意工具的执行（沙箱有自己的 kill，MCP 有自己的
- * timeout，插件什么都没有）。丢掉这个 promise 让本轮继续往下走 —— `Promise.race` 已经给它挂了
- * 处理器，晚到的拒绝不会变成 unhandledRejection 打崩进程。
+ * 超时之后只能停止等待：无法真正取消任意工具的执行（沙箱有自身的 kill，MCP 有自身的 timeout，
+ * 插件则完全没有）。丢弃该 promise 让本轮继续执行 —— `Promise.race` 已为其挂载处理器，
+ * 延迟到达的 reject 不会变成 unhandledRejection 导致进程崩溃。
  */
 async function withTimeout<T>(work: Promise<T> | T, ms: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -236,10 +236,10 @@ export class ToolRegistry {
   readonly #rulesSource: () => readonly unknown[];
   #rulesCache: { source: readonly unknown[]; rules: ApprovalRules } | null =
     null;
-  /** 运维在 WebUI 上按下的那份覆盖（启停 + minRole/审批/超时）。用 getter 读取，保证配置热更新后立即生效。 */
+  /** 运维在 WebUI 中设置的覆盖（启停、minRole、审批、超时）。用 getter 读取，保证热更新后立即生效。 */
   #overrides: () => Readonly<Record<string, ToolOverride>> = () => ({});
-  /** limits 与 approvalRules 同样接受 getter：两者在 doc 11 都标着热更新，吃快照就是冻住
-   *  （新增的高危命令规则要重启才生效，docs/20 · W-CFG-02）。 */
+  /** limits 与 approvalRules 同样接受 getter：两者在 doc 11 中均标注热更新，取快照即被冻结
+   *  （新增的高危命令规则将需重启才生效，docs/20 · W-CFG-02）。 */
   constructor(
     private readonly log: LogSink,
     private readonly approval: ApprovalBroker,
@@ -249,9 +249,9 @@ export class ToolRegistry {
       hook(name: string, ...arguments_: unknown[]): Promise<unknown[]>;
     },
     /**
-     * 只用来记 `turns.tool_calls`。`TurnRepository.incrementToolCall` 从头就没有调用者，
-     * 全库这一列恒为 0 —— WebUI 轮次列表与 `turn.finished` 事件里的工具调用数一直是假的。
-     * 可选：测试与子 agent 的注册表都不必给。
+     * 仅用于记录 `turns.tool_calls`。`TurnRepository.incrementToolCall` 一直没有调用方，
+     * 全库该列恒为 0 —— WebUI 轮次列表与 `turn.finished` 事件中的工具调用数始终不准确。
+     * 可选：测试与子 agent 的注册表均无需提供。
      */
     private readonly turns?: { incrementToolCall(id: string): void },
   ) {
@@ -260,7 +260,7 @@ export class ToolRegistry {
       typeof approvalRules === "function" ? approvalRules : () => approvalRules;
   }
 
-  /** 规则数组换了对象身份才重建：`configStore.replace` 每次都给出新数组，热重载因此自动生效。 */
+  /** 仅当规则数组的对象身份变化时才重建：`configStore.replace` 每次返回新数组，热重载因此自动生效。 */
   #approvalRules(): ApprovalRules {
     const source = this.#rulesSource();
     if (!this.#rulesCache || this.#rulesCache.source !== source)
@@ -272,21 +272,21 @@ export class ToolRegistry {
     this.#overrides = overrides;
   }
 
-  /** 不绑就没有：外部工具的图片照旧走 JSON，而 `#absorbExternalMedia` 整个是 no-op。 */
+  /** 未绑定时不生效：外部工具的图片照常走 JSON，而 `#absorbExternalMedia` 整体为 no-op。 */
   bindMedia(sink: ToolMediaSink): void {
     this.#media = sink;
   }
   #media: ToolMediaSink | null = null;
 
   /**
-   * MCP 的图片结果 → `media` + 一句文本标记。
+   * MCP 的图片结果转为 `media` 加一句文本标记。
    *
-   * 不做这一步的话它会照原样走进 `#normalizeOutput`：`JSON.stringify` → 撞上
-   * `tools.maxOutputBytes`（64KB）从中间截半 → `untrusted()` 包成文本。也就是一张截图变成
-   * 一坨截半的 base64 当不可信文本交给模型 —— 既看不见图，又把整个工具输出预算烧光。
-   * 浏览器类 MCP（obscura 的 `browser_screenshot`、playwright 那些）返回的正是这个形状。
+   * 不做这一步的话它会原样进入 `#normalizeOutput`：`JSON.stringify` → 触及
+   * `tools.maxOutputBytes`（64KB）被从中间截断 → 经 `untrusted()` 包装为文本。即一张截图变成
+   * 一段被截断的 base64，作为不可信文本交给模型 —— 既无法查看图片，又耗尽整个工具输出预算。
+   * 浏览器类 MCP（obscura 的 `browser_screenshot`、playwright 等）返回的正是这一形状。
    *
-   * 失败也要如实写进结果：静静地把图丢掉的话，模型只会以为这个工具坏了然后再调一次。
+   * 失败同样要如实写入结果：静默丢弃图片会使模型认为该工具故障并再次调用。
    */
   async #absorbExternalMedia(
     name: string,
@@ -324,14 +324,14 @@ export class ToolRegistry {
       if (!captured.ok) {
         rewritten.push({
           type: "text",
-          text: `[图片没能放进上下文：${captured.error}]${captured.hint}`,
+          text: `[图片未能放入上下文：${captured.error}]${captured.hint}`,
         });
         continue;
       }
       absorbed.push({ mediaType: captured.mediaType, data: captured.data });
       rewritten.push({
         type: "text",
-        text: `[图片已放进本轮上下文（${captured.mediaType}），直接看即可]`,
+        text: `[图片已放入本轮上下文（${captured.mediaType}），可直接查看]`,
       });
     }
     return absorbed.length
@@ -344,9 +344,9 @@ export class ToolRegistry {
   }
 
   /**
-   * 本次生效的策略 = 注册期那份 + 运维覆盖。**读 minRole / approval 一律走这里**，直接读
-   * `tool.policy` 就是绕过覆盖层 —— 而这两个字段各有两处消费点（目录过滤与准入复查、
-   * 审批基准与 `approvalFor` 抬档），漏掉任何一处的表现都是「界面上关严了，运行时没有」。
+   * 本次生效的策略等于注册期策略叠加运维覆盖。读取 minRole / approval 一律经此处，直接读取
+   * `tool.policy` 即绕过覆盖层 —— 而这两个字段各有两处消费点（目录过滤与准入复查、
+   * 审批基准与 `approvalFor` 提档），遗漏任何一处的表现都是界面已收紧而运行时未生效。
    */
   effectivePolicy(tool: RegisteredTool): ToolPolicyEntry {
     return effectiveToolPolicy(tool.policy, this.#overrides()[tool.name]);
@@ -358,13 +358,13 @@ export class ToolRegistry {
     this.#tools.set(tool.name, tool as RegisteredTool);
   }
   /**
-   * `available` 与 `timeoutMs` 对自定义工具是必需的，不是顺手加的糖：
+   * `available` 与 `timeoutMs` 对自定义工具是必需项，而非附加便利：
    *
-   * - 运维覆盖能改 `effectivePolicy().minRole`，但绕不过 `available()`（docs/09 §3.7）。自定义工具
-   *   那道「不得低于 `bash` 的角色门槛」的地板因此只能写在 `available()` 里 —— 写在注册的
-   *   `minRole` 上，一次覆盖就把它放给 `limited` 了。
-   * - 不给 `timeoutMs: null` 的话它吃 `tools.defaultTimeoutMs`（60s），而 `Sandbox.run` 按
-   *   `tools.exec.maxTimeoutMs`（300s）才 kill —— 一个 120s 的脚本会「对模型报超时、进程接着跑」。
+   * - 运维覆盖可修改 `effectivePolicy().minRole`，但无法绕过 `available()`（docs/09 §3.7）。自定义
+   *   工具不得低于 `bash` 角色门槛这一下限因此只能写在 `available()` 中 —— 写在注册的
+   *   `minRole` 上时，一次覆盖即可将其开放给 `limited`。
+   * - 不设置 `timeoutMs: null` 时它使用 `tools.defaultTimeoutMs`（60s），而 `Sandbox.run` 按
+   *   `tools.exec.maxTimeoutMs`（300s）才终止进程 —— 一个 120s 的脚本会对模型报超时而进程继续运行。
    */
   registerExternal(input: {
     name: string;
@@ -425,16 +425,16 @@ export class ToolRegistry {
   }
 
   /**
-   * `active()` 的过滤链本体，`activeView()` / `activeNamesForStep()` 共用。
+   * `active()` 的过滤链本体，由 `activeView()` / `activeNamesForStep()` 共用。
    *
-   * **整条过滤链、排序、`slice` 的行为一个字都不能变**：`admit()` 与它逐条对齐（`AC-TOOL-022`、
-   * docs/20 · W-TOOL-01），抽出来只是为了让折叠视图不必把整条链抄第二遍 —— 抄第二遍就是
-   * 两份会漂移的准入判据。
+   * 整条过滤链、排序与 `slice` 的行为不得变更：`admit()` 与其逐条对齐（`AC-TOOL-022`、
+   * docs/20 · W-TOOL-01），抽取出来只是为了让折叠视图无需复制整条链 —— 复制一份即产生
+   * 两套会漂移的准入判据。
    *
-   * **warn 不落在这里，落在 `active()`。** 折叠视图与 `active()` 都走这条链，日志写在这里的话
-   * 同一轮会按调用次数重复记 `tool.registry_truncated`；而 `toolSetFor` 那一次 `active()`
-   * （`runtime.ts` 开轮时的全量取数）仍然保证每轮至少落一条运维视角的凭据，提示层则另有
-   * RUNTIME 块里那行给模型看的截断告知。
+   * warn 不记录在此处，而记录在 `active()`。折叠视图与 `active()` 都经过这条链，若在此写日志，
+   * 同一轮会按调用次数重复记录 `tool.registry_truncated`；而 `toolSetFor` 中的那次 `active()`
+   * （`runtime.ts` 开轮时的全量取数）仍保证每轮至少留下一条运维视角的凭据，提示层另有
+   * RUNTIME 块中面向模型的截断告知。
    */
   #eligible(
     role: Role,
@@ -493,28 +493,28 @@ export class ToolRegistry {
   }
 
   /**
-   * 这一个工具在**本次查询**里该不该折叠（docs/07 §5）。
+   * 该工具在本次查询中是否应折叠（docs/07 §5）。
    *
-   * **查询期算，不在 `RegisteredTool` 上打标。** 打标的那份会被 MCP `reconcile`（重连一次就换了
-   * 一批 tool 对象）与配置热更新（`tools.catalog.*` 标着热更新）弄脏，而弄脏的表现是「摘要里
-   * 有、正文里也有」或者反过来「两处都没有」—— 都得等下次重启才好。走 `#limits()` getter
-   * 天然跟着热更新走。
+   * 在查询期计算，不在 `RegisteredTool` 上标记。标记会被 MCP `reconcile`（重连一次即替换一批
+   * tool 对象）与配置热更新（`tools.catalog.*` 标注热更新）污染，污染的表现是摘要与正文中都存在，
+   * 或反过来两处都不存在 —— 均需等待下次重启才能恢复。经 `#limits()` getter 读取则天然跟随
+   * 热更新。
    *
-   * 判据顺序本身是契约：
-   * ① 整段缺席或 `deferExternal !== true` → 一律不折叠（改动前的行为）；② 豁免表（梯子）；
-   * ③ `resident` glob 白名单**最高优先**（运维显式点名常驻的，`defer` 再点也压不过）；
-   * ④ 内建 / agent 默认常驻，只有被 `defer` glob 点名才折叠；⑤ 其余（plugin / mcp / custom）折叠。
+   * 判据顺序本身即契约：
+   * ① 整段缺失或 `deferExternal !== true` → 一律不折叠（改动前的行为）；② 豁免表（展开入口）；
+   * ③ `resident` glob 白名单优先级最高（运维显式指定常驻的，`defer` 再指定也无法覆盖）；
+   * ④ 内建 / agent 默认常驻，只有被 `defer` glob 命中才折叠；⑤ 其余（plugin / mcp / custom）折叠。
    *
-   * 夹在 ① 之后那两条是 docs/05 §3.12 不变量 3 的后半：运维在工具页**把梯子收走**时
-   * **整个目录回退常驻**。判在这里而不是提示层，是因为「看得见折叠摘要却没法展开」这种形态只有
-   * 在折叠判据、目录文本、`prepareStep` 三处同时回退才不会出现，而三处都从这一个判据派生。
+   * 紧随 ① 之后的两条是 docs/05 §3.12 不变量 3 的后半部分：运维在工具页移除展开入口时，
+   * 整个目录回退为常驻。判定在此处而非提示层，是因为可见折叠摘要却无法展开这种状态，只有在折叠
+   * 判据、目录文本、`prepareStep` 三处同时回退时才不会出现，而三处均由这一个判据派生。
    *
-   * 「收走」有**两种**写法，工具页把它们并排放在同一行上（docs/09 §3.7：启停、minRole、审批策略、
-   * 单次超时四项可写）：`enabled=false`，以及**把 `minRole` 抬到本会话的有效角色之上**。后者此前
-   * 漏判 —— `#eligible()` 那道 minRole 闸会把 `search_tools` 滤掉，而折叠判据当时只问 `enabled`，
-   * 于是一个 trusted 会话看得见折叠摘要、调不动 `search_tools`，连 `repairToolCall` 的自愈也一起
-   * 失效（它的闸 ③ 正是「`search_tools` 本步发不出去」）。判据取 `TOOL_POLICY` + 覆盖层而不是
-   * 注册表里那一份：`main.ts` 的启动断言保证它一定注册着，而这样写在手搓注册表的测试里也成立。
+   * 移除展开入口有两种写法，工具页将它们并列于同一行（docs/09 §3.7：启停、minRole、审批策略、
+   * 单次超时四项可写）：`enabled=false`，以及将 `minRole` 提升至本会话的有效角色之上。后者此前
+   * 漏判 —— `#eligible()` 的 minRole 闸会滤除 `search_tools`，而折叠判据当时只检查 `enabled`，
+   * 导致 trusted 会话可见折叠摘要却无法调用 `search_tools`，连 `repairToolCall` 的自愈也一并
+   * 失效（其闸 ③ 正是 `search_tools` 本步无法发出）。判据取 `TOOL_POLICY` 加覆盖层而非注册表中
+   * 的那一份：`main.ts` 的启动断言保证它必定已注册，且这样写在手工构造注册表的测试中同样成立。
    */
   #deferredFor(tool: RegisteredTool, role?: Role): boolean {
     const catalog = this.#limits().catalog;
@@ -543,12 +543,12 @@ export class ToolRegistry {
   }
 
   /**
-   * 折叠组的 key 从**既有命名空间**派生，不新增注册字段（docs/05 §3.9 那套前缀已经把这套命名
-   * 列全了）：多一个字段就多一处 MCP / plugin / custom 三条注册路都要记得填的地方。
+   * 折叠组的 key 由既有命名空间派生，不新增注册字段（docs/05 §3.9 的前缀方案已列全该命名体系）：
+   * 每多一个字段，MCP / plugin / custom 三条注册路径就多一处必须记得填写的位置。
    */
   #groupKey(tool: RegisteredTool): string {
-    // `mcp__<server>__<tool>` 是 `mcp/manager.ts` 拼的。server 名允许下划线，所以按**第一个**
-    // `__` 断开 —— 与拼接方同一个约定，认不出来时退回整族一组而不是编一个假的 server 名。
+    // `mcp__<server>__<tool>` 由 `mcp/manager.ts` 拼接。server 名允许包含下划线，因此按第一个
+    // `__` 分割 —— 与拼接方约定一致，无法识别时退回整族一组，而不是构造一个虚假的 server 名。
     if (tool.policy.source === "mcp") {
       const server = /^mcp__(.+?)__/.exec(tool.name)?.[1];
       return server ? `mcp:${server}` : "mcp";
@@ -561,13 +561,13 @@ export class ToolRegistry {
   }
 
   /**
-   * 目录的折叠视图。提示词的常驻段、折叠摘要段、截断告知行全部从这**一次**取数派生
-   * （此前 `assembleMainPrompt` 里 `activeNames()` + `catalog()` 各算一遍 `active()`）。
+   * 目录的折叠视图。提示词的常驻段、折叠摘要段、截断告知行全部由这一次取数派生
+   * （此前 `assembleMainPrompt` 中 `activeNames()` 与 `catalog()` 各计算一遍 `active()`）。
    *
-   * 分区在**截断之后**做：被 `maxRegistered` 砍掉的名字不进摘要，否则模型按摘要里的名字检索，
-   * 展开出来的是一个开轮冻结的 toolSet 里根本没有的键 —— AI SDK 那边（`filterActiveTools` 是纯
-   * 交集）会把它**静默丢掉**而不是报错，于是坏处是「检索回了 `status:'expanded'`，模型照着调却
-   * 撞 `NoSuchToolError`」：一条说不清的假话，比一次报错难查。
+   * 分区在截断之后进行：被 `maxRegistered` 裁剪的名字不进入摘要，否则模型按摘要中的名字检索，
+   * 展开得到的是开轮时冻结的 toolSet 中不存在的键 —— AI SDK 侧（`filterActiveTools` 为纯交集）
+   * 会将其静默丢弃而非报错，后果是检索返回 `status:'expanded'` 而模型据此调用却撞上
+   * `NoSuchToolError`：一个无法解释的错误结果，比一次明确报错更难排查。
    */
   activeView(
     role: Role,
@@ -579,8 +579,8 @@ export class ToolRegistry {
     const deferred: RegisteredTool[] = [];
     for (const tool of tools)
       (this.#deferredFor(tool, role) ? deferred : resident).push(tool);
-    // 组的顺序 = 首次出现的顺序，也就是 `sourcePriority desc, name asc`（plugin 60 > mcp 40 >
-    // custom 30）。稳定的顺序本身有价值：摘要行属易变段，无谓的重排每步都在改提示词。
+    // 组的顺序即首次出现顺序，也就是 `sourcePriority desc, name asc`（plugin 60 > mcp 40 >
+    // custom 30）。稳定顺序本身有价值：摘要行属易变段，无谓的重排等于每步修改提示词。
     const grouped = new Map<string, string[]>();
     for (const tool of deferred) {
       const key = this.#groupKey(tool);
@@ -601,14 +601,14 @@ export class ToolRegistry {
   }
 
   /**
-   * `prepareStep` 的**唯一**集合来源：常驻 ∪（本轮已展开 ∩ 折叠集）。
+   * `prepareStep` 的唯一集合来源：常驻 ∪（本轮已展开 ∩ 折叠集）。
    *
-   * 直接过滤 `#eligible()` 的有序数组，而不是把 `activeView()` 的两个分区拼回去 —— 拼回来的那份
-   * 是 `resident ++ deferred`，与 `active()` 的 `sourcePriority desc, name asc` 不是同一个序。
+   * 直接过滤 `#eligible()` 的有序数组，而非拼接 `activeView()` 的两个分区 —— 拼接结果为
+   * `resident ++ deferred`，与 `active()` 的 `sourcePriority desc, name asc` 不是同一顺序。
    *
-   * ⚠ **这不影响 provider 的 tools 数组顺序**（那一份由 `filterActiveTools` 按开轮冻结的 toolSet
-   * 的键序生成，与这里返回的数组序无关，`docs/04 §2.1` 那笔缓存账不落在这个函数上）。要的只是
-   * 「一个名字集合只有一种写法」：断言、日志、请求体三处对得上，读 diff 时看得出来哪一步真的变了。
+   * ⚠ 这不影响 provider 的 tools 数组顺序（那一份由 `filterActiveTools` 按开轮冻结的 toolSet
+   * 的键序生成，与此处返回的数组顺序无关，`docs/04 §2.1` 的缓存成本不落在本函数上）。目的仅是
+   * 保证一个名字集合只有一种表示：断言、日志、请求体三处一致，阅读 diff 时可看出哪一步真正变化。
    */
   activeNamesForStep(
     role: Role,
@@ -625,17 +625,17 @@ export class ToolRegistry {
   }
 
   /**
-   * 本角色下**有没有**东西可折叠 —— `search_tools` 的 `available()` 判它，折叠集为空时整个
-   * 元工具不进目录（纯内建部署的提示词逐字节不变）。
+   * 当前角色下是否存在可折叠的工具 —— `search_tools` 的 `available()` 判定它，折叠集为空时整个
+   * 元工具不进入目录（纯内建部署的提示词逐字节不变）。
    *
-   * ⚠ **绝不能改成走 `activeView()`。** 那条路是 `activeView()` → `#eligible()` →
-   * `tool.available?.()` → 回到 `search_tools.available()` → 又一次 `activeView()`：一个无限
-   * 递归环，表现是开轮直接栈溢出。所以这里只遍历 `#tools` 自己判三件事（折叠判据、角色门槛、
-   * 运维禁用），**一次 `available()` 都不调**。
+   * ⚠ 不得改为经 `activeView()` 实现。那条路径为 `activeView()` → `#eligible()` →
+   * `tool.available?.()` → 回到 `search_tools.available()` → 再次 `activeView()`：构成无限
+   * 递归，表现为开轮时栈溢出。因此此处只遍历 `#tools` 自行判定三项（折叠判据、角色门槛、
+   * 运维禁用），不调用任何 `available()`。
    *
-   * 代价是它比真实折叠集**宽**：某个折叠工具因自己的 `available()` 缺席时，这里仍算它在。
-   * 表现上限是「`search_tools` 进了目录但检索结果为空」，而反过来（漏判成空、模型再也看不到
-   * 折叠摘要背后的东西）才是真正说不清的那一档。
+   * 代价是它比真实折叠集更宽：某个折叠工具因自身 `available()` 判定为不可用时，此处仍计入它。
+   * 最坏表现是 `search_tools` 进入目录但检索结果为空，而反向情形（误判为空、模型再也看不到
+   * 折叠摘要对应的工具）才是真正难以解释的一档。
    */
   hasDeferrable(role: Role): boolean {
     for (const tool of this.#tools.values()) {
@@ -663,17 +663,17 @@ export class ToolRegistry {
   }
 
   /**
-   * 准入判定：`execute()` 在跑工具之前要过的那一串闸，抽成一个**只读**判定（不写本轮状态、
-   * 不记日志、不调工具、不发审批）。抽出来的理由是可穷举地测「给定 (角色, 上下文) 这一次调用
-   * 该不该被放行」—— 闸门本身是对的（`active()` 的过滤集合必须在这里逐条复查，docs/20 ·
-   * W-TOOL-01），问题是它们此前和执行编排焊在同一个方法里，而这正是最需要穷举的部分
+   * 准入判定：`execute()` 在运行工具之前需通过的一系列闸门，抽取为一个只读判定（不写本轮状态、
+   * 不记日志、不调用工具、不发起审批）。抽取的理由是可穷举地测试给定角色与上下文时本次调用是否
+   * 应被放行 —— 闸门本身是正确的（`active()` 的过滤集合必须在此逐条复查，docs/20 · W-TOOL-01），
+   * 问题在于它们此前与执行编排耦合在同一方法中，而这恰是最需要穷举测试的部分
    * （docs/27 · D-03）。`execute()` 因此只剩 admit → approve → run → normalize 四步。
    *
-   * `warn` 标的是「这一次拒绝额外值得一条运维视角的日志」：运维禁用的工具被模型硬调过来是排障线索。
+   * `warn` 标识本次拒绝额外值得记录一条运维视角日志：运维已禁用的工具被模型直接调用是排障线索。
    *
-   * `reason` 是**机器可读的拒绝档位**，由 `execute()` 记进 `tool.denied`。它不能在这里记 ——
-   * 这个方法刻意只读（可穷举地测「给定 (角色, 上下文) 这一次该不该放行」，docs/27 · D-03）；
-   * 而不记的代价实测是「45 次调用恰好 40 条 `tool.call`，超出的零日志」（docs/28 · L-LOG-01）。
+   * `reason` 是机器可读的拒绝分类，由 `execute()` 写入 `tool.denied`。它不能在此处记录 ——
+   * 本方法刻意保持只读（以便穷举测试给定角色与上下文时是否应放行，docs/27 · D-03）；
+   * 而不记录的代价实测为 45 次调用只有 40 条 `tool.call`，超出部分无任何日志（docs/28 · L-LOG-01）。
    */
   admit(
     name: string,
@@ -691,16 +691,16 @@ export class ToolRegistry {
     const tool = this.#tools.get(name);
     if (!tool)
       return { ok: false, error: "tool_unavailable", reason: "unknown_tool" };
-    // 「本轮已经连续失败到被停用」和「这个工具根本不存在」对模型是两回事：前者要让它换个办法，
-    // 后者要让它别再猜工具名。混成一句 tool_unavailable 时模型通常继续原地重试到步数耗尽。
+    // 本轮因连续失败而被停用与该工具根本不存在，对模型是两回事：前者应引导它更换方法，
+    // 后者应引导它停止猜测工具名。合并为一句 tool_unavailable 时，模型通常会原地重试至步数耗尽。
     if (state.disabled.has(name))
       return {
         ok: false,
         error: "tool_disabled_after_errors",
         reason: "disabled_after_errors",
-        hint: `本轮连续失败 ${this.#limits().maxConsecutiveErrors} 次后已停用，换个办法或如实告诉用户。`,
+        hint: `本轮连续失败 ${this.#limits().maxConsecutiveErrors} 次后已停用；请更换方法或如实告知用户。`,
       };
-    // 目录过滤之外再挡一次：模型可能沿用上一步的工具名，运维的禁用必须是硬边界。
+    // 在目录过滤之外再拦截一次：模型可能沿用上一步的工具名，运维的禁用必须是硬边界。
     if (this.disabledByOperator(name))
       return {
         ok: false,
@@ -713,9 +713,9 @@ export class ToolRegistry {
       roleRank(this.effectivePolicy(tool).minRole)
     )
       return { ok: false, error: "权限不足", reason: "role" };
-    // active() 的过滤集合必须在这里逐条复查，否则「目录里没有」就成了唯一的边界，而模型完全可以
-    // 凭上一步的工具名直接调过来。目前每个相关工具恰好各自 fail-closed，但那是巧合不是设计
-    // （docs/20 · W-TOOL-01；docs/05 §220「单一数据源」）。
+    // active() 的过滤集合必须在此逐条复查，否则目录中不存在就成为唯一边界，而模型完全可以凭
+    // 上一步的工具名直接调用。当前每个相关工具恰好各自 fail-closed，但那属于巧合而非设计
+    // （docs/20 · W-TOOL-01；docs/05 §220 单一数据源）。
     if (context.agentKind === "sub" && name === "memory_write")
       return {
         ok: false,
@@ -741,7 +741,7 @@ export class ToolRegistry {
     return { ok: true, tool };
   }
 
-  /** 一次拒绝落一条 `tool.denied`。`error` 是给模型看的那句，`reason` 是给日志与排障用的档位。 */
+  /** 每次拒绝记录一条 `tool.denied`。`error` 面向模型，`reason` 是供日志与排障使用的分类。 */
   #denied(
     name: string,
     context: ToolExecutionContext,
@@ -762,11 +762,12 @@ export class ToolRegistry {
   }
 
   /**
-   * 审批档位合并。`approvalFor` 让工具按**本轮配置**把自己抬进审批（`memory.pubWriteRequiresApproval`
-   * 就是这么接的）。它只能抬高，不能放低 —— 否则一个工具就能把自己从注册期定死的档位里摘出去。
+   * 审批档位合并。`approvalFor` 使工具可按本轮配置将自身提升至审批档位
+   * （`memory.pubWriteRequiresApproval` 即以此方式接入）。它只能提高不能降低 —— 否则工具可将
+   * 自身从注册期确定的档位中移除。
    *
-   * 运维覆盖设的是**基准档**，同样只参与这次取最严：把 `memory_write` 的基准改成 `never`，
-   * `approvalFor` 该抬还是抬（docs/09 §3.7）。
+   * 运维覆盖设置的是基准档位，同样只参与本次取最严操作：将 `memory_write` 的基准改为 `never` 后，
+   * `approvalFor` 仍会提档（docs/09 §3.7）。
    */
   #approvalDecision(
     tool: RegisteredTool,
@@ -794,8 +795,8 @@ export class ToolRegistry {
   ): Promise<object> {
     const admitted = this.admit(name, context);
     if (!admitted.ok) {
-      // 两条日志不是重复：`tool.denied` 是准入闸的统一流水（每一次拒绝一行，带档位），
-      // `tool.disabled` 是「运维在界面上关掉的东西被模型硬调过来」这一档的运维视角凭据。
+      // 两条日志并非重复：`tool.denied` 是准入闸的统一流水（每次拒绝一行，带分类），
+      // `tool.disabled` 是运维在界面上禁用的工具被模型直接调用这一情形的运维视角凭据。
       this.#denied(name, context, admitted.reason, admitted.error);
       if (admitted.warn)
         this.log.event({
@@ -816,16 +817,16 @@ export class ToolRegistry {
     const parsed = (
       tool.inputSchemaFor?.(context) ?? tool.inputSchema
     ).safeParse(rawInput);
-    // 参数不合法算一次失败。`maxConsecutiveErrors` 是「模型别原地重试到步数耗尽」的**唯一**硬
-    // 边界，而它此前只数 execute 的失败 —— 参数写错和审批被拒这两种最常见的失败一次都不计，
-    // 于是同一个错误的调用可以无限次重来（实测 6 次全部照收）。
+    // 参数不合法计为一次失败。`maxConsecutiveErrors` 是防止模型原地重试至步数耗尽的唯一硬边界，
+    // 而它此前只统计 execute 的失败 —— 参数错误与审批被拒这两种最常见的失败完全不计入，
+    // 导致同一个错误调用可无限重复（实测 6 次全部被接受）。
     if (!parsed.success) {
       this.#failed(state, name, context);
       const detail = parsed.error.issues
         .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
         .join("; ");
-      // 与 `runtime.ts` 那条 `tool.error` 同一个 kind：从模型的角度这是同一件事（参数写错了），
-      // 只是这一份是 AI SDK 放过、被 `inputSchemaFor` 收窄后的 schema 拦下的那一档（docs/28 · L-LOG-03）。
+      // 与 `runtime.ts` 中的 `tool.error` 使用同一 kind：从模型视角这是同一件事（参数写错），
+      // 只是这一份属于 AI SDK 放行、被 `inputSchemaFor` 收窄后的 schema 拦截的情形（docs/28 · L-LOG-03）。
       this.log.event({
         level: "warn",
         kind: "tool.error",
@@ -843,12 +844,12 @@ export class ToolRegistry {
       });
       return { ok: false, error: "invalid_input", hint: detail };
     }
-    // **审批段与钩子也在 try 里面。** 它们此前在外面，于是 `approval.request` 的
-    // `INSERT INTO approvals` 一旦失败（库满/被锁/已 close），异常就穿过 `execute()` 抛进
-    // AI SDK —— 绕开了这个方法对其他所有失败都保证的统一 `{ok:false,error,hint}` 形状，
-    // 而且 `#failed` 不计数，`tools.maxConsecutiveErrors` 那道「模型别原地重试到步数耗尽」
-    // 的唯一硬边界不推进。`#approvalDecision` 里的 RE2 编译、`onToolCall` 钩子同理。
-    // span 因此要提前声明：抛在建 span 之前时 catch 里 `span?.end` 才不会再抛一次。
+    // 审批段与钩子同样位于 try 内。它们此前在 try 之外，导致 `approval.request` 的
+    // `INSERT INTO approvals` 一旦失败（库满、被锁、已 close），异常会穿过 `execute()` 抛给
+    // AI SDK —— 绕开本方法对其余所有失败都保证的统一 `{ok:false,error,hint}` 形状，
+    // 且 `#failed` 不计数，`tools.maxConsecutiveErrors` 这一防止模型原地重试至步数耗尽的
+    // 唯一硬边界不会推进。`#approvalDecision` 中的 RE2 编译与 `onToolCall` 钩子同理。
+    // span 因此需提前声明：在创建 span 之前抛出时，catch 中的 `span?.end` 才不会再次抛出。
     let span: LogSpan | null = null;
     try {
       const decision = this.#approvalDecision(tool, parsed.data, context);
@@ -862,8 +863,8 @@ export class ToolRegistry {
         const approved =
           typeof verdict === "boolean" ? verdict : verdict.approved;
         const hint = typeof verdict === "boolean" ? undefined : verdict.hint;
-        // 被拒同样计一次失败：owner 连着拒两次之后模型该换个做法，而不是把同一个高危调用
-        // 改个字再递上来 —— 每一次都是一条推给 owner 的审批通知。
+        // 被拒同样计为一次失败：owner 连续拒绝两次后模型应更换做法，而不是把同一个高危调用
+        // 改动措辞后再次提交 —— 每一次都会向 owner 推送一条审批通知。
         if (!approved) {
           this.#failed(state, name, context);
           this.#denied(name, context, "approval", "未获批准");
@@ -871,9 +872,9 @@ export class ToolRegistry {
         }
       }
       state.calls += 1;
-      // 记在这里而不是 `admit()` 之后：被拒的参数、被拒的审批都不算「调用过工具」，
-      // 数进去的话轮次统计会比模型真正做过的事多出一截。子 agent 的调用也算在本轮账上
-      // （`context.turn.turnId` 对父子是同一个），与 `model_calls` 的口径一致。
+      // 记录在此处而非 `admit()` 之后：被拒的参数与被拒的审批都不计为已调用工具，
+      // 计入的话轮次统计会高于模型实际执行的操作。子 agent 的调用同样计入本轮
+      // （`context.turn.turnId` 对父子相同），与 `model_calls` 的口径一致。
       this.turns?.incrementToolCall(context.turn.turnId);
       await this.hooks?.hook("onToolCall", {
         name,
@@ -889,11 +890,11 @@ export class ToolRegistry {
         chatId: context.turn.chatId,
         userId: context.turn.initiatorUserId,
         key: context.turn.key,
-        // `AC-LOG-003` 要「展开任一 `tool.call` 能看出…是否经审批」，而此前这份载荷只有 `{input}`。
-        // 走到这里时被拒的那条早已 return，所以 `granted` 恒真 —— 写出来是为了让这一行**自己**
-        // 说得清，而不是要读的人先懂控制流。「是否沙箱」由挂在这条 span 之下的 `sandbox.run`
-        // 子行回答（`parentSpanId` 那条链，docs/10 §1）：沙箱是三条工具路径共用的底层，
-        // 把它的事实复制一份进这里就会有两个真相。
+        // `AC-LOG-003` 要求展开任一 `tool.call` 都能看出是否经过审批，而此前该载荷只有 `{input}`。
+        // 执行到此处时被拒的分支早已 return，因此 `granted` 恒为真 —— 显式写出是为了让这一行本身
+        // 表达完整，而不要求读者先理解控制流。是否使用沙箱由挂在该 span 之下的 `sandbox.run`
+        // 子行回答（`parentSpanId` 构成的链，docs/10 §1）：沙箱是三条工具路径共用的底层，
+        // 将其事实复制一份到此处会产生两个真相来源。
         data: {
           input: parsed.data,
           approval: decision.needed
@@ -901,12 +902,12 @@ export class ToolRegistry {
             : { required: false },
         },
       });
-      // 挂住的工具调用会挂住整轮：AI SDK 的 toolMs 只是把一个信号递给 execute()，工具不认它就等于
-      // 没有超时。这里改成硬 race —— 到点就把失败交回模型，让它换个做法，而不是让用户对着沉默
-      // 一直等到 `turnTimeoutMs`（logs/2026-08-17 有 7 轮只有 turn.start 没有 turn.end）。
-      // `timeoutMs === null` 的分支必须在最前面：bash / python / spawn_agent / spawn_harness /
-      // ask_parent 各有自己的硬期限，运维从工具页给它们套一层外层 race 会在它们自己的超时之前
-      // 把调用砍掉（工具页对这几个置灰，这里是不信界面的那道兜底）。
+      // 挂起的工具调用会阻塞整轮：AI SDK 的 toolMs 只是向 execute() 传递一个信号，工具不识别它即
+      // 等同于没有超时。此处改为硬 race —— 到期即向模型返回失败，让它更换做法，而不是让用户面对
+      // 沉默直至 `turnTimeoutMs`（logs/2026-08-17 中有 7 轮只有 turn.start 没有 turn.end）。
+      // `timeoutMs === null` 的分支必须排在最前：bash / python / spawn_agent / spawn_harness /
+      // ask_parent 各有自身的硬期限，运维在工具页为它们叠加一层外层 race 会在其自身超时之前
+      // 终止调用（工具页对这几项置灰，此处是不依赖界面的兜底）。
       const budget =
         tool.timeoutMs === null
           ? null
@@ -914,9 +915,9 @@ export class ToolRegistry {
             tool.timeoutMs ??
             this.#limits().defaultTimeoutMs ??
             FALLBACK_TOOL_TIMEOUT_MS);
-      // **浅拷贝一份**，不改共享的 context：这一层往下的 span（子 agent 的 `agent.run`、
-      // `ask_parent` 的 `agent.ask`、`send_message` 的 `tg.send`）都要挂在**本次**调用之下，
-      // 而同一步里并排的多个 `spawn_agent` 共用同一个 context 对象 —— 原地改就会互相顶掉（docs/10 §1）。
+      // 浅拷贝一份，不修改共享的 context：该层之下的 span（子 agent 的 `agent.run`、
+      // `ask_parent` 的 `agent.ask`、`send_message` 的 `tg.send`）都需挂在本次调用之下，
+      // 而同一步内并行的多个 `spawn_agent` 共用同一个 context 对象 —— 原地修改会互相覆盖（docs/10 §1）。
       const called = tool.execute(parsed.data, {
         ...context,
         parentSpanId: span.id,
@@ -947,7 +948,7 @@ export class ToolRegistry {
         error: error instanceof Error ? error.message : "tool_error",
         ...(error instanceof ToolTimeout
           ? {
-              hint: `${error.ms}ms 内没有返回，本次调用已放弃；换个参数或换个办法，别原样重试。`,
+              hint: `${error.ms}ms 内未返回，本次调用已放弃；请更换参数或方法，不要原样重试。`,
             }
           : {}),
       };
@@ -957,7 +958,7 @@ export class ToolRegistry {
     this.#turns.delete(turnId);
   }
 
-  /** 连续失败到上限就在本轮停用，并留一条 warn：排障时要看得见「模型不是没试，是被拦下了」。 */
+  /** 连续失败达到上限即在本轮停用，并记录一条 warn：排障时需能看出模型并非未尝试，而是被拦截。 */
   #failed(
     state: TurnToolState,
     name: string,
@@ -981,12 +982,12 @@ export class ToolRegistry {
   }
 
   /**
-   * 工具页要的那张表：每个**已注册**工具的默认策略、当前生效策略、以及哪几项被放宽了。
+   * 工具页所需的表格：每个已注册工具的默认策略、当前生效策略，以及哪些项被放宽。
    *
-   * 由注册表来出这份数据而不是让服务端拿 `TOOL_POLICY` 自己再算一遍：合并逻辑只有一份才不会
-   * 出现「面板显示的权限和运行时判的不是一回事」。顺带 MCP / plugin 注册进来的工具也进了这张表
-   * —— 之前的 `GET /api/tools` 只枚举 `TOOL_POLICY`，那些工具在面板上根本不存在，而
-   * `disabledByOperator` 一直是认它们的。
+   * 由注册表产出该数据，而非让服务端基于 `TOOL_POLICY` 重新计算：合并逻辑只有一份才不会出现
+   * 面板显示的权限与运行时判定不一致。同时 MCP / plugin 注册的工具也进入该表 —— 此前的
+   * `GET /api/tools` 只枚举 `TOOL_POLICY`，那些工具在面板上完全不存在，而
+   * `disabledByOperator` 一直是识别它们的。
    */
   describe(): Array<{
     name: string;
@@ -1018,8 +1019,8 @@ export class ToolRegistry {
           effective: this.effectivePolicy(tool),
           enabled: override?.enabled !== false,
           timeoutMs: selfManaged ? null : (override?.timeoutMs ?? declared),
-          // 按当前 `tools.catalog.*` **静态**判：这张表没有角色也没有轮次上下文，所以它答的是
-          // 「这个工具在这台机器的配置下属于折叠族吗」，不是「某一轮里它被折叠了吗」。
+          // 按当前 `tools.catalog.*` 静态判定：该表没有角色也没有轮次上下文，因此它回答的是
+          // 该工具在本机配置下是否属于折叠族，而非它在某一轮中是否被折叠。
           defaultTimeoutMs: declared,
           selfManagedTimeout: selfManaged,
           deferred: this.#deferredFor(tool),
@@ -1032,8 +1033,8 @@ export class ToolRegistry {
     const max = this.#limits().maxOutputBytes ?? 65_536;
     const { media, rest } = splitToolMedia(output);
     const serialized = JSON.stringify(rest);
-    // 按字符边界切（docs/27 · T-04）：裸 `subarray().toString('utf8')` 会把末尾那个多字节字符
-    // 切成半个，模型看到的是一串 U+FFFD。
+    // 按字符边界切分（docs/27 · T-04）：直接 `subarray().toString('utf8')` 会截断末尾的多字节
+    // 字符，模型看到的是一串 U+FFFD。
     const { value, truncated } = elideMiddleBytes(
       serialized,
       max,

@@ -39,8 +39,8 @@ const CATEGORY_BY_PREFIX: Record<string, string> = {
   mcp: "system",
 };
 const LEVEL_RANK = { debug: 0, info: 1, warn: 2, error: 3 } as const;
-/** 广播阈值与合并窗口刻意不做成配置项：这两个值一旦调松（广播 debug、或把窗口调到 0），
- *  「每来一条事件前端重拉一次」就会变成自我 DDoS（docs/21 §3 · G-SSE-01）。 */
+/** 广播阈值与合并窗口刻意不设为配置项：这两个值一旦放宽（广播 debug、或把窗口调为 0），
+ *  每条事件触发一次前端重拉将构成自我 DDoS（docs/21 §3 · G-SSE-01）。 */
 const BROADCAST_MIN_LEVEL: LogEvent["level"] = "info";
 const COALESCE_MS = 200;
 
@@ -52,8 +52,8 @@ export interface LogSinkOptions {
   events?: EventBus;
 }
 
-/** SSE 上那条 `log` 事件的载荷：**只有摘要，没有 `data`**。单条载荷能到几百 KB
- *  （`model.call` 带请求体），全量广播会把每个开着的 WebUI 连接一起打爆。 */
+/** SSE 上 `log` 事件的载荷：只含摘要，不含 `data`。单条载荷可达几百 KB
+ *  （`model.call` 携带请求体），全量广播会压垮每个打开的 WebUI 连接。 */
 export interface LogBroadcast {
   id: number;
   ts: number;
@@ -65,12 +65,12 @@ export interface LogBroadcast {
 }
 
 /**
- * `end()` 里可以改写的两列。**`summary` 与 `level` 是列不是载荷**（`span()` 用 `...input` 展开），
- * 所以开始时定下的那份没有别的办法改 —— 而「开始时还不知道最终该写什么」是真实存在的：
- * `model.call` 的 span 在 `onStepStart` 开，那时 AI SDK 报的是**链首**，而链内 fallback 换掉的
- * 候选它看不见（`wrapLanguageModel` 让 SDK 可见的永远是链首）。此前那一行于是记着**失败的候选**，
- * 同一次调用在日志与 `usage_ledger` 里指向两个不同的 provider（docs/28 · L-PROV-01），而
- * `docs/10 §7` 第 3 条要求摘要行里就能看出 provider/模型/别名。
+ * `end()` 中可改写的两列。`summary` 与 `level` 是列而非载荷（`span()` 用 `...input` 展开），
+ * 因此开始时确定的值没有其他修改途径 —— 而开始时无法确定最终值是真实存在的情形：
+ * `model.call` 的 span 在 `onStepStart` 开启，此时 AI SDK 报告的是链首，链内 fallback 更换的
+ * 候选它不可见（`wrapLanguageModel` 使 SDK 始终只见链首）。此前该行因而记录失败的候选，
+ * 同一次调用在日志与 `usage_ledger` 中指向两个不同的 provider（docs/28 · L-PROV-01），而
+ * `docs/10 §7` 第 3 条要求摘要行可直接看出 provider/模型/别名。
  */
 export interface SpanOverride {
   summary?: string;
@@ -123,18 +123,18 @@ export class LogSink {
   setLevel(level: LogEvent["level"]): void {
     this.#level = level;
   }
-  /** `logs.redactPatterns`：追加到内置脱敏规则上的正则源串。热更新时整份换掉。 */
+  /** `logs.redactPatterns`：追加到内置脱敏规则上的正则源串。热更新时整体替换。 */
   redactPatterns: readonly string[] = [];
 
   setSecrets(secrets: readonly string[]): void {
     this.secrets = [...new Set(secrets.filter(Boolean))];
   }
-  /** 装配方在这里挂告警（`alerts.on` 的 db_write_failed）。落盘/落库失败是「日志本身也不可信了」
-   *  的状态，只写 stderr 的话运维通常永远看不到。设置它的调用方必须保证回调自己不抛。 */
+  /** 装配方在此挂载告警（`alerts.on` 的 db_write_failed）。落盘或落库失败意味着日志本身已不可信，
+   *  仅写 stderr 时运维通常无法察觉。设置它的调用方必须保证回调自身不抛出。 */
   onWriteFailure?: (error: unknown) => void;
-  /** `onWriteFailure` 挂的是 `alerts.fire('db_write_failed')`，而 `AlertDispatcher.raise()` 第一件事
-   *  就是往库里记一行 `alert.raised` —— 库坏了这一路会绕回这里。今天 `dedupeMinutes` 恰好也断得掉
-   *  （`#remember` 在那次 log.event 之前调），但「日志失败不会打转」不该靠告警的去重窗口成立。 */
+  /** `onWriteFailure` 挂载的是 `alerts.fire('db_write_failed')`，而 `AlertDispatcher.raise()` 首先
+   *  向库中写入一行 `alert.raised` —— 库故障时该路径会回到此处。当前 `dedupeMinutes` 也能中断循环
+   *  （`#remember` 在那次 log.event 之前调用），但日志失败不循环这一性质不应依赖告警的去重窗口。 */
   #reporting = false;
 
   #reportWriteFailure(error: unknown): void {
@@ -143,14 +143,14 @@ export class LogSink {
         `[log] 写入失败：${error instanceof Error ? error.message : String(error)}\n`,
       );
     } catch {
-      /* stderr 也不可用 */
+      /* stderr 同样不可用 */
     }
     if (this.#reporting) return;
     this.#reporting = true;
     try {
       this.onWriteFailure?.(error);
     } catch {
-      /* 告警链路自己坏了也不能再炸一次 */
+      /* 告警链路自身故障时不得再次抛出 */
     } finally {
       this.#reporting = false;
     }
@@ -167,7 +167,7 @@ export class LogSink {
       try {
         bytes = existsSync(path) ? statSync(path).size : 0;
       } catch {
-        /* 首次写时重试 */
+        /* 首次写入时重试 */
       }
       state = { bytes, buffer: "", timer: null };
       this.#files.set(path, state);
@@ -176,9 +176,9 @@ export class LogSink {
   }
 
   /**
-   * 只有一条同步路径（`appendFileSync`）。此前还带一个 `synchronous` 参数，三处调用点都传 `true`、
-   * 函数体以 `void synchronous;` 结尾 —— 留着会让读者以为存在两条路径（docs/27 · T-02）。
-   * 真要加异步分支，那时再加参数。
+   * 只有一条同步路径（`appendFileSync`）。此前带有 `synchronous` 参数，三处调用点均传 `true`，
+   * 函数体以 `void synchronous;` 结尾 —— 保留会使读者误以为存在两条路径（docs/27 · T-02）。
+   * 若将来需要异步分支，届时再加参数。
    */
   #flushFile(path: string): void {
     const state = this.#files.get(path);
@@ -225,15 +225,15 @@ export class LogSink {
     }
   }
 
-  /** 结构化事件（`turn.*` / `usage` / `quota` / `task.updated`）与日志是同一条观测流，
-   *  从已经持有 LogSink 的调用点直接发，而不是把 EventBus 再穿一遍六个构造函数 ——
-   *  漏穿一个的表现就是某一类事件永远不到，而这正是 G-SSE-01 的成因。不落库，只广播。 */
+  /** 结构化事件（`turn.*` / `usage` / `quota` / `task.updated`）与日志同属一条观测流，
+   *  由已持有 LogSink 的调用点直接发出，而不是把 EventBus 再穿过六个构造函数 ——
+   *  遗漏一处的表现是某类事件永不到达，这正是 G-SSE-01 的成因。不落库，只广播。 */
   publish(type: string, data: unknown): void {
     this.#events?.emit(type, data);
   }
 
-  /** 同一 `kind` 在 COALESCE_MS 内只留最后一条，并带上被合并的条数：一次工具风暴里
-   *  `tool.call` 能在几十毫秒内来上百条，不合并的话前端每条都要重拉一次数据。 */
+  /** 同一 `kind` 在 COALESCE_MS 内只保留最后一条，并附带被合并的条数：工具密集调用时
+   *  `tool.call` 可在几十毫秒内产生上百条，不合并则前端每条都要重拉一次数据。 */
   #broadcast(event: LogBroadcast): void {
     if (
       !this.#events ||
@@ -265,12 +265,12 @@ export class LogSink {
           : entry.event,
       );
     }, wait);
-    // 尾部那一条不该把进程留住：CLI 与测试里 LogSink 常常是最后一个活着的句柄。
+    // 尾包定时器不应阻止进程退出：CLI 与测试中 LogSink 常是最后一个存活的句柄。
     timer.unref?.();
     this.#pending.set(event.kind, { timer, event, merged: 1 });
   }
 
-  /** 关停时刷新文件缓冲，并丢掉尚未发出的 SSE 尾包。 */
+  /** 关停时刷新文件缓冲，并丢弃尚未发出的 SSE 尾包。 */
   close(): void {
     for (const entry of this.#pending.values()) clearTimeout(entry.timer);
     this.#pending.clear();
@@ -320,12 +320,12 @@ export class LogSink {
       process.stdout.write(
         `${new Date().toISOString()} ${input.level.toUpperCase()} ${input.kind} ${input.summary}\n`,
       );
-    // **入库失败一律不往外抛。** 这个方法的调用点全在 catch 块、`.catch()` 回调、以及
-    // `main.ts` 的 crash handler 里 —— 让它抛等于把「日志写不进去」升级成「轮次失败」，
-    // 再升级成「crash handler 自己抛，`process.exit(1)` 走不到」。关停竞态里这是必然发生的：
-    // `poller.drain()` 宽限期用完就返回，在途 handler 之后才 settle，那时 `closeDatabase`
-    // 已经跑过。同一个类里所有文件写早就走 `#reportWriteFailure` 了，只有这一行是裸的。
-    // 返回 0 与「级别不够」那条同一个约定（本方法开头），调用方本来就不该拿它当真 id。
+    // 入库失败一律不向外抛出。本方法的调用点全部位于 catch 块、`.catch()` 回调以及
+    // `main.ts` 的 crash handler 中 —— 抛出会把日志写入失败升级为轮次失败，
+    // 再升级为 crash handler 自身抛出、`process.exit(1)` 无法执行。关停竞态下这必然发生：
+    // `poller.drain()` 宽限期结束即返回，在途 handler 之后才 settle，此时 `closeDatabase`
+    // 已执行完毕。本类中所有文件写入均已走 `#reportWriteFailure`，只有此处未处理。
+    // 返回 0 与级别不足那一条采用同一约定（见本方法开头），调用方本就不应将其视为真实 id。
     let id: number;
     try {
       id = this.repository.insertLog({
@@ -336,8 +336,8 @@ export class LogSink {
       this.#reportWriteFailure(error);
       return 0;
     }
-    // 广播必须在入库成功之后：前端拿这个 id 去 `/api/logs/:id` 拉详情，播一个 0 等于
-    // 在日志页塞一条点不开的行。
+    // 广播必须在入库成功之后：前端用该 id 调 `/api/logs/:id` 拉取详情，广播 0 等于
+    // 在日志页插入一条无法打开的行。
     this.#broadcast({
       id,
       ts,
@@ -350,15 +350,15 @@ export class LogSink {
   }
 
   /**
-   * 一个 span 只落一行，所以开始时的 `data` 与结束时的载荷必须**合并**而不是相互覆盖。
+   * 一个 span 只写一行，因此开始时的 `data` 与结束时的载荷必须合并而非相互覆盖。
    *
-   * 此前 `end()` 里 `data:` 排在 `...input` 之后，开始那份被无条件顶掉：`tool.call` 传进来的
-   * `{input}` 从来没有一次落到库里（30/30 条只有 `{output}`），`model.call` 的
-   * `stepNumber` / `provider` / `instructions` 同样丢掉，而失败路径 `end(undefined, error)`
-   * 更是把输入输出一起丢 —— 排障时只剩「某个工具报错了」。`docs/10 §2` 的字段集和
-   * `docs/09 §3.10` 的「可展开看工具输入输出」写的一直是合并后的那份。
+   * 此前 `end()` 中 `data:` 排在 `...input` 之后，开始那份被无条件覆盖：`tool.call` 传入的
+   * `{input}` 从未写入库中（30/30 条只有 `{output}`），`model.call` 的
+   * `stepNumber` / `provider` / `instructions` 同样丢失，而失败路径 `end(undefined, error)`
+   * 会同时丢弃输入与输出 —— 排障时只剩某个工具报错这一信息。`docs/10 §2` 的字段集与
+   * `docs/09 §3.10` 的可展开查看工具输入输出，描述的一直是合并后的结果。
    *
-   * `end()` 的第三个参数只改 `summary` / `level` 两**列**（载荷的合并契约一个字不动），见 `SpanOverride`。
+   * `end()` 的第三个参数只修改 `summary` / `level` 两列（载荷的合并契约不变），见 `SpanOverride`。
    */
   span(input: Omit<LogEvent, "spanId">): LogSpan {
     const id = ulid();
@@ -390,8 +390,8 @@ const plain = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
 /**
- * 非对象的结束值挂在 `result` 下而不是顶掉开始那份：调用方给的是字符串/数组时，
- * 合并没有意义，但开始时的上下文（工具参数、step 号）仍然是排障要看的东西。
+ * 非对象的结束值挂在 `result` 下而非覆盖开始那份：调用方传入字符串或数组时，
+ * 合并没有意义，但开始时的上下文（工具参数、step 号）仍是排障所需信息。
  */
 function mergeSpanData(open: unknown, close: unknown, error: unknown): unknown {
   const head =

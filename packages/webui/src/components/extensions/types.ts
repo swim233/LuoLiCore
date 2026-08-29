@@ -3,9 +3,9 @@ import type { TagSeverity } from "../../ui/types";
 /**
  * 扩展页四类的行类型与它们共用的那一条判据。
  *
- * 这一页的活儿不是「列出扩展」，是**决定模型被允许具备什么能力，并且真的看过**。M12 之后其中
- * 一部分是模型自己写的，所以视觉主轴取「谁写的 / 有没有人看过」而不是「开着还是关着」——
- * `provenanceOf()` 是那条主轴的唯一实现，四类共用。
+ * 这一页的职责不是列出扩展，而是决定模型被允许具备什么能力并确认已复审。M12 之后其中
+ * 一部分由模型自行编写，因此视觉主轴取来源与是否已复审，而不是启用与否。
+ * `provenanceOf()` 是该主轴的唯一实现，四类共用。
  */
 
 export interface SkillRow {
@@ -13,12 +13,12 @@ export interface SkillRow {
   description?: string;
   min_role?: string;
   enabled?: number;
-  /** `bundled` 随包发的四份说明书 / `package` 装包装进来的 / `local` 手写或 `write_skill` 写的。 */
+  /** `bundled` 随包发布的四份说明文档；`package` 由安装包引入；`local` 手写或 `write_skill` 生成。 */
   source?: string;
   load_error?: string | null;
   updated_at?: number;
   allowed_tools?: string[];
-  /** 这几个工具不在本轮工具集里时，这份 skill 压根不进模型的目录（`SkillLoader.catalog()`）。 */
+  /** 这几个工具不在本轮工具集中时，该 skill 不会进入模型的目录（`SkillLoader.catalog()`）。 */
   requires_tools?: string[];
 }
 
@@ -29,7 +29,7 @@ export interface PluginRow {
   enabled?: number;
   load_error?: string | null;
   updated_at?: number;
-  /** `{ tools, hooks, commands, agents }`。plugin 侧的「N 个工具」，端点一直在发。 */
+  /** `{ tools, hooks, commands, agents }`。plugin 侧的能力条数，端点一直在发送。 */
   provides_json?: string | null;
 }
 
@@ -84,11 +84,11 @@ export interface CustomToolRow {
 }
 
 /**
- * 来源。`id` 直接当 CSS 类后缀用（`.ext-row.from-<id>` 决定左侧那条脊的颜色）。
+ * 来源。`id` 直接用作 CSS 类后缀（`.ext-row.from-<id>` 决定左侧脊线的颜色）。
  *
- * **字段名不叫 `kind`**：`tests/docs.test.ts` 反向扫全仓库里带引号字面量的 `kind` 属性，
- * 要求每一个都在 `docs/10` §2 的事件表里有一行或进 `NON_LOG_KINDS`。这四个不是日志事件，
- * 不该去占那张表。（连这句注释本身都得绕开那个模式 —— 它是纯文本匹配。）
+ * 字段名不叫 `kind`：`tests/docs.test.ts` 反向扫描全仓库中带引号字面量的 `kind` 属性，
+ * 要求每一个都在 `docs/10` §2 的事件表中有一行或列入 `NON_LOG_KINDS`。这四个不是日志事件，
+ * 不应占用那张表。（这段注释本身也需避开该模式，它是纯文本匹配。）
  */
 export type ProvenanceKind = "bundled" | "local" | "package" | "model";
 export interface Provenance {
@@ -101,18 +101,18 @@ const PROVENANCE: Record<ProvenanceKind, Provenance> = {
   bundled: {
     id: "bundled",
     label: "随包",
-    hint: "跟着这个版本一起发的，只能启停",
+    hint: "随发行版分发，仅可启停",
   },
-  local: { id: "local", label: "本地", hint: "在这台机器上写的" },
+  local: { id: "local", label: "本地", hint: "在本机创建" },
   package: {
     id: "package",
     label: "安装包",
-    hint: "从一个 zip 里装进来的，可能带脚本与二进制",
+    hint: "从 zip 安装，可能包含脚本与二进制文件",
   },
   model: {
     id: "model",
     label: "模型自撰",
-    hint: "模型自己写下的，启用前该读过正文",
+    hint: "由模型创建，启用前需人工复核正文",
   },
 };
 
@@ -120,9 +120,9 @@ export const provenanceOf = (kind: ProvenanceKind): Provenance =>
   PROVENANCE[kind];
 
 /**
- * **「未审阅」与「停用」是两档。** 前者是没人看过，后者是有人看过之后关掉的 —— 混成一个标签，
- * 运维就分不清哪些在等自己。这条判据在四类上的形状不同，所以由各自的组件决定，
- * 但呈现（琥珀脊 + 虚线边框）统一在 `.ext-row.pending-review` 里。
+ * 未审阅与停用是两档状态。前者是尚未复审，后者是复审后关闭的；合并为一个标签会使
+ * 运维无法分辨哪些仍在等待处理。这条判据在四类上的形状不同，因此由各自的组件决定，
+ * 但呈现（琥珀脊线与虚线边框）统一在 `.ext-row.pending-review` 中。
  */
 export const skillPendingReview = (row: SkillRow): boolean =>
   row.enabled === 0 && row.source === "package";
@@ -135,13 +135,13 @@ export const MCP_STATE_LABELS: Record<
 > = {
   up: { label: "已连接", severity: "success" },
   pending: { label: "等待连接", severity: "warn" },
-  down: { label: "连不上", severity: "danger" },
-  /** 本轮新增。跟 `down` 分开的理由是运维动作完全不同：这一档要人去点一次授权。 */
+  down: { label: "连接失败", severity: "danger" },
+  /** 本轮新增。与 `down` 分开的理由是运维动作不同：这一档需要执行一次授权操作。 */
   needs_auth: { label: "要登录", severity: "warn" },
   disabled: { label: "停用", severity: "secondary" },
 };
 
-/** 「上次核对」超过这么久就提示可能陈旧。`mcp.healthCheckCron` 默认 5 分钟一次，留一格余量。 */
+/** 上次核对超过该时长即提示数据可能陈旧。`mcp.healthCheckCron` 默认 5 分钟一次，此处留一档余量。 */
 export const MCP_STALE_AFTER_MS = 6 * 60_000;
 
 export function relativeTime(at?: number | null): string {
@@ -153,7 +153,7 @@ export function relativeTime(at?: number | null): string {
   return `${Math.floor(delta / 86_400_000)} 天前`;
 }
 
-/** 到期还剩多久。已过期说「已过期」而不是负数 —— 后者读起来像个 bug。 */
+/** 距到期的剩余时长。已过期时显示「已过期」而不是负数，后者容易被误认为缺陷。 */
 export function untilTime(at?: number | null): string {
   if (!at) return "不过期";
   const delta = at - Date.now();
@@ -164,7 +164,7 @@ export function untilTime(at?: number | null): string {
   return `${Math.floor(delta / 86_400_000)} 天后到期`;
 }
 
-/** `provides_json` → 「2 个工具 · 1 个 hook」这类一句话。读不出来就当空的，不显示半截 JSON。 */
+/** 把 `provides_json` 渲染成一句摘要。解析失败时按空处理，不显示残缺的 JSON。 */
 export function pluginProvides(row: PluginRow): string[] {
   if (!row.provides_json) return [];
   let parsed: Record<string, unknown>;

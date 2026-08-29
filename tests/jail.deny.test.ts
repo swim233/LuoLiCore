@@ -4,18 +4,18 @@ import { describe, expect, it } from 'vitest';
 import { FileTools, PathJail, configSchema, selfAuthoringDenyGlobs } from '@luoli/core';
 
 /**
- * `tools.fs.denyGlobs` 里以 `/**` 结尾的那些同时拒绝那个目录**本身**（`PathJail` 在构造时派生一条
+ * `tools.fs.denyGlobs` 中以 `/**` 结尾的模式同时拒绝该目录本身（`PathJail` 在构造时派生一条
  * 去掉后缀的模式）。
  *
- * 守的是一条完整绕行：minimatch 下 `X/**` 不匹配 `X` 自己，而 `FileTools.move` 一道额外的闸都没有
- * （`remove` 有「显式 recursive + 深度 ≥2」两道，`move` 什么都没有）。于是
- * `move_file('skills','x')` → 整棵树落到名单之外 → 随便改一个**已启用** plugin 的源码 →
- * `move_file('x','skills')` 搬回去，而 `docs/07 §6.1`「内容变了就打回未启用」那道闸住在
- * `PluginManager.writeSource` 里、这条路根本不经过它。
+ * 该断言防的是一条完整绕行路径：minimatch 下 `X/**` 不匹配 `X` 本身，而 `FileTools.move` 没有任何额外闸
+ * （`remove` 有显式 recursive 与深度 ≥2 两道，`move` 没有）。因此
+ * `move_file('skills','x')` 使整棵树脱离名单，随后可修改已启用 plugin 的源码，再用
+ * `move_file('x','skills')` 移回，而 `docs/07 §6.1` 中内容变更即回退为未启用的闸位于
+ * `PluginManager.writeSource`，该路径完全不经过它。
  *
- * 修在 `PathJail` 而不是 `move` 上：判据只该有一份，`list_dir` / `grep` / `read` / `remove` 走的是
- * 同一个 `resolve`。**这不是新开一道门**，是把一道本来就想有的门修严 —— 所以这一族里同样有
- * 「不以 `/**` 结尾的 glob 语义一个字不变」和「兄弟前缀不被误伤」两条对照。
+ * 修复放在 `PathJail` 而不是 `move` 上：判据只应有一份，`list_dir` / `grep` / `read` / `remove` 使用
+ * 同一个 `resolve`。这不是新增限制，而是收紧一道本就应存在的限制，因此这一组中同样包含
+ * 不以 `/**` 结尾的 glob 语义保持不变、以及兄弟前缀不被误伤两条对照。
  */
 function fresh(name: string): { root: string; deny: (globs: readonly string[]) => PathJail; files: (globs: readonly string[]) => FileTools } {
   const root = resolve(`data/jail-deny-${name}`);
@@ -32,15 +32,15 @@ describe('denyGlobs 的 X/** 同时拒绝 X 自己', () => {
     writeFileSync(`${root}/protected/nested/a.txt`, 'x');
     writeFileSync(`${root}/ok.txt`, 'x');
     const jail = deny([`${root}/protected/**`]);
-    // 这一条是修好的那半边：此前它返回路径，于是 move / delete 拿得到那棵树。
+    // 这一条对应修复的部分：此前它返回路径，使 move 与 delete 能够访问该目录树。
     expect(() => jail.resolve('protected')).toThrow('path_denied');
     expect(() => jail.resolve('./protected')).toThrow('path_denied');
     expect(() => jail.resolve(`${root}/protected`)).toThrow('path_denied');
-    // 原来就拒的那半边一个字没变。
+    // 原本即拒绝的部分行为保持不变。
     expect(() => jail.resolve('protected/nested')).toThrow('path_denied');
     expect(() => jail.resolve('protected/nested/a.txt')).toThrow('path_denied');
     expect(() => jail.resolve('protected/does-not-exist.txt')).toThrow('path_denied');
-    // 同一个 jail 里别的路径照旧能解 —— 上面几条不是把整条路读死了。
+    // 同一 jail 中的其他路径仍可解析，上述几条不是将整条路径全部禁止。
     expect(jail.resolve('ok.txt')).toBe(`${root}/ok.txt`);
     expect(jail.resolve('.')).toBe(root);
   });
@@ -50,7 +50,7 @@ describe('denyGlobs 的 X/** 同时拒绝 X 自己', () => {
     for (const dir of ['skills', 'skills-backup', 'skillset']) mkdirSync(`${root}/${dir}`, { recursive: true });
     const jail = deny([`${root}/skills/**`]);
     expect(() => jail.resolve('skills')).toThrow('path_denied');
-    // 派生模式走的仍然是 minimatch，不是字符串前缀比较 —— 后者会把这两个也一起吃掉。
+    // 派生模式仍使用 minimatch 而不是字符串前缀比较，后者会将这两项一并匹配。
     expect(jail.resolve('skills-backup')).toBe(`${root}/skills-backup`);
     expect(jail.resolve('skillset')).toBe(`${root}/skillset`);
   });
@@ -63,14 +63,14 @@ describe('denyGlobs 的 X/** 同时拒绝 X 自己', () => {
     expect(() => jail.resolve('data/luoli.db')).toThrow('path_denied');
     expect(() => jail.resolve('data/luoli.db-wal')).toThrow('path_denied');
     expect(() => jail.resolve('keys/server.pem')).toThrow('path_denied');
-    // 这两个 glob 一个也没被派生成「连目录一起拒」，所以父目录照旧解得开。
+    // 这两个 glob 均未派生出连同目录一并拒绝的模式，因此父目录仍可解析。
     expect(jail.resolve('data')).toBe(`${root}/data`);
     expect(jail.resolve('keys')).toBe(`${root}/keys`);
     expect(jail.resolve('data/other.txt')).toBe(`${root}/data/other.txt`);
   });
 
   it('`<root>` 仍在匹配时替换 —— 派生模式没把替换时机挪到构造函数', () => {
-    // 那个时机是行为的一部分：挪到构造时会让「进程 cwd 在构造之后变了」静默改变语义。
+    // 该时机是行为的一部分：移到构造时会使进程 cwd 在构造之后变化时语义被静默改变。
     const jail = new PathJail(process.cwd(), ['<root>/config/**', '<root>/memory/**']);
     expect(() => jail.resolve('config')).toThrow('path_denied');
     expect(() => jail.resolve('config/config.yaml')).toThrow('path_denied');
@@ -111,17 +111,17 @@ describe('自撰写目录的整棵搬走：move 那条完整绕行被挡住', ()
     mkdirSync(`${root}/plugins/demo`, { recursive: true });
     writeFileSync(`${root}/plugins/demo/plugin.js`, 'module.exports = {};\n');
     const subject = files(selfAuthoringDenyGlobs({ skillsDir: `${root}/skills`, pluginsDir: `${root}/plugins` }));
-    // 绕行的第一步就断掉。`move` 自己一道闸都没有（没有 recursive、没有深度下限），所以拦住它的
-    // 只可能是 jail —— 下面那条对照证明这一点。
+    // 绕行的第一步即被阻断。`move` 自身没有任何闸（无 recursive、无深度下限），因此拦截它的
+    // 只能是 jail，下面那条对照可证明这一点。
     expect(() => subject.move('skills', 'stolen')).toThrow('path_denied');
     expect(() => subject.move('plugins', 'stolen')).toThrow('path_denied');
-    // 反方向也一样：把一棵自己造的树搬**进** skills/ 同样是绕过 writeSource。
+    // 反方向同样成立：将自建目录树移入 skills/ 同样绕过 writeSource。
     mkdirSync(`${root}/mine`, { recursive: true });
     expect(() => subject.move('mine', 'skills')).toThrow('path_denied');
     expect(() => subject.move('mine', 'skills/injected')).toThrow('path_denied');
-    // delete 那条路上此前靠「深度 ≥2」兜着（`skills` 深度 1），现在是 denyGlobs 明确拒的。
+    // delete 路径此前依赖深度 ≥2 兜底（`skills` 深度为 1），现在由 denyGlobs 明确拒绝。
     expect(() => subject.remove('skills', true)).toThrow('path_denied');
-    // 树一个字节都没动。
+    // 目录树未发生任何改动。
     expect(existsSync(`${root}/skills/demo/SKILL.md`)).toBe(true);
     expect(existsSync(`${root}/plugins/demo/plugin.js`)).toBe(true);
     expect(existsSync(`${root}/stolen`)).toBe(false);
@@ -138,9 +138,9 @@ describe('自撰写目录的整棵搬走：move 那条完整绕行被挡住', ()
 });
 
 /**
- * host-fs 形状的 jail：**边界与相对路径的解析基点是两个不同的目录**。生产里那一对是 `/` 与会话
- * workspace（`tools.fs.allowHostFsForOwner`）；这里拿一个临时目录当「整机根」而不是真的传 `/` ——
- * 判据形状一模一样，而万一闸被放空，被搬走的是 `data/` 底下一棵自己造的树，不是宿主的 `/etc`。
+ * host-fs 形态的 jail：边界与相对路径的解析基点是两个不同的目录。生产环境中这一对为 `/` 与会话
+ * workspace（`tools.fs.allowHostFsForOwner`）；这里用一个临时目录充当整机根而不是实际传入 `/`，
+ * 判据形状完全一致，而一旦闸失效，被移动的是 `data/` 下自建的目录树而非宿主的 `/etc`。
  */
 function hostFs(name: string): { boundary: string; base: string; jail: PathJail; files: FileTools } {
   const boundary = resolve(`data/jail-hostfs-${name}`);
@@ -155,15 +155,15 @@ describe('递归删除的深度闸对着可达边界量，不是相对路径的�
   it('host-fs 形状下边界底下的一级目录仍然拒 —— `..` 段不算深度', () => {
     const { boundary, files } = hostFs('shallow');
     mkdirSync(`${boundary}/one/two/three`, { recursive: true });
-    // 模型写出来的就是这个形态：基点是 `<boundary>/deep/nested/workspace`，边界底下的东西一律
-    // 带一串 `..`。旧实现量的是 `relative(jail.root, target)`，那三段 `..` 被一起数进来 ——
-    // `one` 数出 4 层、闸放行，而它离边界只有一层。
+    // 模型生成的正是这种形态：基点为 `<boundary>/deep/nested/workspace`，边界下的路径一律
+    // 带有一串 `..`。旧实现计算的是 `relative(jail.root, target)`，三段 `..` 被一并计入，
+    // 使 `one` 被判定为 4 层并放行，而它距边界只有一层。
     expect(files.remove('../../../one', true)).toMatchObject({ ok: false, error: 'recursive_delete_too_shallow' });
     expect(existsSync(`${boundary}/one/two/three`)).toBe(true);
-    // 边界自己是 0 层（`relative` 交回空串），同样拒。
+    // 边界自身为 0 层（`relative` 返回空串），同样拒绝。
     expect(files.remove('../../..', true)).toMatchObject({ ok: false, error: 'recursive_delete_too_shallow' });
     expect(existsSync(boundary)).toBe(true);
-    // 二级及更深照旧放行 —— 这道闸没有被改成「host-fs 模式下什么都删不掉」。
+    // 二级及更深路径仍然放行：这道闸没有被改成 host-fs 模式下完全禁止删除。
     expect(files.remove('../../../one/two', true)).toMatchObject({ ok: true, recursive: true });
     expect(existsSync(`${boundary}/one/two`)).toBe(false);
   });
@@ -171,8 +171,8 @@ describe('递归删除的深度闸对着可达边界量，不是相对路径的�
   it('hint 里那个数也是边界基准，不是路径里的段数', () => {
     const { boundary, files } = hostFs('hint');
     mkdirSync(`${boundary}/one`, { recursive: true });
-    // 显示路径与深度刻意不同基准：前者相对会话目录（原样交回来还能解回同一个文件），
-    // 后者相对边界。所以这句话里出现的是 `../../../one` 和 1，而不是 `../../../one` 和 4。
+    // 显示路径与深度刻意使用不同基准：前者相对会话目录（原样返回后仍能解析回同一文件），
+    // 后者相对边界。因此这条信息中给出的是 `../../../one` 与 1，而不是 `../../../one` 与 4。
     expect(files.remove('../../../one', true)).toMatchObject({ hint: expect.stringContaining('只有 1 层') });
     expect(files.remove('../../..', true)).toMatchObject({ hint: expect.stringContaining('只有 0 层') });
   });
@@ -183,7 +183,7 @@ describe('递归删除的深度闸对着可达边界量，不是相对路径的�
     expect(jail.depthFromBoundary(boundary)).toBe(0);
     expect(jail.depthFromBoundary(jail.resolve('../../../one'))).toBe(1);
     expect(jail.depthFromBoundary(jail.resolve('../../../one/two'))).toBe(2);
-    // 会话目录自己离边界三层，而它相对**自己**是 0 —— 两个基准差的就是这个。
+    // 会话目录距边界三层，而相对其自身为 0，两个基准的差异正在于此。
     expect(jail.depthFromBoundary(base)).toBe(3);
     expect(jail.depthFromBoundary(jail.resolve('.'))).toBe(3);
   });
@@ -203,15 +203,15 @@ describe('write 的路径判据排在体积闸之前', () => {
     const { root, files } = fresh('write-order');
     mkdirSync(`${root}/protected`, { recursive: true });
     const subject = files([`${root}/protected/**`]);
-    const big = 'x'.repeat(70_000); // fresh() 给的 maxWriteBytes 是 65536
-    // `jail.resolve` 是**抛**而不是返回 `{ok:false}`，所以这一族的断言形状与上面那些不同。
-    // 旧实现先量 `Buffer.byteLength` 再解析路径：这三条都报 `write_too_large` —— 什么都没落盘，
-    // 但安全信号被一句体积抱怨盖住了，而模型据此去拆分内容重试，它永远拆不出一个不越界的路径。
+    const big = 'x'.repeat(70_000); // fresh() 提供的 maxWriteBytes 为 65536
+    // `jail.resolve` 抛出异常而不是返回 `{ok:false}`，因此这一组断言的形状与上面几条不同。
+    // 旧实现先计算 `Buffer.byteLength` 再解析路径：这三条均报 `write_too_large`，虽未写入任何内容，
+    // 但安全信号被体积错误掩盖，模型据此拆分内容重试，而拆分永远无法得到一个合法路径。
     expect(() => subject.write('protected/a.txt', big)).toThrow('path_denied');
     expect(() => subject.write('protected', big)).toThrow('path_denied');
     expect(() => subject.write('../escaped.txt', big)).toThrow('path_outside_workspace');
     expect(existsSync(`${root}/protected/a.txt`)).toBe(false);
-    // 对照：路径没问题时照旧是体积闸那一档 —— 上面三条不是「反正都拒」才恰好过的。
+    // 对照：路径合法时仍落在体积闸这一档，上面三条并非因为一律拒绝才通过。
     expect(subject.write('ok.txt', big)).toMatchObject({ ok: false, error: 'write_too_large' });
     expect(existsSync(`${root}/ok.txt`)).toBe(false);
     expect(subject.write('ok.txt', 'x')).toMatchObject({ ok: true, bytes: 1 });

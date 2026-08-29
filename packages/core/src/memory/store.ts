@@ -31,20 +31,20 @@ interface PendingWrite {
   chatId: string;
   userId: string;
   /** `memory.requireSourceTag`（默认 true）：每条写入是否带 `<!-- src: … -->` 来源标注。
-   *  关掉它省 token，代价是「这条是谁在哪说的」再也查不回来（docs/14 A10）。 */
+   *  关闭可节省 token，代价是该条记忆的来源人与场景无法再追溯（docs/14 A10）。 */
   requireSourceTag?: boolean;
 }
 
-// 与上下文、提示词共用同一把尺子：记忆的软/硬上限是按 token 写的配置，估算器不一致时
-// 「还剩多少额度」在两个页面上会给出两个数（docs/06 §3）。
+// 与上下文、提示词共用同一套度量：记忆的软硬上限是按 token 配置的，估算器不一致时
+// 剩余额度会在两个页面上给出两个数值（docs/06 §3）。
 const estimateTokens = estimateTextTokens;
 
 function normalized(content: string): string {
   return content.toLocaleLowerCase().replace(/[\s\p{P}\p{S}]/gu, "");
 }
 
-/** 来源标注不参与相似度：`jaccard` 数的是字符集合，`<!-- src: chat … -->` 里那串
- *  字母数字会把并集撑大，让「同一条」看起来只有六七成像。 */
+/** 来源标注不参与相似度计算：`jaccard` 统计的是字符集合，`<!-- src: chat … -->` 中的
+ *  字母数字会撑大并集，使内容相同的两条相似度降到六七成。 */
 function stripSource(line: string): string {
   return line.replace(/<!--[^]*?-->/g, "").trim();
 }
@@ -108,14 +108,14 @@ export class MemoryStore {
   }
 
   /**
-   * 「查看他人的私有记忆会被记录」（D11 的问责设计，`docs/06 §425`）的**唯一发出点**。
+   * 查看他人私有记忆会被记录（D11 的问责设计，`docs/06 §425`）这条约束的唯一发出点。
    *
-   * 单拎出来是因为 WebUI 那条路根本不经过 `read()`：`GET /api/prompts/:id` 照 `memory_docs.path`
-   * 直接读文件，绕过整个 MemoryStore，于是那条路上一条日志都没有 —— 而提示词页那张卡的副标题
-   * 正写着这句话（docs/29 · `M-MEM-01`）。改这条约束时只需要改这一处。
+   * 单独提取是因为 WebUI 那条路不经过 `read()`：`GET /api/prompts/:id` 按 `memory_docs.path`
+   * 直接读文件，绕过整个 MemoryStore，于是那条路上没有任何日志，而提示词页那张卡的副标题
+   * 正写着这句话（docs/29 · `M-MEM-01`）。修改该约束时只需改这一处。
    *
-   * `userId` 落的是**被看的那个人**，不是看的人：`lastOwnerRead()` 与用户自己的 `/memory`
-   * 都按它查。看的人在 `data.actor` 里。
+   * `userId` 记录的是被查看者而非查看者：`lastOwnerRead()` 与用户自己的 `/memory`
+   * 都按它查询。查看者记录在 `data.actor` 中。
    */
   auditPrivateAccess(
     targetUserId: string | null,
@@ -132,9 +132,9 @@ export class MemoryStore {
   }
 
   /**
-   * 「最近被 owner 查看于 …」的数据源。**问责要让被看的那个人自己看得见**，所以 `/memory`
-   * 读它 —— 只落一条日志、只有 owner 在控制台上翻得到，那是记录不是问责。
-   * 按日志查而不是给 `memory_docs` 加一列：这件事本来就有保留期，而迁移是不可回退的。
+   * 最近被 owner 查看时间的数据源。问责要求被查看者本人可见，因此 `/memory`
+   * 读取它；若只落一条日志且仅 owner 能在控制台查看，那是记录而非问责。
+   * 按日志查询而不给 `memory_docs` 加一列：该数据本就有保留期，而迁移不可回退。
    */
   lastOwnerRead(userId: string): { ts: number; op: string } | null {
     const row = this.db
@@ -149,7 +149,7 @@ export class MemoryStore {
         (JSON.parse(row.data ?? "{}") as { op?: unknown }).op ?? "read",
       );
     } catch {
-      /* 老行没有 op */
+      /* 历史行没有 op */
     }
     return { ts: row.ts, op };
   }
@@ -238,11 +238,11 @@ export class MemoryStore {
   }
 
   /**
-   * `queueWrite` 的去重与硬上限判据取的是**工具调用那一刻**的快照，而落盘发生在轮末：这中间
-   * 别的轮次完全可能已经把同一条写进同一份文档（PUBMEMORY 是全局单份）。`flush` 本身是同步的
-   * ——`readRaw` → 改 → `persist` 之间没有 await，事件循环插不进来，所以**不会丢更新**
-   * （`docs/22 · I-05` 说的锁不是这里需要的东西）。真正会漏的是那两条判据：重复条目照样落盘，
-   * 硬上限也会被越过。两条都在这里按新读到的内容再走一遍。
+   * `queueWrite` 的去重与硬上限判据取自工具调用那一刻的快照，而落盘发生在轮末：这段时间内
+   * 其他轮次完全可能已把同一条写入同一份文档（PUBMEMORY 是全局单份）。`flush` 自身是同步的，
+   * `readRaw` → 修改 → `persist` 之间没有 await，事件循环无法插入，因此不会丢失更新
+   * （`docs/22 · I-05` 所说的锁不是这里需要的）。真正会失效的是那两条判据：重复条目照样落盘，
+   * 硬上限也会被越过。两条都在这里按新读到的内容重新执行一遍。
    */
   flush(turnId: string): Record<string, unknown> {
     const writes = this.#pending.get(turnId) ?? [];
@@ -287,7 +287,7 @@ export class MemoryStore {
         parsed.sections.set(write.section, lines);
       }
       while (parsed.sections.size > this.maxSections) {
-        // 「其他」自身不能当合并来源：它与目标是同一个数组，会把整段条目复制一份（docs/19 · R-MEM-01）。
+        // 其他分组自身不能作为合并来源：它与目标是同一个数组，会把整段条目复制一份（docs/19 · R-MEM-01）。
         const oldest = [...parsed.sections.keys()].find(
           (name) => name !== "其他",
         );
@@ -302,8 +302,8 @@ export class MemoryStore {
       }
       const content = serializeSections(parsed.title, parsed.sections);
       if (content === document.content) continue;
-      // 硬上限是最后一道闸：`queueWrite` 放行时文档还小，落盘时可能已经被别的轮次写胖了。
-      // 越过它去写等于让这份文档从此再也裁不回来。
+      // 硬上限是最后一道闸：`queueWrite` 放行时文档还小，落盘时可能已被其他轮次写大。
+      // 越过它写入会让这份文档从此无法裁剪回来。
       if (estimateTokens(content) > this.hardLimit) {
         rejected += 1;
         this.log?.event({
@@ -332,8 +332,8 @@ export class MemoryStore {
       }
     }
     this.#pending.delete(turnId);
-    // 只在真有话说时挂字段：`documents: 0` 那条断言（tests/memory.operations.test.ts）问的是
-    // 「abort 之后什么都没写」，恒定多两个 0 会让它变成在核对计数器而不是核对这件事。
+    // 仅在确有内容时附加字段：`documents: 0` 那条断言（tests/memory.operations.test.ts）验证的是
+    // abort 之后未写入任何内容，恒定多出两个 0 会让它退化为核对计数器而非核对该事实。
     return {
       ok: true,
       documents: written,

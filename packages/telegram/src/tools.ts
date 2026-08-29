@@ -18,9 +18,9 @@ import {
 import type { TelegramDeliveryEvent } from "./stream-output.js";
 
 /**
- * Telegram 只接受这一组固定的 reaction emoji（Bot API `ReactionTypeEmoji`）；别的一律 400
- * `REACTION_INVALID`。放在本地挡一道是为了让模型拿到「可选哪些」而不是一句上游报错 ——
- * 内核提示词让它「工具报错只修正参数、最多重试两次」，没有候选集它只能瞎猜两次然后放弃。
+ * Telegram 只接受这一组固定的 reaction emoji（Bot API `ReactionTypeEmoji`），其余一律返回 400
+ * `REACTION_INVALID`。本地拦截一道是为了让模型拿到候选集而非一句上游报错 ——
+ * 内核提示词要求「工具报错只修正参数、最多重试两次」，没有候选集只能盲猜两次后放弃。
  */
 const REACTIONS = [
   "👍",
@@ -98,32 +98,32 @@ const REACTIONS = [
   "😡",
 ] as const;
 /**
- * 变体选择符（U+FE0F）必须在比较前抹掉：`❤️`（带 VS16）与 Telegram 认的 `❤` 是两个字符串，
- * 而模型十有八九打出来的是带 VS16 的那个 —— 按字面比会把最常用的几个 emoji 全判成不支持。
+ * 变体选择符（U+FE0F）必须在比较前剥除：`❤️`（带 VS16）与 Telegram 接受的 `❤` 是两个不同字符串，
+ * 而模型输出的通常是带 VS16 的形式 —— 按字面比较会把最常用的几个 emoji 全部判为不支持。
  */
 const canonical = new Map(
   REACTIONS.map((emoji) => [emoji.replaceAll("️", ""), emoji]),
 );
 
 export interface TelegramToolsDependencies {
-  /** 懒取：工具在 bot 建起来之前就注册好了（`registerBuiltins` 在 `createTelegramBot` 之前跑）。 */
+  /** 惰性取值：工具在 bot 构造之前即完成注册（`registerBuiltins` 先于 `createTelegramBot` 执行）。 */
   bot(): Bot | null;
   archive: ArchiveRepository;
   maxMessageChars(): number;
   /**
-   * `output.maxMentions`。这条路此前**不过**这道闸，于是「投递侧收口」只收住了两条出站路径中的
-   * 那两条：模型（或 `<untrusted-content>` 里被注入的一句话）调 `send_message` 就能绕开 @ 上限。
+   * `output.maxMentions`。该路径此前不经过这道闸，导致投递侧收口只覆盖了三条出站路径中的两条：
+   * 模型（或 `<untrusted-content>` 中被注入的指令）调用 `send_message` 即可绕过 @ 上限。
    */
   maxMentions(): number;
   /**
-   * `output.parseMode`。这条路此前恒用默认的 MarkdownV2，于是运维把 `parseMode` 改成 `none`
-   * 之后，`send_message` 发出去的仍是转义过的 MarkdownV2 文本 —— 三条出站路径两种渲染。
+   * `output.parseMode`。该路径此前恒用默认的 MarkdownV2，导致运维将 `parseMode` 改为 `none`
+   * 之后，`send_message` 发出的仍是转义过的 MarkdownV2 文本 —— 三条出站路径出现两种渲染。
    */
   parseMode(): ParseMode;
   /**
-   * 投递层的语义 span（`docs/10 §2` 的 `tg.send`）。`tg.api` 那条在 grammY 的 transformer 里，
-   * 拿不到 turn 上下文（docs/28 · L-LOG-02），而这里 `TelegramTarget` 带着 turnId 与
-   * 本次 `tool.call` 的 span id。可选：测试不必给。
+   * 投递层的语义 span（`docs/10 §2` 的 `tg.send`）。`tg.api` 位于 grammY 的 transformer 中，
+   * 取不到 turn 上下文（docs/28 · L-LOG-02），而此处 `TelegramTarget` 携带 turnId 与
+   * 本次 `tool.call` 的 span id。可选：测试无需提供。
    */
   log?: LogSink;
 }
@@ -131,7 +131,7 @@ export interface TelegramToolsDependencies {
 export class TelegramTools implements TelegramToolBridge {
   constructor(private readonly dependencies: TelegramToolsDependencies) {}
 
-  /** 一次出站投递落一行。`method` 只用来说清是哪一种（sendMessage / sendPhoto / …）。 */
+  /** 每次出站投递记录一行。`method` 用于区分具体方法（sendMessage / sendPhoto / …）。 */
   #sent(
     target: TelegramTarget,
     method: string,
@@ -153,7 +153,7 @@ export class TelegramTools implements TelegramToolBridge {
 
   async sendMessage(target: TelegramTarget, text: string): Promise<object> {
     return this.guard(target, "sendMessage", async (api) => {
-      // 三条出站路径都要过 @ 上限这道闸，不然它不是边界只是建议。
+      // 三条出站路径都必须经过 @ 上限这道闸，否则它只是建议而非边界。
       const capped = capMentions(text, this.dependencies.maxMentions());
       const parseMode = this.dependencies.parseMode();
       const { rendered, archived } = segmentTelegramText(
@@ -163,8 +163,8 @@ export class TelegramTools implements TelegramToolBridge {
       );
       if (!rendered.length) return { ok: false, error: "empty_text" };
       const messageIds: number[] = [];
-      // 这一批分段按 chat 串行，理由与 `bot.ts` 的定稿分段同一条（docs/28 · L-TG-02）：一条消息
-      // 被切成的那几段中间挤进别的轮次的 `sendMessage`，用户看到的就是错序。
+      // 本批分段按 chat 串行，理由同 `bot.ts` 的定稿分段（docs/28 · L-TG-02）：若在一条消息的
+      // 各分段之间插入其他轮次的 `sendMessage`，用户看到的即为乱序。
       await deliveryOrder.run(target.chatId, async () => {
         for (const [index, part] of rendered.entries()) {
           const startedAt = performance.now();
@@ -179,10 +179,10 @@ export class TelegramTools implements TelegramToolBridge {
             messageId: sent.message_id,
             chars: part.length,
           });
-          // 归档存渲染前的正文而不是 `part`：三条出站路径（这里、`bot.ts` 的兜底、流式）必须在
-          // `messages.text` 里放同一种东西，否则同一张表里一半带 MarkdownV2 转义符。**分片时存
-          // 该段自己那一份**（docs/28 · L-TG-03）。存的是 `capMentions` 之后的那份 —— 归档要与
-          // 真正发出去的一致，另外两条路径也都是收口后的。
+          // 归档写入渲染前的正文而非 `part`：三条出站路径（本处、`bot.ts` 的兜底、流式）必须在
+          // `messages.text` 中写入同一形态，否则同一张表内会有一半带 MarkdownV2 转义符。分片时
+          // 写入该段自身对应的那一份（docs/28 · L-TG-03）。写入的是 `capMentions` 之后的文本 ——
+          // 归档需与实际发出内容一致，另外两条路径同样是收口后的。
           this.archiveOutgoing(
             target,
             sent.message_id,
@@ -290,13 +290,13 @@ export class TelegramTools implements TelegramToolBridge {
   }
 
   /**
-   * 一次 ACP 运行的进度卡片（`docs/08 §6.1`）。**`null` = 没有 Telegram 入口** —— ACP 照跑，
-   * 只是没有卡片：呈现层起不来不该让「起一台外部 agent」这件事失败，这也是 `catch` 兜到 `null`
-   * 而不是往外抛的理由。
+   * 单次 ACP 运行的进度卡片（`docs/08 §6.1`）。`null` 表示没有 Telegram 入口 —— ACP 正常执行，
+   * 仅无卡片：呈现层不可用不应导致启动外部 agent 失败，这也是 `catch` 兜底为 `null` 而非向外
+   * 抛出的原因。
    *
-   * `parseMode` / `maxMessageChars` / `intervalMs` 由调用方给，而不是在这里读 `dependencies`：
-   * 调用方拿的是**本轮**那份合并后的配置（`output.*` 在 `perChat` 白名单里，`docs/11 §2.1`），
-   * 而同一个会话里卡片与主回复必须是同一档渲染 —— 三条出站路径两种渲染的账已经付过一次了。
+   * `parseMode` / `maxMessageChars` / `intervalMs` 由调用方传入，而非在此读取 `dependencies`：
+   * 调用方持有的是本轮合并后的配置（`output.*` 位于 `perChat` 白名单内，`docs/11 §2.1`），
+   * 且同一会话中卡片与主回复必须采用同一渲染档位 —— 渲染分叉的代价已经付过一次。
    */
   async openProgressCard(
     target: AcpCardTarget & { turnId?: string; parentSpanId?: string },
@@ -305,10 +305,10 @@ export class TelegramTools implements TelegramToolBridge {
     const bot = this.dependencies.bot();
     if (!bot) return null;
     try {
-      // 不挂 `onDeliveryError`：send 失败那一跳已经有一条 `ok:false` 的 `tg.send`，edit 失败
-      // 由聚合那一条带出来（`docs/10 §2`：`tg.edit` 一轮一条）。两处都挂等于同一次失败落两行。
-      // `turnId` 在卡片里有第二个用途：取消按钮的 `callback_data`（`c:<turnId>`，`docs/08 §6.1`）。
-      // 缺席时不挂按钮 —— 交回一个必然答「只有发起人或管理员可以取消」的按钮比没有按钮更坏。
+      // 不挂 `onDeliveryError`：send 失败已由一条 `ok:false` 的 `tg.send` 记录，edit 失败
+      // 由聚合记录带出（`docs/10 §2`：`tg.edit` 每轮一条）。两处都挂会使同一次失败记录两行。
+      // `turnId` 在卡片中有第二个用途：取消按钮的 `callback_data`（`c:<turnId>`，`docs/08 §6.1`）。
+      // 缺失时不挂按钮 —— 提供一个必然回复「只有发起人或管理员可以取消」的按钮比不提供更差。
       return await openAcpProgressCard(
         bot,
         {
@@ -327,8 +327,8 @@ export class TelegramTools implements TelegramToolBridge {
     }
   }
 
-  /** 卡片的投递事件 → `tg.send` / `tg.edit`（`docs/10 §2`）。形状与 `bot.ts` 给 `TelegramOutput`
-   *  挂的那个一致；`traceId` 只在调用方给了 turnId 时才有 —— 卡片本身不需要它。 */
+  /** 卡片投递事件 → `tg.send` / `tg.edit`（`docs/10 §2`）。形状与 `bot.ts` 为 `TelegramOutput`
+   *  挂载的一致；`traceId` 仅在调用方提供 turnId 时存在 —— 卡片自身不依赖它。 */
   #card(
     target: { chatId: string; turnId?: string; parentSpanId?: string },
     event: TelegramDeliveryEvent,
@@ -371,13 +371,13 @@ export class TelegramTools implements TelegramToolBridge {
   }
 
   /**
-   * 上游报错一律转成 `ok:false`：抛出去会被注册表记成工具异常，模型看到的只有一句堆栈式的
-   * `Call to "pinChatMessage" failed!`，而「bot 没有置顶权限」这种事它本可以据此换个做法。
+   * 上游报错一律转为 `ok:false`：向外抛出会被注册表记为工具异常，模型只能看到堆栈式的
+   * `Call to "pinChatMessage" failed!`，而「bot 没有置顶权限」这类信息本可据以改换做法。
    *
-   * **吞掉的那一跳必须自己落一行 `tg.send`（失败档 warn，`docs/10 §2`）。** 不落的话「模型发的
-   * 消息被 Telegram 拒收」在带 turn 上下文的日志里一个字都没有：`tg.api` 那条没有 traceId，
-   * 回答不了「这一轮到底发出去了什么」（docs/28 · L-LOG-02）。`durationMs` 从进这道门算起 ——
-   * 分段投递会在 `deliveryOrder` 里排队，而失败那一刻要的就是「这次工具调用等了多久才失败」。
+   * 被吞掉的这一跳必须自行记录一行 `tg.send`（失败档 warn，`docs/10 §2`）。否则「模型发出的
+   * 消息被 Telegram 拒收」在带 turn 上下文的日志中完全不可见：`tg.api` 那条没有 traceId，
+   * 无法回答本轮实际发出了什么（docs/28 · L-LOG-02）。`durationMs` 自进入本方法起计 ——
+   * 分段投递会在 `deliveryOrder` 中排队，而失败时需要的正是本次工具调用等待多久才失败。
    */
   private async guard(
     target: TelegramTarget,
@@ -408,9 +408,9 @@ export class TelegramTools implements TelegramToolBridge {
   }
 
   /**
-   * 追发出去的消息必须回写归档，理由和 bot.ts 里回复自己那条一样：不写的话 `read_messages`、
-   * WebUI 会话页、以及「回复这条消息」的取回链路里都缺这一条，模型自己发过的东西下一轮就不见了。
-   * `direction='out'` 让它天然不会被 `claimBackground` 当成群背景发言再认领一次。
+   * 主动发出的消息必须回写归档，理由同 bot.ts 中回写自身回复：不回写则 `read_messages`、
+   * WebUI 会话页、以及「回复这条消息」的取回链路均缺失该条，模型自己发过的内容下一轮即丢失。
+   * `direction='out'` 使其不会被 `claimBackground` 当作群背景发言重复认领。
    */
   private archiveOutgoing(
     target: TelegramTarget,

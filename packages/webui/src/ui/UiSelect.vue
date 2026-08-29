@@ -1,8 +1,8 @@
 <script setup lang="ts">
-// 下拉框：触发器是自绘的，展开的面板也是。原生 `<select>` 那个弹层由操作系统画 —— 圆角、行高、
-// 选中色、深色主题全不受页面控制，在这套卡片里是唯一一块「别人的界面」。
-// 面板 Teleport 到 body 并用 fixed 定位：它的宿主格子（对话框正文、「全部配置」的分组）都是
-// `overflow: auto` 的滚动区，留在原地会被裁掉。
+// 下拉框：触发器与展开面板均为自绘。原生 `<select>` 的弹层由操作系统绘制，圆角、行高、
+// 选中色、深色主题都不受页面控制，在这套卡片中是唯一一块不可控样式。
+// 面板 Teleport 到 body 并使用 fixed 定位：它的宿主容器（对话框正文、「全部配置」的分组）都是
+// `overflow: auto` 的滚动区，留在原地会被裁剪。
 import { computed, nextTick, onBeforeUnmount, ref, useId, watch } from "vue";
 
 type Option = string | Record<string, unknown>;
@@ -37,7 +37,7 @@ const rows = computed(() =>
     return { value, label };
   }),
 );
-// 「不设置」那一行的出现条件与原来 <select> 里那个空 option 完全一致，语义也一样：空串回给上层是 null。
+// 「不设置」一行的出现条件与原 <select> 中的空 option 完全一致，语义相同：空串向上层返回 null。
 const items = computed(() =>
   props.showClear || props.placeholder || props.modelValue === null
     ? [{ value: "", label: props.placeholder ?? "不设置" }, ...rows.value]
@@ -67,7 +67,7 @@ function place(): void {
   if (!rect) return;
   const below = window.innerHeight - rect.bottom - GAP - 8;
   const above = rect.top - GAP - 8;
-  // 下面摆不开又是上面更宽裕时翻上去：设置页与对话框里的格子经常就贴在视口底边。
+  // 下方空间不足且上方更充裕时向上展开：设置页与对话框中的控件常紧贴视口底边。
   const up = below < 220 && above > below;
   box.value = {
     left: rect.left,
@@ -100,7 +100,7 @@ function hide(): void {
 function pick(index: number): void {
   const row = items.value[index];
   if (!row) return;
-  // 先收面板再发事件：`@change` 可能会开对话框或重载列表，焦点得在那之前还给触发器。
+  // 先关闭面板再发事件：`@change` 可能打开对话框或重载列表，焦点需在此之前归还触发器。
   hide();
   trigger.value?.focus();
   emit("update:modelValue", row.value === "" ? null : row.value);
@@ -112,7 +112,7 @@ function move(delta: number): void {
   void nextTick(scrollToActive);
 }
 
-// 首字母跳转：模型、会话那几个列表几十行起步，没有它只能一路按方向键。
+// 首字母跳转：模型与会话等列表动辄数十行，缺少该能力只能连续使用方向键。
 let typed = "";
 let typedTimer = 0;
 function typeahead(key: string): void {
@@ -134,7 +134,7 @@ function onKeydown(event: KeyboardEvent): void {
   if (props.disabled) return;
   if (event.key === "Escape") {
     if (!open.value) return;
-    // 对话框里的 UiSelect：UiModal 的 Escape 监听挂在 window 上，不拦下来会连对话框一起关掉。
+    // 对话框中的 UiSelect：UiModal 的 Escape 监听挂在 window 上，不拦截会连同对话框一并关闭。
     event.preventDefault();
     event.stopPropagation();
     hide();
@@ -145,7 +145,7 @@ function onKeydown(event: KeyboardEvent): void {
     return;
   }
   if (!open.value) {
-    // Enter / Space 在 <button> 上本来会合成一次 click，这里拦下来自己开，免得开完又被 click 关上。
+    // Enter / Space 在 <button> 上会合成一次 click，此处拦截并自行展开，避免展开后立即被 click 关闭。
     if (["ArrowDown", "ArrowUp", "Enter", " "].includes(event.key)) {
       event.preventDefault();
       void show();
@@ -193,7 +193,7 @@ function onPointerDown(event: PointerEvent): void {
   hide();
 }
 function bind(): void {
-  // scroll 不冒泡，得用捕获才能收到滚动区自己的那一条；面板是 fixed 的，宿主一滚就得重算。
+  // scroll 不冒泡，需使用捕获阶段才能收到滚动区自身的事件；面板为 fixed 定位，宿主滚动即需重算。
   document.addEventListener("pointerdown", onPointerDown, true);
   document.addEventListener("scroll", place, true);
   window.addEventListener("resize", place);

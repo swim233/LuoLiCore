@@ -8,13 +8,13 @@ import {
 } from "./types";
 
 /**
- * 自定义工具是**模型自己写的沙箱脚本**。这一段因此是一条队列而不是一片卡片：未审阅的排在最前，
- * 因为这一页对这一类的唯一活儿就是「读过正文再决定」。
+ * 自定义工具是模型自行编写的沙箱脚本。这一段因此采用队列而不是卡片：未审阅的排在最前，
+ * 因为这一页对该类别的唯一操作就是阅读正文后作出决定。
  *
- * 「未审阅」与「停用」是两档 —— 前者没人看过，后者有人看过之后关掉的。混成一个标签，
- * 运维就分不清哪些在等自己（docs/09 §3.8）。
+ * 未审阅与停用是两档状态：前者尚未复审，后者是复审后关闭的。合并为一个标签会使
+ * 运维无法分辨哪些仍在等待处理（docs/09 §3.8）。
  *
- * 正文与参数在这里**只读**：顺手改一行会让 `definition_hash` 与模型以为的那份定义脱节。
+ * 正文与参数在这里只读：随手修改一行会使 `definition_hash` 与模型所依据的定义不一致。
  */
 const props = defineProps<{
   rows: CustomToolRow[];
@@ -75,13 +75,13 @@ const sorted = (): CustomToolRow[] =>
             "
           />
         </h3>
-        <p>{{ row.description || "模型没有写描述。" }}</p>
+        <p>{{ row.description || "未填写描述" }}</p>
         <code v-if="row.lastError">{{ row.lastError }}</code>
         <p v-if="customToolPendingReview(row)" class="ext-note-warn">
           <i
             class="pi pi-eye"
             aria-hidden="true"
-          />还没有人读过这段脚本。启用之后它会以<b>调用者</b>的角色执行，而那时正文已经不在对话里了。
+          />尚未经人工复核。启用后以<b>调用者</b>的角色执行。
         </p>
         <div class="ext-chips">
           <UiTag :value="row.runtime" severity="info" />
@@ -96,14 +96,14 @@ const sorted = (): CustomToolRow[] =>
             :value="`${Math.round(row.timeoutMs / 1000)}s 超时`"
             severity="secondary"
           />
-          <small class="ext-muted">由 {{ row.createdBy }} 写下</small>
+          <small class="ext-muted">由 {{ row.createdBy }} 创建</small>
         </div>
       </div>
       <div class="ext-row-side">
         <div class="ext-facts">
           <span><small>最低角色</small>{{ row.minRole }}</span>
           <span
-            ><small>{{ row.reviewedAt ? "审阅于" : "写下于" }}</small
+            ><small>{{ row.reviewedAt ? "审阅于" : "创建于" }}</small
             >{{ relativeTime(row.reviewedAt ?? row.updatedAt) }}</span
           >
         </div>
@@ -134,16 +134,15 @@ const sorted = (): CustomToolRow[] =>
     </article>
     <article v-if="!rows.length" class="ext-empty">
       <i class="pi pi-wrench" aria-hidden="true" />
-      <h3>模型还没给自己写过工具</h3>
+      <h3>尚无自定义工具</h3>
       <p v-if="authoringOff">
-        这条通道当前是关的（<code>tools.selfExtend.customTools.enabled</code>）：模型拿不到
-        <code>define_tool</code>，也不会知道为什么。
+        该通道已关闭（<code>tools.selfExtend.customTools.enabled</code>）：模型无法获取
+        <code>define_tool</code>。
       </p>
       <p v-else>
-        模型用 <code>define_tool</code> 写下的脚本会落在这里，<b
-          >一律是停用状态</b
-        >
-        —— 等人读过正文再启用。
+        模型经
+        <code>define_tool</code>
+        创建的脚本<b>一律为停用状态</b>，启用前需人工复核正文。
       </p>
     </article>
   </div>

@@ -4,23 +4,23 @@ import { marked, type MarkedOptions, type Token, type Tokens } from "marked";
 import { KeyedMutex } from "@luoli/core";
 
 /**
- * 普通文本里要转义的全集。**`\` 必须在内** —— 漏掉它时 `C:\x` 会被 Telegram 当成「转义 x」，
- * 反斜杠静静消失（docs/08 §5.3 第 4 条）。
+ * 普通文本需转义的字符全集。必须包含 `\`：遗漏时 `C:\x` 会被 Telegram 解析为转义 x，
+ * 反斜杠被静默丢弃（docs/08 §5.3 第 4 条）。
  */
 const SPECIAL = /[\\_*\[\]()~`>#+\-=|{}.!]/g;
-/** `pre` / `code` 实体内部只有这两个要转义，别的字符按字面走。 */
+/** `pre` / `code` 实体内部只需转义这两个字符，其余按字面输出。 */
 const CODE_SPECIAL = /[\\`]/g;
-/** `[…](url)` 的 URL 部分只有这两个要转义。 */
+/** `[…](url)` 的 URL 部分只需转义这两个字符。 */
 const LINK_SPECIAL = /[\\)]/g;
-/** 可点链接的 scheme 白名单。回复正文里可能带被注入的内容，这里必须是白名单而不是黑名单。 */
+/** 可点击链接的 scheme 白名单。回复正文可能含被注入的内容，此处必须用白名单而非黑名单。 */
 const LINK_SCHEME = /^(?:https?|tg|mailto):/i;
-/** 显式传全套开关：`marked.lexer` 不带 options 时吃的是全局 `marked.use()` 的残留。 */
+/** 显式传入全部开关：`marked.lexer` 不带 options 时会沿用全局 `marked.use()` 的残留配置。 */
 const LEXER_OPTIONS: MarkedOptions = {
   gfm: true,
   breaks: false,
   pedantic: false,
 };
-/** `output.parseMode` 的三档。渲染器、分片器、投递时挂的 `parse_mode` 必须同时按它分档（docs/08 §5.3）。 */
+/** `output.parseMode` 的三个档位。渲染器、分片器与投递时的 `parse_mode` 必须按同一档位取值（docs/08 §5.3）。 */
 export type ParseMode = "MarkdownV2" | "HTML" | "none";
 
 export function escapeMarkdownV2(text: string): string {
@@ -28,48 +28,48 @@ export function escapeMarkdownV2(text: string): string {
 }
 
 /**
- * Telegram HTML 模式的文本转义。**`&` 必须第一个换** —— 反过来的话 `<` 产出的 `&lt;` 会被
- * `&` 那条规则再转一遍成 `&amp;lt;`，用户看到的是字面的 `&lt;`。一次 `replace` 走三个字符
- * 因此比三次链式 `replaceAll` 更难写错。
+ * Telegram HTML 模式的文本转义。`&` 必须最先替换：顺序颠倒时 `<` 产出的 `&lt;` 会被 `&` 规则
+ * 二次转义为 `&amp;lt;`，用户看到字面的 `&lt;`。单次 `replace` 处理三个字符比三次链式
+ * `replaceAll` 更不易出错。
  */
 export function escapeHtml(text: string): string {
   return text.replace(/[&<>]/g, (char) =>
     char === "&" ? "&amp;" : char === "<" ? "&lt;" : "&gt;",
   );
 }
-/** `href` 里额外要挡 `"`：属性值是用双引号括的。 */
+/** `href` 需额外转义 `"`：属性值由双引号包裹。 */
 function escapeHtmlAttribute(url: string): string {
   return escapeHtml(url).replaceAll('"', "&quot;");
 }
 /**
- * `class="language-xxx"` 里的语言名来自模型写的围栏标记，是外部输入 —— 按白名单收，不是转义。
- * **截断到第一个非法字符，而不是把非法字符滤掉**：```` ```js"><script> ```` 滤出来是
- * `jsscript`（安全，但那不是任何一种语言），截出来是 `js`。顺带也把空格后面那截去掉了。
+ * `class="language-xxx"` 中的语言名来自模型写的围栏标记，属于外部输入，按白名单收敛而非转义。
+ * 截断到第一个非法字符，而不是过滤掉非法字符：```` ```js"><script> ```` 过滤后得到 `jsscript`
+ * （安全但不对应任何语言），截断后得到 `js`。该规则同时去掉了空格之后的部分。
  */
 const LANG_PREFIX = /^[A-Za-z0-9+#._-]*/;
 /**
- * 长过这个数就当没写语言。真实语言标识符最长也就 `objective-c` 这个量级，而这个值是**分片的**
- * 前提而不只是整洁：`<pre><code class="language-…">` 是一个不可切开的构造，它加上自己的
- * `</code>` 一旦长过 `maxMessageChars`，这个元素就没有任何切法能既装进一片又保持成对，分片器
- * 只能硬切、让 Telegram 整条拒收（实测 120 个字符的「语言名」配 `maxMessageChars: 150`）。
+ * 超过该长度即视为未指定语言。真实语言标识符最长约为 `objective-c` 的量级，而这个上限是分片的
+ * 前提而不只是整洁性要求：`<pre><code class="language-…">` 是不可切分的构造，它与配对的 `</code>`
+ * 一旦超过 `maxMessageChars`，该元素就没有任何切法能既装入单片又保持成对，分片器只能硬切，
+ * 导致 Telegram 拒收整条消息（实测 120 字符的「语言名」配 `maxMessageChars: 150`）。
  */
 const LANG_MAX = 24;
 
 /**
  * 把通用 Markdown 渲染成 Telegram MarkdownV2（docs/08 §5.3）。
  *
- * **转义只发生在文本节点上**，这是这一节的红线。旧实现走的是反过来那条路 —— 逐行全量转义之后
- * 只把 `\*\*x\*\*` 反解回 `*x*` —— 于是每个不在反解白名单里的构造都降级成字面转义符：行内代码
- * 从来没被反解过（用户看到的是两个反引号），`heading` 生成的 `*粗体*` 因为在转义之前生成、又只有
- * 双星号那一条反解规则，同样被自己的转义吃掉。这类漏洞不会报错，只会看起来朴素，所以补白名单
- * 修不完 —— 只有「先解析、再逐节点输出」能一次性关掉整类。
+ * 转义只发生在文本节点上，这是本节的硬约束。旧实现采用相反路径：逐行全量转义后只把 `\*\*x\*\*`
+ * 反解回 `*x*`，于是每个不在反解白名单内的构造都退化为字面转义符。行内代码从未被反解（用户看到
+ * 两个反引号）；`heading` 生成的 `*粗体*` 因为产生于转义之前且只有双星号一条反解规则，同样被自身
+ * 转义吞掉。这类缺陷不报错、只是显示朴素，因此靠补白名单无法修完，只有「先解析、再逐节点输出」
+ * 才能一次性消除整类问题。
  */
 export function safeRender(markdown: string): string {
-  // NUL 在 Telegram 正文里没有任何显示意义，进门就摘掉。占位符方案（docs/27 · C-07）已经不用了，
-  // 但「正文里的 NUL 不该出去」这条仍然成立。
+  // NUL 在 Telegram 正文中无任何显示意义，入口即剔除。占位符方案（docs/27 · C-07）已废弃，
+  // 但「正文中的 NUL 不应外发」这条仍然成立。
   const text = markdown.replaceAll("\u0000", "");
-  // 渲染器不许成为投递失败的新来源：lexer 对任何输入都该有结果，真抛了就退回全文字面转义 ——
-  // 格式丢掉，消息还在。
+  // 渲染器不得成为投递失败的新来源：lexer 对任何输入都应有结果，一旦抛出则退回全文字面转义，
+  // 丢掉格式但保住消息。
   try {
     return renderBlocks(marked.lexer(text, LEXER_OPTIONS));
   } catch {
@@ -77,13 +77,13 @@ export function safeRender(markdown: string): string {
   }
 }
 
-/** 块级节点的尾随换行照 `raw` 原样带出去：段落间的空行数量因此和模型写的一模一样。 */
+/** 块级节点的尾随换行按 `raw` 原样保留，使段落间空行数量与模型输出完全一致。 */
 function trailingNewlines(raw: string | undefined): string {
   return /\n*$/.exec(raw ?? "")![0];
 }
 
 function renderBlocks(tokens: readonly Token[], depth = 0): string {
-  // `def`（`[a]: url` 那种链接定义）不是正文，连它占的那几个换行一起丢掉。
+  // `def`（`[a]: url` 形式的链接定义）不属于正文，连同其占用的换行一并丢弃。
   return tokens
     .filter((token) => token.type !== "def")
     .map((token) => renderBlock(token, depth) + trailingNewlines(token.raw))
@@ -96,19 +96,19 @@ function renderBlock(token: Token, depth: number): string {
       return "";
     case "paragraph":
       return renderInline(token.tokens, token.text);
-    // 降级：Telegram 没有标题实体（docs/08 §5.3 第 3 条）。整段已经是粗体，所以带着 `strong`
-    // 进去 —— `### **小标题**` 否则会渲染成 `**小标题**`，那是两个空粗体夹着文字，Telegram 判解析失败。
+    // 降级处理：Telegram 没有标题实体（docs/08 §5.3 第 3 条）。整段已是粗体，因此把 `strong`
+    // 一并传入；否则 `### **小标题**` 会渲染成 `**小标题**`，即两个空粗体夹文字，Telegram 判定解析失败。
     case "heading":
       return `*${renderInline(token.tokens, token.text, ["strong"])}*`;
     case "code":
       return fence(token.text, token.lang);
-    // 表格按 raw 原样进等宽块：按码点补齐列宽在中英混排下只会更歪（CJK 是双宽）。
+    // 表格按 raw 原样放入等宽块：按码点补齐列宽在中英混排下反而更不齐（CJK 为双宽字符）。
     case "table":
       return fence(token.raw.replace(/\n+$/, ""), "");
     case "hr":
       return "——————";
-    // `Token` 这个联合里带一个 `Tokens.Generic`（`type: string` + 索引签名），switch 收窄不掉它 ——
-    // 这两处因此要自己兜一下，而不是靠收窄。
+    // `Token` 联合中包含 `Tokens.Generic`（`type: string` + 索引签名），switch 无法将其收窄，
+    // 因此这两处需自行断言而不能依赖类型收窄。
     case "blockquote":
       return quote(renderBlocks(token.tokens ?? [], depth));
     case "list":
@@ -117,13 +117,13 @@ function renderBlock(token: Token, depth: number): string {
       return token.tokens?.length
         ? renderInline(token.tokens, token.text)
         : escapeMarkdownV2(token.text);
-    // 块级 HTML 与任何未知节点：按字面显示。尾随换行由 trailingNewlines 补，这里先摘掉免得算两遍。
+    // 块级 HTML 与任何未知节点按字面显示。尾随换行由 trailingNewlines 补齐，此处先去除以免重复计入。
     default:
       return escapeMarkdownV2((token.raw ?? "").replace(/\n+$/, ""));
   }
 }
 
-/** `open` 记的是「此刻已经张着哪几种强调实体」，用途见 `emphasis`。 */
+/** `open` 记录当前已打开的强调实体种类，用途见 `emphasis`。 */
 type Emphasis = "strong" | "em" | "del";
 
 function renderInline(
@@ -139,7 +139,7 @@ function renderInline(
           return token.tokens?.length
             ? renderInline(token.tokens, token.text, open)
             : escapeMarkdownV2(token.text);
-        // lexer 已经把 `\*` 拆成 escape 节点、text 是还原后的 `*`：再转义一次就无损转回去了。
+        // lexer 已把 `\*` 解析为 escape 节点，text 是还原后的 `*`；再转义一次即可无损还原。
         case "escape":
           return escapeMarkdownV2(token.text);
         case "codespan":
@@ -172,8 +172,8 @@ function renderInline(
 }
 
 /**
- * 同一种强调实体在 MarkdownV2 里不能自嵌套（`*a *b* c*` 直接解析失败）：已经张着就只渲染内容。
- * 形参收成最小结构而不是 `Tokens.Strong | …`：`Token` 联合里那个 `Tokens.Generic` 收窄不掉。
+ * 同种强调实体在 MarkdownV2 中不能自嵌套（`*a *b* c*` 会解析失败），已打开时只渲染内容。
+ * 形参取最小结构而非 `Tokens.Strong | …`：`Token` 联合中的 `Tokens.Generic` 无法收窄。
  */
 function emphasis(
   kind: Emphasis,
@@ -186,7 +186,7 @@ function emphasis(
   return `${mark}${renderInline(token.tokens, token.text ?? "", [...open, kind])}${mark}`;
 }
 
-/** scheme 不在白名单里就退回字面 raw —— 丢掉可点性，但一个字符都不隐藏。 */
+/** scheme 不在白名单内时退回字面 raw：失去可点击性，但不隐藏任何字符。 */
 function link(href: string | undefined, label: string, raw: string): string {
   if (!href || !LINK_SCHEME.test(href)) return escapeMarkdownV2(raw);
   return `[${label}](${href.replace(LINK_SPECIAL, "\\$&")})`;
@@ -198,8 +198,8 @@ function fence(body: string, lang: string | undefined): string {
 }
 
 /**
- * 引用块 = 每行一个不转义的 `>`。**内含围栏时整段退掉前缀**：`>` 逐行前缀会把 `pre` 实体拆开，
- * Telegram 判解析失败 —— 宁可丢引用样式，不要让整条消息掉回纯文本。
+ * 引用块即每行一个不转义的 `>`。内含代码围栏时整段去掉前缀：逐行 `>` 前缀会拆开 `pre` 实体，
+ * 导致 Telegram 判定解析失败。宁可丢失引用样式，也不让整条消息退化为纯文本。
  */
 function quote(inner: string): string {
   if (inner.includes("```")) return inner;
@@ -214,11 +214,11 @@ function renderList(token: Tokens.List, depth: number): string {
   const start = Number(token.start || 1);
   return token.items
     .map((item, index) => {
-      // 无序项用 `•` 而不是 `-`：`-` 在 MarkdownV2 里要转义，`\-` 打头是一串纯噪音。
+      // 无序项用 `•` 而非 `-`：`-` 在 MarkdownV2 中需转义，行首的 `\-` 是纯噪音。
       const marker = token.ordered ? `${start + index}\\.` : "•";
       const box = item.task ? (item.checked ? "☑ " : "☐ ") : "";
-      // 子块用 `\n` 拼而不是照 raw 的尾随换行拼：列表项的 raw 尾随换行属于列表布局，
-      // 嵌套列表自己已经按 depth+1 缩进了，再叠一层就成了阶梯。
+      // 子块用 `\n` 拼接而非沿用 raw 的尾随换行：列表项的 raw 尾随换行属于列表布局，
+      // 嵌套列表已按 depth+1 缩进，再叠加一层会形成阶梯状缩进。
       const inner = item.tokens
         .map((child) => renderBlock(child, depth + 1))
         .filter(Boolean)
@@ -231,8 +231,8 @@ function renderList(token: Tokens.List, depth: number): string {
 /**
  * 把通用 Markdown 渲染成 Telegram HTML（docs/08 §5.3.2）。
  *
- * 走的是 MarkdownV2 那棵**同一棵** AST，节点降级也一致 —— 差别只有输出的标签与转义规则。
- * 两条红线跟着 §5.3.1 走：转义只发生在文本节点上；渲染绝不成为投递失败的新来源。
+ * 使用与 MarkdownV2 相同的 AST，节点降级规则也一致，差别仅在输出标签与转义规则。
+ * 两条硬约束沿用 §5.3.1：转义只发生在文本节点上；渲染不得成为投递失败的新来源。
  */
 export function safeRenderHtml(markdown: string): string {
   const text = markdown.replaceAll("\u0000", "");
@@ -256,8 +256,8 @@ function renderBlockHtml(token: Token, depth: number): string {
       return "";
     case "paragraph":
       return renderInlineHtml(token.tokens, token.text);
-    // 同 MarkdownV2：Telegram 的 HTML 模式也没有标题实体。整段已经是粗体，所以照样带着
-    // `strong` 进去 —— 否则 `### **小标题**` 会输出一层空的 `<b><b>`。
+    // 同 MarkdownV2：Telegram 的 HTML 模式同样没有标题实体。整段已是粗体，因此照样传入
+    // `strong`，否则 `### **小标题**` 会输出一层空的 `<b><b>`。
     case "heading":
       return `<b>${renderInlineHtml(token.tokens, token.text, ["strong"])}</b>`;
     case "code":
@@ -266,8 +266,8 @@ function renderBlockHtml(token: Token, depth: number): string {
       return fenceHtml(token.raw.replace(/\n+$/, ""), "");
     case "hr":
       return "——————";
-    // MarkdownV2 那边「内含围栏就退掉 `>` 前缀」的妥协在这里不需要：那条妥协是因为逐行前缀会
-    // 把 `pre` 实体拆开，而 HTML 的嵌套是显式的，`<pre>` 待在 `<blockquote>` 里没问题。
+    // MarkdownV2 中「内含围栏则去掉 `>` 前缀」的妥协在此不需要：该妥协源于逐行前缀会拆开 `pre`
+    // 实体，而 HTML 的嵌套是显式的，`<pre>` 位于 `<blockquote>` 内没有问题。
     case "blockquote":
       return `<blockquote>${renderBlocksHtml(token.tokens ?? [], depth)}</blockquote>`;
     case "list":
@@ -296,7 +296,7 @@ function renderInlineHtml(
             : escapeHtml(token.text);
         case "escape":
           return escapeHtml(token.text);
-        // 代码实体内部照样要转这三个：Telegram 的 HTML 模式在 `code` / `pre` 里也解析实体。
+        // 代码实体内部同样要转义这三个字符：Telegram 的 HTML 模式在 `code` / `pre` 内也解析实体。
         case "codespan":
           return `<code>${escapeHtml(token.text)}</code>`;
         case "strong":
@@ -327,9 +327,9 @@ function renderInlineHtml(
 }
 
 /**
- * HTML 没有 MarkdownV2 那条「同种强调不能自嵌套」的限制，所以这里抑制重复只是为了不输出
- * `<b><b>x</b></b>` 这种空壳 —— 判据与 `emphasis` 共用一份 `open`，两个渲染器因此对
- * `### **小标题**` 给出同一个结构。
+ * HTML 没有 MarkdownV2「同种强调不能自嵌套」的限制，此处抑制重复只是为了避免输出
+ * `<b><b>x</b></b>` 这类空壳。判据与 `emphasis` 共用同一份 `open`，两个渲染器因此对
+ * `### **小标题**` 产出相同结构。
  */
 function emphasisHtml(
   kind: Emphasis,
@@ -342,7 +342,7 @@ function emphasisHtml(
   return `<${tag}>${renderInlineHtml(token.tokens, token.text ?? "", [...open, kind])}</${tag}>`;
 }
 
-/** scheme 白名单与 MarkdownV2 那条共用：正文里可能带被注入的链接（docs/08 §5.3 第二条约束）。 */
+/** 与 MarkdownV2 共用同一份 scheme 白名单：正文可能含被注入的链接（docs/08 §5.3 第二条约束）。 */
 function linkHtml(
   href: string | undefined,
   label: string,
@@ -364,7 +364,7 @@ function fenceHtml(body: string, lang: string | undefined): string {
 function renderListHtml(token: Tokens.List, depth: number): string {
   const indent = "  ".repeat(depth);
   const start = Number(token.start || 1);
-  // Telegram 的标签子集里没有 `ul` / `ol`，所以列表在两档里都是「靠字符排版」而不是靠标签。
+  // Telegram 的标签子集不含 `ul` / `ol`，因此两个档位的列表都靠字符排版而非标签实现。
   return token.items
     .map((item, index) => {
       const marker = token.ordered ? `${start + index}.` : "•";
@@ -379,12 +379,12 @@ function renderListHtml(token: Tokens.List, depth: number): string {
 }
 
 /**
- * 秒回读起来像自动应答机，流式模式下第一帧还几乎是空的。距离用户那条消息不足
- * `output.replyDelayMs` 就先压住不发；期间 typing 动作照常，所以看起来是在打字而不是卡住。
+ * 即时回复读起来像自动应答机，流式模式下第一帧几乎为空。距用户消息不足 `output.replyDelayMs`
+ * 时先延迟发送；期间 typing 动作照常，因此表现为正在输入而非卡住。
  */
 export async function holdReply(since: number, delayMs: number): Promise<void> {
-  // setTimeout 可以比 Date.now() 的读数早醒 1ms，单次 sleep 会让「至少等这么久」这条下限偶发地
-  // 差一毫秒不成立（tests/output.pacing.test.ts 因此约 8% 概率变红）。补睡到真的过线为止。
+  // setTimeout 可能比 Date.now() 的读数提前 1ms 唤醒，单次 sleep 会使「至少等待该时长」的下限偶发
+  // 差一毫秒不成立（tests/output.pacing.test.ts 因此约有 8% 概率失败）。循环补足到真正达标为止。
   for (
     let remaining = delayMs - (Date.now() - since);
     remaining > 0;
@@ -394,7 +394,7 @@ export async function holdReply(since: number, delayMs: number): Promise<void> {
   }
 }
 
-/** 降级回调的载荷。`phase` 区分发送与编辑两条路 —— 后者在 `stream-output.ts` 里。 */
+/** 降级回调的载荷。`phase` 区分发送与编辑两条路径，后者位于 `stream-output.ts`。 */
 export interface ParseFallbackInfo {
   chars: number;
   error: string;
@@ -402,18 +402,18 @@ export interface ParseFallbackInfo {
 }
 
 /**
- * MarkdownV2 渲染失败时退回纯文本重发一次。所有投递路径共用它：`safeRender` 已经很细，但按字符数
- * 切分仍可能把 `*bold*` 的配对切开，而裸调 `sendMessage` 抛出去会把整轮打成 failed —— 用户明明
- * 已经看到前半段回复，却又收到一句「出了点问题」（docs/20 · W-TG-03 / W-TG-04）。
+ * MarkdownV2 渲染失败时退回纯文本重发一次，所有投递路径共用。`safeRender` 已经足够细致，但按字符数
+ * 分片仍可能切开 `*bold*` 的配对，而直接调用 `sendMessage` 抛出会把整轮标记为 failed：用户已经看到
+ * 前半段回复，却又收到一条错误提示（docs/20 · W-TG-03 / W-TG-04）。
  *
- * 纯文本重发**自己也要有兜底**：它此前是裸调，第二次失败（重渲染后超长、429 flood wait、
- * chat migrated）照样打穿整轮，正是上面那句话说要防的事。第二次失败时抛回**第一个**错误 ——
- * 排障要看的是「为什么 MarkdownV2 崩了」，第二次通常只是派生现象。
+ * 纯文本重发自身也需要兜底：此前它是裸调用，第二次失败（重渲染后超长、429 flood wait、chat migrated）
+ * 同样会打穿整轮，正是上述要防止的情况。第二次失败时抛出第一个错误：排障需要的是 MarkdownV2 失败的
+ * 原因，第二次通常只是派生现象。
  *
- * @param onFallback 降级成功时回调一次。这一跳此前一个字都不落，于是行内代码那个 bug 只能靠翻
- *   下一次模型调用的 context blob 反推（docs/00 §2.3）。可选：`tools.ts` 那条路拿不到 LogSink。
+ * @param onFallback 降级成功时回调一次。此前该分支不记录任何日志，导致行内代码那个缺陷只能靠翻查
+ *   下一次模型调用的 context blob 反推（docs/00 §2.3）。可选参数：`tools.ts` 路径拿不到 LogSink。
  */
-/** `output.parseMode`：`none` 时直接发纯文本（不试 Markdown 也就不会有回退那一跳）。 */
+/** `output.parseMode` 为 `none` 时直接发送纯文本：不尝试 Markdown，也就不存在回退分支。 */
 export async function sendWithFallback(
   api: Api,
   chatId: string,
@@ -431,8 +431,8 @@ export async function sendWithFallback(
   } catch (error) {
     const description = error instanceof Error ? error.message : String(error);
     if (!/parse entities/i.test(description)) throw error;
-    // try/catch 而不是 `.catch()`：同步抛的 `sendMessage` 压根没有 promise 可以挂回调
-    // （同 `approvals.ts` 那处「同步抛也不能影响审批」）。
+    // 用 try/catch 而非 `.catch()`：`sendMessage` 同步抛出时没有 promise 可挂回调
+    // （同 `approvals.ts` 中「同步抛出也不能影响审批」的处理）。
     let sent: Message;
     try {
       sent = await api.sendMessage(chatId, toPlainText(text, parseMode), extra);
@@ -445,32 +445,30 @@ export async function sendWithFallback(
 }
 
 /**
- * **一条消息的那一批分段按 chat 串行**（docs/28 · L-TG-02）。
+ * 单条消息的分段批次按 chat 串行（docs/28 · L-TG-02）。
  *
- * 每一段各自过一次 `apiThrottler`（`bot.ts` 那份 `out: { minTime: 1000 }`），段与段之间因此有一个
- * 「上一段落地了才排下一段」的空档，别的轮次的 `sendMessage` 会在空档里挤进队列：实测一条 9469 字
- * 的回复切成 3 条，Telegram 给的 id 是 1458 / 1459 / **1467** —— 中间隔着三轮后续对话，真人在屏幕上
- * 确认第三段是在后面三条回复之后才冒出来的。
+ * 每一段各自经过一次 `apiThrottler`（`bot.ts` 中的 `out: { minTime: 1000 }`），段与段之间存在
+ * 「上一段送达后才排下一段」的空档，其他轮次的 `sendMessage` 会在空档中插入队列。实测一条 9469 字的
+ * 回复切成 3 条，Telegram 返回的 id 为 1458 / 1459 / 1467，中间隔着三轮后续对话，用户在屏幕上确认
+ * 第三段是在后面三条回复之后才出现的。
  *
- * **只盖「一条消息的那一批分段」，绝不盖流中途的增量编辑** —— 盖整轮会让同一个群里的并发轮次
- * 变成实质串行（前一轮跑完才能看到后一轮的字），那是把一个投递顺序问题换成一个吞吐问题。
+ * 该锁只覆盖单条消息的分段批次，不覆盖流式过程中的增量编辑：覆盖整轮会使同一群内的并发轮次实质串行
+ * （前一轮结束后才能看到后一轮输出），等于把投递顺序问题换成吞吐问题。
  *
- * 模块级单例：同一个 chat 的所有轮次必须排同一条队，每轮新建一把等于没有锁。进程内序与
- * `bot.ts` 的 `ingressOrder` 同一档 —— 它排的是那个 grammY api 客户端的调用顺序，而那个客户端
- * 本来就只存在于这个进程里（`docs/01 §3.1` 为横向扩展保留的抽象仍是 `KeyedMutex` 自己）。
+ * 模块级单例：同一 chat 的所有轮次必须排入同一队列，每轮新建实例等同于没有锁。进程内顺序与
+ * `bot.ts` 的 `ingressOrder` 同级：它排的是该 grammY api 客户端的调用顺序，而该客户端本就只存在于
+ * 本进程内（`docs/01 §3.1` 为横向扩展保留的抽象仍是 `KeyedMutex` 本身）。
  */
 export const deliveryOrder = new KeyedMutex();
 
 /**
- * `output.maxMentions`：一条消息里最多保留几个 `@用户名`，多出来的去掉 `@` 只留名字。
- * 这是防「模型被诱导 @全群」的护栏 —— 提示词里说好不要这么做，但那不是边界，投递侧才是。
- * 0 表示不限。
+ * `output.maxMentions`：单条消息最多保留的 `@用户名` 个数，超出部分去掉 `@` 只保留名字。
+ * 这是防止模型被诱导 @全群的护栏：提示词中已作要求，但提示词不是边界，投递侧才是。0 表示不限制。
  *
- * 前置条件是「前一个字符不是 `[\w@]`」，而不是「前面是空白或左括号」：`,@bob`、`.@cindy`、
- * `;@daisy` 这些 Telegram 照样解析成 mention，而旧判据在 `max=1` 下让它们全部逃过
- * （docs/27 · S-10 实测三种全漏）。投递侧的判据必须跟 Telegram 的一致。
- * 排掉 `@` 是为了不把 `@@name` 的第二个 `@` 当成新的 mention；排掉 `\w` 是因为 `foo@bar`
- * 在 Telegram 那边也不是 mention。
+ * 前置条件是「前一个字符不属于 `[\w@]`」，而非「前面是空白或左括号」：`,@bob`、`.@cindy`、`;@daisy`
+ * 都会被 Telegram 解析为 mention，而旧判据在 `max=1` 下让它们全部漏过（docs/27 · S-10 实测三种全漏）。
+ * 投递侧的判据必须与 Telegram 一致。排除 `@` 是为了不把 `@@name` 的第二个 `@` 当作新的 mention；
+ * 排除 `\w` 是因为 `foo@bar` 在 Telegram 侧同样不是 mention。
  */
 export function capMentions(text: string, max: number): string {
   if (max <= 0) return text;
@@ -484,7 +482,7 @@ export function capMentions(text: string, max: number): string {
   );
 }
 
-/** 码点数组上的 `lastIndexOf('\n\n')`。见下方 splitTelegramText 里为什么不能用 String 版。 */
+/** 码点数组上的 `lastIndexOf('\n\n')`。不能用 String 版本的原因见下方 splitTelegramText。 */
 function lastIndexOfPair(
   haystack: readonly string[],
   first: string,
@@ -496,31 +494,31 @@ function lastIndexOfPair(
   return -1;
 }
 
-/** 每切一段算一次：这一段要补的收尾、下一段要补的开头。跨片保持实体成对的唯一出口。 */
+/** 每切分一段计算一次：本段需补的收尾与下一段需补的开头。这是跨片保持实体成对的唯一出口。 */
 interface Seal {
   suffix: string;
   prefix: string;
 }
 const NO_SEAL: Seal = { suffix: "", prefix: "" };
 
-/** MarkdownV2：只有 ` ``` ` 围栏跨得过片。奇数个 = 切口落在围栏里面。 */
+/** MarkdownV2 中只有 ` ``` ` 围栏可能跨片。出现奇数个即表示切口落在围栏内部。 */
 function sealMarkdown(part: string): Seal {
   return (part.match(/```/g) ?? []).length % 2 === 1
     ? { suffix: "\n```", prefix: "```\n" }
     : NO_SEAL;
 }
 
-/** HTML：切口处还张着的标签，本片按栈逆序闭合，下一片原样重开（属性也得原样带回去）。 */
+/** HTML：切口处仍打开的标签，本片按栈逆序闭合，下一片原样重开（属性也需原样带回）。 */
 function sealHtml(part: string): Seal {
   const stack: Array<{ name: string; open: string }> = [];
-  // 渲染器保证输出里每个裸 `<` 都是标签开头（文本节点里的 `<` 已经是 `&lt;`），所以这条正则够用。
+  // 渲染器保证输出中每个裸 `<` 都是标签起始（文本节点内的 `<` 已转为 `&lt;`），因此该正则足够。
   for (const match of part.matchAll(/<(\/?)([a-z][a-z0-9-]*)(?:\s[^>]*)?>/gi)) {
     const name = match[2]!.toLowerCase();
     if (!match[1]) {
       stack.push({ name, open: match[0] });
       continue;
     }
-    // 正常输出里闭合的一定是栈顶；对不上时宁可不动栈，也别把成对关系改坏。
+    // 正常输出中闭合的必定是栈顶；不匹配时宁可不动栈，也不要破坏成对关系。
     if (stack.at(-1)?.name === name) stack.pop();
   }
   if (!stack.length) return NO_SEAL;
@@ -534,9 +532,9 @@ function sealHtml(part: string): Seal {
 }
 
 /**
- * HTML 那一档「这个下标前面可不可以断开」的掩码。标签 `<…>` 与实体 `&…;` 内部一律不许断：
- * `<a href="…">` 与 `<pre><code class="…">` 里都有空格，而断点候选里就有 `' '` —— 不挡的话
- * 会切出一个 `<a` 加一个 `href="…">`（docs/08 §5.3.4）。
+ * HTML 档位下「该下标之前是否可断开」的掩码。标签 `<…>` 与实体 `&…;` 内部一律不可断开：
+ * `<a href="…">` 与 `<pre><code class="…">` 中都含空格，而断点候选包含 `' '`，不拦截就会切出
+ * 一个 `<a` 和一个 `href="…">`（docs/08 §5.3.4）。
  */
 function htmlBreakable(codepoints: readonly string[]): boolean[] {
   const breakable = new Array<boolean>(codepoints.length + 1).fill(true);
@@ -547,7 +545,7 @@ function htmlBreakable(codepoints: readonly string[]): boolean[] {
     let end = index + 1;
     let literal = false;
     while (end < codepoints.length && codepoints[end] !== closer) {
-      // 实体只可能是 `&amp; &lt; &gt; &quot;`：撞上非实体字符说明这个 `&` 是字面量，不是构造。
+      // 实体只可能是 `&amp; &lt; &gt; &quot;`：遇到非实体字符说明该 `&` 是字面量而非构造。
       if (char === "&" && !/[A-Za-z0-9#]/.test(codepoints[end]!)) {
         literal = true;
         break;
@@ -568,7 +566,7 @@ function htmlBreakable(codepoints: readonly string[]): boolean[] {
   return breakable;
 }
 
-/** 把断点退到掩码允许的位置。没有掩码（MarkdownV2 / none）时原样返回。 */
+/** 把断点回退到掩码允许的位置。无掩码时（MarkdownV2 / none）原样返回。 */
 function retreat(
   boundary: number,
   breakable: readonly boolean[] | null,
@@ -585,9 +583,9 @@ function chooseBoundary(
   breakable: readonly boolean[] | null,
 ): number {
   const window = codepoints.slice(0, limit);
-  // 断点只在码点数组上找。String#lastIndexOf 给的是 UTF-16 下标，一条 emoji 就让它比码点下标大 1；
-  // 拿它去切码点数组，body 取不满而 remaining 多跳，中间那段直接消失（实测 5001 码点丢 1105 个，
-  // docs/24 · R-TG-01）。boundary 由此恒 ≤ limit，也就不会切出超长的 part。
+  // 断点只在码点数组上查找。String#lastIndexOf 返回的是 UTF-16 下标，一个 emoji 就使其比码点下标大 1；
+  // 用它切分码点数组会导致 body 取不满而 remaining 多跳，中间一段直接丢失（实测 5001 码点丢失 1105 个，
+  // docs/24 · R-TG-01）。boundary 因此恒 ≤ limit，不会切出超长的 part。
   const candidates = [
     lastIndexOfPair(window, "\n", "\n"),
     window.lastIndexOf("\n"),
@@ -601,21 +599,21 @@ function chooseBoundary(
   const chosen =
     candidates.find((value) => value >= Math.floor(limit * 0.5)) ??
     retreat(limit, breakable);
-  // 退无可退（单个标签就长过一整片，比如 URL 有几千字符）：硬切。切坏的标签会让 Telegram 报解析
-  // 失败，而 `sendWithFallback` 会降级成纯文本 —— 消息还在。死循环才是真的不可接受。
+  // 无法继续回退时（单个标签就超过整片长度，例如数千字符的 URL）执行硬切。被切坏的标签会让
+  // Telegram 报解析失败，而 `sendWithFallback` 会降级为纯文本，消息仍能送达；死循环才是不可接受的。
   return chosen > 0 ? chosen : limit;
 }
 
 /**
- * 按 `maxMessageChars` 分片。**渲染在分片之前**（转义会让长度翻倍，按源文本切没法保证渲染后
- * 不超上限），所以每一档都要认自己那套不可切开的构造 —— 见 docs/08 §5.3.4 那张表。
+ * 按 `maxMessageChars` 分片。渲染发生在分片之前（转义会使长度翻倍，按源文本切分无法保证渲染后不超
+ * 上限），因此每个档位都要识别各自不可切分的构造，见 docs/08 §5.3.4 的对照表。
  */
 export function splitTelegramText(
   text: string,
   max = 3900,
   parseMode: ParseMode = "MarkdownV2",
 ): string[] {
-  // `none` 只摘 NUL（正文里的 NUL 没有任何显示意义），其余原样 —— 这一档的语义就是「别动我的文本」。
+  // `none` 只剔除 NUL（正文中的 NUL 无显示意义），其余原样保留：该档位的语义就是不修改文本。
   const rendered =
     parseMode === "none"
       ? text.replaceAll("\u0000", "")
@@ -628,23 +626,23 @@ export function splitTelegramText(
       : parseMode === "MarkdownV2"
         ? sealMarkdown
         : null;
-  // MarkdownV2 的收尾长度是定值（`\n``` `），预留掉就一次切成；HTML 的取决于切口处张着哪些标签，
-  // **一律不预留**，靠下面那个重试按真实超出量回退。按最坏情况（白名单里每个标签都张着 = 59 字符）
-  // 悲观预留过一版：`maxMessageChars` 调到 100 时窗口只剩 41，一个 `<a href="…">` 都放不下，
-  // `retreat` 退到 0 之后硬切，把标签切成两半 —— 正是这一整块要防的事（4000 轮随机用例实测）。
+  // MarkdownV2 的收尾长度是定值（`\n``` `），预留后可一次切成；HTML 的收尾长度取决于切口处打开了哪些
+  // 标签，一律不预留，改由下面的重试按实际超出量回退。曾按最坏情况（白名单中所有标签都打开 = 59 字符）
+  // 悲观预留过一版：`maxMessageChars` 设为 100 时窗口只剩 41，连一个 `<a href="…">` 都放不下，
+  // `retreat` 回退到 0 后硬切，把标签切成两半，正是本段要防止的情况（4000 轮随机用例实测）。
   const reserve = parseMode === "MarkdownV2" ? 4 : 0;
   const parts: string[] = [];
   let remaining = [...rendered];
   let seal: Seal = NO_SEAL;
-  // 条件里带上**重开前缀的长度**：`remaining.length <= max` 只说正文装得下，而收尾那一片还要
-  // 把前缀拼上去。不带的话最后一片会超上限（MarkdownV2 最多超 4 个字符，HTML 能超一整条 URL），
-  // 而超长不是解析失败、`sendWithFallback` 兜不住 —— Telegram 直接 message is too long。
+  // 条件中要计入重开前缀的长度：`remaining.length <= max` 只说明正文装得下，而最后一片还要拼上前缀。
+  // 不计入时最后一片会超出上限（MarkdownV2 最多超 4 个字符，HTML 可超出一整条 URL），
+  // 而超长属于长度错误而非解析失败，`sendWithFallback` 兜不住，Telegram 直接返回 message is too long。
   while ([...seal.prefix].length + remaining.length > max) {
     const breakable = parseMode === "HTML" ? htmlBreakable(remaining) : null;
-    // **前缀一旦决定要带就必须带到底。** 试过「装不下就放弃重开」，那是错的：不重开的那一片是
-    // 纯文本没问题，但流里后面**仍然会来那个 `</b>`** —— 它于是变成下一片开头一个没有配对的闭合
-    // 标签（4000 轮随机用例才逼出来，因为按片统计「开了几个/闭了几个」的弱判据看不见野闭合标签）。
-    // 唯一的例外是前缀自己就长过一整片：那时它怎么都带不进去，而那一档的标签本来也已经被硬切了。
+    // 前缀一旦决定携带就必须贯彻到底。曾尝试「装不下就放弃重开」，该做法是错的：不重开的那一片是
+    // 纯文本没有问题，但后续流中仍会出现对应的 `</b>`，它会变成下一片开头一个无配对的闭合标签
+    // （4000 轮随机用例才复现，因为按片统计开闭数量的弱判据看不出孤立闭合标签）。
+    // 唯一例外是前缀自身超过整片长度：此时无论如何都带不进去，而该档位的标签本就已被硬切。
     const prefix = [...seal.prefix].length < max ? seal.prefix : "";
     let limit = Math.max(1, max - [...prefix].length - reserve);
     let boundary = 0;
@@ -657,14 +655,14 @@ export function splitTelegramText(
       const size =
         [...prefix].length + [...body].length + [...next.suffix].length;
       if (size <= max || boundary <= 1) break;
-      // 收尾比预期长（嵌套里切了一刀，闭合链比上一轮更深）：把断点往前挪掉超出的量再来一次。
-      // limit 单调下降，所以必然收敛。
+      // 收尾长度超出预期（切口落在嵌套中，闭合链比上一轮更深）：把断点前移超出的量后重试。
+      // limit 单调下降，因此必然收敛。
       limit = Math.max(1, limit - (size - max));
     }
-    // 退到这里还超上限，只可能是前缀几乎占满了一整片（实测 96 字符的 `<a href="…">` 配
-    // `maxMessageChars: 100`：每片都是前缀 + 1 个字 + 闭合 = 101 字符，超上限而且永远切不完）。
-    // 这一档**宁可丢格式也不能超上限**：超长会被 Telegram 以 message is too long 硬拒，而
-    // `sendWithFallback` 只兜得住解析失败；不成对至少还能降级成纯文本把话说出去。
+    // 到此仍超上限，只可能是前缀几乎占满整片（实测 96 字符的 `<a href="…">` 配 `maxMessageChars: 100`：
+    // 每片都是前缀 + 1 个字 + 闭合 = 101 字符，既超上限又永远切不完）。
+    // 该档位宁可丢失格式也不能超上限：超长会被 Telegram 以 message is too long 直接拒绝，而
+    // `sendWithFallback` 只能兜住解析失败；标签不成对至少还能降级为纯文本把内容发出去。
     if (
       prefix &&
       [...prefix].length + [...body].length + [...next.suffix].length > max
@@ -676,31 +674,31 @@ export function splitTelegramText(
     while (remaining[0]?.trim() === "") remaining.shift();
     seal = next;
   }
-  // 前缀带得进去是上面那个 while 条件保证的，所以这里直接拼。
+  // 前缀能装下由上面的 while 条件保证，因此这里直接拼接。
   if (remaining.length) parts.push(`${seal.prefix}${remaining.join("")}`);
   return parts;
 }
 
 /**
- * 渲染结果反推回纯文本。解析失败降级时用它，而不是把渲染结果原样按纯文本发出去 —— 后者在
- * MarkdownV2 下是满屏 `\-`，在 HTML 下更糟：用户直接看到 `<b>` 标签。`sendWithFallback` 的
- * 承诺是「格式丢掉，消息还在」，那就得真的只丢格式。
+ * 把渲染结果反推回纯文本。解析失败降级时使用它，而不是把渲染结果原样按纯文本发送：后者在
+ * MarkdownV2 下是满屏 `\-`，在 HTML 下更糟，用户会直接看到 `<b>` 标签。`sendWithFallback` 承诺的是
+ * 「丢掉格式、保住消息」，因此必须真的只丢格式。
  */
 export function toPlainText(rendered: string, parseMode: ParseMode): string {
   if (parseMode === "none") return rendered;
   if (parseMode === "HTML") {
-    // 链接的 URL 单独捞出来：标签一律剥掉的话它会**连内容一起丢**，那不是丢格式而是丢信息。
+    // 链接的 URL 需单独提取：一律剥离标签会连同内容一起丢失，那是丢信息而非丢格式。
     return (
       rendered
         .replace(
           /<a href="([^"]*)">(.*?)<\/a>/gs,
           (_whole, href: string, label: string) => `${label} (${href})`,
         )
-        // 只剥**完整**标签。被硬切开的半截标签（`<a href="…` 结尾、`…">` 开头）故意留着：
-        // 它出现在「单个构造比整片还长」那一档，而那一档里 `<a href="` 后面跟的就是那条长 URL 本身。
-        // 试过顺手擦掉这两个半截，代价是把 URL 一起吃了 —— 少几个字面尖括号远不如「消息还在」重要。
+        // 只剥离完整标签。被硬切开的半截标签（以 `<a href="…` 结尾、以 `…">` 开头）刻意保留：
+        // 它出现在「单个构造超过整片长度」的档位，而该档位中 `<a href="` 后面跟的就是那条长 URL 本身。
+        // 曾尝试一并清除这两个半截，代价是把 URL 也吃掉；少几个字面尖括号远不如保住消息内容重要。
         .replace(/<[^>]*>/g, "")
-        // 解码顺序与 `escapeHtml` 的转义顺序相反：`&amp;` 最后，否则 `&amp;lt;` 会被解成 `<`。
+        // 解码顺序与 `escapeHtml` 的转义顺序相反，`&amp;` 放在最后，否则 `&amp;lt;` 会被解成 `<`。
         .replaceAll("&lt;", "<")
         .replaceAll("&gt;", ">")
         .replaceAll("&quot;", '"')
@@ -711,8 +709,8 @@ export function toPlainText(rendered: string, parseMode: ParseMode): string {
 }
 
 /**
- * 分片的两份结果：`rendered[i]` 是真正发出去的那一条，`archived[i]` 是它要落进 `messages.text`
- * 的那一份。两个数组等长，出站路径靠下标把 `message_id` 与文本对应起来。
+ * 分片的两组结果：`rendered[i]` 是实际发送的内容，`archived[i]` 是写入 `messages.text` 的内容。
+ * 两个数组等长，出站路径按下标把 `message_id` 与文本对应起来。
  */
 export interface TelegramSegments {
   rendered: string[];
@@ -720,21 +718,21 @@ export interface TelegramSegments {
 }
 
 /**
- * 分片 + **逐段的归档文本**（docs/28 · L-TG-03）。
+ * 分片并生成逐段的归档文本（docs/28 · L-TG-03）。
  *
- * 此前三条出站路径都给每一段存一份**完整全文**：一条 9469 字的回复切成 3 条 → `messages` 三行
- * 各 9469 字、head/tail 完全相同，`messages_fts` 也是三份，于是 `search_messages` 把同一条回复搜出
- * 三次、归档体积按分段数翻倍。（上下文侧一直是对的：`context_messages` 只有一条整全文。）
+ * 此前三条出站路径都为每一段存储完整全文：一条 9469 字的回复切成 3 条后，`messages` 三行各 9469 字、
+ * head/tail 完全相同，`messages_fts` 同样是三份，导致 `search_messages` 把同一条回复搜出三次、
+ * 归档体积按分段数翻倍。上下文侧一直是正确的：`context_messages` 只存一条完整全文。
  *
- * 归档存的是**渲染前**的正文（`safeRender` 之后的 MarkdownV2 转义符不该进库，否则 WebUI 会话页与
- * `read_messages` 看到的 bot 发言带一串 `\-` `\.`）。而**渲染在分片之前**，分片点是渲染后码点数组
- * 上的下标 —— 反推不回源文本里的下标：转义、`###` 降级成粗体、列表符号替换、表格进围栏，
- * 都不是可逆的 1:1 映射。所以：
+ * 归档存储的是渲染前的正文（`safeRender` 产生的 MarkdownV2 转义符不应入库，否则 WebUI 会话页与
+ * `read_messages` 看到的 bot 发言会带一串 `\-` `\.`）。而渲染发生在分片之前，分片点是渲染后码点数组
+ * 上的下标，无法反推回源文本下标：转义、`###` 降级为粗体、列表符号替换、表格转入围栏，都不是可逆的
+ * 1:1 映射。因此：
  *
- * - **只有一片**（绝大多数消息）：那一片就是整条源文本，`archived` 直接是它，口径一个字未变。
- * - **真的切开了**：按 `toPlainText` 逐段反推。它是 `sendWithFallback` 解析失败降级时**真正发出去**
- *   的那一份，同样不含转义符 —— 代价是几个标记形态会归一（`**粗**` → `*粗*`、`- 项` → `• 项`），
- *   换来的是「每一段只存自己那一段」。近似的是**字面形态**，不是段与 `message_id` 的对应关系。
+ * - 只有一片（绝大多数消息）：该片即整条源文本，`archived` 直接取源文本，口径完全一致。
+ * - 确实切分了：按 `toPlainText` 逐段反推。它是 `sendWithFallback` 解析失败降级时实际发送的内容，
+ *   同样不含转义符。代价是若干标记形态会被归一（`**粗**` → `*粗*`、`- 项` → `• 项`），换来的是每段
+ *   只存储自身内容。近似的是字面形态，而非段与 `message_id` 的对应关系。
  */
 export function segmentTelegramText(
   text: string,

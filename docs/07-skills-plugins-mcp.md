@@ -36,7 +36,7 @@ skills/
 这一条才能住在 `skills/` 里（同分区 `renameSync` 落位），而它本身也是独立正确的：在这之前
 `skills/` 下一个 `.DS_Store` 会被扫成一行 `load_error` 假 skill。
 
-`skills.source` 列（[03 §2.12](./03-data-model.md)）三个取值：`bundled`（随包那四份说明书）/
+`skills.source` 列（[03 §2.12](./03-data-model.md)）三个取值：`bundled`（随包那四份说明文档）/
 `package`（目录里有 `.package.json`）/ `local`（手写或 `write_skill` 写的）。
 
 ```markdown
@@ -182,7 +182,7 @@ activeTools = (常驻 ∪ 本轮已展开) ∩ skill 允许集 ∩ 开轮冻结�
   `skills.dir` 临时不在（换盘、挂载没起来）时清空整张表比留着陈行糟得多。
 - 解析失败：写 `skills.load_error`，该 skill 标记不可用，WebUI 显红，**不影响其他 skill 与启动**。
 - WebUI 可直接编辑 SKILL.md（带 frontmatter 表单 + 正文编辑器）、启停、查看解析结果与 token 占用。
-  **随包那四份说明书只放行启停**：改正文 / 描述 / 删除一律拒（`skill_reserved`）。
+  **随包那四份说明文档只放行启停**：改正文 / 描述 / 删除一律拒（`skill_reserved`）。
   `write_skill` 从一开始就拒改它们（§6.3），而 WebUI 侧此前能改能删 —— 同一条不变量只焊住了一半。
 
 ### 2.4 Skill 目录的文件访问
@@ -204,7 +204,7 @@ skill 包，模型把它解到**工作目录**、一路 `bash scripts/invoke.sh`
 出厂 `false` 且没人开过，被开关关掉的工具不进模型的工具目录，而**一个缺席的工具在模型侧没有任何
 解释** —— 「这条通道存在但关着」这句话它拿不到，于是自己在工作区里凑了一套。运维侧那一半补上了
 （扩展页的通道闸提示条，指名道姓说出真正关着的那个键，[09 §3.8](./09-webui.md)）；模型侧至今只有
-§5 末尾 `maxRegistered` 截断那条 RUNTIME 告知算先例。§6.3 记的是反过来那一半：说明书讲了一个
+§5 末尾 `maxRegistered` 截断那条 RUNTIME 告知算先例。§6.3 记的是反过来那一半：说明文档讲了一个
 它没有的工具。
 
 `installSkillPackage()`（`packages/core/src/skills/package.ts`）是这条通道的唯一实现，
@@ -706,13 +706,13 @@ plugin 60 > MCP 40 > 自定义 30），记 `warn` 日志并在 RUNTIME 块告知
 | `define_tool` → `custom_tools` 表 | `enabled=0` | owner 在扩展页点启用；或运维打开 `tools.selfExtend.customTools.autoEnable` |
 | `write_plugin` → `plugins/<name>/plugin.js` | 库里那行 `enabled=0` | 仅 owner（plugin 是进程内全信任 = root，§3.2 / [14 A27](./14-open-questions.md)） |
 | `install_mcp` → `mcp.servers` | `enabled: false` | 仅 owner |
-| `write_skill` → `SKILL.md` | 直接生效 | —— skill 是纯文本，不含可执行代码；约束是 `min-role` 有配置下限，且随包发的四份说明书不许覆写 |
+| `write_skill` → `SKILL.md` | 直接生效 | —— skill 是纯文本，不含可执行代码；约束是 `min-role` 有配置下限，且随包发的四份说明文档不许覆写 |
 | `install_skill` → `skills/<name>/` 一整棵 | `enabled=false` | 仅 owner（§6.5） |
 
 **`write_skill` 直接生效而 `install_skill` 不行，差别在「纯文本」这个前提**：`write_skill`
-写出去的就是一段 Markdown，最坏情况是一份误导性的说明书；而一个包带着 `scripts/` 与
+写出去的就是一段 Markdown，最坏情况是一份误导性的说明文档；而一个包带着 `scripts/` 与
 `bin/`（那个音乐包里是一个 4.9 MB 的 ELF），启用它等于让模型读到一份「去跑这个自带二进制」
-的说明书。那一步必须有人看过文件清单 —— 与 `write_plugin` / `install_mcp` 同一条理由。
+的说明文档。那一步必须有人看过文件清单 —— 与 `write_plugin` / `install_mcp` 同一条理由。
 
 **改动正文会把前三者打回未启用。** 没有这条，「先定义无害的、拿到启用、再改成恶意的」直接走通。
 `write_plugin` 覆盖前还会把旧源码留一份 `plugin.js.bak-<ts>`（备份名不叫 `plugin.js`，`reconcile()`
@@ -747,20 +747,20 @@ plugin 60 > MCP 40 > 自定义 30），记 `warn` 日志并在 RUNTIME 块告知
   的话，改过目录或自己写过一份 denyGlobs 的部署就一条都不生效 —— 而那正是最需要它的时候：
   `allowHostFsForOwner` 打开时 `write_file` 能绕过 `writeSource` 直接改一个已启用 plugin 的源码。
 
-### 6.3 给模型的说明书
+### 6.3 给模型的说明文档
 
-四份说明书都带 `requires-tools`（[§2.1](#21-目录与格式anthropic-skillmd-兼容d14)），因为
-`min-role` 挡不住这件事：说明书讲的工具受 `tools.selfExtend.*` 控制、出厂是关的，而 skill 目录
+四份说明文档都带 `requires-tools`（[§2.1](#21-目录与格式anthropic-skillmd-兼容d14)），因为
+`min-role` 挡不住这件事：说明文档讲的工具受 `tools.selfExtend.*` 控制、出厂是关的，而 skill 目录
 只按角色过滤。**实测代价**：模型在目录里读到「用 `install_mcp` 装 MCP」，去调却没有这个工具，
 于是花了八分钟用 `bash` 逆向代码库、从 `sessions` 表里取了一个 owner 会话去打 WebUI 的
-`PUT /api/config` + `POST /api/mcp` 把事办了。一份「教你用一个你没有的工具」的说明书，
-比没有这份说明书糟。
+`PUT /api/config` + `POST /api/mcp` 把事办了。一份「教你用一个你没有的工具」的说明文档，
+比没有这份说明文档糟。
 
 四份随包提交在 `skills/` 的 skill：`writing-tools` / `writing-skills` / `writing-plugins` /
 `installing-mcp`，全部 `min-role: owner` + `requires-tools`。走的就是 §2.2 的渐进式披露 —— 平时只占目录里四行，
-正文靠 `load_skill` 拉。新工具的 `description` 结尾指路（「写之前先 `load_skill("writing-tools")`」）。
+正文靠 `load_skill` 拉。新工具的 `description` 结尾指路（「编写前先调用 `load_skill("writing-tools")`」）。
 
-`write_skill` 与 `install_skill` 都拒绝覆写这四个名字：模型把自己的说明书改坏之后，
+`write_skill` 与 `install_skill` 都拒绝覆写这四个名字：模型把自己的说明文档改坏之后，
 下一次它就是照着改坏的那份写的。同一条现在也焊在 WebUI 侧（§2.3 末尾）。
 
 ### 6.4 WebUI

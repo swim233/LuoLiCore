@@ -8,15 +8,15 @@ import type { ApprovalBroker, Config, ModelRegistry } from '@luoli/core';
 import type { RuntimeTurnContext } from '@luoli/shared';
 
 /**
- * 工具目录按需暴露的**请求体 / 运行时层**契约（`AC-TOOL-020`、`AC-TOOL-047`、`AC-TOOL-050`–`052`、
- * 改写后的 `AC-PROMPT-003`）。手法照 `agent.model-wiring.test.ts`（`AC-PROMPT-008` 的先例）：
- * 断言只落在**真正递到 provider 那一层**的两样东西上 —— `options.prompt`（易变段里的目录文本）
+ * 工具目录按需暴露在请求体与运行时层的契约（`AC-TOOL-020`、`AC-TOOL-047`、`AC-TOOL-050`–`052`、
+ * 改写后的 `AC-PROMPT-003`）。手法参照 `agent.model-wiring.test.ts`（`AC-PROMPT-008` 的先例）：
+ * 断言只落在真正递交到 provider 那一层的两样内容上，即 `options.prompt`（易变段中的目录文本）
  * 与 `options.tools`（本步的 tools 数组，带完整 JSON Schema）。
  *
- * 只断言 `activeView()` / `assembleMainPrompt()` 的返回值不够：中间还隔着 `toolSetFor` 的开轮冻结、
- * `prepareStep` 的每步三重交集、`repairToolCall` 的改写、以及 AI SDK 自己按 `activeTools` 收缩
- * toolSet 那一步 —— 折叠这套机制的每一个失效形态（摘要里报了个 toolSet 里没有的名字、展开了却
- * 发不出去、schema 白发一遍）都只在这两样东西上才看得见。
+ * 仅断言 `activeView()` / `assembleMainPrompt()` 的返回值不够：中间还隔着 `toolSetFor` 的开轮冻结、
+ * `prepareStep` 的每步三重交集、`repairToolCall` 的改写，以及 AI SDK 按 `activeTools` 收缩
+ * toolSet 那一步。折叠机制的每一种失效形态（摘要中报出 toolSet 里不存在的名字、已展开却
+ * 发不出去、schema 重复下发）都只在这两样内容上才可观察。
  */
 function candidate(id: string, run: () => unknown) {
   return { specificationVersion: 'v4' as const, provider: 'test', modelId: id, supportedUrls: {},
@@ -31,7 +31,7 @@ function info(modelId: string, vision = false) {
     priceIn: 1, priceOut: 2, priceCacheRead: 0, priceCacheWrite: 0 };
 }
 
-/** 只实现 runMainAgent 真正用到的那几个方法；其余留空，多用一个就会在类型上报出来。 */
+/** 只实现 runMainAgent 实际使用的那几个方法；其余留空，多使用一个会在类型层面报错。 */
 function registryFor(chains: Record<string, Array<{ model: ReturnType<typeof candidate>; info: ReturnType<typeof info> }>>): ModelRegistry {
   const down: string[] = [];
   const failures = new Map<string, number>();
@@ -67,7 +67,7 @@ function registryFor(chains: Record<string, Array<{ model: ReturnType<typeof can
   return fake as unknown as ModelRegistry;
 }
 
-/** 每一轮都要一个**新的** turn 对象：`expandedTools` 随 turn 消亡，「下一轮回到折叠态」测的就是这一条。 */
+/** 每一轮都需要一个新的 turn 对象：`expandedTools` 随 turn 消亡，下一轮回到折叠态验证的正是这一点。 */
 function makeTurn(config: Config, turnId: string): RuntimeTurnContext {
   return { turnId, key: 'chat:1', chatId: '1', threadId: null, initiatorUserId: '2', effectiveRole: 'trusted',
     isPrivate: true, baseCommitId: null, snapshot: { messages: [], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 0 },
@@ -89,8 +89,8 @@ function harness(name: string, patch: Partial<Config> = {}, maxRegistered = 40, 
   const documents = new PromptDocuments(db, config.memory.dir);
   documents.ensure();
   const turn = makeTurn(config, 'turn-1');
-  // registry 的 limits 与本轮 config 必须给**同一份** catalog：折叠判据走 `#limits()` getter，
-  // 而 `search_tools` 的展开额度读 `turn.config` —— 两处不一致时测出来的是一个不存在的部署。
+  // registry 的 limits 与本轮 config 必须使用同一份 catalog：折叠判据走 `#limits()` getter，
+  // 而 `search_tools` 的展开额度读取 `turn.config`，两处不一致时测出的是一个并不存在的部署。
   const tools = new ToolRegistry(log, broker, { maxRegistered, maxCallsPerTurn, maxConsecutiveErrors: 3, catalog: config.tools.catalog });
   registerCatalogTools(tools, { log });
   const dependencies = { config, db, tools, prompts: new PromptAssembler(), documents,
@@ -99,26 +99,26 @@ function harness(name: string, patch: Partial<Config> = {}, maxRegistered = 40, 
 }
 
 type PromptMessage = { role: string; content: unknown; providerOptions?: unknown };
-/** provider 收到的一件 function tool：`inputSchema` 是**完整 JSON Schema**，折叠要省的就是它。 */
+/** provider 收到的一件 function tool：`inputSchema` 是完整 JSON Schema，折叠要节省的正是它。 */
 type WireTool = { name: string; description?: string; inputSchema?: unknown };
 type WireStep = { prompt: PromptMessage[]; tools: WireTool[] };
 
 const textOf = (message: PromptMessage): string => Array.isArray(message.content)
   ? (message.content as Array<{ text?: unknown }>).map((part) => typeof part?.text === 'string' ? part.text : '').join('')
   : String(message.content);
-/** 易变段 = 请求体最后那条 user 消息（`docs/06 §1`：TOOL CATALOG + 记忆 + RUNTIME 都在里面）。 */
+/** 易变段即请求体最后那条 user 消息（`docs/06 §1`：TOOL CATALOG、记忆与 RUNTIME 都在其中）。 */
 const volatileOf = (step: WireStep): string => textOf(step.prompt.at(-1)!);
 const namesOf = (step: WireStep): string[] => step.tools.map((entry) => entry.name);
-/** 「整条请求体」= instructions（prompt 里那条 system）+ 全部消息 + tools 数组。`AC-TOOL-050` 数的就是这一串。 */
+/** 整条请求体等于 instructions（prompt 中那条 system）加全部消息加 tools 数组。`AC-TOOL-050` 统计的正是这一串。 */
 const wholeRequest = (step: WireStep): string => `${JSON.stringify(step.prompt)}${JSON.stringify(step.tools)}`;
 const countOf = (haystack: string, needle: string): number => haystack.split(needle).length - 1;
 
 /**
- * 易变段在 step ≥ 1 时**不再是最后一条消息** —— SDK 把这一步的 tool-call / tool-result 追在它后面。
- * 按 `=== RUNTIME ===` 认那一条，而不是 `at(-1)`：认错了「展开之后正文一个字节都没动」会假绿。
+ * 易变段在 step ≥ 1 时不再是最后一条消息：SDK 会把这一步的 tool-call / tool-result 追加在它之后。
+ * 按 `=== RUNTIME ===` 定位，而非 `at(-1)`：定位错误会让展开之后正文未改动这条断言假通过。
  */
 const volatileIn = (step: WireStep): string => textOf(step.prompt.find((message) => textOf(message).includes('=== RUNTIME ==='))!);
-/** 易变段里某一块的正文（`=== NAME ===` 到下一个块标记之间）。 */
+/** 易变段中某一块的正文（`=== NAME ===` 到下一个块标记之间）。 */
 const blockOf = (text: string, name: string): string => {
   const head = `=== ${name} ===`;
   const at = text.indexOf(head);
@@ -127,9 +127,9 @@ const blockOf = (text: string, name: string): string => {
   const end = rest.search(/\n=== /);
   return end < 0 ? rest : rest.slice(0, end);
 };
-/** TOOL CATALOG 常驻段里**逐条**列出的工具名。折叠组那几行是 `- [组名] N 个：…`，skill 是 `- skill:x: …`，都不匹配。 */
+/** TOOL CATALOG 常驻段中逐条列出的工具名。折叠组那几行形如 `- [组名] N 个：…`，skill 形如 `- skill:x: …`，均不匹配。 */
 const catalogNames = (text: string): string[] => [...blockOf(text, 'TOOL CATALOG').matchAll(/^- ([a-z_][a-z_0-9]*): /gm)].map((match) => match[1]!);
-/** RUNTIME 的「可用工具」行里那串名字（折叠计数后缀在 `；` 之后，不算在内）。 */
+/** RUNTIME 的可用工具行中的名字串（折叠计数后缀位于 `；` 之后，不计入）。 */
 const runtimeToolNames = (text: string): string[] => (/^可用工具：([^；\n]*)/m.exec(blockOf(text, 'RUNTIME'))?.[1] ?? '').split(', ').filter(Boolean);
 
 const toolCall = (name: string, input: unknown, id = `c-${name}`) => ({ ...ok,
@@ -137,13 +137,13 @@ const toolCall = (name: string, input: unknown, id = `c-${name}`) => ({ ...ok,
   finishReason: { unified: 'tool-calls', raw: 'tool_calls' } });
 
 /**
- * 抓每一步的请求体，并按剧本决定这一步回什么。
+ * 捕获每一步的请求体，并按剧本决定该步返回什么。
  *
- * 剧本项是函数而不是死数据：轮**中**的那几件事（MCP reconcile 摘掉一台 server、新挂一台、载入一个
- * 带 `allowed-tools` 的 skill）都要发生在某一步的**中间**，而 `doGenerate` 正是那个位置 ——
- * 它排在本步 `prepareStep` 之后、下一步 `prepareStep` 之前，与「某个工具的 execute 里改 turn 对象」
- * 在时序上等价，但不必为此往目录里多塞一个工具（多一个工具就多一份描述，`AC-TOOL-050` 那条计数
- * 断言会跟着漂）。
+ * 剧本项是函数而非静态数据：轮内的那几件事（MCP reconcile 移除一台 server、新增一台、载入一个
+ * 带 `allowed-tools` 的 skill）都需要发生在某一步的中间，而 `doGenerate` 正是该位置：
+ * 它排在本步 `prepareStep` 之后、下一步 `prepareStep` 之前，与在某个工具的 execute 中修改 turn 对象
+ * 时序等价，但无需为此向目录额外加入一个工具（多一个工具即多一份描述，`AC-TOOL-050` 的计数
+ * 断言会随之漂移）。
  */
 function recorder(steps: WireStep[], script: Array<() => unknown> = []) {
   return { model: { ...candidate('m1', () => ok),
@@ -156,10 +156,10 @@ function recorder(steps: WireStep[], script: Array<() => unknown> = []) {
 const logRows = (db: ReturnType<typeof openDatabase>): Array<{ kind: string; summary: string; data: string | null }> =>
   db.prepare('SELECT kind,summary,data_json AS data FROM log_events ORDER BY rowid').all() as Array<{ kind: string; summary: string; data: string | null }>;
 
-/** 折叠工具的 schema 里那个独一无二的属性名 —— 断言「一个字节都没发出去」就是数它。 */
+/** 折叠工具 schema 中那个唯一的属性名，断言其完全未下发即统计它的出现次数。 */
 const ISSUE_PROP = 'luoliIssueTitleMarker';
 const LIST_PROP = 'luoliIssueStateMarker';
-/** 每个折叠工具一段独一无二的描述：断言「不在 TOOL CATALOG 正文里」要数的是它，而不是名字（名字在摘要行里）。 */
+/** 每个折叠工具一段唯一的描述：断言其不出现在 TOOL CATALOG 正文中要统计的是它，而不是名字（名字在摘要行中）。 */
 const ISSUE_DESC = '甲：在仓库里开一个新的工单并把正文写进去';
 const LIST_DESC = '乙：把仓库里现有的工单按状态列出来';
 
@@ -177,10 +177,10 @@ function registerResident(tools: ToolRegistry, name: string, description: string
 
 describe('deferred tool catalog · 请求体层', () => {
   /**
-   * `AC-TOOL-047` 第一段：**折叠工具在第 0 步的请求体里只剩一个名字。**
+   * `AC-TOOL-047` 第一段：折叠工具在第 0 步的请求体中只保留一个名字。
    *
-   * 三处各自独立，缺一个折叠就白折：目录正文不许有它的描述、tools 数组不许有它的 schema、
-   * 而摘要行必须给出名字 + 个数 + 组名 + 展开指引（只给名字不给出路的话模型直接调过去撞
+   * 三处各自独立，缺任意一处折叠即失效：目录正文不得包含它的描述、tools 数组不得包含它的 schema、
+   * 摘要行必须给出名字、数量、组名与展开指引（只给名字而不给出路时，模型会直接调用并撞上
    * `NoSuchToolError`，`docs/14 §3 T20 ①`）。
    */
   it('第 0 步：折叠工具不在目录正文、schema 一个字节都不在 tools 数组里，只留一行组摘要', async () => {
@@ -189,8 +189,8 @@ describe('deferred tool catalog · 请求体层', () => {
     const steps: WireStep[] = [];
     await runMainAgent(turn, { ...dependencies, registry: registryFor({ main: [recorder(steps)] }) });
     const step = steps[0]!;
-    // 折叠的两个**在**开轮冻结的 toolSet 里（`active()` = 常驻 ∪ 折叠），只是不在本步的
-    // `activeTools` 里 —— SDK 按 `activeTools` 再收一次，所以 provider 手上这份数组里压根没有它们。
+    // 折叠的两个位于开轮冻结的 toolSet 内（`active()` 等于常驻并集折叠），只是不在本步的
+    // `activeTools` 中；SDK 会按 `activeTools` 再收缩一次，因此 provider 收到的数组中不含它们。
     expect(namesOf(step)).toEqual(['search_tools']);
     const wire = JSON.stringify(step.tools);
     expect(countOf(wire, ISSUE_PROP)).toBe(0);
@@ -198,18 +198,18 @@ describe('deferred tool catalog · 请求体层', () => {
     const block = volatileOf(step);
     expect(block).not.toContain(ISSUE_DESC);
     expect(block).not.toContain(LIST_DESC);
-    // 组摘要那两行是模型唯一能知道「还有东西可取」的入口。
+    // 组摘要那两行是模型得知仍有工具可检索的唯一入口。
     expect(block).toContain('【折叠工具 · 共 2 个，本步不可直接调用；用 search_tools 按关键词或名字展开】');
     expect(block).toContain('- [mcp:gh] 2 个：mcp__gh__create_issue, mcp__gh__list_issues');
     closeDatabase(db);
   });
 
   /**
-   * `AC-TOOL-047` 第二、三段：**检索 → 下一步真能调 → 下一轮回到折叠态。**
+   * `AC-TOOL-047` 第二、三段：检索 → 下一步确实可调用 → 下一轮回到折叠态。
    *
-   * 「下一轮回到折叠态」用的是**同一个 registry** 加一个新的 turn 对象：展开集只活在
-   * `turn.expandedTools` 上、不持久化（持久化会造出「server 早删了而展开集还记着」这类腐烂，
-   * `docs/05 §3.12`）。registry 换掉就测不到这条 —— 换掉之后连折叠集都是新的。
+   * 下一轮回到折叠态使用的是同一个 registry 加一个新的 turn 对象：展开集只存在于
+   * `turn.expandedTools`，不持久化（持久化会产生 server 已删除而展开集仍记录的陈旧状态，
+   * `docs/05 §3.12`）。更换 registry 就测不到这条，更换之后连折叠集都是新的。
    */
   it('检索命中之后那一步 schema 才下发，下一轮第一步回到折叠态', async () => {
     const { db, config, turn, dependencies } = harness('catalog-wiring-expand-then-reset');
@@ -218,7 +218,7 @@ describe('deferred tool catalog · 请求体层', () => {
     const registry = registryFor({ main: [recorder(steps, [() => toolCall('search_tools', { names: ['mcp__gh__create_issue'] })])] });
     await runMainAgent(turn, { ...dependencies, registry });
     expect(namesOf(steps[0]!)).toEqual(['search_tools']);
-    // 命中的那一个进了 activeTools，没命中的那一个照旧折叠着 —— 检索是按需的，不是「一次全放开」。
+    // 命中的那个进入 activeTools，未命中的仍保持折叠：检索是按需的，而非一次性全部放开。
     expect(namesOf(steps[1]!)).toEqual(['search_tools', 'mcp__gh__create_issue']);
     const expanded = steps[1]!.tools.find((entry) => entry.name === 'mcp__gh__create_issue')!;
     expect(JSON.stringify(expanded.inputSchema)).toContain(ISSUE_PROP);
@@ -236,10 +236,10 @@ describe('deferred tool catalog · 请求体层', () => {
   });
 
   /**
-   * `AC-TOOL-050`：**同一份 description 不许在一条请求体里出现两次。**
+   * `AC-TOOL-050`：同一份 description 不得在一条请求体中出现两次。
    *
-   * 两处各发一遍时贵的是易变段那一份（每 step 重发），而描述的权威副本本来就是 tools 数组那一份
-   * （还带完整 JSON Schema）。数「全文出现次数」而不是 token 数：数值随描述文本腐烂，
+   * 两处各发一份时成本高的是易变段那一份（每 step 重发），而描述的权威副本本就是 tools 数组那一份
+   * （且带完整 JSON Schema）。统计全文出现次数而非 token 数：数值会随描述文本变动而失效，
    * 结构断言等价且稳定。
    */
   it('residentDescriptions=false：常驻描述在整条请求体里至多出现一次', async () => {
@@ -256,12 +256,12 @@ describe('deferred tool catalog · 请求体层', () => {
     // 元工具自己也是常驻的，同一条规矩。
     const meta = steps[0]!.tools.find((entry) => entry.name === 'search_tools')!;
     expect(countOf(whole, meta.description!)).toBe(1);
-    // 折叠的那两个：schema 与描述在整条请求体里都是 0 次，只有名字出现在摘要行。
+    // 折叠的那两个：schema 与描述在整条请求体中均为 0 次，只有名字出现在摘要行。
     expect(countOf(whole, ISSUE_PROP)).toBe(0);
     expect(countOf(whole, ISSUE_DESC)).toBe(0);
     expect(countOf(whole, LIST_DESC)).toBe(0);
-    // 常驻段压成一行名字清单，且带上「常驻工具」四个字 —— KERNEL 里「见 TOOL CATALOG 的**常驻部分**」
-    // 需要一个能对上的锚点。
+    // 常驻段压缩为一行名字清单，并保留常驻工具字样：KERNEL 中引用 TOOL CATALOG 的常驻部分
+    // 需要一个可对应的锚点。
     expect(volatileOf(steps[0]!)).toContain('常驻工具（可直接调用）：alpha, beta, search_tools');
     closeDatabase(db);
   });
@@ -275,12 +275,12 @@ describe('deferred tool catalog · 请求体层', () => {
     await runMainAgent(turn, { ...dependencies, registry: registryFor({ main: [recorder(steps)] }) });
     expect(volatileOf(steps[0]!)).toContain(`- alpha: ${alphaDesc}`);
     expect(volatileOf(steps[0]!)).not.toContain('常驻工具（可直接调用）：');
-    // 两份：TOOL CATALOG 一行 + tools 数组一件。这正是 `residentDescriptions=false` 要消掉的那一份。
+    // 共两份：TOOL CATALOG 一行与 tools 数组一件。这正是 `residentDescriptions=false` 要消除的那一份。
     expect(countOf(wholeRequest(steps[0]!), alphaDesc)).toBe(2);
     closeDatabase(db);
   });
 
-  /** `AC-TOOL-051` 前半：展开集**轮内只增不减** —— 第二次检索不许把第一次的成果冲掉。 */
+  /** `AC-TOOL-051` 前半：展开集在轮内只增不减，第二次检索不得覆盖第一次的结果。 */
   it('一轮内检索两次：第一次展开的工具在第二次之后仍在 activeTools 里', async () => {
     const { db, turn, dependencies } = harness('catalog-wiring-monotonic');
     registerGithub(dependencies.tools);
@@ -295,35 +295,35 @@ describe('deferred tool catalog · 请求体层', () => {
   });
 
   /**
-   * `AC-TOOL-051` + 改写后的 `AC-PROMPT-003`：**先扩张后收窄，收窄永远赢**，而每一步的键集恒等于
-   * `(常驻 ∪ 已展开) ∩ skill 允许集`，且始终是**开轮那一刻**冻结的 toolSet 的子集。
+   * `AC-TOOL-051` 与改写后的 `AC-PROMPT-003`：先扩张后收窄、收窄优先，且每一步的键集恒等于
+   * `(常驻 ∪ 已展开) ∩ skill 允许集`，并始终是开轮时刻冻结的 toolSet 的子集。
    *
-   * 三件事一起测是因为它们只有一个共同的实现点（`prepareStep` 那条三重过滤）：分开测的话
-   * 「收窄生效了但顺序反了」这一档（先按收窄算再并上展开集）三条断言会各自全绿。
+   * 三件事合并验证是因为它们只有一个共同实现点（`prepareStep` 的三重过滤）：分开验证时，
+   * 收窄生效但顺序颠倒这一档（先按收窄计算再并入展开集）会让三条断言各自通过。
    */
   it('skill 收窄压过展开，search_tools 因豁免留下并如实报 narrowed', async () => {
     const { db, turn, dependencies } = harness('catalog-wiring-narrowed');
     registerResident(dependencies.tools, 'bash', '跑一条命令');
     registerGithub(dependencies.tools);
-    // 开轮冻结的 toolSet = 这一刻的 `active()`。每一步的键集都必须是它的子集，否则 AI SDK 直接报错。
+    // 开轮冻结的 toolSet 即此刻的 `active()`。每一步的键集都必须是它的子集，否则 AI SDK 直接报错。
     const frozen = new Set(dependencies.tools.activeNames('trusted', { turn, workspace: './data', agentKind: 'main' }));
     const steps: WireStep[] = [];
     const script = [
       () => toolCall('search_tools', { names: ['mcp__gh__create_issue'] }, 'c1'),
       () => toolCall('mcp__gh__create_issue', { [ISSUE_PROP]: 'x' }, 'c2'),
-      // 载入一个 `allowed-tools: [bash]` 的 skill。收窄从**下一步**起生效，而本步这次检索的
-      // `execute()` 排在它之后 —— 于是同一次调用就能看到「命中了却调不动」这一档。
+      // 载入一个 `allowed-tools: [bash]` 的 skill。收窄自下一步起生效，而本步这次检索的
+      // `execute()` 排在它之后，因此同一次调用即可观察到命中但不可调用这一档。
       () => { turn.skillAllowedTools = new Set(['bash']); return toolCall('search_tools', { names: ['mcp__gh__create_issue'] }, 'c3'); },
     ];
     await runMainAgent(turn, { ...dependencies, registry: registryFor({ main: [recorder(steps, script)] }) });
     expect(namesOf(steps[0]!)).toEqual(['bash', 'search_tools']);
     expect(namesOf(steps[1]!)).toEqual(['bash', 'search_tools', 'mcp__gh__create_issue']);
-    // 收窄之后：已展开的 MCP 工具被滤掉（展开改变的是可见性，不是权限），`search_tools` 与
-    // 白名单里的 bash 留下。少了 `search_tools` 就等于收窄顺手把检索通道也关了。
+    // 收窄之后：已展开的 MCP 工具被过滤（展开改变的是可见性而非权限），`search_tools` 与
+    // 白名单中的 bash 保留。缺少 `search_tools` 即意味着收窄同时关闭了检索通道。
     expect(namesOf(steps[3]!)).toEqual(['bash', 'search_tools']);
     for (const step of steps) for (const name of namesOf(step)) expect(frozen.has(name)).toBe(true);
-    // 被挡住的必须如实报 narrowed：不说的话模型会对着一个「已展开」却调不动的工具重试到步数耗尽。
-    // 按 `type` 一起筛：同一个 `toolCallId` 在 delta 里有配对的两条（tool-call 与 tool-result）。
+    // 被拦截的必须如实报告 narrowed：否则模型会对着一个已展开却不可调用的工具重试至步数耗尽。
+    // 按 `type` 一并筛选：同一个 `toolCallId` 在 delta 中有配对的两条（tool-call 与 tool-result）。
     const matches = (JSON.parse(JSON.stringify(turn.delta)) as Array<{ parts: Array<{ type?: string; toolCallId?: string; output?: { value?: { matches?: Array<{ name: string; status: string }> } } }> }>)
       .flatMap((message) => message.parts).find((part) => part.type === 'tool-result' && part.toolCallId === 'c3')!.output!.value!.matches!;
     expect(matches).toEqual([{ name: 'mcp__gh__create_issue', description: ISSUE_DESC, group: 'mcp:gh', status: 'narrowed' }]);
@@ -331,17 +331,17 @@ describe('deferred tool catalog · 请求体层', () => {
   });
 
   /**
-   * `AC-TOOL-051` 的 unregister 方向：**摘掉一台 server，那些名字下一步自动掉出可见集，整轮不抛。**
+   * `AC-TOOL-051` 的 unregister 方向：移除一台 server 后，那些名字在下一步自动退出可见集，整轮不抛错。
    *
-   * `toolSet` 开轮冻结，而 `activeNamesForStep` 每步 fresh —— 这个方向是「fresh 集合比冻结集小」，
-   * 报一个已经不存在的名字给 SDK 就是运行时报错。
+   * `toolSet` 在开轮时冻结，而 `activeNamesForStep` 每步重新计算，本方向属于新集合小于冻结集，
+   * 向 SDK 报出一个已不存在的名字即产生运行时报错。
    */
   it('轮中摘掉一台 MCP server：已展开的名字下一步掉出 tools 数组，整轮不抛', async () => {
     const { db, turn, dependencies } = harness('catalog-wiring-unregister');
     registerGithub(dependencies.tools);
-    // 留一个**别的来源**的折叠工具：`unregisterBySource('mcp')` 之后折叠集若整个空掉，
-    // `search_tools` 自己的 `available()` 也跟着为假、整份目录回退常驻（`docs/05 §3.12` 不变量 3）
-    // —— 那一档 `options.tools` 恒为空数组，这条用例要断的「那些名字掉出去了」就被淹掉了。
+    // 保留一个其他来源的折叠工具：`unregisterBySource('mcp')` 之后若折叠集完全为空，
+    // `search_tools` 自身的 `available()` 也随之为假、整份目录回退为常驻（`docs/05 §3.12` 不变量 3），
+    // 该情形下 `options.tools` 恒为空数组，本用例要断言的那些名字已退出就无法观察。
     dependencies.tools.registerExternal({ name: 'custom_helper', description: '丁：模型自撰写的那一个',
       inputSchema: z.object({}), minRole: 'limited', source: 'custom', execute: () => ({ ok: true }) });
     const steps: WireStep[] = [];
@@ -351,26 +351,26 @@ describe('deferred tool catalog · 请求体层', () => {
     ];
     await expect(runMainAgent(turn, { ...dependencies, registry: registryFor({ main: [recorder(steps, script)] }) })).resolves.toBe('ok');
     expect(namesOf(steps[1]!)).toEqual(['search_tools', 'mcp__gh__create_issue']);
-    // 展开集还记着它（`expandedTools` 只增不减），但注册表里已经没有这个工具了。
+    // 展开集仍记录着它（`expandedTools` 只增不减），但注册表中已不存在该工具。
     expect(turn.expandedTools!.has('mcp__gh__create_issue')).toBe(true);
     expect(namesOf(steps[2]!)).toEqual(['search_tools']);
     closeDatabase(db);
   });
 
   /**
-   * `AC-TOOL-051` 的 register 方向：**轮中新挂一台 server，它不进本轮的 tools 数组，但也不许炸。**
+   * `AC-TOOL-051` 的 register 方向：轮内新增一台 server，它不进入本轮的 tools 数组，但也不得抛错。
    *
-   * 这是两个方向里更危险的那个：新工具**真的会**被 `search_tools` 检索到并记进 `expandedTools`
-   * （检索域是活的注册表），于是 `activeNamesForStep` 会把一个开轮冻结的 toolSet 里没有的键报给
-   * SDK —— `prepareStep` 末尾那道 `name in toolSet` 交集就是为它准备的。
+   * 这是两个方向中更危险的一个：新工具确实会被 `search_tools` 检索到并记入 `expandedTools`
+   * （检索域是实时的注册表），于是 `activeNamesForStep` 会把一个开轮冻结的 toolSet 中不存在的键报给
+   * SDK，`prepareStep` 末尾那道 `name in toolSet` 交集正是为此而设。
    *
-   * ⚠ **这条用例挡不住「那道交集被删掉」**，而这不是用例写松了：ai@7.0.65 的 `filterActiveTools`
+   * ⚠ 本用例无法拦截那道交集被删除的情形，这不是用例写得宽松：ai@7.0.65 的 `filterActiveTools`
    * 是纯交集（`Object.entries(tools).filter(([n]) => activeTools.includes(n))`），多报的名字被静默
-   * 丢掉，`activeTools` 本身又不经由任何回调 / 日志露出来（`onStepStart` 只带 provider / modelId /
-   * messages / instructions），于是那道交集在这个 SDK 版本上**没有任何外部可观察行为** ——
-   * 实测把它删掉，全量 1048 条一条都不红。所以这个方向能断言的只有下面三件：整轮不抛、新挂的那个
-   * 一个字节都不下发、以及**它照旧被记进了展开集**（最后这件正是危险的来源，少了它这条用例就退化成
-   * 「一个从未被检索到的工具没出现」的同义反复）。
+   * 丢弃，而 `activeTools` 本身不经由任何回调或日志暴露（`onStepStart` 只带 provider / modelId /
+   * messages / instructions），因此那道交集在该 SDK 版本上没有任何外部可观察行为：
+   * 实测删除它后全量 1048 条用例无一失败。所以本方向能断言的只有三件：整轮不抛错、新增的那个
+   * 完全不下发，以及它仍被记入展开集（最后一件正是风险来源，缺少它本用例就退化为
+   * 一个从未被检索到的工具未出现这类同义反复）。
    */
   it('轮中新挂一个工具：它不进本轮 tools 数组，也不让 SDK 报 activeTools/toolSet 脱节', async () => {
     const { db, turn, dependencies } = harness('catalog-wiring-register-midturn');
@@ -382,12 +382,12 @@ describe('deferred tool catalog · 请求体层', () => {
       return toolCall('search_tools', { names: ['mcp__jira__create_ticket'] }, 'c1');
     }];
     await expect(runMainAgent(turn, { ...dependencies, registry: registryFor({ main: [recorder(steps, script)] }) })).resolves.toBe('ok');
-    // 检索确实展开了它 —— 所以下一步那道交集是唯一挡着 SDK 报错的东西，不是一句「反正不会发生」。
+    // 检索确实展开了它，因此下一步那道交集是唯一阻止 SDK 报错的机制，而非一句不会发生的推断。
     expect(turn.expandedTools!.has('mcp__jira__create_ticket')).toBe(true);
-    // 而 `search_tools` 对它回的是 `status:'expanded'`：**本方向尚存的那句假话**（docs/07 §2.2）——
-    // 「下一步就能直接调用」对一个开轮冻结的 toolSet 里没有的键不成立，它这一轮永远发不出去。
-    // 钉住它是为了哪天真修好（重建 toolSet 或把新挂的名字挡在检索域外）这条断言会红，而不是
-    // 让「两个方向都成立」继续在文档里当真话。
+    // 而 `search_tools` 对它返回 `status:'expanded'`，这是本方向尚存的一处不实描述（docs/07 §2.2）：
+    // 下一步即可直接调用对一个开轮冻结的 toolSet 中不存在的键并不成立，它在本轮永远无法下发。
+    // 固定这条断言是为了在真正修复（重建 toolSet 或把新增名字排除出检索域）时它会失败，而不是
+    // 让两个方向都成立这一说法继续留在文档中。
     const matches = (JSON.parse(JSON.stringify(turn.delta)) as Array<{ parts: Array<{ type?: string; toolCallId?: string; output?: { value?: { matches?: unknown } } }> }>)
       .flatMap((message) => message.parts).find((part) => part.type === 'tool-result' && part.toolCallId === 'c1')!.output!.value!.matches;
     expect(matches).toEqual([{ name: 'mcp__jira__create_ticket', description: '丙：新挂上来的那台 server', group: 'mcp:jira', status: 'expanded' }]);
@@ -397,14 +397,14 @@ describe('deferred tool catalog · 请求体层', () => {
   });
 
   /**
-   * 改写后的 `AC-PROMPT-003` 的正面半边：**开轮那一刻正文里的工具清单恰等于本步 tools 数组，
-   * 无多无少；而展开之后正文刻意不再跟着变。**
+   * 改写后的 `AC-PROMPT-003` 的正向部分：开轮时刻正文中的工具清单恰好等于本步 tools 数组，
+   * 不多不少；而展开之后正文有意不再跟随变化。
    *
-   * 后半句正是这条 AC 被改写的理由。提示词**每轮只装一次**（`assembleMainPrompt` 在开轮那一刻跑，
-   * `prepareStep` 从不返回 `instructions`），所以「正文与本 step 的 `activeTools` 一致」在展开那一步
-   * 之后必然为假 —— 要它成立就得每步重装、于是每步重发整个易变段，而那恰好是折叠要消灭的开销。
-   * 折了这一刀不等于模型看不见展开的工具：描述与完整 schema 已经在 tools 数组里（上面那条用例断的
-   * 就是它）。所以这里断的是「正文一个字节都没动」，而不是「正文跟着 tools 数组走」。
+   * 后半句正是这条 AC 被改写的原因。提示词每轮只装配一次（`assembleMainPrompt` 在开轮时刻执行，
+   * `prepareStep` 从不返回 `instructions`），因此正文与本 step 的 `activeTools` 一致在展开那一步
+   * 之后必然不成立；要使其成立就需每步重装，从而每步重发整个易变段，而那正是折叠要消除的开销。
+   * 做出这一取舍并不意味着模型看不到已展开的工具：描述与完整 schema 已在 tools 数组中（上一条用例
+   * 断言的正是它）。因此这里断言的是正文完全未改动，而不是正文跟随 tools 数组变化。
    */
   it('第 0 步：正文的工具清单与 tools 数组无多无少；展开之后正文一个字节都不动', async () => {
     const { db, turn, dependencies } = harness('catalog-wiring-prompt003');
@@ -414,23 +414,23 @@ describe('deferred tool catalog · 请求体层', () => {
     const script = [() => toolCall('search_tools', { names: ['mcp__gh__create_issue'] }, 'c1')];
     await runMainAgent(turn, { ...dependencies, registry: registryFor({ main: [recorder(steps, script)] }) });
     const opening = volatileOf(steps[0]!);
-    // 无多无少，两个方向一起：目录正文逐条列的名字**恰是**本步 tools 数组，序也一致
-    // （两处同源于开轮那一次 `activeView()`）。step 0 的 `expandedTools` 恒空，所以这一刻它就是常驻集。
+    // 双向断言不多不少：目录正文逐条列出的名字恰为本步 tools 数组，顺序也一致
+    // （两处同源于开轮时那次 `activeView()`）。step 0 的 `expandedTools` 恒为空，因此此刻它即常驻集。
     expect(catalogNames(opening)).toEqual(['bash', 'search_tools']);
     expect(catalogNames(opening)).toEqual(namesOf(steps[0]!));
-    // 折叠的两个只在摘要行里露名字：它们不在 activeTools 里，所以也不许进逐条清单。
+    // 折叠的两个只在摘要行中出现名字：它们不在 activeTools 中，因此也不得进入逐条清单。
     expect(blockOf(opening, 'TOOL CATALOG')).toContain('- [mcp:gh] 2 个：mcp__gh__create_issue, mcp__gh__list_issues');
     expect(catalogNames(opening)).not.toContain('mcp__gh__create_issue');
-    // 展开之后：tools 数组多了一个（描述与 schema 都在里面），而正文**逐字节不变** ——
-    // 连折叠摘要那句「共 2 个」都没动，它仍然把刚展开的那个算在折叠里。
+    // 展开之后：tools 数组增加一个（描述与 schema 都在其中），而正文逐字节不变，
+    // 连折叠摘要中的数量也未变化，它仍把刚展开的那个计入折叠。
     expect(namesOf(steps[1]!)).toEqual(['bash', 'search_tools', 'mcp__gh__create_issue']);
     expect(volatileIn(steps[1]!)).toBe(opening);
     closeDatabase(db);
   });
 
   /**
-   * 改写后的 `AC-PROMPT-003` 的回归半边：**关掉折叠 ⇒ 与按需暴露之前逐字节同形。**
-   * 折叠集为空时 `search_tools` 的 `available()` 也为假，整个元工具不进目录。
+   * 改写后的 `AC-PROMPT-003` 的回归部分：关闭折叠后与按需暴露之前逐字节一致。
+   * 折叠集为空时 `search_tools` 的 `available()` 也为假，整个元工具不进入目录。
    */
   it('deferExternal=false：MCP 工具逐条回到目录正文与 tools 数组，一行折叠摘要都没有', async () => {
     const { db, turn, dependencies } = harness('catalog-wiring-defer-off', { tools: { catalog: { deferExternal: false } } } as Partial<Config>);
@@ -445,15 +445,15 @@ describe('deferred tool catalog · 请求体层', () => {
     expect(block).toContain(`- mcp__gh__create_issue: ${ISSUE_DESC}`);
     expect(block).toContain(`- mcp__gh__list_issues: ${LIST_DESC}`);
     expect(block).not.toContain('折叠工具');
-    // 折叠集为空 ⇒ 元工具自己也不出现（`docs/05 §3.12` 不变量 3）。
+    // 折叠集为空时元工具自身也不出现（`docs/05 §3.12` 不变量 3）。
     expect(block).not.toContain('search_tools 按关键词');
     closeDatabase(db);
   });
 
   /**
-   * 改写后的 `AC-PROMPT-003`：**RUNTIME 的「可用工具」行 == 开轮常驻集**，折叠的只报一个数。
-   * 默认 `includeToolCatalog=true` 时那一行刻意**不出现**（与 TOOL CATALOG 的常驻段纯重复，
-   * 而它在易变段每步重发），所以要测它得先把目录关掉。
+   * 改写后的 `AC-PROMPT-003`：RUNTIME 的可用工具行等于开轮常驻集，折叠部分只报出数量。
+   * 默认 `includeToolCatalog=true` 时该行有意不出现（与 TOOL CATALOG 的常驻段完全重复，
+   * 而它在易变段每步重发），因此验证它需要先关闭目录。
    */
   it('includeToolCatalog=false：RUNTIME 那行只列常驻工具，折叠的只报个数', async () => {
     const { db, turn, dependencies } = harness('catalog-wiring-runtime-line', { prompt: { includeToolCatalog: false } } as Partial<Config>);
@@ -462,11 +462,11 @@ describe('deferred tool catalog · 请求体层', () => {
     const steps: WireStep[] = [];
     await runMainAgent(turn, { ...dependencies, registry: registryFor({ main: [recorder(steps)] }) });
     const block = volatileOf(steps[0]!);
-    expect(block).toContain('可用工具：bash, search_tools；另有 2 个折叠工具，用 search_tools 检索');
-    // 「无多无少」在这一档落在 RUNTIME 那一行上（目录关掉之后它是唯一的工具清单）。
+    expect(block).toContain('可用工具：bash, search_tools；另有 2 个折叠工具，使用 search_tools 检索');
+    // 不多不少这一判据在该档位落在 RUNTIME 那一行上（关闭目录后它是唯一的工具清单）。
     expect(runtimeToolNames(block)).toEqual(namesOf(steps[0]!));
     expect(block).not.toContain('=== TOOL CATALOG ===');
-    // 目录关掉之后折叠组摘要也跟着没了 —— 那个后缀于是是模型唯一能知道「还有东西可取」的入口。
+    // 关闭目录后折叠组摘要也随之消失，该后缀于是成为模型得知仍有工具可检索的唯一入口。
     expect(block).not.toContain('【折叠工具');
     expect(namesOf(steps[0]!)).toEqual(['bash', 'search_tools']);
     closeDatabase(db);
@@ -474,12 +474,12 @@ describe('deferred tool catalog · 请求体层', () => {
 });
 
 /**
- * 自愈钩子（`docs/05 §3.12` 的「自愈」段）。折叠把「模型调了个发不出去的工具」从罕见幻觉变成常规
- * 事件，光靠提示词引导是在赌模型「想到」去检索；`repairToolCall` 把这一次调用改写成
- * `search_tools({names:[原名]})`，代价与它自己先搜一次一样（多一个 step）。
+ * 自愈钩子（`docs/05 §3.12` 的自愈段）。折叠使模型调用不可下发的工具从罕见幻觉变为常规
+ * 事件，仅靠提示词引导等于依赖模型自行想到去检索；`repairToolCall` 把该次调用改写为
+ * `search_tools({names:[原名]})`，代价与模型自行先检索一次相同（多一个 step）。
  *
- * 三条判据都是**防死循环**的，所以每条各有一个用例：改写成检索而检索又不会让状态往前一格，
- * 就是「调 X → NoSuchToolError → 改写 → 检索原地返回 → 再调 X → …」一路烧到步数上限。
+ * 三条判据都用于防止死循环，因此各有一个用例：若改写为检索而检索又不推进状态，
+ * 就会形成调用 X → NoSuchToolError → 改写 → 检索原地返回 → 再调用 X 的循环，直至耗尽步数上限。
  */
 describe('deferred tool catalog · repairToolCall 自愈', () => {
   it('硬调折叠工具：改写成一次检索，下一步那个工具的 schema 真的下发', async () => {
@@ -492,7 +492,7 @@ describe('deferred tool catalog · repairToolCall 自愈', () => {
     expect(interesting.map((row) => row.kind)).toEqual(['tool.repaired', 'tool.expanded', 'tool.call']);
     expect(interesting[0]!.summary).toBe('mcp__gh__create_issue → search_tools');
     expect(JSON.parse(interesting[0]!.data!)).toMatchObject({ tool: 'mcp__gh__create_issue', into: 'search_tools', reason: 'deferred_not_expanded' });
-    // 上下文里留下的是**改写后**那一次调用：模型下一轮读到的是「我搜过它」，而不是一次不存在的调用。
+    // 上下文中保留的是改写后的那次调用：模型下一轮读到的是已检索过该工具，而不是一次不存在的调用。
     const call = (JSON.parse(JSON.stringify(turn.delta)) as Array<{ parts: Array<{ type?: string; toolName?: string; input?: unknown }> }>)
       .flatMap((message) => message.parts).find((part) => part.type === 'tool-call')!;
     expect(call.toolName).toBe('search_tools');
@@ -503,9 +503,9 @@ describe('deferred tool catalog · repairToolCall 自愈', () => {
   });
 
   /**
-   * 防死循环闸 ①：**skill 收窄挡着的只改写一次。** `search_tools` 对它回 `status:'narrowed'`
-   * 却**照样记进 `expandedTools`** —— 那一笔正是这条闸的另一半（`tools/catalog-meta.ts` 里那段
-   * 注释）：不记的话第二次硬调又会被改写成同一次检索，一路打转。
+   * 防死循环闸 ①：被 skill 收窄拦截的只改写一次。`search_tools` 对它返回 `status:'narrowed'`
+   * 但仍记入 `expandedTools`，这一笔正是该闸的另一半（见 `tools/catalog-meta.ts` 中的
+   * 注释）：不记录时第二次强行调用又会被改写为同一次检索，形成循环。
    */
   it('skill 收窄挡着的折叠工具：只改写一次，第二次硬调落回 NoSuchToolError', async () => {
     const { db, turn, dependencies } = harness('catalog-wiring-repair-once');
@@ -517,7 +517,7 @@ describe('deferred tool catalog · repairToolCall 自愈', () => {
       () => toolCall('mcp__gh__create_issue', { [ISSUE_PROP]: 'y' }, 'c2')];
     await runMainAgent(turn, { ...dependencies, registry: registryFor({ main: [recorder(steps, script)] }) });
     expect(logRows(db).filter((row) => row.kind === 'tool.repaired')).toHaveLength(1);
-    // 收窄挡着，所以展开之后它照旧发不出去 —— 但它进了展开集，第二次于是不再改写。
+    // 收窄仍在拦截，因此展开之后它依旧无法下发，但它已进入展开集，第二次不再改写。
     expect(turn.expandedTools!.has('mcp__gh__create_issue')).toBe(true);
     expect(namesOf(steps[1]!)).toEqual(['bash', 'search_tools']);
     const results = (JSON.parse(JSON.stringify(turn.delta)) as Array<{ parts: Array<{ type?: string; toolCallId?: string; output?: { type?: string; value?: unknown } }> }>)
@@ -529,9 +529,9 @@ describe('deferred tool catalog · repairToolCall 自愈', () => {
   });
 
   /**
-   * 防死循环闸 ②：**展开额度满了就一次都不改写。** 这一档 `search_tools` 会回 `expansion_limit`
-   * 且**不写** `expandedTools`，所以闸 ① 拦不住它；而它的 hint 是「用 names 精确点名」而改写出来的
-   * 调用本来就是 `names:[X]` —— 模型照 hint 做也没有出路，是三条里唯一会无限打转的。
+   * 防死循环闸 ②：展开额度用满时一次都不改写。该档位下 `search_tools` 返回 `expansion_limit`
+   * 且不写入 `expandedTools`，因此闸 ① 无法拦住它；而它的 hint 是使用 names 精确指定，改写产生的
+   * 调用本身就是 `names:[X]`，模型按 hint 操作同样没有出路，是三者中唯一会无限循环的。
    */
   it('maxExpandedPerTurn 用满：硬调另一个折叠工具时一条 tool.repaired 都不落', async () => {
     const { db, turn, dependencies } = harness('catalog-wiring-repair-budget', { tools: { catalog: { maxExpandedPerTurn: 1 } } } as Partial<Config>);
@@ -549,24 +549,24 @@ describe('deferred tool catalog · repairToolCall 自愈', () => {
   });
 
   /**
-   * 防死循环闸 ⓿：**同一个名字本轮只改写一次。**
+   * 防死循环闸 ⓿：同一个名字在本轮只改写一次。
    *
-   * ①②③ 各自点名一种「检索不会往前一格」的成因，而成因不止那三种 —— `search_tools` 自己也会在
-   * `admit()` 上失败：`tools.maxCallsPerTurn` 用满（本例）、运维把它的 `approval` 覆盖成 `always`
-   * 而审批被拒、轮内连续失败到 `maxConsecutiveErrors` 之前那几次。这些档位一律**不写**
-   * `expandedTools`，于是闸 ① 永远拦不住第二次。没有 ⓿ 时实测同一个折叠工具被连着改写 **11 次**，
-   * 只有 `maxSteps` 兜住 —— 11 次白付的模型调用。按名字判一次，成因有多少种都不必枚举。
+   * ①②③ 各自对应一种检索无法推进状态的成因，而成因不止这三种：`search_tools` 自身也可能在
+   * `admit()` 处失败，包括 `tools.maxCallsPerTurn` 用满（本例）、运维把它的 `approval` 覆盖为 `always`
+   * 而审批被拒、轮内连续失败达到 `maxConsecutiveErrors` 之前的那几次。这些档位一律不写入
+   * `expandedTools`，因此闸 ① 永远拦不住第二次。缺少 ⓿ 时实测同一个折叠工具被连续改写 11 次，
+   * 仅靠 `maxSteps` 兜底，即 11 次无效的模型调用。按名字判定一次，成因有多少种都无需枚举。
    */
   it('search_tools 自己在 admit() 上失败：同一个名字只改写一次，之后落回 NoSuchToolError', async () => {
     const { db, turn, dependencies } = harness('catalog-wiring-repair-admit-fail', {}, 40, 1);
     registerGithub(dependencies.tools);
     const steps: WireStep[] = [];
-    // 第 0 步把 `maxCallsPerTurn=1` 那一格用掉（展开另一个工具），此后每一步都硬调同一个折叠工具。
+    // 第 0 步用掉 `maxCallsPerTurn=1` 的额度（展开另一个工具），此后每一步都强行调用同一个折叠工具。
     const script: Array<() => unknown> = [() => toolCall('search_tools', { names: ['mcp__gh__list_issues'] }, 'c0')];
     for (let index = 1; index < 6; index += 1) script.push(() => toolCall('mcp__gh__create_issue', { [ISSUE_PROP]: 'x' }, `c${index}`));
     await runMainAgent(turn, { ...dependencies, registry: registryFor({ main: [recorder(steps, script)] }) });
     expect(logRows(db).filter((row) => row.kind === 'tool.repaired')).toHaveLength(1);
-    // 那一次改写出来的检索自己撞在额度上，所以展开集里只有第 0 步那一个 —— 闸 ① 因此拦不住第二次。
+    // 改写产生的那次检索自身撞上额度限制，因此展开集中只有第 0 步那一个，闸 ① 因而拦不住第二次。
     expect([...turn.expandedTools!]).toEqual(['mcp__gh__list_issues']);
     const results = (JSON.parse(JSON.stringify(turn.delta)) as Array<{ parts: Array<{ type?: string; toolCallId?: string; output?: { type?: string; value?: unknown } }> }>)
       .flatMap((message) => message.parts).filter((part) => part.type === 'tool-result');
@@ -578,11 +578,11 @@ describe('deferred tool catalog · repairToolCall 自愈', () => {
   });
 
   /**
-   * 防死循环闸 ③（另一半）：**纯幻觉名字不改写。** 把一个不存在的名字喂给检索只会得到空结果，
-   * 而模型会以为自己找过了 —— 一句明确的 `NoSuchToolError` 比一次假装有进展的往复强。
+   * 防死循环闸 ③（另一半）：完全虚构的名字不改写。把一个不存在的名字送去检索只会得到空结果，
+   * 而模型会认为自己已经查找过；一句明确的 `NoSuchToolError` 优于一次看似有进展的往返。
    *
-   * 顺带记一笔实测：SDK 那句错误文本会把**整份 active 名单**抄进上下文（`Available tools: …`）。
-   * 折叠省下来的钱在这一档会还回去一部分，所以「不改写」的档位越窄越好。
+   * 附带记录一项实测：SDK 的那句错误文本会把整份 active 名单写入上下文（`Available tools: …`）。
+   * 折叠节省的开销在该档位会部分抵消，因此不改写的档位应尽可能窄。
    */
   it('幻觉工具名不改写，照旧走 NoSuchToolError', async () => {
     const { db, turn, dependencies } = harness('catalog-wiring-repair-hallucinated');
@@ -600,14 +600,14 @@ describe('deferred tool catalog · repairToolCall 自愈', () => {
 });
 
 /**
- * `AC-TOOL-020`：**目录被 `tools.maxRegistered` 静默截断这件事必须说出来。**
+ * `AC-TOOL-020`：目录被 `tools.maxRegistered` 静默截断这件事必须明确告知。
  *
- * 三件事各自独立：RUNTIME 里那一行（给模型的）、`tool.registry_truncated` warn（给运维的）、
- * 以及折叠摘要里只许出现截断后的名字（摘要里报一个 `toolSet` 里压根没有的名字，模型展开它就是
- * AI SDK 层的运行时报错）。此前只落地了中间那一件，模型对自己少了什么完全不知情。
+ * 三件事各自独立：RUNTIME 中的那一行（面向模型）、`tool.registry_truncated` warn（面向运维），
+ * 以及折叠摘要中只允许出现截断后的名字（摘要中报出 `toolSet` 里不存在的名字时，模型展开它即产生
+ * AI SDK 层的运行时报错）。此前只实现了中间那一件，模型对自身缺少哪些工具完全不知情。
  */
 describe('deferred tool catalog · maxRegistered 截断告知', () => {
-  /** 排序是 `sourcePriority desc, name asc`，所以 `maxRegistered=2` 留下 search_tools(80) + aaa(40)。 */
+  /** 排序为 `sourcePriority desc, name asc`，因此 `maxRegistered=2` 保留 search_tools(80) 与 aaa(40)。 */
   function registerThree(tools: ToolRegistry): void {
     for (const suffix of ['aaa', 'bbb', 'ccc']) {
       tools.registerExternal({ name: `mcp__gh__${suffix}`, description: `折叠 ${suffix}`,
@@ -622,13 +622,13 @@ describe('deferred tool catalog · maxRegistered 截断告知', () => {
     await runMainAgent(turn, { ...dependencies, registry: registryFor({ main: [recorder(steps)] }) });
     const block = volatileOf(steps[0]!);
     expect(block).toContain('工具目录已截断：共注册 4 个，按来源优先级仅保留前 2 个，其余本轮不可用（tools.maxRegistered）。');
-    // 恰好一条：`#eligible()` 被目录视图、`prepareStep` 的每步取数、`repairToolCall` 反复调用，
-    // warn 却只挂在 `active()` 上（`toolSetFor` 开轮那一次）—— 落在共用的那条过滤链里就会按调用
-    // 次数刷屏，而运维要的是「这一轮截断了」一条。
+    // 恰好一条：`#eligible()` 会被目录视图、`prepareStep` 的每步取数、`repairToolCall` 反复调用，
+    // 而 warn 只挂在 `active()` 上（`toolSetFor` 开轮那一次）；放在共用的过滤链中会按调用
+    // 次数重复输出，而运维需要的是本轮发生截断这一条记录。
     const warns = logRows(db).filter((row) => row.kind === 'tool.registry_truncated');
     expect(warns).toHaveLength(1);
     expect(JSON.parse(warns[0]!.data!)).toMatchObject({ total: 4, visible: 2 });
-    // 被砍掉的一个都不许进摘要 —— 模型按摘要检索，展开出来的会是冻结 toolSet 里没有的键。
+    // 被截断的工具一个都不得进入摘要：模型按摘要检索，展开得到的会是冻结 toolSet 中不存在的键。
     expect(block).toContain('- [mcp:gh] 1 个：mcp__gh__aaa');
     expect(block).not.toContain('mcp__gh__bbb');
     expect(block).not.toContain('mcp__gh__ccc');
@@ -637,8 +637,8 @@ describe('deferred tool catalog · maxRegistered 截断告知', () => {
   });
 
   /**
-   * 那一行**不受 `prompt.runtimeBlock.show.*` 管**：那三个开关管的是「要不要显示某类状态」，
-   * 而这一行说的是「有些工具本轮压根不存在」。三个全关掉之后它还在。
+   * 该行不受 `prompt.runtimeBlock.show.*` 控制：那三个开关决定是否显示某类状态，
+   * 而这一行说明的是本轮部分工具根本不存在。三个全部关闭后它仍然存在。
    */
   it('三个 runtimeBlock 开关全关掉，截断告知行照样在', async () => {
     const { db, turn, dependencies } = harness('catalog-wiring-truncated-show-off',
@@ -648,7 +648,7 @@ describe('deferred tool catalog · maxRegistered 截断告知', () => {
     await runMainAgent(turn, { ...dependencies, registry: registryFor({ main: [recorder(steps)] }) });
     const block = volatileOf(steps[0]!);
     expect(block).toContain('工具目录已截断：共注册 4 个，按来源优先级仅保留前 2 个，其余本轮不可用（tools.maxRegistered）。');
-    // 开关真的生效了 —— 否则上面那条断言什么都没证明。
+    // 确认开关确实生效，否则上面那条断言不具备说明力。
     expect(block).not.toContain('上下文容量：');
     expect(block).not.toContain('工作目录：');
     closeDatabase(db);

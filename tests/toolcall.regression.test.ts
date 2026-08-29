@@ -63,7 +63,7 @@ describe('tool-result 形状', () => {
     const part = (messages[1]!.content as Array<Record<string, unknown>>)[0]!;
     expect(part).toMatchObject({ type: 'tool-result', toolCallId: 'orphan-1', toolName: 'get_message' });
     // 不伪造成功，只如实说结果没了（照 `hydrateAttachment` 的占位先例）。
-    expect(part.output).toEqual({ type: 'error-text', value: '[工具结果缺失：这次调用的结果没有被记录下来]' });
+    expect(part.output).toEqual({ type: 'error-text', value: '[工具结果缺失：本次调用的结果未被记录]' });
   });
 
   /**

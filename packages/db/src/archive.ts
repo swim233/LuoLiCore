@@ -35,9 +35,9 @@ export interface ArchivedMessage {
   triggerReason: string | null;
   turnId?: string | null;
   /**
-   * 同一条 Telegram 消息的第几版：0 是原文，>0 是编辑。**读出侧必须带着它** —— 渲染进上下文时
-   * 要靠它标「已编辑」，否则一条五分钟前的话被改一下，在模型眼里和刚发的新消息完全一样
-   * （docs/29 · `M-TG-02`）。现场构造的消息（适配层）没有这一列，按 0 处理。
+   * 同一条 Telegram 消息的版本号：0 为原文，>0 为编辑。读出侧必须携带此字段：渲染进上下文时
+   * 用它标注「已编辑」，否则五分钟前的消息被编辑后，在模型看来与新发消息无法区分
+   * （docs/29 · `M-TG-02`）。适配层现场构造的消息没有这一列，按 0 处理。
    */
   revision?: number;
   replyToTgMessageId?: number | null;
@@ -47,13 +47,13 @@ export interface ArchivedMessage {
 }
 
 /**
- * `append()` 的返回值：那一行，外加**这次到底插进去了没有**。
+ * `append()` 的返回值：目标行，外加本次是否真的插入。
  *
- * `INSERT OR IGNORE` 撞号时静静返回既有那一行，而下面那条回读是按入参 `tgMessageId` 查的 ——
- * 返回行的 `tgMessageId` 因此**恒等于**入参，调用方无从看出「这行不是我刚写的」。定时轮次的
- * 撞号核对（`runner.ts` 的 `schedule_trigger_conflict`）就是这么变成死代码的（docs/28 · L-SCH-03）。
- * 标记挂在返回值上而不是另开一个方法：`info.changes` 只在这一次 `run()` 里成立，隔一条 SELECT
- * 再问就已经是「现在有没有这一行」而不是「刚才是我插的吗」了。
+ * `INSERT OR IGNORE` 主键冲突时静默返回既有行，而回读是按入参 `tgMessageId` 查的，返回行的
+ * `tgMessageId` 恒等于入参，调用方无法判断该行并非本次写入。定时轮次的冲突核对
+ * （`runner.ts` 的 `schedule_trigger_conflict`）因此成为不可达代码（docs/28 · L-SCH-03）。
+ * 标记挂在返回值而非另开方法：`info.changes` 仅在本次 `run()` 内有效，隔一条 SELECT 再查得到的是
+ * 「当前是否存在该行」而非「本次是否插入」。
  */
 export type AppendedMessage = ArchivedMessage & { inserted: boolean };
 
@@ -67,38 +67,38 @@ export interface AppendMessageInput extends Omit<
   triggerReason?: string | null;
   revision?: number;
   mediaGroupId?: string | null;
-  /** 立刻标成「已消费」。用于引用注入：那条消息本轮就已经进上下文了，不能下一轮再被当背景认领一次。 */
+  /** 立即标记为已消费。用于引用注入：该消息本轮已进入上下文，不能在下一轮被再次认领为背景消息。 */
   claimed?: boolean;
 }
 
 /**
- * FTS5 的 MATCH 串是一门查询语言：`|` `"` `*` `:` `-` `^` `(` `)` 和 AND/OR/NOT/NEAR 都是语法。
- * 查询词来自模型和 WebUI 使用者，原样塞进去 —— 模型写一句 `名字|我是|叫|谁` 就把整次工具调用
- * 打成 `fts5: syntax error near "|"`，它只能瞎改参数重试。这里先切成词，再决定怎么查：
- * - 有 ≥3 字的词：逐个加引号 OR 起来走 FTS（trigram 匹配不了更短的词），bm25 负责排序；
- * - 一个都没有（中文两字词几乎全在这一档）：退回 LIKE，且用最长的那个词而不是原串 ——
- *   原串里还带着 `|`，`LIKE '%名字|我是%'` 永远匹配不到任何东西。
- * 多词之间取 OR 而不是 FTS 默认的隐式 AND：这个工具的调用方是模型，它写多个词就是在列同义词。
+ * FTS5 的 MATCH 串是一门查询语言：`|` `"` `*` `:` `-` `^` `(` `)` 与 AND/OR/NOT/NEAR 均为语法元素。
+ * 查询词来自模型与 WebUI 使用者，原样传入会导致语法错误：模型写 `名字|我是|叫|谁` 会使整次工具调用
+ * 返回 `fts5: syntax error near "|"`，模型只能盲目改参数重试。这里先分词，再决定检索方式：
+ * - 存在 ≥3 字的词：逐个加引号后 OR 连接走 FTS（trigram 索引不匹配更短的词），bm25 负责排序；
+ * - 不存在（中文双字词几乎都属此类）：退回 LIKE，且用最长的词而非原串，因为原串含 `|`，
+ *   `LIKE '%名字|我是%'` 匹配不到任何内容。
+ * 多词间取 OR 而非 FTS 默认的隐式 AND：调用方是模型，它写多个词的意图是列举同义词。
  *
- * **丢弃是对的，沉默不对。** 短词进不了 trigram 索引（`MATCH` 恒 0 命中），所以走 FTS 时把它们
- * 剔掉是正确降级；但混合查询（`search_messages("名字 李小明")`）里模型无从知道自己只查了
- * `李小明` —— 于是 `dropped` 把没参与的词交回给调用方，由它告诉模型「这几个词要单独查一次」
- * （单独查时它们就是全场最长的词，会走下面那条 LIKE 兜底）。docs/28 · L-DB-01。
+ * 丢弃短词是正确降级，静默丢弃不是。短词进不了 trigram 索引（`MATCH` 恒零命中），走 FTS 时必须剔除；
+ * 但混合查询（`search_messages("名字 李小明")`）中模型无法得知自己只检索了 `李小明`。因此 `dropped`
+ * 把未参与的词返回给调用方，由调用方提示模型单独检索这些词（单独检索时它们是最长词，走下面的
+ * LIKE 兜底）。docs/28 · L-DB-01。
  */
 /**
- * LIKE 里 `_` 是「任意一个字符」、`%` 是「任意串」，而上面那个分词正则刻意把 `_` 当词内字符
- * 保留 —— 于是 `a_b` 变成 `LIKE '%a_b%'`，`axb` 也会命中（docs/27 · C-06）。不是注入（值是绑定
- * 参数），只影响检索精度。**转义了就必须配 `ESCAPE '\'`**，三条 LIKE 语句都带着它。
+ * LIKE 中 `_` 匹配任意单字符、`%` 匹配任意串，而上面的分词正则刻意把 `_` 保留为词内字符：
+ * `a_b` 变成 `LIKE '%a_b%'`，`axb` 也会命中（docs/27 · C-06）。这不是注入（值走绑定参数），
+ * 只影响检索精度。转义后必须配 `ESCAPE '\'`，三条 LIKE 语句都带着它。
  */
 const escapeLike = (value: string): string => value.replace(/[\\%_]/g, "\\$&");
-/** 上面那句转义的另一半。加新的 LIKE 查询时跟着带上，否则 `\` 会被当成普通字符。 */
+/** 上述转义的配套子句。新增 LIKE 查询时必须一并带上，否则 `\` 会被当作普通字符。 */
 export const LIKE_ESCAPE = " ESCAPE '\\'";
 /**
- * `dropped` 挂在交集上而不是单独一个返回值：`'like' in parsed` 是三个调用点共用的判别式，
- * 加一个平级字段会把那个判别弄坏。
+ * `dropped` 挂在交叉类型上而非作为平级字段：`'like' in parsed` 是三个调用点共用的判别式，
+ * 增加平级字段会破坏该判别。
  */
 export type ArchiveQuery = ({ fts: string } | { like: string }) & {
-  /** 切出来了但**没参与这次检索**的词（都短于 3 码点）。调用方有责任把它交回给使用者。 */
+  /** 已分词但未参与本次检索的词（长度均小于 3 码点）。调用方有责任把它返回给使用者。 */
   dropped: string[];
 };
 export function archiveQuery(raw: string): ArchiveQuery {
@@ -114,8 +114,8 @@ export function archiveQuery(raw: string): ArchiveQuery {
   const longest = [...tokens].sort(
     (left, right) => [...right].length - [...left].length,
   )[0];
-  // LIKE 那条路只用最长的一个词，其余同样没参与 —— 一并报出去。此时全部词都短于 3 码点，
-  // 所以调用方那句「短于 3 个字」的措辞在两条路上都成立。
+  // LIKE 分支只使用最长的一个词，其余同样未参与，一并报出。此时所有词都短于 3 码点，
+  // 因此调用方「短于 3 个字」的措辞在两条分支上都成立。
   return {
     like: `%${escapeLike(longest ?? raw)}%`,
     dropped: tokens.filter((token) => token !== longest),
@@ -123,11 +123,11 @@ export function archiveQuery(raw: string): ArchiveQuery {
 }
 
 /**
- * `search_messages` 的过滤参数（docs/05 §3.2）。`from` 同时认 tg 用户 id 与 `@username`。
+ * `search_messages` 的过滤参数（docs/05 §3.2）。`from` 同时接受 tg 用户 id 与 `@username`。
  *
- * `minId` 不是模型能填的参数，是**回忆隔断**（`context.recallBarrier`）灌进来的下限：清空上下文
- * 那一刻的 `messages.id`。挂在这里而不是在工具层过滤返回值 —— 那样 `limit:20` 会先取到 20 条
- * 再被削成 3 条，模型看到的是「一共只有 3 条」。
+ * `minId` 不是模型可填的参数，而是回忆隔断（`context.recallBarrier`）注入的下限，取值为清空上下文
+ * 时刻的 `messages.id`。放在 SQL 条件而非工具层过滤返回值：后者会使 `limit:20` 先取 20 条再削减到
+ * 3 条，模型看到的是「总共只有 3 条」。
  */
 export interface SearchFilters {
   from?: string | null;
@@ -137,9 +137,9 @@ export interface SearchFilters {
   minId?: number | null;
 }
 /**
- * 过滤条件一律写成 `@x IS NULL OR …` 的常量 SQL，而不是按传了哪几个参数拼串：语句文本固定
- * 才能吃到 better-sqlite3 的预编译缓存，而「没传的参数不出现在 SQL 里」还得在绑定侧同步剔掉
- * ——漏一处就是一个运行时的 `missing named parameter`。这也是本文件 `recent()` 已有的写法。
+ * 过滤条件一律写成 `@x IS NULL OR …` 的常量 SQL，而非按传入参数拼接：语句文本固定才能命中
+ * better-sqlite3 的预编译缓存；且「未传的参数不出现在 SQL 里」还需在绑定侧同步剔除，漏一处即为
+ * 运行时的 `missing named parameter`。本文件 `recent()` 已采用同一写法。
  */
 function filterClause(prefix: string): string {
   return ` AND (@from IS NULL OR ${prefix}from_user_id = @from OR ${prefix}from_username = @from)
@@ -165,13 +165,13 @@ const withMedia = (row: ArchivedMessage | null): ArchivedMessage | null => {
   if (!row) return null;
   const parts = (row as ArchivedMessage & { mediaPartsJson?: string | null })
     .mediaPartsJson;
-  // 坏 JSON 当「这条消息没有媒体」：这个函数在每一条消息的读出路径上，抛出去会让整次检索、
-  // 整次归档读取失败，而丢一条附件只是那条消息少了张图（docs/27 · T-06）。
+  // 无法解析的 JSON 按「该消息无媒体」处理：本函数位于每条消息的读出路径上，抛异常会导致整次检索、
+  // 整次归档读取失败，而丢弃一条附件只是该消息少一张图（docs/27 · T-06）。
   if (parts) {
     try {
       row.mediaParts = JSON.parse(parts) as unknown[];
     } catch {
-      /* 手工改库或历史坏行 */
+      /* 手工改库或历史脏数据 */
     }
   }
   delete (row as ArchivedMessage & { mediaPartsJson?: string }).mediaPartsJson;
@@ -204,7 +204,7 @@ export class ArchiveRepository {
     return rows.map((row) => withMedia(row)!);
   }
 
-  /** 命中总数。分页页码依赖它：拿「已取回条数」当 total 的话，翻到后面页数会漂（docs/20 · W-API-03）。 */
+  /** 命中总数。分页页码依赖此值：用「已取回条数」充当 total 会导致翻页时页数漂移（docs/20 · W-API-03）。 */
   adminSearchCount(query: string): number {
     const parsed = archiveQuery(query);
     return "like" in parsed
@@ -253,7 +253,7 @@ export class ScopedArchiveRepository {
         triggerReason: input.triggerReason ?? null,
         turnId: input.turnId ?? null,
         revision: input.revision ?? 0,
-        // claimed_by_turn 留空：这条消息已经被消费掉了，但不属于任何在途轮次，abortTurn 的 releaseClaims 不该把它放回去。
+        // claimed_by_turn 留空：该消息已被消费，但不属于任何在途轮次，abortTurn 的 releaseClaims 不应回滚它。
         claimedAt: input.claimed ? Date.now() : null,
       });
     if (info.changes)
@@ -276,7 +276,7 @@ export class ScopedArchiveRepository {
     );
   }
 
-  /** 最新 revision 的那一行：编辑过的消息会有多行，引用时要拿用户此刻看到的那一版。 */
+  /** 取最新 revision 的行：编辑过的消息有多行，引用时应取用户当前看到的那一版。 */
   byTgMessageId(tgMessageId: number): ArchivedMessage | null {
     return withMedia(
       (this.db
@@ -295,9 +295,9 @@ export class ScopedArchiveRepository {
   }
 
   /**
-   * 判成触发、但最终没人为它开轮次的消息改记成背景消息（`trigger.cooldownMsPerUser` 压住的那些）。
-   * `claimBackground` 只认领 `triggered=0`，留着 `triggered=1` 的话这条消息**既不触发也不进上下文**，
-   * 等于凭空消失 —— 编辑消息踩过同一个坑（docs/20 · W-TG-05）。
+   * 把判定为触发但最终未开轮次的消息改记为背景消息（被 `trigger.cooldownMsPerUser` 拦下的那些）。
+   * `claimBackground` 只认领 `triggered=0`，保留 `triggered=1` 会使该消息既不触发也不进上下文，
+   * 等同于丢失。编辑消息曾出现同一缺陷（docs/20 · W-TG-05）。
    */
   demoteToBackground(id: number): void {
     this.db
@@ -307,7 +307,7 @@ export class ScopedArchiveRepository {
       .run(id, this.chatId);
   }
 
-  /** @param minId 回忆隔断的下限（`context.recallBarrier`）：0 = 不设限，见 `SearchFilters.minId`。 */
+  /** @param minId 回忆隔断的下限（`context.recallBarrier`）；0 表示不限制，见 `SearchFilters.minId`。 */
   byId(id: number, minId = 0): ArchivedMessage | null {
     return withMedia(
       (this.db
@@ -318,7 +318,7 @@ export class ScopedArchiveRepository {
     );
   }
 
-  /** 本会话归档里最大的 `messages.id`。清空上下文时拿它当回忆隔断的水位（`ContextEngine.reset`）。 */
+  /** 本会话归档中最大的 `messages.id`。清空上下文时以它作为回忆隔断的水位（`ContextEngine.reset`）。 */
   maxMessageId(): number {
     return (this.db
       .prepare(
@@ -376,12 +376,12 @@ export class ScopedArchiveRepository {
   }
 
   /**
-   * 「按顺序读取聊天记录」（docs/05 §3.2）：`anchor` 之前 / 之后 / 两侧各一半。此前这个工具
-   * 只有 `{limit}`，模型除了「最近 N 条」没有任何往前翻的手段 —— 要找一句三天前的话只能
-   * 把 limit 一路加到上限，而那正是把上下文吃满的做法。
+   * 按顺序读取聊天记录（docs/05 §3.2）：取 `anchor` 之前 / 之后 / 两侧各一半。此前该工具只有
+   * `{limit}` 参数，模型除「最近 N 条」外没有任何回溯手段，要找三天前的一句话只能把 limit 加到上限，
+   * 而这正是耗尽上下文的做法。
    *
-   * 一律按 id 升序交回：`recent()` 那种「最新在最前」在 `direction:'after'` 上会让读出来的
-   * 一段反着念，而模型是照顺序理解对话的。
+   * 一律按 id 升序返回：`recent()` 的「最新在前」在 `direction:'after'` 下会使读出的片段逆序，
+   * 而模型按顺序理解对话。
    */
   window(input: {
     anchorId?: number | null | undefined;
@@ -416,9 +416,9 @@ export class ScopedArchiveRepository {
   }
 
   /**
-   * ISO 时间锚点先落到一条真实消息上（该时刻起的第一条，之后没有了就取最后一条），后面一律按 id 走。
-   * 两条 SQL 把会话过滤写全而不是抽成变量：`db.isolation.test.ts` 的扫描器读的是源码里的字符串
-   * 字面量，藏在 `${scope}` 后面它看不见 —— 那条断言存在的意义就是没人能这么绕过去。
+   * ISO 时间锚点先落到一条真实消息上（该时刻起的第一条，若无则取最后一条），此后一律按 id 定位。
+   * 两条 SQL 各自写全会话过滤而不抽成变量：`db.isolation.test.ts` 的扫描器读的是源码里的字符串
+   * 字面量，藏进 `${scope}` 后它就检测不到，而该断言的意义正是不允许以这种方式绕过。
    */
   #anchorAt(date: number): number | null {
     const bound = { chatId: this.chatId, threadId: this.threadId, date };
@@ -462,9 +462,9 @@ export class ScopedArchiveRepository {
   }
 
   /**
-   * 一批 Telegram 消息编号 → 归档 id（取最新 revision）。渲染回复标记要用它换一次：两套编号
-   * 不通用，把 Telegram 那个当 `#id` 交给模型，它照着 `get_message` 回查会取到另一条消息。
-   * 一次查完整批而不是逐条查 —— 一页 50 条就是 50 次查询。
+   * 批量把 Telegram 消息编号映射到归档 id（取最新 revision）。渲染回复标记时必须做一次转换：
+   * 两套编号不通用，把 Telegram 编号当作 `#id` 交给模型，它用 `get_message` 回查会取到另一条消息。
+   * 整批一次查询而非逐条查询：一页 50 条即 50 次查询。
    */
   archiveIdsByTgMessageIds(
     tgMessageIds: readonly number[],

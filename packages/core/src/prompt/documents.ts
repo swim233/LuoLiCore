@@ -71,10 +71,10 @@ export class PromptDocuments {
 
   /**
    * @param characterOverride `perChat.<key>.character`：会话级人格文件名（`memory/` 下的相对
-   *   文件名，不含目录）。这是**用户可配的自由字符串会被当成路径段用**的地方，与 `S-08` 同一类：
-   *   `../../etc/passwd` 会让人格块读到目录外。所以只放行「纯文件名 + .md」，其余一律退回
-   *   `CHARACTER.md` —— 静默退回而不是抛错：一个拼错的文件名不该让整个会话开不了轮次，
-   *   而人格块用回全局那份是安全的默认（docs/27 · C-08）。
+   *   文件名，不含目录）。这里是用户可配的自由字符串被当作路径段使用的位置，与 `S-08` 同类：
+   *   `../../etc/passwd` 会让人格块读到目录之外。因此只放行纯文件名加 `.md`，其余一律退回
+   *   `CHARACTER.md`。静默退回而非抛错：一个拼写错误的文件名不应让整个会话无法开轮，
+   *   而人格块退回全局那份是安全的默认（docs/27 · C-08）。
    */
   paths(userId: string, characterOverride?: string): PromptPaths {
     return {
@@ -207,11 +207,11 @@ export class AgentResultStore {
   constructor(private readonly directory: string) {}
 
   /**
-   * 返回值就是落进 `agent_runs.result_full_ref` 的那个 ref，**相对 `directory`** ——
+   * 返回值即写入 `agent_runs.result_full_ref` 的那个 ref，相对 `directory`，
    * 与 `attachments.local_path` 同一套（docs/28 · L-OPS-06）。存绝对路径的代价是：
-   * `LUOLI_DATA_DIR` 变过、或没有它而换了个 cwd 起一次进程之后，库里记的是旧根、文件在新根，
-   * 于是 `gcFiles()` 把新根下的全文整批当孤儿删掉（实测删掉 74 份）。绝对路径记的是
-   * 「写的时候在哪」，而这一列要回答的是「现在去哪读」—— 后者只能相对当前配置解析。
+   * `LUOLI_DATA_DIR` 变更过，或未设置该变量而以另一个 cwd 启动进程后，库中记录的是旧根、文件在新根，
+   * 于是 `gcFiles()` 把新根下的全文整批当作孤儿删除（实测删除 74 份）。绝对路径记录的是
+   * 写入时的位置，而这一列要回答的是当前从何处读取，后者只能相对当前配置解析。
    */
   put(runId: string, value: string): string {
     const ref = `${runId}.txt`;
@@ -221,10 +221,10 @@ export class AgentResultStore {
     return ref;
   }
 
-  /** 文件可能已被 `MaintenanceService` 按 `logs.retentionDays` 清掉，或在读之前被 gc 扫走。
-   *  抛出去只会变成一句与原因无关的 ENOENT —— 直说它过期了。
-   *  `ref` 是相对 `directory` 的；存量绝对路径行（归一化时指向另一个根、原样留下的那些）
-   *  照旧读得出来 —— `resolve` 对绝对路径是恒等。 */
+  /** 文件可能已被 `MaintenanceService` 按 `logs.retentionDays` 清理，或在读取前被 gc 回收。
+   *  直接抛出只会得到一句与原因无关的 ENOENT，应明确告知已过期。
+   *  `ref` 相对 `directory`；存量绝对路径行（归一化时指向另一个根而原样保留的那些）
+   *  仍可读取，因为 `resolve` 对绝对路径是恒等的。 */
   read(
     ref: string,
     offset: number,
@@ -233,7 +233,7 @@ export class AgentResultStore {
     const path = resolve(this.directory, ref);
     if (!existsSync(path))
       return {
-        content: "[子 agent 的完整结果已按日志保留期清理，只剩摘要]",
+        content: "[子 agent 的完整结果已按日志保留期清理，仅保留摘要]",
         nextOffset: null,
       };
     const buffer = readFileSync(path);

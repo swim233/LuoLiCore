@@ -127,7 +127,7 @@ with_parent 0`，浏览器里展开一条 trace，13 个节点的 `marginLeft` �
 | `approval.receipt_failed` | warn | error —— 回执发不回发起人所在的会话 |
 | `prompt.posted` | debug | kind, messageId, options —— 一条带 inline 选项的阻塞式提示发出去了（[05 §6.1](./05-tools-and-permissions.md)）。审批的那两个按钮就是它 |
 | `prompt.resolved` | info | kind, optionId, decidableBy + userId —— 谁点了哪一个。**越权点击不落这一行**（等待者一动不动，回一个 `forbidden` 弹窗）；裁决本身另有 `approval.decided`（`channel='telegram'`），两行都在是因为将来的转人工与 ACP permission 没有第二行 |
-| `prompt.post_failed` | warn | kind, error —— 提示发不出去（Telegram 拒收）。**发起方的语义不受它影响**：审批照旧等自己的 TTL 或 WebUI 裁决 |
+| `prompt.post_failed` | warn | kind, error —— 提示投递失败（Telegram 拒收）。**发起方的语义不受它影响**：审批照旧等自己的 TTL 或 WebUI 裁决 |
 | `prompt.options_capped` | warn | kind, given —— 选项超过 8 个被砍掉。这是调用方的 bug：下标要压在一位数以内，`callback_data` 的长度才是常量（Bot API 上界 64 字节）|
 | `prompt.settle_failed` | debug | messageId, rewrote, error —— 收尾那次编辑被拒。`rewrote` 分开两种：`true` = 撤键盘**并**把正文换成结局（审批的正常收场，`AC-APV-004`），`false` = 只撤键盘。消息被用户删了、或同一条消息被收尾第二次（`message is not modified`）都会走到这里，两者都不该影响任何等待者 —— 一次改文案绝不能把审批从「等人批」变成「整轮失败」，所以是 debug |
 | `agent.spawn` | info | runId, name, depth, modelAlias, taskChars —— **派出去那一刻就落**，不等它跑完。`agent.run` 只在结束时才落库（span 的语义），所以一个卡住的子 agent 只有这一行能证明它存在 |
@@ -147,7 +147,7 @@ with_parent 0`，浏览器里展开一条 trace，13 个节点的 `marginLeft` �
 | `memory.hard_limit` | warn | scope, subject, tokens, hardLimit —— 这次写入被硬上限挡掉了 |
 | `memory.compact` | info | pending —— 压缩复审的定时提醒（`memory.compactCron`） |
 | `skill.load` | info（解析失败 **error**） | name, tokens, minRole, allowedTools, requiresTools, error。**只在那份 skill 真的变了时才落**（`scan()` 自己算的 `name → 内容哈希` 签名）：watcher 一次保存能连发好几个事件，逐次记等于把一次 `install_skill` 写成几十行。解析失败这一档与 `agent.file_invalid` 对称 —— 少了它，「我加的那个 skill 为什么不存在」只能去翻 `skills.load_error` 那一列 |
-| `skills.disabled` | info | `skills.enabled=false`：目录整块不扫，一份说明书都不进工具目录 |
+| `skills.disabled` | info | `skills.enabled=false`：目录整块不扫，一份说明文档都不进工具目录 |
 | `plugin.hook` | debug | plugin, hook, ms —— **只记慢的那一次**：判据是 `ms >= max(50, plugins.hookTimeoutMs / 10)`，也就是「已经吃掉超时预算 10% 的那一次」。钩子每轮要跑好几次（`onToolCall` 是每次工具调用一次），逐次记会把 `logs.level='debug'` 的部署刷爆，而「这个钩子跑了 3ms」不是任何排障问题的答案。运维调紧 `hookTimeoutMs` 时这条线跟着紧 |
 | `plugin.error` | warn | plugin, hook, message, errors, disabled —— **每一次**失败都记。此前只有累计到 `plugins.autoDisableAfterErrors` 时才经告警落一行，而那一行还受 `alerts.on`（默认 `[]`）与 `dedupeMinutes` 管：实测一个三轮必抛的 `beforeTurn`，与 plugin 有关的日志 **0 条**（[reviews/28](./reviews/28-round10-live-system-test.md) · L-LOG-01）。加载失败与目录重扫失败走同一个 kind（`phase:'load'` / `'rescan'`） |
 | `plugin.hot_reload_unreliable` | warn | entry —— 这个运行时下热重载会「成功」但仍跑旧代码（tsx 的 loader 按路径缓存模块）。修不了，只能说出来（[reviews/28](./reviews/28-round10-live-system-test.md) · L-EXT-04） |
@@ -184,7 +184,7 @@ with_parent 0`，浏览器里展开一条 trace，13 个节点的 `marginLeft` �
 | `schedule.loaded` | info | registered, missed, enabled —— 启动时装载了多少条 |
 | `system.start` / `system.stop` | info（Telegram 入口禁用时 **warn**） | name, webui, providerSecrets / signal |
 | `system.restart` | warn | reason —— WebUI 按下的「重启进程」。**没有 supervisor 时进程不会自己回来** |
-| `system.recovered` | warn | turns, tasks, agentRuns, claims, reservations —— 上一个进程没有正常收尾，`recoverAfterCrash` 判死了这些。此前它一个字都不落，一次非正常重启 reap 了什么只能靠翻 `turns` 表反推（[reviews/28](./reviews/28-round10-live-system-test.md) · L-OPS-04） |
+| `system.recovered` | warn | turns, tasks, agentRuns, claims, reservations —— 上一个进程非正常退出，`recoverAfterCrash` 把这些标记为失败。此前它一个字都不落，一次非正常重启 reap 了什么只能靠翻 `turns` 表反推（[reviews/28](./reviews/28-round10-live-system-test.md) · L-OPS-04） |
 | `ctx.orphan_tool_call` | warn | toolCallIds[] —— 读出侧给「没有配对结果的 tool-call」补了结果。**这条会话的历史是坏的**：补的那条占位结果是每次物化现补的，库里那几条 parts 一个字都没改，所以这一行会**一直响**到那条被裁出窗口或 `/new` 为止（2026-08-18 那次事故留下的孤儿至今还在 `data/luoli.db` 里，ordinal 508）。反复出现不是噪声，是「这条会话正靠读出侧兜底活着」的读数 —— 没有那层兜底的那一版，同一条会话每一轮都崩 |
 | `alert.raised` | error | alert, …告警自己的载荷 —— 一条告警被触发（[§6](#6-健康检查与告警)）。**它不挡在投递前面**：`db_write_failed` 的触发源就是「库写不进去」 |
 | `alert.deliver_failed` | warn | alert, error —— owner 私聊或 webhook 发不出去。告警链路自己坏了不能再炸一次 |
@@ -277,7 +277,7 @@ logs:
 **`retentionDays` 同时管子 agent 的全文结果。** `data/agent-results/<runId>.txt` 是和日志同性质的调试产物，
 `MaintenanceService.cleanup()` 按 `agent_runs.finished_at` 一并过期：删文件、把 `result_full_ref` 置空，
 `result_summary` 留着（摘要是上下文里已经引用过的东西，删了会让历史轮次的引述悬空）。之后
-`read_agent_result` 回一句「已按日志保留期清理，只剩摘要」而不是抛 ENOENT（docs/22 · I-09）。
+`read_agent_result` 回一句「已按日志保留期清理，仅保留摘要」而不是抛 ENOENT（docs/22 · I-09）。
 **媒体附件不在这里过期** —— `data/files/**` 是用户数据，自动过期策略是 [14 §2](./14-open-questions.md) Q9
 的未决问题。`POST /api/maintenance/gc-files` 扫的是**孤儿**：磁盘上有、但没有任何 DB 行指向的文件
 （下载中途崩溃、`local_path` 被换掉、手工删过库行留下的），那不是保留策略。

@@ -15,8 +15,8 @@ const db = openDatabase(path);
 migrateDatabase(db);
 const archive = new ArchiveRepository(db);
 const engine = new ContextEngine(db, archive);
-// `configSchema.parse` 而不是手搓 `as never`：手搓的那份每新增一处配置读取就会在这里炸成
-// undefined，而冒烟脚本的价值恰恰是「装配起来真的能跑」——它不该因为无关的新配置项而变红。
+// 使用 `configSchema.parse` 而不是手写 `as never`：手写版本在每新增一处配置读取时都会在此处得到
+// undefined，而冒烟脚本的价值在于验证装配后可正常运行，不应因无关的新配置项而失败。
 const smokeConfig = configSchema.parse({
   general: { timezone: "UTC" },
   context: {

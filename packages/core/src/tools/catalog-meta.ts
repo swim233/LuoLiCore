@@ -9,21 +9,21 @@ import {
   type ToolRegistry,
 } from "./registry.js";
 
-/** 一次检索最多报几个。上限 20 焊在 schema 里 —— 一次展开二十个已经把「按需」的意义用完了。 */
+/** 一次检索最多返回几个。上限 20 固定在 schema 里：一次展开二十个已经失去按需展开的意义。 */
 const DEFAULT_LIMIT = 8;
 /**
- * 描述在结果里截到这个长度。**tool result 会永久留在上下文里**（`docs/02`：`context_messages`
- * 只追加），把一份 4KB 的 MCP 描述抄进来等于给这一整段会话每轮都记一次账；而完整 schema
- * 下一步由 provider 的 tools 数组权威送达，这里只需要够模型认出「是不是我要的那个」。
+ * 描述在结果里截到这个长度。tool result 会永久留在上下文里（`docs/02`：`context_messages`
+ * 只追加），把一份 4KB 的 MCP 描述抄进来等于让这段会话每轮都为它付一次 token；而完整 schema
+ * 下一步由 provider 的 tools 数组权威送达，这里只需让模型辨认出是否为目标工具。
  */
 const MAX_DESCRIPTION_CHARS = 240;
-/** minimatch 的元字符。一个不含它们的 `query` 按子串搜，含了就按 glob 匹配名字。 */
+/** minimatch 的元字符。不含它们的 `query` 按子串搜索，含则按 glob 匹配名字。 */
 const GLOB_CHARS = /[*?[]/;
 
 /**
- * 做法与 `custom.ts` 里那份同一条（控制字符能在目录里伪造分隔行、多行描述会把摘要撑开），
- * 只是上限不同：那份管的是模型自撰写工具的注册名片（200），这份管的是检索结果（240）。
- * 复用不成是因为那一份是模块私有的常量绑定，导出它等于让两个上限从此绑在一起。
+ * 与 `custom.ts` 里那份同一做法（控制字符能在目录里伪造分隔行、多行描述会撑开摘要），
+ * 只是上限不同：那份约束模型自撰写工具的注册名片（200），这份约束检索结果（240）。
+ * 未复用是因为那份是模块私有的常量绑定，导出它会让两个上限从此耦合。
  */
 function normalizeDescription(value: string): string {
   return value
@@ -47,16 +47,16 @@ const searchSchema = z
       Boolean(value.group),
     {
       message:
-        "query / names / group 至少给一个：三个都空等于让我把整份目录再抄一遍给你",
+        "query / names / group 至少提供一个：三者均为空等同于返回整份工具目录",
     },
   );
 
 /**
- * `search_tools` —— 折叠目录的检索与展开入口（`docs/07 §5`）。
+ * `search_tools`：折叠目录的检索与展开入口（`docs/07 §5`）。
  *
- * 与 `builtins.ts` 分文件只为了并行改动，装配位置在 `main.ts` 那一串 `register*Tools` 里；
- * 它进了 `TOOL_POLICY`，所以**必须无条件注册**（那条启动断言只看注册没注册），开关全焊在
- * `available()` 里 —— 与自我扩展八工具、`stay_silent`、容器族同形。
+ * 与 `builtins.ts` 分文件只为便于并行改动，装配位置在 `main.ts` 的 `register*Tools` 序列中；
+ * 它进了 `TOOL_POLICY`，因此必须无条件注册（启动断言只检查是否注册），开关全部落在
+ * `available()` 里，与自我扩展八工具、`stay_silent`、容器族同形。
  */
 export function registerCatalogTools(
   registry: ToolRegistry,
@@ -65,30 +65,30 @@ export function registerCatalogTools(
   registry.register({
     name: "search_tools",
     description:
-      "按关键词、名字或分组检索本轮的折叠工具并展开它们：展开过的工具从下一步起可以直接调用。" +
-      "目录里那几行「折叠工具」摘要就是它的入口 —— 摘要只有名字，要用哪个先在这里搜一下，不可以根据名字猜参数。" +
-      "一次尽量把要用的都搜出来，跨轮想重新用某个工具直接用 names 精确指定。",
+      "按关键词、名称或分组检索本轮的折叠工具并展开它们：已展开的工具从下一步起可以直接调用。" +
+      "目录中的「折叠工具」摘要行是其入口 —— 摘要只含名称，需要使用某个工具时先在此检索，不可根据名称推测参数。" +
+      "尽量一次检索出需要使用的全部工具；跨轮重新使用某个工具时，直接用 names 精确指定。",
     inputSchema: searchSchema,
     policy: builtinPolicy("search_tools"),
     sourcePriority: 80,
     /**
-     * 两道闸。`agentKind === 'main'`：**子 agent 拿到的是父轮同一个 turn 对象**
-     * （`agent/subagent.ts` 的 `runSubAgent` 直接收 `turn`，`stay_silent` 为此写过同样的闸），
-     * 让子 agent 调它就会往父轮的 `expandedTools` 里写，而子 agent 那条路没有 per-step 重算 ——
-     * 展开对它自己毫无作用，只剩往父轮漏状态。子 agent 的 `definition.tools` 白名单本来就是比
-     * 折叠更强的表达（`docs/07 §4.1`）。
+     * 两道闸。`agentKind === 'main'`：子 agent 拿到的是父轮同一个 turn 对象
+     * （`agent/subagent.ts` 的 `runSubAgent` 直接接收 `turn`，`stay_silent` 为此写过同样的闸），
+     * 允许子 agent 调用会往父轮的 `expandedTools` 写入，而子 agent 那条路没有 per-step 重算：
+     * 展开对它自身无效，只会向父轮泄漏状态。子 agent 的 `definition.tools` 白名单本就是比
+     * 折叠更强的约束（`docs/07 §4.1`）。
      *
-     * `hasDeferrable`：折叠集为空时整个工具不进目录 —— 纯内建部署（mcp 未开、无 plugin/custom）
-     * 的提示词逐字节不变。不需要另判 `deferExternal`，`#deferredFor` 已经把它算进去了；
-     * 而运维在工具页把这个工具关掉时，`activeView` 的折叠摘要也就没人能展开了 —— 那一档由
-     * 提示层回退整目录常驻兜住（`docs/07 §5`），不在这里再判一次。
+     * `hasDeferrable`：折叠集为空时整个工具不进目录，纯内建部署（mcp 未开、无 plugin/custom）
+     * 的提示词逐字节不变。无需另判 `deferExternal`，`#deferredFor` 已将其计入；
+     * 运维在工具页关闭本工具时，`activeView` 的折叠摘要也就无人能展开，该档由
+     * 提示层回退整目录常驻兜住（`docs/07 §5`），不在这里重复判断。
      */
     available: (role, context) =>
       context.agentKind === "main" && registry.hasDeferrable(role),
     execute: (input, context) => {
-      // 检索域从 `activeView()` 派生 ⇒ 角色、`available()`、运维禁用、`maxRegistered` 截断
-      // 全部已经滤过：limited 用户在这里枚举不到 owner 工具的描述，摘要里也不会出现一个
-      // 开轮冻结的 toolSet 里根本没有的名字。
+      // 检索域从 `activeView()` 派生，因而角色、`available()`、运维禁用、`maxRegistered` 截断
+      // 已全部过滤：limited 用户在这里枚举不到 owner 工具的描述，摘要里也不会出现
+      // 开轮冻结的 toolSet 中不存在的名字。
       const view = registry.activeView(context.turn.effectiveRole, context);
       const deferred = new Set(view.deferred.map((tool) => tool.name));
       const grouped = input.group
@@ -99,7 +99,7 @@ export function registerCatalogTools(
       const needle = input.query?.toLowerCase() ?? "";
       const glob =
         input.query && GLOB_CHARS.test(input.query) ? input.query : null;
-      // 三个通道取**并集**：每一个都是「找到它」的一种办法，给了两个不该让结果更少。
+      // 三个通道取并集：每个通道都是一种检索方式，同时给出两个不应让结果变少。
       const hit = (tool: RegisteredTool): boolean =>
         input.names?.includes(tool.name) === true ||
         grouped?.has(tool.name) === true ||
@@ -115,40 +115,40 @@ export function registerCatalogTools(
         );
       const limit = input.limit ?? DEFAULT_LIMIT;
       const shown = matched.slice(0, limit);
-      // 判据与 `admit()` 的 `skill_narrowed` 那条逐字对齐。被收窄挡住的必须如实标出来 ——
-      // 否则模型会对着一个展开了却调不动的工具原地重试。
+      // 判据与 `admit()` 的 `skill_narrowed` 逐字对齐。被收窄挡住的必须如实标出，
+      // 否则模型会对着一个已展开却调不动的工具反复重试。
       const narrowed = (name: string): boolean =>
         Boolean(context.turn.skillAllowedTools?.size) &&
         !SKILL_NARROWING_EXEMPT.includes(name as ToolName) &&
         !context.turn.skillAllowedTools!.has(name);
       const already = context.turn.expandedTools;
       /**
-       * 收窄挡住的**照样记进 `expandedTools`**，只是它仍然调不动。
+       * 被收窄挡住的同样记进 `expandedTools`，只是仍然调不动。
        *
-       * 「展开」与「可调用」是两件事：`expandedTools` 记的是这一轮展开过什么，收窄是它下游的
+       * 展开与可调用是两件事：`expandedTools` 记录这一轮展开过什么，收窄是其下游的
        * 另一道过滤（`prepareStep` 那条 `先扩张后收窄，收窄永远赢`，`docs/07 §2.2`）。
        *
-       * ⚠ 少了这一笔就是一个**死循环**：`runtime.ts` 的 `repairToolCall` 靠「原名不在
-       * `expandedTools` 里」判断这次值不值得改写成一次检索。折叠且被收窄的工具如果永远进不了
-       * 这个集合，就会走成「模型调 X → NoSuchToolError → 改写成检索 → 回一个 narrowed → 模型
-       * 再调 X → 再改写 → …」，一路烧到步数上限。记上之后第二次尝试落回一句明确的
-       * `NoSuchToolError`，模型看到的是失败而不是一个来回。
+       * ⚠ 缺这一笔会形成死循环：`runtime.ts` 的 `repairToolCall` 依据原名是否在
+       * `expandedTools` 中判断本次是否值得改写成一次检索。折叠且被收窄的工具若永远进不了
+       * 这个集合，就会陷入模型调 X → NoSuchToolError → 改写成检索 → 返回 narrowed → 模型
+       * 再调 X → 再改写的循环，直至耗尽步数上限。记入之后第二次尝试落回明确的
+       * `NoSuchToolError`，模型看到的是失败而非一次往返。
        *
-       * 代价是这类工具白占一格 `maxExpandedPerTurn`（32 格，一次最多报 8 个）—— 拿一格额度换一个
-       * 说不清的空轮，这笔换算不用犹豫。
+       * 代价是这类工具白占一格 `maxExpandedPerTurn`（32 格，一次最多报 8 个）：用一格额度换掉
+       * 一个无法解释的空轮是划算的。
        */
       const fresh = shown
         .filter((tool) => deferred.has(tool.name) && !already?.has(tool.name))
         .map((tool) => tool.name);
-      // 护栏在**写之前**判：每一次展开都会改请求体第 0 段（tools 数组），本轮剩余步骤的前缀缓存
-      // 整段作废重写一次（`docs/04 §2.1`）。压的是展开**次数**累计到的工具数，不是目录大小。
+      // 护栏在写入之前判定：每次展开都会改动请求体第 0 段（tools 数组），本轮剩余步骤的前缀缓存
+      // 整段作废并重建一次（`docs/04 §2.1`）。约束的是展开次数累计到的工具数，不是目录大小。
       const budget = (context.turn.config as Readonly<Config>).tools.catalog
         .maxExpandedPerTurn;
       if ((already?.size ?? 0) + fresh.length > budget) {
         return {
           ok: false,
           error: "expansion_limit",
-          hint: `本轮最多展开 ${budget} 个工具，已展开 ${already?.size ?? 0} 个。用 names 精确指定需要调用的工具。`,
+          hint: `本轮最多展开 ${budget} 个工具，已展开 ${already?.size ?? 0} 个。请使用 names 精确指定需要调用的工具。`,
         };
       }
       if (fresh.length) {
@@ -158,7 +158,7 @@ export function registerCatalogTools(
       const matches = shown.map((tool) => ({
         name: tool.name,
         description: normalizeDescription(tool.description),
-        // 常驻工具不属于任何折叠组，报 `resident` 而不是留空：形状统一，模型也就不用猜缺字段的含义。
+        // 常驻工具不属于任何折叠组，报 `resident` 而非留空：结构统一，模型无需推测缺失字段的含义。
         group: deferred.has(tool.name)
           ? (view.groups.find((group) => group.names.includes(tool.name))
               ?.key ?? "deferred")
@@ -191,8 +191,8 @@ export function registerCatalogTools(
         matches,
         omitted: Math.max(0, matched.length - shown.length),
         hint:
-          "expanded 的从**下一步**起可以直接调用（这一步还发不出去）；already_active 本来就能调；" +
-          "narrowed 的被本轮载入的 skill 挡住了，这一轮调不动，别重试。要更多结果就加大 limit 或换个关键词。",
+          "expanded 的工具从**下一步**起可以直接调用（本步尚无法发出）；already_active 的工具当前即可调用；" +
+          "narrowed 的工具被本轮载入的 skill 拦截，本轮无法调用，不要重试。需要更多结果请加大 limit 或更换关键词。",
       };
     },
   });

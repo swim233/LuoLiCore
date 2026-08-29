@@ -5,16 +5,16 @@ import { LogSink, McpManager, PendingAuthorizations, Secrets, ToolRegistry, conf
 import { start } from './fixtures/mcp-oauth-server.js';
 
 /**
- * 需要登录的 MCP server，整条回路。
+ * 需要登录的 MCP server 的完整回路。
  *
- * 本仓库此前**构造不出**「要登录」这个信号：`StreamableHTTPClientTransport` 没传
- * `authProvider`，而 SDK 那条 401 分支是 `if (response.status === 401 && this._authProvider)` ——
- * 于是一台要登录的 server 只留下 `state='down'` 加一句 `Error POSTing to endpoint: <响应体>`。
- * 这个文件焊住的就是那个信号，以及它之后的每一步。
+ * 本仓库此前无法构造出需要登录这一信号：`StreamableHTTPClientTransport` 未传入
+ * `authProvider`，而 SDK 的 401 分支是 `if (response.status === 401 && this._authProvider)`，
+ * 因此一台需要登录的 server 只会留下 `state='down'` 与一句 `Error POSTing to endpoint: <响应体>`。
+ * 这个文件固定的正是该信号以及其后的每一步。
  *
- * 对家是 `tests/fixtures/mcp-oauth-server.ts`：一台自带授权服务器的受保护 MCP server，
- * PKCE 真的验、code 一次性、refresh_token 真的换。**没有 mock** —— 三层里任何一层的形状写错，
- * 这里都会红。
+ * 对端为 `tests/fixtures/mcp-oauth-server.ts`：一台自带授权服务器的受保护 MCP server，
+ * 实际校验 PKCE、code 一次性、refresh_token 实际换取。不使用 mock：三层中任何一层的形状有误，
+ * 这里都会失败。
  */
 
 type Fixture = Awaited<ReturnType<typeof start>>;
@@ -36,7 +36,7 @@ interface Harness {
   state(): { state: string; last_error: string | null } | undefined;
 }
 
-/** 每个用例自己的库。`publicUrl` 可为空 —— 那一条正是「没配 publicUrl 就不许开始」的用例。 */
+/** 每个用例使用独立的库。`publicUrl` 可为空，对应未配置 publicUrl 时不允许开始授权的用例。 */
 function harness(slug: string, url: string, auth: Record<string, unknown>, publicUrl = 'http://127.0.0.1:8787'): Harness {
   const path = `./data/mcp-oauth-${slug}.test.db`;
   for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
@@ -56,9 +56,9 @@ function harness(slug: string, url: string, auth: Record<string, unknown>, publi
 }
 
 /**
- * 扮演浏览器走完授权那一跳：拿授权 URL、跟一次 302、把 `code` 与 `state` 摘出来。
- * `redirect: 'manual'` 是必须的 —— 真跟过去会打到 `redirect_uri`（我们自己的回调）上，
- * 而这个用例要测的正是「拿到 code 之后我们做了什么」。
+ * 模拟浏览器完成授权跳转：获取授权 URL、跟随一次 302、取出 `code` 与 `state`。
+ * `redirect: 'manual'` 是必需的：实际跟随会请求到 `redirect_uri`（本服务的回调），
+ * 而该用例要验证的正是取得 code 之后的处理逻辑。
  */
 async function followAuthorization(authorizationUrl: string): Promise<{ code: string; state: string }> {
   const response = await fetch(authorizationUrl, { redirect: 'manual' });
@@ -68,8 +68,8 @@ async function followAuthorization(authorizationUrl: string): Promise<{ code: st
 }
 
 afterEach(async () => {
-  // **manager 先关**：它握着的 http 连接关掉时会走 `onclose` → 记一条 `mcp.disconnect`，
-  // 而 `LogSink` 那时要是已经没有库可写，就只剩一行「写入失败」的噪音。
+  // manager 先关闭：它持有的 http 连接关闭时会触发 `onclose` 并记录一条 `mcp.disconnect`，
+  // 若此时 `LogSink` 已无可写入的库，只会产生一行写入失败的噪声日志。
   for (const manager of openManagers.splice(0)) await manager.close();
   for (const server of openFixtures.splice(0)) await server.close();
   for (const db of openDbs.splice(0)) closeDatabase(db);
@@ -80,14 +80,14 @@ describe('MCP 登录', () => {
     const remote = await fixture();
     const box = harness('needs-auth', remote.url, { mode: 'oauth', scope: 'read write' });
     await box.manager.reconcile();
-    // 关键的一条：**不是 down**。运维在这两种状态下要做的事完全不同。
+    // 关键断言：状态不是 down。运维在这两种状态下需要采取的操作完全不同。
     expect(box.state()?.state).toBe('needs_auth');
     expect(box.state()?.last_error).toContain('登录');
     const entry = box.pending.peek('probe');
     expect(entry, '没有留下待授权条目 —— 那个〔登录〕按钮就没有可点的地址').not.toBeNull();
     expect(entry!.authorizationUrl).toContain('code_challenge=');
     expect(entry!.authorizationUrl).toContain('code_challenge_method=S256');
-    // 动态注册真的发生过（对家没有预置 client）。
+    // 动态注册确实发生过（对端没有预置 client）。
     expect(remote.seen.register).toBe(1);
     expect(remote.seen.unauthorized).toBeGreaterThan(0);
   });
@@ -105,12 +105,12 @@ describe('MCP 登录', () => {
     expect(box.state()?.state).toBe('up');
     expect(box.state()?.last_error).toBeNull();
     expect(box.manager.toolEntries().map((entry) => entry.name)).toContain('mcp__probe__whoami');
-    // 凭据落库了，而且**读不到密文**：公开视图里只有 mode / scope / 时间戳。
+    // 凭据已落库，且无法读取密文：公开视图中只有 mode、scope 与时间戳。
     const credential = box.store.get('probe')!;
     expect(credential).toMatchObject({ server: 'probe', mode: 'oauth', authorized: true, scope: 'read write' });
     expect(JSON.stringify(credential)).not.toContain('access_token');
     expect(credential.expiresAt).toBeGreaterThan(Date.now());
-    // 换完 token 就不该再留着那一次的 PKCE verifier 与待授权条目。
+    // 换取 token 后不应继续保留本次的 PKCE verifier 与待授权条目。
     expect(box.pending.peek('probe')).toBeNull();
   });
 
@@ -124,11 +124,11 @@ describe('MCP 登录', () => {
     expect(box.state()?.state).toBe('up');
 
     await new Promise((done) => setTimeout(done, 1200));
-    // 指纹里的 authVersion 会因为 refresh 写 token 而变，所以这里必然是一次真的重连。
+    // 指纹中的 authVersion 会因 refresh 写入 token 而变化，因此这里必然发生一次真实重连。
     await box.manager.reconcile();
     expect(remote.seen.tokenRefresh).toBeGreaterThanOrEqual(1);
     expect(box.state()?.state).toBe('up');
-    // 人一次都没有再参与：授权端点只被打过一次。
+    // 全程无需再次人工参与：授权端点只被请求过一次。
     expect(remote.seen.authorize).toBe(1);
   });
 
@@ -142,8 +142,8 @@ describe('MCP 登录', () => {
     expect(box.state()?.state).toBe('up');
 
     await box.manager.signOut(box.server as never);
-    // 那一行还在（`mode` 有用：界面要能区分「用 OAuth 但没登录」与「压根不需要登录」），
-    // 但 `authorized` 已经是 false。
+    // 该行仍然存在（`mode` 有实际用途：界面需区分使用 OAuth 但未登录与不需要登录两种情况），
+    // 但 `authorized` 已为 false。
     expect(box.store.get('probe')).toMatchObject({ mode: 'oauth', authorized: false, expiresAt: null, authorizedAt: null });
     await box.manager.reconcile();
     expect(box.state()?.state).toBe('needs_auth');
@@ -153,7 +153,7 @@ describe('MCP 登录', () => {
     const remote = await fixture();
     const box = harness('no-public-url', remote.url, { mode: 'oauth' }, '');
     await expect(box.manager.authorize(box.server as never)).rejects.toThrow(/publicUrl/);
-    // 一次网络请求都不该发出去：redirect_uri 注册进对方那里之后就不好改了。
+    // 不应发出任何网络请求：redirect_uri 一旦注册到对端就难以更改。
     expect(remote.seen.register).toBe(0);
     expect(remote.seen.authorize).toBe(0);
   });
@@ -161,7 +161,7 @@ describe('MCP 登录', () => {
   it('bearer：token 存进金库就能连上，被撤销之后是 needs_auth', async () => {
     const remote = await fixture();
     const box = harness('bearer', remote.url, { mode: 'bearer' });
-    // 先不填 token：应当是 needs_auth，且提示语说的是「本地没有保存 token」。
+    // 先不填入 token：应为 needs_auth，且提示信息说明本地没有保存 token。
     await box.manager.reconcile();
     expect(box.state()?.state).toBe('needs_auth');
     expect(box.state()?.last_error).toContain('没有保存 token');
@@ -169,7 +169,7 @@ describe('MCP 登录', () => {
     box.store.setBearer('probe', remote.mintBearer());
     await box.manager.reconcile();
     expect(box.state()?.state).toBe('up');
-    // 界面上只看得到末 4 位，不是整串。
+    // 界面上只显示末 4 位，而不是完整串。
     const credential = box.store.get('probe')!;
     expect(credential.hint).toHaveLength(4);
     expect(credential.mode).toBe('bearer');
@@ -177,7 +177,7 @@ describe('MCP 登录', () => {
     remote.revokeAll();
     await box.manager.reconcile();
     expect(box.state()?.state).toBe('needs_auth');
-    expect(box.state()?.last_error).toContain('拒收');
+    expect(box.state()?.last_error).toContain('拒绝了已保存的 token');
   });
 
   it('bearer：轮换 token 真的换掉连接（指纹里带凭据版本）', async () => {
@@ -188,8 +188,8 @@ describe('MCP 登录', () => {
     expect(box.state()?.state).toBe('up');
     const firstVersion = box.store.version('probe');
 
-    // 旧 token 全部作废，同时换上一个新的。指纹里没有 authVersion 的话，
-    // `existing.fingerprint === print` 会命中旧连接 —— 界面显示「已连接」而它拿着废 token。
+    // 旧 token 全部作废并替换为新的。若指纹中不含 authVersion，
+    // `existing.fingerprint === print` 会命中旧连接，界面显示已连接而实际持有失效 token。
     remote.revokeAll();
     box.store.setBearer('probe', remote.mintBearer());
     expect(box.store.version('probe')).toBeGreaterThan(firstVersion);
@@ -202,20 +202,20 @@ describe('MCP 登录', () => {
     const box = harness('mode-none', remote.url, { mode: 'none' });
     await box.manager.reconcile();
     expect(box.state()?.state).toBe('needs_auth');
-    // 提示语要指向「去把 auth.mode 改掉」，而不是「点登录」——后者在这个模式下没有按钮。
+    // 提示信息应指向修改 auth.mode，而不是执行登录：该模式下界面不提供登录入口。
     expect(box.state()?.last_error).toContain('auth.mode');
-    // **不挂 authProvider 的意义就在这里**：不替运维决定去第三方那里注册一个客户端。
+    // 不挂载 authProvider 的意义在于：不代替运维决定向第三方注册客户端。
     expect(remote.seen.register).toBe(0);
     expect(remote.seen.authorize).toBe(0);
   });
 
   /**
-   * **凭据不能以明文出现在库里任何地方。** 这条不是形式主义：此前
-   * `headers: { Authorization: 'Bearer …' }` 的 token 明文进了 `config_revisions`、也从
-   * `/api/config/export` 原样出来 —— 因为按键名判密的那条正则是 `/key|secret|token|password/i`，
-   * 它匹配不到 `Authorization`。把凭据搬进 `mcp_auth` 的全部意义就在这一条断言上。
+   * 凭据不得以明文出现在库中任何位置。这不是形式要求：此前
+   * `headers: { Authorization: 'Bearer …' }` 的 token 明文写入了 `config_revisions`，也会从
+   * `/api/config/export` 原样导出，原因是按键名判定敏感项的正则为 `/key|secret|token|password/i`，
+   * 无法匹配 `Authorization`。将凭据迁入 `mcp_auth` 的全部价值体现在这条断言上。
    *
-   * 判据是**扫全库**而不是只看 `mcp_auth`：漏的那次正是漏在另一张表里。
+   * 判据是扫描全库而不是只检查 `mcp_auth`：此前遗漏的正是另一张表。
    */
   it('凭据在库里任何一张表、任何一列上都不以明文出现', async () => {
     const remote = await fixture();
@@ -237,7 +237,7 @@ describe('MCP 登录', () => {
       }
     }
     expect(hits, `这些列里有明文 token：${hits.join(', ')}`).toEqual([]);
-    // 对照组：密文确实在那儿（否则上面那条断言用一张空表也能过）。
+    // 对照组：密文确实存在（否则上面那条断言在空表上同样能通过）。
     const stored = db.prepare('SELECT secret_enc FROM mcp_auth WHERE server=?').pluck().get('probe') as string;
     expect(stored).toMatch(/^v2\./);
     expect(stored).not.toContain(token);
@@ -247,13 +247,13 @@ describe('MCP 登录', () => {
     const pending = new PendingAuthorizations();
     pending.put('state-a', 'probe', 'https://as.example/authorize?state=state-a');
     expect(pending.take('state-a')?.server).toBe('probe');
-    // 重放：同一个 state 第二次回来必须落空。
+    // 重放：同一个 state 第二次回调必须失败。
     expect(pending.take('state-a')).toBeNull();
     expect(pending.take('never-issued')).toBeNull();
 
     pending.put('state-b', 'probe', 'https://as.example/authorize?state=state-b');
     pending.put('state-c', 'probe', 'https://as.example/authorize?state=state-c');
-    // 点两次〔登录〕之后，先点的那一条不该还能换到凭据。
+    // 连续两次发起登录后，先发起的那一条不应仍能换取凭据。
     expect(pending.take('state-b')).toBeNull();
     expect(pending.take('state-c')?.server).toBe('probe');
   });

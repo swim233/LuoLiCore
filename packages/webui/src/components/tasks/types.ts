@@ -1,20 +1,20 @@
 import type { GridColumn, TagSeverity } from "../../ui/types";
 
 /**
- * 「任务与审批」页三张卡共用的行类型、列定义与那两条纯函数。
+ * 「任务与审批」页三张卡共用的行类型、列定义与两条纯函数。
  *
- * 放在 `.ts` 而不是留在 SFC 里的理由只有一个：**`.vue` 不进 `tsc`**（根 tsconfig 那条
- * `packages` 下的 `.vue` include 是空转，`ConsoleView.vue` 开头那段注释自陈过这件事害过人）。
- * 能挪出模板旁边的判据就别留在那儿。
+ * 放在 `.ts` 而不是留在 SFC 内的唯一理由：`.vue` 不进 `tsc`（根 tsconfig 中 `packages` 下的
+ * `.vue` include 不生效，`ConsoleView.vue` 开头的注释记录过由此引发的问题）。
+ * 能移出模板的判据不要留在模板旁边。
  *
- * 三张卡的端点、分页游标、弹窗、busy 态零交集 —— 共用的只有这一份形状。
+ * 三张卡的端点、分页游标、弹窗、busy 态没有交集，共用的只有这一份形状。
  */
 
 // ── 行类型 ────────────────────────────────────────────────────────────────────
 
 /**
- * `GET /api/tasks` 的一行。**不含 `progress_json`**：列表不发它（一行进度可以有几 KB），
- * 只有 `GET /api/tasks/:id` 才发解析后的 `progress`。
+ * `GET /api/tasks` 的一行。不含 `progress_json`：列表不发送它（单行进度可达数 KB），
+ * 只有 `GET /api/tasks/:id` 才发送解析后的 `progress`。
  */
 export interface TaskRow {
   id: string;
@@ -28,12 +28,12 @@ export interface TaskRow {
   created_at: number;
   updated_at: number;
   finished_at: number | null;
-  /** 服务端 `principalLabel` 反查出来的显示名。前端**不实现第二份**反查规则。 */
+  /** 服务端 `principalLabel` 反查得到的显示名。前端不实现第二份反查规则。 */
   chatLabel: string | null;
   userLabel: string | null;
 }
 
-/** `GET /api/approvals` 的一行 —— `approvals` 表逐列直出，所以是 snake_case。 */
+/** `GET /api/approvals` 的一行。`approvals` 表逐列直出，因此是 snake_case。 */
 export interface ApprovalRow {
   id: string;
   turn_id: string;
@@ -51,17 +51,17 @@ export interface ApprovalRow {
   decided_at: number | null;
   decision_channel: string | null;
   /**
-   * 服务端 `principalLabel` 反查出来的裁决者显示名。前端**不实现第二份**反查规则 ——
-   * `decided_by` 有三种写法（`user:<tgId>` / `owner` / `system`），在这儿拆 `user:` 前缀就等于把
-   * 格式变成前后端各存一半的暗契约。查不到时是 `null`，那时显示 `decided_by` 原串。
+   * 服务端 `principalLabel` 反查得到的裁决者显示名。前端不实现第二份反查规则：
+   * `decided_by` 有三种写法（`user:<tgId>` / `owner` / `system`），在此拆解 `user:` 前缀会使
+   * 该格式变成前后端各存一半的隐式契约。查不到时为 `null`，此时显示 `decided_by` 原串。
    */
   decidedByLabel: string | null;
 }
 
 /**
- * `GET /api/schedules` 的一行。`silent` / `silentStreak` 是**对外线上的名字**，
- * DB 列叫 `allow_silent` / `silent_streak`，映射只在服务端的 `scheduleRow` 与
- * `scheduledJobView` 两处发生 —— 前端一律只认这一份。
+ * `GET /api/schedules` 的一行。`silent` / `silentStreak` 是对外接口上的名字，
+ * DB 列名为 `allow_silent` / `silent_streak`，映射只在服务端的 `scheduleRow` 与
+ * `scheduledJobView` 两处发生，前端一律只认这一份。
  */
 export interface ScheduleJob {
   id: string;
@@ -74,7 +74,7 @@ export interface ScheduleJob {
   state: string;
   chatLabel: string | null;
   creatorLabel: string | null;
-  /** `cron` 与 `at` 恒有且只有一个（表上有 CHECK）。`at` 是 **UTC 瞬时**，不是墙钟。 */
+  /** `cron` 与 `at` 恒有且只有一个（表上有 CHECK）。`at` 是 UTC 瞬时，不是墙钟时间。 */
   cron?: string;
   at?: string;
   timezone: string;
@@ -88,7 +88,7 @@ export interface ScheduleJob {
   silentStreak?: number;
 }
 
-/** `GET /api/schedules` 的信封。不分页（行数有界），但撞 `listAll` 上限时要说出来。 */
+/** `GET /api/schedules` 的信封。不分页（行数有界），但触及 `listAll` 上限时需明确提示。 */
 export interface ScheduleList {
   available: boolean;
   enabled: boolean;
@@ -103,7 +103,7 @@ export interface ScheduleList {
   truncated?: boolean;
 }
 
-/** 定时任务卡只用得到会话的 key —— 下拉的 value 与 label 都是它。 */
+/** 定时任务卡只需要会话的 key，下拉的 value 与 label 都取它。 */
 export interface ChatOption {
   key: string;
 }
@@ -115,8 +115,8 @@ export interface Paged<T> {
   size: number;
 }
 /**
- * 审批信封。`pending` 是**服务端全表** `COUNT(*) WHERE state='pending'`，不是当前页里数出来的 ——
- * 左侧导航那个角标读的就是它，翻到第 2 页角标不该变（`AC-WEB-049`）。
+ * 审批信封。`pending` 取服务端全表 `COUNT(*) WHERE state='pending'`，而非当前页统计：
+ * 左侧导航的角标读取的就是它，翻到第 2 页时角标不应变化（`AC-WEB-049`）。
  */
 export interface ApprovalPage extends Paged<ApprovalRow> {
   pending: number;
@@ -128,11 +128,11 @@ export const SCHEDULE_STATES: Record<
   string,
   { label: string; severity: TagSeverity }
 > = {
-  active: { label: "在排", severity: "success" },
+  active: { label: "启用中", severity: "success" },
   done: { label: "已完成", severity: "secondary" },
   cancelled: { label: "已停用", severity: "warn" },
 };
-/** 上一次触发的结果。`skipped` 的原因是排障的关键 —— 它意味着任务响了但什么都没发生。 */
+/** 上一次触发的结果。`skipped` 的原因是排障关键：它意味着任务触发了但没有产生任何动作。 */
 export const SCHEDULE_RUN_STATES: Record<
   string,
   { label: string; severity: TagSeverity }
@@ -142,10 +142,10 @@ export const SCHEDULE_RUN_STATES: Record<
   skipped: { label: "跳过", severity: "warn" },
   missed: { label: "错过", severity: "warn" },
   cancelled: { label: "停用", severity: "secondary" },
-  /** 那一轮确实提交了，只是没投递 —— 与 `failed` / `skipped` 必须分得开，否则「一直在失败」会看起来很安静。 */
+  /** 该轮次确实提交了，只是没有投递。必须与 `failed` / `skipped` 区分开，否则持续失败的状态不会被察觉。 */
   silent: { label: "静默", severity: "secondary" },
 };
-/** `tasks` 表的四档。字面沿用会话详情里 `turnState()` 那套说法，同一个东西不该有两种叫法。 */
+/** `tasks` 表的四档。文案沿用会话详情中 `turnState()` 的措辞，同一事物不应有两种叫法。 */
 export const TASK_STATES: Record<
   string,
   { label: string; severity: TagSeverity }
@@ -158,8 +158,8 @@ export const TASK_STATES: Record<
 
 // ── 列定义 ────────────────────────────────────────────────────────────────────
 
-// `chat` 列的数据来自服务端反查好的 `chatLabel` / `userLabel`：一张跨会话的表里只显示裸
-// Telegram id，认不出这条子 agent 任务是谁在哪儿派的。
+// `chat` 列的数据来自服务端反查好的 `chatLabel` / `userLabel`：跨会话的表中只显示裸
+// Telegram id 时，无法辨认某条子 agent 任务由谁在何处派发。
 export const TASK_COLUMNS: GridColumn[] = [
   { key: "title", header: "标题" },
   { key: "state", header: "状态", width: "7rem" },
@@ -167,7 +167,7 @@ export const TASK_COLUMNS: GridColumn[] = [
   { key: "updated_at", header: "更新时间", width: "13rem" },
   { key: "actions", header: "", width: "7rem" },
 ];
-// `actions` 比原来宽 2rem：这一列从「立即触发 + 停掉」变成三个按钮，11rem 会把「编辑」挤到第二行。
+// `actions` 比原来宽 2rem：这一列从两个按钮变成三个，11rem 会把「编辑」挤到第二行。
 export const SCHEDULE_COLUMNS: GridColumn[] = [
   { key: "name", header: "任务" },
   { key: "chatLabel", header: "会话" },
@@ -187,9 +187,9 @@ export const APPROVAL_COLUMNS: GridColumn[] = [
 ];
 
 /**
- * 一段时长的说法。前两档与总览页在途 turn 那个 `elapsed()` **逐字一致** —— 同一个东西不该
- * 有两种叫法，而运维会在两张表之间来回看。多出来的「小时」档是这里独有的：那张表看的是
- * 正在跑的轮次（不会久到按小时算），这里看的是历史任务，`1203 分 4 秒` 读不出来。
+ * 时长的表述。前两档与总览页在途 turn 的 `elapsed()` 逐字一致：同一事物不应有两种叫法，
+ * 而运维会在两张表之间来回对照。额外的「小时」档为此处独有：那张表展示的是正在运行的轮次
+ * （不会长到按小时计），这里展示的是历史任务，`1203 分 4 秒` 无法直观阅读。
  */
 export function durationText(ms: number): string {
   const seconds = Math.max(0, Math.round(ms / 1000));
@@ -202,18 +202,18 @@ export function durationText(ms: number): string {
 
 // ── 墙钟 ──────────────────────────────────────────────────────────────────────
 
-/** 表单里那格一次性时间的格式。服务端收的也是这个形状（按任务行上的时区解释）。 */
+/** 表单中一次性时间输入的格式。服务端接收的也是这个形状（按任务行上的时区解释）。 */
 export const WALL_CLOCK_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/;
 
 /**
- * UTC 瞬时 → **指定时区上的墙钟串**（`YYYY-MM-DDTHH:mm`）。
+ * UTC 瞬时转换为指定时区上的墙钟串（`YYYY-MM-DDTHH:mm`）。
  *
- * `scheduledJobView` 发的 `at` 是 `toISOString()` 的 UTC 瞬时，而表单收的是行上时区的墙钟。
- * 直接把 ISO 回填进输入框的话，`Asia/Shanghai` 上一个「早八点」的任务会显示成
- * `…T00:00:00.000Z`，人顺手改成 `08:00` 再存 —— 任务被静默挪后 8 小时，两次操作各自都不报错。
+ * `scheduledJobView` 发送的 `at` 是 `toISOString()` 的 UTC 瞬时，而表单接收的是行上时区的墙钟。
+ * 直接把 ISO 回填进输入框时，`Asia/Shanghai` 上一个早八点的任务会显示为
+ * `…T00:00:00.000Z`，用户顺手改成 `08:00` 再保存，任务被静默推后 8 小时，两次操作均不报错。
  *
- * 认不出来的时区串**交白卷**（返回空串）而不是退回浏览器时区：给一个偏移几小时且看不出偏移的
- * 墙钟，比一格空输入框危险得多。
+ * 无法识别的时区串返回空串而不是回退到浏览器时区：给出一个偏移数小时且看不出偏移的墙钟，
+ * 比一格空输入框危险得多。
  */
 export function toWallClock(
   iso: string | null | undefined,
@@ -238,7 +238,7 @@ export function toWallClock(
   }
   const pick = (type: Intl.DateTimeFormatPartTypes): string =>
     parts.find((part) => part.type === type)?.value ?? "";
-  // 一部分实现的 h23 在午夜给 `24`，那个串再喂回 `datetime-local` 是不合法的。
+  // 部分实现的 h23 在午夜返回 `24`，该串再传回 `datetime-local` 是不合法的。
   const hour = pick("hour") === "24" ? "00" : pick("hour");
   const wall = `${pick("year")}-${pick("month")}-${pick("day")}T${hour}:${pick("minute")}`;
   return WALL_CLOCK_RE.test(wall) ? wall : "";

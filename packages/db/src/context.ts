@@ -176,13 +176,13 @@ export class ContextRepository {
     return row;
   }
   /**
-   * 回忆隔断的水位（`context.recallBarrier`）：HEAD 之前（含）最近那次 `reset` commit 记下的
-   * `meta.archiveFloor` —— 也就是「最后一次清空发生时，归档里最大的 messages.id」。0 = 没设过。
+   * 回忆隔断的水位（`context.recallBarrier`）：HEAD 之前（含）最近一次 `reset` commit 记录的
+   * `meta.archiveFloor`，即最后一次清空时归档中最大的 messages.id。0 表示未设置。
    *
-   * 按 **seq** 取而不是按祖先链取，与 `hasResetAfter` 同一套语义。好处是 `/undo` 把 HEAD 退回
-   * 那次清空之前时隔断随之解除（head.seq 小于它了）；代价是 WebUI 的「回滚到此」解除不了 ——
-   * 它插的是一条 seq 更大的 `manual` commit。那条路本来就把旧窗口整段搬回来了，窗口里的消息
-   * 模型照样看得见，只是再往前翻不动。
+   * 按 seq 取值而非按祖先链，与 `hasResetAfter` 语义一致。收益是 `/undo` 把 HEAD 退回该次清空之前时
+   * 隔断自动解除（head.seq 已小于它）；代价是 WebUI 的「回滚到此」无法解除，因为它插入的是一条
+   * seq 更大的 `manual` commit。该路径本身会把旧窗口整段恢复，窗口内的消息模型仍可见，
+   * 只是无法继续向前检索。
    */
   recallFloor(): number {
     const head = this.head();
@@ -194,7 +194,7 @@ export class ContextRepository {
       .pluck()
       .get(this.key, head.seq) as string | null | undefined;
     if (!meta) return 0;
-    // 坏 JSON 当「没设过」：这个方法在每次归档检索的路径上，抛出去等于把三个工具一起打死。
+    // 无法解析的 JSON 按「未设置」处理：本方法位于每次归档检索的路径上，抛异常会同时打死三个工具。
     try {
       const floor = (JSON.parse(meta) as { archiveFloor?: unknown })
         .archiveFloor;
@@ -292,8 +292,8 @@ export class ContextRepository {
         (!this.isAncestor(baseCommitId, head.id) ||
           this.hasResetAfter(baseCommitId, head.seq)),
       );
-      // 旁白一律 role:'user'：provider 只接受 user/assistant/tool，system 消息会让整个 prompt 被拒收，
-      // 而这条 note 是持久化的 —— 写坏一次，该会话在 /new 之前每轮都失败（docs/20 · W-CTX-01）。
+      // 旁白一律用 role:'user'：provider 只接受 user/assistant/tool，system 消息会导致整个 prompt 被拒收，
+      // 而这条 note 是持久化的，写错一次会使该会话在 /new 之前每轮都失败（docs/20 · W-CTX-01）。
       if (baseInvalid)
         delta.unshift({
           id: ulid(),
@@ -333,9 +333,9 @@ export class ContextRepository {
       let ordinal = start - 1;
       for (const message of delta) {
         ordinal += 1;
-        // `context.rebase.markMeta`：关掉之后 rebase 过的 assistant 消息不再带 `meta.rebased`。
-        // 影响面不只是好看 —— WebUI 的上下文视图与 `docs/13` 的 AC 都按这个标记判断「这一条是
-        // 并发轮次产出的」，关掉等于把那条线索从库里抹掉，只剩日志里的 ctx.rebase。
+        // `context.rebase.markMeta`：关闭后经过 rebase 的 assistant 消息不再带 `meta.rebased`。
+        // 影响不止于展示：WebUI 的上下文视图与 `docs/13` 的 AC 都依据该标记判断消息是否由并发轮次产出，
+        // 关闭等于把这一线索从库里抹掉，只剩日志中的 ctx.rebase。
         const meta =
           markMeta && message.role === "assistant" && unseen
             ? { ...message.meta, rebased: true, unseenOrdinals: unseen }
@@ -402,10 +402,10 @@ export class ContextRepository {
   }
 
   /**
-   * seq 是这张表的插入序号，只能按 MAX(seq) 递推。按 HEAD 递推的话，`/undo` 把 HEAD 退回上一个
-   * commit 之后，下一次写入就会撞 `ux_commits_key_seq` —— 撤销过的会话下一条消息直接失败，
-   * WebUI 的「回滚到此」也一并 500（docs/02 §7）。commitsAfter / hasResetAfter 要的都是
-   * 「插入得比它晚」，与 HEAD 位置无关，因此这个语义对它们也是对的。
+   * seq 是本表的插入序号，只能按 MAX(seq) 递推。按 HEAD 递推时，`/undo` 把 HEAD 退回上一个 commit
+   * 之后，下一次写入会违反 `ux_commits_key_seq` 唯一约束：撤销过的会话下一条消息直接失败，
+   * WebUI 的「回滚到此」同时返回 500（docs/02 §7）。commitsAfter 与 hasResetAfter 需要的都是
+   * 「插入晚于它」，与 HEAD 位置无关，该语义对二者同样成立。
    */
   nextSeq(): number {
     return (
@@ -545,8 +545,8 @@ export class ContextRepository {
   }
 
   /**
-   * 最近一次 prune / rebase。两者都只在 commit 行上留痕（`kind='prune'` / `rebased=1`），`/ctx`
-   * 要报它们就得单独查 —— `head()` 只看得到当前那一条（`AC-CTX-027`）。
+   * 最近一次 prune / rebase。两者只在 commit 行上留痕（`kind='prune'` / `rebased=1`），`/ctx`
+   * 要报告它们必须单独查询，`head()` 只能看到当前这一条（`AC-CTX-027`）。
    */
   latestCommitOf(what: "prune" | "rebase"): CommitRow | null {
     return (
@@ -575,10 +575,10 @@ export class ContextRepository {
   }
 
   /**
-   * 校准系数只用来吸收分词器差异，量级必须被夹住。曾经没有夹：首轮空上下文时 estimated 只有几十
-   * （真实输入还含着上万 token 的系统提示词与工具 schema），一次采样就把 ratio 推到 26 —— 之后
-   * 每条消息都按 26 倍存 tokens，窗口水位虚高一个数量级，裁剪提前触发（实测 logs/2026-08-16）。
-   * 上游必须传可比的两个量（见 `runtime.ts` 的整请求体估算）；这里是最后一道闸。
+   * 校准系数仅用于吸收分词器差异，量级必须夹住。此前未夹：首轮空上下文时 estimated 只有几十
+   * （真实输入还包含上万 token 的系统提示词与工具 schema），一次采样即把 ratio 推到 26，此后每条消息
+   * 按 26 倍存储 tokens，窗口水位虚高一个数量级并提前触发裁剪（实测 logs/2026-08-16）。
+   * 上游必须传入可比的两个量（见 `runtime.ts` 的整请求体估算），这里是最后一道闸。
    */
   updateTokenRatio(real: number, estimated: number, alpha: number): number {
     const context = this.context();
@@ -597,10 +597,10 @@ export class ContextRepository {
 }
 
 /**
- * 一次性修复：把 `context_messages.tokens` 按当前估算器重算，并把所有 `contexts.token_ratio` 归 1。
- * 旧数据是按当时失控的校准系数（实测最高约 26 倍）存下来的，而 tokens 是持久化的 ——
- * 不重算的话，已经在窗口里的消息会一直按虚高的数字参与裁剪判定，直到 `/new` 或自然滚出窗口为止。
- * `context_commits` 不动（不可变）：它的 `tokens_total` 只用于展示，下一次提交会按 `effectiveStats` 重算。
+ * 一次性修复：按当前估算器重算 `context_messages.tokens`，并把所有 `contexts.token_ratio` 归 1。
+ * 旧数据是按当时失控的校准系数（实测最高约 26 倍）写入的，而 tokens 是持久化的：不重算的话，
+ * 窗口内已有的消息会持续以虚高数值参与裁剪判定，直到 `/new` 或自然滚出窗口。
+ * `context_commits` 不修改（该表不可变）：其 `tokens_total` 仅用于展示，下次提交会按 `effectiveStats` 重算。
  */
 export function recomputeMessageTokens(db: Sqlite): {
   messages: number;
@@ -655,8 +655,8 @@ export interface OpenTurnInput {
 }
 
 /**
- * 硬截断只削减载荷，绝不碰判别字段。`type` 被截掉会让 part 变成 provider 无法识别的形状，
- * 而截断结果会写进 meta_json 并在每次物化时重放，等于会话级永久损坏。
+ * 硬截断只削减载荷，不得修改判别字段。`type` 被截断会使 part 变成 provider 无法识别的形状，
+ * 而截断结果会写入 meta_json 并在每次物化时重放，等同于会话级永久损坏。
  */
 const STRUCTURAL_PART_KEYS = new Set([
   "type",
@@ -668,7 +668,7 @@ const STRUCTURAL_PART_KEYS = new Set([
   "state",
 ]);
 
-/** 非文本 part（图片、文件引用）的载荷必须保持良构：截一半的 data URI 与截掉 type 一样会被 provider 拒绝。 */
+/** 非文本 part（图片、文件引用）的载荷必须保持良构：截断一半的 data URI 与丢失 type 同样会被 provider 拒收。 */
 const OPAQUE_PART_TYPES = new Set(["image", "file", "image_url"]);
 
 function truncatePartStrings(parts: unknown[], maxChars: number): unknown[] {
@@ -699,7 +699,7 @@ function truncatePartStrings(parts: unknown[], maxChars: number): unknown[] {
       part && typeof part === "object"
         ? (part as { type?: unknown }).type
         : undefined;
-    // 不透明 part 要么原样保留，要么整体换成占位文本——绝不半截。
+    // 不透明 part 要么原样保留，要么整体替换为占位文本，不允许部分截断。
     if (typeof type === "string" && OPAQUE_PART_TYPES.has(type))
       return remaining > 0
         ? part

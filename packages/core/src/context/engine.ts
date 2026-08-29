@@ -27,18 +27,18 @@ export interface OpenTurnRequest {
   initiatorUserId: string;
   effectiveRole: Role;
   isPrivate: boolean;
-  /** 群名 / 频道名，只用于 RUNTIME 块的「会话」行。可选：定时任务那条路没有 update 可取。 */
+  /** 群名或频道名，只用于 RUNTIME 块的会话行。可选：定时任务路径没有 update 可读取。 */
   chatTitle?: string;
   trigger: ArchivedMessage;
   /**
-   * 触发消息回复的那条消息（含它自己的 media part）。适配层负责取到它 —— 被回复的消息可能
-   * 从来没进过归档（发送者是 blocked、是别的 bot、或发在 bot 入群之前），而 Telegram 的
-   * update 里带着它的完整副本，所以「库里没有」不等于「拿不到」（docs/08 §7.4）。
+   * 触发消息所回复的那条消息（含其自身的 media part）。由适配层负责获取 —— 被回复的消息可能
+   * 从未进入归档（发送者为 blocked、为其它 bot、或发送于 bot 入群之前），而 Telegram 的
+   * update 中携带其完整副本，因此库中不存在不等于无法获取（docs/08 §7.4）。
    */
   quoted?: ArchivedMessage;
   /**
-   * 本轮允许模型宣布不投递。只有 `ScheduledJobRunner` 会给（任务行的 `allow_silent` 为真时），
-   * 其余入口一概缺席 —— fail-closed 的理由写在 `RuntimeTurnContext.silenceable` 上。
+   * 本轮允许模型声明不投递。只有 `ScheduledJobRunner` 会传入（任务行的 `allow_silent` 为真时），
+   * 其余入口一律不传 —— fail-closed 的理由记录在 `RuntimeTurnContext.silenceable` 上。
    */
   silenceable?: boolean;
   abortSignal: AbortSignal;
@@ -52,8 +52,8 @@ export interface CommitResult {
 }
 
 /**
- * part 的判别字段必须属于这个集合。任何"按字符串遍历改写 parts"的逻辑（分级裁剪、硬截断）
- * 一旦碰坏 type，产出的 ModelMessage 会被 provider 直接拒绝，且改写结果是持久化的。
+ * part 的判别字段必须属于该集合。任何按字符串遍历改写 parts 的逻辑（分级裁剪、硬截断）
+ * 一旦破坏 type，产出的 ModelMessage 会被 provider 直接拒绝，且改写结果是持久化的。
  */
 const KNOWN_PART_TYPES = new Set([
   "text",
@@ -66,9 +66,9 @@ const KNOWN_PART_TYPES = new Set([
 ]);
 
 /**
- * 能发给 provider 的 role 只有这三个。AI SDK v7 的 `standardizePrompt` 在 `allowSystemInMessages`
- * 未开启时直接拒收 messages 里的任何 system 消息 —— 这条规则不是我们定的，是下游契约
- * （docs/02 不变量 15）。系统旁白用 `origin:'note'` 区分，role 仍是 user。
+ * 可发送给 provider 的 role 只有这三个。AI SDK v7 的 `standardizePrompt` 在 `allowSystemInMessages`
+ * 未开启时直接拒收 messages 中的任何 system 消息 —— 该规则并非本项目制定，属下游契约
+ * （docs/02 不变量 15）。系统旁白用 `origin:'note'` 区分，role 仍为 user。
  */
 const KNOWN_ROLES = new Set(["user", "assistant", "tool"]);
 
@@ -81,7 +81,7 @@ function othersSpeech(text: string): string {
   return `<group-message>\n${text.replaceAll("</group-message", "<\\/group-message")}\n</group-message>`;
 }
 
-/** 非法时区只会在群聊分支炸（私聊不走 Intl），所以必须兜底，否则整个群会话永久开不了轮次。 */
+/** 非法时区只在群聊分支抛错（私聊不经 Intl），因此必须兜底，否则整个群会话永久无法开启轮次。 */
 function formatClock(timestamp: number, timezone: string): string {
   const options = {
     hour: "2-digit",
@@ -102,8 +102,8 @@ function formatClock(timestamp: number, timezone: string): string {
 }
 
 /**
- * 群聊前缀里的发言人。身份标识只给真人发言者：bot 自己的消息（被回复时会渲染一次）挂上
- * `@用户名, id=…` 只是噪音，而模型区分发言人靠的就是这一段。
+ * 群聊前缀中的发言人。身份标识只提供给真人发言者：bot 自身的消息（被回复时会渲染一次）附加
+ * `@用户名, id=…` 只是噪音，而模型正是依据这一段区分发言人。
  */
 function speakerName(message: ArchivedMessage, showUsername: boolean): string {
   return message.fromKind === "user"
@@ -128,9 +128,9 @@ function speakerName(message: ArchivedMessage, showUsername: boolean): string {
 export interface RenderOptions {
   isPrivate: boolean;
   timezone: string;
-  /** `context.background.showUsername`：只管前缀里**附带**的 `@用户名`，不影响它作为显示名的兜底位。 */
+  /** `context.background.showUsername`：只控制前缀中附带的 `@用户名`，不影响它作为显示名的兜底作用。 */
   showUsername?: boolean;
-  /** `context.background.showTime`：关掉时前缀里不出现 `HH:mm`。发言人与回复标记照旧。 */
+  /** `context.background.showTime`：关闭时前缀中不出现 `HH:mm`。发言人与回复标记保持不变。 */
   showTime?: boolean;
   quoted?: boolean;
 }
@@ -148,7 +148,7 @@ export function renderArchivedMessage(
   } = options;
   const rawText = message.text ?? `[${message.kind}]`;
   const escaped = escapeForgedSpeakerPrefixes(rawText);
-  // 关掉时间时前缀收成 `[名字]`，而不是留一个 `[名字 ]` 的空位。
+  // 关闭时间显示时前缀收缩为 `[名字]`，而不是保留 `[名字 ]` 的空位。
   const time = showTime ? ` ${formatClock(message.tgDate, timezone)}` : "";
   const body =
     !isPrivate && message.fromKind === "user" && (quoted || !message.triggered)
@@ -157,18 +157,18 @@ export function renderArchivedMessage(
   const reply = message.replyToName
     ? ` ↩︎回复 ${escapeForgedSpeakerPrefixes(message.replyToName)}`
     : "";
-  // 编辑过的消息必须自带标记。不标的话它以裸 `[user]` 形态进上下文，和一条刚发来的新消息**完全
-  // 无法区分** —— 实测模型把一条五分钟前的 `早` 被编辑后当成刚说的话，回了「早呀早呀」
-  // （docs/29 · `M-TG-02`）。时间戳那一格是 `edit_date`，它只说明「改于何时」，说不出「这是改的」。
+  // 编辑过的消息必须自带标记。不标记的话它以裸 `[user]` 形态进入上下文，与一条刚发送的新消息
+  // 完全无法区分 —— 实测模型将五分钟前被编辑的一句「早」当作刚说的话并作出回应
+  // （docs/29 · `M-TG-02`）。时间戳字段是 `edit_date`，它只表明修改时间，无法表明这是编辑内容。
   const edited = (message.revision ?? 0) > 0 ? " · 已编辑" : "";
-  // 被回复的消息在私聊里也必须带前缀：私聊没有 `[名字 时间]`，不标的话模型看到的是「用户连发了两条」，
-  // 而不是「用户指着上面那条问」——尤其当上面那条只有一张图的时候。
-  // 半角方括号是**有意的**：`escapeForgedSpeakerPrefixes` 把正文里形如 `[… H:MM]` 的串改写成全角，
-  // 于是这个前缀与 `[名字 时间]` 共用同一条防伪规则 —— 用全角写反而会和「已被转义」的形态撞上。
+  // 被回复的消息在私聊中同样必须带前缀：私聊没有 `[名字 时间]`，不标记的话模型看到的是用户连发
+  // 两条消息，而不是用户针对上一条提问 —— 尤其当上一条只有一张图片时。
+  // 使用半角方括号是刻意的：`escapeForgedSpeakerPrefixes` 会将正文中形如 `[… H:MM]` 的串改写为
+  // 全角，因此该前缀与 `[名字 时间]` 共用同一条防伪规则 —— 改用全角反而会与已转义的形态冲突。
   const text = quoted
     ? `[↩︎ 被回复的消息 ${speakerName(message, showUsername)}${time}${edited}] ${body}`
     : isPrivate
-      ? // 私聊没有 `[名字 时间]` 那一格，标记只能自己起一个前缀 —— 而私聊正是这条缺陷被实测到的地方。
+      ? // 私聊没有 `[名字 时间]` 字段，标记只能自行构造前缀 —— 而私聊正是该缺陷被实测发现的场景。
         `${edited ? "[已编辑] " : ""}${escaped}`
       : `[${speakerName(message, showUsername)}${time}${reply}${edited}] ${body}`;
   const output: NewContextMessage = {
@@ -190,14 +190,14 @@ export function renderArchivedMessage(
 }
 
 /**
- * 「这个 part 是一张图」的**唯一**判据。`capImages` 与 `runtime.ts` 那条 vision 别名自动切换
- * （docs/04 §5.2）共用它 —— 两处各写一遍的话，一边认得出、另一边认不出的 part 就是一次
- * 「图片进了上下文但没切成 vision 模型」。
+ * 判定 part 是否为图片的唯一判据。`capImages` 与 `runtime.ts` 的 vision 别名自动切换
+ * （docs/04 §5.2）共用它 —— 两处各写一份的话，一侧可识别而另一侧不可识别的 part 即构成
+ * 图片进入上下文但未切换到 vision 模型的情形。
  */
 export function isImagePart(part: unknown): boolean {
   const typed = part as { type?: unknown; mediaType?: unknown } | null;
-  // 废弃的 `image` part 也算：写入侧早就只产 `file` 了，但 parts 是持久化的，库里那些历史 part
-  // 要到读出侧才被 `imageToFilePart` 转过来（`runtime.ts`）—— 判据在转换之前就要认得它。
+  // 已废弃的 `image` part 同样计入：写入侧早已只产出 `file`，但 parts 是持久化的，库中的历史 part
+  // 要到读出侧才由 `imageToFilePart` 转换（`runtime.ts`）—— 判据必须在转换之前即可识别它。
   if (typed?.type === "image") return true;
   return (
     typed?.type === "file" &&
@@ -207,12 +207,12 @@ export function isImagePart(part: unknown): boolean {
 }
 
 /**
- * `media.maxImagesPerTurn`：一轮里最多带几张图进上下文，**从后往前**保留 —— 超限时留下的是
- * 触发消息与最近几条，而不是相册里最早的那几张。图片按 1500 token 估（`IMAGE_TOKEN_ESTIMATE`），
- * 一次 10 张的相册能顶掉整个窗口。
+ * `media.maxImagesPerTurn`：一轮内最多携带多少张图片进入上下文，从后向前保留 —— 超限时保留的是
+ * 触发消息与最近的几条，而非相册中最早的几张。图片按 1500 token 估算（`IMAGE_TOKEN_ESTIMATE`），
+ * 一次 10 张的相册即可占满整个窗口。
  *
- * 超出的那张换成占位文本而不是删掉整条消息：不透明 part「要么原样保留，要么整体换成占位文本」
- * 是 docs/02 的不变量之一，而删掉整条会让发言人与时间一起消失。
+ * 超出的图片替换为占位文本而非删除整条消息：不透明 part 要么原样保留、要么整体替换为占位文本，
+ * 是 docs/02 的不变量之一，而删除整条会使发言人与时间一并丢失。
  */
 function capImages(delta: NewContextMessage[], limit: number): void {
   const slots: Array<{ message: NewContextMessage; index: number }> = [];
@@ -248,7 +248,7 @@ export class ContextEngine {
     private readonly log?: LogSink,
   ) {}
 
-  /** 轮次级事件挂在 trace 根之下（`docs/10 §1`）。`rootSpanId` 缺失（预览、试跑造的假 turn）时什么都不加。 */
+  /** 轮次级事件挂在 trace 根之下（`docs/10 §1`）。`rootSpanId` 缺失（预览、试跑构造的合成 turn）时不添加。 */
   #parent(turn: RuntimeTurnContext): { parentSpanId?: string } {
     return turn.rootSpanId ? { parentSpanId: turn.rootSpanId } : {};
   }
@@ -263,16 +263,17 @@ export class ContextEngine {
         request.config.context.scope,
       );
       let head = repo.head();
-      // 活跃期是**滑动的空闲间隔**，不是从首次唤醒起算的固定截止：每一轮提交都把它顺延一次，
-      // 所以只要对话在继续就永远不裁剪。固定截止会在一场长对话正中间作废热缓存，恰好是最不该裁
-      // 的时刻（docs/02 §5.1.1）。空上下文视同活跃期 —— 本来就没有可裁的东西。
+      // 活跃期是滑动的空闲间隔，而非从首次唤醒起算的固定截止：每一轮提交都会顺延一次，
+      // 因此只要对话在继续就不会裁剪。固定截止会在长对话中途作废热缓存，恰是最不应裁剪
+      // 的时刻（docs/02 §5.1.1）。空上下文视同活跃期 —— 本就没有可裁剪的内容。
       const active = request.config.context.active;
       const idleMs = head ? Date.now() - head.createdAt : 0;
       const inActivePeriod =
         active.windowMs > 0 && (head === null || idleMs <= active.windowMs);
       if (active.windowMs > 0 && !inActivePeriod && head) {
-        // 空闲超期补裁。久别重逢的那一轮上下文可能已经是常规上限的数倍，等到 commitTurn 再裁的话
-        // 这一轮要按全价发一次超大请求；在开轮前裁回去，此时缓存早已过期，裁剪不损失任何命中。
+        // 空闲超期后补充裁剪。长时间未对话后的第一轮，上下文可能已达常规上限的数倍，若等到
+        // commitTurn 再裁剪，本轮需按全价发送一次超大请求；在开轮前裁剪回去时缓存早已过期，
+        // 裁剪不损失任何命中。
         const caught = this.prune(repo, head, request.config);
         if (caught) {
           head = caught.commit;
@@ -309,7 +310,7 @@ export class ContextEngine {
           inActivePeriod,
         );
       } catch (error) {
-        // 认领已经落库；这里不放行就等于把这批背景消息永久吞掉（水位还没推进，但 claimed_at 已非空）。
+        // 认领已写入库；此处不放行等于永久丢弃这批背景消息（水位尚未推进，但 claimed_at 已非空）。
         if (claim.rows.length) scopedArchive.releaseClaims(turnId);
         throw error;
       }
@@ -317,9 +318,9 @@ export class ContextEngine {
   }
 
   /**
-   * 被回复的消息是否已经在模型眼前了。三种「已经看得到」：窗口里有它、本轮刚认领了它、
-   * 或者它是 bot 自己某一轮的产出而那一轮的消息还在窗口里（bot 消息不带 sourceMessageId，
-   * 只能靠 turn_id 反查）。判错的代价是每次「回复 bot」都把它上一句原样再贴一遍。
+   * 被回复的消息是否已在模型可见范围内。三种可见情形：窗口中已有它、本轮刚认领了它、
+   * 或它是 bot 某一轮的产出而该轮消息仍在窗口中（bot 消息不带 sourceMessageId，
+   * 只能通过 turn_id 反查）。判定错误的代价是每次回复 bot 都会重复贴出它的上一句。
    */
   private alreadyVisible(
     quoted: ArchivedMessage,
@@ -337,7 +338,7 @@ export class ContextEngine {
     );
   }
 
-  /** trace 的根：`turn.start` 的 spanId，也是本轮其余事件的 `parentSpanId`（`docs/10 §1`）。 */
+  /** trace 的根节点：`turn.start` 的 spanId，同时是本轮其余事件的 `parentSpanId`（`docs/10 §1`）。 */
   private buildTurn(
     request: OpenTurnRequest,
     turnId: string,
@@ -360,9 +361,9 @@ export class ContextEngine {
         showUsername: background.showUsername,
         showTime: background.showTime,
       };
-      // `includeNonText=false`：纯图片 / 文件 / 贴纸的**背景**发言不进上下文。触发消息与被回复的
-      // 消息不受它管 —— 那两条是用户此刻在说的话和他指着的东西，不是背景噪音。
-      // 被滤掉的条数并进 omitted 的那句提示：认领水位已经推过去了，不说的话它们等于凭空消失。
+      // `includeNonText=false`：纯图片 / 文件 / 贴纸的背景消息不进入上下文。触发消息与被回复的
+      // 消息不受其约束 —— 那两条是用户当前所说的内容及其所指对象，不属于背景噪音。
+      // 被过滤的条数并入 omitted 提示：认领水位已经推进，不说明的话它们等于凭空消失。
       const claimed = background.includeNonText
         ? claim.rows
         : claim.rows.filter((message) => (message.text ?? "") !== "");
@@ -384,9 +385,9 @@ export class ContextEngine {
       }
       const stored = repo.messages(head);
       this.assertValidShape(request.key, stored);
-      // 被回复的消息排在背景消息之后、触发消息之前：它是这一句话的直接语境。
-      // 判据用 `claimed` 而不是 `claim.rows`：被 includeNonText 滤掉的那条并没有进 delta，
-      // 拿它当「已经看得见」会让被回复的那张图整个消失。
+      // 被回复的消息排在背景消息之后、触发消息之前：它是当前这句话的直接语境。
+      // 判据使用 `claimed` 而非 `claim.rows`：被 includeNonText 过滤掉的那条并未进入 delta，
+      // 将其视为已可见会使被回复的那张图片完全消失。
       if (
         request.quoted &&
         !this.alreadyVisible(request.quoted, stored, claimed)
@@ -407,8 +408,8 @@ export class ContextEngine {
         headOrdinal: head?.headOrdinal ?? 0,
       };
       const rootSpanId = ulid();
-      // traceId + parentSpanId：`ctx.open` 此前两个都没有，于是它压根不出现在
-      // `GET /api/logs/trace/:id` 的结果里 —— `docs/10 §1` 那张图的第一个节点在实现里是游离的。
+      // traceId 与 parentSpanId：`ctx.open` 此前两者都缺失，因此它完全不出现在
+      // `GET /api/logs/trace/:id` 的结果中 —— `docs/10 §1` 图中的第一个节点在实现中是游离的。
       this.log?.event({
         level: "debug",
         kind: "ctx.open",
@@ -436,8 +437,8 @@ export class ContextEngine {
         isPrivate: request.isPrivate,
         ...(request.chatTitle ? { chatTitle: request.chatTitle } : {}),
         ...(request.silenceable ? { silenceable: true } : {}),
-        // 「上一件发生的事是有人清空了上下文」：HEAD 就是那条 reset 且窗口还是空的。提交过一轮之后
-        // HEAD 变成 turn commit，这一位自动消失 —— 它说的是「这一轮之前刚清过」，不是「清过」。
+        // 表示上一次发生的操作是清空上下文：HEAD 即那条 reset 且窗口仍为空。提交一轮之后
+        // HEAD 变为 turn commit，该标志自动消失 —— 它表达的是本轮之前刚清空过，而非曾经清空过。
         ...(head?.kind === "reset" && stored.length === 0
           ? { contextCleared: true }
           : {}),
@@ -463,8 +464,8 @@ export class ContextEngine {
     if (turn.finalized) throw new Error("turn_delta_finalized");
     if (message.ordinal !== undefined)
       throw new Error("ordinal is assigned only during commit");
-    // 校准系数要对整个窗口一视同仁：只缩放 buildTurn 那几条、不缩放工具调用与回复，
-    // 窗口里就会同时存在两种量纲的 tokens，裁剪判定按它们求和的结果自然是错的。
+    // 校准系数必须对整个窗口一致应用：只缩放 buildTurn 的那几条而不缩放工具调用与回复，
+    // 窗口中就会同时存在两种量纲的 tokens，裁剪判定按其求和结果自然是错误的。
     if (message.tokens === undefined)
       message.tokens = Math.ceil(
         estimateMessageTokens(message.parts) * (turn.tokenRatio ?? 1),
@@ -476,7 +477,7 @@ export class ContextEngine {
     if (turn.finalized) throw new Error("turn_already_finalized");
     turn.finalized = true;
     const delta = [...turn.delta];
-    // 写入侧也断言一次：坏形状在产生它的那一轮就报错，而不是等到下一轮物化才暴露。
+    // 写入侧同样断言一次：非法形状在产生它的那一轮即报错，而不是等到下一轮物化时才暴露。
     this.assertValidShape(turn.key, [...turn.snapshot.messages, ...delta]);
     this.assertPairedToolCalls(turn.key, delta);
     return this.#mutex.run(turn.key, async () => {
@@ -541,12 +542,12 @@ export class ContextEngine {
   }
 
   /**
-   * `cancel.commitPartial`：取消时把已经生成的那部分也提交进历史（默认 false —— 取消通常意味着
-   * 「这轮不算」，docs/14 A24）。开着时**只对 `cancelled` 生效**：`failed` 提交半截产出会把一段
-   * 模型自己都没说完的话变成历史事实，下一轮还得在它上面接着编。
+   * `cancel.commitPartial`：取消时将已生成的部分一并提交进历史（默认 false —— 取消通常意味着
+   * 本轮不计入，docs/14 A24）。开启时只对 `cancelled` 生效：`failed` 提交部分产出会把模型尚未
+   * 说完的内容变成历史事实，下一轮还需在其基础上继续生成。
    *
-   * 提交走的是正常的 `commitTurn` 路径，所以 rebase / 裁剪 / 形状断言一条都不少；提交失败时
-   * 退回原来的「释放认领」，不让一次取消把整轮的背景消息也一起卡住。
+   * 提交走正常的 `commitTurn` 路径，因此 rebase、裁剪、形状断言一项不少；提交失败时
+   * 退回原有的释放认领逻辑，避免一次取消同时阻塞整轮的背景消息。
    */
   async abortTurn(
     turn: RuntimeTurnContext,
@@ -602,7 +603,7 @@ export class ContextEngine {
 
   /**
    * @param cacheCommits `context.cacheCommits`：物化结果最多缓存多少个 commit。0 表示不缓存
-   *   （排查「读出来的窗口和库里对不上」时用得着）。此前这个上界是写死的 64，配置项从没接线。
+   *   （排查读出的窗口与库中不一致时会用到）。此前该上界写死为 64，配置项从未接线。
    */
   materialize(
     key: string,
@@ -632,18 +633,18 @@ export class ContextEngine {
   }
 
   /**
-   * `/new` 与 WebUI 的「清空上下文窗口」：插一条 reset commit 把窗口起点推到最新 ordinal 之后。
-   * 消息一条不删 —— 这是刻意的（`docs/09 §3.10`「两者都不删消息」），所以**清空只挡窗口，挡不住
-   * 归档工具**：实测清空后模型第一步就 `read_messages({direction:'before',limit:20})` 把 20 条历史
-   * 整段捞回来，那份工具结果又落进新窗口（logs/2026-08-19 · `01M0CKK6W018B5KS9613SNEX5J`）。
+   * `/new` 与 WebUI 的清空上下文窗口操作：插入一条 reset commit 将窗口起点推进到最新 ordinal 之后。
+   * 不删除任何消息 —— 这是刻意的（`docs/09 §3.10` 规定两者都不删消息），因此清空只限制窗口而不
+   * 限制归档工具：实测清空后模型第一步即执行 `read_messages({direction:'before',limit:20})` 将 20 条
+   * 历史整段取回，该工具结果又进入新窗口（logs/2026-08-19 · `01M0CKK6W018B5KS9613SNEX5J`）。
    *
-   * 所以这里顺手记下清空那一刻的归档水位（`meta.archiveFloor`），交给 `context.recallBarrier`
-   * 决定要不要真的挡。**水位无条件记**：开关是运行时的，而 commit 是不可变的历史 ——
-   * 事后打开开关时，没记过水位的旧 reset 就再也补不上了。
+   * 因此此处一并记录清空时刻的归档水位（`meta.archiveFloor`），由 `context.recallBarrier`
+   * 决定是否真正拦截。水位无条件记录：开关是运行时的，而 commit 是不可变的历史 ——
+   * 事后开启开关时，未记录过水位的旧 reset 无法补录。
    *
-   * @param advanceClaims 隔断开着时为真：把背景认领水位也推到同一处。否则清空之后第一轮会把
-   *   清空之前那些还没被认领的群发言重新带进新窗口（`claimBackground` 认的是 `claim_watermark`
-   *   到触发消息之间那一段，与窗口无关），一扇门关了另一扇门还开着。
+   * @param advanceClaims 隔断开启时为真：将背景认领水位也推进到同一位置。否则清空后第一轮会把
+   *   清空之前尚未认领的群消息重新带入新窗口（`claimBackground` 处理的是 `claim_watermark`
+   *   到触发消息之间的区间，与窗口无关），形成一扇门关闭而另一扇门仍开的状态。
    */
   reset(
     key: string,
@@ -654,8 +655,8 @@ export class ContextEngine {
     const head = repo.head();
     const max = repo.maxOrdinal();
     const context = repo.context();
-    // 没有 contexts 行 = 这个 key 还没开过任何一轮（`/new` 打在从没被唤醒过的会话里）。
-    // 那时既没有窗口也没有认领过的东西，水位记 0 就是「不设限」。
+    // 没有 contexts 行表示该 key 尚未开启过任何一轮（`/new` 执行于从未被唤醒的会话）。
+    // 此时既没有窗口也没有已认领的内容，水位记 0 即表示不设限。
     const archiveFloor = context
       ? this.archive.scope(context.chatId, context.threadId).maxMessageId()
       : 0;
@@ -672,8 +673,8 @@ export class ContextEngine {
   }
 
   /**
-   * 归档检索的下限（`context.recallBarrier`）。**开关不在这里判** —— 调用方（`builtins.ts` 的三个
-   * 归档工具）按本轮配置决定要不要用它，这样同一份水位在开关关掉时不影响任何查询。
+   * 归档检索的下限（`context.recallBarrier`）。开关不在此处判定 —— 由调用方（`builtins.ts` 的三个
+   * 归档工具）按本轮配置决定是否使用，从而使同一份水位在开关关闭时不影响任何查询。
    */
   recallFloor(key: string): number {
     return new ScopedContextRepository(this.db, key).recallFloor();
@@ -704,11 +705,11 @@ export class ContextEngine {
   }
 
   /**
-   * @param options.timeline 是否带上「这个会话有史以来的每一条上下文消息及其 parts」加最近 100 个
-   *   commit。**默认不带** —— `context_stats` 工具此前拿的就是整份：随后 `#normalizeOutput` 按
-   *   `tools.exec.maxOutputBytes`（64 KiB）从中间截断，模型看到的是一段掐断的 JSON，前 32 KiB
-   *   是最早的历史、后 32 KiB 是 commit 列表，既烧 token 又没有信息（docs/27 · R-03）。
-   *   WebUI 的 `GET /api/chats/:key/commits` 要这份时间线，所以它显式传 true。
+   * @param options.timeline 是否附带该会话全部历史上下文消息及其 parts，加最近 100 个 commit。
+   *   默认不附带 —— `context_stats` 工具此前获取的正是完整数据：随后 `#normalizeOutput` 按
+   *   `tools.exec.maxOutputBytes`（64 KiB）从中间截断，模型看到的是被截断的 JSON，前 32 KiB
+   *   是最早的历史、后 32 KiB 是 commit 列表，既消耗 token 又没有信息量（docs/27 · R-03）。
+   *   WebUI 的 `GET /api/chats/:key/commits` 需要该时间线，因此显式传入 true。
    */
   stats(
     key: string,
@@ -759,7 +760,7 @@ export class ContextEngine {
     );
   }
 
-  /** 配额预留要按「这一轮大概会发出去多少」估，而不是按上限的固定分数（docs/17 · N-QUOTA-01）。 */
+  /** 配额预留应按本轮预计发送量估算，而不是按上限的固定比例（docs/17 · N-QUOTA-01）。 */
   windowTokens(key: string): number {
     return new ScopedContextRepository(this.db, key).head()?.tokensTotal ?? 0;
   }
@@ -802,17 +803,17 @@ export class ContextEngine {
   }
 
   /**
-   * **反方向也要挡：没有配对 tool-result 的 tool-call。**
+   * 反方向同样需要拦截：没有配对 tool-result 的 tool-call。
    *
-   * `assertValidShape` 只查 orphan tool-**result** 那一个方向。反过来这一种同样致命，只是晚
-   * 一轮才暴露：畸形请求体让 provider 0 步返回，AI SDK 于是用 `NoOutputGeneratedError` reject
-   * 结果 promise，而 parts 是持久化的 —— 该会话在 `/new` 之前每轮都重演。实测
-   * logs/2026-08-18 22:17 / 23:19 两次进程崩溃，根因是 `tool-error` 部件没被追进 delta
-   * （`step.toolResults` 把它滤掉了，见 `runtime.ts` 的 `stepToolResults`）。
+   * `assertValidShape` 只检查孤儿 tool-result 这一个方向。反方向同样致命，只是晚一轮才暴露：
+   * 畸形请求体使 provider 返回 0 步，AI SDK 于是用 `NoOutputGeneratedError` reject 结果 promise，
+   * 而 parts 是持久化的 —— 该会话在 `/new` 之前每轮都会重现。实测
+   * logs/2026-08-18 22:17 / 23:19 两次进程崩溃，根因是 `tool-error` 部件未被追加进 delta
+   * （被 `step.toolResults` 过滤，见 `runtime.ts` 的 `stepToolResults`）。
    *
-   * **只查 `delta`，不查 snapshot。** 已经落库的历史里可能就带着这种孤儿（本次事故那条还在
-   * 库里），拿它去挡提交等于把整条会话彻底锁死，比现在更糟。读出侧的自愈在 `runtime.ts` 的
-   * `contextMessages` 里 —— 写入侧只负责「不再产生新的」，与 `hydrateAttachment` 同一分工。
+   * 只检查 `delta`，不检查 snapshot。已写入库的历史中可能本就带有这类孤儿（本次事故的那条仍在
+   * 库中），用它拦截提交等于彻底锁死整个会话，后果更严重。读出侧的自愈在 `runtime.ts` 的
+   * `contextMessages` 中 —— 写入侧只负责不再产生新的，与 `hydrateAttachment` 分工一致。
    */
   private assertPairedToolCalls(key: string, delta: NewContextMessage[]): void {
     const results = new Set<string>();
@@ -855,11 +856,11 @@ export class ContextEngine {
   }
 
   /**
-   * `deferrable`：这一轮落在活跃期内吗（`openTurn` 按距上一轮提交的间隔算好后快照进 `turn.deferPrune`）。
-   * 活跃期内把**触发阈值**抬到 `context.active.*`，但**裁剪目标**恒为 `context.limit.*` ——
-   * 裁到天花板等于此后每一轮都要在天花板上再裁一次，每次都作废整段前缀缓存，正是这个特性
-   * 要消灭的东西（docs/02 §5.1.1 与红线 19）。推迟的方向永远是多留，所以 turn 边界、tool 配对、
-   * `minKeepTurns` 这些形状不变式不可能因为它被破坏。
+   * `deferrable`：本轮是否处于活跃期（由 `openTurn` 按距上一轮提交的间隔计算后快照进
+   * `turn.deferPrune`）。活跃期内将触发阈值提升至 `context.active.*`，但裁剪目标恒为
+   * `context.limit.*` —— 裁剪到上限意味着此后每一轮都需在上限上再裁一次，每次都作废整段前缀缓存，
+   * 正是该特性要消除的问题（docs/02 §5.1.1 与红线 19）。推迟的方向始终是多保留，因此 turn 边界、
+   * tool 配对、`minKeepTurns` 等形状不变式不会因它被破坏。
    */
   private prune(
     repo: ContextRepository,
@@ -872,9 +873,9 @@ export class ContextEngine {
   } | null {
     const active = config.context.active;
     if (deferrable && active.windowMs > 0) {
-      // 早退在 `repo.messages()` 之前：活跃期内绝大多数轮次都走这条路，没必要为了一个不会用到的
-      // 判断把整个窗口物化一遍。天花板取 max(active, limit)：把 active 配得比 limit 还小是无意义
-      // 配置，但不该因此变成「比不开活跃期裁得还狠」。
+      // 提前返回置于 `repo.messages()` 之前：活跃期内绝大多数轮次走这条路径，无需为一个不会使用的
+      // 判定物化整个窗口。上限取 max(active, limit)：将 active 配置得比 limit 更小属于无意义配置，
+      // 但不应因此导致裁剪比不启用活跃期时更激进。
       const stats = repo.effectiveStats(commit.windowStart, commit.headOrdinal);
       if (
         stats.tokens <= Math.max(active.tokens, config.context.limit.tokens) &&

@@ -10,9 +10,9 @@ import { APPROVAL_COLUMNS, type ApprovalPage, type ApprovalRow } from "./types";
 /**
  * 审批卡。
  *
- * 服务端此前硬 `LIMIT 200`，撞上限是**静默截断**；现在走 `?page=&size=`。翻页只影响这张表
- * —— 左侧导航那个角标读的是信封里的 `pending`（**服务端全表**计数），由父层单独拉，
- * 翻到第 2 页角标不变（`AC-WEB-049`）。
+ * 服务端此前固定 `LIMIT 200`，触及上限即静默截断；现在改走 `?page=&size=`。翻页只影响这张表，
+ * 左侧导航的角标读取的是信封中的 `pending`（服务端全表计数），由父层单独拉取，
+ * 翻到第 2 页时角标不变（`AC-WEB-049`）。
  *
  * 普通 `<script setup>`，不 `return` 任何东西（docs/24 · R-UI-01）。
  */
@@ -21,7 +21,7 @@ const props = defineProps<{
   approvalRulesEmpty: boolean;
   conditionalToolNames: string;
 }>();
-/** 裁决之后角标要立刻跟上，不能等下一个 SSE 事件 —— 父层收到这一条就重拉一次全表 pending。 */
+/** 裁决之后角标需立即更新，不能等待下一个 SSE 事件：父层收到该事件即重新拉取一次全表 pending。 */
 const emit = defineEmits<{ changed: [] }>();
 
 const PAGE_SIZE = 20;
@@ -31,8 +31,8 @@ const page = ref(1);
 const loading = ref(false);
 const pages = computed(() => Math.max(1, Math.ceil(total.value / PAGE_SIZE)));
 
-/** 归一化而不是直接塞：形状对不上的响应不该让整页崩在 DataGrid 的 `rows` 上（docs/24 · R-UI-01）。
- *  同 `loadConversations`：重拉**不复位页码**，否则事件一到就把人弹回第 1 页。 */
+/** 归一化而不是直接赋值：形状不匹配的响应不应使整页在 DataGrid 的 `rows` 上崩溃（docs/24 · R-UI-01）。
+ *  与 `loadConversations` 一致：重新拉取不复位页码，否则事件到达即把用户弹回第 1 页。 */
 async function reload(target = page.value): Promise<void> {
   loading.value = true;
   try {
@@ -70,7 +70,7 @@ async function decideApproval(
           }
         : {
             severity: "warn",
-            summary: "审批已经失效",
+            summary: "审批已失效",
             detail: "可能已被处理、过期或所属轮次已取消",
           },
     );
@@ -98,28 +98,25 @@ watch(
   <article class="surface">
     <h3>审批</h3>
     <p class="section-note">
-      命中审批规则的工具会暂停到
-      <code>approval.ttlMs</code
-      >；批准后原调用继续，拒绝、过期或取消后不会执行。
+      命中审批规则的工具暂停至
+      <code>approval.ttlMs</code>；批准后继续，拒绝、过期或取消则不执行。
     </p>
     <p v-if="approvalRulesEmpty" class="callout warn">
       <i class="pi pi-exclamation-triangle" aria-hidden="true" /><b
         >0 条规则时 <code>conditional</code> 等于 <code>never</code>。</b
-      ><code>approval.enabled</code> 是开的，但
-      <code>approval.rules</code> 是空的 ——
-      规则表为空时判定恒为「不需要审批」，于是
+      ><code>approval.enabled</code> 已启用， <code>approval.rules</code> 为空，
       <span v-if="conditionalToolNames"
         ><code>{{ conditionalToolNames }}</code></span
-      ><span v-else>标着「条件审批」的工具</span>
+      ><span v-else>标记为「条件审批」的工具</span>
       全部直接执行。规则在「全部配置」的
-      <code>approval.rules</code> 里加，上面的试跑可以先验一遍。
+      <code>approval.rules</code> 中添加。
     </p>
     <DataGrid
       :rows="rows"
       :columns="APPROVAL_COLUMNS"
       data-key="id"
       :loading="loading"
-      empty="没有审批记录"
+      empty="暂无"
     >
       <template #tool_name="{ data }"
         ><code>{{ data.tool_name }}</code

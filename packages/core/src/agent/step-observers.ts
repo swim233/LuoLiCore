@@ -8,21 +8,21 @@ import type { LogSink } from "../log/sink.js";
 import type { ContextEngine } from "../context/engine.js";
 
 /**
- * 一步模型调用结束时要做的四件事，拆成四个可单独喂假 step 的观察者。
+ * 一步模型调用结束时要做的四件事，拆成四个可单独注入伪造 step 的观察者。
  *
- * `onStepEnd` 此前是一段三十行的回调，同时管记账、配额提交、SSE 广播、上下文 delta 追加和
- * token 校准 —— 而「链内 fallback 时按谁计价」（docs/20 · W-LEDGER-01）与「校准的两端必须是
- * 同一个东西」这两个历史 bug 都在里面，两者都没有单测，因为要测它就得先造一个完整的
+ * `onStepEnd` 此前是一段三十行的回调，同时负责记账、配额提交、SSE 广播、上下文 delta 追加与
+ * token 校准，而链内 fallback 时按谁计价（docs/20 · W-LEDGER-01）与校准两端必须是
+ * 同一对象这两个历史缺陷都出在其中，两者都没有单测，因为测试它需要先构造一个完整的
  * `ToolLoopAgent`（docs/27 · D-05）。
  *
- * 所以入口是 `StepFacts` 而不是 AI SDK 的 step 类型：那个类型没人能手搓，而这四件事真正需要的
- * 只有下面这十来个字段。把 SDK 的 step 映射成 `StepFacts` 留在 `runtime.ts`（它是适配层）。
+ * 因此入口是 `StepFacts` 而非 AI SDK 的 step 类型：那个类型无法手工构造，而这四件事真正需要的
+ * 只有下面十余个字段。把 SDK 的 step 映射成 `StepFacts` 留在 `runtime.ts`（它是适配层）。
  */
 export interface StepFacts {
   stepNumber: number;
-  /** 这一步**实际出力**的模型 id。链内 fallback 换的是模型不是别名，所以它不一定是链首。 */
+  /** 这一步实际产出的模型 id。链内 fallback 更换的是模型而非别名，因此它不一定是链首。 */
   servedModelId: string;
-  /** `inputTokens` 是 AI SDK 的 `inputTokens.total` —— **超集**，含 cacheRead。计价走 `noCacheTokens`。 */
+  /** `inputTokens` 是 AI SDK 的 `inputTokens.total`，为超集，含 cacheRead。计价走 `noCacheTokens`。 */
   usage: {
     inputTokens: number;
     outputTokens: number;
@@ -40,11 +40,11 @@ export interface StepFacts {
     part: unknown;
     preview: string;
   }>;
-  /** **真正发出去的那份请求体。** 校准的两端必须是同一个东西，见 `calibrate`。 */
+  /** 实际发出的那份请求体。校准两端必须是同一对象，见 `calibrate`。 */
   requestBody: unknown;
 }
 
-/** 记账需要的那几列。`ModelRow` 结构上就是它，所以不用把那个内部类型导出来。 */
+/** 记账所需的那几列。`ModelRow` 结构上与之等价，因此无需导出那个内部类型。 */
 export interface PricedModel {
   providerId: string;
   modelId: string;
@@ -54,7 +54,7 @@ export interface PricedModel {
   priceCacheWrite: number | null;
 }
 
-/** `record()` 算出来、后面两个观察者都要读的那三件事。 */
+/** `record()` 计算出的、后面两个观察者都要读取的三项数据。 */
 export interface StepResolution {
   info: PricedModel;
   alias: string;
@@ -72,14 +72,14 @@ export interface StepObserverDependencies {
   quota?: QuotaGuard | undefined;
   reservation?: QuotaReservation | null;
   tokenRatioAlpha: number;
-  /** 反查不到实际出力的模型时的兜底（链首那一个）。 */
+  /** 反查不到实际产出模型时的兜底（取链首）。 */
   fallbackInfo: PricedModel;
-  /** 这一步**请求**的别名：`prepareStep` 里按降档算出来的那个，不是链首的。 */
+  /** 这一步请求使用的别名：`prepareStep` 中按降档计算得出，而非链首的别名。 */
   aliasForStep(stepNumber: number): string;
 }
 
 export interface StepObservers {
-  /** 记账 + 把花费提交进本轮预留。返回后面三个要读的解析结果。 */
+  /** 记账并把花费提交进本轮预留。返回后面三个观察者需读取的解析结果。 */
   record(facts: StepFacts): StepResolution;
   /** SSE：用量一条、有工具调用时进度一条。 */
   broadcast(facts: StepFacts, resolved: StepResolution): void;
@@ -98,8 +98,8 @@ export function createStepObservers(
       const info =
         dependencies.registry.infoByModelId(facts.servedModelId) ??
         dependencies.fallbackInfo;
-      // 按别名分组的用量报表要的是**别名**，而链内 fallback 换的是模型：按「是不是链首」判会把
-      // 第二个候选记成 low，而它可能根本不是降档（docs/20 · W-LEDGER-01）。
+      // 按别名分组的用量报表需要的是别名，而链内 fallback 更换的是模型：按是否为链首判定会把
+      // 第二个候选记成 low，而它可能并非降档（docs/20 · W-LEDGER-01）。
       const alias =
         dependencies.registry.aliasOf(
           facts.servedModelId,
@@ -177,11 +177,11 @@ export function createStepObservers(
       }
     },
     /**
-     * 校准的两端必须是同一个东西。此前左边是「窗口内消息的估算」、右边是 `usage.inputTokens`
-     * ——后者还含着系统提示词与全部工具 schema（本机实测约 12,000 token 里有 9,500 是这两样）。
-     * 首轮空上下文时左边只有几十，一次采样就把 ratio 推到 26，此后每条消息按 26 倍存进库
-     * （logs/2026-08-16 的 ctx.token_calibration 记录了这条曲线）。改成拿真正发出去的整个
-     * 请求体来估：同一把尺子量同一段内容，得到的才是分词器差异本身。
+     * 校准两端必须是同一对象。此前左侧是窗口内消息的估算、右侧是 `usage.inputTokens`，
+     * 而后者还包含系统提示词与全部工具 schema（本机实测约 12,000 token 中有 9,500 属于这两项）。
+     * 首轮上下文为空时左侧只有几十，一次采样就把 ratio 推到 26，此后每条消息按 26 倍存入数据库
+     * （logs/2026-08-16 的 ctx.token_calibration 记录了这条曲线）。改为按实际发出的整个
+     * 请求体估算：用同一度量衡量同一段内容，得到的才是分词器差异本身。
      */
     calibrate(facts) {
       const estimatedInput =

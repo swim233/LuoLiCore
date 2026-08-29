@@ -20,19 +20,19 @@ export interface AuthoringToolDependencies {
   skills: SkillLoader;
   plugins: PluginManager;
   mcp: McpPersistPorts;
-  /** 随包发的说明书 skill，模型不许覆写 —— 它们是它自己下一次要读的那份文档。 */
+  /** 随包分发的说明文档 skill，模型不得覆写：它们是模型下一次要读的文档。 */
   reservedSkills: readonly string[];
 }
 
 /**
- * `install_skill` 的 source 能指到哪儿。**只有两处**：本轮 workspace，以及本会话在附件库里的
- * 那个子目录 —— 用户在聊天里丢的 zip 就落在后者（`packages/telegram/src/media.ts`）。
+ * `install_skill` 的 source 允许指向的位置只有两处：本轮 workspace，以及本会话在附件库中的
+ * 子目录，用户在聊天里发送的 zip 落在后者（`packages/telegram/src/media.ts`）。
  *
- * `media.dir` 底下是**按 chatId 分目录存着所有会话的附件**，所以这里必须限定到本会话那一层：
- * 不限定就等于凭一个 `install_skill` 把任意别的会话的文件读进来。
+ * `media.dir` 之下按 chatId 分目录存放所有会话的附件，因此这里必须限定到本会话那一层：
+ * 不限定即意味着一次 `install_skill` 就能读取任意其他会话的文件。
  *
- * 判据走 `realpath` 而不是 `resolve`：`resolve` 认不出中途的软链接，而 workspace 是模型自己
- * 能往里写东西的目录 —— 它完全可以先 `ln -s / w` 再 `install_skill('w/etc/...')`。
+ * 判据用 `realpath` 而非 `resolve`：`resolve` 识别不出路径中途的软链接，而 workspace 是模型
+ * 可写的目录，它完全可以先 `ln -s / w` 再 `install_skill('w/etc/...')`。
  */
 function resolveAuthoringSource(
   input: string,
@@ -57,11 +57,11 @@ const settings = (
 ): Config["tools"]["selfExtend"] =>
   (context.turn.config as Readonly<Config>).tools.selfExtend;
 /**
- * 七个工具共用的准入判据。**`role === 'owner'` 这道地板必须在 `available()` 里**，光靠
- * `TOOL_POLICY` 里那个 `minRole: 'owner'` 拦不住 —— 运维可以 `PATCH /api/tools/write_plugin`
- * 把 minRole 放宽到 `trusted`（带二次确认），而 `effectivePolicy()` 认那条覆盖。
- * 一次放宽就等于让任意受信会话里的成员往本进程里写全信任代码（docs/14 A27）。
- * 形状照 `spawn_harness`：它的 owner + 私聊判定同样写在 `available()` 里（docs/09 §3.7 第一条不变量）。
+ * 七个工具共用的准入判据。`role === 'owner'` 这道下限必须写在 `available()` 中，仅靠
+ * `TOOL_POLICY` 里的 `minRole: 'owner'` 拦不住：运维可以 `PATCH /api/tools/write_plugin`
+ * 把 minRole 放宽到 `trusted`（带二次确认），而 `effectivePolicy()` 承认该覆盖。
+ * 一次放宽即等于允许任意受信会话的成员向本进程写入全信任代码（docs/14 A27）。
+ * 形式参照 `spawn_harness`：它的 owner 与私聊判定同样写在 `available()` 中（docs/09 §3.7 第一条不变量）。
  */
 const gate = (
   role: Role,
@@ -75,14 +75,14 @@ const execMax = (context: ToolExecutionContext): number =>
 /**
  * 自我扩展的七个工具（docs/07 §6）。
  *
- * **一律无条件注册，开关放在 `available()` 里。** 按配置跳过注册会撞上 `main.ts` 的
- * 「每个 `TOOL_POLICY` 条目都必须已注册」那条启动断言 —— 表现是关掉这个功能之后进程起不来。
+ * 一律无条件注册，开关放在 `available()` 中。按配置跳过注册会触发 `main.ts` 中
+ * 每个 `TOOL_POLICY` 条目都必须已注册那条启动断言，表现为关闭该功能后进程无法启动。
  *
  * `inputSchema` 里没有 `chatId` / `userId`（docs/05 §8）：落点一律取自 `context.turn`。
  *
- * 共同的纪律：**模型能创建，但不能让自己创建的东西生效**。自定义工具与 plugin 落库即禁用，
- * MCP server 落地即 `enabled: false`，全都要 owner 在 WebUI 看过正文 / argv 再点启用。
- * 唯一的例外是运维显式打开 `tools.selfExtend.customTools.autoEnable`。
+ * 共同约束：模型可以创建，但不能让自己创建的东西生效。自定义工具与 plugin 落库即禁用，
+ * MCP server 落地即 `enabled: false`，均需 owner 在 WebUI 查看正文或 argv 后手动启用。
+ * 唯一例外是运维显式打开 `tools.selfExtend.customTools.autoEnable`。
  */
 export function registerAuthoringTools(
   registry: ToolRegistry,
@@ -94,8 +94,8 @@ export function registerAuthoringTools(
   registry.register({
     name: "define_tool",
     description:
-      "把一段常用做法固化成你自己的工具：给它名字、描述、参数 JSON Schema 和一段 bash/python 正文，之后就能像内建工具那样按参数调用。" +
-      '正文通过 $1（参数 JSON 文件路径）和 $LUOLI_ARG_<参数名大写>（顶层标量参数）拿到入参 —— 参数永远不会被拼进命令行。写之前先 load_skill("writing-tools")。',
+      "将一段常用做法封装为自定义工具：提供名字、描述、参数 JSON Schema 和一段 bash/python 正文，之后即可像内建工具那样按参数调用。" +
+      '正文通过 $1（参数 JSON 文件路径）和 $LUOLI_ARG_<参数名大写>（顶层标量参数）获取入参 —— 参数永远不会被拼进命令行。编写前先调用 load_skill("writing-tools")。',
     inputSchema: z.object({
       name: z
         .string()
@@ -106,13 +106,13 @@ export function registerAuthoringTools(
         .string()
         .min(1)
         .max(200)
-        .describe("下一轮你只能靠这句话决定要不要调它"),
-      runtime: z.enum(["bash", "python"]).describe("正文用哪个解释器跑"),
+        .describe("下一轮你只能据此判断是否调用它"),
+      runtime: z.enum(["bash", "python"]).describe("正文使用哪个解释器执行"),
       body: z
         .string()
         .min(1)
         .describe(
-          "脚本正文。参数从 $1 指向的 JSON 文件或 $LUOLI_ARG_* 环境变量读",
+          "脚本正文。参数从 $1 指向的 JSON 文件或 $LUOLI_ARG_* 环境变量读取",
         ),
       params: z
         .record(z.unknown())
@@ -123,7 +123,7 @@ export function registerAuthoringTools(
       minRole: z
         .enum(["trusted", "owner"])
         .optional()
-        .describe("谁能调它，默认取配置里的默认值"),
+        .describe("谁能调用它，默认取配置中的默认值"),
       timeoutMs: z
         .number()
         .int()
@@ -131,7 +131,7 @@ export function registerAuthoringTools(
         .optional()
         .describe("单次执行的墙钟上限"),
     }),
-    // 上限随配置走，让模型看到的 schema 就是真实上限。
+    // 上限随配置走，让模型看到的 schema 即真实上限。
     inputSchemaFor: (context) =>
       z.object({
         name: z.string().min(2).max(41),
@@ -152,7 +152,7 @@ export function registerAuthoringTools(
   registry.register({
     name: "delete_tool",
     description:
-      "删掉一个自己定义的工具（只能删 custom_ 开头的那些）。撞上数量上限时先用这个腾位置。",
+      "删除一个自己定义的工具（只能删除 custom_ 开头的工具）。达到数量上限时先用它腾出位置。",
     inputSchema: z.object({ name: z.string().min(1) }),
     policy: builtinPolicy("delete_tool"),
     sourcePriority: 90,
@@ -164,7 +164,7 @@ export function registerAuthoringTools(
   registry.register({
     name: "list_tools",
     description:
-      "列出你自己定义过的工具，带启用状态与作用域。定义完却在工具目录里找不到时用它看是为什么。",
+      "列出你自己定义过的工具，带启用状态与作用域。定义后未出现在工具目录中时使用它查看原因。",
     inputSchema: z.object({}),
     policy: builtinPolicy("list_tools"),
     sourcePriority: 90,
@@ -175,25 +175,25 @@ export function registerAuthoringTools(
   registry.register({
     name: "write_skill",
     description:
-      "写一份 SKILL.md 给自己：把一套做法、清单或格式固化下来，之后靠 load_skill 渐进式取用。" +
-      'allowed-tools 一旦声明就会在载入后收窄本轮可用工具，不声明则不收窄。写之前先 load_skill("writing-skills")。',
+      "写一份 SKILL.md 给自己：将一套做法、清单或格式固化下来，之后通过 load_skill 渐进式取用。" +
+      'allowed-tools 一旦声明就会在载入后收窄本轮可用工具，不声明则不收窄。编写前先调用 load_skill("writing-skills")。',
     inputSchema: z.object({
       name: z.string().min(1).max(64).describe("kebab-case，同时是目录名"),
       description: z
         .string()
         .min(1)
         .max(500)
-        .describe("目录里那一行，决定你以后会不会想起来载入它"),
+        .describe("skill 目录中的那一行，决定你此后是否会想起载入它"),
       body: z.string().min(1).describe("SKILL.md 正文（Markdown）"),
       allowedTools: z
         .array(z.string())
         .optional()
-        .describe("声明了就会收窄；不确定就别给"),
+        .describe("声明后即收窄；不确定则不要提供"),
       requiresTools: z
         .array(z.string())
         .optional()
         .describe(
-          "这份 skill 离了就没法用的工具。声明了就是门控：这些工具本轮不可用时它连目录都不进",
+          "这份 skill 必需的工具。声明后即为门控：这些工具在本轮不可用时它不会进入目录",
         ),
       minRole: z
         .enum(["limited", "trusted", "owner"])
@@ -203,7 +203,7 @@ export function registerAuthoringTools(
         .boolean()
         .optional()
         .describe(
-          "设为 false = 禁用这份 skill（当前没有删除工具，用这个工具代替）",
+          "设为 false = 禁用这份 skill（当前没有删除工具，使用本工具代替）",
         ),
     }),
     policy: builtinPolicy("write_skill"),
@@ -215,11 +215,11 @@ export function registerAuthoringTools(
         return {
           ok: false,
           error: "skill_reserved",
-          hint: `${input.name} 是随包发的说明书，不允许修改 —— 请换个名字。`,
+          hint: `${input.name} 是随包发的说明文档，不允许修改 —— 请更换名字。`,
         };
       }
       const floor = settings(context).skills.minRole;
-      // 只能写得更严，不能更松：一份 min-role 比下限还低的 skill 等于把这段正文推给更多人的上下文。
+      // 只能收紧，不能放宽：min-role 低于下限的 skill 等于把这段正文推送到更多人的上下文中。
       if (input.minRole && roleRank(input.minRole) < roleRank(floor)) {
         return {
           ok: false,
@@ -247,8 +247,8 @@ export function registerAuthoringTools(
           minRole: skill.minRole,
           enabled: skill.enabled,
           hint: skill.enabled
-            ? "下一轮就会出现在 skill 目录里，用 load_skill 取正文。"
-            : "已保存但停用，不会出现在目录里。",
+            ? "下一轮即会出现在 skill 目录中，使用 load_skill 获取正文。"
+            : "已保存但停用，不会出现在目录中。",
         };
       } catch (error) {
         return {
@@ -262,9 +262,9 @@ export function registerAuthoringTools(
   registry.register({
     name: "install_skill",
     description:
-      "把一个 skill 包装进来：带 scripts/、bin/、references/ 的整棵目录，压缩包或已解开的目录都行，场景：安装用户发送的skill包。" +
-      "**装完是停用状态**，要 owner 在 WebUI 看过附带的脚本与二进制再点启用 —— 包里可能带可执行文件，这一点和只写一段正文的 write_skill 不同。" +
-      'source 只能指向你的工作目录或本会话收到的附件。写之前先 load_skill("writing-skills")。',
+      "安装一个 skill 包：带 scripts/、bin/、references/ 的整棵目录，压缩包或已解开的目录均可，场景：安装用户发送的 skill 包。" +
+      "**安装后处于停用状态**，需 owner 在 WebUI 复核附带的脚本与二进制后点击启用 —— 包内可能含可执行文件，这一点与只写一段正文的 write_skill 不同。" +
+      'source 只能指向你的工作目录或本会话收到的附件。安装前先调用 load_skill("writing-skills")。',
     inputSchema: z.object({
       source: z
         .string()
@@ -278,14 +278,14 @@ export function registerAuthoringTools(
         .max(64)
         .optional()
         .describe(
-          "装成什么名字（kebab-case，同时是目录名）。不给则取包里 SKILL.md 声明的那个",
+          "安装后的名字（kebab-case，同时是目录名）。不提供则取包内 SKILL.md 声明的名字",
         ),
       subdir: z
         .string()
         .min(1)
         .optional()
         .describe(
-          "包里有多份 SKILL.md 时用它指一个；报 skill_ambiguous_root 时会把候选列出来",
+          "包内有多份 SKILL.md 时使用该参数指定其一；报 skill_ambiguous_root 时会列出候选",
         ),
       overwrite: z
         .boolean()
@@ -306,7 +306,7 @@ export function registerAuthoringTools(
         return {
           ok: false,
           error: "skill_source_forbidden",
-          hint: `${input.source} 不在你的工作目录里，也不是本会话收到的附件 —— 这两处之外的路径不给装。`,
+          hint: `${input.source} 不在你的工作目录中，也不是本会话收到的附件 —— 这两处之外的路径不予安装。`,
         };
       }
       try {
@@ -331,9 +331,9 @@ export function registerAuthoringTools(
           files: installed.files,
           bytes: installed.bytes,
           hint:
-            `已装好但**停用**，所以现在还不在你的 skill 目录里。owner 要在 WebUI 的扩展页看过 SKILL.md 与这 ${installed.files.length} 个文件再点启用；` +
-            `启用之后用 load_skill("${installed.name}") 取正文，附属文件走 read_file("skill://${installed.name}/<相对路径>")。` +
-            (installed.backedUp ? "被覆盖的那棵已留档。" : ""),
+            `已安装但**停用**，因此当前尚未出现在你的 skill 目录中。owner 需在 WebUI 的扩展页复核 SKILL.md 与这 ${installed.files.length} 个文件后点击启用；` +
+            `启用之后使用 load_skill("${installed.name}") 获取正文，附属文件通过 read_file("skill://${installed.name}/<相对路径>") 读取。` +
+            (installed.backedUp ? "被覆盖的那份已留档。" : ""),
         };
       } catch (error) {
         if (error instanceof SkillPackageError) {
@@ -356,8 +356,8 @@ export function registerAuthoringTools(
   registry.register({
     name: "write_plugin",
     description:
-      "写一个 plugin（进程内运行的 JS 模块，能注册工具、挂 hook）。**只认 .js，没有转译步骤**。" +
-      '写完之后它是禁用状态，要 owner 在 WebUI 看过源码再启用 —— plugin 在 bot 进程里全信任运行，等于 root。写之前先 load_skill("writing-plugins")。',
+      "写一个 plugin（进程内运行的 JS 模块，能注册工具、挂载 hook）。**只接受 .js，没有转译步骤**。" +
+      '写完之后它处于禁用状态，需 owner 在 WebUI 复核源码后启用 —— plugin 在 bot 进程内以全信任方式运行，具有与 bot 进程相同的权限。编写前先调用 load_skill("writing-plugins")。',
     inputSchema: z.object({
       name: z
         .string()
@@ -395,8 +395,8 @@ export function registerAuthoringTools(
           enabled: false,
           backedUp: written.backup !== null,
           hint:
-            `${written.reset ? "源码变了，已打回未启用。" : "已写入，处于未启用状态。"}${written.backup ? "被覆盖的那份已留档在同目录下。" : ""}` +
-            `owner 要在 WebUI 的扩展页看过源码再点启用；启用后它的工具会以 ${input.name}_<工具名> 出现。`,
+            `${written.reset ? "源码已变更，已打回未启用。" : "已写入，处于未启用状态。"}${written.backup ? "被覆盖的那份已留档在同目录下。" : ""}` +
+            `owner 需在 WebUI 的扩展页复核源码后点击启用；启用后它的工具会以 ${input.name}_<工具名> 出现。`,
         };
       } catch (error) {
         const message =
@@ -405,7 +405,7 @@ export function registerAuthoringTools(
           ok: false,
           error: message,
           ...(message === "invalid_plugin_name"
-            ? { hint: "名字要是 kebab-case（小写字母数字，连字符分隔）。" }
+            ? { hint: "名字必须是 kebab-case（小写字母数字，连字符分隔）。" }
             : {}),
         };
       }
@@ -415,8 +415,8 @@ export function registerAuthoringTools(
   registry.register({
     name: "install_mcp",
     description:
-      "登记一台 MCP server（stdio 起本地进程，或 http 连远端），它的工具会以 mcp__<server>__<工具名> 出现。" +
-      '登记后是禁用状态：owner 要在 WebUI 看过这条命令行 / URL 再启用 —— stdio 的 server 以 bot 进程的身份跑在沙箱之外。写之前先 load_skill("installing-mcp")。',
+      "登记一台 MCP server（stdio 启动本地进程，或 http 连接远端），它的工具会以 mcp__<server>__<工具名> 出现。" +
+      '登记后处于禁用状态：owner 需在 WebUI 复核这条命令行 / URL 后启用 —— stdio 的 server 以 bot 进程的身份运行于沙箱之外。登记前先调用 load_skill("installing-mcp")。',
     inputSchema: z.object({
       name: z
         .string()
@@ -442,7 +442,7 @@ export function registerAuthoringTools(
       toolDeny: z
         .array(z.string())
         .optional()
-        .describe("挡掉这些工具名（glob）"),
+        .describe("拦截这些工具名（glob）"),
       timeoutMs: z.number().int().positive().optional(),
     }),
     policy: builtinPolicy("install_mcp"),
@@ -461,22 +461,26 @@ export function registerAuthoringTools(
         return {
           ok: false,
           error: "command_required",
-          hint: "stdio 必须给 command。",
+          hint: "stdio 必须提供 command。",
         };
       if (input.transport === "http" && !input.url)
-        return { ok: false, error: "url_required", hint: "http 必须给 url。" };
-      // **取活的配置，不取 `turn.config`。** 后者是开轮时冻结的快照，`configStore.replace` 不会
-      // 回写它 —— 同一轮里连装两台的话，第二次读到的 `current` 还是空的，于是整份 `mcp.servers`
-      // 被覆写成只剩第二台，第一台连同它的 revision 一起消失。运维在轮次进行中改 MCP 同理。
+        return {
+          ok: false,
+          error: "url_required",
+          hint: "http 必须提供 url。",
+        };
+      // 取实时配置而非 `turn.config`。后者是开轮时冻结的快照，`configStore.replace` 不会
+      // 回写它：同一轮内连续安装两台时，第二次读到的 `current` 仍为空，于是整份 `mcp.servers`
+      // 被覆写成只剩第二台，第一台连同其 revision 一并消失。运维在轮次进行中修改 MCP 同理。
       const current = dependencies.mcp.config().mcp.servers;
       if (current.some((server) => server.name === input.name))
         return {
           ok: false,
           error: "already_exists",
-          hint: `已经有一台叫 ${input.name} 的了，用 list_mcp 看看。`,
+          hint: `已存在名为 ${input.name} 的 server，使用 list_mcp 查看。`,
         };
-      // **`enabled: false` 是写死的，不接受入参。** 模型登记的是一条会以 bot 进程身份长期运行的
-      // argv / 一个能往系统提示词里塞工具描述的远端 —— 那一步必须有人看过。
+      // `enabled: false` 固定写死，不接受入参。模型登记的是一条会以 bot 进程身份长期运行的
+      // argv，或一个能向系统提示词注入工具描述的远端，该步骤必须经人工确认。
       const server = {
         name: input.name,
         transport: input.transport,
@@ -505,7 +509,7 @@ export function registerAuthoringTools(
         ok: true,
         name: input.name,
         enabled: false,
-        hint: "已登记但未启用。owner 在 WebUI 的扩展页确认之后才会连接，届时它的工具才会出现在你的目录里。",
+        hint: "已登记但未启用。owner 在 WebUI 的扩展页确认之后才会连接，届时它的工具才会出现在你的目录中。",
       };
     },
   });
@@ -513,7 +517,7 @@ export function registerAuthoringTools(
   registry.register({
     name: "list_mcp",
     description:
-      "列出已登记的 MCP server 与它们的连接状态。装之前先看一眼有没有重复的。",
+      "列出已登记的 MCP server 与它们的连接状态。登记前先查看是否存在重复。",
     inputSchema: z.object({}),
     policy: builtinPolicy("list_mcp"),
     sourcePriority: 90,

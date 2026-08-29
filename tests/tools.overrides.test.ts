@@ -57,7 +57,7 @@ describe('工具策略覆盖层', () => {
     expect(registry.admit('thing', contextFor('limited')).ok).toBe(true);
   });
 
-  // 覆盖动的是角色闸，不是 `available()`。`spawn_harness` 靠 available() 硬判 owner + 私聊，
+  // 覆盖动的是角色判定，不是 `available()`。`spawn_harness` 靠 available() 硬判 owner + 私聊，
   // 把 minRole 调到 limited 也开不出来 —— 这是文档里承诺的性质，不能随合并逻辑一起松掉。
   it('minRole 覆盖绕不过 available()', () => {
     const overrides: Record<string, ToolOverride> = { gated: { minRole: 'limited' } };
@@ -79,10 +79,10 @@ describe('工具策略覆盖层', () => {
     expect(approvalCalls).toEqual(['quiet']);
   });
 
-  // 覆盖设的是**基准档**。`approvalFor` 是工具按本轮配置把自己抬进审批的通道
+  // 覆盖设的是**基准档位**。`approvalFor` 是工具按本轮配置把自己提档进审批的通道
   // （`memory.pubWriteRequiresApproval` 就是这么接的），它只能升不能降 —— 否则运维在面板上
   // 点一下 never，就把一条工具自己认定必须要人点头的路径给关了。
-  it('approvalFor 的抬档不会被 never 覆盖降回去', async () => {
+  it('approvalFor 的提档不会被 never 覆盖降回去', async () => {
     approvalCalls.length = 0;
     const registry = registryWith({ escalating: { approval: 'never' } }, countingBroker);
     registry.register({ name: 'escalating', description: '', inputSchema: z.object({}), policy: { ...policy, approval: 'conditional' }, sourcePriority: 1,

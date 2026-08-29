@@ -11,11 +11,11 @@ import { roleRank } from '@luoli/shared';
 import { BUNDLED_SKILLS, SKILL_PACKAGE_MARKER, frontmatterSchema, type SkillDefinition, type SkillLoader } from './loader.js';
 
 /**
- * 装一个多文件 skill 包（docs/07 §2.5）。
+ * 安装一个多文件 skill 包（docs/07 §2.5）。
  *
- * 这是这条通道的**唯一实现**：模型侧的 `install_skill` 与 WebUI 的
- * `POST /api/skills/package` 都打这里。端点自己抄一遍解包逻辑的话，两条路迟早在校验上分叉
- * —— 而这里的每一条校验都是安全判据，分叉出来的那份就是没有校验的那份。
+ * 这是该通道的唯一实现：模型侧的 `install_skill` 与 WebUI 的
+ * `POST /api/skills/package` 都调用此处。端点若自行复制解包逻辑，两条路径迟早在校验上分叉
+ * —— 而此处每一条校验都是安全判据，分叉出的那份即缺失校验的那份。
  */
 
 export interface SkillPackageLimits {
@@ -26,19 +26,19 @@ export interface SkillPackageLimits {
 }
 export interface SkillPackageOptions {
   limits: SkillPackageLimits;
-  /** `tools.selfExtend.skills.minRole`。包里写的 `min-role` 只能被它抬高，抬不低。 */
+  /** `tools.selfExtend.skills.minRole`。包内声明的 `min-role` 只能被其抬高，不能降低。 */
   minRoleFloor: Role;
   name?: string | undefined;
   subdir?: string | undefined;
   overwrite?: boolean | undefined;
-  /** 记进 `.package.json`，纯留痕：这个包是从哪儿来的。 */
+  /** 记入 `.package.json`，仅用于留痕：记录该包的来源。 */
   origin?: string | undefined;
 }
 export interface InstalledSkillPackage {
   name: string;
   files: string[];
   bytes: number;
-  /** 覆盖安装时旧的那棵被留档了。 */
+  /** 覆盖安装时旧目录已备份。 */
   backedUp: boolean;
 }
 
@@ -51,15 +51,15 @@ export class SkillPackageError extends Error {
 const fail = (code: string, hint?: string, candidates?: string[]): never => { throw new SkillPackageError(code, hint, candidates); };
 
 const NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-/** 只有这两个目录下的文件能保留执行位。skill 正文里让人 `bash scripts/x.sh` 是常态，让人跑 `references/x.md` 不是。 */
+/** 仅这两个目录下的文件保留执行位。skill 正文中引导执行 `bash scripts/x.sh` 属常态，执行 `references/x.md` 不是。 */
 const EXECUTABLE_PREFIXES = ['scripts/', 'bin/'];
 const S_IFMT = 0o170000;
 const S_IFLNK = 0o120000;
 
 /**
- * 条目名 → 安全的相对路径。**两道判据都要**：这一道判形状（名字里就带 `..` / 绝对路径），
- * 调用方随后还要判结果（`resolve()` 之后是不是还在暂存目录里）。只留一道的历史教训是
- * `a/../../b` 这类靠规范化才现形的写法，以及不同平台对 `\` 的不同处理。
+ * 条目名 → 安全的相对路径。两道判据缺一不可：本道判形状（名字中直接含 `..` 或绝对路径），
+ * 调用方随后判结果（`resolve()` 之后是否仍在暂存目录内）。仅保留一道的历史教训是
+ * `a/../../b` 这类须经规范化才暴露的写法，以及不同平台对 `\` 的处理差异。
  */
 function safeRelative(entryName: string): string {
   if (entryName.includes('\0')) fail('skill_package_entry_invalid', '条目名里有 NUL。');
@@ -70,7 +70,7 @@ function safeRelative(entryName: string): string {
   return parts.join('/');
 }
 
-/** `resolve()` 之后的包含判断。`path !== root` 那一支是为了让根目录自己不算越界。 */
+/** `resolve()` 之后的包含判断。`path !== root` 分支使根目录自身不被判为越界。 */
 function contained(path: string, root: string): boolean {
   return path === root || path.startsWith(`${root}${sep}`);
 }
@@ -81,23 +81,23 @@ function targetFor(stage: string, relativePath: string): string {
   return target;
 }
 
-/** 解包的产物：每个文件的来源模式，以及这个包到底带没带 Unix 模式位。 */
+/** 解包结果：每个文件的来源模式，以及该包是否携带 Unix 模式位。 */
 interface Extracted {
   modes: Map<string, number>;
-  /** zip 由 Windows 打的时候外部属性高 16 位恒为 0 —— 那不是「都不可执行」，是「没这个信息」。 */
+  /** Windows 打包的 zip 其外部属性高 16 位恒为 0 —— 表示该信息缺失，而非全部不可执行。 */
   hasUnixModes: boolean;
 }
 
 /**
- * 执行位在**落位之后**才决定，不在解包时。`scripts/` 与 `bin/` 是相对**包根**说的，而解包时
- * 还不知道包根在哪 —— 包常被套一层顶层目录（那个音乐包就是 `music-download-cli-linux/scripts/`），
- * 按暂存目录的相对路径判的话前缀永远对不上，于是整包一个可执行文件都没有、`invoke.sh` 跑不起来。
+ * 执行位在落位之后才决定，而非解包时。`scripts/` 与 `bin/` 是相对包根而言的，解包时
+ * 尚不知道包根位置 —— 包常被套一层顶层目录（如 `music-download-cli-linux/scripts/`），
+ * 按暂存目录的相对路径判定则前缀始终不匹配，结果是整包无可执行文件、`invoke.sh` 无法运行。
  *
- * **包不带 Unix 模式时按目录约定给。** 那个音乐包就是这样：`create_system=0`（Windows 打的），
- * 每个条目的模式位都读成 0。此时照「原本带执行位的才给」办，装完是一个跑不起来的包 ——
- * 而这正是这条通道存在的理由。分发给终端用户的 zip 多半是 Windows 或不保留权限位的工具打的，
- * 所以这是常态而不是例外。硬规则不变：**`scripts/` 与 `bin/` 之外一律不给执行位**，
- * 位置是约定，属性只是这个约定之上的额外收窄。
+ * 包不携带 Unix 模式时按目录约定授予。前述音乐包即属此类：`create_system=0`（Windows 打包），
+ * 每个条目的模式位均读为 0。此时若坚持仅对原本带执行位的文件授予，安装结果是不可运行的包 ——
+ * 而这正是该通道存在的意义。分发给终端用户的 zip 多数由 Windows 或不保留权限位的工具打包，
+ * 属常态而非例外。硬规则不变：`scripts/` 与 `bin/` 之外一律不授予执行位，
+ * 位置是约定，属性只是在该约定之上的额外收窄。
  */
 function applyExecutableBits(stage: string, root: string, extracted: Extracted, limits: SkillPackageLimits): void {
   if (!limits.allowExecutable) return;
@@ -117,26 +117,26 @@ function claimEntry(budget: Budget, limits: SkillPackageLimits): void {
   if (budget.entries > limits.maxEntries) fail('skill_package_too_many_entries', `包里的条目数超过 ${limits.maxEntries}。`);
 }
 
-/** 导出只为了给「error 闸早于第一个 await」那条不变量一个确定性的用例，见 `tests/skill.package.test.ts`。 */
+/** 导出仅为使「error 监听早于第一个 await」这条不变量有确定性用例，见 `tests/skill.package.test.ts`。 */
 export async function writePackageEntry(stream: Readable, target: string, relativePath: string, budget: Budget, limits: SkillPackageLimits): Promise<void> {
-  // **早于这个函数里的第一个 await**：超限那一刻我们从循环里抛出去，异步迭代器随即摘掉自己的监听，
-  // 而 yauzl 的 `validateEntrySizes` 还会在这条流上继续吐 error（压缩炸弹谎报大小时必然吐，而且
-  // 不止一次）。那时没人在听，**流上未处理的 error 在 Node 里直接抛** —— 一个畸形包足以把进程带崩。
-  // 挂在 finally 里太晚；挂在下面那句 `await open()` **之后同样太晚** —— 流在拿到手时已经在流动了
-  // （`openReadStream` 内部就 pipe 上了 inflate），而 `open` 是真的文件系统调用：并行跑全量测试时
-  // 这个窗口能拉到 20ms 量级，那个谎报大小的包正好在里面吐 error，进程当场崩在没人监听的流上。
+  // 必须早于本函数的第一个 await：超限时从循环抛出，异步迭代器随即移除自身监听，
+  // 而 yauzl 的 `validateEntrySizes` 仍会在该流上继续发出 error（压缩炸弹谎报大小时必然发出，
+  // 且不止一次）。此时无监听者，而流上未处理的 error 在 Node 中直接抛出 —— 一个畸形包足以使进程崩溃。
+  // 挂在 finally 中过晚；挂在下方 `await open()` 之后同样过晚 —— 流在返回时已开始流动
+  // （`openReadStream` 内部已 pipe 到 inflate），而 `open` 是真实文件系统调用：并行跑全量测试时
+  // 该窗口可达 20ms 量级，谎报大小的包恰在其中发出 error，进程随即崩溃于无监听的流上。
   stream.on('error', () => {});
-  // 一律先写成 0600，执行位等落位前由 `applyExecutableBits` 按包根重判 —— 解包这一刻还不知道
-  // 包根在哪。中间态是「谁都跑不了」而不是「先给上再收回」。
+  // 一律先写为 0600，执行位在落位前由 `applyExecutableBits` 按包根重新判定 —— 解包时尚不知道
+  // 包根位置。中间态取全部不可执行，而非先授予再回收。
   const handle = await open(target, 'w', 0o600);
   let written = 0;
   try {
     for await (const chunk of stream) {
       const buffer = chunk as Buffer;
       written += buffer.length;
-      // **按实际写出的字节数判，不看 zip 头里的 `uncompressedSize`** —— 那个字段是打包方填的，
-      // 一个声明 1 字节、实际解出 100 MB 的条目正是压缩炸弹的标准形态。判在写之前，
-      // 所以超限的那一刻磁盘上最多多出这一个 chunk。
+      // 按实际写出的字节数判定，不采用 zip 头中的 `uncompressedSize` —— 该字段由打包方填写，
+      // 声明 1 字节而实际解出 100 MB 的条目正是压缩炸弹的标准形态。判定在写入之前，
+      // 因此超限时磁盘上至多多出当前这一个 chunk。
       if (written > limits.maxFileBytes) fail('skill_package_file_too_large', `${relativePath} 超过单文件上限 ${limits.maxFileBytes} 字节。`);
       if (budget.bytes + written > limits.maxTotalBytes) fail('skill_package_too_large', `解开之后超过总上限 ${limits.maxTotalBytes} 字节。`);
       await handle.write(buffer);
@@ -158,8 +158,8 @@ function readEntries(zip: yauzl.ZipFile, limits: SkillPackageLimits): Promise<ya
   return new Promise((resolvePromise, reject) => {
     const entries: yauzl.Entry[] = [];
     zip.on('entry', (entry: yauzl.Entry) => {
-      // 条目数在**读目录时**就挡住，不等到落盘：一个一千万条目的 zip 光是把 Entry 攒进数组
-      // 就够把进程撑爆，而那时候一个字节都还没写。
+      // 条目数在读取目录时即拦截，不等到落盘：一千万条目的 zip 仅将 Entry 累积进数组
+      // 即可耗尽内存，而此时尚未写入任何字节。
       if (entries.length >= limits.maxEntries) { reject(new SkillPackageError('skill_package_too_many_entries', `包里的条目数超过 ${limits.maxEntries}。`)); return; }
       entries.push(entry);
       zip.readEntry();
@@ -171,9 +171,9 @@ function readEntries(zip: yauzl.ZipFile, limits: SkillPackageLimits): Promise<ya
 }
 
 /**
- * yauzl 自己也拒 `..` 与反斜杠（它在 `readEntry` 里就 emit 出来）。**那是第二道，不是唯一一道**
- * —— `safeRelative` 与落位后的包含判断仍然各自独立成立。这里只把它的话翻译成同一套错误码，
- * 免得调用方要同时认两套词汇；认不出来的错误照原样带出去，不吞。
+ * yauzl 自身也拒绝 `..` 与反斜杠（在 `readEntry` 中即发出）。那是第二道校验而非唯一一道
+ * —— `safeRelative` 与落位后的包含判断仍各自独立成立。此处只是把它的错误翻译成同一套错误码，
+ * 避免调用方需同时识别两套词汇；无法识别的错误原样抛出，不吞掉。
  */
 function translateZipError(error: unknown): never {
   if (error instanceof SkillPackageError) throw error;
@@ -194,12 +194,12 @@ async function extractZip(source: string, stage: string, limits: SkillPackageLim
       if (!relativePath) continue;
       claimEntry(budget, limits);
       const target = targetFor(stage, relativePath);
-      // 高 16 位是 Unix 模式。Windows 打的包这里恒为 0 —— 那是「没这个信息」而不是
-      // 「不可执行」，`applyExecutableBits` 据 `hasUnixModes` 分这两种情况。
+      // 高 16 位是 Unix 模式。Windows 打包时该位恒为 0 —— 表示信息缺失而非不可执行，
+      // `applyExecutableBits` 依 `hasUnixModes` 区分这两种情形。
       const sourceMode = entry.externalFileAttributes >>> 16;
       if (sourceMode !== 0) hasUnixModes = true;
       if ((sourceMode & S_IFMT) === S_IFLNK) {
-        fail('skill_package_symlink', `包里有符号链接：${relativePath}。它能让 skill:// 读到目录之外的东西。`);
+        fail('skill_package_symlink', `包里有符号链接：${relativePath}。它会使 skill:// 读取到目录之外的内容。`);
       }
       if (entry.fileName.endsWith('/')) { mkdirSync(target, { recursive: true, mode: 0o700 }); continue; }
       mkdirSync(resolve(target, '..'), { recursive: true, mode: 0o700 });
@@ -223,8 +223,8 @@ async function extractDirectory(source: string, stage: string, limits: SkillPack
       const relativePath = safeRelative(relative(root, absolute));
       claimEntry(budget, limits);
       const target = targetFor(stage, relativePath);
-      // `readdirSync` 的 Dirent 已经是 lstat 语义，软链既不是 file 也不是 directory ——
-      // 但显式判一次，好让错误码和 zip 那条路一致（「包里有软链」而不是「跳过了一个不认识的条目」）。
+      // `readdirSync` 的 Dirent 已是 lstat 语义，符号链接既非 file 也非 directory ——
+      // 但仍显式判定一次，使错误码与 zip 路径一致（报包内含符号链接，而非跳过未知条目）。
       if (entry.isSymbolicLink()) fail('skill_package_symlink', `包里有符号链接：${relativePath}。`);
       if (entry.isDirectory()) { mkdirSync(target, { recursive: true, mode: 0o700 }); await walk(absolute); continue; }
       if (!entry.isFile()) fail('skill_package_entry_invalid', `包里有既不是文件也不是目录的条目：${relativePath}`);
@@ -234,14 +234,14 @@ async function extractDirectory(source: string, stage: string, limits: SkillPack
     }
   };
   await walk(root);
-  // 从目录装时 `lstat` 的模式永远是真的，不存在「没这个信息」那一档。
+  // 从目录安装时 `lstat` 的模式始终有效，不存在信息缺失的情形。
   return { modes, hasUnixModes: true };
 }
 
 /**
- * 找包根。`SKILL.md` 常被套一层顶层目录，而一个包里可以有好几份 —— 那个音乐包就同时带
- * `music-download-cli/`（Windows）与 `music-download-cli-linux/` 两套。歧义时**必须把候选列出来**，
- * 否则调用方只能靠猜去填 `subdir`。
+ * 定位包根。`SKILL.md` 常被套一层顶层目录，且一个包内可能存在多份 —— 前述音乐包同时含
+ * `music-download-cli/`（Windows）与 `music-download-cli-linux/` 两套。存在歧义时必须列出候选，
+ * 否则调用方只能猜测 `subdir` 的取值。
  */
 function findRoot(stage: string, subdir: string | undefined): string {
   if (subdir) {
@@ -255,16 +255,16 @@ function findRoot(stage: string, subdir: string | undefined): string {
     .map((entry) => entry.name);
   if (candidates.length === 1) return join(stage, candidates[0]!);
   if (candidates.length === 0) fail('skill_md_not_found', '包的根目录与第一层子目录里都没有 SKILL.md。');
-  return fail('skill_ambiguous_root', `这个包里有 ${candidates.length} 份 SKILL.md，用 subdir 指一个：${candidates.join(' / ')}`, candidates);
+  return fail('skill_ambiguous_root', `这个包里有 ${candidates.length} 份 SKILL.md，请使用 subdir 指定其一：${candidates.join(' / ')}`, candidates);
 }
 
 /**
- * 落位前重写 frontmatter。三个字段**不接受包里写的值**：
+ * 落位前重写 frontmatter。以下三个字段不采用包内声明的值：
  *
- * - `name` —— `scan()` 要求 `name === 目录名`，包里那个未必对得上（尤其是重命名安装时）；
- * - `enabled` —— 一个带 `scripts/` 与 `bin/` 的包不适用「skill 是纯文本」那条豁免（docs/07 §6.1）；
- * - `min-role` —— 只能被 `minRoleFloor` 抬高。**没写的一律取下限**，而不是落到
- *   `skills.defaultMinRole`：那个值可以比下限低，于是「不写」就成了绕过下限的办法。
+ * - `name` —— `scan()` 要求 `name === 目录名`，包内的值未必匹配（尤其是重命名安装时）；
+ * - `enabled` —— 含 `scripts/` 与 `bin/` 的包不适用 skill 为纯文本这一豁免（docs/07 §6.1）；
+ * - `min-role` —— 只能被 `minRoleFloor` 抬高。未声明时一律取下限，而非取
+ *   `skills.defaultMinRole`：后者可能低于下限，使省略声明成为绕过下限的手段。
  */
 function rewriteFrontmatter(root: string, name: string, minRoleFloor: Role): void {
   const path = join(root, 'SKILL.md');
@@ -277,8 +277,8 @@ function rewriteFrontmatter(root: string, name: string, minRoleFloor: Role): voi
   data.enabled = false;
   data['min-role'] = minRole;
   const check = frontmatterSchema.safeParse(data);
-  // 提前判一次，好让错误说得出「包里的 frontmatter 哪里不对」。落位之后那道复核仍然留着 ——
-  // 它挡的是别的东西（写盘本身出了岔子），两道判的不是同一件事。
+  // 提前判定一次，使错误能指明包内 frontmatter 的具体问题。落位之后的复核仍保留 ——
+  // 它拦截的是另一类问题（写盘过程出错），两道判定的对象不同。
   if (!check.success) fail('skill_package_invalid_frontmatter', check.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; '));
   writeFileSync(path, matter.stringify(`${parsed.content.trim()}\n`, data), { encoding: 'utf8', mode: 0o600 });
 }
@@ -290,15 +290,15 @@ function backupDir(skillsDir: string): string {
 }
 
 /**
- * @param source 已由调用方鉴权过的绝对路径（docs/07 §6.5 限定了模型侧能给哪些），zip 或目录。
+ * @param source 已由调用方鉴权的绝对路径（docs/07 §6.5 限定了模型侧的可选范围），zip 或目录。
  */
 export async function installSkillPackage(loader: SkillLoader, source: string, options: SkillPackageOptions): Promise<InstalledSkillPackage> {
-  if (options.name !== undefined && !NAME_PATTERN.test(options.name)) fail('invalid_skill_name', '名字要是 kebab-case（小写字母数字，连字符分隔）。');
-  if (!existsSync(source)) fail('skill_package_not_found', `找不到 ${source}。`);
+  if (options.name !== undefined && !NAME_PATTERN.test(options.name)) fail('invalid_skill_name', '名字必须是 kebab-case（小写字母数字，连字符分隔）。');
+  if (!existsSync(source)) fail('skill_package_not_found', `${source} 不存在。`);
   const skillsDir = resolve(loader.directory);
   mkdirSync(skillsDir, { recursive: true, mode: 0o700 });
-  // 暂存放在 `skills/` 之内，所以落位是同分区 `renameSync`（跨分区的话就得复制，而复制到一半
-  // 失败会在目录里留下半棵）。点号开头 —— `SkillLoader.scan()` 靠这一条不去扫它。
+  // 暂存目录位于 `skills/` 内，因此落位是同分区 `renameSync`（跨分区需复制，而复制中途
+  // 失败会在目录中留下不完整的树）。以点号开头 —— `SkillLoader.scan()` 据此跳过它。
   const stage = join(skillsDir, `.staging-${process.pid}-${ulid()}`);
   mkdirSync(stage, { recursive: true, mode: 0o700 });
   let installed: string | null = null;
@@ -312,8 +312,8 @@ export async function installSkillPackage(loader: SkillLoader, source: string, o
     applyExecutableBits(stage, root, extracted, options.limits);
     const declaredName = (matter(readFileSync(join(root, 'SKILL.md'), 'utf8')).data as { name?: unknown }).name;
     const name = options.name ?? (typeof declaredName === 'string' ? declaredName : basename(root));
-    if (!NAME_PATTERN.test(name)) fail('invalid_skill_name', `从包里推出来的名字「${name}」不是 kebab-case，用 name 参数指一个。`);
-    if ((BUNDLED_SKILLS as readonly string[]).includes(name)) fail('skill_reserved', `${name} 是随包发的说明书，改不得 —— 换个名字。`);
+    if (!NAME_PATTERN.test(name)) fail('invalid_skill_name', `从包中推断出的名称「${name}」不是 kebab-case，请使用 name 参数指定。`);
+    if ((BUNDLED_SKILLS as readonly string[]).includes(name)) fail('skill_reserved', `${name} 是随包发的说明文档，不可修改，请更换名称。`);
 
     rewriteFrontmatter(root, name, options.minRoleFloor);
     writeFileSync(join(root, SKILL_PACKAGE_MARKER), `${JSON.stringify({
@@ -324,10 +324,10 @@ export async function installSkillPackage(loader: SkillLoader, source: string, o
 
     const destination = join(skillsDir, name);
     if (existsSync(destination)) {
-      if (!options.overwrite) fail('skill_already_exists', `已经有一个叫 ${name} 的了，要覆盖就带 overwrite。`);
-      // 留档而不是直接删：被覆盖的可能是运维手写的那一份，而 skill 目录没有 `write_file`
-      // 那样的回收站（照 `write_plugin` 的先例）。放 `.backups/` 是因为 `<name>.bak-<ts>`
-      // 会被 `scan()` 当成一个名字对不上的坏 skill 扫出来。
+      if (!options.overwrite) fail('skill_already_exists', `${name} 已存在，请传入 overwrite 以覆盖。`);
+      // 备份而非直接删除：被覆盖的可能是运维手写的版本，而 skill 目录没有 `write_file`
+      // 那样的回收站（参照 `write_plugin` 的先例）。放入 `.backups/` 是因为 `<name>.bak-<ts>`
+      // 会被 `scan()` 识别为名字不匹配的损坏 skill。
       backup = join(backupDir(skillsDir), `${name}-${Date.now()}`);
       renameSync(destination, backup);
     }
@@ -336,11 +336,11 @@ export async function installSkillPackage(loader: SkillLoader, source: string, o
 
     loader.scan();
     const written = loader.read(name);
-    if (!written || written.loadError) fail('skill_package_invalid', written?.loadError ?? '装完之后重新解析不出来。');
+    if (!written || written.loadError) fail('skill_package_invalid', written?.loadError ?? '安装后无法重新解析。');
     return { name, files: (written as SkillDefinition).files, bytes: sizeOf(destination), backedUp: backup !== null };
   } catch (error) {
-    // **「装了一半」不能留在目录里**：它在扩展页上和一个装好的坏 skill 长得一模一样。
-    // 覆盖安装失败时把旧的那棵放回去 —— 装新的失败不该顺带把能用的那份弄没了。
+    // 安装未完成的目录不能保留：在扩展页上它与一个安装完成但损坏的 skill 无法区分。
+    // 覆盖安装失败时恢复旧目录 —— 新版本安装失败不应连带丢失可用的旧版本。
     if (installed && existsSync(installed)) renameSync(installed, join(backupDir(skillsDir), `failed-${basename(installed)}-${Date.now()}`));
     if (backup && installed && !existsSync(installed)) renameSync(backup, installed);
     if (installed) loader.scan();

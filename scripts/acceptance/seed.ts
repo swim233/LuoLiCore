@@ -30,14 +30,14 @@ import { assignDotted, type Role } from "@luoli/shared";
 import { MIN_PASSWORD_LENGTH, hashWebuiPassword } from "../passwd.js";
 
 /**
- * `docs/13-acceptance-criteria.md` 顶部那组「通用前置环境 E1–E6」的铺设脚本。
+ * `docs/13-acceptance-criteria.md` 顶部「通用前置环境 E1–E6」的铺设脚本。
  *
- * 它写的东西全部落在 `LUOLI_DATA_DIR` 指的那个目录里，**没有这个变量就拒绝跑**：`loadConfig`
- * 在缺它时把 `db.path` 解析成 `./data/luoli.db`，那是生产库，而且进程一直开着。
+ * 它写入的内容全部落在 `LUOLI_DATA_DIR` 指向的目录中，缺少该变量时拒绝执行：`loadConfig`
+ * 在缺失时会把 `db.path` 解析为 `./data/luoli.db`，那是生产库，且进程持续运行。
  *
- * 配置只往 `config_kv` 写 schema 里真实存在的叶子（`webui.host` / `webui.port` /
- * `webui.passwordHash`）—— 那张表的每一行都会被 `loadConfig` 当配置覆盖层解析，写歪一行下次
- * 启动就直接失败（docs/19 · R-CFG-01）。铺完最后会把覆盖层重放一遍来证明这一点。
+ * 配置只向 `config_kv` 写入 schema 中真实存在的叶子键（`webui.host` / `webui.port` /
+ * `webui.passwordHash`）：该表的每一行都会被 `loadConfig` 当作配置覆盖层解析，写错一行会导致下次
+ * 启动直接失败（docs/19 · R-CFG-01）。铺设完成后会重放一遍覆盖层来验证这一点。
  */
 
 const ACTOR = "acceptance-seed";
@@ -98,10 +98,10 @@ function parseCli(): CliValues {
   try {
     return parseArgs({
       /**
-       * `pnpm ac:seed -- --force` 里那个 `--` 被 pnpm 原样转给脚本，而 `parseArgs` 把它当成
-       * 「后面全是位置参数」的终止符 —— 最自然的那种写法于是炸在
-       * ERR_PARSE_ARGS_UNEXPECTED_POSITIONAL 上，而这个脚本唯一的一道闸恰恰要靠 `--force`
-       * 才过得去。两种写法都收。
+       * `pnpm ac:seed -- --force` 中的 `--` 被 pnpm 原样转发给脚本，而 `parseArgs` 将其视为
+       * 后续全部为位置参数的终止符，导致最常见的写法以
+       * ERR_PARSE_ARGS_UNEXPECTED_POSITIONAL 失败，而该脚本唯一的闸正需要 `--force`
+       * 才能通过。两种写法都接受。
        */
       args: process.argv.slice(2).filter((token) => token !== "--"),
       options: {
@@ -121,7 +121,7 @@ function parseCli(): CliValues {
       allowPositionals: false,
     }).values;
   } catch (error) {
-    // 裸抛的话运维看到的是一段 node 内部栈，而不是「哪个参数写错了」。
+    // 直接抛出时运维看到的是 node 内部栈，而不是具体哪个参数有误。
     die(
       `${error instanceof Error ? error.message : String(error)}\n\n${USAGE}`,
     );
@@ -136,16 +136,16 @@ const sandboxMode = values.sandbox ?? "docker";
 if (sandboxMode !== "docker" && sandboxMode !== "none")
   die(`--sandbox 只能是 docker 或 none，收到 ${sandboxMode}`);
 /**
- * E6 的原文是「监听 127.0.0.1:8787」，而**生产实例就占着 8787**（验收的前提是它照跑不停）。
- * 照抄 8787 的结果不是「更贴合验收文档」，是验收实例起不来（EADDRINUSE）—— 所以默认让开一格，
- * 端口这一格与任何一条验收判据都无关（`AC-SEC-010` 判的是绑不绑 0.0.0.0，不是绑哪个端口）。
- * 真要严格照 8787 跑就 `--port 8787`，前提是先停生产。
+ * E6 的原文是监听 127.0.0.1:8787，而生产实例正占用 8787（验收的前提是它持续运行）。
+ * 沿用 8787 的结果不是更贴合验收文档，而是验收实例无法启动（EADDRINUSE），因此默认让开一个端口。
+ * 端口取值与任何一条验收判据都无关（`AC-SEC-010` 判定的是是否绑定 0.0.0.0，而非绑定哪个端口）。
+ * 需严格按 8787 运行时使用 `--port 8787`，前提是先停止生产实例。
  */
 const webuiPort = Number(values.port ?? 8788);
 if (!Number.isInteger(webuiPort) || webuiPort < 1 || webuiPort > 65535)
   die(`--port 要是 1..65535 的整数，收到 ${values.port}`);
 
-// ── 闸 1：没有 LUOLI_DATA_DIR 一律不跑 ────────────────────────────────────────────
+// ── 闸 1：缺少 LUOLI_DATA_DIR 时一律不执行 ──────────────────────────────────────
 const dataDirectory = process.env.LUOLI_DATA_DIR;
 if (!dataDirectory)
   die(
@@ -164,14 +164,14 @@ if (!dataDirectory)
 
 const config = await loadConfig({ requireOwner: false });
 const databasePath = resolve(config.db.path);
-// 隔离这件事整个压在这条 env 覆盖上，所以它没生效就不该继续 —— 后面每一条写入都落在这个路径上。
+// 隔离完全依赖这条 env 覆盖，因此它未生效时不应继续：后续每一条写入都落在该路径下。
 if (databasePath !== resolve(dataDirectory, "luoli.db"))
   die(
     `拒绝运行：LUOLI_DATA_DIR=${dataDirectory}，但 loadConfig 交回的 db.path 是 ${databasePath}。\n` +
       "这两个对不上说明 config/index.ts 的 envLayer 没生效，隔离没有保证。",
   );
 
-// ── 闸 2：目标库已存在就要显式 --force ────────────────────────────────────────────
+// ── 闸 2：目标库已存在时需显式传入 --force ──────────────────────────────────────
 const reused = existsSync(databasePath);
 if (reused && !values.force)
   die(
@@ -296,7 +296,7 @@ for (const entry of everyone) {
     },
     ACTOR,
   );
-  // `upsertSeen` 的 ON CONFLICT 刻意不动 role（不把手工改过的角色冲掉），所以重跑时靠这一句收敛。
+  // `upsertSeen` 的 ON CONFLICT 刻意不修改 role（避免覆盖手工调整过的角色），因此重跑时由这一句收敛。
   principals.setRole(id, entry.role, ACTOR);
 }
 
@@ -365,8 +365,8 @@ else {
       price_cache_read=excluded.price_cache_read,price_cache_write=excluded.price_cache_write,
       enabled=1,sort=excluded.sort,updated_at=excluded.updated_at`,
   );
-  // 落库后按 (provider,model) 回查真实 id：库里可能已经有一行同名模型，而那一行的 id 是
-  // WebUI 生成的随机串。别名链存的是 `models.id`，指错了这个别名会被 rebuild 静默跳过。
+  // 落库后按 (provider,model) 回查真实 id：库中可能已存在同名模型行，而该行的 id 是
+  // WebUI 生成的随机串。别名链存储的是 `models.id`，指向错误时该别名会在 rebuild 时被静默跳过。
   const findModel = db
     .prepare("SELECT id FROM models WHERE provider_id=? AND model_id=?")
     .pluck();
@@ -385,14 +385,14 @@ else {
     const effectiveUrl = baseUrl ?? `https://${spec.id}.example.invalid/v1`;
     const effectiveKey = apiKey ?? `PLACEHOLDER-${spec.prefix}-FILL-ME`;
     /**
-     * 已经是同一把 key 就不重新加密。`Secrets.encrypt` 每次换 salt 与 iv，无条件重写的话
-     * 「同一个目录重跑两次结果一致」就只剩明文一致，`api_key_enc` 每跑一次变一次。
+     * 已是同一把 key 时不重新加密。`Secrets.encrypt` 每次更换 salt 与 iv，无条件重写会使
+     * 同一目录重跑两次结果一致这一性质仅在明文层面成立，`api_key_enc` 每次执行都会变化。
      */
     let stored: string | null = null;
     try {
       stored = store.key(spec.id, true);
     } catch {
-      stored = null; // 换过主密钥时旧密文解不开，当成没有，下面照常重写。
+      stored = null; // 更换主密钥后旧密文无法解开，按不存在处理，下面照常重写。
     }
     const input: ProviderInput = {
       id: spec.id,
@@ -441,8 +441,8 @@ else {
       chains.set(plan.alias, chain);
       keep.push(...chain);
     }
-    // 上一次铺设留下的模型行（改过 ACC_P*_MODEL_* 之后）不清掉的话会一直挂在 enabled=1 上，
-    // 「重跑两次结果一致」就不成立了。只清本脚本自己那两个 provider 名下的行。
+    // 上一次铺设遗留的模型行（修改 ACC_P*_MODEL_* 之后）若不清理会持续保持 enabled=1，
+    // 使重跑两次结果一致这一性质不成立。只清理本脚本自身两个 provider 名下的行。
     removedModels = db
       .prepare(
         `DELETE FROM models WHERE provider_id IN (${providerPlan.map(() => "?").join(",")})
@@ -463,7 +463,7 @@ else {
   modelCount = keep.length;
 }
 
-// ── E5：沙箱模式 —— 生成两份配置文件，config_kv 里刻意不留 sandbox.mode ────────────
+// ── E5：沙箱模式，生成两份配置文件，config_kv 中刻意不保留 sandbox.mode ──────────
 const dockerBin = config.sandbox.dockerBin;
 const probe = (args: string[]): string | null => {
   try {
@@ -495,10 +495,10 @@ const generatedConfigs = new Map<string, string>();
 for (const mode of ["docker", "none"] as const) {
   const draft = structuredClone(baseConfig);
   assignDotted(draft, "sandbox.mode", mode);
-  // 这六个默认值是 cwd 相对的，不跟 LUOLI_DATA_DIR 走。留着默认值的话验收环境会把工作区、
-  // 记忆库、日志、模型目录缓存以及**写出来的 skill / plugin** 写回仓库里那份生产目录 ——
-  // 隔离就只剩下 db 与附件两样。skills/plugins 这两条尤其要紧：验收里有「新建 / 编辑 / 删除
-  // 一个 Skill」这种条目，不改的话那几步直接改的是仓库里随包的那棵树。
+  // 这六个默认值相对 cwd 解析，不跟随 LUOLI_DATA_DIR。保留默认值会使验收环境把工作区、
+  // 记忆库、日志、模型目录缓存以及生成的 skill 与 plugin 写回仓库中的生产目录，
+  // 隔离范围将只剩 db 与附件。skills 与 plugins 两条尤为关键：验收中包含新建、编辑、删除
+  // Skill 这类条目，不修改则这些步骤会直接改动仓库中随包发布的目录树。
   assignDotted(
     draft,
     "sandbox.workspaceDir",
@@ -508,8 +508,8 @@ for (const mode of ["docker", "none"] as const) {
   assignDotted(draft, "logs.dir", resolve(dataDirectory, "logs"));
   assignDotted(draft, "skills.dir", resolve(dataDirectory, "skills"));
   assignDotted(draft, "plugins.dir", resolve(dataDirectory, "plugins"));
-  // 端口在文件层也写一遍。生效值本来就由 config_kv 那一行说了算（覆盖层压在文件层之上），
-  // 但两处写着不同的数字会让「我到底该开哪个端口」变成一道要先读懂三层合并才答得出的题。
+  // 端口在文件层同样写入一份。生效值由 config_kv 中的那一行决定（覆盖层优先于文件层），
+  // 但两处数值不同会使实际监听端口必须先理解三层合并规则才能判断。
   assignDotted(draft, "webui.host", "127.0.0.1");
   assignDotted(draft, "webui.port", webuiPort);
   assignDotted(
@@ -529,9 +529,9 @@ for (const mode of ["docker", "none"] as const) {
 }
 for (const sub of ["workspace", "memory", "logs", "cache", "plugins"])
   mkdirSync(resolve(dataDirectory, sub), { recursive: true, mode: 0o700 });
-// 随包 skill 得真的在盘上，`BUNDLED_SKILLS` 只是一份名字清单 —— 指到一个空目录的话扩展页是空的，
-// 而「随包 skill 只放行启停」这类条目就没有对象可验。**只在目标不存在时复制**：重跑（含 `--force`）
-// 不覆盖验收过程中改出来的那棵树，否则跑到一半重铺一次就把现场抹了。
+// 随包 skill 必须实际存在于磁盘，`BUNDLED_SKILLS` 只是一份名称清单：指向空目录时扩展页为空，
+// 随包 skill 只放行启停这类条目将没有验证对象。仅在目标不存在时复制：重跑（含 `--force`）
+// 不覆盖验收过程中修改的目录树，否则中途重新铺设会清除现场。
 const skillsTarget = resolve(dataDirectory, "skills");
 const skillsSource = resolve(process.cwd(), "skills");
 let skillsCopied = false;
@@ -543,8 +543,8 @@ if (!existsSync(skillsTarget)) {
 }
 
 // ── E6：WebUI 口令与监听地址 ────────────────────────────────────────────────────
-// 空串当没设：`envPinnedConfigKeys` 判环境变量也是按真值来的，一个 `WEBUI_PASSWORD=` 不该
-// 让整个铺设停在「口令太短」上。
+// 空串按未设置处理：`envPinnedConfigKeys` 判断环境变量同样按真值进行，一个 `WEBUI_PASSWORD=` 不应
+// 使整个铺设过程因口令过短而中止。
 const password = (values.password ?? process.env.WEBUI_PASSWORD) || undefined;
 if (password !== undefined && password.length < MIN_PASSWORD_LENGTH)
   die(`WebUI 口令至少 ${MIN_PASSWORD_LENGTH} 位，收到 ${password.length} 位。`);
@@ -582,9 +582,9 @@ else {
   }
 }
 /**
- * 值没变的键不写。`writeConfigRows` 是配置写入的唯一出口，它对每一条 entry 都记一行
- * `config_revisions`（不管值变没变）—— 无条件写的话，每次 `--force` 重跑都往变更历史里塞两条
- * 「127.0.0.1 → 127.0.0.1」，而这份历史是运维事后查「谁把这一格改了」的地方。
+ * 值未变化的键不写入。`writeConfigRows` 是配置写入的唯一出口，它对每一条 entry 都记录一行
+ * `config_revisions`（无论值是否变化）：无条件写入会使每次 `--force` 重跑都向变更历史插入两条
+ * 值未变的记录，而该历史是运维事后追溯配置修改来源的依据。
  */
 const storedValue = db
   .prepare("SELECT value_json FROM config_kv WHERE key=?")
@@ -596,7 +596,7 @@ if (changedEntries.length)
   writeConfigRows(db, changedEntries, ACTOR, revisionJson);
 closeDatabase(db);
 
-// ── 验证：把刚写下的覆盖层重放一遍 ───────────────────────────────────────────────
+// ── 验证：重放刚写入的覆盖层 ───────────────────────────────────────────────────
 const rejectedKeys: string[] = [];
 const droppedKeys: string[] = [];
 await loadConfig({

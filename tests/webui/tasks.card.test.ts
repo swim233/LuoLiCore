@@ -127,7 +127,7 @@ describe('任务卡', () => {
     await settle(wrapper);
     // 按钮自己的活儿照做：弹出二次确认。
     expect(confirmBox.value.open).toBe(true);
-    expect(confirmBox.value.detail).toContain('同一轮里的其他子 agent 也会一起停');
+    expect(confirmBox.value.detail).toContain('同一轮里的其他子 agent 也会一并终止');
     // 而详情**没有**被顺带打开 —— 既没发请求，也没有弹窗。
     expect(detailFetches('t1'), '点行内按钮顺带把详情也拉了').toBe(0);
     expect(document.body.querySelector('.ui-modal'), '点行内按钮顺带把详情弹窗也打开了').toBeNull();
@@ -208,8 +208,8 @@ describe('任务卡', () => {
     labels = modalFootLabels();
     expect(labels, 'done 的任务不该给〔取消整轮〕').not.toContain('取消整轮');
     expect(labels).toContain('永久删除');
-    expect(labels).toContain('看这一轮详情');
-    expect(labels).toContain('在日志页看这条 trace');
+    expect(labels).toContain('查看该轮详情');
+    expect(labels).toContain('在日志页查看该 trace');
     const removeDone = [...document.body.querySelectorAll('.modal-foot button')].find((button) => button.textContent?.includes('永久删除'))!;
     expect((removeDone as HTMLButtonElement).disabled).toBe(false);
     second.unmount();
@@ -225,13 +225,13 @@ describe('任务卡', () => {
       button.click();
       await settle(wrapper);
     };
-    await click('看这一轮详情');
+    await click('查看该轮详情');
     expect(wrapper.emitted('open-turn')).toEqual([['turn_bbbbbbbbbbbb']]);
     expect(document.body.querySelector('.modal-foot'), '跳转之后详情弹窗该关掉').toBeNull();
 
     await rowFor(wrapper, '整理昨天的群聊').trigger('click');
     await settle(wrapper);
-    await click('在日志页看这条 trace');
+    await click('在日志页查看该 trace');
     expect(wrapper.emitted('open-trace')).toEqual([['turn_bbbbbbbbbbbb']]);
     wrapper.unmount();
   });
@@ -245,7 +245,7 @@ describe('任务卡', () => {
     await settle(wrapper);
     expect(confirmBox.value.open).toBe(true);
     // 「删的是记录，不是取消通道」必须写在人看得见的地方，不能只写在服务端注释里。
-    expect(confirmBox.value.detail).toContain('只删这一条任务记录');
+    expect(confirmBox.value.detail).toContain('只删除这一条任务记录');
     expect(confirmBox.value.detail).toContain('上下文');
     const before = calls.filter((call) => call.url.startsWith('/api/tasks?')).length;
     await runConfirmed();
@@ -267,7 +267,7 @@ describe('任务卡', () => {
     await settle(wrapper);
     const toast = toasts.at(-1)!;
     expect(toast.severity).toBe('warn');
-    expect(toast.detail).toContain('删掉记录不会让它停下来');
+    expect(toast.detail).toContain('删除记录不会终止运行');
     wrapper.unmount();
   });
 });

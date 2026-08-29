@@ -8,10 +8,10 @@ import { capMentions, safeRender } from '@luoli/telegram';
 import { elideMiddleBytes, parsePrincipal, type RuntimeTurnContext } from '@luoli/shared';
 
 /**
- * 第九轮（`docs/27`）整改的回归用例。判据来自那一轮换掉的三条外部标准（OWASP / SOLID / JS·TS
- * 实践），所以这里钉住的多半不是「功能对不对」，而是「同一件事只有一套判据」。
- * `S-01`（登录限流桶键）与 `S-05`（请求体上界）在 `tests/server.test.ts`，
- * `R-02`/`R-03`/`C-01` 这类在各自模块的用例文件里。
+ * 第九轮（`docs/27`）整改的回归用例。判据来自那一轮替换的三条外部标准（OWASP / SOLID / JS·TS
+ * 实践），因此这里固定的多为同一件事只保留一套判据，而不是功能正确性本身。
+ * `S-01`（登录限流桶键）与 `S-05`（请求体上界）位于 `tests/server.test.ts`，
+ * `R-02`/`R-03`/`C-01` 这类位于各自模块的用例文件中。
  */
 
 describe('S-03 · 审批规则的正则走 RE2', () => {
@@ -19,8 +19,8 @@ describe('S-03 · 审批规则的正则走 RE2', () => {
     const rules = new ApprovalRules([{ tool: 'bash', pattern: '(a+)+$', risk: 'high' }]);
     const tool = { name: 'bash' } as never;
     const context = {} as never;
-    // 26 个 a + `!` 是报告里实测过的形状：JS 引擎下每多一个字符耗时翻倍，而求值对象
-    //（`JSON.stringify(input)`）由模型决定 —— 卡住的是整个单线程进程。
+    // 26 个 a 加 `!` 是报告中实测的形状：JS 引擎下每增加一个字符耗时翻倍，而求值对象
+    //（`JSON.stringify(input)`）由模型决定，阻塞的是整个单线程进程。
     const evaluate = (length: number): number => {
       const started = performance.now();
       rules.evaluate(tool, `${'a'.repeat(length)}!`, context);
@@ -40,7 +40,7 @@ describe('S-03 · 审批规则的正则走 RE2', () => {
 
   it('写入端与运行时同一套判据：不兼容 RE2 的模式与超长模式都当场拒收', () => {
     const parse = (pattern: string) => configSchema.safeParse({ access: { bootstrapOwnerId: '1' }, approval: { rules: [{ tool: 'bash', pattern }] } });
-    // 反向引用 RE2 不支持 —— 编译不过的规则在运行时永不命中，收下它等于给一个假开关。
+    // RE2 不支持反向引用：无法编译的规则在运行时永不命中，接受这类规则等同于提供一个无效开关。
     expect(parse('(a)\\1').success).toBe(false);
     expect(parse(`^${'a'.repeat(200)}$`).success).toBe(false);
     expect(parse('(?i)\\brm\\s+-rf\\b').success).toBe(true);
@@ -55,7 +55,7 @@ describe('C-05 · 主体 id 的形态校验只有一份', () => {
     expect(parsePrincipal('user 123 owner')).toBeNull();
     expect(parsePrincipal('user 123')).toEqual({ id: 'user:123', kind: 'user', tgId: '123' });
     expect(parsePrincipal('user:123')).toEqual({ id: 'user:123', kind: 'user', tgId: '123' });
-    // 群/频道是负数。裸 id 不指定 kind：`/whois` 与 `/revoke` 两种主体都试。
+    // 群与频道为负数。裸 id 不指定 kind：`/whois` 与 `/revoke` 两种主体都覆盖。
     expect(parsePrincipal(' -1002492583774 ')).toEqual({ id: '-1002492583774', kind: null, tgId: '-1002492583774' });
   });
 });
@@ -76,11 +76,11 @@ describe('R-02 · read / edit 不再无视文件大小整份读盘', () => {
     expect(first.firstLine).toBe(1);
     expect(first.truncated).toBe(true);
     expect(first.content.startsWith('1\tline-1')).toBe(true);
-    // 第二页的行号接着往下数，而不是从 1 重来。
+    // 第二页的行号连续递增，而不是从 1 重新计数。
     const second = files.read('big.txt', first.nextOffset!) as { content: string; firstLine: number };
     expect(second.firstLine).toBeGreaterThan(1);
     expect(second.content.startsWith(`${second.firstLine}\t`)).toBe(true);
-    // 定位读本身：只碰 [offset, offset+limit)，不整份进内存。
+    // 定位读取本身：只访问 [offset, offset+limit)，不将整份内容读入内存。
     const slice = readSlice(`${root}/big.txt`, 7, 6);
     expect(slice.read).toBe(6);
     expect(slice.size).toBe(Buffer.byteLength(lines));
@@ -102,8 +102,8 @@ describe('R-03 · context_stats 默认不带整段历史', () => {
     const db = openDatabase(path); migrateDatabase(db);
     const engine = new ContextEngine(db, new ArchiveRepository(db));
     const summary = engine.stats('chat:1');
-    // 键集写死是这条断言的全部力气所在：R-03 防的是「有人顺手往摘要里塞回整段历史」。
-    // lastPrune / lastRebase 是 `/ctx` 要的两个标记（AC-CTX-027），各自只有 seq + 时间戳。
+    // 固定键集是这条断言的关键：R-03 防止的是把整段历史重新写回摘要。
+    // lastPrune / lastRebase 是 `/ctx` 需要的两个标记（AC-CTX-027），各自只含 seq 与时间戳。
     expect(Object.keys(summary).sort()).toEqual(['claimWatermark', 'commit', 'key', 'lastPrune', 'lastRebase', 'messageCount', 'tokens']);
     const timeline = engine.stats('chat:1', { timeline: true });
     expect(timeline).toHaveProperty('messages');
@@ -129,7 +129,7 @@ describe('C-01 · 一行坏数据不该让全部别名消失', () => {
     db.prepare('INSERT INTO model_aliases(alias,model_ids_json,updated_at) VALUES (?,?,?)').run('high', JSON.stringify(['m-bad']), Date.now());
     const skipped: string[] = [];
     const registry = new ModelRegistry(db, providers, (providerId) => skipped.push(providerId));
-    // 旧实现：注册表已清空 → JSON.parse 抛 → 异常上抛，main 和 high 一起没了、调用端点 500。
+    // 旧实现：注册表已清空导致 JSON.parse 抛出，异常向上传播，main 与 high 一并丢失、调用端点返回 500。
     expect(() => registry.rebuild()).not.toThrow();
     expect(registry.aliases()).toContain('main');
     expect(registry.aliases()).not.toContain('high');
@@ -142,7 +142,7 @@ describe('C-01 · 一行坏数据不该让全部别名消失', () => {
 describe('S-08 · 身份字符串当路径段用之前先校验形态', () => {
   it('LUOLI_OWNER_ID 里的 ../ 一律拒收，数字与空串放行', () => {
     const parse = (id: string) => configSchema.safeParse({ access: { bootstrapOwnerId: id } });
-    // 这个值会被拼成 memory/private/<id>/PRIMEMORY.md，`../../etc` 会让私有记忆落到目录外。
+    // 该值会被拼接为 memory/private/<id>/PRIMEMORY.md，`../../etc` 会使私有记忆写到目录之外。
     expect(parse('../../etc').success).toBe(false);
     expect(parse('owner').success).toBe(false);
     expect(parse('123456').success).toBe(true);
@@ -158,14 +158,14 @@ describe('R-04 · 并发上限按在途轮次数而不是 turns 表', () => {
     const quota = new QuotaGuard(db, 'UTC');
     const registry = new TurnRegistry();
     const limits = { chatId: 'c', userId: 'u', turnsPerUserPerHour: 100, turnsPerChatPerHour: 100, concurrentPerUser: 1 };
-    // 旧实现：`turns` 那一行要到 openTurn 之后才写，所以这里数出来是 0 —— 同一个人的两条
-    // 并发消息都能通过检查，`concurrentPerUser` 形同虚设。
+    // 旧实现：`turns` 对应行在 openTurn 之后才写入，因此此处统计结果为 0，同一用户的两条
+    // 并发消息都能通过检查，`concurrentPerUser` 失效。
     expect(quota.canStart({ ...limits, inFlight: registry.countForUser('u') })).toBe(true);
     registry.register({ id: 't1', key: 'chat:c', chatId: 'c', userId: 'u', role: 'trusted' }, 60_000);
     expect(registry.countForUser('u')).toBe(1);
     expect(quota.canStart({ ...limits, inFlight: registry.countForUser('u') })).toBe(false);
     expect(quota.lastStartRejection).toBe('concurrent');
-    // 别人不受影响。
+    // 其他主体不受影响。
     expect(quota.canStart({ ...limits, userId: 'other', inFlight: registry.countForUser('other') })).toBe(true);
     registry.finish('t1');
     expect(quota.canStart({ ...limits, inFlight: registry.countForUser('u') })).toBe(true);
@@ -194,7 +194,7 @@ describe('R-05 · 四张派生数据表有保留期，且 0 = 不清', () => {
       .map((table) => db.prepare(`SELECT COUNT(*) FROM ${table}`).pluck().get() as number);
 
     seed();
-    // 0 = 不清。默认沉默地删数据比不删危险得多，所以缺省与 0 都必须一行不动。
+    // 0 表示不清理。默认静默删除数据的风险远高于不删除，因此缺省值与 0 都必须保持数据不变。
     new MaintenanceService(db, path, 2, 30, './data/round9-logs', {}, 0, 30,
       { usage: 0, quotaCounters: 0, configRevisions: 0, memoryRevisions: 0 }).cleanup(now);
     expect(counts()).toEqual([1, 1, 1, 1]);
@@ -206,7 +206,7 @@ describe('R-05 · 四张派生数据表有保留期，且 0 = 不清', () => {
     expect(counts()).toEqual([0, 0, 0, 0]);
     expect(result).toMatchObject({ usage: 1, quotaCounters: 1, configRevisions: 1, memoryRevisions: 1 });
 
-    // 保留期内的行不动。
+    // 保留期内的行不做处理。
     seed();
     db.prepare('UPDATE usage_ledger SET ts=?').run(now - 86_400_000);
     new MaintenanceService(db, path, 2, 30, './data/round9-logs', {}, 0, 30, { usage: 400 }).cleanup(now);
@@ -221,12 +221,12 @@ describe('C-02 · 用量报表与总览趋势按同一个时区分日', () => {
     for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
     const db = openDatabase(path); migrateDatabase(db);
     const ledger = new UsageLedger(db);
-    // 取两天前的 20:30Z：加八小时就跨到了下一个本地日。按 UTC 分日记成前一天，而总览趋势与
-    // 配额窗口都按 general.timezone 记成后一天 —— 同一天两个数字（docs/27 · C-02）。
-    // 相对「现在」取而不是写死日期：总览趋势只覆盖近 7 天，写死的日期过一周就滑出窗口。
+    // 取两天前的 20:30Z：加八小时即跨入下一个本地日。按 UTC 分日归为前一天，而总览趋势与
+    // 配额窗口按 general.timezone 归为后一天，同一天出现两个数字（docs/27 · C-02）。
+    // 相对当前时间取值而不是写死日期：总览趋势只覆盖近 7 天，固定日期一周后会滑出窗口。
     const base = new Date(Date.now() - 2 * 86_400_000);
     const ts = Date.UTC(base.getUTCFullYear(), base.getUTCMonth(), base.getUTCDate(), 20, 30);
-    // 参照值独立算：`Intl` 那份就是 `quotaBucket` 的口径，这条断言钉的正是「报表跟上了它」。
+    // 参照值独立计算：`Intl` 的结果即 `quotaBucket` 的口径，这条断言验证的是报表与之一致。
     const utcDay = new Date(ts).toISOString().slice(0, 10);
     const localDay = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(ts));
     expect(localDay).not.toBe(utcDay);
@@ -236,7 +236,7 @@ describe('C-02 · 用量报表与总览趋势按同一个时区分日', () => {
     const buckets = (timezone: string): string[] => (ledger.report(ts - 86_400_000, ts + 86_400_000, 'day', timezone) as Array<{ bucket: string }>).map((row) => row.bucket);
     expect(buckets('UTC')).toEqual([utcDay]);
     expect(buckets('Asia/Shanghai')).toEqual([localDay]);
-    // 总览趋势用同一份口径：这两个页面对同一天必须给同一个数字。
+    // 总览趋势使用同一份口径：两个页面对同一天必须给出相同数值。
     const trend = (new OperationsRepository(db).dashboard('Asia/Shanghai', 7) as { trend: Array<{ day: string; turns: number }> }).trend;
     expect(trend.find((row) => row.turns > 0)?.day).toBe(localDay);
     closeDatabase(db);
@@ -248,7 +248,7 @@ describe('C-04 · MCP 的 schema 转换有深度上界', () => {
     let deep: Record<string, unknown> = { type: 'string' };
     for (let level = 0; level < 5000; level += 1) deep = { type: 'object', properties: { child: deep } };
     expect(() => jsonSchemaToZod(deep)).not.toThrow();
-    // 上界之内的结构照旧精确转换。
+    // 上界之内的结构仍精确转换。
     const parsed = jsonSchemaToZod({ type: 'object', properties: { name: { type: 'string' } }, required: ['name'] }).safeParse({ name: 'x' });
     expect(parsed.success).toBe(true);
   });
@@ -256,12 +256,12 @@ describe('C-04 · MCP 的 schema 转换有深度上界', () => {
 
 describe('S-10 · mention 护栏的判据跟 Telegram 一致', () => {
   it('前置字符是标点时照样算 mention', () => {
-    // 实测三种在旧判据（「前面是空白或左括号」）下 max=1 时全部逃过 —— 而 Telegram 对这些
-    // 前置字符照样解析成 mention。
+    // 实测三种情况在旧判据（前一个字符为空白或左括号）下 max=1 时全部漏判，而 Telegram 对这些
+    // 前置字符同样解析为 mention。
     expect(capMentions('@alicexx ,@bobbyxx .@cindyxx ;@daisyxx', 1)).toBe('@alicexx ,bobbyxx .cindyxx ;daisyxx');
-    // 前面是 \w 或 @ 的不算：`foo@bar` 与 `@@name` 在 Telegram 那边也不是 mention。
+    // 前一个字符为 \w 或 @ 时不计入：`foo@bar` 与 `@@name` 在 Telegram 侧同样不是 mention。
     expect(capMentions('mail:foo@barbaz @alicexx', 1)).toBe('mail:foo@barbaz @alicexx');
-    // `@@alicexx` 一个都不算（第二个 @ 前面是 @），所以 `@bobbyxx` 才是第 1 个，max=1 时留着。
+    // `@@alicexx` 不计入（第二个 @ 的前一个字符是 @），因此 `@bobbyxx` 为第 1 个，max=1 时保留。
     expect(capMentions('@@alicexx @bobbyxx', 1)).toBe('@@alicexx @bobbyxx');
     expect(capMentions('@@alicexx @bobbyxx @cindyxx', 1)).toBe('@@alicexx @bobbyxx cindyxx');
     expect(capMentions('@alicexx @bobbyxx', 0)).toBe('@alicexx @bobbyxx');
@@ -278,8 +278,8 @@ describe('C-06 · LIKE 分支转义通配符', () => {
       fromKind: 'user', fromUserId: 'u', fromName: 'U', fromUsername: null, kind: 'text', text, tgDate: Date.now(), raw: {}, triggered: false, triggerReason: null });
     add('a_b', 1);
     add('axb', 2);
-    // 分词正则把 `_` 当词内字符保留，于是查询走的是 LIKE '%a_b%' —— 下划线在 LIKE 里是
-    // 「任意一个字符」，旧实现两条都命中。
+    // 分词正则将 `_` 视为词内字符保留，因此查询变为 LIKE '%a_b%'：下划线在 LIKE 中表示
+    // 任意单个字符，旧实现两条均命中。
     const hits = scoped.search('a_b', 10).map((row) => row.text);
     expect(hits).toEqual(['a_b']);
     closeDatabase(db);
@@ -288,8 +288,8 @@ describe('C-06 · LIKE 分支转义通配符', () => {
 
 describe('C-07 · 占位符字符不可伪造', () => {
   it('正文里自带的 NUL 不会换掉代码块', () => {
-    // 代码块被换成 `\u0000<n>\u0000`，而 SPECIAL 不含 NUL：正文里自带 `\u00000\u0000`
-    // 的消息旧实现会被替换成那个代码块，或者（下标越界时）整段吞掉。
+    // 代码块被替换为 `\u0000<n>\u0000`，而 SPECIAL 不含 NUL：正文中自带 `\u00000\u0000`
+    // 的消息在旧实现下会被替换成该代码块，或在下标越界时整段丢失。
     const rendered = safeRender('前\u00000\u0000后\n```\ncode\n```');
     expect(rendered).toContain('code');
     expect(rendered).not.toContain('\u0000');
@@ -309,7 +309,7 @@ describe('C-08 · perChat 的会话级人格真的接上了', () => {
     const db = openDatabase(path); migrateDatabase(db);
     const documents = new PromptDocuments(db, root);
     expect(documents.readForPrompt({ userId: '1', isPrivate: true, characterOverride: 'CHARACTER.-100.md' }).character).toBe('本群人格');
-    // 会被当成路径段用的自由字符串：越界一律退回全局那份，而不是抛错让整个会话开不了轮次。
+    // 用作路径段的自由字符串：越界时一律回退到全局配置，而不是抛出异常导致整个会话无法开启轮次。
     expect(documents.readForPrompt({ userId: '1', isPrivate: true, characterOverride: '../../etc/passwd' }).character).toBe('全局人格');
     expect(documents.readForPrompt({ userId: '1', isPrivate: true, characterOverride: 'sub/dir.md' }).character).toBe('全局人格');
     closeDatabase(db);
@@ -337,7 +337,7 @@ describe('D-03 · 准入判定能单独测', () => {
     expect(registry.admit('memory_write', { ...context, turn: turnOf('limited') })).toMatchObject({ ok: false, error: '权限不足' });
     expect(registry.admit('memory_write', { ...context, allow: new Set(['read_file']) })).toMatchObject({ ok: false, error: 'tool_not_in_allowlist' });
     overrides = { memory_write: { enabled: false } };
-    // 运维禁用要留一条日志：模型硬调一个被关掉的工具是排障线索。
+    // 运维禁用需记录日志：模型调用已关闭的工具是排障线索。
     expect(registry.admit('memory_write', context)).toMatchObject({ ok: false, error: 'tool_disabled_by_operator', warn: true });
     closeDatabase(db);
   });
@@ -357,7 +357,7 @@ describe('D-05 · onStepEnd 的四件事各自能喂一个假 step', () => {
     const fakeLog = { publish: (type: string, data: unknown) => published.push({ type, data }), event: () => 0 };
     const observers = createStepObservers({ turnId: 't', key: 'chat:1', chatId: '1', initiatorUserId: '2' } as never, {
       ledger: new UsageLedger(db),
-      // 第二个候选出力：**别名不跟着变**（链内 fallback 换的是模型，docs/20 · W-LEDGER-01）。
+      // 第二个候选生效：别名保持不变（链内 fallback 更换的是模型，docs/20 · W-LEDGER-01）。
       registry: { infoByModelId: (id) => id === 'model-second' ? second : null, aliasOf: (_id, prefer) => prefer ?? null },
       context: fakeContext as never,
       log: fakeLog as never,
@@ -380,7 +380,7 @@ describe('D-05 · onStepEnd 的四件事各自能喂一个假 step', () => {
     expect(published.filter((entry) => entry.type === 'turn.progress')).toHaveLength(1);
     observers.appendContext(facts);
     expect(appended).toHaveLength(2);
-    // requestBody 缺失（小样本）时不校准：相对误差被常数项主导，校准它只会引入噪声。
+    // requestBody 缺失（小样本）时不做校准：相对误差由常数项主导，校准只会引入噪声。
     let calibrated = 0;
     const quiet = createStepObservers({ turnId: 't', key: 'chat:1', chatId: '1', initiatorUserId: '2' } as never, {
       ledger: new UsageLedger(db), registry: { infoByModelId: () => null, aliasOf: () => null },

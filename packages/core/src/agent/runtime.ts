@@ -34,8 +34,8 @@ import type {
   ToolMedia,
   ToolRegistry,
 } from "../tools/registry.js";
-// 摘 `media` 的那把尺子只有一份：注册表在序列化之前用它，这里在落库之前用同一个（形状判据
-// 分两份写，迟早出现「注册表认得是图、落库那侧不认得」）。registry 不 import runtime，无环。
+// `media` 的形状判据只有一份：注册表在序列化前用它，此处在落库前用同一个。判据写成两份会
+// 导致注册表识别为图片、落库侧不识别的分歧。registry 不 import runtime，无循环依赖。
 import { splitToolMedia } from "../tools/registry.js";
 import { SKILL_NARROWING_EXEMPT } from "../tools/policy.js";
 import type { ProviderStore } from "../provider/store.js";
@@ -100,11 +100,11 @@ export class ModelRegistry {
     string,
     { model: V4LanguageModel; info: ModelRow }
   >();
-  /** 当前处于 `down` 且还在冷却期内的 `models.id`。**派生自库**：`rebuild()` 从库里重算，
-   *  `recordFailure()` 写库的同一次调用里补一份 —— 进程内这份只是让调用路径不必每次查库。 */
+  /** 当前处于 `down` 且仍在冷却期内的 `models.id`。派生自数据库：`rebuild()` 从库重算，
+   *  `recordFailure()` 在写库的同一次调用中同步一份，进程内副本仅用于避免每次调用查库。 */
   readonly #down = new Set<string>();
 
-  /** @param onProviderUnusable rebuild 时跳过某个 provider 的原因。装配方拿它记一条 warn。 */
+  /** @param onProviderUnusable rebuild 跳过某个 provider 的原因，由装配方据此记录 warn。 */
   constructor(
     private readonly db: Sqlite,
     private readonly providers: ProviderStore,
@@ -115,10 +115,10 @@ export class ModelRegistry {
   ) {}
 
   /**
-   * `provider.healthDownCooldownMinutes`：判成 `down` 的 provider 只在冷却期内被排除，过期后
-   * 下一次 `rebuild()` 放它回来再试一次。此前 `down` 是**永久**的 —— 一次网络抖动就能让一个
-   * provider 从模型链里消失，直到有人去 WebUI 手工点「测试连通性」。
-   * `provider.healthCheckCron` 定期调 `rebuild()`，冷却因此是自愈的。
+   * `provider.healthDownCooldownMinutes`：判为 `down` 的 provider 仅在冷却期内被排除，
+   * 期满后下一次 `rebuild()` 重新纳入并再试一次。此前 `down` 是永久状态，一次网络抖动即可
+   * 使某个 provider 从模型链中消失，直至运维在 WebUI 手工执行连通性测试。
+   * `provider.healthCheckCron` 定期调用 `rebuild()`，冷却期因此可自愈。
    */
   rebuild(cooldownMinutes = 30): void {
     this.#models.clear();
@@ -129,11 +129,11 @@ export class ModelRegistry {
     this.#down.clear();
     const cutoff = Date.now() - cooldownMinutes * 60_000;
     /**
-     * **冷却到期要写回库，不能只在这里放行。** 此前判据只在这一句 SELECT 里：过了冷却的 provider
-     * 重新进链、也从 `#down` 消失，可库里那行仍是 `health_state='down'` 且 `health_fail_count>=3`
-     * —— 于是它带着满格计数承接真实流量，下一次超时（4 >= 3）当场再 down 30 分钟，成了
-     * 「30 分钟 down / 一个 cron 间隔 up」的抖动，而 WebUI 全程显示 down。`health_error` 留着
-     * 当「上次失败原因」给界面看，`health_checked_at` 不动（它是上次判定的时间）。
+     * 冷却期满必须写回数据库，不能仅在此处放行。此前判据只存在于下面这条 SELECT：冷却期满的
+     * provider 重新进入模型链、也从 `#down` 移除，但库中该行仍为 `health_state='down'` 且
+     * `health_fail_count>=3`。它带着已满的失败计数承接真实流量，下一次超时（4 >= 3）立即再次
+     * down 30 分钟，形成 30 分钟 down / 一个 cron 间隔 up 的振荡，且 WebUI 全程显示 down。
+     * `health_error` 保留作为界面上的上次失败原因，`health_checked_at` 不动（它记录上次判定时间）。
      */
     this.db
       .prepare(
@@ -146,9 +146,9 @@ export class ModelRegistry {
       WHERE enabled=1 AND COALESCE(health_state,'up') <> 'down'`,
       )
       .all() as ProviderRow[];
-    // down 的 provider 被上面那句整条滤掉，它的模型也就不在任何链里 —— 所以「这个候选是不是
-    // down」必须单独查一次，不能反过来从链里推（`isDown` 判的正是已经不在链里的那些）。
-    // 冷却判据不用在这里重复：过了期的行上面那句 UPDATE 已经改回 `up` 了。
+    // down 的 provider 已被上一条 SELECT 整体滤除，其模型不在任何链中，因此候选是否 down 必须
+    // 单独查询，不能从链反推（`isDown` 判定的正是已不在链中的那些）。此处无需重复冷却期判据：
+    // 期满的行已被上面那条 UPDATE 改回 `up`。
     for (const row of this.db
       .prepare(
         `SELECT m.id FROM models m JOIN providers p ON p.id=m.provider_id
@@ -159,14 +159,14 @@ export class ModelRegistry {
     const providerInstances = new Map<string, Provider>();
     for (const provider of providerRows) {
       /**
-       * **一个 provider 坏掉不能带走全部别名。** `ProviderStore.key()` 在密文解不开时抛（换过
-       * `LUOLI_MASTER_KEY` 就会），`JSON.parse` 在 `headers_json` 是坏 JSON 时抛 —— 而注册表在
-       * 函数开头已经清空了，异常往上抛的结果是**所有别名一起没了**；调用点又是同步的
-       * `POST /api/providers` / `PATCH /api/models/:id`，于是端点 500 且运行时从此没有任何可用
-       * 模型，直到下一次成功的 rebuild（docs/27 · C-01）。`app.ts` 对同一列早就是 try/catch 兜的。
+       * 单个 provider 失效不得波及全部别名。`ProviderStore.key()` 在密文解密失败时抛出
+       * （更换 `LUOLI_MASTER_KEY` 后即会发生），`JSON.parse` 在 `headers_json` 非法时抛出；
+       * 而注册表已在函数开头清空，异常上抛将导致所有别名同时丢失。调用点又是同步的
+       * `POST /api/providers` / `PATCH /api/models/:id`，结果是端点 500 且运行时不再有任何可用
+       * 模型，直到下一次 rebuild 成功（docs/27 · C-01）。`app.ts` 对同一列早已用 try/catch 兜底。
        *
-       * 跳过的那一个记成 `down`：界面能说出原因，冷却期过后下一次 rebuild 会再试一次，
-       * 而「一个别名都不剩」正是 `all_providers_down` 该响的条件。
+       * 被跳过的 provider 记为 `down`：界面可展示原因，冷却期满后下一次 rebuild 会重试，
+       * 而别名全部为空正是 `all_providers_down` 应当触发的条件。
        */
       try {
         const apiKey = this.providers.key(provider.id);
@@ -212,8 +212,8 @@ export class ModelRegistry {
       )
       .all() as ModelRow[];
     const byId = new Map(modelRows.map((model) => [model.id, model]));
-    // 探测用的候选按 `sort` 取每个 provider 的第一个启用模型 —— 与它在哪个别名链里无关：
-    // 一个还没进任何别名的 provider 同样该被探（否则它永远是 `up`，直到有人手工点测试连接）。
+    // 探测候选按 `sort` 取每个 provider 的首个启用模型，与它属于哪条别名链无关：尚未进入任何
+    // 别名的 provider 同样需要被探测，否则它将恒为 `up`，直到有人手工执行连通性测试。
     for (const info of modelRows) {
       if (this.#probes.has(info.providerId)) continue;
       const probe = providerInstances
@@ -258,7 +258,7 @@ export class ModelRegistry {
     }
   }
 
-  /** 别名缺失时的回退顺序（04 §5.2）。模型和采样参数必须落在同一个别名上，否则会串味。 */
+  /** 别名缺失时的回退顺序（04 §5.2）。模型与采样参数必须取自同一个别名，否则两者会错配。 */
   #pick(alias: string): string | null {
     return (
       [alias, "main", "high", "low"].find((candidate) =>
@@ -281,8 +281,8 @@ export class ModelRegistry {
   info(alias: string): ModelRow | null {
     return this.#info.get(alias) ?? null;
   }
-  /** 链上的每一个候选都要能反查到：只扫 `#info`（每个别名的链首）会让 fallback 到第二个模型之后的
-   *  计价、`markProviderDown` 全部落空（docs/20 · W-AGENT-01 / W-LEDGER-01）。 */
+  /** 链上每个候选都必须可反查：只扫描 `#info`（各别名的链首）会使 fallback 到第二个模型之后的
+   *  计价与 `markProviderDown` 全部失效（docs/20 · W-AGENT-01 / W-LEDGER-01）。 */
   infoByModelId(modelId: string): ModelRow | null {
     for (const info of this.#info.values())
       if (info.modelId === modelId) return info;
@@ -291,7 +291,7 @@ export class ModelRegistry {
         if (candidate.info.modelId === modelId) return candidate.info;
     return null;
   }
-  /** modelId → 别名。`prefer` 命中时优先返回它：链内 fallback 换的是模型，别名没变。 */
+  /** modelId → 别名。`prefer` 命中时优先返回它：链内 fallback 更换的是模型，别名不变。 */
   aliasOf(modelId: string, prefer?: string): string | null {
     if (
       prefer &&
@@ -306,10 +306,10 @@ export class ModelRegistry {
     return null;
   }
   /**
-   * `#down` 的粒度**只有这一份**：provider 名下所有模型行一起进、一起出。401/403 那条路
-   * （`markProviderDown`）曾经只加命中的那一行，而按计数判死那条路（`recordFailure`）加的是全部
-   * —— 同一个凭据被拒的 provider 在一条链上挂了两个模型时，第二个不被 `isDown` 跳过，而 401 在
-   * 中间件里是短路 `throw`：这一轮既白烧一次注定 401 的往返，也不会继续往下 fallback。
+   * `#down` 的粒度只有一种：provider 名下所有模型行同时加入、同时移除。401/403 路径
+   * （`markProviderDown`）此前只加入命中的那一行，而按计数判定失效的路径（`recordFailure`）
+   * 加入全部。当同一凭据被拒的 provider 在一条链上挂了两个模型时，第二个不会被 `isDown` 跳过，
+   * 而 401 在中间件里是短路 `throw`：本轮既浪费一次必然 401 的往返，也不会继续向下 fallback。
    */
   #downRows(providerId: string, down: boolean): void {
     for (const row of this.db
@@ -330,7 +330,7 @@ export class ModelRegistry {
       this.#downRows(row.providerId, true);
     }
   }
-  /** `models.id` → `provider_id`。`recordFailure` / `recordSuccess` 都按行反查，不认模型名。 */
+  /** `models.id` → `provider_id`。`recordFailure` / `recordSuccess` 均按行反查，不按模型名。 */
   #providerOf(candidate: { id: string; rowId?: string }): string | null {
     const rowId = candidate.rowId ?? this.infoByModelId(candidate.id)?.id;
     if (!rowId) return null;
@@ -357,16 +357,16 @@ export class ModelRegistry {
   }
 
   /**
-   * 调用路径上的失败计入同一个「连续失败」计数器（`docs/04 §5.3`）。**不在这里 `rebuild()`**：
-   * 轮次中途换掉 `#chains` 会让这一步的记账反查不到服务它的那一行，落到链首的价格上
-   * （`step-observers` 的 `fallbackInfo` 兜底）。跳过失效候选靠 `isDown`，链本身等下一次
-   * `rebuild()`（健康检查 cron 或任何配置改动）收拾。
+   * 调用路径上的失败计入同一个连续失败计数器（`docs/04 §5.3`）。此处不调用 `rebuild()`：
+   * 轮次中途替换 `#chains` 会使本步记账反查不到服务它的那一行，从而落到链首的价格上
+   * （由 `step-observers` 的 `fallbackInfo` 兜底）。跳过失效候选由 `isDown` 负责，链本身留待
+   * 下一次 `rebuild()`（健康检查 cron 或任意配置变更）重建。
    *
-   * 代价是：如果这一次把最后一个 provider 标成了 down，`all_providers_down` 要等下一次 cron
-   * 才响（`rebuildModels` 那条尾巴在 `main.ts`）。
+   * 代价是：若本次将最后一个 provider 标为 down，`all_providers_down` 要等下一次 cron 才触发
+   * （`rebuildModels` 的收尾在 `main.ts`）。
    *
-   * **一次调用一个候选只记一次**，重试不各记一次 —— 那道闸在调用点（`onCandidateFailed` 的
-   * `willRetry`），因为「还会不会再试」只有中间件知道。
+   * 一次调用中同一候选只记一次，重试不重复计数。该闸设在调用点（`onCandidateFailed` 的
+   * `willRetry`），因为是否还会重试只有中间件知道。
    */
   recordFailure(
     candidate: { id: string; rowId?: string },
@@ -386,9 +386,9 @@ export class ModelRegistry {
   }
 
   /**
-   * 成功服务一次就把连续失败计数归零（`docs/04 §5.3`）。**少了这一条，「连续」就是「累计」**：
-   * 跨轮次零散攒够三次超时也能判死一个一直在服务的 provider，而计数在库里、重启也不清。
-   * 常态是 no-op（`recordProviderServed` 自己带守卫），所以每一步调一次不会多一次真实写入。
+   * 成功服务一次即将连续失败计数归零（`docs/04 §5.3`）。缺少这一条，连续失败会退化为累计失败：
+   * 跨轮次零散累积三次超时即可判死一个持续正常服务的 provider，且计数存于库中、重启不清零。
+   * 常态是 no-op（`recordProviderServed` 自带守卫），因此每步调用一次不会产生额外写入。
    */
   recordSuccess(candidate: { id: string; rowId?: string }): void {
     const providerId = this.#providerOf(candidate);
@@ -419,13 +419,13 @@ export class ModelRegistry {
   }
 
   /**
-   * 这个别名**当前服务的那个模型**支不支持看图。`capabilities_json` 一直在库里、SELECT 也一直
-   * 在拉（`ModelRow.capabilities`），只是从来没人 `JSON.parse` 过 —— `docs/03:392` 那句
-   * 「运行时不读这一列」说的就是它，而 `docs/04 §5.2` / `docs/08 §7.2` / `AC-PROV-009`
-   * 三处都要求含图轮次自动切 `vision`。
+   * 该别名当前服务的模型是否支持图像输入。`capabilities_json` 一直存于库中、SELECT 也一直在拉
+   * （`ModelRow.capabilities`），只是从未被 `JSON.parse` 解析过 —— `docs/03:392` 所述运行时不读
+   * 这一列即指此，而 `docs/04 §5.2` / `docs/08 §7.2` / `AC-PROV-009` 三处都要求含图轮次自动
+   * 切换到 `vision`。
    *
-   * **必须先 `has`**：`info()` 走 `#pick`，别名不存在时会静默回落到 `main`，直接问
-   * `supportsVision('vision')` 于是永远得到 main 的答案 —— 「有没有 vision 别名」这个判断会恒为真。
+   * 必须先执行 `has`：`info()` 走 `#pick`，别名不存在时会静默回落到 `main`，直接调用
+   * `supportsVision('vision')` 将永远得到 main 的结果，使 vision 别名是否存在的判断恒为真。
    */
   supportsVision(alias: string): boolean {
     if (!this.#models.has(alias)) return false;
@@ -445,26 +445,26 @@ export class ModelRegistry {
   }
 }
 /**
- * tool-result 的 output 必须是 SDK 的带类型形状（`{type:'json'|'text'|…, value}`），裸对象会让
- * 整个 prompt 过不了 ModelMessage 校验。历史上写进库的是裸对象，而 parts 是持久化的 ——
- * 只改写入端的话，凡是调过一次工具的会话在 `/new` 之前每轮都会失败，所以读出侧也要兜一层。
- * 只补 output，不碰判别字段（docs/02 不变量）。
+ * tool-result 的 output 必须是 SDK 的带类型形状（`{type:'json'|'text'|…, value}`），裸对象会使
+ * 整个 prompt 无法通过 ModelMessage 校验。历史上写入库的是裸对象，而 parts 是持久化的：
+ * 仅修改写入端的话，调用过工具的会话在 `/new` 之前每轮都会失败，因此读出侧也需兜底。
+ * 只补 output，不修改判别字段（docs/02 不变量）。
  */
 /**
- * 上下文里存**引用**不存字节。
+ * 上下文中存引用而非字节。
  *
- * 带图的 tool-result 是 `{type:'content', value:[…, {type:'file', data}]}`（`toolModelOutput`
- * 产出、SDK 原样发给 provider 的那份）。它落进 `context_messages.parts_json` 会两头出事：
- * 每次物化都重放几百 KB base64；而硬截断 `truncatePartStrings` 走进 `output.value[].data`
- * 会把它切一半 —— `tool-result` 不在 `OPAQUE_PART_TYPES` 里，拿不到「要么原样要么整体换占位」
- * 那道保护，而**截断结果是持久化的**，该会话在 `/new` 之前每轮都被 provider 拒收（docs/02 红线）。
+ * 带图的 tool-result 形如 `{type:'content', value:[…, {type:'file', data}]}`（由 `toolModelOutput`
+ * 产出、SDK 原样发给 provider）。它写入 `context_messages.parts_json` 会引发两个问题：每次物化
+ * 都重放数百 KB base64；硬截断 `truncatePartStrings` 进入 `output.value[].data` 会将其切断 ——
+ * `tool-result` 不在 `OPAQUE_PART_TYPES` 中，得不到「原样保留或整体替换为占位」的保护，而截断
+ * 结果是持久化的，该会话在 `/new` 之前每轮都会被 provider 拒收（docs/02 红线）。
  *
- * 图片跨轮靠的是那条顶层 `webasset://` part（`isImagePart` 认得它，于是 vision 切换、`capImages`、
- * `degradeImages` 全部适用），不靠工具结果 —— 所以这里摘掉不丢信息。
- * 放在 `normalizeToolOutput` 里而不是只在写入侧：读出侧也过这一层，库里已经有的那些同样被兜住。
+ * 图片跨轮依靠顶层的 `webasset://` part（`isImagePart` 可识别，因此 vision 切换、`capImages`、
+ * `degradeImages` 均适用），不依赖工具结果，故此处摘除不丢失信息。
+ * 置于 `normalizeToolOutput` 而非仅在写入侧：读出侧同样经过这一层，库中已有的数据也被覆盖。
  */
 const PERSISTED_MEDIA_PLACEHOLDER =
-  "[图片已另存为附件，工具结果里不重复存字节]";
+  "[图片已另存为附件，工具结果中不重复存储字节]";
 function stripToolResultMedia(output: { type: string; value: unknown }): {
   type: string;
   value: unknown;
@@ -477,18 +477,18 @@ function stripToolResultMedia(output: { type: string; value: unknown }): {
       touched = true;
       return { type: "text", text: PERSISTED_MEDIA_PLACEHOLDER };
     });
-    // 判别字段一个不碰（docs/02 红线 14）：只换 `value` 里那几项，`type` 原样。
+    // 判别字段一律不动（docs/02 红线 14）：只替换 `value` 中的对应项，`type` 保持原样。
     return touched ? { ...output, value } : output;
   }
   /**
-   * **落库走的是这一支。** AI SDK 对客户端执行的工具，把 `execute()` 的返回值**原样**放进
-   * `step.content[].output`（`asContent`）—— `toModelOutput` 只作用于发给 provider 的 messages。
-   * 于是 `stepToolResults` 手里是注册表那份带 `media` 的原始输出，`normalizeToolOutput` 给它套上
-   * `{type:'json'}` 就落库了。只认上面那个 `content` 形状的话，摘的是一份**从不落库**的形状，
-   * 而几百 KB base64 照旧每轮重放（实测 `parts_json` 单条 300 KB）。
+   * 落库走的是这一分支。AI SDK 对客户端执行的工具，将 `execute()` 的返回值原样放入
+   * `step.content[].output`（`asContent`），`toModelOutput` 只作用于发给 provider 的 messages。
+   * 因此 `stepToolResults` 拿到的是注册表那份带 `media` 的原始输出，`normalizeToolOutput` 为其
+   * 套上 `{type:'json'}` 后即落库。若只识别上面的 `content` 形状，摘除的是一种从不落库的形状，
+   * 数百 KB base64 仍会每轮重放（实测 `parts_json` 单条 300 KB）。
    *
-   * 摘掉不丢信息：这一份的正文（`content` 字段）里已经有工具自己那句话，图片跨轮靠的是顶层
-   * `webasset://` part。换成一句占位文本而不是删掉键 —— 模型据此知道「这里本来有张图」。
+   * 摘除不丢失信息：该结构的正文（`content` 字段）已包含工具自身的输出，图片跨轮依靠顶层的
+   * `webasset://` part。替换为占位文本而非删除键，使模型知悉此处原本存在图片。
    */
   if (
     output.value &&
@@ -513,8 +513,8 @@ export function normalizeToolOutput(output: unknown): {
     if (typeof typed.type === "string" && "value" in typed)
       return stripToolResultMedia(typed as { type: string; value: unknown });
   }
-  // **这一支也要过一遍摘除**：注册表交回的原始输出（`{ok, content, truncated, media}`）没有 `type`
-  // 字段，走的正是这里 —— 而它就是落库那一份。漏掉它等于摘了个从不落库的形状。
+  // 这一分支同样要执行摘除：注册表返回的原始输出（`{ok, content, truncated, media}`）没有 `type`
+  // 字段，走的正是这里，而它就是落库的那一份。遗漏它等于只处理了一种从不落库的形状。
   return stripToolResultMedia({ type: "json", value: output ?? null });
 }
 export function toolResultPart(
@@ -536,16 +536,16 @@ export function toolResultPart(
 }
 /**
  * 工具输出 → SDK 的 tool-result 形状。带 `media` 时产出多模态的 `{type:'content'}`，
- * 否则照 SDK 的默认行为（字符串走 `text`、其余走 `json`）。
+ * 否则遵循 SDK 默认行为（字符串走 `text`、其余走 `json`）。
  *
- * 这是**图片当步就能被看到的唯一通道**：`context.appendDelta` 写的是 `turn.delta`，而
- * `prepareStep` 拿到的 `messages` 由 SDK 给 —— 轮内注入的 part 到不了本步的请求体，
- * 只有骑在工具结果上才行。跨轮那一份由 `webasset://` 顶层 part 负责。
+ * 这是图片在当步即可被模型看到的唯一通道：`context.appendDelta` 写入的是 `turn.delta`，而
+ * `prepareStep` 拿到的 `messages` 由 SDK 提供，轮内注入的 part 无法进入本步请求体，只有附着在
+ * 工具结果上才行。跨轮的那一份由顶层 `webasset://` part 负责。
  */
 /**
- * SDK 的 `JSONValue` 只从 `@ai-sdk/provider-utils` 导出，而 core 不直接依赖那个包。
- * 工具输出按约定是 JSON 可序列化的（`#normalizeOutput` 就 `JSON.stringify` 它），所以这里写一个
- * 等价的递归类型，而不是把 `unknown` 硬塞过去 —— 塞过去等于把这一处的类型检查整个关掉。
+ * SDK 的 `JSONValue` 只从 `@ai-sdk/provider-utils` 导出，而 core 不直接依赖该包。
+ * 工具输出按约定是 JSON 可序列化的（`#normalizeOutput` 对其执行 `JSON.stringify`），因此此处
+ * 定义一个等价的递归类型，而不是传入 `unknown` —— 后者等于关闭此处的全部类型检查。
  */
 type JsonValue =
   null | string | number | boolean | JsonValue[] | { [key: string]: JsonValue };
@@ -583,9 +583,9 @@ export function toolModelOutput(output: unknown): ToolModelOutput {
   };
 }
 /**
- * 注册表工具 → SDK 的 `ToolSet`。**只有一份**：主 agent 与子 agent 此前各写一遍同样的三行，
- * 而 `toModelOutput` 这类钩子加漏一处的表现是「主 agent 能看图、子 agent 不能」，
- * 而且要真跑一次带图的子 agent 才看得见。
+ * 注册表工具 → SDK 的 `ToolSet`。实现只有一份：主 agent 与子 agent 此前各写一遍相同的三行，
+ * 而 `toModelOutput` 这类钩子漏加一处的表现是主 agent 能识别图片、子 agent 不能，且必须实际
+ * 运行一次带图的子 agent 才能发现。
  */
 export function toolSetFor(
   registry: ToolRegistry,
@@ -604,17 +604,16 @@ export function toolSetFor(
   return set;
 }
 /**
- * 一步的工具结果，**`tool-error` 必须一起收**。
+ * 单步的工具结果，`tool-error` 必须一并收集。
  *
- * AI SDK 的 `step.toolResults` 是 `content.filter(p => p.type === 'tool-result')`；工具抛错
- * 或输入校验失败时产出的是 `tool-error` part，于是被整个滤掉 —— `appendContext` 只把
- * tool-call 追进 delta，上下文里就留下一条**没有配对结果的 tool-call**。轮内看不出来
- * （SDK 自己的 `responseMessages` 会把错误转成合法的 tool-result 发上线），下一轮起该会话
- * 每次请求都是畸形的：provider 0 步返回 → `NoOutputGeneratedError` → 进程崩。实测
- * logs/2026-08-18 22:17 与 23:19 两次，起因是 `get_message({messageId:0})` 撞上
- * `z.number().int().positive()`。
+ * AI SDK 的 `step.toolResults` 等价于 `content.filter(p => p.type === 'tool-result')`；工具抛错
+ * 或输入校验失败时产出的是 `tool-error` part，会被整体滤除 —— `appendContext` 只将 tool-call
+ * 追加进 delta，上下文中于是留下一条没有配对结果的 tool-call。该问题在轮内不可见（SDK 自身的
+ * `responseMessages` 会把错误转成合法的 tool-result 发送），但从下一轮起该会话的每次请求都是
+ * 畸形的：provider 返回 0 步 → `NoOutputGeneratedError` → 进程崩溃。实测于 logs/2026-08-18
+ * 22:17 与 23:19 两次，起因是 `get_message({messageId:0})` 未通过 `z.number().int().positive()`。
  *
- * 形状照 SDK 真正发上线的那份来（`output: {type:'error-text', value}`），不另造一种。
+ * 形状与 SDK 实际发送的那份一致（`output: {type:'error-text', value}`），不另行定义。
  */
 function stepToolResults(
   content: readonly unknown[],
@@ -650,9 +649,9 @@ function stepToolResults(
   return results;
 }
 /**
- * 按别名构造带 fallback / 重试包装的模型。包装必须做在「按别名解析」这一层：`prepareStep` 每一步
- * 都会重设 model，只包构造时那一个等于整条链从第 0 步起就没被用过（docs/20 · W-AGENT-01）。
- * 别名没有链（registry 只认识它的回退目标）时退回裸模型，行为与 `resolve()` 一致。
+ * 按别名构造带 fallback / 重试包装的模型。包装必须做在按别名解析这一层：`prepareStep` 每一步
+ * 都会重设 model，只包装构造时的那一个等于整条链从第 0 步起就未被使用（docs/20 · W-AGENT-01）。
+ * 别名没有链（registry 只识别其回退目标）时退回裸模型，行为与 `resolve()` 一致。
  */
 export function aliasModel(
   registry: ModelRegistry,
@@ -673,13 +672,13 @@ export function aliasModel(
 }
 
 const SENDABLE_ROLES = new Set(["user", "assistant", "tool"]);
-/** 系统旁白的标记。`load_skill` 注入 skill 正文时也用它 —— 同一个 wire 标记只能有一份定义。 */
+/** 系统旁白标记。`load_skill` 注入 skill 正文时复用它 —— 同一个 wire 标记只能有一份定义。 */
 export const NOTE_PREFIX = "（系统提示）";
 /**
- * AI SDK v7 起 `image` part 已废弃：`convertToLanguageModelPrompt` 每遇到一个就打一条
- * DeprecationWarning，然后原样转成 `{type:'file', data, mediaType}` 再发出去。写入侧
- * （`telegram/media.ts`）已经直接产出 `file`，这里兜的是库里那些历史 part —— parts 是持久化的，
- * 不在读出侧转，老会话就得一直刷警告到图片滚出窗口为止。
+ * AI SDK v7 起 `image` part 已废弃：`convertToLanguageModelPrompt` 每遇到一个即输出一条
+ * DeprecationWarning，随后原样转成 `{type:'file', data, mediaType}` 发出。写入侧
+ * （`telegram/media.ts`）已直接产出 `file`，此处兜底的是库中的历史 part —— parts 是持久化的，
+ * 不在读出侧转换的话，旧会话会持续输出警告，直到图片滚出上下文窗口。
  */
 function imageToFilePart(
   part: Record<string, unknown>,
@@ -693,23 +692,23 @@ function imageToFilePart(
   };
 }
 /**
- * system 只能出现在 instructions 里：AI SDK v7 的 `standardizePrompt` 在 `allowSystemInMessages`
- * 未开启时直接拒收 messages 里的 system 消息，整轮请求当场 InvalidPromptError（docs/20 · W-CTX-01）。
- * 写入侧已经不再产生这种消息（`assertValidShape` 的 role 白名单挡着），这里兜的是 0006 之前
- * 写进库、又没跑迁移的历史数据 —— parts 是持久化的，读出侧不兜就是会话级永久损坏。
+ * system 只能出现在 instructions 中：AI SDK v7 的 `standardizePrompt` 在 `allowSystemInMessages`
+ * 未开启时直接拒收 messages 里的 system 消息，整轮请求立即 InvalidPromptError（docs/20 · W-CTX-01）。
+ * 写入侧已不再产生这类消息（由 `assertValidShape` 的 role 白名单拦截），此处兜底的是 0006 之前
+ * 写入库且未执行迁移的历史数据 —— parts 是持久化的，读出侧不兜底即为会话级永久损坏。
  */
 /**
- * `attachment://<id>` / `webasset://<id>` 换回 base64。文件丢了就整体降级成一句占位文本，
- * **不能抛** —— parts 是持久化的，这里抛一次等于该会话在 `/new` 之前每轮都失败；而「不透明
- * part 要么原样保留、要么整体换成占位文本」正是 docs/02 的不变量（docs/24 · R-MEDIA-01）。
+ * `attachment://<id>` / `webasset://<id>` 还原为 base64。文件丢失时整体降级为占位文本，
+ * 不得抛出 —— parts 是持久化的，此处抛出一次即导致该会话在 `/new` 之前每轮都失败；而不透明
+ * part 要么原样保留、要么整体替换为占位文本，正是 docs/02 的不变量（docs/24 · R-MEDIA-01）。
  *
- * 两个 scheme 走同一个函数、同一条兜底：`attachment://` 是 Telegram 发来的附件
- * （`attachments` 表），`webasset://` 是 `web_fetch` / MCP 抓回来的图（`web_assets` 表）。
+ * 两个 scheme 共用同一个函数与同一条兜底：`attachment://` 是 Telegram 发来的附件
+ * （`attachments` 表），`webasset://` 是 `web_fetch` / MCP 抓取的图片（`web_assets` 表）。
  * 分表是因为 `attachments` 整体是 Telegram 形状的（`message_id NOT NULL`、`tg_file_id NOT NULL`），
- * 网页图只能填假值 —— 而这个仓库的先例是「摘除比伪造安全」。
+ * 网页图片只能填入伪造值，而本仓库的先例是摘除比伪造安全。
  */
-/** `web_fetch` / MCP 抓回来的图。**同一个 wire 标记只能有一份定义**（照 `NOTE_PREFIX` 的先例）：
- *  写入侧在 `media/web-assets.ts`、读出侧在下面，各写一遍就等于「存进去的和取出来的不是一个前缀」。 */
+/** `web_fetch` / MCP 抓取的图片。同一个 wire 标记只能有一份定义（沿用 `NOTE_PREFIX` 的先例）：
+ *  写入侧在 `media/web-assets.ts`、读出侧在下方，各写一份将导致存入与取出的前缀不一致。 */
 export const WEB_ASSET_SCHEME = "webasset://";
 const ASSET_SCHEMES = ["attachment://", WEB_ASSET_SCHEME] as const;
 function assetRef(part: Record<string, unknown>): string | null {
@@ -749,47 +748,47 @@ function hydrateAttachment(
 
 export interface ContextMessageOptions {
   /**
-   * 易变段正文（TOOL CATALOG + 记忆 + RUNTIME）。给了就带 nonce 信封追加成请求体**最后一条**
-   * user 消息；不给就一条都不追加。它是每轮现算的渲染产物，**绝不入库、不进 delta** ——
-   * 持久化它等于把上一轮的时钟腌成历史事实。
+   * 易变段正文（TOOL CATALOG + 记忆 + RUNTIME）。传入时带 nonce 信封追加为请求体的最后一条
+   * user 消息，不传则不追加任何内容。它是每轮实时计算的渲染产物，不入库、不进 delta ——
+   * 持久化它等于把上一轮的时钟固化成历史事实。
    */
   volatile?: string;
-  /** Anthropic 专用：在已提交历史的最后一条消息上打移动缓存断点（其余 provider 是隐式前缀缓存，不需要）。 */
+  /** Anthropic 专用：在已提交历史的最后一条消息上设置移动缓存断点（其余 provider 用隐式前缀缓存，无需设置）。 */
   cacheBreakpoint?: boolean;
-  /** 读出侧自愈补了几条缺失的 tool-result。给了就能在日志里看见「这个会话的历史是坏的」。 */
+  /** 读出侧自愈补齐的缺失 tool-result 条数。传入后可在日志中观察到该会话历史已损坏。 */
   onOrphanToolCalls?(toolCallIds: string[]): void;
   /**
-   * 图片整体换成占位文本。把不透明 part 原样发给一个不认它的模型，宽容的 provider 静默忽略、
-   * 严格的直接 400，两种都比一句「我看不了图」糟（`docs/08 §7.2`）。
+   * 将图片整体替换为占位文本。把不透明 part 原样发给不支持它的模型，宽容的 provider 静默忽略、
+   * 严格的直接返回 400，两者都比明确告知不支持图像更糟（`docs/08 §7.2`）。
    *
-   * - `'all'`：本轮的图与历史的图一起换。含图轮次既没有 `vision` 别名、当前别名自己也不支持
-   *   看图时走这一档，回复末尾还要追加一句提示。
-   * - `'history'`：只换 **snapshot 里**那些（= 更早轮次留在窗口里的图）。`media.visionScope='turn'`
-   *   且本轮没有新图、而这一轮的模型看不了图时走这一档 —— 用户这一轮发的是纯文本，没有理由
-   *   为了三轮前那张图切走贵的那一档，也没有理由给他一句「这张图我没能真的看到」。
+   * - `'all'`：本轮图片与历史图片一并替换。含图轮次既没有 `vision` 别名、当前别名本身也不支持
+   *   图像输入时走这一档，回复末尾还需追加一句提示。
+   * - `'history'`：仅替换 snapshot 中的图片（即更早轮次留在窗口内的）。`media.visionScope='turn'`
+   *   且本轮无新图、而本轮模型不支持图像输入时走这一档 —— 用户本轮发送的是纯文本，没有理由
+   *   为三轮前的一张图切换到成本更高的别名，也没有理由提示用户图片未被查看。
    */
   degradeImages?: "all" | "history";
 }
 
-/** 补出来的那条结果的正文。不伪造成功，只如实说结果没了（照 `hydrateAttachment` 的占位先例）。 */
-const ORPHAN_TOOL_RESULT = "[工具结果缺失：这次调用的结果没有被记录下来]";
-/** `degradeImages` 时替掉图片的占位文本，以及回复末尾那句提示（`docs/08 §7.2`）。 */
-const IMAGE_UNSUPPORTED = "[图片：当前模型不支持看图，本轮没能查看]";
+/** 补齐结果的正文。不伪造成功，只如实说明结果已丢失（沿用 `hydrateAttachment` 的占位先例）。 */
+const ORPHAN_TOOL_RESULT = "[工具结果缺失：本次调用的结果未被记录]";
+/** `degradeImages` 替换图片时使用的占位文本，以及回复末尾的提示语（`docs/08 §7.2`）。 */
+const IMAGE_UNSUPPORTED = "[图片：当前模型不支持看图，本轮未能查看]";
 export const VISION_UNSUPPORTED_NOTICE =
-  "（当前模型不支持看图，这张图我没能真的看到。）";
+  "（当前模型不支持看图，这张图未能查看。）";
 /**
- * `degradeImages:'history'` 的占位文本。**写清楚怎么才能看到**：这一档下重新发一次或引用那条
- * 消息就会被算成「本轮的图」，于是切回能看图的别名 —— 不写的话模型只知道自己看不到，
- * 只能猜或者绕远路（那正是 `docs/00 §2` 里那 11 步的由来）。
+ * `degradeImages:'history'` 的占位文本。需明确写出恢复方式：在这一档下重新发送或引用该条消息
+ * 会被计为本轮图片，从而切回支持图像输入的别名。若不写明，模型只知道自身无法查看，只能猜测或
+ * 绕行（`docs/00 §2` 记录的 11 步操作即由此而来）。
  */
 const HISTORY_IMAGE_UNSUPPORTED =
-  "[图片：更早轮次里的图，当前模型不看图。要看的话请用户重新发一次或引用那条消息]";
+  "[图片：更早轮次的图片，当前模型不支持看图。如需查看，请用户重新发送或引用那条消息]";
 
 /**
- * 已经物化成 `ModelMessage` 的那一份里，把图片 part 整体换成占位文本 —— `prepareStep` 的当步兜底
- * （降档到一个看不了图的别名时用）。判据仍是 `isImagePart`：`contextMessages` 出来的图片是
- * `{type:'file', data, mediaType:'image/…'}`，与库里那份同一个判据。
- * 没有图的消息**原样返回同一个对象**：这一层每步都跑，无谓的浅拷贝会把整段前缀的引用换掉。
+ * 在已物化为 `ModelMessage` 的结构中将图片 part 整体替换为占位文本，用作 `prepareStep` 的当步
+ * 兜底（降档到不支持图像输入的别名时）。判据仍为 `isImagePart`：`contextMessages` 产出的图片是
+ * `{type:'file', data, mediaType:'image/…'}`，与库中的判据一致。
+ * 不含图片的消息原样返回同一对象：这一层每步都执行，多余的浅拷贝会替换整段前缀的引用。
  */
 function degradeImageParts(messages: ModelMessage[]): ModelMessage[] {
   return messages.map((message) => {
@@ -813,20 +812,20 @@ export function contextMessages(
   options?: ContextMessageOptions,
 ): ModelMessage[] {
   const source = [...turn.snapshot.messages, ...turn.delta];
-  // **读出侧自愈：没有配对结果的 tool-call 现补一条。** provider 见到这种形状会拒收整个请求
-  // （中转站的表现是 200 + 0 步），而 parts 是持久化的 —— 不在读出侧兜，该会话在 `/new` 之前
-  // 每轮都失败，实测能一路崩到进程被带走。写入侧的 `assertPairedToolCalls` 只管「不再产生新的」，
-  // 库里已经有的那些只能在这里救。
+  // 读出侧自愈：为没有配对结果的 tool-call 现场补一条。provider 遇到这种形状会拒收整个请求
+  // （中转站的表现是 200 + 0 步），而 parts 是持久化的：读出侧不兜底，该会话在 `/new` 之前每轮
+  // 都会失败，实测可导致进程终止。写入侧的 `assertPairedToolCalls` 只保证不再产生新的，
+  // 库中已存在的只能在此处修复。
   /**
-   * **按位置配对，不是全局集合。** 这里曾是一个 `Set<toolCallId>`：窗口内**任何位置**存在同名
-   * `toolCallId` 的 tool-result，那条真正没有结果的 tool-call 就不会被补。而 AI SDK 的
-   * `convertToLanguageModelPrompt` 是**有序**校验，于是它在发请求之前直接抛
+   * 按位置配对，而非全局集合。此处曾使用 `Set<toolCallId>`：窗口内任意位置存在同名 `toolCallId`
+   * 的 tool-result，真正缺少结果的那条 tool-call 就不会被补齐。而 AI SDK 的
+   * `convertToLanguageModelPrompt` 执行的是有序校验，会在发送请求前直接抛出
    * `MissingToolResultsError` —— 该会话每一轮都以 `Tool result is missing for tool call <id>.`
-   * 失败、`steps=0`，而**一条 `ctx.orphan_tool_call` 都没有**（本该救它的这段代码认为它已被回答），
-   * 直到窗口推过那条或 `/new`。真实 provider 的 id 是随机的所以概率低，但修法很小
-   * （docs/28 · L-CTX-01）。
+   * 失败、`steps=0`，且不会产生任何 `ctx.orphan_tool_call` 日志（本应修复它的这段代码认为它已被
+   * 回答），直到窗口推过该条或执行 `/new`。真实 provider 的 id 是随机的，故触发概率较低，
+   * 但修复成本很小（docs/28 · L-CTX-01）。
    *
-   * 判据两条：一条结果只认领一次；一条结果只认领**排在它之前**的调用。
+   * 判据两条：一条结果只认领一次；一条结果只认领排在它之前的调用。
    */
   const unclaimed = new Map<string, number>();
   for (const message of source) {
@@ -843,7 +842,7 @@ export function contextMessages(
     if (left > 0) unclaimed.set(id, left);
     else unclaimed.delete(id);
   };
-  /** 走到某条消息时先把**这条**里的结果划掉：它们属于更早的调用，不能再认领后面的。 */
+  /** 处理某条消息时先扣除该条内的结果：它们属于更早的调用，不能再认领其后的调用。 */
   const passResults = (parts: Array<Record<string, unknown>>): void => {
     for (const part of parts)
       if (part?.type === "tool-result" && typeof part.toolCallId === "string")
@@ -856,14 +855,14 @@ export function contextMessages(
   };
   const messages: ModelMessage[] = [];
   const repaired: string[] = [];
-  // 断点打在「已提交历史的最后一条」而不是整个数组的最后一条：本轮 delta 与工具循环的产出都排在
-  // 它之后，所以这段前缀下一轮原样还在，能整段命中。跟着最后一条走的话每步都换位置，等于没打。
-  // 补出来的结果会让下标漂移，所以 `stored` 数的是**产出侧**的条数，不是 snapshot 的条数。
+  // 断点设在已提交历史的最后一条，而非整个数组的最后一条：本轮 delta 与工具循环的产出均排在
+  // 其后，因此这段前缀在下一轮原样存在、可整段命中缓存。跟随最后一条则每步都会变更位置，
+  // 等同于未设置。补齐的结果会使下标偏移，因此 `stored` 统计的是产出侧的条数而非 snapshot 的条数。
   let stored = 0;
   for (const [index, message] of source.entries()) {
-    // `'history'` 只管 snapshot 那一段。判据用下标而不是 `origin`：被回复的那条消息渲染出来
-    // 也是 `origin:'background'`（`renderArchivedMessage`），按 origin 分等于把用户此刻指着的
-    // 那张图也当成历史抹掉。
+    // `'history'` 只作用于 snapshot 段。判据取下标而非 `origin`：被回复的那条消息渲染后同样是
+    // `origin:'background'`（`renderArchivedMessage`），按 origin 划分会把用户当前正引用的图片
+    // 一并当作历史抹除。
     const historical = index < turn.snapshot.messages.length;
     const degradeThis =
       options?.degradeImages === "all" ||
@@ -883,8 +882,8 @@ export function contextMessages(
         if (part?.type === "image") return imageToFilePart(part);
         if (part?.type === "file" && assetRef(part))
           return hydrateAttachment(part, attachments);
-        // 易变段现在和用户正文同处 user role，正文里能写出 `<system-instructions` 就等于能伪造它。
-        // 只改 text 字符串，判别字段一个不碰（docs/02 红线 14）。
+        // 易变段现与用户正文同处 user role，正文中若能写出 `<system-instructions` 即可伪造它。
+        // 只修改 text 字符串，判别字段一律不动（docs/02 红线 14）。
         if (typeof part?.text === "string")
           return { ...part, text: escapeSystemInstructions(part.text) };
         return part;
@@ -956,14 +955,14 @@ export interface MainAgentDependencies {
   };
   context: ContextEngine;
   agents?: AgentManager;
-  /** 自撰写工具的注册器。每轮开始同步一次，见 `runMainAgentInternal` 顶部那一行。 */
+  /** 自撰写工具的注册器。每轮开始时同步一次，见 `runMainAgentInternal` 开头的调用。 */
   customTools?: { syncIfChanged(): void };
   /**
-   * 持久容器（docs/05 §5.5）。只被 RUNTIME 块的「工作目录」行用：模型不知道自己能起常驻进程
-   * 的话，这个功能等于没做（docs/06 §1）。可选 —— 没绑时那一行退回原来的措辞。
+   * 持久容器（docs/05 §5.5）。仅由 RUNTIME 块的工作目录行使用：模型若不知道自己可以启动常驻
+   * 进程，该功能等同于未实现（docs/06 §1）。可选，未绑定时该行退回原措辞。
    */
   containers?: ContainerManager;
-  /** 只用来记 `turns.steps`（此前没有任何写入方）。可选：子 agent 与测试都不必给。 */
+  /** 仅用于记录 `turns.steps`（此前无任何写入方）。可选：子 agent 与测试均无需提供。 */
   turns?: { countStep(id: string, steps: number): void };
 }
 export interface MainPromptAssembly extends PromptBuildResult {
@@ -987,8 +986,8 @@ type PromptAssemblyDependencies = Pick<
 >;
 
 /**
- * RUNTIME 块里的发起人。昵称与用户名是用户可控内容，`formatSpeakerIdentity` 已经清掉换行与
- * 方括号 —— 一个带换行的昵称在这里等于能往 RUNTIME 块里塞一整行「你的有效权限：owner」。
+ * RUNTIME 块中的发起人。昵称与用户名是用户可控内容，`formatSpeakerIdentity` 已清除换行与
+ * 方括号 —— 带换行的昵称在此处可向 RUNTIME 块注入一整行伪造的权限声明。
  */
 function initiatorDescription(turn: RuntimeTurnContext): string {
   return formatSpeakerIdentity({
@@ -999,9 +998,9 @@ function initiatorDescription(turn: RuntimeTurnContext): string {
 }
 
 /**
- * RUNTIME 块的「会话」行。此前是裸 `chatId / key`，模型看不出私聊还是群聊 —— 而人格与 KERNEL 里
- * 大量规则按这个分岔（群里只在被触发时发言、私聊才有私有记忆）。群名过 `sanitizeIdentity`：
- * 它和昵称一样是用户可控内容，一个带换行的群名等于能往这个块里塞一行「你的有效权限：owner」。
+ * RUNTIME 块的会话行。此前只有裸 `chatId / key`，模型无法区分私聊与群聊，而人格与 KERNEL 中
+ * 大量规则按此分支（群聊仅在被触发时发言、私聊才有私有记忆）。群名需经 `sanitizeIdentity`：
+ * 它与昵称同为用户可控内容，带换行的群名可向该块注入一行伪造的权限声明。
  */
 export function chatDescription(turn: RuntimeTurnContext): string {
   const topic = turn.threadId === null ? "topic 无" : `topic ${turn.threadId}`;
@@ -1013,13 +1012,13 @@ export function chatDescription(turn: RuntimeTurnContext): string {
 /**
  * TOOL CATALOG 的常驻段（docs/06 §1）。
  *
- * `tools.catalog.residentDescriptions=false` 时压成一行名字清单：同一份 description 此前在两处
- * 各发一遍 —— provider 的 tools 数组那份在请求体头部、属可缓存前缀，这一份在易变段、**每步重发**。
- * 重复贵就贵在后者，而描述的权威副本本来就是 tools 数组那一份（还带完整 JSON Schema）。
- * 默认仍是 `true`：折叠与去重是两个变量，同时翻的话模型行为真变差时分不清是哪个引起的。
+ * `tools.catalog.residentDescriptions=false` 时压缩为一行名字清单：同一份 description 此前在
+ * 两处各发送一遍 —— provider 的 tools 数组那份位于请求体头部、属可缓存前缀，这一份位于易变段、
+ * 每步重发。重复的成本主要在后者，而描述的权威副本本就是 tools 数组那份（且带完整 JSON Schema）。
+ * 默认仍为 `true`：折叠与去重是两个独立变量，同时启用会导致模型行为下降时无法归因。
  *
- * 名字清单那一档带「常驻工具」四个字，是给 KERNEL 里「见 TOOL CATALOG 的**常驻部分**」一个能对上
- * 的锚点。默认那一档**不加任何标题** —— 加了就不再是「现状逐字节不变」。
+ * 名字清单一档带有「常驻工具」字样，用于与 KERNEL 中「TOOL CATALOG 的常驻部分」形成锚点对应。
+ * 默认一档不添加任何标题，添加即破坏现状逐字节不变的前提。
  */
 function residentCatalog(
   resident: readonly RegisteredTool[],
@@ -1030,19 +1029,19 @@ function residentCatalog(
     ? resident.map((tool) => `- ${tool.name}: ${tool.description}`).join("\n")
     : `常驻工具（可直接调用）：${resident.map((tool) => tool.name).join(", ")}`;
 }
-/** 每组超过这个数就只列前 `DEFERRED_GROUP_HEAD` 个（docs/06 §1）：摘要行也在易变段，每步重发。 */
+/** 单组超过此数即只列出前 `DEFERRED_GROUP_HEAD` 个（docs/06 §1）：摘要行同处易变段，每步重发。 */
 const DEFERRED_GROUP_CAP = 12;
 const DEFERRED_GROUP_HEAD = 10;
 /**
- * 折叠段：**每组一行、只列名字、不带 per-tool 描述**（docs/06 §1 那份形状）。
+ * 折叠段：每组一行、只列名字、不带 per-tool 描述（形状见 docs/06 §1）。
  *
- * 不带描述是这个机制的本体，不是排版偏好：MCP 工具名本身相当自描述，而上游 description 动辄
- * 数 KB、每步重发正是要消灭的东西。行首那句「本步不可直接调用；用 search_tools 展开」是
- * 两处引导之一（另一处是 KERNEL 那句；RUNTIME 的计数后缀只在目录关掉时出现，docs/14 §3 T20 ①）——
- * 摘要给了名字却不说怎么用，模型只会直接调过去然后撞 `NoSuchToolError`。
+ * 不带描述是该机制的本体，而非排版偏好：MCP 工具名本身相当自描述，而上游 description 动辄
+ * 数 KB、每步重发正是要消除的开销。行首的「本步不可直接调用；用 search_tools 展开」是两处
+ * 引导之一（另一处在 KERNEL；RUNTIME 的计数后缀仅在目录关闭时出现，docs/14 §3 T20 ①）——
+ * 摘要若只给名字而不说明用法，模型会直接调用并撞上 `NoSuchToolError`。
  *
- * 组的顺序照 `activeView()` 交回的原序（`sourcePriority desc, name asc` 的首次出现顺序），
- * **不要重排**：这一段在易变段里，无谓的重排就是每步把提示词改一次。
+ * 组的顺序沿用 `activeView()` 返回的原序（`sourcePriority desc, name asc` 的首次出现顺序），
+ * 不要重排：这一段位于易变段内，无谓的重排等于每步修改一次提示词。
  */
 function deferredCatalog(
   groups: readonly DeferredToolGroup[],
@@ -1062,7 +1061,7 @@ function deferredCatalog(
   ].join("\n");
 }
 
-/** Runtime 与 WebUI 预览共用这一条组装路径；预览出来的 block 必须就是下一轮会发给模型的 block。 */
+/** Runtime 与 WebUI 预览共用这条组装路径；预览产出的 block 必须与下一轮发给模型的 block 一致。 */
 export function assembleMainPrompt(
   turn: RuntimeTurnContext,
   dependencies: PromptAssemblyDependencies,
@@ -1073,16 +1072,16 @@ export function assembleMainPrompt(
     workspace: dependencies.workspace,
     agentKind: "main",
   };
-  // **一次**取数供三个消费点（常驻段、折叠摘要段、RUNTIME 的两行）。此前是 `activeNames()` +
-  // `catalog()` 各跑一遍整条过滤链，而那条链会调每个工具的 `available()` —— 两遍不只是浪费，
-  // 中间还留了一个「两次结果不一致」的缝（`available()` 读的是活的配置与容器状态）。
+  // 取数一次，供三个消费点使用（常驻段、折叠摘要段、RUNTIME 的两行）。此前是 `activeNames()` +
+  // `catalog()` 各跑一遍完整过滤链，而该链会调用每个工具的 `available()`：两遍不仅浪费，还留下
+  // 两次结果不一致的窗口（`available()` 读取的是实时配置与容器状态）。
   const view = dependencies.tools.activeView(turn.effectiveRole, toolContext);
-  // 开轮时 `expandedTools` 恒空（唯一写入方是轮内的 `search_tools`），所以这里的常驻集就是
-  // 第 0 步的 `activeTools`；此后每一步由 `prepareStep` 现算。
+  // 开轮时 `expandedTools` 恒为空（唯一写入方是轮内的 `search_tools`），因此此处的常驻集即
+  // 第 0 步的 `activeTools`；此后每一步由 `prepareStep` 实时计算。
   const activeTools = view.resident.map((tool) => tool.name);
-  // `perChat.<key>.character`：会话级人格文件名。它在 `perChat` 白名单里，但不是 schema 叶子键
-  // （`perChat` 是 `z.record(z.unknown())`），所以从合并后的本轮配置里按名字取（docs/27 · C-08）。
-  // 形态闸在 `PromptDocuments.paths` 里：这个值会被当成 `memory/` 下的路径段用。
+  // `perChat.<key>.character`：会话级人格文件名。它在 `perChat` 白名单内，但不是 schema 叶子键
+  // （`perChat` 为 `z.record(z.unknown())`），因此从合并后的本轮配置中按名字读取（docs/27 · C-08）。
+  // 形态校验在 `PromptDocuments.paths`：该值会被用作 `memory/` 下的路径段。
   const characterOverride = (turn.config as Record<string, unknown>).character;
   const documents = dependencies.documents.readForPrompt({
     userId: turn.initiatorUserId,
@@ -1091,10 +1090,10 @@ export function assembleMainPrompt(
       ? { characterOverride }
       : {}),
   });
-  // 目录按**本轮真正可用的工具**过滤：一份讲 `install_mcp` 的说明书，在那个工具没开的时候
-  // 出现在目录里只会把模型带进死胡同（实测：它读完说明书找不到工具，转头用 bash 逆向代码库）。
-  // **过滤用的是全量名字（常驻 + 折叠）**：一份讲某个折叠 MCP 工具的 skill 仍该出现在目录里 ——
-  // 折叠是「要先展开一次」，不是「没有」，而模型读完 skill 正文正好知道该展开哪个。
+  // 目录按本轮实际可用的工具过滤：一份讲解 `install_mcp` 的说明在该工具未启用时出现在目录中，
+  // 只会把模型引入死路（实测：它读完说明找不到工具，转而用 bash 逆向代码库）。
+  // 过滤依据是全量名字（常驻 + 折叠）：讲解某个折叠 MCP 工具的 skill 仍应出现在目录中 ——
+  // 折叠意味着需要先展开一次，而非不存在，模型读完 skill 正文恰好知道该展开哪个。
   const skillCatalog =
     dependencies.skills
       ?.catalog(turn.effectiveRole, [
@@ -1103,12 +1102,12 @@ export function assembleMainPrompt(
       ])
       .map((skill) => `- skill:${skill.name}: ${skill.description}`)
       .join("\n") ?? "";
-  // `prompt.includeToolCatalog=false` 时只发工具名（RUNTIME 里那一行），不发描述。省的是每轮
-  // 几百到几千 token，代价是模型少了参数用法的提示 —— 所以默认开着。
+  // `prompt.includeToolCatalog=false` 时只发送工具名（RUNTIME 中的那一行），不发送描述。节省的是
+  // 每轮数百至数千 token，代价是模型失去参数用法的提示，因此默认开启。
   //
-  // **skill 目录不跟着工具目录一起关**（docs/06 §1）：它此前塞在这个三元的 then 分支里，于是
-  // 关掉工具目录连带把 skill 清单也关了 —— 而 skill 目录不与任何东西重复（RUNTIME 那行「可用
-  // 工具」只列工具），关掉模型就不知道有哪些 skill 可载。所以两段各自渲染，最后一起拼。
+  // skill 目录不随工具目录一起关闭（docs/06 §1）：它此前置于该三元表达式的 then 分支中，导致
+  // 关闭工具目录会连带关闭 skill 清单 —— 而 skill 目录不与任何内容重复（RUNTIME 的可用工具行
+  // 只列工具），关闭后模型无从知晓有哪些 skill 可载入。因此两段各自渲染，最后拼接。
   const catalog = [
     ...(dependencies.config.prompt.includeToolCatalog
       ? [
@@ -1149,38 +1148,38 @@ export function assembleMainPrompt(
     maxMessages: dependencies.config.context.limit.maxMessages,
     maxTokens: dependencies.config.context.limit.tokens,
     workspace: dependencies.workspace,
-    // 持久容器那一档要说清「常驻 / 还剩多久 / 出不出网」，否则模型不会去起常驻进程（docs/06 §1）。
+    // 持久容器一档需说明常驻状态、剩余时长与出网能力，否则模型不会主动启动常驻进程（docs/06 §1）。
     sandbox: sandboxLabel(
       dependencies.config.sandbox.mode,
       dependencies.config.sandbox.persistent,
       dependencies.containers?.expiryHintFor(turn.chatId) ?? { state: "none" },
     ),
-    // 只在真有本轮预留时才给得出额度；WebUI 的提示词预览没有预留，那一行本来就不该出现。
+    // 只有存在本轮预留时才能给出额度；WebUI 的提示词预览没有预留，该行本就不应出现。
     ...(spent
       ? {
           quota: `本轮已用 $${spent.committed.toFixed(4)} / 上限 $${dependencies.config.quota.perTurn.maxCostUsd.toFixed(2)}`,
         }
       : {}),
-    // 刚被清空过的那一轮说一句。措辞按 `context.recallBarrier` 分岔：隔断开着时归档也翻不动，
-    // 不说清楚模型会在那条死路上来回试（`read_messages` 会返回空，而它无从知道为什么）。
+    // 刚被清空的那一轮需给出说明。措辞按 `context.recallBarrier` 分支：隔断开启时归档同样不可
+    // 检索，不说明清楚模型会在该死路上反复尝试（`read_messages` 返回空，而它无从得知原因）。
     ...(turn.contextCleared
       ? {
           contextCleared: dependencies.config.context.recallBarrier
-            ? "刚被清空。之前的对话不在你当前上下文中，归档检索也查不到清空之前的消息 —— 不要反复尝试，需要的话请用户重说一次。"
-            : "刚被清空。之前的对话不在你当前上下文中；有必要时可用 read_messages / search_messages 去归档里查。",
+            ? "刚被清空。之前的对话不在你当前上下文中，归档检索也查不到清空之前的消息 —— 不要反复尝试，需要时请用户重新描述。"
+            : "刚被清空。之前的对话不在你当前上下文中；必要时可使用 read_messages / search_messages 检索归档。",
         }
       : {}),
-    // 工具名只在目录关掉时才列进 RUNTIME：开着的时候 TOOL CATALOG 的常驻段已经列过了，两处
-    // 同源（都是这一次 `activeView()` 的 `resident`），重复一遍等于每轮白付一份易变段的钱
-    // （docs/06 §1.2）。折叠的那些不进这一行，只在后缀里报一个数。
+    // 工具名仅在目录关闭时列入 RUNTIME：开启时 TOOL CATALOG 的常驻段已列出，两处同源（均为本次
+    // `activeView()` 的 `resident`），重复一遍等于每轮多付一份易变段的成本（docs/06 §1.2）。
+    // 折叠的工具不进入该行，只在后缀中给出计数。
     show: {
       quota: runtimeShow.showQuota,
       contextWatermark: runtimeShow.showContextWatermark,
       workspace: runtimeShow.showWorkspace,
       toolNames: !dependencies.config.prompt.includeToolCatalog,
     },
-    // 截断告知与折叠计数都从上面那一次 `activeView()` 穿下来。折叠数为 0 时 `runtimeBlock` 自己
-    // 不加后缀，所以这里无条件给。
+    // 截断告知与折叠计数均取自上面那次 `activeView()`。折叠数为 0 时 `runtimeBlock` 自身不添加
+    // 后缀，因此此处无条件传入。
     ...(view.truncated ? { catalogTruncated: view.truncated } : {}),
     deferredTools: view.deferred.length,
   });
@@ -1191,9 +1190,9 @@ export function assembleMainPrompt(
     publicMemory: documents.publicMemory,
     runtime,
     maxTokens: dependencies.config.prompt.maxTokens,
-    // 判据不能只看 `includeToolCatalog`：关掉工具目录之后这一块里还剩 skill 清单，整块跳掉就是
-    // 上面那条耦合的另一半。两半都空时才真的不渲染（纯 `includeToolCatalog=false` 且没装 skill，
-    // 与改动之前逐字节一致）。
+    // 判据不能只看 `includeToolCatalog`：关闭工具目录后该块中仍有 skill 清单，整块跳过即为上述
+    // 耦合的另一半。两部分都为空时才真正不渲染（`includeToolCatalog=false` 且未安装 skill 的情形，
+    // 与改动前逐字节一致）。
     includeCatalog:
       dependencies.config.prompt.includeToolCatalog || Boolean(catalog),
   };
@@ -1208,13 +1207,13 @@ export function assembleMainPrompt(
 }
 
 /**
- * `instructions` 里只放稳定段（KERNEL/CHARACTER/ASSIST）。易变段（TOOL CATALOG + 记忆 + RUNTIME）
- * 走 `contextMessages` 追加到请求体**最后**，因为前缀缓存的判据是请求体的物理顺序：易变段留在
- * system #2 时，它每轮都变的那几个字节位于整个历史之前，后面几万 token 的对话一条都缓存不到
- * （实测跨轮只命中 128 token，同一轮内前缀不变时命中 12,672，docs/06 §1）。挪到末尾之后
- * 「稳定段 + 全部历史」才凑成一条逐轮只增不改的前缀。
+ * `instructions` 中只放稳定段（KERNEL/CHARACTER/ASSIST）。易变段（TOOL CATALOG + 记忆 + RUNTIME）
+ * 经 `contextMessages` 追加到请求体末尾，因为前缀缓存的判据是请求体的物理顺序：易变段留在
+ * system #2 时，它每轮变化的那几个字节位于整个历史之前，其后数万 token 的对话一条都无法命中
+ * 缓存（实测跨轮只命中 128 token，同一轮内前缀不变时命中 12,672，docs/06 §1）。移到末尾之后，
+ * 稳定段加全部历史才构成一条逐轮只增不改的前缀。
  *
- * 仍传数组而不是裸字符串：Anthropic 的 `cache_control` 要挂在消息对象上。
+ * 仍传入数组而非裸字符串：Anthropic 的 `cache_control` 需挂在消息对象上。
  */
 function stableInstructions(
   prompt: { stable: string },
@@ -1240,7 +1239,7 @@ function estimateModelMessages(messages: ModelMessage[]): number {
 function bodyForLog(value: unknown, enabled: boolean): unknown {
   return enabled ? value : undefined;
 }
-/** 轮次级 span 的父边（`docs/10 §1`）。假 turn（WebUI 预览、试跑）没有根，就什么都不加。 */
+/** 轮次级 span 的父边（`docs/10 §1`）。合成 turn（WebUI 预览、试跑）没有根 span，此时不添加。 */
 function turnParent(turn: RuntimeTurnContext): { parentSpanId?: string } {
   return turn.rootSpanId ? { parentSpanId: turn.rootSpanId } : {};
 }
@@ -1250,7 +1249,7 @@ export interface MainAgentStreamResult {
   interrupt(): void;
 }
 
-/** `result.stream` 里我们只认 `text-delta`、`finish-step` 与 `error`；其余（reasoning、tool-call）一概跳过。 */
+/** `result.stream` 中只处理 `text-delta`、`finish-step` 与 `error`；其余（reasoning、tool-call）一律跳过。 */
 interface StreamPartLike {
   type: string;
   text?: string;
@@ -1258,28 +1257,28 @@ interface StreamPartLike {
 }
 
 /**
- * 把逐 step 的旁白拼成一条消息，**步边界恰好一个空行**。
+ * 将逐 step 的旁白拼接成一条消息，步边界处恰好一个空行。
  *
- * 两个历史坑，这一版都在这里收口：
+ * 收口两个历史缺陷：
  *
- * ① `result.textStream` 走的是 `toTextStream`，它只把 `text-delta` 的裸字符串透出去，
- *    `finish-step` 之类的边界全丢了 —— 投递侧那一行 `text += step.value` 于是把每一步的旁白
- *    无缝粘成一段（logs/2026-08-18 · turn 01M09QBZVK…）。
- * ② 补上分隔之后反过来空行爆炸：KERNEL 那条「段间空一行」把模型教成**每一步的正文都以
- *    `\n\n\n` 收尾**，而纯工具步的「正文」就是 `\n\n\n`。实测一条 11 步的回复
- *    （logs/2026-08-18 · turn 01M0AKMXG4…）开头 10 个换行、中段 12 连换行，这些全是模型自己
- *    写的空白被原样透传 —— 这个函数一个分隔符都没插。
+ * ① `result.textStream` 基于 `toTextStream`，只透出 `text-delta` 的裸字符串，`finish-step`
+ *    之类的边界全部丢失 —— 投递侧的 `text += step.value` 因此把每一步的旁白无缝拼成一段
+ *    （logs/2026-08-18 · turn 01M09QBZVK…）。
+ * ② 补上分隔后又出现空行膨胀：KERNEL 中的段间空一行规则使模型每一步的正文都以 `\n\n\n` 结尾，
+ *    而纯工具步的正文就是 `\n\n\n`。实测一条 11 步的回复（logs/2026-08-18 · turn 01M0AKMXG4…）
+ *    开头 10 个换行、中段 12 个连续换行，全部是模型写出的空白被原样透传 —— 该函数并未插入
+ *    任何分隔符。
  *
- * 所以判据从「条件补分隔」改成**扣住尾部空白 + 到点补齐**：
+ * 因此判据从条件补分隔改为扣留尾部空白并在边界处补齐：
  *
- * - 一段正文的尾部空白先扣住不发（`held`），跨过 step 边界就直接丢掉，换成恰好一个 `\n\n`；
- *   没跨过边界就原样发出去 —— 同一步内的增量、列表缩进、围栏代码块里的空行一个字都不动。
- * - 纯空白的「正文」不算说过话：不置 `wrote`、不 arm 边界、不透传。
- * - 第一段非空白正文之前什么都不发，流结束时扣住的尾部空白直接丢弃（首尾无空白）。
+ * - 一段正文的尾部空白先扣留不发送（`held`），跨过 step 边界即丢弃并替换为恰好一个 `\n\n`；
+ *   未跨越边界则原样发送 —— 同一步内的增量、列表缩进、围栏代码块中的空行均不修改。
+ * - 纯空白正文不计为已输出：不置 `wrote`、不标记边界、不透传。
+ * - 第一段非空白正文之前不发送任何内容，流结束时扣留的尾部空白直接丢弃（首尾无空白）。
  *
- * `error` 部件也要透出去（`onError`）：AI SDK 把步骤级失败吞进内部 onError（默认实现只
- * `console.error`），流照常正常结束 —— 此前这里明文跳过它，于是「上游挂了」这条路在日志里
- * 是隐形的，0 步的那次连 `model.error` 都没留下。
+ * `error` 部件同样要透出（`onError`）：AI SDK 将步骤级失败吞入内部 onError（默认实现仅
+ * `console.error`），流仍正常结束 —— 此前此处显式跳过它，导致上游故障这条路径在日志中不可见，
+ * 0 步的那次连 `model.error` 都未留下。
  */
 export async function* stepSeparatedText(
   full: AsyncIterable<StreamPartLike>,
@@ -1287,9 +1286,9 @@ export async function* stepSeparatedText(
   onChunk?: (chunk: string) => void,
   onError?: (error: unknown) => void,
 ): AsyncGenerator<string> {
-  let wrote = false; // 这一轮到底产出过**非空白**正文没有
-  let pendingBreak = false; // 上次产出正文之后跨过了 step 边界
-  let held = ""; // 扣住不发的尾部空白
+  let wrote = false; // 本轮是否产出过非空白正文
+  let pendingBreak = false; // 上次产出正文之后已跨过 step 边界
+  let held = ""; // 扣留未发送的尾部空白
   function* emit(text: string): Generator<string> {
     if (onChunk) onChunk(text);
     yield text;
@@ -1299,7 +1298,7 @@ export async function* stepSeparatedText(
       onError?.(part.error);
       continue;
     }
-    // 边界一到，上一步的尾部空白就作废：它要被换成恰好一个空行。连续多个空步只 arm 一次。
+    // 到达边界后上一步的尾部空白即作废：它将被替换为恰好一个空行。连续多个空步只标记一次。
     if (part.type === "finish-step") {
       held = "";
       if (wrote) pendingBreak = true;
@@ -1318,7 +1317,7 @@ export async function* stepSeparatedText(
     wrote = true;
     pendingBreak = false;
   }
-  // 收尾补跑那一次（§2）也要走同一道分隔逻辑，否则它会直接贴在最后一句旁白后面。
+  // 收尾补跑（§2）同样要走这套分隔逻辑，否则它会直接紧贴在最后一句旁白之后。
   if (!trailing) return;
   const extra = (await trailing()).trim();
   if (!extra) return;
@@ -1326,7 +1325,7 @@ export async function* stepSeparatedText(
 }
 
 const WRAP_UP_INSTRUCTION =
-  "刚才的工具调用已经结束，但你还没有给出结论。把结果告诉用户：成功了什么，没成功问题在哪。不要再调用工具，不要复述过程。";
+  "工具调用已经结束，但你还没有给出结论。向用户说明结果：哪些已成功，未成功的问题出在哪里。不要再调用工具，不要复述过程。";
 
 export async function streamMainAgent(
   turn: RuntimeTurnContext,
@@ -1350,20 +1349,20 @@ async function runMainAgentInternal(
   dependencies: MainAgentDependencies,
   streaming: boolean,
 ): Promise<string | MainAgentStreamResult> {
-  // 自撰写的工具在**开轮前**同步进注册表：`toolSet` 下面就冻结了，轮内再注册只会让
-  // `prepareStep` 的 `activeTools` 报出一个 `toolSet` 里没有的名字。**只在主 agent 做** ——
-  // 子 agent 跑在父轮内部，在那里重扫会把父轮已经冻结的那份工具集弄脱节。
+  // 自撰写工具在开轮前同步进注册表：`toolSet` 在下方即冻结，轮内再注册只会让 `prepareStep` 的
+  // `activeTools` 报出 `toolSet` 中不存在的名字。仅在主 agent 执行 —— 子 agent 运行于父轮内部，
+  // 在其中重新扫描会使父轮已冻结的工具集失去一致性。
   dependencies.customTools?.syncIfChanged();
   const toolContext: ToolExecutionContext = {
     turn,
     workspace: dependencies.workspace,
     agentKind: "main",
   };
-  // 子 agent 从 turn 上取同一份预留：spawn_agent 在工具层执行，拿不到这里的 dependencies。
+  // 子 agent 从 turn 上读取同一份预留：spawn_agent 在工具层执行，无法访问此处的 dependencies。
   turn.reservation = dependencies.reservation ?? null;
   await dependencies.plugins?.hook("beforeTurn", { turn });
-  // `docs/10 §1` 那张图里的 span B。抛出来时也要落一行 —— 组装是同步的，但它会读盘（人格、记忆、
-  // skill 目录），一个不可读的 CHARACTER.md 此前在 trace 里什么都不留。
+  // `docs/10 §1` 图中的 span B。抛出异常时同样要记录一行 —— 组装是同步的，但会读取磁盘（人格、
+  // 记忆、skill 目录），不可读的 CHARACTER.md 此前在 trace 中不留任何记录。
   const promptSpan = dependencies.log.span({
     level: "debug",
     kind: "prompt.build",
@@ -1387,8 +1386,8 @@ async function runMainAgentInternal(
     truncated: prompt.truncated,
   });
   const activeNames = prompt.activeTools;
-  // 预算被 catalog + runtime 吃满时 CHARACTER.md 会被整段截成一句「（记忆已截断…）」——
-  // 人格静默消失，而日志里一个字都没有（docs/20 · W-PROMPT-01）。
+  // 预算被 catalog + runtime 占满时，CHARACTER.md 会被整段截断为一句「（记忆已截断…）」，
+  // 人格静默消失且日志中无任何记录（docs/20 · W-PROMPT-01）。
   if (prompt.truncated.length)
     dependencies.log.event({
       level: "warn",
@@ -1433,21 +1432,21 @@ async function runMainAgentInternal(
   )
     throw new Error("model_pricing_required");
   /**
-   * **含图轮次的 vision 自动切换**（`docs/04 §5.2`、`docs/08 §7.2`、`AC-PROV-009`）。
+   * 含图轮次的 vision 自动切换（`docs/04 §5.2`、`docs/08 §7.2`、`AC-PROV-009`）。
    *
-   * 三处文档都写了、代码里此前一行都没有：`capabilities_json` 只有 WebUI 的徽章在读。表现是
-   * 用户发图给一个 `vision=false` 的模型，模型看不见图却又不知道自己看不见 —— 实测它去
-   * `cp` 文件、`python` 读尺寸、开本地 http 服务器、拿 `agent-browser` 截图，绕了 11 步
-   * （logs/2026-08-18 · turn `01M0AKMXG4…`）。它也试过自己 `set_model('vision')`，但那个
-   * 覆盖只在**当轮**生效（`docs/04 §5.2`），下一轮（真正带图那一轮）又回到了 `main`。
+   * 三处文档均有规定而代码中此前没有实现：`capabilities_json` 只有 WebUI 的徽章在读取。表现是
+   * 用户向 `vision=false` 的模型发送图片，模型看不到图片且不知道自己看不到 —— 实测它执行
+   * `cp` 复制文件、用 `python` 读取尺寸、启动本地 http 服务、用 `agent-browser` 截图，共绕行
+   * 11 步（logs/2026-08-18 · turn `01M0AKMXG4…`）。它也尝试过自行调用 `set_model('vision')`，
+   * 但该覆盖只在当轮生效（`docs/04 §5.2`），下一轮（真正带图的那一轮）又回到 `main`。
    *
-   * 判据在轮次级算一次：图片就在 `snapshot` 与 `delta` 里，`prepareStep` 每步重算纯属浪费。
+   * 判据在轮次级计算一次：图片就在 `snapshot` 与 `delta` 中，`prepareStep` 每步重算属于浪费。
    *
-   * **`media.visionScope` 决定「这一轮含图」算到哪里**（默认 `window` = 两段一起算，一直以来的
-   * 行为）。选 `turn` 时只算 `delta`：一张图不该把它之后的每一轮都钉在 vision 别名上 ——
-   * 实测一个私聊里 4 条带图消息留在窗口内，此后每一轮纯文本都记 `vision_required`
-   * （logs/2026-08-19 · `01M0CKPECYZMM…` 一带），而一个 vision 别名都没配时，那些轮次的回复
-   * 末尾还会挂一句「这张图我没能真的看到」—— 用户那一轮根本没发图。
+   * `media.visionScope` 决定本轮含图的统计范围（默认 `window`，即两段合并统计，为既有行为）。
+   * 取 `turn` 时只统计 `delta`：一张图不应使其后的每一轮都固定在 vision 别名上 —— 实测某私聊中
+   * 4 条带图消息留在窗口内，此后每一轮纯文本都记录 `vision_required`（logs/2026-08-19 ·
+   * `01M0CKPECYZMM…` 附近），而未配置任何 vision 别名时，那些轮次的回复末尾还会附加一句图片
+   * 未被查看的提示 —— 用户那一轮根本没有发送图片。
    */
   const freshImages = turn.delta.some((message) =>
     (message.parts as unknown[]).some(isImagePart),
@@ -1459,7 +1458,7 @@ async function runMainAgentInternal(
     dependencies.config.media.visionScope === "turn"
       ? freshImages
       : freshImages || historyImages;
-  // 一张都看不了的时候才降级：`vision` 别名没配、当前别名自己也不支持。
+  // 只有完全无法处理图像时才降级：未配置 `vision` 别名，且当前别名本身也不支持。
   const visionDegraded =
     turnHasImages &&
     !dependencies.registry.supportsVision("vision") &&
@@ -1474,10 +1473,10 @@ async function runMainAgentInternal(
       data: { alias, reason: "vision_unavailable" },
     });
   /**
-   * `visionScope='turn'` 的另一半：本轮没有新图，于是不切别名 —— 那么更早轮次留在窗口里的图
-   * 也不能原样发给这个看不了图的模型（宽容的 provider 静默忽略、严格的直接 400）。
-   * 判据只看**本轮真正会用的那个别名**支不支持：能看图就原样带着，「再看一遍上面那张图」照旧可用。
-   * `visionDegraded` 优先 —— 那一档本来就把两段一起换掉了，再叠一次没有意义。
+   * `visionScope='turn'` 的另一半：本轮没有新图，因此不切换别名 —— 那么更早轮次留在窗口内的
+   * 图片也不能原样发给这个不支持图像的模型（宽容的 provider 静默忽略、严格的直接返回 400）。
+   * 判据只看本轮实际使用的别名是否支持：支持则原样带上，用户要求重看上文图片的场景照常可用。
+   * `visionDegraded` 优先 —— 该档位本就将两段一并替换，再叠加一次没有意义。
    */
   const historyDegraded =
     !visionDegraded &&
@@ -1489,26 +1488,26 @@ async function runMainAgentInternal(
     dependencies.log.event({
       level: "info",
       kind: "ctx.image_placeholder",
-      summary: `${alias} 不看图，历史图片换成占位文本`,
+      summary: `${alias} 不支持看图，历史图片替换为占位文本`,
       traceId: turn.turnId,
       ...turnParent(turn),
       key: turn.key,
       data: { alias, scope: "turn", reason: "history_only" },
     });
-  // 步骤级失败（上游 5xx、重试耗尽）不会从 textStream 抛出来：AI SDK 把它吞进内部的 onError，
-  // 让 result.text 安静地解析成空串。不抓住这一份，一次彻底的上游故障和「模型没话说」
-  // 在调用方眼里长得一模一样 —— 上一次就是这样变成「不回复」的。
+  // 步骤级失败（上游 5xx、重试耗尽）不会从 textStream 抛出：AI SDK 将其吞入内部 onError，
+  // 使 result.text 静默解析为空串。不捕获这一份的话，彻底的上游故障与模型无输出在调用方看来
+  // 完全相同 —— 上一次事故正是由此表现为不回复。
   let streamFailure: unknown = null;
-  // 收尾补跑（§2）的三个状态：最后一步有没有正文、这一轮做过事没有、当前是不是正在补跑那一次。
+  // 收尾补跑（§2）的三个状态：最后一步是否有正文、本轮是否执行过操作、当前是否正处于补跑。
   let lastStepHadText = false;
   let sawToolCall = false;
   let wrapUpMode = false;
-  /** 主轮跑了几步。补跑那次 `agent.generate` 的 stepNumber 从 0 重新起，靠它换算成全轮编号。 */
+  /** 主轮已执行的步数。补跑那次 `agent.generate` 的 stepNumber 从 0 重新计数，据此换算为全轮编号。 */
   let mainStepCount = 0;
   /**
-   * 记下第一份步骤级失败，**并且落一条 `model.error`**。`onExhausted` 那条路自己会记，剩下两条
-   * 此前一个字都不落：流里的 `error` 部件（SDK 默认 onError 只 `console.error`）、以及 0 步空流。
-   * 两次进程崩溃（logs/2026-08-18 22:17 / 23:19）在 `model.jsonl` 里因此完全隐形。
+   * 记录第一份步骤级失败，并写入一条 `model.error`。`onExhausted` 路径自身会记录，其余两条
+   * 此前不留任何记录：流中的 `error` 部件（SDK 默认 onError 仅 `console.error`）以及 0 步空流。
+   * 两次进程崩溃（logs/2026-08-18 22:17 / 23:19）因此在 `model.jsonl` 中完全不可见。
    */
   const noteStreamFailure = (error: unknown): void => {
     if (streamFailure) return;
@@ -1531,12 +1530,12 @@ async function runMainAgentInternal(
     });
   };
   const initialInfo = chain[0]!.info;
-  // 包装必须做在「按别名解析」这一层：`prepareStep` 每一步都无条件设置 model，只包装构造时那一个的话，
-  // 整条 fallback / 重试链从第 0 步起就再没被用过 —— 重试次数、别名 fallback、markProviderDown、
-  // 以及区分「上游挂了」和「模型没话说」所依赖的 onExhausted，全都是死代码（docs/20 · W-AGENT-01）。
+  // 包装必须做在按别名解析这一层：`prepareStep` 每一步都无条件设置 model，若只包装构造时的那个，
+  // 整条 fallback / 重试链从第 0 步起即不再被使用 —— 重试次数、别名 fallback、markProviderDown，
+  // 以及区分上游故障与模型无输出所依赖的 onExhausted 全部成为死代码（docs/20 · W-AGENT-01）。
   const wrapped = new Map<string, LanguageModel>();
-  // 包装之后 `step.model.modelId` 恒等于链首，看不出这一步实际是谁服务的。中间件报一份，
-  // 记账才能落到真正出力的那个模型上（计价、别名、markProviderDown 都靠它）。
+  // 包装之后 `step.model.modelId` 恒等于链首，无法看出本步实际由谁服务。中间件上报一份，
+  // 记账才能落到真正提供服务的模型上（计价、别名、markProviderDown 均依赖它）。
   let servedModelId: string | null = null;
   const wrappedFor = (aliasName: string): LanguageModel => {
     const cached = wrapped.get(aliasName);
@@ -1548,13 +1547,13 @@ async function runMainAgentInternal(
       abortSignal: turn.abortSignal,
       requestTimeoutMs: dependencies.config.provider.requestTimeoutMs,
       streamIdleTimeoutMs: dependencies.config.provider.streamIdleTimeoutMs,
-      // 服务成功 = 上游还答话，连续失败计数归零（`docs/04 §5.3`）。常态是一次 no-op 写。
+      // 服务成功表明上游仍在响应，连续失败计数归零（`docs/04 §5.3`）。常态下是一次 no-op 写入。
       onServed: (served) => {
         servedModelId = served.id;
         dependencies.registry.recordSuccess(served);
       },
       isDown: (candidate) => dependencies.registry.isDown(candidate),
-      // 跳过这件事必须有痕迹，而且 `to` 报的是真正会被试的那个（docs/10 · provider.fallback）。
+      // 跳过行为必须留下记录，且 `to` 上报的是实际将被尝试的候选（docs/10 · provider.fallback）。
       onSkipped: (candidate, next) => {
         dependencies.log.event({
           level: "warn",
@@ -1570,9 +1569,9 @@ async function runMainAgentInternal(
           },
         });
       },
-      // 每一次失败的尝试落一行（`docs/10` 给 `model.error` 定的 `retryAttempt` / `willFallback`）。
-      // 少了它，「熬满三次超时再 fallback」在日志里是一段空白：本次事故 363 秒里只有开头的
-      // `turn.start` 与结尾的 `provider.fallback`（docs/00 §2.3 同一类）。
+      // 每一次失败尝试记录一行（`docs/10` 为 `model.error` 定义的 `retryAttempt` / `willFallback`）。
+      // 缺少它时，三次超时后才 fallback 的过程在日志中是一段空白：本次事故的 363 秒内只有开头的
+      // `turn.start` 与结尾的 `provider.fallback`（docs/00 §2.3 属同类）。
       onCandidateFailed: (candidate, failure) => {
         dependencies.log.event({
           level: "warn",
@@ -1595,11 +1594,12 @@ async function runMainAgentInternal(
             ms: failure.elapsedMs,
           },
         });
-        // **只有超时计入连续失败。** 5xx / 429 是上游在说话，链内 fallback 当场就换人、代价是一次
-        // 往返；真正贵的是「连上了但不返回」—— 每一步都要熬满 `(maxRetries+1) × requestTimeoutMs`。
-        // **而且一次调用一个候选只记一次**：还会再试就先不记。按尝试记的话 `maxRetries: 2` 时一次
-        // 请求就是三次增量，一个合法地超过 `requestTimeoutMs` 的调用（定时任务、子 agent、收尾
-        // 补跑都走非流式，`deadline.guard` 罩的是整段生成）当场就把整个 provider 判死 30 分钟。
+        // 只有超时计入连续失败。5xx / 429 表明上游仍在响应，链内 fallback 会立即更换候选，代价
+        // 仅一次往返；真正昂贵的是连接成功但不返回 —— 每一步都要耗满
+        // `(maxRetries+1) × requestTimeoutMs`。且一次调用中同一候选只记一次：仍会重试时先不记录。
+        // 按尝试计数的话，`maxRetries: 2` 时一次请求即产生三次增量，一个合法超过 `requestTimeoutMs`
+        // 的调用（定时任务、子 agent、收尾补跑均走非流式，`deadline.guard` 覆盖的是整段生成）
+        // 会立即将整个 provider 判死 30 分钟。
         if (failure.kind !== "timeout" || failure.willRetry) return;
         const down = dependencies.registry.recordFailure(
           candidate,
@@ -1622,13 +1622,13 @@ async function runMainAgentInternal(
           });
         }
       },
-      // 这条以前一个消费方都没有 —— `provider.fallback` 是 `docs/10` 里有定义、生产侧却没有任何
-      // 产出的事件，于是「链首熬完之后换了谁」在日志里根本读不出来（本次事故靠算术反推的那一半）。
+      // 该回调此前没有任何消费方 —— `provider.fallback` 是 `docs/10` 中有定义但生产侧无任何产出的
+      // 事件，导致链首耗尽后切换到了哪个候选在日志中无法读出（本次事故中靠推算还原的那一半）。
       onFallback: (from, to) => {
         dependencies.log.event({
           level: "warn",
           kind: "provider.fallback",
-          summary: `${from.id} 试完仍失败，换 ${to.id}`,
+          summary: `${from.id} 重试用尽仍失败，切换至 ${to.id}`,
           traceId: turn.turnId,
           key: turn.key,
           data: {
@@ -1686,7 +1686,7 @@ async function runMainAgentInternal(
       .pluck()
       .get(initialInfo.providerId) as string) ?? "";
   const instructions = stableInstructions(prompt, providerKind);
-  // 同一轮里 `contextMessages` 会被调最多三次（主流 / 收尾补跑 / 非流式），坏历史只报一次。
+  // 同一轮中 `contextMessages` 最多被调用三次（主流程 / 收尾补跑 / 非流式），损坏历史只上报一次。
   let reportedOrphans = false;
   const messageOptions: ContextMessageOptions = {
     volatile: prompt.volatile,
@@ -1711,12 +1711,12 @@ async function runMainAgentInternal(
   };
   const stepSpans = new Map<number, LogSpan>();
   const stepAlias = new Map<number, string>();
-  /** vision 切换每轮只记一条：`prepareStep` 每一步都会重算同一个结论。 */
+  /** vision 切换每轮只记录一条：`prepareStep` 每一步都会重算出同一结论。 */
   let visionSwitchLogged = false;
   /**
-   * `repairToolCall` 本轮已经改写过的名字（判据 ⓿，见那个钩子的注释）。**不放在 turn 上** ——
-   * 它只对这一次 `agent.generate` 有意义（收尾补跑与主轮共用同一个 `agent`，共用它是对的），
-   * 而 `expandedTools` 那份是要给 `prepareStep` 和下一轮的痕迹读的，两者语义不同。
+   * `repairToolCall` 本轮已改写过的名字（判据 ⓿，见该钩子的注释）。不挂在 turn 上 —— 它只对
+   * 本次 `agent.generate` 有意义（收尾补跑与主轮共用同一个 `agent`，共用该集合是正确的），
+   * 而 `expandedTools` 是供 `prepareStep` 与下一轮读取的记录，两者语义不同。
    */
   const repairedThisTurn = new Set<string>();
   const observers = createStepObservers(turn, {
@@ -1735,19 +1735,19 @@ async function runMainAgentInternal(
     instructions,
     tools: toolSet,
     activeTools: activeNames,
-    // 重试与 fallback 归 `fallbackLanguageModel` 管（它认 Retry-After、带真随机抖动、401 短路、
-    // 链内换模型）。SDK 默认还会自己再重试 2 次，两层相乘 = 同一次故障要熬 3×(候选数×尝试数) 次
-    // 上游超时才收场 —— logs/2026-08-17 那几轮卡死就是这么来的：fallback→model.error 的 62 秒
-    // 节拍整整走了两遍，第三遍还在等的时候用户已经去重启进程了。
+    // 重试与 fallback 由 `fallbackLanguageModel` 负责（它识别 Retry-After、带随机抖动、401 短路、
+    // 链内切换模型）。SDK 默认会额外重试 2 次，两层相乘意味着同一次故障需耗满
+    // 3×(候选数×尝试数) 次上游超时才结束 —— logs/2026-08-17 的几轮卡死即由此产生：
+    // fallback→model.error 的 62 秒节拍完整走了两遍，第三遍仍在等待时用户已重启进程。
     maxRetries: 0,
     /**
-     * 第二条判据是收尾补跑的硬边界：`docs/00 §2` 与 `docs/08 §5.2` 都写「追加**一次**禁工具的
-     * 模型调用」，而 `agent.generate(...)` 是 `ToolLoopAgent` 的**整个循环** —— 实测让上游在
-     * `tools:[]` 的请求里仍返回 tool_calls，收尾阶段又跑了 12 步（`steps=24`），最终
-     * `turn.wrap_up chars=0` + `model_returned_empty`。真模型不会这么配合，但「最多一次」
-     * 是判据而不是指望；`perTurn.maxCostUsd` 只是兜底（docs/28 · L-AGT-01）。
-     * `stopWhen` 不是 per-call 选项，而 `wrapUpMode` 只在补跑期间为真，所以判据挂在这里；
-     * 补跑那次调用的 `steps` 是它自己的（从 0 数起，与 `mainStepCount` 的重编号一致）。
+     * 第二条判据是收尾补跑的硬边界：`docs/00 §2` 与 `docs/08 §5.2` 均规定追加一次禁用工具的
+     * 模型调用，而 `agent.generate(...)` 是 `ToolLoopAgent` 的整个循环 —— 实测上游在 `tools:[]`
+     * 的请求中仍返回 tool_calls，收尾阶段又执行了 12 步（`steps=24`），最终得到
+     * `turn.wrap_up chars=0` 与 `model_returned_empty`。真实模型通常不会如此，但最多一次是
+     * 判据而非预期；`perTurn.maxCostUsd` 只是兜底（docs/28 · L-AGT-01）。
+     * `stopWhen` 不是 per-call 选项，而 `wrapUpMode` 仅在补跑期间为真，因此判据置于此处；
+     * 补跑调用的 `steps` 独立计数（从 0 起，与 `mainStepCount` 的重编号一致）。
      */
     stopWhen: [
       stepCountIs(
@@ -1760,53 +1760,52 @@ async function runMainAgentInternal(
     ],
     include: { requestMessages: true, requestBody: true, responseBody: true },
     /**
-     * **折叠工具被硬调时自愈成一次检索**（docs/05 §3.12 的「自愈」段）。
+     * 折叠工具被直接调用时自愈为一次检索（docs/05 §3.12 的自愈段）。
      *
-     * 背景：SDK 先按本步 `activeTools` 把 toolSet 过一遍，再拿过滤后的那份去 `parseToolCall` ——
-     * 所以模型调一个折叠工具时在**解析阶段**就撞 `NoSuchToolError`，压根到不了
-     * `registry.execute()`。折叠把这件事从罕见幻觉变成常规事件，光靠提示词引导（KERNEL 那句无条件在，
-     * 折叠组行与 RUNTIME 计数后缀二者只会出现一个 —— 后者挂在 `show.toolNames` 上）就是在赌模型
-     * 「想到」去检索。这个钩子把它改写成
-     * `search_tools({ names: [原名] })`：调用被自动展开，下一步真能调到那个工具，模型不需要先
-     * 学会用 `search_tools`。代价与它自己先搜一次一样（多一个 step）。
+     * 背景：SDK 先按本步 `activeTools` 过滤 toolSet，再用过滤后的集合执行 `parseToolCall` ——
+     * 因此模型调用折叠工具时在解析阶段即撞上 `NoSuchToolError`，根本到不了 `registry.execute()`。
+     * 折叠使该情形从罕见幻觉变为常规事件，仅靠提示词引导（KERNEL 中的那句无条件存在，折叠组行
+     * 与 RUNTIME 计数后缀只会出现其一 —— 后者取决于 `show.toolNames`）等于寄希望于模型主动想到
+     * 去检索。本钩子将其改写为 `search_tools({ names: [原名] })`：调用被自动展开，下一步即可真正
+     * 调用该工具，模型无需先掌握 `search_tools`。代价与模型自行先检索一次相同（多一个 step）。
      *
-     * 回调参数里的 `tools` 是**已按 activeTools 过滤的** stepToolSet，折叠集压根不在里面 ——
-     * 所以折叠判据只能从注册表现算，不能指望参数。
+     * 回调参数中的 `tools` 是已按 activeTools 过滤的 stepToolSet，折叠集不在其中 ——
+     * 因此折叠判据只能从注册表实时计算，不能依赖该参数。
      */
     repairToolCall: ({ toolCall, tools: stepTools }) => {
       /**
-       * 四条「改写了也白改」的判据排在最前，因为它们最便宜而下面那次 `activeView()` 要跑整条
-       * 过滤链（含每个工具的 `available()`）—— 而最常见的入场情形恰好是幻觉名字，那一档要一路
-       * 判到最后才知道不该改。
+       * 四条改写无效的判据排在最前，因为它们成本最低，而下方的 `activeView()` 需要跑完整条过滤
+       * 链（含每个工具的 `available()`）—— 且最常见的入场情形恰好是幻觉名字，该档位要判到最后
+       * 才能确定不应改写。
        *
-       * ⚠ **这四条都是防死循环的，不是优化。** 判据统一是「这次改写能不能让状态真的往前一格」：
-       * 改写成检索而检索又不会改变任何东西，就是「模型调 X → NoSuchToolError → 改写成检索 →
-       * 检索原地返回 → 模型再调 X → …」一路烧到步数上限或熔断。落回一句正常的
-       * `NoSuchToolError` 比一个来回强 —— 模型看到的是明确的失败，而不是一次假装有进展的往复。
+       * ⚠ 这四条都用于防止死循环，而非优化。统一判据是本次改写能否真正推进状态：改写为检索而
+       * 检索又不产生任何变化，就会形成「模型调用 X → NoSuchToolError → 改写为检索 → 检索原地
+       * 返回 → 模型再次调用 X → …」的循环，直至耗尽步数上限或触发熔断。退回一次正常的
+       * `NoSuchToolError` 更优 —— 模型得到的是明确失败，而不是一次看似有进展的往复。
        *
-       * ⓿ **同一个名字本轮只改写一次。** 这一条是**兜底**，而且必须是第一条：①②③ 各自点名一种
-       *    「检索不会往前一格」的成因，而成因不止那三种 —— `search_tools` 自己也会在 `admit()`
-       *    上失败（`tools.maxCallsPerTurn` 用满、运维把它的 `approval` 覆盖成 `always` 而审批被拒、
-       *    轮内连续失败到 `maxConsecutiveErrors` 之前那几次），这些档位一律**不写**
-       *    `expandedTools`，于是 ① 永远拦不住第二次。实测（`tests/tools.catalog.wiring.test.ts`
-       *    那条 `maxCallsPerTurn` 用例）：额度用满之后同一个折叠工具被连着改写 11 次，只有
-       *    `maxSteps` 兜住 —— 11 次白付的模型调用。按名字判一次，成因有多少种都不必枚举。
-       *    happy path 上它与 ① 等价（改写成功 ⇒ 名字进 `expandedTools` ⇒ ① 本来就会拦），
-       *    所以加上它不会挡掉任何一次有用的改写；顺带把同一步里并排的两次同名硬调也合成一次。
-       *    集合是这次 `runMainAgentInternal` 调用的**局部**变量，随本轮的函数帧消亡 —— 不是
-       *    进程内状态（`docs/01 §3.1`）。
-       * ① 本轮已展开过它。`tools/catalog-meta.ts` 里「被 skill 收窄挡住的照样记进 `expandedTools`」
-       *    那段注释是这一条的另一半：单独看任何一处都会觉得对方多余（那边像是白占额度，这边
-       *    像是可以顺手也判一次 narrowed），两处一起改才成立。narrowed 的判据刻意**不在这里
-       *    再抄一份** —— 它已经有两份（`admit()` 与 `catalog-meta.ts`）且必须逐字对齐。
-       * ② 本轮展开额度已经用满。这一档 `search_tools` 会回 `expansion_limit` 且**不写**
-       *    `expandedTools`，所以 ① 拦不住它；而它的 hint 是「用 names 精确点名」，改写出来的
-       *    调用本来就是 `names:[X]` —— 模型照 hint 做也没有出路。
-       *    判据写成 `size >= budget` 与 `catalog-meta.ts` 那条 `size + fresh > budget` 在
-       *    `fresh` 恒为 1（这里永远只点一个名）时逐字等价，改动任何一侧都要看另一侧。
-       *    ⓿ 也能兜住它，但这一条让**第一次**就落回明确的失败，省掉一次无用的检索。
-       * ③ `search_tools` 自己本步发不出去。常态成立（它常驻、豁免收窄），但成本闸门与收尾补跑
-       *    会把 `activeTools` 整个清空 —— 那两档改写只是换一个名字撞同一个错。
+       * ⓿ 同一名字本轮只改写一次。这一条是兜底，且必须排在首位：①②③ 各自对应一种检索无法推进
+       *    状态的成因，而成因不止这三种 —— `search_tools` 自身也会在 `admit()` 处失败
+       *    （`tools.maxCallsPerTurn` 耗尽、运维将其 `approval` 覆盖为 `always` 且审批被拒、
+       *    轮内连续失败达到 `maxConsecutiveErrors` 之前的若干次），这些档位一律不写入
+       *    `expandedTools`，因此 ① 无法拦住第二次。实测（`tests/tools.catalog.wiring.test.ts`
+       *    中的 `maxCallsPerTurn` 用例）：额度耗尽后同一个折叠工具被连续改写 11 次，仅由
+       *    `maxSteps` 兜住 —— 11 次无效的模型调用。按名字判定一次即可，无需枚举全部成因。
+       *    正常路径上它与 ① 等价（改写成功 ⇒ 名字进入 `expandedTools` ⇒ ① 本就会拦截），
+       *    因此增加它不会阻断任何一次有效改写；同时也将同一步内并列的两次同名调用合并为一次。
+       *    该集合是本次 `runMainAgentInternal` 调用的局部变量，随本轮函数帧释放，不属于进程内
+       *    状态（`docs/01 §3.1`）。
+       * ① 本轮已展开过它。`tools/catalog-meta.ts` 中「被 skill 收窄拦截的仍记入 `expandedTools`」
+       *    那段注释是这一条的另一半：单独看任一处都会认为对方多余（那边看似白占额度，这边看似
+       *    可以顺带判一次 narrowed），两处需一并修改才成立。narrowed 的判据刻意不在此处再写一份
+       *    —— 它已有两份（`admit()` 与 `catalog-meta.ts`）且必须逐字对齐。
+       * ② 本轮展开额度已耗尽。该档位下 `search_tools` 会返回 `expansion_limit` 且不写入
+       *    `expandedTools`，因此 ① 拦不住它；而它的 hint 是用 names 精确指定，改写产生的调用本就是
+       *    `names:[X]` —— 模型即使遵循 hint 也无出路。
+       *    判据写作 `size >= budget`，在 `fresh` 恒为 1（此处永远只指定一个名字）时与
+       *    `catalog-meta.ts` 的 `size + fresh > budget` 逐字等价，改动任一侧都需检查另一侧。
+       *    ⓿ 同样能兜住它，但这一条使第一次即退回明确失败，省去一次无用检索。
+       * ③ `search_tools` 本步无法发出。常态下成立（它常驻且豁免收窄），但成本闸门与收尾补跑会将
+       *    `activeTools` 整体清空 —— 那两档下改写只是换个名字撞同一个错误。
        */
       if (repairedThisTurn.has(toolCall.toolName)) return Promise.resolve(null);
       if (turn.expandedTools?.has(toolCall.toolName))
@@ -1817,8 +1816,8 @@ async function runMainAgentInternal(
       )
         return Promise.resolve(null);
       if (!("search_tools" in stepTools)) return Promise.resolve(null);
-      // 幻觉名字（注册表里根本没有的）**不改写**：把一个不存在的名字喂给检索只会得到空结果，
-      // 而模型会以为自己找过了。它照旧走 `NoSuchToolError`，那是一句明确的失败。
+      // 幻觉名字（注册表中不存在的）不改写：将不存在的名字送去检索只会得到空结果，而模型会认为
+      // 自己已经检索过。它照旧走 `NoSuchToolError`，那是一次明确的失败。
       if (
         !dependencies.tools
           .activeView(turn.effectiveRole, toolContext)
@@ -1841,9 +1840,9 @@ async function runMainAgentInternal(
           reason: "deferred_not_expanded",
         },
       });
-      // 逐个字段列而不是 `...toolCall`：原调用上的 `providerExecuted` / `providerMetadata` 是**那个**
-      // 工具的元数据，整份透传给 `search_tools` 就是把它挂到错的工具上。`input` **必须是 JSON
-      // 字符串** —— 下游走的是 `safeParseJSON({ text: toolCall.input, schema })`。
+      // 逐字段列出而非 `...toolCall`：原调用上的 `providerExecuted` / `providerMetadata` 属于原
+      // 工具的元数据，整份透传给 `search_tools` 等于挂到错误的工具上。`input` 必须是 JSON 字符串
+      // —— 下游执行的是 `safeParseJSON({ text: toolCall.input, schema })`。
       return Promise.resolve({
         type: "tool-call" as const,
         toolCallId: toolCall.toolCallId,
@@ -1852,10 +1851,10 @@ async function runMainAgentInternal(
       });
     },
     prepareStep: async ({ stepNumber: rawStep, messages }) => {
-      // 收尾补跑是**另一次** `agent.generate`，它的 stepNumber 从 0 重新起。不换算的话：
-      // ① `stepSpans.set(0, …)` 会顶掉主轮 step 0 那条已经结束的 span（出错时还会被 end 第二次）；
-      // ② `stepAlias.set(0, …)` 会改写 step 0 实际用的别名，记账落到错的模型上；
-      // ③ `downgrade` 判据回到 0，一轮从 step 8 起就在跑 low 的会话，最后这句结论反而按主别名计价。
+      // 收尾补跑是另一次 `agent.generate`，其 stepNumber 从 0 重新计数。不换算会导致：
+      // ① `stepSpans.set(0, …)` 覆盖主轮 step 0 那条已结束的 span（出错时还会被 end 第二次）；
+      // ② `stepAlias.set(0, …)` 改写 step 0 实际使用的别名，记账落到错误的模型上；
+      // ③ `downgrade` 判据回到 0，从 step 8 起就在使用 low 的会话，其最终结论反而按主别名计价。
       const stepNumber = wrapUpMode ? mainStepCount + rawStep : rawStep;
       await dependencies.plugins?.hook("beforeModelCall", {
         turn,
@@ -1869,38 +1868,38 @@ async function runMainAgentInternal(
         : null;
       const activeForStep = dependencies.tools
         .activeNamesForStep(turn.effectiveRole, toolContext, turn.expandedTools)
-        // **先扩张后收窄，收窄永远赢**（docs/07 §2.2）：载入一个 `allowed-tools: [bash]` 的 skill
-        // 之后，已展开的 MCP 工具照样滤掉 —— 展开改变的是可见性，不是权限。
+        // 先扩张后收窄，收窄始终优先（docs/07 §2.2）：载入 `allowed-tools: [bash]` 的 skill 之后，
+        // 已展开的 MCP 工具照样被滤除 —— 展开改变的是可见性，不是权限。
         .filter((name) => !skillAllow || skillAllow.has(name))
-        // 护栏：`toolSet` 开轮就冻结了，而这一行算出来的合格集是**每步 fresh** 的。轮中 MCP
-        // reconcile 新接一台 server、或热更新放宽了 `tools.overrides`，都会让 fresh 集合里出现
-        // 冻结集之外的名字。此前只有自撰写工具那一条路做了防护（开轮前 `syncIfChanged`）。
+        // 护栏：`toolSet` 在开轮时即冻结，而这一行计算出的合格集每步都是实时的。轮中 MCP
+        // reconcile 新接入一台 server、或热更新放宽了 `tools.overrides`，都会使实时集合中出现
+        // 冻结集之外的名字。此前只有自撰写工具一条路做了防护（开轮前 `syncIfChanged`）。
         //
-        // ⚠ **这道交集在 ai@7.0.65 上是「说清楚」而不是「兜住崩溃」**：`filterActiveTools`
-        // （`ai/dist/index.js`）做的是 `Object.entries(tools).filter(([n]) => activeTools.includes(n))`
-        // —— 纯交集，多报的名字被**静默丢掉**，SDK 一个字都不说。真正的坏处因此不是报错而是
-        // 「说了假话」：`search_tools` 会对一个轮中新挂的工具回 `status:'expanded'`，而它压根不在
-        // 冻结的 toolSet 里、这一轮永远发不出去。显式写出这道交集是为了让「本步到底发得出哪些」
-        // 只有一个答案，也为了不把正确性押在某个 SDK 版本恰好选了宽容语义上。
+        // ⚠ 该交集在 ai@7.0.65 上的作用是明确语义，而非防止崩溃：`filterActiveTools`
+        // （`ai/dist/index.js`）执行的是 `Object.entries(tools).filter(([n]) => activeTools.includes(n))`
+        // —— 纯交集，多报的名字被静默丢弃，SDK 不给出任何提示。因此真正的问题不是报错而是结果
+        // 失真：`search_tools` 会对轮中新挂载的工具返回 `status:'expanded'`，而它根本不在冻结的
+        // toolSet 中，本轮永远无法发出。显式写出这道交集，是为了让本步可发出的工具集只有一个
+        // 答案，也为了不把正确性寄托于某个 SDK 版本恰好采用了宽容语义。
         .filter((name) => name in toolSet);
       const requestedAlias = turn.modelAliasOverride ?? alias;
       const downgrade =
         stepNumber >= dependencies.config.agent.main.downgradeAfterStep &&
         dependencies.registry.aliases().includes("low");
       let selectedAlias = downgrade ? "low" : requestedAlias;
-      // **vision 压过其它一切**（`docs/04 §5.2`）：`low` 大概也看不见图，`set_model` 指定的别名
-      // 同样可能看不见 —— 看不见图的模型拿到这一轮就只能瞎猜或者绕远路。`vision` 优先，退而用
-      // 「降档前那个别名自己就支持」这一条：为了省钱降档而把眼睛降掉是最不划算的一种省。
-      // `turn.mediaInjected` 是**轮内**注入的那一档（`web_fetch` 抓回来的图、MCP 的截图）。
-      // `turnHasImages` 只是轮首快照，结构性地认不出它 —— 而这一步正是那张图要被读到的一步：
-      // step N 调 web_fetch → 图骑在工具结果上 → step N+1 的请求体里带着它。不在这里补一次，
-      // 那张图就落在一个看不了图的别名上（`docs/08 §7.2` 禁的正是这件事）。
+      // vision 优先级高于其它一切（`docs/04 §5.2`）：`low` 大概率不支持图像，`set_model` 指定的
+      // 别名同样可能不支持 —— 不支持图像的模型拿到这一轮只能猜测或绕行。优先取 `vision`，
+      // 其次取降档前那个自身即支持的别名：为省成本而降档却牺牲图像能力是最不划算的取舍。
+      // `turn.mediaInjected` 表示轮内注入的图像（`web_fetch` 抓取的图、MCP 的截图）。
+      // `turnHasImages` 只是轮首快照，结构上无法识别它 —— 而这一步正是该图被读取的一步：
+      // step N 调用 web_fetch → 图片附着在工具结果上 → step N+1 的请求体中携带它。不在此处补判
+      // 一次，该图就会落在不支持图像的别名上（`docs/08 §7.2` 禁止的正是这一情形）。
       if (
         (turnHasImages || turn.mediaInjected) &&
         !dependencies.registry.supportsVision(selectedAlias)
       ) {
-        // 候选里带上 `alias`（本轮解析出来的那个）：`set_model('low')` 把 `requestedAlias` 换掉之后，
-        // 「降档前那个别名」就只剩它了。
+        // 候选中包含 `alias`（本轮解析出的那个）：`set_model('low')` 替换 `requestedAlias` 之后，
+        // 降档前的别名只剩它。
         const seeing = ["vision", requestedAlias, alias].find((name) =>
           dependencies.registry.supportsVision(name),
         );
@@ -1924,7 +1923,7 @@ async function runMainAgentInternal(
           selectedAlias = seeing;
         }
       }
-      // 采样参数按「当步实际选中的别名」取：降档到 low 之后就该用 low 的参数（04 §5.2.1）。
+      // 采样参数取自当步实际选中的别名：降档到 low 之后即应使用 low 的参数（04 §5.2.1）。
       stepAlias.set(stepNumber, selectedAlias);
       const patch: {
         activeTools?: string[];
@@ -1936,8 +1935,8 @@ async function runMainAgentInternal(
         model: wrappedFor(selectedAlias),
         ...dependencies.registry.settings(selectedAlias),
       };
-      // 单轮成本闸门读 ledger：`reservation.committed` 只含主 agent 的花费，子 agent 全部漏在外面
-      // （docs/20 · W-QUOTA-01）。`turnCost` 把主 agent 与该轮所有子 agent 的花费都算进去了。
+      // 单轮成本闸门读取 ledger：`reservation.committed` 只包含主 agent 的花费，子 agent 全部遗漏
+      // （docs/20 · W-QUOTA-01）。`turnCost` 已将主 agent 与该轮所有子 agent 的花费一并计入。
       const cost = dependencies.ledger.turnCost(turn.turnId);
       if (
         cost >= dependencies.config.quota.perTurn.maxCostUsd ||
@@ -1951,30 +1950,29 @@ async function runMainAgentInternal(
         patch.activeTools = [];
         patch.toolChoice = "none";
       }
-      // 收尾补跑（§2）走的是同一条禁工具的路，不另造一套：那一次只许说话，再调工具就又可能
-      // 以工具调用收尾，把同一个坑挖第二遍。
+      // 收尾补跑（§2）复用同一条禁用工具的路径，不另建一套：该次调用只允许输出文本，若再调用
+      // 工具就可能再次以工具调用收尾，重复同一问题。
       if (wrapUpMode) {
         patch.activeTools = [];
         patch.toolChoice = "none";
       }
-      // 推理条目一律不回传。openai responses provider 会把上一步的 reasoning 写成
-      // `{type:'item_reference', id:'rs_…'}` —— 那份内容存在 OpenAI 服务端，第三方兼容网关
-      // 手上没有，解析不了就整个请求 502。表现是「模型一调工具就再也不说话」：后续那一步
-      // 重试三次全挂，而 AI SDK 把 RetryError 吞成空结果，调用方看到的只是「什么都没生成」。
-      // reasoning 本来也只在一轮的步骤之间有意义（上下文里不落盘），摘掉它换来的是工具调用之后还能有回复。
+      // 推理条目一律不回传。openai responses provider 会将上一步的 reasoning 写成
+      // `{type:'item_reference', id:'rs_…'}` —— 该内容存于 OpenAI 服务端，第三方兼容网关没有，
+      // 无法解析即导致整个请求 502。表现为模型一旦调用工具就不再输出文本：后续那一步重试三次
+      // 全部失败，而 AI SDK 将 RetryError 吞为空结果，调用方只看到无任何生成。
+      // reasoning 本就只在一轮的步骤之间有意义（不写入上下文），摘除它换来的是工具调用之后仍有回复。
       patch.messages = pruneMessages({ messages, reasoning: "all" });
       /**
-       * **当步别名看不了图时，请求体里也不能留着不透明 part。** 上面那个 vision 覆盖只在
-       * `turnHasImages` 为真时才拦；`media.visionScope='turn'` 下「窗口里有图但本轮没有新图」
-       * 恰好是它不为真的那一档 —— 而 `downgradeAfterStep` 到点降到 `low`（或 `set_model('low')`）
-       * 照样会把一个瞎模型放到还带着历史图的请求前面，正是 `docs/08 §7.2` 禁的那件事。
-       * `window` 档下这里恒为 no-op：那时要么已经切成能看图的别名，要么 `visionDegraded`
-       * 已经把两段的图都换成文本了。判据带上「这一轮到底有没有图」—— 纯文本轮次连问一次能力位
-       * 都不必。
+       * 当步别名不支持图像时，请求体中也不能保留不透明 part。上面的 vision 覆盖只在
+       * `turnHasImages` 为真时生效；`media.visionScope='turn'` 下「窗口内有图但本轮无新图」
+       * 恰好是它不为真的档位 —— 而 `downgradeAfterStep` 到点降为 `low`（或 `set_model('low')`）
+       * 同样会把不支持图像的模型置于仍带历史图的请求之前，正是 `docs/08 §7.2` 禁止的情形。
+       * `window` 档下此处恒为 no-op：那时要么已切换到支持图像的别名，要么 `visionDegraded`
+       * 已将两段图片全部替换为文本。判据包含本轮是否有图 —— 纯文本轮次无需查询能力位。
        *
-       * **`mediaInjected` 也要算进来**：轮内注入的那条 `webasset://` part 就在 `turn.delta` 里，
-       * 下一轮它是历史图，但**这一轮**它已经在 `messages` 里了（`contextMessages` 把 delta 也物化了）。
-       * 漏掉它 = 上面那次别名切换没找到能看图的别名时，这道兜底也不兜。
+       * `mediaInjected` 同样要计入：轮内注入的 `webasset://` part 就在 `turn.delta` 中，
+       * 下一轮它是历史图，而本轮它已进入 `messages`（`contextMessages` 会物化 delta）。
+       * 遗漏它意味着上面的别名切换未找到支持图像的别名时，这道兜底也失效。
        */
       if (
         (freshImages || historyImages || turn.mediaInjected) &&
@@ -2035,8 +2033,8 @@ async function runMainAgentInternal(
         },
       });
       stepSpans.set(stepNumber, span);
-      // 这一步的工具调用挂在这条 `model.call` 之下（`docs/10 §1` 的第二条边）。步是**串行**的，
-      // 所以原地改这一项是安全的；同一步内并行的工具调用共享同一个父，那正是它们真实的关系。
+      // 本步的工具调用挂在这条 `model.call` 之下（`docs/10 §1` 的第二条边）。步是串行执行的，
+      // 因此原地修改该项是安全的；同一步内并行的工具调用共享同一个父，这正是它们的真实关系。
       toolContext.parentSpanId = span.id;
       dependencies.log.publish("turn.progress", {
         turnId: turn.turnId,
@@ -2045,9 +2043,9 @@ async function runMainAgentInternal(
         note: `${event.provider}/${event.modelId}`,
       });
     },
-    // 四件事拆成四个可单独喂假 step 的观察者（`step-observers.ts`，docs/27 · D-05）。
-    // 这里只剩「把 AI SDK 的 step 映射成 StepFacts」这一层适配 —— 那个 step 类型没人能手搓，
-    // 而记账 / 广播 / 上下文 / 校准真正需要的只有十来个字段。
+    // 四项职责拆成四个可单独注入合成 step 的观察者（`step-observers.ts`，docs/27 · D-05）。
+    // 此处只保留将 AI SDK 的 step 映射为 StepFacts 的适配层 —— 该 step 类型无法手工构造，
+    // 而记账 / 广播 / 上下文 / 校准实际需要的只有十余个字段。
     onStepEnd: (step) => {
       const stepNumber = wrapUpMode
         ? mainStepCount + step.stepNumber
@@ -2062,7 +2060,7 @@ async function runMainAgentInternal(
           outputTokens: step.usage.outputTokens ?? 0,
           cacheReadTokens: step.usage.inputTokenDetails.cacheReadTokens ?? 0,
           cacheWriteTokens: step.usage.inputTokenDetails.cacheWriteTokens ?? 0,
-          // `inputTokens` 是 total（超集），计价要用这一份互斥的。三家 provider 一致，见 `pricedInputTokens`。
+          // `inputTokens` 是总量（超集），计价须用这份互斥值。三家 provider 表现一致，见 `pricedInputTokens`。
           noCacheTokens:
             step.usage.inputTokenDetails.noCacheTokens ?? undefined,
           reasoningTokens: step.usage.outputTokenDetails.reasoningTokens ?? 0,
@@ -2077,24 +2075,24 @@ async function runMainAgentInternal(
         toolResults: stepToolResults(step.content),
         requestBody: (step.request as { body?: unknown } | undefined)?.body,
       };
-      // 收尾判据取自**最后一步**，所以每步都覆写而不是累积。`sawToolCall` 反过来要累积：
-      // 判的是「这一轮到底做过事没有」，只有做过事才值得补一句结论。
+      // 收尾判据取自最后一步，因此每步覆写而非累积。`sawToolCall` 则需累积：它判定本轮是否
+      // 执行过操作，只有执行过才值得补一句结论。
       lastStepHadText = step.text.trim() !== "";
       if (step.toolCalls.length) sawToolCall = true;
       // `turns.steps` 此前没有任何写入方（全库 steps>0 的行数为 0），WebUI 轮次列表与
-      // `turn.finished` 事件里这个数永远是 0 —— 本次排查因此只能去翻 blob 还原步骤。
-      // 用换算后的编号：收尾补跑那一步也是真花了钱的一步，不该在这个数里隐身。
+      // `turn.finished` 事件中该数值恒为 0 —— 本次排查因此只能翻查 blob 还原步骤。
+      // 使用换算后的编号：收尾补跑那一步同样产生了真实开销，不应在该计数中缺失。
       dependencies.turns?.countStep(turn.turnId, stepNumber + 1);
       const resolved = observers.record(facts);
       observers.broadcast(facts, resolved);
       /**
-       * **摘要写真正出力的那个候选，不是链首。** `onStepStart` 拿到的 `event.provider/modelId`
-       * 是 AI SDK 看见的模型，而链内 fallback 发生在 `fallbackLanguageModel` 中间件内部
-       * （`wrapLanguageModel` 让 SDK 可见的永远是链首）—— 实测链 `fake-bad → deepseek-v4-flash`
-       * 时日志记 `rig-fake-bad.chat/fake-bad`、`usage_ledger` 记 `deepseek-v4-flash@ksm-api`，
-       * 同一次调用在两处指向两个不同的 provider（docs/28 · L-PROV-01）。`resolved` 出自
-       * `onServed` 报回来的 `servedModelId`，它就是真的那一个；`docs/10 §7` 第 3 条要求摘要里看得见，
-       * 所以这里用 `end()` 的 override 改列（`summary` 是列不是载荷）。
+       * 摘要写入真正提供服务的候选，而非链首。`onStepStart` 拿到的 `event.provider/modelId`
+       * 是 AI SDK 可见的模型，而链内 fallback 发生在 `fallbackLanguageModel` 中间件内部
+       * （`wrapLanguageModel` 使 SDK 可见的永远是链首）—— 实测链 `fake-bad → deepseek-v4-flash`
+       * 时日志记录 `rig-fake-bad.chat/fake-bad`、`usage_ledger` 记录 `deepseek-v4-flash@ksm-api`，
+       * 同一次调用在两处指向不同的 provider（docs/28 · L-PROV-01）。`resolved` 来自 `onServed`
+       * 上报的 `servedModelId`，即真实服务方；`docs/10 §7` 第 3 条要求摘要中可见，
+       * 因此此处用 `end()` 的 override 修改该列（`summary` 是列而非载荷）。
        */
       const fellBack = facts.servedModelId !== step.model.modelId;
       stepSpans.get(stepNumber)?.end(
@@ -2121,10 +2119,10 @@ async function runMainAgentInternal(
         },
       );
       /**
-       * **模型给了非法工具参数时，`ToolRegistry.execute` 根本没被调到。** 校验在 AI SDK 内部
-       * （`AI_InvalidToolInputError`），于是 `tool.call` 计数是 0，唯一痕迹是上下文里那条
-       * `output.type='error-text'` 的 tool-result —— 而它下一轮就被 `prune_level=1` 抹掉。
-       * 2026-08-18 打崩进程的事故起点正是 `get_message({messageId:0})`（docs/28 · L-LOG-03）。
+       * 模型给出非法工具参数时，`ToolRegistry.execute` 根本不会被调用。校验发生在 AI SDK 内部
+       * （`AI_InvalidToolInputError`），因此 `tool.call` 计数为 0，唯一痕迹是上下文中那条
+       * `output.type='error-text'` 的 tool-result —— 而它下一轮即被 `prune_level=1` 清除。
+       * 2026-08-18 导致进程崩溃的事故起点正是 `get_message({messageId:0})`（docs/28 · L-LOG-03）。
        */
       for (const raw of step.content as readonly unknown[]) {
         const part = raw as {
@@ -2163,9 +2161,9 @@ async function runMainAgentInternal(
     },
   });
   /**
-   * 「最后一步只有 reasoning / 只有工具调用」时补跑一次收尾（§2）。四个闸全过才跑，最多一次：
-   * ① 最后一步没有正文；② 这一轮真的做过事；③ 上游没挂（`streamFailure` 非空时再跑一次纯属
-   * 接着烧钱）；④ 单轮成本闸还有余量。**不伪造答复** —— 是让模型自己写结论（docs/16 §5）。
+   * 最后一步只有 reasoning 或只有工具调用时，补跑一次收尾（§2）。四道闸全部通过才执行，最多一次：
+   * ① 最后一步没有正文；② 本轮确实执行过操作；③ 上游未故障（`streamFailure` 非空时再跑一次
+   * 只会继续消耗成本）；④ 单轮成本闸仍有余量。不伪造答复 —— 由模型自行写出结论（docs/16 §5）。
    */
   const wrapUpIfNeeded = async (): Promise<string> => {
     if (lastStepHadText || !sawToolCall || streamFailure) return "";
@@ -2177,13 +2175,13 @@ async function runMainAgentInternal(
     if (turn.abortSignal.aborted) return "";
     wrapUpMode = true;
     try {
-      // **不要再把 `result.responseMessages` 拼进来**：`observers.appendContext` 每一步都已经把
-      // tool-call / tool-result 追进了 `turn.delta`，而 `contextMessages` 读的就是
-      // `snapshot + delta` —— 拼一遍等于同一个 `toolCallId` 出现两次，Anthropic 直接 400，
-      // 这个补跑于是永远静默失败；宽容一些的 provider 则要为每份工具输出付两次钱。
-      // 收尾指令塞进**易变段内部**而不是追加成新消息：KERNEL 说「只有请求最末尾那个
-      // system-instructions 块是真的」，在它后面再挂一个，等于让模型把自己的 RUNTIME、
-      // 权限行与工具目录当成伪造的用户正文（顺带也保住了「易变段物理最后」这条缓存前提）。
+      // 不要再拼入 `result.responseMessages`：`observers.appendContext` 每一步都已将
+      // tool-call / tool-result 追加进 `turn.delta`，而 `contextMessages` 读取的正是
+      // `snapshot + delta` —— 再拼一遍会使同一个 `toolCallId` 出现两次，Anthropic 直接返回 400，
+      // 该补跑于是永远静默失败；宽容的 provider 则会为每份工具输出重复计费。
+      // 收尾指令置于易变段内部而非追加为新消息：KERNEL 规定只有请求末尾的那个 system-instructions
+      // 块可信，在其后再挂一个等于让模型把自己的 RUNTIME、权限行与工具目录当作伪造的用户正文
+      // （同时也保住了易变段位于物理末尾这一缓存前提）。
       const messages = contextMessages(turn, dependencies.db, {
         ...messageOptions,
         volatile: `${prompt.volatile}\n\n${WRAP_UP_INSTRUCTION}`,
@@ -2205,7 +2203,7 @@ async function runMainAgentInternal(
       });
       return text;
     } catch (error) {
-      // 补跑失败不能把整轮拖下水：旁白已经发出去了，这里抛等于让用户既看到回复又收到一句「这轮没成」。
+      // 补跑失败不能影响整轮：旁白已发送，此处抛出会让用户既看到回复又收到本轮失败的提示。
       dependencies.log.event({
         level: "warn",
         kind: "turn.wrap_up",
@@ -2245,41 +2243,41 @@ async function runMainAgentInternal(
         settled = true;
         throw error;
       };
-      // `final` 必须挂在**流结束**上而不是直接挂 `result.text`：收尾补跑发生在流耗尽之后，
-      // 而 `result.text` 在那之前就 resolve 了 —— 直接挂的话每次都读到补跑之前的空串。
+      // `final` 必须绑定在流结束上，而非直接绑定 `result.text`：收尾补跑发生在流耗尽之后，
+      // 而 `result.text` 在此之前已 resolve —— 直接绑定会每次都读到补跑之前的空串。
       let streamDone!: () => void;
       const drained = new Promise<void>((resolve) => {
         streamDone = resolve;
       });
       let wrapUp = "";
       let delivered = (): string => "";
-      // 空正文 + 捕获到步骤失败 = 上游挂了，不是模型没话说。把真正的原因抛出去，
-      // 让轮次记成 failed 并给用户一句能看懂的话，而不是含糊的「没吐出正文」。
+      // 空正文加上已捕获的步骤失败，表明是上游故障而非模型无输出。抛出真实原因，
+      // 使轮次记为 failed 并向用户给出可理解的说明，而不是含糊的未产出正文。
       const final = drained
         .then(() => result.text)
         .then((text) => {
           if (!text.trim() && streamFailure) throw streamFailure;
-          // `result.text` 是 AI SDK v7 的**最后一步**正文，不是全轮拼接。最后一步以工具调用收尾时
-          // 它就是空串，此前 `bot.ts` 于是回落到「把过程旁白当答复」（本次事故）。
-          // 补跑到了就用**整条发出去的文本**（旁白 + 分隔 + 结论），不是只用结论那一段：归档与
-          // 上下文存的必须是用户屏幕上那条消息，否则下一轮模型看不见自己的旁白，用户一句
-          // 「你上面第二段说的」就无从对应。
+          // `result.text` 是 AI SDK v7 的最后一步正文，而非全轮拼接。最后一步以工具调用收尾时
+          // 它即为空串，此前 `bot.ts` 因此回落到将过程旁白当作答复（本次事故）。
+          // 触发补跑时使用整条已发送的文本（旁白 + 分隔 + 结论），而非仅结论段：归档与上下文
+          // 存储的必须是用户屏幕上的那条消息，否则下一轮模型看不到自己的旁白，用户引用其中某段
+          // 时将无法对应。
           return text.trim() ? text : delivered();
         })
         .then(finish, fail);
       /**
-       * **`final` 必须在创建处就被认领。**
+       * `final` 必须在创建处即被认领。
        *
-       * `fail` 是 rethrow，所以这条链是会 reject 的；唯一的 catch 在 `bot.ts`，而它们全部排在
-       * `await output.consume(...)` 之后 —— `consume` 开头还卡在 `sendChatAction`（实测 561ms）。
-       * 中间这一段就是「无人认领」的窗口：0 步返回时 AI SDK 在 flush 里用
-       * `NoOutputGeneratedError` reject `result.text`（那是 `steps.then().then()` 的**派生** promise，
-       * SDK 只把基础 promise 标成 handled），`main.ts` 的 unhandledRejection 处理器于是先一步
-       * 把进程带走 —— `bot.ts` 那三处 catch 一次都没跑到，`model.error` 也来不及写。
-       * 实测 logs/2026-08-18 22:17:29 与 23:19:43，两次都是 `sendChatAction` 结束后 1ms。
+       * `fail` 会 rethrow，因此这条链会 reject；唯一的 catch 位于 `bot.ts`，且全部排在
+       * `await output.consume(...)` 之后 —— `consume` 开头还阻塞在 `sendChatAction`（实测 561ms）。
+       * 中间这段即为无人认领的窗口：返回 0 步时 AI SDK 在 flush 中用 `NoOutputGeneratedError`
+       * reject `result.text`（那是 `steps.then().then()` 的派生 promise，SDK 只将基础 promise 标为
+       * handled），`main.ts` 的 unhandledRejection 处理器于是先一步终止进程 —— `bot.ts` 的三处
+       * catch 一次都未执行，`model.error` 也来不及写入。
+       * 实测 logs/2026-08-18 22:17:29 与 23:19:43，两次均发生在 `sendChatAction` 结束后 1ms。
        *
-       * 认领之后语义不变：`bot.ts` 那边 `await generated.final` 照旧拿到这个 rejection
-       * （已被观测过的 promise 再 await 一样抛）。
+       * 认领后语义不变：`bot.ts` 中的 `await generated.final` 照旧得到该 rejection
+       * （已被观测的 promise 再次 await 同样抛出）。
        */
       void final.catch(() => undefined);
       let emitted = "";
@@ -2287,42 +2285,42 @@ async function runMainAgentInternal(
         result.stream as AsyncIterable<StreamPartLike>,
         async () => {
           /**
-           * **一步都没跑完 = 上游给了个空流，不是模型没话说。** `fallback-model` 的 `reporting()`
-           * 只在 `doStream` **抛**的时候报 `onExhausted`；中转站 200 收下、流里 0 步就关闭那一路
-           * 既不抛也不触发 `idleGuarded`，于是 `streamFailure` 恒为 null、日志里一条 `model.error`
-           * 都没有，用户看到的只有沉默。补上这一条之后它走的是下面那条既有的 `broken` 路：
-           * 轮次记 failed、用户拿到能看懂的原因、日志有 `model.error`。
-           * 必须排在 `wrapUpIfNeeded` **之前** —— 那里第一道闸就在读 `streamFailure`。
+           * 一步都未完成表明上游返回了空流，而非模型无输出。`fallback-model` 的 `reporting()`
+           * 只在 `doStream` 抛出时上报 `onExhausted`；中转站返回 200 但流内 0 步即关闭这条路径
+           * 既不抛出也不触发 `idleGuarded`，于是 `streamFailure` 恒为 null、日志中没有任何
+           * `model.error`，用户只看到沉默。补上这一条后它走下方既有的 `broken` 路径：
+           * 轮次记为 failed、用户得到可理解的原因、日志中有 `model.error`。
+           * 必须排在 `wrapUpIfNeeded` 之前 —— 那里的第一道闸即读取 `streamFailure`。
            */
           if (mainStepCount === 0 && !turn.abortSignal.aborted)
             noteStreamFailure(new Error("upstream_no_output"));
-          // `wrapUpIfNeeded` 自己吞掉所有异常，这里不会因为它而把流记成 interrupted。
+          // `wrapUpIfNeeded` 自身吞掉全部异常，此处不会因它而将流记为 interrupted。
           try {
             wrapUp = await wrapUpIfNeeded();
           } finally {
             streamDone();
           }
           /**
-           * **断掉的轮次必须让投递侧看见。** 步骤级失败与轮次中止都不会让 `result.stream` 抛：
-           * AI SDK 把它们吞进内部 onError，流照常正常结束，而 `result.text` 还是**上一步**的正文
-           * —— 于是「已经吐过内容之后断掉」这一路在 `bot.ts` 眼里和正常收尾一模一样：用户既没有
-           * 「（生成中断）」也没有超时提示，`turns` 那行还记成 committed。实测
+           * 中断的轮次必须让投递侧感知。步骤级失败与轮次中止都不会使 `result.stream` 抛出：
+           * AI SDK 将其吞入内部 onError，流照常正常结束，而 `result.text` 仍是上一步的正文
+           * —— 于是已输出内容后中断这条路径在 `bot.ts` 看来与正常收尾完全相同：用户既不会看到
+           * 「（生成中断）」也没有超时提示，`turns` 那行还记为 committed。实测
            * logs/2026-08-18 · B8F92Z：600 秒到点 abort（`model.error timeout`），3 分钟后
-           * `turn.end turn committed`。这里抛出去 = `TelegramOutput.consume` 的 `interrupted`，
-           * 也就是 docs/04 §5.3 说的那条「已输出部分内容后失败」的路。
+           * `turn.end turn committed`。此处抛出即对应 `TelegramOutput.consume` 的 `interrupted`，
+           * 也就是 docs/04 §5.3 所述已输出部分内容后失败的路径。
            *
-           * 抛之前先走 `fail`：`streamDone()` 已经放开了 `drained`，`final` 那条链下一个微任务就要
-           * 用 `finish` 把 agent run 记成完成 —— 不在同一个同步块里把 `settled` 抢下来，
-           * `agent_runs` 会说这次子运行成功了。丢掉的 `wrapUp` 恒为空串（断掉时 `wrapUpIfNeeded`
-           * 第一道闸就返回了）。
+           * 抛出前先调用 `fail`：`streamDone()` 已释放 `drained`，`final` 链在下一个微任务即会用
+           * `finish` 将 agent run 记为完成 —— 不在同一同步块内抢先置位 `settled`，`agent_runs`
+           * 会记录本次子运行成功。被丢弃的 `wrapUp` 恒为空串（中断时 `wrapUpIfNeeded` 第一道闸
+           * 即返回）。
            */
           const broken = turn.abortSignal.aborted
             ? (turn.abortSignal.reason ?? "aborted")
             : streamFailure;
           if (broken)
             fail(broken instanceof Error ? broken : new Error(String(broken)));
-          // 「图片降级了」那句提示走**同一条**收尾通道（`docs/08 §7.2` 要求它在回复末尾）：
-          // 另开一条 core→telegram 的管子只为了追加一行文本，两边都要多一个概念。
+          // 图片降级提示走同一条收尾通道（`docs/08 §7.2` 要求其位于回复末尾）：
+          // 仅为追加一行文本另开一条 core→telegram 通道，会使两侧各多出一个概念。
           if (visionDegraded)
             return wrapUp
               ? `${wrapUp}\n\n${VISION_UNSUPPORTED_NOTICE}`
@@ -2334,11 +2332,11 @@ async function runMainAgentInternal(
         },
         noteStreamFailure,
       );
-      // 尾部只要真的追加过东西（补跑的结论、或者那句看不了图的提示），`final` 就该是**整条发出去
-      // 的文本**而不是最后一步的正文 —— 归档与上下文存的必须和用户屏幕上一致。
+      // 尾部只要实际追加过内容（补跑的结论，或图像不支持的提示），`final` 就应是整条已发送的
+      // 文本而非最后一步的正文 —— 归档与上下文存储的内容必须与用户屏幕一致。
       delivered = () => (wrapUp || visionDegraded ? emitted : "");
-      // `interrupt()` 也要放开 `drained`：被打断那条路（`bot.ts` 里的 `void generated.final.catch()`）
-      // 不会再去把生成器读完，不放的话那个 promise 永远悬着。
+      // `interrupt()` 同样要释放 `drained`：被打断的路径（`bot.ts` 中的
+      // `void generated.final.catch()`）不会再读完生成器，不释放会使该 promise 永久挂起。
       return {
         stream,
         final,
@@ -2354,9 +2352,9 @@ async function runMainAgentInternal(
       messages: contextMessages(turn, dependencies.db, messageOptions),
       abortSignal: turn.abortSignal,
     });
-    // 非流式（定时任务走这条）同样吃 `result.text` = 最后一步正文那条语义：以工具调用收尾的
-    // 定时任务此前会空正文 → `model_returned_empty`，整条任务静默失败。
-    // 非流式（定时任务）也要带那句提示：这条路同样可能收到图（被回复的那条消息里那张）。
+    // 非流式路径（定时任务走这条）同样受 `result.text` 等于最后一步正文这一语义影响：以工具调用
+    // 收尾的定时任务此前会得到空正文 → `model_returned_empty`，整条任务静默失败。
+    // 非流式路径也要附带该提示：这条路径同样可能收到图片（被回复消息中的那张）。
     const withVisionNotice = (text: string): string =>
       visionDegraded && text.trim()
         ? `${text}\n\n${VISION_UNSUPPORTED_NOTICE}`

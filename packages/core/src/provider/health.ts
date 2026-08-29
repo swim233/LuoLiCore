@@ -6,30 +6,30 @@ import { redact } from "../secrets.js";
 import type { LogSink } from "../log/sink.js";
 
 /**
- * provider 健康检查（`docs/04 §5.3` 最后一条）。**这条以前压根没实现**：`main.ts` 那个
- * `provider-health` 任务只调 `ModelRegistry.rebuild()`，一次探测都不发 —— 于是「上游连上了但不
- * 返回」这种故障没有任何一处会记住，`rebuild()` 的 `health_state <> 'down'` 过滤每次都放它过，
- * 链首永远排第一。表现是每一步都要重新熬满 `(maxRetries+1) × requestTimeoutMs`，而一轮只有
- * `concurrency.turnTimeoutMs`：`logs/2026-08-18` 的三轮各在开轮后 363 秒才 fallback，最后全部
- * 以「这一轮太久没有进展」收尾。
+ * provider 健康检查（`docs/04 §5.3` 最后一条）。此前未实现：`main.ts` 的
+ * `provider-health` 任务只调 `ModelRegistry.rebuild()`，一次探测都不发，于是上游可连接但不
+ * 返回这类故障无处记录，`rebuild()` 的 `health_state <> 'down'` 过滤每次都放行，
+ * 链首永远排第一。表现是每一步都要耗满 `(maxRetries+1) × requestTimeoutMs`，而一轮只有
+ * `concurrency.turnTimeoutMs`：`logs/2026-08-18` 的三轮各在开轮后 363 秒才 fallback，最终全部
+ * 以本轮长时间无进展收尾。
  *
- * 判据是**上游到底还答不答**，不是「这个模型这次答得对不对」：
- * - 超时 / 网络错 / 5xx → 计入连续失败。到 `failuresToDown`（默认 3）才标 `down`。
- * - 401/403 → 当场标 `down`。与调用路径（`fallback-model` 的 `onUnavailable`）和 WebUI
- *   「测试连接」（`app.ts`）一致：认证被拒不会自己好。
- * - 其余 4xx（400 参数不合、404 模型不存在）→ **不计**，只记一条 warn。上游答了话就说明它活着；
- *   拿探测模型的参数问题去把整个 provider 判死，会在「换了个模型 id」这种事上误伤。
+ * 判据是上游是否仍在响应，而非该模型本次回答是否正确：
+ * - 超时 / 网络错 / 5xx → 计入连续失败。达到 `failuresToDown`（默认 3）才标 `down`。
+ * - 401/403 → 立即标 `down`。与调用路径（`fallback-model` 的 `onUnavailable`）和 WebUI
+ *   测试连接（`app.ts`）一致：认证被拒不会自行恢复。
+ * - 其余 4xx（400 参数不合、404 模型不存在）→ 不计入，只记一条 warn。上游有响应即说明其存活；
+ *   以探测模型的参数问题判死整个 provider，会在更换模型 id 这类场景下误伤。
  */
 
 /**
- * 阈值与探测超时都跟着文档走，**不开新配置键**：`docs/04 §5.3` 把次数定在 3、§5.4 把「测试连接」
- * 的超时定在 15 s，多一个格子只会多一个和文档对不上的地方。真要可调再一起改文档与 schema。
+ * 阈值与探测超时都跟随文档，不新增配置键：`docs/04 §5.3` 将次数定为 3、§5.4 将测试连接
+ * 的超时定为 15 s，多一个配置项只会多一处与文档不一致的风险。确需可调时再一并修改文档与 schema。
  */
 export const PROVIDER_FAILURES_TO_DOWN = 3;
 export const PROVIDER_PROBE_TIMEOUT_MS = 15_000;
 
 export interface ProbeSource {
-  /** 该 provider 的一个**裸**候选（不能是 `aliasModel` 包过的：那一层自己会 fallback，探测就永远探不出问题）。 */
+  /** 该 provider 的一个裸候选（不能是 `aliasModel` 包装过的：那一层自身会 fallback，探测将永远发现不了问题）。 */
   probeCandidate(
     providerId: string,
   ): { model: LanguageModel; modelId: string } | null;
@@ -48,7 +48,7 @@ export interface ProviderHealthOutcome {
   error?: string;
 }
 
-/** 探测与调用路径共用同一个计数器，所以规则只有这一份。`immediate` 给 401/403。 */
+/** 探测与调用路径共用同一个计数器，因此规则只有这一份。`immediate` 用于 401/403。 */
 export function recordProviderFailure(
   db: Sqlite,
   providerId: string,
@@ -67,8 +67,8 @@ export function recordProviderFailure(
     db.prepare(
       "UPDATE providers SET health_fail_count=?,health_state='down',health_checked_at=?,health_error=? WHERE id=?",
     ).run(failures, now, reason.slice(0, 500), providerId);
-  // 还没到阈值时**不碰 health_state**：一次抖动不该让 provider 从链里消失，而
-  // `health_checked_at` 是冷却期的起点，提前推它会让真的 down 之后的冷却算错。
+  // 未达阈值时不改动 health_state：一次抖动不应让 provider 从链中消失，而
+  // `health_checked_at` 是冷却期的起点，提前推进会让真正 down 之后的冷却计算出错。
   else
     db.prepare(
       "UPDATE providers SET health_fail_count=?,health_error=? WHERE id=?",
@@ -83,12 +83,12 @@ export function recordProviderSuccess(db: Sqlite, providerId: string): void {
 }
 
 /**
- * 调用路径上「这一次真的服务成功了」。**「连续失败」少了这一条就是「累计失败」** —— 计数在库里、
- * 重启也不清，跨轮次零散攒够三次超时同样能判死一个一直在答话的 provider。
+ * 记录调用路径上的一次真实成功。缺这一条，连续失败就退化成累计失败：计数存在库里、
+ * 重启也不清零，跨轮次零散攒够三次超时同样会判死一个始终在响应的 provider。
  *
- * 与探测那条（`recordProviderSuccess`）分开是因为守卫：这里每一步模型调用都会调一次，带上
- * 「本来就是 up 且计数为 0 就别写」的条件之后常态命中 0 行，不给每一步加一次真实写入。
- * 返回是否真的改过 —— 调用方拿它决定要不要动进程内那份 `#down`。
+ * 与探测侧的 `recordProviderSuccess` 分开是为了加守卫：这里每一步模型调用都会调用一次，加上
+ * 本就是 up 且计数为 0 时不写入的条件后常态命中 0 行，不给每一步增加一次真实写入。
+ * 返回是否确实改动过，调用方据此决定是否更新进程内的 `#down`。
  */
 export function recordProviderServed(db: Sqlite, providerId: string): boolean {
   return (
@@ -102,8 +102,8 @@ export function recordProviderServed(db: Sqlite, providerId: string): boolean {
 }
 
 function errorStatus(error: unknown): number | null {
-  // 与 `fallback-model.ts` 的同名判据一致。那边是私有的，为一个三行判据把中间件层反向导进
-  // provider 层不值得（provider → agent → provider 的循环）。
+  // 与 `fallback-model.ts` 的同名判据一致。那边是私有的，为一个三行判据将中间件层反向引入
+  // provider 层不值得（会形成 provider → agent → provider 的循环）。
   return error &&
     typeof error === "object" &&
     "statusCode" in error &&
@@ -127,14 +127,14 @@ export async function runProviderHealthCheck(
   const outcomes: ProviderHealthOutcome[] = [];
   for (const row of rows) {
     const candidate = deps.models.probeCandidate(row.id);
-    // 一个启用的模型都没有的 provider 不在任何链里，探它没有意义（也没有模型可探）。
+    // 没有任何启用模型的 provider 不在任何链中，探测无意义（也没有可探的模型）。
     if (!candidate) continue;
     const started = Date.now();
     let failure: unknown;
-    // 走真实调用那一套 `AttemptDeadline`，而不是光传一个 `AbortSignal.timeout`：**只 abort 是不够的**
-    // —— provider 不认那个 signal 时它的 promise 永远不 settle，探测就把这个 cron 挂死在这里，
-    // 而 `Cron` 是 `protect: true`，下一次到点会被跳过 = 健康检查从此再也不跑（同 docs/04 §5.3
-    // 那条「到点后既 abort 底层请求也停止等待」）。
+    // 走真实调用那一套 `AttemptDeadline`，而非只传一个 `AbortSignal.timeout`：仅 abort 不够，
+    // provider 不认该 signal 时它的 promise 永远不 settle，探测会把这个 cron 挂死在此，
+    // 而 `Cron` 是 `protect: true`，下一次到点会被跳过，即健康检查从此不再运行（同 docs/04 §5.3
+    // 中到点后既 abort 底层请求也停止等待那条）。
     const deadline = new AttemptDeadline(undefined);
     try {
       await deadline.guard(
@@ -190,9 +190,9 @@ export async function runProviderHealthCheck(
     const auth = status === 401 || status === 403;
     const counted = auth || status === null || status >= 500;
     if (!counted) {
-      // **答了话就算活着，所以计数归零。** 不归零的话：探测模型常年 400（`max_tokens` 下界之类）
-      // 而调用路径偶尔攒一次超时，几天下来也能凑够三次，把一个一直好着的 provider 判死。
-      // `health_state` / `health_checked_at` 不动：一次 400 只证明网关在答话，不证明这个模型能用。
+      // 有响应即视为存活，因此计数归零。不归零时：探测模型长期返回 400（如 `max_tokens` 下界）
+      // 而调用路径偶尔攒一次超时，几天下来也能凑够三次，判死一个始终正常的 provider。
+      // `health_state` / `health_checked_at` 不改动：一次 400 只证明网关在响应，不证明该模型可用。
       deps.db
         .prepare(
           "UPDATE providers SET health_fail_count=0,health_error=? WHERE id=?",
@@ -247,7 +247,7 @@ export async function runProviderHealthCheck(
       level: recorded.down ? "error" : "warn",
       kind: "provider.health",
       summary: recorded.down
-        ? `${row.name} 连续失败 ${recorded.failures} 次，已标 down`
+        ? `${row.name} 连续失败 ${recorded.failures} 次，已标记为 down`
         : `${row.name} 探测失败（${recorded.failures}/${options.failuresToDown}）`,
       data: {
         provider: row.name,

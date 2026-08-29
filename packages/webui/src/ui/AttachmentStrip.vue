@@ -1,6 +1,6 @@
 <script setup lang="ts">
-// 图片与文件此前在管理端完全不可见：消息行不返回 attachment id，界面上也没有任何地方能点开
-// （docs/21 · G-API-08）。这一条带子挂在消息卡片与检索结果下面，图片直接出缩略图，其余给下载。
+// 图片与文件此前在管理端完全不可见：消息行不返回 attachment id，界面上也没有任何打开入口
+// （docs/21 · G-API-08）。这条附件带挂在消息卡片与检索结果下方，图片直接显示缩略图，其余提供下载。
 import { ref } from "vue";
 import UiTag from "./UiTag.vue";
 import UiModal from "./UiModal.vue";
@@ -8,8 +8,8 @@ import type { Attachment, TagSeverity } from "./types";
 
 defineProps<{ items: Attachment[] }>();
 
-// 服务端只对光栅图放行 `?inline=1`（同源内联 SVG/HTML 等于自造 XSS），这里的判据必须与它一致，
-// 否则会画出一张永远加载不出来的缩略图。
+// 服务端只对光栅图放行 `?inline=1`（同源内联 SVG/HTML 等同于引入 XSS），这里的判据必须与之一致，
+// 否则会渲染出无法加载的缩略图。
 const INLINE_IMAGE_MIME = new Set([
   "image/png",
   "image/jpeg",
@@ -23,9 +23,9 @@ const ICONS: Record<string, string> = {
   audio: "pi pi-volume-up",
   sticker: "pi pi-face-smile",
 };
-// download_state：done / failed / skipped 由 TelegramMedia.insert 写，expired 由
-// MaintenanceService.cleanup 写。done 不需要徽标。**expired 与 failed 必须分开**：前者是文件当初
-// 下来过、模型也看到过，只是过了 media.retentionDays 被清了；后者是从头到尾就没有过。
+// download_state：done / failed / skipped 由 TelegramMedia.insert 写入，expired 由
+// MaintenanceService.cleanup 写入。done 不需要徽标。expired 与 failed 必须区分：前者表示文件曾下载
+// 成功、模型也已读取，只是超过 media.retentionDays 后被清理；后者表示自始至终没有获取到。
 const STATES: Record<
   string,
   { label: string; severity: TagSeverity; hint: string }
@@ -33,17 +33,17 @@ const STATES: Record<
   failed: {
     label: "下载失败",
     severity: "danger",
-    hint: "这条附件没有落盘 —— 模型当时看到的也只是一句「处理失败」占位文本",
+    hint: "未写入磁盘，模型当时读到「处理失败」占位文本",
   },
   skipped: {
     label: "超限未下载",
     severity: "warn",
-    hint: "超过 media.maxImageBytes / media.maxDocBytes，当时就没有下载",
+    hint: "超过 media.maxImageBytes / media.maxDocBytes，未下载",
   },
   expired: {
     label: "已过期",
     severity: "info",
-    hint: "文件按 media.retentionDays 清掉了，元数据保留。当时模型看到的是原文件",
+    hint: "已按 media.retentionDays 清理，元数据保留",
   },
 };
 const viewed = ref<Attachment | null>(null);
@@ -74,7 +74,7 @@ function meta(file: Attachment): string {
   ];
   if (file.width && file.height) parts.push(`${file.width}×${file.height}`);
   if (file.durationSec) parts.push(`${file.durationSec}s`);
-  // 提取过正文的文档，模型当时读到的是正文而不是文件名 —— 这一点值得写在脸上。
+  // 已提取正文的文档，模型当时读到的是正文而不是文件名，该信息需在界面上显式标注。
   if (file.extractState === "done") parts.push("已提取正文");
   return parts.join(" · ");
 }

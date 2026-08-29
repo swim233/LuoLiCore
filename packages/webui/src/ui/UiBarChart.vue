@@ -1,10 +1,10 @@
 <script setup lang="ts">
 /**
- * 水平条形图。用于「按维度看用量」那类排行：维度值是 chat / user / model 的名字，
- * 竖着放会把标签压成竖排，横着放才读得出来。
+ * 水平条形图。用于按维度查看用量的排行：维度值是 chat / user / model 的名称，
+ * 纵向排列会使标签折行，横向排列才便于阅读。
  *
- * 只画前 `limit` 条并把剩下的合成一条「其余 N 项」——**不能只截断**：一张只显示前十
- * 而不说还有多少的图，会让人以为那就是全部（docs/22 §0「no silent caps」）。
+ * 只绘制前 `limit` 条并把其余合并为一条汇总项，不能只做截断：一张只显示前十项
+ * 而不说明剩余数量的图表，会让人误以为这就是全部（docs/22 §0「no silent caps」）。
  */
 import { computed } from "vue";
 
@@ -61,6 +61,6 @@ const maximum = computed(() =>
       /></span>
       <b class="bar-value">{{ format(row.value) }}</b>
     </li>
-    <li v-if="!display.length" class="empty">这个区间里没有用量</li>
+    <li v-if="!display.length" class="empty">暂无用量</li>
   </ul>
 </template>

@@ -22,23 +22,23 @@ import {
 import type { TelegramDeliveryEvent } from "./stream-output.js";
 
 /**
- * 一次 ACP 运行的进度卡片（`docs/08 §6.1`）。**一条消息、只重写、不分片、不逐帧归档。**
+ * 单次 ACP 运行的进度卡片（`docs/08 §6.1`）。单条消息、只重写、不分片、不逐帧归档。
  *
- * 为什么不给 `TelegramOutput` 开第二种模式：那 377 行整个建立在**文本单调追加**上（`lastRenderedLength`
- * 差值判据、每帧重切全文、装不下就再发一条承接、`（生成中断）`后缀、逐段归档），而卡片是**快照重写**
- * —— 计划项打勾、当前工具换掉、计数器加一，文本会**变短**。喂进 `consume()` 的具体坏法：
- * `[...current].length - lastRenderedLength` 为负 ⇒ 永远不满 `minDeltaChars` ⇒ 一次都不编辑；
- * 偶尔涨过头 ⇒ 多发一条消息且永远收不回。那 377 行里织进了五起事故的修复（`L-TG-02/03/04`、
- * `R-TG-02`、`W-TG-04`）与 50+ 条用例，为一个形状不同的东西改它是拿既有绿灯换代码复用。
+ * 不复用 `TelegramOutput` 的第二种模式，原因：那 377 行完全建立在文本单调追加之上
+ * （`lastRenderedLength` 差值判据、每帧重切全文、超长则追发一条承接、`（生成中断）`后缀、逐段归档），
+ * 而卡片是快照重写 —— 计划项打勾、当前工具替换、计数器递增，文本会变短。送入 `consume()` 的具体
+ * 失效模式：`[...current].length - lastRenderedLength` 为负 ⇒ 永远不满足 `minDeltaChars` ⇒ 一次都不
+ * 编辑；偶尔超出 ⇒ 多发一条消息且无法回收。那 377 行中嵌入了五起故障的修复（`L-TG-02/03/04`、
+ * `R-TG-02`、`W-TG-04`）与 50+ 条用例，为一个形状不同的需求改动它，是以既有测试的通过状态换代码复用。
  *
- * 所以这里**复用原语与形状，不复用控制流**：`sendWithFallback` / `toPlainText` 那一跳的
+ * 因此此处复用原语与形状，不复用控制流：`sendWithFallback` / `toPlainText` 的
  * parse-entities 降级、`deliveryOrder` 的首帧串行、`TelegramDeliveryEvent` + `#emit`
- * （观测不许打断投递）、`deliver` 那层「投递失败 ≠ 生成中断」。不复用：分片、占位、后缀、逐帧归档。
+ * （观测不得打断投递）、`deliver` 层的「投递失败 ≠ 生成中断」。不复用：分片、占位、后缀、逐帧归档。
  */
 
-/** `close()` 的入参：ACP 那一趟的收尾事实，由 core 侧在 `finally` 里给。 */
+/** `close()` 的入参：ACP 运行的收尾事实，由 core 侧在 `finally` 中提供。 */
 export interface AcpCardFinal {
-  /** 全部可选字段都显式带 `| undefined`：`exactOptionalPropertyTypes` 下调用方才能直接写 `stopReason: x`。 */
+  /** 全部可选字段显式带 `| undefined`：`exactOptionalPropertyTypes` 下调用方才能直接写 `stopReason: x`。 */
   stopReason?: string | undefined;
   error?: string | undefined;
   files: number;
@@ -49,16 +49,16 @@ export interface AcpCardFinal {
 
 export interface AcpProgressCard {
   /**
-   * 卡片那条消息的 id。`null` = 一条都没发出去（限流、被拉黑）—— 归档侧靠它决定要不要落
-   * `messages` 那一行，而**归档只在终帧做一次**：`ScopedArchiveRepository.append` 是
-   * `INSERT OR IGNORE`，首帧就归档等于把「正在启动…」永久钉进 `messages` 与 FTS。
+   * 卡片消息的 id。`null` 表示一条都未发出（限流、被封禁）—— 归档侧据此决定是否写入
+   * `messages` 行，而归档只在终帧执行一次：`ScopedArchiveRepository.append` 是
+   * `INSERT OR IGNORE`，首帧即归档会把「正在启动…」永久写入 `messages` 与 FTS。
    */
   readonly messageId: number | null;
-  /** 收一条 `session/update`；内部按「时间窗 + 状态变化」双闸决定是否真的编辑。**永不 throw**。 */
+  /** 接收一条 `session/update`；内部按时间窗 + 状态变化双重判据决定是否真正编辑。不抛异常。 */
   push(notification: unknown): void;
   /**
-   * 终帧：立刻渲染并落定（不受节流约束），**同一次调用里把取消按钮撤掉**，交回归档用的最终文本
-   * （渲染前的正文）。**永不 throw**。
+   * 终帧：立即渲染并落定（不受节流约束），在同一次调用中撤除取消按钮，返回用于归档的最终文本
+   * （渲染前的正文）。不抛异常。
    */
   close(final: AcpCardFinal): Promise<string>;
 }
@@ -67,9 +67,9 @@ export interface AcpCardTarget {
   chatId: string;
   threadId: number | null;
   /**
-   * 取消按钮挂的那个 turn（`docs/08 §6.1`）。**缺席时整个按钮不挂** —— `c:` 那条通道的判据是
-   * 「这个 id 还在 `TurnRegistry` 里且点的人是发起人或 owner」，一个空 payload 必然判 false，
-   * 而屏幕上出现的是「只有发起人或管理员可以取消」：一句与真实原因毫不相干的话。
+   * 取消按钮绑定的 turn（`docs/08 §6.1`）。缺失时不挂载该按钮 —— `c:` 通道的判据是
+   * 「该 id 仍在 `TurnRegistry` 中且点击者为发起人或 owner」，空 payload 必然判 false，
+   * 屏幕上显示的是「只有发起人或管理员可以取消」：与真实原因无关的提示。
    */
   turnId?: string | undefined;
 }
@@ -78,10 +78,10 @@ export interface AcpCardOptions {
   parseMode: ParseMode;
   maxMessageChars: number;
   intervalMs: number;
-  /** 表头那两格。缺省时退化成「外部 agent」并省掉目录 —— 少一格标题不值得让整张卡片发不出来。 */
+  /** 表头的两个字段。缺省时退化为「外部 agent」并省略目录 —— 缺一格标题不应导致整张卡片发不出。 */
   agent?: string | undefined;
   dir?: string | undefined;
-  /** `agent_thought_chunk` 那一行的开关，默认开（见下面 `#lines` 里那条注释）。 */
+  /** `agent_thought_chunk` 行的开关，默认开启（见下方 `#lines` 中的注释）。 */
   thoughts?: boolean | undefined;
 }
 
@@ -92,32 +92,32 @@ export interface AcpCardHooks {
 }
 
 /**
- * 卡片的字符预算：`min(maxMessageChars, 3500)`。上限是 Telegram 的 4096，而**超长不是解析失败**
- * —— `sendWithFallback` 兜不住它，Telegram 直接 `message is too long`。3500 这个数比
- * `maxMessageChars` 的默认 3900 更紧：卡片是**一条消息一趟到底**，它没有「装不下就再发一条」这条
- * 退路，宁可留厚一点余量。
+ * 卡片的字符预算：`min(maxMessageChars, 3500)`。上限为 Telegram 的 4096，而超长不属于解析失败
+ * —— `sendWithFallback` 无法降级处理，Telegram 直接返回 `message is too long`。3500 比
+ * `maxMessageChars` 的默认值 3900 更紧：卡片全程使用单条消息，没有「超长则追发一条」的退路，
+ * 因此预留更多余量。
  */
 const CARD_MAX_CHARS = 3500;
 /**
- * 即时刷新（plan 被替换 / 某个 tool_call 变 failed）之间的地板。
+ * 即时刷新（plan 被替换 / 某个 tool_call 转为 failed）之间的最小间隔。
  *
- * 私聊的真实预算是 **~60 次/分钟、串行一秒一拍**（`docs/08 §5.2` 最后那颗：`chat_id < 0` 才走
- * `group` 桶，私聊走只有 `{minTime: 1000}` 的 `out` 桶，**没有 per-minute reservoir**），而卡片按
- * `intervalMs=5000` 只占 ~12/分钟。但即时刷新绕过间隔：一个 200 次工具调用全失败的 agent 会把它
- * 变成 200 次编辑。两个关键事件隔不到 2 秒时，第二次晚 3 秒显示没有任何损失 —— 前一帧已经告诉
- * 用户「有东西变了」。加上这道地板，最坏 30/分钟，仍在私聊预算的一半以内。
+ * 私聊的真实预算约为 60 次/分钟、串行一秒一拍（`docs/08 §5.2` 末条：`chat_id < 0` 才走
+ * `group` 桶，私聊走只有 `{minTime: 1000}` 的 `out` 桶，无 per-minute reservoir），而卡片按
+ * `intervalMs=5000` 仅占约 12/分钟。但即时刷新会绕过该间隔：一个 200 次工具调用全部失败的 agent
+ * 会将其放大为 200 次编辑。两个关键事件间隔不足 2 秒时，第二次延后 3 秒显示无任何损失 ——
+ * 前一帧已经告知用户状态发生变化。加上该下限后，最坏为 30/分钟，仍在私聊预算的一半以内。
  */
 const IMMEDIATE_MIN_GAP_MS = 2000;
-/** `close()` 等在途那一帧落地的上界。它挂在调用方的 `finally` 上，不能没有底。 */
+/** `close()` 等待在途帧落地的上界。它挂在调用方的 `finally` 上，必须有上界。 */
 const CLOSE_WAIT_MS = 5000;
 /**
- * 取消按钮走的是 **`bot.ts` 那条既有的 `c:<turnId>` 通道**（`docs/08 §6` 的取消按钮，那里已经判过
- * 「点的人是发起人或 owner」），不是一种新的 callback 种类 —— 所以适配层这边只有「挂不挂这副键盘」
- * 一个决定，`callback_query:data` 的处理器一个字都不用改。
+ * 取消按钮复用 `bot.ts` 中既有的 `c:<turnId>` 通道（`docs/08 §6` 的取消按钮，该处已判定
+ * 「点击者为发起人或 owner」），不是新增的 callback 种类 —— 因此适配层只需决定是否挂载这副键盘，
+ * `callback_query:data` 的处理器无需改动。
  *
- * 64 字节是 Bot API 给 `callback_data` 的硬上界（同 `docs/05 §6.1` 里 `a:` 那套的算术）。
- * `c:` + ULID(26) = 28，这道闸只在 turnId 不是 ULID 时才够得着；而它一旦超界，Telegram 拒的是整条
- * `sendMessage` —— 屏幕上连卡片都没有。宁可不挂按钮。
+ * 64 字节是 Bot API 对 `callback_data` 的硬上界（算法同 `docs/05 §6.1` 中 `a:` 那套）。
+ * `c:` + ULID(26) = 28，该判据仅在 turnId 非 ULID 时才可能触发；而一旦超界，Telegram 拒绝的是整条
+ * `sendMessage` —— 屏幕上不会出现卡片。因此宁可不挂按钮。
  */
 const CANCEL_PREFIX = "c:";
 const CALLBACK_DATA_MAX = 64;
@@ -126,27 +126,27 @@ const TITLE_MAX = 72;
 const PLAN_INLINE_MAX = 24;
 const PATH_MAX = 52;
 const DIR_MAX = 40;
-/** 思考行与正文尾行各自的显示长度，以及它们各自那个**有界滚动窗口**的长度。 */
+/** 思考行与正文尾行各自的显示长度，以及各自有界滚动窗口的长度。 */
 const THOUGHT_MAX = 120;
 const THOUGHT_BUFFER_MAX = 240;
 const TAIL_MAX = 120;
 const TAIL_BUFFER_MAX = 400;
 /**
- * 卡片自己那几张表的上界。喂它的是我们不信任其输出量的子进程（实测 86 秒的任务 263 条 update），
- * 而 `maxUpdatesPerPrompt` 是**每次 prompt** 的上界 —— 一张按 toolCallId 长的表不该跟着它长。
- * 撞上界之后只停止**跟踪明细**，计数照旧准（`#toolCalls` / `#paths`）。
+ * 卡片内部各表的上界。输入方是输出量不受信任的子进程（实测 86 秒的任务产生 263 条 update），
+ * 而 `maxUpdatesPerPrompt` 是每次 prompt 的上界 —— 按 toolCallId 增长的表不应随之增长。
+ * 达到上界后仅停止跟踪明细，计数仍然准确（`#toolCalls` / `#paths`）。
  */
 const MAX_TRACKED_TOOLS = 256;
 const MAX_TRACKED_FILES = 64;
-/** 只参与计数的那张路径表的上界。比明细宽得多（计数只要「有几个」），但仍然有界 ——
- *  路径长度不受我们控制，一份无界的 Set 挂在一次 run 上就是一条内存泄漏。 */
+/** 仅参与计数的路径表的上界。比明细表宽得多（计数只需数量），但仍然有界 ——
+ *  路径长度不受控制，挂在一次 run 上的无界 Set 即为内存泄漏。 */
 const MAX_COUNTED_FILES = 512;
 const MAX_PLAN_ENTRIES = 40;
 /**
- * 行级计数的输入上界与编辑距离上界。`diffLines` 是 O(n·d)，而 `push()` 跑在收 `session/update`
- * 的那条路上：一次 200 个工具调用的 run 里，每条 diff 都对一份上万行的文件全量比一遍，等于把
- * 事件循环按在 CPU 上。超界就**只显示路径不显示行数** —— 卡片要回答的是「动了哪些文件」，
- * 行数是附赠品。
+ * 行级计数的输入上界与编辑距离上界。`diffLines` 复杂度为 O(n·d)，而 `push()` 运行在接收
+ * `session/update` 的路径上：一次 200 个工具调用的 run 中，每条 diff 都对上万行文件做全量比对，
+ * 会长时间占用事件循环。超界时只显示路径不显示行数 —— 卡片需要回答的是改动了哪些文件，
+ * 行数是附加信息。
  */
 const MAX_DIFF_CHARS = 131_072;
 const MAX_DIFF_EDIT = 4000;
@@ -155,21 +155,21 @@ const PLAN_ACTIVE_LINES = 2;
 const PLAN_PENDING_INLINE = 2;
 const FILE_LINES = 3;
 
-/** 计数行用的短标签（`读 9 · 改 6 · 跑 5 · 搜 3`），顺序即显示顺序。 */
+/** 计数行使用的短标签（`读取 9 · 编辑 6 · 执行 5 · 搜索 3`），定义顺序即显示顺序。 */
 const KIND_LABEL: Record<ToolKind, string> = {
-  read: "读",
-  edit: "改",
-  execute: "跑",
-  search: "搜",
-  fetch: "取",
-  delete: "删",
-  move: "移",
-  think: "想",
-  switch_mode: "换档",
+  read: "读取",
+  edit: "编辑",
+  execute: "执行",
+  search: "搜索",
+  fetch: "获取",
+  delete: "删除",
+  move: "移动",
+  think: "思考",
+  switch_mode: "切换模式",
   other: "其他",
 };
 const KIND_ORDER = Object.keys(KIND_LABEL) as ToolKind[];
-/** `现在` 那一行的图标。标题本来就是一句人读的话，前面配图标比再塞一个中文标签更好读。 */
+/** 「当前」行的图标。标题本身即自然语言描述，前置图标比再加一个中文标签更易读。 */
 const KIND_ICON: Record<ToolKind, string> = {
   read: "📖",
   edit: "✏️",
@@ -190,23 +190,23 @@ const PLAN_MARK: Record<PlanEntryStatus, string> = {
 const STOP_LABEL: Record<string, string> = {
   end_turn: "完成",
   max_tokens: "上游截断（max_tokens）",
-  max_turn_requests: "撞上请求数上限",
+  max_turn_requests: "达到请求数上限",
   refusal: "上游拒答",
   cancelled: "已取消",
 };
-/** core 侧的 `AcpErrorCode` 里会走到终帧的那几个。名单外的原样显示 —— 编一个中文说法比露出码更糟。 */
+/** core 侧 `AcpErrorCode` 中会到达终帧的若干项。名单外的原样显示 —— 杜撰中文说法比暴露错误码更差。 */
 const ERROR_LABEL: Record<string, string> = {
   acp_cancelled: "已取消",
   acp_timeout: "超时中止",
   acp_cost_exceeded: "超预算中止",
   acp_connection_lost: "连接断开",
-  acp_prompt_failed: "agent 报错",
+  acp_prompt_failed: "agent 执行失败",
 };
 
 /**
- * 整段丢弃的优先级（`docs/08 §6.1`）。前四档是定死的那四段，其后几档只有在 `maxMessageChars` 被
- * 调到荒唐的小值时才够得着。**表头、失败行、三个计数行永不进这张表** —— 失败才是这一趟花了十五
- * 分钟的原因，只显示「当前」会把它冲掉。
+ * 整段丢弃的优先级（`docs/08 §6.1`）。前四档为固定的四段，其后几档只有在 `maxMessageChars` 被
+ * 调至极小值时才会触发。表头、失败行、三个计数行永不进入该表 —— 失败正是本次运行耗时十五分钟
+ * 的原因，只显示当前状态会将其覆盖。
  */
 type Group =
   | "thought"
@@ -230,9 +230,9 @@ const DROP_LADDER: readonly Group[] = [
   "now",
 ];
 
-/** `key` 是这一行进「与上帧逐字节相同」判据时的形态，缺省即 `text`。只有表头用它：那一行带着
- *  一个每秒都在变的计时器，把它算进判据等于让「相同就不发」永不成立，而**表头里的模式与目录
- *  仍要参与** —— 一次 `current_mode_update` 是真的变化，不该被计时器连坐着一起排除。 */
+/** `key` 是该行参与「与上帧逐字节相同」判据时的形态，缺省即 `text`。只有表头使用它：该行包含
+ *  一个每秒变化的计时器，将其计入判据会使「相同则不发」永不成立，而表头中的模式与目录
+ *  仍需参与判据 —— 一次 `current_mode_update` 是真实变化，不应被计时器一并排除。 */
 interface Line {
   group?: Group;
   text: string;
@@ -252,8 +252,8 @@ interface TouchedFile {
 }
 
 /**
- * 任何要进卡片的外部文本都先过这里。**换行必须折掉** —— 卡片是「一项一行」的版式，一个带换行的
- * 工具标题会把后面所有行的语义错位；控制字符同理（NUL 在 Telegram 正文里没有任何显示意义）。
+ * 所有进入卡片的外部文本先经过此处。换行必须折叠 —— 卡片采用一项一行的版式，带换行的
+ * 工具标题会使后续所有行的语义错位；控制字符同理（NUL 在 Telegram 正文中无任何显示意义）。
  */
 function oneLine(text: string): string {
   return text
@@ -263,9 +263,9 @@ function oneLine(text: string): string {
 }
 
 /**
- * 单个字段的省略。**这不是「切半行」** —— `docs/02 §9` 红线 11 说的是不透明单元不许截半，而一条
- * 带显式 `…` 的标题是完整的显示单元；真正不许出现的是「一行只渲染了一半就没了」，那由整段丢弃
- * 和最后那道按行的兜底来保证。
+ * 单个字段的省略。这不属于截断半行 —— `docs/02 §9` 红线 11 约束的是不透明单元不得截半，而带
+ * 显式 `…` 的标题是完整的显示单元；真正禁止的是一行只渲染一半即中断，该约束由整段丢弃
+ * 和最后一道按行兜底保证。
  */
 function clip(text: string, max: number): string {
   const points = [...oneLine(text)];
@@ -275,8 +275,8 @@ function clip(text: string, max: number): string {
 }
 
 /**
- * 路径按**尾部**收：`…/tools/builtins.ts` 认得出是哪个文件，`/home/swim/code/Luo…` 认不出。
- * 一段 4000 字的路径因此照样只占一行 —— 那是外部 agent 递过来的字段，长度不受我们控制。
+ * 路径按尾部保留：`…/tools/builtins.ts` 可辨识具体文件，`/home/swim/code/Luo…` 不可。
+ * 4000 字的路径因此同样只占一行 —— 该字段由外部 agent 传入，长度不受控制。
  */
 function shortPath(path: string, max = PATH_MAX): string {
   const clean = oneLine(path);
@@ -290,12 +290,12 @@ function shortPath(path: string, max = PATH_MAX): string {
     kept.unshift(parts[index]!);
     size += next;
   }
-  // 连最后一段自己都超长（单个文件名几千字符）：那一段按尾部硬收，前面补 `…`。
+  // 最后一段自身即超长（单个文件名数千字符）：该段按尾部硬截断，前置 `…`。
   if (!kept.length) return `…${[...clean].slice(-(max - 1)).join("")}`;
   return `…/${kept.join("/")}`;
 }
 
-/** `unref` 过的 sleep：`close()` 那个上界不该成为「进程退不出去」的新理由。 */
+/** 已 `unref` 的 sleep：`close()` 的等待上界不应成为进程无法退出的原因。 */
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     const timer = setTimeout(resolve, ms);
@@ -317,23 +317,23 @@ function costLabel(amount: number): string {
   return `$${amount < 0.01 ? amount.toFixed(3) : amount.toFixed(2)}`;
 }
 
-/** 有界滚动窗口：只留尾部。思考与正文都只显示「最近说到哪了」，留头没有意义。 */
+/** 有界滚动窗口：只保留尾部。思考与正文都只需展示最新进度，保留开头没有意义。 */
 function rollingTail(text: string, max: number): string {
   const points = [...text];
   return points.length <= max ? text : points.slice(-max).join("");
 }
 
 /**
- * 名单里查不到就原样显示（见 `ERROR_LABEL`）。**用 `Object.hasOwn` 而不是直接索引**：`stopReason`
- * 是外部 agent 从 JSON-RPC 递过来的字符串，`STOP_LABEL['toString']` 顺着原型链拿到的是一个函数，
- * 插进模板就是一整段函数源码躺在卡片上。
+ * 名单中不存在时原样显示（见 `ERROR_LABEL`）。使用 `Object.hasOwn` 而非直接索引：`stopReason`
+ * 是外部 agent 经 JSON-RPC 传入的字符串，`STOP_LABEL['toString']` 会沿原型链取到一个函数，
+ * 插入模板后会在卡片上显示整段函数源码。
  */
 function label(table: Record<string, string>, key: string): string {
   return Object.hasOwn(table, key) ? table[key]! : clip(key, TITLE_MAX);
 }
 
-/** 同一个道理：`'constructor' in KIND_LABEL` 为真，于是 `KIND_LABEL[kind]` 是 `undefined`，
- *  卡片上出现一个字面的 `undefined`。 */
+/** 同理：`'constructor' in KIND_LABEL` 为真，而 `KIND_LABEL[kind]` 为 `undefined`，
+ *  卡片上会显示字面量 `undefined`。 */
 function normalizeKind(kind: unknown): ToolKind {
   return typeof kind === "string" && Object.hasOwn(KIND_LABEL, kind)
     ? (kind as ToolKind)
@@ -349,9 +349,9 @@ function firstPath(locations: unknown): string | null {
 }
 
 /**
- * `Diff{path, oldText, newText}` → `+A −B`。**patch 全文一个字节都不进消息**，两条硬理由：
- * ① Telegram 的 4096 上限，一份真实 diff 一条就顶满；② 终帧那份文本要被归档、下一轮进模型上下文
- * —— 让外部 agent 生成的 diff 原文走这条路，等于给注入开一条不经 `untrusted()` 的门。
+ * `Diff{path, oldText, newText}` → `+A −B`。patch 全文一个字节都不进入消息，两条理由：
+ * ① Telegram 的 4096 上限，一份真实 diff 即可占满；② 终帧文本会被归档并进入下一轮模型上下文
+ * —— 让外部 agent 生成的 diff 原文走这条路，等于开出一条不经 `untrusted()` 的注入通道。
  */
 function countDiff(
   oldText: string,
@@ -373,11 +373,11 @@ class AcpCard implements AcpProgressCard {
   readonly #startedAt = Date.now();
   readonly #agent: string;
   readonly #dir: string;
-  /** 工作目录的原样形态（`#dir` 是给表头看的、可能已经省略过的那份）。用途见 `#short`。 */
+  /** 工作目录的原始形态（`#dir` 是供表头显示、可能已省略过的那份）。用途见 `#short`。 */
   readonly #root: string;
   readonly #budget: number;
   readonly #interval: number;
-  /** 整趟 run 不变的那副键盘，`undefined` = 这张卡片没有取消按钮（见 `AcpCardTarget.turnId`）。 */
+  /** 整次 run 不变的键盘，`undefined` 表示该卡片没有取消按钮（见 `AcpCardTarget.turnId`）。 */
   readonly #cancel: InlineKeyboardMarkup | undefined;
   #mode: string | null = null;
   #plan: Array<{ content: string; status: PlanEntryStatus }> = [];
@@ -385,16 +385,16 @@ class AcpCard implements AcpProgressCard {
   readonly #tools = new Map<string, TrackedTool>();
   #toolCalls = 0;
   readonly #kinds = new Map<ToolKind, number>();
-  /** 当前在跑的那个工具。用显式的一对而不是每帧扫 `#tools`：撞上 `MAX_TRACKED_TOOLS` 之后
-   *  那张表就不再收人了，而「现在在干什么」不该跟着一起消失。 */
+  /** 当前正在执行的工具。使用显式字段而非每帧扫描 `#tools`：达到 `MAX_TRACKED_TOOLS` 后
+   *  该表不再接收新项，而当前执行状态不应随之消失。 */
   #current: TrackedTool | null = null;
   #currentId: string | null = null;
   #failures = 0;
   #lastFailure: string | null = null;
   readonly #files = new Map<string, TouchedFile>();
-  /** 只为**计数**存路径：`#files` 那张表撞上 `MAX_TRACKED_FILES` 之后就不再收人，而
-   *  「改动 N 个文件」不该跟着停。用 Set 而不是一个溢出计数器 —— 后者按 `#touch` 的次数加，
-   *  同一个文件被改十次就报十个文件（一个 200 次工具调用的 run 能把它虚报成三位数）。 */
+  /** 仅用于计数的路径集合：`#files` 达到 `MAX_TRACKED_FILES` 后不再接收新项，而
+   *  「改动 N 个文件」不应随之停止。使用 Set 而非溢出计数器 —— 后者按 `#touch` 调用次数累加，
+   *  同一文件被改十次即报十个文件（一次 200 个工具调用的 run 可使其虚增至三位数）。 */
   readonly #paths = new Set<string>();
   #tail = "";
   #thought = "";
@@ -403,8 +403,8 @@ class AcpCard implements AcpProgressCard {
   #dirty = false;
   #lastEditAt = 0;
   #messageId: number | null = null;
-  /** 上一帧的正文，**表头里那个计时器除外**（见 `Line.key`）：时钟走了一秒不是新信息，
-   *  把它算进判据等于让「逐字节相同就不发」永不成立。 */
+  /** 上一帧的正文，不含表头中的计时器（见 `Line.key`）：时钟走过一秒不构成新信息，
+   *  将其计入判据会使「逐字节相同则不发」永不成立。 */
   #lastKey: string | null = null;
   #plain = "";
   #closed = false;
@@ -427,8 +427,8 @@ class AcpCard implements AcpProgressCard {
       64,
       Math.min(options.maxMessageChars, CARD_MAX_CHARS),
     );
-    // 间隔有下限：私聊那个桶本来就是 `{minTime: 1000}` 一秒一拍，配得比它更小只会让编辑在
-    // 节流器里排队 —— 而排在队里的编辑占的正是下一帧要用的槽位（`docs/08 §5.2` 的队尾饿死）。
+    // 间隔存在下限：私聊桶本身为 `{minTime: 1000}` 一秒一拍，配置更小只会使编辑在节流器中
+    // 排队 —— 排队中的编辑占用的正是下一帧所需的槽位（`docs/08 §5.2` 的队尾饥饿）。
     this.#interval = Math.max(1000, options.intervalMs);
     const data = `${CANCEL_PREFIX}${target.turnId ?? ""}`;
     this.#cancel =
@@ -442,10 +442,10 @@ class AcpCard implements AcpProgressCard {
   }
 
   /**
-   * 路径进卡片前的收窄。**先去掉工作目录前缀**：目录已经在表头上，每一行再重复一遍
-   * `/home/swim/code/LuoLiCore/` 只是把本来就紧的预算花在同一段字上，而「动了哪些文件」要的是
-   * `packages/telegram/src/tools.ts` 那一截。目录外的路径（agent 越界读了别处）原样保留 ——
-   * 那恰恰是最该看清的一种。
+   * 路径进入卡片前的收窄。先去除工作目录前缀：目录已在表头显示，每行重复
+   * `/home/swim/code/LuoLiCore/` 只会把本已紧张的预算耗在同一段字符上，而「改动了哪些文件」
+   * 需要的是 `packages/telegram/src/tools.ts` 这一段。目录外的路径（agent 越界访问）原样保留 ——
+   * 那恰恰是最需要看清的一类。
    */
   #short(path: string): string {
     const clean = oneLine(path);
@@ -456,28 +456,28 @@ class AcpCard implements AcpProgressCard {
     );
   }
 
-  /** 观测不许打断投递（同 `TelegramOutput.#emit`）：`LogSink.event` 保证不抛，但契约上不该赌它。 */
+  /** 观测不得打断投递（同 `TelegramOutput.#emit`）：`LogSink.event` 保证不抛，但契约上不应依赖。 */
   #emit(event: TelegramDeliveryEvent): void {
     try {
       this.hooks.onDelivery?.(event);
     } catch {
-      /* 记不上日志也不能让这张卡片停下来 */
+      /* 日志写入失败不应中止卡片更新 */
     }
   }
 
-  /** 首帧：卡片必须在 ACP 真的开跑之前就出现在屏幕上，「几分钟看不见任何进度」是这整块的由来。 */
+  /** 首帧：卡片必须在 ACP 实际开始执行前出现在屏幕上，「数分钟看不到任何进度」是本模块的由来。 */
   async start(): Promise<void> {
     this.#dirty = true;
-    // 首帧发不出去也要把卡片交出去（`messageId` 为 `null`，下一帧重试发送）：一次投递失败
-    // 不该把整趟 ACP 拦在门外。`#flushNow` 自己吞投递错误，这一层兜的是渲染路径上的意外。
+    // 首帧发送失败也要返回卡片（`messageId` 为 `null`，下一帧重试发送）：一次投递失败
+    // 不应阻断整次 ACP。`#flushNow` 自行吞掉投递错误，本层兜底的是渲染路径上的异常。
     try {
       await this.#flushNow(null);
     } catch {
-      /* 首帧没渲染出来，下一帧还有机会 */
+      /* 首帧未渲染成功，下一帧继续 */
     }
-    // 只在 dirty 时真的发（判据与 `push` 那条完全一样），所以它不额外占预算；有它才能保证
-    // **最后一条 update 一定被渲染出来** —— 一个 3 分钟不吭声的 `execute` 之前那次 flush 可能
-    // 才过了半秒，没有心跳的话屏幕上永远停在上一个工具。
+    // 仅在 dirty 时真正发送（判据与 `push` 完全一致），因此不额外消耗预算；有它才能保证
+    // 最后一条 update 一定被渲染 —— 一个静默 3 分钟的 `execute` 之前那次 flush 可能仅过去半秒，
+    // 无心跳时屏幕会永远停留在上一个工具。
     this.#heartbeat = setInterval(() => {
       this.#schedule(false);
     }, this.#interval);
@@ -488,13 +488,13 @@ class AcpCard implements AcpProgressCard {
     try {
       if (this.#closed) return;
       const immediate = this.#absorb(notification);
-      // 「任何 update → dirty」。`agent_message_chunk` 于是也置位，而它**事实上不驱动刷新**：
-      // 正文尾只在没有 in_progress 工具时才显示，有工具在跑时这一帧渲染结果与上帧逐字节相同，
-      // 被下面那道判据直接吃掉。用「相同就不发」实现规则 6，比给 chunk 开一个特例更少一处分支。
+      // 任何 update 均置 dirty。`agent_message_chunk` 因此也会置位，但它实际上不驱动刷新：
+      // 正文尾仅在无 in_progress 工具时显示，有工具执行时该帧渲染结果与上帧逐字节相同，
+      // 被下方判据直接过滤。以「相同则不发」实现规则 6，比为 chunk 增加特例少一处分支。
       this.#dirty = true;
       this.#schedule(immediate);
     } catch {
-      /* 呈现层的任何异常都不许冒到收 `session/update` 那条路上去 */
+      /* 呈现层的任何异常都不得传播到接收 `session/update` 的路径上 */
     }
   }
 
@@ -503,9 +503,9 @@ class AcpCard implements AcpProgressCard {
     this.#closed = true;
     if (this.#heartbeat) clearInterval(this.#heartbeat);
     try {
-      // 在途那一帧先落地，否则两次 `editMessageText` 可能倒序到达，终帧被上一帧盖回去。
-      // **等待有上界**：在途那一帧可能正压在节流器队列里，而这个 await 挂在调用方的 `finally`
-      // 上 —— 拖住它等于拖住整次工具调用的返回。超时就照发终帧，节流器是 FIFO，顺序仍然对。
+      // 先让在途帧落地，否则两次 `editMessageText` 可能乱序到达，终帧被上一帧覆盖。
+      // 等待存在上界：在途帧可能正排在节流器队列中，而该 await 挂在调用方的 `finally`
+      // 上 —— 阻塞它等于阻塞整次工具调用的返回。超时则照常发送终帧，节流器为 FIFO，顺序仍正确。
       if (this.#inFlight)
         await Promise.race([
           this.#inFlight.catch(() => undefined),
@@ -514,11 +514,11 @@ class AcpCard implements AcpProgressCard {
       this.#dirty = true;
       await this.#flushNow(final);
     } catch {
-      /* 终帧渲染或投递失败也要把文本交回去：调用方在 `finally` 里等它 */
+      /* 终帧渲染或投递失败也要返回文本：调用方在 `finally` 中等待它 */
     }
     if (this.#editCount) {
-      // 编辑是**一轮聚合成一条**（`docs/10 §2` 的 `tg.edit`）。`ok` 跟着有没有失败过走：全程
-      // 挂掉的编辑否则一个字都不落 —— 逐次记是噪声，但「这张卡片其实一次都没更新上去」不是。
+      // 编辑按轮聚合为一条（`docs/10 §2` 的 `tg.edit`）。`ok` 取决于是否发生过失败：否则全程
+      // 失败的编辑不会留下任何记录 —— 逐次记录是噪声，但「该卡片一次都未更新成功」不是。
       this.#emit({
         kind: "edit",
         ok: this.#editError === null,
@@ -533,8 +533,8 @@ class AcpCard implements AcpProgressCard {
   }
 
   /**
-   * 时间窗 + 状态变化，两者都要。只用时间窗：plan 变了要等 5 秒才看得见。只用状态变化：
-   * 200 次 tool_call = 200 次编辑，把私聊那 ~60/分钟 打光。三个即时例外见 `IMMEDIATE_MIN_GAP_MS`。
+   * 时间窗与状态变化两者都需要。仅用时间窗：plan 变化需等 5 秒才可见。仅用状态变化：
+   * 200 次 tool_call 即 200 次编辑，耗尽私聊约 60/分钟的预算。三个即时例外见 `IMMEDIATE_MIN_GAP_MS`。
    */
   #schedule(immediate: boolean): void {
     if (this.#closed || !this.#dirty || this.#inFlight) return;
@@ -551,21 +551,21 @@ class AcpCard implements AcpProgressCard {
   async #flushNow(final: AcpCardFinal | null): Promise<void> {
     const frame = this.#frame(final);
     this.#plain = frame.plain;
-    // **键盘只挂在过程帧上，所以它进判据。** 终帧通常正文也变了（多一行 `✅ 完成` / `⛔ …`），但那是
-    // 常态不是不变量：表头本身就长过预算时，`#frame` 最后那道按码点硬收的兜底会把每一帧都磨成表头
-    // 的同一截（计时器与 verdict 都在截断点之后），于是「逐字节相同就不发」把终帧整个吃掉 ——
-    // 那排按钮就永远留在一张已经结束的卡片上。「键盘从有到无」是一次真的变化，不许被正文吃掉。
+    // 键盘只挂在过程帧上，因此它参与判据。终帧通常正文也会变化（增加一行 `✅ 完成` / `⛔ …`），
+    // 但那是常态而非不变量：表头本身超过预算时，`#frame` 最后一道按码点硬截断的兜底会把每一帧
+    // 都截为表头的同一段（计时器与 verdict 均在截断点之后），于是「逐字节相同则不发」会过滤掉整个
+    // 终帧 —— 按钮将永久留在一张已结束的卡片上。键盘由有到无是一次真实变化，不得被正文判据吞掉。
     const markup = final === null ? this.#cancel : undefined;
     const key = `${markup ? CANCEL_PREFIX : ""}${frame.key}`;
-    // 逐字节相同就不发，**不靠 Telegram 回 `message is not modified` 兜**：那一跳照样占掉一个
-    // 槽位（还是排在真正要发的东西前面）。也不动 `#lastEditAt` —— 这一帧没花掉配额。
+    // 逐字节相同则不发送，不依赖 Telegram 返回 `message is not modified` 兜底：该请求同样会占用
+    // 一个槽位，且排在真正需要发送的内容之前。也不更新 `#lastEditAt` —— 该帧未消耗配额。
     if (this.#lastKey !== null && key === this.#lastKey) {
       this.#dirty = false;
       return;
     }
     this.#dirty = false;
     this.#lastKey = key;
-    // 先记时刻再投递：投递失败也算用掉了一次尝试，不然一个持续失败的 chat 会被连着重试打光预算。
+    // 先记录时刻再投递：投递失败同样计为一次尝试，否则持续失败的 chat 会因连续重试耗尽预算。
     this.#lastEditAt = Date.now();
     if (this.#messageId === null) {
       await this.#send(frame.rendered, final !== null, markup);
@@ -574,7 +574,7 @@ class AcpCard implements AcpProgressCard {
     await this.#edit(this.#messageId, frame.rendered, markup);
   }
 
-  /** 投递失败 ≠ ACP 运行失败（`R-TG-02` 那条的同一道理）：吞掉、记一行、卡片继续。 */
+  /** 投递失败 ≠ ACP 运行失败（同 `R-TG-02` 的判据）：吞掉异常、记录一行、卡片继续。 */
   async #send(
     rendered: string,
     isFinal: boolean,
@@ -587,8 +587,8 @@ class AcpCard implements AcpProgressCard {
         : { message_thread_id: this.target.threadId }),
       ...(markup ? { reply_markup: markup } : {}),
     };
-    // 首帧这一条按 chat 串行（同另外三条出站路径，`L-TG-02`）：卡片不能挤进别的消息那批分段中间。
-    // **编辑一律在锁外** —— 盖上去会让整个 ACP 运行期间这个 chat 的投递变成实质串行。
+    // 首帧按 chat 串行（同另外三条出站路径，`L-TG-02`）：卡片不能插入其他消息的分段之间。
+    // 编辑一律在锁外 —— 纳入锁内会使整个 ACP 运行期间该 chat 的投递退化为实质串行。
     const sent = await deliveryOrder
       .run(this.target.chatId, () =>
         sendWithFallback(
@@ -605,7 +605,7 @@ class AcpCard implements AcpProgressCard {
         return null;
       });
     if (sent) this.#messageId = sent.message_id;
-    else this.#lastKey = null; // 没发出去 ⇒ 屏幕上什么都没有，下一帧不该被「与上帧相同」拦掉
+    else this.#lastKey = null; // 未发出 ⇒ 屏幕上无内容，下一帧不应被「与上帧相同」判据拦截
     this.#emit({
       kind: "send",
       ok: sent !== null,
@@ -623,9 +623,9 @@ class AcpCard implements AcpProgressCard {
   ): Promise<void> {
     const at = Date.now();
     this.#editCount += 1;
-    // **`reply_markup` 每一帧都要重给**：Bot API 把「不带这个字段的 `editMessageText`」当成撤键盘
-    // （同 `TelegramPromptChannel.settle` 那一跳），所以省略它正是终帧要的语义 —— 反过来，过程帧
-    // 忘了带就等于按钮在第一次编辑之后自己消失了。撤键盘与改正文因此是同一次调用，不额外占槽位。
+    // `reply_markup` 每一帧都需重新传入：Bot API 将不带该字段的 `editMessageText` 视为撤除键盘
+    // （同 `TelegramPromptChannel.settle`），因此省略它正是终帧所需的语义 —— 反之，过程帧遗漏
+    // 该字段即等于按钮在首次编辑后自行消失。撤键盘与改正文因此合并为同一次调用，不额外占槽位。
     const extra = markup === undefined ? {} : { reply_markup: markup };
     try {
       if (this.options.parseMode === "none")
@@ -647,8 +647,8 @@ class AcpCard implements AcpProgressCard {
         error instanceof Error ? error.message : String(error);
       if (/message is not modified|429/i.test(description)) return;
       if (/parse entities/i.test(description)) {
-        // 与 `sendWithFallback` 同一跳、同一条 warn：格式丢掉，卡片还在。降级发的是 `toPlainText`
-        // 而不是渲染结果原文 —— 后者在 MarkdownV2 下是满屏 `\-`。
+        // 与 `sendWithFallback` 属同一跳、同一条 warn：丢弃格式，保留卡片。降级发送的是 `toPlainText`
+        // 而非渲染结果原文 —— 后者在 MarkdownV2 下会呈现满屏 `\-`。
         try {
           await this.bot.api.editMessageText(
             this.target.chatId,
@@ -663,7 +663,7 @@ class AcpCard implements AcpProgressCard {
           });
           return;
         } catch {
-          /* 二次失败照旧只记不抛 */
+          /* 二次失败同样只记录不抛出 */
         }
       }
       this.#editError = description;
@@ -674,11 +674,11 @@ class AcpCard implements AcpProgressCard {
   }
 
   /**
-   * 渲染一帧。**超预算按固定优先级整段丢，绝不切半行** —— `docs/02 §9` 红线 11「不透明单元要么
-   * 原样保留要么整体换占位」搬到 UI 上。
+   * 渲染一帧。超出预算时按固定优先级整段丢弃，不截断半行 —— 即 `docs/02 §9` 红线 11「不透明单元
+   * 要么原样保留要么整体替换为占位」在 UI 层的应用。
    *
-   * 判据量的是**渲染之后**的长度：转义会让长度接近翻倍，按正文量就会超上限，而超长是 Telegram
-   * 硬拒（`sendWithFallback` 只兜得住解析失败）。
+   * 判据度量的是渲染之后的长度：转义会使长度接近翻倍，按正文长度度量会超出上限，而超长会被
+   * Telegram 硬拒（`sendWithFallback` 只能兜底解析失败）。
    */
   #frame(final: AcpCardFinal | null): {
     plain: string;
@@ -693,15 +693,15 @@ class AcpCard implements AcpProgressCard {
       );
       const plain = kept.map((line) => line.text).join("\n");
       const rendered = this.#render(plain);
-      // key 用**渲染前**的正文：`#render` 是逐字符的纯函数，比它和比渲染结果是同一个判据。
+      // key 采用渲染前的正文：`#render` 是逐字符的纯函数，比较它与比较渲染结果等价。
       const key = kept.map((line) => line.key ?? line.text).join("\n");
       if ([...rendered].length <= this.#budget) return { plain, rendered, key };
       if (step < DROP_LADDER.length) {
         dropped.add(DROP_LADDER[step]!);
         continue;
       }
-      // 整张梯子丢完还超（只可能是 `maxMessageChars` 被调到荒唐的小值）：按码点硬收正文。
-      // **这一步不会切坏转义** —— 两档转义都是逐字符映射，正文里没有跨字符的构造。
+      // 丢弃梯全部用尽仍超限（只可能是 `maxMessageChars` 被配置为极小值）：按码点硬截断正文。
+      // 该步骤不会破坏转义 —— 两档转义均为逐字符映射，正文中不存在跨字符的构造。
       let clipped = plain;
       let out = rendered;
       while ([...out].length > this.#budget && clipped.length) {
@@ -718,12 +718,12 @@ class AcpCard implements AcpProgressCard {
   }
 
   /**
-   * 卡片正文**整体按纯文本转义**，不走 `safeRender` 那棵 Markdown AST。
+   * 卡片正文整体按纯文本转义，不经过 `safeRender` 的 Markdown AST。
    *
-   * 理由：卡片里每一个变量都是外部 agent 递过来的字符串（工具标题、路径、思考、正文尾）。
-   * 交给 Markdown 解析器的话，一个标题里的 ``` 就能开一段围栏把整张卡片吞进去 —— 输出仍然是
-   * 合法的 MarkdownV2（`safeRender` 保证这一点），但卡片会变成一团代码块。逐字符转义换来的是
-   * 「一个字符都不会被当成标记」，代价只是卡片里没有粗体，而它本来也不需要。
+   * 理由：卡片中每一个变量都是外部 agent 传入的字符串（工具标题、路径、思考、正文尾）。
+   * 若交给 Markdown 解析器，标题中的 ``` 即可开启围栏并吞掉整张卡片 —— 输出仍是合法的
+   * MarkdownV2（`safeRender` 保证这一点），但卡片会整体变为代码块。逐字符转义换取的是
+   * 任何字符都不会被解释为标记，代价仅是卡片内无粗体，而卡片本就不需要。
    */
   #render(plain: string): string {
     const text = plain.replaceAll("\u0000", "");
@@ -752,7 +752,7 @@ class AcpCard implements AcpProgressCard {
         group: "planCount",
         text: `计划 ${done.length}/${this.#plan.length}`,
       });
-      // 已完成只留最近两条：剩下的由 `3/7` 那个计数代表。已完成的项是「已经不用管了」的那些。
+      // 已完成项只保留最近两条：其余由 `3/7` 计数代表。已完成项属于无需再关注的部分。
       for (const entry of done.slice(-PLAN_DONE_LINES))
         lines.push({
           group: "planDone",
@@ -787,13 +787,13 @@ class AcpCard implements AcpProgressCard {
       const title = this.#current.title || KIND_LABEL[this.#current.kind];
       lines.push({
         group: "now",
-        text: `现在 · ${KIND_ICON[this.#current.kind]} ${clip(title, TITLE_MAX)}${path}`,
+        text: `当前 · ${KIND_ICON[this.#current.kind]} ${clip(title, TITLE_MAX)}${path}`,
       });
     } else {
       /**
-       * 空闲时才显示这两行。思考行**只在过程帧显示**：终帧那份文本要进归档与下一轮上下文，
-       * 而思考链是 agent 的内心戏（`docs/02` 对不透明 part 的同一条口径）—— 显示给人看可以，
-       * 钉进历史不行。它也是唯一能让「一个想了 90 秒还没出 plan 的 agent」看起来不是冻住的东西。
+       * 仅在空闲时显示这两行。思考行只在过程帧显示：终帧文本会进入归档与下一轮上下文，
+       * 而思考链属于 agent 的内部状态（同 `docs/02` 对不透明 part 的口径）—— 可以展示给人看，
+       * 但不应写入历史。它也是唯一能表明「思考 90 秒仍未产出 plan 的 agent」未卡死的信号。
        */
       if (!final && this.#thought && this.options.thoughts !== false)
         lines.push({
@@ -823,7 +823,7 @@ class AcpCard implements AcpProgressCard {
       if (rest > 0)
         lines.push({ group: "fileLines", text: `  … 还有 ${rest} 个` });
     }
-    // 失败是粘性的：一旦有过就在**每一帧**里留着，且永不进丢弃梯。
+    // 失败状态是粘性的：一旦出现即在每一帧中保留，且永不进入丢弃梯。
     const failures = Math.max(final?.failures ?? 0, this.#failures);
     if (failures)
       lines.push({
@@ -834,11 +834,11 @@ class AcpCard implements AcpProgressCard {
       const breakdown = KIND_ORDER.filter((kind) => this.#kinds.get(kind)).map(
         (kind) => `${KIND_LABEL[kind]} ${this.#kinds.get(kind)}`,
       );
-      lines.push({ text: `工具 ${toolCalls} 次` });
+      lines.push({ text: `工具调用 ${toolCalls} 次` });
       if (breakdown.length)
         lines.push({ group: "toolKinds", text: `  ${breakdown.join(" · ")}` });
     }
-    // 一条 update 都还没来：屏幕上必须有东西，这张卡片的存在本身就是「已经开跑了」这个信息。
+    // 尚未收到任何 update：屏幕上必须有内容，卡片的存在本身即表示运行已启动。
     if (lines.length === 1) lines.push({ text: "⏳ 正在启动…" });
     return lines;
   }
@@ -851,8 +851,8 @@ class AcpCard implements AcpProgressCard {
           ? ` · ${costLabel(this.#costUsd)}`
           : "";
     const files = Math.max(final.files, this.#paths.size);
-    // 取消与超时**一定要留终帧**（`docs/00 §「收尾那一条消息还是要发出去」`）：屏幕上停着一张
-    // 「现在 · 编辑 …」的卡片而进程已经没了，用户没有任何办法知道它是死了还是还在跑。
+    // 取消与超时必须保留终帧（`docs/00 §「收尾那一条消息还是要发出去」`）：若屏幕上停留一张
+    // 「现在 · 编辑 …」的卡片而进程已终止，用户无法判断它是已结束还是仍在运行。
     if (final.error)
       return `⛔ ${label(ERROR_LABEL, final.error)} · 已改动 ${files} 个文件${cost}`;
     const stop = final.stopReason ?? "end_turn";
@@ -860,7 +860,7 @@ class AcpCard implements AcpProgressCard {
     return `⚠ ${label(STOP_LABEL, stop)}${cost}`;
   }
 
-  /** 交回「这条 update 值不值一次绕过间隔的即时刷新」。**只有 plan 被替换与 tool_call 变 failed。** */
+  /** 返回该 update 是否值得触发一次绕过间隔的即时刷新。仅限 plan 被替换与 tool_call 转为 failed。 */
   #absorb(notification: unknown): boolean {
     const update = (notification as SessionNotification | null | undefined)
       ?.update;
@@ -868,9 +868,9 @@ class AcpCard implements AcpProgressCard {
     switch (update.sessionUpdate) {
       case "plan":
         return this.#setPlan(update.entries, null);
-      // `plan_update` 在 SDK 里还标着 UNSTABLE，但不接的代价是「agent 用的是新那套 ⇒ 卡片上一个
-      // 计划都没有」。只认 `items` 那一档（`file` / `markdown` 是要我们去读文件或渲染 markdown，
-      // 两者都不该在卡片这一层做）；多个 planId 时后来的赢 —— 一张卡片只显示一份计划。
+      // `plan_update` 在 SDK 中仍标记为 UNSTABLE，但不接收的代价是「agent 使用新协议 ⇒ 卡片上
+      // 没有任何计划」。只接受 `items` 一档（`file` / `markdown` 要求读取文件或渲染 markdown，
+      // 二者都不应在卡片层完成）；存在多个 planId 时以后到者为准 —— 一张卡片只显示一份计划。
       case "plan_update":
         return update.plan?.type === "items"
           ? this.#setPlan(update.plan.entries, update.plan.planId)
@@ -889,9 +889,9 @@ class AcpCard implements AcpProgressCard {
         const kind = normalizeKind(update.kind);
         this.#toolCalls += 1;
         this.#kinds.set(kind, (this.#kinds.get(kind) ?? 0) + 1);
-        // 建表时一律记 `pending`，真实状态交给 `#applyStatus` 去「换」—— 它按 `was !== 'failed'`
-        // 判要不要计一次失败，直接把 `failed` 写进初值的话，一条**一上来就是 failed** 的
-        // `tool_call`（ACP 允许）会被当成「已经报过了」，那次失败一次都不计。
+        // 建表时统一记为 `pending`，真实状态交由 `#applyStatus` 迁移 —— 它按 `was !== 'failed'`
+        // 判定是否计入一次失败；若直接把 `failed` 写入初值，一条初始状态即为 failed 的
+        // `tool_call`（ACP 允许）会被视为已上报，该次失败将完全不被计入。
         const tool: TrackedTool = {
           kind,
           title: clip(update.title ?? "", TITLE_MAX),
@@ -906,7 +906,7 @@ class AcpCard implements AcpProgressCard {
       case "tool_call_update": {
         const id =
           typeof update.toolCallId === "string" ? update.toolCallId : "";
-        // 更新只带变化的字段：没跟踪到（撞了上界 / 没见过 `tool_call`）时用它自己带的那些兜。
+        // 更新只携带变化的字段：未被跟踪时（达到上界 / 未收到过 `tool_call`）以其自带字段兜底。
         const tool = this.#tools.get(id) ?? {
           kind: normalizeKind(update.kind),
           title: "",
@@ -929,9 +929,9 @@ class AcpCard implements AcpProgressCard {
         return false;
       }
       case "agent_thought_chunk": {
-        // 「永不累积」= 不无界增长、不进归档。但 chunk 是按 token 来的，一条常常只有两三个字
-        // —— 每条都整段替换的话，屏幕上显示的是一个毫无意义的碎片。所以是**有界滚动窗口**，
-        // 并按 `messageId` 换一段思考就清空（ACP 明文：messageId 变了就是新一条消息）。
+        // 「永不累积」指不无界增长、不进入归档。但 chunk 按 token 切分，单条常只有两三个字
+        // —— 若每条整体替换，屏幕上显示的将是无意义的片段。因此采用有界滚动窗口，
+        // 并在 `messageId` 变化时清空（ACP 明确规定：messageId 变化即为新一条消息）。
         if (update.content.type !== "text") return false;
         const messageId =
           typeof update.messageId === "string" ? update.messageId : null;
@@ -946,23 +946,23 @@ class AcpCard implements AcpProgressCard {
         return false;
       }
       case "usage_update": {
-        // `cost.amount` 是**累计值**，所以取见过的最大值而不是求和（同 `AcpUpdateSink`）。
+        // `cost.amount` 是累计值，因此取已见过的最大值而非求和（同 `AcpUpdateSink`）。
         const amount = update.cost?.amount;
         if (typeof amount === "number")
           this.#costUsd = Math.max(this.#costUsd ?? 0, amount);
         return false;
       }
       case "current_mode_update": {
-        // 模式进表头：一次 plan 档的 run 一个文件都不会改，不显示它的话那张「改动 0 个文件」
-        // 的卡片看起来像 agent 什么都没干。
+        // 模式显示在表头：plan 档的 run 不会修改任何文件，不显示模式时那张「改动 0 个文件」
+        // 的卡片看起来像 agent 未执行任何操作。
         this.#mode =
           typeof update.currentModeId === "string"
             ? clip(update.currentModeId, 16)
             : null;
         return false;
       }
-      // `session_info_update`（agent 自己给会话起的标题）与 `available_commands_update`
-      // （它支持哪些 slash 命令）对「它现在在干什么」没有信息量，收下但不显示。
+      // `session_info_update`（agent 为会话生成的标题）与 `available_commands_update`
+      // （其支持的 slash 命令）对当前执行状态没有信息量，接收但不显示。
       default:
         return false;
     }
@@ -970,7 +970,7 @@ class AcpCard implements AcpProgressCard {
 
   #setPlan(entries: unknown, planId: string | null): boolean {
     if (!Array.isArray(entries)) return false;
-    // **plan 整体替换**，不合并：ACP 的语义就是「每次带全量」，合并会在 agent 改主意时留下幽灵条目。
+    // plan 整体替换，不做合并：ACP 的语义即每次携带全量，合并会在 agent 变更计划时残留过期条目。
     this.#plan = (entries as PlanEntry[])
       .slice(0, MAX_PLAN_ENTRIES)
       .map((entry) => ({
@@ -998,8 +998,8 @@ class AcpCard implements AcpProgressCard {
       this.#current = null;
       this.#currentId = null;
     }
-    // 「动了哪些文件」不能只靠 diff 块：diff 是可选的。所以 edit / delete / move 收尾时把
-    // `locations[0]` 也记上 —— 但只在**收尾**记，不在创建时记：一个失败的 edit 没有改过任何东西。
+    // 「改动了哪些文件」不能仅依赖 diff 块：diff 是可选的。因此 edit / delete / move 收尾时同时
+    // 记录 `locations[0]` —— 但只在收尾记录、不在创建时记录：失败的 edit 未修改任何内容。
     if (
       status === "completed" &&
       tool.path &&
@@ -1011,8 +1011,8 @@ class AcpCard implements AcpProgressCard {
       );
     }
     if (status !== "failed") return false;
-    // 同一个 id 反复报 failed 只算一次；没跟踪到的（撞了上界）按每条算 —— 宁可多记一次失败，
-    // 也不要把「它一直在失败」这件事漏掉。
+    // 同一 id 重复上报 failed 只计一次；未被跟踪的（已达上界）按条计 —— 宁可多计一次失败，
+    // 也不能遗漏持续失败这一事实。
     if (was === "failed") return false;
     this.#failures += 1;
     this.#lastFailure = tool.title || KIND_LABEL[tool.kind];
@@ -1022,8 +1022,8 @@ class AcpCard implements AcpProgressCard {
   #absorbContent(content: unknown): void {
     if (!Array.isArray(content)) return;
     for (const block of content as ToolCallContent[]) {
-      // `content`（文本 / 图片）与 `terminal`（终端输出）一律不进卡片：都是成块的内容，
-      // 而卡片的预算是一条消息。工具在干什么由 `title` 说，那是一句人读的话。
+      // `content`（文本 / 图片）与 `terminal`（终端输出）一律不进入卡片：二者均为成块内容，
+      // 而卡片的预算仅为一条消息。工具的当前行为由 `title` 表达，那是一句自然语言描述。
       if (
         !block ||
         block.type !== "diff" ||
@@ -1037,8 +1037,8 @@ class AcpCard implements AcpProgressCard {
       if (!stat) continue;
       const counted = countDiff(oldText, newText);
       if (!counted) continue;
-      // 同一个文件被改多次时**累加每次的行数**，不是「最终 vs 最初」的 git diff：后者要留住每个
-      // 文件的原始全文，等于把整个工作副本挂在一条卡片上。
+      // 同一文件被多次修改时累加每次的行数，而非计算「最终 vs 最初」的 git diff：后者需保留每个
+      // 文件的原始全文，相当于把整个工作副本挂在一条卡片上。
       stat.added += counted.added;
       stat.removed += counted.removed;
       stat.counted = true;
@@ -1048,8 +1048,8 @@ class AcpCard implements AcpProgressCard {
   #touch(path: string, mark: string): TouchedFile | null {
     if (this.#paths.size < MAX_COUNTED_FILES) this.#paths.add(path);
     const existing = this.#files.get(path);
-    // `+`（新建）一旦定了就粘住：一个新文件后面被改十次仍然是新文件。别的标记后来的赢
-    // —— 先改后删时该显示的是删掉了。
+    // `+`（新建）一经确定即固定：新文件后续被修改十次仍是新文件。其他标记以后到者为准
+    // —— 先修改后删除时应显示为已删除。
     if (existing) {
       if (existing.mark !== "+") existing.mark = mark;
       return existing;
@@ -1062,11 +1062,11 @@ class AcpCard implements AcpProgressCard {
 }
 
 /**
- * 开一张卡片。**首帧在这里就发出去**（await 掉）：调用方拿到卡片时屏幕上已经有东西了，而
- * 「起一次外部 agent，几分钟看不见任何进度」正是这一整块要修的事。
+ * 创建一张卡片。首帧在此处发出（await 完成）：调用方拿到卡片时屏幕上已有内容，而
+ * 「启动一次外部 agent 后数分钟看不到任何进度」正是本模块要解决的问题。
  *
- * 首帧发不出去也照样交回卡片（`messageId` 为 `null`）：下一帧会重试发送，而不是把整趟 ACP
- * 卡在一次投递失败上。
+ * 首帧发送失败同样返回卡片（`messageId` 为 `null`）：下一帧会重试发送，而不是让整次 ACP
+ * 阻塞在一次投递失败上。
  */
 export async function openAcpProgressCard(
   bot: Bot,

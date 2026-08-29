@@ -51,8 +51,8 @@ const text = (value: unknown): string | null =>
 
 function catalogUrl(kind: string, baseUrl: string): string {
   const base = baseUrl.replace(/\/+$/, "");
-  // Anthropic 的 limit 上限 1000、Google 的 pageSize 上限 1000；一次拿满就不用翻页，
-  // 翻页会让「探测」变成 N 次出网请求，超时语义也说不清。
+  // Anthropic 的 limit 上限为 1000、Google 的 pageSize 上限为 1000；一次取满即无需翻页，
+  // 翻页会让一次探测变成 N 次出网请求，超时语义也难以界定。
   if (kind === "anthropic") return `${base}/models?limit=1000`;
   if (kind === "google") return `${base}/models?pageSize=1000`;
   return `${base}/models`;
@@ -108,8 +108,8 @@ function normalize(kind: string, payload: unknown): CatalogModel[] {
 }
 
 /**
- * 一次最小出网调用，同时服务「测试连接」与「拉取模型列表」（docs/04 §5.4）。
- * 上游错误体会把请求头原样回显（不少网关如此），所以摘要必须过 `redact` 并带上本次用的 key。
+ * 一次最小出网调用，同时服务于测试连接与拉取模型列表（docs/04 §5.4）。
+ * 上游错误体可能原样回显请求头（不少网关如此），因此摘要必须经过 `redact` 并带上本次使用的 key。
  */
 export async function probeProvider(
   target: ProbeTarget,
