@@ -74,6 +74,7 @@ import {
   canSeeImages,
   captureImage,
   configJsonSchema,
+  highlight,
   loadConfig,
   perChatConfig,
   registerAuthoringTools,
@@ -84,6 +85,7 @@ import {
   runMainAgent,
   runLwWorker,
   streamMainAgent,
+  tagged,
   type ContainerEvent,
   type LwWorkerRuntimeEvent,
 } from "@luoli/core";
@@ -122,7 +124,10 @@ const passwordHashFromEnvironment = process.env.WEBUI_PASSWORD
   : null;
 const reportRejectedKey = (key: string): void =>
   void process.stderr.write(
-    `[config] 已拒绝 config_kv 中的非法键：${key}（清理命令：DELETE FROM config_kv WHERE key='${key.replaceAll("'", "''")}';）\n`,
+    tagged(
+      "warn",
+      `[config] 已拒绝 config_kv 中的非法键：${key}（清理命令：DELETE FROM config_kv WHERE key='${key.replaceAll("'", "''")}';）\n`,
+    ),
   );
 const envOverlay = (
   overrides: Record<string, unknown>,
@@ -148,8 +153,11 @@ const droppedOverrides: string[] = [];
 const reportInvalidOverride = (dropped: string[], messages: string[]): void => {
   droppedOverrides.push(...dropped);
   process.stderr.write(
-    `[config] 已忽略 ${dropped.length} 条非法持久化覆盖：\n  ${messages.join("\n  ")}\n` +
-      `[config] 清理命令：DELETE FROM config_kv WHERE key IN (${dropped.map((key) => `'${key.replaceAll("'", "''")}'`).join(", ")});\n`,
+    tagged(
+      "warn",
+      `[config] 已忽略 ${dropped.length} 条非法持久化覆盖：\n  ${messages.join("\n  ")}\n` +
+        `[config] 清理命令：DELETE FROM config_kv WHERE key IN (${dropped.map((key) => `'${key.replaceAll("'", "''")}'`).join(", ")});\n`,
+    ),
   );
 };
 const config = await loadConfig({
@@ -182,16 +190,23 @@ migrateDatabase(db, undefined, {
 const instanceLock = acquireInstanceLock(config.db.path);
 if (!instanceLock.ok) {
   process.stderr.write(
-    `[lock] 另一个实例正在使用该数据库（pid ${instanceLock.holder.pid}@${instanceLock.holder.host}，` +
-      `启动于 ${new Date(instanceLock.holder.startedAt).toISOString()}）。\n` +
-      `[lock] 同库双实例会相互清除在途轮次与消息认领，因此拒绝启动。更换实例前请先停止在位实例；\n` +
-      `[lock] 确认在位进程已退出而锁文件仍在时，删除 ${config.db.path}.lock 后重启（同目录的 .lock.<n> 可一并删除）。\n`,
+    tagged(
+      "error",
+      `[lock] 另一个实例正在使用该数据库（pid ${instanceLock.holder.pid}@${instanceLock.holder.host}，` +
+        `启动于 ${new Date(instanceLock.holder.startedAt).toISOString()}）。\n` +
+        `[lock] 同库双实例会相互清除在途轮次与消息认领，因此拒绝启动。更换实例前请先停止在位实例；\n` +
+        `[lock] 确认在位进程已退出而锁文件仍在时，删除 ${config.db.path}.lock 后重启（同目录的 .lock.<n> 可一并删除）。\n`,
+    ),
   );
   process.exit(1);
 }
 if (instanceLock.lock.stolenFrom)
   process.stdout.write(
-    `[lock] 已接管 pid ${instanceLock.lock.stolenFrom} 遗留的锁：上一次进程非正常退出。\n`,
+    tagged(
+      "warn",
+      `[lock] 已接管 pid ${instanceLock.lock.stolenFrom} 遗留的锁：上一次进程非正常退出。\n`,
+      process.stdout,
+    ),
   );
 // 报出来而不是静静收尾：`LogSink` 到下面才建得起来，所以先走 stdout，等 sink 有了再补一条
 // `system.recovered`。此前它返回 void 也不记日志，一次非正常重启之后 reap 了什么只能靠翻
@@ -200,8 +215,12 @@ const recovered = recoverAfterCrash(db);
 const recoveredAny = Object.values(recovered).some((count) => count > 0);
 if (recoveredAny)
   process.stdout.write(
-    `[recover] 上一个进程非正常退出：标记失败 ${recovered.turns} 条轮次 / ${recovered.tasks} 条任务 / ${recovered.agentRuns} 条子 agent，` +
-      `释放 ${recovered.claims} 条消息认领，清零 ${recovered.reservations} 行在途预留。\n`,
+    tagged(
+      "warn",
+      `[recover] 上一个进程非正常退出：标记失败 ${recovered.turns} 条轮次 / ${recovered.tasks} 条任务 / ${recovered.agentRuns} 条子 agent，` +
+        `释放 ${recovered.claims} 条消息认领，清零 ${recovered.reservations} 行在途预留。\n`,
+      process.stdout,
+    ),
   );
 // 一次性数据修复而不是迁移：迁移文件提交后不可修改，而这件事要用 TS 侧的估算器重算 parts。
 // 修的是 token 校准失控期间落库的 tokens（实测系数最高约 26 倍，logs/2026-08-16）。
@@ -210,7 +229,11 @@ if (!readAppKv<boolean>(db, TOKEN_REPAIR_KEY)) {
   writeAppKv(db, TOKEN_REPAIR_KEY, true, "startup");
   if (repaired.messages || repaired.contexts)
     process.stdout.write(
-      `[context] 已按新估算器重算 ${repaired.messages} 条上下文消息的 tokens，并重置 ${repaired.contexts} 个会话的校准系数。\n`,
+      tagged(
+        "info",
+        `[context] 已按新估算器重算 ${repaired.messages} 条上下文消息的 tokens，并重置 ${repaired.contexts} 个会话的校准系数。\n`,
+        process.stdout,
+      ),
     );
 }
 // 同一条路的第二次一次性修复：缓存 token 曾被双重计价，账面高估约 44%（docs/28 · L-COST-01）。
@@ -218,9 +241,13 @@ if (!readAppKv<boolean>(db, TOKEN_REPAIR_KEY)) {
 const ledgerRepair = repairLedgerCacheCost(db, config.general.timezone);
 if (ledgerRepair?.rewritten)
   process.stdout.write(
-    `[ledger] 已按新计价口径重算 ${ledgerRepair.rewritten} 条用量（受影响 ${ledgerRepair.affected} 条、跳过 ${ledgerRepair.skipped} 条），` +
-      `合计 $${ledgerRepair.before.toFixed(6)} → $${ledgerRepair.after.toFixed(6)}；同时重算 ${ledgerRepair.turns} 条轮次与 ${ledgerRepair.counters} 行配额计数` +
-      `${ledgerRepair.countersStale ? `（另有 ${ledgerRepair.countersStale} 行明细已过保留期，无法重算）` : ""}。\n`,
+    tagged(
+      "info",
+      `[ledger] 已按新计价口径重算 ${ledgerRepair.rewritten} 条用量（受影响 ${ledgerRepair.affected} 条、跳过 ${ledgerRepair.skipped} 条），` +
+        `合计 $${ledgerRepair.before.toFixed(6)} → $${ledgerRepair.after.toFixed(6)}；同时重算 ${ledgerRepair.turns} 条轮次与 ${ledgerRepair.counters} 行配额计数` +
+        `${ledgerRepair.countersStale ? `（另有 ${ledgerRepair.countersStale} 行明细已过保留期，无法重算）` : ""}。\n`,
+      process.stdout,
+    ),
   );
 const principals = new PrincipalRepository(db);
 principals.ensureOwner(config.access.bootstrapOwnerId);
@@ -235,7 +262,10 @@ const secrets = new Secrets(process.env.LUOLI_MASTER_KEY);
 // scrypt 抬高了离线爆破成本，但抬不动一个短口令（docs/20 · W-SEC-02）。
 if (secrets.weak)
   process.stderr.write(
-    "[secrets] LUOLI_MASTER_KEY 短于 32 字符：provider key 的加密强度取决于它，建议换成 32 字节随机值。\n",
+    tagged(
+      "warn",
+      "[secrets] LUOLI_MASTER_KEY 短于 32 字符：provider key 的加密强度取决于它，建议换成 32 字节随机值。\n",
+    ),
   );
 const providers = new ProviderStore(db, secrets);
 // 只在 WebUI 主动拉取模型时才可能出网；缓存命中的路径不碰网络（docs/04 §5.4.1）。
@@ -315,8 +345,11 @@ if (!modelRegistry.aliases().includes("main")) {
     summary: "Required model alias main is unavailable",
   });
   process.stderr.write(
-    "[config] 缺少必需的 main 模型别名：服务仍会启动，但所有轮次都会以 model alias unavailable 失败。\n" +
-      `[config] 请在 WebUI（http://${config.webui.host}:${config.webui.port} → Provider 页）配置 provider / 模型 / main 别名，保存后即时生效，无需重启。\n`,
+    tagged(
+      "error",
+      "[config] 缺少必需的 main 模型别名：服务仍会启动，但所有轮次都会以 model alias unavailable 失败。\n" +
+        `[config] 请在 WebUI（http://${config.webui.host}:${config.webui.port} → Provider 页）配置 provider / 模型 / main 别名，保存后即时生效，无需重启。\n`,
+    ),
   );
 }
 const memory = new MemoryStore(
@@ -363,12 +396,19 @@ const agentResultsDir = process.env.LUOLI_DATA_DIR
 const resultRefs = repairAgentResultRefs(db, agentResultsDir);
 if (resultRefs?.rewritten)
   process.stdout.write(
-    `[agents] 已将 ${resultRefs.rewritten} 行子 agent 结果路径归一化为相对 ${agentResultsDir} 的 ref（另有 ${resultRefs.relative} 行已是相对 ref）。\n`,
+    tagged(
+      "info",
+      `[agents] 已将 ${resultRefs.rewritten} 行子 agent 结果路径归一化为相对 ${agentResultsDir} 的 ref（另有 ${resultRefs.relative} 行已是相对 ref）。\n`,
+      process.stdout,
+    ),
   );
 if (resultRefs?.foreign) {
   process.stderr.write(
-    `[agents] ${resultRefs.foreign} 行子 agent 结果路径指向另一个部署根（例如 ${resultRefs.sample}），已原样保留。\n` +
-      `[agents] gc-files 会因此拒绝清理子 agent 结果目录，请先确认该数据库与 ${agentResultsDir} 属于同一部署。\n`,
+    tagged(
+      "warn",
+      `[agents] ${resultRefs.foreign} 行子 agent 结果路径指向另一个部署根（例如 ${resultRefs.sample}），已原样保留。\n` +
+        `[agents] gc-files 会因此拒绝清理子 agent 结果目录，请先确认该数据库与 ${agentResultsDir} 属于同一部署。\n`,
+    ),
   );
   log.event({
     level: "warn",
@@ -416,7 +456,9 @@ if (config.plugins.enabled) {
       summary: "当前运行时下 plugin 热重载不可靠：重载返回成功但仍执行旧代码",
       data: { entry: process.argv[1] ?? null },
     });
-    process.stderr.write(`[plugins] ${plugins.hotReloadWarning}\n`);
+    process.stderr.write(
+      tagged("warn", `[plugins] ${plugins.hotReloadWarning}\n`),
+    );
   }
   // `plugins.watch`：目录变动后重新 reconcile。默认关 —— 热加载一个全信任的 JS 文件，
   // 风险面比省一次重启大得多，开它要自己清楚这一点。
@@ -674,8 +716,11 @@ else if (!config.approval.rules.length) {
     data: { conditional },
   });
   process.stderr.write(
-    `[approval] 审批已启用但 approval.rules 为空：0 条规则时 conditional 等同于 never，${conditional.join(" / ")} 全部不经审批直接执行。\n` +
-      "[approval] 请在 WebUI 审批页添加规则，或写入 config/config.yaml 的 approval.rules（其中附有注释示例）。\n",
+    tagged(
+      "warn",
+      `[approval] 审批已启用但 approval.rules 为空：0 条规则时 conditional 等同于 never，${conditional.join(" / ")} 全部不经审批直接执行。\n` +
+        "[approval] 请在 WebUI 审批页添加规则，或写入 config/config.yaml 的 approval.rules（其中附有注释示例）。\n",
+    ),
   );
 }
 // 唤醒词在匹配时被静默跳过、或四个开关全关，表现都只是「bot 不理我」——启动时先把它说出来（docs/11 §启动校验）。
@@ -1156,13 +1201,14 @@ for (const [old, current] of RENAMED_TOOLS) {
     summary,
     data: { key: `tools.overrides.${old}`, renamedTo: current },
   });
-  process.stderr.write(`[config] ${summary}\n`);
+  process.stderr.write(tagged("error", `[config] ${summary}\n`));
 }
 let setup: { token: string; expiresAt: number } | undefined;
 if (!config.webui.passwordHash) {
   setup = setupToken();
   process.stdout.write(
-    `LuoLiCore setup token: ${setup.token}\nOpen http://${config.webui.host}:${config.webui.port}/setup\n`,
+    `LuoLiCore setup token: ${highlight(setup.token)}\n` +
+      `Open ${highlight(`http://${config.webui.host}:${config.webui.port}/setup`)}\n`,
   );
 }
 const previewPrompt = (
@@ -1526,7 +1572,9 @@ const fatalSummary = (event: string, error: unknown): string =>
   `${event}: ${error instanceof Error ? error.message : String(error)}`;
 process.on("uncaughtException", (error: unknown) => {
   const detail = fatalDetail(error);
-  process.stderr.write(`[crash] uncaughtException: ${detail}\n`);
+  process.stderr.write(
+    tagged("error", `[crash] uncaughtException: ${detail}\n`),
+  );
   // `system.crash` 在 LogSink 里被标成 urgent（appendFileSync 立刻落盘），所以这一行在
   // 下面那个 exit 之前是真的写完了的，不是靠 200ms 的缓冲定时器。
   log.event({
@@ -1552,7 +1600,9 @@ process.on("uncaughtException", (error: unknown) => {
  */
 process.on("unhandledRejection", (error: unknown) => {
   const detail = fatalDetail(error);
-  process.stderr.write(`[unhandled] unhandledRejection: ${detail}\n`);
+  process.stderr.write(
+    tagged("error", `[unhandled] unhandledRejection: ${detail}\n`),
+  );
   log.event({
     level: "error",
     kind: "system.unhandled_rejection",
@@ -1796,8 +1846,11 @@ if (process.env.BOT_TOKEN) {
       data: { phase: "init", fatal: false },
     });
     process.stderr.write(
-      `[telegram] bot 初始化失败（token 失效、已撤销，或网络不可达）：${message}\n` +
-        `[telegram] Telegram 入口已禁用，WebUI 正常启动；请在 http://${config.webui.host}:${config.webui.port} 更换 BOT_TOKEN 后重启。\n`,
+      tagged(
+        "error",
+        `[telegram] bot 初始化失败（token 失效、已撤销，或网络不可达）：${message}\n` +
+          `[telegram] Telegram 入口已禁用，WebUI 正常启动；请在 http://${config.webui.host}:${config.webui.port} 更换 BOT_TOKEN 后重启。\n`,
+      ),
     );
   }
 }
@@ -1843,7 +1896,10 @@ if (bot) {
           data: { fatal: true },
         });
         process.stderr.write(
-          `[telegram] 轮询被 Telegram 拒绝（token 失效，或另有实例正在轮询同一个 bot）：${error instanceof Error ? error.message : String(error)}\n`,
+          tagged(
+            "error",
+            `[telegram] 轮询被 Telegram 拒绝（token 失效，或另有实例正在轮询同一个 bot）：${error instanceof Error ? error.message : String(error)}\n`,
+          ),
         );
         void shutdown("telegram:fatal").then(() => {
           process.exitCode = 1;

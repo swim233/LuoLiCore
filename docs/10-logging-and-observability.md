@@ -313,6 +313,29 @@ logs:
     - 'sk-[A-Za-z0-9_\-]{16,}'
 ```
 
+### 3.1.1 `console: pretty` 的行格式
+
+`packages/core/src/log/pretty.ts` 一处，五列定宽：本地时间 `HH:mm:ss.SSS`、级别（5 字宽）、
+`kind`（18 字宽）、`summary`、可选的耗时与 `traceId` 尾六位。**不打 `data`** —— 载荷单条可达几 MB
+（`model.call` 携带请求体），整块打进终端会把上面几屏顶掉，而它在库里那一行上完整存着。
+
+```
+09:05:03.047 INFO  model.call         openai/gpt-5 in=6240 out=180 $0.0081 2431ms #DEF9XZ
+```
+
+着色用 `node:util` 的 `styleText`，不引入着色库。级别用绿 / 黄 / 红；`kind` 的色相取自命名空间
+（`tool.*` 与 `model.*` 各自成色），全为冷色，与级别列不重合 —— 级别是唯一表示严重程度的位置。
+超过 1 秒的耗时转黄。**着色仅限这一路**：`json` 一路要保持可被 jq 逐行解析。
+
+开不开由 Node 判定目标流（TTY、`NO_COLOR`、`FORCE_COLOR`、`TERM=dumb`），非终端时
+一个转义序列都不写 —— 重定向进文件、journald 与 `docker logs` 收到的是纯文本。
+
+`apps/bot/src/main.ts` 里那些直写终端的 `[tag] 正文` 行（配置被拒、实例锁、一次性数据修复、
+crash handler、Telegram 入口失败）走同一文件的 `tagged(level, text, stream)`：位于 LogSink 之外
+或之前，没有级别列，严重程度落在 `[tag]` 的颜色上 —— error 粗红、warn 黄、info 按 tag 取色。
+**只染行首的 `[tag]`，正文一个字节不动**（正文里是 SQL 清理命令、路径与 pid）。首启的 setup token
+用 `highlight()`。`stream` 必须传实际写入的那条流：能力校验的默认目标是 stdout。
+
 ### 3.2 库写不进去的时候
 
 `LogSink.event()` **一律不抛**（理由见 [§6](#6-健康检查与告警) 末尾），入库失败返回 `0`，并只做两件事：

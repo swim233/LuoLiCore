@@ -2,6 +2,7 @@ import { ulid } from "ulid";
 import type { OperationsRepository } from "@luoli/db";
 import type { EventBus } from "../events.js";
 import { redact } from "../secrets.js";
+import { formatPretty, tagged } from "./pretty.js";
 
 export interface LogEvent {
   level: "debug" | "info" | "warn" | "error";
@@ -132,10 +133,14 @@ export class LogSink {
         } catch {
           text = "";
         }
-        if (text) process.stderr.write(`[log] ${text}\n`);
+        // 整行 JSON 的正文不着色：这一行是排障时要整段复制走的那份。
+        if (text) process.stderr.write(tagged("error", `[log] ${text}\n`));
       }
       process.stderr.write(
-        `[log] 写入失败：${error instanceof Error ? error.message : String(error)}\n`,
+        tagged(
+          "error",
+          `[log] 写入失败：${error instanceof Error ? error.message : String(error)}\n`,
+        ),
       );
     } catch {
       /* stderr 同样不可用 */
@@ -209,11 +214,9 @@ export class LogSink {
     if (this.#console === "json")
       process.stdout.write(`${JSON.stringify({ ts, ...safe })}\n`);
     else if (this.#console === "pretty")
-      // 打的是脱敏后的 summary。此前这一行用的是 `input.summary` —— 同一个方法里 json 那一路
+      // 传的是脱敏后的整份。此前这一行取的是 `input.summary` —— 同一个方法里 json 那一路
       // 打脱敏后的、pretty 那一路打原文，而默认配置正是 pretty。
-      process.stdout.write(
-        `${new Date(ts).toISOString()} ${input.level.toUpperCase()} ${input.kind} ${safe.summary}\n`,
-      );
+      process.stdout.write(`${formatPretty(ts, safe)}\n`);
     // 入库失败一律不向外抛出。本方法的调用点全部位于 catch 块、`.catch()` 回调以及
     // `main.ts` 的 crash handler 中 —— 抛出会把日志写入失败升级为轮次失败，
     // 再升级为 crash handler 自身抛出、`process.exit(1)` 无法执行。关停竞态下这必然发生：

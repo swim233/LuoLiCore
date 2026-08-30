@@ -26,6 +26,7 @@ export * from "./config/wakeword.js";
 export * from "./context/engine.js";
 export * from "./events.js";
 export * from "./interaction/prompts.js";
+export * from "./log/pretty.js";
 export * from "./log/sink.js";
 export * from "./config/redact.js";
 export * from "./mcp/manager.js";
