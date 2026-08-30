@@ -187,7 +187,7 @@
 | [x] AC-PROV-005 (手动) | WebUI 保存 provider（含新 key） | `api_key_enc` 为密文；`GET /api/providers` 只返回 hint；日志中无明文 | 〔手测 2026-08-27 · S3〕
 | [x] AC-PROV-006 (手动) | WebUI 编辑 provider 但 key 留空 | 原 key 保持不变 | 〔手测 2026-08-27 · S3〕
 | [x] AC-PROV-007 (手动) | `[测试连接]` | 真的打一次上游模型目录接口；返回成功/失败与错误类型（`code`）、耗时、模型数；响应体内无 key；结果以右上角 Toast 呈现。成功把 `health_state` 写回 `up`，401/403 写 `down`，超时/404/5xx 不改 `health_state` | 〔手测 2026-08-27 · S3〕
-| [x] AC-PROV-008 (自动) | P1 连续健康检查失败 3 次 | 标 `down`，从 fallback 链跳过；30 分钟后自动重试。前两次只累计不动 `health_state`；非认证 4xx 不计入；调用路径上的请求超时喂同一个计数器（**一次调用一个候选只记一次**，重试不各记一次），**服务成功一次就归零**，判成 down 之后同一次调用就跳过它、跳过要落一条 `provider.fallback`；冷却到期时把库里那一行也改回 `up`/0（[04 §5.3](./04-agents-and-providers.md)） | 〔provider.health.test.ts〕
+| [x] AC-PROV-008 (自动) | P1 连续健康检查失败 3 次 | 标 `down`，从 fallback 链跳过；30 分钟后自动重试。探测打的是**模型目录接口**（一次 `GET {baseUrl}/models`，不发补全、不消耗 token、不要求配了启用模型）；前两次只累计不动 `health_state`；404 / 非认证 4xx / 非 JSON 响应体不计入；API key 解不开时跳过不写状态；仍在冷却期的 `down` 行不探；调用路径上的请求超时喂同一个计数器（**一次调用一个候选只记一次**，重试不各记一次），**服务成功一次就归零**，判成 down 之后同一次调用就跳过它、跳过要落一条 `provider.fallback`；冷却到期时把库里那一行也改回 `up`/0（[04 §5.3](./04-agents-and-providers.md)） | 〔provider.health.test.ts〕
 | [x] AC-PROV-009 (自动) | 含图片的轮次 + 当前模型无 vision | 自动切 `vision` 别名，**压过 `downgradeAfterStep` 与 `set_model` 的当轮指定**；`vision` 不可用时退而选「降档前那个别名自己支持」；一个都没有才降级为文本占位 + 回复末尾提示，两条路各记一条 `provider.fallback`。没有图片时一律不切（[04 §5.2](./04-agents-and-providers.md)） | 〔agent.model-wiring.test.ts〕
 | [x] AC-PROV-010 (自动) | 给 `main` 配 `settings_json`，再写一个白名单外的键 | 白名单键随每步调用下发（降档到 `low` 后用 `low` 的参数）；白名单外的键 `PUT` 返回 `alias_invalid` + 路径，不落库 | 〔provider.test.ts〕
 | [ ] AC-PROV-011 (手动) ★ | 接第三方 OpenAI 兼容网关，让模型在一轮里调用工具 | 带工具结果的后续请求里**不含** `item_reference`，该步返回 200，模型给出最终回复。回归的是「一调工具就再也不说话」 |

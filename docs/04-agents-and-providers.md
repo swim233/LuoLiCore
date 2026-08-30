@@ -630,18 +630,25 @@ fallbackModel(chain, cfg) 语义：
   - **一个字都没投递出去时不加「(生成中断)」后缀**：那个标记是给已经在屏幕上的半截内容用的，空内容加上它就是一条只有标记的空壳。这一路走失败那条路（那里有能看懂的原因），并且**把已经发出去的占位消息删掉** —— 占位消息不携带任何内容，留着它就是永久停在「正在想…」的一条孤儿消息（`docs/16 §5`「摘除比伪造安全」）。
   - **这一路必须由流自己抛出来。** 步骤级失败与轮次 abort 都不会让 AI SDK 的 `result.stream` 抛（它把错误吞进内部 onError，流照常正常结束，`result.text` 还是上一步的正文），所以 `streamMainAgent` 在流耗尽时显式检查一次「这一轮是不是断的」并抛出去 —— 不抛的话投递侧看不出区别，轮次会以 committed 收尾，用户既没有「(生成中断)」也没有超时提示（实测 `logs/2026-08-18` · B8F92Z：600 秒到点 abort，3 分钟后 `turn.end turn committed`）。
   - 收尾那一条消息**仍然要发出去**，所以一轮的墙钟可以超出 `turnTimeoutMs` 一个 API 调用的时间（群聊里由 `telegram.throttle.perChatPerMinute` 的队列决定）。这是有意的：内容已经在屏幕上，标记必须跟上去。
-- 健康检查：每 `provider.healthCheckCron`（默认 10 分钟）对启用的 provider 发一次 1-token 探测；连续失败 3 次标 `health_state='down'`，WebUI 显示并从 fallback 链临时跳过（`down` 状态 30 分钟后自动重试）。
+- 健康检查：每 `provider.healthCheckCron`（默认 10 分钟）对启用的 provider 探一次**模型目录接口**
+  （`GET {baseUrl}/models`，与 §5.4「测试连接」同一个 `probeProvider`）；连续失败 3 次标
+  `health_state='down'`，WebUI 显示并从 fallback 链临时跳过（`down` 状态 30 分钟后自动重试）。
   实现在 `packages/core/src/provider/health.ts`，计数落 `providers.health_fail_count`（0009）。
+  **探测不发补全**：不消耗 token、不占上游配额、不在上游侧留下对话记录，也不要求该 provider
+  已配置启用模型。代价写在下面倒数第二条 —— 目录接口活着不等于补全接口活着。
   **粒度是 provider，不是模型**：状态挂在 `providers` 行上（`health_state` / `health_fail_count`），
   一个 provider 被判 `down`，它名下**所有**模型一起从各自的别名链里消失（本部署 ksm-api 判 down 会
   连带 `high` 的链首）。这是现在的口径，要改成按模型判就得先改这一节、再加一张表 —— 别在实现里
-  悄悄分叉出第二种粒度。三条补充：
-  - **判据是「上游还答不答」，不是「这个模型这次答得对不对」**：超时 / 网络错 / 5xx 计入连续失败；
-    401/403 当场标 `down`（与调用路径的 `onUnavailable`、WebUI「测试连接」一致）；**其余 4xx 不计**，
-    只记一条 warn —— 上游答了话就说明它活着，拿探测模型的参数问题（`max_tokens` 下界、模型名换了）
-    去把整个 provider 判死会误伤 —— 而且**答了话就把计数归零**（否则「探测常年 400 + 调用路径偶尔
-    攒一次超时」几天下来也能凑够三次）。到阈值之前只累计，不动 `health_state`：`health_checked_at`
-    是那 30 分钟冷却的起点，提前推它会让冷却算错。
+  悄悄分叉出第二种粒度。补充：
+  - **判据是「上游还答不答」，不是「这个目录接口长得对不对」**：超时 / 网络错 / 5xx 计入连续失败；
+    401/403 当场标 `down`（与调用路径的 `onUnavailable`、WebUI「测试连接」一致）；**404、其余 4xx、
+    2xx 但响应体不是 JSON 一律不计**，只记一条 warn —— 上游答了话就说明它活着，而自建网关不实现
+    `/models` 是常态，拿它去把整个 provider 判死会打断整条 fallback 链 —— 而且**答了话就把计数归零**
+    （否则「目录接口常年 404 + 调用路径偶尔攒一次超时」几天下来也能凑够三次）。到阈值之前只累计，
+    不动 `health_state`：`health_checked_at` 是那 30 分钟冷却的起点，提前推它会让冷却算错。
+    缺 `base_url`、API key 解不开、被本机出网策略拦下（`blocked`）这三种情形判不了连通性，
+    **跳过、不写任何状态**。`blocked` 尤其不能计入：推理走 AI SDK 自己的 fetch、不过 `guardedFetch`
+    那道守卫，据此判死会摘掉一个跑在私网上、完全可用的自建 provider（`provider.allowPrivateBaseUrl`）。
   - **调用路径上的请求超时喂同一个计数器**（`fallback-model` 的 `onCandidateFailed`），
     因为 10 分钟一次的探测最坏还要放 10 分钟的轮次去踩坑。只有超时计入：5xx/429 是上游在说话，
     链内 fallback 当场换人、代价是一次往返，而「连上了但不返回」每一步都要熬满
@@ -675,8 +682,13 @@ fallbackModel(chain, cfg) 语义：
     服务它的那一行（价格落回链首）。代价是明知的 —— 这一次要是把**最后一个** provider 标成了 down，
     `all_providers_down` 告警要等下一次 cron 才响（那条尾巴在 `main.ts` 的 `rebuildModels`）。
     本次调用内跳过失效候选靠 `isDown`，链本身等下一次 rebuild 收拾。
-  - 探测**要花钱、也依赖至少配了一个启用模型**（这两点与 §5.4「测试连接」刻意相反：那一个用模型目录
-    接口，不花钱、不管模型配没配）。一个启用模型都没有的 provider 不在任何链里，跳过不探。
+  - **探测只覆盖 `health_state <> 'down'` 的行**，过滤条件与 `rebuild()` 同一份。冷却到期由
+    `rebuild()` 写回 `up`，而 `main.ts` 先 rebuild 再探，期满的那一行在同一 tick 内即被探到。
+    少了这条过滤，只有目录接口活着的黑洞网关每个 cron 间隔就被探回 `up` 一次，30 分钟冷却形同虚设。
+  - **目录接口活着不等于补全接口活着。** 只答 `/models`、补全挂起的网关，探测判不出来；这一路
+    只能靠上一条的调用路径超时计数器发现（`logs/2026-08-18` 那次也正是它记住的）。以前发 1-token
+    补全能直接覆盖这种故障，代价是每个 provider 每 10 分钟一次真实推理请求 —— 现在的口径是不花钱、
+    不占配额、不依赖模型配置，检出面收窄到「上游还答不答」。要改回补全探测就先改这一条。
   少了这一条时的表现见 `logs/2026-08-18`：ksm-api 变成黑洞之后，链首每一步都要重新熬满
   `3 × requestTimeoutMs`（实测 363 秒 × 每一步），而一轮只有 `concurrency.turnTimeoutMs`（600 秒）
   —— 三个轮次全部以「本轮长时间无进展」收尾（一轮 600 秒最多够走一步），而库里那行
@@ -693,7 +705,9 @@ fallbackModel(chain, cfg) 语义：
   「最小调用」= 按 kind 请求上游的模型目录接口（`openai`/`openai-compatible` → `{baseUrl}/models`；
   `anthropic` → `{baseUrl}/models` + `x-api-key` + `anthropic-version`；`google` → `{baseUrl}/models` + `x-goog-api-key`），
   15s 超时。选它而不是发一次 1-token 补全，是因为它不花钱、不受模型是否配置影响，且同一次响应正好就是「拉取模型列表」要的数据。
-  错误按 `unauthorized / not_found / upstream_error / timeout / network / invalid_response / missing_base_url / no_master_key` 归类，
+  §5.3 的周期健康检查走同一个 `probeProvider`，错误分类因而只有这一份。
+  错误按 `unauthorized / not_found / upstream_error / timeout / network / invalid_response / missing_base_url / no_master_key / blocked` 归类
+  （`blocked` = 被本机出网策略拦下，与上游无关，提示指向 `provider.allowPrivateBaseUrl`），
   上游响应体只截前 300 字符做摘要（**先过一遍日志脱敏正则**，网关会把请求头回显进错误体）。健康状态写入规则见 [09 §4](./09-webui.md#4-rest-api)。
 
 ### 5.4.1 模型元数据目录（models.dev）

@@ -1394,27 +1394,18 @@ const rebuildModels = (): void => {
 scheduler.add(
   config.provider.healthCheckCron,
   async () => {
-    // **先 rebuild 再探。** `#probes` 是上一次 rebuild 的产物：反过来的话，刚过完 30 分钟冷却、
-    // 这一轮才被放回链里的那个 provider 探不到（`probeCandidate` 返回 null → 整个跳过），它会带着
-    // 上一次的判定承接一整个 cron 间隔的真实流量。探完再 rebuild 一次是因为探测本身会改状态
-    // （新判死的要出链、探回 up 的要进链）—— 这一次也顺带管 `all_providers_down` 与 `log.setSecrets`。
+    // **先 rebuild 再探。** 探测只覆盖 `health_state <> 'down'` 的行，而把冷却到期的那一行写回
+    // `up` 的正是 `rebuild()`：反过来的话，刚过完 30 分钟冷却的那个 provider 本轮探不到，
+    // 它会带着上一次的判定承接一整个 cron 间隔的真实流量。探完再 rebuild 一次是因为探测本身会改
+    // 状态（新判死的要出链、探回 up 的要进链）—— 这一次也顺带管 `all_providers_down` 与
+    // `log.setSecrets`。
     rebuildModels();
     const outcomes = await runProviderHealthCheck(
-      {
-        db,
-        models: modelRegistry,
-        log,
-        keyFor: (providerId) => {
-          try {
-            return providers.key(providerId);
-          } catch {
-            return null;
-          }
-        },
-      },
+      { db, log, keyFor: (providerId) => providers.key(providerId) },
       {
         timeoutMs: PROVIDER_PROBE_TIMEOUT_MS,
         failuresToDown: PROVIDER_FAILURES_TO_DOWN,
+        allowPrivate: configStore.snapshot().provider.allowPrivateBaseUrl,
       },
     );
     rebuildModels();

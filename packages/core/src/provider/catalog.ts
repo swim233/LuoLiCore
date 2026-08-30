@@ -17,7 +17,21 @@ export type ProbeCode =
   | "network"
   | "invalid_response"
   | "missing_base_url"
-  | "no_master_key";
+  | "no_master_key"
+  | "blocked";
+
+/**
+ * `guardedFetch` 按本地出网策略拒绝时抛出的几个原因。与「上游不可达」必须分开：周期健康检查
+ * （`health.ts`）据 `network` 计入连续失败，而私网地址被拦是本机配置问题 —— 混在一起会把一个
+ * 跑在 127.0.0.1、推理路径完全正常的自建 provider 判成 `down`（推理走 AI SDK 的 fetch，不过这道守卫）。
+ */
+const GUARD_BLOCKED = new Set([
+  "ssrf_blocked",
+  "port_blocked",
+  "host_denied",
+  "host_not_allowed",
+  "unsupported_protocol",
+]);
 
 export interface ProviderProbe {
   reachable: boolean;
@@ -161,10 +175,13 @@ export async function probeProvider(
     const name = error instanceof Error ? error.name : "";
     if (name === "TimeoutError" || name === "AbortError")
       return fail("timeout", `上游 ${timeoutMs} ms 内未响应`);
-    return fail(
-      "network",
-      `无法连接上游：${clean(error instanceof Error ? error.message : String(error))}`,
-    );
+    const message = error instanceof Error ? error.message : String(error);
+    if (GUARD_BLOCKED.has(message))
+      return fail(
+        "blocked",
+        `出网策略拦下该地址（${message}）。私网地址与非常规端口需开启 provider.allowPrivateBaseUrl`,
+      );
+    return fail("network", `无法连接上游：${clean(message)}`);
   }
   const body = response.body.toString("utf8");
   if (!response.ok) {

@@ -1,9 +1,7 @@
-import { generateText } from "ai";
-import type { LanguageModel } from "ai";
 import type { Sqlite } from "@luoli/db";
-import { AttemptDeadline } from "../agent/fallback-model.js";
-import { redact } from "../secrets.js";
 import type { LogSink } from "../log/sink.js";
+import { probeProvider } from "./catalog.js";
+import type { ProbeCode } from "./catalog.js";
 
 /**
  * provider 健康检查（`docs/04 §5.3` 最后一条）。此前未实现：`main.ts` 的
@@ -13,12 +11,18 @@ import type { LogSink } from "../log/sink.js";
  * `concurrency.turnTimeoutMs`：`logs/2026-08-18` 的三轮各在开轮后 363 秒才 fallback，最终全部
  * 以本轮长时间无进展收尾。
  *
- * 判据是上游是否仍在响应，而非该模型本次回答是否正确：
+ * **探测请求打模型目录接口（`probeProvider`），不发补全**。与 WebUI 测试连接同一条路径、
+ * 同一份错误分类，因此不消耗 token、不占配额、不写入上游侧的对话记录，也不依赖该 provider
+ * 是否已配置启用模型。代价记在 `docs/04 §5.3`：目录接口活着不等于补全接口活着，只答目录、
+ * 补全挂起的网关要靠调用路径上的超时计数器（`recordProviderFailure`）发现。
+ *
+ * 判据是上游是否仍在响应：
  * - 超时 / 网络错 / 5xx → 计入连续失败。达到 `failuresToDown`（默认 3）才标 `down`。
  * - 401/403 → 立即标 `down`。与调用路径（`fallback-model` 的 `onUnavailable`）和 WebUI
  *   测试连接（`app.ts`）一致：认证被拒不会自行恢复。
- * - 其余 4xx（400 参数不合、404 模型不存在）→ 不计入，只记一条 warn。上游有响应即说明其存活；
- *   以探测模型的参数问题判死整个 provider，会在更换模型 id 这类场景下误伤。
+ * - 404 / 其余 4xx / 响应体不是 JSON → 不计入，只记一条 warn。上游有响应即说明其存活；
+ *   自建网关不实现 `/models` 是常态，以此判死整个 provider 会打断整条 fallback 链。
+ * - 缺 base_url、API key 解不开、被本机出网策略拦下 → 无法探测，跳过，不改动任何状态。
  */
 
 /**
@@ -28,23 +32,16 @@ import type { LogSink } from "../log/sink.js";
 export const PROVIDER_FAILURES_TO_DOWN = 3;
 export const PROVIDER_PROBE_TIMEOUT_MS = 15_000;
 
-export interface ProbeSource {
-  /** 该 provider 的一个裸候选（不能是 `aliasModel` 包装过的：那一层自身会 fallback，探测将永远发现不了问题）。 */
-  probeCandidate(
-    providerId: string,
-  ): { model: LanguageModel; modelId: string } | null;
-}
-
 export interface ProviderHealthOutcome {
   providerId: string;
   name: string;
-  modelId: string;
   ok: boolean;
-  /** 这次失败是否计入连续失败计数。4xx（非认证）为 false。 */
+  /** 这次失败是否计入连续失败计数。4xx（非认证）与无法探测为 false。 */
   counted: boolean;
   failures: number;
-  state: "up" | "down" | "unchanged";
+  state: "up" | "down" | "unchanged" | "skipped";
   ms: number;
+  code: ProbeCode;
   error?: string;
 }
 
@@ -101,127 +98,186 @@ export function recordProviderServed(db: Sqlite, providerId: string): boolean {
   );
 }
 
-function errorStatus(error: unknown): number | null {
-  // 与 `fallback-model.ts` 的同名判据一致。那边是私有的，为一个三行判据将中间件层反向引入
-  // provider 层不值得（会形成 provider → agent → provider 的循环）。
-  return error &&
-    typeof error === "object" &&
-    "statusCode" in error &&
-    typeof error.statusCode === "number"
-    ? error.statusCode
-    : null;
+/**
+ * 探测结果 → 连续失败计数的处置。`counted` 只给「上游没有答话」那几档；上游答了话（哪怕是
+ * 404 或 HTML 登录页）一律归零并放行，判据见文件头。
+ */
+function verdict(
+  code: ProbeCode,
+  status: number | null,
+): "ok" | "auth" | "counted" | "responded" | "skipped" {
+  if (code === "ok") return "ok";
+  if (code === "unauthorized") return "auth";
+  if (code === "timeout" || code === "network") return "counted";
+  // `blocked` 是本机出网策略拦的，不是上游的事：推理路径走 AI SDK 的 fetch、不过这道守卫，
+  // 据此判死会摘掉一个跑在私网上、完全可用的自建 provider。
+  if (
+    code === "missing_base_url" ||
+    code === "no_master_key" ||
+    code === "blocked"
+  )
+    return "skipped";
+  // `upstream_error` 覆盖 401/403/404 之外的全部非 2xx；5xx 是上游自己坏了，计入。
+  return code === "upstream_error" && status !== null && status >= 500
+    ? "counted"
+    : "responded";
 }
 
 export async function runProviderHealthCheck(
   deps: {
     db: Sqlite;
-    models: ProbeSource;
     log: LogSink;
-    keyFor?: (providerId: string) => string | null;
+    /** 解不开时抛出（更换 `LUOLI_MASTER_KEY` 后即如此），该 provider 本轮跳过。 */
+    keyFor: (providerId: string) => string | null;
   },
-  options: { timeoutMs: number; failuresToDown: number },
+  options: {
+    timeoutMs: number;
+    failuresToDown: number;
+    allowPrivate: boolean;
+  },
 ): Promise<ProviderHealthOutcome[]> {
+  /**
+   * 与 `rebuild()` 同一份过滤条件。已判 `down` 且仍在冷却期内的不探：冷却到期由 `rebuild()`
+   * 写回 `up`，而 `main.ts` 先 rebuild 再探，因此期满的那一个在同一 tick 内就能被探到。
+   * 少了这条过滤时，只有目录接口活着的黑洞网关每 10 分钟被探回 `up` 一次，冷却期形同虚设。
+   */
   const rows = deps.db
-    .prepare("SELECT id,name FROM providers WHERE enabled=1")
-    .all() as Array<{ id: string; name: string }>;
+    .prepare(
+      `SELECT id,name,kind,base_url AS baseUrl,headers_json AS headers FROM providers
+      WHERE enabled=1 AND COALESCE(health_state,'up') <> 'down'`,
+    )
+    .all() as Array<{
+    id: string;
+    name: string;
+    kind: string;
+    baseUrl: string | null;
+    headers: string | null;
+  }>;
   const outcomes: ProviderHealthOutcome[] = [];
   for (const row of rows) {
-    const candidate = deps.models.probeCandidate(row.id);
-    // 没有任何启用模型的 provider 不在任何链中，探测无意义（也没有可探的模型）。
-    if (!candidate) continue;
     const started = Date.now();
-    let failure: unknown;
-    // 走真实调用那一套 `AttemptDeadline`，而非只传一个 `AbortSignal.timeout`：仅 abort 不够，
-    // provider 不认该 signal 时它的 promise 永远不 settle，探测会把这个 cron 挂死在此，
-    // 而 `Cron` 是 `protect: true`，下一次到点会被跳过，即健康检查从此不再运行（同 docs/04 §5.3
-    // 中到点后既 abort 底层请求也停止等待那条）。
-    const deadline = new AttemptDeadline(undefined);
+    let apiKey: string | null = null;
     try {
-      await deadline.guard(
-        generateText({
-          model: candidate.model,
-          prompt: "ping",
-          maxOutputTokens: 1,
-          maxRetries: 0,
-          abortSignal: deadline.signal,
-        }),
-        options.timeoutMs,
-        "probe",
-      );
-    } catch (error) {
-      failure = error;
-    }
-    const ms = Date.now() - started;
-    if (!failure) {
-      recordProviderSuccess(deps.db, row.id);
+      apiKey = deps.keyFor(row.id);
+    } catch {
       outcomes.push({
         providerId: row.id,
         name: row.name,
-        modelId: candidate.modelId,
+        ok: false,
+        counted: false,
+        failures: 0,
+        state: "skipped",
+        ms: Date.now() - started,
+        code: "no_master_key",
+        error: "API Key 无法解密",
+      });
+      deps.log.event({
+        level: "warn",
+        kind: "provider.health",
+        summary: `${row.name} 的 API Key 无法解密，跳过探测`,
+        data: {
+          provider: row.name,
+          providerId: row.id,
+          state: "skipped",
+          code: "no_master_key",
+        },
+      });
+      continue;
+    }
+    let headers: Record<string, string> | null = null;
+    // `headers_json` 非法只影响自定义头，不影响连通性判定；与 `app.ts` 的测试连接同样容错。
+    try {
+      headers = row.headers
+        ? (JSON.parse(row.headers) as Record<string, string>)
+        : null;
+    } catch {
+      headers = null;
+    }
+    /**
+     * 超时由 `probeProvider` 的 `AbortSignal.timeout` + `guardedFetch` 保证：那一层是本仓库
+     * 自己的 `http.request`，abort 即 `destroy`，promise 必定 settle。不需要旧探测那一套
+     * `AttemptDeadline`（它防的是第三方 provider SDK 不认 signal 时 promise 永不 settle，
+     * 从而把这个 `protect: true` 的 cron 永久挂死）。
+     */
+    const probe = await probeProvider(
+      { name: row.name, kind: row.kind, baseUrl: row.baseUrl, headers },
+      apiKey,
+      options.timeoutMs,
+      options.allowPrivate,
+    );
+    const ms = Date.now() - started;
+    const decision = verdict(probe.code, probe.status);
+    const base = {
+      providerId: row.id,
+      name: row.name,
+      ms,
+      code: probe.code,
+    };
+    const logged = {
+      provider: row.name,
+      providerId: row.id,
+      code: probe.code,
+      status: probe.status,
+      ms,
+    };
+    if (decision === "ok") {
+      recordProviderSuccess(deps.db, row.id);
+      outcomes.push({
+        ...base,
         ok: true,
         counted: false,
         failures: 0,
         state: "up",
-        ms,
       });
       deps.log.event({
         level: "info",
         kind: "provider.health",
         summary: `${row.name} 探测正常`,
-        data: {
-          provider: row.name,
-          providerId: row.id,
-          modelId: candidate.modelId,
-          state: "up",
-          ms,
-        },
+        data: { ...logged, state: "up", models: probe.models.length },
       });
       continue;
     }
-    const status = errorStatus(failure);
-    const raw =
-      failure instanceof Error
-        ? `${failure.name}: ${failure.message}`
-        : String(failure);
-    const reason = redact(
-      raw.replace(/\s+/g, " ").trim(),
-      [deps.keyFor?.(row.id) ?? ""].filter(Boolean),
-    ).slice(0, 500);
-    const auth = status === 401 || status === 403;
-    const counted = auth || status === null || status >= 500;
-    if (!counted) {
-      // 有响应即视为存活，因此计数归零。不归零时：探测模型长期返回 400（如 `max_tokens` 下界）
+    // `probeProvider` 已对响应体做过脱敏与截断（网关常把请求头回显进错误体）。
+    const reason = probe.message.slice(0, 500);
+    if (decision === "skipped") {
+      outcomes.push({
+        ...base,
+        ok: false,
+        counted: false,
+        failures: 0,
+        state: "skipped",
+        error: reason,
+      });
+      deps.log.event({
+        level: "warn",
+        kind: "provider.health",
+        summary: `${row.name} 无法探测，跳过`,
+        data: { ...logged, state: "skipped", error: reason },
+      });
+      continue;
+    }
+    if (decision === "responded") {
+      // 有响应即视为存活，因此计数归零。不归零时：目录接口长期 404（自建网关不实现它）
       // 而调用路径偶尔攒一次超时，几天下来也能凑够三次，判死一个始终正常的 provider。
-      // `health_state` / `health_checked_at` 不改动：一次 400 只证明网关在响应，不证明该模型可用。
+      // `health_state` / `health_checked_at` 不改动：404 只证明网关在响应，不证明补全可用。
       deps.db
         .prepare(
           "UPDATE providers SET health_fail_count=0,health_error=? WHERE id=?",
         )
         .run(reason, row.id);
       outcomes.push({
-        providerId: row.id,
-        name: row.name,
-        modelId: candidate.modelId,
+        ...base,
         ok: false,
         counted: false,
         failures: 0,
         state: "unchanged",
-        ms,
         error: reason,
       });
       deps.log.event({
         level: "warn",
         kind: "provider.health",
-        summary: `${row.name} 探测被拒（${status}），不计入连续失败`,
-        data: {
-          provider: row.name,
-          providerId: row.id,
-          modelId: candidate.modelId,
-          state: "unchanged",
-          status,
-          ms,
-          error: reason,
-        },
+        summary: `${row.name} 目录接口不可用（${probe.code}），不计入连续失败`,
+        data: { ...logged, state: "unchanged", error: reason },
       });
       continue;
     }
@@ -230,17 +286,14 @@ export async function runProviderHealthCheck(
       row.id,
       reason,
       options.failuresToDown,
-      auth,
+      decision === "auth",
     );
     outcomes.push({
-      providerId: row.id,
-      name: row.name,
-      modelId: candidate.modelId,
+      ...base,
       ok: false,
       counted: true,
       failures: recorded.failures,
       state: recorded.down ? "down" : "unchanged",
-      ms,
       error: reason,
     });
     deps.log.event({
@@ -250,13 +303,9 @@ export async function runProviderHealthCheck(
         ? `${row.name} 连续失败 ${recorded.failures} 次，已标记为 down`
         : `${row.name} 探测失败（${recorded.failures}/${options.failuresToDown}）`,
       data: {
-        provider: row.name,
-        providerId: row.id,
-        modelId: candidate.modelId,
+        ...logged,
         state: recorded.down ? "down" : "unchanged",
-        status,
         failures: recorded.failures,
-        ms,
         error: reason,
       },
     });

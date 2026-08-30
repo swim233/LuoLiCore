@@ -138,8 +138,20 @@ describe('probe normalization', () => {
 
   it('fails closed when the base url or the upstream is missing', async () => {
     expect(await probeProvider({ name: 'gateway', kind: 'openai-compatible', baseUrl: '' }, GOOD_KEY)).toMatchObject({ reachable: false, code: 'missing_base_url' });
-    const dead = await probeProvider({ name: 'dead', kind: 'openai-compatible', baseUrl: 'http://127.0.0.1:1/v1' }, GOOD_KEY, 2000);
+    const dead = await probeProvider({ name: 'dead', kind: 'openai-compatible', baseUrl: 'http://127.0.0.1:1/v1' }, GOOD_KEY, 2000, true);
     expect(dead.code === 'network' || dead.code === 'timeout').toBe(true);
     expect(dead.models).toEqual([]);
+  });
+
+  /**
+   * 被本机出网策略拦下与「上游不可达」必须分成两个 code：周期健康检查据 `network` 计入连续失败，
+   * 而推理路径走 AI SDK 自己的 fetch、根本不过 `guardedFetch` 这道守卫 —— 混成一个的话，一个跑在
+   * 私网上、对话完全正常的自建 provider 会被健康检查判成 `down`（`docs/04 §5.3`）。
+   */
+  it('separates outbound-policy rejections from unreachable upstreams', async () => {
+    const blocked = await probeProvider({ name: 'local', kind: 'openai-compatible', baseUrl: `${base}/v1` }, GOOD_KEY, 2000);
+    expect(blocked).toMatchObject({ reachable: false, code: 'blocked', status: null });
+    expect(blocked.message).toContain('provider.allowPrivateBaseUrl');
+    expect(await probeProvider({ name: 'local', kind: 'openai-compatible', baseUrl: `${base}/v1` }, GOOD_KEY, 2000, true)).toMatchObject({ reachable: true, code: 'ok' });
   });
 });

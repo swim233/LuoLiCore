@@ -96,11 +96,6 @@ export class ModelRegistry {
     Array<{ model: V4LanguageModel; info: ModelRow }>
   >();
   readonly #settings = new Map<string, AliasSettings>();
-  /** 每个 provider 一个裸候选，只给健康探测用（`provider/health.ts`）。 */
-  readonly #probes = new Map<
-    string,
-    { model: V4LanguageModel; info: ModelRow }
-  >();
   /** 当前处于 `down` 且仍在冷却期内的 `models.id`。派生自数据库：`rebuild()` 从库重算，
    *  `recordFailure()` 在写库的同一次调用中同步一份，进程内副本仅用于避免每次调用查库。 */
   readonly #down = new Set<string>();
@@ -126,7 +121,6 @@ export class ModelRegistry {
     this.#info.clear();
     this.#chains.clear();
     this.#settings.clear();
-    this.#probes.clear();
     this.#down.clear();
     const cutoff = Date.now() - cooldownMinutes * 60_000;
     /**
@@ -213,23 +207,6 @@ export class ModelRegistry {
       )
       .all() as ModelRow[];
     const byId = new Map(modelRows.map((model) => [model.id, model]));
-    // 探测候选按 `sort` 取每个 provider 的首个启用模型，与它属于哪条别名链无关：尚未进入任何
-    // 别名的 provider 同样需要被探测，否则它将恒为 `up`，直到有人手工执行连通性测试。
-    for (const info of modelRows) {
-      if (this.#probes.has(info.providerId)) continue;
-      const probe = providerInstances
-        .get(info.providerId)
-        ?.languageModel(info.modelId);
-      if (
-        probe &&
-        typeof probe !== "string" &&
-        probe.specificationVersion === "v4"
-      )
-        this.#probes.set(info.providerId, {
-          model: probe as V4LanguageModel,
-          info,
-        });
-    }
     const aliases = this.db
       .prepare(
         "SELECT alias,model_ids_json AS modelIds,settings_json AS settings FROM model_aliases",
@@ -341,14 +318,6 @@ export class ModelRegistry {
         .pluck()
         .get(rowId) as string) ?? null
     );
-  }
-
-  /** 健康探测用的裸候选（`provider/health.ts` 的 `ProbeSource`）。 */
-  probeCandidate(
-    providerId: string,
-  ): { model: V4LanguageModel; modelId: string } | null {
-    const probe = this.#probes.get(providerId);
-    return probe ? { model: probe.model, modelId: probe.info.modelId } : null;
   }
 
   isDown(candidate: { id: string; rowId?: string }): boolean {

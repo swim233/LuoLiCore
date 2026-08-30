@@ -185,7 +185,8 @@ export const HOT_RELOADABLE_CONFIG_KEYS = [
   "provider.catalog",
   // 冷却期在每次 `rebuild()` 时读取，而 `provider.*` 的任何变更都会触发 rebuildModels。
   "provider.healthDownCooldownMinutes",
-  // 出网放行开关在每次探测时实时读取（app.ts 的 probeProvider 调用点、ModelCatalog 的 options getter）。
+  // 出网放行开关在每次探测时实时读取（app.ts 的 probeProvider 调用点、main.ts 的 provider-health
+  // cron、ModelCatalog 的 options getter）。
   // 它属于故障时运维会去调整的开关，冻结即意味着界面提示修改成功而下一次探测仍访问私网。
   "provider.allowPrivateBaseUrl",
   // 三项均由 memory_write 从本轮 `turn.config` 读取（`approvalFor` 与 queueWrite 各一次）。

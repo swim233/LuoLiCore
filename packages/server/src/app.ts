@@ -2148,7 +2148,8 @@ export function createServer(
         result.code === "unauthorized"
           ? 403
           : result.code === "missing_base_url" ||
-              result.code === "no_master_key"
+              result.code === "no_master_key" ||
+              result.code === "blocked"
             ? 400
             : 502;
       return ctx.json(
