@@ -1,9 +1,10 @@
-import { existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import Database from 'better-sqlite3';
 import { describe, expect, it } from 'vitest';
 import { closeDatabase, migrateDatabase, openDatabase, recoverAfterCrash } from '@luoli/db';
 import { MaintenanceService } from '@luoli/core';
+import { code, codeIndex, source } from './support/source.js';
 
 describe('migration backup', () => {
   it('creates a pre-migration backup before applying a pending migration', () => {
@@ -87,6 +88,111 @@ describe('migration backup', () => {
     expect(db.prepare('SELECT state FROM tasks WHERE id=\'task\'').pluck().get()).toBe('failed');
     expect(db.prepare('SELECT state FROM agent_runs WHERE id=\'run\'').pluck().get()).toBe('failed');
     expect(db.prepare('SELECT state FROM agent_messages WHERE id=\'ask\'').pluck().get()).toBe('timeout');
+    closeDatabase(db);
+  });
+});
+
+const REAL_MIGRATIONS = 'packages/db/migrations';
+const WORKER_KIND_MIGRATION = '0018_agent_runs_worker_kind.sql';
+
+/**
+ * 迁移 `0018` 给 `agent_runs` 加 `worker_kind`（docs/03 §2.7）。
+ *
+ * 三条断言分别守住三件不同的事，缺任何一条都留下一个静默失败：
+ * ① **回填**。不回填的话本轮名额那条 COUNT（`AgentManager.spawn`）要写成两分支，而第二支会把
+ *    存量 ACP 行一起数进名额；这类错的表现是「升级之后 worker 突然派不出来了」，没有报错。
+ * ② **`kind` 上那条 CHECK 一个字节没动**。它是本次迁移存在的全部理由 —— 要给 `kind` 加一档就得
+ *    重建整张 trace 骨架表，而重建期间 `parent_run_id` / `tasks.agent_run_id` /
+ *    `usage_ledger.agent_run_id` / `approvals.agent_run_id` 四处引用全在半空中（同 `0014`）。
+ * ③ **幂等**。迁移账本认的是文件名，跑第二次时那条 `CREATE INDEX`（没有 `IF NOT EXISTS`）
+ *    会直接抛，所以「只执行一次」这件事必须真的成立。
+ */
+function upgradeAcross0018(name: string): Database.Database {
+  const root = `./data/${name}`;
+  const database = `${root}/luoli.db`;
+  const staging = `${root}/migrations`;
+  rmSync(root, { recursive: true, force: true });
+  mkdirSync(staging, { recursive: true });
+  // 真迁移目录里除 0018 之外的每一份，先跑到 0017 那个点上 —— 这正是升级时库所处的状态。
+  // 自己手写一份 agent_runs 建表语句是不行的：那样断言的是用例里那份 DDL，不是仓库里那份。
+  for (const entry of readdirSync(REAL_MIGRATIONS))
+    if (entry.endsWith('.sql') && entry !== WORKER_KIND_MIGRATION)
+      copyFileSync(resolve(REAL_MIGRATIONS, entry), resolve(staging, entry));
+  const db = openDatabase(database);
+  migrateDatabase(db, staging);
+  expect(db.prepare("SELECT COUNT(*) FROM pragma_table_info('agent_runs') WHERE name='worker_kind'").pluck().get(),
+    '0018 之前 worker_kind 就已经在了 —— 这个用例没在测升级').toBe(0);
+  const insert = db.prepare(`INSERT INTO agent_runs(id,turn_id,depth,kind,agent_name,model_alias,effective_role,state,started_at)
+    VALUES (?,'t',?,?,?,?,'owner','done',1)`);
+  insert.run('main-run', 0, 'main', 'main', 'main');
+  insert.run('acp-run', 1, 'sub', 'acp:omp', 'external');
+  insert.run('sub-run', 1, 'sub', 'researcher', 'low');
+  // 两个诱饵：判据要**两个都中**才算 ACP。`agent.agents[].name` 当年是裸 `z.string()`，
+  // 运维真能从 DB / WebUI 建一个叫 `acp:x` 的子 agent，而它是我们付钱的模型调用，得占名额。
+  insert.run('lookalike-name', 1, 'sub', 'acp:x', 'low');
+  insert.run('lookalike-alias', 1, 'sub', 'researcher', 'external');
+  copyFileSync(resolve(REAL_MIGRATIONS, WORKER_KIND_MIGRATION), resolve(staging, WORKER_KIND_MIGRATION));
+  migrateDatabase(db, staging);
+  return db;
+}
+
+describe('迁移 0018 · agent_runs.worker_kind', () => {
+  it('加列并按三条规则回填：ACP 认 acp、其余 sub 认 lw、主 run 留 NULL', () => {
+    const db = upgradeAcross0018('migration-0018-backfill');
+    const kindOf = (id: string): string | null =>
+      db.prepare('SELECT worker_kind FROM agent_runs WHERE id=?').pluck().get(id) as string | null;
+    expect(kindOf('acp-run')).toBe('acp');
+    expect(kindOf('sub-run')).toBe('lw');
+    expect(kindOf('lookalike-name'), 'agent_name 像 ACP 但别名不是 external，它是我们自己的 worker').toBe('lw');
+    expect(kindOf('lookalike-alias'), '别名是 external 但名字不带 acp: 前缀，同上').toBe('lw');
+    // 主 run 不是 worker —— 留 NULL，与 `AgentManager.createMain` 此后写入的一致。
+    expect(kindOf('main-run')).toBeNull();
+    // 名额那条 COUNT 靠的就是这一列，回填漏了它会静默把存量 ACP 行数进去。
+    expect(db.prepare("SELECT COUNT(*) FROM agent_runs WHERE turn_id='t' AND worker_kind='lw'").pluck().get()).toBe(3);
+    // 部分索引真的建出来了（只覆盖 worker 行：主 run 在这张表里是绝大多数）。
+    expect(db.prepare("SELECT sql FROM sqlite_master WHERE type='index' AND name='ix_agentruns_worker'").pluck().get())
+      .toContain('WHERE worker_kind IS NOT NULL');
+    closeDatabase(db);
+  });
+
+  it('kind 上那条 CHECK 一个字节没动，迁移文件里没有 DROP TABLE / RENAME', () => {
+    const db = upgradeAcross0018('migration-0018-check');
+    const ddl = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='agent_runs'").pluck().get() as string;
+    expect(ddl, 'kind 上那条 CHECK 被改过 —— 那意味着整张 trace 骨架表被重建了').toContain("CHECK (kind IN ('main','sub'))");
+    // 三种 worker 照旧记 kind='sub'：CHECK 没动，认它靠新列。
+    expect(() => db.prepare(`INSERT INTO agent_runs(id,turn_id,depth,kind,worker_kind,agent_name,model_alias,effective_role,state,started_at)
+      VALUES ('h','t',1,'sub','harness','harness:claude','external','owner','done',1)`).run()).not.toThrow();
+    expect(db.prepare("SELECT worker_kind FROM agent_runs WHERE id='h'").pluck().get()).toBe('harness');
+    // 新列刻意不加 CHECK：0018 存在的理由就是「kind 上那个 CHECK 扩不动」，在同一张表上再加一个
+    // 同样扩不动的枚举，下一种 worker 出现时会撞上一模一样的墙。取值域焊在 TS 与唯一那个插入口上。
+    expect(() => db.prepare(`INSERT INTO agent_runs(id,turn_id,depth,kind,worker_kind,agent_name,model_alias,effective_role,state,started_at)
+      VALUES ('future','t',1,'sub','something-new','x','external','owner','done',1)`).run()).not.toThrow();
+    closeDatabase(db);
+
+    // 源码级：整表重建走的是 `DROP TABLE` / `ALTER TABLE … RENAME`，两者在这份文件里一个都不许有。
+    // 上面那条读的是结果，这条读的是手法 —— 一次「先建新表再改名」同样能让结果看起来对。
+    const text = source(`${REAL_MIGRATIONS}/${WORKER_KIND_MIGRATION}`);
+    expect(text).not.toContain(code('DROP TABLE'));
+    expect(text).not.toContain(code('RENAME'));
+    expect(text).toContain(code('ALTER TABLE agent_runs ADD COLUMN worker_kind TEXT;'));
+    // 回填的顺序不能反：ACP 是 kind='sub' 的子集，先认它，剩下的 sub 才是 lw。
+    // 反过来写的话第一条会把 ACP 行一起认成 lw，而第二条再也改不回来（它只看 IS NULL）。
+    const acpAt = codeIndex(text, "UPDATE agent_runs SET worker_kind = 'acp'");
+    const lwAt = codeIndex(text, "UPDATE agent_runs SET worker_kind = 'lw'");
+    expect(acpAt, '找不到 ACP 那条回填').toBeGreaterThan(0);
+    expect(lwAt, '找不到 lw 那条回填').toBeGreaterThan(0);
+    expect(acpAt, 'ACP 那条回填排在 lw 之后，存量 ACP 行会被认成 lw').toBeLessThan(lwAt);
+  });
+
+  it('同一个库跑两次迁移，0018 只执行一次', () => {
+    const db = upgradeAcross0018('migration-0018-idempotent');
+    const applied = (): number =>
+      db.prepare('SELECT COUNT(*) FROM __drizzle_migrations WHERE name=?').pluck().get(WORKER_KIND_MIGRATION) as number;
+    expect(applied()).toBe(1);
+    // 第二趟：`CREATE INDEX` 没有 `IF NOT EXISTS`，真的再执行一次会当场抛。
+    expect(() => migrateDatabase(db, './data/migration-0018-idempotent/migrations')).not.toThrow();
+    expect(applied()).toBe(1);
+    expect(db.prepare("SELECT COUNT(*) FROM pragma_table_info('agent_runs') WHERE name='worker_kind'").pluck().get()).toBe(1);
     closeDatabase(db);
   });
 });

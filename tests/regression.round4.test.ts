@@ -2,7 +2,7 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { ArchiveRepository, OperationsRepository, PrincipalRepository, closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
-import { ContextEngine, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceService, MemoryStore, ProviderStore, Secrets, ToolRegistry, configSchema } from '@luoli/core';
+import { ContextEngine, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceService, MemoryStore, ProviderStore, Secrets, ToolRegistry, configSchema, newToolScope } from '@luoli/core';
 import type { Config, LogSink as LogSinkType } from '@luoli/core';
 import type { RuntimeTurnContext } from '@luoli/shared';
 import { createServer } from '@luoli/server';
@@ -115,7 +115,9 @@ describe('R-API-01 / R-CFG-02 WebUI 写端点', () => {
     registry.bindOverrides(() => (disabled ? { bash: { enabled: false } } : {}));
     registry.register({ name: 'bash', description: '', inputSchema: z.object({}), policy: { minRole: 'trusted', approval: 'never', scope: 'sandbox', source: 'builtin' }, sourcePriority: 1, execute: () => ({ ok: true }) });
     const turn = { turnId: 't', key: 'k', chatId: 'c', threadId: null, initiatorUserId: 'u', effectiveRole: 'trusted', isPrivate: false, baseCommitId: null, snapshot: { messages: [], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 0 }, delta: [], abortSignal: new AbortController().signal, config: {} } as unknown as RuntimeTurnContext;
-    const context = { turn, workspace: '.', agentKind: 'main' as const };
+    // `lw`：`bash` 在 worker 那一侧，主 agent 侧目录里恒无此名，「禁用前它在目录里」这半条判据
+    // 会跟着恒假 —— 本条判的是运维禁用的硬边界，与派发那道闸正交。
+    const context = { turn, workspace: '.', agentKind: 'lw' as const, ...newToolScope() };
     expect(registry.activeNames('trusted', context)).toContain('bash');
     disabled = true;
     expect(registry.activeNames('trusted', context)).not.toContain('bash');

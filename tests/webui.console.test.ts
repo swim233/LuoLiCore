@@ -223,14 +223,23 @@ describe('console endpoints', () => {
     closeDatabase(db);
   });
 
-  it('persists edited sub agents through the config override layer', async () => {
-    const { app, db, headers } = harness('agents');
-    const definition = { name: 'research', description: '查资料', modelAlias: 'high', maxSteps: 6, minRole: 'trusted', tools: ['web_fetch'], resultMaxChars: 4000, instructions: '只做检索', injectMemory: false };
-    expect((await app.request('/api/config', { method: 'PUT', headers, body: JSON.stringify({ 'agent.agents': [definition] }) })).status).toBe(200);
-    const stored = db.prepare('SELECT value_json AS value FROM config_kv WHERE key=?').get('agent.agents') as { value: string };
-    expect(JSON.parse(stored.value)).toEqual([definition]);
-    // 缺 instructions 这类必填字段要在写入端就被 schema 挡掉，而不是等下次启动。
-    expect((await app.request('/api/config', { method: 'PUT', headers, body: JSON.stringify({ 'agent.agents': [{ name: 'broken' }] }) })).status).toBe(400);
+  /**
+   * 数组叶子整块落库、非法值在写入端就被 schema 挡掉。判据原先挂在 `agent.agents` 上，而
+   * 子 agent 定义体系已整个删除 —— 换 `approval.rules` 继续守同一件事，并把「那个键真的没了」
+   * 一并焊住：写不进去比留一个静默被丢弃的键安全（`config_kv` 里的每一行都会被 `loadConfig` 解析）。
+   */
+  it('persists array leaves through the config override layer and rejects the deleted agent keys', async () => {
+    const { app, db, headers } = harness('array-leaves');
+    const rules = [{ tool: 'bash', pattern: 'rm -rf', risk: 'high' }];
+    expect((await app.request('/api/config', { method: 'PUT', headers, body: JSON.stringify({ 'approval.rules': rules }) })).status).toBe(200);
+    const stored = db.prepare('SELECT value_json AS value FROM config_kv WHERE key=?').get('approval.rules') as { value: string };
+    expect(JSON.parse(stored.value)).toEqual(rules);
+    // 字段拼错要在写入端被挡掉，而不是等下次启动才发现审批规则不生效。
+    expect((await app.request('/api/config', { method: 'PUT', headers, body: JSON.stringify({ 'approval.rules': [{ toool: 'bash' }] }) })).status).toBe(400);
+    // 已删除的三个键：一个都不许落库。
+    for (const key of ['agent.agents', 'agent.agentsDir', 'agent.maxDepth'])
+      expect((await app.request('/api/config', { method: 'PUT', headers, body: JSON.stringify({ [key]: key === 'agent.maxDepth' ? 3 : [] }) })).status, key).toBe(400);
+    expect(db.prepare("SELECT COUNT(*) FROM config_kv WHERE key LIKE 'agent.agents%' OR key='agent.maxDepth'").pluck().get()).toBe(0);
     closeDatabase(db);
   });
 });

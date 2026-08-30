@@ -14,7 +14,8 @@ import { elideMiddleBytes } from "@luoli/shared";
  * fail-closed 与 `execute()` 的二次硬拦截都看不到它的内部调用。收窄依靠三道门，且仅有三道：
  *
  * 1. 准入：仅 `owner` 且仅私聊（群内任何人的发言都是注入面，而它能修改仓库）；
- * 2. 目录：只能在 `agent.harness.allowedDirs` 列出的路径下运行，默认为空即整个功能关闭；
+ * 2. 目录：只能在 `agent.harness.allowedDirs` 列出的路径下运行；名单为空且未开
+ *    `agent.harness.workspaceFallback` 时整个功能关闭；
  * 3. 审批：启动 harness 这一动作走一次审批，批准后其内部执行不再逐条拦截。
  *
  * 不存在第四道门。
@@ -69,24 +70,42 @@ const HARNESS_ENV_DENY = new Set([
   "WEBUI_PASSWORD",
 ]);
 
+/**
+ * `defaultDir`：`dir` 缺省时的落点（会话工作目录下的 `harness/<runId>`，由工具壳建好再传进来）。
+ *
+ * 它**并进白名单**再走同一个 `resolveHarnessDir`，不另开一支放行。另开一支的话「哪些路径可以跑」
+ * 就有了两份判据，而其中一份不经过逐段比较（`/srv/app` 不放行 `/srv/app-secrets` 那条）。
+ */
 export async function runHarness(
   task: string,
-  requestedDir: string,
+  requestedDir: string | undefined,
   settings: HarnessSettings,
   abortSignal: AbortSignal,
+  defaultDir?: string,
 ): Promise<HarnessResult> {
-  if (!settings.allowedDirs.length)
+  // 整体关停的判据排在拼 roots 之前：拼完再判的话，`defaultDir` 会让一个本应关闭的功能开着。
+  if (!settings.allowedDirs.length && !defaultDir)
     return {
       ok: false,
       error: "harness_disabled",
-      hint: "agent.harness.allowedDirs 为空 —— 该功能默认关闭，启用前需在配置中列出允许的仓库路径",
+      hint: "agent.harness.allowedDirs 为空且未开 agent.harness.workspaceFallback —— 该功能默认关闭，启用前需在配置中列出允许的仓库路径",
     };
-  const dir = resolveHarnessDir(requestedDir, settings.allowedDirs);
+  const roots = defaultDir
+    ? [...settings.allowedDirs, defaultDir]
+    : settings.allowedDirs;
+  const target = requestedDir ?? defaultDir;
+  if (!target)
+    return {
+      ok: false,
+      error: "harness_dir_required",
+      hint: `未开 agent.harness.workspaceFallback，必须指定 dir：${settings.allowedDirs.join(" · ")}`,
+    };
+  const dir = resolveHarnessDir(target, roots);
   if (!dir)
     return {
       ok: false,
       error: "harness_dir_not_allowed",
-      hint: `只能在 agent.harness.allowedDirs 列出的路径下运行：${settings.allowedDirs.join(" · ")}`,
+      hint: `只能在这些路径下运行：${roots.join(" · ")}`,
     };
   if (!existsSync(dir) || !statSync(dir).isDirectory())
     return { ok: false, error: "harness_dir_missing", dir };

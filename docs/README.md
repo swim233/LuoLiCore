@@ -17,7 +17,7 @@
 | [01-architecture.md](./01-architecture.md) | 总体架构、模块边界、请求全链路时序、目录结构 | 全体 |
 | [02-context-engine.md](./02-context-engine.md) | **核心**：快照 / rebase / 裁剪 / 并发语义的完整规格 | 后端 |
 | [03-data-model.md](./03-data-model.md) | 数据库 DDL、索引、迁移、中文全文检索 | 后端 |
-| [04-agents-and-providers.md](./04-agents-and-providers.md) | Agent 架构、subagent、双向通信、Provider/模型注册表 | 后端 |
+| [04-agents-and-providers.md](./04-agents-and-providers.md) | Agent 架构、worker（lw / harness）、双向通信、Provider/模型注册表 | 后端 |
 | [05-tools-and-permissions.md](./05-tools-and-permissions.md) | 工具目录、角色矩阵、沙箱、审批 | 后端 / 安全 |
 | [06-prompt-and-memory.md](./06-prompt-and-memory.md) | 系统提示词装配、ASSIST/CHARACTER/PUBMEMORY/PRIMEMORY | 后端 / 提示词 |
 | [07-skills-plugins-mcp.md](./07-skills-plugins-mcp.md) | SKILL.md 规范、Plugin API、MCP 接入 | 后端 / 扩展开发 |
@@ -85,11 +85,11 @@ Telegram ──► 准入(白名单/角色) ──► 归档(DB, 按 chat 隔离
                                                               ▼
                                        主 Agent (ToolLoopAgent, 固定头部系统提示词)
                                           │            │              │
-                                     日常对话      工具调用        重任务
+                                     日常对话      对话面工具      要动手
                                           │            │              │
-                                          │      READ/WRITE/BASH  spawn subagent
-                                          │      检索聊天记录     (独立上下文)
-                                          │      Skill/Plugin/MCP  ◄─ask_parent─►
+                                          │      记忆/归档检索   spawn_worker
+                                          │      Telegram 输出   → lw-worker(独立上下文)
+                                          │      定时任务        ◄─ask_parent─►
                                           ▼            ▼              ▼
                                      Telegram 输出(流式) + 出站消息入库 + commit/rebase/裁剪
 ```
@@ -114,7 +114,7 @@ Telegram ──► 准入(白名单/角色) ──► 归档(DB, 按 chat 隔离
 | D10 | 沙箱 | **可开关**：`mode = none \| docker`；`bypassRoles=['owner']`（owner 宿主直跑）；非 owner 无沙箱时**工具直接禁用（fail-closed）** | [05](./05-tools-and-permissions.md#5-沙箱) |
 | D11 | 私有记忆 | **每用户一份** `memory/private/<userId>/PRIMEMORY.md`；owner 可读写全部；群聊永不注入 | [06](./06-prompt-and-memory.md#3-作用域与注入矩阵) |
 | D12 | 公开记忆 | **全局单一份** `memory/PUBMEMORY.md`（所有会话共享）；写入需 `pubWriteMinRole`（默认 `trusted`） | [06](./06-prompt-and-memory.md#3-作用域与注入矩阵) |
-| D13 | Agent 通信 | **双向**：subagent 可 `ask_parent` 阻塞提问、`report_progress` 上报；`maxDepth=3` + 环路检测 + 待答超时 | [04](./04-agents-and-providers.md#4-agent-间通信) |
+| D13 | Agent 通信 | **双向**：worker 可 `ask_parent` 阻塞提问、`report_progress` 上报；待答超时后走仲裁。⚠ **`maxDepth` 与环路检测已随 worker 重构摘除** —— lw-worker 是叶子，深度恒 ≤1，那两道闸判的都是恒假条件 | [04](./04-agents-and-providers.md#4-agent-间通信) |
 | D14 | 扩展生态 | **Anthropic SKILL.md 兼容 + JS/TS Plugin + MCP** | [07](./07-skills-plugins-mcp.md) |
 | D15 | WebUI | **同进程内置**（Hono + 静态 SPA）+ 单管理员密码/Session + SSE 实时日志；默认仅监听 `127.0.0.1` | [09](./09-webui.md) |
 | D16 | 多模态 | **图片 + 文档（pdf/txt/代码）**；语音/视频仅归档为占位符（不做 STT） | [08](./08-telegram-adapter.md#7-多模态) |
@@ -123,8 +123,8 @@ Telegram ──► 准入(白名单/角色) ──► 归档(DB, 按 chat 隔离
 | D19 | 配额 | **记账 + 多级配额硬限**（global/chat/user，日/月，按角色覆盖），超额拒绝并提示 | [10](./10-logging-and-observability.md#5-配额) |
 | D20 | 技术栈 | TypeScript / Node 22 / pnpm workspace / **AI SDK v7** / **grammY** / **better-sqlite3 + 原生 SQL（无 ORM 查询层）** / Hono / Vite + Vue 3（自建 UI 层）/ vitest。**原定 Drizzle ORM，实现阶段改为手写 SQL**：查询层要强制注入 chat 作用域过滤（D7），自己写比绕过 ORM 更直接；迁移相应改为手写 `NNNN_*.sql` + 自研执行器。账本表名 `__drizzle_migrations` 是那一版留下的名字，不代表还在用 | [01](./01-architecture.md#5-技术栈) |
 | D21 | 定时 / 主动发言 | **做**（[14 §2 Q4](./14-open-questions.md) 已答复）：`mode='agent'` 起完整轮次、`mode='notify'` 只发预写文本；产出**照常进上下文**；停机错过**不补跑**；`minRole=trusted` 且落点绑死本会话 | [02 §10](./02-context-engine.md#10-定时轮次的上下文归属) |
-| D22 | 子 agent 的 md 定义 | **做**（[14 §2 Q5](./14-open-questions.md)）：`agents/<name>.md` 是**只读**来源，DB / WebUI 同名定义覆盖它；加载失败报错而不是静默跳过 | [04](./04-agents-and-providers.md) |
-| D23 | `HarnessAgent` | **做，已落地**（[14 §2 Q8](./14-open-questions.md)）：仅 owner 且仅私聊、目录限白名单（默认空 = 关闭）、起 harness 整体走一次审批。它内部的工具调用**不受本系统权限模型约束**（T17） | [05 §3.5](./05-tools-and-permissions.md) |
+| D22 | 子 agent 的 md 定义 | ~~做~~ ⚠ **已推翻**：worker 重构把两来源定义体系整个删掉（`agents/<name>.md` / `agent.agents[]` / `list_agents` 全部移除），只剩单一内建 lw-worker。编号留着是因为 [14 §2 Q5](./14-open-questions.md) 与源码注释都引它 | [04 §3](./04-agents-and-providers.md) |
+| D23 | `HarnessAgent` | **做，已落地**（[14 §2 Q8](./14-open-questions.md)）：仅 owner 且仅私聊、目录限白名单（默认空 = 关闭）、起 harness 整体走一次审批。worker 重构后它是 **harness-worker**，多一个默认工作目录（`workspaceFallback`，出厂关）。它内部的工具调用**不受本系统权限模型约束**（T17） | [05 §3.5](./05-tools-and-permissions.md) |
 | D24 | 保留策略 | **媒体文件 90 天**（`media.retentionDays`，0 = 不清）删文件留元数据；`messages` / `context_messages` / `turns` / `tasks` **永久**（[14 §2 Q9](./14-open-questions.md)） | [03 §4](./03-data-model.md) |
 | D25 | `ask_parent` 应答 | **实现 low 档仲裁**（[14](./14-open-questions.md) A7）：`agent.askArbiter` / `askTimeoutMs` 接线，不再返回 `ask_parent_not_implemented`。降级顺序 仲裁 → `default` → `ask_parent_unanswered`。**转人工（`askEscalateToUser`）仍未实现** —— 阻塞式人机通道本身已落地（`PendingPrompts`，[05 §6.1](./05-tools-and-permissions.md)），欠的是「问谁 / 选项从哪儿来 / 等人期间的并发槽与超时怎么算」这三条语义 | [04 §3.4](./04-agents-and-providers.md) |
 
@@ -141,8 +141,8 @@ Telegram ──► 准入(白名单/角色) ──► 归档(DB, 按 chat 隔离
 | 多 Provider / 多模型导入与管理 | `createProviderRegistry({...})`，字符串 id `provider:model` 寻址；`customProvider({ languageModels })` 做模型别名与能力裁剪；`fallbackProvider` 兜底 |
 | 高费用 / 低费用模型指派 | `customProvider` 别名（`high` / `low` / `vision` / `title`）+ 运行期 `prepareStep` 动态换模型 |
 | 主 Agent 工具循环 | `ToolLoopAgent`（自动管理 message 数组、step 循环、停止条件） |
-| Subagent 分发重任务 | 官方 subagent 模式：把 agent 包在 `tool().execute` 里，**独立上下文窗口**；`toModelOutput` 只回灌摘要给主模型 |
-| Subagent 流式进度 | `execute` 写成 `async function*`，`yield` 中间态；配合 `readUIMessageStream` |
+| worker 承接全部工具执行 | 官方 subagent 模式：把 agent 包在 `tool().execute` 里，**独立上下文窗口**；`toModelOutput` 按 `resultMode` 回灌摘要或全文给主模型 |
+| worker 流式进度 | `execute` 写成 `async function*`，`yield` 中间态；配合 `readUIMessageStream` |
 | 单轮次上下文限制与裁剪 | `prepareStep` + `pruneMessages()`（可分级裁剪 reasoning / toolCalls / 空消息） |
 | 步数/停止控制 | `stopWhen: [isStepCount(n), hasToolCall('final_answer')]`、`isLoopFinished()` |
 | 受信 / 非受信工具白名单 | `prepareStep` 返回 `activeTools: string[]`；每 step 重算 |
@@ -244,5 +244,5 @@ pnpm build && pnpm start      # 生产
 | **claim（认领）** | 把尚未进入上下文的原始消息折入某个 turn 的 delta |
 | **principal（主体）** | 可被授予角色的对象：user 或 chat |
 | **effective role（有效角色）** | 私聊 = `role(user)`；群/频道 = `min(max(role(user), role(chat)), 'trusted')`，任一侧 `blocked` 则为 `blocked`。会话角色取的是下限不是上限，群内封顶 `trusted` |
-| **agent run** | 一次 agent 实例的执行（主 agent 或 subagent） |
-| **trace** | 以 `turn_id` 为根的一整棵调用树（模型调用、工具调用、subagent） |
+| **agent run** | 一次 agent 实例的执行（主 agent 或 worker） |
+| **trace** | 以 `turn_id` 为根的一整棵调用树（模型调用、工具调用、worker） |

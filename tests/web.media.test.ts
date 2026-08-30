@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 import sharp from 'sharp';
 import { ArchiveRepository, OperationsRepository, closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
 import { ContextEngine, LogSink, MaintenanceService, ToolRegistry, WebAssetStore, canSeeImages, captureImage, configSchema,
-  contextMessages, isImagePart, normalizeToolOutput, splitToolMedia, toolModelOutput, toolResultPart } from '@luoli/core';
+  contextMessages, isImagePart, newToolScope, normalizeToolOutput, splitToolMedia, toolModelOutput, toolResultPart } from '@luoli/core';
 import type { RuntimeTurnContext } from '@luoli/shared';
 
 /**
@@ -42,10 +42,10 @@ async function png(width = 40, height = 30): Promise<Buffer> {
 }
 
 function sink(harnessed: ReturnType<typeof harness>, visionAvailable: boolean,
-  subAgent?: { name: string; images: () => number; onInjected: () => void }) {
+  worker?: { name: string; images: () => number; onInjected: () => void }) {
   return { assets: harnessed.assets, visionAvailable: () => visionAvailable, log: harnessed.log,
     appendDelta: (turn: RuntimeTurnContext, message: unknown) => harnessed.engine.appendDelta(turn, message as never),
-    ...(subAgent ? { subAgent } : {}) };
+    ...(worker ? { worker } : {}) };
 }
 
 describe('web_assets · 抓回来的图存哪、怎么归一化', () => {
@@ -114,22 +114,22 @@ describe('captureImage · 注入的是顶层 part，而且看不了图时不许�
   });
 
   /**
-   * 子 agent 取的图不进入父轮的像素，只留一条文字痕迹：图是它派出的那个 agent 取的，结论在它
-   * 交回的摘要里。像素同时给父轮，等于主 agent 为一张自己没请求过的图支付图片额度、并被固定在
+   * worker 取的图不进入父轮的像素，只留一条文字痕迹：图是它取的，结论在它
+   * 交回的产出里。像素同时给父轮，等于主 agent 为一张自己没请求过的图支付图片额度、并被固定在
    * vision 别名上（`visionScope='window'`）。行与文件照常保存：`gcFiles` 的 referenced 读的是表，
    * 而它当时看到的是哪张图，事后要能查得到。
    */
-  it('子 agent 要的那张图：父轮只留文字痕迹，行与文件照存', async () => {
+  it('worker 要的那张图：父轮只留文字痕迹，行与文件照存', async () => {
     const bench = harness('capture-subagent');
     try {
       let injected = 0;
-      const result = await captureImage(sink(bench, true, { name: 'researcher', images: () => injected, onInjected: () => { injected += 1; } }),
+      const result = await captureImage(sink(bench, true, { name: 'lw', images: () => injected, onInjected: () => { injected += 1; } }),
         bench.turn, { url: 'https://a.example/chart.png', mediaType: 'image/png', body: await png() });
       expect(result.ok).toBe(true);
       const parts = bench.turn.delta.at(-1)!.parts as unknown[];
       expect(parts.some((part) => isImagePart(part))).toBe(false);
       // 痕迹要写明由谁取回、以及父轮自身并未看到，否则主 agent 会认为自己看过这张图。
-      expect(JSON.stringify(parts)).toContain('researcher');
+      expect(JSON.stringify(parts)).toContain('你派出的 worker');
       expect(JSON.stringify(parts)).toContain('webasset://');
       // 标志落在实际看到图的那个 agent 上：置在父轮上等于多付一次贵别名的费用。
       expect(bench.turn.mediaInjected).toBeUndefined();
@@ -141,11 +141,11 @@ describe('captureImage · 注入的是顶层 part，而且看不了图时不许�
     } finally { bench.cleanup(); }
   });
 
-  it('子 agent 的张数按它这次运行自己数 —— 父轮 delta 里没有它们，数 delta 等于数不到', async () => {
+  it('worker 的张数按它这次运行自己数 —— 父轮 delta 里没有它们，数 delta 等于数不到', async () => {
     const bench = harness('capture-subagent-cap');
     try {
       const limit = bench.config.media.maxImagesPerTurn;
-      const result = await captureImage(sink(bench, true, { name: 'researcher', images: () => limit, onInjected: () => {} }),
+      const result = await captureImage(sink(bench, true, { name: 'lw', images: () => limit, onInjected: () => {} }),
         bench.turn, { url: 'https://a.example/chart.png', mediaType: 'image/png', body: await png() });
       expect(result).toMatchObject({ ok: false, error: 'image_limit_reached' });
       expect(bench.turn.delta).toHaveLength(0);
@@ -215,7 +215,7 @@ describe('工具结果里的图片：摘出去交给 provider，不写进上下�
       const data = 'A'.repeat(300_000);
       registry.registerExternal({ name: 'shot', description: '', inputSchema: (await import('zod')).z.record((await import('zod')).z.unknown()),
         minRole: 'owner', source: 'plugin', execute: () => ({ ok: true, note: '看这张图', media: [{ mediaType: 'image/jpeg', data }] }) });
-      const output = await registry.execute('shot', {}, { turn: bench.turn, workspace: './data', agentKind: 'main' }) as Record<string, unknown>;
+      const output = await registry.execute('shot', {}, { turn: bench.turn, workspace: './data', agentKind: 'lw', ...newToolScope() }) as Record<string, unknown>;
       // base64 保持完整（未被 4096 的上限截断：截断后的 base64 会被 provider 整体拒收）……
       expect((output.media as Array<{ data: string }>)[0]!.data).toHaveLength(300_000);
       // ……而模型要读的那句话也没被 base64 挤出预算。
@@ -266,7 +266,7 @@ describe('工具结果里的图片：摘出去交给 provider，不写进上下�
       const data = 'A'.repeat(300_000);
       registry.registerExternal({ name: 'shot', description: '', inputSchema: z.record(z.unknown()),
         minRole: 'owner', source: 'plugin', execute: () => ({ ok: true, note: '看这张图', media: [{ mediaType: 'image/jpeg', data }] }) });
-      const output = await registry.execute('shot', {}, { turn: bench.turn, workspace: './data', agentKind: 'main' });
+      const output = await registry.execute('shot', {}, { turn: bench.turn, workspace: './data', agentKind: 'lw', ...newToolScope() });
       const part = toolResultPart('call-1', 'shot', output);   // stepToolResults 做的就是这一句
       const persisted = JSON.stringify(part);
       expect(persisted).not.toContain('AAAA');
@@ -284,22 +284,22 @@ describe('这张图交给谁看，就问谁的能力位', () => {
   const seeing = (aliases: Record<string, boolean>) => ({ supportsVision: (alias: string) => aliases[alias] === true });
   /**
    * 判据取错的表现是图被送给一个不支持视觉的模型：宽容的 provider 静默忽略，严格的直接返回 400
-   * （docs/08 §7.2）。子 agent 常跑在 `low` 上，而这里此前查的是主轮别名，与这张图无关。
+   * （docs/08 §7.2）。worker 常跑在 `low` 上，而这里此前查的是主轮别名，与这张图无关。
    */
-  it('主 agent 问本轮别名，子 agent 问它自己那个', () => {
+  it('主 agent 问本轮别名，worker 问它自己那个', () => {
     const registry = seeing({ vision: false, main: true, low: false });
     expect(canSeeImages(registry, { agentKind: 'main' }, () => 'main')).toBe(true);
-    expect(canSeeImages(registry, { agentKind: 'sub', subAgent: { alias: 'low' } }, () => 'main')).toBe(false);
-    expect(canSeeImages(registry, { agentKind: 'sub', subAgent: { alias: 'main' } }, () => 'low')).toBe(true);
+    expect(canSeeImages(registry, { agentKind: 'lw', worker: { alias: 'low' } }, () => 'main')).toBe(false);
+    expect(canSeeImages(registry, { agentKind: 'lw', worker: { alias: 'main' } }, () => 'low')).toBe(true);
   });
 
   it('有能看图的 vision 别名时两边都算能看 —— 两处切换都会切到它', () => {
-    expect(canSeeImages(seeing({ vision: true, low: false }), { agentKind: 'sub', subAgent: { alias: 'low' } }, () => 'low')).toBe(true);
+    expect(canSeeImages(seeing({ vision: true, low: false }), { agentKind: 'lw', worker: { alias: 'low' } }, () => 'low')).toBe(true);
     expect(canSeeImages(seeing({ vision: true, low: false }), { agentKind: 'main' }, () => 'low')).toBe(true);
   });
 
-  it('子 agent 的上下文缺了 subAgent 时按看不了算 —— 存疑的一档 fail-closed', () => {
-    expect(canSeeImages(seeing({ vision: false, low: true }), { agentKind: 'sub' }, () => 'low')).toBe(false);
+  it('worker 的上下文缺了 worker 字段时按看不了算 —— 存疑的一档 fail-closed', () => {
+    expect(canSeeImages(seeing({ vision: false, low: true }), { agentKind: 'lw' }, () => 'low')).toBe(false);
   });
 });
 

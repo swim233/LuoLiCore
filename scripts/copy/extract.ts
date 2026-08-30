@@ -827,6 +827,7 @@ export const BROWSER_FILES = [
   "packages/webui/src/views/ExtensionsPage.vue",
   "packages/webui/src/views/LoginView.vue",
   "packages/webui/src/views/TasksPage.vue",
+  "packages/webui/src/views/WorkerRunsPage.vue",
   ...readdirSync("packages/webui/src/ui")
     .filter((n) => n.endsWith(".vue"))
     .map((n) => `packages/webui/src/ui/${n}`),
@@ -836,8 +837,12 @@ export const BROWSER_FILES = [
   ...readdirSync("packages/webui/src/components/tasks")
     .filter((n) => n.endsWith(".vue"))
     .map((n) => `packages/webui/src/components/tasks/${n}`),
+  ...readdirSync("packages/webui/src/components/workers")
+    .filter((n) => n.endsWith(".vue"))
+    .map((n) => `packages/webui/src/components/workers/${n}`),
   "packages/webui/src/components/extensions/types.ts",
   "packages/webui/src/components/tasks/types.ts",
+  "packages/webui/src/components/workers/types.ts",
   "packages/webui/src/api/client.ts",
   "packages/webui/src/ui/toast.ts",
   "packages/webui/src/ui/confirm.ts",

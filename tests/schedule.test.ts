@@ -1,7 +1,7 @@
 import { mkdirSync, rmSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { ArchiveRepository, OperationsRepository, PrincipalRepository, ScheduleRepository, TurnRepository, closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
-import { ContextEngine, EventBus, LogSink, MemoryStore, QuotaGuard, SILENT_STREAK_WARN, SYNTHETIC_TG_MESSAGE_ID_BASE, ScheduledJobRunner, Scheduler, ToolRegistry, TurnConcurrency, TurnFailureStreak, TurnRegistry, configSchema, registerScheduleTools, updateScheduledJob } from '@luoli/core';
+import { ContextEngine, EventBus, LogSink, MemoryStore, QuotaGuard, SILENT_STREAK_WARN, SYNTHETIC_TG_MESSAGE_ID_BASE, ScheduledJobRunner, Scheduler, ToolRegistry, TurnConcurrency, TurnFailureStreak, TurnRegistry, configSchema, newToolScope, registerScheduleTools, updateScheduledJob } from '@luoli/core';
 import type { Config, TelegramToolBridge } from '@luoli/core';
 import type { RuntimeTurnContext } from '@luoli/shared';
 import { logPayload, logRows } from './support/logs.js';
@@ -57,12 +57,14 @@ function harness(name: string, extra: Record<string, unknown> = {}) {
     turn: { turnId: `t-${chatId}`, key: `chat:${chatId}`, chatId, threadId: null, initiatorUserId: userId, effectiveRole: 'trusted',
       isPrivate: true, baseCommitId: null, config: live, snapshot: { messages: [], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 0 },
       delta: [], abortSignal: new AbortController().signal },
-    workspace: `./data/${name}-workspace`, agentKind: 'main',
+    // schedule_* 五条都在 `MAIN_AGENT_TOOLS` 里，这里取 main 是本来就该走的那一侧。
+    workspace: `./data/${name}-workspace`, agentKind: 'main', ...newToolScope(),
   });
   // 静默相关用例必须用真实轮次对象调用工具：`stay_silent` 判定的正是 runner 在 `openTurn` 上设置的
-  // `silenceable`，用 `contextFor` 手工构造的 turn 测试等于绕过判据本身。
-  const turnContext = (turn: RuntimeTurnContext, agentKind: 'main' | 'sub' = 'main'): unknown =>
-    ({ turn, workspace: `./data/${name}-workspace`, agentKind });
+  // `silenceable`，用 `contextFor` 手工构造的 turn 测试等于绕过判据本身。渐进披露的三个集合按 agent
+  // run 各持一份（不在 turn 上），因此父轮与 worker 两侧各建各的。
+  const turnContext = (turn: RuntimeTurnContext, agentKind: 'main' | 'lw' = 'main'): unknown =>
+    ({ turn, workspace: `./data/${name}-workspace`, agentKind, ...newToolScope() });
   principals.upsertSeen({ id: 'user:7', kind: 'user', tgId: '7', role: 'trusted', displayName: '阿离', username: null, chatType: null });
   return { db, jobs, runner, registry, scheduler, principals, sent, agentCalls, contextFor, context, archive, fired, failures, turnContext,
     scheduleSettings: (): Config['schedule'] => live.schedule,
@@ -586,15 +588,21 @@ describe('本轮不用汇报（静默）', () => {
     h.close();
   });
 
-  /** 子 agent 拿到的是父轮同一个 turn 对象：缺少主 agent 那道闸时，一个 researcher 即可让整轮静默。 */
-  it('子 agent 拿不到这个工具，哪怕本轮确实允许静默', async () => {
+  /** worker 拿到的是父轮同一个 turn 对象：缺少主 agent 那道闸时，一个 researcher 即可让整轮静默。 */
+  it('worker 拿不到这个工具，哪怕本轮确实允许静默', async () => {
     const h = harness('sched-silent-sub');
     await call(h, 'schedule_create', { name: '查更新', mode: 'agent', text: '看看', cron: '0 12 * * *', silent: true });
     const job = h.jobs.byName('chat:c1', '查更新')!;
     h.setAgent(async (turn) => {
       expect(turn.silenceable).toBe(true);
-      expect(h.registry.activeNames('trusted', h.turnContext(turn, 'sub') as never)).not.toContain('stay_silent');
-      expect(await h.registry.execute('stay_silent', { reason: '我是 researcher' }, h.turnContext(turn, 'sub') as never)).toMatchObject({ ok: false, error: 'tool_unavailable' });
+      expect(h.registry.activeNames('trusted', h.turnContext(turn, 'lw') as never)).not.toContain('stay_silent');
+      // 现在有两道闸都挡得住它：`stay_silent` 落在 `MAIN_ONLY_TOOLS` 里（工具下沉之后 worker 一律
+      // 拿不到），以及 `available()` 里的 `silenceable`。命中的是 `admit()` 判据顺序里排在前面那道，
+      // 所以这里断的是 `tool_unavailable_for_worker` / `worker` 而不是 `tool_unavailable` ——
+      // 照旧值抄会在下沉这道闸被误删时仍然变绿。`silenceable` 那道对主 agent 仍是唯一的闸
+      // （上一条用例正是它）。`reason` 只有 `admit()` 交得出来，`execute()` 只把 `error` 给模型。
+      expect(h.registry.admit('stay_silent', h.turnContext(turn, 'lw') as never)).toMatchObject({ ok: false, error: 'tool_unavailable_for_worker', reason: 'worker' });
+      expect(await h.registry.execute('stay_silent', { reason: '我是 researcher' }, h.turnContext(turn, 'lw') as never)).toMatchObject({ ok: false, error: 'tool_unavailable_for_worker' });
       // 派发它的主 agent 全程不知情，因此本轮照常发送。
       expect(turn.silenced).toBeUndefined();
       return '查到了：1.5.0 发布了。';

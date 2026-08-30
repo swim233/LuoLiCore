@@ -14,6 +14,7 @@ import AttachmentStrip from '../ui/AttachmentStrip.vue';
 import SchemaForm from '../ui/SchemaForm.vue';
 import ExtensionsPage from './ExtensionsPage.vue';
 import TasksPage from './TasksPage.vue';
+import WorkerRunsPage from './WorkerRunsPage.vue';
 // 扩展四类的行类型跟着页面一起搬走了：这一层只负责拉数据，形状由那一份定义。
 import type { CustomToolRow, McpRow, PluginRow, SkillRow } from '../components/extensions/types';
 import UiLineChart from '../ui/UiLineChart.vue';
@@ -22,7 +23,7 @@ import UiRing from '../ui/UiRing.vue';
 import { pushToast, toastError } from '../ui/toast';
 import { askConfirm } from '../ui/confirm';
 import type { Attachment, GridColumn, TagSeverity } from '../ui/types';
-import { api, ApiError, apiStream, hydrateSession } from '../api/client';
+import { api, ApiError, hydrateSession } from '../api/client';
 
 interface TrendPoint { day: string; messages: number; turns: number; costUsd: number }
 interface Dashboard { turns: { total: number; running: number; failed: number; cost: number }; messages: { total: number }; providers: { total: number; enabled: number }; trend?: TrendPoint[] }
@@ -48,11 +49,10 @@ interface Conversation { id: string; key: string; chatId: string; userId: string
 interface MessageHit { id: number; chatId: string; direction: string; fromName: string | null; fromUsername: string | null; kind: string; text: string | null; tgDate: number; turnId: string | null; attachments: Attachment[] }
 // 扁平字段是生效值，`defaults` 是代码里 `TOOL_POLICY` 那份，`relaxed` 列出比默认更宽松的字段。
 // 两者都要显示：只给一个时运维看不出当前偏离默认的程度（docs/09 §3.7）。
+// `sides` 由服务端按运行时判据 `toolCallableBy()` 现算（docs/09 §3.7）：主 agent 与 lw-worker
+// 的可用集在这里分叉，前端不再判一遍。它与 `enabled` 正交 —— 停用是两侧都没有。
 interface ToolPolicy { minRole: string; approval: string; scope: string; source: string; enabled: boolean; timeoutMs: number | null;
-  selfManagedTimeout: boolean; defaults: { minRole: string; approval: string; timeoutMs: number | null }; relaxed: string[] }
-// `source`：config = 只在 agent.agents 里；file = 只在 agents/<name>.md 里；
-// file-overridden = 两边都有，运行时用的是配置那份（docs/14 §2 Q5-a：DB 赢）。
-interface AgentDefinition { name: string; description: string; modelAlias: string; maxSteps: number; minRole: string; tools: string[]; resultMaxChars: number; instructions: string; injectMemory: boolean; source?: 'config' | 'file' | 'file-overridden' }
+  selfManagedTimeout: boolean; sides?: Array<'main' | 'worker'>; defaults: { minRole: string; approval: string; timeoutMs: number | null }; relaxed: string[] }
 const active = ref('dashboard');
 const dashboard = ref<Dashboard>({ turns: { total: 0, running: 0, failed: 0, cost: 0 }, messages: { total: 0 }, providers: { total: 0, enabled: 0 } });
 const principals = ref<Principal[]>([]);
@@ -65,9 +65,8 @@ const skills = ref<SkillRow[]>([]);
 const plugins = ref<PluginRow[]>([]);
 const mcp = ref<McpRow[]>([]);
 const customTools = ref<CustomToolRow[]>([]);
-const agents = ref<AgentDefinition[]>([]);
-// 任务 / 审批 / 定时任务三份行数据整体移入 `TasksPage.vue` 的三张卡：它们各自持有服务端
-// 分页的游标，行留在这一层时页码没有存放位置（`loadConversations` 同形）。
+// 任务 / 审批 / 定时任务三份行数据整体移入 `TasksPage.vue` 的三张卡，worker 运行记录同理进了
+// `WorkerRunsPage.vue`：它们各自持有服务端分页的游标，行留在这一层时页码没有存放位置。
 const prompts = ref<Array<Record<string, unknown>>>([]);
 const config = ref<Record<string, unknown>>({});
 const botName = ref('LuoLiCore');
@@ -105,7 +104,7 @@ const aliasDialog = ref(false);
 // 别名的用途只写在 docs/04 里，运维在这个页面上看不到，因此六个内建别名常驻表格并附用途说明。
 const ALIAS_GUIDE: Array<{ alias: string; purpose: string; tier: string }> = [
   { alias: 'main', purpose: '主 Agent 的默认模型，用于日常对话', tier: '中高档，对话质量优先' },
-  { alias: 'high', purpose: '复杂推理、代码类子 agent', tier: '最强模型' },
+  { alias: 'high', purpose: '复杂推理与代码类 worker', tier: '最强模型' },
   { alias: 'low', purpose: '摘要、记忆压缩，以及超过 agent.main.downgradeAfterStep 后的自动降档', tier: '最便宜可用' },
   { alias: 'vision', purpose: '含图片的轮次；当前模型不支持看图时自动切换到该别名', tier: '支持 vision' },
   { alias: 'title', purpose: '生成任务标题与会话摘要', tier: '最便宜' },
@@ -152,7 +151,7 @@ const aliasForm = ref({ alias: 'main', custom: '', description: '', isNew: true,
 const aliasChain = ref<ModelOption[]>([]);
 const aliasSettings = ref(emptySettings());
 const aliasName = computed(() => aliasForm.value.alias === '__custom__' ? aliasForm.value.custom.trim() : aliasForm.value.alias);
-const aliasNameHint = computed(() => ALIAS_GUIDE.find((entry) => entry.alias === aliasName.value)?.purpose ?? '仅在被配置项（如 agent.agents.*.modelAlias）引用时生效');
+const aliasNameHint = computed(() => ALIAS_GUIDE.find((entry) => entry.alias === aliasName.value)?.purpose ?? '仅在被配置项（如 agent.worker.modelAlias）引用时生效');
 const testingProvider = ref('');
 const catalogDialog = ref(false);
 const catalogProviderId = ref('');
@@ -212,6 +211,24 @@ const capabilityTags = (meta: CatalogMeta | null): string[] => {
   return tags;
 };
 const priceText = (row: CatalogModel): string => (row.priceIn === null && row.priceOut === null ? '—' : `$${row.priceIn ?? '?'} / $${row.priceOut ?? '?'}`);
+/** 模型表那一列只有几个字符宽，1000000 这类原值会把列撑开：≥ 1M 记 M（保留小数），其余记 k（取整）。
+    单位为空即无值，底衬不出，只留一个 `—`。 */
+const windowMetric = (value: unknown): { num: string; unit: string } => {
+  const tokens = Number(value);
+  if (!Number.isFinite(tokens) || tokens <= 0) return { num: '—', unit: '' };
+  return tokens >= 1_000_000
+    ? { num: String(Number((tokens / 1_000_000).toFixed(2))), unit: 'M' }
+    : { num: String(Math.round(tokens / 1000)), unit: 'k' };
+};
+const priceMetric = (value: unknown): { num: string; unit: string } => (value === null || value === undefined || value === '' ? { num: '—', unit: '' } : { num: String(value), unit: '$' });
+const metricText = (metric: { num: string; unit: string }): string => (metric.unit ? `${metric.num} ${metric.unit}` : metric.num);
+/** 同列底衬等宽：取该列最长的一条。底衬走等宽字体，一个字符恰好一个 `ch`，无需实测。 */
+const metricWidth = (metrics: Array<{ num: string; unit: string }>): string => `${metrics.reduce((widest, metric) => Math.max(widest, metricText(metric).length), 0)}ch`;
+const modelMetricWidths = computed(() => ({
+  window: metricWidth(models.value.map((model) => windowMetric(model.context_window))),
+  priceIn: metricWidth(models.value.map((model) => priceMetric(model.price_in))),
+  priceOut: metricWidth(models.value.map((model) => priceMetric(model.price_out))),
+}));
 // 各家报价一致时给出区间只是噪音，但「几家一致」本身是有用的判断依据，要留着。
 const rangeText = (range: { min: number; max: number; providers: number }): string => (range.min === range.max
   ? `第三方输入价 $${range.min}（${range.providers} 家一致）`
@@ -239,7 +256,7 @@ const connected = ref(false);
 const navigation = [
   ['dashboard', 'pi pi-chart-bar', '总览'], ['chats', 'pi pi-comments', '会话'], ['messages', 'pi pi-search', '消息'],
   ['prompts', 'pi pi-align-left', '提示词'], ['providers', 'pi pi-sparkles', '模型'], ['principals', 'pi pi-users', '主体'],
-  ['tools', 'pi pi-wrench', '工具'], ['extensions', 'pi pi-box', '扩展'], ['agents', 'pi pi-sitemap', 'Agent'],
+  ['tools', 'pi pi-wrench', '工具'], ['extensions', 'pi pi-box', '扩展'], ['workers', 'pi pi-sitemap', 'Worker'],
   ['logs', 'pi pi-list', '日志'], ['usage', 'pi pi-wallet', '用量'], ['quota', 'pi pi-gauge', '配额'],
   ['tasks', 'pi pi-check-square', '任务与审批'], ['settings', 'pi pi-cog', '设置'],
 ] as const;
@@ -258,13 +275,14 @@ async function loadApprovalBadge(): Promise<void> {
 }
 /** 任务页的「该重拉了」脉冲。三张卡各自 `watch` 它，父层不碰它们的行数据与页码。 */
 const tick = ref(0);
+/** Worker 运行记录页的同一种脉冲。与 `tick` 分开：两页的可见性判据不同，合用会让看不见的那页白刷。 */
+const workerTick = ref(0);
 const COLUMNS = {
-  tools: [{ key: 'name', header: '工具' }, { key: 'source', header: '来源', width: '7rem' }, { key: 'minRole', header: '最低角色', width: '8rem' }, { key: 'approval', header: '审批', width: '9rem' }, { key: 'scope', header: '作用域', width: '8rem' }, { key: 'enabled', header: '状态', width: '8rem' }],
-  agents: [{ key: 'name', header: '名称' }, { key: 'description', header: '职责' }, { key: 'minRole', header: '最低角色', width: '7rem' }, { key: 'modelAlias', header: '模型别名', width: '8rem' }, { key: 'tools', header: '可用工具' }, { key: 'maxSteps', header: '步数上限', width: '6rem' }, { key: 'actions', header: '', width: '6rem' }],
+  tools: [{ key: 'name', header: '工具' }, { key: 'source', header: '来源', width: '7rem' }, { key: 'sides', header: '可达侧', width: '8rem' }, { key: 'minRole', header: '最低角色', width: '8rem' }, { key: 'approval', header: '审批', width: '9rem' }, { key: 'scope', header: '作用域', width: '8rem' }, { key: 'enabled', header: '状态', width: '8rem' }],
   hits: [{ key: 'tgDate', header: '时间', width: '12rem' }, { key: 'chatId', header: '会话', width: '9rem' }, { key: 'from', header: '发言人', width: '10rem' }, { key: 'text', header: '内容' }, { key: 'detail', header: '操作', width: '8rem' }],
   usage: [{ key: 'ts', header: '时间', width: '13rem' }, { key: 'model_alias', header: '别名' }, { key: 'input_tokens', header: '输入' }, { key: 'output_tokens', header: '输出' }, { key: 'cost_usd', header: '成本' }],
   principals: [{ key: 'kind', header: '类型' }, { key: 'displayName', header: '显示名' }, { key: 'tgId', header: 'Telegram ID' }, { key: 'role', header: '角色', width: '9rem' }, { key: 'username', header: '用户名' }],
-  models: [{ key: 'model_id', header: '模型 ID' }, { key: 'provider_id', header: 'Provider' }, { key: 'context_window', header: '窗口' }, { key: 'capabilities', header: '能力' }, { key: 'price_in', header: '输入价格' }, { key: 'price_out', header: '输出价格' }, { key: 'enabled', header: '启用', width: '6rem' }, { key: 'actions', header: '', width: '4rem' }],
+  models: [{ key: 'model_id', header: '模型 ID' }, { key: 'provider_id', header: 'Provider' }, { key: 'context_window', header: '上下文窗口', align: 'right' }, { key: 'capabilities', header: '能力' }, { key: 'price_in', header: '输入价格', align: 'right' }, { key: 'price_out', header: '输出价格', align: 'right' }, { key: 'enabled', header: '启用', width: '6rem' }, { key: 'actions', header: '', width: '4rem' }],
   aliases: [{ key: 'alias', header: '别名', width: '12%' }, { key: 'purpose', header: '用途', width: '27%' }, { key: 'chain', header: 'Fallback 链', width: '31%' }, { key: 'settings', header: '采样参数', width: '20%' }, { key: 'actions', header: '', width: '10%' }],
   logs: [{ key: 'ts', header: '时间', width: '13rem' }, { key: 'level', header: '级别', width: '7rem' }, { key: 'kind', header: '事件' }, { key: 'summary', header: '摘要' }, { key: 'data_bytes', header: '载荷', width: '6rem' }, { key: 'trace_id', header: 'Trace' }],
   // tasks / schedules / approvals 三套跟着那三张卡搬进 `components/tasks/types.ts`。
@@ -276,11 +294,11 @@ const COLUMNS = {
 
 async function load(): Promise<void> {
   // 位置解构：左右两串必须逐项对齐，错一位即整片数据错位（且类型均为 `any` 级，没有检查能拦住）。
-  [dashboard.value, principals.value, providers.value, logs.value, chats.value, usage.value, skills.value, plugins.value, mcp.value, customTools.value, agents.value, tools.value, prompts.value, config.value, models.value, aliases.value, health.value] = await Promise.all([
+  [dashboard.value, principals.value, providers.value, logs.value, chats.value, usage.value, skills.value, plugins.value, mcp.value, customTools.value, tools.value, prompts.value, config.value, models.value, aliases.value, health.value] = await Promise.all([
     api<Dashboard>('/api/dashboard'), api<Principal[]>('/api/principals'), api<Provider[]>('/api/providers'), api<LogRow[]>('/api/logs'),
     api<Chat[]>('/api/chats'), api<Usage[]>('/api/usage'), api<SkillRow[]>('/api/skills'), api<PluginRow[]>('/api/plugins'), api<McpRow[]>('/api/mcp'),
-    // 没装配自撰写工具的部署会回 not_implemented，那不该把另外 16 个端点一起带下去。
-    api<CustomToolRow[]>('/api/custom-tools').catch(() => []), api<AgentDefinition[]>('/api/agents'), api<Record<string, ToolPolicy>>('/api/tools'),
+    // 没装配自撰写工具的部署会回 not_implemented，那不该把另外 15 个端点一起带下去。
+    api<CustomToolRow[]>('/api/custom-tools').catch(() => []), api<Record<string, ToolPolicy>>('/api/tools'),
     api<Array<Record<string, unknown>>>('/api/prompts'), api<Record<string, unknown>>('/api/config'), api<Array<Record<string, unknown>>>('/api/models'), api<Array<Record<string, unknown>>>('/api/aliases'),
     api<HealthDetail>('/api/health/detail'),
   ]);
@@ -1007,12 +1025,37 @@ async function saveBulk(): Promise<void> {
 }
 
 // ── 工具：代码里的 TOOL_POLICY 是默认值，这里写的是覆盖层（docs/09 §3.7）────────
-const TOOL_SOURCE_LABEL: Record<string, string> = { builtin: '内建', agent: '子 Agent', plugin: 'Plugin', mcp: 'MCP', custom: '自定义' };
+// `agent` 这个取值仍在（`policy.source`），指的是派发与上报那一族工具，不再指某份子 agent 定义。
+const TOOL_SOURCE_LABEL: Record<string, string> = { builtin: '内建', agent: 'Agent 编排', plugin: 'Plugin', mcp: 'MCP', custom: '自定义' };
+/**
+ * 可达侧：主 agent 与 lw-worker 的可用集在代码里就是分叉的（`toolCallableBy()`）。
+ *
+ * 三态各有含义，缺一个就读不出区别：只在主 agent 目录里（派发类）、只在 worker 那侧
+ * （worker 回父的内部通道）、两侧都有（绝大多数）。这一列只读 —— 判据在代码里，
+ * 做成开关就是又一个改了没效果的控件。
+ */
+const SIDE_LABEL: Record<string, { label: string; severity: TagSeverity; hint: string }> = {
+  main: { label: '仅主 agent', severity: 'warn', hint: '只出现在主 agent 的工具目录里，worker 调它会被 execute() 拦下' },
+  worker: { label: '仅 worker', severity: 'info', hint: '只出现在 worker 那侧，主 agent 的目录里没有它' },
+  both: { label: '两侧', severity: 'secondary', hint: '主 agent 与 lw-worker 都够得着' },
+  none: { label: '两侧都无', severity: 'danger', hint: '两侧都调不到，这一行只是注册表里的一条死数据' },
+};
+const sideKey = (sides?: string[]): string => {
+  const main = sides?.includes('main') ?? false;
+  const worker = sides?.includes('worker') ?? false;
+  return main && worker ? 'both' : main ? 'main' : worker ? 'worker' : 'none';
+};
+const SIDE_FILTERS = [
+  { value: '', label: '全部' }, { value: 'both', label: '两侧' },
+  { value: 'main', label: '仅主 agent' }, { value: 'worker', label: '仅 worker' },
+];
+const sideFilter = ref('');
 const APPROVAL_LABEL: Record<string, string> = { never: '不需要', always: '每次审批', conditional: '按规则判定' };
 const SCOPE_LABEL: Record<string, string> = { workspace: '工作区文件', chat: '当前会话', private: '用户私有', global: '全局', sandbox: '沙箱执行', telegram: 'Telegram' };
 const ROLE_OPTIONS = ['blocked', 'limited', 'trusted', 'owner'].map((value) => ({ value, label: value }));
 const APPROVAL_OPTIONS = ['never', 'conditional', 'always'].map((value) => ({ value, label: `${value}（${APPROVAL_LABEL[value]}）` }));
 const toolRows = computed(() => Object.entries(tools.value).map(([name, policy]) => ({ name, ...policy })));
+const visibleToolRows = computed(() => sideFilter.value ? toolRows.value.filter((row) => sideKey(row.sides) === sideFilter.value) : toolRows.value);
 const overriddenToolCount = computed(() => toolRows.value.filter((row) => row.minRole !== row.defaults?.minRole
   || row.approval !== row.defaults?.approval || (row.timeoutMs ?? null) !== (row.defaults?.timeoutMs ?? null)).length);
 const toolDialog = ref(false);
@@ -1083,106 +1126,6 @@ async function saveTool(confirmRelax = false): Promise<void> {
   }
   finally { toolSaving.value = false; }
 }
-
-// ── 子 Agent：整张 agent.agents 数组作为一条配置覆盖写回 ───────────────────────
-const emptyAgent = (): AgentDefinition => ({ name: '', description: '', modelAlias: 'high', maxSteps: 8, minRole: 'limited', tools: [], resultMaxChars: 4000, instructions: '', injectMemory: false });
-const agentDialog = ref(false);
-const agentSaving = ref(false);
-const agentForm = ref<AgentDefinition & { originalName: string; isNew: boolean }>({ ...emptyAgent(), originalName: '', isNew: true });
-const agentNameTaken = computed(() => agentForm.value.isNew && agents.value.some((entry) => entry.name === agentForm.value.name.trim()));
-function editAgent(row?: AgentDefinition): void {
-  agentForm.value = { ...emptyAgent(), ...row, tools: [...row?.tools ?? []], originalName: row?.name ?? '', isNew: !row };
-  agentDialog.value = true;
-}
-function toggleAgentTool(name: string): void {
-  const current = agentForm.value.tools;
-  agentForm.value.tools = current.includes(name) ? current.filter((entry) => entry !== name) : [...current, name];
-}
-/**
- * 只有来自配置的那些条目才写回 `agent.agents`。`/api/agents` 返回的是文件与配置合并后的
- * 名单，整张写回等于把每一条 `agents/<name>.md` 复制进 DB 覆盖层：此后改文件不再生效，
- * 而界面上没有任何提示（docs/14 §2 Q5-a：文件是只读来源）。
- */
-const configAgents = (): AgentDefinition[] => agents.value.filter((entry) => entry.source !== 'file')
-  .map(({ source: _source, ...entry }) => entry);
-/** 写的是整张数组：单条 PATCH 端点不存在，而 agent.agents 本身就是一个 schema 叶子。 */
-async function writeAgents(next: AgentDefinition[], summary: string, detail: string): Promise<void> {
-  await api('/api/config', { method: 'PUT', body: JSON.stringify({ 'agent.agents': next.map(({ source: _source, ...entry }) => entry) }) });
-  pushToast({ severity: 'success', summary, detail });
-  await load();
-}
-async function saveAgent(): Promise<void> {
-  const form = agentForm.value;
-  const name = form.name.trim();
-  if (!name) { pushToast({ severity: 'warn', summary: '请填 Agent 名称' }); return; }
-  if (agentNameTaken.value) { pushToast({ severity: 'warn', summary: `已存在名为 ${name} 的 Agent` }); return; }
-  if (!form.instructions.trim()) { pushToast({ severity: 'warn', summary: '请填 instructions', detail: '为空时子 agent 没有任何职责说明' }); return; }
-  const entry: AgentDefinition = { name, description: form.description, modelAlias: form.modelAlias, maxSteps: form.maxSteps, minRole: form.minRole,
-    tools: form.tools, resultMaxChars: form.resultMaxChars, instructions: form.instructions, injectMemory: form.injectMemory };
-  const base = configAgents();
-  const next = base.map((existing) => existing.name === form.originalName ? entry : existing);
-  // 修改一条来自文件的定义即在配置层建立一份覆盖（它此后显示为 file-overridden）。这正是
-  // 文件只读、DB 优先这条规则应有的入口：禁用它会让该优先级规则在界面上无法使用。
-  if (form.isNew || !base.some((existing) => existing.name === form.originalName)) next.push(entry);
-  agentSaving.value = true;
-  try { await writeAgents(next, form.isNew ? 'Agent 已创建' : 'Agent 已保存', `${name} · 热更新已生效`); agentDialog.value = false; }
-  catch (error) { toastError('保存 Agent 失败', error); }
-  finally { agentSaving.value = false; }
-}
-async function removeAgent(name: string): Promise<void> {
-  const current = agents.value.find((entry) => entry.name === name);
-  // 纯文件定义在 WebUI 里无法删除：这个按钮只能修改 `agent.agents` 覆盖层，写回不会删除磁盘上
-  // 那个 .md。伪装成删除成功、刷新后它重新出现，比直接说明更糟。
-  if (current?.source === 'file') { pushToast({ severity: 'warn', summary: `${name} 来自文件定义`, detail: '删除 agents/ 下对应的 .md 文件，或在此编辑创建配置覆盖' }); return; }
-  const revert = current?.source === 'file-overridden';
-  askConfirm(
-    revert ? `删除 ${name} 的配置覆盖？` : `删除子 Agent ${name}？`,
-    revert ? `删除后回到 agents/${name}.md 中的定义。` : '引用它的 spawn_agent 调用将返回「未知子 agent」。',
-    async () => {
-      try { await writeAgents(configAgents().filter((entry) => entry.name !== name), revert ? `${name} 的覆盖已删除` : `Agent ${name} 已删除`, revert ? '回到文件中的定义' : '写入 agent.agents 覆盖层'); agentDialog.value = false; }
-      catch (error) { toastError('删除 Agent 失败', error); }
-    });
-}
-type AgentDryRunEvent =
-  | { type: 'step'; step: number; finishReason: string; text: string; toolCalls: unknown[]; toolResults: unknown[] }
-  | { type: 'usage'; step: number; inputTokens: number; outputTokens: number; costUsd: number }
-  | { type: 'final'; summary: string; fullRef: string; truncated: boolean }
-  | { type: 'error'; message: string };
-const agentDryRunDialog = ref(false);
-const agentDryRunName = ref('');
-const agentDryRunTask = ref('');
-const agentDryRunEvents = ref<AgentDryRunEvent[]>([]);
-const agentDryRunRunning = ref(false);
-const agentDryRunAbort = ref<AbortController | null>(null);
-const agentDryRunCost = computed(() => agentDryRunEvents.value.reduce((sum, event) => sum + (event.type === 'usage' ? event.costUsd : 0), 0));
-function openAgentDryRun(agent: AgentDefinition): void {
-  agentDryRunName.value = agent.name;
-  agentDryRunTask.value = '';
-  agentDryRunEvents.value = [];
-  agentDryRunDialog.value = true;
-}
-async function runAgentDryRun(): Promise<void> {
-  const task = agentDryRunTask.value.trim();
-  if (!task) { pushToast({ severity: 'warn', summary: '请填写试跑任务' }); return; }
-  agentDryRunAbort.value?.abort();
-  const controller = new AbortController();
-  agentDryRunAbort.value = controller;
-  agentDryRunEvents.value = [];
-  agentDryRunRunning.value = true;
-  try {
-    await apiStream<AgentDryRunEvent>(`/api/agents/${encodeURIComponent(agentDryRunName.value)}/dryrun`,
-      { method: 'POST', body: JSON.stringify({ task }), signal: controller.signal },
-      (event) => { agentDryRunEvents.value = [...agentDryRunEvents.value, event]; });
-    const error = agentDryRunEvents.value.find((event) => event.type === 'error');
-    if (error?.type === 'error') pushToast({ severity: 'error', summary: 'Agent 试跑失败', detail: error.message, life: 9000 });
-  } catch (error) {
-    if (!controller.signal.aborted) toastError('Agent 试跑失败', error);
-  } finally {
-    if (agentDryRunAbort.value === controller) agentDryRunAbort.value = null;
-    agentDryRunRunning.value = false;
-  }
-}
-function cancelAgentDryRun(): void { agentDryRunAbort.value?.abort(); }
 
 // ── 配额：限额在配置里、计数器在 quota_counters 里，GET /api/quota 已经把两边对齐好 ────────
 interface QuotaPair { daily: number | null; monthly: number | null }
@@ -1551,7 +1494,7 @@ const mergedConfigOpen = ref(false);
 const MAINTENANCE_ACTIONS = [
   { action: 'backup', label: '立即备份 DB', icon: 'pi pi-database', hint: '快照写入 db.path 同级目录，保留 db.backupKeep 份' },
   { action: 'vacuum', label: 'VACUUM', icon: 'pi pi-compress', hint: '回收空间；数据库较大时会阻塞写入' },
-  { action: 'cleanup-logs', label: '清理过期日志', icon: 'pi pi-eraser', hint: '按 logs.retentionDays 删除 log_events 与子 agent 全文结果，并把腾出的空间还给磁盘' },
+  { action: 'cleanup-logs', label: '清理过期日志', icon: 'pi pi-eraser', hint: '按 logs.retentionDays 删除 log_events 与 worker 全文结果，并把腾出的空间还给磁盘' },
   { action: 'gc-files', label: '清理孤儿文件', icon: 'pi pi-trash', hint: '仅删除没有任何 DB 行指向的文件；在用的媒体不受影响' },
   { action: 'rebuild-fts', label: '重建 FTS 索引', icon: 'pi pi-sync', hint: '消息检索结果异常时重建' },
 ] as const;
@@ -1654,7 +1597,7 @@ async function importConfig(event: Event): Promise<void> {
 function runMaintenance(action: string, label: string): void {
   // gc-files 会删除文件，不能与常规整理混在同一句确认文案里：运维需要知道它删除什么、保留什么。
   const warning = action === 'gc-files'
-    ? '仅删除没有任何数据库行指向的孤儿文件；在用的媒体与子 agent 结果不受影响。'
+    ? '仅删除没有任何数据库行指向的孤儿文件；在用的媒体与 worker 结果不受影响。'
     : '数据库较大时会阻塞写入。';
   askConfirm(`执行「${label}」？`, warning, async () => {
     maintenanceBusy.value = action;
@@ -1751,9 +1694,11 @@ const REFRESH_LOADERS: Record<RefreshGroup, () => Promise<void>> = {
   // 而它只有这一层拉得到。卡片没挂载时 tick 空转，代价是零。
   approvals: async () => { tick.value += 1; await loadApprovalBadge(); },
   schedules: async () => { tick.value += 1; },
+  // Worker 运行记录页同形：只发脉冲，行数据与页码在那张卡自己手上。
+  workerRuns: async () => { workerTick.value += 1; },
   // 自定义工具单独 catch：没装配这块的部署会回 `not_implemented`，那不该把另外三类一起带下去。
   extensions: async () => { [skills.value, plugins.value, mcp.value, customTools.value] = await Promise.all([api<SkillRow[]>('/api/skills'), api<PluginRow[]>('/api/plugins'), api<McpRow[]>('/api/mcp'), api<CustomTool[]>('/api/custom-tools').catch(() => [])]); },
-  config: async () => { [config.value, tools.value, agents.value] = await Promise.all([api<Record<string, unknown>>('/api/config'), api<Record<string, ToolPolicy>>('/api/tools'), api<AgentDefinition[]>('/api/agents')]); syncTrigger(); syncOutput(); },
+  config: async () => { [config.value, tools.value] = await Promise.all([api<Record<string, unknown>>('/api/config'), api<Record<string, ToolPolicy>>('/api/tools')]); syncTrigger(); syncOutput(); },
   activeTurns: loadActiveTurns,
   containers: loadContainers,
 };
@@ -1761,13 +1706,14 @@ const REFRESH_LOADERS: Record<RefreshGroup, () => Promise<void>> = {
 const REFRESH_VISIBILITY: Record<RefreshGroup, readonly string[]> = {
   dashboard: ['dashboard'], logs: ['dashboard', 'logs'], chats: ['chats'], usage: ['usage'], quota: ['quota'],
   tasks: ['tasks'], extensions: ['extensions', 'dashboard'], activeTurns: ['dashboard'], schedules: ['tasks'],
+  workerRuns: ['workers'],
   // 容器面板在工具页的沙箱块下方 —— 只有那一页看得见。
   containers: ['tools'],
   // 待审批不做页面过滤：一条 pending 会阻塞某个真实轮次最长 approval.ttlMs，
   // 只在任务页刷新意味着运维不切到那一页就无从得知有请求在等待。该事件本身很稀疏（命中规则才发）。
-  approvals: ['dashboard', 'chats', 'messages', 'prompts', 'providers', 'principals', 'tools', 'extensions', 'agents', 'logs', 'usage', 'quota', 'tasks', 'settings'],
-  // 配置变了影响设置页、工具页、Agent 页，也影响会话页的覆盖显示；这个事件本身很稀疏，不做页面过滤。
-  config: ['dashboard', 'chats', 'messages', 'prompts', 'providers', 'principals', 'tools', 'extensions', 'agents', 'logs', 'usage', 'quota', 'tasks', 'settings'],
+  approvals: ['dashboard', 'chats', 'messages', 'prompts', 'providers', 'principals', 'tools', 'extensions', 'workers', 'logs', 'usage', 'quota', 'tasks', 'settings'],
+  // 配置变了影响设置页与工具页，也影响会话页的覆盖显示；这个事件本身很稀疏，不做页面过滤。
+  config: ['dashboard', 'chats', 'messages', 'prompts', 'providers', 'principals', 'tools', 'extensions', 'workers', 'logs', 'usage', 'quota', 'tasks', 'settings'],
 };
 const EVENT_REFRESH: Record<string, readonly RefreshGroup[]> = {
   log: ['logs', 'dashboard'],
@@ -1776,7 +1722,9 @@ const EVENT_REFRESH: Record<string, readonly RefreshGroup[]> = {
   'turn.finished': ['activeTurns', 'dashboard', 'chats', 'schedules'],
   usage: ['usage', 'dashboard'],
   quota: ['quota'],
-  'task.updated': ['tasks'],
+  // 三档 worker 的 state 变化都经 `task.updated` 发出来（docs/09 §5）：不新增事件类型，
+  // 而 worker 运行页那两类外部 run 不实时动的话，一条跑了二十分钟的 harness 在界面上看着像卡住。
+  'task.updated': ['tasks', 'workerRuns'],
   'approval.pending': ['approvals'], 'approval.decided': ['approvals'],
   'config.changed': ['config', 'containers'],
   // 扩展页此前只靠 `health` 顺带刷新，而那个事件只在 provider 测试与 MCP 重连后才发 ——
@@ -1979,7 +1927,7 @@ async function openConfigRevisions(): Promise<void> {
   finally { revisionsLoading.value = false; }
 }
 /**
- * 值可能很长（agent.agents 是整张数组），列表里只给一行；密钥类的键在写入时就已经存成 «redacted»。
+ * 值可能很长（`approval.rules` 是整张数组），列表里只给一行；密钥类的键在写入时就已经存成 «redacted»。
  * 两侧的 null 意思不同：旧值为空 = 此前没有覆盖，新值为空 = 这条覆盖行被删掉了
  * （写更粗的祖先键时，被它取代的后代行会一并作废）。
  */
@@ -2325,9 +2273,14 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
           </template>
         </section>
         <section v-else-if="active === 'tools'" key="tools" class="surface page-surface"><header><div><p class="eyebrow">TOOL POLICY</p><h2>工具与权限</h2><p>此处修改 <code>TOOL_POLICY</code> 的覆盖层。点击任一行可改启停 / 最低角色 / 审批 / 超时；放宽需二次确认。</p></div><div class="header-tags"><UiTag v-if="overriddenToolCount" :value="`${overriddenToolCount} 项策略已覆盖`" severity="info" /><UiTag :value="`${toolRows.filter((row) => row.enabled).length} / ${toolRows.length} 启用`" :severity="toolRows.every((row) => row.enabled) ? 'secondary' : 'warn'" /></div></header>
-          <DataGrid :rows="toolRows" :columns="COLUMNS.tools" data-key="name" paginate :page-size="15" clickable @row-click="editTool">
+          <div class="section-actions">
+            <UiSelect v-model="sideFilter" :options="SIDE_FILTERS" option-label="label" option-value="value" aria-label="可达侧" />
+            <small class="field-note">可达侧由代码里的判据决定，不可覆盖；<code>tools.overrides.&lt;name&gt;.enabled=false</code> 与它正交，那是两侧都停用。</small>
+          </div>
+          <DataGrid :rows="visibleToolRows" :columns="COLUMNS.tools" data-key="name" paginate :page-size="15" clickable empty="没有可达侧符合这个筛选的工具" @row-click="editTool">
             <template #name="{ data }"><code>{{ data.name }}</code></template>
             <template #source="{ data }">{{ TOOL_SOURCE_LABEL[data.source] ?? data.source }}</template>
+            <template #sides="{ data }"><UiTag :value="SIDE_LABEL[sideKey(data.sides)]!.label" :severity="SIDE_LABEL[sideKey(data.sides)]!.severity" :title="SIDE_LABEL[sideKey(data.sides)]!.hint" /></template>
             <template #minRole="{ data }"><UiTag :value="data.minRole" :severity="roleSeverity(data.minRole)" /><i v-if="data.defaults && data.minRole !== data.defaults.minRole" class="pi pi-pencil overridden" :title="`代码默认 ${data.defaults.minRole}`" /></template>
             <template #approval="{ data }">{{ APPROVAL_LABEL[data.approval] ?? data.approval }}<i v-if="data.defaults && data.approval !== data.defaults.approval" class="pi pi-pencil overridden" :title="`代码默认 ${data.defaults.approval}`" /></template>
             <template #scope="{ data }">{{ SCOPE_LABEL[data.scope] ?? data.scope }}</template>
@@ -2431,18 +2384,13 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
           :skills="skills" :plugins="plugins" :mcp="mcp" :custom-tools="customTools" :config="config"
           @refresh="load"
         />
-        <section v-else-if="active === 'agents'" key="agents" class="surface page-surface"><header><div><p class="eyebrow">AGENT TOPOLOGY</p><h2>子 Agent</h2><p>独立上下文、权限不高于父 Agent，结果全文单独存储。点击任一行编辑，保存即热更新。</p></div><UiButton label="新建 Agent" icon="pi pi-plus" @click="editAgent()" /></header>
-          <DataGrid :rows="agents" :columns="COLUMNS.agents" data-key="name" clickable empty="暂无子 Agent" @row-click="editAgent">
-            <template #name="{ data }"><code>{{ data.name }}</code>
-              <UiTag v-if="data.source === 'file'" value="来自文件" severity="info" :title="`定义在 agents/${data.name}.md；在此编辑将创建一份配置覆盖`" />
-              <UiTag v-else-if="data.source === 'file-overridden'" value="覆盖了文件" severity="warn" :title="`agents/${data.name}.md 中也有一份定义，运行时使用当前配置`" />
-            </template>
-            <template #minRole="{ data }"><UiTag :value="data.minRole" :severity="roleSeverity(data.minRole)" /></template>
-            <template #modelAlias="{ data }"><code>{{ data.modelAlias }}</code></template>
-            <template #tools="{ data }"><span v-if="data.tools.length" class="agent-tools">{{ data.tools.join(' · ') }}</span><small v-else class="alias-empty">未限定，继承父 agent 的可用工具</small></template>
-            <template #actions="{ data }"><UiButton size="small" variant="outlined" icon="pi pi-play" label="试跑" @click.stop="openAgentDryRun(data)" /></template>
-          </DataGrid>
-        </section>
+        <!-- Worker 运行记录页整段在 `WorkerRunsPage.vue`（两张卡竖排：运行记录 → 试跑，docs/09 §3.9）。
+             `key` 同上是必须的。 -->
+        <WorkerRunsPage
+          v-else-if="active === 'workers'" key="workers"
+          :tick="workerTick"
+          @open-turn="openDetail" @open-trace="openTrace"
+        />
         <section v-else-if="active === 'usage'" key="usage" class="surface page-surface"><header><div><p class="eyebrow">USAGE LEDGER</p><h2>用量与成本</h2><p>输入、输出、缓存读写分别计价。</p></div>
             <div class="section-actions">
               <UiSelect v-model="usageRange" :options="USAGE_RANGES" option-label="label" option-value="value" aria-label="时间范围" @change="loadUsageReport" />
@@ -2509,7 +2457,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             </div>
             <p class="field-note wide"><i class="pi pi-info-circle" />覆盖只能填<b>具体金额</b>：<code>null</code> 回落到单用户额度，解除限制需同时清空单用户输入框。判定使用<b>有效角色</b>。</p>
             <p class="field-title wide">单轮上限<small>单轮内的硬限制，与上方日 / 月额度独立。</small></p>
-            <label>单轮成本上限（美元）<UiNumber :model-value="quotaForm.maxCostUsd" :min="0.001" :step="0.1" @update:model-value="quotaForm.maxCostUsd = $event; markQuotaDirty()" /><small class="field-note">触发后清空工具目录并强制收尾；子 agent 花费一并计入。</small></label>
+            <label>单轮成本上限（美元）<UiNumber :model-value="quotaForm.maxCostUsd" :min="0.001" :step="0.1" @update:model-value="quotaForm.maxCostUsd = $event; markQuotaDirty()" /><small class="field-note">触发后清空工具目录并强制收尾；worker 花费一并计入。</small></label>
             <label>单轮步数上限<UiNumber :model-value="quotaForm.maxSteps" :min="1" :max="200" @update:model-value="quotaForm.maxSteps = $event; markQuotaDirty()" /><small class="field-note">与 <code>agent.main.maxSteps</code> 取较小者生效。</small></label>
             <p class="field-title wide">频率限制<small>按最近 1 小时的 turns 表统计，<b>不受上方「启用金额配额」开关影响</b>。</small></p>
             <label>每人每小时轮次<UiNumber :model-value="quotaForm.turnsPerUserPerHour" :min="1" @update:model-value="quotaForm.turnsPerUserPerHour = $event; markQuotaDirty()" /></label>
@@ -2577,8 +2525,10 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
           <div class="registry-heading"><div><h3>模型</h3><p class="section-note">元数据来自 models.dev 本地缓存，导入时带入；<code>补齐元数据</code>仅填空缺价格。点击任一行可手动标记<b>看图能力</b>，优先于目录且不被<code>补齐元数据</code>撤销。</p></div><div class="section-actions"><UiButton size="small" variant="outlined" icon="pi pi-cloud-download" label="从 Provider 拉取" :disabled="!providers.length" @click="openCatalog()" /><UiButton size="small" variant="outlined" icon="pi pi-sparkles" label="补齐元数据" :disabled="!models.length" :loading="enriching" @click="enrichModels" /><UiButton size="small" variant="outlined" label="添加模型" @click="editModel()" /></div></div>
           <DataGrid :rows="models" :columns="COLUMNS.models" data-key="id" clickable empty="暂无模型" @row-click="editModel">
             <template #provider_id="{ data }">{{ providerLabel(String(data.provider_id)) }}</template>
+            <template #context_window="{ data }"><span v-if="windowMetric(data.context_window).unit" class="metric-chip" :style="{ minWidth: modelMetricWidths.window }">{{ metricText(windowMetric(data.context_window)) }}</span><span v-else>—</span></template>
             <template #capabilities="{ data }"><span v-if="capabilityTags(storedMeta(data)).length || manualVision(data) !== 'follow'" class="cap-tags"><UiTag v-for="tag in capabilityTags(storedMeta(data))" :key="tag" :value="tag" severity="secondary" /><UiTag v-if="manualVision(data) !== 'follow'" :value="manualVision(data) === 'on' ? '手标 · 能看图' : '手标 · 看不了图'" :severity="manualVision(data) === 'on' ? 'info' : 'warn'" title="手动标记优先于 models.dev，「补齐元数据」不会撤销" /></span><small v-else class="catalog-sub">未知</small></template>
-            <template #price_in="{ data }"><span>{{ data.price_in ?? '—' }}</span><small v-if="storedPriceSource(data)" class="catalog-sub">{{ storedPriceSource(data) === 'manual' ? '手工填写' : MATCH_LABELS[String(storedPriceSource(data))]?.label ?? '' }}</small><small v-else-if="data.price_in === null" class="catalog-sub match-third-party">缺定价 · 花费按 0 记账</small></template>
+            <template #price_in="{ data }"><span v-if="priceMetric(data.price_in).unit" class="metric-chip" :style="{ minWidth: modelMetricWidths.priceIn }">{{ metricText(priceMetric(data.price_in)) }}</span><span v-else>—</span><small v-if="storedPriceSource(data)" class="catalog-sub">{{ storedPriceSource(data) === 'manual' ? '手工填写' : MATCH_LABELS[String(storedPriceSource(data))]?.label ?? '' }}</small><small v-else-if="data.price_in === null" class="catalog-sub match-third-party">缺定价 · 花费按 0 记账</small></template>
+            <template #price_out="{ data }"><span v-if="priceMetric(data.price_out).unit" class="metric-chip" :style="{ minWidth: modelMetricWidths.priceOut }">{{ metricText(priceMetric(data.price_out)) }}</span><span v-else>—</span></template>
             <template #enabled="{ data }"><UiTag :value="data.enabled ? '启用' : '停用'" :severity="data.enabled ? 'success' : 'secondary'" /></template>
             <!-- 行本身是「点开编辑」，所以这颗按钮必须 @click.stop —— 不然点删除会同时弹出编辑框 -->
             <template #actions="{ data }"><UiButton size="small" variant="text" severity="danger" icon="pi pi-trash" :aria-label="`删除模型 ${data.model_id}`" @click.stop="removeModel(String(data.id), String(data.model_id))" /></template>
@@ -3016,37 +2966,11 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
       <p class="field-note">放宽后该工具对更低角色可见 / 更少触发人工审批，仍需通过 <code>available()</code> 判定。</p>
       <template #footer><UiButton variant="text" label="取消" @click="toolRelaxDialog = false" /><UiButton label="确认放宽" severity="danger" :loading="toolSaving" @click="saveTool(true)" /></template>
     </UiModal>
-    <UiModal v-model:visible="agentDialog" :title="agentForm.isNew ? '新建子 Agent' : `子 Agent ${agentForm.originalName}`" width="min(860px, 94vw)">
-      <div class="form-grid">
-        <label>名称<input v-model="agentForm.name" :disabled="!agentForm.isNew" placeholder="模型以此名称调用 spawn_agent"></label>
-        <label>模型别名<UiSelect v-model="agentForm.modelAlias" :options="aliasRows.map((row) => row.alias)" /></label>
-        <p v-if="agentNameTaken" class="wide callout error"><i class="pi pi-times-circle" aria-hidden="true" />已存在同名 Agent。</p>
-        <label class="wide">职责描述<input v-model="agentForm.description" placeholder="写给模型：何时派发该 agent"></label>
-        <label>最低角色<UiSelect v-model="agentForm.minRole" :options="ROLES" /></label>
-        <label>步数上限<UiNumber v-model="agentForm.maxSteps" :min="1" :max="64" /></label>
-        <label>结果最大字符<UiNumber v-model="agentForm.resultMaxChars" :min="200" :step="500" /></label>
-        <UiSwitch v-model="agentForm.injectMemory" class="wide" label="注入记忆文档（PUBMEMORY / PRIMEMORY）" />
-        <p class="wide field-note">子 agent 的有效角色 = min(父 agent 角色, 此处的最低角色)。</p>
-        <div class="wide">
-          <p class="field-title">可用工具<small>全不勾选 = 沿用父 agent 当前角色下的工具目录</small></p>
-          <div class="tool-picker">
-            <UiCheckbox v-for="row in toolRows" :key="row.name" :class="{ off: !row.enabled }" :model-value="agentForm.tools.includes(row.name)" @change="toggleAgentTool(row.name)">
-              <code>{{ row.name }}</code><small v-if="!row.enabled">已停用</small>
-            </UiCheckbox>
-          </div>
-        </div>
-        <label class="wide">instructions<textarea v-model="agentForm.instructions" rows="9" placeholder="该子 agent 的系统提示词" /></label>
-      </div>
-      <template #footer>
-        <UiButton v-if="!agentForm.isNew" variant="outlined" severity="danger" icon="pi pi-trash" label="删除" @click="removeAgent(agentForm.originalName)" />
-        <UiButton variant="text" label="取消" @click="agentDialog = false" /><UiButton :label="agentForm.isNew ? '创建 Agent' : '保存 Agent'" :loading="agentSaving" @click="saveAgent" />
-      </template>
-    </UiModal>
     <UiModal v-model:visible="promptPreviewDialog" title="预览提示词组装" width="min(1080px, 96vw)">
       <div class="form-grid">
         <label class="wide">会话<UiSelect v-model="promptPreviewForm.key" :options="promptPreviewChats" placeholder="选择会话" /></label>
         <label>有效角色<UiSelect v-model="promptPreviewForm.role" :options="ROLES" /></label>
-        <p class="field-note">工具、Skill、子 Agent 与私有记忆按该角色与会话实时筛选。</p>
+        <p class="field-note">工具、Skill 与私有记忆按该角色与会话实时筛选。</p>
       </div>
       <template v-if="promptPreview">
         <div class="preview-summary"><b>{{ promptPreview.totalTokens.toLocaleString() }} tokens</b><span>上下文 {{ promptPreview.context.messages }} 条 / {{ promptPreview.context.tokens.toLocaleString() }} tokens</span></div>
@@ -3064,21 +2988,6 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
       </template>
       <p v-else class="empty">选择会话与角色后运行组装。预览与真实轮次共用 <code>assembleMainPrompt()</code>。</p>
       <template #footer><UiButton variant="text" label="关闭" @click="promptPreviewDialog = false" /><UiButton label="运行组装" icon="pi pi-play" :loading="promptPreviewLoading" @click="runPromptPreview" /></template>
-    </UiModal>
-    <UiModal v-model:visible="agentDryRunDialog" :title="`试跑 Agent ${agentDryRunName}`" width="min(980px, 96vw)">
-      <div class="form-grid"><label class="wide">任务<textarea v-model="agentDryRunTask" rows="5" :disabled="agentDryRunRunning" placeholder="这次试跑要完成的具体任务" /></label></div>
-      <p class="callout warn"><i class="pi pi-exclamation-triangle" />试跑调用真实模型与真实工具，产生实际费用与副作用；结果只写 agent_runs / usage ledger，不进入会话上下文。</p>
-      <div v-if="agentDryRunEvents.length" class="dryrun-summary"><b>${{ agentDryRunCost.toFixed(4) }}</b><span>{{ agentDryRunEvents.filter((event) => event.type === 'step').length }} 步</span></div>
-      <ol class="dryrun-events">
-        <li v-for="(event, index) in agentDryRunEvents" :key="index" :class="event.type">
-          <template v-if="event.type === 'step'"><header><UiTag :value="`步骤 ${event.step}`" severity="info" /><code>{{ event.finishReason }}</code></header><pre v-if="event.text" v-text="event.text" /><pre v-if="event.toolCalls.length" v-text="JSON.stringify({ toolCalls: event.toolCalls, toolResults: event.toolResults }, null, 2)" /></template>
-          <template v-else-if="event.type === 'usage'"><header><UiTag :value="`用量 ${event.step}`" severity="secondary" /><span>{{ event.inputTokens }}/{{ event.outputTokens }} tok · ${{ event.costUsd.toFixed(4) }}</span></header></template>
-          <template v-else-if="event.type === 'final'"><header><UiTag value="完成" severity="success" /><code>{{ event.fullRef }}</code></header><pre v-text="event.summary" /></template>
-          <template v-else><header><UiTag value="失败" severity="danger" /><span>{{ event.message }}</span></header></template>
-        </li>
-        <li v-if="agentDryRunRunning" class="empty"><i class="pi pi-spin pi-spinner" /> Agent 运行中…</li>
-      </ol>
-      <template #footer><UiButton v-if="agentDryRunRunning" severity="danger" variant="outlined" label="取消试跑" @click="cancelAgentDryRun" /><UiButton variant="text" label="关闭" :disabled="agentDryRunRunning" @click="agentDryRunDialog = false" /><UiButton label="开始试跑" icon="pi pi-play" :loading="agentDryRunRunning" :disabled="!agentDryRunTask.trim()" @click="runAgentDryRun" /></template>
     </UiModal>
     <UiModal v-model:visible="revisionsDialog" title="配置变更历史" width="min(960px, 96vw)">
       <p class="callout"><i class="pi pi-info-circle" />经 WebUI 写入的配置覆盖记入 <code>config_revisions</code>，保留最近 500 条。密钥类字段存为 <code>«redacted»</code>。</p>

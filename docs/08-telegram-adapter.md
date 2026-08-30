@@ -457,14 +457,14 @@ bot:  ⏳ 已接收，正在处理…                                    ← 占
 用户: /cancel                                                 ← 取消入口是命令，不是按钮
 ```
 
-- **何时出现占位消息**：`spawn_agent` 被调用，或首个 chunk 迟于 `output.placeholderAfterMs`（默认 4000ms）。日常聊天不会看到它。
+- **何时出现占位消息**：`spawn_worker` 被调用，或首个 chunk 迟于 `output.placeholderAfterMs`（默认 4000ms）。日常聊天不会看到它。
 - **占位消息说什么**：`output.placeholderTexts` 里的备选文案（默认只有一条 `…`），按 `output.placeholderPick`
   随机挑或恒用 `output.placeholderIndex` 那条；三项都能 `perChat` 覆盖，WebUI 在设置页「输出节奏」卡片里
   （[09 §3.13](./09-webui.md)）。**列表清空 = 不发占位消息**，这是关掉它的唯一途径。文案在开轮时就挑定，
   不是在定时器回调里挑 —— 随机档挑在回调里的话，消息内容和渲染基线会分处两个时刻。
   占位消息发出后渲染基线记 0 而不是文案长度：`lastRenderedLength` 量的是「答复渲染了多少字」，
   占位消息里一个字都不是答复；记成文案长度会让长文案把第一次编辑推后十几个字。
-- 进度来源：`report_progress` 工具、`spawn_agent` 的 `yield`、内部阶段事件（快照、模型调用、工具执行）。节流 `agent.progressThrottleMs`（默认 3000）。
+- 进度来源：`report_progress` 工具、`spawn_worker` 的 `yield`、内部阶段事件（快照、模型调用、工具执行）。节流 `agent.progressThrottleMs`（默认 3000）。
 - **取消入口是 `/cancel` 命令**，不是占位消息上的按钮 —— 那个按钮从来没有实现过，本节此前的
   示意图画着它（2026-08-25 改掉）。缺的**只是键盘**：`c:<turnId>` 那条 callback 通道整条是活的
   （handler、发起人/owner 判据、收尾那次写「⛔ 已取消」的 `editMessageText` 都在），而
@@ -476,7 +476,7 @@ bot:  ⏳ 已接收，正在处理…                                    ← 占
 - 取消的语义（两个入口共用一条路）：
   - 校验触发者 = turn 发起人 或 owner，否则回「只有发起人或管理员可以取消」
     （按钮那条路走 `answerCallbackQuery({show_alert:true})`）；
-  - 调 `turnRunner.cancel(turnId, 'user')` → `AbortController.abort()` → 级联子 agent、`docker kill` 沙箱容器；
+  - 调 `turnRunner.cancel(turnId, 'user')` → `AbortController.abort()` → 级联 worker、`docker kill` 沙箱容器；
   - 编辑消息为「⛔ 已取消」，按 `cancel.commitPartial`（默认 false）决定是否提交部分 delta（[02 §3.5](./02-context-engine.md#35-取消cancel)）。
 - `/tasks`：列出本会话 `state='running'` 的任务（id、标题、已运行时长、进度）。`/cancel [id]`：无 id 时取消本人最近一个在途 turn。
 - 任务超时 `concurrency.turnTimeoutMs`（默认 10 分钟）→ **记 `failed` 而不是 `cancelled`**

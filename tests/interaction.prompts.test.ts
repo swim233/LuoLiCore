@@ -1,7 +1,7 @@
 import { rmSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import { OperationsRepository, closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
-import { DatabaseApprovalBroker, EventBus, LogSink, PROMPT_CALLBACK_MAX_BYTES, PROMPT_MAX_OPTIONS, PROMPT_TEXT_MAX, PROMPT_TTL_GRACE_MS, PendingPrompts, ToolRegistry, configSchema, parsePromptToken, promptToken, type ApprovalOutcome, type PromptChannel, type PromptPost, type PromptRequest, type PromptTarget } from '@luoli/core';
+import { DatabaseApprovalBroker, EventBus, LogSink, PROMPT_CALLBACK_MAX_BYTES, PROMPT_MAX_OPTIONS, PROMPT_TEXT_MAX, PROMPT_TTL_GRACE_MS, PendingPrompts, ToolRegistry, configSchema, newToolScope, parsePromptToken, promptToken, type ApprovalOutcome, type PromptChannel, type PromptPost, type PromptRequest, type PromptTarget } from '@luoli/core';
 import { approvalSettledText, promptAckText, staleApprovalOutcome } from '@luoli/telegram';
 import type { RuntimeTurnContext } from '@luoli/shared';
 import { z } from 'zod';
@@ -312,7 +312,10 @@ function brokerHarness(name: string, options: { webuiChannel: boolean; telegramU
   const turn = { turnId: `turn-${name}`, key: `chat:${chatId}`, chatId, threadId: null, initiatorUserId: options.ownerChat ? '1' : '7', effectiveRole: options.ownerChat ? 'owner' : 'trusted', isPrivate: Boolean(options.ownerChat),
     ...(options.ownerChat ? {} : { chatTitle: '开发群' }),
     baseCommitId: null, snapshot: { messages: [], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 0 }, delta: [], abortSignal: options.abortSignal ?? new AbortController().signal, config } satisfies RuntimeTurnContext;
-  return { db, broker, prompts, channel, registry, notices, context: { turn, workspace: './data', agentKind: 'main' as const } };
+  // `lw` 而非 `main`：`bash` 已随工具整体下沉到 worker 那一侧，主 agent 侧会先撞
+  // `tool_requires_worker`（那道闸排在 `available()` 之前）——审批链一步都走不到，
+  // 本组用例判的却是审批通道，两条正交的闸混在一起会遮住真正的判据。
+  return { db, broker, prompts, channel, registry, notices, context: { turn, workspace: './data', agentKind: 'lw' as const, ...newToolScope() } };
 }
 async function waitForPost(channel: TestChannel): Promise<PromptPost> {
   for (let round = 0; round < 60 && !channel.posts.length; round += 1) await new Promise((settle) => setTimeout(settle, 5));

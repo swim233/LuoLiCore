@@ -159,12 +159,11 @@ export const HOT_RELOADABLE_CONFIG_KEYS = [
   "general.name",
   // 取消时是否提交部分产出，`abortTurn` 从本轮 `turn.config` 读取。
   "cancel.commitPartial",
-  // `agentsDir` 与 `agents` 一同热更新：两者任一变化都触发一次重扫与 `replaceDefinitions`
-  // （main.ts 的 scanAgents）。修改目录后仍使用旧目录扫描出的定义，是最难排查的一类配置未生效。
   "agent.main",
-  "agent.agents",
-  "agent.agentsDir",
-  "agent.maxConcurrentSubagents",
+  // `agent.worker` 整段：四项均在每次派发时从本轮 `turn.config` 读取，修改后下一次派发生效；
+  // 在途 worker 沿用启动时的值。
+  "agent.worker",
+  "agent.maxConcurrentWorkers",
   "agent.progressThrottleMs",
   // 仲裁的两项在每次 `ask_parent` 时从本轮 `turn.config` 实时读取（builtins.ts）。
   "agent.askArbiter",
@@ -526,17 +525,25 @@ export const configSchema = z
             downgradeAfterStep: z.number().int().positive().default(8),
           })
           .default({}),
-        maxDepth: z.number().int().positive().default(3),
-        maxConcurrentSubagents: z.number().int().positive().default(3),
-        maxSubagentsPerTurn: z.number().int().positive().default(10),
+        // lw-worker：唯一的内建 worker，拿的是调用者有效角色下的工具全集。没有 `tools` 白名单，
+        // 收窄由角色、`tools.overrides` 与 skill 允许集承担 —— 再加一层名单只会与它们分岔。
+        worker: z
+          .object({
+            modelAlias: z.string().default("low"),
+            maxSteps: z.number().int().positive().default(12),
+            resultMaxChars: z.number().int().positive().default(4000),
+            // `full` 档回灌给主 agent 的硬上界。`agent_runs.result_summary` 一侧没有降级兜底，
+            // 因此这一档必须按构造有界，而不是等写入时才失败。
+            maxResultChars: z.number().int().positive().default(65_536),
+          })
+          .default({}),
+        maxConcurrentWorkers: z.number().int().positive().default(3),
+        maxWorkersPerTurn: z.number().int().positive().default(10),
         askTimeoutMs: z.number().int().positive().default(120_000),
         maxAsksPerRun: z.number().int().positive().default(5),
         askArbiter: z.boolean().default(true),
         askEscalateToUser: z.boolean().default(false),
         progressThrottleMs: z.number().int().positive().default(3000),
-        // `agentsDir`：`agents/<name>.md` 所在目录（docs/14 §2 Q5）。文件是只读来源，下方
-        // `agents`（DB / WebUI）中的同名定义会覆盖它。优先级写死，不设为配置项。
-        agentsDir: z.string().default("./agents"),
         // M11 · HarnessAgent（docs/14 §2 Q8）：启动外部 CLI（Claude Code / Codex）修改宿主上的仓库。
         // `allowedDirs` 为空即整个功能关闭，工具不会进入模型的目录 —— 这是刻意的默认值：它绕过
         // 本系统全部工具闸（T17），启用必须是一次显式的运维操作，而非安装即可用。
@@ -546,6 +553,11 @@ export const configSchema = z
             // 任务正文作为 argv 的最后一项追加在这些参数之后，不经过 shell。
             args: z.array(z.string()).default(["-p"]),
             allowedDirs: z.array(z.string()).default([]),
+            // 与 `allowedDirs` 取「或」：为真时本会话的默认工作目录
+            // （`<sandbox.workspaceDir>/<chatId>/harness/<runId>`）无需登记即视为白名单内。
+            // 单列一个开关而不是往 `allowedDirs` 里塞一条模板路径：那条路径含运行时才知道的
+            // `chatId` 与 `runId`，写不进一份静态配置。
+            workspaceFallback: z.boolean().default(false),
             timeoutMs: z.number().int().positive().default(900_000),
             maxOutputBytes: z.number().int().positive().default(65_536),
           })
@@ -555,31 +567,6 @@ export const configSchema = z
         // 都无需引入整个 ACP SDK。不扩展 `harness`：那一侧 `args` 的契约是任务正文作为 argv 最后一项，
         // 而 ACP 下任务经 `session/prompt` 传递，argv 中不含任务。
         acp: acpSchema.default({}),
-        // 名称中不允许包含冒号。`agent_runs` 上按行数统计子 agent 的闸（`AgentManager.spawn`）需排除
-        // ACP 写入的行，判据是 `agent_name GLOB 'acp:*' AND model_alias='external'` —— 真实子 agent 只要
-        // 能命名为 `acp:x` 且别名为 `external`，就永久不占用本轮名额。文件路径（`agents/<name>.md`）本身
-        // 已有更严格的正则，此处只补齐冒号这一个命名空间分隔符：它是判据用到的唯一字符，收得更严会使
-        // 既有部署中含大写字母的名称导致启动失败。
-        agents: z
-          .array(
-            z.object({
-              name: z
-                .string()
-                .regex(
-                  /^[^:]+$/,
-                  "子 agent 名称不能包含冒号（冒号是 acp: 这类内部命名空间的分隔符）",
-                ),
-              description: z.string(),
-              modelAlias: z.string(),
-              maxSteps: z.number().int().positive(),
-              minRole: role.default("limited"),
-              tools: z.array(z.string()).default([]),
-              resultMaxChars: z.number().int().positive().default(4000),
-              instructions: z.string(),
-              injectMemory: z.boolean().default(false),
-            }),
-          )
-          .default([]),
       })
       .default({}),
     provider: z
@@ -995,7 +982,7 @@ export const configSchema = z
               .default({}),
           })
           .default({}), // perTurn 只保留真正生效的两项。maxToolCalls / maxSubagents / maxDurationMs 已移除：
-        // 它们各有一个真正生效的同名键（`tools.maxCallsPerTurn` / `agent.maxSubagentsPerTurn` /
+        // 它们各有一个真正生效的同名键（`tools.maxCallsPerTurn` / `agent.maxWorkersPerTurn` /
         // `concurrency.turnTimeoutMs`），并存会导致运维在错误的配置项上修改（同 docs/22 · N-CFG-02）。
         perTurn: z
           .object({

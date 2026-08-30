@@ -15,7 +15,7 @@ export interface BlobDirectories {
   /** `attachments.local_path` 所指向的媒体目录（`media.dir`）。 */
   files?: string;
   /**
-   * `agent_runs.result_full_ref` 所指向的子 agent 全文目录。库中该列存储的是相对该目录的
+   * `agent_runs.result_full_ref` 所指向的 worker 全文目录。库中该列存储的是相对该目录的
    * 路径（`AgentResultStore.put`，docs/28 · L-OPS-06），因此该值同时是读出侧的解析基准 ——
    * 传错不仅意味着扫描错误的目录，还会使每一条 ref 都解析到别处。存量的绝对路径行仍可识别
    * （`resolve` 对绝对路径是恒等的），它们正是错配保护需要拦截的信号。
@@ -112,7 +112,7 @@ export class MaintenanceService {
     // 日志的**全部**清理就是这一条：载荷在同一行上，没有第二个落点要跟着删（docs/10 §3）。
     // 此前它后面还跟着「扫 logs/ 删掉整个过期日目录」与「把更早的 jsonl 压成 .gz」，
     // 两者都随文件落点一起消失（返回值里的 logDirectories / compressed 因此也没有了）。
-    // `gcFiles()` 不受影响：它扫的一直是媒体与子 agent 结果那两棵目录，日志 blob 不在其中。
+    // `gcFiles()` 不受影响：它扫的一直是媒体与 worker 结果那两棵目录，日志 blob 不在其中。
     const logs = this.db
       .prepare("DELETE FROM log_events WHERE ts<?")
       .run(logCutoff).changes;
@@ -135,7 +135,7 @@ export class MaintenanceService {
         "UPDATE approvals SET state='expired' WHERE state='pending' AND expires_at<?",
       )
       .run(now);
-    // 子 agent 的全文结果属调试产物，与日志同周期：按 `logs.retentionDays` 过期。
+    // worker 的全文结果属调试产物，与日志同周期：按 `logs.retentionDays` 过期。
     // 只删除文件并将 `result_full_ref` 置空，保留 `result_summary` —— 摘要已被上下文引用，
     // 删除会使历史轮次中的引用悬空（docs/22 · I-09）。
     let agentResults = 0;
@@ -308,7 +308,7 @@ export class MaintenanceService {
        * `media.dir` 仍是相对 cwd 的路径）。此时没有行指向某文件并不表示它是孤儿，而表示查询
        * 使用了错误的库，据此删除等于清空另一套部署的用户数据。
        *
-       * 这不是假设的风险：第七轮验证过程中即因此删除了 76 个真实附件与 90 份子 agent
+       * 这不是假设的风险：第七轮验证过程中即因此删除了 76 个真实附件与 90 份 worker
        * 全文（`docs/25 §10`）。真正的空部署目录本就为空，因此该拒绝不会造成误伤。
        */
       if (!referenced.size) {
@@ -352,7 +352,7 @@ export class MaintenanceService {
        * 不要将条件收窄为目录外且磁盘上已不存在 —— 那是错误的。本轮的测试环境正是生产 data/
        * 的完整副本：旧根的文件仍在，而新根的那份仍会被整批当作孤儿删除，收窄之后该保护
        * 恰好会在真实事故发生时放行。
-       * 子 agent 结果所在列此后存储相对路径（`AgentResultStore.put`），从此天然免疫；
+       * worker 结果所在列此后存储相对路径（`AgentResultStore.put`），从此天然免疫；
        * 剩余会到达此处的绝对路径行，正是启动期归一化刻意保留、需要人工确认的那些。
        */
       const prefix = root.endsWith(sep) ? root : root + sep;
@@ -421,6 +421,12 @@ export class MaintenanceService {
       ...referenced("local_path", "web_assets"),
     ]);
     const files = sweep(this.blobs.files, mediaRefs, "attachments/web_assets");
+    /**
+     * 整张 `agent_runs`，**不按 `worker_kind` 过滤**（迁移 `0018`）。当前只有 lw-worker 的行写
+     * `result_full_ref`，harness 与 ACP 那两条路只写 `result_summary`；哪天 harness 也开始写，
+     * 这里一个字都不用改 —— 而那正是不加过滤的理由：按 worker_kind 收窄等价于上面那条注释说的
+     * 「遗漏一张表」，表现不是报错，是被漏掉那一族的全文被静默当成孤儿删掉。
+     */
     const results = sweep(
       this.blobs.agentResults,
       referenced(

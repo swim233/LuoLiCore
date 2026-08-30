@@ -4,7 +4,7 @@ import type { Bot } from 'grammy';
 import { describe, expect, it } from 'vitest';
 import { code, codeIndex, source } from './support/source.js';
 import { ArchiveRepository, ScheduleRepository, closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
-import { AgentManager, AgentResultStore, FileTools, KNOWN_UNIMPLEMENTED_CONFIG_KEYS, MaintenanceService, PathJail, TOOL_POLICY, ToolRegistry, UsageLedger, configSchema, mergeAgentDefinitions, registerBuiltins, resolveHarnessDir, runHarness, scanAgentFiles } from '@luoli/core';
+import { AgentManager, AgentResultStore, FileTools, KNOWN_UNIMPLEMENTED_CONFIG_KEYS, MaintenanceService, PathJail, TOOL_POLICY, ToolRegistry, UsageLedger, configSchema, newToolScope, registerBuiltins, resolveHarnessDir, runHarness } from '@luoli/core';
 import { TelegramOutput } from '@luoli/telegram';
 
 /**
@@ -165,9 +165,9 @@ function arbiterHarness(name: string, options: { reply?: unknown; alias?: string
 
   const events: Array<Record<string, unknown>> = [];
   const log = { event: (event: Record<string, unknown>) => { events.push(event); }, publish: () => undefined, span: () => ({ id: 's', end: () => undefined }) } as never;
-  const agents = new AgentManager(db, new AgentResultStore(results), [{ name: 'researcher', description: 'r', modelAlias: 'low', maxSteps: 3, minRole: 'limited', tools: [], resultMaxChars: 4000, instructions: 'r' }], 3, 10);
+  const agents = new AgentManager(db, new AgentResultStore(results), 10);
   const parent = agents.createMain('turn-ask', 'trusted', 'main');
-  const { run } = agents.spawn(parent, 'researcher', '把候选方案 A / B 各查一遍并给结论');
+  const run = agents.spawn(parent, '把候选方案 A / B 各查一遍并给结论', 'low');
 
   const registry = new ToolRegistry(log, { request: async () => true }, { maxRegistered: 200, maxCallsPerTurn: 50, maxConsecutiveErrors: 10 });
   registerBuiltins(registry, { db, agents, models, ledger: new UsageLedger(db), log,
@@ -182,7 +182,7 @@ function arbiterHarness(name: string, options: { reply?: unknown; alias?: string
     isPrivate: true, baseCommitId: null, snapshot: { messages: [], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 0 },
     delta: [], abortSignal: new AbortController().signal, config };
   return { db, registry, prompts, events, parent, run, agents,
-    context: { turn, workspace: resolve('./data'), agentKind: 'sub', agentRunId: run.id } as never };
+    context: { turn, workspace: resolve('./data'), agentKind: 'lw', agentRunId: run.id, ...newToolScope() } as never };
 }
 
 const answers = (db: ReturnType<typeof openDatabase>): Array<{ payload: string }> =>
@@ -194,7 +194,7 @@ describe('A7 · ask_parent 走 low 档仲裁', () => {
     const result = await registry.execute('ask_parent', { question: '选 A 还是 B？', options: ['A', 'B'] }, context) as Record<string, unknown>;
     expect(result).toMatchObject({ ok: true, source: 'arbiter', answer: '选 A：它的依赖最少。' });
     expect(answers(db)[0]!.payload).toContain('arbiter');
-    // 记账落在**父 run**：是父 agent 在回答，不该给提问的子 agent 记一笔它没花的钱。
+    // 记账落在**父 run**：是主 agent 在回答，不该给提问的 worker 记一笔它没花的钱。
     const ledger = db.prepare('SELECT agent_run_id AS runId,model_alias AS alias,cost_usd AS cost FROM usage_ledger').all() as Array<{ runId: string; alias: string; cost: number }>;
     expect(ledger).toHaveLength(1);
     expect(ledger[0]).toMatchObject({ runId: parent.id, alias: 'low' });
@@ -242,53 +242,6 @@ describe('A7 · ask_parent 走 low 档仲裁', () => {
   });
 });
 
-/* ------------------------------------------------------------------ Q5 · agents/<name>.md */
-
-describe('Q5 · 子 agent 的 markdown 文件定义', () => {
-  const agentsDir = (name: string): string => {
-    const directory = resolve(`./data/${name}-agents`);
-    rmSync(directory, { recursive: true, force: true });
-    mkdirSync(directory, { recursive: true });
-    return directory;
-  };
-  const CONFIG_ONLY = { name: 'coder', description: 'c', modelAlias: 'high', maxSteps: 30, minRole: 'trusted' as const, tools: [], resultMaxChars: 4000, instructions: 'c', injectMemory: false };
-
-  it('读 frontmatter 与正文，缺省值与 agent.agents 那套一致', () => {
-    const directory = agentsDir('round10-agentmd');
-    writeFileSync(resolve(directory, 'researcher.md'), '---\nname: researcher\ndescription: 检索资料\n---\n你是检索型子 agent。\n');
-    const scan = scanAgentFiles(directory);
-    expect(scan.errors).toEqual([]);
-    expect(scan.definitions[0]).toMatchObject({ name: 'researcher', description: '检索资料', modelAlias: 'low', maxSteps: 8, minRole: 'limited', tools: [], resultMaxChars: 4000, injectMemory: false, instructions: '你是检索型子 agent。' });
-  });
-
-  it('名字必须等于文件名、正文不能为空 —— 都报错而不是静默跳过', () => {
-    const directory = agentsDir('round10-agentmd-bad');
-    writeFileSync(resolve(directory, 'renamed.md'), '---\nname: other\ndescription: d\n---\n正文\n');
-    writeFileSync(resolve(directory, 'hollow.md'), '---\nname: hollow\ndescription: d\n---\n\n');
-    writeFileSync(resolve(directory, 'good.md'), '---\nname: good\ndescription: d\n---\n正文\n');
-    const scan = scanAgentFiles(directory);
-    // 坏文件不拖累好文件：一个写错的定义不该让整批消失。
-    expect(scan.definitions.map((definition) => definition.name)).toEqual(['good']);
-    expect(scan.errors.map((failure) => failure.file.split('/').at(-1))).toEqual(['hollow.md', 'renamed.md']);
-    expect(scan.errors.find((failure) => failure.file.endsWith('renamed.md'))?.error).toContain('must equal file name');
-  });
-
-  it('目录不存在时是空结果，不是异常', () => {
-    expect(scanAgentFiles(resolve('./data/round10-agentmd-missing'))).toEqual({ definitions: [], errors: [] });
-  });
-
-  it('同名时配置赢，只在文件里的照常保留', () => {
-    const fromFiles = [
-      { name: 'researcher', description: '文件版', modelAlias: 'low', maxSteps: 8, minRole: 'limited' as const, tools: [], resultMaxChars: 4000, instructions: 'f', injectMemory: false },
-      { name: 'only-file', description: '只有文件', modelAlias: 'low', maxSteps: 8, minRole: 'limited' as const, tools: [], resultMaxChars: 4000, instructions: 'f', injectMemory: false },
-    ];
-    const fromConfig = [{ ...fromFiles[0]!, description: '配置版', modelAlias: 'high' }, CONFIG_ONLY];
-    const merged = mergeAgentDefinitions(fromFiles, fromConfig);
-    expect(merged.map((definition) => definition.name)).toEqual(['researcher', 'only-file', 'coder']);
-    expect(merged[0]).toMatchObject({ description: '配置版', modelAlias: 'high' });
-  });
-});
-
 /* ------------------------------------------------------------------ Q8/M11 · spawn_harness */
 
 describe('Q8 · spawn_harness 的三道门', () => {
@@ -306,6 +259,43 @@ describe('Q8 · spawn_harness 的三道门', () => {
   it('空白名单 = 功能关闭，连跑都不跑', async () => {
     const result = await runHarness('随便干点什么活儿', resolve('.'), settings([]), new AbortController().signal);
     expect(result).toMatchObject({ ok: false, error: 'harness_disabled' });
+  });
+
+  /**
+   * 缺省工作目录（docs/04 §6.1.1）。判据有三条，三条都在这一族里：
+   * ① 缺省目录**并进白名单**再走同一个 `resolveHarnessDir`，不另开一支放行；
+   * ② `dir` 与缺省目录都没有时明说 `harness_dir_required`，不拿 cwd 顶上；
+   * ③ 白名单为空 + 没有缺省目录仍然是 `harness_disabled` —— 缺省目录不能把一个本应关着的功能打开。
+   */
+  it('省略 dir 时落在缺省目录里，且它照旧走白名单那条判据', async () => {
+    const fallback = resolve('./data/round10-harness-default');
+    rmSync(fallback, { recursive: true, force: true });
+    mkdirSync(fallback, { recursive: true });
+    const result = await runHarness('process.stdout.write(process.cwd())', undefined, settings([]), new AbortController().signal, fallback);
+    expect(result).toMatchObject({ ok: true, exitCode: 0, dir: fallback });
+    expect(result.output).toContain(fallback);
+  });
+
+  it('给了缺省目录也不放行白名单外的显式 dir', async () => {
+    const fallback = resolve('./data/round10-harness-default');
+    const result = await runHarness('随便干点什么活儿', resolve('./packages'), settings([]), new AbortController().signal, fallback);
+    expect(result).toMatchObject({ ok: false, error: 'harness_dir_not_allowed' });
+    // hint 里给的是本次真实的 roots（白名单 + 缺省目录），不是一份写死的名单。
+    expect(String(result.hint)).toContain(fallback);
+  });
+
+  it('两处都没有目录时明说 harness_dir_required，不拿当前工作目录顶上', async () => {
+    const result = await runHarness('随便干点什么活儿', undefined, settings([resolve('./data')]), new AbortController().signal);
+    expect(result).toMatchObject({ ok: false, error: 'harness_dir_required' });
+  });
+
+  it('白名单为空且没有缺省目录 = 整体关闭，判据排在拼 roots 之前', () => {
+    // `harness_disabled` 那一条必须在 `roots` 之前算出来，否则缺省目录会把它挤掉。
+    const body = source('packages/core/src/agent/harness.ts');
+    const disabled = codeIndex(body, "error: \"harness_disabled\"");
+    const roots = codeIndex(body, 'const roots = defaultDir');
+    expect(disabled).toBeGreaterThan(-1);
+    expect(roots).toBeGreaterThan(disabled);
   });
 
   it('白名单外的目录当场拒绝，并把允许的路径写在 hint 里', async () => {

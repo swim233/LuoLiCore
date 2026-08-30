@@ -18,7 +18,7 @@ import { confirmBox, dismissConfirm, runConfirmed } from '../../packages/webui/s
  */
 
 const NAV_KEYS = ['dashboard', 'chats', 'messages', 'prompts', 'providers', 'principals', 'tools',
-  'extensions', 'agents', 'logs', 'usage', 'quota', 'tasks', 'settings'] as const;
+  'extensions', 'workers', 'logs', 'usage', 'quota', 'tasks', 'settings'] as const;
 /** 设置页的四个二级 tab（docs/09 §3.13）。与导航项同理：遗漏一个分支，该 tab 从此无人渲染。 */
 const SETTINGS_TABS = ['common', 'all', 'maintenance', 'advanced'] as const;
 /** 扩展页的四个分段（docs/09 §3.8）。同上：新增一段就要同步加入这里。 */
@@ -53,10 +53,16 @@ const RESPONSES: Record<string, unknown> = {
   '/api/sandbox': { config: { mode: 'docker', bypassRoles: ['owner'], persistent: { enabled: false } }, allowHostFsForOwner: false,
     plan: { allowed: true, mode: 'docker' } },
   // 扁平字段是生效值，`defaults` 是代码中的默认值；缺少 defaults 时，工具页弹窗的代码默认绑定会读到 undefined。
+  // `sides` 三态各出现一次：只有主 agent（派发口）、只有 worker（主 agent 不再碰工具）、两侧共享。
+  // 缺了它，工具表那一列的模板与过滤器就从未被渲染过。
   '/api/tools': { bash: { minRole: 'trusted', approval: 'conditional', scope: 'global', source: 'builtin', enabled: true,
-    timeoutMs: null, selfManagedTimeout: true, defaults: { minRole: 'trusted', approval: 'conditional', timeoutMs: null }, relaxed: [] },
+    timeoutMs: null, selfManagedTimeout: true, sides: ['worker'], defaults: { minRole: 'trusted', approval: 'conditional', timeoutMs: null }, relaxed: [] },
+    spawn_worker: { minRole: 'limited', approval: 'never', scope: 'chat', source: 'agent', enabled: true,
+      timeoutMs: null, selfManagedTimeout: true, sides: ['main'], defaults: { minRole: 'limited', approval: 'never', timeoutMs: null }, relaxed: [] },
+    memory_read: { minRole: 'limited', approval: 'never', scope: 'private', source: 'builtin', enabled: true,
+      timeoutMs: 5_000, selfManagedTimeout: false, sides: ['main', 'worker'], defaults: { minRole: 'limited', approval: 'never', timeoutMs: 5_000 }, relaxed: [] },
     web_fetch: { minRole: 'owner', approval: 'never', scope: 'global', source: 'builtin', enabled: true,
-      timeoutMs: 45_000, selfManagedTimeout: false, defaults: { minRole: 'limited', approval: 'never', timeoutMs: 60_000 }, relaxed: [] } },
+      timeoutMs: 45_000, selfManagedTimeout: false, sides: ['worker'], defaults: { minRole: 'limited', approval: 'never', timeoutMs: 60_000 }, relaxed: [] } },
   '/api/turns': { items: [], total: 0, page: 1, size: 20 },
   // 归档检索的命中行。此前一律返回 `{items: []}`，导致这一页的三个行内动作（查看轮次、查看原始载荷、
   // 软删除）从未被渲染过。
@@ -86,6 +92,22 @@ const RESPONSES: Record<string, unknown> = {
     { id: 'a2', turn_id: 'turn_bbbbbbbbbbbb', agent_run_id: null, span_id: null, chat_id: '8899001', requester_user_id: '555',
       tool_name: 'write_file', input_json: '{"path":"./notes.md"}', risk: 'medium', state: 'approved',
       requested_at: Date.now() - 3_600_000, expires_at: Date.now() - 3_300_000, decided_by: 'owner', decided_at: Date.now() - 3_500_000, decision_channel: 'webui' },
+  ] },
+  // Worker 运行记录：三档各一行。返回 `{items:[]}` 的写法会让这一页的行模板（类型徽标、
+  // 外部自报那一格、耗时）从未被渲染过 —— 与模型行、容器行此前的情形相同。
+  '/api/worker-runs': { total: 3, page: 1, size: 20, items: [
+    { id: 'run-h1', turnId: 'turn_aaaaaaaaaaaa', parentRunId: null, depth: 1, workerKind: 'harness', agentName: 'harness:claude',
+      modelAlias: 'external', effectiveRole: 'owner', state: 'running', steps: 0, toolCalls: 0, inputTokens: 0, outputTokens: 0,
+      costUsd: 0, externalCostUsd: null, taskLine: '改一下那个仓库的 parser', resultSummary: null, error: null,
+      startedAt: Date.now() - 1_200_000, finishedAt: null },
+    { id: 'run-a1', turnId: 'turn_bbbbbbbbbbbb', parentRunId: null, depth: 1, workerKind: 'acp', agentName: 'acp:omp',
+      modelAlias: 'external', effectiveRole: 'owner', state: 'done', steps: 0, toolCalls: 0, inputTokens: 0, outputTokens: 0,
+      costUsd: 0, externalCostUsd: 1.25, taskLine: '重构 parser', resultSummary: '改完了', error: null,
+      startedAt: Date.now() - 600_000, finishedAt: Date.now() - 300_000 },
+    { id: 'run-l1', turnId: 'turn_bbbbbbbbbbbb', parentRunId: null, depth: 1, workerKind: 'lw', agentName: 'worker',
+      modelAlias: 'low', effectiveRole: 'trusted', state: 'done', steps: 3, toolCalls: 4, inputTokens: 900, outputTokens: 120,
+      costUsd: 0.0123, externalCostUsd: null, taskLine: '查一下今天的更新', resultSummary: '查完了', error: null,
+      startedAt: Date.now() - 120_000, finishedAt: Date.now() - 60_000 },
   ] },
   '/api/usage/report': { groupBy: 'day', from: 0, to: Date.now(), rows: [] },
   // 唤醒词可用性是数组端点，但路径形态不像列表，因此显式列出。
@@ -165,7 +187,7 @@ function responseFor(url: string): unknown {
   // `/api/turns/active` 同样返回数组：它稍后落到 DataGrid 的 `rows`，返回 `{}` 的表现是一条
   // Invalid prop: type check failed for prop "rows"，而这正是本装置要拦截的症状类型。
   const listLike = ['/api/principals', '/api/providers', '/api/logs', '/api/chats', '/api/usage', '/api/skills', '/api/plugins',
-    '/api/mcp', '/api/custom-tools', '/api/agents', '/api/prompts', '/api/models', '/api/aliases', '/api/turns/active'];
+    '/api/mcp', '/api/custom-tools', '/api/prompts', '/api/models', '/api/aliases', '/api/turns/active'];
   return listLike.includes(path) ? [] : {};
 }
 
@@ -389,6 +411,24 @@ describe('ConsoleView 渲染', () => {
   });
 
   /**
+   * 模型表三个数值列的渲染（docs/09 §3.5）。缩写、单位底衬与右对齐全部只存在于 `.vue` 模板与
+   * `GridColumn.align` 上，而模板不进入 `tsc --noEmit`：拼错列名 slot 会静默退回原值渲染。
+   */
+  it('模型表的数值列：窗口缩写、底衬等宽、三列右对齐', async () => {
+    const { default: ConsoleView } = await import('../../packages/webui/src/views/ConsoleView.vue');
+    const wrapper = mount(ConsoleView, { attachTo: document.body });
+    await settle(wrapper);
+    (wrapper.vm as unknown as { active: string }).active = 'providers';
+    await settle(wrapper);
+    expect(wrapper.findAll('.data-grid th.align-right').map((node) => node.text())).toEqual(['上下文窗口', '输入价格', '输出价格']);
+    const chips = wrapper.findAll('.metric-chip');
+    expect(chips.map((node) => node.text())).toEqual(['500 k', '3 $', '15 $']);
+    // 底衬宽度是同列最长那条的字符数，逐列各算各的：`500 k` 五格、`3 $` 三格、`15 $` 四格。
+    expect(chips.map((node) => node.attributes('style'))).toEqual(['min-width: 5ch;', 'min-width: 3ch;', 'min-width: 4ch;']);
+    wrapper.unmount();
+  });
+
+  /**
    * 扩展页的四个分段（docs/09 §3.8）。与设置页那四个 tab 同理：遗漏一个分支，该分段从此
    * 无人渲染。这一页是从 `ConsoleView.vue` 整段抽出的（`ExtensionsPage.vue`），
    * 而上一次抽取子视图时三项检查全部通过、14 个页面却全为空白（docs/24 · R-UI-01），因此这里断言的是
@@ -554,6 +594,64 @@ describe('ConsoleView 渲染', () => {
     const calls = (fetch as unknown as { mock: { calls: Array<[string, RequestInit?]> } }).mock.calls
       .map(([url]) => String(url)).filter((url) => url.startsWith('/api/approvals'));
     expect(calls.some((url) => url.includes('size=1')), `角标没走单行请求：${calls.join(' , ')}`).toBe(true);
+    wrapper.unmount();
+  });
+
+  /**
+   * Worker 运行记录页是从 `ConsoleView.vue` 整段抽出的（`WorkerRunsPage.vue` 与两张卡），
+   * 与扩展页、任务页那两次同理：上一回抽取子视图时三项检查全部通过、14 个页面却全为空白
+   * （docs/24 · R-UI-01）。因此这里断言两张卡各自确实渲染出了内容，而非组件能否被 import。
+   */
+  it('Worker 页两张卡竖排、顺序固定，三档 worker 与外部自报那一格都渲染出来', async () => {
+    const warnings: string[] = [];
+    const spy = vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => { warnings.push(args.map(String).join(' ')); });
+    const { default: ConsoleView } = await import('../../packages/webui/src/views/ConsoleView.vue');
+    const wrapper = mount(ConsoleView, { attachTo: document.body });
+    await settle(wrapper);
+    (wrapper.vm as unknown as { active: string }).active = 'workers';
+    await settle(wrapper);
+    expect(wrapper.findComponent({ name: 'WorkerRunsPage' }).exists(), 'Worker 页组件没挂上').toBe(true);
+    const stack = wrapper.find('.card-stack');
+    expect(stack.exists(), '两张卡不在 .card-stack 里').toBe(true);
+    expect(stack.findAll(':scope > article').map((card) => card.find('h3').text())).toEqual(['运行记录', '试跑']);
+    const card = wrapper.findComponent({ name: 'WorkerRunsCard' });
+    expect(card.text(), '一行都没渲染').toContain('改一下那个仓库的 parser');
+    // 三档徽标各出现一次：少一档就会原样显示英文，读不出三者的花费口径差别。
+    for (const kind of ['lw', 'harness', 'acp']) expect(card.text(), `${kind} 这一档没渲染`).toContain(kind);
+    // 外部自报那一格与「花费」分开，且旁边写明它不进聚合 —— 合并显示就是邀请人把两者相加。
+    expect(card.text()).toContain('$1.2500');
+    expect(card.text()).toContain('不进任何聚合');
+    // 没有取消入口，而这件事必须写在页面上（worker 跑在父轮的 abort 信号下）。
+    expect(card.findAll('button').map((button) => button.text())).not.toContain('取消');
+    expect(card.text()).toContain('这里没有取消');
+    const rendering = warnings.filter((line) => line.includes('[Vue warn]'));
+    expect(rendering, `渲染期间产生了 Vue 警告：\n${rendering.join('\n')}`).toEqual([]);
+    spy.mockRestore();
+    wrapper.unmount();
+  });
+
+  /**
+   * 工具表的「可达侧」列（docs/09 §3.7）。三态必须都渲染得出来，且这一列**只读** ——
+   * 分叉由 `toolCallableBy()` 决定，做成开关就是又一个改了没效果的控件。
+   * `.vue` 模板不进 `tsc --noEmit`，判据只能固定在这里。
+   */
+  it('工具表的可达侧列有三态、可按它筛，且不给任何开关', async () => {
+    const { default: ConsoleView } = await import('../../packages/webui/src/views/ConsoleView.vue');
+    const wrapper = mount(ConsoleView, { attachTo: document.body });
+    await settle(wrapper);
+    const vm = wrapper.vm as unknown as { active: string; sideFilter: string; visibleToolRows: Array<{ name: string }> };
+    vm.active = 'tools';
+    await settle(wrapper);
+    const table = wrapper.find('.page-surface');
+    for (const label of ['仅主 agent', '仅 worker', '两侧'])
+      expect(table.text(), `可达侧少了「${label}」这一档`).toContain(label);
+    // 这一列与 `enabled` 正交：弹窗与表头都要把这句说出来，否则运维会当成另一种停用。
+    expect(table.text()).toContain('tools.overrides');
+    for (const [filter, names] of [['main', ['spawn_worker']], ['worker', ['bash', 'web_fetch']], ['both', ['memory_read']]] as const) {
+      vm.sideFilter = filter;
+      await settle(wrapper);
+      expect(vm.visibleToolRows.map((row) => row.name).sort(), `${filter} 筛出来的行不对`).toEqual([...names].sort());
+    }
     wrapper.unmount();
   });
 

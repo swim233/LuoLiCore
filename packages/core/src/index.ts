@@ -12,7 +12,6 @@ export * from "./approval/rules.js";
 export * from "./approvals.js";
 export * from "./agent/manager.js";
 export * from "./agent/ask-arbiter.js";
-export * from "./agent/definitions.js";
 export * from "./agent/harness.js";
 export * from "./agent/fallback-model.js";
 export * from "./agent/subagent.js";

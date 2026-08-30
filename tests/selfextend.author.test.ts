@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { CustomToolRepository, closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
-import { BUNDLED_SKILLS, CustomToolManager, PluginManager, Sandbox, SkillLoader, ToolRegistry, configSchema, registerAuthoringTools, type Config, type LogSink } from '@luoli/core';
+import { BUNDLED_SKILLS, CustomToolManager, PluginManager, Sandbox, SkillLoader, ToolRegistry, configSchema, newToolScope, registerAuthoringTools, type Config, type LogSink } from '@luoli/core';
 import { zipFixture } from './fixtures/zip.js';
 
 const log = { event: () => undefined, publish: () => undefined, span: () => ({ id: 's', end: () => undefined }) } as unknown as LogSink;
@@ -37,7 +37,10 @@ function harness(name: string, selfExtend: Record<string, unknown> = {}) {
     isPrivate: true, baseCommitId: null, config, snapshot: { messages: [], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 0 },
     delta: [], abortSignal: new AbortController().signal };
   // `turn.config` 是每轮的快照，`install_mcp` 之后要拿新的那份才能看到刚写进去的 server。
-  const contextFor = (patch: Partial<typeof turn> = {}) => ({ turn: { ...turn, ...patch, config }, workspace: `${root}/workspace`, agentKind: 'main' }) as never;
+  // `lw` 而非 `main`：自我扩展这八条不在 `MAIN_AGENT_TOOLS` 里（随工具执行一起下沉，docs/05 §4），
+  // 主 agent 侧会先撞 `tool_requires_worker` —— 那道闸排在 `available()` 之前，本文件判的
+  // owner 地板、落地即停用、source 白名单一条都走不到。
+  const contextFor = (patch: Partial<typeof turn> = {}) => ({ turn: { ...turn, ...patch, config }, workspace: `${root}/workspace`, agentKind: 'lw', ...newToolScope() }) as never;
   const relax = (tool: string, minRole: string): void => {
     config = { ...config, tools: { ...config.tools, overrides: { ...config.tools.overrides, [tool]: { enabled: true, minRole } } } } as Config;
   };

@@ -1,6 +1,6 @@
 import { rmSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { LogSink, ToolRegistry } from '@luoli/core';
+import { LogSink, ToolRegistry, newToolScope } from '@luoli/core';
 import { OperationsRepository, TurnRepository, closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
 import { z } from 'zod';
 
@@ -37,7 +37,10 @@ describe('turn accounting', () => {
     const registry = new ToolRegistry(log, { request: async () => true }, { maxRegistered: 10, maxCallsPerTurn: 10, maxConsecutiveErrors: 5 }, [], undefined, turns);
     registry.register({ name: 'echo', description: 'echo', inputSchema: z.object({ value: z.string() }),
       policy: { minRole: 'limited', approval: 'never', scope: 'workspace', source: 'builtin' }, sourcePriority: 1, execute: (input) => ({ ok: true, value: input.value }) });
-    const context = { turn: { turnId: 'turn', chatId: '1', initiatorUserId: '1', key: 'chat:1', effectiveRole: 'owner', config: {} }, workspace: '/tmp', agentKind: 'main' } as never;
+    // `agentKind: 'lw'`：重构后工具全在 worker 那一侧，主 agent 调普通工具会被 `admit()` 以
+    // `main_agent` 挡下（`tool_requires_worker`），那样这条用例数的就不再是「执行过的调用」。
+    const context = { turn: { turnId: 'turn', chatId: '1', initiatorUserId: '1', key: 'chat:1', effectiveRole: 'owner', config: {} },
+      workspace: '/tmp', agentKind: 'lw', ...newToolScope() } as never;
     const count = (): number => (db.prepare('SELECT tool_calls AS calls FROM turns WHERE id=?').get('turn') as { calls: number }).calls;
 
     await registry.execute('echo', { value: 'hi' }, context);

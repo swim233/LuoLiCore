@@ -1,10 +1,12 @@
 import { rmSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { OperationsRepository, closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
-import { DatabaseApprovalBroker, EventBus, LogSink, ToolRegistry, configSchema } from '@luoli/core';
+import { DatabaseApprovalBroker, EventBus, LogSink, ToolRegistry, configSchema, newToolScope } from '@luoli/core';
 import type { RuntimeTurnContext } from '@luoli/shared';
 import { z } from 'zod';
 
+// 审批这一族的视角一律取 `lw`：`bash` / `delete_file` / `write_file` / MCP 那批工具全部下沉给
+// worker 了，主 agent 视角下它们先撞 `tool_requires_worker`，根本走不到审批段。
 function harness(enabled = true, rules: unknown[] = [{ tool: 'bash', pattern: '(?i)\\brm\\s+-rf\\b', risk: 'high' }, { tool: 'mcp__*', risk: 'medium' }], ttlMs = 10_000,
   receipts: Array<{ chatId: string; tool: string; risk: string; ttlMs: number }> = []) {
   const path = `./data/approval-${enabled}.test.db`;
@@ -21,7 +23,7 @@ function harness(enabled = true, rules: unknown[] = [{ tool: 'bash', pattern: '(
   const registry = new ToolRegistry(log, broker, { maxRegistered: 10, maxCallsPerTurn: 10, maxConsecutiveErrors: 3 }, config.approval.rules);
   const abort = new AbortController();
   const turn = { turnId: 'turn-1', key: 'chat:1', chatId: '1', threadId: null, initiatorUserId: '2', effectiveRole: 'trusted', isPrivate: false, baseCommitId: null, snapshot: { messages: [], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 0 }, delta: [], abortSignal: abort.signal, config } satisfies RuntimeTurnContext;
-  return { db, broker, events, registry, abort, receipts, context: { turn, workspace: './data', agentKind: 'main' as const } };
+  return { db, broker, events, registry, abort, receipts, context: { turn, workspace: './data', agentKind: 'lw' as const, ...newToolScope() } };
 }
 function pendingApprovalId(db: ReturnType<typeof openDatabase>): string {
   const row: unknown = db.prepare("SELECT id FROM approvals WHERE state='pending'").get();
@@ -56,7 +58,7 @@ describe('approval rules', () => {
     // （subscriberCount 而不是 channelCount）的话，这一行就让当场拒绝变成死代码（docs/24 · R-APPR-01）。
     events.subscribe(() => undefined);
     const started = performance.now();
-    expect(await registry.execute('delete_file', {}, { turn, workspace: '.', agentKind: 'main' })).toMatchObject({ ok: false, hint: expect.stringContaining('没有可用的审批通道') });
+    expect(await registry.execute('delete_file', {}, { turn, workspace: '.', agentKind: 'lw', ...newToolScope() })).toMatchObject({ ok: false, hint: expect.stringContaining('没有可用的审批通道') });
     expect(performance.now() - started).toBeLessThan(100);
     expect(db.prepare('SELECT COUNT(*) AS count FROM approvals').get()).toMatchObject({ count: 0 });
     // 没有裁决通道时也**不该发回执**：那一条本来就当场拒绝，再发一句「等 owner 批」是骗人。
@@ -76,7 +78,7 @@ describe('approval rules', () => {
     const abort = new AbortController(); const turn = { turnId: 'turn-with-channel', key: 'chat:1', chatId: '1', threadId: null, initiatorUserId: '2', effectiveRole: 'trusted', isPrivate: false, baseCommitId: null, snapshot: { messages: [], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 0 }, delta: [], abortSignal: abort.signal, config } satisfies RuntimeTurnContext;
     registry.register({ name: 'delete_file', description: '', inputSchema: z.object({}), policy: { minRole: 'trusted', approval: 'always', scope: 'workspace', source: 'builtin' }, sourcePriority: 1, execute: () => ({ ok: true }) });
     events.subscribe(() => undefined, { channel: true });
-    const pending = registry.execute('delete_file', {}, { turn, workspace: '.', agentKind: 'main' });
+    const pending = registry.execute('delete_file', {}, { turn, workspace: '.', agentKind: 'lw', ...newToolScope() });
     const row = db.prepare("SELECT id FROM approvals WHERE state='pending'").get() as { id: string };
     expect(row).toBeTruthy();
     expect(broker.decide(row.id, true, 'owner', 'webui')).toBe(true);
@@ -140,11 +142,13 @@ describe('approval rules', () => {
     closeDatabase(db);
   });
 
-  it('rechecks subagent and skill allowlists during execution', async () => {
+  // 两条收窄都长在 `ToolExecutionContext` 上（per-run），而不是 turn 上：worker 与主轮共享同一个
+  // turn 对象，写在 turn 上时一个 worker 载入带 `allowed-tools` 的 skill 会去收窄主轮。
+  it('rechecks worker and skill allowlists during execution', async () => {
     const { db, registry, context } = harness(false);
     registry.register({ name: 'write_file', description: '', inputSchema: z.object({}), policy: { minRole: 'trusted', approval: 'never', scope: 'workspace', source: 'builtin' }, sourcePriority: 1, execute: () => ({ ok: true }) });
-    expect(await registry.execute('write_file', {}, { ...context, agentKind: 'sub', allow: new Set(['read_file']) })).toMatchObject({ ok: false, error: 'tool_not_in_allowlist' });
-    (context.turn as RuntimeTurnContext).skillAllowedTools = new Set(['read_file']);
+    expect(await registry.execute('write_file', {}, { ...context, agentKind: 'lw', allow: new Set(['read_file']) })).toMatchObject({ ok: false, error: 'tool_not_in_allowlist' });
+    context.skillAllowedTools.add('read_file');
     expect(await registry.execute('write_file', {}, context)).toMatchObject({ ok: false, error: 'tool_not_in_allowlist' });
     closeDatabase(db);
   });
@@ -188,7 +192,7 @@ describe('approval rules', () => {
     const broker = new DatabaseApprovalBroker(db, () => config, events, log);
     const registry = new ToolRegistry(log, broker, () => ({ maxRegistered: 10, maxCallsPerTurn: 50, maxConsecutiveErrors: 3 }), () => config.approval.rules);
     const turn = { turnId: 'turn-hot', key: 'chat:1', chatId: '1', threadId: null, initiatorUserId: '2', effectiveRole: 'trusted', isPrivate: false, baseCommitId: null, snapshot: { messages: [], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 0 }, delta: [], abortSignal: new AbortController().signal, config } satisfies RuntimeTurnContext;
-    const context = { turn, workspace: './data', agentKind: 'main' as const };
+    const context = { turn, workspace: './data', agentKind: 'lw' as const, ...newToolScope() };
     registry.register({ name: 'bash', description: '', inputSchema: z.object({}), policy: { minRole: 'trusted', approval: 'conditional', scope: 'sandbox', source: 'builtin' }, sourcePriority: 1, execute: () => ({ ok: true }) });
     const first = registry.execute('bash', {}, context);
     const firstId = pendingApprovalId(db);
@@ -242,7 +246,7 @@ describe('approval rules', () => {
     const abort = new AbortController();
     const turn = { turnId: 't', key: 'chat:1', chatId: '1', threadId: null, initiatorUserId: '2', effectiveRole: 'trusted', isPrivate: false,
       baseCommitId: null, snapshot: { messages: [], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 0 }, delta: [], abortSignal: abort.signal, config } satisfies RuntimeTurnContext;
-    const running = registry.execute('bash', { command: 'anything' }, { turn, workspace: './data', agentKind: 'main' });
+    const running = registry.execute('bash', { command: 'anything' }, { turn, workspace: './data', agentKind: 'lw', ...newToolScope() });
     for (let round = 0; round < 40 && !db.prepare("SELECT COUNT(*) FROM approvals WHERE state='pending'").pluck().get(); round += 1) await new Promise((settle) => setTimeout(settle, 5));
     broker.decide(pendingApprovalId(db), true, 'owner', 'webui');
     expect(await running).toMatchObject({ ok: true });

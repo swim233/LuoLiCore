@@ -44,31 +44,11 @@ agent:
     modelAlias: main
     maxSteps: 12
     downgradeAfterStep: 8
-  agents:
-    - name: researcher
-      description: 在聊天记录、文件和网络中检索资料并给出带引用的结论
-      modelAlias: low
-      maxSteps: 20
-      minRole: limited
-      tools: [read_file, list_dir, grep, glob, search_messages, read_messages, get_message, web_fetch, web_search]
-      resultMaxChars: 4000
-      instructions: 使用最少的调用找到确定答案，输出结论、证据和不确定项。
-    - name: coder
-      description: 在工作目录内完成多文件读写与脚本执行类任务
-      modelAlias: high
-      maxSteps: 30
-      minRole: trusted
-      tools: [read_file, write_file, edit_file, move_file, list_dir, grep, glob, bash, python]
-      resultMaxChars: 6000
-      instructions: 先理解现有代码，再进行最小且完整的实现并验证。
-    - name: summarizer
-      description: 把大段文本压缩为结构化摘要
-      modelAlias: low
-      maxSteps: 3
-      minRole: limited
-      tools: []
-      resultMaxChars: 3000
-      instructions: 输出结论、要点、数据和不确定项。
+  worker:
+    modelAlias: low
+    maxSteps: 12
+    resultMaxChars: 4000
+    maxResultChars: 65536
 tools:
   maxRegistered: 80
   maxCallsPerTurn: 40

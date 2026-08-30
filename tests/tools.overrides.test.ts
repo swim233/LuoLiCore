@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
-import { ToolRegistry, relaxedFields, effectiveToolPolicy } from '@luoli/core';
+import { ToolRegistry, newToolScope, relaxedFields, effectiveToolPolicy } from '@luoli/core';
 import type { ApprovalBroker, LogSink, ToolOverride, ToolPolicyEntry } from '@luoli/core';
 import type { Role, RuntimeTurnContext } from '@luoli/shared';
 
@@ -24,7 +24,12 @@ function turnFor(role: Role): RuntimeTurnContext {
   return { turnId: 't', key: 'chat:1', chatId: '1', threadId: null, initiatorUserId: '2', effectiveRole: role, isPrivate: true, baseCommitId: null,
     snapshot: { messages: [], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 0 }, delta: [], abortSignal: new AbortController().signal, config: {} };
 }
-const contextFor = (role: Role) => ({ turn: turnFor(role), workspace: '.', agentKind: 'main' as const });
+// `agentKind` 取 lw 而不是 main：这份文件注册的是自造工具名（`thing` / `gated` / …），它们不在
+// `MAIN_AGENT_TOOLS` 白名单里，`toolCallableBy('main', …)` 会在角色闸之后立刻拒掉全部用例 ——
+// 那是「谁能调这一族」的正交闸，混进来会把覆盖层自己的判据整个遮住（覆盖到底生效没有就再也
+// 断不出来了）。worker 侧的判据是 `!MAIN_ONLY_TOOLS.has(name)`，自造名一律放行，正好只留下
+// 覆盖层这一道。
+const contextFor = (role: Role) => ({ turn: turnFor(role), workspace: '.', agentKind: 'lw' as const, ...newToolScope() });
 
 function registryWith(overrides: Record<string, ToolOverride>, approval: ApprovalBroker = broker): ToolRegistry {
   const registry = new ToolRegistry(log, approval, limits);
@@ -107,7 +112,7 @@ describe('工具策略覆盖层', () => {
     expect(await registry.execute('slow', {}, contextFor('owner'))).toEqual({ ok: true, done: true });
   });
 
-  // `timeoutMs: null` 的工具（bash / python / spawn_agent / spawn_harness / ask_parent）各有自己的
+  // `timeoutMs: null` 的工具（bash / python / spawn_worker / spawn_harness / ask_parent）各有自己的
   // 硬期限。从工具页给它们套一层外层 race 会在它们自己的超时之前把调用砍掉，所以这里不认覆盖。
   it('timeoutMs 覆盖对自管超时的工具无效', async () => {
     const registry = registryWith({ owns: { timeoutMs: 20 } });

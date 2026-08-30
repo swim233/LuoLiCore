@@ -2,6 +2,15 @@ import { roleRank, type Role } from "@luoli/shared";
 
 export const APPROVAL_POLICIES = ["never", "conditional", "always"] as const;
 export type ApprovalPolicy = (typeof APPROVAL_POLICIES)[number];
+/**
+ * 谁在调这个工具（`docs/04 §1`）。`main` 只对话与派发，工具执行整体下沉给 `lw` —— 内建的轻任务
+ * worker，拿的是调用者有效角色下的全集。
+ *
+ * **没有 `harness` 这一档**：外部 harness 与 ACP 自带整套工具，它们内部的调用一次都不经过本注册表
+ * （`docs/14` T17），因此没有任何代码会构造一个 harness 侧的 `ToolExecutionContext`。加一个谁都不产生
+ * 的枚举值，等于在权限判据里放一条永远走不到的分支。
+ */
+export type AgentKind = "main" | "lw";
 export type ToolScope =
   "workspace" | "chat" | "private" | "global" | "sandbox" | "telegram";
 
@@ -125,19 +134,13 @@ export const TOOL_POLICY = {
     scope: "global",
     source: "builtin",
   },
-  spawn_agent: {
+  spawn_worker: {
     minRole: "limited",
     approval: "never",
     scope: "chat",
     source: "agent",
   },
-  list_agents: {
-    minRole: "limited",
-    approval: "never",
-    scope: "chat",
-    source: "agent",
-  },
-  read_agent_result: {
+  read_worker_result: {
     minRole: "limited",
     approval: "never",
     scope: "chat",
@@ -383,10 +386,16 @@ export type ToolName = keyof typeof TOOL_POLICY;
  *
  * `allowed-tools` 表达的是完成该任务需要哪些工具，而非本轮禁止其他行为。一个
  * `allowed-tools: [bash]` 的 skill 曾同时关闭 `send_message` / `report_progress` / `context_stats`，
- * 导致模型执行完 skill 后无法追发消息、子 agent 无法上报进度。
+ * 导致模型执行完 skill 后无法追发消息、worker 无法上报进度。
  *
  * 这不构成放权：skill 的 `allowed-tools` 只能是角色白名单的子集（docs/07 §2），豁免这几个
  * 归还的仍是该角色本就具备的能力。
+ *
+ * **`send_message` 已从表里摘掉**：`load_skill` 随工具一起下沉，收窄从此只发生在 worker 那一侧
+ * （主 agent 的 `skillAllowedTools` 恒空，`admit()` 那条 `.size &&` 直接短路），而 `send_message`
+ * 是 `MAIN_ONLY_TOOLS`，worker 先撞 `tool_unavailable_for_worker` 就走不到收窄这一步。
+ * 留着它就是一条恒不生效的豁免 —— 而一条读起来像在防某件事、实际什么都不防的规则，
+ * 比没有这条规则更坏。
  *
  * `search_tools` 在列的理由与 `load_skill` 相同：元能力不属于作业工具。一个
  * `allowed-tools: [bash]` 的 skill 若同时关闭检索入口，模型既看不到折叠工具的 schema，
@@ -396,7 +405,6 @@ export type ToolName = keyof typeof TOOL_POLICY;
 export const SKILL_NARROWING_EXEMPT: readonly ToolName[] = [
   "load_skill",
   "search_tools",
-  "send_message",
   "report_progress",
   "context_stats",
 ];
@@ -409,6 +417,85 @@ export const SKILL_NARROWING_EXEMPT: readonly ToolName[] = [
  * 无法调用的名字。因此运维用 `tools.catalog.defer` 点名这两个时静默不生效。
  */
 export const DEFER_EXEMPT: readonly ToolName[] = ["search_tools", "load_skill"];
+
+/**
+ * **只有主 agent 能调**的工具（`docs/05 §4`）。worker 侧一律拒。
+ *
+ * 五族，每族各有自己的理由，不是笼统的「对话面」：
+ *
+ * - **记忆写入**：记什么是对话层的判断，而 worker 看不到对话（`docs/04 §3.3`）。
+ * - **Telegram 输出**：投递通道只有一条，`docs/04 §1.1` 那句「主 agent 永远负责最终对话」
+ *   靠它成立。另有两处实打实的坏处：追发额度 `tools.tg.maxExtraMessagesPerTurn` 的计数器挂在
+ *   父子共享的 turn 上（worker 会吃掉主 agent 的份），而 worker 的 kernel 刻意不含 Telegram 排版段
+ *   （`docs/06 §3.1`），它直接发出去的东西会带转义符。
+ * - **定时任务**：它立的是会话层面的约，且 `scope: 'chat'` 绑死本会话 —— 由看得见对话的那一侧下。
+ * - **轮次形态开关**：`stay_silent` 本来就焊死了 `agentKind === 'main'`（`docs/02 §10.5`）；
+ *   `set_model` 直接改 `turn.modelAliasOverride`，给 worker 等于让它换掉**父轮**的模型。
+ * - **派发族与结果读取**：主 agent 的本职。worker 是叶子，给了它就不是叶子了。
+ */
+export const MAIN_ONLY_TOOLS: ReadonlySet<ToolName> = new Set([
+  "memory_write",
+  "send_message",
+  "send_photo",
+  "send_file",
+  "react",
+  "pin_message",
+  "schedule_create",
+  "schedule_update",
+  "schedule_list",
+  "schedule_cancel",
+  "stay_silent",
+  "set_model",
+  "spawn_worker",
+  "spawn_harness",
+  "spawn_acp",
+  "read_worker_result",
+] satisfies ToolName[]);
+
+/**
+ * 主 agent 调得到的工具全集 = `MAIN_ONLY_TOOLS` 再加几件**两侧都给**的只读查询。
+ *
+ * 那几件共享是刻意的：记忆与归档都分「读」和「写」两半，把一族拆到两个 agent 手里，模型会先
+ * `memory_read` 拿不到想要的、再为了 `memory_list` 派一个 worker。读侧不动外部世界，共享无代价。
+ *
+ * **这是白名单不是黑名单**，因此 skill / plugin / MCP / custom 那批不必枚举就自动拒 ——
+ * 它们压根不在 `TOOL_POLICY` 里，名字落不进这张表。
+ *
+ * **它不是可见性而是边界。** 同一份判据喂 `#eligible()`（目录）与 `admit()`（准入复查）两处 ——
+ * 只挡目录的话，模型沿用上一步的工具名直接调过来照样穿得过去（`docs/05 §4` 那条
+ * 「目录过滤不是边界，`execute()` 才是」）。
+ */
+export const MAIN_AGENT_TOOLS: ReadonlySet<ToolName> = new Set([
+  ...MAIN_ONLY_TOOLS,
+  "memory_read",
+  "memory_list",
+  "search_messages",
+  "read_messages",
+  "get_message",
+  "context_stats",
+  "admin_search_messages",
+] satisfies ToolName[]);
+
+/**
+ * worker 用得着、但**不写进主 agent 目录**的内部通道。
+ *
+ * block 3 现在描述的是「worker 能做什么」，按 worker 视角取数就会把这三个带进来 —— 而它们是
+ * worker→父的通道，列在主 agent 的目录里会让模型以为自己可以派一个 worker 去上报进度。
+ */
+export const WORKER_INTERNAL_TOOLS: readonly ToolName[] = [
+  "ask_parent",
+  "report_progress",
+  "search_tools",
+];
+
+/**
+ * 这一档 agent 能不能调这个工具。`#eligible()` 与 `admit()` 共用，判据只有一份。
+ */
+export function toolCallableBy(kind: AgentKind, name: string): boolean {
+  return kind === "main"
+    ? MAIN_AGENT_TOOLS.has(name as ToolName)
+    : !MAIN_ONLY_TOOLS.has(name as ToolName);
+}
 
 /**
  * 运维在工具页保存的覆盖项（`tools.overrides.<name>`，docs/09 §3.7）。

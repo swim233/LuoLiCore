@@ -28,6 +28,7 @@ import type {
   DatabaseApprovalBroker,
   EventBus,
   LogSink,
+  LwWorkerRuntimeEvent,
   MaintenanceService,
   McpManager,
   MemoryStore,
@@ -39,7 +40,6 @@ import type {
   ScheduleUpdateRequest,
   SkillLoader,
   SkillWriteInput,
-  SubAgentRuntimeEvent,
   TurnRegistry,
 } from "@luoli/core";
 import {
@@ -48,10 +48,9 @@ import {
   HOT_RELOADABLE_CONFIG_KEYS,
   chatCandidates,
   createScheduledJob,
-  mergeAgentDefinitions,
-  scanAgentFiles,
   scheduledJobView,
   testApprovalRules,
+  toolCallableBy,
   updateScheduledJob,
   KNOWN_UNIMPLEMENTED_CONFIG_KEYS,
   TOOL_POLICY,
@@ -130,8 +129,8 @@ export interface PromptPreviewResult {
   context: { messages: number; tokens: number };
 }
 
-export type AgentDryRunEvent =
-  | SubAgentRuntimeEvent
+export type WorkerDryRunEvent =
+  | LwWorkerRuntimeEvent
   | { type: "final"; summary: string; fullRef: string; truncated: boolean }
   | { type: "error"; message: string };
 
@@ -202,11 +201,14 @@ export interface ServerDependencies {
     key: string,
     role: Role,
   ) => PromptPreviewResult | Promise<PromptPreviewResult>;
-  dryRunAgent?: (
-    name: string,
-    task: string,
+  /**
+   * lw-worker 的隔离试跑（`POST /api/workers/dryrun`）。没有 `name` 参数 —— 定义体系已删除，
+   * 一次试跑要说清的只有任务本身与两个可选旋钮。
+   */
+  dryRunWorker?: (
+    input: { task: string; tools?: string[]; modelAlias?: string },
     signal: AbortSignal,
-    emit: (event: SubAgentRuntimeEvent) => void | Promise<void>,
+    emit: (event: LwWorkerRuntimeEvent) => void | Promise<void>,
   ) => Promise<{ summary: string; fullRef: string; truncated: boolean }>;
   log: LogSink;
   configSchema: unknown;
@@ -298,7 +300,7 @@ const invalidConfig = (
  * `.default()` 填满，写回的是填满之后的整棵子树，一次未作任何修改的往返即把当时的代码默认值
  * 永久固定（docs/28 · L-WEB-02）。
  *
- * 两条刻意的取舍：数组按叶子处理 —— `approval.rules` / `mcp.servers` / `agent.agents` 是整块语义，
+ * 两条刻意的取舍：数组按叶子处理 —— `approval.rules` / `mcp.servers` / `agent.acp.agents` 是整块语义，
  * 逐下标落库既无人这样读取，也会被 `sortOverrideKeys` 拼回原样；空对象不产生叶子 —— 它表达的是
  * 此处不做任何覆盖，而写成一行 `{}` 会让 `writeConfigRows` 连带删除同一子树下的密钥行，
  * 那正是 docs/28 · L-WEB-04 的形态。
@@ -1537,7 +1539,15 @@ export function createServer(
    * 字段名；两者都给出才能看出当前偏离默认的程度（docs/09 §3.7）。
    *
    * 有注册表时向它查询（合并逻辑只有一份，还能一并列出 MCP / plugin 的工具）；没有则退回静态表。
+   *
+   * `sides` 现算，取的正是运行时那个判据 `toolCallableBy()`（`#eligible()` 与 `admit()` 共用的
+   * 那一份，docs/05 §4）。不在前端也不在这里另写一遍分叉规则：写第二份必然漂移，而漂移的表现是
+   * 界面说某个工具 worker 用得上、实际调过去撞 `tool_unavailable_for_worker`。
    */
+  const toolSides = (name: string): Array<"main" | "worker"> => [
+    ...(toolCallableBy("main", name) ? (["main"] as const) : []),
+    ...(toolCallableBy("lw", name) ? (["worker"] as const) : []),
+  ];
   app.get("/api/tools", (ctx) => {
     const overrides = currentConfig().tools.overrides;
     if (dependencies.tools) {
@@ -1559,6 +1569,8 @@ export function createServer(
               // 这个工具当前是常驻还是折叠（`tools.catalog.*`，docs/05 §3.12）。它不是启停开关的
               // 另一种表述：折叠工具照旧可执行，只是模型默认看不到 schema，要先 `search_tools` 展开。
               deferred: entry.deferred,
+              // 主 agent 与 lw-worker 的可用集分叉。与 `enabled` 正交：`enabled=false` 是两侧都没有。
+              sides: toolSides(entry.name),
               relaxed: entry.relaxed,
             },
           ]),
@@ -1580,6 +1592,8 @@ export function createServer(
               // 这条路没有注册表，折叠判不出来（判据要 `#limits()` 与实际注册进来的那批工具）。
               // 报 false 而不是省掉这个字段：形状统一，前端不必分两种响应处理。
               deferred: false,
+              // `sides` 在这条路上照样是真的：判据只看工具名，与有没有注册表无关。
+              sides: toolSides(name),
               defaults: {
                 minRole: policy.minRole,
                 approval: policy.approval,
@@ -1981,9 +1995,8 @@ export function createServer(
         dependencies.db
           .prepare("DELETE FROM models WHERE provider_id=?")
           .run(id);
-      return dependencies.db
-        .prepare("DELETE FROM providers WHERE id=?")
-        .run(id).changes;
+      return dependencies.db.prepare("DELETE FROM providers WHERE id=?").run(id)
+        .changes;
     })();
     for (const entry of aliases.filter((one) => one.emptied))
       dependencies.log.event({
@@ -2846,6 +2859,16 @@ export function createServer(
       pruneApplied: Boolean(row.pruneApplied),
       ...detailPayload(parts),
     }));
+    // 这一轮派出去的 worker。主 run（`worker_kind IS NULL`）就是这一轮本身，列在自己的子表里
+    // 只会让人以为它派了一个自己。三种 worker 共用这一张表，`workerKind` 是它们唯一的区分符。
+    const workerRuns = dependencies.db
+      .prepare(
+        `SELECT id,worker_kind AS workerKind,agent_name AS agentName,model_alias AS modelAlias,state,steps,
+      tool_calls AS toolCalls,cost_usd AS costUsd,external_cost_usd AS externalCostUsd,result_summary AS resultSummary,
+      error,started_at AS startedAt,finished_at AS finishedAt
+      FROM agent_runs WHERE turn_id=? AND worker_kind IS NOT NULL ORDER BY started_at`,
+      )
+      .all(id);
     return ctx.json({
       ok: true,
       data: {
@@ -2853,6 +2876,7 @@ export function createServer(
         captureBodies: currentConfig().logs.captureBodies,
         events,
         contextMessages,
+        workerRuns,
       },
     });
   });
@@ -3106,9 +3130,8 @@ export function createServer(
       [];
     const changes = dependencies.db.transaction(() => {
       aliases = pruneAliases([id]);
-      return dependencies.db
-        .prepare("DELETE FROM models WHERE id=?")
-        .run(id).changes;
+      return dependencies.db.prepare("DELETE FROM models WHERE id=?").run(id)
+        .changes;
     })();
     for (const entry of aliases.filter((one) => one.emptied))
       dependencies.log.event({
@@ -3495,14 +3518,12 @@ export function createServer(
       data: {
         enabled: boxes.enabled(),
         ...boxes.capacity(),
-        containers: boxes
-          .list()
-          .map((row) => ({
-            ...row,
-            pinned: row.pinned !== 0,
-            hasSetsid: row.hasSetsid !== 0,
-            chatLabel: labels.get(row.chatId) ?? null,
-          })),
+        containers: boxes.list().map((row) => ({
+          ...row,
+          pinned: row.pinned !== 0,
+          hasSetsid: row.hasSetsid !== 0,
+          chatLabel: labels.get(row.chatId) ?? null,
+        })),
       },
     });
   });
@@ -3671,8 +3692,7 @@ export function createServer(
     const row = dependencies.db
       .prepare("SELECT * FROM memory_docs WHERE id=?")
       .get(ctx.req.param("id")) as
-      | { path?: string; scope?: string; subject?: string | null }
-      | undefined;
+      { path?: string; scope?: string; subject?: string | null } | undefined;
     if (!row?.path)
       return ctx.json(apiError("not_found", "文档不存在", 404).body, 404);
     // `memory_docs.path` 今天只由本进程写，但「库里的路径值可信」是一个会随时间失效的假设
@@ -5015,51 +5035,25 @@ export function createServer(
       },
     });
   });
-  // 文件定义（`agents/<name>.md`）与配置定义合并后一并返回，每条带 `source`（docs/14 §2 Q5-b）：
-  // 界面上要能直接看出哪条来自文件、哪条被 WebUI 覆盖过。只返回不可编辑的事实，不返回文件路径。
-  // 合并逻辑与 `main.ts` 共用 `mergeAgentDefinitions`：端点自行实现一遍时，WebUI 迟早会展示出
-  // 一份运行时并不生效的名单。
-  app.get("/api/agents", (ctx) => {
-    const config = currentConfig();
-    const scan = scanAgentFiles(config.agent.agentsDir);
-    const fromFiles = new Set(
-      scan.definitions.map((definition) => definition.name),
-    );
-    const overridden = new Set(
-      config.agent.agents.map((definition) => definition.name),
-    );
-    const data = mergeAgentDefinitions(
-      scan.definitions,
-      config.agent.agents,
-    ).map((definition) => ({
-      ...definition,
-      source: fromFiles.has(definition.name)
-        ? overridden.has(definition.name)
-          ? "file-overridden"
-          : "file"
-        : "config",
-    }));
-    // 解析失败的文件不进入这张表（它们没有可展示的定义），改走日志：启动与每次配置热更新时
-    // `main.ts` 各记一条 `agent.file_invalid` error 与一行 stderr。没有文件监听：只改
-    // agents/ 下的 .md 不会自动重新扫描，需要改一次配置或重启。
-    for (const failure of scan.errors)
-      dependencies.log.event({
-        level: "error",
-        kind: "agent.file_invalid",
-        summary: `子 agent 定义解析失败：${failure.file}`,
-        data: failure,
-      });
-    return ctx.json({ ok: true, data });
-  });
-  app.post("/api/agents/:name/dryrun", async (ctx) => {
-    if (!dependencies.dryRunAgent)
+  /**
+   * lw-worker 的隔离试跑。**没有 `:name`** —— 定义体系已删除，worker 只有一种，权限来自调用者。
+   *
+   * 保留这条路的理由与试跑某份定义无关：它是唯一能不开一条真轮次、用真模型真工具跑一遍、
+   * 并逐步看到 step / usage / 工具输入输出的入口，而 lw-worker 是重构后唯一执行工具的一档。
+   * `tools` 与 `modelAlias` 只做形状校验，取值合法性由运行时判（未知别名、越权工具名都在那边拦）。
+   */
+  app.post("/api/workers/dryrun", async (ctx) => {
+    if (!dependencies.dryRunWorker)
       return ctx.json(
-        apiError("not_implemented", "Agent 试跑未接入运行时", 500).body,
+        apiError("not_implemented", "Worker 试跑未接入运行时", 500).body,
         500,
       );
-    const body = await ctx.req
-      .json<{ task?: unknown }>()
-      .catch((): { task?: unknown } => ({}));
+    type DryRunBody = {
+      task?: unknown;
+      tools?: unknown;
+      modelAlias?: unknown;
+    };
+    const body = await ctx.req.json<DryRunBody>().catch((): DryRunBody => ({}));
     if (typeof body.task !== "string" || !body.task.trim())
       return ctx.json(apiError("invalid_task", "task 必填").body, 400);
     if (body.task.length > 20_000)
@@ -5067,7 +5061,31 @@ export function createServer(
         apiError("task_too_large", "task 最多 20000 字符").body,
         400,
       );
-    const task = body.task.trim();
+    if (
+      body.tools !== undefined &&
+      (!Array.isArray(body.tools) ||
+        body.tools.some((name: unknown) => typeof name !== "string" || !name))
+    )
+      return ctx.json(
+        apiError("invalid_tools", "tools 只能是工具名数组").body,
+        400,
+      );
+    if (
+      body.modelAlias !== undefined &&
+      (typeof body.modelAlias !== "string" ||
+        !ALIAS_NAME_PATTERN.test(body.modelAlias))
+    )
+      return ctx.json(
+        apiError("invalid_model_alias", "modelAlias 不是合法别名").body,
+        400,
+      );
+    // 空数组与不给是两件事：不给 = 调用者角色下的全集，给了空数组 = 一个工具都不许用。
+    // 两者都送出去，由运行时决定，端点不替它归一。
+    const input = {
+      task: body.task.trim(),
+      ...(body.tools === undefined ? {} : { tools: body.tools as string[] }),
+      ...(body.modelAlias === undefined ? {} : { modelAlias: body.modelAlias }),
+    };
     const abort = new AbortController();
     const requestSignal = ctx.req.raw.signal;
     const onRequestAbort = (): void => abort.abort();
@@ -5076,16 +5094,11 @@ export function createServer(
     let closed = false;
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
-        const send = (event: AgentDryRunEvent): void => {
+        const send = (event: WorkerDryRunEvent): void => {
           if (!closed)
             controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
         };
-        void dependencies.dryRunAgent!(
-          ctx.req.param("name"),
-          task,
-          abort.signal,
-          send,
-        )
+        void dependencies.dryRunWorker!(input, abort.signal, send)
           .then((result) => send({ type: "final", ...result }))
           .catch((error) =>
             send({
@@ -5112,6 +5125,129 @@ export function createServer(
         "content-type": "application/x-ndjson; charset=utf-8",
         "cache-control": "no-store",
         "x-content-type-options": "nosniff",
+      },
+    });
+  });
+  /**
+   * Worker 运行记录（`agent_runs` 里 `worker_kind IS NOT NULL` 的那些，迁移 `0018`）。
+   *
+   * 判据用 `worker_kind` 而不是 `kind`：主 run 的 `worker_kind` 恒 NULL，三种 worker 各占一档
+   * （`lw` / `harness` / `acp`）。此前全仓唯一读 `agent_runs` 的是 `GET /api/tasks/:id` 那条 join，
+   * 入口是 `tasks.agent_run_id` —— harness / ACP 两条路不建 `tasks` 行，那条 join 永远够不着
+   * （docs/21 · G-API-25）。
+   *
+   * 列表不带 `task_input` / `external_usage_json` / `progress`：一页 50 行各带一份完整任务正文
+   * 只是往浏览器推死重量，理由同 `GET /api/tasks` 不带 `progress_json`。排序照 `GET /api/tasks`：
+   * 正在跑的那几条才是关注对象。
+   *
+   * **`external_cost_usd` 原样透出，不与 `cost_usd` 相加。** 那是外部 agent 自报的数字，口径由它定、
+   * 无法核对，结构上被挡在每一个聚合之外（迁移 `0014`）；在这里合并等于把一条有意为之的边界当缺口修掉。
+   */
+  const WORKER_KINDS = ["lw", "harness", "acp"];
+  const RUN_STATES = ["running", "done", "failed", "cancelled"];
+  app.get("/api/worker-runs", (ctx) => {
+    const {
+      page: pageNumber,
+      size,
+      offset,
+    } = pageParams(ctx, { defaultSize: 50, maxSize: 200 });
+    const workerKind = ctx.req.query("workerKind");
+    const state = ctx.req.query("state");
+    // 非法过滤值 400 而不是忽略：忽略的表现是「筛了 acp 却看见 lw 的行」，比报错更难察觉。
+    if (workerKind !== undefined && !WORKER_KINDS.includes(workerKind))
+      return ctx.json(
+        apiError(
+          "invalid_worker_kind",
+          `workerKind 只能是 ${WORKER_KINDS.join(" / ")}`,
+        ).body,
+        400,
+      );
+    if (state !== undefined && !RUN_STATES.includes(state))
+      return ctx.json(
+        apiError("invalid_state", `state 只能是 ${RUN_STATES.join(" / ")}`)
+          .body,
+        400,
+      );
+    const filters = ["worker_kind IS NOT NULL"];
+    const bindings: string[] = [];
+    if (workerKind !== undefined) {
+      filters.push("worker_kind=?");
+      bindings.push(workerKind);
+    }
+    if (state !== undefined) {
+      filters.push("state=?");
+      bindings.push(state);
+    }
+    const where = filters.join(" AND ");
+    const total = Number(
+      dependencies.db
+        .prepare(`SELECT COUNT(*) FROM agent_runs WHERE ${where}`)
+        .pluck()
+        .get(...bindings),
+    );
+    const rows = dependencies.db
+      .prepare(
+        `SELECT id,turn_id AS turnId,parent_run_id AS parentRunId,depth,worker_kind AS workerKind,agent_name AS agentName,
+      model_alias AS modelAlias,effective_role AS effectiveRole,state,steps,tool_calls AS toolCalls,
+      input_tokens AS inputTokens,output_tokens AS outputTokens,cost_usd AS costUsd,external_cost_usd AS externalCostUsd,
+      task_input AS taskInput,result_summary AS resultSummary,error,started_at AS startedAt,finished_at AS finishedAt
+      FROM agent_runs WHERE ${where} ORDER BY (state='running') DESC,started_at DESC LIMIT ? OFFSET ?`,
+      )
+      .all(...bindings, size, offset) as Array<
+      Record<string, unknown> & { taskInput: string | null }
+    >;
+    // 列表只给任务的第一行：整份 `task_input` 是详情的事。ACP 那条路的任务正文可以是一整段
+    // 提示词，五十行各带一份就是往浏览器推死重量（同 `GET /api/tasks` 不带 `progress_json`）。
+    const items = rows.map(({ taskInput, ...row }) => ({
+      ...row,
+      taskLine: (taskInput?.split("\n")[0] ?? "").slice(0, 160),
+    }));
+    return ctx.json({
+      ok: true,
+      data: { items, total, page: pageNumber, size },
+    });
+  });
+  /**
+   * 单条 worker run 的只读详情。多出的四列（`task_input` / `external_usage_json` /
+   * `result_full_ref` / `provider_id`+`model_id`）都只有这条路取得到。
+   *
+   * `worker_kind IS NULL` 的行（主 run）按 404 处理而不是原样返回：这个入口的语义是 worker 运行记录，
+   * 把主 run 从这里放出去等于让页面上出现一条它解释不了的行。
+   */
+  app.get("/api/worker-runs/:id", (ctx) => {
+    const row = dependencies.db
+      .prepare(
+        `SELECT id,turn_id AS turnId,parent_run_id AS parentRunId,depth,worker_kind AS workerKind,agent_name AS agentName,
+      model_alias AS modelAlias,provider_id AS providerId,model_id AS modelId,effective_role AS effectiveRole,task_input AS taskInput,
+      state,steps,tool_calls AS toolCalls,input_tokens AS inputTokens,output_tokens AS outputTokens,cost_usd AS costUsd,
+      external_cost_usd AS externalCostUsd,external_usage_json AS externalUsageJson,result_summary AS resultSummary,
+      result_full_ref AS resultFullRef,error,started_at AS startedAt,finished_at AS finishedAt
+      FROM agent_runs WHERE id=? AND worker_kind IS NOT NULL`,
+      )
+      .get(ctx.req.param("id")) as Record<string, unknown> | undefined;
+    if (!row)
+      return ctx.json(
+        apiError("not_found", "这条 worker 运行记录不存在", 404).body,
+        404,
+      );
+    // 与 `GET /api/tasks/:id` 同形：run 上只记它自己那一段，而排障要知道它挂在哪一轮、那一轮怎么了。
+    const turn =
+      (dependencies.db
+        .prepare(
+          "SELECT key,chat_id AS chatId,state,error FROM turns WHERE id=?",
+        )
+        .get(row.turnId as string) as Record<string, unknown> | undefined) ??
+      null;
+    return ctx.json({
+      ok: true,
+      data: {
+        ...row,
+        turn,
+        chatLabel: principalLabel(
+          dependencies.db,
+          "chat",
+          (turn?.chatId as string | undefined) ?? null,
+        ),
       },
     });
   });
@@ -5182,8 +5318,7 @@ export function createServer(
         "SELECT kind,data,data_codec AS codec FROM log_events WHERE id=?",
       )
       .get(Number(ctx.req.param("id"))) as
-      | { kind: string; data: Buffer | null; codec: string | null }
-      | undefined;
+      { kind: string; data: Buffer | null; codec: string | null } | undefined;
     const decoded = row ? decodeLogPayload(row.data, row.codec) : null;
     if (!row || !decoded)
       return ctx.json(apiError("not_found", "该事件没有载荷", 404).body, 404);
@@ -5434,7 +5569,7 @@ export function createServer(
     return ctx.json({ ok: true, data: { changes } });
   });
   /**
-   * `spawn_agent` 派发出去的子 agent 任务（docs/09 §3.12）。
+   * `spawn_worker` 派发出去的 worker 任务（docs/09 §3.12）。
    *
    * 列表不返回 `progress_json`：`AgentManager.progress` 每一帧都覆盖同一列，一行可达数 KB，
    * 而列表上只显示标题与状态，理由同 `GET /api/logs` 不返回 `data_json`。查看进度走详情。
@@ -5511,7 +5646,7 @@ export function createServer(
     const agentRun = row.agent_run_id
       ? (dependencies.db
           .prepare(
-            "SELECT agent_name AS agentName,model_alias AS modelAlias,state,result_summary AS resultSummary FROM agent_runs WHERE id=?",
+            "SELECT worker_kind AS workerKind,agent_name AS agentName,model_alias AS modelAlias,state,result_summary AS resultSummary FROM agent_runs WHERE id=?",
           )
           .get(row.agent_run_id as string) ?? null)
       : null;

@@ -834,8 +834,8 @@ Telegram 流消费者；流式的占位消息与进度编辑在这条路上只�
 里：`agentKind === 'main'` **且** `turn.silenceable === true`。
 
 - `silenceable` 的**唯一置位方是 `ScheduledJobRunner`**（且只在 `allow_silent` 为真时）。缺席 = 假，
-  所以每一条 Telegram 轮次、提示词预览、子 agent 隔离试跑都 fail-closed。
-- 子 agent 那道闸不是冗余：**子 agent 拿到的是父轮的同一个 turn 对象**，让它够得着这个工具等于
+  所以每一条 Telegram 轮次、提示词预览、worker 隔离试跑都 fail-closed。
+- worker 那道闸不是冗余：**worker 拿到的是父轮的同一个 turn 对象**，让它够得着这个工具等于
   一个 researcher 可以替整轮闭嘴，而派它出去的主 agent 全程不知情。
 - 模型置的是 `turn.silenced`，而**只有 runner 读这个字段**。就算哪天有人误给一条 Telegram 轮次
   置了 `silenceable`，模型能置的也只是一个没人读的布尔 —— 这是结构性保险，不指望调用方自觉。

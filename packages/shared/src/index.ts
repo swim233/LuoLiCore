@@ -324,22 +324,15 @@ export interface RuntimeTurnContext {
   snapshot: MaterializedContext;
   delta: NewContextMessage[];
   abortSignal: AbortSignal;
-  loadedSkills?: Set<string>;
-  skillAllowedTools?: Set<string>;
-  /**
-   * 本轮被 `search_tools` 展开过的折叠工具（`docs/05 §3.12`）。与 `skillAllowedTools` 方向相反：
-   * 那个是收窄，这个是扩张。`prepareStep` 算的是 `(常驻 ∪ 本轮已展开) ∩ skill 允许集`，
-   * 先扩张后收窄，收窄恒胜（`docs/07 §2.2`）。
+  /*
+   * 渐进披露的三个集合（`loadedSkills` / `skillAllowedTools` / `expandedTools`）**不在这里** ——
+   * 它们挂在 `ToolExecutionContext` 上，按 agent run 各持一份（`tools/registry.ts`）。
    *
-   * 轮内单调递增，只增不减，两个理由：① 回收一次即修改请求体第 0 段（tools 数组），本轮剩余
-   * 步骤的前缀缓存整段作废重写（`docs/04 §2.1`）；② 单调集合天然区分「未展开」与「展开了但零命中」，
-   * 无需像 `narrows` 那样另加标志位。
-   *
-   * 唯一写入方是 `search_tools`（`tools/catalog-meta.ts`），读取方是 `prepareStep` 与
-   * `repairToolCall`。随 turn 对象销毁，不跨轮保留、不持久化：持久化会产生「server 已删除而展开集
-   * 仍记着」的状态腐烂，模型凭历史里的名字用 `names:[…]` 批量重展开即可。
+   * 挂在 turn 上的时候，worker 与主轮共享同一个引用：worker 载入一个带 `allowed-tools` 的 skill
+   * 会去收窄主轮，worker 展开的折叠工具会写进主轮的展开集。`search_tools` 那道
+   * `agentKind === 'main'` 闸当初存在的全部理由就是这个，而工具下沉之后那道闸要翻过来给 worker
+   * （`docs/05 §3.12` 不变量 4），只能先把状态挪对位置。
    */
-  expandedTools?: Set<string>;
   /**
    * 本轮内有工具向上下文注入过图片（`web_fetch` 抓取的图、MCP 截图）。
    *

@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { ulid } from "ulid";
 import type {
   AgentManager,
   Config,
@@ -29,7 +30,7 @@ import {
   readSlice,
   resolveAcpTarget,
   runHarness,
-  runSubAgent,
+  runLwWorker,
   selfAuthoringDenyGlobs,
   webFetch,
   webSearch,
@@ -288,8 +289,8 @@ export function registerBuiltins(
      * （测试与未配置 vision 的部署均落在此处）。`visionAvailable` 每次调用实时计算，因为它判定的是
      * 本轮当前别名是否支持图像，而别名可被 `set_model` 更换。
      *
-     * 接收整个 `ToolExecutionContext` 而非仅 `turn`：子 agent 的别名不在 turn 上（它是
-     * `runSubAgent` 的局部变量，经 `agentAlias` 传入），而该图片正是要交给它（`docs/04 §5.2`）。
+     * 接收整个 `ToolExecutionContext` 而非仅 `turn`：worker 的别名不在 turn 上（它是
+     * `runLwWorker` 的局部变量，经 `worker.alias` 传入），而该图片正是要交给它（`docs/04 §5.2`）。
      */
     webMedia?: {
       assets: WebAssetStore;
@@ -331,13 +332,13 @@ export function registerBuiltins(
               dependencies.context.appendDelta(turn, message as never),
             visionAvailable: () => media.visionAvailable(context),
             log: dependencies.log,
-            // 子 agent 档位：父轮只保留文字记录、张数按 run 自行统计、已注入图片标志置于其自身（docs/04 §5.2）。
-            ...(context.subAgent
+            // worker 档位：父轮只保留文字记录、张数按 run 自行统计、已注入图片标志置于其自身（docs/04 §5.2）。
+            ...(context.worker
               ? {
-                  subAgent: {
-                    name: context.subAgent.name,
-                    images: context.subAgent.images,
-                    onInjected: context.subAgent.onMediaInjected,
+                  worker: {
+                    name: context.worker.name,
+                    images: context.worker.images,
+                    onInjected: context.worker.onMediaInjected,
                   },
                 }
               : {}),
@@ -353,15 +354,15 @@ export function registerBuiltins(
   /** 每个 agent_run 上一次向 SSE 广播进度的时间（`agent.progressThrottleMs`）。 */
   const progressBroadcast = new Map<string, number>();
   /**
-   * `agent.maxConcurrentSubagents`：同一轮内同时运行的子 agent 数上限。
-   * 模型可在一步中并行发出多个 `spawn_agent`，每个都是一次真实的模型调用 —— 不设闸门时
-   * 一步即可耗尽 provider 的并发配额与本机内存。它与 `agent.maxSubagentsPerTurn` 是两回事：
-   * 后者统计一轮累计派发数量，本项统计当前同时运行的数量。
+   * `agent.maxConcurrentWorkers`：同一轮内同时运行的 worker 数上限。
+   * 模型可在一步中并列发出多个 `spawn_worker`（worker 是叶子，这也是它唯一的并行途径），
+   * 每个都是一次真实的模型调用 —— 不设闸门时一步即可耗尽 provider 的并发配额与本机内存。
+   * 它与 `agent.maxWorkersPerTurn` 是两回事：后者统计一轮累计派发数量，本项统计当前同时运行的数量。
    */
   const running = new Map<string, number>();
   const waiting = new Map<string, Array<() => void>>();
   /**
-   * 一轮内排队的 `spawn_agent` 全部被 abort（`/cancel`）时，`releaseSlot` 一次都不会被调用，
+   * 一轮内排队的 `spawn_worker` 全部被 abort（`/cancel`）时，`releaseSlot` 一次都不会被调用，
    * 于是 `waiting` 中残留一个空数组条目、`running` 可能残留一个 0，在进程生命周期内不被回收
    * （docs/27 · R-07）。`drop` 的 abort 路径顺带清理一次：队列为空且无运行中任务时，删除两个键。
    */
@@ -372,7 +373,7 @@ export function registerBuiltins(
   };
   /**
    * 获得槽位时返回 true。排队时必须识别 abortSignal：该 promise 原本只由 `releaseSlot` 唤醒，
-   * 因此 `/cancel` 之后排在后面的 `spawn_agent` 仍会被唤醒并真正派发一个子 agent —— 已取消的
+   * 因此 `/cancel` 之后排在后面的 `spawn_worker` 仍会被唤醒并真正派发一个 worker —— 已取消的
    * 会话继续消耗 token，而无人等待其结果（`timeoutMs: null`，注册表的兜底 race 也不会终止它）。
    */
   const acquireSlot = async (
@@ -978,15 +979,17 @@ export function registerBuiltins(
     policy: builtinPolicy("load_skill"),
     sourcePriority: 80,
     execute: (input, context) => {
-      const loaded = (context.turn.loadedSkills ??= new Set());
-      if (loaded.has(input.name)) return { ok: true, alreadyLoaded: true };
+      // 三个 Set 都挂在 `ToolExecutionContext` 上（per-run）而不是 turn 上：worker 与主轮共享同一个
+      // turn 对象，写在 turn 上时 worker 载入一个带 `allowed-tools` 的 skill 会去收窄**主轮**。
+      if (context.loadedSkills.has(input.name))
+        return { ok: true, alreadyLoaded: true };
       const result = dependencies.skills.load(
         input.name,
         context.turn.effectiveRole,
         registry.activeNames(context.turn.effectiveRole, context),
       );
       if (result.ok !== false) {
-        loaded.add(input.name);
+        context.loadedSkills.add(input.name);
         // 只有声明了 `allowed-tools` 的 skill 才修改允许集（docs/07 §4：未声明则不收窄）。
         // 此前此处无条件并入 loader 返回的 `allowedTools`，而该值等于当前全部可用工具 ——
         // 于是先载入一个 `allowed-tools: [read_file]` 的 skill、再载入一个未声明的，前者的
@@ -997,22 +1000,37 @@ export function registerBuiltins(
                 (name): name is string => typeof name === "string",
               )
             : [];
-          const set = (context.turn.skillAllowedTools ??= new Set());
-          for (const name of allowed) set.add(name);
+          for (const name of allowed) context.skillAllowedTools.add(name);
         }
-        // 附带来源标注：`role` 只能是 user/assistant/tool（provider 拒收 messages 中的 system，
-        // docs/02 不变量 15），而 `NOTE_PREFIX` 只对非 sendable role 生效 —— 覆盖不到这一条。
-        // 不标注的话，模型看到的是用户发来的一大段 skill 正文，会把说明文档当作用户要求去执行。
-        // 不使用 untrusted() 包裹：skill 属于本地可信资源，包裹它等于告知模型不要遵循其内容。
-        const body = `${NOTE_PREFIX}以下是 Skill「${input.name}」的正文，由系统按你的 load_skill 调用载入，不是用户发言。\n\n${String(result.body ?? "")}`;
-        dependencies.context.appendDelta(context.turn, {
-          id: crypto.randomUUID(),
-          role: "user",
-          origin: "note",
-          parts: [{ type: "text", text: body }],
-          textPreview: `Skill ${input.name}`,
-          pruneLevel: 2,
-        });
+        /**
+         * 正文的落点按调用方分两条。
+         *
+         * worker 一档什么都不做：正文本来就在 `result.body` 里，随工具返回值进 worker 自己的消息
+         * 序列。走 `appendDelta` 的话它会写进**主 agent** 的上下文并持久化 —— 主 agent 从没调过
+         * `load_skill`，却要在此后每一轮重发一份它读不懂的 skill 正文。
+         *
+         * 主 agent 一档保留旧路径。它现在调不到 `load_skill`（不在 `MAIN_AGENT_TOOLS` 里），
+         * 因此这一支实际走不到 —— 判据写在 `agentKind` 上而不是省掉，是为了让「正文进谁的上下文」
+         * 这件事有一条读得出来的判据，而不是靠「反正只有 worker 有这个工具」。
+         */
+        if (context.agentKind === "main")
+          // 附带来源标注：`role` 只能是 user/assistant/tool（provider 拒收 messages 中的 system，
+          // docs/02 不变量 15），而 `NOTE_PREFIX` 只对非 sendable role 生效 —— 覆盖不到这一条。
+          // 不标注的话，模型看到的是用户发来的一大段 skill 正文，会把说明文档当作用户要求去执行。
+          // 不使用 untrusted() 包裹：skill 属于本地可信资源，包裹它等于告知模型不要遵循其内容。
+          dependencies.context.appendDelta(context.turn, {
+            id: crypto.randomUUID(),
+            role: "user",
+            origin: "note",
+            parts: [
+              {
+                type: "text",
+                text: `${NOTE_PREFIX}以下是 Skill「${input.name}」的正文，由系统按你的 load_skill 调用载入，不是用户发言。\n\n${String(result.body ?? "")}`,
+              },
+            ],
+            textPreview: `Skill ${input.name}`,
+            pruneLevel: 2,
+          });
       }
       return result;
     },
@@ -1025,34 +1043,27 @@ export function registerBuiltins(
     sourcePriority: 100,
     execute: () => ({ ok: true, documents: dependencies.memory.list() }),
   });
+  // worker 是一条完整的 agent 循环（自有步数上限与模型超时），墙钟耗时按分钟计：兜底 race
+  // 会在其运行中途返回 tool_timeout，而 worker 仍在继续产生费用。它的边界是 quota 与 maxSteps。
+  //
+  // `untrustedOutput: true`：worker 是外部内容进主上下文的唯一通道。它读过的网页、文件、工具输出
+  // 在它那一侧都是包过的，但它把这些写成一段摘要交回来，包装就此丢失 —— 不在这里重新包一次，
+  // 等于给了任意网页一条「让主 agent 把这段话当指令读」的路。
   registry.register({
-    name: "list_agents",
-    description: "列出当前权限可派发的子 agent。",
-    inputSchema: z.object({}),
-    policy: builtinPolicy("list_agents"),
-    sourcePriority: 90,
-    execute: (_input, context) => ({
-      ok: true,
-      agents: dependencies.agents
-        .available(context.turn.effectiveRole)
-        .map(({ name, description }) => ({ name, description })),
-    }),
-  });
-  // 子 agent 是一条完整的 agent 循环（自有步数上限与模型超时），墙钟耗时按分钟计：兜底 race
-  // 会在其运行中途返回 tool_timeout，而子 agent 仍在继续产生费用。它的边界是 quota 与 maxSteps。
-  registry.register({
-    name: "spawn_agent",
-    description: "派发独立上下文子 agent；task 必须自包含。",
+    name: "spawn_worker",
+    description:
+      "把一件事整个交给 worker 去做并等它做完：它有全部工具（读写文件、执行命令、上网、检索归档），你没有。task 必须自包含 —— worker 看不到这段对话。resultMode 取 summary 拿结论，取 full 拿完整产出。",
     inputSchema: z.object({
-      agent: z.string(),
       task: z.string().min(10),
       context: z.string().optional(),
       modelAlias: z.string().optional(),
       label: z.string().optional(),
+      resultMode: z.enum(["summary", "full"]).default("summary"),
     }),
-    policy: builtinPolicy("spawn_agent"),
+    policy: builtinPolicy("spawn_worker"),
     sourcePriority: 90,
     timeoutMs: null,
+    untrustedOutput: true,
     execute: async (input, context) => {
       const perTurn = (context.turn.config as Readonly<Config>).quota.perTurn;
       if (
@@ -1067,14 +1078,15 @@ export function registerBuiltins(
             "main",
           );
       if (!parent) return { ok: false, error: "parent_agent_unavailable" };
-      const { run, definition } = dependencies.agents.spawn(
+      const worker = (context.turn.config as Readonly<Config>).agent.worker;
+      const run = dependencies.agents.spawn(
         parent,
-        input.agent,
         input.task,
-        input.modelAlias,
+        input.modelAlias ?? worker.modelAlias,
       );
       const taskId = crypto.randomUUID();
-      const title = input.label ?? definition.name;
+      // 没有 agent 名字可作缺省标题了。截一段任务正文 —— 任务列表要能一眼看出这个 worker 在做什么。
+      const title = input.label ?? input.task.slice(0, 60);
       dependencies.db
         .prepare(
           "INSERT INTO tasks(id,turn_id,agent_run_id,chat_id,user_id,title,state,created_at,updated_at) VALUES (?,?,?,?,?,?,'running',?,?)",
@@ -1100,7 +1112,7 @@ export function registerBuiltins(
       if (
         !(await acquireSlot(
           context.turn.turnId,
-          live.agent.maxConcurrentSubagents,
+          live.agent.maxConcurrentWorkers,
           context.turn.abortSignal,
         ))
       ) {
@@ -1120,11 +1132,10 @@ export function registerBuiltins(
         return { ok: false, error: "turn_cancelled", taskId, runId: run.id };
       }
       try {
-        // provider 重试设置与配额预留均取自本轮：子 agent 的花费必须计入主 agent 的预留，
+        // provider 重试设置与配额预留均取自本轮：worker 的花费必须计入主 agent 的预留，
         // 否则配额只能统计到主 agent（docs/20 · W-QUOTA-01）。
-        const result = await runSubAgent(
+        const result = await runLwWorker(
           run,
-          definition,
           input.task,
           input.context,
           context.turn,
@@ -1143,7 +1154,7 @@ export function registerBuiltins(
               requestTimeoutMs: live.provider.requestTimeoutMs,
               streamIdleTimeoutMs: live.provider.streamIdleTimeoutMs,
             },
-            // 子 agent 整段挂在本次 `spawn_agent` 的 `tool.call` 之下（`docs/10 §7` 第 4 条）。
+            // worker 整段挂在本次 `spawn_worker` 的 `tool.call` 之下（`docs/10 §7` 第 4 条）。
             // `context` 已是 `execute()` 浅拷贝的副本，因此同一步内并行的多个 spawn 各自持有其父 span。
             ...(context.parentSpanId
               ? { parentSpanId: context.parentSpanId }
@@ -1153,7 +1164,18 @@ export function registerBuiltins(
               (context.turn.reservation as QuotaReservation | undefined) ??
               null,
           },
-          input.modelAlias,
+          {
+            ...(input.modelAlias ? { modelAlias: input.modelAlias } : {}),
+            /**
+             * `full` 不截到 `resultMaxChars`，但仍按构造有界：`agent.worker.maxResultChars` 是
+             * `result_summary` 这一列的硬上限。那一列没有任何降级兜底 —— 一次 200KB 的产出会
+             * 原样进主 agent 的上下文并持久化，此后每一轮重发。
+             */
+            resultLimit:
+              input.resultMode === "full"
+                ? worker.maxResultChars
+                : worker.resultMaxChars,
+          },
         );
         dependencies.db
           .prepare(
@@ -1171,7 +1193,7 @@ export function registerBuiltins(
           ok: true,
           taskId,
           runId: run.id,
-          agent: definition.name,
+          resultMode: input.resultMode,
           ...result,
         };
       } catch (error) {
@@ -1194,7 +1216,7 @@ export function registerBuiltins(
         });
         return {
           ok: false,
-          error: error instanceof Error ? error.message : "subagent_failed",
+          error: error instanceof Error ? error.message : "worker_failed",
           taskId,
           runId: run.id,
         };
@@ -1205,31 +1227,66 @@ export function registerBuiltins(
     },
   });
   /**
+   * 本次外部 run 的缺省工作目录：`<sandbox.workspaceDir>/<chatId>/harness/<runId>`。
+   *
+   * 一个 run 一个目录，不复用：harness 与 ACP 都会在 cwd 里留下自己的痕迹（`.claude/`、临时脚本、
+   * 未提交的改动），叠在一起之后没人能说清哪一份属于哪一次调用。
+   *
+   * 建目录留在工具壳，不下沉给 `runHarness` / `AcpManager.run`：那两个是纯执行器，判据只该是
+   * 「这个目录准不准跑」；掺进建目录之后，一次被白名单拒绝的调用也会先在磁盘上留下一个空目录。
+   */
+  const externalWorkDir = (
+    context: ToolExecutionContext,
+    runId: string,
+  ): string =>
+    join(
+      (context.turn.config as Readonly<Config>).sandbox.workspaceDir,
+      context.turn.chatId,
+      "harness",
+      runId,
+    );
+  /**
    * M11 · 启动外部 harness CLI 修改宿主上的仓库（docs/14 §2 Q8）。三道门：
-   * `available()` 判定仅 owner、仅私聊、目录白名单非空（三者任一不成立时工具不进入模型的工具
-   * 目录，而不是进入目录后再报错）；`TOOL_POLICY` 判定 owner 与每次审批；`runHarness` 判定目录。
+   * `available()` 判定仅 owner、仅私聊、目录白名单非空或已开 `workspaceFallback`（三者任一不成立时
+   * 工具不进入模型的工具目录，而不是进入目录后再报错）；`TOOL_POLICY` 判定 owner 与每次审批；
+   * `runHarness` 判定目录。
    * `timeoutMs: null` —— 它自有 `agent.harness.timeoutMs`，注册表的 60s 兜底 race 会在
    * harness 运行中途判为 `tool_timeout`，而该进程仍在修改文件。
    */
+  const harnessSettings = (context: ToolExecutionContext) =>
+    (context.turn.config as Readonly<Config>).agent.harness;
+  /**
+   * 开了 `workspaceFallback` 才允许省略 `dir`。照 `spawn_acp` 的 `agent` 参数的先例用
+   * `inputSchemaFor` 表达，而不是收一个可选参数再在 `execute()` 里报错 —— 后者的表现是模型按
+   * schema 合法地少填一个参数，然后拿到一次失败。
+   */
+  const harnessInputSchema = (
+    fallback: boolean,
+  ): z.ZodType<{ task: string; dir?: string | undefined }> =>
+    fallback
+      ? z.object({ task: z.string().min(10), dir: z.string().optional() })
+      : z.object({ task: z.string().min(10), dir: z.string() });
   registry.register({
     name: "spawn_harness",
     description:
-      "在允许的仓库目录中启动一个外部 coding harness（Claude Code / Codex / omp）执行任务；仅 owner、且仅私聊。",
-    inputSchema: z.object({ task: z.string().min(10), dir: z.string() }),
+      "在允许的仓库目录中启动一个外部 coding harness（Claude Code / Codex / omp）执行任务；仅 owner、且仅私聊。省略 dir 时在本会话工作目录下新开一个空目录。",
+    inputSchema: harnessInputSchema(false),
+    inputSchemaFor: (context) =>
+      harnessInputSchema(harnessSettings(context).workspaceFallback),
     policy: builtinPolicy("spawn_harness"),
     sourcePriority: 90,
     timeoutMs: null,
     untrustedOutput: true,
     available: (role, context) => {
-      const harness = (context.turn.config as Readonly<Config>).agent.harness;
+      const harness = harnessSettings(context);
       return (
         role === "owner" &&
         context.turn.isPrivate &&
-        harness.allowedDirs.length > 0
+        (harness.allowedDirs.length > 0 || harness.workspaceFallback)
       );
     },
     execute: async (input, context) => {
-      const harness = (context.turn.config as Readonly<Config>).agent.harness;
+      const harness = harnessSettings(context);
       // `available()` 已判定过一次，此处再判定一次：热更新可能在注册与执行之间清空目录名单，
       // 而模型可能沿用上一步的工具名（禁用必须是硬边界，CLAUDE.md）。
       if (!context.turn.isPrivate || context.turn.effectiveRole !== "owner")
@@ -1238,28 +1295,121 @@ export function registerBuiltins(
           error: "harness_forbidden",
           hint: "仅 owner 在私聊中可用",
         };
+      /**
+       * 这个 id 一个人干三件事：本次的工作目录名、`agent_runs.id`、两条日志的 `agentRunId`。
+       * 铸两个 id（一个给目录、一个给行）等于事后没法从目录追回那一行。
+       */
+      const runId = ulid();
+      const fallbackDir = harness.workspaceFallback
+        ? externalWorkDir(context, runId)
+        : null;
+      // 默认目录是我们自己算的、每次一个新的空目录；模型显式指名一个白名单里的既有仓库是另一回事。
+      // 两者在日志里此前长得一模一样，而它们在风险上不是一件事。
+      const dirSource = input.dir ? "requested" : "default";
+      if (fallbackDir && !input.dir)
+        mkdirSync(fallbackDir, { recursive: true, mode: 0o700 });
+      const dir = input.dir ?? fallbackDir ?? "";
+      // 派发瞬间先落一条。`agent.harness` 只在结束时发，而这条路的 `timeoutMs` 默认 15 分钟 ——
+      // 一次跑满超时的调用在它结束之前日志里一个字都没有，而它正在改宿主上的文件。
+      dependencies.log.event({
+        level: "info",
+        kind: "agent.spawn",
+        summary: `harness ${harness.command} · ${dir}`,
+        traceId: context.turn.turnId,
+        agentRunId: runId,
+        chatId: context.turn.chatId,
+        userId: context.turn.initiatorUserId,
+        key: context.turn.key,
+        data: {
+          runId,
+          workerKind: "harness",
+          dir,
+          dirSource,
+          command: harness.command,
+          taskChars: input.task.length,
+        },
+      });
+      /**
+       * 三档 worker 的状态变化都经 `task.updated` 发出去（`docs/09 §5`），不新增事件类型 ——
+       * 运行页拿它当「去重新拉一次」的脉冲。harness 这一档没有 `tasks` 行（`spawn_worker` 才建），
+       * 因此 `id` 为 null，能对上库的是 `runId`。
+       */
+      const publish = (state: "running" | "done" | "failed"): void =>
+        dependencies.log.publish("task.updated", {
+          id: null,
+          runId,
+          turnId: context.turn.turnId,
+          title: `harness:${harness.command}`,
+          state,
+          progress: null,
+        });
+      // 派发这一刻先发一条 running：这条路默认 15 分钟超时，不发的话运行页在它结束之前一直是空的。
+      publish("running");
       const started = Date.now();
       const result = await runHarness(
         input.task,
         input.dir,
         harness,
         context.turn.abortSignal,
+        fallbackDir ?? undefined,
       );
+      const ranIn = result.dir ?? dir;
       dependencies.log.event({
         level: result.ok ? "info" : "warn",
         kind: "agent.harness",
-        summary: `harness ${result.ok ? "ok" : result.error} · ${result.dir ?? input.dir}`,
+        summary: `harness ${result.ok ? "ok" : result.error} · ${ranIn}`,
         traceId: context.turn.turnId,
+        agentRunId: runId,
         chatId: context.turn.chatId,
         userId: context.turn.initiatorUserId,
         data: {
-          dir: result.dir ?? input.dir,
+          runId,
+          dir: ranIn,
+          dirSource,
           command: harness.command,
           exitCode: result.exitCode,
           timedOut: result.timedOut,
           ms: Date.now() - started,
         },
       });
+      /**
+       * 落一行 `agent_runs`。此前这条路压根不落库 —— 于是三条 worker 路径里唯一能改宿主仓库的
+       * 那条，在 trace 树上整段不存在。
+       *
+       * 结束时一次性写到终态，不留 running 窗口（同 `acp/runs.ts:17-18`）：这条路没有中途要更新的
+       * 字段，而一个 running 窗口就多一份要靠 `recoverAfterCrash` 收尾的状态。代价是卡住的 harness
+       * 在这张表上不留行 —— 由上面那条 `agent.spawn` 兜住。
+       *
+       * 记账失败不该让一次成功的调用变成失败。
+       */
+      try {
+        dependencies.agents.recordHarness({
+          id: runId,
+          turnId: context.turn.turnId,
+          command: harness.command,
+          task: input.task,
+          ok: result.ok,
+          ...(result.error ? { error: result.error } : {}),
+          output: result.output ?? "",
+          startedAt: started,
+          finishedAt: Date.now(),
+        });
+      } catch (error) {
+        dependencies.log.event({
+          level: "warn",
+          kind: "agent.harness",
+          summary:
+            `harness run 未能落库：${error instanceof Error ? error.message : String(error)}`.slice(
+              0,
+              300,
+            ),
+          traceId: context.turn.turnId,
+          agentRunId: runId,
+          data: { runId, dir: ranIn, dirSource },
+        });
+      }
+      // 终态那一条排在落库之后：运行页收到它就会去拉表，先发的话拉到的还是没有这一行的那一份。
+      publish(result.ok ? "done" : "failed");
       return result;
     },
   });
@@ -1267,8 +1417,8 @@ export function registerBuiltins(
    * M13 · 启动一台本机编码 agent 修改宿主上的仓库，走 ACP 协议（`docs/05 §3.5`）。
    *
    * 三道门与 `spawn_harness` 完全一致，且必须一致 —— 风险面相同（`docs/14` T17）：
-   * `available()` 判定仅 owner、仅私聊、整块启用、目录白名单非空、至少一台已启用的 agent；
-   * `TOOL_POLICY` 判定 owner 与每次审批；`AcpManager.run` 再判定一次目录。
+   * `available()` 判定仅 owner、仅私聊、整块启用、目录白名单非空或已开 `workspaceFallback`、
+   * 至少一台已启用的 agent；`TOOL_POLICY` 判定 owner 与每次审批；`AcpManager.run` 再判定一次目录。
    * `timeoutMs: null` —— 它自有 `agents[].timeoutMs`，注册表的 60s 兜底 race 会在 agent
    * 运行中途判为 `tool_timeout`，而该进程仍在修改文件。
    */
@@ -1277,17 +1427,26 @@ export function registerBuiltins(
   /**
    * 存在多台 agent 时为 `agent` 参数添加枚举，单 agent 部署的 schema 逐字节不变 ——
    * 只有一台 agent 的部署不应因该特性多出一个模型必须填写的参数。
+   *
+   * `dir` 同理：开了 `agent.acp.workspaceFallback` 才允许省略。
    */
   const acpInputSchema = (
     names: readonly string[],
-  ): z.ZodType<{ task: string; dir: string; agent?: string }> =>
-    names.length > 1
+    fallback: boolean,
+  ): z.ZodType<{
+    task: string;
+    dir?: string | undefined;
+    agent?: string | undefined;
+  }> => {
+    const dir = fallback ? z.string().optional() : z.string();
+    return names.length > 1
       ? z.object({
           task: z.string().min(10),
-          dir: z.string(),
+          dir,
           agent: z.enum(names as unknown as [string, ...string[]]),
         })
-      : z.object({ task: z.string().min(10), dir: z.string() });
+      : z.object({ task: z.string().min(10), dir });
+  };
   /**
    * `permissionMode === 'ask'` 但运行时没有审批 broker 时，整个工具不进入目录（与 `allowedDirs`
    * 为空同形态）。名为 `ask` 的档位实际放行，正是 `docs/reviews/16 §5` 所述的伪造一道门；
@@ -1299,11 +1458,12 @@ export function registerBuiltins(
   registry.register({
     name: "spawn_acp",
     description:
-      "在允许的仓库目录中让一台本机 code agent（经 ACP 协议驱动）执行任务；仅 owner、仅私聊。它自带一整套工具（读写与修改文件、执行 shell 命令）并会实际修改仓库 —— 任务需写成自包含的一段话，说明目标、约束与验收方式（例如「改完跑 pnpm test」）。",
-    inputSchema: acpInputSchema([]),
+      "在允许的仓库目录中让一台本机 code agent（经 ACP 协议驱动）执行任务；仅 owner、仅私聊。它自带一整套工具（读写与修改文件、执行 shell 命令）并会实际修改仓库 —— 任务需写成自包含的一段话，说明目标、约束与验收方式（例如「改完跑 pnpm test」）。省略 dir 时在本会话工作目录下新开一个空目录。",
+    inputSchema: acpInputSchema([], false),
     inputSchemaFor: (context) =>
       acpInputSchema(
         enabledAcpAgents(acpSettings(context)).map((agent) => agent.name),
+        acpSettings(context).workspaceFallback,
       ),
     policy: builtinPolicy("spawn_acp"),
     sourcePriority: 90,
@@ -1316,7 +1476,7 @@ export function registerBuiltins(
         role === "owner" &&
         context.turn.isPrivate &&
         acp.enabled &&
-        acp.allowedDirs.length > 0 &&
+        (acp.allowedDirs.length > 0 || acp.workspaceFallback) &&
         acp.agents.some((agent) => agent.enabled) &&
         acpPermissionReady(acp)
       );
@@ -1334,6 +1494,20 @@ export function registerBuiltins(
       const acp = acpSettings(context);
       if (!acpPermissionReady(acp)) return acpFailure("acp_unavailable");
       const approvals = dependencies.approvals;
+      const runId = ulid();
+      const fallbackDir = acp.workspaceFallback
+        ? externalWorkDir(context, runId)
+        : null;
+      if (fallbackDir && !input.dir)
+        mkdirSync(fallbackDir, { recursive: true, mode: 0o700 });
+      // 缺省目录并进白名单再走 `resolveAcpTarget` 的同一条判据，与 `runHarness` 的 `defaultDir`
+      // 同形：另开一支放行等于让「哪些路径可以跑」有两份判据，而只有一份做逐段比较。
+      const settings: AcpSettings = fallbackDir
+        ? { ...acp, allowedDirs: [...acp.allowedDirs, fallbackDir] }
+        : acp;
+      // 两处都为空只可能发生在 schema 被绕过时（`workspaceFallback=false` 那一档 `dir` 是必填）：
+      // 空串过不了 `resolveAcpTarget` 的白名单，据此退回一次明确的 `acp_dir_not_allowed`。
+      const dir = input.dir ?? fallbackDir ?? "";
       /**
        * 进度卡片。渲染选项取自本轮配置 —— `output.*` 位于 `PER_CHAT_OVERRIDE_ALLOWLIST` 中，
        * 读取全局快照会静默丢弃会话级覆盖（`main.ts` 中若干读快照的 getter 属于既有缺陷）。
@@ -1346,10 +1520,10 @@ export function registerBuiltins(
       const target = resolveAcpTarget(
         {
           task: input.task,
-          dir: input.dir,
+          dir,
           ...(input.agent ? { agent: input.agent } : {}),
         },
-        acp,
+        settings,
       );
       const card =
         (await dependencies.telegram
@@ -1374,13 +1548,28 @@ export function registerBuiltins(
             },
           )
           .catch(() => null)) ?? null;
+      /**
+       * 与 harness 同一条脉冲（`docs/09 §5`，不新增事件类型）。`runId` 这里给不出来：ACP 的
+       * `agent_runs` 行由 `AcpRunRecorder` 在 manager 内部铸 id，工具壳看不到它 —— 发一个对不上
+       * 任何一行的 id 比不发更糟，因此这一档只发「有东西变了，去拉一次」。
+       */
+      const publish = (state: "running" | "done" | "failed"): void =>
+        dependencies.log.publish("task.updated", {
+          id: null,
+          runId: null,
+          turnId: context.turn.turnId,
+          title: `acp:${target.ok ? target.agent.name : (input.agent ?? "")}`,
+          state,
+          progress: null,
+        });
+      publish("running");
       const result = await dependencies.acp.run(
         {
           task: input.task,
-          dir: input.dir,
+          dir,
           ...(input.agent ? { agent: input.agent } : {}),
         },
-        acp,
+        settings,
         {
           abortSignal: context.turn.abortSignal,
           // 与注册表 `#normalizeOutput` 使用同一上界（`main.ts` 将其接为 `tools.exec.maxOutputBytes`），
@@ -1453,18 +1642,22 @@ export function registerBuiltins(
           ...(result.costUsd === undefined ? {} : { costUsd: result.costUsd }),
         });
       }
+      // 行由 `AcpManager.run` 在返回之前落好，所以这一条发出去时表里已经有它。
+      publish(result.ok ? "done" : "failed");
       return result;
     },
   });
   registry.register({
-    name: "read_agent_result",
-    description: "分页读取子 agent 完整结果。",
+    name: "read_worker_result",
+    // 句柄仍是 `agentresult://<runId>`：它是落库的 ref 形状，改 scheme 会让历史行读不出来。
+    description:
+      "分页读取 worker 的完整产出（runId 取自 spawn_worker 的返回值）。",
     inputSchema: z.object({
       runId: z.string(),
       offset: z.number().int().nonnegative().default(0),
       limit: z.number().int().positive().max(262_144).default(65_536),
     }),
-    policy: builtinPolicy("read_agent_result"),
+    policy: builtinPolicy("read_worker_result"),
     sourcePriority: 90,
     execute: (input) => ({
       ok: true,
@@ -1475,7 +1668,7 @@ export function registerBuiltins(
   // 的 60s race 只会使默认配置下的仲裁在运行中途被判为 `tool_timeout`，而模型调用继续产生费用。
   registry.register({
     name: "ask_parent",
-    description: "向父 agent 提问；仅子 agent 可用。",
+    description: "向派出你的主 agent 提问；仅 worker 可用。",
     inputSchema: z.object({
       question: z.string(),
       options: z.array(z.string()).default([]),
@@ -1484,7 +1677,7 @@ export function registerBuiltins(
     policy: builtinPolicy("ask_parent"),
     sourcePriority: 90,
     timeoutMs: null,
-    available: (_role, context) => context.agentKind === "sub",
+    available: (_role, context) => context.agentKind === "lw",
     execute: async (input, context) => {
       const run = context.agentRunId
         ? dependencies.agents.byId(context.agentRunId)
@@ -1625,7 +1818,7 @@ export function registerBuiltins(
   });
   registry.register({
     name: "report_progress",
-    description: "报告子 agent 当前进度。",
+    description: "报告 worker 当前进度。",
     inputSchema: z.object({
       status: z.string(),
       current: z.number().optional(),
@@ -1634,7 +1827,7 @@ export function registerBuiltins(
     }),
     policy: builtinPolicy("report_progress"),
     sourcePriority: 90,
-    available: (_role, context) => context.agentKind === "sub",
+    available: (_role, context) => context.agentKind === "lw",
     execute: (input, context) => {
       const run = context.agentRunId
         ? dependencies.agents.byId(context.agentRunId)

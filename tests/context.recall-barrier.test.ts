@@ -1,7 +1,7 @@
 import { rmSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { ArchiveRepository, OperationsRepository, ScheduleRepository, closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
-import { ContextEngine, FileTools, LogSink, PathJail, ToolRegistry, configSchema, registerBuiltins } from '@luoli/core';
+import { ContextEngine, FileTools, LogSink, PathJail, ToolRegistry, configSchema, newToolScope, registerBuiltins } from '@luoli/core';
 import type { Config } from '@luoli/core';
 import type { ArchivedMessage } from '@luoli/db';
 
@@ -33,7 +33,7 @@ function harness(name: string, patch: Partial<Config> = {}) {
   const turn = { turnId: 'probe', key: 'chat:chat', chatId: 'chat', threadId: null, initiatorUserId: 'user', effectiveRole: 'owner',
     isPrivate: true, baseCommitId: null, config, snapshot: { messages: [], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 0 },
     delta: [], abortSignal: new AbortController().signal };
-  return { db, archive, engine, config, registry, context: { turn, workspace: './data', agentKind: 'main' } as never };
+  return { db, archive, engine, config, registry, context: { turn, workspace: './data', agentKind: 'main', ...newToolScope() } as never };
 }
 
 let nextTgId = 100;

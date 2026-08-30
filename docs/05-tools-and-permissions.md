@@ -8,7 +8,9 @@
    以及 `search_tools` 的**检索展开**（§3.12）都会改变可用集。前三样与 skill 的 `allowed-tools` 一样是
    **收窄**，检索展开是这条链上唯一的**轮内扩张** —— 它把折叠起来的工具加回本步的可见集，而收窄仍然
    压在它之上（先扩张后收窄，收窄永远赢）。扩张只动可见性，一个权限判据都不动。
-4. **子 agent 权限 ≤ 派发者权限**，永不提权。
+4. **worker 权限 ≤ 派发者权限**，永不提权。派发的方向上还有一条正交的分工：主 agent 只对话与派发，
+   工具执行整体下沉给 worker（§4 那一列）—— 那是「谁该拿这件工具」，不是「谁够格」，两者相乘才是
+   本轮真正拿得到的集合。
 5. **模型可见的一切文本都是不可信输入**（含群成员发言、文件内容、网页内容、MCP 返回）。
 
 ---
@@ -335,7 +337,7 @@ bash: tool({
 
 ### 3.5 Agent
 
-`spawn_agent`（limited）、`list_agents`（limited）、`read_agent_result`（limited）、`ask_parent`/`report_progress`（仅子 agent）、`set_model`（trusted）。见 [04](./04-agents-and-providers.md)。
+`spawn_worker`（limited）、`read_worker_result`（limited）、`ask_parent`/`report_progress`（仅 worker）、`set_model`（trusted）。见 [04](./04-agents-and-providers.md)。
 
 `spawn_harness`（**owner + 每次审批**，M11）：在白名单目录里起一个外部 coding harness
 （Claude Code / Codex）执行任务。三道门，而且**只有三道**：
@@ -343,8 +345,28 @@ bash: tool({
 | 门 | 判据 | 在哪 |
 |---|---|---|
 | 准入 | 仅 `owner` **且仅私聊**（`turn.isPrivate`） | `available()` —— 不满足时工具**不进模型的工具目录** |
-| 目录 | 只能在 `agent.harness.allowedDirs` 列出的路径或其子目录里跑；**空名单 = 功能关闭** | `available()` + `runHarness()` 各判一次（热更新可能在两者之间清空名单） |
+| 目录 | 只能在**准入目录集**里跑 = `agent.harness.allowedDirs` 列出的路径或其子目录，加上默认工作目录 `<sandbox.workspaceDir>/<chatId>/harness/<runId>`（由 `agent.harness.workspaceFallback` 控制，默认 `false`）；**空名单 + 未开回退 = 功能关闭** | `available()` + `runHarness()` 各判一次（热更新可能在两者之间清空名单） |
 | 审批 | `approval: 'always'` —— 起 harness 这一个动作走一次审批 | `TOOL_POLICY` |
+
+**默认工作目录这一档是对 [14 §2 Q8-b](./14-open-questions.md) 的有意推翻（2026-08-30）。** Q8-b 当时写死
+「不复用 `data/workspace/<chatId>`」，理由是那个目录跨轮次长期存在、被其它工具写着，把它整个放进
+准入集等于给 harness 一块常驻的落脚地。现在放进去的**不是**那个目录，而是它下面**每次调用新建的
+一格** `harness/<runId>`：由本系统创建、只在本次调用中存在、调用结束即无人再写，**不是宿主上任何
+一个既有仓库**。Q8-b 真正要挡的是「harness 能摸到运维没点头的既有代码」，而一个空的临时目录里
+没有任何既有代码 —— 放它进白名单不构成放宽，只是让「harness 从零写点东西给我看」这件事不必先在
+宿主上挑一个真仓库交出去。
+
+三种组合说清楚，别只记住其中一条：
+
+| `allowedDirs` | `workspaceFallback` | 准入目录集 |
+|---|---|---|
+| 空 | `false`（**出厂**） | 空 ⇒ **功能整体关闭**，工具不进目录 —— 与改动前逐字相同 |
+| 空 | `true` | 只有默认工作目录：能用，但够不着宿主上任何既有仓库 |
+| 非空 | 任意 | 名单 ∪ 默认工作目录 —— 功能已经开着，多一格空目录不改变风险面 |
+
+出厂姿态一个字没变，**「`allowedDirs` 为空 = 功能整体关闭」在默认配置下仍然成立**；要越过它得由
+运维显式把 `workspaceFallback` 拨上去，而拨上去之后能够到的仍然只有本系统自己造的那一格。
+`agent.acp.workspaceFallback` 与本项**同名同义同默认值**，理由见 §3.5.1 那条「两条路的档位必须相同」。
 
 **它内部的工具调用不受本系统约束**（[14](./14-open-questions.md) T17）：harness 自带一整套工具，
 `available()` 的注册期 fail-closed 与 `execute()` 的二次硬拦截都看不见。批准一次 = 批准它这一趟
@@ -357,7 +379,7 @@ bash: tool({
 
 | `error` | 何时 | 判在哪 |
 |---|---|---|
-| `harness_disabled` | `agent.harness.allowedDirs` 为空 = 功能整体关闭 | `runHarness` 第一行 |
+| `harness_disabled` | 准入目录集为空（`allowedDirs` 空**且** `workspaceFallback` 未开）= 功能整体关闭 | `runHarness` 第一行 |
 | `harness_forbidden` | 非 owner 或非私聊 | `execute()` 的二次硬拦截 —— `available()` 判过一次，热更新可能在注册与执行之间把名单清空 |
 | `harness_dir_not_allowed` | 请求的目录不在白名单里（逐段比较，`/srv/app` 不放行 `/srv/app-secrets`）| `resolveHarnessDir` 回 `null`；`hint` 点名允许的路径 |
 | `harness_dir_missing` | 目录不存在或不是目录 | `runHarness` |
@@ -383,12 +405,17 @@ bash: tool({
 
 | 门 | 判据 | 在哪 |
 |---|---|---|
-| 准入 | 仅 `owner` **且仅私聊**，且 `agent.acp.enabled`，且 `allowedDirs` 非空，且至少一台 agent 启用 | `available()` —— 任一不成立时工具**不进模型的工具目录** |
-| 目录 | 只能在 `agent.acp.allowedDirs` 列出的路径或其子目录里跑（复用 `resolveHarnessDir`，逐段比较）；**空名单 = 功能关闭** | `available()` + `AcpManager.run()` 各判一次（热更新可能在两者之间清空名单） |
+| 准入 | 仅 `owner` **且仅私聊**，且 `agent.acp.enabled`，且**准入目录集非空**，且至少一台 agent 启用 | `available()` —— 任一不成立时工具**不进模型的工具目录** |
+| 目录 | 只能在准入目录集里跑 = `agent.acp.allowedDirs` 列出的路径或其子目录（复用 `resolveHarnessDir`，逐段比较），加上默认工作目录 `<sandbox.workspaceDir>/<chatId>/harness/<runId>`（由 `agent.acp.workspaceFallback` 控制，默认 `false`）；**空名单 + 未开回退 = 功能关闭** | `available()` + `AcpManager.run()` 各判一次（热更新可能在两者之间清空名单） |
 | 审批 | `approval: 'always'` —— 起这台 agent 这一个动作走一次审批 | `TOOL_POLICY` |
 
-**出厂两道都是关的**：`agent.acp.enabled` 默认 `false`、`allowedDirs` 默认空
-（[11](./11-config-reference.md) 的 `agent.acp`），任一不成立时 `spawn_acp` 连模型的工具目录都不进。
+默认工作目录那一格与 `spawn_harness` **同形同默认值**（§3.5 那张三组合表逐条适用，包括对
+[14 §2 Q8-b](./14-open-questions.md) 的推翻及其日期）。两条路的目录门必须逐字相同这一条本身就是
+本节的判据 —— 给 ACP 单开一个更松或更紧的目录档，等于让运维在两个界面上读到两套规矩。
+
+**出厂两道都是关的**：`agent.acp.enabled` 默认 `false`、`allowedDirs` 默认空且 `workspaceFallback`
+默认 `false`（[11](./11-config-reference.md) 的 `agent.acp`）—— 后两者合起来才让准入目录集为空，
+任一不成立时 `spawn_acp` 连模型的工具目录都不进。
 而打开之后的默认姿态是**「整趟交给它」**（`permissionMode: auto` + `agents[].approvalMode: yolo`），
 两个默认值各自的理由见下面那两段 —— **别把「整块默认关」读成「打开之后默认逐条拦」**。
 
@@ -530,7 +557,7 @@ profile 说了算（那里面可能写着别的值），而运维在界面上往
 
 | `error` | 何时 | 判在哪 |
 |---|---|---|
-| `acp_disabled` | `agent.acp.enabled` 为假、或 `allowedDirs` 为空 | `AcpManager.run` 第一行 |
+| `acp_disabled` | `agent.acp.enabled` 为假、或准入目录集为空（`allowedDirs` 空**且** `workspaceFallback` 未开）| `AcpManager.run` 第一行 |
 | `acp_unavailable` | 这个运行时压根没装 ACP 客户端 | 与上一条分开一档：那一档改配置就能用，这一档不是配置问题。`available()` 判的第一项就是它，所以生产里到不了（`main.ts` 恒传）—— 它是工具壳那道二次硬拦截的返回值 |
 | `acp_no_agents` | `agents` 里一台启用的都没有 | 同上 |
 | `acp_agent_unknown` | 模型给的 `agent` 名不在启用集里（或它被停用了）| `resolveAcpAgent` 回 `null`。**不「随便挑一个」** —— 那台 agent 的 `--tools` / `--approval-mode` 可能完全不同 |
@@ -586,12 +613,15 @@ agent 反过来调我们的七个 method。**能力申报与这七个处理器�
 「以 `/**` 结尾的同时拒绝那个目录本身」那一条（§3.1）—— 终端的 `cwd` 走的也是这个 `resolve`，所以
 「把工作目录设成一个被保护目录」同样被拒。⚠ 但那一道是**一致性**（同一个 jail 判 cwd 与判文件），
 不是一道边界：命令在宿主上直跑，`denyGlobs` 只被 `PathJail` 执行，一条 `cat ~/.ssh/id_rsa` 压根不经
-那个函数（同 [14](./14-open-questions.md) T19）。真边界仍然只有 `allowedDirs` + 仅 owner + 仅私聊。
+那个函数（同 [14](./14-open-questions.md) T19）。真边界仍然只有准入目录集 + 仅 owner + 仅私聊。
 
 ⚠ **不复用 `dependencies.filesFor(workspace, role)`**（[14 §2](./14-open-questions.md) Q8-b 明说不
 复用）：那份的 root 是 `data/workspace/<chatId>`，而且 `tools.fs.allowHostFsForOwner` 一开它就是 `/`
-—— ACP 这条路的边界必须是**这次被批准的那个仓库目录**，跟着一个全局开关走等于把「批准一个目录」
-变成「批准整台机器」。
+—— ACP 这条路的边界必须是**这次被批准的那个目录**，跟着一个全局开关走等于把「批准一个目录」
+变成「批准整台机器」。**`workspaceFallback`（§3.5）不是这一条的例外**：默认工作目录进的是准入目录集
+（它可以被批准成本次的 `dir`），而 jail 照旧是**为这一次新建的**、root = `realpathSync(那一格)` ——
+仍然不是 `filesFor` 那份，也仍然不看 `allowHostFsForOwner`。两条规矩管的是不同的东西：一条说
+「哪些路径可以被批准」，另一条说「批准之后用哪个 jail 关住它」。
 
 **读走 `FileTools.readText()` 而不是 `read()`。** 后者无条件给正文加 `行号<TAB>` 前缀 —— 那对我们的
 模型是对的（是 `edit_file` 的对照坐标），但 ACP 的写是**全量覆盖**：agent 读出来改两行再写回去，就把
@@ -834,10 +864,14 @@ data, mimeType}]}` 被换成 `media` + 一句文本标记。不做这一步的�
 - **`stay_silent` 的两道 `available()` 闸**：`agentKind === 'main'` **且** `turn.silenceable === true`。
   语义与全部取舍在 [02 §10.5](./02-context-engine.md)，这里只说这两道闸为什么都必须在：
   `silenceable` 的唯一置位方是 `ScheduledJobRunner`，缺席即假，于是 Telegram 轮次、提示词预览、
-  agent 隔离试跑全部 fail-closed；而**子 agent 拿到的是父轮的同一个 turn 对象**，
-  少了主 agent 那道闸，一个 researcher 就能替整轮闭嘴，派它出去的主 agent 全程不知情。
-  判据写在 `available()` 里而不是像「子 agent 不给 `memory_write`」那样硬编码在注册表的分支上 ——
-  `admit()` 会自动复查一遍 `available()`，一处判据两道闸（目录过滤 + `execute()` 硬拦截，见 §4 末尾）。
+  agent 隔离试跑全部 fail-closed；而**worker 拿到的是父轮的同一个 turn 对象**（`silenced` /
+  `silenceReason` 正写在它上面 —— 渐进披露那三个集合已经按 run 拆开了，这一位没有，因为静默是
+  轮次形态），少了主 agent 那道闸，一个 lw-worker 就能替整轮闭嘴，派它出去的主 agent 全程不知情。
+  判据写在 `available()` 里：`admit()` 会自动复查一遍 `available()`，一处判据两道闸
+  （目录过滤 + `execute()` 硬拦截，见 §4 末尾）。**它与 §4 那一列不是同一道闸，只是恰好同向**：
+  `stay_silent` 也在 `MAIN_ONLY_TOOLS` 里，因此 worker 侧先在 `toolCallableBy()` 上被拒
+  （`tool_unavailable_for_worker`），根本走不到这里；而主 agent 那一侧，`silenceable` 这道仍是唯一的闸。
+  两道都要留：白名单管的是「哪一档 agent 拿得到」，`silenceable` 管的是「这一轮的形态允不允许」。
 - 接线是这一族的边界，同 §3.7：没有 `TelegramToolBridge`（缺 `BOT_TOKEN`）时四个 `schedule_*`
   整体不进目录 —— 排一个到点发不出去的任务是纯粹的假承诺。`stay_silent` 不看这一条：
   它的 `silenceable` 只可能来自 runner，而 runner 在投递通道不在时压根不开轮
@@ -1010,10 +1044,13 @@ meta 工具本身与它的五条不变量。
 - 护栏 `tools.catalog.maxExpandedPerTurn`（默认 32）：超了返回 `expansion_limit` 并提示改用精确 `names`。
   它不是可选优化 —— 每次展开都改 tools 数组，而那是请求体第 0 段
   （[04 §2.1](./04-agents-and-providers.md#21-prompt-缓存) 记了这笔账）。
-- 展开状态是 `turn.expandedTools`：**轮内只增不减**、随 turn 对象消亡、**不跨轮保留**、不持久化
-  （持久化会造出「server 早删了而展开集还记着」这类状态腐烂）。单调既让 tools 段在一轮内至多变几次而
-  不来回抖，又天然区分「没展开过」与「展开了但一个都没命中」—— 与
+- 展开状态是 `ToolExecutionContext.expandedTools`，**按 agent run 各持一份**（`newToolScope()`）：
+  **run 内只增不减**、随该 run 消亡、**不跨 run 也不跨轮保留**、不持久化（持久化会造出「server 早删了
+  而展开集还记着」这类状态腐烂）。单调既让 tools 段在一个 run 内至多变几次而不来回抖，又天然区分
+  「没展开过」与「展开了但一个都没命中」—— 与
   [07 §2.2](./07-skills-plugins-mcp.md#22-渐进式披露progressive-disclosure) 那条 `narrows` 教训同形。
+  它此前挂在 `RuntimeTurnContext` 上，父子共用一份引用；挪位置的理由与不变量 4 是同一条。
+  同一轮里并发派出的两个 worker 各展开各的，互不写入对方，这是不变量 4 能翻过来的前提。
 - **检索不新造痕迹通道。** `search_tools` 自己的 tool-call / tool-result 对由既有 step observer 照常进
   上下文，那就是「本轮搜过什么、展开了什么」的持久凭据（同 [02 §10.5](./02-context-engine.md) 那条
   「痕迹走既有提交通道」）。另记一条 `tool.expanded` info 日志（[10 §2](./10-logging-and-observability.md)）。
@@ -1032,14 +1069,15 @@ meta 工具本身与它的五条不变量。
 
 | 层 | 判据 | 为什么 |
 |---|---|---|
-| 兜底 | **同一个名字本轮只改写一次** | 「检索不会往前一格」的成因数不完：`search_tools` 自己会在 `admit()` 上失败（`tools.maxCallsPerTurn` 用满、运维把它的 `approval` 覆盖成 `always` 而审批被拒、轮内熔断前那几次），这些档位一律**不写** `expandedTools`，逐条枚举必然漏。按名字判一次，成因有多少种都不必管；happy path 上它与下面第一条等价（改写成功 ⇒ 名字进了 `expandedTools`），所以不会挡掉任何一次有用的改写，还顺带把同一步里并排的两次同名硬调合成一次 |
-| 逐档 | 本轮**已展开过**它 | 折叠且被 skill 收窄挡住的工具照样记进 `expandedTools`（正因为如此，第二次硬调才落回一句明确的 `NoSuchToolError` 而不是又一次检索）|
+| 兜底 | **同一个名字本 run 只改写一次** | 「检索不会往前一格」的成因数不完：`search_tools` 自己会在 `admit()` 上失败（`tools.maxCallsPerTurn` 用满、运维把它的 `approval` 覆盖成 `always` 而审批被拒、轮内熔断前那几次），这些档位一律**不写** `expandedTools`，逐条枚举必然漏。按名字判一次，成因有多少种都不必管；happy path 上它与下面第一条等价（改写成功 ⇒ 名字进了 `expandedTools`），所以不会挡掉任何一次有用的改写，还顺带把同一步里并排的两次同名硬调合成一次 |
+| 逐档 | 本 run **已展开过**它 | 折叠且被 skill 收窄挡住的工具照样记进 `expandedTools`（正因为如此，第二次硬调才落回一句明确的 `NoSuchToolError` 而不是又一次检索）|
 | 逐档 | `maxExpandedPerTurn` **已满** | 这一档 `search_tools` 回 `expansion_limit` 且不写 `expandedTools`，而它的 hint 是「用 `names` 精确点名」—— 改写出来的调用本来就是 `names:[X]`，模型照 hint 做也没有出路 |
 | 逐档 | `search_tools` **本步发不出去** | 常态成立（它常驻、豁免收窄），但单轮成本闸门与收尾补跑会把 `activeTools` 整个清空，那两档改写只是换一个名字撞同一个错 |
 
-这一组判据挂在 `agent/runtime.ts` 的钩子里，**不在 turn 上留状态**：兜底那个集合是本轮那次
-`runMainAgentInternal` 调用的局部变量，随函数帧消亡（`turn.expandedTools` 是给 `prepareStep`
-与下一轮痕迹读的，语义不同，不要合并）。
+这一组判据挂在 `agent/runtime.ts` 的钩子里，**不留在 turn 上、也不留在 run scope 上**：兜底那个集合是
+跑这一趟模型循环的那次函数调用的局部变量，随函数帧消亡（`expandedTools` 是给 `prepareStep` 与
+痕迹读的，语义不同，不要合并）。折叠转给 worker 之后这条钩子跟着长在 worker 那条循环上 ——
+主 agent 侧没有折叠工具，也就没有可改写的对象（不变量 4）。
 
 **五条不变量**（改这块之前逐条对）：
 
@@ -1067,66 +1105,103 @@ meta 工具本身与它的五条不变量。
    trusted 那一档整目录回退），因为折叠判据本身就要按角色算。这一条不能只判 `enabled`：
    `#eligible()` 的 minRole 闸会照样把 `search_tools` 滤掉，而那时折叠摘要还在渲染，
    连上面那个自愈钩子也一起失效（它的闸 ③ 正是「`search_tools` 本步发不出去」）。
-4. **只有主 agent 能检索**（`agentKind === 'main'`）。子 agent 与主轮**共享同一个 turn 对象**（同 §3.8
-   `stay_silent` 那道闸），让它调就是往父轮的 `expandedTools` 里写，而子 agent 没有 per-step 重算 ——
-   那是纯粹的状态泄漏。子 agent 的目录形态是**显式非目标**：`definition.tools` 白名单本来就是比折叠
-   更强的表达（[07 §4.1](./07-skills-plugins-mcp.md#41-配置)）。
-5. **模型调一个未展开工具时，上下文必须保持配对。** SDK 在 `parseToolCall` 阶段就用本步 `activeTools`
+4. **只有 lw-worker 能检索**（`agentKind === 'lw'`）。折叠的是外部工具（MCP / plugin / custom），而
+   工具整体已经下沉给 worker —— 主 agent 那一侧的白名单 `MAIN_AGENT_TOOLS`（§4）里**一个折叠工具
+   都没有**，给它一个检索入口只能检索出一份它调不动的清单，模型据此排的每一步都会在 `admit()` 上
+   撞 `tool_requires_worker`。检索入口要长在有工具的那一侧。
+
+   **这道闸此前朝反方向焊着，理由已经不存在了**（2026-08-30 翻转）。旧理由是「子 agent 与主轮共享
+   同一个 turn 对象，让它调就是往父轮的 `expandedTools` 里写」—— 那时 `loadedSkills` /
+   `skillAllowedTools` / `expandedTools` 三个集合都挂在 `RuntimeTurnContext` 上，父子共用一份引用，
+   worker 展开什么都会漏进主轮，worker 载一个带 `allowed-tools` 的 skill 还会去收窄主轮。现在三个
+   集合挂在 `ToolExecutionContext` 上、**每个 agent run 各持一份**（`newToolScope()` 在建 run 时就
+   建好，三个字段都是必填 —— 写成可选加 `??=` 的话，惰性建出来的 Set 会落在 `execute()` 交给工具的
+   那份浅拷贝上，调用一返回就丢了）。状态泄漏这条理由随之作废，闸也就该翻过来。
+
+   翻过来之后 §3.8 `stay_silent` 那道 `agentKind === 'main'` **不跟着翻**：两者形状像而判据不同 ——
+   静默是**轮次形态**（`docs/02 §10.5`：不投递，读取方只有 `ScheduledJobRunner`），本来就该由整轮
+   那一份说了算，而它正是仍然挂在 turn 上的东西。
+5. **模型调一个本步不在 `activeTools` 里的工具时，上下文必须保持配对。** 有两种入场情形，**走的是
+   完全同一条路径**，因此下面这段论证一字不用改：① 调一个**未展开的折叠工具**；② **主 agent 硬调一个
+   已下沉到 worker 的工具**（§4 的新一列，`bash` / `web_fetch` / 任何 MCP 工具都是这一档）。
+   两者都是「名字在注册表里、不在本步 `activeTools` 里」，`#eligible()` 那两道过滤（折叠判据、
+   `toolCallableBy()`）产生的收缩形状相同 —— SDK 不区分它们，`stepToolResults` 也不需要区分。
+   ⚠ 第二种没有自愈钩子：`repairToolCall` 只把命中折叠集的名字改写成一次检索，而下沉的工具改写成
+   检索也取不回来（主 agent 连 `search_tools` 都没有，不变量 4）。它落回的是明确的一句
+   `NoSuchToolError`，而这正是它该落的地方 —— 出路是 `spawn_worker`，不是换个名字再试一次。
+
+   SDK 在 `parseToolCall` 阶段就用本步 `activeTools`
    过滤掉它 ⇒ `NoSuchToolError` ⇒ 产出一条 `invalid` 的 tool-call，随后被转成带 `toolCallId` **与**
    `toolName` 的 `tool-error` part；而 `stepToolResults`（`packages/core/src/agent/runtime.ts`）正是收
    `tool-error` 的，那句 `if (!part.toolCallId || !part.toolName) continue` 两个字段都拿得到，不会把它
    丢掉。**这一条是这个机制能上线的前提，不是可省的注解**：折叠把「调了一个不在 `activeTools` 里的
-   工具」从罕见幻觉变成常规事件，而未配对的 tool-call 正是 `runtime.ts` 那段注释记着的灾难的起点
-   —— 下一轮起每次请求都畸形 → provider 0 步返回 → `NoOutputGeneratedError` → 进程崩
-   （[02 §9](./02-context-engine.md#9-实现红线清单code-review-必查) 第 20 条）。有了上面那条自愈钩子，
-   绝大多数这类调用连 `tool-error` 都走不到；剩下的（幻觉名字）必须配对。
+   工具」从罕见幻觉变成常规事件，而工具下沉又给它加了一整族（模型在对话面上想直接 `bash` 是常见
+   冲动，主 agent 的提示词只能把它引开、挡不住它），未配对的 tool-call 正是 `runtime.ts` 那段注释
+   记着的灾难的起点 —— 下一轮起每次请求都畸形 → provider 0 步返回 → `NoOutputGeneratedError` →
+   进程崩（[02 §9](./02-context-engine.md#9-实现红线清单code-review-必查) 第 20 条）。有了上面那条
+   自愈钩子，折叠那一类里绝大多数连 `tool-error` 都走不到；剩下的（幻觉名字、以及下沉那一整族）
+   必须配对。
 
 ---
 
 ## 4. 权限矩阵（权威表）
 
-| 工具 | blocked | limited | trusted | owner |
-|---|:---:|:---:|:---:|:---:|
-| （任何工具 / 任何回复） | ✗ | | | |
-| `read_file` `list_dir` `glob` `grep` | ✗ | ✓ jail | ✓ jail | ✓ jail（可开宿主） |
-| `write_file` `edit_file` `move_file` | ✗ | ✗ | ✓ jail（+条件审批） | ✓ |
-| `delete_file` | ✗ | ✗ | ✓ + 审批 | ✓ + 审批* |
-| `bash` `python` | ✗ | ✗ | ✓ 沙箱（+条件审批） | ✓ 宿主/沙箱 |
-| `search_messages` `read_messages` `get_message` | ✗ | ✓ 本会话 | ✓ 本会话 | ✓ 本会话 |
-| `admin_search_messages` | ✗ | ✗ | ✗ | ✓ 跨会话 |
-| `context_stats` | ✗ | ✓ 本会话 | ✓ 本会话 | ✓ 本会话 |
-| `memory_read(pub)` | ✗ | ✓ | ✓ | ✓ |
-| `memory_write(pub)` | ✗ | ✗† | ✓ | ✓ |
-| `memory_read/write(pri)` | ✗ | ✓ 仅私聊·仅本人 | ✓ 仅私聊·仅本人 | ✓ 全部 |
-| `memory_list` | ✗ | ✗ | ✗ | ✓ 全部记忆 |
-| `spawn_agent` | ✗ | ✓（受 agent.minRole 约束） | ✓ | ✓ |
-| `list_agents` `read_agent_result` | ✗ | ✓ | ✓ | ✓ |
-| `ask_parent` `report_progress` | ✗ | ✓ 仅子 agent※ | ✓ 仅子 agent※ | ✓ 仅子 agent※ |
-| `spawn_harness` | ✗ | ✗ | ✗ | ✓ + 审批 · 仅私聊 · 仅白名单目录◇ |
-| `spawn_acp` | ✗ | ✗ | ✗ | ✓ + 审批 · 仅私聊 · 仅白名单目录◆ |
-| `set_model` | ✗ | ✗ | ✓ | ✓ |
-| `web_fetch` | ✗ | ✓ allowlist | ✓ | ✓ |
-| `web_search` | ✗ | ✓ | ✓ | ✓ |
-| `send_message` `send_photo` `react` | ✗ | ✓ | ✓ | ✓ |
-| `schedule_create` `schedule_update` `schedule_list` `schedule_cancel` | ✗ | ✗ | ✓ 本会话 | ✓ 本会话 |
-| `stay_silent` | ✗ | ✗ | ✓ 仅静默定时轮次¶ | ✓ 仅静默定时轮次¶ |
-| `send_file` `pin_message` | ✗ | ✗ | ✓ | ✓ |
-| `define_tool` `delete_tool` `write_skill` `install_skill` `write_plugin` `install_mcp` | ✗ | ✗ | ✗ | ✓ + 审批* |
-| `list_tools` `list_mcp` | ✗ | ✗ | ✗ | ✓ |
-| `container_list` `container_inspect` `container_logs` `container_keep` | ✗ | ✗ | ✗ | ✓ 跨会话§ |
-| `container_exec` | ✗ | ✗ | ✗ | ✓ 跨会话§（+条件审批） |
-| `container_reset` | ✗ | ✗ | ✗ | ✓ 跨会话§（清文件时 + 审批） |
-| `load_skill` | ✗ | ✓ | ✓ | ✓ |
-| `search_tools` | ✗ | ✓‖ | ✓‖ | ✓‖ |
-| Skill | ✗ | 按 `min-role` | 按 `min-role` | ✓ |
-| Plugin 工具 | ✗ | 按 `minRole` | 按 `minRole` | ✓ |
-| MCP 工具 | ✗ | 按 server `minRole`（默认 trusted ⇒ ✗） | ✓ | ✓ |
-| 自定义工具（`custom_*`） | ✗ | ✗‡ | 按声明的 `minRole` + 沙箱可用 + 本会话 | 同左 |
-| 配置类（`/grant` `/revoke` WebUI） | ✗ | ✗ | ✗ | ✓ |
+**「主 agent」那一列与角色四列是两根正交的轴**，两根都过了才拿得到这个工具。角色轴回答「这个人够不够
+格」，主 agent 轴回答「哪一档 agent 该拿它」——「✗」不等于谁都不能调，而是**这件事得由 worker 去做**
+（模型的出路是 `spawn_worker`，不是换个说法再调一次）。这一列在代码里就是 `MAIN_AGENT_TOOLS`
+（`packages/core/src/tools/policy.ts`）：✓ 的进那张白名单，✗ 的不进，`toolCallableBy()` 是唯一的判据函数。
+worker 那一侧是反过来的黑名单 `MAIN_ONLY_TOOLS` —— 因此 skill / plugin / MCP / 自定义工具那四类
+**不必枚举就自动是「主 agent ✗ / worker ✓」**：它们压根不在 `TOOL_POLICY` 里，名字落不进白名单。
+
+| 工具 | 主 agent | blocked | limited | trusted | owner |
+|---|:---:|:---:|:---:|:---:|:---:|
+| （任何工具 / 任何回复） | | ✗ | | | |
+| `read_file` `list_dir` `glob` `grep` | ✗ | ✗ | ✓ jail | ✓ jail | ✓ jail（可开宿主） |
+| `write_file` `edit_file` `move_file` | ✗ | ✗ | ✗ | ✓ jail（+条件审批） | ✓ |
+| `delete_file` | ✗ | ✗ | ✗ | ✓ + 审批 | ✓ + 审批* |
+| `bash` `python` | ✗ | ✗ | ✗ | ✓ 沙箱（+条件审批） | ✓ 宿主/沙箱 |
+| `search_messages` `read_messages` `get_message` | ✓ | ✗ | ✓ 本会话 | ✓ 本会话 | ✓ 本会话 |
+| `admin_search_messages` | ✓ | ✗ | ✗ | ✗ | ✓ 跨会话 |
+| `context_stats` | ✓ | ✗ | ✓ 本会话 | ✓ 本会话 | ✓ 本会话 |
+| `memory_read(pub)` | ✓ | ✗ | ✓ | ✓ | ✓ |
+| `memory_write(pub)` | ✓ 仅主 agent△ | ✗ | ✗† | ✓ | ✓ |
+| `memory_read/write(pri)` | ✓ 写仅主 agent△ | ✗ | ✓ 仅私聊·仅本人 | ✓ 仅私聊·仅本人 | ✓ 全部 |
+| `memory_list` | ✓ | ✗ | ✗ | ✗ | ✓ 全部记忆 |
+| `spawn_worker` | ✓ 仅主 agent△ | ✗ | ✓（受 agent.minRole 约束） | ✓ | ✓ |
+| `read_worker_result` | ✓ 仅主 agent△ | ✗ | ✓ | ✓ | ✓ |
+| `ask_parent` `report_progress` | ✗ | ✗ | ✓ 仅 worker※ | ✓ 仅 worker※ | ✓ 仅 worker※ |
+| `spawn_harness` | ✓ 仅主 agent△ | ✗ | ✗ | ✗ | ✓ + 审批 · 仅私聊 · 仅白名单目录◇ |
+| `spawn_acp` | ✓ 仅主 agent△ | ✗ | ✗ | ✗ | ✓ + 审批 · 仅私聊 · 仅白名单目录◆ |
+| `set_model` | ✓ 仅主 agent△ | ✗ | ✗ | ✓ | ✓ |
+| `web_fetch` | ✗ | ✗ | ✓ allowlist | ✓ | ✓ |
+| `web_search` | ✗ | ✗ | ✓ | ✓ | ✓ |
+| `send_message` `send_photo` `react` | ✓ 仅主 agent△ | ✗ | ✓ | ✓ | ✓ |
+| `schedule_create` `schedule_update` `schedule_list` `schedule_cancel` | ✓ 仅主 agent△ | ✗ | ✗ | ✓ 本会话 | ✓ 本会话 |
+| `stay_silent` | ✓ 仅主 agent△ | ✗ | ✗ | ✓ 仅静默定时轮次¶ | ✓ 仅静默定时轮次¶ |
+| `send_file` `pin_message` | ✓ 仅主 agent△ | ✗ | ✗ | ✓ | ✓ |
+| `define_tool` `delete_tool` `write_skill` `install_skill` `write_plugin` `install_mcp` | ✗ | ✗ | ✗ | ✗ | ✓ + 审批* |
+| `list_tools` `list_mcp` | ✗ | ✗ | ✗ | ✗ | ✓ |
+| `container_list` `container_inspect` `container_logs` `container_keep` | ✗ | ✗ | ✗ | ✗ | ✓ 跨会话§ |
+| `container_exec` | ✗ | ✗ | ✗ | ✗ | ✓ 跨会话§（+条件审批） |
+| `container_reset` | ✗ | ✗ | ✗ | ✗ | ✓ 跨会话§（清文件时 + 审批） |
+| `load_skill` | ✗ | ✗ | ✓ | ✓ | ✓ |
+| `search_tools` | ✗ | ✗ | ✓‖ | ✓‖ | ✓‖ |
+| Skill | ✗ | ✗ | 按 `min-role` | 按 `min-role` | ✓ |
+| Plugin 工具 | ✗ | ✗ | 按 `minRole` | 按 `minRole` | ✓ |
+| MCP 工具 | ✗ | ✗ | 按 server `minRole`（默认 trusted ⇒ ✗） | ✓ | ✓ |
+| 自定义工具（`custom_*`） | ✗ | ✗ | ✗‡ | 按声明的 `minRole` + 沙箱可用 + 本会话 | 同左 |
+| 配置类（`/grant` `/revoke` WebUI） | — | ✗ | ✗ | ✗ | ✓ |
 
 \* owner 的 `delete_file` 审批可由 `approval.skipForOwner`（默认 `true`）跳过。同一条对自我扩展那五个
 写工具成立 —— 它们的主闸不是审批，而是「落库即禁用，owner 在 WebUI 点开」（§3.10）。
 † `memory.pubWriteMinRole` 默认 `trusted`（D12 的安全阀：防止任意群成员污染全局公开记忆）。
+△ 「仅主 agent」= 主 agent 那一列 ✓ **而 worker 侧 ✗**，即它在 `MAIN_ONLY_TOOLS` 里；不带这个标记的 ✓
+是**两侧都给**。共享的那几件全是只读查询（记忆读、归档检索、`context_stats`），刻意如此：记忆与归档
+都分读写两半，把一族拆到两个 agent 手里，模型会先 `memory_read` 拿不到想要的、再为了 `memory_list`
+派一个 worker，而读侧不动外部世界，共享无代价。`memory_read/write(pri)` 那一行两个键的答案不同 ——
+`memory_read` 两侧都给、`memory_write` 只给主 agent，格子里写的是主 agent 那一侧（两个键都是 ✓）。
+各族为什么归主 agent，理由逐条写在 `MAIN_ONLY_TOOLS` 的注释里，不在这里复述；只记一条形态：
+**这是白名单不是黑名单**，所以 skill / plugin / MCP / 自定义工具那四类不必枚举就自动落在 ✗ 一侧。
 ‡ 自定义工具的角色地板焊在 `available()` 里，等于 `TOOL_POLICY.bash.minRole`：一段 shell 不能比
 `bash` 更松，运维把 `tools.overrides.<name>.minRole` 调到 `limited` 也开不出来。
 § 容器管理那六个只在 `sandbox.persistent.enabled` 为真时进目录，且 owner 地板同样焊在
@@ -1137,20 +1212,28 @@ meta 工具本身与它的五条不变量。
 与上面 ‡ 的自定义工具地板、§ 的容器 owner 地板同形。`minRole` 管的是「谁够格」，这一条管的是
 「这一轮的形态允不允许」，两者相乘才是它进不进目录。角色那一栏写 trusted 只是与
 `schedule_create` 对齐（能排静默任务的人才可能触发一条静默轮次），真正的边界不在那里。
-‖ `search_tools` 只在本 (角色, 会话) 的**折叠集非空**时进目录（§3.12 不变量 3），且只对主 agent 可用
-（不变量 4）。纯内建部署下折叠集恒为空，它一次都不出现。这道闸与上面 ¶ 同形：`minRole` 管「谁够格」，
-它管「这一轮的目录形态里到底有没有东西可展开」。角色那一栏是 `limited` 而不是更高档，因为它检索的域
-是**调用者自己那份** `active()`（§3.12），`limited` 用户枚举不到自己本来就没有的工具。
-※ 「仅子 agent」= `available()` 判 `agentKind === 'sub'`，与 ¶ ‖ 同形（`minRole` 管「谁够格」，这一条管
-「这一轮的形态允不允许」）。角色那一栏写 `limited` 只是与 `spawn_agent` 对齐 —— 主 agent 无论什么角色
-都拿不到这两个，运维调 `tools.overrides` 也开不出来。
-◇ `spawn_harness` 的三道门（§3.5）：`available()` 判**仅 owner 且仅私聊且 `agent.harness.allowedDirs`
-非空**（默认空 = 功能整体关闭，工具不进目录）；`TOOL_POLICY` 判 `approval: 'always'`；`runHarness` 再判
+‖ `search_tools` 只在本 (角色, 会话) 的**折叠集非空**时进目录（§3.12 不变量 3），且**只对 lw-worker
+可用**（不变量 4，2026-08-30 从「只对主 agent」翻过来的 —— 折叠的是外部工具，而工具整体在 worker
+那一侧，主 agent 手里一个折叠工具都没有）。纯内建部署下折叠集恒为空，它一次都不出现。折叠集那道闸与
+上面 ¶ 同形：`minRole` 管「谁够格」，它管「这一轮的目录形态里到底有没有东西可展开」。角色那一栏是
+`limited` 而不是更高档，因为它检索的域是**调用者自己那份** `active()`（§3.12），`limited` 用户枚举不到
+自己本来就没有的工具。主 agent 那一列的 ✗ 是**另一层**：它由白名单 `MAIN_AGENT_TOOLS` 给出，不由
+`available()` 给出 —— 主 agent 硬调过来时 `admit()` 先在 `toolCallableBy()` 上拒（`tool_requires_worker`），
+排在 `available()` 那道之前。
+※ 「仅 worker」现在有两层各判一次，缺任一层都不构成完整判据：① 工具自己的 `available()` 判
+`agentKind === 'lw'`；② 这两个在 `WORKER_INTERNAL_TOOLS` 里、**不在 `MAIN_AGENT_TOOLS` 里**，
+`#eligible()`（目录）与 `admit()`（准入复查）两处的 `toolCallableBy()` 各拒一次。列进主 agent 的目录
+会让模型以为自己可以派一个 worker 去替它上报进度。角色那一栏写 `limited` 只是与 `spawn_worker`
+对齐 —— 主 agent 无论什么角色都拿不到这两个，运维调 `tools.overrides` 也开不出来。
+◇ `spawn_harness` 的三道门（§3.5）：`available()` 判**仅 owner 且仅私聊且准入目录集非空**
+（= `agent.harness.allowedDirs` ∪ 默认工作目录，后者由 `workspaceFallback` 控制；两项出厂都是空/关，
+因而出厂 = 功能整体关闭，工具不进目录）；`TOOL_POLICY` 判 `approval: 'always'`；`runHarness` 再判
 一次目录。第三道门对 owner 实际无感（`approval.skipForOwner` 默认 `true`，同上面 \*），**真正拦得住的
 是目录白名单那一道**。批准一次 = 批准它这一趟在那个目录里做的全部事情：harness 自带一整套工具，
 `available()` 的注册期 fail-closed 与 `execute()` 的二次硬拦截都看不见它内部的调用（[14](./14-open-questions.md) T17）。
 ◆ `spawn_acp` 的三道门与上面 ◇ **完全同形，档位在 `TOOL_POLICY` 里逐字相同**（§3.5.1）：
-`available()` 判仅 owner 且仅私聊、`agent.acp.enabled`、`allowedDirs` 非空、至少一台 agent 启用、
+`available()` 判仅 owner 且仅私聊、`agent.acp.enabled`、准入目录集非空（`allowedDirs` ∪ 默认工作目录，
+后者由 `agent.acp.workspaceFallback` 控制，出厂关）、至少一台 agent 启用、
 **以及 `permissionMode` 那一档接得上**（`ask` 而没有审批 broker 时整个工具不进目录，§3.5.3）；
 `TOOL_POLICY` 判 `approval: 'always'`；`AcpManager.run` 再判一次目录。**相同不是偷懒，是判据**：
 ACP 这条路我们看得见 agent 内部做了什么（进度卡片逐条渲染它的 tool_call），但那不是理由把这三道门
@@ -1174,16 +1257,40 @@ ACP 这条路我们看得见 agent 内部做了什么（进度卡片逐条渲染
 两个策略键），映射表在用例里，**想加第四条之前先读那段注释** —— 每加一条，断言就少认一个工具名。
 分类行（`Skill` / `Plugin 工具` / `MCP 工具` / `custom_*` / 配置类）靠「不是工具名的形状」被容忍。
 
-**仍然没有被焊住的是角色与审批那几栏**：某一格是 ✓ 还是 ✗、审批标不标，与 `minRole` / `approval`
-的对应仍然靠改动时逐条对。这段话的边界要跟着用例走，不要提前写：本表曾经漏掉九个工具
-（`context_stats` `memory_list` `list_agents` `read_agent_result` `ask_parent` `report_progress`
-`load_skill` `install_skill` `spawn_harness`）而没有任何人被绊倒，正是因为那时这里写着「CI 有
-一致性测试」而那条测试并不存在 —— **声称一个不存在的保证比没有保证更糟**。
+**「主 agent」那一列已经焊住了**：`tests/docs.test.ts` 的「主 agent 那一列与 `MAIN_AGENT_TOOLS` 一致」
+逐行比对本表这一列的 ✓/✗ 与 `toolCallableBy()` 用的那个集合，两侧任改一处不改另一处即红。
+它**只判 ✓/✗ 那一位，不判 `△`**（「仅主 agent」）：`memory_read/write(pri)` 这类分作用域的行一格对应
+两个策略键，两键在 `MAIN_ONLY_TOOLS` 里的归属并不相同（读两侧都给、写只给主 agent），判那一位需要
+一份把格子拆开的映射，而每加一条映射断言就少覆盖一个工具名（同 `MATRIX_ALIASES` 那条纪律）。
+
+**仍然没有被焊住的是角色与审批那几栏**：某一格是 ✓ 还是 ✗、审批标不标，仍然靠改动时逐条对。
+这段话的边界要跟着用例走，
+不要提前写：本表曾经漏掉九个工具（`context_stats` `memory_list` `ask_parent` `report_progress`
+`load_skill` `install_skill` `spawn_harness`，以及当时叫 `list_agents` / `read_agent_result` 的那两个 ——
+前者已删、后者已改名 `read_worker_result`）而没有任何人被绊倒，正是因为那时这里写着「CI 有一致性
+测试」而那条测试并不存在 —— **声称一个不存在的保证比没有保证更糟**。
 
 **目录过滤不是边界，`execute()` 才是。** `ToolRegistry.active()` 的每一条过滤在 `execute()` 里都要
-再判一次：`minRole`、运维禁用、本轮熔断、`available()`、以及「子 agent 不给 `memory_write`」。
+再判一次：`minRole`、运维禁用、本轮熔断、`available()`、以及**这一档 agent 该不该拿这个工具**。
 模型完全可以沿用上一步的工具名直接调过来，「目录里没有」拦不住它 —— 曾经每个相关工具恰好各自
 fail-closed，但那是巧合不是设计（docs/20 · W-TOOL-01）。
+
+**主 agent 那道新闸落在 `#eligible()` 与 `admit()` 两处，而不写在 `execute()` 的函数体里 —— 这不是
+漏了一层。** `execute()` 第一行就是 `admit()`，凡到达 `execute()` 的调用必然先过 `admit()` 里那句
+`toolCallableBy(context.agentKind, name)`。上一段那句话讲的是「**凡到达 `execute()` 的调用都逐条全判**」，
+不是「判据的代码必须写在 `execute()` 的函数体里」—— 前者是个关于覆盖面的断言，后者只是行文位置。
+两处各判一次的分工是：
+
+- `#eligible()`（目录侧）**不是安全闸，理由是成本**。它是 `toolSetFor` 的取数口，不在这里滤掉的话，
+  那几十个下沉工具的完整 JSON Schema 仍会进请求体第 0 段、每步重发
+  （[04 §2.1](./04-agents-and-providers.md#21-prompt-缓存)）。
+- `admit()`（准入侧）**是安全闸**，而且是**同一个函数**给出的判据 —— `toolCallableBy()` 只有一份实现，
+  两处共用。抄成两份必然漂移，而漂移的表现正是 W-TOOL-01 那一条：目录里没有、硬调过来却通了。
+
+要检查这道闸有没有被拆掉，判据是「`execute()` 有没有真的没跑」，**不是「目录里有没有」**。只断目录的
+用例在 `admit()` 被人挪掉时照样绿 —— 那就是把 W-TOOL-01 那条教训原样重犯一遍。用例里因此挂了一个
+会留痕迹的桩工具：从错误的那一侧调它，既要断返回 `tool_requires_worker` / `tool_unavailable_for_worker`，
+也要断那个痕迹一笔都没有。
 
 **折叠同样不是本系统新增的边界，而它的可达性收缩来自别处 —— 这两层要分开说**（§3.12 不变量 1）：
 
@@ -1225,7 +1332,7 @@ fail-closed，但那是巧合不是设计（docs/20 · W-TOOL-01）。
   最严的一档：把 `memory_write` 这类工具的基准改为 `never`，它靠 `approvalFor` 提档进审批的那些
   输入照旧要审批。方向是刻意的 —— 运维可以替一个不审批的工具收紧，不能替一个工具把它自己认定的
   高危输入放过去。
-- **`timeoutMs: null` 的工具不吃超时覆盖。** `bash` / `python` / `spawn_agent` / `spawn_harness` /
+- **`timeoutMs: null` 的工具不吃超时覆盖。** `bash` / `python` / `spawn_worker` / `spawn_harness` /
   `spawn_acp` / `container_exec` / `ask_parent` 与全部 `custom_*` 各有自己的硬期限（§8.1、§5.5），
   从外面再套一层 race 会在它们自己的超时之前把调用砍掉。判 `null` 那一支在 `execute()` 里排在读覆盖
   **之前**：工具页对这几行置灰是界面礼貌，运行时这一支是不信界面的那道兜底。
@@ -1707,7 +1814,7 @@ approval:
   AI SDK 的 `timeout.toolMs` 不能替代这一条：它只是把一个 `AbortSignal` 递给 `execute()`，
   工具不认那个信号就等于没有超时。
 - **自己管超时的工具**（注册时写 `timeoutMs`）：`bash` / `python` 按 `tools.exec.maxTimeoutMs`（300s）
-  kill 进程；`spawn_agent` 的边界是子 agent 的 `maxSteps` 与配额；`send_photo` / `send_file` 的耗时跟
+  kill 进程；`spawn_worker` 的边界是 worker 的 `maxSteps` 与配额；`send_photo` / `send_file` 的耗时跟
   文件大小走（`tools.tg.maxFileSendMb`）；`web_fetch` / `web_search` 自带下面那份预算。拿 60s 去卡它们
   只会把正常的长任务砍成 `tool_timeout`，而后台那件事还在继续。
 - **瞬时失败重试**：只有 `web_fetch` / `web_search` 开（`tools.web.retries`，默认 2 次，退避带真随机抖动，

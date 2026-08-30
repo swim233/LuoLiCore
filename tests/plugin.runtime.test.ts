@@ -1,7 +1,7 @@
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
-import { ContextEngine, HOT_RELOAD_UNRELIABLE_HINT, LogSink, MemoryStore, PluginManager, QuotaGuard, ToolRegistry, TurnConcurrency, TurnRegistry, configSchema, isHotReloadReliable } from '@luoli/core';
+import { ContextEngine, HOT_RELOAD_UNRELIABLE_HINT, LogSink, MemoryStore, PluginManager, QuotaGuard, ToolRegistry, TurnConcurrency, TurnRegistry, configSchema, isHotReloadReliable, newToolScope } from '@luoli/core';
 import type { ToolExecutionContext } from '@luoli/core';
 import { ArchiveRepository, OperationsRepository, PrincipalRepository, TurnRepository } from '@luoli/db';
 import { createTelegramBot } from '@luoli/telegram';
@@ -51,7 +51,9 @@ describe('plugin runtime', () => {
     expect(manager.list().map((entry) => entry.name)).toEqual(['beta', 'alpha']);
     expect(manager.toolEntries().map((entry) => entry.name)).toEqual(['beta_echo', 'alpha_echo']);
     expect(registry.names()).toEqual(['alpha_echo', 'beta_echo']);
-    const context: ToolExecutionContext = { turn: { turnId: 't', key: 'k', chatId: 'c', threadId: null, initiatorUserId: 'u', effectiveRole: 'trusted', isPrivate: false, baseCommitId: null, snapshot: { messages: [], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 0 }, delta: [], abortSignal: new AbortController().signal, config: {} }, workspace: '.', agentKind: 'main' };
+    const context: ToolExecutionContext = { turn: { turnId: 't', key: 'k', chatId: 'c', threadId: null, initiatorUserId: 'u', effectiveRole: 'trusted', isPrivate: false, baseCommitId: null, snapshot: { messages: [], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 0 }, delta: [], abortSignal: new AbortController().signal, config: {} }, workspace: '.', agentKind: 'lw', ...newToolScope() };
+    // `lw`：plugin 工具不在 `TOOL_POLICY` 里，主 agent 那张白名单收不下它们（docs/05 §4 的下沉），
+    // 目录里恒空，「按 minRole 分档可见」这条判据会跟着恒真。
     expect(registry.activeNames('limited', context)).toEqual([]);
     expect(registry.activeNames('trusted', context)).toEqual(['alpha_echo', 'beta_echo']);
     expect((await manager.hook('ping')).map((entry) => entry.result)).toEqual(['beta', 'alpha']);

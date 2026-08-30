@@ -587,35 +587,59 @@
               "additionalProperties": false,
               "default": {}
             },
-            "maxDepth": {
+            "worker": {
+              "type": "object",
+              "properties": {
+                "modelAlias": {
+                  "type": "string",
+                  "default": "low",
+                  "description": "worker 使用的模型别名。主 agent 自己不调用工具，查、读、写、执行都在 worker 里发生，本项决定这部分的模型档位与单价。"
+                },
+                "maxSteps": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 12,
+                  "description": "单个 worker 的步骤上限（一次模型调用及其后续工具执行计为一步）。"
+                },
+                "resultMaxChars": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 4000,
+                  "description": "worker 结果按 summary 档回灌给主 agent 时的字符上限，超出部分截断，全文仍可用 read_worker_result 分页读取。"
+                },
+                "maxResultChars": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 65536,
+                  "description": "worker 结果按 full 档回灌时的字符硬上限。写入结果表没有降级兜底，因此该上限必须存在。"
+                }
+              },
+              "additionalProperties": false,
+              "default": {}
+            },
+            "maxConcurrentWorkers": {
               "type": "integer",
               "exclusiveMinimum": 0,
               "default": 3,
-              "description": "子 agent 的最大嵌套深度，防止 agent 无限派生 agent。"
+              "description": "同时运行的 worker 数上限，超出的排队等待。"
             },
-            "maxConcurrentSubagents": {
-              "type": "integer",
-              "exclusiveMinimum": 0,
-              "default": 3,
-              "description": "同时运行的子 agent 数上限。"
-            },
-            "maxSubagentsPerTurn": {
+            "maxWorkersPerTurn": {
               "type": "integer",
               "exclusiveMinimum": 0,
               "default": 10,
-              "description": "单轮内允许派生的子 agent 总数。"
+              "description": "单轮内允许派发的 worker 总数。"
             },
             "askTimeoutMs": {
               "type": "integer",
               "exclusiveMinimum": 0,
               "default": 120000,
-              "description": "子 agent 用 ask_parent 提问后，等待答复的超时（毫秒）。"
+              "description": "worker 用 ask_parent 提问后，等待答复的超时（毫秒）。"
             },
             "maxAsksPerRun": {
               "type": "integer",
               "exclusiveMinimum": 0,
               "default": 5,
-              "description": "单次运行中 ask_parent 的调用次数上限，防止子 agent 持续提问而不执行任务。"
+              "description": "单次运行中 ask_parent 的调用次数上限，防止 worker 持续提问而不执行任务。"
             },
             "askArbiter": {
               "type": "boolean",
@@ -631,12 +655,7 @@
               "type": "integer",
               "exclusiveMinimum": 0,
               "default": 3000,
-              "description": "子 agent 向上回报进度的最小间隔（毫秒）。"
-            },
-            "agentsDir": {
-              "type": "string",
-              "default": "./agents",
-              "description": "子 agent 的 markdown 定义目录（agents/<名字>.md）。文件是只读来源，「子 Agent」页中的同名定义会覆盖它。修改 .md 之后需变更一次配置或重启才会重新扫描。"
+              "description": "worker 向上回报进度的最小间隔（毫秒）。"
             },
             "harness": {
               "type": "object",
@@ -662,7 +681,12 @@
                     "type": "string"
                   },
                   "default": [],
-                  "description": "harness 允许访问的仓库路径白名单。**留空 = 功能整体关闭**，该工具不进入模型的工具目录。"
+                  "description": "harness 允许访问的仓库路径白名单。**留空且下方 workspaceFallback 为关 = 功能整体关闭**，该工具不进入模型的工具目录。"
+                },
+                "workspaceFallback": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "把本会话工作目录下的 harness 子目录也视为白名单内，无需登记具体路径。与 allowedDirs 是「或」的关系：两者都为空或关闭时功能才整体关闭。"
                 },
                 "timeoutMs": {
                   "type": "integer",
@@ -694,7 +718,12 @@
                     "type": "string"
                   },
                   "default": [],
-                  "description": "ACP agent 允许访问的仓库路径白名单，语义与 harness 的同名项一致。**留空 = 功能整体关闭**。并发轮次不会在同一目录上各启动一个 agent（按 realpath 互斥，等待时间有上界）。"
+                  "description": "ACP agent 允许访问的仓库路径白名单，语义与 harness 的同名项一致。**留空且下方 workspaceFallback 为关 = 功能整体关闭**。并发轮次不会在同一目录上各启动一个 agent（按 realpath 互斥，等待时间有上界）。"
+                },
+                "workspaceFallback": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "把本会话工作目录下的 harness 子目录也视为白名单内，无需登记具体路径。与 allowedDirs 是「或」的关系，语义与 agent.harness 的同名项一致。"
                 },
                 "defaultAgent": {
                   "type": "string",
@@ -826,66 +855,11 @@
               },
               "additionalProperties": false,
               "default": {}
-            },
-            "agents": {
-              "type": "array",
-              "items": {
-                "type": "object",
-                "properties": {
-                  "name": {
-                    "type": "string",
-                    "pattern": "^[^:]+$"
-                  },
-                  "description": {
-                    "type": "string"
-                  },
-                  "modelAlias": {
-                    "type": "string"
-                  },
-                  "maxSteps": {
-                    "type": "integer",
-                    "exclusiveMinimum": 0
-                  },
-                  "minRole": {
-                    "$ref": "#/definitions/LuoLiConfig/properties/access/properties/defaultUserRole",
-                    "default": "limited"
-                  },
-                  "tools": {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    },
-                    "default": []
-                  },
-                  "resultMaxChars": {
-                    "type": "integer",
-                    "exclusiveMinimum": 0,
-                    "default": 4000
-                  },
-                  "instructions": {
-                    "type": "string"
-                  },
-                  "injectMemory": {
-                    "type": "boolean",
-                    "default": false
-                  }
-                },
-                "required": [
-                  "name",
-                  "description",
-                  "modelAlias",
-                  "maxSteps",
-                  "instructions"
-                ],
-                "additionalProperties": false
-              },
-              "default": [],
-              "description": "子 agent 定义数组：名称、描述、模型别名、步数、最低角色、可用工具、指令。Agent 页有专用编辑器，直接编辑此处的 JSON 容易破坏结构。"
             }
           },
           "additionalProperties": false,
           "default": {},
-          "description": "主 agent 与子 agent 的运行边界。子 agent 的具体定义在 Agent 页编辑。"
+          "description": "主 agent、worker 与外部 harness 的运行边界。"
         },
         "provider": {
           "type": "object",
@@ -1001,7 +975,7 @@
               "type": "integer",
               "exclusiveMinimum": 0,
               "default": 60000,
-              "description": "单次工具调用的默认墙钟上限（毫秒）。超时后向模型返回 tool_timeout，避免整轮对话阻塞在不返回的工具上。bash/python/spawn_agent 与两个 web 工具自行管理超时，不受本项约束。"
+              "description": "单次工具调用的默认墙钟上限（毫秒）。超时后向模型返回 tool_timeout，避免整轮对话阻塞在不返回的工具上。bash/python/spawn_worker 与两个 web 工具自行管理超时，不受本项约束。"
             },
             "overrides": {
               "type": "object",

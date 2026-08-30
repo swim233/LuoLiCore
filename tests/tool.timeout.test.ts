@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
-import { ToolRegistry } from '@luoli/core';
+import { ToolRegistry, newToolScope } from '@luoli/core';
 import type { ApprovalBroker, LogSink } from '@luoli/core';
 import type { RuntimeTurnContext } from '@luoli/shared';
 
@@ -11,7 +11,9 @@ const denials = (): Array<{ tool: string; reason: string }> => events.filter((ev
   .map((event) => event.data as { tool: string; reason: string });
 const turn = { turnId: 't', key: 'chat:1', chatId: '1', threadId: null, initiatorUserId: '2', effectiveRole: 'owner', isPrivate: true, baseCommitId: null,
   snapshot: { messages: [], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 0 }, delta: [], abortSignal: new AbortController().signal, config: {} } satisfies RuntimeTurnContext;
-const context = { turn, workspace: '.', agentKind: 'main' as const };
+// 这一族测的是工具执行本身，所以视角取 `lw`：主 agent 只调得到 `MAIN_AGENT_TOOLS`
+// 那十几个名字，用它跑一个自造的 `hangs` 只会先撞上 `tool_requires_worker`。
+const context = { turn, workspace: '.', agentKind: 'lw' as const, ...newToolScope() };
 const policy = { minRole: 'limited' as const, approval: 'never' as const, scope: 'global' as const, source: 'builtin' as const };
 const limits = { maxRegistered: 10, maxCallsPerTurn: 10, maxConsecutiveErrors: 2, defaultTimeoutMs: 80 };
 
@@ -92,9 +94,9 @@ describe('tool call timeout', () => {
  * （docs/28 · L-LOG-01）。所以 `reason` 由 `admit()` 交出来、由 `execute()` 记。
  */
 describe('tool.denied 覆盖准入闸的每一档', () => {
-  const context2 = { turn: { ...turn, effectiveRole: 'limited' as const }, workspace: '.', agentKind: 'main' as const };
+  const context2 = { turn: { ...turn, effectiveRole: 'limited' as const }, workspace: '.', agentKind: 'lw' as const, ...newToolScope() };
 
-  it('role 不够、allowlist、subagent、超限、运维禁用各记一条，reason 分得开', async () => {
+  it('role 不够、allowlist、两侧的 agentKind、超限、运维禁用各记一条，reason 分得开', async () => {
     events.length = 0;
     const registry = new ToolRegistry(log, broker, { maxRegistered: 10, maxCallsPerTurn: 1, maxConsecutiveErrors: 5 });
     registry.register({ name: 'ok_tool', description: '', inputSchema: z.object({}), policy, sourcePriority: 1, execute: () => ({ ok: true }) });
@@ -106,7 +108,9 @@ describe('tool.denied 覆盖准入闸的每一档', () => {
     await registry.execute('nope', {}, context);
     await registry.execute('owner_only', {}, context2);
     await registry.execute('blocked_tool', {}, context);
-    await registry.execute('memory_write', {}, { ...context, agentKind: 'sub' as const });
+    await registry.execute('memory_write', {}, context);
+    // `ok_tool` 不在 `MAIN_AGENT_TOOLS` 里，主 agent 视角下过不了 `toolCallableBy` 那道闸。
+    await registry.execute('ok_tool', {}, { ...context, agentKind: 'main' as const });
     await registry.execute('ok_tool', {}, { ...context, allow: new Set(['other']) });
     // 这一次真的跑起来，把 maxCallsPerTurn(1) 用掉；下一次就该撞上限。
     expect(await registry.execute('ok_tool', {}, context)).toEqual({ ok: true });
@@ -116,7 +120,8 @@ describe('tool.denied 覆盖准入闸的每一档', () => {
       { tool: 'nope', reason: 'unknown_tool', role: 'owner', error: 'tool_unavailable' },
       { tool: 'owner_only', reason: 'role', role: 'limited', error: '权限不足' },
       { tool: 'blocked_tool', reason: 'disabled_by_operator', role: 'owner', error: 'tool_disabled_by_operator' },
-      { tool: 'memory_write', reason: 'subagent', role: 'owner', error: 'tool_unavailable_for_subagent' },
+      { tool: 'memory_write', reason: 'worker', role: 'owner', error: 'tool_unavailable_for_worker' },
+      { tool: 'ok_tool', reason: 'main_agent', role: 'owner', error: 'tool_requires_worker' },
       { tool: 'ok_tool', reason: 'allowlist', role: 'owner', error: 'tool_not_in_allowlist' },
       { tool: 'ok_tool', reason: 'rate', role: 'owner', error: 'tool_call_limit_exceeded' },
     ]);
@@ -131,7 +136,8 @@ describe('tool.denied 覆盖准入闸的每一档', () => {
     registry.register({ name: 'gated', description: '', inputSchema: z.object({}), policy: { ...policy, approval: 'conditional' }, sourcePriority: 1, execute: () => ({ ok: true }) });
     registry.register({ name: 'narrowed', description: '', inputSchema: z.object({}), policy, sourcePriority: 1, execute: () => ({ ok: true }) });
     await registry.execute('gated', {}, context);
-    await registry.execute('narrowed', {}, { ...context, turn: { ...turn, skillAllowedTools: new Set(['other']) } });
+    // 收窄集挂在 `ToolExecutionContext`（per-run）上而不是 turn 上 —— 两个并行 worker 各持一份。
+    await registry.execute('narrowed', {}, { ...context, skillAllowedTools: new Set(['other']) });
     expect(denials().map((entry) => entry.reason)).toEqual(['approval', 'skill_narrowed']);
   });
 

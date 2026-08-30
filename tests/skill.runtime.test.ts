@@ -83,8 +83,10 @@ describe('skill runtime', () => {
     closeDatabase(db);
   });
 
-  // 交集为空必须判为失败而非空集：空集在 `admit()` 一侧（`skillAllowedTools?.size &&`）是 falsy，
-  // 收窄会被整条跳过，于是「仅允许 read_file」在运行时变成不做任何限制。
+  // 交集为空必须判为失败而非空集：空集在 `admit()` 一侧（`context.skillAllowedTools.size &&`）是
+  // falsy，收窄会被整条跳过，于是「仅允许 read_file」在运行时变成不做任何限制。该集合现在必填、
+  // 挂在 `ToolExecutionContext` 上而不是 turn 上 —— 每个 agent run 各持一份，worker 载入带
+  // `allowed-tools` 的 skill 收窄的只是自己那一份，不会波及共享同一个 turn 对象的父轮。
   it('fails the load when allowed-tools intersects to nothing', () => {
     const { db, skills } = setup();
     expect(skills.load('safe-skill', 'limited', ['bash', 'web_search'])).toMatchObject({ ok: false, error: 'skill_tools_unavailable' });

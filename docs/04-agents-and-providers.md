@@ -6,38 +6,52 @@
                        ┌──────────────────────────────────────┐
    Telegram turn ─────►│  main agent  (ToolLoopAgent)         │
                        │  depth=0  role=effective(user,chat)  │
-                       │  instructions = 固定头部系统提示词    │
+                       │  只对话与派发：MAIN_AGENT_TOOLS       │
                        │  messages     = snapshot + delta      │
-                       └───┬───────────────┬──────────────────┘
-                           │               │ spawn_agent(tool)
-                     普通工具            重任务
-                           │               ▼
-                           │      ┌───────────────────────────┐
-                           │      │ sub agent  depth=1        │
-                           │      │ 独立上下文（不继承历史）   │
-                           │      │ role ≤ 父 role            │
-                           │      └───┬───────────┬───────────┘
-                           │          │           │ spawn_agent
-                           │    ask_parent /      ▼
-                           │    report_progress  sub agent depth=2
-                           │          │           （depth=3 为上限，再 spawn 直接报错）
-                           ▼          ▼
-                    ToolRegistry   AgentBus ──► 主 agent 的 pendingAsk 队列
+                       └───┬──────────────┬───────────┬───────┘
+                           │              │           │
+                 对话面工具  │   spawn_worker│           │ spawn_harness / spawn_acp
+                （投递/记忆/ │   （阻塞等结果）│          │ （owner + 仅私聊 + 每次审批）
+                  定时/归档）│              ▼           ▼
+                           │   ┌───────────────────┐  ┌──────────────────────────┐
+                           │   │ lw-worker depth=1 │  │ harness-worker           │
+                           │   │ 独立上下文        │  │ 外部 CLI / ACP server    │
+                           │   │ role = 父 role    │  │ 自带整套工具，不经本注册表│
+                           │   │ 工具全集 − 主 only │  │ 花的是它自己那份额度      │
+                           │   └───┬───────────┬───┘  └──────────────────────────┘
+                           │       │           │ worker 是叶子：
+                           │  ask_parent /     │ 没有 spawn_worker，depth 到此为止
+                           │  report_progress  │
+                           ▼       ▼           ▼
+                    ToolRegistry  AgentBus  ToolRegistry
 ```
 
-### 1.1 「日常聊天 vs 重任务」的判定
+worker 分两类，`agent_runs.worker_kind` 记着是哪一类（`lw` / `harness` / `acp`，主 run 为 NULL）：
 
-**不做前置分类器**。判定由主 Agent 自己在工具循环里完成——这是 AI SDK 工具调用的自然行为，也避免了「分类器错判导致体验割裂」。
+| | lw-worker | harness-worker |
+|---|---|---|
+| 谁在跑 | 本系统的 `ToolLoopAgent`（`agent/subagent.ts`） | 外部 CLI 或 ACP server |
+| 工具 | 本注册表的全集减去 `MAIN_ONLY_TOOLS` | 它自带的那套，一次都不经本注册表 |
+| 权限 | 与派它的那一轮**完全相同** | owner + 仅私聊 + 每次审批 + 目录白名单 |
+| 花费 | 计入本轮 `cost_usd` 与配额 | 数不到（`cost_usd` 恒 0，见 §6） |
+| 入口 | `spawn_worker` | `spawn_harness` / `spawn_acp` |
 
-- ASSIST.md 明确写清何时应 `spawn_agent`（见 [06 §2.2](./06-prompt-and-memory.md#22-assistmd-骨架)）：
-  - 需要读/写超过 3 个文件，或需要多轮探索才能定位信息；
-  - 预计工具调用 >5 次；
-  - 需要长时间运行的命令（构建、爬取、批量处理）；
-  - 需要与主对话不同的模型档位（例如廉价模型跑批量归纳）。
-- 兜底护栏（代码层，非提示词层）：主 agent 单轮 `stopWhen: isStepCount(cfg.agent.main.maxSteps)`（默认 12）。触及上限时强制收尾并提示「任务较重，建议拆分或让我派发子任务」。
+### 1.1 「自己答 vs 派 worker」的判定
+
+**不做前置分类器**。判定由主 agent 自己在工具循环里完成 —— 这是 AI SDK 工具调用的自然行为，也避免了「分类器错判导致体验割裂」。
+
+判据不再是「任务重不重」，而是**这件事要不要动工具**：主 agent 手上只有对话面那几件
+（投递、记忆读、归档检索、定时、派发），其余全部在 worker 那侧。
+
+- 「早上好」这类不需要任何工具的，主 agent 独自答完。
+- 「帮我查一下天气」要 `web_search`／`web_fetch` —— 派一个 lw-worker，**主 agent 阻塞等它的完整
+  结果**再继续说话（`spawn_worker` 的 `execute` 就是一次 await，不是发射后不管）。
+- 「起一个 harness 去改那个仓库」走 `spawn_harness` / `spawn_acp`。
+- ASSIST.md 写清这三档的落点（见 [06 §2.2](./06-prompt-and-memory.md#22-assistmd-骨架)）。
+- 兜底护栏（代码层，非提示词层）：主 agent 单轮 `stopWhen: stepCountIs(cfg.agent.main.maxSteps)`（默认 12）。
 
 > AI SDK v7 同时提供 `isStepCount` 与同义的 `stepCountIs`；本项目实现统一使用 `stepCountIs`。
-- **主 Agent 永远负责最终对话**：subagent 的返回值只是素材，主 Agent 必须自己组织回复（D 需求原文：「主模型根据结果进行对话」）。因此 `spawn_agent` 工具的 `toModelOutput` 只回灌摘要，且 ASSIST.md 禁止直接把子 agent 输出原样转发。
+- **主 agent 永远负责最终对话**：worker 的返回值只是素材，主 agent 必须自己组织回复（D 需求原文：「主模型根据结果进行对话」）。`MAIN_ONLY_TOOLS` 里那一族 Telegram 投递工具是这句话的执行面 —— worker 拿不到投递通道，它说的话只能经主 agent 转述。
 
 ---
 
@@ -244,164 +258,73 @@ AI SDK v7 的 `result.text` 是**最后一步的正文**，不是全轮拼接 �
 
 ---
 
-## 3. Subagent
+## 3. lw-worker
 
-### 3.1 定义方式
+### 3.1 它没有定义
 
-Subagent 定义有**两个来源**，都不是代码（[14 §2 Q5](./14-open-questions.md)）：
+worker **只有一种**，没有名字、没有 `agents/<name>.md`、没有 `agent.agents[]`、没有 `tools` 白名单。
+两来源定义体系（旧 [14 §2 Q5](./14-open-questions.md)）连同 `list_agents`、`agent.agentsDir`、
+`inject-memory` 一起删掉了。
 
-| 来源 | 谁写 | 能不能在 WebUI 改 |
+理由是这套东西唯一还在表达的收窄，与它带来的分岔不成比例：`minRole` 收窄一个本来就跑在调用者
+角色下的 worker，`tools` 白名单与角色白名单、`tools.overrides`、skill 允许集三者叠在一起，
+而运维要在**四个地方**才能确认某个工具到底能不能被派出去用。现在只有一条：
+`toolCallableBy('lw', name)`。
+
+行为参数落在 `agent.worker.*`（[11](./11-config-reference.md)）：
+
+| 键 | 默认 | 作用 |
 |---|---|---|
-| `agent.agents[]`（配置数据，DB 覆盖层 + WebUI；plugin 也可注册） | 运维 | 能 |
-| `agents/<name>.md`（`agent.agentsDir`，默认 `./agents`） | 谁都行，**可以 git 版本化** | 能，但改的结果是在配置层建一份**覆盖** |
+| `agent.worker.modelAlias` | `low` | 默认模型档位，`spawn_worker` 的 `modelAlias` 参数可覆盖 |
+| `agent.worker.maxSteps` | 12 | 单个 worker 的步数上限，再与 `quota.perTurn.maxSteps` 取小 |
+| `agent.worker.resultMaxChars` | 4000 | `resultMode: 'summary'` 回灌给主 agent 的字数 |
+| `agent.worker.maxResultChars` | 65536 | `resultMode: 'full'` 的硬上界 |
 
-**同名时配置赢**，优先级写死、不做成配置项 —— 两个来源静默打架比只有一个来源糟得多。
-`GET /api/agents` 交回合并后的名单，每条带 `source`（`config` / `file` / `file-overridden`），
-WebUI 据此打徽标；写回 `agent.agents` 时**只写 source 不是 `file` 的那些**，否则一次保存就会把每个
-文件定义悄悄复制进 DB 覆盖层，从此改文件不再生效而界面上什么都看不出来。
+instructions 是 `LW_WORKER_KERNEL`（[06 §3.1](./06-prompt-and-memory.md)），一份固定文本：
+边界语义、工具范围、重试上限、密钥、产出形态。刻意不含 Telegram 排版段 —— worker 的产出交给
+主 agent 当素材，让它按 Telegram 的 Markdown 子集书写只会把转义符带进主 agent 的回复。
 
-md 的 frontmatter 用 kebab-case（与 `SKILL.md` 一致），正文就是 `instructions`：
+### 3.2 `spawn_worker` 工具
 
-```markdown
----
-name: researcher            # 必须等于文件名
-description: 在聊天记录/文件/网络中检索资料并给出带引用的结论
-model: low                  # 默认 low
-max-steps: 20               # 默认 8
-min-role: limited           # 默认 limited
-tools: [read_file, grep, web_fetch]
-result-max-chars: 4000
-inject-memory: false
----
-你是检索型子 agent。目标：用尽可能少的 token 找到确定答案。
-```
+参数（`packages/core/src/tools/builtins.ts`）：
 
-解析失败**不静默跳过**：每个坏文件记一条 `agent.file_invalid` error + 一行 stderr，其余照常加载
-（一个 agent 写错不该让整个 bot 起不来）。正文为空同样算错误 —— 那等于一个没有职责说明的 agent。
-**没有文件监听**：只改 `.md` 不会自动重扫，要么动一次配置（`agent.agents` / `agent.agentsDir` 都会
-触发）要么重启。
+| 参数 | 必填 | 说明 |
+|---|---|---|
+| `task` | 是 | 完整、自包含的任务描述。worker 看不到当前对话历史 |
+| `context` | 否 | 背景资料，原样拼进 worker 的首条消息 |
+| `modelAlias` | 否 | 覆盖 `agent.worker.modelAlias` |
+| `label` | 否 | 任务列表上显示的标题；缺省取 `task` 的前 60 字 |
+| `resultMode` | 否 | `summary`（默认，截到 `resultMaxChars`）/ `full`（截到 `maxResultChars`） |
 
-配置数据那一份长这样：
+**没有 `agent` 参数** —— 只有一种 worker。
 
-```yaml
-agents:
-  - name: researcher
-    description: 在聊天记录/文件/网络中检索资料并给出带引用的结论
-    modelAlias: low
-    maxSteps: 20
-    tools: [read_file, list_dir, grep, glob, search_messages, read_messages, web_fetch, web_search]
-    instructions: |
-      你是检索型子 agent。目标：用尽可能少的 token 找到确定答案。
-      产出格式：
-      ## 结论
-      ## 证据（每条附 file:line 或 message id）
-      ## 不确定项
-    resultMaxChars: 4000
+三件与旧 `spawn_agent` 不同、且各自有理由的事：
 
-  - name: coder
-    description: 在工作目录内完成多文件读写与脚本执行类任务
-    modelAlias: high
-    maxSteps: 30
-    tools: [read_file, write_file, edit_file, list_dir, grep, glob, bash, python]
-    minRole: trusted            # 低于此角色的用户不可派发该 agent
-    instructions: |
-      ...
+1. **`untrustedOutput: true`。** worker 是外部内容进主上下文的唯一通道。它读过的网页、文件、
+   工具输出在它那侧都经过 `untrusted()` 包装，但它把这些写成一段摘要交回来时包装就丢了 ——
+   不在这一层重新包一次，等于给了任意网页一条「让主 agent 把这段话当指令读」的路。
+2. **`full` 档也是有界的。** 不截到 `resultMaxChars` 不等于不截：`agent_runs.result_summary`
+   那一列没有任何降级兜底（不像 `context_messages` 有分级降级与硬截断），一次 200KB 的产出会
+   原样进主 agent 的上下文并持久化，此后每一轮重发。所以 `full` 走 `maxResultChars`，
+   **按构造有界**，而不是等写入时才失败。
+3. **完整结果由主 agent 阻塞等到。** `execute` 是一次 `await runLwWorker(...)`，返回值里带
+   `runId`；`resultMode: 'summary'` 被截断时可以用 `read_worker_result` 分页读全文
+   （句柄仍是 `agentresult://<runId>` —— 那是落库的 ref 形状，改 scheme 会让历史行读不出来）。
 
-  - name: summarizer
-    description: 把大段文本压缩为结构化摘要
-    modelAlias: low
-    maxSteps: 3
-    tools: []
-```
-
-### 3.2 `spawn_agent` 工具
-
-```ts
-export const spawnAgent = (t: TurnCtx, deps: Deps, parent: AgentRun) => tool({
-  description:
-    '把一个较重的、可独立完成的任务派发给子 agent。子 agent 有独立上下文，' +
-    '只返回结果摘要。适用于：多文件探索、批量处理、长时间命令、需要不同模型档位的工作。',
-  inputSchema: z.object({
-    agent: z.string().describe('子 agent 名称，见系统提示词中的可用子 agent 列表'),
-    task: z.string().min(10).describe('完整、自包含的任务描述。子 agent 看不到当前对话历史'),
-    context: z.string().optional().describe('必要的背景资料（会原样注入子 agent 的首条消息）'),
-    modelAlias: z.enum(['high','low','main','vision']).optional().describe('覆盖默认模型档位'),
-    label: z.string().optional().describe('展示给用户的任务标题'),
-  }),
-
-  execute: async function* ({ agent, task, context, modelAlias, label }, { abortSignal }) {
-    const def = deps.agents.get(agent);
-    if (!def) return { ok: false, error: `未知子 agent: ${agent}` };
-
-    // —— 权限与深度校验（fail-closed）
-    if (parent.depth + 1 > cfg.agent.maxDepth) return { ok:false, error:'已达子 agent 深度上限' };
-    const role = minRole(parent.effectiveRole, def.minRole ?? 'limited');
-    if (roleRank(role) < roleRank(def.minRole ?? 'limited'))
-      return { ok:false, error:'当前用户权限不足以派发该子 agent' };
-    if (deps.bus.wouldCycle(parent.id, agent))
-      return { ok:false, error:'检测到子 agent 环路' };
-
-    const run = await deps.runs.create({ turnId: t.turnId, parentRunId: parent.id,
-      depth: parent.depth + 1, kind:'sub', agentName: agent,
-      modelAlias: modelAlias ?? def.modelAlias, effectiveRole: role, taskInput: task });
-
-    const task$ = await deps.tasks.create({ turnId: t.turnId, agentRunId: run.id,
-      chatId: t.chatId, userId: t.initiatorUserId, title: label ?? def.name });
-
-    yield { status: 'started', taskId: task$.id };          // → 占位消息（08 §6）
-
-    const sub = new ToolLoopAgent({
-      model: deps.registry.resolve(modelAlias ?? def.modelAlias),
-      instructions: deps.prompt.buildSub(def, { role, workspace: t.workspace }),
-      tools: await deps.tools.forRole(role, { turn: t, agentKind:'sub', allow: def.tools, run }),
-      stopWhen: [isStepCount(def.maxSteps)],
-      prepareStep: subPrepareStep(run, deps),
-      onStepEnd: e => { deps.ledger.record(t, e.usage, e.model, run.id);
-                        deps.log.stepEnd(t, e, run.id); },
-    });
-
-    const stream = await sub.stream({
-      messages: [{ role:'user', content: context ? `${task}\n\n---\n参考资料:\n${context}` : task }],
-      abortSignal,
-    });
-
-    // 中间进度：把子 agent 的 progress 事件与 step 摘要 yield 出去
-    for await (const ev of deps.bus.progressOf(run.id, stream)) yield ev;
-
-    const final = await stream.finalText;
-    const summary = truncate(final, def.resultMaxChars ?? 4000);
-    await deps.runs.finish(run.id, { state:'done', resultSummary: summary,
-      resultFullRef: await deps.blobs.put(run.id, final) });
-    await deps.tasks.finish(task$.id, { state:'done', resultSummary: summary });
-
-    return { ok: true, agent, taskId: task$.id, result: summary,
-             truncated: final.length > summary.length,
-             fullRef: `agentresult://${run.id}` };
-  },
-
-  // 主 agent 上下文里只保留摘要，避免子 agent 的 token 泄回主上下文
-  toModelOutput: ({ output }) => ({
-    type: 'text',
-    value: output.ok
-      ? `[子 agent ${output.agent} 完成]\n${output.result}` +
-        (output.truncated ? `\n(结果被截断，可用 read_agent_result 工具读取全文: ${output.fullRef})` : '')
-      : `[子 agent 失败] ${output.error}`,
-  }),
-});
-```
-
-### 3.3 Subagent 的隔离保证
+### 3.3 worker 的隔离保证
 
 | 维度 | 规则 |
 |---|---|
 | 上下文 | 全新窗口，**不含**主对话历史；只有 `task` + `context` |
-| 权限 | `role = min(父 role, def.minRole)` —— **永不提权** |
-| 工具 | `def.tools` 与角色白名单的交集；`spawn_agent` 仅在 `depth < maxDepth` 时提供 |
-| 记忆 | 子 agent **不注入** PUBMEMORY/PRIMEMORY（除非 `def.injectMemory: true`，默认 false）；`memory_write` 不提供给子 agent |
+| 权限 | `role = 父 run 的 effectiveRole` —— **不提权，也不收窄**（worker 是主 agent 的执行面，收窄它等于让主 agent 用得到的工具在它手里报权限不足） |
+| 工具 | 该角色下的全集减去 `MAIN_ONLY_TOOLS`（`toolCallableBy('lw', …)` 在 `#eligible()` 与 `admit()` 两处各判一次） |
+| 派发 | **worker 是叶子**：`spawn_worker` / `spawn_harness` / `spawn_acp` 都在 `MAIN_ONLY_TOOLS` 里；`AgentManager.spawn()` 另有一条 `parent.depth > 0` 的兜底拒绝 |
+| 渐进披露 | 载过的 skill、skill 收窄集、`search_tools` 展开集三者挂在**本次 run** 上（`newToolScope()`），不写父轮：两个并行 worker 各展开各的，一个 worker 载入带 `allowed-tools` 的 skill 不会去收窄主轮（[05 §3.12](./05-tools-and-permissions.md) 不变量 4） |
+| 记忆 | 不注入 PUBMEMORY / PRIMEMORY；`memory_write` 在 `MAIN_ONLY_TOOLS` 里（记什么是对话层的判断，而 worker 看不到对话） |
 | 工作目录 | 与主 agent 相同的 `data/workspace/<chatId>`（便于交付产物） |
-| 输出 | 只有返回值进主上下文；子 agent 的完整 transcript 落 `agent_runs.result_full_ref` 与日志 |
+| 输出 | 只有返回值进主上下文，且经 `untrusted()` 包装；完整 transcript 落 `agent_runs.result_full_ref` 与日志 |
 | 配额 | 计入同一个 turn 的 `cost_usd`，共享 turn 级预算上限 |
-| 取消 | 父 turn 的 `abortSignal` 级联，子 agent 立即中止 |
+| 取消 | 父 turn 的 `abortSignal` 级联，worker 立即中止 |
 
 ---
 
@@ -413,13 +336,13 @@ AI SDK 的 subagent 是**单向**的（父调子 → 子返回）。D13 要求�
 
 | kind | 方向 | 语义 | 阻塞 |
 |---|---|---|---|
-| `ask` | 子 → 父 | 子 agent 需要澄清/决策才能继续 | **是**（子侧阻塞等 answer） |
-| `answer` | 父 → 子 | 对 ask 的回复 | — |
-| `progress` | 子 → 父 | 进度上报（转 Telegram 进度编辑 + SSE） | 否 |
-| `result` | 子 → 父 | 最终结果（即工具返回值，也记一条便于审计） | 否 |
-| `error` | 子 → 父 | 失败通知 | 否 |
+| `ask` | worker → 主 | worker 需要澄清/决策才能继续 | **是**（worker 侧阻塞等 answer） |
+| `answer` | 主 → worker | 对 ask 的回复 | — |
+| `progress` | worker → 主 | 进度上报（转 Telegram 进度编辑 + SSE） | 否 |
+| `result` | worker → 主 | 最终结果（即工具返回值，也记一条便于审计） | 否 |
+| `error` | worker → 主 | 失败通知 | 否 |
 
-### 4.2 子 agent 侧工具
+### 4.2 worker 侧工具
 
 ```ts
 ask_parent: tool({
@@ -448,21 +371,21 @@ report_progress: tool({
 
 ### 4.3 父 agent 侧如何应答 `ask`
 
-父 agent 正处在 `spawn_agent` 的 `execute` 里（同一个 JS 事件循环），不可能「在工具执行中途再跑一次模型 step」。因此 `ask` 的应答按顺序降级 —— **任何一级都不伪造答复**（[16 §5](./reviews/16-remediation-plan.md)）：
+主 agent 正处在 `spawn_worker` 的 `execute` 里（同一个 JS 事件循环），不可能「在工具执行中途再跑一次模型 step」。因此 `ask` 的应答按顺序降级 —— **任何一级都不伪造答复**（[16 §5](./reviews/16-remediation-plan.md)）：
 
-1. **独立仲裁调用**（默认启用，`agent.askArbiter: true`）：用 `low` 档模型发起一次**独立的、无工具、只走一步**的调用（`packages/core/src/agent/ask-arbiter.ts`），输入 = 提问的子 agent 名 + 它的 task + 问题 + options，输出 = 答复文本。记 `answer.source='arbiter'`。
+1. **独立仲裁调用**（默认启用，`agent.askArbiter: true`）：用 `low` 档模型发起一次**独立的、无工具、只走一步**的调用（`packages/core/src/agent/ask-arbiter.ts`），输入 = 提问的 worker 的 task + 问题 + options，输出 = 答复文本。记 `answer.source='arbiter'`。
    - 硬期限 `agent.askTimeoutMs`，与本轮 `abortSignal` 合成一个信号：**取消与超时分开报**，否则用户按了 `/cancel` 却看到「仲裁超时」，会去调一个不相干的配置。
-   - 花费按 `low` 档记进 `usage_ledger` 并 `quota.commit`，挂在**父 run** 上（是父 agent 在回答，也不该给子 agent 记一笔它没花的钱）。
-   - 子 agent 的 task 与问题一律经 `untrusted()` 包裹后再交给仲裁模型：那些文本里可能带着它读过的网页与文件。
-   - 空答复算失败 —— 子 agent 会把空串当成一个有效结论继续做下去。
+   - 花费按 `low` 档记进 `usage_ledger` 并 `quota.commit`，挂在**父 run** 上（是主 agent 在回答，也不该给 worker 记一笔它没花的钱）。
+   - worker 的 task 与问题一律经 `untrusted()` 包裹后再交给仲裁模型：那些文本里可能带着它读过的网页与文件。
+   - 空答复算失败 —— worker 会把空串当成一个有效结论继续做下去。
 2. **调用方自带的 `default`**：仲裁不可用（没有 `low` 档模型 / 超时 / 失败 / 空答复）且调用时给了 `default` 时用它，记 `answer.source='rule'`。
-3. **明说没人应答**：返回 `{ok:false, error:'ask_parent_unanswered'}` + 一句能照着改的 hint，子 agent 按提示词自行决策并声明假设。
+3. **明说没人应答**：返回 `{ok:false, error:'ask_parent_unanswered'}` + 一句能照着改的 hint，worker 按提示词自行决策并声明假设。
 
 **没有「转人工」这一级。** `agent.askEscalateToUser` 仍在未接线白名单里。它要的那条阻塞式人机通道
-（发 inline 选项 → 等人点 → 把结果回灌给正在等的子 agent）**现在有了** —— `PendingPrompts` +
+（发 inline 选项 → 等人点 → 把结果回灌给正在等的 worker）**现在有了** —— `PendingPrompts` +
 `TelegramPromptChannel`（[05 §6.1](./05-tools-and-permissions.md)），inline keyboard 审批就跑在它上面，
-`PromptRequest.kind` 里已经留着 `agent_ask` 这一档。**欠的不再是通道，而是语义**：问谁（子 agent 的
-发起人还是 owner）、选项从哪儿来（自由文本答复 vs 固定选项）、以及等人期间那个子 agent 占着的并发槽
+`PromptRequest.kind` 里已经留着 `agent_ask` 这一档。**欠的不再是通道，而是语义**：问谁（worker 的
+发起人还是 owner）、选项从哪儿来（自由文本答复 vs 固定选项）、以及等人期间那个 worker 占着的并发槽
 与 `askTimeoutMs` 怎么算。这三条没定之前接线就是又一个假开关。打开这个键时，仲裁失败会多记一条带
 `escalationRequested: true` 的 `agent.ask_unarbitrated` warn，**不会真的去问人**。
 
@@ -472,12 +395,11 @@ report_progress: tool({
 
 | 护栏 | 默认 | 说明 |
 |---|---|---|
-| `agent.maxDepth` | 3 | `depth > maxDepth` 时 `spawn_agent` 不注册 |
-| `agent.maxConcurrentSubagents` | 3 | 同 turn 在途子 agent 上限；超出排队。**排队要认 `abortSignal`**：那个等待原本只由前一个子 agent 释放槽位来唤醒，于是 `/cancel` 之后排在后面的 `spawn_agent` 照样会醒过来、照样真的去派一个子 agent —— 一轮已经取消的对话继续烧 token，而没有任何人还在等它的结果（这个工具是 `timeoutMs: null`，注册表那道兜底的 race 也不会砍它）。取消时交回 `{ok:false, error:'turn_cancelled'}`，对应的 task 行落 `failed` |
-| `agent.maxSubagentsPerTurn` | 10 | 同 turn 累计派发上限（防无限派发） |
+| worker 是叶子 | — | `spawn_worker` 在 `MAIN_ONLY_TOOLS` 里（worker 既拿不到目录项也过不了 `admit()`），`AgentManager.spawn()` 另有一条 `parent.depth > 0` 的兜底拒绝。它取代了旧的 `agent.maxDepth` 与环路检测：层数只剩一层，而「同名祖先 ≥2 即拒」在只有一个 worker 名字时就等价于 `depth ≥ 2` 一律拒 |
+| `agent.maxConcurrentWorkers` | 3 | 同 turn 在途 worker 上限；超出排队。**排队要认 `abortSignal`**：那个等待原本只由前一个 worker 释放槽位来唤醒，于是 `/cancel` 之后排在后面的 `spawn_worker` 照样会醒过来、照样真的去派一个 worker —— 一轮已经取消的对话继续烧 token，而没有任何人还在等它的结果（这个工具是 `timeoutMs: null`，注册表那道兜底的 race 也不会砍它）。取消时交回 `{ok:false, error:'turn_cancelled'}`，对应的 task 行落 `failed` |
+| `agent.maxWorkersPerTurn` | 10 | 同 turn 累计派发上限（防无限派发）。判据是 `agent_runs.worker_kind='lw'` —— harness 与 ACP 烧的是它们自己的额度，各自另有三道门，不占这个名额 |
 | `agent.askTimeoutMs` | 120000 | ask 阻塞超时 |
-| `agent.maxAsksPerRun` | 5 | 单个子 agent 的提问次数上限，超出直接返回超时错误 |
-| 环路检测 | — | `wouldCycle(parentId, agentName)`：沿 `parent_run_id` 链回溯，同名 agent 出现 ≥2 次即拒绝 |
+| `agent.maxAsksPerRun` | 5 | 单个 worker 的提问次数上限，超出直接返回超时错误 |
 | `agent.progressThrottleMs` | 3000 | progress 事件到 Telegram 编辑的最小间隔 |
 
 ---
@@ -561,7 +483,7 @@ shim 去翻译 Responses 语义，代价有两项，都是实测出来的：
 | 别名 | 用途 | 建议档位 |
 |---|---|---|
 | `main` | 主 Agent 默认 | 中高（对话质量优先） |
-| `high` | 复杂推理、代码类子 agent | 最强模型 |
+| `high` | 复杂推理、写代码的 worker | 最强模型 |
 | `low` | 批量归纳、摘要、仲裁应答、记忆压缩 | 最便宜可用模型 |
 | `vision` | 含图片的轮次（`prepareStep` 自动切换） | 支持 vision 的模型 |
 | `title` | 生成任务标题/会话摘要 | 最便宜 |
@@ -598,19 +520,19 @@ shim 去翻译 Responses 语义，代价有两项，都是实测出来的：
   只认顶层 part，认不出藏在 tool-result `output.value` 里那张图（`02 §9` 红线 22）。
   反过来，注入**之前**也要问一次能力位：`vision` 别名与本轮别名都看不了图时整条路不走，如实回一句
   「当前没有能看图的模型」，一个字节都不入库 —— 比伪造一次「已放进上下文」安全。
-  **子 agent 走同一条判据，但它有自己的别名。** 子 agent 常跑在 `low` 上，而它 `web_fetch` 回来的图
-  同样骑在工具结果上进下一步的请求体，所以两处都要按**子 agent 的别名**来：① 注入前那次能力位
+  **worker 走同一条判据，但它有自己的别名。** worker 常跑在 `low` 上，而它 `web_fetch` 回来的图
+  同样骑在工具结果上进下一步的请求体，所以两处都要按**worker 的别名**来：① 注入前那次能力位
   （问主轮别名等于问了一个跟这张图无关的模型），② `runSubAgent` 的 `prepareStep` 里也要有那次切换
   —— 否则没有任何一处会把它换到能看图的别名上，而它拿到的图既躲开 `isImagePart`（红线 22）
   也就躲开了当步降级兜底。别名经 `ToolExecutionContext.subAgent.alias` 交给工具侧；切换之后那一步的
   `usage_ledger.model_alias` 记**实际用的**那个别名，不是定义里写的那个。候选只有
-  `{它自己那个, vision}`：子 agent 没有 `downgradeAfterStep` 那种机械降档，它看不了图只可能是
-  它**就是被指定成**这个别名的，把 `spawn_agent` 明确指定的别名偷偷换成定义里那个不是修复。
-  **子 agent 要的图，父轮只留一条文字痕迹**（`captureImage` 的 `subAgent` 分支）：一句「你派出的
+  `{它自己那个, vision}`：worker 没有 `downgradeAfterStep` 那种机械降档，它看不了图只可能是
+  它**就是被指定成**这个别名的，把 `spawn_worker` 明确指定的别名偷偷换回 `agent.worker.modelAlias`
+  不是修复。**worker 要的图，父轮只留一条文字痕迹**（`captureImage` 的 `worker` 分支）：一句「你派出的
   `<name>` 从 `<url>` 取过一张图（`webasset://<id>`），你自己没有看到它」，**不带 file part**。
   像素也塞进父轮 = 主 agent 为一张自己没要过的图付图片额度、并被钉在 vision 别名上
   （`visionScope='window'`）。行与文件照存 —— `gcFiles` 的 `referenced` 读的是表而不是 part，
-  「它当时到底看到哪张图」事后仍查得到。跟着这条走的还有两样：`media.maxImagesPerTurn` 对子 agent
+  「它当时到底看到哪张图」事后仍查得到。跟着这条走的还有两样：`media.maxImagesPerTurn` 对 worker
   **按这次 run 自己数**（它的图不进父轮 delta，数 delta 等于数不到），而「注入过图」这个标志置在
   它自己身上（`subAgent.onMediaInjected`）而不是 `turn.mediaInjected` —— 置父轮那个会把主 agent
   后续每一步都切到贵别名上，而主 agent 的 messages 里一张图都没有。
@@ -665,7 +587,7 @@ shim 去翻译 Responses 语义，代价有两项，都是实测出来的：
 
 - **留空 = 不下发该字段**，用 provider 默认值。整份 `settings_json` 为空对象等价于 `NULL`。
 - 生效点在 `prepareStep`：**每一步按当步实际选中的别名取参数**，所以 `downgradeAfterStep` 降档到
-  `low` 之后用的是 `low` 的参数而不是 `main` 的。子 agent 走 `runSubAgent`，取它自己别名的参数。
+  `low` 之后用的是 `low` 的参数而不是 `main` 的。worker 走 `runLwWorker`，取它自己别名的参数。
 - 别名不存在而回退到 `main`/`high`/`low` 的模型时，参数也跟着**回退后的那个别名**走
   （`ModelRegistry.resolve` 与 `.settings` 共用同一段解析），不会出现 A 的模型配 B 的温度。
 - provider 私有选项（如 Anthropic 的 thinking budget）**不在白名单里**，需要时另开字段，
@@ -727,7 +649,7 @@ fallbackModel(chain, cfg) 语义：
     都是 abort，日志里也是一条 timeout —— 记上去等于把健康的 provider 一路推到 `down`）。
     **计数的单位是「一次调用一个候选」，不是「一次尝试」**：同一个候选的重试（`maxRetries`，默认 2）
     只在最后一次失败时记一次。按尝试记的话 `maxRetries: 2` 时一次请求就是三次增量 —— 一个合法地
-    超过 `requestTimeoutMs` 的调用（定时任务、子 agent、收尾补跑都走非流式）当场就能把整个 provider
+    超过 `requestTimeoutMs` 的调用（定时任务、worker、收尾补跑都走非流式）当场就能把整个 provider
     判死 30 分钟，它托管的每个模型从每条别名链里一起消失。
   - **成功服务一次就把计数归零**（`onServed` → `recordProviderServed`），与探测成功同一份语义。
     「连续」少了这一条就是「累计」：跨轮次零散攒够三次超时也能判死一个一直在服务的 provider。
@@ -837,10 +759,46 @@ AI SDK v7 号称还提供 `WorkflowAgent`（确定性编排）与 `HarnessAgent`
 - ⚠️ **`HarnessAgent` 这个抽象不存在。** `ai@7` 里只有 `ToolLoopAgent`（[14 §2](./14-open-questions.md) Q8
   点了这一处错）。所以 `HarnessAgent` 落地的不是「接一个 SDK 类」，
   而是 `spawn_harness`：起一个外部 CLI 子进程（`claude -p "<任务>"` / `codex exec "<任务>"`），
-  任务正文作为 argv 最后一项、不经 shell，把输出收回来。它**不是**一个子 agent 定义 ——
-  没有 `agents[].kind: 'harness'` 这个东西，权限与门在 `TOOL_POLICY` 与 `available()` 上
+  任务正文作为 argv 最后一项、不经 shell，把输出收回来。它**不是**一份 worker 定义 ——
+  定义体系整个不存在了（§3.1），权限与门在 `TOOL_POLICY` 与 `available()` 上
   （[05 §3.5](./05-tools-and-permissions.md)）。连带影响：**配额与记账接不上**，花的是 harness
   自己的额度，本系统数不到它的 token；能复用的只有取消（abortSignal → SIGTERM）与日志。
+
+### 6.1.1 缺省工作目录
+
+`spawn_harness` / `spawn_acp` 的 `dir` 参数是**有条件可选**的：开了
+`agent.harness.workspaceFallback` / `agent.acp.workspaceFallback`（都默认 `false`）时，
+`inputSchemaFor` 才把它渲染成可选，缺省落在
+
+```
+<sandbox.workspaceDir>/<chatId>/harness/<runId>
+```
+
+一个 run 一个目录，不复用 —— harness 与 ACP 都会在 cwd 里留下自己的痕迹（`.claude/`、临时脚本、
+未提交的改动），叠在一起之后没人能说清哪一份属于哪一次调用。`<runId>` **就是那一行
+`agent_runs.id`**（`spawn_harness` 在起进程之前铸一个 ulid，目录名、日志的 `agentRunId`、
+最后那次 INSERT 用的是同一个），否则目录追不回行。
+
+三条约束：
+
+- **目录由工具壳 `mkdirSync` 建，不下沉给 `runHarness` / `AcpManager.run`。** 那两个是纯执行器，
+  判据只该是「这个目录准不准跑」；掺进建目录之后，一次被白名单拒绝的调用也会先在磁盘上留下一个空目录。
+- **缺省目录并进 `allowedDirs` 之后走同一个 `resolveHarnessDir` / `resolveAcpTarget`，不另开一支放行。**
+  另开一支等于让「哪些路径可以跑」有两份判据，而只有一份做逐段比较（`/srv/app` 不放行 `/srv/app-secrets`）。
+- **`allowedDirs` 为空仍然等于功能整体关闭。** `available()` 那条判据是
+  `allowedDirs.length > 0 || workspaceFallback`；两者都不成立时工具不进目录，`runHarness`
+  里的 `harness_disabled` 排在拼 roots 之前，不会被缺省目录悄悄打开。
+
+准入（owner + 仅私聊）与审批（`approval: 'always'`）**一个字都没动**（[14](./14-open-questions.md) T8 / T17）。
+
+`spawn_harness` 跑完落一行 `agent_runs`（`worker_kind='harness'`、`agent_name='harness:<command>'`、
+`model_alias='external'`、`cost_usd` 恒 0）。**执行结束后一次性写到终态，不留 running 窗口** ——
+照 `acp/runs.ts` 的先例：这条路没有中途要更新的字段，而一个 running 窗口就多一份要靠
+`recoverAfterCrash` 收尾的状态。代价是卡住 15 分钟的 harness 在这张表上不留行，由**派发瞬间**那条
+`agent.spawn` 兜住（带 `runId` / `workerKind` / `dir` / `dirSource`）：此前 `agent.harness` 只在结束时发，
+一次跑满 `timeoutMs` 的调用在它结束之前日志里一个字都没有，而它正在改宿主上的文件。
+`dirSource`（`default` / `requested`）单列一个字段，是因为我们自己算出来的空目录与模型指名一个
+白名单里的既有仓库在风险上不是一件事，而两者此前在日志里长得一模一样。
 
 ### 6.2 `spawn_acp`（M13）：同一件事换成协议
 

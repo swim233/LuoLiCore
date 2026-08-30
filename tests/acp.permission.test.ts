@@ -2,7 +2,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, w
 import { resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { closeDatabase, migrateDatabase, openDatabase, OperationsRepository, type Sqlite } from '@luoli/db';
-import { ACP_PERMISSION_TOOL_NAME, AcpManager, DatabaseApprovalBroker, EventBus, LogSink, PathJail, acpPermissionGate, acpPermissionRisk, configSchema, type AcpSettings, type ToolExecutionContext } from '@luoli/core';
+import { ACP_PERMISSION_TOOL_NAME, AcpManager, DatabaseApprovalBroker, EventBus, LogSink, PathJail, acpPermissionGate, acpPermissionRisk, configSchema, newToolScope, type AcpSettings, type ToolExecutionContext } from '@luoli/core';
 import type { RuntimeTurnContext } from '@luoli/shared';
 
 /**
@@ -61,7 +61,7 @@ function harness(options: { permissionMode?: 'ask' | 'auto' | 'deny'; channel?: 
     effectiveRole: 'owner', isPrivate: true, baseCommitId: null,
     snapshot: { messages: [], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 0 },
     delta: [], abortSignal: abort.signal, config } satisfies RuntimeTurnContext;
-  const context: ToolExecutionContext = { turn, workspace: './data', agentKind: 'main' };
+  const context: ToolExecutionContext = { turn, workspace: './data', agentKind: 'main', ...newToolScope() };
   return { broker, abort, context, acp: config.agent.acp as AcpSettings };
 }
 

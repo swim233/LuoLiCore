@@ -107,36 +107,36 @@ export interface WebMediaDependencies {
   visionAvailable(): boolean;
   log?: LogSink;
   /**
-   * 非空表示该图由子 agent 请求（`ToolExecutionContext.subAgent`）。随之变化的三点：父轮只保留
+   * 非空表示该图由 worker 请求（`ToolExecutionContext.worker`）。随之变化的三点：父轮只保留
    * 一条文字记录（不含 file part）、张数按本次 run 单独统计、已注入图片标志置于其上。理由见下方
    * 注入部分。
    */
-  subAgent?:
+  worker?:
     { name: string; images: () => number; onInjected: () => void } | undefined;
 }
 
 /**
- * 图片交给哪个模型查看，就查询哪个模型的能力位（`docs/04 §5.2`）。主 agent 与子 agent 不是同一模型：
- * 子 agent 常运行在 `low` 上，按主轮别名判定等于查询了与该图无关的模型，导致图片落到不支持视觉的模型上
+ * 图片交给哪个模型查看，就查询哪个模型的能力位（`docs/04 §5.2`）。主 agent 与 worker 不是同一模型：
+ * worker 常运行在 `low` 上，按主轮别名判定等于查询了与该图无关的模型，导致图片落到不支持视觉的模型上
  * （`docs/08 §7.2` 禁止的情形，且 `degradeImageParts` 无法覆盖 —— 图片位于 tool-result 内，
  * `isImagePart` 无法识别，`docs/02 §9` 红线 22）。
  *
- * 候选集合与 `runMainAgent` / `runSubAgent` 中的两次切换严格对齐：不一致会导致图片已存储但无人可读，
+ * 候选集合与 `runMainAgent` / `runLwWorker` 中的两次切换严格对齐：不一致会导致图片已存储但无人可读，
  * 或反过来实际可读却报告不支持。主轮别名需实时计算（`set_model` 可在轮内更换），
  * 因此它是闭包而非固定值。
  */
 export function canSeeImages(
   registry: { supportsVision(alias: string): boolean },
   context: {
-    agentKind: "main" | "sub";
-    subAgent?: { alias: string } | undefined;
+    agentKind: "main" | "lw";
+    worker?: { alias: string } | undefined;
   },
   mainAlias: () => string,
 ): boolean {
   if (registry.supportsVision("vision")) return true;
-  // 子 agent 的上下文缺少 `subAgent` 时按不支持处理：存疑情形 fail-closed，而不是回退到查询主轮。
+  // worker 的上下文缺少 `worker` 字段时按不支持处理：存疑情形 fail-closed，而不是回退到查询主轮。
   return registry.supportsVision(
-    context.agentKind === "sub" ? (context.subAgent?.alias ?? "") : mainAlias(),
+    context.agentKind === "lw" ? (context.worker?.alias ?? "") : mainAlias(),
   );
 }
 
@@ -171,13 +171,13 @@ export async function captureImage(
    * 此处拒绝新增而非像 `capImages` 那样替换旧的：模型可能已针对前几张图作出陈述，移除它们
    * 会使其上一句话失去依据。拒绝则提供了可理解的后续步骤。
    *
-   * 子 agent 一档按 run 单独统计：其图片不进入父轮 delta（只留文字记录），统计 delta 无法覆盖 ——
+   * worker 一档按 run 单独统计：其图片不进入父轮 delta（只留文字记录），统计 delta 无法覆盖 ——
    * 一个 run 内抓取五十张图将无人拦截，而每张按 1500 token 估算。同一上限，各自计算预算。
    */
   const limit = (
     turn.config as { media?: { maxImagesPerTurn?: number } } | undefined
   )?.media?.maxImagesPerTurn;
-  const sub = dependencies.subAgent;
+  const sub = dependencies.worker;
   const already = sub
     ? sub.images()
     : turn.delta.reduce(
@@ -191,7 +191,7 @@ export async function captureImage(
     return {
       ok: false,
       error: "image_limit_reached",
-      hint: `${sub ? "你本次运行" : "本轮"}已放入 ${limit} 张图（由 media.maxImagesPerTurn 控制），这一张未放入上下文。${sub ? "将地址交回给派出你的 agent 以查看更多图片。" : "下一轮重新获取以查看该图，或先说明你需要从图中查看的内容。"}`,
+      hint: `${sub ? "你本次运行" : "本轮"}已放入 ${limit} 张图（由 media.maxImagesPerTurn 控制），这一张未放入上下文。${sub ? "把地址写进产出交回去，由派你出来的那一侧再取。" : "下一轮重新获取以查看该图，或先说明你需要从图中查看的内容。"}`,
     };
   }
   let row;
@@ -222,8 +222,8 @@ export async function captureImage(
    * `origin:'note'` + `NOTE_PREFIX`：参照 `load_skill` 的先例标明来源。不标注时模型会将其理解为
    * 用户发送的图片，而该图由模型自行抓取，且来源是不可信的公网。
    *
-   * 子 agent 请求的图片，父轮只保留一条文字记录（无 file part）。图片由其派出的 agent 请求，
-   * 结论包含在返回的摘要中 —— 将像素一并放入父轮等于让主 agent 为未请求的图片支付图片额度，
+   * worker 请求的图片，父轮只保留一条文字记录（无 file part）。图片由它请求，
+   * 结论包含在它交回的产出中 —— 将像素一并放入父轮等于让主 agent 为未请求的图片支付图片额度，
    * 并使后续每一轮固定在 vision 别名上（`visionScope='window'`）。行与文件照常存储：`gcFiles` 的
    * `referenced` 读取的是表而非 part，且事后仍可查证当时读到的是哪张图。
    */
@@ -236,7 +236,7 @@ export async function captureImage(
       ? [
           {
             type: "text",
-            text: `${NOTE_PREFIX}你派出的 ${sub.name} 从 ${source.slice(0, 300)} 取过一张图（${WEB_ASSET_SCHEME}${row.id}）。该图已提供给它查看、结论包含在它交回的摘要中；**你自己没有看到这张图**，需要自行查看时再取一次。`,
+            text: `${NOTE_PREFIX}你派出的 worker 从 ${source.slice(0, 300)} 取过一张图（${WEB_ASSET_SCHEME}${row.id}）。该图已提供给它查看、结论包含在它交回的产出中；**你自己没有看到这张图**，需要自行查看时再取一次。`,
           },
         ]
       : [
@@ -268,7 +268,7 @@ export async function captureImage(
       bytes: row.bytes,
       width: row.width,
       height: row.height,
-      ...(sub ? { subAgent: sub.name } : {}),
+      ...(sub ? { worker: sub.name } : {}),
     },
   });
   // 当步通道：`turn.delta` 无法进入本步的 SDK 消息（`prepareStep` 的 messages 由 SDK 提供），

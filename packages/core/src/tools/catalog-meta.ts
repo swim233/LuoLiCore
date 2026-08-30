@@ -72,11 +72,14 @@ export function registerCatalogTools(
     policy: builtinPolicy("search_tools"),
     sourcePriority: 80,
     /**
-     * 两道闸。`agentKind === 'main'`：子 agent 拿到的是父轮同一个 turn 对象
-     * （`agent/subagent.ts` 的 `runSubAgent` 直接接收 `turn`，`stay_silent` 为此写过同样的闸），
-     * 允许子 agent 调用会往父轮的 `expandedTools` 写入，而子 agent 那条路没有 per-step 重算：
-     * 展开对它自身无效，只会向父轮泄漏状态。子 agent 的 `definition.tools` 白名单本就是比
-     * 折叠更强的约束（`docs/07 §4.1`）。
+     * 两道闸。`agentKind === 'lw'`：折叠的是外部工具（MCP / plugin / custom），而工具整体已经
+     * 下沉给 worker —— 主 agent 那一侧 `MAIN_AGENT_TOOLS` 里一个折叠工具都没有，给它一个
+     * 检索入口只能检索出一份它调不动的清单（`docs/05 §3.12` 不变量 4）。
+     *
+     * 这道闸此前朝反方向焊着，理由是「子 agent 与主轮共享同一个 turn 对象，让它调就是往父轮的
+     * `expandedTools` 里写」。那条理由现在不存在了：`expandedTools` 与 `skillAllowedTools` 已从
+     * `RuntimeTurnContext` 挪到 `ToolExecutionContext`，每个 agent run 各持一份
+     * （`newToolScope()`），worker 展开什么都只落在自己那份上。
      *
      * `hasDeferrable`：折叠集为空时整个工具不进目录，纯内建部署（mcp 未开、无 plugin/custom）
      * 的提示词逐字节不变。无需另判 `deferExternal`，`#deferredFor` 已将其计入；
@@ -84,7 +87,7 @@ export function registerCatalogTools(
      * 提示层回退整目录常驻兜住（`docs/07 §5`），不在这里重复判断。
      */
     available: (role, context) =>
-      context.agentKind === "main" && registry.hasDeferrable(role),
+      context.agentKind === "lw" && registry.hasDeferrable(role),
     execute: (input, context) => {
       // 检索域从 `activeView()` 派生，因而角色、`available()`、运维禁用、`maxRegistered` 截断
       // 已全部过滤：limited 用户在这里枚举不到 owner 工具的描述，摘要里也不会出现
@@ -118,10 +121,10 @@ export function registerCatalogTools(
       // 判据与 `admit()` 的 `skill_narrowed` 逐字对齐。被收窄挡住的必须如实标出，
       // 否则模型会对着一个已展开却调不动的工具反复重试。
       const narrowed = (name: string): boolean =>
-        Boolean(context.turn.skillAllowedTools?.size) &&
+        context.skillAllowedTools.size > 0 &&
         !SKILL_NARROWING_EXEMPT.includes(name as ToolName) &&
-        !context.turn.skillAllowedTools!.has(name);
-      const already = context.turn.expandedTools;
+        !context.skillAllowedTools.has(name);
+      const already = context.expandedTools;
       /**
        * 被收窄挡住的同样记进 `expandedTools`，只是仍然调不动。
        *
@@ -138,23 +141,20 @@ export function registerCatalogTools(
        * 一个无法解释的空轮是划算的。
        */
       const fresh = shown
-        .filter((tool) => deferred.has(tool.name) && !already?.has(tool.name))
+        .filter((tool) => deferred.has(tool.name) && !already.has(tool.name))
         .map((tool) => tool.name);
       // 护栏在写入之前判定：每次展开都会改动请求体第 0 段（tools 数组），本轮剩余步骤的前缀缓存
       // 整段作废并重建一次（`docs/04 §2.1`）。约束的是展开次数累计到的工具数，不是目录大小。
       const budget = (context.turn.config as Readonly<Config>).tools.catalog
         .maxExpandedPerTurn;
-      if ((already?.size ?? 0) + fresh.length > budget) {
+      if (already.size + fresh.length > budget) {
         return {
           ok: false,
           error: "expansion_limit",
-          hint: `本轮最多展开 ${budget} 个工具，已展开 ${already?.size ?? 0} 个。请使用 names 精确指定需要调用的工具。`,
+          hint: `本轮最多展开 ${budget} 个工具，已展开 ${already.size} 个。请使用 names 精确指定需要调用的工具。`,
         };
       }
-      if (fresh.length) {
-        const expanded = (context.turn.expandedTools ??= new Set());
-        for (const name of fresh) expanded.add(name);
-      }
+      for (const name of fresh) already.add(name);
       const matches = shown.map((tool) => ({
         name: tool.name,
         description: normalizeDescription(tool.description),

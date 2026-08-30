@@ -2,7 +2,7 @@ import { rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import { z } from 'zod';
-import { Sandbox, ToolRegistry } from '@luoli/core';
+import { Sandbox, ToolRegistry, newToolScope } from '@luoli/core';
 import type { ApprovalBroker, LogSink, SandboxConfig } from '@luoli/core';
 import type { RuntimeTurnContext } from '@luoli/shared';
 
@@ -16,7 +16,9 @@ describe('sandbox fail-closed visibility', () => {
     const sandbox = new Sandbox(sandboxConfig);
     const registry = new ToolRegistry(log, broker, { maxRegistered: 10, maxCallsPerTurn: 10, maxConsecutiveErrors: 3 });
     registry.register({ name: 'bash', description: '', inputSchema: z.object({ command: z.string() }), policy: { minRole: 'trusted', approval: 'conditional', scope: 'sandbox', source: 'builtin' }, sourcePriority: 1, available: (role, context) => sandbox.plan(role, context.workspace).allowed, execute: () => ({ ok: true }) });
-    const context = { turn, workspace: '.', agentKind: 'main' as const };
+    // `lw`：`bash` 随执行整体下沉到 worker 那一侧（docs/05 §4），主 agent 侧目录里恒无此名 ——
+    // 本条判的是沙箱不可用时的 fail-closed 与 owner 的 bypass，两条闸不能混。
+    const context = { turn, workspace: '.', agentKind: 'lw' as const, ...newToolScope() };
     expect(registry.activeNames('trusted', context)).not.toContain('bash');
     expect(registry.activeNames('owner', { ...context, turn: { ...turn, effectiveRole: 'owner' } })).toContain('bash');
   });
@@ -28,7 +30,7 @@ describe('sandbox fail-closed visibility', () => {
     const sandbox = new Sandbox(() => live, true, false);
     const registry = new ToolRegistry(log, broker, { maxRegistered: 10, maxCallsPerTurn: 10, maxConsecutiveErrors: 3 });
     registry.register({ name: 'bash', description: '', inputSchema: z.object({ command: z.string() }), policy: { minRole: 'trusted', approval: 'never', scope: 'sandbox', source: 'builtin' }, sourcePriority: 1, available: (role, context) => sandbox.plan(role, context.workspace).allowed, execute: () => ({ ok: true }) });
-    const context = { turn, workspace: '.', agentKind: 'main' as const };
+    const context = { turn, workspace: '.', agentKind: 'lw' as const, ...newToolScope() };
     expect(registry.activeNames('trusted', context)).toContain('bash');
     live = { ...live, mode: 'none' as const };
     expect(registry.activeNames('trusted', context)).not.toContain('bash');

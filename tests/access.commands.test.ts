@@ -112,7 +112,7 @@ describe('Telegram 只读命令的回执', () => {
 
   // `/tasks` 与 WebUI「任务与审批」页此前各指一样东西：前者列 turns（没有标题也没有进度），
   // 后者列 tasks。两样都列，各自标清楚（docs/29 · M-TG-05）。
-  it('/tasks 同时列在途轮次与子 agent 任务，带标题与进度', async () => {
+  it('/tasks 同时列在途轮次与 worker 任务，带标题与进度', async () => {
     const { db, bot, sent } = await readOnlyHarness('tasks-detail');
     const now = Date.now();
     db.prepare(`INSERT INTO turns(id,key,chat_id,initiator_user_id,effective_role,state,started_at)
@@ -124,7 +124,7 @@ describe('Telegram 只读命令的回执', () => {
     const [text] = sent;
     expect(text).toContain('在途轮次 1 个');
     expect(text).toContain('01TURNRUNNIN running · 已运行 12s');
-    expect(text).toContain('子 agent 任务 1 个');
+    expect(text).toContain('worker 任务 1 个');
     expect(text).toContain('「把 docs 扫一遍」');
     expect(text).toContain('读文档 12/20 · docs/11');
     closeDatabase(db);

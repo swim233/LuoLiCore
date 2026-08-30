@@ -226,6 +226,14 @@ code { font-family: var(--font-mono); font-size: .82rem; }
 .data-grid .pick { width: 3rem; }
 .data-grid .grid-note td { color: var(--muted); text-align: center; padding: 34px 12px; }
 .data-grid .grid-note:hover td { background: transparent; }
+/* 数值列右对齐，个位对齐后同一列的量级可直接比较；等宽数字避免 1 与 8 不同宽造成的锯齿。 */
+.data-grid :is(th, td).align-right { text-align: right; }
+.data-grid td.align-right { font-variant-numeric: tabular-nums; }
+/* 数值连同单位（k / M / $）一并套底衬。宽度由行内 `min-width` 给出，同列取最长的一条 ——
+   逐格自适应会让底衬宽窄不一，读成「这几行不是同一类东西」。内部右对齐，单位因此逐行对齐。
+   取主色最淡的一档：同一行右侧已有 success / secondary 两色徽标，再引入语义色会读成状态。 */
+.metric-chip { display: inline-block; padding: 1px 7px; border-radius: 7px; background: color-mix(in srgb, var(--primary), transparent 88%); color: color-mix(in srgb, var(--primary), var(--ink) 18%); font: 600 .74rem/1.6 var(--font-mono); font-variant-numeric: tabular-nums; text-align: right; }
+.dark .metric-chip { background: color-mix(in srgb, var(--primary), transparent 82%); color: color-mix(in srgb, var(--primary), #fff 12%); }
 .grid-pager { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 12px 2px 0; color: var(--muted); font: .72rem var(--font-mono); }
 .grid-pager button { display: grid; place-items: center; width: 28px; height: 28px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--ink); }
 .grid-pager button:hover:not(:disabled) { border-color: var(--primary); color: var(--primary); }

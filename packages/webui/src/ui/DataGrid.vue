@@ -98,6 +98,7 @@ function toggleAll(): void {
             <th
               v-for="column in columns"
               :key="column.key"
+              :class="{ 'align-right': column.align === 'right' }"
               :style="column.width ? { width: column.width } : undefined"
             >
               {{ column.header }}
@@ -122,7 +123,11 @@ function toggleAll(): void {
                 @change="togglePick(row)"
               />
             </td>
-            <td v-for="column in columns" :key="column.key">
+            <td
+              v-for="column in columns"
+              :key="column.key"
+              :class="{ 'align-right': column.align === 'right' }"
+            >
               <slot :name="column.key" :data="row">{{
                 cell(row, column)
               }}</slot>

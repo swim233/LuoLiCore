@@ -461,9 +461,10 @@ export class SkillLoader {
       ? roleTools.filter((tool) => skill.allowedTools!.includes(tool))
       : null;
     // 交集为空表示该 skill 声明的工具本轮全部不可用，此时必须使载入失败而非返回空集：
-    // 下游把空集并入 `turn.skillAllowedTools` 后，`admit()` 的判据是 `skillAllowedTools?.size &&`
-    // —— size 0 为 falsy，整条收窄被跳过，收窄到零个工具在运行时等同于完全不收窄，
-    // 一个 `allowed-tools: [nonexistent]` 的 skill 反而获得该角色的全部工具。
+    // 下游把空集并入本次 run 的 `skillAllowedTools`（挂在 `ToolExecutionContext` 上，每个 agent
+    // run 各持一份）后，`admit()` 的判据是 `skillAllowedTools.size &&` —— size 0 为 falsy，
+    // 整条收窄被跳过，收窄到零个工具在运行时等同于完全不收窄，一个
+    // `allowed-tools: [nonexistent]` 的 skill 反而获得该角色的全部工具。
     if (narrowed !== null && narrowed.length === 0)
       return {
         ok: false,

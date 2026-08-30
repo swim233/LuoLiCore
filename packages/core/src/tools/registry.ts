@@ -9,7 +9,9 @@ import {
   TOOL_POLICY,
   effectiveToolPolicy,
   relaxedFields,
+  toolCallableBy,
 } from "./policy.js";
+import type { AgentKind } from "./policy.js";
 import type { LogSink, LogSpan } from "../log/sink.js";
 import { ApprovalRules, type ApprovalRisk } from "../approval/rules.js";
 export type { ApprovalRisk } from "../approval/rules.js";
@@ -18,16 +20,31 @@ import type { ApprovalPolicy, ToolScope } from "./policy.js";
 export interface ToolExecutionContext {
   turn: RuntimeTurnContext;
   workspace: string;
-  agentKind: "main" | "sub";
+  agentKind: AgentKind;
   agentRunId?: string;
   /**
-   * 子 agent 专有的字段，在主 agent 的上下文中恒为 `undefined`。工具侧此前对子 agent 一无所知
-   * （别名、名称、张数均为 `runSubAgent` 的局部变量），而图片路径需要这三项（`docs/04 §5.2`）。
+   * 本次 agent run 的渐进披露状态：载过哪些 skill、skill 把工具收窄成了什么、
+   * `search_tools` 展开过哪些折叠工具。
+   *
+   * 挂在 run 上而不是 turn 上：worker 与主轮共享同一个 turn 对象，挂在 turn 上时 worker 载入一个
+   * 带 `allowed-tools` 的 skill 会去收窄主轮，worker 展开的工具会写进主轮的展开集 ——
+   * `search_tools` 那道 `agentKind === 'main'` 闸当初存在的全部理由就是这个，而它现在要翻过来
+   * 给 worker 用（`docs/05 §3.12` 不变量 4）。
+   *
+   * 三个都必填、且在建 run 时就建好：`execute()` 交给工具的是本对象的**浅拷贝**，写成可选加
+   * `??=` 的话惰性建出来的 Set 落在那份副本上，调用一返回就丢了。
    */
-  subAgent?: {
-    /** 子 agent 自身的模型别名 —— 图片能否进入上下文按它判定，按主轮别名判定即查询了无关的模型。 */
+  loadedSkills: Set<string>;
+  skillAllowedTools: Set<string>;
+  expandedTools: Set<string>;
+  /**
+   * worker 专有的字段，在主 agent 的上下文中恒为 `undefined`。工具侧此前对 worker 一无所知
+   * （别名、名称、张数均为 `runLwWorker` 的局部变量），而图片路径需要这三项（`docs/04 §5.2`）。
+   */
+  worker?: {
+    /** worker 自身的模型别名 —— 图片能否进入上下文按它判定，按主轮别名判定即查询了无关的模型。 */
     alias: string;
-    /** 子 agent 的名称。父轮的文字记录需写明获取方（例如所派出的 researcher 取过一张图）。 */
+    /** worker 的名称。父轮的文字记录需写明获取方（例如你派出的 worker 取过一张图）。 */
     name: string;
     /** 本次 run 已注入的图片数。父轮 delta 中不含它们，`maxImagesPerTurn` 只能按 run 自行统计。 */
     images: () => number;
@@ -43,6 +60,24 @@ export interface ToolExecutionContext {
    * 若修改共享对象，同一步内并行的多个 `spawn_agent` 会互相覆盖父边。
    */
   parentSpanId?: string;
+}
+
+/**
+ * 一份空的渐进披露状态。每个 agent run 建一次，之后整个 run 共用同一组引用。
+ *
+ * 三个 Set 在 `ToolExecutionContext` 上是**必填**的，正是为了逼每个构造点回答「这一份归谁」——
+ * 写成可选加 `??=` 的话，惰性建出来的 Set 会落在 `execute()` 交给工具的那份**浅拷贝**上，
+ * 调用一返回就丢了。
+ */
+export function newToolScope(): Pick<
+  ToolExecutionContext,
+  "loadedSkills" | "skillAllowedTools" | "expandedTools"
+> {
+  return {
+    loadedSkills: new Set(),
+    skillAllowedTools: new Set(),
+    expandedTools: new Set(),
+  };
 }
 
 export interface RegisteredTool<I = unknown> {
@@ -71,7 +106,8 @@ export type ToolDenyReason =
   | "disabled_after_errors"
   | "disabled_by_operator"
   | "role"
-  | "subagent"
+  | "main_agent"
+  | "worker"
   | "unavailable"
   | "allowlist"
   | "skill_narrowed"
@@ -453,10 +489,10 @@ export class ToolRegistry {
       .filter((tool) => !this.disabledByOperator(tool.name))
       .filter((tool) => !state.disabled.has(tool.name))
       .filter((tool) => !allow || allow.includes(tool.name))
-      .filter(
-        (tool) =>
-          !(context.agentKind === "sub" && tool.name === "memory_write"),
-      )
+      // 主 agent 只留对话与派发，其余下沉给 worker（`docs/05 §4`）。这一层不是安全闸
+      // （`admit()` 才是），它在这里的理由是成本：`#eligible()` 是 `toolSetFor` 的取数口，
+      // 不在此滤掉的话那几十个工具的完整 JSON Schema 仍会进请求体第 0 段、每步重发。
+      .filter((tool) => toolCallableBy(context.agentKind, tool.name))
       .filter((tool) => tool.available?.(role, context) !== false)
       .map((tool) =>
         tool.inputSchemaFor
@@ -716,20 +752,23 @@ export class ToolRegistry {
     // active() 的过滤集合必须在此逐条复查，否则目录中不存在就成为唯一边界，而模型完全可以凭
     // 上一步的工具名直接调用。当前每个相关工具恰好各自 fail-closed，但那属于巧合而非设计
     // （docs/20 · W-TOOL-01；docs/05 §220 单一数据源）。
-    if (context.agentKind === "sub" && name === "memory_write")
-      return {
-        ok: false,
-        error: "tool_unavailable_for_subagent",
-        reason: "subagent",
-      };
+    if (!toolCallableBy(context.agentKind, name))
+      return context.agentKind === "main"
+        ? {
+            ok: false,
+            error: "tool_requires_worker",
+            reason: "main_agent",
+            hint: "这个工具在 worker 那一侧，用 spawn_worker 把任务派出去。",
+          }
+        : { ok: false, error: "tool_unavailable_for_worker", reason: "worker" };
     if (tool.available?.(context.turn.effectiveRole, context) === false)
       return { ok: false, error: "tool_unavailable", reason: "unavailable" };
     if (context.allow && !context.allow.has(name))
       return { ok: false, error: "tool_not_in_allowlist", reason: "allowlist" };
     if (
-      context.turn.skillAllowedTools?.size &&
+      context.skillAllowedTools.size &&
       !SKILL_NARROWING_EXEMPT.includes(name as ToolName) &&
-      !context.turn.skillAllowedTools.has(name)
+      !context.skillAllowedTools.has(name)
     )
       return {
         ok: false,

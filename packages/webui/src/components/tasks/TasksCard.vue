@@ -17,7 +17,7 @@ import {
 } from "./types";
 
 /**
- * 任务卡（`tasks` 表，即 `spawn_agent` 派发的子 agent 任务）。
+ * 任务卡（`tasks` 表，即 `spawn_worker` 派发的 worker 任务）。
  *
  * 分页游标与 loader 放在一起。这一页三张卡的端点、游标、弹窗、busy 态没有交集，把 `page`
  * 提升到父层只会重新制造一个争用点（`ConsoleView` 中 `loadConversations` 同形）。父层只发送
@@ -68,8 +68,8 @@ async function reload(target = page.value): Promise<void> {
 }
 
 const cancelling = ref("");
-/** 任务没有独立的取消句柄：`spawn_agent` 的子 agent 运行在父轮次的 abort 信号下，
- *  取消一条任务只能取消其所属的整轮。需先说明清楚，避免误认为只停止了这一个子 agent。 */
+/** 任务没有独立的取消句柄：`spawn_worker` 派出去的 worker 运行在父轮次的 abort 信号下，
+ *  取消一条任务只能取消其所属的整轮。需先说明清楚，避免误认为只停止了这一个 worker。 */
 function cancelTaskTurn(task: TaskRow): void {
   const turnId = String(task.turn_id ?? "");
   if (!turnId) {
@@ -82,7 +82,7 @@ function cancelTaskTurn(task: TaskRow): void {
   }
   askConfirm(
     `取消任务「${String(task.title ?? turnId)}」？`,
-    `实际取消的是所属整轮 ${turnId.slice(0, 12)}；同一轮里的其他子 agent 也会一并终止。`,
+    `实际取消的是所属整轮 ${turnId.slice(0, 12)}；同一轮里的其他 worker 也会一并终止。`,
     async () => {
       cancelling.value = turnId;
       try {
@@ -131,6 +131,8 @@ interface TaskDetail extends TaskRow {
     error: string | null;
   } | null;
   agentRun: {
+    /** `agent_runs.worker_kind`：`lw` / `harness` / `acp`（迁移 0018）。主 run 不建 `tasks` 行，故必有值。 */
+    workerKind: string | null;
     agentName: string;
     modelAlias: string;
     state: string;
@@ -176,7 +178,7 @@ const taskState = (state: string): { label: string; severity: TagSeverity } =>
 function removeTask(task: TaskDetail): void {
   askConfirm(
     `永久删除任务「${task.title}」？`,
-    "只删除这一条任务记录；轮次、agent run、上下文与已发消息不受影响，无法撤销。",
+    "只删除这一条任务记录；轮次、worker 运行记录、上下文与已发消息不受影响，无法撤销。",
     async () => {
       try {
         await api(`/api/tasks/${encodeURIComponent(task.id)}`, {
@@ -220,9 +222,9 @@ watch(
     <h3>任务</h3>
     <p class="section-note">
       任务由
-      <code>spawn_agent</code>
-      派发，生命周期绑定所属轮次。<b>「取消」取消的是整轮</b>：同一轮的其他子
-      agent 一并终止。点击一行查看详情。
+      <code>spawn_worker</code>
+      派发，生命周期绑定所属轮次。<b>「取消」取消的是整轮</b>：同一轮的其他 worker
+      一并终止。点击一行查看详情。
     </p>
     <DataGrid
       :rows="rows"
@@ -349,8 +351,8 @@ watch(
             ><b>${{ Number(detail.turn.costUsd || 0).toFixed(4) }}</b></span
           >
           <span v-if="detail.agentRun"
-            ><small>agent</small
-            ><code>{{ detail.agentRun.agentName }}</code></span
+            ><small>worker</small
+            ><code>{{ detail.agentRun.workerKind ?? '—' }} · {{ detail.agentRun.agentName }}</code></span
           >
           <span v-if="detail.agentRun"
             ><small>别名</small
@@ -375,14 +377,14 @@ watch(
         </p>
         <div class="detail-payload">
           <!-- **不回退到 `agentRun.resultSummary`。** 成功那一路两列是同一个串：`runSubAgent` 返回的
-               正是 `AgentManager.finish()` 的 `summary`（`agent/subagent.ts:178-180`），`spawn_agent`
+               正是 `AgentManager.finish()` 的 `summary`（`agent/subagent.ts`），`spawn_worker`
                紧接着把它写进 `tasks.result_summary`（`tools/builtins.ts:406`）。两者真正分岔的只有失败
                那一路 —— 那时 `agent_runs.result_summary` 是 NULL、原因在 `agent_runs.error` 上，而
                `tasks.result_summary` 记着那句错误（`builtins.ts:392/410`、`db/database.ts:65` 的
                `process_restarted` 同理）。所以回退永远轮不到，加了只是暗示一种不存在的分岔。 -->
           <div class="detail-actions">
             <b>结果摘要</b
-            ><small class="alias-empty">子 agent 的返回内容。</small>
+            ><small class="alias-empty">worker 的返回内容。</small>
           </div>
           <pre v-if="detail.result_summary" v-text="detail.result_summary" />
           <p v-else class="empty">暂无</p>

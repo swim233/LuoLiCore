@@ -30,14 +30,15 @@ import { runtimeBlock, type PromptBuildResult } from "../prompt/assembler.js";
 import type {
   DeferredToolGroup,
   RegisteredTool,
+  ToolCatalogView,
   ToolExecutionContext,
   ToolMedia,
   ToolRegistry,
 } from "../tools/registry.js";
 // `media` 的形状判据只有一份：注册表在序列化前用它，此处在落库前用同一个。判据写成两份会
 // 导致注册表识别为图片、落库侧不识别的分歧。registry 不 import runtime，无循环依赖。
-import { splitToolMedia } from "../tools/registry.js";
-import { SKILL_NARROWING_EXEMPT } from "../tools/policy.js";
+import { newToolScope, splitToolMedia } from "../tools/registry.js";
+import { WORKER_INTERNAL_TOOLS, type ToolName } from "../tools/policy.js";
 import type { ProviderStore } from "../provider/store.js";
 import {
   PROVIDER_FAILURES_TO_DOWN,
@@ -583,9 +584,9 @@ export function toolModelOutput(output: unknown): ToolModelOutput {
   };
 }
 /**
- * 注册表工具 → SDK 的 `ToolSet`。实现只有一份：主 agent 与子 agent 此前各写一遍相同的三行，
- * 而 `toModelOutput` 这类钩子漏加一处的表现是主 agent 能识别图片、子 agent 不能，且必须实际
- * 运行一次带图的子 agent 才能发现。
+ * 注册表工具 → SDK 的 `ToolSet`。实现只有一份：主 agent 与 worker 此前各写一遍相同的三行，
+ * 而 `toModelOutput` 这类钩子漏加一处的表现是主 agent 能识别图片、worker 不能，且必须实际
+ * 运行一次带图的 worker 才能发现。
  */
 export function toolSetFor(
   registry: ToolRegistry,
@@ -615,7 +616,7 @@ export function toolSetFor(
  *
  * 形状与 SDK 实际发送的那份一致（`output: {type:'error-text', value}`），不另行定义。
  */
-function stepToolResults(
+export function stepToolResults(
   content: readonly unknown[],
 ): StepFacts["toolResults"] {
   const results: StepFacts["toolResults"] = [];
@@ -647,6 +648,49 @@ function stepToolResults(
     });
   }
   return results;
+}
+/**
+ * 单步里被 AI SDK 自己拦下的工具调用（`tool-error`），供两条 agent 路径各记一条 `tool.error`。
+ *
+ * 模型给出非法工具参数时 `ToolRegistry.execute` 根本不会被调用 —— 校验发生在 AI SDK 内部
+ * （`AI_InvalidToolInputError`），因此 `tool.call` 计数为 0，唯一痕迹是上下文里那条
+ * `output.type='error-text'` 的 tool-result，而它下一轮即被 `prune_level=1` 清除。
+ * 2026-08-18 导致进程崩溃的事故起点正是 `get_message({messageId:0})`（docs/28 · L-LOG-03）。
+ *
+ * 抽出来是因为 worker 那一侧此前整段缺失（`docs/00 §2` 的既有盲区），而重构之后 worker 是唯一
+ * 有工具的那一侧 —— 两处各写一遍必然漂移成「同一件事在主路径记 warn、在 worker 侧无声」。
+ */
+export function stepToolErrors(content: readonly unknown[]): Array<{
+  toolName: string | null;
+  toolCallId: string | null;
+  errorKind: string;
+  message: string;
+}> {
+  const failures: Array<{
+    toolName: string | null;
+    toolCallId: string | null;
+    errorKind: string;
+    message: string;
+  }> = [];
+  for (const raw of content) {
+    const part = raw as {
+      type?: string;
+      toolName?: string;
+      toolCallId?: string;
+      error?: unknown;
+    };
+    if (part?.type !== "tool-error") continue;
+    failures.push({
+      toolName: part.toolName ?? null,
+      toolCallId: part.toolCallId ?? null,
+      errorKind: part.error instanceof Error ? part.error.name : "unknown",
+      message:
+        part.error instanceof Error
+          ? `${part.error.name}: ${part.error.message}`
+          : String(part.error),
+    });
+  }
+  return failures;
 }
 /**
  * 按别名构造带 fallback / 重试包装的模型。包装必须做在按别名解析这一层：`prepareStep` 每一步
@@ -962,11 +1006,21 @@ export interface MainAgentDependencies {
    * 进程，该功能等同于未实现（docs/06 §1）。可选，未绑定时该行退回原措辞。
    */
   containers?: ContainerManager;
-  /** 仅用于记录 `turns.steps`（此前无任何写入方）。可选：子 agent 与测试均无需提供。 */
+  /** 仅用于记录 `turns.steps`（此前无任何写入方）。可选：worker 与测试均无需提供。 */
   turns?: { countStep(id: string, steps: number): void };
 }
 export interface MainPromptAssembly extends PromptBuildResult {
+  /** 主 agent 第 0 步真正能发出的工具（`agentKind: 'main'` 视角）。 */
   activeTools: string[];
+  /**
+   * TOOL CATALOG 里列出的名字（`agentKind: 'lw'` 视角，滤掉 `WORKER_INTERNAL_TOOLS`）。
+   *
+   * 与 `activeTools` 是两份数据：block 3 描述的是 **worker 能做什么**（主 agent 据此判断值不值得
+   * 派一个出去），而 `activeTools` 是主 agent 自己这一步的可发出集。共用一份的话，要么目录里
+   * 只剩对话与派发那几个（模型于是认为这个部署没有任何工具），要么主 agent 的 `activeTools`
+   * 混进它调不到的名字（每一次调用都撞 `tool_requires_worker`）。
+   */
+  catalogTools: string[];
   catalog: string;
   runtime: string;
 }
@@ -1017,8 +1071,9 @@ export function chatDescription(turn: RuntimeTurnContext): string {
  * 每步重发。重复的成本主要在后者，而描述的权威副本本就是 tools 数组那份（且带完整 JSON Schema）。
  * 默认仍为 `true`：折叠与去重是两个独立变量，同时启用会导致模型行为下降时无法归因。
  *
- * 名字清单一档带有「常驻工具」字样，用于与 KERNEL 中「TOOL CATALOG 的常驻部分」形成锚点对应。
- * 默认一档不添加任何标题，添加即破坏现状逐字节不变的前提。
+ * 名字清单一档的抬头写「worker 常驻工具」而不是「常驻工具（可直接调用）」：这份目录现在描述的是
+ * worker 能做什么，主 agent 自己一个都调不到（`docs/04 §1`）。写成「可直接调用」是把 worker 的
+ * 能力说成读者的能力，而读者是主 agent。
  */
 function residentCatalog(
   resident: readonly RegisteredTool[],
@@ -1027,7 +1082,7 @@ function residentCatalog(
   if (!resident.length) return "";
   return withDescriptions
     ? resident.map((tool) => `- ${tool.name}: ${tool.description}`).join("\n")
-    : `常驻工具（可直接调用）：${resident.map((tool) => tool.name).join(", ")}`;
+    : `worker 常驻工具：${resident.map((tool) => tool.name).join(", ")}`;
 }
 /** 单组超过此数即只列出前 `DEFERRED_GROUP_HEAD` 个（docs/06 §1）：摘要行同处易变段，每步重发。 */
 const DEFERRED_GROUP_CAP = 12;
@@ -1036,9 +1091,13 @@ const DEFERRED_GROUP_HEAD = 10;
  * 折叠段：每组一行、只列名字、不带 per-tool 描述（形状见 docs/06 §1）。
  *
  * 不带描述是该机制的本体，而非排版偏好：MCP 工具名本身相当自描述，而上游 description 动辄
- * 数 KB、每步重发正是要消除的开销。行首的「本步不可直接调用；用 search_tools 展开」是两处
- * 引导之一（另一处在 KERNEL；RUNTIME 的计数后缀仅在目录关闭时出现，docs/14 §3 T20 ①）——
- * 摘要若只给名字而不说明用法，模型会直接调用并撞上 `NoSuchToolError`。
+ * 数 KB、每步重发正是要消除的开销。
+ *
+ * **行首那句引导是给谁的，随工具下沉换过一次人。** 此前写「本步不可直接调用；用 `search_tools`
+ * 展开」，读者是手里握着折叠工具的主 agent。现在这份目录读者仍是主 agent，而 `search_tools`
+ * 在 worker 那一侧 —— 照原样写，模型会去调一个它没有的工具，撞 `NoSuchToolError`
+ * （`docs/05 §3.12` 不变量 5 那条路径）。所以这句改成说清「这些要派 worker」，
+ * 展开那一跳的引导留在 `LW_WORKER_KERNEL` 里，由真正做得到的那一方收。
  *
  * 组的顺序沿用 `activeView()` 返回的原序（`sourcePriority desc, name asc` 的首次出现顺序），
  * 不要重排：这一段位于易变段内，无谓的重排等于每步修改一次提示词。
@@ -1056,7 +1115,7 @@ function deferredCatalog(
     return `- [${group.key}] ${group.total} 个：${shown.join(", ")}${shown.length < group.total ? `, …等 ${group.total} 个` : ""}`;
   });
   return [
-    `【折叠工具 · 共 ${total} 个，本步不可直接调用；用 search_tools 按关键词或名字展开】`,
+    `【折叠工具 · 共 ${total} 个，worker 检索后才可用；需要其中任何一项，把要求写进 task 派 worker】`,
     ...lines,
   ].join("\n");
 }
@@ -1071,14 +1130,37 @@ export function assembleMainPrompt(
     turn,
     workspace: dependencies.workspace,
     agentKind: "main",
+    ...newToolScope(),
   };
-  // 取数一次，供三个消费点使用（常驻段、折叠摘要段、RUNTIME 的两行）。此前是 `activeNames()` +
-  // `catalog()` 各跑一遍完整过滤链，而该链会调用每个工具的 `available()`：两遍不仅浪费，还留下
-  // 两次结果不一致的窗口（`available()` 读取的是实时配置与容器状态）。
-  const view = dependencies.tools.activeView(turn.effectiveRole, toolContext);
-  // 开轮时 `expandedTools` 恒为空（唯一写入方是轮内的 `search_tools`），因此此处的常驻集即
-  // 第 0 步的 `activeTools`；此后每一步由 `prepareStep` 实时计算。
-  const activeTools = view.resident.map((tool) => tool.name);
+  /**
+   * 目录与 `activeTools` 现在是两次取数，两个视角。
+   *
+   * 目录（block 3）用 worker 的视角：主 agent 自己不调工具了，它需要知道的是**派出去能做什么** ——
+   * 按主 agent 的视角取数，目录里只剩 `send_message` / `spawn_worker` 那几个，模型会据此认为
+   * 这个部署没有文件、没有沙箱、不能上网。折叠视图也随之按 worker 的合格集切分，因为真正会去
+   * `search_tools` 展开它们的是 worker。
+   *
+   * 主 agent 的合格集另取一次（`toolContext` 本身就是 `agentKind: 'main'`）。
+   */
+  const workerView = dependencies.tools.activeView(turn.effectiveRole, {
+    ...toolContext,
+    agentKind: "lw",
+  });
+  const view: ToolCatalogView = {
+    ...workerView,
+    // `ask_parent` / `report_progress` / `search_tools` 是 worker→父的内部通道。列进主 agent 的
+    // 目录会让模型以为自己可以派一个 worker 去上报进度（`WORKER_INTERNAL_TOOLS` 的注释是另一半）。
+    resident: workerView.resident.filter(
+      (tool) => !WORKER_INTERNAL_TOOLS.includes(tool.name as ToolName),
+    ),
+  };
+  const catalogTools = view.resident.map((tool) => tool.name);
+  // 与 `prepareStep` 逐字同一个调用，只是那边每步重算一次：主 agent 没有 `search_tools`，展开集
+  // 恒为空，因此第 0 步与其后每一步的合格集本就相同 —— 两处写法不同会让它们在某个配置下分叉。
+  const activeTools = dependencies.tools.activeNamesForStep(
+    turn.effectiveRole,
+    toolContext,
+  );
   // `perChat.<key>.character`：会话级人格文件名。它在 `perChat` 白名单内，但不是 schema 叶子键
   // （`perChat` 为 `z.record(z.unknown())`），因此从合并后的本轮配置中按名字读取（docs/27 · C-08）。
   // 形态校验在 `PromptDocuments.paths`：该值会被用作 `memory/` 下的路径段。
@@ -1097,7 +1179,7 @@ export function assembleMainPrompt(
   const skillCatalog =
     dependencies.skills
       ?.catalog(turn.effectiveRole, [
-        ...activeTools,
+        ...catalogTools,
         ...view.deferred.map((tool) => tool.name),
       ])
       .map((skill) => `- skill:${skill.name}: ${skill.description}`)
@@ -1134,15 +1216,6 @@ export function assembleMainPrompt(
     triggerDescription: initiatorDescription(turn),
     role: turn.effectiveRole,
     tools: activeTools,
-    agents: dependencies.config.agent.agents
-      .filter(
-        (agent) =>
-          ["blocked", "limited", "trusted", "owner"].indexOf(
-            turn.effectiveRole,
-          ) >=
-          ["blocked", "limited", "trusted", "owner"].indexOf(agent.minRole),
-      )
-      .map((agent) => `${agent.name}(${agent.description})`),
     contextMessages: turn.snapshot.messages.length,
     contextTokens: turn.snapshot.tokens,
     maxMessages: dependencies.config.context.limit.maxMessages,
@@ -1169,17 +1242,18 @@ export function assembleMainPrompt(
             : "刚被清空。之前的对话不在你当前上下文中；必要时可使用 read_messages / search_messages 检索归档。",
         }
       : {}),
-    // 工具名仅在目录关闭时列入 RUNTIME：开启时 TOOL CATALOG 的常驻段已列出，两处同源（均为本次
-    // `activeView()` 的 `resident`），重复一遍等于每轮多付一份易变段的成本（docs/06 §1.2）。
-    // 折叠的工具不进入该行，只在后缀中给出计数。
+    // 这一行现在恒真。它此前只在目录关闭时出现（开着时 TOOL CATALOG 的常驻段已列出同一份名字，
+    // 属重复计费）—— 而 block 3 描述的已经是 worker 能做什么，两处不再同源：RUNTIME 的
+    // 「可用工具」是主 agent 自己那一步唯一的清单，缺了它模型只能从目录里挑一个名字直接调，
+    // 每次都撞 `tool_requires_worker`。
     show: {
       quota: runtimeShow.showQuota,
       contextWatermark: runtimeShow.showContextWatermark,
       workspace: runtimeShow.showWorkspace,
-      toolNames: !dependencies.config.prompt.includeToolCatalog,
+      toolNames: true,
     },
-    // 截断告知与折叠计数均取自上面那次 `activeView()`。折叠数为 0 时 `runtimeBlock` 自身不添加
-    // 后缀，因此此处无条件传入。
+    // 截断告知与折叠计数均取自 worker 视角那次 `activeView()`。折叠数为 0 时 `runtimeBlock` 自身
+    // 不添加后缀，因此此处无条件传入。
     ...(view.truncated ? { catalogTruncated: view.truncated } : {}),
     deferredTools: view.deferred.length,
   });
@@ -1201,6 +1275,7 @@ export function assembleMainPrompt(
   return {
     ...dependencies.prompts.build(promptInput),
     activeTools,
+    catalogTools,
     catalog,
     runtime,
   };
@@ -1324,6 +1399,13 @@ export async function* stepSeparatedText(
   yield* emit(wrote ? `\n\n${extra}` : extra);
 }
 
+/**
+ * 主 run 的 `result_summary` 上限。它只是 trace 上的一段留痕（真正的回复走投递侧，不受它约束），
+ * 与 `agent.worker.resultMaxChars` 不是同一个数：那个决定 worker 的产出有多少字进主 agent 的上下文。
+ * 保持 4000 —— 改动前 `finish()` 查不到定义时用的就是这个兜底值。
+ */
+const MAIN_RESULT_SUMMARY_CHARS = 4000;
+
 const WRAP_UP_INSTRUCTION =
   "工具调用已经结束，但你还没有给出结论。向用户说明结果：哪些已成功，未成功的问题出在哪里。不要再调用工具，不要复述过程。";
 
@@ -1350,15 +1432,21 @@ async function runMainAgentInternal(
   streaming: boolean,
 ): Promise<string | MainAgentStreamResult> {
   // 自撰写工具在开轮前同步进注册表：`toolSet` 在下方即冻结，轮内再注册只会让 `prepareStep` 的
-  // `activeTools` 报出 `toolSet` 中不存在的名字。仅在主 agent 执行 —— 子 agent 运行于父轮内部，
+  // `activeTools` 报出 `toolSet` 中不存在的名字。仅在主 agent 执行 —— worker 运行于父轮内部，
   // 在其中重新扫描会使父轮已冻结的工具集失去一致性。
   dependencies.customTools?.syncIfChanged();
+  /**
+   * `newToolScope()` 的三个 Set 在主 agent 这一侧恒为空：`load_skill` 与 `search_tools` 都不在
+   * `MAIN_AGENT_TOOLS` 里，唯一的写入方是 worker 各自那份。留着是因为它们在 `ToolExecutionContext`
+   * 上是必填 —— 写成可选的话，惰性建出来的 Set 会落在 `execute()` 交给工具的那份浅拷贝上。
+   */
   const toolContext: ToolExecutionContext = {
     turn,
     workspace: dependencies.workspace,
     agentKind: "main",
+    ...newToolScope(),
   };
-  // 子 agent 从 turn 上读取同一份预留：spawn_agent 在工具层执行，无法访问此处的 dependencies。
+  // worker 从 turn 上读取同一份预留：spawn_worker 在工具层执行，无法访问此处的 dependencies。
   turn.reservation = dependencies.reservation ?? null;
   await dependencies.plugins?.hook("beforeTurn", { turn });
   // `docs/10 §1` 图中的 span B。抛出异常时同样要记录一行 —— 组装是同步的，但会读取磁盘（人格、
@@ -1598,7 +1686,7 @@ async function runMainAgentInternal(
         // 仅一次往返；真正昂贵的是连接成功但不返回 —— 每一步都要耗满
         // `(maxRetries+1) × requestTimeoutMs`。且一次调用中同一候选只记一次：仍会重试时先不记录。
         // 按尝试计数的话，`maxRetries: 2` 时一次请求即产生三次增量，一个合法超过 `requestTimeoutMs`
-        // 的调用（定时任务、子 agent、收尾补跑均走非流式，`deadline.guard` 覆盖的是整段生成）
+        // 的调用（定时任务、worker、收尾补跑均走非流式，`deadline.guard` 覆盖的是整段生成）
         // 会立即将整个 provider 判死 30 分钟。
         if (failure.kind !== "timeout" || failure.willRetry) return;
         const down = dependencies.registry.recordFailure(
@@ -1713,12 +1801,6 @@ async function runMainAgentInternal(
   const stepAlias = new Map<number, string>();
   /** vision 切换每轮只记录一条：`prepareStep` 每一步都会重算出同一结论。 */
   let visionSwitchLogged = false;
-  /**
-   * `repairToolCall` 本轮已改写过的名字（判据 ⓿，见该钩子的注释）。不挂在 turn 上 —— 它只对
-   * 本次 `agent.generate` 有意义（收尾补跑与主轮共用同一个 `agent`，共用该集合是正确的），
-   * 而 `expandedTools` 是供 `prepareStep` 与下一轮读取的记录，两者语义不同。
-   */
-  const repairedThisTurn = new Set<string>();
   const observers = createStepObservers(turn, {
     ledger: dependencies.ledger,
     registry: dependencies.registry,
@@ -1759,97 +1841,6 @@ async function runMainAgentInternal(
       ({ steps }) => wrapUpMode && steps.length >= 1,
     ],
     include: { requestMessages: true, requestBody: true, responseBody: true },
-    /**
-     * 折叠工具被直接调用时自愈为一次检索（docs/05 §3.12 的自愈段）。
-     *
-     * 背景：SDK 先按本步 `activeTools` 过滤 toolSet，再用过滤后的集合执行 `parseToolCall` ——
-     * 因此模型调用折叠工具时在解析阶段即撞上 `NoSuchToolError`，根本到不了 `registry.execute()`。
-     * 折叠使该情形从罕见幻觉变为常规事件，仅靠提示词引导（KERNEL 中的那句无条件存在，折叠组行
-     * 与 RUNTIME 计数后缀只会出现其一 —— 后者取决于 `show.toolNames`）等于寄希望于模型主动想到
-     * 去检索。本钩子将其改写为 `search_tools({ names: [原名] })`：调用被自动展开，下一步即可真正
-     * 调用该工具，模型无需先掌握 `search_tools`。代价与模型自行先检索一次相同（多一个 step）。
-     *
-     * 回调参数中的 `tools` 是已按 activeTools 过滤的 stepToolSet，折叠集不在其中 ——
-     * 因此折叠判据只能从注册表实时计算，不能依赖该参数。
-     */
-    repairToolCall: ({ toolCall, tools: stepTools }) => {
-      /**
-       * 四条改写无效的判据排在最前，因为它们成本最低，而下方的 `activeView()` 需要跑完整条过滤
-       * 链（含每个工具的 `available()`）—— 且最常见的入场情形恰好是幻觉名字，该档位要判到最后
-       * 才能确定不应改写。
-       *
-       * ⚠ 这四条都用于防止死循环，而非优化。统一判据是本次改写能否真正推进状态：改写为检索而
-       * 检索又不产生任何变化，就会形成「模型调用 X → NoSuchToolError → 改写为检索 → 检索原地
-       * 返回 → 模型再次调用 X → …」的循环，直至耗尽步数上限或触发熔断。退回一次正常的
-       * `NoSuchToolError` 更优 —— 模型得到的是明确失败，而不是一次看似有进展的往复。
-       *
-       * ⓿ 同一名字本轮只改写一次。这一条是兜底，且必须排在首位：①②③ 各自对应一种检索无法推进
-       *    状态的成因，而成因不止这三种 —— `search_tools` 自身也会在 `admit()` 处失败
-       *    （`tools.maxCallsPerTurn` 耗尽、运维将其 `approval` 覆盖为 `always` 且审批被拒、
-       *    轮内连续失败达到 `maxConsecutiveErrors` 之前的若干次），这些档位一律不写入
-       *    `expandedTools`，因此 ① 无法拦住第二次。实测（`tests/tools.catalog.wiring.test.ts`
-       *    中的 `maxCallsPerTurn` 用例）：额度耗尽后同一个折叠工具被连续改写 11 次，仅由
-       *    `maxSteps` 兜住 —— 11 次无效的模型调用。按名字判定一次即可，无需枚举全部成因。
-       *    正常路径上它与 ① 等价（改写成功 ⇒ 名字进入 `expandedTools` ⇒ ① 本就会拦截），
-       *    因此增加它不会阻断任何一次有效改写；同时也将同一步内并列的两次同名调用合并为一次。
-       *    该集合是本次 `runMainAgentInternal` 调用的局部变量，随本轮函数帧释放，不属于进程内
-       *    状态（`docs/01 §3.1`）。
-       * ① 本轮已展开过它。`tools/catalog-meta.ts` 中「被 skill 收窄拦截的仍记入 `expandedTools`」
-       *    那段注释是这一条的另一半：单独看任一处都会认为对方多余（那边看似白占额度，这边看似
-       *    可以顺带判一次 narrowed），两处需一并修改才成立。narrowed 的判据刻意不在此处再写一份
-       *    —— 它已有两份（`admit()` 与 `catalog-meta.ts`）且必须逐字对齐。
-       * ② 本轮展开额度已耗尽。该档位下 `search_tools` 会返回 `expansion_limit` 且不写入
-       *    `expandedTools`，因此 ① 拦不住它；而它的 hint 是用 names 精确指定，改写产生的调用本就是
-       *    `names:[X]` —— 模型即使遵循 hint 也无出路。
-       *    判据写作 `size >= budget`，在 `fresh` 恒为 1（此处永远只指定一个名字）时与
-       *    `catalog-meta.ts` 的 `size + fresh > budget` 逐字等价，改动任一侧都需检查另一侧。
-       *    ⓿ 同样能兜住它，但这一条使第一次即退回明确失败，省去一次无用检索。
-       * ③ `search_tools` 本步无法发出。常态下成立（它常驻且豁免收窄），但成本闸门与收尾补跑会将
-       *    `activeTools` 整体清空 —— 那两档下改写只是换个名字撞同一个错误。
-       */
-      if (repairedThisTurn.has(toolCall.toolName)) return Promise.resolve(null);
-      if (turn.expandedTools?.has(toolCall.toolName))
-        return Promise.resolve(null);
-      if (
-        (turn.expandedTools?.size ?? 0) >=
-        dependencies.config.tools.catalog.maxExpandedPerTurn
-      )
-        return Promise.resolve(null);
-      if (!("search_tools" in stepTools)) return Promise.resolve(null);
-      // 幻觉名字（注册表中不存在的）不改写：将不存在的名字送去检索只会得到空结果，而模型会认为
-      // 自己已经检索过。它照旧走 `NoSuchToolError`，那是一次明确的失败。
-      if (
-        !dependencies.tools
-          .activeView(turn.effectiveRole, toolContext)
-          .deferred.some((entry) => entry.name === toolCall.toolName)
-      )
-        return Promise.resolve(null);
-      repairedThisTurn.add(toolCall.toolName);
-      dependencies.log.event({
-        level: "info",
-        kind: "tool.repaired",
-        summary: `${toolCall.toolName} → search_tools`,
-        traceId: turn.turnId,
-        ...turnParent(turn),
-        chatId: turn.chatId,
-        userId: turn.initiatorUserId,
-        key: turn.key,
-        data: {
-          tool: toolCall.toolName,
-          into: "search_tools",
-          reason: "deferred_not_expanded",
-        },
-      });
-      // 逐字段列出而非 `...toolCall`：原调用上的 `providerExecuted` / `providerMetadata` 属于原
-      // 工具的元数据，整份透传给 `search_tools` 等于挂到错误的工具上。`input` 必须是 JSON 字符串
-      // —— 下游执行的是 `safeParseJSON({ text: toolCall.input, schema })`。
-      return Promise.resolve({
-        type: "tool-call" as const,
-        toolCallId: toolCall.toolCallId,
-        toolName: "search_tools",
-        input: JSON.stringify({ names: [toolCall.toolName] }),
-      });
-    },
     prepareStep: async ({ stepNumber: rawStep, messages }) => {
       // 收尾补跑是另一次 `agent.generate`，其 stepNumber 从 0 重新计数。不换算会导致：
       // ① `stepSpans.set(0, …)` 覆盖主轮 step 0 那条已结束的 span（出错时还会被 end 第二次）；
@@ -1860,17 +1851,10 @@ async function runMainAgentInternal(
         turn,
         step: stepNumber,
       });
-      const skillAllow = turn.skillAllowedTools?.size
-        ? new Set<string>([
-            ...turn.skillAllowedTools,
-            ...SKILL_NARROWING_EXEMPT,
-          ])
-        : null;
+      // 不传展开集、也不再做 skill 收窄：`search_tools` 与 `load_skill` 都不在 `MAIN_AGENT_TOOLS`
+      // 里，主 agent 这一侧两者都没有写入方，渐进披露整体在 worker 那边（`agent/subagent.ts`）。
       const activeForStep = dependencies.tools
-        .activeNamesForStep(turn.effectiveRole, toolContext, turn.expandedTools)
-        // 先扩张后收窄，收窄始终优先（docs/07 §2.2）：载入 `allowed-tools: [bash]` 的 skill 之后，
-        // 已展开的 MCP 工具照样被滤除 —— 展开改变的是可见性，不是权限。
-        .filter((name) => !skillAllow || skillAllow.has(name))
+        .activeNamesForStep(turn.effectiveRole, toolContext)
         // 护栏：`toolSet` 在开轮时即冻结，而这一行计算出的合格集每步都是实时的。轮中 MCP
         // reconcile 新接入一台 server、或热更新放宽了 `tools.overrides`，都会使实时集合中出现
         // 冻结集之外的名字。此前只有自撰写工具一条路做了防护（开轮前 `syncIfChanged`）。
@@ -2118,28 +2102,14 @@ async function runMainAgentInternal(
           ...(fellBack ? { level: "warn" as const } : {}),
         },
       );
-      /**
-       * 模型给出非法工具参数时，`ToolRegistry.execute` 根本不会被调用。校验发生在 AI SDK 内部
-       * （`AI_InvalidToolInputError`），因此 `tool.call` 计数为 0，唯一痕迹是上下文中那条
-       * `output.type='error-text'` 的 tool-result —— 而它下一轮即被 `prune_level=1` 清除。
-       * 2026-08-18 导致进程崩溃的事故起点正是 `get_message({messageId:0})`（docs/28 · L-LOG-03）。
-       */
-      for (const raw of step.content as readonly unknown[]) {
-        const part = raw as {
-          type?: string;
-          toolName?: string;
-          toolCallId?: string;
-          error?: unknown;
-        };
-        if (part?.type !== "tool-error") continue;
-        const message =
-          part.error instanceof Error
-            ? `${part.error.name}: ${part.error.message}`
-            : String(part.error);
+      for (const failure of stepToolErrors(step.content))
         dependencies.log.event({
           level: "warn",
           kind: "tool.error",
-          summary: `${part.toolName ?? "unknown"}: ${message}`.slice(0, 300),
+          summary: `${failure.toolName ?? "unknown"}: ${failure.message}`.slice(
+            0,
+            300,
+          ),
           traceId: turn.turnId,
           ...(stepSpans.get(stepNumber)
             ? { parentSpanId: stepSpans.get(stepNumber)!.id }
@@ -2148,14 +2118,12 @@ async function runMainAgentInternal(
           userId: turn.initiatorUserId,
           key: turn.key,
           data: {
-            tool: part.toolName ?? null,
-            toolCallId: part.toolCallId ?? null,
-            errorKind:
-              part.error instanceof Error ? part.error.name : "unknown",
-            message: message.slice(0, 500),
+            tool: failure.toolName,
+            toolCallId: failure.toolCallId,
+            errorKind: failure.errorKind,
+            message: failure.message.slice(0, 500),
           },
         });
-      }
       observers.appendContext(facts);
       observers.calibrate(facts);
     },
@@ -2230,7 +2198,8 @@ async function runMainAgentInternal(
       });
       let settled = false;
       const finish = (text: string): string => {
-        if (!settled && mainRun) dependencies.agents?.finish(mainRun, text);
+        if (!settled && mainRun)
+          dependencies.agents?.finish(mainRun, text, MAIN_RESULT_SUMMARY_CHARS);
         settled = true;
         return text;
       };
@@ -2362,13 +2331,19 @@ async function runMainAgentInternal(
     if (!result.text.trim()) {
       const wrapUp = withVisionNotice(await wrapUpIfNeeded());
       if (wrapUp) {
-        if (mainRun) dependencies.agents?.finish(mainRun, wrapUp);
+        if (mainRun)
+          dependencies.agents?.finish(
+            mainRun,
+            wrapUp,
+            MAIN_RESULT_SUMMARY_CHARS,
+          );
         return wrapUp;
       }
     }
     if (!result.text.trim() && streamFailure) throw streamFailure;
     const answer = withVisionNotice(result.text);
-    if (mainRun) dependencies.agents?.finish(mainRun, answer);
+    if (mainRun)
+      dependencies.agents?.finish(mainRun, answer, MAIN_RESULT_SUMMARY_CHARS);
     return answer;
   } catch (error) {
     if (mainRun)

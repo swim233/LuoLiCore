@@ -58,9 +58,15 @@ export class AcpRunRecorder implements AcpRunLedger {
      * 主 agent 的一次工具调用中，trace 树上就应处于该位置；查不到主 run（如试跑）时退回 `depth: 0`。
      */
     const parent = this.db.prepare("SELECT id FROM agent_runs WHERE turn_id=? AND kind='main'").pluck().get(entry.turnId) as string | undefined;
-    this.db.prepare(`INSERT INTO agent_runs(id,turn_id,parent_run_id,depth,kind,agent_name,model_alias,effective_role,task_input,
+    /**
+     * `worker_kind='acp'`（迁移 `0018`）。此前认出这一行靠的是
+     * `agent_name GLOB 'acp:*' AND model_alias='external'` 这对合取判据 —— 那是在没有专属列时
+     * 的将就，而它成立的前提（运维可以建一个叫 `acp:x` 的子 agent 来冒名）随定义体系一起消失了。
+     * 判据落到列上之后，本轮名额那条 COUNT 与 worker 运行页各只剩一个等值比较。
+     */
+    this.db.prepare(`INSERT INTO agent_runs(id,turn_id,parent_run_id,depth,kind,worker_kind,agent_name,model_alias,effective_role,task_input,
       state,tool_calls,cost_usd,external_cost_usd,external_usage_json,result_summary,error,started_at,finished_at)
-      VALUES (?,?,?,?,'sub',?,'external',?,?,?,?,0,?,?,?,?,?,?)`).run(
+      VALUES (?,?,?,?,'sub','acp',?,'external',?,?,?,?,0,?,?,?,?,?,?)`).run(
       id, entry.turnId, parent ?? null, parent ? 1 : 0,
       `acp:${entry.agent}`,
       /**

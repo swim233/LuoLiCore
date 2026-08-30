@@ -137,6 +137,11 @@ export function recoverAfterCrash(db: Sqlite): CrashRecovery {
         "UPDATE tasks SET state='failed',result_summary='process_restarted',updated_at=?,finished_at=? WHERE state='running'",
       )
       .run(now, now).changes,
+    // 判据是 `state='running'`，**不看 `worker_kind`**（迁移 `0018`）—— 这一条收的是「上一个进程
+    // 还没来得及收尾的那些行」，而那与它是主 run、lw-worker 还是外部那两条路无关。此前它事实上
+    // 只命中主 run 与子 agent：ACP 的行跑完才一次性插入，落库即终态。哪条 worker 路径开出
+    // running 窗口，这一条就第一次开始命中它 —— 那是插入侧的性质，不是本语句的边界，所以
+    // 不许在这里补 `worker_kind` 判据把它写死成「只收自家的」。
     agentRuns: db
       .prepare(
         "UPDATE agent_runs SET state='failed',error='process_restarted',finished_at=? WHERE state='running'",

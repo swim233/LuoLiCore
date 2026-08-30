@@ -33,8 +33,6 @@ import {
   ConfigStore,
   ContainerManager,
   CustomToolManager,
-  mergeAgentDefinitions,
-  scanAgentFiles,
   ContextEngine,
   DatabaseApprovalBroker,
   EventBus,
@@ -84,10 +82,10 @@ import {
   registerContainerTools,
   rejectedWakewords,
   runMainAgent,
-  runSubAgent,
+  runLwWorker,
   streamMainAgent,
   type ContainerEvent,
-  type SubAgentRuntimeEvent,
+  type LwWorkerRuntimeEvent,
 } from "@luoli/core";
 import {
   createServer,
@@ -379,31 +377,10 @@ if (resultRefs?.foreign) {
     data: resultRefs,
   });
 }
-/**
- * `agents/<name>.md`（docs/14 §2 Q5）：文件是只读来源，`agent.agents`（DB / WebUI）同名覆盖它。
- * 解析失败**必须报出来** —— 一个写错 frontmatter 的 agent 悄悄不存在，表现是「我明明加了这个
- * agent，模型说没有」。所以每条错误一行 error 日志 + 一行 stderr，而不是让它消失在启动噪音里。
- * 不为此中止启动：一个 agent 定义写错，不该让整个 bot 起不来（同 skills 的取舍）。
- */
-const scanAgents = (current: typeof config) => {
-  const scan = scanAgentFiles(current.agent.agentsDir);
-  for (const failure of scan.errors) {
-    log.event({
-      level: "error",
-      kind: "agent.file_invalid",
-      summary: `子 agent 定义解析失败：${failure.file}`,
-      data: failure,
-    });
-    process.stderr.write(`[agents] ${failure.file}: ${failure.error}\n`);
-  }
-  return mergeAgentDefinitions(scan.definitions, current.agent.agents);
-};
 const agents = new AgentManager(
   db,
   new AgentResultStore(agentResultsDir),
-  scanAgents(config),
-  config.agent.maxDepth,
-  config.agent.maxSubagentsPerTurn,
+  config.agent.maxWorkersPerTurn,
 );
 if (config.skills.enabled && config.skills.watch) skills.startWatching();
 // 第八个参数是 `LogSink`：单次钩子失败此前完全静默（要累计到 `autoDisableAfterErrors` 才经告警
@@ -777,8 +754,8 @@ toolRegistry.bindOverrides(() => configStore.snapshot().tools.overrides);
 // 判据本身在 core（`canSeeImages`，与两处 vision 切换一字对齐）；这里只补它问不到的那一半：
 // 主轮此刻用的是哪个别名 —— `set_model` 的当轮覆盖、会话固定别名、配置默认值，按这个顺序。
 const imageAudience = (toolContext: {
-  agentKind: "main" | "sub";
-  agentAlias?: string;
+  agentKind: "main" | "lw";
+  worker?: { alias: string } | undefined;
   turn: RuntimeTurnContext;
 }): boolean =>
   canSeeImages(
@@ -802,13 +779,13 @@ toolRegistry.bindMedia({
           context.appendDelta(turn, message as never),
         visionAvailable: () => imageAudience(toolContext),
         log,
-        // 与 `web_fetch` 同一条路：子 agent 的截图在父轮只留文字痕迹（docs/04 §5.2）。
-        ...(toolContext.subAgent
+        // 与 `web_fetch` 同一条路：worker 的截图在父轮只留文字痕迹（docs/04 §5.2）。
+        ...(toolContext.worker
           ? {
-              subAgent: {
-                name: toolContext.subAgent.name,
-                images: toolContext.subAgent.images,
-                onInjected: toolContext.subAgent.onMediaInjected,
+              worker: {
+                name: toolContext.worker.name,
+                images: toolContext.worker.images,
+                onInjected: toolContext.worker.onMediaInjected,
               },
             }
           : {}),
@@ -1107,7 +1084,7 @@ registerBuiltins(toolRegistry, {
     provider: config.tools.web.searchProvider,
     apiKey: config.tools.web.searchApiKey,
   },
-  // 抓回来的图片进上下文。`visionAvailable` 的判据与 `runMainAgent` / `runSubAgent` 里那两次切换
+  // 抓回来的图片进上下文。`visionAvailable` 的判据与 `runMainAgent` / `runLwWorker` 里那两次切换
   // **必须一致**：一边说能看、另一边把图换成占位文本，模型就会收到「图已放进上下文」加一句
   // 「当前模型不看图」。别名按次现算（`set_model` 能在轮内换掉它），所以这里是个函数而不是快照。
   webMedia: { assets: webAssets, visionAvailable: imageAudience },
@@ -1156,6 +1133,31 @@ customTools.reconcile();
 for (const name of Object.keys(TOOL_POLICY))
   if (!toolRegistry.has(name))
     throw new Error(`tool policy is not registered: ${name}`);
+/**
+ * 工具改名之后，存量的 `tools.overrides.<旧名>` 会变成孤儿。
+ *
+ * `tools.overrides` 是 `z.record`：孤儿键既不报错也不生效，`loadConfig` 的 `onInvalidOverride`
+ * 那条路也拦不到它（它挡的是 schema 之外的路径，而 record 下任何键都在 schema 之内）。表现是
+ * 运维当初在工具页关掉的那个工具，升级之后静静地重新打开了 —— 而界面上不会显示它被关过。
+ *
+ * 只报不迁移：迁移等于替运维改一条他没看过的权限设置。`config.invalid` 是既有 kind
+ * （`docs/10 §2` 那张表与源码双向焊死，不新增），它表达的正是「这条覆盖没生效」。
+ */
+const RENAMED_TOOLS: ReadonlyArray<[string, string]> = [
+  ["spawn_agent", "spawn_worker"],
+  ["read_agent_result", "read_worker_result"],
+];
+for (const [old, current] of RENAMED_TOOLS) {
+  if (!(old in config.tools.overrides)) continue;
+  const summary = `tools.overrides.${old} 已改名为 ${current}，这条覆盖当前不生效，请在工具页重新设置`;
+  log.event({
+    level: "warn",
+    kind: "config.invalid",
+    summary,
+    data: { key: `tools.overrides.${old}`, renamedTo: current },
+  });
+  process.stderr.write(`[config] ${summary}\n`);
+}
 let setup: { token: string; expiresAt: number } | undefined;
 if (!config.webui.passwordHash) {
   setup = setupToken();
@@ -1260,26 +1262,26 @@ const previewPrompt = (
 /** 试跑的 chat/user 计数落在这个合成 subject 上：它花的是真钱，但不该记到某个真实会话头上。 */
 const DRY_RUN_SUBJECT = "webui-dryrun";
 
-async function dryRunAgent(
-  name: string,
-  task: string,
+async function dryRunWorker(
+  input: { task: string; tools?: string[]; modelAlias?: string },
   signal: AbortSignal,
-  emit: (event: SubAgentRuntimeEvent) => void | Promise<void>,
+  emit: (event: LwWorkerRuntimeEvent) => void | Promise<void>,
 ): Promise<{ summary: string; fullRef: string; truncated: boolean }> {
-  const { run, definition } = agents.createDryRun(name, task, "owner");
   const live = configStore.snapshot();
+  const alias = input.modelAlias ?? live.agent.worker.modelAlias;
+  const run = agents.createDryRun(input.task, alias, "owner");
   const workspace = resolve(live.sandbox.workspaceDir, DRY_RUN_SUBJECT);
   mkdirSync(workspace, { recursive: true, mode: 0o700 });
   // 试跑跑的是真实模型调用。不接配额的话 usage_ledger 看得见这笔花费、quota_counters 却不涨，
-  // global.daily 对试跑一概无效 —— 和 docs/20 · W-QUOTA-01 是同一个成因（subagent.ts 的注释）。
+  // global.daily 对试跑一概无效 —— 和 docs/20 · W-QUOTA-01 是同一个成因（agent/subagent.ts 的注释）。
   const roleLimits = live.quota.perUser.byRole[run.effectiveRole];
   const estimate = modelRegistry.estimate(
-    definition.modelAlias,
+    alias,
     Math.max(live.context.limit.tokens / 4, 1000),
   );
   if (live.quota.enabled && live.quota.requirePricing && estimate === null)
     throw new Error(
-      `别名 ${definition.modelAlias} 缺少定价，无法预估试跑花费（quota.requirePricing=true）`,
+      `别名 ${alias} 缺少定价，无法预估试跑花费（quota.requirePricing=true）`,
     );
   const reservation = live.quota.enabled
     ? quota.reserve({
@@ -1326,23 +1328,34 @@ async function dryRunAgent(
     config: live,
   } satisfies RuntimeTurnContext;
   try {
-    return await runSubAgent(run, definition, task, undefined, turn, {
-      db,
-      agents,
-      registry: modelRegistry,
-      tools: toolRegistry,
-      ledger,
-      log,
-      workspace,
-      provider: {
-        maxRetries: live.provider.maxRetries,
-        retryBaseMs: live.provider.retryBaseMs,
-        retryMaxMs: live.provider.retryMaxMs,
+    return await runLwWorker(
+      run,
+      input.task,
+      undefined,
+      turn,
+      {
+        db,
+        agents,
+        registry: modelRegistry,
+        tools: toolRegistry,
+        ledger,
+        log,
+        workspace,
+        provider: {
+          maxRetries: live.provider.maxRetries,
+          retryBaseMs: live.provider.retryBaseMs,
+          retryMaxMs: live.provider.retryMaxMs,
+        },
+        quota,
+        reservation,
+        onEvent: emit,
       },
-      quota,
-      reservation,
-      onEvent: emit,
-    });
+      {
+        modelAlias: alias,
+        // 面板上勾了一组工具才收窄；不勾即照正常派发那样拿全集，两者是同一条路上的两个档位。
+        ...(input.tools?.length ? { tools: input.tools } : {}),
+      },
+    );
   } finally {
     // commit 只退掉已结算的那部分，剩下的预留必须还回去，否则一次试跑就永久占住一份额度。
     if (reservation) quota.release(reservation);
@@ -1594,7 +1607,7 @@ const server = createServer({
   sandbox,
   eventStreams,
   previewPrompt,
-  dryRunAgent,
+  dryRunWorker,
   schedules: { jobs: scheduledJobs, runner: scheduleRunner },
   configSchema: configJsonSchema(),
   startedAt,
@@ -1659,18 +1672,6 @@ events.subscribe((event) => {
         )
       )
         rebuildModels();
-      // `agentsDir` 也要触发重扫：改了目录却还用着旧目录扫出来的定义，是最难查的一种「没生效」。
-      // 写成两个显式判据而不是 `startsWith('agent.agents')` —— 后者顺带匹配上 `agentsDir` 是巧合，
-      // 而巧合会在下一次改键名时安静地失效。
-      if (
-        keys.some(
-          (key) =>
-            key === "agent.agentsDir" ||
-            key.startsWith("agent.agents.") ||
-            key === "agent.agents",
-        )
-      )
-        agents.replaceDefinitions(scanAgents(next));
       if (keys.some((key) => key.startsWith("skills."))) skills.scan();
       if (keys.some((key) => key.startsWith("plugins.")))
         void plugins.reconcile();

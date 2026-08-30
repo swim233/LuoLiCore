@@ -29,10 +29,10 @@
 | `G-API-19` | `skills.dir` 改了要重启，界面上看不出来 | [§6.4](#64-新增缺口扩展页重设计--mcp-登录这一轮) |
 | `G-API-20` | `web_assets` 抓回来的图，界面上没有任何地方看得到 | [§14](#14-web_fetch-抓回来的图这一轮2026-08-21) |
 | `G-API-23` | 工具目录的折叠状态（常驻 / 折叠）界面上没有徽章 | [§16](#16-工具目录按需暴露这一轮) |
-| `G-API-25` | ACP 的 `agent_runs` 行在用量页读不到 | [§18](#18-acp-客户端这一轮m132026-08-22) |
 | `G-CFG-09` | `agent.acp.agents` 只有裸 JSON 够得着，没有专用表 | [§18](#18-acp-客户端这一轮m132026-08-22) |
 | `G-UI-05` | 权限矩阵视图（拿界面这张表跟 `docs/05 §4` 那张权威表对） | [§19](#19-手动验收这一轮2026-08-25) |
 | `G-UI-06` | 别名链上看不出谁能看图 —— `vision` 链首配错时界面毫无提示 | [§20](#20-别名链上看不出谁能看图2026-08-27) |
+| `G-API-28` | 日志页没有「只看这条 run」的过滤器，worker 详情只能跳到整轮的 trace | [§21](#21-worker-重构这一轮) |
 
 后三条标着「记录，不当轮闭合」，理由各自写在所属小节里 —— **不是忘了做，是位置/判据没定**。
 
@@ -87,17 +87,17 @@ schema 自动表单，可写覆盖率达到 151/151（第三轮接线两项后�
 扣掉 `KNOWN_UNIMPLEMENTED_CONFIG_KEYS` 与 `perChat`（它是覆盖层容器不是配置项），
 再和页面上实际能写的键取差集。
 
-**当前值（2026-08-27 复算，跑的就是上面那套方法）：**
+**当前值（2026-08-30 worker 重构后复算，跑的就是上面那套方法）：**
 
 带 〔实测〕 的三行由 `tests/docs.test.ts` 焊住 —— 改了 schema 或摘了未接线键，这张表会自己报错，
 不用记得回来手改。（这正是它此前烂掉的原因：没有闸的计数快照一定会漂。）
 
 | | 数量 |
 |---|---|
-| schema 叶子总数 | **281** 〔实测〕 |
+| schema 叶子总数 | **284** 〔实测〕 |
 | 运行时从不读（`KNOWN_UNIMPLEMENTED_CONFIG_KEYS`） | **10** 〔实测〕 —— 权威在 [11 §2.0.1](./11-config-reference.md)，由 `tests/config.test.ts` 双向焊住 |
 | `perChat`（覆盖层容器，不是配置项） | 1 |
-| **已接线** | **270** 〔实测〕 |
+| **已接线** | **273** 〔实测〕 |
 
 ⚠ **下面那张 2026-08-18 的表在 2026-08-27 之前一直被当成现值读，而它的「67」当时已经是「10」。**
 同一个数字在本文里曾有三个版本（§1 的 67、§5 的 70、§7 的 67），全部对着代码里的 10。
@@ -138,6 +138,12 @@ schema 自动表单，可写覆盖率达到 151/151（第三轮接线两项后�
 **现在这一张表只剩存档价值**：设置页的「全部配置」由 `config/config.schema.json` 自动生成，
 下面每一项都能在界面上改（§4.3）。留着这张分组表是为了下次复算时对得上号 ——
 **表里每一项都是运行时真的会读的值**。
+
+⚠ **键名按 2026-08-16 那天写死，此后没有跟着改。** worker 重构（2026-08-30）删了
+`agent.maxDepth`，并把 `agent.maxSubagentsPerTurn` / `agent.maxConcurrentSubagents` 改名成
+`agent.maxWorkersPerTurn` / `agent.maxConcurrentWorkers`（**没有迁移**，见
+[11 §2.0.0](./11-config-reference.md)）。**要现值去查 schema，不要照这张表抄** —— 它记的是
+那一天的分组与条数，不是键名的现状。
 
 > 「改得动」之后剩下的那半个缺口是「敢不敢改」：表单一度只给点分键名，键名认不出来就只能回去翻
 > `docs/11`。现在每一格都带一句作用说明，来源是 `CONFIG_DESCRIPTIONS` 注入 schema 的 `description`
@@ -793,13 +799,14 @@ PATCH 成 `trusted` 三次而 `user:` 那行一次都没被点到，期间 10 �
 
 | 编号 | 运行时已有 | 界面缺什么 | 状态 |
 |---|---|---|---|
-| **G-API-23** | 每次 `active()` 都算得出常驻 / 折叠的二分与折叠组（`mcp:<server>` / `plugin` / `custom` / `builtin`），`GET /api/tools` 已经透传 `deferred` 字段；轮内的展开事实另有一条 `tool.expanded` 日志（[05 §3.12](./05-tools-and-permissions.md)、[10 §2](./10-logging-and-observability.md)） | 工具页那张表只有名字 / 来源 / minRole / 审批 / 启停，**看不出哪些工具模型默认看不见**。运维在扩展页接了一台 MCP server、在工具表里看见它的工具行行齐全、于是以为模型直接就能用 —— 而它们全在折叠组里，要检索一次才可达。同理，「这一轮模型到底展开了哪几个」只能去日志页 grep `tool.expanded`，工具表与轮次详情里都没有 | 🚧 未补 |
+| **G-API-23** | 每次 `active()` 都算得出常驻 / 折叠的二分与折叠组（`mcp:<server>` / `plugin` / `custom` / `builtin`），`GET /api/tools` 已经透传 `deferred` 字段；轮内的展开事实另有一条 `tool.expanded` 日志（[05 §3.12](./05-tools-and-permissions.md)、[10 §2](./10-logging-and-observability.md)） | 工具页那张表只有名字 / 来源 / minRole / 审批 / 启停，**看不出哪些工具模型默认看不见**。运维在扩展页接了一台 MCP server、在工具表里看见它的工具行行齐全、于是以为模型直接就能用 —— 而它们全在折叠组里，要检索一次才可达。同理，「这一轮模型到底展开了哪几个」只能去日志页 grep `tool.expanded`，工具表与轮次详情里都没有。**折叠现在对 lw-worker 侧同样生效**（worker 拿到了 `search_tools` 与每步重算的 `activeTools`），所以这条缺口的作用面比原先大了一档 | 🚧 未补 |
 
 优先级 P2：它不影响运行时正确性（折叠只是可见性，权限判定一个字未改，见
 [05 §4](./05-tools-and-permissions.md#4-权限矩阵权威表) 末尾那三层），缺的是**可见性** ——
 而这一次缺的可见性正好落在「运维对模型能力的心智模型」上，比 `G-API-20` 那种事后取证更容易误事。
 最小形态是工具表加一列徽章（常驻 / 折叠 + 组名，数据 `GET /api/tools` 已经在给），轮次详情里把
-`tool.expanded` 那几条与工具调用并排显示。**不要做成开关** —— 单个工具的折叠与否由
+`tool.expanded` 那几条与工具调用并排显示。**「可达侧」那一列已经按这个形态做出来了**
+（[09 §3.7](./09-webui.md)：服务端现算、只读、不做成开关），折叠徽章照抄它即可。**不要做成开关** —— 单个工具的折叠与否由
 `tools.catalog.resident` / `defer` 的 glob 决定，那两个键在配置页已经改得到；在工具表上再加一个
 per-tool 开关就是第二份真相，[§1.2](#12-假控件界面上能点运行时不读) 那类「界面上能点、运行时不读」
 的老问题会从这里长回来。
@@ -837,7 +844,7 @@ inline keyboard 审批落地（[05 §6.1](./05-tools-and-permissions.md)）之�
 | 编号 | 运行时已有 | 界面缺什么 | 状态 |
 |---|---|---|---|
 | **G-UI-04** | `approvals.decision_channel` 的取值域是**通道**（`telegram` / `webui` / `system`），主体在 `decided_by`（[03](./03-data-model.md) 的 `approvals` 段） | ~~`recordDecided()` 把裁决者原样写进了通道列，于是 ACP 会话内 `allow_always` 命中时两列同值，审批卡那一格（渲染的正是 `decided_by · decision_channel`）把 `acp:always` 印两遍；按通道分桶的查询还会多出一个取值域外的桶~~ | ✅ 已闭合（2026-08-22） |
-| **G-API-25** | 一次 ACP 调用跑完在 `agent_runs` 上留一行，外部花费与用量在迁移 `0014` 新加的 `external_cost_usd` / `external_usage_json` 上（写入侧 `packages/core/src/acp/runs.ts`，[03 §2.7](./03-data-model.md)） | **WebUI 里没有任何一处读得到那一行** —— 不只是花费，是整行。全仓唯一读 `agent_runs` 的地方是 `GET /api/tasks/:id` 那条 join，而它的入口是 `tasks.agent_run_id`；ACP 这条路**不建 `tasks` 行**，所以那条 join 永远够不着它。用量页聚合的是 `usage_ledger` 与 `turns`，而 ACP 一行都不进那两张表（刻意的） | 📋 记录，不当轮闭合 |
+| **G-API-25** | 一次 ACP 调用跑完在 `agent_runs` 上留一行，外部花费与用量在迁移 `0014` 新加的 `external_cost_usd` / `external_usage_json` 上（写入侧 `packages/core/src/acp/runs.ts`，[03 §2.7](./03-data-model.md)） | **WebUI 里没有任何一处读得到那一行** —— 不只是花费，是整行。全仓唯一读 `agent_runs` 的地方是 `GET /api/tasks/:id` 那条 join，而它的入口是 `tasks.agent_run_id`；ACP 这条路**不建 `tasks` 行**，所以那条 join 永远够不着它。用量页聚合的是 `usage_ledger` 与 `turns`，而 ACP 一行都不进那两张表（刻意的） | ✅ 已闭合（2026-08-30，只闭合了一半，见下） |
 | **G-CFG-09** | `agent.acp.agents` 是对象数组，每一项里有 `approvalMode`（agent 内部的自动放行档）与 `tools`（下发成 flag 的工具白名单）—— 两个都是权限相关字段 | 只有自动生成的「全部配置」表单够得着它，而对象数组在那张表单里就是**一格裸 JSON**。MCP transport 有专用的 CRUD 表（[§4.5](#45-第三轮最后六项缺口)、`G-API-11`），这一格没有：改错一个字母时 zod 会拒，但回给运维的是一条路径式报错，而不是「这一档是什么意思」 | 📋 记录，不当轮闭合 |
 
 **G-UI-04 的闭合方式**：`decision_channel` 的取值域加第四个值 `acp`（`ACP_DECISION_CHANNEL`，
@@ -856,13 +863,32 @@ WebUI 功能而不是一行 SQL。更要紧的是它有个坑：这个数字**�
 运维今天不是全瞎：`acp.run` 那条日志带 `costUsd` / `degraded` / `filesWritten` / `terminals`，
 日志页看得见 —— 缺的是聚合与「挂在那一轮上」，不是这次调用花了多少钱本身。
 
+**2026-08-30 闭合，而且只闭合了上面那两半理由里的第一半。** 原文一个字不改，是因为第二半仍然成立。
+
+- **①「要新开一个呈现面」这一半自动消解。** worker 重构把「子 Agent」页整页替换成
+  [09 §3.9](./09-webui.md) 的 Worker 运行记录页 —— 那个面本来就要开。`agent_runs` 上新加一列
+  `worker_kind`（迁移 `0018`，`'lw'` / `'harness'` / `'acp'`，主 run 为 NULL）之后，
+  `GET /api/worker-runs` 与 `GET /api/worker-runs/:id` 按它取数，ACP 那一行连同
+  `external_cost_usd` / `external_usage_json` 一起读得到了；`GET /api/turns/:id/detail` 另带
+  `workerRuns`，那一行也挂到了它所属的那一轮上。
+- **②「接到用量页上就是邀请人把两者相加」这一半一个字都不推翻。** 闭合形态是
+  **「读得到那一行」，不是「把那个数并进聚合」**：`external_cost_usd` 在列表与详情里都**单独占一格**，
+  与 `cost_usd` 并排显示且**绝不相加**，格子旁写明它是外部 agent 自报、未经核对、不进任何聚合；
+  `—` 表示它一次 `usage_update` 都没报过，与「它报了 0」分得开。用量页（`usage_ledger` / `turns`
+  的聚合）**一个字节都没动**，ACP 照旧一行都不进那两张表。
+- 判据由 `tests/webui/worker-runs.card.test.ts` 与 `tests/api.contract.test.ts` 焊住：两个数字必须落在
+  两个不同的格子里，且任何一格都不得是两者之和。**把它并进聚合就是把一条有意为之的边界当缺口修掉**
+  —— 那正是这条缺口当初不当轮闭合的理由。
+
 **G-CFG-09 为什么不当轮闭合。** 专用表要照 MCP transport 那张的规格做（逐字段控件 + 校验回显 +
 每一档的说明），那是一块真界面。而这一格的实际风险比它看起来小：`approvalMode` 与 `tools` 是
 **一等配置键**（`acp/schema.ts` 里 `ACP_MANAGED_FLAGS` 拒收把它们塞进 `extraArgs` 的写法），
 所以裸 JSON 里改错的结果是 zod 拒收整块、配置不生效，**不是静默失去一道权限门**。
 
 `docs/13` 的验收覆盖：`AC-LOG-024` 覆盖那一行的落库形状，`AC-SEC-028` / `AC-SEC-030` 覆盖两个默认
-档位 —— 但**没有条目覆盖 G-API-25 这个缺口本身**，缺口不是可验收行为。
+档位。**闭合之后它有了自己的验收条目** —— 「那一行读得到」与「那个数不进聚合」都是可验收行为
+（见 [13](./13-acceptance-criteria.md)），当初写「缺口不是可验收行为」是因为当时缺的是一整个
+呈现面，而不是这句话本身成立。
 
 §1 那三个数字是 **2026-08-18** 的快照，这一轮没有复算：M13 往 schema 里加了 `agent.acp.*` 整块
 （叶子数上涨），同时从 `KNOWN_UNIMPLEMENTED_CONFIG_KEYS` 里摘掉了两个 acp 键。可写覆盖率不受影响
@@ -912,3 +938,36 @@ WebUI 功能而不是一行 SQL。更要紧的是它有个坑：这个数字**�
 **判据。** 徽章取 `capabilities_json` 顶层（运行时读哪个就显示哪个，不要在前端再懂一层优先级，
 这是 [§10](#10-标记模型能力) 定下的纪律）；`vision` 链首不能看图时要显式警示，而不只是少一个徽章 ——
 **一个缺席的徽章和一个没查过的徽章长得一样**。
+---
+
+## 21. worker 重构这一轮
+
+两来源的子 agent 定义体系整个删除（`agent.agents[]` / `agent.agentsDir` / `agents/<name>.md` /
+`list_agents`），主 agent 不再直接调工具、只对话与派发，执行整体下沉给 **lw-worker**；
+`spawn_harness` / `spawn_acp` 两条外部路合称 **harness-worker**。控制面这一侧的三处改动
+（Worker 运行记录页、工具表的「可达侧」列、`GET /api/tools` 的 `sides`）在
+[09 §3.7 / §3.9](./09-webui.md) 里，不在本文重复。
+
+这一轮**闭合**了 [`G-API-25`](#18-acp-客户端这一轮m132026-08-22) 的第一半（理由与形态写在那一节，
+第二半原样成立），**新开**一条：
+
+| 编号 | 运行时已有 | 界面缺什么 | 状态 |
+|---|---|---|---|
+| **G-API-28** | `log_events.agent_run_id` 这一列接线了（派发时写进 worker 那份 `ToolExecutionContext`，worker 内部的每一条日志沿它带上 `agentRunId`；主 agent 自己的事件不带，与 `agent_runs.worker_kind` 上主 run 为 NULL 同一个口径，[10 §1](./10-logging-and-observability.md#1-trace-模型)） | `GET /api/logs` 只收 `traceId` 与 `minLevel`，**没有「只看这条 run」的过滤器**。于是 Worker 运行记录页的详情只能跳到**整轮**的 trace —— 一轮里派了三个 worker 时，运维得在三份交错的日志里靠 span 父链自己认哪几条是这一个的，而一次查询只取 500 行、父完全可能不在这一页里 | 🚧 未补 |
+
+优先级 P2：它不影响运行时正确性，缺的是排障时的收窄能力，而那一列**已经在写**了 ——
+最小形态是 `GET /api/logs` 多收一个 `agentRunId` 查询参数（判据就是那一列，不需要新表也不需要
+新索引之外的东西），Worker 详情的 footer 多一个 `[只看这条 run 的日志]`。**不要用 span 父链去推**：
+父链要一路爬到 `agent.run`，而 500 行的窗口保证不了父在同一页里，那正是「环与悬挂父按 depth 0
+渲染」那条兜底存在的理由。
+
+### 21.1 判定为「不是缺口」
+
+- **Worker 没有独立的取消入口。** 与 `tasks` 同源：worker 跑在**父轮**的 abort 信号下，
+  没有独立句柄，能取消的只有整轮（`POST /api/turns/:id/cancel`）。造一个只能取消整轮的
+  `POST /api/worker-runs/:id/cancel` 等于起一个会误导人的名字，与 `GET /api/tasks` 那条
+  「没有 `POST /api/tasks/:id/cancel`」是同一个判断。
+  **但这件事必须写在页面上** —— 否则运维看到一条跑了 20 分钟的 harness 会去找一个不存在的入口，
+  所以 Worker 运行记录页上直接写明「这里没有取消」并指到总览页的在途轮次
+  （[09 §3.9](./09-webui.md)，`tests/webui/worker-runs.card.test.ts` 焊住这句话在)。
+

@@ -129,7 +129,7 @@ load_skill: tool({
   （单一数据源：`packages/core/tools/policy.ts` 的 `SKILL_NARROWING_EXEMPT`，`prepareStep` 与
   `ToolRegistry.execute` 两处都读它）。`allowed-tools` 表达的是「这件事要用哪些工具」，不是
   「这一轮不许再干别的」—— 一个 `allowed-tools: [bash]` 的 skill 此前把这四个一起关掉，于是模型
-  跑完 skill 连一句话都追发不出去、子 agent 连进度都报不了。豁免它们不是放权：`allowed-tools`
+  跑完 skill 连一句话都追发不出去、worker 连进度都报不了。豁免它们不是放权：`allowed-tools`
   只能是角色白名单的子集（见上表），交回去的仍然是该角色本来就有的东西。
 - skill 正文作为一条 `role='system'`、`origin='note'`、`prune_level=2` 的消息进入 **delta**（因此可审计、会被裁剪、不占 `instructions`）。
 - 同一轮多次载入同一 skill → 幂等，返回 `{ok:true, alreadyLoaded:true}` 不重复注入。
@@ -400,11 +400,18 @@ mcp:
 `active()` 现算的，不是缓存下来的一份清单。所以模型不会看着一行「`[mcp:github]` 12 个」去检索一台已经
 连不上的 server。轮**中**掉线同理：已展开的名字在下一步的交集里自动掉出可见集，硬调由 `admit()` 兜住。
 
-**子 agent 是显式非目标。** 它的工具集由 `definition.tools` 白名单定死
-（[04 §3.1](./04-agents-and-providers.md#31-定义方式)），那已经是比折叠更强的表达 —— 白名单外的工具根本
-不进它的 `toolSet`，没有「折叠起来省 token」这回事，而白名单内的工具正是派它出去要用的那几个。所以
-`search_tools` 对子 agent 不可用（[05 §3.12](./05-tools-and-permissions.md) 不变量 4），子 agent 的目录
-形态一个字节都不变。
+**折叠现在只对 lw-worker 生效，主 agent 那一侧根本没有可折叠的东西。** 这是 worker 重构翻过来的：
+此前折叠服务于主 agent（工具全在它手里），而子 agent 的工具集由 `definition.tools` 白名单定死，
+白名单比折叠更强，所以 `search_tools` 对它不可用。现在定义体系没了 —— lw-worker 拿的是调用者角色
+下的**全集**，MCP / plugin / custom 那批全在它手里，折叠要省的正是这一份；而主 agent 的可调用集只剩
+对话面与派发族，一个外部工具都没有。所以 `search_tools` 的那道闸从 `agentKind === 'main'` 翻成
+`'lw'`（[05 §3.12](./05-tools-and-permissions.md) 不变量 4），展开集也跟着从 turn 挪到 run
+—— 挂在 turn 上时 worker 展开的工具会写进主轮的展开集，而那正是原来那道闸存在的全部理由。
+
+**主 agent 的 block 3 仍然列着全部折叠组**，但它描述的是 **worker 能做什么**，不是主 agent 能调什么
+（[06 §1](./06-prompt-and-memory.md#1-系统提示词的固定结构)）—— 派发决策要看得见这些能力，
+而 `WORKER_INTERNAL_TOOLS`（`ask_parent` / `report_progress` / `search_tools`）从这份目录里滤掉：
+它们是 worker→父的通道，列出来会让模型以为自己可以派一个 worker 去上报进度。
 
 ### 4.2 接入实现
 
@@ -632,7 +639,7 @@ warn 级，单行截到 2 KB，缓冲上界 8 KB）。这一条独立于 OAuth�
 // ToolRegistry.forRole(role, ctx) 的组装顺序（后者不覆盖前者，冲突则报错并跳过）
 const tools = {
   ...builtinTools(role, ctx),                       // 05 §3
-  ...agentTools(role, ctx),                         // spawn_agent 等
+  ...agentTools(role, ctx),                         // spawn_worker 等
   ...(cfg.skills.enabled ? { load_skill } : {}),    // skill 正文按需载入
   ...pluginTools(role, ctx),                        // <plugin>_<tool>
   ...(await mcpTools(role, ctx)),                   // mcp__<server>__<tool>
@@ -740,7 +747,7 @@ plugin 60 > MCP 40 > 自定义 30），记 `warn` 日志并在 RUNTIME 块告知
   一份畸形的 params 不能带走其余工具，更不能从这里抛到启动路径上（同 `docs/27 · C-04`）。
 - 同步：每轮开始在 `runMainAgentInternal` 顶部调一次 `syncIfChanged()`，指纹是「条数 + max(updated_at)」。
   **条数不能省**：删掉一行不会推高 max，只看时间戳的话一次删除永远同步不过去。
-  **只在主 agent 做** —— 子 agent 跑在父轮内部，在那里重扫会把父轮已冻结的 `toolSet` 弄脱节。
+  **只在主 agent 做** —— worker 跑在父轮内部，在那里重扫会把父轮已冻结的 `toolSet` 弄脱节。
 - 执行与参数契约、以及那七道闸各自挡什么：[05 §3.10](./05-tools-and-permissions.md)。
 - `skills/` 与 `plugins/` 对 fs 工具一律关死，而且**由 `skills.dir` / `plugins.dir` 推出来**、
   叠在运维那份 `tools.fs.denyGlobs` 之上（`selfAuthoringDenyGlobs()`）。写死在 schema 默认值里

@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { KNOWN_UNIMPLEMENTED_CONFIG_KEYS, TOOL_POLICY, configJsonSchema, configSchemaLeafPaths } from '@luoli/core';
+import { KNOWN_UNIMPLEMENTED_CONFIG_KEYS, MAIN_AGENT_TOOLS, TOOL_POLICY, configJsonSchema, configSchemaLeafPaths } from '@luoli/core';
 import { describe, expect, it } from 'vitest';
 
 /**
@@ -405,6 +405,40 @@ describe('TOOL_POLICY 与 docs/05 §4 双向一致', () => {
     const section = matrixSection();
     const stale = [...MATRIX_ALIASES.keys()].filter((alias) => !section.includes(`\`${alias}\``));
     expect(stale, '这些写法已从 §4 消失，从 MATRIX_ALIASES 里删掉').toEqual([]);
+  });
+
+  /**
+   * 「主 agent」那一列与 `MAIN_AGENT_TOOLS` 双向一致（worker 重构）。
+   *
+   * 这一列不是排版而是本次重构的权限边界本身：工具下沉给 worker 之后，「主 agent 调不调得到」
+   * 由 `toolCallableBy()` 判定，而 `#eligible()` 与 `admit()` 共用它。表与代码分叉的表现是
+   * 运维照着表以为主 agent 还能读文件 —— 而 §4 开头就写着这张表是权威表。
+   *
+   * 只判 ✓/✗ 那一位，不判 `△`（「仅主 agent」）：`memory_read/write(pri)` 这类分作用域的行一格
+   * 对应两个策略键，两个键在 `MAIN_ONLY_TOOLS` 里的归属并不相同（读两侧都给、写只给主 agent），
+   * 那一位靠散文表达，判它需要一份把格子拆开的映射 —— 而每加一条映射，断言就少覆盖一个工具名
+   * （同 MATRIX_ALIASES 那段注释）。✓/✗ 这一位对同格的每个键必须一致，因此判得动。
+   */
+  it('主 agent 那一列与 MAIN_AGENT_TOOLS 一致', () => {
+    const wrong: string[] = [];
+    for (const line of matrixSection().split('\n')) {
+      if (!line.startsWith('|')) continue;
+      const [first, main] = line.slice(1).split('|');
+      if (first === undefined || main === undefined) continue;
+      const cell = main.trim();
+      // 表头、分隔行与「任何工具 / 任何回复」那行的这一格是空的：它说的是角色而不是这根轴。
+      if (!cell.startsWith('✓') && !cell.startsWith('✗')) continue;
+      const callable = cell.startsWith('✓');
+      for (const match of first.matchAll(/`([^`]+)`/g)) {
+        for (const name of MATRIX_ALIASES.get(match[1]!) ?? [match[1]!]) {
+          if (!TOOL_NAME.test(name)) continue;
+          if (MAIN_AGENT_TOOLS.has(name as never) !== callable)
+            wrong.push(`${name}: 表里 ${cell.slice(0, 12)}，代码里 ${MAIN_AGENT_TOOLS.has(name as never) ? '可调' : '不可调'}`);
+        }
+      }
+    }
+    expect(wrong.sort(), `${TOOL_DOC} §4 的「主 agent」列与 MAIN_AGENT_TOOLS 对不上 —— `
+      + '那一列是工具下沉之后的权限边界，判据在 toolCallableBy()，改一侧必须改另一侧').toEqual([]);
   });
 });
 

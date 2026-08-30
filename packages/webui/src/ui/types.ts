@@ -6,6 +6,8 @@ export interface GridColumn {
   header: string;
   field?: string;
   width?: string;
+  /** 数值列右对齐，表头一并跟随 —— 表头留在左边时读不出这一列是右对齐的。 */
+  align?: "right";
 }
 export interface ChainItem {
   id: string;

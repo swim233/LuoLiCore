@@ -23,16 +23,19 @@ describe('skills and subagents', () => {
     closeDatabase(db);
   });
 
-  it('keeps subagent role at or below its parent', () => {
+  it('worker 的有效角色照抄父 run，而它自己派不出下一层', () => {
     const dbPath = './data/agents.test.db';
     for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${dbPath}${suffix}`, { force: true });
     const db = openDatabase(dbPath);
     migrateDatabase(db);
     db.prepare("INSERT INTO turns(id,key,chat_id,initiator_user_id,effective_role,state) VALUES ('t','chat:1','1','1','trusted','running')").run();
-    const manager = new AgentManager(db, new AgentResultStore(resolve('data/agent-results-test')), [{ name: 'coder', description: 'code', modelAlias: 'high', maxSteps: 2, minRole: 'trusted', tools: [], resultMaxChars: 10, instructions: 'code' }], 3, 10);
+    const manager = new AgentManager(db, new AgentResultStore(resolve('data/agent-results-test')), 3);
     const parent = manager.createMain('t', 'trusted', 'main');
-    const child = manager.spawn(parent, 'coder', 'complete this task').run;
+    // 不再按定义收窄：只有一种 worker，而它是主 agent 的整个执行面 —— 收窄它等于让主 agent
+    // 用得到的工具在它手里报权限不足（docs/04 §3）。
+    const child = manager.spawn(parent, 'complete this task', 'high');
     expect(child.effectiveRole).toBe('trusted');
+    expect(() => manager.spawn(child, 'again', 'high')).toThrow();
     closeDatabase(db);
   });
 });

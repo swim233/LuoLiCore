@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { ArchiveRepository, OperationsRepository, closeDatabase, migrateDatabase, openDatabase, readAppKv } from '@luoli/db';
-import { ApprovalRules, ContextEngine, FileTools, LogSink, MaintenanceService, ModelRegistry, PathJail, PromptDocuments, ProviderStore, QuotaGuard, Secrets, ToolRegistry, TurnRegistry, UsageLedger, configSchema, createStepObservers, jsonSchemaToZod, readSlice, type StepFacts } from '@luoli/core';
+import { ApprovalRules, ContextEngine, FileTools, LogSink, MaintenanceService, ModelRegistry, PathJail, PromptDocuments, ProviderStore, QuotaGuard, Secrets, ToolRegistry, TurnRegistry, UsageLedger, configSchema, createStepObservers, jsonSchemaToZod, newToolScope, readSlice, type StepFacts } from '@luoli/core';
 import { capMentions, safeRender } from '@luoli/telegram';
 import { elideMiddleBytes, parsePrincipal, type RuntimeTurnContext } from '@luoli/shared';
 
@@ -330,10 +330,11 @@ describe('D-03 · 准入判定能单独测', () => {
     const turnOf = (role: 'limited' | 'trusted') => ({ turnId: `t-${role}`, key: 'chat:1', chatId: '1', threadId: null, initiatorUserId: '2', effectiveRole: role,
       isPrivate: false, baseCommitId: null, snapshot: { messages: [], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 0 }, delta: [],
       abortSignal: new AbortController().signal, config } satisfies RuntimeTurnContext);
-    const context = { turn: turnOf('trusted'), workspace: './data', agentKind: 'main' as const };
+    const context = { turn: turnOf('trusted'), workspace: './data', agentKind: 'main' as const, ...newToolScope() };
     expect(registry.admit('memory_write', context)).toMatchObject({ ok: true });
     expect(registry.admit('nope', context)).toMatchObject({ ok: false, error: 'tool_unavailable' });
-    expect(registry.admit('memory_write', { ...context, agentKind: 'sub' })).toMatchObject({ ok: false, error: 'tool_unavailable_for_subagent' });
+    // `memory_write` 在 `MAIN_ONLY_TOOLS` 里：记什么是对话层的判断，而 worker 看不到对话。
+    expect(registry.admit('memory_write', { ...context, agentKind: 'lw' })).toMatchObject({ ok: false, error: 'tool_unavailable_for_worker' });
     expect(registry.admit('memory_write', { ...context, turn: turnOf('limited') })).toMatchObject({ ok: false, error: '权限不足' });
     expect(registry.admit('memory_write', { ...context, allow: new Set(['read_file']) })).toMatchObject({ ok: false, error: 'tool_not_in_allowlist' });
     overrides = { memory_write: { enabled: false } };

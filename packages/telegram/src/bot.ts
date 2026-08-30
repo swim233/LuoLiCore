@@ -873,7 +873,7 @@ export async function createTelegramBot(
     );
   });
   /**
-   * 两类都要列出。`turns` 表示用户发出的那轮是否仍在执行，`tasks` 表示 `spawn_agent` 派发的子 agent ——
+   * 两类都要列出。`turns` 表示用户发出的那轮是否仍在执行，`tasks` 表示 `spawn_worker` 派发的 worker ——
    * 同一个「任务」在 Telegram 与 WebUI「任务与审批」页此前各指其中一类，实测出现过混淆
    * （docs/29 · M-TG-05）。标题与进度只存在于 `tasks` 表，turns 行没有也不应有。
    */
@@ -914,7 +914,7 @@ export async function createTelegramBot(
       );
     if (tasks.length)
       sections.push(
-        `子 agent 任务 ${tasks.length} 个：\n${tasks
+        `worker 任务 ${tasks.length} 个：\n${tasks
           .slice(0, 20)
           .map(
             (task) =>
@@ -925,7 +925,7 @@ export async function createTelegramBot(
     await ctx.reply(
       sections.length
         ? sections.join("\n\n")
-        : "当前无在途轮次，也无子 agent 任务。",
+        : "当前无在途轮次，也无 worker 任务。",
     );
   });
   bot.command("model", async (ctx) => {

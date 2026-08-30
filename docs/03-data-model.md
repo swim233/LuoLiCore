@@ -355,7 +355,12 @@ CREATE TABLE agent_runs (
   parent_run_id    TEXT,
   depth            INTEGER NOT NULL DEFAULT 0,
   kind             TEXT NOT NULL CHECK (kind IN ('main','sub')),
-  agent_name       TEXT NOT NULL,          -- 'main' | 'researcher' | ...
+  -- 三种 worker（lw / harness / acp）认自己的那一列（迁移 0018）。主 run 为 NULL —— 它不是 worker。
+  -- **刻意无 CHECK**，理由见迁移文件：0018 存在的全部理由就是 kind 上那个 CHECK 扩不动，
+  -- 在同一张表上再加一个同样扩不动的枚举，下一种 worker 出现时会撞上一模一样的墙。
+  -- 取值域焊在 TS 的 WORKER_KINDS 联合类型与唯一那个插入口（AgentManager）上。
+  worker_kind      TEXT,                   -- 'lw' | 'harness' | 'acp' | NULL（主 run）
+  agent_name       TEXT NOT NULL,          -- 'main' | 'lw' | 'harness:<cmd>' | 'acp:<name>'
   model_alias      TEXT NOT NULL,
   provider_id      TEXT, model_id TEXT,
   effective_role   TEXT NOT NULL,          -- 继承自派发者，永不提权
@@ -389,6 +394,9 @@ CREATE TABLE agent_runs (
 );
 CREATE INDEX ix_agentruns_turn ON agent_runs(turn_id, started_at);
 CREATE INDEX ix_agentruns_parent ON agent_runs(parent_run_id);
+-- 部分索引，先例是 ix_agentmsg_pending（下面那条）：主 run 在这张表里是绝大多数，
+-- 全量索引等于为少数行让多数行各留一个条目。
+CREATE INDEX ix_agentruns_worker ON agent_runs(worker_kind, started_at DESC) WHERE worker_kind IS NOT NULL;
 
 CREATE TABLE agent_messages (
   id            TEXT PRIMARY KEY,
@@ -409,30 +417,45 @@ CREATE INDEX ix_agentmsg_pending ON agent_messages(to_run_id, state) WHERE state
 ACP 加一档就得整表重建，而 `agent_runs` 是 trace 的骨架表（§4：`turns` / `tasks` 永久保留，靠这张表
 把子 run 串起来）—— 重建期间那些 id 引用全在半空中。所以 **ACP 行照旧记 `kind='sub'`**，认它靠
 `agent_name='acp:<name>'` + `model_alias='external'` 这一对，而不是一个新的 kind。
+**迁移 0018 是同一形态的第二次应用**：三种 worker 仍然全记 `kind='sub'`，新加的 `worker_kind`
+把「认它靠一对字符串」换成「认它靠一列」，那条 CHECK 依旧一个字节都没动。
 
-**ACP 行不占本轮的子 agent 名额。** `AgentManager.spawn()` 判 `agent.maxSubagentsPerTurn`（默认 10）
-的那条 COUNT 把它们排掉：
-`… WHERE turn_id=? AND kind='sub' AND NOT (agent_name GLOB 'acp:*' AND model_alias='external')`。
+**只有 lw-worker 的行占本轮名额。** `AgentManager.spawn()` 判 `agent.maxWorkersPerTurn`（默认 10）
+的那条 COUNT 判据是那一列：
+`… WHERE turn_id=? AND worker_kind='lw'`。
 
-**为什么排除是对的：** 那个数管的是**本系统自己的 fan-out 成本** —— 每个子 agent 都是一次我们
-付钱的模型调用，护栏防的是模型一步派出一片；而 ACP 那条路有它自己的三道门（owner + 仅私聊、
-目录白名单、每次审批，[05 §3.5.1](./05-tools-and-permissions.md)）加目录互斥加
-`agent.acp.maxCostUsd`，从来不共用这个数。**旧口径（数行、不看 `agent_name`）的问题不只是
-「多占一个」**：那一行是**跑完之后**才一次性插入的（没有 `state='running'` 那一段），所以它只压得住
-同一轮里排在它**后面**的 `spawn_agent` —— 一个依赖调用顺序的上界，比「占」与「不占」两种一致的
-选择都更坏（同样两次 ACP 调用 + 两次 `spawn_agent`，换个顺序就是两个不同的额度）。
+**为什么 harness / acp 不算在内：** 那个数管的是**本系统自己的 fan-out 成本** —— 每个 lw-worker
+都是一次我们付钱的模型调用，护栏防的是模型一步派出一片；而外部那两条路烧的是它们自己的额度，
+各自另有三道门（owner + 仅私聊、目录白名单、每次审批，[05 §3.5.1](./05-tools-and-permissions.md)）
+加目录互斥加 `agent.acp.maxCostUsd`，从来不共用这个数。
 
-判据取 `acp:` 前缀与 `model_alias='external'` **两个都中**才排除。`agent.agents[].name` 是裸
-`z.string()`，没有正则：`agents/<name>.md` 那条路挡得住冒号（`^[a-z0-9]+(?:-[a-z0-9]+)*$`），
-DB / WebUI 那条挡不住，所以运维真能建一个叫 `acp:x` 的子 agent —— 要它**同时**把 `modelAlias`
-写成 `external` 才会被漏数。用 `GLOB` 而不是 `LIKE`：后者在 SQLite 里 ASCII 大小写不敏感，
-会把 `ACP:x` 一起排掉。
+⚠ **这条论证的后半段（关于旧口径的那段）已经作废，不是当初写错了。** 它当年说的是：
+旧口径（数行、不看 `agent_name`）的问题不只是「多占一个」—— ACP 那一行是跑完之后才一次性插入的，
+所以它只压得住同一轮里排在它**后面**的派发，是一个依赖调用顺序的上界。那段论证的对象是
+**「靠名字排除」这个口径**，而口径已经换掉：`worker_kind` 在 INSERT 那一刻就写死，COUNT 读的是
+一列常量，外部两条路的行何时插入（当前仍是跑完之后一次性插入，见 `acp/runs.ts` 与
+`AgentManager.recordHarness`）**不再影响名额**。所以那段话不再是排除的理由 ——
+理由只剩上面那一段，而它保持原样。
 
-**这是 `agent_runs` 上唯一一处按行聚合的地方**，其余读法结构上碰不到 ACP 行：深度是
-`parent.depth + 1`、环路检测（`ancestors()`）沿 `parent_run_id` 往上走，而没有任何 run 以 ACP 行
-为父；`agent.maxConcurrentSubagents` 的闸是进程内计数、不查库；`recoverAfterCrash` 只改
-`state='running'` 的行，而 ACP 行落库即终态；§4 的结果全文过期只挑 `result_full_ref IS NOT NULL`，
-而 ACP 行那一列恒 NULL（它只有 `result_summary`）。
+**这一段读起来像背景说明，实际是四条不变量。** 旧版说的是「这是 `agent_runs` 上唯一一处按行聚合
+的地方，其余读法结构上碰不到 ACP 行」；判据的主语从「ACP 行」扩成「三种 worker 的行」之后
+**四条里有三条被推翻**：
+
+1. ✅ **深度仍成立**：`parent.depth + 1`，而没有任何 run 以 harness / acp 的行为父（它们是叶子）。
+2. ❌ **环路检测（`ancestors()`）删了**：只剩一种 worker 名字之后它等价于「深度 ≥2 一律拒」，
+   与 `AgentManager.spawn()` 里那条深度判断重复且更难读懂，随子 agent 定义体系一并退休。
+   这一条现在什么都不论证 —— 它论证的那个函数已经不存在。
+3. ❌ **`recoverAfterCrash` 碰得到 worker 行**：它的判据是 `state='running'`，不看 `worker_kind`。
+   lw-worker 的行有 running 窗口，非正常重启会把它们一起判成 `process_restarted`。
+   旧版那句「ACP 行落库即终态」对 ACP 与 harness 仍是事实，但它已经不能代表 worker 那一族
+   —— 而恰恰是能代表的那一半（lw）被这条语句收着。
+4. ❌ **§4 的结果全文过期同样碰得到 worker 行**：它挑 `result_full_ref IS NOT NULL`，
+   而 lw-worker 的行正是写这一列的那些。harness 与 acp 的行不写（只写 `result_summary`），
+   所以旧版那句「那一列恒 NULL」只对外部两条路成立。⚠ 哪天 harness 开始写 `result_full_ref`，
+   `MaintenanceService.gcFiles()` 那一侧**不需要改**：它扫的是整张 `agent_runs`、不按
+   `worker_kind` 过滤，正因为按 worker 过滤就是「漏一张表」那个事故的同一种形状（本仓踩过两次）。
+
+`agent.maxConcurrentWorkers` 的闸仍是进程内计数、不查库，那一条与这张表无关。
 
 ### 2.8 Provider 与模型
 
@@ -917,7 +940,7 @@ image 都改不动了；没有这一列，运维在 WebUI 换了镜像之后所�
 | `config_revisions` | `maintenance.retention.configRevisionDays` = 180 | 按 ts 删。删的是审计记录，不影响当前配置（`config_kv` 不动） |
 | `memory_revisions` | `maintenance.retention.memoryRevisionDays` = 180 | 按 ts 删。删除之后无法回滚到更早的版本 |
 | `turns` / `tasks` | 永久 | **刻意不给保留期**：它们是 trace 的骨架（`/api/turns/:id/detail` 靠 turn 行把日志、用量与上下文串起来），删掉等于历史轮次凭空消失。[14 §2 Q9-c](./14-open-questions.md) 已确认永久保留，不再是未决问题 |
-| `agent_runs` / `agent_messages`（**行**） | 永久 | 同上：子 run 与 ask/answer 是那条 trace 的另一半，`turns` 留着而它们被清掉的话，「这一轮里哪个子 agent 干了什么」凭空消失。**但行永久不代表全文永久** —— `result_full_ref` 指向的文件按 `logs.retentionDays` 过期：删文件、把该列置空、`result_summary` 留着（摘要是历史轮次已经引述过的东西，删了会让那些引述变成悬空，`docs/22 · I-09`）。ACP 那种行结构上落不进这一路，它的 `result_full_ref` 恒 NULL（只有 `result_summary`）|
+| `agent_runs` / `agent_messages`（**行**） | 永久 | 同上：worker 的 run 与 ask/answer 是那条 trace 的另一半，`turns` 留着而它们被清掉的话，「这一轮里哪个 worker 干了什么」凭空消失。**三种 worker（`worker_kind` 为 `lw` / `harness` / `acp`）的行都永久保留**，一条保留期都不适用于它们 —— 写明是因为「worker 运行页只看得到最近 30 天」会被当成 bug 报上来，而那 30 天是下面那条**全文**的保留期，不是行的。**行永久不代表全文永久**：`result_full_ref` 指向的文件按 `logs.retentionDays` 过期，删文件、把该列置空、`result_summary` 留着（摘要是历史轮次已经引述过的东西，删了会让那些引述变成悬空，`docs/22 · I-09`）。harness 与 ACP 的行结构上落不进这一路，它们的 `result_full_ref` 恒 NULL（只有 `result_summary`）|
 | `processed_updates` | 7 天 | 定期删 |
 | `sessions` | 过期即删 | 每小时 |
 | `approvals` | 90 天 | pending 超 `expires_at` 标 `expired` |
@@ -926,7 +949,7 @@ image 都改不动了；没有这一列，运维在 WebUI 换了镜像之后所�
 | `web_assets`（**行 + 文件**） | `media.retentionDays` = 90 | 与上面那一项同一个保留期、同一处执行，但**行也一起删**。`attachments` 留行是因为历史消息里那条「[图片]」要保住 mime / 尺寸 / 已提取正文；网页图那条 `webasset://` part 自己就带着「这张图取自哪」的文本，行没了读出侧照旧交回占位文本（`hydrateAttachment` 的 `missing` 分支），留一堆 `local_path=NULL` 的行只是让 `gcFiles` 与过期清理都得多绕一次 |
 | `data/cache/models.dev.json` | 永久 | 纯派生数据，删掉即可（下次拉取模型时自动重下）。年龄记在 `app_kv` 的 `catalog:models.dev`，超 `provider.catalog.ttlHours` 时用 ETag 条件请求续期 |
 | `sandbox_containers` | 跟着容器走 | **不由 `maintenanceCron` 管**，走自己的 `sandbox.persistent.reapCron`（默认每 5 分钟）：容器被销毁时删行，同一个 tick 里与 docker 双向对账。行本身不占空间，它只是 docker 状态的索引 |
-| `data/workspace/<chatId>` | **永久，且至今无人清理** | **没有实现任何回收**。`MaintenanceService` 一行都没管它，唯一的可见性是 `GET /api/health` 的 `workspaceBytes`。容器到期被回收**不动这里的文件**（那正是 `container_reset` 默认不清文件的同一条取舍：容器是环境，workspace 是数据）。要清只能人工，或用 `container_reset` 的 `wipeWorkspace` 单会话清 |
+| `data/workspace/<chatId>` | **永久，且至今无人清理** | **没有实现任何回收**。`MaintenanceService` 一行都没管它，唯一的可见性是 `GET /api/health` 的 `workspaceBytes`。容器到期被回收**不动这里的文件**（那正是 `container_reset` 默认不清文件的同一条取舍：容器是环境，workspace 是数据）。要清只能人工，或用 `container_reset` 的 `wipeWorkspace` 单会话清。⚠ **harness 的默认工作目录 `<workspaceDir>/<chatId>/harness/<runId>` 就落在这个至今无人清理的目录之下，而它每次 run 一个新目录** —— 这是本次改动引入的**唯一一处会持续增长且无回收的磁盘占用**。模型显式指名 `agent.harness.allowedDirs` 里某个既有仓库时不落这里（那是运维自己的目录），只有走默认目录那一档才建新目录（`agent.spawn` 的 `dirSource` 分得开这两档，[10 §2](./10-logging-and-observability.md#2-事件种类log_eventskind-枚举)）|
 
 清理任务在 `general.maintenanceCron`（默认每日 04:00 本地时间）执行，并在完成后 `PRAGMA wal_checkpoint(TRUNCATE)` + 每周一次 `VACUUM`。
 

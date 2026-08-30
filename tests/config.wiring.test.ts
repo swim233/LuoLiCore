@@ -108,7 +108,7 @@ describe('prompt.includeToolCatalog / prompt.runtimeBlock.*', () => {
 
   it('三个 runtimeBlock 开关各自控制自己那一行', () => {
     const input = { now: new Date(0), timezone: 'UTC', chatDescription: 'c', triggerDescription: 't', role: 'trusted',
-      tools: ['read_file'], agents: [], contextMessages: 3, contextTokens: 100, maxMessages: 200, maxTokens: 32_000,
+      tools: ['read_file'], contextMessages: 3, contextTokens: 100, maxMessages: 200, maxTokens: 32_000,
       quota: '本轮已用 $0.0100', workspace: '/w', sandbox: 'docker' };
     const full = runtimeBlock(input);
     expect(full).toContain('上下文容量：');
@@ -147,7 +147,7 @@ describe('白名单', () => {
     const wired = ['general.name', 'telegram.dropPendingOnStart', 'trigger.cooldownMsPerUser', 'concurrency.coalesceSameUserMs',
       'context.background.showTime', 'context.background.includeNonText', 'prompt.includeToolCatalog',
       'prompt.runtimeBlock.showQuota', 'prompt.runtimeBlock.showContextWatermark', 'prompt.runtimeBlock.showWorkspace',
-      'agent.maxConcurrentSubagents', 'agent.progressThrottleMs', 'provider.healthDownCooldownMinutes',
+      'agent.maxConcurrentWorkers', 'agent.progressThrottleMs', 'provider.healthDownCooldownMinutes',
       'tools.archive.defaultSearchLimit', 'tools.archive.maxSearchLimit', 'tools.archive.defaultReadLimit', 'tools.archive.maxReadLimit',
       'media.maxImagesPerTurn', 'media.stickerAsImage', 'media.downloadVoice', 'media.extract.codeExtensions',
       'skills.enabled', 'plugins.enabled', 'plugins.watch', 'mcp.connectTimeoutMs'];
@@ -162,5 +162,23 @@ describe('白名单', () => {
     expect(parsed.approval!.allowInitiator).toBeUndefined();
     expect(Object.keys(parsed.quota!.perTurn as Record<string, unknown>).sort()).toEqual(['maxCostUsd', 'maxSteps']);
     for (const key of removed) expect((KNOWN_UNIMPLEMENTED_CONFIG_KEYS as readonly string[]).includes(key)).toBe(false);
+  });
+
+  /**
+   * 派发层收敛到唯一的 lw-worker 之后摘掉的三项。`maxDepth` 是其中唯一有过判据的：worker 是叶子
+   * 之后 `parent.depth + 1 > 3` 恒假，留着即一个改了没效果的格子；另两项随子 agent 定义一起消失。
+   * 两项改名（`maxConcurrentSubagents` / `maxSubagentsPerTurn` → `…Workers…`）没有迁移，存量
+   * `config_kv` 覆盖会被 `onInvalidOverride` 逐条剔除 —— 这条断言至少保证旧键不会被悄悄当成新键。
+   */
+  it('子 agent 那套定义随派发层收敛一起摘除', () => {
+    const parsed = configSchema.parse({ agent: { maxDepth: 5, agentsDir: './agents',
+      agents: [{ name: 'researcher', description: 'r', modelAlias: 'low', maxSteps: 3, instructions: 'r' }],
+      maxConcurrentSubagents: 9, maxSubagentsPerTurn: 9 } }).agent as unknown as Record<string, unknown>;
+    for (const key of ['maxDepth', 'agentsDir', 'agents', 'maxConcurrentSubagents', 'maxSubagentsPerTurn']) {
+      expect(parsed[key], `agent.${key} 应当已从 schema 摘除`).toBeUndefined();
+    }
+    expect(parsed.maxConcurrentWorkers).toBe(3);
+    expect(parsed.maxWorkersPerTurn).toBe(10);
+    expect(parsed.worker).toEqual({ modelAlias: 'low', maxSteps: 12, resultMaxChars: 4000, maxResultChars: 65_536 });
   });
 });

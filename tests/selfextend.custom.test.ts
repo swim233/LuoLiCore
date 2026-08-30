@@ -2,7 +2,7 @@ import { mkdirSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { CustomToolRepository, closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
-import { CustomToolManager, Sandbox, ToolRegistry, configSchema, type Config, type LogSink } from '@luoli/core';
+import { CustomToolManager, Sandbox, ToolRegistry, configSchema, newToolScope, type Config, type LogSink } from '@luoli/core';
 
 const log = { event: () => undefined, publish: () => undefined, span: () => ({ id: 's', end: () => undefined }) } as unknown as LogSink;
 const recordingLog = (events: Array<{ kind: string }>): LogSink =>
@@ -37,7 +37,10 @@ function harness(name: string, overrides: Record<string, unknown> = {}) {
   const turn = { turnId: 't1', key: 'chat:1', chatId: '1', threadId: null, initiatorUserId: '2', effectiveRole: 'owner' as 'owner' | 'trusted' | 'limited',
     isPrivate: true, baseCommitId: null, config, snapshot: { messages: [], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 0 },
     delta: [], abortSignal: new AbortController().signal };
-  const contextFor = (patch: Partial<typeof turn> = {}) => ({ turn: { ...turn, ...patch }, workspace, agentKind: 'main' }) as never;
+  // `lw` 而非 `main`：`custom_*` 压根不在 `TOOL_POLICY` 里，主 agent 那张白名单收不下它 ——
+  // 目录与 `admit()` 两处都会先撞 `tool_requires_worker`，本文件判的角色地板、会话作用域、
+  // 中途改定义那几条一条都走不到。自定义工具本就是随执行一起下沉的那一批（docs/05 §4）。
+  const contextFor = (patch: Partial<typeof turn> = {}) => ({ turn: { ...turn, ...patch }, workspace, agentKind: 'lw', ...newToolScope() }) as never;
   return { db, repo, manager, registry, events, context: contextFor(), contextFor, turn, workspace,
     reconfigure: (patch: Record<string, unknown>) => { config = configSchema.parse(patch) as Config; } };
 }

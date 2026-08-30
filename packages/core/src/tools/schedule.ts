@@ -253,11 +253,14 @@ export function registerScheduleTools(
     policy: builtinPolicy("stay_silent"),
     sourcePriority: 100,
     // 两道闸。`silenceable` 的唯一置位方是 `ScheduledJobRunner`，缺席即假，于是 Telegram 轮次、
-    // 提示词预览、agent 隔离试跑全部 fail-closed；主 agent 那道不是冗余：子 agent 拿到的是
-    // 父轮同一个 turn 对象（`agent/subagent.ts` 的 `runSubAgent` 直接接收 `turn`），缺了它，
-    // 一个 researcher 就能替整轮静默，而派发它的主 agent 全程不知情。
-    // 写在 `available()` 而非像 `memory_write` 那样硬编码进 `registry.ts` 的 `admit()`：
-    // `admit()` 本就会复查一遍 `available()`，一处判据同时管住目录过滤与硬拦截。
+    // 提示词预览、agent 隔离试跑全部 fail-closed；主 agent 那道不是冗余：worker 拿到的是
+    // 父轮同一个 turn 对象（`silenced` / `silenceReason` 正写在它上面），缺了它，一个 lw-worker
+    // 就能替整轮静默，而派发它的主 agent 全程不知情。渐进披露那三个集合已经按 run 拆开了，
+    // 这一位没有 —— 静默是轮次形态，本来就该由整轮那一份说了算。
+    // 写在 `available()` 而不是往 `registry.ts` 的 `admit()` 里加一条分支：`admit()` 本就会复查一遍
+    // `available()`，一处判据同时管住目录过滤与硬拦截。⚠ 它与 `MAIN_ONLY_TOOLS` 那道**不是**同一道，
+    // 只是恰好同向 —— 那张表管「哪一档 agent 拿得到」（worker 侧先撞 `tool_unavailable_for_worker`，
+    // 走不到这里），这一道管「这一轮的形态允不允许」，对主 agent 是唯一的闸。
     available: (_role, context) =>
       context.agentKind === "main" && context.turn.silenceable === true,
     execute: (input, context) => {

@@ -46,17 +46,20 @@ export class OperationsRepository {
     chatId?: string;
     userId?: string;
     key?: string;
+    agentRunId?: string;
     data?: unknown;
     durationMs?: number;
   }): number {
     const payload = encodeLogPayload(input.data, this.compressLogPayloads);
-    // `agent_run_id` 这一列**照旧没有写入方**（生产库 59799 行里 0 行有值），与 `docs/10 §1`
-    // 记的 `parent_span_id` 是同一类死列。这次不顺手接：它的值要从子 agent 的调用链一路穿下来，
-    // 属 trace 模型的改动，按房规要先改 `docs/10 §1` 那张载体表。留着列不留假的写入口。
+    // `agent_run_id` 这一列此前**一个写入方都没有**（生产库 60428 行里 0 行有值），与 `parent_span_id`
+    // 曾经的处境相同。接上它的前置条件是 `docs/10 §1` 那张「四条边各自的载体」表里先有一行说清
+    // 这个值由谁一路带下来 —— 现在有了（`ToolExecutionContext.agentRunId`），所以这里才收这个参数。
+    // 载体在调用侧，本方法只负责「给了就写」：默认 null 而不是回落到某个猜出来的 run，
+    // 「这条事件不属于任何 worker」与「属于某个 worker 但我们没记住」必须分得开。
     const info = this.db
       .prepare(
-        `INSERT INTO log_events(ts,level,kind,trace_id,span_id,parent_span_id,chat_id,user_id,key,summary,duration_ms,data,data_codec,data_bytes)
-      VALUES (@ts,@level,@kind,@traceId,@spanId,@parentSpanId,@chatId,@userId,@key,@summary,@durationMs,@data,@codec,@bytes)`,
+        `INSERT INTO log_events(ts,level,kind,trace_id,span_id,parent_span_id,chat_id,user_id,key,agent_run_id,summary,duration_ms,data,data_codec,data_bytes)
+      VALUES (@ts,@level,@kind,@traceId,@spanId,@parentSpanId,@chatId,@userId,@key,@agentRunId,@summary,@durationMs,@data,@codec,@bytes)`,
       )
       .run({
         ts: Date.now(),
@@ -69,6 +72,7 @@ export class OperationsRepository {
         chatId: input.chatId ?? null,
         userId: input.userId ?? null,
         key: input.key ?? null,
+        agentRunId: input.agentRunId ?? null,
         durationMs: input.durationMs ?? null,
         data: payload.data,
         codec: payload.codec,

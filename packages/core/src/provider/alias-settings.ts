@@ -59,7 +59,7 @@ export const BUILTIN_ALIASES = [
     purpose: "主 Agent 的默认模型，用于日常对话",
     tier: "中高档，对话质量优先",
   },
-  { alias: "high", purpose: "复杂推理、代码类子 agent", tier: "最强模型" },
+  { alias: "high", purpose: "复杂推理、代码类 worker", tier: "最强模型" },
   {
     alias: "low",
     purpose:

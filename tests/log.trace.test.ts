@@ -4,7 +4,7 @@ import { code, codeIndex, source } from './support/source.js';
 import { z } from 'zod';
 import type { LanguageModel } from 'ai';
 import { ArchiveRepository, OperationsRepository, closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
-import { AgentManager, AgentResultStore, ContextEngine, LogSink, PromptAssembler, PromptDocuments, Sandbox, ToolRegistry, UsageLedger, configSchema, registerBuiltins, runMainAgent, runSubAgent } from '@luoli/core';
+import { AgentManager, AgentResultStore, ContextEngine, LogSink, PromptAssembler, PromptDocuments, Sandbox, ToolRegistry, UsageLedger, configSchema, newToolScope, registerBuiltins, runLwWorker, runMainAgent } from '@luoli/core';
 import type { ApprovalBroker, ModelRegistry, SandboxRunEvent, ToolExecutionContext } from '@luoli/core';
 import { logPayload, logRows } from './support/logs.js';
 
@@ -14,13 +14,13 @@ import { logPayload, logRows } from './support/logs.js';
  * `parent_span_id` 此前在全仓只出现在四处（类型声明、写库、读出、前端展示），没有任何调用点
  * 传过它：staging 库 `total 15841 / with_span 11354 / with_parent 0`，浏览器里展开一条 trace，
  * 13 个节点的 `marginLeft` 全是 `0px`。读出侧甚至修过一次，修完之后正确地读着一个恒为 NULL
- * 的列（docs/28 · L-LOG-04）。因此这里跑一轮假上游 + 假工具 + 假子 agent，直接查库断言
+ * 的列（docs/28 · L-LOG-04）。因此这里跑一轮假上游 + 假工具 + 真 worker，直接查库断言
  * `docs/10 §1` 那张图的四条边确实落库：
  *
  * ① turn 根 → `ctx.open` / `prompt.build` / `model.call` / `ctx.commit`
  * ② `model.call` → `tool.call`
  * ③ `tool.call` → `agent.spawn` / `agent.run`
- * ④ `agent.run` → 子 agent 的 `model.call` / `agent.end`
+ * ④ `agent.run` → worker 的 `model.call` / `agent.end`
  *
  * 单元测试看不见这个盲区的原因也在这里：工具与上下文的用例一律把 `LogSink` stub 成
  * `{span:()=>…}`，于是是否真的落进 log_events 从来无人验证。这个文件用真 sink、真库。
@@ -38,7 +38,7 @@ function info(modelId: string) {
   return { id: modelId, providerId: 'p1', modelId, contextWindow: 128_000, maxOutput: 4096, capabilities: '{}',
     priceIn: 1, priceOut: 2, priceCacheRead: 0, priceCacheWrite: 0 };
 }
-/** 只实现 `runMainAgent` / `runSubAgent` 真正用到的那几个方法。 */
+/** 只实现 `runMainAgent` / `runLwWorker` 真正用到的那几个方法。 */
 function registryFor(chains: Record<string, Array<{ model: ReturnType<typeof candidate>; info: ReturnType<typeof info> }>>): ModelRegistry {
   return {
     chain: (alias: string) => chains[alias] ?? [],
@@ -74,8 +74,7 @@ async function runTracedTurn(name: string) {
   documents.ensure();
   const broker: ApprovalBroker = { request: async () => true };
   const tools = new ToolRegistry(log, broker, { maxRegistered: 20, maxCallsPerTurn: 10, maxConsecutiveErrors: 3 });
-  const agents = new AgentManager(db, new AgentResultStore(`./data/${name}-results`),
-    [{ name: 'researcher', description: 'r', modelAlias: 'low', maxSteps: 2, minRole: 'limited', tools: [], resultMaxChars: 400, instructions: 'r' }], 3, 10);
+  const agents = new AgentManager(db, new AgentResultStore(`./data/${name}-results`), 10);
   const ledger = new UsageLedger(db);
   const models = registryFor({
     main: [{ model: candidate('main-model', () => mainStep()), info: info('main-model') }],
@@ -88,26 +87,29 @@ async function runTracedTurn(name: string) {
   const turn = await context.openTurn({ chatId: 'chat', threadId: null, key: 'chat:chat', initiatorUserId: 'u',
     effectiveRole: 'trusted', isPrivate: true, trigger, abortSignal: new AbortController().signal, config });
 
-  // 派生子 agent 的那个工具：它把 `context.parentSpanId`（即本次 `tool.call` 的 span）交给
-  // `runSubAgent`，也就是 `docs/10 §7` 第 4 条那条边。真实路径是 `spawn_agent`，形状完全一致。
-  tools.register({ name: 'dig', description: '派 researcher 去查', inputSchema: z.object({ q: z.string() }),
+  // 派 worker 的那个工具：它把 `context.parentSpanId`（即本次 `tool.call` 的 span）交给
+  // `runLwWorker`，也就是 `docs/10 §7` 第 4 条那条边。真实路径是 `spawn_worker`，形状完全一致。
+  // 名字必须是 `spawn_worker`：`toolCallableBy` 认的是名字（`MAIN_ONLY_TOOLS` 那张白名单），
+  // 换个名字主 agent 连目录都进不去，这一轮里一条 `tool.call` 都不会有。
+  tools.register({ name: 'spawn_worker', description: '派一个 worker 去查', inputSchema: z.object({ q: z.string() }),
     policy: { minRole: 'limited', approval: 'never', scope: 'workspace', source: 'builtin' }, sourcePriority: 100, timeoutMs: null,
     execute: async (input, executionContext: ToolExecutionContext) => {
       const parent = agents.createMain(turn.turnId, 'trusted', 'main');
-      const spawned = agents.spawn(parent, 'researcher', `${input.q} —— 这段任务足够长了`);
-      const result = await runSubAgent(spawned.run, spawned.definition, input.q, undefined, turn,
+      const spawned = agents.spawn(parent, `${input.q} —— 这段任务足够长了`, 'low');
+      const result = await runLwWorker(spawned, input.q, undefined, turn,
         { db, agents, registry: models, tools, ledger, log, workspace: './data',
-          ...(executionContext.parentSpanId ? { parentSpanId: executionContext.parentSpanId } : {}) });
+          ...(executionContext.parentSpanId ? { parentSpanId: executionContext.parentSpanId } : {}) },
+        { modelAlias: 'low' });
       return { ok: true, summary: result.summary };
     } });
 
   let calls = 0;
   const mainStep = (): unknown => {
     calls += 1;
-    if (calls === 1) return step([{ type: 'tool-call', toolCallId: 'call-1', toolName: 'dig', input: JSON.stringify({ q: '洛璃' }) }], 'tool-calls');
+    if (calls === 1) return step([{ type: 'tool-call', toolCallId: 'call-1', toolName: 'spawn_worker', input: JSON.stringify({ q: '洛璃' }) }], 'tool-calls');
     // 第二步附带一次参数非法的工具调用：`tool.error` 走的是 AI SDK 内部校验那一路，
     // `ToolRegistry.execute` 不会被调用（docs/28 · L-LOG-03）。
-    if (calls === 2) return step([{ type: 'tool-call', toolCallId: 'call-2', toolName: 'dig', input: JSON.stringify({ q: 42 }) }], 'tool-calls');
+    if (calls === 2) return step([{ type: 'tool-call', toolCallId: 'call-2', toolName: 'spawn_worker', input: JSON.stringify({ q: 42 }) }], 'tool-calls');
     return step([{ type: 'text', text: '查到了' }], 'stop');
   };
 
@@ -141,7 +143,7 @@ describe('trace 是一棵真的树', () => {
       expect(one(rows, kind).traceId, `${kind} 没进这一轮的 trace`).toBe(turn.turnId);
     }
     const modelCalls = of(rows, 'model.call');
-    // 主 agent 三步 + 子 agent 一步。
+    // 主 agent 三步 + worker 一步。
     expect(modelCalls.length).toBe(4);
     const mainCalls = modelCalls.filter((row) => row.parentSpanId === root);
     expect(mainCalls.length, '主 agent 的 model.call 没挂在 turn 根上').toBe(3);
@@ -150,14 +152,14 @@ describe('trace 是一棵真的树', () => {
     const toolCall = one(rows, 'tool.call');
     expect(mainCalls.map((row) => row.spanId)).toContain(toolCall.parentSpanId);
 
-    // ③ `tool.call` → 子 agent。
+    // ③ `tool.call` → worker。
     expect(one(rows, 'agent.spawn').parentSpanId).toBe(toolCall.spanId);
     const agentRun = one(rows, 'agent.run');
     expect(agentRun.parentSpanId, 'agent.run 没挂在派发它的 tool.call 之下').toBe(toolCall.spanId);
 
-    // ④ `agent.run` → 子 agent 内部。
+    // ④ `agent.run` → worker 内部。
     const subCalls = modelCalls.filter((row) => row.parentSpanId === agentRun.spanId);
-    expect(subCalls.length, '子 agent 的 model.call 没挂在 agent.run 之下').toBe(1);
+    expect(subCalls.length, 'worker 的 model.call 没挂在 agent.run 之下').toBe(1);
     expect(one(rows, 'agent.end').parentSpanId).toBe(agentRun.spanId);
     expect(of(rows, 'agent.progress').every((row) => row.parentSpanId === agentRun.spanId)).toBe(true);
 
@@ -191,13 +193,13 @@ describe('trace 是一棵真的树', () => {
     expect(error.traceId).toBeTruthy();
     const payload = logRows(db, 'tool.error')[0]!;
     expect(payload.level).toBe('warn');
-    expect(JSON.parse(payload.data!)).toMatchObject({ tool: 'dig', toolCallId: 'call-2' });
+    expect(JSON.parse(payload.data!)).toMatchObject({ tool: 'spawn_worker', toolCallId: 'call-2' });
     // 它挂在对应那一步的 model.call 之下，而不是挂在 turn 根上。
     expect(of(rows, 'model.call').map((row) => row.spanId)).toContain(error.parentSpanId);
     closeDatabase(db);
   });
 
-  it('子 agent 的花费与 model.call 记的是同一个候选', async () => {
+  it('worker 的花费与 model.call 记的是同一个候选', async () => {
     const { db, rows } = await runTracedTurn('log-trace-served');
     const summaries = db.prepare("SELECT summary FROM log_events WHERE kind='model.call' ORDER BY id").pluck().all() as string[];
     // 摘要里写的是实际生效的那个候选（provider/model），而不是 AI SDK 报的链首（docs/28 · L-PROV-01）。
@@ -242,7 +244,10 @@ describe('trace 是一棵真的树', () => {
     const turn = { turnId: 'trace-sandbox', key: 'chat:1', chatId: '1', threadId: null, initiatorUserId: '2', effectiveRole: 'owner',
       isPrivate: true, baseCommitId: null, config: configSchema.parse({ access: { bootstrapOwnerId: '1' } }),
       snapshot: { messages: [], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 0 }, delta: [], abortSignal: new AbortController().signal };
-    const done = await registry.execute('bash', { command: 'echo trace-probe', description: '探针' }, { turn, workspace: './data', agentKind: 'main' } as never);
+    // `agentKind: 'lw'`：`bash` 与其余工具一样只在 worker 那一侧，主 agent 这边会被 `admit()`
+    // 以 `main_agent` 挡下，沙箱一次都不会被调到。
+    const done = await registry.execute('bash', { command: 'echo trace-probe', description: '探针' },
+      { turn, workspace: './data', agentKind: 'lw', ...newToolScope() } as never);
     expect(done, `bash 没跑起来：${JSON.stringify(done)}`).toMatchObject({ ok: true });
 
     expect(spans, '这次调用没开出 tool.call 的 span').toHaveLength(1);

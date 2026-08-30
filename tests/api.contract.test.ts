@@ -21,7 +21,7 @@ describe('documented API surface', () => {
     const { app, db, headers } = harness(); const cookie = { cookie: headers.cookie };
     // 只断言 200 会形成假通过：未注册的 /api/* 会落入 SPA fallback，得到 200 与 index.html。
     // `GET /api/quota` 曾因此长期通过，而该端点实际并不存在。必须连同 JSON 信封一起断言。
-    for (const path of ['/api/dashboard','/api/chats','/api/messages','/api/turns','/api/turns/active','/api/providers','/api/models','/api/aliases','/api/principals','/api/tools','/api/sandbox','/api/skills','/api/plugins','/api/mcp','/api/agents','/api/logs','/api/usage','/api/quota','/api/tasks','/api/approvals','/api/config','/api/config/schema','/api/config/revisions']) {
+    for (const path of ['/api/dashboard','/api/chats','/api/messages','/api/turns','/api/turns/active','/api/providers','/api/models','/api/aliases','/api/principals','/api/tools','/api/sandbox','/api/skills','/api/plugins','/api/mcp','/api/worker-runs','/api/logs','/api/usage','/api/quota','/api/tasks','/api/approvals','/api/config','/api/config/schema','/api/config/revisions']) {
       const read = await app.request(path, { headers: cookie });
       expect(read.status, path).toBe(200);
       expect(read.headers.get('content-type'), path).toMatch(/application\/json/);
@@ -79,6 +79,87 @@ describe('documented API surface', () => {
     expect(scanned).toMatchObject({ total: 4, pending: 2 });
     expect((scanned.items as Array<{ state: string }>).filter((row) => row.state === 'pending')).toHaveLength(2);
     expect(db.prepare("SELECT state FROM approvals WHERE id='appr-stale'").pluck().get()).toBe('expired');
+    closeDatabase(db);
+  });
+
+  /**
+   * `GET /api/worker-runs` 的形状、分页与两个过滤器（docs/09 §3.9、§4）。
+   *
+   * 判据是 `worker_kind IS NOT NULL`：主 run 那一行的 `worker_kind` 恒 NULL，它就是这一轮本身，
+   * 出现在 worker 列表里等于让页面上多一条它解释不了的行。三档 worker（lw / harness / acp）
+   * 都要能被单独筛出来 —— 此前全仓唯一读 `agent_runs` 的是 `GET /api/tasks/:id` 那条 join，
+   * 而它的入口是 `tasks.agent_run_id`，harness / ACP 两条路不建 `tasks` 行（docs/21 · G-API-25）。
+   */
+  it('worker-runs 只列 worker_kind 非空的行，分页与两个过滤器都走 SQL', async () => {
+    const { app, db, headers } = harness();
+    const cookie = { cookie: headers.cookie };
+    const now = Date.now();
+    db.prepare("INSERT INTO turns(id,key,chat_id,initiator_user_id,effective_role,state,queued_at,started_at) VALUES ('turn-w','chat:c','c','u','trusted','committed',?,?)").run(now, now);
+    const insert = db.prepare(`INSERT INTO agent_runs(id,turn_id,depth,kind,worker_kind,agent_name,model_alias,effective_role,task_input,state,steps,tool_calls,cost_usd,external_cost_usd,external_usage_json,result_summary,started_at,finished_at)
+      VALUES (?,'turn-w',?,?,?,?,?,'trusted',?,?,?,?,?,?,?,?,?,?)`);
+    insert.run('run-main', 0, 'main', null, 'main', 'main', '这一轮本身', 'done', 5, 9, 0.5, null, null, null, now, now + 1000);
+    insert.run('run-lw', 1, 'sub', 'lw', 'worker', 'low', '查一下今天的更新\n第二行不进列表', 'done', 3, 4, 0.01, null, null, '查完了', now + 1, now + 2000);
+    insert.run('run-harness', 1, 'sub', 'harness', 'harness:claude', 'external', '改一下那个仓库', 'running', 0, 0, 0, null, null, null, now + 2, null);
+    insert.run('run-acp', 1, 'sub', 'acp', 'acp:omp', 'external', '重构 parser', 'done', 0, 0, 0, 1.25, '{"source":"omp","model":"gpt-5"}', '改完了', now + 3, now + 9000);
+
+    const envelope = async (path: string): Promise<Record<string, unknown>> =>
+      ((await (await app.request(path, { headers: cookie })).json()) as { data: Record<string, unknown> }).data;
+    const all = await envelope('/api/worker-runs?page=1&size=50');
+    expect(Object.keys(all).sort()).toEqual(['items', 'page', 'size', 'total']);
+    expect(all.total).toBe(3);
+    const items = all.items as Array<Record<string, unknown>>;
+    // 主 run 不在里面，而正在跑的那条排在最前（排序照 `GET /api/tasks`）。
+    expect(items.map((row) => row.id)).toEqual(['run-harness', 'run-acp', 'run-lw']);
+    // 列表只给任务的第一行，整份 `task_input` 与 `external_usage_json` 都是详情的事。
+    expect(items.find((row) => row.id === 'run-lw')!.taskLine).toBe('查一下今天的更新');
+    expect(Object.keys(items[0]!)).not.toContain('taskInput');
+    expect(Object.keys(items[0]!)).not.toContain('externalUsageJson');
+    // 外部自报的花费原样透出，且与 costUsd 各占一列 —— 不相加、不合并（迁移 0014）。
+    const acp = items.find((row) => row.id === 'run-acp')!;
+    expect(acp.externalCostUsd).toBe(1.25);
+    expect(acp.costUsd).toBe(0);
+    // 「没报过」与「报了 0」是两件事：前者必须是 null。
+    expect(items.find((row) => row.id === 'run-lw')!.externalCostUsd).toBeNull();
+
+    for (const [kind, ids] of [['lw', ['run-lw']], ['harness', ['run-harness']], ['acp', ['run-acp']]] as const)
+      expect((await envelope(`/api/worker-runs?workerKind=${kind}`)).items as Array<{ id: string }>).toMatchObject(ids.map((id) => ({ id })));
+    expect(((await envelope('/api/worker-runs?state=running')).items as Array<{ id: string }>).map((row) => row.id)).toEqual(['run-harness']);
+    // 分页真的走 OFFSET：第 2 页与第 1 页不重复。
+    const first = await envelope('/api/worker-runs?page=1&size=1');
+    const second = await envelope('/api/worker-runs?page=2&size=1');
+    expect(second).toMatchObject({ total: 3, page: 2, size: 1 });
+    expect((second.items as Array<{ id: string }>)[0]!.id).not.toBe((first.items as Array<{ id: string }>)[0]!.id);
+    // 非法过滤值 400 而不是忽略：忽略的表现是「筛了 acp 却看见 lw 的行」。
+    expect((await app.request('/api/worker-runs?workerKind=sub', { headers: cookie })).status).toBe(400);
+    expect((await app.request('/api/worker-runs?state=queued', { headers: cookie })).status).toBe(400);
+
+    const detail = await envelope('/api/worker-runs/run-acp');
+    expect(detail).toMatchObject({ id: 'run-acp', workerKind: 'acp', taskInput: '重构 parser', externalCostUsd: 1.25 });
+    expect(detail.externalUsageJson).toBe('{"source":"omp","model":"gpt-5"}');
+    expect(detail.turn).toMatchObject({ key: 'chat:c', chatId: 'c', state: 'committed' });
+    // 主 run 从这个入口取不到：它不是一次 worker 运行。
+    expect((await app.request('/api/worker-runs/run-main', { headers: cookie })).status).toBe(404);
+    expect((await app.request('/api/worker-runs/nope', { headers: cookie })).status).toBe(404);
+    closeDatabase(db);
+  });
+
+  /**
+   * 轮次详情要能回答「这一轮派了哪几个 worker」。`log_events` 按 `logs.retentionDays` 清理，
+   * 而 `agent_runs` 的行永久保留（docs/03 §4）—— 对历史轮次这是唯一还答得出来的那份。
+   */
+  it('turns/:id/detail 带回本轮的 workerRuns，且不含主 run', async () => {
+    const { app, db, headers } = harness();
+    const now = Date.now();
+    db.prepare("INSERT INTO turns(id,key,chat_id,initiator_user_id,effective_role,state,queued_at,started_at) VALUES ('turn-d','chat:c','c','u','trusted','committed',?,?)").run(now, now);
+    const insert = db.prepare(`INSERT INTO agent_runs(id,turn_id,depth,kind,worker_kind,agent_name,model_alias,effective_role,state,steps,tool_calls,cost_usd,external_cost_usd,started_at,finished_at)
+      VALUES (?,'turn-d',?,?,?,?,?,'trusted',?,?,?,?,?,?,?)`);
+    insert.run('d-main', 0, 'main', null, 'main', 'main', 'done', 6, 2, 0.3, null, now, now + 100);
+    insert.run('d-lw', 1, 'sub', 'lw', 'worker', 'low', 'done', 2, 3, 0.02, null, now + 10, now + 60);
+    insert.run('d-acp', 1, 'sub', 'acp', 'acp:omp', 'external', 'done', 0, 0, 0, 0.9, now + 20, now + 80);
+    const data = ((await (await app.request('/api/turns/turn-d/detail', { headers: { cookie: headers.cookie } })).json()) as
+      { data: { workerRuns: Array<Record<string, unknown>> } }).data;
+    expect(data.workerRuns.map((row) => row.id)).toEqual(['d-lw', 'd-acp']);
+    expect(data.workerRuns[1]).toMatchObject({ workerKind: 'acp', costUsd: 0, externalCostUsd: 0.9 });
     closeDatabase(db);
   });
 
@@ -342,14 +423,14 @@ describe('documented API surface', () => {
     closeDatabase(db);
   });
 
-  it('previews the runtime prompt and streams an isolated Agent dry-run', async () => {
+  it('previews the runtime prompt and streams an isolated worker dry-run', async () => {
     const { app, db, headers } = harness(() => ({
       previewPrompt: async (key, role) => ({
         key, role, instructions: 'assembled prompt', blocks: [{ name: 'kernel', tokens: 5, content: 'abcde', truncated: false, cached: true }],
         totalTokens: 5, context: { messages: 2, tokens: 4 },
       }),
-      dryRunAgent: async (_name, task, _signal, emit) => {
-        await emit({ type: 'step', step: 1, finishReason: 'stop', text: task, toolCalls: [], toolResults: [] });
+      dryRunWorker: async (input, _signal, emit) => {
+        await emit({ type: 'step', step: 1, finishReason: 'stop', text: `${input.task}|${input.modelAlias ?? '-'}|${(input.tools ?? []).join(',')}`, toolCalls: [], toolResults: [] });
         await emit({ type: 'usage', step: 1, inputTokens: 3, outputTokens: 2, costUsd: 0.01 });
         return { summary: 'done', fullRef: 'artifact://dry-run', truncated: false };
       },
@@ -357,15 +438,22 @@ describe('documented API surface', () => {
     const preview = await app.request('/api/prompts/preview', { method: 'POST', headers, body: JSON.stringify({ key: 'chat:1', role: 'trusted' }) });
     expect(preview.status).toBe(200);
     expect(await preview.json()).toMatchObject({ ok: true, data: { key: 'chat:1', role: 'trusted', instructions: 'assembled prompt', totalTokens: 5 } });
-    const dryRun = await app.request('/api/agents/researcher/dryrun', { method: 'POST', headers, body: JSON.stringify({ task: 'inspect state' }) });
+    // 端点上**没有 `:name`**：定义体系已删，worker 只有一种，两个可选旋钮原样送到运行时。
+    const dryRun = await app.request('/api/workers/dryrun', { method: 'POST', headers, body: JSON.stringify({ task: 'inspect state', modelAlias: 'low', tools: ['read_file'] }) });
     expect(dryRun.status).toBe(200);
     expect(dryRun.headers.get('content-type')).toContain('application/x-ndjson');
     const events = (await dryRun.text()).trim().split('\n').map((line) => JSON.parse(line) as unknown);
     expect(events).toEqual([
-      { type: 'step', step: 1, finishReason: 'stop', text: 'inspect state', toolCalls: [], toolResults: [] },
+      { type: 'step', step: 1, finishReason: 'stop', text: 'inspect state|low|read_file', toolCalls: [], toolResults: [] },
       { type: 'usage', step: 1, inputTokens: 3, outputTokens: 2, costUsd: 0.01 },
       { type: 'final', summary: 'done', fullRef: 'artifact://dry-run', truncated: false },
     ]);
+    // 旧路径不留别名：`:name` 在新世界里没有指代对象，留着只会让人以为还能试跑某份定义。
+    expect((await app.request('/api/agents/researcher/dryrun', { method: 'POST', headers, body: JSON.stringify({ task: 'x' }) })).status).toBe(404);
+    expect((await app.request('/api/agents', { headers: { cookie: headers.cookie } })).status).toBe(404);
+    // 形状校验：两个旋钮给错类型一律 400，不静静吞掉。
+    for (const body of [{ task: 'x', tools: 'read_file' }, { task: 'x', tools: [1] }, { task: 'x', modelAlias: 'Not Valid' }])
+      expect((await app.request('/api/workers/dryrun', { method: 'POST', headers, body: JSON.stringify(body) })).status, JSON.stringify(body)).toBe(400);
     closeDatabase(db);
   });
 

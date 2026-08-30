@@ -2,7 +2,7 @@ import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { closeDatabase, migrateDatabase, openDatabase, OperationsRepository } from '@luoli/db';
-import { LogSink, McpManager, ToolRegistry, configSchema, registerCatalogTools } from '@luoli/core';
+import { LogSink, McpManager, ToolRegistry, configSchema, newToolScope, registerCatalogTools } from '@luoli/core';
 import type { ToolExecutionContext } from '@luoli/core';
 
 const PROBE = resolve('tests/fixtures/mcp-server-probe.mjs');
@@ -35,6 +35,11 @@ function harness(slug: string, specs: Array<{ name: string; hang?: boolean }>, c
   return { db, spawnLog, registry, manager: new McpManager(db, config, log, registry) };
 }
 
+/**
+ * 本文件的上下文一律是 `lw`。MCP 工具压根不在 `TOOL_POLICY` 里，主 agent 那张白名单收不下它们，
+ * 目录与 `admit()` 两处都会先撞 `tool_requires_worker`（docs/05 §4 的下沉）；`search_tools` 的
+ * `available()` 也已翻成 `agentKind === "lw"`。判发现、超时、折叠展开的这几条与派发那道闸正交。
+ */
 describe('MCP runtime', () => {
   it('discovers and invokes allowlisted tools through stdio SDK transport', async () => {
     const database = './data/mcp-runtime.test.db';
@@ -48,7 +53,7 @@ describe('MCP runtime', () => {
     const tools = manager.toolEntries();
     expect(tools.map((tool) => tool.name)).toEqual(['mcp__fixture__echo']);
     expect(registry.names()).toEqual(['mcp__fixture__echo']);
-    const context: ToolExecutionContext = { turn: { turnId: 't', key: 'k', chatId: 'c', threadId: null, initiatorUserId: 'u', effectiveRole: 'trusted', isPrivate: false, baseCommitId: null, snapshot: { messages: [], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 0 }, delta: [], abortSignal: new AbortController().signal, config: {} }, workspace: '.', agentKind: 'main' };
+    const context: ToolExecutionContext = { turn: { turnId: 't', key: 'k', chatId: 'c', threadId: null, initiatorUserId: 'u', effectiveRole: 'trusted', isPrivate: false, baseCommitId: null, snapshot: { messages: [], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 0 }, delta: [], abortSignal: new AbortController().signal, config: {} }, workspace: '.', agentKind: 'lw', ...newToolScope() };
     expect(registry.activeNames('limited', context)).toEqual([]);
     expect(registry.activeNames('trusted', context)).toEqual(['mcp__fixture__echo']);
     expect(await tools[0]!.call({ text: 'hello' })).toMatchObject({ content: [{ type: 'text', text: 'hello' }] });
@@ -129,7 +134,7 @@ describe('MCP runtime', () => {
   /**
    * 一台真 MCP server 走完「折叠 → 检索 → 可调」（`AC-MCP-001`、`AC-TOOL-047`、`AC-TOOL-048`）。
    * 手搓注册表的分段用例挡不住这条链上的接线错：注册名怎么拼、`#groupKey` 在哪一个 `__` 上断句、
-   * `expandedTools` 那一笔落在哪个 turn 对象上，都只有跑一遍真注册流程才看得见。
+   * `expandedTools` 那一笔落在哪个 run 的 scope 上，都只有跑一遍真注册流程才看得见。
    */
   it('deferExternal 开着时 MCP 工具先折叠，检索展开之后本轮可用', async () => {
     const database = './data/mcp-defer.test.db';
@@ -142,7 +147,7 @@ describe('MCP runtime', () => {
     const manager = new McpManager(db, config.mcp, log, registry);
     await manager.reconcile();
     // `turn.config` 必须是真配置：`search_tools` 的护栏从 `tools.catalog.maxExpandedPerTurn` 现读。
-    const context: ToolExecutionContext = { turn: { turnId: 't', key: 'k', chatId: 'c', threadId: null, initiatorUserId: 'u', effectiveRole: 'trusted', isPrivate: false, baseCommitId: null, snapshot: { messages: [], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 0 }, delta: [], abortSignal: new AbortController().signal, config }, workspace: '.', agentKind: 'main' };
+    const context: ToolExecutionContext = { turn: { turnId: 't', key: 'k', chatId: 'c', threadId: null, initiatorUserId: 'u', effectiveRole: 'trusted', isPrivate: false, baseCommitId: null, snapshot: { messages: [], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 0 }, delta: [], abortSignal: new AbortController().signal, config }, workspace: '.', agentKind: 'lw', ...newToolScope() };
     const view = registry.activeView('trusted', context);
     expect(view.resident.map((tool) => tool.name)).toEqual(['search_tools']);
     expect(view.deferred.map((tool) => tool.name)).toEqual(['mcp__fixture__echo']);
@@ -154,9 +159,9 @@ describe('MCP runtime', () => {
     const searched = await registry.execute('search_tools', { names: ['mcp__fixture__echo'] }, context) as { ok: boolean; matches: Array<{ name: string; group: string; status: string }> };
     expect(searched.ok).toBe(true);
     expect(searched.matches).toEqual([{ name: 'mcp__fixture__echo', description: 'echo text', group: 'mcp:fixture', status: 'expanded' }]);
-    expect([...context.turn.expandedTools!]).toEqual(['mcp__fixture__echo']);
+    expect([...context.expandedTools]).toEqual(['mcp__fixture__echo']);
     // 顺序仍是 `sourcePriority desc, name asc`：展开只是放行，不重排请求体第 0 段。
-    expect(registry.activeNamesForStep('trusted', context, context.turn.expandedTools)).toEqual(['search_tools', 'mcp__fixture__echo']);
+    expect(registry.activeNamesForStep('trusted', context, context.expandedTools)).toEqual(['search_tools', 'mcp__fixture__echo']);
     // 折叠**不参与准入**：直调照常走 admit → 审批 → 执行，闸一道不多一道不少。
     expect(await registry.execute('mcp__fixture__echo', { text: 'hello' }, context)).toMatchObject({ ok: true });
     await manager.close(); closeDatabase(db);
@@ -186,7 +191,7 @@ describe('MCP runtime', () => {
     expect(elapsed).toBeGreaterThanOrEqual(380); // 真等满了 timeoutMs，不是握手就失败了
     expect(elapsed).toBeLessThan(5_000); // 轮次超时 600_000、工具层兜底 60_000，两者都够不着这里
     // 模型侧拿回的是一条失败的工具结果，于是它还能换个做法；挂死的话这一步永远不 settle。
-    const context: ToolExecutionContext = { turn: { turnId: 't', key: 'k', chatId: 'c', threadId: null, initiatorUserId: 'u', effectiveRole: 'trusted', isPrivate: false, baseCommitId: null, snapshot: { messages: [], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 0 }, delta: [], abortSignal: new AbortController().signal, config: {} }, workspace: '.', agentKind: 'main' };
+    const context: ToolExecutionContext = { turn: { turnId: 't', key: 'k', chatId: 'c', threadId: null, initiatorUserId: 'u', effectiveRole: 'trusted', isPrivate: false, baseCommitId: null, snapshot: { messages: [], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 0 }, delta: [], abortSignal: new AbortController().signal, config: {} }, workspace: '.', agentKind: 'lw', ...newToolScope() };
     expect(await registry.execute('mcp__stuck__hang', { text: 'hi' }, context)).toMatchObject({ ok: false, error: expect.stringMatching(/timed out/i) });
     await manager.close(); closeDatabase(db);
   }, 20_000);

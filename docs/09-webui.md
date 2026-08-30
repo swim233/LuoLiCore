@@ -243,8 +243,10 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
 - Provider 表：名称、类型、base_url、key hint、启用、健康状态（`UiTag`）、`[测试连接]` `[拉取模型]` `[编辑]` `[删除]`。
 - 编辑对话框：类型下拉、base_url、**API Key 写入型输入**（占位符 `保持不变`）、自定义 headers（键值表格）、`[测试连接]`（用对话框里尚未保存的 key/base_url 试，不写健康状态）。
 - `[测试连接]` 的结果与所有 provider/模型写操作的反馈走**右上角 `ToastHost`**（滑入、到点自动消失、可手动关掉，最多同时留 5 条），不再用顶栏的静态横幅：连通时显示耗时与上游返回的模型数，失败时显示错误类型与上游消息摘要。详见 [04 §5.4](./04-agents-and-providers.md#54-密钥管理)。
-- 模型表：model_id、Provider、context_window、**能力标签**（看图 / 读 PDF / 工具 / 结构化输出 / 思考档位，来自 `capabilities_json`）、
-  两个价格字段（每行标出定价出处：`provider 自报价` / `厂商官方价` / `手工填写`；为空时红字提示「缺定价 · 花费按 0 记账」）、启用、排序。
+- 模型表：model_id、Provider、上下文窗口、**能力标签**（看图 / 读 PDF / 工具 / 结构化输出 / 思考档位，来自 `capabilities_json`）、
+  两个价格字段（数值后空一格接 `$`；每行标出定价出处：`provider 自报价` / `厂商官方价` / `手工填写`；为空时红字提示「缺定价 · 花费按 0 记账」）、启用、排序。
+  上下文窗口列显示缩写：`context_window` ≥ 1M 记 M 并保留小数（`1 M` / `1.5 M`），其余按千四舍五入记 k 且不留小数（`128 k`）。
+  这三列**右对齐**（`GridColumn.align='right'`，表头一并右对齐）；数值连同单位套一层主色圆角底衬，底衬宽度**逐列取该列最长的一条**（等宽字体下按字符数折算 `ch`），无值的行只显示 `—`、不出底衬。
   表头的 `[补齐元数据]` 对**已入库**的模型重跑一次匹配：能力块照写（**但人工标记盖回去**，见下），
   **价格只填空着的**（已填的不覆盖），窗口/最大输出默认不动（运维可能按预算调小过），走 `POST /api/models/enrich`。
 - **看图能力可以人工标记**（模型编辑对话框里的三态下拉：`跟随目录判断` / `强制：能看图` / `强制：看不了图`）。
@@ -315,14 +317,31 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
 - 权限矩阵只读视图（**未实现**，2026-08-25 核实：`packages/webui/src` 里 `视角` / `权限矩阵` 零命中）：把 `TOOL_POLICY` 渲染成 [05 §4](./05-tools-and-permissions.md#4-权限矩阵权威表) 那张表，便于核对；可切「以某角色视角」预览可用工具集。这一句此前是本文单方面的承诺，而 `AC-WEB-016` 一直照它去验 —— 现在它进了 [21](./21-webui-coverage-gaps.md) 的缺口台账，做与不做在那里决定。
 
 ### 3.7 工具与沙箱
-- 工具表：名称、来源（builtin/agent/plugin/mcp/custom）、minRole、审批策略、作用域、启停状态、近 7 天调用次数与失败率、平均耗时。
+- 工具表：名称、来源（builtin/agent/plugin/mcp/custom）、**可达侧**、minRole、审批策略、作用域、
+  启停状态、近 7 天调用次数与失败率、平均耗时。
   `GET /api/tools` 除策略外还返回每个工具当前的 `enabled`（来自 `tools.overrides`）——
   只给静态策略表的话，页面显示的东西与运行时无关。
+- **可达侧**（`sides`，位置在「来源」之后）：主 agent 与 lw-worker 的可用集在代码里就是分叉的
+  （`toolCallableBy()`，[05 §4](./05-tools-and-permissions.md#4-权限矩阵权威表)），三态各有含义 ——
+  **仅主 agent**（`spawn_worker` / `send_message` 这批派发与投递口，worker 是叶子）、
+  **仅 worker**（`read_file` / `bash` 这批执行工具，主 agent 重构后不再直接调；也含 `ask_parent`
+  这类 worker 回父的内部通道）、**两侧**（`memory_read` / `search_messages` 这批刻意共享的只读查询）。
+  表头带一个按可达侧的过滤器，弹窗里在「来源 / 作用域」旁边多一个同样**只读**的格子。
+  - **由服务端现算，不许前端再判一遍。** `GET /api/tools` 调的就是运行时那个 `toolCallableBy()`
+    （`#eligible()` 与 `admit()` 共用的同一份）。写第二份必然漂移，而漂移的表现是界面说某个工具
+    worker 用得上、实际调过去撞 `tool_unavailable_for_worker`。判据只看工具名，所以没装配注册表的
+    静态兜底分支上它照样是真的（与 `deferred` 不同）。
+  - **绝不做成开关。** 这个分叉由代码里的判据决定，做成可写就是又一个改了没效果的控件
+    （同「来源 / 作用域只读」那条）。
+  - **它与 `enabled` 正交**：`tools.overrides.<name>.enabled=false` 是**两侧都没有**，
+    而可达侧说的是「哪一侧的目录里有它」。弹窗里要把这句写出来，否则两者会被当成同一个开关。
 - 每行还带一个 `deferred`：**这台机器的配置下**这个工具属不属于折叠族，由 `tools.catalog.*` 的 glob、
   `policy.source`、折叠豁免表、以及 `search_tools` 那一行的 `enabled` 在查询期一起算
   （[05 §3.12](./05-tools-and-permissions.md)、[07 §5](./07-skills-plugins-mcp.md#5-三者的统一注册流程)）。
   **它答的不是「某一轮里它被折叠了吗」**：`describe()` 手上没有角色也没有轮次上下文，所以真实轮次里
-  还会叠上角色门槛、`available()`、skill 收窄、`maxRegistered` 截断，而子 agent 那条路一个都不折叠。
+  还会叠上角色门槛、`available()`、skill 收窄、`maxRegistered` 截断。**折叠现在对 worker 侧同样生效**
+  —— lw-worker 拿到了 `search_tools` 与每步重算的 `activeTools`（展开集挂在本次 run 上，
+  [04 §3](./04-agents-and-providers.md)），旧的「子 agent 那条路一个都不折叠」已不成立。
   一个连带后果值得单说：把 `search_tools` 那一行 `enabled` 关掉（或把它的 `minRole` 抬上去）会让
   **每一行**的 `deferred` 变成 false —— 折叠机制整体停摆，就在这个开关所在的同一张表上。
   **它与 `enabled` 是两件事**：折叠工具
@@ -348,8 +367,8 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
     否则运维会以为调低 minRole 就等于放开了那个工具。
   - **`approvalFor` 的提档不受覆盖影响**：覆盖设定的是**基准档位**，`memory_write` 这类靠
     `approvalFor` 提档进审批的工具，基准改为 `never` 也仍会提档（`ToolRegistry` 取最严者）。
-  - `timeoutMs` 只对声明了超时的工具有效。`bash` / `python` / `spawn_agent` / `spawn_harness` /
-    `ask_parent` 以及全部 `custom_*` 声明的是 `timeoutMs: null`（它们各自有自己的硬期限），界面对
+  - `timeoutMs` 只对声明了超时的工具有效。`bash` / `python` / `spawn_worker` / `spawn_harness` /
+    `spawn_acp` / `ask_parent` 以及全部 `custom_*` 声明的是 `timeoutMs: null`（它们各自有自己的硬期限），界面对
     这几个置灰并注明原因 —— 从外面给它们套一层 race 会在它们自己的超时之前把调用砍掉。
     自定义工具自己的期限在 `custom_tools.timeout_ms` 上，由 `Sandbox.run` 钳在
     `tools.exec.maxTimeoutMs` 内执行，与 `bash` 同构。
@@ -522,22 +541,45 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
 在带外做的。界面上这类 server 的凭据列恒为「不需要」，而它的 stderr 现在会逐行进日志
 （`mcp.stderr`）—— 那是这类 server 唯一能给出的线索。
 
-### 3.9 子 Agent（Agents）
+### 3.9 Worker 运行记录（Workers）
 
-- 表格：name、description、modelAlias、maxSteps、tools、minRole、resultMaxChars、injectMemory。
-- **来源徽标**（[14 §2 Q5-b](./14-open-questions.md)）：`GET /api/agents` 交回文件定义
-  （`agents/<name>.md`）与配置定义合并后的名单，每条带 `source` —— `file`（只在文件里，打
-  「来自文件」）/ `file-overridden`（两边都有，跑的是配置那份，打「覆盖了文件」）/ `config`（无徽标）。
-- `[新建 Agent]` / 行点击编辑整份 `agent.agents` 配置数组；保存后 `config.changed` 触发
-  `AgentManager.replaceDefinitions()`（含一次文件重扫），删除也走同一条干净切换路径。
-  **写回时只写 `source !== 'file'` 的那些** —— 把整张合并名单写回去等于把每个 `.md` 悄悄复制进
-  DB 覆盖层，从此改文件不再生效而界面上什么都看不出来。
-- 编辑一条 `file` 定义**不置灰**：那正是「文件只读 / DB 赢」该有的入口，保存后它变成 `file-overridden`。
-  删除分两种：纯文件定义删不掉（提示去删那个 `.md`），覆盖则删掉覆盖、回到文件那份。
-- `[试跑]` 打开隔离面板：输入 task 后调用 `POST /api/agents/:name/dryrun`。服务端创建可审计的
-  `agent_run`，复用 `runSubAgent`，以 NDJSON 逐行推送 step（正文、工具输入输出）、usage、
-  final 或 error。关闭请求或点 `[取消试跑]` 会 abort 该试跑，不影响 Telegram turn。
-  **试跑与正常轮次共用同一份配额**：开跑前 `quota.reserve`，每步 `commit`，结束后 `release` 剩余
+「子 Agent」页在 worker 重构里整页替换：两来源的定义体系（`agent.agents[]` / `agents/<name>.md`）
+连同 `GET /api/agents` 一起删除，这一页从**编辑定义**改成**看运行记录**。整段在
+`views/WorkerRunsPage.vue` 与 `components/workers/`，`ConsoleView.vue` 里只占一行。
+
+两张卡竖排：运行记录、试跑。
+
+**运行记录**（`GET /api/worker-runs`，读 `agent_runs` 里 `worker_kind IS NOT NULL` 的那些）。
+判据用 `worker_kind` 而不是 `kind`：主 run 那一列恒 NULL，它就是这一轮本身，列进来只会多一条
+读的人解释不了的行。三档 worker 都会有 `state='running'` 的窗口，所以这一页看得见在途的那些。
+
+- 列：worker 类型徽标（`lw` / `harness` / `acp`）、状态、任务首行、所属轮次（点进轮次详情）、
+  步数 / 工具调用数、花费、**外部自报**、耗时、开始时间。表头带按类型与按状态两个过滤器
+  （非法取值服务端 400，不是忽略 —— 忽略的表现是「筛了 acp 却看见 lw 的行」）。
+- ⚠ **`external_cost_usd` 单独一格，与 `cost_usd` 分开显示且绝不相加**，格子旁写明它是外部 agent
+  自报、未经核对、不进任何聚合。这是 [21 · G-API-25](./21-webui-coverage-gaps.md) 明确警告的地方：
+  那个数不是我们的钱，口径由外部 agent 定、我们无法核对，结构上被挡在每一个聚合之外
+  （迁移 `0014` 的注释写了为什么）—— 把它并进聚合就是把一条有意为之的边界当缺口修掉。
+  `—` 表示它一次 `usage_update` 都没报过，与「它报了 0」是两件事。
+- 详情（`GET /api/worker-runs/:id`）：`task_input` / `result_summary` / `error` /
+  `external_usage_json`（原样 JSON，带 `[复制 JSON]`，照日志详情弹窗那条先例），加上服务端 join
+  出来的所属轮次与会话显示名。footer 两个跳转：`[查看该轮详情]` 与 `[在日志页查看该 trace]`。
+- **没有「取消这条 run」按钮**，理由与 `GET /api/tasks` 那条一致：worker 跑在父轮的 abort 信号下，
+  没有独立句柄。**这句话要写在页面上** —— 否则运维看到一条跑了 20 分钟的 harness 会去找一个
+  不存在的入口。要停只能取消它所属的整轮（总览页的在途轮次）。
+- **「读不到」与「一个都没有」分得开**：拉取失败出红条并写出原因，不冒充一页空列表（同定时任务面板）。
+
+**试跑**（`POST /api/workers/dryrun`）。从旧的「子 Agent」页整段搬过来，**去掉了 `:name`** ——
+定义没了，worker 只有一种。**旧路径不留别名**：`:name` 在新世界里没有指代对象。
+
+- 它的价值从来不是「试跑某份定义」，而是唯一能**不开一条真轮次**、用真模型真工具跑一遍、并逐步
+  看到 step（正文、工具输入输出）、usage、final / error 的入口 —— 而 lw-worker 是重构后唯一执行
+  工具的一档，这个价值不减反增。
+- body `{ task, tools?, modelAlias? }`。`tools` 留空 = 调用者角色下的全集，给了空数组 = 一个都不许用
+  （两者都送到运行时，端点不替它归一）；面板上的工具清单只列 `sides` 含 `worker` 的那些，取的正是
+  §3.7 那一列的同一份数据。服务端创建可审计的 `agent_run`，以 NDJSON 逐行推送。关闭请求或点
+  `[取消试跑]` 会 abort 该试跑，不影响 Telegram turn。
+- **试跑与正常轮次共用同一份配额**：开跑前 `quota.reserve`，每步 `commit`，结束后 `release` 剩余
   预留；额度不足直接拒绝开跑。只记 `usage_ledger` 不进 `quota_counters` 的话，`global.daily`
   对试跑一概无效（docs/20 · W-QUOTA-01）。chat / user 两级计数落在合成 subject `webui-dryrun` 上，
   不吃真实会话与用户的额度。
@@ -550,15 +592,25 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
   turn 01J8…  (12.4s, $0.031, committed, rebased)
   ├ context.open        (8ms)  base=c041 claimed=3
   ├ model.call #1       (2.1s) main→claude-opus-5  in 6,240 out 180  $0.008
-  │ └ tool.spawn_agent  (7.9s) researcher
-  │   ├ model.call      (1.8s) low→…  in 1,020 out 240  $0.001
-  │   ├ tool.grep       (120ms) 12 hits
-  │   ├ agent.ask       (2.0s) "该用哪个目录?" → arbiter: "/workspace/logs"
-  │   └ model.call      (2.4s) …
+  │ ├ tool.spawn_worker (7.9s) 主 agent 这一层几乎只剩派发
+  │ │ ├ agent.spawn            workerKind=lw
+  │ │ ├ agent.run       (7.8s) workerKind=lw  run_id=…
+  │ │ │ ├ model.call    (1.8s) low→…  in 1,020 out 240  $0.001
+  │ │ │ ├ tool.grep     (120ms) 12 hits（工具全在 worker 这一侧）
+  │ │ │ └ agent.ask     (2.0s) "该用哪个目录?" → arbiter: "/workspace/logs"
+  │ │ └ agent.end              steps, costUsd, resultMode
+  │ └ tool.spawn_acp    (41s)  外部那两条路
+  │   ├ agent.spawn            workerKind=acp  dir=…
+  │   ├ agent.run       (41s)  workerKind=acp
+  │   │ └ acp.run / acp.permission   （harness 那一档之下是 agent.harness 一条）
+  │   └ agent.end
   ├ model.call #2       (1.9s) …
   ├ telegram.send       (300ms) msg 8841
   └ context.commit      (14ms) rebase onto c042, prune 2 turns
   ```
+  这棵树与 [10 §1](./10-logging-and-observability.md#1-trace-模型) 是同一棵，改一处要两处一起改。
+  `agent.spawn` / `agent.run` / `agent.end` 三行由 **lw / harness / acp 三种 worker 共用**，靠
+  `workerKind` 区分 —— 三种同构是刻意的，Trace 视图与 §3.9 那一页因此各只有一套判据。
   每个节点可展开看完整 payload（请求 messages、工具输入输出、响应）—— 它就在那一行的 `data` 列上，按 `data_codec` 解码即可。
   缩进按 `parent_span_id` **链**算 depth（[10 §1](./10-logging-and-observability.md#1-trace-模型)），不是「有父就缩一级」——
   后者在 `parent_span_id` 全库为 NULL 的年代看不出问题，父边真的连上之后会把 `agent.run` 下面那三层
@@ -677,30 +729,30 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
 在整个 webui 里没有任何 CSS 命中，是一个死 class。三张卡都是宽表，横排只能让每一张都不够宽；
 竖排（`.card-stack`）之后各占满整行。**总览页的 `.dashboard-grid` 不动**，那是另一页的骨架。
 
-- 任务表：在途 + 历史（`tasks` 表，由 `spawn_agent` 派发），标题、状态、会话 / 发起人、更新时间、
+- 任务表：在途 + 历史（`tasks` 表，由 `spawn_worker` 派发），标题、状态、会话 / 发起人、更新时间、
   `[取消]`。**删除不在行内**，见下。**服务端分页**（`?page=&size=`），排序是「running 优先，其余按
   `updated_at` 倒序」—— 在途的那几条是运维唯一等得起的东西，不该被昨天的历史挤到第二页。
   **行内没有删除、而弹窗里必须有一个删除，理由也在这条排序上**：`tasks` 刻意不给保留期
-  （[03 §4](./03-data-model.md)，它是 trace 的骨架表），每派一个子 agent 就长一行，
+  （[03 §4](./03-data-model.md)，它是 trace 的骨架表），每派一个 worker 就长一行，
   于是一次跑歪的批量派发留下的几十行会**永远**排在最前面，等不来任何一次自动清理。
   会话名与用户名由**服务端**反查（`principals`），前端不实现第二份规则（同 §3.11 的用量维度）。
 - **只读详情弹窗**（点行打开，抄日志详情那套 `.detail-summary` + `.detail-payload` 两段式）：
   整行字段 + `progress`（解析后）+ join 出来的那一轮（`turns`：状态、步数、工具数、花费、错误）
-  与那次子运行（`agent_runs`：agent 名、模型别名、状态、结果摘要）。**只读，不做编辑** ——
+  与那次 worker 运行（`agent_runs`：`workerKind`、名称、模型别名、状态、结果摘要）。**只读，不做编辑** ——
   一条任务记录是某一轮真实发生过的事，改它等于改历史。
   ⚠ 进度那一栏的标签必须写「**最后一条**进度」而不是「进度」：`AgentManager.progress` 每次
   覆盖 `progress_json` 同一列，历史行里留下的是最后那一帧，不是一条时间线。
 - **`[取消整轮]` 与 `[永久删除]` 是两个动词，而且都在详情弹窗的 footer 里。** 取消打的是
-  `POST /api/turns/:id/cancel`（子 agent 没有独立取消句柄，二次确认要明说会取消整轮及同轮其他
-  子 agent）；删除打的是 `DELETE /api/tasks/:id`，**删的是这一行记录，不是取消通道** ——
+  `POST /api/turns/:id/cancel`（worker 没有独立取消句柄，二次确认要明说会取消整轮及同轮其他
+  worker）；删除打的是 `DELETE /api/tasks/:id`，**删的是这一行记录，不是取消通道** ——
   它对在跑的任务直接回 409 `task_running`。二次确认要写清：删掉之后这条子任务的进度与
   结果摘要都没有了，而那一轮的 trace（`turns` / `agent_runs` / 日志）还在。
   两条形状上的取舍，都跟着已有先例：**删除不进行内**（与 `[取消]` 两个红按钮并排必然误点，
   同 §3.10.1 的定时任务卡与扩展页的 Skill 弹窗），而 running 时那一档是**置灰而不是隐藏** ——
   隐藏之后运维只会问「为什么这条没有删除按钮」，置灰配一句说明才答得上来。
 - ⚠ 行内按钮一律 `@click.stop`：`DataGrid` 的 `row-click` **无条件**挂在 `<tr>` 上（不看
-  `clickable`），不 stop 就是「点取消的同时弹出详情框」。先例是 §3.9 子 Agent 表里那个行内
-  `[试跑]`，只是那一处没有用例守着。
+  `clickable`），不 stop 就是「点取消的同时弹出详情框」。§3.9 那张 worker 运行表里的轮次跳转
+  是同一种形态（clickable 加行内按钮），两处都由用例守着。
 - ⚠ 二次确认是在**详情弹窗开着**的时候弹的，而 `.ui-overlay` 恒为 `z-index: 40` —— 两层弹窗
   只能靠 DOM 顺序分胜负，而 `ConfirmHost` 挂在 `App.vue` 里、锚点排在所有页内弹窗**之前**。
   所以确认框的遮罩要单独抬一层（`.ui-overlay:has(.confirm-detail)`），否则点了什么都不会发生。
@@ -778,7 +830,7 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
   `integer`/`number` → 数字框（`anyOf[number,null]` 留空即「不限」），
   字符串数组 → 一行一条的文本域，**取值受限的数组（`items.enum`）→ 一组复选框**，
   对象与对象数组（`tools.overrides`、`approval.rules`、
-  `agent.agents`、`mcp.servers`）→ JSON 文本域（保存前本地校验，敲错了不发请求）。
+  `agent.acp.agents`、`mcp.servers`）→ JSON 文本域（保存前本地校验，敲错了不发请求）。
   - **复选框那一档还带逐个取值的说明**（`CONFIG_ENUM_NOTES`，随三件套一起进
     `GET /api/config/schema` 的 `enumNotes`）：一格里的取值不总是等价的 ——
     `telegram.allowedUpdates` 那 23 个 Bot API 更新类型里只有 4 个真的有处理器，
@@ -832,7 +884,7 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
     `runtimeConfigSchema.safeParse` 会把每个 `.default()` 填满，写回去的是**填满之后**那整棵子树，
     于是一次「一个字不改」的往返就把生效覆盖叶子从 73 涨到 171，把那一刻的代码默认值永久钉死，
     而第二次往返起幂等 —— 第一次保存就钉死了，之后界面上看不出来（docs/28 · L-WEB-02）。
-    枚举叶子时**递归普通对象、把数组当叶子**（`approval.rules` / `mcp.servers` / `agent.agents`
+    枚举叶子时**递归普通对象、把数组当叶子**（`approval.rules` / `mcp.servers` / `agent.acp.agents`
     是整块语义，逐个下标落库既没人这么读、也会被 `sortOverrideKeys` 拼回原样），空对象不产生叶子。
     落库的值仍取**校验后**的那一份，与 `PUT /api/config` 同一条契约（zod 的强制转换要进 `config_kv`）。
   - **这份 YAML 是所提交段落的全量视图**：段里删掉一个键，那一行就真的从 `config_kv` 消失 ——
@@ -891,7 +943,7 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
 ## 4. REST API
 
 统一响应：普通 JSON 端点使用 `{ ok:true, data }` / `{ ok:false, error:{ code,message,details? } }`；
-`GET /api/events` 使用 SSE，`POST /api/agents/:name/dryrun` 使用逐行 NDJSON，不套普通响应信封。
+`GET /api/events` 使用 SSE，`POST /api/workers/dryrun` 使用逐行 NDJSON，不套普通响应信封。
 
 **这个信封没有例外，失败路径也一样。** 客户端（`packages/webui/src/api/client.ts`）无条件
 `response.json()`，任何一条 `text/plain` 响应在它那儿都表现成 `SyntaxError: Unexpected token 'I'`
@@ -916,7 +968,7 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
 | `POST /api/chats/:key/reset` `POST /api/chats/:key/undo` | 等价 `/new` `/undo` |
 | `GET /api/messages` `GET /api/messages/:id` `DELETE /api/messages/:id` | 消息检索（`?q=` 走 FTS）。列表结果里 `turnId` 会回填：触发消息自己不带 `turn_id`（只有回复落盘才写那一列），但检索命中后最想点开的正是它那一轮，所以按 `turns.trigger_message_id` 反查补上。每条还带 `attachments:[{id, kind, mime, fileName, sizeBytes, width, height, durationSec, downloadState, downloadError, extractState, hasLocal}]`（按 `message_id` 一次 IN 查询归组）—— **不返回 `local_path`**：磁盘路径对界面没用，泄漏出去只是白送一份部署布局。单条详情**另带 `rawJson`**（脱敏后的原始 Telegram 载荷，见 §3.3）；**列表不带** —— 一页 50 条各一份完整 update |
 | `GET /api/turns` | 最近的模型对话，按 turn 聚合：`?page=1&size=20`（size 上限 100）→ `{items, total, page, size}`。每项带触发消息正文（`prompt`）与该轮 bot 回复（`reply`，按内容去重）、状态、步数/工具数/token/花费，以及触发消息上的 `attachments`（形状同 `GET /api/messages`，另带 `promptMessageId`）。分页走 SQL `LIMIT/OFFSET` |
-| `GET /api/turns/:id/detail` | 一次对话的**实际调用载荷**：`{turn, captureBodies, events:[{id, ts, level, kind, summary, spanId, parentSpanId, durationMs, text, bytes, truncated}], contextMessages:[{ordinal, id, role, origin, pruneLevel, pruneApplied, textPreview, tokens, createdAt, text, bytes, truncated}]}`。`events` 是 `log_events` 里 `trace_id = turn id` 的全部 span（上限 500 条，按时间序）；`text` 是**解码后**格式化的 `data`（`data_codec` 为 `zstd` 时先解压），单条超过 120k 字符截断并置 `truncated`。行在就意味着载荷在，所以不再有「载荷已被清理」这一档。turn 不存在返回 404。`contextMessages` 是该轮写进 `context_messages` 的消息（按 `(key, turn_id)` 取，上限 500），`text` 是**原始 `parts_json`** —— 不走 `ContextRepository.messages()`，那条路会跑 `elidePart` 把降级过的行改写成占位符。这是工具输入对历史轮次唯一有效的来源 |
+| `GET /api/turns/:id/detail` | 一次对话的**实际调用载荷**：`{turn, captureBodies, events:[{id, ts, level, kind, summary, spanId, parentSpanId, durationMs, text, bytes, truncated}], contextMessages:[{ordinal, id, role, origin, pruneLevel, pruneApplied, textPreview, tokens, createdAt, text, bytes, truncated}]}`。`events` 是 `log_events` 里 `trace_id = turn id` 的全部 span（上限 500 条，按时间序）；`text` 是**解码后**格式化的 `data`（`data_codec` 为 `zstd` 时先解压），单条超过 120k 字符截断并置 `truncated`。行在就意味着载荷在，所以不再有「载荷已被清理」这一档。turn 不存在返回 404。`contextMessages` 是该轮写进 `context_messages` 的消息（按 `(key, turn_id)` 取，上限 500），`text` 是**原始 `parts_json`** —— 不走 `ContextRepository.messages()`，那条路会跑 `elidePart` 把降级过的行改写成占位符。这是工具输入对历史轮次唯一有效的来源。另带 **`workerRuns`**：这一轮派出去的 worker（`agent_runs WHERE turn_id=? AND worker_kind IS NOT NULL ORDER BY started_at`，字段 `{id, workerKind, agentName, modelAlias, state, steps, toolCalls, costUsd, externalCostUsd, resultSummary, error, startedAt, finishedAt}`）。**不含主 run** —— `worker_kind IS NULL` 的那一行就是这一轮本身，列在自己的子表里只会让人以为它派了一个自己。`log_events` 按 `logs.retentionDays` 清理而 `agent_runs` 的行永久保留（[03 §4](./03-data-model.md)），所以对历史轮次这是唯一还答得出「这一轮派了谁」的那份 |
 | `GET /api/logs/:id` | 单条日志事件的详情（日志页点开一行）：整行 camelCase（`id, ts, level, kind, traceId, spanId, parentSpanId, chatId, userId, key, summary, durationMs`） + `{text, bytes, truncated}`（与 `GET /api/turns/:id/detail` 共用 `detailPayload` 做 120k 截断，载荷先经 `decodeLogPayload` 还原）。**注册在 `/api/logs/trace/:traceId` 之后**（Hono 按注册序匹配，`:id` 放前面会把它整个吃掉），非数字 id 直接 404 |
 | `GET /api/logs/:id/data` | 单条日志事件的完整载荷（`application/json` 附件下载），同样先经 `decodeLogPayload` 还原。详情视图里的 JSON 会被截断，复制与下载必须拿到完整那一份。行没有、或该行本就没有载荷时 404 |
 | `GET /api/files/:attachmentId` | 附件下载（校验 session）。默认 `content-disposition: attachment`；`?inline=1` 只对**光栅图**（`image/png` `image/jpeg` `image/gif` `image/webp`）放行内联渲染 —— 附件的 mime 来自 Telegram、是发送方可控的，同源内联 SVG/HTML 等于把用户上传的内容变成本站脚本，白名单之外一律照旧当附件下载 |
@@ -935,7 +987,7 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
 | `GET/PATCH /api/principals[/:id]` | 主体与角色。`GET` **只回库里那份 `role`，不再合成 `effectiveRole`**（2026-08-30：私聊只占 `user:` 一行，没有需要靠合成才看得出来的形态；群 / 频道那一行是下限，合不出一个对每个成员都成立的值）。`PATCH` 对 `kind='chat'` 的行拒收 `role='owner'`（群内封顶 `trusted`，写进去零效果）—— 400 `invalid_role_for_chat` |
 | `POST /api/principals/bulk` | 批量登记主体：`{ids:[…], kind: user\|chat, role}`，单次上限 500。ID 必须是 Telegram 数字 ID（`^-?\d{1,20}$`），非法 ID 或非法角色返回 400。**`kind='chat'` 另拒两样：正数 ID（那是一个用户，`chat:` 行今后恒为群 / 频道）与 `role='owner'`（群内封顶 `trusted`），两者都 400** —— 与 `/grant chat` 同一份判据（[05 §2.3](./05-tools-and-permissions.md)）。已存在的主体**只补一次 `setRole`，不再走 `upsertSeen`**（`ON CONFLICT` 分支不动 role 但会照写 `display_name`/`username`，而这里手上只有 `null`，等于把 Telegram 同步来的真名清空），返回 `{count, created, updated}` |
 | `POST /api/principals/roles` | 勾选批量改角色：`{ids:[主体 id…], role}`，单次上限 500。**只改已存在的行，不新建**（新建走 `/api/principals/bulk`，那边收的是 Telegram 数字 ID）；库里找不到的 id 原样回报而不是静默跳过，返回 `{count, changed, missing}` |
-| `GET /api/tools` `PATCH /api/tools/:name` | 工具启停与策略覆盖。`GET` 每个工具回**生效值**（`minRole`/`approval`/`scope`/`source`/`enabled`/`timeoutMs`）外加 `defaults`（代码里那份）、`relaxed`（比默认更松的字段名）、`selfManagedTimeout`、`deferred`（这台机器的 `tools.catalog.*` 下它属不属于折叠族；没装配注册表的静态兜底分支一律 false，见 §3.7）。`PATCH` 收 `{enabled?, minRole?, approval?, timeoutMs?, confirmRelax?}`，三个策略字段给 `null` = 恢复默认；**先读当前覆盖再整体写回** `tools.overrides.<name>`（一个 key 一条整叶 JSON，只写变动的那个字段会把其余的抹掉）。放宽且无 `confirmRelax` 时 `409 relax_requires_confirmation`。被禁用的工具从工具目录消失，且 `ToolRegistry.execute` 会二次拦截并返回 `tool_disabled_by_operator`。未知工具名返回 404 |
+| `GET /api/tools` `PATCH /api/tools/:name` | 工具启停与策略覆盖。`GET` 每个工具回**生效值**（`minRole`/`approval`/`scope`/`source`/`enabled`/`timeoutMs`）外加 `defaults`（代码里那份）、`relaxed`（比默认更松的字段名）、`selfManagedTimeout`、`deferred`（这台机器的 `tools.catalog.*` 下它属不属于折叠族；没装配注册表的静态兜底分支一律 false，见 §3.7）、**`sides`**（`('main'|'worker')[]`，主 agent 与 lw-worker 的可用集分叉，由端点调运行时那份 `toolCallableBy()` 现算 —— 判据只看工具名，所以静态兜底分支上它照样是真的；与 `enabled` 正交，见 §3.7）。`PATCH` 收 `{enabled?, minRole?, approval?, timeoutMs?, confirmRelax?}`，三个策略字段给 `null` = 恢复默认；**先读当前覆盖再整体写回** `tools.overrides.<name>`（一个 key 一条整叶 JSON，只写变动的那个字段会把其余的抹掉）。放宽且无 `confirmRelax` 时 `409 relax_requires_confirmation`。被禁用的工具从工具目录消失，且 `ToolRegistry.execute` 会二次拦截并返回 `tool_disabled_by_operator`。未知工具名返回 404 |
 | `GET/PUT /api/sandbox` `POST /api/sandbox/probe` `POST /api/sandbox/image` | 沙箱配置、探测、拉取镜像（只 pull 不 build；镜像名取自已保存的配置） |
 | `GET /api/containers` | 持久容器列表 + `used/max`。运行时没装配时 `not_implemented`，**不是空列表** |
 | `DELETE /api/containers/:chatId` | 重置（销毁 + 立即重建）。`?wipe=1` 才连 `/workspace` 的文件一起清，且那一档把文件挪进 `.luoli-trash/<ts>/` |
@@ -955,15 +1007,17 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
 | `GET /api/mcp/oauth/callback` | 授权服务器重定向回来的落点。**在鉴权白名单里** —— session cookie 是 `SameSite=Strict`，跨站重定向不会带上它；准入判据换成 OAuth 自己的 `state`（32 字节随机、单次使用、10 分钟、只在进程内）。换完 token 单台重连，然后 `302 → /?mcpAuth=<status>` |
 | `PUT/DELETE /api/mcp/:name/auth` | 设 / 清 bearer token。写入即加密（`LUOLI_MASTER_KEY`），任何读路径都不回显；拒 `«redacted»`。缺凭据库（通常是缺 `LUOLI_MASTER_KEY`）时四条 auth 端点一律 500 `mcp_auth_unavailable` —— **不假装保存成功**（照 `PUT /api/quota` 回 `not_implemented` 的先例） |
 | `GET/PATCH/DELETE /api/custom-tools[/:name]` | 模型自撰写的工具。缺装配时 500 `not_implemented` 而不是空数组 |
-| `GET /api/agents` `POST /api/agents/:name/dryrun` | 子 agent 定义与 NDJSON 隔离试跑（定义增删改走 `agent.agents` 配置） |
+| `POST /api/workers/dryrun` | lw-worker 的 NDJSON 隔离试跑。body `{task, tools?, modelAlias?}`，**没有 `:name`** —— 定义体系已删，worker 只有一种。`tools` 留空 = 调用者角色下的全集，给了空数组 = 一个都不许用（两者都送到运行时，端点不替它归一）；`task` 上限 20000 字符，`modelAlias` 过 `ALIAS_NAME_PATTERN`，两个旋钮给错类型一律 400 而不是静静吞掉。**旧路径 `GET /api/agents` 与 `POST /api/agents/:name/dryrun` 已删除且不留别名**：`:name` 在新世界里没有指代对象，留一条别名只会让人以为还能试跑某份定义 |
+| `GET /api/worker-runs` | Worker 运行记录列表（`agent_runs` 里 `worker_kind IS NOT NULL` 的那些）：`?page=&size=&workerKind=&state=` → `{items, total, page, size}`，排序「`state='running'` 优先，其余 `started_at` 倒序」（同 `GET /api/tasks`）。**行里不带 `task_input` / `external_usage_json`**，只给 `taskLine`（任务正文的第一行，截 160 字符）—— ACP 那条路的任务正文可以是一整段提示词，五十行各带一份只是往浏览器推死重量。`workerKind` / `state` 取值域外一律 **400**（`invalid_worker_kind` / `invalid_state`），不是忽略：忽略的表现是「筛了 acp 却看见 lw 的行」。**`externalCostUsd` 原样透出、与 `costUsd` 各占一列，两者永不相加**（见 §3.9） |
+| `GET /api/worker-runs/:id` | 单条 worker run 的只读详情：整行 camelCase（多出 `taskInput` / `externalUsageJson` / `resultFullRef` / `providerId` / `modelId`）+ join 出来的 `turn{key, chatId, state, error}` 与服务端反查的 `chatLabel`。**`worker_kind IS NULL` 的行（主 run）按 404**：这个入口的语义是 worker 运行记录，把主 run 从这里放出去等于让页面上出现一条它解释不了的行 |
 | `GET /api/logs` `GET /api/logs/:id` `GET /api/logs/:id/data` `GET /api/logs/trace/:traceId` | 日志 |
 | `GET /api/usage` | 用量明细（`usage_ledger`，最近 1000 条） |
 | `GET /api/usage/report?groupBy&from&to` | 用量聚合。`groupBy` ∈ `day\|chat\|user\|model\|alias\|agent`，非法值 400；`chat`/`user` 的行带回 `label`（服务端反查 `principals`） |
 | `GET /api/quota` | 配额页的全部数据：`{quota, timezone, buckets:{day,month}, counters:[…], unpriced:[…], unpricedTotal, unimplemented:[…]}`。`counters` 是 `quota_counters` 全表（上限 500 行）**加上服务端合成的 `limit`**：`(scope, window)` 到配置的取值规则含 `perUser.byRole` 覆盖，让前端自己拼等于把 `bot.ts` 的规则实现两遍。`current` 标记该行是否落在当前 bucket；chat/user 行按 `principals` 反查 `role`/`label`/`username`；配了 `byRole` 时 user 行带 `limitApprox`（有效角色要连会话一起算 —— 群里取较高者再封顶 `trusted`，所以实际那档可能比这里高，服务端在这张表上只看得到用户自己那一档）。`unimplemented` 转发 `KNOWN_UNIMPLEMENTED_CONFIG_KEYS` 里 `quota.` 开头的那几项，界面据此不给控件 |
 | `PUT /api/quota` | body 是**相对 `quota` 的点分键**（`{"global.daily": 5}` → `quota.global.daily`），与 `PUT /api/sandbox` 一致。展开走 `assignDotted`、整体过 `configSchema`，落 `config_kv` + `config_revisions` 并广播 `config.changed`（与 `PUT /api/config` 同一套校验与审计）。非法键 400 `invalid_config_key`，校验失败 400 `invalid_config` + 逐条 `details` |
 | `POST /api/quota/reset` | 重置计数器。不带 body = 全表清零；带 `{scope, subject?, window?, bucket?}` 只删匹配的行（**给了任一过滤条件就必须给 `scope`**，否则 400 `invalid_filter` —— 只按 `bucket` 删会跨 scope 误伤）。返回 `{changes}` |
-| `GET /api/tasks` | 任务列表（`tasks` 表）：`?page=&size=` → `{items, total, page, size}`，排序「`state='running'` 优先，其余 `updated_at` 倒序」。**行里不带 `progress_json`**（那是详情的事，列表一次上百行带着它只是往浏览器推死重量），**加 `chatLabel` / `userLabel`**（服务端 `principalLabel` 反查，前端不实现第二份规则，同 `GET /api/usage/report`）。**没有 `POST /api/tasks/:id/cancel`**：子 agent 跑在父轮次的 abort 信号下，没有独立的取消句柄，界面上的任务 `[取消]` 打的是下面那条轮次取消 —— 造一个只能取消整轮的 task 端点等于起个会误导人的名字 |
-| `GET /api/tasks/:id` | 单条任务的只读详情：整行 + `progress`（解析后的 `progress_json`，注意它是**最后一帧**不是时间线 —— `AgentManager.progress` 每次覆盖同一列）+ join 出来的 `turn{state, steps, toolCalls, costUsd, error}` 与 `agentRun{agentName, modelAlias, state, resultSummary}`。404 表示这一行不在了。这两块数据运行时一直在写，而界面此前一处都看不到（[21 §15](./21-webui-coverage-gaps.md)） |
+| `GET /api/tasks` | 任务列表（`tasks` 表）：`?page=&size=` → `{items, total, page, size}`，排序「`state='running'` 优先，其余 `updated_at` 倒序」。**行里不带 `progress_json`**（那是详情的事，列表一次上百行带着它只是往浏览器推死重量），**加 `chatLabel` / `userLabel`**（服务端 `principalLabel` 反查，前端不实现第二份规则，同 `GET /api/usage/report`）。**没有 `POST /api/tasks/:id/cancel`**：worker 跑在父轮次的 abort 信号下，没有独立的取消句柄，界面上的任务 `[取消]` 打的是下面那条轮次取消 —— 造一个只能取消整轮的 task 端点等于起个会误导人的名字 |
+| `GET /api/tasks/:id` | 单条任务的只读详情：整行 + `progress`（解析后的 `progress_json`，注意它是**最后一帧**不是时间线 —— `AgentManager.progress` 每次覆盖同一列）+ join 出来的 `turn{state, steps, toolCalls, costUsd, error}` 与 `agentRun{workerKind, agentName, modelAlias, state, resultSummary}`。404 表示这一行不在了。这两块数据运行时一直在写，而界面此前一处都看不到（[21 §15](./21-webui-coverage-gaps.md)） |
 | `DELETE /api/tasks/:id` | 删这一行**记录**，不是取消通道：`{removed:true}`；404；**409 `task_running`**（只拒 `state='running'`，其余四态都放行）。删掉之后这条子任务的进度与结果摘要没有了，而那一轮的 trace（`turns` / `agent_runs` / 日志）还在 —— 界面上的二次确认要把这句说出来。名字里是 `tasks` 不是 `turns`，两者删的东西完全不同 |
 | `GET /api/turns/active` | 在途轮次：`[{id, key, chatId, userId, role, startedAt, steps, toolCalls, costUsd, inputTokens, outputTokens}]`。**来源是进程内的 `TurnRegistry`**（`turns` 表里可能有上次崩溃残留的 `running` 行），步数与花费仍从表里按 `id IN (…)` 一次取回；表里没有对应行时补零。进程内的 `AbortController` / 定时器不出现在响应里 |
 | `POST /api/turns/:id/cancel` | 取消一个在途轮次：向该轮的 `AbortController` 发 abort，轮次走 `abortTurn` 落成 `cancelled`，**不删任何消息或上下文**。WebUI 是单角色 owner，可取消任何人的轮次。轮次不在注册表里（已经结束）时返回 `{cancelled:false}` 而不是 404 —— 这不是错误，是「没有作用对象」。写 `webui.action` 与 `turn.cancel` 审计 |
@@ -997,7 +1051,7 @@ event: turn.finished     data: {turnId, key, chatId, state, steps, toolCalls, co
 event: log               data: {id, ts, level, kind, traceId, summary, merged?}
 event: usage             data: {turnId, model, alias, in, out, costUsd}
 event: quota             data: {scope, subject, window, bucket, spent, limit}
-event: task.updated      data: {id, turnId, title?, runId?, state, progress}
+event: task.updated      data: {id, turnId, title?, runId?, workerKind?, state, progress}
 event: health            data: {source: provider|mcp, name, ok, code}
 event: config.changed    data: {keys:[...]}
 event: approval.pending  data: {id, turnId, agentRunId, tool, input, risk, chatId, requesterUserId, requestedAt, expiresAt}
@@ -1013,10 +1067,17 @@ event: extensions.changed data: {kind: 'skill'}
 发送点（都在已有的日志点旁边）：`turn.started` / `turn.finished` 在 `packages/telegram/src/bot.ts`，
 `turn.progress` / `usage` 在 `packages/core/src/agent/runtime.ts` 的 `onStepStart` / `onStepEnd`，
 `quota` 在 `QuotaGuard.commit`（结算事务提交之后才发，先发会让订阅方读到旧值），
-`task.updated` 在 `spawn_agent` 与 `report_progress`，`health` 在 `POST /api/providers/:id/test`
+`task.updated` 在 `spawn_worker` / `spawn_harness` / `spawn_acp` 与 `report_progress`，`health` 在 `POST /api/providers/:id/test`
 与 `POST /api/mcp/:name/reconnect`（这两处是健康状态**真的会变**的地方；没有独立的健康轮询器，
 所以它不是周期心跳），`extensions.changed` 在 `SkillLoader` 的变更回调（`apps/bot/src/main.ts` 装配处）。
 `log` 由 `LogSink` 自己发。
+
+⚠ **`task.updated` 三档 worker 都发，且不新增事件类型。** 它原先只在 `spawn_agent` 与
+`report_progress` 那两处，而 harness / acp 两条路一次都不发 —— 结果是 §3.9 那一页上，正在跑的
+harness 与 ACP 两类行直到下一次手动刷新才动，界面看着像卡住。为它们各开一个事件类型是更坏的选法：
+worker 运行页与任务页就要各写一套映射，而三种 worker 在 `agent_runs` 上本来就同构
+（`workerKind` 是唯一的区分符）。载荷里的 `workerKind` 是可选的，订阅方只按事件类型定向刷新，
+不解析它 —— 加它是为了将来能按档过滤，不是为了现在分流。
 
 - 单连接多主题。心跳注释 `: ping` 每 20s，防中间代理断连；断线由浏览器 `EventSource` 自动重连。
   **重连之后前端要自己补拉一次** —— 断线期间的事件不会重放，只把左下角的 pill 点回「系统在线」
@@ -1067,21 +1128,29 @@ packages/webui/
     ├── components/tasks/       「任务与审批」页三张卡各一个自足组件（§3.12）
     │   ├── types.ts           三套 COLUMNS、行类型、状态枚举、toWallClock()/WALL_CLOCK_RE
     │   └── TasksCard.vue  SchedulesCard.vue  ApprovalsCard.vue
+    ├── components/workers/     「Worker 运行记录」页两张卡各一个自足组件（§3.9）
+    │   ├── types.ts           行类型、COLUMNS、三档 worker 与四档状态的标签、试跑事件类型
+    │   └── WorkerRunsCard.vue  WorkerDryRunCard.vue
     └── views/
         ├── LoginView.vue
         ├── ExtensionsPage.vue 扩展页（§3.8）。ConsoleView 里只留 `<ExtensionsPage>` 一行
         ├── TasksPage.vue      任务与审批页（§3.12）：三张卡竖排的壳，同样只在 ConsoleView 里占一行
-        └── ConsoleView.vue    其余 12 个页面（docs/00 §2.1 的 D-02 就是它）
+        ├── WorkerRunsPage.vue Worker 运行记录页（§3.9）：两张卡竖排的壳，同样只占一行
+        └── ConsoleView.vue    其余 11 个页面（docs/00 §2.1 的 D-02 就是它）
 ```
 
-- **`components/tasks/` 这三张卡各管各的端点、分页游标、弹窗与 busy 态，写操作不上提到父层。**
+- **`ConsoleView.vue` 这一轮是净减**：旧的「子 Agent」页（表格 + 编辑弹窗 + 试跑弹窗 + 那一整段
+  写回 `agent.agents` 的脚本）整段删除，新页面一个字节都没写进去。`D-02` 记的是它一直在变大 ——
+  「抽出去的比加回来的少」，这是第一次反过来。实测行数以 [00 §2.1](./00-state.md) 那一格为准。
+
+- **`components/tasks/` 与 `components/workers/` 那几张卡各管各的端点、分页游标、弹窗与 busy 态，写操作不上提到父层。**
   扩展页那条「父层管所有写操作」的规矩防的是**跨卡共享 busy**，这里三张卡零交集；
   而服务端分页的页码必须和它的 loader 待在一起（同 `loadConversations`），提到父层就又变回争用点。
 - **能挪进 `.ts` 的逻辑就别留在 SFC 里。** `types.ts` 一次写全三套列定义与折算函数，是因为
   **`.vue` 不进 `tsc`**（`tsconfig.json` 里那条 `packages/**/*.vue` 是空转）——
   留在 SFC 里的那部分等于没有类型检查，只有渲染用例兜得住。
 - **`scripts/copy/extract.ts` 的 `BROWSER_FILES` 要跟着改**：`views/` 是逐个列名字的、
-  `components/` 下没有通配。不加进去，新 UI 的文案在 dev 校样面板里一句都看不见。
+  `components/` 下每个目录各一条 `readdirSync`（新开一个目录要新加一条）。不加进去，新 UI 的文案在 dev 校样面板里一句都看不见。
 
 - **抽子组件一律用普通 `<script setup>`，不返回任何 Proxy。** 上一次把控制台拆成 15 个子视图时，
   子 SFC 的 `setup` 返回了一个只有 `get` 陷阱的 Proxy，而 Vue 解析模板绑定走

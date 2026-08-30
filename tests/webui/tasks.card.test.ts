@@ -12,7 +12,7 @@ import { toasts } from '../../packages/webui/src/ui/toast';
  *
  * 尤其是 `@click.stop`：`DataGrid` 的 `row-click` 挂在 `<tr>` 上，漏掉 stop 的表现是「点取消的
  * 同时弹出详情框」—— 界面上两件事都发生了，看起来像随机抽风。全站只有 Agent 表那个〔试跑〕
- * （`ConsoleView.vue:2286`）是同样的 clickable + 行内按钮组合，而它没有任何用例守着。
+ * （`components/workers/WorkerRunsCard.vue` 里的轮次跳转）是同样的 clickable + 行内按钮组合。
  */
 
 const NOW = 1_760_000_000_000;
@@ -27,7 +27,7 @@ const DONE = { id: 't2', turn_id: 'turn_bbbbbbbbbbbb', agent_run_id: null, chat_
 const DETAILS: Record<string, unknown> = {
   t1: { ...RUNNING, placeholder_tg_message_id: 4242, progress: { step: 3, note: '正在读第 3 个仓库' },
     turn: { state: 'running', steps: 3, toolCalls: 5, costUsd: 0.0123, error: null },
-    agentRun: { agentName: 'researcher', modelAlias: 'fast', state: 'running', resultSummary: null } },
+    agentRun: { workerKind: 'lw', agentName: 'worker', modelAlias: 'fast', state: 'running', resultSummary: null } },
   t2: { ...DONE, placeholder_tg_message_id: null, progress: null,
     turn: { state: 'done', steps: 7, toolCalls: 11, costUsd: 0.2, error: null },
     agentRun: null },
@@ -127,7 +127,7 @@ describe('任务卡', () => {
     await settle(wrapper);
     // 按钮自己的活儿照做：弹出二次确认。
     expect(confirmBox.value.open).toBe(true);
-    expect(confirmBox.value.detail).toContain('同一轮里的其他子 agent 也会一并终止');
+    expect(confirmBox.value.detail).toContain('同一轮里的其他 worker 也会一并终止');
     // 而详情**没有**被顺带打开 —— 既没发请求，也没有弹窗。
     expect(detailFetches('t1'), '点行内按钮顺带把详情也拉了').toBe(0);
     expect(document.body.querySelector('.ui-modal'), '点行内按钮顺带把详情弹窗也打开了').toBeNull();

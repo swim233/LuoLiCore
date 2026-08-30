@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
-import { ToolRegistry, builtinPolicy, configSchema, registerCatalogTools } from '@luoli/core';
-import type { ApprovalBroker, ApprovalPolicy, LogEvent, LogSink, ToolExecutionContext, ToolOverride } from '@luoli/core';
-import type { Role, RuntimeTurnContext } from '@luoli/shared';
+import { MAIN_AGENT_TOOLS, ToolRegistry, builtinPolicy, configSchema, newToolScope, registerCatalogTools } from '@luoli/core';
+import type { AgentKind, ApprovalBroker, ApprovalPolicy, LogEvent, LogSink, ToolExecutionContext, ToolOverride } from '@luoli/core';
+import type { Role } from '@luoli/shared';
 
 /**
  * 工具目录按需暴露（`docs/05 §3.12` 五条不变量、`docs/07 §5` 折叠判据四档）的 registry 层。
@@ -11,6 +11,10 @@ import type { Role, RuntimeTurnContext } from '@luoli/shared';
  * 折叠的风险是多处各自计算得出不同结果。提示词的常驻段、折叠摘要段、`prepareStep` 的可见集与
  * `search_tools` 的检索域必须全部由同一次 `#eligible()` 派生。因此分区断言一律以 `active()` 为
  * 基准对齐，而非各自统计数量：统计数量的测试在两份判据漂移时仍会通过。
+ *
+ * `contextFor` 的 `agentKind` 默认取 `lw` 而非 `main`：工具整体下沉给 worker 之后，折叠与
+ * `search_tools` 都在 worker 那一侧，本文件绝大多数用例跑的是折叠链路。主 agent 侧只剩对话与派发，
+ * 它手里一个折叠工具都没有 —— 那一侧的判据集中在末尾「主 agent / worker 的硬闸」一节。
  *
  * 全程不启用数据库、不经过模型。折叠只影响可见性，权限判定完全未变（不变量 1），能在这一层判定完成的
  * 就不应启动完整轮次；而经模型的路径根本到不了 `execute()`（见 `AC-TOOL-048` 那组用例的注释）。
@@ -42,10 +46,19 @@ function harness(input: { catalog?: Record<string, unknown>; maxRegistered?: num
   const registry = new ToolRegistry(log, input.approval ?? okBroker, limits);
   const overrides = input.overrides;
   if (overrides) registry.bindOverrides(() => overrides);
-  const contextFor = (role: Role, extra: Partial<RuntimeTurnContext> = {}, agentKind: 'main' | 'sub' = 'main'): ToolExecutionContext => ({
+  /**
+   * 一次调用 = 一个 agent run。渐进披露的三个集合走 `newToolScope()`，因此每次调用各持一份
+   * 引用：worker 展开的工具写不进主轮，两个 worker 之间也互不可见（`docs/05 §3.12` 不变量 4）。
+   * 用例里一律 `const context = contextFor(...)` 存一次再反复用 —— 连着调两次拿到的是两个 run，
+   * 前一个写进去的 `expandedTools` 在后一个身上读不到，那是本设计要买到的东西。
+   *
+   * `extra` 落在 context 层而非 turn 层：`skillAllowedTools` / `expandedTools` 已从
+   * `RuntimeTurnContext` 挪走，给初值即等同于「这个 run 开始前就载过 skill」。
+   */
+  const contextFor = (role: Role, extra: Partial<ToolExecutionContext> = {}, agentKind: AgentKind = 'lw'): ToolExecutionContext => ({
     turn: { turnId: 't', key: 'chat:1', chatId: '1', threadId: null, initiatorUserId: '2', effectiveRole: role, isPrivate: true, baseCommitId: null,
-      snapshot: { messages: [], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 0 }, delta: [], abortSignal: new AbortController().signal, config, ...extra },
-    workspace: '.', agentKind });
+      snapshot: { messages: [], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 0 }, delta: [], abortSignal: new AbortController().signal, config },
+    workspace: '.', agentKind, ...newToolScope(), ...extra });
   return { registry, config, contextFor };
 }
 
@@ -57,11 +70,16 @@ function external(registry: ToolRegistry, name: string, source: 'mcp' | 'plugin'
   registry.registerExternal({ name, description: extra.description ?? 'd', inputSchema: schema, minRole: extra.minRole ?? 'limited', source, execute: noop,
     ...(extra.approval ? { approval: extra.approval } : {}) });
 }
-/** 内建 100、agent 90、load_skill 80 与 `EXTERNAL_SOURCE_PRIORITY` 一致，排序才能反映真实部署。 */
+/**
+ * 内建 100、agent 90、load_skill 80 与 `EXTERNAL_SOURCE_PRIORITY` 一致，排序才能反映真实部署。
+ *
+ * agent 那一档取 `report_progress` 而非派发族：`spawn_worker` 在 `MAIN_ONLY_TOOLS` 里，
+ * 在 worker 侧的目录中根本不出现，拿它当「优先级 90 的样本」会让整组 resident 断言错位。
+ */
 function mixed(registry: ToolRegistry): void {
   builtin(registry, 'read_file', 100, '读一个文件');
   builtin(registry, 'bash', 100, '跑一段 shell');
-  builtin(registry, 'spawn_agent', 90, '派一个子 agent');
+  builtin(registry, 'report_progress', 90, '向上报一句进度');
   builtin(registry, 'load_skill', 80, '载入 skill 正文');
   external(registry, 'plug_thing', 'plugin', { description: '插件自带的东西' });
   external(registry, 'mcp__alpha__one', 'mcp', { description: '回显一段文字' });
@@ -91,7 +109,7 @@ describe('工具目录按需暴露 · 分区与判据', () => {
     const deferred = view.deferred.map((tool) => tool.name);
     expect([...resident, ...deferred].sort()).toEqual([...registry.activeNames('owner', context)].sort());
     expect(resident.filter((name) => deferred.includes(name))).toEqual([]);
-    expect(resident).toEqual(['bash', 'read_file', 'spawn_agent', 'load_skill', 'search_tools']);
+    expect(resident).toEqual(['bash', 'read_file', 'report_progress', 'load_skill', 'search_tools']);
     expect(deferred).toEqual(['plug_thing', 'mcp__alpha__one', 'mcp__alpha__two', 'mcp__beta__one', 'custom_thing']);
   });
 
@@ -139,12 +157,13 @@ describe('工具目录按需暴露 · 分区与判据', () => {
     const plain = harness({ catalog: {} });
     mixed(plain.registry);
     expect(plain.registry.activeView('owner', plain.contextFor('owner')).resident.map((tool) => tool.name))
-      .toEqual(expect.arrayContaining(['bash', 'read_file', 'spawn_agent']));
-    const named = harness({ catalog: { defer: ['bash', 'spawn_*'] } });
+      .toEqual(expect.arrayContaining(['bash', 'read_file', 'report_progress']));
+    // glob 要真的落在内建 / agent 族上，否则这条断言恒真：`report_*` 命中的正是那件 agent 族工具。
+    const named = harness({ catalog: { defer: ['bash', 'report_*'] } });
     mixed(named.registry);
     const deferred = named.registry.activeView('owner', named.contextFor('owner')).deferred.map((tool) => tool.name);
     expect(deferred).toContain('bash');
-    expect(deferred).toContain('spawn_agent');
+    expect(deferred).toContain('report_progress');
     expect(deferred).not.toContain('read_file');
   });
 
@@ -159,9 +178,9 @@ describe('工具目录按需暴露 · 分区与判据', () => {
    * 判据第四档中本就走同一路径（默认常驻，被 defer 显式指定才折叠）。
    */
   it('#groupKey 从既有命名空间派生，含 server 名带下划线的情形', () => {
-    const { registry, contextFor } = harness({ catalog: { defer: ['bash', 'spawn_agent'] } });
+    const { registry, contextFor } = harness({ catalog: { defer: ['bash', 'report_progress'] } });
     builtin(registry, 'bash', 100);
-    builtin(registry, 'spawn_agent', 90);
+    builtin(registry, 'report_progress', 90);
     external(registry, 'mcp__a_b__t', 'mcp');
     external(registry, 'mcp__a__b__t', 'mcp');
     external(registry, 'weird_no_prefix', 'mcp');
@@ -170,7 +189,7 @@ describe('工具目录按需暴露 · 分区与判据', () => {
     const groups = registry.activeView('owner', contextFor('owner')).groups;
     expect(groups.map((group) => group.key).sort()).toEqual(['builtin', 'custom', 'mcp', 'mcp:a', 'mcp:a_b', 'plugin']);
     const of = (key: string): readonly string[] => groups.find((group) => group.key === key)!.names;
-    expect(of('builtin')).toEqual(['bash', 'spawn_agent']);
+    expect(of('builtin')).toEqual(['bash', 'report_progress']);
     expect(of('mcp:a_b')).toEqual(['mcp__a_b__t']);
     expect(of('mcp:a')).toEqual(['mcp__a__b__t']);
     expect(of('mcp')).toEqual(['weird_no_prefix']);
@@ -274,7 +293,7 @@ describe('工具目录按需暴露 · activeNamesForStep', () => {
     const { registry, contextFor } = harness({ catalog: {} });
     mixed(registry);
     const context = contextFor('owner');
-    const resident = ['bash', 'read_file', 'spawn_agent', 'load_skill', 'search_tools'];
+    const resident = ['bash', 'read_file', 'report_progress', 'load_skill', 'search_tools'];
     expect(registry.activeNamesForStep('owner', context)).toEqual(resident);
     const step = registry.activeNamesForStep('owner', context, new Set(['mcp__alpha__two']));
     expect(step).toEqual([...resident, 'mcp__alpha__two']);
@@ -379,6 +398,31 @@ describe('工具目录按需暴露 · search_tools', () => {
   });
 
   /**
+   * 展开集按 agent run 各持一份，这是把它从 `RuntimeTurnContext` 挪到 `ToolExecutionContext`
+   * 唯一买到的东西 —— 缺这条断言，挪位置这件事就没有判据在守。
+   *
+   * 挂在 turn 上时两个 run 共享同一个引用：worker A 展开的 MCP 工具会出现在 worker B 与主轮的
+   * `prepareStep` 里，而 B 从未检索过它，模型于是拿到一份自己没要过、也解释不了的工具清单；
+   * `maxExpandedPerTurn` 的额度也被两边合着花。
+   */
+  it('两个 run 各持一份展开集，互不写入对方', async () => {
+    const { registry, contextFor } = harness({ catalog: {} });
+    mixed(registry);
+    const first = contextFor('owner');
+    const second = contextFor('owner');
+    expect((await search(registry, first, { names: ['mcp__alpha__one'] })).matches![0]!.status).toBe('expanded');
+    expect([...first.expandedTools]).toEqual(['mcp__alpha__one']);
+    expect([...second.expandedTools]).toEqual([]);
+    // 另一个 run 检索同一个工具照样报 expanded：它此前一无所知，额度也各算各的。
+    expect((await search(registry, second, { names: ['mcp__alpha__one'] })).matches![0]!.status).toBe('expanded');
+    expect([...first.expandedTools]).toEqual(['mcp__alpha__one']);
+    // 收窄同理：一个 run 载入带 allowed-tools 的 skill 收不到另一个 run 头上。
+    const narrowed = contextFor('owner', { skillAllowedTools: new Set(['bash']) });
+    expect(registry.admit('mcp__alpha__one', narrowed).ok).toBe(false);
+    expect(registry.admit('mcp__alpha__one', first).ok).toBe(true);
+  });
+
+  /**
    * 被收窄拦截的同样记入 `expandedTools`，只是仍然不可调用。缺这一笔即构成死循环的一半：
    * 另一半在 `agent/runtime.ts` 的 `repairToolCall`，它依据原名是否在 `expandedTools` 中判断本次
    * 强行调用是否值得改写为一次检索；折叠且被收窄的工具若永远进不了该集合，就会形成
@@ -389,7 +433,7 @@ describe('工具目录按需暴露 · search_tools', () => {
     mixed(registry);
     const context = contextFor('owner', { skillAllowedTools: new Set(['bash']) });
     expect((await search(registry, context, { names: ['mcp__alpha__two'] })).matches![0]!.status).toBe('narrowed');
-    expect([...context.turn.expandedTools!]).toEqual(['mcp__alpha__two']);
+    expect([...context.expandedTools]).toEqual(['mcp__alpha__two']);
     // 记入后仍然不可调用：`admit()` 的 skill_narrowed 与检索中的判据逐字一致。
     const admitted = registry.admit('mcp__alpha__two', context);
     expect(admitted.ok).toBe(false);
@@ -405,19 +449,31 @@ describe('工具目录按需暴露 · search_tools', () => {
     expect(denied).toMatchObject({ ok: false, error: 'expansion_limit' });
     expect(denied.hint).toContain('names');
     // 护栏在写入之前判定：若置于写入之后额度将失效，而每一次展开都会改动请求体第 0 段。
-    expect([...context.turn.expandedTools!]).toEqual(['mcp__alpha__one']);
+    expect([...context.expandedTools]).toEqual(['mcp__alpha__one']);
   });
 
-  it('agentKind=sub 时 search_tools 两处都不可用（AC-TOOL-052 那道闸）', () => {
+  /**
+   * `AC-TOOL-052` 那道闸，方向已翻转：折叠的是外部工具（MCP / plugin / custom），而工具整体
+   * 下沉给了 worker —— 主 agent 的 `MAIN_AGENT_TOOLS` 里一个折叠工具都没有，给它一个检索入口
+   * 只能检索出一份它调不动的清单。
+   *
+   * 旧理由（子 agent 与主轮共享同一个 turn 对象，允许它调用即向父轮的 `expandedTools` 写入状态）
+   * 已经不存在：那三个集合挪到了 `ToolExecutionContext`，每个 run 各持一份。
+   */
+  it('agentKind=main 时 search_tools 两处都不可用，lw 侧才有（AC-TOOL-052 那道闸）', () => {
     const { registry, contextFor } = harness({ catalog: {} });
     mixed(registry);
-    const sub = contextFor('owner', {}, 'sub');
-    expect(registry.activeNames('owner', sub)).not.toContain('search_tools');
-    const admitted = registry.admit('search_tools', sub);
+    const main = contextFor('owner', {}, 'main');
+    expect(registry.activeNames('owner', main)).not.toContain('search_tools');
+    const admitted = registry.admit('search_tools', main);
     expect(admitted.ok).toBe(false);
-    expect(admitted.ok === false && admitted.error).toBe('tool_unavailable');
-    // 子 agent 与主轮共享同一个 turn 对象，允许它调用即向父轮的 expandedTools 写入状态。
+    // 先命中的是 `toolCallableBy()` 那道闸而非 `available()`：`search_tools` 不在
+    // `MAIN_AGENT_TOOLS` 里，`admit()` 的判据顺序把它拦在 `available()` 之前。照旧断
+    // `tool_unavailable` 会在两道闸调换时仍然通过。
+    expect(admitted.ok === false && admitted.error).toBe('tool_requires_worker');
+    expect(admitted.ok === false && admitted.reason).toBe('main_agent');
     expect(registry.activeNames('owner', contextFor('owner'))).toContain('search_tools');
+    expect(registry.admit('search_tools', contextFor('owner')).ok).toBe(true);
   });
 
   it('落一条 tool.expanded info 日志', async () => {
@@ -483,6 +539,101 @@ describe('工具目录按需暴露 · 折叠不参与准入（AC-TOOL-048）', (
     expect(registry.activeNames('owner', context)).not.toContain('mcp__alpha__one');
     expect(registry.activeView('owner', context).groups.flatMap((group) => group.names)).not.toContain('mcp__alpha__one');
     expect(await registry.execute('mcp__alpha__one', {}, context)).toMatchObject({ ok: false, error: 'tool_disabled_by_operator' });
+  });
+});
+
+/**
+ * 折叠不是权限边界，`toolCallableBy()` 才是（`docs/05 §4`）。同一份判据喂 `#eligible()`（目录）
+ * 与 `admit()`（准入复查）两处，`execute()` 走 `admit()` 因而是同一道。
+ *
+ * 三层各断一次，而**执行层那两条才是判据**：只断目录、只断 admit 等于把 `docs/20 · W-TOOL-01`
+ * 那条教训重犯一遍 —— 模型完全可以沿用上一步的工具名直接调过来，目录里没有拦不住它。
+ * 因此执行层用留痕桩工具：返回值说拒绝、而工具体已经跑过，是这类改动最典型的坏法。
+ */
+describe('工具目录按需暴露 · 主 agent / worker 的硬闸', () => {
+  /** 两侧各有代表：MAIN_ONLY 五件、两侧共享的只读两件、worker 侧作业四件，外加一个会被折叠的 MCP 工具。 */
+  function bothSides(registry: ToolRegistry): void {
+    builtin(registry, 'send_message', 100, '发一条消息');
+    builtin(registry, 'memory_write', 100, '写一条记忆');
+    builtin(registry, 'schedule_create', 100, '排一个定时任务');
+    builtin(registry, 'set_model', 90, '换掉本轮的模型');
+    builtin(registry, 'spawn_worker', 90, '把任务派给 worker');
+    builtin(registry, 'memory_read', 100, '读一条记忆');
+    builtin(registry, 'context_stats', 100, '看一眼上下文水位');
+    builtin(registry, 'bash', 100, '跑一段 shell');
+    builtin(registry, 'read_file', 100, '读一个文件');
+    builtin(registry, 'web_search', 100, '搜一下网');
+    builtin(registry, 'report_progress', 90, '向上报一句进度');
+    external(registry, 'mcp__alpha__one', 'mcp', { description: '回显一段文字' });
+    registerCatalogTools(registry, { log });
+  }
+  /** 留痕桩：`execute` 进过一次就往数组里记一笔。只断返回值的用例挡不住「先跑再改结果」那种写法。 */
+  function tracing(registry: ToolRegistry, name: Parameters<typeof builtinPolicy>[0], trace: string[]): void {
+    registry.register({ name, description: 'd', inputSchema: schema, policy: builtinPolicy(name), sourcePriority: 100,
+      execute: () => { trace.push(name); return { ok: true }; } });
+  }
+
+  it('目录层：main 的 activeNames() 恰好等于 MAIN_AGENT_TOOLS ∩ 已注册', () => {
+    const { registry, contextFor } = harness({ catalog: {} });
+    bothSides(registry);
+    // 与 `MAIN_AGENT_TOOLS` 求交集而不是手抄一份名单：手抄的名单在 policy 改一次之后就成了恒真断言。
+    const registered = new Set(registry.names());
+    const expected = [...MAIN_AGENT_TOOLS].filter((name) => registered.has(name)).sort();
+    expect(expected.length).toBeGreaterThan(0);
+    expect([...registry.activeNames('owner', contextFor('owner', {}, 'main'))].sort()).toEqual(expected);
+  });
+
+  it('目录层反向：lw 拿得到作业工具与折叠的 MCP 工具，拿不到 MAIN_ONLY 那族', () => {
+    const { registry, contextFor } = harness({ catalog: {} });
+    bothSides(registry);
+    const worker = contextFor('owner');
+    const names = registry.activeNames('owner', worker);
+    expect(names).toEqual(expect.arrayContaining(['bash', 'read_file', 'web_search', 'report_progress', 'search_tools']));
+    // `activeNames()` 走的是 `active()` 而非 `activeNamesForStep()`：折叠只改本步可见集，
+    // 开轮冻结的那份仍然含它 —— 否则模型检索出来的名字会不在 toolSet 里。
+    expect(names).toContain('mcp__alpha__one');
+    expect(registry.activeView('owner', worker).deferred.map((tool) => tool.name)).toEqual(['mcp__alpha__one']);
+    expect(registry.activeNamesForStep('owner', worker)).not.toContain('mcp__alpha__one');
+    for (const name of ['send_message', 'memory_write', 'schedule_create', 'set_model', 'spawn_worker'])
+      expect(names).not.toContain(name);
+  });
+
+  it('准入层：main 侧 admit 一件 worker 工具回 tool_requires_worker', () => {
+    const { registry, contextFor } = harness({ catalog: {} });
+    bothSides(registry);
+    const denied = registry.admit('bash', contextFor('owner', {}, 'main'));
+    expect(denied.ok).toBe(false);
+    expect(denied.ok === false && denied.error).toBe('tool_requires_worker');
+    expect(denied.ok === false && denied.reason).toBe('main_agent');
+    // hint 面向模型：只说「不可用」它会原地重试，说清出路才走得下去。
+    expect(denied.ok === false && denied.hint).toContain('spawn_worker');
+  });
+
+  it('执行层：两个方向都拒，且工具体一次都没进', async () => {
+    const { registry, contextFor } = harness({ catalog: {} });
+    const trace: string[] = [];
+    tracing(registry, 'send_message', trace);
+    tracing(registry, 'bash', trace);
+    expect(await registry.execute('send_message', {}, contextFor('owner')))
+      .toMatchObject({ ok: false, error: 'tool_unavailable_for_worker' });
+    expect(await registry.execute('bash', {}, contextFor('owner', {}, 'main')))
+      .toMatchObject({ ok: false, error: 'tool_requires_worker' });
+    expect(trace).toEqual([]);
+    // 反方向各跑通一次，否则空数组只是同义反复（两件工具本来就跑不起来也会得到空数组）。
+    expect(await registry.execute('send_message', {}, contextFor('owner', {}, 'main'))).toMatchObject({ ok: true });
+    expect(await registry.execute('bash', {}, contextFor('owner'))).toMatchObject({ ok: true });
+    expect(trace).toEqual(['send_message', 'bash']);
+  });
+
+  it('执行层：worker 侧对 MAIN_ONLY 一族一律拒', async () => {
+    const { registry, contextFor } = harness({ catalog: {} });
+    const trace: string[] = [];
+    const names = ['memory_write', 'send_message', 'set_model'] as const;
+    for (const name of names) tracing(registry, name, trace);
+    const worker = contextFor('owner');
+    for (const name of names)
+      expect(await registry.execute(name, {}, worker)).toMatchObject({ ok: false, error: 'tool_unavailable_for_worker' });
+    expect(trace).toEqual([]);
   });
 });
 

@@ -80,9 +80,12 @@ const DEDICATED: Record<string, string> = {
   quota: "「配额」页有专用面板",
   sandbox: "工具页有沙箱卡片",
   "tools.overrides": "工具页可逐项启停；在此写入会覆盖逐项开关",
-  "agent.agents": "Agent 页有专用编辑器",
   "mcp.servers": "扩展页有 MCP 表单：不脱敏，可改 env / headers 密钥",
   "approval.rules": "写入时校验字段与正则；写错则审批不生效",
+  // 这两个键刚改过名且**没有迁移**（docs/11 §2.0.0）：存量覆盖在启动时被逐条剔除，只剩代码默认值。
+  // 不在这里说一句，运维会看着一个显示默认值的输入框，以为自己当年设的那档还在生效。
+  "agent.maxConcurrentWorkers": "由 maxConcurrentSubagents 改名而来，旧覆盖已失效，需在此重设",
+  "agent.maxWorkersPerTurn": "由 maxSubagentsPerTurn 改名而来，旧覆盖已失效，需在此重设",
 };
 const SECRET_SEGMENT = /key|secret|token|password/i;
 const REDACTED = "«redacted»";

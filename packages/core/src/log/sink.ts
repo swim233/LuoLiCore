@@ -13,6 +13,13 @@ export interface LogEvent {
   chatId?: string;
   userId?: string;
   key?: string;
+  /**
+   * `agent_runs.id`：这条事件是**哪一个 worker 跑出来的**（docs/10 §1 那张载体表的第五行）。
+   * 与 `parentSpanId` 不重复 —— 后者是 trace 树上的一条边，要认出「这条 `tool.call` 属于哪个
+   * worker」得沿父链一路爬到 `agent.run`，而一次查询只取 500 行，父完全可能不在这一页里。
+   * 主 agent 自己的事件不带它：`worker_kind` 那一列上主 run 是 NULL，两边同一个口径。
+   */
+  agentRunId?: string;
   data?: unknown;
   durationMs?: number;
 }

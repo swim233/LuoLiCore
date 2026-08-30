@@ -116,6 +116,12 @@ export const acpAgentSchema = z.object({
 export const acpSchema = z.object({
   enabled: z.boolean().default(false),
   allowedDirs: z.array(z.string()).default([]),
+  /**
+   * 与 `allowedDirs` 取「或」：为真时本会话的默认工作目录
+   * （`<sandbox.workspaceDir>/<chatId>/harness/<runId>`）无需登记即视为白名单内。
+   * 单列一个开关而不是往 `allowedDirs` 里塞模板路径：那条路径含运行时才知道的 `chatId` 与 `runId`。
+   */
+  workspaceFallback: z.boolean().default(false),
   /** 多 agent 部署下模型未给 `agent` 参数时用哪个。空则取第一个启用的。 */
   defaultAgent: z.string().default(''),
   /** 默认 `auto`：整趟一次审批管到底。逐条拦截用 `ask`，见 `ACP_PERMISSION_MODES` 那段。 */
@@ -165,6 +171,7 @@ export interface AcpAgentSettings {
 export interface AcpSettings {
   enabled: boolean;
   allowedDirs: readonly string[];
+  workspaceFallback: boolean;
   defaultAgent: string;
   permissionMode: AcpPermissionMode;
   maxUpdatesPerPrompt: number;

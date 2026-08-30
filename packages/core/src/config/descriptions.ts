@@ -157,26 +157,34 @@ export const CONFIG_DESCRIPTIONS: Record<string, string> = {
   "memory.requireSourceTag":
     "写入记忆时是否强制附带来源标注（主体与消息位置），便于事后审计与撤销。",
 
-  agent: "主 agent 与子 agent 的运行边界。子 agent 的具体定义在 Agent 页编辑。",
+  agent: "主 agent、worker 与外部 harness 的运行边界。",
   "agent.main.modelAlias":
     "主 agent 使用的模型别名。别名到具体模型的映射在模型页维护。",
   "agent.main.maxSteps":
     "主 agent 单轮的步骤上限（一次模型调用及其后续工具执行计为一步）。",
   "agent.main.downgradeAfterStep":
     "超过该步数后自动降级到 low 档模型，避免长循环按高档价格计费。",
-  "agent.maxDepth": "子 agent 的最大嵌套深度，防止 agent 无限派生 agent。",
-  "agent.maxConcurrentSubagents": "同时运行的子 agent 数上限。",
-  "agent.maxSubagentsPerTurn": "单轮内允许派生的子 agent 总数。",
-  "agent.askTimeoutMs":
-    "子 agent 用 ask_parent 提问后，等待答复的超时（毫秒）。",
+  "agent.worker.modelAlias":
+    "worker 使用的模型别名。主 agent 自己不调用工具，查、读、写、执行都在 worker 里发生，本项决定这部分的模型档位与单价。",
+  "agent.worker.maxSteps":
+    "单个 worker 的步骤上限（一次模型调用及其后续工具执行计为一步）。",
+  "agent.worker.resultMaxChars":
+    "worker 结果按 summary 档回灌给主 agent 时的字符上限，超出部分截断，全文仍可用 read_worker_result 分页读取。",
+  "agent.worker.maxResultChars":
+    "worker 结果按 full 档回灌时的字符硬上限。写入结果表没有降级兜底，因此该上限必须存在。",
+  "agent.maxConcurrentWorkers": "同时运行的 worker 数上限，超出的排队等待。",
+  "agent.maxWorkersPerTurn": "单轮内允许派发的 worker 总数。",
+  "agent.askTimeoutMs": "worker 用 ask_parent 提问后，等待答复的超时（毫秒）。",
   "agent.maxAsksPerRun":
-    "单次运行中 ask_parent 的调用次数上限，防止子 agent 持续提问而不执行任务。",
+    "单次运行中 ask_parent 的调用次数上限，防止 worker 持续提问而不执行任务。",
   "agent.askArbiter":
     "是否用 low 档模型自动仲裁 ask_parent 的提问，而不是每次都转人工。",
   "agent.harness.command": "harness 的可执行名，例如 claude 或 codex。",
   "agent.harness.args": "固定参数；任务正文作为最后一个参数追加，不经 shell。",
   "agent.harness.allowedDirs":
-    "harness 允许访问的仓库路径白名单。**留空 = 功能整体关闭**，该工具不进入模型的工具目录。",
+    "harness 允许访问的仓库路径白名单。**留空且下方 workspaceFallback 为关 = 功能整体关闭**，该工具不进入模型的工具目录。",
+  "agent.harness.workspaceFallback":
+    "把本会话工作目录下的 harness 子目录也视为白名单内，无需登记具体路径。与 allowedDirs 是「或」的关系：两者都为空或关闭时功能才整体关闭。",
   "agent.harness.timeoutMs":
     "单次 harness 运行的时间上限，超时先 SIGTERM 再 SIGKILL。",
   "agent.harness.maxOutputBytes":
@@ -184,7 +192,9 @@ export const CONFIG_DESCRIPTIONS: Record<string, string> = {
   "agent.acp.enabled":
     "总开关。关闭时 spawn_acp 不进入模型的工具目录。本项与下方的 allowedDirs 任一为空或为假，功能即整体关闭。",
   "agent.acp.allowedDirs":
-    "ACP agent 允许访问的仓库路径白名单，语义与 harness 的同名项一致。**留空 = 功能整体关闭**。并发轮次不会在同一目录上各启动一个 agent（按 realpath 互斥，等待时间有上界）。",
+    "ACP agent 允许访问的仓库路径白名单，语义与 harness 的同名项一致。**留空且下方 workspaceFallback 为关 = 功能整体关闭**。并发轮次不会在同一目录上各启动一个 agent（按 realpath 互斥，等待时间有上界）。",
+  "agent.acp.workspaceFallback":
+    "把本会话工作目录下的 harness 子目录也视为白名单内，无需登记具体路径。与 allowedDirs 是「或」的关系，语义与 agent.harness 的同名项一致。",
   "agent.acp.defaultAgent":
     "模型未指定 agent 时使用的默认 agent（填名称）。留空则使用下方列表中第一个启用的 agent。仅配置一个 agent 时本项无效。",
   "agent.acp.permissionMode":
@@ -199,13 +209,9 @@ export const CONFIG_DESCRIPTIONS: Record<string, string> = {
     "单次任务的花费上限（美元，0 = 不限）。**这是唯一能约束 ACP 花费的配置**：agent 使用它自己的 provider 凭据，本项目的配额与用量账单不覆盖它。达到上限时按协议取消，已修改的文件不会回滚。",
   "agent.acp.agents":
     "ACP agent 定义数组：名称、可执行名、profile、审批档、允许的工具、模型、会话模式、超时。审批档与工具清单是独立的键，不进自由参数：两者是权限边界，写进自由参数会被一行配置静默移除。approvalMode **默认 yolo**（agent 内部不做拦截）：另两档下实测 bash 不可用，always-ask 另有可复现的 edit 故障。",
-  "agent.agentsDir":
-    "子 agent 的 markdown 定义目录（agents/<名字>.md）。文件是只读来源，「子 Agent」页中的同名定义会覆盖它。修改 .md 之后需变更一次配置或重启才会重新扫描。",
   "agent.askEscalateToUser":
     "🚧 未接线：仲裁无法作答时转人工，需要「发送选项—等待选择—回灌结果」的阻塞式通道，当前不存在。启用后仅在仲裁失败时额外记录一条日志。",
-  "agent.progressThrottleMs": "子 agent 向上回报进度的最小间隔（毫秒）。",
-  "agent.agents":
-    "子 agent 定义数组：名称、描述、模型别名、步数、最低角色、可用工具、指令。Agent 页有专用编辑器，直接编辑此处的 JSON 容易破坏结构。",
+  "agent.progressThrottleMs": "worker 向上回报进度的最小间隔（毫秒）。",
 
   provider:
     "上游模型服务的重试、超时、健康检查与模型元数据目录。API key 在模型页管理。",
@@ -239,7 +245,7 @@ export const CONFIG_DESCRIPTIONS: Record<string, string> = {
   "tools.maxConsecutiveErrors":
     "连续工具报错达到该次数即中止这一轮，防止模型对同一个错误反复重试产生费用。",
   "tools.defaultTimeoutMs":
-    "单次工具调用的默认墙钟上限（毫秒）。超时后向模型返回 tool_timeout，避免整轮对话阻塞在不返回的工具上。bash/python/spawn_agent 与两个 web 工具自行管理超时，不受本项约束。",
+    "单次工具调用的默认墙钟上限（毫秒）。超时后向模型返回 tool_timeout，避免整轮对话阻塞在不返回的工具上。bash/python/spawn_worker 与两个 web 工具自行管理超时，不受本项约束。",
   "tools.overrides":
     "逐个工具的运维覆盖层（键为工具名），每个工具可写 enabled / minRole / approval / timeoutMs。工具页是更完整的入口，在其中修改会同步到本项，且放宽权限时二次确认。后三项缺省时沿用代码内置的默认策略。禁用为强制约束：工具不出现在目录中，模型直接指定工具名也会在 execute() 被拦截。",
   "tools.catalog.deferExternal":

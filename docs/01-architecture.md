@@ -15,6 +15,7 @@
 ├───────────────────────────────────────────────────────────────────────────┤
 │ L3  智能层 Intelligence                                                   │
 │  AgentFactory    AI SDK ToolLoopAgent 装配（模型/工具/停止条件/prepareStep）│
+│                  主 agent 只对话与派发；工具执行在 lw-worker 那一侧         │
 │  PromptAssembler 固定头部系统提示词装配（ASSIST/CHARACTER/MEMORY/环境块）   │
 │  AgentBus        父子双向通信（ask_parent / answer / progress / result）    │
 │  ProviderRegistry AI SDK provider registry（DB 驱动，热更新）              │
@@ -28,11 +29,11 @@
 │  ContextEngine   ★ 快照 / commit / rebase / 裁剪 / 背景消息认领            │
 │  Archive         Telegram 原始消息归档 + FTS 检索                          │
 │  Ledger          usage 记账 · 配额计数                                     │
-│  LogSink         结构化 JSONL + DB 索引                                    │
+│  LogSink         结构化事件 → data/logs.db（ATTACH 的独立库）               │
 ├───────────────────────────────────────────────────────────────────────────┤
 │ L0  持久层 Persistence                                                    │
 │  packages/db     原生 SQL · 迁移 · 强制 chat 作用域的 Repository          │
-│  文件系统        data/files · data/workspace · memory/ · skills/ · logs/   │
+│  文件系统        data/files · data/workspace · memory/ · skills/           │
 └───────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -77,9 +78,10 @@ Telegram Update
   ├─(12) AgentFactory.main(...)  → ToolLoopAgent.stream()
   │        loop: prepareStep(activeTools by role, 硬天花板 prune, 模型选择)
   │              ├─ 文本增量 → TelegramOutput.stream(editMessageText 节流)
-  │              ├─ 工具调用 → ToolRegistry.execute(权限校验 → 沙箱 → 日志)
-  │              └─ 重任务   → spawn_agent → subagent(独立上下文)
-  │                              ◄── ask_parent / report_progress (AgentBus)
+  │              ├─ 对话面工具 → ToolRegistry.execute(记忆 / 归档检索 / Telegram 输出 / 定时任务)
+  │              ├─ 要动手   → spawn_worker → lw-worker(独立上下文，拿本角色全集)
+  │              │               ◄── ask_parent / report_progress (AgentBus)
+  │              └─ 用户明说起 harness → spawn_harness / spawn_acp → harness-worker(外部进程)
   ├─(13) 出站消息 Archive.append(direction='out')
   │
   ├─(14) ContextEngine.commitTurn(turnId, delta)  ── 加 key 锁 ─┐
@@ -167,7 +169,7 @@ LuoLiCore/
 │   ├── core/src/                   绝大部分逻辑
 │   │   ├── context/engine.ts       ★ ContextEngine：openTurn / commitTurn / materialize / prune
 │   │   ├── turn/                   concurrency.ts · keyed-mutex.ts · registry.ts
-│   │   ├── agent/                  manager · runtime · subagent · harness · ask-arbiter ·
+│   │   ├── agent/                  manager · runtime · worker · harness · ask-arbiter ·
 │   │   │                           definitions · fallback-model · step-observers · result-refs
 │   │   ├── acp/                    ACP 客户端（规格见 docs/05 §3.5）：schema · errors · process ·
 │   │   │                           manager · session · fs · terminals · permission · runs
@@ -190,7 +192,7 @@ LuoLiCore/
 │   │   ├── mcp/                    manager.ts · schema.ts · oauth.ts · persist.ts
 │   │   ├── schedule/               create.ts（建任务的唯一校验）· runner.ts
 │   │   ├── ledger/                 usage.ts 记账 · quota.ts QuotaGuard · repair.ts（一次性重算）
-│   │   ├── log/sink.ts             LogSink（JSONL）· trace/span · 脱敏
+│   │   ├── log/sink.ts             LogSink（data/logs.db）· trace/span · 脱敏
 │   │   ├── net/outbound.ts         全仓库唯一一条出网路径（SSRF 防护）
 │   │   ├── config/                 schema.ts（zod）· index.ts（三层合并）· descriptions ·
 │   │   │                           wakeword · redact.ts（脱敏口径，只有这一份）
@@ -225,7 +227,6 @@ LuoLiCore/
 │   └── private/<userId>/PRIMEMORY.md
 ├── skills/<name>/SKILL.md
 ├── plugins/<name>/plugin.ts
-├── agents/<name>.md                子 agent 的只读定义（D22）
 ├── data/
 │   ├── luoli.db  luoli.db-wal  luoli.db-shm
 │   ├── logs.db   logs.db-wal   logs.db-shm      日志的唯一落点，主连接 ATTACH 上来（10 §3）
@@ -269,7 +270,7 @@ LuoLiCore/
 | HTTP | **Hono** + `@hono/node-server` | REST + SSE + 静态托管 |
 | 前端 | Vite + Vue 3 + Pinia + vue-router + PrimeIcons（**无 UI 组件框架**，`src/ui/` 自建原语） | 视觉基准是总览页，全站共用 `styles.css` 的设计变量；见 [09 §6](./09-webui.md#6-前端结构) |
 | 校验 | **zod** | 工具 `inputSchema`、配置 schema、API body |
-| 日志 | 自建 `LogSink`（JSONL）+ `pino` 作控制台输出 | 见 [10](./10-logging-and-observability.md) |
+| 日志 | 自建 `LogSink`（写 `data/logs.db`）+ `pino` 作控制台输出 | 见 [10](./10-logging-and-observability.md) |
 | 测试 | **vitest** + `@grammyjs/...` 无需真实 API 的 stub + 内存 SQLite | 见 [13](./13-acceptance-criteria.md) |
 | 沙箱 | Docker CLI（`docker run --rm`） | 见 [05](./05-tools-and-permissions.md#5-沙箱) |
 
@@ -292,5 +293,5 @@ LuoLiCore/
 | Telegram 429 | `auto-retry` 按 `retry_after` 等待；流式编辑遇 429 直接跳过本次增量（不排队堆积） |
 | DB 写失败 | turn 标 `failed`，向用户回复「内部错误(引用 turnId)」；日志 `level=error` |
 | commit 时发现 base commit 已不存在（被 `/new` 重置） | 放弃 rebase，转为 `kind='turn'` 挂到当前 HEAD，并在 delta 前插入 `origin='note'` 的系统提示说明上下文已被重置 |
-| subagent 失败 | 向父 agent 返回 `{ok:false, error}`；父 agent 决定重试或告知用户 |
+| worker 失败 | 向主 agent 返回 `{ok:false, error}`；主 agent 决定重派或如实告知用户 |
 | 配额超限（轮内触发） | 停止后续模型调用，把已生成内容作为最终回复发出，并追加额度提示 |

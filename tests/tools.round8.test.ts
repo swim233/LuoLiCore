@@ -3,7 +3,7 @@ import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { ArchiveRepository, closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
-import { FileTools, PathJail, SKILL_NARROWING_EXEMPT, Sandbox, SkillLoader, ToolRegistry, citeArchivedMessages, extractHtml } from '@luoli/core';
+import { FileTools, PathJail, SKILL_NARROWING_EXEMPT, Sandbox, SkillLoader, ToolRegistry, citeArchivedMessages, extractHtml, newToolScope } from '@luoli/core';
 import type { ApprovalBroker, LogSink } from '@luoli/core';
 import type { RuntimeTurnContext } from '@luoli/shared';
 
@@ -139,19 +139,27 @@ const turnOf = (extra: Partial<RuntimeTurnContext> = {}): RuntimeTurnContext => 
   abortSignal: new AbortController().signal, config: {}, ...extra } as RuntimeTurnContext);
 const policy = { minRole: 'limited' as const, approval: 'never' as const, scope: 'global' as const, source: 'builtin' as const };
 const limits = { maxRegistered: 10, maxCallsPerTurn: 20, maxConsecutiveErrors: 2 };
+// 下面几个 describe 注册的都是自造工具名（`strict` / `gated` / `read_file` …），`agentKind` 取 lw 而不是
+// main：`toolCallableBy('main', …)` 只放行 `MAIN_AGENT_TOOLS` 那张白名单，自造名一条都不在，于是熔断
+// 计数与 skill 收窄这两件真正要测的事会被那道正交的闸整个遮住 —— 全部调用都停在 `tool_requires_worker`。
+// worker 侧判的是 `!MAIN_ONLY_TOOLS.has(name)`，自造名一律放行，恰好只留下要测的那一道。
+// 三个渐进披露集合按 agent run 各持一份，构造口只有 `newToolScope()`：写成惰性 `??=` 的话建出来的 Set
+// 落在 `execute()` 交给工具的浅拷贝上，调用一返回就丢了。
+const contextOf = (turn: RuntimeTurnContext, scope: Partial<ReturnType<typeof newToolScope>> = {}) =>
+  ({ turn, workspace: '.', agentKind: 'lw' as const, ...newToolScope(), ...scope });
 
 describe('R8-REG-01 · 熔断计数要覆盖最常见的两种失败', () => {
   it('参数写错连续两次就停用该工具', async () => {
     const registry = new ToolRegistry(log, { request: async () => true } as ApprovalBroker, limits);
     registry.register({ name: 'strict', description: '', inputSchema: z.object({ n: z.number() }), policy, sourcePriority: 1, execute: () => ({ ok: true }) });
-    const context = { turn: turnOf(), workspace: '.', agentKind: 'main' as const };
+    const context = contextOf(turnOf());
     // 旧实现：invalid_input 完全不计数，实测同一个错误调用连发 5 次全部被接受，唯一的边界是
     // maxSteps，在用户侧表现为 bot 忙了半分钟后回复无法完成。
     expect(await registry.execute('strict', { n: 'bad' }, context)).toMatchObject({ error: 'invalid_input' });
     expect(await registry.execute('strict', { n: 'bad' }, context)).toMatchObject({ error: 'invalid_input' });
     expect(await registry.execute('strict', { n: 'bad' }, context)).toMatchObject({ error: 'tool_disabled_after_errors' });
     // 门槛是连续失败：熔断前成功一次即应清零。
-    const fresh = { turn: turnOf({ turnId: 't2' }), workspace: '.', agentKind: 'main' as const };
+    const fresh = contextOf(turnOf({ turnId: 't2' }));
     expect(await registry.execute('strict', { n: 'bad' }, fresh)).toMatchObject({ error: 'invalid_input' });
     expect(await registry.execute('strict', { n: 1 }, fresh)).toMatchObject({ ok: true });
     expect(await registry.execute('strict', { n: 'bad' }, fresh)).toMatchObject({ error: 'invalid_input' });
@@ -160,7 +168,7 @@ describe('R8-REG-01 · 熔断计数要覆盖最常见的两种失败', () => {
   it('审批被拒连续两次就停用该工具', async () => {
     const registry = new ToolRegistry(log, { request: async () => false } as ApprovalBroker, limits);
     registry.register({ name: 'gated', description: '', inputSchema: z.object({}), policy: { ...policy, approval: 'always' }, sourcePriority: 1, execute: () => ({ ok: true }) });
-    const context = { turn: turnOf(), workspace: '.', agentKind: 'main' as const };
+    const context = contextOf(turnOf());
     // 每一次被拒的重试都会向 owner 推送一条审批通知。旧实现连发 6 次全部被接受。
     expect(await registry.execute('gated', {}, context)).toMatchObject({ error: '未获批准' });
     expect(await registry.execute('gated', {}, context)).toMatchObject({ error: '未获批准' });
@@ -169,18 +177,22 @@ describe('R8-REG-01 · 熔断计数要覆盖最常见的两种失败', () => {
 });
 
 describe('R8-SKILL-01 · skill 的 allowed-tools 收窄不到核心工具集', () => {
-  it('收窄生效时 send_message / report_progress / context_stats 仍然可调', async () => {
+  it('收窄生效时 report_progress / context_stats 仍然可调', async () => {
     const registry = new ToolRegistry(log, { request: async () => true } as ApprovalBroker, limits);
-    for (const name of ['bash', 'send_message', 'read_file']) {
+    for (const name of ['bash', 'report_progress', 'read_file']) {
       registry.register({ name, description: '', inputSchema: z.object({}), policy, sourcePriority: 1, execute: () => ({ ok: true, ran: name }) });
     }
-    const context = { turn: turnOf({ skillAllowedTools: new Set(['bash']) }), workspace: '.', agentKind: 'main' as const };
+    // 收窄集挂在 context 上而不是 turn 上：worker 与父轮共享同一个 turn 对象，挂在 turn 上时
+    // worker 载一个带 `allowed-tools` 的 skill 就会去收窄父轮。
+    const context = contextOf(turnOf(), { skillAllowedTools: new Set(['bash']) });
     expect(await registry.execute('bash', {}, context)).toMatchObject({ ok: true, ran: 'bash' });
-    // 旧实现：只豁免 load_skill，于是一个 `allowed-tools: [bash]` 的 skill 会导致模型执行完成后
-    // 无法追发任何一条消息。
-    expect(await registry.execute('send_message', {}, context)).toMatchObject({ ok: true, ran: 'send_message' });
+    // 旧实现：只豁免 load_skill，于是一个 `allowed-tools: [bash]` 的 skill 会连带关掉上报进度这条
+    // 通道，worker 干完活父轮什么都收不到。探针取 report_progress 而不是 send_message ——
+    // 后者是 main-only，而收窄只可能发生在 worker 的 run 里（`load_skill` 不在 `MAIN_AGENT_TOOLS`，
+    // 主 agent 压根载不了 skill），拿一件 worker 调不到的工具当探针等于什么都没测。
+    expect(await registry.execute('report_progress', {}, context)).toMatchObject({ ok: true, ran: 'report_progress' });
     expect(await registry.execute('read_file', {}, context)).toMatchObject({ error: 'tool_not_in_allowlist' });
-    expect(SKILL_NARROWING_EXEMPT).toContain('send_message');
+    expect(SKILL_NARROWING_EXEMPT).toContain('report_progress');
   });
 
   it('未声明 allowed-tools 的 skill 交回 narrows:false，不该被并进允许集', () => {

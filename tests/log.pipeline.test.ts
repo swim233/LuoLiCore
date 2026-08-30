@@ -68,6 +68,41 @@ describe('structured log pipeline', () => {
   });
 
   /**
+   * `log_events.agent_run_id` 曾经是一条**真死列**：列在、读出侧在读、`LOG_COLUMNS` 里也有它，
+   * 而写入方一个都没有（实测生产库 60428 行 / 0 行有值）—— 与 `parent_span_id` 那次
+   * （docs/28 · L-LOG-04）是同一种形态：一个永远为 NULL 的列被正确地读着。
+   *
+   * 接它的前置条件是 `docs/10 §1` 那张载体表里先有一行说清这个值由谁带下来
+   * （`ToolExecutionContext.agentRunId` → `LogSink` 入参 → `insertLog`），现在有了。
+   * 判据取「写进去的那一行读得出来」而不是「有调用点传了它」：后者随重构改名就会静默失效，
+   * 而这一列的失败模式恰恰是**没有任何断言会因此变红**。
+   */
+  it('agent_run_id 真的写进 log_events —— 给了就写，没给是 NULL', () => {
+    const database = './data/log-agentrun.test.db';
+    wipe(database);
+    const db = openDatabase(database); migrateDatabase(db); const operations = new OperationsRepository(db);
+    const log = new LogSink(operations, [], { console: 'off' });
+    const withRun = log.event({ level: 'info', kind: 'tool.call', summary: 'worker 里的一次工具调用', agentRunId: 'run-01J8', traceId: 'turn-1' });
+    // span 那条路同样要带上：`agent.run` / `model.call` 都是 span，只走 `event()` 等于只接了一半。
+    const span = log.span({ level: 'info', kind: 'agent.run', summary: 'worker', agentRunId: 'run-01J8', traceId: 'turn-1' });
+    span.end({ ok: true });
+    // 主 agent 自己的事件不带 —— 与 `agent_runs.worker_kind` 上主 run 为 NULL 同一个口径。
+    const mainSide = log.event({ level: 'info', kind: 'turn.start', summary: '主 agent 这一侧', traceId: 'turn-1' });
+    log.close();
+    const runOf = (id: number): string | null =>
+      db.prepare('SELECT agent_run_id FROM log_events WHERE id=?').pluck().get(id) as string | null;
+    expect(runOf(withRun), 'agent_run_id 仍然没有写入方').toBe('run-01J8');
+    expect(runOf(mainSide)).toBeNull();
+    expect(db.prepare("SELECT COUNT(*) FROM log_events WHERE kind='agent.run' AND agent_run_id='run-01J8'").pluck().get(),
+      'span() 那条路把 agent_run_id 丢了').toBe(1);
+    // 列表也带着它：worker 运行页按这一列过滤，`LOG_COLUMNS` 少了它等于页面上永远是空的。
+    const listed = operations.logs(10) as Array<{ kind: string; agent_run_id: string | null }>;
+    expect(listed.find((row) => row.kind === 'tool.call')?.agent_run_id).toBe('run-01J8');
+    expect(listed.find((row) => row.kind === 'turn.start')?.agent_run_id).toBeNull();
+    closeDatabase(db);
+  });
+
+  /**
    * 日志落在 `logs.dbPath` 那**一个**文件里，不在主库（docs/10 §3）。判据有两条，缺一不可：
    * 主库那张同名表必须已经不存在 —— 它只要还在就会按 temp → main → attached 的解析顺序一直
    * 遮住附加库那张，所有查询读到的都是一张永远不再增长的旧表，而**没有任何别的断言会因此变红**。

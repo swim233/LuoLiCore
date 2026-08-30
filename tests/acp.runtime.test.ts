@@ -3,7 +3,7 @@ import { Readable } from 'node:stream';
 import { resolve } from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
-import { ACP_APPROVAL_MODES, ACP_ERROR_HINTS, ACP_PERMISSION_MODES, AcpLineOverflowError, AcpManager, AcpRunRecorder, acpChildEnv, acpClientCapabilities, acpStopReasonError, buildAcpArgv, clipToJsonBudget, configSchema, enabledAcpAgents, floorPermission, guardedByteStream, resolveAcpAgent, ToolRegistry, registerBuiltins, TOOL_POLICY, type AcpAgentSettings, type AcpSettings, type ToolExecutionContext } from '@luoli/core';
+import { ACP_APPROVAL_MODES, ACP_ERROR_HINTS, ACP_PERMISSION_MODES, AcpLineOverflowError, AcpManager, AcpRunRecorder, acpChildEnv, acpClientCapabilities, acpStopReasonError, buildAcpArgv, clipToJsonBudget, configSchema, enabledAcpAgents, floorPermission, guardedByteStream, newToolScope, resolveAcpAgent, ToolRegistry, registerBuiltins, TOOL_POLICY, type AcpAgentSettings, type AcpSettings, type ToolExecutionContext } from '@luoli/core';
 
 /**
  * M13 · ACP 客户端的运行时用例。一律使用 fixture，不接触真实 `omp`：用例必须离线且确定。
@@ -594,7 +594,7 @@ describe('ACP · spawn_acp 的三道门', () => {
   const context = (config: unknown, role: string, isPrivate: boolean): ToolExecutionContext => ({
     turn: { turnId: 't', key: 'k', chatId: 'c', threadId: null, initiatorUserId: 'u', effectiveRole: role, isPrivate,
       baseCommitId: null, snapshot: { messages: [], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 0 },
-      delta: [], abortSignal: new AbortController().signal, config }, workspace: '.', agentKind: 'main' } as never);
+      delta: [], abortSignal: new AbortController().signal, config }, workspace: '.', agentKind: 'main', ...newToolScope() } as never);
   const on = (acp: Record<string, unknown>) => configSchema.parse({ access: { bootstrapOwnerId: '1' },
     agent: { acp: { enabled: true, allowedDirs: [WORK], agents: [{ name: 'fixture', command: FIXTURE }], ...acp } } });
 

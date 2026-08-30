@@ -75,11 +75,29 @@ NODE_ENV=production
 | `general.locale` | i18n 在 [14 §4](./14-open-questions.md) 明确「第一版不做」，运行时从不读它 | 真做 i18n 时与 `webui/src/i18n` 一起加回来 |
 | `approval.allowInitiator` | WebUI 只有一个 owner 身份（[14](./14-open-questions.md) A15），裁决权下放不到发起人，当前架构里没有能实现它的落点 | **不做**。[14 §2](./14-open-questions.md) Q7（WebUI 多用户）已于 2026-08-18 答复为「确定不做」，这一条随之失去落点；键本身也已从 schema 摘除（`config/schema.ts` 那句注释）。此行留作沿革记录 |
 | `quota.perTurn.maxToolCalls` | 真正生效的是 `tools.maxCallsPerTurn` | `tools.maxCallsPerTurn` |
-| `quota.perTurn.maxSubagents` | 真正生效的是 `agent.maxSubagentsPerTurn` | `agent.maxSubagentsPerTurn` |
+| `quota.perTurn.maxSubagents` | 真正生效的是 `agent.maxWorkersPerTurn` | `agent.maxWorkersPerTurn` |
 | `quota.perTurn.maxDurationMs` | 真正生效的是 `concurrency.turnTimeoutMs` | `concurrency.turnTimeoutMs` |
 
 **升级不会卡住**：顶层 config schema 不带 `.strict()`，老 `config.yaml` 里残留这些键会被 zod
 静默剥掉；`config_kv` 里的残留行由 `loadConfig` 的 `onInvalidOverride` 逐条剔除并告警。
+
+### 2.0.0 派发层收敛（2026-08-30）摘除与改名的键
+
+主 agent 不再自己调工具、派发收敛到唯一的 lw-worker 之后（[04 §1](./04-agents-and-providers.md)），
+`agent` 段有三个键**从 schema 删除**、两个键**改名**：
+
+| 键 | 处置 | 说明 |
+|---|---|---|
+| `agent.agents` | 删除 | 子 agent 定义数组随多 agent 一起消失。其中的 `injectMemory` **从来没有被子 agent 的执行路径读过** —— 那是一个假开关，[06 §3.1](./06-prompt-and-memory.md) 的脚注承诺的是一个从未存在的行为 |
+| `agent.agentsDir` | 删除 | `agents/<name>.md` 这条只读来源随上一条一并失去消费方 |
+| `agent.maxDepth` | 删除 | worker 是叶子（不能再派 worker、不能起 harness）之后 `parent.depth + 1 > 3` 恒假，留着就是一个改了没效果的格子 |
+| `agent.maxConcurrentSubagents` | → `agent.maxConcurrentWorkers` | 标识符统一到 worker 口径 |
+| `agent.maxSubagentsPerTurn` | → `agent.maxWorkersPerTurn` | 同上 |
+
+⚠ **两处改名没有做迁移。** 存量 `config.yaml` 里的旧键被 zod 静默剥掉，存量 `config_kv` 覆盖行被
+`onInvalidOverride` 逐条剔除并告警 —— 都不会让进程起不来，但**运维此前在 WebUI 上的设置就此失效，
+需要在新键上重设一次**。这是一次有意的取舍：迁移代码要长期保留一份旧键到新键的映射，而这两项
+都是数量上限，重设一次的代价小于永久多一条映射。
 
 ### 2.0.1 未实现键白名单
 
@@ -91,7 +109,7 @@ NODE_ENV=production
 | 🚧 `telegram.notifyEdits` | 要把「上一轮之后有哪些编辑」带进 RUNTIME 块，得给 `RuntimeTurnContext` 加一块会话级瞬时状态 —— 那是上下文引擎的表面 |
 | 🚧 `trigger.ignoreEditedAsTrigger` | 先要定「编辑触发的那一轮与原轮次什么关系」：重开一轮还是改写历史，两种都会动到 rebase 与认领水位。[14 §2](./14-open-questions.md) 那一轮**没有覆盖这一条** —— 它不在 Q1–Q12 里 |
 | 🚧 `memory.autoApplyCompaction` | **记忆压缩本身没实现**（`compactCron` 只统计超过软上限的文档数）。给一个不存在的产物配「是否自动应用」是假开关 |
-| 🚧 `agent.askEscalateToUser` | 转人工要一条**阻塞式人机通道**：在 Telegram 发一条带 inline 选项的消息、等人点、把结果回灌给正在等的那个子 agent。**那条通道现在有了** —— `PendingPrompts` + `TelegramPromptChannel`（[05 §6.1](./05-tools-and-permissions.md)），inline keyboard 审批就跑在它上面，`PromptRequest.kind` 里已经留着 `agent_ask` 这一档。**缺的是接线与语义**：`ask_parent` 走的是仲裁模型那条路，转人工要定「问谁」（子 agent 的发起人还是 owner）、「选项从哪儿来」（自由文本答复 vs 固定选项）、以及等人期间那个子 agent 占着的并发槽与 `askTimeoutMs` 怎么算。仲裁本身（`agent.askArbiter` + `askTimeoutMs`）已接线；这个键为真时仲裁失败只会多记一条 `agent.ask_unarbitrated` warn（带 `escalationRequested: true`），**不会真的去问人** |
+| 🚧 `agent.askEscalateToUser` | 转人工要一条**阻塞式人机通道**：在 Telegram 发一条带 inline 选项的消息、等人点、把结果回灌给正在等的那个 worker。**那条通道现在有了** —— `PendingPrompts` + `TelegramPromptChannel`（[05 §6.1](./05-tools-and-permissions.md)），inline keyboard 审批就跑在它上面，`PromptRequest.kind` 里已经留着 `agent_ask` 这一档。**缺的是接线与语义**：`ask_parent` 走的是仲裁模型那条路，转人工要定「问谁」（worker 的发起人还是 owner）、「选项从哪儿来」（自由文本答复 vs 固定选项）、以及等人期间那个 worker 占着的并发槽与 `askTimeoutMs` 怎么算。仲裁本身（`agent.askArbiter` + `askTimeoutMs`）已接线；这个键为真时仲裁失败只会多记一条 `agent.ask_unarbitrated` warn（带 `escalationRequested: true`），**不会真的去问人** |
 | 🚧 `tools.web.summarizeWithAlias` | 要在 `web_fetch` 里插一次模型调用：计费、配额、取消、失败降级都得跟着走一遍。**A7 的仲裁调用已经趟过同一条路**（见 `agent/ask-arbiter.ts`），要接的话照那个形状抄 |
 | 🚧 `media.groupDebounceMs` | 相册合并要按 `media_group_id` 在触发路径上缓冲 update，与并发和认领水位有交互（`concurrency.coalesceSameUserMs` 做的是按人合并） |
 | 🚧 `webui.basePath` | 子路径挂载：要给所有路由加前缀、改静态资源 base、改 SPA 的 router base，三处一起动 |
@@ -244,23 +262,39 @@ agent:
     modelAlias: main              # 热更新
     maxSteps: 12                  # 热更新
     downgradeAfterStep: 8         # 热更新 · 超过该步数自动降到 low 档
-  maxDepth: 3                     # 需重启 · AgentManager 构造时吃的是快照（docs/20 · W-CFG-02）
-  maxConcurrentSubagents: 3       # 热更新 · 同一轮里同时在跑的子 agent 数上限
-  maxSubagentsPerTurn: 10         # 需重启 · 同上
-  askTimeoutMs: 120000            # 热更新 · 子 agent 等仲裁答复的上限，超时按「仲裁不可用」降级
+  worker:                         # 热更新 · lw-worker：唯一的内建 worker。主 agent 不调工具，查 / 读 /
+                                  #   写 / 跑全部在这里发生，所以这一段决定的是绝大多数实际花费
+    modelAlias: low               # 热更新 · worker 的模型档
+    maxSteps: 12                  # 热更新 · 单个 worker 的步数上限
+    resultMaxChars: 4000          # 热更新 · summary 档回灌给主 agent 的字符上界；全文仍可
+                                  #   read_worker_result 分页读
+    maxResultChars: 65536         # 热更新 · full 档的硬上界。agent_runs.result_summary 一侧没有降级
+                                  #   兜底，超界即整条写失败，所以这一档必须按构造有界
+                                  # 没有 tools 白名单：worker 拿的是**调用者有效角色下的工具全集**，
+                                  #   收窄由角色、tools.overrides 与 skill 允许集承担。再加一层名单
+                                  #   只会与它们分岔（05 §2.2）
+  maxConcurrentWorkers: 3         # 热更新 · 同一轮里同时在跑的 worker 数上限
+                                  # ⚠ 2026-08-30 由 maxConcurrentSubagents 改名，**没有做迁移**：
+                                  #   config_kv 里的旧键会被 loadConfig 的 onInvalidOverride 逐条剔除
+                                  #   并告警（不致启动失败），但那条覆盖就此失效，需要在 WebUI 重设一次
+  maxWorkersPerTurn: 10           # 需重启 · 同一轮累计派发上限
+                                  # ⚠ 同上，由 maxSubagentsPerTurn 改名，无迁移
+  askTimeoutMs: 120000            # 热更新 · worker 等仲裁答复的上限，超时按「仲裁不可用」降级
   maxAsksPerRun: 5                # 需重启 · registerBuiltins 构造时吃的是快照
   askArbiter: true                # 热更新 · 用 low 档模型仲裁 ask_parent；false = 工具直接回「无人应答」
   askEscalateToUser: false        # 🚧 通道已有（PendingPrompts），缺的是「问谁 / 选项从哪儿来 /
                                   #    等人期间的并发槽与超时怎么算」，打开也只会多记一条 warn
   progressThrottleMs: 3000        # 热更新 · report_progress 广播到 SSE 的节流窗口（库里那行照常更新）
-  agentsDir: ./agents             # 热更新 · agents/<name>.md 的目录（14 §2 Q5）。文件是**只读**
-                                  # 来源，下面这份 agents 里的同名定义覆盖它。目录不存在 = 没有
-                                  # 文件定义，不报错。没有文件监听：改 .md 要动一次配置或重启
   harness:                        # M11 · 起外部 coding harness 改宿主仓库（14 §2 Q8）
     command: claude               # 需重启位面无关：每次调用现读。CLI 可执行名
     args: [-p]                    # 任务正文作为 argv 最后一项追加，**不经 shell**
-    allowedDirs: []               # 热更新 · **空 = 整个功能关闭**，工具不进模型的工具目录。
-                                  # 只能在这里列出的路径（或其子目录）里跑
+    allowedDirs: []               # 热更新 · **空且下面 workspaceFallback 为 false = 整个功能关闭**，
+                                  # 工具不进模型的工具目录。只能在这里列出的路径（或其子目录）里跑
+    workspaceFallback: false      # 热更新 · 把本会话的默认工作目录
+                                  #   <sandbox.workspaceDir>/<chatId>/harness/<runId> 也算白名单内。
+                                  #   与 allowedDirs 是**「或」**：两者都空 / 关时功能才整体关闭。
+                                  #   单开一个开关而不是往 allowedDirs 里写模板路径 —— 那条路径含
+                                  #   运行时才知道的 chatId 与 runId，写不进一份静态配置
     timeoutMs: 900000             # 热更新 · 单次上限；超时 SIGTERM，5s 后 SIGKILL
                                   # ⚠ 默认值大于 concurrency.turnTimeoutMs（600000）——
                                   # 轮次先超时 → abortSignal → 同一个 SIGTERM，**这 15 分钟
@@ -278,12 +312,15 @@ agent:
                                   #   形态），而是存下它会把第三道门从「一次审批」偷偷改成「一次审批、此后
                                   #   永久」—— 一条 session/load 带着当初被批过的 cwd 重新进那个目录，而这一次
                                   #   没有任何人点头。fork / resume 同理，所以本版没有追问
-    enabled: false                # 热更新 · 它与 allowedDirs **任一为假 / 为空 = 整个功能关闭**，spawn_acp
-                                  #   连模型的工具目录都不进（同族：mcp.enabled、tools.selfExtend）
+    enabled: false                # 热更新 · 它为假 = 整个功能关闭，spawn_acp 连模型的工具目录都不进
+                                  #   （同族：mcp.enabled、tools.selfExtend）
     allowedDirs: []               # 热更新 · 语义与实现都复用 agent.harness.allowedDirs 那份（同一个
                                   #   resolveHarnessDir，按路径段比较：/srv/app 不放行 /srv/app-secrets）。
+                                  #   空**且** workspaceFallback 为 false 时同样等于整个功能关闭。
                                   #   多一条：两个并发轮次绝不会在同一个目录上各起一个 agent —— 按 realpath
                                   #   硬互斥，等待有上界（30s，可取消），超时交回 acp_dir_busy
+    workspaceFallback: false      # 热更新 · 与 agent.harness.workspaceFallback 同义：把本会话的默认工作
+                                  #   目录也算白名单内，与 allowedDirs 取**「或」**
     defaultAgent: ''              # 热更新 · 模型没给 agent 参数时用哪一台；空 = 列表里第一台启用的
     permissionMode: auto          # 热更新 · ask | auto | deny —— agent 反过来问「这一步准不准」时**我们**怎么
                                   #   回。与下面 agents[].approvalMode 是两件事（那个是 agent 内部的自动放行档）。
@@ -376,40 +413,6 @@ agent:
                                   #   agent.harness.timeoutMs 同一个坑，区别是现在启动时会有一条 config.invalid
                                   #   warn 点名所有配长了的 agent
         maxOutputBytes: 65536     # 交回模型的输出上限（工具壳再按注册表那个上界收一次）
-  agents:                         # 子 agent 定义（WebUI 可编辑，见 04 §3.1）
-                                  # name 里不许有冒号（其余字符不限）：`AgentManager.spawn` 数本轮
-                                  #   子 agent 时要把 ACP 落的行排除掉，判据是
-                                  #   `agent_name GLOB 'acp:*' AND model_alias='external'`（03 §2.7）——
-                                  #   一个真子 agent 能起名叫 `acp:x` 且别名叫 `external` 的话，
-                                  #   它就永久不占名额。文件那条路（agents/<name>.md）另有更严的正则。
-    - name: researcher
-      description: 在聊天记录/文件/网络中检索资料并给出带引用的结论
-      modelAlias: low
-      maxSteps: 20
-      minRole: limited
-      tools: [read_file, list_dir, grep, glob, search_messages, read_messages,
-              get_message, web_fetch, web_search]
-      resultMaxChars: 4000
-      instructions: |
-        你是检索型子 agent…
-    - name: coder
-      description: 在工作目录内完成多文件读写与脚本执行类任务
-      modelAlias: high
-      maxSteps: 30
-      minRole: trusted
-      tools: [read_file, write_file, edit_file, move_file, list_dir, grep, glob, bash, python]
-      resultMaxChars: 6000
-      instructions: |
-        你是编码型子 agent…
-    - name: summarizer
-      description: 把大段文本压缩为结构化摘要
-      modelAlias: low
-      maxSteps: 3
-      minRole: limited
-      tools: []
-      resultMaxChars: 3000
-      instructions: |
-        你把输入压缩为：结论 / 要点 / 数据 / 不确定项。
 
 # ============================================================ provider
 provider:
@@ -446,7 +449,7 @@ tools:
   maxConsecutiveErrors: 3         # 热更新 · 同一工具连续失败到这个数就在本轮停用；之后再调返回
                                   #   `tool_disabled_after_errors`（成功一次即清零，见 05 §8.1）
   defaultTimeoutMs: 60000         # 热更新 · 单次工具调用的默认墙钟上限，到点返回 `tool_timeout` 给模型。
-                                  #   bash/python/spawn_agent 与两个 web 工具自行管理超时，不受这一项约束
+                                  #   bash/python/spawn_worker 与两个 web 工具自行管理超时，不受这一项约束
   overrides: {}                   # 热更新 · 逐个工具的运维覆盖层，键为工具名。工具页是它的入口（09 §3.7）
                                   #   <name>.enabled     缺省 true；false = 硬边界（目录里没有 + execute 二次拦截）
                                   #   <name>.minRole     覆盖 TOOL_POLICY 的最低角色
@@ -456,7 +459,7 @@ tools:
                                   #   写死一个默认值等于把每条历史覆盖行钉在写它那天的策略上，此后改代码推不动它们。
                                   # 三条不变量：① 覆盖仅作用于角色判定与审批判定，不绕过 `available()`（`spawn_harness`
                                   #   仍限 owner 且仅在私聊）；② `approvalFor` 只提档、不降档，基准改为 never
-                                  #   也仍会提档；③ `timeoutMs: null` 的工具（bash/python/spawn_agent/spawn_harness/
+                                  #   也仍会提档；③ `timeoutMs: null` 的工具（bash/python/spawn_worker/spawn_harness/
                                   #   ask_parent）不吃超时覆盖 —— 它们各有自己的硬期限，套外层 race 会提前砍断。
                                   # 「放宽（minRole 调低 / 审批降档）需二次确认」是 `PATCH /api/tools/:name` 的
                                   #   端点行为（409 `relax_requires_confirmation`），**不是 schema 约束** ——
@@ -813,7 +816,7 @@ schedule:
 
 # ============================================================ maintenance（保留期，见 10 §5）
 # 每日 general.maintenanceCron 触发时按这几项删行。MaintenanceService.cleanup() 此前只清
-# log_events / processed_updates / sessions / approvals / 子 agent 结果 / scheduled_jobs，
+# log_events / processed_updates / sessions / approvals / worker 结果 / scheduled_jobs，
 # 而下面这四张表只涨不落 —— 读端点都有 LIMIT，所以症状不是慢查询而是**库文件只涨不落**，
 # 且 VACUUM 帮不上（数据还在，docs/27 · R-05）。
 # **turns 与 tasks 刻意不在其列**：它们是 trace 的骨架（/api/turns/:id/detail 靠 turn 行把日志、

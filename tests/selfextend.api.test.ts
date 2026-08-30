@@ -2,7 +2,7 @@ import { mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { ArchiveRepository, CustomToolRepository, OperationsRepository, PrincipalRepository, closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
-import { ContextEngine, CustomToolManager, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceService, PluginManager, ProviderStore, Sandbox, Secrets, ToolRegistry, configSchema } from '@luoli/core';
+import { ContextEngine, CustomToolManager, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceService, PluginManager, ProviderStore, Sandbox, Secrets, ToolRegistry, configSchema, newToolScope } from '@luoli/core';
 import { createServer } from '@luoli/server';
 
 /**
@@ -47,7 +47,9 @@ const json = async (response: Response): Promise<{ ok: boolean; data?: unknown; 
 describe('self-extension review endpoints', () => {
   it('lists, enables and deletes a custom tool, and the toggle drives the registry', async () => {
     const h = harness('selfextend-api-tools');
-    const context = { turn: { turnId: 't', key: 'chat:1', chatId: '1', initiatorUserId: '2', effectiveRole: 'owner' }, workspace: `${h.root}/workspace`, agentKind: 'main' } as never;
+    // `define_tool` 与自定义工具本身都在 worker 那一侧（docs/05 §4），这里只把 manager 当库调，
+    // 但上下文照实写成 `lw` —— 写 `main` 的话下一个读它的人会以为主 agent 调得到这条路。
+    const context = { turn: { turnId: 't', key: 'chat:1', chatId: '1', initiatorUserId: '2', effectiveRole: 'owner' }, workspace: `${h.root}/workspace`, agentKind: 'lw', ...newToolScope() } as never;
     h.manager.define({ name: 'probe', description: 'x', runtime: 'bash', body: 'true' }, context);
 
     const listed = await json(await h.app.request('/api/custom-tools', { headers: h.headers }));

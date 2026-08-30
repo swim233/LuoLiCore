@@ -1,6 +1,6 @@
 # 10 · 日志、成本与配额
 
-需求原文：「每次模型调用/工具调用等 都要有独立的日志」。落地为 **trace/span 模型**：一个 turn = 一条 trace，其中每次模型调用、每次工具调用、每个子 agent、每次 Telegram API 调用、每次上下文操作都是一个独立 span，可单独检索、单独查看完整 payload。
+需求原文：「每次模型调用/工具调用等 都要有独立的日志」。落地为 **trace/span 模型**：一个 turn = 一条 trace，其中每次模型调用、每次工具调用、每个 worker、每次 Telegram API 调用、每次上下文操作都是一个独立 span，可单独检索、单独查看完整 payload。
 
 ## 1. Trace 模型
 
@@ -16,16 +16,22 @@ turn 01J8…                                     kind=turn.start（spanId = turn
 ├── ctx.open        span A  parent=turn        claimed=3, base=c041
 ├── prompt.build    span B  parent=turn        blockTokens=…
 ├── model.call      span C  parent=turn        #1 main→claude-opus-5
-│   ├── tool.call   span D  parent=C           spawn_agent(researcher)
-│   │   ├── agent.spawn     parent=D           派出去那一刻就落，不等它跑完
-│   │   ├── agent.run  span E  parent=D        sub run_id=…
+│   ├── tool.call   span D  parent=C           spawn_worker（主 agent 这一层几乎只剩派发）
+│   │   ├── agent.spawn     parent=D           派出去那一刻就落，不等它跑完；workerKind=lw
+│   │   ├── agent.run  span E  parent=D        workerKind=lw, run_id=…
 │   │   │   ├── model.call  span F parent=E
 │   │   │   ├── agent.progress    parent=E
-│   │   │   └── tool.call   span G parent=E    grep
+│   │   │   └── tool.call   span G parent=E    grep（工具全在 worker 这一侧）
 │   │   │       └── agent.ask  span H parent=G ask_parent 本身是一次工具调用
 │   │   │           ├── model.call  parent=H   仲裁（low 档，一步，无工具）
 │   │   │           └── agent.answer parent=H  source=arbiter
-│   │   └── agent.end       parent=E           steps, costUsd
+│   │   └── agent.end       parent=E           steps, costUsd, resultMode
+│   ├── tool.call   span I  parent=C           spawn_harness / spawn_acp（外部那两条路）
+│   │   ├── agent.spawn     parent=I           workerKind=harness|acp, dir=…
+│   │   ├── agent.run  span I′ parent=I        容器 span 与 lw 同构
+│   │   │   ├── agent.harness    parent=I′     harness 之下只有这一条
+│   │   │   └── acp.run  / acp.permission      acp 之下是这两条
+│   │   └── agent.end       parent=I′
 │   └── tool.error          parent=C           模型给了非法参数：SDK 内部就拒了，execute 没被调到
 ├── model.call      span J  parent=turn        #2
 ├── tg.send         span K  parent=turn
@@ -34,20 +40,33 @@ turn 01J8…                                     kind=turn.start（spanId = turn
 └── ctx.commit      span N  parent=turn        rebase, prune
 ```
 
+形状（父边）与上一版一字不差，变的是每一层里出现什么：主 agent 那一层从「什么工具都有」收成
+几乎只有派发，工具调用整体下沉到 worker 那一层；`agent.spawn` / `agent.run` / `agent.end` 三行
+由 **lw / harness / acp 三种 worker 共用**，靠 `workerKind` 区分。三种同构是刻意的 ——
+Trace 视图与 WebUI 的 worker 运行页因此各只有一套判据，而不是每来一种 worker 就多一个分支。
+
 - span 落 `log_events` 一行（含 `duration_ms`），完整 payload 就在这一行的 `data` 列上（[§3](#3-存储)）。
 - WebUI Trace 视图按 `parent_span_id` 重建树（[09 §3.10](./09-webui.md#310-日志logs)）：depth 由父链长度算，
   **环与悬挂父都按 depth 0 渲染** —— 一次查询只取 500 行，子 span 的父完全可能不在这一页里，
   而一条坏数据不该把整个视图打成空白。
 
 **父边一律显式传，不用 AsyncLocalStorage。** 全仓零处使用隐式上下文，而「当前 span」这种
-进程内隐式状态与 [01 §3.1](./01-architecture.md) 那张表相冲。四条边各自的载体：
+进程内隐式状态与 [01 §3.1](./01-architecture.md) 那张表相冲。四条父边、外加 `agent_run_id`
+那一列，各自的载体：
 
-| 边 | 载体 |
+| 边 / 列 | 载体 |
 |---|---|
 | turn 根 → `ctx.*` / `prompt.build` / `model.call` / `tg.*` / `turn.end` | `RuntimeTurnContext.rootSpanId`（`openTurn` 生成一个 ULID） |
 | `model.call` → `tool.call` | `onStepStart` 把该步 span 的 id 写进 `ToolExecutionContext.parentSpanId`（步是串行的，同一步里并行的工具调用共享同一个父，正确） |
-| `tool.call` → 子 agent / 子调用 | `ToolRegistry.execute()` 建完 span 后**浅拷贝**一份 context 交给 `tool.execute`（改共享对象的话，同一步里并排的多个 `spawn_agent` 会互相顶掉） |
-| `agent.run` → 子 agent 内部 | `runSubAgent` 建 `agent.run` span，它的 `model.call` / `tool.call` 都挂在它之下 |
+| `tool.call` → worker / 子调用 | `ToolRegistry.execute()` 建完 span 后**浅拷贝**一份 context 交给 `tool.execute`（改共享对象的话，同一步里并排的多个 `spawn_worker` 会互相顶掉） |
+| `agent.run` → worker 内部 | worker 那条路建 `agent.run` span，它的 `model.call` / `tool.call` 都挂在它之下 |
+| `log_events.agent_run_id`（**不是边，是一列**） | `ToolExecutionContext.agentRunId` —— 派发时写进 worker 那份 context，worker 内部的每一条日志沿它带上 `agentRunId`（`LogSink.event()` / `span()` 的入参 → `OperationsRepository.insertLog`）。主 agent 自己的事件**不带**，与 `agent_runs.worker_kind` 上主 run 为 NULL 同一个口径 |
+
+**`agent_run_id` 与 `parent_span_id` 不重复。** 后者是树上的一条边；要靠它回答「这条 `tool.call`
+是哪个 worker 干的」得沿父链一路爬到 `agent.run`，而一次查询只取 500 行，父完全可能不在这一页里
+（那也正是「环与悬挂父按 depth 0 渲染」那条兜底存在的理由）。按 worker 过滤是 worker 运行页的
+主查询，它要的是一列能直接 `WHERE` 的值。这一列此前同样**一个写入方都没有**（生产库 60428 行 /
+0 行有值）—— 接它的前置条件就是这张表里先有上面那一行。
 
 此前 `parent_span_id` 这一列**从来没有任何调用点写过**：staging 库 `total 15841 / with_span 11354 /
 with_parent 0`，浏览器里展开一条 trace，13 个节点的 `marginLeft` 全是 `0px`。读出侧修过一次
@@ -100,8 +119,8 @@ with_parent 0`，浏览器里展开一条 trace，13 个节点的 `marginLeft` �
 | `provider.health` | info/warn/**error** | provider, state, ms, failures, status。error = 这一次把 provider 判成了 `down`（[04 §5.3](./04-agents-and-providers.md)） |
 | `provider.catalog` | info/warn | outcome, models, error —— models.dev 的模型目录拉取结果（[04 §5.4.1](./04-agents-and-providers.md)） |
 | `tool.call` | info | **input**（工具参数）, **approval**（`{required:false}` 或 `{required:true, risk, granted:true}`）, output, ms, ok；失败时 input + error。`approval` 是 `AC-LOG-003`「能看出是否经审批」的落点 —— 别处无从得知：不需要审批的调用在 `approvals` 表里根本没有行，「没找到行」与「这张表没记上」长得一模一样。走到建 span 这一步时被拒的那条早已 return，所以 `granted` 恒真；写出来是为了让这一行**自己**说得清，而不是要读的人先懂控制流。一个 span 只落一行，所以开始时的 `input` 与结束时的 `output` 是**合并**进同一行的 —— `LogSink.span().end()` 曾经用结束载荷整体顶掉开始那份，于是这一行只有 `output`，WebUI 的对话详情因此永远看不到工具输入（`tests/log.span.test.ts`） |
-| `tool.denied` | warn | tool, reason, role, error —— **准入闸的每一次拒绝一行**。`reason` 穷举：`unknown_tool` / `disabled_after_errors` / `disabled_by_operator` / `role` / `subagent` / `unavailable` / `allowlist` / `skill_narrowed` / `rate`（`tools.maxCallsPerTurn`）/ `approval`。`ToolRegistry.admit()` 刻意是**只读**判定（不写状态、不记日志），所以这一行由 `execute()` 记。此前整批闸门全是静默的：实测 45 次调用恰好 40 条 `tool.call`，超出的**零日志**，模型侧只收到一句不带 hint 的 `tool_call_limit_exceeded`（[reviews/28](./reviews/28-round10-live-system-test.md) · L-LOG-01） |
-| `tool.error` | warn | tool, toolCallId, errorKind, message —— 模型给了**非法工具参数**：校验发生在 AI SDK 内部（`AI_InvalidToolInputError`），`ToolRegistry.execute` 根本没被调到，于是 `tool.call` 计数是 0，唯一痕迹是上下文里那条 `output.type='error-text'` 的 tool-result，而它下一轮就被 `prune_level=1` 抹掉。这一行从 `stepToolResults` 收到的 `tool-error` part 上记。2026-08-18 打崩进程的事故起点正是 `get_message({messageId:0})`（[reviews/28](./reviews/28-round10-live-system-test.md) · L-LOG-03）。注册表自己的入参校验失败（`inputSchemaFor` 收窄过的那一档）走同一个 kind，`errorKind='invalid_input'`。⚠ **这一行只覆盖主 agent**：子 agent 的 `onStepEnd` 不走 `stepToolResults`，同一个盲区在那边还开着 —— 子 agent 反复用错工具参数只会在上下文里留一条下一轮就被抹掉的 `error-text`，日志里一个字都没有。事故起点在主路径，所以先补的是主路径；这条边界是知情的，记在 [`00 §2`](./00-state.md) |
+| `tool.denied` | warn | tool, reason, role, error —— **准入闸的每一次拒绝一行**。`reason` 穷举：`unknown_tool` / `disabled_after_errors` / `disabled_by_operator` / `role` / `main_agent` / `worker` / `unavailable` / `allowlist` / `skill_narrowed` / `rate`（`tools.maxCallsPerTurn`）/ `approval`。`main_agent` 与 `worker` 是分家的两侧各自的拒绝：前者是「这个工具在 worker 那一侧，主 agent 调不了」，后者是「这个工具只有主 agent 有」。`ToolRegistry.admit()` 刻意是**只读**判定（不写状态、不记日志），所以这一行由 `execute()` 记。此前整批闸门全是静默的：实测 45 次调用恰好 40 条 `tool.call`，超出的**零日志**，模型侧只收到一句不带 hint 的 `tool_call_limit_exceeded`（[reviews/28](./reviews/28-round10-live-system-test.md) · L-LOG-01） |
+| `tool.error` | warn | tool, toolCallId, errorKind, message —— 模型给了**非法工具参数**：校验发生在 AI SDK 内部（`AI_InvalidToolInputError`），`ToolRegistry.execute` 根本没被调到，于是 `tool.call` 计数是 0，唯一痕迹是上下文里那条 `output.type='error-text'` 的 tool-result，而它下一轮就被 `prune_level=1` 抹掉。这一行从 `stepToolResults` 收到的 `tool-error` part 上记。2026-08-18 打崩进程的事故起点正是 `get_message({messageId:0})`（[reviews/28](./reviews/28-round10-live-system-test.md) · L-LOG-03）。注册表自己的入参校验失败（`inputSchemaFor` 收窄过的那一档）走同一个 kind，`errorKind='invalid_input'`。重构后 worker 是唯一有工具的一侧，它的 `onStepEnd` 也接了 `stepToolResults`，此前那条「只覆盖主 agent」的边界不再存在 |
 | `tool.disabled` | warn | tool —— 运维在 WebUI 关掉的工具被调用（目录之外的第二道硬拦截）。这一档**同时**记 `tool.denied`：那一条是统一的拒绝流水，这一条是运维视角的凭据 |
 | `tool.disabled_after_errors` | warn | tool, failures —— 同一工具连续失败到 `tools.maxConsecutiveErrors`，本轮停用。这条是排障时区分「模型没试」和「试了被拦」的唯一凭据 |
 | `tool.registry_truncated` | warn | total, visible —— 可用工具数超过 `tools.maxRegistered`，目录被截断 |
@@ -130,23 +149,22 @@ with_parent 0`，浏览器里展开一条 trace，13 个节点的 `marginLeft` �
 | `prompt.post_failed` | warn | kind, error —— 提示投递失败（Telegram 拒收）。**发起方的语义不受它影响**：审批照旧等自己的 TTL 或 WebUI 裁决 |
 | `prompt.options_capped` | warn | kind, given —— 选项超过 8 个被砍掉。这是调用方的 bug：下标要压在一位数以内，`callback_data` 的长度才是常量（Bot API 上界 64 字节）|
 | `prompt.settle_failed` | debug | messageId, rewrote, error —— 收尾那次编辑被拒。`rewrote` 分开两种：`true` = 撤键盘**并**把正文换成结局（审批的正常收场，`AC-APV-004`），`false` = 只撤键盘。消息被用户删了、或同一条消息被收尾第二次（`message is not modified`）都会走到这里，两者都不该影响任何等待者 —— 一次改文案绝不能把审批从「等人批」变成「整轮失败」，所以是 debug |
-| `agent.spawn` | info | runId, name, depth, modelAlias, taskChars —— **派出去那一刻就落**，不等它跑完。`agent.run` 只在结束时才落库（span 的语义），所以一个卡住的子 agent 只有这一行能证明它存在 |
-| `agent.run` | info（失败时 **warn**） | runId, name, alias, steps, costUsd, ok, ms —— 子 agent 那一整段的**容器 span**：它的 id 是内部 `model.call` / `tool.call` 的父。父是派发它的那次 `tool.call`（[§7](#7-可观测性验收要点) 第 4 条） |
-| `agent.end` | info（失败时 **warn**） | runId, name, steps, costUsd, ok, error, summaryChars |
+| `agent.spawn` | info | runId, name, **workerKind**（`lw` \| `harness` \| `acp`）, depth, modelAlias, taskChars, **dir**（harness / acp）—— **派出去那一刻就落**，不等它跑完。`agent.run` 只在结束时才落库（span 的语义），所以一个卡住的 worker 只有这一行能证明它存在。**三种 worker 共用这一行是本次新增的**：此前 harness 与 acp 一条都没有，一次跑满 `agent.harness.timeoutMs`（默认 15 分钟）的调用在它结束之前**日志里完全不存在** —— 而那正是三条 worker 路径里唯一能改宿主上的文件的那条，`dir` 说的就是它在改哪儿 |
+| `agent.run` | info（失败时 **warn**） | runId, name, **workerKind**, alias, steps, costUsd, ok, ms —— 三种 worker 那一整段的**容器 span**：它的 id 是内部事件的父（lw 之下是 `model.call` / `tool.call`，harness 之下是 `agent.harness`，acp 之下是 `acp.run` / `acp.permission`）。父是派发它的那次 `tool.call`（[§7](#7-可观测性验收要点) 第 4 条）。三种同构是刻意的：Trace 视图与 worker 运行页因此各只有一套判据 |
+| `agent.end` | info（失败时 **warn**） | runId, name, **workerKind**, steps, costUsd, ok, error, summaryChars, **resultMode**（`summary` \| `full`）—— 回灌档位记在这一行而不是新开 kind：主上下文里出现的是摘要还是全文，是排查「它为什么没看到细节」时的第一个问题 |
 | `agent.ask` / `agent.answer` | info | askId, fromRun, toRun, source(rule/arbiter/timeout), ms。`agent.ask` 是一个 span（父是 `ask_parent` 那次 `tool.call`），`agent.answer` 挂在它之下。**没有 `source='user'`** —— 转人工那一级没实现（[04 §4.3](./04-agents-and-providers.md)） |
-| `agent.ask_unarbitrated` | warn（取消时 info） | askId, agentRunId, reason(no_model/cancelled/timeout/failed/empty), detail, escalationRequested —— 仲裁没能给出答复，子 agent 接下来按「没人应答」走。`escalationRequested:true` 表示运维开了 `agent.askEscalateToUser` 但那个键仍未接线，**没有真的去问人** |
-| `agent.file_invalid` | error | file, error —— `agents/<name>.md` 解析失败。其余定义照常加载，所以这一行是「我加的那个 agent 为什么不存在」的唯一凭据（[04 §3.1](./04-agents-and-providers.md)） |
-| `agent.harness` | info/warn | dir, command, exitCode, timedOut, ms —— M11 起了一次外部 harness。**它内部干了什么不在这里**（也不在任何地方），本系统看不见（[14](./14-open-questions.md) T17） |
-| `acp.run` | info/warn | agent, dir, command, approvalMode, stopReason, error, updates, dropped, toolCalls, capabilities, degraded, filesWritten, terminals, terminalsLeaked, costUsd, runId, ms —— M13 起了一次 ACP agent。**它内部干了什么不在这里**：`session/update` 一路报过来了（`updates` 就是条数），但把 131 条思考与工具调用各摊成一行日志只是把这一轮的 trace 冲成噪声 —— 逐条呈现的读者是人，落点是 Telegram 进度卡片（[05 §3.5.2](./05-tools-and-permissions.md)）。`capabilities` 是这一次**真申报出去**的那几位（按本次调用现算，不是常量）；`filesWritten` / `terminals` 是「它到底动了什么」的凭据 —— `stopReason: 'end_turn'` 加一份漂亮的总结加 `filesWritten: 0` 是实测见过的组合（它只是读了读然后描述了一遍）。**这一行同时是反向调用面那两条 warn 的落点**：`degraded` 带逐条人话的能力降级理由（最常见的是 `sandbox.plan(role, root)` 不是 `'host'`，于是 `terminal` 整位不申报，而配置里那个 `bash` 就成了一个可证明用不了的工具），`terminalsLeaked` 是 agent 建了终端却没 `terminal/release` 的条数 —— 我们替它收拾了，但**那意味着有命令在宿主上一直跑到了我们收摊的时候**。两者任一非空就把这一行抬成 warn，**哪怕这一趟 `ok:true`**；给它们各开一个新 kind 换来的是两个只在异常路径上出现的枚举值，而这张表是双向焊住的（表里有、源码零发出，同样是红）。关停时 `close()` 收拾整个 manager 那一趟也走这个 kind（`at:'shutdown'` + `terminalsLeaked`），它没有 traceId：那时轮次早就结束了。`costUsd` 是外部 agent **自己报的**那个数（`usage_update.cost.amount` 的累计值），落库时它进的是 `agent_runs.external_cost_usd` 而**不是** `cost_usd`（那一列 ACP 行恒 0）—— 所以这个字段名在这张表上从来只有一个意思，两者不共用名字。`runId` 就是库里那一行的 id，这条日志与 `agent_runs` 之间唯一的接缝。⚠ **落库不等于记账接上了**：`usage_ledger` / `quota_counters` / `turns.cost_usd` 里仍然一分钱都没有，唯一的闸是 `agent.acp.maxCostUsd`（[03 §2.7](./03-data-model.md) · [04 §6.2](./04-agents-and-providers.md)）。记账本身失败时也走这个 kind（`recordFailed` + warn）—— 为一条只在写库出错时出现的事新开枚举值不值得，而这张表是双向焊住的 |
+| `agent.ask_unarbitrated` | warn（取消时 info） | askId, agentRunId, reason(no_model/cancelled/timeout/failed/empty), detail, escalationRequested —— 仲裁没能给出答复，worker 接下来按「没人应答」走。`escalationRequested:true` 表示运维开了 `agent.askEscalateToUser` 但那个键仍未接线，**没有真的去问人** |
+| `agent.harness` | info/warn | dir, **dirSource**（`default` \| `requested`）, command, exitCode, timedOut, ms, **runId** —— M11 起了一次外部 harness，父是这一次的 `agent.run` span。**它内部干了什么不在这里**（也不在任何地方），本系统看不见（[14](./14-open-questions.md) T17）。`dirSource` 是 `dir` 变可选之后新增的：默认目录是我们自己算的、每次一个新目录，与模型显式指名一个白名单里的既有仓库，在风险上不是一件事 —— 而两者在这一行里此前长得一模一样 |
+| `acp.run` | info/warn | agent, dir, command, approvalMode, stopReason, error, updates, dropped, toolCalls, capabilities, degraded, filesWritten, terminals, terminalsLeaked, costUsd, runId, ms —— M13 起了一次 ACP agent。**它内部干了什么不在这里**：`session/update` 一路报过来了（`updates` 就是条数），但把 131 条思考与工具调用各摊成一行日志只是把这一轮的 trace 冲成噪声 —— 逐条呈现的读者是人，落点是 Telegram 进度卡片（[05 §3.5.2](./05-tools-and-permissions.md)）。`capabilities` 是这一次**真申报出去**的那几位（按本次调用现算，不是常量）；`filesWritten` / `terminals` 是「它到底动了什么」的凭据 —— `stopReason: 'end_turn'` 加一份漂亮的总结加 `filesWritten: 0` 是实测见过的组合（它只是读了读然后描述了一遍）。**这一行同时是反向调用面那两条 warn 的落点**：`degraded` 带逐条人话的能力降级理由（最常见的是 `sandbox.plan(role, root)` 不是 `'host'`，于是 `terminal` 整位不申报，而配置里那个 `bash` 就成了一个可证明用不了的工具），`terminalsLeaked` 是 agent 建了终端却没 `terminal/release` 的条数 —— 我们替它收拾了，但**那意味着有命令在宿主上一直跑到了我们收摊的时候**。两者任一非空就把这一行抬成 warn，**哪怕这一趟 `ok:true`**；给它们各开一个新 kind 换来的是两个只在异常路径上出现的枚举值，而这张表是双向焊住的（表里有、源码零发出，同样是红）。关停时 `close()` 收拾整个 manager 那一趟也走这个 kind（`at:'shutdown'` + `terminalsLeaked`），它没有 traceId：那时轮次早就结束了。`costUsd` 是外部 agent **自己报的**那个数（`usage_update.cost.amount` 的累计值），落库时它进的是 `agent_runs.external_cost_usd` 而**不是** `cost_usd`（那一列 ACP 行恒 0）—— 所以这个字段名在这张表上从来只有一个意思，两者不共用名字。`runId` 就是库里那一行的 id，但**它不再是这条日志与 `agent_runs` 之间唯一的接缝** —— 同一次调用另有 `agent.spawn` / `agent.run` / `agent.end` 三行带同一个 runId，而 `log_events.agent_run_id` 这一列现在也有写入方了（[§1](#1-trace-模型)）。父是这一次的 `agent.run` span。⚠ **落库不等于记账接上了**：`usage_ledger` / `quota_counters` / `turns.cost_usd` 里仍然一分钱都没有，唯一的闸是 `agent.acp.maxCostUsd`（[03 §2.7](./03-data-model.md) · [04 §6.2](./04-agents-and-providers.md)）。记账本身失败时也走这个 kind（`recordFailed` + warn）—— 为一条只在写库出错时出现的事新开枚举值不值得，而这张表是双向焊住的 |
 | `acp.stderr` | warn | agent —— stdio 子进程 stderr 的**逐行**转发（单行截到 2 KB），与 `mcp.stderr` 同一条理由：那是「它为什么起不来 / 为什么握不上手」的答案所在。omp 一类 agent 把 `console.*` 全重定向到 stderr，所以成功那一路这里也会有话 |
 | `acp.disconnect` | warn | agent, exitCode, signal —— 子进程**自己**退了（我们主动关的走 `#intentional`，不记这一条）。它与 `acp.run` 那条 `error: 'acp_connection_lost'` 是一件事的两面：这一条带退出码 |
 | `acp.permission` | info（拒绝 **warn**） | agent, mode, kind, title, outcome, risk, paths, outsideJail, decidedBy —— agent 反过来问「这一步准不准」时我们回了什么（[05 §3.5.3](./05-tools-and-permissions.md)）。`ask` 档走的是**真审批**（`acpPermissionGate` → 同一张 `approvals` 表 / 同一套 `approval.rules` / TTL / 双通道裁决），所以分档按结论走：批了 info、拒了 warn。`decidedBy` 只有两个值：`human`（真人点的）与 `acp:always`（会话内那份 `allow_always` / `reject_always` 记忆命中 —— 答案早在选中 `*_always` 那一档时就已经给出去了，再问一次是纯表演，但审计行照旧一条一条落，见 [03 §2.11](./03-data-model.md)）。`risk` 由 `toolCall.kind` 推（`execute` / `delete` high，`edit` / `move` medium，读一族 low，**不认识的 kind 一律 medium、绝不猜低**），`outsideJail` 为真时一律抬到 high。`paths` 是**条数**不是路径本身：路径进 `approvals.input_json`，日志摘要不背这份长度。⚠ **`ask` 那一档的 warn 现在是反过来的意思** —— 它以前说的是「ask 档暂按放行」，现在带 `gated: false` 的那条说的是「ask 档没有审批通道，按 deny 处理了」，而那种情形只可能是有人绕过了 `spawn_acp.available()`（`permissionMode='ask'` 而没接 broker 时工具压根不进目录），所以这一行是那件事唯一的凭据。`auto` / `deny` 两档不问人（`floorPermission`），同样带 `gated: false`，级别是 info |
-| `agent.progress` | debug | phase, done/total —— 子 agent 每跑完一步一条（`phase:'step'`），加上模型自己调 `report_progress` 那一条 |
+| `agent.progress` | debug | phase, done/total —— worker 每跑完一步一条（`phase:'step'`），加上模型自己调 `report_progress` 那一条 |
 | `memory.read` / `memory.write` | info | scope, subject, op, bytesAfter |
 | `memory.owner_read_private` | **warn** | targetUserId, actor, op（`read` / `write`）。`user_id` 落的是**被看的那个人** —— 用户自己的 `/memory` 按它查「最近被 owner 查看于 …」。三条路（`memory_read` 工具、`GET`/`PUT /api/prompts/:id`）共用 `MemoryStore.auditPrivateAccess()` 这一个发出点 |
 | `memory.hard_limit` | warn | scope, subject, tokens, hardLimit —— 这次写入被硬上限挡掉了 |
 | `memory.compact` | info | pending —— 压缩复审的定时提醒（`memory.compactCron`） |
-| `skill.load` | info（解析失败 **error**） | name, tokens, minRole, allowedTools, requiresTools, error。**只在那份 skill 真的变了时才落**（`scan()` 自己算的 `name → 内容哈希` 签名）：watcher 一次保存能连发好几个事件，逐次记等于把一次 `install_skill` 写成几十行。解析失败这一档与 `agent.file_invalid` 对称 —— 少了它，「我加的那个 skill 为什么不存在」只能去翻 `skills.load_error` 那一列 |
+| `skill.load` | info（解析失败 **error**） | name, tokens, minRole, allowedTools, requiresTools, error。**只在那份 skill 真的变了时才落**（`scan()` 自己算的 `name → 内容哈希` 签名）：watcher 一次保存能连发好几个事件，逐次记等于把一次 `install_skill` 写成几十行。解析失败这一档单独留着 —— 少了它，「我加的那个 skill 为什么不存在」只能去翻 `skills.load_error` 那一列。它此前与 `agent.file_invalid` 对称，而子 agent 定义体系整个退休之后那一档已经没有了 |
 | `skills.disabled` | info | `skills.enabled=false`：目录整块不扫，一份说明文档都不进工具目录 |
 | `plugin.hook` | debug | plugin, hook, ms —— **只记慢的那一次**：判据是 `ms >= max(50, plugins.hookTimeoutMs / 10)`，也就是「已经吃掉超时预算 10% 的那一次」。钩子每轮要跑好几次（`onToolCall` 是每次工具调用一次），逐次记会把 `logs.level='debug'` 的部署刷爆，而「这个钩子跑了 3ms」不是任何排障问题的答案。运维调紧 `hookTimeoutMs` 时这条线跟着紧 |
 | `plugin.error` | warn | plugin, hook, message, errors, disabled —— **每一次**失败都记。此前只有累计到 `plugins.autoDisableAfterErrors` 时才经告警落一行，而那一行还受 `alerts.on`（默认 `[]`）与 `dedupeMinutes` 管：实测一个三轮必抛的 `beforeTurn`，与 plugin 有关的日志 **0 条**（[reviews/28](./reviews/28-round10-live-system-test.md) · L-LOG-01）。加载失败与目录重扫失败走同一个 kind（`phase:'load'` / `'rescan'`） |
@@ -310,10 +328,10 @@ logs:
 
 > `maintenance.gc_files` **不受影响** —— 它扫的一直是 `media.dir` 与 `data/agent-results/`（`attachments.local_path` / `agent_runs.result_full_ref` 指向的那两棵），日志 blob 从来不在它的范围里。那条「库与目录来自两套部署就整棵拒扫」的守卫照旧留着。
 
-**`retentionDays` 同时管子 agent 的全文结果。** `data/agent-results/<runId>.txt` 是和日志同性质的调试产物，
+**`retentionDays` 同时管 worker 的全文结果。** `data/agent-results/<runId>.txt` 是和日志同性质的调试产物，
 `MaintenanceService.cleanup()` 按 `agent_runs.finished_at` 一并过期：删文件、把 `result_full_ref` 置空，
 `result_summary` 留着（摘要是上下文里已经引用过的东西，删了会让历史轮次的引述悬空）。之后
-`read_agent_result` 回一句「已按日志保留期清理，仅保留摘要」而不是抛 ENOENT（docs/22 · I-09）。
+`read_worker_result` 回一句「已按日志保留期清理，仅保留摘要」而不是抛 ENOENT（docs/22 · I-09）。
 **媒体附件不在这里过期** —— `data/files/**` 是用户数据，自动过期策略是 [14 §2](./14-open-questions.md) Q9
 的未决问题。`POST /api/maintenance/gc-files` 扫的是**孤儿**：磁盘上有、但没有任何 DB 行指向的文件
 （下载中途崩溃、`local_path` 被换掉、手工删过库行留下的），那不是保留策略。
@@ -557,7 +575,7 @@ GET /api/health/detail（需登录）—— 详细状态
 3. 每次模型调用能看到 provider/模型/别名/四类 token/费用/延迟/finishReason；费用之和 = `turns.cost_usd`（误差 < 1e-9）。
    **一旦发生链内 fallback，这三个说的必须是真正出力的那个候选** —— 它与 `usage_ledger` 那一行
    指向同一个 provider（[reviews/28](./reviews/28-round10-live-system-test.md) · L-PROV-01）。
-4. 子 agent 的 span（`agent.run`）挂在派发它的 `tool.call` 之下，且其费用计入同一 turn。
+4. worker 的 span（`agent.run`）挂在派发它的 `tool.call` 之下，且其费用计入同一 turn。
 5. rebase / prune / hardcap 事件在日志中明确可见，且能看出裁掉了哪些 ordinal。
 6. 日志中**不出现**任何 API key、bot token、master key 明文（自动化测试用正则扫 `log_events` 的全部
    `summary` 与**解码后**的 `data`，AC-LOG-007 —— 压缩不是掩护，扫的必须是解出来的那份）。

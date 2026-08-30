@@ -2,7 +2,7 @@ import { rmSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { ArchiveRepository, OperationsRepository, PrincipalRepository, closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
-import { ContextEngine, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceService, ProviderStore, Secrets, TOOL_POLICY, ToolRegistry, configSchema } from '@luoli/core';
+import { ContextEngine, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceService, ProviderStore, Secrets, TOOL_POLICY, ToolRegistry, configSchema, toolCallableBy } from '@luoli/core';
 import type { ToolOverride } from '@luoli/core';
 import { createServer } from '@luoli/server';
 
@@ -128,6 +128,35 @@ describe('GET /api/tools', () => {
     expect(data.bash!.minRole).toBe(TOOL_POLICY.bash.minRole);
     expect(data.bash!.enabled).toBe(false);
     expect(data.bash!.relaxed).toEqual([]);
+    closeDatabase(db);
+  });
+
+  /**
+   * `sides` 与运行时判据同源。**这一条断言的是「同源」而不是某个具体名单** —— 写死一份期望名单
+   * 就等于在测试里造第二份真相，而这一列存在的全部理由正是不许有第二份（docs/09 §3.7）。
+   *
+   * 判据现算，所以静态兜底这条路上它照样是真的：它只看工具名，与有没有注册表无关。
+   */
+  it('每一行的 sides 就是 toolCallableBy() 现算出来的那两问，不是另抄一份名单', async () => {
+    const { app, db, headers } = harness('tools-api-sides');
+    const response = await app.request('/api/tools', { headers: { cookie: headers.cookie } });
+    const data = (await response.json() as { data: Record<string, { sides: string[] }> }).data;
+    for (const name of Object.keys(TOOL_POLICY)) {
+      const expected = [
+        ...(toolCallableBy('main', name) ? ['main'] : []),
+        ...(toolCallableBy('lw', name) ? ['worker'] : []),
+      ];
+      expect(data[name]!.sides, name).toEqual(expected);
+    }
+    // 三态都要真的出现过，否则上面那圈在名单退化成恒等时也会绿。
+    const keys = Object.values(data).map((row) => row.sides.join('+'));
+    for (const shape of ['main', 'worker', 'main+worker'])
+      expect(keys, `没有一个工具落在「${shape}」这一档`).toContain(shape);
+    // 三档各点一个名：`spawn_worker` 是主 agent 独占的派发口（worker 是叶子），`read_file` 只在
+    // worker 那侧（主 agent 不再碰工具），`memory_read` 是刻意两侧共享的只读查询。
+    expect(data.spawn_worker!.sides).toEqual(['main']);
+    expect(data.read_file!.sides).toEqual(['worker']);
+    expect(data.memory_read!.sides).toEqual(['main', 'worker']);
     closeDatabase(db);
   });
 

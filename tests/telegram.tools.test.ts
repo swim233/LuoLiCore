@@ -2,7 +2,7 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { ArchiveRepository, ScheduleRepository, closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
-import { FileTools, PathJail, TOOL_POLICY, ToolRegistry, configSchema, registerBuiltins, type Config, type LogSink } from '@luoli/core';
+import { FileTools, PathJail, TOOL_POLICY, ToolRegistry, configSchema, newToolScope, registerBuiltins, type Config, type LogSink } from '@luoli/core';
 import { TelegramTools, type ParseMode } from '@luoli/telegram';
 import type { Bot } from 'grammy';
 
@@ -52,7 +52,7 @@ function harness(name: string, options: { wired?: boolean; fail?: string; config
   const turn = { turnId: 't1', key: 'chat:1', chatId: '1', threadId: null, initiatorUserId: '2', effectiveRole: 'owner',
     isPrivate: false, baseCommitId: null, triggerTgMessageId: 4321, config,
     snapshot: { messages: [], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 0 }, delta: [], abortSignal: new AbortController().signal };
-  return { db, archive, registry, calls, workspace, turn, context: { turn, workspace, agentKind: 'main' } as never };
+  return { db, archive, registry, calls, workspace, turn, context: { turn, workspace, agentKind: 'main', ...newToolScope() } as never };
 }
 
 describe('telegram side tools', () => {
@@ -71,27 +71,26 @@ describe('telegram side tools', () => {
     const wired = harness('tg-tools-wired');
     const active = new Set(wired.registry.activeNames('owner', wired.context));
     expect(family.filter((name) => !active.has(name))).toEqual([]);
-    // 依赖齐全时，主 agent 可见的集合应当是策略表全集减去以下几族：子 agent 专用的那两个；
-    // `spawn_harness` —— 这个 harness 默认关闭（`agent.harness.allowedDirs` 为空），
-    // 且这条 turn 是群聊（`isPrivate: false`），两个条件各自都足以把它挡在目录之外，
-    // 这正是 docs/14 §2 Q8-a/b 的要求：不进目录，而不是进了目录再报错。
-    // 接着八个是自我扩展那一族：它们由 `registerAuthoringTools` 注册（这个 harness 只装了
-    // builtins），且 `tools.selfExtend.enabled` 出厂关闭，两条各自都足以让它们缺席。
-    // 最后六个是容器管理（docs/05 §3.11）：由 `registerContainerTools` 注册，且
-    // `sandbox.persistent.enabled` 出厂同样关闭，两条各自都足够。
-    // 夹在中间的 `stay_silent` 缺席理由与上述几族都不同：它已注册、角色也满足（owner ≥ trusted），
-    // 挡住它的是 `available()` 里那两道轮次形态闸 —— 这条 turn 没有 `silenceable`，而它的唯一
-    // 置位方是 `ScheduledJobRunner`（docs/02 §10.5 ②）。普通轮次看得见它就是这次改动最坏的
-    // 失败形态：模型可以对正在等待回复的人宣布不汇报。四个 `schedule_*` 则都在目录里
-    // （`deliverable()` 为真），`schedule_update` 因此不出现在这张缺席表上。
-    // `search_tools` 缺席的理由又是另一档：真实部署里它是注册着的（这个 harness 只装 builtins，
-    // 连注册都没有），而即便注册了它也不该在 —— 这条 turn 的折叠集为空（没有 MCP / plugin /
-    // custom 工具），`hasDeferrable()` 为假，于是整个元工具不进目录。这正是 docs/07 §5 承诺的
-    // 纯内建部署提示词逐字节不变：折叠机制在没有可折叠对象时必须完全隐身（`AC-TOOL-049`）。
-    // `spawn_acp` 缺席的理由与 `spawn_harness` 同源（三道门任一不成立就不进目录），另加一条
-    // 独有的：这个 harness 没传 `acp` 依赖，而 `available()` 判的第一项就是它在不在 —— 没有 ACP
-    // 客户端的部署里这个工具不应出现（与 telegram 那五个和 `deliverable()` 的关系相同）。
-    expect(Object.keys(TOOL_POLICY).filter((name) => !active.has(name))).toEqual(['ask_parent', 'report_progress', 'search_tools', 'stay_silent', 'spawn_harness', 'spawn_acp',
+    // 依赖齐全时，主 agent 可见的集合应当是策略表全集减去以下几族。头一大批（文件族、两个沙箱、
+    // 两个 web、`load_skill`）与末尾两族（自我扩展八个、容器六个）缺席的理由现在是同一条：
+    // 它们不在 `MAIN_AGENT_TOOLS` 里，`#eligible()` 那道 `toolCallableBy` 直接滤掉 —— 工具执行
+    // 整体下沉给 worker（docs/05 §4）。后两族原本还各有一条独立的缺席理由（未注册 + 出厂开关关闭），
+    // 那两条仍然成立，只是不再是唯一防线。
+    // `ask_parent` / `report_progress` 是 worker→父的内部通道，同样落在主 agent 白名单之外。
+    // `search_tools` 缺席现在有三条各自足够的理由：不在白名单、`available()` 已翻成
+    // `agentKind === 'lw'`、以及这条 turn 的折叠集为空（`hasDeferrable()` 为假）——最后一条正是
+    // docs/07 §5 承诺的纯内建部署提示词逐字节不变（`AC-TOOL-049`）。
+    // 余下三个是白名单里、被 `available()` 挡下的，判据各不相同：
+    // `stay_silent` 已注册、角色也满足（owner ≥ trusted），挡住它的是那两道轮次形态闸 —— 这条 turn
+    // 没有 `silenceable`，而它的唯一置位方是 `ScheduledJobRunner`（docs/02 §10.5 ②）。普通轮次
+    // 看得见它就是最坏的失败形态：模型可以对正在等待回复的人宣布不汇报。四个 `schedule_*` 则都在
+    // 目录里（`deliverable()` 为真），`schedule_update` 因此不出现在这张缺席表上。
+    // `spawn_harness` 的 harness 默认关闭（`agent.harness.allowedDirs` 为空），且这条 turn 是群聊
+    // （`isPrivate: false`），两个条件各自都足以把它挡在目录之外 —— docs/14 §2 Q8-a/b 要的正是
+    // 不进目录，而不是进了目录再报错。`spawn_acp` 与之同源，另加一条独有的：这个 harness 没传
+    // `acp` 依赖，而 `available()` 判的第一项就是它在不在（与 telegram 那五个和 `deliverable()` 同形）。
+    expect(Object.keys(TOOL_POLICY).filter((name) => !active.has(name))).toEqual(['read_file', 'list_dir', 'glob', 'grep', 'write_file', 'edit_file', 'move_file', 'delete_file',
+      'bash', 'python', 'ask_parent', 'report_progress', 'web_fetch', 'web_search', 'load_skill', 'search_tools', 'stay_silent', 'spawn_harness', 'spawn_acp',
       'define_tool', 'delete_tool', 'list_tools', 'write_skill', 'install_skill', 'write_plugin', 'install_mcp', 'list_mcp',
       'container_list', 'container_exec', 'container_reset', 'container_inspect', 'container_keep', 'container_logs']);
     closeDatabase(wired.db);

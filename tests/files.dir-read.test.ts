@@ -2,7 +2,7 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
-import { FileTools, PathJail, SkillLoader, ToolRegistry, configSchema, registerBuiltins } from '@luoli/core';
+import { FileTools, PathJail, SkillLoader, ToolRegistry, configSchema, newToolScope, registerBuiltins } from '@luoli/core';
 import type { ApprovalBroker, LogSink } from '@luoli/core';
 import type { RuntimeTurnContext } from '@luoli/shared';
 
@@ -135,7 +135,9 @@ function skillHarness(name: string): { db: ReturnType<typeof openDatabase>; regi
   const turn = { turnId: 't', key: 'k', chatId: 'c', threadId: null, initiatorUserId: 'u', effectiveRole: 'owner',
     isPrivate: true, baseCommitId: null, snapshot: { messages: [], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 0 },
     delta: [], abortSignal: new AbortController().signal, config: configSchema.parse({}) } as unknown as RuntimeTurnContext;
-  return { db, registry, context: { turn, workspace: resolve('./data'), agentKind: 'main' } };
+  // `lw`：`read_file` 在 worker 那一侧（docs/05 §4），主 agent 侧连 `admit()` 都过不了 ——
+  // 本条判的是 `skill://` 支路上的目录形状，与派发那道闸正交。
+  return { db, registry, context: { turn, workspace: resolve('./data'), agentKind: 'lw', ...newToolScope() } };
 }
 
 describe('read_file 的 skill:// 支路同样报 path_is_directory', () => {

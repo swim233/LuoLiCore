@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import type { LanguageModel } from 'ai';
 import { ArchiveRepository, OperationsRepository, closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
-import { AgentManager, AgentResultStore, ContextEngine, LogSink, PromptAssembler, PromptDocuments, QuotaGuard, ToolRegistry, UsageLedger, configSchema, runMainAgent, runSubAgent, streamMainAgent } from '@luoli/core';
+import { AgentManager, AgentResultStore, ContextEngine, LogSink, PromptAssembler, PromptDocuments, QuotaGuard, ToolRegistry, UsageLedger, configSchema, runMainAgent, runLwWorker, streamMainAgent } from '@luoli/core';
 import type { ApprovalBroker, Config, ModelRegistry } from '@luoli/core';
 import type { RuntimeTurnContext } from '@luoli/shared';
 
@@ -244,16 +244,15 @@ describe('model wiring through prepareStep', () => {
   it('commits sub-agent spend into the same quota reservation as the main agent', async () => {
     const { db, turn, dependencies, quota } = harness('wiring-subquota');
     const registry = registryFor({ main: [{ model: candidate('m1', () => ok), info: info('m1') }] });
-    const manager = new AgentManager(db, new AgentResultStore('./data/wiring-subquota-results'),
-      [{ name: 'researcher', description: 'r', modelAlias: 'main', maxSteps: 2, minRole: 'limited', tools: [], resultMaxChars: 100, instructions: 'r', injectMemory: false }], 3, 10);
+    const manager = new AgentManager(db, new AgentResultStore('./data/wiring-subquota-results'), 10);
     const reservation = quota.reserve({ chatId: turn.chatId, userId: turn.initiatorUserId, estimateUsd: 0.01,
       limits: { globalDaily: 10, globalMonthly: 10, chatDaily: 10, chatMonthly: 10, userDaily: 10, userMonthly: 10 } })!;
     expect(reservation).toBeTruthy();
     const parent = manager.createMain(turn.turnId, 'trusted', 'main');
-    const { run, definition } = manager.spawn(parent, 'researcher', 'do the research task please');
-    await runSubAgent(run, definition, 'do the research task please', undefined, turn,
+    const run = manager.spawn(parent, 'do the research task please', 'main');
+    await runLwWorker(run, 'do the research task please', undefined, turn,
       { db, agents: manager, registry, tools: dependencies.tools, ledger: dependencies.ledger, log: dependencies.log, workspace: './data',
-        provider: { maxRetries: 0, retryBaseMs: 1, retryMaxMs: 1 }, quota, reservation });
+        provider: { maxRetries: 0, retryBaseMs: 1, retryMaxMs: 1 }, quota, reservation }, { modelAlias: 'main' });
     const ledgerTotal = dependencies.ledger.turnCost(turn.turnId);
     const counted = db.prepare("SELECT cost_usd AS cost FROM quota_counters WHERE scope='user' AND window='day'").pluck().get() as number;
     expect(ledgerTotal).toBeGreaterThan(0);
@@ -272,12 +271,12 @@ describe('model wiring through prepareStep', () => {
     // 信号走真实路径：图片落地那一步调用的正是 `context.subAgent.onMediaInjected()`
     // （`captureImage` 中的那一句）。手动修改 `turn.mediaInjected` 覆盖不到这条链路：父轮的标志现在
     // 有意不参与子 agent 的判据，因为父轮的图片不在它的 messages 中，跟随切换只会多付费用。
-    let seenContext: { subAgent?: { alias: string; name: string } } | null = null;
-    // `minRole` 需不高于子 agent 的有效角色（`min(父 agent, definition.minRole)` 即 limited），
-    // 否则它不会进入该工具目录：注册期 fail-closed，而表现仅为模型调用了一个不存在的工具。
+    let seenContext: { worker?: { alias: string; name: string } } | null = null;
+    // `minRole` 需不高于 worker 的有效角色（现在就是父 run 的角色），否则它不会进入该工具目录：
+    // 注册期 fail-closed，而表现仅为模型调用了一个不存在的工具。
     dependencies.tools.register({ name: 'shot', description: '', inputSchema: z.object({}),
       policy: { minRole: 'limited', approval: 'never', scope: 'chat', source: 'builtin' }, sourcePriority: 1,
-      execute: (_input, context) => { seenContext = context; context.subAgent?.onMediaInjected(); return { ok: true }; } });
+      execute: (_input, context) => { seenContext = context; context.worker?.onMediaInjected(); return { ok: true }; } });
     let step = 0;
     const blind = { ...candidate('blind', () => ok), doGenerate: async () => {
       step += 1;
@@ -288,15 +287,14 @@ describe('model wiring through prepareStep', () => {
       low: [{ model: blind, info: info('blind') }],
       vision: [{ model: candidate('seeing', () => ok), info: info('seeing', true) }],
     });
-    const manager = new AgentManager(db, new AgentResultStore('./data/wiring-subvision-results'),
-      [{ name: 'researcher', description: 'r', modelAlias: 'low', maxSteps: 2, minRole: 'limited', tools: ['shot'], resultMaxChars: 100, instructions: 'r', injectMemory: false }], 3, 10);
+    const manager = new AgentManager(db, new AgentResultStore('./data/wiring-subvision-results'), 10);
     const parent = manager.createMain(turn.turnId, 'trusted', 'main');
-    const { run, definition } = manager.spawn(parent, 'researcher', 'read that picture please');
-    await runSubAgent(run, definition, 'read that picture please', undefined, turn,
+    const run = manager.spawn(parent, 'read that picture please', 'low');
+    await runLwWorker(run, 'read that picture please', undefined, turn,
       { db, agents: manager, registry, tools: dependencies.tools, ledger: dependencies.ledger, log: dependencies.log, workspace: './data',
-        provider: { maxRetries: 0, retryBaseMs: 1, retryMaxMs: 1 } });
-    // 图片路径需按子 agent 自身的别名查询能力位，因此别名与名字都要传到工具侧（docs/04 §5.2）。
-    expect(seenContext!.subAgent).toMatchObject({ alias: 'low', name: 'researcher' });
+        provider: { maxRetries: 0, retryBaseMs: 1, retryMaxMs: 1 } }, { tools: ['shot'] });
+    // 图片路径需按 worker 自身的别名查询能力位，因此别名与名字都要传到工具侧（docs/04 §5.2）。
+    expect(seenContext!.worker).toMatchObject({ alias: 'low', name: 'lw' });
     // 第一步仍在 low 上（图片在这一步才产生），第二步该图片进入请求体，于是切换到 vision；
     // 记账随之切换：已切换却按定义中的别名记账会把费用计到未执行的模型上。
     const rows = db.prepare('SELECT model_id AS modelId,model_alias AS alias FROM usage_ledger ORDER BY rowid').all() as Array<{ modelId: string; alias: string }>;
@@ -313,11 +311,10 @@ describe('model wiring through prepareStep', () => {
       low: [{ model: candidate('blind', () => ok), info: info('blind') }],
       vision: [{ model: candidate('seeing', () => ok), info: info('seeing', true) }],
     });
-    const manager = new AgentManager(db, new AgentResultStore('./data/wiring-subvision-none-results'),
-      [{ name: 'researcher', description: 'r', modelAlias: 'low', maxSteps: 1, minRole: 'limited', tools: [], resultMaxChars: 100, instructions: 'r', injectMemory: false }], 3, 10);
+    const manager = new AgentManager(db, new AgentResultStore('./data/wiring-subvision-none-results'), 10);
     const parent = manager.createMain(turn.turnId, 'trusted', 'main');
-    const { run, definition } = manager.spawn(parent, 'researcher', 'just read this text');
-    await runSubAgent(run, definition, 'just read this text', undefined, turn,
+    const run = manager.spawn(parent, 'just read this text', 'low');
+    await runLwWorker(run, 'just read this text', undefined, turn,
       { db, agents: manager, registry, tools: dependencies.tools, ledger: dependencies.ledger, log: dependencies.log, workspace: './data',
         provider: { maxRetries: 0, retryBaseMs: 1, retryMaxMs: 1 } });
     // 纯文本的子 agent 不应被升级到高价别名：vision 只在确实存在图片时优先。
@@ -425,13 +422,17 @@ describe('model wiring through prepareStep', () => {
    */
   it('appends a paired tool-result for a tool call the SDK rejected on input validation', async () => {
     const { db, turn, dependencies } = harness('wiring-tool-error');
-    dependencies.tools.register({ name: 'look', description: '', inputSchema: z.object({ path: z.string() }),
-      policy: { minRole: 'trusted', approval: 'never', scope: 'chat', source: 'builtin' }, sourcePriority: 1, execute: () => ({ ok: true }) });
+    // 用 `get_message` 而不是随手起一个名字：主 agent 只调得到 `MAIN_AGENT_TOOLS` 里那些
+    // （`toolCallableBy` 在 `#eligible()` 与 `admit()` 各判一次），别的名字连 toolSet 都进不去，
+    // 撞的是 `NoSuchToolError` 而不是这条用例要复现的输入校验失败。而当年那次事故的起点
+    // 恰好就是 `get_message({messageId:0})`。
+    dependencies.tools.register({ name: 'get_message', description: '', inputSchema: z.object({ messageId: z.number().int().positive() }),
+      policy: { minRole: 'limited', approval: 'never', scope: 'chat', source: 'builtin' }, sourcePriority: 1, execute: () => ({ ok: true }) });
     let step = 0;
     const model = { model: { ...candidate('m1', () => ok), doGenerate: async () => {
       step += 1;
-      // `path` 要求 string 而传入 number：AI SDK 在调用 execute 之前即判定 InvalidToolInputError。
-      return (step === 1 ? { ...ok, content: [{ type: 'tool-call', toolCallId: 'c1', toolName: 'look', input: '{"path":123}' }] } : ok) as never;
+      // `messageId` 要求正整数而传入 0：AI SDK 在调用 execute 之前即判定 InvalidToolInputError。
+      return (step === 1 ? { ...ok, content: [{ type: 'tool-call', toolCallId: 'c1', toolName: 'get_message', input: '{"messageId":0}' }] } : ok) as never;
     } } as ReturnType<typeof candidate>, info: info('m1') };
     await runMainAgent(turn, { ...dependencies, registry: registryFor({ main: [model] }) });
     const parts = turn.delta.flatMap((message) => message.parts as Array<{ type?: string; toolCallId?: string; output?: { type?: string; value?: unknown } }>);
