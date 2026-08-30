@@ -6,7 +6,7 @@ import { closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
 describe('quota reservation', () => {
   it('atomically prevents concurrent overspending', () => {
     const path = './data/quota.test.db';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
     const db = openDatabase(path);
     migrateDatabase(db);
     const guard = new QuotaGuard(db, 'UTC');
@@ -31,7 +31,7 @@ describe('canStart：定时轮次不吃频率闸', () => {
     db.prepare(`INSERT INTO turns(id,key,chat_id,initiator_user_id,effective_role,trigger_reason,state,started_at)
       VALUES (?,'chat:c','c','u','owner',?,'committed',?)`).run(id, reason, Date.now());
   };
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
   const db = openDatabase(path);
   migrateDatabase(db);
   const guard = new QuotaGuard(db, 'UTC');

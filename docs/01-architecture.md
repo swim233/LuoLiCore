@@ -228,9 +228,9 @@ LuoLiCore/
 ├── agents/<name>.md                子 agent 的只读定义（D22）
 ├── data/
 │   ├── luoli.db  luoli.db-wal  luoli.db-shm
+│   ├── logs.db   logs.db-wal   logs.db-shm      日志的唯一落点，主连接 ATTACH 上来（10 §3）
 │   ├── files/<chatId>/<fileUniqueId>.<ext>
 │   └── workspace/<chatId>/         工具的可写工作目录（沙箱挂载点）
-├── logs/YYYY-MM-DD/{turn,model,tool,system}.jsonl
 ├── docs/                           本目录（`reviews/` 是冻结的历史复审）
 └── docker/
     ├── Dockerfile                  应用镜像

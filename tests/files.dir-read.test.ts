@@ -117,7 +117,7 @@ const log = { span: () => ({ id: 's', end: () => undefined }), event: () => unde
  */
 function skillHarness(name: string): { db: ReturnType<typeof openDatabase>; registry: ToolRegistry; context: object } {
   const path = `./data/${name}.test.db`;
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
   const directory = resolve(`data/${name}-skills`);
   rmSync(directory, { recursive: true, force: true });
   mkdirSync(`${directory}/demo/assets`, { recursive: true });

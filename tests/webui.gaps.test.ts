@@ -9,19 +9,17 @@ import { createServer, issueLoginToken } from '@luoli/server';
 
 function harness(name: string, extra: Record<string, unknown> = {}) {
   const path = `./data/${name}.test.db`;
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
-  const logDir = `./data/${name}-logs`;
-  rmSync(logDir, { recursive: true, force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
   const workspace = resolve(`./data/${name}-workspace`);
   rmSync(workspace, { recursive: true, force: true });
   mkdirSync(workspace, { recursive: true });
   const db = openDatabase(path); migrateDatabase(db);
-  const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, webui: { passwordHash: 'secret-hash' }, logs: { dir: logDir }, sandbox: { workspaceDir: workspace }, db: { path }, ...extra });
-  const operations = new OperationsRepository(db); const events = new EventBus(); const log = new LogSink(operations, logDir);
+  const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, webui: { passwordHash: 'secret-hash' }, sandbox: { workspaceDir: workspace }, db: { path }, ...extra });
+  const operations = new OperationsRepository(db); const events = new EventBus(); const log = new LogSink(operations);
   const archive = new ArchiveRepository(db);
   const app = createServer({ config, db, operations, principals: new PrincipalRepository(db), archive, context: new ContextEngine(db, archive),
     providers: new ProviderStore(db, new Secrets('x'.repeat(32))), approvals: new DatabaseApprovalBroker(db, config, events, log),
-    maintenance: new MaintenanceService(db, path, 2, 30, logDir), ledger: new UsageLedger(db), events, log, configSchema: {}, startedAt: Date.now(), setup: undefined });
+    maintenance: new MaintenanceService(db, path, 2, 30), ledger: new UsageLedger(db), events, log, configSchema: {}, startedAt: Date.now(), setup: undefined });
   const session = operations.createSession(1);
   return { app, db, workspace, headers: { cookie: `luoli_sid=${session.id}`, 'x-csrf-token': session.csrf, 'content-type': 'application/json' } };
 }

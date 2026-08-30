@@ -10,7 +10,7 @@ import type { RuntimeTurnContext } from '@luoli/shared';
 function harness() {
   const path = './data/subagent.test.db';
   const results = './data/subagent-results';
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
   rmSync(results, { recursive: true, force: true });
   const db = openDatabase(path);
   migrateDatabase(db);
@@ -87,11 +87,11 @@ describe('AC-TOOL-052 · 子 agent 的工具目录与折叠正交', () => {
   function wired(slug: string) {
     const path = `./data/${slug}.test.db`;
     const results = `./data/${slug}-results`;
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
     rmSync(results, { recursive: true, force: true });
     const db = openDatabase(path); migrateDatabase(db);
     const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, quota: { requirePricing: false }, approval: { enabled: false } });
-    const log = new LogSink(new OperationsRepository(db), `./data/${slug}-logs`);
+    const log = new LogSink(new OperationsRepository(db));
     // 折叠开着才有可折叠的东西：`search_tools` 的 `available()` 第二道闸问的正是 `hasDeferrable`。
     const tools = new ToolRegistry(log, { request: async () => true },
       { maxRegistered: 20, maxCallsPerTurn: 5, maxConsecutiveErrors: 3, catalog: { deferExternal: true } });

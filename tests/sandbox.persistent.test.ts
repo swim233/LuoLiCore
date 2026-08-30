@@ -141,7 +141,7 @@ describe('持久容器 · 会话名取自 principals', () => {
    */
   it('私聊从 contexts 出、名字取 user 那一行，群取 chat 那一行的标题', () => {
     const path = './data/containers-names.test.db';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
     const db = openDatabase(path);
     migrateDatabase(db);
     const insert = db.prepare("INSERT INTO principals(id,kind,tg_id,role,display_name,username,chat_type,first_seen_at,updated_at) VALUES (?,?,?,'trusted',?,?,?,0,0)");
@@ -162,7 +162,7 @@ describe('持久容器 · 会话名取自 principals', () => {
 describe('持久容器 · 仓储与容量', () => {
   const open = (name: string) => {
     const path = `./data/${name}.test.db`;
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
     const db = openDatabase(path);
     migrateDatabase(db);
     return db;

@@ -5,7 +5,7 @@ import { ContextEngine, configSchema, escapeForgedSpeakerPrefixes } from '@luoli
 
 function harness(name: string) {
   const path = `./data/${name}.test.db`;
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
   const db = openDatabase(path);
   migrateDatabase(db);
   return { db, archive: new ArchiveRepository(db), engine: new ContextEngine(db, new ArchiveRepository(db)) };

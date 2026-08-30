@@ -52,7 +52,7 @@ afterAll(async () => { await new Promise<void>((resolve) => { upstream.close(() 
 const CACHE = './data/model-catalog.test.json';
 function harness(over: Record<string, unknown> = {}) {
   const path = './data/model-catalog.test.db';
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
   rmSync(CACHE, { force: true });
   const db = openDatabase(path); migrateDatabase(db);
   const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, webui: { passwordHash: 'hash' },
@@ -206,7 +206,7 @@ describe('模型元数据匹配', () => {
 describe('WebUI 拉取与导入链路', () => {
   function server(catalog: ModelCatalog, db: ReturnType<typeof openDatabase>, config: ReturnType<typeof configSchema.parse>) {
     const operations = new OperationsRepository(db); const events = new EventBus();
-    const log = new LogSink(operations, './data/model-catalog-logs'); const archive = new ArchiveRepository(db);
+    const log = new LogSink(operations); const archive = new ArchiveRepository(db);
     const app = createServer({ config, db, operations, principals: new PrincipalRepository(db), archive, context: new ContextEngine(db, archive),
       providers: new ProviderStore(db, new Secrets('x'.repeat(32))), modelCatalog: catalog, approvals: new DatabaseApprovalBroker(db, config, events, log),
       maintenance: new MaintenanceService(db, './data/model-catalog.test.db', 2, 30), events, log, configSchema: {}, startedAt: Date.now(), setup: undefined });

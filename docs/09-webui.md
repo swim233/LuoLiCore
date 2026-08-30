@@ -559,7 +559,7 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
   ├ telegram.send       (300ms) msg 8841
   └ context.commit      (14ms) rebase onto c042, prune 2 turns
   ```
-  每个节点可展开看完整 payload（请求 messages、工具输入输出、响应），大 payload 从 `logs/*.jsonl` 按 `file_ref` 懒加载。
+  每个节点可展开看完整 payload（请求 messages、工具输入输出、响应）—— 它就在那一行的 `data` 列上，按 `data_codec` 解码即可。
   缩进按 `parent_span_id` **链**算 depth（[10 §1](./10-logging-and-observability.md#1-trace-模型)），不是「有父就缩一级」——
   后者在 `parent_span_id` 全库为 NULL 的年代看不出问题，父边真的连上之后会把 `agent.run` 下面那三层
   压成同一层（docs/28 · L-LOG-04）。**环与悬挂父都按 depth 0 渲染**：一次查询只取 500 行，
@@ -916,9 +916,9 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
 | `POST /api/chats/:key/reset` `POST /api/chats/:key/undo` | 等价 `/new` `/undo` |
 | `GET /api/messages` `GET /api/messages/:id` `DELETE /api/messages/:id` | 消息检索（`?q=` 走 FTS）。列表结果里 `turnId` 会回填：触发消息自己不带 `turn_id`（只有回复落盘才写那一列），但检索命中后最想点开的正是它那一轮，所以按 `turns.trigger_message_id` 反查补上。每条还带 `attachments:[{id, kind, mime, fileName, sizeBytes, width, height, durationSec, downloadState, downloadError, extractState, hasLocal}]`（按 `message_id` 一次 IN 查询归组）—— **不返回 `local_path`**：磁盘路径对界面没用，泄漏出去只是白送一份部署布局。单条详情**另带 `rawJson`**（脱敏后的原始 Telegram 载荷，见 §3.3）；**列表不带** —— 一页 50 条各一份完整 update |
 | `GET /api/turns` | 最近的模型对话，按 turn 聚合：`?page=1&size=20`（size 上限 100）→ `{items, total, page, size}`。每项带触发消息正文（`prompt`）与该轮 bot 回复（`reply`，按内容去重）、状态、步数/工具数/token/花费，以及触发消息上的 `attachments`（形状同 `GET /api/messages`，另带 `promptMessageId`）。分页走 SQL `LIMIT/OFFSET` |
-| `GET /api/turns/:id/detail` | 一次对话的**实际调用载荷**：`{turn, captureBodies, events:[{id, ts, level, kind, summary, spanId, parentSpanId, durationMs, text, bytes, truncated, fileRef}], contextMessages:[{ordinal, id, role, origin, pruneLevel, pruneApplied, textPreview, tokens, createdAt, text, bytes, truncated, fileRef}]}`。`events` 是 `log_events` 里 `trace_id = turn id` 的全部 span（上限 500 条，按时间序）；`text` 是格式化后的 `data_json`，单条超过 120k 字符截断并置 `truncated`。超过 `logs.bodyMaxBytes` 的载荷已被 `LogSink` 挪进 `logs/<day>/blobs/*.json`，这里**解引用后再返回**（不然详情里只剩一行 `{"fileRef":…}`）；blob 已被保留策略清掉时 `text=null` 且保留 `fileRef`。turn 不存在返回 404。`contextMessages` 是该轮写进 `context_messages` 的消息（按 `(key, turn_id)` 取，上限 500），`text` 是**原始 `parts_json`** —— 不走 `ContextRepository.messages()`，那条路会跑 `elidePart` 把降级过的行改写成占位符。这是工具输入对历史轮次唯一有效的来源 |
-| `GET /api/logs/:id` | 单条日志事件的详情（日志页点开一行）：整行 camelCase（`id, ts, level, kind, traceId, spanId, parentSpanId, chatId, userId, key, summary, durationMs`） + `{text, bytes, truncated, fileRef}`（与 `GET /api/turns/:id/detail` 共用 `detailPayload`：120k 截断 + blob 解引用）。**注册在 `/api/logs/blob` 与 `/api/logs/trace/:traceId` 之后**（Hono 按注册序匹配，`:id` 放前面会把那两条整个吃掉），非数字 id 直接 404 |
-| `GET /api/logs/:id/data` | 单条日志事件的完整载荷（`application/json` 附件下载），blob 同样解引用。详情视图里的 JSON 会被截断，复制与下载必须拿到完整那一份 |
+| `GET /api/turns/:id/detail` | 一次对话的**实际调用载荷**：`{turn, captureBodies, events:[{id, ts, level, kind, summary, spanId, parentSpanId, durationMs, text, bytes, truncated}], contextMessages:[{ordinal, id, role, origin, pruneLevel, pruneApplied, textPreview, tokens, createdAt, text, bytes, truncated}]}`。`events` 是 `log_events` 里 `trace_id = turn id` 的全部 span（上限 500 条，按时间序）；`text` 是**解码后**格式化的 `data`（`data_codec` 为 `zstd` 时先解压），单条超过 120k 字符截断并置 `truncated`。行在就意味着载荷在，所以不再有「载荷已被清理」这一档。turn 不存在返回 404。`contextMessages` 是该轮写进 `context_messages` 的消息（按 `(key, turn_id)` 取，上限 500），`text` 是**原始 `parts_json`** —— 不走 `ContextRepository.messages()`，那条路会跑 `elidePart` 把降级过的行改写成占位符。这是工具输入对历史轮次唯一有效的来源 |
+| `GET /api/logs/:id` | 单条日志事件的详情（日志页点开一行）：整行 camelCase（`id, ts, level, kind, traceId, spanId, parentSpanId, chatId, userId, key, summary, durationMs`） + `{text, bytes, truncated}`（与 `GET /api/turns/:id/detail` 共用 `detailPayload` 做 120k 截断，载荷先经 `decodeLogPayload` 还原）。**注册在 `/api/logs/trace/:traceId` 之后**（Hono 按注册序匹配，`:id` 放前面会把它整个吃掉），非数字 id 直接 404 |
+| `GET /api/logs/:id/data` | 单条日志事件的完整载荷（`application/json` 附件下载），同样先经 `decodeLogPayload` 还原。详情视图里的 JSON 会被截断，复制与下载必须拿到完整那一份。行没有、或该行本就没有载荷时 404 |
 | `GET /api/files/:attachmentId` | 附件下载（校验 session）。默认 `content-disposition: attachment`；`?inline=1` 只对**光栅图**（`image/png` `image/jpeg` `image/gif` `image/webp`）放行内联渲染 —— 附件的 mime 来自 Telegram、是发送方可控的，同源内联 SVG/HTML 等于把用户上传的内容变成本站脚本，白名单之外一律照旧当附件下载 |
 | `GET /api/prompts` `GET /api/prompts/:id` `PUT /api/prompts/:id` | 提示词（body 读写） |
 | `GET /api/prompts/:id/revisions` `POST /api/prompts/:id/rollback` | 版本 |
@@ -956,7 +956,7 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
 | `PUT/DELETE /api/mcp/:name/auth` | 设 / 清 bearer token。写入即加密（`LUOLI_MASTER_KEY`），任何读路径都不回显；拒 `«redacted»`。缺凭据库（通常是缺 `LUOLI_MASTER_KEY`）时四条 auth 端点一律 500 `mcp_auth_unavailable` —— **不假装保存成功**（照 `PUT /api/quota` 回 `not_implemented` 的先例） |
 | `GET/PATCH/DELETE /api/custom-tools[/:name]` | 模型自撰写的工具。缺装配时 500 `not_implemented` 而不是空数组 |
 | `GET /api/agents` `POST /api/agents/:name/dryrun` | 子 agent 定义与 NDJSON 隔离试跑（定义增删改走 `agent.agents` 配置） |
-| `GET /api/logs` `GET /api/logs/:id` `GET /api/logs/trace/:traceId` `GET /api/logs/blob?ref=` | 日志 |
+| `GET /api/logs` `GET /api/logs/:id` `GET /api/logs/:id/data` `GET /api/logs/trace/:traceId` | 日志 |
 | `GET /api/usage` | 用量明细（`usage_ledger`，最近 1000 条） |
 | `GET /api/usage/report?groupBy&from&to` | 用量聚合。`groupBy` ∈ `day\|chat\|user\|model\|alias\|agent`，非法值 400；`chat`/`user` 的行带回 `label`（服务端反查 `principals`） |
 | `GET /api/quota` | 配额页的全部数据：`{quota, timezone, buckets:{day,month}, counters:[…], unpriced:[…], unpricedTotal, unimplemented:[…]}`。`counters` 是 `quota_counters` 全表（上限 500 行）**加上服务端合成的 `limit`**：`(scope, window)` 到配置的取值规则含 `perUser.byRole` 覆盖，让前端自己拼等于把 `bot.ts` 的规则实现两遍。`current` 标记该行是否落在当前 bucket；chat/user 行按 `principals` 反查 `role`/`label`/`username`；配了 `byRole` 时 user 行带 `limitApprox`（有效角色要连会话一起算 —— 群里取较高者再封顶 `trusted`，所以实际那档可能比这里高，服务端在这张表上只看得到用户自己那一档）。`unimplemented` 转发 `KNOWN_UNIMPLEMENTED_CONFIG_KEYS` 里 `quota.` 开头的那几项，界面据此不给控件 |
@@ -975,7 +975,7 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
 | `GET /api/config/export` `POST /api/config/import` | 配置覆盖层的导出 / 导入。密钥类键不导出（不是导成 `«redacted»`）；导入按键覆盖、不删除 |
 | `GET/PUT /api/config/yaml` | 原始 YAML 模式。解析在服务端（与 `loadConfig` 同一个解析器）；语法错误回 `{line, column}`，校验错误回 zod 路径。`GET` 跳过密钥类行并在 YAML 顶部生成注释逐条点名；`PUT` **按叶子落库**（递归对象、数组当叶子），并删掉「落在提交段之下、不在新叶子集里」的旧键 —— 密钥类行与 env 钉住的键排除在删除集之外。响应 `{keys, skipped, pruned, preserved, subsumed}` |
 | `POST /api/auth/token` | 用 `/webui` 发的一次性 token 换 session。单次使用、5 分钟过期；**在鉴权中间件的放行名单里**（否则它自己就要求先登录） |
-| `GET /api/logs?minLevel=` | 日志列表。`minLevel` ∈ `debug\|info\|warn\|error`，总览页的「最近错误」卡片用 `warn`。字段是 `log_events` 的列（snake_case）**减去 `data_json`，加 `data_bytes`** —— 单条载荷能到 `logs.bodyMaxBytes`（256 KB）、列表一次上千行，带着载荷刷新等于每次往浏览器推几十 MB。要正文走 `GET /api/logs/:id` |
+| `GET /api/logs?minLevel=` | 日志列表。`minLevel` ∈ `debug\|info\|warn\|error`，总览页的「最近错误」卡片用 `warn`。字段是 `log_events` 的列（snake_case）**减去 `data` 与 `data_codec`，留 `data_bytes`** —— 单条载荷没有上限（实测 `model.call` 均 29 KB、最大 5 MB）、列表一次上千行，带着载荷刷新等于每次往浏览器推几十 MB。要正文走 `GET /api/logs/:id` |
 | `GET /api/events` | SSE |
 
 **定时任务的 `at` 在两个方向上不是同一种字符串**：`GET` 发 `toISOString()` 的 UTC 瞬时，

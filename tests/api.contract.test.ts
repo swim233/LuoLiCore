@@ -4,12 +4,13 @@ import { ArchiveRepository, OperationsRepository, PrincipalRepository, SandboxCo
 import { ConfigStore, ContainerManager, ContextEngine, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceService, McpManager, ModelRegistry, ProviderStore, Sandbox, Secrets, SkillLoader, configSchema } from '@luoli/core';
 import { createServer, type ServerDependencies } from '@luoli/server';
 import { zipFixture } from './fixtures/zip.js';
+import { logPayloads, logRows } from './support/logs.js';
 
 function harness(extend: (base: { db: ReturnType<typeof openDatabase>; config: ConfigStore; events: EventBus; log: LogSink }) => Partial<ServerDependencies> = () => ({})) {
-  const path = './data/api-contract.test.db'; for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+  const path = './data/api-contract.test.db'; for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
   const db = openDatabase(path); migrateDatabase(db);
   const config = new ConfigStore(configSchema.parse({ access: { bootstrapOwnerId: '1' }, webui: { passwordHash: 'hash' } }));
-  const operations = new OperationsRepository(db); const events = new EventBus(); const log = new LogSink(operations, './data/api-contract-logs'); const archive = new ArchiveRepository(db);
+  const operations = new OperationsRepository(db); const events = new EventBus(); const log = new LogSink(operations); const archive = new ArchiveRepository(db);
   const app = createServer({ config, db, operations, principals: new PrincipalRepository(db), archive, context: new ContextEngine(db, archive), providers: new ProviderStore(db, new Secrets('x'.repeat(32))), approvals: new DatabaseApprovalBroker(db, () => config.snapshot(), events, log), maintenance: new MaintenanceService(db, path, 2, 30), events, log, configSchema: {}, startedAt: Date.now(), setup: undefined, ...extend({ db, config, events, log }) });
   const session = operations.createSession(1); const headers = { cookie: `luoli_sid=${session.id}`, 'x-csrf-token': session.csrf, 'content-type': 'application/json' };
   return { app, db, config, headers };
@@ -440,7 +441,7 @@ describe('documented API surface', () => {
     expect(db.prepare("SELECT model_ids_json FROM model_aliases WHERE alias='high'").pluck().get()).toBe(JSON.stringify(['kept']));
     expect(db.prepare("SELECT COUNT(*) FROM model_aliases WHERE alias='vision'").pluck().get()).toBe(0);
     // 运行时对链为空没有任何提示（不注册，`#pick` 回退到 main），因此那条 warn 是唯一凭据。
-    const warned = db.prepare("SELECT data_json FROM log_events WHERE kind='model.alias_emptied'").pluck().all() as string[];
+    const warned = logPayloads(db, 'model.alias_emptied');
     expect(warned).toHaveLength(1);
     expect(JSON.parse(warned[0]!)).toMatchObject({ alias: 'vision' });
     closeDatabase(db);
@@ -599,9 +600,9 @@ describe('documented API surface', () => {
     // 异常原文包含数据库的绝对路径，不得对外返回：回传给前端的只有那一行日志的 id。
     expect(body.error.message).not.toContain('/srv/luoli');
     expect(body.error.message).toMatch(/ref: \d+/);
-    const logged = db.prepare("SELECT summary,data_json FROM log_events WHERE kind='webui.error'").get() as { summary: string; data_json: string };
+    const logged = logRows(db, 'webui.error')[0]!;
     expect(logged.summary).toContain('/api/maintenance/vacuum');
-    expect(logged.data_json).toContain('disk image is malformed');
+    expect(logged.data).toContain('disk image is malformed');
     // ref 指向的正是那一行，否则运维据此在日志页搜索将无结果。
     expect(body.error.message).toContain(String(db.prepare("SELECT id FROM log_events WHERE kind='webui.error'").pluck().get()));
     closeDatabase(db);

@@ -54,7 +54,7 @@ const harness = (overrides: Partial<ContainerRuntimeConfig['persistent']> = {}) 
  */
 const fresh = (overrides: Partial<ContainerRuntimeConfig['persistent']> = {}) => {
   purge();
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${dbPath}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${dbPath}${suffix}`, { force: true });
   return harness(overrides);
 };
 /**
@@ -76,7 +76,7 @@ describe.skipIf(!dockerReady)('持久容器 · 真 docker', () => {
   afterAll(() => {
     purge();
     rmSync(ROOT, { recursive: true, force: true });
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${dbPath}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${dbPath}${suffix}`, { force: true });
   });
 
   it('同一个会话复用同一个容器，不同会话互不可见', async () => {
@@ -207,7 +207,7 @@ describe.skipIf(!dockerReady)('持久容器 · 真 docker', () => {
 
     for (const persistent of [true, false]) {
       // 第二个实例：另一张库对应另一个 `luoli.instance`，它的库里没有任何容器行。
-      for (const suffix of ['', '-wal', '-shm']) rmSync(`${otherDbPath}${suffix}`, { force: true });
+      for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${otherDbPath}${suffix}`, { force: true });
       const second = openDatabase(otherDbPath);
       migrateDatabase(second);
       const intruder = new ContainerManager(second, new SandboxContainerRepository(second), () => ({ ...runtimeConfig(), persistent: { ...runtimeConfig().persistent, enabled: persistent } }));
@@ -224,7 +224,7 @@ describe.skipIf(!dockerReady)('持久容器 · 真 docker', () => {
     // 在位的那个实例照旧能认领到自己的容器。
     expect((await manager.reap()).adopted).toBe(1);
     execFileSync('docker', ['inspect', name], { stdio: 'ignore', timeout: 10_000 });
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${otherDbPath}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${otherDbPath}${suffix}`, { force: true });
     closeDatabase(db);
   }, 240_000);
 

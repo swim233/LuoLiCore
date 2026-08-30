@@ -13,7 +13,7 @@ function textUpdate(id: number, text: string) {
 describe('per-chat trigger overrides', () => {
   it('matches the chat-level wakeword list instead of the global one', async () => {
     const path = './data/trigger-perchat.test.db';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
     rmSync('./data/trigger-perchat-memory', { recursive: true, force: true });
     const db = openDatabase(path); migrateDatabase(db);
     const config = configSchema.parse({ access: { defaultUserRole: 'trusted', defaultChatRole: 'trusted', bootstrapOwnerId: '1' }, quota: { enabled: false },
@@ -21,7 +21,7 @@ describe('per-chat trigger overrides', () => {
     const principals = new PrincipalRepository(db); const archive = new ArchiveRepository(db); const operations = new OperationsRepository(db);
     const bot = await createTelegramBot('12345678:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', { config, db, principals, archive, operations, context: new ContextEngine(db, archive),
       turns: new TurnRepository(db), quota: new QuotaGuard(db, 'UTC'), memory: new MemoryStore(db, './data/trigger-perchat-memory', 1500, 3000), registry: new TurnRegistry(),
-      concurrency: new TurnConcurrency(config.concurrency), log: new LogSink(operations, './data/trigger-perchat-logs'), botInfo });
+      concurrency: new TurnConcurrency(config.concurrency), log: new LogSink(operations), botInfo });
     // 触发之后整轮会跑到发消息，这里把 Bot API 整个短路掉，测试不打网络。
     bot.api.config.use((async (_prev: unknown, method: string) => ({ ok: true, result: method === 'sendMessage' || method === 'editMessageText'
       ? { message_id: 900, date: 0, chat: { id: -100, type: 'group' }, text: 'ok' } : true })) as never);

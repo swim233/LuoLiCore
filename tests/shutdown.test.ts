@@ -262,33 +262,45 @@ describe('SIGTERM 退出路径', () => {
  *
  * 采用真实进程：那两个处理器固定在 `apps/bot/src/main.ts` 模块顶层，没有可单独 import 的导出，
  * 而在测试中复制一份等于验证了另一个实现。因此启动真实进程，用 `--import` 加载一个仅负责触发的 fixture
- * （`tests/fixtures/fatal-trigger.mjs`，它不复制处理器），再检查 stderr、落盘的
- * `system.jsonl` 以及进程是否退出。
+ * （`tests/fixtures/fatal-trigger.mjs`，它不复制处理器），再检查 stderr、写进 `logs.db` 的
+ * `log_events` 以及进程是否退出。
  */
 describe('崩溃与未处理的 rejection', () => {
   it('unhandledRejection 只留证据不退出，uncaughtException 落 system.crash 后才退出，下次启动照常收尾', async () => {
-    const { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } = await import('node:fs');
-    const { closeDatabase, openDatabase } = await import('@luoli/db');
+    const { existsSync, mkdirSync, writeFileSync } = await import('node:fs');
+    const { closeDatabase, decodeLogPayload, openDatabase } = await import('@luoli/db');
     const dataDir = resolve('./data/crash-test');
-    const logsDir = resolve(dataDir, 'logs');
+    const logsDatabase = resolve(dataDir, 'logs.db');
     rmSync(dataDir, { recursive: true, force: true });
     mkdirSync(dataDir, { recursive: true });
-    // `logs.dir` 默认为 cwd 下的 `./logs`，与本机运行中的 bot 共用同一目录，断言会读到其他进程的记录。
+    // `logs.dbPath` 跟随 `LUOLI_DATA_DIR`（`ENV_PINNED_CONFIG_KEYS`）—— 不跟随的话它会停在
+    // cwd 下的 `./data/logs.db`，与本机运行中的 bot 共用同一个库，断言会读到其他进程的记录。
     //
     // `sandbox.dockerBin` 必须指向一个必然失败的目标。启动时那次 `void reapContainers()`
     // 在 `sandbox.persistent.enabled=false`（默认）下会执行 `#sweepOrphans(counts, new Set())`：
     // 宿主上每一个带 `luoli.managed=1` 标签的容器都不在那张空表中，于是逐个执行 `docker rm -f`。
     // 本用例启动两次进程，相当于把 `sandbox.containers.docker.test.ts` 正在使用的容器删除两次。
     writeFileSync(resolve(dataDir, 'config.yaml'),
-      `general:\n  shutdown:\n    graceMs: ${GRACE_MS}\nwebui:\n  port: ${CRASH_PORT}\nlogs:\n  dir: ${logsDir}\nsandbox:\n  mode: none\n  dockerBin: /bin/false\n`);
-    /** 落盘的 system.jsonl。按 UTC 日期分目录，因此扫描目录而非自行计算当天日期（跨零点会出错）。 */
-    interface Line { level: string; kind: string; data?: { event?: string; detail?: string } }
-    const systemLog = (): Line[] => (existsSync(logsDir) ? readdirSync(logsDir, { withFileTypes: true }) : [])
-      .filter((entry) => entry.isDirectory()).map((entry) => resolve(logsDir, entry.name, 'system.jsonl'))
-      .filter((path) => existsSync(path))
-      // 只读取完整的行：urgent 档使用 appendFileSync，读取时可能正遇到其他进程写入到一半。
-      .flatMap((path) => readFileSync(path, 'utf8').split('\n').filter((line) => line.startsWith('{') && line.endsWith('}'))
-        .map((line) => JSON.parse(line) as Line));
+      `general:\n  shutdown:\n    graceMs: ${GRACE_MS}\nwebui:\n  port: ${CRASH_PORT}\nsandbox:\n  mode: none\n  dockerBin: /bin/false\n`);
+    /**
+     * 写进 `logs.db` 的 `system.*`。用独立只读连接去读**正在被另一个进程写**的那个库 ——
+     * WAL 允许这样，而这正是「进程被自己的 crash handler 带走之前留没留下东西」唯一的观测点。
+     */
+    interface Line { level: string; kind: string; data?: { event?: string; detail?: string } | undefined }
+    const systemLog = (): Line[] => {
+      if (!existsSync(logsDatabase)) return [];
+      const reader = openDatabase(logsDatabase);
+      try {
+        return (reader.prepare("SELECT level,kind,data,data_codec AS codec FROM log_events WHERE kind LIKE 'system.%' ORDER BY id")
+          .all() as Array<{ level: string; kind: string; data: Buffer | null; codec: string | null }>)
+          .map(({ data, codec, ...row }): Line => {
+            const text = decodeLogPayload(data, codec);
+            return text ? { ...row, data: JSON.parse(text) as Line['data'] } : { ...row };
+          });
+      } finally {
+        reader.close();
+      }
+    };
 
     // 启动过的进程一律登记：断言中途失败也要清理干净，否则它会占用 8801 端口直到下一次运行本用例。
     const running: Array<ReturnType<typeof spawn>> = [];

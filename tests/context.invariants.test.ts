@@ -13,9 +13,9 @@ function config(tokens: number): Config {
 describe('context output invariants', () => {
   for (const seed of seeds) it(`preserves materialized shape for deterministic sequence ${seed}`, async () => {
     const path = `./data/context-invariants-${seed}.test.db`;
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
     const db = openDatabase(path); migrateDatabase(db);
-    const archive = new ArchiveRepository(db); const log = new LogSink(new OperationsRepository(db), `./data/context-invariants-${seed}-logs`);
+    const archive = new ArchiveRepository(db); const log = new LogSink(new OperationsRepository(db));
     const engine = new ContextEngine(db, archive, log); const limit = 4000 + seed * 7; const cfg = config(limit); const scoped = archive.scope('chat');
     for (let turnNumber = 1; turnNumber <= 8; turnNumber += 1) {
       scoped.append({ chatId: 'chat', messageThreadId: null, tgMessageId: turnNumber * 10, direction: 'in', fromKind: 'user', fromUserId: `bg-${turnNumber}`, fromName: 'Background', fromUsername: null, kind: 'text', text: `background ${seed}-${turnNumber}`, tgDate: Date.now(), raw: {}, triggered: false });

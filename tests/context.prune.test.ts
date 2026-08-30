@@ -5,7 +5,7 @@ import { ContextEngine, configSchema } from '@luoli/core';
 
 function harness(name: string, tokens = 4000) {
   const path = `./data/${name}.test.db`;
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
   const db = openDatabase(path);
   migrateDatabase(db);
   const archive = new ArchiveRepository(db);

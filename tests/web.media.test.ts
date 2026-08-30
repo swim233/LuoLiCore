@@ -17,14 +17,14 @@ import type { RuntimeTurnContext } from '@luoli/shared';
  */
 function harness(name: string) {
   const path = `./data/${name}.test.db`;
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
   const mediaDir = `./data/${name}-media`;
   rmSync(mediaDir, { recursive: true, force: true });
   mkdirSync(mediaDir, { recursive: true });
   const db = openDatabase(path);
   migrateDatabase(db);
   const archive = new ArchiveRepository(db);
-  const log = new LogSink(new OperationsRepository(db), `./data/${name}-logs`);
+  const log = new LogSink(new OperationsRepository(db));
   const engine = new ContextEngine(db, archive, log);
   const config = configSchema.parse({ access: { bootstrapOwnerId: '1' } });
   const assets = new WebAssetStore(db, mediaDir, config.media.maxImageEdge);
@@ -311,8 +311,8 @@ describe('gcFiles / 保留期 · 网页图不许被当孤儿删掉', () => {
       const orphan = join(bench.mediaDir, 'orphan.jpg');
       rmSync(orphan, { force: true });
       (await import('node:fs')).writeFileSync(orphan, 'not referenced');
-      const maintenance = new MaintenanceService(bench.db, './data/gc-web-assets.test.db', 1, 0, './data/gc-web-assets-logs',
-        { files: bench.mediaDir }, 0, 30, {});
+      const maintenance = new MaintenanceService(bench.db, './data/gc-web-assets.test.db', 1, 0,
+        { files: bench.mediaDir }, 30, {});
       const result = maintenance.gcFiles();
       // 该问题本仓出现过两次（docs/25 §10 / docs/28 · L-OPS-06）：referenced 集合漏一张表，
       // 那张表的文件就会被静默删除。孤儿要删除、被引用的要保留，两条都需断言。
@@ -336,8 +336,8 @@ describe('gcFiles / 保留期 · 网页图不许被当孤儿删掉', () => {
       const fresh = await bench.assets.put('chat:chat', 'https://a.example/again.png', image);
       expect(fresh.localPath).toBe(old.localPath);
       bench.db.prepare('UPDATE web_assets SET created_at=? WHERE id=?').run(Date.now() - 40 * 86_400_000, old.id);
-      const maintenance = new MaintenanceService(bench.db, './data/retention-shared.test.db', 1, 0, './data/retention-shared-logs',
-        { files: bench.mediaDir }, 0, 30, { media: 30 });
+      const maintenance = new MaintenanceService(bench.db, './data/retention-shared.test.db', 1, 0,
+        { files: bench.mediaDir }, 30, { media: 30 });
       maintenance.cleanup();
       expect(bench.assets.path(old.id)).toBeNull();
       expect(bench.assets.path(fresh.id)).toBe(fresh.localPath);
@@ -350,8 +350,8 @@ describe('gcFiles / 保留期 · 网页图不许被当孤儿删掉', () => {
     try {
       const row = await bench.assets.put('chat:chat', 'https://a.example/a.png', await png());
       bench.db.prepare('UPDATE web_assets SET created_at=? WHERE id=?').run(Date.now() - 40 * 86_400_000, row.id);
-      const maintenance = new MaintenanceService(bench.db, './data/retention-web-assets.test.db', 1, 0, './data/retention-web-assets-logs',
-        { files: bench.mediaDir }, 0, 30, { media: 30 });
+      const maintenance = new MaintenanceService(bench.db, './data/retention-web-assets.test.db', 1, 0,
+        { files: bench.mediaDir }, 30, { media: 30 });
       maintenance.cleanup();
       expect(existsSync(row.localPath)).toBe(false);
       expect(bench.db.prepare('SELECT COUNT(*) FROM web_assets').pluck().get()).toBe(0);

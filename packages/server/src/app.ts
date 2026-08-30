@@ -98,6 +98,7 @@ import type {
   Sqlite,
 } from "@luoli/db";
 import {
+  decodeLogPayload,
   deleteAppKv,
   modelAliasKey,
   readAppKv,
@@ -452,29 +453,32 @@ function decidedByLabel(db: Sqlite, decidedBy: unknown): string | null {
 function diskUsage(config: Readonly<Config>): {
   bytes: number;
   walBytes: number;
+  /** 日志库（`logs.dbPath`）连同它的 -wal / -shm。它是独立文件，不计进 `bytes` 里
+   *  —— 合并成一个数之后，「主库在涨」与「日志在涨」这两件事就分不开了。 */
+  logsBytes: number;
   workspaceBytes: number;
 } {
   return {
     bytes: fileSize(config.db.path),
     walBytes: fileSize(`${config.db.path}-wal`),
+    logsBytes:
+      fileSize(config.logs.dbPath) +
+      fileSize(`${config.logs.dbPath}-wal`) +
+      fileSize(`${config.logs.dbPath}-shm`),
     workspaceBytes: directorySize(resolve(config.sandbox.workspaceDir)),
   };
 }
 
-function safeRef(root: string, reference: string): string {
-  const absolute = resolve(root, reference);
-  const base = resolve(root);
-  if (absolute !== base && !absolute.startsWith(`${base}${sep}`))
-    throw new Error("invalid_file_ref");
-  return absolute;
-}
 /**
- * 对库里存储的那类路径做包含性校验。与 `safeRef` 只有一点不同：先绝对化再判包含，
- * 不把它当成相对 `root` 的引用 —— `attachments.local_path` 是 `join('./data/files', chatId, …)`
- * 这种相对 cwd 的路径，交给 `safeRef` 会被拼成 `<root>/data/files/…`，全部无法匹配。
+ * 对库里存储的那类路径做包含性校验：先绝对化再判包含，而不是把它当成相对 `root` 的引用 ——
+ * `attachments.local_path` 是 `join('./data/files', chatId, …)` 这种相对 cwd 的路径，
+ * 按「相对 root 拼接」处理会被拼成 `<root>/data/files/…`，全部无法匹配。
  *
  * 这两列目前只由本进程写入，因此这属于纵深防御；但 DB 里的路径值可信是一个会随时间失效的假设：
- * 导入、迁移、手工修库都能改动它，而同一个文件里读日志目录早已经过闸（docs/27 · S-07）。
+ * 导入、迁移、手工修库都能改动它（docs/27 · S-07）。
+ *
+ * 〔曾经与它并列的 `safeRef` 已删除：它唯一的用途是把 `log_events.file_ref` 解析到
+ * `logs/<day>/blobs/` 下，而载荷现在就在行上，那条路径连同 `GET /api/logs/blob` 一起没有了。〕
  */
 function storedPathWithin(root: string, stored: string): string {
   const absolute = resolve(stored);
@@ -2767,28 +2771,19 @@ export function createServer(
     return ctx.json({ ok: true, data: { cancelled } });
   });
   // 本轮向上游发送了什么，只有日志里那一份记录：turns 表存的是统计，messages 表存的是最终文本。
-  // trace_id 就是 turn id，把该轮的 span 连同 data 一起读出来即可；超过 logs.bodyMaxBytes 的 data
-  // 已经被 LogSink 挪进 logs/<day>/blobs/*.json，不跟着解引用的话详情里只剩一行 {"fileRef":…}。
+  // trace_id 就是 turn id，把该轮的 span 连同载荷一起读出来即可。
+  //
+  // 本函数收的是**已经解码好**的 JSON 文本，不是那个 BLOB —— 它同时服务于
+  // `context_messages.parts_json`（那一列本来就是 TEXT），把解码塞进来会让两条路的入参
+  // 变成两种东西。日志侧的解码在调用点用 `decodeLogPayload` 完成（docs/10 §3）。
   const DETAIL_MAX_CHARS = 120_000;
   interface DetailPayload {
     text: string | null;
     bytes: number;
     truncated: boolean;
-    fileRef: string | null;
   }
-  const blobRef = (value: unknown): string | null =>
-    value &&
-    typeof value === "object" &&
-    !Array.isArray(value) &&
-    typeof (value as { fileRef?: unknown }).fileRef === "string"
-      ? (value as { fileRef: string }).fileRef
-      : null;
-  const readBlob = (reference: string): unknown =>
-    JSON.parse(
-      readFileSync(safeRef(currentConfig().logs.dir, reference), "utf8"),
-    );
   const detailPayload = (raw: string | null): DetailPayload => {
-    if (!raw) return { text: null, bytes: 0, truncated: false, fileRef: null };
+    if (!raw) return { text: null, bytes: 0, truncated: false };
     let parsed: unknown;
     try {
       parsed = JSON.parse(raw);
@@ -2797,30 +2792,13 @@ export function createServer(
         text: raw.slice(0, DETAIL_MAX_CHARS),
         bytes: Buffer.byteLength(raw),
         truncated: raw.length > DETAIL_MAX_CHARS,
-        fileRef: null,
       };
     }
-    const reference = blobRef(parsed);
-    let value = parsed;
-    // 保留期一过 blobs/ 就被清掉，行还在。返回 text=null + fileRef，让界面说「载荷已清理」而不是显示那个占位对象。
-    if (reference) {
-      try {
-        value = readBlob(reference);
-      } catch {
-        return {
-          text: null,
-          bytes: Number((parsed as { bytes?: unknown }).bytes ?? 0),
-          truncated: false,
-          fileRef: reference,
-        };
-      }
-    }
-    const text = JSON.stringify(value, null, 2) ?? "";
+    const text = JSON.stringify(parsed, null, 2) ?? "";
     return {
       text: text.slice(0, DETAIL_MAX_CHARS),
       bytes: Buffer.byteLength(text),
       truncated: text.length > DETAIL_MAX_CHARS,
-      fileRef: reference,
     };
   };
   app.get("/api/turns/:id/detail", (ctx) => {
@@ -2841,13 +2819,15 @@ export function createServer(
       );
     const rows = dependencies.db
       .prepare(
-        `SELECT id,ts,level,kind,summary,span_id AS spanId,parent_span_id AS parentSpanId,duration_ms AS durationMs,data_json AS data
+        `SELECT id,ts,level,kind,summary,span_id AS spanId,parent_span_id AS parentSpanId,duration_ms AS durationMs,data,data_codec AS codec
       FROM log_events WHERE trace_id=? ORDER BY ts,id LIMIT 500`,
       )
-      .all(id) as Array<Record<string, unknown> & { data: string | null }>;
-    const events = rows.map(({ data, ...row }) => ({
+      .all(id) as Array<
+      Record<string, unknown> & { data: Buffer | null; codec: string | null }
+    >;
+    const events = rows.map(({ data, codec, ...row }) => ({
       ...row,
-      ...detailPayload(data),
+      ...detailPayload(decodeLogPayload(data, codec)),
     }));
     // 工具输入的第二个来源，也是唯一对历史轮次有效的那个：`log_events` 按 logs.retentionDays 清理，
     // 且 `logs.captureBodies=false` 时不带请求体，而 `context_messages.parts_json` 永久保留。
@@ -5159,26 +5139,14 @@ export function createServer(
       data: dependencies.operations.logs(2000, ctx.req.param("traceId")),
     }),
   );
-  app.get("/api/logs/blob", (ctx) => {
-    try {
-      const path = safeRef(
-        currentConfig().logs.dir,
-        ctx.req.query("ref") ?? "",
-      );
-      return existsSync(path)
-        ? ctx.text(readFileSync(path, "utf8"))
-        : ctx.json(apiError("not_found", "日志载荷不存在", 404).body, 404);
-    } catch {
-      return ctx.json(apiError("invalid_ref", "非法日志引用", 403).body, 403);
-    }
-  });
   /**
-   * 单条日志事件的详情（日志页展开一行）。必须注册在 `/api/logs/blob` 与
-   * `/api/logs/trace/:traceId` 之后：Hono 按注册顺序匹配，`:id` 放在前面会把那两条完全覆盖。
-   * 非数字 id 直接 404，避免 `blob` / `trace` 这类字符串进入 `Number()` 变成 NaN 查询。
+   * 单条日志事件的详情（日志页展开一行）。必须注册在 `/api/logs/trace/:traceId` 之后：
+   * Hono 按注册顺序匹配，`:id` 放在前面会把它完全覆盖。非数字 id 直接 404，避免 `trace`
+   * 这类字符串进入 `Number()` 变成 NaN 查询。
    *
    * 列表刻意不带载荷（见 `OperationsRepository.logs` 的注释），因此正文只有这条路径能取到，
-   * 且与对话详情共用 `detailPayload`：同一套 blob 解引用与截断语义（docs/10 §读出侧必须解引用）。
+   * 且与对话详情共用 `detailPayload` 的截断语义。载荷先经 `decodeLogPayload` 还原
+   * —— 行在就意味着载荷在，不再有「有行没载荷」那一档（docs/10 §3）。
    */
   app.get("/api/logs/:id", (ctx) => {
     const raw = ctx.req.param("id");
@@ -5187,51 +5155,43 @@ export function createServer(
     const row = dependencies.db
       .prepare(
         `SELECT id,ts,level,kind,trace_id AS traceId,span_id AS spanId,parent_span_id AS parentSpanId,
-      chat_id AS chatId,user_id AS userId,key,summary,file_ref AS fileRefColumn,duration_ms AS durationMs,data_json AS data
+      chat_id AS chatId,user_id AS userId,key,summary,duration_ms AS durationMs,data,data_codec AS codec
       FROM log_events WHERE id=?`,
       )
       .get(Number(raw)) as
-      (Record<string, unknown> & { data: string | null }) | undefined;
+      | (Record<string, unknown> & {
+          data: Buffer | null;
+          codec: string | null;
+        })
+      | undefined;
     if (!row)
       return ctx.json(
         apiError("not_found", "该日志不存在（可能已被保留策略清理）", 404).body,
         404,
       );
-    const { data, fileRefColumn, ...rest } = row;
-    const payload = detailPayload(data);
+    const { data, codec, ...rest } = row;
     return ctx.json({
       ok: true,
-      data: {
-        ...rest,
-        ...payload,
-        fileRef: payload.fileRef ?? (fileRefColumn as string | null),
-      },
+      data: { ...rest, ...detailPayload(decodeLogPayload(data, codec)) },
     });
   });
-  // 对话详情里的 JSON 按 DETAIL_MAX_CHARS 截断（单个 span 的请求体能到几百 KB），排查时要能拿到完整的那一份。
+  // 对话详情里的 JSON 按 DETAIL_MAX_CHARS 截断（单个 span 的请求体实测均 29 KB、最大 5 MB），排查时要能拿到完整的那一份。
   app.get("/api/logs/:id/data", (ctx) => {
     const row = dependencies.db
-      .prepare("SELECT kind,data_json AS data FROM log_events WHERE id=?")
+      .prepare(
+        "SELECT kind,data,data_codec AS codec FROM log_events WHERE id=?",
+      )
       .get(Number(ctx.req.param("id"))) as
-      { kind: string; data: string | null } | undefined;
-    if (!row?.data)
+      | { kind: string; data: Buffer | null; codec: string | null }
+      | undefined;
+    const decoded = row ? decodeLogPayload(row.data, row.codec) : null;
+    if (!row || !decoded)
       return ctx.json(apiError("not_found", "该事件没有载荷", 404).body, 404);
     let value: unknown;
     try {
-      value = JSON.parse(row.data);
+      value = JSON.parse(decoded);
     } catch {
-      value = row.data;
-    }
-    const reference = blobRef(value);
-    if (reference) {
-      try {
-        value = readBlob(reference);
-      } catch {
-        return ctx.json(
-          apiError("not_found", "载荷文件已被日志清理删除", 404).body,
-          404,
-        );
-      }
+      value = decoded;
     }
     return new Response(JSON.stringify(value, null, 2), {
       headers: {

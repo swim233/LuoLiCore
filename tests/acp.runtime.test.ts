@@ -689,7 +689,7 @@ describe('ACP · 外部花费落库，但不进任何计价口径', () => {
   const DB_PATH = resolve('data/acp-runs.test.db');
   const TURN = 'turn-acp-external-1';
   const fresh = () => {
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${DB_PATH}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${DB_PATH}${suffix}`, { force: true });
     const db = openDatabase(DB_PATH);
     migrateDatabase(db);
     // 本轮的主 run 需先存在：ACP 那一行要挂在它之下（该调用发生在主 agent 的一次工具调用中）。

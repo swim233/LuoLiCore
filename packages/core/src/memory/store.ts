@@ -11,7 +11,7 @@ import { createTwoFilesPatch } from "diff";
 import { ulid } from "ulid";
 import type { Role } from "@luoli/shared";
 import { estimateTextTokens, roleRank } from "@luoli/shared";
-import type { Sqlite } from "@luoli/db";
+import { type Sqlite, decodeLogPayload } from "@luoli/db";
 
 interface MemoryDocument {
   id: string;
@@ -139,14 +139,17 @@ export class MemoryStore {
   lastOwnerRead(userId: string): { ts: number; op: string } | null {
     const row = this.db
       .prepare(
-        "SELECT ts,data_json AS data FROM log_events WHERE kind='memory.owner_read_private' AND user_id=? ORDER BY ts DESC LIMIT 1",
+        "SELECT ts,data,data_codec AS codec FROM log_events WHERE kind='memory.owner_read_private' AND user_id=? ORDER BY ts DESC LIMIT 1",
       )
-      .get(userId) as { ts: number; data: string | null } | undefined;
+      .get(userId) as
+      { ts: number; data: Buffer | null; codec: string | null } | undefined;
     if (!row) return null;
     let op = "read";
     try {
       op = String(
-        (JSON.parse(row.data ?? "{}") as { op?: unknown }).op ?? "read",
+        (JSON.parse(decodeLogPayload(row.data, row.codec) ?? "{}") as {
+          op?: unknown;
+        }).op ?? "read",
       );
     } catch {
       /* 历史行没有 op */

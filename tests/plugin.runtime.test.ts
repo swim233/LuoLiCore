@@ -5,6 +5,7 @@ import { ContextEngine, HOT_RELOAD_UNRELIABLE_HINT, LogSink, MemoryStore, Plugin
 import type { ToolExecutionContext } from '@luoli/core';
 import { ArchiveRepository, OperationsRepository, PrincipalRepository, TurnRepository } from '@luoli/db';
 import { createTelegramBot } from '@luoli/telegram';
+import { logRows } from './support/logs.js';
 
 const botInfo = { id: 1, is_bot: true as const, first_name: 'Bot', username: 'mybot', can_join_groups: true, can_read_all_group_messages: false, supports_inline_queries: false, can_connect_to_business: false, has_main_web_app: false, has_topics_enabled: false, allows_users_to_create_topics: false, can_manage_bots: false, supports_join_request_queries: false };
 const privateUpdate = (id: number, text: string): never => ({ update_id: id, message: { message_id: id, date: Math.floor(Date.now() / 1000),
@@ -14,13 +15,13 @@ function setup() {
   const database = './data/plugin-runtime.test.db';
   const directory = './data/plugin-runtime-plugins';
   (globalThis as { __pluginUnloads?: number }).__pluginUnloads = 0;
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${database}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${database}${suffix}`, { force: true });
   rmSync(directory, { recursive: true, force: true }); mkdirSync(`${directory}/alpha`, { recursive: true }); mkdirSync(`${directory}/beta`, { recursive: true });
   for (const name of ['alpha', 'beta']) writeFileSync(`${directory}/${name}/plugin.js`, `export default { name:'${name}', hooks:{ ping: () => '${name}' }, onUnload: () => globalThis.__pluginUnloads = (globalThis.__pluginUnloads ?? 0) + 1, tools: () => ({ echo: { description:'echo', inputSchema:{}, execute: input => input } }) };`);
   const db = openDatabase(database); migrateDatabase(db);
   const insert = db.prepare('INSERT INTO plugins(name,path,min_role,enabled,config_json,updated_at) VALUES (?,?,?,1,?,?)');
   insert.run('alpha', `${directory}/alpha/plugin.js`, 'trusted', '{}', Date.now()); insert.run('beta', `${directory}/beta/plugin.js`, 'trusted', '{}', Date.now());
-  const log = new LogSink(new OperationsRepository(db), './data/plugin-runtime-logs', [], { level: 'debug', console: 'off' });
+  const log = new LogSink(new OperationsRepository(db), [], { level: 'debug', console: 'off' });
   const registry = new ToolRegistry(log, { request: async () => true }, { maxRegistered: 80, maxCallsPerTurn: 40, maxConsecutiveErrors: 3 });
   return { db, registry, log, manager: new PluginManager(db, directory, 1000, 3, ['beta', 'alpha'], registry, undefined, log) };
 }
@@ -29,7 +30,7 @@ function setup() {
 function hookOnly(name: string, body: string) {
   const database = `./data/${name}.test.db`;
   const directory = `./data/${name}-plugins`;
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${database}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${database}${suffix}`, { force: true });
   rmSync(directory, { recursive: true, force: true });
   rmSync(`./data/${name}-logs`, { recursive: true, force: true });
   mkdirSync(`${directory}/hooky`, { recursive: true });
@@ -37,12 +38,12 @@ function hookOnly(name: string, body: string) {
   const db = openDatabase(database); migrateDatabase(db);
   db.prepare('INSERT INTO plugins(name,path,min_role,enabled,config_json,updated_at) VALUES (?,?,?,1,?,?)')
     .run('hooky', `${directory}/hooky/plugin.js`, 'trusted', '{}', Date.now());
-  const log = new LogSink(new OperationsRepository(db), `./data/${name}-logs`, [], { level: 'debug', console: 'off' });
+  const log = new LogSink(new OperationsRepository(db), [], { level: 'debug', console: 'off' });
   // `hookTimeoutMs = 2000` → 慢钩子判据是 `max(50, 200) = 200ms`。
   return { db, log, manager: new PluginManager(db, directory, 2000, 3, [], undefined, undefined, log) };
 }
 const rowsOf = (db: ReturnType<typeof openDatabase>, kind: string): Array<{ level: string; summary: string; data: string | null }> =>
-  db.prepare('SELECT level,summary,data_json AS data FROM log_events WHERE kind=? ORDER BY id').all(kind) as Array<{ level: string; summary: string; data: string | null }>;
+  logRows(db, kind);
 
 describe('plugin runtime', () => {
   it('loads enabled plugins, preserves configured order, exposes tools, and runs hooks', async () => {
@@ -90,7 +91,7 @@ describe('plugin runtime', () => {
 
   it('discovers files as disabled rows before any database seed', async () => {
     const database = './data/plugin-discovery.test.db'; const directory = './data/plugin-discovery-plugins';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${database}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${database}${suffix}`, { force: true });
     rmSync(directory, { recursive: true, force: true }); mkdirSync(`${directory}/new-plugin`, { recursive: true });
     writeFileSync(`${directory}/new-plugin/plugin.js`, "export default { name:'new-plugin', minRole:'owner', tools:() => ({}) };");
     const db = openDatabase(database); migrateDatabase(db); const manager = new PluginManager(db, directory, 1000, 3);
@@ -161,7 +162,7 @@ describe('plugin runtime', () => {
     const name = 'plugin-drop-message';
     const database = `./data/${name}.test.db`;
     const directory = `./data/${name}-plugins`;
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${database}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${database}${suffix}`, { force: true });
     for (const path of [directory, `./data/${name}-logs`, `./data/${name}-memory`]) rmSync(path, { recursive: true, force: true });
     mkdirSync(`${directory}/dropper`, { recursive: true });
     // 按正文挑着 drop：同一个插件、同一条钩子里出两种答复，正对照就不必换一套装配。
@@ -179,7 +180,7 @@ describe('plugin runtime', () => {
     const bot = await createTelegramBot('12345678:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', {
       config, db, principals: new PrincipalRepository(db), archive, operations, context: new ContextEngine(db, archive), turns: new TurnRepository(db),
       quota: new QuotaGuard(db, 'UTC'), memory: new MemoryStore(db, `./data/${name}-memory`, 1500, 3000), registry: new TurnRegistry(),
-      concurrency: new TurnConcurrency(config.concurrency), log: new LogSink(operations, `./data/${name}-logs`), botInfo, plugins: manager,
+      concurrency: new TurnConcurrency(config.concurrency), log: new LogSink(operations), botInfo, plugins: manager,
       onTurn: async (turn) => { opened.push(turn.turnId); return '好的'; } });
     bot.api.config.use((async (_prev: unknown, method: string, payload: Record<string, unknown>) => ({ ok: true,
       result: method === 'sendMessage' || method === 'editMessageText'

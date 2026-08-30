@@ -6,6 +6,7 @@ import type { LanguageModel } from 'ai';
 import { ArchiveRepository, OperationsRepository, closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
 import { AgentManager, AgentResultStore, ContextEngine, LogSink, PromptAssembler, PromptDocuments, Sandbox, ToolRegistry, UsageLedger, configSchema, registerBuiltins, runMainAgent, runSubAgent } from '@luoli/core';
 import type { ApprovalBroker, ModelRegistry, SandboxRunEvent, ToolExecutionContext } from '@luoli/core';
+import { logPayload, logRows } from './support/logs.js';
 
 /**
  * trace 是一棵树这件事的唯一防线。
@@ -59,14 +60,14 @@ interface SpanRow { kind: string; spanId: string | null; parentSpanId: string | 
 
 async function runTracedTurn(name: string) {
   const path = `./data/${name}.test.db`;
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
   for (const directory of [`./data/${name}-memory`, `./data/${name}-logs`, `./data/${name}-results`]) rmSync(directory, { recursive: true, force: true });
   const db = openDatabase(path);
   migrateDatabase(db);
   const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, quota: { requirePricing: false, enabled: false },
     memory: { dir: `./data/${name}-memory` }, approval: { enabled: false }, logs: { level: 'debug' } });
   // 真 sink、真库：level=debug 才收得到 `prompt.build` 与 `agent.progress`（两条都是 debug）。
-  const log = new LogSink(new OperationsRepository(db), `./data/${name}-logs`, [], { level: 'debug', console: 'off' });
+  const log = new LogSink(new OperationsRepository(db), [], { level: 'debug', console: 'off' });
   const archive = new ArchiveRepository(db);
   const context = new ContextEngine(db, archive, log);
   const documents = new PromptDocuments(db, config.memory.dir);
@@ -176,7 +177,7 @@ describe('trace 是一棵真的树', () => {
    */
   it('tool.call 的载荷说得出这次要不要审批', async () => {
     const { db } = await runTracedTurn('log-trace-approval');
-    const payload = db.prepare("SELECT data_json AS data FROM log_events WHERE kind='tool.call'").pluck().get() as string;
+    const payload = logPayload(db, 'tool.call');
     expect(JSON.parse(payload)).toMatchObject({ approval: { required: false } });
     closeDatabase(db);
   });
@@ -188,9 +189,9 @@ describe('trace 是一棵真的树', () => {
     expect(of(rows, 'tool.call')).toHaveLength(1);
     const error = one(rows, 'tool.error');
     expect(error.traceId).toBeTruthy();
-    const payload = db.prepare("SELECT level,data_json AS data FROM log_events WHERE kind='tool.error'").get() as { level: string; data: string };
+    const payload = logRows(db, 'tool.error')[0]!;
     expect(payload.level).toBe('warn');
-    expect(JSON.parse(payload.data)).toMatchObject({ tool: 'dig', toolCallId: 'call-2' });
+    expect(JSON.parse(payload.data!)).toMatchObject({ tool: 'dig', toolCallId: 'call-2' });
     // 它挂在对应那一步的 model.call 之下，而不是挂在 turn 根上。
     expect(of(rows, 'model.call').map((row) => row.spanId)).toContain(error.parentSpanId);
     closeDatabase(db);

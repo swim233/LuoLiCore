@@ -6,7 +6,7 @@ import { SkillLoader } from '@luoli/core';
 function setup() {
   const database = './data/skill-runtime.test.db';
   const skillsDir = './data/skill-runtime-skills';
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${database}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${database}${suffix}`, { force: true });
   rmSync(skillsDir, { recursive: true, force: true });
   mkdirSync(`${skillsDir}/safe-skill`, { recursive: true });
   writeFileSync(`${skillsDir}/safe-skill/SKILL.md`, `---\nname: safe-skill\ndescription: Safe skill\nmin-role: limited\nallowed-tools: [read_file]\n---\nUse only files.\n`);
@@ -26,7 +26,7 @@ describe('skill.load 的可观测性', () => {
   it('只在真的变了时落一行，解析失败那一档是 error', () => {
     const database = './data/skill-load-log.test.db';
     const skillsDir = './data/skill-load-log-skills';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${database}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${database}${suffix}`, { force: true });
     rmSync(skillsDir, { recursive: true, force: true });
     mkdirSync(`${skillsDir}/good`, { recursive: true });
     writeFileSync(`${skillsDir}/good/SKILL.md`, '---\nname: good\ndescription: 好的\nmin-role: limited\nallowed-tools: [read_file]\n---\n正文很长一点点。\n');
@@ -184,7 +184,7 @@ describe('skill runtime', () => {
   it('一份 frontmatter 写坏只坏它自己：那份显红且不可用，同目录其他 skill 与装载器照常', () => {
     const database = './data/skill-broken-frontmatter.test.db';
     const skillsDir = './data/skill-broken-frontmatter-skills';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${database}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${database}${suffix}`, { force: true });
     rmSync(skillsDir, { recursive: true, force: true });
     mkdirSync(`${skillsDir}/healthy`, { recursive: true });
     writeFileSync(`${skillsDir}/healthy/SKILL.md`, '---\nname: healthy\ndescription: 好的那份\nmin-role: limited\nallowed-tools: [read_file]\n---\n正文\n');

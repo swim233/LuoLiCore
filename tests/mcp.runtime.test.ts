@@ -23,11 +23,11 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 5000): Promise<vo
  *  串行 discover 的旧实现是逐台开窗口的。 */
 function harness(slug: string, specs: Array<{ name: string; hang?: boolean }>, connectTimeoutMs?: number) {
   const database = `./data/mcp-${slug}.test.db`;
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${database}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${database}${suffix}`, { force: true });
   const spawnLog = resolve(`data/mcp-${slug}-spawns.log`);
   rmSync(spawnLog, { force: true });
   const db = openDatabase(database); migrateDatabase(db);
-  const log = new LogSink(new OperationsRepository(db), './data/mcp-runtime-logs');
+  const log = new LogSink(new OperationsRepository(db));
   const registry = new ToolRegistry(log, { request: async () => true }, { maxRegistered: 80, maxCallsPerTurn: 40, maxConsecutiveErrors: 3 });
   const servers = specs.map((spec) => ({ name: spec.name, transport: 'stdio', command: process.execPath, args: [PROBE], enabled: true,
     env: { MCP_SPAWN_LOG: spawnLog, ...(spec.hang ? { MCP_HANG: '1' } : {}) } }));
@@ -38,9 +38,9 @@ function harness(slug: string, specs: Array<{ name: string; hang?: boolean }>, c
 describe('MCP runtime', () => {
   it('discovers and invokes allowlisted tools through stdio SDK transport', async () => {
     const database = './data/mcp-runtime.test.db';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${database}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${database}${suffix}`, { force: true });
     const db = openDatabase(database); migrateDatabase(db);
-    const log = new LogSink(new OperationsRepository(db), './data/mcp-runtime-logs');
+    const log = new LogSink(new OperationsRepository(db));
     const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, mcp: { enabled: true, servers: [{ name: 'fixture', transport: 'stdio', command: process.execPath, args: [resolve('tests/fixtures/mcp-server.mjs')], enabled: true, toolAllow: ['echo'] }] } });
     const registry = new ToolRegistry(log, { request: async () => true }, { maxRegistered: 80, maxCallsPerTurn: 40, maxConsecutiveErrors: 3 });
     const manager = new McpManager(db, config.mcp, log, registry);
@@ -64,9 +64,9 @@ describe('MCP runtime', () => {
   // 而下一次 reconcile 又会把它当成「已连接」复用（docs/20 · W-MCP-01 / W-CFG-02）。
   it('reads servers from a getter and disconnects the ones that disappear', async () => {
     const database = './data/mcp-reconcile.test.db';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${database}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${database}${suffix}`, { force: true });
     const db = openDatabase(database); migrateDatabase(db);
-    const log = new LogSink(new OperationsRepository(db), './data/mcp-runtime-logs');
+    const log = new LogSink(new OperationsRepository(db));
     const server = { name: 'fixture', transport: 'stdio', command: process.execPath, args: [resolve('tests/fixtures/mcp-server.mjs')], enabled: true };
     let live = configSchema.parse({ access: { bootstrapOwnerId: '1' }, mcp: { enabled: true, servers: [server] } }).mcp;
     const registry = new ToolRegistry(log, { request: async () => true }, { maxRegistered: 80, maxCallsPerTurn: 40, maxConsecutiveErrors: 3 });
@@ -133,9 +133,9 @@ describe('MCP runtime', () => {
    */
   it('deferExternal 开着时 MCP 工具先折叠，检索展开之后本轮可用', async () => {
     const database = './data/mcp-defer.test.db';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${database}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${database}${suffix}`, { force: true });
     const db = openDatabase(database); migrateDatabase(db);
-    const log = new LogSink(new OperationsRepository(db), './data/mcp-runtime-logs');
+    const log = new LogSink(new OperationsRepository(db));
     const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, mcp: { enabled: true, servers: [{ name: 'fixture', transport: 'stdio', command: process.execPath, args: [resolve('tests/fixtures/mcp-server.mjs')], enabled: true }] } });
     const registry = new ToolRegistry(log, { request: async () => true }, { maxRegistered: 80, maxCallsPerTurn: 40, maxConsecutiveErrors: 3, catalog: { deferExternal: true } });
     registerCatalogTools(registry, { log });
@@ -170,9 +170,9 @@ describe('MCP runtime', () => {
    */
   it('卡住的 MCP server 在 timeoutMs 之后失败，而不是把整轮拖到轮次超时', async () => {
     const database = './data/mcp-calltimeout.test.db';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${database}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${database}${suffix}`, { force: true });
     const db = openDatabase(database); migrateDatabase(db);
-    const log = new LogSink(new OperationsRepository(db), './data/mcp-runtime-logs');
+    const log = new LogSink(new OperationsRepository(db));
     const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, mcp: { enabled: true, servers: [{ name: 'stuck', transport: 'stdio', command: process.execPath, args: [resolve('tests/fixtures/mcp-server-hang.mjs')], enabled: true, timeoutMs: 400 }] } });
     const registry = new ToolRegistry(log, { request: async () => true }, { maxRegistered: 80, maxCallsPerTurn: 40, maxConsecutiveErrors: 3 });
     const manager = new McpManager(db, config.mcp, log, registry);

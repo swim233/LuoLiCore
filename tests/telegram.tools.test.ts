@@ -29,7 +29,7 @@ function fakeBot(calls: ApiCall[], fail?: string) {
 
 function harness(name: string, options: { wired?: boolean; fail?: string; config?: Partial<Config['tools']['tg']>; parseMode?: ParseMode } = {}) {
   const path = `./data/${name}.test.db`;
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
   const workspace = resolve(`./data/${name}-workspace`);
   rmSync(workspace, { recursive: true, force: true });
   mkdirSync(workspace, { recursive: true });

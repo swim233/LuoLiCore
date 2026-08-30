@@ -16,7 +16,7 @@ const recordingLog = (events: Array<{ kind: string }>): LogSink =>
  */
 function harness(name: string, overrides: Record<string, unknown> = {}) {
   const path = `./data/${name}.test.db`;
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
   const workspace = resolve(`./data/${name}-workspace`);
   rmSync(workspace, { recursive: true, force: true });
   mkdirSync(workspace, { recursive: true });

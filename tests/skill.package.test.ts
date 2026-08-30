@@ -22,7 +22,7 @@ function setup(limits: Partial<SkillPackageLimits> = {}) {
   const database = `./data/skill-package-${counter}.test.db`;
   const skillsDir = `./data/skill-package-${counter}-skills`;
   const inbox = `./data/skill-package-${counter}-inbox`;
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${database}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${database}${suffix}`, { force: true });
   rmSync(skillsDir, { recursive: true, force: true });
   rmSync(inbox, { recursive: true, force: true });
   mkdirSync(skillsDir, { recursive: true });

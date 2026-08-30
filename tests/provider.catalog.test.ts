@@ -33,9 +33,9 @@ beforeAll(async () => { await new Promise<void>((resolve) => upstream.listen(0, 
 afterAll(async () => { await new Promise<void>((resolve) => { upstream.close(() => resolve()); }); });
 
 function harness() {
-  const path = './data/provider-catalog.test.db'; for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+  const path = './data/provider-catalog.test.db'; for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
   const db = openDatabase(path); migrateDatabase(db); const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, webui: { passwordHash: 'hash' }, provider: { allowPrivateBaseUrl: true } });
-  const operations = new OperationsRepository(db); const events = new EventBus(); const log = new LogSink(operations, './data/provider-catalog-logs'); const archive = new ArchiveRepository(db);
+  const operations = new OperationsRepository(db); const events = new EventBus(); const log = new LogSink(operations); const archive = new ArchiveRepository(db);
   const app = createServer({ config, db, operations, principals: new PrincipalRepository(db), archive, context: new ContextEngine(db, archive), providers: new ProviderStore(db, new Secrets('x'.repeat(32))), approvals: new DatabaseApprovalBroker(db, config, events, log), maintenance: new MaintenanceService(db, path, 2, 30), events, log, configSchema: {}, startedAt: Date.now(), setup: undefined });
   const session = operations.createSession(1); const headers = { cookie: `luoli_sid=${session.id}`, 'x-csrf-token': session.csrf, 'content-type': 'application/json' };
   const provider = async (name: string, kind: string, suffix: string, apiKey: string): Promise<string> => {

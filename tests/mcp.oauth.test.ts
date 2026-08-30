@@ -39,11 +39,11 @@ interface Harness {
 /** 每个用例使用独立的库。`publicUrl` 可为空，对应未配置 publicUrl 时不允许开始授权的用例。 */
 function harness(slug: string, url: string, auth: Record<string, unknown>, publicUrl = 'http://127.0.0.1:8787'): Harness {
   const path = `./data/mcp-oauth-${slug}.test.db`;
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
   const db = openDatabase(path);
   migrateDatabase(db);
   openDbs.push(db);
-  const log = new LogSink(new OperationsRepository(db), './data/mcp-oauth-logs');
+  const log = new LogSink(new OperationsRepository(db));
   const registry = new ToolRegistry(log, { request: async () => true }, { maxRegistered: 80, maxCallsPerTurn: 40, maxConsecutiveErrors: 3 });
   const store = new McpAuthRepository(db, new Secrets('unit-test-master-key-at-least-32-bytes'));
   const pending = new PendingAuthorizations();

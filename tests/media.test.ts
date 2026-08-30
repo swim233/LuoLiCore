@@ -15,7 +15,7 @@ const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, media: { 
 
 function harness(name: string) {
   const path = `./data/${name}.test.db`;
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
   rmSync('./data/media-test', { recursive: true, force: true });
   const db = openDatabase(path);
   migrateDatabase(db);

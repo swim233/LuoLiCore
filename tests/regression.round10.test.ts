@@ -14,7 +14,7 @@ import { TelegramOutput } from '@luoli/telegram';
 
 function database(name: string) {
   const path = `./data/${name}.test.db`;
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
   const db = openDatabase(path); migrateDatabase(db);
   return { db, path };
 }
@@ -55,7 +55,7 @@ describe('Q9 · 媒体文件按 media.retentionDays 过期', () => {
     seed(db, 'a-old', old, now - 100 * 86_400_000);
     seed(db, 'a-fresh', fresh, now - 10 * 86_400_000);
 
-    const maintenance = new MaintenanceService(db, path, 2, 30, './data/round10-media-logs', { files: filesDir }, 0, 30, { media: 90 });
+    const maintenance = new MaintenanceService(db, path, 2, 30, { files: filesDir }, 30, { media: 90 });
     expect(maintenance.cleanup(now).mediaFiles).toBe(1);
 
     expect(existsSync(old)).toBe(false);
@@ -76,7 +76,7 @@ describe('Q9 · 媒体文件按 media.retentionDays 过期', () => {
     writeFileSync(ancient, 'x');
     seed(db, 'a-ancient', ancient, now - 4000 * 86_400_000);
 
-    const maintenance = new MaintenanceService(db, path, 2, 30, './data/round10-media-off-logs', { files: filesDir }, 0, 30, { media: 0 });
+    const maintenance = new MaintenanceService(db, path, 2, 30, { files: filesDir }, 30, { media: 0 });
     expect(maintenance.cleanup(now).mediaFiles).toBe(0);
     expect(existsSync(ancient)).toBe(true);
     closeDatabase(db);
@@ -89,7 +89,7 @@ describe('Q9 · 媒体文件按 media.retentionDays 过期', () => {
     const now = Date.UTC(2026, 7, 18);
     seed(db, 'a-gone', resolve(filesDir, 'never-existed.jpg'), now - 100 * 86_400_000);
 
-    const maintenance = new MaintenanceService(db, path, 2, 30, './data/round10-media-gone-logs', { files: filesDir }, 0, 30, { media: 90 });
+    const maintenance = new MaintenanceService(db, path, 2, 30, { files: filesDir }, 30, { media: 90 });
     expect(maintenance.cleanup(now).mediaFiles).toBe(1);
     expect(db.prepare('SELECT download_state AS state FROM attachments WHERE id=?').get('a-gone')).toMatchObject({ state: 'expired' });
     closeDatabase(db);
@@ -145,7 +145,7 @@ const ARBITER_OK = { content: [{ type: 'text', text: '选 A：它的依赖最少
 
 function arbiterHarness(name: string, options: { reply?: unknown; alias?: string; config?: Record<string, unknown> } = {}) {
   const path = `./data/${name}.test.db`;
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
   const results = `./data/${name}-results`;
   rmSync(results, { recursive: true, force: true });
   const db = openDatabase(path); migrateDatabase(db);

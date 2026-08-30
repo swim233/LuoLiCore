@@ -8,11 +8,11 @@ import { z } from 'zod';
 function harness(enabled = true, rules: unknown[] = [{ tool: 'bash', pattern: '(?i)\\brm\\s+-rf\\b', risk: 'high' }, { tool: 'mcp__*', risk: 'medium' }], ttlMs = 10_000,
   receipts: Array<{ chatId: string; tool: string; risk: string; ttlMs: number }> = []) {
   const path = `./data/approval-${enabled}.test.db`;
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
   const db = openDatabase(path);
   migrateDatabase(db);
   const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, approval: { enabled, ttlMs, skipForOwner: true, rules } });
-  const log = new LogSink(new OperationsRepository(db), './data/approval-logs');
+  const log = new LogSink(new OperationsRepository(db));
   const events = new EventBus();
   // 这些用例都在问「有人能裁决时怎么走」，所以 harness 必须真的挂一条裁决通道（WebUI 的 SSE）。
   // 挂成普通订阅者的话，走的是「没有通道 → 当场拒绝」那条分支，测的就不是这些用例想测的东西了。
@@ -43,10 +43,10 @@ describe('approval rules', () => {
 
   it('rejects immediately when no approval channel is connected', async () => {
     const path = './data/approval-unavailable.test.db';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
     const db = openDatabase(path); migrateDatabase(db);
     const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, approval: { enabled: true, skipForOwner: true } });
-    const events = new EventBus(); const log = new LogSink(new OperationsRepository(db), './data/approval-logs');
+    const events = new EventBus(); const log = new LogSink(new OperationsRepository(db));
     const sent: string[] = [];
     const broker = new DatabaseApprovalBroker(db, config, events, log, (pending) => { sent.push(pending.tool); });
     const registry = new ToolRegistry(log, broker, { maxRegistered: 10, maxCallsPerTurn: 10, maxConsecutiveErrors: 3 });
@@ -66,10 +66,10 @@ describe('approval rules', () => {
 
   it('waits for a decision once a real channel is connected', async () => {
     const path = './data/approval-channel.test.db';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
     const db = openDatabase(path); migrateDatabase(db);
     const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, approval: { enabled: true, skipForOwner: true } });
-    const events = new EventBus(); const log = new LogSink(new OperationsRepository(db), './data/approval-logs');
+    const events = new EventBus(); const log = new LogSink(new OperationsRepository(db));
     const sent: string[] = [];
     const broker = new DatabaseApprovalBroker(db, config, events, log, (pending) => { sent.push(pending.tool); });
     const registry = new ToolRegistry(log, broker, { maxRegistered: 10, maxCallsPerTurn: 10, maxConsecutiveErrors: 3 });
@@ -179,10 +179,10 @@ describe('approval rules', () => {
   // 点了没用而界面说成功，是 docs/20 · W-CFG-02 里最要命的那一类。
   it('follows approval config and rules through a hot reload', async () => {
     const path = './data/approval-hot.test.db';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
     const db = openDatabase(path);
     migrateDatabase(db);
-    const log = new LogSink(new OperationsRepository(db), './data/approval-logs');
+    const log = new LogSink(new OperationsRepository(db));
     let config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, approval: { enabled: true, skipForOwner: true, rules: [{ tool: 'bash', risk: 'high' }] } });
     const events = new EventBus(); events.subscribe(() => undefined, { channel: true });
     const broker = new DatabaseApprovalBroker(db, () => config, events, log);
@@ -227,10 +227,10 @@ describe('approval rules', () => {
 
   it('回执回调抛异常时审批照常走完', async () => {
     const path = './data/approval-receipt-throws.test.db';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
     const db = openDatabase(path); migrateDatabase(db);
     const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, approval: { enabled: true, ttlMs: 10_000, skipForOwner: true, rules: [{ tool: 'bash', always: true, risk: 'high' }] } });
-    const log = new LogSink(new OperationsRepository(db), './data/approval-logs');
+    const log = new LogSink(new OperationsRepository(db));
     const events = new EventBus();
     events.subscribe(() => undefined, { channel: true });
     // 回执通道坏了（Telegram 拒发、bot 还没建起来）不该把审批带崩 —— 那会让一次高危调用

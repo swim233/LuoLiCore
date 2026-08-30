@@ -8,9 +8,9 @@ import { capMentions } from '@luoli/telegram';
 
 function harness(name: string) {
   const path = `./data/${name}.test.db`;
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
   const db = openDatabase(path); migrateDatabase(db);
-  const log = new LogSink(new OperationsRepository(db), `./data/${name}-logs`);
+  const log = new LogSink(new OperationsRepository(db));
   return { db, log };
 }
 
@@ -120,7 +120,7 @@ describe('output.maxMentions', () => {
 describe('quota.warnAtRatio / lastRejection', () => {
   it('跨过预警线只提示一次，且能说出是哪一档挡的', () => {
     const path = './data/alerts-quota.test.db';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
     const db = openDatabase(path); migrateDatabase(db);
     const guard = new QuotaGuard(db, 'UTC');
     const limits = { globalDaily: 1, globalMonthly: null, chatDaily: null, chatMonthly: null, userDaily: null, userMonthly: null };

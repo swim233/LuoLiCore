@@ -24,7 +24,6 @@ services:
       - ./memory:/app/memory
       - ./skills:/app/skills
       - ./plugins:/app/plugins
-      - ./logs:/app/logs
       - ./config:/app/config
       - /var/run/docker.sock:/var/run/docker.sock
   sandbox:

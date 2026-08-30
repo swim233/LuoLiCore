@@ -5,6 +5,7 @@ import { DatabaseApprovalBroker, EventBus, LogSink, PROMPT_CALLBACK_MAX_BYTES, P
 import { approvalSettledText, promptAckText, staleApprovalOutcome } from '@luoli/telegram';
 import type { RuntimeTurnContext } from '@luoli/shared';
 import { z } from 'zod';
+import { logPayload } from './support/logs.js';
 
 /**
  * 用例自行实现的 `PromptChannel`。它与既有的 `{ request: async () => true }` 桩、`telegram: null`
@@ -268,13 +269,13 @@ const NOTICE_WEBUI = '需 owner 在 WebUI 审批页批准。';
  */
 function brokerHarness(name: string, options: { webuiChannel: boolean; telegramUp: boolean; abortSignal?: AbortSignal; ttlMs?: number; ownerChat?: boolean }) {
   const path = `./data/prompts-${name}.test.db`;
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
   const db = openDatabase(path);
   migrateDatabase(db);
   // owner 私聊那一档的有效角色就是 owner，`skipForOwner` 开着的话根本走不到审批
   // （生产里的同形路径是 ACP 的 `exemptOwnerSkip`，它反向豁免的正是这个开关）。
   const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, approval: { enabled: true, ttlMs: options.ttlMs ?? 10_000, skipForOwner: !options.ownerChat, rules: [{ tool: 'bash', always: true, risk: 'high' }] } });
-  const log = new LogSink(new OperationsRepository(db), './data/prompts-logs');
+  const log = new LogSink(new OperationsRepository(db));
   const events = new EventBus();
   if (options.webuiChannel) events.subscribe(() => undefined, { channel: true });
   const channel = new TestChannel();
@@ -401,7 +402,7 @@ describe('Telegram 审批裁决通道', () => {
     expect(notices[1]!.text).toContain(NOTICE_WEBUI);
     expect(db.prepare('SELECT state,decided_by AS decidedBy,decision_channel AS channel FROM approvals').get())
       .toMatchObject({ state: 'expired', decidedBy: 'system', channel: 'system' });
-    expect(db.prepare("SELECT data_json AS data FROM log_events WHERE kind='approval.unavailable'").pluck().get()).toContain('receipt_undeliverable');
+    expect(logPayload(db, 'approval.unavailable')).toContain('receipt_undeliverable');
     closeDatabase(db);
   });
 
@@ -634,7 +635,7 @@ describe('Telegram 审批裁决通道', () => {
     // 而本条从未送达用户。说明原因的是那条 `approval.unavailable` warn。
     expect(db.prepare('SELECT state,decided_by AS decidedBy,decision_channel AS channel FROM approvals').get())
       .toMatchObject({ state: 'expired', decidedBy: 'system', channel: 'system' });
-    expect(db.prepare("SELECT data_json AS data FROM log_events WHERE kind='approval.unavailable'").pluck().get()).toContain('receipt_undeliverable');
+    expect(logPayload(db, 'approval.unavailable')).toContain('receipt_undeliverable');
     closeDatabase(db);
   });
 

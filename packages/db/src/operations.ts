@@ -5,12 +5,16 @@ import {
   timezoneOffsetMinutes,
 } from "@luoli/shared";
 import type { Sqlite } from "./database.js";
+import { encodeLogPayload } from "./logs.js";
 
-/** `log_events` 的全部列去掉 `data_json`，改为其字节数：列表需要的是摘要而非载荷。 */
-const LOG_COLUMNS = `id,ts,level,kind,trace_id,span_id,parent_span_id,chat_id,user_id,key,agent_run_id,summary,file_ref,duration_ms,
-  COALESCE(length(data_json),0) AS data_bytes`;
+/** `log_events` 的全部列去掉载荷本身（`data` / `data_codec`），只留它解压后的字节数：
+ *  列表需要的是摘要而非载荷，而 `data_bytes` 记的就是解压后的长度，取它不必解压。 */
+const LOG_COLUMNS = `id,ts,level,kind,trace_id,span_id,parent_span_id,chat_id,user_id,key,agent_run_id,summary,duration_ms,data_bytes`;
 
 export class OperationsRepository {
+  /** `logs.compress`：热更新时整体替换。编码方式逐行记在 `data_codec` 上，所以关掉它之后
+   *  此前压过的行照读 —— 这个开关只决定**此后**写入的行怎么存。 */
+  compressLogPayloads = true;
   constructor(private readonly db: Sqlite) {}
 
   claimUpdate(updateId: number): boolean {
@@ -24,10 +28,13 @@ export class OperationsRepository {
   }
 
   /**
-   * `fileRef`：超过 `logs.bodyMaxBytes` 的载荷被移入 `logs/<day>/blobs/*.json` 后的引用。
-   * 此前它只写在 `data_json` 内，`log_events.file_ref` 列从未被写入，而 docs/03 的 DDL 中已有该列，
-   * 按 DDL 查库的人会误以为「无 file_ref 即无大载荷」。
-   * 两处都写：`data_json` 保持原样（解引用路径读的是它），同时填充该列，使 DDL 与实现一致。
+   * 载荷整块落在这一行的 `data` 上，没有第二个落点（docs/10 §3）。此前它分三处：行内的
+   * `data_json`、超过 `bodyMaxBytes` 时挪去的 `logs/<day>/blobs/*.json`、以及重复记一遍的
+   * `file_ref` 列 —— 而「行在、文件被保留策略清掉了」是读出侧必须处理的一种状态。
+   * 现在行与载荷同生同死，那种状态不再存在。
+   *
+   * `data` 写的是 Buffer 而不是字符串：`data_codec='zstd'` 时它本来就是二进制，而两种编码
+   * 共用一列才谈得上「读出侧只看 `data_codec`」。
    */
   insertLog(input: {
     level: string;
@@ -41,12 +48,15 @@ export class OperationsRepository {
     key?: string;
     data?: unknown;
     durationMs?: number;
-    fileRef?: string;
   }): number {
+    const payload = encodeLogPayload(input.data, this.compressLogPayloads);
+    // `agent_run_id` 这一列**照旧没有写入方**（生产库 59799 行里 0 行有值），与 `docs/10 §1`
+    // 记的 `parent_span_id` 是同一类死列。这次不顺手接：它的值要从子 agent 的调用链一路穿下来，
+    // 属 trace 模型的改动，按房规要先改 `docs/10 §1` 那张载体表。留着列不留假的写入口。
     const info = this.db
       .prepare(
-        `INSERT INTO log_events(ts,level,kind,trace_id,span_id,parent_span_id,chat_id,user_id,key,summary,data_json,file_ref,duration_ms)
-      VALUES (@ts,@level,@kind,@traceId,@spanId,@parentSpanId,@chatId,@userId,@key,@summary,@data,@fileRef,@durationMs)`,
+        `INSERT INTO log_events(ts,level,kind,trace_id,span_id,parent_span_id,chat_id,user_id,key,summary,duration_ms,data,data_codec,data_bytes)
+      VALUES (@ts,@level,@kind,@traceId,@spanId,@parentSpanId,@chatId,@userId,@key,@summary,@durationMs,@data,@codec,@bytes)`,
       )
       .run({
         ts: Date.now(),
@@ -59,9 +69,10 @@ export class OperationsRepository {
         chatId: input.chatId ?? null,
         userId: input.userId ?? null,
         key: input.key ?? null,
-        data: input.data ? JSON.stringify(input.data) : null,
-        fileRef: input.fileRef ?? null,
         durationMs: input.durationMs ?? null,
+        data: payload.data,
+        codec: payload.codec,
+        bytes: payload.bytes,
       });
     return Number(info.lastInsertRowid);
   }
@@ -70,9 +81,9 @@ export class OperationsRepository {
    * @param minLevel 只取该级别及以上。总览页的「最近错误」卡片需要 `warn` 以上（docs/09 §3.1）：
    *   不分级别地取最近若干条时结果几乎总被 info 占满，该卡片形同虚设。
    *
-   * 不返回 `data_json`，只返回其字节数。此处原为 `SELECT *`：一条 `model.call` 的载荷可达
-   * `logs.bodyMaxBytes`（默认 256 KB），列表单次最多 1000 行，日志页每次刷新都会向浏览器推送
-   * 数十 MB，而界面只用得到摘要列。需要正文时走 `GET /api/logs/:id`（含 blob 解引用与截断）。
+   * 不返回载荷本身，只返回它解压后的字节数。此处原为 `SELECT *`：一条 `model.call` 的载荷
+   * 实测均 29 KB、最大 5 MB（且不再有上限），列表单次最多 1000 行，日志页每次刷新都会向浏览器
+   * 推送数十 MB，而界面只用得到摘要列。需要正文时走 `GET /api/logs/:id`（含解码与截断）。
    */
   logs(
     limit = 100,

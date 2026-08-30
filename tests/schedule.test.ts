@@ -4,6 +4,7 @@ import { ArchiveRepository, OperationsRepository, PrincipalRepository, ScheduleR
 import { ContextEngine, EventBus, LogSink, MemoryStore, QuotaGuard, SILENT_STREAK_WARN, SYNTHETIC_TG_MESSAGE_ID_BASE, ScheduledJobRunner, Scheduler, ToolRegistry, TurnConcurrency, TurnFailureStreak, TurnRegistry, configSchema, registerScheduleTools, updateScheduledJob } from '@luoli/core';
 import type { Config, TelegramToolBridge } from '@luoli/core';
 import type { RuntimeTurnContext } from '@luoli/shared';
+import { logPayload, logRows } from './support/logs.js';
 
 /**
  * 定时任务（docs/14 §2 Q4 的四条决策）。本文件验证的正是那四条：
@@ -15,13 +16,13 @@ import type { RuntimeTurnContext } from '@luoli/shared';
  */
 function harness(name: string, extra: Record<string, unknown> = {}) {
   const path = `./data/${name}.test.db`;
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
   const directory = `./data/${name}-logs`; rmSync(directory, { recursive: true, force: true }); mkdirSync(directory, { recursive: true });
   const memoryDir = `./data/${name}-memory`; rmSync(memoryDir, { recursive: true, force: true }); mkdirSync(memoryDir, { recursive: true });
   const db = openDatabase(path); migrateDatabase(db);
   const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, general: { timezone: 'UTC' }, quota: { enabled: false }, ...extra }) as Config;
   const events = new EventBus();
-  const log = new LogSink(new OperationsRepository(db), directory, [], { level: 'debug', console: 'off' });
+  const log = new LogSink(new OperationsRepository(db), [], { level: 'debug', console: 'off' });
   const archive = new ArchiveRepository(db);
   const jobs = new ScheduleRepository(db);
   const scheduler = new Scheduler();
@@ -265,7 +266,7 @@ describe('定时任务触发', () => {
     expect(summary).toContain('会话 chat:-1001');
     expect(summary).not.toContain('创建者');
     // 两侧的角色都写入 data，运维无需再推断是哪一方。
-    expect(h.db.prepare("SELECT data_json FROM log_events WHERE kind='schedule.cancelled'").pluck().get()).toContain('"userRole":"trusted"');
+    expect(logPayload(h.db, 'schedule.cancelled')).toContain('"userRole":"trusted"');
     h.close();
   });
 
@@ -290,7 +291,7 @@ describe('定时任务触发', () => {
     expect(h.db.prepare('SELECT COUNT(*) FROM context_messages').pluck().get()).toBe(0);
     expect(h.db.prepare('SELECT COUNT(*) FROM usage_ledger').pluck().get()).toBe(0);
     expect(h.db.prepare('SELECT COUNT(*) FROM quota_counters').pluck().get()).toBe(0);
-    expect(h.db.prepare("SELECT data_json FROM log_events WHERE kind='schedule.skipped'").pluck().get()).toContain('telegram_unavailable');
+    expect(logPayload(h.db, 'schedule.skipped')).toContain('telegram_unavailable');
     // 任务保留：通道恢复后它照常执行，这不属于停用。
     expect(h.jobs.byId(job.id)).toMatchObject({ state: 'active', lastState: 'skipped', lastError: 'telegram_unavailable' });
     expect(h.scheduler.names()).toEqual([`job:${job.id}`]);
@@ -558,12 +559,12 @@ describe('本轮不用汇报（静默）', () => {
     // 该轮确实已提交：静默属于投递侧行为，区分依据在 last_state 与日志上。
     expect(h.db.prepare('SELECT state FROM turns').pluck().get()).toBe('committed');
     expect(h.jobs.byId(job.id)).toMatchObject({ state: 'active', runCount: 1, lastState: 'silent', lastError: null, silentStreak: 1 });
-    const silent = h.db.prepare("SELECT level,data_json AS data FROM log_events WHERE kind='schedule.silent'").get() as { level: string; data: string };
+    const silent = logRows(h.db, 'schedule.silent')[0]!;
     expect(silent.level).toBe('info');
     // reason 始终存在：它是判断该任务是否已长期静默的唯一可读凭据。
-    expect(JSON.parse(silent.data)).toMatchObject({ streak: 1, warnAt: SILENT_STREAK_WARN, reason: '版本号没变' });
+    expect(JSON.parse(silent.data!)).toMatchObject({ streak: 1, warnAt: SILENT_STREAK_WARN, reason: '版本号没变' });
     // 一条正常提交的轮次缺少 tg.send，没有这一标志位时在 trace 中无法解释。
-    expect(h.db.prepare("SELECT data_json FROM log_events WHERE kind='turn.end'").pluck().get()).toContain('"silenced":true');
+    expect(logPayload(h.db, 'turn.end')).toContain('"silenced":true');
     h.close();
   });
 

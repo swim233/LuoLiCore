@@ -38,7 +38,7 @@ COPY skills ./skills
 # 属主是宿主用户（通常 1000），uid 对不上就是启动即 EACCES mkdir /app/data/workspace；而且沙箱容器
 # 固定跑 --user=1000:1000，uid 一致才不会出现「bash 写的文件应用改不动」。宿主用户不是 1000 时，
 # 在 docker-compose.yml 里用 user: "${UID}:${GID}" 覆盖。
-RUN mkdir -p data logs skills plugins && chown -R node:node /app
+RUN mkdir -p data skills plugins && chown -R node:node /app
 USER node
 EXPOSE 8787
 CMD ["node", "dist/apps/bot/src/main.js"]

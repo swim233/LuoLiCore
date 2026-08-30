@@ -71,13 +71,13 @@ function registryFor(chains: Record<string, Array<{ model: ReturnType<typeof can
 
 function harness(name: string, patch: Partial<Config> = {}) {
   const path = `./data/${name}.test.db`;
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
   rmSync(`./data/${name}-memory`, { recursive: true, force: true });
   const db = openDatabase(path);
   migrateDatabase(db);
   const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, quota: { requirePricing: false }, provider: { maxRetries: 1, retryBaseMs: 1, retryMaxMs: 2 },
     memory: { dir: `./data/${name}-memory` }, approval: { enabled: false }, ...patch });
-  const log = new LogSink(new OperationsRepository(db), `./data/${name}-logs`);
+  const log = new LogSink(new OperationsRepository(db));
   const broker: ApprovalBroker = { request: async () => true };
   const documents = new PromptDocuments(db, config.memory.dir);
   documents.ensure();

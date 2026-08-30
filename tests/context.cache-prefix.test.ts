@@ -29,12 +29,12 @@ interface Captured { prompt: PromptMessage[]; tools: unknown }
 
 function harness(name: string, active: { windowMs: number } = { windowMs: 600_000 }) {
   const path = `./data/${name}.test.db`;
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
   rmSync(`./data/${name}-memory`, { recursive: true, force: true });
   const db = openDatabase(path);
   migrateDatabase(db);
   const archive = new ArchiveRepository(db);
-  const log = new LogSink(new OperationsRepository(db), `./data/${name}-logs`);
+  const log = new LogSink(new OperationsRepository(db));
   const engine = new ContextEngine(db, archive, log);
   const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, general: { timezone: 'UTC' },
     quota: { requirePricing: false }, approval: { enabled: false }, memory: { dir: `./data/${name}-memory` },

@@ -161,7 +161,6 @@ const config = await loadConfig({
 const configStore = new ConfigStore(config);
 for (const path of [
   resolve("data"),
-  resolve("logs"),
   resolve("skills"),
   resolve("plugins"),
   resolve(config.memory.dir),
@@ -169,7 +168,15 @@ for (const path of [
 ])
   mkdirSync(path, { recursive: true, mode: 0o700 });
 const db = openDatabase(config.db.path);
-migrateDatabase(db);
+// 第三个参数把日志库串进来：建 `logs.dbPath` → 迁移它 → ATTACH → 搬迁主库里的存量
+// `log_events` → 最后才跑主库迁移。顺序在 `migrateDatabase` 里写死，理由见 docs/10 §3
+// （`0017` 会删掉主库那张表，跑在搬迁之前就是把存量日志直接删了）。
+// `legacyDir` 是上一版那个 `logs/` 目录：搬迁时要顺着 `file_ref` 把 blob 收回行上。
+migrateDatabase(db, undefined, {
+  path: config.logs.dbPath,
+  legacyDir: resolve("logs"),
+  compress: config.logs.compress,
+});
 // **拿锁必须排在 `recoverAfterCrash` 之前**：那个函数假定「进程启动 ⇒ 上一个进程已死」，
 // 而在这把锁之前没有任何东西保证这一点 —— 用同一个库起第二个实例会把在位实例**仍在执行**的
 // 轮次就地判死、释放已认领的消息、清零在途预留，之后 A 才因为 409 关停（docs/28 · L-OPS-01）。
@@ -243,17 +250,11 @@ const turnRegistry = new TurnRegistry();
 const turnConcurrency = new TurnConcurrency(config.concurrency);
 const log = new LogSink(
   operations,
-  config.logs.dir,
   [process.env.BOT_TOKEN ?? "", process.env.LUOLI_MASTER_KEY ?? ""],
-  {
-    level: config.logs.level,
-    maxFileMb: config.logs.maxFileMb,
-    bodyMaxBytes: config.logs.bodyMaxBytes,
-    console: config.logs.console,
-    events,
-  },
+  { level: config.logs.level, console: config.logs.console, events },
 );
 log.redactPatterns = config.logs.redactPatterns;
+operations.compressLogPayloads = config.logs.compress;
 // 两条修复都发生在 sink 之前，所以补记在这里 —— stdout 那两行只有盯着终端的人看得见，
 // 而「上一次崩溃 reap 了什么」正是事后才会有人来查的东西（docs/28 · L-OPS-04）。
 if (recoveredAny)
@@ -483,9 +484,7 @@ const maintenance = new MaintenanceService(
   config.db.path,
   config.db.backupKeep,
   config.logs.retentionDays,
-  config.logs.dir,
   { files: config.media.dir, agentResults: agentResultsDir },
-  config.logs.gzipAfterDays,
   config.schedule.retentionDays,
   {
     usage: config.maintenance.retention.usageDays,
@@ -1647,6 +1646,10 @@ events.subscribe((event) => {
         log.setLevel(next.logs.level);
       if (keys.some((key) => key.startsWith("logs.redactPatterns")))
         log.redactPatterns = next.logs.redactPatterns;
+      // 编码方式逐行记在 `data_codec` 上，所以这个开关只作用于**此后**写入的行，
+      // 已压缩的照读 —— 它因此能安全热更新（`logs.dbPath` 不能，它在启动时就被 ATTACH 走了）。
+      if (keys.some((key) => key.startsWith("logs.compress")))
+        operations.compressLogPayloads = next.logs.compress;
       if (
         keys.some(
           (key) =>

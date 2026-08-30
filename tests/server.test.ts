@@ -7,14 +7,14 @@ import argon2 from 'argon2';
 
 async function appHarness(overrides: Record<string, unknown> = {}) {
   const path = './data/server.test.db';
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
   const db = openDatabase(path);
   migrateDatabase(db);
   const validHash = await argon2.hash('current-password', { type: argon2.argon2id, memoryCost: 19_456, timeCost: 2, parallelism: 1 });
   const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, webui: { passwordHash: validHash }, ...overrides });
   const operations = new OperationsRepository(db);
   const events = new EventBus();
-  const log = new LogSink(operations, './data/server-logs');
+  const log = new LogSink(operations);
   const archive = new ArchiveRepository(db);
   const context = new ContextEngine(db, archive);
   const approvals = new DatabaseApprovalBroker(db, config, events, log);
@@ -114,12 +114,12 @@ describe('server security', () => {
   // （PUT /api/config 写 passwordHash 返回 200、落库、登录还认旧的，docs/24 · R-AUTH-01）。
   it('hands the password back to the config layer once the hot reload lands', async () => {
     const path = './data/server-passwd.test.db';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
     const db = openDatabase(path); migrateDatabase(db);
     const hashOf = (value: string) => argon2.hash(value, { type: argon2.argon2id, memoryCost: 19_456, timeCost: 2, parallelism: 1 });
     const withHash = async (value: string) => configSchema.parse({ access: { bootstrapOwnerId: '1' }, webui: { passwordHash: await hashOf(value) } });
     const store = new ConfigStore(await withHash('first-password'));
-    const operations = new OperationsRepository(db); const events = new EventBus(); const log = new LogSink(operations, './data/server-logs');
+    const operations = new OperationsRepository(db); const events = new EventBus(); const log = new LogSink(operations);
     const archive = new ArchiveRepository(db); const context = new ContextEngine(db, archive);
     const app = createServer({ config: store, db, operations, principals: new PrincipalRepository(db), archive, context,
       providers: new ProviderStore(db, new Secrets('x'.repeat(32))), approvals: new DatabaseApprovalBroker(db, store.snapshot(), events, log),

@@ -15,7 +15,7 @@ import { closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
 function harness(slug: string, maxSubagentsPerTurn: number, extra: AgentDefinition[] = []) {
   const path = `./data/${slug}.test.db`;
   const results = `./data/${slug}-results`;
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
   rmSync(results, { recursive: true, force: true });
   const db = openDatabase(path);
   migrateDatabase(db);

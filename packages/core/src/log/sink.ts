@@ -1,12 +1,3 @@
-import {
-  appendFileSync,
-  existsSync,
-  mkdirSync,
-  renameSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
-import { dirname, join, resolve } from "node:path";
 import { ulid } from "ulid";
 import type { OperationsRepository } from "@luoli/db";
 import type { EventBus } from "../events.js";
@@ -26,18 +17,6 @@ export interface LogEvent {
   durationMs?: number;
 }
 
-const CATEGORY_BY_PREFIX: Record<string, string> = {
-  model: "model",
-  tool: "tool",
-  sandbox: "tool",
-  approval: "tool",
-  system: "system",
-  config: "system",
-  maintenance: "system",
-  webui: "system",
-  plugin: "system",
-  mcp: "system",
-};
 const LEVEL_RANK = { debug: 0, info: 1, warn: 2, error: 3 } as const;
 /** 广播阈值与合并窗口刻意不设为配置项：这两个值一旦放宽（广播 debug、或把窗口调为 0），
  *  每条事件触发一次前端重拉将构成自我 DDoS（docs/21 §3 · G-SSE-01）。 */
@@ -46,13 +25,11 @@ const COALESCE_MS = 200;
 
 export interface LogSinkOptions {
   level?: LogEvent["level"];
-  maxFileMb?: number;
-  bodyMaxBytes?: number;
   console?: "pretty" | "json" | "off";
   events?: EventBus;
 }
 
-/** SSE 上 `log` 事件的载荷：只含摘要，不含 `data`。单条载荷可达几百 KB
+/** SSE 上 `log` 事件的载荷：只含摘要，不含 `data`。单条载荷可达几 MB
  *  （`model.call` 携带请求体），全量广播会压垮每个打开的 WebUI 连接。 */
 export interface LogBroadcast {
   id: number;
@@ -82,10 +59,16 @@ export interface LogSpan {
   end: (data?: unknown, error?: unknown, override?: SpanOverride) => void;
 }
 
+/**
+ * 日志只有一个落点：`log_events` 那一行，载荷就在它的 `data` 列上（docs/10 §3）。
+ *
+ * 此前有三个 —— 按天按类分的 `logs/<day>/*.jsonl`、超 `bodyMaxBytes` 时挪去的
+ * `logs/<day>/blobs/*.json`、以及同一条再入一次库。实测 16 天摊成 841 个文件，而那些 jsonl
+ * **生产代码零处读过**。随之删掉的还有文件轮转、按天目录的保留期删除、gzip，以及
+ * 「库与目录来自两套部署」这一整类不一致。
+ */
 export class LogSink {
   #level: LogEvent["level"];
-  readonly #maxFileBytes: number;
-  readonly #bodyMaxBytes: number;
   readonly #console: "pretty" | "json" | "off";
   readonly #events: EventBus | null;
   readonly #pending = new Map<
@@ -97,25 +80,14 @@ export class LogSink {
     }
   >();
   readonly #lastBroadcast = new Map<string, number>();
-  readonly #files = new Map<
-    string,
-    {
-      bytes: number;
-      buffer: string;
-      timer: ReturnType<typeof setTimeout> | null;
-    }
-  >();
   private secrets: string[];
   constructor(
     private readonly repository: OperationsRepository,
-    private readonly directory: string,
     secrets: string[] = [],
     options: LogSinkOptions = {},
   ) {
     this.secrets = secrets;
     this.#level = options.level ?? "debug";
-    this.#maxFileBytes = (options.maxFileMb ?? 128) * 1024 * 1024;
-    this.#bodyMaxBytes = options.bodyMaxBytes ?? 262_144;
     this.#console = options.console ?? "off";
     this.#events = options.events ?? null;
   }
@@ -129,7 +101,7 @@ export class LogSink {
   setSecrets(secrets: readonly string[]): void {
     this.secrets = [...new Set(secrets.filter(Boolean))];
   }
-  /** 装配方在此挂载告警（`alerts.on` 的 db_write_failed）。落盘或落库失败意味着日志本身已不可信，
+  /** 装配方在此挂载告警（`alerts.on` 的 db_write_failed）。落库失败意味着日志本身已不可信，
    *  仅写 stderr 时运维通常无法察觉。设置它的调用方必须保证回调自身不抛出。 */
   onWriteFailure?: (error: unknown) => void;
   /** `onWriteFailure` 挂载的是 `alerts.fire('db_write_failed')`，而 `AlertDispatcher.raise()` 首先
@@ -137,8 +109,24 @@ export class LogSink {
    *  （`#remember` 在那次 log.event 之前调用），但日志失败不循环这一性质不应依赖告警的去重窗口。 */
   #reporting = false;
 
-  #reportWriteFailure(error: unknown): void {
+  /**
+   * @param line 已脱敏的整条事件。**写的是整行而不只是那句错误消息** —— 「库坏了至少内容还在」
+   *   此前由 JSONL 兜着（`tests/log.pipeline.test.ts` 那条断言），删掉文件落点之后，唯一还留得住
+   *   载荷的地方就是进程的 stderr（journald / `docker logs` 收得到）。这不是第二个落点：
+   *   它只在写库失败这一条路径上有输出，正常运行时一个字节都不写。
+   */
+  #reportWriteFailure(error: unknown, line?: unknown): void {
     try {
+      if (line !== undefined) {
+        // 载荷可能带环（调用方传进来的任意对象），序列化失败不该盖掉下面那句错误。
+        let text: string;
+        try {
+          text = JSON.stringify(line) ?? "";
+        } catch {
+          text = "";
+        }
+        if (text) process.stderr.write(`[log] ${text}\n`);
+      }
       process.stderr.write(
         `[log] 写入失败：${error instanceof Error ? error.message : String(error)}\n`,
       );
@@ -153,75 +141,6 @@ export class LogSink {
       /* 告警链路自身故障时不得再次抛出 */
     } finally {
       this.#reporting = false;
-    }
-  }
-
-  #file(path: string): {
-    bytes: number;
-    buffer: string;
-    timer: ReturnType<typeof setTimeout> | null;
-  } {
-    let state = this.#files.get(path);
-    if (!state) {
-      let bytes = 0;
-      try {
-        bytes = existsSync(path) ? statSync(path).size : 0;
-      } catch {
-        /* 首次写入时重试 */
-      }
-      state = { bytes, buffer: "", timer: null };
-      this.#files.set(path, state);
-    }
-    return state;
-  }
-
-  /**
-   * 只有一条同步路径（`appendFileSync`）。此前带有 `synchronous` 参数，三处调用点均传 `true`，
-   * 函数体以 `void synchronous;` 结尾 —— 保留会使读者误以为存在两条路径（docs/27 · T-02）。
-   * 若将来需要异步分支，届时再加参数。
-   */
-  #flushFile(path: string): void {
-    const state = this.#files.get(path);
-    if (!state?.buffer) return;
-    if (state.timer) {
-      clearTimeout(state.timer);
-      state.timer = null;
-    }
-    const content = state.buffer;
-    state.buffer = "";
-    try {
-      appendFileSync(path, content, { mode: 0o600 });
-      state.bytes += Buffer.byteLength(content);
-    } catch (error) {
-      this.#reportWriteFailure(error);
-    }
-  }
-
-  #writeLine(path: string, line: string, urgent: boolean): void {
-    try {
-      mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-      let state = this.#file(path);
-      const bytes = Buffer.byteLength(line);
-      if (
-        state.bytes + Buffer.byteLength(state.buffer) + bytes >=
-        this.#maxFileBytes
-      ) {
-        this.#flushFile(path);
-        let suffix = 1;
-        while (existsSync(`${path}.${suffix}`)) suffix += 1;
-        if (existsSync(path)) renameSync(path, `${path}.${suffix}`);
-        state = { bytes: 0, buffer: "", timer: null };
-        this.#files.set(path, state);
-      }
-      state.buffer += line;
-      if (urgent || Buffer.byteLength(state.buffer) >= 65_536)
-        this.#flushFile(path);
-      else if (!state.timer) {
-        state.timer = setTimeout(() => this.#flushFile(path), 200);
-        state.timer.unref?.();
-      }
-    } catch (error) {
-      this.#reportWriteFailure(error);
     }
   }
 
@@ -270,70 +189,35 @@ export class LogSink {
     this.#pending.set(event.kind, { timer, event, merged: 1 });
   }
 
-  /** 关停时刷新文件缓冲，并丢弃尚未发出的 SSE 尾包。 */
+  /** 关停时丢弃尚未发出的 SSE 尾包。事件本身早已同步入库，没有缓冲要刷。 */
   close(): void {
     for (const entry of this.#pending.values()) clearTimeout(entry.timer);
     this.#pending.clear();
-    for (const path of this.#files.keys()) this.#flushFile(path);
   }
 
   event(input: LogEvent): number {
     if (LEVEL_RANK[input.level] < LEVEL_RANK[this.#level]) return 0;
     const safe = redact(input, this.secrets, this.redactPatterns);
-    const prefix = input.kind.split(".")[0] ?? "turn";
-    const category = CATEGORY_BY_PREFIX[prefix] ?? "turn";
-    const day = new Date().toISOString().slice(0, 10);
-    let data = safe.data;
-    let fileRef: string | undefined;
-    if (data !== undefined) {
-      const serialized = JSON.stringify(data);
-      if (Buffer.byteLength(serialized) > this.#bodyMaxBytes) {
-        fileRef = join(day, "blobs", `${Date.now()}-${ulid()}.json`);
-        const blobPath = resolve(this.directory, fileRef);
-        try {
-          mkdirSync(dirname(blobPath), { recursive: true, mode: 0o700 });
-          writeFileSync(blobPath, serialized, { mode: 0o600 });
-        } catch (error) {
-          this.#reportWriteFailure(error);
-          fileRef = undefined;
-        }
-        data = fileRef
-          ? { fileRef, bytes: Buffer.byteLength(serialized) }
-          : { omitted: true, bytes: Buffer.byteLength(serialized) };
-      }
-    }
-    const path = join(this.directory, day, `${category}.jsonl`);
-    const stored = { ...safe, data };
     const ts = Date.now();
-    const line = JSON.stringify({
-      ts,
-      ...stored,
-      ...(fileRef ? { fileRef } : {}),
-    });
-    this.#writeLine(
-      path,
-      `${line}\n`,
-      input.level === "error" || input.kind === "system.crash",
-    );
-    if (this.#console === "json") process.stdout.write(`${line}\n`);
+    if (this.#console === "json")
+      process.stdout.write(`${JSON.stringify({ ts, ...safe })}\n`);
     else if (this.#console === "pretty")
+      // 打的是脱敏后的 summary。此前这一行用的是 `input.summary` —— 同一个方法里 json 那一路
+      // 打脱敏后的、pretty 那一路打原文，而默认配置正是 pretty。
       process.stdout.write(
-        `${new Date().toISOString()} ${input.level.toUpperCase()} ${input.kind} ${input.summary}\n`,
+        `${new Date(ts).toISOString()} ${input.level.toUpperCase()} ${input.kind} ${safe.summary}\n`,
       );
     // 入库失败一律不向外抛出。本方法的调用点全部位于 catch 块、`.catch()` 回调以及
     // `main.ts` 的 crash handler 中 —— 抛出会把日志写入失败升级为轮次失败，
     // 再升级为 crash handler 自身抛出、`process.exit(1)` 无法执行。关停竞态下这必然发生：
     // `poller.drain()` 宽限期结束即返回，在途 handler 之后才 settle，此时 `closeDatabase`
-    // 已执行完毕。本类中所有文件写入均已走 `#reportWriteFailure`，只有此处未处理。
-    // 返回 0 与级别不足那一条采用同一约定（见本方法开头），调用方本就不应将其视为真实 id。
+    // 已执行完毕。返回 0 与级别不足那一条采用同一约定（见本方法开头），调用方本就不应
+    // 将其视为真实 id。
     let id: number;
     try {
-      id = this.repository.insertLog({
-        ...stored,
-        ...(fileRef ? { fileRef } : {}),
-      });
+      id = this.repository.insertLog(safe);
     } catch (error) {
-      this.#reportWriteFailure(error);
+      this.#reportWriteFailure(error, { ts, ...safe });
       return 0;
     }
     // 广播必须在入库成功之后：前端用该 id 调 `/api/logs/:id` 拉取详情，广播 0 等于

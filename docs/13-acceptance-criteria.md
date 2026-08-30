@@ -57,7 +57,7 @@
 | [x] AC-CFG-016 (自动) ★ | 设 `LUOLI_WEBUI_HOST` 后写 `webui.host`；设 `WEBUI_PASSWORD` 后调 `POST /api/auth/password` | 前者 400 `config_pinned_by_env` 且 `config_kv` 无新行（祖先写入 `{webui:{host}}` 同样挡回去），后者 409 `password_pinned_by_env`；`GET /api/config/schema` 的 `envPinned` 列出该键与变量名，表单据此禁用控件。env 层在覆盖层之后合并，写进去必然被盖回 —— 「保存成功但运行时没变」不许再新造（docs/21 · G-CFG-03） | 〔config.api.test.ts、config.persistence.test.ts〕
 | [x] AC-CFG-017 (手动) | 不重启改 `webui.sessionTtlHours` / `webui.loginRateLimit.attempts`；再改 `mcp.healthCheckCron` | 前两项徽标是「热更新」且下一次请求即按新值走（每请求从 `currentConfig()` 现读）；`mcp.healthCheckCron` 徽标是「需重启」—— 它由 `scheduler.add()` 在启动时拿走，`Scheduler` 没有重配入口。徽标与真实读取路径一致，两个方向都不许说反（docs/21 · G-CFG-05） 〔手测 2026-08-27 · S3〕
 | [x] AC-CFG-018 (自动) | `PUT /api/config` 写 `approval.rules`：字段名写成 `toolName`、`pattern: '('`、`risk: 'huge'`、`always: false` | 四种都 400；`{tool: ['delete_file','move_file'], pattern: '(?i)\\.env', risk: 'high'}` 200。运行时 `ApprovalRules` 会把写歪的规则静默丢掉或永不命中 —— 一道静默不生效的审批门等于门开着（docs/21 · G-CFG-07） | 〔config.api.test.ts〕
-| [x] AC-DB-001 (自动) | 空库启动 | 全部表/索引/FTS/触发器创建成功；PRAGMA journal_mode=wal | 〔db.isolation.test.ts〕
+| [x] AC-DB-001 (自动) | 空库启动 | 全部表/索引/FTS/触发器创建成功；PRAGMA journal_mode=wal。`log_events` 来自附加上来的 `logs.db`，且**主库那张同名表必须已被删掉** —— 它只要还在就会按 main 优先的解析顺序一直遮住附加库那张（[10 §3](../docs/10-logging-and-observability.md#3-存储)） | 〔db.isolation.test.ts〕
 | [x] AC-DB-002 (自动) | 对已迁移库再次启动 | 迁移幂等，无报错，无重复表 | 〔db.isolation.test.ts〕
 | [x] AC-DB-003 (自动) ★ | 遍历所有 Repository 导出方法 | 非 `admin*`/`report*` 白名单方法的 SQL 均含 `chat_id = ?` 或 `key = ?` | 〔db.isolation.test.ts〕
 | [x] AC-DB-004 (自动) | 中文关键词「隆福」检索 | FTS trigram 命中；查询串长度 <3 时回退 LIKE 且仍带 chat 过滤 | 〔db.isolation.test.ts〕
@@ -399,11 +399,11 @@
 | [ ] AC-LOG-004 (自动) ★ | 求和校验 | 该 turn 所有 `usage_ledger.cost_usd` 之和 == `turns.cost_usd`（误差 <1e-9） |
 | [ ] AC-LOG-005 (自动) | 子 agent 的 span | `parent_span_id` = 派发它的 `tool.call` span；费用计入同一 `turn_id` |
 | [ ] AC-LOG-006 (自动) | rebase / prune / hardcap | 三类事件均有独立日志，且能读出涉及的 ordinal 区间 |
-| [ ] AC-LOG-007 (自动) ★ | 正则扫描全部 `logs/**/*.jsonl` 与 `log_events.data_json` | 不出现 bot token 形态、`sk-…`、`Bearer …`、master key、任何 provider key 明文 |
+| [ ] AC-LOG-007 (自动) ★ | 正则扫描 `log_events` 的全部 `summary` 与**解码后**的 `data`（压缩不是掩护） | 不出现 bot token 形态、`sk-…`、`Bearer …`、master key、任何 provider key 明文 |
 | [ ] AC-LOG-008 (自动) | 流式模型调用 | usage 在流结束的 finish part 记账（不是 0） |
 | [ ] AC-LOG-009 (自动) | 模型调用失败 | 仍写一行 `usage_ledger`（`ok=0`, `error_kind`） |
 | [ ] AC-LOG-010 (自动) | `logs.captureBodies=false` | 日志仅含 hash 与长度，无消息正文 |
-| [x] AC-LOG-011 (自动) | 单条 payload 超 `bodyMaxBytes` | 落独立文件并在行内记 `file_ref`；WebUI 可懒加载查看 | 〔log.pipeline.test.ts〕
+| [x] AC-LOG-011 (自动) | 一条带完整请求体的 `model.call` | 载荷整块留在 `log_events.data` 上（`data_codec='zstd'`、`data_bytes` 记的是解压后的长度），没有第二个落点；解码后与原文一字不差，WebUI 详情页取到的就是那一份 | 〔log.pipeline.test.ts〕
 | [x] AC-QUOTA-001 (自动) ★ | `perUser.daily=0.001`，发第二条消息 | 被拒；文案含已用/上限与重置时间；无模型调用发生 | 〔quota.test.ts〕
 | [x] AC-QUOTA-002 (自动) ★ | 额度只够 2 个 turn，并发 5 个 | 恰好 2 个执行、3 个被拒；总花费不超上限（预留机制） | 〔quota.concurrency.test.ts〕
 | [ ] AC-QUOTA-003 (自动) | 判定顺序 | global 超限时即使 perUser 有余额也拒绝 |
@@ -513,9 +513,9 @@
 | [ ] AC-WEB-010 (手动) ★ | Trace 视图 | 展开一次真实 turn 的全部 span；可查看完整请求消息与工具 IO |
 | [ ] AC-WEB-011 (手动) | 消息检索 | FTS 中文命中；跨会话检索仅 owner 可用；`raw_json` 与附件可查看/下载 |
 | [ ] AC-WEB-011b (自动) | 消息页默认视图（库里有 25 次对话） | 按 turn 列出最近 20 次，提问与回答成对显示；翻到第 2 页得到剩下 5 次；流式切成多条消息的回复不重复显示；搜索框与 `[搜索归档]` 在同一行，回车等价点按钮 |
-| [ ] AC-WEB-011c (自动) | 对某一轮点 `[查看详情]` | 弹出该轮实际调用：`model.call` 的载荷里能看到 `request.body`（真正发给上游的请求体）；超过 `logs.bodyMaxBytes` 被挪进 `blobs/` 的载荷同样解引用出来，而不是显示 `{"fileRef":…}`；超长 JSON 截断并置 `truncated`，`[复制 JSON]` / `[下载完整 JSON]` 取到的是完整那一份；`logs.captureBodies` 关闭时页面明说「没有请求体」；turn 不存在返回 404 |
+| [ ] AC-WEB-011c (自动) | 对某一轮点 `[查看详情]` | 弹出该轮实际调用：`model.call` 的载荷里能看到 `request.body`（真正发给上游的请求体）；压缩过的行同样解码出来，而不是显示一串二进制；超长 JSON 截断并置 `truncated`，`[复制 JSON]` / `[下载完整 JSON]` 取到的是完整那一份；`logs.captureBodies` 关闭时页面明说「没有请求体」；turn 不存在返回 404 |
 | [x] AC-WEB-011d (自动) ★ | 对一轮点 `[查看详情]`，切到「工具输入输出」组 | 列出该轮的 `tool_call` / `tool_result`，**能看到工具调用的原始参数**；被裁剪降级过的行（`prune_applied=1`）也给出库里保留的原文并标注「模型现在看到的是占位符」；这一组读 `context_messages.parts_json` 而不是日志，所以对 `LogSink.span` 修好之前的历史轮次同样有效，也不受 `logs.retentionDays` / `captureBodies` 影响；别的会话里同 `turn_id` 的 parts 不会串进来 | 〔webui.console.test.ts〕
-| [x] AC-WEB-011e (自动) ★ | 日志页点一行（分别点有 trace 的、没有 trace 的、载荷被挪进 `blobs/` 的） | 三种都打开详情：元信息（trace/span/parent/chat/user/key/耗时）+ 格式化载荷；blob 解引用；无载荷的行如实说「没有载荷」而不是空白。`GET /api/logs/:id` 对不存在的 id 与非数字 id 都是 404，且 `/api/logs/blob`、`/api/logs/trace/:traceId` 仍然可达（`:id` 注册在它们之后）。列表响应里**不含 `data_json`**，只带 `data_bytes` | 〔webui.console.test.ts〕
+| [x] AC-WEB-011e (自动) ★ | 日志页点一行（分别点有 trace 的、没有 trace 的、载荷被压缩过的） | 三种都打开详情：元信息（trace/span/parent/chat/user/key/耗时）+ 格式化载荷；压缩行按 `data_codec` 解码；无载荷的行如实说「没有载荷」而不是空白。`GET /api/logs/:id` 对不存在的 id 与非数字 id 都是 404，且 `/api/logs/trace/:traceId` 仍然可达（`:id` 注册在它之后）。列表响应里**不含 `data` / `data_codec`**，只带 `data_bytes` | 〔webui.console.test.ts〕
 | [x] AC-WEB-030 (自动) ★ | 定时任务面板：两个会话各排一个任务后打开「任务与审批」页 | 跨会话都列出来，每行带会话名、创建者、模式、cron/绝对时间 + 时区、下一次触发（来自进程内 `Scheduler`）、上一次结果与累计次数，外加静默开关与连续静默次数（`silent` / `silentStreak` —— 后者是「这条任务已经变成一台只烧钱不说话的定时器」在界面上唯一看得见的凭据）；信封带 `total` / `truncated`，撞上 `listAll` 那 500 条上限时界面说「还有 N 条」而不是显示一份看不出来是截断过的列表 | 〔schedule.api.test.ts〕
 | [x] AC-WEB-031 (自动) ★ | 在面板里建任务时给非法 cron / 间隔过密 / 已过去的 `at` / 超过 `maxPerChat` / 重名 / 非法 mode / 空正文 / 不存在的会话 | 八种全部 400 且一条都不落库；判定与 `schedule_create` 工具**共用 `createScheduledJob`**，所以两边必然一致 | 〔schedule.api.test.ts〕
 | [x] AC-WEB-032 (自动) | 面板里建一次性任务，`general.timezone='Asia/Shanghai'`，填 `2030-06-01T15:00` | 存成 `07:00Z` —— 按配置时区解释，不是浏览器/宿主时区 | 〔schedule.api.test.ts〕

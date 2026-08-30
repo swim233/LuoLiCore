@@ -9,7 +9,7 @@ const log = { event: () => undefined, publish: () => undefined, span: () => ({ i
 
 function harness(name: string, selfExtend: Record<string, unknown> = {}) {
   const path = `./data/${name}.test.db`;
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
   const root = resolve(`./data/${name}-root`);
   rmSync(root, { recursive: true, force: true });
   for (const dir of ['workspace', 'skills', 'plugins']) mkdirSync(`${root}/${dir}`, { recursive: true });

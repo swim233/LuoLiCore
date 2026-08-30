@@ -157,7 +157,7 @@ describe('归档检索的 FTS5 查询串', () => {
 
   it('对真实的 FTS 表跑一遍，敌意查询不再抛 SQLite 错', () => {
     const path = './data/fts.test.db';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
     const db = openDatabase(path);
     migrateDatabase(db);
     const scoped = new ArchiveRepository(db).scope('chat-1', null);

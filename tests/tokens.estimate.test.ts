@@ -45,7 +45,7 @@ describe('token 估算', () => {
 
   it('校准系数被夹在合理量级内', () => {
     const path = './data/tokens-ratio.test.db';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
     const db = openDatabase(path);
     migrateDatabase(db);
     const repo = new ContextRepository(db, 'chat:1');
@@ -60,7 +60,7 @@ describe('token 估算', () => {
 
   it('一次性修复按 parts 重算 tokens 并把校准系数归 1', () => {
     const path = './data/tokens-repair.test.db';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
     const db = openDatabase(path);
     migrateDatabase(db);
     const repo = new ContextRepository(db, 'chat:1');

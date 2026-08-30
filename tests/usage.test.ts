@@ -5,7 +5,7 @@ import { closeDatabase, migrateDatabase, openDatabase, readAppKv, type Sqlite } 
 
 function database(name: string): { db: Sqlite; close: () => void } {
   const path = `./data/${name}.test.db`;
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
   const db = openDatabase(path);
   migrateDatabase(db);
   return { db, close: () => { closeDatabase(db); } };

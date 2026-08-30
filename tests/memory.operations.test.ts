@@ -7,11 +7,11 @@ import { OperationsRepository } from '@luoli/db';
 function harness() {
   const database = './data/memory-operations.test.db';
   const directory = './data/memory-operations-memory';
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${database}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${database}${suffix}`, { force: true });
   rmSync(directory, { recursive: true, force: true });
   const db = openDatabase(database);
   migrateDatabase(db);
-  const log = new LogSink(new OperationsRepository(db), './data/memory-operations-logs');
+  const log = new LogSink(new OperationsRepository(db));
   return { db, memory: new MemoryStore(db, directory, 100, 3000, 2, log) };
 }
 

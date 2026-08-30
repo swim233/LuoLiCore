@@ -8,13 +8,13 @@ import { createServer } from '@luoli/server';
  *  首屏之后界面看到的永远是打开那一刻的快照。 */
 function harness(events = new EventBus()) {
   const path = './data/sse-events.test.db';
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
   rmSync('./data/sse-events-logs', { recursive: true, force: true });
   const db = openDatabase(path);
   migrateDatabase(db);
   const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, webui: { passwordHash: 'hash' } });
   const operations = new OperationsRepository(db);
-  const log = new LogSink(operations, './data/sse-events-logs', [], { events });
+  const log = new LogSink(operations, [], { events });
   const archive = new ArchiveRepository(db);
   const turnRegistry = new TurnRegistry();
   const app = createServer({ config, db, operations, principals: new PrincipalRepository(db), archive, context: new ContextEngine(db, archive),

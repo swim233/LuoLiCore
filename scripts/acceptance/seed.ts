@@ -196,7 +196,14 @@ if (reused && !values.force)
 mkdirSync(dataDirectory, { recursive: true, mode: 0o700 });
 mkdirSync(resolve(config.media.dir), { recursive: true, mode: 0o700 });
 const db = openDatabase(databasePath);
-migrateDatabase(db);
+// 第三个参数不能省，理由同 `scripts/migrate.ts`：默认值是 `<databasePath>-logs`，而铺完之后
+// 进程按 `logs.dbPath`（即 `<dataDirectory>/logs.db`）去读，日志会落在两个文件里。
+// `legacyDir` 是上一版那个按天分目录的 `logs/`，`--force` 铺在有存量日志的旧库上时要靠它解引用。
+migrateDatabase(db, undefined, {
+  path: config.logs.dbPath,
+  legacyDir: resolve(dataDirectory, "logs"),
+  compress: config.logs.compress,
+});
 
 // ── E2 / E3：principals ─────────────────────────────────────────────────────────
 interface SeedPrincipal {
@@ -505,7 +512,7 @@ for (const mode of ["docker", "none"] as const) {
     resolve(dataDirectory, "workspace"),
   );
   assignDotted(draft, "memory.dir", resolve(dataDirectory, "memory"));
-  assignDotted(draft, "logs.dir", resolve(dataDirectory, "logs"));
+  assignDotted(draft, "logs.dbPath", resolve(dataDirectory, "logs.db"));
   assignDotted(draft, "skills.dir", resolve(dataDirectory, "skills"));
   assignDotted(draft, "plugins.dir", resolve(dataDirectory, "plugins"));
   // 端口在文件层同样写入一份。生效值由 config_kv 中的那一行决定（覆盖层优先于文件层），
@@ -527,7 +534,8 @@ for (const mode of ["docker", "none"] as const) {
   );
   generatedConfigs.set(mode, target);
 }
-for (const sub of ["workspace", "memory", "logs", "cache", "plugins"])
+// 没有 "logs"：日志是 `<dataDirectory>/logs.db` 一个文件，由 `openDatabase` 自己建目录（docs/10 §3）。
+for (const sub of ["workspace", "memory", "cache", "plugins"])
   mkdirSync(resolve(dataDirectory, sub), { recursive: true, mode: 0o700 });
 // 随包 skill 必须实际存在于磁盘，`BUNDLED_SKILLS` 只是一份名称清单：指向空目录时扩展页为空，
 // 随包 skill 只放行启停这类条目将没有验证对象。仅在目标不存在时复制：重跑（含 `--force`）

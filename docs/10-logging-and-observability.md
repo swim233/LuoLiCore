@@ -34,7 +34,7 @@ turn 01J8…                                     kind=turn.start（spanId = turn
 └── ctx.commit      span N  parent=turn        rebase, prune
 ```
 
-- span 落 `log_events` 一行（含 `duration_ms`），大 payload 落 `logs/<date>/<kind>.jsonl` 并在行里记 `file_ref`。
+- span 落 `log_events` 一行（含 `duration_ms`），完整 payload 就在这一行的 `data` 列上（[§3](#3-存储)）。
 - WebUI Trace 视图按 `parent_span_id` 重建树（[09 §3.10](./09-webui.md#310-日志logs)）：depth 由父链长度算，
   **环与悬挂父都按 depth 0 渲染** —— 一次查询只取 500 行，子 span 的父完全可能不在这一页里，
   而一条坏数据不该把整个视图打成空白。
@@ -137,7 +137,7 @@ with_parent 0`，浏览器里展开一条 trace，13 个节点的 `marginLeft` �
 | `agent.ask_unarbitrated` | warn（取消时 info） | askId, agentRunId, reason(no_model/cancelled/timeout/failed/empty), detail, escalationRequested —— 仲裁没能给出答复，子 agent 接下来按「没人应答」走。`escalationRequested:true` 表示运维开了 `agent.askEscalateToUser` 但那个键仍未接线，**没有真的去问人** |
 | `agent.file_invalid` | error | file, error —— `agents/<name>.md` 解析失败。其余定义照常加载，所以这一行是「我加的那个 agent 为什么不存在」的唯一凭据（[04 §3.1](./04-agents-and-providers.md)） |
 | `agent.harness` | info/warn | dir, command, exitCode, timedOut, ms —— M11 起了一次外部 harness。**它内部干了什么不在这里**（也不在任何地方），本系统看不见（[14](./14-open-questions.md) T17） |
-| `acp.run` | info/warn | agent, dir, command, approvalMode, stopReason, error, updates, dropped, toolCalls, capabilities, degraded, filesWritten, terminals, terminalsLeaked, costUsd, runId, ms —— M13 起了一次 ACP agent。**它内部干了什么不在这里**：`session/update` 一路报过来了（`updates` 就是条数），但把 131 条思考与工具调用摊进日志只会把 `tool.jsonl` 冲掉 —— 逐条呈现的读者是人，落点是 Telegram 进度卡片（[05 §3.5.2](./05-tools-and-permissions.md)）。`capabilities` 是这一次**真申报出去**的那几位（按本次调用现算，不是常量）；`filesWritten` / `terminals` 是「它到底动了什么」的凭据 —— `stopReason: 'end_turn'` 加一份漂亮的总结加 `filesWritten: 0` 是实测见过的组合（它只是读了读然后描述了一遍）。**这一行同时是反向调用面那两条 warn 的落点**：`degraded` 带逐条人话的能力降级理由（最常见的是 `sandbox.plan(role, root)` 不是 `'host'`，于是 `terminal` 整位不申报，而配置里那个 `bash` 就成了一个可证明用不了的工具），`terminalsLeaked` 是 agent 建了终端却没 `terminal/release` 的条数 —— 我们替它收拾了，但**那意味着有命令在宿主上一直跑到了我们收摊的时候**。两者任一非空就把这一行抬成 warn，**哪怕这一趟 `ok:true`**；给它们各开一个新 kind 换来的是两个只在异常路径上出现的枚举值，而这张表是双向焊住的（表里有、源码零发出，同样是红）。关停时 `close()` 收拾整个 manager 那一趟也走这个 kind（`at:'shutdown'` + `terminalsLeaked`），它没有 traceId：那时轮次早就结束了。`costUsd` 是外部 agent **自己报的**那个数（`usage_update.cost.amount` 的累计值），落库时它进的是 `agent_runs.external_cost_usd` 而**不是** `cost_usd`（那一列 ACP 行恒 0）—— 所以这个字段名在这张表上从来只有一个意思，两者不共用名字。`runId` 就是库里那一行的 id，这条日志与 `agent_runs` 之间唯一的接缝。⚠ **落库不等于记账接上了**：`usage_ledger` / `quota_counters` / `turns.cost_usd` 里仍然一分钱都没有，唯一的闸是 `agent.acp.maxCostUsd`（[03 §2.7](./03-data-model.md) · [04 §6.2](./04-agents-and-providers.md)）。记账本身失败时也走这个 kind（`recordFailed` + warn）—— 为一条只在写库出错时出现的事新开枚举值不值得，而这张表是双向焊住的 |
+| `acp.run` | info/warn | agent, dir, command, approvalMode, stopReason, error, updates, dropped, toolCalls, capabilities, degraded, filesWritten, terminals, terminalsLeaked, costUsd, runId, ms —— M13 起了一次 ACP agent。**它内部干了什么不在这里**：`session/update` 一路报过来了（`updates` 就是条数），但把 131 条思考与工具调用各摊成一行日志只是把这一轮的 trace 冲成噪声 —— 逐条呈现的读者是人，落点是 Telegram 进度卡片（[05 §3.5.2](./05-tools-and-permissions.md)）。`capabilities` 是这一次**真申报出去**的那几位（按本次调用现算，不是常量）；`filesWritten` / `terminals` 是「它到底动了什么」的凭据 —— `stopReason: 'end_turn'` 加一份漂亮的总结加 `filesWritten: 0` 是实测见过的组合（它只是读了读然后描述了一遍）。**这一行同时是反向调用面那两条 warn 的落点**：`degraded` 带逐条人话的能力降级理由（最常见的是 `sandbox.plan(role, root)` 不是 `'host'`，于是 `terminal` 整位不申报，而配置里那个 `bash` 就成了一个可证明用不了的工具），`terminalsLeaked` 是 agent 建了终端却没 `terminal/release` 的条数 —— 我们替它收拾了，但**那意味着有命令在宿主上一直跑到了我们收摊的时候**。两者任一非空就把这一行抬成 warn，**哪怕这一趟 `ok:true`**；给它们各开一个新 kind 换来的是两个只在异常路径上出现的枚举值，而这张表是双向焊住的（表里有、源码零发出，同样是红）。关停时 `close()` 收拾整个 manager 那一趟也走这个 kind（`at:'shutdown'` + `terminalsLeaked`），它没有 traceId：那时轮次早就结束了。`costUsd` 是外部 agent **自己报的**那个数（`usage_update.cost.amount` 的累计值），落库时它进的是 `agent_runs.external_cost_usd` 而**不是** `cost_usd`（那一列 ACP 行恒 0）—— 所以这个字段名在这张表上从来只有一个意思，两者不共用名字。`runId` 就是库里那一行的 id，这条日志与 `agent_runs` 之间唯一的接缝。⚠ **落库不等于记账接上了**：`usage_ledger` / `quota_counters` / `turns.cost_usd` 里仍然一分钱都没有，唯一的闸是 `agent.acp.maxCostUsd`（[03 §2.7](./03-data-model.md) · [04 §6.2](./04-agents-and-providers.md)）。记账本身失败时也走这个 kind（`recordFailed` + warn）—— 为一条只在写库出错时出现的事新开枚举值不值得，而这张表是双向焊住的 |
 | `acp.stderr` | warn | agent —— stdio 子进程 stderr 的**逐行**转发（单行截到 2 KB），与 `mcp.stderr` 同一条理由：那是「它为什么起不来 / 为什么握不上手」的答案所在。omp 一类 agent 把 `console.*` 全重定向到 stderr，所以成功那一路这里也会有话 |
 | `acp.disconnect` | warn | agent, exitCode, signal —— 子进程**自己**退了（我们主动关的走 `#intentional`，不记这一条）。它与 `acp.run` 那条 `error: 'acp_connection_lost'` 是一件事的两面：这一条带退出码 |
 | `acp.permission` | info（拒绝 **warn**） | agent, mode, kind, title, outcome, risk, paths, outsideJail, decidedBy —— agent 反过来问「这一步准不准」时我们回了什么（[05 §3.5.3](./05-tools-and-permissions.md)）。`ask` 档走的是**真审批**（`acpPermissionGate` → 同一张 `approvals` 表 / 同一套 `approval.rules` / TTL / 双通道裁决），所以分档按结论走：批了 info、拒了 warn。`decidedBy` 只有两个值：`human`（真人点的）与 `acp:always`（会话内那份 `allow_always` / `reject_always` 记忆命中 —— 答案早在选中 `*_always` 那一档时就已经给出去了，再问一次是纯表演，但审计行照旧一条一条落，见 [03 §2.11](./03-data-model.md)）。`risk` 由 `toolCall.kind` 推（`execute` / `delete` high，`edit` / `move` medium，读一族 low，**不认识的 kind 一律 medium、绝不猜低**），`outsideJail` 为真时一律抬到 high。`paths` 是**条数**不是路径本身：路径进 `approvals.input_json`，日志摘要不背这份长度。⚠ **`ask` 那一档的 warn 现在是反过来的意思** —— 它以前说的是「ask 档暂按放行」，现在带 `gated: false` 的那条说的是「ask 档没有审批通道，按 deny 处理了」，而那种情形只可能是有人绕过了 `spawn_acp.available()`（`permissionMode='ask'` 而没接 broker 时工具压根不进目录），所以这一行是那件事唯一的凭据。`auto` / `deny` 两档不问人（`floorPermission`），同样带 `gated: false`，级别是 info |
@@ -224,33 +224,61 @@ catch 一次都没跑到，`model.error` 也来不及写，事后只能靠 `turn
 抹掉），`ctx.orphan_tool_call` 则是此后每一轮的。收口的另外三层（写入侧收 `tool-error`、`commitTurn` 的
 配对断言、读出侧补结果）在 [02 §9](./02-context-engine.md#9-实现红线清单code-review-必查) 第 20 条。
 
-## 3. 落盘格式
+## 3. 存储
 
-```
-logs/
-  2026-08-15/
-    turn.jsonl        turn/ctx/quota/trigger 级事件
-    model.jsonl       每次模型调用（含完整请求消息与响应，见下）
-    tool.jsonl        每次工具调用（完整输入输出）
-    system.jsonl      启动/配置/维护/插件/MCP/WebUI
+全部日志落**一个 SQLite 文件**（`logs.dbPath`，默认 `./data/logs.db`），没有第二个落点。
+
+此前是三个：`logs/<day>/<category>.jsonl` 按天按类分文件、超 `bodyMaxBytes` 的载荷再单独落
+`logs/<day>/blobs/*.json` 并在行里记 `file_ref`、同一条另外还要 `INSERT` 进主库的 `log_events`。
+实测 16 天摊成 **841 个文件、31 个目录**（jsonl 18.0 MB / 61 个，blobs 774.9 MB / 780 个），
+按 `retentionDays: 30` 满窗约 1600 个；而那 61 个 jsonl **生产代码零处读过** ——
+读它的只有几条断言文件存在的用例，和负责压它、删它的 `MaintenanceService`。
+
+**`logs.db` 是独立文件而不是并进 `luoli.db`。** 主库有两处会整库重写（`migrateDatabase` 在有待执行
+迁移时先 `VACUUM INTO` 备份、`maintenance.vacuum` 定期整理，`db.backupKeep` 还留 N 份），把载荷并进去
+等于每次迁移复制一遍 —— 实测 `log_events` 已经占了 88 MB 主库的 70%（56.2 MB 数据 + 5.6 MB 索引）。
+
+代价本该是「查询要跨库」，但这一条不成立：`logs.db` 用独立句柄建好并迁移完，再从主连接
+`ATTACH … AS logs`，而 **SQLite 按 temp → main → attached 解析表名** —— 主库那张 `log_events` 被
+`0017_drop_log_events.sql` 删掉之后，不带前缀的 `FROM log_events` 自然落到附加库上，仓库里既有的
+查询一个字都不用改。⚠ 反过来说：**主库那张表只要还在就会一直遮住附加库那张**，读到的会是一张永远
+不再增长的旧表。所以存量搬迁与 `DROP` 必须原子完成（`importLegacyLogEvents` 在同一个事务里做完
+两件事，那条迁移只是兜底），而这也是「先 ATTACH、再搬迁、最后才跑主库迁移」这个顺序的由来。
+
+### 3.1 表
+
+```sql
+CREATE TABLE log_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL,
+  level TEXT NOT NULL, kind TEXT NOT NULL,
+  trace_id TEXT, span_id TEXT, parent_span_id TEXT,
+  chat_id TEXT, user_id TEXT, key TEXT, agent_run_id TEXT,
+  summary TEXT NOT NULL, duration_ms INTEGER,
+  data BLOB, data_codec TEXT NOT NULL DEFAULT 'raw', data_bytes INTEGER NOT NULL DEFAULT 0
+);
 ```
 
-每行一个 JSON 对象：
+三列取代了原来的 `data_json` + `file_ref`：
+
+- **`data`** —— 载荷本身，`data_codec='raw'` 时是 UTF-8 的 JSON 原文，`'zstd'` 时是它的压缩结果。
+  **不再有大小上限**：`bodyMaxBytes` 那条外溢线存在的唯一理由是「别把主库撑爆」，而现在库就是唯一
+  落点，外溢无处可去。超过约 4 KB 的部分由 SQLite 自己放进 overflow 页，而列表查询本来就不 SELECT
+  这一列（见 `OperationsRepository.logs` 的注释），读不到它们。
+- **`data_codec`** —— 压缩开关是 `logs.compress`，但编码方式**逐行**记而不是全库一个标志：
+  运维关掉它之后，此前压过的行还得读得出来。低于 `COMPRESS_MIN_BYTES`（代码常量 1024）的载荷一律
+  `raw` —— 压几百字节的 JSON 只会更大，而 66 个 kind 里有 64 个平均只有 30–140 字节。
+- **`data_bytes`** —— **解压后**的字节数。日志列表要显示「这条载荷多大」，不该为此把每一行都解压一遍。
+
+一条 `model.call` 的载荷形状不变（`request.messages` 是完整请求消息，`§7` 第 1 条要的就是它）：
 
 ```json
-{
-  "ts": 1755212345678, "level": "info", "kind": "model.call",
-  "traceId": "01J8ABCD…", "spanId": "01J8ABCE…", "parentSpanId": "01J8ABCD…",
-  "chatId": "-1001234567", "userId": "8899001", "key": "chat:-1001234567",
-  "agentRunId": "01J8…",
-  "alias": "main", "provider": "anthropic-main", "modelId": "claude-opus-5",
-  "durationMs": 2114, "finishReason": "tool-calls",
+{ "alias": "main", "servedProvider": "anthropic-main", "servedModelId": "claude-opus-5",
+  "stepNumber": 0, "durationMs": 2114, "finishReason": "tool-calls",
   "usage": { "in": 6240, "out": 180, "cacheRead": 5800, "cacheWrite": 0, "reasoning": 0 },
   "costUsd": 0.0081,
   "request":  { "instructionsHash": "sha256:…", "messages": [ … ], "tools": ["read_file", …],
                 "settings": { "temperature": 0.7, "maxOutputTokens": 4096 } },
-  "response": { "text": "…", "toolCalls": [ … ] }
-}
+  "response": { "text": "…", "toolCalls": [ … ] } }
 ```
 
 配置：
@@ -258,21 +286,29 @@ logs/
 ```yaml
 logs:
   level: info                  # debug|info|warn|error
-  dir: ./logs
+  dbPath: ./data/logs.db       # 需重启
   captureBodies: true          # false 时 request/response 只留 hash 与长度
-  bodyMaxBytes: 262144         # 单条 payload 上限，超出落独立文件并记引用
+  compress: true               # 载荷是否 zstd 压缩；关掉只影响此后写入的行
   retentionDays: 30
-  gzipAfterDays: 3
   console: pretty              # pretty|json|off
   redactPatterns:              # 追加到内置脱敏规则
     - 'sk-[A-Za-z0-9_\-]{16,}'
 ```
 
-**脱敏**（内置，不可关闭）：Bot token 形态 `\d{8,10}:[A-Za-z0-9_-]{35}`、`sk-…`、`Bearer <token>`、`LUOLI_MASTER_KEY` 值、`providers.api_key_enc` 解密后的明文、`config` 中名字匹配 `/key|secret|token|password/i` 的字段值 → 替换为 `«redacted»`。脱敏在**写入前**执行，对 DB 与文件同时生效。
+### 3.2 库写不进去的时候
 
-**轮转**：按日期目录 + 单文件超 `logs.maxFileMb`（默认 128）时追加 `.1`、`.2`。写入用追加流 + 每 200ms 或 64KB flush，避免每条 fsync。
+`LogSink.event()` **一律不抛**（理由见 [§6](#6-健康检查与告警) 末尾），入库失败返回 `0`，并只做两件事：
+把**整行 JSON 写进 stderr**、调一次 `onWriteFailure`（装配方挂的是 `alerts.fire('db_write_failed')`）。
 
-**DB 索引行 vs 文件全文**：`log_events` 只存摘要字段（可检索、可聚合），完整 payload 只在文件里。这样 DB 不会被大 payload 撑爆，同时 WebUI 仍能按需拉全文（`GET /api/logs/blob?ref=`）。
+写 stderr 的是整行而不只是那句错误消息 —— 「库坏了至少内容还在」此前由 JSONL 兜着，删掉文件落点
+之后，唯一还留得住载荷的地方就是进程的 stderr（journald / `docker logs` 收得到）。这不是第二个落点：
+它只在**写库失败**这一条路径上有输出，正常运行时一个字节都不写。
+
+**脱敏**（内置，不可关闭）：Bot token 形态 `\d{8,10}:[A-Za-z0-9_-]{35}`、`sk-…`、`Bearer <token>`、`LUOLI_MASTER_KEY` 值、`providers.api_key_enc` 解密后的明文、`config` 中名字匹配 `/key|secret|token|password/i` 的字段值 → 替换为 `«redacted»`。脱敏在**序列化与压缩之前**执行，因此压缩过的载荷里同样不可能有明文。
+
+**保留期**：`DELETE FROM log_events WHERE ts<?` 一条，配 `PRAGMA auto_vacuum=INCREMENTAL` —— 删完就还盘，不需要 `VACUUM` 那把整库锁。原先它还要顺带扫 `logs/` 删掉整个过期日目录、再把更早的 jsonl 压成 `.gz`，两者都随文件落点一起消失（`maintenance.cleanup` 的返回值里 `logDirectories` 与 `compressed` 两项因此不再存在）。「行还在、载荷已被清掉」这种半截状态也随之消失：它们现在同生同死。
+
+> `maintenance.gc_files` **不受影响** —— 它扫的一直是 `media.dir` 与 `data/agent-results/`（`attachments.local_path` / `agent_runs.result_full_ref` 指向的那两棵），日志 blob 从来不在它的范围里。那条「库与目录来自两套部署就整棵拒扫」的守卫照旧留着。
 
 **`retentionDays` 同时管子 agent 的全文结果。** `data/agent-results/<runId>.txt` 是和日志同性质的调试产物，
 `MaintenanceService.cleanup()` 按 `agent_runs.finished_at` 一并过期：删文件、把 `result_full_ref` 置空，
@@ -294,10 +330,11 @@ logs:
 阈值与窗口刻意不做成配置项：调松它们的唯一效果是把 SSE 连接和前端一起打爆。
 `LogSink` 没拿到 `EventBus` 时这一整段是空操作（测试与 CLI 场景），日志行为完全不变。
 
-**读出侧必须解引用**：超过 `logs.bodyMaxBytes` 的 `data` 在库里只剩 `{fileRef, bytes}`。任何展示载荷的地方
-（`GET /api/turns/:id/detail`、`GET /api/logs/:id/data`，见 [09 §4](./09-webui.md#4-rest-api)）都要顺着 `fileRef`
-把 `logs/<day>/blobs/*.json` 读回来 —— 否则「查看这一轮实际发了什么」看到的是一行占位对象，
-而恰恰是最大的那些请求体会命中这条路径。文件已被保留策略清掉时如实说明，不要拿占位对象充数。
+**读出侧必须按 `data_codec` 解码**：任何展示载荷的地方（`GET /api/logs/:id`、`GET /api/logs/:id/data`、
+`GET /api/turns/:id/detail`，见 [09 §4](./09-webui.md#4-rest-api)）拿到的都是 `data` 这个 BLOB，
+要先经 `decodeLogPayload` 还原成 JSON 文本。**行在就意味着载荷在** —— 此前那条「顺着 `fileRef` 去
+`logs/<day>/blobs/` 里捞，捞不到就说明被保留策略清掉了」的路径连同 `GET /api/logs/blob?ref=` 一起删除，
+因为行与载荷现在同生同死，「有行没载荷」不再是一种可能的状态。
 
 ## 4. 成本记账
 
@@ -522,4 +559,5 @@ GET /api/health/detail（需登录）—— 详细状态
    指向同一个 provider（[reviews/28](./reviews/28-round10-live-system-test.md) · L-PROV-01）。
 4. 子 agent 的 span（`agent.run`）挂在派发它的 `tool.call` 之下，且其费用计入同一 turn。
 5. rebase / prune / hardcap 事件在日志中明确可见，且能看出裁掉了哪些 ordinal。
-6. 日志中**不出现**任何 API key、bot token、master key 明文（自动化测试用正则扫全部 JSONL，AC-LOG-007）。
+6. 日志中**不出现**任何 API key、bot token、master key 明文（自动化测试用正则扫 `log_events` 的全部
+   `summary` 与**解码后**的 `data`，AC-LOG-007 —— 压缩不是掩护，扫的必须是解出来的那份）。

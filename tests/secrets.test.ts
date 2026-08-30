@@ -8,11 +8,11 @@ import { createServer } from '@luoli/server';
 /** 起一台真的服务器：缺主密钥时「界面上看得见什么」只有走端点才问得出来。 */
 function harness(name: string, options: { masterKey?: string; config?: Record<string, unknown> } = {}) {
   const path = `./data/secrets-${name}.test.db`;
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
   rmSync(`./data/secrets-${name}-logs`, { recursive: true, force: true });
   const db = openDatabase(path); migrateDatabase(db);
   const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, webui: { passwordHash: 'secret-hash' }, memory: { dir: `./data/secrets-${name}-memory` }, ...options.config });
-  const operations = new OperationsRepository(db); const events = new EventBus(); const log = new LogSink(operations, `./data/secrets-${name}-logs`); const archive = new ArchiveRepository(db);
+  const operations = new OperationsRepository(db); const events = new EventBus(); const log = new LogSink(operations); const archive = new ArchiveRepository(db);
   const providers = new ProviderStore(db, new Secrets(options.masterKey));
   const app = createServer({ config, db, operations, principals: new PrincipalRepository(db), archive, context: new ContextEngine(db, archive), providers, approvals: new DatabaseApprovalBroker(db, config, events, log), maintenance: new MaintenanceService(db, path, 2, 30), events, log, configSchema: {}, startedAt: Date.now(), setup: undefined });
   const session = operations.createSession(1);

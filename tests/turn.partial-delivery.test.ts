@@ -30,7 +30,7 @@ type StreamMaker = (turn: { turnId: string; abortSignal: AbortSignal }, registry
 
 async function fixture(name: string, makeStream: StreamMaker, patch: Record<string, unknown> = {}): Promise<Fixture> {
   const path = `./data/${name}.test.db`;
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
   rmSync(`./data/${name}-memory`, { recursive: true, force: true });
   rmSync(`./data/${name}-logs`, { recursive: true, force: true });
   const db = openDatabase(path);
@@ -48,7 +48,7 @@ async function fixture(name: string, makeStream: StreamMaker, patch: Record<stri
     config, db, principals: new PrincipalRepository(db), archive, operations, context: new ContextEngine(db, archive), turns: new TurnRepository(db),
     quota: new QuotaGuard(db, 'UTC'), memory: new MemoryStore(db, `./data/${name}-memory`, 1500, 3000),
     registry, concurrency: new TurnConcurrency(config.concurrency),
-    log: new LogSink(operations, `./data/${name}-logs`), botInfo,
+    log: new LogSink(operations), botInfo,
     alerts: { fire: (kind, _summary, data) => { alerts.push({ kind, count: (data as { count?: unknown } | undefined)?.count }); } },
     onTurn: async (turn) => {
       const made = makeStream(turn, registry);

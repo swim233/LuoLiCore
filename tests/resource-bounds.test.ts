@@ -1,8 +1,8 @@
-import { mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { OperationsRepository, closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
-import { LogSink, Sandbox, configSchema } from '@luoli/core';
+import { OperationsRepository, closeDatabase, decodeLogPayload, migrateDatabase, openDatabase } from '@luoli/db';
+import { LogSink, MaintenanceService, Sandbox, configSchema } from '@luoli/core';
 
 /**
  * 资源上界（docs/22 §6 建议的那一组）。此前只有 `grep` 的正则回溯有上界断言，而 §2 的两个 P0
@@ -72,41 +72,56 @@ describe('文档提取上界', () => {
   }, 40_000);
 });
 
-describe('日志文件上界', () => {
-  it('单文件超过 maxFileMb 时轮转，不无限增长', () => {
-    const path = './data/bounds-logs.test.db';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
-    const directory = resolve('./data/bounds-logs');
-    rmSync(directory, { recursive: true, force: true });
+/**
+ * 日志的上界形态在 2026-08-30 换过一次（docs/10 §3）：落点从「按天按类的 jsonl + 独立 blob 文件
+ * + 库里一行」并成 `logs.dbPath` 一个文件，于是文件轮转（`maxFileMb`）与大载荷外溢（`bodyMaxBytes`）
+ * 这两条上界都不存在了 —— 它们守的是「别把主库撑爆」和「别让单个文件无限长」。
+ *
+ * 接替它们的是下面两条。**对着没有这两条守卫的实现会怎样**：
+ * ① 列表查询一旦 `SELECT *`，日志页每次刷新都会把一整轮的请求体推给浏览器（实测单条均 29 KB、
+ *    最大 5 MB，列表一次上千行）；
+ * ② `auto_vacuum` 停在 `NONE` 时，保留期删除只把页标成空闲，文件只涨不落 —— 而这正是
+ *    `attachLogDatabase` 里「auto_vacuum 必须排在 journal_mode 之前」那句注释所防的事故，
+ *    顺序写反的话它会静静地留在 0，没有任何别的判据会响。
+ */
+describe('日志库的体积上界', () => {
+  it('大载荷不进列表：只回 data_bytes，正文要单独取', () => {
+    const path = './data/bounds-blob.test.db';
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
     const db = openDatabase(path); migrateDatabase(db);
-    // maxFileMb 压到 1：默认 128MB 的话这条用例要写掉一百多兆才看得出轮转。
-    const sink = new LogSink(new OperationsRepository(db), directory, [], { maxFileMb: 1, bodyMaxBytes: 512 });
-    for (let index = 0; index < 4000; index += 1) sink.event({ level: 'info', kind: 'system.bounds', summary: 'x'.repeat(400) });
-    sink.close();
-    const day = new Date().toISOString().slice(0, 10);
-    const files = readdirSync(resolve(directory, day));
-    // 轮转发生过：除了 `system.jsonl` 还该有 `.1`（甚至 `.2`）。
-    expect(files.some((name) => /\.jsonl\.\d+$/.test(name)), `没有发生轮转：${files.join(', ')}`).toBe(true);
-    for (const name of files) expect(statSync(resolve(directory, day, name)).size).toBeLessThan(2 * 1024 * 1024);
+    const operations = new OperationsRepository(db);
+    const sink = new LogSink(operations, [], { console: 'off' });
+    const id = sink.event({ level: 'info', kind: 'model.call', summary: 'big', data: { prompt: 'y'.repeat(200_000) } });
+    const listed = operations.logs(10) as Array<{ data_bytes: number }>;
+    // 列表整体远小于那一条载荷本身。`SELECT *` 的实现在这里会是 200 KB 起步。
+    expect(JSON.stringify(listed).length).toBeLessThan(4_000);
+    expect(listed[0]!.data_bytes).toBeGreaterThan(200_000);
+    // 而正文取得回来，且一字不差 —— 上界不能是靠丢数据换的。
+    const row = db.prepare('SELECT data,data_codec AS codec,data_bytes AS bytes FROM log_events WHERE id=?').get(id) as { data: Buffer; codec: string; bytes: number };
+    expect(row.codec).toBe('zstd');
+    expect(row.data.byteLength).toBeLessThan(row.bytes / 10);
+    expect(JSON.parse(decodeLogPayload(row.data, row.codec)!)).toEqual({ prompt: 'y'.repeat(200_000) });
     closeDatabase(db);
-    rmSync(directory, { recursive: true, force: true });
   }, 40_000);
 
-  it('超过 bodyMaxBytes 的 payload 落独立文件，不塞进 log_events', () => {
-    const path = './data/bounds-blob.test.db';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
-    const directory = resolve('./data/bounds-blob');
-    rmSync(directory, { recursive: true, force: true });
+  it('保留期删完之后文件真的缩回去，不是只把页标成空闲', () => {
+    const path = './data/bounds-reclaim.test.db';
+    const logs = `${path}-logs`;
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
     const db = openDatabase(path); migrateDatabase(db);
-    const sink = new LogSink(new OperationsRepository(db), directory, [], { bodyMaxBytes: 1024 });
-    sink.event({ level: 'info', kind: 'model.call', summary: 'big', data: { prompt: 'y'.repeat(200_000) } });
-    sink.close();
-    // DB 行里只留引用：不这么做的话一条带请求体的 `model.call` 就能把 log_events 撑爆（docs/10 §4）。
-    const row = db.prepare("SELECT data_json AS data,file_ref AS ref FROM log_events WHERE kind='model.call'").get() as { data: string | null; ref: string | null };
-    expect(row.ref).toBeTruthy();
-    expect((row.data ?? '').length).toBeLessThan(512);
-    expect(row.data ?? '').not.toContain('yyyy');
+    const operations = new OperationsRepository(db);
+    // 关掉压缩：压缩之后 'x'.repeat(4000) 只剩几十字节，量不出「删完有没有还盘」。
+    operations.compressLogPayloads = false;
+    const sink = new LogSink(operations, [], { console: 'off' });
+    for (let index = 0; index < 2000; index += 1)
+      sink.event({ level: 'info', kind: 'system.bounds', summary: 'bulk', data: { blob: 'x'.repeat(4000) } });
+    db.pragma('wal_checkpoint(TRUNCATE)');
+    const grown = statSync(logs).size;
+    expect(grown, '语料没把库撑起来，这条用例量不到东西').toBeGreaterThan(4 * 1024 * 1024);
+    // 全部挪到保留期之外，再跑一次维护。
+    db.prepare('UPDATE log_events SET ts=?').run(Date.now() - 400 * 86_400_000);
+    new MaintenanceService(db, path, 2, 30).cleanup();
+    expect(statSync(logs).size).toBeLessThan(grown / 4);
     closeDatabase(db);
-    rmSync(directory, { recursive: true, force: true });
-  }, 40_000);
+  }, 60_000);
 });

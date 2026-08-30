@@ -16,7 +16,7 @@ describe('Telegram command access gate', () => {
   it('archives according to policy and rejects blocked /new before state mutation', async () => {
     const path = './data/access-commands.test.db';
     const memoryDir = './data/access-commands-memory';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
     rmSync(memoryDir, { recursive: true, force: true });
     const db = openDatabase(path);
     migrateDatabase(db);
@@ -28,7 +28,7 @@ describe('Telegram command access gate', () => {
     const engine = new ContextEngine(db, archive);
     const operations = new OperationsRepository(db);
     const bot = await createTelegramBot('12345678:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', {
-      config, db, principals, archive, operations, context: engine, turns: new TurnRepository(db), quota: new QuotaGuard(db, 'UTC'), memory: new MemoryStore(db, memoryDir, 1500, 3000), registry: new TurnRegistry(), concurrency: new TurnConcurrency(config.concurrency), log: new LogSink(operations, './data/access-commands-logs'),
+      config, db, principals, archive, operations, context: engine, turns: new TurnRepository(db), quota: new QuotaGuard(db, 'UTC'), memory: new MemoryStore(db, memoryDir, 1500, 3000), registry: new TurnRegistry(), concurrency: new TurnConcurrency(config.concurrency), log: new LogSink(operations),
       botInfo: { id: 1, is_bot: true, first_name: 'Bot', username: 'mybot', can_join_groups: true, can_read_all_group_messages: false, supports_inline_queries: false, can_connect_to_business: false, has_main_web_app: false, has_topics_enabled: false, allows_users_to_create_topics: false, can_manage_bots: false, supports_join_request_queries: false },
     });
     const key = contextKey({ chatId: '-100', messageThreadId: null }, config.context.scope);
@@ -41,11 +41,11 @@ describe('Telegram command access gate', () => {
 
   it('archives edited messages as a new revision without double-claiming the update', async () => {
     const path = './data/access-edited.test.db';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
     const db = openDatabase(path); migrateDatabase(db);
     const config = configSchema.parse({ access: { defaultUserRole: 'trusted', defaultChatRole: 'trusted', bootstrapOwnerId: '1' }, quota: { enabled: false } });
     const principals = new PrincipalRepository(db); const archive = new ArchiveRepository(db); const operations = new OperationsRepository(db);
-    const bot = await createTelegramBot('12345678:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', { config, db, principals, archive, operations, context: new ContextEngine(db, archive), turns: new TurnRepository(db), quota: new QuotaGuard(db, 'UTC'), memory: new MemoryStore(db, './data/access-edited-memory', 1500, 3000), registry: new TurnRegistry(), concurrency: new TurnConcurrency(config.concurrency), log: new LogSink(operations, './data/access-edited-logs'), botInfo: { id: 1, is_bot: true, first_name: 'Bot', username: 'mybot', can_join_groups: true, can_read_all_group_messages: false, supports_inline_queries: false, can_connect_to_business: false, has_main_web_app: false, has_topics_enabled: false, allows_users_to_create_topics: false, can_manage_bots: false, supports_join_request_queries: false } });
+    const bot = await createTelegramBot('12345678:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', { config, db, principals, archive, operations, context: new ContextEngine(db, archive), turns: new TurnRepository(db), quota: new QuotaGuard(db, 'UTC'), memory: new MemoryStore(db, './data/access-edited-memory', 1500, 3000), registry: new TurnRegistry(), concurrency: new TurnConcurrency(config.concurrency), log: new LogSink(operations), botInfo: { id: 1, is_bot: true, first_name: 'Bot', username: 'mybot', can_join_groups: true, can_read_all_group_messages: false, supports_inline_queries: false, can_connect_to_business: false, has_main_web_app: false, has_topics_enabled: false, allows_users_to_create_topics: false, can_manage_bots: false, supports_join_request_queries: false } });
     await bot.handleUpdate(update(10, 'original'));
     await bot.handleUpdate(editedUpdate(11, 10, 'edited'));
     const rows = db.prepare('SELECT text,revision FROM messages WHERE chat_id=? AND tg_message_id=? ORDER BY revision').all('-100', 10) as Array<{ text: string; revision: number }>;
@@ -73,7 +73,7 @@ function privateCommand(id: number, text: string) {
  */
 async function readOnlyHarness(name: string) {
   const path = `./data/${name}.test.db`;
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
   rmSync(`./data/${name}-memory`, { recursive: true, force: true });
   const db = openDatabase(path); migrateDatabase(db);
   const config = configSchema.parse({ general: { timezone: 'UTC' }, access: { defaultUserRole: 'owner', defaultChatRole: 'owner', bootstrapOwnerId: '200' }, quota: { enabled: false } });
@@ -82,7 +82,7 @@ async function readOnlyHarness(name: string) {
   const bot = await createTelegramBot('12345678:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', {
     config, db, principals: new PrincipalRepository(db), archive, operations, context: new ContextEngine(db, archive),
     turns: new TurnRepository(db), quota: new QuotaGuard(db, 'UTC'), memory: new MemoryStore(db, `./data/${name}-memory`, 1500, 3000),
-    registry: new TurnRegistry(), concurrency: new TurnConcurrency(config.concurrency), log: new LogSink(operations, `./data/${name}-logs`),
+    registry: new TurnRegistry(), concurrency: new TurnConcurrency(config.concurrency), log: new LogSink(operations),
     ledger: new UsageLedger(db), startedAt: Date.now() - 3_725_000, botInfo: BOT_INFO,
   });
   bot.api.config.use(async (_prev, method, payload) => {
@@ -102,7 +102,9 @@ describe('Telegram 只读命令的回执', () => {
     expect(text).toContain('LuoLiCore');
     expect(text).toContain('上线时长：1小时2分');
     expect(text).toContain('模型别名：main');
-    expect(text).toMatch(/DB 大小：\d+\.\d MB（含 -wal \/ -shm）/);
+    // 主库与日志库分开报（docs/10 §3）：日志此前占主库 70%，只报主库的话这个数会在搬家那天
+    // 凭空掉七成，而磁盘上什么都没少。
+    expect(text).toMatch(/DB 大小：\d+\.\d MB \+ 日志 \d+\.\d MB（各含 -wal \/ -shm）/);
     // W-TG-02 给 /ctx、/tasks 修掉的反模式：一坨 JSON 顶着 4096 字符上限。
     expect(text).not.toContain('"turns"');
     closeDatabase(db);

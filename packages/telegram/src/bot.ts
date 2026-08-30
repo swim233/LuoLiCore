@@ -741,7 +741,9 @@ export async function createTelegramBot(
       `LuoLiCore ${process.env.npm_package_version ?? "dev"}\n运行正常\n` +
         `上线时长：${dependencies.startedAt ? duration(Date.now() - dependencies.startedAt) : "未知"}\n` +
         `模型别名：${alias}\n` +
-        `DB 大小：${megabytes(databaseBytes(dependencies.db.name))}（含 -wal / -shm）\n` +
+        // 日志自 2026-08-30 起独立成 `logs.dbPath` 那个文件（docs/10 §3），它此前占主库 70%。
+        // 只报主库的话，这个数会在改动当天凭空掉七成，而磁盘上什么都没少 —— 两个数分开列。
+        `DB 大小：${megabytes(databaseBytes(dependencies.db.name))} + 日志 ${megabytes(databaseBytes(currentConfig().logs.dbPath))}（各含 -wal / -shm）\n` +
         `有效权限：${access.effectiveRole}`,
     );
   });

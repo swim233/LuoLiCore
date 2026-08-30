@@ -1,8 +1,9 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { relative, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { OperationsRepository, closeDatabase, migrateDatabase, openDatabase, readAppKv } from '@luoli/db';
 import { AGENT_RESULT_REF_REPAIR_KEY, AgentResultStore, LogSink, MaintenanceService, Scheduler, repairAgentResultRefs } from '@luoli/core';
+import { logRows } from './support/logs.js';
 
 /**
  * 第十轮活体测试中维护那一批（`docs/reviews/28` 的 `L-OPS-05` / `L-OPS-06`）。
@@ -11,7 +12,7 @@ import { AGENT_RESULT_REF_REPAIR_KEY, AgentResultStore, LogSink, MaintenanceServ
 
 function database(name: string) {
   const path = `./data/${name}.test.db`;
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
   const db = openDatabase(path); migrateDatabase(db);
   return { db, path };
 }
@@ -40,7 +41,7 @@ describe('L-OPS-05 · VACUUM 之后必须 checkpoint', () => {
     db.prepare('DELETE FROM messages').run();
     const wal = `${path}-wal`;
     expect(statSync(wal).size).toBeGreaterThan(0);
-    const maintenance = new MaintenanceService(db, path, 2, 30, './data/maint28-vacuum-logs');
+    const maintenance = new MaintenanceService(db, path, 2, 30);
     maintenance.vacuum();
     // 旧实现：这里是整库大小（VACUUM 刚把整个库写进 WAL），要等下一次自动 checkpoint 攒够写入。
     expect(statSync(wal).size).toBe(0);
@@ -65,7 +66,7 @@ describe('L-OPS-06 · gcFiles 的错配保护要挡住部分错配', () => {
     // 一行指着新根（正常），一行还记着旧根（搬过目录 / 换过 LUOLI_DATA_DIR 留下的）。
     seedAgentRun(db, 'r-moved', survivor);
     seedAgentRun(db, 'r-old', resolve(oldRoot, 'r-old.txt'));
-    const maintenance = new MaintenanceService(db, path, 2, 30, './data/maint28-gc-partial-logs', { agentResults: newRoot });
+    const maintenance = new MaintenanceService(db, path, 2, 30, { agentResults: newRoot });
     const result = maintenance.gcFiles();
     expect(result.agentResults).toBe(0);
     expect(result.refused).toHaveLength(1);
@@ -88,7 +89,7 @@ describe('L-OPS-06 · gcFiles 的错配保护要挡住部分错配', () => {
       VALUES ('a1',1,'c','photo','f','u',?,'done','skipped',1)`).run(relative(process.cwd(), resolve(filesDir, 'kept.jpg')));
     writeFileSync(resolve(filesDir, 'kept.jpg'), 'y'.repeat(8));
     seedAgentRun(db, 'r-far', '/somewhere/else/r-far.txt');
-    const maintenance = new MaintenanceService(db, path, 2, 30, './data/maint28-gc-split-logs', { files: filesDir, agentResults: resultsDir });
+    const maintenance = new MaintenanceService(db, path, 2, 30, { files: filesDir, agentResults: resultsDir });
     const result = maintenance.gcFiles();
     // 媒体那一棵照常清（`local_path` 存的是 cwd 相对路径，与 walk 用同一个基准归一化）。
     expect(result.files).toBe(1);
@@ -117,7 +118,7 @@ describe('L-OPS-06 · gcFiles 的错配保护要挡住部分错配', () => {
     db.prepare(`INSERT INTO attachments(id,message_id,chat_id,kind,tg_file_id,tg_file_unique_id,local_path,download_state,extract_state,created_at)
       VALUES ('a1',1,'c','photo','f','u',?,'done','skipped',1)`).run(relative(process.cwd(), kept));
     seedAgentRun(db, 'r-kept', ref);
-    const maintenance = new MaintenanceService(db, path, 2, 30, './data/maint28-gc-happy-logs', { files: filesDir, agentResults: resultsDir });
+    const maintenance = new MaintenanceService(db, path, 2, 30, { files: filesDir, agentResults: resultsDir });
     const swept = maintenance.gcFiles();
     expect(swept).toMatchObject({ files: 1, fileBytes: 20, agentResults: 1 });
     expect(swept.refused).toBeUndefined();
@@ -147,7 +148,7 @@ describe('L-OPS-06 · result_full_ref 存相对路径', () => {
     const resultsDir = directory('maint28-ref-cleanup-results');
     const ref = new AgentResultStore(resultsDir).put('r1', '完整结果');
     seedAgentRun(db, 'r1', ref, Date.now() - 40 * 86_400_000);
-    const maintenance = new MaintenanceService(db, path, 2, 30, './data/maint28-ref-cleanup-logs', { agentResults: resultsDir });
+    const maintenance = new MaintenanceService(db, path, 2, 30, { agentResults: resultsDir });
     expect(maintenance.cleanup()).toMatchObject({ agentResults: 1 });
     expect(existsSync(resolve(resultsDir, 'r1.txt'))).toBe(false);
     expect(db.prepare("SELECT result_full_ref FROM agent_runs WHERE id='r1'").pluck().get()).toBeNull();
@@ -190,7 +191,7 @@ describe('L-OPS-06 · result_full_ref 存相对路径', () => {
     // 换根意味着文件随之迁移，而库里那一行仍记着旧位置。
     writeFileSync(resolve(newRoot, 'r1.txt'), '完整结果');
     rmSync(resolve(oldRoot, 'r1.txt'));
-    const service = (dir: string) => new MaintenanceService(db, path, 2, 30, './data/maint28-ref-rootswap-logs', { agentResults: dir });
+    const service = (dir: string) => new MaintenanceService(db, path, 2, 30, { agentResults: dir });
     // 归一化之前：这正是那次误删的形态，现在被挡下。
     expect(service(newRoot).gcFiles().refused).toHaveLength(1);
     // 归一化只认前缀恰好是当前目录的行；这里模拟运维按 refused 的提示把行改到当前目录之后再执行
@@ -221,19 +222,16 @@ describe('L-OPS-06 · result_full_ref 存相对路径', () => {
 describe('AC-DB-006 · 维护任务跑完要留下痕迹', () => {
   it('AC-DB-006：一次触发清掉过期日志与 processed_updates、把 WAL 收回 0，并落一条 maintenance.cleanup', async () => {
     const { db, path } = database('maint-ac006');
-    const logsDir = directory('maint-ac006-logs');
     const now = Date.now(); const wal = `${path}-wal`;
-    const day = (daysAgo: number): string => new Date(now - daysAgo * 86_400_000).toISOString().slice(0, 10);
     const logRow = db.prepare("INSERT INTO log_events(ts,level,kind,summary) VALUES (?,'info',?,'x')");
     logRow.run(now - 40 * 86_400_000, 'system.expired'); logRow.run(now - 86_400_000, 'system.fresh');
     const update = db.prepare('INSERT INTO processed_updates(update_id,ts) VALUES (?,?)');
     update.run(1, now - 10 * 86_400_000); update.run(2, now - 86_400_000);
-    for (const daysAgo of [40, 1]) { mkdirSync(resolve(logsDir, day(daysAgo)), { recursive: true }); writeFileSync(resolve(logsDir, day(daysAgo), 'system.jsonl'), '{}\n'); }
     expect(statSync(wal).size, '装置本身就没往 WAL 里写过东西，checkpoint 那条断言会白过').toBeGreaterThan(0);
-    const log = new LogSink(new OperationsRepository(db), logsDir, [], { level: 'info', console: 'off' });
+    const log = new LogSink(new OperationsRepository(db), [], { level: 'info', console: 'off' });
     // 日志由服务自身发出，而不是由这条 cron 的包装层发出：由包装层落库时，同一个动作从
     // `POST /api/maintenance/:action` 执行只剩一条仅含方法与路径的 webui.action（docs/29 · M-LOG-01）。
-    const maintenance = new MaintenanceService(db, path, 2, 30, logsDir, {}, 0, 30, {}, log);
+    const maintenance = new MaintenanceService(db, path, 2, 30, {}, 30, {}, log);
     const failures: unknown[] = [];
     const scheduler = new Scheduler((_name, error) => failures.push(error));
     let walAfterCleanup = -1;
@@ -249,16 +247,12 @@ describe('AC-DB-006 · 维护任务跑完要留下痕迹', () => {
     expect(walAfterCleanup).toBe(0);
     expect(db.prepare('SELECT kind FROM log_events WHERE kind LIKE ? ORDER BY ts').pluck().all('system.%')).toEqual(['system.fresh']);
     expect(db.prepare('SELECT update_id FROM processed_updates').pluck().all()).toEqual([2]);
-    expect(existsSync(resolve(logsDir, day(40)))).toBe(false);
-    expect(existsSync(resolve(logsDir, day(1), 'system.jsonl'))).toBe(true);
-    const recorded = db.prepare("SELECT data_json FROM log_events WHERE kind='maintenance.cleanup'").get() as { data_json: string } | undefined;
+    const recorded = logRows(db, 'maintenance.cleanup')[0];
     expect(recorded, '库里没有 maintenance.* 那条 —— 跑过一次维护在日志里没有任何凭据').toBeDefined();
     // 计数必须进入载荷：`data` 缺失时日志里只剩一条 complete，运维看不出这次清理了什么。
-    expect(JSON.parse(recorded!.data_json)).toMatchObject({ logs: 1, updates: 1, logDirectories: 1 });
-    // `maintenance` 是 `CATEGORY_BY_PREFIX` 识别的前缀，落 system.jsonl；无法识别的前缀会落入
-    // `turn` 那个兜底，于是维护记录散进轮次日志，按类别检索的人再也找不到它。
-    expect(readFileSync(resolve(logsDir, day(0), 'system.jsonl'), 'utf8')).toContain('"kind":"maintenance.cleanup"');
-    expect(existsSync(resolve(logsDir, day(0), 'turn.jsonl'))).toBe(false);
+    expect(JSON.parse(recorded!.data!)).toMatchObject({ logs: 1, updates: 1 });
+    // 落点只有一个（docs/10 §3），所以「这条记录去哪了」不再是个问题：它和别的事件在同一张表上。
+    // 此前它按 kind 前缀分文件，`maintenance` 认不出来就会掉进 `turn.jsonl` 那个兜底里。
     closeDatabase(db);
   });
 
@@ -269,26 +263,24 @@ describe('AC-DB-006 · 维护任务跑完要留下痕迹', () => {
    */
   it('直接调用（= WebUI 那条路）同样留下带结果的 maintenance.*，被拒是 warn', () => {
     const { db, path } = database('maint-log-parity');
-    const logsDir = directory('maint-log-parity-logs');
     const oldRoot = directory('maint-log-parity-old');
     const newRoot = directory('maint-log-parity-new');
     writeFileSync(resolve(newRoot, 'orphan.txt'), 'nobody points here');
     seedAgentRun(db, 'r-old', resolve(oldRoot, 'r-old.txt'));
-    const log = new LogSink(new OperationsRepository(db), logsDir, [], { level: 'info', console: 'off' });
-    const maintenance = new MaintenanceService(db, path, 2, 30, logsDir, { agentResults: newRoot }, 0, 30, {}, log);
+    const log = new LogSink(new OperationsRepository(db), [], { level: 'info', console: 'off' });
+    const maintenance = new MaintenanceService(db, path, 2, 30, { agentResults: newRoot }, 30, {}, log);
     maintenance.backup('manual');
     maintenance.rebuildFts();
     expect(maintenance.gcFiles().refused).toHaveLength(1);
     log.close();
-    const rows = db.prepare("SELECT kind,level,data_json FROM log_events WHERE kind LIKE 'maintenance.%' ORDER BY id")
-      .all() as Array<{ kind: string; level: string; data_json: string | null }>;
+    const rows = logRows(db).filter((row) => row.kind.startsWith('maintenance.'));
     expect(rows.map((row) => row.kind)).toEqual(['maintenance.backup', 'maintenance.rebuild_fts', 'maintenance.gc_files']);
     // 备份那条要写明落点：只报备份成功而不给路径，出问题时没人找得到那份文件。
-    expect(JSON.parse(rows[0]!.data_json!)).toMatchObject({ label: 'manual', kept: 2 });
-    expect(String((JSON.parse(rows[0]!.data_json!) as { path: string }).path)).toContain('backup');
+    expect(JSON.parse(rows[0]!.data!)).toMatchObject({ label: 'manual', kept: 2 });
+    expect(String((JSON.parse(rows[0]!.data!) as { path: string }).path)).toContain('backup');
     // 被拒不能记为 info：它唯一的触发条件是库与目录来自两套部署，混在 info 里等于把它藏起来。
     expect(rows[2]!.level).toBe('warn');
-    expect(JSON.parse(rows[2]!.data_json!)).toMatchObject({ agentResults: 0 });
+    expect(JSON.parse(rows[2]!.data!)).toMatchObject({ agentResults: 0 });
     expect(existsSync(resolve(newRoot, 'orphan.txt')), '判不准哪些是孤儿时不该动手').toBe(true);
     closeDatabase(db);
   });

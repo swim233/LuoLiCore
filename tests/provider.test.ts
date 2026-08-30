@@ -42,7 +42,7 @@ describe('alias sampling settings', () => {
 
   it('binds settings to the alias the model actually came from', () => {
     const path = './data/provider-alias.test.db';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
     const db = openDatabase(path); migrateDatabase(db);
     const now = Date.now();
     db.prepare("INSERT INTO providers(id,name,kind,base_url,enabled,created_at,updated_at) VALUES('p','p','openai-compatible','http://127.0.0.1:9/v1',1,?,?)").run(now, now);

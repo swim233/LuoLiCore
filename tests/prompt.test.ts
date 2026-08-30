@@ -136,10 +136,10 @@ describe('TOOL CATALOG 的常驻段', () => {
   const catalogOf = (residentDescriptions: boolean): string => {
     const slug = residentDescriptions ? 'desc' : 'names';
     const path = `./data/prompt-catalog-${slug}.test.db`;
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
     const db = openDatabase(path); migrateDatabase(db);
     const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, tools: { catalog: { residentDescriptions } } });
-    const log = new LogSink(new OperationsRepository(db), `./data/prompt-catalog-${slug}-logs`);
+    const log = new LogSink(new OperationsRepository(db));
     const tools = new ToolRegistry(log, { request: async () => true }, { maxRegistered: 80, maxCallsPerTurn: 40, maxConsecutiveErrors: 3 });
     for (const [name, description] of [['alpha', '第一件事'], ['beta', '第二件事']] as const) {
       tools.register({ name, description, inputSchema: z.object({}), sourcePriority: 100,
@@ -178,11 +178,11 @@ describe('纯内建部署：折叠开着而折叠集为空', () => {
   const assemble = (options: { deferExternal: boolean; withCatalogBlock?: boolean; external?: boolean }) => {
     const slug = `${options.deferExternal ? 'on' : 'off'}${options.withCatalogBlock === false ? '-noblock' : ''}${options.external ? '-ext' : ''}`;
     const path = `./data/prompt-defer-${slug}.test.db`;
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
     const db = openDatabase(path); migrateDatabase(db);
     const config = configSchema.parse({ access: { bootstrapOwnerId: '1' },
       prompt: { includeToolCatalog: options.withCatalogBlock ?? true }, tools: { catalog: { deferExternal: options.deferExternal } } });
-    const log = new LogSink(new OperationsRepository(db), `./data/prompt-defer-${slug}-logs`);
+    const log = new LogSink(new OperationsRepository(db));
     // limits 与本轮 config 必须给同一份 catalog：折叠判据走 `#limits()`，`search_tools` 的额度读
     // `turn.config`，两处不一致时测出来的是一个不存在的部署。
     const tools = new ToolRegistry(log, { request: async () => true },

@@ -505,6 +505,10 @@ CREATE TABLE model_aliases (
 ### 2.9 日志、记账、配额
 
 ```sql
+-- ⚠ 这张表**不在 luoli.db 里**，它在 logs.dbPath（默认 ./data/logs.db）那个独立文件里，
+--   由主连接 `ATTACH … AS logs` 挂上来（10 §3）。不带前缀的 `FROM log_events` 之所以照旧能用，
+--   是因为主库那张同名表已被 0017 删掉 —— 它只要还在就会一直遮住这一张。
+--   迁移序列也是独立的一条：packages/db/migrations-logs/。
 CREATE TABLE log_events (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   ts            INTEGER NOT NULL,
@@ -515,9 +519,10 @@ CREATE TABLE log_events (
   chat_id TEXT, user_id TEXT, key TEXT,
   agent_run_id  TEXT,
   summary       TEXT NOT NULL,
-  data_json     TEXT,                      -- 摘要字段（脱敏后）
-  file_ref      TEXT,                      -- 大 payload 落盘位置 logs/<date>/<kind>.jsonl#<offset>
-  duration_ms   INTEGER
+  duration_ms   INTEGER,
+  data          BLOB,                      -- 载荷（脱敏后）：raw 时是 UTF-8 JSON，zstd 时是它的压缩结果
+  data_codec    TEXT NOT NULL DEFAULT 'raw',  -- raw | zstd，逐行记：关掉 logs.compress 之后旧行还得读得出来
+  data_bytes    INTEGER NOT NULL DEFAULT 0    -- 解压后的字节数。列表要显示它，不该为此逐行解压
 );
 CREATE INDEX ix_log_ts ON log_events(ts DESC);
 CREATE INDEX ix_log_trace ON log_events(trace_id, ts);
@@ -906,8 +911,7 @@ image 都改不动了；没有这一列，运维在 WebUI 换了镜像之后所�
 |---|---|---|
 | `messages` / `attachments`（**行**） | 永久 | 不清理（owner 可在 WebUI 按 chat 手动清）。[14 §2 Q9-b](./14-open-questions.md) 拍板：纯文本每万条才 5–15MB，不值得为它冒删错的风险。**行永久不代表文件永久** —— 见下面 `media.dir` 那行 |
 | `context_messages` | 永久 | 不清理（裁剪只移窗口） |
-| `log_events` | `logs.retentionDays` = 30 | 按 ts 删除 + `logs/` 目录同期归档删除 |
-| `logs/*.jsonl` | 同上 | 超期文件删除；可选先 gzip |
+| `log_events`（在 `logs.db` 里） | `logs.retentionDays` = 30 | 按 ts 删除一条 SQL。载荷就在行上，没有第二个落点要跟着清（[10 §3](./10-logging-and-observability.md#3-存储)）。`logs.db` 开着 `auto_vacuum=INCREMENTAL`，删完就还盘 |
 | `usage_ledger` | `maintenance.retention.usageDays` = 400 | 按 ts 直接删。**`usage_daily` 聚合表没有实现**，所以超期就是没有了 —— 要长期账目请在保留期内导出（docs/27 · R-05） |
 | `quota_counters` | `maintenance.retention.quotaCounterDays` = 400 | 按 `updated_at` 删过期账期的行；当前账期每轮都在更新，落不进保留期之外 |
 | `config_revisions` | `maintenance.retention.configRevisionDays` = 180 | 按 ts 删。删的是审计记录，不影响当前配置（`config_kv` 不动） |

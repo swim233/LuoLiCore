@@ -18,10 +18,10 @@ function contextConfig(tokens: number): Config {
 }
 
 function harness(name: string) {
-  const path = `./data/${name}.test.db`; for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+  const path = `./data/${name}.test.db`; for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
   const db = openDatabase(path); migrateDatabase(db);
   const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, webui: { passwordHash: 'hash' } });
-  const operations = new OperationsRepository(db); const events = new EventBus(); const log = new LogSink(operations, `./data/${name}-logs`); const archive = new ArchiveRepository(db);
+  const operations = new OperationsRepository(db); const events = new EventBus(); const log = new LogSink(operations); const archive = new ArchiveRepository(db);
   const app = createServer({ config, db, operations, principals: new PrincipalRepository(db), archive, context: new ContextEngine(db, archive), providers: new ProviderStore(db, new Secrets('x'.repeat(32))), approvals: new DatabaseApprovalBroker(db, config, events, log), maintenance: new MaintenanceService(db, path, 2, 30), events, log, configSchema: {}, startedAt: Date.now(), setup: undefined });
   const session = operations.createSession(1);
   return { app, db, headers: { cookie: `luoli_sid=${session.id}`, 'x-csrf-token': session.csrf, 'content-type': 'application/json' } };
@@ -30,9 +30,9 @@ function harness(name: string) {
 describe('R-CTX-01 硬截断保持 part 形状', () => {
   it('预算压到 1 也不破坏 type，且带附件的消息整体降级而非半截', async () => {
     const path = './data/round4-truncate.test.db';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
     const db = openDatabase(path); migrateDatabase(db);
-    const archive = new ArchiveRepository(db); const log = new LogSink(new OperationsRepository(db), './data/round4-truncate-logs');
+    const archive = new ArchiveRepository(db); const log = new LogSink(new OperationsRepository(db));
     const engine = new ContextEngine(db, archive, log); const config = contextConfig(100); const scoped = archive.scope('chat');
     const trigger = scoped.append({ chatId: 'chat', messageThreadId: null, tgMessageId: 1, direction: 'in', fromKind: 'user', fromUserId: 'u', fromName: 'U', fromUsername: null,
       kind: 'photo', text: 'z'.repeat(4000), tgDate: Date.now(), raw: {}, triggered: true, triggerReason: 'mention',
@@ -61,7 +61,7 @@ describe('R-CTX-01 硬截断保持 part 形状', () => {
 
   it('形状断言会拒收未知的 part type', async () => {
     const path = './data/round4-shape.test.db';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
     const db = openDatabase(path); migrateDatabase(db);
     const archive = new ArchiveRepository(db); const engine = new ContextEngine(db, archive); const config = contextConfig(32_000);
     const trigger = archive.scope('chat').append({ chatId: 'chat', messageThreadId: null, tgMessageId: 1, direction: 'in', fromKind: 'user', fromUserId: 'u', fromName: 'U', fromUsername: null, kind: 'text', text: 'hi', tgDate: Date.now(), raw: {}, triggered: true, triggerReason: 'mention' });
@@ -75,7 +75,7 @@ describe('R-CTX-01 硬截断保持 part 形状', () => {
 describe('R-TG-01 时区', () => {
   it('群聊渲染在时区非法时回退而不是抛错', async () => {
     const path = './data/round4-timezone.test.db';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
     const db = openDatabase(path); migrateDatabase(db);
     const archive = new ArchiveRepository(db); const engine = new ContextEngine(db, archive);
     const valid = contextConfig(32_000);
@@ -126,7 +126,7 @@ describe('R-API-01 / R-CFG-02 WebUI 写端点', () => {
 describe('R-MEM-01 记忆段合并', () => {
   it('段数超限时不会复制「其他」段的条目', () => {
     const path = './data/round4-memory.test.db';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
     const directory = './data/round4-memory-docs';
     rmSync(directory, { recursive: true, force: true }); mkdirSync(directory, { recursive: true });
     const db = openDatabase(path); migrateDatabase(db);

@@ -1,16 +1,13 @@
-import { gzipSync } from "node:zlib";
 import {
   chmodSync,
   mkdirSync,
-  readFileSync,
   readdirSync,
   rmSync,
   statSync,
   unlinkSync,
-  writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
-import type { Sqlite } from "@luoli/db";
+import { type Sqlite, reclaimLogDatabase } from "@luoli/db";
 import type { LogSink } from "./log/sink.js";
 
 /** 位于磁盘上、由 DB 行索引的两棵 blob 目录。未提供路径的那一棵不扫描（测试中常只提供一棵）。 */
@@ -46,9 +43,7 @@ export class MaintenanceService {
     private readonly databasePath: string,
     private readonly backupKeep: number,
     private readonly retentionDays: number,
-    private readonly logsDir = "./logs",
     private readonly blobs: BlobDirectories = {},
-    private readonly gzipAfterDays = 0,
     private readonly scheduleRetentionDays = 30,
     private readonly retention: RetentionDays = {},
     /**
@@ -110,59 +105,20 @@ export class MaintenanceService {
     this.db.pragma("wal_checkpoint(TRUNCATE)");
   }
 
-  /**
-   * `logs.gzipAfterDays`：早于该天数且尚未压缩的 `.jsonl` 就地压缩为 `.jsonl.gz`。
-   * 0 表示不压缩。压缩发生在删除之前 —— 保留期内的历史日志占用可降低一个数量级，而 `blobs/`
-   * 中独立的 JSON 载荷不处理（按 `file_ref` 懒加载的路径不识别 `.gz`，压缩后将无法读取）。
-   */
-  #gzipOldLogs(cutoffDay: string): number {
-    let compressed = 0;
-    let days: string[];
-    try {
-      days = readdirSync(this.logsDir, { withFileTypes: true })
-        .filter(
-          (entry) =>
-            entry.isDirectory() &&
-            /^\d{4}-\d{2}-\d{2}$/.test(entry.name) &&
-            entry.name < cutoffDay,
-        )
-        .map((entry) => entry.name);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0;
-      throw error;
-    }
-    for (const day of days) {
-      const directory = join(this.logsDir, day);
-      let entries: string[];
-      try {
-        entries = readdirSync(directory);
-      } catch {
-        continue;
-      }
-      for (const name of entries) {
-        if (!name.endsWith(".jsonl") && !/\.jsonl\.\d+$/.test(name)) continue;
-        const path = join(directory, name);
-        try {
-          writeFileSync(`${path}.gz`, gzipSync(readFileSync(path)), {
-            mode: 0o600,
-          });
-          unlinkSync(path);
-          compressed += 1;
-        } catch {
-          /* 无法读取或写入即跳过：压缩用于节省磁盘，不涉及正确性 */
-        }
-      }
-    }
-    return compressed;
-  }
-
   cleanup(now = Date.now()): Record<string, number> {
     const logCutoff = now - this.retentionDays * 86_400_000;
     const updateCutoff = now - 7 * 86_400_000;
     const approvalsCutoff = now - 90 * 86_400_000;
+    // 日志的**全部**清理就是这一条：载荷在同一行上，没有第二个落点要跟着删（docs/10 §3）。
+    // 此前它后面还跟着「扫 logs/ 删掉整个过期日目录」与「把更早的 jsonl 压成 .gz」，
+    // 两者都随文件落点一起消失（返回值里的 logDirectories / compressed 因此也没有了）。
+    // `gcFiles()` 不受影响：它扫的一直是媒体与子 agent 结果那两棵目录，日志 blob 不在其中。
     const logs = this.db
       .prepare("DELETE FROM log_events WHERE ts<?")
       .run(logCutoff).changes;
+    // 删掉的页还给文件系统。`logs.db` 建库时就开了 `auto_vacuum=INCREMENTAL`，所以这是一次
+    // 短操作，不是 `VACUUM` 那把整库锁 —— 而不还的话保留期只是把行标成空闲，文件只涨不落。
+    if (logs > 0) reclaimLogDatabase(this.db);
     const updates = this.db
       .prepare("DELETE FROM processed_updates WHERE ts<?")
       .run(updateCutoff).changes;
@@ -179,22 +135,6 @@ export class MaintenanceService {
         "UPDATE approvals SET state='expired' WHERE state='pending' AND expires_at<?",
       )
       .run(now);
-    const cutoffDay = new Date(logCutoff).toISOString().slice(0, 10);
-    let logDirectories = 0;
-    try {
-      for (const day of readdirSync(this.logsDir, { withFileTypes: true })) {
-        if (
-          !day.isDirectory() ||
-          !/^\d{4}-\d{2}-\d{2}$/.test(day.name) ||
-          day.name >= cutoffDay
-        )
-          continue;
-        rmSync(join(this.logsDir, day.name), { recursive: true, force: true });
-        logDirectories += 1;
-      }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
     // 子 agent 的全文结果属调试产物，与日志同周期：按 `logs.retentionDays` 过期。
     // 只删除文件并将 `result_full_ref` 置空，保留 `result_summary` —— 摘要已被上下文引用，
     // 删除会使历史轮次中的引用悬空（docs/22 · I-09）。
@@ -321,24 +261,13 @@ export class MaintenanceService {
         for (const id of ids) drop.run(id);
       }
     }
-    // 压缩在删除之后执行：已超过保留期的目录整体已被删除，无需先压缩再删除。
-    const compressed =
-      this.gzipAfterDays > 0
-        ? this.#gzipOldLogs(
-            new Date(now - this.gzipAfterDays * 86_400_000)
-              .toISOString()
-              .slice(0, 10),
-          )
-        : 0;
     const result = {
       logs,
-      logDirectories,
       updates,
       sessions,
       approvals,
       agentResults,
       schedules,
-      compressed,
       usage,
       quotaCounters,
       configRevisions,

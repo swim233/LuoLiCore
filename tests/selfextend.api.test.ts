@@ -13,7 +13,7 @@ import { createServer } from '@luoli/server';
  */
 function harness(name: string) {
   const path = `./data/${name}.test.db`;
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
   const root = resolve(`./data/${name}-root`);
   rmSync(root, { recursive: true, force: true });
   for (const dir of ['workspace', 'plugins']) mkdirSync(`${root}/${dir}`, { recursive: true });
@@ -21,7 +21,7 @@ function harness(name: string) {
   const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, webui: { passwordHash: 'hash' },
     tools: { selfExtend: { enabled: true, customTools: { enabled: true } } } });
   const operations = new OperationsRepository(db); const events = new EventBus();
-  const log = new LogSink(operations, `./data/${name}-logs`); const archive = new ArchiveRepository(db);
+  const log = new LogSink(operations); const archive = new ArchiveRepository(db);
   const registry = new ToolRegistry(log, { request: async () => true }, { maxRegistered: 200, maxCallsPerTurn: 50, maxConsecutiveErrors: 10 });
   const sandbox = new Sandbox(() => ({ mode: 'docker', bypassRoles: ['owner'], dockerBin: 'docker', image: 'x', network: 'none',
     memoryMb: 256, cpus: 1, pidsLimit: 64, readOnlyRoot: false, tmpfsMb: 16, workspaceDir: `${root}/workspace`, hostWorkspaceDir: '',
@@ -104,11 +104,11 @@ describe('self-extension review endpoints', () => {
 
   it('reports not_implemented instead of an empty list when the deployment lacks the wiring', async () => {
     const path = './data/selfextend-api-bare.test.db';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
     const db = openDatabase(path); migrateDatabase(db);
     const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, webui: { passwordHash: 'hash' } });
     const operations = new OperationsRepository(db); const events = new EventBus();
-    const log = new LogSink(operations, './data/selfextend-api-bare-logs'); const archive = new ArchiveRepository(db);
+    const log = new LogSink(operations); const archive = new ArchiveRepository(db);
     const app = createServer({ config, db, operations, principals: new PrincipalRepository(db), archive, context: new ContextEngine(db, archive),
       providers: new ProviderStore(db, new Secrets('x'.repeat(32))), approvals: new DatabaseApprovalBroker(db, config, events, log),
       maintenance: new MaintenanceService(db, path, 2, 30), events, log, configSchema: {}, startedAt: Date.now(), setup: undefined });

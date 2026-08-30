@@ -98,7 +98,7 @@ describe('R-02 · read / edit 不再无视文件大小整份读盘', () => {
 describe('R-03 · context_stats 默认不带整段历史', () => {
   it('摘要里没有 messages / commits，显式要时才有', () => {
     const path = './data/round9-stats.test.db';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
     const db = openDatabase(path); migrateDatabase(db);
     const engine = new ContextEngine(db, new ArchiveRepository(db));
     const summary = engine.stats('chat:1');
@@ -115,7 +115,7 @@ describe('R-03 · context_stats 默认不带整段历史', () => {
 describe('C-01 · 一行坏数据不该让全部别名消失', () => {
   it('headers_json 是坏 JSON 的 provider 被跳过并记成 down，其余别名照常可用', () => {
     const path = './data/round9-rebuild.test.db';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
     const db = openDatabase(path); migrateDatabase(db);
     const providers = new ProviderStore(db, new Secrets('x'.repeat(32)));
     const insert = db.prepare(`INSERT INTO providers(id,name,kind,base_url,headers_json,enabled,created_at,updated_at) VALUES (?,?,?,?,?,1,?,?)`);
@@ -153,7 +153,7 @@ describe('S-08 · 身份字符串当路径段用之前先校验形态', () => {
 describe('R-04 · 并发上限按在途轮次数而不是 turns 表', () => {
   it('turns 表里一行都没有时，注册表里的在途轮次照样能挡住第二条', () => {
     const path = './data/round9-quota.test.db';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
     const db = openDatabase(path); migrateDatabase(db);
     const quota = new QuotaGuard(db, 'UTC');
     const registry = new TurnRegistry();
@@ -176,7 +176,7 @@ describe('R-04 · 并发上限按在途轮次数而不是 turns 表', () => {
 describe('R-05 · 四张派生数据表有保留期，且 0 = 不清', () => {
   it('按保留期删过期行，天数为 0 时一行都不动', () => {
     const path = './data/round9-retention.test.db';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
     const db = openDatabase(path); migrateDatabase(db);
     const now = Date.now();
     const old = now - 500 * 86_400_000;
@@ -195,13 +195,13 @@ describe('R-05 · 四张派生数据表有保留期，且 0 = 不清', () => {
 
     seed();
     // 0 表示不清理。默认静默删除数据的风险远高于不删除，因此缺省值与 0 都必须保持数据不变。
-    new MaintenanceService(db, path, 2, 30, './data/round9-logs', {}, 0, 30,
+    new MaintenanceService(db, path, 2, 30, {}, 30,
       { usage: 0, quotaCounters: 0, configRevisions: 0, memoryRevisions: 0 }).cleanup(now);
     expect(counts()).toEqual([1, 1, 1, 1]);
-    new MaintenanceService(db, path, 2, 30, './data/round9-logs').cleanup(now);
+    new MaintenanceService(db, path, 2, 30).cleanup(now);
     expect(counts()).toEqual([1, 1, 1, 1]);
 
-    const result = new MaintenanceService(db, path, 2, 30, './data/round9-logs', {}, 0, 30,
+    const result = new MaintenanceService(db, path, 2, 30, {}, 30,
       { usage: 400, quotaCounters: 400, configRevisions: 180, memoryRevisions: 180 }).cleanup(now);
     expect(counts()).toEqual([0, 0, 0, 0]);
     expect(result).toMatchObject({ usage: 1, quotaCounters: 1, configRevisions: 1, memoryRevisions: 1 });
@@ -209,7 +209,7 @@ describe('R-05 · 四张派生数据表有保留期，且 0 = 不清', () => {
     // 保留期内的行不做处理。
     seed();
     db.prepare('UPDATE usage_ledger SET ts=?').run(now - 86_400_000);
-    new MaintenanceService(db, path, 2, 30, './data/round9-logs', {}, 0, 30, { usage: 400 }).cleanup(now);
+    new MaintenanceService(db, path, 2, 30, {}, 30, { usage: 400 }).cleanup(now);
     expect(db.prepare('SELECT COUNT(*) FROM usage_ledger').pluck().get()).toBe(1);
     closeDatabase(db);
   });
@@ -218,7 +218,7 @@ describe('R-05 · 四张派生数据表有保留期，且 0 = 不清', () => {
 describe('C-02 · 用量报表与总览趋势按同一个时区分日', () => {
   it('东八区里跨 UTC 午夜的调用归到本地那一天', () => {
     const path = './data/round9-usage-tz.test.db';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
     const db = openDatabase(path); migrateDatabase(db);
     const ledger = new UsageLedger(db);
     // 取两天前的 20:30Z：加八小时即跨入下一个本地日。按 UTC 分日归为前一天，而总览趋势与
@@ -271,7 +271,7 @@ describe('S-10 · mention 护栏的判据跟 Telegram 一致', () => {
 describe('C-06 · LIKE 分支转义通配符', () => {
   it('a_b 不再命中 axb', () => {
     const path = './data/round9-like.test.db';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
     const db = openDatabase(path); migrateDatabase(db);
     const scoped = new ArchiveRepository(db).scope('c');
     const add = (text: string, id: number): void => void scoped.append({ chatId: 'c', messageThreadId: null, tgMessageId: id, direction: 'in',
@@ -305,7 +305,7 @@ describe('C-08 · perChat 的会话级人格真的接上了', () => {
     writeFileSync(`${root}/CHARACTER.md`, '全局人格');
     writeFileSync(`${root}/CHARACTER.-100.md`, '本群人格');
     const path = './data/round9-character.test.db';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
     const db = openDatabase(path); migrateDatabase(db);
     const documents = new PromptDocuments(db, root);
     expect(documents.readForPrompt({ userId: '1', isPrivate: true, characterOverride: 'CHARACTER.-100.md' }).character).toBe('本群人格');
@@ -319,10 +319,10 @@ describe('C-08 · perChat 的会话级人格真的接上了', () => {
 describe('D-03 · 准入判定能单独测', () => {
   it('运维禁用、角色不足、子 agent 限制三档各自说清原因', () => {
     const path = './data/round9-admit.test.db';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
     const db = openDatabase(path); migrateDatabase(db);
     const config = configSchema.parse({ access: { bootstrapOwnerId: '1' } });
-    const log = new LogSink(new OperationsRepository(db), './data/round9-logs');
+    const log = new LogSink(new OperationsRepository(db));
     let overrides: Record<string, { enabled?: boolean }> = {};
     const registry = new ToolRegistry(log, { request: async () => true }, { maxRegistered: 10, maxCallsPerTurn: 2, maxConsecutiveErrors: 3 });
     registry.bindOverrides(() => overrides);
@@ -346,7 +346,7 @@ describe('D-03 · 准入判定能单独测', () => {
 describe('D-05 · onStepEnd 的四件事各自能喂一个假 step', () => {
   it('链内 fallback 时按实际出力的模型计价，别名不跟着变', () => {
     const path = './data/round9-observers.test.db';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
     const db = openDatabase(path); migrateDatabase(db);
     db.prepare(`INSERT INTO turns(id,key,chat_id,initiator_user_id,effective_role,trigger_message_id,trigger_reason,state,started_at) VALUES ('t','chat:1','1','2','trusted',1,'mention','running',?)`).run(Date.now());
     const config = configSchema.parse({ access: { bootstrapOwnerId: '1' } });
@@ -409,7 +409,7 @@ describe('T-04 · 中间省略式截断按字符边界切且不超预算', () =>
 describe('T-06 · 库里的坏 JSON 不该抛在没有边界的地方', () => {
   it('app_kv 的坏行当「没有这一行」', () => {
     const path = './data/round9-appkv.test.db';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
     const db = openDatabase(path); migrateDatabase(db);
     db.prepare('INSERT INTO app_kv(key,value_json,updated_at,updated_by) VALUES (?,?,?,?)').run('modelAlias:chat:1', '{not json', Date.now(), 'test');
     expect(readAppKv(db, 'modelAlias:chat:1')).toBeUndefined();

@@ -37,7 +37,7 @@ interface CatalogStatus { enabled: boolean; available: boolean; stale: boolean; 
  *  树不缩进、每个节点都显示 0 ms，而 .vue 模板不进 `tsc --noEmit`，没有检查能拦住。 */
 interface LogRow { id: number; ts: number; level: string; kind: string; summary: string; trace_id: string | null;
   span_id: string | null; parent_span_id: string | null; chat_id: string | null; user_id: string | null; key: string | null;
-  duration_ms: number | null; file_ref: string | null; data_bytes: number | null }
+  duration_ms: number | null; data_bytes: number | null }
 
 interface Chat { key: string; chatId: string; threadId: number | null; scope: string; tokens: number | null; messages: number | null }
 interface Usage { id: number; ts: number; model_alias: string; input_tokens: number; output_tokens: number; cost_usd: number; ok: number }
@@ -525,7 +525,7 @@ const traceIndent = computed(() => traceDepths(traceDetail.value));
  */
 interface LogDetail { id: number; ts: number; level: string; kind: string; summary: string; traceId: string | null; spanId: string | null;
   parentSpanId: string | null; chatId: string | null; userId: string | null; key: string | null; durationMs: number | null;
-  text: string | null; bytes: number; truncated: boolean; fileRef: string | null }
+  text: string | null; bytes: number; truncated: boolean }
 const logDialog = ref(false);
 const logLoading = ref(false);
 const logDetail = ref<LogDetail | null>(null);
@@ -851,10 +851,10 @@ function softDeleteMessage(id: number, label: string): void {
 // ── 对话详情：这一轮实际发给上游的 JSON ──────────────────────────────────────
 // 只有日志里那一份是真的：turns 表存统计、messages 表存最终文本，两者都看不出请求体长什么样。
 interface DetailEvent { id: number; ts: number; level: string; kind: string; summary: string; spanId: string | null; parentSpanId: string | null; durationMs: number | null;
-  text: string | null; bytes: number; truncated: boolean; fileRef: string | null }
+  text: string | null; bytes: number; truncated: boolean }
 /** 这一轮写进上下文的消息，`parts` 是原始 parts_json（未经过 elidePart）。 */
 interface DetailContextMessage { ordinal: number; id: string; role: string; origin: string; pruneLevel: number; pruneApplied: boolean;
-  textPreview: string | null; tokens: number; createdAt: number; text: string | null; bytes: number; truncated: boolean; fileRef: string | null }
+  textPreview: string | null; tokens: number; createdAt: number; text: string | null; bytes: number; truncated: boolean }
 interface TurnDetail { turn: Record<string, unknown>; captureBodies: boolean; events: DetailEvent[]; contextMessages: DetailContextMessage[] }
 // `parts` 单列一组而不是混进 events：它的来源是 context_messages 而不是 log_events —— 日志按
 // retentionDays 清掉之后、或 captureBodies 关掉时，这一组是工具输入唯一还看得见的地方。
@@ -1551,7 +1551,7 @@ const mergedConfigOpen = ref(false);
 const MAINTENANCE_ACTIONS = [
   { action: 'backup', label: '立即备份 DB', icon: 'pi pi-database', hint: '快照写入 db.path 同级目录，保留 db.backupKeep 份' },
   { action: 'vacuum', label: 'VACUUM', icon: 'pi pi-compress', hint: '回收空间；数据库较大时会阻塞写入' },
-  { action: 'cleanup-logs', label: '清理过期日志', icon: 'pi pi-eraser', hint: '按 logs.retentionDays 删除 log_events、blobs/ 与子 agent 全文结果' },
+  { action: 'cleanup-logs', label: '清理过期日志', icon: 'pi pi-eraser', hint: '按 logs.retentionDays 删除 log_events 与子 agent 全文结果，并把腾出的空间还给磁盘' },
   { action: 'gc-files', label: '清理孤儿文件', icon: 'pi pi-trash', hint: '仅删除没有任何 DB 行指向的文件；在用的媒体不受影响' },
   { action: 'rebuild-fts', label: '重建 FTS 索引', icon: 'pi pi-sync', hint: '消息检索结果异常时重建' },
 ] as const;
@@ -1674,7 +1674,7 @@ function runMaintenance(action: string, label: string): void {
 }
 
 // ── 依赖健康：总览页那张卡以前是四行写死的字，与运行时无关 ──────────────────────────
-interface HealthDetail { ok: boolean; version: string; uptimeMs: number; db: { ok: boolean; bytes?: number; walBytes?: number; workspaceBytes?: number };
+interface HealthDetail { ok: boolean; version: string; uptimeMs: number; db: { ok: boolean; bytes?: number; walBytes?: number; logsBytes?: number; workspaceBytes?: number };
   mcp: Array<{ name: string; state: string; error: string | null }>; sandbox: { allowed: boolean; mode?: string; reason?: string }; inFlightTurns: number }
 const health = ref<HealthDetail | null>(null);
 const uptimeText = computed(() => {
@@ -2150,6 +2150,7 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
               <div class="health-row"><span>沙箱</span><UiTag :value="health?.sandbox ? `${health.sandbox.mode ?? '未知'}${health.sandbox.allowed ? '' : ' · 不可用'}` : '未装配'" :severity="!health?.sandbox ? 'secondary' : health.sandbox.allowed ? 'info' : 'danger'" :title="health?.sandbox?.reason ?? ''" /></div>
               <!-- 占用只统计不清理：这三行是「该不该去点维护操作」的判据（docs/09 §3.1）。 -->
               <div class="health-row"><span>DB / WAL</span><UiTag :value="`${formatBytes(health?.db.bytes)} / ${formatBytes(health?.db.walBytes)}`" severity="secondary" title="WAL 偏大时执行 VACUUM，或等下次维护 checkpoint" /></div>
+              <div class="health-row"><span>日志库</span><UiTag :value="formatBytes(health?.db.logsBytes)" severity="secondary" title="日志独立成一个文件，按 logs.retentionDays 清理；它不计入上面的 DB 大小" /></div>
               <div class="health-row"><span>workspace 占用</span><UiTag :value="formatBytes(health?.db.workspaceBytes)" severity="secondary" title="模型在会话工作目录生成的文件，用「清理孤儿文件」清理" /></div>
             </article>
           </section>
@@ -2905,7 +2906,6 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
                 <small v-if="event.truncated" class="detail-truncated">仅渲染前 120k 字符；完整载荷 {{ formatBytes(event.bytes) }}，用上方复制或下载获取。</small>
               </div>
               <pre v-if="event.text" v-text="event.text" />
-              <p v-else-if="event.fileRef" class="empty">载荷文件 <code>{{ event.fileRef }}</code> 已被日志保留策略清理。</p>
               <p v-else class="empty">无载荷</p>
             </div>
           </li>
@@ -2937,7 +2937,6 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             <small v-if="logDetail.truncated" class="detail-truncated">仅渲染前 120k 字符；完整载荷 {{ formatBytes(logDetail.bytes) }}，用上方复制或下载获取。</small>
           </div>
           <pre v-if="logDetail.text" v-text="logDetail.text" />
-          <p v-else-if="logDetail.fileRef" class="empty">载荷文件 <code>{{ logDetail.fileRef }}</code> 已被日志保留策略清理。</p>
           <p v-else class="empty">无载荷</p>
         </div>
       </template>

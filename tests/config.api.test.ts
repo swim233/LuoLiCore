@@ -8,12 +8,12 @@ import { assignDotted, sortOverrideKeys } from '@luoli/shared';
 
 function harness() {
   const path = './data/config-write.test.db';
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
   const db = openDatabase(path); migrateDatabase(db);
   // `memory.dir` 需与 PromptDocuments 的根一致：`GET /api/prompts/:id` 按 `config.memory.dir`
   // 做包含性校验（docs/27 · S-07），两者指向不同目录的部署在生产中不存在。
   const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, webui: { passwordHash: 'secret-hash' }, memory: { dir: './data/config-prompts' } });
-  const operations = new OperationsRepository(db); const events = new EventBus(); const log = new LogSink(operations, './data/config-write-logs'); const archive = new ArchiveRepository(db);
+  const operations = new OperationsRepository(db); const events = new EventBus(); const log = new LogSink(operations); const archive = new ArchiveRepository(db);
   const promptDocuments = new PromptDocuments(db, './data/config-prompts'); promptDocuments.ensure();
   const app = createServer({ config, db, operations, principals: new PrincipalRepository(db), archive, context: new ContextEngine(db, archive), providers: new ProviderStore(db, new Secrets('x'.repeat(32))), approvals: new DatabaseApprovalBroker(db, config, events, log), maintenance: new MaintenanceService(db, path, 2, 30), promptDocuments, memory: new MemoryStore(db, './data/config-prompts', 1500, 3000, 2, log), events, log, configSchema: {}, startedAt: Date.now(), setup: undefined });
   const session = operations.createSession(1); const headers = { cookie: `luoli_sid=${session.id}`, 'x-csrf-token': session.csrf, 'content-type': 'application/json' };
@@ -393,7 +393,7 @@ describe('config API validation', () => {
       seed.run(`primemory:${subject}`, subject, `./data/config-prompts/PRIMEMORY.${subject}.md`, Date.now());
     }
     const audits = (): Array<{ userId: string | null; op: string }> => (db
-      .prepare("SELECT user_id AS userId,data_json AS data FROM log_events WHERE kind='memory.owner_read_private' ORDER BY id")
+      .prepare("SELECT user_id AS userId,data,data_codec AS codec FROM log_events WHERE kind='memory.owner_read_private' ORDER BY id")
       .all() as Array<{ userId: string | null; data: string }>)
       .map((row) => ({ userId: row.userId, op: String((JSON.parse(row.data) as { op: string }).op) }));
 

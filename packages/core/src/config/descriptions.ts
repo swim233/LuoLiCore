@@ -468,15 +468,15 @@ export const CONFIG_DESCRIPTIONS: Record<string, string> = {
   "db.backupKeep": "执行迁移前自动备份，保留最近的份数。",
   "db.vacuumCron": "VACUUM 整理任务的 cron 表达式。",
 
-  logs: "日志级别、留存与请求载荷记录。日志页读取的就是这些文件。",
+  logs: "日志级别、留存与请求载荷记录。日志页读取的就是这个库。",
   "logs.level": "日志级别，低于它的不记录。",
-  "logs.dir": "日志文件目录。",
+  "logs.dbPath":
+    "日志数据库的路径。日志独立成一个文件，与主库分开备份、分开清理。改这一项需重启。",
   "logs.captureBodies":
     "是否把发给上游的请求体与响应体存盘。关闭后对话详情里看不到实际发出的载荷，排障能力受限。",
-  "logs.bodyMaxBytes": "单条载荷存盘的字节上限，超出截断。",
-  "logs.maxFileMb": "单个日志文件的大小上限（MB），超出轮转。",
+  "logs.compress":
+    "是否压缩存放载荷。关闭后新写入的行存明文，已压缩的行照常读取。",
   "logs.retentionDays": "日志保留天数，超期删除。",
-  "logs.gzipAfterDays": "日志文件在多少天之后压缩存放。",
   "logs.console":
     "控制台输出格式：pretty 供人阅读、json 供采集器解析、off 不输出。",
   "logs.redactPatterns":

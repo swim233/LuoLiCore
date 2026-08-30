@@ -11,7 +11,7 @@ import { z } from 'zod';
  */
 function open(name: string) {
   const path = `./data/${name}.test.db`;
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
   const db = openDatabase(path);
   migrateDatabase(db);
   db.prepare(`INSERT INTO turns(id,key,chat_id,initiator_user_id,effective_role,state) VALUES ('turn','chat:1','1','1','owner','running')`).run();
@@ -33,7 +33,7 @@ describe('turn accounting', () => {
   it('counts executed tool calls but not rejected ones', async () => {
     const { db } = open('turn-accounting-tools');
     const turns = new TurnRepository(db);
-    const log = new LogSink(new OperationsRepository(db), './data/turn-accounting-logs');
+    const log = new LogSink(new OperationsRepository(db));
     const registry = new ToolRegistry(log, { request: async () => true }, { maxRegistered: 10, maxCallsPerTurn: 10, maxConsecutiveErrors: 5 }, [], undefined, turns);
     registry.register({ name: 'echo', description: 'echo', inputSchema: z.object({ value: z.string() }),
       policy: { minRole: 'limited', approval: 'never', scope: 'workspace', source: 'builtin' }, sourcePriority: 1, execute: (input) => ({ ok: true, value: input.value }) });

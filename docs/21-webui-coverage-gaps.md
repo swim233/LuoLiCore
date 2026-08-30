@@ -94,10 +94,10 @@ schema 自动表单，可写覆盖率达到 151/151（第三轮接线两项后�
 
 | | 数量 |
 |---|---|
-| schema 叶子总数 | **283** 〔实测〕 |
+| schema 叶子总数 | **281** 〔实测〕 |
 | 运行时从不读（`KNOWN_UNIMPLEMENTED_CONFIG_KEYS`） | **10** 〔实测〕 —— 权威在 [11 §2.0.1](./11-config-reference.md)，由 `tests/config.test.ts` 双向焊住 |
 | `perChat`（覆盖层容器，不是配置项） | 1 |
-| **已接线** | **272** 〔实测〕 |
+| **已接线** | **270** 〔实测〕 |
 
 ⚠ **下面那张 2026-08-18 的表在 2026-08-27 之前一直被当成现值读，而它的「67」当时已经是「10」。**
 同一个数字在本文里曾有三个版本（§1 的 67、§5 的 70、§7 的 67），全部对着代码里的 10。
@@ -159,7 +159,7 @@ schema 自动表单，可写覆盖率达到 151/151（第三轮接线两项后�
 | `agent` | 7 | `main.modelAlias` `main.maxSteps` `main.downgradeAfterStep` `maxDepth` `maxSubagentsPerTurn` `askTimeoutMs` `maxAsksPerRun` |
 | `memory` | 6 | `dir` `pubWriteMinRole` `softLimitTokens` `hardLimitTokens` `maxSections` `compactCron` |
 | `media` | 7 | `dir` `maxImageBytes` `maxDocBytes` `maxImageEdge` `extract.enabled` `extract.maxChars` `extract.inlineChars` |
-| `logs` | 7 | `level` `dir` `captureBodies` `bodyMaxBytes` `maxFileMb` `retentionDays` `console` |
+| `logs` | 6 | `level` `dbPath` `captureBodies` `compress` `retentionDays` `console` |
 | `telegram` | 6 | `mode` `allowedUpdates` `allowBots` `strictCommandSuffix` `throttle.globalPerSecond` `throttle.perChatPerMinute` |
 | `concurrency` | 5 | `mode` `perKey` `global` `queueMax` `turnTimeoutMs` |
 | `access` | 4 | `defaultUserRole` `defaultChatRole` `archiveBlocked` `bootstrapOwnerId` |
@@ -385,7 +385,6 @@ SPA fallback（`app.get('*')` 返回 `index.html`，200），所以 **`GET /api/
 | 项 | 理由 |
 |---|---|
 | `GET /api/health` | 无鉴权探活端点，是给外部监控用的；SPA 该用 `/api/health/detail` |
-| `GET /api/logs/blob` | 被 `GET /api/logs/:id/data` 取代（后者带 `content-disposition`，且 blob 解引用一致） |
 | `GET /api/messages/:id`、`GET /api/chats/:key/commits` | 列表端点已经返回同样的字段，单条端点是给外部集成留的 |
 | `GET /api/models/catalog` | `GET /api/providers/:id/models` 的响应里已经带 `catalog` 状态块 |
 | 工具的 `scope` 只读 | `scope` 在运行时不参与任何判定，只是给人看的标签 —— 做成可写等于放一个改了没效果的开关。`source` 同理，它由注册方式决定 |

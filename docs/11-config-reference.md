@@ -841,12 +841,10 @@ db:
 # ============================================================ logs（见 10）
 logs:
   level: info                     # 热更新
-  dir: ./logs                     # 需重启
+  dbPath: ./data/logs.db          # 需重启 · 日志的唯一落点，独立于 db.path（见 10 §3）
   captureBodies: true             # 热更新
-  bodyMaxBytes: 262144
-  maxFileMb: 128
-  retentionDays: 30
-  gzipAfterDays: 3                # 需重启 · 比这么多天更早的 jsonl 压成 .gz（blobs/ 不动）；0 = 不压
+  compress: true                  # 热更新 · 载荷是否 zstd；关掉只影响此后写入的行，旧行照读
+  retentionDays: 30               # 需重启：跟 schedule.retentionDays 一样在启动时交给 MaintenanceService
   console: pretty                 # pretty | json | off
   redactPatterns: []              # 热更新 · 追加到内置脱敏规则上的正则；写坏的那条整条跳过
 
@@ -1014,4 +1012,4 @@ config.onChange(keys => {
 | `perChat` 出现白名单外的路径 | 拒绝启动，指出具体路径 |
 | `trigger` 全部为 false 且没有可用唤醒词 | 警告（bot 永不会被触发） |
 | `trigger.wakewords` 里有不可用的模式（过短 / 正则过长 / 有回溯风险） | 警告并列出被跳过的模式；经 WebUI 与 API 写入时直接拒绝（400 `invalid_wakeword`） |
-| `logs.captureBodies=true` 且 `logs.dir` 不可写 | 拒绝启动 |
+| `logs.dbPath` 所在目录不可写 | 拒绝启动（`openDatabase` 建目录失败即抛，日志写不进去时整个可观测面是哑的） |

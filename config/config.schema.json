@@ -2234,39 +2234,26 @@
               "default": "info",
               "description": "日志级别，低于它的不记录。"
             },
-            "dir": {
+            "dbPath": {
               "type": "string",
-              "default": "./logs",
-              "description": "日志文件目录。"
+              "default": "./data/logs.db",
+              "description": "日志数据库的路径。日志独立成一个文件，与主库分开备份、分开清理。改这一项需重启。"
             },
             "captureBodies": {
               "type": "boolean",
               "default": true,
               "description": "是否把发给上游的请求体与响应体存盘。关闭后对话详情里看不到实际发出的载荷，排障能力受限。"
             },
-            "bodyMaxBytes": {
-              "type": "integer",
-              "exclusiveMinimum": 0,
-              "default": 262144,
-              "description": "单条载荷存盘的字节上限，超出截断。"
-            },
-            "maxFileMb": {
-              "type": "number",
-              "exclusiveMinimum": 0,
-              "default": 128,
-              "description": "单个日志文件的大小上限（MB），超出轮转。"
+            "compress": {
+              "type": "boolean",
+              "default": true,
+              "description": "是否压缩存放载荷。关闭后新写入的行存明文，已压缩的行照常读取。"
             },
             "retentionDays": {
               "type": "integer",
               "minimum": 0,
               "default": 30,
               "description": "日志保留天数，超期删除。"
-            },
-            "gzipAfterDays": {
-              "type": "integer",
-              "minimum": 0,
-              "default": 3,
-              "description": "日志文件在多少天之后压缩存放。"
             },
             "console": {
               "type": "string",
@@ -2289,7 +2276,7 @@
           },
           "additionalProperties": false,
           "default": {},
-          "description": "日志级别、留存与请求载荷记录。日志页读取的就是这些文件。"
+          "description": "日志级别、留存与请求载荷记录。日志页读取的就是这个库。"
         },
         "quota": {
           "type": "object",

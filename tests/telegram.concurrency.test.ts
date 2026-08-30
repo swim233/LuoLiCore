@@ -139,7 +139,7 @@ interface BotFixture { bot: Bot; db: ReturnType<typeof openDatabase>; replies: s
 function telegramFixture(name: string, overrides: Record<string, unknown>,
   dependencies: { onTurn?: (turnId: string) => Promise<string>; plugins?: { hook(name: string, ...arguments_: unknown[]): Promise<unknown[]> } } = {}): Promise<BotFixture> {
   const path = `./data/${name}.test.db`;
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
   rmSync(`./data/${name}-memory`, { recursive: true, force: true });
   const db = openDatabase(path);
   migrateDatabase(db);
@@ -152,7 +152,7 @@ function telegramFixture(name: string, overrides: Record<string, unknown>,
     config, db, principals, archive, operations, context: new ContextEngine(db, archive), turns: new TurnRepository(db),
     quota: new QuotaGuard(db, 'UTC'), memory: new MemoryStore(db, `./data/${name}-memory`, 1500, 3000),
     registry: new TurnRegistry(), concurrency: new TurnConcurrency(config.concurrency),
-    log: new LogSink(operations, `./data/${name}-logs`), botInfo,
+    log: new LogSink(operations), botInfo,
     ...(dependencies.plugins ? { plugins: dependencies.plugins } : {}),
     ...(dependencies.onTurn ? { onTurn: (turn) => dependencies.onTurn!(turn.turnId) } : {}),
   }).then((bot) => {

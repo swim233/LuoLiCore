@@ -6,7 +6,7 @@ import { MemoryStore } from '@luoli/core';
 function harness(name: string) {
   const database = `./data/${name}.test.db`;
   const directory = `./data/${name}-memory`;
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${database}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${database}${suffix}`, { force: true });
   rmSync(directory, { recursive: true, force: true });
   const db = openDatabase(database);
   migrateDatabase(db);

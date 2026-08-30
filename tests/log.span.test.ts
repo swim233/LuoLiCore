@@ -2,6 +2,7 @@ import { mkdirSync, rmSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { OperationsRepository, closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
 import { LogSink } from '@luoli/core';
+import { logRows } from './support/logs.js';
 
 /**
  * 一个 span 只落一行，所以「开始时给的 data」和「结束时给的 data」必须都在那一行里。
@@ -12,16 +13,16 @@ import { LogSink } from '@luoli/core';
  */
 function sink(name: string): { log: LogSink; db: ReturnType<typeof openDatabase>; close: () => void } {
   const database = `./data/${name}.test.db`; const directory = `./data/${name}-logs`;
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${database}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${database}${suffix}`, { force: true });
   rmSync(directory, { recursive: true, force: true }); mkdirSync(directory, { recursive: true });
   const db = openDatabase(database); migrateDatabase(db);
-  return { log: new LogSink(new OperationsRepository(db), directory, [], { level: 'debug', console: 'off' }), db, close: () => { closeDatabase(db); } };
+  return { log: new LogSink(new OperationsRepository(db), [], { level: 'debug', console: 'off' }), db, close: () => { closeDatabase(db); } };
 }
 
 // 直查库而不走 `operations.logs()`：那个查询刻意不返回 `data_json`（列表一次上千行，
 // 单条载荷能到 bodyMaxBytes），而这几条断言要看的正是载荷本身。
 const payload = (db: ReturnType<typeof openDatabase>, kind: string): Record<string, unknown> => {
-  const row = db.prepare('SELECT data_json AS data FROM log_events WHERE kind=? ORDER BY id LIMIT 1').get(kind) as { data: string | null } | undefined;
+  const row = logRows(db, kind)[0];
   return JSON.parse(row?.data ?? '{}') as Record<string, unknown>;
 };
 
@@ -81,10 +82,10 @@ describe('LogSink.span 的载荷是开始与结束的合并', () => {
     const { log, db, close } = sink('log-span-override');
     log.span({ level: 'info', kind: 'model.call', summary: 'rig-fake-bad.chat/fake-bad', traceId: 't2', data: { stepNumber: 0, modelId: 'fake-bad' } })
       .end({ servedModelId: 'deepseek-v4-flash' }, undefined, { summary: 'ksm-api/deepseek-v4-flash ← fallback from fake-bad', level: 'warn' });
-    const row = db.prepare("SELECT level,summary,data_json AS data FROM log_events WHERE kind='model.call'").get() as { level: string; summary: string; data: string };
+    const row = logRows(db, 'model.call')[0]!;
     expect(row.level).toBe('warn');
     expect(row.summary).toBe('ksm-api/deepseek-v4-flash ← fallback from fake-bad');
-    expect(JSON.parse(row.data)).toEqual({ stepNumber: 0, modelId: 'fake-bad', servedModelId: 'deepseek-v4-flash' });
+    expect(JSON.parse(row.data!)).toEqual({ stepNumber: 0, modelId: 'fake-bad', servedModelId: 'deepseek-v4-flash' });
     close();
   });
 

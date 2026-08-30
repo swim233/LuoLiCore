@@ -14,15 +14,22 @@ import { ArchiveRepository, closeDatabase, migrateDatabase, openDatabase } from 
 describe('AC-DB-001 / AC-DB-002 · 迁移', () => {
   it('空库建齐表与 FTS，journal_mode=wal，且重复迁移幂等', () => {
     const path = './data/db-init.test.db';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
     const db = openDatabase(path);
     migrateDatabase(db);
     expect(String((db.pragma('journal_mode') as Array<{ journal_mode: string }>)[0]!.journal_mode).toLowerCase()).toBe('wal');
     const tables = new Set((db.prepare("SELECT name FROM sqlite_master WHERE type='table'").pluck().all() as string[]));
     for (const name of ['messages', 'messages_fts', 'context_messages', 'context_commits', 'refs', 'turns', 'principals',
-      'approvals', 'config_kv', 'config_revisions', 'log_events', 'usage_ledger', 'quota_counters', 'attachments', 'agent_runs']) {
+      'approvals', 'config_kv', 'config_revisions', 'usage_ledger', 'quota_counters', 'attachments', 'agent_runs']) {
       expect(tables.has(name), `缺表 ${name}`).toBe(true);
     }
+    // `log_events` 在 `logs.dbPath` 那个独立文件里，由主连接 ATTACH 上来（docs/10 §3）。
+    // **主库那张同名表必须不存在**：SQLite 按 temp → main → attached 解析表名，它只要还在
+    // 就会一直遮住附加库那张，所有查询读到的都是一张永远不再增长的旧表，而日志页只是静静地空着。
+    expect(tables.has('log_events'), '主库还留着 log_events，它会遮住附加库那张').toBe(false);
+    expect(db.prepare("SELECT COUNT(*) FROM logs.sqlite_master WHERE type='table' AND name='log_events'").pluck().get()).toBe(1);
+    // 不带前缀的查询照旧可用 —— 全仓所有既有 SQL 靠的就是这一点。
+    expect(() => db.prepare('SELECT COUNT(*) FROM log_events').pluck().get()).not.toThrow();
     // 幂等：再迁一次不该报错、也不该多出表。
     const before = tables.size;
     migrateDatabase(db);
@@ -91,7 +98,7 @@ describe('AC-DB-003 ★ · 跨会话隔离由 SQL 扫描兜住', () => {
 
   it('实际读写也确实隔离：另一个会话的消息读不到', () => {
     const path = './data/db-isolation.test.db';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
     const db = openDatabase(path); migrateDatabase(db);
     const archive = new ArchiveRepository(db);
     const append = (chatId: string, id: number, text: string) => archive.scope(chatId, null).append({ chatId, messageThreadId: null,
@@ -112,7 +119,7 @@ describe('AC-DB-003 ★ · 跨会话隔离由 SQL 扫描兜住', () => {
 describe('AC-DB-004 · 中文检索与短词回退', () => {
   it('≥3 字走 FTS trigram，<3 字回退 LIKE，两条路都带 chat 过滤', () => {
     const path = './data/db-fts.test.db';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
     const db = openDatabase(path); migrateDatabase(db);
     const archive = new ArchiveRepository(db);
     const append = (chatId: string, id: number, text: string) => archive.scope(chatId, null).append({ chatId, messageThreadId: null,

@@ -5,10 +5,10 @@ import { ContextEngine, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceSe
 import { createServer } from '@luoli/server';
 
 function harness(quota: Record<string, unknown> = {}) {
-  const path = './data/quota-api.test.db'; for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+  const path = './data/quota-api.test.db'; for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
   const db = openDatabase(path); migrateDatabase(db);
   const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, webui: { passwordHash: 'hash' }, general: { timezone: 'UTC' }, quota });
-  const operations = new OperationsRepository(db); const events = new EventBus(); const log = new LogSink(operations, './data/quota-api-logs'); const archive = new ArchiveRepository(db);
+  const operations = new OperationsRepository(db); const events = new EventBus(); const log = new LogSink(operations); const archive = new ArchiveRepository(db);
   const changed: string[] = [];
   events.subscribe((event) => { if (event.type === 'config.changed') changed.push(...(event.data as { keys: string[] }).keys); });
   const app = createServer({ config, db, operations, principals: new PrincipalRepository(db), archive, context: new ContextEngine(db, archive), providers: new ProviderStore(db, new Secrets('x'.repeat(32))), approvals: new DatabaseApprovalBroker(db, config, events, log), maintenance: new MaintenanceService(db, path, 2, 30), events, log, configSchema: {}, startedAt: Date.now(), setup: undefined });

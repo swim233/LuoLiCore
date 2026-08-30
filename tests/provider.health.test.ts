@@ -24,12 +24,12 @@ const status = (message: string, statusCode: number): Error => Object.assign(new
 
 function harness(name: string) {
   const path = `./data/${name}.test.db`;
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
   rmSync(`./data/${name}-logs`, { recursive: true, force: true });
   const db = openDatabase(path);
   migrateDatabase(db);
   const providers = new ProviderStore(db, new Secrets('x'.repeat(32)));
-  const log = new LogSink(new OperationsRepository(db), `./data/${name}-logs`);
+  const log = new LogSink(new OperationsRepository(db));
   const registry = new ModelRegistry(db, providers);
   const now = Date.now();
   /** 同一个 provider 挂第二个模型（一份凭据下多个模型是常态）。 */

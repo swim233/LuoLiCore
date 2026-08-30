@@ -6,6 +6,7 @@ import { ArchiveRepository, OperationsRepository, closeDatabase, migrateDatabase
 import { ContextEngine, LogSink, PromptAssembler, PromptDocuments, ToolRegistry, UsageLedger, configSchema, registerCatalogTools, runMainAgent } from '@luoli/core';
 import type { ApprovalBroker, Config, ModelRegistry } from '@luoli/core';
 import type { RuntimeTurnContext } from '@luoli/shared';
+import { logRows as loggedRows } from './support/logs.js';
 
 /**
  * 工具目录按需暴露在请求体与运行时层的契约（`AC-TOOL-020`、`AC-TOOL-047`、`AC-TOOL-050`–`052`、
@@ -77,14 +78,14 @@ function makeTurn(config: Config, turnId: string): RuntimeTurnContext {
 
 function harness(name: string, patch: Partial<Config> = {}, maxRegistered = 40, maxCallsPerTurn = 20) {
   const path = `./data/${name}.test.db`;
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
   rmSync(`./data/${name}-memory`, { recursive: true, force: true });
   const db = openDatabase(path);
   migrateDatabase(db);
   const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, quota: { requirePricing: false },
     provider: { maxRetries: 0, retryBaseMs: 1, retryMaxMs: 2 },
     memory: { dir: `./data/${name}-memory` }, approval: { enabled: false }, ...patch });
-  const log = new LogSink(new OperationsRepository(db), `./data/${name}-logs`);
+  const log = new LogSink(new OperationsRepository(db));
   const broker: ApprovalBroker = { request: async () => true };
   const documents = new PromptDocuments(db, config.memory.dir);
   documents.ensure();
@@ -154,7 +155,7 @@ function recorder(steps: WireStep[], script: Array<() => unknown> = []) {
 }
 
 const logRows = (db: ReturnType<typeof openDatabase>): Array<{ kind: string; summary: string; data: string | null }> =>
-  db.prepare('SELECT kind,summary,data_json AS data FROM log_events ORDER BY rowid').all() as Array<{ kind: string; summary: string; data: string | null }>;
+  loggedRows(db);
 
 /** 折叠工具 schema 中那个唯一的属性名，断言其完全未下发即统计它的出现次数。 */
 const ISSUE_PROP = 'luoliIssueTitleMarker';

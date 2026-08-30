@@ -10,16 +10,16 @@ import { estimateTextTokens } from '@luoli/shared';
 
 function server(name: string, extra: Record<string, unknown> = {}) {
   const path = `./data/${name}.test.db`;
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
   const logDir = `./data/${name}-logs`;
   rmSync(logDir, { recursive: true, force: true });
   const db = openDatabase(path); migrateDatabase(db);
   const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, webui: { passwordHash: 'secret-hash' }, logs: { dir: logDir }, ...extra });
-  const operations = new OperationsRepository(db); const events = new EventBus(); const log = new LogSink(operations, logDir);
+  const operations = new OperationsRepository(db); const events = new EventBus(); const log = new LogSink(operations);
   const archive = new ArchiveRepository(db);
   const app = createServer({ config, db, operations, principals: new PrincipalRepository(db), archive, context: new ContextEngine(db, archive),
     providers: new ProviderStore(db, new Secrets('x'.repeat(32))), approvals: new DatabaseApprovalBroker(db, config, events, log),
-    maintenance: new MaintenanceService(db, path, 2, 30, logDir), events, log, configSchema: {}, startedAt: Date.now(), setup: undefined });
+    maintenance: new MaintenanceService(db, path, 2, 30), events, log, configSchema: {}, startedAt: Date.now(), setup: undefined });
   const session = operations.createSession(1);
   return { app, db, headers: { cookie: `luoli_sid=${session.id}`, 'x-csrf-token': session.csrf, 'content-type': 'application/json' } };
 }
@@ -127,7 +127,7 @@ describe('I-05 · 落盘前按新内容复核去重与硬上限', () => {
   it('别的轮次已经写进去的同一条不再重复落盘', () => {
     const database = './data/round7-memory.test.db';
     const directory = './data/round7-memory';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${database}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${database}${suffix}`, { force: true });
     rmSync(directory, { recursive: true, force: true });
     const db = openDatabase(database); migrateDatabase(db);
     const memory = new MemoryStore(db, directory, 100_000, 300_000, 12);
@@ -146,7 +146,7 @@ describe('I-05 · 落盘前按新内容复核去重与硬上限', () => {
   it('落盘时超过硬上限就整组跳过，不越过闸门', () => {
     const database = './data/round7-memory-limit.test.db';
     const directory = './data/round7-memory-limit';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${database}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${database}${suffix}`, { force: true });
     rmSync(directory, { recursive: true, force: true });
     const db = openDatabase(database); migrateDatabase(db);
     // 两条各自都装得下、加起来装不下。queueWrite 判的都是空文档那一刻的快照，所以两条都放行；
@@ -169,7 +169,7 @@ describe('I-05 · 落盘前按新内容复核去重与硬上限', () => {
 describe('I-02 · quota_counters.turns 数的是轮次', () => {
   it('一轮里多步结算只 +1', () => {
     const path = './data/round7-quota.test.db';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
     const db = openDatabase(path); migrateDatabase(db);
     const guard = new QuotaGuard(db, 'UTC');
     const reservation = guard.reserve({ chatId: 'c', userId: 'u', estimateUsd: 0.05,
@@ -188,7 +188,7 @@ describe('I-02 · quota_counters.turns 数的是轮次', () => {
 describe('I-09 · 孤儿 blob 真的被清理', () => {
   it('gcFiles 删没有 DB 行指向的文件、留下有行指向的', () => {
     const path = './data/round7-gc.test.db';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
     const filesDir = resolve('./data/round7-gc-files');
     const resultsDir = resolve('./data/round7-gc-results');
     for (const directory of [filesDir, resultsDir]) { rmSync(directory, { recursive: true, force: true }); mkdirSync(directory, { recursive: true }); }
@@ -205,7 +205,7 @@ describe('I-09 · 孤儿 blob 真的被清理', () => {
       VALUES ('a1',1,'c','photo','f','u',?, 'done','skipped',1)`).run(kept);
     db.prepare(`INSERT INTO agent_runs(id,turn_id,kind,agent_name,model_alias,effective_role,state,result_full_ref,started_at,finished_at)
       VALUES ('r1','t1','sub','a','main','owner','done',?,1,1)`).run(keptResult);
-    const maintenance = new MaintenanceService(db, path, 2, 30, './data/round7-gc-logs', { files: filesDir, agentResults: resultsDir });
+    const maintenance = new MaintenanceService(db, path, 2, 30, { files: filesDir, agentResults: resultsDir });
     // 旧实现：这个端点直接返回 not_implemented，两棵目录只涨不落。
     expect(maintenance.gcFiles()).toMatchObject({ files: 1, agentResults: 1, fileBytes: 20 });
     expect(maintenance.gcFiles()).toMatchObject({ files: 0, agentResults: 0 });
@@ -227,13 +227,13 @@ describe('I-09 · 孤儿 blob 真的被清理', () => {
    */
   it('库里一条带路径的行都没有、而目录里有文件时拒绝清理', () => {
     const path = './data/round7-gc-mismatch.test.db';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
     const filesDir = resolve('./data/round7-gc-mismatch-files');
     rmSync(filesDir, { recursive: true, force: true });
     mkdirSync(filesDir, { recursive: true });
     writeFileSync(resolve(filesDir, 'someone-elses.jpg'), 'x'.repeat(64));
     const db = openDatabase(path); migrateDatabase(db);
-    const maintenance = new MaintenanceService(db, path, 2, 30, './data/round7-gc-mismatch-logs', { files: filesDir });
+    const maintenance = new MaintenanceService(db, path, 2, 30, { files: filesDir });
     const result = maintenance.gcFiles();
     expect(result.files).toBe(0);
     expect(result.refused).toHaveLength(1);

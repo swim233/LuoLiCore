@@ -236,6 +236,10 @@ export const HOT_RELOADABLE_CONFIG_KEYS = [
   "alerts",
   "logs.level",
   "logs.captureBodies",
+  // `logs.compress` 只决定**此后**写入的行怎么存（编码方式逐行记在 `data_codec` 上，
+  // 旧行照读），所以它热更新是安全的：`OperationsRepository.compressLogPayloads` 每次
+  // `config.changed` 后整体替换一次即可。
+  "logs.compress",
   "logs.redactPatterns",
   // mcp 整段曾列于此，但 `mcp.healthCheckCron` 由 `scheduler.add(config.mcp.healthCheckCron, …)`
   // 在启动时取走，Scheduler 也没有重配入口 —— 整段标注热更新等于对该项作出错误陈述（docs/20 · W-CFG-02）。
@@ -950,12 +954,12 @@ export const configSchema = z
     logs: z
       .object({
         level: z.enum(["debug", "info", "warn", "error"]).default("info"),
-        dir: z.string().default("./logs"),
+        // 日志的唯一落点，独立于 `db.path`（docs/10 §3）。主库有 `VACUUM INTO` 备份与定期
+        // VACUUM 两处整库重写，把载荷并进去等于每次迁移复制一遍。
+        dbPath: z.string().default("./data/logs.db"),
         captureBodies: z.boolean().default(true),
-        bodyMaxBytes: z.number().int().positive().default(262_144),
-        maxFileMb: z.number().positive().default(128),
+        compress: z.boolean().default(true),
         retentionDays: z.number().int().nonnegative().default(30),
-        gzipAfterDays: z.number().int().nonnegative().default(3),
         console: z.enum(["pretty", "json", "off"]).default("pretty"),
         redactPatterns: z.array(z.string()).default([]),
       })

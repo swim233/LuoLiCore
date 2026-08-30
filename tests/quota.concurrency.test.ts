@@ -5,7 +5,7 @@ import { closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
 
 function setup() {
   const path = './data/quota-concurrency.test.db';
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
   const db = openDatabase(path);
   migrateDatabase(db);
   return { db, quota: new QuotaGuard(db, 'UTC') };

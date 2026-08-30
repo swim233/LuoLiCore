@@ -185,7 +185,7 @@ describe('R8-SKILL-01 · skill 的 allowed-tools 收窄不到核心工具集', (
 
   it('未声明 allowed-tools 的 skill 交回 narrows:false，不该被并进允许集', () => {
     const path = './data/round8-skills.test.db';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
     const directory = resolve('data/round8-skills');
     rmSync(directory, { recursive: true, force: true });
     for (const [name, frontmatter] of [['narrow', 'allowed-tools: [read_file]\n'], ['open', '']] as const) {
@@ -323,7 +323,7 @@ describe('R8-EXEC-01 · python 落成临时文件再跑', () => {
 describe('R8-ARCH-01 · read_messages 要能往前翻，search_messages 要能过滤', () => {
   function archive(): { db: ReturnType<typeof openDatabase>; scoped: ReturnType<ArchiveRepository['scope']> } {
     const path = './data/round8-archive.test.db';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
     const db = openDatabase(path); migrateDatabase(db);
     const scoped = new ArchiveRepository(db).scope('c', null);
     // Telegram 编号刻意与归档 id 错开：两者相等时，回复标记是否正确转换这条断言测不到任何东西。

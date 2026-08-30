@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { ArchiveRepository, OperationsRepository, PrincipalRepository, ScheduleRepository, closeDatabase, migrateDatabase, openDatabase, type ScheduledJob } from '@luoli/db';
 import { ContextEngine, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceService, ProviderStore, Secrets, configSchema } from '@luoli/core';
 import { createServer } from '@luoli/server';
+import { lastLogPayload, logRows } from './support/logs.js';
 
 /**
  * 定时任务的 WebUI 面板（docs/21 · `G-API-16`）。此前运维在界面上既看不到部署里有哪些任务在排、
@@ -14,14 +15,14 @@ import { createServer } from '@luoli/server';
  */
 function harness(name: string, extra: Record<string, unknown> = {}, wired = true) {
   const path = `./data/${name}.test.db`;
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
   const logDir = `./data/${name}-logs`; rmSync(logDir, { recursive: true, force: true }); mkdirSync(logDir, { recursive: true });
   const db = openDatabase(path); migrateDatabase(db);
   const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, general: { timezone: 'UTC' },
     webui: { passwordHash: '$argon2id$v=19$m=65536,t=3,p=4$x$x' }, logs: { dir: logDir }, ...extra });
   const operations = new OperationsRepository(db);
   const events = new EventBus();
-  const log = new LogSink(operations, logDir, [], { console: 'off' });
+  const log = new LogSink(operations, [], { console: 'off' });
   const archive = new ArchiveRepository(db);
   const principals = new PrincipalRepository(db);
   const jobs = new ScheduleRepository(db);
@@ -46,7 +47,7 @@ function harness(name: string, extra: Record<string, unknown> = {}, wired = true
   principals.upsertSeen({ id: 'chat:-100200', kind: 'chat', tgId: '-100200', role: 'trusted', displayName: '开发组', username: null, chatType: 'supergroup' });
   const app = createServer({ config, db, operations, principals, archive, context: new ContextEngine(db, archive),
     providers: new ProviderStore(db, new Secrets('x'.repeat(32))), approvals: new DatabaseApprovalBroker(db, config, events, log),
-    maintenance: new MaintenanceService(db, path, 2, 30, logDir), events, log,
+    maintenance: new MaintenanceService(db, path, 2, 30), events, log,
     ...(wired ? { schedules: { jobs, runner } } : {}), configSchema: {}, startedAt: Date.now(), setup: undefined });
   const session = operations.createSession(1);
   return { app, db, jobs, runner, registered, registerCalls, fired,
@@ -190,7 +191,7 @@ describe('定时任务面板端点', () => {
     // 修改后必须重新排期：遗漏时在 WebUI 把 cron 从 08:00 改成 09:00，调度器上排的仍是 08:00。
     // 改完仍在 registered 中是恒真的（创建时已 add），此处要断言的是重排次数。
     expect(h.registerCalls.filter((id) => id === created.id)).toHaveLength(2);
-    const logged = h.db.prepare("SELECT data_json AS data FROM log_events WHERE kind='schedule.updated' ORDER BY id DESC LIMIT 1").get() as { data: string };
+    const logged = { data: lastLogPayload(h.db, 'schedule.updated') };
     const payload = JSON.parse(logged.data) as { actor: string; name: string; changed: string[] };
     expect(payload).toMatchObject({ actor: 'webui', job: created.id, name: '早间简报' });
     expect([...payload.changed].sort()).toEqual(['cron', 'name', 'silent', 'text']);
@@ -233,10 +234,10 @@ describe('定时任务面板端点', () => {
     expect(await body(await h.app.request(`/api/schedules/${stopped.id}/purge`, { method: 'POST', headers: h.headers }))).toEqual({ removed: true, name: '早报', wasActive: false });
     expect(h.jobs.listAll()).toEqual([]);
     // 硬删一条 active 任务后，bot 停止提醒在库中不留痕迹，这两条 warn 是唯一凭据。
-    const events = h.db.prepare("SELECT level,data_json AS data FROM log_events WHERE kind='schedule.purged' ORDER BY id").all() as Array<{ level: string; data: string }>;
+    const events = logRows(h.db, 'schedule.purged');
     expect(events.map((row) => row.level)).toEqual(['warn', 'warn']);
-    expect(JSON.parse(events[0]!.data)).toMatchObject({ job: alive.id, name: '周报', state: 'active', wasActive: true, actor: 'webui' });
-    expect(JSON.parse(events[1]!.data)).toMatchObject({ state: 'cancelled', wasActive: false });
+    expect(JSON.parse(events[0]!.data!)).toMatchObject({ job: alive.id, name: '周报', state: 'active', wasActive: true, actor: 'webui' });
+    expect(JSON.parse(events[1]!.data!)).toMatchObject({ state: 'cancelled', wasActive: false });
     expect((await h.app.request('/api/schedules/nope/purge', { method: 'POST', headers: h.headers })).status).toBe(404);
     h.close();
   });
@@ -295,7 +296,7 @@ describe('定时任务面板端点', () => {
     expect(started).toMatchObject({ started: true, mode: 'agent' });
     expect(h.fired).toEqual([created.id]);
     // 手动触发要落一条 schedule.fired（带 manual:true），否则无法追溯触发人与触发时刻。
-    const logged = h.db.prepare("SELECT data_json AS data FROM log_events WHERE kind='schedule.fired' ORDER BY id DESC LIMIT 1").get() as { data: string };
+    const logged = { data: lastLogPayload(h.db, 'schedule.fired') };
     expect(JSON.parse(logged.data)).toMatchObject({ actor: 'webui', manual: true });
     h.jobs.finish(created.id, 'cancelled');
     expect((await h.app.request(`/api/schedules/${created.id}/trigger`, { method: 'POST', headers: h.headers })).status).toBe(409);

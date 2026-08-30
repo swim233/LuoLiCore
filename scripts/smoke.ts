@@ -9,10 +9,13 @@ import {
 import { ContextEngine, configSchema } from "@luoli/core";
 
 const path = "./data/smoke.db";
-for (const suffix of ["", "-wal", "-shm"])
+// 日志库是与主库并列的第二个文件，清库要连它一起清 —— 漏掉的表现是冒烟不再从空日志库开始，
+// 而那三个文件跨次累积。后缀照 `tests/` 里那套 `-logs` 约定，名字则显式传给 `migrateDatabase`
+// 而不是吃它的默认值（默认值恰好也是这个，但生产侧靠它就会与 `logs.dbPath` 分叉）。
+for (const suffix of ["", "-wal", "-shm", "-logs", "-logs-wal", "-logs-shm"])
   rmSync(`${path}${suffix}`, { force: true });
 const db = openDatabase(path);
-migrateDatabase(db);
+migrateDatabase(db, undefined, { path: `${path}-logs` });
 const archive = new ArchiveRepository(db);
 const engine = new ContextEngine(db, archive);
 // 使用 `configSchema.parse` 而不是手写 `as never`：手写版本在每新增一处配置读取时都会在此处得到

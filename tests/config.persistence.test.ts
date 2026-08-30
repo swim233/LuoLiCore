@@ -8,7 +8,7 @@ const MISSING_FILE = './config/__no-such-config.yaml';
 
 function database(name: string) {
   const path = `./data/${name}.test.db`;
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
   const db = openDatabase(path);
   migrateDatabase(db);
   return { db, path };
@@ -26,7 +26,7 @@ describe('配置持久化往返', () => {
 
   it('0005 迁移把历史遗留的 perChat.modelAlias / plugin 键搬出 config_kv', () => {
     const path = './data/config-persistence-migrate.test.db';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
     const db = openDatabase(path);
     // 先迁到 0004，写入旧格式，再迁到最新，模拟已在运行的实例升级。
     migrateDatabase(db, 'packages/db/migrations');

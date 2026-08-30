@@ -8,6 +8,11 @@ import {
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  LOG_SCHEMA,
+  attachLogDatabase,
+  importLegacyLogEvents,
+} from "./logs.js";
 
 export type Sqlite = Database.Database;
 
@@ -25,10 +30,30 @@ export function openDatabase(path: string): Sqlite {
   return db;
 }
 
+/** 日志库的位置与搬迁参数。默认值只服务于测试与 CLI —— 生产由 `logs.dbPath` 指定。 */
+export interface LogStoreOptions {
+  /** 默认从主库路径派生，使两者在同一目录里成对出现（也让测试的清理循环能一并扫到）。 */
+  path?: string;
+  /** 存量 `logs/<day>/blobs/*.json` 的所在目录，搬迁时解引用用。 */
+  legacyDir?: string;
+  compress?: boolean;
+}
+
+/**
+ * 第三个参数是日志库。四件事的**顺序不能动**（docs/10 §3）：
+ * ① 先把 `logs.db` 建好、迁移、ATTACH 上来；② 照常做迁移前那份整库备份；③ 把主库里的存量
+ * `log_events` 搬过去；④ 最后才应用主库迁移 —— `0017` 会删掉主库那张表，跑在搬迁之前就是
+ * 把存量日志直接删了。而不删又不行：它只要还在就会按 main 优先的解析顺序一直遮住附加库那张。
+ *
+ * ② 排在 ③ 前面是有意的：那份备份的语义是「动手之前的快照」，而搬迁**就是动手** ——
+ * 排在它后面的话，一次搬坏了的结果会被原样备份下来，那份文件也就不再是退路。
+ */
 export function migrateDatabase(
   db: Sqlite,
   migrationsDir = fileURLToPath(new URL("../migrations", import.meta.url)),
+  logs: LogStoreOptions = {},
 ): void {
+  attachLogDatabase(db, logs.path ?? `${db.name}-logs`);
   db.exec(
     "CREATE TABLE IF NOT EXISTS __drizzle_migrations (name TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)",
   );
@@ -58,6 +83,15 @@ export function migrateDatabase(
       chmodSync(path, 0o600);
     }
   }
+  const moved = importLegacyLogEvents(
+    db,
+    logs.legacyDir ?? "./logs",
+    logs.compress ?? true,
+  );
+  // 搬完 VACUUM 一次主库。`DROP TABLE` 只把页标成空闲，文件一个字节都不会小 ——
+  // 实测 `log_events` 占了 88 MB 主库的 70%，不收的话运维会看到「日志搬走了而主库没变小」，
+  // 而下一次 `maintenance.vacuumCron` 可能是六天以后。只在真搬过东西时做，一个部署就一次。
+  if (moved && moved.rows > 0) db.exec("VACUUM");
   for (const name of pending) {
     const sql = readFileSync(join(migrationsDir, name), "utf8");
     db.transaction(() => {
@@ -127,6 +161,17 @@ export function recoverAfterCrash(db: Sqlite): CrashRecovery {
 }
 
 export function closeDatabase(db: Sqlite): void {
+  // 不带库名的 checkpoint 按文档覆盖全部附加库，但这里写明是为了让「日志库也要收尾」这件事
+  // 在读代码时看得见 —— 它是一个独立文件，漏掉的表现是关停后留下一个不断长大的 logs.db-wal。
+  //
+  // 要先判它挂没挂：`openDatabase` 单独用而不跑 `migrateDatabase` 是合法的（只读连接就这么开），
+  // 那种连接上 `PRAGMA logs.…` 会抛 `unknown database logs`，把「关个库」变成关停路径上的异常。
   db.pragma("wal_checkpoint(TRUNCATE)");
+  if (
+    (db.pragma("database_list") as Array<{ name: string }>).some(
+      (row) => row.name === LOG_SCHEMA,
+    )
+  )
+    db.pragma(`${LOG_SCHEMA}.wal_checkpoint(TRUNCATE)`);
   db.close();
 }

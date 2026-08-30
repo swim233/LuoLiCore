@@ -60,6 +60,9 @@ export const ENV_PINNED_CONFIG_KEYS = [
   { key: "db.path", env: "LUOLI_DATA_DIR", appliedIn: "loadConfig" },
   // 媒体目录跟随数据目录，否则数据库与附件会分属两套部署，而 `gcFiles()` 判定孤儿只看数据库（docs/25 §10）。
   { key: "media.dir", env: "LUOLI_DATA_DIR", appliedIn: "loadConfig" },
+  // 日志库同理。它不像媒体那样会被误删，但不跟随的后果是**读到另一套部署的日志**：
+  // 主库搬走了而 `logs.dbPath` 还停在相对 cwd 的默认值上，两个实例就会往同一个文件里写。
+  { key: "logs.dbPath", env: "LUOLI_DATA_DIR", appliedIn: "loadConfig" },
   {
     key: "access.bootstrapOwnerId",
     env: "LUOLI_OWNER_ID",
@@ -172,6 +175,8 @@ export async function loadConfig(
     // 正是数据库中是否有行指向它，于是它会把 B 中的用户数据全部当作孤儿删除。
     // 第七轮验证过程中曾因此删除 76 个附件和 90 份子 agent 全文（docs/25 §10）。
     envLayer.media = { dir: resolve(process.env.LUOLI_DATA_DIR, "files") };
+    // 日志库同样跟随，理由见 `ENV_PINNED_CONFIG_KEYS` 里那一条。
+    envLayer.logs = { dbPath: resolve(process.env.LUOLI_DATA_DIR, "logs.db") };
   }
   if (process.env.LUOLI_OWNER_ID)
     envLayer.access = { bootstrapOwnerId: process.env.LUOLI_OWNER_ID };

@@ -7,7 +7,7 @@ import { closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
 describe('skills and subagents', () => {
   it('only exposes skill metadata and intersects allowed tools', () => {
     const dbPath = './data/skills.test.db';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${dbPath}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${dbPath}${suffix}`, { force: true });
     const root = resolve('data/skills-fixture');
     rmSync(root, { recursive: true, force: true });
     mkdirSync(`${root}/report`, { recursive: true });
@@ -25,7 +25,7 @@ describe('skills and subagents', () => {
 
   it('keeps subagent role at or below its parent', () => {
     const dbPath = './data/agents.test.db';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${dbPath}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${dbPath}${suffix}`, { force: true });
     const db = openDatabase(dbPath);
     migrateDatabase(db);
     db.prepare("INSERT INTO turns(id,key,chat_id,initiator_user_id,effective_role,state) VALUES ('t','chat:1','1','1','trusted','running')").run();

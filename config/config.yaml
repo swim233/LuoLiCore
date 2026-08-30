@@ -144,8 +144,9 @@ db:
   path: ./data/luoli.db
 logs:
   level: info
-  dir: ./logs
+  dbPath: ./data/logs.db
   captureBodies: true
+  compress: true
 quota:
   enabled: true
   requirePricing: true

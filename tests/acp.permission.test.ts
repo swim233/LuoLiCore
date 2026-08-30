@@ -43,14 +43,14 @@ const pending = (): ApprovalRow[] => rows().filter((row) => row.state === 'pendi
  * 而该结论只有在这个开关开着时才成立。
  */
 function harness(options: { permissionMode?: 'ask' | 'auto' | 'deny'; channel?: boolean; ttlMs?: number } = {}) {
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${DB_PATH}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${DB_PATH}${suffix}`, { force: true });
   db = openDatabase(DB_PATH);
   migrateDatabase(db);
   const config = configSchema.parse({ access: { bootstrapOwnerId: '1' },
     approval: { enabled: true, skipForOwner: true, ttlMs: options.ttlMs ?? 10_000, rules: [] },
     agent: { acp: { enabled: true, allowedDirs: [realpathSync(ROOT)], permissionMode: options.permissionMode ?? 'ask',
       agents: [{ name: 'fixture', command: FIXTURE, profile: '', tools: [], handshakeTimeoutMs: 4000, timeoutMs: 8000 }] } } });
-  const log = new LogSink(new OperationsRepository(db), './data/acp-perm-logs');
+  const log = new LogSink(new OperationsRepository(db));
   const bus = new EventBus();
   // 确实挂一条裁决通道（WebUI 的 SSE）：不挂时走的是两条通道都没有即当场拒绝那一支，
   // 测到的就不是这些用例的目标。

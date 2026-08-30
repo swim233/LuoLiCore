@@ -18,11 +18,11 @@ import type { ArchivedMessage } from '@luoli/db';
 
 function harness(name: string, patch: Partial<Config> = {}) {
   const path = `./data/${name}.test.db`;
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
   const db = openDatabase(path);
   migrateDatabase(db);
   const archive = new ArchiveRepository(db);
-  const log = new LogSink(new OperationsRepository(db), `./data/${name}-logs`);
+  const log = new LogSink(new OperationsRepository(db));
   const engine = new ContextEngine(db, archive, log);
   const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, general: { timezone: 'UTC' },
     context: { scope: 'chat', background: { enabled: true, maxPerTurn: 20 } }, ...patch });

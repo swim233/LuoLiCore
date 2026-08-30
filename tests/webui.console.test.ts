@@ -6,16 +6,14 @@ import { createServer } from '@luoli/server';
 
 function harness(name: string, extra: Record<string, unknown> = {}) {
   const path = `./data/${name}.test.db`;
-  for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+  for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
   // 日志目录按用例分开：对话详情要解引用 logs/<day>/blobs/*.json，上一次跑剩下的 blob 会串进来。
-  const logDir = `./data/${name}-logs`;
-  rmSync(logDir, { force: true, recursive: true });
   const db = openDatabase(path);
   migrateDatabase(db);
-  const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, webui: { passwordHash: '$argon2id$v=19$m=65536,t=3,p=4$invalid$invalid' }, tools: { overrides: { bash: { enabled: false } } }, logs: { dir: logDir }, ...extra });
+  const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, webui: { passwordHash: '$argon2id$v=19$m=65536,t=3,p=4$invalid$invalid' }, tools: { overrides: { bash: { enabled: false } } }, ...extra });
   const operations = new OperationsRepository(db);
   const events = new EventBus();
-  const log = new LogSink(operations, logDir, [], { bodyMaxBytes: config.logs.bodyMaxBytes });
+  const log = new LogSink(operations, [], { console: 'off' });
   const archive = new ArchiveRepository(db);
   const principals = new PrincipalRepository(db);
   const app = createServer({ config, db, operations, principals, archive, context: new ContextEngine(db, archive),
@@ -107,23 +105,22 @@ describe('console endpoints', () => {
   });
 
   it('serves the JSON that was actually sent upstream for one turn, blobs included', async () => {
-    const { app, db, log, headers } = harness('turn-detail', { logs: { dir: './data/turn-detail-logs', bodyMaxBytes: 512 } });
+    const { app, db, log, headers } = harness('turn-detail');
     db.prepare(`INSERT INTO turns(id,key,chat_id,initiator_user_id,effective_role,trigger_reason,state,started_at,finished_at,steps,model_calls,tool_calls,input_tokens,output_tokens,cost_usd)
       VALUES ('turn-x','chat:c1','c1','7','trusted','wakeword','committed',1000,3400,2,2,1,900,120,0.02)`).run();
     log.event({ level: 'info', kind: 'tool.call', summary: 'read_file', traceId: 'turn-x', data: { input: { path: 'a.md' } } });
     log.event({ level: 'info', kind: 'model.call', summary: 'openai/gpt', traceId: 'turn-x', durationMs: 1200, data: { request: { body: { model: 'gpt', input: 'hi' } } } });
-    // 超过 bodyMaxBytes 的 data 被 LogSink 挪进 blobs/，库里只剩 {fileRef,bytes} —— 不解引用的话详情里就没有请求体。
+    // 压过的载荷（默认阈值以上一律 zstd）读出侧要按 data_codec 解开 —— 不解的话详情里就没有请求体。
     log.event({ level: 'info', kind: 'model.call', summary: 'openai/gpt big', traceId: 'turn-x', data: { request: { body: { model: 'gpt', input: 'x'.repeat(4000) } } } });
     log.event({ level: 'info', kind: 'model.call', summary: 'openai/gpt huge', traceId: 'turn-x', data: { request: { body: { input: 'y'.repeat(200_000) } } } });
     log.event({ level: 'info', kind: 'model.call', summary: '别的轮次', traceId: 'turn-y', data: { request: { body: {} } } });
-    interface DetailEvent { id: number; kind: string; text: string | null; bytes: number; truncated: boolean; fileRef: string | null }
+    interface DetailEvent { id: number; kind: string; text: string | null; bytes: number; truncated: boolean }
     const detail = await body<{ turn: { id: string; costUsd: number }; captureBodies: boolean; events: DetailEvent[] }>(await app.request('/api/turns/turn-x/detail', { headers }));
     expect(detail.turn).toMatchObject({ id: 'turn-x', costUsd: 0.02 });
     expect(detail.captureBodies).toBe(true);
     expect(detail.events.map((entry) => entry.kind)).toEqual(['tool.call', 'model.call', 'model.call', 'model.call']);
     expect(JSON.parse(detail.events[1]!.text!)).toMatchObject({ request: { body: { model: 'gpt', input: 'hi' } } });
     const big = detail.events[2]!;
-    expect(big.fileRef).toMatch(/blobs\//);
     expect((JSON.parse(big.text!) as { request: { body: { input: string } } }).request.body.input).toHaveLength(4000);
     // 20 万字符的请求体不能整段塞给浏览器：截断并标出来，完整那份走原始端点。
     const huge = detail.events[3]!;
@@ -172,30 +169,28 @@ describe('console endpoints', () => {
   });
 
   it('serves one log event with its payload, and keeps the sibling log routes reachable', async () => {
-    const { app, db, log, headers } = harness('log-detail', { logs: { dir: './data/log-detail-logs', bodyMaxBytes: 512 } });
+    const { app, db, log, headers } = harness('log-detail');
     log.event({ level: 'warn', kind: 'tool.call', summary: 'bash', traceId: 'turn-z', chatId: 'c1', userId: '7', key: 'chat:c1', durationMs: 42,
       data: { input: { command: 'ls' }, error: 'exit 1' } });
     const plainId = log.event({ level: 'info', kind: 'system.start', summary: '启动' });
     const bigId = log.event({ level: 'info', kind: 'model.call', summary: 'big', data: { body: 'x'.repeat(4000) } });
-    interface Detail { id: number; kind: string; level: string; traceId: string | null; chatId: string | null; key: string | null; durationMs: number | null; text: string | null; bytes: number; fileRef: string | null }
+    interface Detail { id: number; kind: string; level: string; traceId: string | null; chatId: string | null; key: string | null; durationMs: number | null; text: string | null; bytes: number }
     const first = await body<Detail>(await app.request('/api/logs/1', { headers }));
     expect(first).toMatchObject({ kind: 'tool.call', level: 'warn', traceId: 'turn-z', chatId: 'c1', key: 'chat:c1', durationMs: 42 });
     expect(JSON.parse(first.text!)).toEqual({ input: { command: 'ls' }, error: 'exit 1' });
     // 没有 trace、没有载荷的那些行以前点了什么都不发生；现在也要能取回来。
     const bare = await body<Detail>(await app.request(`/api/logs/${plainId}`, { headers }));
     expect(bare).toMatchObject({ kind: 'system.start', traceId: null, text: null, bytes: 0 });
-    // blob 解引用跟对话详情共用同一套语义。
+    // 解码跟对话详情共用同一套语义：压过的行照样给出完整正文。
     const big = await body<Detail>(await app.request(`/api/logs/${bigId}`, { headers }));
-    expect(big.fileRef).toMatch(/blobs\//);
     expect((JSON.parse(big.text!) as { body: string }).body).toHaveLength(4000);
     expect((await app.request('/api/logs/999999', { headers })).status).toBe(404);
-    // `:id` 注册在 blob / trace 之后，且非数字直接 404 —— 否则这两条会被 Number('blob')=NaN 吃掉。
+    // `:id` 注册在 trace 之后，且非数字直接 404 —— 否则那一条会被 Number('trace')=NaN 吃掉。
     expect((await app.request('/api/logs/nope', { headers })).status).toBe(404);
-    expect((await app.request('/api/logs/blob?ref=missing.json', { headers })).status).toBe(404);
     expect((await app.request('/api/logs/trace/turn-z', { headers })).status).toBe(200);
-    // 列表只给摘要与载荷字节数：一条 model.call 的 data 能到 bodyMaxBytes，列表一次上千行。
+    // 列表只给摘要与载荷字节数：一条 model.call 的载荷实测均 29 KB、且没有上限，列表一次上千行。
     const list = await body<Array<Record<string, unknown>>>(await app.request('/api/logs', { headers }));
-    expect(list.every((row) => !('data_json' in row))).toBe(true);
+    expect(list.every((row) => !('data' in row) && !('data_codec' in row))).toBe(true);
     expect(list.find((row) => row.id === bigId)!.data_bytes).toBeGreaterThan(0);
     expect(list.find((row) => row.id === plainId)!.data_bytes).toBe(0);
     closeDatabase(db);

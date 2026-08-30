@@ -8,7 +8,7 @@ const config = configSchema.parse({ general: { timezone: 'UTC' }, context: { sco
 describe('context reset races and token accounting', () => {
   it('inserts a reset note for a turn whose base was reset while running', async () => {
     const path = './data/context-reset-race.test.db';
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+    for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
     const db = openDatabase(path);
     migrateDatabase(db);
     const archive = new ArchiveRepository(db);
