@@ -1,13 +1,14 @@
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
+import { ref } from "vue";
 import { RouterView } from "vue-router";
+import AmbientField from "./components/AmbientField.vue";
 import ToastHost from "./ui/ToastHost.vue";
 import ConfirmHost from "./ui/ConfirmHost.vue";
 
-const dark = ref(matchMedia("(prefers-color-scheme: dark)").matches);
+const dark = ref(true);
 const apply = (): void =>
   document.documentElement.classList.toggle("dark", dark.value);
-onMounted(apply);
+apply();
 function toggleTheme(): void {
   dark.value = !dark.value;
   apply();
@@ -15,6 +16,7 @@ function toggleTheme(): void {
 </script>
 
 <template>
+  <AmbientField />
   <button
     class="theme-toggle"
     type="button"
