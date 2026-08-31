@@ -393,84 +393,94 @@ watch(() => props.tick, refresh);
       />还没有任何会话上下文。任务须绑定 bot 至少响应过一次的会话。
     </p>
     <DataGrid
+      class="work-table work-table-schedules"
       :rows="schedules.jobs"
       :columns="SCHEDULE_COLUMNS"
       data-key="id"
       paginate
       empty="暂无"
     >
-      <template #name="{ data }"
-        ><div class="alias-name">
+      <template #name="{ data }">
+        <div class="work-cell-stack">
+          <div class="alias-name">
           <b>{{ data.name }}</b>
+          </div>
+          <small class="hit-text">{{ data.payload }}</small>
         </div>
-        <small class="hit-text">{{ data.payload }}</small></template
-      >
-      <template #chatLabel="{ data }"
-        ><span>{{ data.chatLabel ?? data.chatId }}</span
-        ><small class="alias-empty"
-          >创建者 {{ data.creatorLabel ?? data.createdBy }}</small
-        ></template
-      >
-      <template #mode="{ data }"
-        ><UiTag
-          :value="data.mode"
-          :severity="data.mode === 'agent' ? 'warn' : 'secondary'"
-          :title="
-            data.mode === 'agent'
-              ? '每次触发一轮真实模型调用'
-              : '只发预写文本，不调模型'
-          " /><UiTag
-          v-if="data.silent"
-          value="静默"
-          severity="secondary"
-          title="无内容可发时不投递，正文仍进上下文"
-      /></template>
-      <template #trigger="{ data }"
-        ><code v-if="data.cron">{{ data.cron }}</code
-        ><span v-else>{{ new Date(data.at).toLocaleString() }}</span
-        ><small class="alias-empty"
-          >{{ data.timezone }}{{ data.cron ? "" : " · 一次性" }}</small
-        ></template
-      >
-      <template #nextRun="{ data }"
-        ><span v-if="data.nextRun">{{
-          new Date(data.nextRun).toLocaleString()
-        }}</span
-        ><small v-else class="alias-empty">不再触发</small></template
-      >
-      <template #last="{ data }">
-        <template v-if="data.lastRunAt">
+      </template>
+      <template #chatLabel="{ data }">
+        <span class="work-cell-stack">
+          <span>{{ data.chatLabel ?? data.chatId }}</span>
+          <small class="alias-empty">创建者 {{ data.creatorLabel ?? data.createdBy }}</small>
+        </span>
+      </template>
+      <template #mode="{ data }">
+        <span class="work-cell-tags">
           <UiTag
-            :value="
-              (
-                SCHEDULE_RUN_STATES[data.lastState ?? ''] ?? {
-                  label: data.lastState ?? '—',
-                }
-              ).label
-            "
-            :severity="
-              (
-                SCHEDULE_RUN_STATES[data.lastState ?? ''] ?? {
-                  severity: 'secondary',
-                }
-              ).severity
+            :value="data.mode"
+            :severity="data.mode === 'agent' ? 'warn' : 'secondary'"
+            :title="
+              data.mode === 'agent'
+                ? '每次触发一轮真实模型调用'
+                : '只发预写文本，不调模型'
             "
           />
-          <small class="alias-empty"
-            >{{ new Date(data.lastRunAt).toLocaleString() }} · 共
-            {{ data.runCount }} 次</small
+          <UiTag
+            v-if="data.silent"
+            value="静默"
+            severity="secondary"
+            title="无内容可发时不投递，正文仍进上下文"
+          />
+        </span>
+      </template>
+      <template #trigger="{ data }">
+        <span class="work-cell-stack">
+          <code v-if="data.cron">{{ data.cron }}</code>
+          <span v-else>{{ new Date(data.at).toLocaleString() }}</span>
+          <small class="alias-empty">{{ data.timezone }}{{ data.cron ? "" : " · 一次性" }}</small>
+        </span>
+      </template>
+      <template #nextRun="{ data }">
+        <span class="work-cell-stack">
+          <span v-if="data.nextRun">{{ new Date(data.nextRun).toLocaleString() }}</span>
+          <small v-else class="alias-empty">不再触发</small>
+        </span>
+      </template>
+      <template #last="{ data }">
+        <span class="work-cell-stack">
+          <template v-if="data.lastRunAt">
+            <UiTag
+              :value="
+                (
+                  SCHEDULE_RUN_STATES[data.lastState ?? ''] ?? {
+                    label: data.lastState ?? '—',
+                  }
+                ).label
+              "
+              :severity="
+                (
+                  SCHEDULE_RUN_STATES[data.lastState ?? ''] ?? {
+                    severity: 'secondary',
+                  }
+                ).severity
+              "
+            />
+            <small class="alias-empty"
+              >{{ new Date(data.lastRunAt).toLocaleString() }} · 共
+              {{ data.runCount }} 次</small
+            >
+            <small v-if="data.lastError" class="detail-truncated">{{
+              data.lastError
+            }}</small>
+          </template>
+          <small v-else class="alias-empty">尚未执行过</small>
+          <!-- 连续静默：这条任务可能已经变成一台只烧钱不说话的定时器，界面上要一直说着。 -->
+          <small
+            v-if="(data.silentStreak ?? 0) >= SILENT_STREAK_WARN"
+            class="detail-truncated"
+            >已连续 {{ data.silentStreak }} 次未发出消息</small
           >
-          <small v-if="data.lastError" class="detail-truncated">{{
-            data.lastError
-          }}</small>
-        </template>
-        <small v-else class="alias-empty">尚未执行过</small>
-        <!-- 连续静默：这条任务可能已经变成一台只烧钱不说话的定时器，界面上要一直说着。 -->
-        <small
-          v-if="(data.silentStreak ?? 0) >= SILENT_STREAK_WARN"
-          class="detail-truncated"
-          >已连续 {{ data.silentStreak }} 次未发出消息</small
-        >
+        </span>
       </template>
       <template #state="{ data }"
         ><UiTag

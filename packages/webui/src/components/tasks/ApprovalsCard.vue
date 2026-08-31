@@ -112,16 +112,19 @@ watch(
       <code>approval.rules</code> 中添加。
     </p>
     <DataGrid
+      class="work-table work-table-approvals"
       :rows="rows"
       :columns="APPROVAL_COLUMNS"
       data-key="id"
       :loading="loading"
       empty="暂无"
     >
-      <template #tool_name="{ data }"
-        ><code>{{ data.tool_name }}</code
-        ><small class="hit-text">{{ data.input_json }}</small></template
-      >
+      <template #tool_name="{ data }">
+        <span class="work-cell-stack">
+          <code>{{ data.tool_name }}</code>
+          <small class="hit-text">{{ data.input_json }}</small>
+        </span>
+      </template>
       <template #risk="{ data }"
         ><UiTag
           :value="String(data.risk)"
@@ -146,9 +149,9 @@ watch(
                   : 'secondary'
           "
       /></template>
-      <template #requested_at="{ data }">{{
-        new Date(Number(data.requested_at)).toLocaleString()
-      }}</template>
+      <template #requested_at="{ data }">
+        <time>{{ new Date(Number(data.requested_at)).toLocaleString() }}</time>
+      </template>
       <template #actions="{ data }"
         ><div v-if="data.state === 'pending'" class="section-actions">
           <UiButton

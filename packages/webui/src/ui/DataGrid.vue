@@ -126,6 +126,7 @@ function toggleAll(): void {
             <td
               v-for="column in columns"
               :key="column.key"
+              :data-label="column.header"
               :class="{ 'align-right': column.align === 'right' }"
             >
               <slot :name="column.key" :data="row">{{

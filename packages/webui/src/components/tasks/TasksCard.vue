@@ -227,6 +227,7 @@ watch(
       一并终止。点击一行查看详情。
     </p>
     <DataGrid
+      class="work-table work-table-tasks"
       :rows="rows"
       :columns="TASK_COLUMNS"
       data-key="id"
@@ -240,15 +241,15 @@ watch(
           :value="taskState(data.state).label"
           :severity="taskState(data.state).severity"
       /></template>
-      <template #chat="{ data }"
-        ><span>{{ data.chatLabel ?? data.chat_id }}</span
-        ><small class="alias-empty">{{
-          data.userLabel ?? data.user_id
-        }}</small></template
-      >
-      <template #updated_at="{ data }">{{
-        new Date(Number(data.updated_at)).toLocaleString()
-      }}</template>
+      <template #chat="{ data }">
+        <span class="work-cell-stack">
+          <span>{{ data.chatLabel ?? data.chat_id }}</span>
+          <small class="alias-empty">{{ data.userLabel ?? data.user_id }}</small>
+        </span>
+      </template>
+      <template #updated_at="{ data }">
+        <time>{{ new Date(Number(data.updated_at)).toLocaleString() }}</time>
+      </template>
       <!-- 容器上的 `@click.stop` 是必需的：`DataGrid` 的 row-click 挂在 `<tr>` 上（`DataGrid.vue:43`），
            不 stop 就是「点取消的同时弹出详情框」。先例是 Agent 表那个〔试跑〕（`ConsoleView.vue:2286`），
            它也是 clickable + 行内按钮，也带着 stop。 -->

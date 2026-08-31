@@ -165,9 +165,9 @@ export const TASK_COLUMNS: GridColumn[] = [
   { key: "state", header: "状态", width: "7rem" },
   { key: "chat", header: "会话", width: "10rem" },
   { key: "updated_at", header: "更新时间", width: "13rem" },
-  { key: "actions", header: "", width: "7rem" },
+  { key: "actions", header: "操作", width: "7rem" },
 ];
-// `actions` 比原来宽 2rem：这一列从两个按钮变成三个，11rem 会把「编辑」挤到第二行。
+// 三个动作的实测内容宽约 13.4rem；列宽还需包含单元格左右 padding，固定布局下取 15.5rem。
 export const SCHEDULE_COLUMNS: GridColumn[] = [
   { key: "name", header: "任务" },
   { key: "chatLabel", header: "会话" },
@@ -176,14 +176,14 @@ export const SCHEDULE_COLUMNS: GridColumn[] = [
   { key: "nextRun", header: "下一次", width: "12rem" },
   { key: "last", header: "上一次", width: "12rem" },
   { key: "state", header: "状态", width: "6rem" },
-  { key: "actions", header: "", width: "13rem" },
+  { key: "actions", header: "操作", width: "15.5rem" },
 ];
 export const APPROVAL_COLUMNS: GridColumn[] = [
   { key: "tool_name", header: "工具" },
   { key: "risk", header: "风险", width: "7rem" },
   { key: "state", header: "状态", width: "7rem" },
   { key: "requested_at", header: "请求时间", width: "12rem" },
-  { key: "actions", header: "", width: "12rem" },
+  { key: "actions", header: "操作", width: "12rem" },
 ];
 
 /**

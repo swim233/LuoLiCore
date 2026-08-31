@@ -123,6 +123,8 @@ const RESPONSES: Record<string, unknown> = {
       catalog: { source: 'models.dev', match: 'official', providerId: 'xai', modelId: 'grok-4.5', normalized: false, priceRange: null, priceSource: 'official', fetchedAt: 1_787_000_000_000 },
       manual: { vision: false } }),
     price_in: 3, price_out: 15, price_cache_read: null, price_cache_write: null, enabled: 1, sort: 0 }],
+  // 别名路由同时放一段可用模型与一段已删除模型，列表需要保留顺序并明确标出失效段。
+  '/api/aliases': [{ alias: 'main', model_ids_json: JSON.stringify(['m1', 'gone']), settings_json: JSON.stringify({ temperature: .4, reasoning: 'high' }), description: '生产主链' }],
   // 持久容器：一个已钉住、一个正常。行模板中的几个派生值（剩余时间、无 setsid 的提示、
   // 上次使用时间）只有存在数据行时才会渲染，返回 `[]` 时这一块等同未实现。
   '/api/containers': { enabled: true, used: 2, max: 16, containers: [
@@ -428,6 +430,26 @@ describe('ConsoleView 渲染', () => {
     wrapper.unmount();
   });
 
+  it('别名路由使用列表并按纵向轨道保留 fallback 顺序', async () => {
+    const { default: ConsoleView } = await import('../../packages/webui/src/views/ConsoleView.vue');
+    const wrapper = mount(ConsoleView, { attachTo: document.body });
+    await settle(wrapper);
+    (wrapper.vm as unknown as { active: string }).active = 'providers';
+    await settle(wrapper);
+    const list = wrapper.find('.alias-route-list');
+    expect(list.exists()).toBe(true);
+    expect(list.element.tagName).toBe('UL');
+    expect(list.findAll('.alias-route-item')).toHaveLength(6);
+    const main = list.find('[data-alias="main"]');
+    expect(main.findAll('.alias-chain-step').map((node) => node.text())).toEqual(['1', '2']);
+    expect(main.findAll('.alias-chain-model').map((node) => node.text())).toEqual(['p1 / grok-4.5', 'gone']);
+    expect(main.find('.alias-chain-item.missing').text()).toContain('模型记录已删除');
+    expect(main.find('.alias-route-settings').text()).toContain('温度 0.4 · 推理档位 high');
+    expect(list.find('[data-alias="high"] .alias-route-empty').text()).toContain('main → high → low');
+    expect(list.find('table').exists()).toBe(false);
+    wrapper.unmount();
+  });
+
   /**
    * 扩展页的四个分段（docs/09 §3.8）。与设置页那四个 tab 同理：遗漏一个分支，该分段从此
    * 无人渲染。这一页是从 `ConsoleView.vue` 整段抽出的（`ExtensionsPage.vue`），
@@ -564,6 +586,13 @@ describe('ConsoleView 渲染', () => {
       expect(card.exists(), `${name} 没挂上`).toBe(true);
       expect(card.text(), `${name} 一行都没渲染`).toContain(needle);
     }
+    expect(stack.findAll('.work-table').map((grid) => grid.classes().find((name) => name.startsWith('work-table-')))).toEqual([
+      'work-table-tasks', 'work-table-schedules', 'work-table-approvals',
+    ]);
+    // 窄屏用 `data-label` 把每个单元格改排成键值行。列名只存在于 thead 时，移动端会再次只剩裸值。
+    expect(stack.find('.work-table-schedules tbody tr').findAll('td').map((cell) => cell.attributes('data-label'))).toEqual([
+      '任务', '会话', '模式', '触发', '下一次', '上一次', '状态', '操作',
+    ]);
     // 静默那一档：`SCHEDULE_RUN_STATES` 缺少一条它就会原样显示为英文的 `silent`。
     expect(wrapper.findComponent({ name: 'SchedulesCard' }).text()).toContain('静默');
     const rendering = warnings.filter((line) => line.includes('[Vue warn]'));

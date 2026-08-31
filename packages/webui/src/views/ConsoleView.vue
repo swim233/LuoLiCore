@@ -101,7 +101,7 @@ const providerForm = ref({ id: '', name: '', kind: 'openai', baseUrl: '', apiKey
 const modelDialog = ref(false);
 const modelForm = ref({ id: '', providerId: '', modelId: '', displayName: '', contextWindow: 128000, maxOutput: 8192, priceIn: 0, priceOut: 0, priceCacheRead: 0, priceCacheWrite: 0, enabled: true, sort: 0, vision: 'follow' as VisionMark });
 const aliasDialog = ref(false);
-// 别名的用途只写在 docs/04 里，运维在这个页面上看不到，因此六个内建别名常驻表格并附用途说明。
+// 别名的用途只写在 docs/04 里，运维在这个页面上看不到，因此六个内建别名常驻列表并附用途说明。
 const ALIAS_GUIDE: Array<{ alias: string; purpose: string; tier: string }> = [
   { alias: 'main', purpose: '主 Agent 的默认模型，用于日常对话', tier: '中高档，对话质量优先' },
   { alias: 'high', purpose: '复杂推理与代码类 worker', tier: '最强模型' },
@@ -282,8 +282,7 @@ const COLUMNS = {
   hits: [{ key: 'tgDate', header: '时间', width: '12rem' }, { key: 'chatId', header: '会话', width: '9rem' }, { key: 'from', header: '发言人', width: '10rem' }, { key: 'text', header: '内容' }, { key: 'detail', header: '操作', width: '8rem' }],
   usage: [{ key: 'ts', header: '时间', width: '13rem' }, { key: 'model_alias', header: '别名' }, { key: 'input_tokens', header: '输入' }, { key: 'output_tokens', header: '输出' }, { key: 'cost_usd', header: '成本' }],
   principals: [{ key: 'kind', header: '类型' }, { key: 'displayName', header: '显示名' }, { key: 'tgId', header: 'Telegram ID' }, { key: 'role', header: '角色', width: '9rem' }, { key: 'username', header: '用户名' }],
-  models: [{ key: 'model_id', header: '模型 ID' }, { key: 'provider_id', header: 'Provider' }, { key: 'context_window', header: '上下文窗口', align: 'right' }, { key: 'capabilities', header: '能力' }, { key: 'price_in', header: '输入价格', align: 'right' }, { key: 'price_out', header: '输出价格', align: 'right' }, { key: 'enabled', header: '启用', width: '6rem' }, { key: 'actions', header: '', width: '4rem' }],
-  aliases: [{ key: 'alias', header: '别名', width: '12%' }, { key: 'purpose', header: '用途', width: '27%' }, { key: 'chain', header: 'Fallback 链', width: '31%' }, { key: 'settings', header: '采样参数', width: '20%' }, { key: 'actions', header: '', width: '10%' }],
+  models: [{ key: 'model_id', header: '模型 ID' }, { key: 'provider_id', header: 'Provider' }, { key: 'context_window', header: '上下文窗口', align: 'right' }, { key: 'capabilities', header: '能力' }, { key: 'price_in', header: '输入价格', align: 'right' }, { key: 'price_out', header: '输出价格', align: 'right' }, { key: 'enabled', header: '启用', width: '6rem' }, { key: 'actions', header: '操作', width: '4rem' }],
   logs: [{ key: 'ts', header: '时间', width: '13rem' }, { key: 'level', header: '级别', width: '7rem' }, { key: 'kind', header: '事件' }, { key: 'summary', header: '摘要' }, { key: 'data_bytes', header: '载荷', width: '6rem' }, { key: 'trace_id', header: 'Trace' }],
   // tasks / schedules / approvals 三套跟着那三张卡搬进 `components/tasks/types.ts`。
   containers: [{ key: 'chat', header: '会话' }, { key: 'name', header: '容器', width: '14rem' }, { key: 'used', header: '上次用 / 次数', width: '13rem' }, { key: 'expires', header: '还剩', width: '8rem' }, { key: 'actions', header: '', width: '17rem' }],
@@ -2534,13 +2533,41 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             <template #actions="{ data }"><UiButton size="small" variant="text" severity="danger" icon="pi pi-trash" :aria-label="`删除模型 ${data.model_id}`" @click.stop="removeModel(String(data.id), String(data.model_id))" /></template>
           </DataGrid>
           <div class="registry-heading"><div><h3>别名路由</h3><p class="section-note">别名指向一条有序的 fallback 链，前一个模型不可用时顺延。下方六个是内建别名，<code>main</code> 必须配置。</p></div><UiButton size="small" variant="outlined" label="添加自定义别名" @click="editAlias()" /></div>
-          <DataGrid :rows="aliasRows" :columns="COLUMNS.aliases" data-key="alias">
-            <template #alias="{ data }"><div class="alias-name"><code>{{ data.alias }}</code><UiTag v-if="data.state !== 'ok'" :value="ALIAS_STATE_TAG[data.state].label" :severity="ALIAS_STATE_TAG[data.state].severity" :title="ALIAS_STATE_TAG[data.state].hint" /><UiTag v-if="!data.validName" value="名称不合法" severity="warn" title="别名须以小写字母开头且只含 [a-z0-9_-]；该行只能删除后重建" /></div></template>
-            <template #purpose="{ data }"><p class="alias-purpose">{{ data.purpose }}</p><small v-if="data.tier">建议档位：{{ data.tier }}</small><small v-if="data.description">{{ data.description }}</small></template>
-            <template #chain="{ data }"><div v-if="data.chain.length" class="alias-chain"><span v-for="(segment, index) in data.chain" :key="segment.id" :class="['alias-seg', segment.state]" :title="segment.state === 'missing' ? '模型记录已删除' : segment.state === 'disabled' ? '模型已停用，会被跳过' : ''">{{ index + 1 }}. {{ segment.label }}</span></div><small v-else class="alias-empty">{{ data.alias === 'main' ? '没有可用模型时所有轮次都会失败' : '缺失时按 main → high → low 回退' }}</small></template>
-            <template #settings="{ data }"><small class="alias-settings">{{ settingsSummary(data.settings) }}</small></template>
-            <template #actions="{ data }"><div class="card-actions"><UiButton variant="text" size="small" :icon="data.state === 'absent' ? 'pi pi-plus' : 'pi pi-pencil'" :aria-label="data.state === 'absent' ? '配置别名' : '编辑别名'" @click="editAlias(data)" /><UiButton v-if="data.state !== 'absent'" variant="text" size="small" severity="danger" icon="pi pi-trash" aria-label="删除别名" @click="removeAlias(data.alias)" /></div></template>
-          </DataGrid>
+          <ul class="alias-route-list" aria-label="模型别名路由列表">
+            <li v-for="data in aliasRows" :key="data.alias" :data-alias="data.alias" :class="['alias-route-item', `state-${data.state}`]">
+              <div class="alias-route-head">
+                <div class="alias-route-copy">
+                  <div class="alias-route-title">
+                    <code>{{ data.alias }}</code>
+                    <span :class="['alias-health', data.state]" :title="data.state === 'ok' ? '链中至少有一个可用模型' : ALIAS_STATE_TAG[data.state].hint"><i aria-hidden="true" />{{ data.state === 'ok' ? '可用' : ALIAS_STATE_TAG[data.state].label }}</span>
+                    <UiTag v-if="!data.validName" value="名称不合法" severity="warn" title="别名须以小写字母开头且只含 [a-z0-9_-]；该行只能删除后重建" />
+                  </div>
+                  <p>{{ data.purpose }}</p>
+                  <div v-if="data.tier || data.description" class="alias-route-notes"><span v-if="data.tier">建议档位：{{ data.tier }}</span><span v-if="data.description">备注：{{ data.description }}</span></div>
+                </div>
+                <div class="alias-route-actions">
+                  <UiButton variant="outlined" size="small" :icon="data.state === 'absent' ? 'pi pi-plus' : 'pi pi-pencil'" :label="data.state === 'absent' ? '配置' : '编辑'" :aria-label="`${data.state === 'absent' ? '配置' : '编辑'}别名 ${data.alias}`" @click="editAlias(data)" />
+                  <UiButton v-if="data.state !== 'absent'" variant="text" size="small" severity="danger" icon="pi pi-trash" :aria-label="`删除别名 ${data.alias}`" @click="removeAlias(data.alias)" />
+                </div>
+              </div>
+              <div class="alias-route-body">
+                <section class="alias-route-chain" :aria-label="`${data.alias} fallback 顺序`">
+                  <p class="alias-route-label">Fallback 顺序</p>
+                  <ol v-if="data.chain.length" class="alias-chain-list">
+                    <li v-for="(segment, index) in data.chain" :key="segment.id" :class="['alias-chain-item', segment.state]" :title="segment.state === 'missing' ? '模型记录已删除' : segment.state === 'disabled' ? '模型已停用，会被跳过' : ''">
+                      <span class="alias-chain-step">{{ index + 1 }}</span>
+                      <div><code class="alias-chain-model">{{ segment.label }}</code><small v-if="segment.state !== 'ok'">{{ segment.state === 'missing' ? '模型记录已删除' : '模型已停用，路由时跳过' }}</small></div>
+                    </li>
+                  </ol>
+                  <div v-else class="alias-route-empty"><i class="pi pi-arrow-right" aria-hidden="true" /><span>{{ data.alias === 'main' ? '未设置模型。所有轮次都会失败。' : '未单独设置。按 main → high → low 回退。' }}</span></div>
+                </section>
+                <dl class="alias-route-settings">
+                  <dt>采样参数</dt>
+                  <dd>{{ settingsSummary(data.settings) }}</dd>
+                </dl>
+              </div>
+            </li>
+          </ul>
         </section>
         <section v-else-if="active === 'logs'" key="logs" class="surface page-surface"><header><div><p class="eyebrow">OBSERVABILITY</p><h2>日志与 Trace</h2><p>点击任一行查看完整载荷，详情中可展开整条 trace。</p></div><UiTag :value="connected ? '实时' : '重连中'" :severity="connected ? 'success' : 'warn'" /></header>
           <DataGrid :rows="logs" :columns="COLUMNS.logs" data-key="id" paginate clickable empty="暂无日志" @row-click="openLogDetail($event)">
