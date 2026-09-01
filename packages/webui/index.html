@@ -4,6 +4,9 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="dark" />
+    <!-- 本站自带深浅两套主题。Dark Reader 一类的扩展在 document_start 注入自己的样式、随后再撤换一遍，
+         已经是深色的页面因此会在刷新首帧闪一次浅色；这个 meta 是它官方的停手开关（4.9.63 起）。 -->
+    <meta name="darkreader-lock" />
     <title>LuoLiCore 控制台</title>
     <!-- Vue 与完整样式表执行前先建立首帧底色，避免浏览器绘制透明画布。 -->
     <style>

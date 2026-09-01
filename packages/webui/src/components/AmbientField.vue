@@ -89,7 +89,12 @@ function resize(): void {
   element.height = Math.round(height * ratio);
   element.style.width = `${width}px`;
   element.style.height = `${height}px`;
-  context = element.getContext("2d", { alpha: true, desynchronized: true });
+  // 不加 `desynchronized`：它是给画笔类应用压输入延迟的低延迟画布，这层装饰画布用不上，
+  // 代价却是刷新首帧的白闪 —— 低延迟画布走独立的 swap chain，与挂载时新建的其余合成层
+  // （两条帘幕、#app::before 的透视网格）一起分配时，首帧会拿到未初始化的缓冲。
+  // 二分实测（docs/09 §7）：同一份产物只改这一个标志位，白闪即消失；GPU 合成路径上才复现，
+  // 软件合成与嵌套合成都看不到，本机自动抓帧因此一直抓不到它。
+  context = element.getContext("2d", { alpha: true });
   if (context) {
     context.setTransform(ratio, 0, 0, ratio, 0, 0);
     context.imageSmoothingEnabled = true;

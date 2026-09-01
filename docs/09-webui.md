@@ -1247,9 +1247,29 @@ packages/webui/
 
 ## 7. 构建与托管
 
-- `pnpm build` → `packages/webui/dist` → 被 `packages/server` 用 `serveStatic` 托管；SPA fallback 到 `index.html`。
+- `pnpm build` → `packages/webui/dist` → 被 `packages/server` 用 `serveStatic` 托管；`/assets/*` 之外的一切路径（含 `/`）由文档处理器返回 `index.html`。
 - 生产镜像里 dist 已内置，无需 Node 之外的静态服务器。
-- 缓存：带 hash 的资源 `immutable, max-age=31536000`；`index.html` `no-cache`。
+- 缓存：`/assets/*` 文件名带 build hash，发 `public, max-age=31536000, immutable`；`index.html` 发 `no-cache` + `ETag`，`If-None-Match` 命中返回 304。刷新因此只剩一条条件请求，CSS 与 JS 的 558 kB 不再重新下载。
+- **`index.html` 不经 `serveStatic`，`/` 也不例外。** `serveStatic` 把目录路径补成 `index.html`，正文由
+  `createReadStream` 给出，响应头与首个数据块分处两个 tick。浏览器收到响应头即完成导航提交，正文到达之前
+  绘制的是**自己的白色画布**：文档里的底色、`color-scheme`、`class="dark"` 全部落在这段窗口之外，改不到它。
+  窗口长度等于事件循环下一次空闲的时刻，单进程内同步 SQLite 与 argon2 各占几十到几百 ms，表现为概率性的
+  刷新首帧白屏，频繁刷新即可触发。文档一律由内存中的字符串与响应头一次写出，窗口为 0。
+  实测本机空载：`/` 每次都有可测的间隔（p90 2.6 ms、峰值 8.9 ms），`/login` 与其余 SPA 路径恒为 0。
+  两条互补的防线**不因本条落地而失效，不要删**：`index.html` 的内联底色覆盖「正文已到、外部样式表未到」
+  那一段（渲染在样式表到达前是阻塞的），`<meta name="color-scheme" content="dark">` 覆盖阻塞超过约 5 s
+  之后浏览器自绘画布的那一帧 —— 无它则那一帧同样是白的。
+- **粒子画布不加 `desynchronized`**（`components/AmbientField.vue`）。低延迟画布走独立的 swap chain，
+  与应用挂载时新建的其余合成层一起分配，首帧会拿到未初始化的缓冲 —— 表现为刷新时一到两帧的全屏白闪，
+  比 120 ms 短，概率性出现。它只在 GPU 合成路径上复现：软件合成、Xvfb + ANGLE、嵌套 KWin Wayland
+  三条路径下抓帧一百余次一帧都抓不到，自动化在这条判据上没有约束力。
+  二分结论（同一份产物、只改这一个标志位）：`desynchronized: true` 闪，`false` 不闪；
+  隐藏粒子层或隐藏帘幕同样不闪。这层画布是装饰，低延迟对它没有任何用处。
+- `<meta name="darkreader-lock">`：本站自带深浅两套主题，不需要扩展再改一遍。Dark Reader 一类扩展在
+  `document_start` 注入自己的样式、拿到设置后再撤换一遍，已经是深色的页面于是在刷新首帧闪一次浅色；
+  滤镜档（`filter: invert`）作用在深色页上直接就是白的。这个 meta 是 Dark Reader 官方的停手开关
+  （4.9.63 起）。**扩展侧的这类闪烁在服务端与页面代码里都改不掉** —— 判断是不是它：用访客窗口
+  （无扩展）打开控制台连续刷新，不闪即为扩展所致。
 - 安全响应头：`Content-Security-Policy: default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; connect-src 'self'`、`X-Frame-Options: DENY`、`X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`。
 - **字体自托管，不许连外网**：CSP 是 `default-src 'self'`，`fonts.googleapis.com` 的 `@import` 会被整条挡掉 ——
   表现是本地 dev 好好的、线上悄悄退回系统字体。字体走 `@fontsource/fira-sans`（latin 400/600/700）+

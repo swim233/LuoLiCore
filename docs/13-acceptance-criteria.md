@@ -608,6 +608,8 @@
 | [x] AC-WEB-073 (自动) ★ | Worker 运行记录页的运行记录卡：三档 worker 各一行、点行看详情、两个过滤器、翻页、拉取失败 | 旧的「子 Agent」页整页替换成这一页（`views/WorkerRunsPage.vue` + `components/workers/`，`ConsoleView.vue` 里只占一行）。判据五条：①三档 worker 各有徽标、状态是中文档不是裸英文；②**`external_cost_usd` 与 `cost_usd` 各占一格、绝不相加**，格子旁写明它是外部 agent 自报、未经核对、不进任何聚合，`—` 表示「一次都没报过」（与「报了 0」是两件事）；③**没有「取消这条 run」按钮**，并把「worker 跑在父轮的 abort 信号下、没有独立句柄，要停只能取消整轮」这句话**写在页面上** —— 否则运维看到一条跑了 20 分钟的 harness 会去找一个不存在的入口；④两个过滤器落到查询串上、换筛选条件回第 1 页，服务端分页；⑤**「读不到」与「一个都没有」分得开**，拉取失败出红条并写出原因，不冒充一页空列表。⚠ 用例只挂载 `components/workers/WorkerRunsCard.vue`；`WorkerRunsPage.vue`（页壳）与 `WorkerDryRunCard.vue`（试跑卡）**没有用例** | 〔webui/worker-runs.card.test.ts〕
 | [x] AC-WEB-074 (自动) ★ | `GET /api/worker-runs` 与 `GET /api/worker-runs/:id` 与 `POST /api/workers/dryrun`：分页、两个过滤器、主 run、旧路径 | 列表只列 `worker_kind IS NOT NULL` 的行（**主 run 恒 NULL，不进来** —— 它就是这一轮本身，列进来只多一条读的人解释不了的行），信封与另外四条分页端点一致（`{items,total,page,size}`），`total` 是**带上过滤器**的全表 `COUNT` 而不是本页条数，排序「`state='running'` 优先，其余 `started_at` 倒序」，翻页真走 SQL 的 `OFFSET`；行里**不带** `task_input` / `external_usage_json`，只给 `taskLine`（任务正文第一行，截 160 字符）—— ACP 那条路的任务正文可以是一整段提示词，五十行各驮一份只是往浏览器推死重量。`workerKind` / `state` 取值域外一律 **400**（`invalid_worker_kind` / `invalid_state`）**而不是忽略**：忽略的表现是「筛了 acp 却看见 lw 的行」。详情端点多给 `taskInput` / `externalUsageJson` / `resultFullRef` / `providerId` / `modelId` 加 join 出来的 `turn` 与 `chatLabel`，**主 run 的 id 与不存在的 id 同样 404**。`POST /api/workers/dryrun` 回 `application/x-ndjson`，逐行推 step / usage / final / error；`task` 空或非串 400 `invalid_task`、超 20000 字 400 `task_too_large`、`tools` 非字符串数组 400 `invalid_tools`、`modelAlias` 不合 `ALIAS_NAME_PATTERN` 400 `invalid_model_alias`；**`tools` 缺席与 `tools: []` 是两件事**（前者 = 调用者角色下的全集，后者 = 一个都不许用），端点原样转发、不替它归一。旧路径 `GET /api/agents` 与 `POST /api/agents/:name/dryrun` **双双 404 且不留别名**：`:name` 在新世界里没有指代对象，留一条别名只会让人以为还能试跑某份定义 | 〔api.contract.test.ts〕
 | [x] AC-WEB-075 (自动) | `GET /api/turns/:id/detail` 的 `workerRuns` | 带回本轮派出去的 worker（`agent_runs` 里该 turn 且 `worker_kind IS NOT NULL` 的行，按 `started_at` 升序），**不含主 run** —— 含了看起来就像这一轮派了自己。投影比 `/api/worker-runs` 更薄（没有 `taskInput` / `parentRunId` / `depth` / token 列 / `resultFullRef`），与既有的 `turn` / `events` / `contextMessages` 并列在同一个 `data` 里。这条是 [21 · `G-API-25`](./21-webui-coverage-gaps.md) 的闭合判据 —— **闭合的是呈现面那一半**（此前全仓唯一读 `agent_runs` 的地方是 `GET /api/tasks/:id` 那条 join，入口是 `tasks.agent_run_id`，而 ACP 这条路不建 `tasks` 行，那条 join 永远够不着它）；**「不并进聚合」那一半原样成立**，`external_cost_usd` 仍然结构性地被挡在每一个 `SUM(cost_usd)` 之外 | 〔api.contract.test.ts〕
+| [x] AC-WEB-076 (自动) | 反复刷新 `/` 与任一 SPA 路径，逐条查响应头 | 文档不经 `serveStatic`：`/` 与 SPA 路径回同一份 `index.html`，带 `ETag` + `Cache-Control: no-cache`，`If-None-Match` 命中回 304 空正文，`dist` 重建后同一个 ETag 换 200 回来。`/assets/*` 发 `public, max-age=31536000, immutable`，其余静态文件 `no-cache`。判据是「已提交、正文未到达」那段窗口：`serveStatic` 的正文来自 `createReadStream`，响应头与首个数据块分处两个 tick，浏览器在这段时间绘制自己的白色画布，`index.html` 里的底色与 `color-scheme` 全在窗口之外（[09 §7](./09-webui.md)）—— 这是概率性刷新首帧白屏的成因，`/` 上少了 `ETag` 即意味着静态中间件又接回了文档 | 〔server.test.ts〕
+| [ ] AC-WEB-077 (手动) | 在 GPU 合成的浏览器里连续刷新控制台二十次以上（用访客窗口，先排除扩展）| 不出现整屏白闪。成因在 GPU 路径上才成立：低延迟画布（`desynchronized`）走独立 swap chain，与挂载时新建的其余合成层一起分配，首帧拿到未初始化缓冲，表现为一到两帧的全屏白（比 120 ms 短、概率性）。软件合成、Xvfb + ANGLE、嵌套 KWin Wayland 三条路径下抓帧一百余次一帧都抓不到 —— **自动化在这条上没有约束力**，只有 `tests/webui/motion.test.ts` 守着那个标志位不许加回来（[09 §7](./09-webui.md)）。二分方式：同一份产物只改 `desynchronized` 一个标志位比对，其余一字不动 |
 
 ## 11. 安全 AC-SEC
 
@@ -675,9 +677,9 @@
 | 记忆 | | 3 / 12 | | | |
 | 日志与成本 | | 13 / 32 | | | |
 | 扩展生态 | | 38 / 53 | | | |
-| WebUI | | 54 / 92 | `AC-WEB-016`（权限矩阵视图从未实现，详见 [29 §3](./29-manual-acceptance-log.md)） | | |
+| WebUI | | 55 / 94 | `AC-WEB-016`（权限矩阵视图从未实现，详见 [29 §3](./29-manual-acceptance-log.md)） | | |
 | 安全 | | 17 / 31 | | | |
 | 运维 | | 2 / 10 | `AC-OPS-005` 后半（首次启动向导从未实现）、`AC-OPS-006`（`pnpm smoke` 走完全链路是开发任务，前置 `D-04`）；两条详见 [29 §3](./29-manual-acceptance-log.md) | | |
-| **合计** | | **337 / 529** | | | |
+| **合计** | | **338 / 531** | | | |
 
 **整体通过条件**：全部 ★ 项通过 + 非 ★ 项通过率 ≥ 95% + 所有豁免项经需求方书面确认。

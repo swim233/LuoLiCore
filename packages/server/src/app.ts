@@ -1,4 +1,4 @@
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import {
   createReadStream,
   existsSync,
@@ -214,6 +214,8 @@ export interface ServerDependencies {
   configSchema: unknown;
   startedAt: number;
   setup: { token: string; expiresAt: number } | undefined;
+  /** 静态产物目录。只由用例注入；生产按包内相对路径算出 `packages/webui/dist`。 */
+  webRoot?: string | undefined;
 }
 
 interface AuthVariables {
@@ -5841,7 +5843,9 @@ export function createServer(
       500,
     );
   });
-  const webRoot = fileURLToPath(new URL("../../webui/dist", import.meta.url));
+  const webRoot =
+    dependencies.webRoot ??
+    fileURLToPath(new URL("../../webui/dist", import.meta.url));
   // 未匹配的 /api/* 必须在静态兜底之前拦下：否则它们会拿到 200 与 index.html，前端的 `api()`
   // 在 `response.json()` 处抛 SyntaxError，报错信息与真实原因（路径写错）无关（docs/22 · I-13）。
   app.all("/api/*", (ctx) =>
@@ -5854,12 +5858,62 @@ export function createServer(
       404,
     ),
   );
+  /**
+   * 文档响应由这里出，不经 `serveStatic`（docs/09 §7）。刷新首帧白屏的窗口是「导航已提交、
+   * 正文未到达」那一段：浏览器收到响应头即提交新文档，正文到达之前绘制的是自己的白色画布，
+   * 而 `index.html` 里的底色、`color-scheme` 与 `class="dark"` 全部落在这段窗口之外
+   * —— fbfecdc 补的首帧底色因此改不到它，白屏照旧。`serveStatic` 的正文是 `createReadStream`，
+   * 响应头与首个数据块分处两个 tick，窗口长度等于事件循环下一次空闲的时刻：单进程内同步
+   * SQLite 与 argon2 各占几十到几百 ms，刷新够频繁就能撞上。实测本机空载：`/` 每次都有
+   * 可测的间隔（p90 2.6 ms、峰值 8.9 ms），走内存字符串的 `/login` 与其余 SPA 路径恒为 0。
+   * `ETag` 是同一件事的另一半：命中即 304，正文不必再传，窗口无从产生。
+   */
+  let indexCache: { mtimeMs: number; html: string; etag: string } | null = null;
+  const documentResponse = (ctx: Context<ServerEnv>) => {
+    const file = resolve(webRoot, "index.html");
+    let stats;
+    try {
+      stats = statSync(file);
+    } catch {
+      return ctx.text("LuoLiCore WebUI 尚未构建", 503);
+    }
+    // 比对 mtime 而不是启动时读一次：dev 会话中重建 dist 之后，旧 HTML 指向的资源 hash 已经 404。
+    if (!indexCache || indexCache.mtimeMs !== stats.mtimeMs) {
+      const html = readFileSync(file, "utf8");
+      indexCache = {
+        mtimeMs: stats.mtimeMs,
+        html,
+        etag: `"${createHash("sha256").update(html).digest("base64url").slice(0, 27)}"`,
+      };
+    }
+    ctx.header("Cache-Control", "no-cache");
+    ctx.header("ETag", indexCache.etag);
+    return ctx.req.header("if-none-match") === indexCache.etag
+      ? ctx.body(null, 304)
+      : ctx.html(indexCache.html);
+  };
+  // `/` 必须注册在静态中间件之前：`serveStatic` 遇到目录路径会补成 index.html 并以文件流返回，
+  // 那正是上面那段窗口的来源。
+  app.get("/", documentResponse);
+  /**
+   * 资源文件名带 build hash，同一个 URL 上的内容不会变化，`immutable` 让刷新完全不碰网络；
+   * 其余静态文件走条件请求（docs/09 §7）。
+   * 两处顺序要求：①必须设在 `serveStatic` 之前 —— 它用 `c.body()` 建好响应才调 `onFound`，
+   * 那之后写的头落进 `#preparedHeaders`，不会进已经建好的那个 Response（`onFound` 因此不可用）；
+   * ②`/` 已由上面的文档处理器接掉，不经过这里。目录穿越由 `serveStatic` 自己拦下（解码后带
+   * `..` 一律不服务），落到文档兜底时下面那句 `no-cache` 覆盖本行，`immutable` 不会跟着错的文件走。
+   */
+  app.use("/*", async (ctx, next) => {
+    ctx.header(
+      "Cache-Control",
+      ctx.req.path.startsWith("/assets/")
+        ? "public, max-age=31536000, immutable"
+        : "no-cache",
+    );
+    await next();
+  });
   app.use("/*", serveStatic({ root: webRoot }));
-  app.get("*", (ctx) =>
-    existsSync(resolve(webRoot, "index.html"))
-      ? ctx.html(readFileSync(resolve(webRoot, "index.html"), "utf8"))
-      : ctx.text("LuoLiCore WebUI 尚未构建", 503),
-  );
+  app.get("*", documentResponse);
   return app;
 }
 

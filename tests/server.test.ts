@@ -1,11 +1,13 @@
-import { rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { ArchiveRepository, OperationsRepository, PrincipalRepository, closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
 import { ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceService, ProviderStore, Secrets, configSchema } from '@luoli/core';
 import { createServer } from '@luoli/server';
 import argon2 from 'argon2';
 
-async function appHarness(overrides: Record<string, unknown> = {}) {
+async function appHarness(overrides: Record<string, unknown> = {}, webRoot?: string) {
   const path = './data/server.test.db';
   for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });
   const db = openDatabase(path);
@@ -20,7 +22,7 @@ async function appHarness(overrides: Record<string, unknown> = {}) {
   const approvals = new DatabaseApprovalBroker(db, config, events, log);
   const app = createServer({ config, db, operations, principals: new PrincipalRepository(db), archive, context,
     providers: new ProviderStore(db, new Secrets('x'.repeat(32))), approvals,
-    maintenance: new MaintenanceService(db, path, 2, 30), events, log, configSchema: {}, startedAt: Date.now(), setup: undefined });
+    maintenance: new MaintenanceService(db, path, 2, 30), events, log, configSchema: {}, startedAt: Date.now(), setup: undefined, webRoot });
   return { app, db, operations };
 }
 
@@ -169,6 +171,81 @@ describe('server security', () => {
     const response = await app.request('/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: 'x'.repeat(2_000_000) }) });
     expect(response.status).toBe(413);
     expect((await response.json() as { error: { code: string } }).error.code).toBe('payload_too_large');
+    closeDatabase(db);
+  });
+});
+
+/**
+ * 刷新首帧白屏的判据（docs/09 §7）。窗口是「导航已提交、正文未到达」那一段：`serveStatic`
+ * 的正文来自 `createReadStream`，响应头与首个数据块分处两个 tick，浏览器在这段时间里绘制的是
+ * 自己的白色画布 —— `index.html` 内的底色与 `color-scheme` 全在窗口之外，改不到它。
+ * 文档因此不许经 `serveStatic`：`ETag` 与 `Cache-Control: no-cache` 是这件事在响应上唯一的
+ * 可观察凭据（`serveStatic` 两个头都不发），`/` 上少了它们即意味着静态中间件又接回了文档。
+ */
+describe('静态托管', () => {
+  const fixture = () => {
+    const root = mkdtempSync(join(tmpdir(), 'luoli-webroot-'));
+    mkdirSync(join(root, 'assets'));
+    writeFileSync(join(root, 'index.html'), '<!doctype html><html class="dark"><body><div id="app"></div></body></html>');
+    writeFileSync(join(root, 'assets', 'index-Cx0TZRdI.css'), 'body{background:#050c11}');
+    writeFileSync(join(root, 'robots.txt'), 'User-agent: *\n');
+    return root;
+  };
+
+  it('文档不走文件流：/ 与 SPA 路径同一份 index.html，都带 ETag 与 no-cache', async () => {
+    const webRoot = fixture();
+    const { app, db } = await appHarness({}, webRoot);
+    const root = await app.request('/');
+    expect(root.status).toBe(200);
+    expect(root.headers.get('cache-control')).toBe('no-cache');
+    const etag = root.headers.get('etag');
+    expect(etag).toMatch(/^"[\w-]{27}"$/);
+    expect(await root.text()).toContain('<div id="app"></div>');
+    // SPA 路径与 `/` 必须是同一份文档：两条路分别实现的话，其中一条迟早退回文件流。
+    const spa = await app.request('/login');
+    expect(spa.status).toBe(200);
+    expect(spa.headers.get('etag')).toBe(etag);
+    rmSync(webRoot, { recursive: true, force: true });
+    closeDatabase(db);
+  });
+
+  it('If-None-Match 命中返回 304 且不带正文', async () => {
+    const webRoot = fixture();
+    const { app, db } = await appHarness({}, webRoot);
+    const etag = (await app.request('/')).headers.get('etag')!;
+    const revalidated = await app.request('/', { headers: { 'if-none-match': etag } });
+    expect(revalidated.status).toBe(304);
+    expect(await revalidated.text()).toBe('');
+    // 改动 dist 之后同一个 ETag 不再命中：条件请求换 200 回来，而不是让浏览器一直用旧文档。
+    writeFileSync(join(webRoot, 'index.html'), '<!doctype html><html class="dark"><body><div id="app"></div><!-- rebuilt --></body></html>');
+    const rebuilt = await app.request('/', { headers: { 'if-none-match': etag } });
+    expect(rebuilt.status).toBe(200);
+    expect(rebuilt.headers.get('etag')).not.toBe(etag);
+    rmSync(webRoot, { recursive: true, force: true });
+    closeDatabase(db);
+  });
+
+  it('带 hash 的资源 immutable，其余静态文件 no-cache', async () => {
+    const webRoot = fixture();
+    const { app, db } = await appHarness({}, webRoot);
+    const asset = await app.request('/assets/index-Cx0TZRdI.css');
+    expect(asset.status).toBe(200);
+    // 缺这个头时每次刷新都要重新下载整份 CSS 与 JS，渲染被阻塞的时间随服务端负载浮动。
+    expect(asset.headers.get('cache-control')).toBe('public, max-age=31536000, immutable');
+    const other = await app.request('/robots.txt');
+    expect(other.status).toBe(200);
+    expect(other.headers.get('cache-control')).toBe('no-cache');
+    rmSync(webRoot, { recursive: true, force: true });
+    closeDatabase(db);
+  });
+
+  it('dist 缺失时回 503，不冒充一个空页面', async () => {
+    const webRoot = mkdtempSync(join(tmpdir(), 'luoli-webroot-'));
+    const { app, db } = await appHarness({}, webRoot);
+    const response = await app.request('/');
+    expect(response.status).toBe(503);
+    expect(await response.text()).toContain('尚未构建');
+    rmSync(webRoot, { recursive: true, force: true });
     closeDatabase(db);
   });
 });
