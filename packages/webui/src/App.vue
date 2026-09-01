@@ -1,14 +1,24 @@
 <script setup lang="ts">
-import { ref } from "vue";
-import { RouterView } from "vue-router";
+import { onBeforeUnmount, ref } from "vue";
+import { RouterView, useRouter } from "vue-router";
+import { AUTH_REQUIRED_EVENT } from "./api/client";
 import AmbientField from "./components/AmbientField.vue";
 import ToastHost from "./ui/ToastHost.vue";
 import ConfirmHost from "./ui/ConfirmHost.vue";
 
 const dark = ref(true);
+const router = useRouter();
+let redirecting = false;
 const apply = (): void =>
   document.documentElement.classList.toggle("dark", dark.value);
 apply();
+function redirectToLogin(): void {
+  if (redirecting || router.currentRoute.value.path === "/login") return;
+  redirecting = true;
+  void router.replace("/login").finally(() => { redirecting = false; });
+}
+window.addEventListener(AUTH_REQUIRED_EVENT, redirectToLogin);
+onBeforeUnmount(() => window.removeEventListener(AUTH_REQUIRED_EVENT, redirectToLogin));
 function toggleTheme(): void {
   dark.value = !dark.value;
   apply();

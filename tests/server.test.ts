@@ -95,9 +95,9 @@ describe('server security', () => {
     closeDatabase(db);
   });
 
-  // 401 会让客户端的 `api()` 无条件 `location.assign("/login")`：填错当前口令的人被踢出控制台，
-  // 「当前口令错误」一个字都渲染不出来，同页未保存的表单一并丢掉，而 session 根本没失效
-  // （docs/29 · M-WEB-13）。403 = 登录是好的、错的是表单里那一格。
+  // 401 会让客户端的 `api()` 要求切到登录页：填错当前口令的人会被踢出控制台，
+  // 「当前口令错误」一个字都渲染不出来，而 session 根本没失效（docs/29 · M-WEB-13）。
+  // 403 = 登录是好的、错的是表单里那一格。
   it('填错当前口令回 403 而不是 401，session 照旧有效', async () => {
     const { app, db, operations } = await appHarness();
     const session = operations.createSession(1);

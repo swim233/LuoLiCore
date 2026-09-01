@@ -1,6 +1,14 @@
 import { reactive } from "vue";
 
 export const auth = reactive({ csrf: "", authenticated: false });
+export const AUTH_REQUIRED_EVENT = "luoli:auth-required";
+
+/** 交给 App 内的 Vue Router 切换登录页。整页导航会在新文档首帧前暴露浏览器默认画布。 */
+export function requestLogin(): void {
+  auth.csrf = "";
+  auth.authenticated = false;
+  window.dispatchEvent(new Event(AUTH_REQUIRED_EVENT));
+}
 
 /**
  * 服务端的错误体带 `code` 与 `details`，而调用方此前只能取到 `message`：想按错误种类分支
@@ -32,7 +40,7 @@ export async function api<T>(
     headers.set("X-CSRF-Token", auth.csrf);
   const response = await fetch(path, { ...options, headers });
   if (response.status === 401 && location.pathname !== "/login")
-    location.assign("/login");
+    requestLogin();
   // 服务端的 `app.onError` 与未匹配 `/api/*` 的 404 已保证信封结构，但非 JSON 响应不应
   // 表现为 SyntaxError：直接调用 `response.json()` 遇到 `text/plain` 会抛出
   // `Unexpected token 'I'`，界面上的报错与真实原因（端点异常、反向代理返回 502 页面）无关。
@@ -70,7 +78,7 @@ export async function apiStream<T>(
     headers.set("X-CSRF-Token", auth.csrf);
   const response = await fetch(path, { ...options, headers });
   if (response.status === 401 && location.pathname !== "/login")
-    location.assign("/login");
+    requestLogin();
   if (!response.ok || !response.body) {
     const result = (await response.json().catch(() => null)) as {
       error?: { message?: string };

@@ -71,7 +71,7 @@ webui:
   `config_revisions` → **吊销除当前会话外的全部 session**（`DELETE FROM sessions WHERE id<>?`）→ 发
   `config.changed`。校验一律现读配置，热重载落地后不再认任何进程内缓存；不重启也生效。
   `pnpm webui:passwd` 仍可用于线下生成哈希。**界面上暂时还没有这个表单**，当前只能打 API（见 [21](./21-webui-coverage-gaps.md)）。
-- 登出删除 session 行，入口是顶栏最右侧的 `[退出登录]` 图标按钮（打 `POST /api/auth/logout` 后跳 `/login`；
+- 登出删除 session 行，入口是顶栏最右侧的 `[退出登录]` 图标按钮（打 `POST /api/auth/logout` 后由 Vue Router 替换为 `/login`，不创建新文档；
   端点早就有，界面上一直没有入口，只能等 session 过期或手删 cookie）。`GET /api/auth/me` 返回登录态、到期时间**与本 session 的 `csrf`** —— 前端只把 token 放在内存里，刷新页面后必须靠这个端点补回来，否则刷新之后所有写操作都会 403。跨站拿不到它：既过不了 Origin 中间件，也读不到响应体。
 - Session 滑动续期：每次请求更新 `last_seen_at`，超过 `sessionTtlHours` 未活动则失效。
 
@@ -1108,9 +1108,10 @@ packages/webui/
 │                              （代理改写 Host + Origin 过 §2.1 的 Origin 闸，缺了就恒 403）
 └── src/
     ├── main.ts                createApp + router + pinia（无 UI 框架插件）+ 自托管字体
+    ├── App.vue                接收会话失效事件，经 Vue Router 合并切换到 /login
     ├── styles.css             设计变量（浅/深两套 + 字体栈）+ 全站样式，唯一的样式来源
-    ├── router/index.ts        三条路由（/login /setup /），全局守卫（未登录 → /login）
-    ├── api/client.ts          fetch 封装：CSRF 头、401 跳登录、统一错误 toast、NDJSON 流
+    ├── router/index.ts        三条路由（/login /setup /）
+    ├── api/client.ts          fetch 封装：CSRF 头、401 发会话失效事件、统一错误、NDJSON 流
     ├── ui/                    自建原语，全部只用 styles.css 的变量
     │   ├── toast.ts           pushToast() / toastError()：全站唯一的通知通道
     │   ├── ToastHost.vue      右上角通知栈（success/info/warn/error）

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import UiButton from '../ui/UiButton.vue';
 import UiTag from '../ui/UiTag.vue';
 import UiSelect from '../ui/UiSelect.vue';
@@ -23,7 +23,7 @@ import UiRing from '../ui/UiRing.vue';
 import { pushToast, toastError } from '../ui/toast';
 import { askConfirm } from '../ui/confirm';
 import type { Attachment, GridColumn, TagSeverity } from '../ui/types';
-import { api, ApiError, hydrateSession } from '../api/client';
+import { api, ApiError, hydrateSession, requestLogin } from '../api/client';
 
 interface TrendPoint { day: string; messages: number; turns: number; costUsd: number }
 interface Dashboard { turns: { total: number; running: number; failed: number; cost: number }; messages: { total: number }; providers: { total: number; enabled: number }; trend?: TrendPoint[] }
@@ -253,6 +253,7 @@ const catalogExists = (entry: CatalogModel): boolean => importedModelKeys.value.
 const catalogRows = computed(() => { const needle = catalogQuery.value.trim().toLowerCase(); return needle ? catalogModels.value.filter((entry) => entry.modelId.toLowerCase().includes(needle) || (entry.displayName ?? '').toLowerCase().includes(needle)) : catalogModels.value; });
 const mobileMenu = ref(false);
 const connected = ref(false);
+let eventStream: EventSource | null = null;
 const navigationSections = [
   { label: '工作区', eyebrow: 'OPERATIONS', items: [
     ['dashboard', 'pi pi-chart-bar', '总览'], ['chats', 'pi pi-comments', '会话'],
@@ -1684,7 +1685,7 @@ const activeTurns = ref<ActiveTurn[]>([]);
 const turnProgress = ref<Record<string, { phase: string; step: number; note: string }>>({});
 const cancellingTurn = ref('');
 const nowTick = ref(Date.now());
-setInterval(() => { nowTick.value = Date.now(); }, 1000);
+const nowTimer = setInterval(() => { nowTick.value = Date.now(); }, 1000);
 const elapsed = (since: number): string => {
   const seconds = Math.max(0, Math.round((nowTick.value - since) / 1000));
   return seconds < 60 ? `${seconds} 秒` : `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`;
@@ -1981,7 +1982,7 @@ const revisionValue = (raw: string | null, side: 'old' | 'new'): string => (raw 
 
 async function logout(): Promise<void> {
   try { await api('/api/auth/logout', { method: 'POST', body: '{}' }); } catch { /* 会话可能已经过期，照样跳登录页 */ }
-  location.assign('/login');
+  requestLogin();
 }
 
 watch(active, (value) => {
@@ -2021,25 +2022,25 @@ function reportMcpAuthResult(): void {
 }
 
 onMounted(async () => {
-  await hydrateSession();
+  if (!await hydrateSession()) return;
   await load();
   reportMcpAuthResult();
   void loadActiveTurns();
-  const events = new EventSource('/api/events');
+  eventStream = new EventSource('/api/events');
   // 断线期间的事件不会重放，因此重连之后必须自行补拉一次（docs/29 · `M-WEB-02`）。实测断开 20 秒
   // 后重连，总览的归档消息停在旧值十几秒，直到下一条无关事件到达才更新：
   // 状态指示已恢复为系统在线而数字仍是旧的，比保持断开更糟，断开时界面至少表明了数据不新鲜。
   // 首次连接不补拉：`load()` 刚执行完那 18 个端点。
   let everDropped = false;
-  events.onopen = () => {
+  eventStream.onopen = () => {
     connected.value = true;
     if (!everDropped) return;
     everDropped = false;
     scheduleRefresh(ALL_REFRESH_GROUPS);
   };
-  events.onerror = () => { connected.value = false; everDropped = true; };
+  eventStream.onerror = () => { connected.value = false; everDropped = true; };
   for (const [type, groups] of Object.entries(EVENT_REFRESH)) {
-    events.addEventListener(type, (message) => {
+    eventStream.addEventListener(type, (message) => {
       lastEventAt.value = Date.now();
       // 步骤进度只有事件里那一份（turns 表要等这一步结束才写），直接用载荷更新，不回查。
       if (type === 'turn.progress') {
@@ -2051,6 +2052,14 @@ onMounted(async () => {
       scheduleRefresh(groups);
     });
   }
+});
+
+onBeforeUnmount(() => {
+  clearInterval(nowTimer);
+  for (const timer of refreshTimers.values()) clearTimeout(timer);
+  refreshTimers.clear();
+  eventStream?.close();
+  eventStream = null;
 });
 
 const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted: 'info', limited: 'warn', blocked: 'danger' }[role] as TagSeverity);

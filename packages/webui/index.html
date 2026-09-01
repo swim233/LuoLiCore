@@ -1,10 +1,15 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" class="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="color-scheme" content="dark light" />
+    <meta name="color-scheme" content="dark" />
     <title>LuoLiCore 控制台</title>
+    <!-- Vue 与完整样式表执行前先建立首帧底色，避免浏览器绘制透明画布。 -->
+    <style>
+      html, body { min-height: 100%; margin: 0; background: #050c11; color: #e9f6f6; }
+      #app { min-height: 100vh; }
+    </style>
   </head>
   <body>
     <div id="app"></div>
