@@ -630,7 +630,7 @@ defineExpose({ commit });
         >
         <span class="count">{{ group.entries.length }} 项</span>
       </button>
-      <div v-if="openGroups.has(group.name)" class="schema-fields">
+      <div v-if="openGroups.has(group.name)" class="schema-list" role="list" :aria-label="`${group.name} 配置列表`">
         <!-- multiEnum 与 boolean 一样不能包在 `<label>` 里：里面每个复选框自带 `<label>`，
              嵌套之后点哪一格都可能落到第一个控件上。 -->
         <component
@@ -641,6 +641,7 @@ defineExpose({ commit });
           "
           v-for="field in group.entries"
           :key="field.path"
+          role="listitem"
           :class="[
             'schema-field',
             {
@@ -654,85 +655,73 @@ defineExpose({ commit });
             },
           ]"
         >
-          <span class="schema-key"
-            ><code
-              ><span v-if="field.label !== field.path" class="prefix"
-                >{{ field.group }}.</span
-              >{{ field.label }}</code
-            ><UiTag
-              :value="badge(field).label"
-              :severity="badge(field).severity"
-              :title="badge(field).hint"
-          /></span>
-          <p v-if="field.description" class="schema-desc">
-            {{ field.description }}
-          </p>
-          <template v-if="field.pinnedEnv">
-            <input
-              :value="String(display(field, dotted(value, field.path)))"
-              disabled
-            />
-            <small class="field-note"
-              >值由环境变量
-              <code>{{ field.pinnedEnv }}</code>
-              决定，修改需更新该变量并重启。</small
-            >
-          </template>
-          <template v-else-if="field.readOnly">
-            <input
-              :value="
-                String(dotted(value, field.path) ? '«已设置»' : '«未设置»')
-              "
-              disabled
-            />
-            <small class="field-note"
-              >需 argon2 哈希，不是明文口令。改口令用上方「修改登录口令」，或
-              <code>pnpm webui:passwd</code> 后写入
-              <code>config.yaml</code>。</small
-            >
-          </template>
-          <template v-else-if="field.secret">
-            <span class="secret-row">
+          <div class="schema-field-name">
+            <span class="schema-key"
+              ><code
+                ><span v-if="field.label !== field.path" class="prefix"
+                  >{{ field.group }}.</span
+                >{{ field.label }}</code
+              ><UiTag
+                :value="badge(field).label"
+                :severity="badge(field).severity"
+                :title="badge(field).hint"
+            /></span>
+            <p v-if="field.description" class="schema-desc">
+              {{ field.description }}
+            </p>
+          </div>
+          <div class="schema-control">
+            <template v-if="field.pinnedEnv">
               <input
-                :value="asText(field.path)"
-                type="password"
-                autocomplete="off"
-                spellcheck="false"
-                :placeholder="
-                  cleared.has(field.path)
-                    ? '保存后清空'
-                    : secretSet(field)
-                      ? '已设置，留空表示不改'
-                      : '未设置'
+                :value="String(display(field, dotted(value, field.path)))"
+                disabled
+              />
+            </template>
+            <template v-else-if="field.readOnly">
+              <input
+                :value="
+                  String(dotted(value, field.path) ? '«已设置»' : '«未设置»')
                 "
-                :disabled="!field.wired"
-                @input="
-                  update(field, ($event.target as HTMLInputElement).value)
-                "
+                disabled
               />
-              <UiButton
-                v-if="secretSet(field) && !cleared.has(field.path)"
-                variant="text"
-                size="small"
-                severity="danger"
-                label="清空"
-                :disabled="!field.wired"
-                @click="clearSecret(field)"
-              />
-              <UiButton
-                v-else-if="cleared.has(field.path)"
-                variant="text"
-                size="small"
-                label="撤销清空"
-                @click="keepSecret(field)"
-              />
-            </span>
-            <small class="field-note"
-              >只写字段：不回显，留空表示不改。支持
-              <code>${env:NAME}</code>
-              引用。</small
-            >
-          </template>
+            </template>
+            <template v-else-if="field.secret">
+              <span class="secret-row">
+                <input
+                  :value="asText(field.path)"
+                  type="password"
+                  autocomplete="off"
+                  spellcheck="false"
+                  :placeholder="
+                    cleared.has(field.path)
+                      ? '保存后清空'
+                      : secretSet(field)
+                        ? '已设置，留空表示不改'
+                        : '未设置'
+                  "
+                  :disabled="!field.wired"
+                  @input="
+                    update(field, ($event.target as HTMLInputElement).value)
+                  "
+                />
+                <UiButton
+                  v-if="secretSet(field) && !cleared.has(field.path)"
+                  variant="text"
+                  size="small"
+                  severity="danger"
+                  label="清空"
+                  :disabled="!field.wired"
+                  @click="clearSecret(field)"
+                />
+                <UiButton
+                  v-else-if="cleared.has(field.path)"
+                  variant="text"
+                  size="small"
+                  label="撤销清空"
+                  @click="keepSecret(field)"
+                />
+              </span>
+            </template>
           <div v-else-if="field.kind === 'multiEnum'" class="enum-choices">
             <UiCheckbox
               v-for="option in field.enumValues"
@@ -783,13 +772,25 @@ defineExpose({ commit });
             :disabled="!field.wired"
             @input="update(field, ($event.target as HTMLInputElement).value)"
           />
-          <small class="field-note">
-            {{ defaultText(field)
-            }}<template v-if="rangeText(field)">
-              · {{ rangeText(field) }}</template
-            ><template v-if="field.itemHint"> · {{ field.itemHint }}</template>
-            <template v-if="field.kind === 'stringList'"> · 一行一条</template>
-            <template v-if="field.note"> · {{ field.note }}</template>
+          </div>
+          <small class="field-note schema-meta">
+            <template v-if="field.pinnedEnv"
+              >值由环境变量 <code>{{ field.pinnedEnv }}</code> 决定，修改需更新该变量并重启。</template
+            >
+            <template v-else-if="field.readOnly"
+              >需 argon2 哈希。改口令请使用“修改登录口令”，或执行 <code>pnpm webui:passwd</code> 后写入 <code>config.yaml</code>。</template
+            >
+            <template v-else-if="field.secret"
+              >只写字段，不回显。留空表示不改，支持 <code>${env:NAME}</code> 引用。</template
+            >
+            <template v-else>
+              {{ defaultText(field)
+              }}<template v-if="rangeText(field)">
+                · {{ rangeText(field) }}</template
+              ><template v-if="field.itemHint"> · {{ field.itemHint }}</template>
+              <template v-if="field.kind === 'stringList'"> · 一行一条</template>
+              <template v-if="field.note"> · {{ field.note }}</template>
+            </template>
           </small>
         </component>
       </div>

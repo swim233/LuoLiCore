@@ -128,6 +128,13 @@ const elapsed = (run: { startedAt: number; finishedAt: number | null }): string 
   run.finishedAt
     ? durationText(Number(run.finishedAt) - Number(run.startedAt))
     : "未结束";
+const startedText = (value: number): string =>
+  new Date(Number(value)).toLocaleString(undefined, {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 /** 原样 JSON，缩进后渲染；解析不了就照原串显示（那一列由外部 agent 写入，不保证形状）。 */
 const externalUsageText = computed(() => {
   const raw = detail.value?.externalUsageJson;
@@ -191,6 +198,7 @@ watch(
     <DataGrid
       :rows="rows"
       :columns="WORKER_RUN_COLUMNS"
+      class="worker-runs-grid"
       data-key="id"
       clickable
       :loading="loading"
@@ -209,7 +217,9 @@ watch(
           :severity="stateOf(data.state).severity"
       /></template>
       <template #taskLine="{ data }"
-        ><span>{{ data.taskLine || "—" }}</span
+        ><span class="worker-task-text" :title="data.taskLine || ''">{{
+          data.taskLine || "—"
+        }}</span
         ><small class="alias-empty">{{ data.modelAlias }}</small></template
       >
       <!-- 行内按钮上的 `@click.stop` 是必需的：`DataGrid` 的 row-click 挂在 `<tr>` 上，
@@ -234,10 +244,10 @@ watch(
         }}</span
         ><small v-else class="alias-empty">—</small></template
       >
-      <template #elapsed="{ data }">{{ elapsed(data) }}</template>
-      <template #startedAt="{ data }">{{
-        new Date(Number(data.startedAt)).toLocaleString()
-      }}</template>
+      <template #elapsed="{ data }"
+        ><span>{{ elapsed(data) }}</span
+        ><small class="alias-empty">{{ startedText(data.startedAt) }}</small></template
+      >
     </DataGrid>
     <p class="field-note">
       「外部自报」是外部 agent 自己报的花费，未经核对，不进任何聚合，也不与「花费」相加。

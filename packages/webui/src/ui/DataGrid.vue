@@ -81,9 +81,10 @@ function toggleAll(): void {
   <div :class="['data-grid', { clickable }]">
     <div
       class="grid-scroll"
+      tabindex="0"
       :style="scrollHeight ? { maxHeight: scrollHeight } : undefined"
     >
-      <table>
+      <table :aria-busy="loading || undefined">
         <thead>
           <tr>
             <th v-if="selection" class="pick">

@@ -21,6 +21,8 @@ const NAV_KEYS = ['dashboard', 'chats', 'messages', 'prompts', 'providers', 'pri
   'extensions', 'workers', 'logs', 'usage', 'quota', 'tasks', 'settings'] as const;
 /** 设置页的四个二级 tab（docs/09 §3.13）。与导航项同理：遗漏一个分支，该 tab 从此无人渲染。 */
 const SETTINGS_TABS = ['common', 'all', 'maintenance', 'advanced'] as const;
+/** 工具页按操作目的拆分。缺少任一分区时，长页重构会把审批或沙箱入口静默藏掉。 */
+const TOOL_TABS = ['catalog', 'approval', 'runtime'] as const;
 /** 扩展页的四个分段（docs/09 §3.8）。同上：新增一段就要同步加入这里。 */
 const EXTENSION_TABS = ['skills', 'mcp', 'plugins', 'tools'] as const;
 
@@ -32,6 +34,10 @@ const RESPONSES: Record<string, unknown> = {
     trend: Array.from({ length: 7 }, (_value, index) => ({ day: `2026-08-${11 + index}`, messages: index, turns: index, costUsd: index * 0.01 })) },
   '/api/health/detail': { ok: true, version: 'test', uptimeMs: 90_000, db: { ok: true, bytes: 4096, walBytes: 0, workspaceBytes: 1024 },
     providers: [], mcp: [], sandbox: { allowed: true, mode: 'docker' }, inFlightTurns: 0 },
+  '/api/logs': [
+    { id: 1, ts: Date.now() - 5_000, level: 'warn', kind: 'sandbox.weak_isolation', summary: 'sandbox.persistent.network=bridge：持久容器可直连公网与宿主', trace_id: 'turn_aaaaaaaaaaaa', span_id: null, parent_span_id: null, chat_id: null, user_id: null, key: null, duration_ms: null, data_bytes: 120 },
+    { id: 2, ts: Date.now() - 6_000, level: 'warn', kind: 'plugin.hot_reload_unreliable', summary: '当前运行时下 plugin 热重载不可靠', trace_id: 'turn_bbbbbbbbbbbb', span_id: null, parent_span_id: null, chat_id: null, user_id: null, key: null, duration_ms: null, data_bytes: 80 },
+  ],
   '/api/quota': { quota: { enabled: true, requirePricing: true, minReserveUsd: 0.02, global: { daily: 5, monthly: 100 }, perChat: { daily: 1, monthly: null },
     perUser: { daily: 0.5, monthly: null, byRole: {} }, perTurn: { maxCostUsd: 0.5, maxSteps: 12 },
     rateLimit: { turnsPerUserPerHour: 30, turnsPerChatPerHour: 100, concurrentPerUser: 2 }, onExceeded: { reply: true, message: '额度用完了' } },
@@ -56,13 +62,13 @@ const RESPONSES: Record<string, unknown> = {
   // `sides` 三态各出现一次：只有主 agent（派发口）、只有 worker（主 agent 不再碰工具）、两侧共享。
   // 缺了它，工具表那一列的模板与过滤器就从未被渲染过。
   '/api/tools': { bash: { minRole: 'trusted', approval: 'conditional', scope: 'global', source: 'builtin', enabled: true,
-    timeoutMs: null, selfManagedTimeout: true, sides: ['worker'], defaults: { minRole: 'trusted', approval: 'conditional', timeoutMs: null }, relaxed: [] },
+    timeoutMs: null, selfManagedTimeout: true, deferred: false, sides: ['worker'], defaults: { minRole: 'trusted', approval: 'conditional', timeoutMs: null }, relaxed: [] },
     spawn_worker: { minRole: 'limited', approval: 'never', scope: 'chat', source: 'agent', enabled: true,
-      timeoutMs: null, selfManagedTimeout: true, sides: ['main'], defaults: { minRole: 'limited', approval: 'never', timeoutMs: null }, relaxed: [] },
+      timeoutMs: null, selfManagedTimeout: true, deferred: false, sides: ['main'], defaults: { minRole: 'limited', approval: 'never', timeoutMs: null }, relaxed: [] },
     memory_read: { minRole: 'limited', approval: 'never', scope: 'private', source: 'builtin', enabled: true,
-      timeoutMs: 5_000, selfManagedTimeout: false, sides: ['main', 'worker'], defaults: { minRole: 'limited', approval: 'never', timeoutMs: 5_000 }, relaxed: [] },
+      timeoutMs: 5_000, selfManagedTimeout: false, deferred: false, sides: ['main', 'worker'], defaults: { minRole: 'limited', approval: 'never', timeoutMs: 5_000 }, relaxed: [] },
     web_fetch: { minRole: 'owner', approval: 'never', scope: 'global', source: 'builtin', enabled: true,
-      timeoutMs: 45_000, selfManagedTimeout: false, sides: ['worker'], defaults: { minRole: 'limited', approval: 'never', timeoutMs: 60_000 }, relaxed: [] } },
+      timeoutMs: 45_000, selfManagedTimeout: false, deferred: true, sides: ['worker'], defaults: { minRole: 'limited', approval: 'never', timeoutMs: 60_000 }, relaxed: [] } },
   '/api/turns': { items: [], total: 0, page: 1, size: 20 },
   // 归档检索的命中行。此前一律返回 `{items: []}`，导致这一页的三个行内动作（查看轮次、查看原始载荷、
   // 软删除）从未被渲染过。
@@ -659,27 +665,66 @@ describe('ConsoleView 渲染', () => {
     wrapper.unmount();
   });
 
+  it('最近错误把事件名与摘要放进同一信息组，长标识不会侵入摘要', async () => {
+    const { default: ConsoleView } = await import('../../packages/webui/src/views/ConsoleView.vue');
+    const wrapper = mount(ConsoleView, { attachTo: document.body });
+    for (let round = 0; round < 12 && wrapper.findAll('.log-list > .log-row').length === 0; round += 1) await settle(wrapper);
+    const rows = wrapper.findAll('.log-list > .log-row');
+    expect(rows).toHaveLength(2);
+    for (const row of rows) {
+      const copy = row.find('.log-row-copy');
+      expect(copy.exists()).toBe(true);
+      expect(copy.find('code').text().length).toBeGreaterThan(0);
+      expect(copy.find('span').text().length).toBeGreaterThan(0);
+      expect(row.find('time[datetime]').exists()).toBe(true);
+    }
+    wrapper.unmount();
+  });
+
   /**
-   * 工具表的「可达侧」列（docs/09 §3.7）。三态必须都渲染得出来，且这一列**只读** ——
-   * 分叉由 `toolCallableBy()` 决定，做成开关就是又一个改了没效果的控件。
-   * `.vue` 模板不进 `tsc --noEmit`，判据只能固定在这里。
+   * 工具目录的可达侧与常驻 / 折叠均来自运行时，只读展示。分叉由 `toolCallableBy()` 决定，
+   * 折叠由 `tools.catalog.*` 决定；任一项做成行内开关都会产生第二份真相。
    */
-  it('工具表的可达侧列有三态、可按它筛，且不给任何开关', async () => {
+  it('工具策略列表显示可达侧与模型可见性，可分别筛选', async () => {
     const { default: ConsoleView } = await import('../../packages/webui/src/views/ConsoleView.vue');
     const wrapper = mount(ConsoleView, { attachTo: document.body });
     await settle(wrapper);
-    const vm = wrapper.vm as unknown as { active: string; sideFilter: string; visibleToolRows: Array<{ name: string }> };
+    const vm = wrapper.vm as unknown as { active: string; sideFilter: string; toolVisibilityFilter: string; visibleToolRows: Array<{ name: string }> };
     vm.active = 'tools';
     await settle(wrapper);
-    const table = wrapper.find('.page-surface');
+    const page = wrapper.find('.tool-page');
+    expect(page.find('.tool-policy-list').exists()).toBe(true);
+    expect(page.findAll('.tool-policy-row')).toHaveLength(4);
     for (const label of ['仅主 agent', '仅 worker', '两侧'])
-      expect(table.text(), `可达侧少了「${label}」这一档`).toContain(label);
-    // 这一列与 `enabled` 正交：弹窗与表头都要把这句说出来，否则运维会当成另一种停用。
-    expect(table.text()).toContain('tools.overrides');
+      expect(page.text(), `可达侧少了「${label}」这一档`).toContain(label);
+    for (const label of ['常驻', '折叠']) expect(page.text()).toContain(label);
+    expect(page.text()).toContain('tools.overrides');
     for (const [filter, names] of [['main', ['spawn_worker']], ['worker', ['bash', 'web_fetch']], ['both', ['memory_read']]] as const) {
       vm.sideFilter = filter;
       await settle(wrapper);
       expect(vm.visibleToolRows.map((row) => row.name).sort(), `${filter} 筛出来的行不对`).toEqual([...names].sort());
+    }
+    vm.sideFilter = '';
+    vm.toolVisibilityFilter = 'deferred';
+    await settle(wrapper);
+    expect(vm.visibleToolRows.map((row) => row.name)).toEqual(['web_fetch']);
+    wrapper.unmount();
+  });
+
+  it('工具页三个任务分区均有内容', async () => {
+    const { default: ConsoleView } = await import('../../packages/webui/src/views/ConsoleView.vue');
+    const wrapper = mount(ConsoleView, { attachTo: document.body });
+    await settle(wrapper);
+    const vm = wrapper.vm as unknown as { active: string; toolTab: string; TOOL_TABS: ReadonlyArray<readonly [string, string, string]> };
+    vm.active = 'tools';
+    await settle(wrapper);
+    expect(vm.TOOL_TABS.map(([key]) => key)).toEqual([...TOOL_TABS]);
+    for (const key of TOOL_TABS) {
+      vm.toolTab = key;
+      await settle(wrapper);
+      const panel = wrapper.find(`[data-tool-tab="${key}"]`);
+      expect(panel.exists(), `${key} 分区不存在`).toBe(true);
+      expect(panel.text().trim().length, `${key} 分区无内容`).toBeGreaterThan(20);
     }
     wrapper.unmount();
   });

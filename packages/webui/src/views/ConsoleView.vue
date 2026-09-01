@@ -52,7 +52,7 @@ interface MessageHit { id: number; chatId: string; direction: string; fromName: 
 // `sides` 由服务端按运行时判据 `toolCallableBy()` 现算（docs/09 §3.7）：主 agent 与 lw-worker
 // 的可用集在这里分叉，前端不再判一遍。它与 `enabled` 正交 —— 停用是两侧都没有。
 interface ToolPolicy { minRole: string; approval: string; scope: string; source: string; enabled: boolean; timeoutMs: number | null;
-  selfManagedTimeout: boolean; sides?: Array<'main' | 'worker'>; defaults: { minRole: string; approval: string; timeoutMs: number | null }; relaxed: string[] }
+  selfManagedTimeout: boolean; deferred: boolean; sides?: Array<'main' | 'worker'>; defaults: { minRole: string; approval: string; timeoutMs: number | null }; relaxed: string[] }
 const active = ref('dashboard');
 const dashboard = ref<Dashboard>({ turns: { total: 0, running: 0, failed: 0, cost: 0 }, messages: { total: 0 }, providers: { total: 0, enabled: 0 } });
 const principals = ref<Principal[]>([]);
@@ -253,14 +253,27 @@ const catalogExists = (entry: CatalogModel): boolean => importedModelKeys.value.
 const catalogRows = computed(() => { const needle = catalogQuery.value.trim().toLowerCase(); return needle ? catalogModels.value.filter((entry) => entry.modelId.toLowerCase().includes(needle) || (entry.displayName ?? '').toLowerCase().includes(needle)) : catalogModels.value; });
 const mobileMenu = ref(false);
 const connected = ref(false);
-const navigation = [
-  ['dashboard', 'pi pi-chart-bar', '总览'], ['chats', 'pi pi-comments', '会话'], ['messages', 'pi pi-search', '消息'],
-  ['prompts', 'pi pi-align-left', '提示词'], ['providers', 'pi pi-sparkles', '模型'], ['principals', 'pi pi-users', '主体'],
-  ['tools', 'pi pi-wrench', '工具'], ['extensions', 'pi pi-box', '扩展'], ['workers', 'pi pi-sitemap', 'Worker'],
-  ['logs', 'pi pi-list', '日志'], ['usage', 'pi pi-wallet', '用量'], ['quota', 'pi pi-gauge', '配额'],
-  ['tasks', 'pi pi-check-square', '任务与审批'], ['settings', 'pi pi-cog', '设置'],
+const navigationSections = [
+  { label: '工作区', eyebrow: 'OPERATIONS', items: [
+    ['dashboard', 'pi pi-chart-bar', '总览'], ['chats', 'pi pi-comments', '会话'],
+    ['messages', 'pi pi-search', '消息'], ['prompts', 'pi pi-align-left', '提示词'],
+  ] },
+  { label: '资源', eyebrow: 'RESOURCES', items: [
+    ['providers', 'pi pi-sparkles', '模型'], ['principals', 'pi pi-users', '主体'],
+    ['tools', 'pi pi-wrench', '工具'], ['extensions', 'pi pi-box', '扩展'],
+    ['workers', 'pi pi-sitemap', 'Worker'],
+  ] },
+  { label: '观测', eyebrow: 'OBSERVABILITY', items: [
+    ['logs', 'pi pi-list', '日志'], ['usage', 'pi pi-wallet', '用量'], ['quota', 'pi pi-gauge', '配额'],
+  ] },
+  { label: '管理', eyebrow: 'GOVERNANCE', items: [
+    ['tasks', 'pi pi-check-square', '任务与审批'], ['settings', 'pi pi-cog', '设置'],
+  ] },
 ] as const;
-const currentLabel = computed(() => navigation.find(([key]) => key === active.value)?.[2] ?? '总览');
+const navigation = navigationSections.flatMap(({ items }) => items);
+const currentNavigation = computed(() => navigation.find(([key]) => key === active.value));
+const currentLabel = computed(() => currentNavigation.value?.[2] ?? '总览');
+const currentEyebrow = computed(() => navigationSections.find(({ items }) => items.some(([key]) => key === active.value))?.eyebrow ?? 'OPERATIONS');
 /**
  * 每一条 pending 都对应一个正阻塞在工具调用上的真实轮次，因此角标挂在导航上而不是只在任务页里。
  *
@@ -285,8 +298,8 @@ const COLUMNS = {
   models: [{ key: 'model_id', header: '模型 ID' }, { key: 'provider_id', header: 'Provider' }, { key: 'context_window', header: '上下文窗口', align: 'right' }, { key: 'capabilities', header: '能力' }, { key: 'price_in', header: '输入价格', align: 'right' }, { key: 'price_out', header: '输出价格', align: 'right' }, { key: 'enabled', header: '启用', width: '6rem' }, { key: 'actions', header: '操作', width: '4rem' }],
   logs: [{ key: 'ts', header: '时间', width: '13rem' }, { key: 'level', header: '级别', width: '7rem' }, { key: 'kind', header: '事件' }, { key: 'summary', header: '摘要' }, { key: 'data_bytes', header: '载荷', width: '6rem' }, { key: 'trace_id', header: 'Trace' }],
   // tasks / schedules / approvals 三套跟着那三张卡搬进 `components/tasks/types.ts`。
-  containers: [{ key: 'chat', header: '会话' }, { key: 'name', header: '容器', width: '14rem' }, { key: 'used', header: '上次用 / 次数', width: '13rem' }, { key: 'expires', header: '还剩', width: '8rem' }, { key: 'actions', header: '', width: '17rem' }],
-  activeTurns: [{ key: 'who', header: '发起人' }, { key: 'chat', header: '会话' }, { key: 'progress', header: '当前动作' }, { key: 'stats', header: '步数 / 成本', width: '11rem' }, { key: 'elapsed', header: '已用时长', width: '8rem' }, { key: 'actions', header: '', width: '6rem' }],
+  containers: [{ key: 'chat', header: '会话' }, { key: 'name', header: '容器', width: '14rem' }, { key: 'used', header: '上次用 / 次数', width: '13rem' }, { key: 'expires', header: '还剩', width: '8rem' }, { key: 'actions', header: '操作', width: '17rem' }],
+  activeTurns: [{ key: 'who', header: '发起人' }, { key: 'chat', header: '会话' }, { key: 'progress', header: '当前动作' }, { key: 'stats', header: '步数 / 成本', width: '11rem' }, { key: 'elapsed', header: '已用时长', width: '8rem' }, { key: 'actions', header: '操作', width: '6rem' }],
   catalog: [{ key: 'modelId', header: '模型 ID' }, { key: 'limits', header: '窗口 / 最大输出', width: '11rem' }, { key: 'price', header: '价格 / M token', width: '13rem' }, { key: 'capabilities', header: '能力' }, { key: 'status', header: '状态', width: '7rem' }],
   fallback: [{ key: 'kind', header: '关联事件' }, { key: 'summary', header: '最近状态' }, { key: 'level', header: '级别' }],
 } satisfies Record<string, GridColumn[]>;
@@ -1048,15 +1061,46 @@ const SIDE_FILTERS = [
   { value: '', label: '全部' }, { value: 'both', label: '两侧' },
   { value: 'main', label: '仅主 agent' }, { value: 'worker', label: '仅 worker' },
 ];
+const TOOL_TABS = [
+  ['catalog', '策略目录', 'pi pi-list'],
+  ['approval', '审批试跑', 'pi pi-shield'],
+  ['runtime', '执行环境', 'pi pi-box'],
+] as const;
+const toolTab = ref<(typeof TOOL_TABS)[number][0]>('catalog');
 const sideFilter = ref('');
+const toolQuery = ref('');
+const toolVisibilityFilter = ref('');
+const TOOL_VISIBILITY_FILTERS = [
+  { value: '', label: '全部可见性' }, { value: 'resident', label: '常驻' }, { value: 'deferred', label: '折叠' },
+];
 const APPROVAL_LABEL: Record<string, string> = { never: '不需要', always: '每次审批', conditional: '按规则判定' };
 const SCOPE_LABEL: Record<string, string> = { workspace: '工作区文件', chat: '当前会话', private: '用户私有', global: '全局', sandbox: '沙箱执行', telegram: 'Telegram' };
 const ROLE_OPTIONS = ['blocked', 'limited', 'trusted', 'owner'].map((value) => ({ value, label: value }));
 const APPROVAL_OPTIONS = ['never', 'conditional', 'always'].map((value) => ({ value, label: `${value}（${APPROVAL_LABEL[value]}）` }));
 const toolRows = computed(() => Object.entries(tools.value).map(([name, policy]) => ({ name, ...policy })));
-const visibleToolRows = computed(() => sideFilter.value ? toolRows.value.filter((row) => sideKey(row.sides) === sideFilter.value) : toolRows.value);
+const visibleToolRows = computed(() => {
+  const needle = toolQuery.value.trim().toLowerCase();
+  return toolRows.value.filter((row) => {
+    if (sideFilter.value && sideKey(row.sides) !== sideFilter.value) return false;
+    if (toolVisibilityFilter.value === 'resident' && row.deferred) return false;
+    if (toolVisibilityFilter.value === 'deferred' && !row.deferred) return false;
+    return !needle || [row.name, row.source, row.scope, row.minRole, row.approval]
+      .some((value) => String(value).toLowerCase().includes(needle));
+  });
+});
+const enabledToolCount = computed(() => toolRows.value.filter((row) => row.enabled).length);
+const approvalToolCount = computed(() => toolRows.value.filter((row) => row.approval !== 'never').length);
+const deferredToolCount = computed(() => toolRows.value.filter((row) => row.deferred).length);
 const overriddenToolCount = computed(() => toolRows.value.filter((row) => row.minRole !== row.defaults?.minRole
   || row.approval !== row.defaults?.approval || (row.timeoutMs ?? null) !== (row.defaults?.timeoutMs ?? null)).length);
+const toolPage = ref(1);
+const TOOL_PAGE_SIZE = 12;
+const toolPages = computed(() => Math.max(1, Math.ceil(visibleToolRows.value.length / TOOL_PAGE_SIZE)));
+const pagedToolRows = computed(() => {
+  const page = Math.min(toolPage.value, toolPages.value);
+  return visibleToolRows.value.slice((page - 1) * TOOL_PAGE_SIZE, page * TOOL_PAGE_SIZE);
+});
+watch([sideFilter, toolVisibilityFilter, toolQuery], () => { toolPage.value = 1; });
 const toolDialog = ref(false);
 const toolSaving = ref(false);
 interface ToolForm { name: string; minRole: string; approval: string; scope: string; source: string; enabled: boolean; timeoutMs: number | null;
@@ -1934,11 +1978,6 @@ const revisionValue = (raw: string | null, side: 'old' | 'new'): string => (raw 
   ? (side === 'old' ? '（此前没有覆盖）' : '（这条覆盖已被删除）')
   : raw.length > 160 ? `${raw.slice(0, 160)}…` : raw);
 
-/** 侧栏那行监听地址：来自合并后的配置，不是写死的默认值。 */
-const listenAddress = computed(() => {
-  const webui = (config.value.webui ?? {}) as { host?: string; port?: number };
-  return webui.host && webui.port ? `${webui.host}:${webui.port}` : location.host;
-});
 
 async function logout(): Promise<void> {
   try { await api('/api/auth/logout', { method: 'POST', body: '{}' }); } catch { /* 会话可能已经过期，照样跳登录页 */ }
@@ -2022,20 +2061,21 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
     <aside class="sidebar">
       <div class="brand"><div class="brand-mark">{{ botName.slice(0, 1).toUpperCase() }}</div><div><b>{{ botName }}</b><span>CONTROL PLANE</span></div></div>
       <nav aria-label="主导航">
-        <button v-for="item in navigation" :key="item[0]" type="button" :class="{ active: active === item[0] }" @click="active = item[0]">
-          <i :class="item[1]" aria-hidden="true" /><span>{{ item[2] }}</span>
-          <span v-if="item[0] === 'tasks' && pendingApprovals" class="nav-badge" :title="`${pendingApprovals} 个调用等待审批`">{{ pendingApprovals }}</span>
-        </button>
+        <div v-for="section in navigationSections" :key="section.label" class="nav-section">
+          <p class="nav-label">{{ section.label }}</p>
+          <button v-for="item in section.items" :key="item[0]" type="button" :class="{ active: active === item[0] }" @click="active = item[0]">
+            <i :class="item[1]" aria-hidden="true" /><span>{{ item[2] }}</span>
+            <span v-if="item[0] === 'tasks' && pendingApprovals" class="nav-badge" :title="`${pendingApprovals} 个调用等待审批`">{{ pendingApprovals }}</span>
+          </button>
+        </div>
       </nav>
-      <!-- 监听地址读配置：写死成 127.0.0.1:8787 的话，改过 host/port 的部署会看到一个假地址 -->
-      <div class="system-pill"><span :class="['status-dot', { live: connected }]" /><div><b>{{ connected ? '系统在线' : '正在连接' }}</b><small>{{ listenAddress }}</small></div></div>
     </aside>
 
     <section class="main-panel">
       <header class="topbar">
         <UiButton class="mobile-only" variant="text" icon="pi pi-bars" aria-label="打开导航" @click="mobileMenu = true" />
-        <div><p class="eyebrow">OPERATIONS</p><h1>{{ currentLabel }}</h1></div>
-        <div class="top-actions"><label class="search"><i class="pi pi-search" /><input v-model="query" placeholder="搜索 trace、会话或主体"></label><UiButton variant="outlined" icon="pi pi-bell" aria-label="通知" />
+        <div><p class="eyebrow">{{ currentEyebrow }}</p><h1>{{ currentLabel }}</h1></div>
+        <div class="top-actions"><label class="search"><i class="pi pi-search" aria-hidden="true" /><input v-model="query" type="search" aria-label="全局搜索" placeholder="搜索 trace、会话或主体"></label><UiButton variant="outlined" icon="pi pi-bell" aria-label="通知" />
           <button type="button" class="owner-chip" :title="`bot owner · ${ownerLabel} ${ownerHandle}`" @click="active = 'principals'">
             <span class="avatar">{{ ownerInitials }}</span><span class="who"><b>{{ ownerLabel }}</b><small>{{ ownerHandle }}</small></span>
           </button>
@@ -2079,8 +2119,11 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
                  的最近 6 条，实际上永远被 info 刷满 —— 一张「最近错误」卡片看不到错误（docs/09 §3.1）。 -->
             <article class="surface"><header><div><p class="eyebrow">RECENT ERRORS</p><h3>最近错误</h3><p class="section-note">点击任一行打开对应 trace</p></div><UiButton variant="text" label="查看全部" icon="pi pi-arrow-right" icon-pos="right" @click="active = 'logs'" /></header>
               <div class="log-list">
-                <button v-for="row in recentErrors" :key="row.id" type="button" class="log-row" @click="openTrace(row.trace_id)">
-                  <span :class="['level', row.level]">{{ row.level }}</span><code>{{ row.kind }}</code><p>{{ row.summary }}</p><time>{{ new Date(row.ts).toLocaleTimeString() }}</time>
+                <button v-for="row in recentErrors" :key="row.id" type="button" class="log-row" :aria-label="`打开 ${row.kind} 的 trace`" @click="openTrace(row.trace_id)">
+                  <span :class="['level', row.level]">{{ row.level }}</span>
+                  <span class="log-row-copy"><code :title="row.kind">{{ row.kind }}</code><span :title="row.summary">{{ row.summary }}</span></span>
+                  <time :datetime="new Date(row.ts).toISOString()">{{ new Date(row.ts).toLocaleTimeString() }}</time>
+                  <i class="pi pi-chevron-right log-row-arrow" aria-hidden="true" />
                 </button>
                 <div v-if="!recentErrors.length" class="empty">暂无</div>
               </div>
@@ -2271,45 +2314,87 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             </footer>
           </template>
         </section>
-        <section v-else-if="active === 'tools'" key="tools" class="surface page-surface"><header><div><p class="eyebrow">TOOL POLICY</p><h2>工具与权限</h2><p>此处修改 <code>TOOL_POLICY</code> 的覆盖层。点击任一行可改启停 / 最低角色 / 审批 / 超时；放宽需二次确认。</p></div><div class="header-tags"><UiTag v-if="overriddenToolCount" :value="`${overriddenToolCount} 项策略已覆盖`" severity="info" /><UiTag :value="`${toolRows.filter((row) => row.enabled).length} / ${toolRows.length} 启用`" :severity="toolRows.every((row) => row.enabled) ? 'secondary' : 'warn'" /></div></header>
-          <div class="section-actions">
-            <UiSelect v-model="sideFilter" :options="SIDE_FILTERS" option-label="label" option-value="value" aria-label="可达侧" />
-            <small class="field-note">可达侧由代码里的判据决定，不可覆盖；<code>tools.overrides.&lt;name&gt;.enabled=false</code> 与它正交，那是两侧都停用。</small>
+        <section v-else-if="active === 'tools'" key="tools" class="surface page-surface tool-page">
+          <header><div><p class="eyebrow">TOOL CONTROL</p><h2>工具与权限</h2><p>工具可见性、调用权限、审批策略与执行环境</p></div><UiTag :value="`${enabledToolCount} / ${toolRows.length} 启用`" :severity="enabledToolCount === toolRows.length ? 'secondary' : 'warn'" /></header>
+          <nav class="subtabs tool-tabs" aria-label="工具管理分区">
+            <button v-for="[key, label, icon] in TOOL_TABS" :key="key" type="button" :class="{ active: toolTab === key }" @click="toolTab = key">
+              <i :class="icon" aria-hidden="true" />{{ label }}
+            </button>
+          </nav>
+
+          <div v-show="toolTab === 'catalog'" data-tool-tab="catalog" class="tool-tab-panel">
+            <dl class="tool-summary-strip" aria-label="工具策略摘要">
+              <div><dt>启用</dt><dd>{{ enabledToolCount }}<small>/ {{ toolRows.length }}</small></dd></div>
+              <div><dt>策略覆盖</dt><dd>{{ overriddenToolCount }}</dd></div>
+              <div><dt>需审批</dt><dd>{{ approvalToolCount }}</dd></div>
+              <div><dt>折叠目录</dt><dd>{{ deferredToolCount }}</dd></div>
+            </dl>
+            <section class="tool-module tool-catalog-module">
+              <header><div><h3>策略目录</h3><p class="section-note">选择工具以修改启停、最低角色、审批策略与超时。</p></div><UiTag :value="`${visibleToolRows.length} 项`" severity="secondary" /></header>
+              <div class="tool-filterbar">
+                <label class="tool-filter-search"><i class="pi pi-search" aria-hidden="true" /><input v-model="toolQuery" type="search" aria-label="搜索工具" placeholder="搜索名称、来源或作用域"></label>
+                <UiSelect v-model="sideFilter" :options="SIDE_FILTERS" option-label="label" option-value="value" aria-label="可达侧" />
+                <UiSelect v-model="toolVisibilityFilter" :options="TOOL_VISIBILITY_FILTERS" option-label="label" option-value="value" aria-label="模型可见性" />
+              </div>
+              <p class="tool-filter-note"><i class="pi pi-info-circle" aria-hidden="true" />可达侧与模型可见性均为只读状态。<code>tools.overrides.&lt;name&gt;.enabled=false</code> 才会在两侧停用工具。</p>
+              <div class="tool-policy-list" role="list">
+                <div class="tool-policy-head" aria-hidden="true"><span>工具</span><span>可达与可见性</span><span>权限策略</span><span>状态</span></div>
+                <button v-for="row in pagedToolRows" :key="row.name" type="button" role="listitem" :class="['tool-policy-row', { disabled: !row.enabled, relaxed: row.relaxed?.length }]" @click="editTool(row)">
+                  <span class="tool-identity">
+                    <span class="tool-name"><i aria-hidden="true" /><code :title="row.name">{{ row.name }}</code></span>
+                    <small>{{ TOOL_SOURCE_LABEL[row.source] ?? row.source }} · {{ SCOPE_LABEL[row.scope] ?? row.scope }}</small>
+                  </span>
+                  <span class="tool-visibility">
+                    <span class="tool-route" aria-hidden="true"><b :class="{ active: row.sides?.includes('main') }">MAIN</b><i /><b :class="{ active: row.sides?.includes('worker') }">WORKER</b></span>
+                    <small><b>{{ SIDE_LABEL[sideKey(row.sides)]!.label }}</b><span>·</span><b :class="row.deferred ? 'deferred' : 'resident'">{{ row.deferred ? '折叠' : '常驻' }}</b></small>
+                  </span>
+                  <span class="tool-permission">
+                    <span><small>最低角色</small><UiTag :value="row.minRole" :severity="roleSeverity(row.minRole)" /><i v-if="row.defaults && row.minRole !== row.defaults.minRole" class="pi pi-pencil overridden" :title="`代码默认 ${row.defaults.minRole}`" /></span>
+                    <span><small>审批</small><b>{{ APPROVAL_LABEL[row.approval] ?? row.approval }}</b><i v-if="row.defaults && row.approval !== row.defaults.approval" class="pi pi-pencil overridden" :title="`代码默认 ${row.defaults.approval}`" /></span>
+                  </span>
+                  <span class="tool-row-state"><span><UiTag :value="row.enabled ? '启用' : '已停用'" :severity="row.enabled ? 'success' : 'danger'" /><UiTag v-if="row.relaxed?.length" value="已放宽" severity="danger" :title="`${row.relaxed.join('、')} 比代码默认更宽松`" /></span><i class="pi pi-chevron-right" aria-hidden="true" /></span>
+                </button>
+                <div v-if="!pagedToolRows.length" class="empty tool-empty">没有符合筛选条件的工具</div>
+              </div>
+              <footer v-if="toolPages > 1" class="grid-pager tool-pager">
+                <span>第 {{ toolPage }} / {{ toolPages }} 页</span>
+                <button type="button" aria-label="上一页" :disabled="toolPage <= 1" @click="toolPage -= 1"><i class="pi pi-chevron-left" aria-hidden="true" /></button>
+                <button type="button" aria-label="下一页" :disabled="toolPage >= toolPages" @click="toolPage += 1"><i class="pi pi-chevron-right" aria-hidden="true" /></button>
+              </footer>
+            </section>
           </div>
-          <DataGrid :rows="visibleToolRows" :columns="COLUMNS.tools" data-key="name" paginate :page-size="15" clickable empty="没有可达侧符合这个筛选的工具" @row-click="editTool">
-            <template #name="{ data }"><code>{{ data.name }}</code></template>
-            <template #source="{ data }">{{ TOOL_SOURCE_LABEL[data.source] ?? data.source }}</template>
-            <template #sides="{ data }"><UiTag :value="SIDE_LABEL[sideKey(data.sides)]!.label" :severity="SIDE_LABEL[sideKey(data.sides)]!.severity" :title="SIDE_LABEL[sideKey(data.sides)]!.hint" /></template>
-            <template #minRole="{ data }"><UiTag :value="data.minRole" :severity="roleSeverity(data.minRole)" /><i v-if="data.defaults && data.minRole !== data.defaults.minRole" class="pi pi-pencil overridden" :title="`代码默认 ${data.defaults.minRole}`" /></template>
-            <template #approval="{ data }">{{ APPROVAL_LABEL[data.approval] ?? data.approval }}<i v-if="data.defaults && data.approval !== data.defaults.approval" class="pi pi-pencil overridden" :title="`代码默认 ${data.defaults.approval}`" /></template>
-            <template #scope="{ data }">{{ SCOPE_LABEL[data.scope] ?? data.scope }}</template>
-            <template #enabled="{ data }"><UiTag :value="data.enabled ? '启用' : '已停用'" :severity="data.enabled ? 'success' : 'danger'" /><UiTag v-if="data.relaxed?.length" value="已放宽" severity="danger" :title="`${data.relaxed.join('、')} 比代码默认更宽松`" /></template>
-          </DataGrid>
-          <div class="registry-heading">
-            <div><h3>审批规则试跑</h3><p class="section-note">以样例输入执行<b>运行时的</b> <code>ApprovalRules</code>。规则在「全部配置」的 <code>approval.rules</code> 中编辑。</p></div>
-            <UiButton size="small" variant="outlined" icon="pi pi-play" label="试跑" :loading="ruleTesting" :disabled="!ruleTestTool" @click="testApprovalRule" />
+
+          <div v-show="toolTab === 'approval'" data-tool-tab="approval" class="tool-tab-panel">
+            <section class="tool-module tool-approval-module">
+              <header><div><h3>审批规则试跑</h3><p class="section-note">使用运行时 <code>ApprovalRules</code> 检查样例输入。</p></div><UiButton size="small" icon="pi pi-play" label="运行检查" :loading="ruleTesting" :disabled="!ruleTestTool" @click="testApprovalRule" /></header>
+              <div class="approval-workbench">
+                <div class="approval-input-panel">
+                  <label>工具名<UiSelect v-model="ruleTestTool" :options="Object.keys(tools).map((name) => ({ value: name, label: name }))" filter aria-label="工具名" /></label>
+                  <label>样例输入（JSON）<textarea v-model="ruleTestInput" rows="8" spellcheck="false" placeholder='{"command":"rm -rf /"}' /><small><code>pattern</code> 匹配 JSON 序列化结果，包含键名。</small></label>
+                </div>
+                <div class="approval-output-panel" aria-live="polite">
+                  <template v-if="ruleTestResult">
+                    <p :class="['callout', ruleTestResult.needed ? 'warn' : '']"><i :class="ruleTestResult.needed ? 'pi pi-shield' : 'pi pi-check-circle'" />{{ ruleTestResult.needed ? `需要审批 · 风险 ${ruleTestResult.risk}` : '不需要审批' }}<span v-if="ruleTestResult.runtimeDependent">存在 <code>when: target_exists</code> 规则，试跑无法判定。</span></p>
+                    <ol class="rule-report"><li v-for="entry in ruleTestResult.rules" :key="entry.index" :class="{ matched: entry.matched }"><UiTag :value="entry.matched ? '命中' : '未命中'" :severity="entry.matched ? 'warn' : 'secondary'" /><code>#{{ entry.index }}</code><span>{{ entry.reason }}</span></li></ol>
+                    <p v-if="!ruleTestResult.rules.length" class="empty">暂无审批规则</p>
+                  </template>
+                  <div v-else class="approval-placeholder"><i class="pi pi-shield" aria-hidden="true" /><b>等待检查</b><span>选择工具并输入样例参数</span></div>
+                </div>
+              </div>
+              <p class="tool-module-foot">规则编辑入口：设置 → 全部配置 → <code>approval.rules</code></p>
+            </section>
           </div>
-          <div class="form-grid">
-            <label>工具名<UiSelect v-model="ruleTestTool" :options="Object.keys(tools).map((name) => ({ value: name, label: name }))" filter aria-label="工具名" /></label>
-            <label>样例输入（JSON）<textarea v-model="ruleTestInput" rows="3" spellcheck="false" placeholder='{"command":"rm -rf /"}' /><small class="field-note"><code>pattern</code> 匹配该输入的 JSON 序列化结果，含键名。</small></label>
-          </div>
-          <div v-if="ruleTestResult" class="rule-test-result">
-            <p :class="['callout', ruleTestResult.needed ? 'warn' : '']">
-              <i :class="ruleTestResult.needed ? 'pi pi-shield' : 'pi pi-check-circle'" />
-              {{ ruleTestResult.needed ? `需要审批 · 风险 ${ruleTestResult.risk}` : '不需要审批（无规则命中）' }}
-              <span v-if="ruleTestResult.runtimeDependent">。存在 <code>when: target_exists</code> 规则，试跑无法判定。</span>
-            </p>
-            <ol class="rule-report"><li v-for="entry in ruleTestResult.rules" :key="entry.index" :class="{ matched: entry.matched }"><UiTag :value="entry.matched ? '命中' : '未命中'" :severity="entry.matched ? 'warn' : 'secondary'" /><code>#{{ entry.index }}</code><span>{{ entry.reason }}</span></li></ol>
-            <p v-if="!ruleTestResult.rules.length" class="empty">暂无审批规则</p>
-          </div>
-          <div class="registry-heading">
+
+          <div v-show="toolTab === 'runtime'" data-tool-tab="runtime" class="tool-tab-panel">
+          <section class="tool-module">
+          <header>
             <div><h3>沙箱</h3><p class="section-note">决定 <code>exec</code> 类工具的执行位置，保存后热更新。<code>bypassRoles</code> 中的角色<b>完全绕过</b>沙箱，直接在宿主执行。</p></div>
             <div class="section-actions">
               <UiButton size="small" variant="outlined" icon="pi pi-bolt" label="探测可用性" :loading="sandboxProbing" @click="probeSandbox" />
               <UiButton size="small" variant="outlined" icon="pi pi-cloud-download" label="拉取镜像" :loading="pullingImage" :disabled="sandboxForm.mode !== 'docker'" @click="pullSandboxImage" />
               <UiButton size="small" icon="pi pi-save" label="保存沙箱" :loading="sandboxSaving" :disabled="!sandboxDirty" @click="saveSandbox" />
             </div>
-          </div>
+          </header>
           <div v-if="sandboxForm.mode === 'none'" class="danger-banner"><i class="pi pi-exclamation-triangle" /><code>mode = none</code>：exec 类工具不隔离，以 bot 进程权限在宿主执行模型给出的命令。</div>
           <div v-if="sandbox?.plan && !sandbox.plan.allowed" class="danger-banner"><i class="pi pi-exclamation-triangle" />沙箱对 owner 也不可用：{{ sandbox.plan.reason ?? '未知原因' }}。需要沙箱的工具将失败。</div>
           <p v-if="sandboxProbe" :class="['callout', sandboxProbe.available ? '' : 'warn']"><i :class="sandboxProbe.available ? 'pi pi-check-circle' : 'pi pi-times-circle'" />探测结果（基于<b>已保存</b>的配置）：{{ sandboxProbe.available ? `可用 · ${sandboxProbe.mode ?? sandboxForm.mode}` : sandboxProbe.error ?? '不可用' }}</p>
@@ -2343,9 +2428,11 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
               </p>
             </div>
           </div>
-          <div class="registry-heading">
+          </section>
+          <section class="tool-module">
+          <header>
             <div><h3>持久容器</h3><p class="section-note">启用后<b>每个群 / 私聊各有一个常驻容器</b>，执行走 <code>docker exec</code>，后台进程可保留到下一轮。仅在 <code>mode = docker</code> 下生效。</p></div>
-          </div>
+          </header>
           <div v-if="sandboxForm.persistent.enabled" class="danger-banner"><i class="pi pi-exclamation-triangle" />持久容器<b>默认可出网</b>：<code>bridge</code> 下容器可直接访问公网与宿主。</div>
           <div class="form-grid">
             <UiSwitch v-model="sandboxForm.persistent.enabled" class="wide" label="启用会话级持久容器" :disabled="sandboxForm.mode !== 'docker'" @change="markSandboxDirty" />
@@ -2374,6 +2461,8 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
               <UiButton size="small" variant="outlined" severity="danger" icon="pi pi-trash" title="重置并将工作区文件移入 .luoli-trash" :loading="containerBusy === data.chatId" @click="resetContainer(data, true)" />
             </div></template>
           </DataGrid>
+          </section>
+          </div>
         </section>
         <!-- 扩展页整段搬进 `ExtensionsPage.vue`（四类各一套版式 + MCP 登录，docs/09 §3.8）。
              `key` 是必须的：相邻页面都是 `<section>`，没有 key 时 Vue 认成同一个节点，
@@ -2621,54 +2710,97 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             <div><h3>触发与唤醒词</h3><p class="section-note">五个来源取并集，命中任一条即开启轮次；群内无命中的消息仅作背景发言存档。保存后热更新。</p></div>
             <UiButton size="small" icon="pi pi-save" label="保存触发设置" :loading="triggerSaving" :disabled="!triggerDirty" @click="saveTrigger" />
           </div>
-          <div class="form-grid">
-            <!-- 五个来源取并集，是「哪些消息算触发」这一个集合的成员，不是五个独立开关 —— 用勾选框。 -->
-            <div class="trigger-switches">
-              <UiCheckbox v-model="triggerForm.private" label="私聊消息" @change="markTriggerDirty" />
-              <UiCheckbox v-model="triggerForm.mention" label="@ 提及" @change="markTriggerDirty" />
-              <UiCheckbox v-model="triggerForm.reply" label="回复 bot" @change="markTriggerDirty" />
-              <UiCheckbox v-model="triggerForm.command" label="bot 命令" @change="markTriggerDirty" />
-              <UiCheckbox v-model="triggerForm.channels" label="频道消息" @change="markTriggerDirty" />
-            </div>
-            <div class="wide">
-              <p class="field-title">唤醒词<small>不以 ^ 开头 = 包含匹配，忽略大小写；以 ^ 开头 = 正则（u 标志，仅扫描前 4096 字符），大小写敏感，需忽略写 ^(?i)nori。私聊不判定唤醒词。</small></p>
-              <div class="wake-list">
-                <span v-for="entry in wakewordStatus" :key="entry.pattern" :class="['wake-chip', { bad: !entry.ok }]" :title="entry.reason ?? ''">
-                  <code>{{ entry.pattern }}</code>
-                  <UiTag :value="entry.kind === 'regex' ? '正则' : '包含'" :severity="entry.kind === 'regex' ? 'info' : 'secondary'" />
-                  <UiTag v-if="!entry.ok" value="不生效" severity="danger" />
-                  <button type="button" aria-label="删除唤醒词" @click="removeWakeword(entry.pattern)"><i class="pi pi-times" /></button>
-                </span>
-                <span v-if="!triggerForm.wakewords.length" class="alias-empty">未配置唤醒词：群内仅能 @ 提及、回复或命令触发。</span>
+          <div class="settings-list" role="list" aria-label="触发与唤醒词配置列表">
+            <div class="settings-item" role="listitem">
+              <div class="settings-name"><b>触发来源</b><small>命中任一来源即开启轮次</small></div>
+              <div class="settings-control trigger-switches">
+                <UiCheckbox v-model="triggerForm.private" label="私聊消息" @change="markTriggerDirty" />
+                <UiCheckbox v-model="triggerForm.mention" label="@ 提及" @change="markTriggerDirty" />
+                <UiCheckbox v-model="triggerForm.reply" label="回复 bot" @change="markTriggerDirty" />
+                <UiCheckbox v-model="triggerForm.command" label="bot 命令" @change="markTriggerDirty" />
+                <UiCheckbox v-model="triggerForm.channels" label="频道消息" @change="markTriggerDirty" />
               </div>
-              <p v-for="entry in wakewordStatus.filter((item) => !item.ok)" :key="`bad-${entry.pattern}`" class="field-note wake-issue"><i class="pi pi-exclamation-triangle" />「{{ entry.pattern }}」{{ entry.reason }}。匹配时跳过，保存也会被拒绝。</p>
-              <div class="wake-add"><input v-model="newWakeword" placeholder="例如 洛璃 或 ^璃酱[，,、 ]" @keyup.enter="addWakeword"><UiButton size="small" variant="outlined" icon="pi pi-plus" label="添加" @click="addWakeword" /></div>
+              <small class="settings-meta">五个来源取并集，不是互斥选项。群内未命中的消息仅作背景发言存档。</small>
             </div>
-            <label>唤醒词最短长度<UiNumber :model-value="triggerForm.wakewordMinLength" :min="1" :max="32" @update:model-value="changeWakewordMinLength" /><small class="field-note">短于该长度的唤醒词整条忽略（按 ^ 之后的字符数计）。</small></label>
-            <div class="switch-column">
-              <UiSwitch v-model="triggerForm.requireTextAfterMention" label="仅 @ 而无正文时不触发" @change="markTriggerDirty" />
-              <!-- 这一格在 KNOWN_UNIMPLEMENTED_CONFIG_KEYS 里：编辑消息一律按背景消息归档，
-                   开关存得下但运行时没人读（docs/20 · W-TG-05）。不能让它看起来像个能用的开关。 -->
-              <UiSwitch v-model="triggerForm.ignoreEditedAsTrigger" disabled>编辑旧消息不重新触发<UiTag value="未接线" severity="secondary" title="编辑消息按背景消息归档，运行时无代码读取该开关" /></UiSwitch>
+            <div class="settings-item" role="listitem">
+              <div class="settings-name"><b>唤醒词</b><small>私聊不判定唤醒词</small></div>
+              <div class="settings-control">
+                <div class="wake-list">
+                  <span v-for="entry in wakewordStatus" :key="entry.pattern" :class="['wake-chip', { bad: !entry.ok }]" :title="entry.reason ?? ''">
+                    <code>{{ entry.pattern }}</code>
+                    <UiTag :value="entry.kind === 'regex' ? '正则' : '包含'" :severity="entry.kind === 'regex' ? 'info' : 'secondary'" />
+                    <UiTag v-if="!entry.ok" value="不生效" severity="danger" />
+                    <button type="button" aria-label="删除唤醒词" @click="removeWakeword(entry.pattern)"><i class="pi pi-times" /></button>
+                  </span>
+                  <span v-if="!triggerForm.wakewords.length" class="alias-empty">未配置唤醒词：群内仅能 @ 提及、回复或命令触发。</span>
+                </div>
+                <div class="wake-add"><input v-model="newWakeword" aria-label="新唤醒词" placeholder="例如 洛璃 或 ^璃酱[，,、 ]" @keyup.enter="addWakeword"><UiButton size="small" variant="outlined" icon="pi pi-plus" label="添加" @click="addWakeword" /></div>
+              </div>
+              <div class="settings-meta">
+                <small>不以 <code>^</code> 开头为忽略大小写的包含匹配；以 <code>^</code> 开头为大小写敏感的正则，仅扫描前 4096 字符。</small>
+                <small v-for="entry in wakewordStatus.filter((item) => !item.ok)" :key="`bad-${entry.pattern}`" class="wake-issue"><i class="pi pi-exclamation-triangle" />「{{ entry.pattern }}」{{ entry.reason }}。匹配时跳过，保存也会被拒绝。</small>
+              </div>
             </div>
-            <p class="field-note wide">会话级覆盖（<code>perChat.&lt;contextKey&gt;.trigger</code>）优先于全局值，入口在<b>会话页</b>。</p>
+            <div class="settings-item" role="listitem">
+              <div class="settings-name"><b>唤醒词最短长度</b><small>按 <code>^</code> 之后的字符数计</small></div>
+              <label class="settings-control"><span class="sr-only">唤醒词最短长度</span><UiNumber :model-value="triggerForm.wakewordMinLength" :min="1" :max="32" @update:model-value="changeWakewordMinLength" /></label>
+              <small class="settings-meta">短于该长度的唤醒词整条忽略。可设置范围：1–32。</small>
+            </div>
+            <div class="settings-item" role="listitem">
+              <div class="settings-name"><b>触发行为</b><small>附加的消息判定规则</small></div>
+              <div class="settings-control switch-column">
+                <UiSwitch v-model="triggerForm.requireTextAfterMention" label="仅 @ 而无正文时不触发" @change="markTriggerDirty" />
+                <UiSwitch v-model="triggerForm.ignoreEditedAsTrigger" disabled>编辑旧消息不重新触发<UiTag value="未接线" severity="secondary" title="编辑消息按背景消息归档，运行时无代码读取该开关" /></UiSwitch>
+              </div>
+              <small class="settings-meta">会话级 <code>perChat.&lt;contextKey&gt;.trigger</code> 覆盖全局值；入口在会话页。</small>
+            </div>
           </div>
           <div class="registry-heading">
             <div><h3>输出节奏</h3><p class="section-note">流式模式先缓冲再发首条，之后按固定间隔编辑同一条消息。<b>等待文案</b>也在此配置，保存后下一轮生效。</p></div>
             <UiButton size="small" icon="pi pi-save" label="保存输出节奏" :loading="outputSaving" :disabled="!outputDirty" @click="saveOutput" />
           </div>
-          <div class="form-grid">
-            <label>模式<UiSelect v-model="outputForm.mode" :options="[{ value: 'stream', label: 'stream · 边生成边编辑' }, { value: 'once', label: 'once · 生成完一次性发出' }]" @change="markOutputDirty" /><small class="field-note">once 模式下，下方三项编辑设置不生效。</small></label>
-            <label>防秒回等待（毫秒）<UiNumber :model-value="outputForm.replyDelayMs" :min="0" :max="30000" :step="500" @update:model-value="changeOutputNumber('replyDelayMs', $event)" /><small class="field-note">从<b>用户消息到达</b>算起，模型耗时已超过该值时不额外延迟。0 = 立即回复。</small></label>
-            <label>首帧缓冲（毫秒）<UiNumber :model-value="outputForm.streamBufferMs" :min="0" :max="30000" :step="500" @update:model-value="changeOutputNumber('streamBufferMs', $event)" /><small class="field-note">从<b>上游首个 chunk 到达</b>算起，缓冲该时长后发送首条；流在窗口内结束则立即发出。</small></label>
-            <label>编辑间隔（毫秒）<UiNumber :model-value="outputForm.streamIntervalMs" :min="200" :max="30000" :step="500" @update:model-value="changeOutputNumber('streamIntervalMs', $event)" /><small class="field-note">两次 editMessageText 之间的最小间隔；首条发送也计为一次刷新。</small></label>
-            <label>最小增量（字）<UiNumber :model-value="outputForm.streamMinDeltaChars" :min="1" :max="2000" @update:model-value="changeOutputNumber('streamMinDeltaChars', $event)" /><small class="field-note">与上一项<b>同时满足</b>才执行编辑；收尾那次编辑不受两项约束。</small></label>
-            <label class="wide">等待文案<textarea v-model="outputForm.placeholderTexts" rows="4" spellcheck="false" placeholder="一行一条，例如：&#10;让我想想…&#10;稍等，正在查" @input="markOutputDirty" /><small class="field-note">一行一条，空行保存时过滤。<b>后续答复编辑同一条消息</b>，仅在 stream 模式下发送。</small></label>
-            <label>挑选方式<UiSelect v-model="outputForm.placeholderPick" :options="[{ value: 'random', label: '随机 · 每轮从备选中选取' }, { value: 'fixed', label: '固定 · 始终使用指定下标' }]" @change="markOutputDirty" /></label>
-            <label>固定使用的下标<UiNumber :model-value="outputForm.placeholderIndex" :min="0" :disabled="outputForm.placeholderPick !== 'fixed'" @update:model-value="changeOutputNumber('placeholderIndex', $event)" /><small class="field-note">从 0 起，按<b>去除空行后</b>的行序计数；越界回落到第一条。</small></label>
-            <label>等待文案延迟（毫秒）<UiNumber :model-value="outputForm.placeholderAfterMs" :min="1" :step="500" @update:model-value="changeOutputNumber('placeholderAfterMs', $event)" /><small class="field-note">从开始生成算起，超过该时长仍无内容可发时才发送。</small></label>
-            <p class="wide" :class="placeholderList.length ? 'field-note' : 'callout warn'"><i v-if="!placeholderList.length" class="pi pi-info-circle" aria-hidden="true" />{{ placeholderPreview }}</p>
-            <p class="field-note wide">会话级覆盖（<code>perChat.&lt;contextKey&gt;.output</code>）优先于全局值。</p>
+          <div class="settings-list" role="list" aria-label="输出节奏配置列表">
+            <div class="settings-item" role="listitem">
+              <div class="settings-name"><b>输出模式</b><small>消息的生成与发送方式</small></div>
+              <label class="settings-control"><span class="sr-only">输出模式</span><UiSelect v-model="outputForm.mode" :options="[{ value: 'stream', label: 'stream · 边生成边编辑' }, { value: 'once', label: 'once · 生成完一次性发出' }]" @change="markOutputDirty" /></label>
+              <small class="settings-meta"><code>once</code> 模式不使用首帧缓冲、编辑间隔和最小增量。</small>
+            </div>
+            <div class="settings-item" role="listitem">
+              <div class="settings-name"><b>防秒回等待</b><small>从用户消息到达开始计算</small></div>
+              <label class="settings-control"><span class="sr-only">防秒回等待毫秒数</span><UiNumber :model-value="outputForm.replyDelayMs" :min="0" :max="30000" :step="500" @update:model-value="changeOutputNumber('replyDelayMs', $event)" /></label>
+              <small class="settings-meta">模型耗时已超过设定值时不再延迟；0 表示立即回复。单位：毫秒。</small>
+            </div>
+            <div class="settings-item" role="listitem">
+              <div class="settings-name"><b>首帧缓冲</b><small>从上游首个 chunk 到达开始计算</small></div>
+              <label class="settings-control"><span class="sr-only">首帧缓冲毫秒数</span><UiNumber :model-value="outputForm.streamBufferMs" :min="0" :max="30000" :step="500" @update:model-value="changeOutputNumber('streamBufferMs', $event)" /></label>
+              <small class="settings-meta">窗口内生成结束时立即发出；仅 <code>stream</code> 模式生效。单位：毫秒。</small>
+            </div>
+            <div class="settings-item" role="listitem">
+              <div class="settings-name"><b>流式编辑阈值</b><small>两项同时满足才更新消息</small></div>
+              <div class="settings-control control-pair">
+                <label><span>编辑间隔（毫秒）</span><UiNumber :model-value="outputForm.streamIntervalMs" :min="200" :max="30000" :step="500" @update:model-value="changeOutputNumber('streamIntervalMs', $event)" /></label>
+                <label><span>最小增量（字）</span><UiNumber :model-value="outputForm.streamMinDeltaChars" :min="1" :max="2000" @update:model-value="changeOutputNumber('streamMinDeltaChars', $event)" /></label>
+              </div>
+              <small class="settings-meta">首条发送计为一次刷新；收尾编辑不受间隔和增量约束。</small>
+            </div>
+            <div class="settings-item" role="listitem">
+              <div class="settings-name"><b>等待文案</b><small>一行一条，空行保存时过滤</small></div>
+              <label class="settings-control"><span class="sr-only">等待文案</span><textarea v-model="outputForm.placeholderTexts" rows="4" spellcheck="false" placeholder="一行一条，例如：&#10;让我想想…&#10;稍等，正在查" @input="markOutputDirty" /></label>
+              <small class="settings-meta">仅 <code>stream</code> 模式发送，后续答复编辑同一条消息。</small>
+            </div>
+            <div class="settings-item" role="listitem">
+              <div class="settings-name"><b>文案挑选</b><small>决定每轮使用哪一条文案</small></div>
+              <div class="settings-control control-pair">
+                <label><span>挑选方式</span><UiSelect v-model="outputForm.placeholderPick" :options="[{ value: 'random', label: '随机 · 每轮从备选中选取' }, { value: 'fixed', label: '固定 · 始终使用指定下标' }]" @change="markOutputDirty" /></label>
+                <label><span>固定下标</span><UiNumber :model-value="outputForm.placeholderIndex" :min="0" :disabled="outputForm.placeholderPick !== 'fixed'" @update:model-value="changeOutputNumber('placeholderIndex', $event)" /></label>
+              </div>
+              <small class="settings-meta">下标从 0 起，按过滤空行后的顺序计数；越界时使用第一条。</small>
+            </div>
+            <div class="settings-item" role="listitem">
+              <div class="settings-name"><b>等待文案延迟</b><small>从开始生成起计算</small></div>
+              <label class="settings-control"><span class="sr-only">等待文案延迟毫秒数</span><UiNumber :model-value="outputForm.placeholderAfterMs" :min="1" :step="500" @update:model-value="changeOutputNumber('placeholderAfterMs', $event)" /></label>
+              <div :class="['settings-meta', { warn: !placeholderList.length }]"><small>{{ placeholderPreview }}</small><small>会话级 <code>perChat.&lt;contextKey&gt;.output</code> 覆盖全局值。</small></div>
+            </div>
           </div>
           </div>
           <div v-show="settingsTab === 'maintenance'" data-settings-tab="maintenance">
@@ -2679,25 +2811,40 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             <i class="pi pi-lock" aria-hidden="true" />
             口令由环境变量 <code>{{ passwordPinnedEnv }}</code> 固定：此处修改重启后被覆盖。永久更换需改该环境变量，清除后交回 <code>config_kv</code> 管理。
           </p>
-          <div v-else class="form-grid">
-            <label>当前口令<input v-model="passwordForm.current" type="password" autocomplete="current-password" placeholder="用于身份确认"></label>
-            <label>新口令<input v-model="passwordForm.next" type="password" autocomplete="new-password" placeholder="至少 12 个字符"></label>
-            <label>确认新口令<input v-model="passwordForm.confirm" type="password" autocomplete="new-password" placeholder="需与上方一致"></label>
-            <div class="wide password-actions">
-              <UiButton icon="pi pi-key" label="更新口令" :loading="passwordSaving" :disabled="Boolean(passwordProblem)" @click="savePassword" />
-              <small class="field-note">{{ passwordProblem || '吊销其余全部登录态。' }}</small>
+          <div v-else class="settings-list compact" role="list" aria-label="修改登录口令列表">
+            <div class="settings-item" role="listitem">
+              <div class="settings-name"><b>当前口令</b><small>用于身份确认</small></div>
+              <label class="settings-control"><span class="sr-only">当前口令</span><input v-model="passwordForm.current" type="password" autocomplete="current-password" placeholder="输入当前口令"></label>
+              <small class="settings-meta">必须与当前登录口令一致。</small>
+            </div>
+            <div class="settings-item" role="listitem">
+              <div class="settings-name"><b>新口令</b><small>替换当前登录口令</small></div>
+              <label class="settings-control"><span class="sr-only">新口令</span><input v-model="passwordForm.next" type="password" autocomplete="new-password" placeholder="至少 12 个字符"></label>
+              <small class="settings-meta">至少 12 个字符。</small>
+            </div>
+            <div class="settings-item" role="listitem">
+              <div class="settings-name"><b>确认新口令</b><small>再次输入以避免误改</small></div>
+              <label class="settings-control"><span class="sr-only">确认新口令</span><input v-model="passwordForm.confirm" type="password" autocomplete="new-password" placeholder="需与新口令一致"></label>
+              <small class="settings-meta">必须与新口令完全一致。</small>
+            </div>
+            <div class="settings-item" role="listitem">
+              <div class="settings-name"><b>提交修改</b><small>保存后立即生效</small></div>
+              <div class="settings-control"><UiButton icon="pi pi-key" label="更新口令" :loading="passwordSaving" :disabled="Boolean(passwordProblem)" @click="savePassword" /></div>
+              <small class="settings-meta">{{ passwordProblem || '其余全部登录态将被吊销。' }}</small>
             </div>
           </div>
           <div class="registry-heading"><div><h3>维护操作</h3><p class="section-note">同步执行：大库上阻塞写入，bot 侧消息将排队。</p></div></div>
-          <div class="maintenance-grid">
-            <article v-for="item in MAINTENANCE_ACTIONS" :key="item.action">
-              <div><b><i :class="item.icon" aria-hidden="true" /> {{ item.label }}</b><small>{{ item.hint }}</small></div>
-              <UiButton size="small" variant="outlined" label="执行" :loading="maintenanceBusy === item.action" :disabled="Boolean(maintenanceBusy)" @click="runMaintenance(item.action, item.label)" />
-            </article>
-            <article class="danger">
-              <div><b><i class="pi pi-refresh" aria-hidden="true" /> 重启进程</b><small>等同 SIGTERM 的优雅关闭。<b>没有 systemd / docker 等 supervisor 时，进程不会自动重启</b></small></div>
-              <UiButton size="small" variant="outlined" severity="danger" label="重启" :loading="restarting" :disabled="Boolean(maintenanceBusy)" @click="restartProcess" />
-            </article>
+          <div class="settings-list compact" role="list" aria-label="维护操作列表">
+            <div v-for="item in MAINTENANCE_ACTIONS" :key="item.action" class="settings-item maintenance-item" role="listitem">
+              <div class="settings-name"><b><i :class="item.icon" aria-hidden="true" /> {{ item.label }}</b><small>同步维护任务</small></div>
+              <small class="settings-meta">{{ item.hint }}</small>
+              <div class="settings-control settings-execute"><UiButton size="small" variant="outlined" label="执行" :loading="maintenanceBusy === item.action" :disabled="Boolean(maintenanceBusy)" @click="runMaintenance(item.action, item.label)" /></div>
+            </div>
+            <div class="settings-item maintenance-item danger" role="listitem">
+              <div class="settings-name"><b><i class="pi pi-refresh" aria-hidden="true" /> 重启进程</b><small>优雅关闭当前进程</small></div>
+              <small class="settings-meta">等同 SIGTERM。没有 systemd、Docker 等 supervisor 时，进程不会自动重启。</small>
+              <div class="settings-control settings-execute"><UiButton size="small" variant="outlined" severity="danger" label="重启" :loading="restarting" :disabled="Boolean(maintenanceBusy)" @click="restartProcess" /></div>
+            </div>
           </div>
           <div class="registry-heading"><div><h3>导出 / 导入配置</h3><p class="section-note">导出 <code>config_kv</code> 中的<b>覆盖层</b>。密钥类键不导出，也不导出为 <code>«redacted»</code>。导入按键覆盖，<b>不删除</b>现有覆盖行。</p></div>
             <div class="section-actions"><UiButton size="small" variant="outlined" icon="pi pi-download" label="导出" :loading="exportBusy" @click="exportConfig" /><UiButton size="small" variant="outlined" icon="pi pi-upload" label="导入" @click="importFile?.click()" /></div>
@@ -3028,6 +3175,16 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
         <li v-if="!configRevisions.length && !revisionsLoading" class="empty">暂无变更记录</li>
       </ol>
     </UiModal>
-    <UiDrawer v-model:visible="mobileMenu" :title="botName"><nav class="mobile-nav"><button v-for="item in navigation" :key="item[0]" type="button" @click="active = item[0]; mobileMenu = false"><i :class="item[1]" />{{ item[2] }}<span v-if="item[0] === 'tasks' && pendingApprovals" class="nav-badge">{{ pendingApprovals }}</span></button></nav></UiDrawer>
+    <UiDrawer v-model:visible="mobileMenu" :title="botName">
+      <nav class="mobile-nav" aria-label="移动端主导航">
+        <div v-for="section in navigationSections" :key="section.label" class="nav-section">
+          <p class="nav-label">{{ section.label }}</p>
+          <button v-for="item in section.items" :key="item[0]" type="button" :class="{ active: active === item[0] }" @click="active = item[0]; mobileMenu = false">
+            <i :class="item[1]" aria-hidden="true" /><span>{{ item[2] }}</span>
+            <span v-if="item[0] === 'tasks' && pendingApprovals" class="nav-badge">{{ pendingApprovals }}</span>
+          </button>
+        </div>
+      </nav>
+    </UiDrawer>
   </main>
 </template>

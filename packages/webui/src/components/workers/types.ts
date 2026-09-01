@@ -98,16 +98,16 @@ export const WORKER_RUN_STATES: Record<
 // ── 列定义 ────────────────────────────────────────────────────────────────────
 
 export const WORKER_RUN_COLUMNS: GridColumn[] = [
-  { key: "workerKind", header: "类型", width: "6.5rem" },
-  { key: "state", header: "状态", width: "6.5rem" },
+  { key: "workerKind", header: "类型", width: "4.25rem" },
+  { key: "state", header: "状态", width: "4.75rem" },
   { key: "taskLine", header: "任务" },
-  { key: "turnId", header: "轮次", width: "9rem" },
-  { key: "steps", header: "步数 / 工具", width: "8rem" },
-  { key: "cost", header: "花费", width: "8rem" },
+  { key: "turnId", header: "轮次", width: "6.5rem" },
+  { key: "steps", header: "步数 / 工具", width: "5.5rem" },
+  { key: "cost", header: "花费", width: "5.75rem" },
   // 外部花费单独占一格。合进上一格就是把「我们的钱」和「它自己说的钱」摆成一个数。
-  { key: "externalCost", header: "外部自报", width: "8rem" },
-  { key: "elapsed", header: "耗时", width: "7rem" },
-  { key: "startedAt", header: "开始时间", width: "12rem" },
+  { key: "externalCost", header: "外部自报", width: "6.5rem" },
+  // 开始时间并入耗时格的第二行；保留信息，同时避免为单个时间戳撑出整列。
+  { key: "elapsed", header: "耗时 / 开始", width: "8.5rem" },
 ];
 
 /** 试跑面板逐行收到的 NDJSON 事件（`POST /api/workers/dryrun`）。 */
