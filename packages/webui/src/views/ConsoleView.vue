@@ -4,6 +4,7 @@ import UiButton from '../ui/UiButton.vue';
 import UiTag from '../ui/UiTag.vue';
 import UiSelect from '../ui/UiSelect.vue';
 import UiNumber from '../ui/UiNumber.vue';
+import UiRollingNumber from '../ui/UiRollingNumber.vue';
 import UiCheckbox from '../ui/UiCheckbox.vue';
 import UiSwitch from '../ui/UiSwitch.vue';
 import UiModal from '../ui/UiModal.vue';
@@ -55,6 +56,8 @@ interface ToolPolicy { minRole: string; approval: string; scope: string; source:
   selfManagedTimeout: boolean; deferred: boolean; sides?: Array<'main' | 'worker'>; defaults: { minRole: string; approval: string; timeoutMs: number | null }; relaxed: string[] }
 const active = ref('dashboard');
 const dashboard = ref<Dashboard>({ turns: { total: 0, running: 0, failed: 0, cost: 0 }, messages: { total: 0 }, providers: { total: 0, enabled: 0 } });
+const dashboardIntroReady = ref(false);
+const dashboardIntroAnimate = ref(true);
 const principals = ref<Principal[]>([]);
 const providers = ref<Provider[]>([]);
 const logs = ref<LogRow[]>([]);
@@ -315,9 +318,13 @@ async function load(): Promise<void> {
     api<Array<Record<string, unknown>>>('/api/prompts'), api<Record<string, unknown>>('/api/config'), api<Array<Record<string, unknown>>>('/api/models'), api<Array<Record<string, unknown>>>('/api/aliases'),
     api<HealthDetail>('/api/health/detail'),
   ]);
+  dashboardIntroReady.value = true;
+  // 动画只属于刷新后的首屏。下一帧解除武装；切换页面再返回时直接显示当前数据。
+  window.requestAnimationFrame(() => { dashboardIntroAnimate.value = false; });
   // 总览页那张「最近错误」卡片走单独一次请求：日志页要的是全量流，卡片要的是 warn 以上的十条，
   // 在前端过滤会因为日志页只取了最近 200 条而漏掉更早的错误。
   recentErrors.value = await api<LogRow[]>('/api/logs?minLevel=warn&size=10');
+  recentErrorsLoaded.value = true;
   // 总览的额度环和配额页读的是同一个端点。失败不该把整个总览页带下去 —— 配额关掉时它本来就是空的。
   await Promise.all([loadQuota().catch(() => undefined), loadUsageReport()]);
   // 导航角标：任务页的三份数据由那三张卡自己拉，但这个数不切页也要看得见（AC-WEB-049）。
@@ -1672,6 +1679,8 @@ const uptimeText = computed(() => {
 const mcpDown = computed(() => (health.value?.mcp ?? []).filter((entry) => entry.state !== 'up').length);
 /** 总览页那张卡片只看 warn 以上，最多 10 条：服务端已经按 `minLevel` 过滤过一遍，这里只截条数。 */
 const recentErrors = ref<LogRow[]>([]);
+const recentErrorsLoaded = ref(false);
+const errorEnterStyle = (index: number): Record<string, string> => ({ '--error-order': String(Math.min(index, 9)) });
 /** 点一行跳到日志页并展开那条 trace。没有 traceId 的事件（启动、配置变更）只切页。 */
 function openTrace(traceId: string | null): void {
   active.value = 'logs';
@@ -1724,6 +1733,7 @@ const lastEventAt = ref(0);
 const REFRESH_LOADERS: Record<RefreshGroup, () => Promise<void>> = {
   dashboard: async () => {
     [dashboard.value, health.value, recentErrors.value] = await Promise.all([api<Dashboard>('/api/dashboard'), api<HealthDetail>('/api/health/detail'), api<LogRow[]>('/api/logs?minLevel=warn&size=10')]);
+    recentErrorsLoaded.value = true;
     await loadQuota().catch(() => undefined);
   },
   logs: async () => { logs.value = await api<LogRow[]>('/api/logs'); },
@@ -2101,10 +2111,10 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             <UiButton label="打开实时日志" icon="pi pi-wave-pulse" @click="active = 'logs'" />
           </section>
           <section class="metric-grid">
-            <article><div class="metric-icon violet"><i class="pi pi-bolt" /></div><span>在途 turn</span><b>{{ dashboard.turns.running }}</b><small>总计 {{ dashboard.turns.total }} 次</small></article>
-            <article><div class="metric-icon cyan"><i class="pi pi-comments" /></div><span>归档消息</span><b>{{ dashboard.messages.total }}</b><small>FTS 索引已启用</small></article>
-            <article><div class="metric-icon rose"><i class="pi pi-wallet" /></div><span>累计花费</span><b>${{ Number(dashboard.turns.cost || 0).toFixed(4) }}</b><small>失败 {{ dashboard.turns.failed }} 次</small></article>
-            <article><div class="metric-icon amber"><i class="pi pi-sparkles" /></div><span>可用 Provider</span><b>{{ dashboard.providers.enabled }}</b><small>共配置 {{ dashboard.providers.total }} 个</small></article>
+            <article><div class="metric-icon violet"><i class="pi pi-bolt" /></div><span>在途 turn</span><b><UiRollingNumber :value="dashboard.turns.running" :ready="dashboardIntroReady" :animate="dashboardIntroAnimate" /></b><small>总计 {{ dashboard.turns.total }} 次</small></article>
+            <article><div class="metric-icon cyan"><i class="pi pi-comments" /></div><span>归档消息</span><b><UiRollingNumber :value="dashboard.messages.total" :ready="dashboardIntroReady" :animate="dashboardIntroAnimate" /></b><small>FTS 索引已启用</small></article>
+            <article><div class="metric-icon rose"><i class="pi pi-wallet" /></div><span>累计花费</span><b><UiRollingNumber :value="Number(dashboard.turns.cost || 0)" :ready="dashboardIntroReady" :animate="dashboardIntroAnimate" prefix="$" :fraction-digits="4" /></b><small>失败 {{ dashboard.turns.failed }} 次</small></article>
+            <article><div class="metric-icon amber"><i class="pi pi-sparkles" /></div><span>可用 Provider</span><b><UiRollingNumber :value="dashboard.providers.enabled" :ready="dashboardIntroReady" :animate="dashboardIntroAnimate" /></b><small>共配置 {{ dashboard.providers.total }} 个</small></article>
           </section>
           <!-- 在途 turn 表（docs/09 §3.1）：数据来自进程内的 TurnRegistry，首屏拉一次，
                之后 turn.started / turn.progress / turn.finished 三种事件增量更新。 -->
@@ -2127,14 +2137,14 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             <!-- 最近**错误**（level≥warn，10 条），点一行直接跳到那条 trace。此前这里是不分级别
                  的最近 6 条，实际上永远被 info 刷满 —— 一张「最近错误」卡片看不到错误（docs/09 §3.1）。 -->
             <article class="surface"><header><div><p class="eyebrow">RECENT ERRORS</p><h3>最近错误</h3><p class="section-note">点击任一行打开对应 trace</p></div><UiButton variant="text" label="查看全部" icon="pi pi-arrow-right" icon-pos="right" @click="active = 'logs'" /></header>
-              <div class="log-list">
-                <button v-for="row in recentErrors" :key="row.id" type="button" class="log-row" :aria-label="`打开 ${row.kind} 的 trace`" @click="openTrace(row.trace_id)">
+              <div class="log-list" :aria-busy="!recentErrorsLoaded">
+                <button v-for="(row, index) in recentErrors" :key="row.id" type="button" class="log-row dashboard-error-reveal" :style="errorEnterStyle(index)" :aria-label="`打开 ${row.kind} 的 trace`" @click="openTrace(row.trace_id)">
                   <span :class="['level', row.level]">{{ row.level }}</span>
                   <span class="log-row-copy"><code :title="row.kind">{{ row.kind }}</code><span :title="row.summary">{{ row.summary }}</span></span>
                   <time :datetime="new Date(row.ts).toISOString()">{{ new Date(row.ts).toLocaleTimeString() }}</time>
                   <i class="pi pi-chevron-right log-row-arrow" aria-hidden="true" />
                 </button>
-                <div v-if="!recentErrors.length" class="empty">暂无</div>
+                <div v-if="recentErrorsLoaded && !recentErrors.length" key="empty" class="empty">暂无</div>
               </div>
             </article>
             <!-- 这四行以前是写死的字（沙箱恒显示「Docker」，与 sandbox.mode 无关）。数据一律来自 /api/health/detail。 -->

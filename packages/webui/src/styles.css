@@ -588,7 +588,7 @@ code { font-family: var(--font-mono); font-size: .82rem; }
 .metric-icon.cyan { background: color-mix(in srgb, var(--cyan), transparent 88%); color: var(--cyan); }
 .metric-icon.rose { background: color-mix(in srgb, var(--rose), transparent 88%); color: var(--rose); }
 .metric-icon.amber { background: color-mix(in srgb, var(--amber), transparent 88%); color: var(--amber); }
-.metric-grid span { color: var(--muted); font-size: .76rem; }
+.metric-grid article > span { color: var(--muted); font-size: .76rem; }
 .metric-grid b { font: 600 1.55rem var(--font-mono); }
 .metric-grid small { color: var(--muted); font-size: .68rem; }
 .dashboard-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 14px; margin-top: 14px; }
@@ -1275,7 +1275,7 @@ code { font-family: var(--font-mono); font-size: .82rem; }
   .alias-route-actions .ui-btn:first-child { flex: 1 1 auto; }
 }
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; }
+  *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; transition-delay: 0s !important; animation-duration: .01ms !important; animation-delay: 0s !important; }
   .auth-page::before, .auth-copy, .auth-card { animation: none !important; }
   .ui-btn:hover:not(:disabled) { transform: none; }
 }
@@ -1334,6 +1334,13 @@ code { font-family: var(--font-mono); font-size: .82rem; }
   border: 0; border-top: 1px solid var(--border); background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; padding: 8px 4px 8px 0; transition: background-color 150ms ease; }
 .log-list > .log-row:hover { background: color-mix(in srgb, var(--primary-soft), transparent 50%); }
 .log-list > .log-row:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+@keyframes dashboard-error-in {
+  from { opacity: 0; transform: translateY(9px); }
+}
+.dashboard-error-reveal {
+  animation: dashboard-error-in 420ms cubic-bezier(.22, .61, .36, 1) backwards;
+  animation-delay: calc(var(--error-order, 0) * 45ms);
+}
 
 /* ── 审批规则试跑 ────────────────────────────────────────────────────────── */
 .rule-test-result { display: grid; gap: 10px; margin-bottom: 18px; }

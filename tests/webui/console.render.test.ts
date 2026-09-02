@@ -672,6 +672,7 @@ describe('ConsoleView 渲染', () => {
     const rows = wrapper.findAll('.log-list > .log-row');
     expect(rows).toHaveLength(2);
     for (const row of rows) {
+      expect(row.classes()).toContain('dashboard-error-reveal');
       const copy = row.find('.log-row-copy');
       expect(copy.exists()).toBe(true);
       expect(copy.find('code').text().length).toBeGreaterThan(0);
