@@ -16,6 +16,7 @@ import SchemaForm from '../ui/SchemaForm.vue';
 import ExtensionsPage from './ExtensionsPage.vue';
 import TasksPage from './TasksPage.vue';
 import WorkerRunsPage from './WorkerRunsPage.vue';
+import SdkPage from './SdkPage.vue';
 // 扩展四类的行类型跟着页面一起搬走了：这一层只负责拉数据，形状由那一份定义。
 import type { CustomToolRow, McpRow, PluginRow, SkillRow } from '../components/extensions/types';
 import UiLineChart from '../ui/UiLineChart.vue';
@@ -265,7 +266,7 @@ const navigationSections = [
   { label: '资源', eyebrow: 'RESOURCES', items: [
     ['providers', 'pi pi-sparkles', '模型'], ['principals', 'pi pi-users', '主体'],
     ['tools', 'pi pi-wrench', '工具'], ['extensions', 'pi pi-box', '扩展'],
-    ['workers', 'pi pi-sitemap', 'Worker'],
+    ['workers', 'pi pi-sitemap', 'Worker'], ['sdk', 'pi pi-key', 'SDK 接入'],
   ] },
   { label: '观测', eyebrow: 'OBSERVABILITY', items: [
     ['logs', 'pi pi-list', '日志'], ['usage', 'pi pi-wallet', '用量'], ['quota', 'pi pi-gauge', '配额'],
@@ -1765,9 +1766,9 @@ const REFRESH_VISIBILITY: Record<RefreshGroup, readonly string[]> = {
   containers: ['tools'],
   // 待审批不做页面过滤：一条 pending 会阻塞某个真实轮次最长 approval.ttlMs，
   // 只在任务页刷新意味着运维不切到那一页就无从得知有请求在等待。该事件本身很稀疏（命中规则才发）。
-  approvals: ['dashboard', 'chats', 'messages', 'prompts', 'providers', 'principals', 'tools', 'extensions', 'workers', 'logs', 'usage', 'quota', 'tasks', 'settings'],
+  approvals: ['dashboard', 'chats', 'messages', 'prompts', 'providers', 'principals', 'tools', 'extensions', 'workers', 'sdk', 'logs', 'usage', 'quota', 'tasks', 'settings'],
   // 配置变了影响设置页与工具页，也影响会话页的覆盖显示；这个事件本身很稀疏，不做页面过滤。
-  config: ['dashboard', 'chats', 'messages', 'prompts', 'providers', 'principals', 'tools', 'extensions', 'workers', 'logs', 'usage', 'quota', 'tasks', 'settings'],
+  config: ['dashboard', 'chats', 'messages', 'prompts', 'providers', 'principals', 'tools', 'extensions', 'workers', 'sdk', 'logs', 'usage', 'quota', 'tasks', 'settings'],
 };
 const EVENT_REFRESH: Record<string, readonly RefreshGroup[]> = {
   log: ['logs', 'dashboard'],
@@ -2219,10 +2220,10 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
             <!-- character 不是 schema 叶子键（perChat 是 z.record），SchemaForm 渲染不出它 -->
             <div class="chat-character">
               <label>会话人格文件
-                <input v-model="chatCharacter" placeholder="CHARACTER.md（留空 = 使用全局人格）" spellcheck="false">
+                <input v-model="chatCharacter" placeholder="CHARACTER.md（留空 = 使用来源人格）" spellcheck="false">
               </label>
               <UiButton size="small" variant="outlined" label="保存" :loading="chatCharacterSaving" @click="saveChatCharacter" />
-              <p class="field-note"><code>memory/</code> 下的替代人设文件名，仅接受纯文件名（<code>.md</code> 结尾、不含目录与 <code>..</code>）。其他取值<b>静默退回全局 <code>CHARACTER.md</code></b>。</p>
+              <p class="field-note"><code>memory/</code> 下的替代人设文件名，仅接受纯文件名（<code>.md</code> 结尾、不含目录与 <code>..</code>）。其他取值<b>静默退回来源 <code>CHARACTER.md</code></b>。</p>
             </div>
             <UiButton variant="text" :icon="chatOverrideOpen ? 'pi pi-chevron-up' : 'pi pi-chevron-down'" :label="chatOverrideOpen ? '收起' : '编辑覆盖项'" @click="chatOverrideOpen = !chatOverrideOpen" />
             <!-- 控件里显示的是这个会话实际生效的值（全局 + 覆盖）；改动才会写进覆盖层 -->
@@ -2498,6 +2499,9 @@ const roleSeverity = (role: string): TagSeverity => ({ owner: 'success', trusted
           :tick="workerTick"
           @open-turn="openDetail" @open-trace="openTrace"
         />
+        <!-- SDK 接入页整段在 `SdkPage.vue`（来源列表 + 新建，密钥管理在详情弹窗里，
+             docs/12-sdk.md T3.11）。`key` 同上是必须的。 -->
+        <SdkPage v-else-if="active === 'sdk'" key="sdk" />
         <section v-else-if="active === 'usage'" key="usage" class="surface page-surface"><header><div><p class="eyebrow">USAGE LEDGER</p><h2>用量与成本</h2><p>输入、输出、缓存读写分别计价。</p></div>
             <div class="section-actions">
               <UiSelect v-model="usageRange" :options="USAGE_RANGES" option-label="label" option-value="value" aria-label="时间范围" @change="loadUsageReport" />

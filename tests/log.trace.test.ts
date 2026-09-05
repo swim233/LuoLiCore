@@ -256,7 +256,10 @@ describe('trace 是一棵真的树', () => {
   }, 30_000);
 
   it('两个开轮入口都把 turn.start 的 spanId 设成 trace 根', () => {
-    for (const path of ['packages/telegram/src/bot.ts', 'packages/core/src/schedule/runner.ts']) {
+    // 两个开轮入口现为 bot.ts 与 turn/pipeline.ts 的 runTurn()：`schedule/runner.ts` 与未来
+    // SDK 均经后者，`turn.queued`/`turn.start`/`.available(` 这几处随 T3.7 的抽取一并迁入
+    // pipeline.ts，判据本身未变（docs/02 §10.6）。
+    for (const path of ['packages/telegram/src/bot.ts', 'packages/core/src/turn/pipeline.ts']) {
       const text = source(path);
       const at = codeIndex(text, "kind: 'turn.start'");
       expect(at, `${path} 里找不到 turn.start`).toBeGreaterThan(0);

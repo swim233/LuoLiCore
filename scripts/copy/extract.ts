@@ -828,6 +828,7 @@ export const BROWSER_FILES = [
   "packages/webui/src/views/LoginView.vue",
   "packages/webui/src/views/TasksPage.vue",
   "packages/webui/src/views/WorkerRunsPage.vue",
+  "packages/webui/src/views/SdkPage.vue",
   ...readdirSync("packages/webui/src/ui")
     .filter((n) => n.endsWith(".vue"))
     .map((n) => `packages/webui/src/ui/${n}`),
@@ -840,9 +841,13 @@ export const BROWSER_FILES = [
   ...readdirSync("packages/webui/src/components/workers")
     .filter((n) => n.endsWith(".vue"))
     .map((n) => `packages/webui/src/components/workers/${n}`),
+  ...readdirSync("packages/webui/src/components/sdk")
+    .filter((n) => n.endsWith(".vue"))
+    .map((n) => `packages/webui/src/components/sdk/${n}`),
   "packages/webui/src/components/extensions/types.ts",
   "packages/webui/src/components/tasks/types.ts",
   "packages/webui/src/components/workers/types.ts",
+  "packages/webui/src/components/sdk/types.ts",
   "packages/webui/src/api/client.ts",
   "packages/webui/src/ui/toast.ts",
   "packages/webui/src/ui/confirm.ts",
@@ -880,9 +885,11 @@ export function extractFile(file: string): Entry[] {
       ? "extensions-"
       : file.includes("TasksPage") || file.includes("/components/tasks/")
         ? "tasks-"
-        : file.includes("LoginView")
-          ? "login-"
-          : "ui-";
+        : file.includes("SdkPage") || file.includes("/components/sdk/")
+          ? "sdk-"
+          : file.includes("LoginView")
+            ? "login-"
+            : "ui-";
   if (file.endsWith(".vue")) extractVue(sink, file, prefix);
   else extractTs(sink, file, `${prefix}script`, false);
   return dropNested(sink.entries);
@@ -925,6 +932,11 @@ export function extractAll(): Entry[] {
     (n) => n.endsWith(".vue"),
   ))
     extractVue(sink, `packages/webui/src/components/tasks/${name}`, "tasks-");
+  extractVue(sink, "packages/webui/src/views/SdkPage.vue", "sdk-");
+  for (const name of readdirSync("packages/webui/src/components/sdk").filter(
+    (n) => n.endsWith(".vue"),
+  ))
+    extractVue(sink, `packages/webui/src/components/sdk/${name}`, "sdk-");
   extractTs(
     sink,
     "packages/webui/src/components/extensions/types.ts",
@@ -935,6 +947,12 @@ export function extractAll(): Entry[] {
     sink,
     "packages/webui/src/components/tasks/types.ts",
     "tasks-labels",
+    false,
+  );
+  extractTs(
+    sink,
+    "packages/webui/src/components/sdk/types.ts",
+    "sdk-labels",
     false,
   );
   extractTs(sink, "packages/webui/src/api/client.ts", "ui-plumbing", false);

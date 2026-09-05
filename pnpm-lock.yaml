@@ -47,6 +47,9 @@ importers:
       '@luoli/plugin-sdk':
         specifier: workspace:*
         version: link:packages/plugin-sdk
+      '@luoli/sdk-client':
+        specifier: workspace:*
+        version: link:packages/sdk-client
       '@luoli/server':
         specifier: workspace:*
         version: link:packages/server
@@ -220,6 +223,12 @@ importers:
         specifier: workspace:*
         version: link:../shared
 
+  packages/sdk-client:
+    dependencies:
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
+
   packages/server:
     dependencies:
       '@luoli/core':
@@ -228,6 +237,9 @@ importers:
       '@luoli/db':
         specifier: workspace:*
         version: link:../db
+      '@luoli/sdk-client':
+        specifier: workspace:*
+        version: link:../sdk-client
       '@luoli/shared':
         specifier: workspace:*
         version: link:../shared
@@ -1162,6 +1174,7 @@ packages:
   '@xmldom/xmldom@0.8.14':
     resolution: {integrity: sha512-T4EDRUBVZYRldYApjEJiU0e1stYWaRAX7CuSnKzrpwdZKo53zGV8/pqfzV6FfwNl9YThD2OumQYvqtvjvgG7aQ==}
     engines: {node: '>=10.0.0'}
+    deprecated: this version has critical issues, please update to the latest version
 
   abbrev@2.0.0:
     resolution: {integrity: sha512-6/mh1E2u2YgEsCHdY0Yx5oW+61gZU+1vXaoiHHrpKeuRNNgFvS+/jrwHiQhB5apAf5oB7UB7E19ol2R2LKH8hQ==}

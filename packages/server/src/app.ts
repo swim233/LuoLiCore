@@ -30,14 +30,17 @@ import type {
   LogSink,
   LwWorkerRuntimeEvent,
   MaintenanceService,
+  MainAgentDependencies,
   McpManager,
   MemoryStore,
   ModelCatalog,
   PluginManager,
   PromptDocuments,
   ProviderStore,
+  RunTurnDependencies,
   Sandbox,
   ScheduleUpdateRequest,
+  Secrets,
   SkillLoader,
   SkillWriteInput,
   TurnRegistry,
@@ -62,6 +65,7 @@ import {
   probeProvider,
   quotaBucket,
   rejectedWakewords,
+  splitPrimemorySubject,
 } from "@luoli/core";
 import {
   APPROVAL_POLICIES,
@@ -87,6 +91,7 @@ import type {
   ToolRegistry,
 } from "@luoli/core";
 import type {
+  ApiKeyRepository,
   ArchiveRepository,
   CustomToolRepository,
   McpAuthRepository,
@@ -94,6 +99,8 @@ import type {
   PrincipalRepository,
   ScheduleRepository,
   ScheduledJob,
+  SdkSessionRepository,
+  SourceRepository,
   Sqlite,
 } from "@luoli/db";
 import {
@@ -112,6 +119,12 @@ import {
   type Role,
 } from "@luoli/shared";
 import type { EventStreamRegistry } from "./events.js";
+import { apiError } from "./api-error.js";
+import { mountSdkAdmin } from "./sdk/admin.js";
+import { mountSdkV1 } from "./sdk/v1.js";
+
+// 重新导出：`packages/server/src/sdk/**`（曾经的循环 import 对象）与既有测试仍从 `app.js` 引用它。
+export { apiError } from "./api-error.js";
 
 export interface PromptPreviewResult {
   key: string;
@@ -173,6 +186,39 @@ export interface ServerDependencies {
     };
   };
   events: EventBus;
+  /**
+   * `sources` / `api_keys` 仓储与对称加密（docs/12-sdk.md T3.2/T3.3）。缺任一项时 `/api/sdk/*`
+   * 一律返回 `not_implemented`（`packages/server/src/sdk/admin.ts`），不伪造空列表——空来源列表与
+   * 该部署未装配 SDK 管理对运维是两种结论（docs/16 §5）。`secrets` 与 `providers` 共用同一份
+   * `Secrets` 实例（同一 `LUOLI_MASTER_KEY`），`available=false` 时签发/回显端点各自单独拒绝。
+   */
+  sources?: SourceRepository;
+  apiKeys?: ApiKeyRepository;
+  secrets?: Secrets;
+  /**
+   * `/sdk/v1/*` 的会话仓储与轮次执行依赖（docs/12-sdk.md T3.6/T3.7）。缺失时该前缀下全部端点
+   * 返回 `not_implemented`（500）——与 `sources`/`apiKeys`/`secrets` 分开声明是因为 Bearer
+   * 中间件只需要后三者就能完成认证，而认证通过之后能否真正开轮次是另一层「摘除比伪造安全」
+   * 判据：一个只装配了密钥系统、还没接好轮次管线的部署应该让「建会话」直接报缺失，而不是
+   * 建出一个永远无法对话的会话。
+   *
+   * `turn` 与 `agent` 的字段分组直接对应 `runTurn()`（`RunTurnDependencies`）与
+   * `runMainAgent()`（`MainAgentDependencies`）各自的入参形状，端点处理函数据此原样拼装两次
+   * 调用，不在 `ServerDependencies` 这一层重新定义一套字段名。`agent` 省略五个按请求变化的
+   * 字段——`workspace`/`reservation`/`agentKind`/`outputFormat` 逐次请求计算，`config` 必须取
+   * `turn.config`（`perChatConfig` 按会话热更新后的快照，与 `ScheduledJobRunner#run` 的
+   * `runAgent` 闭包同一先例）而非本对象构造时的快照，否则配置改动后 SDK 轮次仍按旧值执行。
+   */
+  sdk?: {
+    sessions: SdkSessionRepository;
+    turn: RunTurnDependencies;
+    agent: Omit<
+      MainAgentDependencies,
+      "workspace" | "reservation" | "agentKind" | "outputFormat" | "config"
+    >;
+    /** `sandbox.workspaceDir`；per-turn 工作目录为 `resolve(workspaceRoot, chatId)`。 */
+    workspaceRoot: string;
+  };
   memory?: MemoryStore;
   promptDocuments?: PromptDocuments;
   skills?: SkillLoader;
@@ -218,12 +264,22 @@ export interface ServerDependencies {
   webRoot?: string | undefined;
 }
 
-interface AuthVariables {
+// 两者导出：`composeRuntime`（`apps/bot/src/compose.ts`）的返回值里带着 `createServer` 的结果，
+// `tsconfig.build.json` 开了 `declaration`，导出函数的返回类型里出现不可具名的类型会是 TS4058。
+export interface AuthVariables {
   sessionId: string;
   csrf: string;
+  /**
+   * `/sdk/v1/*` 的 Bearer 中间件写入（`packages/server/src/sdk/auth.ts`）。`/api/*` 的
+   * cookie 会话路径不写这两个字段，值为 `undefined`——两套鉴权各写各的键，互不覆盖，
+   * 也正因如此 SDK key 打 `/api/*`（只读 `sessionId`）与 cookie 打 `/sdk/v1/*`（只读
+   * `sourceId`）天然各自拿不到对方的凭据，不需要额外的排斥判断。
+   */
+  sourceId?: string;
+  apiKeyId?: string;
 }
 
-type ServerEnv = { Variables: AuthVariables };
+export type ServerEnv = { Variables: AuthVariables };
 
 function cookie(header: string | undefined, name: string): string | null {
   if (!header) return null;
@@ -233,12 +289,6 @@ function cookie(header: string | undefined, name: string): string | null {
   }
   return null;
 }
-
-const apiError = (
-  code: string,
-  message: string,
-  status: 400 | 401 | 403 | 404 | 409 | 413 | 429 | 500 | 502 = 400,
-) => ({ body: { ok: false as const, error: { code, message } }, status });
 
 /**
  * 展开一律走 `assignDotted`：裸 `cursor[part]` 遇到 `__proto__` 会在校验之前污染 `Object.prototype`，
@@ -1122,13 +1172,17 @@ export function createServer(
       data: dependencies.operations.dashboard(currentConfig().general.timezone),
     }),
   );
+  // `deleted_at IS NULL` 过滤 SDK 软停用的会话（docs/12-sdk.md T3.6）：软停用是「不可开轮 / 不可读 /
+  // 不出现在列表」三条之一，`/api/*` 的这份会话列表同属「出现在列表」的判据，Telegram 的
+  // `contexts` 行 `deleted_at` 恒为 NULL（该列只有 SDK 的 DELETE 动词会写），因此对 Telegram
+  // 无行为影响。`sourceId` 一并返回：WebUI 的会话列表需要它才能标注「哪个来源」（T3.11 消费）。
   app.get("/api/chats", (ctx) =>
     ctx.json({
       ok: true,
       data: dependencies.db
         .prepare(
-          `SELECT c.key,c.chat_id AS chatId,c.thread_id AS threadId,c.scope,c.claim_watermark AS claimWatermark,
-    cc.head_ordinal AS headOrdinal,cc.tokens_total AS tokens,cc.msg_count AS messages FROM contexts c LEFT JOIN refs r ON r.key=c.key AND r.name='done' LEFT JOIN context_commits cc ON cc.id=r.commit_id ORDER BY c.updated_at DESC`,
+          `SELECT c.key,c.chat_id AS chatId,c.thread_id AS threadId,c.scope,c.claim_watermark AS claimWatermark,c.source_id AS sourceId,
+    cc.head_ordinal AS headOrdinal,cc.tokens_total AS tokens,cc.msg_count AS messages FROM contexts c LEFT JOIN refs r ON r.key=c.key AND r.name='done' LEFT JOIN context_commits cc ON cc.id=r.commit_id WHERE c.deleted_at IS NULL ORDER BY c.updated_at DESC`,
         )
         .all(),
     }),
@@ -3681,15 +3735,36 @@ export function createServer(
         .all(),
     }),
   );
-  /** 控制台是 owner 单口令的，因此查看者只有一个；判据是所查看的是否为他人那一份。 */
+  /**
+   * 控制台是 owner 单口令的，因此查看者只有一个；判据是所查看的是否为他人那一份。
+   *
+   * `row.subject` 是 `memory_docs` 里的复合键（`<sourceId>:<sessionId>`，T2.1/T2.3），审计记录的
+   * 「被看的是谁」应当是裸 sessionId，因此先经 `splitPrimemorySubject(subject).sessionId` 拆开
+   * 再记——否则这里记复合键，`lastOwnerRead()` 按裸 id 查询，查不到自己那份「被看」记录；
+   * `bootstrapOwnerId` 的比较同理，复合键直接比较恒不相等，owner 查看自己反而会被误记。不是
+   * 合法复合 subject 时按原样记录，审计路径本身不因此抛错。
+   *
+   * `MemoryStore.read()` 内的 `auditPrivateAccess` 调用已被 T2.4 删除（Q-C 拍板：owner 例外
+   * 整条分支移除，随之一并摘掉那处审计）——这里是 `auditPrivateAccess` 现在唯一的调用方，
+   * `GET`/`PUT /api/prompts/:id` 各经它记一次。
+   */
   const auditPrimemoryAccess = (
     row: { scope?: unknown; subject?: unknown },
     op: "read" | "write",
   ): void => {
     if (row.scope !== "primemory") return;
     const subject = typeof row.subject === "string" ? row.subject : null;
-    if (subject && subject === currentConfig().access.bootstrapOwnerId) return;
-    dependencies.memory?.auditPrivateAccess(subject, "webui", op);
+    let targetUserId = subject;
+    if (subject) {
+      try {
+        targetUserId = splitPrimemorySubject(subject).sessionId;
+      } catch {
+        /* 不是合法复合 subject 时按原样记录 */
+      }
+    }
+    if (targetUserId && targetUserId === currentConfig().access.bootstrapOwnerId)
+      return;
+    dependencies.memory?.auditPrivateAccess(targetUserId, "webui", op);
   };
   app.get("/api/prompts/:id", (ctx) => {
     const row = dependencies.db
@@ -3719,9 +3794,10 @@ export function createServer(
   app.get("/api/prompts/:id/revisions", (ctx) =>
     ctx.json({
       ok: true,
+      // 次键用 rowid：与 PromptDocuments.rollback() 的次键一致，ulid 同毫秒不单调。
       data: dependencies.db
         .prepare(
-          "SELECT id,doc_id AS docId,ts,actor,turn_id AS turnId,chat_id AS chatId,user_id AS userId,op,diff,bytes_after AS bytesAfter FROM memory_revisions WHERE doc_id=? ORDER BY ts DESC,id DESC LIMIT 200",
+          "SELECT id,doc_id AS docId,ts,actor,turn_id AS turnId,chat_id AS chatId,user_id AS userId,op,diff,bytes_after AS bytesAfter FROM memory_revisions WHERE doc_id=? ORDER BY ts DESC,rowid DESC LIMIT 200",
         )
         .all(ctx.req.param("id")),
     }),
@@ -5797,6 +5873,16 @@ export function createServer(
       },
     });
   });
+  // 独立文件、只挂载（A6）：必须在下面 `/api/*` 兜底 404 之前——那条 `app.all` 是普通路由
+  // 而不是中间件，先注册的话每一次请求都会在这里被接住返回 404，本文件挂的路由永远轮不到。
+  mountSdkAdmin(app, dependencies);
+  // `/sdk/v1/*`（T3.6，Bearer 认证的第三方入口）。必须在下方的静态兜底（`app.use("/*",
+  // serveStatic(...))` 与 `app.get("*", documentResponse)`）之前注册——否则该前缀下的请求会被
+  // SPA 兜底接住，返回 200 与 index.html（qa-T3-3 在 T3.6 开工前发现的中间态：
+  // `tests/sdk.keys.test.ts` 对此有一条占位断言，本任务已将其改写为正式契约）。
+  // 与 `mountSdkAdmin` 相邻但不同前缀、不共用鉴权中间件——`/api/*` 那条 cookie 会话闸
+  // （`app.use("/api/*", ...)`）不匹配 `/sdk/v1/*`，两套鉴权因此天然互斥，不需要显式排除。
+  mountSdkV1(app, dependencies);
   /**
    * I-13 的另一半。那一轮修的是未匹配的 `/api/*` 返回 200 与 index.html，前端在
    * `response.json()` 处抛 SyntaxError，报错与真实原因无关；下面那行 `app.all` 即是它。

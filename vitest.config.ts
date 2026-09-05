@@ -16,6 +16,11 @@ export default defineConfig({
       '@luoli/core': `${root}packages/core/src/index.ts`,
       '@luoli/telegram': `${root}packages/telegram/src/index.ts`,
       '@luoli/server': `${root}packages/server/src/index.ts`,
+      // 子路径别名必须排在裸包名之前：vite 的字符串别名按插入顺序取第一个匹配
+      // （`importee === find || importee.startsWith(find + '/')`），裸名在前会把
+      // `@luoli/sdk-client/schema` 错配到裸名条目、拼出 `.../src/index.ts/schema`。
+      '@luoli/sdk-client/schema': `${root}packages/sdk-client/src/schema.ts`,
+      '@luoli/sdk-client': `${root}packages/sdk-client/src/index.ts`,
     },
   },
   test: {

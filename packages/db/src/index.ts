@@ -10,3 +10,6 @@ export * from "./schedule.js";
 export * from "./custom-tools.js";
 export * from "./sandbox.js";
 export * from "./mcp-auth.js";
+export * from "./sources.js";
+export * from "./api-keys.js";
+export * from "./sdk-sessions.js";

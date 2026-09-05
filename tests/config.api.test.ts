@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { ArchiveRepository, OperationsRepository, PrincipalRepository, closeDatabase, migrateDatabase, modelAliasKey, openDatabase, readAppKv, writeAppKv } from '@luoli/db';
 import type { Sqlite } from '@luoli/db';
@@ -15,9 +15,10 @@ function harness() {
   const config = configSchema.parse({ access: { bootstrapOwnerId: '1' }, webui: { passwordHash: 'secret-hash' }, memory: { dir: './data/config-prompts' } });
   const operations = new OperationsRepository(db); const events = new EventBus(); const log = new LogSink(operations); const archive = new ArchiveRepository(db);
   const promptDocuments = new PromptDocuments(db, './data/config-prompts'); promptDocuments.ensure();
-  const app = createServer({ config, db, operations, principals: new PrincipalRepository(db), archive, context: new ContextEngine(db, archive), providers: new ProviderStore(db, new Secrets('x'.repeat(32))), approvals: new DatabaseApprovalBroker(db, config, events, log), maintenance: new MaintenanceService(db, path, 2, 30), promptDocuments, memory: new MemoryStore(db, './data/config-prompts', 1500, 3000, 2, log), events, log, configSchema: {}, startedAt: Date.now(), setup: undefined });
+  const memory = new MemoryStore(db, './data/config-prompts', 1500, 3000, 2, log);
+  const app = createServer({ config, db, operations, principals: new PrincipalRepository(db), archive, context: new ContextEngine(db, archive), providers: new ProviderStore(db, new Secrets('x'.repeat(32))), approvals: new DatabaseApprovalBroker(db, config, events, log), maintenance: new MaintenanceService(db, path, 2, 30), promptDocuments, memory, events, log, configSchema: {}, startedAt: Date.now(), setup: undefined });
   const session = operations.createSession(1); const headers = { cookie: `luoli_sid=${session.id}`, 'x-csrf-token': session.csrf, 'content-type': 'application/json' };
-  return { app, db, headers };
+  return { app, db, headers, memory };
 }
 
 const data = async <T>(response: Response): Promise<T> => (await response.json() as { data: T }).data;
@@ -367,15 +368,17 @@ describe('config API validation', () => {
 
   it('persists prompt edits with a unified diff revision', async () => {
     const { app, db, headers } = harness();
-    const response = await app.request('/api/prompts/assist:global', { method: 'PUT', headers, body: JSON.stringify({ content: '# Assist\n\nupdated\n' }) });
+    // T2.5：ensure() 按来源 upsert，id 从 `assist:global` 改为 `assist:<sourceId>`——
+    // harness() 只有内建 telegram 来源，因此是 `assist:telegram`。
+    const response = await app.request('/api/prompts/assist:telegram', { method: 'PUT', headers, body: JSON.stringify({ content: '# Assist\n\nupdated\n' }) });
     expect(response.status).toBe(200);
-    const revision = db.prepare("SELECT diff FROM memory_revisions WHERE doc_id='assist:global' ORDER BY ts DESC").pluck().get() as string;
+    const revision = db.prepare("SELECT diff FROM memory_revisions WHERE doc_id='assist:telegram' ORDER BY ts DESC").pluck().get() as string;
     expect(revision).toContain('--- before');
     expect(revision).toContain('+++ after');
-    const revisionId = db.prepare("SELECT id FROM memory_revisions WHERE doc_id='assist:global' ORDER BY ts DESC").pluck().get() as string;
-    const rollback = await app.request('/api/prompts/assist:global/rollback', { method: 'POST', headers, body: JSON.stringify({ revisionId }) });
+    const revisionId = db.prepare("SELECT id FROM memory_revisions WHERE doc_id='assist:telegram' ORDER BY ts DESC").pluck().get() as string;
+    const rollback = await app.request('/api/prompts/assist:telegram/rollback', { method: 'POST', headers, body: JSON.stringify({ revisionId }) });
     expect(rollback.status).toBe(200);
-    expect((await app.request('/api/prompts/assist:global', { headers: { cookie: headers.cookie } })).status).toBe(200);
+    expect((await app.request('/api/prompts/assist:telegram', { headers: { cookie: headers.cookie } })).status).toBe(200);
     closeDatabase(db);
   });
 
@@ -385,28 +388,44 @@ describe('config API validation', () => {
    * 都没有），而同一组端点的 `PUT` 还可修改他人的内容（docs/29 · `M-MEM-01`）。
    */
   it('看 / 改他人的私有记忆都留痕，看自己那份不留', async () => {
-    const { app, db, headers } = harness();
+    // `harness()` 只清库文件，不清 `./data/config-prompts` 目录：F-2② 的两条 `existsSync`
+    // 断言按磁盘落点判定，跨测试重跑残留的旧文件会让它们读到假阳性，因此这里先清一次。
+    rmSync('./data/config-prompts', { recursive: true, force: true });
+    const { app, db, headers, memory } = harness();
     const seed = db.prepare("INSERT INTO memory_docs(id,scope,subject,path,bytes,tokens,content_hash,updated_at) VALUES (?,'primemory',?,?,0,0,'seed',?)");
     mkdirSync('./data/config-prompts', { recursive: true });
+    // T2.5：primemory 的 subject 自 0019 迁移起是复合键 `<sourceId>:<sessionId>`——裸 `'b'`/`'1'`
+    // 会在 `save()` 内 `splitPrimemorySubject()` 处直接抛错（PUT 500）。这里的 `path` 仍是这条
+    // 用例自定义的旧式扁平路径：`GET` 按 `memory_docs.path` 直接读文件，与 subject 形态无关。
     for (const subject of ['b', '1']) {
       writeFileSync(`./data/config-prompts/PRIMEMORY.${subject}.md`, '# 私有记忆\n');
-      seed.run(`primemory:${subject}`, subject, `./data/config-prompts/PRIMEMORY.${subject}.md`, Date.now());
+      seed.run(`primemory:telegram:${subject}`, `telegram:${subject}`, `./data/config-prompts/PRIMEMORY.${subject}.md`, Date.now());
     }
     const audits = (): Array<{ userId: string | null; op: string }> => (db
       .prepare("SELECT user_id AS userId,data,data_codec AS codec FROM log_events WHERE kind='memory.owner_read_private' ORDER BY id")
       .all() as Array<{ userId: string | null; data: string }>)
       .map((row) => ({ userId: row.userId, op: String((JSON.parse(row.data) as { op: string }).op) }));
 
-    expect((await app.request('/api/prompts/primemory:b', { headers: { cookie: headers.cookie } })).status).toBe(200);
+    expect((await app.request('/api/prompts/primemory:telegram:b', { headers: { cookie: headers.cookie } })).status).toBe(200);
+    // F-2①（qa-T2-3）：审计的 userId 是裸 sessionId（'b'），不是复合 subject（'telegram:b'）——
+    // 否则 `lastOwnerRead('b')`（bot.ts 的 /memory 命令读它）恒查不到这条记录。
     expect(audits()).toEqual([{ userId: 'b', op: 'read' }]);
-    expect((await app.request('/api/prompts/primemory:b', { method: 'PUT', headers, body: JSON.stringify({ content: '# 私有记忆\n\n改过\n' }) })).status).toBe(200);
+    expect(memory.lastOwnerRead('b')).not.toBeNull();
+    expect((await app.request('/api/prompts/primemory:telegram:b', { method: 'PUT', headers, body: JSON.stringify({ content: '# 私有记忆\n\n改过\n' }) })).status).toBe(200);
     expect(audits().at(-1)).toEqual({ userId: 'b', op: 'write' });
+    // F-2②（qa-T2-3）：`save()` 按新布局把复合 subject 拆开落盘到
+    // `sources/<sourceId>/private/<sessionId>/PRIMEMORY.md`，目录名不含 `:`——旧实现会把整段
+    // 复合 subject 当成一个目录名（`private/telegram:b/`），`MemoryStore` 永远读不到那份内容。
+    const newPath = './data/config-prompts/sources/telegram/private/b/PRIMEMORY.md';
+    expect(existsSync(newPath)).toBe(true);
+    expect(readFileSync(newPath, 'utf8')).toContain('改过');
+    expect(existsSync('./data/config-prompts/private/telegram:b')).toBe(false);
     // owner 查看自己的内容不记录：`bootstrapOwnerId` 为 '1'。全部记录会让该日志被自身噪声淹没。
-    expect((await app.request('/api/prompts/primemory:1', { headers: { cookie: headers.cookie } })).status).toBe(200);
+    expect((await app.request('/api/prompts/primemory:telegram:1', { headers: { cookie: headers.cookie } })).status).toBe(200);
     expect(audits()).toHaveLength(2);
     // 读取不到文件时返回 404，那不构成一次查看，不应留下记录。
-    seed.run('primemory:gone', 'gone', './data/config-prompts/PRIMEMORY.gone.md', Date.now());
-    expect((await app.request('/api/prompts/primemory:gone', { headers: { cookie: headers.cookie } })).status).toBe(404);
+    seed.run('primemory:telegram:gone', 'telegram:gone', './data/config-prompts/PRIMEMORY.gone.md', Date.now());
+    expect((await app.request('/api/prompts/primemory:telegram:gone', { headers: { cookie: headers.cookie } })).status).toBe(404);
     expect(audits()).toHaveLength(2);
     closeDatabase(db);
   });

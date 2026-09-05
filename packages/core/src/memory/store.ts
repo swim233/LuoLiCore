@@ -12,6 +12,11 @@ import { ulid } from "ulid";
 import type { Role } from "@luoli/shared";
 import { estimateTextTokens, roleRank } from "@luoli/shared";
 import { type Sqlite, decodeLogPayload } from "@luoli/db";
+import {
+  TELEGRAM_SOURCE_ID,
+  memoryScopeSubjects,
+  splitPrimemorySubject,
+} from "./scope.js";
 
 interface MemoryDocument {
   id: string;
@@ -33,6 +38,12 @@ interface PendingWrite {
   /** `memory.requireSourceTag`（默认 true）：每条写入是否带 `<!-- src: … -->` 来源标注。
    *  关闭可节省 token，代价是该条记忆的来源人与场景无法再追溯（docs/14 A10）。 */
   requireSourceTag?: boolean;
+  /**
+   * 本轮的来源 id，缺省 `"telegram"`。仅用于 `primemory` 的访问闸——按 `(sourceId, userId)`
+   * 重新算出调用者本人的作用域键，与 `subject` 比较（唯一实现点 [[memoryScopeSubjects]]）。
+   * 不参与路径与来源标注。
+   */
+  sourceId?: string;
 }
 
 // 与上下文、提示词共用同一套度量：记忆的软硬上限是按 token 配置的，估算器不一致时
@@ -108,11 +119,11 @@ export class MemoryStore {
   }
 
   /**
-   * 查看他人私有记忆会被记录（D11 的问责设计，`docs/06 §425`）这条约束的唯一发出点。
-   *
-   * 单独提取是因为 WebUI 那条路不经过 `read()`：`GET /api/prompts/:id` 按 `memory_docs.path`
-   * 直接读文件，绕过整个 MemoryStore，于是那条路上没有任何日志，而提示词页那张卡的副标题
-   * 正写着这句话（docs/29 · `M-MEM-01`）。修改该约束时只需改这一处。
+   * 查看他人私有记忆会被记录（D11 的问责设计，`docs/06 §425`）这条约束的唯一发出点——
+   * 现在唯一的调用方是 WebUI（`app.ts:3692` 的 `auditPrimemoryAccess`）。`read()` 内部不再
+   * 调用它：owner 例外整条删除后（Q-C，`docs/12-sdk.md` T2.4），越过闸读他人私有记忆这件事本身
+   * 在工具路径上不再发生，也就没有「越过之后记一笔」的分支；owner 读他人私有记忆的通道只剩
+   * `GET /api/prompts/:id` 这一条，它按 `memory_docs.path` 直接读文件，绕过整个 MemoryStore。
    *
    * `userId` 记录的是被查看者而非查看者：`lastOwnerRead()` 与用户自己的 `/memory`
    * 都按它查询。查看者记录在 `data.actor` 中。
@@ -157,19 +168,32 @@ export class MemoryStore {
     return { ts: row.ts, op };
   }
 
+  /**
+   * `sourceId`（缺省 `"telegram"`）只用于重算调用者本人在 `primemory` 下的作用域键
+   * （`memoryScopeSubjects(sourceId, actorUserId).primemory`），不参与路径计算——`subject`
+   * 参数本身已是调用方（`builtins.ts`）按同一函数算好的复合键。
+   *
+   * `primemory` 唯一的放行条件是 `subject === ownSubject`：调用者只能读自己在
+   * `(sourceId, actorUserId)` 下算出的那一份。角色不参与判定——owner 例外整条删除
+   * （Q-C，`docs/12-sdk.md` T2.4），owner 读他人私有记忆的通道只剩 WebUI
+   * （`app.ts:3692` 的 `auditPrimemoryAccess`，不经过这里）。唯一实现点仍是
+   * [[memoryScopeSubjects]]。`actorRole` 保留在签名里只为不改动既有调用点的位置参数，
+   * 本方法内不再读取它。
+   */
   read(
     scope: "assist" | "character" | "pubmemory" | "primemory",
     subject: string | null,
     actorRole: Role,
     actorUserId?: string,
     isPrivate = false,
+    sourceId = TELEGRAM_SOURCE_ID,
   ): MemoryDocument {
     if (scope === "primemory") {
       if (!isPrivate) throw new Error("private_memory_forbidden");
-      if (subject !== actorUserId && actorRole !== "owner")
-        throw new Error("private_memory_forbidden");
-      if (subject !== actorUserId)
-        this.auditPrivateAccess(subject, actorUserId ?? "unknown", "read");
+      const ownSubject = actorUserId
+        ? memoryScopeSubjects(sourceId, actorUserId).primemory
+        : undefined;
+      if (subject !== ownSubject) throw new Error("private_memory_forbidden");
     }
     const document = this.readRaw(scope, subject);
     this.log?.event({
@@ -187,9 +211,15 @@ export class MemoryStore {
     isPrivate: boolean,
     pubWriteMinRole: Role,
   ): Record<string, unknown> {
+    // 与 `read()` 同一条闸：`input.subject` 是复合键，`input.userId` 是裸 id，直接比较恒不
+    // 相等——重算 `input.userId` 本人的复合键再比较（同一实现点）。写侧从未有过角色例外，
+    // Q-C（`docs/12-sdk.md` T2.4）删的是 `read()` 那条。
     if (
       input.scope === "primemory" &&
-      (!isPrivate || input.subject !== input.userId)
+      (!isPrivate ||
+        input.subject !==
+          memoryScopeSubjects(input.sourceId ?? TELEGRAM_SOURCE_ID, input.userId)
+            .primemory)
     )
       return { ok: false, error: "primemory_scope_forbidden" };
     if (
@@ -203,6 +233,7 @@ export class MemoryStore {
       role,
       input.userId,
       isPrivate,
+      input.sourceId,
     );
     const existing = document.content
       .split("\n")
@@ -242,7 +273,8 @@ export class MemoryStore {
 
   /**
    * `queueWrite` 的去重与硬上限判据取自工具调用那一刻的快照，而落盘发生在轮末：这段时间内
-   * 其他轮次完全可能已把同一条写入同一份文档（PUBMEMORY 是全局单份）。`flush` 自身是同步的，
+   * 其他轮次完全可能已把同一条写入同一份文档（PUBMEMORY 按来源分区，同来源内的轮次共享
+   * 同一份文档）。`flush` 自身是同步的，
    * `readRaw` → 修改 → `persist` 之间没有 await，事件循环无法插入，因此不会丢失更新
    * （`docs/22 · I-05` 所说的锁不是这里需要的）。真正会失效的是那两条判据：重复条目照样落盘，
    * 硬上限也会被越过。两条都在这里按新读到的内容重新执行一遍。
@@ -325,10 +357,13 @@ export class MemoryStore {
       this.persist(document, content, first);
       written += 1;
       if (estimateTokens(content) > this.softLimit) {
+        // `first.subject` 对 primemory 是复合键（含 `:`），文件名不按来源分目录——
+        // 用 `-` 替掉 `:` 而不是拆两段建子目录：`.pending/` 不按来源分区（T2.2 明确留答，
+        // `memory/.pending/` 是写入暂存区，不动），保持扁平即可，只是不能让 `:` 落进文件名。
         const pending = resolve(
           this.directory,
           ".pending",
-          `${first.scope}-${first.subject ?? "global"}.md`,
+          `${first.scope}-${(first.subject ?? TELEGRAM_SOURCE_ID).replace(/:/g, "-")}.md`,
         );
         mkdirSync(dirname(pending), { recursive: true, mode: 0o700 });
         writeFileSync(pending, content, { mode: 0o600 });
@@ -381,7 +416,11 @@ export class MemoryStore {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
     return {
-      id: `${scope}:${subject ?? "global"}`,
+      // `subject` 缺省回退到 `TELEGRAM_SOURCE_ID` 而非字面 `"global"`：0019 迁移之后
+      // `memory_docs.id` 恒为 `<scope>:telegram`（三个来源级 scope）或
+      // `primemory:telegram:<userId>`，两侧不一致会在 `persist()` 的 `ON CONFLICT(id)` 处
+      // 走失——命中不到迁移后的行，多插入一行永远读不到的旧 id。
+      id: `${scope}:${subject ?? TELEGRAM_SOURCE_ID}`,
       scope,
       subject,
       path,
@@ -389,19 +428,39 @@ export class MemoryStore {
     };
   }
 
+  /**
+   * 新布局（`docs/12-sdk.md` T2.2/T2.3，A4）：四个 scope 全部按来源分路径，
+   * `memory/sources/<sourceId>/{ASSIST,CHARACTER,PUBMEMORY}.md`，
+   * `memory/sources/<sourceId>/private/<sessionId>/PRIMEMORY.md`。与
+   * `packages/core/src/memory/layout.ts` 的搬迁目标路径逐字一致——那边搬文件，这边算路径，
+   * 算出来对不上，`migrateMemoryLayout()` 搬完的文件就成了永远读不到的孤儿。
+   *
+   * `assist` / `character` / `pubmemory` 的 subject 就是 sourceId 本身；`primemory` 的 subject
+   * 是复合键 `<sourceId>:<sessionId>`，用 `splitPrimemorySubject` 拆回两段——复合 subject
+   * 只作 `memory_docs` 里的键，不直接当目录名（含 `:` 的目录名在部分文件系统上不合法）。
+   */
   private path(scope: string, subject: string | null): string {
-    const paths: Record<string, string> = {
-      assist: join(this.directory, "ASSIST.md"),
-      character: join(this.directory, "CHARACTER.md"),
-      pubmemory: join(this.directory, "PUBMEMORY.md"),
-      primemory: join(
+    if (scope === "primemory") {
+      const { sourceId, sessionId } = splitPrimemorySubject(subject ?? "");
+      return join(
         this.directory,
+        "sources",
+        sourceId,
         "private",
-        subject ?? "invalid",
+        sessionId,
         "PRIMEMORY.md",
-      ),
+      );
+    }
+    const filenames: Record<string, string> = {
+      assist: "ASSIST.md",
+      character: "CHARACTER.md",
+      pubmemory: "PUBMEMORY.md",
     };
-    return paths[scope]!;
+    const filename = filenames[scope];
+    if (!filename) throw new Error(`invalid_scope: ${scope}`);
+    // 缺省回退到 telegram：批二仅此一个来源，历史调用点（`tests/regression.*`）传 `null`
+    // subject 时按内建来源解释，而不是拒绝——那些用例测的是别的行为，不是来源隔离。
+    return join(this.directory, "sources", subject ?? TELEGRAM_SOURCE_ID, filename);
   }
 
   private persist(

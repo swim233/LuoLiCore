@@ -20,7 +20,9 @@
       "@luoli/core": ["packages/core/src/index.ts"],
       "@luoli/telegram": ["packages/telegram/src/index.ts"],
       "@luoli/server": ["packages/server/src/index.ts"],
-      "@luoli/plugin-sdk": ["packages/plugin-sdk/src/index.ts"]
+      "@luoli/plugin-sdk": ["packages/plugin-sdk/src/index.ts"],
+      "@luoli/sdk-client": ["packages/sdk-client/src/index.ts"],
+      "@luoli/sdk-client/schema": ["packages/sdk-client/src/schema.ts"]
     },
     "types": ["node"]
   },

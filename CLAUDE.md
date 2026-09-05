@@ -228,7 +228,7 @@ better-sqlite3 + 原生 SQL，无 ORM 查询层。WAL 模式。迁移文件为 `
   文档分两层：`docs/00`–`docs/21` 与 `docs/29` 是**活的规格层**，`docs/reviews/` 是**冻结的历史复审**。
   **`docs/00-state.md` 是当前欠项与已核查项的唯一入口**，开工前先阅读 ——
   复审报告中的结论均为当轮快照，不代表当前状态。
-  `docs/13-acceptance-criteria.md` 是 531 条可逐条勾选的验收条目（条数变动时同步该文件末尾的签署表）。
+  `docs/13-acceptance-criteria.md` 是 588 条可逐条勾选的验收条目（条数变动时同步该文件末尾的签署表）。
   每条标 `(自动)` 或 `(手动)`：前者勾选需点名 `〔用例文件〕`，后者需点名 `〔手测 YYYY-MM-DD · S<n>〕`，
   且 `docs/29-manual-acceptance-log.md` 对应场次中存在 `### <条目编号>` 小节 —— 两条均由
   `tests/acceptance.test.ts` 焊住。**编号 29 归手动验收台账，下一份复审报告用 30。**

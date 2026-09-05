@@ -28,7 +28,7 @@
 | A9 | 子 agent 默认**不注入**任何记忆（减少 token 与泄露面） | ⚠ **2026-08-30 · 那个逃生舱随 A8 一并删除，而它从来没有被读过**：`injectMemory` 从进 schema 到被删，`runSubAgent` 一次都没有读过它 —— 写 `true` 与写 `false` 的产出逐字节相同，整轮里它是个假开关。**假设本身仍然成立**，只是现在没有开关：lw-worker 的 instructions 里一个记忆字节都没有（[04 §3.3](./04-agents-and-providers.md)、[06 §3.1](./06-prompt-and-memory.md)）。真要注入得新开一条路，而那条路要先回答「worker 看不到对话，凭什么它该看到记忆」 |
 | A10 | 记忆写入采用**结构化 markdown + 来源标注**，不是自由文本 —— 去重、精确更新、可审计都依赖结构 | `memory.requireSourceTag=false`（关掉省 token，代价是「这条是谁在哪说的」再也查不回来） |
 | A11 | 记忆自动压缩结果**默认需 owner 审阅**才应用 | `memory.autoApplyCompaction=true` |
-| A12 | 群聊里 `limited` 角色**不能写公开记忆**（`pubWriteMinRole=trusted`）—— 全局单份 PUBMEMORY 下这是防污染的必要安全阀 | `memory.pubWriteMinRole='limited'` |
+| A12 | 群聊里 `limited` 角色**不能写公开记忆**（`pubWriteMinRole=trusted`）—— 全局单份 PUBMEMORY 下这是防污染的必要安全阀 | `memory.pubWriteMinRole='limited'`（D12 于 2026-09-03 改为按来源分区，见 docs/README D12） |
 | A13 | 语音**不做 STT**，只归档（多模态里没选语音） | 加一个 `transcribe` 工具或 plugin |
 | A14 | 图片长边归一化到 **1568px**（主流 vision 模型的性价比拐点） | `media.maxImageEdge` |
 | A15 | WebUI 只有**单一 owner 身份**，无多用户 RBAC —— §2 Q7 已定为**确定不做** | **不再改动**。这条同时是 A26 与 T5 成立的前提 |
@@ -86,7 +86,7 @@ Q1–Q13 之外没覆盖到的两件事各有去处：**关键词触发的主动
 | T1 | **并发轮次的回答可能过时**：B 作答时看不到 A 的对话，但历史里 B 排在 A 之后。用户可能觉得 bot「答了个不相关的」 | D1（你明确选择） | `meta.rebased` 标记 + `rebase.injectNotice` 可开 + `concurrency.mode='serial'` 作为逃生舱 |
 | T2 | **并发下背景消息的时间序可能被打乱**：A 认领了 1–10、B 认领了 11–12，若 B 先完成，日志里 11,12 会排在 1–10 之前 | D1 | 每条背景消息带真实时间前缀 `[张三 10:02]`，模型仍能判断实际先后；实践中并发窗口只有几秒 |
 | T3 | **失败/取消的轮次会「吃掉」它认领的背景消息**：水位不回退，这批消息永远不会进上下文 | D1 的原子认领要求 | 消息仍在归档中，`search_messages` / `read_messages` 可检索；可考虑将来做「未消费队列」 |
-| T4 | **群 A 的公开记忆会流到群 B 和所有私聊** | D12（你明确选择全局单份） | `pubWriteMinRole=trusted` + 来源标注 + WebUI 可审查回滚 + `pubWriteRequiresApproval` 可开 |
+| T4 | **群 A 的公开记忆会流到群 B 和所有私聊** | D12（你明确选择全局单份） | `pubWriteMinRole=trusted` + 来源标注 + WebUI 可审查回滚 + `pubWriteRequiresApproval` 可开（D12 于 2026-09-03 改为按来源分区，见 docs/README D12） |
 | T5 | **owner 能读所有人的私有记忆** | D11（你明确选择） | 每次读取记 warn 日志 + 在该用户记忆页显示「最近被 owner 查看」 |
 | T6 | **背景消息进上下文 ⇒ token 成本明显上升**：活跃群里每轮可能多几千 token | D6（你明确选择） | `background.maxPerTurn` 可调（你已要求做成配置项）+ prompt cache 抵消一部分 + 轮后裁剪兜住上限 |
 | T7 | **单库单文件 ⇒ 隔离靠代码纪律，不是物理边界** | D7 | Repository 层类型强制 + 跨会话白名单 + CI 的 SQL 扫描测试（AC-DB-003） |
@@ -123,7 +123,7 @@ Q1–Q13 之外没覆盖到的两件事各有去处：**关键词触发的主动
 | WebUI 多用户 RBAC | §2 Q7 **确定不做**（2026-08-18）。连带：`approval.allowInitiator` 永久不再引入 |
 | `WorkflowAgent` | 编排在自己的 `TurnRunner` 里，语义更强（[04 §6](./04-agents-and-providers.md#6-workflowagent-harnessagent-的取舍)） |
 | 上下文分支 DAG（保留多分支 + merge） | D1 选了线性 rebase；数据模型（`parent_id`）已为将来预留 |
-| 每群独立 PUBMEMORY | D12 选了全局单份；数据模型（`memory_docs.subject`）已预留 |
+| 每群独立 PUBMEMORY | D12 选了全局单份；数据模型（`memory_docs.subject`）已预留（D12 于 2026-09-03 改为按来源分区，见 docs/README D12） |
 | Telegram Business / Stars / 支付 | 需求未提 |
 | 频道（channel）支持 | `trigger.channels` 默认 false，未做完整验证 |
 | i18n 多语言界面 | 第一版只有 zh-CN。**结构并没有预留** —— 原文写的 `i18n/` 目录从来没存在过，文案就在各 SFC 里（改写工具见 [`docs/copy/README.md`](./copy/README.md)）。真做时要连 `general.locale` 一起加回来（A2） |

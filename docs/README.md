@@ -25,6 +25,7 @@
 | [09-webui.md](./09-webui.md) | 管理端页面、REST/SSE API、鉴权 | 前端 / 后端 |
 | [10-logging-and-observability.md](./10-logging-and-observability.md) | 独立日志、trace 模型、成本记账、配额 | 后端 / 运维 |
 | [11-config-reference.md](./11-config-reference.md) | 全量配置项参考（含默认值与热更新语义） | 全体 |
+| [12-sdk.md](./12-sdk.md) | **SDK 接入**：`/sdk/v1` 端点契约、认证、流式协议、错误码、`@luoli/sdk-client`、`/api/sdk/*` 管理面 | 后端 / 第三方接入方 |
 | [13-acceptance-criteria.md](./13-acceptance-criteria.md) | **验收文档**：可逐条勾选的验收用例 | QA / 验收 |
 | [14-open-questions.md](./14-open-questions.md) | 未确认项、默认假设、已知取舍。**§2 的 Q1–Q13 已全部答复且全部落地**（Q1–Q12 于 2026-08-18，Q13 随 M12），开头那张表是结论速查。§3 的 `T*` 编号被源码当凭据引用（`T17` 6 处、`T19` 4 处），**不得重编号** | 全体 |
 | [21-webui-coverage-gaps.md](./21-webui-coverage-gaps.md) | **WebUI 控制面覆盖缺口**：口径是「运行时有这个能力，但运维在 WebUI 里够不着」。动 WebUI 或从 `KNOWN_UNIMPLEMENTED_CONFIG_KEYS` 摘键之前先扫一眼 §1 的复算方法与 §5 的「不是缺口」清单 | 全体 / 运维 |
@@ -54,6 +55,11 @@
 ⚠ **`27-full-scope-review.md` 含 3 个字面 NUL 字节**（`C-07` 条目在讲 `safeRender` 的 `\0<n>\0` 占位符），
 `file` 判它为 `data`，**普通 `grep` 会静默跳过整份文件** —— 查它的编号要用 `grep -a`。这份承载 108 处引用，
 是这套「编号即凭据」机制里最容易被漏查的一份。
+
+⚠ **同样的坑在源码里也有一处**：`packages/core/src/ledger/repair.ts` 与 `packages/core/src/ledger/quota.ts`
+含字面 NUL 字节，`file` 判两者为 `data`，不加 `-a` 的 `grep` 会静默跳过整份文件——`docs/00 §2.1` 的
+`D-01` 复算数字曾因此少 12 条 / 2 个文件。检索这两个文件（含按 `docs/00`/`docs/12` 编号找源码引用）
+一律带 `grep -a`。
 
 | 文档 | 那一轮做了什么 |
 |---|---|
@@ -112,8 +118,8 @@ Telegram ──► 准入(白名单/角色) ──► 归档(DB, 按 chat 隔离
 | D8 | 上下文粒度 | 默认整群共享（`contextScope='chat'`）；可切换按论坛 topic 隔离（`'thread'`）。`message_thread_id` 始终入库 | [02](./02-context-engine.md#2-上下文键) |
 | D9 | 权限模型 | **分级角色 owner > trusted > limited > blocked**；私聊 `effective = role(user)`，群/频道 `effective = min(max(role(user), role(chat)), 'trusted')` —— 会话角色是**下限**（把群里已登记的成员整体抬上来），封顶 `trusted`（`owner` 只在私聊成立），任一侧 `blocked` 一票否决（2026-08-30 拍板） | [05](./05-tools-and-permissions.md#2-角色与判定) |
 | D10 | 沙箱 | **可开关**：`mode = none \| docker`；`bypassRoles=['owner']`（owner 宿主直跑）；非 owner 无沙箱时**工具直接禁用（fail-closed）** | [05](./05-tools-and-permissions.md#5-沙箱) |
-| D11 | 私有记忆 | **每用户一份** `memory/private/<userId>/PRIMEMORY.md`；owner 可读写全部；群聊永不注入 | [06](./06-prompt-and-memory.md#3-作用域与注入矩阵) |
-| D12 | 公开记忆 | **全局单一份** `memory/PUBMEMORY.md`（所有会话共享）；写入需 `pubWriteMinRole`（默认 `trusted`） | [06](./06-prompt-and-memory.md#3-作用域与注入矩阵) |
+| D11 | 私有记忆 | **按（来源, 用户）一份** `memory/sources/<sourceId>/private/<userId>/PRIMEMORY.md`；owner 读写他人那份的通道只剩 WebUI（`GET`/`PUT /api/prompts/:id`），`memory_read`/`memory_write` 与 `/memory` 命令下 owner 只能读写自己那份（2026-09-03 起，Q-C 拍板删除 owner 例外）；群聊永不注入 | [06](./06-prompt-and-memory.md#3-作用域与注入矩阵) |
+| D12 | 公开记忆 | **按来源分区**：`sources` 表一行一份 `PUBMEMORY.md`，同一来源内所有会话共享，不同来源互不可见；写入需 `pubWriteMinRole`（默认 `trusted`）。2026-09-03 拍板改自「全局单一份」，依据 [12 §2](./12-sdk.md#2-数据模型引用) 的来源维度——Telegram 是当前唯一内建来源，实际效果不变 | [06](./06-prompt-and-memory.md#3-作用域与注入矩阵)、[12 §2](./12-sdk.md#2-数据模型引用) |
 | D13 | Agent 通信 | **双向**：worker 可 `ask_parent` 阻塞提问、`report_progress` 上报；待答超时后走仲裁。⚠ **`maxDepth` 与环路检测已随 worker 重构摘除** —— lw-worker 是叶子，深度恒 ≤1，那两道闸判的都是恒假条件 | [04](./04-agents-and-providers.md#4-agent-间通信) |
 | D14 | 扩展生态 | **Anthropic SKILL.md 兼容 + JS/TS Plugin + MCP** | [07](./07-skills-plugins-mcp.md) |
 | D15 | WebUI | **同进程内置**（Hono + 静态 SPA）+ 单管理员密码/Session + SSE 实时日志；默认仅监听 `127.0.0.1` | [09](./09-webui.md) |

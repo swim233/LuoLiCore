@@ -18,7 +18,7 @@ import { confirmBox, dismissConfirm, runConfirmed } from '../../packages/webui/s
  */
 
 const NAV_KEYS = ['dashboard', 'chats', 'messages', 'prompts', 'providers', 'principals', 'tools',
-  'extensions', 'workers', 'logs', 'usage', 'quota', 'tasks', 'settings'] as const;
+  'extensions', 'workers', 'sdk', 'logs', 'usage', 'quota', 'tasks', 'settings'] as const;
 /** 设置页的四个二级 tab（docs/09 §3.13）。与导航项同理：遗漏一个分支，该 tab 从此无人渲染。 */
 const SETTINGS_TABS = ['common', 'all', 'maintenance', 'advanced'] as const;
 /** 工具页按操作目的拆分。缺少任一分区时，长页重构会把审批或沙箱入口静默藏掉。 */
@@ -186,6 +186,12 @@ const RESPONSES: Record<string, unknown> = {
     body: 'import json, sys\nprint(json.dumps({"ok": True}))\n', paramsJson: JSON.stringify({ type: 'object', properties: {} }),
     minRole: 'owner', scope: 'chat', ownerChatId: '-1001', timeoutMs: 60_000, enabled: 0, createdBy: '5568996608',
     reviewedAt: null, lastError: null, updatedAt: Date.now() - 1_800_000 }],
+  // SDK 接入页：内建 telegram 一行 + 一个第三方来源。此前一直返回 `{}`（`sources` 为
+  // undefined），导致来源表的行模板与类型 / 状态徽标从未被渲染过，与模型行、容器行此前的情形相同。
+  '/api/sdk/sources': { sources: [
+    { id: 'telegram', kind: 'telegram', name: 'Telegram', createdAt: Date.now() - 90_000_000, disabledAt: null },
+    { id: '01HXAMPLE00000000000000001', kind: 'sdk', name: '示例接入方', createdAt: Date.now() - 3_600_000, disabledAt: null },
+  ] },
 };
 
 /** 未显式列出的端点：按路径形态推断一个空值。数组端点返回 `[]`，其余返回 `{}`。 */
@@ -228,7 +234,7 @@ async function settle(wrapper: VueWrapper): Promise<void> {
 describe('ConsoleView 渲染', () => {
   beforeEach(() => { stubFetch(); });
 
-  it('14 个导航页逐个切过去都有内容，且不产生 Vue 警告', async () => {
+  it('15 个导航页逐个切过去都有内容，且不产生 Vue 警告', async () => {
     const warnings: string[] = [];
     const spy = vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => { warnings.push(args.map(String).join(' ')); });
     const errors: string[] = [];
@@ -738,6 +744,23 @@ describe('ConsoleView 渲染', () => {
     // 从此无人渲染的页面，新增导航项时必须同步加入这里。
     const keys = (wrapper.vm as unknown as { navigation: ReadonlyArray<readonly [string, string, string]> }).navigation.map(([key]) => key);
     expect(keys).toEqual([...NAV_KEYS]);
+    wrapper.unmount();
+  });
+
+  /**
+   * `approvals` / `config` 两组故意不做页面过滤（待审批会阻塞真实轮次，`AC-WEB-049`；配置变化
+   * 影响面广）——`REFRESH_VISIBILITY` 里这两组因此是手写的「全部导航项」清单，不是从 `NAV_KEYS`
+   * 派生的。新增导航项时若漏改这两行，代价是静默的：那一页不会报错，只是待审批角标 /
+   * 配置刷新在这一页上停摆，没有任何用例能从「渲染出内容」的角度发现。
+   */
+  it('全局刷新组（待审批 / 配置）覆盖每一个导航项，不漏页', async () => {
+    const { default: ConsoleView } = await import('../../packages/webui/src/views/ConsoleView.vue');
+    const wrapper = mount(ConsoleView, { attachTo: document.body });
+    await settle(wrapper);
+    const visibility = (wrapper.vm as unknown as { REFRESH_VISIBILITY: Record<string, readonly string[]> }).REFRESH_VISIBILITY;
+    for (const group of ['approvals', 'config'] as const)
+      for (const key of NAV_KEYS)
+        expect(visibility[group], `REFRESH_VISIBILITY.${group} 缺 '${key}'`).toContain(key);
     wrapper.unmount();
   });
 

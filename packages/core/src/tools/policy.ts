@@ -4,13 +4,14 @@ export const APPROVAL_POLICIES = ["never", "conditional", "always"] as const;
 export type ApprovalPolicy = (typeof APPROVAL_POLICIES)[number];
 /**
  * 谁在调这个工具（`docs/04 §1`）。`main` 只对话与派发，工具执行整体下沉给 `lw` —— 内建的轻任务
- * worker，拿的是调用者有效角色下的全集。
+ * worker，拿的是调用者有效角色下的全集。`sdk` 是第三方经 `/sdk/v1` 接入的顶层入口
+ * （`docs/12-sdk.md` T3.4，`docs/05 §3.13`），角色恒 `trusted`，不接派发，白名单见 `SDK_AGENT_TOOLS`。
  *
  * **没有 `harness` 这一档**：外部 harness 与 ACP 自带整套工具，它们内部的调用一次都不经过本注册表
  * （`docs/14` T17），因此没有任何代码会构造一个 harness 侧的 `ToolExecutionContext`。加一个谁都不产生
  * 的枚举值，等于在权限判据里放一条永远走不到的分支。
  */
-export type AgentKind = "main" | "lw";
+export type AgentKind = "main" | "lw" | "sdk";
 export type ToolScope =
   "workspace" | "chat" | "private" | "global" | "sandbox" | "telegram";
 
@@ -489,9 +490,25 @@ export const WORKER_INTERNAL_TOOLS: readonly ToolName[] = [
 ];
 
 /**
+ * SDK 会话可调的工具全集（`docs/12-sdk.md` T3.4，`docs/05 §3.13`）。第三方接入方经 `/sdk/v1` 建的轮次
+ * 不接派发，本次不做工具调用，模型侧只保留记忆读写三件。
+ *
+ * `memory_write` 在 `MAIN_ONLY_TOOLS` 里、默认只给 `main`；这里单独把它列进白名单，
+ * 而不是让 `sdk` 复用 `lw` 那条「非 `MAIN_ONLY_TOOLS` 即放行」的黑名单算法 —— 黑名单算法会把
+ * `bash` / `web_fetch` 等 worker 专属工具一并放出来，与「SDK 只保留记忆三件」的既定结论相悖
+ * （`docs/12-sdk.md` §1「不在本次范围」）。
+ */
+export const SDK_AGENT_TOOLS: ReadonlySet<ToolName> = new Set([
+  "memory_read",
+  "memory_list",
+  "memory_write",
+] satisfies ToolName[]);
+
+/**
  * 这一档 agent 能不能调这个工具。`#eligible()` 与 `admit()` 共用，判据只有一份。
  */
 export function toolCallableBy(kind: AgentKind, name: string): boolean {
+  if (kind === "sdk") return SDK_AGENT_TOOLS.has(name as ToolName);
   return kind === "main"
     ? MAIN_AGENT_TOOLS.has(name as ToolName)
     : !MAIN_ONLY_TOOLS.has(name as ToolName);

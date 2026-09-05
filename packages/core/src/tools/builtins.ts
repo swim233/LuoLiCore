@@ -20,12 +20,14 @@ import type {
 import {
   DEFAULT_WEB_RETRY,
   NOTE_PREFIX,
+  TELEGRAM_SOURCE_ID,
   acpFailure,
   acpPermissionGate,
   arbitrateAsk,
   builtinPolicy,
   captureImage,
   enabledAcpAgents,
+  memoryScopeSubjects,
   numberLines,
   readSlice,
   resolveAcpTarget,
@@ -52,7 +54,7 @@ import {
   registerScheduleTools,
   type ScheduleToolDependencies,
 } from "./schedule.js";
-import type { Role } from "@luoli/shared";
+import type { Role, RuntimeTurnContext } from "@luoli/shared";
 import type { ToolExecutionContext } from "./registry.js";
 
 /** 一次投递的目标位置。thread 必须一并传递，否则话题群中的追发会落到 General。 */
@@ -909,6 +911,14 @@ export function registerBuiltins(
         ? z.enum(["pubmemory", "primemory"])
         : z.enum(["pubmemory"]),
     });
+  // 作用域键的唯一实现点是 `memoryScopeSubjects`（`packages/core/src/memory/scope.ts`）。
+  // 两个工具都经这里取 subject，不再把 `initiatorUserId` 直传给 `MemoryStore`——
+  // `primemory` 的 subject 是复合键 `<sourceId>:<userId>`，裸 userId 已不是合法路径段。
+  const turnMemorySubjects = (turn: RuntimeTurnContext) =>
+    memoryScopeSubjects(
+      turn.sourceId ?? TELEGRAM_SOURCE_ID,
+      turn.initiatorUserId,
+    );
   registry.register({
     name: "memory_read",
     description: "读取公开记忆或当前用户私有记忆。",
@@ -916,16 +926,20 @@ export function registerBuiltins(
     inputSchemaFor: (context) => memoryScopeSchema(context.turn.isPrivate),
     policy: builtinPolicy("memory_read"),
     sourcePriority: 100,
-    execute: (input, context) => ({
-      ok: true,
-      content: dependencies.memory.read(
-        input.scope,
-        input.scope === "primemory" ? context.turn.initiatorUserId : null,
-        context.turn.effectiveRole,
-        context.turn.initiatorUserId,
-        context.turn.isPrivate,
-      ).content,
-    }),
+    execute: (input, context) => {
+      const subjects = turnMemorySubjects(context.turn);
+      return {
+        ok: true,
+        content: dependencies.memory.read(
+          input.scope,
+          input.scope === "primemory" ? subjects.primemory : subjects.pubmemory,
+          context.turn.effectiveRole,
+          context.turn.initiatorUserId,
+          context.turn.isPrivate,
+          context.turn.sourceId ?? TELEGRAM_SOURCE_ID,
+        ).content,
+      };
+    },
   });
   const memoryWriteSchema = (isPrivate: boolean) =>
     z.object({
@@ -953,11 +967,11 @@ export function registerBuiltins(
         : null,
     execute: (input, context) => {
       const memory = (context.turn.config as Readonly<Config>).memory;
+      const subjects = turnMemorySubjects(context.turn);
       return dependencies.memory.queueWrite(
         {
           scope: input.scope,
-          subject:
-            input.scope === "primemory" ? context.turn.initiatorUserId : null,
+          subject: input.scope === "primemory" ? subjects.primemory : subjects.pubmemory,
           section: input.section,
           lines: input.content.split("\n").filter(Boolean),
           actor: "model",
@@ -965,6 +979,7 @@ export function registerBuiltins(
           chatId: context.turn.chatId,
           userId: context.turn.initiatorUserId,
           requireSourceTag: memory.requireSourceTag,
+          sourceId: context.turn.sourceId ?? TELEGRAM_SOURCE_ID,
         },
         context.turn.effectiveRole,
         context.turn.isPrivate,

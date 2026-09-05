@@ -1,10 +1,10 @@
-import { readFileSync, mkdirSync, rmSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { mkdirSync, rmSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { ArchiveRepository, OperationsRepository, PrincipalRepository, ScheduleRepository, closeDatabase, migrateDatabase, openDatabase, type ScheduledJob } from '@luoli/db';
 import { ContextEngine, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceService, ProviderStore, Secrets, configSchema } from '@luoli/core';
 import { createServer } from '@luoli/server';
 import { lastLogPayload, logRows } from './support/logs.js';
+import { code, source } from './support/source.js';
 
 /**
  * 定时任务的 WebUI 面板（docs/21 · `G-API-16`）。此前运维在界面上既看不到部署里有哪些任务在排、
@@ -357,10 +357,11 @@ describe('定时任务面板端点', () => {
 describe('装配', () => {
   it('main.ts 把定时任务运行时交给了 createServer', () => {
     // 依赖为可选（与 `ledger?` / `restart?` 同一写法），漏传不会产生编译错误，表现为面板持续提示
-    // 运行时未装配。该断言即漏传的守卫。
-    const source = readFileSync(resolve('apps/bot/src/main.ts'), 'utf8');
-    expect(source).toMatch(/schedules:\s*\{\s*jobs:\s*scheduledJobs,\s*runner:\s*scheduleRunner\s*\}/);
-    // 装载须在 bot 构建完成之后：早于它时，第一批任务触发时 telegram() 仍为 null。
-    expect(source).toContain('scheduleRunner.load()');
+    // 运行时未装配。该断言即漏传的守卫。createServer 调用挪进了 composeRuntime（apps/bot/src/compose.ts）。
+    const compose = source('apps/bot/src/compose.ts');
+    expect(compose).toMatch(/schedules:\s*\{\s*jobs:\s*scheduledJobs,\s*runner:\s*scheduleRunner\s*\}/);
+    // 装载须在 bot 构建完成之后：早于它时，第一批任务触发时 telegram() 仍为 null。这一步仍在 main.ts。
+    const main = source('apps/bot/src/main.ts');
+    expect(main).toContain(code('scheduleRunner.load()'));
   });
 });

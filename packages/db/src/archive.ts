@@ -276,6 +276,62 @@ export class ScopedArchiveRepository {
     );
   }
 
+  /**
+   * 会话内 `tg_message_id` 取 `MAX+1`，分配与插入同一事务（docs/12-sdk.md T3.6/T3.7）。
+   *
+   * **不与 `runner.ts` 的保留高位段（`SYNTHETIC_TG_MESSAGE_ID_BASE = 2_000_000_000`）重叠**：
+   * 那段是为了在**同一个 Telegram `chat_id`** 下区分「合成触发消息」与真实用户消息——两者共享
+   * 同一个计数空间，若从 1 起分配就可能撞上未来某条真实消息。SDK 会话的 `chat_id` 是服务端签发的
+   * uuid（`SdkSessionRepository.createSession`），与 Telegram 的数字 `chat_id` 是两个不相交的
+   * 字符串集合，`tg_message_id` 的唯一约束是 `(chat_id, tg_message_id, revision)` 复合键——不同
+   * `chat_id` 下的编号互不干扰，SDK 每个会话从 1 起递增没有与任何 Telegram chat 冲突的可能，
+   * 也不需要保留高位段（SDK 消息本身就是"真实"的，没有"合成 vs 真实"这层区分）。
+   *
+   * `append()` 是 `INSERT OR IGNORE`：调用方必须核对 `inserted`，**不能比较返回行的
+   * `tgMessageId`**——`append()` 冲突时的回读是 `SELECT ... WHERE tg_message_id=?`，用的正是
+   * 本次尝试插入的那个值，因此无论插入成功与否，返回行的 `tgMessageId` 恒等于调用方传入的值，
+   * 这个比较**永远为真、没有判别力**（`packages/core/src/schedule/runner.ts` 的
+   * `#appendTrigger` 文档注释与 `docs/28 · L-SCH-03` 记录的正是同一个坑：早期实现比较过
+   * `tgMessageId`，改为判定 `inserted` 才是修复）。本方法在一个 `db.transaction` 内完成
+   * 「查最大值→插入」两步，正常情况下不会撞号（better-sqlite3 的事务同步执行，中途无法插队），
+   * 撞号意味着并发写入绕过了这层封装，属不可信任的状态——直接抛出而非静默复用既有行，
+   * 抛出会连带回滚本次事务内的其余写入（`tests/sdk.v1.test.ts` 用与 `tests/schedule.test.ts`
+   * 同一手法验证过：包一层 `.append()` 模拟另一个实例抢先插入同一个号）。
+   */
+  appendNext(
+    input: Omit<AppendMessageInput, "tgMessageId">,
+  ): AppendedMessage {
+    return this.db.transaction(() => {
+      const highest = this.db
+        .prepare("SELECT MAX(tg_message_id) FROM messages WHERE chat_id=?")
+        .pluck()
+        .get(this.chatId) as number | null;
+      const appended = this.append({
+        ...input,
+        tgMessageId: (highest ?? 0) + 1,
+      });
+      if (!appended.inserted)
+        throw new Error(`archive_append_conflict:${appended.tgMessageId}`);
+      return appended;
+    })();
+  }
+
+  /**
+   * 软删除（`messages.deleted_at`，`0001_init.sql` 起即存在的列）。SDK 侧 A8 用它标记
+   * 「排队中断连 / 队列满时已归档但从未真正开轮」的那条消息：不复用 `demoteToBackground`——
+   * 后者语义是「改记为背景消息，仍可被下一轮认领」，而 SDK 客户端收到错误即可重发，
+   * 让失败的这条继续留在背景反而会让重发的下一条被前一条的失败上下文污染（A8 依据）。
+   * 全部按 `deleted_at IS NULL` 过滤的读出路径（归档检索、`claimThroughMessageId`）因此
+   * 自动跳过它，行为与 Telegram 侧手工软删一条消息完全一致。
+   */
+  markDeleted(id: number): void {
+    this.db
+      .prepare(
+        "UPDATE messages SET deleted_at=? WHERE id=? AND chat_id=? AND deleted_at IS NULL",
+      )
+      .run(Date.now(), id, this.chatId);
+  }
+
   /** 取最新 revision 的行：编辑过的消息有多行，引用时应取用户当前看到的那一版。 */
   byTgMessageId(tgMessageId: number): ArchivedMessage | null {
     return withMedia(

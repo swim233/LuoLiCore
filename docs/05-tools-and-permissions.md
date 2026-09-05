@@ -62,6 +62,9 @@ role(chat): principals['chat:<id>'].role ?? cfg.access.defaultChatRole   // 默�
 | 任意 | blocked | **blocked** | 群未授权 → 整群静默 |
 | blocked | 任意 | **blocked** | 用户被拉黑 |
 
+**SDK 会话不参与这套判定**：经 `/sdk/v1` 接入的顶层入口角色恒 `trusted`、`isPrivate: true`，
+硬编码在 SDK 入口，不查 `principals`、不做角色重算（`docs/12 §7`）。
+
 两条不变量：
 
 1. **`effectiveRole === 'owner'` ⟹ `isPrivate`。** 群 / 频道里封顶 `trusted`，任何一条群消息都换不到
@@ -1141,6 +1144,40 @@ meta 工具本身与它的五条不变量。
    进程崩（[02 §9](./02-context-engine.md#9-实现红线清单code-review-必查) 第 20 条）。有了上面那条
    自愈钩子，折叠那一类里绝大多数连 `tool-error` 都走不到；剩下的（幻觉名字、以及下沉那一整族）
    必须配对。
+
+### 3.13 SDK 会话（`AgentKind = 'sdk'`）
+
+第三方经 `/sdk/v1` 接入的顶层入口（`docs/12 §1`），角色恒 `trusted`，不接派发。白名单固定
+三件：`memory_read`、`memory_list`、`memory_write`，判据是独立常量 `SDK_AGENT_TOOLS`
+（`packages/core/src/tools/policy.ts`），`toolCallableBy()` 按 `kind` 三分。强制点与 `main` / `lw`
+相同：`#eligible()`（目录）与 `admit()`（准入复查）两处。
+
+**白名单三件，实际可达两件。** `memory_list` 的 `TOOL_POLICY` 策略 `minRole: 'owner'`
+（§4 权限矩阵那一行），而角色轴的判定（`roleRank(role) >= roleRank(minRole)`）先于
+`toolCallableBy()` 的 `agentKind` 白名单生效——SDK 角色恒 `trusted`，`trusted < owner`，
+`memory_list` 在角色这一层即被拒，永远到不了白名单判定那一步。这不是实现缺陷：拍板保留
+`memory_list` 在 `SDK_AGENT_TOOLS` 里（不收窄成两件、不下调 `minRole`），只在文档写明它对
+SDK 不可达（`docs/12 §8`）——下调 `minRole` 会把「跨来源枚举 `memory_docs`」这项 owner 专属
+能力一并开给 `trusted`，影响面超出 SDK 本身。
+
+不可达：派发族（`spawn_worker` `spawn_harness` `spawn_acp` `read_worker_result`）、`schedule_create`
+`schedule_update` `schedule_list` `schedule_cancel`、归档检索（`search_messages` `read_messages`
+`get_message` `context_stats` `admin_search_messages`）、Telegram 输出五件（`send_message`
+`send_photo` `send_file` `react` `pin_message`）、`stay_silent`、`search_tools`、`memory_list`
+（角色轴拒绝，见上）。本次不做工具调用（`docs/12 §1`「不在本次范围」），模型侧只保留记忆读写。
+
+`memory_write` 在 `MAIN_ONLY_TOOLS` 里、默认只给 `main`；`SDK_AGENT_TOOLS` 单独把它列进白名单，
+不经 `lw` 那套「非 `MAIN_ONLY_TOOLS` 即放行」的黑名单算法 —— 黑名单算法会把 `bash` `web_fetch`
+等 worker 专属工具一并放出来。三档判据的形状因此不同：`main` 与 `sdk` 各自一份白名单，`lw` 一份
+黑名单，`toolCallableBy()` 按 `kind` 分支取数，判据只有一份。
+
+**SDK 轮次没有人工审批通道**（lead 裁决，`docs/12 §7`）：`memory_write` 在
+`memory.pubWriteRequiresApproval=true` 时会把自身升到 `approval:'always'`（`docs/05` 权限矩阵的
+`memory_write(pub)` 那一行），但 `ToolRegistry.execute()` 里 `agentKind==='sdk'` 且
+`decision.needed` 为真的调用在进入 `DatabaseApprovalBroker.request()` 之前即被拦下，直接返回
+`{ok:false, error:'approval_unavailable'}`——不写入一条待处理的 `approvals` 行，也不等到 TTL
+过期才判定无人接单。理由是后者是分钟级的挂起，不是「即时」；一个没有裁决通道的会话让模型的
+每一次公开记忆写入都先卡住等一段固定时长再失败，观感上与卡死无异。
 
 ---
 

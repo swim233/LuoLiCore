@@ -232,9 +232,12 @@ CREATE TABLE contexts (
   claim_watermark  INTEGER NOT NULL DEFAULT 0,   -- 已折入上下文的最大 messages.id
   token_ratio      REAL    NOT NULL DEFAULT 1.0, -- 估算校准系数（EMA）
   created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  updated_at INTEGER NOT NULL,
+  source_id        TEXT    NOT NULL DEFAULT 'telegram',  -- 迁移 0020，见 §2.15
+  deleted_at       INTEGER                                -- 迁移 0020，见 §2.15
 );
 CREATE INDEX ix_contexts_chat ON contexts(chat_id);
+CREATE INDEX ix_contexts_source ON contexts(source_id);
 
 CREATE TABLE context_messages (
   key                 TEXT    NOT NULL,
@@ -567,12 +570,14 @@ CREATE TABLE usage_ledger (
   latency_ms    INTEGER,
   finish_reason TEXT,
   ok            INTEGER NOT NULL DEFAULT 1,
-  error_kind    TEXT
+  error_kind    TEXT,
+  source_id     TEXT                          -- 迁移 0020，见 §2.15；存量行回填 'telegram'
 );
 CREATE INDEX ix_usage_ts ON usage_ledger(ts DESC);
 CREATE INDEX ix_usage_chat_ts ON usage_ledger(chat_id, ts DESC);
 CREATE INDEX ix_usage_user_ts ON usage_ledger(user_id, ts DESC);
 CREATE INDEX ix_usage_turn ON usage_ledger(turn_id);
+CREATE INDEX ix_usage_source_ts ON usage_ledger(source_id, ts DESC);
 
 CREATE TABLE quota_counters (
   scope    TEXT NOT NULL CHECK (scope IN ('global','chat','user')),
@@ -674,10 +679,20 @@ CREATE TABLE mcp_auth (
 > WebUI 从不读，于是所有行都是默认值 `local`。plugin 不贡献 skill，那个取值从来没有过写入方。
 
 ```sql
+CREATE TABLE sources (
+  id             TEXT PRIMARY KEY,      -- telegram 固定 'telegram'；其余接入方为服务端生成的 ulid
+  kind           TEXT NOT NULL CHECK (kind IN ('telegram','sdk')),
+  name           TEXT NOT NULL,
+  character_file TEXT,                  -- 该来源目录下的人格文件名，未设时退回 CHARACTER.md
+  assist_file    TEXT,                  -- 同上，退回 ASSIST.md
+  created_at     INTEGER NOT NULL,
+  disabled_at    INTEGER
+);
+
 CREATE TABLE memory_docs (
   id           TEXT PRIMARY KEY,
   scope        TEXT NOT NULL CHECK (scope IN ('assist','character','pubmemory','primemory')),
-  subject      TEXT,                     -- primemory: userId；character 可 per-chat 覆盖: chatId
+  subject      TEXT,                     -- 见下方说明；character 可 per-chat 覆盖: chatId
   path         TEXT NOT NULL,
   bytes        INTEGER NOT NULL,
   tokens       INTEGER NOT NULL,
@@ -698,6 +713,13 @@ CREATE TABLE memory_revisions (
 );
 CREATE INDEX ix_memrev_doc_ts ON memory_revisions(doc_id, ts DESC);
 ```
+
+> 记忆按来源分区（迁移 `0019`）。`assist` / `character` / `pubmemory` 三个来源级 scope，
+> `id` 为 `<scope>:<来源 id>`（Telegram 为 `assist:telegram`、`character:telegram`、
+> `pubmemory:telegram`），`subject` 为来源 id，非空。`primemory` 的 `id` 为
+> `primemory:<来源 id>:<用户 id>`，`subject` 为 `<来源 id>:<用户 id>`，非空。
+> `character` 的 per-chat 覆盖行例外：`subject` 直接是 chatId，不带来源前缀，不受来源迁移影响。
+> `sources` 内建一行 `id='telegram'`。
 
 ### 2.11 审批、配置、会话
 
@@ -913,6 +935,92 @@ CREATE INDEX ix_sandbox_containers_expires ON sandbox_containers(expires_at);
 **`spec_hash` 存在的理由是「改了配置却不生效」。** 容器一旦跑起来，`--memory` / `--network` /
 image 都改不动了；没有这一列，运维在 WebUI 换了镜像之后所有已存在的容器会一直用旧的，
 而界面上显示的是新的。
+
+### 2.15 SDK 密钥与会话
+
+> 迁移 `0020`，规格见 [12](./12-sdk.md)。`sources` 表与 `telegram` 种子行在 `0019`
+> 已建好（§2.10）；这里补密钥表、会话按来源的两列、SDK 专有会话属性、记账按来源。
+
+```sql
+CREATE TABLE api_keys (
+  id          TEXT PRIMARY KEY,
+  source_id   TEXT NOT NULL REFERENCES sources(id),
+  secret_enc  TEXT NOT NULL,           -- Secrets.encrypt(secret 段)
+  label       TEXT,
+  created_at  INTEGER NOT NULL,
+  expires_at  INTEGER,
+  disabled_at INTEGER,
+  last_used_at INTEGER
+);
+CREATE INDEX ix_api_keys_source ON api_keys(source_id);
+
+CREATE TABLE sdk_sessions (
+  key           TEXT PRIMARY KEY REFERENCES contexts(key),
+  output_format TEXT NOT NULL DEFAULT 'markdown' CHECK (output_format IN ('plain','markdown')),
+  label         TEXT,
+  created_at    INTEGER NOT NULL
+);
+```
+
+`api_keys` 一行一枚 `sk-` 前缀密钥，明文只在签发那一刻回给调用方，`secret_enc` 是
+`Secrets.encrypt()` 之后的密文；owner 事后回显走单独的解密路径，记一条 warn。`disabled_at`
+是软停用（留行），密钥没有硬删。
+
+`contexts` 加两列（§2.5）：`source_id` 记会话所属来源，默认 `'telegram'` 回填存量行；
+`deleted_at` 是 SDK 会话动词 `delete` 的软停用标记，与「彻底删除会话」的硬删（整行清除）
+是两个动词。`source_id` 未加外键约束——SQLite 的 `ALTER TABLE ADD COLUMN` 若列带外键约束，
+默认值必须是 `NULL`，而这一列需要非空默认值 `'telegram'` 去回填存量行，两者不能同时满足；
+合法取值由仓储层维护。
+
+`sdk_sessions` 单列一表而不并进 `contexts`：`contexts` 是上下文引擎的表，SDK 专有列混进去
+之后上下文引擎每一处读取都要带着它。`end_user_id` 不落这张表——它是每请求必填的字段，
+落点是 `messages.from_user_id`（服务端加 `<sourceId>:` 前缀），不是会话级属性。
+
+`usage_ledger` 加 `source_id` 列（§2.9），存量行回填 `'telegram'`。按 `chat_id` 关联
+`contexts.source_id` 在会话 purge（硬删整行）之后会断链，而记账要求两种删除动词都不删
+`usage_ledger` 的行——加列在记账那一刻把归属焊死，按来源聚合不再依赖 `contexts` 是否还在。
+
+写入端（`UsageLedger.record()`，T3.9）：值取自本轮 `turn.sourceId`，SDK 轮次由 `runTurn()`
+写回该会话的来源 id，Telegram/定时任务轮次缺省未设、调用方回落 `'telegram'`；两者均缺失时
+落 NULL，不在写入点猜测来源。按来源聚合经 `UsageLedger.sourceUsage(sourceId)`，该方法当前无
+任何 HTTP 端点或 WebUI 页面读取（`docs/12 §9`）。
+
+WebUI 试跑（`dryRunWorker`，`apps/bot/src/compose.ts`）构造的 `turn` 不设置 `sourceId`，经
+`subagent.ts` 的兜底回落 `'telegram'`——试跑花费在记账上与真实 Telegram 轮次同落一个桶，
+三档写入规则未单独为试跑开一档（`docs/12 §9`）。
+
+### 2.16 SDK 仓储层与会话 purge
+
+> `docs/12 §10`（两种删除动词）。本节只描述 §2.15 三张表（`api_keys`/`sdk_sessions`/§2.10 的
+> `sources`）的仓储层访问口径与硬删删除面，不新增 DDL。
+
+**仓储层**（`packages/db/src/{sources,api-keys,sdk-sessions}.ts`，`docs/12 §10`）三张表各配一个仓储类，
+`SourceRepository` / `ApiKeyRepository` / `SdkSessionRepository`；全部 SQL 落在 `packages/db`，不进
+`packages/server`。逐会话方法一律要求同时传入 `sourceId` 与 `key`，跨来源隔离靠 SQL 的
+`source_id=?` 过滤强制，缺任一参数运行时抛错，不退化为「查询条件恒真」。
+
+`SourceRepository.create(name)` 的 id 由方法内部生成 ulid，签名不接受调用方指定 id——A3 要求的
+「不含 `:` 与路径字符」因此是结构性保证：ulid 字母表恒为 Crockford Base32。内建 `telegram` 行
+不可停用、无删除方法。
+
+`SdkSessionRepository.createSession(sourceId, {label?, outputFormat?})` 一个事务内建 `contexts` 行
+（`chat_id` 取 `randomUUID()`，与 `ContextEngine.ensure()` 同样的默认列，仅显式写入 `source_id`）
+与 `sdk_sessions` 行；`key` 是 `contexts.key`（`chat:<uuid>`）而非对外的 `chatId`，以裸 uuid 作
+URL 段的调用方需自行 `contextKey({chatId, messageThreadId: null}, "chat")` 换算。
+
+**会话 purge 删除面**（`SdkSessionRepository.purge(sourceId, key)`），一个事务内按顺序执行：
+
+1. `sdk_sessions`（按 `key`）
+2. `memory_revisions`（该会话 primemory 文档的修订行，按 `doc_id`）
+3. `memory_docs`（该会话的 primemory 行；磁盘文件不在这一步删，db 层只回传 `path` 列表）
+4. `messages`（按 `chat_id`，`messages_fts` 触发器自动跟随）
+5. `turns`（按 `key`）
+6. `context_messages` / `context_commits` / `refs`（按 `key`）
+7. `contexts`（按 `key`）
+
+`usage_ledger` / `agent_runs` / `approvals` / 日志不在此列，全部保留。primemory 文档的磁盘删除由
+`packages/core/src/memory/purge.ts` 的 `purgeSdkSession()` 完成——db 层不碰文件系统。跨来源调用
+返回 `null`，不执行任何删除，不泄漏该会话其实属于别的来源。
 
 ---
 

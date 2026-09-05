@@ -360,8 +360,8 @@ describe('外部 worker 的目录白名单为空 = 整体关闭', () => {
    * 生产代码里那两条 `available()` **还在**。
    *
    * 上面三条跑的是副本，装不起真的 `spawn_harness` / `spawn_acp`：它们的注册要一整套依赖
-   * （AcpManager、sandbox.plan、approvals broker、telegram 卡片），而那正是 `docs/00 §2.1 · D-04`
-   * 那条欠账（`composeRuntime` 没抽出来）挡着的东西。判据因此长在源码结构上，按 `CLAUDE.md`
+   * （AcpManager、sandbox.plan、approvals broker、telegram 卡片）。装配这套依赖是 `composeRuntime`
+   * （`apps/bot/src/compose.ts`）的事，用例不重做一遍。判据因此长在源码结构上，按 `CLAUDE.md`
    * 走 `source()` / `code()`。
    *
    * 实测过它会咬人：把 `builtins.ts` 里那个析取整段换成 `true`，上面三条**一条都不红**，

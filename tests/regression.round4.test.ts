@@ -132,7 +132,10 @@ describe('R-MEM-01 记忆段合并', () => {
     const directory = './data/round4-memory-docs';
     rmSync(directory, { recursive: true, force: true }); mkdirSync(directory, { recursive: true });
     const db = openDatabase(path); migrateDatabase(db);
-    writeFileSync(`${directory}/PUBMEMORY.md`, ['# 公开记忆', '', '- 开头的裸条目', ...Array.from({ length: 13 }, (_, index) => `## 段${index}\n- 条目${index}`)].join('\n'));
+    // 新布局（T2.3）下 `subject: null` 回退到内建来源 telegram，实际路径是 sources/telegram/ 下——
+    // fixture 必须预先写在这里，否则 store 读到的是空文档，这条合并回归就测不出东西。
+    mkdirSync(`${directory}/sources/telegram`, { recursive: true });
+    writeFileSync(`${directory}/sources/telegram/PUBMEMORY.md`, ['# 公开记忆', '', '- 开头的裸条目', ...Array.from({ length: 13 }, (_, index) => `## 段${index}\n- 条目${index}`)].join('\n'));
     const store = new MemoryStore(db, directory, 100_000, 200_000, 12);
     store.queueWrite({ scope: 'pubmemory', subject: null, section: '新增', lines: ['一条新记忆'], actor: 'test', turnId: 't1', chatId: 'c', userId: 'u' }, 'owner', false, 'trusted');
     store.flush('t1');

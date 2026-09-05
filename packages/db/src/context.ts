@@ -558,12 +558,23 @@ export class ContextRepository {
     );
   }
 
-  commits(limit = 100): CommitRow[] {
+  /**
+   * `before` 是 keyset 游标（上一页最后一条的 `seq`，`GET /sdk/v1/sessions/:id/commits` 用它翻页，
+   * docs/12-sdk.md T3.6）：`seq` 单调递增且不回收，`seq < before` 比 offset 分页在并发写入下更稳定
+   * ——两次翻页之间若有新 commit 插入，offset 分页会跳过或重复行，keyset 不会。
+   */
+  commits(limit = 100, before?: number): CommitRow[] {
+    if (before === undefined)
+      return this.db
+        .prepare(
+          `SELECT ${COMMIT_COLUMNS} FROM context_commits WHERE key=? ORDER BY seq DESC LIMIT ?`,
+        )
+        .all(this.key, limit) as CommitRow[];
     return this.db
       .prepare(
-        `SELECT ${COMMIT_COLUMNS} FROM context_commits WHERE key=? ORDER BY seq DESC LIMIT ?`,
+        `SELECT ${COMMIT_COLUMNS} FROM context_commits WHERE key=? AND seq<? ORDER BY seq DESC LIMIT ?`,
       )
-      .all(this.key, limit) as CommitRow[];
+      .all(this.key, before, limit) as CommitRow[];
   }
 
   markPruned(from: number, to: number, level: number): void {

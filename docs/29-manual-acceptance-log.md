@@ -3215,3 +3215,63 @@ provider）—— 这替代了「写一台假上游」，不用起任何服务�
 
 **开跑前确认没有别的实例在跑**（§4 `M-OPS-01`：起一个默认配置的实例会清掉宿主上所有 luoli
 持久容器）。生产实例这时候要停，或者确认它没有持久容器。
+
+## S9 · SDK 接入场（2026-09-05）
+
+**装置**：`pnpm build` 后的 `dist/` 产物；两段脚本各起一个真实的 `node dist/apps/bot/src/main.js`
+子进程，临时 `config.yaml` + `LUOLI_DATA_DIR` 落在 `mkdtemp` 目录，随机空闲端口，本地假 upstream，
+`BOT_TOKEN` 置空（Telegram 入口禁用，WebUI 与 `/sdk/v1` 运行）。仓库 `config/` 与 `data/` 未触碰。
+前置门禁同日 02:17–02:18：`pnpm typecheck` / `pnpm lint` 无输出，`pnpm test` 137 文件 1588 条，
+`pnpm smoke` `{"ok":true,"updates":20,"turns":10,"messages":30}`。三条命令的原始输出归档于本机
+`/home/swim/orca/workspaces/LuoLiCore/sdk-patches/final-logs-2026-09-05/`。
+
+### AC-SDK-003
+
+**过。** 比对口径：`docs/03 §2.15` 代码块与 `packages/db/migrations/0020_sdk_keys_and_sessions.sql`
+各自去掉 `--` 注释、压平空白、归一化逗号与括号两侧空格后逐语句比对。
+
+| 语句 | docs/03 落点 | 结果 |
+|---|---|---|
+| `CREATE TABLE api_keys (...)` 八列 | §2.15 | 逐 token 一致 |
+| `CREATE INDEX ix_api_keys_source` | §2.15 | 一致 |
+| `CREATE TABLE sdk_sessions (...)` 四列含 CHECK | §2.15 | 逐 token 一致 |
+| `contexts` 加列 `source_id` / `deleted_at` + `ix_contexts_source` | §2.5 :236–240（表定义内标注「迁移 0020」） | 列类型、默认值、索引一致 |
+| `usage_ledger` 加列 `source_id` + `ix_usage_source_ts` + 存量回填 `'telegram'` | §2.9 :574–580 与 §2.15 正文 | 一致 |
+
+四段说明：明文只在签发时返回、回显走解密路径记 warn（A2）；`source_id` 默认 `'telegram'` 回填且
+不加外键的原因；`deleted_at` 软删与硬删两个动词；`end_user_id` 落 `messages.from_user_id`
+带 `<sourceId>:` 前缀。四段均在 §2.15 正文。
+
+〔证据：`docs/03-data-model.md:939–1027`；`packages/db/migrations/0020_sdk_keys_and_sessions.sql` 全文〕
+
+### AC-SDK-045
+
+**过。** `pnpm build`（02:18:31，rc=0，postbuild 7 个包产物就位）→ `pnpm sdk:e2e`（02:18:39，rc=0）。
+`scripts/sdk-e2e.ts` 以 `@luoli/sdk-client` 对真实子进程执行 9 步：create → send → stream → list →
+patch → delete → purge，末步落一条 `sdk.session_purged` warn，子进程收 SIGTERM 退出。
+同一构建下另跑 lead 探针脚本 `final-e2e.mts`（16 步，脚本与日志同置于本机 `/home/swim/orca/workspaces/LuoLiCore/sdk-patches/final-logs-2026-09-05/`，不在仓库内）：`GET /api/health` 200；`/sdk/v1` 无 key 401 JSON；
+SDK key 打 `/api/chats` 401；`luoli_sid` cookie 打 `/sdk/v1` 401；建会话后连发三轮 + 一轮流式
+（3 个 `delta`，末事件 `done`，`done.text` 等于 delta 拼接）；`listSessions` 含该会话、`commits` 4 条 turn；
+第二来源的密钥对该会话 list / get / patch / delete / purge 五操作均 404 `not_found`；
+软删后 `getSession` 404 `session_deleted`；purge 后 404 `not_found`，预先种下的 primemory
+`memory_docs` 行、`memory_revisions` 行、磁盘文件三处均不存在，`usage_ledger` 4 行 / cost 0.000112 /
+tokens 80 前后不变；临时数据目录 7 个 db / wal / logs 文件按字节扫描，两把 key 明文与
+`sk-[A-Za-z0-9]{48}` 均 0 命中。
+
+〔证据：`final-logs-2026-09-05/final-4.sdk-e2e.log`（purge 会话 `10ad5274-b416-4518-a1c2-99e0db60b1c6`）、
+`final-3.e2e.log`（会话 `a71cd91c-b1b5-4b76-996e-53e6158a4c32`，turn
+`01M1PT9THQH5WPGRCHA4WMEJV9` / `…6T39FP` / `…T6XKYB`）〕
+
+### AC-SDK-047
+
+**过，替代口径。** `pnpm start` 的定义是 `node --env-file-if-exists=.env dist/apps/bot/src/main.js`
+（`package.json:12`）。两段脚本起的是同一个入口文件 `dist/apps/bot/src/main.js`，差异仅在
+`--env-file-if-exists=.env` 与 cwd：直接执行 `pnpm start` 的 cwd 为仓库根，`memory.dir` /
+`skills.dir` / `logs.dir` 等 cwd 相对默认值会落进仓库树（§1.2 的同一问题）。本场以显式
+`LUOLI_CONFIG` + `LUOLI_DATA_DIR` 的临时目录代替。判据「无 `ERR_MODULE_NOT_FOUND`」：子进程从
+`dist/` 布局解析 `@luoli/db` / `@luoli/core` / `@luoli/server` 后启动完成、`/api/health` 200；
+脚本侧 `@luoli/sdk-client` 与 `@luoli/db` / `@luoli/core` 经各包 `exports` 指向的 `packages/<name>/dist/`
+导入成功。构建 → 启动 → `pnpm sdk:e2e` 的先后顺序：02:18:31 → 02:18:37 → 02:18:39。
+
+〔证据：`final-logs-2026-09-05/final-2.summary.log`（三段时间戳与 rc）、`final-2.build.log` 末行
+`postbuild: 7 个包的产物已就位`〕

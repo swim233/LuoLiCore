@@ -1,6 +1,5 @@
-import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { code, source } from './support/source.js';
+import { code, codeIndex, source } from './support/source.js';
 import { HANDLED_COMMANDS, matchTrigger } from '@luoli/telegram';
 import { checkWakeword, configSchema, rejectedWakewords } from '@luoli/core';
 
@@ -112,10 +111,11 @@ describe('Telegram trigger matching', () => {
     expect(rejected[1]).toContain('RE2');
     expect(rejected[2]).toContain('128');
     expect(rejected.join('\n'), '可用的那条不该出现在被跳过的名单里').not.toContain('nori');
-    const main = readFileSync('apps/bot/src/main.ts', 'utf8');
-    const at = main.indexOf('rejectedWakewords(');
+    // 校验挪进了 composeRuntime（apps/bot/src/compose.ts），main.ts 只装配不做这类检查。
+    const compose = source('apps/bot/src/compose.ts');
+    const at = codeIndex(compose, 'rejectedWakewords(');
     expect(at, '启动时不再校验唤醒词 —— 被跳过的那几条从此一声不吭').toBeGreaterThan(0);
-    const startup = main.slice(at, at + 500);
+    const startup = compose.slice(at, at + 500);
     expect(startup).toMatch(/kind:\s*["']config\.invalid["']/);
     expect(startup, '名单本身要进 data，只报条数等于没报').toMatch(/data:\s*\{\s*rejected:/);
   });

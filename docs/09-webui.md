@@ -587,6 +587,38 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
   对试跑一概无效（docs/20 · W-QUOTA-01）。chat / user 两级计数落在合成 subject `webui-dryrun` 上，
   不吃真实会话与用户的额度。
 
+### 3.9a SDK 接入（来源 / 密钥）
+
+最小运维面（`docs/12 §11`），对接 `/api/sdk/*`（`packages/server/src/sdk/admin.ts`，T3.3；
+六端点与错误码全集见 [12 §11](./12-sdk.md#11-管理面-apisdk)）。整段在 `views/SdkPage.vue` +
+`components/sdk/SourcesCard.vue`，`ConsoleView.vue` 里只占一行。单张卡：来源列表 + 新建，
+密钥的签发 / 回显 / 停用都在点开来源后的详情弹窗里完成，不另拆卡。
+
+`/api/sdk/*` 与 `/sdk/v1/*`（`docs/12 §4`）是两套完全独立的端点：前者挂 `/api/*` 前缀、走
+cookie 会话 + CSRF，只服务本页这个 owner 管理面；后者挂独立前缀、走 Bearer token，是第三方
+接入方的运行时入口。两者共享同一批数据表（`sources`/`api_keys`），除此之外互不调用、互不
+认对方的凭据。
+
+- **来源列**（`GET /api/sdk/sources`，含已停用行）：名称、类型（内建 `telegram` / 接入方
+  `sdk`）、状态（启用中 / 已停用）、创建时间。新建（`POST /api/sdk/sources`）只填名称，
+  `id` 由服务端生成 ulid（A3，docs/03 §2.10）。
+- 点一行打开密钥详情（`GET /api/sdk/sources/:id/keys`，从不携带密文）：id、备注、创建、
+  过期、最后使用、状态。签发（`POST .../keys`，label / 过期时间均可选）成功后明文只显示
+  一次；回显（`GET /api/sdk/keys/:id/reveal`）二次确认之后才发请求，确认文案写明每次回显
+  都会记一条 `sdk.key_revealed`；停用（`DELETE /api/sdk/keys/:id`）软停用留行，无法撤销。
+- `telegram` 行与已停用来源不给「签发密钥」入口：界面按 `source.kind` / `disabledAt` 提前
+  算出同一句原因（与服务端 400 `source_not_sdk` / `source_disabled` 的错误文案同源）禁用按钮，
+  不必等一次失败请求才知道。`GET .../keys` 与 `GET .../reveal` 不受此限，两类来源名下已有的
+  密钥仍可正常列出与回显。
+- 回显的第三种失败（主密钥轮换后旧密文解不开）是 500 `secret_undecryptable`，与
+  `not_implemented`（未装配）、`secrets_unavailable`（无主密钥）、404 `not_found` 并列为四种
+  结论。界面不分支判断 `code`，而是把 `apiError()` 给出的那句话原样透出（四种结论文案互不
+  相同），效果上等价于分别提示，不会被合并成一条「加载失败」。
+- **`packages/server/src/sdk/{admin,v1}.ts` 的用户可见错误文案进不了 dev 文案校样面板**：
+  `scripts/copy/extract.ts` 的 `extractAll()` 只对 `packages/server/src/app.ts` 跑
+  `extractTs(..., "api-errors", true)`，两个 SDK 路由文件不在扫描范围内——`docs/12` 的错误码表
+  用的正是这批字符串，改动它们时无法借面板核对格式化前后一致，只能人工比对源码。
+
 ### 3.10 日志（Logs）
 - 过滤器：时间范围、level、kind（多选）、trace_id、chat、user、关键词。
 - 虚拟滚动表格；`[实时]` 开关走 SSE 追加。
@@ -1013,6 +1045,7 @@ token → 回一条 `<webui.publicUrl>/login?t=<token>` → 前端拿它打 `POS
 | `POST /api/workers/dryrun` | lw-worker 的 NDJSON 隔离试跑。body `{task, tools?, modelAlias?}`，**没有 `:name`** —— 定义体系已删，worker 只有一种。`tools` 留空 = 调用者角色下的全集，给了空数组 = 一个都不许用（两者都送到运行时，端点不替它归一）；`task` 上限 20000 字符，`modelAlias` 过 `ALIAS_NAME_PATTERN`，两个旋钮给错类型一律 400 而不是静静吞掉。**旧路径 `GET /api/agents` 与 `POST /api/agents/:name/dryrun` 已删除且不留别名**：`:name` 在新世界里没有指代对象，留一条别名只会让人以为还能试跑某份定义 |
 | `GET /api/worker-runs` | Worker 运行记录列表（`agent_runs` 里 `worker_kind IS NOT NULL` 的那些）：`?page=&size=&workerKind=&state=` → `{items, total, page, size}`，排序「`state='running'` 优先，其余 `started_at` 倒序」（同 `GET /api/tasks`）。**行里不带 `task_input` / `external_usage_json`**，只给 `taskLine`（任务正文的第一行，截 160 字符）—— ACP 那条路的任务正文可以是一整段提示词，五十行各带一份只是往浏览器推死重量。`workerKind` / `state` 取值域外一律 **400**（`invalid_worker_kind` / `invalid_state`），不是忽略：忽略的表现是「筛了 acp 却看见 lw 的行」。**`externalCostUsd` 原样透出、与 `costUsd` 各占一列，两者永不相加**（见 §3.9） |
 | `GET /api/worker-runs/:id` | 单条 worker run 的只读详情：整行 camelCase（多出 `taskInput` / `externalUsageJson` / `resultFullRef` / `providerId` / `modelId`）+ join 出来的 `turn{key, chatId, state, error}` 与服务端反查的 `chatLabel`。**`worker_kind IS NULL` 的行（主 run）按 404**：这个入口的语义是 worker 运行记录，把主 run 从这里放出去等于让页面上出现一条它解释不了的行 |
+| `GET/POST /api/sdk/sources` `GET/POST /api/sdk/sources/:id/keys` `DELETE /api/sdk/keys/:id` `GET /api/sdk/keys/:id/reveal` | SDK 来源与密钥管理面（[§3.9a](#39a-sdk-接入来源--密钥)）。与 `/sdk/v1/*`（`docs/12 §4`，Bearer 鉴权的第三方运行时入口）是两套独立端点，只共享 `sources`/`api_keys` 两张表，错误码全集见 `docs/12 §11` |
 | `GET /api/logs` `GET /api/logs/:id` `GET /api/logs/:id/data` `GET /api/logs/trace/:traceId` | 日志 |
 | `GET /api/usage` | 用量明细（`usage_ledger`，最近 1000 条） |
 | `GET /api/usage/report?groupBy&from&to` | 用量聚合。`groupBy` ∈ `day\|chat\|user\|model\|alias\|agent`，非法值 400；`chat`/`user` 的行带回 `label`（服务端反查 `principals`） |
@@ -1112,6 +1145,7 @@ packages/webui/
 └── src/
     ├── main.ts                createApp + router + pinia（无 UI 框架插件）+ 自托管字体
     ├── App.vue                接收会话失效事件，经 Vue Router 合并切换到 /login
+    ├── components/AmbientField.vue  App.vue 挂一次的 canvas 粒子背景，全站共用
     ├── styles.css             设计变量（浅/深两套 + 字体栈）+ 全站样式，唯一的样式来源
     ├── router/index.ts        三条路由（/login /setup /）
     ├── api/client.ts          fetch 封装：CSRF 头、401 发会话失效事件、统一错误、NDJSON 流
@@ -1135,13 +1169,23 @@ packages/webui/
     ├── components/workers/     「Worker 运行记录」页两张卡各一个自足组件（§3.9）
     │   ├── types.ts           行类型、COLUMNS、三档 worker 与四档状态的标签、试跑事件类型
     │   └── WorkerRunsCard.vue  WorkerDryRunCard.vue
+    ├── components/sdk/         「SDK 接入」页的一张卡（§3.9a）
+    │   ├── types.ts           行类型、来源/密钥的列定义
+    │   └── SourcesCard.vue
     └── views/
         ├── LoginView.vue
         ├── ExtensionsPage.vue 扩展页（§3.8）。ConsoleView 里只留 `<ExtensionsPage>` 一行
         ├── TasksPage.vue      任务与审批页（§3.12）：三张卡竖排的壳，同样只在 ConsoleView 里占一行
         ├── WorkerRunsPage.vue Worker 运行记录页（§3.9）：两张卡竖排的壳，同样只占一行
+        ├── SdkPage.vue        SDK 接入页（§3.9a）：一张卡的壳，同样只占一行
         └── ConsoleView.vue    其余 11 个页面（docs/00 §2.1 的 D-02 就是它）
 ```
+
+`scripts/copy/extract.ts` 的 `BROWSER_FILES`（dev 面板可预览的文件清单）已收录
+`WorkerRunsPage.vue`/`components/workers/*` 与 `SdkPage.vue`/`components/sdk/*`，但真正驱动
+文案抽取的 `extractAll()` **只调用了后者**——前者从未被 `extractVue()` 处理过（既有缺口，
+T3.11 这一轮新增的 SDK 页面调用没有连带修它）：`WorkerRunsPage.vue` 与
+`components/workers/*.vue` 里的文案在 dev 校样面板上一条都抽不出来。
 
 - **`ConsoleView.vue` 这一轮是净减**：旧的「子 Agent」页（表格 + 编辑弹窗 + 试跑弹窗 + 那一整段
   写回 `agent.agents` 的脚本）整段删除，新页面一个字节都没写进去。`D-02` 记的是它一直在变大 ——

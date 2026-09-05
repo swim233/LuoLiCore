@@ -122,10 +122,16 @@ describe('SIGTERM 退出路径', () => {
     expect(main).toContain(code("turnRegistry.abortAll('shutdown')"));
     // `drain` 的返回值必须被使用：`await turnRegistry.drain(graceMs)` 丢弃返回值正是那次回归的形态。
     expect(main).toMatch(/if\s*\(!\(await turnRegistry\.drain\(/);
-    // 收尾三项同样固定（同一次回归中被替换的）：带 checkpoint 的关闭数据库、事件名、skills 的 await。
+    // 收尾三项同样固定（同一次回归中被替换的）：带 checkpoint 的关闭数据库、事件名、
+    // 以及 plugins/mcp/acp/skills/log 那五件的收尾（拆进了 dispose.close()，见下一条断言）。
     expect(main).toContain(code('closeDatabase(db)'));
     expect(main).toContain(code("kind: 'system.stop'"));
-    expect(main).toContain(code('await skills.close()'));
+    expect(main).toContain(code('await dispose.close()'));
+    // `skills.close()` 本体挪进了 `composeRuntime` 的 `dispose.close()`（apps/bot/src/compose.ts）。
+    // main.ts 这里只留一句「调了 dispose.close()」的源码断言，不改成行为化：要验 skills 真的关掉了，
+    // 得先把整台运行时装起来，那是 tests/support/runtime.ts（T1.2）要做的事。
+    const compose = source('apps/bot/src/compose.ts');
+    expect(compose).toContain(code('await skills.close()'));
   });
 
   /**

@@ -74,7 +74,9 @@ export function registerCatalogTools(
     /**
      * 两道闸。`agentKind === 'lw'`：折叠的是外部工具（MCP / plugin / custom），而工具整体已经
      * 下沉给 worker —— 主 agent 那一侧 `MAIN_AGENT_TOOLS` 里一个折叠工具都没有，给它一个
-     * 检索入口只能检索出一份它调不动的清单（`docs/05 §3.12` 不变量 4）。
+     * 检索入口只能检索出一份它调不动的清单（`docs/05 §3.12` 不变量 4）。**严格等值而非取反**：
+     * `AgentKind` 新增 `sdk` 档（`docs/12-sdk.md` T3.4）时这道闸不必跟着改 —— `sdk` 同样不是
+     * `'lw'`，自动落在假分支，SDK 会话的白名单里本就没有折叠工具（`docs/05 §3.13`）。
      *
      * 这道闸此前朝反方向焊着，理由是「子 agent 与主轮共享同一个 turn 对象，让它调就是往父轮的
      * `expandedTools` 里写」。那条理由现在不存在了：`expandedTools` 与 `skillAllowedTools` 已从

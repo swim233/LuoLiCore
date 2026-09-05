@@ -298,6 +298,13 @@ export interface RuntimeTurnContext {
   effectiveRole: Role;
   isPrivate: boolean;
   /**
+   * 本轮的来源 id（`sources.id`），缺省 Telegram（`"telegram"`）。记忆作用域键
+   * （`memoryScopeSubjects`，`packages/core/src/memory/scope.ts`）据此计算 `pubmemory` /
+   * `primemory` 的 subject。批三（SDK 接入）按各自签发的来源 id 填入；批二只有 Telegram
+   * 一个来源，全部既有调用点不传即为缺省值，行为不变。
+   */
+  sourceId?: string;
+  /**
    * 群名 / 频道名（私聊无此值），只用于 RUNTIME 块的「会话」行。此前该行只有裸 chatId，
    * 模型无法区分私聊与群聊，而人格里大量规则按此分支。
    *

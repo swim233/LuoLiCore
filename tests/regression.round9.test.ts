@@ -142,7 +142,7 @@ describe('C-01 · 一行坏数据不该让全部别名消失', () => {
 describe('S-08 · 身份字符串当路径段用之前先校验形态', () => {
   it('LUOLI_OWNER_ID 里的 ../ 一律拒收，数字与空串放行', () => {
     const parse = (id: string) => configSchema.safeParse({ access: { bootstrapOwnerId: id } });
-    // 该值会被拼接为 memory/private/<id>/PRIMEMORY.md，`../../etc` 会使私有记忆写到目录之外。
+    // 该值会被拼接为 memory/sources/<sourceId>/private/<id>/PRIMEMORY.md，`../../etc` 会使私有记忆写到目录之外。
     expect(parse('../../etc').success).toBe(false);
     expect(parse('owner').success).toBe(false);
     expect(parse('123456').success).toBe(true);
@@ -302,7 +302,11 @@ describe('C-08 · perChat 的会话级人格真的接上了', () => {
     const root = resolve('data/round9-character');
     rmSync(root, { recursive: true, force: true });
     mkdirSync(root, { recursive: true });
-    writeFileSync(`${root}/CHARACTER.md`, '全局人格');
+    // T2.5：默认人格文件按来源分路径（`memory/sources/<sourceId>/CHARACTER.md`），不再是根目录
+    // 单例；这条用例不调 `ensure()`，因此手工把「全局人格」放到内建来源（telegram）目录下。
+    // per-chat 覆盖文件（`CHARACTER.<chatId>.md`）不随来源迁移，仍留根目录（docs/06 §2）。
+    mkdirSync(`${root}/sources/telegram`, { recursive: true });
+    writeFileSync(`${root}/sources/telegram/CHARACTER.md`, '全局人格');
     writeFileSync(`${root}/CHARACTER.-100.md`, '本群人格');
     const path = './data/round9-character.test.db';
     for (const suffix of ['', '-wal', '-shm', '-logs', '-logs-wal', '-logs-shm']) rmSync(`${path}${suffix}`, { force: true });

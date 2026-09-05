@@ -6,6 +6,7 @@ import { ArchiveRepository, OperationsRepository, PrincipalRepository, closeData
 import { ConfigStore, ContextEngine, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceService, ProviderStore, Secrets, configSchema } from '@luoli/core';
 import { createServer } from '@luoli/server';
 import argon2 from 'argon2';
+import { startTestRuntime } from './support/runtime.js';
 
 async function appHarness(overrides: Record<string, unknown> = {}, webRoot?: string) {
   const path = './data/server.test.db';
@@ -26,29 +27,46 @@ async function appHarness(overrides: Record<string, unknown> = {}, webRoot?: str
   return { app, db, operations };
 }
 
+/**
+ * `server security` 这一整块此前手工挑了近十个构造函数（`ArchiveRepository` / `ContextEngine` /
+ * `ProviderStore` / …），且 `configSchema: {}` 是假的——composeRuntime（T1.1）把这些接线全部
+ * 收在一处，`GET /api/config/schema` 因此能拿到真 schema 而不是 `{}`。断言语义不变：这里的用例
+ * 只关心鉴权 / CSRF / 限流这一层，从未依赖某个依赖项缺失或是假的。
+ */
+async function securityHarness(overrides: Record<string, unknown> = {}) {
+  const passwordHash = await argon2.hash('current-password', { type: argon2.argon2id, memoryCost: 19_456, timeCost: 2, parallelism: 1 });
+  // `{ ...overrides, webui }` 而不是 `{ webui: {...}, ...overrides }`：后者在 `overrides.webui`
+  // 存在时整体覆盖掉默认的 `webui` 键，`passwordHash` 随之消失（qa-1 verify-1 指出）。
+  // 这里把 `overrides.webui` 的字段合并在默认 `passwordHash` 之上，两个用例各自的
+  // `trustProxy` / `loginRateLimit` 等键照样生效，同时保留可登录的默认口令。
+  const webui = { passwordHash, ...(overrides.webui as Record<string, unknown> | undefined) };
+  const runtime = await startTestRuntime('server-security', { config: { ...overrides, webui } });
+  return { app: runtime.server, db: runtime.db, operations: runtime.deps.operations, dispose: runtime.dispose };
+}
+
 describe('server security', () => {
   it('requires authentication and CSRF for writes', async () => {
-    const { app, db } = await appHarness();
+    const { app, operations, dispose } = await securityHarness();
     expect((await app.request('/api/chats')).status).toBe(401);
-    const session = new OperationsRepository(db).createSession(1);
+    const session = operations.createSession(1);
     const cookie = `luoli_sid=${session.id}`;
     expect((await app.request('/api/principals/user:1', { method: 'PATCH', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ role: 'owner' }) })).status).toBe(403);
     expect((await app.request('/api/principals/user:1', { method: 'PATCH', headers: { cookie, 'x-csrf-token': session.csrf, 'content-type': 'application/json' }, body: JSON.stringify({ role: 'owner' }) })).status).toBe(200);
-    closeDatabase(db);
+    await dispose();
   });
 
   it('hands the session csrf back to an authenticated same-origin caller but not across origins', async () => {
-    const { app, db } = await appHarness();
-    const session = new OperationsRepository(db).createSession(1);
+    const { app, operations, dispose } = await securityHarness();
+    const session = operations.createSession(1);
     const me = await app.request('/api/auth/me', { headers: { cookie: `luoli_sid=${session.id}` } });
     expect((await me.json() as { data: { csrf: string; expiresAt: number } }).data).toMatchObject({ csrf: session.csrf, expiresAt: session.expiresAt });
     expect((await app.request('/api/auth/me', { headers: { cookie: `luoli_sid=${session.id}`, origin: 'https://evil.example' } })).status).toBe(403);
     expect((await app.request('/api/auth/me')).status).toBe(401);
-    closeDatabase(db);
+    await dispose();
   });
 
   it('adds documented security headers', async () => {
-    const { app, db } = await appHarness();
+    const { app, dispose } = await securityHarness();
     const response = await app.request('/api/health');
     expect(response.headers.get('content-security-policy')).toContain("default-src 'self'");
     // 无鉴权的 /api/health 只说存活；provider / MCP / 沙箱拓扑必须留在鉴权后（docs/20 · W-API-01）。
@@ -56,13 +74,13 @@ describe('server security', () => {
     expect(health).toMatchObject({ ok: true });
     expect(Object.keys(health).sort()).toEqual(['ok', 'uptimeMs']);
     expect((await app.request('/api/health/detail')).status).toBe(401);
-    closeDatabase(db);
+    await dispose();
   });
 
   it('rejects cross-origin browser requests', async () => {
-    const { app, db } = await appHarness();
+    const { app, dispose } = await securityHarness();
     expect((await app.request('/api/auth/login', { method: 'POST', headers: { origin: 'https://evil.example', 'content-type': 'application/json' }, body: JSON.stringify({ password: 'wrong' }) })).status).toBe(403);
-    closeDatabase(db);
+    await dispose();
   });
 
   /**
@@ -74,7 +92,7 @@ describe('server security', () => {
    * 上一次就是这么坏的（对象形式的代理不会自动补 `changeOrigin`），而这件事在自动化里一直没人看着。
    */
   it('accepts what the dev proxy forwards', async () => {
-    const { app, db } = await appHarness();
+    const { app, dispose } = await securityHarness();
     const { server } = (await import('../packages/webui/vite.config.js')).default as
       { server: { port: number; proxy: Record<string, { target: string; changeOrigin?: boolean; headers?: Record<string, string> }> } };
     const api = server.proxy['/api']!;
@@ -83,32 +101,32 @@ describe('server security', () => {
     const response = await app.request(`http://${host}/api/auth/login`, { method: 'POST',
       headers: { origin, 'content-type': 'application/json' }, body: JSON.stringify({ password: 'wrong' }) });
     expect(response.status).toBe(401);
-    closeDatabase(db);
+    await dispose();
   });
 
   it('rotates the active password and revokes other sessions', async () => {
-    const { app, db, operations } = await appHarness();
+    const { app, operations, dispose } = await securityHarness();
     const current = operations.createSession(1); const other = operations.createSession(1);
     const response = await app.request('/api/auth/password', { method: 'POST', headers: { cookie: `luoli_sid=${current.id}`, 'x-csrf-token': current.csrf, 'content-type': 'application/json' }, body: JSON.stringify({ current: 'current-password', next: 'next-password-123' }) });
     expect(response.status).toBe(200);
     expect(operations.session(other.id)).toBeNull();
     expect((await app.request('/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: 'current-password' }) })).status).toBe(401);
     expect((await app.request('/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: 'next-password-123' }) })).status).toBe(200);
-    closeDatabase(db);
+    await dispose();
   });
 
   // 401 会让客户端的 `api()` 要求切到登录页：填错当前口令的人会被踢出控制台，
   // 「当前口令错误」一个字都渲染不出来，而 session 根本没失效（docs/29 · M-WEB-13）。
   // 403 = 登录是好的、错的是表单里那一格。
   it('填错当前口令回 403 而不是 401，session 照旧有效', async () => {
-    const { app, db, operations } = await appHarness();
+    const { app, operations, dispose } = await securityHarness();
     const session = operations.createSession(1);
     const headers = { cookie: `luoli_sid=${session.id}`, 'x-csrf-token': session.csrf, 'content-type': 'application/json' };
     const response = await app.request('/api/auth/password', { method: 'POST', headers, body: JSON.stringify({ current: 'wrong-password', next: 'next-password-123' }) });
     expect(response.status).toBe(403);
     expect(await response.json()).toMatchObject({ ok: false, error: { code: 'invalid_credentials' } });
     expect((await app.request('/api/auth/me', { headers: { cookie: `luoli_sid=${session.id}` } })).status).toBe(200);
-    closeDatabase(db);
+    await dispose();
   });
 
   // 热重载落地之后不能再认那份闭包里的口令：`/api/auth/password` 写完到 configStore 换上新值
@@ -144,34 +162,34 @@ describe('server security', () => {
   });
 
   it('uses the trusted proxy hop from the right and bounds attacker-controlled buckets', async () => {
-    const { app, db } = await appHarness({ webui: { passwordHash: await argon2.hash('current-password'), trustProxy: true, trustedProxyHops: 1, loginRateLimit: { attempts: 2, windowMinutes: 15 } } });
+    const { app, dispose } = await securityHarness({ webui: { trustProxy: true, trustedProxyHops: 1, loginRateLimit: { attempts: 2, windowMinutes: 15 } } });
     const request = (xff: string) => app.request('/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json', 'x-forwarded-for': xff }, body: JSON.stringify({ password: 'wrong' }) });
     expect((await request('spoof-a, 198.51.100.8')).status).toBe(401);
     expect((await request('spoof-b, 198.51.100.8')).status).toBe(401);
     expect((await request('spoof-c, 198.51.100.8')).status).toBe(429);
-    closeDatabase(db);
+    await dispose();
   });
 
   // `trustProxy=false`（默认）**这条路径此前一次都没被测过**，于是桶键取自 `X-Real-IP` 的回归
   // 活了两轮：docs/18 · N-WEB-02 修过一次，docs/27 · S-01 实测 12 次轮换头值全部 401。
   // 没有这条用例它会第三次回来。
   it('ignores client headers for the login bucket when trustProxy is off', async () => {
-    const { app, db } = await appHarness({ webui: { passwordHash: await argon2.hash('current-password'), loginRateLimit: { attempts: 2, windowMinutes: 15 } } });
+    const { app, dispose } = await securityHarness({ webui: { loginRateLimit: { attempts: 2, windowMinutes: 15 } } });
     const request = (ip: string) => app.request('/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json', 'x-real-ip': ip, 'x-forwarded-for': ip }, body: JSON.stringify({ password: 'wrong' }) });
     expect((await request('1.1.1.1')).status).toBe(401);
     expect((await request('2.2.2.2')).status).toBe(401);
     // 第三次换了第三个头值，仍然锁：桶键是连接的远端地址（`app.request()` 无 socket → 常量 local）。
     expect((await request('3.3.3.3')).status).toBe(429);
-    closeDatabase(db);
+    await dispose();
   });
 
   // 未登录就能推的三条端点（/api/setup、两条登录）此前无请求体上界，`ctx.req.json()` 整份进内存。
   it('rejects oversized request bodies before reading them', async () => {
-    const { app, db } = await appHarness();
+    const { app, dispose } = await securityHarness();
     const response = await app.request('/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: 'x'.repeat(2_000_000) }) });
     expect(response.status).toBe(413);
     expect((await response.json() as { error: { code: string } }).error.code).toBe('payload_too_large');
-    closeDatabase(db);
+    await dispose();
   });
 });
 

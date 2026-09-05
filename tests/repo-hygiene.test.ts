@@ -59,7 +59,7 @@ describe('版本库卫生', () => {
     const lines = ignoreLines();
     // PUBMEMORY.md 由 `memory_write` 工具写，private/ 是每用户一份的私有记忆，
     // .forgotten/ 存的是「被遗忘的私有记忆正文」—— 最后这个进版本库是隐私问题而不只是噪音。
-    for (const path of ['memory/PUBMEMORY.md', 'memory/private/', 'memory/.pending/', 'memory/.forgotten/']) {
+    for (const path of ['memory/PUBMEMORY.md', 'memory/private/', 'memory/.pending/', 'memory/.forgotten/', 'memory/sources/']) {
       expect(lines, `${path} 不在忽略名单里`).toContain(path);
     }
     // 反方向：这两份是提示词文档（有真实编写提交、只经 WebUI 改），不该被顺手一起忽略掉。

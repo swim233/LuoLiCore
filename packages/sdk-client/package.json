@@ -1,0 +1,12 @@
+{
+  "name": "@luoli/sdk-client",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js",
+    "./schema": "./dist/schema.js"
+  },
+  "dependencies": {
+    "zod": "^3.25.76"
+  }
+}

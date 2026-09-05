@@ -3,5 +3,5 @@
   "private": true,
   "type": "module",
   "exports": "./dist/index.js",
-  "dependencies": { "@luoli/shared": "workspace:*", "@luoli/db": "workspace:*", "@luoli/core": "workspace:*" }
+  "dependencies": { "@luoli/shared": "workspace:*", "@luoli/db": "workspace:*", "@luoli/core": "workspace:*", "@luoli/sdk-client": "workspace:*" }
 }

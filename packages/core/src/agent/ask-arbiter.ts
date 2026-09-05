@@ -7,6 +7,7 @@ import { type ModelRegistry, aliasModel } from "./runtime.js";
 import type { QuotaGuard, QuotaReservation } from "../ledger/quota.js";
 import type { UsageLedger } from "../ledger/usage.js";
 import type { LogSink } from "../log/sink.js";
+import { TELEGRAM_SOURCE_ID } from "../memory/scope.js";
 
 /**
  * `ask_parent` 的父 agent 仲裁（docs/14 A7，2026-08-18 决定实现）。
@@ -155,6 +156,7 @@ export async function arbitrateAsk(
         latencyMs: step.performance.responseTimeMs,
         finishReason: step.finishReason,
         ok: true,
+        sourceId: turn.sourceId ?? TELEGRAM_SOURCE_ID,
       });
       if (dependencies.quota && dependencies.reservation)
         dependencies.quota.commit(dependencies.reservation, cost);

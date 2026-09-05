@@ -673,6 +673,21 @@ export class ContextEngine {
   }
 
   /**
+   * 提交历史，只读（`GET /sdk/v1/sessions/:id/commits`，docs/12-sdk.md T3.6）。`before` 是上一页
+   * 最后一条的 `seq`，keyset 分页——判据与实现均在 `ContextRepository.commits()`，此处只是
+   * 按 key 转发，不重新实现分页逻辑。
+   */
+  listCommits(
+    key: string,
+    options: { limit?: number; before?: number } = {},
+  ): CommitRow[] {
+    return new ScopedContextRepository(this.db, key).commits(
+      options.limit,
+      options.before,
+    );
+  }
+
+  /**
    * 归档检索的下限（`context.recallBarrier`）。开关不在此处判定 —— 由调用方（`builtins.ts` 的三个
    * 归档工具）按本轮配置决定是否使用，从而使同一份水位在开关关闭时不影响任何查询。
    */

@@ -6,6 +6,7 @@ import type { UsageLedger } from "../ledger/usage.js";
 import type { QuotaGuard, QuotaReservation } from "../ledger/quota.js";
 import type { LogSink } from "../log/sink.js";
 import type { ContextEngine } from "../context/engine.js";
+import { TELEGRAM_SOURCE_ID } from "../memory/scope.js";
 
 /**
  * 一步模型调用结束时要做的四件事，拆成四个可单独注入伪造 step 的观察者。
@@ -125,6 +126,7 @@ export function createStepObservers(
         latencyMs: facts.latencyMs,
         ...(facts.finishReason ? { finishReason: facts.finishReason } : {}),
         ok: true,
+        sourceId: turn.sourceId ?? TELEGRAM_SOURCE_ID,
       });
       if (dependencies.quota && dependencies.reservation)
         dependencies.quota.commit(dependencies.reservation, cost);

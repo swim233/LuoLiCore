@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 // tsc 以 rootDir='.' 编译整个 workspace，产物位于 dist/packages/<name>/src/，而各包的
 // package.json exports 指向 packages/<name>/dist/index.js，两者不一致会使 node 在宿主上解析
 // @luoli/* 时报 ERR_MODULE_NOT_FOUND。将产物移动到 exports 声明的位置，宿主与容器共用同一套布局。
-const PACKAGES = ["shared", "db", "core", "server", "telegram", "plugin-sdk"];
+const PACKAGES = ["shared", "db", "core", "server", "telegram", "plugin-sdk", "sdk-client"];
 
 for (const name of PACKAGES) {
   const from = resolve("dist/packages", name, "src");

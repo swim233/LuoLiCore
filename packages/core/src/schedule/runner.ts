@@ -1,5 +1,4 @@
 import { Cron } from "croner";
-import { ulid } from "ulid";
 import type { Role, RuntimeTurnContext } from "@luoli/shared";
 import { minRole } from "@luoli/shared";
 import {
@@ -23,6 +22,7 @@ import type { Scheduler } from "../scheduler.js";
 import type { TelegramToolBridge } from "../tools/builtins.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import type { TurnConcurrency } from "../turn/concurrency.js";
+import { runTurn } from "../turn/pipeline.js";
 import type { TurnRegistry } from "../turn/registry.js";
 
 /**
@@ -260,6 +260,14 @@ export class ScheduledJobRunner {
     return turn.rootSpanId ? { parentSpanId: turn.rootSpanId } : {};
   }
 
+  /**
+   * 轮次核心（配额预留之后、markRun 之前）交给 `runTurn()`（`docs/02` §10.6，`docs/12-sdk.md` §14.1
+   * Q-A）：并发闸、`openTurn`/`turns.create`、`turn.queued`/`turn.start`/`turn.end`/
+   * `turn.finished` 通用日志、四条不变量（并发槽释放、配额释放、`abortTurn` 抛出后仍
+   * `turns.finish`、`appendDelta`/`commitTurn` 排在合流点之后）均由它保证，本方法只保留
+   * 触发前的判定（配额是否需要预留）与三处调用方特有的逻辑：合成消息的归档与 id 核对
+   * （`buildTrigger`）、投递（`deliver`）、模型产出或预写正文（`produce`）。
+   */
   async #run(
     job: ScheduledJob,
     role: Role,
@@ -275,168 +283,77 @@ export class ScheduledJobRunner {
       this.#skip(job, "quota_exceeded");
       return;
     }
-    const pendingId = `job_${ulid()}`;
-    const pending = this.dependencies.registry.register(
-      {
-        id: pendingId,
-        key: job.key,
-        chatId: job.chatId,
-        userId: job.createdBy,
-        role,
-      },
-      live.concurrency.turnTimeoutMs,
-    );
-    let release: (() => void) | null = null;
-    // 与 `bot.ts` 使用同一判据（docs/28 · L-LOG-01）：只有确实排队时才记录 `turn.queued`，
-    // `turn.start` 一律携带 `waitedMs`。定时轮次触发并发闸的概率不低于用户轮次 —— 它们常同时到期。
-    const queuedAt = Date.now();
-    const wasQueued = !this.dependencies.concurrency.available(job.key);
-    const queueSnapshot = {
-      active: this.dependencies.concurrency.active,
-      queued: this.dependencies.concurrency.queued,
-    };
+    // 群名从库中读取：该路径没有 Telegram update 可用，而 RUNTIME 的会话行需要它。
+    // 权威副本是 `principals` 中的 `chat:<id>`（`upsertSeen` 每条消息刷新一次 `display_name`）。
+    // 私聊查不到是预期结果、不是待修的 bug：私聊不占 `chat:` 行，而 `chatTitle` 的契约就是
+    // 「群名 / 频道名，私聊无此值」（`chatDescription` 对私聊直接返回「私聊」，根本不读它）。
+    // 回落去查同 id 的 `user:` 行会把对方的显示名漏进提示词。
+    //
+    // 这条查询在 `runTurn()` 之外、`reservation` 之后执行：`runTurn()` 只负责释放传给它的
+    // reservation，这一步若抛出（DB 故障），reservation 还没交给 `runTurn()`，必须在这里
+    // 自己兜底释放，否则它会永久卡在 `quota_counters.reserved_usd` 里——`fire()` 对 `#run()`
+    // 没有外层 try，抛出还会带走整条触发链路（R-BOT-01 的同一类问题，只是发生在 `runTurn()`
+    // 调用之前）。
+    let chatTitle: string | null;
     try {
-      release = await this.dependencies.concurrency.acquire(
-        job.key,
-        pending.controller.signal,
-      );
-    } catch (error) {
-      this.dependencies.registry.finish(pendingId);
-      if (reservation) this.dependencies.quota.release(reservation);
-      this.#skip(job, "turn_queue_rejected", {
-        error: error instanceof Error ? error.message : String(error),
-      });
-      return;
-    }
-    let turn: Awaited<ReturnType<ContextEngine["openTurn"]>>;
-    let triggerMessageId: number;
-    try {
-      // 合成触发消息：`[定时任务 <名字>] <正文>` 作为一条 from_kind='system' 的入站消息写入归档，
-      // 使上下文中呈现为一次正常对话，用户可直接接续 bot 的回答（需求方决策：照常进入上下文）。
-      // 不使用 untrusted() 包裹：该文本是 owner 或 trusted 自行创建的任务，包裹等于告知模型忽略它。
-      const trigger = this.#appendTrigger(job);
-      triggerMessageId = trigger.id;
-      // 群名从库中读取：该路径没有 Telegram update 可用，而 RUNTIME 的会话行需要它。
-      // 权威副本是 `principals` 中的 `chat:<id>`（`upsertSeen` 每条消息刷新一次 `display_name`）。
-      // 私聊查不到是预期结果、不是待修的 bug：私聊不占 `chat:` 行，而 `chatTitle` 的契约就是
-      // 「群名 / 频道名，私聊无此值」（`chatDescription` 对私聊直接返回「私聊」，根本不读它）。
-      // 回落去查同 id 的 `user:` 行会把对方的显示名漏进提示词。
-      const chatTitle = this.dependencies.db
+      chatTitle = this.dependencies.db
         .prepare(
           "SELECT display_name FROM principals WHERE kind='chat' AND tg_id=?",
         )
         .pluck()
         .get(job.chatId) as string | null;
-      // `silenceable` 只从此处传入（docs/02 §10.5）：其余构造 turn 的位置一律不传，因此模型可以
-      // 声明不投递这一能力在结构上只可能出现在启用 allow_silent 的定时轮次中。
-      turn = await this.dependencies.context.openTurn({
-        chatId: job.chatId,
-        threadId: job.threadId,
-        key: job.key,
-        initiatorUserId: job.createdBy,
-        effectiveRole: role,
-        isPrivate,
-        trigger,
-        ...(chatTitle ? { chatTitle } : {}),
-        ...(job.allowSilent ? { silenceable: true } : {}),
-        abortSignal: pending.controller.signal,
-        config: chatConfig,
-      });
-      this.dependencies.registry.finish(pendingId);
-      const tracked = this.dependencies.registry.register(
-        {
-          id: turn.turnId,
-          key: job.key,
-          chatId: job.chatId,
-          userId: job.createdBy,
-          role,
-        },
-        live.concurrency.turnTimeoutMs,
-      );
-      Object.assign(turn, { abortSignal: tracked.controller.signal });
-      this.dependencies.turns.create({
-        id: turn.turnId,
-        key: job.key,
-        chatId: job.chatId,
-        threadId: job.threadId,
-        userId: job.createdBy,
-        role,
-        triggerMessageId,
-        triggerReason: "schedule",
-        baseCommitId: turn.baseCommitId,
-      });
     } catch (error) {
-      this.dependencies.registry.finish(pendingId);
-      release();
       if (reservation) this.dependencies.quota.release(reservation);
       this.#failed(job, error);
       return;
     }
-    const waitedMs = Date.now() - queuedAt;
-    this.dependencies.log.event({
-      level: "info",
-      kind: "schedule.fired",
-      summary: `定时任务 ${job.name} 触发`,
-      traceId: turn.turnId,
-      ...this.#parent(turn),
-      chatId: job.chatId,
-      userId: job.createdBy,
-      key: job.key,
-      data: {
-        job: job.id,
-        name: job.name,
-        mode: job.mode,
-        role,
-        runCount: job.runCount,
+    const result = await runTurn({
+      dependencies: {
+        context: this.dependencies.context,
+        turns: this.dependencies.turns,
+        registry: this.dependencies.registry,
+        concurrency: this.dependencies.concurrency,
+        quota: this.dependencies.quota,
+        tools: this.dependencies.tools,
+        memory: this.dependencies.memory,
+        log: this.dependencies.log,
+        ...(this.dependencies.approvals
+          ? { approvals: this.dependencies.approvals }
+          : {}),
+        ...(this.dependencies.plugins
+          ? { plugins: this.dependencies.plugins }
+          : {}),
+        ...(this.dependencies.failures
+          ? { failures: this.dependencies.failures }
+          : {}),
       },
-    });
-    if (wasQueued)
-      this.dependencies.log.event({
-        level: "info",
-        kind: "turn.queued",
-        summary: `Turn ${turn.turnId} waited ${waitedMs}ms in queue`,
-        traceId: turn.turnId,
-        ...this.#parent(turn),
-        chatId: job.chatId,
-        userId: job.createdBy,
-        key: job.key,
-        durationMs: waitedMs,
-        data: { ...queueSnapshot, waitedMs },
-      });
-    this.dependencies.log.event({
-      level: "info",
-      kind: "turn.start",
-      summary: `Turn ${turn.turnId} started`,
-      traceId: turn.turnId,
-      ...(turn.rootSpanId ? { spanId: turn.rootSpanId } : {}),
       chatId: job.chatId,
-      userId: job.createdBy,
+      threadId: job.threadId,
       key: job.key,
-      data: { role, triggerReason: "schedule", waitedMs },
-    });
-    this.dependencies.log.publish("turn.started", {
-      turnId: turn.turnId,
-      key: job.key,
-      chatId: job.chatId,
-      user: job.createdBy,
-      role,
+      initiatorUserId: job.createdBy,
+      effectiveRole: role,
+      isPrivate,
+      ...(chatTitle ? { chatTitle } : {}),
+      // `silenceable` 只从此处传入（docs/02 §10.5）：其余构造 turn 的位置一律不传，因此模型可以
+      // 声明不投递这一能力在结构上只可能出现在启用 allow_silent 的定时轮次中。
+      ...(job.allowSilent ? { silenceable: true } : {}),
+      config: chatConfig,
+      turnTimeoutMs: live.concurrency.turnTimeoutMs,
       triggerReason: "schedule",
-      at: Date.now(),
-    });
-    try {
-      const answer =
+      reservation,
+      logExtra: { schedule: job.id },
+      // 合成触发消息：`[定时任务 <名字>] <正文>` 作为一条 from_kind='system' 的入站消息写入归档，
+      // 使上下文中呈现为一次正常对话，用户可直接接续 bot 的回答（需求方决策：照常进入上下文）。
+      // 不使用 untrusted() 包裹：该文本是 owner 或 trusted 自行创建的任务，包裹等于告知模型忽略它。
+      buildTrigger: () => this.#appendTrigger(job),
+      // `notify` 不调用模型，直接返回预写正文；`agent` 与 `bot.ts` 共用的 `runAgent` 依赖一致。
+      produce:
         job.mode === "notify"
-          ? job.payload
-          : (await this.dependencies.runAgent(turn, reservation)).trim();
-      // 空正文视为失败：无法发送（splitTelegramText('') 返回空数组），且会在上下文中留下一条
-      // 无法解释的空消息（docs/16 §5 摘除比伪造安全）。
-      // 该闸门对静默同样不放宽。静默加空正文等于上下文中没有任何记录，而让模型在下一轮知晓自己
-      // 已执行过查询正是静默机制的全部目的（docs/02 §10.5）。
-      if (!answer) throw new Error("model_returned_empty");
-      // `notify` 恒为 false：该路径不调用模型，没有任何执行方能够置位 `turn.silenced`。
-      const silenced = turn.silenced === true;
-      if (!silenced) {
-        const sent = (await bridge.sendMessage(
+          ? () => Promise.resolve(job.payload)
+          : (turn, turnReservation) =>
+              this.dependencies.runAgent(turn, turnReservation),
+      deliver: (turn, answer) =>
+        bridge.sendMessage(
           {
             chatId: job.chatId,
             threadId: job.threadId,
@@ -444,19 +361,39 @@ export class ScheduledJobRunner {
             ...(turn.rootSpanId ? { parentSpanId: turn.rootSpanId } : {}),
           },
           answer,
-        )) as { ok?: boolean; error?: string };
-        if (sent.ok === false)
-          throw new Error(`delivery_failed:${sent.error ?? "unknown"}`);
-      } else {
-        // `job.silentStreak` 是本次触发之前的值，下方的 markRun 才会加 1 —— 日志需要表达这是连续
-        // 第几次，因此此处先加。
+        ) as Promise<{ ok?: boolean; error?: string }>,
+      onOpened: (turn) =>
+        this.dependencies.log.event({
+          level: "info",
+          kind: "schedule.fired",
+          summary: `定时任务 ${job.name} 触发`,
+          traceId: turn.turnId,
+          ...this.#parent(turn),
+          chatId: job.chatId,
+          userId: job.createdBy,
+          key: job.key,
+          data: {
+            job: job.id,
+            name: job.name,
+            mode: job.mode,
+            role,
+            runCount: job.runCount,
+          },
+        }),
+    });
+
+    if (result.ok) {
+      if (result.silenced) {
+        // `job.silentStreak` 是本次触发之前的值，下面的 markRun 才会加 1 —— 日志需要表达这是
+        // 连续第几次，因此此处先加。`last_error` 在静默路径上恒为 NULL（markRun 不传 error），
+        // 这是区分静默与 failed / skipped 的第二层手段。
         const streak = job.silentStreak + 1;
         this.dependencies.log.event({
           level: streak >= SILENT_STREAK_WARN ? "warn" : "info",
           kind: "schedule.silent",
           summary: `定时任务 ${job.name} 本轮不用汇报（连续第 ${streak} 次）`,
-          traceId: turn.turnId,
-          ...this.#parent(turn),
+          traceId: result.turn.turnId,
+          ...this.#parent(result.turn),
           chatId: job.chatId,
           userId: job.createdBy,
           key: job.key,
@@ -468,167 +405,33 @@ export class ScheduledJobRunner {
             mode: job.mode,
             streak,
             warnAt: SILENT_STREAK_WARN,
-            reason: turn.silenceReason ?? null,
+            reason: result.turn.silenceReason ?? null,
           },
         });
+        this.dependencies.jobs.markRun(job.id, { state: "silent" });
+      } else {
+        this.dependencies.jobs.markRun(job.id, { state: "committed" });
       }
-      // 两条路径在此合流，`appendDelta` / `commitTurn` 必须位于合流点之后。将它们移入上方分支
-      // （或直接写成 `if (silenced) return`）正好复现 docs/02 §10.1 当初否决的方案：节省的是
-      // 一次 commit，代价是一次无法解释的记忆缺失 —— 用户次日询问查询结果而模型完全没有相关记录。
-      this.dependencies.context.appendDelta(turn, {
-        id: turn.turnId,
-        role: "assistant",
-        origin: "assistant",
-        parts: [{ type: "text", text: answer }],
-        textPreview: answer.slice(0, 240),
-        pruneLevel: 0,
-      });
-      const committed = await this.dependencies.context.commitTurn(turn);
-      // `turns.finish` 仍记录 `committed`：该轮确实已提交，静默属于投递侧的行为。区分手段在
-      // `scheduled_jobs.last_state` 与 `schedule.silent` 那一行，不在此处新增一种轮次状态。
-      const settled = this.dependencies.turns.finish(turn.turnId, {
-        state: "committed",
-        commitId: committed.commit.id,
-        rebased: committed.rebased,
-      });
-      await this.dependencies.plugins?.hook("afterCommit", { turn, committed });
-      // `silenced` 写入 `turn.end` 的 data：否则完整 trace 中会缺少 `tg.send`，读取者无从解释。
-      this.dependencies.log.event({
-        level: "info",
-        kind: "turn.end",
-        summary: "turn committed",
-        traceId: turn.turnId,
-        ...this.#parent(turn),
-        chatId: job.chatId,
-        userId: job.createdBy,
-        key: job.key,
-        data: {
-          state: "committed",
-          rebased: committed.rebased,
-          waitedMs,
-          schedule: job.id,
-          ...(silenced ? { silenced: true } : {}),
-        },
-      });
-      this.dependencies.log.publish("turn.finished", {
-        turnId: turn.turnId,
-        key: job.key,
-        chatId: job.chatId,
-        state: "committed",
-        steps: settled?.steps ?? 0,
-        toolCalls: settled?.toolCalls ?? 0,
-        costUsd: settled?.costUsd ?? 0,
-        rebased: committed.rebased,
-        durationMs: settled?.durationMs ?? 0,
-      });
-      this.dependencies.memory.flush(turn.turnId);
-      // `last_error` 在静默路径上恒为 NULL（markRun 不传 error），这是区分静默与
-      // failed / skipped 的第二层手段。`silent_streak` 由 markRun 就地加 1。
-      this.dependencies.jobs.markRun(job.id, {
-        state: silenced ? "silent" : "committed",
-      });
-      // 与 Telegram 轮次共用同一份计数（docs/28 · L-SCH-02）：成功一次即归零，跨会话生效。
-      // 静默同样计为成功：该轮已执行完成并提交，只是没有需要输出的内容。
-      this.dependencies.failures?.succeeded();
-    } catch (error) {
-      // 超时不等于取消（`docs/04 §5.3` 的三档，同 `bot.ts`）。定时任务路径上尤为明显：不会有人去
-      // 取消一个自动触发的任务，记为 cancelled 等于在上游故障期间每次触发都被静默地判为无效。
-      const timedOut = turn.abortSignal.reason === "timeout";
-      const cancelled = turn.abortSignal.aborted && !timedOut;
-      // 同 `bot.ts` 中的处理：`abortTurn` 抛出会使下方的 `turns.finish` 不执行，该行永久停留在
-      // `state='running'`。清理是尽力而为，而状态记录不是。
-      try {
-        await this.dependencies.context.abortTurn(
-          turn,
-          cancelled ? "cancelled" : "failed",
-          error,
-        );
-      } catch (cleanup) {
-        this.dependencies.log.event({
-          level: "error",
-          kind: "ctx.abort",
-          summary: "abortTurn failed; turn still recorded as ended",
-          traceId: turn.turnId,
-          chatId: job.chatId,
-          key: job.key,
-          data: {
-            error: cleanup instanceof Error ? cleanup.message : String(cleanup),
-            schedule: job.id,
-          },
-        });
-      }
-      const settled = this.dependencies.turns.finish(
-        turn.turnId,
-        cancelled
-          ? {
-              state: "cancelled",
-              cancelReason: String(turn.abortSignal.reason ?? "cancelled"),
-            }
-          : {
-              state: "failed",
-              error: timedOut
-                ? "turn_timeout"
-                : error instanceof Error
-                  ? error.message
-                  : String(error),
-              ...(timedOut ? { cancelReason: "timeout" } : {}),
-            },
-      );
-      this.dependencies.log.event({
-        level: cancelled ? "warn" : "error",
-        kind: "turn.end",
-        summary: cancelled
-          ? "turn cancelled"
-          : timedOut
-            ? "turn timed out"
-            : error instanceof Error
-              ? error.message
-              : "turn failed",
-        traceId: turn.turnId,
-        ...this.#parent(turn),
-        chatId: job.chatId,
-        userId: job.createdBy,
-        key: job.key,
-        data: {
-          state: cancelled ? "cancelled" : "failed",
-          waitedMs,
-          schedule: job.id,
-        },
-      });
-      this.dependencies.log.publish("turn.finished", {
-        turnId: turn.turnId,
-        key: job.key,
-        chatId: job.chatId,
-        state: cancelled ? "cancelled" : "failed",
-        steps: settled?.steps ?? 0,
-        toolCalls: settled?.toolCalls ?? 0,
-        costUsd: settled?.costUsd ?? 0,
-        rebased: false,
-        durationMs: settled?.durationMs ?? 0,
-      });
-      // 与 `bot.ts` 的两个出口一致：取消不计为故障，超时计入 —— 而上游无响应导致每次定时触发都
-      // 超时，正是该告警最应覆盖的场景，也正是它此前从未触发的场景（docs/28 · L-SCH-02）。
-      if (!cancelled)
-        this.dependencies.failures?.failed(
-          timedOut
-            ? "turn_timeout"
-            : error instanceof Error
-              ? error.message
-              : String(error),
-        );
-      this.#failed(job, error, turn.turnId);
-    } finally {
-      this.dependencies.tools.releaseTurn(turn.turnId);
-      this.dependencies.approvals?.releaseTurn(turn.turnId);
-      this.dependencies.memory.discard(turn.turnId);
-      this.dependencies.registry.finish(turn.turnId);
-      release();
-      if (reservation) this.dependencies.quota.release(reservation);
-      // 一次性任务执行完即结束，成功与否都不重试：15:00 的会议提醒在 15:05 才发出已无意义。
-      if (job.runAt !== null) {
-        this.dependencies.jobs.finish(job.id, "done");
-        this.unregister(job.id);
-      }
+    } else if (result.stage === "queue") {
+      this.#skip(job, "turn_queue_rejected", { error: result.error });
+    } else if (result.stage === "setup") {
+      this.#failed(job, new Error(result.error));
+    } else {
+      this.#failed(job, new Error(result.error), result.turn.turnId);
+    }
+
+    // 一次性任务执行完即结束，成功与否都不重试：15:00 的会议提醒在 15:05 才发出已无意义。
+    // 但「执行完」须以「轮次真的开过」为界——`result.ok` 或 `stage:'turn'` 都意味着
+    // `openTurn`/`turns.create` 已经成功，之后无论产出/投递/提交是否失败都算「跑过一次」；
+    // `stage:'queue'`（并发闸拒绝）与 `stage:'setup'`（`buildTrigger`/`openTurn`/`turns.create`
+    // 本身抛出）与 `quota_exceeded`（更早处已 return，不会走到这里）是同一类"这一轮压根没开
+    // 起来"的失败，与原实现一致地保留 `active`：调用方可通过
+    // `POST /api/schedules/:id/trigger` 手动重试，而不是让一次瞬时故障（队列一时占满、
+    // 触发消息撞号）直接把一次性任务判"死"。
+    const turnOpened = result.ok || result.stage === "turn";
+    if (turnOpened && job.runAt !== null) {
+      this.dependencies.jobs.finish(job.id, "done");
+      this.unregister(job.id);
     }
   }
 

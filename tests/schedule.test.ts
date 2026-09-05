@@ -41,9 +41,11 @@ function harness(name: string, extra: Record<string, unknown> = {}) {
   // `mode:'agent'` 那一步。默认返回一句正文；静默相关用例改为先调用 stay_silent 再写入结论。
   let agent: (turn: RuntimeTurnContext) => Promise<string> = () => Promise.resolve('早报：昨天聊了三件事。');
   const failures = new TurnFailureStreak({ fire: (kind, _summary, data) => { fired.push({ kind, count: (data as { count?: unknown } | undefined)?.count }); } }, 2);
+  const concurrency = new TurnConcurrency(config.concurrency);
+  const turnRegistry = new TurnRegistry();
   const runner = new ScheduledJobRunner({
     db, jobs, scheduler, context, archive, turns: new TurnRepository(db),
-    registry: new TurnRegistry(), concurrency: new TurnConcurrency(config.concurrency),
+    registry: turnRegistry, concurrency,
     quota: new QuotaGuard(db, config.general.timezone, events), memory: new MemoryStore(db, memoryDir, 1500, 3000),
     tools: new ToolRegistry(log, { request: async () => true }, { maxRegistered: 200, maxCallsPerTurn: 50, maxConsecutiveErrors: 10 }), log, failures,
     config: () => live,
@@ -66,7 +68,7 @@ function harness(name: string, extra: Record<string, unknown> = {}) {
   const turnContext = (turn: RuntimeTurnContext, agentKind: 'main' | 'lw' = 'main'): unknown =>
     ({ turn, workspace: `./data/${name}-workspace`, agentKind, ...newToolScope() });
   principals.upsertSeen({ id: 'user:7', kind: 'user', tgId: '7', role: 'trusted', displayName: '阿离', username: null, chatType: null });
-  return { db, jobs, runner, registry, scheduler, principals, sent, agentCalls, contextFor, context, archive, fired, failures, turnContext,
+  return { db, jobs, runner, registry, scheduler, principals, sent, agentCalls, contextFor, context, archive, fired, failures, turnContext, concurrency, turnRegistry,
     scheduleSettings: (): Config['schedule'] => live.schedule,
     setAgent: (fn: (turn: RuntimeTurnContext) => Promise<string>) => { agent = fn; },
     unplugTelegram: () => { bridge = null; },
@@ -220,6 +222,80 @@ describe('定时任务触发', () => {
     await h.runner.fire(job.id);
     expect(h.jobs.byId(job.id)).toMatchObject({ state: 'done', runCount: 1 });
     expect(h.scheduler.names()).toHaveLength(0);
+    h.close();
+  });
+
+  /**
+   * 一次性任务只有在轮次真的开起来之后才算「跑完」。并发闸拒绝（`stage:'queue'`）与
+   * `buildTrigger`/`openTurn`/`turns.create` 本身抛出（`stage:'setup'`）都是「这一轮压根没开
+   * 起来」，与 `quota_exceeded` 是同一类失败——都应保留 `active`，留给下一次触发或
+   * `POST /api/schedules/:id/trigger` 手动重试，而不是被一次瞬时占用直接判「死」
+   * （qa-T3-7 verify-1 打回项 2：T3.7 抽取时曾把 `jobs.finish('done')` 提到了这两条路径也够得着的位置）。
+   */
+  it('一次性任务队列满时不算跑完：留 active，槽位腾出后手动重触发仍能跑完', async () => {
+    const h = harness('sched-once-queue-full', { concurrency: { mode: 'parallel', perKey: 1, global: 1, queueMax: 0 } });
+    await call(h, 'schedule_create', { name: '开会', mode: 'notify', text: '开会了', at: new Date(Date.now() + 3_600_000).toISOString().slice(0, 16) });
+    const job = h.jobs.byName('chat:c1', '开会')!;
+    const holder = new AbortController();
+    const releaseHolder = await h.concurrency.acquire('chat:c1', holder.signal);
+    await h.runner.fire(job.id);
+    // 与「投递通道不在时不开轮」「触发时重算角色」等既有的 skip 路径同一档：任务留存。
+    expect(h.jobs.byId(job.id)).toMatchObject({ state: 'active', lastState: 'skipped', lastError: 'turn_queue_rejected' });
+    expect(h.sent).toHaveLength(0);
+    expect(h.scheduler.names()).toHaveLength(1);
+    releaseHolder();
+    // 槽位腾出后手动再触发一次，这次真的跑起来，按一次性任务的规则收尾。
+    await h.runner.fire(job.id);
+    expect(h.jobs.byId(job.id)).toMatchObject({ state: 'done', runCount: 2 });
+    expect(h.scheduler.names()).toHaveLength(0);
+    h.close();
+  });
+
+  /**
+   * 上一条用例焊住了「没开起来」（`stage:'queue'`）的那一支；这一条焊住「开起来了、但后续
+   * 失败」（`stage:'turn'`）的那一支——两支都要覆盖到，才能确认 `turnOpened` 的判据边界画对了
+   * 地方：不是「本次触发成功与否」，而是「`openTurn`/`turns.create` 是否真的执行过」
+   * （lead 对 qa-T3-7 verify-2 打回项 2 的裁决）。
+   */
+  it('一次性任务里 produce 抛出仍算「跑过」：state 变为 done', async () => {
+    const h = harness('sched-once-produce-throws');
+    await call(h, 'schedule_create', { name: '汇总', mode: 'agent', text: '汇总昨天', at: new Date(Date.now() + 3_600_000).toISOString().slice(0, 16) });
+    const job = h.jobs.byName('chat:c1', '汇总')!;
+    h.setAgent(() => Promise.reject(new Error('模型挂了')));
+    await h.runner.fire(job.id);
+    expect(h.jobs.byId(job.id)).toMatchObject({ state: 'done', lastState: 'failed', lastError: '模型挂了' });
+    expect(h.scheduler.names()).toHaveLength(0);
+    h.close();
+  });
+
+  /**
+   * `chatTitle` 的 `principals` 查询现在包在自己的 try/catch 里（qa-T3-7 verify-2 打回项 3）：
+   * 抛出时必须释放已经预留的配额、不留下任何 `turns` / `TurnRegistry` 残留——它发生在
+   * `runTurn()` 调用之前，`runTurn()` 自身的清理够不着这一步。
+   */
+  it('chatTitle 查询抛出：配额已释放、无 running 残留', async () => {
+    const h = harness('sched-chattitle-throws', { quota: { enabled: true, minReserveUsd: 0.02, global: { daily: 5 } } });
+    await call(h, 'schedule_create', { name: '早报', mode: 'agent', text: '汇总', cron: '0 8 * * *' });
+    const job = h.jobs.byName('chat:c1', '早报')!;
+    // 只让 chatTitle 那一条 principals 查询抛出，其余 SQL（含 roleOf 用的
+    // `kind = ?` 参数化查询、本文件其余用例复用的同一个 harness）原样放行。
+    const originalPrepare = h.db.prepare.bind(h.db);
+    Object.assign(h.db, {
+      prepare: (sql: string) => {
+        if (sql.includes("FROM principals WHERE kind='chat'")) throw new Error('principals 表读不动');
+        return originalPrepare(sql);
+      },
+    });
+    await h.runner.fire(job.id);
+    expect(h.agentCalls).toHaveLength(0);
+    expect(h.sent).toHaveLength(0);
+    expect(h.db.prepare('SELECT COUNT(*) FROM turns').pluck().get()).toBe(0);
+    expect(h.turnRegistry.size).toBe(0);
+    expect(h.concurrency.available('chat:c1')).toBe(true);
+    const counter = h.db.prepare("SELECT reserved_usd AS reserved FROM quota_counters WHERE scope='global'").get() as { reserved: number } | undefined;
+    expect(counter?.reserved ?? 0).toBe(0);
+    expect(h.jobs.byId(job.id)).toMatchObject({ state: 'active', lastState: 'failed' });
+    expect(h.jobs.byId(job.id)!.lastError).toContain('principals 表读不动');
     h.close();
   });
 

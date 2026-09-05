@@ -398,8 +398,9 @@ export const configSchema = z
         archiveBlocked: z.boolean().default(false),
         /**
          * 需校验形态。该值（来自 `LUOLI_OWNER_ID` 这一自由字符串环境变量）会被直接用作路径段：
-         * `memory/private/<id>/PRIMEMORY.md`（`memory/store.ts`、`prompt/documents.ts`），
-         * 定时任务的 `createdBy` 也走同一路径 —— `LUOLI_OWNER_ID=../../etc` 会使私有记忆写到目录之外
+         * `memory/sources/<sourceId>/private/<id>/PRIMEMORY.md`（`memory/store.ts`、
+         * `prompt/documents.ts`），定时任务的 `createdBy` 也走同一路径 ——
+         * `LUOLI_OWNER_ID=../../etc` 会使私有记忆写到目录之外
          * （属自伤场景，但此前没有任何校验，docs/27 · S-08）。判据与 `TG_ID_PATTERN` 相同：
          * Telegram 数字 id。空串照常放行（`loadConfig` 另有 requireOwner 给出的更明确报错）。
          */

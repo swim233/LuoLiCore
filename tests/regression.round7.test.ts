@@ -133,7 +133,7 @@ describe('I-05 · 落盘前按新内容复核去重与硬上限', () => {
     const memory = new MemoryStore(db, directory, 100_000, 300_000, 12);
     const write = (turnId: string) => memory.queueWrite({ scope: 'pubmemory', subject: null, section: '偏好',
       lines: ['他喝手冲不加糖'], actor: 'test', turnId, chatId: 'c', userId: 'u' }, 'owner', false, 'trusted');
-    // 两轮各自在**同一份快照**上通过了去重（PUBMEMORY 是全局单份），随后先后落盘。
+    // 两轮各自在**同一份快照**上通过了去重（PUBMEMORY 按来源分区，同来源内共享同一份文档），随后先后落盘。
     write('t1'); write('t2');
     expect(memory.flush('t1')).toMatchObject({ documents: 1 });
     // 旧实现：t2 的判据取自 queueWrite 那一刻的空文档，于是同一条又写一遍。

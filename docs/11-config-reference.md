@@ -959,8 +959,8 @@ memory.pubWriteMinRole（只允许比全局更严格）
 > 要么对应 schema 叶子，要么登进 `PER_CHAT_NON_SCHEMA_KEYS` 且真的被代码读到。
 >
 > **只收纯文件名**（`^[\w.-]{1,96}\.md$`，且不含 `..`）：它会被当成 `memory/` 下的路径段用，
-> 而这是自由字符串（同 `S-08` 的教训）。不合格时**静默退回全局 `CHARACTER.md`** —— 一个拼错的
-> 文件名不该让整个会话开不了轮次，而用回全局人格是安全的默认。
+> 而这是自由字符串（同 `S-08` 的教训）。不合格时**静默退回该来源目录下的 `CHARACTER.md`** ——
+> 一个拼错的文件名不该让整个会话开不了轮次，而回退到来源目录下的 `CHARACTER.md` 是安全的默认。
 
 覆盖在 `openTurn` 时由 `perChatConfig(config, key)` 合并进本轮配置，`onTurn` 用的是 `turn.config` 而不是全局快照，因此 agent 运行时看到的也是合并后的值。
 `trigger.*` 还要更早一步：`matchTrigger` 在 `openTurn` 之前就跑，所以触发判定处（`bot.ts` 的消息与

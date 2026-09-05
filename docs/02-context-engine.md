@@ -675,7 +675,9 @@ export interface CommitResult {
 ## 10. 定时轮次的上下文归属
 
 > [14 §2 Q4](./14-open-questions.md) 要求的「单独设计一节」。需求方已拍板：**照常进上下文**。
-> 实现在 `packages/core/src/schedule/runner.ts`，工具在 [05 §3.8](./05-tools-and-permissions.md)。
+> 触发前的判定（角色重算、配额是否预留、合成消息归档、投递通道是否可用）实现在
+> `packages/core/src/schedule/runner.ts`；轮次核心（配额预留之后、`markRun` 之前）由 §10.6
+> 的 `runTurn()` 统一实现。工具在 [05 §3.8](./05-tools-and-permissions.md)。
 
 ### 10.1 归属规则
 
@@ -693,13 +695,19 @@ cron 到点 ──► 重算有效角色（§10.4）──► 合成触发消息
                               │ turn.silenced                            │ 否（默认）
                               │ （§10.5，只有开了 allow_silent 的任务够得着）  │
                               ▼                                          ▼
-                    记 schedule.silent，不投递                       投递（tg.send）
+                          不投递                                     投递（tg.send）
                               └───────────────────────────┬──────────────┘
                                                           ▼
                                             appendDelta ──► commitTurn
                                                           ▼
                                         markRun(silent | committed)
+                                     （silent 分支同时记 schedule.silent）
 ```
+
+`schedule.silent` 记在 `commitTurn` 成功之后（`runTurn()` 返回、`markRun` 落库的同一时刻），
+不在静默分支判定的当下。两者之间隔着 `appendDelta` / `commitTurn`：提前记的坏处是
+`commitTurn` 随后失败时，库里会留一条「本轮静默」的日志，而这一轮实际按失败收尾——
+静默是投递侧的结论，只有轮次真正提交才成立。
 
 **`appendDelta` / `commitTurn` 画在合流点之后不是排版偏好，是这一节的核心不变量**：
 静默改变的只有「发不发那条 Telegram 消息」，上下文这一侧两条路一个字都不差（§10.5 第 ①、④ 条）。
@@ -883,3 +891,70 @@ Telegram 流消费者；流式的占位消息与进度编辑在这条路上只�
 没有它在 trace 里无从解释 —— 而「少了一跳」正是 [10 §2](./10-logging-and-observability.md) 的
 `tg.send` 行当初被补上的同一种形态。`reason` 在 `stay_silent` 上是必填参数，也是为了这张表：
 它既进日志、又逼模型对「为什么不用说」做一次显式判断。
+
+### 10.6 `runTurn()`：轮次管线的唯一实现
+
+`packages/core/src/turn/pipeline.ts` 导出的 `runTurn()` 是本节 §10.1 图中
+`openTurn → … → commitTurn` 那一段（配额预留之后、markRun 之前）的唯一实现
+（`docs/12 §14.1` Q-A）。此前这段逻辑在 `packages/telegram/src/bot.ts` 与
+`packages/core/src/schedule/runner.ts` 中各写一份，四条不变量因此各维护两处；`runTurn()`
+出现后，`runner.ts` 与 SDK（`docs/12 §7`）两个调用方共用同一份，`bot.ts` 暂缓接入
+（`docs/12 §1`「不在本次范围」留后续单独一轮）。
+
+`runTurn()` 内部保证的四条不变量，均在自身的 `try/catch/finally` 中完成，调用方不得也不需要
+重复实现：
+
+1. 并发闸与配额预留在**任何**失败路径（排队被拒、`openTurn`/`turns.create` 抛出、产出/投递/
+   提交失败、`abortTurn` 自身抛出）之后都会释放——`finally` 块无条件执行
+   `tools.releaseTurn` / `approvals.releaseTurn` / `memory.discard` / `registry.finish` /
+   并发槽 `release()` / `quota.release(reservation)`。
+2. `commitTurn` 失败时改走 `abortTurn`；`abortTurn` 自身抛出不会阻断 `turns.finish`——清理是
+   尽力而为，状态记录不是（R-BOT-01）。
+3. `appendDelta` / `commitTurn` 恒排在「投递或静默」分支的合流点之后（§10.1）。
+4. `openTurn`/`turns.create` 成功但随后失败的轮次，`TurnRegistry` 中以 `turn.turnId` 注册的那条
+   记录同样会被释放，不会与排队阶段的 `pendingId` 一并遗漏。
+
+**调用方注入三处，其余全部由 `runTurn()` 自己完成**：
+
+- `buildTrigger(): AppendedMessage | Promise<AppendedMessage>`——本轮的触发消息如何归档、
+  合成 id 如何分配与核对（§10.2 那一套），完全是调用方的事：`runner.ts` 复用既有的
+  `#appendTrigger`；SDK 的开轮前归档另有一套（`db.transaction` 内核对 `MAX+1`），
+  同样通过这个回调注入，不复制到 `pipeline.ts` 里。`buildTrigger` 抛出与 `openTurn`/
+  `turns.create` 抛出走同一条失败路径（`stage: 'setup'`）。
+- `produce(turn, reservation, meta)`：模型侧产出（或 `notify` 模式下直接返回预写正文）。
+  返回值由 `runTurn()` 统一 `.trim()` 后做空正文检查——空则 `model_returned_empty`，
+  这道闸不为静默开例外（§10.5 第 ④ 条）。
+- `deliver(turn, answer)`（可选）：投递失败以 `{ ok:false, error }` 表达，`runTurn()`
+  统一转成 `delivery_failed:<error>` 走失败路径；省略等价于「没有旁路投递动作」，
+  调用方从返回值里的 `answer` 自行处理（例如 SDK 把它写进 HTTP 响应体）。
+  `turn.silenced === true` 时这一步整体跳过，不算失败。
+
+另有一处非「三处」之列的钩子 `onOpened(turn)`：`openTurn`/`turns.create` 成功后、`produce`
+开始前触发一次，供调用方记录「这一轮确实开起来了」（`runner.ts` 用它记 `schedule.fired`）。
+抛出与产出/投递/提交失败走同一条失败路径，不绕过任何一条不变量。**`schedule.fired` 的落库
+顺序因此从「先于 `turn.queued` / `turn.start`」变为「后于二者」**（`onOpened` 排在这两条通用
+日志之后）——`docs/10` 未约束这几条日志之间的相对顺序，Trace 视图按时间排序读起来仍是
+「轮次开始 → 定时任务触发」，不影响归属判断。
+
+**`onQueued` 与 `turn.queued` 日志是两件事**：`onQueued` 在**进入排队的那一刻**（`acquire()`
+之前，此时还没有 `turnId`）触发一次，只带 `{ active, queued }`，供 T3.8 的 SSE `queued` 事件
+使用——排队时长可能长达数秒，事件必须在排队开始时就发给客户端，晚到 `turnId` 产生之后毫无意义。
+`turn.queued` 这条日志则仍在 `openTurn` 成功之后记录（需要 `turnId` 与 `waitedMs`），供事后
+排障使用，与 `onQueued` 的调用时机、载荷都不同。判据是 `!concurrency.available(key)`——此时
+`acquire()` 尚未调用，无法区分「会排队等待」与「队列已满、即将被拒」，`queueMax` 配得很小的
+部署里，`onQueued` 触发后紧跟着 `stage:'queue'` 失败是预期行为。
+
+`schedule.silent` 的记录时机随本次重构后移到 `commitTurn` 成功之后（§10.1 diagram 已更新）：
+静默是投递侧的结论，只有轮次真正提交才成立，提前记录会在 `commitTurn` 随后失败时留下一条
+「本轮静默」但轮次其实失败了的错误日志。
+
+**`onPending(pendingId)`**（T3.6 新增，`docs/12 §7`）：`TurnRegistry.register()`
+分配排队态 id 之后立即触发一次，早于 `onQueued`。供需要支持「排队阶段取消」的调用方（SDK 的
+客户端断连处理）记下这个 id——排队期间没有 `turnId` 可用，`registry.cancel(pendingId, ...)`
+是此时唯一能触发 `pending.controller.signal` 中止、进而让 `concurrency.acquire()` 以
+`turn_queue_cancelled` 拒绝的入口；`openTurn` 成功、`onOpened` 触发后应改用 `turn.turnId`
+取消——`pendingId` 此时已经 `registry.finish()`，继续用它无效。不改变四条不变量：这是一处
+纯粹的「多暴露一个已经存在的值」，不影响 `runTurn()` 自身的清理路径。
+
+`runTurn()` 不引入进程内状态（`docs/01 §3.1` 单实例纪律）：`reservation` 由调用方计算并传入，
+`runTurn()` 只负责在恰当的时机释放它，本身不持有跨调用的缓存。

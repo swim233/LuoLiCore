@@ -47,6 +47,8 @@ plugins/*
 #   - private/<userId>/ —— 每用户一份的私有记忆（0700）
 #   - .pending/         —— 超过软上限、等待压缩的那些
 #   - .forgotten/       —— `forget_me` 之后留档的正文，按 memory.forgetMeRetentionDays 保留
+#   - sources/          —— 按来源分区后的记忆文件（`migrateMemoryLayout()` 搬迁产物 + 各来源
+#                          自己的读写），同样是运行时数据
 # CHARACTER.md 与 ASSIST.md **留在版本库里**：它们是人格与助手规则（提示词文档，不是记忆），
 # 有真实的编写提交，只经 WebUI 的 `PUT /api/prompts/:id` 改，而 ASSIST.md 与 KERNEL 的空行
 # 约定是耦合的（docs/00 §2.3）。
@@ -54,3 +56,4 @@ memory/PUBMEMORY.md
 memory/private/
 memory/.pending/
 memory/.forgotten/
+memory/sources/

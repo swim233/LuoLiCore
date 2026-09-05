@@ -26,7 +26,12 @@ import {
   type RuntimeTurnContext,
 } from "@luoli/shared";
 import type { PromptAssembler, PromptDocuments } from "../index.js";
-import { runtimeBlock, type PromptBuildResult } from "../prompt/assembler.js";
+import {
+  runtimeBlock,
+  type PromptBuildResult,
+  type SdkOutputFormat,
+  type SdkPromptBuildInput,
+} from "../prompt/assembler.js";
 import type {
   DeferredToolGroup,
   RegisteredTool,
@@ -38,7 +43,11 @@ import type {
 // `media` 的形状判据只有一份：注册表在序列化前用它，此处在落库前用同一个。判据写成两份会
 // 导致注册表识别为图片、落库侧不识别的分歧。registry 不 import runtime，无循环依赖。
 import { newToolScope, splitToolMedia } from "../tools/registry.js";
-import { WORKER_INTERNAL_TOOLS, type ToolName } from "../tools/policy.js";
+import {
+  WORKER_INTERNAL_TOOLS,
+  type AgentKind,
+  type ToolName,
+} from "../tools/policy.js";
 import type { ProviderStore } from "../provider/store.js";
 import {
   PROVIDER_FAILURES_TO_DOWN,
@@ -61,6 +70,7 @@ import type { LogSink, LogSpan } from "../log/sink.js";
 import { isImagePart, type ContextEngine } from "../context/engine.js";
 import type { AgentManager } from "./manager.js";
 import type { SkillLoader } from "../skills/loader.js";
+import { TELEGRAM_SOURCE_ID } from "../memory/scope.js";
 interface ProviderRow {
   id: string;
   name: string;
@@ -977,6 +987,15 @@ export interface MainAgentDependencies {
   containers?: ContainerManager;
   /** 仅用于记录 `turns.steps`（此前无任何写入方）。可选：worker 与测试均无需提供。 */
   turns?: { countStep(id: string, steps: number): void };
+  /**
+   * 缺省 `'main'`（既有调用方零变化）。SDK 路径（docs/12-sdk.md T3.6/T3.7）传 `'sdk'`：
+   * `assembleMainPrompt` 据此改走 `prompts.buildSdk()` 而非 `prompts.build()`，本函数自身
+   * （工具集解析、模型链、`ToolLoopAgent` 步循环、ledger 记账）不区分 `agentKind`——
+   * 白名单收窄已经在 `ToolRegistry` 那一层（`toolContext.agentKind` 决定 `activeTools`）完成。
+   */
+  agentKind?: AgentKind;
+  /** 仅 `agentKind:'sdk'` 时读取，决定 `SDK_KERNEL` 与输出格式段选哪一档，缺省 `'markdown'`。 */
+  outputFormat?: SdkOutputFormat;
 }
 export interface MainPromptAssembly extends PromptBuildResult {
   /** 主 agent 第 0 步真正能发出的工具（`agentKind: 'main'` 视角）。 */
@@ -1006,6 +1025,7 @@ type PromptAssemblyDependencies = Pick<
   | "quota"
   | "reservation"
   | "containers"
+  | "outputFormat"
 >;
 
 /**
@@ -1089,41 +1109,25 @@ function deferredCatalog(
   ].join("\n");
 }
 
-/** Runtime 与 WebUI 预览共用这条组装路径；预览产出的 block 必须与下一轮发给模型的 block 一致。 */
+/**
+ * Runtime 与 WebUI 预览共用这条组装路径；预览产出的 block 必须与下一轮发给模型的 block 一致。
+ *
+ * `agentKind` 只在未传 `executionContext` 时生效，缺省 `main`：既有调用方（`runMainAgentInternal`
+ * 与不带第三参的 WebUI 预览）零变化。SDK 路径（`docs/12-sdk.md` T3.6/T3.7）尚无完整的
+ * `ToolExecutionContext` 可传时，直接传 `'sdk'` 走这条缺省分支。
+ */
 export function assembleMainPrompt(
   turn: RuntimeTurnContext,
   dependencies: PromptAssemblyDependencies,
   executionContext?: ToolExecutionContext,
+  agentKind: AgentKind = "main",
 ): MainPromptAssembly {
   const toolContext = executionContext ?? {
     turn,
     workspace: dependencies.workspace,
-    agentKind: "main",
+    agentKind,
     ...newToolScope(),
   };
-  /**
-   * 目录与 `activeTools` 现在是两次取数，两个视角。
-   *
-   * 目录（block 3）用 worker 的视角：主 agent 自己不调工具了，它需要知道的是**派出去能做什么** ——
-   * 按主 agent 的视角取数，目录里只剩 `send_message` / `spawn_worker` 那几个，模型会据此认为
-   * 这个部署没有文件、没有沙箱、不能上网。折叠视图也随之按 worker 的合格集切分，因为真正会去
-   * `search_tools` 展开它们的是 worker。
-   *
-   * 主 agent 的合格集另取一次（`toolContext` 本身就是 `agentKind: 'main'`）。
-   */
-  const workerView = dependencies.tools.activeView(turn.effectiveRole, {
-    ...toolContext,
-    agentKind: "lw",
-  });
-  const view: ToolCatalogView = {
-    ...workerView,
-    // `ask_parent` / `report_progress` / `search_tools` 是 worker→父的内部通道。列进主 agent 的
-    // 目录会让模型以为自己可以派一个 worker 去上报进度（`WORKER_INTERNAL_TOOLS` 的注释是另一半）。
-    resident: workerView.resident.filter(
-      (tool) => !WORKER_INTERNAL_TOOLS.includes(tool.name as ToolName),
-    ),
-  };
-  const catalogTools = view.resident.map((tool) => tool.name);
   // 与 `prepareStep` 逐字同一个调用，只是那边每步重算一次：主 agent 没有 `search_tools`，展开集
   // 恒为空，因此第 0 步与其后每一步的合格集本就相同 —— 两处写法不同会让它们在某个配置下分叉。
   const activeTools = dependencies.tools.activeNamesForStep(
@@ -1137,42 +1141,80 @@ export function assembleMainPrompt(
   const documents = dependencies.documents.readForPrompt({
     userId: turn.initiatorUserId,
     isPrivate: turn.isPrivate,
+    ...(turn.sourceId ? { sourceId: turn.sourceId } : {}),
     ...(typeof characterOverride === "string" && characterOverride
       ? { characterOverride }
       : {}),
   });
-  // 目录按本轮实际可用的工具过滤：一份讲解 `install_mcp` 的说明在该工具未启用时出现在目录中，
-  // 只会把模型引入死路（实测：它读完说明找不到工具，转而用 bash 逆向代码库）。
-  // 过滤依据是全量名字（常驻 + 折叠）：讲解某个折叠 MCP 工具的 skill 仍应出现在目录中 ——
-  // 折叠意味着需要先展开一次，而非不存在，模型读完 skill 正文恰好知道该展开哪个。
-  const skillCatalog =
-    dependencies.skills
-      ?.catalog(turn.effectiveRole, [
-        ...catalogTools,
-        ...view.deferred.map((tool) => tool.name),
-      ])
-      .map((skill) => `- skill:${skill.name}: ${skill.description}`)
-      .join("\n") ?? "";
-  // `prompt.includeToolCatalog=false` 时只发送工具名（RUNTIME 中的那一行），不发送描述。节省的是
-  // 每轮数百至数千 token，代价是模型失去参数用法的提示，因此默认开启。
-  //
-  // skill 目录不随工具目录一起关闭（docs/06 §1）：它此前置于该三元表达式的 then 分支中，导致
-  // 关闭工具目录会连带关闭 skill 清单 —— 而 skill 目录不与任何内容重复（RUNTIME 的可用工具行
-  // 只列工具），关闭后模型无从知晓有哪些 skill 可载入。因此两段各自渲染，最后拼接。
-  const catalog = [
-    ...(dependencies.config.prompt.includeToolCatalog
-      ? [
-          residentCatalog(
-            view.resident,
-            dependencies.config.tools.catalog.residentDescriptions,
-          ),
-          deferredCatalog(view.groups, view.deferred.length),
-        ]
-      : []),
-    skillCatalog,
-  ]
-    .filter(Boolean)
-    .join("\n");
+  /**
+   * SDK 会话（`agentKind:'sdk'`）没有 TOOL CATALOG 块：白名单只有记忆三件，没有派工可言，
+   * 目录描述的是「worker 能做什么」这件事对 SDK 不存在（`docs/06 §1.3`，`docs/12-sdk.md` T3.5
+   * 验收 4 要求装配结果不含该块）。因此跳过下面这一整段 worker 视角的目录计算——
+   * `catalogTools`/`catalog` 保持空，`runtime` 里的折叠计数与截断提示也随之为零/无。
+   */
+  let catalogTools: string[] = [];
+  let catalog = "";
+  let catalogTruncated: ToolCatalogView["truncated"] = null;
+  let deferredCount = 0;
+  if (toolContext.agentKind !== "sdk") {
+    /**
+     * 目录与 `activeTools` 现在是两次取数，两个视角。
+     *
+     * 目录（block 3）用 worker 的视角：主 agent 自己不调工具了，它需要知道的是**派出去能做什么** ——
+     * 按主 agent 的视角取数，目录里只剩 `send_message` / `spawn_worker` 那几个，模型会据此认为
+     * 这个部署没有文件、没有沙箱、不能上网。折叠视图也随之按 worker 的合格集切分，因为真正会去
+     * `search_tools` 展开它们的是 worker。
+     *
+     * 主 agent 的合格集另取一次（`toolContext` 本身就是 `agentKind: 'main'`）。
+     */
+    const workerView = dependencies.tools.activeView(turn.effectiveRole, {
+      ...toolContext,
+      agentKind: "lw",
+    });
+    const view: ToolCatalogView = {
+      ...workerView,
+      // `ask_parent` / `report_progress` / `search_tools` 是 worker→父的内部通道。列进主 agent 的
+      // 目录会让模型以为自己可以派一个 worker 去上报进度（`WORKER_INTERNAL_TOOLS` 的注释是另一半）。
+      resident: workerView.resident.filter(
+        (tool) => !WORKER_INTERNAL_TOOLS.includes(tool.name as ToolName),
+      ),
+    };
+    catalogTools = view.resident.map((tool) => tool.name);
+    // 目录按本轮实际可用的工具过滤：一份讲解 `install_mcp` 的说明在该工具未启用时出现在目录中，
+    // 只会把模型引入死路（实测：它读完说明找不到工具，转而用 bash 逆向代码库）。
+    // 过滤依据是全量名字（常驻 + 折叠）：讲解某个折叠 MCP 工具的 skill 仍应出现在目录中 ——
+    // 折叠意味着需要先展开一次，而非不存在，模型读完 skill 正文恰好知道该展开哪个。
+    const skillCatalog =
+      dependencies.skills
+        ?.catalog(turn.effectiveRole, [
+          ...catalogTools,
+          ...view.deferred.map((tool) => tool.name),
+        ])
+        .map((skill) => `- skill:${skill.name}: ${skill.description}`)
+        .join("\n") ?? "";
+    // `prompt.includeToolCatalog=false` 时只发送工具名（RUNTIME 中的那一行），不发送描述。节省的是
+    // 每轮数百至数千 token，代价是模型失去参数用法的提示，因此默认开启。
+    //
+    // skill 目录不随工具目录一起关闭（docs/06 §1）：它此前置于该三元表达式的 then 分支中，导致
+    // 关闭工具目录会连带关闭 skill 清单 —— 而 skill 目录不与任何内容重复（RUNTIME 的可用工具行
+    // 只列工具），关闭后模型无从知晓有哪些 skill 可载入。因此两段各自渲染，最后拼接。
+    catalog = [
+      ...(dependencies.config.prompt.includeToolCatalog
+        ? [
+            residentCatalog(
+              view.resident,
+              dependencies.config.tools.catalog.residentDescriptions,
+            ),
+            deferredCatalog(view.groups, view.deferred.length),
+          ]
+        : []),
+      skillCatalog,
+    ]
+      .filter(Boolean)
+      .join("\n");
+    catalogTruncated = view.truncated;
+    deferredCount = view.deferred.length;
+  }
   const runtimeShow = dependencies.config.prompt.runtimeBlock;
   const spent =
     dependencies.quota && dependencies.reservation
@@ -1221,11 +1263,33 @@ export function assembleMainPrompt(
       workspace: runtimeShow.showWorkspace,
       toolNames: true,
     },
-    // 截断告知与折叠计数均取自 worker 视角那次 `activeView()`。折叠数为 0 时 `runtimeBlock` 自身
-    // 不添加后缀，因此此处无条件传入。
-    ...(view.truncated ? { catalogTruncated: view.truncated } : {}),
-    deferredTools: view.deferred.length,
+    // 截断告知与折叠计数均取自 worker 视角那次 `activeView()`（SDK 会话恒为零/无，上面已跳过该计算）。
+    // 折叠数为 0 时 `runtimeBlock` 自身不添加后缀，因此此处无条件传入。
+    ...(catalogTruncated ? { catalogTruncated } : {}),
+    deferredTools: deferredCount,
   });
+  // SDK 会话装配走 `buildSdk()`（`SDK_KERNEL` + 按 `outputFormat` 分档），不是 `build()`——
+  // 两者都不接受另一方专有的字段（`buildSdk` 类型层拒收 `catalog`/`includeCatalog`，
+  // 见 `SdkPromptBuildInput`），因此这里在调用处整体分叉，而不是把两条路径的入参强行合并成一份。
+  if (toolContext.agentKind === "sdk") {
+    const sdkPromptInput: SdkPromptBuildInput = {
+      character: documents.character,
+      assist: documents.assist,
+      publicMemory: documents.publicMemory,
+      runtime,
+      maxTokens: dependencies.config.prompt.maxTokens,
+      outputFormat: dependencies.outputFormat ?? "markdown",
+    };
+    if (documents.privateMemory !== undefined)
+      Object.assign(sdkPromptInput, { privateMemory: documents.privateMemory });
+    return {
+      ...dependencies.prompts.buildSdk(sdkPromptInput),
+      activeTools,
+      catalogTools,
+      catalog,
+      runtime,
+    };
+  }
   const promptInput = {
     character: documents.character,
     assist: documents.assist,
@@ -1405,14 +1469,19 @@ async function runMainAgentInternal(
   // 在其中重新扫描会使父轮已冻结的工具集失去一致性。
   dependencies.customTools?.syncIfChanged();
   /**
-   * `newToolScope()` 的三个 Set 在主 agent 这一侧恒为空：`load_skill` 与 `search_tools` 都不在
-   * `MAIN_AGENT_TOOLS` 里，唯一的写入方是 worker 各自那份。留着是因为它们在 `ToolExecutionContext`
-   * 上是必填 —— 写成可选的话，惰性建出来的 Set 会落在 `execute()` 交给工具的那份浅拷贝上。
+   * `newToolScope()` 的三个 Set 在主 agent 与 SDK 这两侧恒为空：`load_skill` 与 `search_tools`
+   * 都不在 `MAIN_AGENT_TOOLS` / `SDK_AGENT_TOOLS` 里，唯一的写入方是 worker 各自那份。留着是
+   * 因为它们在 `ToolExecutionContext` 上是必填 —— 写成可选的话，惰性建出来的 Set 会落在
+   * `execute()` 交给工具的那份浅拷贝上。
+   *
+   * `agentKind` 缺省 `'main'`（既有调用方零变化）；SDK 路径（`docs/12-sdk.md` T3.6/T3.7）传入
+   * `dependencies.agentKind:'sdk'`，白名单收窄（工具目录、`activeTools`）由 `ToolRegistry`
+   * 那一层依据它自行完成，本函数其余部分（模型链、`ToolLoopAgent` 步循环、ledger 记账）不分叉。
    */
   const toolContext: ToolExecutionContext = {
     turn,
     workspace: dependencies.workspace,
-    agentKind: "main",
+    agentKind: dependencies.agentKind ?? "main",
     ...newToolScope(),
   };
   // worker 从 turn 上读取同一份预留：spawn_worker 在工具层执行，无法访问此处的 dependencies。
@@ -2341,6 +2410,7 @@ async function runMainAgentInternal(
       latencyMs: 0,
       ok: false,
       errorKind: error instanceof Error ? error.name : "unknown",
+      sourceId: turn.sourceId ?? TELEGRAM_SOURCE_ID,
     });
     throw error;
   }

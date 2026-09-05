@@ -13,6 +13,7 @@ import {
 } from "./runtime.js";
 import { PROVIDER_FAILURES_TO_DOWN } from "../provider/health.js";
 import { LW_WORKER_KERNEL } from "../prompt/assembler.js";
+import { TELEGRAM_SOURCE_ID } from "../memory/scope.js";
 import type { Config } from "../config/schema.js";
 import type { QuotaGuard, QuotaReservation } from "../ledger/quota.js";
 import { newToolScope } from "../tools/registry.js";
@@ -535,6 +536,7 @@ export async function runLwWorker(
         latencyMs: step.performance.responseTimeMs,
         finishReason: step.finishReason,
         ok: true,
+        sourceId: turn.sourceId ?? TELEGRAM_SOURCE_ID,
       });
       // 只 record 不 commit 时，用量报表能看到这笔花费而配额拦不住它：日/月计数器只在
       // commit() 里递增，一轮十个 worker 会在账本上不计费用地跑完（docs/20 · W-QUOTA-01）。

@@ -20,7 +20,9 @@ import type {
 import {
   KeyedMutex,
   PROMPT_CALLBACK_PREFIX,
+  TELEGRAM_SOURCE_ID,
   TurnFailureStreak,
+  memoryScopeSubjects,
   perChatConfig,
   resolveEffectiveRole,
 } from "@luoli/core";
@@ -1092,9 +1094,12 @@ export async function createTelegramBot(
       await ctx.reply("私有记忆仅限私聊查看。");
       return;
     }
+    // subject 经 memoryScopeSubjects 取复合键（与 builtins.ts 的 memory_read/memory_write
+    // 同一实现点，`packages/core/src/memory/scope.ts`）——T2.1 之后 primemory 的 subject 已是
+    // `telegram:<userId>`，裸 userId 既过不了 read() 的自读闸，也拆不出 path() 要的目录段。
     const document = dependencies.memory.read(
       "primemory",
-      access.userId,
+      memoryScopeSubjects(TELEGRAM_SOURCE_ID, access.userId).primemory,
       access.effectiveRole,
       access.userId,
       true,

@@ -154,6 +154,8 @@ describe('docs/13 的勾选是可核对的', () => {
       ['WebUI', ['WEB']],
       ['安全', ['SEC']],
       ['运维', ['OPS']],
+      // T3.13：SDK 接入（docs/12）新增的验收条目单列一组，编号 AC-SDK-nnn（lead 2026-09-05 批准）。
+      ['SDK 接入', ['SDK']],
     ];
     const problems: string[] = [];
     let expectedChecked = 0;

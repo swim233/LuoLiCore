@@ -1,6 +1,7 @@
 import { createCipheriv, createHash, randomBytes } from 'node:crypto';
 import { readFileSync, rmSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { codeIndex, source } from './support/source.js';
 import { ArchiveRepository, OperationsRepository, PrincipalRepository, closeDatabase, migrateDatabase, openDatabase } from '@luoli/db';
 import { ContextEngine, DatabaseApprovalBroker, EventBus, LogSink, MaintenanceService, ProviderStore, Secrets, configSchema, publicConfig, redact } from '@luoli/core';
 import { createServer } from '@luoli/server';
@@ -89,10 +90,11 @@ describe('secret handling', () => {
   it('warns on stderr when the master key is shorter than 32 characters', () => {
     expect(new Secrets('x'.repeat(31)).weak).toBe(true);
     expect(new Secrets('x'.repeat(32)).weak).toBe(false);
-    const main = readFileSync('apps/bot/src/main.ts', 'utf8');
-    const at = main.indexOf('secrets.weak');
-    expect(at, 'main.ts 不再读 secrets.weak —— 短口令从此一声不吭').toBeGreaterThan(0);
-    const warning = main.slice(at, at + 500);
+    // `Secrets` 的构造与这条判据都在 composeRuntime（apps/bot/src/compose.ts）里，main.ts 不再读它。
+    const compose = source('apps/bot/src/compose.ts');
+    const at = codeIndex(compose, 'secrets.weak');
+    expect(at, 'compose.ts 不再读 secrets.weak —— 短口令从此一声不吭').toBeGreaterThan(0);
+    const warning = compose.slice(at, at + 500);
     expect(warning, '判据读到了，但没往 stderr 写').toContain('process.stderr.write');
     expect(warning).toContain('LUOLI_MASTER_KEY');
     expect(warning, '告警得说清「多短算短」').toContain('32');
@@ -121,8 +123,10 @@ describe('secret handling', () => {
     // 日志侧：`redact` 只认它被喂进去的那份密钥表，所以两条 `log.setSecrets` 都得带上它 ——
     // 启动那次漏了 = 全程明文，热更新那次漏了 = 改过 key 之后开始明文。
     expect(redact({ url: `https://api.search.brave.com/res?token=${key}` }, [key]).url).not.toContain(key);
-    const main = readFileSync('apps/bot/src/main.ts', 'utf8');
-    const wired = [...main.matchAll(/log\.setSecrets\(\[[^\]]*\]\)/g)].map((match) => match[0]);
+    // 两处 `log.setSecrets` 都在 composeRuntime（apps/bot/src/compose.ts）里：启动时一次，
+    // `rebuildModels()` 热更新时一次，main.ts 不再直接调用它。
+    const compose = source('apps/bot/src/compose.ts');
+    const wired = [...compose.matchAll(/log\.setSecrets\(\[[^\]]*\]\)/g)].map((match) => match[0]);
     expect(wired.length, 'log.setSecrets 的调用点变了 —— 这条断言的锚点没了').toBe(2);
     for (const call of wired) expect(call, `这一处没把搜索 key 喂进脱敏表：${call}`).toMatch(/tools\.web\.searchApiKey/);
     // doc 11 那一格要自陈明文、给出 `${env:…}` 的写法，并说明读端会脱敏。

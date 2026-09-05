@@ -43,6 +43,7 @@
 - 跨层反向通知统一走**事件总线**（`EventBus`，进程内 `EventEmitter` + SSE 转发），而非直接调用。
 - 唯一允许「跨层读」的对象是 `Config`（只读快照）与 `Logger`。
 - 所有 DB 访问必须经 `packages/db` 的 Repository，**禁止在业务层写裸 SQL**（例外：`Archive` 的 FTS 查询，集中在 `ArchiveRepo` 内）。
+- `packages/sdk-client` 不依赖任何 `@luoli/*`；仅 `server` 依赖它（`server → sdk-client`）。
 
 ---
 
@@ -203,6 +204,7 @@ LuoLiCore/
 │   │   └── src/                    database.ts（连接 · PRAGMA · 迁移执行器）
 │   │                               archive · context · config · principals · schedule · operations
 │   │                               custom-tools · mcp-auth · sandbox
+│   │                               sources · api-keys · sdk-sessions（SDK 专表仓储，docs/12 §2）
 │   │                               —— 强制 chat 作用域的 Repository，全部手写 SQL
 │   │                               instance-lock.ts —— 不是仓储，是进程级互斥（见 §3.1）
 │   ├── telegram/src/               bot.ts（grammY · transformer 限流 · 入口按 chat 串行）
@@ -212,12 +214,18 @@ LuoLiCore/
 │   │                               output.ts · stream-output.ts（流式 · 分片 · MarkdownV2 降级）
 │   ├── server/src/                 app.ts（Hono · session · CSRF · 全部 `/api` 路由，当前 121 条）
 │   │                               events.ts（SSE `/api/events`）
+│   │                               sdk/（v1.ts `/sdk/v1` 十端点 · auth.ts Bearer 中间件 ·
+│   │                               admin.ts `/api/sdk/*` 六端点 · errors.ts，docs/12）
 │   ├── webui/src/                  Vite + Vue 3（构建产物由 server 托管）
-│   │   ├── views/                  ConsoleView.vue · ExtensionsPage.vue · TasksPage.vue · LoginView.vue
-│   │   ├── components/             extensions/ · tasks/（从 ConsoleView 抽出去的纯呈现子组件）
+│   │   ├── views/                  ConsoleView.vue · ExtensionsPage.vue · TasksPage.vue ·
+│   │   │                           WorkerRunsPage.vue · SdkPage.vue · LoginView.vue
+│   │   ├── components/             extensions/ · tasks/ · workers/ · sdk/（从 ConsoleView
+│   │   │                           抽出去的纯呈现子组件，各自一个页面）
 │   │   ├── ui/                     自建组件原语（无 UI 框架）+ SchemaForm 自动生成配置表单
 │   │   ├── api/client.ts           router/index.ts   styles.css
 │   ├── plugin-sdk/src/index.ts     Plugin 作者用的类型入口
+│   ├── sdk-client/src/schema.ts    /sdk/v1 请求/响应的 zod 定义，子路径 `./schema` 导出；
+│   │                               不依赖任何 @luoli/*（index.ts 为 `LuoliSdkClient` 实现，docs/12 §12）
 │   └── shared/src/                 errors.ts · index.ts（类型 · 常量 · 公共 zod schema）
 ├── config/
 │   ├── config.yaml                 主配置（可被 WebUI 写回）
@@ -239,8 +247,9 @@ LuoLiCore/
 ```
 
 > 这棵树画的是**现状**，不是目标结构。两处正在改的：`server/src/app.ts` 一个文件装着全部 `/api`
-> 路由与大量裸 SQL（`docs/00 §2.1` 的 `D-01` / `D-04`），`webui/src/views/ConsoleView.vue`
+> 路由与大量裸 SQL，收拢仍欠（`docs/00 §2.1` 的 `D-01`），`webui/src/views/ConsoleView.vue`
 > 仍是全仓最长的单文件（`D-02`；扩展页与任务页已经抽出去了，剩下的部分还没拆成页面组件）。
+> `composeRuntime` 已抽出（`apps/bot/src/compose.ts`）。
 > **行数与条数别在这里写死** —— 现值记在 `docs/00 §2.1` 那两行的实测列里，两处各写一份必然漂。
 
 > `acp/` 那九个文件的切法有讲究，不是按「一个类一个文件」随手分的：

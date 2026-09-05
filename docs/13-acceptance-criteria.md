@@ -376,18 +376,23 @@
 
 | ID | 步骤 | 期望 |
 |---|---|---|
-| [x] AC-MEM-001 (手动) | owner 私聊「记住我不吃香菜」 | 写入 `memory/private/<uid>/PRIMEMORY.md`，含 `<!-- src: … -->` 标注；`memory_revisions` 有 diff 〔手测 2026-08-27 · S4〕
+| [x] AC-MEM-001 (手动) | owner 私聊「记住我不吃香菜」 | 写入 `memory/sources/telegram/private/<uid>/PRIMEMORY.md`，含 `<!-- src: … -->` 标注；`memory_revisions` 有 diff 〔手测 2026-08-27 · S4〕
 | [x] AC-MEM-002 (自动) ★ | 用户 B 私聊 | 系统提示词中不含用户 A 的私有记忆任何字符串 | 〔memory.isolation.test.ts〕
 | [ ] AC-MEM-003 (自动) ★ | 群聊中检查工具集 | 无任何可写 `primemory` 的工具（scope 枚举里没有该值） |
 | [ ] AC-MEM-004 (自动) ★ | 群聊组装提示词 | 结果不含 primemory 内容；且代码路径上未读取该文件（用 fs mock 断言零次读取） |
 | [ ] AC-MEM-005 (自动) | `limited` 用户在群里要求「记住 X」 | `memory_write` 不注册（`pubWriteMinRole=trusted`）；模型如实说明无权限 |
-| [ ] AC-MEM-006 (手动) | `trusted` 用户在群 A 写 PUBMEMORY | 写入全局 `memory/PUBMEMORY.md`；群 B 与所有私聊都能读到（D12 的既定语义） |
+| [ ] AC-MEM-006 (手动) | `trusted` 用户在群 A 写 PUBMEMORY | 写入该来源的 `memory/sources/telegram/PUBMEMORY.md`；同一来源内群 B 与所有私聊都能读到（D12 的按来源语义） |
 | [ ] AC-MEM-007 (自动) | 重复写入相似条目 | 去重生效，返回 `skipped:true`，文件无重复行 |
 | [ ] AC-MEM-008 (自动) | 写入使 token 超 `hardLimitTokens` | 拒绝写入并提示先整理；文件未变更 |
 | [ ] AC-MEM-009 (自动) | 超 `softLimitTokens` | 触发异步压缩，结果落 `memory/.pending/`，WebUI 出现待审 diff；原文件未变 |
 | [ ] AC-MEM-010 (自动) | 一轮内 3 次 `memory_write` | 只有 1 次落盘（轮末批量），文件内容含 3 条 |
 | [ ] AC-MEM-011 (手动) | owner 在 WebUI 查看用户 B 的 PRIMEMORY | 有 `memory.owner_read_private` warn 日志；用户 B 的记忆页显示「最近被 owner 查看于…」 |
 | [x] AC-MEM-013 (手动) | WebUI 编辑 ASSIST.md 保存 | 下一轮生效；有 diff 版本；可回滚 | 〔手测 2026-08-27 · S3〕
+| [x] AC-MEM-014 (自动) | 在含存量 `memory_docs`/`memory_revisions` 的库上执行迁移 `0019` | 两表行数不变；`memory_docs` 无 subject 为 NULL 的行；每条 `memory_revisions.doc_id` 都能在 `memory_docs` 中找到；`sources` 恰一行 `telegram` | 〔migration.0019.test.ts〕
+| [x] AC-MEM-015 (自动) | 对旧布局记忆文件运行启动期 `migrateMemoryLayout()` | 文件搬迁到 `memory/sources/<sourceId>/` 下且内容逐字节不变；`PUBMEMORY.md`/`private/` 旧路径清空，`CHARACTER.md`/`ASSIST.md` 根目录模板保留；`memory_docs.path` 同步刷新；重跑幂等；中断态（旧路径已消失、新路径已存在但 `path` 列未同步）下自愈 | 〔memory.layout.test.ts〕
+| [x] AC-MEM-016 (自动) | 计算四个 scope 的路径与作用域键 | `pubmemory`/`character`/`assist` 按来源 id 分路径，`primemory` 按复合键 `<sourceId>:<sessionId>` 分路径；生成路径不含 `:`；`memoryScopeSubjects()` 是唯一实现点，`builtins.ts` 不再把 `initiatorUserId` 直传为 subject | 〔memory.scope.test.ts〕
+| [x] AC-MEM-017 (自动) ★ | 跨来源读、同来源跨会话读、`isPrivate=false` 读写、`actorRole=owner` 跨键读写 | 全部返回 `private_memory_forbidden` / `primemory_scope_forbidden`；owner 不再有例外；跨键越权不产生 `memory.owner_read_private` 审计 | 〔memory.gates.test.ts〕
+| [x] AC-MEM-018 (自动) | 按来源 `ensure()`/`readForPrompt()` 装配提示词 | 私聊一轮 PRIMEMORY/PUBMEMORY 内容与迁移前逐字节一致；群聊不含 PRIMEMORY；`sources.character_file` 非法值静默退回该来源的 `CHARACTER.md`；新建来源后 `memory_docs` 出现该来源三行且目录下有模板复制的文件 | 〔prompt.documents.sources.test.ts〕
 
 ## 8. 日志与成本 AC-LOG
 
@@ -625,7 +630,7 @@
 | [ ] AC-SEC-008 (手动) ★ | 让模型写文件到 `memory/PUBMEMORY.md` 绕过记忆工具 | `denyGlobs` 拒绝 |
 | [ ] AC-SEC-009 (手动) ★ | 让模型读 `data/luoli.db` | 拒绝 |
 | [ ] AC-SEC-010 (手动) | 用 `curl` 从局域网另一台机器访问 WebUI（默认配置） | 连接被拒（仅监听 127.0.0.1） |
-| [ ] AC-SEC-011 (手动) | 备份文件权限 | `data/`、`memory/private/` 目录 0700；备份文件 0600 |
+| [ ] AC-SEC-011 (手动) | 备份文件权限 | `data/`、`memory/sources/<sourceId>/private/` 目录 0700；备份文件 0600 |
 | [ ] AC-SEC-012 (手动) ★ | 沙箱内尝试访问宿主 docker socket | 不可见（未挂载） |
 | [ ] AC-SEC-013 (自动) | 库里存在 v1（`sha256(masterKey)`）加密的 provider key | 仍能解密；读到之后就地重写成 v2（scrypt + 随机 salt，salt 随密文存），无需迁移脚本（docs/20 · W-SEC-02） |
 | [x] AC-SEC-014 (自动) | `LUOLI_MASTER_KEY` 短于 32 字符 | 启动时 stderr 有明确告警（scrypt 抬不动一个短口令） | 〔secrets.test.ts〕
@@ -633,7 +638,7 @@
 | [x] AC-SEC-016 ★ (自动) | `webui.trustProxy=false`（默认）下每次登录都换一个 `X-Real-IP` / `X-Forwarded-For` | 第 `attempts` 次仍被锁成 429：桶键取自连接的远端地址，**请求头一概不参与**。这一项回归过一次（docs/18 · N-WEB-02 → docs/27 · S-01） | 〔server.test.ts〕
 | [x] AC-SEC-017 (自动) | 未登录向 `/api/auth/login` 推一个 2 MB 请求体 | 413 `payload_too_large`，且在 `ctx.req.json()` 之前就被拦下（docs/27 · S-05） | 〔server.test.ts〕
 | [x] AC-SEC-018 ★ (自动) | 审批规则写 `pattern: '(a+)+$'`，输入是 34 个 `a` 加一个 `!` | 求值在毫秒级完成（RE2，线性时间）；不兼容 RE2 的模式与超过 128 字符的模式在写入端当场拒收（docs/27 · S-03） | 〔regression.round9.test.ts〕
-| [x] AC-SEC-019 (自动) | `LUOLI_OWNER_ID=../../etc` | `configSchema` 拒收：这个值会被当成 `memory/private/<id>/` 的目录名用（docs/27 · S-08） | 〔regression.round9.test.ts〕
+| [x] AC-SEC-019 (自动) | `LUOLI_OWNER_ID=../../etc` | `configSchema` 拒收：这个值会被当成 `memory/sources/<sourceId>/private/<id>/` 的目录名用（docs/27 · S-08） | 〔regression.round9.test.ts〕
 | [x] AC-SEC-020 (自动) | `/grant user @alice owner` | 拒收并给出用法；`@username` 写不进 `principals`（否则那一行永远匹配不到任何消息，而命令回「已设置」）。三个 Telegram 命令与 `POST /api/principals/bulk` 共用 `parsePrincipal`（docs/27 · C-05） | 〔regression.round9.test.ts〕
 | [x] AC-SEC-022 (自动) ★ | `spawn_harness` 的三道门，外加 `dir` 变可选之后的四种组合（白名单为空 + fallback 关 / 只开 fallback / 只列目录 / 两个都有） | 出厂档（`agent.harness.allowedDirs` 为空 **且** `agent.harness.workspaceFallback` 为 `false`）**不进模型的工具目录**，群聊同样不进 —— **判据是「且」不是「或」**：两个条件里任一成立就回到目录里（这一条与 `spawn_acp` 那条必须成对改，只改一条的表现是一个本应整体关闭的功能从另一条路上开着）。省略 `dir` 时落在缺省目录 `<sandbox.workspaceDir>/<chatId>/harness/<runId>`（一个 run 一个新目录、不复用），而它**照旧走白名单那条判据**；给了缺省目录也不放行白名单外的显式 `dir`；两处都没有目录时明说 `harness_dir_required`，**不拿当前工作目录顶上**。`/srv/app-secrets` 不算 `/srv/app` 的子目录；任务正文**不经 shell**；超时与取消分开报；策略档位恒为 owner + `approval: 'always'`（docs/14 §2 Q8-b 的部分推翻记录 / T17 —— 门的数目与性质未变）。⚠ 缺省目录的**路径公式本身没有用例**：`runHarness()` 收的是一个已经算好的 fallback 目录参数，用例验的是「fallback 被采纳」而不是「它等于那个公式」 | 〔regression.round10.test.ts、subagent.test.ts〕
 | [x] AC-SEC-023 (自动) ★ | `PATCH /api/tools/write_plugin {minRole:'trusted'}` 与 `define_tool {minRole:'limited'}` 之后，用对应角色取 `active()` 与 `admit()` | 两侧**同时**仍然拒绝：七个自撰写工具的 `owner` 地板写在 `available()` 里，而运维覆盖只动 `effectivePolicy()`。少这一道的话，一次放宽就等于让任意受信会话里的成员往本进程里写全信任代码（[14 A27](./14-open-questions.md)） | 〔selfextend.author.test.ts〕
@@ -656,7 +661,7 @@
 | [ ] AC-OPS-003 (手动) | 1 小时 500 条消息 / 50 个 turn | 无内存持续增长（heap 稳定）、无句柄泄漏、无残留容器/子进程；DB 与日志体积在预期范围 |
 | [ ] AC-OPS-004 (手动) | 备份 → 另一台机器恢复 | 上下文、记忆、配置（除密钥）、历史消息完整；可继续对话 |
 | [ ] AC-OPS-005 (手动) | `docker compose up` 从零部署 | 10 分钟内可用。**「首次启动向导」这一半豁免：它从来没有实现过** —— `/setup` 复用的就是 `LoginView`，是一个设密码页而不是配置向导（那条路本身由 AC-WEB-001 验）。**不进 `docs/21`**：那份台账的口径是「运行时有这个能力而界面够不着」，而配置本身在设置页完全够得着，向导只是没做的便利；豁免登记在 [29 §3](./29-manual-acceptance-log.md) |
-| [ ] AC-OPS-006 (手动) | `pnpm smoke` | 模拟 20 个 update 走完全链路并断言 DB 状态，全绿。**本轮豁免：这是开发任务不是测试项** —— `scripts/smoke.ts` 只有 90 行、只做 archive+context 的 ordinal 检查，一次模型/工具/Telegram 调用都没有；要走完全链路得先有 `D-04` 的 `composeRuntime`（`docs/00` §2.1）|
+| [ ] AC-OPS-006 (手动) | `pnpm smoke` | 模拟 20 个 update 走完全链路并断言 DB 状态，全绿。**本轮豁免：这是开发任务不是测试项** —— `scripts/smoke.ts` 只有 90 行、只做 archive+context 的 ordinal 检查，一次模型/工具/Telegram 调用都没有；`composeRuntime` 已抽出（`apps/bot/src/compose.ts`），smoke 接入完整轮次仍是开发任务、未做 |
 | [ ] AC-OPS-007 (手动) | 磁盘写满（模拟） | DB 写失败被捕获；回复「内部错误(ref)」；owner 收告警；进程不崩 |
 | [ ] AC-OPS-008 (手动) | 时区设为 UTC 后重启 | 配额 bucket 与时间渲染一致切换，无跨日重复计费 |
 | [ ] AC-OPS-009 (手动) | 人为制造一次 uncaught 异常 / unhandled rejection | `uncaughtException`：退出前写入 `system.crash`（含 event 与 stack）到日志与 stderr，下次启动 `recoverAfterCrash` 照常收尾。`unhandledRejection`：写入 `system.unhandled_rejection` 并**继续运行**，其它并发轮次不受影响（[10 §2](./10-logging-and-observability.md)）。两种都不允许在日志里不留痕迹 |
@@ -664,7 +669,69 @@
 
 ---
 
-## 13. 验收签署
+## 13. SDK 接入（AC-SDK）
+
+> 规格见 [12](./12-sdk.md)。条目编号对应实施计划批三 T3.1–T3.12 各节「验收」的原始编号
+>（映射表见 [12 §14](./12-sdk.md#14-与实施计划的对应)）；单条陈述未编号的（T3.9、T3.12）各占一条。
+
+| ID | 步骤 | 期望 |
+|---|---|---|
+| [x] AC-SDK-001 (自动) | 迁移 `0020_sdk_keys_and_sessions.sql` 在含存量数据的库上执行 | 执行成功，`api_keys`/`sdk_sessions` 建表，`contexts`/`usage_ledger` 加列 | 〔migration.0020.test.ts〕
+| [x] AC-SDK-002 (自动) | 迁移后检查存量行 | `contexts.source_id` 与 `usage_ledger.source_id` 存量全为 `telegram` | 〔migration.0020.test.ts〕
+| [x] AC-SDK-003 (手动) | 核对 `docs/03-data-model.md` §2.15 与迁移文件 | DDL 逐字一致，四段说明覆盖 A2/来源/软删/`end_user_id` 前缀口径 〔手测 2026-09-05 · S9〕
+| [x] AC-SDK-004 (自动) | 遍历 `packages/server/src/sdk/**` 源码 | 不出现 `.prepare(` 与 `db.exec(`（源码断言，SQL 全部在 `packages/db`） | 〔db.sdk.test.ts〕
+| [x] AC-SDK-005 (自动) ★ | 来源 A 的仓储调用（`listBySource`/`getBySource`/`softDelete`/`update`/`purge`/`ApiKeyRepository.listBySource`） | 列不出、读不到、改不动、删不掉来源 B 的会话与密钥 | 〔db.sdk.test.ts〕
+| [x] AC-SDK-006 (自动) | `SdkSessionRepository`/`ApiKeyRepository` 逐会话方法省略 `sourceId`/`key` | 类型层拒绝（`@ts-expect-error`），运行时以 `as any` 绕过类型后抛 `*_scope_required`，不退化为查询条件恒真 | 〔db.sdk.test.ts〕
+| [x] AC-SDK-007 (自动) ★ | `purge()` 对一个含 primemory 文档、消息、上下文的会话执行 | `sdk_sessions`/`memory_revisions`/`memory_docs`（含磁盘文件）/`messages`/`turns`/`context_messages`/`context_commits`/`refs`/`contexts` 七类均不存在；`usage_ledger` 行仍在且 `source_id` 不变 | 〔db.sdk.test.ts〕
+| [x] AC-SDK-008 (自动) | 签发一把密钥 | token 匹配 `/^sk-[A-Za-z0-9]{48}$/` | 〔sdk.keys.test.ts〕
+| [x] AC-SDK-009 (自动) | 一条含 token 的日志经 `redact` 处理 | 不含该 token 任何片段 | 〔sdk.keys.test.ts〕
+| [x] AC-SDK-010 (自动) ★ | 检查明文出现的位置：签发响应、回显端点、`/sdk/v1/*` 全部端点、每次回显的日志 | 明文只在签发响应与回显端点返回；`/sdk/v1/*` 下任何端点不返回明文；每次回显留一条 `sdk.key_revealed` warn | 〔sdk.keys.test.ts〕
+| [x] AC-SDK-011 (自动) | 停用（`disabled_at`）后的密钥发起请求 | 校验失败 | 〔sdk.keys.test.ts〕
+| [x] AC-SDK-012 (自动) | 过期（`expires_at`）后的密钥发起请求 | 校验失败 | 〔sdk.keys.test.ts〕
+| [x] AC-SDK-013 (自动) | id 正确但 secret 段错误 | 校验失败，响应不区分「id 不存在」与「secret 不对」 | 〔sdk.keys.test.ts〕
+| [x] AC-SDK-014 (自动) | 一次成功校验之后查库 | `last_used_at` 已更新 | 〔sdk.keys.test.ts〕
+| [x] AC-SDK-015 (自动) | 回显端点：无 cookie 会话 / SDK key 访问 / 成功回显 | 前两者 401，成功后响应体中的 token 与签发时一致 | 〔sdk.keys.test.ts〕
+| [x] AC-SDK-016 (自动) | 构造一次 SDK 轮次的工具目录 | 只含 `memory_read`/`memory_list`/`memory_write` 三件（`memory_list` 实际不可达，见 `docs/12 §8`，本条只判白名单含义与 D-A 拍板一致） | 〔policy.sdk.test.ts〕
+| [x] AC-SDK-017 (自动) | 直接构造一次 `spawn_worker` 调用（SDK agentKind） | 被 `admit()` 拒 | 〔policy.sdk.test.ts〕
+| [x] AC-SDK-018 (自动) | 无 Telegram bridge 时复核 Telegram 输出五件 | 不进注册表（`available` 判据） | 〔policy.sdk.test.ts〕
+| [x] AC-SDK-019 (自动) | SDK agentKind 调 `stay_silent` | 不可达（`silenceable` 缺省为假，且在白名单之外） | 〔policy.sdk.test.ts〕
+| [x] AC-SDK-020 (自动) | SDK agentKind 调 `search_tools` | 不可达（`catalog-meta.ts` 判据只放行 `lw`） | 〔policy.sdk.test.ts〕
+| [x] AC-SDK-021 (自动) | 断言 `SDK_KERNEL` 常量与 SDK 轮次装配出的 RUNTIME 块 | 不含 `Telegram`、`group-message`、`已编辑` | 〔prompt.sdk-kernel.test.ts〕
+| [x] AC-SDK-022 (自动) | `output_format='plain'` 档 | 不含 Markdown 指示 | 〔prompt.sdk-kernel.test.ts〕
+| [x] AC-SDK-023 (自动) | 断言 `SDK_KERNEL` 全档 | 含 `<untrusted-content>` 边界那一条 | 〔prompt.sdk-kernel.test.ts〕
+| [x] AC-SDK-024 (自动) | 断言 `SDK_KERNEL` 与 SDK 轮次装配结果 | 不含 `spawn_worker`、`worker`、`TOOL CATALOG`；装配结果不含 TOOL CATALOG 块 | 〔prompt.sdk-kernel.test.ts〕
+| [x] AC-SDK-025 (自动) | 核对 `app.ts` 的 `/api/*` cookie 免验白名单条数（源码断言） | 与挂载 `/sdk/v1/*` 前一致，未被本次改动 | 〔sdk.v1.test.ts〕
+| [x] AC-SDK-026 (自动) | 无 Bearer token 请求 `/sdk/v1/*` | 401 `unauthorized` | 〔sdk.v1.test.ts〕
+| [x] AC-SDK-027 (自动) ★ | 来源 A 的 key 访问来源 B 的会话 | 404 `not_found`，不返回 403（不泄漏存在性） | 〔sdk.v1.test.ts〕
+| [x] AC-SDK-028 (自动) ★ | SDK key 访问 `/api/*` 任一端点 | 401 | 〔sdk.v1.test.ts〕
+| [x] AC-SDK-029 (自动) ★ | `luoli_sid` cookie 访问 `/sdk/v1/*` | 401 | 〔sdk.v1.test.ts〕
+| [x] AC-SDK-030 (自动) | 软停用后的会话请求开轮 / 读取 / 列表 | 均不可（不可开轮、不可读、不出现在 `/sdk/v1/sessions` 与 `/api/chats`） | 〔sdk.v1.test.ts〕
+| [x] AC-SDK-031 (自动) | `purge` 一次会话 | 留一条 `sdk.session_purged` warn，作为唯一凭据 | 〔sdk.v1.test.ts〕
+| [x] AC-SDK-032 (自动) | 同一会话连发两条消息 | 上下文连续，第二次能引用第一次的内容 | 〔sdk.v1.test.ts〕
+| [x] AC-SDK-033 (自动) ★ | 同一会话两个并发请求 | 一个执行、一个排队，`tg_message_id` 各不相同，无 `append` 落空 | 〔sdk.v1.test.ts〕
+| [x] AC-SDK-034 (自动) | 手工预插一行制造 `tg_message_id` 冲突 | `append` 返回既有行时报错而非静默继续 | 〔sdk.v1.test.ts〕
+| [x] AC-SDK-035 (自动) | `concurrency.queueMax` 已满时发消息 | 返回 429 并带 `Retry-After` | 〔sdk.v1.test.ts〕
+| [x] AC-SDK-036 (自动) | 客户端在排队/开轮阶段断连 | `turns` 与 `agent_runs` 无 running 残留；排队中断连的那条 `messages` 行 `deleted_at` 非空，下一请求的 `openTurn` 不把它当背景认领 | 〔sdk.v1.test.ts〕
+| [x] AC-SDK-037 (自动) | `endUserId` 缺失 / 超长 / 含控制字符 | 均 400；取值本身不设形态限制（整数用户 id 允许） | 〔sdk.v1.test.ts〕
+| [x] AC-SDK-038 (自动) | 非法 `modelAlias` | 返回 400，不静默退回默认别名链首个存在项 | 〔sdk.v1.test.ts〕
+| [x] AC-SDK-039 (自动) ★ | `runner.ts` 改用 `runTurn()` 后跑定时任务用例；核对 `runner.ts` 源码 | `tests/schedule*.test.ts` 全部仍通过；`runner.ts` 中不再出现 `openTurn(`（源码断言） | 〔schedule.test.ts、schedule.api.test.ts、turn.pipeline.test.ts〕
+| [x] AC-SDK-040 (自动) | 排队发生时的首事件 | `queued`（判据同 `bot.ts` 的 `available(key)`） | 〔sdk.stream.test.ts〕
+| [x] AC-SDK-041 (自动) | 流式一轮结束后的 `done` 事件 | 带最终文本与用量，用量与 `usage_ledger` 按 `turn_id` 的合计一致 | 〔sdk.stream.test.ts〕
+| [x] AC-SDK-042 (自动) | 上游报错的流式一轮 | 发 `error` 事件且流正常关闭，不半开 | 〔sdk.stream.test.ts〕
+| [x] AC-SDK-043 (自动) | 同一输入分别走非流式与流式端点 | 最终文本一致 | 〔sdk.stream.test.ts〕
+| [x] AC-SDK-044 (自动) | 一次 SDK 轮次后按 `source_id` 聚合；`purge` 该会话后再聚合；Telegram 侧再聚合 | 能聚合出该次花费；`purge` 后聚合值不变；Telegram 侧聚合值不变 | 〔sdk.usage.test.ts〕
+| [x] AC-SDK-045 (手动) | 用 `@luoli/sdk-client` 对真实进程（`pnpm build && pnpm sdk:e2e`）跑通 create→send→stream→list→patch→delete→purge 全流程 | 全程成功 〔手测 2026-09-05 · S9〕
+| [x] AC-SDK-046 (自动) | 核对 `tsconfig.json` 的 `paths`、`vitest.config.ts` 的 `resolve.alias`、消费方 `package.json`；`packages/sdk-client/package.json` 无 `@luoli/*` 依赖 | 三处同步项各自存在（源码断言） | 〔sdk-client.scaffold.test.ts〕
+| [x] AC-SDK-047 (手动) | `pnpm build && pnpm start` 后重跑 `pnpm sdk:e2e` | 客户端仍跑通，无 `ERR_MODULE_NOT_FOUND` 类问题 〔手测 2026-09-05 · S9〕
+| [x] AC-SDK-048 (自动) | SDK 接入页组件级渲染（happy-dom） | 来源卡与密钥弹窗均正常渲染 | 〔webui/sdk-sources.test.ts、webui/sdk-keys.test.ts〕
+| [x] AC-SDK-049 (自动) | 签发一把密钥后查看列表；查看密钥详情 | 列表出现该 key；列表不含明文；回显需二次确认，确认后才请求回显端点 | 〔webui/sdk-keys.test.ts〕
+| [x] AC-SDK-050 (自动) | 停用一把密钥 | 列表状态变化 | 〔webui/sdk-keys.test.ts〕
+| [x] AC-SDK-051 (自动) | 无来源时打开 SDK 接入页 | 空态 2–6 字 | 〔webui/sdk-sources.test.ts〕
+| [x] AC-SDK-052 (自动) | `docs/00 §2` 的 `SDK-01`/`SDK-02` 两条欠账 | 均存在，探针形态与该节其余条目一致 | 〔docs.test.ts〕
+
+---
+
+## 14. 验收签署
 
 | 模块 | 负责人 | 通过 AC 数 / 总数 | 豁免项及理由 | 日期 | 签署 |
 |---|---|---|---|---|---|
@@ -674,12 +741,13 @@
 | Agent 与 Provider | | 33 / 46 | | | |
 | 工具/沙箱/审批 | | 61 / 95 | | | |
 | Subagent 与任务 | | 32 / 45 | | | |
-| 记忆 | | 3 / 12 | | | |
+| 记忆 | | 8 / 17 | | | |
 | 日志与成本 | | 13 / 32 | | | |
 | 扩展生态 | | 38 / 53 | | | |
 | WebUI | | 55 / 94 | `AC-WEB-016`（权限矩阵视图从未实现，详见 [29 §3](./29-manual-acceptance-log.md)） | | |
 | 安全 | | 17 / 31 | | | |
-| 运维 | | 2 / 10 | `AC-OPS-005` 后半（首次启动向导从未实现）、`AC-OPS-006`（`pnpm smoke` 走完全链路是开发任务，前置 `D-04`）；两条详见 [29 §3](./29-manual-acceptance-log.md) | | |
-| **合计** | | **338 / 531** | | | |
+| 运维 | | 2 / 10 | `AC-OPS-005` 后半（首次启动向导从未实现）、`AC-OPS-006`（`composeRuntime` 已抽出，`pnpm smoke` 接入完整轮次仍是开发任务、未做）；两条详见 [29 §3](./29-manual-acceptance-log.md) | | |
+| SDK 接入 | | 52 / 52 | | | |
+| **合计** | | **395 / 588** | | | |
 
 **整体通过条件**：全部 ★ 项通过 + 非 ★ 项通过率 ≥ 95% + 所有豁免项经需求方书面确认。

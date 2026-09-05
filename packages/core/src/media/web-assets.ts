@@ -7,6 +7,7 @@ import type { RuntimeTurnContext } from "@luoli/shared";
 import type { LogSink } from "../log/sink.js";
 import { NOTE_PREFIX, WEB_ASSET_SCHEME } from "../agent/runtime.js";
 import { isImagePart } from "../context/engine.js";
+import type { AgentKind } from "../tools/policy.js";
 import { normalizeImage } from "./normalize.js";
 
 export interface WebAssetRow {
@@ -128,13 +129,15 @@ export interface WebMediaDependencies {
 export function canSeeImages(
   registry: { supportsVision(alias: string): boolean },
   context: {
-    agentKind: "main" | "lw";
+    agentKind: AgentKind;
     worker?: { alias: string } | undefined;
   },
   mainAlias: () => string,
 ): boolean {
   if (registry.supportsVision("vision")) return true;
   // worker 的上下文缺少 `worker` 字段时按不支持处理：存疑情形 fail-closed，而不是回退到查询主轮。
+  // `sdk` 落在非 `lw` 分支同主轮一起查 `mainAlias()`：SDK 会话不派 worker（`docs/05 §3.13`），
+  // 这里没有第三种取值可查，且该路径当前不可达（SDK 白名单里没有能触发抓图的工具）。
   return registry.supportsVision(
     context.agentKind === "lw" ? (context.worker?.alias ?? "") : mainAlias(),
   );

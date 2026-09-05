@@ -26,6 +26,13 @@ export interface UsageRecord {
   finishReason?: string;
   ok: boolean;
   errorKind?: string;
+  /**
+   * 本轮的来源 id（`sources.id`），落 `usage_ledger.source_id`。调用方从 `turn.sourceId` 取，
+   * Telegram/定时任务轮次该字段缺省未设，调用方应显式回落 `TELEGRAM_SOURCE_ID`；SDK 轮次由
+   * `runTurn()` 写回 `turn.sourceId`。省略时落 NULL，不在这里猜成 `'telegram'`：一条来自
+   * 第三方来源的花费误计进 Telegram 的账，且这张表本身无法分辨出它是猜的。
+   */
+  sourceId?: string;
 }
 
 /**
@@ -76,8 +83,8 @@ export class UsageLedger {
       this.db
         .prepare(
           `INSERT INTO usage_ledger(ts,turn_id,agent_run_id,span_id,chat_id,user_id,provider_id,model_id,model_alias,
-        input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,reasoning_tokens,cost_usd,latency_ms,finish_reason,ok,error_kind)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,reasoning_tokens,cost_usd,latency_ms,finish_reason,ok,error_kind,source_id)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         )
         .run(
           Date.now(),
@@ -99,6 +106,7 @@ export class UsageLedger {
           input.finishReason ?? null,
           input.ok ? 1 : 0,
           input.errorKind ?? (hasPricing ? null : "no_pricing"),
+          input.sourceId ?? null,
         );
       this.db
         .prepare(
@@ -116,6 +124,68 @@ export class UsageLedger {
       )
       .get(turnId) as { value: number };
     return row.value;
+  }
+
+  /**
+   * 一轮的用量合计（camelCase 镜像），供 `/sdk/v1/sessions/:id/messages` 的非流式响应与
+   * T3.8 流式 `done` 事件复用（docs/12-sdk.md：两处均要求「按 `turn_id` 从 `usage_ledger` 聚合」）。
+   * `SUM` 而非取单行：一轮内多次模型调用（多步、收尾补跑）各记一行 ledger，`turns` 表本身的
+   * `input_tokens`/`output_tokens`/`cost_usd` 虽同样是累计值，但没有缓存与推理 token 的拆分列。
+   */
+  turnUsage(turnId: string): {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheWriteTokens: number;
+    reasoningTokens: number;
+    costUsd: number;
+  } {
+    return this.db
+      .prepare(
+        `SELECT COALESCE(SUM(input_tokens),0) AS inputTokens,COALESCE(SUM(output_tokens),0) AS outputTokens,
+      COALESCE(SUM(cache_read_tokens),0) AS cacheReadTokens,COALESCE(SUM(cache_write_tokens),0) AS cacheWriteTokens,
+      COALESCE(SUM(reasoning_tokens),0) AS reasoningTokens,COALESCE(SUM(cost_usd),0) AS costUsd
+      FROM usage_ledger WHERE turn_id=?`,
+      )
+      .get(turnId) as {
+      inputTokens: number;
+      outputTokens: number;
+      cacheReadTokens: number;
+      cacheWriteTokens: number;
+      reasoningTokens: number;
+      costUsd: number;
+    };
+  }
+
+  /**
+   * 一个来源的用量合计（camelCase 镜像，形状同 `turnUsage()`），供按 `source_id` 聚合花费
+   * （docs/12-sdk.md T3.9：SDK 与 Telegram 按来源分别计费的唯一读口）。会话 purge 只硬删
+   * `contexts`/`turns` 等七类行，`usage_ledger` 行与其 `source_id` 均不随之改变
+   * （`docs/03` §2.15）：这里的聚合值在 purge 前后不变。
+   */
+  sourceUsage(sourceId: string): {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheWriteTokens: number;
+    reasoningTokens: number;
+    costUsd: number;
+  } {
+    return this.db
+      .prepare(
+        `SELECT COALESCE(SUM(input_tokens),0) AS inputTokens,COALESCE(SUM(output_tokens),0) AS outputTokens,
+      COALESCE(SUM(cache_read_tokens),0) AS cacheReadTokens,COALESCE(SUM(cache_write_tokens),0) AS cacheWriteTokens,
+      COALESCE(SUM(reasoning_tokens),0) AS reasoningTokens,COALESCE(SUM(cost_usd),0) AS costUsd
+      FROM usage_ledger WHERE source_id=?`,
+      )
+      .get(sourceId) as {
+      inputTokens: number;
+      outputTokens: number;
+      cacheReadTokens: number;
+      cacheWriteTokens: number;
+      reasoningTokens: number;
+      costUsd: number;
+    };
   }
 
   /**

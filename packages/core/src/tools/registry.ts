@@ -108,6 +108,7 @@ export type ToolDenyReason =
   | "role"
   | "main_agent"
   | "worker"
+  | "sdk"
   | "unavailable"
   | "allowlist"
   | "skill_narrowed"
@@ -760,7 +761,14 @@ export class ToolRegistry {
             reason: "main_agent",
             hint: "这个工具在 worker 那一侧，用 spawn_worker 把任务派出去。",
           }
-        : { ok: false, error: "tool_unavailable_for_worker", reason: "worker" };
+        : context.agentKind === "sdk"
+          ? {
+              ok: false,
+              error: "tool_unavailable_for_sdk",
+              reason: "sdk",
+              hint: "SDK 会话不接派发，只保留记忆读写；这个工具不在白名单里。",
+            }
+          : { ok: false, error: "tool_unavailable_for_worker", reason: "worker" };
     if (tool.available?.(context.turn.effectiveRole, context) === false)
       return { ok: false, error: "tool_unavailable", reason: "unavailable" };
     if (context.allow && !context.allow.has(name))
@@ -893,6 +901,19 @@ export class ToolRegistry {
     try {
       const decision = this.#approvalDecision(tool, parsed.data, context);
       if (decision.needed) {
+        // SDK 会话没有人工审批通道（lead 裁决，docs/12-sdk.md T3.6）：`DatabaseApprovalBroker.request()`
+        // 会写一条 `approvals` 行、挂起等待，直至 TTL 过期才判「无人接单」失败——那是分钟级的
+        // 挂起，不是「即时」。有 `needed:true` 就在此处直接 fail-closed，不进入 broker，
+        // 不产生一条永远无人处理的待批准记录。
+        if (context.agentKind === "sdk") {
+          this.#failed(state, name, context);
+          this.#denied(name, context, "approval", "SDK 会话无人工审批通道");
+          return {
+            ok: false,
+            error: "approval_unavailable",
+            hint: "该操作需要人工批准，SDK 会话没有审批通道，本次调用已被拒绝。",
+          };
+        }
         const verdict = await this.approval.request(
           tool,
           parsed.data,
