@@ -1051,6 +1051,35 @@ export class ToolRegistry {
    * `GET /api/tools` 只枚举 `TOOL_POLICY`，那些工具在面板上完全不存在，而
    * `disabledByOperator` 一直是识别它们的。
    */
+  /**
+   * 一个 SDK 来源能调哪些工具，供 `GET /sdk/v1/tools` 回答「我能用什么」。
+   *
+   * 判据与 `#eligible()` 的**静态那几条**逐条同源：角色轴（SDK 会话恒 `trusted`）、运维禁用、
+   * `toolCallableBy()` 的来源白名单。三条都读同一批方法，不另算一份。
+   *
+   * **不含轮次内的那几条**，因为这里没有轮次：本轮连续失败后的停用、skill 的 `allowed-tools`
+   * 收窄、`maxRegistered` 截断。它们都只在一轮之内成立，一个接入方在建会话前问「我能用什么」
+   * 时它们还不存在。因此这份清单是上界 —— 客户端应当把它当作「可能可用」，而不是「这一次
+   * 调用一定成功」；真正的边界永远是 `admit()`。
+   *
+   * `approval` 一并给出：SDK 会话没有人工审批通道（`docs/12 §7`），需要审批的调用会直接返回
+   * `approval_unavailable`。不告诉客户端的话，它只能靠试。
+   */
+  sdkCatalog(
+    sdkTools: ReadonlySet<string> | undefined,
+  ): Array<{ name: string; description: string; approval: ApprovalPolicy }> {
+    return [...this.#tools.values()]
+      .filter((tool) => roleRank("trusted") >= roleRank(this.effectivePolicy(tool).minRole))
+      .filter((tool) => !this.disabledByOperator(tool.name))
+      .filter((tool) => toolCallableBy("sdk", tool.name, sdkTools))
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map((tool) => ({
+        name: tool.name,
+        description: tool.description,
+        approval: this.effectivePolicy(tool).approval,
+      }));
+  }
+
   describe(): Array<{
     name: string;
     description: string;

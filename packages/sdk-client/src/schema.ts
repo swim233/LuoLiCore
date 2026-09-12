@@ -203,6 +203,30 @@ export const sdkStreamQueuedDataSchema = z.object({
 });
 export type SdkStreamQueuedData = z.infer<typeof sdkStreamQueuedDataSchema>;
 
+/**
+ * `GET /sdk/v1/tools` 的一行。
+ *
+ * `approval` 一并给出：SDK 会话没有人工审批通道，需要审批的调用直接返回
+ * `approval_unavailable`；不告诉调用方的话它只能靠试。
+ */
+export const sdkToolSchema = z.object({
+  name: z.string(),
+  description: z.string(),
+  approval: z.enum(["never", "conditional", "always"]),
+});
+export type SdkTool = z.infer<typeof sdkToolSchema>;
+
+/**
+ * 这份清单是**上界**：轮次内才成立的那几条收窄（本轮连续失败后的停用、skill 的
+ * `allowed-tools`、目录截断）没有参与判定，因为问的时候还没有轮次。当作「可能可用」，
+ * 不是「这一次调用一定成功」——真正的边界是服务端的 `admit()`。
+ */
+export const sdkToolListResponseSchema = z.object({
+  ok: z.literal(true),
+  tools: z.array(sdkToolSchema),
+});
+export type SdkToolListResponse = z.infer<typeof sdkToolListResponseSchema>;
+
 export const sdkStreamEventSchema = z.discriminatedUnion("event", [
   z.object({ event: z.literal("delta"), data: sdkStreamDeltaDataSchema }),
   z.object({ event: z.literal("done"), data: sdkStreamDoneDataSchema }),

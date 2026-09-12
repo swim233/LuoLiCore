@@ -8,6 +8,7 @@ import {
   openDatabase,
 } from "@luoli/db";
 import {
+  issueApiKey,
   SDK_AGENT_TOOLS,
   SDK_FORBIDDEN_TOOLS,
   ToolRegistry,
@@ -351,5 +352,101 @@ describe("ToolRegistry 的两个强制点都读来源配置", () => {
     const admitted = registry.admit("memory_list", context);
     expect(admitted.ok).toBe(false);
     expect(admitted.ok === false && admitted.reason).toBe("role");
+  });
+});
+
+/**
+ * `GET /sdk/v1/tools`：接入方问「我能用什么」。
+ *
+ * 没有这个端点时客户端只能靠试 —— 调一个拿不到的工具，读 `tool_unavailable_for_sdk` 反推。
+ */
+describe("GET /sdk/v1/tools", () => {
+  async function withSource(name: string) {
+    const runtime = await startTestRuntime(name);
+    const created = runtime.deps.sources.create("Acme");
+    const issued = issueApiKey({
+      apiKeys: runtime.deps.apiKeys,
+      secrets: runtime.deps.secrets,
+      sourceId: created.id,
+    });
+    return { runtime, sourceId: created.id, token: issued.token };
+  }
+
+  async function listTools(
+    runtime: Awaited<ReturnType<typeof startTestRuntime>>,
+    token: string,
+  ): Promise<{ status: number; names: string[]; body: Record<string, unknown> }> {
+    const response = await runtime.server.request("/sdk/v1/tools", {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    const body = (await response.json()) as Record<string, unknown>;
+    const tools = Array.isArray(body.tools) ? (body.tools as Array<{ name: string }>) : [];
+    return { status: response.status, names: tools.map((tool) => tool.name), body };
+  }
+
+  it("未配置时给默认那几件，且与 toolCallableBy 的判定一致", async () => {
+    const { runtime, token } = await withSource("sdk-tools-list-default");
+    try {
+      const listed = await listTools(runtime, token);
+      expect(listed.status).toBe(200);
+      // memory_list 的 minRole 是 owner，SDK 恒 trusted —— 名义白名单里有，这份清单里不该有。
+      expect(listed.names).not.toContain("memory_list");
+      expect(listed.names).toContain("memory_read");
+      for (const name of listed.names)
+        expect(toolCallableBy("sdk", name, undefined), name).toBe(true);
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("跟着来源配置走", async () => {
+    const { runtime, sourceId, token } = await withSource("sdk-tools-list-configured");
+    try {
+      runtime.deps.sources.setTools(sourceId, ["grep", "read_file"]);
+
+      const listed = await listTools(runtime, token);
+      expect(listed.names.sort()).toEqual(["grep", "read_file"]);
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("配了空数组就是空清单，不回落默认", async () => {
+    const { runtime, sourceId, token } = await withSource("sdk-tools-list-empty");
+    try {
+      runtime.deps.sources.setTools(sourceId, []);
+      expect((await listTools(runtime, token)).names).toEqual([]);
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  /** 需要审批的调用在 SDK 会话里直接被拒，不告诉客户端的话它只能靠试。 */
+  it("带上 approval，让客户端能提前知道哪些会被审批挡掉", async () => {
+    const { runtime, sourceId, token } = await withSource("sdk-tools-list-approval");
+    try {
+      runtime.deps.sources.setTools(sourceId, ["delete_file", "grep"]);
+      const listed = await listTools(runtime, token);
+      const tools = listed.body.tools as Array<{ name: string; approval: string }>;
+
+      expect(tools.find((tool) => tool.name === "grep")?.approval).toBe("never");
+      expect(tools.find((tool) => tool.name === "delete_file")?.approval).toBe("always");
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("无 Bearer 401；跨来源看不到别人的配置", async () => {
+    const { runtime, token } = await withSource("sdk-tools-list-auth");
+    try {
+      expect((await runtime.server.request("/sdk/v1/tools")).status).toBe(401);
+
+      const other = runtime.deps.sources.create("Beta");
+      runtime.deps.sources.setTools(other.id, ["bash"]);
+      // 用 Acme 的密钥问，读到的是 Acme 的配置（默认），不是 Beta 的。
+      expect((await listTools(runtime, token)).names).not.toContain("bash");
+    } finally {
+      await runtime.dispose();
+    }
   });
 });

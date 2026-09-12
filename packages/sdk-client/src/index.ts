@@ -9,6 +9,7 @@ import {
   sdkSessionListResponseSchema,
   sdkSessionResponseSchema,
   sdkStreamEventSchema,
+  sdkToolListResponseSchema,
   type SdkCommitListResponse,
   type SdkCreateSessionInput,
   type SdkErrorCode,
@@ -18,6 +19,7 @@ import {
   type SdkSession,
   type SdkStreamErrorData,
   type SdkStreamEvent,
+  type SdkTool,
   type SdkUpdateSessionInput,
 } from "./schema.js";
 
@@ -320,6 +322,11 @@ export interface SdkResetResult {
  * 前缀（T3.6a 接口说明），客户端不重复这层拼接。
  */
 export interface LuoliSdkClient {
+  /**
+   * 本来源能调哪些工具。返回的是**上界**：轮次内才成立的收窄（本轮连续失败后的停用、
+   * skill 的 `allowed-tools`、目录截断）不参与判定，因为问的时候还没有轮次。
+   */
+  listTools(): Promise<SdkTool[]>;
   createSession(input?: SdkCreateSessionInput): Promise<SdkSession>;
   listSessions(query?: SdkPageQuery): Promise<SdkListSessionsResult>;
   getSession(id: string): Promise<SdkSession>;
@@ -398,6 +405,11 @@ export function createSdkClient(options: SdkClientOptions): LuoliSdkClient {
         `/sdk/v1/sessions/${encodeURIComponent(id)}`,
         sdkOkResponseSchema,
       );
+    },
+
+    async listTools() {
+      const parsed = await callJson("GET", "/sdk/v1/tools", sdkToolListResponseSchema);
+      return parsed.tools;
     },
 
     async purgeSession(id) {

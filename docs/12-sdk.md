@@ -89,10 +89,11 @@ Bearer（`Authorization: Bearer sk-...`）只对 `/sdk/v1/*` 生效，`packages/
 
 ## 4. `/sdk/v1` 端点契约
 
-十个端点，独立中间件挂载（`mountSdkV1()`），不改 `app.ts` 的 `/api/*` cookie 免验白名单。
+十一个端点，独立中间件挂载（`mountSdkV1()`），不改 `app.ts` 的 `/api/*` cookie 免验白名单。
 
 | 方法 | 路径 | 请求 schema | 响应 schema | 状态码 |
 |---|---|---|---|---|
+| GET | `/sdk/v1/tools` | 无 | `sdkToolListResponseSchema`（本来源可调的工具，[§8](#8-工具目录)） | 200 / 401 / 500 |
 | POST | `/sdk/v1/sessions` | `sdkCreateSessionInputSchema`（`modelAlias`/`outputFormat`/`label` 均可选） | `sdkSessionResponseSchema` | 200 / 400 / 401 / 500 |
 | GET | `/sdk/v1/sessions` | `sdkPageQuerySchema`（`cursor`/`limit`，查询串） | `sdkSessionListResponseSchema` | 200 / 400 / 401 / 500 |
 | GET | `/sdk/v1/sessions/:id` | 无 | `sdkSessionResponseSchema` | 200 / 401 / 404 / 500 |
@@ -104,7 +105,7 @@ Bearer（`Authorization: Bearer sk-...`）只对 `/sdk/v1/*` 生效，`packages/
 | POST | `/sdk/v1/sessions/:id/messages` | `sdkSendMessageInputSchema`（`endUserId`/`text`/`modelAlias?`） | `sdkMessageResponseSchema`（`text`/`usage`/`turnId`） | 200 / 400 / 401 / 404 / 429 / 500 / 502 / 409 |
 | POST | `/sdk/v1/sessions/:id/messages/stream` | `sdkSendMessageInputSchema` | SSE，见 [§6](#6-流式协议) | 200（成功与失败共用；失败经 SSE `error` 事件表达）/ 400 / 401 / 404 / 429（配额，发生在写响应头之前） / 500 |
 
-十端点的 zod 定义唯一来源为 `packages/sdk-client/src/schema.ts`（子路径 `@luoli/sdk-client/schema`
+十一个端点的 zod 定义唯一来源为 `packages/sdk-client/src/schema.ts`（子路径 `@luoli/sdk-client/schema`
 导出），服务端 `safeParse` 校验，客户端类型取 `z.infer`——两侧不各自维护一份形状。
 
 会话解析（`resolveSession()`）按 `chatId`（URL 段裸 uuid）换算 `contexts.key` 后按
@@ -272,6 +273,15 @@ error:'approval_unavailable'}`，不进入 `DatabaseApprovalBroker.request()`—
 放开。`search_tools` 放开时需注意 SDK 会话不渲染 TOOL CATALOG（见下），折叠目录这个概念在
 这条路径上不成立。
 
+**接入方怎么知道自己能用什么。** `GET /sdk/v1/tools` 返回本来源可调的工具（名字、说明、
+`approval` 档位），判据复用 `ToolRegistry.sdkCatalog()` —— 与运行期同一批方法取数，不另算一份。
+不挂在会话下：工具集是来源的属性，不随会话变化，而调用方常在建会话之前就需要知道这件事。
+
+这份清单是**上界**。轮次内才成立的三条收窄没有参与判定（本轮连续失败后的停用、skill 的
+`allowed-tools`、`maxRegistered` 截断）—— 问的时候还没有轮次。客户端应当把它当作「可能可用」，
+真正的边界永远是 `admit()`。`approval` 一并给出的理由是 SDK 会话没有人工审批通道
+（[§7](#7-轮次语义)）：需要审批的调用直接返回 `approval_unavailable`，不提前说的话调用方只能靠试。
+
 **TOOL CATALOG 仍然不渲染。** 那一块描述的是「worker 能做的事」，供主 agent 判断值不值得派一个
 出去；SDK 不接派发（结构性禁止），因此放开白名单也不改变这一点。模型看得到的是 RUNTIME 块
 里的「可用工具」行（`activeTools`，按本来源的集合取数）与请求体里那几份工具 schema——
@@ -374,6 +384,7 @@ purge 成功后落一条 `warn` 级 `sdk.session_purged`（`sourceId`、`chatId`
 | `deleteSession(id)` | `DELETE /sdk/v1/sessions/:id` |
 | `purgeSession(id)` | `POST /sdk/v1/sessions/:id/purge` |
 | `resetSession(id)` | `POST /sdk/v1/sessions/:id/reset` |
+| `listTools()` | `GET /sdk/v1/tools` |
 | `listCommits(id, query?)` | `GET /sdk/v1/sessions/:id/commits` |
 | `sendMessage(id, input)` | `POST /sdk/v1/sessions/:id/messages` |
 | `streamMessage(id, input)` | `POST /sdk/v1/sessions/:id/messages/stream`（返回 `AsyncIterable<SdkStreamEvent>`） |

@@ -316,6 +316,29 @@ export function mountSdkV1(app: Hono<ServerEnv>, dependencies: ServerDependencie
     return ctx.json({ ok: true });
   });
 
+  /**
+   * 本来源能调哪些工具（`docs/12 §8`）。
+   *
+   * 不挂在会话下：工具集是来源的属性，不随会话变化，而调用方常在建会话之前就需要知道
+   * 「我能做什么」。判据复用 `ToolRegistry.sdkCatalog()`，与运行期同一批方法取数。
+   *
+   * 返回的是**上界**：轮次内才成立的收窄不参与判定（问的时候还没有轮次）。真正的边界仍是
+   * `admit()`，这一点写进了响应 schema 的注释与 `docs/12 §8`。
+   */
+  app.get("/sdk/v1/tools", (ctx) => {
+    const sdk = requireSdk(dependencies);
+    if (!sdk || !dependencies.tools)
+      return ctx.json(
+        sdkError("not_implemented", "这个部署没有装配工具注册表", 500).body,
+        500,
+      );
+    const sourceId = ctx.get("sourceId")!;
+    return ctx.json({
+      ok: true,
+      tools: dependencies.tools.sdkCatalog(sdkToolsFor(dependencies, sourceId)),
+    });
+  });
+
   app.post("/sdk/v1/sessions/:id/reset", (ctx) => {
     const sdk = requireSdk(dependencies);
     if (!sdk)
