@@ -20,8 +20,10 @@ function upgradeAcross0020(name: string, extraFixture?: (db: Database.Database) 
   const staging = `${root}/migrations`;
   rmSync(root, { recursive: true, force: true });
   mkdirSync(staging, { recursive: true });
+  // 与 `migration.0019.test.ts` 同一理由：排除 0020 **及其之后的每一份**。只跳过 0020 自己的话，
+  // 这一趟造出来的并不是「已到 0019」的库，后续迁移会在这里提前生效。
   for (const entry of readdirSync(REAL_MIGRATIONS))
-    if (entry.endsWith('.sql') && entry !== SDK_MIGRATION)
+    if (entry.endsWith('.sql') && entry < SDK_MIGRATION)
       copyFileSync(resolve(REAL_MIGRATIONS, entry), resolve(staging, entry));
   const db = openDatabase(database);
   migrateDatabase(db, staging);

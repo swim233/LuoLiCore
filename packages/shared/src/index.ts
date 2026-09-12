@@ -305,6 +305,16 @@ export interface RuntimeTurnContext {
    */
   sourceId?: string;
   /**
+   * 本轮所属来源配出来的 SDK 工具集（`sources.tools` 经 `sdkToolsFromConfig()` 整理）。
+   *
+   * 只有 `agentKind === 'sdk'` 的轮次读它，由开轮时一次性写入；缺席即 `SDK_AGENT_TOOLS`，
+   * 所以 Telegram / 定时任务那些既有调用点不传就是原行为。
+   *
+   * 放在 turn 上而不是 `ToolExecutionContext` 上：它是这一轮的来源属性，整轮不变；挂在
+   * 执行上下文上的话每个构造点都要回答「这一份归谁」，而这里根本没有 per-run 的差异。
+   */
+  sdkTools?: ReadonlySet<string>;
+  /**
    * 群名 / 频道名（私聊无此值），只用于 RUNTIME 块的「会话」行。此前该行只有裸 chatId，
    * 模型无法区分私聊与群聊，而人格里大量规则按此分支。
    *

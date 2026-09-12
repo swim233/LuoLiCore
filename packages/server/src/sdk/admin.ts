@@ -13,7 +13,7 @@
  * 本文件的端点全部只服务 WebUI 的 owner 管理面。
  */
 import type { Hono } from "hono";
-import { issueApiKey } from "@luoli/core";
+import { issueApiKey, SDK_FORBIDDEN_TOOLS } from "@luoli/core";
 import { apiError } from "../api-error.js";
 import type { ServerDependencies, ServerEnv } from "../app.js";
 
@@ -55,6 +55,59 @@ export function mountSdkAdmin(
     return ctx.json({
       ok: true,
       data: { source: dependencies.sources.create(name) },
+    });
+  });
+
+  /**
+   * 这个来源的 SDK 会话能调哪些工具（`docs/12 §8`）。
+   *
+   * `tools: null` 恢复默认（记忆三件），`tools: []` 显式一件都不给，两者不同。
+   *
+   * 结构性禁止的那两族（派发、Telegram 输出）在此**拒收**而不是静默滤掉：运维在界面上勾了
+   * 一个存不进去的名字，得到一句明确的拒绝比得到一份「保存成功但少了一项」的配置好查。
+   * 运行期读侧仍然会再滤一次（`sdkToolsFromConfig`），那一层防的是库被直接编辑过。
+   *
+   * 工具名是否真的存在于注册表不在这里判：自撰写工具、插件、MCP 的名字随部署变化，
+   * 管理面没有权威的全集；一个不存在的名字的后果只是它调不到，与没配它一样。
+   */
+  app.patch("/api/sdk/sources/:id/tools", async (ctx) => {
+    if (!dependencies.sources)
+      return ctx.json(
+        apiError("not_implemented", "这个部署没有装配 SDK 来源仓储", 500).body,
+        500,
+      );
+    const id = ctx.req.param("id");
+    if (!dependencies.sources.get(id))
+      return ctx.json(apiError("not_found", "来源不存在", 404).body, 404);
+    const body = await ctx.req
+      .json<{ tools?: unknown }>()
+      .catch((): { tools?: unknown } => ({}));
+    if (body.tools !== null && !Array.isArray(body.tools))
+      return ctx.json(
+        apiError("invalid_tools", "tools 必须是工具名数组，或 null 表示用默认").body,
+        400,
+      );
+    let tools: string[] | null = null;
+    if (body.tools !== null) {
+      if (!body.tools.every((name): name is string => typeof name === "string"))
+        return ctx.json(
+          apiError("invalid_tools", "工具名必须是字符串").body,
+          400,
+        );
+      const forbidden = body.tools.filter((name) => SDK_FORBIDDEN_TOOLS.has(name));
+      if (forbidden.length)
+        return ctx.json(
+          apiError(
+            "tool_forbidden_for_sdk",
+            `这些工具与 SDK 通道的形状冲突，配了也不会生效：${forbidden.join("、")}`,
+          ).body,
+          400,
+        );
+      tools = [...new Set(body.tools)];
+    }
+    return ctx.json({
+      ok: true,
+      data: { source: dependencies.sources.setTools(id, tools) },
     });
   });
 

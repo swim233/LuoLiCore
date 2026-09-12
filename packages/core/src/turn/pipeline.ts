@@ -83,6 +83,11 @@ export interface RunTurnInput {
   agentKind?: AgentKind;
   /** 缺省 telegram（下游按 `?? TELEGRAM_SOURCE_ID` 兜底）；提供时写回 `turn.sourceId`。 */
   sourceId?: string;
+  /**
+   * 本轮所属来源配出来的 SDK 工具集；提供时写回 `turn.sdkTools`，只有 `agentKind:'sdk'` 读它。
+   * 与 `sourceId` 同一条路：调用方算好传进来，本函数不去查库。
+   */
+  sdkTools?: ReadonlySet<string>;
   /** 额外并入 `turn.end` / `ctx.abort` 日志 `data` 的字段（如 schedule 侧的 `{schedule: job.id}`）。 */
   logExtra?: Record<string, unknown>;
   buildTrigger(): AppendedMessage | Promise<AppendedMessage>;
@@ -227,6 +232,7 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
       config: input.config,
     });
     if (input.sourceId) Object.assign(turn, { sourceId: input.sourceId });
+    if (input.sdkTools) Object.assign(turn, { sdkTools: input.sdkTools });
     registry.finish(pendingId);
     const tracked = registry.register(
       {

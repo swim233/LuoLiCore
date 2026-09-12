@@ -16,6 +16,18 @@ export interface SourceRow {
   name: string;
   createdAt: number;
   disabledAt: number | null;
+  /**
+   * 这个来源的 SDK 会话能调哪些工具（`docs/12 §8`）。`null` = 用默认（记忆三件），
+   * 空数组 = 一件都不给。两者不同，界面必须能把它们分开显示。
+   */
+  tools: string[] | null;
+}
+
+/** `GET /api/tools` 里本页用得上的两项：名字由键给出，值里只取这两个字段。 */
+export interface ToolChoice {
+  name: string;
+  /** 配了也不生效（结构性禁止的派发族与 Telegram 输出，判据在服务端）。 */
+  sdkForbidden: boolean;
 }
 
 /** `GET /api/sdk/sources/:id/keys` 的一行：从不携带密文，回显走单独的 `/reveal` 端点。 */
@@ -81,4 +93,28 @@ export function issueDisabledReason(source: SourceRow | null): string {
   if (source.kind !== "sdk") return "该来源不支持签发密钥";
   if (source.disabledAt !== null) return "来源已停用，无法签发密钥";
   return "";
+}
+
+/**
+ * 默认三件。与 `SDK_AGENT_TOOLS` 同源的那份判据在服务端，这里只用于**显示**
+ * 「未配置时实际生效的是哪几件」——不参与任何准入判定，写错了也只影响这一行提示文字。
+ */
+export const SDK_DEFAULT_TOOLS = ["memory_read", "memory_list", "memory_write"];
+
+/**
+ * 未配置（`null`）与配了空数组是两种状态，摘要文案必须把它们分开。
+ *
+ * 入参容忍 `undefined`：连的服务端可能还没有这一列（旧版本），那种情况等同于「用默认」，
+ * 不该让整张卡在这里崩掉。
+ */
+export function toolsSummary(tools: string[] | null | undefined): string {
+  if (tools === null || tools === undefined)
+    return `默认 ${SDK_DEFAULT_TOOLS.length} 件（记忆读写）`;
+  if (tools.length === 0) return "不给任何工具";
+  return `${tools.length} 件`;
+}
+
+/** 归一化：非数组一律按「未配置」处理，与 `SourcesCard` 对 `sources` 的做法同一理由。 */
+export function normalizeSource(row: SourceRow): SourceRow {
+  return { ...row, tools: Array.isArray(row.tools) ? row.tools : null };
 }

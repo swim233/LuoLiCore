@@ -505,10 +505,73 @@ export const SDK_AGENT_TOOLS: ReadonlySet<ToolName> = new Set([
 ] satisfies ToolName[]);
 
 /**
- * 这一档 agent 能不能调这个工具。`#eligible()` 与 `admit()` 共用，判据只有一份。
+ * 结构性禁止：无论来源怎么配，SDK 会话都拿不到这两族。
+ *
+ * 与「默认不给」不是一回事 —— 上面那份白名单是范围决定，可以按来源放开；这里两族是跟 SDK
+ * 通道的形状冲突，放开会产生没有正确行为可言的调用：
+ *
+ * - 派发族：SDK 顶层轮次的 `agent_runs.kind` 恒 `main`、`worker_kind` 恒 `NULL`
+ *   （`docs/12 §7`），接了派发之后这条口径与实际产生的 worker 行对不上，记账与审计都会错；
+ *   而 `read_worker_result` 没有派发就永远读不到东西。
+ * - Telegram 输出五件：SDK 会话没有 Telegram chat，调用只会投到空处；`stay_silent` 同理，
+ *   它表达的是「这一轮不回 Telegram」，而 SDK 的调用方在等一个响应体。
  */
-export function toolCallableBy(kind: AgentKind, name: string): boolean {
-  if (kind === "sdk") return SDK_AGENT_TOOLS.has(name as ToolName);
+// 类型写 `ReadonlySet<string>` 而非 `ReadonlySet<ToolName>`：两个使用点拿到的都是运行期的
+// 任意字符串（配置值、模型给的工具名），逐处 `as ToolName` 只是把检查糊掉。元素本身仍由
+// 下面的 `satisfies ToolName[]` 保证是真实存在的工具名。
+export const SDK_FORBIDDEN_TOOLS: ReadonlySet<string> = new Set([
+  "spawn_worker",
+  "spawn_harness",
+  "spawn_acp",
+  "read_worker_result",
+  "ask_parent",
+  "send_message",
+  "send_photo",
+  "send_file",
+  "react",
+  "pin_message",
+  "stay_silent",
+] satisfies ToolName[]);
+
+/**
+ * 把来源上配置的工具名整理成一份可用的集合。
+ *
+ * `null`（未配置）回落到 `SDK_AGENT_TOOLS` —— 这是存量部署与新建来源的取值，行为与此前一字不差。
+ * 配置过的来源按配置走，并在此滤掉结构性禁止的两族。
+ *
+ * 滤而不是拒：这个函数同时是管理面写入前的校验口和运行期的取数口，两处共用一份判据。运行期
+ * 拿到一个当初合法、后来被移出 `TOOL_POLICY` 的名字是可能的（工具改名、插件卸载），那时候
+ * 整个来源不该因此不可用。名字是否真的存在于注册表由注册表自己回答：它按名字查不到就不会
+ * 出现在目录里，`admit()` 也会拒。
+ */
+export function sdkToolsFromConfig(
+  configured: readonly string[] | null | undefined,
+): ReadonlySet<string> {
+  if (configured === null || configured === undefined) return SDK_AGENT_TOOLS;
+  return new Set(
+    configured.filter((name) => !SDK_FORBIDDEN_TOOLS.has(name)),
+  );
+}
+
+/**
+ * 这一档 agent 能不能调这个工具。`#eligible()` 与 `admit()` 共用，判据只有一份。
+ *
+ * `sdkTools` 只对 `kind === 'sdk'` 有意义：本轮所属来源配出来的工具集，由开轮时写入
+ * `RuntimeTurnContext.sdkTools`。不传即 `SDK_AGENT_TOOLS`，因此既有调用点一律行为不变。
+ *
+ * **这一轴不是安全边界。** 角色轴才是：SDK 会话角色恒 `trusted`（`docs/12 §7`），`minRole`
+ * 高于 `trusted` 的工具（如 `memory_list` 的 `owner`）先在角色轴被拒，配进白名单也到不了这里。
+ * 审批同理仍然 fail-closed（`docs/05 §3.13`）—— 放开白名单不会把一个需要人工裁决的调用
+ * 变成免审批。
+ */
+export function toolCallableBy(
+  kind: AgentKind,
+  name: string,
+  sdkTools?: ReadonlySet<string>,
+): boolean {
+  if (kind === "sdk")
+    return (sdkTools ?? SDK_AGENT_TOOLS).has(name) &&
+      !SDK_FORBIDDEN_TOOLS.has(name);
   return kind === "main"
     ? MAIN_AGENT_TOOLS.has(name as ToolName)
     : !MAIN_ONLY_TOOLS.has(name as ToolName);

@@ -234,19 +234,48 @@ error:'approval_unavailable'}`，不进入 `DatabaseApprovalBroker.request()`—
 
 ## 8. 工具目录
 
-名义白名单三件：`memory_read`、`memory_list`、`memory_write`（`SDK_AGENT_TOOLS` 常量，
-`packages/core/src/tools/policy.ts`），`toolCallableBy('sdk', name)` 判据。强制点两处：
-`#eligible()`（目录）与 `admit()`（准入复查），与 `main`/`lw` 相同。
+**默认三件，按来源可配。** 未配置的来源走 `SDK_AGENT_TOOLS` 常量
+（`memory_read` / `memory_list` / `memory_write`，`packages/core/src/tools/policy.ts`）；配置过的
+来源走 `sources.tools`（[§11](#11-管理面-apisdk)的 `PATCH /api/sdk/sources/:id/tools`）。取数口是
+`sdkToolsFromConfig(row.tools)`：`NULL` 回落常量，空数组表示这个来源一件工具都不给——两者
+不同，后者是显式配置的一种取值。存量部署与新建来源都是 `NULL`，因此不配就是原行为。
 
-**实际可达两件**：`memory_list` 的 `TOOL_POLICY` 策略 `minRole: 'owner'`，而角色轴的判定
-（`roleRank(role) >= roleRank(minRole)`）先于 `agentKind` 白名单生效——SDK 角色恒 `trusted`，
-`trusted < owner`，`memory_list` 在这一层即被拒，永远到不了白名单那一步。这是 D-A 拍板保留
-的现状（选项 (b)：保留在白名单里并在文档写明不可达），未改代码收窄白名单，也未降低
-`memory_list` 的 `minRole`。详见 [05 §3.13](./05-tools-and-permissions.md#313-sdk-会话agentkind--sdk)。
+判据仍是 `toolCallableBy(kind, name, sdkTools?)` 一个函数，强制点仍是两处
+（`#eligible()` 目录取数与 `admit()` 准入复查），与 `main`/`lw` 相同。本轮的集合在开轮时
+一次性写入 `RuntimeTurnContext.sdkTools`（与 `sourceId` 同一条路，由 `/sdk/v1` 的路由查库后
+传给 `runTurn()`），注册表不自己查库。每轮查一次而不缓存：改了配置就该下一轮生效。
 
-不可达：派发族（`spawn_worker`/`spawn_harness`/`spawn_acp`/`read_worker_result`）、
-`schedule_*` 四件、归档检索五件（`search_messages`/`read_messages`/`get_message`/
-`context_stats`/`admin_search_messages`）、Telegram 输出五件、`stay_silent`、`search_tools`。
+**按来源而不是按密钥。** 密钥签发时绑定来源（[§3.1](#31-token-形态与签发)），同一来源可以有
+多把密钥；按密钥配会让「轮换一把钥匙」变成一次权限变更。
+
+**放开的是 `agentKind` 轴，不是安全边界。** 两根轴正交（[05 §4](./05-tools-and-permissions.md#4-权限矩阵权威表)）：
+角色轴回答「这个身份够不够格」，`agentKind` 轴回答「这一档 agent 该拿哪些」。SDK 会话角色
+恒 `trusted`，因此 `minRole` 高于 `trusted` 的工具配进白名单也到不了 `toolCallableBy()`——
+`memory_list`（`minRole: 'owner'`）就是这种情况，它在名义白名单里但对 SDK 恒不可达（D-A 拍板
+保留现状，不下调 `minRole`：那会把「跨来源枚举 `memory_docs`」这项 owner 专属能力一并开给
+`trusted`）。审批同样不变，仍然 fail-closed（[§7](#7-轮次语义)）：放开白名单不会把一个需要
+人工裁决的调用变成免审批的调用。
+
+**结构性禁止，配了也不生效**（`SDK_FORBIDDEN_TOOLS`）。与「默认不给」不是一回事——上面那份
+默认白名单是范围决定，可以按来源放开；这两族是与 SDK 通道的形状冲突，放开会产生没有正确
+行为可言的调用：
+
+| 族 | 成员 | 为什么 |
+|---|---|---|
+| 派发 | `spawn_worker` `spawn_harness` `spawn_acp` `read_worker_result` `ask_parent` | SDK 顶层轮次 `agent_runs.kind` 恒 `main`、`worker_kind` 恒 `NULL`（[§7](#7-轮次语义)），接了派发之后这条记账口径与实际产生的 worker 行对不上；`read_worker_result` 没有派发则永远读不到东西 |
+| Telegram 输出 | `send_message` `send_photo` `send_file` `react` `pin_message` `stay_silent` | SDK 会话没有 Telegram chat，调用只会投到空处；`stay_silent` 表达的是「这一轮不回 Telegram」，而 SDK 的调用方在等一个响应体 |
+
+两处都拦：管理面写入时**拒收**（400 `tool_forbidden_for_sdk`，让运维得到一句明确的拒绝，
+而不是一份「保存成功但少了一项」的配置），运行期读侧再滤一次（防库被直接编辑过）。
+
+`search_tools` 与 `schedule_*`、归档检索五件不在结构性禁止之列——它们默认不给，但可以按来源
+放开。`search_tools` 放开时需注意 SDK 会话不渲染 TOOL CATALOG（见下），折叠目录这个概念在
+这条路径上不成立。
+
+**TOOL CATALOG 仍然不渲染。** 那一块描述的是「worker 能做的事」，供主 agent 判断值不值得派一个
+出去；SDK 不接派发（结构性禁止），因此放开白名单也不改变这一点。模型看得到的是 RUNTIME 块
+里的「可用工具」行（`activeTools`，按本来源的集合取数）与请求体里那几份工具 schema——
+它直接调用叶子工具，不需要那个目录。
 
 ## 9. 记账
 
@@ -303,6 +332,7 @@ purge 成功后落一条 `warn` 级 `sdk.session_purged`（`sourceId`、`chatId`
 | POST | `/api/sdk/sources` | 新建来源（只填 `name`，`id` 服务端生成 ulid） |
 | GET | `/api/sdk/sources/:id/keys` | 列出该来源的密钥（不含密文） |
 | POST | `/api/sdk/sources/:id/keys` | 签发密钥（返回明文 token，仅此一次） |
+| PATCH | `/api/sdk/sources/:id/tools` | 改这个来源的 SDK 工具白名单（`{tools: string[] \| null}`，[§8](#8-工具目录)） |
 | DELETE | `/api/sdk/keys/:id` | 软停用密钥 |
 | GET | `/api/sdk/keys/:id/reveal` | 回显密钥明文（二次确认后调用） |
 
@@ -316,6 +346,8 @@ purge 成功后落一条 `warn` 级 `sdk.session_purged`（`sourceId`、`chatId`
 | `not_found` | 404 | 来源或密钥不存在 |
 | `source_not_sdk` | 400 | 对 `kind='telegram'` 的内建来源签发密钥（它走 Telegram 自己的鉴权，签发一把能代表它的 key 会绕开那条路径） |
 | `source_disabled` | 400 | 对已停用的 SDK 来源签发密钥（停用是「不再接受新签发」的语义，已签发的旧密钥不因此失效） |
+| `invalid_tools` | 400 | `tools` 不是工具名数组，也不是 `null` |
+| `tool_forbidden_for_sdk` | 400 | 配进了结构性禁止的两族（[§8](#8-工具目录)）—— 拒收而不是静默滤掉：一份「保存成功但少了一项」的配置比一句明确的拒绝难查 |
 | `invalid_label` | 400 | `label` 超过 200 字符 |
 | `invalid_expires_at` | 400 | `expiresAt` 不是数字或不晚于当前时间 |
 | `secret_undecryptable` | 500 | 回显时解密失败（主密钥轮换后旧密文用当前主密钥解不开） |

@@ -493,7 +493,9 @@ export class ToolRegistry {
       // 主 agent 只留对话与派发，其余下沉给 worker（`docs/05 §4`）。这一层不是安全闸
       // （`admit()` 才是），它在这里的理由是成本：`#eligible()` 是 `toolSetFor` 的取数口，
       // 不在此滤掉的话那几十个工具的完整 JSON Schema 仍会进请求体第 0 段、每步重发。
-      .filter((tool) => toolCallableBy(context.agentKind, tool.name))
+      .filter((tool) =>
+        toolCallableBy(context.agentKind, tool.name, context.turn.sdkTools),
+      )
       .filter((tool) => tool.available?.(role, context) !== false)
       .map((tool) =>
         tool.inputSchemaFor
@@ -753,7 +755,7 @@ export class ToolRegistry {
     // active() 的过滤集合必须在此逐条复查，否则目录中不存在就成为唯一边界，而模型完全可以凭
     // 上一步的工具名直接调用。当前每个相关工具恰好各自 fail-closed，但那属于巧合而非设计
     // （docs/20 · W-TOOL-01；docs/05 §220 单一数据源）。
-    if (!toolCallableBy(context.agentKind, name))
+    if (!toolCallableBy(context.agentKind, name, context.turn.sdkTools))
       return context.agentKind === "main"
         ? {
             ok: false,
@@ -766,7 +768,7 @@ export class ToolRegistry {
               ok: false,
               error: "tool_unavailable_for_sdk",
               reason: "sdk",
-              hint: "SDK 会话不接派发，只保留记忆读写；这个工具不在白名单里。",
+              hint: "这个工具不在本来源的 SDK 白名单里；SDK 会话不接派发，也没有 Telegram 输出。",
             }
           : { ok: false, error: "tool_unavailable_for_worker", reason: "worker" };
     if (tool.available?.(context.turn.effectiveRole, context) === false)

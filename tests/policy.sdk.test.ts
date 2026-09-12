@@ -217,12 +217,22 @@ describe('toolCallableBy(sdk, ·) 真值表与判据唯一性', () => {
 
   it('policy.ts 中判 sdk 的那一支只出现一次，SDK_AGENT_TOOLS 只声明一次（判据只有一份）', () => {
     const text = source('packages/core/src/tools/policy.ts');
-    const branch = code('if (kind === "sdk") return SDK_AGENT_TOOLS.has(name as ToolName);');
+    // 按来源可配之后这一支读的是传入的集合，缺省仍回落 SDK_AGENT_TOOLS——判据仍然只有这一处。
+    const branch = code('return (sdkTools ?? SDK_AGENT_TOOLS).has(name) &&');
     expect(text.split(branch).length - 1, 'toolCallableBy() 里判 sdk 的那一支应恰好出现一次').toBe(1);
     const declaration = code('export const SDK_AGENT_TOOLS: ReadonlySet<ToolName> = new Set([');
     expect(text.split(declaration).length - 1, 'SDK_AGENT_TOOLS 不应散落成第二份声明').toBe(1);
     // 顺序：常量声明必须在 toolCallableBy() 引用它之前，否则是运行时的 TDZ 错误而非类型错误。
     expect(codeIndex(text, declaration)).toBeGreaterThanOrEqual(0);
     expect(codeIndex(text, declaration)).toBeLessThan(codeIndex(text, branch));
+  });
+
+  it('不传 sdkTools 时与 SDK_AGENT_TOOLS 逐条一致（存量调用点行为不变）', () => {
+    const wrong: string[] = [];
+    for (const name of Object.keys(TOOL_POLICY)) {
+      const expected = SDK_AGENT_TOOLS.has(name as never);
+      if (toolCallableBy('sdk', name, undefined) !== expected) wrong.push(name);
+    }
+    expect(wrong, '缺省参数下与常量白名单对不上的工具名').toEqual([]);
   });
 });

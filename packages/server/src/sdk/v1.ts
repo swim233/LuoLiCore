@@ -24,6 +24,7 @@ import {
   purgeSdkSession,
   runMainAgent,
   runTurn,
+  sdkToolsFromConfig,
   streamMainAgent,
   type Config,
 } from "@luoli/core";
@@ -51,6 +52,23 @@ function currentConfig(dependencies: ServerDependencies): Readonly<Config> {
   return "snapshot" in dependencies.config
     ? dependencies.config.snapshot()
     : dependencies.config;
+}
+
+/**
+ * 本来源配出来的 SDK 工具集（`sources.tools`，`docs/12 §8`）。
+ *
+ * 每轮查一次而不是缓存：改了配置就该下一轮生效，一个进程内缓存会让「我已经改过了」和
+ * 「它还是调不到」同时成立，这种不一致查起来很贵。这是一次按主键的 SELECT，与这条路径上
+ * 已有的会话解析同量级。
+ *
+ * 来源行读不到时回落默认：`sources` 未装配的部署根本到不了这里（Bearer 中间件已短路），
+ * 而行确实不存在属于数据异常，此时给默认的三件记忆工具是最小惊讶的取值。
+ */
+function sdkToolsFor(
+  dependencies: ServerDependencies,
+  sourceId: string,
+): ReadonlySet<string> {
+  return sdkToolsFromConfig(dependencies.sources?.get(sourceId)?.tools);
 }
 
 /** 请求方缺任一装配（Bearer 中间件已经在 sources/apiKeys/secrets 缺失时短路，这里覆盖轮次执行链）。 */
@@ -477,6 +495,7 @@ export function mountSdkV1(app: Hono<ServerEnv>, dependencies: ServerDependencie
         reservation,
         agentKind: "sdk",
         sourceId,
+        sdkTools: sdkToolsFor(dependencies, sourceId),
         onPending: (pendingId) => {
           cancelId = pendingId;
         },
@@ -670,6 +689,7 @@ export function mountSdkV1(app: Hono<ServerEnv>, dependencies: ServerDependencie
           reservation,
           agentKind: "sdk",
           sourceId,
+          sdkTools: sdkToolsFor(dependencies, sourceId),
           // 排队时长可能长达数秒：必须在进入排队的那一刻就发（`onQueued` 的触发时机早于
           // `turnId` 产生），不能等 `runTurn()` 整体返回后再补发（docs/02 §10.6）。
           onQueued: () => send("queued", {}),

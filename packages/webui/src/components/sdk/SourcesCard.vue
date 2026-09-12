@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import UiButton from "../../ui/UiButton.vue";
+import UiCheckbox from "../../ui/UiCheckbox.vue";
 import UiTag from "../../ui/UiTag.vue";
 import UiModal from "../../ui/UiModal.vue";
 import DataGrid from "../../ui/DataGrid.vue";
@@ -14,8 +15,12 @@ import {
   SOURCE_COLUMNS,
   SOURCE_KIND_LABELS,
   SOURCE_KIND_SEVERITY,
+  SDK_DEFAULT_TOOLS,
+  normalizeSource,
+  toolsSummary,
   type ApiKeyRow,
   type SourceRow,
+  type ToolChoice,
 } from "./types";
 
 /**
@@ -35,7 +40,9 @@ async function reloadSources(): Promise<void> {
   sourcesLoading.value = true;
   try {
     const result = await api<{ sources?: SourceRow[] }>("/api/sdk/sources");
-    sources.value = Array.isArray(result?.sources) ? result.sources : [];
+    sources.value = Array.isArray(result?.sources)
+      ? result.sources.map(normalizeSource)
+      : [];
   } catch (error) {
     toastError("加载来源失败", error);
   } finally {
@@ -96,11 +103,79 @@ async function loadKeys(sourceId: string): Promise<void> {
   }
 }
 async function openKeys(source: SourceRow): Promise<void> {
-  selectedSource.value = source;
+  selectedSource.value = normalizeSource(source);
   revealedToken.value = "";
   issueForm.value = { label: "", expiresAt: "" };
   keysDialog.value = true;
-  await loadKeys(source.id);
+  resetToolDraft(selectedSource.value);
+  await Promise.all([loadKeys(source.id), loadToolChoices()]);
+}
+
+// ── 工具白名单：这个来源的 SDK 会话能调哪些（docs/12 §8） ──────────────────────
+//
+// 名单来自 `GET /api/tools`（本部署真正注册着的那批，含自撰写工具与 MCP），不是前端写死的
+// 一份常量 —— 写死的话新装一个 MCP 服务器就勾不到它。结构性禁止的两族由服务端标 `sdkForbidden`，
+// 界面据此禁用复选框并说明原因，不在前端另列一份会漂的名单。
+const toolChoices = ref<ToolChoice[]>([]);
+const toolChoicesLoading = ref(false);
+/** `null` = 用默认；数组 = 显式配置（可以为空）。与 `SourceRow.tools` 同一形状。 */
+const toolDraft = ref<string[] | null>(null);
+const toolsSaving = ref(false);
+
+async function loadToolChoices(): Promise<void> {
+  if (toolChoices.value.length) return;
+  toolChoicesLoading.value = true;
+  try {
+    const result = await api<Record<string, { sdkForbidden?: boolean }>>("/api/tools");
+    toolChoices.value = Object.entries(result ?? {})
+      .map(([name, entry]) => ({ name, sdkForbidden: entry?.sdkForbidden === true }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  } catch (error) {
+    toolChoices.value = [];
+    toastError("加载工具清单失败", error);
+  } finally {
+    toolChoicesLoading.value = false;
+  }
+}
+
+function resetToolDraft(source: SourceRow): void {
+  toolDraft.value = source.tools === null ? null : [...source.tools];
+}
+
+const usingDefaultTools = computed(() => toolDraft.value === null);
+const effectiveToolNames = computed(() => toolDraft.value ?? SDK_DEFAULT_TOOLS);
+
+/** 从「用默认」切到显式配置时以默认三件起步，而不是从空开始：后者等于一键关掉这个来源。 */
+function startCustomTools(): void {
+  if (toolDraft.value === null) toolDraft.value = [...SDK_DEFAULT_TOOLS];
+}
+
+function toggleTool(name: string, checked: boolean): void {
+  startCustomTools();
+  const current = new Set(toolDraft.value ?? []);
+  if (checked) current.add(name);
+  else current.delete(name);
+  toolDraft.value = [...current];
+}
+
+async function saveTools(): Promise<void> {
+  const source = selectedSource.value;
+  if (!source) return;
+  toolsSaving.value = true;
+  try {
+    const result = await api<{ source: SourceRow }>(
+      `/api/sdk/sources/${encodeURIComponent(source.id)}/tools`,
+      { method: "PATCH", body: JSON.stringify({ tools: toolDraft.value }) },
+    );
+    selectedSource.value = normalizeSource(result.source);
+    resetToolDraft(selectedSource.value);
+    pushToast({ severity: "success", summary: "工具白名单已保存" });
+    await reloadSources();
+  } catch (error) {
+    toastError("保存工具白名单失败", error);
+  } finally {
+    toolsSaving.value = false;
+  }
 }
 
 // ── 签发密钥：label / 过期时间均可选 ─────────────────────────────────────────
@@ -277,6 +352,51 @@ onMounted(() => {
             ><b>{{ new Date(selectedSource.createdAt).toLocaleString() }}</b></span
           >
         </div>
+
+        <section class="tools-block">
+          <header>
+            <b>工具白名单</b>
+            <UiTag
+              :value="toolsSummary(selectedSource.tools)"
+              :severity="selectedSource.tools === null ? 'secondary' : 'info'"
+            />
+          </header>
+          <p class="hint">
+            这个来源的 SDK 会话能调哪些工具。未配置时用默认的记忆三件；配置是整份替换，
+            不是在默认之上叠加。放开的是「哪一档 agent 拿哪些工具」这一轴，角色仍恒为
+            trusted，需要审批的调用照旧会被拒。
+          </p>
+          <div class="tools-actions">
+            <UiButton
+              size="small"
+              variant="outlined"
+              :label="usingDefaultTools ? '改为自定义' : '恢复默认'"
+              @click="usingDefaultTools ? startCustomTools() : (toolDraft = null)"
+            />
+            <UiButton
+              size="small"
+              label="保存"
+              :loading="toolsSaving"
+              @click="saveTools"
+            />
+          </div>
+          <div v-if="toolChoicesLoading" class="hint">正在加载工具清单…</div>
+          <div v-else class="tools-grid">
+            <UiCheckbox
+              v-for="tool in toolChoices"
+              :key="tool.name"
+              :label="tool.name"
+              :disabled="tool.sdkForbidden"
+              :aria-label="
+                tool.sdkForbidden
+                  ? `${tool.name}：与 SDK 通道的形状冲突，配了也不生效`
+                  : tool.name
+              "
+              :model-value="effectiveToolNames.includes(tool.name)"
+              @change="(checked: boolean) => toggleTool(tool.name, checked)"
+            />
+          </div>
+        </section>
 
         <div v-if="revealedToken" class="callout warn">
           <i class="pi pi-key" aria-hidden="true" /><code>{{ revealedToken }}</code

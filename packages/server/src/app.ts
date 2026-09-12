@@ -56,6 +56,7 @@ import {
   toolCallableBy,
   updateScheduledJob,
   KNOWN_UNIMPLEMENTED_CONFIG_KEYS,
+  SDK_FORBIDDEN_TOOLS,
   TOOL_POLICY,
   aliasSettingsSchema,
   checkWakeword,
@@ -1627,6 +1628,9 @@ export function createServer(
               deferred: entry.deferred,
               // 主 agent 与 lw-worker 的可用集分叉。与 `enabled` 正交：`enabled=false` 是两侧都没有。
               sides: toolSides(entry.name),
+              // 这一件配进 SDK 来源的白名单也不会生效（`docs/12 §8` 的结构性禁止两族）。
+              // 由服务端算而不是让 WebUI 自己列一份名单：那会变成第二份会漂的判据。
+              sdkForbidden: SDK_FORBIDDEN_TOOLS.has(entry.name),
               relaxed: entry.relaxed,
             },
           ]),
@@ -1650,6 +1654,8 @@ export function createServer(
               deferred: false,
               // `sides` 在这条路上照样是真的：判据只看工具名，与有没有注册表无关。
               sides: toolSides(name),
+              // 同上，`SDK_FORBIDDEN_TOOLS` 也只看名字。
+              sdkForbidden: SDK_FORBIDDEN_TOOLS.has(name),
               defaults: {
                 minRole: policy.minRole,
                 approval: policy.approval,

@@ -686,7 +686,9 @@ CREATE TABLE sources (
   character_file TEXT,                  -- 该来源目录下的人格文件名，未设时退回 CHARACTER.md
   assist_file    TEXT,                  -- 同上，退回 ASSIST.md
   created_at     INTEGER NOT NULL,
-  disabled_at    INTEGER
+  disabled_at    INTEGER,
+  tools          TEXT                   -- 0021：SDK 工具白名单（JSON 数组）。NULL = 用默认（SDK_AGENT_TOOLS），
+                                        -- '[]' = 一件都不给。两者不同，读侧 sdkToolsFromConfig() 据此分支
 );
 
 CREATE TABLE memory_docs (
@@ -719,6 +721,11 @@ CREATE INDEX ix_memrev_doc_ts ON memory_revisions(doc_id, ts DESC);
 > `pubmemory:telegram`），`subject` 为来源 id，非空。`primemory` 的 `id` 为
 > `primemory:<来源 id>:<用户 id>`，`subject` 为 `<来源 id>:<用户 id>`，非空。
 > `character` 的 per-chat 覆盖行例外：`subject` 直接是 chatId，不带来源前缀，不受来源迁移影响。
+> `sources.tools` 落在来源而不是 `api_keys`：密钥签发时绑定来源，同一来源可以有多把密钥，
+> 轮换一把钥匙不应连带改变这个来源能做什么。合法性不由 DB 层拦（没有可枚举的工具全集 ——
+> 自撰写工具、插件、MCP 的名字随部署变化），判据在 `sdkToolsFromConfig()`，见
+> [12 §8](./12-sdk.md#8-工具目录)。
+>
 > `sources` 内建一行 `id='telegram'`。
 
 ### 2.11 审批、配置、会话

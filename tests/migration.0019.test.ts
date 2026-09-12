@@ -22,8 +22,11 @@ function upgradeAcross0019(name: string, extraFixture?: (db: Database.Database) 
   const staging = `${root}/migrations`;
   rmSync(root, { recursive: true, force: true });
   mkdirSync(staging, { recursive: true });
+  // 排除的是 0019 **及其之后的每一份**，不只是 0019 自己：这一趟要造的是「已到 0018」的库，
+  // 而 0019 之后的迁移可以依赖它建出来的表（0021 就是 `ALTER TABLE sources`）。只跳过 0019
+  // 的话，那些迁移会在 sources 还不存在时执行，报的错与本用例要验证的东西无关。
   for (const entry of readdirSync(REAL_MIGRATIONS))
-    if (entry.endsWith('.sql') && entry !== SCOPE_MIGRATION)
+    if (entry.endsWith('.sql') && entry < SCOPE_MIGRATION)
       copyFileSync(resolve(REAL_MIGRATIONS, entry), resolve(staging, entry));
   const db = openDatabase(database);
   migrateDatabase(db, staging);
