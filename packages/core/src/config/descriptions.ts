@@ -125,6 +125,10 @@ export const CONFIG_DESCRIPTIONS: Record<string, string> = {
   "concurrency.turnTimeoutMs":
     "单个轮次从开始到结束的总超时（毫秒），超时强制终止并记为「失败」而不是「已取消」。",
 
+  sdk: "第三方经 /sdk/v1 接入时的传输层参数。",
+  "sdk.streamHeartbeatMs":
+    "流式端点保活注释帧的间隔（毫秒），0 关闭。轮次执行期间流上可能长时间没有数据，反向代理会按自己的空闲超时提前掐断连接；此时客户端读到的是传输中断而不是错误事件。",
+
   cancel: "轮次被取消（用户中断 / 超时）时的处理方式。",
   "cancel.commitPartial":
     "取消时是否将尚未发送给用户的部分回复提交进上下文。已发送的内容始终提交（上下文必须与用户所见一致），不受本项控制。",

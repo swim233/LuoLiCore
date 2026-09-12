@@ -450,6 +450,20 @@
           "default": {},
           "description": "并发轮次数、队列长度与单轮超时。"
         },
+        "sdk": {
+          "type": "object",
+          "properties": {
+            "streamHeartbeatMs": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 15000,
+              "description": "流式端点保活注释帧的间隔（毫秒），0 关闭。轮次执行期间流上可能长时间没有数据，反向代理会按自己的空闲超时提前掐断连接；此时客户端读到的是传输中断而不是错误事件。"
+            }
+          },
+          "additionalProperties": false,
+          "default": {},
+          "description": "第三方经 /sdk/v1 接入时的传输层参数。"
+        },
         "cancel": {
           "type": "object",
           "properties": {

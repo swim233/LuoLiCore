@@ -187,10 +187,19 @@ Bearer（`Authorization: Bearer sk-...`）只对 `/sdk/v1/*` 生效，`packages/
 `X-Accel-Buffering: no`（关闭反向代理的响应缓冲；nginx 认这个头，无反代的部署里它无副作用；
 不设置的话逐块转发的 `delta` 事件会被代理攒到轮次结束才一次性放出，等价于退化成非流式）。
 
-**无心跳帧**：连接在轮次执行期间没有任何保活数据。部署要求 `proxy_read_timeout ≥
-concurrency.turnTimeoutMs`（默认 `600s`），否则反向代理会按自己的空闲超时（nginx 默认 `60s`）
-提前掐断连接——比本系统自身的轮次超时更早生效，且客户端读到的将是一次传输层中断而非
-`error` 事件。加心跳帧是后续可能的改进，本次未做。
+**保活注释帧**（`sdk.streamHeartbeatMs`，默认 `15000`，置 `0` 关闭）。轮次执行期间流上可能长时间
+没有任何事件（模型在想、工具在跑），而反向代理按自己的空闲超时算账：nginx 默认
+`proxy_read_timeout` 60s，比本系统的 `turnTimeoutMs`（默认 600s）早得多。被它掐断时客户端读到的
+是一次传输层中断而非 `error` 事件，只能靠截断语义兜底。默认 15s 给了 4 倍余量。
+
+帧形态是 SSE 注释（`: heartbeat`），不是新增的事件类型：注释按规范被解析器忽略
+（`@luoli/sdk-client` 的 `parseFrame` 跳过 `:` 开头的行），既有客户端不必改一个字，
+[§6](#6-流式协议) 的顺序不变量也不受影响 —— 注释不参与「末尾恰好 `done` 或 `error` 之一」。
+定时器在流关闭时清掉，客户端断连与正常终结都经过同一条路径。
+
+仍然建议部署侧把 `proxy_read_timeout` 设到 ≥ `turnTimeoutMs`：心跳把「反代提前掐断」这一类
+从常态降成了配置失误下的边缘情形，但它不改变一个轮次最长可以跑 600s 这件事。关掉心跳
+（置 `0`）时旧的部署要求原样成立。
 
 客户端断连（连接中止）映射到 `TurnRegistry.cancel()`：排队阶段用 `onPending` 拿到的 pendingId
 取消，`openTurn` 成功后改用真实 `turnId`。

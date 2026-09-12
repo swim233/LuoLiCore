@@ -53,6 +53,9 @@ function currentConfig(dependencies: ServerDependencies): Readonly<Config> {
     : dependencies.config;
 }
 
+/** SSE 注释帧：解析器按规范忽略它，只用来让连接上有字节流动。 */
+const HEARTBEAT_FRAME = ": heartbeat\n\n";
+
 /** 请求方缺任一装配（Bearer 中间件已经在 sources/apiKeys/secrets 缺失时短路，这里覆盖轮次执行链）。 */
 function requireSdk(
   dependencies: ServerDependencies,
@@ -642,9 +645,32 @@ export function mountSdkV1(app: Hono<ServerEnv>, dependencies: ServerDependencie
         encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`),
       );
     };
+    /**
+     * 保活注释帧（`sdk.streamHeartbeatMs`，0 关闭）。
+     *
+     * 轮次执行期间这条流可能长时间没有任何数据（模型在想、工具在跑），而反向代理按自己的
+     * 空闲超时算账：nginx 默认 `proxy_read_timeout` 60s，比本系统的 `turnTimeoutMs`（默认
+     * 600s）早得多。被它掐断时客户端读到的是一次传输层中断，而不是一个 `error` 事件 ——
+     * 两者在客户端的处理路径完全不同，前者只能靠截断语义兜底。
+     *
+     * 用 SSE 注释（`:` 开头）而不是新增一种事件：注释按规范被解析器忽略，既有客户端
+     * （`@luoli/sdk-client` 的 `parseFrame` 跳过 `:` 开头的行）不必改一个字，`docs/12 §6`
+     * 的顺序不变量也不受影响 —— 注释不是事件，不参与「末尾恰好 done 或 error 之一」。
+     *
+     * 定时器在 `close()` 里清掉：客户端断连（`ReadableStream.cancel`）与正常终结
+     * （`done` / `error`）都经过它，没有第二条退出路径。
+     */
+    const heartbeat =
+      config.sdk.streamHeartbeatMs > 0
+        ? setInterval(() => {
+            if (closed || !controllerRef) return;
+            controllerRef.enqueue(encoder.encode(HEARTBEAT_FRAME));
+          }, config.sdk.streamHeartbeatMs)
+        : null;
     const close = (): void => {
       if (closed) return;
       closed = true;
+      if (heartbeat) clearInterval(heartbeat);
       ctx.req.raw.signal.removeEventListener("abort", onAbort);
       try {
         controllerRef?.close();

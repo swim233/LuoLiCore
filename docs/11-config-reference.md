@@ -232,6 +232,12 @@ concurrency:
                                   # 都是 900000）比它大，因此默认配置下那两个 15 分钟从来没生效过
                                   # （见各自那条）。启动时有一条 config.invalid warn 点名所有配得
                                   # 比它长的长工具（main.ts），不必靠人对着两处默认值自己算
+sdk:
+  streamHeartbeatMs: 15000        # 热更新 · /sdk/v1 流式端点的保活注释帧间隔，0 关闭。轮次执行期间
+                                  # 流上可能长时间没有事件，而 nginx 的 proxy_read_timeout 默认 60s，
+                                  # 比 turnTimeoutMs（600000）早得多；被它掐断时客户端读到的是传输
+                                  # 中断而不是 error 事件。帧是 SSE 注释（`: heartbeat`），解析器按
+                                  # 规范忽略，不影响事件顺序（docs/12 §6）
 cancel:
   commitPartial: false            # 热更新 · 取消时是否提交**没投递给用户**的那部分（已发到屏幕上的一律提交，见 04 §5.3）
 
