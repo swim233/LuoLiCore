@@ -667,10 +667,37 @@ export function mountSdkV1(app: Hono<ServerEnv>, dependencies: ServerDependencie
             controllerRef.enqueue(encoder.encode(HEARTBEAT_FRAME));
           }, config.sdk.streamHeartbeatMs)
         : null;
+    /**
+     * 工具活动事件（opt-in，`events: ["tool"]`）。
+     *
+     * 订阅的是既有的观测流 `turn.progress`，不给 agent 层新穿一条回调：那条流上已经有
+     * `phase:'model'`（每步开始）与 `phase:'tools'`（每步结束），本次补的 `phase:'tool'`
+     * 由 `ToolRegistry.execute()` 在真正调用之前发出 —— 一次工具调用可能跑几十秒，只有这一条
+     * 能让调用方在这段时间里看到东西。
+     *
+     * 按 `turnId` 过滤：同一进程内可能有多个轮次在跑，事件总线是全局的。turnId 要到
+     * `onOpened` 才有，之前的事件不可能属于本轮。
+     *
+     * **不传 `channel: true`**：那个标记的含义是「这个订阅者背后有一个能做决定的人」，审批
+     * 据此判断有没有裁决通道。SDK 会话恰恰没有人（`docs/12 §7` 的 fail-closed 就建立在这上面），
+     * 传了会让审批以为有人接单。
+     */
+    const wantsToolEvents = parsed.data.events?.includes("tool") === true;
+    let openedTurnId: string | null = null;
+    const unsubscribe = wantsToolEvents
+      ? dependencies.events.subscribe((event) => {
+          if (event.type !== "turn.progress" || openedTurnId === null) return;
+          const data = event.data as { turnId?: string; phase?: string; note?: string };
+          if (data.turnId !== openedTurnId || data.phase !== "tool") return;
+          send("tool", { name: String(data.note ?? "") });
+        })
+      : null;
+
     const close = (): void => {
       if (closed) return;
       closed = true;
       if (heartbeat) clearInterval(heartbeat);
+      unsubscribe?.();
       ctx.req.raw.signal.removeEventListener("abort", onAbort);
       try {
         controllerRef?.close();
@@ -704,6 +731,7 @@ export function mountSdkV1(app: Hono<ServerEnv>, dependencies: ServerDependencie
           },
           onOpened: (turn) => {
             cancelId = turn.turnId;
+            openedTurnId = turn.turnId;
           },
           buildTrigger: () => archived,
           produce: async (turn, turnReservation) => {

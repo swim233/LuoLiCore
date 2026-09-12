@@ -160,9 +160,24 @@ Bearer（`Authorization: Bearer sk-...`）只对 `/sdk/v1/*` 生效，`packages/
 
 ## 6. 流式协议
 
-`POST /sdk/v1/sessions/:id/messages/stream`，四事件：`delta`（文本增量，`{text}`）、`done`
+`POST /sdk/v1/sessions/:id/messages/stream`，四个缺省事件 + 一个 opt-in：`delta`（文本增量，`{text}`）、`done`
 （最终文本与用量，`{text, usage}`）、`error`（`{code, message, retryable}`，与 HTTP 错误体
 同形）、`queued`（进入排队时一次，`{position?}`，`position` 目前从不由服务端填充）。
+
+**`tool`（opt-in）**：这一轮开始执行某个工具，载荷 `{name}`。**只有请求里写了
+`events: ["tool"]` 才发**，这一条是必须的 —— `sdkStreamEventSchema` 是 `discriminatedUnion`，
+旧客户端 `.parse()` 到一个不认识的事件会抛裸 `ZodError`，无条件发新事件等于破坏既有接入方。
+显式要了才发，因此这是一次加法而不是改动。
+
+为什么需要它：一次工具调用可能跑上几十秒，期间流上原本什么都没有，调用方只能等。服务端订阅
+既有的观测流 `turn.progress`（`phase:'tool'`，由 `ToolRegistry.execute()` 在真正调用之前发出），
+不给 agent 层新穿一条回调；按 `turnId` 过滤，事件总线是全局的。
+
+载荷只有工具名，不带入参与结果：入参可能含敏感内容（文件路径、命令行），而这条流是给第三方
+后端看的进度信号，不是审计通道 —— 审计在 `tool.call` 那条 span 上，它不出网。
+
+`tool` 事件**不参与顺序不变量**：它可以出现在任意两个 `delta` 之间，也可以在没有任何 `delta`
+的轮次里出现，但仍然在 `done` / `error` 之前。
 
 顺序不变量：`queued`（如果出现）先于任何 `delta`——它在 `acquire()` 之前、`turnId` 产生之前
 触发，排队时长可能长达数秒，事件必须在排队开始那一刻就发出；`delta` 零至多次；末尾恰好

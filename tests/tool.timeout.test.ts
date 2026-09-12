@@ -6,7 +6,7 @@ import type { RuntimeTurnContext } from '@luoli/shared';
 
 const broker: ApprovalBroker = { request: async () => true };
 const events: Array<{ kind: string; summary: string; data?: unknown }> = [];
-const log = { span: () => ({ id: 'span', end: () => undefined }), event: (event: { kind: string; summary: string; data?: unknown }) => events.push(event) } as unknown as LogSink;
+const log = { span: () => ({ id: 'span', end: () => undefined }), event: (event: { kind: string; summary: string; data?: unknown }) => events.push(event), publish: () => undefined } as unknown as LogSink;
 const denials = (): Array<{ tool: string; reason: string }> => events.filter((event) => event.kind === 'tool.denied')
   .map((event) => event.data as { tool: string; reason: string });
 const turn = { turnId: 't', key: 'chat:1', chatId: '1', threadId: null, initiatorUserId: '2', effectiveRole: 'owner', isPrivate: true, baseCommitId: null,

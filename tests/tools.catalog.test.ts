@@ -21,7 +21,7 @@ import type { Role } from '@luoli/shared';
  */
 
 const events: LogEvent[] = [];
-const log = { span: () => ({ id: 'span', end: () => undefined }), event: (event: LogEvent) => { events.push(event); } } as unknown as LogSink;
+const log = { span: () => ({ id: 'span', end: () => undefined }), event: (event: LogEvent) => { events.push(event); }, publish: () => undefined } as unknown as LogSink;
 const okBroker: ApprovalBroker = { request: async () => true };
 const schema = z.object({ text: z.string().optional() });
 const noop = (): object => ({ ok: true });

@@ -40,6 +40,7 @@ const events: LogEvent[] = [];
 const log = {
   span: () => ({ id: 'span', end: () => undefined }),
   event: (event: LogEvent) => { events.push(event); },
+  publish: () => undefined,
 } as unknown as LogSink;
 const okBroker: ApprovalBroker = { request: async () => true };
 

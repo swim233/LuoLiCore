@@ -16,7 +16,7 @@ import type { Role, RuntimeTurnContext } from '@luoli/shared';
 const broker: ApprovalBroker = { request: async () => true };
 const approvalCalls: string[] = [];
 const countingBroker: ApprovalBroker = { request: async (tool) => { approvalCalls.push(tool.name); return true; } };
-const log = { span: () => ({ id: 'span', end: () => undefined }), event: () => undefined } as unknown as LogSink;
+const log = { span: () => ({ id: 'span', end: () => undefined }), event: () => undefined, publish: () => undefined } as unknown as LogSink;
 const limits = { maxRegistered: 20, maxCallsPerTurn: 20, maxConsecutiveErrors: 3, defaultTimeoutMs: 80 };
 const policy = { minRole: 'trusted', approval: 'never', scope: 'global', source: 'builtin' } satisfies ToolPolicyEntry;
 
