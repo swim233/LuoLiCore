@@ -74,7 +74,12 @@ async function freePort(): Promise<number> {
  * 固定回复，非流式请求回一条完整 JSON，`stream:true` 回一段 SSE，格式对齐
  * `@ai-sdk/openai-compatible` 的期望（与 `tests/support/upstream.ts` 同一协议子集）。
  */
-async function startFakeUpstream(reply: string): Promise<{ url: string; close(): Promise<void> }> {
+async function startFakeUpstream(reply: string): Promise<{
+  url: string;
+  queueToolCall(name: string, args: Record<string, unknown>): void;
+  close(): Promise<void>;
+}> {
+  let pendingToolCall: { name: string; arguments: Record<string, unknown> } | null = null;
   const server = createHttpServer((request: IncomingMessage, response: ServerResponse) => {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
     if (!url.pathname.endsWith("/chat/completions")) {
@@ -101,6 +106,31 @@ async function startFakeUpstream(reply: string): Promise<{ url: string; close():
         const created = Math.floor(Date.now() / 1000);
         const send = (payload: Record<string, unknown>): void =>
           void response.write(`data: ${JSON.stringify(payload)}\n\n`);
+        // 排了一次工具调用就走 tool_calls 增量：SSE tool 事件只有在模型真的调了工具时才产生，
+        // 靠固定文本的回复测不出来。用一次即出队。
+        const queuedTool = pendingToolCall;
+        pendingToolCall = null;
+        if (queuedTool) {
+          send({
+            id, object: "chat.completion.chunk", created, model: body.model ?? "fake",
+            choices: [{ index: 0, delta: { role: "assistant", content: null }, finish_reason: null }],
+          });
+          send({
+            id, object: "chat.completion.chunk", created, model: body.model ?? "fake",
+            choices: [{ index: 0, delta: { tool_calls: [{
+              index: 0, id: "call_e2e", type: "function",
+              function: { name: queuedTool.name, arguments: JSON.stringify(queuedTool.arguments) },
+            }] }, finish_reason: null }],
+          });
+          send({
+            id, object: "chat.completion.chunk", created, model: body.model ?? "fake",
+            choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
+            usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+          });
+          response.write("data: [DONE]\n\n");
+          response.end();
+          return;
+        }
         send({
           id, object: "chat.completion.chunk", created, model: body.model ?? "fake",
           choices: [{ index: 0, delta: { role: "assistant", content: reply }, finish_reason: null }],
@@ -127,6 +157,10 @@ async function startFakeUpstream(reply: string): Promise<{ url: string; close():
   const { port } = server.address() as AddressInfo;
   return {
     url: `http://127.0.0.1:${port}`,
+    /** 排一次「下一个流式请求回工具调用而不是文本」。用一次即出队。 */
+    queueToolCall: (name: string, args: Record<string, unknown>) => {
+      pendingToolCall = { name, arguments: args };
+    },
     close: () => new Promise<void>((settle) => server.close(() => settle())),
   };
 }
@@ -208,6 +242,12 @@ async function main(): Promise<void> {
   const apiKeys = new ApiKeyRepository(db);
   const source = sources.create("sdk-e2e");
   const issued = issueApiKey({ apiKeys, secrets, sourceId: source.id });
+  // 第二个来源显式配一份工具白名单（0021 的 sources.tools）。两个来源一起种下去，就能在同一次
+  // 冒烟里同时验「未配置走默认」与「配了按配置走」，而不必在进程跑起来之后再去写同一个 db
+  // 文件 —— 那需要第二个写连接，和常驻进程抢锁。
+  const toolSource = sources.create("sdk-e2e-tools");
+  sources.setTools(toolSource.id, ["grep", "read_file", "memory_read"]);
+  const toolIssued = issueApiKey({ apiKeys, secrets, sourceId: toolSource.id });
   closeDatabase(db);
 
   process.stdout.write(`[sdk-e2e] 临时目录：${tempRoot}\n`);
@@ -275,6 +315,55 @@ async function main(): Promise<void> {
         if (last?.event !== "done") throw new Error(`末事件不是 done：${JSON.stringify(last)}`);
       });
 
+      // ---- 本轮新增能力（PR #1 / #3 / #4）----
+
+      await assertStep("listTools：未配白名单的来源拿到默认那几件", async () => {
+        const tools = await client.listTools();
+        const names = tools.map((tool) => tool.name);
+        if (!names.includes("memory_read") || !names.includes("memory_write"))
+          throw new Error(`默认清单缺记忆工具：${names.join(",")}`);
+        if (names.includes("grep"))
+          throw new Error(`未配白名单却拿到了 grep：${names.join(",")}`);
+        // memory_list 在名义白名单里，但 minRole 是 owner 而 SDK 恒 trusted，角色轴先拒。
+        if (names.includes("memory_list"))
+          throw new Error("memory_list 不该出现：角色轴应当先把它挡掉");
+      });
+
+      await assertStep("listTools：配了白名单的来源按配置走", async () => {
+        const scoped = createSdkClient({ baseUrl, apiKey: toolIssued.token });
+        const names = (await scoped.listTools()).map((tool) => tool.name).sort();
+        if (names.join(",") !== "grep,memory_read,read_file")
+          throw new Error(`配置未生效，实际：${names.join(",")}`);
+      });
+
+      await assertStep("SSE tool 事件：要了才发", async () => {
+        upstream.queueToolCall("memory_read", { scope: "pubmemory" });
+        const events: SdkStreamEvent[] = [];
+        for await (const event of client.streamMessage(sessionId, {
+          endUserId: "e2e-user",
+          text: "读一下公开记忆",
+          events: ["tool"],
+        }))
+          events.push(event);
+        const tools = events.filter((event) => event.event === "tool");
+        if (tools.length === 0) throw new Error("要了却没收到 tool 事件");
+        const first = tools[0];
+        if (first?.event !== "tool" || first.data.name !== "memory_read")
+          throw new Error(`工具名不符：${JSON.stringify(first)}`);
+      });
+
+      await assertStep("SSE tool 事件：不要就不发", async () => {
+        upstream.queueToolCall("memory_read", { scope: "pubmemory" });
+        const events: SdkStreamEvent[] = [];
+        for await (const event of client.streamMessage(sessionId, {
+          endUserId: "e2e-user",
+          text: "再读一次",
+        }))
+          events.push(event);
+        if (events.some((event) => event.event === "tool"))
+          throw new Error("没要却收到了 tool 事件 —— 旧客户端会因此解析失败");
+      });
+
       await assertStep("listSessions 含刚创建的会话", async () => {
         const listed = await client.listSessions();
         if (!listed.sessions.some((row) => row.id === sessionId)) throw new Error("列表中未找到该会话");
@@ -285,10 +374,11 @@ async function main(): Promise<void> {
         if (patched.label !== "e2e-renamed") throw new Error(`label 未更新：${patched.label}`);
       });
 
-      await assertStep("listCommits 含两条 turn 提交", async () => {
+      await assertStep("listCommits 含四条 turn 提交", async () => {
         const commits = await client.listCommits(sessionId);
         const turns = commits.commits.filter((row) => row.kind === "turn");
-        if (turns.length !== 2) throw new Error(`turn 提交数为 ${turns.length}，期望 2`);
+        // 两条基础轮次 + 上面两条工具事件用例各一轮。
+        if (turns.length !== 4) throw new Error(`turn 提交数为 ${turns.length}，期望 4`);
       });
 
       await assertStep("deleteSession 后 getSession 返回 404 session_deleted", async () => {
