@@ -524,3 +524,190 @@ describe("POST .../messages/stream：SSE 四事件（plan T3.8 验收 1–4）",
     }
   });
 });
+
+describe("SSE 保活注释帧（sdk.streamHeartbeatMs）", () => {
+  /**
+   * 轮次执行期间这条流可能长时间没有任何数据，而反向代理按自己的空闲超时算账（nginx 默认
+   * 60s，比 turnTimeoutMs 的 600s 早得多）。被它掐断时客户端读到的是传输层中断而不是 error
+   * 事件，只能靠截断语义兜底。
+   */
+  it("轮次卡住时连接上仍有字节流动", async () => {
+    const upstream = await startHangingUpstream("最终答案");
+    const runtime = await startTestRuntime("sdk-stream-heartbeat", {
+      config: { sdk: { streamHeartbeatMs: 20 } },
+    });
+    try {
+      await setupModelWithUrl(runtime, upstream.url, "main");
+      const { token } = issueSource(runtime, "Alpha");
+      const chatId = ((await createSession(runtime, token, {})).json.session as { id: string }).id;
+
+      const response = await streamMessage(runtime, token, chatId, { endUserId: "u1", text: "hi" });
+      expect(response.status).toBe(200);
+
+      const reader = response.body!.getReader();
+      const decoder = new TextDecoder();
+      let seen = "";
+      try {
+        // 轮次此刻卡在 hanging upstream 上，没有任何事件可发；读到的只可能是注释帧。
+        for (let round = 0; round < 40 && seen.split(": heartbeat").length - 1 < 2; round += 1) {
+          const { value, done } = await reader.read();
+          if (value) seen += decoder.decode(value, { stream: true });
+          if (done) break;
+        }
+      } finally {
+        reader.releaseLock();
+      }
+
+      expect(seen.split(": heartbeat").length - 1).toBeGreaterThanOrEqual(2);
+      // 注释不是事件：顺序不变量（queued 先于 delta、末尾恰好 done 或 error）不受影响。
+      expect(seen).not.toContain("event: ");
+    } finally {
+      upstream.release();
+      await upstream.close();
+      await runtime.dispose();
+    }
+  });
+
+  it("置 0 时一帧都不发", async () => {
+    const upstream = await startHangingUpstream("最终答案");
+    const runtime = await startTestRuntime("sdk-stream-heartbeat-off", {
+      config: { sdk: { streamHeartbeatMs: 0 } },
+    });
+    try {
+      await setupModelWithUrl(runtime, upstream.url, "main");
+      const { token } = issueSource(runtime, "Alpha");
+      const chatId = ((await createSession(runtime, token, {})).json.session as { id: string }).id;
+
+      const response = await streamMessage(runtime, token, chatId, { endUserId: "u1", text: "hi" });
+      const reader = response.body!.getReader();
+      const decoder = new TextDecoder();
+      let seen = "";
+      const settle = new Promise((done) => setTimeout(done, 120));
+      const race = await Promise.race([reader.read(), settle.then(() => null)]);
+      if (race && typeof race === "object" && "value" in race && race.value)
+        seen += decoder.decode(race.value as Uint8Array, { stream: true });
+      reader.releaseLock();
+
+      expect(seen).not.toContain("heartbeat");
+    } finally {
+      upstream.release();
+      await upstream.close();
+      await runtime.dispose();
+    }
+  });
+
+  /** 既有解析器按规范跳过 `:` 开头的行，因此开着心跳时事件序列与关掉时逐条一致。 */
+  it("开着心跳时事件序列不变", async () => {
+    const upstream = await startFakeUpstream("正常完成");
+    const runtime = await startTestRuntime("sdk-stream-heartbeat-parity", {
+      config: { sdk: { streamHeartbeatMs: 20 } },
+    });
+    try {
+      await setupModel(runtime, upstream);
+      const { token } = issueSource(runtime, "Alpha");
+      const chatId = ((await createSession(runtime, token, {})).json.session as { id: string }).id;
+
+      const events = await collectAll(
+        await streamMessage(runtime, token, chatId, { endUserId: "u1", text: "hi" }),
+      );
+
+      expect(events.at(-1)?.event).toBe("done");
+      expect(events.filter((event) => event.event === "error")).toHaveLength(0);
+    } finally {
+      await upstream.close();
+      await runtime.dispose();
+    }
+  });
+});
+
+describe("SSE tool 事件（opt-in）", () => {
+  /**
+   * 一次工具调用可能跑上几十秒，期间流上原本什么都没有。这条事件让调用方知道「她正在跑 X」。
+   *
+   * 必须 opt-in：`sdkStreamEventSchema` 是 discriminatedUnion，旧客户端 `.parse()` 到不认识的
+   * 事件会抛裸 ZodError —— 无条件发等于破坏既有接入方。
+   */
+  it("不要就不发：默认的流里没有 tool 事件", async () => {
+    const upstream = await startFakeUpstream("好了");
+    const runtime = await startTestRuntime("sdk-stream-tool-optout");
+    try {
+      await setupModel(runtime, upstream);
+      const { token } = issueSource(runtime, "Alpha");
+      const chatId = ((await createSession(runtime, token, {})).json.session as { id: string }).id;
+
+      upstream.queueToolCallStep([
+        { id: "call_1", name: "memory_read", arguments: { scope: "pubmemory" } },
+      ]);
+
+      const events = await collectAll(
+        await streamMessage(runtime, token, chatId, { endUserId: "u1", text: "查一下" }),
+      );
+
+      expect(events.filter((event) => event.event === "tool")).toHaveLength(0);
+      expect(events.at(-1)?.event).toBe("done");
+    } finally {
+      await upstream.close();
+      await runtime.dispose();
+    }
+  });
+
+  it("要了就发，带的是工具名", async () => {
+    const upstream = await startFakeUpstream("好了");
+    const runtime = await startTestRuntime("sdk-stream-tool-optin");
+    try {
+      await setupModel(runtime, upstream);
+      const { token } = issueSource(runtime, "Alpha");
+      const chatId = ((await createSession(runtime, token, {})).json.session as { id: string }).id;
+
+      upstream.queueToolCallStep([
+        { id: "call_1", name: "memory_read", arguments: { scope: "pubmemory" } },
+      ]);
+
+      const events = await collectAll(
+        await streamMessage(runtime, token, chatId, {
+          endUserId: "u1",
+          text: "查一下",
+          events: ["tool"],
+        }),
+      );
+
+      const tools = events.filter((event) => event.event === "tool");
+      expect(tools).toHaveLength(1);
+      expect((tools[0]!.data as { name: string }).name).toBe("memory_read");
+      // 顺序不变量不受影响：末尾仍然恰好是 done。
+      expect(events.at(-1)?.event).toBe("done");
+    } finally {
+      await upstream.close();
+      await runtime.dispose();
+    }
+  });
+
+  /** 事件总线是全局的，同一进程内可能有别的轮次在跑。 */
+  it("只转发本轮的工具事件", async () => {
+    const upstream = await startFakeUpstream("好了");
+    const runtime = await startTestRuntime("sdk-stream-tool-scope");
+    try {
+      await setupModel(runtime, upstream);
+      const { token } = issueSource(runtime, "Alpha");
+      const chatId = ((await createSession(runtime, token, {})).json.session as { id: string }).id;
+
+      const response = await streamMessage(runtime, token, chatId, {
+        endUserId: "u1",
+        text: "随便说点什么",
+        events: ["tool"],
+      });
+      // 别的轮次发出的进度事件：turnId 对不上，不该出现在这条流里。
+      runtime.deps.log.publish("turn.progress", {
+        turnId: "别人的轮次",
+        phase: "tool",
+        note: "bash",
+      });
+      const events = await collectAll(response);
+
+      expect(events.filter((event) => event.event === "tool")).toHaveLength(0);
+    } finally {
+      await upstream.close();
+      await runtime.dispose();
+    }
+  });
+});

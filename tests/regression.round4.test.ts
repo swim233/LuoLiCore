@@ -109,7 +109,7 @@ describe('R-API-01 / R-CFG-02 WebUI 写端点', () => {
   });
 
   it('被运维禁用的工具既不出现在目录里，也无法被调用', async () => {
-    const log = { event: () => 1, span: () => ({ id: 's', end: () => undefined }) } as unknown as LogSinkType;
+    const log = { event: () => 1, span: () => ({ id: 's', end: () => undefined }), publish: () => undefined } as unknown as LogSinkType;
     const registry = new ToolRegistry(log, { request: async () => true }, { maxRegistered: 10, maxCallsPerTurn: 10, maxConsecutiveErrors: 3 });
     let disabled = false;
     registry.bindOverrides(() => (disabled ? { bash: { enabled: false } } : {}));

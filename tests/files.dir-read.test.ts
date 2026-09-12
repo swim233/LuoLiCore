@@ -108,7 +108,7 @@ describe('read / readText 读到目录时报 path_is_directory', () => {
   });
 });
 
-const log = { span: () => ({ id: 's', end: () => undefined }), event: () => undefined } as unknown as LogSink;
+const log = { span: () => ({ id: 's', end: () => undefined }), event: () => undefined, publish: () => undefined } as unknown as LogSink;
 
 /**
  * `read_file` 的 `skill://` 支路是**另一条**读路径：它压根不经过 `FileTools`，直接调 `readSlice`。

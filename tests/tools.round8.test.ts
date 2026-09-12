@@ -132,7 +132,7 @@ describe('R8-FS-04 · delete_file 删目录 = rm -r，要两道闸', () => {
   });
 });
 
-const log = { span: () => ({ id: 's', end: () => undefined }), event: () => undefined } as unknown as LogSink;
+const log = { span: () => ({ id: 's', end: () => undefined }), event: () => undefined, publish: () => undefined } as unknown as LogSink;
 const turnOf = (extra: Partial<RuntimeTurnContext> = {}): RuntimeTurnContext => ({ turnId: 't', key: 'k', chatId: 'c', threadId: null,
   initiatorUserId: 'u', effectiveRole: 'owner', isPrivate: true, baseCommitId: null,
   snapshot: { messages: [], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 0 }, delta: [],

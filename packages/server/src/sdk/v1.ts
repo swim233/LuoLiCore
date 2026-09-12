@@ -71,6 +71,9 @@ function sdkToolsFor(
   return sdkToolsFromConfig(dependencies.sources?.get(sourceId)?.tools);
 }
 
+/** SSE 注释帧：解析器按规范忽略它，只用来让连接上有字节流动。 */
+const HEARTBEAT_FRAME = ": heartbeat\n\n";
+
 /** 请求方缺任一装配（Bearer 中间件已经在 sources/apiKeys/secrets 缺失时短路，这里覆盖轮次执行链）。 */
 function requireSdk(
   dependencies: ServerDependencies,
@@ -684,9 +687,59 @@ export function mountSdkV1(app: Hono<ServerEnv>, dependencies: ServerDependencie
         encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`),
       );
     };
+    /**
+     * 保活注释帧（`sdk.streamHeartbeatMs`，0 关闭）。
+     *
+     * 轮次执行期间这条流可能长时间没有任何数据（模型在想、工具在跑），而反向代理按自己的
+     * 空闲超时算账：nginx 默认 `proxy_read_timeout` 60s，比本系统的 `turnTimeoutMs`（默认
+     * 600s）早得多。被它掐断时客户端读到的是一次传输层中断，而不是一个 `error` 事件 ——
+     * 两者在客户端的处理路径完全不同，前者只能靠截断语义兜底。
+     *
+     * 用 SSE 注释（`:` 开头）而不是新增一种事件：注释按规范被解析器忽略，既有客户端
+     * （`@luoli/sdk-client` 的 `parseFrame` 跳过 `:` 开头的行）不必改一个字，`docs/12 §6`
+     * 的顺序不变量也不受影响 —— 注释不是事件，不参与「末尾恰好 done 或 error 之一」。
+     *
+     * 定时器在 `close()` 里清掉：客户端断连（`ReadableStream.cancel`）与正常终结
+     * （`done` / `error`）都经过它，没有第二条退出路径。
+     */
+    const heartbeat =
+      config.sdk.streamHeartbeatMs > 0
+        ? setInterval(() => {
+            if (closed || !controllerRef) return;
+            controllerRef.enqueue(encoder.encode(HEARTBEAT_FRAME));
+          }, config.sdk.streamHeartbeatMs)
+        : null;
+    /**
+     * 工具活动事件（opt-in，`events: ["tool"]`）。
+     *
+     * 订阅的是既有的观测流 `turn.progress`，不给 agent 层新穿一条回调：那条流上已经有
+     * `phase:'model'`（每步开始）与 `phase:'tools'`（每步结束），本次补的 `phase:'tool'`
+     * 由 `ToolRegistry.execute()` 在真正调用之前发出 —— 一次工具调用可能跑几十秒，只有这一条
+     * 能让调用方在这段时间里看到东西。
+     *
+     * 按 `turnId` 过滤：同一进程内可能有多个轮次在跑，事件总线是全局的。turnId 要到
+     * `onOpened` 才有，之前的事件不可能属于本轮。
+     *
+     * **不传 `channel: true`**：那个标记的含义是「这个订阅者背后有一个能做决定的人」，审批
+     * 据此判断有没有裁决通道。SDK 会话恰恰没有人（`docs/12 §7` 的 fail-closed 就建立在这上面），
+     * 传了会让审批以为有人接单。
+     */
+    const wantsToolEvents = parsed.data.events?.includes("tool") === true;
+    let openedTurnId: string | null = null;
+    const unsubscribe = wantsToolEvents
+      ? dependencies.events.subscribe((event) => {
+          if (event.type !== "turn.progress" || openedTurnId === null) return;
+          const data = event.data as { turnId?: string; phase?: string; note?: string };
+          if (data.turnId !== openedTurnId || data.phase !== "tool") return;
+          send("tool", { name: String(data.note ?? "") });
+        })
+      : null;
+
     const close = (): void => {
       if (closed) return;
       closed = true;
+      if (heartbeat) clearInterval(heartbeat);
+      unsubscribe?.();
       ctx.req.raw.signal.removeEventListener("abort", onAbort);
       try {
         controllerRef?.close();
@@ -721,6 +774,7 @@ export function mountSdkV1(app: Hono<ServerEnv>, dependencies: ServerDependencie
           },
           onOpened: (turn) => {
             cancelId = turn.turnId;
+            openedTurnId = turn.turnId;
           },
           buildTrigger: () => archived,
           produce: async (turn, turnReservation) => {

@@ -159,6 +159,9 @@ export const HOT_RELOADABLE_CONFIG_KEYS = [
   "general.name",
   // 取消时是否提交部分产出，`abortTurn` 从本轮 `turn.config` 读取。
   "cancel.commitPartial",
+  // 心跳间隔在流式端点建流时从 `currentConfig(dependencies)` 读取，改后下一条流即按新值；
+  // 已经在途的流沿用建流时的间隔（定时器已经起好，不重设）。
+  "sdk.streamHeartbeatMs",
   "agent.main",
   // `agent.worker` 整段：四项均在每次派发时从本轮 `turn.config` 读取，修改后下一次派发生效；
   // 在途 worker 沿用启动时的值。
@@ -489,6 +492,18 @@ export const configSchema = z
         queueMax: z.number().int().nonnegative().default(20),
         coalesceSameUserMs: z.number().int().nonnegative().default(0),
         turnTimeoutMs: z.number().int().positive().default(600_000),
+      })
+      .default({}),
+    sdk: z
+      .object({
+        /**
+         * SSE 保活注释帧的间隔（毫秒），`0` 关闭。
+         *
+         * 默认 15s：流在轮次执行期间可能长时间没有任何数据（模型在想、工具在跑），而 nginx 的
+         * `proxy_read_timeout` 默认 60s —— 反代会比本系统自身的 `turnTimeoutMs`（默认 600s）
+         * 更早掐断连接，客户端读到的是一次传输层中断而不是 `error` 事件。15s 给了 4 倍余量。
+         */
+        streamHeartbeatMs: z.number().int().nonnegative().default(15_000),
       })
       .default({}),
     cancel: z.object({ commitPartial: z.boolean().default(false) }).default({}),

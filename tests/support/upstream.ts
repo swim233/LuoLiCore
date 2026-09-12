@@ -34,9 +34,9 @@ export interface FakeUpstream {
   /** 换一个固定回复：多步轮次里后续请求要返回不同文本时使用。 */
   setReply(text: string): void;
   /**
-   * 按到达顺序排一步「返回工具调用而非文本」的响应（非流式分支专用——测试审批 fail-closed
-   * 等需要模型真的发出一次 `tool-call` 的场景，流式分支的 tool_calls delta 未实现，不在本次
-   * SDK 端点用例的需要范围内）。用一次即出队，之后的请求回落到 `setReply` 设置的固定文本。
+   * 按到达顺序排一步「返回工具调用而非文本」的响应。用一次即出队，之后的请求回落到
+   * `setReply` 设置的固定文本。**两条分支都认它**：非流式回一条带 `tool_calls` 的完整消息，
+   * 流式回一段 `delta.tool_calls` 增量 + `finish_reason:'tool_calls'`。
    */
   queueToolCallStep(calls: FakeUpstreamToolCall[]): void;
   close(): Promise<void>;
@@ -82,6 +82,27 @@ export async function startFakeUpstream(reply = 'ok'): Promise<FakeUpstream> {
         const created = Math.floor(Date.now() / 1000);
         const send = (payload: Record<string, unknown>): void =>
           void response.write(`data: ${JSON.stringify(payload)}\n\n`);
+        // 脚本里排了工具调用就走 tool_calls 增量：OpenAI 兼容格式下每个调用一条
+        // `delta.tool_calls[]`（`index` 定位、`function.arguments` 可分片，这里一次给全），
+        // 以 `finish_reason:'tool_calls'` 收尾。没排就回落到固定文本。
+        const streamStep = toolCallSteps.shift();
+        if (streamStep) {
+          send({ id, object: 'chat.completion.chunk', created, model: body.model ?? 'fake',
+            choices: [{ index: 0, delta: { role: 'assistant', content: null }, finish_reason: null }] });
+          send({ id, object: 'chat.completion.chunk', created, model: body.model ?? 'fake',
+            choices: [{ index: 0, delta: { tool_calls: streamStep.map((call, index) => ({
+              index,
+              id: call.id,
+              type: 'function',
+              function: { name: call.name, arguments: JSON.stringify(call.arguments) },
+            })) }, finish_reason: null }] });
+          send({ id, object: 'chat.completion.chunk', created, model: body.model ?? 'fake',
+            choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+            usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } });
+          response.write('data: [DONE]\n\n');
+          response.end();
+          return;
+        }
         send({ id, object: 'chat.completion.chunk', created, model: body.model ?? 'fake',
           choices: [{ index: 0, delta: { role: 'assistant', content: text }, finish_reason: null }] });
         send({ id, object: 'chat.completion.chunk', created, model: body.model ?? 'fake',
@@ -92,8 +113,7 @@ export async function startFakeUpstream(reply = 'ok'): Promise<FakeUpstream> {
         return;
       }
       response.writeHead(200, { 'content-type': 'application/json' });
-      // 非流式分支：先出队一步脚本化的工具调用（若有），否则回落固定文本——与流式分支（tool_calls
-      // 未实现）保持独立，脚本只影响 `stream:false` 的请求。
+      // 非流式分支：先出队一步脚本化的工具调用（若有），否则回落固定文本。
       const step = toolCallSteps.shift();
       response.end(JSON.stringify({
         id,

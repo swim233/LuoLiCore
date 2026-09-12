@@ -7,7 +7,7 @@ import type { ApprovalBroker, LogSink, SandboxConfig } from '@luoli/core';
 import type { RuntimeTurnContext } from '@luoli/shared';
 
 const broker: ApprovalBroker = { request: async () => true };
-const log = { span: () => ({ id: 'span', end: () => undefined }) } as unknown as LogSink;
+const log = { span: () => ({ id: 'span', end: () => undefined }), event: () => undefined, publish: () => undefined } as unknown as LogSink;
 const turn = { turnId: 't', key: 'chat:1', chatId: '1', threadId: null, initiatorUserId: '2', effectiveRole: 'trusted', isPrivate: false, baseCommitId: null, snapshot: { messages: [], ordinals: [], tokens: 0, windowStart: 1, headOrdinal: 0 }, delta: [], abortSignal: new AbortController().signal, config: {} } satisfies RuntimeTurnContext;
 const sandboxConfig = { mode: 'none' as const, bypassRoles: ['owner' as const], dockerBin: 'docker', image: 'none', network: 'none' as const, memoryMb: 128, cpus: 1, pidsLimit: 8, readOnlyRoot: true, tmpfsMb: 8, workspaceDir: './data/sandbox-map.test', hostWorkspaceDir: '', defaultTimeoutMs: 1000, maxTimeoutMs: 1000, maxOutputBytes: 1024 };
 

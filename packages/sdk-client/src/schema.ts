@@ -152,10 +152,21 @@ export type SdkCommitListResponse = z.infer<typeof sdkCommitListResponseSchema>;
 // 消息：非流式 + 流式共用入参，字段对应 `usage_ledger` 的列（camelCase）。
 // ---------------------------------------------------------------------------
 
+/**
+ * 流式端点上要不要额外的事件种类。**缺省不发**，这是必须的：`sdkStreamEventSchema` 是
+ * `discriminatedUnion`，旧客户端 `.parse()` 到一个它不认识的事件会抛裸 `ZodError` —— 无条件
+ * 发新事件等于破坏既有接入方。显式要了才发，因此这是一次加法而不是改动。
+ *
+ * 非流式端点忽略这个字段（那条路径上没有事件可言）。
+ */
+export const sdkStreamOptInEventSchema = z.enum(["tool"]);
+export type SdkStreamOptInEvent = z.infer<typeof sdkStreamOptInEventSchema>;
+
 export const sdkSendMessageInputSchema = z.object({
   endUserId: sdkEndUserIdSchema,
   text: z.string().min(1),
   modelAlias: sdkModelAliasSchema.optional(),
+  events: z.array(sdkStreamOptInEventSchema).optional(),
 });
 export type SdkSendMessageInput = z.infer<typeof sdkSendMessageInputSchema>;
 
@@ -227,10 +238,22 @@ export const sdkToolListResponseSchema = z.object({
 });
 export type SdkToolListResponse = z.infer<typeof sdkToolListResponseSchema>;
 
+/**
+ * SSE `tool` 事件的载荷：这一轮开始执行哪个工具。
+ *
+ * 只有工具名，不带入参与结果。入参可能含敏感内容（文件路径、命令行），而这条流是给第三方
+ * 后端看的进度信号，不是审计通道 —— 审计在 `tool.call` 那条 span 上，它不出网。
+ */
+export const sdkStreamToolDataSchema = z.object({
+  name: z.string(),
+});
+export type SdkStreamToolData = z.infer<typeof sdkStreamToolDataSchema>;
+
 export const sdkStreamEventSchema = z.discriminatedUnion("event", [
   z.object({ event: z.literal("delta"), data: sdkStreamDeltaDataSchema }),
   z.object({ event: z.literal("done"), data: sdkStreamDoneDataSchema }),
   z.object({ event: z.literal("error"), data: sdkStreamErrorDataSchema }),
   z.object({ event: z.literal("queued"), data: sdkStreamQueuedDataSchema }),
+  z.object({ event: z.literal("tool"), data: sdkStreamToolDataSchema }),
 ]);
 export type SdkStreamEvent = z.infer<typeof sdkStreamEventSchema>;

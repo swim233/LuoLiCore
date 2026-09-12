@@ -964,6 +964,15 @@ export class ToolRegistry {
             : { required: false },
         },
       });
+      // 工具开始跑了。这一条与 `step-observers.ts` 里那条 `phase:'tools'` 是两个时刻：那条在
+      // 整步结束后发，带的是这一步调过的全部工具名；而一次工具调用本身可能跑上几十秒，期间
+      // 观测方（WebUI 的进度行、SDK 流式端点）看不到任何变化。载荷形状与既有那条一致
+      // （消费方读的是 `phase`/`note` 两个字符串，新增取值是加法，不是改动）。
+      this.log.publish("turn.progress", {
+        turnId: context.turn.turnId,
+        phase: "tool",
+        note: name,
+      });
       // 挂起的工具调用会阻塞整轮：AI SDK 的 toolMs 只是向 execute() 传递一个信号，工具不识别它即
       // 等同于没有超时。此处改为硬 race —— 到期即向模型返回失败，让它更换做法，而不是让用户面对
       // 沉默直至 `turnTimeoutMs`（logs/2026-08-17 中有 7 轮只有 turn.start 没有 turn.end）。

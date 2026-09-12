@@ -1023,6 +1023,7 @@ describe("审批 fail-closed：SDK 轮次无人工审批通道（lead 裁决）"
     const log = {
       span: () => ({ id: "span", end: () => undefined }),
       event: () => undefined,
+      publish: () => undefined,
     } as unknown as LogSink;
     const config = configSchema.parse({ access: { bootstrapOwnerId: "1" } });
     const registry = new ToolRegistry(log, hangingBroker, {

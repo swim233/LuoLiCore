@@ -232,7 +232,7 @@ describe('trace 是一棵真的树', () => {
     let seq = 0;
     // 记下每条 span 的 id：判据是 `sandbox.run` 的父等于那次 `tool.call` 自身的 span，
     // 而 `tool.call` 是这里唯一会开的 span。
-    const log = { span: () => { const id = `span-${seq += 1}`; spans.push(id); return { id, end: () => undefined }; }, event: () => undefined } as unknown as LogSink;
+    const log = { span: () => { const id = `span-${seq += 1}`; spans.push(id); return { id, end: () => undefined }; }, event: () => undefined, publish: () => undefined } as unknown as LogSink;
     // owner 且 bypassRoles 含 owner 时直接在宿主上执行，不需要 docker。
     const sandbox = new Sandbox({ mode: 'none', bypassRoles: ['owner'], dockerBin: 'docker', image: 'none', network: 'none',
       memoryMb: 128, cpus: 1, pidsLimit: 16, readOnlyRoot: true, tmpfsMb: 8, workspaceDir: './data', hostWorkspaceDir: '',
