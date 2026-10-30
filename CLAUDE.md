@@ -23,6 +23,7 @@ LuoLiCore：群聊助手 agent，核心基于 Vercel AI SDK v7。术语见 `CONT
 
 - 单包：`src/core`、`src/cli`。core 不得引用 cli 或任何平台代码，由 lint 规则保证。
 - 核心是进程内的库，`reply()` 输出 UI message stream。MVP 用 `streamText`，加工具时再换 `ToolLoopAgent`。
+- 送模型的用户消息：正文包在 `<message from="名字">` 标签里，由 core 的一个格式化函数生成，以后的字段（时间、回复对象等）都加在这里。core 在 instructions 末尾附上格式说明，`prompts/system.md` 只写人设。
 - provider 只接 openai-compatible。配置只来自环境变量与命令行参数：`LUOLI_BASE_URL`、`LUOLI_API_KEY`、`LUOLI_MODEL`，写在 `.env`。
 - 测试：核心用 `ai/test` 的 mock 模型写行为测试，不调用真实 API；CLI 手动验证。
 - 重试：用 AI SDK 内置重试，次数由 `LUOLI_MAX_RETRIES` 配置，默认 2。请求阶段（`maxRetries`）重试可重试错误；流式开始后服务端发来错误事件时也重试（`streamRetries`，次数相同），失败那次的半截不写入历史。连接中途断开不重试。
@@ -32,7 +33,6 @@ LuoLiCore：群聊助手 agent，核心基于 Vercel AI SDK v7。术语见 `CONT
 CLI 默认行为：
 
 - 发言人名字：`--name` 指定，默认取系统用户名
-- 送模型时的名字格式：`名字: 正文`
 - 模型：`--model` 优先，其次 `LUOLI_MODEL`，都没有则报错退出
 - 生成中按 Ctrl+C 中止；空闲时按 Ctrl+C 或 Ctrl+D 退出
 - 模型调用出错：打印错误，程序不退出，用户消息保留在历史里

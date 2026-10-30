@@ -40,6 +40,7 @@ export function createConversation({
 }: {
   /** 不接受字符串形式的模型 id：`wrapLanguageModel` 需要模型实例 */
   model: Exclude<LanguageModel, string>;
+  /** system prompt。core 会在末尾附上消息格式说明，调用方不必解释用户消息的格式 */
   instructions: string;
   store?: ConversationStore;
   logger?: Logger;
@@ -98,8 +99,8 @@ export function createConversation({
           const result = streamText({
             // SDK 的每次请求（含两类重试）都重新调用 doStream，中间件能逐次观察
             model: wrapLanguageModel({ model, middleware: tracker.middleware }),
-            instructions,
-            messages: await convertToModelMessages(history.map(withAuthorName)),
+            instructions: `${instructions}\n\n${messageFormatNote}`,
+            messages: await convertToModelMessages(history.map(formatForModel)),
             maxRetries,
             streamRetries: maxRetries,
             // 错误经 stream 进入 UI 流；不传时 SDK 默认把整个错误对象打到 stderr。
@@ -158,16 +159,56 @@ export function createConversation({
   };
 }
 
-// 群聊里有多个发言人，送模型前在用户消息正文前加上名字
-function withAuthorName(message: Message): Message {
-  const author = message.metadata?.author;
-  if (message.role !== 'user' || !author) return message;
+// 送模型的用户消息格式。改格式或加字段时，同步修改下面的 messageFormatNote
+const messageFormatNote = `## 消息格式
+
+每条用户消息都包在 <message> 标签里，from 属性是平台提供的发言人名字。
+不同名字是不同的人，同一个名字始终是同一个人。需要知道对方是谁时，以 from 为准。
+回复时只写正文，不要输出 <message> 标签，也不要在开头加自己的名字。`;
+
+/**
+ * 送模型前把用户消息包成 `<message from="名字">…</message>`，其他消息原样返回。
+ * 只改送给模型的副本，存储里的消息不变。
+ */
+function formatForModel(message: Message): Message {
+  if (message.role !== 'user') return message;
+  const texts = message.parts.flatMap((part) => (part.type === 'text' ? [part.text] : []));
+  if (texts.length === 0) return message;
+
+  // 标签属性，按顺序输出，值为 undefined 的不输出。以后加字段（时间、回复对象等）在这里加一项
+  const attributes: Record<string, string | undefined> = {
+    from: message.metadata?.author?.name,
+  };
+  const attributeText = Object.entries(attributes)
+    .flatMap(([name, value]) =>
+      value === undefined ? [] : [` ${name}="${escapeAttribute(value)}"`],
+    )
+    .join('');
+  const text = `<message${attributeText}>\n${escapeBody(texts.join('\n'))}\n</message>`;
+
+  // 所有 text part 合成一个，放在第一个 text part 的位置；其他 part 原样保留
+  const firstText = message.parts.findIndex((part) => part.type === 'text');
   return {
     ...message,
-    parts: message.parts.map((part) =>
-      part.type === 'text' ? { ...part, text: `${author.name}: ${part.text}` } : part,
-    ),
+    parts: message.parts.flatMap((part, index): Message['parts'] => {
+      if (part.type !== 'text') return [part];
+      return index === firstText ? [{ ...part, text }] : [];
+    }),
   };
+}
+
+function escapeAttribute(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('"', '&quot;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;');
+}
+
+// 正文只处理会被当成标签的部分：<message、</message 开头的 <（不分大小写）。
+// 代码里的 a < b、<div> 等保持原样
+function escapeBody(text: string): string {
+  return text.replace(/<(?=\/?message)/gi, '&lt;');
 }
 
 // 只取摘要字段，不把原始错误对象交给 logger：APICallError 的 requestBodyValues 含对话正文
