@@ -4,6 +4,8 @@ import type { ModelOptions } from '../core/index.js';
 export type CliConfig = {
   model: ModelOptions;
   prompt: string;
+  /** 未设置时为 undefined，用核心的默认值 */
+  maxRetries?: number;
 };
 
 export type ConfigResult =
@@ -46,9 +48,26 @@ export function parseConfig(argv: string[], env: Record<string, string | undefin
   if (!baseURL) {
     return { ok: false, error: '缺少环境变量 LUOLI_BASE_URL', showUsage: false };
   }
+  if (!URL.canParse(baseURL)) {
+    return { ok: false, error: 'LUOLI_BASE_URL 不是合法的 URL', showUsage: false };
+  }
+
+  const rawRetries = env.LUOLI_MAX_RETRIES;
+  const maxRetries = rawRetries ? Number(rawRetries) : undefined;
+  if (rawRetries && !(/^\d+$/.test(rawRetries) && Number.isSafeInteger(maxRetries))) {
+    return {
+      ok: false,
+      error: `LUOLI_MAX_RETRIES 必须是非负整数，当前为 "${rawRetries}"`,
+      showUsage: false,
+    };
+  }
 
   return {
     ok: true,
-    config: { model: { baseURL, apiKey: env.LUOLI_API_KEY || undefined, modelId }, prompt },
+    config: {
+      model: { baseURL, apiKey: env.LUOLI_API_KEY || undefined, modelId },
+      prompt,
+      maxRetries,
+    },
   };
 }

@@ -17,6 +17,7 @@
   "dependencies": {
     "@ai-sdk/openai-compatible": "^3.0.80",
     "ai": "^7.0.156",
+    "pino": "^10.4.0",
     "zod": "^4.6.7"
   },
   "devDependencies": {

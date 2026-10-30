@@ -7,7 +7,17 @@ export type ModelOptions = {
   modelId: string;
 };
 
-export function createModel({ baseURL, apiKey, modelId }: ModelOptions): LanguageModel {
-  const provider = createOpenAICompatible({ name: 'openai-compatible', baseURL, apiKey });
+export function createModel({
+  baseURL,
+  apiKey,
+  modelId,
+}: ModelOptions): Exclude<LanguageModel, string> {
+  const provider = createOpenAICompatible({
+    name: 'openai-compatible',
+    baseURL,
+    apiKey,
+    // 流式响应默认不带用量，要显式请求（stream_options.include_usage）
+    includeUsage: true,
+  });
   return provider(modelId);
 }

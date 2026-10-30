@@ -1,0 +1,215 @@
+import { APICallError, type LanguageModelMiddleware } from 'ai';
+import type { Logger } from './logger.js';
+import type { MessageChunk, MessageData } from './message.js';
+
+type WrapStream = NonNullable<LanguageModelMiddleware['wrapStream']>;
+type ModelStream = Awaited<ReturnType<WrapStream>>['stream'];
+type ModelStreamPart = ModelStream extends ReadableStream<infer P> ? P : never;
+
+export type AttemptStats = {
+  /** 模型请求次数，含重试 */
+  attempts: number;
+  /** 请求阶段（流开始前）的重试次数，由 SDK 的 maxRetries 执行 */
+  requestRetries: number;
+  /** 流中出现错误事件后的重新生成次数，由 SDK 的 streamRetries 执行 */
+  streamRetries: number;
+};
+
+/**
+ * 跟踪一轮回复里的每次模型请求：写 `model.attempt` 日志、统计两类重试、通知前端。
+ * 是否会重试的判断照搬 SDK，SDK 本身没有逐次重试的回调。
+ */
+export function trackAttempts({
+  logger,
+  logFields,
+  maxRetries,
+  notify,
+}: {
+  logger: Logger;
+  logFields: object;
+  maxRetries: number;
+  /** 请求阶段的重试提示，发生在流开始前，直接写进外层流 */
+  notify: (chunk: MessageChunk) => void;
+}): {
+  middleware: LanguageModelMiddleware;
+  /** 包在 UI 流上：在新一次尝试的内容之前插入流式重试的提示与 reset-step */
+  markStreamRetries: () => TransformStream<MessageChunk, MessageChunk>;
+  stats: AttemptStats;
+} {
+  const stats: AttemptStats = { attempts: 0, requestRetries: 0, streamRetries: 0 };
+  // 当前这次调用里请求阶段连续失败的次数。SDK 每次调用（包括流式重试发起的那次）
+  // 都重新计算请求重试次数，这个计数与 SDK 的 tryNumber 对应
+  let requestFailures = 0;
+  // 模型已发出的内容段起点数（text-start、reasoning-start），用来在 UI 流里定位尝试的边界
+  let contentStarts = 0;
+  // 等待插入 UI 流的流式重试提示。notices 首项是重新生成提示，其后是这次重新生成的
+  // 请求阶段重试提示：它们若直接写出，会排到「输出中断」之前，甚至夹在失败那次的半截中间
+  const pendingStreamRetries: Array<{ notices: MessageChunk[]; afterStarts: number }> = [];
+
+  const retryNotice = (data: MessageData['retry']): MessageChunk => ({
+    type: 'data-retry',
+    data,
+    transient: true,
+  });
+
+  const middleware: LanguageModelMiddleware = {
+    wrapStream: async ({ doStream }) => {
+      const attempt = ++stats.attempts;
+      const startedAt = Date.now();
+      const fields = () => ({ ...logFields, attempt, durationMs: Date.now() - startedAt });
+
+      let result;
+      try {
+        result = await doStream();
+      } catch (error) {
+        requestFailures++;
+        // SDK：APICallError 且可重试，且本次调用的失败次数未超过 maxRetries
+        const willRetry =
+          APICallError.isInstance(error) && error.isRetryable && requestFailures <= maxRetries;
+        logger.warn(
+          { ...fields(), phase: 'request', ok: false, ...describeFailure(error), willRetry },
+          'model.attempt',
+        );
+        if (willRetry) {
+          stats.requestRetries++;
+          const statusCode = APICallError.isInstance(error) ? error.statusCode : undefined;
+          const notice = retryNotice({
+            phase: 'request',
+            attempt: requestFailures,
+            maxRetries,
+            statusCode,
+          });
+          const pending = pendingStreamRetries.at(-1);
+          if (pending) pending.notices.push(notice);
+          else notify(notice);
+        }
+        throw error;
+      }
+      requestFailures = 0;
+
+      let logged = false;
+      const stream = observe(result.stream, {
+        onPart(part) {
+          if (part.type === 'text-start' || part.type === 'reasoning-start') contentStarts++;
+          if (part.type !== 'error' || logged) return;
+          logged = true;
+          // SDK：流中的任何错误事件都会重新生成，直到次数用完；不看是否可重试
+          const willRetry = stats.streamRetries < maxRetries;
+          const statusCode = statusCodeOf(part.error);
+          logger.warn(
+            { ...fields(), phase: 'stream', ok: false, statusCode, willRetry },
+            'model.attempt',
+          );
+          if (willRetry) {
+            stats.streamRetries++;
+            pendingStreamRetries.push({
+              notices: [
+                retryNotice({
+                  phase: 'stream',
+                  attempt: stats.streamRetries,
+                  maxRetries,
+                  statusCode,
+                }),
+              ],
+              afterStarts: contentStarts,
+            });
+          }
+        },
+        onClose() {
+          if (logged) return;
+          logged = true;
+          logger.info({ ...fields(), phase: 'stream', ok: true }, 'model.attempt');
+        },
+        // 读流时抛错（如连接中途断开）SDK 不重试
+        onError(error) {
+          if (logged) return;
+          logged = true;
+          logger.warn(
+            {
+              ...fields(),
+              phase: 'stream',
+              ok: false,
+              ...describeFailure(error),
+              willRetry: false,
+            },
+            'model.attempt',
+          );
+        },
+      });
+      return { ...result, stream };
+    },
+  };
+
+  // 中间件看到错误事件时，UI 流可能还没处理完失败那次的内容（中间有缓冲），
+  // 所以不按时间、而按内容段的个数定位：失败那次（及之前）共发出 afterStarts 个内容段，
+  // 之后的第一个内容段属于新的尝试。SDK 在重试前会补发 text-end 收尾，
+  // 所以插入点之前失败那次的段都已结束，reset-step 能把它们从消息里整段去掉。
+  // 前提：模型流的内容段与 UI 流一一对应（不关 sendReasoning；加工具时要重新审）
+  const markStreamRetries = () => {
+    let starts = 0;
+    return new TransformStream<MessageChunk, MessageChunk>({
+      transform(chunk, controller) {
+        const isStart = chunk.type === 'text-start' || chunk.type === 'reasoning-start';
+        // 新的尝试一个内容段都没给就结束或失败时，在结束段之前插入
+        const endsReply =
+          chunk.type === 'finish-step' || chunk.type === 'finish' || chunk.type === 'error';
+        while (
+          pendingStreamRetries[0] &&
+          (endsReply || (isStart && pendingStreamRetries[0].afterStarts <= starts))
+        ) {
+          const [streamNotice, ...requestNotices] = pendingStreamRetries.shift()!.notices;
+          controller.enqueue(streamNotice!);
+          controller.enqueue({ type: 'reset-step' });
+          for (const notice of requestNotices) controller.enqueue(notice);
+        }
+        if (isStart) starts++;
+        controller.enqueue(chunk);
+      },
+    });
+  };
+
+  return { middleware, markStreamRetries, stats };
+}
+
+function observe(
+  source: ModelStream,
+  handlers: {
+    onPart: (part: ModelStreamPart) => void;
+    onClose: () => void;
+    onError: (error: unknown) => void;
+  },
+): ModelStream {
+  const reader = source.getReader();
+  return new ReadableStream<ModelStreamPart>({
+    async pull(controller) {
+      let next;
+      try {
+        next = await reader.read();
+      } catch (error) {
+        handlers.onError(error);
+        controller.error(error);
+        return;
+      }
+      if (next.done) {
+        handlers.onClose();
+        controller.close();
+        return;
+      }
+      handlers.onPart(next.value);
+      controller.enqueue(next.value);
+    },
+    cancel: (reason) => reader.cancel(reason),
+  });
+}
+
+function describeFailure(error: unknown): object {
+  if (!APICallError.isInstance(error)) {
+    return { errorType: error instanceof Error ? error.name : typeof error };
+  }
+  return error.statusCode === undefined ? { networkError: true } : { statusCode: error.statusCode };
+}
+
+function statusCodeOf(error: unknown): number | undefined {
+  if (typeof error !== 'object' || error === null || !('statusCode' in error)) return undefined;
+  return typeof error.statusCode === 'number' ? error.statusCode : undefined;
+}
