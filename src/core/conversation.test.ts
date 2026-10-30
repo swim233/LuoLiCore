@@ -16,15 +16,16 @@ const alice = { id: 'u-alice', name: 'Alice' };
 const bob = { id: 'u-bob', name: 'Bob' };
 const instructions = '你是测试助手';
 
-function finish(reason: 'stop' | 'error' = 'stop'): StreamPart {
-  return {
-    type: 'finish',
-    finishReason: { unified: reason, raw: undefined },
-    usage: {
-      inputTokens: { total: 1, noCache: 1, cacheRead: undefined, cacheWrite: undefined },
-      outputTokens: { total: 1, text: 1, reasoning: undefined },
-    },
-  };
+type FinishPart = Extract<StreamPart, { type: 'finish' }>;
+
+function finish(
+  reason: 'stop' | 'error' = 'stop',
+  usage: FinishPart['usage'] = {
+    inputTokens: { total: 1, noCache: 1, cacheRead: undefined, cacheWrite: undefined },
+    outputTokens: { total: 1, text: 1, reasoning: undefined },
+  },
+): StreamPart {
+  return { type: 'finish', finishReason: { unified: reason, raw: undefined }, usage };
 }
 
 function textParts(...deltas: string[]): StreamPart[] {
@@ -1015,5 +1016,155 @@ describe('中止', () => {
     expect(stored[1]?.metadata?.aborted).toBe(true);
     expect(textOf(stored[3])).toBe('接着说');
     expect(stored[3]?.metadata?.aborted).toBeUndefined();
+  });
+});
+
+describe('用量', () => {
+  /** 模型报的用量：输入 input（其中缓存命中 cacheRead）、输出 output */
+  function usageOf(
+    input: number,
+    output: number,
+    cacheRead?: number,
+    raw?: FinishPart['usage']['raw'],
+  ): FinishPart['usage'] {
+    return {
+      inputTokens: {
+        total: input,
+        noCache: input - (cacheRead ?? 0),
+        cacheRead,
+        cacheWrite: undefined,
+      },
+      outputTokens: { total: output, text: output, reasoning: undefined },
+      ...(raw ? { raw } : {}),
+    };
+  }
+
+  function modelReporting(...usages: Array<FinishPart['usage']>): MockLanguageModelV4 {
+    return new MockLanguageModelV4({
+      doStream: usages.map((usage) => ({
+        stream: simulateReadableStream({ chunks: [...textParts('好'), finish('stop', usage)] }),
+      })),
+    });
+  }
+
+  it('正常完成：finish 段与写入历史的助手消息都带用量（含缓存命中），createdAt 仍在', async () => {
+    const { chunks, messages } = await replyOnce(modelReporting(usageOf(120, 30, 100)));
+
+    const expected = { input: 120, output: 30, total: 150, cacheRead: 100 };
+    const finishChunk = chunks.find((c) => c.type === 'finish');
+    expect(finishChunk?.type === 'finish' && finishChunk.messageMetadata?.usage).toEqual(expected);
+
+    const reply = messages[1];
+    expect(reply?.metadata?.usage).toEqual(expected);
+    const startChunk = chunks.find((c) => c.type === 'start');
+    expect(isIsoTime(reply?.metadata?.createdAt)).toBe(true);
+    expect(startChunk?.type === 'start' && startChunk.messageMetadata?.createdAt).toBe(
+      reply?.metadata?.createdAt,
+    );
+  });
+
+  it('模型不报缓存数：cacheRead 为 undefined', async () => {
+    const { messages } = await replyOnce(modelReporting(usageOf(10, 2)));
+
+    expect(messages[1]?.metadata?.usage).toEqual({
+      input: 10,
+      output: 2,
+      total: 12,
+      cacheRead: undefined,
+    });
+  });
+
+  it('openai 格式的原始用量没报 cached_tokens 时 cacheRead 为 undefined，报了 0 时为 0', async () => {
+    // openai-compatible 的 provider 在没报时也把 cacheRead 填成 0，只能看原始用量区分
+    const notReported = { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 };
+    const reportedZero = { ...notReported, prompt_tokens_details: { cached_tokens: 0 } };
+    const model = modelReporting(usageOf(10, 2, 0, notReported), usageOf(10, 2, 0, reportedZero));
+    const conversation = createConversation({ model, instructions });
+
+    await conversation.append({ author: alice, text: '一' });
+    await readAll(conversation.reply());
+    await conversation.append({ author: alice, text: '二' });
+    await readAll(conversation.reply());
+
+    const [, first, , second] = await conversation.messages();
+    expect(first?.metadata?.usage?.cacheRead).toBeUndefined();
+    expect(second?.metadata?.usage?.cacheRead).toBe(0);
+  });
+
+  it('模型没报用量：metadata 不带 usage', async () => {
+    const model = new MockLanguageModelV4({
+      doStream: {
+        stream: simulateReadableStream({
+          chunks: [
+            ...textParts('好'),
+            finish('stop', {
+              inputTokens: {
+                total: undefined,
+                noCache: undefined,
+                cacheRead: undefined,
+                cacheWrite: undefined,
+              },
+              outputTokens: { total: undefined, text: undefined, reasoning: undefined },
+            }),
+          ],
+        }),
+      },
+    });
+    const { messages, entries } = await replyOnce(model);
+
+    expect(messages[1]?.metadata).not.toHaveProperty('usage');
+    expect(logsOf(entries, 'reply.end')[0]?.fields.usage).toBeUndefined();
+  });
+
+  it('中止的回复：写入的半截没有 usage', async () => {
+    const model = new MockLanguageModelV4({
+      doStream: async ({ abortSignal }) => ({
+        stream: hangingStream(textParts('说到一半').slice(0, -1), abortSignal),
+      }),
+    });
+    const conversation = createConversation({ model, instructions });
+    await conversation.append({ author: alice, text: '讲' });
+    const controller = new AbortController();
+    const chunks = await readUntilAbort(
+      conversation.reply({ abortSignal: controller.signal }),
+      controller,
+      (c) => c.type === 'text-delta',
+    );
+
+    expect(chunks.some((c) => c.type === 'finish')).toBe(false);
+    const reply = (await conversation.messages())[1];
+    expect(reply?.metadata?.aborted).toBe(true);
+    expect(reply?.metadata).not.toHaveProperty('usage');
+  });
+
+  it('流式重试后成功：usage 是成功那次的数', async () => {
+    let call = 0;
+    const model = new MockLanguageModelV4({
+      doStream: async () =>
+        call++ === 0
+          ? { stream: simulateReadableStream({ chunks: streamError('半截').parts }) }
+          : {
+              stream: simulateReadableStream({
+                chunks: [...textParts('完整'), finish('stop', usageOf(50, 5, 40))],
+              }),
+            },
+    });
+    const { messages, entries } = await replyOnce(model);
+
+    expect(logsOf(entries, 'reply.end')[0]?.fields).toMatchObject({ streamRetries: 1 });
+    expect(messages[1]?.metadata?.usage).toEqual({
+      input: 50,
+      output: 5,
+      total: 55,
+      cacheRead: 40,
+    });
+  });
+
+  it('日志 reply.end 的 usage 与 metadata 相同，含 cacheRead', async () => {
+    const { entries, messages } = await replyOnce(modelReporting(usageOf(120, 30, 100)));
+
+    const logged = logsOf(entries, 'reply.end')[0]?.fields.usage;
+    expect(logged).toEqual({ input: 120, output: 30, total: 150, cacheRead: 100 });
+    expect(logged).toEqual(messages[1]?.metadata?.usage);
   });
 });

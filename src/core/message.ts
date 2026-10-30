@@ -12,6 +12,17 @@ export type MessageMetadata = {
   createdAt: string;
   /** 助手回复被中止，正文是中止前已输出的部分 */
   aborted?: true;
+  /** 正常完成的助手回复才有；只算最终成功的那次请求 */
+  usage?: Usage;
+};
+
+/** 一次回复的 token 用量。服务端没报的项为 undefined */
+export type Usage = {
+  input?: number;
+  output?: number;
+  total?: number;
+  /** 输入中命中缓存的部分 */
+  cacheRead?: number;
 };
 
 /** 回复流中的数据段。都是 transient 的，不进入消息历史。 */

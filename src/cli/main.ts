@@ -1,8 +1,9 @@
 import { userInfo } from 'node:os';
 import { createInterface } from 'node:readline/promises';
-import { createConversation, createModel, readInstructions } from '../core/index.js';
+import { createConversation, createModel, readInstructions, type Usage } from '../core/index.js';
 import { parseConfig, usage } from './config.js';
 import { createLogger, jsonEscapedForms, logFile } from './logger.js';
+import { notice } from './notice.js';
 import { printReply } from './print-reply.js';
 import { runTerminal } from './terminal.js';
 
@@ -48,14 +49,25 @@ if (process.stdin.isTTY) {
 async function converse(text: string, abortSignal?: AbortSignal): Promise<void> {
   await conversation.append({ author, text });
   const result = await printReply(conversation.reply({ abortSignal }));
-  if (result.status === 'aborted') {
-    console.error('（已中止）');
-  } else if (result.status === 'failed') {
+  if (result.status === 'completed') {
+    const line = result.usage && formatUsage(result.usage);
+    if (line) notice(line);
+  } else if (result.status === 'aborted') {
+    notice('（已中止）');
+  } else {
     // 出错不退出：用户消息已留在历史里，继续下一轮
     console.error(
       `模型调用失败（${model.modelId}）：${redactKey(result.errorText, model.apiKey)}（详见 ${logFile}）`,
     );
   }
+}
+
+// tokens 输入 1234（缓存 1000）· 输出 567。服务端报了缓存数才显示括号；
+// 输入、输出都没报时不打印，只缺一个时那个数显示 ?
+function formatUsage({ input, output, cacheRead }: Usage): string | undefined {
+  if (input === undefined && output === undefined) return undefined;
+  const cache = cacheRead === undefined ? ' ' : `（缓存 ${cacheRead}）`;
+  return `tokens 输入 ${input ?? '?'}${cache}· 输出 ${output ?? '?'}`;
 }
 
 // 服务端报错可能回显请求里的 key（也可能嵌在 JSON 文本里），打印前抹掉

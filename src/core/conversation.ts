@@ -9,11 +9,11 @@ import {
   toUIMessageStream,
   wrapLanguageModel,
   type LanguageModel,
-  type LanguageModelUsage,
   type ToolSet,
 } from 'ai';
 import { trackAttempts } from './attempts.js';
 import { silentLogger, type Logger } from './logger.js';
+import { toUsage } from './model.js';
 import type { Author, Message, MessageChunk } from './message.js';
 import { createMemoryStore, type ConversationStore } from './store.js';
 
@@ -74,7 +74,6 @@ export function createConversation({
       const replyId = generateId();
       const logFields = { replyId, modelId: model.modelId };
       const startedAt = Date.now();
-      let usage: LanguageModelUsage | undefined;
 
       let writeNotice: (chunk: MessageChunk) => void = () => {};
       const tracker = trackAttempts({
@@ -113,15 +112,25 @@ export function createConversation({
             // 错误经 stream 进入 UI 流；不传时 SDK 默认把整个错误对象打到 stderr。
             // 不返回 { retry: true }，不额外请求重试
             onError: () => {},
-            onEnd: (event) => {
-              usage = event.usage;
-            },
           });
+          let createdAt: string | undefined;
           writer.merge(
             toUIMessageStream<ToolSet, Message>({
               stream: result.stream,
-              messageMetadata: ({ part }) =>
-                part.type === 'start' ? { createdAt: new Date().toISOString() } : undefined,
+              // start 段附上时间，finish 段附上用量（合并进回复的 metadata）。
+              // 中止没有 finish 段；失败的回复不写入历史。finish 段也要带 createdAt（类型要求），值不变
+              messageMetadata: ({ part }) => {
+                if (part.type === 'start') {
+                  createdAt = new Date().toISOString();
+                  return { createdAt };
+                }
+                if (part.type === 'finish') {
+                  createdAt ??= new Date().toISOString();
+                  const usage = toUsage(part.totalUsage);
+                  return usage ? { createdAt, usage } : { createdAt };
+                }
+                return undefined;
+              },
               onError: describeError,
             }).pipeThrough(tracker.markStreamRetries()),
           );
@@ -166,11 +175,7 @@ export function createConversation({
                   ...summary,
                   outcome: 'completed',
                   finishReason,
-                  usage: {
-                    input: usage?.inputTokens,
-                    output: usage?.outputTokens,
-                    total: usage?.totalTokens,
-                  },
+                  usage: responseMessage.metadata?.usage,
                 },
                 'reply.end',
               );

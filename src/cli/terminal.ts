@@ -1,5 +1,6 @@
 import { emitKeypressEvents, type Key } from 'node:readline';
 import { createInterface } from 'node:readline/promises';
+import { notice } from './notice.js';
 
 /** 处理一行输入；signal 在用户按 Ctrl+C 时中止 */
 export type LineHandler = (text: string, signal: AbortSignal) => Promise<void>;
@@ -97,7 +98,7 @@ function readLine(
       } else {
         exitArmed = true;
         process.stdout.write('\n');
-        console.error('再按一次 Ctrl+C 退出');
+        notice('再按一次 Ctrl+C 退出');
         rl.prompt();
       }
     });
