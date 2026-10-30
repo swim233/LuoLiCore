@@ -70,6 +70,17 @@ describe.each([
     expect(await store.list()).toEqual(messages);
   });
 
+  it('没有 id 的发言人原样往返', async () => {
+    const storage = await open();
+    const store = await storage.openConversation(
+      await storage.createConversation({ platform: 'cli' }),
+    );
+    const saved = message('user', '你好', { author: { name: '无名' } });
+    await store.add(saved);
+
+    expect(await store.list()).toEqual([saved]);
+  });
+
   it('预留序号后先写入后来的消息、再用预留号写入：预留的那条排在前面', async () => {
     const storage = await open();
     const store = await storage.openConversation(
@@ -244,7 +255,7 @@ describe('SQLite 存储', () => {
     expect(() => openSqliteStorage(path)).toThrow('数据库版本比程序新');
   });
 
-  it('消息行的 role、author_id、created_at 与消息本身一致，platform_message_id 为空', async () => {
+  it('消息行的 role、author_id、created_at 与消息本身一致，没有 id 的发言人 author_id 为空', async () => {
     const dir = await tempDir();
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
     const path = join(dir, 'luoli.db');
@@ -253,9 +264,14 @@ describe('SQLite 存储', () => {
     const id = await storage.createConversation({ platform: 'cli' });
     const store = await storage.openConversation(id);
     const user = message('user', '你好', { author: alice, createdAt: '2026-10-30T08:00:00.000Z' });
+    const anonymous = message('user', '我没有 id', {
+      author: { name: '无名' },
+      createdAt: '2026-10-30T08:00:02.000Z',
+    });
     const reply = message('assistant', '你好呀', { createdAt: '2026-10-30T08:00:01.000Z' });
     await store.add(user);
     await store.add(reply);
+    await store.add(anonymous);
 
     const db = new DatabaseSync(path, { readOnly: true });
     try {
@@ -280,6 +296,14 @@ describe('SQLite 存储', () => {
           author_id: null,
           platform_message_id: null,
           created_at: '2026-10-30T08:00:01.000Z',
+        },
+        {
+          id: anonymous.id,
+          seq: 3,
+          role: 'user',
+          author_id: null,
+          platform_message_id: null,
+          created_at: '2026-10-30T08:00:02.000Z',
         },
       ]);
     } finally {

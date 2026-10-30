@@ -1,7 +1,9 @@
 import type { InferUIMessageChunk, UIMessage } from 'ai';
 
 export type Author = {
-  id: string;
+  /** 平台提供的不变的用户 id；没有时（如 CLI）只能按名字区分 */
+  id?: string;
+  /** 发言人当时的显示名 */
   name: string;
 };
 

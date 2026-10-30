@@ -22,7 +22,7 @@ if (!parsed.ok) {
   if (parsed.showUsage) console.error(usage);
   process.exit(1);
 }
-const { model, maxRetries, resume, dbPath, promptPath } = parsed.config;
+const { model, maxRetries, timeouts, resume, dbPath, promptPath } = parsed.config;
 const name = parsed.config.name ?? userInfo().username;
 
 let instructions: string;
@@ -49,9 +49,11 @@ const conversation = createConversation({
   store: await storage.openConversation(conversationId),
   logger: createLogger(model),
   maxRetries,
+  timeouts,
   conversationId,
 });
-const author = { id: name, name };
+// CLI 没有不变的用户 id，发言人只有名字
+const author = { name };
 
 if (process.stdin.isTTY) {
   await runTerminal(converse);

@@ -44,6 +44,7 @@ export function createConversation({
   logger = silentLogger,
   maxRetries = 2,
   conversationId,
+  timeouts = {},
 }: {
   /** 不接受字符串形式的模型 id：`wrapLanguageModel` 需要模型实例 */
   model: Exclude<LanguageModel, string>;
@@ -55,7 +56,10 @@ export function createConversation({
   maxRetries?: number;
   /** 存储里的会话 id，只写进日志，便于多会话排查 */
   conversationId?: string;
+  /** 超时（毫秒）：等第一段输出、两段输出之间。超时按失败处理 */
+  timeouts?: { firstChunkMs?: number; chunkMs?: number };
 }): Conversation {
+  const { firstChunkMs = 60_000, chunkMs = 30_000 } = timeouts;
   let replying = false;
 
   return {
@@ -82,12 +86,20 @@ export function createConversation({
       let seq: number | undefined;
       const startedAt = Date.now();
 
+      // 超时由这个控制器中止 streamText；与用户的中止分开，结束时据此区分
+      const timeoutController = new AbortController();
+      const replySignal = abortSignal
+        ? AbortSignal.any([abortSignal, timeoutController.signal])
+        : timeoutController.signal;
+
       let writeNotice: (chunk: MessageChunk) => void = () => {};
       const tracker = trackAttempts({
         logger,
         logFields,
         maxRetries,
         abortSignal,
+        firstChunkMs,
+        onFirstChunkTimeout: () => timeoutController.abort(),
         notify: (chunk) => writeNotice(chunk),
       });
 
@@ -99,6 +111,31 @@ export function createConversation({
       const describeError = (error: unknown) => {
         failure ??= { error };
         return error instanceof Error ? error.message : String(error);
+      };
+
+      // SDK 超时（以及上面的首段计时）都以 abort 段结束回复流。用户没有中止却收到 abort，
+      // 就是超时：换成 error 段，按失败处理（不写入，记 reply.failed）。
+      // 是哪种超时看这次请求有没有输出过内容，不解析 SDK 的错误文字。
+      // 流式重试的 reset-step 之后是新的请求，失败那次的半截不算
+      const timeoutAsFailure = () => {
+        let sawOutput = false;
+        return new TransformStream<MessageChunk, MessageChunk>({
+          transform(chunk, controller) {
+            if ((chunk.type === 'text-delta' || chunk.type === 'reasoning-delta') && chunk.delta) {
+              sawOutput = true;
+            }
+            if (chunk.type === 'reset-step') sawOutput = false;
+            if (chunk.type !== 'abort' || abortSignal?.aborted) {
+              controller.enqueue(chunk);
+              return;
+            }
+            const detail = sawOutput
+              ? `两段输出之间超过 ${chunkMs / 1000} 秒`
+              : `${firstChunkMs / 1000} 秒内没有收到第一段输出`;
+            const error = new DOMException(`等待模型输出超时：${detail}`, 'TimeoutError');
+            controller.enqueue({ type: 'error', errorText: describeError(error) });
+          },
+        });
       };
 
       // 外层 createUIMessageStream 让 reply() 能同步返回流（历史要异步读），
@@ -117,7 +154,8 @@ export function createConversation({
             messages: await convertToModelMessages(history.map(formatForModel)),
             maxRetries,
             streamRetries: maxRetries,
-            abortSignal,
+            timeout: { firstChunkMs, chunkMs },
+            abortSignal: replySignal,
             // 错误经 stream 进入 UI 流；不传时 SDK 默认把整个错误对象打到 stderr。
             // 不返回 { retry: true }，不额外请求重试
             onError: () => {},
@@ -141,7 +179,9 @@ export function createConversation({
                 return undefined;
               },
               onError: describeError,
-            }).pipeThrough(tracker.markStreamRetries()),
+            })
+              .pipeThrough(tracker.markStreamRetries())
+              .pipeThrough(timeoutAsFailure()),
           );
         },
         onError: describeError,
@@ -206,14 +246,16 @@ export function createConversation({
 // 送模型的用户消息格式。改格式或加字段时，同步修改下面的 messageFormatNote
 const messageFormatNote = `## 消息格式
 
-每条用户消息都包在 <message> 标签里，from 属性是平台提供的发言人名字。
-不同名字是不同的人，同一个名字始终是同一个人。需要知道对方是谁时，以 from 为准。
+每条用户消息都包在 <message> 标签里，标签属性由平台提供：
+- from：发言人当时的显示名，称呼对方时用它。
+- uid：发言人不变的 id，有时没有。uid 相同就是同一个人，即使 from 不同（改过名）；from 相同而 uid 不同是两个人。没有 uid 时按 from 区分。
+- time：消息发出的时间。最后一条消息的 time 可以当作现在的时间。
 你之前的回复若以「（回复被中止）」结尾，表示那条回复被用户中途打断，没有说完。
 回复时只写正文，不要输出 <message> 标签或「（回复被中止）」，也不要在开头加自己的名字。`;
 
 /**
  * 送模型前的格式化，只改送给模型的副本，存储里的消息不变：
- * 用户消息包成 `<message from="名字">…</message>`；被中止的助手回复末尾加「（回复被中止）」；
+ * 用户消息包成 `<message from="名字" uid="id" time="时间">…</message>`；被中止的助手回复末尾加「（回复被中止）」；
  * 其他消息原样返回。
  */
 function formatForModel(message: Message): Message {
@@ -222,9 +264,11 @@ function formatForModel(message: Message): Message {
   const texts = message.parts.flatMap((part) => (part.type === 'text' ? [part.text] : []));
   if (texts.length === 0) return message;
 
-  // 标签属性，按顺序输出，值为 undefined 的不输出。以后加字段（时间、回复对象等）在这里加一项
+  // 标签属性，按顺序输出，值为 undefined 的不输出。以后加字段（回复对象等）在这里加一项
   const attributes: Record<string, string | undefined> = {
     from: message.metadata?.author?.name,
+    uid: message.metadata?.author?.id,
+    time: formatTime(message.metadata?.createdAt),
   };
   const attributeText = Object.entries(attributes)
     .flatMap(([name, value]) =>
@@ -260,6 +304,16 @@ function markAborted(message: Message): Message {
 
 function hasText(message: Message): boolean {
   return message.parts.some((part) => part.type === 'text' && part.text.trim() !== '');
+}
+
+/** ISO 时间按进程所在时区格式化为 `YYYY-MM-DD HH:mm`；无法解析时不输出 */
+function formatTime(iso: string | undefined): string | undefined {
+  if (iso === undefined) return undefined;
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return undefined;
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const day = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+  return `${day} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
 function escapeAttribute(value: string): string {

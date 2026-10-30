@@ -24,12 +24,18 @@ export function trackAttempts({
   logFields,
   maxRetries,
   abortSignal,
+  firstChunkMs,
+  onFirstChunkTimeout,
   notify,
 }: {
   logger: Logger;
   logFields: object;
   maxRetries: number;
+  /** 用户的中止信号；请求被中止而它没有中止时，就是超时 */
   abortSignal?: AbortSignal;
+  /** 每次请求从发出起到第一段内容的时限；到时调用 onFirstChunkTimeout */
+  firstChunkMs: number;
+  onFirstChunkTimeout: () => void;
   /** 请求阶段的重试提示，发生在流开始前，直接写进外层流 */
   notify: (chunk: MessageChunk) => void;
 }): {
@@ -55,19 +61,43 @@ export function trackAttempts({
   });
 
   const middleware: LanguageModelMiddleware = {
-    wrapStream: async ({ doStream }) => {
+    wrapStream: async ({ doStream, params }) => {
       const attempt = ++stats.attempts;
       const startedAt = Date.now();
       const fields = () => ({ ...logFields, attempt, durationMs: Date.now() - startedAt });
-      // 被中止的请求不算失败、不算重试
-      const logAborted = (phase: 'request' | 'stream') =>
-        logger.info({ ...fields(), phase, aborted: true, willRetry: false }, 'model.attempt');
+      // 这次请求是怎么被中止的：用户中止，或超时（SDK 合并进 params.abortSignal 的超时、
+      // 以及下面的首段计时都会中止它，而用户的信号不变）
+      const abortedBy = () =>
+        abortSignal?.aborted ? 'user' : params.abortSignal?.aborted ? 'timeout' : undefined;
+      // 被用户中止的请求不算失败、不算重试；超时算失败，SDK 不重试
+      const logAborted = (phase: 'request' | 'stream') => {
+        if (abortedBy() === 'user') {
+          logger.info({ ...fields(), phase, aborted: true, willRetry: false }, 'model.attempt');
+        } else {
+          logger.warn(
+            { ...fields(), phase, ok: false, timeout: true, willRetry: false },
+            'model.attempt',
+          );
+        }
+      };
+
+      // SDK 的 firstChunkMs 从收到响应头才开始计时，服务端迟迟不响应时等不到超时。
+      // 这里从发出请求起计时，到第一段内容为止；每次请求（含重试）重新计时，重试等待不算在内
+      let firstChunkTimer: NodeJS.Timeout | undefined = setTimeout(
+        onFirstChunkTimeout,
+        firstChunkMs,
+      );
+      const clearFirstChunkTimer = () => {
+        clearTimeout(firstChunkTimer);
+        firstChunkTimer = undefined;
+      };
 
       let result;
       try {
         result = await doStream();
       } catch (error) {
-        if (abortSignal?.aborted) {
+        clearFirstChunkTimer();
+        if (abortedBy()) {
           logAborted('request');
           throw error;
         }
@@ -100,6 +130,10 @@ export function trackAttempts({
       const stream = observe(result.stream, {
         onPart(part) {
           if (part.type === 'text-start' || part.type === 'reasoning-start') contentStarts++;
+          if ((part.type === 'text-delta' || part.type === 'reasoning-delta') && part.delta) {
+            clearFirstChunkTimer();
+          }
+          if (part.type === 'error') clearFirstChunkTimer();
           if (part.type !== 'error' || logged) return;
           logged = true;
           // SDK：流中的任何错误事件都会重新生成，直到次数用完；不看是否可重试
@@ -125,16 +159,18 @@ export function trackAttempts({
           }
         },
         onClose() {
+          clearFirstChunkTimer();
           if (logged) return;
           logged = true;
-          if (abortSignal?.aborted) logAborted('stream');
+          if (abortedBy()) logAborted('stream');
           else logger.info({ ...fields(), phase: 'stream', ok: true }, 'model.attempt');
         },
         // 读流时抛错（如连接中途断开）SDK 不重试；中止时 fetch 也以这种方式结束
         onError(error) {
+          clearFirstChunkTimer();
           if (logged) return;
           logged = true;
-          if (abortSignal?.aborted) return logAborted('stream');
+          if (abortedBy()) return logAborted('stream');
           logger.warn(
             {
               ...fields(),
@@ -146,10 +182,11 @@ export function trackAttempts({
             'model.attempt',
           );
         },
-        // SDK 因中止不再读这个流。通常挂起的读取随后以 done 返回、由 onClose 记下；
+        // SDK 因中止或超时不再读这个流。通常挂起的读取随后以 done 返回、由 onClose 记下；
         // 这里兜住当时没有挂起读取的情况。回复流被消费方取消不会传到这里（请求在后台照常读完）
         onCancel() {
-          if (logged || !abortSignal?.aborted) return;
+          clearFirstChunkTimer();
+          if (logged || !abortedBy()) return;
           logged = true;
           logAborted('stream');
         },

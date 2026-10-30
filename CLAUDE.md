@@ -24,12 +24,12 @@ LuoLiCore：群聊助手 agent，核心基于 Vercel AI SDK v7。术语见 `CONT
 - 核心是进程内的库，`reply()` 输出 UI message stream。现在用 `streamText`，加工具时再换 `ToolLoopAgent`。
 - 存储：由 core 负责，SQLite（Node 自带的 `node:sqlite`），默认 `data/luoli.db`。表结构与取舍见 ADR-0005。core 的测试用内存存储。
 - 上下文：按段拼接，见 ADR-0004。system 依次为人设、格式说明、会话标题、之前的摘要；之后是当前段的消息，只往后追加。空闲超过 4 小时切段，后台生成滚动摘要，重启后补做；上一轮输入超过 64k token 时压缩，保留最近 20 条。摘要请求沿用当前前缀，末尾追加摘要指令。数字均可配置。
-- 送模型的用户消息：正文包在 `<message from="显示名" uid="发言人 id" time="10-30 14:02">` 标签里，由 core 的格式化函数生成，以后的字段都加在这里。core 在人设之后附上格式说明，`prompts/system.md` 只放默认 prompt。
+- 送模型的用户消息：正文包在 `<message from="显示名" uid="发言人 id" time="2026-10-30 14:02">` 标签里，由 core 的格式化函数生成，以后的字段都加在这里。`uid` 只在平台提供不变的用户 id 时才有（CLI 没有）；`time` 按本机时区。core 在人设之后附上格式说明，逐个解释标签属性；`prompts/system.md` 只放默认 prompt。
 - 人设：`LUOLI_PROMPT` 指向人设文件（不进仓库），不设时用 `prompts/system.md`。
 - provider 只接 openai-compatible。配置只来自环境变量与命令行参数：`LUOLI_BASE_URL`、`LUOLI_API_KEY`、`LUOLI_MODEL` 等，写在 `.env`。
 - 测试：核心用 `ai/test` 的 mock 模型写行为测试，不调用真实 API；CLI 与 Telegram 手动验证。
 - 重试：用 AI SDK 内置重试，次数由 `LUOLI_MAX_RETRIES` 配置，默认 2。请求阶段（`maxRetries`）重试可重试错误；流式开始后服务端发来错误事件时也重试（`streamRetries`，次数相同），失败那次的半截不写入历史。连接中途断开不重试。
-- 超时：等第一段输出超过 60 秒、或两段输出之间超过 30 秒，按失败处理。可配置。
+- 超时：等第一段输出超过 60 秒、或两段输出之间超过 30 秒，按失败处理（半截不写入）。由 `LUOLI_FIRST_CHUNK_TIMEOUT`、`LUOLI_CHUNK_TIMEOUT` 配置，单位秒。
 - 模型调用出错：不写入助手消息，用户消息保留。
 - 中止：半截回复写入历史，metadata 标记 `aborted`；送模型时在副本末尾加「（回复被中止）」。一个字都没输出就被中止时不写入。
 - 用量：回复正常完成时写入助手消息 metadata 的 `usage`（输入、输出、总数、缓存命中），只算最终成功的那次；中止、失败没有用量。

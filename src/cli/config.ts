@@ -7,6 +7,8 @@ export type CliConfig = {
   name?: string;
   /** 未设置时为 undefined，用核心的默认值 */
   maxRetries?: number;
+  /** 首段与段间超时（毫秒），未设置的项用核心的默认值 */
+  timeouts: { firstChunkMs?: number; chunkMs?: number };
   /** 接着上次的 CLI 会话，而不是新开一个 */
   resume: boolean;
   /** 数据库文件，LUOLI_DB，默认 data/luoli.db */
@@ -17,6 +19,8 @@ export type CliConfig = {
 
 export type ConfigResult =
   { ok: true; config: CliConfig } | { ok: false; error: string; showUsage: boolean };
+
+const maxTimeoutSeconds = Math.floor((2 ** 31 - 1) / 1000);
 
 export const usage = '用法：pnpm dev [--model <模型 id>] [--name <名字>] [--resume]';
 
@@ -65,12 +69,32 @@ export function parseConfig(argv: string[], env: Record<string, string | undefin
     };
   }
 
+  const timeouts: CliConfig['timeouts'] = {};
+  for (const [key, variable] of [
+    ['firstChunkMs', 'LUOLI_FIRST_CHUNK_TIMEOUT'],
+    ['chunkMs', 'LUOLI_CHUNK_TIMEOUT'],
+  ] as const) {
+    const raw = env[variable];
+    if (!raw) continue;
+    const seconds = Number(raw);
+    // 上限来自 setTimeout：超过 2^31-1 毫秒会被当成 1 毫秒，立刻超时
+    if (!(/^\d+$/.test(raw) && seconds > 0 && seconds <= maxTimeoutSeconds)) {
+      return {
+        ok: false,
+        error: `${variable} 必须是 1 到 ${maxTimeoutSeconds} 之间的整数（秒），当前为 "${raw}"`,
+        showUsage: false,
+      };
+    }
+    timeouts[key] = seconds * 1000;
+  }
+
   return {
     ok: true,
     config: {
       model: { baseURL, apiKey: env.LUOLI_API_KEY || undefined, modelId },
       name: values.name?.trim() || undefined,
       maxRetries,
+      timeouts,
       resume: values.resume,
       dbPath: env.LUOLI_DB || 'data/luoli.db',
       promptPath: env.LUOLI_PROMPT || 'prompts/system.md',
