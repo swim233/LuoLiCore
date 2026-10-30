@@ -10,8 +10,10 @@ export type Author = {
 export type MessageMetadata = {
   /** 用户消息必有 */
   author?: Author;
-  /** ISO 时间 */
+  /** ISO 时间。用户消息取平台上的发送时间（平台给出时） */
   createdAt: string;
+  /** 平台里的消息 id（如 Telegram 的 message_id），编辑消息时靠它找到这条 */
+  platformMessageId?: string;
   /** 助手回复被中止，正文是中止前已输出的部分 */
   aborted?: true;
   /** 正常完成的助手回复才有；只算最终成功的那次请求 */

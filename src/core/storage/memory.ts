@@ -1,5 +1,6 @@
 import { generateId } from 'ai';
 import type { Message } from '../message.js';
+import { DuplicateMessageError } from './errors.js';
 import type { ConversationStore, Segment, Storage } from './types.js';
 
 // createdAt 对应 SQLite 的 created_at 列：消息自带的时间，没带时取写入时间
@@ -50,6 +51,14 @@ function memoryStore(data: Data): ConversationStore {
     },
     async add(message, seq = nextSeq++) {
       if (rows.some((row) => row.seq === seq)) throw new Error(`序号 ${seq} 已被使用`);
+      // 与 SQLite 的唯一索引一致：同一会话里平台消息 id 不重复
+      const platformMessageId = message.metadata?.platformMessageId;
+      if (
+        platformMessageId !== undefined &&
+        rows.some((row) => row.message.metadata?.platformMessageId === platformMessageId)
+      ) {
+        throw new DuplicateMessageError(platformMessageId);
+      }
       rows.push({
         seq,
         message: structuredClone(message),
@@ -117,6 +126,31 @@ export function createMemoryStorage(): Storage {
         }
       }
       return latest?.id;
+    },
+    async findConversation(platform, platformConversationId) {
+      for (const [id, conversation] of conversations) {
+        if (
+          conversation.platform === platform &&
+          conversation.platformConversationId === platformConversationId
+        ) {
+          return { id, platformConversationId, title: conversation.data.title };
+        }
+      }
+      return undefined;
+    },
+    async listConversations(platform) {
+      return [...conversations]
+        .filter(([, conversation]) => conversation.platform === platform)
+        .map(([id, { platformConversationId, data }]) => ({
+          id,
+          platformConversationId,
+          title: data.title,
+        }));
+    },
+    async updateTitle(id, title) {
+      const conversation = conversations.get(id);
+      if (!conversation) throw new Error(`会话 ${id} 不存在`);
+      conversation.data.title = title;
     },
     close() {},
   };

@@ -5,6 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   createMemoryStorage,
+  DuplicateMessageError,
   openSqliteStorage,
   type Message,
   type MessageMetadata,
@@ -206,6 +207,61 @@ describe.each([
     expect(await store.currentSegment()).toMatchObject({ startSeq: 12, priorSummary: '再后' });
   });
 
+  it('按平台与平台会话 id 找会话；列出某平台的会话；改标题只影响之后开始的段', async () => {
+    const storage = await open();
+    const group = await storage.createConversation({
+      platform: 'telegram',
+      platformConversationId: '-100',
+      title: '旧名',
+    });
+    const dm = await storage.createConversation({
+      platform: 'telegram',
+      platformConversationId: '11',
+      title: '与 Alice 的私聊',
+    });
+    await storage.createConversation({ platform: 'cli' });
+
+    expect(await storage.findConversation('telegram', '-100')).toEqual({
+      id: group,
+      platformConversationId: '-100',
+      title: '旧名',
+    });
+    expect(await storage.findConversation('telegram', '-999')).toBeUndefined();
+    expect(await storage.findConversation('cli', '-100')).toBeUndefined();
+    expect((await storage.listConversations('telegram')).map((c) => c.id)).toEqual([group, dm]);
+
+    await storage.updateTitle(group, '新名');
+    const store = await storage.openConversation(group);
+    await store.addSegment({ startSeq: 5, startReason: 'idle', priorSummary: '摘要' });
+
+    expect((await storage.findConversation('telegram', '-100'))?.title).toBe('新名');
+    expect((await store.currentSegment()).conversationTitle).toBe('新名');
+    await expect(storage.updateTitle('nope', 'x')).rejects.toThrow();
+  });
+
+  it('同一会话里平台消息 id 不能重复；不同会话可以', async () => {
+    const storage = await open();
+    const a = await storage.openConversation(
+      await storage.createConversation({ platform: 'telegram', platformConversationId: '1' }),
+    );
+    const b = await storage.openConversation(
+      await storage.createConversation({ platform: 'telegram', platformConversationId: '2' }),
+    );
+    await a.add(message('user', '一', { platformMessageId: '7' }));
+    await b.add(message('user', '一', { platformMessageId: '7' }));
+
+    await expect(a.add(message('user', '二', { platformMessageId: '7' }))).rejects.toThrow(
+      DuplicateMessageError,
+    );
+    expect(await a.list()).toHaveLength(1);
+    // 序号冲突是另一种错误，不能当成重复的平台消息
+    const seq = await a.reserve();
+    await a.add(message('user', '三'), seq);
+    await expect(a.add(message('user', '四', { platformMessageId: '8' }), seq)).rejects.not.toThrow(
+      DuplicateMessageError,
+    );
+  });
+
   it('找最后一条消息最新的会话：只看指定平台，跳过没有消息的会话', async () => {
     const storage = await open();
     const create = async (platform: string, platformConversationId?: string) => {
@@ -389,7 +445,7 @@ describe('SQLite 存储', () => {
     expect(() => openSqliteStorage(path)).toThrow('数据库版本比程序新');
   });
 
-  it('消息行的 role、author_id、created_at 与消息本身一致，没有 id 的发言人 author_id 为空', async () => {
+  it('消息行的 role、author_id、platform_message_id、created_at 与消息本身一致，没有的为空', async () => {
     const dir = await tempDir();
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
     const path = join(dir, 'luoli.db');
@@ -397,7 +453,11 @@ describe('SQLite 存储', () => {
     cleanups.push(async () => storage.close());
     const id = await storage.createConversation({ platform: 'cli' });
     const store = await storage.openConversation(id);
-    const user = message('user', '你好', { author: alice, createdAt: '2026-10-30T08:00:00.000Z' });
+    const user = message('user', '你好', {
+      author: alice,
+      createdAt: '2026-10-30T08:00:00.000Z',
+      platformMessageId: '42',
+    });
     const anonymous = message('user', '我没有 id', {
       author: { name: '无名' },
       createdAt: '2026-10-30T08:00:02.000Z',
@@ -420,7 +480,7 @@ describe('SQLite 存储', () => {
           seq: 1,
           role: 'user',
           author_id: 'u-alice',
-          platform_message_id: null,
+          platform_message_id: '42',
           created_at: '2026-10-30T08:00:00.000Z',
         },
         {

@@ -57,6 +57,7 @@ export function createSegmenter({
   },
   summarize,
   isReplying,
+  checkOnCreate = true,
 }: {
   store: ConversationStore;
   logger: Logger;
@@ -66,6 +67,8 @@ export function createSegmenter({
   summarize: Summarize;
   /** 回复进行中不做空闲检查：回复与它回答的消息不能分到两段。回复结束后会重新安排检查 */
   isReplying: () => boolean;
+  /** 创建时是否立即检查一次空闲（见下）；前端要先处理完离线积压时传 false */
+  checkOnCreate?: boolean;
 }) {
   // 正在进行的切段（含压缩前读消息）；结束时清空，done 从不 reject
   let cutting: { reason: Reason; done: Promise<void> } | undefined;
@@ -133,16 +136,16 @@ export function createSegmenter({
   }
 
   /**
-   * 最后一条消息距今超过空闲时长、且当前段有消息时，在后台切段。
+   * 最后一条消息距 at（默认为现在）超过空闲时长、且当前段有消息时，在后台切段。
    * 等到读完消息、决定好新段从哪里开始才返回，摘要不等；从不 reject
    */
-  function checkIdle(): Promise<void> {
+  function checkIdle(at?: number): Promise<void> {
     checking = checking.then(async () => {
       if (cutting || closing.signal.aborted || isReplying()) return;
       try {
         const last = await store.last();
         if (!last) return;
-        const idleFor = Date.now() - Date.parse(last.createdAt);
+        const idleFor = (at ?? Date.now()) - Date.parse(last.createdAt);
         if (Number.isNaN(idleFor)) return;
         if (idleFor < idleMs) return schedule(idleMs - idleFor);
         const segment = await store.currentSegment();
@@ -216,7 +219,7 @@ export function createSegmenter({
   }
 
   // 创建时立即检查一次：上次退出时已经空闲太久的，在后台补做
-  void checkIdle();
+  if (checkOnCreate) void checkIdle();
 
   return {
     checkIdle,

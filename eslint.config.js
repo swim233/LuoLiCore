@@ -8,6 +8,11 @@ const coreBoundary = 'core 不得引用前端或平台代码';
 const forbiddenInCore = [
   // 任何含 cli 路径段的写法：../cli/x.js、../../src/cli/x.js、./../cli 等
   '(^|[/#])cli(/|$)',
+  // Telegram 前端，同上
+  '(^|[/#])telegram(/|$)',
+  // 前端共用的配置与日志（含 pino），同上；core 只依赖 Logger 接口
+  '(^|[/#])shared(/|$)',
+  '^pino(/|$)',
   '^(node:)?readline(/|$)',
   '^chat(/|$)',
   '^@chat-adapter/',

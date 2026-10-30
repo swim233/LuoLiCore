@@ -50,6 +50,12 @@ export type NewConversation = {
   title?: string;
 };
 
+export type ConversationInfo = {
+  id: string;
+  platformConversationId?: string;
+  title?: string;
+};
+
 /** 一个数据库：多个会话 */
 export type Storage = {
   /** 新建会话，同时写入它的第一段，返回会话 id */
@@ -58,5 +64,14 @@ export type Storage = {
   openConversation(id: string): Promise<ConversationStore>;
   /** 某平台里最后一条消息最新的会话 id；没有消息的会话不算 */
   findLatestConversation(platform: string): Promise<string | undefined>;
+  /** 按平台与平台会话 id 找会话；没有时为 undefined */
+  findConversation(
+    platform: string,
+    platformConversationId: string,
+  ): Promise<ConversationInfo | undefined>;
+  /** 某平台的全部会话，按创建先后 */
+  listConversations(platform: string): Promise<ConversationInfo[]>;
+  /** 改会话标题；已有的段保留各自开始时的快照，新段用新标题 */
+  updateTitle(id: string, title: string | undefined): Promise<void>;
   close(): void;
 };

@@ -127,6 +127,28 @@ describe('会话', () => {
     expect(model.doStreamCalls).toHaveLength(0);
   });
 
+  it('append 可以给出平台的发送时间与消息 id：写进 metadata，标签里的 time 用它', async () => {
+    const model = replyingModel(['好']);
+    const conversation = createConversation({ model, instructions });
+
+    const message = await conversation.append({
+      author: alice,
+      text: '早',
+      createdAt: '2026-10-30T01:00:00.000Z',
+      platformMessageId: '42',
+    });
+    await readAll(conversation.reply());
+
+    expect(message.metadata).toEqual({
+      author: alice,
+      createdAt: '2026-10-30T01:00:00.000Z',
+      platformMessageId: '42',
+    });
+    expect(promptOf(model, 0)[1]?.text).toBe(
+      '<message from="Alice" uid="u-alice" time="2026-10-30 09:00">\n早\n</message>',
+    );
+  });
+
   it('修改 messages() 或 append() 的返回值不影响会话历史', async () => {
     const conversation = createConversation({ model: replyingModel(), instructions });
     const appended = await conversation.append({ author: alice, text: '原文' });
@@ -242,6 +264,37 @@ describe('会话', () => {
     });
     expect(model.doStreamCalls[0]?.prompt[1]?.content).toHaveLength(1);
   });
+
+  it.each([
+    ['没有文字段', []],
+    ['只有空白', [' \n ']],
+  ])(
+    '回复正常结束但没有任何文字（%s）：不写入助手消息，记 reply.end（empty）',
+    async (_name, deltas) => {
+      const { logger, entries } = recordingLogger();
+      const model = new MockLanguageModelV4({
+        doStream: async () => ({
+          stream: simulateReadableStream({
+            chunks: [...(deltas.length > 0 ? textParts(...deltas) : []), finish()],
+          }),
+        }),
+      });
+      const conversation = createConversation({ model, instructions, logger });
+      await conversation.append({ author: alice, text: '在吗' });
+
+      const chunks = await readAll(conversation.reply());
+
+      expect(chunks.at(-1)?.type).toBe('finish');
+      expect((await conversation.messages()).map((m) => m.role)).toEqual(['user']);
+      expect(logsOf(entries, 'reply.end')).toEqual([
+        {
+          level: 'warn',
+          msg: 'reply.end',
+          fields: expect.objectContaining({ outcome: 'empty', saved: false }),
+        },
+      ]);
+    },
+  );
 
   it('回复进行中再次 reply 立即抛错，结束后可以再次回复', async () => {
     const conversation = createConversation({

@@ -1,0 +1,42 @@
+import type { TelegramChat, TelegramMessage, TelegramUser } from '@chat-adapter/telegram';
+import type { AppendInput } from '../core/index.js';
+
+/** Telegram 原始消息。改群名的服务消息带 new_chat_title（适配器的类型里没有这一项） */
+export type TelegramRaw = TelegramMessage & { new_chat_title?: string };
+
+/** 显示名：名 + 空格 + 姓，没有姓时只有名 */
+export function displayName(user: Pick<TelegramUser, 'first_name' | 'last_name'>): string {
+  return [user.first_name, user.last_name].filter(Boolean).join(' ');
+}
+
+/** 会话标题：群为群名；私聊为「与 {显示名} 的私聊」 */
+export function conversationTitle(chat: TelegramChat): string | undefined {
+  if (chat.type !== 'private') return chat.title;
+  return `与 ${displayName({ first_name: chat.first_name ?? '', last_name: chat.last_name })} 的私聊`;
+}
+
+/** 白名单：群看 chat id，私聊看发送者 id；频道不工作 */
+export function isAllowed(
+  raw: TelegramRaw,
+  { chats, users }: { chats: ReadonlySet<string>; users: ReadonlySet<string> },
+): boolean {
+  if (raw.chat.type === 'private') return raw.from !== undefined && users.has(String(raw.from.id));
+  if (raw.chat.type === 'group' || raw.chat.type === 'supergroup') {
+    return chats.has(String(raw.chat.id));
+  }
+  return false;
+}
+
+/**
+ * 一条文字消息记成核心的输入：发言人、Telegram 的发送时间、消息 id。
+ * 不是文字消息（图片、贴纸、服务消息等）时返回 undefined，本步不记录
+ */
+export function toAppendInput(raw: TelegramRaw): AppendInput | undefined {
+  if (raw.text === undefined || raw.from === undefined) return undefined;
+  return {
+    author: { id: String(raw.from.id), name: displayName(raw.from) },
+    text: raw.text,
+    createdAt: new Date(raw.date * 1000).toISOString(),
+    platformMessageId: String(raw.message_id),
+  };
+}

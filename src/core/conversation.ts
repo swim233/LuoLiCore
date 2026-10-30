@@ -25,12 +25,12 @@ export type Conversation = {
    * 记录一条用户消息，不产生回复。可以附带图片（先存进文件存储，消息里只存地址），
    * 有图片时可以没有文字。写入前发现会话已空闲太久时，在后台切段，这条消息归入新段
    */
-  append(input: { author: Author; text?: string; files?: NewFile[] }): Promise<Message>;
+  append(input: AppendInput): Promise<Message>;
   /**
    * 根据当前历史生成回复。错误以 error chunk 出现在流中，不会抛出；
    * 每次重试前流中出现一个 transient 的 `data-retry` 段；流中途重新生成时随后还有
    * 一个 `reset-step`，失败那次已输出的内容不会写入历史。
-   * 流读完时回复已写入历史；出错或被取消则不写入。
+   * 流读完时回复已写入历史；出错、被取消或没有任何文字时不写入。
    * 后台正在空闲切段时，等它结束再读当前段；压缩进行中不等，照常用当前段。
    * 正常完成且输入超过压缩阈值时，在后台压缩。
    * 上一个回复的流还没结束时调用会立即抛错。
@@ -39,6 +39,16 @@ export type Conversation = {
   messages(): Promise<Message[]>;
   /** 停止后台的空闲检查，中止进行中的摘要并等它结束。之后不再使用这个会话 */
   close(): Promise<void>;
+};
+
+export type AppendInput = {
+  author: Author;
+  text?: string;
+  files?: NewFile[];
+  /** 消息发出的时间（ISO），平台给出时用它；默认为写入时间 */
+  createdAt?: string;
+  /** 平台里的消息 id，存进 metadata 与 platform_message_id 列 */
+  platformMessageId?: string;
 };
 
 export type ReplyOptions = {
@@ -56,6 +66,7 @@ export function createConversation({
   conversationId,
   timeouts = {},
   segments = {},
+  checkIdleOnCreate = true,
 }: {
   /** 不接受字符串形式的模型 id：`wrapLanguageModel` 需要模型实例 */
   model: Exclude<LanguageModel, string>;
@@ -73,6 +84,11 @@ export function createConversation({
   timeouts?: { firstChunkMs?: number; chunkMs?: number };
   /** 分段：空闲切段、压缩与摘要（ADR-0004） */
   segments?: SegmentOptions;
+  /**
+   * 创建时按现在的时间检查一次空闲，补做停机期间漏掉的切段（默认）。
+   * 前端还有离线积压要写入时传 false：积压的消息带着平台时间，写入时按消息之间的间隔判断
+   */
+  checkIdleOnCreate?: boolean;
 }): Conversation {
   const { firstChunkMs = 60_000, chunkMs = 30_000 } = timeouts;
   let replying = false;
@@ -172,16 +188,21 @@ export function createConversation({
     options: segments,
     summarize,
     isReplying: () => replying,
+    checkOnCreate: checkIdleOnCreate,
   });
 
   return {
-    async append({ author, text, files = [] }) {
+    async append({ author, text, files = [], createdAt, platformMessageId }) {
       // 先存文件，再写消息：消息里的地址总能找到文件
       const urls = await Promise.all(files.map((file) => fileStore.save(file)));
       const message: Message = {
         id: generateId(),
         role: 'user',
-        metadata: { author, createdAt: new Date().toISOString() },
+        metadata: {
+          author,
+          createdAt: createdAt ?? new Date().toISOString(),
+          ...(platformMessageId === undefined ? {} : { platformMessageId }),
+        },
         parts: [
           // 有图片时文字可以省略；只有文字时照旧（空文字也写一个 text part）
           ...(text || files.length === 0 ? [{ type: 'text' as const, text: text ?? '' }] : []),
@@ -193,8 +214,9 @@ export function createConversation({
         ],
       };
       // 写入前看是否已经空闲太久：定时器没赶上、或上次空闲切段失败时，在这里补做，
-      // 这条消息归入新段
-      await segmenter.checkIdle();
+      // 这条消息归入新段。消息带着平台的发送时间时，按它与上一条的间隔判断：
+      // 离线期间积压的消息彼此只隔几秒，不应因为「距今」很久而切段
+      await segmenter.checkIdle(createdAt === undefined ? undefined : Date.parse(createdAt));
       await store.add(message);
       segmenter.wrote();
       return message;
@@ -326,6 +348,18 @@ export function createConversation({
               logger.info({ ...summary, outcome: 'aborted', saved }, 'reply.end');
             } else if (isCancelled) {
               logger.info({ ...summary, outcome: 'cancelled' }, 'reply.end');
+            } else if (!hasText(responseMessage)) {
+              // 正常结束却没有任何文字：与一字未出就被中止一样不写入，序号空着
+              logger.warn(
+                {
+                  ...summary,
+                  outcome: 'empty',
+                  saved: false,
+                  finishReason,
+                  usage: responseMessage.metadata?.usage,
+                },
+                'reply.end',
+              );
             } else {
               await store.add(responseMessage, seq);
               logger.info(

@@ -1,7 +1,8 @@
 import { DatabaseSync } from 'node:sqlite';
 import { generateId } from 'ai';
+import { DuplicateMessageError } from './errors.js';
 import type { Message } from '../message.js';
-import type { ConversationStore, Segment, SeqRange, Storage } from './types.js';
+import type { ConversationInfo, ConversationStore, Segment, SeqRange, Storage } from './types.js';
 
 const schemaVersion = 1;
 
@@ -66,7 +67,7 @@ export function openSqliteStorage(path: string): Storage {
   const insertMessage = db.prepare(
     `INSERT INTO messages
        (id, conversation_id, seq, role, author_id, platform_message_id, created_at, ui_message)
-     VALUES (?, ?, ?, ?, ?, NULL, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   const listMessages = db.prepare(
     `SELECT seq, ui_message FROM messages
@@ -88,6 +89,15 @@ export function openSqliteStorage(path: string): Storage {
      ON CONFLICT (conversation_id, start_seq) DO NOTHING`,
   );
   // 最后一条消息最新的会话；时间相同时按写入先后（rowid）
+  const findConversation = db.prepare(
+    `SELECT id, platform_conversation_id, title FROM conversations
+     WHERE platform = ? AND platform_conversation_id = ?`,
+  );
+  const listConversations = db.prepare(
+    `SELECT id, platform_conversation_id, title FROM conversations
+     WHERE platform = ? ORDER BY created_at, rowid`,
+  );
+  const updateTitle = db.prepare('UPDATE conversations SET title = ? WHERE id = ?');
   const latestConversation = db.prepare(
     `SELECT c.id FROM conversations c JOIN messages m ON m.conversation_id = c.id
      WHERE c.platform = ?
@@ -135,16 +145,26 @@ export function openSqliteStorage(path: string): Storage {
       return row && { seq: Number(row.seq), createdAt: String(row.created_at) };
     },
     async add(message, seq = reserve(conversationId)) {
-      // 这几列是 ui_message 的副本，用于查询；读取以 ui_message 为准
-      insertMessage.run(
-        message.id,
-        conversationId,
-        seq,
-        message.role,
-        message.metadata?.author?.id ?? null,
-        message.metadata?.createdAt ?? new Date().toISOString(),
-        JSON.stringify(message),
-      );
+      const platformMessageId = message.metadata?.platformMessageId;
+      try {
+        // 这几列是 ui_message 的副本，用于查询；读取以 ui_message 为准
+        insertMessage.run(
+          message.id,
+          conversationId,
+          seq,
+          message.role,
+          message.metadata?.author?.id ?? null,
+          platformMessageId ?? null,
+          message.metadata?.createdAt ?? new Date().toISOString(),
+          JSON.stringify(message),
+        );
+      } catch (error) {
+        // 撞上 messages_platform 唯一索引：这条平台消息已经写入过
+        if (platformMessageId !== undefined && isPlatformMessageConflict(error)) {
+          throw new DuplicateMessageError(platformMessageId);
+        }
+        throw error;
+      }
     },
     async reserve() {
       return reserve(conversationId);
@@ -191,6 +211,16 @@ export function openSqliteStorage(path: string): Storage {
       const row = latestConversation.get(platform);
       return row ? String(row.id) : undefined;
     },
+    async findConversation(platform, platformConversationId) {
+      const row = findConversation.get(platform, platformConversationId);
+      return row && conversationInfo(row);
+    },
+    async listConversations(platform) {
+      return listConversations.all(platform).map(conversationInfo);
+    },
+    async updateTitle(id, title) {
+      if (updateTitle.run(title ?? null, id).changes === 0) throw new Error(`会话 ${id} 不存在`);
+    },
     close() {
       if (db.isOpen) db.close();
     },
@@ -222,6 +252,23 @@ function transaction(db: DatabaseSync, run: () => void): void {
     db.exec('ROLLBACK');
     throw error;
   }
+}
+
+function conversationInfo(row: Record<string, unknown>): ConversationInfo {
+  return {
+    id: String(row.id),
+    platformConversationId: optional(row.platform_conversation_id),
+    title: optional(row.title),
+  };
+}
+
+// SQLITE_CONSTRAINT_UNIQUE；同一错误码也用于序号冲突，再看是哪一列
+function isPlatformMessageConflict(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    (error as { errcode?: number }).errcode === 2067 &&
+    error.message.includes('platform_message_id')
+  );
 }
 
 // NULL 列读成 undefined

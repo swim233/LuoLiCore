@@ -12,7 +12,7 @@ import {
   type Usage,
 } from '../core/index.js';
 import { parseConfig, usage } from './config.js';
-import { createLogger, jsonEscapedForms, logFile } from './logger.js';
+import { createLogger, jsonEscapedForms, logFile } from '../shared/logger.js';
 import { notice } from './notice.js';
 import { printReply } from './print-reply.js';
 import { runTerminal } from './terminal.js';

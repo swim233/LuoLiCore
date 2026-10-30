@@ -8,6 +8,7 @@
   "packageManager": "pnpm@12.15.0",
   "scripts": {
     "dev": "tsx --env-file-if-exists=.env src/cli/main.ts",
+    "telegram": "tsx --env-file-if-exists=.env src/telegram/main.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "format": "prettier --write .",
@@ -16,7 +17,10 @@
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "^3.0.80",
+    "@chat-adapter/state-memory": "4.43.0",
+    "@chat-adapter/telegram": "4.43.0",
     "ai": "^7.0.156",
+    "chat": "4.43.0",
     "pino": "^10.4.0",
     "zod": "^4.6.7"
   },

@@ -172,10 +172,12 @@ function setup({
   turns,
   segments,
   store = createMemoryStore(),
+  checkIdleOnCreate,
 }: {
   turns: Turn[];
   segments?: SegmentOptions;
   store?: ConversationStore;
+  checkIdleOnCreate?: boolean;
 }) {
   const { logger, entries } = recordingLogger();
   const model = scripted(...turns);
@@ -186,6 +188,7 @@ function setup({
     logger,
     conversationId: 'c1',
     segments,
+    checkIdleOnCreate,
   });
   opened.push(conversation);
   const round = async (text: string) => {
@@ -387,6 +390,71 @@ describe('空闲切段', () => {
       '晚安',
       instruction(idleScope, 1500),
     ]);
+  });
+
+  it('append 带着平台时间：按与上一条消息的间隔判断空闲，不按距今多久', async () => {
+    const { conversation, model, store } = setup({ turns: ['两条之间的摘要'] });
+    const hoursAgo = (hours: number, seconds = 0) =>
+      new Date(Date.parse(start) - hours * 3_600_000 + seconds * 1000).toISOString();
+
+    // 离线期间积压的消息：六小时前，彼此只隔几秒
+    await conversation.append({ author: alice, text: '一', createdAt: hoursAgo(6) });
+    await conversation.append({ author: alice, text: '二', createdAt: hoursAgo(6, 10) });
+    await conversation.append({ author: alice, text: '三', createdAt: hoursAgo(6, 20) });
+    await sleep(50);
+    expect(model.doStreamCalls).toHaveLength(0);
+    expect((await store.currentSegment()).startSeq).toBe(1);
+
+    // 与上一条相隔超过空闲时长（默认 240 分钟）才切段，新消息归入新段
+    await conversation.append({ author: alice, text: '四', createdAt: hoursAgo(1) });
+    await until(async () => (await store.currentSegment()).startReason === 'idle');
+    expect((await store.currentSegment()).startSeq).toBe(4);
+    expect(model.doStreamCalls).toHaveLength(1);
+  });
+
+  it('checkIdleOnCreate 为 false：创建时不补做；写入前的检查照旧（按现在的时间）', async () => {
+    const store = createMemoryStore();
+    const old = new Date(Date.parse(start) - 5 * 3_600_000).toISOString();
+    await store.add({
+      id: 'u1',
+      role: 'user',
+      metadata: { author: alice, createdAt: old },
+      parts: [{ type: 'text', text: '很久以前' }],
+    });
+
+    const { conversation, model } = setup({
+      turns: ['写入时补做的摘要'],
+      store,
+      checkIdleOnCreate: false,
+    });
+    await sleep(100);
+    expect(model.doStreamCalls).toHaveLength(0);
+    expect((await store.currentSegment()).startReason).toBe('first');
+
+    // 不带平台时间的写入：按现在的时间，与上一条相隔 5 小时，切段
+    await conversation.append({ author: alice, text: '现在' });
+    await until(async () => (await store.currentSegment()).startReason === 'idle');
+    expect(await store.currentSegment()).toMatchObject({
+      startSeq: 2,
+      priorSummary: '写入时补做的摘要',
+    });
+  });
+
+  it('checkIdleOnCreate 为 false：写入后的定时器照旧切段', async () => {
+    const { store, round } = setup({
+      turns: ['好的', '定时器触发的摘要'],
+      segments: { idleMs: 30 },
+      checkIdleOnCreate: false,
+    });
+
+    await round('早上好');
+    advance(60_000);
+
+    await until(async () => (await store.currentSegment()).startReason === 'idle');
+    expect(await store.currentSegment()).toMatchObject({
+      startSeq: 3,
+      priorSummary: '定时器触发的摘要',
+    });
   });
 
   it('当前段还没有消息（刚切过段）时不再切', async () => {

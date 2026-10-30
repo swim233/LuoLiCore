@@ -2,9 +2,19 @@ import { pino } from 'pino';
 
 export const logFile = 'logs/luoli.log';
 
-/** 写 `logs/luoli.log` 的 JSON Lines 日志。写盘前抹掉 API key，每行带上服务的主机名。 */
-export function createLogger({ baseURL, apiKey }: { baseURL: string; apiKey?: string }) {
-  const keyForms = apiKey ? jsonEscapedForms(apiKey) : [];
+/**
+ * 写 `logs/luoli.log` 的 JSON Lines 日志。写盘前抹掉 API key 与 secrets（如 bot token），
+ * 每行带上服务的主机名。
+ */
+export function createLogger(
+  { baseURL, apiKey }: { baseURL: string; apiKey?: string },
+  secrets: string[] = [],
+) {
+  const keyForms = [apiKey, ...secrets]
+    .filter((secret): secret is string => Boolean(secret))
+    .flatMap(jsonEscapedForms)
+    // 长的在前：一个秘密是另一个的一部分时，先整段替换
+    .sort((a, b) => b.length - a.length);
   const logger = pino(
     {
       // 去掉默认的 hostname（本机名），免得与服务主机名 host 混淆
