@@ -14,9 +14,10 @@ LuoLiCore：群聊助手 agent，核心基于 Vercel AI SDK v7。术语见 `CONT
 1. 脚手架：pnpm、ESM、Node ≥22、TypeScript strict、ESLint + Prettier（含 core 禁止引用 cli 的规则）、vitest
 2. 模型接入：从环境变量创建 openai-compatible provider，按 `--model` 或 `LUOLI_MODEL` 选模型
 3. 会话核心：`Conversation`（`append`、`reply`）、内存存储、`UIMessage` 加发言人 metadata、送模型前加名字、读取 `prompts/system.md`
-4. CLI 循环：readline 读输入、调用 `reply()`、逐段打印文本、`/exit`
-5. 中止：Ctrl+C 中止当前生成，半截回复保留并在 metadata 标记 `aborted`
-6. 用量：每轮结束打印一行 token 用量
+4. 重试与日志：SDK 内置重试、重试时终端提示、pino 写 `logs/luoli.log`
+5. CLI 循环：readline 读输入、调用 `reply()`、逐段打印文本、`/exit`
+6. 中止：Ctrl+C 中止当前生成，半截回复保留并在 metadata 标记 `aborted`
+7. 用量：每轮结束打印一行 token 用量
 
 已定的实现选择：
 
@@ -24,6 +25,9 @@ LuoLiCore：群聊助手 agent，核心基于 Vercel AI SDK v7。术语见 `CONT
 - 核心是进程内的库，`reply()` 输出 UI message stream。MVP 用 `streamText`，加工具时再换 `ToolLoopAgent`。
 - provider 只接 openai-compatible。配置只来自环境变量与命令行参数：`LUOLI_BASE_URL`、`LUOLI_API_KEY`、`LUOLI_MODEL`，写在 `.env`。
 - 测试：核心用 `ai/test` 的 mock 模型写行为测试，不调用真实 API；CLI 手动验证。
+- 重试：用 AI SDK 内置重试（流式开始前、可重试错误），次数由 `LUOLI_MAX_RETRIES` 配置，默认 2；流式开始后出错不重试。
+- 模型调用出错：不写入助手消息，用户消息保留。
+- 日志：pino 写 `logs/luoli.log`（JSON Lines）。记录调用失败、每次 HTTP 请求尝试、每轮回复概要；不记录对话正文；API key 抹为 `***`。core 只依赖 `Logger` 接口，不引用 pino。
 
 CLI 默认行为：
 
@@ -32,6 +36,7 @@ CLI 默认行为：
 - 模型：`--model` 优先，其次 `LUOLI_MODEL`，都没有则报错退出
 - 生成中按 Ctrl+C 中止；空闲时按 Ctrl+C 或 Ctrl+D 退出
 - 模型调用出错：打印错误，程序不退出，用户消息保留在历史里
+- 每次重试在终端打印一行，如「请求失败（429），重试中（1/2）」
 - 用量行：`tokens 输入 1234 · 输出 567`
 
 MVP 非目标：工具调用、Markdown 渲染、显示 reasoning、多会话切换、持久化、Telegram 接入、HTTP 服务。
@@ -72,7 +77,7 @@ AI SDK v7 与旧版本的差异（以 https://ai-sdk.dev 为准）：`system` �
 
 - 只在 `refactor` 分支提交，不推送。
 - 标题格式 `type(scope): 中文短句`，如 `feat(core): 新增会话核心`。type 用 feat、fix、refactor、test、docs、chore；scope 取模块或领域名，如 core、cli、adr、build。
-- 标题一行，不超过 50 字符，不加句号。需要时空一行写正文，说明改了什么、为什么，每行不超过 72 字符。
+- 只写标题一行，不超过 50 字符，不加句号，不写正文。
 - 不加 `Co-Authored-By` 等任何署名行。
 
 ## 需求阶段（grill 拷问）
