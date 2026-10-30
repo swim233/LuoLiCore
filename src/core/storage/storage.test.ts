@@ -138,6 +138,74 @@ describe.each([
     await storage.createConversation({ platform: 'cli' });
   });
 
+  it('按序号区间读消息：from 含、before 不含，entries 附带序号；last 给出序号最大的那条', async () => {
+    const storage = await open();
+    const store = await storage.openConversation(
+      await storage.createConversation({ platform: 'cli' }),
+    );
+    expect(await store.last()).toBeUndefined();
+    const first = message('user', '一', { createdAt: '2026-10-30T08:00:00.000Z' });
+    await store.add(first);
+    const reserved = await store.reserve(); // 空着的序号 2
+    const third = message('user', '三', { createdAt: '2026-10-30T08:03:00.000Z' });
+    await store.add(third);
+    const fourth = message('assistant', '四', { createdAt: '2026-10-30T08:04:00.000Z' });
+    await store.add(fourth);
+
+    expect(reserved).toBe(2);
+    expect(await store.entries({ from: 2 })).toEqual([
+      { seq: 3, message: third },
+      { seq: 4, message: fourth },
+    ]);
+    expect(await store.list({ from: 1, before: 4 })).toEqual([first, third]);
+    expect(await store.list({ from: 4, before: 4 })).toEqual([]);
+    expect(await store.last()).toEqual({ seq: 4, createdAt: '2026-10-30T08:04:00.000Z' });
+  });
+
+  it('新建会话即有第一段：从 1 开始、标题为会话标题、没有摘要', async () => {
+    const storage = await open();
+    const titled = await storage.openConversation(
+      await storage.createConversation({
+        platform: 'telegram',
+        platformConversationId: '-1',
+        title: '读书会',
+      }),
+    );
+    const untitled = await storage.openConversation(
+      await storage.createConversation({ platform: 'cli' }),
+    );
+
+    expect(await titled.currentSegment()).toEqual({
+      startSeq: 1,
+      startReason: 'first',
+      conversationTitle: '读书会',
+    });
+    expect(await untitled.currentSegment()).toEqual({ startSeq: 1, startReason: 'first' });
+  });
+
+  it('开始新的一段：当前段是 startSeq 最大的一段，标题取会话标题；同一序号已有一段时不写入、返回 false', async () => {
+    const storage = await open();
+    const store = await storage.openConversation(
+      await storage.createConversation({ platform: 'cli', title: '群' }),
+    );
+    await store.addSegment({ startSeq: 9, startReason: 'compress', priorSummary: '后' });
+    await store.addSegment({ startSeq: 5, startReason: 'idle', priorSummary: '前' });
+
+    expect(await store.currentSegment()).toEqual({
+      startSeq: 9,
+      startReason: 'compress',
+      conversationTitle: '群',
+      priorSummary: '后',
+    });
+    expect(
+      await store.addSegment({ startSeq: 5, startReason: 'compress', priorSummary: '重复' }),
+    ).toBe(false);
+    expect(
+      await store.addSegment({ startSeq: 12, startReason: 'idle', priorSummary: '再后' }),
+    ).toBe(true);
+    expect(await store.currentSegment()).toMatchObject({ startSeq: 12, priorSummary: '再后' });
+  });
+
   it('找最后一条消息最新的会话：只看指定平台，跳过没有消息的会话', async () => {
     const storage = await open();
     const create = async (platform: string, platformConversationId?: string) => {
@@ -239,6 +307,72 @@ describe('SQLite 存储', () => {
         'prior_summary',
         'created_at',
       ]);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('第 2 步建的会话没有段：当前段视为从 1 开始、标题取会话标题的第一段', async () => {
+    const dir = await tempDir();
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    const path = join(dir, 'luoli.db');
+    const storage = openSqliteStorage(path);
+    cleanups.push(async () => storage.close());
+    const id = await storage.createConversation({ platform: 'cli', title: '老群' });
+    const db = new DatabaseSync(path);
+    db.exec('DELETE FROM segments');
+    db.close();
+
+    expect(await (await storage.openConversation(id)).currentSegment()).toEqual({
+      startSeq: 1,
+      startReason: 'first',
+      conversationTitle: '老群',
+    });
+  });
+
+  it('段的行：标题是插入时会话标题的快照，之后改名不影响已有的段', async () => {
+    const dir = await tempDir();
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    const path = join(dir, 'luoli.db');
+    const storage = openSqliteStorage(path);
+    cleanups.push(async () => storage.close());
+    const id = await storage.createConversation({
+      platform: 'telegram',
+      platformConversationId: '-1',
+      title: '旧名',
+    });
+    const store = await storage.openConversation(id);
+    const db = new DatabaseSync(path);
+    try {
+      db.prepare('UPDATE conversations SET title = ? WHERE id = ?').run('新名', id);
+      await store.addSegment({ startSeq: 3, startReason: 'idle', priorSummary: '摘要' });
+
+      const rows = db
+        .prepare(
+          `SELECT conversation_id, start_seq, start_reason, conversation_title, prior_summary, created_at
+           FROM segments ORDER BY start_seq`,
+        )
+        .all()
+        .map((row) => ({ ...row }));
+      expect(rows).toEqual([
+        {
+          conversation_id: id,
+          start_seq: 1,
+          start_reason: 'first',
+          conversation_title: '旧名',
+          prior_summary: null,
+          created_at: expect.any(String),
+        },
+        {
+          conversation_id: id,
+          start_seq: 3,
+          start_reason: 'idle',
+          conversation_title: '新名',
+          prior_summary: '摘要',
+          created_at: expect.any(String),
+        },
+      ]);
+      expect(new Date(String(rows[1]?.created_at)).toISOString()).toBe(rows[1]?.created_at);
     } finally {
       db.close();
     }

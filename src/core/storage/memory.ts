@@ -1,35 +1,78 @@
 import { generateId } from 'ai';
 import type { Message } from '../message.js';
-import type { ConversationStore, Storage } from './types.js';
+import type { ConversationStore, Segment, Storage } from './types.js';
 
-type Row = { seq: number; message: Message; addedAt: number };
+// createdAt 对应 SQLite 的 created_at 列：消息自带的时间，没带时取写入时间
+type Row = { seq: number; message: Message; createdAt: string; addedAt: number };
+
+/** 一个会话在内存里的全部数据 */
+type Data = { title?: string; rows: Row[]; segments: Segment[] };
 
 // 写入顺序计数，「最后一条消息最新」时间相同时用它分先后（对应 SQLite 的 rowid）
 let addCounter = 0;
 
 /**
- * 内存里的一个会话，语义与 SQLite 实现一致（含序号预留、重复序号报错）。
+ * 内存里的一个新会话（已有第一段），语义与 SQLite 实现一致（含序号预留、重复序号报错）。
  * 存取都复制一份：外部改动拿到的消息不影响存储
  */
-export function createMemoryStore(): ConversationStore {
-  return memoryStore([]);
+export function createMemoryStore({ title }: { title?: string } = {}): ConversationStore {
+  return memoryStore(newData(title));
 }
 
-function memoryStore(rows: Row[]): ConversationStore {
-  let nextSeq = 1;
+function newData(title: string | undefined): Data {
   return {
-    async list({ before } = {}) {
-      const ordered = rows
-        .filter((row) => before === undefined || row.seq < before)
-        .sort((a, b) => a.seq - b.seq);
-      return structuredClone(ordered.map((row) => row.message));
+    title,
+    rows: [],
+    segments: [{ startSeq: 1, startReason: 'first', conversationTitle: title }],
+  };
+}
+
+function memoryStore(data: Data): ConversationStore {
+  const { rows, segments } = data;
+  let nextSeq = 1;
+  const entries: ConversationStore['entries'] = async ({ from, before } = {}) => {
+    const ordered = rows
+      .filter(
+        (row) =>
+          (from === undefined || row.seq >= from) && (before === undefined || row.seq < before),
+      )
+      .sort((a, b) => a.seq - b.seq);
+    return structuredClone(ordered.map(({ seq, message }) => ({ seq, message })));
+  };
+  return {
+    entries,
+    async list(range) {
+      return (await entries(range)).map((entry) => entry.message);
+    },
+    async last() {
+      const last = rows.reduce<Row | undefined>((a, b) => (a && a.seq > b.seq ? a : b), undefined);
+      return last && { seq: last.seq, createdAt: last.createdAt };
     },
     async add(message, seq = nextSeq++) {
       if (rows.some((row) => row.seq === seq)) throw new Error(`序号 ${seq} 已被使用`);
-      rows.push({ seq, message: structuredClone(message), addedAt: ++addCounter });
+      rows.push({
+        seq,
+        message: structuredClone(message),
+        createdAt: message.metadata?.createdAt ?? new Date().toISOString(),
+        addedAt: ++addCounter,
+      });
     },
     async reserve() {
       return nextSeq++;
+    },
+    async currentSegment() {
+      const current = segments.reduce<Segment | undefined>(
+        (a, b) => (a && a.startSeq > b.startSeq ? a : b),
+        undefined,
+      );
+      return structuredClone(
+        current ?? { startSeq: 1, startReason: 'first', conversationTitle: data.title },
+      );
+    },
+    async addSegment({ startSeq, startReason, priorSummary }) {
+      if (segments.some((segment) => segment.startSeq === startSeq)) return false;
+      segments.push({ startSeq, startReason, conversationTitle: data.title, priorSummary });
+      return true;
     },
   };
 }
@@ -38,10 +81,10 @@ function memoryStore(rows: Row[]): ConversationStore {
 export function createMemoryStorage(): Storage {
   const conversations = new Map<
     string,
-    { platform: string; platformConversationId?: string; rows: Row[]; store: ConversationStore }
+    { platform: string; platformConversationId?: string; data: Data; store: ConversationStore }
   >();
   return {
-    async createConversation({ platform, platformConversationId }) {
+    async createConversation({ platform, platformConversationId, title }) {
       const duplicate = [...conversations.values()].some(
         (c) =>
           platformConversationId !== undefined &&
@@ -50,8 +93,8 @@ export function createMemoryStorage(): Storage {
       );
       if (duplicate) throw new Error(`平台会话 ${platform}/${platformConversationId} 已存在`);
       const id = generateId();
-      const rows: Row[] = [];
-      conversations.set(id, { platform, platformConversationId, rows, store: memoryStore(rows) });
+      const data = newData(title);
+      conversations.set(id, { platform, platformConversationId, data, store: memoryStore(data) });
       return id;
     },
     async openConversation(id) {
@@ -63,14 +106,13 @@ export function createMemoryStorage(): Storage {
       let latest: { id: string; createdAt: string; addedAt: number } | undefined;
       for (const [id, conversation] of conversations) {
         if (conversation.platform !== platform) continue;
-        for (const row of conversation.rows) {
-          const createdAt = row.message.metadata?.createdAt ?? '';
+        for (const row of conversation.data.rows) {
           if (
             !latest ||
-            createdAt > latest.createdAt ||
-            (createdAt === latest.createdAt && row.addedAt > latest.addedAt)
+            row.createdAt > latest.createdAt ||
+            (row.createdAt === latest.createdAt && row.addedAt > latest.addedAt)
           ) {
-            latest = { id, createdAt, addedAt: row.addedAt };
+            latest = { id, createdAt: row.createdAt, addedAt: row.addedAt };
           }
         }
       }

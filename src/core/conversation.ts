@@ -1,35 +1,40 @@
 import {
-  APICallError,
   convertToModelMessages,
   createUIMessageStream,
   generateId,
-  RetryError,
-  StreamProviderError,
   streamText,
   toUIMessageStream,
   wrapLanguageModel,
   type LanguageModel,
+  type ModelMessage,
   type ToolSet,
 } from 'ai';
 import { trackAttempts } from './attempts.js';
+import { summarizeError } from './errors.js';
 import { silentLogger, type Logger } from './logger.js';
 import { toUsage } from './model.js';
 import type { Author, Message, MessageChunk } from './message.js';
+import { formatForModel, systemPrompt } from './prompt.js';
+import { createSegmenter, type SegmentOptions, type Summarize } from './segments.js';
 import { createMemoryStore } from './storage/memory.js';
-import type { ConversationStore } from './storage/types.js';
+import type { ConversationStore, Segment } from './storage/types.js';
 
 export type Conversation = {
-  /** 记录一条用户消息，不产生回复 */
+  /** 记录一条用户消息，不产生回复。写入前发现会话已空闲太久时，在后台切段，这条消息归入新段 */
   append(input: { author: Author; text: string }): Promise<Message>;
   /**
    * 根据当前历史生成回复。错误以 error chunk 出现在流中，不会抛出；
    * 每次重试前流中出现一个 transient 的 `data-retry` 段；流中途重新生成时随后还有
    * 一个 `reset-step`，失败那次已输出的内容不会写入历史。
    * 流读完时回复已写入历史；出错或被取消则不写入。
+   * 后台正在空闲切段时，等它结束再读当前段；压缩进行中不等，照常用当前段。
+   * 正常完成且输入超过压缩阈值时，在后台压缩。
    * 上一个回复的流还没结束时调用会立即抛错。
    */
   reply(options?: ReplyOptions): ReadableStream<MessageChunk>;
   messages(): Promise<Message[]>;
+  /** 停止后台的空闲检查，中止进行中的摘要并等它结束。之后不再使用这个会话 */
+  close(): Promise<void>;
 };
 
 export type ReplyOptions = {
@@ -45,6 +50,7 @@ export function createConversation({
   maxRetries = 2,
   conversationId,
   timeouts = {},
+  segments = {},
 }: {
   /** 不接受字符串形式的模型 id：`wrapLanguageModel` 需要模型实例 */
   model: Exclude<LanguageModel, string>;
@@ -58,9 +64,98 @@ export function createConversation({
   conversationId?: string;
   /** 超时（毫秒）：等第一段输出、两段输出之间。超时按失败处理 */
   timeouts?: { firstChunkMs?: number; chunkMs?: number };
+  /** 分段：空闲切段、压缩与摘要（ADR-0004） */
+  segments?: SegmentOptions;
 }): Conversation {
   const { firstChunkMs = 60_000, chunkMs = 30_000 } = timeouts;
   let replying = false;
+
+  /**
+   * 一次模型调用（回复或摘要），重试与超时相同。tracker 先建好，调用方随时能读它的统计；
+   * stream() 才真正发出请求
+   */
+  function modelCall({
+    abortSignal,
+    logFields,
+    notify,
+  }: {
+    /** 调用方的中止信号；请求被中止而它没有中止时，就是超时 */
+    abortSignal?: AbortSignal;
+    logFields: object;
+    notify: (chunk: MessageChunk) => void;
+  }) {
+    // 超时由这个控制器中止 streamText；与调用方的中止分开，结束时据此区分
+    const timeoutController = new AbortController();
+    const signal = abortSignal
+      ? AbortSignal.any([abortSignal, timeoutController.signal])
+      : timeoutController.signal;
+    const tracker = trackAttempts({
+      logger,
+      logFields,
+      maxRetries,
+      abortSignal,
+      firstChunkMs,
+      onFirstChunkTimeout: () => timeoutController.abort(),
+      notify,
+    });
+    return {
+      tracker,
+      stream: (segment: Segment, messages: ModelMessage[]) =>
+        streamText({
+          // SDK 的每次请求（含两类重试）都重新调用 doStream，中间件能逐次观察
+          model: wrapLanguageModel({ model, middleware: tracker.middleware }),
+          instructions: systemPrompt(instructions, segment),
+          messages,
+          maxRetries,
+          streamRetries: maxRetries,
+          timeout: { firstChunkMs, chunkMs },
+          abortSignal: signal,
+          // 错误经 stream 交给调用方；不传时 SDK 默认把整个错误对象打到 stderr。
+          // 不返回 { retry: true }，不额外请求重试
+          onError: () => {},
+        }),
+    };
+  }
+
+  // 摘要请求沿用这一段的前缀：与回复相同的 system 与消息，末尾追加一条不包标签的指令
+  const summarize: Summarize = async ({ reason, segment, history, instruction, abortSignal }) => {
+    const call = modelCall({
+      abortSignal,
+      logFields: { conversationId, modelId: model.modelId, purpose: 'summary', reason },
+      notify: () => {},
+    });
+    const result = call.stream(segment, [
+      ...(await convertToModelMessages(history.map(formatForModel))),
+      { role: 'user', content: instruction },
+    ]);
+    // 流式重试时 result.text 只含成功那次的文本；出错、超时、中止都以流中的段告知
+    let failure: { error: unknown } | undefined;
+    for await (const part of result.stream) {
+      if (part.type === 'error') failure ??= { error: part.error };
+      if (part.type === 'abort') {
+        failure ??= {
+          error: abortSignal.aborted
+            ? new DOMException('摘要被中止', 'AbortError')
+            : new DOMException('等待模型输出超时', 'TimeoutError'),
+        };
+      }
+    }
+    if (failure) throw failure.error;
+    return {
+      text: await result.text,
+      usage: toUsage(await result.totalUsage),
+      stats: call.tracker.stats,
+    };
+  };
+
+  const segmenter = createSegmenter({
+    store,
+    logger,
+    logFields: { conversationId, modelId: model.modelId },
+    options: segments,
+    summarize,
+    isReplying: () => replying,
+  });
 
   return {
     async append({ author, text }) {
@@ -70,7 +165,11 @@ export function createConversation({
         metadata: { author, createdAt: new Date().toISOString() },
         parts: [{ type: 'text', text }],
       };
+      // 写入前看是否已经空闲太久：定时器没赶上、或上次空闲切段失败时，在这里补做，
+      // 这条消息归入新段
+      await segmenter.checkIdle();
       await store.add(message);
+      segmenter.wrote();
       return message;
     },
 
@@ -84,24 +183,13 @@ export function createConversation({
       // 回复在历史里的序号，开始时预留：生成期间记录进来的消息排在回复之后。
       // 回复失败或没有输出时不写入，这个序号空着
       let seq: number | undefined;
+      // 这次回复所在的段，回复完成后据此决定是否压缩
+      let segment: Segment | undefined;
       const startedAt = Date.now();
 
-      // 超时由这个控制器中止 streamText；与用户的中止分开，结束时据此区分
-      const timeoutController = new AbortController();
-      const replySignal = abortSignal
-        ? AbortSignal.any([abortSignal, timeoutController.signal])
-        : timeoutController.signal;
-
       let writeNotice: (chunk: MessageChunk) => void = () => {};
-      const tracker = trackAttempts({
-        logger,
-        logFields,
-        maxRetries,
-        abortSignal,
-        firstChunkMs,
-        onFirstChunkTimeout: () => timeoutController.abort(),
-        notify: (chunk) => writeNotice(chunk),
-      });
+      const call = modelCall({ abortSignal, logFields, notify: (chunk) => writeNotice(chunk) });
+      const { tracker } = call;
 
       // onEnd 的 outcome 判断不了是否出错：外层流没声明 outcome 时正常结束也是 unknown，
       // 内层在错误事件之后收到 finish 又会记成 completed。所以自己记下出过的错。
@@ -144,22 +232,16 @@ export function createConversation({
         generateId: () => replyId,
         execute: async ({ writer }) => {
           writeNotice = (chunk) => writer.write(chunk);
+          // 正在空闲切段时先等它结束，读到的才是切段之后的当前段（压缩不等，见 settled）
+          await segmenter.settled();
+          segment = await store.currentSegment();
           seq = await store.reserve();
-          // 只看预留号之前的消息：模型看到的正是排在回复之前的那些
-          const history = await store.list({ before: seq });
-          const result = streamText({
-            // SDK 的每次请求（含两类重试）都重新调用 doStream，中间件能逐次观察
-            model: wrapLanguageModel({ model, middleware: tracker.middleware }),
-            instructions: `${instructions}\n\n${messageFormatNote}`,
-            messages: await convertToModelMessages(history.map(formatForModel)),
-            maxRetries,
-            streamRetries: maxRetries,
-            timeout: { firstChunkMs, chunkMs },
-            abortSignal: replySignal,
-            // 错误经 stream 进入 UI 流；不传时 SDK 默认把整个错误对象打到 stderr。
-            // 不返回 { retry: true }，不额外请求重试
-            onError: () => {},
-          });
+          // 只看当前段里预留号之前的消息：模型看到的正是排在回复之前的那些
+          const history = await store.list({ from: segment.startSeq, before: seq });
+          const result = call.stream(
+            segment,
+            await convertToModelMessages(history.map(formatForModel)),
+          );
           let createdAt: string | undefined;
           writer.merge(
             toUIMessageStream<ToolSet, Message>({
@@ -231,140 +313,25 @@ export function createConversation({
                 },
                 'reply.end',
               );
+              if (segment && seq !== undefined) {
+                segmenter.replied({ segment, seq, usage: responseMessage.metadata?.usage });
+              }
             }
           } finally {
             replying = false;
+            // 回复期间跳过了空闲检查，从现在起重新计时
+            segmenter.wrote();
           }
         },
       });
     },
 
     messages: () => store.list(),
-  };
-}
 
-// 送模型的用户消息格式。改格式或加字段时，同步修改下面的 messageFormatNote
-const messageFormatNote = `## 消息格式
-
-每条用户消息都包在 <message> 标签里，标签属性由平台提供：
-- from：发言人当时的显示名，称呼对方时用它。
-- uid：发言人不变的 id，有时没有。uid 相同就是同一个人，即使 from 不同（改过名）；from 相同而 uid 不同是两个人。没有 uid 时按 from 区分。
-- time：消息发出的时间。最后一条消息的 time 可以当作现在的时间。
-你之前的回复若以「（回复被中止）」结尾，表示那条回复被用户中途打断，没有说完。
-回复时只写正文，不要输出 <message> 标签或「（回复被中止）」，也不要在开头加自己的名字。`;
-
-/**
- * 送模型前的格式化，只改送给模型的副本，存储里的消息不变：
- * 用户消息包成 `<message from="名字" uid="id" time="时间">…</message>`；被中止的助手回复末尾加「（回复被中止）」；
- * 其他消息原样返回。
- */
-function formatForModel(message: Message): Message {
-  if (message.role === 'assistant') return markAborted(message);
-  if (message.role !== 'user') return message;
-  const texts = message.parts.flatMap((part) => (part.type === 'text' ? [part.text] : []));
-  if (texts.length === 0) return message;
-
-  // 标签属性，按顺序输出，值为 undefined 的不输出。以后加字段（回复对象等）在这里加一项
-  const attributes: Record<string, string | undefined> = {
-    from: message.metadata?.author?.name,
-    uid: message.metadata?.author?.id,
-    time: formatTime(message.metadata?.createdAt),
-  };
-  const attributeText = Object.entries(attributes)
-    .flatMap(([name, value]) =>
-      value === undefined ? [] : [` ${name}="${escapeAttribute(value)}"`],
-    )
-    .join('');
-  const text = `<message${attributeText}>\n${escapeBody(texts.join('\n'))}\n</message>`;
-
-  // 所有 text part 合成一个，放在第一个 text part 的位置；其他 part 原样保留
-  const firstText = message.parts.findIndex((part) => part.type === 'text');
-  return {
-    ...message,
-    parts: message.parts.flatMap((part, index): Message['parts'] => {
-      if (part.type !== 'text') return [part];
-      return index === firstText ? [{ ...part, text }] : [];
-    }),
-  };
-}
-
-function markAborted(message: Message): Message {
-  if (!message.metadata?.aborted) return message;
-  const lastText = message.parts.findLastIndex((part) => part.type === 'text');
-  if (lastText === -1) return message;
-  return {
-    ...message,
-    parts: message.parts.map((part, index) =>
-      index === lastText && part.type === 'text'
-        ? { ...part, text: `${part.text}\n（回复被中止）` }
-        : part,
-    ),
+    close: () => segmenter.close(),
   };
 }
 
 function hasText(message: Message): boolean {
   return message.parts.some((part) => part.type === 'text' && part.text.trim() !== '');
-}
-
-/** ISO 时间按进程所在时区格式化为 `YYYY-MM-DD HH:mm`；无法解析时不输出 */
-function formatTime(iso: string | undefined): string | undefined {
-  if (iso === undefined) return undefined;
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return undefined;
-  const pad = (n: number) => String(n).padStart(2, '0');
-  const day = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
-  return `${day} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
-}
-
-function escapeAttribute(value: string): string {
-  return value
-    .replaceAll('&', '&amp;')
-    .replaceAll('"', '&quot;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;');
-}
-
-// 正文只处理会被当成标签的部分：<message、</message 开头的 <（不分大小写）。
-// 代码里的 a < b、<div> 等保持原样
-function escapeBody(text: string): string {
-  return text.replace(/<(?=\/?message)/gi, '&lt;');
-}
-
-// 只取摘要字段，不把原始错误对象交给 logger：APICallError 的 requestBodyValues 含对话正文
-function summarizeError(error: unknown): object {
-  if (RetryError.isInstance(error)) {
-    return { ...summarizeError(error.lastError), retries: error.errors.length - 1 };
-  }
-  if (!(error instanceof Error)) return { message: String(error) };
-  return {
-    type: error.name,
-    message: error.message,
-    ...(APICallError.isInstance(error)
-      ? { statusCode: error.statusCode, responseBody: summarizeResponseBody(error.responseBody) }
-      : {}),
-    ...(StreamProviderError.isInstance(error) ? { statusCode: error.statusCode } : {}),
-    cause: error.cause instanceof Error ? error.cause.message : undefined,
-  };
-}
-
-// 服务端可能在错误响应里回显请求（含对话正文），所以 JSON 响应体只留错误字段
-function summarizeResponseBody(body: string | undefined): unknown {
-  if (body === undefined) return undefined;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(body);
-  } catch {
-    return body.slice(0, 500);
-  }
-  if (typeof parsed !== 'object' || parsed === null) return body.slice(0, 500);
-  const record = parsed as Record<string, unknown>;
-  if (typeof record.error === 'string') return { message: record.error };
-  const source = (
-    typeof record.error === 'object' && record.error !== null ? record.error : record
-  ) as Record<string, unknown>;
-  return {
-    message: source.message,
-    code: source.code,
-    type: source.type,
-  };
 }

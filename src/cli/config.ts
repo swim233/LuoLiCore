@@ -1,5 +1,5 @@
 import { parseArgs } from 'node:util';
-import type { ModelOptions } from '../core/index.js';
+import type { ModelOptions, SegmentOptions } from '../core/index.js';
 
 export type CliConfig = {
   model: ModelOptions;
@@ -9,6 +9,8 @@ export type CliConfig = {
   maxRetries?: number;
   /** 首段与段间超时（毫秒），未设置的项用核心的默认值 */
   timeouts: { firstChunkMs?: number; chunkMs?: number };
+  /** 分段与摘要，未设置的项用核心的默认值 */
+  segments: SegmentOptions;
   /** 接着上次的 CLI 会话，而不是新开一个 */
   resume: boolean;
   /** 数据库文件，LUOLI_DB，默认 data/luoli.db */
@@ -88,6 +90,22 @@ export function parseConfig(argv: string[], env: Record<string, string | undefin
     timeouts[key] = seconds * 1000;
   }
 
+  const segments: SegmentOptions = {};
+  for (const [key, variable, scale] of [
+    ['idleMs', 'LUOLI_IDLE_MINUTES', 60_000],
+    ['compressTokens', 'LUOLI_COMPRESS_TOKENS', 1],
+    ['keepMessages', 'LUOLI_KEEP_MESSAGES', 1],
+    ['summaryMaxChars', 'LUOLI_SUMMARY_MAX_CHARS', 1],
+  ] as const) {
+    const raw = env[variable];
+    if (!raw) continue;
+    const value = Number(raw) * scale;
+    if (!(/^\d+$/.test(raw) && value > 0 && Number.isSafeInteger(value))) {
+      return { ok: false, error: `${variable} 必须是正整数，当前为 "${raw}"`, showUsage: false };
+    }
+    segments[key] = value;
+  }
+
   return {
     ok: true,
     config: {
@@ -95,6 +113,7 @@ export function parseConfig(argv: string[], env: Record<string, string | undefin
       name: values.name?.trim() || undefined,
       maxRetries,
       timeouts,
+      segments,
       resume: values.resume,
       dbPath: env.LUOLI_DB || 'data/luoli.db',
       promptPath: env.LUOLI_PROMPT || 'prompts/system.md',

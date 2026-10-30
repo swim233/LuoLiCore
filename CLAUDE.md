@@ -23,7 +23,7 @@ LuoLiCore：群聊助手 agent，核心基于 Vercel AI SDK v7。术语见 `CONT
 - 单包：`src/core`、`src/cli`，Telegram 前端另起目录。core 不得引用 cli 或任何平台代码，由 lint 规则保证。
 - 核心是进程内的库，`reply()` 输出 UI message stream。现在用 `streamText`，加工具时再换 `ToolLoopAgent`。
 - 存储：由 core 负责，SQLite（Node 自带的 `node:sqlite`），默认 `data/luoli.db`。表结构与取舍见 ADR-0005。core 的测试用内存存储。
-- 上下文：按段拼接，见 ADR-0004。system 依次为人设、格式说明、会话标题、之前的摘要；之后是当前段的消息，只往后追加。空闲超过 4 小时切段，后台生成滚动摘要，重启后补做；上一轮输入超过 64k token 时压缩，保留最近 20 条。摘要请求沿用当前前缀，末尾追加摘要指令。数字均可配置。
+- 上下文：按段拼接，见 ADR-0004。system 依次为人设、格式说明、会话标题、之前的摘要；之后是当前段的消息，只往后追加。空闲超过 4 小时切段，后台生成滚动摘要，重启后补做；上一轮输入超过 300k token 时压缩，保留最近 20 条。摘要请求沿用当前前缀，末尾追加摘要指令。数字均可配置。
 - 送模型的用户消息：正文包在 `<message from="显示名" uid="发言人 id" time="2026-10-30 14:02">` 标签里，由 core 的格式化函数生成，以后的字段都加在这里。`uid` 只在平台提供不变的用户 id 时才有（CLI 没有）；`time` 按本机时区。core 在人设之后附上格式说明，逐个解释标签属性；`prompts/system.md` 只放默认 prompt。
 - 人设：`LUOLI_PROMPT` 指向人设文件（不进仓库），不设时用 `prompts/system.md`。
 - provider 只接 openai-compatible。配置只来自环境变量与命令行参数：`LUOLI_BASE_URL`、`LUOLI_API_KEY`、`LUOLI_MODEL` 等，写在 `.env`。
