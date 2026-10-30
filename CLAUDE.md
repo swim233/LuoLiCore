@@ -25,7 +25,7 @@ LuoLiCore：群聊助手 agent，核心基于 Vercel AI SDK v7。术语见 `CONT
 - 核心是进程内的库，`reply()` 输出 UI message stream。MVP 用 `streamText`，加工具时再换 `ToolLoopAgent`。
 - provider 只接 openai-compatible。配置只来自环境变量与命令行参数：`LUOLI_BASE_URL`、`LUOLI_API_KEY`、`LUOLI_MODEL`，写在 `.env`。
 - 测试：核心用 `ai/test` 的 mock 模型写行为测试，不调用真实 API；CLI 手动验证。
-- 重试：用 AI SDK 内置重试（流式开始前、可重试错误），次数由 `LUOLI_MAX_RETRIES` 配置，默认 2；流式开始后出错不重试。
+- 重试：用 AI SDK 内置重试，次数由 `LUOLI_MAX_RETRIES` 配置，默认 2。请求阶段（`maxRetries`）重试可重试错误；流式开始后服务端发来错误事件时也重试（`streamRetries`，次数相同），失败那次的半截不写入历史。连接中途断开不重试。
 - 模型调用出错：不写入助手消息，用户消息保留。
 - 日志：pino 写 `logs/luoli.log`（JSON Lines）。记录调用失败、每次 HTTP 请求尝试、每轮回复概要；不记录对话正文；API key 抹为 `***`。core 只依赖 `Logger` 接口，不引用 pino。
 
@@ -36,7 +36,7 @@ CLI 默认行为：
 - 模型：`--model` 优先，其次 `LUOLI_MODEL`，都没有则报错退出
 - 生成中按 Ctrl+C 中止；空闲时按 Ctrl+C 或 Ctrl+D 退出
 - 模型调用出错：打印错误，程序不退出，用户消息保留在历史里
-- 每次重试在终端打印一行，如「请求失败（429），重试中（1/2）」
+- 每次重试在终端打印一行，如「请求失败（429），重试中（1/2）」；流式中途重试时保留已输出的半截，另起一行打印「输出中断，重新生成（1/2）」
 - 用量行：`tokens 输入 1234 · 输出 567`
 
 MVP 非目标：工具调用、Markdown 渲染、显示 reasoning、多会话切换、持久化、Telegram 接入、HTTP 服务。
