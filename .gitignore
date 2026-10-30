@@ -1,0 +1,15 @@
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+.env
+*.db
+*.db-wal
+*.db-shm
+.claude/settings.local.json
+
+# 运行时目录：内容不进版本库。写成 `dir/*` 而非 `dir/`，日后可用 `!dir/x` 放行单个条目。
+data/*
+logs/*
+skills/*
+memory/*
