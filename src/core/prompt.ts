@@ -53,19 +53,21 @@ const messageFormatNote = `## 消息格式
 - from：发言人当时的显示名，称呼对方时用它。
 - uid：发言人不变的 id，有时没有。uid 相同就是同一个人，即使 from 不同（改过名）；from 相同而 uid 不同是两个人。没有 uid 时按 from 区分。
 - time：消息发出的时间。最后一条消息的 time 可以当作现在的时间。
+- 标签之间的图片是这条消息附带的。
 你之前的回复若以「（回复被中止）」结尾，表示那条回复被用户中途打断，没有说完。
 回复时只写正文，不要输出 <message> 标签或「（回复被中止）」，也不要在开头加自己的名字。`;
 
 /**
  * 送模型前的格式化，只改送给模型的副本，存储里的消息不变：
- * 用户消息包成 `<message from="名字" uid="id" time="时间">…</message>`；被中止的助手回复末尾加「（回复被中止）」；
+ * 用户消息包成 `<message from="名字" uid="id" time="时间">…</message>`，带图片时图片在标签之间；被中止的助手回复末尾加「（回复被中止）」；
  * 其他消息原样返回。
  */
 export function formatForModel(message: Message): Message {
   if (message.role === 'assistant') return markAborted(message);
   if (message.role !== 'user') return message;
   const texts = message.parts.flatMap((part) => (part.type === 'text' ? [part.text] : []));
-  if (texts.length === 0) return message;
+  const files = message.parts.filter((part) => part.type === 'file');
+  if (texts.length === 0 && files.length === 0) return message;
 
   // 标签属性，按顺序输出，值为 undefined 的不输出。以后加字段（回复对象等）在这里加一项
   const attributes: Record<string, string | undefined> = {
@@ -78,16 +80,29 @@ export function formatForModel(message: Message): Message {
       value === undefined ? [] : [` ${name}="${escapeAttribute(value)}"`],
     )
     .join('');
-  const text = `<message${attributeText}>\n${escapeBody(texts.join('\n'))}\n</message>`;
+  const open = `<message${attributeText}>`;
+  const body = texts.length > 0 ? `\n${escapeBody(texts.join('\n'))}` : '';
 
-  // 所有 text part 合成一个，放在第一个 text part 的位置；其他 part 原样保留
-  const firstText = message.parts.findIndex((part) => part.type === 'text');
+  if (files.length === 0) {
+    // 所有 text part 合成一个，放在第一个 text part 的位置；其他 part 原样保留
+    const text = `${open}${body}\n</message>`;
+    const firstText = message.parts.findIndex((part) => part.type === 'text');
+    return {
+      ...message,
+      parts: message.parts.flatMap((part, index): Message['parts'] => {
+        if (part.type !== 'text') return [part];
+        return index === firstText ? [{ ...part, text }] : [];
+      }),
+    };
+  }
+  // 带图片：标签拆成两段，把图片包在中间。没有图片的消息仍是上面一个 text part，前缀不变
   return {
     ...message,
-    parts: message.parts.flatMap((part, index): Message['parts'] => {
-      if (part.type !== 'text') return [part];
-      return index === firstText ? [{ ...part, text }] : [];
-    }),
+    parts: [
+      { type: 'text', text: `${open}${body}` },
+      ...message.parts.filter((part) => part.type !== 'text'),
+      { type: 'text', text: '</message>' },
+    ],
   };
 }
 

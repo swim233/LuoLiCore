@@ -1,3 +1,4 @@
+import { dirname, join } from 'node:path';
 import { parseArgs } from 'node:util';
 import type { ModelOptions, SegmentOptions } from '../core/index.js';
 
@@ -15,6 +16,8 @@ export type CliConfig = {
   resume: boolean;
   /** 数据库文件，LUOLI_DB，默认 data/luoli.db */
   dbPath: string;
+  /** 图片等文件的目录，LUOLI_FILES_DIR，默认为数据库所在目录下的 files/ */
+  filesDir: string;
   /** 人设文件，LUOLI_PROMPT，默认 prompts/system.md */
   promptPath: string;
 };
@@ -106,6 +109,7 @@ export function parseConfig(argv: string[], env: Record<string, string | undefin
     segments[key] = value;
   }
 
+  const dbPath = env.LUOLI_DB || 'data/luoli.db';
   return {
     ok: true,
     config: {
@@ -115,7 +119,8 @@ export function parseConfig(argv: string[], env: Record<string, string | undefin
       timeouts,
       segments,
       resume: values.resume,
-      dbPath: env.LUOLI_DB || 'data/luoli.db',
+      dbPath,
+      filesDir: env.LUOLI_FILES_DIR || join(dirname(dbPath), 'files'),
       promptPath: env.LUOLI_PROMPT || 'prompts/system.md',
     },
   };

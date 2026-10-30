@@ -11,6 +11,7 @@ import {
 } from 'ai';
 import { trackAttempts } from './attempts.js';
 import { summarizeError } from './errors.js';
+import { createMemoryFileStore, inlineFiles, type FileStore, type NewFile } from './files.js';
 import { silentLogger, type Logger } from './logger.js';
 import { toUsage } from './model.js';
 import type { Author, Message, MessageChunk } from './message.js';
@@ -20,8 +21,11 @@ import { createMemoryStore } from './storage/memory.js';
 import type { ConversationStore, Segment } from './storage/types.js';
 
 export type Conversation = {
-  /** 记录一条用户消息，不产生回复。写入前发现会话已空闲太久时，在后台切段，这条消息归入新段 */
-  append(input: { author: Author; text: string }): Promise<Message>;
+  /**
+   * 记录一条用户消息，不产生回复。可以附带图片（先存进文件存储，消息里只存地址），
+   * 有图片时可以没有文字。写入前发现会话已空闲太久时，在后台切段，这条消息归入新段
+   */
+  append(input: { author: Author; text?: string; files?: NewFile[] }): Promise<Message>;
   /**
    * 根据当前历史生成回复。错误以 error chunk 出现在流中，不会抛出；
    * 每次重试前流中出现一个 transient 的 `data-retry` 段；流中途重新生成时随后还有
@@ -46,6 +50,7 @@ export function createConversation({
   model,
   instructions,
   store = createMemoryStore(),
+  fileStore = createMemoryFileStore(),
   logger = silentLogger,
   maxRetries = 2,
   conversationId,
@@ -57,6 +62,8 @@ export function createConversation({
   /** system prompt。core 会在末尾附上消息格式说明，调用方不必解释用户消息的格式 */
   instructions: string;
   store?: ConversationStore;
+  /** 消息附带的图片存在这里 */
+  fileStore?: FileStore;
   logger?: Logger;
   /** 重试次数：请求阶段（maxRetries）与流中错误事件（streamRetries）各自最多这么多次 */
   maxRetries?: number;
@@ -69,6 +76,19 @@ export function createConversation({
 }): Conversation {
   const { firstChunkMs = 60_000, chunkMs = 30_000 } = timeouts;
   let replying = false;
+
+  /**
+   * 历史消息换成发给模型的消息：标签格式、被中止的标记、图片换成 data URL。
+   * 读不到的图片换成文字，记一条 warn（只记地址）
+   */
+  async function toModelMessages(history: Message[], logFields: object): Promise<ModelMessage[]> {
+    const onMissing = (url: string) => logger.warn({ ...logFields, url }, 'file.missing');
+    return convertToModelMessages(
+      await Promise.all(
+        history.map((message) => inlineFiles(formatForModel(message), fileStore, onMissing)),
+      ),
+    );
+  }
 
   /**
    * 一次模型调用（回复或摘要），重试与超时相同。tracker 先建好，调用方随时能读它的统计；
@@ -119,13 +139,10 @@ export function createConversation({
 
   // 摘要请求沿用这一段的前缀：与回复相同的 system 与消息，末尾追加一条不包标签的指令
   const summarize: Summarize = async ({ reason, segment, history, instruction, abortSignal }) => {
-    const call = modelCall({
-      abortSignal,
-      logFields: { conversationId, modelId: model.modelId, purpose: 'summary', reason },
-      notify: () => {},
-    });
+    const logFields = { conversationId, modelId: model.modelId, purpose: 'summary', reason };
+    const call = modelCall({ abortSignal, logFields, notify: () => {} });
     const result = call.stream(segment, [
-      ...(await convertToModelMessages(history.map(formatForModel))),
+      ...(await toModelMessages(history, logFields)),
       { role: 'user', content: instruction },
     ]);
     // 流式重试时 result.text 只含成功那次的文本；出错、超时、中止都以流中的段告知
@@ -158,12 +175,22 @@ export function createConversation({
   });
 
   return {
-    async append({ author, text }) {
+    async append({ author, text, files = [] }) {
+      // 先存文件，再写消息：消息里的地址总能找到文件
+      const urls = await Promise.all(files.map((file) => fileStore.save(file)));
       const message: Message = {
         id: generateId(),
         role: 'user',
         metadata: { author, createdAt: new Date().toISOString() },
-        parts: [{ type: 'text', text }],
+        parts: [
+          // 有图片时文字可以省略；只有文字时照旧（空文字也写一个 text part）
+          ...(text || files.length === 0 ? [{ type: 'text' as const, text: text ?? '' }] : []),
+          ...files.map((file, index) => ({
+            type: 'file' as const,
+            mediaType: file.mediaType,
+            url: urls[index]!,
+          })),
+        ],
       };
       // 写入前看是否已经空闲太久：定时器没赶上、或上次空闲切段失败时，在这里补做，
       // 这条消息归入新段
@@ -238,10 +265,7 @@ export function createConversation({
           seq = await store.reserve();
           // 只看当前段里预留号之前的消息：模型看到的正是排在回复之前的那些
           const history = await store.list({ from: segment.startSeq, before: seq });
-          const result = call.stream(
-            segment,
-            await convertToModelMessages(history.map(formatForModel)),
-          );
+          const result = call.stream(segment, await toModelMessages(history, logFields));
           let createdAt: string | undefined;
           writer.merge(
             toUIMessageStream<ToolSet, Message>({

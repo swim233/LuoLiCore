@@ -5,6 +5,7 @@ import { createInterface } from 'node:readline/promises';
 import {
   createConversation,
   createModel,
+  openFileStore,
   openSqliteStorage,
   readInstructions,
   type Storage,
@@ -22,7 +23,8 @@ if (!parsed.ok) {
   if (parsed.showUsage) console.error(usage);
   process.exit(1);
 }
-const { model, maxRetries, timeouts, segments, resume, dbPath, promptPath } = parsed.config;
+const { model, maxRetries, timeouts, segments, resume, dbPath, filesDir, promptPath } =
+  parsed.config;
 const name = parsed.config.name ?? userInfo().username;
 
 let instructions: string;
@@ -47,6 +49,8 @@ const conversation = createConversation({
   model: createModel(model),
   instructions,
   store: await storage.openConversation(conversationId),
+  // CLI 本身不发图片；文件目录照样交给核心，不写入时不会创建
+  fileStore: openFileStore(filesDir),
   logger: createLogger(model),
   maxRetries,
   timeouts,
