@@ -49,7 +49,8 @@ const messageFormatNote = `## 消息格式
 
 每条用户消息都包在 <message> 标签里，from 属性是平台提供的发言人名字。
 不同名字是不同的人，同一个名字始终是同一个人。需要知道对方是谁时，以 from 为准。
-回复时只写正文，不要输出 <message> 标签，也不要在开头加自己的名字。`;
+你之前的回复若以「（回复被中止）」结尾，表示那条回复被用户中途打断，没有说完。
+回复时只写正文，不要输出 <message> 标签或「（回复被中止）」，也不要在开头加自己的名字。`;
 
 /** 模型第 call 次调用收到的 prompt，每条消息的内容拼成一段文本 */
 function promptOf(model: MockLanguageModelV4, call: number): Array<{ role: string; text: string }> {
@@ -795,5 +796,224 @@ describe('reply.failed 的响应体摘要', () => {
     const summary = logsOf(entries, 'reply.failed')[0]?.fields.error as { responseBody: string };
     expect(summary.responseBody).toBe(body.slice(0, 500));
     expect(JSON.stringify(entries)).not.toContain(secret);
+  });
+});
+
+const abortError = () => new DOMException('This operation was aborted', 'AbortError');
+
+/** 像 fetch 一样：给出这些段后挂起，直到中止时以 AbortError 出错 */
+function hangingStream(parts: StreamPart[], signal: AbortSignal | undefined) {
+  return new ReadableStream<StreamPart>({
+    start(controller) {
+      for (const part of parts) controller.enqueue(part);
+      signal?.addEventListener('abort', () => controller.error(abortError()), { once: true });
+    },
+  });
+}
+
+/** 读回复流，读到满足 until 的段时中止；返回读到的全部段 */
+async function readUntilAbort(
+  stream: ReadableStream<MessageChunk>,
+  controller: AbortController,
+  until: (chunk: MessageChunk) => boolean,
+): Promise<MessageChunk[]> {
+  const chunks: MessageChunk[] = [];
+  for await (const chunk of stream) {
+    chunks.push(chunk);
+    if (until(chunk)) controller.abort();
+  }
+  return chunks;
+}
+
+describe('中止', () => {
+  async function abortedConversation(model: MockLanguageModelV4) {
+    const { logger, entries } = recordingLogger();
+    const conversation = createConversation({ model, instructions, logger });
+    await conversation.append({ author: alice, text: secret });
+    return { conversation, entries };
+  }
+
+  it('输出几段后中止：流以 abort 结束、没有 error chunk，半截写入历史并标记 aborted，日志记中止而不是失败', async () => {
+    const model = new MockLanguageModelV4({
+      doStream: async ({ abortSignal }) => ({
+        stream: hangingStream(textParts('一', '二').slice(0, -1), abortSignal),
+      }),
+    });
+    const { conversation, entries } = await abortedConversation(model);
+    const controller = new AbortController();
+
+    const chunks = await readUntilAbort(
+      conversation.reply({ abortSignal: controller.signal }),
+      controller,
+      (c) => c.type === 'text-delta' && c.delta === '二',
+    );
+
+    expect(chunks.at(-1)?.type).toBe('abort');
+    expect(chunks.some((c) => c.type === 'error')).toBe(false);
+
+    const reply = (await conversation.messages())[1];
+    expect(reply?.role).toBe('assistant');
+    expect(reply?.parts).toEqual([
+      { type: 'step-start' },
+      { type: 'text', text: '一二', state: 'done' },
+    ]);
+    expect(reply?.metadata).toMatchObject({ aborted: true });
+    expect(isIsoTime(reply?.metadata?.createdAt)).toBe(true);
+
+    expect(logsOf(entries, 'model.attempt').map((e) => [e.level, e.fields])).toMatchObject([
+      ['info', { phase: 'stream', aborted: true, willRetry: false }],
+    ]);
+    expect(logsOf(entries, 'model.attempt')[0]?.fields).not.toHaveProperty('ok');
+    expect(logsOf(entries, 'reply.end')[0]?.fields).toMatchObject({
+      outcome: 'aborted',
+      saved: true,
+      attempts: 1,
+      requestRetries: 0,
+      streamRetries: 0,
+    });
+    expect(logsOf(entries, 'reply.failed')).toHaveLength(0);
+    expect(JSON.stringify(entries)).not.toContain(secret);
+  });
+
+  it('一个字都没输出就中止：不写入助手消息，reply.end 为 aborted', async () => {
+    const controller = new AbortController();
+    // 请求已发出、响应还没到时中止
+    const model = new MockLanguageModelV4({
+      doStream: ({ abortSignal }) =>
+        new Promise((_, reject) => {
+          abortSignal?.addEventListener('abort', () => reject(abortError()), { once: true });
+          queueMicrotask(() => controller.abort());
+        }),
+    });
+    const { conversation, entries } = await abortedConversation(model);
+
+    const chunks = await readAll(conversation.reply({ abortSignal: controller.signal }));
+
+    expect(chunks.at(-1)?.type).toBe('abort');
+    expect(model.doStreamCalls).toHaveLength(1);
+    expect((await conversation.messages()).map((m) => m.role)).toEqual(['user']);
+    expect(logsOf(entries, 'model.attempt').map((e) => e.fields)).toMatchObject([
+      { phase: 'request', aborted: true, willRetry: false },
+    ]);
+    expect(logsOf(entries, 'reply.end')[0]?.fields).toMatchObject({
+      outcome: 'aborted',
+      saved: false,
+    });
+    expect(logsOf(entries, 'reply.failed')).toHaveLength(0);
+  });
+
+  it('调用 reply() 时信号已中止：立即以 abort 结束，不写入，模型的调用被立即取消', async () => {
+    const model = new MockLanguageModelV4({
+      doStream: async ({ abortSignal }) => ({
+        stream: hangingStream(textParts('不该到达').slice(0, -1), abortSignal),
+      }),
+    });
+    const { conversation, entries } = await abortedConversation(model);
+
+    const chunks = await readAll(conversation.reply({ abortSignal: AbortSignal.abort() }));
+
+    expect(chunks.map((c) => c.type)).toEqual(['start', 'abort']);
+    expect(model.doStreamCalls.length).toBeLessThanOrEqual(1);
+    expect((await conversation.messages()).map((m) => m.role)).toEqual(['user']);
+    expect(logsOf(entries, 'model.attempt').every((e) => e.fields.aborted === true)).toBe(true);
+    expect(logsOf(entries, 'reply.end')[0]?.fields).toMatchObject({
+      outcome: 'aborted',
+      saved: false,
+    });
+  });
+
+  it('请求阶段 429 后等待重试期间中止：不再发起请求，reply.end 为 aborted', async () => {
+    const slowRetry = new APICallError({
+      message: 'HTTP 429',
+      url: 'http://mock.test/v1/chat/completions',
+      requestBodyValues: {},
+      statusCode: 429,
+      responseHeaders: { 'retry-after-ms': '30000' },
+    });
+    const model = scriptedModel(slowRetry, ['不该到达']);
+    const { conversation, entries } = await abortedConversation(model);
+    const controller = new AbortController();
+    const startedAt = Date.now();
+
+    const chunks = await readUntilAbort(
+      conversation.reply({ abortSignal: controller.signal }),
+      controller,
+      (c) => c.type === 'data-retry',
+    );
+
+    expect(Date.now() - startedAt).toBeLessThan(5000);
+    expect(chunks.at(-1)?.type).toBe('abort');
+    expect(model.doStreamCalls).toHaveLength(1);
+    expect((await conversation.messages()).map((m) => m.role)).toEqual(['user']);
+    expect(logsOf(entries, 'reply.end')[0]?.fields).toMatchObject({
+      outcome: 'aborted',
+      saved: false,
+    });
+    expect(logsOf(entries, 'reply.failed')).toHaveLength(0);
+  });
+
+  it('流中出错、重新生成还没出字就中止：失败那次的半截不写入', async () => {
+    let call = 0;
+    const model = new MockLanguageModelV4({
+      doStream: async ({ abortSignal }) =>
+        call++ === 0
+          ? { stream: hangingStream(streamError('失败的半截').parts, undefined) }
+          : { stream: hangingStream([], abortSignal) },
+    });
+    const { conversation, entries } = await abortedConversation(model);
+    const controller = new AbortController();
+
+    const chunks = await readUntilAbort(
+      conversation.reply({ abortSignal: controller.signal }),
+      controller,
+      (c) => c.type === 'text-end',
+    );
+
+    expect(attemptTrace(chunks)).toEqual([
+      'text-start',
+      'text-delta:失败的半截',
+      'text-end',
+      'data-retry:stream/1',
+      'reset-step',
+      'abort',
+    ]);
+    expect((await conversation.messages()).map((m) => m.role)).toEqual(['user']);
+    expect(logsOf(entries, 'reply.end')[0]?.fields).toMatchObject({
+      outcome: 'aborted',
+      saved: false,
+    });
+  });
+
+  it('中止后可以再次回复：模型收到的上一条助手消息末尾带「（回复被中止）」，存储的正文不带', async () => {
+    let call = 0;
+    const model = new MockLanguageModelV4({
+      doStream: async ({ abortSignal }) =>
+        call++ === 0
+          ? { stream: hangingStream(textParts('说到一半').slice(0, -1), abortSignal) }
+          : { stream: simulateReadableStream({ chunks: [...textParts('接着说'), finish()] }) },
+    });
+    const conversation = createConversation({ model, instructions });
+    await conversation.append({ author: alice, text: '讲个故事' });
+    const controller = new AbortController();
+    await readUntilAbort(
+      conversation.reply({ abortSignal: controller.signal }),
+      controller,
+      (c) => c.type === 'text-delta',
+    );
+
+    await conversation.append({ author: alice, text: '你刚才说到哪了？' });
+    await readAll(conversation.reply());
+
+    expect(promptOf(model, 1)).toEqual([
+      { role: 'system', text: `${instructions}\n\n${messageFormatNote}` },
+      { role: 'user', text: '<message from="Alice">\n讲个故事\n</message>' },
+      { role: 'assistant', text: '说到一半\n（回复被中止）' },
+      { role: 'user', text: '<message from="Alice">\n你刚才说到哪了？\n</message>' },
+    ]);
+    const stored = await conversation.messages();
+    expect(textOf(stored[1])).toBe('说到一半');
+    expect(stored[1]?.metadata?.aborted).toBe(true);
+    expect(textOf(stored[3])).toBe('接着说');
+    expect(stored[3]?.metadata?.aborted).toBeUndefined();
   });
 });

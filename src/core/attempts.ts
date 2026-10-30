@@ -23,11 +23,13 @@ export function trackAttempts({
   logger,
   logFields,
   maxRetries,
+  abortSignal,
   notify,
 }: {
   logger: Logger;
   logFields: object;
   maxRetries: number;
+  abortSignal?: AbortSignal;
   /** 请求阶段的重试提示，发生在流开始前，直接写进外层流 */
   notify: (chunk: MessageChunk) => void;
 }): {
@@ -57,11 +59,18 @@ export function trackAttempts({
       const attempt = ++stats.attempts;
       const startedAt = Date.now();
       const fields = () => ({ ...logFields, attempt, durationMs: Date.now() - startedAt });
+      // 被中止的请求不算失败、不算重试
+      const logAborted = (phase: 'request' | 'stream') =>
+        logger.info({ ...fields(), phase, aborted: true, willRetry: false }, 'model.attempt');
 
       let result;
       try {
         result = await doStream();
       } catch (error) {
+        if (abortSignal?.aborted) {
+          logAborted('request');
+          throw error;
+        }
         requestFailures++;
         // SDK：APICallError 且可重试，且本次调用的失败次数未超过 maxRetries
         const willRetry =
@@ -118,12 +127,14 @@ export function trackAttempts({
         onClose() {
           if (logged) return;
           logged = true;
-          logger.info({ ...fields(), phase: 'stream', ok: true }, 'model.attempt');
+          if (abortSignal?.aborted) logAborted('stream');
+          else logger.info({ ...fields(), phase: 'stream', ok: true }, 'model.attempt');
         },
-        // 读流时抛错（如连接中途断开）SDK 不重试
+        // 读流时抛错（如连接中途断开）SDK 不重试；中止时 fetch 也以这种方式结束
         onError(error) {
           if (logged) return;
           logged = true;
+          if (abortSignal?.aborted) return logAborted('stream');
           logger.warn(
             {
               ...fields(),
@@ -134,6 +145,13 @@ export function trackAttempts({
             },
             'model.attempt',
           );
+        },
+        // SDK 因中止不再读这个流。通常挂起的读取随后以 done 返回、由 onClose 记下；
+        // 这里兜住当时没有挂起读取的情况。回复流被消费方取消不会传到这里（请求在后台照常读完）
+        onCancel() {
+          if (logged || !abortSignal?.aborted) return;
+          logged = true;
+          logAborted('stream');
         },
       });
       return { ...result, stream };
@@ -150,9 +168,13 @@ export function trackAttempts({
     return new TransformStream<MessageChunk, MessageChunk>({
       transform(chunk, controller) {
         const isStart = chunk.type === 'text-start' || chunk.type === 'reasoning-start';
-        // 新的尝试一个内容段都没给就结束或失败时，在结束段之前插入
+        // 新的尝试一个内容段都没给就结束、失败或被中止时，在结束段之前插入，
+        // 失败那次的半截也就不会随中止写入历史
         const endsReply =
-          chunk.type === 'finish-step' || chunk.type === 'finish' || chunk.type === 'error';
+          chunk.type === 'finish-step' ||
+          chunk.type === 'finish' ||
+          chunk.type === 'error' ||
+          chunk.type === 'abort';
         while (
           pendingStreamRetries[0] &&
           (endsReply || (isStart && pendingStreamRetries[0].afterStarts <= starts))
@@ -177,6 +199,7 @@ function observe(
     onPart: (part: ModelStreamPart) => void;
     onClose: () => void;
     onError: (error: unknown) => void;
+    onCancel: () => void;
   },
 ): ModelStream {
   const reader = source.getReader();
@@ -198,7 +221,10 @@ function observe(
       handlers.onPart(next.value);
       controller.enqueue(next.value);
     },
-    cancel: (reason) => reader.cancel(reason),
+    cancel(reason) {
+      handlers.onCancel();
+      return reader.cancel(reason);
+    },
   });
 }
 

@@ -10,6 +10,8 @@ export type MessageMetadata = {
   author?: Author;
   /** ISO 时间 */
   createdAt: string;
+  /** 助手回复被中止，正文是中止前已输出的部分 */
+  aborted?: true;
 };
 
 /** 回复流中的数据段。都是 transient 的，不进入消息历史。 */

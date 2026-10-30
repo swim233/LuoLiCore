@@ -1,13 +1,15 @@
 import type { MessageChunk } from '../core/index.js';
 
-export type PrintResult = { ok: true } | { ok: false; errorText: string };
+export type PrintResult =
+  { status: 'completed' } | { status: 'failed'; errorText: string } | { status: 'aborted' };
 
 /**
  * 遍历一次回复并打印：文本增量写 stdout，两类重试提示写 stderr。
- * 结束时保证 stdout 停在行首，调用方可以直接接着打印提示符或失败行。
+ * 结束时保证 stdout 停在行首，调用方可以直接接着打印提示符、失败行或中止提示。
  */
 export async function printReply(stream: ReadableStream<MessageChunk>): Promise<PrintResult> {
   let errorText: string | undefined;
+  let aborted = false;
   let atLineStart = true;
   for await (const chunk of stream) {
     if (chunk.type === 'text-delta') {
@@ -27,8 +29,11 @@ export async function printReply(stream: ReadableStream<MessageChunk>): Promise<
       }
     } else if (chunk.type === 'error') {
       errorText ??= chunk.errorText;
+    } else if (chunk.type === 'abort') {
+      aborted = true;
     }
   }
   if (!atLineStart) process.stdout.write('\n');
-  return errorText === undefined ? { ok: true } : { ok: false, errorText };
+  if (errorText !== undefined) return { status: 'failed', errorText };
+  return aborted ? { status: 'aborted' } : { status: 'completed' };
 }

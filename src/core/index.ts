@@ -1,4 +1,4 @@
-export { createConversation, type Conversation } from './conversation.js';
+export { createConversation, type Conversation, type ReplyOptions } from './conversation.js';
 export { readInstructions } from './instructions.js';
 export { silentLogger, type Logger } from './logger.js';
 export type { Author, Message, MessageChunk, MessageData, MessageMetadata } from './message.js';

@@ -27,8 +27,13 @@ export type Conversation = {
    * 流读完时回复已写入历史；出错或被取消则不写入。
    * 上一个回复的流还没结束时调用会立即抛错。
    */
-  reply(): ReadableStream<MessageChunk>;
+  reply(options?: ReplyOptions): ReadableStream<MessageChunk>;
   messages(): Promise<Message[]>;
+};
+
+export type ReplyOptions = {
+  /** 中止当前回复。调用时已中止的信号照常走中止路径 */
+  abortSignal?: AbortSignal;
 };
 
 export function createConversation({
@@ -61,7 +66,7 @@ export function createConversation({
       return message;
     },
 
-    reply() {
+    reply({ abortSignal }: ReplyOptions = {}) {
       if (replying) throw new Error('上一个回复还没结束');
       replying = true;
 
@@ -76,6 +81,7 @@ export function createConversation({
         logger,
         logFields,
         maxRetries,
+        abortSignal,
         notify: (chunk) => writeNotice(chunk),
       });
 
@@ -103,6 +109,7 @@ export function createConversation({
             messages: await convertToModelMessages(history.map(formatForModel)),
             maxRetries,
             streamRetries: maxRetries,
+            abortSignal,
             // 错误经 stream 进入 UI 流；不传时 SDK 默认把整个错误对象打到 stderr。
             // 不返回 { retry: true }，不额外请求重试
             onError: () => {},
@@ -129,9 +136,29 @@ export function createConversation({
             };
             if (failure) {
               logger.error({ ...summary, error: summarizeError(failure.error) }, 'reply.failed');
-            } else if (isAborted || isCancelled) {
-              const outcome = isCancelled ? 'cancelled' : 'aborted';
-              logger.info({ ...summary, outcome }, 'reply.end');
+            } else if (isAborted) {
+              // 半截回复写入历史并标记 aborted；一个字都没输出就被中止时不写入
+              const saved = hasText(responseMessage);
+              if (saved) {
+                await store.add({
+                  ...responseMessage,
+                  // 中止时最后一段还停在 streaming 状态；写入历史的是定稿，改为 done
+                  parts: responseMessage.parts.map((part) =>
+                    (part.type === 'text' || part.type === 'reasoning') &&
+                    part.state === 'streaming'
+                      ? { ...part, state: 'done' }
+                      : part,
+                  ),
+                  metadata: {
+                    createdAt: new Date().toISOString(),
+                    ...responseMessage.metadata,
+                    aborted: true,
+                  },
+                });
+              }
+              logger.info({ ...summary, outcome: 'aborted', saved }, 'reply.end');
+            } else if (isCancelled) {
+              logger.info({ ...summary, outcome: 'cancelled' }, 'reply.end');
             } else {
               await store.add(responseMessage);
               logger.info(
@@ -164,13 +191,16 @@ const messageFormatNote = `## 消息格式
 
 每条用户消息都包在 <message> 标签里，from 属性是平台提供的发言人名字。
 不同名字是不同的人，同一个名字始终是同一个人。需要知道对方是谁时，以 from 为准。
-回复时只写正文，不要输出 <message> 标签，也不要在开头加自己的名字。`;
+你之前的回复若以「（回复被中止）」结尾，表示那条回复被用户中途打断，没有说完。
+回复时只写正文，不要输出 <message> 标签或「（回复被中止）」，也不要在开头加自己的名字。`;
 
 /**
- * 送模型前把用户消息包成 `<message from="名字">…</message>`，其他消息原样返回。
- * 只改送给模型的副本，存储里的消息不变。
+ * 送模型前的格式化，只改送给模型的副本，存储里的消息不变：
+ * 用户消息包成 `<message from="名字">…</message>`；被中止的助手回复末尾加「（回复被中止）」；
+ * 其他消息原样返回。
  */
 function formatForModel(message: Message): Message {
+  if (message.role === 'assistant') return markAborted(message);
   if (message.role !== 'user') return message;
   const texts = message.parts.flatMap((part) => (part.type === 'text' ? [part.text] : []));
   if (texts.length === 0) return message;
@@ -195,6 +225,24 @@ function formatForModel(message: Message): Message {
       return index === firstText ? [{ ...part, text }] : [];
     }),
   };
+}
+
+function markAborted(message: Message): Message {
+  if (!message.metadata?.aborted) return message;
+  const lastText = message.parts.findLastIndex((part) => part.type === 'text');
+  if (lastText === -1) return message;
+  return {
+    ...message,
+    parts: message.parts.map((part, index) =>
+      index === lastText && part.type === 'text'
+        ? { ...part, text: `${part.text}\n（回复被中止）` }
+        : part,
+    ),
+  };
+}
+
+function hasText(message: Message): boolean {
+  return message.parts.some((part) => part.type === 'text' && part.text.trim() !== '');
 }
 
 function escapeAttribute(value: string): string {
