@@ -13,3 +13,9 @@ data/*
 logs/*
 skills/*
 memory/*
+
+# grill 决策台的页面、brief 与答案副本
+.grill/
+
+# 开发流程中 dev / QA 的 spec 与报告
+.handoff/
