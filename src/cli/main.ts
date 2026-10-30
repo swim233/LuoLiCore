@@ -1,6 +1,15 @@
+import { mkdirSync } from 'node:fs';
 import { userInfo } from 'node:os';
+import { dirname } from 'node:path';
 import { createInterface } from 'node:readline/promises';
-import { createConversation, createModel, readInstructions, type Usage } from '../core/index.js';
+import {
+  createConversation,
+  createModel,
+  openSqliteStorage,
+  readInstructions,
+  type Storage,
+  type Usage,
+} from '../core/index.js';
 import { parseConfig, usage } from './config.js';
 import { createLogger, jsonEscapedForms, logFile } from './logger.js';
 import { notice } from './notice.js';
@@ -13,22 +22,34 @@ if (!parsed.ok) {
   if (parsed.showUsage) console.error(usage);
   process.exit(1);
 }
-const { model, maxRetries } = parsed.config;
+const { model, maxRetries, resume, dbPath, promptPath } = parsed.config;
 const name = parsed.config.name ?? userInfo().username;
 
 let instructions: string;
 try {
-  instructions = await readInstructions();
+  instructions = await readInstructions(promptPath);
 } catch (error) {
   console.error(`读取 system prompt 失败：${(error as Error).message}`);
   process.exit(1);
 }
 
+let storage: Storage;
+try {
+  mkdirSync(dirname(dbPath), { recursive: true });
+  storage = openSqliteStorage(dbPath);
+} catch (error) {
+  console.error(`打开数据库失败（${dbPath}）：${(error as Error).message}`);
+  process.exit(1);
+}
+
+const conversationId = await chooseConversation(storage, resume);
 const conversation = createConversation({
   model: createModel(model),
   instructions,
+  store: await storage.openConversation(conversationId),
   logger: createLogger(model),
   maxRetries,
+  conversationId,
 });
 const author = { id: name, name };
 
@@ -44,6 +65,21 @@ if (process.stdin.isTTY) {
     if (text) await converse(text);
   }
   rl.close();
+}
+storage.close();
+
+// 默认每次新开会话；--resume 接着 CLI 平台里最后一条消息最新的会话
+async function chooseConversation(storage: Storage, resume: boolean): Promise<string> {
+  if (resume) {
+    const latest = await storage.findLatestConversation('cli');
+    if (latest) {
+      const count = (await (await storage.openConversation(latest)).list()).length;
+      notice(`接着上次的会话（${count} 条消息）`);
+      return latest;
+    }
+    notice('没有之前的 CLI 会话，已新开一个');
+  }
+  return storage.createConversation({ platform: 'cli' });
 }
 
 async function converse(text: string, abortSignal?: AbortSignal): Promise<void> {

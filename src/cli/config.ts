@@ -7,12 +7,18 @@ export type CliConfig = {
   name?: string;
   /** 未设置时为 undefined，用核心的默认值 */
   maxRetries?: number;
+  /** 接着上次的 CLI 会话，而不是新开一个 */
+  resume: boolean;
+  /** 数据库文件，LUOLI_DB，默认 data/luoli.db */
+  dbPath: string;
+  /** 人设文件，LUOLI_PROMPT，默认 prompts/system.md */
+  promptPath: string;
 };
 
 export type ConfigResult =
   { ok: true; config: CliConfig } | { ok: false; error: string; showUsage: boolean };
 
-export const usage = '用法：pnpm dev [--model <模型 id>] [--name <名字>]';
+export const usage = '用法：pnpm dev [--model <模型 id>] [--name <名字>] [--resume]';
 
 // 空字符串按未设置处理；名字去掉首尾空白
 export function parseConfig(argv: string[], env: Record<string, string | undefined>): ConfigResult {
@@ -20,7 +26,11 @@ export function parseConfig(argv: string[], env: Record<string, string | undefin
   try {
     parsed = parseArgs({
       args: argv,
-      options: { model: { type: 'string' }, name: { type: 'string' } },
+      options: {
+        model: { type: 'string' },
+        name: { type: 'string' },
+        resume: { type: 'boolean', default: false },
+      },
       allowPositionals: false,
     });
   } catch (error) {
@@ -61,6 +71,9 @@ export function parseConfig(argv: string[], env: Record<string, string | undefin
       model: { baseURL, apiKey: env.LUOLI_API_KEY || undefined, modelId },
       name: values.name?.trim() || undefined,
       maxRetries,
+      resume: values.resume,
+      dbPath: env.LUOLI_DB || 'data/luoli.db',
+      promptPath: env.LUOLI_PROMPT || 'prompts/system.md',
     },
   };
 }

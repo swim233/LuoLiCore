@@ -10,4 +10,6 @@ export type {
   Usage,
 } from './message.js';
 export { createModel, type ModelOptions } from './model.js';
-export { createMemoryStore, type ConversationStore } from './store.js';
+export { createMemoryStorage, createMemoryStore } from './storage/memory.js';
+export { openSqliteStorage } from './storage/sqlite.js';
+export type { ConversationStore, NewConversation, Storage } from './storage/types.js';

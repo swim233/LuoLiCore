@@ -15,7 +15,8 @@ import { trackAttempts } from './attempts.js';
 import { silentLogger, type Logger } from './logger.js';
 import { toUsage } from './model.js';
 import type { Author, Message, MessageChunk } from './message.js';
-import { createMemoryStore, type ConversationStore } from './store.js';
+import { createMemoryStore } from './storage/memory.js';
+import type { ConversationStore } from './storage/types.js';
 
 export type Conversation = {
   /** 记录一条用户消息，不产生回复 */
@@ -42,6 +43,7 @@ export function createConversation({
   store = createMemoryStore(),
   logger = silentLogger,
   maxRetries = 2,
+  conversationId,
 }: {
   /** 不接受字符串形式的模型 id：`wrapLanguageModel` 需要模型实例 */
   model: Exclude<LanguageModel, string>;
@@ -51,6 +53,8 @@ export function createConversation({
   logger?: Logger;
   /** 重试次数：请求阶段（maxRetries）与流中错误事件（streamRetries）各自最多这么多次 */
   maxRetries?: number;
+  /** 存储里的会话 id，只写进日志，便于多会话排查 */
+  conversationId?: string;
 }): Conversation {
   let replying = false;
 
@@ -72,7 +76,10 @@ export function createConversation({
 
       // 回复 id 也是写入历史的助手消息 id，日志与历史可以对上
       const replyId = generateId();
-      const logFields = { replyId, modelId: model.modelId };
+      const logFields = { conversationId, replyId, modelId: model.modelId };
+      // 回复在历史里的序号，开始时预留：生成期间记录进来的消息排在回复之后。
+      // 回复失败或没有输出时不写入，这个序号空着
+      let seq: number | undefined;
       const startedAt = Date.now();
 
       let writeNotice: (chunk: MessageChunk) => void = () => {};
@@ -100,7 +107,9 @@ export function createConversation({
         generateId: () => replyId,
         execute: async ({ writer }) => {
           writeNotice = (chunk) => writer.write(chunk);
-          const history = await store.list();
+          seq = await store.reserve();
+          // 只看预留号之前的消息：模型看到的正是排在回复之前的那些
+          const history = await store.list({ before: seq });
           const result = streamText({
             // SDK 的每次请求（含两类重试）都重新调用 doStream，中间件能逐次观察
             model: wrapLanguageModel({ model, middleware: tracker.middleware }),
@@ -149,27 +158,30 @@ export function createConversation({
               // 半截回复写入历史并标记 aborted；一个字都没输出就被中止时不写入
               const saved = hasText(responseMessage);
               if (saved) {
-                await store.add({
-                  ...responseMessage,
-                  // 中止时最后一段还停在 streaming 状态；写入历史的是定稿，改为 done
-                  parts: responseMessage.parts.map((part) =>
-                    (part.type === 'text' || part.type === 'reasoning') &&
-                    part.state === 'streaming'
-                      ? { ...part, state: 'done' }
-                      : part,
-                  ),
-                  metadata: {
-                    createdAt: new Date().toISOString(),
-                    ...responseMessage.metadata,
-                    aborted: true,
+                await store.add(
+                  {
+                    ...responseMessage,
+                    // 中止时最后一段还停在 streaming 状态；写入历史的是定稿，改为 done
+                    parts: responseMessage.parts.map((part) =>
+                      (part.type === 'text' || part.type === 'reasoning') &&
+                      part.state === 'streaming'
+                        ? { ...part, state: 'done' }
+                        : part,
+                    ),
+                    metadata: {
+                      createdAt: new Date().toISOString(),
+                      ...responseMessage.metadata,
+                      aborted: true,
+                    },
                   },
-                });
+                  seq,
+                );
               }
               logger.info({ ...summary, outcome: 'aborted', saved }, 'reply.end');
             } else if (isCancelled) {
               logger.info({ ...summary, outcome: 'cancelled' }, 'reply.end');
             } else {
-              await store.add(responseMessage);
+              await store.add(responseMessage, seq);
               logger.info(
                 {
                   ...summary,

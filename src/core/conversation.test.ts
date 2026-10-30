@@ -1168,3 +1168,58 @@ describe('用量', () => {
     expect(logged).toEqual(messages[1]?.metadata?.usage);
   });
 });
+
+describe('序号预留', () => {
+  it('回复生成期间记录的消息排在回复之后，也不在这次回复的 prompt 里', async () => {
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => (release = resolve));
+    const model = new MockLanguageModelV4({
+      doStream: async () => ({
+        stream: new ReadableStream<StreamPart>({
+          async start(controller) {
+            controller.enqueue({ type: 'text-start', id: 't' });
+            controller.enqueue({ type: 'text-delta', id: 't', delta: '回' });
+            await released;
+            controller.enqueue({ type: 'text-delta', id: 't', delta: '复' });
+            controller.enqueue({ type: 'text-end', id: 't' });
+            controller.enqueue(finish());
+            controller.close();
+          },
+        }),
+      }),
+    });
+    const conversation = createConversation({ model, instructions });
+    await conversation.append({ author: alice, text: '在吗' });
+
+    const reader = conversation.reply().getReader();
+    while ((await reader.read()).value?.type !== 'text-delta');
+    await conversation.append({ author: bob, text: '我也来了' });
+    release();
+    while (!(await reader.read()).done);
+
+    const messages = await conversation.messages();
+    expect(messages.map((m) => [m.role, textOf(m)])).toEqual([
+      ['user', '在吗'],
+      ['assistant', '回复'],
+      ['user', '我也来了'],
+    ]);
+    expect(promptOf(model, 0).filter((m) => m.role === 'user')).toHaveLength(1);
+  });
+
+  it('回复失败留下的空号不影响之后的顺序', async () => {
+    const conversation = createConversation({
+      model: scriptedModel(httpError(401), ['好']),
+      instructions,
+    });
+    await conversation.append({ author: alice, text: '一' });
+    await readAll(conversation.reply());
+    await conversation.append({ author: alice, text: '二' });
+    await readAll(conversation.reply());
+
+    expect((await conversation.messages()).map((m) => [m.role, textOf(m)])).toEqual([
+      ['user', '一'],
+      ['user', '二'],
+      ['assistant', '好'],
+    ]);
+  });
+});
