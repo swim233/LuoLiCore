@@ -3,7 +3,8 @@ import type { ModelOptions } from '../core/index.js';
 
 export type CliConfig = {
   model: ModelOptions;
-  prompt: string;
+  /** 发言人名字；未指定时为 undefined，由调用方取系统用户名 */
+  name?: string;
   /** 未设置时为 undefined，用核心的默认值 */
   maxRetries?: number;
 };
@@ -11,30 +12,22 @@ export type CliConfig = {
 export type ConfigResult =
   { ok: true; config: CliConfig } | { ok: false; error: string; showUsage: boolean };
 
-export const usage = '用法：pnpm dev [--model <模型 id>] "<要发送的文本>"';
+export const usage = '用法：pnpm dev [--model <模型 id>] [--name <名字>]';
 
-// 空字符串按未设置处理
+// 空字符串按未设置处理；名字去掉首尾空白
 export function parseConfig(argv: string[], env: Record<string, string | undefined>): ConfigResult {
   let parsed;
   try {
     parsed = parseArgs({
       args: argv,
-      options: { model: { type: 'string' } },
-      allowPositionals: true,
+      options: { model: { type: 'string' }, name: { type: 'string' } },
+      allowPositionals: false,
     });
   } catch (error) {
     return { ok: false, error: `参数错误：${(error as Error).message}`, showUsage: true };
   }
 
-  const { values, positionals } = parsed;
-  if (positionals.length > 1) {
-    return { ok: false, error: '只接受一个位置参数，含空格的文本请加引号', showUsage: true };
-  }
-  const prompt = positionals[0];
-  if (!prompt) {
-    return { ok: false, error: '缺少要发送的文本', showUsage: true };
-  }
-
+  const { values } = parsed;
   const modelId = values.model || env.LUOLI_MODEL;
   if (!modelId) {
     return {
@@ -66,7 +59,7 @@ export function parseConfig(argv: string[], env: Record<string, string | undefin
     ok: true,
     config: {
       model: { baseURL, apiKey: env.LUOLI_API_KEY || undefined, modelId },
-      prompt,
+      name: values.name?.trim() || undefined,
       maxRetries,
     },
   };
