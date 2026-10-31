@@ -48,8 +48,14 @@ export function trackAttempts({
    */
   restart: () => void;
   stats: AttemptStats;
+  /**
+   * 第一次出现非空的文字或推理输出的时间（Date.now()），之后被流式重试作废的也算；
+   * 还没有时为 undefined
+   */
+  firstOutputAt: () => number | undefined;
 } {
   const stats: AttemptStats = { attempts: 0, requestRetries: 0, streamRetries: 0 };
+  let firstOutputAt: number | undefined;
   // 当前这次调用里请求阶段连续失败的次数。SDK 每次调用（包括流式重试发起的那次）
   // 都重新计算请求重试次数，这个计数与 SDK 的 tryNumber 对应
   let requestFailures = 0;
@@ -139,6 +145,7 @@ export function trackAttempts({
           if (part.type === 'text-start' || part.type === 'reasoning-start') contentStarts++;
           if ((part.type === 'text-delta' || part.type === 'reasoning-delta') && part.delta) {
             clearFirstChunkTimer();
+            firstOutputAt ??= Date.now();
           }
           if (part.type === 'error') clearFirstChunkTimer();
           if (part.type !== 'error' || logged) return;
@@ -242,7 +249,7 @@ export function trackAttempts({
     pendingStreamRetries.length = 0;
   };
 
-  return { middleware, markStreamRetries, restart, stats };
+  return { middleware, markStreamRetries, restart, stats, firstOutputAt: () => firstOutputAt };
 }
 
 function observe(

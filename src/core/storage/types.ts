@@ -13,6 +13,38 @@ export type Segment = {
   priorSummary?: string;
 };
 
+/**
+ * 一次模型调用（一次回复或一次摘要，期间的重试都合在一起）的结果，对应 model_calls 的一行
+ * （ADR-0005）。服务端没报、或这次调用没有的项为 undefined（存为 NULL），不是 0
+ */
+export type ModelCall = {
+  purpose: 'reply' | 'summary';
+  /** 摘要才有 */
+  summaryReason?: 'idle' | 'compress';
+  /** 回复才有：与写入历史的助手消息 id、日志里的 replyId 相同 */
+  replyId?: string;
+  /** 模型 id */
+  model: string;
+  /** 第一次请求发出的时间，ISO */
+  startedAt: string;
+  durationMs: number;
+  /** 从开始到第一段非空的文字或推理输出；没有输出时为 undefined */
+  firstOutputMs?: number;
+  /** HTTP 请求次数，含重试与拒收图片后的恢复 */
+  attempts: number;
+  outcome: 'completed' | 'empty' | 'aborted' | 'cancelled' | 'failed';
+  /** 正常结束时才有 */
+  finishReason?: string;
+  /** 以下 4 项：正常结束时的总用量 */
+  inputTokens?: number;
+  cacheReadTokens?: number;
+  /** 含推理 */
+  outputTokens?: number;
+  reasoningTokens?: number;
+  /** 失败时的错误类型与状态码，如 `APICallError 429`；不含错误信息与正文 */
+  error?: string;
+};
+
 /** 一个会话的消息与段的存取。消息按序号排列；序号由存储分配，可以先预留再写入 */
 export type ConversationStore = {
   /** 按序号升序返回区间内的整条消息 */
@@ -45,6 +77,10 @@ export type ConversationStore = {
     startReason: 'idle' | 'compress';
     priorSummary: string;
   }): Promise<boolean>;
+  /** 记一次模型调用，只追加 */
+  recordCall(call: ModelCall): Promise<void>;
+  /** 本会话记下的模型调用，按写入先后 */
+  calls(): Promise<ModelCall[]>;
 };
 
 export type NewConversation = {

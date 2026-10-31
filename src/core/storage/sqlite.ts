@@ -2,12 +2,19 @@ import { DatabaseSync } from 'node:sqlite';
 import { generateId } from 'ai';
 import { DuplicateMessageError } from './errors.js';
 import type { Message } from '../message.js';
-import type { ConversationInfo, ConversationStore, Segment, SeqRange, Storage } from './types.js';
+import type {
+  ConversationInfo,
+  ConversationStore,
+  ModelCall,
+  Segment,
+  SeqRange,
+  Storage,
+} from './types.js';
 
-const schemaVersion = 1;
-
-// 表结构见 docs/adr/0005-sqlite-storage-in-core.md
-const schema = `
+// 表结构见 docs/adr/0005-sqlite-storage-in-core.md。第 i 项把版本 i 的库升到 i + 1：
+// 新库（版本 0）依次执行全部，已有的库只执行比它新的部分
+const migrations = [
+  `
 CREATE TABLE conversations (
   id                       TEXT PRIMARY KEY,
   platform                 TEXT NOT NULL,
@@ -43,7 +50,33 @@ CREATE TABLE segments (
   created_at         TEXT NOT NULL
 );
 CREATE UNIQUE INDEX segments_order ON segments(conversation_id, start_seq);
-`;
+`,
+  `
+CREATE TABLE model_calls (
+  id                INTEGER PRIMARY KEY,
+  conversation_id   TEXT NOT NULL REFERENCES conversations(id),
+  purpose           TEXT NOT NULL,
+  summary_reason    TEXT,
+  reply_id          TEXT,
+  model             TEXT NOT NULL,
+  started_at        TEXT NOT NULL,
+  duration_ms       INTEGER NOT NULL,
+  first_output_ms   INTEGER,
+  attempts          INTEGER NOT NULL,
+  outcome           TEXT NOT NULL,
+  finish_reason     TEXT,
+  input_tokens      INTEGER,
+  cache_read_tokens INTEGER,
+  output_tokens     INTEGER,
+  reasoning_tokens  INTEGER,
+  error             TEXT
+);
+CREATE INDEX model_calls_time         ON model_calls(started_at);
+CREATE INDEX model_calls_conversation ON model_calls(conversation_id, started_at);
+`,
+];
+
+const schemaVersion = migrations.length;
 
 /** 打开（不存在时新建）一个 SQLite 数据库文件作为存储。目录须已存在 */
 export function openSqliteStorage(path: string): Storage {
@@ -114,6 +147,15 @@ export function openSqliteStorage(path: string): Storage {
      ORDER BY MAX(m.created_at) DESC, MAX(m.rowid) DESC
      LIMIT 1`,
   );
+
+  const insertCall = db.prepare(
+    `INSERT INTO model_calls
+       (conversation_id, purpose, summary_reason, reply_id, model, started_at, duration_ms,
+        first_output_ms, attempts, outcome, finish_reason, input_tokens, cache_read_tokens,
+        output_tokens, reasoning_tokens, error)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  const listCalls = db.prepare('SELECT * FROM model_calls WHERE conversation_id = ? ORDER BY id');
 
   const reserve = (conversationId: string): number => {
     const row = reserveSeq.get(conversationId);
@@ -207,6 +249,29 @@ export function openSqliteStorage(path: string): Storage {
     async addSegment(segment) {
       return addSegment(conversationId, segment);
     },
+    async recordCall(call) {
+      insertCall.run(
+        conversationId,
+        call.purpose,
+        call.summaryReason ?? null,
+        call.replyId ?? null,
+        call.model,
+        call.startedAt,
+        call.durationMs,
+        call.firstOutputMs ?? null,
+        call.attempts,
+        call.outcome,
+        call.finishReason ?? null,
+        call.inputTokens ?? null,
+        call.cacheReadTokens ?? null,
+        call.outputTokens ?? null,
+        call.reasoningTokens ?? null,
+        call.error ?? null,
+      );
+    },
+    async calls() {
+      return listCalls.all(conversationId).map(modelCall);
+    },
   });
 
   return {
@@ -258,8 +323,9 @@ function migrate(db: DatabaseSync): void {
     throw new Error(`数据库版本比程序新（文件为 ${version}，程序支持 ${schemaVersion}）`);
   }
   if (version === schemaVersion) return;
+  // 一个事务里升到最新：中途出错时库保持原来的版本，已有数据不动
   transaction(db, () => {
-    db.exec(schema);
+    for (const migration of migrations.slice(version)) db.exec(migration);
     db.exec(`PRAGMA user_version = ${schemaVersion}`);
   });
 }
@@ -283,6 +349,26 @@ function conversationInfo(row: Record<string, unknown>): ConversationInfo {
   };
 }
 
+function modelCall(row: Record<string, unknown>): ModelCall {
+  return {
+    purpose: String(row.purpose) as ModelCall['purpose'],
+    summaryReason: optional(row.summary_reason) as ModelCall['summaryReason'],
+    replyId: optional(row.reply_id),
+    model: String(row.model),
+    startedAt: String(row.started_at),
+    durationMs: Number(row.duration_ms),
+    firstOutputMs: optionalNumber(row.first_output_ms),
+    attempts: Number(row.attempts),
+    outcome: String(row.outcome) as ModelCall['outcome'],
+    finishReason: optional(row.finish_reason),
+    inputTokens: optionalNumber(row.input_tokens),
+    cacheReadTokens: optionalNumber(row.cache_read_tokens),
+    outputTokens: optionalNumber(row.output_tokens),
+    reasoningTokens: optionalNumber(row.reasoning_tokens),
+    error: optional(row.error),
+  };
+}
+
 // SQLITE_CONSTRAINT_UNIQUE；同一错误码也用于序号冲突，再看是哪一列
 function isPlatformMessageConflict(error: unknown): boolean {
   return (
@@ -295,4 +381,8 @@ function isPlatformMessageConflict(error: unknown): boolean {
 // NULL 列读成 undefined
 function optional(value: unknown): string | undefined {
   return value === null || value === undefined ? undefined : String(value);
+}
+
+function optionalNumber(value: unknown): number | undefined {
+  return value === null || value === undefined ? undefined : Number(value);
 }

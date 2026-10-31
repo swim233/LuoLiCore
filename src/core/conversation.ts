@@ -6,11 +6,12 @@ import {
   toUIMessageStream,
   wrapLanguageModel,
   type LanguageModel,
+  type LanguageModelUsage,
   type ModelMessage,
   type ToolSet,
 } from 'ai';
 import { trackAttempts } from './attempts.js';
-import { summarizeError } from './errors.js';
+import { errorKind, summarizeError } from './errors.js';
 import { createMemoryFileStore, inlineFiles, type FileStore, type NewFile } from './files.js';
 import {
   isRejectedRequest,
@@ -19,12 +20,12 @@ import {
   withUnreadable,
 } from './image-fallback.js';
 import { silentLogger, type Logger } from './logger.js';
-import { toUsage } from './model.js';
+import { toCallTokens, toUsage } from './model.js';
 import type { Author, Message, MessageChunk } from './message.js';
 import { formatForModel, systemPrompt } from './prompt.js';
 import { createSegmenter, type SegmentOptions, type Summarize } from './segments.js';
 import { createMemoryStore } from './storage/memory.js';
-import type { ConversationStore, Segment } from './storage/types.js';
+import type { ConversationStore, ModelCall, Segment } from './storage/types.js';
 
 export type Conversation = {
   /**
@@ -116,18 +117,25 @@ export function createConversation({
 
   /**
    * 一次模型调用（回复或摘要），重试与超时相同。tracker 先建好，调用方随时能读它的统计；
-   * stream() 才真正发出请求
+   * stream() 才真正发出请求。调用结束时由调用方 record()，在模型调用表记一行
    */
   function modelCall({
     abortSignal,
     logFields,
     notify,
+    kind,
   }: {
     /** 调用方的中止信号；请求被中止而它没有中止时，就是超时 */
     abortSignal?: AbortSignal;
     logFields: object;
     notify: (chunk: MessageChunk) => void;
+    /** 模型调用表里区分用途的几列 */
+    kind: Pick<ModelCall, 'purpose' | 'summaryReason' | 'replyId'>;
   }) {
+    const createdAt = Date.now();
+    // 第一次请求发出（第一次 stream()）的时间；拒收图片后的重试不改它。
+    // 没来得及发出请求就出错时，按建立这次调用的时间算
+    let startedAt: number | undefined;
     // 超时由这个控制器中止 streamText；与调用方的中止分开，结束时据此区分
     const timeoutController = new AbortController();
     const signal = abortSignal
@@ -144,8 +152,9 @@ export function createConversation({
     });
     return {
       tracker,
-      stream: (segment: Segment, messages: ModelMessage[]) =>
-        streamText({
+      stream: (segment: Segment, messages: ModelMessage[]) => {
+        startedAt ??= Date.now();
+        return streamText({
           // SDK 的每次请求（含两类重试）都重新调用 doStream，中间件能逐次观察
           model: wrapLanguageModel({ model, middleware: tracker.middleware }),
           instructions: systemPrompt(instructions, segment),
@@ -157,36 +166,96 @@ export function createConversation({
           // 错误经 stream 交给调用方；不传时 SDK 默认把整个错误对象打到 stderr。
           // 不返回 { retry: true }，不额外请求重试
           onError: () => {},
-        }),
+        });
+      },
+
+      /**
+       * 调用结束：在模型调用表记一行。正常结束（completed、empty）才记结束原因与用量，
+       * 失败才记错误。写入出错（如退出时数据库已关闭）只记日志，从不抛出
+       */
+      async record({
+        outcome,
+        finishReason,
+        usage,
+        error,
+      }: {
+        outcome: ModelCall['outcome'];
+        finishReason?: string;
+        usage?: LanguageModelUsage;
+        error?: unknown;
+      }): Promise<void> {
+        const endedAt = Date.now();
+        const start = startedAt ?? createdAt;
+        const firstOutputAt = tracker.firstOutputAt();
+        const finished = outcome === 'completed' || outcome === 'empty';
+        const row: ModelCall = {
+          ...kind,
+          model: model.modelId,
+          startedAt: new Date(start).toISOString(),
+          durationMs: endedAt - start,
+          firstOutputMs: firstOutputAt === undefined ? undefined : firstOutputAt - start,
+          attempts: tracker.stats.attempts,
+          outcome,
+          ...(finished ? { finishReason, ...(usage && toCallTokens(usage)) } : {}),
+          ...(outcome === 'failed' ? { error: errorKind(error) } : {}),
+        };
+        try {
+          await store.recordCall(row);
+        } catch (writeError) {
+          logger.error(
+            { ...logFields, purpose: kind.purpose, error: summarizeError(writeError) },
+            'model_call.record_failed',
+          );
+        }
+      },
     };
   }
 
   // 摘要请求沿用这一段的前缀：与回复相同的 system 与消息，末尾追加一条不包标签的指令
   const summarize: Summarize = async ({ reason, segment, history, instruction, abortSignal }) => {
     const logFields = { conversationId, modelId: model.modelId, purpose: 'summary', reason };
-    const call = modelCall({ abortSignal, logFields, notify: () => {} });
-    const result = call.stream(segment, [
-      ...(await toModelMessages(history, logFields)),
-      { role: 'user', content: instruction },
-    ]);
-    // 流式重试时 result.text 只含成功那次的文本；出错、超时、中止都以流中的段告知
-    let failure: { error: unknown } | undefined;
-    for await (const part of result.stream) {
-      if (part.type === 'error') failure ??= { error: part.error };
-      if (part.type === 'abort') {
-        failure ??= {
-          error: abortSignal.aborted
-            ? new DOMException('摘要被中止', 'AbortError')
-            : new DOMException('等待模型输出超时', 'TimeoutError'),
-        };
+    const call = modelCall({
+      abortSignal,
+      logFields,
+      notify: () => {},
+      kind: { purpose: 'summary', summaryReason: reason },
+    });
+    let text: string;
+    let usage: LanguageModelUsage;
+    let finishReason: string;
+    try {
+      const result = call.stream(segment, [
+        ...(await toModelMessages(history, logFields)),
+        { role: 'user', content: instruction },
+      ]);
+      // 流式重试时 result.text 只含成功那次的文本；出错、超时、中止都以流中的段告知
+      let failure: { error: unknown } | undefined;
+      for await (const part of result.stream) {
+        if (part.type === 'error') failure ??= { error: part.error };
+        if (part.type === 'abort') {
+          failure ??= {
+            error: abortSignal.aborted
+              ? new DOMException('摘要被中止', 'AbortError')
+              : new DOMException('等待模型输出超时', 'TimeoutError'),
+          };
+        }
       }
+      if (failure) throw failure.error;
+      [text, usage, finishReason] = await Promise.all([
+        result.text,
+        result.totalUsage,
+        result.finishReason,
+      ]);
+    } catch (error) {
+      // 关闭会话时的中止不算失败，与 summary.aborted 的判断一致
+      await call.record(
+        abortSignal.aborted ? { outcome: 'aborted' } : { outcome: 'failed', error },
+      );
+      throw error;
     }
-    if (failure) throw failure.error;
-    return {
-      text: await result.text,
-      usage: toUsage(await result.totalUsage),
-      stats: call.tracker.stats,
-    };
+    // 摘要为空由切段那边按失败处理；这次调用本身正常结束了
+    await call.record({ outcome: text.trim() ? 'completed' : 'empty', finishReason, usage });
+    return { text, usage: toUsage(usage), stats: call.tracker.stats };
   };
 
   const segmenter = createSegmenter({
@@ -245,10 +314,17 @@ export function createConversation({
       const startedAt = Date.now();
 
       let writeNotice: (chunk: MessageChunk) => void = () => {};
-      const call = modelCall({ abortSignal, logFields, notify: (chunk) => writeNotice(chunk) });
+      const call = modelCall({
+        abortSignal,
+        logFields,
+        notify: (chunk) => writeNotice(chunk),
+        kind: { purpose: 'reply', replyId },
+      });
       const { tracker } = call;
       // 拒收图片后的重试换掉的图片，按消息 id；没有重试过时为 undefined
       let fallback: Map<string, string[]> | undefined;
+      // finish 段带的总用量（含原始用量），记进模型调用表；metadata 里的 usage 由它换算
+      let totalUsage: LanguageModelUsage | undefined;
 
       // onEnd 的 outcome 判断不了是否出错：外层流没声明 outcome 时正常结束也是 unknown，
       // 内层在错误事件之后收到 finish 又会记成 completed。所以自己记下出过的错。
@@ -354,6 +430,7 @@ export function createConversation({
                 }
                 if (part.type === 'finish') {
                   createdAt ??= new Date().toISOString();
+                  totalUsage = part.totalUsage;
                   const usage = toUsage(part.totalUsage);
                   return usage ? { createdAt, usage } : { createdAt };
                 }
@@ -367,6 +444,12 @@ export function createConversation({
         },
         onError: describeError,
         onEnd: async ({ responseMessage, isAborted, isCancelled, finishReason }) => {
+          const outcome = replyOutcome({
+            failed: failure !== undefined,
+            isAborted,
+            isCancelled,
+            message: responseMessage,
+          });
           try {
             const summary = {
               ...logFields,
@@ -374,9 +457,11 @@ export function createConversation({
               ...tracker.stats,
               ...(fallback ? { imageFallback: true } : {}),
             };
-            if (failure) {
-              logger.error({ ...summary, error: summarizeError(failure.error) }, 'reply.failed');
-            } else if (isAborted) {
+            // 先记模型调用：之后写历史出错也不影响这一行
+            await call.record({ outcome, finishReason, usage: totalUsage, error: failure?.error });
+            if (outcome === 'failed') {
+              logger.error({ ...summary, error: summarizeError(failure?.error) }, 'reply.failed');
+            } else if (outcome === 'aborted') {
               // 半截回复写入历史并标记 aborted；一个字都没输出就被中止时不写入
               const saved = hasText(responseMessage);
               if (saved) {
@@ -401,9 +486,9 @@ export function createConversation({
               }
               const marked = saved ? await markUnreadable() : {};
               logger.info({ ...summary, outcome: 'aborted', saved, ...marked }, 'reply.end');
-            } else if (isCancelled) {
+            } else if (outcome === 'cancelled') {
               logger.info({ ...summary, outcome: 'cancelled' }, 'reply.end');
-            } else if (!hasText(responseMessage)) {
+            } else if (outcome === 'empty') {
               // 正常结束却没有任何文字：与一字未出就被中止一样不写入，序号空着
               logger.warn(
                 {
@@ -445,6 +530,24 @@ export function createConversation({
 
     close: () => segmenter.close(),
   };
+}
+
+/** 回复的结果：reply.end（或 reply.failed）与模型调用表都按它 */
+function replyOutcome({
+  failed,
+  isAborted,
+  isCancelled,
+  message,
+}: {
+  failed: boolean;
+  isAborted: boolean;
+  isCancelled?: boolean;
+  message: Message;
+}): ModelCall['outcome'] {
+  if (failed) return 'failed';
+  if (isAborted) return 'aborted';
+  if (isCancelled) return 'cancelled';
+  return hasText(message) ? 'completed' : 'empty';
 }
 
 function hasText(message: Message): boolean {

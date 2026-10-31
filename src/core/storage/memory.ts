@@ -1,13 +1,13 @@
 import { generateId } from 'ai';
 import type { Message } from '../message.js';
 import { DuplicateMessageError } from './errors.js';
-import type { ConversationStore, Segment, Storage } from './types.js';
+import type { ConversationStore, ModelCall, Segment, Storage } from './types.js';
 
 // createdAt 对应 SQLite 的 created_at 列：消息自带的时间，没带时取写入时间
 type Row = { seq: number; message: Message; createdAt: string; addedAt: number };
 
 /** 一个会话在内存里的全部数据 */
-type Data = { title?: string; rows: Row[]; segments: Segment[] };
+type Data = { title?: string; rows: Row[]; segments: Segment[]; calls: ModelCall[] };
 
 // 写入顺序计数，「最后一条消息最新」时间相同时用它分先后（对应 SQLite 的 rowid）
 let addCounter = 0;
@@ -25,11 +25,12 @@ function newData(title: string | undefined): Data {
     title,
     rows: [],
     segments: [{ startSeq: 1, startReason: 'first', conversationTitle: title }],
+    calls: [],
   };
 }
 
 function memoryStore(data: Data): ConversationStore {
-  const { rows, segments } = data;
+  const { rows, segments, calls } = data;
   let nextSeq = 1;
   const entries: ConversationStore['entries'] = async ({ from, before } = {}) => {
     const ordered = rows
@@ -95,6 +96,12 @@ function memoryStore(data: Data): ConversationStore {
       if (segments.some((segment) => segment.startSeq === startSeq)) return false;
       segments.push({ startSeq, startReason, conversationTitle: data.title, priorSummary });
       return true;
+    },
+    async recordCall(call) {
+      calls.push(structuredClone(call));
+    },
+    async calls() {
+      return structuredClone(calls);
     },
   };
 }

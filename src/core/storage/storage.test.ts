@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -9,6 +9,7 @@ import {
   openSqliteStorage,
   type Message,
   type MessageMetadata,
+  type ModelCall,
   type Storage,
 } from '../index.js';
 
@@ -28,6 +29,47 @@ function message(
 }
 
 const alice = { id: 'u-alice', name: 'Alice' };
+
+/** 一次模型调用，默认是正常完成的回复 */
+function call(fields: Partial<ModelCall> = {}): ModelCall {
+  return {
+    purpose: 'reply',
+    replyId: 'r1',
+    model: 'test-model',
+    startedAt: '2026-10-30T06:02:00.000Z',
+    durationMs: 1500,
+    firstOutputMs: 400,
+    attempts: 1,
+    outcome: 'completed',
+    finishReason: 'stop',
+    inputTokens: 120,
+    cacheReadTokens: 100,
+    outputTokens: 30,
+    reasoningTokens: 12,
+    ...fields,
+  };
+}
+
+// ADR-0005 里 model_calls 的列，按顺序
+const modelCallColumns = [
+  'id',
+  'conversation_id',
+  'purpose',
+  'summary_reason',
+  'reply_id',
+  'model',
+  'started_at',
+  'duration_ms',
+  'first_output_ms',
+  'attempts',
+  'outcome',
+  'finish_reason',
+  'input_tokens',
+  'cache_read_tokens',
+  'output_tokens',
+  'reasoning_tokens',
+  'error',
+];
 
 async function tempDir(): Promise<string> {
   return mkdtemp(join(tmpdir(), 'luolicore-db-'));
@@ -348,6 +390,46 @@ describe.each([
     expect(await storage.findLatestConversation('telegram')).toBe(telegram.id);
     expect(await storage.findLatestConversation('none')).toBeUndefined();
   });
+
+  it('记下的模型调用按写入先后读回，没有的项为空；只读到本会话的', async () => {
+    const storage = await open();
+    const a = await storage.openConversation(await storage.createConversation({ platform: 'cli' }));
+    const b = await storage.openConversation(await storage.createConversation({ platform: 'cli' }));
+    const reply = call();
+    const failed = call({
+      replyId: 'r2',
+      firstOutputMs: undefined,
+      attempts: 3,
+      outcome: 'failed',
+      finishReason: undefined,
+      inputTokens: undefined,
+      cacheReadTokens: undefined,
+      outputTokens: undefined,
+      reasoningTokens: undefined,
+      error: 'APICallError 429',
+    });
+    const summary = call({ purpose: 'summary', summaryReason: 'idle', replyId: undefined });
+
+    await a.recordCall(reply);
+    await b.recordCall(summary);
+    await a.recordCall(failed);
+
+    expect(await a.calls()).toEqual([reply, failed]);
+    expect(await b.calls()).toEqual([summary]);
+  });
+
+  it('读回的模型调用是副本：改动不影响存储', async () => {
+    const storage = await open();
+    const store = await storage.openConversation(
+      await storage.createConversation({ platform: 'cli' }),
+    );
+    const recorded = call();
+    await store.recordCall(recorded);
+    recorded.attempts = 9;
+    (await store.calls())[0]!.outcome = 'failed';
+
+    expect(await store.calls()).toEqual([call()]);
+  });
 });
 
 describe('SQLite 存储', () => {
@@ -370,7 +452,7 @@ describe('SQLite 存储', () => {
     expect(await store.reserve()).toBe(2);
   });
 
-  it('新库：WAL 模式、user_version 为 1、三张表与索引按 ADR-0005 建好', async () => {
+  it('新库：WAL 模式、user_version 为 2、四张表与索引按 ADR-0005 建好', async () => {
     const dir = await tempDir();
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
     const path = join(dir, 'luoli.db');
@@ -379,7 +461,7 @@ describe('SQLite 存储', () => {
     const db = new DatabaseSync(path);
     try {
       expect(db.prepare('PRAGMA journal_mode').get()?.journal_mode).toBe('wal');
-      expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(1);
+      expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(2);
       const objects = db
         .prepare(
           "SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
@@ -390,9 +472,12 @@ describe('SQLite 存储', () => {
         'index:conversations_platform',
         'index:messages_order',
         'index:messages_platform',
+        'index:model_calls_conversation',
+        'index:model_calls_time',
         'index:segments_order',
         'table:conversations',
         'table:messages',
+        'table:model_calls',
         'table:segments',
       ]);
       const columns = (table: string) =>
@@ -427,6 +512,14 @@ describe('SQLite 存储', () => {
         'prior_summary',
         'created_at',
       ]);
+      expect(columns('model_calls')).toEqual(modelCallColumns);
+      const indexed = (index: string) =>
+        db
+          .prepare(`PRAGMA index_info(${index})`)
+          .all()
+          .map((row) => row.name);
+      expect(indexed('model_calls_time')).toEqual(['started_at']);
+      expect(indexed('model_calls_conversation')).toEqual(['conversation_id', 'started_at']);
     } finally {
       db.close();
     }
@@ -498,12 +591,12 @@ describe('SQLite 存储', () => {
     }
   });
 
-  it('user_version 大于 1 时打开报错', async () => {
+  it('user_version 大于 2 时打开报错', async () => {
     const dir = await tempDir();
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
     const path = join(dir, 'luoli.db');
     const db = new DatabaseSync(path);
-    db.exec('PRAGMA user_version = 2');
+    db.exec('PRAGMA user_version = 3');
     db.close();
 
     expect(() => openSqliteStorage(path)).toThrow('数据库版本比程序新');
@@ -592,4 +685,318 @@ describe('SQLite 存储', () => {
     expect(new Set(seqs).size).toBe(seqs.length);
     expect(await storeA.list()).toHaveLength(40);
   });
+
+  it('模型调用的行：会话 id 是所在的会话，各列照写入的值；没报的为 NULL，报了 0 的为 0', async () => {
+    const dir = await tempDir();
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    const path = join(dir, 'luoli.db');
+    const storage = openSqliteStorage(path);
+    cleanups.push(async () => storage.close());
+    const id = await storage.createConversation({ platform: 'cli' });
+    const store = await storage.openConversation(id);
+    await store.recordCall(call({ cacheReadTokens: undefined, reasoningTokens: undefined }));
+    await store.recordCall(
+      call({
+        purpose: 'summary',
+        summaryReason: 'compress',
+        replyId: undefined,
+        cacheReadTokens: 0,
+        reasoningTokens: 0,
+      }),
+    );
+
+    const db = new DatabaseSync(path, { readOnly: true });
+    try {
+      const rows = db
+        .prepare('SELECT * FROM model_calls ORDER BY id')
+        .all()
+        .map((row) => ({ ...row }));
+      const common = {
+        conversation_id: id,
+        model: 'test-model',
+        started_at: '2026-10-30T06:02:00.000Z',
+        duration_ms: 1500,
+        first_output_ms: 400,
+        attempts: 1,
+        outcome: 'completed',
+        finish_reason: 'stop',
+        input_tokens: 120,
+        output_tokens: 30,
+        error: null,
+      };
+      expect(rows).toEqual([
+        {
+          id: 1,
+          purpose: 'reply',
+          summary_reason: null,
+          reply_id: 'r1',
+          ...common,
+          cache_read_tokens: null,
+          reasoning_tokens: null,
+        },
+        {
+          id: 2,
+          purpose: 'summary',
+          summary_reason: 'compress',
+          reply_id: null,
+          ...common,
+          cache_read_tokens: 0,
+          reasoning_tokens: 0,
+        },
+      ]);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('版本 1 的库：打开时升到版本 2，原有的表与数据不变，能写模型调用；重新打开后能读回', async () => {
+    const dir = await tempDir();
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    const path = join(dir, 'luoli.db');
+    // 第 7 步的程序建的库：三张表，user_version 为 1
+    const old = new DatabaseSync(path);
+    old.exec('PRAGMA journal_mode = WAL');
+    old.exec(version1Schema);
+    old.exec('PRAGMA user_version = 1');
+    old.exec(`
+      INSERT INTO conversations (id, platform, platform_conversation_id, title, next_seq, created_at)
+        VALUES ('c1', 'telegram', '-100', '读书会', 3, '2026-10-29T00:00:00.000Z');
+      INSERT INTO segments
+          (id, conversation_id, start_seq, start_reason, conversation_title, prior_summary, created_at)
+        VALUES ('s1', 'c1', 1, 'first', '读书会', NULL, '2026-10-29T00:00:00.000Z'),
+               ('s2', 'c1', 2, 'idle', '读书会', '昨天的摘要', '2026-10-30T00:00:00.000Z');
+    `);
+    const saved = [
+      message('user', '早', { author: alice, platformMessageId: '7' }),
+      message('assistant', '早上好'),
+    ];
+    for (const [index, item] of saved.entries()) {
+      old
+        .prepare(
+          `INSERT INTO messages
+             (id, conversation_id, seq, role, author_id, platform_message_id, created_at, ui_message)
+           VALUES (?, 'c1', ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          item.id,
+          index + 1,
+          item.role,
+          item.metadata?.author?.id ?? null,
+          item.metadata?.platformMessageId ?? null,
+          item.metadata!.createdAt,
+          JSON.stringify(item),
+        );
+    }
+    const dump = (db: DatabaseSync) =>
+      ['conversations', 'messages', 'segments'].map((table) =>
+        db
+          .prepare(`SELECT * FROM ${table} ORDER BY rowid`)
+          .all()
+          .map((row) => ({ ...row })),
+      );
+    const before = dump(old);
+    old.close();
+
+    const storage = openSqliteStorage(path);
+    const store = await storage.openConversation('c1');
+    expect(await store.list()).toEqual(saved);
+    expect(await store.currentSegment()).toMatchObject({ startSeq: 2, priorSummary: '昨天的摘要' });
+    await store.recordCall(call());
+    storage.close();
+
+    const db = new DatabaseSync(path, { readOnly: true });
+    try {
+      expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(2);
+      expect(dump(db)).toEqual(before);
+      expect(
+        db
+          .prepare("SELECT name FROM sqlite_master WHERE tbl_name = 'model_calls' ORDER BY name")
+          .all()
+          .map((row) => row.name),
+      ).toEqual(['model_calls', 'model_calls_conversation', 'model_calls_time']);
+    } finally {
+      db.close();
+    }
+
+    const reopened = openSqliteStorage(path);
+    cleanups.push(async () => reopened.close());
+    expect(await (await reopened.openConversation('c1')).calls()).toEqual([call()]);
+  });
+
+  it('docs/queries/usage.sql 的查询在库上能跑通：按本地时区分天，缓存命中率只算报了缓存数的调用', async () => {
+    const dir = await tempDir();
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    const path = join(dir, 'luoli.db');
+    const storage = openSqliteStorage(path);
+    const group = await storage.openConversation(
+      await storage.createConversation({
+        platform: 'telegram',
+        platformConversationId: '-100',
+        title: '读书会',
+      }),
+    );
+    const cli = await storage.openConversation(
+      await storage.createConversation({ platform: 'cli' }),
+    );
+    const noTokens = {
+      inputTokens: undefined,
+      cacheReadTokens: undefined,
+      outputTokens: undefined,
+      reasoningTokens: undefined,
+    };
+    // 上海时间：10-30 10:00、10-31 04:00、10-31 05:00、10-31 09:00
+    await group.recordCall(
+      call({
+        model: 'm1',
+        startedAt: '2026-10-30T02:00:00.000Z',
+        inputTokens: 100,
+        cacheReadTokens: 80,
+        outputTokens: 10,
+        reasoningTokens: undefined,
+      }),
+    );
+    await group.recordCall(
+      call({
+        model: 'm1',
+        startedAt: '2026-10-30T20:00:00.000Z',
+        inputTokens: 200,
+        cacheReadTokens: undefined,
+        outputTokens: 20,
+        reasoningTokens: 5,
+      }),
+    );
+    await group.recordCall(
+      call({
+        model: 'm1',
+        startedAt: '2026-10-30T21:00:00.000Z',
+        attempts: 3,
+        outcome: 'failed',
+        finishReason: undefined,
+        ...noTokens,
+        error: 'APICallError 429',
+      }),
+    );
+    await cli.recordCall(
+      call({
+        purpose: 'summary',
+        summaryReason: 'idle',
+        replyId: undefined,
+        model: 'm2',
+        startedAt: '2026-10-31T01:00:00.000Z',
+        inputTokens: 400,
+        cacheReadTokens: 100,
+        outputTokens: 30,
+        reasoningTokens: 0,
+      }),
+    );
+    storage.close();
+
+    // sqlite3 的点命令（表头、对齐）不是 SQL，去掉后按分号分成各条查询
+    const source = await readFile(
+      new URL('../../../docs/queries/usage.sql', import.meta.url),
+      'utf8',
+    );
+    const queries = source
+      .split('\n')
+      .filter((line) => !line.startsWith('.'))
+      .join('\n')
+      .split(';')
+      .filter((query) =>
+        query.split('\n').some((line) => line.trim() !== '' && !line.trim().startsWith('--')),
+      );
+    const originalTz = process.env.TZ;
+    process.env.TZ = 'Asia/Shanghai';
+    const db = new DatabaseSync(path, { readOnly: true });
+    try {
+      const [byDay, byConversation, byModel, failures] = queries.map((query) =>
+        db
+          .prepare(query)
+          .all()
+          .map((row) => ({ ...row })),
+      );
+      expect(queries).toHaveLength(4);
+      expect(byDay).toEqual([
+        {
+          日期: '2026-10-30',
+          调用: 1,
+          失败: 0,
+          输入: 100,
+          缓存命中: 80,
+          命中率: 80,
+          输出: 10,
+          推理: null,
+        },
+        {
+          日期: '2026-10-31',
+          调用: 3,
+          失败: 1,
+          输入: 600,
+          缓存命中: 100,
+          命中率: 25,
+          输出: 50,
+          推理: 5,
+        },
+      ]);
+      expect(byConversation).toEqual([
+        { 平台: 'cli', 标题: null, 调用: 1, 输入: 400, 命中率: 25, 输出: 30 },
+        { 平台: 'telegram', 标题: '读书会', 调用: 3, 输入: 300, 命中率: 80, 输出: 30 },
+      ]);
+      expect(byModel).toEqual([
+        { 模型: 'm2', 调用: 1, 输入: 400, 命中率: 25, 输出: 30 },
+        { 模型: 'm1', 调用: 3, 输入: 300, 命中率: 80, 输出: 30 },
+      ]);
+      expect(failures).toEqual([
+        {
+          时间: '2026-10-31 05:00:00',
+          标题: '读书会',
+          用途: 'reply',
+          错误: 'APICallError 429',
+          请求: 3,
+        },
+      ]);
+    } finally {
+      db.close();
+      if (originalTz === undefined) delete process.env.TZ;
+      else process.env.TZ = originalTz;
+    }
+  });
 });
+
+// 第 7 步（表结构版本 1）的建表语句，用来造一个旧库
+const version1Schema = `
+CREATE TABLE conversations (
+  id                       TEXT PRIMARY KEY,
+  platform                 TEXT NOT NULL,
+  platform_conversation_id TEXT,
+  title                    TEXT,
+  next_seq                 INTEGER NOT NULL DEFAULT 1,
+  created_at               TEXT NOT NULL
+);
+CREATE UNIQUE INDEX conversations_platform
+  ON conversations(platform, platform_conversation_id) WHERE platform_conversation_id IS NOT NULL;
+
+CREATE TABLE messages (
+  id                  TEXT PRIMARY KEY,
+  conversation_id     TEXT NOT NULL REFERENCES conversations(id),
+  seq                 INTEGER NOT NULL,
+  role                TEXT NOT NULL,
+  author_id           TEXT,
+  platform_message_id TEXT,
+  created_at          TEXT NOT NULL,
+  ui_message          TEXT NOT NULL
+);
+CREATE UNIQUE INDEX messages_order    ON messages(conversation_id, seq);
+CREATE UNIQUE INDEX messages_platform ON messages(conversation_id, platform_message_id)
+  WHERE platform_message_id IS NOT NULL;
+
+CREATE TABLE segments (
+  id                 TEXT PRIMARY KEY,
+  conversation_id    TEXT NOT NULL REFERENCES conversations(id),
+  start_seq          INTEGER NOT NULL,
+  start_reason       TEXT NOT NULL,
+  conversation_title TEXT,
+  prior_summary      TEXT,
+  created_at         TEXT NOT NULL
+);
+CREATE UNIQUE INDEX segments_order ON segments(conversation_id, start_seq);
+`;

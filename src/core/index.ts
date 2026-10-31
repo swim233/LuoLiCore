@@ -31,6 +31,7 @@ export { openSqliteStorage } from './storage/sqlite.js';
 export type {
   ConversationInfo,
   ConversationStore,
+  ModelCall,
   NewConversation,
   Segment,
   SeqRange,

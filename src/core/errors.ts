@@ -17,6 +17,21 @@ export function summarizeError(error: unknown): object {
   };
 }
 
+/**
+ * 模型调用表的 error 列：错误类型，有状态码时加一个空格和状态码，如 `APICallError 429`、
+ * `TimeoutError`。RetryError 取最后一次的错误；SDK 错误名的 `AI_` 前缀去掉。不含错误信息
+ */
+export function errorKind(error: unknown): string {
+  if (RetryError.isInstance(error)) return errorKind(error.lastError);
+  if (!(error instanceof Error)) return typeof error;
+  const type = error.name.replace(/^AI_/, '');
+  const statusCode =
+    APICallError.isInstance(error) || StreamProviderError.isInstance(error)
+      ? error.statusCode
+      : undefined;
+  return statusCode === undefined ? type : `${type} ${statusCode}`;
+}
+
 // 服务端可能在错误响应里回显请求（含对话正文），所以 JSON 响应体只留错误字段
 function summarizeResponseBody(body: string | undefined): unknown {
   if (body === undefined) return undefined;
