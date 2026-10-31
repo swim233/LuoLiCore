@@ -14,6 +14,12 @@ export type MessageMetadata = {
   createdAt: string;
   /** 平台里的消息 id（如 Telegram 的 message_id），编辑消息时靠它找到这条 */
   platformMessageId?: string;
+  /** 在平台上被编辑过：最后一次编辑的时间（ISO） */
+  editedAt?: string;
+  /**
+   * 模型服务拒收过的图片（`luoli-file:` 地址）。文件与 parts 不变，发给模型时换成「[图片无法读取]」
+   */
+  unreadableFiles?: string[];
   /** 助手回复被中止，正文是中止前已输出的部分 */
   aborted?: true;
   /** 正常完成的助手回复才有；只算最终成功的那次请求 */

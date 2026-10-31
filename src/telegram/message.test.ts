@@ -1,12 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { TelegramChat, TelegramUser } from '@chat-adapter/telegram';
-import {
-  conversationTitle,
-  displayName,
-  isAllowed,
-  toAppendInput,
-  type TelegramRaw,
-} from './message.js';
+import { conversationTitle, displayName, isAllowed, type TelegramRaw } from './message.js';
 import { sdkLogger } from './adapter.js';
 import { splitMessage, telegramMessageLimit } from './split.js';
 import { isTriggered } from './trigger.js';
@@ -34,21 +28,6 @@ describe('消息转换', () => {
       conversationTitle({ id: 11, type: 'private', first_name: 'Alice', last_name: 'Liddell' }),
     ).toBe('与 Alice Liddell 的私聊');
     expect(conversationTitle({ id: 22, type: 'private', first_name: 'Bob' })).toBe('与 Bob 的私聊');
-  });
-
-  it('文字消息：发言人 id 与显示名、Telegram 的发送时间、消息 id', () => {
-    expect(toAppendInput(message({ text: '你好', date: 1793404920, message_id: 42 }))).toEqual({
-      author: { id: '11', name: 'Alice Liddell' },
-      text: '你好',
-      createdAt: '2026-10-31T00:02:00.000Z',
-      platformMessageId: '42',
-    });
-  });
-
-  it('不是文字消息（图片、服务消息）或没有发送者时不记录', () => {
-    expect(toAppendInput(message({ caption: '图片说明' }))).toBeUndefined();
-    expect(toAppendInput(message({ new_chat_title: '新名' }))).toBeUndefined();
-    expect(toAppendInput(message({ text: '匿名', from: undefined }))).toBeUndefined();
   });
 });
 
@@ -119,6 +98,26 @@ describe('触发', () => {
     expect(triggered({ text: 'NORI 在吗' })).toBe(true);
     expect(triggered({ text: '找小诺聊天' })).toBe(true);
     expect(triggered({ text: '今天天气不错' })).toBe(false);
+  });
+
+  it('图片等的说明文字与文字一样：唤醒词、@bot、text_mention 都触发；私聊与回复 bot 的非文字消息也触发', () => {
+    const image = { photo: [{ file_id: 'p', width: 1, height: 1 }] };
+    expect(triggered({ ...image, caption: 'nori 看图' })).toBe(true);
+    expect(triggered({ ...image, caption: '看图 @nori_bot' })).toBe(true);
+    expect(
+      triggered({
+        ...image,
+        caption: '机器人看图',
+        caption_entities: [{ type: 'text_mention', offset: 0, length: 3, user: botUser }],
+      }),
+    ).toBe(true);
+    expect(triggered({ ...image, caption: '看图' })).toBe(false);
+    expect(triggered({ ...image })).toBe(false);
+    expect(triggered({ ...image, chat: { id: 11, type: 'private' } })).toBe(true);
+    const botMessage = { message_id: 3, date: 0, chat: group, from: botUser, text: '我是 bot' };
+    expect(triggered({ voice: { file_id: 'v', duration: 1 }, reply_to_message: botMessage })).toBe(
+      true,
+    );
   });
 
   it('bot 身份还没拿到时，只有私聊与唤醒词能触发', () => {

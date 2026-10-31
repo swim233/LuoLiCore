@@ -1,11 +1,13 @@
 import {
   DuplicateMessageError,
+  editMessage,
   type Conversation,
   type Logger,
   type MessageChunk,
   type Storage,
 } from '../core/index.js';
-import { conversationTitle, isAllowed, toAppendInput, type TelegramRaw } from './message.js';
+import { editedText, toAppendInput } from './content.js';
+import { conversationTitle, isAllowed, type TelegramRaw } from './message.js';
 import { splitMessage } from './split.js';
 import { isTriggered, type BotIdentity } from './trigger.js';
 
@@ -20,23 +22,48 @@ export type Sender = {
   send(target: ChatTarget, text: string, replyTo?: number): Promise<void>;
 };
 
+/** 等待合并：触发后这么久内没有新消息才开始生成 */
+export const waitMs = 2000;
+/** 等待合并：从第一条触发算起最多等这么久 */
+export const maxWaitMs = 8000;
+
+/**
+ * 一轮回复：从被触发进入等待，到最后一次回复发出。一轮之内「正在输入」一直在发
+ */
+type Round = {
+  state: 'waiting' | 'replying';
+  /** 最后一条触发消息，回复引用它 */
+  trigger: TelegramRaw;
+  /** 回复中又被触发：这次发出后再回复一次 */
+  again: boolean;
+  /** 第一条触发的时间，等待的上限从这里算 */
+  startedAt: number;
+  timer?: NodeJS.Timeout;
+  stopTyping: () => void;
+  /** 这一轮结束时兑现 */
+  done: Promise<void>;
+  finish: () => void;
+};
+
 type Session = {
   conversationId: string;
   conversation: Conversation;
   /** 会话标题，用来判断群名是否变了 */
   title?: string;
-  /** 每个会话两种状态：空闲、回复中 */
-  replying?: Promise<void>;
+  /** 每个会话三种状态：空闲（没有 round）、等待、回复中 */
+  round?: Round;
 };
 
 /**
- * Telegram 前端的会话与回复逻辑，不依赖 Chat SDK：收到一条原始消息时
- * 判断白名单、记录、判断触发，空闲时在后台回复。
+ * Telegram 前端的会话与回复逻辑，不依赖 Chat SDK：收到一条原始消息（或一组相册）时
+ * 判断白名单、记录（编辑则改历史）、判断触发；被触发后等待合并，再在后台回复。
  */
 export function createTelegramBot({
   storage,
   open,
   sender,
+  download,
+  albumOf = (raw) => [raw],
   logger,
   bot,
   chats,
@@ -45,6 +72,7 @@ export function createTelegramBot({
   errorText,
   staleMs,
   typingIntervalMs = 4000,
+  wait = { idleMs: waitMs, maxMs: maxWaitMs },
 }: {
   storage: Storage;
   /**
@@ -53,6 +81,10 @@ export function createTelegramBot({
    */
   open: (conversationId: string, options: { checkIdleOnCreate: boolean }) => Promise<Conversation>;
   sender: Sender;
+  /** 按 Telegram 的 file_id 下载文件 */
+  download: (fileId: string) => Promise<Uint8Array>;
+  /** 相册（带 media_group_id）的全部条目，按原顺序；适配器攒齐后只派发其中一条 */
+  albumOf?: (raw: TelegramRaw) => TelegramRaw[];
   logger: Logger;
   /** 读 bot 当前的身份（启动后由 getMe 补上） */
   bot: () => BotIdentity;
@@ -62,14 +94,16 @@ export function createTelegramBot({
   errorText: string;
   /** 触发消息的发送时间早于这么久之前（毫秒）时只记录、不回复 */
   staleMs: number;
-  /** 生成期间每隔多久重发「正在输入」 */
+  /** 等待与生成期间每隔多久重发「正在输入」 */
   typingIntervalMs?: number;
+  /** 等待合并的两个时长；测试里调小 */
+  wait?: { idleMs: number; maxMs: number };
 }) {
   // 按 chat id；正在打开的也在这里，同一个聊天不会建两个会话
   const sessions = new Map<string, Promise<Session>>();
   // 关闭时中止还没完成的回复
   const stopping = new AbortController();
-  // 一开始关闭就置位：之后不再打开会话（补做恰好在退出时进行，打开的会话会没人关闭）
+  // 一开始关闭就置位：之后不再打开会话、不再开始新的一轮
   let closing = false;
 
   /** 已经打开好的会话（打开失败的不算） */
@@ -119,29 +153,104 @@ export function createTelegramBot({
     session.title = title;
   }
 
-  async function reply(session: Session, raw: TelegramRaw): Promise<void> {
-    const target: ChatTarget = {
-      chatId: raw.chat.id,
-      messageThreadId: raw.is_topic_message ? raw.message_thread_id : undefined,
-    };
-    const fields = { conversationId: session.conversationId };
-    const stopTyping = keepTyping(target, fields);
-    let result: { ok: boolean; text: string };
-    try {
-      result = await readReply(session.conversation.reply({ abortSignal: stopping.signal }));
-    } finally {
-      stopTyping();
+  /** 编辑：改历史里那条消息的正文，不触发回复，也不影响等待计时 */
+  async function edit(raw: TelegramRaw): Promise<void> {
+    const chatId = String(raw.chat.id);
+    const messageId = String(raw.message_id);
+    const info = await storage.findConversation('telegram', chatId);
+    const edited =
+      info &&
+      (await editMessage(await storage.openConversation(info.id), {
+        platformMessageId: messageId,
+        text: editedText(raw),
+        editedAt: new Date((raw.edit_date ?? raw.date) * 1000).toISOString(),
+      }));
+    if (!info || !edited) {
+      // 没记录过（如加入白名单之前发的）
+      logger.info({ chatId, messageId }, 'telegram.edit_missing');
+      return;
     }
+    logger.info({ conversationId: info.id, messageId }, 'telegram.edited');
+  }
+
+  /**
+   * 记录一条新消息之后：等待中则重置计时；被触发时，空闲进入等待，回复中记下「还有人在等」。
+   * trigger 为这条消息（未过期且触发时），否则为 undefined
+   */
+  function onMessage(session: Session, trigger: TelegramRaw | undefined): void {
+    const { round } = session;
+    if (round?.state === 'waiting') {
+      if (trigger) round.trigger = trigger;
+      schedule(session, round);
+      return;
+    }
+    if (!trigger || closing) return;
+    if (round?.state === 'replying') {
+      round.again = true;
+      round.trigger = trigger;
+      return;
+    }
+    let finish!: () => void;
+    const done = new Promise<void>((resolve) => (finish = resolve));
+    session.round = {
+      state: 'waiting',
+      trigger,
+      again: false,
+      startedAt: Date.now(),
+      stopTyping: keepTyping(targetOf(trigger), { conversationId: session.conversationId }),
+      done,
+      finish,
+    };
+    schedule(session, session.round);
+  }
+
+  /** 等待计时：重置为 wait.idleMs，但不超过从第一条触发算起的 wait.maxMs */
+  function schedule(session: Session, round: Round): void {
+    clearTimeout(round.timer);
+    const delay = Math.min(wait.idleMs, round.startedAt + wait.maxMs - Date.now());
+    round.timer = setTimeout(() => void replyRound(session, round), Math.max(0, delay));
+  }
+
+  /** 等待结束：回复；期间又被触发就接着再回一次，引用期间最后一条触发 */
+  async function replyRound(session: Session, round: Round): Promise<void> {
+    round.state = 'replying';
+    try {
+      do {
+        round.again = false;
+        await reply(session, round.trigger);
+        // 开始关闭后不再开始新的生成：宽限期只等进行中的那次
+      } while (round.again && !closing);
+    } catch (error) {
+      logger.error(
+        { conversationId: session.conversationId, error: describe(error) },
+        'telegram.reply_failed',
+      );
+    } finally {
+      endRound(session, round);
+    }
+  }
+
+  function endRound(session: Session, round: Round): void {
+    clearTimeout(round.timer);
+    round.stopTyping();
+    if (session.round === round) session.round = undefined;
+    round.finish();
+  }
+
+  async function reply(session: Session, trigger: TelegramRaw): Promise<void> {
+    const target = targetOf(trigger);
+    const fields = { conversationId: session.conversationId };
+    const result = await readReply(session.conversation.reply({ abortSignal: stopping.signal }));
     if (stopping.signal.aborted) return;
     if (!result.ok) {
       // 错误详情由核心记进日志；群里只发固定提示
-      await send(target, errorText, raw.message_id, fields);
+      await send(target, errorText, trigger.message_id, fields);
       return;
     }
     const chunks = splitMessage(result.text).filter((chunk) => chunk.trim());
     for (const [index, chunk] of chunks.entries()) {
       // 第一段引用触发消息，后面的接着发
-      const sent = await send(target, chunk, index === 0 ? raw.message_id : undefined, fields);
+      const sent = await send(target, chunk, index === 0 ? trigger.message_id : undefined, fields);
       if (!sent) break;
     }
   }
@@ -151,7 +260,7 @@ export function createTelegramBot({
     let failed = false;
     const typing = () => {
       sender.typing(target).catch((error: unknown) => {
-        // 网络不通时每次都会失败，一次回复只记一条
+        // 网络不通时每次都会失败，一轮只记一条
         if (failed) return;
         failed = true;
         logger.warn(
@@ -186,11 +295,14 @@ export function createTelegramBot({
   }
 
   return {
-    /** 处理一条原始消息。等到记录完成才返回，回复在后台进行；从不抛错 */
+    /**
+     * 处理一条原始消息（相册由适配器攒齐后只派发一条，各条由 albumOf 取回）。
+     * 等到记录完成才返回，等待与回复在后台进行；从不抛错
+     */
     async handle(raw: TelegramRaw): Promise<void> {
       try {
-        // 编辑过的消息（第 7 步处理）
-        if (raw.edit_date !== undefined) return;
+        // 相册先取回各条（白名单外的也要取走）；编辑只改那一条
+        const raws = raw.media_group_id && raw.edit_date === undefined ? albumOf(raw) : [raw];
         if (!isAllowed(raw, { chats, users })) {
           logger.info(
             {
@@ -202,48 +314,53 @@ export function createTelegramBot({
           );
           return;
         }
+        if (raw.edit_date !== undefined) {
+          await edit(raw);
+          return;
+        }
         const session = await sessionFor(raw);
         await syncTitle(session, raw);
-        const input = toAppendInput(raw);
+        const fields = { conversationId: session.conversationId };
+        const input = await toAppendInput(raws, {
+          download,
+          // 只记文件种类与大小：文件地址含 token
+          onDownloadFailed: (image) =>
+            logger.warn(
+              { ...fields, kind: image.kind, size: image.size },
+              'telegram.download_failed',
+            ),
+          onImageRejected: (image, size) =>
+            logger.warn({ ...fields, kind: image.kind, size }, 'telegram.image_rejected'),
+        });
         if (!input) return;
         try {
           await session.conversation.append(input);
         } catch (error) {
           // Telegram 重发了已经处理过的更新（如进程在确认前退出）：已记录过，也已按当时的状态回复过
           if (!(error instanceof DuplicateMessageError)) throw error;
-          logger.info(
-            { conversationId: session.conversationId, messageId: input.platformMessageId },
-            'telegram.duplicate',
-          );
+          logger.info({ ...fields, messageId: input.platformMessageId }, 'telegram.duplicate');
           return;
         }
-        if (!isTriggered(raw, { bot: bot(), wakeWords })) return;
+        // 相册任一条触发即整条触发，回复引用相册的第一条
+        const [first] = raws as [TelegramRaw, ...TelegramRaw[]];
+        let trigger = raws.some((r) => isTriggered(r, { bot: bot(), wakeWords }))
+          ? first
+          : undefined;
         // 太久以前的触发（如离线期间积压的）：只记录，不回复，也不发「正在输入」
-        const ageMs = Date.now() - raw.date * 1000;
-        if (ageMs > staleMs) {
+        const ageMs = Date.now() - first.date * 1000;
+        if (trigger && ageMs > staleMs) {
           logger.info(
             {
-              conversationId: session.conversationId,
+              ...fields,
               chatId: String(raw.chat.id),
               messageId: input.platformMessageId,
               ageMinutes: Math.floor(ageMs / 60_000),
             },
             'telegram.stale',
           );
-          return;
+          trigger = undefined;
         }
-        // 回复中再被触发：只记录，不回复
-        if (session.replying || stopping.signal.aborted) return;
-        session.replying = reply(session, raw)
-          .catch((error: unknown) => {
-            logger.error(
-              { conversationId: session.conversationId, error: describe(error) },
-              'telegram.reply_failed',
-            );
-          })
-          .finally(() => {
-            session.replying = undefined;
-          });
+        onMessage(session, trigger);
       } catch (error) {
         logger.error(
           { chatId: String(raw.chat.id), error: describe(error) },
@@ -254,7 +371,7 @@ export function createTelegramBot({
 
     /**
      * 打开白名单内还没打开的已知会话，核心按现在的时间补做漏掉的空闲切段。
-     * 在离线积压处理完之后调用：积压里出现过的会话已经按消息时间判断过，不再打开
+     * 在离线积压（含相册）处理完之后调用：积压里的会话已经打开，按消息之间的间隔判断
      */
     async openKnown(): Promise<number> {
       if (closing) return 0;
@@ -280,31 +397,42 @@ export function createTelegramBot({
       return opened;
     },
 
-    /** 正在进行的回复都结束（测试用） */
+    /** 等待中与回复中的都结束（测试用） */
     async idle(): Promise<void> {
-      for (const session of await Promise.all(sessions.values())) await session.replying;
+      for (const session of await openedSessions()) await session.round?.done;
     },
 
     /**
-     * 关闭：不再开始新的回复；进行中的回复最多等 graceMs，仍未完成的中止（不发出）；
-     * 再关闭各会话（中止进行中的摘要）
+     * 关闭：不再开始新的一轮；等待中的直接放弃；回复中的最多等 graceMs，仍未完成的中止
+     * （不发出）；再关闭各会话（中止进行中的摘要）
      */
     async close(graceMs = 10_000): Promise<void> {
       closing = true;
       const opened = await openedSessions();
-      const replies = Promise.all(opened.map((session) => session.replying));
+      for (const session of opened) {
+        if (session.round?.state === 'waiting') endRound(session, session.round);
+      }
+      const rounds = Promise.all(opened.map((session) => session.round?.done));
       let timer: NodeJS.Timeout | undefined;
       await Promise.race([
-        replies,
+        rounds,
         new Promise((resolve) => {
           timer = setTimeout(resolve, graceMs);
         }),
       ]);
       clearTimeout(timer);
       stopping.abort();
-      await replies;
+      await rounds;
       await Promise.all(opened.map((session) => session.conversation.close()));
     },
+  };
+}
+
+/** 回复发到触发消息所在的聊天；论坛群里回到它所在的话题 */
+function targetOf(trigger: TelegramRaw): ChatTarget {
+  return {
+    chatId: trigger.chat.id,
+    messageThreadId: trigger.is_topic_message ? trigger.message_thread_id : undefined,
   };
 }
 

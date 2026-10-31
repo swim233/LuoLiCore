@@ -19,6 +19,7 @@ export async function startTelegram({
   logger,
   pollTimeoutSeconds = 30,
   typingIntervalMs,
+  wait,
   state = createMemoryState(),
 }: {
   config: Pick<
@@ -42,6 +43,8 @@ export async function startTelegram({
   /** getUpdates 的长轮询时长（秒）；测试里调小 */
   pollTimeoutSeconds?: number;
   typingIntervalMs?: number;
+  /** 等待合并的两个时长；测试里调小 */
+  wait?: { idleMs: number; maxMs: number };
   /** Chat SDK 的平台状态（去重、轮询进度等），默认放内存；测试里可以换成记录调用的 */
   state?: StateAdapter;
 }) {
@@ -90,6 +93,8 @@ export async function startTelegram({
         else await adapter.reply(threadId(target), String(replyTo), text);
       },
     },
+    download: (fileId) => adapter.download(fileId),
+    albumOf: (raw) => adapter.takeAlbum(raw),
     logger,
     bot: () => ({ id: adapter.botUserId, username: adapter.userName }),
     chats: config.chats,
@@ -98,6 +103,7 @@ export async function startTelegram({
     errorText: config.errorText,
     staleMs: config.staleMs,
     typingIntervalMs,
+    wait,
   });
 
   // 不订阅任何线程：私聊进 onDirectMessage，@bot 进 onNewMention，其余进不带模式的
@@ -117,8 +123,8 @@ export async function startTelegram({
     },
     'telegram.start',
   );
-  // 离线积压处理完之后，再打开其余的已知会话补做空闲切段。积压里的会话在收到消息时已经打开，
-  // 按消息之间的间隔判断；先补做的话会按「距今」在停机前最后一条与积压之间多切一段
+  // 离线积压（含相册）处理完之后，再打开其余的已知会话补做空闲切段。积压里的会话在收到消息时
+  // 已经打开，按消息之间的间隔判断；先补做的话会按「距今」在停机前最后一条与积压之间多切一段
   const caughtUp = adapter.caughtUp
     .then(() => bot.openKnown())
     .then((opened) => logger.info({ opened }, 'telegram.caught_up'))

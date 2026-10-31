@@ -5,20 +5,29 @@ import {
 } from '@chat-adapter/telegram';
 import type { Logger as ChatLogger, WebhookOptions } from 'chat';
 import type { Logger } from '../core/index.js';
+import type { TelegramRaw } from './message.js';
 
 /**
- * 按我们的需要调整的 Telegram 适配器（依赖 4.43.0 的内部实现，升级 SDK 前要重新核对这五处）：
+ * 按我们的需要调整的 Telegram 适配器（依赖 4.43.0 的内部实现，升级 SDK 前要重新核对这几处）：
  * - 不让 Chat SDK 再存一份线程历史：会话正本归核心（ADR-0003）。
  * - 不缓存收发过的消息：适配器默认把每条消息都留在内存里且每次重新排序，常驻进程会越积越多；
  *   我们不用 fetchMessages 等依赖缓存的接口。
  * - 私聊来消息时不自动发「正在输入」：白名单外的人也会看到；输入状态由前端在回复时自己发。
  * - 同一个聊天的更新按到达顺序逐条处理：一批更新默认并行派发，后到的消息可能先记录。
- * - 启动时先立即取回离线积压（不长轮询），积压处理完时兑现 caughtUp。
+ * - 启动时先立即取回离线积压（不长轮询），积压处理完时兑现 caughtUp。积压里的相册要等
+ *   适配器攒齐、派发完才算处理完。
+ * - 相册：适配器攒齐后只派发一条（原始数据只有最后一条），各条原始消息另记一份，由 takeAlbum 取回。
+ *   相册某一条的编辑不再攒，立即按单条派发。
+ * - 下载文件：公开基类的 downloadFile。
  */
 export class LuoliTelegramAdapter extends TelegramAdapter {
   private readonly chains = new Map<string, Promise<void>>();
+  // 相册的各条原始消息，按「chat id:media_group_id」
+  private readonly albums = new Map<string, { raws: TelegramRaw[]; at: number }>();
   // 离线积压是否已全部取回：一次拉取返回的更新少于 limit 条就说明取完了
   private backlogDrained = false;
+  // 积压里还没处理完的相册消息（update_id）：轮询要攒够一会儿才处理它们，晚于积压取完
+  private readonly backlogAlbums = new Set<number>();
   private markCaughtUp!: () => void;
   /** 启动后离线积压的更新都处理完时兑现；没有积压时，第一次拉取返回空之后兑现 */
   readonly caughtUp = new Promise<void>((resolve) => (this.markCaughtUp = resolve));
@@ -38,18 +47,41 @@ export class LuoliTelegramAdapter extends TelegramAdapter {
       return super.telegramFetch<TResult>(method, payload, request);
     }
     if (this.backlogDrained) {
-      // 轮询要等上一批都处理完才拉下一批：积压的最后一批这时已经处理完
-      this.markCaughtUp();
+      // 轮询要等上一批都处理完才拉下一批：积压的最后一批这时已经处理完；相册要等它也派发完
+      if (this.backlogAlbums.size === 0) this.markCaughtUp();
       return super.telegramFetch<TResult>(method, payload, request);
     }
     // 还在取积压：不等新消息，立即返回
-    const updates = await super.telegramFetch<unknown[]>(
+    const updates = await super.telegramFetch<TelegramUpdate[]>(
       method,
       { ...payload, timeout: 0 },
       request,
     );
+    for (const update of updates) {
+      // 相册里某一条的编辑不打开会话，不用等
+      if (update.message?.media_group_id) this.backlogAlbums.add(update.update_id);
+    }
     if (updates.length < Number(payload?.limit ?? 100)) this.backlogDrained = true;
     return updates as TResult;
+  }
+
+  /** 按 file_id 下载文件（getFile 再取文件；地址含 token，出错时的消息里只有 file_id） */
+  async download(fileId: string): Promise<Uint8Array> {
+    return new Uint8Array(await this.downloadFile(fileId));
+  }
+
+  /**
+   * 取走相册里已派发的各条原始消息，按消息 id 排序。raw 是适配器派发的那一条（攒齐的最后一条）；
+   * id 比它大的是下一批，留着。没记过时只返回 raw
+   */
+  takeAlbum(raw: TelegramRaw): TelegramRaw[] {
+    const key = albumKey(raw);
+    const album = this.albums.get(key);
+    const taken = album?.raws.filter((item) => item.message_id <= raw.message_id) ?? [];
+    const rest = album?.raws.filter((item) => item.message_id > raw.message_id) ?? [];
+    if (rest.length > 0) album!.raws = rest;
+    else this.albums.delete(key);
+    return taken.length > 0 ? taken.sort((a, b) => a.message_id - b.message_id) : [raw];
   }
 
   protected override cacheMessage(): void {}
@@ -60,9 +92,18 @@ export class LuoliTelegramAdapter extends TelegramAdapter {
     update: TelegramUpdate,
     options?: WebhookOptions,
   ): Promise<void>[] | void {
+    if (update.message?.media_group_id) {
+      return this.processAlbumUpdate(update, update.message, options);
+    }
+    if (update.edited_message?.media_group_id) {
+      // 编辑只改那一条，不用攒：去掉 media_group_id，按单条处理
+      update = {
+        ...update,
+        edited_message: { ...update.edited_message, media_group_id: undefined },
+      };
+    }
     const message = update.message ?? update.edited_message;
-    // 相册由适配器自己攒齐再派发，依赖并行处理，不排队（第 7 步处理相册）
-    if (!message || message.media_group_id) return super.processUpdate(update, options);
+    if (!message) return super.processUpdate(update, options);
     const chatId = String(message.chat.id);
     const run = (this.chains.get(chatId) ?? Promise.resolve()).then(async () => {
       await Promise.all(super.processUpdate(update, options) ?? []);
@@ -74,6 +115,36 @@ export class LuoliTelegramAdapter extends TelegramAdapter {
     });
     return [run];
   }
+
+  /** 相册的一条：记下原始消息，交给适配器攒齐（依赖并行处理，不排队） */
+  private processAlbumUpdate(
+    update: TelegramUpdate,
+    message: TelegramRaw,
+    options?: WebhookOptions,
+  ): Promise<void>[] | void {
+    const now = Date.now();
+    // 没派发出去的（如处理失败）不一直留着
+    for (const [key, album] of this.albums) {
+      if (now - album.at > albumTtlMs) this.albums.delete(key);
+    }
+    const key = albumKey(message);
+    const album = this.albums.get(key) ?? { raws: [], at: now };
+    album.raws = [...album.raws.filter((raw) => raw.message_id !== message.message_id), message];
+    album.at = now;
+    this.albums.set(key, album);
+
+    const tasks = super.processUpdate(update, options) ?? [];
+    if (this.backlogAlbums.has(update.update_id)) {
+      void Promise.allSettled(tasks).then(() => this.backlogAlbums.delete(update.update_id));
+    }
+    return tasks;
+  }
+}
+
+const albumTtlMs = 5 * 60_000;
+
+function albumKey(raw: TelegramRaw): string {
+  return `${raw.chat.id}:${raw.media_group_id}`;
 }
 
 // SDK 的日志里可能带消息正文的字段，转写时去掉

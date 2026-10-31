@@ -3,19 +3,26 @@ import type { TelegramRaw } from './message.js';
 /** bot 自己的身份；启动时由 getMe 得到，拿到之前为空 */
 export type BotIdentity = { id?: string; username?: string };
 
-/** 是否触发回复：私聊；@bot；回复 bot 的消息；文字里含唤醒词（不分大小写） */
+/**
+ * 是否触发回复：私聊；@bot；回复 bot 的消息；文字里含唤醒词（不分大小写）。
+ * 图片等消息的说明文字与文字一样看待
+ */
 export function isTriggered(
   raw: TelegramRaw,
   { bot, wakeWords }: { bot: BotIdentity; wakeWords: string[] },
 ): boolean {
   if (raw.chat.type === 'private') return true;
-  return mentionsBot(raw, bot) || repliesToBot(raw, bot) || hasWakeWord(raw.text, wakeWords);
+  return (
+    mentionsBot(raw, bot) ||
+    repliesToBot(raw, bot) ||
+    hasWakeWord(raw.text ?? raw.caption, wakeWords)
+  );
 }
 
 function mentionsBot(raw: TelegramRaw, bot: BotIdentity): boolean {
-  const text = raw.text ?? '';
+  const text = raw.text ?? raw.caption ?? '';
   // 没有用户名的人被提到时是 text_mention，带着用户对象
-  const byEntity = (raw.entities ?? []).some(
+  const byEntity = (raw.entities ?? raw.caption_entities ?? []).some(
     (entity) => entity.type === 'text_mention' && bot.id && String(entity.user?.id) === bot.id,
   );
   if (byEntity) return true;

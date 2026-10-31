@@ -1,5 +1,4 @@
 import type { TelegramChat, TelegramMessage, TelegramUser } from '@chat-adapter/telegram';
-import type { AppendInput } from '../core/index.js';
 
 /** Telegram 原始消息。改群名的服务消息带 new_chat_title（适配器的类型里没有这一项） */
 export type TelegramRaw = TelegramMessage & { new_chat_title?: string };
@@ -25,18 +24,4 @@ export function isAllowed(
     return chats.has(String(raw.chat.id));
   }
   return false;
-}
-
-/**
- * 一条文字消息记成核心的输入：发言人、Telegram 的发送时间、消息 id。
- * 不是文字消息（图片、贴纸、服务消息等）时返回 undefined，本步不记录
- */
-export function toAppendInput(raw: TelegramRaw): AppendInput | undefined {
-  if (raw.text === undefined || raw.from === undefined) return undefined;
-  return {
-    author: { id: String(raw.from.id), name: displayName(raw.from) },
-    text: raw.text,
-    createdAt: new Date(raw.date * 1000).toISOString(),
-    platformMessageId: String(raw.message_id),
-  };
 }

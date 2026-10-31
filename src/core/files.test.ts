@@ -17,7 +17,7 @@ import {
   type Message,
   type MessageChunk,
 } from './index.js';
-import { inlineFiles } from './files.js';
+import { inlineFiles, isSupportedImage } from './files.js';
 
 type StreamResult = Awaited<ReturnType<MockLanguageModelV4['doStream']>>;
 type StreamPart = StreamResult['stream'] extends ReadableStream<infer P> ? P : never;
@@ -48,9 +48,20 @@ afterEach(async () => {
 
 const open = '<message from="Alice" uid="u-alice" time="2026-10-30 14:02">';
 
-// 两张「图片」：内容随意，模型不解码
-const red = { data: Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]), mediaType: 'image/png' };
-const blue = { data: Uint8Array.from([0xff, 0xd8, 0xff, 4, 5, 6]), mediaType: 'image/jpeg' };
+// 各类型的「图片」：文件头正确，后面的内容随意，模型不解码
+const ascii = (text: string) => [...text].map((char) => char.charCodeAt(0));
+const headers = {
+  'image/jpeg': [0xff, 0xd8, 0xff],
+  'image/png': [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
+  'image/webp': [...ascii('RIFF'), 1, 2, 3, 4, ...ascii('WEBP')],
+  'image/gif': ascii('GIF89a'),
+};
+const image = (mediaType: keyof typeof headers, ...rest: number[]) => ({
+  data: Uint8Array.from([...headers[mediaType], ...rest]),
+  mediaType,
+});
+const red = image('image/png', 1, 2, 3);
+const blue = image('image/jpeg', 4, 5, 6);
 const base64 = (data: Uint8Array) => Buffer.from(data).toString('base64');
 
 async function tempDir(): Promise<string> {
@@ -149,18 +160,48 @@ describe.each([
 
   it('扩展名按媒体类型；不支持的类型报错', async () => {
     const store = await openStore();
-    const data = Uint8Array.from([1]);
 
     const urls = await Promise.all(
-      ['image/jpeg', 'image/png', 'image/webp', 'image/gif'].map((mediaType) =>
-        store.save({ data, mediaType }),
+      (['image/jpeg', 'image/png', 'image/webp', 'image/gif'] as const).map((mediaType) =>
+        store.save(image(mediaType, 1)),
       ),
     );
 
     expect(urls.map((url) => url.split('.').at(-1))).toEqual(['jpg', 'png', 'webp', 'gif']);
-    await expect(store.save({ data, mediaType: 'application/pdf' })).rejects.toThrow(
-      'application/pdf',
-    );
+    await expect(
+      store.save({ data: Uint8Array.from([1]), mediaType: 'application/pdf' }),
+    ).rejects.toThrow('application/pdf');
+  });
+
+  it('文件头与媒体类型不符（伪造或损坏的图片）：报错，不保存', async () => {
+    const store = await openStore();
+    const text = new TextEncoder().encode('这其实是一段文字，扩展名改成了 .png');
+    const fakes = [
+      // 改了扩展名的文字文件
+      { data: text, mediaType: 'image/png' },
+      // 别的类型的图片
+      { data: blue.data, mediaType: 'image/png' },
+      { data: red.data, mediaType: 'image/jpeg' },
+      // 只有一半文件头
+      { data: Uint8Array.from(headers['image/png'].slice(0, 4)), mediaType: 'image/png' },
+      { data: Uint8Array.from([0xff, 0xd8]), mediaType: 'image/jpeg' },
+      // RIFF 但不是 WEBP（如 WAV）
+      {
+        data: Uint8Array.from([...ascii('RIFF'), 1, 2, 3, 4, ...ascii('WAVE')]),
+        mediaType: 'image/webp',
+      },
+      { data: Uint8Array.from(ascii('GIF88a')), mediaType: 'image/gif' },
+      { data: new Uint8Array(), mediaType: 'image/jpeg' },
+    ];
+
+    for (const fake of fakes) {
+      await expect(store.save(fake), fake.mediaType).rejects.toThrow('文件内容与媒体类型不符');
+      expect(isSupportedImage(fake)).toBe(false);
+    }
+    // GIF 两个版本都算
+    const gif87 = { data: Uint8Array.from(ascii('GIF87a')), mediaType: 'image/gif' };
+    expect(isSupportedImage(gif87)).toBe(true);
+    expect(await store.save(gif87)).toMatch(/\.gif$/);
   });
 
   it.each(['constructor', 'toString', '__proto__', 'hasOwnProperty', 'valueOf'])(
@@ -189,9 +230,13 @@ describe('目录里的文件', () => {
     const store = openFileStore(dir);
     await expect(readdir(dir)).rejects.toThrow();
 
+    // 被拒绝的不建目录、不留文件
+    await expect(store.save({ data: red.data, mediaType: 'image/jpeg' })).rejects.toThrow();
+    await expect(readdir(dir)).rejects.toThrow();
     const url = await store.save(red);
     await store.save(red);
     await store.save(blue);
+    await expect(store.save({ data: blue.data, mediaType: 'image/gif' })).rejects.toThrow();
 
     const names = (await readdir(dir)).sort();
     expect(names).toHaveLength(2);
@@ -264,15 +309,17 @@ describe('带图片的消息', () => {
     expect(message.parts.map((part) => part.type)).toEqual(['file']);
   });
 
-  it('不支持的媒体类型：append 报错，消息不写入', async () => {
+  it.each([
+    ['不支持的媒体类型', { data: red.data, mediaType: 'application/pdf' }],
+    [
+      '文件头与媒体类型不符',
+      { data: new TextEncoder().encode('伪造的 png'), mediaType: 'image/png' },
+    ],
+  ])('%s：append 报错，消息不写入', async (_name, file) => {
     const { conversation, store } = setup({ model: replying() });
 
     await expect(
-      conversation.append({
-        author: alice,
-        text: '文件',
-        files: [{ data: red.data, mediaType: 'application/pdf' }],
-      }),
+      conversation.append({ author: alice, text: '文件', files: [file] }),
     ).rejects.toThrow();
     expect(await store.list()).toEqual([]);
   });

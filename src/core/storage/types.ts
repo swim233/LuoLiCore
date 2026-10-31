@@ -23,6 +23,12 @@ export type ConversationStore = {
   last(): Promise<{ seq: number; createdAt: string } | undefined>;
   /** 写入一条消息：不给 seq 时取下一个序号，给了 seq 时用之前预留的序号 */
   add(message: Message, seq?: number): Promise<void>;
+  /** 按 id 读一条消息；没有时为 undefined */
+  get(id: string): Promise<Message | undefined>;
+  /** 按平台消息 id 找消息；没有时为 undefined */
+  findByPlatformMessageId(platformMessageId: string): Promise<Message | undefined>;
+  /** 按 id 换掉已写入的消息（如编辑后的正文）。序号与查询用的副本列不变；没有这条时抛错 */
+  update(message: Message): Promise<void>;
   /** 预留一个序号。之后写入的消息排在它后面；预留了没写入时序号空着 */
   reserve(): Promise<number>;
   /**

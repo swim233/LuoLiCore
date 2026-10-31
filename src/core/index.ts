@@ -4,7 +4,15 @@ export {
   type Conversation,
   type ReplyOptions,
 } from './conversation.js';
-export { createMemoryFileStore, openFileStore, type FileStore, type NewFile } from './files.js';
+export { editMessage } from './edit.js';
+export {
+  createMemoryFileStore,
+  isSupportedImage,
+  isSupportedMediaType,
+  openFileStore,
+  type FileStore,
+  type NewFile,
+} from './files.js';
 export { readInstructions } from './instructions.js';
 export { silentLogger, type Logger } from './logger.js';
 export type {

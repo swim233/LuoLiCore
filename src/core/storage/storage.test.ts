@@ -71,6 +71,70 @@ describe.each([
     expect(await store.list()).toEqual(messages);
   });
 
+  it('按平台消息 id 找消息；update 按 id 换掉整条，序号不变、副本列不变；只在本会话里找', async () => {
+    const storage = await open();
+    const store = await storage.openConversation(
+      await storage.createConversation({ platform: 'telegram' }),
+    );
+    const other = await storage.openConversation(
+      await storage.createConversation({ platform: 'telegram' }),
+    );
+    const first = message('user', '一', { author: alice, platformMessageId: '100' });
+    const second = message('user', '二', { platformMessageId: '101' });
+    await store.add(first);
+    await store.add(second);
+    await other.add(message('user', '别的会话', { platformMessageId: '102' }));
+
+    expect(await store.findByPlatformMessageId('100')).toEqual(first);
+    expect(await store.findByPlatformMessageId('102')).toBeUndefined();
+    expect(await store.findByPlatformMessageId('999')).toBeUndefined();
+
+    const edited: Message = {
+      ...first,
+      metadata: { ...first.metadata!, editedAt: '2026-10-30T12:01:00.000Z' },
+      parts: [{ type: 'text', text: '一（改）' }],
+    };
+    await store.update(edited);
+
+    expect(await store.list()).toEqual([edited, second]);
+    expect(await store.findByPlatformMessageId('100')).toEqual(edited);
+    expect((await store.entries()).map((entry) => entry.seq)).toEqual([1, 2]);
+    // 改返回的对象不影响存储里的
+    const found = await store.findByPlatformMessageId('101');
+    found!.parts = [];
+    expect((await store.list())[1]).toEqual(second);
+  });
+
+  it('按 id 读一条消息：只在本会话里找，返回副本', async () => {
+    const storage = await open();
+    const store = await storage.openConversation(
+      await storage.createConversation({ platform: 'cli' }),
+    );
+    const other = await storage.openConversation(
+      await storage.createConversation({ platform: 'cli' }),
+    );
+    const saved = message('user', '你好', { author: alice });
+    await store.add(saved);
+    const elsewhere = message('user', '别的会话');
+    await other.add(elsewhere);
+
+    expect(await store.get(saved.id)).toEqual(saved);
+    expect(await store.get(elsewhere.id)).toBeUndefined();
+    expect(await store.get('missing')).toBeUndefined();
+    const found = await store.get(saved.id);
+    found!.parts = [];
+    expect(await store.get(saved.id)).toEqual(saved);
+  });
+
+  it('update 一条不存在的消息时报错', async () => {
+    const storage = await open();
+    const store = await storage.openConversation(
+      await storage.createConversation({ platform: 'cli' }),
+    );
+
+    await expect(store.update(message('user', '不存在'))).rejects.toThrow();
+  });
+
   it('没有 id 的发言人原样往返', async () => {
     const storage = await open();
     const store = await storage.openConversation(

@@ -17,7 +17,7 @@ export const fakeBot: TelegramUser = {
 
 /**
  * 只实现前端用到的方法：getMe、deleteWebhook、getUpdates（长轮询）、
- * sendMessage、sendChatAction。其他方法返回 404
+ * sendMessage、sendChatAction、getFile，以及文件下载（/file/bot<token>/<路径>）。其他返回 404
  */
 export async function startFakeTelegram() {
   const updates: TelegramUpdate[] = [];
@@ -29,12 +29,19 @@ export async function startFakeTelegram() {
   let nextMessageId = 5000;
   // sendMessage 依次按这里的状态码失败；空了就成功
   const sendFailures: number[] = [];
+  // 可下载的文件：file_id → 内容；在 failingFiles 里的下载时返回 500
+  const files = new Map<string, Uint8Array>();
+  const failingFiles = new Set<string>();
+  // 下载请求的文件路径（地址里的 token 不记）
+  const downloads: string[] = [];
 
   const server = createServer((request, response) => {
     void handle(request, response);
   });
 
   async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const file = /^\/file\/bot[^/]+\/files\/(.+)$/.exec(request.url ?? '');
+    if (file) return download(decodeURIComponent(file[1]!), response);
     const match = /^\/bot([^/]+)\/(\w+)$/.exec(request.url ?? '');
     let raw = '';
     for await (const chunk of request) raw += chunk;
@@ -52,6 +59,17 @@ export async function startFakeTelegram() {
       case 'getUpdates':
         polls.push(body);
         return ok(response, await pending(body, request));
+      case 'getFile': {
+        const fileId = String(body.file_id);
+        if (!files.has(fileId)) {
+          return reply(response, 400, {
+            ok: false,
+            error_code: 400,
+            description: 'Bad Request: invalid file_id',
+          });
+        }
+        return ok(response, { file_id: fileId, file_path: `files/${fileId}` });
+      }
       case 'sendMessage': {
         const failure = sendFailures.shift();
         if (failure) {
@@ -78,9 +96,23 @@ export async function startFakeTelegram() {
     }
   }
 
+  function download(fileId: string, response: ServerResponse): void {
+    downloads.push(`files/${fileId}`);
+    const data = files.get(fileId);
+    if (!data || failingFiles.has(fileId)) {
+      response.writeHead(data ? 500 : 404);
+      response.end();
+      return;
+    }
+    response.writeHead(200, { 'content-type': 'application/octet-stream' });
+    response.end(data);
+  }
+
   /** getUpdates：有新更新立即返回，否则等到有更新或超时，客户端断开时放弃 */
   async function pending(body: Record<string, unknown>, request: IncomingMessage) {
     const offset = Number(body.offset ?? 0);
+    // 与真的 Bot API 一样：带上 offset 就算确认了它之前的更新，之后不再返回（重启后也不会）
+    updates.splice(0, updates.filter((update) => update.update_id < offset).length);
     const available = () => updates.filter((update) => update.update_id >= offset);
     if (available().length === 0) {
       await new Promise<void>((resolve) => {
@@ -104,6 +136,7 @@ export async function startFakeTelegram() {
     url: `http://127.0.0.1:${port}`,
     calls,
     polls,
+    downloads,
     /** 推送一批更新（同一次 getUpdates 里返回），返回各自的 message_id */
     push(...messages: Array<Omit<TelegramRaw, 'message_id' | 'date'> & { date?: number }>) {
       const ids = messages.map((message) => {
@@ -116,6 +149,20 @@ export async function startFakeTelegram() {
       });
       for (const wake of [...waiting]) wake();
       return ids;
+    },
+    /** 推送一条编辑（edited_message），带 edit_date */
+    pushEdit(message: Omit<TelegramRaw, 'date'> & { date?: number }) {
+      const now = Math.floor(Date.now() / 1000);
+      updates.push({
+        update_id: nextUpdateId++,
+        edited_message: { date: now, edit_date: now, ...message },
+      });
+      for (const wake of [...waiting]) wake();
+    },
+    /** 登记一个可下载的文件；failing 时 getFile 成功、下载返回 500 */
+    addFile(fileId: string, data: Uint8Array, { failing = false } = {}) {
+      files.set(fileId, data);
+      if (failing) failingFiles.add(fileId);
     },
     /** 之后的 sendMessage 依次以这些状态码失败 */
     failSends(...statuses: number[]) {
@@ -135,6 +182,23 @@ export async function startFakeTelegram() {
       await new Promise((resolve) => server.close(resolve));
     },
   };
+}
+
+const headers: Record<string, number[]> = {
+  'image/jpeg': [0xff, 0xd8, 0xff, 0xe0],
+  'image/png': [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
+  'image/webp': [0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x45, 0x42, 0x50],
+  'image/gif': [0x47, 0x49, 0x46, 0x38, 0x39, 0x61],
+};
+
+/** 测试用的「图片」：该类型的文件头，后面跟着「|tag」，用 tagOf 取回 tag */
+export function imageBytes(mediaType: string, tag: string): Uint8Array {
+  return Uint8Array.from([...headers[mediaType]!, ...new TextEncoder().encode(`|${tag}`)]);
+}
+
+/** imageBytes 里的 tag */
+export function tagOf(data: Uint8Array): string {
+  return new TextDecoder().decode(data).split('|').at(-1)!;
 }
 
 function ok(response: ServerResponse, result: unknown): void {

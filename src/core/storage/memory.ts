@@ -69,6 +69,19 @@ function memoryStore(data: Data): ConversationStore {
     async reserve() {
       return nextSeq++;
     },
+    async get(id) {
+      const row = rows.find((r) => r.message.id === id);
+      return row && structuredClone(row.message);
+    },
+    async findByPlatformMessageId(platformMessageId) {
+      const row = rows.find((r) => r.message.metadata?.platformMessageId === platformMessageId);
+      return row && structuredClone(row.message);
+    },
+    async update(message) {
+      const row = rows.find((r) => r.message.id === message.id);
+      if (!row) throw new Error(`消息 ${message.id} 不存在`);
+      row.message = structuredClone(message);
+    },
     async currentSegment() {
       const current = segments.reduce<Segment | undefined>(
         (a, b) => (a && a.startSeq > b.startSeq ? a : b),

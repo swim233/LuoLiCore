@@ -12,6 +12,12 @@ import {
 import { trackAttempts } from './attempts.js';
 import { summarizeError } from './errors.js';
 import { createMemoryFileStore, inlineFiles, type FileStore, type NewFile } from './files.js';
+import {
+  isRejectedRequest,
+  suspectImages,
+  withFallback,
+  withUnreadable,
+} from './image-fallback.js';
 import { silentLogger, type Logger } from './logger.js';
 import { toUsage } from './model.js';
 import type { Author, Message, MessageChunk } from './message.js';
@@ -32,6 +38,8 @@ export type Conversation = {
    * 一个 `reset-step`，失败那次已输出的内容不会写入历史。
    * 流读完时回复已写入历史；出错、被取消或没有任何文字时不写入。
    * 后台正在空闲切段时，等它结束再读当前段；压缩进行中不等，照常用当前段。
+   * 请求还没有输出就被拒收（400、413、422），且上一条助手消息之后有新图片时，把这些图片换成
+   * 「[图片无法读取]」重试一次，流里只出现重试的输出；重试没有失败时把标记写进那些消息。
    * 正常完成且输入超过压缩阈值时，在后台压缩。
    * 上一个回复的流还没结束时调用会立即抛错。
    */
@@ -239,6 +247,8 @@ export function createConversation({
       let writeNotice: (chunk: MessageChunk) => void = () => {};
       const call = modelCall({ abortSignal, logFields, notify: (chunk) => writeNotice(chunk) });
       const { tracker } = call;
+      // 拒收图片后的重试换掉的图片，按消息 id；没有重试过时为 undefined
+      let fallback: Map<string, string[]> | undefined;
 
       // onEnd 的 outcome 判断不了是否出错：外层流没声明 outcome 时正常结束也是 unknown，
       // 内层在错误事件之后收到 finish 又会记成 completed。所以自己记下出过的错。
@@ -275,6 +285,27 @@ export function createConversation({
         });
       };
 
+      /**
+       * 拒收图片后的重试没有失败：把换掉的图片标记写进那些消息，之后的请求都用占位。
+       * 以存储里的最新版本为基础（生成期间可能被编辑过），只加标记。出错只记日志
+       */
+      async function markUnreadable(): Promise<{ markedUnreadable?: number }> {
+        if (!fallback) return {};
+        try {
+          let marked = 0;
+          for (const [id, urls] of fallback) {
+            const latest = await store.get(id);
+            if (!latest) continue;
+            await store.update(withUnreadable(latest, urls));
+            marked++;
+          }
+          return { markedUnreadable: marked };
+        } catch (error) {
+          logger.error({ ...logFields, error: summarizeError(error) }, 'reply.mark_failed');
+          return {};
+        }
+      }
+
       // 外层 createUIMessageStream 让 reply() 能同步返回流（历史要异步读），
       // 并把任何抛出的错误（读历史失败、连接中途断开）都转成 error chunk
       return createUIMessageStream<Message>({
@@ -283,15 +314,37 @@ export function createConversation({
           writeNotice = (chunk) => writer.write(chunk);
           // 正在空闲切段时先等它结束，读到的才是切段之后的当前段（压缩不等，见 settled）
           await segmenter.settled();
-          segment = await store.currentSegment();
+          const current = await store.currentSegment();
+          segment = current;
           seq = await store.reserve();
           // 只看当前段里预留号之前的消息：模型看到的正是排在回复之前的那些
-          const history = await store.list({ from: segment.startSeq, before: seq });
-          const result = call.stream(segment, await toModelMessages(history, logFields));
+          const history = await store.list({ from: current.startSeq, before: seq });
+          const first = call.stream(current, await toModelMessages(history, logFields)).stream;
+          // 还没有输出就被拒收：可能是新来的图片模型读不了，换成占位重试一次（同一段、同一个序号）
+          const stream = withFallback(first, async (error) => {
+            if (!isRejectedRequest(error)) return undefined;
+            const suspects = await suspectImages(
+              history,
+              async (url) => (await fileStore.read(url)) !== undefined,
+            );
+            if (suspects.size === 0) return undefined;
+            const urls = [...suspects.values()].flat();
+            logger.warn(
+              { ...logFields, replaced: urls.length, urls, error: summarizeError(error) },
+              'reply.image_fallback',
+            );
+            fallback = suspects;
+            tracker.restart();
+            const marked = history.map((message) => {
+              const replaced = suspects.get(message.id);
+              return replaced ? withUnreadable(message, replaced) : message;
+            });
+            return call.stream(current, await toModelMessages(marked, logFields)).stream;
+          });
           let createdAt: string | undefined;
           writer.merge(
             toUIMessageStream<ToolSet, Message>({
-              stream: result.stream,
+              stream,
               // start 段附上时间，finish 段附上用量（合并进回复的 metadata）。
               // 中止没有 finish 段；失败的回复不写入历史。finish 段也要带 createdAt（类型要求），值不变
               messageMetadata: ({ part }) => {
@@ -319,6 +372,7 @@ export function createConversation({
               ...logFields,
               durationMs: Date.now() - startedAt,
               ...tracker.stats,
+              ...(fallback ? { imageFallback: true } : {}),
             };
             if (failure) {
               logger.error({ ...summary, error: summarizeError(failure.error) }, 'reply.failed');
@@ -345,7 +399,8 @@ export function createConversation({
                   seq,
                 );
               }
-              logger.info({ ...summary, outcome: 'aborted', saved }, 'reply.end');
+              const marked = saved ? await markUnreadable() : {};
+              logger.info({ ...summary, outcome: 'aborted', saved, ...marked }, 'reply.end');
             } else if (isCancelled) {
               logger.info({ ...summary, outcome: 'cancelled' }, 'reply.end');
             } else if (!hasText(responseMessage)) {
@@ -357,6 +412,7 @@ export function createConversation({
                   saved: false,
                   finishReason,
                   usage: responseMessage.metadata?.usage,
+                  ...(await markUnreadable()),
                 },
                 'reply.end',
               );
@@ -368,6 +424,7 @@ export function createConversation({
                   outcome: 'completed',
                   finishReason,
                   usage: responseMessage.metadata?.usage,
+                  ...(await markUnreadable()),
                 },
                 'reply.end',
               );

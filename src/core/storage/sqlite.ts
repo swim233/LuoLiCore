@@ -73,6 +73,15 @@ export function openSqliteStorage(path: string): Storage {
     `SELECT seq, ui_message FROM messages
      WHERE conversation_id = ? AND seq >= ? AND seq < ? ORDER BY seq`,
   );
+  const messageById = db.prepare(
+    'SELECT ui_message FROM messages WHERE conversation_id = ? AND id = ?',
+  );
+  const messageByPlatformId = db.prepare(
+    'SELECT ui_message FROM messages WHERE conversation_id = ? AND platform_message_id = ?',
+  );
+  const updateMessage = db.prepare(
+    'UPDATE messages SET ui_message = ? WHERE conversation_id = ? AND id = ?',
+  );
   const lastMessage = db.prepare(
     'SELECT seq, created_at FROM messages WHERE conversation_id = ? ORDER BY seq DESC LIMIT 1',
   );
@@ -139,6 +148,18 @@ export function openSqliteStorage(path: string): Storage {
     },
     async entries(range) {
       return entries(conversationId, range);
+    },
+    async get(id) {
+      const row = messageById.get(conversationId, id);
+      return row && (JSON.parse(String(row.ui_message)) as Message);
+    },
+    async findByPlatformMessageId(platformMessageId) {
+      const row = messageByPlatformId.get(conversationId, platformMessageId);
+      return row && (JSON.parse(String(row.ui_message)) as Message);
+    },
+    async update(message) {
+      const { changes } = updateMessage.run(JSON.stringify(message), conversationId, message.id);
+      if (Number(changes) === 0) throw new Error(`消息 ${message.id} 不存在`);
     },
     async last() {
       const row = lastMessage.get(conversationId);

@@ -10,6 +10,7 @@ import {
   type Storage,
 } from '../core/index.js';
 import { createTelegramBot, type ChatTarget } from './bot.js';
+import { imageBytes } from './fake-api.js';
 import type { TelegramRaw } from './message.js';
 import { telegramMessageLimit } from './split.js';
 
@@ -74,11 +75,21 @@ function setup({
   storage = createMemoryStorage(),
   typingIntervalMs = 4000,
   typingFails = false,
+  wait = { idleMs: 5, maxMs: 50 },
+  albums = [],
+  failingDownloads = [],
+  files = {},
 }: {
   model: MockLanguageModelV4;
   storage?: Storage;
   typingIntervalMs?: number;
   typingFails?: boolean;
+  wait?: { idleMs: number; maxMs: number };
+  /** 相册：派发其中一条时，albumOf 取回整组 */
+  albums?: TelegramRaw[][];
+  failingDownloads?: string[];
+  /** 下载到的内容；没给的为 jpeg 图片 */
+  files?: Record<string, Uint8Array>;
 }) {
   const sent: Sent[] = [];
   const typing: ChatTarget[] = [];
@@ -110,6 +121,12 @@ function setup({
         sent.push({ target, text, replyTo });
       },
     },
+    download: async (fileId) => {
+      if (failingDownloads.includes(fileId)) throw new Error('下载失败');
+      return files[fileId] ?? imageBytes('image/jpeg', fileId);
+    },
+    albumOf: (raw) =>
+      albums.find((album) => album.some((item) => item.message_id === raw.message_id)) ?? [raw],
     logger,
     bot: () => ({ id: '999', username: 'nori_bot' }),
     chats: new Set([String(group.id)]),
@@ -118,6 +135,7 @@ function setup({
     errorText: '（出错了）',
     staleMs: 60 * 60_000,
     typingIntervalMs,
+    wait,
   });
   cleanups.push(() => bot.close(0));
   return { bot, sent, typing, entries, storage, conversations };
@@ -130,17 +148,42 @@ afterEach(async () => {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-describe('Telegram 前端的会话逻辑', () => {
-  it('编辑过的消息不记录、不触发（第 7 步处理）', async () => {
-    const { bot, sent, storage } = setup({ model: replying('好') });
+/** 一次模型请求里所有消息的文字（含名字标签） */
+function promptText(model: MockLanguageModelV4, index: number): string {
+  return JSON.stringify(model.doStreamCalls[index]?.prompt ?? []);
+}
 
-    await bot.handle(message({ text: 'nori 改过的', edit_date: 1 }));
-    await bot.idle();
+/** 历史里的消息：正文与附件数 */
+async function historyOf(storage: Storage) {
+  const info = await storage.findConversation('telegram', String(group.id));
+  if (!info) return [];
+  const messages = await (await storage.openConversation(info.id)).list();
+  return messages.map((message) => ({
+    role: message.role,
+    text: message.parts.map((part) => (part.type === 'text' ? part.text : '')).join(''),
+    files: message.parts.filter((part) => part.type === 'file').length,
+    editedAt: message.metadata?.editedAt,
+  }));
+}
 
-    expect(sent).toEqual([]);
-    expect(await storage.listConversations('telegram')).toEqual([]);
+/** 带闸门的模型：第 index 次调用等 release 才输出 */
+function gated(...texts: string[]) {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  const calledAt: number[] = [];
+  let call = 0;
+  const model = new MockLanguageModelV4({
+    doStream: async (options) => {
+      calledAt.push(Date.now());
+      const index = call++;
+      if (index === 0) await gate;
+      return replying(texts[index] ?? '').doStream(options);
+    },
   });
+  return { model, release: () => release(), calledAt };
+}
 
+describe('Telegram 前端的会话逻辑', () => {
   it('Telegram 重发已处理过的消息：识别为重复，记 info 级 telegram.duplicate，不再回复', async () => {
     const { bot, sent, entries } = setup({ model: replying('好', '不该出现') });
     const trigger = message({ text: 'nori 在吗' });
@@ -365,5 +408,336 @@ describe('Telegram 前端的会话逻辑', () => {
       expect(entries.map((e) => e.msg)).toContain('summary.aborted');
       expect(entries.map((e) => e.msg)).not.toContain('summary.failed');
     });
+  });
+});
+
+describe('等待合并与合并回复', () => {
+  it('触发后先等待并立即显示「正在输入」；等待期间每来一条消息就重置计时，到时回复一次，请求里有期间的消息', async () => {
+    const model = replying('好');
+    const { bot, sent, typing } = setup({ model, wait: { idleMs: 100, maxMs: 1000 } });
+
+    const trigger = message({ text: 'nori 问个问题' });
+    await bot.handle(trigger);
+    const triggeredAt = Date.now();
+    expect(typing).toHaveLength(1);
+    await sleep(50);
+    await bot.handle(message({ text: '补充一句' }));
+    // 第一条触发的 100 毫秒已过，但第二条重置了计时
+    await sleep(triggeredAt + 130 - Date.now());
+    expect(model.doStreamCalls).toHaveLength(0);
+
+    await bot.idle();
+    expect(sent.map(({ text, replyTo }) => ({ text, replyTo }))).toEqual([
+      { text: '好', replyTo: trigger.message_id },
+    ]);
+    expect(model.doStreamCalls).toHaveLength(1);
+    expect(promptText(model, 0)).toContain('补充一句');
+  });
+
+  it('等待从第一条触发算起最多到上限：消息一直来也会开始回复', async () => {
+    const { model, calledAt } = gated('好');
+    const { bot } = setup({ model, wait: { idleMs: 60, maxMs: 200 } });
+
+    await bot.handle(message({ text: 'nori 在吗' }));
+    const triggeredAt = Date.now();
+    const deadline = triggeredAt + 2000;
+    while (calledAt.length === 0 && Date.now() < deadline) {
+      await bot.handle(message({ text: '刷屏' }));
+      await sleep(15);
+    }
+
+    expect(calledAt).toHaveLength(1);
+    expect(calledAt[0]! - triggeredAt).toBeGreaterThanOrEqual(190);
+  });
+
+  it('等待期间再被触发：只回复一次，引用最后一条触发', async () => {
+    const model = replying('一起回答', '不该出现');
+    const { bot, sent } = setup({ model });
+
+    await bot.handle(message({ text: 'nori 第一问' }));
+    await bot.handle(message({ text: '闲聊' }));
+    const last = message({ text: 'nori 第二问' });
+    await bot.handle(last);
+    await bot.handle(message({ text: '又一句闲聊' }));
+    await bot.idle();
+
+    expect(sent.map(({ text, replyTo }) => ({ text, replyTo }))).toEqual([
+      { text: '一起回答', replyTo: last.message_id },
+    ]);
+    expect(model.doStreamCalls).toHaveLength(1);
+  });
+
+  it('回复中再被触发：这次发出后立即再回一次，引用期间最后一条触发，请求里有期间所有消息', async () => {
+    const { model, release, calledAt } = gated('第一次', '第二次', '不该出现');
+    const { bot, sent, typing } = setup({
+      model,
+      wait: { idleMs: 300, maxMs: 300 },
+      typingIntervalMs: 20,
+    });
+
+    const first = message({ text: 'nori 讲个故事' });
+    await bot.handle(first);
+    const deadline = Date.now() + 2000;
+    while (calledAt.length === 0 && Date.now() < deadline) await sleep(5);
+    await bot.handle(message({ text: 'nori 我也要听' }));
+    await bot.handle(message({ text: '期间的闲聊' }));
+    const last = message({ text: 'nori 讲长一点' });
+    await bot.handle(last);
+    release();
+    await bot.idle();
+
+    expect(sent.map(({ text, replyTo }) => ({ text, replyTo }))).toEqual([
+      { text: '第一次', replyTo: first.message_id },
+      { text: '第二次', replyTo: last.message_id },
+    ]);
+    expect(model.doStreamCalls).toHaveLength(2);
+    for (const text of ['nori 我也要听', '期间的闲聊', 'nori 讲长一点', '第一次']) {
+      expect(promptText(model, 1)).toContain(text);
+    }
+    // 第二次不再等待（等待时长是 300 毫秒）
+    expect(calledAt[1]! - calledAt[0]!).toBeLessThan(250);
+    // 两次之间「正在输入」没有断：一轮结束后才停
+    const count = typing.length;
+    await sleep(60);
+    expect(typing.length).toBe(count);
+  });
+
+  it('失败提示发出后，期间又被触发的同样再回一次', async () => {
+    let call = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const model = new MockLanguageModelV4({
+      doStream: async (options) => {
+        if (call++ === 0) {
+          await gate;
+          throw new Error('模型挂了');
+        }
+        return replying('恢复了').doStream(options);
+      },
+    });
+    const { bot, sent } = setup({ model });
+
+    const first = message({ text: 'nori 在吗' });
+    await bot.handle(first);
+    while (model.doStreamCalls.length === 0) await sleep(5);
+    const second = message({ text: 'nori 还在吗' });
+    await bot.handle(second);
+    release();
+    await bot.idle();
+
+    expect(sent.map(({ text, replyTo }) => ({ text, replyTo }))).toEqual([
+      { text: '（出错了）', replyTo: first.message_id },
+      { text: '恢复了', replyTo: second.message_id },
+    ]);
+  });
+
+  it('过期的触发不进入等待、不设「还有人在等」，也不改引用的消息；但照常算作等待期间的新消息', async () => {
+    const stale = () =>
+      message({ text: 'nori 很久以前', date: Math.floor(Date.now() / 1000) - 2 * 3600 });
+    const { model, release, calledAt } = gated('回复', '不该出现');
+    const { bot, sent, entries } = setup({ model, wait: { idleMs: 100, maxMs: 1000 } });
+
+    const trigger = message({ text: 'nori 现在' });
+    await bot.handle(trigger);
+    const triggeredAt = Date.now();
+    await sleep(50);
+    await bot.handle(stale());
+    await sleep(triggeredAt + 130 - Date.now());
+    expect(calledAt).toHaveLength(0);
+    while (calledAt.length === 0) await sleep(5);
+    await bot.handle(stale());
+    release();
+    await bot.idle();
+
+    expect(sent.map(({ text, replyTo }) => ({ text, replyTo }))).toEqual([
+      { text: '回复', replyTo: trigger.message_id },
+    ]);
+    expect(entries.filter((e) => e.msg === 'telegram.stale')).toHaveLength(2);
+  });
+
+  it('回复中又被触发后开始退出：宽限期内只把进行中的这次发完，不再开始下一次', async () => {
+    const { model, release, calledAt } = gated('第一次', '不该出现');
+    const { bot, sent } = setup({ model });
+
+    await bot.handle(message({ text: 'nori 讲个故事' }));
+    while (calledAt.length === 0) await sleep(5);
+    await bot.handle(message({ text: 'nori 我也要听' }));
+    const closed = bot.close(10_000);
+    await sleep(20);
+    release();
+    const startedAt = Date.now();
+    await closed;
+
+    expect(sent.map((s) => s.text)).toEqual(['第一次']);
+    expect(calledAt).toHaveLength(1);
+    expect(Date.now() - startedAt).toBeLessThan(1000);
+  });
+
+  it('退出时等待中的会话直接放弃：不生成、不发送，「正在输入」停止，不等宽限期', async () => {
+    const model = replying('不该出现');
+    const { bot, sent, typing } = setup({
+      model,
+      wait: { idleMs: 5000, maxMs: 8000 },
+      typingIntervalMs: 20,
+    });
+
+    await bot.handle(message({ text: 'nori 在吗' }));
+    await sleep(30);
+    const startedAt = Date.now();
+    await bot.close(10_000);
+    const count = typing.length;
+    await sleep(60);
+
+    expect(Date.now() - startedAt).toBeLessThan(1000);
+    expect(model.doStreamCalls).toHaveLength(0);
+    expect(sent).toEqual([]);
+    expect(typing.length).toBe(count);
+  });
+});
+
+describe('编辑', () => {
+  it('改历史里那条消息的正文并记 editedAt；附件不变；记 telegram.edited；不触发、不发送', async () => {
+    const model = replying('好', '不该出现');
+    const { bot, sent, storage, entries } = setup({ model });
+    const original = message({ photo: [{ file_id: 'p', width: 8, height: 8 }], caption: '原来的' });
+    await bot.handle(original);
+    await bot.idle();
+
+    const editDate = Math.floor(Date.now() / 1000);
+    await bot.handle({ ...original, caption: 'nori 改过的', edit_date: editDate });
+    await bot.idle();
+
+    expect(sent).toEqual([]);
+    expect(model.doStreamCalls).toHaveLength(0);
+    expect(await historyOf(storage)).toEqual([
+      {
+        role: 'user',
+        text: 'nori 改过的',
+        files: 1,
+        editedAt: new Date(editDate * 1000).toISOString(),
+      },
+    ]);
+    expect(entries.filter((e) => e.msg.startsWith('telegram.'))).toEqual([
+      {
+        level: 'info',
+        msg: 'telegram.edited',
+        fields: { conversationId: expect.any(String), messageId: String(original.message_id) },
+      },
+    ]);
+  });
+
+  it('找不到被编辑的消息：记 telegram.edit_missing，不建会话、不做别的', async () => {
+    const { bot, sent, storage, entries } = setup({ model: replying('不该出现') });
+
+    await bot.handle(message({ message_id: 4242, text: 'nori 改过的', edit_date: 1 }));
+    await bot.idle();
+
+    expect(sent).toEqual([]);
+    expect(await storage.listConversations('telegram')).toEqual([]);
+    expect(entries.filter((e) => e.msg.startsWith('telegram.'))).toEqual([
+      {
+        level: 'info',
+        msg: 'telegram.edit_missing',
+        fields: { chatId: String(group.id), messageId: '4242' },
+      },
+    ]);
+  });
+
+  it('白名单外的编辑照旧忽略', async () => {
+    const { bot, entries } = setup({ model: replying() });
+
+    await bot.handle(message({ chat: { ...group, id: -1002 }, text: '改过的', edit_date: 1 }));
+
+    expect(entries.map((e) => e.msg)).toEqual(['telegram.ignored']);
+  });
+
+  it('编辑不影响等待计时：编辑之后的回复里是新正文', async () => {
+    const { model, calledAt } = gated('好');
+    const { bot } = setup({ model, wait: { idleMs: 200, maxMs: 1000 } });
+    const before = message({ text: '原来的说法' });
+    await bot.handle(before);
+
+    await bot.handle(message({ text: 'nori 帮我看看' }));
+    const triggeredAt = Date.now();
+    await sleep(150);
+    await bot.handle({ ...before, text: '改过的说法', edit_date: 1 });
+    while (calledAt.length === 0 && Date.now() < triggeredAt + 2000) await sleep(5);
+
+    // 编辑若重置了计时，要到 350 毫秒之后才开始
+    expect(calledAt[0]! - triggeredAt).toBeLessThan(330);
+    expect(promptText(model, 0)).toContain('改过的说法');
+    expect(promptText(model, 0)).not.toContain('原来的说法');
+  });
+});
+
+describe('非文字消息', () => {
+  it('照片下载后作为图片记录；相册由 albumOf 取回整组，合成一条，任一条触发即回复，引用第一条', async () => {
+    const album = [
+      message({ media_group_id: 'g', photo: [{ file_id: 'a', width: 8, height: 8 }] }),
+      message({
+        media_group_id: 'g',
+        photo: [{ file_id: 'b', width: 8, height: 8 }],
+        caption: 'nori 看看这两张',
+      }),
+    ];
+    const model = replying('看到了');
+    const { bot, sent, storage } = setup({ model, albums: [album] });
+
+    // 适配器攒齐后派发的是最后一条
+    await bot.handle(album[1]!);
+    await bot.idle();
+
+    expect(await historyOf(storage)).toMatchObject([
+      { role: 'user', text: 'nori 看看这两张', files: 2 },
+      { role: 'assistant', text: '看到了' },
+    ]);
+    expect(sent.map(({ replyTo }) => replyTo)).toEqual([album[0]!.message_id]);
+    const prompt = model.doStreamCalls[0]!.prompt;
+    const files = prompt.flatMap((m) =>
+      Array.isArray(m.content) ? m.content.filter((part) => part.type === 'file') : [],
+    );
+    expect(files).toHaveLength(2);
+  });
+
+  it('「图片」内容与声明的类型不符：记占位，不作为图片；warn 日志 telegram.image_rejected 只有种类与大小，回复照常', async () => {
+    const fake = new TextEncoder().encode('其实是文字');
+    const model = replying('这是个文件');
+    const { bot, storage, entries, sent } = setup({ model, files: { fake } });
+
+    await bot.handle(
+      message({
+        document: { file_id: 'fake', file_name: 'fake.png', mime_type: 'image/png' },
+        caption: 'nori 这个文件里是什么',
+      }),
+    );
+    await bot.idle();
+
+    expect(await historyOf(storage)).toMatchObject([
+      { role: 'user', text: '[文件 fake.png]\nnori 这个文件里是什么', files: 0 },
+      { role: 'assistant', text: '这是个文件' },
+    ]);
+    expect(sent.map((s) => s.text)).toEqual(['这是个文件']);
+    expect(entries.filter((e) => e.msg === 'telegram.image_rejected')).toEqual([
+      {
+        level: 'warn',
+        msg: 'telegram.image_rejected',
+        fields: { conversationId: expect.any(String), kind: 'document', size: fake.length },
+      },
+    ]);
+  });
+
+  it('下载失败：记「[图片下载失败]」，warn 日志 telegram.download_failed 只有文件种类与大小', async () => {
+    const { bot, storage, entries } = setup({ model: replying(), failingDownloads: ['bad'] });
+
+    await bot.handle(message({ photo: [{ file_id: 'bad', width: 8, height: 8, file_size: 64 }] }));
+
+    expect(await historyOf(storage)).toMatchObject([{ text: '[图片下载失败]', files: 0 }]);
+    expect(entries.filter((e) => e.msg === 'telegram.download_failed')).toEqual([
+      {
+        level: 'warn',
+        msg: 'telegram.download_failed',
+        fields: { conversationId: expect.any(String), kind: 'photo', size: 64 },
+      },
+    ]);
   });
 });

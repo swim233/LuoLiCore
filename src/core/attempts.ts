@@ -42,12 +42,19 @@ export function trackAttempts({
   middleware: LanguageModelMiddleware;
   /** 包在 UI 流上：在新一次尝试的内容之前插入流式重试的提示与 reset-step */
   markStreamRetries: () => TransformStream<MessageChunk, MessageChunk>;
+  /**
+   * 同一轮回复里另起一次 streamText 调用（拒收图片后的重试）：按新调用重新计数，
+   * 丢掉上一次调用还没插入的流式重试提示（上一次调用的 UI 流整个不发出）。stats 照常累计
+   */
+  restart: () => void;
   stats: AttemptStats;
 } {
   const stats: AttemptStats = { attempts: 0, requestRetries: 0, streamRetries: 0 };
   // 当前这次调用里请求阶段连续失败的次数。SDK 每次调用（包括流式重试发起的那次）
   // 都重新计算请求重试次数，这个计数与 SDK 的 tryNumber 对应
   let requestFailures = 0;
+  // 当前这次调用里流式重试的次数（SDK 的 streamRetries 按调用计）
+  let callStreamRetries = 0;
   // 模型已发出的内容段起点数（text-start、reasoning-start），用来在 UI 流里定位尝试的边界
   let contentStarts = 0;
   // 等待插入 UI 流的流式重试提示。notices 首项是重新生成提示，其后是这次重新生成的
@@ -137,7 +144,7 @@ export function trackAttempts({
           if (part.type !== 'error' || logged) return;
           logged = true;
           // SDK：流中的任何错误事件都会重新生成，直到次数用完；不看是否可重试
-          const willRetry = stats.streamRetries < maxRetries;
+          const willRetry = callStreamRetries < maxRetries;
           const statusCode = statusCodeOf(part.error);
           logger.warn(
             { ...fields(), phase: 'stream', ok: false, statusCode, willRetry },
@@ -145,11 +152,12 @@ export function trackAttempts({
           );
           if (willRetry) {
             stats.streamRetries++;
+            callStreamRetries++;
             pendingStreamRetries.push({
               notices: [
                 retryNotice({
                   phase: 'stream',
-                  attempt: stats.streamRetries,
+                  attempt: callStreamRetries,
                   maxRetries,
                   statusCode,
                 }),
@@ -227,7 +235,14 @@ export function trackAttempts({
     });
   };
 
-  return { middleware, markStreamRetries, stats };
+  const restart = () => {
+    requestFailures = 0;
+    callStreamRetries = 0;
+    contentStarts = 0;
+    pendingStreamRetries.length = 0;
+  };
+
+  return { middleware, markStreamRetries, restart, stats };
 }
 
 function observe(

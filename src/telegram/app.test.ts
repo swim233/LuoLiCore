@@ -11,7 +11,7 @@ import {
   type Storage,
 } from '../core/index.js';
 import { startTelegram } from './app.js';
-import { fakeBot, startFakeTelegram, type FakeTelegram } from './fake-api.js';
+import { fakeBot, imageBytes, startFakeTelegram, type FakeTelegram } from './fake-api.js';
 
 type StreamResult = Awaited<ReturnType<MockLanguageModelV4['doStream']>>;
 type StreamPart = StreamResult['stream'] extends ReadableStream<infer P> ? P : never;
@@ -92,9 +92,12 @@ async function start(
     storage = createMemoryStorage(),
     state,
     backlog,
+    wait = { idleMs: 50, maxMs: 500 },
   }: {
     storage?: Storage;
     state?: StateAdapter;
+    /** 等待合并的时长；默认调小 */
+    wait?: { idleMs: number; maxMs: number };
     /** 启动前就在假接口里的更新，相当于停机期间积压的 */
     backlog?: (api: FakeTelegram) => void;
   } = {},
@@ -123,6 +126,7 @@ async function start(
     logger,
     pollTimeoutSeconds: 1,
     state,
+    wait,
   });
   running.push(() => app.stop());
   return { api, app, storage, entries };
@@ -137,6 +141,32 @@ async function waitUntil(check: () => boolean | Promise<boolean>, timeoutMs = 30
 }
 
 const sends = (api: FakeTelegram) => api.calls.filter((call) => call.method === 'sendMessage');
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** 第 index 次模型请求里所有消息的内容（含名字标签） */
+function promptText(model: MockLanguageModelV4, index: number): string {
+  return JSON.stringify(model.doStreamCalls[index]?.prompt ?? []);
+}
+
+/** 第 index 次模型请求里的图片，按出现顺序列出媒体类型 */
+function promptFiles(model: MockLanguageModelV4, index: number): string[] {
+  return (model.doStreamCalls[index]?.prompt ?? []).flatMap((message) =>
+    Array.isArray(message.content)
+      ? message.content.flatMap((part) => (part.type === 'file' ? [part.mediaType] : []))
+      : [],
+  );
+}
+
+/** 每条消息的附件数 */
+async function filesOf(storage: Storage, chatId: number) {
+  const info = await storage.findConversation('telegram', String(chatId));
+  if (!info) return [];
+  const store = await storage.openConversation(info.id);
+  return (await store.list()).map(
+    (message) => message.parts.filter((part) => part.type === 'file').length,
+  );
+}
 
 async function historyOf(storage: Storage, chatId: number) {
   const info = await storage.findConversation('telegram', String(chatId));
@@ -313,30 +343,31 @@ describe('Telegram 前端（本地假 Bot API）', () => {
     expect(await storage.listConversations('telegram')).toEqual([]);
   });
 
-  it('回复中再被触发：只记录、不回复；回复完成后可以再次触发', async () => {
+  it('回复中再被触发：当前回复发出后立即再回一次，引用期间最后一条触发，请求里有期间所有消息', async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => (release = resolve));
-    const { api, app, storage, entries } = await start(replying({ text: '慢慢说', gate }, '再说'));
+    const model = replying({ text: '慢慢说', gate }, '再说');
+    const { api, app, storage, entries } = await start(model);
 
     const [first] = api.push({ chat: group, from: alice, text: 'nori 讲个故事' });
-    await waitUntil(async () => (await historyOf(storage, group.id)).length === 1);
+    await waitUntil(() => model.doStreamCalls.length === 1);
     api.push({ chat: group, from: bob, text: 'nori 我也要听' });
     await waitUntil(async () => (await historyOf(storage, group.id)).length === 2);
+    api.push({ chat: group, from: bob, text: '期间的闲聊' });
+    const [last] = api.push({ chat: group, from: alice, text: 'nori 讲长一点' });
+    await waitUntil(async () => (await historyOf(storage, group.id)).length === 4);
     release();
-    await api.waitFor(() => sends(api).length === 1);
+    await api.waitFor(() => sends(api).length === 2);
     await app.bot.idle();
 
-    expect(sends(api)[0]?.body).toMatchObject({
-      text: '慢慢说',
-      reply_parameters: { message_id: first },
-    });
-    const [third] = api.push({ chat: group, from: bob, text: 'nori 然后呢' });
-    await api.waitFor(() => sends(api).length === 2);
-    expect(sends(api)[1]?.body).toMatchObject({
-      text: '再说',
-      reply_parameters: { message_id: third },
-    });
-    // 第二次触发没有去调用核心的 reply（那会抛「上一个回复还没结束」）
+    expect(sends(api).map((call) => call.body)).toMatchObject([
+      { text: '慢慢说', reply_parameters: { message_id: first } },
+      { text: '再说', reply_parameters: { message_id: last } },
+    ]);
+    for (const text of ['nori 我也要听', '期间的闲聊', 'nori 讲长一点', '慢慢说']) {
+      expect(promptText(model, 1)).toContain(text);
+    }
+    // 没有去调用核心的 reply 两次（那会抛「上一个回复还没结束」）
     expect(entries.filter((e) => e.level !== 'info').map((e) => e.msg)).toEqual([]);
   });
 
@@ -463,6 +494,266 @@ describe('Telegram 前端（本地假 Bot API）', () => {
     expect(messageCache.size).toBe(0);
   });
 
+  it('连发三条、第二条带 nori：等待合并，只回复一次，引用第二条，请求里有第三条', async () => {
+    const model = replying('一起回答', '不该出现');
+    const { api, app, storage } = await start(model, { wait: { idleMs: 400, maxMs: 3000 } });
+
+    api.push({ chat: group, from: alice, text: '我先说一句' });
+    await waitUntil(async () => (await historyOf(storage, group.id)).length === 1);
+    const [second] = api.push({ chat: group, from: bob, text: 'nori 你怎么看' });
+    await waitUntil(async () => (await historyOf(storage, group.id)).length === 2);
+    api.push({ chat: group, from: alice, text: '我也想知道' });
+    await api.waitFor(() => sends(api).length === 1);
+    await app.bot.idle();
+    await sleep(100);
+
+    expect(sends(api).map((call) => call.body.reply_parameters)).toEqual([
+      { message_id: second, allow_sending_without_reply: true },
+    ]);
+    expect(model.doStreamCalls).toHaveLength(1);
+    expect(promptText(model, 0)).toContain('我也想知道');
+    // 等待期间就在发「正在输入」
+    expect(api.calls.findIndex((call) => call.method === 'sendChatAction')).toBeLessThan(
+      api.calls.findIndex((call) => call.method === 'sendMessage'),
+    );
+  });
+
+  it('照片与静态贴纸下载后以图片交给模型；语音、动画贴纸、PDF 记成占位', async () => {
+    const model = replying('看到了');
+    const { api, app, storage } = await start(model);
+    for (const id of ['photo-s', 'photo-m', 'photo-l'])
+      api.addFile(id, imageBytes('image/jpeg', id));
+    api.addFile('sticker', imageBytes('image/webp', 'sticker'));
+    api.addFile('pdf', new TextEncoder().encode('%PDF-1.7'));
+
+    api.push(
+      {
+        chat: group,
+        from: alice,
+        caption: 'nori 看看这张',
+        photo: [
+          { file_id: 'photo-s', width: 90, height: 68 },
+          { file_id: 'photo-l', width: 2560, height: 1920 },
+          { file_id: 'photo-m', width: 1280, height: 960 },
+        ],
+      },
+      { chat: group, from: bob, sticker: { file_id: 'sticker', emoji: '👍' } },
+      { chat: group, from: bob, voice: { file_id: 'voice', duration: 5 } },
+      { chat: group, from: alice, sticker: { file_id: 'anim', emoji: '😀', is_animated: true } },
+      {
+        chat: group,
+        from: alice,
+        document: { file_id: 'pdf', file_name: '报告.pdf', mime_type: 'application/pdf' },
+      },
+    );
+    await api.waitFor(() => sends(api).length === 1);
+    await app.bot.idle();
+
+    expect(promptFiles(model, 0)).toEqual(['image/jpeg', 'image/webp']);
+    expect(api.downloads).toEqual(['files/photo-m', 'files/sticker']);
+    expect(await historyOf(storage, group.id)).toEqual([
+      { role: 'user', text: 'nori 看看这张' },
+      { role: 'user', text: '' },
+      { role: 'user', text: '[语音 0:05]' },
+      { role: 'user', text: '[贴纸 😀]' },
+      { role: 'user', text: '[文件 报告.pdf]' },
+      { role: 'assistant', text: '看到了' },
+    ]);
+    expect(await filesOf(storage, group.id)).toEqual([1, 1, 0, 0, 0, 0]);
+  });
+
+  it('相册：适配器攒齐后合成一条消息、多张图，按原顺序；回复引用第一条；编辑第一条的说明文字改正文、图片不变', async () => {
+    const model = replying('两张都看到了');
+    const { api, app, storage, entries } = await start(model);
+    api.addFile('a1', imageBytes('image/jpeg', 'a1'));
+    api.addFile('a2', imageBytes('image/jpeg', 'a2'));
+    const firstItem = {
+      chat: group,
+      from: alice,
+      media_group_id: 'album-1',
+      photo: [{ file_id: 'a1', width: 8, height: 8 }],
+    };
+
+    const secondItem = {
+      chat: group,
+      from: alice,
+      media_group_id: 'album-1',
+      photo: [{ file_id: 'a2', width: 8, height: 8 }],
+    };
+
+    const [first, second] = api.push({ ...firstItem, caption: 'nori 看看这组' }, secondItem);
+    await api.waitFor(() => sends(api).length === 1, 8000);
+    await app.bot.idle();
+
+    expect(await historyOf(storage, group.id)).toEqual([
+      { role: 'user', text: 'nori 看看这组' },
+      { role: 'assistant', text: '两张都看到了' },
+    ]);
+    expect(await filesOf(storage, group.id)).toEqual([2, 0]);
+    expect(api.downloads).toEqual(['files/a1', 'files/a2']);
+    expect(promptFiles(model, 0)).toEqual(['image/jpeg', 'image/jpeg']);
+    expect(sends(api)[0]?.body.reply_parameters).toEqual({
+      message_id: first,
+      allow_sending_without_reply: true,
+    });
+
+    // 同一批里改了两条的说明：各条分别处理，不被当成一组攒起来只剩最后一条
+    api.pushEdit({ ...firstItem, message_id: first!, caption: '改过的说明' });
+    api.pushEdit({ ...secondItem, message_id: second!, caption: '第二条加的说明' });
+    await waitUntil(
+      () =>
+        entries.some((e) => e.msg === 'telegram.edited') &&
+        entries.some((e) => e.msg === 'telegram.edit_missing'),
+      5000,
+    );
+    expect((await historyOf(storage, group.id))[0]?.text).toBe('改过的说明');
+    expect(await filesOf(storage, group.id)).toEqual([2, 0]);
+    expect(api.downloads).toHaveLength(2);
+  }, 15_000);
+
+  it('相册还没攒齐时改了其中一条：编辑单独处理（此时找不到），相册照样记录', async () => {
+    const { api, storage, entries } = await start(replying());
+    const item = (fileId: string) => ({
+      chat: group,
+      from: alice,
+      media_group_id: 'album-2',
+      photo: [{ file_id: fileId, width: 8, height: 8 }],
+    });
+    api.addFile('b1', imageBytes('image/jpeg', 'b1'));
+    api.addFile('b2', imageBytes('image/jpeg', 'b2'));
+
+    const [, second] = api.push({ ...item('b1'), caption: '原来的说明' }, item('b2'));
+    api.pushEdit({ ...item('b2'), message_id: second!, caption: '马上改了' });
+    await waitUntil(async () => (await historyOf(storage, group.id)).length === 1, 8000);
+
+    expect(await historyOf(storage, group.id)).toEqual([{ role: 'user', text: '原来的说明' }]);
+    expect(await filesOf(storage, group.id)).toEqual([2]);
+    expect(entries.map((e) => e.msg)).toContain('telegram.edit_missing');
+  }, 10_000);
+
+  it('编辑：改历史里的正文，不触发；下一次请求里是新正文', async () => {
+    const model = replying('他改口了', '不该出现');
+    const { api, app, storage, entries } = await start(model);
+
+    const [id] = api.push({ chat: group, from: alice, text: '原来的说法' });
+    await waitUntil(async () => (await historyOf(storage, group.id)).length === 1);
+    api.pushEdit({ message_id: id!, chat: group, from: alice, text: 'nori 改过的说法' });
+    await waitUntil(() => entries.some((e) => e.msg === 'telegram.edited'));
+    await sleep(100);
+    expect(sends(api)).toEqual([]);
+
+    api.push({ chat: group, from: bob, text: 'nori 她说了什么' });
+    await api.waitFor(() => sends(api).length === 1);
+    await app.bot.idle();
+
+    expect(promptText(model, 0)).toContain('改过的说法');
+    expect(promptText(model, 0)).not.toContain('原来的说法');
+  });
+
+  it('文件头是 PNG、后面是乱码的图片被模型拒收：换成「[图片无法读取]」重试，正常回复；下一次请求里那里是占位', async () => {
+    let reply = 0;
+    const model = new MockLanguageModelV4({
+      doStream: async ({ prompt }) => {
+        const hasImage = prompt.some(
+          (m) => Array.isArray(m.content) && m.content.some((part) => part.type === 'file'),
+        );
+        if (hasImage) {
+          throw new APICallError({
+            message: 'Bad Request',
+            url: 'https://example.invalid/v1/chat/completions',
+            requestBodyValues: {},
+            statusCode: 400,
+          });
+        }
+        return replying(['这张图打不开', '记得'][reply++] ?? '好').doStream({ prompt } as never);
+      },
+    });
+    const { api, app, storage, entries } = await start(model);
+    api.addFile('garbled', Uint8Array.from([...imageBytes('image/png', ''), 0xde, 0xad, 0xbe]));
+
+    const [id] = api.push({
+      chat: group,
+      from: alice,
+      document: { file_id: 'garbled', file_name: 'scan.png', mime_type: 'image/png' },
+      caption: 'nori 看看这张',
+    });
+    await api.waitFor(() => sends(api).length === 1);
+    await app.bot.idle();
+    api.push({ chat: group, from: bob, text: 'nori 刚才那张呢' });
+    await api.waitFor(() => sends(api).length === 2);
+    await app.bot.idle();
+
+    expect(sends(api).map((call) => call.body)).toMatchObject([
+      { text: '这张图打不开', reply_parameters: { message_id: id } },
+      { text: '记得' },
+    ]);
+    expect(model.doStreamCalls).toHaveLength(3);
+    expect(promptFiles(model, 0)).toEqual(['image/png']);
+    expect(promptFiles(model, 2)).toEqual([]);
+    // 那条消息在原来图片的位置是占位
+    const [first] = model.doStreamCalls[2]!.prompt.filter((m) => m.role === 'user');
+    expect(first?.content).toMatchObject([
+      { type: 'text', text: expect.stringContaining('nori 看看这张') },
+      { type: 'text', text: '[图片无法读取]' },
+      { type: 'text', text: '</message>' },
+    ]);
+    expect(await filesOf(storage, group.id)).toEqual([1, 0, 0, 0]);
+    expect(entries.filter((e) => e.msg === 'reply.image_fallback')).toHaveLength(1);
+    expect(entries.filter((e) => e.level === 'error')).toEqual([]);
+  });
+
+  it('伪造的 .png（内容是文字）：记成「[文件 fake.png]」，不作为图片；这次和之后的请求都正常', async () => {
+    const model = replying('看起来是个文件', '好的');
+    const { api, app, storage, entries } = await start(model);
+    api.addFile('fake', new TextEncoder().encode('这是一段文字，不是图片'));
+
+    api.push({
+      chat: group,
+      from: alice,
+      document: { file_id: 'fake', file_name: 'fake.png', mime_type: 'image/png', file_size: 33 },
+      caption: 'nori 这个文件里是什么？',
+    });
+    await api.waitFor(() => sends(api).length === 1);
+    await app.bot.idle();
+    api.push({ chat: group, from: bob, text: 'nori 还在吗' });
+    await api.waitFor(() => sends(api).length === 2);
+    await app.bot.idle();
+
+    expect(api.downloads).toEqual(['files/fake']);
+    expect(promptFiles(model, 0)).toEqual([]);
+    expect(promptFiles(model, 1)).toEqual([]);
+    expect(promptText(model, 1)).toContain('[文件 fake.png]');
+    expect(sends(api).map((call) => call.body.text)).toEqual(['看起来是个文件', '好的']);
+    expect(await filesOf(storage, group.id)).toEqual([0, 0, 0, 0]);
+    expect(entries.filter((e) => e.msg === 'telegram.image_rejected').map((e) => e.fields)).toEqual(
+      [{ conversationId: expect.any(String), kind: 'document', size: 33 }],
+    );
+  });
+
+  it('下载失败：记「[图片下载失败]」，warn 日志只有文件种类与大小，没有文件地址与 token', async () => {
+    const { api, storage, entries } = await start(replying());
+    api.addFile('broken', new Uint8Array([1]), { failing: true });
+
+    api.push({
+      chat: group,
+      from: alice,
+      photo: [{ file_id: 'broken', width: 8, height: 8, file_size: 1234 }],
+    });
+    await waitUntil(async () => (await historyOf(storage, group.id)).length === 1);
+
+    expect(await historyOf(storage, group.id)).toEqual([{ role: 'user', text: '[图片下载失败]' }]);
+    expect(entries.filter((e) => e.msg === 'telegram.download_failed')).toEqual([
+      {
+        level: 'warn',
+        msg: 'telegram.download_failed',
+        fields: { conversationId: expect.any(String), kind: 'photo', size: 1234 },
+      },
+    ]);
+    const logged = JSON.stringify(entries);
+    expect(logged).not.toContain(token);
+    expect(logged).not.toContain('/file/');
+  });
+
   describe('停机后重启的空闲补做', () => {
     const hoursAgo = (hours: number) => new Date(Date.now() - hours * 3_600_000);
 
@@ -521,6 +812,58 @@ describe('Telegram 前端（本地假 Bot API）', () => {
       // 积压里出现过的会话已经打开，补做时不再打开
       expect(entries.find((e) => e.msg === 'telegram.caught_up')?.fields).toEqual({ opened: 0 });
     });
+
+    it('积压里只有相册：等相册攒齐、记录之后才补做，不按现在的时间多切一段（观察 G）', async () => {
+      const storage = await storageWithOldMessage();
+      const model = replying('不该有摘要');
+      const date = Math.floor(hoursAgo(5 - 10 / 60).getTime() / 1000);
+      const { app, entries } = await start(model, {
+        storage,
+        backlog: (api) => {
+          api.addFile('g1', imageBytes('image/jpeg', 'g1'));
+          api.addFile('g2', imageBytes('image/jpeg', 'g2'));
+          api.push(
+            {
+              chat: group,
+              from: bob,
+              media_group_id: 'backlog-album',
+              photo: [{ file_id: 'g1', width: 8, height: 8 }],
+              caption: '停机期间的相册',
+              date,
+            },
+            {
+              chat: group,
+              from: bob,
+              media_group_id: 'backlog-album',
+              photo: [{ file_id: 'g2', width: 8, height: 8 }],
+              date,
+            },
+          );
+          // 别的相册里某一条的编辑：不打开会话，补做不用等它
+          api.pushEdit({
+            message_id: 4000,
+            chat: group,
+            from: bob,
+            media_group_id: 'older-album',
+            photo: [{ file_id: 'g0', width: 8, height: 8 }],
+            caption: '改过的旧说明',
+          });
+        },
+      });
+
+      await app.caughtUp;
+      // 补做时相册已经记录
+      expect((await historyOf(storage, group.id)).map((m) => m.text)).toEqual([
+        '停机前最后一句',
+        '停机期间的相册',
+      ]);
+      await sleep(100);
+
+      expect(model.doStreamCalls).toHaveLength(0);
+      expect(await segmentOf(storage)).toMatchObject({ startSeq: 1, startReason: 'first' });
+      expect(entries.find((e) => e.msg === 'telegram.caught_up')?.fields).toEqual({ opened: 0 });
+      expect(entries.map((e) => e.msg)).toContain('telegram.edit_missing');
+    }, 10_000);
 
     it('没有积压：启动后照常按现在的时间补做空闲切段', async () => {
       const storage = await storageWithOldMessage();
