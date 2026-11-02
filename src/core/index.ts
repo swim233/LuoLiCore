@@ -37,6 +37,7 @@ export {
   defineTool,
   installTools,
   ToolDefinitionError,
+  ToolError,
   type InstalledTool,
   type ToolContext,
   type ToolDefinition,

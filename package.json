@@ -19,9 +19,13 @@
     "@ai-sdk/openai-compatible": "^3.0.80",
     "@chat-adapter/state-memory": "4.43.0",
     "@chat-adapter/telegram": "4.43.0",
+    "@joplin/turndown-plugin-gfm": "^1.0.68",
+    "@mozilla/readability": "^0.6.0",
     "ai": "^7.0.156",
     "chat": "4.43.0",
+    "linkedom": "^0.18.15",
     "pino": "^10.4.0",
+    "turndown": "^7.2.4",
     "undici": "^8.12.3",
     "zod": "^4.6.7"
   },

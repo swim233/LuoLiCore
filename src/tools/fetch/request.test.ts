@@ -1,11 +1,5 @@
 import { lookup } from 'node:dns/promises';
-import {
-  createServer,
-  type IncomingHttpHeaders,
-  type IncomingMessage,
-  type ServerResponse,
-} from 'node:http';
-import type { AddressInfo, Socket } from 'node:net';
+import type { IncomingMessage } from 'node:http';
 import { brotliCompressSync, deflateSync, gzipSync } from 'node:zlib';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
@@ -15,45 +9,13 @@ import {
   type Requester,
   type RequesterOptions,
 } from './request.js';
+import { closeAll, ok, onClose, onlyLoopback, serve, type Handler } from './test-server.js';
 
-// 本地 HTTP 服务：记下收到的连接与请求，由 handler 决定怎么回
-type Handler = (request: IncomingMessage, response: ServerResponse) => void;
-type TestServer = {
-  origin: string;
-  port: number;
-  requests: Array<{ path: string; headers: IncomingHttpHeaders }>;
-  sockets: Socket[];
-};
-
-const closers: Array<() => Promise<void>> = [];
-afterEach(async () => {
-  for (const close of closers.splice(0)) await close();
-});
-
-async function serve(handler: Handler, host = '127.0.0.1'): Promise<TestServer> {
-  const requests: TestServer['requests'] = [];
-  const sockets: Socket[] = [];
-  const server = createServer((request, response) => {
-    requests.push({ path: request.url ?? '', headers: request.headers });
-    handler(request, response);
-  });
-  server.on('connection', (socket) => sockets.push(socket));
-  await new Promise<void>((resolve) => server.listen(0, host, resolve));
-  closers.push(async () => {
-    server.closeAllConnections();
-    await new Promise((resolve) => server.close(resolve));
-  });
-  const { port } = server.address() as AddressInfo;
-  const origin = `http://${host.includes(':') ? `[${host}]` : host}:${port}`;
-  return { origin, port, requests, sockets };
-}
-
-// 测试里只放行 127.0.0.1，其余照默认范围拦（127.0.0.2、::1 都拦）
-const onlyLoopback = (address: string) => address !== '127.0.0.1';
+afterEach(closeAll);
 
 function requester(options: RequesterOptions = {}): Requester {
   const created = createRequester({ isBlocked: onlyLoopback, ...options });
-  closers.push(() => created.close());
+  onClose(() => created.close());
   return created;
 }
 
@@ -65,13 +27,6 @@ async function failure(promise: Promise<unknown>): Promise<FetchError> {
   expect(error).toBeInstanceOf(FetchError);
   return error as FetchError;
 }
-
-const ok =
-  (body: string | Buffer, headers: Record<string, string> = {}): Handler =>
-  (_request, response) => {
-    response.writeHead(200, headers);
-    response.end(body);
-  };
 
 const userAgentOf = (request: IncomingMessage) => request.headers['user-agent'];
 const [curl, bot, chrome] = defaultUserAgents as [string, string, string];
@@ -90,7 +45,7 @@ describe('内网地址', () => {
     const v4 = await serve(ok('秘密'));
     const v6 = await serve(ok('秘密'), '::1');
     const fetcher = createRequester();
-    closers.push(() => fetcher.close());
+    onClose(() => fetcher.close());
     for (const url of [
       `http://127.0.0.1:${v4.port}/`,
       `http://localhost:${v4.port}/`,
