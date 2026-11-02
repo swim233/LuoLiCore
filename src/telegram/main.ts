@@ -8,6 +8,8 @@ import {
   type Storage,
 } from '../core/index.js';
 import { createLogger, jsonEscapedForms } from '../shared/logger.js';
+import { setupTools } from '../shared/tools.js';
+import { tools as toolList } from '../tools/index.js';
 import { startTelegram } from './app.js';
 import { parseTelegramConfig } from './config.js';
 
@@ -35,6 +37,16 @@ try {
   process.exit(1);
 }
 
+// 工具清单：有误时退出；缺环境变量的不装，各提示一行。所有群共用装上的这一份
+const installed = setupTools(toolList, process.env, {
+  logger,
+  report: (line) => console.error(line),
+});
+if (!installed.ok) {
+  console.error(installed.error);
+  process.exit(1);
+}
+
 let storage: Storage;
 try {
   mkdirSync(dirname(config.dbPath), { recursive: true });
@@ -50,6 +62,7 @@ try {
     config,
     model: createModel(config.model),
     prompts,
+    tools: installed.tools,
     storage,
     fileStore: openFileStore(config.filesDir),
     logger,

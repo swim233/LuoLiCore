@@ -237,22 +237,49 @@ export function createTelegramBot({
     round.finish();
   }
 
+  /**
+   * 一次回复，分条发出：每一步的文字在这一步的模型输出结束时发出。这一步调了工具时，
+   * 在它的第一个工具段出现时发（核心在请求正常结束后才放出工具段，之前的文字已经齐了）；
+   * 最后一步的文字在这一步结束时发。没有文字的步不发。每条都引用触发消息。
+   * 流中途重试只清掉这一步还没发出的文字；失败时失败那一步的文字不发，之前发出的保留，
+   * 再发失败提示。群里看到的正好是核心写进历史的那些完成的步
+   */
   async function reply(session: Session, trigger: TelegramRaw): Promise<void> {
     const target = targetOf(trigger);
     const fields = { conversationId: session.conversationId };
-    const result = await readReply(session.conversation.reply({ abortSignal: stopping.signal }));
+    // 这一步还没发出的文字
+    let pending = '';
+    let failed = false;
+    const flush = async () => {
+      const text = pending;
+      pending = '';
+      // 关闭时被中止的回复不再发出
+      if (stopping.signal.aborted) return;
+      const chunks = splitMessage(text).filter((chunk) => chunk.trim());
+      for (const [index, chunk] of chunks.entries()) {
+        // 第一段引用触发消息，后面的接着发
+        const sent = await send(
+          target,
+          chunk,
+          index === 0 ? trigger.message_id : undefined,
+          fields,
+        );
+        if (!sent) break;
+      }
+    };
+    for await (const chunk of session.conversation.reply({ abortSignal: stopping.signal })) {
+      if (chunk.type === 'text-delta') pending += chunk.delta;
+      else if (chunk.type === 'reset-step') pending = '';
+      else if (chunk.type === 'error') {
+        failed = true;
+        pending = '';
+      } else if (startsToolCall(chunk) || (chunk.type === 'finish-step' && !failed)) {
+        await flush();
+      }
+    }
     if (stopping.signal.aborted) return;
-    if (!result.ok) {
-      // 错误详情由核心记进日志；群里只发固定提示
-      await send(target, errorText, trigger.message_id, fields);
-      return;
-    }
-    const chunks = splitMessage(result.text).filter((chunk) => chunk.trim());
-    for (const [index, chunk] of chunks.entries()) {
-      // 第一段引用触发消息，后面的接着发
-      const sent = await send(target, chunk, index === 0 ? trigger.message_id : undefined, fields);
-      if (!sent) break;
-    }
+    // 错误详情由核心记进日志；群里只发固定提示
+    if (failed) await send(target, errorText, trigger.message_id, fields);
   }
 
   /** 从现在起显示「正在输入」，每隔一段时间重发，直到调用返回的函数 */
@@ -436,18 +463,13 @@ function targetOf(trigger: TelegramRaw): ChatTarget {
   };
 }
 
-/** 读完回复流：拼出最终正文。流式重试的 reset-step 之后重新开始；出现 error 段就是失败 */
-async function readReply(
-  stream: ReadableStream<MessageChunk>,
-): Promise<{ ok: boolean; text: string }> {
-  let text = '';
-  let ok = true;
-  for await (const chunk of stream) {
-    if (chunk.type === 'text-delta') text += chunk.delta;
-    else if (chunk.type === 'reset-step') text = '';
-    else if (chunk.type === 'error') ok = false;
-  }
-  return { ok, text };
+/** 一次工具调用在回复流里的头一个段：参数开始流出、完整的调用、或不合规的调用 */
+function startsToolCall(chunk: MessageChunk): boolean {
+  return (
+    chunk.type === 'tool-input-start' ||
+    chunk.type === 'tool-input-available' ||
+    chunk.type === 'tool-input-error'
+  );
 }
 
 // 只取错误的类型与消息，不把原始对象交给日志（可能带请求正文）

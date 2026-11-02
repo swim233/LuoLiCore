@@ -3,6 +3,7 @@ import { Chat, type StateAdapter } from 'chat';
 import {
   createConversation,
   type FileStore,
+  type InstalledTool,
   type Logger,
   type PromptSource,
   type Storage,
@@ -20,6 +21,7 @@ export async function startTelegram({
   config,
   model,
   prompts,
+  tools = [],
   storage,
   fileStore,
   logger,
@@ -46,6 +48,8 @@ export async function startTelegram({
   model: Parameters<typeof createConversation>[0]['model'];
   /** 提示词来源，所有会话共用 */
   prompts: PromptSource;
+  /** 装好的工具，所有会话共用 */
+  tools?: readonly InstalledTool[];
   storage: Storage;
   fileStore: FileStore;
   logger: Logger;
@@ -85,6 +89,7 @@ export async function startTelegram({
       createConversation({
         model,
         prompts,
+        tools,
         store: await storage.openConversation(conversationId),
         fileStore,
         logger,

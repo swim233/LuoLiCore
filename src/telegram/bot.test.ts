@@ -1,11 +1,15 @@
-import { simulateReadableStream } from 'ai';
+import { APICallError, simulateReadableStream } from 'ai';
 import { MockLanguageModelV4 } from 'ai/test';
 import { afterEach, describe, expect, it } from 'vitest';
+import { z } from 'zod';
 import type { TelegramChat, TelegramUser } from '@chat-adapter/telegram';
 import {
   createConversation,
   createMemoryStorage,
+  defineTool,
+  installTools,
   type Conversation,
+  type InstalledTool,
   type Logger,
   type Storage,
 } from '../core/index.js';
@@ -80,6 +84,8 @@ function setup({
   albums = [],
   failingDownloads = [],
   files = {},
+  tools = [],
+  sendDelayMs = 0,
 }: {
   model: MockLanguageModelV4;
   storage?: Storage;
@@ -91,6 +97,9 @@ function setup({
   failingDownloads?: string[];
   /** 下载到的内容；没给的为 jpeg 图片 */
   files?: Record<string, Uint8Array>;
+  tools?: InstalledTool[];
+  /** 每次发送要等这么久才发出（像真的网络请求） */
+  sendDelayMs?: number;
 }) {
   const sent: Sent[] = [];
   const typing: ChatTarget[] = [];
@@ -109,6 +118,7 @@ function setup({
         conversationId: id,
         logger,
         checkIdleOnCreate,
+        tools,
       });
       conversations.push(conversation);
       return conversation;
@@ -119,6 +129,7 @@ function setup({
         if (typingFails) throw new Error('网络不通');
       },
       send: async (target, text, replyTo) => {
+        if (sendDelayMs) await sleep(sendDelayMs);
         sent.push({ target, text, replyTo });
       },
     },
@@ -739,6 +750,207 @@ describe('非文字消息', () => {
         msg: 'telegram.download_failed',
         fields: { conversationId: expect.any(String), kind: 'photo', size: 64 },
       },
+    ]);
+  });
+});
+
+describe('分条发送（装了工具时）', () => {
+  const usage = {
+    inputTokens: { total: 1, noCache: 1, cacheRead: undefined, cacheWrite: undefined },
+    outputTokens: { total: 1, text: 1, reasoning: undefined },
+  };
+  const text = (content: string): StreamPart[] => [
+    { type: 'text-start', id: 't' },
+    { type: 'text-delta', id: 't', delta: content },
+    { type: 'text-end', id: 't' },
+  ];
+  const call = (id = 'c1'): StreamPart[] => [
+    { type: 'tool-input-start', id, toolName: 'lookup' },
+    { type: 'tool-input-delta', id, delta: '{}' },
+    { type: 'tool-input-end', id },
+    { type: 'tool-call', toolCallId: id, toolName: 'lookup', input: '{}' },
+  ];
+  const finish = (reason: 'stop' | 'tool-calls'): StreamPart => ({
+    type: 'finish',
+    finishReason: { unified: reason, raw: undefined },
+    usage,
+  });
+  /** 这一步说了 content（可以为空）再调工具 */
+  const callsTool = (content = ''): StreamPart[] => [
+    ...(content ? text(content) : []),
+    ...call(),
+    finish('tool-calls'),
+  ];
+  const answer = (content: string): StreamPart[] => [...text(content), finish('stop')];
+  /** 输出 content 后在流中报错 */
+  const failsAfter = (content: string): StreamPart[] => [
+    ...text(content).slice(0, -1),
+    { type: 'error', error: { message: '服务端过载' } },
+  ];
+  const serverError = () =>
+    new APICallError({
+      message: 'HTTP 500',
+      url: 'http://mock.test/v1/chat/completions',
+      requestBodyValues: {},
+      statusCode: 500,
+      responseHeaders: { 'retry-after-ms': '0' },
+    });
+
+  /** 依次处理每次请求：段数组原样输出；Error 则请求失败 */
+  function steps(...turns: Array<StreamPart[] | Error>) {
+    let index = 0;
+    return new MockLanguageModelV4({
+      doStream: async () => {
+        const turn = turns[index++] ?? answer('');
+        if (turn instanceof Error) throw turn;
+        return { stream: simulateReadableStream({ chunks: turn }) };
+      },
+    });
+  }
+
+  /**
+   * 装上 lookup 工具的 bot：工具执行时记下群里已经发出的消息（seen，也用来知道工具开始执行了），
+   * gate 给出时等它放行
+   */
+  function setupWithTool(model: MockLanguageModelV4, gate?: Promise<void>) {
+    const seen: string[][] = [];
+    let sentNow: () => string[] = () => [];
+    const lookup = defineTool({
+      name: 'lookup',
+      description: '查一下',
+      input: z.object({}),
+      execute: async () => {
+        seen.push(sentNow());
+        await gate;
+        return '查到了';
+      },
+    });
+    // 发送要花一点时间，像真的网络请求：与工具执行并行
+    const t = setup({ model, tools: installTools([lookup], {}).tools, sendDelayMs: 20 });
+    sentNow = () => t.sent.map((s) => s.text);
+    return { ...t, seen };
+  }
+
+  const quoted = (sent: Sent[]) => sent.map(({ text, replyTo }) => ({ text, replyTo }));
+
+  it('两步回复：调工具前说的话在这一步结束时发出（回复还没结束），最后的回答另发，都引用触发消息', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const { bot, sent } = setupWithTool(steps(callsTool('我查一下'), answer('查到了，是 4')), gate);
+
+    const trigger = message({ text: 'nori 查一下' });
+    await bot.handle(trigger);
+    // 工具还卡在闸门上、回复没有结束：第一条已经发出
+    const deadline = Date.now() + 2000;
+    while (sent.length === 0 && Date.now() < deadline) await sleep(5);
+    expect(quoted(sent)).toEqual([{ text: '我查一下', replyTo: trigger.message_id }]);
+    release();
+    await bot.idle();
+
+    expect(quoted(sent)).toEqual([
+      { text: '我查一下', replyTo: trigger.message_id },
+      { text: '查到了，是 4', replyTo: trigger.message_id },
+    ]);
+  });
+
+  it('只调工具、没说话的步不发', async () => {
+    const { bot, sent } = setupWithTool(steps(callsTool(), answer('查到了')));
+
+    const trigger = message({ text: 'nori 查一下' });
+    await bot.handle(trigger);
+    await bot.idle();
+
+    expect(quoted(sent)).toEqual([{ text: '查到了', replyTo: trigger.message_id }]);
+  });
+
+  it('第 2 步失败：第 1 步的文字已发，第 2 步的半截不发，随后引用触发消息发失败提示', async () => {
+    const { bot, sent } = setupWithTool(
+      steps(callsTool('我查一下'), failsAfter('结果'), failsAfter('结果'), failsAfter('结果')),
+    );
+
+    const trigger = message({ text: 'nori 查一下' });
+    await bot.handle(trigger);
+    await bot.idle();
+
+    expect(quoted(sent)).toEqual([
+      { text: '我查一下', replyTo: trigger.message_id },
+      { text: '（出错了）', replyTo: trigger.message_id },
+    ]);
+  });
+
+  it('第 2 步请求失败：同样先有第 1 步的文字，再有失败提示', async () => {
+    const { bot, sent } = setupWithTool(
+      steps(callsTool('我查一下'), serverError(), serverError(), serverError()),
+    );
+
+    await bot.handle(message({ text: 'nori 查一下' }));
+    await bot.idle();
+
+    expect(sent.map((s) => s.text)).toEqual(['我查一下', '（出错了）']);
+  });
+
+  it('第 2 步流中途重试：第 1 步的文字只发一次，第 2 步只发重新生成后的文字', async () => {
+    const { bot, sent } = setupWithTool(
+      steps(callsTool('我查一下'), failsAfter('结果'), answer('结果是 4')),
+    );
+
+    const trigger = message({ text: 'nori 查一下' });
+    await bot.handle(trigger);
+    await bot.idle();
+
+    expect(quoted(sent)).toEqual([
+      { text: '我查一下', replyTo: trigger.message_id },
+      { text: '结果是 4', replyTo: trigger.message_id },
+    ]);
+  });
+
+  it('长文字拆分：每一步的第一段引用触发消息，其余不引用', async () => {
+    const long = `${'a'.repeat(telegramMessageLimit)}${'b'.repeat(10)}`;
+    const { bot, sent } = setupWithTool(steps(callsTool(long), answer(`${long}c`)));
+
+    const trigger = message({ text: 'nori 讲长一点' });
+    await bot.handle(trigger);
+    await bot.idle();
+
+    expect(sent.map(({ text, replyTo }) => ({ length: text.length, replyTo }))).toEqual([
+      { length: telegramMessageLimit, replyTo: trigger.message_id },
+      { length: 10, replyTo: undefined },
+      { length: telegramMessageLimit, replyTo: trigger.message_id },
+      { length: 11, replyTo: undefined },
+    ]);
+  });
+
+  it('执行过工具、最后一步没有文字：不发失败提示，之前发出的保留', async () => {
+    const { bot, sent } = setupWithTool(steps(callsTool('我查一下'), answer('')));
+
+    await bot.handle(message({ text: 'nori 查一下' }));
+    await bot.idle();
+
+    expect(sent.map((s) => s.text)).toEqual(['我查一下']);
+  });
+
+  it('合并回复：工具执行期间又被触发，这次的各条都引用原来的触发，下一次的引用期间最后一条触发', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const { bot, sent, seen } = setupWithTool(
+      steps(callsTool('我查一下'), answer('查到了'), answer('第二次')),
+      gate,
+    );
+
+    const first = message({ text: 'nori 查一下' });
+    await bot.handle(first);
+    const deadline = Date.now() + 2000;
+    while (seen.length === 0 && Date.now() < deadline) await sleep(5);
+    await bot.handle(message({ text: 'nori 还有我' }));
+    const last = message({ text: 'nori 也查查我' });
+    await bot.handle(last);
+    release();
+    await bot.idle();
+
+    expect(quoted(sent)).toEqual([
+      { text: '我查一下', replyTo: first.message_id },
+      { text: '查到了', replyTo: first.message_id },
+      { text: '第二次', replyTo: last.message_id },
     ]);
   });
 });
