@@ -7,10 +7,16 @@ declare module 'turndown' {
     bulletListMarker?: '-' | '+' | '*';
   };
   type Plugin = (service: TurndownService) => void;
+  type Node = { nodeName: string; textContent: string | null };
+  type Rule = {
+    filter: (node: Node) => boolean;
+    replacement: (content: string, node: Node) => string;
+  };
 
   export default class TurndownService {
     constructor(options?: Options);
     use(plugin: Plugin | Plugin[]): this;
+    addRule(key: string, rule: Rule): this;
     /** 传 HTML 字符串时由 turndown 自带的 domino 解析 */
     turndown(html: string): string;
   }

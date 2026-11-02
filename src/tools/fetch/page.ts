@@ -16,6 +16,9 @@ export type Page = {
   notes: string[];
 } & ({ content: string } | { summary: string });
 
+/** 正文超过 5 MB 被截短时头部的提示 */
+export const truncatedNote = '正文超过 5 MB，后面的部分没有读';
+
 /** 正文一次最多给这么多字符，超出的用 offset 接着读 */
 export const maxChars = 20_000;
 

@@ -4,8 +4,8 @@ import { parseHTML } from 'linkedom';
 import TurndownService from 'turndown';
 
 // linkedom 的类型依赖 DOM 库（本项目不引入），这两个实际都是 any
-type HtmlDocument = ReturnType<typeof parseHTML>['document'];
-type HtmlElement = HtmlDocument['body'];
+export type HtmlDocument = ReturnType<typeof parseHTML>['document'];
+export type HtmlElement = HtmlDocument['body'];
 
 /** 读网页的方式：正文模式只取文章正文，整页模式去掉脚本、导航等之后整页转换 */
 export type FetchMode = 'article' | 'page';
@@ -81,6 +81,21 @@ function readPage(html: string, url: string): Converted {
   };
 }
 
+/**
+ * 站点处理器用：解析 HTML，交给 prepare 改动 document（删元素、删节……），补全相对链接后
+ * 把整个 body 转成 Markdown，清理与表格的整理同两种模式
+ */
+export function bodyToMarkdown(
+  html: string,
+  url: string,
+  prepare: (document: HtmlDocument) => void,
+): string {
+  const document = parse(html, url);
+  prepare(document);
+  absolutizeLinks(document);
+  return toMarkdown(document.body?.innerHTML ?? '', document);
+}
+
 /** 解析成 document，设上 baseURI 与 documentURI：有 <base href> 时以它为准，相对于最终 URL 解析 */
 function parse(html: string, url: string): HtmlDocument {
   // linkedom 不补省略的 <html>、<head>、<body>：没写 <body> 时自己包一层，否则内容不在 body 里
@@ -103,7 +118,7 @@ function resolve(uri: string | null | undefined, base: string): string | undefin
   }
 }
 
-// 整页模式自己补全相对链接（正文模式由 readability 补）：页内锚点在没有 <base> 时保持原样，
+// 整页模式与站点处理器自己补全相对链接（正文模式由 readability 补）：页内锚点在没有 <base> 时保持原样，
 // javascript: 链接只留文字
 function absolutizeLinks(document: HtmlDocument): void {
   const { baseURI, documentURI } = document as { baseURI: string; documentURI: string };
@@ -148,11 +163,17 @@ function toMarkdown(html: string, document: HtmlDocument): string {
     headingStyle: 'atx',
     codeBlockStyle: 'fenced',
     bulletListMarker: '-',
-  }).use(gfm);
+  })
+    .use(gfm)
+    // 表格里的代码（见 tidyTables）：文字原样包进反引号，不转义
+    .addRule('tableCode', {
+      filter: (node) => node.nodeName === tableCodeTag.toUpperCase(),
+      replacement: (_content, node) => inlineCode(node.textContent ?? ''),
+    });
   const pages = [document.documentURI, document.baseURI].map(withoutHash);
   return (
     turndown
-      .turndown(html)
+      .turndown(tidyTables(html))
       // data: 内联图片换成 alt 文字，没有 alt 就去掉
       .replace(/!\[([^\]]*)\]\(data:[^)]*\)/g, '$1')
       // 文字为空、只指向页内锚点的链接
@@ -163,6 +184,82 @@ function toMarkdown(html: string, document: HtmlDocument): string {
       .replace(/\n(?:[ \t]*\n){2,}/g, '\n\n')
       .trim()
   );
+}
+
+// 跨列再多也只拆这么多，防止异常的 colspan 撑出巨大的表格
+const maxColspan = 20;
+// 表格里的代码换成这个自定义元素：gfm 插件见到表格里有 code 就整张表保留成 HTML
+const tableCodeTag = 'luoli-code';
+// 单元格里的块级元素：拆掉，前后的内容用「; 」隔开
+const cellBlocks =
+  'p, div, ul, ol, li, dl, dt, dd, h1, h2, h3, h4, h5, h6, blockquote, figure, figcaption, center, br, hr';
+// 单元格里拆块时临时用的分隔记号（私用区字符，网页正文里不会有）
+const separator = '';
+const edgeSeparators = /^[\s]+|[\s]+$/g;
+const innerSeparators = /\s*[\s]*/g;
+// 表格里的元素只留这些属性，class、style 等都去掉
+const keptAttributes = new Set(['href', 'src', 'alt', 'title', 'rowspan']);
+
+/**
+ * 整理表格，让 gfm 插件能转成 GFM 表格，否则它会跳过或整张表保留成原始 HTML。正文、整页模式与
+ * 站点处理器都经过这里，表格外的内容不动：
+ * - 跨列的单元格拆成几个空单元格：第一行有跨列（如信息框的标题行）时分隔行会错位；
+ * - 单元格（与表格标题）里的块级内容压成一行：列表、段落等用「; 」连接，代码块与行内代码换成
+ *   行内代码，里面的换行压成一个空格；
+ * - 去掉表格内元素的 class、style 等属性。
+ * 套着别的表格的表格不动：gfm 插件本来就把它的单元格逐个当段落
+ */
+function tidyTables(html: string): string {
+  if (!/<table[\s>]/i.test(html)) return html;
+  const { document } = parseHTML(`<!doctype html><html><head></head><body>${html}</body></html>`);
+  for (const table of document.querySelectorAll('table')) {
+    if (table.querySelector('table')) continue;
+    for (const cell of table.querySelectorAll('th[colspan], td[colspan]')) {
+      const span = Number(cell.getAttribute('colspan'));
+      cell.removeAttribute('colspan');
+      if (Number.isInteger(span) && span > 1 && span <= maxColspan) {
+        const tag = cell.tagName.toLowerCase();
+        cell.insertAdjacentHTML('afterend', `<${tag}></${tag}>`.repeat(span - 1));
+      }
+    }
+    for (const cell of table.querySelectorAll('th, td, caption')) flattenCell(cell, document);
+    for (const element of [table, ...table.querySelectorAll('*')]) {
+      for (const name of element.getAttributeNames()) {
+        if (!keptAttributes.has(name)) element.removeAttribute(name);
+      }
+    }
+  }
+  return document.body?.innerHTML ?? html;
+}
+
+function flattenCell(cell: HtmlElement, document: HtmlDocument): void {
+  // 先换代码块（里面的 code 跟着没了），再换剩下的行内代码
+  for (const selector of ['pre', 'code']) {
+    for (const code of cell.querySelectorAll(selector)) {
+      const marker = document.createElement(tableCodeTag);
+      marker.textContent = (code.textContent ?? '').replace(/\s+/g, ' ').trim();
+      code.replaceWith(marker);
+    }
+  }
+  // 块级元素拆掉，内容留在原处，前后各加一个分隔记号
+  for (const block of cell.querySelectorAll(cellBlocks)) {
+    const parent = block.parentNode;
+    parent.insertBefore(document.createTextNode(separator), block);
+    while (block.firstChild) parent.insertBefore(block.firstChild, block);
+    parent.insertBefore(document.createTextNode(separator), block);
+    block.remove();
+  }
+  const inner: string = cell.innerHTML;
+  if (inner.includes(separator)) {
+    cell.innerHTML = inner.replace(edgeSeparators, '').replace(innerSeparators, '; ');
+  }
+}
+
+/** 行内代码：文字里有反引号时用两个反引号包 */
+function inlineCode(text: string): string {
+  const code = text.replace(/\s+/g, ' ').trim();
+  if (code === '') return '';
+  return code.includes('`') ? `\`\` ${code} \`\`` : `\`${code}\``;
 }
 
 function withoutHash(url: string): string {

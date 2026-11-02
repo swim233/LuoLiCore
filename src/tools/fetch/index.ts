@@ -1,7 +1,7 @@
 import { z } from 'zod';
-import { defineTool, ToolError, type ToolDefinition } from '../../core/index.js';
+import { defineTool, ToolError, type Logger, type ToolDefinition } from '../../core/index.js';
 import { defaultJina } from './jina.js';
-import { renderPage } from './page.js';
+import { renderPage, truncatedNote } from './page.js';
 import { readGeneric, type ReadOptions, type ReadResult } from './read.js';
 import { createRequester, FetchError, type FetchErrorKind, type Requester } from './request.js';
 import { siteHandlers, type SiteHandler } from './sites.js';
@@ -76,7 +76,8 @@ export function createFetchTool({
       let output: string;
       try {
         const url = normalizeUrl(raw);
-        result = (await fromSites(url, sites, options)) ?? (await readGeneric(url, options));
+        result =
+          (await fromSites(url, sites, options, ctx.logger)) ?? (await readGeneric(url, options));
         output = renderPage(result.page, offset);
       } catch (error) {
         const failure =
@@ -126,19 +127,25 @@ function normalizeUrl(raw: string): URL {
   return url;
 }
 
-/** 第一个认得这个网址的站点处理器来处理；它不处理或失败时返回 undefined，走通用流程 */
+/**
+ * 第一个认得这个网址的站点处理器来处理；它不处理或失败时返回 undefined，走通用流程。
+ * 每次记一条 fetch.site：处理器名字与结果（用了、不处理、失败），不记网址与内容
+ */
 async function fromSites(
   url: URL,
   sites: readonly SiteHandler[],
   { requester, signal, mode }: ReadOptions,
+  logger: Logger,
 ): Promise<ReadResult | undefined> {
   const site = sites.find((handler) => handler.matches(url));
   if (!site) return undefined;
   try {
-    const page = await site.read(url, { requester, signal, mode });
-    return page && { page, truncated: false, jina: false };
+    const page = await site.read(url, { requester, signal, mode, logger });
+    logger.info({ site: site.name, outcome: page ? 'used' : 'declined' }, 'fetch.site');
+    return page && { page, truncated: page.notes.includes(truncatedNote), jina: false };
   } catch (error) {
     if (signal.aborted) throw error;
+    logger.info({ site: site.name, outcome: 'failed' }, 'fetch.site');
     return undefined;
   }
 }

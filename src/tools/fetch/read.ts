@@ -2,7 +2,7 @@ import { ToolError } from '../../core/index.js';
 import { decodeText } from './body.js';
 import { convertHtml, isPoorConversion, type Converted, type FetchMode } from './convert.js';
 import { readViaJina, type JinaOptions } from './jina.js';
-import type { Page } from './page.js';
+import { truncatedNote, type Page } from './page.js';
 import type { FetchResponse, Requester } from './request.js';
 
 export type ReadOptions = {
@@ -29,7 +29,6 @@ const challengePages: Array<(url: URL) => boolean> = [
   (url) => url.pathname.includes('/mp/wappoc_appmsgcaptcha'),
 ];
 
-const truncatedNote = '正文超过 5 MB，后面的部分没有读';
 const commentsNote = '页面里有评论区，要看用 mode=page';
 const javaScriptNote = '页面可能要 JavaScript 才能显示';
 
