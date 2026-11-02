@@ -578,7 +578,7 @@ describe('上限与收尾', () => {
     expect(logsOf(entries, 'reply.limit')[0]?.fields).toMatchObject({ reason: 'time', step: 2 });
   });
 
-  it('收尾步里模型不理会 toolChoice 仍调工具：工具不执行、不再请求，SDK 按 ToolChoiceViolationError 报错，回复失败', async () => {
+  it('收尾步里模型不理会 toolChoice 仍调工具：工具不执行、不再请求，SDK 按 ToolChoiceViolationError 报错，回复失败；只写入完成的第 1 步', async () => {
     const dice = diceTool();
     const model = scriptedModel(
       calls(call('dice', { sides: 6 }, 'c1')),
@@ -595,9 +595,17 @@ describe('上限与收尾', () => {
     expect(model.doStreamCalls).toHaveLength(2);
     expect(dice.received).toHaveLength(1);
     expect(chunks.filter((chunk) => chunk.type === 'error')).toHaveLength(1);
-    expect((await conversation.messages()).map((m) => m.role)).toEqual(['user']);
+    // 收尾步也收到了 finish-step，但它出了错，不算完成；它的文字与调用都不写
+    const reply = (await conversation.messages())[1];
+    expect(reply?.metadata?.failed).toBe(true);
+    expect(reply?.parts).toMatchObject([
+      { type: 'step-start' },
+      { type: 'tool-dice', toolCallId: 'c1', state: 'output-available' },
+    ]);
+    expect(reply?.parts).toHaveLength(2);
     expect(logsOf(entries, 'reply.failed')[0]?.fields).toMatchObject({
       error: { type: 'AI_ToolChoiceViolationError' },
+      saved: true,
       steps: 2,
       toolCalls: 1,
     });
@@ -797,16 +805,20 @@ describe('中止', () => {
     expect(logsOf(entries, 'tool.end').map((e) => [e.level, e.fields.outcome])).toEqual([
       ['info', 'aborted'],
     ]);
-    // 半截照常写入并标记；工具段停在没有结果的状态
+    // 半截照常写入并标记；没有结果的工具段以「工具调用未完成」结束
     const saved = (await conversation.messages())[1];
     expect(saved?.metadata?.aborted).toBe(true);
-    expect(toolPartsOf(saved).map((part) => part.state)).toEqual(['input-available']);
+    expect(toolPartsOf(saved).map((part) => [part.state, part.errorText])).toEqual([
+      ['output-error', '工具调用未完成'],
+    ]);
 
-    // 没有结果的工具调用不发给模型，下一次请求不会被拒
+    // 下一次请求不会被拒；最后是工具段，标记另起一步
     const next = await round('然后呢');
     expect(next.some((chunk) => chunk.type === 'error')).toBe(false);
     expect(messagesOf(model, 1).slice(1)).toEqual([
-      'assistant: 我查一下\n（回复被中止）',
+      'assistant: 我查一下<call slow {}>',
+      'tool: <result slow {"type":"error-text","value":"工具调用未完成"}>',
+      'assistant: （回复被中止）',
       expect.stringContaining('然后呢'),
     ]);
   });
@@ -924,7 +936,7 @@ describe('与重试、超时的配合', () => {
     expect((await conversation.messages()).map((m) => m.role)).toEqual(['user', 'assistant']);
   });
 
-  it('第 2 步等不到第一段输出：报首段超时（看这一步，不受第 1 步的输出影响）；回复失败，有 steps 与 toolCalls', async () => {
+  it('第 2 步等不到第一段输出：报首段超时（看这一步，不受第 1 步的输出影响）；回复失败，写入完成的第 1 步，有 steps 与 toolCalls', async () => {
     const model = scriptedModel(calls(text('我查一下'), call('dice', { sides: 6 })), hanging([]));
     const { conversation, entries, round } = setup({
       model,
@@ -938,8 +950,15 @@ describe('与重试、超时的配合', () => {
       type: 'error',
       errorText: '等待模型输出超时：0.05 秒内没有收到第一段输出',
     });
-    expect((await conversation.messages()).map((m) => m.role)).toEqual(['user']);
-    expect(logsOf(entries, 'reply.failed')[0]?.fields).toMatchObject({ steps: 2, toolCalls: 1 });
+    expect((await conversation.messages()).map((m) => [m.role, m.metadata?.failed])).toEqual([
+      ['user', undefined],
+      ['assistant', true],
+    ]);
+    expect(logsOf(entries, 'reply.failed')[0]?.fields).toMatchObject({
+      saved: true,
+      steps: 2,
+      toolCalls: 1,
+    });
   });
 
   it('只输出了工具调用参数就停住：算已有输出，报段间超时', async () => {

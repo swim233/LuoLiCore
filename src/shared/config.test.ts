@@ -13,6 +13,24 @@ function errorOf(env: Env): string {
   return result.error;
 }
 
+describe('工具结果在历史里的默认长度', () => {
+  it('LUOLI_TOOL_HISTORY_CHARS 是正整数；不设或为空时为 undefined，用核心的默认值', () => {
+    const set = parse({ LUOLI_TOOL_HISTORY_CHARS: '500' });
+    expect(set.ok && set.config.toolHistoryChars).toBe(500);
+    for (const env of [{}, { LUOLI_TOOL_HISTORY_CHARS: '' }]) {
+      const result = parse(env);
+      expect(result.ok && result.config.toolHistoryChars).toBeUndefined();
+    }
+  });
+
+  it('不合法的值报错', () => {
+    const invalid = ['0', '-1', '1.5', 'abc', '99999999999999999999'];
+    expect(invalid.map((value) => errorOf({ LUOLI_TOOL_HISTORY_CHARS: value }))).toEqual(
+      invalid.map((value) => `LUOLI_TOOL_HISTORY_CHARS 必须是正整数，当前为 "${value}"`),
+    );
+  });
+});
+
 describe('步数上限与回复、工具的超时', () => {
   it('不设或为空时为 undefined，用核心的默认值', () => {
     const unset = parse({});

@@ -22,6 +22,8 @@ export type MessageMetadata = {
   unreadableFiles?: string[];
   /** 助手回复被中止，正文是中止前已输出的部分 */
   aborted?: true;
+  /** 助手回复因出错中断，正文是出错前已完成的步（失败那一步自己的输出不在其中） */
+  failed?: true;
   /** 正常完成的助手回复才有；只算最终成功的那次请求 */
   usage?: Usage;
 };

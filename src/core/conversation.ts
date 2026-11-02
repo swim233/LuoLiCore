@@ -21,12 +21,13 @@ import {
 } from './image-fallback.js';
 import { silentLogger, type Logger } from './logger.js';
 import { toCallTokens, toUsage } from './model.js';
-import type { Author, Message, MessageChunk } from './message.js';
+import type { Author, Message, MessageChunk, MessageMetadata } from './message.js';
 import { formatForModel, summaryInstruction, systemPrompt } from './prompt.js';
 import { PromptFileError, type PromptSource } from './prompt-files.js';
 import { createSegmenter, type SegmentOptions, type Summarize } from './segments.js';
 import { createMemoryStore } from './storage/memory.js';
 import type { ConversationStore, ModelCall, Segment } from './storage/types.js';
+import { hasToolCalls, settleToolParts, toolHistory } from './tool-history.js';
 import { runTool, toToolSet, ToolError, watchToolCalls, type InstalledTool } from './tools.js';
 
 export type Conversation = {
@@ -39,7 +40,7 @@ export type Conversation = {
    * 根据当前历史生成回复。错误以 error chunk 出现在流中，不会抛出；
    * 每次重试前流中出现一个 transient 的 `data-retry` 段；流中途重新生成时随后还有
    * 一个 `reset-step`，失败那次已输出的内容不会写入历史。
-   * 流读完时回复已写入历史；出错、被取消或没有任何文字时不写入。
+   * 流读完时回复已写入历史；被取消、一步都没完成就出错、没有任何文字也没有执行过工具时不写入。
    * 后台正在空闲切段时，等它结束再读当前段；压缩进行中不等，照常用当前段。
    * 开始时读一次提示词，这次的重试与拒收图片后的恢复都用这一份；提示词文件有误时按失败处理
    * （流里一个 error 段，不发请求，不记模型调用）。
@@ -49,6 +50,8 @@ export type Conversation = {
    * 装了工具时一次回复可以有多步：模型调了工具，执行完把结果交回模型再请求一次，直到不再调工具
    * 或碰到上限（步数、总时长）。工具出错、超时、参数不对都以错误结果交给模型，循环照常继续，
    * 不算回复失败。重试与首段、段间超时按每一步的请求计。
+   * 中途出错时，已完成的步（流里收到 finish-step 的步）写入历史并标记 failed，失败那一步自己的
+   * 输出不写；没有完成的步时不写入。写入前没有结果的工具调用都以「工具调用未完成」结束。
    * 上一个回复的流还没结束时调用会立即抛错。
    */
   reply(options?: ReplyOptions): ReadableStream<MessageChunk>;
@@ -89,6 +92,7 @@ export function createConversation({
   timeouts = {},
   tools = [],
   maxSteps = 50,
+  toolHistoryChars = 2000,
   segments = {},
   checkIdleOnCreate = true,
 }: {
@@ -125,6 +129,11 @@ export function createConversation({
    * 是收尾步：工具定义照旧发出，但不许调用，请求末尾加一条收尾提示（prompts/tool-limit.md）
    */
   maxSteps?: number;
+  /**
+   * 以后的回复（和摘要）里，没有声明 history 的工具结果截短到这么多字符（默认 2000）；
+   * 不在这次装上的工具里的、工具出错的说明也按它截短
+   */
+  toolHistoryChars?: number;
   /** 分段：空闲切段、压缩与摘要（ADR-0004） */
   segments?: SegmentOptions;
   /**
@@ -136,19 +145,23 @@ export function createConversation({
   const { firstChunkMs = 60_000, chunkMs = 30_000, replyMs = 600_000, toolMs = 60_000 } = timeouts;
   let replying = false;
 
+  const presentTools = toolHistory(tools, toolHistoryChars);
+
   /**
-   * 历史消息换成发给模型的消息：标签格式、被中止的标记、图片换成 data URL。
-   * 读不到的图片换成文字，记一条 warn（只记地址）。
-   * 没有结果的工具调用（如工具执行中被中止）先略去，否则请求会被 SDK 拒绝；
-   * 以后改成补上「工具调用未完成」（ADR-0006）
+   * 历史消息换成发给模型的消息：工具结果按工具的声明呈现、标签格式、中途结束的标记、
+   * 图片换成 data URL。读不到的图片换成文字，记一条 warn（只记地址）；
+   * 呈现函数出错时按默认处理，记一条 warn（只记工具名与错误类型；同一个调用在这个会话对象里只记一次）
    */
   async function toModelMessages(history: Message[], logFields: object): Promise<ModelMessage[]> {
     const onMissing = (url: string) => logger.warn({ ...logFields, url }, 'file.missing');
+    const onRenderError = (tool: string, error: unknown) =>
+      logger.warn({ ...logFields, tool, errorType: errorKind(error) }, 'tool.history_failed');
     return convertToModelMessages(
       await Promise.all(
-        history.map((message) => inlineFiles(formatForModel(message), fileStore, onMissing)),
+        history.map((message) =>
+          inlineFiles(formatForModel(presentTools(message, onRenderError)), fileStore, onMissing),
+        ),
       ),
-      { ignoreIncompleteToolCalls: true },
     );
   }
 
@@ -422,6 +435,43 @@ export function createConversation({
           },
         });
 
+      // 完成的步：流里收到了 finish-step（工具已执行完、结果已在段里）、此前没有出错的步。
+      // 出错的那一步也可能随后收到 finish-step（如模型违反 toolChoice），不算
+      let finishedSteps = 0;
+      const countFinishedSteps = () => {
+        let errored = false;
+        return new TransformStream<MessageChunk, MessageChunk>({
+          transform(chunk, controller) {
+            if (chunk.type === 'error') errored = true;
+            if (chunk.type === 'finish-step' && !errored) finishedSteps++;
+            controller.enqueue(chunk);
+          },
+        });
+      };
+
+      /**
+       * 写入历史：工具段收尾（见 settleToolParts），停在 streaming 状态的文字、推理段改为 done，
+       * 空的文字段（一步只调了工具、没说话时会有）与末尾没有内容的 step-start 去掉；
+       * metadata 合并 extra。序号用回复开始时预留的
+       */
+      async function save(message: Message, extra: Partial<MessageMetadata> = {}) {
+        const parts = settleToolParts(message.parts).flatMap((part): Message['parts'] => {
+          if (part.type === 'text' && part.text === '') return [];
+          return (part.type === 'text' || part.type === 'reasoning') && part.state === 'streaming'
+            ? [{ ...part, state: 'done' }]
+            : [part];
+        });
+        while (parts.at(-1)?.type === 'step-start') parts.pop();
+        await store.add(
+          {
+            ...message,
+            parts,
+            metadata: { createdAt: new Date().toISOString(), ...message.metadata, ...extra },
+          },
+          seq,
+        );
+      }
+
       /**
        * 装了工具时一次 streamText 调用的多步循环（没有工具时为 undefined）。每次调用（含拒收图片后的
        * 重试）各用一份，从第 1 步数起。每一步开始前看是否已到上限：这一步是第 maxSteps 步，
@@ -554,7 +604,8 @@ export function createConversation({
               onError: describeStreamError,
             })
               .pipeThrough(tracker.markStreamRetries())
-              .pipeThrough(timeoutAsFailure()),
+              .pipeThrough(timeoutAsFailure())
+              .pipeThrough(countFinishedSteps()),
           );
         },
         onError: describeError,
@@ -584,41 +635,49 @@ export function createConversation({
               });
             }
             if (outcome === 'failed') {
-              logger.error({ ...summary, error: summarizeError(failure?.error) }, 'reply.failed');
-            } else if (outcome === 'aborted') {
-              // 半截回复写入历史并标记 aborted；一个字都没输出就被中止时不写入
-              const saved = hasText(responseMessage);
+              // 已完成的步写入历史并标记 failed：群里已经看到的话、工具已经产生的副作用，
+              // 模型以后应该知道。失败那一步自己的输出不写；一步都没完成时不写入，序号空着。
+              // 失败没有用量（失败那一步可能也带来了 finish 段的用量）
+              const done = {
+                ...responseMessage,
+                parts: firstSteps(responseMessage.parts, finishedSteps),
+              };
+              const saved = finishedSteps > 0 && (hasText(done) || hasToolCalls(done));
               if (saved) {
-                await store.add(
-                  {
-                    ...responseMessage,
-                    // 中止时最后一段还停在 streaming 状态；写入历史的是定稿，改为 done
-                    parts: responseMessage.parts.map((part) =>
-                      (part.type === 'text' || part.type === 'reasoning') &&
-                      part.state === 'streaming'
-                        ? { ...part, state: 'done' }
-                        : part,
-                    ),
-                    metadata: {
-                      createdAt: new Date().toISOString(),
-                      ...responseMessage.metadata,
-                      aborted: true,
-                    },
-                  },
-                  seq,
-                );
+                const metadata: MessageMetadata = {
+                  createdAt: new Date().toISOString(),
+                  ...done.metadata,
+                  failed: true,
+                };
+                delete metadata.usage;
+                await save({ ...done, metadata });
               }
+              // 写入的步用的是换成占位后被接受的请求：标记照写，否则这些图片落到这条回复之前，
+              // 不再算可疑，之后的请求会一直带着它们被拒
+              const marked = saved ? await markUnreadable() : {};
+              logger.error(
+                { ...summary, saved, ...marked, error: summarizeError(failure?.error) },
+                'reply.failed',
+              );
+            } else if (outcome === 'aborted') {
+              // 半截回复写入历史并标记 aborted；一个字都没输出、也没执行过工具时不写入。
+              // 执行中的工具可能已经产生副作用，以「工具调用未完成」结束后照样写入
+              const saved = hasText(responseMessage) || hasToolCalls(responseMessage);
+              if (saved) await save(responseMessage, { aborted: true });
               const marked = saved ? await markUnreadable() : {};
               logger.info({ ...summary, outcome: 'aborted', saved, ...marked }, 'reply.end');
             } else if (outcome === 'cancelled') {
               logger.info({ ...summary, outcome: 'cancelled' }, 'reply.end');
             } else if (outcome === 'empty') {
-              // 正常结束却没有任何文字：与一字未出就被中止一样不写入，序号空着
+              // 正常结束却没有任何文字：执行过工具时照样写入（副作用已经发生）；
+              // 否则与一字未出就被中止一样不写入，序号空着
+              const saved = hasToolCalls(responseMessage);
+              if (saved) await save(responseMessage);
               logger.warn(
                 {
                   ...summary,
                   outcome: 'empty',
-                  saved: false,
+                  saved,
                   finishReason,
                   usage: responseMessage.metadata?.usage,
                   ...(await markUnreadable()),
@@ -626,7 +685,7 @@ export function createConversation({
                 'reply.end',
               );
             } else {
-              await store.add(responseMessage, seq);
+              await save(responseMessage);
               logger.info(
                 {
                   ...summary,
@@ -676,4 +735,11 @@ function replyOutcome({
 
 function hasText(message: Message): boolean {
   return message.parts.some((part) => part.type === 'text' && part.text.trim() !== '');
+}
+
+/** 前 count 步的段：每一步从一个 step-start 开始，切在第 count + 1 个 step-start 之前 */
+function firstSteps(parts: Message['parts'], count: number): Message['parts'] {
+  let starts = 0;
+  const end = parts.findIndex((part) => part.type === 'step-start' && ++starts > count);
+  return end === -1 ? parts : parts.slice(0, end);
 }

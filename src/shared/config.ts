@@ -13,6 +13,11 @@ export type CommonConfig = {
   timeouts: { firstChunkMs?: number; chunkMs?: number; replyMs?: number; toolMs?: number };
   /** 一次回复最多几步（不小于 2），LUOLI_MAX_STEPS；未设置时为 undefined，用核心的默认值 */
   maxSteps?: number;
+  /**
+   * 以后的回复里，没有声明呈现方式的工具结果截短到这么多字符，LUOLI_TOOL_HISTORY_CHARS；
+   * 未设置时为 undefined，用核心的默认值
+   */
+  toolHistoryChars?: number;
   /** 分段与摘要，未设置的项用核心的默认值 */
   segments: SegmentOptions;
   /** 数据库文件，LUOLI_DB，默认 data/luoli.db */
@@ -79,6 +84,22 @@ export function parseCommonConfig(
     }
   }
 
+  let toolHistoryChars: number | undefined;
+  const rawChars = env.LUOLI_TOOL_HISTORY_CHARS;
+  if (rawChars) {
+    toolHistoryChars = Number(rawChars);
+    if (!(
+      /^\d+$/.test(rawChars) &&
+      toolHistoryChars > 0 &&
+      Number.isSafeInteger(toolHistoryChars)
+    )) {
+      return {
+        ok: false,
+        error: `LUOLI_TOOL_HISTORY_CHARS 必须是正整数，当前为 "${rawChars}"`,
+      };
+    }
+  }
+
   const segments: SegmentOptions = {};
   for (const [key, variable, scale] of [
     ['idleMs', 'LUOLI_IDLE_MINUTES', 60_000],
@@ -103,6 +124,7 @@ export function parseCommonConfig(
       maxRetries,
       timeouts,
       maxSteps,
+      toolHistoryChars,
       segments,
       dbPath,
       filesDir: env.LUOLI_FILES_DIR || join(dirname(dbPath), 'files'),

@@ -1,3 +1,4 @@
+import { isToolUIPart } from 'ai';
 import type { Message } from './message.js';
 import { fill, type PromptTexts } from './prompt-files.js';
 import type { Segment } from './storage/types.js';
@@ -42,11 +43,11 @@ export function summaryInstruction(
 
 /**
  * 送模型前的格式化，只改送给模型的副本，存储里的消息不变：
- * 用户消息包成 `<message from="名字" uid="id" time="时间">…</message>`，带图片时图片在标签之间；被中止的助手回复末尾加「（回复被中止）」；
- * 其他消息原样返回。
+ * 用户消息包成 `<message from="名字" uid="id" time="时间">…</message>`，带图片时图片在标签之间；
+ * 被中止的助手回复末尾加「（回复被中止）」，出错中断的加「（回复出错中断）」；其他消息原样返回。
  */
 export function formatForModel(message: Message): Message {
-  if (message.role === 'assistant') return markAborted(message);
+  if (message.role === 'assistant') return markEnded(message);
   if (message.role !== 'user') return message;
   const texts = message.parts.flatMap((part) => (part.type === 'text' ? [part.text] : []));
   const files = message.parts.filter((part) => part.type === 'file');
@@ -90,17 +91,34 @@ export function formatForModel(message: Message): Message {
   };
 }
 
-function markAborted(message: Message): Message {
-  if (!message.metadata?.aborted) return message;
-  const lastText = message.parts.findLastIndex((part) => part.type === 'text');
-  if (lastText === -1) return message;
+/**
+ * 中途结束的回复在送模型的内容最末加标记：最后一段是文字时接在它后面；最后是工具段时另起一步，
+ * 模型看到的是工具结果之后的一条助手消息；其他（如推理）在末尾加一个文字段
+ */
+function markEnded(message: Message): Message {
+  const marker = message.metadata?.aborted
+    ? '（回复被中止）'
+    : message.metadata?.failed
+      ? '（回复出错中断）'
+      : undefined;
+  if (marker === undefined) return message;
+  const last = message.parts.findLastIndex((part) => part.type !== 'step-start');
+  const lastPart = message.parts[last];
+  if (lastPart?.type === 'text') {
+    return {
+      ...message,
+      parts: message.parts.map((part, index) =>
+        index === last ? { ...lastPart, text: `${lastPart.text}\n${marker}` } : part,
+      ),
+    };
+  }
+  const markerPart = { type: 'text' as const, text: marker };
   return {
     ...message,
-    parts: message.parts.map((part, index) =>
-      index === lastText && part.type === 'text'
-        ? { ...part, text: `${part.text}\n（回复被中止）` }
-        : part,
-    ),
+    parts:
+      lastPart && isToolUIPart(lastPart)
+        ? [...message.parts, { type: 'step-start' }, markerPart]
+        : [...message.parts, markerPart],
   };
 }
 

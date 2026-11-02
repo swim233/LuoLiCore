@@ -40,6 +40,7 @@ export async function startTelegram({
     | 'maxRetries'
     | 'timeouts'
     | 'maxSteps'
+    | 'toolHistoryChars'
     | 'segments'
   >;
   model: Parameters<typeof createConversation>[0]['model'];
@@ -90,6 +91,7 @@ export async function startTelegram({
         maxRetries: config.maxRetries,
         timeouts: config.timeouts,
         maxSteps: config.maxSteps,
+        toolHistoryChars: config.toolHistoryChars,
         segments: config.segments,
         conversationId,
         checkIdleOnCreate,
