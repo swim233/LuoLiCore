@@ -1,4 +1,4 @@
--- 模型调用的常用统计（表结构见 docs/adr/0005-sqlite-storage-in-core.md）
+-- 模型调用与工具调用的常用统计（表结构见 docs/adr/0005-sqlite-storage-in-core.md）
 -- 用法：sqlite3 -readonly data/luoli.db < docs/queries/usage.sql
 -- 时间按本地时区。token 列为空表示服务端没报；缓存命中率只算报了缓存数的调用。
 .headers on
@@ -65,4 +65,36 @@ FROM model_calls m
 JOIN conversations c ON c.id = m.conversation_id
 WHERE m.outcome = 'failed'
 ORDER BY m.started_at DESC
+LIMIT 20;
+
+.print
+.print 按工具
+-- 按工具：调用次数、失败、超时、平均耗时（毫秒）、平均与最大结果长度（字符）；调用多的在前
+SELECT
+  tool AS 工具,
+  count(*) AS 调用,
+  sum(outcome = 'failed') AS 失败,
+  sum(outcome = 'timeout') AS 超时,
+  round(avg(duration_ms)) AS 平均耗时,
+  round(avg(output_chars)) AS 平均长度,
+  max(output_chars) AS 最大长度
+FROM tool_calls
+GROUP BY tool
+ORDER BY 调用 DESC;
+
+.print
+.print 最近的工具失败
+-- 最近 20 次工具失败或超时（本地时区）：时间、会话标题、工具、第几步、结果、错误、耗时
+SELECT
+  datetime(t.started_at, 'localtime') AS 时间,
+  c.title AS 标题,
+  t.tool AS 工具,
+  t.step AS 步,
+  t.outcome AS 结果,
+  t.error AS 错误,
+  t.duration_ms AS 耗时
+FROM tool_calls t
+JOIN conversations c ON c.id = t.conversation_id
+WHERE t.outcome IN ('failed', 'timeout')
+ORDER BY t.started_at DESC
 LIMIT 20;

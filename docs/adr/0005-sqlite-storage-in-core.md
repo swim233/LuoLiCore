@@ -52,17 +52,35 @@ CREATE TABLE model_calls (
   started_at        TEXT NOT NULL,     -- 开始时间（ISO，UTC，与其他表一致）
   duration_ms       INTEGER NOT NULL,  -- 从开始到结束
   first_output_ms   INTEGER,           -- 从开始到第一段输出（文字或推理）；没有输出时为空
-  attempts          INTEGER NOT NULL,  -- HTTP 请求次数，含重试与拒收图片后的恢复
+  attempts          INTEGER NOT NULL,  -- HTTP 请求次数：各步的请求，含重试与拒收图片后的恢复
   outcome           TEXT NOT NULL,     -- 'completed' | 'empty' | 'aborted' | 'cancelled' | 'failed'
-  finish_reason     TEXT,              -- 'stop'、'length' 等；没有正常结束时为空
-  input_tokens      INTEGER,
+  finish_reason     TEXT,              -- 最后一步的 'stop'、'length' 等；没有正常结束时为空
+  input_tokens      INTEGER,           -- token 四列都是各步之和
   cache_read_tokens INTEGER,           -- 服务端报了才有
   output_tokens     INTEGER,           -- 含推理
   reasoning_tokens  INTEGER,           -- 服务端报了才有
-  error             TEXT               -- 失败时的错误类型与状态码，如 'APICallError 429'；不含正文
+  error             TEXT,              -- 失败时的错误类型与状态码，如 'APICallError 429'；不含正文
+  steps             INTEGER,           -- 表结构版本 3 加入：步数；之前的行为空
+  tool_calls        INTEGER            -- 表结构版本 3 加入：工具调用次数；之前的行为空
 );
 CREATE INDEX model_calls_time         ON model_calls(started_at);
 CREATE INDEX model_calls_conversation ON model_calls(conversation_id, started_at);
+
+-- 表结构版本 3 加入
+CREATE TABLE tool_calls (
+  id              INTEGER PRIMARY KEY,
+  conversation_id TEXT NOT NULL REFERENCES conversations(id),
+  reply_id        TEXT NOT NULL,     -- 所在回复的 id，与 model_calls.reply_id 相同
+  tool            TEXT NOT NULL,     -- 工具名（模型调了不存在的工具时，是模型给的名字）
+  step            INTEGER NOT NULL,  -- 第几步，从 1 开始
+  started_at      TEXT NOT NULL,     -- 开始时间（ISO，UTC）
+  duration_ms     INTEGER NOT NULL,  -- 超时时算到超时为止
+  outcome         TEXT NOT NULL,     -- 'completed' | 'failed' | 'timeout' | 'aborted'
+  error           TEXT,              -- 失败时的错误类型，如 'InvalidToolInputError'；不含正文
+  output_chars    INTEGER            -- 结果转成文字后的长度；没有结果时为空
+);
+CREATE INDEX tool_calls_time ON tool_calls(started_at);
+CREATE INDEX tool_calls_tool ON tool_calls(tool, started_at);
 ```
 
 - 消息一条一行，整条 `UIMessage` 存在 `ui_message` 里（ADR-0001）。查询要用的几列是它的副本，写入时一起写，读取以 JSON 为准。消息结构以后加工具调用、图片，不用改表。
@@ -70,6 +88,7 @@ CREATE INDEX model_calls_conversation ON model_calls(conversation_id, started_at
 - 回复开始生成时从 `next_seq` 预留序号，所以回复排在它看到的最后一条消息之后。回复失败或没有输出时序号空着，序号只用于排序。
 - 图片存为 `data/files/<内容哈希>.<扩展名>`，消息里以 `luoli-file:` 开头的地址引用，发请求时换成图片数据。同一张图只存一份。不建文件表、成员表：名字随每条消息存快照。
 - 模型调用一次一行：一次回复或一次摘要，期间的重试都合在这一行，成功、失败、中止都记。只追加，用来统计 token、缓存命中与失败率；不记金额，要算钱时按当时的单价现算。正常完成的回复的用量仍随助手消息存一份。常用查询在 `docs/queries/usage.sql`。
+- 工具调用一次一行（ADR-0006），挂在所在回复下，用来统计每个工具的次数、失败与超时、耗时，以及结果长度（据此调整历史呈现）。模型传错参数、调了不存在的工具也记一行（结果 `failed`）。不存参数和结果：它们是对话内容，完整的在助手消息里。
 - 原文永久保留。开 WAL 模式，表结构版本记在 `PRAGMA user_version`。
 
 ## Considered Options
@@ -81,7 +100,8 @@ CREATE INDEX model_calls_conversation ON model_calls(conversation_id, started_at
 - 图片存进数据库，或只记 Telegram 的文件 id：前者让数据库变大；后者每次请求都要重新下载，且下载地址含 bot token，不能交给模型服务。
 - 消息只存用户 id、按最新名字显示：有人改名会改写整段历史，缓存失效。
 - 用量只看日志：日志会被清理，也不便统计；只存在消息 metadata 里：摘要与失败的调用没有地方放。
-- 模型调用按 HTTP 请求一行：失败的请求服务端多半不返回用量，每次请求的细节日志里已有。
+- 模型调用按 HTTP 请求一行：失败的请求服务端多半不返回用量，每次请求的细节日志里已有。按步一行同理：一次回复算一次模型调用，费用一眼可见。
+- 工具调用只记日志、不建表：日志会被清理，统计每个工具的成功率与耗时不方便。
 
 ## Consequences
 
