@@ -39,6 +39,43 @@ export function toUsage(usage: LanguageModelUsage): Usage | undefined {
   };
 }
 
+/**
+ * 一次调用各步的用量合成一份：输入、输出、总数等取 SDK 的合计（total）；缓存命中与推理 token
+ * 按每一步的原始用量判断服务端报没报。SDK 合计多步时不保留原始用量，而 openai-compatible 在
+ * 服务端没报时也填 0，只看合计会把「没报」记成 0。任何一步报了就是报了的各步之和，
+ * 没有一步报为 undefined。结果不带原始用量：toUsage、toCallTokens 直接用这两个数
+ */
+export function combineSteps(
+  total: LanguageModelUsage,
+  steps: readonly LanguageModelUsage[],
+): LanguageModelUsage {
+  if (steps.length === 0) return total;
+  const sumReported = (values: Array<number | undefined>) => {
+    const reported = values.filter((value): value is number => value !== undefined);
+    return reported.length === 0 ? undefined : reported.reduce((sum, value) => sum + value, 0);
+  };
+  return {
+    ...total,
+    inputTokenDetails: {
+      ...total.inputTokenDetails,
+      cacheReadTokens: sumReported(
+        steps.map((step) =>
+          reportsCacheRead(step.raw) ? step.inputTokenDetails.cacheReadTokens : undefined,
+        ),
+      ),
+    },
+    outputTokenDetails: {
+      ...total.outputTokenDetails,
+      reasoningTokens: sumReported(
+        steps.map((step) =>
+          reportsReasoning(step.raw) ? step.outputTokenDetails.reasoningTokens : undefined,
+        ),
+      ),
+    },
+    raw: undefined,
+  };
+}
+
 /** 模型调用表的 4 个 token 列（ADR-0005） */
 export type CallTokens = Pick<
   ModelCall,
@@ -56,7 +93,7 @@ export function toCallTokens(usage: LanguageModelUsage): CallTokens | undefined 
     inputTokens: reported.input,
     cacheReadTokens: reported.cacheRead,
     outputTokens: reported.output,
-    reasoningTokens: reports(usage.raw, 'completion_tokens_details', 'reasoning_tokens')
+    reasoningTokens: reportsReasoning(usage.raw)
       ? usage.outputTokenDetails.reasoningTokens
       : undefined,
   };
@@ -64,6 +101,10 @@ export function toCallTokens(usage: LanguageModelUsage): CallTokens | undefined 
 
 function reportsCacheRead(raw: LanguageModelUsage['raw']): boolean {
   return reports(raw, 'prompt_tokens_details', 'cached_tokens');
+}
+
+function reportsReasoning(raw: LanguageModelUsage['raw']): boolean {
+  return reports(raw, 'completion_tokens_details', 'reasoning_tokens');
 }
 
 /** 原始用量里报了 raw[details][field] 这个数 */

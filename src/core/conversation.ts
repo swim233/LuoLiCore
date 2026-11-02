@@ -20,7 +20,7 @@ import {
   withUnreadable,
 } from './image-fallback.js';
 import { silentLogger, type Logger } from './logger.js';
-import { toCallTokens, toUsage } from './model.js';
+import { combineSteps, toCallTokens, toUsage } from './model.js';
 import type { Author, Message, MessageChunk, MessageMetadata } from './message.js';
 import { formatForModel, summaryInstruction, systemPrompt } from './prompt.js';
 import { PromptFileError, type PromptSource } from './prompt-files.js';
@@ -319,11 +319,13 @@ export function createConversation({
         }
       }
       if (failure) throw failure.error;
-      [text, usage, finishReason] = await Promise.all([
-        result.text,
-        result.totalUsage,
-        result.finishReason,
-      ]);
+      const [total, steps] = await Promise.all([result.totalUsage, result.steps]);
+      [text, finishReason] = await Promise.all([result.text, result.finishReason]);
+      // 与回复相同：缓存数、推理数按各步判断服务端报没报（摘要只有一步，结果与 total 一致）
+      usage = combineSteps(
+        total,
+        steps.map((step) => step.usage),
+      );
     } catch (error) {
       // 关闭会话时的中止不算失败，与 summary.aborted 的判断一致
       await call.record(
@@ -401,8 +403,10 @@ export function createConversation({
       const { tracker } = call;
       // 拒收图片后的重试换掉的图片，按消息 id；没有重试过时为 undefined
       let fallback: Map<string, string[]> | undefined;
-      // finish 段带的总用量（各步之和，含原始用量），记进模型调用表；metadata 里的 usage 由它换算
+      // 这次回复的总用量（各步之和，见 combineSteps），记进模型调用表；metadata 里的 usage 由它换算
       let totalUsage: LanguageModelUsage | undefined;
+      // 每一步的用量（finish-step 段带着，含原始用量），合计时据此判断服务端报没报缓存数与推理数
+      const stepUsages: LanguageModelUsage[] = [];
       // 最后一步的输入 token（finish-step 段带着这一步的用量）：压缩按它判断，
       // 各步之和会把同一段上下文重复计算（ADR-0004）
       let lastStepInput: number | undefined;
@@ -620,11 +624,14 @@ export function createConversation({
                   createdAt = new Date().toISOString();
                   return { createdAt };
                 }
-                if (part.type === 'finish-step') lastStepInput = part.usage.inputTokens;
+                if (part.type === 'finish-step') {
+                  lastStepInput = part.usage.inputTokens;
+                  stepUsages.push(part.usage);
+                }
                 if (part.type === 'finish') {
                   createdAt ??= new Date().toISOString();
-                  totalUsage = part.totalUsage;
-                  const usage = toUsage(part.totalUsage);
+                  totalUsage = combineSteps(part.totalUsage, stepUsages);
+                  const usage = toUsage(totalUsage);
                   return usage ? { createdAt, usage } : { createdAt };
                 }
                 return undefined;

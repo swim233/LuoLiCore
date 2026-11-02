@@ -453,6 +453,78 @@ describe('用量', () => {
   });
 });
 
+describe('多步回复的缓存命中与推理 token：按各步判断服务端报没报', () => {
+  /**
+   * 带 openai 格式原始用量的一步：cached、reasoning 不给时原始用量里没有这一项，
+   * 而 SDK 照 openai-compatible 的做法填 0
+   */
+  function rawUsage(
+    input: number,
+    output: number,
+    { cached, reasoning }: { cached?: number; reasoning?: number } = {},
+  ): FinishPart['usage'] {
+    return {
+      inputTokens: {
+        total: input,
+        noCache: input - (cached ?? 0),
+        cacheRead: cached ?? 0,
+        cacheWrite: undefined,
+      },
+      outputTokens: { total: output, text: output - (reasoning ?? 0), reasoning: reasoning ?? 0 },
+      raw: {
+        prompt_tokens: input,
+        completion_tokens: output,
+        total_tokens: input + output,
+        ...(cached === undefined ? {} : { prompt_tokens_details: { cached_tokens: cached } }),
+        ...(reasoning === undefined
+          ? {}
+          : { completion_tokens_details: { reasoning_tokens: reasoning } }),
+      },
+    };
+  }
+
+  async function twoSteps(first: FinishPart['usage'], second: FinishPart['usage']) {
+    const t = setup({
+      definitions: [dice],
+      turns: [calls(first, call('dice', { sides: 6 })), answer('掷出了 4', second)],
+    });
+    await t.round('掷');
+    const reply = (await t.conversation.messages())[1];
+    const [row] = await t.store.calls();
+    return { usage: reply?.metadata?.usage, row };
+  }
+
+  it('两步都没报：metadata 没有 cacheRead，模型调用表两列为空；输入、输出、总数照旧是两步之和', async () => {
+    const { usage, row } = await twoSteps(rawUsage(100, 10), rawUsage(150, 20));
+
+    expect(usage).toEqual({ input: 250, output: 30, total: 280 });
+    expect(usage).not.toHaveProperty('cacheRead', 0);
+    expect(row).toMatchObject({ inputTokens: 250, outputTokens: 30 });
+    expect(row?.cacheReadTokens).toBeUndefined();
+    expect(row?.reasoningTokens).toBeUndefined();
+  });
+
+  it('两步都报了：是两步之和（报了 0 也算报了）', async () => {
+    const { usage, row } = await twoSteps(
+      rawUsage(100, 10, { cached: 30, reasoning: 0 }),
+      rawUsage(150, 20, { cached: 50, reasoning: 7 }),
+    );
+
+    expect(usage).toEqual({ input: 250, output: 30, total: 280, cacheRead: 80 });
+    expect(row).toMatchObject({ cacheReadTokens: 80, reasoningTokens: 7 });
+  });
+
+  it('只有一步报了：是报了的那一步的值', async () => {
+    const { usage, row } = await twoSteps(
+      rawUsage(100, 10),
+      rawUsage(150, 20, { cached: 40, reasoning: 3 }),
+    );
+
+    expect(usage).toEqual({ input: 250, output: 30, total: 280, cacheRead: 40 });
+    expect(row).toMatchObject({ cacheReadTokens: 40, reasoningTokens: 3 });
+  });
+});
+
 describe('压缩按最后一步的输入判断', () => {
   // 先聊一轮（输入很小），3 分钟后第二轮是两步回复；压缩时第一轮并入摘要，保留第二轮
   const segments = { compressTokens: 200, keepMessages: 1 };
