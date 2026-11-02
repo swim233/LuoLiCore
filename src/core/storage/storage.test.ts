@@ -11,6 +11,7 @@ import {
   type MessageMetadata,
   type ModelCall,
   type Storage,
+  type ToolCall,
 } from '../index.js';
 
 let nextId = 0;
@@ -46,6 +47,22 @@ function call(fields: Partial<ModelCall> = {}): ModelCall {
     cacheReadTokens: 100,
     outputTokens: 30,
     reasoningTokens: 12,
+    steps: 1,
+    toolCalls: 0,
+    ...fields,
+  };
+}
+
+/** 一次工具调用，默认是正常完成的 */
+function toolCall(fields: Partial<ToolCall> = {}): ToolCall {
+  return {
+    replyId: 'r1',
+    tool: 'dice',
+    step: 1,
+    startedAt: '2026-10-30T06:02:01.000Z',
+    durationMs: 120,
+    outcome: 'completed',
+    outputChars: 11,
     ...fields,
   };
 }
@@ -69,6 +86,22 @@ const modelCallColumns = [
   'output_tokens',
   'reasoning_tokens',
   'error',
+  'steps',
+  'tool_calls',
+];
+
+// ADR-0005 里 tool_calls 的列，按顺序
+const toolCallColumns = [
+  'id',
+  'conversation_id',
+  'reply_id',
+  'tool',
+  'step',
+  'started_at',
+  'duration_ms',
+  'outcome',
+  'error',
+  'output_chars',
 ];
 
 async function tempDir(): Promise<string> {
@@ -430,6 +463,32 @@ describe.each([
 
     expect(await store.calls()).toEqual([call()]);
   });
+
+  it('记下的工具调用按写入先后读回，没有的项为空；只读到本会话的；读回的是副本', async () => {
+    const storage = await open();
+    const a = await storage.openConversation(await storage.createConversation({ platform: 'cli' }));
+    const b = await storage.openConversation(await storage.createConversation({ platform: 'cli' }));
+    const completed = toolCall();
+    const failed = toolCall({
+      replyId: 'r2',
+      tool: 'nope',
+      step: 2,
+      durationMs: 0,
+      outcome: 'failed',
+      error: 'NoSuchToolError',
+      outputChars: undefined,
+    });
+    const timeout = toolCall({ outcome: 'timeout', outputChars: undefined });
+
+    await a.recordToolCall(completed);
+    await b.recordToolCall(timeout);
+    await a.recordToolCall(failed);
+    completed.step = 9;
+    (await a.toolCalls())[0]!.tool = '改过';
+
+    expect(await a.toolCalls()).toEqual([toolCall(), failed]);
+    expect(await b.toolCalls()).toEqual([timeout]);
+  });
 });
 
 describe('SQLite 存储', () => {
@@ -452,7 +511,7 @@ describe('SQLite 存储', () => {
     expect(await store.reserve()).toBe(2);
   });
 
-  it('新库：WAL 模式、user_version 为 2、四张表与索引按 ADR-0005 建好', async () => {
+  it('新库：WAL 模式、user_version 为 3、五张表与索引按 ADR-0005 建好', async () => {
     const dir = await tempDir();
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
     const path = join(dir, 'luoli.db');
@@ -461,7 +520,7 @@ describe('SQLite 存储', () => {
     const db = new DatabaseSync(path);
     try {
       expect(db.prepare('PRAGMA journal_mode').get()?.journal_mode).toBe('wal');
-      expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(2);
+      expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(3);
       const objects = db
         .prepare(
           "SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
@@ -475,10 +534,13 @@ describe('SQLite 存储', () => {
         'index:model_calls_conversation',
         'index:model_calls_time',
         'index:segments_order',
+        'index:tool_calls_time',
+        'index:tool_calls_tool',
         'table:conversations',
         'table:messages',
         'table:model_calls',
         'table:segments',
+        'table:tool_calls',
       ]);
       const columns = (table: string) =>
         db
@@ -513,6 +575,7 @@ describe('SQLite 存储', () => {
         'created_at',
       ]);
       expect(columns('model_calls')).toEqual(modelCallColumns);
+      expect(columns('tool_calls')).toEqual(toolCallColumns);
       const indexed = (index: string) =>
         db
           .prepare(`PRAGMA index_info(${index})`)
@@ -520,6 +583,8 @@ describe('SQLite 存储', () => {
           .map((row) => row.name);
       expect(indexed('model_calls_time')).toEqual(['started_at']);
       expect(indexed('model_calls_conversation')).toEqual(['conversation_id', 'started_at']);
+      expect(indexed('tool_calls_time')).toEqual(['started_at']);
+      expect(indexed('tool_calls_tool')).toEqual(['tool', 'started_at']);
     } finally {
       db.close();
     }
@@ -591,12 +656,12 @@ describe('SQLite 存储', () => {
     }
   });
 
-  it('user_version 大于 2 时打开报错', async () => {
+  it('user_version 大于 3 时打开报错', async () => {
     const dir = await tempDir();
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
     const path = join(dir, 'luoli.db');
     const db = new DatabaseSync(path);
-    db.exec('PRAGMA user_version = 3');
+    db.exec('PRAGMA user_version = 4');
     db.close();
 
     expect(() => openSqliteStorage(path)).toThrow('数据库版本比程序新');
@@ -723,6 +788,8 @@ describe('SQLite 存储', () => {
         input_tokens: 120,
         output_tokens: 30,
         error: null,
+        steps: 1,
+        tool_calls: 0,
       };
       expect(rows).toEqual([
         {
@@ -749,7 +816,118 @@ describe('SQLite 存储', () => {
     }
   });
 
-  it('版本 1 的库：打开时升到版本 2，原有的表与数据不变，能写模型调用；重新打开后能读回', async () => {
+  it('工具调用的行：会话 id 是所在的会话，各列照写入的值；没有的为 NULL', async () => {
+    const dir = await tempDir();
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    const path = join(dir, 'luoli.db');
+    const storage = openSqliteStorage(path);
+    cleanups.push(async () => storage.close());
+    const id = await storage.createConversation({ platform: 'cli' });
+    const store = await storage.openConversation(id);
+    await store.recordToolCall(toolCall());
+    await store.recordToolCall(
+      toolCall({
+        tool: 'nope',
+        step: 2,
+        durationMs: 0,
+        outcome: 'failed',
+        error: 'NoSuchToolError',
+        outputChars: undefined,
+      }),
+    );
+
+    const db = new DatabaseSync(path, { readOnly: true });
+    try {
+      expect(
+        db
+          .prepare('SELECT * FROM tool_calls ORDER BY id')
+          .all()
+          .map((row) => ({ ...row })),
+      ).toEqual([
+        {
+          id: 1,
+          conversation_id: id,
+          reply_id: 'r1',
+          tool: 'dice',
+          step: 1,
+          started_at: '2026-10-30T06:02:01.000Z',
+          duration_ms: 120,
+          outcome: 'completed',
+          error: null,
+          output_chars: 11,
+        },
+        {
+          id: 2,
+          conversation_id: id,
+          reply_id: 'r1',
+          tool: 'nope',
+          step: 2,
+          started_at: '2026-10-30T06:02:01.000Z',
+          duration_ms: 0,
+          outcome: 'failed',
+          error: 'NoSuchToolError',
+          output_chars: null,
+        },
+      ]);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('版本 2 的库：打开时升到版本 3，旧的模型调用行两列为空，新写入的有值；能写工具调用', async () => {
+    const dir = await tempDir();
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    const path = join(dir, 'luoli.db');
+    // 第二阶段第 8 步的程序建的库：四张表，user_version 为 2，已有一行模型调用
+    const old = new DatabaseSync(path);
+    old.exec('PRAGMA journal_mode = WAL');
+    old.exec(version1Schema);
+    old.exec(version2Schema);
+    old.exec('PRAGMA user_version = 2');
+    old.exec(`
+      INSERT INTO conversations (id, platform, next_seq, created_at)
+        VALUES ('c1', 'cli', 1, '2026-10-29T00:00:00.000Z');
+      INSERT INTO model_calls
+          (conversation_id, purpose, reply_id, model, started_at, duration_ms, first_output_ms,
+           attempts, outcome, finish_reason, input_tokens, cache_read_tokens, output_tokens,
+           reasoning_tokens)
+        VALUES ('c1', 'reply', 'r0', 'test-model', '2026-10-29T06:00:00.000Z', 900, 300,
+                1, 'completed', 'stop', 50, NULL, 5, NULL);
+    `);
+    const before = old
+      .prepare('SELECT * FROM model_calls')
+      .all()
+      .map((row) => ({ ...row }));
+    old.close();
+
+    const storage = openSqliteStorage(path);
+    const store = await storage.openConversation('c1');
+    await store.recordCall(call({ steps: 2, toolCalls: 3 }));
+    await store.recordToolCall(toolCall());
+    storage.close();
+
+    const db = new DatabaseSync(path, { readOnly: true });
+    try {
+      expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(3);
+      const rows = db
+        .prepare('SELECT * FROM model_calls ORDER BY id')
+        .all()
+        .map((row) => ({ ...row }));
+      expect(rows[0]).toEqual({ ...before[0], steps: null, tool_calls: null });
+      expect(rows[1]).toMatchObject({ steps: 2, tool_calls: 3 });
+    } finally {
+      db.close();
+    }
+
+    const reopened = openSqliteStorage(path);
+    cleanups.push(async () => reopened.close());
+    const calls = await (await reopened.openConversation('c1')).calls();
+    expect(calls[0]).toMatchObject({ replyId: 'r0', steps: undefined, toolCalls: undefined });
+    expect(calls[1]).toEqual(call({ steps: 2, toolCalls: 3 }));
+    expect(await (await reopened.openConversation('c1')).toolCalls()).toEqual([toolCall()]);
+  });
+
+  it('版本 1 的库：打开时升到版本 3，原有的表与数据不变，能写模型调用；重新打开后能读回', async () => {
     const dir = await tempDir();
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
     const path = join(dir, 'luoli.db');
@@ -806,7 +984,7 @@ describe('SQLite 存储', () => {
 
     const db = new DatabaseSync(path, { readOnly: true });
     try {
-      expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(2);
+      expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(3);
       expect(dump(db)).toEqual(before);
       expect(
         db
@@ -889,6 +1067,28 @@ describe('SQLite 存储', () => {
         reasoningTokens: 0,
       }),
     );
+    // 工具调用：dice 三次（一次超时），search 一次失败
+    await group.recordToolCall(toolCall({ durationMs: 100, outputChars: 10 }));
+    await group.recordToolCall(toolCall({ durationMs: 300, outputChars: 30 }));
+    await group.recordToolCall(
+      toolCall({
+        startedAt: '2026-10-31T02:00:00.000Z',
+        step: 2,
+        durationMs: 60_000,
+        outcome: 'timeout',
+        outputChars: undefined,
+      }),
+    );
+    await cli.recordToolCall(
+      toolCall({
+        tool: 'search',
+        startedAt: '2026-10-31T03:00:00.000Z',
+        durationMs: 0,
+        outcome: 'failed',
+        error: 'InvalidToolInputError',
+        outputChars: undefined,
+      }),
+    );
     storage.close();
 
     // sqlite3 的点命令（表头、对齐）不是 SQL，去掉后按分号分成各条查询
@@ -908,13 +1108,14 @@ describe('SQLite 存储', () => {
     process.env.TZ = 'Asia/Shanghai';
     const db = new DatabaseSync(path, { readOnly: true });
     try {
-      const [byDay, byConversation, byModel, failures] = queries.map((query) =>
-        db
-          .prepare(query)
-          .all()
-          .map((row) => ({ ...row })),
+      const [byDay, byConversation, byModel, failures, byTool, toolFailures] = queries.map(
+        (query) =>
+          db
+            .prepare(query)
+            .all()
+            .map((row) => ({ ...row })),
       );
-      expect(queries).toHaveLength(4);
+      expect(queries).toHaveLength(6);
       expect(byDay).toEqual([
         {
           日期: '2026-10-30',
@@ -954,6 +1155,38 @@ describe('SQLite 存储', () => {
           请求: 3,
         },
       ]);
+      expect(byTool).toEqual([
+        { 工具: 'dice', 调用: 3, 失败: 0, 超时: 1, 平均耗时: 20133, 平均长度: 20, 最大长度: 30 },
+        {
+          工具: 'search',
+          调用: 1,
+          失败: 1,
+          超时: 0,
+          平均耗时: 0,
+          平均长度: null,
+          最大长度: null,
+        },
+      ]);
+      expect(toolFailures).toEqual([
+        {
+          时间: '2026-10-31 11:00:00',
+          标题: null,
+          工具: 'search',
+          步: 1,
+          结果: 'failed',
+          错误: 'InvalidToolInputError',
+          耗时: 0,
+        },
+        {
+          时间: '2026-10-31 10:00:00',
+          标题: '读书会',
+          工具: 'dice',
+          步: 2,
+          结果: 'timeout',
+          错误: null,
+          耗时: 60_000,
+        },
+      ]);
     } finally {
       db.close();
       if (originalTz === undefined) delete process.env.TZ;
@@ -963,6 +1196,31 @@ describe('SQLite 存储', () => {
 });
 
 // 第 7 步（表结构版本 1）的建表语句，用来造一个旧库
+// 第二阶段第 8 步（表结构版本 2）加的模型调用表，接在 version1Schema 之后，用来造一个版本 2 的库
+const version2Schema = `
+CREATE TABLE model_calls (
+  id                INTEGER PRIMARY KEY,
+  conversation_id   TEXT NOT NULL REFERENCES conversations(id),
+  purpose           TEXT NOT NULL,
+  summary_reason    TEXT,
+  reply_id          TEXT,
+  model             TEXT NOT NULL,
+  started_at        TEXT NOT NULL,
+  duration_ms       INTEGER NOT NULL,
+  first_output_ms   INTEGER,
+  attempts          INTEGER NOT NULL,
+  outcome           TEXT NOT NULL,
+  finish_reason     TEXT,
+  input_tokens      INTEGER,
+  cache_read_tokens INTEGER,
+  output_tokens     INTEGER,
+  reasoning_tokens  INTEGER,
+  error             TEXT
+);
+CREATE INDEX model_calls_time         ON model_calls(started_at);
+CREATE INDEX model_calls_conversation ON model_calls(conversation_id, started_at);
+`;
+
 const version1Schema = `
 CREATE TABLE conversations (
   id                       TEXT PRIMARY KEY,

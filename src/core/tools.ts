@@ -2,6 +2,7 @@ import type { TextStreamPart, ToolExecutionOptions, ToolSet } from 'ai';
 import type { z } from 'zod';
 import { errorKind } from './errors.js';
 import type { Logger } from './logger.js';
+import type { ToolCall } from './storage/types.js';
 
 /**
  * 工具执行时拿到的上下文。只往里加字段：以后的能力（触发者、读本会话、平台操作……）都作为新字段
@@ -216,8 +217,12 @@ export function toToolSet(
   );
 }
 
+/** 一次工具调用结束时交给调用方写进工具调用表的一行（回复 id 由调用方补上） */
+export type RecordToolCall = (call: Omit<ToolCall, 'replyId'>) => Promise<void>;
+
 /**
- * 执行一次工具调用：限时，结束时记一条 tool.end（不记参数与结果的内容）。
+ * 执行一次工具调用：限时，结束时记一条 tool.end，并用同一份数据在工具调用表写一行
+ * （都不记参数与结果的内容）。
  * 时限到或回复被中止时立即结束这次调用，不等工具停下（它的 ctx.abortSignal 已触发）。
  * 出错都换成 ToolError：工具抛的错照 SDK 的写法转成文字，超时是「工具执行超时（N 秒）」
  */
@@ -232,6 +237,7 @@ export async function runTool(
     conversation,
     logger,
     logFields,
+    record,
   }: {
     toolCallId: string;
     /** SDK 交给这次调用的中止信号：回复被中止、等模型输出超时 */
@@ -243,13 +249,34 @@ export async function runTool(
     conversation: ToolContext['conversation'];
     logger: Logger;
     logFields: object;
+    /** 写工具调用表；出错由它自己处理，不抛出 */
+    record: RecordToolCall;
   },
 ): Promise<unknown> {
   const fields = { ...logFields, tool: definition.name, toolCallId };
   const limitMs = definition.timeoutMs ?? timeoutMs;
   const startedAt = Date.now();
-  const end = (level: 'info' | 'warn', result: object) =>
-    logger[level]({ ...fields, step, durationMs: Date.now() - startedAt, ...result }, 'tool.end');
+  const end = async (
+    level: 'info' | 'warn',
+    outcome: ToolCall['outcome'],
+    { errorType, resultLength }: { errorType?: string; resultLength?: number } = {},
+  ) => {
+    const durationMs = Date.now() - startedAt;
+    const details = {
+      ...(errorType === undefined ? {} : { errorType }),
+      ...(resultLength === undefined ? {} : { resultLength }),
+    };
+    logger[level]({ ...fields, step, durationMs, outcome, ...details }, 'tool.end');
+    await record({
+      tool: definition.name,
+      step,
+      startedAt: new Date(startedAt).toISOString(),
+      durationMs,
+      outcome,
+      ...(errorType === undefined ? {} : { error: errorType }),
+      ...(resultLength === undefined ? {} : { outputChars: resultLength }),
+    });
+  };
 
   const limit = new AbortController();
   // 怎么结束的：时限到、回复被中止；按它记结果，不看是哪个 promise 先落定
@@ -285,14 +312,14 @@ export async function runTool(
     output = await Promise.race([running, stopped]);
   } catch (error) {
     if (ended === 'timeout') {
-      end('warn', { outcome: 'timeout' });
+      await end('warn', 'timeout');
       throw new ToolError(`工具执行超时（${limitMs / 1000} 秒）`);
     }
     if (ended === 'aborted' || abortSignal?.aborted) {
-      end('info', { outcome: 'aborted' });
+      await end('info', 'aborted');
       throw new ToolError('工具调用被中止');
     }
-    end('warn', { outcome: 'failed', errorType: errorKind(error) });
+    await end('warn', 'failed', { errorType: errorKind(error) });
     throw new ToolError(modelErrorText(error));
   } finally {
     clearTimeout(timer);
@@ -305,10 +332,10 @@ export async function runTool(
   try {
     text = typeof output === 'string' ? output : (JSON.stringify(output) ?? 'null');
   } catch (error) {
-    end('warn', { outcome: 'failed', errorType: errorKind(error) });
+    await end('warn', 'failed', { errorType: errorKind(error) });
     throw new ToolError(`工具的结果无法转成 JSON：${modelErrorText(error)}`);
   }
-  end('info', { outcome: 'completed', resultLength: text.length });
+  await end('info', 'completed', { resultLength: text.length });
   return output;
 }
 
@@ -325,10 +352,18 @@ type Part = TextStreamPart<ToolSet>;
 
 /**
  * 包在一次回复的 streamText 流上（转成 UI 流之前）：数工具调用；参数不合结构、调了不存在的工具的
- * 调用（SDK 不执行，直接以错误交给模型）记一条 tool.end；工具的错误都换成 ToolError，
- * 转 UI 流时据此与回复失败区分，写进历史的 errorText 与模型看到的相同
+ * 调用（SDK 不执行，直接以错误交给模型）记一条 tool.end，在工具调用表写一行；工具的错误都换成
+ * ToolError，转 UI 流时据此与回复失败区分，写进历史的 errorText 与模型看到的相同
  */
-export function watchToolCalls({ logger, logFields }: { logger: Logger; logFields: object }): {
+export function watchToolCalls({
+  logger,
+  logFields,
+  record,
+}: {
+  logger: Logger;
+  logFields: object;
+  record: RecordToolCall;
+}): {
   stream: TransformStream<Part, Part>;
   /** 到目前为止的工具调用次数，含不合规的 */
   count: () => number;
@@ -337,11 +372,12 @@ export function watchToolCalls({ logger, logFields }: { logger: Logger; logField
   // 第几步（从 1 数），按流里的 start-step 数
   let step = 0;
   const stream = new TransformStream<Part, Part>({
-    transform(part, controller) {
+    async transform(part, controller) {
       if (part.type === 'start-step') step++;
       if (part.type === 'tool-call') {
         calls++;
         if (part.invalid) {
+          const errorType = errorKind(part.error);
           logger.warn(
             {
               ...logFields,
@@ -351,10 +387,18 @@ export function watchToolCalls({ logger, logFields }: { logger: Logger; logField
               // SDK 不执行，没有耗时
               durationMs: 0,
               outcome: 'failed',
-              errorType: errorKind(part.error),
+              errorType,
             },
             'tool.end',
           );
+          await record({
+            tool: part.toolName,
+            step,
+            startedAt: new Date().toISOString(),
+            durationMs: 0,
+            outcome: 'failed',
+            error: errorType,
+          });
           controller.enqueue({ ...part, error: new ToolError(modelErrorText(part.error)) });
           return;
         }

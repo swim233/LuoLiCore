@@ -51,4 +51,5 @@ export type {
   Segment,
   SeqRange,
   Storage,
+  ToolCall,
 } from './storage/types.js';

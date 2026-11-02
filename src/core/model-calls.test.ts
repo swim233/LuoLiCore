@@ -284,6 +284,8 @@ describe('模型调用表：回复', () => {
         cacheReadTokens: 100,
         outputTokens: 30,
         reasoningTokens: 12,
+        steps: 1,
+        toolCalls: 0,
       },
     ]);
     expect(calls[0]).not.toHaveProperty('summaryReason');
@@ -384,6 +386,8 @@ describe('模型调用表：回复', () => {
       finishReason: undefined,
       ...noTokens,
       error: undefined,
+      steps: 1,
+      toolCalls: 0,
     });
   });
 
@@ -695,6 +699,8 @@ describe('模型调用表：摘要', () => {
       cacheReadTokens: 30,
       outputTokens: 8,
       reasoningTokens: undefined,
+      steps: 1,
+      toolCalls: 0,
     });
     expect(summary).not.toHaveProperty('replyId');
     expect(summary).not.toHaveProperty('error');

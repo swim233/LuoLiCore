@@ -51,7 +51,7 @@ CREATE TABLE model_calls (
   model             TEXT NOT NULL,     -- 模型 id
   started_at        TEXT NOT NULL,     -- 开始时间（ISO，UTC，与其他表一致）
   duration_ms       INTEGER NOT NULL,  -- 从开始到结束
-  first_output_ms   INTEGER,           -- 从开始到第一段输出（文字或推理）；没有输出时为空
+  first_output_ms   INTEGER,           -- 从开始到第一段输出（文字、推理或工具调用）；没有输出时为空
   attempts          INTEGER NOT NULL,  -- HTTP 请求次数：各步的请求，含重试与拒收图片后的恢复
   outcome           TEXT NOT NULL,     -- 'completed' | 'empty' | 'aborted' | 'cancelled' | 'failed'
   finish_reason     TEXT,              -- 最后一步的 'stop'、'length' 等；没有正常结束时为空

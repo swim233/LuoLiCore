@@ -26,7 +26,7 @@ import { formatForModel, summaryInstruction, systemPrompt } from './prompt.js';
 import { PromptFileError, type PromptSource } from './prompt-files.js';
 import { createSegmenter, type SegmentOptions, type Summarize } from './segments.js';
 import { createMemoryStore } from './storage/memory.js';
-import type { ConversationStore, ModelCall, Segment } from './storage/types.js';
+import type { ConversationStore, ModelCall, Segment, ToolCall } from './storage/types.js';
 import { hasToolCalls, settleToolParts, toolHistory } from './tool-history.js';
 import { runTool, toToolSet, ToolError, watchToolCalls, type InstalledTool } from './tools.js';
 
@@ -222,19 +222,22 @@ export function createConversation({
       },
 
       /**
-       * 调用结束：在模型调用表记一行。正常结束（completed、empty）才记结束原因与用量，
-       * 失败才记错误。写入出错（如退出时数据库已关闭）只记日志，从不抛出
+       * 调用结束：在模型调用表记一行。正常结束（completed、empty）才记结束原因与用量（各步之和），
+       * 失败才记错误；步数取发出过请求的步数，工具调用次数由调用方给（摘要为 0）。
+       * 写入出错（如退出时数据库已关闭）只记日志，从不抛出
        */
       async record({
         outcome,
         finishReason,
         usage,
         error,
+        toolCalls = 0,
       }: {
         outcome: ModelCall['outcome'];
         finishReason?: string;
         usage?: LanguageModelUsage;
         error?: unknown;
+        toolCalls?: number;
       }): Promise<void> {
         const endedAt = Date.now();
         const start = startedAt ?? createdAt;
@@ -250,6 +253,8 @@ export function createConversation({
           outcome,
           ...(finished ? { finishReason, ...(usage && toCallTokens(usage)) } : {}),
           ...(outcome === 'failed' ? { error: errorKind(error) } : {}),
+          steps: tracker.steps(),
+          toolCalls,
         };
         try {
           await store.recordCall(row);
@@ -396,8 +401,11 @@ export function createConversation({
       const { tracker } = call;
       // 拒收图片后的重试换掉的图片，按消息 id；没有重试过时为 undefined
       let fallback: Map<string, string[]> | undefined;
-      // finish 段带的总用量（含原始用量），记进模型调用表；metadata 里的 usage 由它换算
+      // finish 段带的总用量（各步之和，含原始用量），记进模型调用表；metadata 里的 usage 由它换算
       let totalUsage: LanguageModelUsage | undefined;
+      // 最后一步的输入 token（finish-step 段带着这一步的用量）：压缩按它判断，
+      // 各步之和会把同一段上下文重复计算（ADR-0004）
+      let lastStepInput: number | undefined;
 
       // onEnd 的 outcome 判断不了是否出错：外层流没声明 outcome 时正常结束也是 unknown，
       // 内层在错误事件之后收到 finish 又会记成 completed。所以自己记下出过的错。
@@ -413,8 +421,19 @@ export function createConversation({
       // watchToolCalls 已把它们换成 ToolError，message 就是模型看到的说明
       const describeStreamError = (error: unknown) =>
         error instanceof ToolError ? error.message : describeError(error);
-      // 工具调用：数次数，不合规的调用记日志，工具的错误换成 ToolError
-      const toolCalls = watchToolCalls({ logger, logFields });
+      /** 工具调用表写一行。写入出错只记日志，不影响工具调用与回复 */
+      async function recordToolCall(row: Omit<ToolCall, 'replyId'>): Promise<void> {
+        try {
+          await store.recordToolCall({ replyId, ...row });
+        } catch (error) {
+          logger.error(
+            { ...logFields, tool: row.tool, error: summarizeError(error) },
+            'tool_call.record_failed',
+          );
+        }
+      }
+      // 工具调用：数次数，不合规的调用记日志与工具调用表，工具的错误换成 ToolError
+      const toolCalls = watchToolCalls({ logger, logFields, record: recordToolCall });
 
       // SDK 超时（以及上面的首段计时）都以 abort 段结束回复流。用户没有中止却收到 abort，
       // 就是超时：换成 error 段，按失败处理（不写入，记 reply.failed）。
@@ -448,6 +467,13 @@ export function createConversation({
           },
         });
       };
+
+      /** 写入的回复正常结束后，按最后一步的输入看是否要在后台压缩 */
+      function checkCompress() {
+        if (segment && seq !== undefined) {
+          segmenter.replied({ segment, seq, inputTokens: lastStepInput });
+        }
+      }
 
       /**
        * 写入历史：工具段收尾（见 settleToolParts），停在 streaming 状态的文字、推理段改为 done，
@@ -492,6 +518,7 @@ export function createConversation({
               conversation: { id: conversationId, title },
               logger,
               logFields,
+              record: recordToolCall,
             }),
           ),
           // 收尾步之后不再有下一步；其余时候模型不再调工具，循环自然结束
@@ -593,6 +620,7 @@ export function createConversation({
                   createdAt = new Date().toISOString();
                   return { createdAt };
                 }
+                if (part.type === 'finish-step') lastStepInput = part.usage.inputTokens;
                 if (part.type === 'finish') {
                   createdAt ??= new Date().toISOString();
                   totalUsage = part.totalUsage;
@@ -632,6 +660,7 @@ export function createConversation({
                 finishReason,
                 usage: totalUsage,
                 error: failure?.error,
+                toolCalls: toolCalls.count(),
               });
             }
             if (outcome === 'failed') {
@@ -672,7 +701,10 @@ export function createConversation({
               // 正常结束却没有任何文字：执行过工具时照样写入（副作用已经发生）；
               // 否则与一字未出就被中止一样不写入，序号空着
               const saved = hasToolCalls(responseMessage);
-              if (saved) await save(responseMessage);
+              if (saved) {
+                await save(responseMessage);
+                checkCompress();
+              }
               logger.warn(
                 {
                   ...summary,
@@ -696,9 +728,7 @@ export function createConversation({
                 },
                 'reply.end',
               );
-              if (segment && seq !== undefined) {
-                segmenter.replied({ segment, seq, usage: responseMessage.metadata?.usage });
-              }
+              checkCompress();
             }
           } finally {
             replying = false;

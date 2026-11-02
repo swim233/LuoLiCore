@@ -28,7 +28,7 @@ export type ModelCall = {
   /** 第一次请求发出的时间，ISO */
   startedAt: string;
   durationMs: number;
-  /** 从开始到第一段非空的文字或推理输出；没有输出时为 undefined */
+  /** 从开始到第一段非空的文字、推理或工具调用输出；没有输出时为 undefined */
   firstOutputMs?: number;
   /** HTTP 请求次数，含重试与拒收图片后的恢复 */
   attempts: number;
@@ -43,6 +43,32 @@ export type ModelCall = {
   reasoningTokens?: number;
   /** 失败时的错误类型与状态码，如 `APICallError 429`；不含错误信息与正文 */
   error?: string;
+  /** 发出过请求的步数；摘要为 1。表结构版本 3 之前的行为空 */
+  steps?: number;
+  /** 工具调用次数，含参数不合结构、调了不存在的工具的；摘要为 0。表结构版本 3 之前的行为空 */
+  toolCalls?: number;
+};
+
+/**
+ * 一次工具调用的结果，对应 tool_calls 的一行（ADR-0005），与 tool.end 日志同一份数据。
+ * 不存参数、结果与错误消息
+ */
+export type ToolCall = {
+  /** 所在回复的 id，与 ModelCall 的 replyId 相同 */
+  replyId: string;
+  /** 工具名；模型调了不存在的工具时，是模型给的名字 */
+  tool: string;
+  /** 第几步，从 1 开始 */
+  step: number;
+  /** 开始时间，ISO */
+  startedAt: string;
+  /** 超时时算到超时为止；参数不合结构、调了不存在的工具（没有执行）为 0 */
+  durationMs: number;
+  outcome: 'completed' | 'failed' | 'timeout' | 'aborted';
+  /** 失败时的错误类型，如 `InvalidToolInputError`；不含错误信息 */
+  error?: string;
+  /** 结果交给模型的文字的长度（tool.end 日志的 resultLength）；没有结果时为 undefined */
+  outputChars?: number;
 };
 
 /** 一个会话的消息与段的存取。消息按序号排列；序号由存储分配，可以先预留再写入 */
@@ -81,6 +107,10 @@ export type ConversationStore = {
   recordCall(call: ModelCall): Promise<void>;
   /** 本会话记下的模型调用，按写入先后 */
   calls(): Promise<ModelCall[]>;
+  /** 记一次工具调用，只追加 */
+  recordToolCall(call: ToolCall): Promise<void>;
+  /** 本会话记下的工具调用，按写入先后 */
+  toolCalls(): Promise<ToolCall[]>;
 };
 
 export type NewConversation = {

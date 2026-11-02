@@ -232,9 +232,21 @@ export function createSegmenter({
       schedule(idleMs);
     },
 
-    /** 回复正常完成后调用：输入超过阈值时在后台压缩（压缩进行中、或刚失败过时不压缩） */
-    replied({ segment, seq, usage }: { segment: Segment; seq: number; usage?: Usage }): void {
-      if (usage?.input === undefined || usage.input <= compressTokens) return;
+    /**
+     * 写入的回复正常结束后调用（含执行过工具、最后没有文字的回复）：最后一步的输入超过阈值时
+     * 在后台压缩（压缩进行中、或刚失败过时不压缩）
+     */
+    replied({
+      segment,
+      seq,
+      inputTokens,
+    }: {
+      segment: Segment;
+      seq: number;
+      /** 这次回复最后一步的输入 token；多步时各步之和会把同一段上下文重复计算（ADR-0004） */
+      inputTokens?: number;
+    }): void {
+      if (inputTokens === undefined || inputTokens <= compressTokens) return;
       if (Date.now() < compressAllowedAt) return;
       begin('compress', () => planCompress(segment, seq));
     },

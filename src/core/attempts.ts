@@ -49,8 +49,8 @@ export function trackAttempts({
   restart: () => void;
   stats: AttemptStats;
   /**
-   * 第一次出现非空的文字或推理输出的时间（Date.now()），之后被流式重试作废的也算；
-   * 还没有时为 undefined
+   * 第一次出现输出（非空的文字、推理、工具调用参数，完整的工具调用）的时间（Date.now()），
+   * 之后被流式重试作废的也算；还没有时为 undefined
    */
   firstOutputAt: () => number | undefined;
   /** 发出过请求的步数；拒收图片后的重试从第 1 步重新数，这里取两次调用里多的那个 */
@@ -189,8 +189,6 @@ export function trackAttempts({
           if (visible && isOutput(part)) {
             clearFirstChunkTimer();
             attemptOutput = true;
-          }
-          if ((part.type === 'text-delta' || part.type === 'reasoning-delta') && part.delta) {
             firstOutputAt ??= Date.now();
           }
           if (part.type === 'finish' && !failed) {

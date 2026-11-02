@@ -9,6 +9,7 @@ import type {
   Segment,
   SeqRange,
   Storage,
+  ToolCall,
 } from './types.js';
 
 // 表结构见 docs/adr/0005-sqlite-storage-in-core.md。第 i 项把版本 i 的库升到 i + 1：
@@ -73,6 +74,25 @@ CREATE TABLE model_calls (
 );
 CREATE INDEX model_calls_time         ON model_calls(started_at);
 CREATE INDEX model_calls_conversation ON model_calls(conversation_id, started_at);
+`,
+  `
+ALTER TABLE model_calls ADD COLUMN steps      INTEGER;
+ALTER TABLE model_calls ADD COLUMN tool_calls INTEGER;
+
+CREATE TABLE tool_calls (
+  id              INTEGER PRIMARY KEY,
+  conversation_id TEXT NOT NULL REFERENCES conversations(id),
+  reply_id        TEXT NOT NULL,
+  tool            TEXT NOT NULL,
+  step            INTEGER NOT NULL,
+  started_at      TEXT NOT NULL,
+  duration_ms     INTEGER NOT NULL,
+  outcome         TEXT NOT NULL,
+  error           TEXT,
+  output_chars    INTEGER
+);
+CREATE INDEX tool_calls_time ON tool_calls(started_at);
+CREATE INDEX tool_calls_tool ON tool_calls(tool, started_at);
 `,
 ];
 
@@ -152,10 +172,19 @@ export function openSqliteStorage(path: string): Storage {
     `INSERT INTO model_calls
        (conversation_id, purpose, summary_reason, reply_id, model, started_at, duration_ms,
         first_output_ms, attempts, outcome, finish_reason, input_tokens, cache_read_tokens,
-        output_tokens, reasoning_tokens, error)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        output_tokens, reasoning_tokens, error, steps, tool_calls)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   const listCalls = db.prepare('SELECT * FROM model_calls WHERE conversation_id = ? ORDER BY id');
+  const insertToolCall = db.prepare(
+    `INSERT INTO tool_calls
+       (conversation_id, reply_id, tool, step, started_at, duration_ms, outcome, error,
+        output_chars)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  const listToolCalls = db.prepare(
+    'SELECT * FROM tool_calls WHERE conversation_id = ? ORDER BY id',
+  );
 
   const reserve = (conversationId: string): number => {
     const row = reserveSeq.get(conversationId);
@@ -267,10 +296,28 @@ export function openSqliteStorage(path: string): Storage {
         call.outputTokens ?? null,
         call.reasoningTokens ?? null,
         call.error ?? null,
+        call.steps ?? null,
+        call.toolCalls ?? null,
       );
     },
     async calls() {
       return listCalls.all(conversationId).map(modelCall);
+    },
+    async recordToolCall(call) {
+      insertToolCall.run(
+        conversationId,
+        call.replyId,
+        call.tool,
+        call.step,
+        call.startedAt,
+        call.durationMs,
+        call.outcome,
+        call.error ?? null,
+        call.outputChars ?? null,
+      );
+    },
+    async toolCalls() {
+      return listToolCalls.all(conversationId).map(toolCall);
     },
   });
 
@@ -366,6 +413,21 @@ function modelCall(row: Record<string, unknown>): ModelCall {
     outputTokens: optionalNumber(row.output_tokens),
     reasoningTokens: optionalNumber(row.reasoning_tokens),
     error: optional(row.error),
+    steps: optionalNumber(row.steps),
+    toolCalls: optionalNumber(row.tool_calls),
+  };
+}
+
+function toolCall(row: Record<string, unknown>): ToolCall {
+  return {
+    replyId: String(row.reply_id),
+    tool: String(row.tool),
+    step: Number(row.step),
+    startedAt: String(row.started_at),
+    durationMs: Number(row.duration_ms),
+    outcome: String(row.outcome) as ToolCall['outcome'],
+    error: optional(row.error),
+    outputChars: optionalNumber(row.output_chars),
   };
 }
 
