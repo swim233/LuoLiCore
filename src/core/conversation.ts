@@ -16,6 +16,7 @@ import { createMemoryFileStore, inlineFiles, type FileStore, type NewFile } from
 import {
   isRejectedRequest,
   suspectImages,
+  toolImageFallback,
   withFallback,
   withUnreadable,
 } from './image-fallback.js';
@@ -27,6 +28,7 @@ import { PromptFileError, type PromptSource } from './prompt-files.js';
 import { createSegmenter, type SegmentOptions, type Summarize } from './segments.js';
 import { createMemoryStore } from './storage/memory.js';
 import type { ConversationStore, ModelCall, Segment, ToolCall } from './storage/types.js';
+import { isStoredToolContent, toolContentOutput } from './tool-content.js';
 import { hasToolCalls, settleToolParts, toolHistory } from './tool-history.js';
 import { runTool, toToolSet, ToolError, watchToolCalls, type InstalledTool } from './tools.js';
 
@@ -46,6 +48,9 @@ export type Conversation = {
    * （流里一个 error 段，不发请求，不记模型调用）。
    * 请求还没有输出就被拒收（400、413、422），且上一条助手消息之后有新图片时，把这些图片换成
    * 「[图片无法读取]」重试一次，流里只出现重试的输出；重试没有失败时把标记写进那些消息。
+   * 工具结果可以带图片（TextAndImages）：图片存进文件存储，当次回复里交给模型看，以后的回复里
+   * 照样发。某一步的请求因为这次回复工具结果里的图片被拒收时，换成占位重试这一步，余下的步也用
+   * 占位，回复写入历史时把这些图片记进 metadata 的 unreadableFiles，以后的请求都用占位。
    * 正常完成且输入超过压缩阈值时，在后台压缩。
    * 装了工具时一次回复可以有多步：模型调了工具，执行完把结果交回模型再请求一次，直到不再调工具
    * 或碰到上限（步数、总时长）。工具出错、超时、参数不对都以错误结果交给模型，循环照常继续，
@@ -104,7 +109,7 @@ export function createConversation({
    */
   prompts: PromptSource;
   store?: ConversationStore;
-  /** 消息附带的图片存在这里 */
+  /** 消息附带的图片、工具结果里的图片存在这里 */
   fileStore?: FileStore;
   logger?: Logger;
   /** 重试次数：请求阶段（maxRetries）与流中错误事件（streamRetries）各自最多这么多次 */
@@ -149,19 +154,39 @@ export function createConversation({
 
   /**
    * 历史消息换成发给模型的消息：工具结果按工具的声明呈现、标签格式、中途结束的标记、
-   * 图片换成 data URL。读不到的图片换成文字，记一条 warn（只记地址）；
+   * 图片换成 data URL，工具结果里的图片与当次回复一样以图片部件交出。读不到的图片换成文字，
+   * 记一条 warn（只记地址）；
    * 呈现函数出错时按默认处理，记一条 warn（只记工具名与错误类型；同一个调用在这个会话对象里只记一次）
    */
   async function toModelMessages(history: Message[], logFields: object): Promise<ModelMessage[]> {
     const onMissing = (url: string) => logger.warn({ ...logFields, url }, 'file.missing');
     const onRenderError = (tool: string, error: unknown) =>
       logger.warn({ ...logFields, tool, errorType: errorKind(error) }, 'tool.history_failed');
-    return convertToModelMessages(
+    const messages = await convertToModelMessages(
       await Promise.all(
         history.map((message) =>
           inlineFiles(formatForModel(presentTools(message, onRenderError)), fileStore, onMissing),
         ),
       ),
+    );
+    // 带图片的工具结果被 SDK 当成 JSON：换成文字加图片的内容部件
+    return Promise.all(
+      messages.map(async (message) => {
+        if (message.role !== 'tool') return message;
+        const content = await Promise.all(
+          message.content.map(async (part) =>
+            part.type === 'tool-result' &&
+            part.output.type === 'json' &&
+            isStoredToolContent(part.output.value)
+              ? {
+                  ...part,
+                  output: await toolContentOutput(part.output.value, fileStore, { onMissing }),
+                }
+              : part,
+          ),
+        );
+        return { ...message, content };
+      }),
     );
   }
 
@@ -200,14 +225,29 @@ export function createConversation({
       onFirstChunkTimeout: () => timeoutController.abort(),
       notify,
     });
+    // 本次回复工具结果里的图片被拒收时换成占位重试；套在 tracker 外层，重试的请求照常计数。
+    // 被接住的那次失败 SDK 看不到，tracker 也不算进请求失败，之后的重试序号与 SDK 一致
+    const imageFallback = toolImageFallback((urls, error) => {
+      tracker.discountFailure();
+      logger.warn(
+        { ...logFields, replaced: urls.length, urls, error: summarizeError(error) },
+        'reply.tool_image_fallback',
+      );
+    });
     return {
       tracker,
+      /** 这次调用里被拒收、换成占位的工具图片的地址；回复写入历史时记进 metadata */
+      unreadableToolImages: imageFallback.unreadable,
       /** 发出请求。loop 是装了工具时的工具与多步设置；不给时与没有工具时一样，只有一步 */
       stream: (system: string, messages: ModelMessage[], loop?: ToolLoop) => {
         startedAt ??= Date.now();
         return streamText({
-          // SDK 的每次请求（含两类重试、多步的每一步）都重新调用 doStream，中间件能逐次观察
-          model: wrapLanguageModel({ model, middleware: tracker.middleware }),
+          // SDK 的每次请求（含两类重试、多步的每一步）都重新调用 doStream，中间件能逐次观察。
+          // 排在前面的中间件在外层
+          model: wrapLanguageModel({
+            model,
+            middleware: [imageFallback.middleware, tracker.middleware],
+          }),
           instructions: system,
           messages,
           maxRetries,
@@ -301,7 +341,11 @@ export function createConversation({
         // 定义。toolChoice 为 none，SDK 不执行工具
         tools.length > 0
           ? {
-              tools: toToolSet(tools, () => Promise.reject(new ToolError('摘要请求不执行工具'))),
+              tools: toToolSet(
+                tools,
+                () => Promise.reject(new ToolError('摘要请求不执行工具')),
+                fileStore,
+              ),
               toolChoice: 'none',
             }
           : undefined,
@@ -482,9 +526,11 @@ export function createConversation({
       /**
        * 写入历史：工具段收尾（见 settleToolParts），停在 streaming 状态的文字、推理段改为 done，
        * 空的文字段（一步只调了工具、没说话时会有）与末尾没有内容的 step-start 去掉；
-       * metadata 合并 extra。序号用回复开始时预留的
+       * metadata 合并 extra。这次回复里被拒收的工具图片记进 unreadableFiles，以后的请求都用占位。
+       * 序号用回复开始时预留的
        */
       async function save(message: Message, extra: Partial<MessageMetadata> = {}) {
+        const unreadable = call.unreadableToolImages();
         const parts = settleToolParts(message.parts).flatMap((part): Message['parts'] => {
           if (part.type === 'text' && part.text === '') return [];
           return (part.type === 'text' || part.type === 'reasoning') && part.state === 'streaming'
@@ -496,7 +542,12 @@ export function createConversation({
           {
             ...message,
             parts,
-            metadata: { createdAt: new Date().toISOString(), ...message.metadata, ...extra },
+            metadata: {
+              createdAt: new Date().toISOString(),
+              ...message.metadata,
+              ...extra,
+              ...(unreadable.length > 0 ? { unreadableFiles: unreadable } : {}),
+            },
           },
           seq,
         );
@@ -513,17 +564,21 @@ export function createConversation({
         let step = 0;
         let finalStep = false;
         return {
-          tools: toToolSet(tools, (tool, input, { toolCallId, abortSignal }) =>
-            runTool(tool, input, {
-              toolCallId,
-              abortSignal,
-              timeoutMs: toolMs,
-              step: step + 1,
-              conversation: { id: conversationId, title },
-              logger,
-              logFields,
-              record: recordToolCall,
-            }),
+          tools: toToolSet(
+            tools,
+            (tool, input, { toolCallId, abortSignal }) =>
+              runTool(tool, input, {
+                toolCallId,
+                abortSignal,
+                timeoutMs: toolMs,
+                step: step + 1,
+                conversation: { id: conversationId, title },
+                logger,
+                logFields,
+                record: recordToolCall,
+                files: fileStore,
+              }),
+            fileStore,
           ),
           // 收尾步之后不再有下一步；其余时候模型不再调工具，循环自然结束
           stopWhen: () => finalStep,
@@ -659,6 +714,7 @@ export function createConversation({
               steps: tracker.steps(),
               toolCalls: toolCalls.count(),
               ...(fallback ? { imageFallback: true } : {}),
+              ...(call.unreadableToolImages().length > 0 ? { toolImageFallback: true } : {}),
             };
             // 先记模型调用：之后写历史出错也不影响这一行。提示词文件有误时没有发出请求，不记
             if (!(failure?.error instanceof PromptFileError)) {

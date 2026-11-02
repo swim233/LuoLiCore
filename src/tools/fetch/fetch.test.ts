@@ -1,5 +1,6 @@
+import { gzipSync } from 'node:zlib';
 import { afterEach, describe, expect, it } from 'vitest';
-import { installTools, ToolError } from '../../core/index.js';
+import { installTools, TextAndImages, ToolError } from '../../core/index.js';
 import { tools } from '../index.js';
 import { createFetchTool, fetchTool } from './index.js';
 import { createRequester, defaultUserAgents } from './request.js';
@@ -594,10 +595,6 @@ describe('内容类型', () => {
         response.write(Buffer.alloc(64 * 1024));
         response.on('close', () => (closedEarly = !response.writableFinished));
       },
-      '/photo.png': ok(Buffer.alloc(1000), {
-        'content-type': 'image/png',
-        'content-length': '1000',
-      }),
     });
     const output = await call({ url: url('/report.pdf') });
     expect(output).toBe(
@@ -609,9 +606,133 @@ describe('内容类型', () => {
       ].join('\n'),
     );
     await expect.poll(() => closedEarly).toBe(true);
-    // 图片在第 5 步交给模型看，这一步先按其他类型处理
-    expect(parse(await call({ url: url('/photo.png') })).header.at(-1)).toBe(
-      '[非文本内容：image/png，1000 B]',
+  });
+});
+
+describe('非文本内容的大小', () => {
+  it('响应压缩过时 Content-Length 是压缩后的大小，注明「压缩后」；identity 照旧', async () => {
+    const compressed = gzipSync(Buffer.alloc(4000, 'a'));
+    const raw = Buffer.alloc(4000, 'a');
+    const { call, url } = await fixture({
+      '/a.pdf': ok(compressed, {
+        'content-type': 'application/pdf',
+        'content-encoding': 'gzip',
+        'content-length': String(compressed.length),
+      }),
+      '/b.pdf': ok(raw, {
+        'content-type': 'application/pdf',
+        'content-encoding': 'identity',
+        'content-length': String(raw.length),
+      }),
+    });
+    expect(parse(await call({ url: url('/a.pdf') })).header.at(-1)).toBe(
+      `[非文本内容：application/pdf，${compressed.length} B（压缩后）]`,
+    );
+    expect(parse(await call({ url: url('/b.pdf') })).header.at(-1)).toBe(
+      '[非文本内容：application/pdf，4 KB]',
+    );
+  });
+});
+
+describe('图片', () => {
+  const u32be = (value: number) => [
+    value >>> 24,
+    (value >> 16) & 0xff,
+    (value >> 8) & 0xff,
+    value & 0xff,
+  ];
+  // PNG 的开头（签名与 IHDR）加若干字节的填充
+  const png = (width: number, height: number, padding = 0) =>
+    Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, ...u32be(13)]),
+      Buffer.from('IHDR'),
+      Buffer.from([...u32be(width), ...u32be(height), 8, 6, 0, 0, 0]),
+      Buffer.alloc(padding),
+    ]);
+  const image = (body: Buffer, type: string): Handler =>
+    ok(body, { 'content-type': type, 'content-length': String(body.length) });
+
+  it('PNG：结果是头部加一行图片说明，图片交给核心', async () => {
+    const body = png(800, 600, 100);
+    const { call, url } = await fixture({ '/cat.png': image(body, 'image/png') });
+    const output: unknown = await call({ url: url('/cat.png') });
+    expect(output).toBeInstanceOf(TextAndImages);
+    const { text, images } = output as TextAndImages;
+    expect(text).toBe(
+      [
+        `URL：${url('/cat.png')}`,
+        '方法：图片',
+        notice,
+        `[图片 image/png 800×600 ${body.length} B]`,
+      ].join('\n'),
+    );
+    expect(images).toHaveLength(1);
+    expect(images[0]!.mediaType).toBe('image/png');
+    expect(Buffer.from(images[0]!.data).equals(body)).toBe(true);
+  });
+
+  it('读到 10 MB 还没读完：只有一行说明，不交给模型', async () => {
+    const { call, url } = await fixture({
+      // 没有 Content-Length，发出 11 MB 后不结束：读到结尾的话会一直等
+      '/huge.png': (_request, response) => {
+        response.writeHead(200, { 'content-type': 'image/png' });
+        response.write(png(8000, 6000, 11 * 1024 * 1024));
+      },
+    });
+    const output = await call({ url: url('/huge.png') });
+    expect(parse(output).header.slice(1)).toEqual([
+      '方法：图片',
+      notice,
+      '[图片超过 10 MB，没有交给模型：image/png]',
+    ]);
+  });
+
+  it('Content-Length 声明超过 10 MB：不读正文，一行说明里有大小', async () => {
+    let closedEarly = false;
+    const { call, url } = await fixture({
+      '/huge.png': (_request, response) => {
+        response.writeHead(200, {
+          'content-type': 'image/png',
+          'content-length': String(12 * 1024 * 1024),
+        });
+        // 只发开头就停住：读正文的话会一直等
+        response.write(png(8000, 6000, 64 * 1024));
+        response.on('close', () => (closedEarly = !response.writableFinished));
+      },
+    });
+    const output = await call({ url: url('/huge.png') });
+    expect(parse(output).header.at(-1)).toBe('[图片超过 10 MB，没有交给模型：image/png，12 MB]');
+    await expect.poll(() => closedEarly).toBe(true);
+  });
+
+  it('文件头与类型不符的「PNG」：图片无法识别', async () => {
+    const body = Buffer.from('<html>其实是网页</html>');
+    const { call, url } = await fixture({ '/fake.png': image(body, 'image/png') });
+    expect(parse(await call({ url: url('/fake.png') })).header.at(-1)).toBe(
+      `[图片无法识别：image/png，${body.length} B]`,
+    );
+  });
+
+  it('SVG 等其他图片只有一行说明', async () => {
+    const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"></svg>');
+    const { call, url } = await fixture({
+      '/logo.svg': image(svg, 'image/svg+xml'),
+      '/photo.bmp': image(Buffer.from('BM0000'), 'image/bmp'),
+    });
+    expect(parse(await call({ url: url('/logo.svg') })).header.slice(1)).toEqual([
+      '方法：非文本内容',
+      notice,
+      `[非文本内容：image/svg+xml，${svg.length} B]`,
+    ]);
+    expect(parse(await call({ url: url('/photo.bmp') })).header.at(-1)).toBe(
+      '[非文本内容：image/bmp，6 B]',
+    );
+  });
+
+  it('图片给了非 0 的 offset：报错', async () => {
+    const { call, url } = await fixture({ '/cat.png': image(png(8, 8), 'image/png') });
+    expect(await toolError(call({ url: url('/cat.png'), offset: 10 }))).toBe(
+      '图片没有可分段的正文',
     );
   });
 });

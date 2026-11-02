@@ -73,7 +73,7 @@ export function createFetchTool({
         mode,
       };
       let result: ReadResult;
-      let output: string;
+      let output: Awaited<ReturnType<typeof renderPage>>;
       try {
         const url = normalizeUrl(raw);
         result =

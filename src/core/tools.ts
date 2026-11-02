@@ -1,8 +1,16 @@
 import type { TextStreamPart, ToolExecutionOptions, ToolSet } from 'ai';
 import type { z } from 'zod';
 import { errorKind } from './errors.js';
+import type { FileStore } from './files.js';
 import type { Logger } from './logger.js';
 import type { ToolCall } from './storage/types.js';
+import {
+  storeToolContent,
+  TextAndImages,
+  toolContentImages,
+  toolContentText,
+  toolModelOutput,
+} from './tool-content.js';
 
 /**
  * 工具执行时拿到的上下文。只往里加字段：以后的能力（触发者、读本会话、平台操作……）都作为新字段
@@ -25,7 +33,8 @@ export type ToolContext<ENV extends string = string> = {
 /**
  * 以后的回复（和摘要）里怎么呈现这个工具的结果（ADR-0006）：完整、不保留（只留调用和那次的回答）、
  * 截短到 maxChars 字、或自定义的呈现函数（返回能转成 JSON 的值，字符串也行）。
- * 当次回复的循环里模型看到的总是完整结果
+ * 当次回复的循环里模型看到的总是完整结果。结果带图片（TextAndImages）时只对文字部分这样处理，
+ * 呈现函数拿到的 output 是文字，图片照样发；不保留时图片一起省略
  */
 export type ToolHistory<INPUT = unknown, OUTPUT = unknown> =
   'full' | 'omit' | { maxChars: number } | ((call: { input: INPUT; output: OUTPUT }) => unknown);
@@ -62,8 +71,11 @@ export function defineTool<SCHEMA extends z.ZodType, OUTPUT, ENV extends string 
   /** 一次调用的时限（毫秒）；不给时用会话的默认值 */
   timeoutMs?: number;
   /** 以后的回复里怎么呈现结果，见 ToolHistory */
-  history?: ToolHistory<z.output<SCHEMA>, Awaited<OUTPUT>>;
-  /** 执行：返回能转成 JSON 的值（字符串也行）；抛错即这次调用失败，模型会看到错误说明 */
+  history?: ToolHistory<z.output<SCHEMA>, HistoryOutput<Awaited<OUTPUT>>>;
+  /**
+   * 执行：返回能转成 JSON 的值（字符串也行），或者带图片的 TextAndImages；抛错即这次调用失败，
+   * 模型会看到错误说明
+   */
   execute: (input: z.output<SCHEMA>, ctx: ToolContext<ENV>) => OUTPUT;
 }): ToolDefinition {
   return {
@@ -71,11 +83,15 @@ export function defineTool<SCHEMA extends z.ZodType, OUTPUT, ENV extends string 
     env,
     history:
       typeof history === 'function'
-        ? (call) => history(call as { input: z.output<SCHEMA>; output: Awaited<OUTPUT> })
+        ? (call) =>
+            history(call as { input: z.output<SCHEMA>; output: HistoryOutput<Awaited<OUTPUT>> })
         : history,
     execute: (input, ctx) => execute(input as z.output<SCHEMA>, ctx),
   };
 }
+
+/** 呈现函数拿到的结果：带图片的结果只给文字部分 */
+type HistoryOutput<OUTPUT> = OUTPUT extends TextAndImages ? string : OUTPUT;
 
 /** 装上的一个工具：定义，加上它声明的环境变量的值 */
 export type InstalledTool = {
@@ -194,7 +210,8 @@ function modelErrorText(error: unknown): string {
 
 /**
  * 装上的工具换成 streamText 的工具集。按清单顺序：发给模型的工具定义每次都一样，利于前缀缓存。
- * run 执行一次调用（摘要请求不执行工具，给一个不会被调用的 run）
+ * run 执行一次调用（摘要请求不执行工具，给一个不会被调用的 run）。
+ * 结果交给模型时，带图片的结果从 files 读出图片，以文字加图片的内容部件交给模型；其余照旧
  */
 export function toToolSet(
   tools: readonly InstalledTool[],
@@ -203,7 +220,9 @@ export function toToolSet(
     input: unknown,
     options: ToolExecutionOptions<unknown>,
   ) => Promise<unknown>,
+  files: FileStore,
 ): ToolSet {
+  const toModelOutput = toolModelOutput(files);
   return Object.fromEntries(
     tools.map((installed) => [
       installed.definition.name,
@@ -212,6 +231,7 @@ export function toToolSet(
         inputSchema: installed.definition.input,
         execute: (input: unknown, options: ToolExecutionOptions<unknown>) =>
           run(installed, input, options),
+        toModelOutput,
       },
     ]),
   );
@@ -224,7 +244,9 @@ export type RecordToolCall = (call: Omit<ToolCall, 'replyId'>) => Promise<void>;
  * 执行一次工具调用：限时，结束时记一条 tool.end，并用同一份数据在工具调用表写一行
  * （都不记参数与结果的内容）。
  * 时限到或回复被中止时立即结束这次调用，不等工具停下（它的 ctx.abortSignal 已触发）。
- * 出错都换成 ToolError：工具抛的错照 SDK 的写法转成文字，超时是「工具执行超时（N 秒）」
+ * 出错都换成 ToolError：工具抛的错照 SDK 的写法转成文字，超时是「工具执行超时（N 秒）」。
+ * 结果带图片（TextAndImages）时，图片存进 files，返回只含地址的结果（见 StoredToolContent）；
+ * 结果长度只算文字，tool.end 另记图片张数
  */
 export async function runTool(
   { definition, env }: InstalledTool,
@@ -238,6 +260,7 @@ export async function runTool(
     logger,
     logFields,
     record,
+    files,
   }: {
     toolCallId: string;
     /** SDK 交给这次调用的中止信号：回复被中止、等模型输出超时 */
@@ -251,6 +274,8 @@ export async function runTool(
     logFields: object;
     /** 写工具调用表；出错由它自己处理，不抛出 */
     record: RecordToolCall;
+    /** 结果里的图片存在这里 */
+    files: FileStore;
   },
 ): Promise<unknown> {
   const fields = { ...logFields, tool: definition.name, toolCallId };
@@ -259,12 +284,17 @@ export async function runTool(
   const end = async (
     level: 'info' | 'warn',
     outcome: ToolCall['outcome'],
-    { errorType, resultLength }: { errorType?: string; resultLength?: number } = {},
+    {
+      errorType,
+      resultLength,
+      images,
+    }: { errorType?: string; resultLength?: number; images?: number } = {},
   ) => {
     const durationMs = Date.now() - startedAt;
     const details = {
       ...(errorType === undefined ? {} : { errorType }),
       ...(resultLength === undefined ? {} : { resultLength }),
+      ...(images === undefined ? {} : { images }),
     };
     logger[level]({ ...fields, step, durationMs, outcome, ...details }, 'tool.end');
     await record({
@@ -324,6 +354,21 @@ export async function runTool(
   } finally {
     clearTimeout(timer);
     abortSignal?.removeEventListener('abort', onAbort);
+  }
+
+  // 带图片的结果：图片存进文件存储，结果里只留地址。存不了的图片换成说明，调用照常完成
+  if (output instanceof TextAndImages) {
+    const stored = await storeToolContent(output, files, (mediaType, error) =>
+      logger.warn(
+        { ...fields, step, mediaType, errorType: errorKind(error) },
+        'tool.image_unsaved',
+      ),
+    );
+    await end('info', 'completed', {
+      resultLength: toolContentText(stored).length,
+      images: toolContentImages(stored).length,
+    });
+    return stored;
   }
 
   // 交给模型的文字：字符串原样，其他转成 JSON（undefined 是 null）。转不了按失败处理，

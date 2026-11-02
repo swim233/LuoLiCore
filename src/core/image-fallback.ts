@@ -1,7 +1,17 @@
-import { APICallError, RetryError, type TextStreamPart, type ToolSet } from 'ai';
+import {
+  APICallError,
+  RetryError,
+  type LanguageModelMiddleware,
+  type TextStreamPart,
+  type ToolSet,
+} from 'ai';
 import type { Message } from './message.js';
+import type { FreshImageTag } from './tool-content.js';
 
 type Part = TextStreamPart<ToolSet>;
+type WrapStream = NonNullable<LanguageModelMiddleware['wrapStream']>;
+type CallParams = Parameters<WrapStream>[0]['params'];
+type CallModel = Parameters<WrapStream>[0]['model'];
 
 // 模型服务拒收请求的状态码：图片损坏、格式或尺寸不被接受时常见这几种
 const rejectedStatus = new Set([400, 413, 422]);
@@ -120,4 +130,105 @@ function isQuiet(part: Part): boolean {
     default:
       return false;
   }
+}
+
+/** 换掉的图片的占位，与用户消息里被拒收的图片相同 */
+const unreadableImage = '[图片无法读取]';
+
+/**
+ * 本次回复工具结果里的图片被拒收时，换成占位重试这一步（套在模型外层的中间件，一次回复一个）。
+ * 只有本次回复新出现、还没被接受过的图片可疑：它们在请求里带着 FreshImageTag（见 toolModelOutput）；
+ * 历史里的图片以前已被接受过，不带标记，不算；带标记的图片随某次请求成功发出（doStream 返回）后
+ * 记进 accepted，也不再算。某次请求还没有输出就被拒收（400、413、422），且请求里有可疑图片：把它们
+ * 记进 unreadable，换成「[图片无法读取]」立即再请求一次，SDK 只看到这次的结果；这次回复余下的请求
+ * 里，记下的图片都换成占位。重试的请求经过内层的中间件，照常计入请求次数。没有可疑图片、或重试
+ * 仍失败时，错误照原样交给 SDK。
+ * unreadable 是换掉的图片的地址，回复写入历史时记进 metadata，以后的请求也用占位
+ */
+export function toolImageFallback(onFallback: (urls: string[], error: unknown) => void): {
+  middleware: LanguageModelMiddleware;
+  unreadable: () => string[];
+} {
+  const unreadable = new Set<string>();
+  const accepted = new Set<string>();
+  // 请求成功发出：其中没换掉的带标记图片都已被接受
+  const request = async (model: CallModel, params: CallParams) => {
+    const result = await model.doStream(withoutImages(params, unreadable));
+    for (const url of freshImages(params)) if (!unreadable.has(url)) accepted.add(url);
+    return result;
+  };
+  return {
+    middleware: {
+      wrapStream: async ({ params, model }) => {
+        try {
+          return await request(model, params);
+        } catch (error) {
+          const suspect = freshImages(params).filter(
+            (url) => !unreadable.has(url) && !accepted.has(url),
+          );
+          if (suspect.length === 0 || !isRejectedRequest(error)) throw error;
+          for (const url of suspect) unreadable.add(url);
+          onFallback(suspect, error);
+          return request(model, params);
+        }
+      },
+    },
+    unreadable: () => [...unreadable],
+  };
+}
+
+type ToolResultOutput = Extract<
+  Extract<CallParams['prompt'][number], { role: 'tool' }>['content'][number],
+  { type: 'tool-result' }
+>['output'];
+type ContentPart = Extract<ToolResultOutput, { type: 'content' }>['value'][number];
+
+/** 带 FreshImageTag 的文件部件的地址 */
+function freshImageOf(part: ContentPart): string | undefined {
+  if (part.type !== 'file') return undefined;
+  const url = (part.providerOptions as Partial<FreshImageTag> | undefined)?.luoli?.freshToolImage;
+  return typeof url === 'string' ? url : undefined;
+}
+
+function toolOutputs(params: CallParams): ToolResultOutput[] {
+  return params.prompt.flatMap((message) =>
+    message.role === 'tool'
+      ? message.content.flatMap((part) => (part.type === 'tool-result' ? [part.output] : []))
+      : [],
+  );
+}
+
+function freshImages(params: CallParams): string[] {
+  return toolOutputs(params).flatMap((output) =>
+    output.type === 'content' ? output.value.flatMap((part) => freshImageOf(part) ?? []) : [],
+  );
+}
+
+function withoutImages(params: CallParams, urls: ReadonlySet<string>): CallParams {
+  if (urls.size === 0) return params;
+  const replace = (output: ToolResultOutput): ToolResultOutput =>
+    output.type === 'content'
+      ? {
+          ...output,
+          value: output.value.map((part) => {
+            const url = freshImageOf(part);
+            return url !== undefined && urls.has(url)
+              ? { type: 'text' as const, text: unreadableImage }
+              : part;
+          }),
+        }
+      : output;
+  return {
+    ...params,
+    prompt: params.prompt.map((message) =>
+      message.role === 'tool'
+        ? {
+            ...message,
+            content: message.content.map((part) =>
+              part.type === 'tool-result' ? { ...part, output: replace(part.output) } : part,
+            ),
+          }
+        : message,
+    ),
+  };
 }

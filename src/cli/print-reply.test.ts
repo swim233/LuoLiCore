@@ -117,4 +117,52 @@ describe('CLI 打印工具调用', () => {
     // 宽 60：「工具结果 echo 」占 14 列，「…」占 1 列，剩 45 列
     expect(line).toBe(`工具结果 echo ${'x'.repeat(45)}…`);
   });
+
+  // 带图片的工具结果在历史与流里的样子：文字与图片地址、描述
+  const content = (text: string) => ({
+    type: 'luoli-content',
+    parts: [
+      { type: 'text', text },
+      {
+        type: 'image',
+        url: 'luoli-file:a.png',
+        mediaType: 'image/png',
+        width: 800,
+        height: 600,
+        bytes: 53_248,
+      },
+      { type: 'image', url: 'luoli-file:b.gif', mediaType: 'image/gif', bytes: 900 },
+    ],
+  });
+
+  it('带图片的结果：文字后面每张图片接一段说明', async () => {
+    Object.defineProperty(process.stderr, 'columns', { value: 120, configurable: true });
+    await printReply(
+      streamOf([
+        { type: 'tool-input-available', toolCallId: 'c1', toolName: 'fetch', input: {} },
+        { type: 'tool-output-available', toolCallId: 'c1', output: content('读到\n一张图') },
+        { type: 'finish' },
+      ]),
+    );
+
+    expect(output[1]).toBe(
+      '[err]工具结果 fetch 读到 一张图 [图片 image/png 800×600 52 KB] [图片 image/gif 900 B]\n',
+    );
+  });
+
+  it('带图片的结果超过终端宽度时只截文字，图片说明保留', async () => {
+    Object.defineProperty(process.stderr, 'columns', { value: 120, configurable: true });
+    await printReply(
+      streamOf([
+        { type: 'tool-input-available', toolCallId: 'c1', toolName: 'fetch', input: {} },
+        { type: 'tool-output-available', toolCallId: 'c1', output: content('x'.repeat(200)) },
+        { type: 'finish' },
+      ]),
+    );
+
+    const line = output[1]!.replace(/^\[err\]/, '').replace(/\n$/, '');
+    const images = ' [图片 image/png 800×600 52 KB] [图片 image/gif 900 B]';
+    // 宽 120：图片说明占 54 列（「图片」两字各占两列），文字截到 66 列，含「工具结果 fetch 」15 列与「…」
+    expect(line).toBe(`工具结果 fetch ${'x'.repeat(50)}…${images}`);
+  });
 });

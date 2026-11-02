@@ -7,19 +7,26 @@ export type ModelOptions = {
   baseURL: string;
   apiKey?: string;
   modelId: string;
+  /** 发请求用的 fetch，默认全局的；测试里换成假的服务端 */
+  fetch?: typeof globalThis.fetch;
 };
 
 export function createModel({
   baseURL,
   apiKey,
   modelId,
+  fetch,
 }: ModelOptions): Exclude<LanguageModel, string> {
   const provider = createOpenAICompatible({
     name: 'openai-compatible',
     baseURL,
     apiKey,
+    fetch,
     // 流式响应默认不带用量，要显式请求（stream_options.include_usage）
     includeUsage: true,
+    // 工具结果带图片时，tool 消息的内容是文字加 image_url 部件（ADR-0006）。不是 Chat Completions
+    // 的标准，用户的服务端实测可用。只影响以内容部件交出的结果，普通结果照旧是字符串
+    supportsMultiPartToolContent: true,
   });
   return provider(modelId);
 }

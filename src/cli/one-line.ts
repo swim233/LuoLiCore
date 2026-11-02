@@ -4,12 +4,10 @@
  */
 export function oneLine(text: string, width: number): string {
   const flat = text.replace(/\s+/g, ' ');
-  let used = 0;
-  for (const char of flat) used += charWidth(char);
-  if (used <= width) return flat;
+  if (displayWidth(flat) <= width) return flat;
   // 留一列给「…」
   let kept = '';
-  used = 0;
+  let used = 0;
   for (const char of flat) {
     const next = used + charWidth(char);
     if (next > width - 1) break;
@@ -17,6 +15,13 @@ export function oneLine(text: string, width: number): string {
     used = next;
   }
   return `${kept}…`;
+}
+
+/** 在终端里占几列（中日韩文字、全角符号、emoji 占两列） */
+export function displayWidth(text: string): number {
+  let used = 0;
+  for (const char of text) used += charWidth(char);
+  return used;
 }
 
 // 显示时占两列的码点范围（东亚宽字符与全角，以及常见 emoji），其余算一列

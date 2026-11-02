@@ -47,6 +47,11 @@ export function trackAttempts({
    * 丢掉上一次调用还没插入的流式重试提示（上一次调用的 UI 流整个不发出）。stats 照常累计
    */
   restart: () => void;
+  /**
+   * 刚失败的那次请求被外层的中间件接住、重发了（工具图片被拒收后换成占位），SDK 没有看到这次失败：
+   * 不算进请求阶段的连续失败，之后的重试序号与 SDK 一致
+   */
+  discountFailure: () => void;
   stats: AttemptStats;
   /**
    * 第一次出现输出（非空的文字、推理、工具调用参数，完整的工具调用）的时间（Date.now()），
@@ -305,10 +310,15 @@ export function trackAttempts({
     pendingStreamRetries.length = 0;
   };
 
+  const discountFailure = () => {
+    requestFailures = Math.max(0, requestFailures - 1);
+  };
+
   return {
     middleware,
     markStreamRetries,
     restart,
+    discountFailure,
     stats,
     firstOutputAt: () => firstOutputAt,
     steps: () => steps,

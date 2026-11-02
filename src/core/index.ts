@@ -13,6 +13,7 @@ export {
   type FileStore,
   type NewFile,
 } from './files.js';
+export { imageSize, type ImageSize } from './image-size.js';
 export { silentLogger, type Logger } from './logger.js';
 export type {
   Author,
@@ -30,6 +31,15 @@ export {
   type PromptTexts,
 } from './prompt-files.js';
 export type { SegmentOptions } from './segments.js';
+export {
+  describeImage,
+  isStoredToolContent,
+  TextAndImages,
+  toolContentImages,
+  toolContentText,
+  type StoredImage,
+  type StoredToolContent,
+} from './tool-content.js';
 export { createMemoryStorage, createMemoryStore } from './storage/memory.js';
 export { DuplicateMessageError } from './storage/errors.js';
 export { openSqliteStorage } from './storage/sqlite.js';

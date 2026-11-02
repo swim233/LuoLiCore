@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { TextAndImages } from '../../core/index.js';
 import { createGitHubHandler } from './github.js';
 import { createFetchTool } from './index.js';
 import { createRequester, defaultUserAgents, type Requester } from './request.js';
@@ -47,6 +48,7 @@ async function fixture(routes: Record<string, Handler>) {
   return {
     server,
     logs,
+    call,
     read: async (url: string, offset?: number) =>
       parseOutput(await call({ url, ...(offset === undefined ? {} : { offset }) })),
     paths: () => server.requests.map(({ path }) => path),
@@ -180,6 +182,23 @@ describe('文件', () => {
       site: 'github',
       outcome: 'declined',
     });
+  });
+
+  it('图片文件交回通用流程后，走通用流程的图片分支交给模型看', async () => {
+    const png = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13]),
+      Buffer.from('IHDR'),
+      Buffer.from([0, 0, 0, 64, 0, 0, 0, 32, 8, 6, 0, 0, 0]),
+    ]);
+    const asImage = ok(png, { 'content-type': 'image/png' });
+    const { call } = await fixture({
+      '/web/vercel/ai/raw/main/logo.png': asImage,
+      '/vercel/ai/blob/main/logo.png': asImage,
+    });
+    const output: unknown = await call({ url: 'https://github.com/vercel/ai/blob/main/logo.png' });
+    expect(output).toBeInstanceOf(TextAndImages);
+    expect((output as TextAndImages).text).toContain('方法：图片');
+    expect((output as TextAndImages).text).toContain(`[图片 image/png 64×32 ${png.length} B]`);
   });
 });
 

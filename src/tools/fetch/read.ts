@@ -1,4 +1,4 @@
-import { ToolError } from '../../core/index.js';
+import { describeImage, imageSize, isSupportedImage, ToolError } from '../../core/index.js';
 import { decodeText } from './body.js';
 import { convertHtml, isPoorConversion, type Converted, type FetchMode } from './convert.js';
 import { readViaJina, type JinaOptions } from './jina.js';
@@ -97,14 +97,20 @@ export async function readGeneric(url: URL, options: ReadOptions): Promise<ReadR
       if (!bytes.includes(0)) return textual(truncated, { method: '纯文本', content: text });
       return other(response, status);
     }
+    case 'image':
+      return readImage(response, status);
     case 'other':
-      // 图片在第 5 步改成交给模型看
       await response.discard();
       return other(response, status);
   }
 }
 
-type ContentKind = 'markdown' | 'text' | 'json' | 'html' | 'unknown' | 'other';
+type ContentKind = 'markdown' | 'text' | 'json' | 'html' | 'image' | 'unknown' | 'other';
+
+// 交给模型看的图片类型；其他图片（SVG、BMP、AVIF……）只给一行说明
+const modelImageTypes = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+// 图片最多读这么多，再大的不交给模型
+const maxImageBytes = 10 * 1024 * 1024;
 
 // 按纯文本原样给模型的非 text/* 类型（text/* 除 HTML、Markdown 外都是纯文本）
 const textTypes = new Set([
@@ -114,9 +120,10 @@ const textTypes = new Set([
   'application/ecmascript',
 ]);
 
-// 顺序要紧：application/xhtml+xml 是 HTML，不按 *+xml 当纯文本
+// 顺序要紧：application/xhtml+xml 是 HTML、image/svg+xml 是图片，不按 *+xml 当纯文本
 function contentKind(mimeType: string | undefined): ContentKind {
   if (mimeType === undefined) return 'unknown';
+  if (mimeType.startsWith('image/')) return modelImageTypes.has(mimeType) ? 'image' : 'other';
   if (mimeType === 'text/html' || mimeType === 'application/xhtml+xml') return 'html';
   if (mimeType === 'text/markdown' || mimeType === 'text/x-markdown') return 'markdown';
   if (mimeType === 'application/json' || mimeType.endsWith('+json')) return 'json';
@@ -127,10 +134,67 @@ function contentKind(mimeType: string | undefined): ContentKind {
   return 'other';
 }
 
+/**
+ * 图片：不超过 10 MB 时读出来交给模型看，结果是头部加一行说明（类型、宽高、大小）。
+ * 超过 10 MB（声明的或读到的）、或者文件头与类型不符时，只给一行说明
+ */
+async function readImage(response: FetchResponse, status: number): Promise<ReadResult> {
+  const mediaType = response.mimeType!;
+  const declared = contentLength(response);
+  const line = (summary: string): ReadResult => ({
+    page: { url: response.url, method: '图片', notes: [], summary },
+    status,
+    truncated: false,
+    jina: false,
+  });
+  const size = declaredSize(response);
+  const tooLarge = () =>
+    line(`[图片超过 10 MB，没有交给模型：${mediaType}${size === undefined ? '' : `，${size}`}]`);
+  if (declared !== undefined && declared > maxImageBytes) {
+    await response.discard();
+    return tooLarge();
+  }
+  const { bytes, truncated } = await response.bytes({ maxBytes: maxImageBytes });
+  if (truncated) return tooLarge();
+  if (!isSupportedImage({ data: bytes, mediaType })) {
+    return line(`[图片无法识别：${mediaType}，${formatSize(bytes.length)}]`);
+  }
+  return {
+    page: {
+      url: response.url,
+      method: '图片',
+      notes: [],
+      summary: describeImage({ mediaType, ...imageSize(bytes), bytes: bytes.length }),
+      image: { data: bytes, mediaType },
+    },
+    status,
+    truncated: false,
+    jina: false,
+  };
+}
+
+/** Content-Length；没给或看不懂时为 undefined */
+function contentLength(response: FetchResponse): number | undefined {
+  const value = response.headers.get('content-length');
+  const length = value === null ? NaN : Number(value);
+  return Number.isSafeInteger(length) && length >= 0 ? length : undefined;
+}
+
+/**
+ * 按 Content-Length 写的大小，如「1.2 MB」；响应压缩过（Content-Encoding 不是 identity）时它是
+ * 压缩后的大小，写成「2 KB（压缩后）」。没有 Content-Length 时为 undefined
+ */
+function declaredSize(response: FetchResponse): string | undefined {
+  const length = contentLength(response);
+  if (length === undefined) return undefined;
+  const encoding = response.headers.get('content-encoding')?.trim().toLowerCase();
+  const compressed = encoding !== undefined && encoding !== '' && encoding !== 'identity';
+  return compressed ? `${formatSize(length)}（压缩后）` : formatSize(length);
+}
+
 /** 非文本内容：不读正文，只给一行说明 */
 function other(response: FetchResponse, status: number): ReadResult {
-  const length = Number(response.headers.get('content-length') ?? NaN);
-  const size = Number.isFinite(length) ? formatSize(length) : '大小未知';
+  const size = declaredSize(response) ?? '大小未知';
   return {
     page: {
       url: response.url,

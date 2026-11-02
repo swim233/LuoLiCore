@@ -17,7 +17,8 @@ export type MessageMetadata = {
   /** 在平台上被编辑过：最后一次编辑的时间（ISO） */
   editedAt?: string;
   /**
-   * 模型服务拒收过的图片（`luoli-file:` 地址）。文件与 parts 不变，发给模型时换成「[图片无法读取]」
+   * 模型服务拒收过的图片（`luoli-file:` 地址）：用户消息里的图片，或助手消息里工具结果的图片。
+   * 文件与 parts 不变，发给模型时换成「[图片无法读取]」
    */
   unreadableFiles?: string[];
   /** 助手回复被中止，正文是中止前已输出的部分 */
