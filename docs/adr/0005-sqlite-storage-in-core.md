@@ -77,7 +77,7 @@ CREATE TABLE tool_calls (
   duration_ms     INTEGER NOT NULL,  -- 超时时算到超时为止
   outcome         TEXT NOT NULL,     -- 'completed' | 'failed' | 'timeout' | 'aborted'
   error           TEXT,              -- 失败时的错误类型，如 'InvalidToolInputError'；不含正文
-  output_chars    INTEGER            -- 结果转成文字后的长度；没有结果时为空
+  output_chars    INTEGER            -- 结果转成文字后的长度（带图片时只算文字部分）；没有结果时为空
 );
 CREATE INDEX tool_calls_time ON tool_calls(started_at);
 CREATE INDEX tool_calls_tool ON tool_calls(tool, started_at);
