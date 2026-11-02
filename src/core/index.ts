@@ -33,6 +33,16 @@ export type { SegmentOptions } from './segments.js';
 export { createMemoryStorage, createMemoryStore } from './storage/memory.js';
 export { DuplicateMessageError } from './storage/errors.js';
 export { openSqliteStorage } from './storage/sqlite.js';
+export {
+  defineTool,
+  installTools,
+  ToolDefinitionError,
+  type InstalledTool,
+  type ToolContext,
+  type ToolDefinition,
+  type ToolHistory,
+  type ToolSetup,
+} from './tools.js';
 export type {
   ConversationInfo,
   ConversationStore,

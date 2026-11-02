@@ -27,6 +27,7 @@ import { PromptFileError, type PromptSource } from './prompt-files.js';
 import { createSegmenter, type SegmentOptions, type Summarize } from './segments.js';
 import { createMemoryStore } from './storage/memory.js';
 import type { ConversationStore, ModelCall, Segment } from './storage/types.js';
+import { runTool, toToolSet, ToolError, watchToolCalls, type InstalledTool } from './tools.js';
 
 export type Conversation = {
   /**
@@ -45,6 +46,9 @@ export type Conversation = {
    * 请求还没有输出就被拒收（400、413、422），且上一条助手消息之后有新图片时，把这些图片换成
    * 「[图片无法读取]」重试一次，流里只出现重试的输出；重试没有失败时把标记写进那些消息。
    * 正常完成且输入超过压缩阈值时，在后台压缩。
+   * 装了工具时一次回复可以有多步：模型调了工具，执行完把结果交回模型再请求一次，直到不再调工具
+   * 或碰到上限（步数、总时长）。工具出错、超时、参数不对都以错误结果交给模型，循环照常继续，
+   * 不算回复失败。重试与首段、段间超时按每一步的请求计。
    * 上一个回复的流还没结束时调用会立即抛错。
    */
   reply(options?: ReplyOptions): ReadableStream<MessageChunk>;
@@ -68,6 +72,12 @@ export type ReplyOptions = {
   abortSignal?: AbortSignal;
 };
 
+/** 装了工具时传给 streamText 的几项：工具集与多步的控制 */
+type ToolLoop = Pick<
+  Parameters<typeof streamText<ToolSet>>[0],
+  'tools' | 'toolChoice' | 'stopWhen' | 'prepareStep'
+>;
+
 export function createConversation({
   model,
   prompts,
@@ -77,6 +87,8 @@ export function createConversation({
   maxRetries = 2,
   conversationId,
   timeouts = {},
+  tools = [],
+  maxSteps = 50,
   segments = {},
   checkIdleOnCreate = true,
 }: {
@@ -95,8 +107,24 @@ export function createConversation({
   maxRetries?: number;
   /** 存储里的会话 id，只写进日志，便于多会话排查 */
   conversationId?: string;
-  /** 超时（毫秒）：等第一段输出、两段输出之间。超时按失败处理 */
-  timeouts?: { firstChunkMs?: number; chunkMs?: number };
+  /**
+   * 超时（毫秒）。firstChunkMs、chunkMs：等第一段输出、两段输出之间，按每一步的每次请求计，
+   * 工具执行期间不计；超时按失败处理。replyMs：一次回复的总时长（默认 10 分钟），每一步开始前
+   * 检查，已经超过时这一步就是收尾步。toolMs：一次工具调用的默认时限（默认 60 秒），
+   * 工具自己声明了 timeoutMs 时用它的；到时这次调用以错误结束，回复继续
+   */
+  timeouts?: { firstChunkMs?: number; chunkMs?: number; replyMs?: number; toolMs?: number };
+  /**
+   * 装好的工具（installTools 的结果），按这个顺序发给模型。没有工具时请求里没有工具定义，
+   * 与不传这一项时逐字相同
+   */
+  tools?: readonly InstalledTool[];
+  /**
+   * 一次回复最多几步（默认 50，至少为 2：为 1 时第一步就是收尾步；这里不校验，由前端的配置保证），
+   * 装了工具时才起作用。第 maxSteps 步（或总时长已超过时的那一步）
+   * 是收尾步：工具定义照旧发出，但不许调用，请求末尾加一条收尾提示（prompts/tool-limit.md）
+   */
+  maxSteps?: number;
   /** 分段：空闲切段、压缩与摘要（ADR-0004） */
   segments?: SegmentOptions;
   /**
@@ -105,12 +133,14 @@ export function createConversation({
    */
   checkIdleOnCreate?: boolean;
 }): Conversation {
-  const { firstChunkMs = 60_000, chunkMs = 30_000 } = timeouts;
+  const { firstChunkMs = 60_000, chunkMs = 30_000, replyMs = 600_000, toolMs = 60_000 } = timeouts;
   let replying = false;
 
   /**
    * 历史消息换成发给模型的消息：标签格式、被中止的标记、图片换成 data URL。
-   * 读不到的图片换成文字，记一条 warn（只记地址）
+   * 读不到的图片换成文字，记一条 warn（只记地址）。
+   * 没有结果的工具调用（如工具执行中被中止）先略去，否则请求会被 SDK 拒绝；
+   * 以后改成补上「工具调用未完成」（ADR-0006）
    */
   async function toModelMessages(history: Message[], logFields: object): Promise<ModelMessage[]> {
     const onMissing = (url: string) => logger.warn({ ...logFields, url }, 'file.missing');
@@ -118,6 +148,7 @@ export function createConversation({
       await Promise.all(
         history.map((message) => inlineFiles(formatForModel(message), fileStore, onMissing)),
       ),
+      { ignoreIncompleteToolCalls: true },
     );
   }
 
@@ -158,10 +189,11 @@ export function createConversation({
     });
     return {
       tracker,
-      stream: (system: string, messages: ModelMessage[]) => {
+      /** 发出请求。loop 是装了工具时的工具与多步设置；不给时与没有工具时一样，只有一步 */
+      stream: (system: string, messages: ModelMessage[], loop?: ToolLoop) => {
         startedAt ??= Date.now();
         return streamText({
-          // SDK 的每次请求（含两类重试）都重新调用 doStream，中间件能逐次观察
+          // SDK 的每次请求（含两类重试、多步的每一步）都重新调用 doStream，中间件能逐次观察
           model: wrapLanguageModel({ model, middleware: tracker.middleware }),
           instructions: system,
           messages,
@@ -172,6 +204,7 @@ export function createConversation({
           // 错误经 stream 交给调用方；不传时 SDK 默认把整个错误对象打到 stderr。
           // 不返回 { retry: true }，不额外请求重试
           onError: () => {},
+          ...loop,
         });
       },
 
@@ -240,10 +273,21 @@ export function createConversation({
     let usage: LanguageModelUsage;
     let finishReason: string;
     try {
-      const result = call.stream(systemPrompt(texts, segment), [
-        ...(await toModelMessages(history, logFields)),
-        { role: 'user', content: summaryInstruction(texts, scope, maxChars) },
-      ]);
+      const result = call.stream(
+        systemPrompt(texts, segment),
+        [
+          ...(await toModelMessages(history, logFields)),
+          { role: 'user', content: summaryInstruction(texts, scope, maxChars) },
+        ],
+        // 装了工具时带上同样的工具定义：前缀与回复一致，缓存照常命中；历史里的工具调用也有对应的
+        // 定义。toolChoice 为 none，SDK 不执行工具
+        tools.length > 0
+          ? {
+              tools: toToolSet(tools, () => Promise.reject(new ToolError('摘要请求不执行工具'))),
+              toolChoice: 'none',
+            }
+          : undefined,
+      );
       // 流式重试时 result.text 只含成功那次的文本；出错、超时、中止都以流中的段告知
       let failure: { error: unknown } | undefined;
       for await (const part of result.stream) {
@@ -351,30 +395,76 @@ export function createConversation({
         failure ??= { error };
         return error instanceof Error ? error.message : String(error);
       };
+      // 工具的错误（执行出错、超时、参数不合结构、不存在的工具）也经过 UI 流的 onError，
+      // 用来生成工具段的 errorText。它们以错误结果交给模型、循环继续，不算回复失败：
+      // watchToolCalls 已把它们换成 ToolError，message 就是模型看到的说明
+      const describeStreamError = (error: unknown) =>
+        error instanceof ToolError ? error.message : describeError(error);
+      // 工具调用：数次数，不合规的调用记日志，工具的错误换成 ToolError
+      const toolCalls = watchToolCalls({ logger, logFields });
 
       // SDK 超时（以及上面的首段计时）都以 abort 段结束回复流。用户没有中止却收到 abort，
       // 就是超时：换成 error 段，按失败处理（不写入，记 reply.failed）。
-      // 是哪种超时看这次请求有没有输出过内容，不解析 SDK 的错误文字。
-      // 流式重试的 reset-step 之后是新的请求，失败那次的半截不算
-      const timeoutAsFailure = () => {
-        let sawOutput = false;
-        return new TransformStream<MessageChunk, MessageChunk>({
+      // 是哪种超时看超时那次请求（当前这一步的最近一次请求）有没有输出过内容，
+      // 由跟踪每次请求的中间件判断，不解析 SDK 的错误文字
+      const timeoutAsFailure = () =>
+        new TransformStream<MessageChunk, MessageChunk>({
           transform(chunk, controller) {
-            if ((chunk.type === 'text-delta' || chunk.type === 'reasoning-delta') && chunk.delta) {
-              sawOutput = true;
-            }
-            if (chunk.type === 'reset-step') sawOutput = false;
             if (chunk.type !== 'abort' || abortSignal?.aborted) {
               controller.enqueue(chunk);
               return;
             }
-            const detail = sawOutput
+            const detail = tracker.attemptHasOutput()
               ? `两段输出之间超过 ${chunkMs / 1000} 秒`
               : `${firstChunkMs / 1000} 秒内没有收到第一段输出`;
             const error = new DOMException(`等待模型输出超时：${detail}`, 'TimeoutError');
             controller.enqueue({ type: 'error', errorText: describeError(error) });
           },
         });
+
+      /**
+       * 装了工具时一次 streamText 调用的多步循环（没有工具时为 undefined）。每次调用（含拒收图片后的
+       * 重试）各用一份，从第 1 步数起。每一步开始前看是否已到上限：这一步是第 maxSteps 步，
+       * 或回复开始已超过 replyMs，这一步就是收尾步
+       */
+      const toolLoop = (toolLimit: string, title: string | undefined): ToolLoop | undefined => {
+        if (tools.length === 0) return undefined;
+        // 当前是第几步（从 0 数），工具执行时记进日志
+        let step = 0;
+        let finalStep = false;
+        return {
+          tools: toToolSet(tools, (tool, input, { toolCallId, abortSignal }) =>
+            runTool(tool, input, {
+              toolCallId,
+              abortSignal,
+              timeoutMs: toolMs,
+              step: step + 1,
+              conversation: { id: conversationId, title },
+              logger,
+              logFields,
+            }),
+          ),
+          // 收尾步之后不再有下一步；其余时候模型不再调工具，循环自然结束
+          stopWhen: () => finalStep,
+          prepareStep: ({ stepNumber, messages }) => {
+            step = stepNumber;
+            const reason =
+              stepNumber + 1 >= maxSteps
+                ? 'steps'
+                : Date.now() - startedAt >= replyMs
+                  ? 'time'
+                  : undefined;
+            if (!reason) return undefined;
+            finalStep = true;
+            logger.info({ ...logFields, reason, step: stepNumber + 1 }, 'reply.limit');
+            // 工具定义照旧发出（前缀不变，缓存不受影响），只是这一步不许调用。
+            // 收尾提示不包标签，只加在这次请求的末尾，不写进历史
+            return {
+              toolChoice: 'none',
+              messages: [...messages, { role: 'user', content: toolLimit }],
+            };
+          },
+        };
       };
 
       /**
@@ -415,7 +505,12 @@ export function createConversation({
           // 只看当前段里预留号之前的消息：模型看到的正是排在回复之前的那些
           const history = await store.list({ from: current.startSeq, before: seq });
           const system = systemPrompt(texts, current);
-          const first = call.stream(system, await toModelMessages(history, logFields)).stream;
+          const loop = () => toolLoop(texts.toolLimit, current.conversationTitle);
+          const first = call.stream(
+            system,
+            await toModelMessages(history, logFields),
+            loop(),
+          ).stream;
           // 还没有输出就被拒收：可能是新来的图片模型读不了，换成占位重试一次（同一段、同一个序号）
           const stream = withFallback(first, async (error) => {
             if (!isRejectedRequest(error)) return undefined;
@@ -435,12 +530,12 @@ export function createConversation({
               const replaced = suspects.get(message.id);
               return replaced ? withUnreadable(message, replaced) : message;
             });
-            return call.stream(system, await toModelMessages(marked, logFields)).stream;
+            return call.stream(system, await toModelMessages(marked, logFields), loop()).stream;
           });
           let createdAt: string | undefined;
           writer.merge(
             toUIMessageStream<ToolSet, Message>({
-              stream,
+              stream: stream.pipeThrough(toolCalls.stream),
               // start 段附上时间，finish 段附上用量（合并进回复的 metadata）。
               // 中止没有 finish 段；失败的回复不写入历史。finish 段也要带 createdAt（类型要求），值不变
               messageMetadata: ({ part }) => {
@@ -456,7 +551,7 @@ export function createConversation({
                 }
                 return undefined;
               },
-              onError: describeError,
+              onError: describeStreamError,
             })
               .pipeThrough(tracker.markStreamRetries())
               .pipeThrough(timeoutAsFailure()),
@@ -475,6 +570,8 @@ export function createConversation({
               ...logFields,
               durationMs: Date.now() - startedAt,
               ...tracker.stats,
+              steps: tracker.steps(),
+              toolCalls: toolCalls.count(),
               ...(fallback ? { imageFallback: true } : {}),
             };
             // 先记模型调用：之后写历史出错也不影响这一行。提示词文件有误时没有发出请求，不记

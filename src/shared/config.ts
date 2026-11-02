@@ -1,13 +1,18 @@
 import { dirname, join } from 'node:path';
 import type { ModelOptions, SegmentOptions } from '../core/index.js';
 
-/** 各前端共用的配置：模型、重试、超时、分段、数据库、文件目录、人设 */
+/** 各前端共用的配置：模型、重试、超时、步数上限、分段、数据库、文件目录、人设 */
 export type CommonConfig = {
   model: ModelOptions;
   /** 未设置时为 undefined，用核心的默认值 */
   maxRetries?: number;
-  /** 首段与段间超时（毫秒），未设置的项用核心的默认值 */
-  timeouts: { firstChunkMs?: number; chunkMs?: number };
+  /**
+   * 超时（毫秒）：首段、段间、一次回复的总时长、一次工具调用的默认时限。
+   * 环境变量的单位是秒，未设置的项用核心的默认值
+   */
+  timeouts: { firstChunkMs?: number; chunkMs?: number; replyMs?: number; toolMs?: number };
+  /** 一次回复最多几步（不小于 2），LUOLI_MAX_STEPS；未设置时为 undefined，用核心的默认值 */
+  maxSteps?: number;
   /** 分段与摘要，未设置的项用核心的默认值 */
   segments: SegmentOptions;
   /** 数据库文件，LUOLI_DB，默认 data/luoli.db */
@@ -48,6 +53,8 @@ export function parseCommonConfig(
   for (const [key, variable] of [
     ['firstChunkMs', 'LUOLI_FIRST_CHUNK_TIMEOUT'],
     ['chunkMs', 'LUOLI_CHUNK_TIMEOUT'],
+    ['replyMs', 'LUOLI_REPLY_TIMEOUT'],
+    ['toolMs', 'LUOLI_TOOL_TIMEOUT'],
   ] as const) {
     const raw = env[variable];
     if (!raw) continue;
@@ -60,6 +67,16 @@ export function parseCommonConfig(
       };
     }
     timeouts[key] = seconds * 1000;
+  }
+
+  let maxSteps: number | undefined;
+  const rawSteps = env.LUOLI_MAX_STEPS;
+  if (rawSteps) {
+    maxSteps = Number(rawSteps);
+    // 为 1 时第一步就是收尾步：模型一次工具都没调过，却被告知已到上限
+    if (!(/^\d+$/.test(rawSteps) && maxSteps >= 2 && Number.isSafeInteger(maxSteps))) {
+      return { ok: false, error: `LUOLI_MAX_STEPS 必须是不小于 2 的整数，当前为 "${rawSteps}"` };
+    }
   }
 
   const segments: SegmentOptions = {};
@@ -85,6 +102,7 @@ export function parseCommonConfig(
       model: { baseURL, apiKey: env.LUOLI_API_KEY || undefined, modelId },
       maxRetries,
       timeouts,
+      maxSteps,
       segments,
       dbPath,
       filesDir: env.LUOLI_FILES_DIR || join(dirname(dbPath), 'files'),

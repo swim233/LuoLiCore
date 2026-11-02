@@ -53,19 +53,38 @@ export function trackAttempts({
    * 还没有时为 undefined
    */
   firstOutputAt: () => number | undefined;
+  /** 发出过请求的步数；拒收图片后的重试从第 1 步重新数，这里取两次调用里多的那个 */
+  steps: () => number;
+  /**
+   * 最近一次请求是否已有输出（文字、推理、工具调用）。超时结束回复时据此区分
+   * 首段超时与段间超时：超时那次请求就是最近一次
+   */
+  attemptHasOutput: () => boolean;
 } {
   const stats: AttemptStats = { attempts: 0, requestRetries: 0, streamRetries: 0 };
   let firstOutputAt: number | undefined;
   // 当前这次调用里请求阶段连续失败的次数。SDK 每次调用（包括流式重试发起的那次）
   // 都重新计算请求重试次数，这个计数与 SDK 的 tryNumber 对应
   let requestFailures = 0;
-  // 当前这次调用里流式重试的次数（SDK 的 streamRetries 按调用计）
-  let callStreamRetries = 0;
-  // 模型已发出的内容段起点数（text-start、reasoning-start），用来在 UI 流里定位尝试的边界
+  // 当前这一步里流式重试的次数（SDK 的 streamRetries 按步计）
+  let stepStreamRetries = 0;
+  // 当前是这次 streamText 调用的第几步（从 0 数）。SDK 不告诉中间件，按请求推断：
+  // 一次请求正常结束后的下一次请求是新的一步，失败后的下一次是同一步的重试
+  let step = 0;
+  let stepDone = false;
+  let steps = 0;
+  // 最近一次请求是否已有输出
+  let attemptOutput = false;
+  // UI 流里已出现的内容段起点数（见 modelStarts），用来在 UI 流里定位尝试的边界
   let contentStarts = 0;
   // 等待插入 UI 流的流式重试提示。notices 首项是重新生成提示，其后是这次重新生成的
-  // 请求阶段重试提示：它们若直接写出，会排到「输出中断」之前，甚至夹在失败那次的半截中间
-  const pendingStreamRetries: Array<{ notices: MessageChunk[]; afterStarts: number }> = [];
+  // 请求阶段重试提示：它们若直接写出，会排到「输出中断」之前，甚至夹在失败那次的半截中间。
+  // step 是出错的那一步：UI 流可能还没走完前一步，不能在前一步的结尾插入
+  const pendingStreamRetries: Array<{
+    notices: MessageChunk[];
+    step: number;
+    afterStarts: number;
+  }> = [];
 
   const retryNotice = (data: MessageData['retry']): MessageChunk => ({
     type: 'data-retry',
@@ -75,9 +94,21 @@ export function trackAttempts({
 
   const middleware: LanguageModelMiddleware = {
     wrapStream: async ({ doStream, params }) => {
+      if (stepDone) {
+        step++;
+        stepDone = false;
+        stepStreamRetries = 0;
+      }
       const attempt = ++stats.attempts;
+      steps = Math.max(steps, step + 1);
+      attemptOutput = false;
       const startedAt = Date.now();
-      const fields = () => ({ ...logFields, attempt, durationMs: Date.now() - startedAt });
+      const fields = () => ({
+        ...logFields,
+        attempt,
+        step: step + 1,
+        durationMs: Date.now() - startedAt,
+      });
       // 这次请求是怎么被中止的：用户中止，或超时（SDK 合并进 params.abortSignal 的超时、
       // 以及下面的首段计时都会中止它，而用户的信号不变）
       const abortedBy = () =>
@@ -140,18 +171,41 @@ export function trackAttempts({
       requestFailures = 0;
 
       let logged = false;
+      // 收尾步（toolChoice 为 none）里 SDK 不放出工具段，也不因它们缓冲之后的段
+      const withholdsTools = params.toolChoice?.type === 'none';
+      // 这次请求从第一个工具段起，SDK 把之后的段都缓冲到请求正常结束才放出，失败时整批丢弃。
+      // held 是缓冲着的内容段起点数
+      let buffering = false;
+      let held = 0;
+      let failed = false;
       const stream = observe(result.stream, {
         onPart(part) {
-          if (part.type === 'text-start' || part.type === 'reasoning-start') contentStarts++;
-          if ((part.type === 'text-delta' || part.type === 'reasoning-delta') && part.delta) {
+          const visible = !(withholdsTools && part.type.startsWith('tool-'));
+          if (visible && part.type.startsWith('tool-')) buffering = true;
+          if (visible && modelStarts.has(part.type)) {
+            if (buffering) held++;
+            else contentStarts++;
+          }
+          if (visible && isOutput(part)) {
             clearFirstChunkTimer();
+            attemptOutput = true;
+          }
+          if ((part.type === 'text-delta' || part.type === 'reasoning-delta') && part.delta) {
             firstOutputAt ??= Date.now();
           }
-          if (part.type === 'error') clearFirstChunkTimer();
+          if (part.type === 'finish' && !failed) {
+            contentStarts += held;
+            held = 0;
+            stepDone = true;
+          }
+          if (part.type === 'error') {
+            clearFirstChunkTimer();
+            failed = true;
+          }
           if (part.type !== 'error' || logged) return;
           logged = true;
           // SDK：流中的任何错误事件都会重新生成，直到次数用完；不看是否可重试
-          const willRetry = callStreamRetries < maxRetries;
+          const willRetry = stepStreamRetries < maxRetries;
           const statusCode = statusCodeOf(part.error);
           logger.warn(
             { ...fields(), phase: 'stream', ok: false, statusCode, willRetry },
@@ -159,16 +213,17 @@ export function trackAttempts({
           );
           if (willRetry) {
             stats.streamRetries++;
-            callStreamRetries++;
+            stepStreamRetries++;
             pendingStreamRetries.push({
               notices: [
                 retryNotice({
                   phase: 'stream',
-                  attempt: callStreamRetries,
+                  attempt: stepStreamRetries,
                   maxRetries,
                   statusCode,
                 }),
               ],
+              step,
               afterStarts: contentStarts,
             });
           }
@@ -210,27 +265,28 @@ export function trackAttempts({
     },
   };
 
-  // 中间件看到错误事件时，UI 流可能还没处理完失败那次的内容（中间有缓冲），
-  // 所以不按时间、而按内容段的个数定位：失败那次（及之前）共发出 afterStarts 个内容段，
-  // 之后的第一个内容段属于新的尝试。SDK 在重试前会补发 text-end 收尾，
-  // 所以插入点之前失败那次的段都已结束，reset-step 能把它们从消息里整段去掉。
-  // 前提：模型流的内容段与 UI 流一一对应（不关 sendReasoning；加工具时要重新审）
+  // 中间件看到错误事件时，UI 流可能还没处理完失败那次的内容（中间有缓冲），甚至还没走完前一步，
+  // 所以不按时间、而按步与内容段的个数定位：失败那次（及之前）在 UI 流里共有 afterStarts 个内容段，
+  // 那一步里之后的第一个内容段属于新的尝试。SDK 在重试前会补发 text-end 收尾，
+  // 所以插入点之前失败那次的段都已结束，reset-step 能把它们从这一步里整段去掉。
+  // 前提：模型流的内容段起点与 UI 流一一对应（不关 sendReasoning；见 modelStarts、uiStarts）
   const markStreamRetries = () => {
     let starts = 0;
+    // UI 流里已开始的步数（start-step 段数）
+    let uiSteps = 0;
     return new TransformStream<MessageChunk, MessageChunk>({
       transform(chunk, controller) {
-        const isStart = chunk.type === 'text-start' || chunk.type === 'reasoning-start';
+        if (chunk.type === 'start-step') uiSteps++;
+        const isStart = uiStarts.has(chunk.type);
         // 新的尝试一个内容段都没给就结束、失败或被中止时，在结束段之前插入，
-        // 失败那次的半截也就不会随中止写入历史
+        // 失败那次的半截也就不会随中止写入历史。一步结束时只插入这一步的
         const endsReply =
-          chunk.type === 'finish-step' ||
-          chunk.type === 'finish' ||
-          chunk.type === 'error' ||
-          chunk.type === 'abort';
-        while (
-          pendingStreamRetries[0] &&
-          (endsReply || (isStart && pendingStreamRetries[0].afterStarts <= starts))
-        ) {
+          chunk.type === 'finish' || chunk.type === 'error' || chunk.type === 'abort';
+        const endsStep = chunk.type === 'finish-step';
+        while (pendingStreamRetries[0]) {
+          const { step: retryStep, afterStarts } = pendingStreamRetries[0];
+          const inStep = uiSteps > retryStep;
+          if (!(endsReply || (inStep && (endsStep || (isStart && afterStarts <= starts))))) break;
           const [streamNotice, ...requestNotices] = pendingStreamRetries.shift()!.notices;
           controller.enqueue(streamNotice!);
           controller.enqueue({ type: 'reset-step' });
@@ -244,12 +300,50 @@ export function trackAttempts({
 
   const restart = () => {
     requestFailures = 0;
-    callStreamRetries = 0;
+    stepStreamRetries = 0;
+    step = 0;
+    stepDone = false;
     contentStarts = 0;
     pendingStreamRetries.length = 0;
   };
 
-  return { middleware, markStreamRetries, restart, stats, firstOutputAt: () => firstOutputAt };
+  return {
+    middleware,
+    markStreamRetries,
+    restart,
+    stats,
+    firstOutputAt: () => firstOutputAt,
+    steps: () => steps,
+    attemptHasOutput: () => attemptOutput,
+  };
+}
+
+// 模型流里在 UI 流中各有一段与之对应的起点：文字、推理段的开始，工具调用参数的开始，
+// 完整的工具调用（UI 流里依次是 text-start、reasoning-start、tool-input-start，
+// 以及 tool-input-available 或不合规时的 tool-input-error）
+const modelStarts = new Set(['text-start', 'reasoning-start', 'tool-input-start', 'tool-call']);
+const uiStarts = new Set<string>([
+  'text-start',
+  'reasoning-start',
+  'tool-input-start',
+  'tool-input-available',
+  'tool-input-error',
+]);
+
+/** 算作模型输出的段，与 SDK 计首段、段间超时时一致：非空的增量、完整的工具调用、文件 */
+function isOutput(part: ModelStreamPart): boolean {
+  switch (part.type) {
+    case 'text-delta':
+    case 'reasoning-delta':
+    case 'tool-input-delta':
+      return part.delta !== '';
+    case 'tool-call':
+    case 'file':
+    case 'reasoning-file':
+      return true;
+    default:
+      return false;
+  }
 }
 
 function observe(

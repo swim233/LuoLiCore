@@ -23,7 +23,7 @@ if (!parsed.ok) {
   if (parsed.showUsage) console.error(usage);
   process.exit(1);
 }
-const { model, maxRetries, timeouts, segments, resume, dbPath, filesDir, promptPath } =
+const { model, maxRetries, timeouts, maxSteps, segments, resume, dbPath, filesDir, promptPath } =
   parsed.config;
 const name = parsed.config.name ?? userInfo().username;
 
@@ -56,6 +56,7 @@ const conversation = createConversation({
   logger,
   maxRetries,
   timeouts,
+  maxSteps,
   segments,
   conversationId,
 });

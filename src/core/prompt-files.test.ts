@@ -5,10 +5,13 @@ import { fileURLToPath } from 'node:url';
 import { APICallError, simulateReadableStream } from 'ai';
 import { MockLanguageModelV4 } from 'ai/test';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 import {
   createConversation,
   createMemoryStore,
   createPromptFiles,
+  defineTool,
+  installTools,
   PromptFileError,
   type Conversation,
   type ConversationStore,
@@ -76,19 +79,23 @@ function recordingLogger(): { logger: Logger; entries: LogEntry[] } {
 
 const logsOf = (entries: LogEntry[], msg: string) => entries.filter((e) => e.msg === msg);
 
+function finish(reason: 'stop' | 'tool-calls' = 'stop'): StreamPart {
+  return {
+    type: 'finish',
+    finishReason: { unified: reason, raw: undefined },
+    usage: {
+      inputTokens: { total: 1, noCache: 1, cacheRead: undefined, cacheWrite: undefined },
+      outputTokens: { total: 1, text: 1, reasoning: undefined },
+    },
+  };
+}
+
 function answer(text: string): StreamPart[] {
   return [
     { type: 'text-start', id: 't' },
     { type: 'text-delta', id: 't', delta: text },
     { type: 'text-end', id: 't' },
-    {
-      type: 'finish',
-      finishReason: { unified: 'stop', raw: undefined },
-      usage: {
-        inputTokens: { total: 1, noCache: 1, cacheRead: undefined, cacheWrite: undefined },
-        outputTokens: { total: 1, text: 1, reasoning: undefined },
-      },
-    },
+    finish(),
   ];
 }
 
@@ -281,6 +288,22 @@ describe('读取与检查', () => {
     expect(error.message).toBe(`提示词文件有误：prompts/${file}（缺少变量 {{${name}}}）`);
   });
 
+  it('收尾提示 tool-limit.md：缺文件、写了变量（它没有变量）都报错', async () => {
+    const missing = await promptDir();
+    await rm(join(missing.dir, 'tool-limit.md'));
+    expect(
+      (await loadError(createPromptFiles({ personaPath: missing.personaPath, dir: missing.dir })))
+        .message,
+    ).toBe('提示词文件有误：prompts/tool-limit.md（文件不存在）');
+
+    const variable = await promptDir();
+    await variable.edit('tool-limit.md', (text) => `${text}{{step}}`);
+    expect(
+      (await loadError(createPromptFiles({ personaPath: variable.personaPath, dir: variable.dir })))
+        .message,
+    ).toBe('提示词文件有误：prompts/tool-limit.md（不认识的变量 {{step}}）');
+  });
+
   it('summary.md 不用 {{maxChars}} 也可以：摘要指令里就没有字数', async () => {
     const { dir, personaPath, edit } = await promptDir();
     await edit('summary.md', (text) => text.replace('{{maxChars}}', '若干'));
@@ -374,6 +397,42 @@ describe('一次调用内用同一份', () => {
     expect(mock.doStreamCalls).toHaveLength(2);
     expect(requestOf(mock, 1).system).toBe(requestOf(mock, 0).system);
     expect(requestOf(mock, 1).system).not.toContain('新加的一句。');
+  });
+
+  it('收尾提示：回复中途改了 tool-limit.md，这次的收尾步仍是旧内容，下一次回复才用新的', async () => {
+    const { dir, personaPath, edit } = await promptDir();
+    const original = (await readFile(join(dir, 'tool-limit.md'), 'utf8')).trim();
+    // 工具执行时改文件；每次回复第 1 步调它，第 2 步是收尾步
+    const touch = defineTool({
+      name: 'touch',
+      description: '改文件',
+      input: z.object({}),
+      execute: async () => {
+        await edit('tool-limit.md', () => '新的收尾提示。');
+        return 'ok';
+      },
+    });
+    const toolCall: StreamPart[] = [
+      { type: 'tool-call', toolCallId: 'c1', toolName: 'touch', input: '{}' },
+      finish('tool-calls'),
+    ];
+    const mock = model(async (call) => (call % 2 === 0 ? toolCall : undefined));
+    const conversation = createConversation({
+      model: mock,
+      prompts: createPromptFiles({ personaPath, dir }),
+      tools: installTools([touch], {}).tools,
+      maxSteps: 2,
+    });
+    opened.push(conversation);
+
+    await conversation.append({ author: alice, text: '一' });
+    await readAll(conversation.reply());
+    await conversation.append({ author: alice, text: '二' });
+    await readAll(conversation.reply());
+
+    expect(mock.doStreamCalls).toHaveLength(4);
+    expect(requestOf(mock, 1).messages.at(-1)).toBe(original);
+    expect(requestOf(mock, 3).messages.at(-1)).toBe('新的收尾提示。');
   });
 
   it('拒收图片后换成占位重试：仍是旧内容', async () => {

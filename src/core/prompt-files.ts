@@ -15,6 +15,8 @@ const builtins = {
   scopeIdle: { file: 'summary-scope-idle.md', required: [], optional: [] },
   scopeBefore: { file: 'summary-scope-before.md', required: ['time'], optional: [] },
   scopeRecent: { file: 'summary-scope-recent.md', required: ['keep'], optional: [] },
+  // 回复碰到步数或总时长上限时，收尾那一步末尾追加的提示
+  toolLimit: { file: 'tool-limit.md', required: [], optional: [] },
 } as const satisfies Record<
   string,
   { file: string; required: readonly string[]; optional: readonly string[] }
