@@ -107,7 +107,14 @@ AI SDK v7 与旧版本的差异（以 https://ai-sdk.dev 为准）：`system` �
 ## 提交
 
 - 只在 `refactor` 分支提交，不推送。
-- 标题格式 `type(scope): 中文短句`，如 `feat(core): 新增会话核心`。type 用 feat、fix、refactor、test、docs、chore；scope 取模块或领域名，如 core、cli、adr、build。
+- 标题格式 `type(scope): 中文描述`，如 `feat(core): 新增会话核心`。type 用 feat、fix、refactor、test、docs、chore；scope 取模块或领域名，如 core、cli、adr、build。
+- 描述的写法（用户定的）：
+  - 写完整、自然的说法，补全宾语：「新增中止回复功能」「新增超时机制」，不写「新增中止回复」「新增超时」。
+  - 说清在哪里、什么时候：「数据库新增模型调用表」「新增对话结束后的 token 用量报告」「cli 新增 --resume 参数」。
+  - 不用内部简称或压缩说法（如「用量行」「每次重读」），直接说效果：「将 prompt 抽离到文件中，prompt 修改后自动重载」。
+  - 通用的英文技术词保留英文：prompt、token、cli。
+  - 只写改动本身，不写阶段、流程等背景（不写「进入第二阶段」「提交只写标题」）。
+  - 两处相关的改动可以用逗号连成一句：「新增 SQLite 持久化，cli 新增 --resume 参数」。
 - 只写标题一行，不超过 50 字符，不加句号，不写正文。
 - 不加 `Co-Authored-By` 等任何署名行。
 
