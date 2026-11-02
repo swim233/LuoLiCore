@@ -13,7 +13,6 @@ export {
   type FileStore,
   type NewFile,
 } from './files.js';
-export { readInstructions } from './instructions.js';
 export { silentLogger, type Logger } from './logger.js';
 export type {
   Author,
@@ -24,6 +23,12 @@ export type {
   Usage,
 } from './message.js';
 export { createModel, type ModelOptions } from './model.js';
+export {
+  createPromptFiles,
+  PromptFileError,
+  type PromptSource,
+  type PromptTexts,
+} from './prompt-files.js';
 export type { SegmentOptions } from './segments.js';
 export { createMemoryStorage, createMemoryStore } from './storage/memory.js';
 export { DuplicateMessageError } from './storage/errors.js';

@@ -1,3 +1,5 @@
 pnpm-lock.yaml
 .grill
 .handoff
+# 提示词文件是发给模型的原文，不做格式化。不带斜杠，也匹配测试用的 src/core/fixtures/prompts
+prompts

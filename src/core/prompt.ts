@@ -1,61 +1,44 @@
 import type { Message } from './message.js';
+import { fill, type PromptTexts } from './prompt-files.js';
 import type { Segment } from './storage/types.js';
 
 /**
  * 一段的 system：人设、格式说明、当前会话、之前的对话摘要，依次用空行隔开。
- * 越稳定的越靠前（ADR-0004）；后两节一段之内不变，没有内容时整节省略
+ * 越稳定的越靠前（ADR-0004）；后两节一段之内不变，没有内容时整节省略。
+ * 各节的文字来自这次读到的提示词文件
  */
-export function systemPrompt(instructions: string, segment: Segment): string {
-  const sections = [instructions, messageFormatNote];
+export function systemPrompt(texts: PromptTexts, segment: Segment): string {
+  const sections = [texts.persona, texts.messageFormat];
   if (segment.conversationTitle) {
-    sections.push(`## 当前会话\n\n名称：${segment.conversationTitle}`);
+    sections.push(fill(texts.conversation, { title: segment.conversationTitle }));
   }
   if (segment.priorSummary) {
-    sections.push(
-      `## 之前的对话摘要\n\n以下是本会话更早内容的摘要，原文已不在上下文中。\n\n${segment.priorSummary}`,
-    );
+    sections.push(fill(texts.priorSummary, { summary: segment.priorSummary }));
   }
   return sections.join('\n\n');
 }
 
+/**
+ * 这次摘要哪些消息：空闲切段是本段全部；压缩时是 time 早于某一分钟的消息，
+ * 或（保留部分里没有带时间的用户消息时）除最后 keep 条之外的
+ */
+export type SummaryScope =
+  { kind: 'idle' } | { kind: 'before'; time: string } | { kind: 'recent'; keep: number };
+
 /** 摘要请求末尾追加的指令。scope 说明这次要摘要哪些消息，maxChars 是字数上限 */
-export function summaryInstruction(scope: string, maxChars: number): string {
-  return `（以下是系统指令，不是会话成员的消息）
-
-现在暂停对话。请为以上内容写一份摘要，供你之后继续参与这个会话时参考。这份摘要会替代原文：之后你只能看到摘要，以及摘要之后的新消息。
-
-摘要范围：
-- 「之前的对话摘要」里的全部内容（如果有）；
-- ${scope}
-
-写法：
-- 用中性的第三人称客观记录，不用你的角色口吻，不写感想或评价。
-- 提到人时写显示名，第一次出现时附上 uid，如「小明（uid 123456）」；没有 uid 的只写名字。改过名的注明「原名 某某」。
-- 只记事实，不推测；不确定的不写。
-- 保留以后可能用得上的信息：
-  1. 每个人的身份、关系、偏好、习惯，以及透露过的个人信息（如宠物、工作、计划）；
-  2. 正在进行或悬而未决的话题、问题、约定、待办，以及由谁负责；
-  3. 大家对你提出的要求或纠正（如称呼、说话方式、不要做的事）；
-  4. 重要的结论、决定，以及数字、日期、链接等具体信息；
-  5. 图片中与对话有关的内容，用文字描述。
-- 闲聊、寒暄、重复的内容省略，或一笔带过。
-- 与之前的摘要合并：新信息与旧信息冲突时以新的为准；仍然有效的旧信息保留，过时的删去。
-- 按主题分组，用简短的条目；需要时注明大致时间，如「10 月 30 日晚」。
-- 总长度不超过 ${maxChars} 字。
-
-只输出摘要正文，不要标题、开场白或结束语。`;
+export function summaryInstruction(
+  texts: PromptTexts,
+  scope: SummaryScope,
+  maxChars: number,
+): string {
+  const scopeText =
+    scope.kind === 'idle'
+      ? texts.scopeIdle
+      : scope.kind === 'before'
+        ? fill(texts.scopeBefore, { time: scope.time })
+        : fill(texts.scopeRecent, { keep: String(scope.keep) });
+  return fill(texts.summary, { scope: scopeText, maxChars: String(maxChars) });
 }
-
-// 送模型的用户消息格式。改格式或加字段时，同步修改下面的 messageFormatNote
-const messageFormatNote = `## 消息格式
-
-每条用户消息都包在 <message> 标签里，标签属性由平台提供：
-- from：发言人当时的显示名，称呼对方时用它。
-- uid：发言人不变的 id，有时没有。uid 相同就是同一个人，即使 from 不同（改过名）；from 相同而 uid 不同是两个人。没有 uid 时按 from 区分。
-- time：消息发出的时间。最后一条消息的 time 可以当作现在的时间。
-- 标签之间的图片是这条消息附带的。
-你之前的回复若以「（回复被中止）」结尾，表示那条回复被用户中途打断，没有说完。
-回复时只写正文，不要输出 <message> 标签或「（回复被中止）」，也不要在开头加自己的名字。`;
 
 /**
  * 送模型前的格式化，只改送给模型的副本，存储里的消息不变：
@@ -69,7 +52,8 @@ export function formatForModel(message: Message): Message {
   const files = message.parts.filter((part) => part.type === 'file');
   if (texts.length === 0 && files.length === 0) return message;
 
-  // 标签属性，按顺序输出，值为 undefined 的不输出。以后加字段（回复对象等）在这里加一项
+  // 标签属性，按顺序输出，值为 undefined 的不输出。以后加字段（回复对象等）在这里加一项，
+  // 并在 prompts/message-format.md 里说明
   const attributes: Record<string, string | undefined> = {
     from: message.metadata?.author?.name,
     uid: message.metadata?.author?.id,

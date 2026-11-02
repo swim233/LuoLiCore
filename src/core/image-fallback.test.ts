@@ -18,6 +18,7 @@ import {
   type MessageChunk,
 } from './index.js';
 import { withUnreadable } from './image-fallback.js';
+import { testPrompts } from './test-prompts.js';
 
 type StreamResult = Awaited<ReturnType<MockLanguageModelV4['doStream']>>;
 type StreamPart = StreamResult['stream'] extends ReadableStream<infer P> ? P : never;
@@ -158,7 +159,7 @@ function setup({
   const logger: Logger = { info: record('info'), warn: record('warn'), error: record('error') };
   const conversation = createConversation({
     model,
-    instructions: '你是测试助手',
+    prompts: testPrompts('你是测试助手'),
     store,
     fileStore,
     logger,

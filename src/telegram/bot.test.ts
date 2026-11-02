@@ -9,6 +9,7 @@ import {
   type Logger,
   type Storage,
 } from '../core/index.js';
+import { testPrompts } from '../core/test-prompts.js';
 import { createTelegramBot, type ChatTarget } from './bot.js';
 import { imageBytes } from './fake-api.js';
 import type { TelegramRaw } from './message.js';
@@ -103,7 +104,7 @@ function setup({
     open: async (id, { checkIdleOnCreate }) => {
       const conversation = createConversation({
         model,
-        instructions: '你是测试助手',
+        prompts: testPrompts('你是测试助手'),
         store: await storage.openConversation(id),
         conversationId: id,
         logger,

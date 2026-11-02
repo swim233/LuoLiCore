@@ -10,6 +10,7 @@ import {
   type Logger,
   type Storage,
 } from '../core/index.js';
+import { testPrompts } from '../core/test-prompts.js';
 import { startTelegram } from './app.js';
 import { fakeBot, imageBytes, startFakeTelegram, type FakeTelegram } from './fake-api.js';
 
@@ -120,7 +121,7 @@ async function start(
       maxRetries: 0,
     },
     model,
-    instructions: '你是测试助手',
+    prompts: testPrompts('你是测试助手'),
     storage,
     fileStore: createMemoryFileStore(),
     logger,

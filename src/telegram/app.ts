@@ -1,6 +1,12 @@
 import { createMemoryState } from '@chat-adapter/state-memory';
 import { Chat, type StateAdapter } from 'chat';
-import { createConversation, type FileStore, type Logger, type Storage } from '../core/index.js';
+import {
+  createConversation,
+  type FileStore,
+  type Logger,
+  type PromptSource,
+  type Storage,
+} from '../core/index.js';
 import { LuoliTelegramAdapter, sdkLogger } from './adapter.js';
 import { createTelegramBot, type ChatTarget } from './bot.js';
 import type { TelegramConfig } from './config.js';
@@ -13,7 +19,7 @@ import type { TelegramRaw } from './message.js';
 export async function startTelegram({
   config,
   model,
-  instructions,
+  prompts,
   storage,
   fileStore,
   logger,
@@ -36,7 +42,8 @@ export async function startTelegram({
     | 'segments'
   >;
   model: Parameters<typeof createConversation>[0]['model'];
-  instructions: string;
+  /** 提示词来源，所有会话共用 */
+  prompts: PromptSource;
   storage: Storage;
   fileStore: FileStore;
   logger: Logger;
@@ -75,7 +82,7 @@ export async function startTelegram({
     open: async (conversationId, { checkIdleOnCreate }) =>
       createConversation({
         model,
-        instructions,
+        prompts,
         store: await storage.openConversation(conversationId),
         fileStore,
         logger,

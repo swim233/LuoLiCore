@@ -17,6 +17,7 @@ import {
   type Message,
   type MessageChunk,
 } from './index.js';
+import { testPrompts } from './test-prompts.js';
 import { inlineFiles, isSupportedImage } from './files.js';
 
 type StreamResult = Awaited<ReturnType<MockLanguageModelV4['doStream']>>;
@@ -24,6 +25,7 @@ type StreamPart = StreamResult['stream'] extends ReadableStream<infer P> ? P : n
 
 const alice = { id: 'u-alice', name: 'Alice' };
 const instructions = '你是测试助手';
+const prompts = testPrompts(instructions);
 
 // 固定时区与时钟：标签里的 time 是 2026-10-30 14:02
 let originalTz: string | undefined;
@@ -133,7 +135,7 @@ function setup({
   const { logger, entries } = recordingLogger();
   const conversation = createConversation({
     model,
-    instructions,
+    prompts,
     store,
     fileStore,
     logger,

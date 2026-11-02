@@ -2,9 +2,9 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import {
   createModel,
+  createPromptFiles,
   openFileStore,
   openSqliteStorage,
-  readInstructions,
   type Storage,
 } from '../core/index.js';
 import { createLogger, jsonEscapedForms } from '../shared/logger.js';
@@ -25,11 +25,13 @@ const redact = (text: string) =>
     .flatMap(jsonEscapedForms)
     .reduce((result, form) => result.replaceAll(form, '***'), text);
 
-let instructions: string;
+// 人设与内置提示文件：启动时读一遍并检查，有错就退出；之后每次回复、每次摘要开始时重读。
+// 所有群共用这一个来源
+const prompts = createPromptFiles({ personaPath: config.promptPath, logger });
 try {
-  instructions = await readInstructions(config.promptPath);
+  await prompts.load();
 } catch (error) {
-  console.error(`读取 system prompt 失败：${(error as Error).message}`);
+  console.error((error as Error).message);
   process.exit(1);
 }
 
@@ -47,7 +49,7 @@ try {
   app = await startTelegram({
     config,
     model: createModel(config.model),
-    instructions,
+    prompts,
     storage,
     fileStore: openFileStore(config.filesDir),
     logger,

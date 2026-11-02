@@ -5,9 +5,9 @@ import { createInterface } from 'node:readline/promises';
 import {
   createConversation,
   createModel,
+  createPromptFiles,
   openFileStore,
   openSqliteStorage,
-  readInstructions,
   type Storage,
   type Usage,
 } from '../core/index.js';
@@ -27,11 +27,13 @@ const { model, maxRetries, timeouts, segments, resume, dbPath, filesDir, promptP
   parsed.config;
 const name = parsed.config.name ?? userInfo().username;
 
-let instructions: string;
+const logger = createLogger(model);
+// 人设与内置提示文件：启动时读一遍并检查，有错就退出；之后每次回复、每次摘要开始时重读
+const prompts = createPromptFiles({ personaPath: promptPath, logger });
 try {
-  instructions = await readInstructions(promptPath);
+  await prompts.load();
 } catch (error) {
-  console.error(`读取 system prompt 失败：${(error as Error).message}`);
+  console.error((error as Error).message);
   process.exit(1);
 }
 
@@ -47,11 +49,11 @@ try {
 const conversationId = await chooseConversation(storage, resume);
 const conversation = createConversation({
   model: createModel(model),
-  instructions,
+  prompts,
   store: await storage.openConversation(conversationId),
   // CLI 本身不发图片；文件目录照样交给核心，不写入时不会创建
   fileStore: openFileStore(filesDir),
-  logger: createLogger(model),
+  logger,
   maxRetries,
   timeouts,
   segments,

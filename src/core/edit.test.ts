@@ -7,6 +7,7 @@ import {
   isSupportedMediaType,
 } from './index.js';
 import { MockLanguageModelV4 } from 'ai/test';
+import { testPrompts } from './test-prompts.js';
 
 const alice = { id: 'u-alice', name: 'Alice' };
 const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
@@ -18,7 +19,7 @@ async function setup() {
   );
   const conversation = createConversation({
     model: new MockLanguageModelV4(),
-    instructions: '你是测试助手',
+    prompts: testPrompts('你是测试助手'),
     store,
     fileStore: createMemoryFileStore(),
   });

@@ -15,6 +15,7 @@ import {
   type ModelCall,
   type SegmentOptions,
 } from './index.js';
+import { testPrompts } from './test-prompts.js';
 
 type StreamResult = Awaited<ReturnType<MockLanguageModelV4['doStream']>>;
 type StreamPart = StreamResult['stream'] extends ReadableStream<infer P> ? P : never;
@@ -22,6 +23,7 @@ type FinishPart = Extract<StreamPart, { type: 'finish' }>;
 
 const alice = { id: 'u-alice', name: 'Alice' };
 const instructions = '你是测试助手';
+const prompts = testPrompts(instructions);
 
 // 只假冒 Date，计时器照常走：时间列是确定的（不拨 Date 时耗时都是 0），SDK 的重试与超时不受影响
 const now = '2026-10-30T06:02:00.000Z';
@@ -195,7 +197,7 @@ function setup({
   const { logger, entries } = recordingLogger();
   const conversation = createConversation({
     model,
-    instructions,
+    prompts,
     store,
     logger,
     conversationId: 'c1',

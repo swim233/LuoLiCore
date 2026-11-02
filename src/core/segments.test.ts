@@ -16,12 +16,14 @@ import {
   type MessageChunk,
   type SegmentOptions,
 } from './index.js';
+import { testPrompts } from './test-prompts.js';
 
 type StreamResult = Awaited<ReturnType<MockLanguageModelV4['doStream']>>;
 type StreamPart = StreamResult['stream'] extends ReadableStream<infer P> ? P : never;
 
 const alice = { id: 'u-alice', name: 'Alice' };
 const instructions = '你是测试助手';
+const prompts = testPrompts(instructions);
 
 // 固定时区与时钟：2026-10-30T06:02Z 在上海是 14:02。只假冒 Date，计时器照常走；
 // 「过了多久」用 vi.setSystemTime 拨 Date，空闲检查的定时器按真实时间触发
@@ -183,7 +185,7 @@ function setup({
   const model = scripted(...turns);
   const conversation = createConversation({
     model,
-    instructions,
+    prompts,
     store,
     logger,
     conversationId: 'c1',

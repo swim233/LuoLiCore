@@ -31,7 +31,7 @@ describe('Telegram 配置', () => {
         segments: {},
         dbPath: 'data/luoli.db',
         filesDir: 'data/files',
-        promptPath: 'prompts/system.md',
+        promptPath: undefined,
         token,
         chats: new Set(),
         users: new Set(),
@@ -65,6 +65,14 @@ describe('Telegram 配置', () => {
     expect(result.ok && result.config.errorText).toBe('稍等');
     expect(result.ok && result.config.apiUrl).toBe('http://127.0.0.1:8081');
     expect(result.ok && result.config.staleMs).toBe(30 * 60_000);
+  });
+
+  it('LUOLI_PROMPT 设了时原样保留路径；不设或为空时为 undefined，由 core 用仓库里的 prompts/system.md', () => {
+    const set = parse({ LUOLI_PROMPT: 'my/persona.md' });
+    const empty = parse({ LUOLI_PROMPT: '' });
+
+    expect(set.ok && set.config.promptPath).toBe('my/persona.md');
+    expect(empty.ok && empty.config.promptPath).toBeUndefined();
   });
 
   it('缺少模型或 token 时报错', () => {

@@ -14,8 +14,8 @@ export type CommonConfig = {
   dbPath: string;
   /** 图片等文件的目录，LUOLI_FILES_DIR，默认为数据库所在目录下的 files/ */
   filesDir: string;
-  /** 人设文件，LUOLI_PROMPT，默认 prompts/system.md */
-  promptPath: string;
+  /** 人设文件，LUOLI_PROMPT；未设置时为 undefined，用仓库里的 prompts/system.md */
+  promptPath?: string;
 };
 
 export type Env = Record<string, string | undefined>;
@@ -88,7 +88,7 @@ export function parseCommonConfig(
       segments,
       dbPath,
       filesDir: env.LUOLI_FILES_DIR || join(dirname(dbPath), 'files'),
-      promptPath: env.LUOLI_PROMPT || 'prompts/system.md',
+      promptPath: env.LUOLI_PROMPT || undefined,
     },
   };
 }

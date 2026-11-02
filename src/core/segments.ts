@@ -1,7 +1,7 @@
 import { summarizeError } from './errors.js';
 import type { Logger } from './logger.js';
 import type { Message, Usage } from './message.js';
-import { formatTime, summaryInstruction } from './prompt.js';
+import { formatTime, type SummaryScope } from './prompt.js';
 import type { ConversationStore, Segment } from './storage/types.js';
 
 export type SegmentOptions = {
@@ -17,12 +17,16 @@ export type SegmentOptions = {
 
 type Reason = 'idle' | 'compress';
 
-/** 生成摘要：沿用这一段的前缀（system 与 history），末尾追加 instruction */
+/**
+ * 生成摘要：沿用这一段的前缀（system 与 history），末尾追加摘要指令。
+ * 指令按 scope 与 maxChars 填好，与 system 用同一次读到的提示词
+ */
 export type Summarize = (request: {
   reason: Reason;
   segment: Segment;
   history: Message[];
-  instruction: string;
+  scope: SummaryScope;
+  maxChars: number;
   abortSignal: AbortSignal;
 }) => Promise<{ text: string; usage?: Usage; stats: object }>;
 
@@ -32,7 +36,7 @@ type Plan = {
   history: Message[];
   toSeq: number;
   startSeq: number;
-  scope: string;
+  scope: SummaryScope;
 };
 
 // setTimeout 超过 2^31-1 毫秒会立刻触发；更久的等待分几次，每次到时再检查
@@ -93,7 +97,8 @@ export function createSegmenter({
           reason,
           segment,
           history,
-          instruction: summaryInstruction(scope, summaryMaxChars),
+          scope,
+          maxChars: summaryMaxChars,
           abortSignal: closing.signal,
         });
         const text = result.text.trim();
@@ -153,12 +158,12 @@ export function createSegmenter({
         if (last.seq < segment.startSeq) return;
         const history = await store.list({ from: segment.startSeq, before: last.seq + 1 });
         // 新段从最后那条消息之后开始：摘要生成期间写入的消息都归入新段
-        const plan = {
+        const plan: Plan = {
           segment,
           history,
           toSeq: last.seq,
           startSeq: last.seq + 1,
-          scope: idleScope,
+          scope: { kind: 'idle' },
         };
         begin('idle', async () => plan);
       } catch (error) {
@@ -212,9 +217,7 @@ export function createSegmenter({
       history: entries.map((entry) => entry.message),
       toSeq: entries[keepFrom - 1]!.seq,
       startSeq: kept[0]!.seq,
-      scope: time
-        ? `本段中 time 早于 ${time} 的消息，以及夹在其间的你的回复。time 为 ${time} 及之后的消息会原样保留，不要写进摘要。`
-        : `本段中除最后 ${keepMessages} 条之外的全部消息。`,
+      scope: time ? { kind: 'before', time } : { kind: 'recent', keep: keepMessages },
     };
   }
 
@@ -254,5 +257,3 @@ export function createSegmenter({
     },
   };
 }
-
-const idleScope = '本段的全部消息，以及其中你的回复。';

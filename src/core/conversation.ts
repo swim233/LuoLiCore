@@ -22,7 +22,8 @@ import {
 import { silentLogger, type Logger } from './logger.js';
 import { toCallTokens, toUsage } from './model.js';
 import type { Author, Message, MessageChunk } from './message.js';
-import { formatForModel, systemPrompt } from './prompt.js';
+import { formatForModel, summaryInstruction, systemPrompt } from './prompt.js';
+import { PromptFileError, type PromptSource } from './prompt-files.js';
 import { createSegmenter, type SegmentOptions, type Summarize } from './segments.js';
 import { createMemoryStore } from './storage/memory.js';
 import type { ConversationStore, ModelCall, Segment } from './storage/types.js';
@@ -39,6 +40,8 @@ export type Conversation = {
    * 一个 `reset-step`，失败那次已输出的内容不会写入历史。
    * 流读完时回复已写入历史；出错、被取消或没有任何文字时不写入。
    * 后台正在空闲切段时，等它结束再读当前段；压缩进行中不等，照常用当前段。
+   * 开始时读一次提示词，这次的重试与拒收图片后的恢复都用这一份；提示词文件有误时按失败处理
+   * （流里一个 error 段，不发请求，不记模型调用）。
    * 请求还没有输出就被拒收（400、413、422），且上一条助手消息之后有新图片时，把这些图片换成
    * 「[图片无法读取]」重试一次，流里只出现重试的输出；重试没有失败时把标记写进那些消息。
    * 正常完成且输入超过压缩阈值时，在后台压缩。
@@ -67,7 +70,7 @@ export type ReplyOptions = {
 
 export function createConversation({
   model,
-  instructions,
+  prompts,
   store = createMemoryStore(),
   fileStore = createMemoryFileStore(),
   logger = silentLogger,
@@ -79,8 +82,11 @@ export function createConversation({
 }: {
   /** 不接受字符串形式的模型 id：`wrapLanguageModel` 需要模型实例 */
   model: Exclude<LanguageModel, string>;
-  /** system prompt。core 会在末尾附上消息格式说明，调用方不必解释用户消息的格式 */
-  instructions: string;
+  /**
+   * 提示词来源：人设与内置提示（消息格式说明等），每次回复、每次摘要开始时取一次当前的文字。
+   * 几个会话可以共用一个来源
+   */
+  prompts: PromptSource;
   store?: ConversationStore;
   /** 消息附带的图片存在这里 */
   fileStore?: FileStore;
@@ -152,12 +158,12 @@ export function createConversation({
     });
     return {
       tracker,
-      stream: (segment: Segment, messages: ModelMessage[]) => {
+      stream: (system: string, messages: ModelMessage[]) => {
         startedAt ??= Date.now();
         return streamText({
           // SDK 的每次请求（含两类重试）都重新调用 doStream，中间件能逐次观察
           model: wrapLanguageModel({ model, middleware: tracker.middleware }),
-          instructions: systemPrompt(instructions, segment),
+          instructions: system,
           messages,
           maxRetries,
           streamRetries: maxRetries,
@@ -212,7 +218,17 @@ export function createConversation({
   }
 
   // 摘要请求沿用这一段的前缀：与回复相同的 system 与消息，末尾追加一条不包标签的指令
-  const summarize: Summarize = async ({ reason, segment, history, instruction, abortSignal }) => {
+  const summarize: Summarize = async ({
+    reason,
+    segment,
+    history,
+    scope,
+    maxChars,
+    abortSignal,
+  }) => {
+    // 一次摘要读一次提示词，system 与摘要指令来自同一份。读到有错时直接抛出：
+    // 切段那边按摘要失败处理；还没有发出请求，不记模型调用
+    const texts = await prompts.load();
     const logFields = { conversationId, modelId: model.modelId, purpose: 'summary', reason };
     const call = modelCall({
       abortSignal,
@@ -224,9 +240,9 @@ export function createConversation({
     let usage: LanguageModelUsage;
     let finishReason: string;
     try {
-      const result = call.stream(segment, [
+      const result = call.stream(systemPrompt(texts, segment), [
         ...(await toModelMessages(history, logFields)),
-        { role: 'user', content: instruction },
+        { role: 'user', content: summaryInstruction(texts, scope, maxChars) },
       ]);
       // 流式重试时 result.text 只含成功那次的文本；出错、超时、中止都以流中的段告知
       let failure: { error: unknown } | undefined;
@@ -390,12 +406,16 @@ export function createConversation({
           writeNotice = (chunk) => writer.write(chunk);
           // 正在空闲切段时先等它结束，读到的才是切段之后的当前段（压缩不等，见 settled）
           await segmenter.settled();
+          // 读一次提示词：这次的重试（SDK 内部的两类）与拒收图片后的恢复都用这一份，
+          // 期间文件再变也不影响。读到有错时抛出，按失败处理
+          const texts = await prompts.load();
           const current = await store.currentSegment();
           segment = current;
           seq = await store.reserve();
           // 只看当前段里预留号之前的消息：模型看到的正是排在回复之前的那些
           const history = await store.list({ from: current.startSeq, before: seq });
-          const first = call.stream(current, await toModelMessages(history, logFields)).stream;
+          const system = systemPrompt(texts, current);
+          const first = call.stream(system, await toModelMessages(history, logFields)).stream;
           // 还没有输出就被拒收：可能是新来的图片模型读不了，换成占位重试一次（同一段、同一个序号）
           const stream = withFallback(first, async (error) => {
             if (!isRejectedRequest(error)) return undefined;
@@ -415,7 +435,7 @@ export function createConversation({
               const replaced = suspects.get(message.id);
               return replaced ? withUnreadable(message, replaced) : message;
             });
-            return call.stream(current, await toModelMessages(marked, logFields)).stream;
+            return call.stream(system, await toModelMessages(marked, logFields)).stream;
           });
           let createdAt: string | undefined;
           writer.merge(
@@ -457,8 +477,15 @@ export function createConversation({
               ...tracker.stats,
               ...(fallback ? { imageFallback: true } : {}),
             };
-            // 先记模型调用：之后写历史出错也不影响这一行
-            await call.record({ outcome, finishReason, usage: totalUsage, error: failure?.error });
+            // 先记模型调用：之后写历史出错也不影响这一行。提示词文件有误时没有发出请求，不记
+            if (!(failure?.error instanceof PromptFileError)) {
+              await call.record({
+                outcome,
+                finishReason,
+                usage: totalUsage,
+                error: failure?.error,
+              });
+            }
             if (outcome === 'failed') {
               logger.error({ ...summary, error: summarizeError(failure?.error) }, 'reply.failed');
             } else if (outcome === 'aborted') {
