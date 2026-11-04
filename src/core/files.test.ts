@@ -224,6 +224,17 @@ describe.each([
     expect(await store.read('luoli-file:../../etc/passwd')).toBeUndefined();
     expect(await store.read('https://example.com/a.png')).toBeUndefined();
   });
+
+  it('has：保存过的为 true；不存在、地址格式不对时为 false', async () => {
+    const store = await openStore();
+    const url = await store.save(red);
+
+    expect(await store.has(url)).toBe(true);
+    expect(await store.has(url.replace('.png', '.jpg'))).toBe(false);
+    expect(await store.has(`luoli-file:${'0'.repeat(64)}.png`)).toBe(false);
+    expect(await store.has('luoli-file:../../etc/passwd')).toBe(false);
+    expect(await store.has('https://example.com/a.png')).toBe(false);
+  });
 });
 
 describe('目录里的文件', () => {

@@ -30,6 +30,17 @@ export {
   type PromptSource,
   type PromptTexts,
 } from './prompt-files.js';
+export {
+  openRequestLog,
+  type LoggedRequest,
+  type NewRequest,
+  type RequestCleanup,
+  type RequestFilter,
+  type RequestListOptions,
+  type RequestLog,
+  type RequestLogOptions,
+  type RequestResponse,
+} from './request-log/log.js';
 export type { SegmentOptions } from './segments.js';
 export {
   describeImage,

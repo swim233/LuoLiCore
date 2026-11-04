@@ -12,6 +12,8 @@ export type FileStore = {
   save(file: NewFile): Promise<string>;
   /** 读取地址指向的文件；文件不存在（或地址不是本存储的格式）时返回 undefined */
   read(url: string): Promise<Uint8Array | undefined>;
+  /** 地址指向的文件在不在；不读内容。地址不是本存储的格式时为 false */
+  has(url: string): Promise<boolean>;
 };
 
 export type NewFile = { data: Uint8Array; mediaType: string };
@@ -61,6 +63,23 @@ function nameOf(file: NewFile): string {
   return `${createHash('sha256').update(file.data).digest('hex')}.${type.extension}`;
 }
 
+/**
+ * 这个文件存进文件存储时的地址（不管存了没有）；不能存成图片（类型不支持、文件头不符）时
+ * 返回 undefined
+ */
+export function fileUrlOf(file: NewFile): string | undefined {
+  return isSupportedImage(file) ? scheme + nameOf(file) : undefined;
+}
+
+/** 文件存储地址的媒体类型（按扩展名）；不是文件存储的地址时返回 undefined */
+export function mediaTypeOf(url: string): string | undefined {
+  const name = nameIn(url);
+  if (name === undefined) return undefined;
+  const extension = name.slice(name.lastIndexOf('.') + 1);
+  for (const [mediaType, type] of imageTypes) if (type.extension === extension) return mediaType;
+  return undefined;
+}
+
 function nameIn(url: string): string | undefined {
   if (!url.startsWith(scheme)) return undefined;
   const name = url.slice(scheme.length);
@@ -96,6 +115,10 @@ export function openFileStore(dir: string): FileStore {
         throw error;
       }
     },
+    async has(url) {
+      const name = nameIn(url);
+      return name !== undefined && (await exists(join(dir, name)));
+    },
   };
 }
 
@@ -122,6 +145,10 @@ export function createMemoryFileStore(): FileStore & { names(): string[] } {
       const name = nameIn(url);
       const data = name === undefined ? undefined : files.get(name);
       return data && new Uint8Array(data);
+    },
+    async has(url) {
+      const name = nameIn(url);
+      return name !== undefined && files.has(name);
     },
     /** 已保存的文件名，供测试核对 */
     names: () => [...files.keys()],
