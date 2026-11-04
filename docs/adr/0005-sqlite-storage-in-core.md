@@ -90,6 +90,7 @@ CREATE INDEX tool_calls_tool ON tool_calls(tool, started_at);
 - 模型调用一次一行：一次回复或一次摘要，期间的重试都合在这一行，成功、失败、中止都记。只追加，用来统计 token、缓存命中与失败率；不记金额，要算钱时按当时的单价现算。正常完成的回复的用量仍随助手消息存一份。常用查询在 `docs/queries/usage.sql`。
 - 工具调用一次一行（ADR-0006），挂在所在回复下，用来统计每个工具的次数、失败与超时、耗时，以及结果长度（据此调整历史呈现）。模型传错参数、调了不存在的工具也记一行（结果 `failed`）。不存参数和结果：它们是对话内容，完整的在助手消息里。
 - 原文永久保留。开 WAL 模式，表结构版本记在 `PRAGMA user_version`。
+- 每次发给模型的请求原文不在这个库里，存在单独的 `data/requests.db`（ADR-0008）。
 
 ## Considered Options
 

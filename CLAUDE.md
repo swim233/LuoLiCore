@@ -4,23 +4,22 @@ LuoLiCore：群聊助手 agent，核心基于 Vercel AI SDK v7。术语见 `CONT
 
 前身项目在 tag `archive/legacy-v0`（原 `main`）。新项目从零重写，不复制旧代码；除非用户明确要求，不参考前身项目的代码与文档。
 
-## 当前阶段：第四阶段 · fetch 工具
+## 当前阶段：第五阶段 · 请求记录
 
-第一阶段（CLI MVP：多轮对话、重试与日志、中止、用量）、第二阶段（持久化与 Telegram）、第三阶段（工具接口与多步循环，ADR-0006）已完成。本阶段做第一个真正的工具 fetch：读网页，转成 Markdown 交给模型；同时让工具结果能带图片给模型看。设计参照开源 agent oh-my-pi 的 fetch，按群聊场景收窄（ADR-0007）。异步任务与主动发言另开一轮拷问。
+第一阶段（CLI MVP：多轮对话、重试与日志、中止、用量）、第二阶段（持久化与 Telegram）、第三阶段（工具接口与多步循环，ADR-0006）、第四阶段（fetch 工具与工具结果里的图片，ADR-0007）已完成。本阶段把每一次实际发给模型的请求连同响应记进单独的数据库，供排查和重放，并做一个导出脚本（ADR-0008）。异步任务与主动发言另开一轮拷问。
 
 实现步骤（每步按「开发流程」推进）：
 
-1. 文档：本文件、`CONTEXT.md`、ADR-0007，ADR-0006 改工具的归属、平台工具的接法与工具结果里的图片，ADR-0005 补一处注释
-2. 安全请求（`src/tools/fetch/`）：undici 连接时检查 IP、跳转、User-Agent 轮换、429、优先要 Markdown、字符集、5 MB 上限
-3. 转换与 fetch 工具：按内容类型分派、正文模式与整页模式、质量检查与评论区提示、r.jina.ai 退路、验证页识别、结果的头部与 `offset`，fetch 加进清单
-4. 站点处理器：GitHub、维基百科；处理器清单文件开头的注释列出没做的
-5. 工具结果里的图片（core 与 CLI）：工具返回图片、存进文件存储、放进 tool 消息、以后的回复照样发、拒收后标记并换成占位、CLI 显示，接上 fetch 的图片分支
+1. 文档：本文件、`CONTEXT.md`、ADR-0008，ADR-0005 补一句
+2. 请求记录的存储（core）：`data/requests.db` 的表结构、按内容去重、图片换成引用、按天数清理、读出并拼回完整的请求体
+3. 记录（core 与两个前端）：在 provider 的 fetch 处截获每一次请求与响应，注明会话、用途、回复、步、尝试；CLI 与 Telegram 启动时打开；环境变量
+4. 导出脚本 `pnpm requests`：筛选、拼回、图片嵌回 base64
 
 已定的实现选择：
 
 - 单包：`src/core`、`src/cli`，Telegram 前端另起目录。core 不得引用 cli 或任何平台代码，由 lint 规则保证。
 - 核心是进程内的库，`reply()` 输出 UI message stream。用 `streamText` 的多步循环，不用 `ToolLoopAgent`（它不支持 `streamRetries`）。
-- 存储：由 core 负责，SQLite（Node 自带的 `node:sqlite`），默认 `data/luoli.db`。表结构与取舍见 ADR-0005。core 的测试用内存存储。
+- 存储：由 core 负责，SQLite（Node 自带的 `node:sqlite`），默认 `data/luoli.db`。表结构与取舍见 ADR-0005。core 的测试用内存存储。请求记录另存一个文件（默认 `data/requests.db`，ADR-0008）。
 - 上下文：按段拼接，见 ADR-0004。system 依次为人设、格式说明、会话标题、之前的摘要；之后是当前段的消息，只往后追加。空闲超过 4 小时切段，后台生成滚动摘要，重启后补做；上一轮回复最后一步的输入超过 300k token 时压缩，保留最近 20 条。摘要请求沿用当前前缀，末尾追加摘要指令。数字均可配置。
 - 送模型的用户消息：正文包在 `<message from="显示名" uid="发言人 id" time="2026-10-30 14:02">` 标签里，由 core 的格式化函数生成，以后的字段都加在这里。`uid` 只在平台提供不变的用户 id 时才有（CLI 没有）；`time` 按本机时区。正文只转义以 `<message`、`</message` 开头的 `<`，用户确认不再加严。core 在人设之后附上格式说明（`prompts/message-format.md`），逐个解释标签属性。
 - 人设：`LUOLI_PROMPT` 指向人设文件（不进仓库），不设时用 `prompts/system.md`。
@@ -33,7 +32,7 @@ LuoLiCore：群聊助手 agent，核心基于 Vercel AI SDK v7。术语见 `CONT
 - 工具出错与超时：工具抛错或超时（默认 60 秒，`LUOLI_TOOL_TIMEOUT` 改默认，工具可声明自己的），这次调用以错误结果结束，模型看到错误说明，循环继续；超时时发中止信号，不等工具停下。
 - 工具调用的历史：工具调用连同完整结果存进助手消息。当次回复的循环里模型看到完整结果；以后的回复和摘要按工具声明的方式呈现（完整、不保留、截短、自定义），没声明的截短到 2000 字符（`LUOLI_TOOL_HISTORY_CHARS`）并注明已截短。呈现只由存下来的内容决定，前缀缓存照常命中。
 - provider 只接 openai-compatible。配置只来自环境变量与命令行参数：`LUOLI_BASE_URL`、`LUOLI_API_KEY`、`LUOLI_MODEL` 等，写在 `.env`。
-- 测试：核心用 `ai/test` 的 mock 模型写行为测试，不调用真实 API；工具用测试里的假工具。fetch 的测试用本地 HTTP 服务，不访问外网（IP 检查在测试里可以替换），站点处理器的接口也用本地服务模拟。CLI 与 Telegram 手动验证。
+- 测试：核心用 `ai/test` 的 mock 模型写行为测试，不调用真实 API；工具用测试里的假工具。fetch 的测试用本地 HTTP 服务，不访问外网（IP 检查在测试里可以替换），站点处理器的接口也用本地服务模拟。请求记录用临时数据库测试，截获用 provider 的自定义 fetch 模拟服务端；导出脚本用临时的两个数据库测试。CLI 与 Telegram 手动验证。
 - 重试：用 AI SDK 内置重试，次数由 `LUOLI_MAX_RETRIES` 配置，默认 2。请求阶段（`maxRetries`）重试可重试错误；流式开始后服务端发来错误事件时也重试（`streamRetries`，次数相同），失败那次的半截不写入历史。连接中途断开不重试。
 - 超时：等第一段输出超过 60 秒、或两段输出之间超过 30 秒，按失败处理（半截不写入）。由 `LUOLI_FIRST_CHUNK_TIMEOUT`、`LUOLI_CHUNK_TIMEOUT` 配置，单位秒。
 - 模型调用出错：用户消息保留。一步都没完成时不写入助手消息；已完成的步（文字、有结果的工具调用）写入历史，metadata 标记 `failed`，送模型时在副本末尾加「（回复出错中断）」。失败那一步自己的半截不写入。
@@ -43,7 +42,9 @@ LuoLiCore：群聊助手 agent，核心基于 Vercel AI SDK v7。术语见 `CONT
 - 用量：回复正常完成时写入助手消息 metadata 的 `usage`（输入、输出、总数、缓存命中），为各步之和，每步只算成功的那次请求；中止、失败没有用量。
 - 模型调用表：每次回复、每次摘要结束时（成功、失败、中止都算）在 `model_calls` 写一行（提示词文件出错、没发出请求的除外）：用途、模型、耗时、首字延迟、请求次数、步数、工具调用次数、结果、token（各步之和：输入、缓存命中、输出、推理）、错误类型与状态码。不记金额。写入出错只记日志。表结构见 ADR-0005，常用查询在 `docs/queries/usage.sql`。
 - 工具调用表：每次工具调用在 `tool_calls` 写一行：会话、回复 id、工具名、第几步、开始时间、耗时、结果（completed、failed、timeout、aborted）、错误类型、结果长度。不存参数和结果的内容。
-- 日志：pino 写 `logs/luoli.log`（JSON Lines）。记录调用失败、每次 HTTP 请求尝试、每轮回复概要（含步数、工具调用次数）、每次工具调用（`tool.end`：工具名、耗时、结果、错误类型、结果长度）；不记录对话正文，也不记工具的参数和结果；API key 抹为 `***`。core 只依赖 `Logger` 接口，不引用 pino。
+- 日志：pino 写 `logs/luoli.log`（JSON Lines）。记录调用失败、每次 HTTP 请求尝试、每轮回复概要（含步数、工具调用次数）、每次工具调用（`tool.end`：工具名、耗时、结果、错误类型、结果长度）；不记录对话正文，也不记工具的参数和结果；API key 抹为 `***`。core 只依赖 `Logger` 接口，不引用 pino。请求与响应的原文只进请求记录，不进日志。
+- 请求记录（ADR-0008）：每一次实际发出的 HTTP 请求记一条，含回复的每一步、摘要、各种重试与失败的请求；注明会话、用途、回复 id、第几步、这一步的第几次尝试、开始时间、耗时、结果（completed、failed、aborted）。在 provider 的 fetch 处截获：请求体原样记（不记请求头）；响应整理成状态码、文字、思考内容、工具调用、结束原因、用量，失败时记错误体（抹掉 key），流中途出错时连同半截。存在单独的 SQLite 文件（默认 `data/requests.db`，`LUOLI_REQUESTS_DB`），由 core 存取；按内容去重（每条消息、整份工具定义各存一份，请求只存引用，读出时拼回，字段顺序不变）；图片的 base64 对上 `data/files/` 的就换成 `luoli-file:` 引用。默认保留 30 天（`LUOLI_REQUEST_LOG_DAYS`，0 为永久），启动时和之后每天清理，只动这个数据库。默认打开，`LUOLI_REQUEST_LOG=off` 关闭；写入出错只记日志，不影响回复。
+- 导出：`pnpm requests`，只读打开两个数据库。按会话（会话 id、Telegram 群 id 或群名里的字）、时间范围、回复 id 筛选，可以只看失败的；不给条件时导出最近 24 小时。输出 JSON 数组（默认标准输出，`-o` 写文件），一项一次请求：时间（本机时区）、会话（id、平台、标题）、用途、回复 id、步、尝试、耗时、结果、完整的请求体、整理过的响应。图片默认写成引用，加参数嵌回 base64。
 
 CLI 默认行为：
 
@@ -90,7 +91,7 @@ fetch 工具（ADR-0007）：
 - 不缓存，同一个 URL 每次都重新请求。日志与工具调用表不记 URL 和内容。
 - 依赖：`undici`（8.x，项目要求的 Node 版本因此提到 22.19）、`linkedom`、`@mozilla/readability`、`turndown`、`@joplin/turndown-plugin-gfm`，用户已确认。
 
-本阶段非目标：其他站点处理器（含 Reddit）、PDF 等文档的转换、网页里的配图、图片缩放、无头浏览器渲染、URL 缓存、可选的环境变量（GitHub token、jina key）、Responses 协议、图片放进 user 消息的做法、平台工具（接法已定，等第一个用例）、工具接口的其余扩展点（触发者、读会话、权限与审批、发到群里的文件、子 agent；ADR-0006 写明以后怎么接）、仓库里的示例工具、异步任务与主动发言（另开拷问）、MCP、回复期间的新消息喂进循环、Markdown 渲染、显示 reasoning、webhook 与 HTTP 服务、多实例部署、看动图与视频、语音转文字、处理消息删除、成员表、CLI 多会话切换（只有 `--resume`）。
+本阶段非目标：重建过去的请求、记原始响应流（SSE）、记人设文件的路径、导出按回复分组、重放脚本（导出的请求体自己拿去重发）、查看请求记录的界面（CLI 命令、网页）、请求记录按总大小清理、其他站点处理器（含 Reddit）、PDF 等文档的转换、网页里的配图、图片缩放、无头浏览器渲染、URL 缓存、可选的环境变量（GitHub token、jina key）、Responses 协议、图片放进 user 消息的做法、平台工具（接法已定，等第一个用例）、工具接口的其余扩展点（触发者、读会话、权限与审批、发到群里的文件、子 agent；ADR-0006 写明以后怎么接）、仓库里的示例工具、异步任务与主动发言（另开拷问）、MCP、回复期间的新消息喂进循环、Markdown 渲染、显示 reasoning、webhook 与 HTTP 服务、多实例部署、看动图与视频、语音转文字、处理消息删除、成员表、CLI 多会话切换（只有 `--resume`）。
 
 AI SDK v7 与旧版本的差异（以 https://ai-sdk.dev 为准）：`system` 改为 `instructions`；`onFinish` / `onStepFinish` 改为 `onEnd` / `onStepEnd`；`fullStream` 改为 `stream`；`toUIMessageStream` 是独立函数；messages 中的 system 消息默认被拒绝；完整历史取 `result.responseMessages`。工具相关：`execute` 第二个参数里的上下文叫 `context`（来自 `streamText` 的 `toolsContext`，按工具名分）；`needsApproval` 改为 `streamText` 的 `toolApproval`；`stepCountIs` 改名 `isStepCount`，`streamText` 默认只走 1 步；`result.usage` 是各步之和，`totalUsage` 是它的旧名。已装版本的细节见 `node_modules/ai` 的类型与自带 `docs/`。
 
@@ -123,7 +124,7 @@ AI SDK v7 与旧版本的差异（以 https://ai-sdk.dev 为准）：`system` �
 - dev 与 QA 各一个，跨步骤用 SendMessage 续用；用户要求时新开。
 - 纯文档步骤由主会话完成，用户直接审阅。
 - 允许实际调用模型验证，每步少量调用。key 只在 `.env`，不得写进代码、日志、报告或对话。fetch 的验收允许少量访问外网的公开网页。
-- 用户的人设文件只供程序读取，agent 不读其内容；查看请求时过滤 system。
+- 用户的人设文件只供程序读取，agent 不读其内容；查看请求时过滤 system。agent 不读用户真实的 `data/requests.db`（里面有人设全文与完整对话），只用测试数据和自己 scratchpad 里副本产生的记录，查看时同样过滤 system。
 - 测试产生的日志行用 `truncate -s` 原地截断（测试前记下字节数），不得移动、删除或替换 `logs/luoli.log`：正在运行的会话会继续写旧文件。
 
 ## 提交
