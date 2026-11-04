@@ -32,6 +32,7 @@ describe('Telegram 配置', () => {
         dbPath: 'data/luoli.db',
         filesDir: 'data/files',
         promptPath: undefined,
+        requestLog: { path: 'data/requests.db', retentionDays: 30 },
         token,
         chats: new Set(),
         users: new Set(),

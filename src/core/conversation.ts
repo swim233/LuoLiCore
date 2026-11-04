@@ -150,6 +150,14 @@ export function createConversation({
   const { firstChunkMs = 60_000, chunkMs = 30_000, replyMs = 600_000, toolMs = 60_000 } = timeouts;
   let replying = false;
 
+  /** 超时的说明：超时那次请求有没有输出过，区分首段超时与段间超时 */
+  const timeoutText = (hadOutput: boolean) =>
+    `等待模型输出超时：${
+      hadOutput
+        ? `两段输出之间超过 ${chunkMs / 1000} 秒`
+        : `${firstChunkMs / 1000} 秒内没有收到第一段输出`
+    }`;
+
   const presentTools = toolHistory(tools, toolHistoryChars);
 
   /**
@@ -224,6 +232,11 @@ export function createConversation({
       firstChunkMs,
       onFirstChunkTimeout: () => timeoutController.abort(),
       notify,
+      // 请求记录：每次请求带上会话、用途、回复（没有会话 id 时不带，provider 的 fetch 不记）
+      request:
+        conversationId === undefined
+          ? undefined
+          : { conversationId, purpose: kind.purpose, replyId: kind.replyId, timeoutText },
     });
     // 本次回复工具结果里的图片被拒收时换成占位重试；套在 tracker 外层，重试的请求照常计数。
     // 被接住的那次失败 SDK 看不到，tracker 也不算进请求失败，之后的重试序号与 SDK 一致
@@ -494,10 +507,7 @@ export function createConversation({
               controller.enqueue(chunk);
               return;
             }
-            const detail = tracker.attemptHasOutput()
-              ? `两段输出之间超过 ${chunkMs / 1000} 秒`
-              : `${firstChunkMs / 1000} 秒内没有收到第一段输出`;
-            const error = new DOMException(`等待模型输出超时：${detail}`, 'TimeoutError');
+            const error = new DOMException(timeoutText(tracker.attemptHasOutput()), 'TimeoutError');
             controller.enqueue({ type: 'error', errorText: describeError(error) });
           },
         });

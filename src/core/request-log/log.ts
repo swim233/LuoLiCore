@@ -65,16 +65,27 @@ export type RequestListOptions = {
 /** 清理删掉的条数 */
 export type RequestCleanup = { requests: number; contents: number };
 
+export type RequestCleanupOptions = {
+  /** 「现在」，默认当前时间（测试用） */
+  now?: Date;
+  /** 每批最多删几条请求（默认 100）；每批一个事务，批与批之间让出事件循环 */
+  batchSize?: number;
+  /** 中止时在下一批开始前停下，返回已删的条数 */
+  signal?: AbortSignal;
+};
+
 export type RequestLog = {
   /** 写入一次请求；在一个事务里完成。只读时抛错 */
   record(request: NewRequest): Promise<void>;
   /** 按条件读出，按开始时间升序，相同时按写入先后 */
   list(filter?: RequestFilter, options?: RequestListOptions): Promise<LoggedRequest[]>;
   /**
-   * 删掉开始时间早于「now 减保留天数」的请求，再删掉剩下的请求都不再引用的内容。
+   * 删掉开始时间早于「now 减保留天数」的请求，再删掉剩下的请求都不再引用的内容。分批进行：
+   * 每批按开始时间从早到晚取一些过期请求，在一个事务里删掉它们与只被它们引用的内容；
+   * 批与批之间让出事件循环（node:sqlite 等锁、删除都是同步的，一次删很多会长时间卡住进程）。
    * 保留天数为 0 时什么也不删。只读时抛错。不碰文件存储
    */
-  cleanup(now?: Date): Promise<RequestCleanup>;
+  cleanup(options?: RequestCleanupOptions): Promise<RequestCleanup>;
   close(): void;
 };
 
@@ -162,14 +173,15 @@ export function openRequestLog(options: RequestLogOptions): RequestLog {
     'INSERT INTO request_contents (request_id, content_hash) VALUES (?, ?)',
   );
   const selectContent = db.prepare('SELECT content FROM contents WHERE hash = ?');
-  // 先摘下过期请求的引用，记下它们引用过的内容，再删请求，最后删其中没人再引用的内容：
-  // 只看这次删掉的请求引用过的内容，不扫整张表
+  // 一批过期请求：开始时间最早的 batchSize 条。同一个事务里两次取到的是同一批
+  const expiredBatch =
+    'SELECT id FROM requests WHERE started_at < ? ORDER BY started_at, id LIMIT ?';
+  // 先摘下这批请求的引用，记下它们引用过的内容，再删请求，最后删其中没人再引用的内容：
+  // 只看这批请求引用过的内容，不扫整张表
   const unlinkExpired = db.prepare(
-    `DELETE FROM request_contents
-     WHERE request_id IN (SELECT id FROM requests WHERE started_at < ?)
-     RETURNING content_hash`,
+    `DELETE FROM request_contents WHERE request_id IN (${expiredBatch}) RETURNING content_hash`,
   );
-  const deleteExpired = db.prepare('DELETE FROM requests WHERE started_at < ?');
+  const deleteExpired = db.prepare(`DELETE FROM requests WHERE id IN (${expiredBatch})`);
   const deleteUnused = db.prepare(
     `DELETE FROM contents
      WHERE hash = ? AND NOT EXISTS (SELECT 1 FROM request_contents WHERE content_hash = ?)`,
@@ -241,17 +253,30 @@ export function openRequestLog(options: RequestLogOptions): RequestLog {
       return requests;
     },
 
-    async cleanup(now = new Date()) {
+    async cleanup({ now = new Date(), batchSize = 100, signal } = {}) {
       writable('清理');
-      if (retentionDays === 0) return { requests: 0, contents: 0 };
+      if (!(Number.isSafeInteger(batchSize) && batchSize > 0)) {
+        throw new RangeError(`每批条数须为正整数：${batchSize}`);
+      }
+      const total = { requests: 0, contents: 0 };
+      if (retentionDays === 0) return total;
       const cutoff = new Date(now.getTime() - retentionDays * day).toISOString();
-      return transaction(db, 'IMMEDIATE', () => {
-        const hashes = new Set(unlinkExpired.all(cutoff).map((row) => String(row.content_hash)));
-        const requests = Number(deleteExpired.run(cutoff).changes);
-        let contents = 0;
-        for (const hash of hashes) contents += Number(deleteUnused.run(hash, hash).changes);
-        return { requests, contents };
-      });
+      for (;;) {
+        if (signal?.aborted) return total;
+        const batch = transaction(db, 'IMMEDIATE', () => {
+          const hashes = new Set(
+            unlinkExpired.all(cutoff, batchSize).map((row) => String(row.content_hash)),
+          );
+          const requests = Number(deleteExpired.run(cutoff, batchSize).changes);
+          let contents = 0;
+          for (const hash of hashes) contents += Number(deleteUnused.run(hash, hash).changes);
+          return { requests, contents };
+        });
+        total.requests += batch.requests;
+        total.contents += batch.contents;
+        if (batch.requests < batchSize) return total;
+        await new Promise((resolve) => setImmediate(resolve));
+      }
     },
 
     close() {

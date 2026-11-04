@@ -35,12 +35,20 @@ export {
   type LoggedRequest,
   type NewRequest,
   type RequestCleanup,
+  type RequestCleanupOptions,
   type RequestFilter,
   type RequestListOptions,
   type RequestLog,
   type RequestLogOptions,
   type RequestResponse,
 } from './request-log/log.js';
+export { createRedactor, jsonEscapedForms } from './redact.js';
+export {
+  createRequestRecorder,
+  type RequestContext,
+  type RequestRecorder,
+} from './request-log/capture.js';
+export { startRequestLogCleanup } from './request-log/cleanup.js';
 export type { SegmentOptions } from './segments.js';
 export {
   describeImage,

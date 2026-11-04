@@ -1,5 +1,6 @@
 import { APICallError, type LanguageModelMiddleware } from 'ai';
 import type { Logger } from './logger.js';
+import { withRequestContext, type RequestContext } from './request-log/capture.js';
 import type { MessageChunk, MessageData } from './message.js';
 
 type WrapStream = NonNullable<LanguageModelMiddleware['wrapStream']>;
@@ -27,6 +28,7 @@ export function trackAttempts({
   firstChunkMs,
   onFirstChunkTimeout,
   notify,
+  request,
 }: {
   logger: Logger;
   logFields: object;
@@ -38,6 +40,13 @@ export function trackAttempts({
   onFirstChunkTimeout: () => void;
   /** 请求阶段的重试提示，发生在流开始前，直接写进外层流 */
   notify: (chunk: MessageChunk) => void;
+  /**
+   * 每次请求带给 provider 的 fetch 的说明（请求记录用，见 withRequestContext）；不给时不带。
+   * timeoutText：超时中止的那次请求的错误说明，参数是这次请求有没有输出过
+   */
+  request?: Pick<RequestContext, 'conversationId' | 'purpose' | 'replyId'> & {
+    timeoutText: (hadOutput: boolean) => string;
+  };
 }): {
   middleware: LanguageModelMiddleware;
   /** 包在 UI 流上：在新一次尝试的内容之前插入流式重试的提示与 reset-step */
@@ -73,6 +82,9 @@ export function trackAttempts({
   let requestFailures = 0;
   // 当前这一步里流式重试的次数（SDK 的 streamRetries 按步计）
   let stepStreamRetries = 0;
+  // 当前这一步发出的请求数：请求记录里「这一步的第几次尝试」。拒收图片后另起的调用从第 1 步
+  // 重新数，被拒的也是第 1 步，所以 restart 不清零，接着数
+  let stepAttempts = 0;
   // 当前是这次 streamText 调用的第几步（从 0 数）。SDK 不告诉中间件，按请求推断：
   // 一次请求正常结束后的下一次请求是新的一步，失败后的下一次是同一步的重试
   let step = 0;
@@ -103,8 +115,10 @@ export function trackAttempts({
         step++;
         stepDone = false;
         stepStreamRetries = 0;
+        stepAttempts = 0;
       }
       const attempt = ++stats.attempts;
+      const stepAttempt = ++stepAttempts;
       steps = Math.max(steps, step + 1);
       attemptOutput = false;
       const startedAt = Date.now();
@@ -141,9 +155,25 @@ export function trackAttempts({
         firstChunkTimer = undefined;
       };
 
+      // 这次请求有没有输出过；超时中止时据此说明是哪种超时
+      let hadOutput = false;
+      const context: RequestContext | undefined = request && {
+        conversationId: request.conversationId,
+        purpose: request.purpose,
+        replyId: request.replyId,
+        step: request.purpose === 'reply' ? step + 1 : undefined,
+        attempt: stepAttempt,
+        aborted: () => {
+          const by = abortedBy();
+          if (by === 'user') return { outcome: 'aborted' };
+          if (by === 'timeout') return { outcome: 'failed', error: request.timeoutText(hadOutput) };
+          return undefined;
+        },
+      };
+
       let result;
       try {
-        result = await doStream();
+        result = context ? await withRequestContext(context, doStream) : await doStream();
       } catch (error) {
         clearFirstChunkTimer();
         if (abortedBy()) {
@@ -194,6 +224,7 @@ export function trackAttempts({
           if (visible && isOutput(part)) {
             clearFirstChunkTimer();
             attemptOutput = true;
+            hadOutput = true;
             firstOutputAt ??= Date.now();
           }
           if (part.type === 'finish' && !failed) {

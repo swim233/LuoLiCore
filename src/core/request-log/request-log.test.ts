@@ -557,7 +557,7 @@ describe('清理', () => {
     expect(rows(path, 'contents')).toBe(6);
     const files = await readdir(filesDir);
 
-    const result = await log.cleanup(now);
+    const result = await log.cleanup({ now });
 
     expect(result).toEqual({ requests: 2, contents: 2 });
     expect(rows(path, 'requests')).toBe(1);
@@ -569,14 +569,14 @@ describe('清理', () => {
     expect(await readdir(filesDir)).toEqual(files);
 
     // 再清理一次什么也不删
-    expect(await log.cleanup(now)).toEqual({ requests: 0, contents: 0 });
+    expect(await log.cleanup({ now })).toEqual({ requests: 0, contents: 0 });
   });
 
   it('保留天数为 0 时什么也不删', async () => {
     const { log, path } = await setup({ retentionDays: 0 });
     await log.record(request({ startedAt: '2000-01-01T00:00:00.000Z' }));
 
-    expect(await log.cleanup(now)).toEqual({ requests: 0, contents: 0 });
+    expect(await log.cleanup({ now })).toEqual({ requests: 0, contents: 0 });
     expect(rows(path, 'requests')).toBe(1);
   });
 
@@ -598,6 +598,60 @@ describe('清理', () => {
     expect(() => openRequestLog({ path, fileStore, retentionDays: Number.NaN })).toThrow(
       '保留天数',
     );
+  });
+
+  it('分批清理：多批删得与一次删的一样；跨批共用的内容在最后一个引用它的请求删掉后才删', async () => {
+    const { log, path } = await setup({ retentionDays: 30 });
+    // 7 条过期请求，同一段对话逐条变长：前一条的消息都被后一条引用
+    const history: ChatMessage[] = [system];
+    for (let i = 0; i < 7; i++) {
+      history.push(user(`旧 ${i}`));
+      await log.record(
+        request({ startedAt: `2026-10-0${i + 1}T00:00:00.000Z`, body: chatBody(history) }),
+      );
+    }
+    const keptBody = chatBody([system, user('新的')]);
+    await log.record(request({ startedAt: cutoff, body: keptBody }));
+    // system、tools、7 句旧的、「新的」
+    expect(rows(path, 'contents')).toBe(10);
+
+    expect(await log.cleanup({ now, batchSize: 3 })).toEqual({ requests: 7, contents: 7 });
+    expect(rows(path, 'requests')).toBe(1);
+    expect(rows(path, 'contents')).toBe(3);
+    expect(JSON.stringify((await log.list())[0]!.body)).toBe(keptBody);
+  });
+
+  it('批与批之间让出事件循环；中止时在下一批之前停下，返回已删的条数', async () => {
+    const { log, path } = await setup({ retentionDays: 30 });
+    for (let i = 0; i < 5; i++) {
+      await log.record(
+        request({ startedAt: `2026-10-0${i + 1}T00:00:00.000Z`, body: chatBody([user(`${i}`)]) }),
+      );
+    }
+    const controller = new AbortController();
+    // 第一批删完、让出事件循环时中止
+    setImmediate(() => controller.abort());
+
+    const result = await log.cleanup({ now, batchSize: 2, signal: controller.signal });
+
+    expect(result.requests).toBe(2);
+    expect(rows(path, 'requests')).toBe(3);
+    // 剩下 3 条各自的消息，加上它们最后才不再引用的 tools
+    expect(await log.cleanup({ now, batchSize: 2 })).toEqual({ requests: 3, contents: 4 });
+  });
+
+  it('配置允许的最大保留天数（36500）照常清理', async () => {
+    const { log } = await setup({ retentionDays: 36_500 });
+    await log.record(request({ startedAt: '1900-01-01T00:00:00.000Z' }));
+    await log.record(request());
+
+    expect(await log.cleanup({ now })).toEqual({ requests: 1, contents: 0 });
+  });
+
+  it('每批条数须为正整数', async () => {
+    const { log } = await setup();
+
+    await expect(log.cleanup({ now, batchSize: 0 })).rejects.toThrow('每批条数');
   });
 });
 
@@ -664,7 +718,9 @@ describe('只读', () => {
     const reader = open({ path, fileStore: createMemoryFileStore(), readOnly: true });
 
     await expect(reader.record(request())).rejects.toThrow('只读');
-    await expect(reader.cleanup(new Date('2100-01-01T00:00:00.000Z'))).rejects.toThrow('只读');
+    await expect(reader.cleanup({ now: new Date('2100-01-01T00:00:00.000Z') })).rejects.toThrow(
+      '只读',
+    );
     expect(rows(path, 'requests')).toBe(1);
   });
 

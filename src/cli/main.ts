@@ -13,6 +13,7 @@ import {
 } from '../core/index.js';
 import { parseConfig, usage } from './config.js';
 import { createLogger, jsonEscapedForms, logFile } from '../shared/logger.js';
+import { openRequestLogging, type RequestLogging } from '../shared/request-log.js';
 import { setupTools } from '../shared/tools.js';
 import { tools as toolList } from '../tools/index.js';
 import { notice } from './notice.js';
@@ -36,6 +37,7 @@ const {
   dbPath,
   filesDir,
   promptPath,
+  requestLog,
 } = parsed.config;
 const name = parsed.config.name ?? userInfo().username;
 
@@ -65,13 +67,30 @@ try {
   process.exit(1);
 }
 
+// CLI 本身不发图片；文件目录照样交给核心（工具结果里的图片也存在这里），不写入时不会创建
+const fileStore = openFileStore(filesDir);
+
+// 请求记录：每次发给模型的请求原样记下（ADR-0008）；打不开时退出
+let requestLogging: RequestLogging;
+try {
+  requestLogging = openRequestLogging({
+    config: requestLog,
+    fileStore,
+    logger,
+    secrets: [model.apiKey],
+  });
+} catch (error) {
+  console.error((error as Error).message);
+  storage.close();
+  process.exit(1);
+}
+
 const conversationId = await chooseConversation(storage, resume);
 const conversation = createConversation({
-  model: createModel(model),
+  model: createModel({ ...model, fetch: requestLogging.fetch }),
   prompts,
   store: await storage.openConversation(conversationId),
-  // CLI 本身不发图片；文件目录照样交给核心，不写入时不会创建
-  fileStore: openFileStore(filesDir),
+  fileStore,
   logger,
   maxRetries,
   timeouts,
@@ -99,6 +118,8 @@ if (process.stdin.isTTY) {
 }
 // 退出时不等进行中的摘要：中止它，下次启动（空闲）或下次回复（压缩）时重做
 await conversation.close();
+// 等已经开始的请求记录写完再关
+await requestLogging.close();
 storage.close();
 
 // 默认每次新开会话；--resume 接着 CLI 平台里最后一条消息最新的会话

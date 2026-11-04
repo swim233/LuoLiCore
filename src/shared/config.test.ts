@@ -76,3 +76,47 @@ describe('步数上限与回复、工具的超时', () => {
     }
   });
 });
+
+describe('请求记录', () => {
+  it('默认打开：数据库在主库同一目录下的 requests.db，保留 30 天', () => {
+    for (const env of [
+      {},
+      { LUOLI_REQUEST_LOG: '', LUOLI_REQUESTS_DB: '', LUOLI_REQUEST_LOG_DAYS: '' },
+    ]) {
+      const result = parse(env);
+      expect(result.ok && result.config.requestLog).toEqual({
+        path: 'data/requests.db',
+        retentionDays: 30,
+      });
+    }
+    const moved = parse({ LUOLI_DB: '/srv/luoli/main.db' });
+    expect(moved.ok && moved.config.requestLog?.path).toBe('/srv/luoli/requests.db');
+  });
+
+  it('LUOLI_REQUESTS_DB 改路径；LUOLI_REQUEST_LOG_DAYS 是非负整数，0 为永久', () => {
+    const result = parse({ LUOLI_REQUESTS_DB: 'logs/r.db', LUOLI_REQUEST_LOG_DAYS: '0' });
+    expect(result.ok && result.config.requestLog).toEqual({ path: 'logs/r.db', retentionDays: 0 });
+    const week = parse({ LUOLI_REQUEST_LOG_DAYS: '7' });
+    expect(week.ok && week.config.requestLog?.retentionDays).toBe(7);
+    const most = parse({ LUOLI_REQUEST_LOG_DAYS: '36500' });
+    expect(most.ok && most.config.requestLog?.retentionDays).toBe(36500);
+  });
+
+  it('LUOLI_REQUEST_LOG=off 时关闭', () => {
+    const result = parse({ LUOLI_REQUEST_LOG: 'off' });
+    expect(result.ok && result.config.requestLog).toBeUndefined();
+  });
+
+  it('不合法的值报错', () => {
+    for (const value of ['on', 'OFF', 'false', '0']) {
+      expect(errorOf({ LUOLI_REQUEST_LOG: value })).toBe(
+        `LUOLI_REQUEST_LOG 只能是 off（关闭请求记录；不设时打开），当前为 "${value}"`,
+      );
+    }
+    for (const value of ['-1', '1.5', 'abc', '36501', '100000000', '99999999999999999999']) {
+      expect(errorOf({ LUOLI_REQUEST_LOG_DAYS: value })).toBe(
+        `LUOLI_REQUEST_LOG_DAYS 必须是 0 到 36500 之间的整数（0 为永久保留），当前为 "${value}"`,
+      );
+    }
+  });
+});

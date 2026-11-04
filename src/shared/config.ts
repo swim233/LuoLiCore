@@ -1,7 +1,7 @@
 import { dirname, join } from 'node:path';
 import type { ModelOptions, SegmentOptions } from '../core/index.js';
 
-/** 各前端共用的配置：模型、重试、超时、步数上限、分段、数据库、文件目录、人设 */
+/** 各前端共用的配置：模型、重试、超时、步数上限、分段、数据库、文件目录、人设、请求记录 */
 export type CommonConfig = {
   model: ModelOptions;
   /** 未设置时为 undefined，用核心的默认值 */
@@ -26,11 +26,18 @@ export type CommonConfig = {
   filesDir: string;
   /** 人设文件，LUOLI_PROMPT；未设置时为 undefined，用仓库里的 prompts/system.md */
   promptPath?: string;
+  /**
+   * 请求记录（ADR-0008），默认打开；LUOLI_REQUEST_LOG=off 时为 undefined。
+   * path：LUOLI_REQUESTS_DB，默认为数据库所在目录下的 requests.db；
+   * retentionDays：LUOLI_REQUEST_LOG_DAYS，默认 30，0 为永久保留，最多 36500（约 100 年）
+   */
+  requestLog?: { path: string; retentionDays: number };
 };
 
 export type Env = Record<string, string | undefined>;
 
 const maxTimeoutSeconds = Math.floor((2 ** 31 - 1) / 1000);
+const maxRetentionDays = 36_500;
 
 /** 解析共用配置。模型 id 由前端自己决定来源（命令行或环境变量）；空字符串按未设置处理 */
 export function parseCommonConfig(
@@ -116,6 +123,23 @@ export function parseCommonConfig(
     segments[key] = value;
   }
 
+  const switchValue = env.LUOLI_REQUEST_LOG;
+  if (switchValue && switchValue !== 'off') {
+    return {
+      ok: false,
+      error: `LUOLI_REQUEST_LOG 只能是 off（关闭请求记录；不设时打开），当前为 "${switchValue}"`,
+    };
+  }
+  const rawDays = env.LUOLI_REQUEST_LOG_DAYS;
+  const retentionDays = rawDays ? Number(rawDays) : 30;
+  // 上限：清理时的截止时间要在 Date 的范围内，天数太大时算不出来
+  if (rawDays && !(/^\d+$/.test(rawDays) && retentionDays <= maxRetentionDays)) {
+    return {
+      ok: false,
+      error: `LUOLI_REQUEST_LOG_DAYS 必须是 0 到 ${maxRetentionDays} 之间的整数（0 为永久保留），当前为 "${rawDays}"`,
+    };
+  }
+
   const dbPath = env.LUOLI_DB || 'data/luoli.db';
   return {
     ok: true,
@@ -129,6 +153,13 @@ export function parseCommonConfig(
       dbPath,
       filesDir: env.LUOLI_FILES_DIR || join(dirname(dbPath), 'files'),
       promptPath: env.LUOLI_PROMPT || undefined,
+      requestLog:
+        switchValue === 'off'
+          ? undefined
+          : {
+              path: env.LUOLI_REQUESTS_DB || join(dirname(dbPath), 'requests.db'),
+              retentionDays,
+            },
     },
   };
 }

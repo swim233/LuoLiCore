@@ -8,6 +8,7 @@ import {
   type Storage,
 } from '../core/index.js';
 import { createLogger, jsonEscapedForms } from '../shared/logger.js';
+import { openRequestLogging, type RequestLogging } from '../shared/request-log.js';
 import { setupTools } from '../shared/tools.js';
 import { tools as toolList } from '../tools/index.js';
 import { startTelegram } from './app.js';
@@ -56,19 +57,37 @@ try {
   process.exit(1);
 }
 
+const fileStore = openFileStore(config.filesDir);
+
+// 请求记录：每次发给模型的请求原样记下（ADR-0008）；打不开时退出
+let requestLogging: RequestLogging;
+try {
+  requestLogging = openRequestLogging({
+    config: config.requestLog,
+    fileStore,
+    logger,
+    secrets: [config.model.apiKey, config.token],
+  });
+} catch (error) {
+  console.error(redact((error as Error).message));
+  storage.close();
+  process.exit(1);
+}
+
 let app: Awaited<ReturnType<typeof startTelegram>>;
 try {
   app = await startTelegram({
     config,
-    model: createModel(config.model),
+    model: createModel({ ...config.model, fetch: requestLogging.fetch }),
     prompts,
     tools: installed.tools,
     storage,
-    fileStore: openFileStore(config.filesDir),
+    fileStore,
     logger,
   });
 } catch (error) {
   console.error(redact(`启动失败：${(error as Error).message}`));
+  await requestLogging.close();
   storage.close();
   process.exit(1);
 }
@@ -81,6 +100,8 @@ const stop = async () => {
   stopping = true;
   console.log('正在退出……');
   await app.stop();
+  // 等已经开始的请求记录写完再关
+  await requestLogging.close();
   storage.close();
   process.exit(0);
 };
