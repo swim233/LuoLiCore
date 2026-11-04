@@ -36,6 +36,20 @@ export type CommonConfig = {
 
 export type Env = Record<string, string | undefined>;
 
+/**
+ * 数据文件的路径：主库 LUOLI_DB（默认 data/luoli.db）；文件目录 LUOLI_FILES_DIR、请求记录
+ * LUOLI_REQUESTS_DB 默认都在主库所在目录下（files/、requests.db）。前端与导出脚本共用。
+ * 空字符串按未设置处理
+ */
+export function dataPaths(env: Env): { dbPath: string; filesDir: string; requestsDbPath: string } {
+  const dbPath = env.LUOLI_DB || 'data/luoli.db';
+  return {
+    dbPath,
+    filesDir: env.LUOLI_FILES_DIR || join(dirname(dbPath), 'files'),
+    requestsDbPath: env.LUOLI_REQUESTS_DB || join(dirname(dbPath), 'requests.db'),
+  };
+}
+
 const maxTimeoutSeconds = Math.floor((2 ** 31 - 1) / 1000);
 const maxRetentionDays = 36_500;
 
@@ -140,7 +154,7 @@ export function parseCommonConfig(
     };
   }
 
-  const dbPath = env.LUOLI_DB || 'data/luoli.db';
+  const { dbPath, filesDir, requestsDbPath } = dataPaths(env);
   return {
     ok: true,
     config: {
@@ -151,15 +165,9 @@ export function parseCommonConfig(
       toolHistoryChars,
       segments,
       dbPath,
-      filesDir: env.LUOLI_FILES_DIR || join(dirname(dbPath), 'files'),
+      filesDir,
       promptPath: env.LUOLI_PROMPT || undefined,
-      requestLog:
-        switchValue === 'off'
-          ? undefined
-          : {
-              path: env.LUOLI_REQUESTS_DB || join(dirname(dbPath), 'requests.db'),
-              retentionDays,
-            },
+      requestLog: switchValue === 'off' ? undefined : { path: requestsDbPath, retentionDays },
     },
   };
 }

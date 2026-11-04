@@ -9,6 +9,7 @@ import type {
   Segment,
   SeqRange,
   Storage,
+  StoredConversation,
   ToolCall,
 } from './types.js';
 
@@ -358,6 +359,36 @@ export function openSqliteStorage(path: string): Storage {
       if (db.isOpen) db.close();
     },
   };
+}
+
+/**
+ * 只读打开数据库，读出全部会话（按建立先后）后关闭。不迁移、不写（不设 WAL 等要写的 pragma）；
+ * 文件不存在时报错，不创建。表结构版本与程序不一致时报错。供导出等不写库的工具使用，
+ * bot 运行时也能读
+ */
+export function readConversations(path: string): StoredConversation[] {
+  const db = new DatabaseSync(path, { readOnly: true });
+  try {
+    // 另一个进程正在写时等它，而不是立即报 SQLITE_BUSY
+    db.exec('PRAGMA busy_timeout = 5000');
+    const version = Number(db.prepare('PRAGMA user_version').get()?.user_version ?? 0);
+    if (version !== schemaVersion) {
+      throw new Error(
+        version > schemaVersion
+          ? `数据库版本比程序新（文件为 ${version}，程序支持 ${schemaVersion}）`
+          : `数据库版本比程序旧（文件为 ${version}，程序为 ${schemaVersion}），先用新版本启动一次 CLI 或 bot`,
+      );
+    }
+    return db
+      .prepare(
+        `SELECT id, platform, platform_conversation_id, title FROM conversations
+         ORDER BY created_at, rowid`,
+      )
+      .all()
+      .map((row) => ({ ...conversationInfo(row), platform: String(row.platform) }));
+  } finally {
+    db.close();
+  }
 }
 
 function migrate(db: DatabaseSync): void {

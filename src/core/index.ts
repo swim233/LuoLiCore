@@ -61,7 +61,7 @@ export {
 } from './tool-content.js';
 export { createMemoryStorage, createMemoryStore } from './storage/memory.js';
 export { DuplicateMessageError } from './storage/errors.js';
-export { openSqliteStorage } from './storage/sqlite.js';
+export { openSqliteStorage, readConversations } from './storage/sqlite.js';
 export {
   defineTool,
   installTools,
@@ -81,5 +81,6 @@ export type {
   Segment,
   SeqRange,
   Storage,
+  StoredConversation,
   ToolCall,
 } from './storage/types.js';

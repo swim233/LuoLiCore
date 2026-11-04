@@ -9,6 +9,7 @@
   "scripts": {
     "dev": "tsx --env-file-if-exists=.env src/cli/main.ts",
     "telegram": "tsx --env-file-if-exists=.env src/telegram/main.ts",
+    "requests": "tsx --env-file-if-exists=.env src/requests/main.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "format": "prettier --write .",

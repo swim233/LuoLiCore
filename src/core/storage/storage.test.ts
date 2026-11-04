@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -7,6 +7,7 @@ import {
   createMemoryStorage,
   DuplicateMessageError,
   openSqliteStorage,
+  readConversations,
   type Message,
   type MessageMetadata,
   type ModelCall,
@@ -1258,3 +1259,44 @@ CREATE TABLE segments (
 );
 CREATE UNIQUE INDEX segments_order ON segments(conversation_id, start_seq);
 `;
+
+describe('只读读出会话（readConversations）', () => {
+  it('按建立先后读出全部会话与平台；库文件的内容与修改时间不变', async () => {
+    const dir = await tempDir();
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    const path = join(dir, 'luoli.db');
+    const storage = openSqliteStorage(path);
+    const group = await storage.createConversation({
+      platform: 'telegram',
+      platformConversationId: '-1001',
+      title: '读书会',
+    });
+    const cli = await storage.createConversation({ platform: 'cli' });
+    storage.close();
+    const before = { bytes: await readFile(path), mtime: (await stat(path)).mtimeMs };
+
+    const conversations = readConversations(path);
+
+    expect(conversations).toEqual([
+      { id: group, platform: 'telegram', platformConversationId: '-1001', title: '读书会' },
+      { id: cli, platform: 'cli', platformConversationId: undefined, title: undefined },
+    ]);
+    expect({ bytes: await readFile(path), mtime: (await stat(path)).mtimeMs }).toEqual(before);
+  });
+
+  it('文件不存在时报错，不建文件；版本不一致时报错', async () => {
+    const dir = await tempDir();
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    const missing = join(dir, 'missing.db');
+
+    expect(() => readConversations(missing)).toThrow();
+    expect(await readdir(dir)).toEqual([]);
+
+    const old = join(dir, 'old.db');
+    const db = new DatabaseSync(old);
+    db.exec(version1Schema);
+    db.exec('PRAGMA user_version = 1');
+    db.close();
+    expect(() => readConversations(old)).toThrow('先用新版本启动一次 CLI 或 bot');
+  });
+});

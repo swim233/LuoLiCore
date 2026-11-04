@@ -128,6 +128,9 @@ export type ConversationInfo = {
   title?: string;
 };
 
+/** 会话连同所在的平台（readConversations 的结果） */
+export type StoredConversation = ConversationInfo & { platform: string };
+
 /** 一个数据库：多个会话 */
 export type Storage = {
   /** 新建会话，同时写入它的第一段，返回会话 id */

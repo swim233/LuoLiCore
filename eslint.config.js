@@ -2,9 +2,14 @@ import js from '@eslint/js';
 import { defineConfig, globalIgnores } from 'eslint/config';
 import tseslint from 'typescript-eslint';
 
-// 前端（CLI、Telegram）与前端共用的配置、日志：任何含这些路径段的写法，
+// 前端（CLI、Telegram）、导出脚本（src/requests/）与前端共用的配置、日志：任何含这些路径段的写法，
 // 如 ../cli/x.js、../../src/cli/x.js、./../cli 等（不区分大小写）
-const frontends = ['(^|[/#])cli(/|$)', '(^|[/#])telegram(/|$)', '(^|[/#])shared(/|$)'];
+const frontends = [
+  '(^|[/#])cli(/|$)',
+  '(^|[/#])telegram(/|$)',
+  '(^|[/#])shared(/|$)',
+  '(^|[/#])requests(/|$)',
+];
 
 // core 不得引用的模块
 const forbiddenInCore = [
