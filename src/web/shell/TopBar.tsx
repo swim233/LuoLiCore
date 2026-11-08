@@ -1,0 +1,87 @@
+import { Badge } from '../components/Badge';
+import { ICON_ARRANGE } from '../components/icons';
+import { useNarrow } from '../lib/env';
+import { chooseMotion, usePrefs } from '../lib/prefs';
+import { STATE_TEXT, useStatus } from '../model/status';
+import { hasDef, useDefsRev, useDesk } from '../state/desk';
+import { nowCtl, setArranging } from '../state/actions';
+import { pop } from '../state/ui';
+import { Cap } from './Cap';
+
+/* 顶栏：洛璃的状态按钮（点一下展开「此刻」）、窄屏时「此刻」的胶囊在正中（灵动岛）、整理、动画开关 */
+export function TopBar() {
+  useDefsRev();
+  const snap = useStatus();
+  const narrow = useNarrow();
+  const arranging = useDesk((s) => s.arranging);
+  const motion = usePrefs((p) => p.motion);
+  const L = useDesk((s) => s.layout);
+  const islandOn = narrow && hasDef('now') && !L.hidden.now;
+  const name = snap.state === 'tool' ? '调用 ' + (snap.tool || '工具') : STATE_TEXT[snap.state];
+  const where = snap.count >= 2 ? snap.count + ' 个群' : snap.list[0] ? snap.list[0].title : '';
+  return (
+    <header className="top" id="top">
+      <div className="top-in">
+        <button
+          className={'top-status' + (islandOn ? ' is-island-mode' : '')}
+          id="top-status"
+          type="button"
+          aria-label="洛璃的状态，点一下展开「此刻」"
+          onClick={() => {
+            pop.hide();
+            nowCtl.manualExpand();
+          }}
+          onPointerEnter={(e) => {
+            if (e.pointerType === 'mouse') pop.show(e.currentTarget);
+          }}
+          onPointerLeave={() => pop.hide()}
+        >
+          <span className="top-badge" id="top-badge">
+            <Badge size={22} />
+          </span>
+          <span className="top-name">洛璃</span>
+          <span className="top-state" id="top-state">
+            {snap.state === 'offline' ? (
+              '离线'
+            ) : snap.state === 'idle' ? (
+              '空闲'
+            ) : (
+              <>
+                <b>{name}</b>
+                {where ? ' · ' + where : ''}
+              </>
+            )}
+          </span>
+        </button>
+        <div className="island-slot" id="island-slot">
+          {islandOn && <Cap id="now" island />}
+        </div>
+        <div className="top-right">
+          <button
+            className="tbtn"
+            id="btn-arrange"
+            type="button"
+            aria-pressed={arranging}
+            title="整理桌面（Esc 退出）"
+            onClick={() => setArranging(!arranging)}
+          >
+            {ICON_ARRANGE}
+            <span className="tlabel">整理</span>
+          </button>
+          <button
+            className="tbtn tswitch"
+            id="btn-motion"
+            type="button"
+            role="switch"
+            aria-checked={motion}
+            title="装饰性的动画"
+            onClick={() => chooseMotion(!motion)}
+          >
+            <span className="tswitch-track" aria-hidden="true" />
+            <span className="tlabel">动画</span>
+          </button>
+        </div>
+      </div>
+    </header>
+  );
+}

@@ -1,0 +1,148 @@
+/* 演示控制面板的样式：只在开发模式里加载（dev/DemoPanel.tsx） */
+.demo {
+  position: fixed;
+  z-index: 100;
+  right: max(16px, env(safe-area-inset-right, 0px));
+  bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 10px;
+  transition: opacity 0.16s ease;
+}
+.demo-toggle {
+  height: 40px;
+  padding: 0 16px 0 12px;
+  border-radius: 999px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  border: 1px solid var(--edge-gold);
+  background: color-mix(in srgb, var(--surface) 94%, transparent);
+  color: var(--gold-pale);
+  box-shadow:
+    0 10px 30px -10px color-mix(in srgb, var(--black) 80%, transparent),
+    0 0 20px color-mix(in srgb, var(--gold) 15%, transparent);
+}
+.demo-toggle i {
+  font-style: normal;
+  color: var(--gold);
+  display: inline-flex;
+}
+.demo-toggle i .st4 {
+  width: 15px;
+  height: 15px;
+}
+.demo-panel {
+  width: 320px;
+  max-width: calc(100vw - 32px);
+  max-height: min(72vh, 640px);
+  box-sizing: border-box;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 12px;
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--surface-lo) 97%, transparent);
+  border: 1px solid var(--edge-hi);
+  box-shadow: 0 24px 60px -16px color-mix(in srgb, var(--black) 90%, transparent);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--blue) 35%, transparent) transparent;
+}
+.demo-panel h4 {
+  margin: 0 0 6px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--fg-3);
+  letter-spacing: 0.14em;
+}
+.demo-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+.dbtn {
+  min-height: 30px;
+  padding: 5px 10px;
+  border-radius: 9px;
+  cursor: pointer;
+  text-align: left;
+  border: 1px solid var(--edge);
+  background: var(--blue-wash);
+  color: var(--fg);
+  font-size: 12.5px;
+  line-height: 1.3;
+  transition:
+    background-color 0.15s,
+    border-color 0.15s;
+}
+.dbtn:hover {
+  border-color: var(--edge-hi);
+  background: color-mix(in srgb, var(--blue) 20%, transparent);
+}
+.dbtn:active {
+  transform: translateY(1px);
+}
+.dbtn.is-wide {
+  grid-column: 1 / -1;
+}
+.dbtn small {
+  display: block;
+  color: var(--dim);
+  font-size: 11px;
+}
+.demo-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12.5px;
+  color: var(--fg-2);
+}
+.demo-row > span {
+  white-space: nowrap;
+  flex: none;
+}
+.demo-row .seg-ctl {
+  flex: 1 1 auto;
+  max-width: 196px;
+  min-width: 0;
+}
+/* 全屏时，演示控制挪到右上角（全屏窗口上方那一行的空处），不压住全屏窗口的内容。
+   进出全屏的过渡期间先淡出（.dev-hide），过渡结束后再换位置（.dev-fs）、在新位置淡入，不在两个位置之间瞬移 */
+.dev-hide .demo {
+  opacity: 0;
+  pointer-events: none;
+}
+.dev-fs .demo {
+  top: calc(env(safe-area-inset-top, 0px) + 17px);
+  bottom: auto;
+  right: max(24px, env(safe-area-inset-right, 0px));
+  flex-direction: column-reverse;
+}
+.dev-fs .demo-toggle {
+  width: 40px;
+  padding: 0;
+  justify-content: center;
+}
+.dev-fs .demo-toggle span {
+  display: none;
+}
+@media (max-width: 719px) {
+  .dev-fs .demo {
+    top: calc(env(safe-area-inset-top, 0px) + 5px);
+    right: max(8px, env(safe-area-inset-right, 0px));
+  }
+  .demo-panel {
+    width: calc(100vw - 32px);
+    max-height: 66vh;
+  }
+}
+html.bare .demo {
+  visibility: hidden !important;
+}

@@ -1,0 +1,3783 @@
+/* 布局：顶栏 + 胶囊栏 + 网格桌面；部件停靠在 4/3/2/1 列的网格上，「此刻」从胶囊浮起，全屏盖在变暗变模糊的桌面上 */
+:root {
+  color-scheme: dark;
+  /* 基础色：全部颜色从这里派生（透明度变体用 color-mix 从这些变量算出来） */
+  --bg-0: #0b1026;
+  --bg-1: #141b3d;
+  --bg-2: #1b2350;
+  --blue: #6e82d2; /* 矢车菊蓝，洛璃的瞳色，主强调 */
+  --gold: #e3c17a; /* 星星、洛璃的名字、高亮 */
+  --ok: #7ec699;
+  --err: #e07a7a;
+  /* 中间色 */
+  --gold-pale: #f4e6c0;
+  --gold-star: #e9d8a6;
+  --gold-deep: #c9a35a;
+  --quote: #b9c4f5;
+  --tool: #8fa2e6;
+  --amber: #d9a35f;
+  --pink: #f2a7c3;
+  --pink-pale: #f2c4d6;
+  --ok-pale: #b6e3c6;
+  --err-pale: #ffd9d9;
+  --night: #080c1e;
+  --abyss: #020410;
+  --white: #ffffff;
+  --black: #000000;
+  --mask: #000000; /* 只用于遮罩的不透明部分 */
+  /* 每人一个固定的颜色：按 uid 算下标 */
+  --who-0: #8fb4ff;
+  --who-1: #9fe0c8;
+  --who-2: #f2a7c3;
+  --who-3: #c3a6ff;
+  --who-4: #ffab91;
+  --who-5: #80deea;
+  --who-6: #b5e48c;
+  --who-7: #f48fb1;
+  --who-8: #a0c4ff;
+  --who-9: #ce93d8;
+  /* 派生的语义色 */
+  --ink: var(--bg-0);
+  --card: color-mix(in srgb, var(--surface) var(--card-a), transparent);
+  --card-hi: color-mix(in srgb, var(--surface-hi) 92%, transparent);
+  --card-solid: var(--surface);
+  --edge: color-mix(in srgb, var(--fg-2) var(--edge-a), transparent);
+  --edge-hi: color-mix(in srgb, var(--fg-2) var(--edge-hi-a), transparent);
+  --edge-gold: color-mix(in srgb, var(--gold) 38%, transparent);
+  --gold-wash: color-mix(in srgb, var(--gold) 7%, transparent);
+  --gold-glow: color-mix(in srgb, var(--gold) 70%, transparent);
+  --gold-soft: color-mix(in srgb, var(--gold) 16%, transparent);
+  --blue-wash: color-mix(in srgb, var(--blue) 12%, transparent);
+  --blue-soft: color-mix(in srgb, var(--blue) 25%, transparent);
+  --blue-glow: color-mix(in srgb, var(--blue) 40%, transparent);
+  --red-glow: color-mix(in srgb, var(--err) 55%, transparent);
+  --shade: color-mix(in srgb, var(--night) 55%, transparent);
+  --shade-0: color-mix(in srgb, var(--night) 0%, transparent);
+  --scrim: color-mix(
+    in srgb,
+    var(--space-0) 58%,
+    transparent
+  ); /* 全屏时盖在桌面上的暗层（另有固定半径的模糊） */
+  --scrim-narrow: color-mix(in srgb, var(--space-0) 74%, transparent);
+  --hair: color-mix(in srgb, var(--white) 6%, transparent);
+  /* 字体：已加载的思源黑体排在系统黑体（含雅黑）前面，避免本机只有粗体时全变粗 */
+  --font-ui:
+    -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Noto Sans SC Variable',
+    'Noto Sans SC', 'Noto Sans CJK SC', 'Source Han Sans SC', system-ui, sans-serif;
+  --font-term:
+    'JetBrains Mono', 'Noto Sans SC Variable', 'Noto Sans SC', ui-monospace, 'SF Mono', Menlo,
+    Consolas, 'DejaVu Sans Mono', monospace;
+  /* 尺寸 */
+  --r-card: 16px;
+  --gap: 16px;
+  --row: 232px;
+  --top-h: 56px;
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --ease-io: cubic-bezier(0.65, 0, 0.35, 1);
+}
+
+/* ---------- 配色 ----------
+   「星夜」：矢车菊蓝和金色（品牌色）、状态色、群友的颜色在上面的基础色里；下面是大面积的面、文字、边线、气泡等的取值（第 4 版里的「暗底」）：
+   大面积的面（窗口底、时间线区、标题栏、气泡）压暗、降低饱和，文字略低于近白。面板和气泡用不透明色，对比度好算。 */
+:root {
+  --space-0: #02030a;
+  --space-1: #04061a;
+  --fog: #1c2a6a;
+  --vignette: #000104;
+  --sky-0: #04081a;
+  --sky-1: #070c26;
+  --sky-2: #0d1436;
+  --surface: #090f2c;
+  --surface-hi: #111847;
+  --surface-lo: #050920;
+  --card-a: 94%;
+  --fg: #e4e9fc;
+  --fg-2: #c6cff2;
+  --fg-3: #a5b1e0;
+  --dim: #8c99cb;
+  --edge-a: 32%;
+  --edge-hi-a: 58%;
+  --p-head: #131a45;
+  --p-side: #03051a;
+  --p-main: #0d1334;
+  --p-in: #070b26;
+  --rule: #424f98;
+  --rule-hi: #6475bf;
+  --li-hover: #111847;
+  --li-sel: #1d2974;
+  --li-sel-bd: #8b9cec;
+  --li-sel-t: #f1f4ff;
+  --li-sel-t2: #c4cdf2;
+  --li-sel-ico: #2c3b96;
+  --b-o-bg: #141c54;
+  --b-o-bd: #5a6cc0;
+  --b-o-fg: #e4e9fc;
+  --b-l-bg: #2a210c;
+  --b-l-bd: #c0a05a;
+  --b-l-fg: #f8edcc;
+  --b-m-bg: #20308a;
+  --b-m-bd: #96a5ee;
+  --b-m-fg: #f1f4ff;
+  --b-m-num: #ffe09a;
+  --sum-bg: #111748;
+  --sum-bd: #7686d3;
+  --fold-bg: #0a1034;
+  --fold-bd: #5a6bba;
+  --fold-body: #060a20;
+}
+
+[hidden] {
+  display: none !important;
+}
+/* 页面的滚动条位置一直留着（scrollbar-gutter: stable；没有溢出时只是一条空的边，没有轨道也没有箭头）：页面变高变矮时
+   滚动条出现或消失，桌面的宽度不会跟着变，卡片就不会在那一帧整体横移。全屏锁滚动时只把 overflow-y 换成 hidden（lockScroll），
+   固定定位的元素（演示按钮、收纳盒、星空）也不会因为滚动条消失而移位 */
+html {
+  height: 100%;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--blue) 38%, transparent) transparent;
+}
+body {
+  min-height: 100%;
+  margin: 0;
+  font: 14px/1.55 var(--font-ui);
+  color: var(--fg);
+  background-color: var(--space-0);
+  background-image:
+    radial-gradient(
+      ellipse 62% 55% at 50% 42%,
+      color-mix(in srgb, var(--fog) 24%, transparent),
+      transparent 72%
+    ),
+    radial-gradient(
+      1000px 600px at 90% -14%,
+      color-mix(in srgb, var(--blue) 7%, transparent),
+      transparent 64%
+    ),
+    linear-gradient(180deg, var(--space-0), var(--space-1) 52%, var(--space-0));
+  background-attachment: fixed;
+  -webkit-font-smoothing: antialiased;
+}
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0 0 auto;
+  height: env(safe-area-inset-top, 0px);
+  z-index: 70;
+  background: var(--space-0);
+}
+/* 暗角：盖在星空上面、桌面下面，四周的星星也跟着暗下去 */
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background: radial-gradient(
+    ellipse 80% 72% at 50% 44%,
+    color-mix(in srgb, var(--vignette) 0%, transparent) 52%,
+    color-mix(in srgb, var(--vignette) 62%, transparent) 100%
+  );
+}
+button {
+  font: inherit;
+  color: inherit;
+}
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+:where(
+  a[href],
+  button,
+  input,
+  select,
+  textarea,
+  summary,
+  [tabindex]:not([tabindex='-1'])
+):focus-visible {
+  outline: 2px solid var(--gold);
+  outline-offset: 2px;
+}
+.fs-win:focus,
+.fs-win:focus-visible {
+  outline: none;
+}
+::selection {
+  background: color-mix(in srgb, var(--blue) 45%, transparent);
+  color: var(--fg);
+}
+
+/* ---------- 背景星空（页面里的小元素，见第 6 节）、特效画布 ---------- */
+.sky,
+.fx {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  display: block;
+}
+.sky {
+  z-index: 0;
+  overflow: hidden;
+}
+.sky-stars,
+.sky-cons {
+  position: absolute;
+  inset: 0;
+}
+.sky i {
+  position: absolute;
+  display: block;
+  background: var(--fg);
+  opacity: var(--mid);
+}
+.sky i[data-c='1'] {
+  background: var(--gold-star);
+}
+.sky i[data-c='2'] {
+  background: var(--fg-2);
+}
+.sky i:not(.is-sq) {
+  border-radius: 50%;
+}
+.sky i.is-big::before,
+.sky i.is-big::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 8px;
+  height: 1px;
+  margin: -0.5px 0 0 -4px;
+  background: var(--gold-star);
+  opacity: 0.5;
+}
+.sky i.is-big::after {
+  transform: rotate(90deg);
+}
+.sky svg.con {
+  position: absolute;
+  overflow: visible;
+}
+.sky .con-lines line {
+  stroke: color-mix(in srgb, var(--gold) 6%, transparent);
+  stroke-width: 0.7;
+}
+.sky .con-dots circle {
+  fill: color-mix(in srgb, var(--gold-star) 34%, transparent);
+}
+/* 漂移（transform）：整层星点一起慢慢飘（每颗星各飘各的，一秒钟只差一两个像素，看不出来），星座各飘各的；闪烁（opacity）：三分之一的星点。
+   都只动 transform / opacity，跑在合成器上。全屏期间 .is-held：漂移停在当前位置，闪烁的星点停在亮度的中间值（不再有动画，也就不再各占一层） */
+@keyframes sky-drift {
+  to {
+    transform: translate(var(--dx), var(--dy));
+  }
+}
+@keyframes sky-tw {
+  from {
+    opacity: var(--lo);
+  }
+  to {
+    opacity: var(--hi);
+  }
+}
+.motion .sky-stars {
+  animation: sky-drift 90s linear infinite alternate;
+}
+.motion .sky i.is-tw {
+  animation: sky-tw var(--t2) ease-in-out var(--l2) infinite alternate;
+}
+.motion .sky svg.con {
+  animation: sky-drift 60s linear var(--l1) infinite alternate;
+}
+.sky.is-held .sky-stars,
+.sky.is-held svg.con {
+  animation-play-state: paused !important;
+}
+.sky.is-held i.is-tw {
+  animation: none !important;
+}
+.fx {
+  z-index: 95;
+}
+.ghosts {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 85;
+}
+
+/* 帧率显示（演示控制里打开才有） */
+.fps {
+  position: fixed;
+  z-index: 120;
+  left: max(12px, env(safe-area-inset-left, 0px));
+  bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+  padding: 6px 10px;
+  border-radius: 10px;
+  pointer-events: none;
+  white-space: pre;
+  font: 12px/1.45 var(--font-term);
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-2);
+  background: color-mix(in srgb, var(--space-0) 84%, transparent);
+  border: 1px solid var(--edge);
+}
+
+/* ---------- 顶栏 ---------- */
+.app {
+  position: relative;
+  z-index: 1;
+  min-height: 100%;
+}
+/* 全屏期间，被暗层盖住的桌面上的 CSS 动画都停下（反正看不清），后面不再一帧帧重算模糊 */
+.fs-open .app *,
+.fs-open .app *::before,
+.fs-open .app *::after,
+.fs-open > .w.is-island * {
+  animation-play-state: paused !important;
+}
+.top {
+  position: sticky;
+  top: env(safe-area-inset-top, 0px);
+  z-index: 50;
+  height: var(--top-h);
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--space-0) 94%, transparent),
+    color-mix(in srgb, var(--space-0) 72%, transparent) 70%,
+    color-mix(in srgb, var(--space-0) 0%, transparent)
+  );
+}
+.top-in {
+  width: 100%;
+  max-width: 1480px;
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.top-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  height: 40px;
+  padding: 0 14px 0 8px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  cursor: pointer;
+  transition:
+    background-color 0.2s,
+    border-color 0.2s;
+}
+.top-status:hover {
+  background: var(--blue-wash);
+  border-color: var(--edge);
+}
+.top-name {
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  color: var(--gold);
+  white-space: nowrap;
+}
+.top-state {
+  color: var(--fg-2);
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.top-state b {
+  font-weight: 500;
+  color: var(--fg);
+}
+.island-slot {
+  flex: 1 1 auto;
+  display: flex;
+  justify-content: center;
+  min-width: 0;
+}
+.top-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+.tbtn {
+  height: 34px;
+  padding: 0 14px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--blue-wash);
+  border: 1px solid var(--edge);
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--fg);
+  transition:
+    background-color 0.2s,
+    border-color 0.2s,
+    color 0.2s,
+    box-shadow 0.2s;
+}
+.tbtn:hover {
+  border-color: var(--edge-hi);
+  background: color-mix(in srgb, var(--blue) 20%, transparent);
+}
+.tbtn[aria-pressed='true'] {
+  background: var(--gold-soft);
+  border-color: var(--edge-gold);
+  color: var(--gold-pale);
+  box-shadow: 0 0 18px color-mix(in srgb, var(--gold) 18%, transparent);
+}
+.tbtn svg {
+  width: 15px;
+  height: 15px;
+  flex: none;
+}
+.tswitch {
+  gap: 8px;
+  padding: 0 12px 0 6px;
+}
+.tswitch-track {
+  width: 30px;
+  height: 18px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--dim) 50%, transparent);
+  position: relative;
+  transition: background-color 0.2s;
+  flex: none;
+}
+.tswitch-track::after {
+  content: '';
+  position: absolute;
+  left: 2px;
+  top: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--fg-2);
+  transition:
+    transform 0.2s var(--ease-out),
+    background-color 0.2s;
+}
+.tswitch[aria-checked='true'] .tswitch-track {
+  background: color-mix(in srgb, var(--gold) 45%, transparent);
+}
+.tswitch[aria-checked='true'] .tswitch-track::after {
+  transform: translateX(12px);
+  background: var(--gold-pale);
+}
+
+/* ---------- 整理模式提示条 ---------- */
+.arrange-bar {
+  position: sticky;
+  top: calc(env(safe-area-inset-top, 0px) + var(--top-h));
+  z-index: 45;
+  margin: 0 auto 8px;
+  width: fit-content;
+  max-width: calc(100% - 32px);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  justify-content: center;
+  padding: 8px 8px 8px 16px;
+  border-radius: 999px;
+  background: var(--card-hi);
+  border: 1px solid var(--edge-gold);
+  color: var(--fg-2);
+  font-size: 13px;
+  box-shadow: 0 8px 30px -10px color-mix(in srgb, var(--black) 60%, transparent);
+  /* 进出整理模式：从顶栏下面滑下来、滑回去（退出时先脱离文档流，固定在原处淡出） */
+  opacity: 0;
+  transform: translateY(-14px);
+  transition:
+    opacity 0.26s ease,
+    transform 0.34s var(--ease-out);
+}
+.arrange-bar.is-on {
+  opacity: 1;
+  transform: none;
+}
+.arrange-bar.is-leaving {
+  pointer-events: none;
+}
+.arrange-bar b {
+  color: var(--gold-pale);
+  font-weight: 500;
+}
+
+/* ---------- 桌面 ---------- */
+.main {
+  position: relative;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 4px 112px;
+}
+.desk-wrap {
+  position: relative;
+  max-width: 1480px;
+  margin: 0 auto;
+}
+.shelf {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: var(--gap);
+  min-height: 0;
+}
+.shelf:empty {
+  display: none;
+}
+.desk {
+  display: grid;
+  grid-template-columns: repeat(var(--cols, 4), minmax(0, 1fr));
+  grid-auto-rows: var(--row);
+  grid-auto-flow: row dense;
+  gap: var(--gap);
+}
+.desk {
+  --cols: 4;
+}
+@media (max-width: 1199px) {
+  .desk {
+    --cols: 3;
+  }
+}
+@media (max-width: 959px) {
+  .desk {
+    --cols: 2;
+  }
+}
+@media (max-width: 719px) {
+  .desk {
+    --cols: 1;
+  }
+}
+.is-hidden-for-anim,
+[data-hide] {
+  visibility: hidden !important;
+}
+.desk-empty {
+  grid-column: 1 / -1;
+  color: var(--fg-3);
+  text-align: center;
+  padding: 48px 0;
+}
+
+/* 部件外壳：.w 负责位置（FLIP 动画），.w-card 负责外观（悬停、倾斜、晃动） */
+.w {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  z-index: 1;
+}
+.w.is-active {
+  z-index: 35;
+}
+.w.is-float {
+  position: absolute;
+  z-index: 30;
+}
+.w.is-float.is-active {
+  z-index: 36;
+}
+.w.is-island {
+  position: fixed;
+  z-index: 60;
+}
+.w.is-hidden-for-anim {
+  visibility: hidden;
+}
+.w-card {
+  position: relative;
+  height: 100%;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--r-card);
+  border: 1px solid var(--edge);
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--white) 3.5%, transparent),
+      color-mix(in srgb, var(--white) 0%, transparent) 42%
+    ),
+    radial-gradient(
+      120% 90% at 0% 0%,
+      color-mix(in srgb, var(--blue) 11%, transparent),
+      transparent 62%
+    ),
+    var(--card);
+  box-shadow:
+    inset 0 1px 0 var(--hair),
+    0 18px 44px -22px color-mix(in srgb, var(--abyss) 95%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--bg-0) 35%, transparent);
+  overflow: hidden;
+  isolation: isolate;
+  transition:
+    border-color 0.3s,
+    box-shadow 0.3s,
+    transform 0.18s ease-out;
+  transform-style: flat;
+}
+.w.is-active > .w-card {
+  border-color: var(--edge-hi);
+  box-shadow:
+    inset 0 1px 0 var(--hair),
+    0 22px 54px -20px color-mix(in srgb, var(--abyss) 100%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--blue) 18%, transparent),
+    0 0 26px color-mix(in srgb, var(--blue) 14%, transparent);
+}
+.w.is-float > .w-card,
+.w.is-island > .w-card {
+  border-color: var(--edge-gold);
+  box-shadow:
+    inset 0 1px 0 var(--hair),
+    0 30px 70px -18px color-mix(in srgb, var(--abyss) 100%, transparent),
+    0 0 34px color-mix(in srgb, var(--blue) 28%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--gold) 12%, transparent);
+}
+.w-head {
+  position: relative;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 42px;
+  padding: 0 8px 0 14px;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+}
+.w-head::after {
+  content: '';
+  position: absolute;
+  left: 14px;
+  right: 14px;
+  bottom: 0;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--gold) 0%, transparent),
+    color-mix(in srgb, var(--gold) 38%, transparent) 18%,
+    color-mix(in srgb, var(--gold) 14%, transparent) 70%,
+    color-mix(in srgb, var(--gold) 0%, transparent)
+  );
+}
+.w-icon {
+  width: 18px;
+  height: 18px;
+  color: var(--fg-2);
+  flex: none;
+  display: grid;
+  place-items: center;
+}
+.w-icon svg {
+  width: 18px;
+  height: 18px;
+}
+.w-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--fg);
+  white-space: nowrap;
+}
+.w-sub {
+  font-size: 12px;
+  color: var(--fg-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.w-new {
+  font-size: 11px;
+  line-height: 18px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--gold);
+  color: var(--ink);
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  box-shadow: 0 0 14px color-mix(in srgb, var(--gold) 60%, transparent);
+}
+.w-btns {
+  margin-left: auto;
+  display: flex;
+  gap: 2px;
+  flex: none;
+}
+.w-btn {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  color: var(--fg-3);
+  transition:
+    background-color 0.15s,
+    color 0.15s;
+}
+.w-btn:hover {
+  background: var(--blue-wash);
+  color: var(--fg);
+}
+.w-btn svg {
+  width: 15px;
+  height: 15px;
+}
+.w-body {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+/* 部件的内容区比标题栏（卡片本色）亮或暗一档，由面板色（--p-side）决定；「此刻」自带夜空，不加 */
+.w:not(.now-card) .w-body {
+  background: var(--p-side);
+}
+.w-edge {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  z-index: 3;
+}
+
+/* 胶囊（缩略） */
+.cap-wrap {
+  position: relative;
+  display: inline-flex;
+  max-width: 100%;
+}
+.cap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  height: 44px;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: 0 18px 0 6px;
+  border-radius: 999px;
+  border: 1px solid var(--edge);
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--white) 4%, transparent),
+      color-mix(in srgb, var(--white) 0%, transparent)
+    ),
+    var(--card);
+  box-shadow:
+    inset 0 1px 0 var(--hair),
+    0 10px 26px -14px color-mix(in srgb, var(--abyss) 90%, transparent);
+  cursor: pointer;
+  text-align: left;
+  overflow: hidden;
+  isolation: isolate;
+  transition:
+    border-color 0.25s,
+    box-shadow 0.25s,
+    background-color 0.25s;
+}
+.cap:hover {
+  border-color: var(--edge-hi);
+  box-shadow:
+    inset 0 1px 0 var(--hair),
+    0 0 22px color-mix(in srgb, var(--blue) 22%, transparent);
+}
+.cap-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  flex: none;
+  background: var(--blue-wash);
+  color: var(--fg-2);
+}
+.cap-icon svg {
+  width: 17px;
+  height: 17px;
+}
+.cap-name {
+  font-size: 12px;
+  color: var(--fg-3);
+  letter-spacing: 0.08em;
+  flex: none;
+}
+.cap-text {
+  font-size: 13px;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.cap-text em {
+  font-style: normal;
+  color: var(--gold);
+}
+.cap-now .cap-icon {
+  background: transparent;
+}
+.cap-wrap.is-placeholder-float {
+  visibility: hidden;
+}
+/* .in-island：灵动岛胶囊复制出去做形变时，离开了 .island-slot 也保持同样的样子 */
+.island-slot .cap,
+.in-island > .cap {
+  height: 38px;
+  padding-right: 14px;
+}
+.island-slot .cap-icon,
+.in-island .cap-icon {
+  width: 28px;
+  height: 28px;
+}
+.island-slot .cap-name,
+.in-island .cap-name {
+  display: none;
+}
+/* 有对话但没自动展开（窄屏上用户正在操作别的部件）：胶囊发光提示，点一下再展开 */
+@keyframes cap-call {
+  0%,
+  100% {
+    box-shadow:
+      inset 0 1px 0 var(--hair),
+      0 0 0 1px var(--gold-soft),
+      0 0 14px color-mix(in srgb, var(--gold) 30%, transparent);
+  }
+  50% {
+    box-shadow:
+      inset 0 1px 0 var(--hair),
+      0 0 0 2px color-mix(in srgb, var(--gold) 45%, transparent),
+      0 0 30px color-mix(in srgb, var(--gold) 55%, transparent);
+  }
+}
+.cap.is-calling {
+  border-color: var(--gold);
+  box-shadow:
+    inset 0 1px 0 var(--hair),
+    0 0 0 2px color-mix(in srgb, var(--gold) 45%, transparent),
+    0 0 26px color-mix(in srgb, var(--gold) 50%, transparent);
+}
+.motion .cap.is-calling {
+  animation: cap-call 1.6s ease-in-out infinite;
+}
+
+/* ---------- 悬停的三种效果（只在有鼠标的设备上） ---------- */
+/* 只有边缘发光：鼠标附近的那段边框被照亮（只露出 1px 的边）；卡片内部不放跟着鼠标走的光斑 */
+.w-card::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.35s;
+  padding: 1px;
+  background: radial-gradient(
+    280px circle at var(--mx, 50%) var(--my, 50%),
+    color-mix(in srgb, var(--gold-pale) 90%, transparent),
+    color-mix(in srgb, var(--gold) 55%, transparent) 30%,
+    color-mix(in srgb, var(--blue) 30%, transparent) 55%,
+    transparent 78%
+  );
+  -webkit-mask:
+    linear-gradient(var(--mask) 0 0) content-box,
+    linear-gradient(var(--mask) 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(var(--mask) 0 0) content-box exclude,
+    linear-gradient(var(--mask) 0 0);
+  z-index: 4;
+}
+.w-head,
+.w-body {
+  z-index: 1;
+}
+.hover-C .w-card.is-hot::after,
+.hover-D .w-card.is-hot::after {
+  opacity: 1;
+}
+/* 边缘流光：一道光绕边框一圈，之后保持淡淡的发光 */
+@property --sweep {
+  syntax: '<angle>';
+  inherits: false;
+  initial-value: 0deg;
+}
+@keyframes sweep {
+  from {
+    --sweep: 0deg;
+    opacity: 1;
+  }
+  85% {
+    opacity: 1;
+  }
+  to {
+    --sweep: 360deg;
+    opacity: 0;
+  }
+}
+.w-edge.run,
+.cap .w-edge.run {
+  padding: 1.5px;
+  background: conic-gradient(
+    from var(--sweep),
+    transparent 0deg,
+    transparent 290deg,
+    color-mix(in srgb, var(--blue) 70%, transparent) 325deg,
+    var(--gold-pale) 352deg,
+    transparent 360deg
+  );
+  -webkit-mask:
+    linear-gradient(var(--mask) 0 0) content-box,
+    linear-gradient(var(--mask) 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(var(--mask) 0 0) content-box exclude,
+    linear-gradient(var(--mask) 0 0);
+  animation: sweep 1.15s linear both;
+}
+.hover-B .w-card.is-hot {
+  border-color: color-mix(in srgb, var(--gold) 42%, transparent);
+  box-shadow:
+    inset 0 1px 0 var(--hair),
+    0 18px 44px -22px color-mix(in srgb, var(--abyss) 95%, transparent),
+    0 0 24px color-mix(in srgb, var(--blue) 26%, transparent),
+    0 0 2px color-mix(in srgb, var(--gold) 40%, transparent);
+}
+.hover-D .w-card {
+  transform: perspective(900px) rotateX(var(--rx, 0deg)) rotateY(var(--ry, 0deg));
+}
+.hover-D .fs-stage .w-card,
+.hover-D .drag-clone .w-card {
+  transform: none;
+}
+
+/* ---------- 事件特效 ---------- */
+@keyframes err-pulse {
+  0% {
+    box-shadow:
+      0 0 0 0 var(--red-glow),
+      0 0 0 0 var(--red-glow);
+    border-color: var(--err);
+  }
+  70% {
+    box-shadow:
+      0 0 0 10px color-mix(in srgb, var(--err) 0%, transparent),
+      0 0 40px 4px color-mix(in srgb, var(--err) 25%, transparent);
+    border-color: var(--err);
+  }
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--err) 0%, transparent);
+  }
+}
+.fx-err {
+  animation: err-pulse 0.9s ease-out 2;
+}
+@keyframes lit-flash {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--gold) 55%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 12px color-mix(in srgb, var(--gold) 0%, transparent);
+  }
+}
+.ghost {
+  position: fixed;
+  box-sizing: border-box;
+  border-radius: 16px;
+  border: 1px solid var(--edge-gold);
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--white) 5%, transparent),
+      color-mix(in srgb, var(--white) 0%, transparent) 40%
+    ),
+    radial-gradient(
+      120% 90% at 0% 0%,
+      color-mix(in srgb, var(--blue) 16%, transparent),
+      transparent 62%
+    ),
+    var(--card-hi);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--blue) 18%, transparent),
+    0 0 36px color-mix(in srgb, var(--blue) 35%, transparent),
+    0 24px 60px -20px color-mix(in srgb, var(--abyss) 100%, transparent);
+  overflow: hidden;
+}
+.ghost.is-sky {
+  background: linear-gradient(170deg, var(--sky-0), var(--sky-1) 70%, var(--sky-2));
+}
+.ghost::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    105deg,
+    transparent 30%,
+    color-mix(in srgb, var(--gold) 14%, transparent) 48%,
+    color-mix(in srgb, var(--white) 6%, transparent) 52%,
+    transparent 70%
+  );
+  background-size: 250% 100%;
+  animation: ghost-shine 0.8s ease-out both;
+}
+@keyframes ghost-shine {
+  from {
+    background-position: 120% 0;
+  }
+  to {
+    background-position: -40% 0;
+  }
+}
+
+/* ---------- 整理模式 ---------- */
+/* 进入：部件依次（--ad 错开几十毫秒）轻轻缩一点、浮起来，落定后再开始晃动；
+   退出：停止晃动，依次落回原位（.arr-leaving 期间保留错开的过渡）。都是过渡，连点时从当前位置折返 */
+@keyframes wiggle {
+  0% {
+    transform: translateY(-3px) scale(0.975) rotate(0deg);
+    animation-timing-function: cubic-bezier(0.33, 1, 0.68, 1);
+  }
+  25% {
+    transform: translateY(-3px) scale(0.975) rotate(-0.45deg);
+    animation-timing-function: cubic-bezier(0.32, 0, 0.67, 0);
+  }
+  50% {
+    transform: translateY(-3px) scale(0.975) rotate(0deg);
+    animation-timing-function: cubic-bezier(0.33, 1, 0.68, 1);
+  }
+  75% {
+    transform: translateY(-3px) scale(0.975) rotate(0.45deg);
+    animation-timing-function: cubic-bezier(0.32, 0, 0.67, 0);
+  }
+  100% {
+    transform: translateY(-3px) scale(0.975) rotate(0deg);
+  }
+}
+.arranging .w > .w-card,
+.arranging .cap-wrap > .cap,
+.arr-leaving .w > .w-card,
+.arr-leaving .cap-wrap > .cap {
+  transition:
+    transform 0.32s var(--ease-out) var(--ad, 0ms),
+    box-shadow 0.32s var(--ease-out) var(--ad, 0ms),
+    border-color 0.32s ease var(--ad, 0ms);
+}
+.arranging .w > .w-card,
+.arranging .cap-wrap > .cap {
+  transform: translateY(-3px) scale(0.975);
+  animation: wiggle 0.62s linear calc(var(--ad, 0ms) + 0.34s) infinite;
+}
+.arranging .w > .w-card {
+  cursor: grab;
+  touch-action: pan-y;
+  box-shadow:
+    inset 0 1px 0 var(--hair),
+    0 28px 54px -20px color-mix(in srgb, var(--abyss) 100%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--gold) 16%, transparent),
+    0 0 22px color-mix(in srgb, var(--blue) 12%, transparent);
+}
+.arranging .cap {
+  cursor: grab;
+  touch-action: none;
+  box-shadow:
+    inset 0 1px 0 var(--hair),
+    0 18px 34px -14px color-mix(in srgb, var(--abyss) 100%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--gold) 16%, transparent);
+}
+.arranging .w-body {
+  pointer-events: none;
+}
+.w-arr {
+  position: absolute;
+  inset: 42px 0 0;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  background: color-mix(in srgb, var(--bg-0) 80%, transparent);
+  border-top: 1px dashed color-mix(in srgb, var(--gold) 25%, transparent);
+  padding: 12px;
+  text-align: center;
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(6px);
+  transition:
+    opacity 0.2s ease var(--ad, 0ms),
+    transform 0.28s var(--ease-out) var(--ad, 0ms),
+    visibility 0s linear calc(var(--ad, 0ms) + 0.28s);
+}
+.arranging .w-arr {
+  opacity: 1;
+  visibility: visible;
+  transform: none;
+  transition:
+    opacity 0.24s ease calc(var(--ad, 0ms) + 80ms),
+    transform 0.3s var(--ease-out) calc(var(--ad, 0ms) + 80ms),
+    visibility 0s linear calc(var(--ad, 0ms) + 80ms);
+}
+.w-btns {
+  transition:
+    opacity 0.2s ease var(--ad, 0ms),
+    visibility 0s linear var(--ad, 0ms);
+}
+.arranging .w-btns {
+  opacity: 0;
+  visibility: hidden;
+  transition:
+    opacity 0.16s ease var(--ad, 0ms),
+    visibility 0s linear calc(var(--ad, 0ms) + 0.16s);
+}
+.w-grip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px 6px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--edge-hi);
+  background: var(--blue-wash);
+  font-size: 12px;
+  color: var(--fg-2);
+  letter-spacing: 0.06em;
+  cursor: grab;
+  touch-action: none;
+}
+.grip-ico {
+  width: 9px;
+  height: 14px;
+  fill: currentColor;
+  flex: none;
+}
+.w-sizes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: center;
+}
+.chip {
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  cursor: pointer;
+  border: 1px solid var(--edge);
+  background: var(--blue-wash);
+  color: var(--fg-2);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  transition:
+    background-color 0.15s,
+    border-color 0.15s,
+    color 0.15s;
+}
+.chip:hover {
+  border-color: var(--edge-hi);
+  color: var(--fg);
+}
+.chip[aria-pressed='true'] {
+  background: var(--gold-soft);
+  border-color: var(--edge-gold);
+  color: var(--gold-pale);
+}
+.chip:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+/* 要再点一次才生效的按钮（设置里的「恢复默认布局」）等待确认时 */
+.chip.is-armed {
+  background: color-mix(in srgb, var(--err) 14%, transparent);
+  border-color: color-mix(in srgb, var(--err) 60%, transparent);
+  color: var(--err-pale);
+  box-shadow: 0 0 14px -4px var(--red-glow);
+}
+/* 分段选择（components/Seg.tsx）：设置里的「外观」和开发模式的演示面板共用 */
+.seg-ctl {
+  display: flex;
+  gap: 4px;
+  padding: 3px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg-0) 50%, transparent);
+  border: 1px solid var(--edge);
+}
+.seg-ctl button {
+  flex: 1;
+  height: 28px;
+  padding: 0 6px;
+  border-radius: 7px;
+  border: 0;
+  background: transparent;
+  color: var(--fg-2);
+  cursor: pointer;
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+.seg-ctl button[aria-pressed='true'] {
+  background: var(--gold-soft);
+  color: var(--gold-pale);
+  box-shadow: inset 0 0 0 1px var(--edge-gold);
+}
+.w-hide {
+  color: var(--fg-2);
+}
+.cap-x {
+  display: grid;
+  place-items: center;
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  z-index: 3;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1px solid var(--edge-hi);
+  background: var(--card-solid);
+  color: var(--fg-2);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  opacity: 0;
+  visibility: hidden;
+  transform: scale(0.5);
+  transition:
+    opacity 0.18s ease var(--ad, 0ms),
+    transform 0.24s var(--ease-out) var(--ad, 0ms),
+    visibility 0s linear calc(var(--ad, 0ms) + 0.24s);
+}
+.arranging .cap-x {
+  opacity: 1;
+  visibility: visible;
+  transform: none;
+  transition:
+    opacity 0.22s ease calc(var(--ad, 0ms) + 80ms),
+    transform 0.3s cubic-bezier(0.34, 1.4, 0.64, 1) calc(var(--ad, 0ms) + 80ms),
+    visibility 0s linear calc(var(--ad, 0ms) + 80ms);
+}
+.is-placeholder > .w-card,
+.cap-wrap.is-placeholder > .cap,
+[data-dragging] > .w-card,
+[data-dragging] > .cap {
+  opacity: 0.22;
+  border-style: dashed;
+  animation: none !important;
+}
+.drag-clone {
+  position: fixed;
+  z-index: 92;
+  pointer-events: none;
+  margin: 0;
+  transform-origin: 50% 50%;
+}
+.drag-clone > .w-card,
+.drag-clone > .cap {
+  box-shadow:
+    0 30px 70px -18px color-mix(in srgb, var(--abyss) 100%, transparent),
+    0 0 30px color-mix(in srgb, var(--gold) 25%, transparent) !important;
+  border-color: var(--edge-gold) !important;
+  animation: none !important;
+}
+.tray {
+  position: fixed;
+  z-index: 55;
+  left: 50%;
+  bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  width: min(720px, calc(100% - 32px));
+  box-sizing: border-box;
+  padding: 10px 14px;
+  border-radius: 18px;
+  border: 1px dashed var(--edge-gold);
+  background: color-mix(in srgb, var(--surface-lo) 94%, transparent);
+  box-shadow: 0 20px 50px -18px color-mix(in srgb, var(--black) 80%, transparent);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  /* 平时藏在下面；整理时从底部滑上来，退出时滑回去 */
+  opacity: 0;
+  visibility: hidden;
+  transform: translate(-50%, 28px);
+  transition:
+    border-color 0.2s,
+    box-shadow 0.2s,
+    background-color 0.2s,
+    opacity 0.24s ease,
+    transform 0.32s var(--ease-out),
+    visibility 0s linear 0.32s;
+}
+.tray.is-on {
+  opacity: 1;
+  visibility: visible;
+  transform: translate(-50%, 0);
+  transition:
+    border-color 0.2s,
+    box-shadow 0.2s,
+    background-color 0.2s,
+    opacity 0.26s ease 0.06s,
+    transform 0.34s var(--ease-out) 0.06s,
+    visibility 0s linear 0s;
+}
+.tray.is-over {
+  border-color: var(--gold);
+  background: color-mix(in srgb, var(--gold) 9%, var(--surface-lo));
+  box-shadow: 0 0 34px color-mix(in srgb, var(--gold) 30%, transparent);
+}
+.tray-label {
+  font-size: 12px;
+  color: var(--gold);
+  letter-spacing: 0.12em;
+  flex: none;
+}
+.tray-items {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.tray-empty {
+  font-size: 12px;
+  color: var(--fg-3);
+}
+.tray-item {
+  height: 32px;
+  padding: 0 12px 0 6px;
+  border-radius: 999px;
+  cursor: grab;
+  touch-action: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--edge);
+  background: var(--blue-wash);
+  font-size: 13px;
+}
+.tray-item .cap-icon {
+  width: 22px;
+  height: 22px;
+}
+.tray-item .cap-icon svg {
+  width: 13px;
+  height: 13px;
+}
+
+/* ---------- 全屏 ---------- */
+/* 层次：暗层（固定半径的背景模糊，只动透明度）< 形变层（窗口外框 + 旧内容）< 窗口（切换栏 + 新内容）。
+   不要给 .fs 或它的祖先加 opacity / filter / will-change：那样暗层的 backdrop-filter 就看不到后面的桌面了 */
+.fs {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+}
+.fs-dim {
+  position: absolute;
+  inset: 0;
+  background: var(--scrim);
+  -webkit-backdrop-filter: blur(10px) saturate(0.8);
+  backdrop-filter: blur(10px) saturate(0.8);
+}
+.fs-morph {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+}
+/* 形变的外框（morph.tsx）：一个 position: fixed 的盒子，Motion 的 layout 动画做缩放。边线不能被 Motion 校正（它只会把边线拉伸），
+   所以边线用外层盒子的 1px 内边距画：外层是边线色，里面一层是底色，两层都是 layout 元素，圆角各自校正。内容层只管内容 */
+.mf-wrap {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+}
+/* 外框的两个元素都是 fixed，各自在 style 里摆矩形 */
+.mf {
+  position: fixed;
+  box-sizing: border-box;
+  pointer-events: none;
+}
+.mf-layers {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+}
+.mf-layers > .w,
+.mf-layers > .cap-wrap {
+  transform-origin: 0 0;
+}
+.fs-glow {
+  position: fixed;
+  pointer-events: none;
+  will-change: opacity;
+}
+.fs-sheen {
+  background-repeat: no-repeat;
+  pointer-events: none;
+  will-change: opacity;
+}
+/* 形变中的内容层：外框交给 .fs-shell；自己裁掉模糊溢出的部分；不倾斜、不晃动、不过渡 */
+.is-morphing {
+  overflow: hidden !important;
+  transform-origin: 0 0 !important;
+  margin: 0 !important;
+}
+.w.is-morphing {
+  border-radius: var(--r-card);
+}
+.cap-wrap.is-morphing {
+  border-radius: 999px;
+}
+.is-morphing > .cap {
+  background-image: none !important;
+}
+.is-morphing > .w-card,
+.is-morphing > .cap {
+  background-color: transparent !important;
+  border-color: transparent !important;
+  box-shadow: none !important;
+  transform: none !important;
+  animation: none !important;
+  transition: none !important;
+}
+.is-morphing .w-edge {
+  animation: none !important;
+  background: none !important;
+}
+.fs-morph .cap-x,
+.fs-morph .w-arr,
+.ghosts .cap-x,
+.ghosts .w-arr,
+.mf-layers .cap-x,
+.mf-layers .w-arr {
+  display: none !important;
+}
+/* 复制出来的那一份：动画都停在复制那一刻的样子 */
+.is-frozen,
+.is-frozen *,
+.is-frozen *::before,
+.is-frozen *::after {
+  animation: none !important;
+  transition: none !important;
+}
+/* 全屏期间，桌面上的那一份空出来，退出时外框正好落在这里 */
+.is-lifted,
+.is-lifted *,
+[data-lifted],
+[data-lifted] * {
+  visibility: hidden !important;
+}
+.no-tr,
+.no-tr * {
+  transition: none !important;
+}
+.fs-stage.is-switching {
+  overflow: hidden;
+  border-radius: var(--r-card);
+}
+.fs-win {
+  position: absolute;
+  top: calc(env(safe-area-inset-top, 0px) + 20px);
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 20px);
+  left: max(24px, env(safe-area-inset-left, 0px));
+  right: max(24px, env(safe-area-inset-right, 0px));
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+/* 切换栏只占图标那么宽：两边空着的地方算「窗口外面」，点了退出全屏 */
+.fs-switch {
+  flex: none;
+  display: flex;
+  gap: 6px;
+  justify-content: center;
+  align-items: center;
+  align-self: center;
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding: 2px 4px;
+}
+/* 全屏的窗口里不放边缘流光（新消息、悬停效果 B 都不放） */
+.fs .w-edge.run {
+  animation: none !important;
+  background: none !important;
+}
+.fs-switch::-webkit-scrollbar {
+  display: none;
+}
+.fs-tab {
+  height: 34px;
+  padding: 0 14px 0 10px;
+  border-radius: 999px;
+  cursor: pointer;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--edge);
+  background: color-mix(in srgb, var(--surface) 85%, transparent);
+  color: var(--fg-2);
+  font-size: 13px;
+  transition:
+    background-color 0.2s,
+    border-color 0.2s,
+    color 0.2s,
+    box-shadow 0.2s;
+}
+.fs-tab svg {
+  width: 16px;
+  height: 16px;
+}
+.fs-tab:hover {
+  color: var(--fg);
+  border-color: var(--edge-hi);
+}
+.fs-tab[aria-current='true'] {
+  color: var(--gold-pale);
+  border-color: var(--edge-gold);
+  background: color-mix(in srgb, var(--gold) 12%, transparent);
+  box-shadow: 0 0 20px color-mix(in srgb, var(--gold) 20%, transparent);
+}
+.fs-tab .badge {
+  --bs: 18px;
+}
+.fs-stage {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.fs-stage > .w {
+  position: absolute;
+  inset: 0;
+}
+/* 阴影的写法和桌面上的卡片一一对应（第一项都是内侧的高光），形变时外框的阴影才能连续过渡 */
+.fs-stage > .w > .w-card {
+  border-color: var(--edge-gold);
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--white) 3%, transparent),
+      color-mix(in srgb, var(--white) 0%, transparent) 30%
+    ),
+    var(--card-solid);
+  box-shadow:
+    inset 0 1px 0 var(--hair),
+    0 40px 100px -30px color-mix(in srgb, var(--black) 100%, transparent),
+    0 0 50px color-mix(in srgb, var(--blue) 20%, transparent);
+}
+
+/* ---------- 状态徽记 ---------- */
+.badge {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  width: var(--bs, 22px);
+  height: var(--bs, 22px);
+  flex: none;
+  --halo: color-mix(in srgb, var(--gold) 55%, transparent);
+}
+.badge > * {
+  grid-area: 1 / 1;
+}
+/* 光晕画在星星上面（和第 3 版一样：星星是 <svg> 元素后，它有 transform / opacity 时会自成一层、盖到光晕上面，这里把层次定死） */
+.badge-halo {
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  background: radial-gradient(circle, var(--halo) 0, transparent 66%);
+  transform: scale(1.55);
+  opacity: 0.7;
+  z-index: 1;
+  transition: opacity 0.4s;
+}
+.badge-svg {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+/* 星星自己是一个 <svg> 元素（不是 SVG 里的 <g>）：HTML 元素上的 transform / opacity 动画跑在合成器上，SVG 里的子元素的动画要主线程每帧重画 */
+.b-star {
+  transform-origin: 50% 50%;
+  transition: opacity 0.3s;
+}
+.b-star-path {
+  fill: url(#g-star);
+  transition: fill 0.3s;
+}
+.b-glint {
+  fill: var(--gold-pale);
+  opacity: 0.85;
+}
+.b-rings circle {
+  fill: none;
+  stroke: var(--gold);
+  stroke-width: 2.5;
+  opacity: 0;
+  transform-box: view-box;
+  transform-origin: 0 0;
+}
+.b-sparks circle {
+  fill: var(--gold-pale);
+  opacity: 0;
+  transform-box: view-box;
+  transform-origin: 0 0;
+}
+.badge-count {
+  position: absolute;
+  right: -7px;
+  top: -6px;
+  grid-area: auto;
+  z-index: 2;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 3px;
+  box-sizing: border-box;
+  border-radius: 999px;
+  background: var(--gold);
+  color: var(--ink);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 15px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  box-shadow: 0 0 8px color-mix(in srgb, var(--gold) 60%, transparent);
+}
+.badge-count:empty {
+  display: none;
+}
+.badge[data-s='offline'] {
+  --halo: transparent;
+}
+.badge[data-s='offline'] .b-star-path {
+  fill: var(--dim);
+}
+.badge[data-s='offline'] .b-glint {
+  opacity: 0;
+}
+.badge[data-s='offline'] .b-star {
+  opacity: 0.7;
+}
+.badge[data-s='waiting'] {
+  --halo: color-mix(in srgb, var(--blue) 55%, transparent);
+}
+.badge[data-s='thinking'] {
+  --halo: color-mix(in srgb, var(--blue) 60%, transparent);
+}
+.badge[data-s='replying'] {
+  --halo: color-mix(in srgb, var(--gold) 75%, transparent);
+}
+.badge[data-s='tool'] {
+  --halo: color-mix(in srgb, var(--tool) 60%, transparent);
+}
+.badge[data-s='retry'] {
+  --halo: color-mix(in srgb, var(--amber) 50%, transparent);
+}
+.badge[data-s='error'] {
+  --halo: color-mix(in srgb, var(--err) 75%, transparent);
+}
+.badge[data-s='error'] .b-star-path {
+  fill: var(--err);
+}
+.badge[data-s='error'] .b-glint {
+  fill: var(--err-pale);
+}
+.badge[data-s='error'] .b-rings circle {
+  stroke: var(--err);
+}
+/* 动画关掉时的静态区别 */
+.badge[data-s='waiting'] .b-rings circle:first-child {
+  opacity: 0.55;
+  transform: scale(0.72);
+}
+.badge[data-s='thinking'] .b-star {
+  transform: rotate(45deg);
+}
+.badge[data-s='replying'] .b-sparks circle {
+  opacity: 0.8;
+  transform: rotate(var(--a)) translateY(-40px) scale(0.8);
+}
+.badge[data-s='tool'] .b-star {
+  opacity: 0.6;
+}
+.badge[data-s='retry'] .b-star {
+  opacity: 0.38;
+}
+.badge[data-s='error'] .b-rings circle:first-child {
+  opacity: 0.6;
+  transform: scale(1.05);
+}
+@keyframes b-breathe {
+  0%,
+  100% {
+    transform: scale(1.3);
+    opacity: 0.45;
+  }
+  50% {
+    transform: scale(1.7);
+    opacity: 0.9;
+  }
+}
+@keyframes b-star-breathe {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.05);
+  }
+}
+@keyframes b-ring-in {
+  0% {
+    transform: scale(1.25);
+    opacity: 0;
+  }
+  30% {
+    opacity: 0.75;
+  }
+  100% {
+    transform: scale(0.32);
+    opacity: 0;
+  }
+}
+@keyframes b-ring-out {
+  0% {
+    transform: scale(0.45);
+    opacity: 0.95;
+  }
+  100% {
+    transform: scale(1.6);
+    opacity: 0;
+  }
+}
+@keyframes b-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes b-spark {
+  0% {
+    transform: rotate(var(--a)) translateY(-12px) scale(1);
+    opacity: 0;
+  }
+  20% {
+    opacity: 1;
+  }
+  100% {
+    transform: rotate(var(--a)) translateY(-56px) scale(0.35);
+    opacity: 0;
+  }
+}
+@keyframes b-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.28;
+  }
+}
+@keyframes b-retry {
+  0% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  25%,
+  55% {
+    opacity: 0.22;
+    transform: scale(0.86);
+  }
+  80% {
+    opacity: 1;
+    transform: scale(1.08);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+@keyframes b-halo-flash {
+  0%,
+  55% {
+    opacity: 0.15;
+  }
+  80% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0.6;
+  }
+}
+.motion .badge[data-s='idle'] .badge-halo {
+  animation: b-breathe 3.6s ease-in-out infinite;
+}
+.motion .badge[data-s='idle'] .b-star {
+  animation: b-star-breathe 3.6s ease-in-out infinite;
+}
+.motion .badge[data-s='waiting'] .b-rings circle {
+  animation: b-ring-in 1.35s ease-in infinite;
+}
+.motion .badge[data-s='waiting'] .b-rings circle:nth-child(2) {
+  animation-delay: 0.45s;
+}
+.motion .badge[data-s='waiting'] .b-rings circle:nth-child(3) {
+  animation-delay: 0.9s;
+}
+.motion .badge[data-s='thinking'] .b-star {
+  animation: b-spin 7s linear infinite;
+}
+.motion .badge[data-s='replying'] .b-star {
+  animation: b-spin 2.2s linear infinite;
+}
+.motion .badge[data-s='replying'] .b-sparks circle {
+  animation: b-spark 1.1s ease-out infinite;
+  animation-delay: var(--d);
+}
+.motion .badge[data-s='tool'] .b-star {
+  animation: b-blink 0.8s ease-in-out infinite;
+}
+.motion .badge[data-s='retry'] .b-star {
+  animation: b-retry 1.6s ease-in-out infinite;
+}
+.motion .badge[data-s='retry'] .badge-halo {
+  animation: b-halo-flash 1.6s ease-in-out infinite;
+}
+.motion .badge[data-s='error'] .b-rings circle {
+  opacity: 0;
+  transform: none;
+  animation: b-ring-out 1.1s ease-out 2;
+}
+.motion .badge[data-s='error'] .b-rings circle:nth-child(2) {
+  animation-delay: 0.25s;
+}
+.badge-tool {
+  font: 500 12px/1 var(--font-term);
+  color: var(--tool);
+  white-space: nowrap;
+}
+.badge-tool:empty {
+  display: none;
+}
+.motion .badge-tool:not(:empty) {
+  animation: b-blink 0.8s ease-in-out infinite;
+}
+
+/* 状态点（各群的状态） */
+.sdot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--dim);
+}
+.sdot[data-s='waiting'] {
+  background: var(--blue);
+}
+.sdot[data-s='thinking'] {
+  background: var(--quote);
+}
+.sdot[data-s='replying'] {
+  background: var(--gold);
+  box-shadow: 0 0 8px var(--gold-glow);
+}
+.sdot[data-s='tool'] {
+  background: var(--tool);
+}
+.sdot[data-s='retry'] {
+  background: var(--amber);
+}
+.sdot[data-s='error'] {
+  background: var(--err);
+  box-shadow: 0 0 8px var(--red-glow);
+}
+.sdot[data-s='idle'] {
+  background: var(--ok);
+}
+
+/* ---------- 弹出的各群状态 ---------- */
+.pop {
+  position: fixed;
+  z-index: 110;
+  min-width: 200px;
+  max-width: min(320px, calc(100vw - 32px));
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--card-hi);
+  border: 1px solid var(--edge-hi);
+  box-shadow: 0 18px 40px -12px color-mix(in srgb, var(--black) 80%, transparent);
+  font-size: 13px;
+  color: var(--fg-2);
+  pointer-events: none;
+}
+.pop-title {
+  font-size: 12px;
+  color: var(--fg-3);
+  margin-bottom: 6px;
+  letter-spacing: 0.06em;
+}
+.pop-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+}
+.pop-row b {
+  font-weight: 500;
+  color: var(--fg);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pop-row span:last-child {
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+/* ---------- 小星空（「此刻」自己的夜空） ---------- */
+.msky {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  background: linear-gradient(170deg, var(--sky-0), var(--sky-1) 70%, var(--sky-2));
+}
+.msky i {
+  position: absolute;
+  width: var(--s, 2px);
+  height: var(--s, 2px);
+  border-radius: 50%;
+  background: var(--gold-star);
+  opacity: var(--o, 0.5);
+}
+@keyframes msky-drift {
+  to {
+    transform: translate(var(--dx, 8px), var(--dy, -6px));
+  }
+}
+@keyframes msky-tw {
+  50% {
+    opacity: calc(var(--o, 0.5) * 0.2);
+  }
+}
+.motion .msky i {
+  animation:
+    msky-drift var(--t1, 20s) ease-in-out infinite alternate,
+    msky-tw var(--t2, 5s) ease-in-out infinite;
+  animation-delay: var(--l1, 0s), var(--l2, 0s);
+}
+
+/* ---------- 此刻 ---------- */
+.now-card > .w-card {
+  background: transparent;
+}
+.now-card > .w-card > .w-head {
+  background: color-mix(in srgb, var(--bg-0) 35%, transparent);
+}
+.now {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.now-top {
+  position: relative;
+  z-index: 1;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px 6px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.now-top .badge {
+  --bs: 44px;
+}
+.now-meta {
+  min-width: 0;
+  flex: 1 1 160px;
+}
+.now-state {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--fg);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.now-where {
+  font-size: 12px;
+  color: var(--fg-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.now-tabs {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.now-tab {
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 999px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  border: 1px solid var(--edge);
+  background: color-mix(in srgb, var(--bg-0) 45%, transparent);
+  color: var(--fg-2);
+}
+.now-tab[aria-selected='true'] {
+  color: var(--gold-pale);
+  border-color: var(--edge-gold);
+  background: color-mix(in srgb, var(--gold) 10%, transparent);
+}
+.now-term {
+  position: relative;
+  z-index: 1;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.now-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  text-align: center;
+  color: var(--fg-3);
+  font-size: 13px;
+  padding: 16px;
+}
+.now-cols {
+  position: relative;
+  z-index: 1;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(var(--n, 1), minmax(0, 1fr));
+  gap: 0;
+}
+.now-col {
+  position: relative;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.now-col + .now-col {
+  border-left: 1px solid var(--rule);
+}
+.now-col-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.now-col-head b {
+  font-weight: 600;
+  color: var(--fg);
+  font-size: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.now-col-head .st {
+  font-size: 12px;
+  color: var(--fg-2);
+  white-space: nowrap;
+}
+.now-open {
+  margin-left: auto;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid var(--edge);
+  background: var(--blue-wash);
+  color: var(--fg-2);
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.now-open:hover {
+  color: var(--fg);
+  border-color: var(--edge-hi);
+}
+.now-col .now-term {
+  flex: 1 1 auto;
+}
+
+/* ---------- 终端（「此刻」的样式，用户逐项拼出来的） ---------- */
+.term {
+  position: absolute;
+  inset: 0;
+  font: 13px/1.6 var(--font-term);
+  color: var(--fg);
+  font-synthesis: none;
+  font-variant-ligatures: none;
+}
+.term-shade {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(to top, var(--shade), var(--shade-0));
+  pointer-events: none;
+}
+.term-clip {
+  position: absolute;
+  inset: 0 12px 10px;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, var(--mask) 30px);
+  mask-image: linear-gradient(to bottom, transparent 0, var(--mask) 30px);
+}
+.term-rows {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.tl {
+  display: flex;
+  align-items: flex-start;
+  padding: 1px 6px;
+  border-radius: 4px;
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+@keyframes tl-in {
+  from {
+    opacity: 0;
+  }
+}
+.tl.is-new {
+  animation: tl-in 0.3s ease-out both;
+}
+.tl.is-luoli {
+  background: var(--gold-wash);
+}
+.tl-head {
+  flex: none;
+  white-space: nowrap;
+  margin-right: 0.6ch;
+}
+.tl-time {
+  color: var(--dim);
+}
+.tl-name {
+  color: var(--who, var(--fg-2));
+  margin-left: 1ch;
+}
+.tl-sym {
+  margin-left: 1ch;
+}
+.k-user .tl-sym {
+  color: var(--dim);
+}
+.k-luoli .tl-name {
+  color: var(--gold);
+}
+.k-luoli .tl-sym {
+  color: var(--gold);
+}
+.k-tool .tl-name {
+  color: var(--gold);
+}
+.k-tool .tl-sym {
+  color: var(--blue);
+}
+.k-tool .tl-body {
+  color: var(--tool);
+}
+.k-status .tl-sym {
+  color: var(--dim);
+}
+.k-status .tl-body {
+  color: var(--dim);
+  font-style: italic;
+}
+.k-status.is-err .tl-body {
+  color: var(--err);
+}
+.k-status.is-retry .tl-body {
+  color: var(--amber);
+}
+.k-stats .tl-body {
+  color: var(--dim);
+}
+.tl-body {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.tl-pad {
+  visibility: hidden;
+}
+.spin {
+  display: inline-block;
+  width: 1.2ch;
+  margin-left: 0.6ch;
+  color: var(--gold);
+}
+.tl-ok {
+  color: var(--ok);
+  margin-left: 0.6ch;
+  white-space: nowrap;
+}
+.tl-ok.is-bad {
+  color: var(--err);
+}
+@keyframes ok-in {
+  from {
+    opacity: 0;
+  }
+}
+.tl-ok.is-new {
+  animation: ok-in 0.4s ease-out both;
+}
+.tl-sum {
+  display: block;
+  color: var(--fg-2);
+}
+.tl-think {
+  all: unset;
+  cursor: pointer;
+  color: var(--dim);
+  font-style: italic;
+}
+.tl-think:hover {
+  color: var(--fg-2);
+}
+.tl-think:focus-visible {
+  outline: 2px solid var(--gold);
+  outline-offset: 1px;
+  border-radius: 3px;
+}
+.tl-think-text {
+  display: block;
+  margin: 2px 0 2px;
+  padding-left: 1.2ch;
+  border-left: 1px solid color-mix(in srgb, var(--dim) 50%, transparent);
+  color: var(--dim);
+  font-style: normal;
+}
+/* 正文高亮 */
+.hl-url {
+  color: var(--blue);
+  text-decoration: underline dashed;
+  text-underline-offset: 3px;
+  text-decoration-thickness: 1px;
+}
+.hl-num {
+  color: var(--gold);
+}
+.hl-at {
+  background: var(--blue-soft);
+  border-radius: 4px;
+  padding: 0 3px;
+}
+/* 逐字输出时：一个词元一个外层 span，里面的字各自落下。下划线不会画到 inline-block 的字上，改用下边框 */
+.tk.hl-url {
+  text-decoration: none;
+  border-bottom: 1px dashed currentColor;
+}
+.tk.hl-at {
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+.hl-q {
+  color: var(--quote);
+  font-style: italic;
+}
+.hl-hit {
+  color: var(--gold-pale);
+  text-shadow: 0 0 6px var(--gold-glow);
+}
+.k-stats .hl-num {
+  color: inherit;
+}
+/* 逐字：每个字从上方轻轻落下 */
+@keyframes ch-drop {
+  from {
+    transform: translateY(-8px);
+    opacity: 0;
+  }
+}
+.ch {
+  display: inline-block;
+  white-space: pre;
+  animation: ch-drop 0.3s var(--ease-out) both;
+}
+.ch.is-waapi {
+  animation: none;
+}
+/* 光标：一颗金色小星，一明一暗 */
+@keyframes cur-star {
+  0%,
+  100% {
+    transform: scale(0.8);
+    opacity: 0.5;
+  }
+  50% {
+    transform: scale(1.1);
+    opacity: 1;
+  }
+}
+.cur {
+  display: inline-block;
+  color: var(--gold);
+  margin-left: 2px;
+  line-height: 1;
+  animation: cur-star 1.2s ease-in-out infinite;
+  transition: opacity 0.5s;
+}
+.cur .st4 {
+  width: 0.8em;
+  height: 0.8em;
+  vertical-align: -0.05em;
+}
+/* 四角星（内联 SVG），颜色跟随文字 */
+.st4 {
+  display: inline-block;
+  width: 0.8em;
+  height: 0.8em;
+  fill: currentColor;
+  vertical-align: -0.08em;
+  flex: none;
+}
+.tl-sym .st4 {
+  width: 0.74em;
+  height: 0.74em;
+  vertical-align: -0.04em;
+}
+/* 展开 / 收起的小箭头（CSS 画的，不靠字体） */
+.chev {
+  display: inline-block;
+  width: 0.38em;
+  height: 0.38em;
+  margin: 0 0.2em 0 0.5em;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: translateY(-0.12em) rotate(-45deg);
+  transition: transform 0.2s;
+}
+[aria-expanded='true'] > .chev {
+  transform: translateY(-0.22em) rotate(45deg);
+}
+.cur.is-gone {
+  opacity: 0 !important;
+  animation: none;
+}
+/* 缩略图（生成的色块代替图片） */
+.thumb {
+  display: inline-block;
+  vertical-align: middle;
+  width: var(--tw, 72px);
+  height: var(--th, 50px);
+  border-radius: 6px;
+  margin: 4px 0 2px;
+  max-width: 100%;
+  background:
+    radial-gradient(60% 70% at 70% 30%, hsla(var(--h2, 40), 80%, 75%, 0.9), transparent 70%),
+    radial-gradient(70% 80% at 20% 80%, hsla(var(--h1, 230), 60%, 45%, 0.95), transparent 75%),
+    linear-gradient(135deg, hsl(var(--h1, 230), 45%, 22%), hsl(var(--h2, 40), 50%, 35%));
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--white) 10%, transparent),
+    0 6px 14px -6px color-mix(in srgb, var(--black) 70%, transparent);
+  position: relative;
+  overflow: hidden;
+}
+.thumb > span {
+  position: absolute;
+  left: 6px;
+  bottom: 3px;
+  font: 10px/1.3 var(--font-ui);
+  color: color-mix(in srgb, var(--white) 80%, transparent);
+  text-shadow: 0 1px 2px color-mix(in srgb, var(--black) 60%, transparent);
+}
+.thumb.is-real {
+  background: center / cover no-repeat var(--img);
+}
+
+/* ---------- 会话 ---------- */
+.list {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  background: var(--p-side);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 6px;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--blue) 35%, transparent) transparent;
+}
+.li-wrap {
+  overflow: hidden;
+}
+.conv-item {
+  position: relative;
+  width: 100%;
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 10px;
+  border-radius: 12px;
+  border: 1px solid transparent;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  transition:
+    background-color 0.2s,
+    border-color 0.2s;
+}
+.conv-item:hover {
+  background: var(--li-hover);
+}
+.conv-item[aria-current='true'] {
+  background: var(--li-sel);
+  border-color: var(--li-sel-bd);
+}
+.conv-item[aria-current='true'] .conv-title,
+.conv-item[aria-current='true'].has-new .conv-title {
+  color: var(--li-sel-t);
+}
+.conv-item[aria-current='true'] .conv-last,
+.conv-item[aria-current='true'] .conv-time {
+  color: var(--li-sel-t2);
+}
+.conv-item[aria-current='true'] .conv-ico {
+  background: var(--li-sel-ico);
+  color: var(--li-sel-t);
+}
+.conv-ico {
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg-2);
+  background: color-mix(in srgb, var(--blue) 14%, transparent);
+  letter-spacing: 0;
+}
+.conv-ico[data-p='private'] {
+  background: color-mix(in srgb, var(--pink) 14%, transparent);
+  color: var(--pink-pale);
+}
+.conv-ico[data-p='cli'] {
+  background: color-mix(in srgb, var(--ok) 13%, transparent);
+  color: var(--ok-pale);
+  font-family: var(--font-term);
+}
+.conv-ico[data-p='web'] {
+  background: color-mix(in srgb, var(--gold) 13%, transparent);
+  color: var(--gold-pale);
+}
+.conv-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.conv-title {
+  color: var(--fg);
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.conv-last {
+  color: var(--fg-3);
+  font-size: 12.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.conv-side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+}
+.conv-time {
+  font-size: 11.5px;
+  color: var(--fg-3);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.conv-unread {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  box-sizing: border-box;
+  border-radius: 999px;
+  background: var(--gold);
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  box-shadow: 0 0 10px color-mix(in srgb, var(--gold) 50%, transparent);
+}
+.conv-unread:empty {
+  visibility: hidden;
+}
+.conv-item.has-new .conv-title {
+  color: var(--gold-pale);
+}
+.conv-item.has-new::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 18%;
+  bottom: 18%;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--gold);
+  box-shadow: 0 0 8px var(--gold-glow);
+}
+@keyframes lit {
+  0% {
+    background-color: color-mix(in srgb, var(--gold) 22%, transparent);
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, var(--gold) 50%, transparent),
+      0 0 22px color-mix(in srgb, var(--gold) 30%, transparent);
+  }
+  100% {
+    background-color: transparent;
+    box-shadow: none;
+  }
+}
+.conv-item.is-lit {
+  animation: lit 1.4s ease-out;
+}
+.empty {
+  margin: auto;
+  padding: 24px 16px;
+  text-align: center;
+  color: var(--fg-3);
+  font-size: 13px;
+}
+.empty b {
+  display: block;
+  color: var(--fg-2);
+  font-weight: 500;
+  margin-bottom: 4px;
+}
+
+.sess {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(240px, 300px) minmax(0, 1fr);
+}
+.sess-side {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--p-side);
+  border-right: 1px solid var(--rule);
+}
+.sess-side-head {
+  flex: none;
+  padding: 10px 14px 4px;
+  font-size: 12px;
+  color: var(--fg-3);
+  display: flex;
+  justify-content: space-between;
+}
+.sess-main {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--p-main);
+}
+.sess-main-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 18px;
+  background: var(--p-head);
+  border-bottom: 1px solid var(--rule);
+  min-width: 0;
+}
+.sess-main-head h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex: 0 1 auto;
+  max-width: 60%;
+}
+.sess-meta {
+  font-size: 12px;
+  color: var(--fg-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.sess-back {
+  display: none;
+}
+.pchip {
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--blue-wash);
+  color: var(--fg-2);
+  border: 1px solid var(--edge);
+  white-space: nowrap;
+  flex: none;
+}
+
+/* 时间线：聊天气泡 */
+.tline {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 16px 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--blue) 35%, transparent) transparent;
+}
+.msg {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  max-width: min(78%, 640px);
+  min-width: 0;
+}
+.msg.is-me {
+  align-self: flex-end;
+  align-items: flex-end;
+}
+.msg-meta {
+  font-size: 12px;
+  color: var(--fg-3);
+  margin: 0 6px 3px;
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+.msg-meta b {
+  font-weight: 500;
+  color: var(--who, var(--fg-2));
+}
+.msg-meta time {
+  font-variant-numeric: tabular-nums;
+}
+.bubble {
+  position: relative;
+  padding: 9px 13px;
+  border-radius: 14px 14px 14px 4px;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+  background: var(--b-o-bg);
+  border: 1px solid var(--b-o-bd);
+  color: var(--b-o-fg);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  user-select: text;
+}
+.msg.is-luoli .bubble {
+  background: var(--b-l-bg);
+  border-color: var(--b-l-bd);
+  color: var(--b-l-fg);
+  border-radius: 14px 14px 4px 14px;
+}
+.msg.is-luoli .msg-meta b {
+  color: var(--gold);
+}
+.msg.is-you .bubble {
+  background: var(--b-m-bg);
+  border-color: var(--b-m-bd);
+  color: var(--b-m-fg);
+  border-radius: 14px 14px 4px 14px;
+}
+.msg.is-you .bubble .hl-num,
+.msg.is-you .bubble .hl-url {
+  color: var(--b-m-num);
+}
+@keyframes msg-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+}
+.msg.is-new {
+  animation: msg-in 0.35s var(--ease-out) both;
+}
+.mark {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  font-style: italic;
+  color: var(--fg-2);
+  opacity: 0.85;
+}
+.mark.is-err {
+  color: var(--err);
+}
+.fold {
+  margin: 0 0 6px;
+  font-size: 12.5px;
+  color: var(--fg-2);
+  white-space: normal;
+}
+.fold summary {
+  cursor: pointer;
+  list-style: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--fg-2);
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--fold-bg);
+  border: 1px solid var(--fold-bd);
+}
+.fold-tag {
+  display: inline-flex;
+  align-items: center;
+  color: var(--fg-2);
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--fold-bg);
+  border: 1px solid var(--fold-bd);
+  font-style: italic;
+}
+.fold summary::-webkit-details-marker {
+  display: none;
+}
+.fold summary::after {
+  content: '';
+  width: 0.38em;
+  height: 0.38em;
+  margin-left: 0.1em;
+  border-right: 1.5px solid var(--fg-3);
+  border-bottom: 1.5px solid var(--fg-3);
+  transform: rotate(-45deg);
+  transition: transform 0.2s;
+}
+.fold[open] summary::after {
+  transform: translateY(-0.1em) rotate(45deg);
+}
+.fold-body {
+  margin-top: 6px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: var(--fold-body);
+  color: var(--fg-2);
+}
+.fold .ok {
+  color: var(--ok);
+}
+.fold .bad {
+  color: var(--err);
+}
+.msg-imgs {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+.msg-imgs .thumb {
+  --tw: 120px;
+  --th: 84px;
+  margin: 0;
+}
+.seg {
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 0;
+}
+.seg-line {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--fg-3);
+  font-size: 12px;
+}
+.seg-line::before,
+.seg-line::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--rule-hi) 35%,
+    var(--rule-hi) 65%,
+    transparent
+  );
+}
+.seg-line span {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.seg-btn {
+  all: unset;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--gold);
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--edge-gold);
+}
+.seg-btn:focus-visible {
+  outline: 2px solid var(--gold);
+  outline-offset: 2px;
+}
+.seg-sum {
+  max-width: 560px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  background: var(--sum-bg);
+  border: 1px dashed var(--sum-bd);
+  color: var(--fg-2);
+  font-size: 13px;
+}
+.seg-sum b {
+  display: block;
+  color: var(--gold);
+  font-weight: 500;
+  font-size: 12px;
+  margin-bottom: 2px;
+  letter-spacing: 0.06em;
+}
+.typing {
+  display: inline-flex;
+  gap: 4px;
+  padding: 12px 14px;
+}
+.typing i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--gold);
+  opacity: 0.4;
+}
+@keyframes typing {
+  0%,
+  100% {
+    opacity: 0.3;
+    transform: translateY(0);
+  }
+  50% {
+    opacity: 1;
+    transform: translateY(-3px);
+  }
+}
+.motion .typing i {
+  animation: typing 1s ease-in-out infinite;
+}
+.motion .typing i:nth-child(2) {
+  animation-delay: 0.15s;
+}
+.motion .typing i:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+/* ---------- 对话 ---------- */
+.chat {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--p-main);
+}
+.chat-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--p-head);
+  border-bottom: 1px solid var(--rule);
+  min-width: 0;
+  position: relative;
+}
+.chat-pick {
+  min-width: 0;
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid var(--edge);
+  background: color-mix(in srgb, var(--bg-0) 35%, transparent);
+  color: var(--fg);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+.chat-pick span {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.chat-pick::after {
+  content: '';
+  flex: none;
+  width: 0.4em;
+  height: 0.4em;
+  margin: 0 0.15em 0 0.1em;
+  border-right: 1.5px solid var(--fg-3);
+  border-bottom: 1.5px solid var(--fg-3);
+  transform: translateY(-0.15em) rotate(45deg);
+}
+.chat-new {
+  margin-left: auto;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid var(--edge-gold);
+  background: var(--gold-soft);
+  color: var(--gold-pale);
+  cursor: pointer;
+  font-size: 13px;
+  white-space: nowrap;
+  flex: none;
+}
+.chat-menu {
+  position: absolute;
+  left: 12px;
+  top: 40px;
+  z-index: 10;
+  width: min(280px, calc(100% - 24px));
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 6px;
+  border-radius: 12px;
+  background: var(--card-hi);
+  border: 1px solid var(--edge-hi);
+  box-shadow: 0 18px 40px -12px color-mix(in srgb, var(--black) 85%, transparent);
+}
+.chat-menu button {
+  width: 100%;
+  text-align: left;
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 13px;
+}
+.chat-menu button:hover,
+.chat-menu button[aria-current='true'] {
+  background: var(--blue-wash);
+}
+.chat-menu button span {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.chat-menu time {
+  color: var(--fg-3);
+  font-size: 12px;
+  flex: none;
+}
+.chat .tline {
+  padding: 10px 14px 12px;
+}
+.chat-in {
+  flex: none;
+  margin: 0 10px 10px;
+  padding: 8px;
+  border-radius: 14px;
+  border: 1px solid var(--rule-hi);
+  background: var(--p-in);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  transition:
+    border-color 0.2s,
+    box-shadow 0.2s;
+}
+.chat-in:focus-within {
+  border-color: color-mix(in srgb, var(--blue) 55%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 14%, transparent);
+}
+.chat-in.is-drop {
+  border-color: var(--gold);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--gold) 18%, transparent);
+}
+.chat-atts {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.chat-atts:empty {
+  display: none;
+}
+.att {
+  position: relative;
+}
+.att .thumb {
+  --tw: 56px;
+  --th: 56px;
+  margin: 0;
+}
+.att button {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 1px solid var(--edge-hi);
+  background: var(--card-solid);
+  color: var(--fg);
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+  display: grid;
+  place-items: center;
+  padding: 0;
+}
+.chat-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+}
+.chat-ta {
+  flex: 1 1 auto;
+  min-width: 0;
+  resize: none;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--fg);
+  font: 14px/1.5 var(--font-ui);
+  padding: 4px 6px;
+  max-height: 140px;
+  min-height: 22px;
+}
+.chat-ta::placeholder {
+  color: var(--fg-3);
+}
+.chat-send {
+  flex: none;
+  height: 32px;
+  min-width: 56px;
+  padding: 0 12px;
+  border-radius: 10px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  border: 1px solid var(--edge-gold);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--gold) 32%, transparent),
+    color-mix(in srgb, var(--gold) 18%, transparent)
+  );
+  color: var(--gold-pale);
+}
+.chat-send.is-stop {
+  border-color: color-mix(in srgb, var(--err) 50%, transparent);
+  background: color-mix(in srgb, var(--err) 16%, transparent);
+  color: var(--err-pale);
+}
+.chat-hint {
+  font-size: 11.5px;
+  color: var(--fg-3);
+  padding: 0 6px;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+.chat-full {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
+}
+.chat-full .sess-side {
+  border-right: 1px solid var(--rule);
+}
+.chat-full .chat-bar .chat-pick {
+  display: none;
+}
+.bubble .ch {
+  white-space: pre-wrap;
+}
+
+/* ---------- 设置（骨架） ---------- */
+.skel {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 10px 14px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  -webkit-mask-image: linear-gradient(to bottom, var(--mask) calc(100% - 34px), transparent);
+  mask-image: linear-gradient(to bottom, var(--mask) calc(100% - 34px), transparent);
+}
+.skel-note {
+  font-size: 12px;
+  color: var(--gold);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.skel-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg-0) 30%, transparent);
+  border: 1px solid color-mix(in srgb, var(--fg-2) 8%, transparent);
+}
+.skel-group b {
+  font-weight: 500;
+  font-size: 13px;
+  color: var(--fg-2);
+  flex: none;
+  min-width: 6em;
+}
+.skel-live {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 10px 12px 12px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg-0) 30%, transparent);
+  border: 1px solid var(--edge-gold);
+}
+.skel-live > b {
+  font-weight: 500;
+  font-size: 13px;
+  color: var(--gold-pale);
+}
+/* 桌面卡片里紧凑一些：标签在左、选项在右，放不下就换行；说明文字不占地方（悬停时看 title，全屏里有） */
+.skel-live .set-field {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 12px;
+}
+.skel-live .set-field .seg-ctl,
+.skel-live .set-field .chip {
+  align-self: center;
+}
+.skel-live .set-hint {
+  display: none;
+}
+.skel-bar {
+  height: 8px;
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--blue) 16%, transparent),
+    color-mix(in srgb, var(--blue) 6%, transparent)
+  );
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.set-full {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+}
+.set-nav {
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border-right: 1px solid var(--rule);
+  overflow-y: auto;
+}
+.set-nav button {
+  text-align: left;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 0;
+  background: transparent;
+  color: var(--fg-2);
+  cursor: pointer;
+}
+.set-nav button[aria-current='true'] {
+  background: var(--blue-wash);
+  color: var(--fg);
+}
+.set-main {
+  min-width: 0;
+  overflow-y: auto;
+  padding: 20px 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  background: var(--p-main);
+}
+.set-main h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+.set-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 520px;
+}
+.set-field label,
+.set-field .set-label {
+  font-size: 12px;
+  color: var(--fg-3);
+}
+.set-field .seg-ctl,
+.set-field .chip {
+  align-self: flex-start;
+  max-width: 100%;
+}
+.set-field .seg-ctl button {
+  padding: 0 14px;
+}
+.set-hint,
+.set-note {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--fg-3);
+}
+.set-hint {
+  min-height: 1.5em;
+}
+.set-field .chip {
+  height: 30px;
+  padding: 0 14px;
+}
+.set-input {
+  height: 34px;
+  border-radius: 10px;
+  border: 1px dashed color-mix(in srgb, var(--fg-2) 20%, transparent);
+  background: color-mix(in srgb, var(--bg-0) 35%, transparent);
+}
+.set-input.is-tall {
+  height: 120px;
+}
+.ribbon {
+  align-self: flex-start;
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: var(--gold-soft);
+  border: 1px solid var(--edge-gold);
+  color: var(--gold-pale);
+}
+
+/* ---------- 今日概况 ---------- */
+.today {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 16px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.today-hero {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.today-hero .roll {
+  font-size: 40px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--gold-pale);
+  letter-spacing: -0.01em;
+  text-shadow: 0 0 22px color-mix(in srgb, var(--gold) 35%, transparent);
+}
+.today-hero span {
+  color: var(--fg-2);
+}
+.stat {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.stat-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--fg-2);
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.stat-row b {
+  font-weight: 500;
+  color: var(--fg);
+}
+.roll {
+  font-variant-numeric: tabular-nums;
+  display: inline-block;
+}
+.roll.is-up {
+  color: var(--gold-pale);
+}
+.today-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 14px;
+}
+.tile {
+  padding: 14px 16px;
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--bg-0) 35%, transparent);
+  border: 1px solid color-mix(in srgb, var(--fg-2) 10%, transparent);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.tile small {
+  font-size: 12px;
+  color: var(--fg-3);
+  letter-spacing: 0.06em;
+}
+.tile .roll {
+  font-size: 28px;
+  font-weight: 600;
+  color: var(--fg);
+  line-height: 1.1;
+}
+.per-conv {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.per-row {
+  display: grid;
+  grid-template-columns: minmax(80px, 160px) minmax(0, 1fr) 3em;
+  gap: 10px;
+  align-items: center;
+  font-size: 13px;
+  color: var(--fg-2);
+}
+.per-row span:first-child {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.per-row span:last-child {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 能量槽 */
+.energy {
+  position: relative;
+  height: 10px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--white) 6%, transparent);
+  box-shadow:
+    inset 0 1px 2px color-mix(in srgb, var(--black) 50%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--fg-2) 10%, transparent);
+  overflow: hidden;
+}
+.energy-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 0;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--blue), var(--gold));
+  box-shadow: 0 0 12px color-mix(in srgb, var(--gold) 40%, transparent);
+  transition: width 0.9s var(--ease-out);
+}
+.energy-fill::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  top: -2px;
+  bottom: -2px;
+  width: 6px;
+  border-radius: 3px;
+  background: var(--gold-pale);
+  box-shadow: 0 0 10px 2px color-mix(in srgb, var(--gold-pale) 80%, transparent);
+}
+.energy.is-bad .energy-fill {
+  background: linear-gradient(90deg, color-mix(in srgb, var(--err) 50%, transparent), var(--err));
+  box-shadow: 0 0 10px color-mix(in srgb, var(--err) 40%, transparent);
+}
+.energy.is-bad .energy-fill::after {
+  background: var(--err-pale);
+  box-shadow: 0 0 8px 2px color-mix(in srgb, var(--err) 70%, transparent);
+}
+.energy-ticks {
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(
+    90deg,
+    transparent 0,
+    transparent calc(10% - 2px),
+    color-mix(in srgb, var(--bg-0) 55%, transparent) calc(10% - 2px),
+    color-mix(in srgb, var(--bg-0) 55%, transparent) 10%
+  );
+  pointer-events: none;
+}
+@keyframes energy-shine {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(260%);
+  }
+}
+.energy-shine {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 40%;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--white) 35%, transparent),
+    transparent
+  );
+  transform: translateX(-100%);
+  pointer-events: none;
+}
+.motion .energy-shine.run {
+  animation: energy-shine 1s ease-out;
+}
+
+.toast {
+  position: fixed;
+  z-index: 120;
+  left: 50%;
+  bottom: calc(76px + env(safe-area-inset-bottom, 0px));
+  transform: translate(-50%, 12px);
+  max-width: calc(100vw - 32px);
+  padding: 9px 16px;
+  border-radius: 999px;
+  box-sizing: border-box;
+  background: var(--card-hi);
+  border: 1px solid var(--edge-gold);
+  color: var(--fg);
+  font-size: 13px;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 0.25s,
+    transform 0.25s var(--ease-out);
+}
+.toast.is-on {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+/* ---------- 窄屏：单列，「此刻」像灵动岛 ---------- */
+@media (max-width: 719px) {
+  :root {
+    --row: 214px;
+    --gap: 12px;
+    --top-h: 54px;
+  }
+  .top {
+    gap: 8px;
+    background: color-mix(in srgb, var(--space-0) 88%, transparent);
+    -webkit-backdrop-filter: blur(12px);
+    backdrop-filter: blur(12px);
+    box-shadow: 0 1px 0 color-mix(in srgb, var(--fg-2) 10%, transparent);
+  }
+  .top-in {
+    gap: 8px;
+  }
+  .top-status {
+    padding: 0 6px;
+    height: 38px;
+  }
+  .top-status.is-island-mode .top-badge,
+  .top-status.is-island-mode .top-state {
+    display: none;
+  }
+  .top-state {
+    display: none;
+  }
+  .tbtn {
+    padding: 0 10px;
+  }
+  .tbtn .tlabel {
+    display: none;
+  }
+  .tswitch {
+    padding: 0 8px;
+  }
+  .fs-win {
+    top: calc(env(safe-area-inset-top, 0px) + 8px);
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 8px);
+    left: max(8px, env(safe-area-inset-left, 0px));
+    right: max(8px, env(safe-area-inset-right, 0px));
+  }
+  .fs-switch {
+    justify-content: flex-start;
+    align-self: flex-start;
+    max-width: calc(100% - 52px);
+  }
+  /* 胶囊按屏幕居中（不是在顶栏中间那一格里居中），两边留出「洛璃」和右边按钮的位置 */
+  .island-slot {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    width: max-content;
+    max-width: calc(100vw - 228px);
+  }
+  .island-slot .cap {
+    max-width: 100%;
+  }
+  .fs-dim {
+    background: var(--scrim-narrow);
+  }
+  .sess-meta {
+    flex: 1 1 0;
+  }
+  .fs-tab .fs-tab-name {
+    display: none;
+  }
+  .fs-tab[aria-current='true'] .fs-tab-name {
+    display: inline;
+  }
+  .sess,
+  .chat-full {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .sess-side,
+  .chat-full .sess-side {
+    border-right: 0;
+  }
+  .sess.is-detail .sess-side,
+  .chat-full.is-detail .sess-side {
+    display: none;
+  }
+  .sess:not(.is-detail) .sess-main,
+  .chat-full:not(.is-detail) .sess-main {
+    display: none;
+  }
+  .sess-back {
+    display: inline-flex;
+  }
+  .set-full {
+    grid-template-columns: minmax(0, 1fr);
+    /* 分组导航只占它自己的高度，剩下的给内容（内容矮时不让导航被撑高，内容高时在里面滚动） */
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+  .set-nav {
+    flex-direction: row;
+    overflow-x: auto;
+    border-right: 0;
+    border-bottom: 1px solid color-mix(in srgb, var(--fg-2) 10%, transparent);
+  }
+  .set-nav button {
+    white-space: nowrap;
+  }
+  .set-main {
+    padding: 16px;
+  }
+  .msg {
+    max-width: 88%;
+  }
+  .w-head {
+    height: 44px;
+    cursor: pointer;
+  }
+  .arrange-bar {
+    border-radius: 16px;
+    padding: 8px 12px;
+  }
+  .tray {
+    bottom: calc(68px + env(safe-area-inset-bottom, 0px));
+  }
+  .w-arr {
+    inset: 44px 0 0;
+  }
+  .now-top .badge {
+    --bs: 38px;
+  }
+  .now-cols {
+    grid-template-columns: minmax(0, 1fr);
+    grid-auto-rows: minmax(0, 1fr);
+  }
+  .now-col + .now-col {
+    border-left: 0;
+    border-top: 1px solid color-mix(in srgb, var(--fg-2) 10%, transparent);
+  }
+}
+@media (max-width: 380px) {
+  .top-name {
+    letter-spacing: 0.06em;
+  }
+}
+
+/* ---------- 动画关掉（含「减少动态效果」）：去掉装饰性的动画 ---------- */
+.still *,
+.still *::before,
+.still *::after {
+  animation-duration: 0.001s !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.12s !important;
+  transition-delay: 0s !important;
+  animation-delay: 0s !important;
+}
+.still .ch,
+.still .tl.is-new,
+.still .msg.is-new {
+  animation: none !important;
+}
+.still .cur {
+  animation: none !important;
+}
+/* 整理模式：不缩、不浮、不晃，直接换成虚线框；按钮、提示条、收纳盒只是很快地淡入淡出 */
+.still .arranging .w > .w-card,
+.still .arranging .cap-wrap > .cap {
+  animation: none !important;
+  transform: none !important;
+  outline: 1px dashed color-mix(in srgb, var(--gold) 45%, transparent);
+  outline-offset: 3px;
+}
+.still .arrange-bar,
+.still .tray,
+.still .w-arr,
+.still .cap-x {
+  transform: translate(var(--still-x, 0), 0) !important;
+}
+.still .tray {
+  --still-x: -50%;
+}
+.still .w-edge.run {
+  animation: none !important;
+  background: none;
+}
+.still .fx-err {
+  animation: none !important;
+  border-color: var(--err) !important;
+}
+.still .ghost::after {
+  animation: none !important;
+}
+
+/* 调试：?bare=1 只显示形变的外框（量圆角、边线用） */
+html.bare .mf-layers,
+html.bare .fs-glow,
+html.bare #fs-stage,
+html.bare .fs-switch,
+html.bare .app,
+html.bare .tray {
+  visibility: hidden !important;
+}
+/* 调试：量各部分的成本（?dbg=noframe,noblur,nodim） */
+html.dbg-noframe .mf {
+  display: none !important;
+}
+html.dbg-noblur #fs-stage > .w > .w-card,
+html.dbg-noblur .mf-layers > .w > .w-card,
+html.dbg-noblur .mf-layers > .cap-wrap > .cap {
+  filter: none !important;
+}
+html.dbg-nodim .fs-dim {
+  display: none !important;
+}
+
+/* 外框的小件做法（shell.ts）：容器是屏幕左上角的 0×0 的原点，小件各自用 transform 摆到屏幕上的位置 */
+.fs-shell {
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+.fs-shell > i {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: 0 0;
+  pointer-events: none;
+  will-change: transform;
+}
+html.dbg-nolayers .mf-layers > .w,
+html.dbg-nolayers .mf-layers > .cap-wrap {
+  display: none !important;
+}
+html.dbg-nopieces .fs-shell {
+  display: none !important;
+}
+html.dbg-nosheen .fs-sheen {
+  display: none !important;
+}
+
+/* 桌面上的卡片和胶囊：Motion 的 layout 动画（其他部件让位）每帧在主线程改它们的 transform，
+   不提升成自己的合成层的话，每帧要把整张卡片重新栅格；位置动画不缩放，所以 will-change: transform 不会让字发糊 */
+.desk > .w,
+.shelf > .cap-wrap {
+  will-change: transform;
+}
