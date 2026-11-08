@@ -1,5 +1,7 @@
 import { createStore, useStore } from '../lib/store';
 import { storage } from '../lib/storage';
+import { DUR_MORPH, EASE_MORPH } from '../lib/easing';
+import type { Bezier } from '../lib/easing';
 import { bus } from '../model/bus';
 import type { FullParams, SizeKey, WidgetDef, WidgetHandle } from '../widgets/types';
 import { useEffect, useState } from 'react';
@@ -79,13 +81,8 @@ export interface DeskState {
   /** 整理模式的依次错开（--ad） */
   stagger: Record<string, number>;
   /** 其他卡片让位的 FLIP：时长（秒）和缓动，随这次重排里形变的最长时长变 */
-  flip: { dur: number; ease: [number, number, number, number] };
+  flip: { dur: number; ease: Bezier };
 }
-
-export const FS_DUR = 500;
-export const FS_EASE: [number, number, number, number] = [0.35, 0.2, 0.15, 1];
-export const FS_EASE_CSS = 'cubic-bezier(.35, .2, .15, 1)';
-export const OUT_EASE: [number, number, number, number] = [0.2, 0.8, 0.2, 1];
 
 export const desk = createStore<DeskState>({
   layout: loadLayout(),
@@ -101,7 +98,7 @@ export const desk = createStore<DeskState>({
   fresh: [],
   barPos: null,
   stagger: {},
-  flip: { dur: FS_DUR / 1000, ease: FS_EASE },
+  flip: { dur: DUR_MORPH / 1000, ease: EASE_MORPH },
 });
 export const useDesk = <R>(sel: (s: DeskState) => R) => useStore(desk, sel);
 export const saveLayout = () => storage.set(LAYOUT_KEY, desk.get().layout);

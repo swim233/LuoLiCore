@@ -2,6 +2,7 @@ import { memo, useEffect, useRef, useState } from 'react';
 import { VirtualLog } from '../../components/VirtualLog';
 import type { LogItem } from '../../components/VirtualLog';
 import { Hl, Thumb } from '../../components/Hl';
+import { EASE_OUT_CSS } from '../../lib/easing';
 import { motionOn } from '../../lib/prefs';
 import { fmtDay, nf } from '../../lib/util';
 import { useBusRev } from '../../model/rev';
@@ -27,7 +28,7 @@ function SegView({ seg }: { seg: Segment }) {
           { opacity: 0, transform: 'translateY(-6px)' },
           { opacity: 1, transform: 'none' },
         ],
-        { duration: 260, easing: 'ease-out' },
+        { duration: 260, easing: EASE_OUT_CSS },
       );
   }, [open]);
   return (

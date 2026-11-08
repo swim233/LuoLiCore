@@ -3,6 +3,7 @@ import { animate } from 'motion';
 import { motionOn, prefs } from '../lib/prefs';
 import { env } from '../lib/env';
 import { storage } from '../lib/storage';
+import { DUR_MORPH, DUR_VANISH, EASE_MORPH, EASE_OUT, EASE_OUT_CSS } from '../lib/easing';
 import { edgeRun, pulse } from '../lib/fx-dom';
 import { fx, sky } from '../fx/client';
 import { bus } from '../model/bus';
@@ -11,8 +12,6 @@ import { nowModel } from '../model/nowModel';
 import {
   LAYOUT_KEY,
   DEFAULT_LAYOUT,
-  FS_DUR,
-  FS_EASE,
   desk,
   hasDef,
   hooks,
@@ -125,7 +124,6 @@ function onScreenRect(r: Rect | undefined): Rect {
    这几条短动画用浏览器自带的 WAAPI（element.animate），关键帧和第 4.1 版一模一样，结束后不在元素上留任何行内样式。
    不用 Motion 的 animate：它对 transform 字符串关键帧里的 `none` 处理有误——`scale(.94)` 到 `none`，none 被读成「没有数字」、数字按 0 算，
    结果缩到 scale(0)；`none` 到 `scale(.9)` 就是从 scale(0) 长出来。而且它会把终值留在行内样式里，盖掉样式表里的 transform（悬停效果 D 的倾斜）。 */
-const EASE_OUT = 'cubic-bezier(.2,.8,.2,1)';
 function appear(el: HTMLElement | null | undefined) {
   if (!el) return;
   el.animate(
@@ -133,7 +131,7 @@ function appear(el: HTMLElement | null | undefined) {
       { opacity: 0, transform: 'scale(.94)' },
       { opacity: 1, transform: 'none' },
     ],
-    { duration: 380, easing: EASE_OUT },
+    { duration: 380, easing: EASE_OUT_CSS },
   );
 }
 function vanish(r: Rect, rad = 16) {
@@ -154,7 +152,7 @@ function vanish(r: Rect, rad = 16) {
       { opacity: 1, transform: 'none' },
       { opacity: 0, transform: 'scale(.9)' },
     ],
-    { duration: 340, easing: 'ease-in', fill: 'forwards' },
+    { duration: DUR_VANISH, easing: 'ease-in', fill: 'forwards' },
   );
   a.finished.then(
     () => g.remove(),
@@ -271,12 +269,12 @@ export function relayout(mutate: (() => void) | null, opts: RelayoutOpts = {}): 
   const before = anim ? snapshot() : null;
   const bFaces = anim ? beforeFaces(runIds) : null;
   const L = desk.get().layout;
-  /* 其他卡片让位的 FLIP 用的时长：先按默认 FS_DUR，有形变时下面再改（Motion 的 layout 动画在渲染后下一帧才开始，来得及） */
+  /* 其他卡片让位的 FLIP 用的时长：先按默认 DUR_MORPH，有形变时下面再改（Motion 的 layout 动画在渲染后下一帧才开始，来得及） */
   flushSync(() => {
     mutate?.();
     desk.set({
       layout: { ...desk.get().layout },
-      flip: { dur: (opts.flipDur ?? FS_DUR) / 1000, ease: opts.flipEase ?? FS_EASE },
+      flip: { dur: (opts.flipDur ?? DUR_MORPH) / 1000, ease: opts.flipEase ?? EASE_MORPH },
     });
   });
   saveLayout();
@@ -362,9 +360,9 @@ export function relayout(mutate: (() => void) | null, opts: RelayoutOpts = {}): 
   }
   if (mdur && !opts.flipDur) {
     /* 有形变：其他卡片让位的时长改成形变的最长时长（Motion 的 layout 动画在下一帧才读时长） */
-    desk.set({ flip: { dur: mdur / 1000, ease: FS_EASE } });
+    desk.set({ flip: { dur: mdur / 1000, ease: EASE_MORPH } });
   }
-  markBusy((mdur || opts.flipDur || FS_DUR) + 200);
+  markBusy((mdur || opts.flipDur || DUR_MORPH) + 200);
   return Promise.all(jobs).then(() => {});
 }
 /* 形变的终点没了（部件被隐藏、换成别的样子）：整个形变淡出再收尾，不在最后一帧突然消失 */
@@ -468,7 +466,7 @@ export function moveTo(id: string, targetId: string) {
       o.splice(from, 1);
       o.splice(to, 0, id);
     },
-    { flipDur: 340, flipEase: [0.2, 0.8, 0.2, 1] },
+    { flipDur: 340, flipEase: EASE_OUT },
   );
 }
 export function flashWidget(id: string, kind: 'stream' | 'error') {
@@ -508,7 +506,7 @@ export function clearFresh(id: string) {
           { opacity: 1, transform: 'none' },
           { opacity: 0, transform: 'scale(.6)' },
         ],
-        { duration: 300, easing: 'ease-in', fill: 'forwards' },
+        { duration: DUR_VANISH, easing: 'ease-in', fill: 'forwards' },
       )
       .finished.then(drop, drop);
   else drop();
@@ -560,7 +558,7 @@ export function addWidget(def: WidgetDef) {
                 { opacity: 0, transform: 'scale(.94)', filter: 'brightness(1.8)' },
                 { opacity: 1, transform: 'none', filter: 'none' },
               ],
-              { duration: 560, easing: EASE_OUT },
+              { duration: 560, easing: EASE_OUT_CSS },
             );
           edgeRun(faces(def.id).card);
           fx.burst(r.left + r.width / 2, r.top + r.height / 2, { n: 14, speed: 80 });
@@ -930,7 +928,7 @@ export function openFull(id: string, params?: FullParams): void {
   const rec = startMorph({
     id,
     host: 'fs',
-    dur: FS_DUR,
+    dur: DUR_MORPH,
     A,
     B: to,
     layers,
@@ -1045,7 +1043,7 @@ export function closeFull() {
     const rec: MorphRec = startMorph({
       id: f.id,
       host: 'fs',
-      dur: FS_DUR,
+      dur: DUR_MORPH,
       A,
       B,
       layers,
@@ -1119,7 +1117,7 @@ export function switchFull(id: string, params?: FullParams): void {
   const rec: MorphRec = startMorph({
     id,
     host: 'fs',
-    dur: FS_DUR,
+    dur: DUR_MORPH,
     A,
     B,
     layers,
@@ -1223,7 +1221,6 @@ export const fsPointer = {
 export const ARR_STEP = 30,
   ARR_MAX = 150,
   ARR_DUR = 340;
-export const ARR_EASE: [number, number, number, number] = [0.2, 0.8, 0.2, 1];
 let arrTok = 0;
 function staggerArr() {
   let i = 0;
@@ -1269,7 +1266,7 @@ export function setArranging(on: boolean) {
       }
       desk.set({ arranging: on, arrLeaving: !on });
     },
-    { flipDur: ARR_DUR, flipEase: ARR_EASE, now: true },
+    { flipDur: ARR_DUR, flipEase: EASE_OUT, now: true },
   );
   if (on) {
     if (wasFloat) nowModel.clearEnded();

@@ -1,9 +1,11 @@
 import { useEffect, useRef } from 'react';
-import { animate } from 'motion';
+import { animate, cubicBezier } from 'motion';
+import { EASE_OUT } from '../lib/easing';
 import { motionOn } from '../lib/prefs';
 import { clamp, nf } from '../lib/util';
 
-/* 滚动数字：从旧值到新值 900 ms，先快后慢，滚动期间变 --gold-pale，结束后 .5 秒还原；动画关掉时直接跳到新值 */
+/* 滚动数字：从旧值到新值 900 ms，曲线和能量条的宽度过渡是同一条（EASE_OUT），滚动期间变 --gold-pale，结束后 .5 秒还原；动画关掉时直接跳到新值 */
+const rollEase = cubicBezier(...EASE_OUT);
 export function Roll({ value, fmt = nf }: { value: number; fmt?: (n: number) => string }) {
   const el = useRef<HTMLSpanElement>(null);
   const cur = useRef(value);
@@ -27,7 +29,7 @@ export function Roll({ value, fmt = nf }: { value: number; fmt?: (n: number) => 
     let off: ReturnType<typeof setTimeout>;
     const a = animate(0, 1, {
       duration: 0.9,
-      ease: (t: number) => 1 - Math.pow(1 - t, 3),
+      ease: rollEase,
       onUpdate: (k: number) => {
         cur.current = from + (value - from) * k;
         node.textContent = fmt(cur.current);

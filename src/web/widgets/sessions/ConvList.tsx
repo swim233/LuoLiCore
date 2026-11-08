@@ -1,6 +1,7 @@
 import { memo } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import { useEffect, useState } from 'react';
+import { DUR_VANISH, EASE_OUT } from '../../lib/easing';
 import { usePrefs } from '../../lib/prefs';
 import { morphStore } from '../../shell/morph';
 import { fmtShort } from '../../lib/util';
@@ -21,7 +22,6 @@ export const KIND_LABEL: Record<ConvKind, string> = {
   cli: 'CLI',
   web: '网页',
 };
-const OUT = [0.2, 0.8, 0.2, 1] as const;
 
 const ConvRow = memo(function ConvRow({
   conv,
@@ -128,10 +128,19 @@ export function ConvList({
             animate={{ height: 'auto', opacity: 1, x: 0 }}
             exit={
               motionOn
-                ? { height: 0, opacity: 0, x: 16, transition: { duration: 0.32, ease: 'easeIn' } }
+                ? {
+                    height: 0,
+                    opacity: 0,
+                    x: 16,
+                    transition: { duration: DUR_VANISH / 1000, ease: 'easeIn' },
+                  }
                 : { opacity: 0, transition: { duration: 0 } }
             }
-            transition={{ duration: 0.42, ease: OUT, layout: { duration: 0.42, ease: OUT } }}
+            transition={{
+              duration: 0.42,
+              ease: EASE_OUT,
+              layout: { duration: 0.42, ease: EASE_OUT },
+            }}
           >
             <ConvRow
               conv={c}

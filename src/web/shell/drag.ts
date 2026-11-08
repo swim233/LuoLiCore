@@ -1,4 +1,5 @@
 import { animate } from 'motion';
+import { EASE_OUT } from '../lib/easing';
 import { motionOn } from '../lib/prefs';
 import { desk } from '../state/desk';
 import { hideWidget, moveTo, unhideWidget } from '../state/actions';
@@ -123,7 +124,7 @@ export function dragStart(
     animate(
       c,
       { transform: [from, `translate(${t.left}px, ${t.top}px) scale(1)`] },
-      { duration: 0.26, ease: [0.2, 0.8, 0.2, 1] },
+      { duration: 0.26, ease: EASE_OUT },
     ).finished.then(
       () => c.remove(),
       () => c.remove(),

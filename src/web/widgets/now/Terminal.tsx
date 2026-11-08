@@ -2,6 +2,7 @@ import { memo, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { Hl, Spin, Thumb } from '../../components/Hl';
 import { STAR_SVG, StreamText } from '../../components/stream';
+import { EASE_OUT_CSS } from '../../lib/easing';
 import { motionOn } from '../../lib/prefs';
 import { fmtTime } from '../../lib/util';
 import { colorOf, LUOLI } from '../../model/who';
@@ -248,7 +249,7 @@ export function Terminal({ session }: { session: Session }) {
       push.current?.cancel();
       push.current = el.animate(
         [{ transform: `translateY(${cur + dy}px)` }, { transform: 'translateY(0px)' }],
-        { duration: 300, easing: 'cubic-bezier(.2,.8,.2,1)' },
+        { duration: 300, easing: EASE_OUT_CSS },
       );
     }
   });

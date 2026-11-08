@@ -1,3 +1,4 @@
+import { EASE_OUT_CSS } from '../lib/easing';
 import { motionOn } from '../lib/prefs';
 import { chars } from '../lib/util';
 import { hlTokens } from './Hl';
@@ -48,7 +49,7 @@ export class StreamText {
         { transform: 'translateY(-8px)', opacity: 0 },
         { transform: 'none', opacity: 1 },
       ],
-      { duration: 300, delay: nd._drop, easing: 'cubic-bezier(.2,.8,.2,1)', fill: 'backwards' },
+      { duration: 300, delay: nd._drop, easing: EASE_OUT_CSS, fill: 'backwards' },
     );
   }
   /* 收到新的片段：几个字按到达顺序每个晚 28 ms 开始落下 */

@@ -72,8 +72,7 @@
   --gap: 16px;
   --row: 232px;
   --top-h: 56px;
-  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
-  --ease-io: cubic-bezier(0.65, 0, 0.35, 1);
+  /* 动画的曲线和时长（--ease-out、--dur-hover、--dur-card）由 lib/easing.ts 在页面启动时写进 <head> 里的 <style>，这里不再另写一份 */
 }
 
 /* ---------- 配色 ----------
@@ -217,7 +216,7 @@ button {
   color: var(--fg);
 }
 
-/* ---------- 背景星空（页面里的小元素，见第 6 节）、特效画布 ---------- */
+/* ---------- 背景星空（<canvas id="sky">，由 fx/sky.worker 在 Worker 里画）、特效画布 ---------- */
 .sky,
 .fx {
   position: fixed;
@@ -230,83 +229,6 @@ button {
 .sky {
   z-index: 0;
   overflow: hidden;
-}
-.sky-stars,
-.sky-cons {
-  position: absolute;
-  inset: 0;
-}
-.sky i {
-  position: absolute;
-  display: block;
-  background: var(--fg);
-  opacity: var(--mid);
-}
-.sky i[data-c='1'] {
-  background: var(--gold-star);
-}
-.sky i[data-c='2'] {
-  background: var(--fg-2);
-}
-.sky i:not(.is-sq) {
-  border-radius: 50%;
-}
-.sky i.is-big::before,
-.sky i.is-big::after {
-  content: '';
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  width: 8px;
-  height: 1px;
-  margin: -0.5px 0 0 -4px;
-  background: var(--gold-star);
-  opacity: 0.5;
-}
-.sky i.is-big::after {
-  transform: rotate(90deg);
-}
-.sky svg.con {
-  position: absolute;
-  overflow: visible;
-}
-.sky .con-lines line {
-  stroke: color-mix(in srgb, var(--gold) 6%, transparent);
-  stroke-width: 0.7;
-}
-.sky .con-dots circle {
-  fill: color-mix(in srgb, var(--gold-star) 34%, transparent);
-}
-/* 漂移（transform）：整层星点一起慢慢飘（每颗星各飘各的，一秒钟只差一两个像素，看不出来），星座各飘各的；闪烁（opacity）：三分之一的星点。
-   都只动 transform / opacity，跑在合成器上。全屏期间 .is-held：漂移停在当前位置，闪烁的星点停在亮度的中间值（不再有动画，也就不再各占一层） */
-@keyframes sky-drift {
-  to {
-    transform: translate(var(--dx), var(--dy));
-  }
-}
-@keyframes sky-tw {
-  from {
-    opacity: var(--lo);
-  }
-  to {
-    opacity: var(--hi);
-  }
-}
-.motion .sky-stars {
-  animation: sky-drift 90s linear infinite alternate;
-}
-.motion .sky i.is-tw {
-  animation: sky-tw var(--t2) ease-in-out var(--l2) infinite alternate;
-}
-.motion .sky svg.con {
-  animation: sky-drift 60s linear var(--l1) infinite alternate;
-}
-.sky.is-held .sky-stars,
-.sky.is-held svg.con {
-  animation-play-state: paused !important;
-}
-.sky.is-held i.is-tw {
-  animation: none !important;
 }
 .fx {
   z-index: 95;
@@ -385,8 +307,8 @@ button {
   background: transparent;
   cursor: pointer;
   transition:
-    background-color 0.2s,
-    border-color 0.2s;
+    background-color var(--dur-hover),
+    border-color var(--dur-hover);
 }
 .top-status:hover {
   background: var(--blue-wash);
@@ -435,10 +357,10 @@ button {
   font-size: 13px;
   color: var(--fg);
   transition:
-    background-color 0.2s,
-    border-color 0.2s,
-    color 0.2s,
-    box-shadow 0.2s;
+    background-color var(--dur-hover),
+    border-color var(--dur-hover),
+    color var(--dur-hover),
+    box-shadow var(--dur-hover);
 }
 .tbtn:hover {
   border-color: var(--edge-hi);
@@ -465,7 +387,7 @@ button {
   border-radius: 999px;
   background: color-mix(in srgb, var(--dim) 50%, transparent);
   position: relative;
-  transition: background-color 0.2s;
+  transition: background-color var(--dur-hover);
   flex: none;
 }
 .tswitch-track::after {
@@ -637,8 +559,8 @@ button {
   overflow: hidden;
   isolation: isolate;
   transition:
-    border-color 0.3s,
-    box-shadow 0.3s,
+    border-color var(--dur-card),
+    box-shadow var(--dur-card),
     transform 0.18s ease-out;
   transform-style: flat;
 }
@@ -742,8 +664,8 @@ button {
   place-items: center;
   color: var(--fg-3);
   transition:
-    background-color 0.15s,
-    color 0.15s;
+    background-color var(--dur-hover),
+    color var(--dur-hover);
 }
 .w-btn:hover {
   background: var(--blue-wash);
@@ -804,9 +726,9 @@ button {
   overflow: hidden;
   isolation: isolate;
   transition:
-    border-color 0.25s,
-    box-shadow 0.25s,
-    background-color 0.25s;
+    border-color var(--dur-hover),
+    box-shadow var(--dur-hover),
+    background-color var(--dur-hover);
 }
 .cap:hover {
   border-color: var(--edge-hi);
@@ -903,7 +825,7 @@ button {
   border-radius: inherit;
   pointer-events: none;
   opacity: 0;
-  transition: opacity 0.35s;
+  transition: opacity var(--dur-card);
   padding: 1px;
   background: radial-gradient(
     280px circle at var(--mx, 50%) var(--my, 50%),
@@ -1199,9 +1121,9 @@ button {
   font-size: 12px;
   font-variant-numeric: tabular-nums;
   transition:
-    background-color 0.15s,
-    border-color 0.15s,
-    color 0.15s;
+    background-color var(--dur-hover),
+    border-color var(--dur-hover),
+    color var(--dur-hover);
 }
 .chip:hover {
   border-color: var(--edge-hi);
@@ -1549,10 +1471,10 @@ button {
   color: var(--fg-2);
   font-size: 13px;
   transition:
-    background-color 0.2s,
-    border-color 0.2s,
-    color 0.2s,
-    box-shadow 0.2s;
+    background-color var(--dur-hover),
+    border-color var(--dur-hover),
+    color var(--dur-hover),
+    box-shadow var(--dur-hover);
 }
 .fs-tab svg {
   width: 16px;
@@ -2188,7 +2110,7 @@ button {
   }
 }
 .tl.is-new {
-  animation: tl-in 0.3s ease-out both;
+  animation: tl-in 0.3s var(--ease-out) both;
 }
 .tl.is-luoli {
   background: var(--gold-wash);
@@ -2269,7 +2191,7 @@ button {
   }
 }
 .tl-ok.is-new {
-  animation: ok-in 0.4s ease-out both;
+  animation: ok-in 0.4s var(--ease-out) both;
 }
 .tl-sum {
   display: block;

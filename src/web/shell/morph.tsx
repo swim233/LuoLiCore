@@ -3,7 +3,7 @@ import { motion } from 'motion/react';
 import { animate, cancelFrame, frame, motionValue, type MotionValue } from 'motion';
 import { createStore, useStore } from '../lib/store';
 import { clamp } from '../lib/util';
-import { FS_EASE } from '../state/desk';
+import { cssBezier, EASE_MORPH } from '../lib/easing';
 import { fpsMeter } from '../lib/fps';
 import { freezeAt, SLOW } from '../lib/debug';
 import { createShell } from './shell';
@@ -16,6 +16,14 @@ export const PIECES = FRAME_MODE === 'pieces';
 export const REVERSE_SNAP = new URLSearchParams(location.search).get('reverse') === 'snap';
 /* 反向的最短时长（毫秒）：按要走的距离缩放，但不短于这个 */
 export const REV_MIN = 180;
+/* 往目标方向接着走时，起点斜率（以 d 为单位）的上限：超过 3，Hermite 会冲过目标 */
+const REV_FWD_SLOPE = 3;
+/* 往回折时，转折前外框多往原方向走的距离上限（占整段行程的比例）。开头就按 Esc 要马上收回，多走一截会让人觉得 Esc 没反应：
+   至少 2%（约 20 px）；还要走的距离 |d| 大、速度快的时候（几十毫秒内硬折回会像一下子弹回去）放宽到 0.15·|d|，取两者里大的 */
+const REV_OVERSHOOT = 0.02;
+const REV_OVERSHOOT_REL = 0.15;
+/* 为了满足上面的限制缩短后的时长，不短于这个（毫秒，乘 SLOW），约两帧 */
+const REV_SHRINK_MIN = 30;
 
 /* ---------- 形变舞台 ----------
    一次形变 = 一个外框（Motion 的 layout 动画）+ 若干内容层（旧内容、新内容）+ 暗层等。
@@ -289,7 +297,10 @@ export function setDir(m: MorphRec, dir: 0 | 1) {
 }
 /* 从此刻的进度、带着此刻的速度走向 m.dir 那一端。
    时长按要走的距离缩放（整段 × 距离），不短于 REV_MIN；曲线是三次 Hermite：起点的斜率等于此刻的速度，终点斜率 0。
-   速度朝着目标就接着往前走，背着目标就先往原方向再冲一点点（动量）再折回来，不会在转折那一帧速度突变。冲出去的量不超过两端的范围 */
+   速度朝着目标就接着往前走，背着目标就先往原方向再冲一点点（动量）再折回来，不会在转折那一帧速度突变。
+   起点斜率 s = v·D/d 不截断：s 和 D 成正比，起点速度 d·s/D = v，所以任何一条限制（见下）都靠缩短 D 来满足，D 缩短、s 跟着等比变小，起点速度不变。
+   限制：往目标方向走时 s ≤ 3（再大会冲过目标）；往回折时冲出去的量不超过 REV_OVERSHOOT 那一档，也不超过原方向剩下的距离的 90%（不冲出 0~1 的范围）。
+   缩短时可以低于 REV_MIN：开头按 Esc 本来就该很快收回，减速更急，但起点速度不变，速度仍然连续 */
 function hermite(s: number) {
   return (t: number) => s * (t * t * t - 2 * t * t + t) + (-2 * t * t * t + 3 * t * t);
 }
@@ -311,15 +322,25 @@ export function glide(m: MorphRec) {
     requestAnimationFrame(() => finishMorph(m, target));
     return;
   }
-  const D = Math.max(REV_MIN * SLOW, m.dur * Math.abs(d)) / 1000;
-  let sl = clamp((v * D) / d, -3, 3);
+  let D = Math.max(REV_MIN * SLOW, m.dur * Math.abs(d)) / 1000;
   const head = v > 0 ? 1 - p0 : p0; // 往原方向冲，最多冲到范围的边
-  for (let i = 0; i < 14; i++) {
+  const cap = Math.min(head * 0.9, Math.max(REV_OVERSHOOT, REV_OVERSHOOT_REL * Math.abs(d)));
+  const dMin = (REV_SHRINK_MIN * SLOW) / 1000;
+  let sl = (v * D) / d;
+  for (let i = 0; i < 24; i++) {
+    if (sl > REV_FWD_SLOPE) {
+      D = (REV_FWD_SLOPE * Math.abs(d)) / Math.abs(v);
+      sl = REV_FWD_SLOPE;
+      break;
+    }
     const e = hermite(sl);
     let mn = 0;
-    for (let k = 1; k <= 40; k++) mn = Math.min(mn, e(k / 40));
-    if (-mn * Math.abs(d) <= head * 0.9) break;
-    sl *= 0.7;
+    for (let k = 1; k <= 80; k++) mn = Math.min(mn, e(k / 80));
+    const over = -mn * Math.abs(d);
+    if (over <= cap || D <= dMin) break;
+    /* 冲出量大致和 D 成正比：按超出的比例缩短（每次至少缩 10%、最多缩到 30%），几次就收敛 */
+    D = Math.max(dMin, D * clamp((0.9 * cap) / over, 0.3, 0.9));
+    sl = (v * D) / d;
   }
   clearTimeout(m.doneTimer);
   m.doneTimer = setTimeout(() => finishMorph(m, m.dir), D * 1000 + 260);
@@ -344,7 +365,7 @@ function snap(m: MorphRec) {
   m.doneTimer = setTimeout(() => finishMorph(m, m.dir), m.dur + 260);
   m.pAnim = animate(pv, target, {
     duration: m.dur / 1000,
-    ease: FS_EASE,
+    ease: EASE_MORPH,
     onComplete: () => finishMorph(m, target),
   });
 }
@@ -360,7 +381,7 @@ function runTime(m: MorphRec, fromLayout = false) {
   m.pAnim?.stop();
   m.pAnim = animate(m.pv!, m.dir, {
     duration: m.dur / 1000,
-    ease: FS_EASE,
+    ease: EASE_MORPH,
     onComplete: () => finishMorph(m, m.dir),
   });
 }
@@ -444,8 +465,8 @@ function MorphFrame({ m }: { m: MorphRec }) {
     return () => cancelAnimationFrame(raf);
   }, [m]);
   const r = m.go ? (m.dir ? m.B : m.A) : m.A;
-  const tr = `${dur}s cubic-bezier(.35,.2,.15,1)`;
-  const t = { layout: { duration: dur, ease: FS_EASE } };
+  const tr = `${dur}s ${cssBezier(EASE_MORPH)}`;
+  const t = { layout: { duration: dur, ease: EASE_MORPH } };
   return (
     <>
       <motion.div

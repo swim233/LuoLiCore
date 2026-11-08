@@ -2,6 +2,7 @@ import { useLayoutEffect, useRef } from 'react';
 import { motionOn } from '../lib/prefs';
 import { Star4 } from '../components/icons';
 import { Seg } from '../components/Seg';
+import { EASE_OUT_CSS } from '../lib/easing';
 import { chooseMotion, usePrefs } from '../lib/prefs';
 import type { Prefs } from '../lib/prefs';
 import { useBusRev } from '../model/rev';
@@ -30,7 +31,7 @@ export function DemoPanel() {
           { opacity: 0, transform: 'translateY(10px) scale(.98)' },
           { opacity: 1, transform: 'none' },
         ],
-        { duration: 240, easing: 'cubic-bezier(.2,.8,.2,1)' },
+        { duration: 240, easing: EASE_OUT_CSS },
       );
   }, [open]);
   const act = (e: React.MouseEvent) => {
