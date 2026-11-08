@@ -490,9 +490,374 @@ describe.each([
     expect(await a.toolCalls()).toEqual([toolCall(), failed]);
     expect(await b.toolCalls()).toEqual([timeout]);
   });
+
+  describe('读取', () => {
+    /** 一个会话，依次写入 count 条消息（用户、助手交替），返回存储与会话 */
+    async function withMessages(count: number) {
+      const storage = await open();
+      const id = await storage.createConversation({ platform: 'cli' });
+      const store = await storage.openConversation(id);
+      const written: Message[] = [];
+      for (let i = 1; i <= count; i++) {
+        const m = message(i % 2 === 1 ? 'user' : 'assistant', `第 ${i} 条`, {
+          createdAt: `2026-10-30T12:${String(i % 60).padStart(2, '0')}:00.000Z`,
+          ...(i % 2 === 1 ? { author: alice } : {}),
+        });
+        written.push(m);
+        await store.add(m);
+      }
+      return { storage, id, store, written };
+    }
+
+    it('entry：按 id 取一条，带序号与时间；别的会话的、不存在的为 undefined', async () => {
+      const { storage, store, written } = await withMessages(3);
+      const other = await storage.openConversation(
+        await storage.createConversation({ platform: 'cli' }),
+      );
+
+      expect(await store.entry(written[1]!.id)).toEqual({
+        seq: 2,
+        createdAt: '2026-10-30T12:02:00.000Z',
+        message: written[1],
+      });
+      expect(await other.entry(written[1]!.id)).toBeUndefined();
+      expect(await store.entry('nope')).toBeUndefined();
+    });
+
+    it('entry：消息没带时间时，时间是写入时间', async () => {
+      const storage = await open();
+      const store = await storage.openConversation(
+        await storage.createConversation({ platform: 'cli' }),
+      );
+      const m: Message = { id: 'no-time', role: 'user', parts: [{ type: 'text', text: '无' }] };
+      const before = new Date().toISOString();
+      await store.add(m);
+
+      const entry = await store.entry('no-time');
+      expect(entry!.createdAt >= before).toBe(true);
+      expect(entry!.createdAt <= new Date().toISOString()).toBe(true);
+    });
+
+    it('page：从最新往前一批批取，按序号升序；hasMore 说明前面还有没有', async () => {
+      const { store, written } = await withMessages(7);
+      const seqs = (page: { entries: Array<{ seq: number }> }) => page.entries.map((e) => e.seq);
+
+      const latest = await store.page({ limit: 3 });
+      expect(seqs(latest)).toEqual([5, 6, 7]);
+      expect(latest.hasMore).toBe(true);
+      expect(latest.entries[0]).toEqual({
+        seq: 5,
+        createdAt: '2026-10-30T12:05:00.000Z',
+        message: written[4],
+      });
+
+      const earlier = await store.page({ before: 5, limit: 3 });
+      expect(seqs(earlier)).toEqual([2, 3, 4]);
+      expect(earlier.hasMore).toBe(true);
+
+      // 正好取到头：前面没有了
+      const first = await store.page({ before: 2, limit: 1 });
+      expect(seqs(first)).toEqual([1]);
+      expect(first.hasMore).toBe(false);
+      // 不够一批
+      expect(await store.page({ before: 3, limit: 10 })).toMatchObject({ hasMore: false });
+      expect(seqs(await store.page({ before: 3, limit: 10 }))).toEqual([1, 2]);
+      // 最前面之前什么也没有
+      expect(await store.page({ before: 1, limit: 10 })).toEqual({ entries: [], hasMore: false });
+      // 全部正好一批
+      const all = await store.page({ limit: 7 });
+      expect(seqs(all)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+      expect(all.hasMore).toBe(false);
+    });
+
+    it('page：序号有空洞（预留了没写入）时照样按序号取', async () => {
+      const storage = await open();
+      const store = await storage.openConversation(
+        await storage.createConversation({ platform: 'cli' }),
+      );
+      await store.add(message('user', '一'));
+      await store.reserve();
+      await store.add(message('user', '三'));
+
+      const page = await store.page({ limit: 1 });
+      expect(page.entries.map((e) => e.seq)).toEqual([3]);
+      expect(page.hasMore).toBe(true);
+      expect((await store.page({ before: 3, limit: 5 })).entries.map((e) => e.seq)).toEqual([1]);
+    });
+
+    it('page：取到的消息是副本，改了不影响存储', async () => {
+      const { store } = await withMessages(2);
+      const page = await store.page({ limit: 2 });
+      (page.entries[0]!.message.parts[0] as { text: string }).text = '改过';
+
+      expect(((await store.list())[0]!.parts[0] as { text: string }).text).toBe('第 1 条');
+    });
+
+    it('count：某序号之后的条数，可以只数一种角色', async () => {
+      const { store } = await withMessages(5);
+
+      expect(await store.count()).toBe(5);
+      expect(await store.count({ after: 2 })).toBe(3);
+      expect(await store.count({ role: 'user' })).toBe(3);
+      expect(await store.count({ after: 2, role: 'user' })).toBe(2);
+      expect(await store.count({ after: 2, role: 'assistant' })).toBe(1);
+      expect(await store.count({ after: 5 })).toBe(0);
+    });
+
+    it('segments：全部段按开始的序号升序，带标题快照、摘要与时间', async () => {
+      const storage = await open();
+      const id = await storage.createConversation({ platform: 'telegram', title: '读书会' });
+      const store = await storage.openConversation(id);
+      const before = new Date().toISOString();
+      await store.addSegment({ startSeq: 10, startReason: 'compress', priorSummary: '后来' });
+      await storage.updateTitle(id, '新群名');
+      await store.addSegment({ startSeq: 5, startReason: 'idle', priorSummary: '之前' });
+
+      const segments = await store.segments();
+      expect(segments).toEqual([
+        {
+          startSeq: 1,
+          startReason: 'first',
+          conversationTitle: '读书会',
+          createdAt: expect.any(String),
+        },
+        {
+          startSeq: 5,
+          startReason: 'idle',
+          conversationTitle: '新群名',
+          priorSummary: '之前',
+          createdAt: expect.any(String),
+        },
+        {
+          startSeq: 10,
+          startReason: 'compress',
+          conversationTitle: '读书会',
+          priorSummary: '后来',
+          createdAt: expect.any(String),
+        },
+      ]);
+      for (const segment of segments) {
+        expect(segment.createdAt.slice(0, 4)).toBe(before.slice(0, 4));
+      }
+      // currentSegment 照旧不带时间
+      expect(await store.currentSegment()).toEqual({
+        startSeq: 10,
+        startReason: 'compress',
+        conversationTitle: '读书会',
+        priorSummary: '后来',
+      });
+    });
+
+    it('overviews：全部会话，不分平台，按建立先后；最后一条消息的要点、条数、段数', async () => {
+      const storage = await open();
+      const group = await storage.createConversation({
+        platform: 'telegram',
+        platformConversationId: '-1001',
+        title: '读书会',
+      });
+      const cli = await storage.createConversation({ platform: 'cli' });
+      const empty = await storage.createConversation({ platform: 'web', title: '新对话' });
+      const groupStore = await storage.openConversation(group);
+      await groupStore.add(message('assistant', '较早的回复'));
+      await groupStore.add({
+        id: 'last',
+        role: 'user',
+        metadata: { author: alice, createdAt: '2026-10-30T13:00:00.000Z' },
+        parts: [
+          { type: 'text', text: '第一段' },
+          { type: 'file', mediaType: 'image/png', url: 'luoli-file:a.png' },
+          { type: 'text', text: '第二段' },
+        ],
+      });
+      await groupStore.addSegment({ startSeq: 2, startReason: 'idle', priorSummary: '摘要' });
+      await (await storage.openConversation(cli)).add(message('assistant', '只有助手'));
+
+      const overviews = await storage.overviews();
+      expect(overviews.map((o) => o.id)).toEqual([group, cli, empty]);
+      const [groupOverview, cliOverview, emptyOverview] = overviews;
+      expect(groupOverview).toEqual({
+        id: group,
+        platform: 'telegram',
+        platformConversationId: '-1001',
+        title: '读书会',
+        createdAt: expect.any(String),
+        messages: 2,
+        segments: 2,
+        last: {
+          seq: 2,
+          createdAt: '2026-10-30T13:00:00.000Z',
+          role: 'user',
+          author: alice,
+          text: '第一段\n第二段',
+          files: 1,
+        },
+      });
+      expect(cliOverview).toMatchObject({
+        platform: 'cli',
+        messages: 1,
+        segments: 1,
+        last: { seq: 1, role: 'assistant', text: '只有助手', files: 0 },
+      });
+      expect(cliOverview!.platformConversationId).toBeUndefined();
+      expect(cliOverview!.last!.author).toBeUndefined();
+      expect(emptyOverview).toEqual({
+        id: empty,
+        platform: 'web',
+        platformConversationId: undefined,
+        title: '新对话',
+        createdAt: expect.any(String),
+        messages: 0,
+        segments: 1,
+      });
+      // overview(id) 与列表里的那一项相同；不存在时 undefined
+      expect(await storage.overview(group)).toEqual(groupOverview);
+      expect(await storage.overview('nope')).toBeUndefined();
+    });
+
+    it('overviews：文字按 Unicode 字符截到 textChars；只有图片时文字为空', async () => {
+      const storage = await open();
+      const id = await storage.createConversation({ platform: 'cli' });
+      const store = await storage.openConversation(id);
+      await store.add(message('user', '😀😀😀abc'));
+
+      expect((await storage.overview(id, { textChars: 4 }))!.last!.text).toBe('😀😀😀a');
+      expect((await storage.overviews({ textChars: 2 }))[0]!.last!.text).toBe('😀😀');
+
+      await store.add({
+        id: 'img',
+        role: 'user',
+        metadata: { createdAt: '2026-10-30T12:00:00.000Z' },
+        parts: [
+          { type: 'file', mediaType: 'image/png', url: 'luoli-file:a.png' },
+          { type: 'file', mediaType: 'image/png', url: 'luoli-file:b.png' },
+        ],
+      });
+      expect((await storage.overview(id))!.last).toMatchObject({ seq: 2, text: '', files: 2 });
+    });
+
+    it('overviews：最后一条按序号，不按时间', async () => {
+      const storage = await open();
+      const id = await storage.createConversation({ platform: 'cli' });
+      const store = await storage.openConversation(id);
+      await store.add(message('user', '新', { createdAt: '2026-10-30T13:00:00.000Z' }));
+      await store.add(message('user', '旧', { createdAt: '2026-10-30T11:00:00.000Z' }));
+
+      expect((await storage.overview(id))!.last).toMatchObject({ seq: 2, text: '旧' });
+    });
+
+    it('callSummary：某时刻以来；回复数与失败数只算回复，token 算全部用途与结果', async () => {
+      const storage = await open();
+      const a = await storage.createConversation({ platform: 'telegram', title: '甲' });
+      const b = await storage.createConversation({ platform: 'cli' });
+      const c = await storage.createConversation({ platform: 'telegram', title: '丙' });
+      const storeA = await storage.openConversation(a);
+      const storeB = await storage.openConversation(b);
+      const storeC = await storage.openConversation(c);
+      const today = '2026-10-30T16:00:00.000Z';
+      const at = (time: string) => ({ startedAt: time });
+
+      // 昨天的不算
+      await storeA.recordCall(call(at('2026-10-30T15:59:59.999Z')));
+      // 今天：甲 1 次回复，乙 2 次回复，丙只有失败与摘要
+      await storeA.recordCall(call(at('2026-10-30T16:00:00.000Z')));
+      await storeB.recordCall(call(at('2026-10-30T17:00:00.000Z')));
+      await storeB.recordCall(call(at('2026-10-30T18:00:00.000Z')));
+      await storeC.recordCall(
+        call({
+          ...at('2026-10-30T19:00:00.000Z'),
+          outcome: 'failed',
+          inputTokens: 50,
+          cacheReadTokens: undefined,
+          outputTokens: undefined,
+        }),
+      );
+      await storeC.recordCall(
+        call({
+          ...at('2026-10-30T19:30:00.000Z'),
+          purpose: 'summary',
+          summaryReason: 'idle',
+          replyId: undefined,
+          inputTokens: 1000,
+          cacheReadTokens: 800,
+          outputTokens: 200,
+        }),
+      );
+      // 中止的回复：不算回复也不算失败，token 照算
+      await storeA.recordCall(
+        call({ ...at('2026-10-30T20:00:00.000Z'), outcome: 'aborted', inputTokens: 7 }),
+      );
+      // 摘要失败：不算失败的回复
+      await storeA.recordCall(
+        call({
+          ...at('2026-10-30T20:30:00.000Z'),
+          purpose: 'summary',
+          outcome: 'failed',
+          inputTokens: undefined,
+          cacheReadTokens: undefined,
+          outputTokens: undefined,
+        }),
+      );
+
+      expect(await storage.callSummary(today)).toEqual({
+        replies: 3,
+        failedReplies: 1,
+        inputTokens: 120 * 3 + 50 + 1000 + 7,
+        cacheReadTokens: 100 * 3 + 800 + 100,
+        outputTokens: 30 * 3 + 200 + 30,
+        repliesByConversation: [
+          { conversationId: b, title: undefined, replies: 2 },
+          { conversationId: a, title: '甲', replies: 1 },
+        ],
+      });
+    });
+
+    it('callSummary：没有调用时全是 0；同样多的回复按会话建立先后', async () => {
+      const storage = await open();
+      expect(await storage.callSummary('2026-10-30T00:00:00.000Z')).toEqual({
+        replies: 0,
+        failedReplies: 0,
+        inputTokens: 0,
+        cacheReadTokens: 0,
+        outputTokens: 0,
+        repliesByConversation: [],
+      });
+
+      const first = await storage.createConversation({ platform: 'cli', title: '先' });
+      const second = await storage.createConversation({ platform: 'cli', title: '后' });
+      await (await storage.openConversation(second)).recordCall(call());
+      await (await storage.openConversation(first)).recordCall(call());
+
+      expect((await storage.callSummary('2026-10-30T00:00:00.000Z')).repliesByConversation).toEqual(
+        [
+          { conversationId: first, title: '先', replies: 1 },
+          { conversationId: second, title: '后', replies: 1 },
+        ],
+      );
+    });
+  });
 });
 
 describe('SQLite 存储', () => {
+  it('没有段的旧会话（第 2 步建的库）：segments 视为一段，时间取会话的建立时间；概览算一段', async () => {
+    const dir = await tempDir();
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    const path = join(dir, 'luoli.db');
+    const storage = openSqliteStorage(path);
+    cleanups.push(async () => storage.close());
+    const id = await storage.createConversation({ platform: 'cli', title: '旧会话' });
+    const raw = new DatabaseSync(path);
+    raw.prepare('DELETE FROM segments WHERE conversation_id = ?').run(id);
+    const createdAt = String(
+      raw.prepare('SELECT created_at FROM conversations WHERE id = ?').get(id)?.created_at,
+    );
+    raw.close();
+
+    expect(await (await storage.openConversation(id)).segments()).toEqual([
+      { startSeq: 1, startReason: 'first', conversationTitle: '旧会话', createdAt },
+    ]);
+    expect((await storage.overview(id))!.segments).toBe(1);
+  });
+
   it('关闭后重新打开同一文件，数据还在，序号接着往下', async () => {
     const dir = await tempDir();
     cleanups.push(() => rm(dir, { recursive: true, force: true }));

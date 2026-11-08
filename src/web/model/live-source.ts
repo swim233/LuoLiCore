@@ -1,0 +1,137 @@
+import { DefaultChatTransport } from 'ai';
+import { httpApi } from './api';
+import { db } from './db';
+import { setLink } from './link';
+import type { DataSource } from './source';
+import {
+  applyMessage,
+  applyReset,
+  applyResync,
+  applyRow,
+  applyToday,
+  bindApi,
+  loadOlder,
+  markRead,
+  openConversation,
+  refreshToday,
+} from './sync';
+import type { ChatMsg } from './types';
+import type { ConversationRow, MessageEvent, ServerEvents, TodaySummary } from '../../server/types';
+
+/* 真实的数据源：连洛璃服务。
+   - 连上 SSE（GET /api/events）；每次收到 hello（第一次连上、断线重连）就重新取会话列表和今日概况：第一次整批放进去并发 data:reset，
+     断线重连后合并（已经取到的消息和阅读位置留着，补取断线期间的新消息，见 sync.ts 的 applyResync）；
+   - 之后的 conversation、message、today 事件增量放进 db，发部件在听的总线事件；
+   - 连不上时（SSE 断了，或取数据失败）连接状态是 down，部件显示「连不上洛璃服务」；EventSource 自己会重连，连上后自动恢复；
+   - 今天的日期（服务器时区）变了就重新取今日概况。 */
+const RETRY_MS = 3000;
+const DAY_CHECK_MS = 30_000;
+
+/** 现在在这个时区是哪一天，YYYY-MM-DD */
+function dateIn(timeZone: string, now = new Date()): string | null {
+  try {
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(now);
+  } catch {
+    return null;
+  }
+}
+
+export const liveSource: DataSource = {
+  kind: 'live',
+  start() {
+    bindApi(httpApi);
+    setLink('loading');
+    let es: EventSource | null = null;
+    let stopped = false;
+    let syncGen = 0;
+    // 第一次取到数据以后，再连上（断线重连）就合并：已经取到的消息和阅读位置留着
+    let synced = false;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    let reconnect: ReturnType<typeof setTimeout> | undefined;
+
+    async function resync() {
+      const gen = ++syncGen;
+      clearTimeout(retry);
+      try {
+        const [list, today] = await Promise.all([httpApi.conversations(), httpApi.today()]);
+        if (stopped || gen !== syncGen) return;
+        if (synced) applyResync(list.conversations, today);
+        else applyReset(list.conversations, today);
+        synced = true;
+        setLink('ready');
+      } catch {
+        if (stopped || gen !== syncGen) return;
+        setLink('down');
+        retry = setTimeout(resync, RETRY_MS);
+      }
+    }
+
+    function on<K extends keyof ServerEvents>(
+      source: EventSource,
+      name: K,
+      handler: (data: ServerEvents[K]) => void,
+    ) {
+      source.addEventListener(name, (e) => {
+        let data: ServerEvents[K];
+        try {
+          data = JSON.parse((e as globalThis.MessageEvent<string>).data) as ServerEvents[K];
+        } catch {
+          return;
+        }
+        handler(data);
+      });
+    }
+
+    function connect() {
+      if (stopped) return;
+      const source = new EventSource('/api/events');
+      es = source;
+      on(source, 'hello', () => void resync());
+      on(source, 'conversation', (row: ConversationRow) => applyRow(row));
+      on(source, 'message', (ev: MessageEvent) => applyMessage(ev));
+      on(source, 'today', (t: TodaySummary) => applyToday(t));
+      source.addEventListener('error', () => {
+        if (stopped || es !== source) return;
+        // 断了：显示连不上。EventSource 会自己重连；被服务拒绝（状态码不对）时它不再重连，这里补一次
+        syncGen++;
+        clearTimeout(retry);
+        setLink('down');
+        if (source.readyState === EventSource.CLOSED) {
+          source.close();
+          reconnect = setTimeout(connect, RETRY_MS);
+        }
+      });
+    }
+    connect();
+
+    // 过了 0 点（服务器时区）今日概况换成新的一天：定时看一眼，页面回到前台时也看一眼
+    const checkDay = () => {
+      const t = db.today;
+      if (stopped || !t || document.visibilityState !== 'visible') return;
+      const now = dateIn(t.timeZone);
+      if (now && now !== t.date) void refreshToday();
+    };
+    const dayTimer = setInterval(checkDay, DAY_CHECK_MS);
+    document.addEventListener('visibilitychange', checkDay);
+    return () => {
+      stopped = true;
+      clearTimeout(retry);
+      clearTimeout(reconnect);
+      clearInterval(dayTimer);
+      document.removeEventListener('visibilitychange', checkDay);
+      es?.close();
+    };
+  },
+  openConversation: (id) => void openConversation(id),
+  loadOlder: (id, manual) => void loadOlder(id, manual),
+  markRead,
+  // 网页对话还不能用（第 6 步）
+  chatBlocked: () => '网页对话还不能用',
+  chatTransport: () => new DefaultChatTransport<ChatMsg>({ api: '/api/chat' }),
+  webChat: null,
+};

@@ -1,8 +1,18 @@
 import { uid } from '../lib/util';
 import { bus } from './bus';
 import { db } from './db';
+import {
+  authorOf,
+  demoOf,
+  inputLine,
+  isFile,
+  isReasoning,
+  isTool,
+  textOf,
+  toolName,
+} from './parts';
 import { status } from './status';
-import type { ImagePart, MsgRow } from './types';
+import type { Conversation, ImagePart, MsgRow } from './types';
 
 /* 「此刻」的数据：每个进行中的对话一份终端日志。只列正在回复的会话加上最近结束的一个 */
 export type LineKind = 'user' | 'luoli' | 'tool' | 'status' | 'think' | 'stats';
@@ -56,50 +66,55 @@ const emit: Sub = (type, convId, line, extra) =>
   });
 
 function linesFromRow(row: MsgRow): Line[] {
-  const at = Date.parse(row.created_at);
-  const m = row.ui_message;
+  const at = Date.parse(row.createdAt);
+  const m = row.message;
   if (row.role === 'user') {
-    const img = m.parts.find((p) => p.type === 'file') as ImagePart | undefined;
+    const file = m.parts.find(isFile);
+    const author = authorOf(row);
     return [
       {
         id: uid('l'),
         kind: 'user',
         at,
-        name: m.metadata.author?.name,
-        uid: m.metadata.author?.uid,
-        text: db.textOf(row),
-        image: img || null,
+        name: author?.name,
+        uid: author?.id ?? null,
+        text: textOf(row),
+        // 「此刻」第 5 步才接真图；开发模式的色块图在 demo 里
+        image: file
+          ? ({ type: 'file', mediaType: file.mediaType, url: file.url } as ImagePart)
+          : null,
       },
     ];
   }
+  /* 思考秒数、工具耗时、摘要、工具结果里的图是演示字段（parts.ts 的 demoOf），第 5 步换成真实来源 */
   const out: Line[] = [];
   for (const p of m.parts) {
-    if (p.type === 'reasoning')
+    if (isReasoning(p))
       out.push({
         id: uid('l'),
         kind: 'think',
         at,
         done: true,
-        sec: p.demo?.sec || 2,
+        sec: demoOf(p)?.sec || 2,
         text: p.text,
       });
-    else if (p.type === 'tool-fetch')
+    else if (isTool(p))
       out.push({
         id: uid('l'),
         kind: 'tool',
         at,
-        label: p.input.url,
+        label: inputLine((p as { input?: unknown }).input) || toolName(p),
         done: true,
         ok: p.state !== 'output-error',
-        ms: p.demo?.ms || 800,
-        summary: p.output?.summary,
-        image: p.demo?.image,
+        ms: demoOf(p)?.ms || 800,
+        summary: demoOf(p)?.summary,
+        image: demoOf(p)?.image,
       });
   }
-  const t = db.textOf(row);
+  const t = textOf(row);
   if (t) out.push({ id: uid('l'), kind: 'luoli', at, text: t });
-  if (m.metadata.aborted) out.push({ id: uid('l'), kind: 'status', at, text: '回复被中止' });
-  if (m.metadata.failed)
+  if (m.metadata?.aborted) out.push({ id: uid('l'), kind: 'status', at, text: '回复被中止' });
+  if (m.metadata?.failed)
     out.push({ id: uid('l'), kind: 'status', at, err: true, text: '出错：回复中断' });
   return out;
 }
@@ -178,13 +193,13 @@ function finish(s: Session) {
 }
 /* 还没有人触发过时：取数据里最近一次回复所在的会话，手动展开时显示它的上下文 */
 function recentFromDb(): Session | null {
-  let best: import('./types').Conversation | null = null,
+  let best: Conversation | null = null,
     t = 0;
   for (const c of db.conversations) {
     const m = db.msgs(c.id);
     for (let i = m.length - 1; i >= 0; i--) {
       if (m[i].role !== 'assistant') continue;
-      const tt = Date.parse(m[i].created_at);
+      const tt = Date.parse(m[i].createdAt);
       if (tt > t) {
         t = tt;
         best = c;
@@ -213,7 +228,8 @@ const get = (id: string) => sessions.get(id);
 
 bus.on('message', ({ convId, row }) => {
   const s = get(convId);
-  if (s && row) linesFromRow(row).forEach((l) => push(s, l));
+  // 助手的消息写入时回复已经在这里逐行显示过了（reply:* 事件），只加别人发的
+  if (s && row && row.role === 'user') linesFromRow(row).forEach((l) => push(s, l));
 });
 bus.on('reply:wait', ({ convId, replyId, noWait }) => {
   replying.add(convId);

@@ -3,7 +3,17 @@ import { chars, uid } from '../../lib/util';
 import { bus } from '../../model/bus';
 import { db } from '../../model/db';
 import { getSource } from '../../model/source';
-import type { ChatMsg, ChatPart, Metadata, MsgRow, Part } from '../../model/types';
+import {
+  demoOf,
+  isFile,
+  isReasoning,
+  isText,
+  isTool,
+  toolOutput,
+  withDemo,
+} from '../../model/parts';
+import type { NewMessage } from '../../model/source';
+import type { ChatMsg, ChatPart, ImageInfo, MsgRow, Part, ToolResultInfo } from '../../model/types';
 import { toast } from '../../state/ui';
 import { chatState, draftOf, newWebConv } from './chatState';
 
@@ -35,76 +45,99 @@ interface Rec {
 }
 const recs = new Map<string, Rec>();
 
+/* 服务里的一条消息 → useChat 的消息。图片用服务给的地址（开发模式是色块的数据地址）；
+   思考秒数、工具耗时与摘要读模拟数据里的演示字段（第 6 步换成真实来源） */
 function rowToMsg(row: MsgRow): ChatMsg {
-  const m = row.ui_message;
+  const m = row.message;
   const parts: ChatPart[] = [];
   for (const p of m.parts) {
-    if (p.type === 'text') parts.push({ type: 'text', text: p.text, state: 'done' });
-    else if (p.type === 'file')
+    if (isText(p)) parts.push({ type: 'text', text: p.text, state: 'done' });
+    else if (isFile(p))
       parts.push({
         type: 'file',
         mediaType: p.mediaType,
-        url: p.url,
-        filename: p.name,
-        demo: p.demo,
-        blob: p.blob,
+        url: row.images[p.url]?.src ?? p.url,
+        filename: p.filename,
       });
-    else if (p.type === 'reasoning')
-      parts.push({ type: 'reasoning', text: p.text, state: 'done', demo: p.demo });
-    else if (p.type === 'tool-fetch')
+    else if (isReasoning(p)) {
+      const sec = demoOf(p)?.sec;
+      parts.push({
+        type: 'reasoning',
+        text: p.text,
+        state: 'done',
+        demo: sec ? { sec } : undefined,
+      });
+    } else if (isTool(p)) {
+      const d = demoOf(p);
+      const out =
+        p.state === 'output-available' ? toolOutput((p as { output?: unknown }).output) : null;
       parts.push({
         type: 'tool-fetch',
         toolCallId: p.toolCallId,
-        state: p.state,
-        input: p.input,
-        output: p.output ? { ...p.output, ms: p.demo?.ms } : undefined,
-        demo: p.demo,
+        state:
+          p.state === 'output-error'
+            ? 'output-error'
+            : p.state === 'output-available'
+              ? 'output-available'
+              : 'input-available',
+        input: { url: (p as { input?: { url?: string } }).input?.url },
+        output: out
+          ? {
+              summary: d?.summary ?? out.text.slice(0, 120),
+              chars: row.tools[p.toolCallId]?.chars ?? out.text.length,
+              ms: d?.ms,
+            }
+          : undefined,
+        demo: d ? { ms: d.ms, summary: d.summary, image: d.image } : undefined,
       });
+    }
   }
+  const usage = m.metadata?.usage;
   return {
     id: row.id,
     role: row.role,
     parts: parts as unknown as ChatMsg['parts'],
     metadata: {
-      at: Date.parse(row.created_at),
-      name: m.metadata.author?.name,
-      aborted: m.metadata.aborted,
-      failed: m.metadata.failed,
-      usage: m.metadata.usage
-        ? {
-            input: m.metadata.usage.inputTokens,
-            cache: m.metadata.usage.cachedInputTokens,
-            output: m.metadata.usage.outputTokens,
-          }
+      at: Date.parse(row.createdAt),
+      name: m.metadata?.author?.name,
+      aborted: m.metadata?.aborted,
+      failed: m.metadata?.failed,
+      usage: usage
+        ? { input: usage.input ?? 0, cache: usage.cacheRead ?? 0, output: usage.output ?? 0 }
         : undefined,
     },
   } as ChatMsg;
 }
-function msgToParts(m: ChatMsg): Part[] {
-  const out: Part[] = [];
+/* useChat 的消息 → 服务里的消息。图片：浏览器里的 blob 地址就是它的显示地址（第 6 步改成上传进文件存储） */
+function msgToParts(m: ChatMsg): Pick<NewMessage, 'parts' | 'images' | 'tools'> {
+  const parts: Part[] = [];
+  const images: Record<string, ImageInfo | null> = {};
+  const tools: Record<string, ToolResultInfo> = {};
   for (const p of partsOf(m)) {
-    if (p.type === 'file')
-      out.push({
-        type: 'file',
-        mediaType: p.mediaType,
-        url: 'luoli-file:（上传后由服务端存）',
-        blob: p.url,
-        name: p.filename,
-      });
-    else if (p.type === 'reasoning')
-      out.push({ type: 'reasoning', text: p.text, demo: { sec: p.sec || 2 } });
-    else if (p.type === 'tool-fetch' && p.state === 'output-available')
-      out.push({
-        type: 'tool-fetch',
-        toolCallId: p.toolCallId,
-        state: 'output-available',
-        input: { url: p.input?.url ?? '' },
-        output: { summary: p.output?.summary ?? '', chars: p.output?.chars ?? 0 },
-        demo: { ms: p.output?.ms || 800, image: null },
-      });
-    else if (p.type === 'text' && p.text) out.push({ type: 'text', text: p.text });
+    if (p.type === 'file') {
+      const url = 'luoli-file:' + uid('web') + '.png';
+      parts.push({ type: 'file', mediaType: p.mediaType, url, filename: p.filename });
+      images[url] = { src: p.url };
+    } else if (p.type === 'reasoning')
+      parts.push(withDemo({ type: 'reasoning', text: p.text }, { sec: p.sec || 2 }));
+    else if (p.type === 'tool-fetch' && p.state === 'output-available') {
+      const text = p.output?.summary ?? '';
+      tools[p.toolCallId] = { chars: p.output?.chars ?? text.length, truncated: false };
+      parts.push(
+        withDemo(
+          {
+            type: 'tool-fetch',
+            toolCallId: p.toolCallId,
+            state: 'output-available',
+            input: { url: p.input?.url ?? '' },
+            output: text,
+          } as Part,
+          { ms: p.output?.ms || 800, summary: text, image: null },
+        ),
+      );
+    } else if (p.type === 'text' && p.text) parts.push({ type: 'text', text: p.text });
   }
-  return out;
+  return { parts, images, tools };
 }
 
 export function getRec(convId: string): Rec {
@@ -234,21 +267,19 @@ function finalize(r: Rec, how: 'end' | 'abort' | 'error') {
   const last = r.chat.messages[r.chat.messages.length - 1];
   const msg = last && last.role === 'assistant' ? last : null;
   const ms = Date.now() - r.t0;
-  const meta: Metadata = {};
+  const meta: NonNullable<NewMessage['meta']> = {};
   if (how === 'abort') meta.aborted = true;
   if (how === 'error') meta.failed = true;
   const usage = msg?.metadata?.usage || { input: 1500, cache: 0, output: 30 };
   if (how === 'end')
-    meta.usage = {
-      inputTokens: usage.input,
-      cachedInputTokens: usage.cache,
-      outputTokens: usage.output,
-    };
+    meta.usage = { input: usage.input, cacheRead: usage.cache, output: usage.output };
   let row: MsgRow | null = null;
-  const parts = msg ? msgToParts(msg) : [];
-  if (db.conv(convId) && parts.length) row = db.addMsg(convId, { role: 'assistant', parts, meta });
-  if (db.conv(convId)) {
-    db.addCall({
+  const built = msg ? msgToParts(msg) : null;
+  const store = getSource().webChat;
+  if (store && db.conv(convId) && built && built.parts.length)
+    row = store.addMessage(convId, { role: 'assistant', ...built, meta });
+  if (store && db.conv(convId)) {
+    store.addCall({
       conversation_id: convId,
       reply_id: row?.id ?? null,
       started_at: new Date(r.t0).toISOString(),
@@ -268,7 +299,12 @@ function finalize(r: Rec, how: 'end' | 'abort' | 'error') {
   /* 界面上这条消息的标记 */
   if (msg && how !== 'end')
     r.chat.messages = r.chat.messages.map((m) =>
-      m.id === msg.id ? ({ ...m, metadata: { ...m.metadata, ...meta } } as ChatMsg) : m,
+      m.id === msg.id
+        ? ({
+            ...m,
+            metadata: { ...m.metadata, aborted: meta.aborted, failed: meta.failed },
+          } as ChatMsg)
+        : m,
     );
   r.lingerUntil = Date.now() + (how === 'end' ? 2000 : 300);
   if (chatState.get().gen === convId) chatState.set({ gen: null });
@@ -297,27 +333,26 @@ export function sendChat(convId: string | null, text: string): boolean {
     return false;
   }
   const id = id0 || newWebConv();
+  const store = getSource().webChat;
+  if (!id || !store) return false;
   const files = draftOf(id).atts.splice(0);
-  const parts: Part[] = files.map((a) => ({
-    type: 'file',
-    mediaType: a.type,
-    url: 'luoli-file:（上传后由服务端存）',
-    blob: a.url,
-    name: a.name,
-  }));
-  if (text) parts.push({ type: 'text', text });
-  const row = db.addMsg(id, { role: 'user', author: { name: '你', uid: null }, parts })!;
-  const c = db.conv(id)!;
-  if (c.title === '新对话') {
-    c.title = text
-      ? chars(text).length > 16
-        ? chars(text).slice(0, 16).join('') + '…'
-        : text
-      : '图片';
-    bus.emit('conv:update', { id });
+  const parts: Part[] = [];
+  const images: Record<string, ImageInfo | null> = {};
+  for (const a of files) {
+    const url = 'luoli-file:' + uid('web') + '.png';
+    parts.push({ type: 'file', mediaType: a.type, url, filename: a.name });
+    images[url] = { src: a.url };
   }
+  if (text) parts.push({ type: 'text', text });
+  // 用户的消息记进「服务」：服务把它推回来，会话列表、时间线、「此刻」从事件里看到
+  store.addMessage(id, { role: 'user', author: { name: '你' }, parts, images });
+  const c = db.conv(id);
+  if (c && c.title === '新对话')
+    store.setTitle(
+      id,
+      text ? (chars(text).length > 16 ? chars(text).slice(0, 16).join('') + '…' : text) : '图片',
+    );
   draftOf(id).text = '';
-  bus.emit('message', { convId: id, row, trigger: true });
   const r = getRec(id);
   r.liveMsg = null;
   const fileParts = files.map((a) => ({

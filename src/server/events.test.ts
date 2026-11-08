@@ -6,6 +6,7 @@ import type { Logger } from '../core/index.js';
 import { createApp } from './app.js';
 import { createEvents } from './events.js';
 import type { ServiceStatus } from './types.js';
+import { emptyViews } from './test-kit.js';
 
 const port = 7310;
 
@@ -32,7 +33,7 @@ function setup({ heartbeat = 60_000 }: { heartbeat?: number } = {}) {
   const events = createEvents({ status: () => status, logger, heartbeat });
   const dist = mkdtempSync(join(tmpdir(), 'luoli-web-'));
   dirs.push(dist);
-  const app = createApp({ port, dist, events, status: () => status, logger });
+  const app = createApp({ port, dist, events, views: emptyViews(), status: () => status, logger });
 
   /** 连上 SSE，返回响应与一个按需读文字的读取器 */
   async function connect() {

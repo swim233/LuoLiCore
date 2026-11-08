@@ -15,12 +15,14 @@ export const KIND_TEXT: Record<ConvKind, string> = {
   private: '私',
   cli: '>_',
   web: '网',
+  other: '·',
 };
 export const KIND_LABEL: Record<ConvKind, string> = {
   group: 'Telegram 群',
   private: 'Telegram 私聊',
   cli: 'CLI',
   web: '网页',
+  other: '其他',
 };
 
 const ConvRow = memo(function ConvRow({
@@ -35,10 +37,10 @@ const ConvRow = memo(function ConvRow({
   onPick: (id: string) => void;
 }) {
   void rev;
-  const n = db.unread.get(conv.id) || 0;
-  const last = db.preview(db.lastMsg(conv.id)) || '还没有消息';
+  const n = conv.unread;
+  const last = db.previewOf(conv) || '还没有消息';
   const st = status.conv.get(conv.id);
-  const time = st ? (st.state === 'error' ? '出错' : '回复中…') : fmtShort(db.lastAt(conv.id));
+  const time = st ? (st.state === 'error' ? '出错' : '回复中…') : fmtShort(Date.parse(conv.lastAt));
   return (
     <button
       className={'conv-item' + (n > 0 ? ' has-new' : '')}
@@ -124,7 +126,7 @@ export function ConvList({
             className="li-wrap"
             role="listitem"
             data-id={c.id}
-            initial={motionOn ? { height: 0, opacity: 0, x: -16 } : false}
+            initial={motionOn && !db.bulk.has(c.id) ? { height: 0, opacity: 0, x: -16 } : false}
             animate={{ height: 'auto', opacity: 1, x: 0 }}
             exit={
               motionOn

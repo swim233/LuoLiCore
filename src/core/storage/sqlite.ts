@@ -1,17 +1,43 @@
 import { DatabaseSync } from 'node:sqlite';
 import { generateId } from 'ai';
 import { DuplicateMessageError } from './errors.js';
-import type { Message } from '../message.js';
+import type { Author, Message } from '../message.js';
 import type {
   ConversationInfo,
+  ConversationOverview,
   ConversationStore,
   ModelCall,
   Segment,
   SeqRange,
   Storage,
   StoredConversation,
+  StoredMessage,
+  StoredSegment,
   ToolCall,
 } from './types.js';
+
+/** 概览里最后一条消息的文字默认取多少个字符 */
+const defaultTextChars = 200;
+
+// 会话的概览：最后一条消息按 messages_order 索引取序号最大的一条；条数、段数按各自的索引数。
+// 最后一条消息只取要点：文字部分用 SQLite 的 JSON 函数取出来连起来，不把整条消息读回 JS
+const overviewSelect = `
+SELECT
+  c.id, c.platform, c.platform_conversation_id, c.title, c.created_at,
+  (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id) AS message_count,
+  MAX(1, (SELECT COUNT(*) FROM segments s WHERE s.conversation_id = c.id)) AS segment_count,
+  l.seq AS last_seq,
+  l.created_at AS last_created_at,
+  l.role AS last_role,
+  json_extract(l.ui_message, '$.metadata.author') AS last_author,
+  (SELECT substr(group_concat(json_extract(p.value, '$.text'), char(10)), 1, :chars)
+     FROM json_each(l.ui_message, '$.parts') p
+     WHERE json_extract(p.value, '$.type') = 'text') AS last_text,
+  (SELECT COUNT(*) FROM json_each(l.ui_message, '$.parts') p
+     WHERE json_extract(p.value, '$.type') = 'file') AS last_files
+FROM conversations c
+LEFT JOIN messages l ON l.conversation_id = c.id
+  AND l.seq = (SELECT MAX(seq) FROM messages WHERE conversation_id = c.id)`;
 
 // 表结构见 docs/adr/0005-sqlite-storage-in-core.md。第 i 项把版本 i 的库升到 i + 1：
 // 新库（版本 0）依次执行全部，已有的库只执行比它新的部分
@@ -187,6 +213,44 @@ export function openSqliteStorage(path: string): Storage {
     'SELECT * FROM tool_calls WHERE conversation_id = ? ORDER BY id',
   );
 
+  // 读取：都走已有的索引（messages_order、segments_order、model_calls_time）
+  const entryById = db.prepare(
+    'SELECT seq, created_at, ui_message FROM messages WHERE conversation_id = ? AND id = ?',
+  );
+  const pageBefore = db.prepare(
+    `SELECT seq, created_at, ui_message FROM messages
+     WHERE conversation_id = ? AND seq < ? ORDER BY seq DESC LIMIT ?`,
+  );
+  const countAfter = db.prepare(
+    'SELECT COUNT(*) AS n FROM messages WHERE conversation_id = ? AND seq > ?',
+  );
+  const countAfterByRole = db.prepare(
+    'SELECT COUNT(*) AS n FROM messages WHERE conversation_id = ? AND seq > ? AND role = ?',
+  );
+  const listSegments = db.prepare(
+    `SELECT start_seq, start_reason, conversation_title, prior_summary, created_at FROM segments
+     WHERE conversation_id = ? ORDER BY start_seq`,
+  );
+  const conversationRow = db.prepare('SELECT title, created_at FROM conversations WHERE id = ?');
+  const allOverviews = db.prepare(`${overviewSelect} ORDER BY c.created_at, c.rowid`);
+  const oneOverview = db.prepare(`${overviewSelect} WHERE c.id = :id`);
+  const callTotals = db.prepare(
+    `SELECT
+       COALESCE(SUM(purpose = 'reply' AND outcome = 'completed'), 0) AS replies,
+       COALESCE(SUM(purpose = 'reply' AND outcome = 'failed'), 0) AS failed_replies,
+       COALESCE(SUM(input_tokens), 0) AS input_tokens,
+       COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+       COALESCE(SUM(output_tokens), 0) AS output_tokens
+     FROM model_calls WHERE started_at >= ?`,
+  );
+  const repliesByConversation = db.prepare(
+    `SELECT m.conversation_id, c.title, COUNT(*) AS replies
+     FROM model_calls m JOIN conversations c ON c.id = m.conversation_id
+     WHERE m.started_at >= ? AND m.purpose = 'reply' AND m.outcome = 'completed'
+     GROUP BY m.conversation_id
+     ORDER BY replies DESC, c.created_at, c.rowid`,
+  );
+
   const reserve = (conversationId: string): number => {
     const row = reserveSeq.get(conversationId);
     if (!row) throw new Error(`会话 ${conversationId} 不存在`);
@@ -214,6 +278,12 @@ export function openSqliteStorage(path: string): Storage {
     return Number(changes) > 0;
   };
 
+  const storedMessage = (row: Record<string, unknown>): StoredMessage => ({
+    seq: Number(row.seq),
+    createdAt: String(row.created_at),
+    message: JSON.parse(String(row.ui_message)) as Message,
+  });
+
   const store = (conversationId: string): ConversationStore => ({
     async list(range) {
       return entries(conversationId, range).map((entry) => entry.message);
@@ -224,6 +294,25 @@ export function openSqliteStorage(path: string): Storage {
     async get(id) {
       const row = messageById.get(conversationId, id);
       return row && (JSON.parse(String(row.ui_message)) as Message);
+    },
+    async entry(id) {
+      const row = entryById.get(conversationId, id);
+      return row && storedMessage(row);
+    },
+    async page({ before, limit }) {
+      // 多取一条，看这批之前还有没有
+      const rows = pageBefore.all(conversationId, before ?? Number.MAX_SAFE_INTEGER, limit + 1);
+      return {
+        entries: rows.slice(0, limit).reverse().map(storedMessage),
+        hasMore: rows.length > limit,
+      };
+    },
+    async count({ after = 0, role } = {}) {
+      const row =
+        role === undefined
+          ? countAfter.get(conversationId, after)
+          : countAfterByRole.get(conversationId, after, role);
+      return Number(row?.n ?? 0);
     },
     async findByPlatformMessageId(platformMessageId) {
       const row = messageByPlatformId.get(conversationId, platformMessageId);
@@ -275,6 +364,28 @@ export function openSqliteStorage(path: string): Storage {
         conversationTitle: optional(row.conversation_title),
         priorSummary: optional(row.prior_summary),
       };
+    },
+    async segments() {
+      const rows = listSegments.all(conversationId);
+      if (rows.length === 0) {
+        // 第 2 步建的会话没有段：整个会话算第一段，同 currentSegment
+        const conversation = conversationRow.get(conversationId);
+        return [
+          {
+            startSeq: 1,
+            startReason: 'first',
+            conversationTitle: optional(conversation?.title),
+            createdAt: String(conversation?.created_at),
+          },
+        ];
+      }
+      return rows.map((row): StoredSegment => ({
+        startSeq: Number(row.start_seq),
+        startReason: String(row.start_reason) as Segment['startReason'],
+        conversationTitle: optional(row.conversation_title),
+        priorSummary: optional(row.prior_summary),
+        createdAt: String(row.created_at),
+      }));
     },
     async addSegment(segment) {
       return addSegment(conversationId, segment);
@@ -355,6 +466,28 @@ export function openSqliteStorage(path: string): Storage {
     async updateTitle(id, title) {
       if (updateTitle.run(title ?? null, id).changes === 0) throw new Error(`会话 ${id} 不存在`);
     },
+    async overviews({ textChars = defaultTextChars } = {}) {
+      return allOverviews.all({ chars: textChars }).map(overview);
+    },
+    async overview(id, { textChars = defaultTextChars } = {}) {
+      const row = oneOverview.get({ id, chars: textChars });
+      return row && overview(row);
+    },
+    async callSummary(since) {
+      const totals = callTotals.get(since) ?? {};
+      return {
+        replies: Number(totals.replies ?? 0),
+        failedReplies: Number(totals.failed_replies ?? 0),
+        inputTokens: Number(totals.input_tokens ?? 0),
+        cacheReadTokens: Number(totals.cache_read_tokens ?? 0),
+        outputTokens: Number(totals.output_tokens ?? 0),
+        repliesByConversation: repliesByConversation.all(since).map((row) => ({
+          conversationId: String(row.conversation_id),
+          title: optional(row.title),
+          replies: Number(row.replies),
+        })),
+      };
+    },
     close() {
       if (db.isOpen) db.close();
     },
@@ -424,6 +557,30 @@ function conversationInfo(row: Record<string, unknown>): ConversationInfo {
     id: String(row.id),
     platformConversationId: optional(row.platform_conversation_id),
     title: optional(row.title),
+  };
+}
+
+function overview(row: Record<string, unknown>): ConversationOverview {
+  return {
+    ...conversationInfo(row),
+    platform: String(row.platform),
+    createdAt: String(row.created_at),
+    messages: Number(row.message_count),
+    segments: Number(row.segment_count),
+    ...(row.last_seq === null || row.last_seq === undefined
+      ? {}
+      : {
+          last: {
+            seq: Number(row.last_seq),
+            createdAt: String(row.last_created_at),
+            role: String(row.last_role) as Message['role'],
+            ...(row.last_author === null || row.last_author === undefined
+              ? {}
+              : { author: JSON.parse(String(row.last_author)) as Author }),
+            text: optional(row.last_text) ?? '',
+            files: Number(row.last_files ?? 0),
+          },
+        }),
   };
 }
 

@@ -1,8 +1,9 @@
 import { pick, randi } from '../lib/util';
 import { bot, nextScript, PLAIN, SCRIPTS, initLastReply } from './bot';
 import type { Script } from './bot';
-import { bus } from '../model/bus';
 import { db } from '../model/db';
+import { mockServer as server } from './mock-server';
+import { mockSource } from './mock-source';
 import { imgPart, loadData } from './seed';
 import { status } from '../model/status';
 import { addWidget, nowCtl, relayout, removeWidget } from '../state/actions';
@@ -19,24 +20,25 @@ const CONV_KEYS: Record<string, { title: string; kind: 'group' | 'private'; chat
   'c-book': { title: '读书会', kind: 'group', chat: '-1001288361001' },
   'c-star': { title: '星空观测站', kind: 'group', chat: '-1001288362002' },
   'c-ball': { title: '周末打球', kind: 'group', chat: '-1001288363003' },
-  'c-dm': { title: '小雨', kind: 'private', chat: '50001002' },
+  'c-dm': { title: '与 小雨 的私聊', kind: 'private', chat: '50001002' },
 };
 /* 找到剧本要用的会话；数据里没有时（空数据、被删掉了），群里第一条消息到来，会话随之出现 */
 function convFor(key: string) {
-  if (db.conv(key)) return key;
+  if (server.has(key)) return key;
   const k = CONV_KEYS[key];
-  const found = db.conversations.find((c) => c.title === k.title && c.kind === k.kind);
+  const found = server.all().find((c) => c.title === k.title && c.kind === k.kind);
   if (found) return found.id;
-  const c = db.addConv({
-    platform: 'telegram',
-    kind: k.kind,
-    title: k.title,
-    chatId: k.chat,
-    id: key,
+  server.batch(() => {
+    server.addConv({
+      platform: 'telegram',
+      kind: k.kind,
+      title: k.title,
+      chatId: k.chat,
+      id: key,
+    });
+    server.addSeg(key, 'first', Date.now(), null);
   });
-  db.addSeg(c.id, 'first', Date.now(), null);
-  bus.emit('conv:add', { conv: c });
-  return c.id;
+  return key;
 }
 function needOnline() {
   if (bot.online) return true;
@@ -104,18 +106,20 @@ export const ACTIONS: Record<string, () => void> = {
       const [base, u, t] = NEW_GROUPS[addN % NEW_GROUPS.length];
       const round = Math.floor(addN / NEW_GROUPS.length);
       addN++;
-      const c = db.addConv({
-        platform: 'telegram',
-        kind: 'group',
-        title: round ? `${base} ${round + 1}` : base,
-        chatId: String(-1001288390000 - addN),
+      let id = '';
+      server.batch(() => {
+        id = server.addConv({
+          platform: 'telegram',
+          kind: 'group',
+          title: round ? `${base} ${round + 1}` : base,
+          chatId: String(-1001288390000 - addN),
+        }).id;
+        server.addSeg(id, 'first', Date.now(), null);
       });
-      demoAdded.add(c.id);
-      db.addSeg(c.id, 'first', Date.now(), null);
-      bus.emit('conv:add', { conv: c });
+      demoAdded.add(id);
       setTimeout(
         () => {
-          if (db.conv(c.id)) bot.post(c.id, u, t);
+          if (server.has(id)) bot.post(id, u, t);
         },
         260 + i * 320,
       );
@@ -134,8 +138,7 @@ export const ACTIONS: Record<string, () => void> = {
     }
     for (const c of victims) {
       if (bot.runs.has(c.id)) bot.abort(c.id);
-      db.removeConv(c.id);
-      bus.emit('conv:remove', { id: c.id });
+      server.removeConv(c.id); // 模拟服务通知客户端：会话没了
     }
     toast('删掉了' + victims.map((c) => '「' + c.title + '」').join(''));
   },
@@ -150,7 +153,7 @@ export function setData(kind: Dataset) {
   resetChatState();
   nowCtl.cancel();
   desk.set({ nowFloat: false, floatTop: null });
-  bus.emit('data:reset', {});
+  mockSource.resync();
   relayout(null, { instant: true });
   toast(
     { empty: '切换成空数据', normal: '切换成正常的数据', big: '切换成大量数据：30 个会话、长消息' }[

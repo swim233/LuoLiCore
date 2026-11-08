@@ -1,8 +1,9 @@
 import { chars, rand, randi, uid } from '../lib/util';
 import { bus } from '../model/bus';
-import { db } from '../model/db';
-import type { ImagePart, MsgRow, Part } from '../model/types';
-import { U, imgPart } from './seed';
+import { withDemo } from '../model/parts';
+import type { ImageInfo, ImagePart, MsgRow, Part, ToolResultInfo } from '../model/types';
+import { mockServer as server } from './mock-server';
+import { U, imgPart, toolPart } from './seed';
 
 /* 模拟 bot 的剧本 */
 export interface Script {
@@ -61,6 +62,8 @@ interface RunState {
   waitUntil: number;
   text: string;
   parts: Part[];
+  images: Record<string, ImageInfo | null>;
+  tools: Record<string, ToolResultInfo>;
 }
 
 /* 模拟 bot：一次回复 = 等待合并 →（重试）→ 思考 →（工具）→ 逐字输出 → 结束。
@@ -73,18 +76,11 @@ class Bot {
     convId: string,
     uidv: number | string,
     text: string,
-    {
-      trigger = false,
-      image = null,
-      at,
-    }: { trigger?: boolean; image?: ImagePart | null; at?: number } = {},
+    { image = null, at }: { trigger?: boolean; image?: ImagePart | null; at?: number } = {},
   ) {
-    if (!db.conv(convId)) return null;
-    const row = U(convId, uidv, text, at || Date.now(), image ? { image } : undefined);
-    if (row && row.role === 'user' && db.conv(convId)!.platform !== 'web')
-      db.unread.set(convId, (db.unread.get(convId) || 0) + 1);
-    bus.emit('message', { convId, row, trigger });
-    return row;
+    if (!server.has(convId)) return null;
+    // 写进模拟服务：它像真实的服务那样推 message、conversation 事件，客户端的 sync.ts 放进 db、发总线事件
+    return U(convId, uidv, text, at || Date.now(), image ? { image } : undefined);
   }
   trigger(convId: string, script: Script) {
     if (!this.online) return false;
@@ -108,11 +104,17 @@ class Bot {
     st.run.cancel();
     this.runs.delete(convId);
     let row: MsgRow | null = null;
-    if (db.conv(convId) && (st.text || st.parts.length)) {
+    if (server.has(convId) && (st.text || st.parts.length)) {
       const parts = st.parts.slice();
       if (st.text) parts.push({ type: 'text', text: st.text });
-      row = db.addMsg(convId, { role: 'assistant', parts, meta: { aborted: true } });
-      db.addCall({
+      row = server.addMsg(convId, {
+        role: 'assistant',
+        parts,
+        images: st.images,
+        tools: st.tools,
+        meta: { aborted: true },
+      });
+      server.addCall({
         conversation_id: convId,
         reply_id: row!.id,
         started_at: new Date(st.started).toISOString(),
@@ -152,6 +154,8 @@ async function replyFlow(convId: string, script: Script, merged = false) {
     waitUntil: 0,
     text: '',
     parts: [],
+    images: {},
+    tools: {},
   };
   bot.runs.set(convId, st);
   const noWait = merged || script.wait === 0;
@@ -184,7 +188,7 @@ async function replyFlow(convId: string, script: Script, merged = false) {
     bus.emit('reply:think', { convId, replyId: st.replyId });
     await run.sleep(script.think.ms);
     const sec = Math.max(1, Math.round(script.think.ms / 1000));
-    st.parts.push({ type: 'reasoning', text: script.think.text, demo: { sec } });
+    st.parts.push(withDemo({ type: 'reasoning', text: script.think.text }, { sec }));
     bus.emit('reply:thinkEnd', { convId, replyId: st.replyId, sec, text: script.think.text });
   }
   if (script.tool) {
@@ -193,14 +197,16 @@ async function replyFlow(convId: string, script: Script, merged = false) {
     const t = script.tool;
     bus.emit('tool:start', { convId, replyId: st.replyId, callId, name: 'fetch', label: t.url });
     await run.sleep(t.wait || 1500);
-    st.parts.push({
-      type: 'tool-fetch',
-      toolCallId: callId,
-      state: 'output-available',
-      input: { url: t.url },
-      output: { summary: t.summary, chars: t.chars || 2400 },
-      demo: { ms: t.ms, image: t.image || null },
+    const built = toolPart(callId, {
+      url: t.url,
+      summary: t.summary,
+      ms: t.ms,
+      chars: t.chars || 2400,
+      image: t.image,
     });
+    st.parts.push(built.part);
+    Object.assign(st.images, built.images);
+    Object.assign(st.tools, built.tools);
     bus.emit('tool:end', {
       convId,
       replyId: st.replyId,
@@ -236,21 +242,17 @@ async function replyFlow(convId: string, script: Script, merged = false) {
         output: Math.round(cs.length * 1.3) + randi(4, 20),
       };
   bot.runs.delete(convId);
-  const row = db.conv(convId)
-    ? db.addMsg(convId, {
+  const row = server.has(convId)
+    ? server.addMsg(convId, {
         role: 'assistant',
         parts: [...st.parts, { type: 'text', text: st.text }],
-        meta: {
-          usage: {
-            inputTokens: usage.input,
-            cachedInputTokens: usage.cache,
-            outputTokens: usage.output,
-          },
-        },
+        images: st.images,
+        tools: st.tools,
+        meta: { usage: { input: usage.input, cacheRead: usage.cache, output: usage.output } },
       })
     : null;
   if (row)
-    db.addCall({
+    server.addCall({
       conversation_id: convId,
       reply_id: row.id,
       started_at: new Date(st.started).toISOString(),
@@ -269,7 +271,7 @@ async function replyFlow(convId: string, script: Script, merged = false) {
   if (st.pending) {
     const next = st.pending;
     setTimeout(() => {
-      if (bot.online && db.conv(convId) && !bot.runs.has(convId)) replyFlow(convId, next, true);
+      if (bot.online && server.has(convId) && !bot.runs.has(convId)) replyFlow(convId, next, true);
     }, 500);
   }
 }
@@ -277,11 +279,18 @@ async function replyFlow(convId: string, script: Script, merged = false) {
 function failFlow(convId: string, st: RunState, script: Script, attempts: number) {
   bot.runs.delete(convId);
   let row: MsgRow | null = null;
-  if (db.conv(convId)) {
+  if (server.has(convId)) {
     const parts = st.parts.slice();
     if (st.text) parts.push({ type: 'text', text: st.text });
-    if (parts.length) row = db.addMsg(convId, { role: 'assistant', parts, meta: { failed: true } });
-    db.addCall({
+    if (parts.length)
+      row = server.addMsg(convId, {
+        role: 'assistant',
+        parts,
+        images: st.images,
+        tools: st.tools,
+        meta: { failed: true },
+      });
+    server.addCall({
       conversation_id: convId,
       reply_id: row ? row.id : null,
       started_at: new Date(st.started).toISOString(),
@@ -295,7 +304,7 @@ function failFlow(convId: string, st: RunState, script: Script, attempts: number
   if (st.pending) {
     const next = st.pending;
     setTimeout(() => {
-      if (bot.online && db.conv(convId) && !bot.runs.has(convId)) replyFlow(convId, next, true);
+      if (bot.online && server.has(convId) && !bot.runs.has(convId)) replyFlow(convId, next, true);
     }, 900);
   }
 }
@@ -403,9 +412,5 @@ export const nextScript = (kind: keyof typeof scriptIdx) => {
   return list[scriptIdx[kind]++ % list.length];
 };
 export function initLastReply() {
-  let t = 0;
-  for (const c of db.conversations)
-    for (const m of db.msgs(c.id))
-      if (m.role === 'assistant') t = Math.max(t, Date.parse(m.created_at));
-  return t;
+  return server.lastAssistantAt();
 }

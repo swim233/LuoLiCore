@@ -17,6 +17,9 @@ import type { Snap } from './status';
      reply:end      {convId, replyId, ms, usage, row}
      bot:online / bot:offline
      conv:add {conv} / conv:remove {id} / conv:update {id} / unread {convId} / data:reset {}
+     conv:messages {convId}   某个会话已取到的消息、段或加载状态变了
+     today:update             今日概况有了新数据
+     link                     和洛璃服务的连接状态变了
      chat:switch
      status         汇总后的状态（status.ts 算出） */
 type Empty = Record<string, never>;
@@ -54,6 +57,9 @@ export interface BusEvents {
   'conv:update': { id: string };
   unread: { convId: string };
   'data:reset': Empty;
+  'conv:messages': { convId: string };
+  'today:update': Empty;
+  link: Empty;
   'chat:switch': Empty;
   status: Snap;
 }

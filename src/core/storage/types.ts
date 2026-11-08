@@ -1,4 +1,4 @@
-import type { Message } from '../message.js';
+import type { Author, Message } from '../message.js';
 
 /** 序号区间：from 起（含）到 before 之前（不含），不给的一端不限 */
 export type SeqRange = { from?: number; before?: number };
@@ -71,6 +71,68 @@ export type ToolCall = {
   outputChars?: number;
 };
 
+/** 一条消息连同它的序号与时间 */
+export type StoredMessage = {
+  seq: number;
+  /** 消息自带的时间（metadata.createdAt），没带时为写入时间 */
+  createdAt: string;
+  message: Message;
+};
+
+/** 按序号取的一批消息 */
+export type MessagePage = {
+  /** 按序号升序 */
+  entries: StoredMessage[];
+  /** 这批之前还有更早的消息 */
+  hasMore: boolean;
+};
+
+/** 段连同它开始的时间 */
+export type StoredSegment = Segment & {
+  /** 这一段写入的时间（ISO）。没有段的旧会话视为一段，时间取会话的建立时间 */
+  createdAt: string;
+};
+
+/** 一条消息的要点，不含整条消息 */
+export type MessageGlance = {
+  seq: number;
+  /** 同 StoredMessage.createdAt */
+  createdAt: string;
+  role: Message['role'];
+  /** 用户消息的发言人 */
+  author?: Author;
+  /** 文字部分按顺序用换行连起来，最多取开头若干个字符（按 Unicode 字符计） */
+  text: string;
+  /** 文件（图片）部分的个数；工具结果里的图片不算 */
+  files: number;
+};
+
+/** 一个会话的概览 */
+export type ConversationOverview = StoredConversation & {
+  /** 会话建立的时间（ISO） */
+  createdAt: string;
+  /** 消息条数 */
+  messages: number;
+  /** 段数；没有段的旧会话算一段 */
+  segments: number;
+  /** 序号最大的那条消息；没有消息时没有 */
+  last?: MessageGlance;
+};
+
+/** 某时刻以来开始的模型调用的汇总 */
+export type ModelCallSummary = {
+  /** 用途为回复、结果为 completed 的次数 */
+  replies: number;
+  /** 用途为回复、结果为 failed 的次数 */
+  failedReplies: number;
+  /** 以下三项：全部用途（回复与摘要）、全部结果之和；服务端没报的按 0 计 */
+  inputTokens: number;
+  cacheReadTokens: number;
+  outputTokens: number;
+  /** 每个会话的回复数（口径同 replies），多的在前，同样多时按会话建立先后；没有回复的会话不列 */
+  repliesByConversation: Array<{ conversationId: string; title?: string; replies: number }>;
+};
+
 /** 一个会话的消息与段的存取。消息按序号排列；序号由存储分配，可以先预留再写入 */
 export type ConversationStore = {
   /** 按序号升序返回区间内的整条消息 */
@@ -83,6 +145,15 @@ export type ConversationStore = {
   add(message: Message, seq?: number): Promise<void>;
   /** 按 id 读一条消息；没有时为 undefined */
   get(id: string): Promise<Message | undefined>;
+  /** 同 get，附带序号与时间 */
+  entry(id: string): Promise<StoredMessage | undefined>;
+  /**
+   * 序号在 before 之前（不给时不限）的最后 limit 条消息，按序号升序；hasMore 说明这批之前还有没有。
+   * 用来从新到旧一批批往前取
+   */
+  page(options: { before?: number; limit: number }): Promise<MessagePage>;
+  /** 序号大于 after（不给时不限）的消息条数；给了 role 时只数这种角色的 */
+  count(options?: { after?: number; role?: Message['role'] }): Promise<number>;
   /** 按平台消息 id 找消息；没有时为 undefined */
   findByPlatformMessageId(platformMessageId: string): Promise<Message | undefined>;
   /** 按 id 换掉已写入的消息（如编辑后的正文）。序号与查询用的副本列不变；没有这条时抛错 */
@@ -94,6 +165,8 @@ export type ConversationStore = {
    * 视为从序号 1 开始、标题取会话标题、没有摘要的第一段
    */
   currentSegment(): Promise<Segment>;
+  /** 全部段，按开始的序号升序。会话还没有段时同 currentSegment，视为一段 */
+  segments(): Promise<StoredSegment[]>;
   /**
    * 开始新的一段；标题取会话此刻的标题。
    * 这个序号已经有一段时（如另一个进程刚切过）不写入，返回 false
@@ -148,5 +221,13 @@ export type Storage = {
   listConversations(platform: string): Promise<ConversationInfo[]>;
   /** 改会话标题；已有的段保留各自开始时的快照，新段用新标题 */
   updateTitle(id: string, title: string | undefined): Promise<void>;
+  /**
+   * 全部会话（不分平台）的概览，按建立先后。textChars：最后一条消息的文字取开头多少个字符，默认 200
+   */
+  overviews(options?: { textChars?: number }): Promise<ConversationOverview[]>;
+  /** 一个会话的概览；会话不存在时为 undefined */
+  overview(id: string, options?: { textChars?: number }): Promise<ConversationOverview | undefined>;
+  /** since（ISO 时间）及以后开始的模型调用的汇总 */
+  callSummary(since: string): Promise<ModelCallSummary>;
   close(): void;
 };

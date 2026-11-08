@@ -1,3 +1,4 @@
+import { dirname, join } from 'node:path';
 import { parseCommonConfig, type CommonConfig, type Env } from '../shared/config.js';
 import { parseTelegramConfig, type TelegramConfig } from '../telegram/config.js';
 
@@ -10,9 +11,11 @@ export type ServerConfig = CommonConfig & {
   telegram?: TelegramConfig;
   /**
    * 网页服务；LUOLI_WEB=off 时为 undefined。
-   * port：LUOLI_WEB_PORT，默认 7310。只监听 127.0.0.1
+   * port：LUOLI_WEB_PORT，默认 7310。只监听 127.0.0.1。
+   * dbPath：网页面板自己的状态（已读位置）存在这个 SQLite 文件里，LUOLI_WEB_DB，
+   * 默认为数据库所在目录下的 web.db
    */
-  web?: { port: number };
+  web?: { port: number; dbPath: string };
 };
 
 /**
@@ -27,7 +30,7 @@ export function parseServerConfig(
   const common = parseCommonConfig(env, modelId);
   if (!common.ok) return common;
 
-  const web = parseWeb(env);
+  const web = parseWeb(env, common.config.dbPath);
   if (!web.ok) return web;
 
   let telegram: TelegramConfig | undefined;
@@ -45,7 +48,8 @@ export function parseServerConfig(
 
 function parseWeb(
   env: Env,
-): { ok: true; config?: { port: number } } | { ok: false; error: string } {
+  dbPath: string,
+): { ok: true; config?: { port: number; dbPath: string } } | { ok: false; error: string } {
   const switchValue = env.LUOLI_WEB;
   if (switchValue === 'off') return { ok: true };
   if (switchValue) {
@@ -62,5 +66,8 @@ function parseWeb(
       error: `LUOLI_WEB_PORT 必须是 1 到 65535 之间的整数，当前为 "${rawPort}"`,
     };
   }
-  return { ok: true, config: { port } };
+  return {
+    ok: true,
+    config: { port, dbPath: env.LUOLI_WEB_DB || join(dirname(dbPath), 'web.db') },
+  };
 }

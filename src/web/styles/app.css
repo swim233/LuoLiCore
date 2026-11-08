@@ -2757,6 +2757,130 @@ button {
   --th: 84px;
   margin: 0;
 }
+/* 消息里的文字段：每段一块（一次回复里工具调用前后的话分开显示） */
+.msg-text {
+  display: block;
+}
+.msg-text + .msg-text {
+  margin-top: 6px;
+}
+/* 真实的图片：宽高按原图比例算好（Pic.tsx），读不到的显示「图片已丢失」 */
+.pic {
+  display: inline-block;
+  position: relative;
+  width: 160px;
+  height: 120px;
+  max-width: 100%;
+  border-radius: 8px;
+  overflow: hidden;
+  vertical-align: middle;
+  background: var(--fold-body);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--white) 10%, transparent),
+    0 6px 14px -6px color-mix(in srgb, var(--black) 70%, transparent);
+}
+.pic img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.pic.is-lost {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 120px;
+  height: 84px;
+  box-shadow: none;
+  border: 1px dashed var(--rule-hi);
+  color: var(--fg-3);
+  font-size: 12px;
+}
+/* 工具调用展开后：参数、结果、错误各一块，等宽字，太长在块里滚动 */
+.fold-k {
+  font-size: 11.5px;
+  color: var(--fg-3);
+  margin: 6px 0 2px;
+}
+.fold-k:first-child {
+  margin-top: 0;
+}
+.fold-k.bad {
+  color: var(--err);
+}
+.fold-pre {
+  margin: 0;
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: 12px/1.5 var(--font-term);
+  color: var(--fg-2);
+  scrollbar-width: thin;
+}
+/* 工具调用折叠行右边的状态（✓、× 出错）不换行 */
+.fold summary > span + span {
+  flex: none;
+  white-space: nowrap;
+}
+/* 时间线顶上的小提示（加载更早的消息）：贴在顶边，不占位置 */
+.log-top {
+  position: sticky;
+  top: 0;
+  height: 0;
+  z-index: 3;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  pointer-events: none;
+}
+.log-pill {
+  margin-top: -4px;
+  padding: 3px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--fg-2);
+  background: var(--fold-bg);
+  border: 1px solid var(--fold-bd);
+  backdrop-filter: blur(6px);
+  pointer-events: auto;
+}
+.log-pill.is-err {
+  color: var(--err);
+}
+.log-retry {
+  all: unset;
+  cursor: pointer;
+  margin-left: 8px;
+  color: var(--gold);
+  font-size: 12px;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid var(--edge-gold);
+}
+.empty .log-retry {
+  display: inline-block;
+  margin: 8px 0 0;
+  padding: 2px 10px;
+}
+.log-retry:focus-visible {
+  outline: 2px solid var(--gold);
+  outline-offset: 2px;
+}
+/* 「以下是新消息」：金色的分隔线 */
+.seg-line.is-new {
+  color: var(--gold);
+}
+.seg-line.is-new::before,
+.seg-line.is-new::after {
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--edge-gold) 35%,
+    var(--edge-gold) 65%,
+    transparent
+  );
+}
 .seg {
   align-self: stretch;
   display: flex;

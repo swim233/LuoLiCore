@@ -16,9 +16,13 @@ import { createApp } from './app.js';
 import { parseServerConfig } from './config.js';
 import { createEvents, type Events } from './events.js';
 import { hostname, listen, type Listener } from './listen.js';
+import { observeStorage } from './observed-storage.js';
 import { isBuilt, notBuiltText, webDist } from './pages.js';
+import { relayChanges } from './relay.js';
 import { createSessions } from './sessions.js';
 import type { ServiceStatus } from './types.js';
+import { createViews } from './views.js';
+import { openWebState, type WebState } from './web-state.js';
 
 // 洛璃服务（ADR-0009）：一个进程里有核心的各个会话、Telegram 前端（设了 token 时）与网页服务
 
@@ -85,20 +89,25 @@ try {
   process.exit(1);
 }
 
-// 会话管理：所有会话对象都从这里取，同一个会话只有一个
-const sessions = createSessions({
-  model: createModel({ ...config.model, fetch: requestLogging.fetch }),
-  prompts,
-  tools: installed.tools,
-  storage,
-  fileStore,
-  logger,
-  maxRetries: config.maxRetries,
-  timeouts: config.timeouts,
-  maxSteps: config.maxSteps,
-  toolHistoryChars: config.toolHistoryChars,
-  segments: config.segments,
-});
+// 网页面板自己的状态（已读位置），只在开网页服务时打开。第一次建立时，现有会话以当时最后一条
+// 消息为已读；打不开时退出
+let webState: WebState | undefined;
+if (config.web) {
+  const { dbPath } = config.web;
+  try {
+    mkdirSync(dirname(dbPath), { recursive: true });
+    webState = await openWebState(dbPath, async () =>
+      (await storage.overviews({ textChars: 0 })).flatMap((overview) =>
+        overview.last ? [[overview.id, overview.last.seq] as const] : [],
+      ),
+    );
+  } catch (error) {
+    console.error(`打开网页状态库失败（${dbPath}）：${(error as Error).message}`);
+    await requestLogging.close();
+    storage.close();
+    process.exit(1);
+  }
+}
 
 let telegram: Awaited<ReturnType<typeof startTelegram>> | undefined;
 
@@ -113,12 +122,34 @@ function status(): ServiceStatus {
   };
 }
 
+// 网页服务的数据与实时事件。写入经过包了一层的存储时，变化转成 SSE 事件推给面板
+const events = config.web ? createEvents({ status, logger }) : undefined;
+const views = webState && createViews({ storage, fileStore, webState });
+const relay = views && events && relayChanges({ views, events, logger });
+const observed = relay ? observeStorage(storage, relay.onChange) : storage;
+
+// 会话管理：所有会话对象都从这里取，同一个会话只有一个
+const sessions = createSessions({
+  model: createModel({ ...config.model, fetch: requestLogging.fetch }),
+  prompts,
+  tools: installed.tools,
+  storage: observed,
+  fileStore,
+  logger,
+  maxRetries: config.maxRetries,
+  timeouts: config.timeouts,
+  maxSteps: config.maxSteps,
+  toolHistoryChars: config.toolHistoryChars,
+  segments: config.segments,
+});
+
 /** 启动失败时：关掉已经打开的，退出 */
 async function fail(message: string, web?: { events: Events; listener: Listener }): Promise<never> {
   console.error(redact(message));
   await web?.events.close();
   await web?.listener.close();
   await sessions.close(0);
+  webState?.close();
   await requestLogging.close();
   storage.close();
   process.exit(1);
@@ -126,14 +157,13 @@ async function fail(message: string, web?: { events: Events; listener: Listener 
 
 // 先开网页服务：端口被占用时，在连 Telegram 之前就退出
 let web: { events: Events; listener: Listener; port: number } | undefined;
-if (config.web) {
+if (config.web && events && views) {
   const { port } = config.web;
   if (!isBuilt(webDist)) {
     console.error(notBuiltText);
     logger.warn({ dist: webDist }, 'web.not_built');
   }
-  const events = createEvents({ status, logger });
-  const app = createApp({ port, dist: webDist, events, status, logger });
+  const app = createApp({ port, dist: webDist, events, views, status, logger });
   try {
     web = { events, listener: await listen(app, port), port };
   } catch (error) {
@@ -147,7 +177,7 @@ if (config.telegram) {
     telegram = await startTelegram({
       config: config.telegram,
       open: (conversationId, options) => sessions.open(conversationId, options),
-      storage,
+      storage: observed,
       logger,
     });
   } catch (error) {
@@ -175,8 +205,11 @@ const stop = async () => {
   await telegram?.stop();
   // 其余进行中的回复同样等完或中止，再关闭各会话
   await sessions.close();
+  // 已经发生的写入，事件推完再断开面板
+  await relay?.settled();
   await web?.events.close();
   await web?.listener.close();
+  webState?.close();
   // 等已经开始的请求记录写完再关
   await requestLogging.close();
   storage.close();

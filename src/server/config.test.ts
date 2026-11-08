@@ -31,7 +31,7 @@ describe('洛璃服务的配置', () => {
         promptPath: undefined,
         requestLog: { path: 'data/requests.db', retentionDays: 30 },
         telegram: undefined,
-        web: { port: 7310 },
+        web: { port: 7310, dbPath: 'data/web.db' },
       },
     });
   });
@@ -65,7 +65,17 @@ describe('洛璃服务的配置', () => {
 
     expect(off.ok && off.config.web).toBeUndefined();
     expect(off.ok && off.config.telegram?.token).toBe(token);
-    expect(port.ok && port.config.web).toEqual({ port: 8080 });
+    expect(port.ok && port.config.web).toEqual({ port: 8080, dbPath: 'data/web.db' });
+  });
+
+  it('web.db 默认在数据库所在目录下；LUOLI_WEB_DB 改路径，空字符串按没设处理', () => {
+    const near = parse({ LUOLI_DB: '/srv/luoli/main.db' });
+    const set = parse({ LUOLI_WEB_DB: '/tmp/panel.db' });
+    const empty = parse({ LUOLI_WEB_DB: '' });
+
+    expect(near.ok && near.config.web?.dbPath).toBe('/srv/luoli/web.db');
+    expect(set.ok && set.config.web?.dbPath).toBe('/tmp/panel.db');
+    expect(empty.ok && empty.config.web?.dbPath).toBe('data/web.db');
   });
 
   it('Telegram 和网页都没开时报错', () => {

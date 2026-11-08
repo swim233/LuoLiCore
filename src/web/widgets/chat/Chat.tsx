@@ -196,7 +196,7 @@ function SegLine({ convId }: { convId: string }) {
   return (
     <div className="seg">
       <div className="seg-line">
-        <span>{`会话开始 · ${fmtDay(Date.parse(seg.created_at))}`}</span>
+        <span>{`会话开始 · ${fmtDay(Date.parse(seg.createdAt))}`}</span>
       </div>
     </div>
   );
@@ -254,6 +254,7 @@ function Composer({ convId, fullId }: { convId: string | null; fullId: string })
   const syncAtts = (id: string) => setAtts(draftOf(id).atts.slice());
   const addFiles = (files: File[]) => {
     const id = convId || newWebConv();
+    if (!id) return;
     const d = draftOf(id);
     let n = 0;
     for (const f of files) {

@@ -9,6 +9,7 @@ export {
   createMemoryFileStore,
   isSupportedImage,
   isSupportedMediaType,
+  mediaTypeOf,
   openFileStore,
   type FileStore,
   type NewFile,
@@ -75,12 +76,18 @@ export {
 } from './tools.js';
 export type {
   ConversationInfo,
+  ConversationOverview,
   ConversationStore,
+  MessageGlance,
+  MessagePage,
   ModelCall,
+  ModelCallSummary,
   NewConversation,
   Segment,
   SeqRange,
   Storage,
   StoredConversation,
+  StoredMessage,
+  StoredSegment,
   ToolCall,
 } from './storage/types.js';

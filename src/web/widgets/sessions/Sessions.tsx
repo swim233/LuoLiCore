@@ -3,17 +3,33 @@ import { IconSessions } from '../../components/icons';
 import { bus } from '../../model/bus';
 import type { BusEventName } from '../../model/bus';
 import { db } from '../../model/db';
-import { getSource } from '../../model/source';
+import { link, useLinkPhase } from '../../model/link';
+import type { LinkPhase } from '../../model/link';
 import { useBusRev } from '../../model/rev';
 import { ConvList, KIND_LABEL, lightUp } from './ConvList';
 import { Timeline } from './Timeline';
 import type { FullParams, ViewProps, WidgetDef } from '../types';
 
-const EMPTY = (
-  <div className="empty">
-    <b>还没有会话</b>群里有人发言后，会话会出现在这里
-  </div>
-);
+/* 列表没有内容时显示什么：加载中、连不上服务、确实没有会话 */
+function emptyOf(phase: LinkPhase) {
+  if (phase === 'loading')
+    return (
+      <div className="empty">
+        <b>加载中…</b>
+      </div>
+    );
+  if (phase === 'down')
+    return (
+      <div className="empty">
+        <b>连不上洛璃服务</b>连上后会自动恢复
+      </div>
+    );
+  return (
+    <div className="empty">
+      <b>还没有会话</b>群里有人发言后，会话会出现在这里
+    </div>
+  );
+}
 const EVENTS: BusEventName[] = [
   'message',
   'conv:add',
@@ -25,11 +41,13 @@ const EVENTS: BusEventName[] = [
   'reply:error',
   'status',
   'data:reset',
+  'link',
 ];
 
 /* 普通：会话列表 */
 function ListView({ handle }: { handle: ViewProps['handle'] }) {
   const rev = useBusRev(EVENTS);
+  const phase = useLinkPhase();
   useEffect(
     () =>
       bus.on('message', ({ convId, row }) => {
@@ -37,38 +55,41 @@ function ListView({ handle }: { handle: ViewProps['handle'] }) {
       }),
     [],
   );
-  const convs = db.sorted();
+  /* 连不上服务时不显示旧的列表，免得当成现在的 */
+  const convs = phase === 'ready' ? db.sorted() : [];
   return (
     <ConvList
       convs={convs}
       onPick={(id) => handle.openFull('sessions', { convId: id })}
       rev={rev}
       label="会话列表"
-      empty={EMPTY}
+      empty={emptyOf(phase)}
     />
   );
 }
 /* 全屏：左边列表（宽 240–300px，标题「全部会话」加个数），右边选中会话的时间线；窄屏分两层 */
 function FullView({ params }: { params: FullParams }) {
   const rev = useBusRev(EVENTS);
-  const convs = db.sorted();
+  const phase = useLinkPhase();
+  const convs = phase === 'ready' ? db.sorted() : [];
   const [selected, setSelected] = useState<string | null>(() =>
     params?.convId && db.conv(params.convId) ? params.convId : (convs[0]?.id ?? null),
   );
   const [detail, setDetail] = useState(!!params?.convId);
+  /* 选中一个会话只是打开它；算「看过」由时间线看有没有滚到最底下 */
   const select = (id: string | null) => {
     setSelected(id);
-    if (id) getSource().markRead(id);
     if (id) setDetail(true);
   };
-  useEffect(() => {
-    if (selected) getSource().markRead(selected);
-  }, [selected]);
   /* 在「此刻」里点「在会话中打开」：全屏里同一个部件换参数 */
   useEffect(() => {
     if (params?.convId && db.conv(params.convId) && params.convId !== selected)
       select(params.convId);
   }, [params?.convId]);
+  /* 没选过会话、数据后来才到：选第一个 */
+  useEffect(() => {
+    if (selected === null && convs.length) setSelected(convs[0].id);
+  }, [selected, convs.length]);
   useEffect(
     () =>
       bus.on('conv:remove', ({ id }) => {
@@ -76,20 +97,19 @@ function FullView({ params }: { params: FullParams }) {
       }),
     [selected],
   );
+  /* 整批换了数据（重新连上服务）：选中的会话还在就留着 */
   useEffect(
     () =>
       bus.on('data:reset', () => {
-        setDetail(false);
-        setSelected(db.sorted()[0]?.id ?? null);
+        setSelected((cur) => (cur && db.conv(cur) ? cur : (db.sorted()[0]?.id ?? null)));
       }),
     [],
   );
   useEffect(
     () =>
       bus.on('message', ({ convId, row }) => {
-        if (convId === selected) {
-          db.unread.delete(convId);
-        } else if (row && row.role === 'user') requestAnimationFrame(() => lightUp(convId));
+        if (convId !== selected && row && row.role === 'user')
+          requestAnimationFrame(() => lightUp(convId));
       }),
     [selected],
   );
@@ -99,7 +119,7 @@ function FullView({ params }: { params: FullParams }) {
       <aside className="sess-side">
         <div className="sess-side-head">
           <span>全部会话</span>
-          <span>{convs.length} 个</span>
+          <span>{phase === 'ready' ? `${convs.length} 个` : ''}</span>
         </div>
         <ConvList
           convs={convs}
@@ -107,7 +127,7 @@ function FullView({ params }: { params: FullParams }) {
           onPick={(id) => select(id)}
           rev={rev}
           label="会话列表"
-          empty={EMPTY}
+          empty={emptyOf(phase)}
         />
       </aside>
       <section className="sess-main">
@@ -125,7 +145,7 @@ function FullView({ params }: { params: FullParams }) {
           {c && <span className="pchip">{KIND_LABEL[c.kind]}</span>}
           <span className="sess-meta">
             {c
-              ? `${db.msgs(c.id).length} 条消息 · ${db.segs(c.id).length} 段${c.platform_conversation_id ? ' · id ' + c.platform_conversation_id : ''}`
+              ? `${c.messages} 条消息 · ${c.segments} 段${c.platformConversationId ? ' · id ' + c.platformConversationId : ''}`
               : ''}
           </span>
         </div>
@@ -142,14 +162,17 @@ export const SESSIONS_DEF: WidgetDef = {
   name: '会话',
   icon: IconSessions,
   defaultSize: '2x2',
-  refreshOn: ['message', 'conv:add', 'conv:remove', 'unread', 'data:reset'],
+  refreshOn: ['message', 'conv:add', 'conv:remove', 'conv:update', 'unread', 'data:reset', 'link'],
   init(w) {
     w.on('message', ({ row }) => {
       if (row && row.role === 'user') w.flash('stream');
     });
   },
   thumb() {
-    const n = db.conversations.filter((c) => db.unread.get(c.id)).length;
+    const phase = link.get().phase;
+    if (phase === 'down') return '连不上洛璃服务';
+    if (phase === 'loading') return '加载中…';
+    const n = db.conversations.filter((c) => c.unread > 0).length;
     return n ? (
       <>
         <em>{n}</em> 个会话有新消息
@@ -160,6 +183,7 @@ export const SESSIONS_DEF: WidgetDef = {
       '还没有会话'
     );
   },
-  sub: () => (db.conversations.length ? db.conversations.length + ' 个' : ''),
+  sub: () =>
+    link.get().phase === 'ready' && db.conversations.length ? db.conversations.length + ' 个' : '',
   View: SessionsView,
 };

@@ -1,8 +1,10 @@
 import { hashStr, pick, rand, randi, startOfDay, uid } from '../lib/util';
-import { db } from '../model/db';
-import type { ImagePart, Metadata, Part } from '../model/types';
+import { withDemo } from '../model/parts';
+import type { NewMessage } from '../model/source';
+import type { ImageInfo, ImagePart, Part, ToolResultInfo } from '../model/types';
 import { devUi } from './demo-state';
 import type { Dataset } from './demo-state';
+import { mockServer as server, svgImage, toolBody } from './mock-server';
 
 export const PEOPLE: Record<string, string> = {
   1001: '小明',
@@ -37,6 +39,11 @@ export function imgPart(h1: number, h2: number, label: string, w = 1280, ht = 96
 }
 
 /* --- 编数据用的小工具 --- */
+const filePart = (img: ImagePart): Part => ({
+  type: 'file',
+  mediaType: img.mediaType,
+  url: img.url,
+});
 export function U(
   convId: string,
   uidv: number | string,
@@ -46,53 +53,113 @@ export function U(
 ) {
   const name = PEOPLE[uidv] || String(uidv);
   const parts: Part[] = [];
-  if (extra?.image) parts.push(extra.image);
+  const images: Record<string, ImageInfo | null> = {};
+  if (extra?.image) {
+    parts.push(filePart(extra.image));
+    images[extra.image.url] = svgImage(extra.image);
+  }
   if (text) parts.push({ type: 'text', text });
-  return db.addMsg(convId, {
+  return server.addMsg(convId, {
     role: 'user',
-    author: { name, uid: UIDS[uidv] || (PEOPLE[uidv] ? String(uidv) : null) },
+    author: { id: UIDS[uidv] || (PEOPLE[uidv] ? String(uidv) : undefined), name },
     parts,
+    images,
     at,
   })!;
 }
+export interface ToolSpec {
+  url: string;
+  summary: string;
+  ms?: number;
+  chars?: number;
+  ok?: boolean;
+  image?: ImagePart | null;
+}
+/** 一次 fetch 工具调用：真实的 part（结果文字最多 2000 个字符，带图片的是 luoli-content），加图片与结果长度的信息；
+    summary、ms、image 是「此刻」「对话」还在读的演示字段 */
+export function toolPart(callId: string, t: ToolSpec) {
+  const images: Record<string, ImageInfo | null> = {};
+  const tools: Record<string, ToolResultInfo> = {};
+  const full = t.chars || 1830;
+  const demo = { ms: t.ms || 800, summary: t.summary, image: t.image || null };
+  if (t.ok === false) {
+    const errorText = '抓取失败：HTTP 404';
+    tools[callId] = { chars: errorText.length, truncated: false };
+    return {
+      part: withDemo(
+        {
+          type: 'tool-fetch',
+          toolCallId: callId,
+          state: 'output-error',
+          input: { url: t.url },
+          errorText,
+        } as Part,
+        demo,
+      ),
+      images,
+      tools,
+    };
+  }
+  const text = toolBody(t.summary, Math.min(full, 2000));
+  let output: unknown = text;
+  if (t.image) {
+    output = {
+      type: 'luoli-content',
+      parts: [
+        { type: 'text', text },
+        {
+          type: 'image',
+          url: t.image.url,
+          mediaType: t.image.mediaType,
+          width: t.image.demo?.w,
+          height: t.image.demo?.h,
+          bytes: 52_000,
+        },
+      ],
+    };
+    images[t.image.url] = svgImage(t.image);
+  }
+  tools[callId] = { chars: full, truncated: full > 2000 };
+  return {
+    part: withDemo(
+      {
+        type: 'tool-fetch',
+        toolCallId: callId,
+        state: 'output-available',
+        input: { url: t.url },
+        output,
+      } as Part,
+      demo,
+    ),
+    images,
+    tools,
+  };
+}
 export interface AOpts {
   think?: [string, number];
-  tool?: {
-    url: string;
-    summary: string;
-    ms?: number;
-    chars?: number;
-    ok?: boolean;
-    image?: ImagePart | null;
-  };
+  tool?: ToolSpec;
   usage?: [number, number, number];
   failed?: boolean;
   aborted?: boolean;
 }
 export function A(convId: string, text: string, at: number, o: AOpts = {}) {
   const parts: Part[] = [];
-  if (o.think) parts.push({ type: 'reasoning', text: o.think[0], demo: { sec: o.think[1] } });
-  if (o.tool)
-    parts.push({
-      type: 'tool-fetch',
-      toolCallId: uid('call'),
-      state: o.tool.ok === false ? 'output-error' : 'output-available',
-      input: { url: o.tool.url },
-      output: { summary: o.tool.summary, chars: o.tool.chars || 1830 },
-      demo: { ms: o.tool.ms || 800, image: o.tool.image || null },
-    });
+  let images: Record<string, ImageInfo | null> = {};
+  let tools: Record<string, ToolResultInfo> = {};
+  if (o.think) parts.push(withDemo({ type: 'reasoning', text: o.think[0] }, { sec: o.think[1] }));
+  if (o.tool) {
+    const t = toolPart(uid('call'), o.tool);
+    parts.push(t.part);
+    images = t.images;
+    tools = t.tools;
+  }
   if (text) parts.push({ type: 'text', text });
-  const meta: Metadata = {};
-  if (o.usage)
-    meta.usage = {
-      inputTokens: o.usage[0],
-      cachedInputTokens: o.usage[1],
-      outputTokens: o.usage[2],
-    };
+  const meta: NewMessage['meta'] = {};
+  if (o.usage) meta.usage = { input: o.usage[0], cacheRead: o.usage[1], output: o.usage[2] };
   if (o.failed) meta.failed = true;
   if (o.aborted) meta.aborted = true;
-  const row = db.addMsg(convId, { role: 'assistant', parts, at, meta })!;
-  db.addCall({
+  const row = server.addMsg(convId, { role: 'assistant', parts, images, tools, at, meta })!;
+  server.addCall({
     conversation_id: convId,
     reply_id: row.id,
     started_at: new Date(at - 3000).toISOString(),
@@ -113,7 +180,7 @@ const MIN = 60e3,
 
 function seedNormal() {
   const now = Date.now();
-  const book = db.addConv({
+  const book = server.addConv({
     platform: 'telegram',
     kind: 'group',
     title: '读书会',
@@ -121,7 +188,7 @@ function seedNormal() {
     at: now - 9 * DAY,
     id: 'c-book',
   }).id;
-  db.addSeg(book, 'first', now - 2 * DAY - 3 * HOUR, null);
+  server.addSeg(book, 'first', now - 2 * DAY - 3 * HOUR, null);
   U(book, 1001, '这个月读什么？我提名《三体》', now - 2 * DAY - 3 * HOUR);
   U(book, 1004, '三体我读过三遍了😂 换一本吧', now - 2 * DAY - 3 * HOUR + 2 * MIN);
   U(book, 1002, '@洛璃 有没有不太长、又能聊很久的书', now - 2 * DAY - 3 * HOUR + 4 * MIN);
@@ -137,7 +204,7 @@ function seedNormal() {
       usage: [1620, 0, 58],
     },
   );
-  db.addSeg(
+  server.addSeg(
     book,
     'idle',
     now - DAY - 5 * HOUR,
@@ -157,7 +224,7 @@ function seedNormal() {
     now - DAY - 4 * HOUR - 39 * MIN,
     { usage: [2210, 1536, 61] },
   );
-  db.addSeg(
+  server.addSeg(
     book,
     'compress',
     now - 5 * HOUR,
@@ -183,7 +250,7 @@ function seedNormal() {
   );
   U(book, 1003, '好，周六见', now - 2 * HOUR);
 
-  const star = db.addConv({
+  const star = server.addConv({
     platform: 'telegram',
     kind: 'group',
     title: '星空观测站',
@@ -191,7 +258,7 @@ function seedNormal() {
     at: now - 30 * DAY,
     id: 'c-star',
   }).id;
-  db.addSeg(
+  server.addSeg(
     star,
     'idle',
     now - 7 * HOUR,
@@ -217,9 +284,9 @@ function seedNormal() {
   });
   U(star, 2002, '那 17 号一起去水库？', now - 12 * MIN);
   U(star, 1002, '我可以！', now - 8 * MIN);
-  db.unread.set(star, 2);
+  server.setUnread(star, 2);
 
-  const ball = db.addConv({
+  const ball = server.addConv({
     platform: 'telegram',
     kind: 'group',
     title: '周末打球',
@@ -227,38 +294,37 @@ function seedNormal() {
     at: now - 60 * DAY,
     id: 'c-ball',
   }).id;
-  db.addSeg(ball, 'first', now - 6 * HOUR, null);
+  server.addSeg(ball, 'first', now - 6 * HOUR, null);
   U(ball, 3001, '周六上午 9 点，老地方', now - 6 * HOUR);
   U(ball, 3002, '我带球，谁带打气筒', now - 5 * HOUR - 30 * MIN);
   U(ball, 1003, 'nori 周六会下雨吗', now - 5 * HOUR);
   A(ball, '我看看哦，周六上午', now - 5 * HOUR + MIN, { failed: true });
   U(ball, 3001, '洛璃好像卡住了哈哈', now - 4 * HOUR - 50 * MIN);
   U(ball, 3002, '那就先按不下雨准备', now - 50 * MIN);
-  db.unread.set(ball, 3);
+  server.setUnread(ball, 3);
 
-  const dm = db.addConv({
+  const dm = server.addConv({
     platform: 'telegram',
     kind: 'private',
-    title: '小雨',
+    title: '与 小雨 的私聊',
     chatId: '50001002',
     at: now - 40 * DAY,
     id: 'c-dm',
   }).id;
-  db.addSeg(dm, 'first', now - 13 * HOUR, null);
+  server.addSeg(dm, 'first', now - 13 * HOUR, null);
   U(dm, 1002, '洛璃晚安～', now - 13 * HOUR);
   A(dm, '晚安小雨！明天也要元气满满哦！', now - 13 * HOUR + MIN, { usage: [980, 768, 18] });
   U(dm, 1002, '早！今天降温了', now - 70 * MIN);
   A(dm, '早呀！今天最高只有 9 度，出门记得围巾～', now - 69 * MIN, { usage: [1120, 768, 21] });
-  db.unread.set(dm, 1);
+  server.setUnread(dm, 1);
 
-  const cli = db.addConv({
+  const cli = server.addConv({
     platform: 'cli',
     kind: 'cli',
-    title: 'CLI',
     at: now - 3 * DAY,
     id: 'c-cli',
   }).id;
-  db.addSeg(cli, 'first', now - 26 * HOUR, null);
+  server.addSeg(cli, 'first', now - 26 * HOUR, null);
   U(cli, '小林', '测试一下 fetch 工具 https://example.com', now - 26 * HOUR);
   A(
     cli,
@@ -277,14 +343,14 @@ function seedNormal() {
   U(cli, '小林', '写一首关于星星的长诗', now - 25 * HOUR);
   A(cli, '星星落进口袋里，\n口袋里装着一整个夏天，', now - 25 * HOUR + MIN, { aborted: true });
 
-  const w1 = db.addConv({
+  const w1 = server.addConv({
     platform: 'web',
     kind: 'web',
     title: '推荐几部科幻小说',
     at: now - 3 * DAY,
     id: 'c-web1',
   }).id;
-  db.addSeg(w1, 'first', now - 3 * DAY, null);
+  server.addSeg(w1, 'first', now - 3 * DAY, null);
   U(w1, '你', '推荐几部科幻小说', now - 3 * DAY);
   A(
     w1,
@@ -292,14 +358,14 @@ function seedNormal() {
     now - 3 * DAY + MIN,
     { usage: [1210, 0, 52] },
   );
-  const w2 = db.addConv({
+  const w2 = server.addConv({
     platform: 'web',
     kind: 'web',
     title: '帮我起个群名',
     at: now - 20 * HOUR,
     id: 'c-web2',
   }).id;
-  db.addSeg(w2, 'first', now - 20 * HOUR, null);
+  server.addSeg(w2, 'first', now - 20 * HOUR, null);
   U(w2, '你', '帮我给天文社团起个群名', now - 20 * HOUR);
   A(w2, '“今晚有星星”“拾星社”“仰望小分队”——我最喜欢第一个，像一句约定～', now - 20 * HOUR + MIN, {
     usage: [1180, 768, 40],
@@ -320,7 +386,7 @@ function seedNormal() {
   for (const [cid, n] of weights)
     for (let i = 0; i < n; i++) {
       const inp = randi(2600, 5600);
-      db.addCall({
+      server.addCall({
         conversation_id: cid,
         started_at: new Date(t0 + (((k++ * 7919) % 44) / 44) * span).toISOString(),
         duration_ms: randi(1200, 5200),
@@ -332,8 +398,20 @@ function seedNormal() {
         tool_calls: 0,
       });
     }
+  // 摘要也是模型调用：今天的 token 把它们算进去，回复数不算
   for (let i = 0; i < 2; i++)
-    db.addCall({
+    server.addCall({
+      conversation_id: book,
+      started_at: new Date(t0 + span * (0.2 + i * 0.3)).toISOString(),
+      duration_ms: 4200,
+      outcome: 'completed',
+      purpose: 'summary',
+      input_tokens: 8200,
+      cache_read_tokens: 6144,
+      output_tokens: 310,
+    });
+  for (let i = 0; i < 2; i++)
+    server.addCall({
       conversation_id: ball,
       started_at: new Date(t0 + span * (0.3 + i * 0.4)).toISOString(),
       duration_ms: 3100,
@@ -409,19 +487,21 @@ function seedBig() {
   const now = Date.now();
   BIG_TITLES.forEach((title, i) => {
     const kind = i === 5 ? 'private' : 'group';
-    const c = db.addConv({
+    const c = server.addConv({
       platform: 'telegram',
       kind,
-      title: kind === 'private' ? '晴天' : title,
+      title: kind === 'private' ? '与 晴天 的私聊' : title,
       chatId: String(-1001288370000 - i),
       at: now - (40 + i) * DAY,
     }).id;
-    const n = randi(14, 34);
-    let t = now - randi(2, 60 * 30) * MIN - n * 9 * MIN;
-    db.addSeg(c, 'first', t, null);
+    // 第一个会话有 650 条消息：看分批取（200 条一批）和「一次取到分隔线那条」
+    const long = i === 0;
+    const n = long ? 650 : randi(14, 34);
+    let t = long ? now - 650 * 8 * MIN : now - randi(2, 60 * 30) * MIN - n * 9 * MIN;
+    server.addSeg(c, 'first', t, null);
     for (let j = 0; j < n; j++) {
-      if (j === Math.floor(n / 2))
-        db.addSeg(
+      if (long ? j > 0 && j % 160 === 0 : j === Math.floor(n / 2))
+        server.addSeg(
           c,
           j % 2 ? 'compress' : 'idle',
           t,
@@ -452,11 +532,12 @@ function seedBig() {
         );
       t += randi(2, 14) * MIN;
     }
-    if (i % 3 === 0) db.unread.set(c, randi(1, 99));
+    if (long) server.setUnread(c, 320);
+    else if (i % 3 === 0) server.setUnread(c, randi(1, 99));
   });
   ['帮我写一段很长很长的自我介绍，用在社团招新上', '新对话'].forEach((title, i) => {
-    const c = db.addConv({ platform: 'web', kind: 'web', title, at: now - (i + 1) * HOUR }).id;
-    db.addSeg(c, 'first', now - (i + 1) * HOUR, null);
+    const c = server.addConv({ platform: 'web', kind: 'web', title, at: now - (i + 1) * HOUR }).id;
+    server.addSeg(c, 'first', now - (i + 1) * HOUR, null);
     if (i === 0) {
       U(c, '你', title, now - HOUR);
       A(c, '好的！' + LONG_LINES[2] + LONG_LINES[1], now - HOUR + MIN, { usage: [1800, 0, 260] });
@@ -464,8 +545,8 @@ function seedBig() {
   });
   const t0 = startOfDay(now);
   for (let i = 0; i < 380; i++)
-    db.addCall({
-      conversation_id: db.conversations[i % 30].id,
+    server.addCall({
+      conversation_id: server.all()[i % 30].id,
       started_at: new Date(t0 + rand(0, Math.max(now - t0 - MIN, MIN))).toISOString(),
       duration_ms: 2000,
       outcome: i % 37 === 0 ? 'failed' : 'completed',
@@ -475,9 +556,16 @@ function seedBig() {
     });
 }
 
+/** 灌模拟服务的数据（不推事件）。灌完要调用 mockSource 的 resync 把它交给客户端 */
 export function loadData(kind: Dataset) {
-  db.reset();
+  server.reset();
   devUi.set({ dataset: kind });
-  if (kind === 'normal') seedNormal();
-  else if (kind === 'big') seedBig();
+  server.silent = true;
+  try {
+    if (kind === 'normal') seedNormal();
+    else if (kind === 'big') seedBig();
+    server.settle();
+  } finally {
+    server.silent = false;
+  }
 }

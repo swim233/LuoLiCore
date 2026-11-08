@@ -1,7 +1,17 @@
 import { generateId } from 'ai';
 import type { Message } from '../message.js';
 import { DuplicateMessageError } from './errors.js';
-import type { ConversationStore, ModelCall, Segment, Storage, ToolCall } from './types.js';
+import type {
+  ConversationOverview,
+  ConversationStore,
+  MessageGlance,
+  ModelCall,
+  ModelCallSummary,
+  Storage,
+  StoredMessage,
+  StoredSegment,
+  ToolCall,
+} from './types.js';
 
 // createdAt 对应 SQLite 的 created_at 列：消息自带的时间，没带时取写入时间
 type Row = { seq: number; message: Message; createdAt: string; addedAt: number };
@@ -9,14 +19,19 @@ type Row = { seq: number; message: Message; createdAt: string; addedAt: number }
 /** 一个会话在内存里的全部数据 */
 type Data = {
   title?: string;
+  /** 会话建立的时间 */
+  createdAt: string;
   rows: Row[];
-  segments: Segment[];
+  segments: StoredSegment[];
   calls: ModelCall[];
   toolCalls: ToolCall[];
 };
 
 // 写入顺序计数，「最后一条消息最新」时间相同时用它分先后（对应 SQLite 的 rowid）
 let addCounter = 0;
+
+/** 概览里最后一条消息的文字默认取多少个字符，同 SQLite 存储 */
+const defaultTextChars = 200;
 
 /**
  * 内存里的一个新会话（已有第一段），语义与 SQLite 实现一致（含序号预留、重复序号报错）。
@@ -27,26 +42,31 @@ export function createMemoryStore({ title }: { title?: string } = {}): Conversat
 }
 
 function newData(title: string | undefined): Data {
+  const createdAt = new Date().toISOString();
   return {
     title,
+    createdAt,
     rows: [],
-    segments: [{ startSeq: 1, startReason: 'first', conversationTitle: title }],
+    segments: [{ startSeq: 1, startReason: 'first', conversationTitle: title, createdAt }],
     calls: [],
     toolCalls: [],
   };
 }
 
+function storedMessage({ seq, createdAt, message }: Row): StoredMessage {
+  return structuredClone({ seq, createdAt, message });
+}
+
 function memoryStore(data: Data): ConversationStore {
   const { rows, segments, calls, toolCalls } = data;
   let nextSeq = 1;
+  const ordered = () => [...rows].sort((a, b) => a.seq - b.seq);
   const entries: ConversationStore['entries'] = async ({ from, before } = {}) => {
-    const ordered = rows
-      .filter(
-        (row) =>
-          (from === undefined || row.seq >= from) && (before === undefined || row.seq < before),
-      )
-      .sort((a, b) => a.seq - b.seq);
-    return structuredClone(ordered.map(({ seq, message }) => ({ seq, message })));
+    const inRange = ordered().filter(
+      (row) =>
+        (from === undefined || row.seq >= from) && (before === undefined || row.seq < before),
+    );
+    return structuredClone(inRange.map(({ seq, message }) => ({ seq, message })));
   };
   return {
     entries,
@@ -54,7 +74,7 @@ function memoryStore(data: Data): ConversationStore {
       return (await entries(range)).map((entry) => entry.message);
     },
     async last() {
-      const last = rows.reduce<Row | undefined>((a, b) => (a && a.seq > b.seq ? a : b), undefined);
+      const last = lastRow(rows);
       return last && { seq: last.seq, createdAt: last.createdAt };
     },
     async add(message, seq = nextSeq++) {
@@ -81,6 +101,20 @@ function memoryStore(data: Data): ConversationStore {
       const row = rows.find((r) => r.message.id === id);
       return row && structuredClone(row.message);
     },
+    async entry(id) {
+      const row = rows.find((r) => r.message.id === id);
+      return row && storedMessage(row);
+    },
+    async page({ before, limit }) {
+      const earlier = ordered().filter((row) => before === undefined || row.seq < before);
+      const taken = earlier.slice(Math.max(0, earlier.length - limit));
+      return { entries: taken.map(storedMessage), hasMore: earlier.length > taken.length };
+    },
+    async count({ after = 0, role } = {}) {
+      return rows.filter(
+        (row) => row.seq > after && (role === undefined || row.message.role === role),
+      ).length;
+    },
     async findByPlatformMessageId(platformMessageId) {
       const row = rows.find((r) => r.message.metadata?.platformMessageId === platformMessageId);
       return row && structuredClone(row.message);
@@ -91,17 +125,27 @@ function memoryStore(data: Data): ConversationStore {
       row.message = structuredClone(message);
     },
     async currentSegment() {
-      const current = segments.reduce<Segment | undefined>(
+      const current = segments.reduce<StoredSegment | undefined>(
         (a, b) => (a && a.startSeq > b.startSeq ? a : b),
         undefined,
       );
-      return structuredClone(
-        current ?? { startSeq: 1, startReason: 'first', conversationTitle: data.title },
-      );
+      if (!current) return { startSeq: 1, startReason: 'first', conversationTitle: data.title };
+      // 不带时间：只有 segments() 给时间
+      const { startSeq, startReason, conversationTitle, priorSummary } = current;
+      return structuredClone({ startSeq, startReason, conversationTitle, priorSummary });
+    },
+    async segments() {
+      return structuredClone([...segments].sort((a, b) => a.startSeq - b.startSeq));
     },
     async addSegment({ startSeq, startReason, priorSummary }) {
       if (segments.some((segment) => segment.startSeq === startSeq)) return false;
-      segments.push({ startSeq, startReason, conversationTitle: data.title, priorSummary });
+      segments.push({
+        startSeq,
+        startReason,
+        conversationTitle: data.title,
+        priorSummary,
+        createdAt: new Date().toISOString(),
+      });
       return true;
     },
     async recordCall(call) {
@@ -119,12 +163,51 @@ function memoryStore(data: Data): ConversationStore {
   };
 }
 
+function lastRow(rows: Row[]): Row | undefined {
+  return rows.reduce<Row | undefined>((a, b) => (a && a.seq > b.seq ? a : b), undefined);
+}
+
+/** 最后一条消息的要点，口径同 SQLite 存储：文字按 Unicode 字符截 */
+function glance(row: Row, textChars: number): MessageGlance {
+  const { message } = row;
+  const text = message.parts
+    .flatMap((part) => (part.type === 'text' ? [part.text] : []))
+    .join('\n');
+  const author = message.metadata?.author;
+  return structuredClone({
+    seq: row.seq,
+    createdAt: row.createdAt,
+    role: message.role,
+    ...(author === undefined ? {} : { author }),
+    text: [...text].slice(0, textChars).join(''),
+    files: message.parts.filter((part) => part.type === 'file').length,
+  });
+}
+
 /** 内存里的多个会话，接口与语义同 SQLite 存储，供测试使用 */
 export function createMemoryStorage(): Storage {
   const conversations = new Map<
     string,
     { platform: string; platformConversationId?: string; data: Data; store: ConversationStore }
   >();
+
+  const overviewOf = (id: string, textChars: number): ConversationOverview | undefined => {
+    const conversation = conversations.get(id);
+    if (!conversation) return undefined;
+    const { platform, platformConversationId, data } = conversation;
+    const last = lastRow(data.rows);
+    return {
+      id,
+      platform,
+      platformConversationId,
+      title: data.title,
+      createdAt: data.createdAt,
+      messages: data.rows.length,
+      segments: Math.max(1, data.segments.length),
+      ...(last === undefined ? {} : { last: glance(last, textChars) }),
+    };
+  };
+
   return {
     async createConversation({ platform, platformConversationId, title }) {
       const duplicate = [...conversations.values()].some(
@@ -184,6 +267,41 @@ export function createMemoryStorage(): Storage {
       const conversation = conversations.get(id);
       if (!conversation) throw new Error(`会话 ${id} 不存在`);
       conversation.data.title = title;
+    },
+    async overviews({ textChars = defaultTextChars } = {}) {
+      return [...conversations.keys()].map((id) => overviewOf(id, textChars)!);
+    },
+    async overview(id, { textChars = defaultTextChars } = {}) {
+      return overviewOf(id, textChars);
+    },
+    async callSummary(since) {
+      const summary: ModelCallSummary = {
+        replies: 0,
+        failedReplies: 0,
+        inputTokens: 0,
+        cacheReadTokens: 0,
+        outputTokens: 0,
+        repliesByConversation: [],
+      };
+      // Map 按插入顺序遍历，即会话建立先后
+      for (const [conversationId, { data }] of conversations) {
+        let replies = 0;
+        for (const call of data.calls) {
+          if (call.startedAt < since) continue;
+          if (call.purpose === 'reply' && call.outcome === 'completed') replies++;
+          if (call.purpose === 'reply' && call.outcome === 'failed') summary.failedReplies++;
+          summary.inputTokens += call.inputTokens ?? 0;
+          summary.cacheReadTokens += call.cacheReadTokens ?? 0;
+          summary.outputTokens += call.outputTokens ?? 0;
+        }
+        summary.replies += replies;
+        if (replies > 0) {
+          summary.repliesByConversation.push({ conversationId, title: data.title, replies });
+        }
+      }
+      // 稳定排序：同样多时保持建立先后
+      summary.repliesByConversation.sort((a, b) => b.replies - a.replies);
+      return summary;
     },
     close() {},
   };
