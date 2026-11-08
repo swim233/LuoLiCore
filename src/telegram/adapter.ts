@@ -19,6 +19,7 @@ import type { TelegramRaw } from './message.js';
  * - 相册：适配器攒齐后只派发一条（原始数据只有最后一条），各条原始消息另记一份，由 takeAlbum 取回。
  *   相册某一条的编辑不再攒，立即按单条派发。
  * - 下载文件：公开基类的 downloadFile。
+ * - 连接状态：记下最近一次拉取更新是否成功（connected），洛璃服务据此报告「离线」。
  */
 export class LuoliTelegramAdapter extends TelegramAdapter {
   private readonly chains = new Map<string, Promise<void>>();
@@ -31,6 +32,16 @@ export class LuoliTelegramAdapter extends TelegramAdapter {
   private markCaughtUp!: () => void;
   /** 启动后离线积压的更新都处理完时兑现；没有积压时，第一次拉取返回空之后兑现 */
   readonly caughtUp = new Promise<void>((resolve) => (this.markCaughtUp = resolve));
+  // 最近一次拉取更新是否成功
+  private polled = false;
+
+  /**
+   * 连得上 Telegram：最近一次拉取更新（getUpdates）成功。拉取失败（网络不通、token 失效等）时为 false，
+   * 下一次成功时恢复；被中止的拉取（等相册攒齐、退出）不算。还没拉取过时为 false
+   */
+  get connected(): boolean {
+    return this.polled;
+  }
 
   constructor(config: TelegramAdapterConfig) {
     super(config);
@@ -46,14 +57,29 @@ export class LuoliTelegramAdapter extends TelegramAdapter {
     if (method !== 'getUpdates' || payload instanceof FormData) {
       return super.telegramFetch<TResult>(method, payload, request);
     }
+    try {
+      const updates = await this.fetchUpdates<TResult>(payload, request);
+      this.polled = true;
+      return updates;
+    } catch (error) {
+      if (!request?.signal?.aborted) this.polled = false;
+      throw error;
+    }
+  }
+
+  /** getUpdates：积压取完之前不长轮询 */
+  private async fetchUpdates<TResult>(
+    payload: Record<string, unknown> | undefined,
+    request?: { signal?: AbortSignal },
+  ): Promise<TResult> {
     if (this.backlogDrained) {
       // 轮询要等上一批都处理完才拉下一批：积压的最后一批这时已经处理完；相册要等它也派发完
       if (this.backlogAlbums.size === 0) this.markCaughtUp();
-      return super.telegramFetch<TResult>(method, payload, request);
+      return super.telegramFetch<TResult>('getUpdates', payload, request);
     }
     // 还在取积压：不等新消息，立即返回
     const updates = await super.telegramFetch<TelegramUpdate[]>(
-      method,
+      'getUpdates',
       { ...payload, timeout: 0 },
       request,
     );

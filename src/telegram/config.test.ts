@@ -2,11 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { defaultErrorText, parseTelegramConfig } from './config.js';
 
 const token = '123456:ABC-def_ghi';
-const base = {
-  LUOLI_BASE_URL: 'https://api.example.com/v1',
-  LUOLI_MODEL: 'some-model',
-  LUOLI_TELEGRAM_TOKEN: token,
-};
+const base = { LUOLI_TELEGRAM_TOKEN: token };
 
 function parse(env: Record<string, string | undefined>) {
   return parseTelegramConfig({ ...base, ...env });
@@ -19,20 +15,12 @@ function errorOf(env: Record<string, string | undefined>): string {
 }
 
 describe('Telegram 配置', () => {
-  it('默认值：白名单为空，唤醒词 nori，固定提示，官方 API 地址；共用配置与 CLI 相同', () => {
+  it('默认值：白名单为空，唤醒词 nori，固定提示，官方 API 地址；只有 Telegram 自己的配置', () => {
     const result = parse({});
 
     expect(result).toEqual({
       ok: true,
       config: {
-        model: { baseURL: 'https://api.example.com/v1', apiKey: undefined, modelId: 'some-model' },
-        maxRetries: undefined,
-        timeouts: {},
-        segments: {},
-        dbPath: 'data/luoli.db',
-        filesDir: 'data/files',
-        promptPath: undefined,
-        requestLog: { path: 'data/requests.db', retentionDays: 30 },
         token,
         chats: new Set(),
         users: new Set(),
@@ -68,16 +56,7 @@ describe('Telegram 配置', () => {
     expect(result.ok && result.config.staleMs).toBe(30 * 60_000);
   });
 
-  it('LUOLI_PROMPT 设了时原样保留路径；不设或为空时为 undefined，由 core 用仓库里的 prompts/system.md', () => {
-    const set = parse({ LUOLI_PROMPT: 'my/persona.md' });
-    const empty = parse({ LUOLI_PROMPT: '' });
-
-    expect(set.ok && set.config.promptPath).toBe('my/persona.md');
-    expect(empty.ok && empty.config.promptPath).toBeUndefined();
-  });
-
-  it('缺少模型或 token 时报错', () => {
-    expect(errorOf({ LUOLI_MODEL: '' })).toContain('LUOLI_MODEL');
+  it('缺少 token 时报错', () => {
     expect(errorOf({ LUOLI_TELEGRAM_TOKEN: undefined })).toBe('缺少环境变量 LUOLI_TELEGRAM_TOKEN');
   });
 
@@ -88,7 +67,6 @@ describe('Telegram 配置', () => {
       errorOf({ LUOLI_TELEGRAM_USERS: 'abc' }),
       errorOf({ LUOLI_WAKE_WORDS: ' , ' }),
       errorOf({ LUOLI_TELEGRAM_API_URL: 'not a url' }),
-      errorOf({ LUOLI_MAX_RETRIES: '-1' }),
       ...['0', 'abc', '-5', '1.5'].map((value) => errorOf({ LUOLI_TELEGRAM_STALE_MINUTES: value })),
     ];
 
@@ -98,7 +76,6 @@ describe('Telegram 配置', () => {
       'LUOLI_TELEGRAM_USERS 的第 1 项不是数字 id',
       'LUOLI_WAKE_WORDS 里没有唤醒词',
       'LUOLI_TELEGRAM_API_URL 不是合法的 URL',
-      'LUOLI_MAX_RETRIES 必须是非负整数，当前为 "-1"',
       ...Array(4).fill('LUOLI_TELEGRAM_STALE_MINUTES 必须是正整数（分钟）'),
     ]);
     expect(errors.join('\n')).not.toContain('ABC-def');

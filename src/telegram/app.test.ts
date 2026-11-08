@@ -5,6 +5,7 @@ import type { StateAdapter } from 'chat';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { TelegramChat, TelegramUser } from '@chat-adapter/telegram';
 import {
+  createConversation,
   createMemoryFileStore,
   createMemoryStorage,
   type Logger,
@@ -107,6 +108,7 @@ async function start(
   running.push(() => api.close());
   backlog?.(api);
   const { logger, entries } = recordingLogger();
+  const fileStore = createMemoryFileStore();
   const app = await startTelegram({
     config: {
       token,
@@ -116,14 +118,20 @@ async function start(
       wakeWords: ['nori'],
       errorText: '（出了点问题）',
       staleMs: 60 * 60_000,
-      timeouts: {},
-      segments: {},
-      maxRetries: 0,
     },
-    model,
-    prompts: testPrompts('你是测试助手'),
+    // 洛璃服务里由会话管理提供；这里直接建
+    open: async (conversationId, { checkIdleOnCreate }) =>
+      createConversation({
+        model,
+        prompts: testPrompts('你是测试助手'),
+        store: await storage.openConversation(conversationId),
+        fileStore,
+        logger,
+        maxRetries: 0,
+        conversationId,
+        checkIdleOnCreate,
+      }),
     storage,
-    fileStore: createMemoryFileStore(),
     logger,
     pollTimeoutSeconds: 1,
     state,
@@ -493,6 +501,16 @@ describe('Telegram 前端（本地假 Bot API）', () => {
     expect(listKeys).toEqual([]);
     const { messageCache } = app.adapter as unknown as { messageCache: Map<string, unknown> };
     expect(messageCache.size).toBe(0);
+  });
+
+  it('连接状态：拉取更新成功后为连上；Bot API 不通时为断开', async () => {
+    const { api, app } = await start(replying('好'));
+
+    await app.caughtUp;
+    expect(app.adapter.connected).toBe(true);
+
+    await api.close();
+    await waitUntil(() => !app.adapter.connected);
   });
 
   it('连发三条、第二条带 nori：等待合并，只回复一次，引用第二条，请求里有第三条', async () => {

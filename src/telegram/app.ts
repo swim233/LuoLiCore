@@ -1,57 +1,31 @@
 import { createMemoryState } from '@chat-adapter/state-memory';
 import { Chat, type StateAdapter } from 'chat';
-import {
-  createConversation,
-  type FileStore,
-  type InstalledTool,
-  type Logger,
-  type PromptSource,
-  type Storage,
-} from '../core/index.js';
+import type { Logger, Storage } from '../core/index.js';
 import { LuoliTelegramAdapter, sdkLogger } from './adapter.js';
-import { createTelegramBot, type ChatTarget } from './bot.js';
+import { createTelegramBot, type ChatTarget, type OpenConversation } from './bot.js';
 import type { TelegramConfig } from './config.js';
 import type { TelegramRaw } from './message.js';
 
 /**
  * 启动 Telegram 前端：Chat SDK 轮询收消息（平台状态放内存），每条消息交给 bot 处理。
- * 返回 stop()：停止轮询、收尾进行中的回复、关闭各会话。数据库由调用方关闭
+ * 会话对象由 open 提供（洛璃服务里是会话管理）。
+ * 返回 stop()：停止轮询、收尾进行中的回复，再对各会话对象调 close()。数据库由调用方关闭
  */
 export async function startTelegram({
   config,
-  model,
-  prompts,
-  tools = [],
+  open,
   storage,
-  fileStore,
   logger,
   pollTimeoutSeconds = 30,
   typingIntervalMs,
   wait,
   state = createMemoryState(),
 }: {
-  config: Pick<
-    TelegramConfig,
-    | 'token'
-    | 'apiUrl'
-    | 'chats'
-    | 'users'
-    | 'wakeWords'
-    | 'errorText'
-    | 'staleMs'
-    | 'maxRetries'
-    | 'timeouts'
-    | 'maxSteps'
-    | 'toolHistoryChars'
-    | 'segments'
-  >;
-  model: Parameters<typeof createConversation>[0]['model'];
-  /** 提示词来源，所有会话共用 */
-  prompts: PromptSource;
-  /** 装好的工具，所有会话共用 */
-  tools?: readonly InstalledTool[];
+  config: TelegramConfig;
+  /** 按会话 id 取核心的会话对象，见 createTelegramBot */
+  open: OpenConversation;
+  /** 找会话、建会话、改标题、编辑消息用 */
   storage: Storage;
-  fileStore: FileStore;
   logger: Logger;
   /** getUpdates 的长轮询时长（秒）；测试里调小 */
   pollTimeoutSeconds?: number;
@@ -85,22 +59,7 @@ export async function startTelegram({
     adapter.encodeThreadId({ chatId: String(chatId), messageThreadId });
   const bot = createTelegramBot({
     storage,
-    open: async (conversationId, { checkIdleOnCreate }) =>
-      createConversation({
-        model,
-        prompts,
-        tools,
-        store: await storage.openConversation(conversationId),
-        fileStore,
-        logger,
-        maxRetries: config.maxRetries,
-        timeouts: config.timeouts,
-        maxSteps: config.maxSteps,
-        toolHistoryChars: config.toolHistoryChars,
-        segments: config.segments,
-        conversationId,
-        checkIdleOnCreate,
-      }),
+    open,
     sender: {
       typing: (target) => adapter.startTyping(threadId(target)),
       // 传字符串：适配器按纯文本发送，不转 Markdown

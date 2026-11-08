@@ -22,6 +22,15 @@ export type Sender = {
   send(target: ChatTarget, text: string, replyTo?: number): Promise<void>;
 };
 
+/**
+ * 为存储里的会话取核心的会话对象。checkIdleOnCreate：创建时是否按现在的时间补做空闲切段；
+ * 收到消息时打开的不补做（可能是离线积压，按消息时间判断），启动补做时打开的才补做
+ */
+export type OpenConversation = (
+  conversationId: string,
+  options: { checkIdleOnCreate: boolean },
+) => Promise<Conversation>;
+
 /** 等待合并：触发后这么久内没有新消息才开始生成 */
 export const waitMs = 2000;
 /** 等待合并：从第一条触发算起最多等这么久 */
@@ -75,11 +84,8 @@ export function createTelegramBot({
   wait = { idleMs: waitMs, maxMs: maxWaitMs },
 }: {
   storage: Storage;
-  /**
-   * 为存储里的会话建核心的会话对象。checkIdleOnCreate：创建时是否按现在的时间补做空闲切段；
-   * 收到消息时打开的不补做（可能是离线积压，按消息时间判断），启动补做时打开的才补做
-   */
-  open: (conversationId: string, options: { checkIdleOnCreate: boolean }) => Promise<Conversation>;
+  /** 为存储里的会话取核心的会话对象，每个聊天只取一次 */
+  open: OpenConversation;
   sender: Sender;
   /** 按 Telegram 的 file_id 下载文件 */
   download: (fileId: string) => Promise<Uint8Array>;

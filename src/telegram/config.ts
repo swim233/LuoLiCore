@@ -1,6 +1,7 @@
-import { parseCommonConfig, type CommonConfig, type Env } from '../shared/config.js';
+import type { Env } from '../shared/config.js';
 
-export type TelegramConfig = CommonConfig & {
+/** Telegram 前端自己的配置。模型、数据库等共用的配置由洛璃服务解析（src/server/config.ts） */
+export type TelegramConfig = {
   /** bot token，LUOLI_TELEGRAM_TOKEN。不得出现在任何输出与日志里 */
   token: string;
   /** 允许工作的群 id，LUOLI_TELEGRAM_CHATS */
@@ -22,15 +23,13 @@ export type TelegramConfig = CommonConfig & {
 
 export const defaultErrorText = '（出了点问题，稍后再试）';
 
-/** 解析 Telegram 前端的配置。空字符串按未设置处理；错误信息里不出现 token */
+/**
+ * 解析 Telegram 前端的配置。洛璃服务只在设了 LUOLI_TELEGRAM_TOKEN 时调用它，所以白名单、唤醒词等
+ * 只在启动 Telegram 时才检查。空字符串按未设置处理；错误信息里不出现 token
+ */
 export function parseTelegramConfig(
   env: Env,
 ): { ok: true; config: TelegramConfig } | { ok: false; error: string } {
-  const modelId = env.LUOLI_MODEL;
-  if (!modelId) return { ok: false, error: '缺少模型：设置环境变量 LUOLI_MODEL' };
-  const common = parseCommonConfig(env, modelId);
-  if (!common.ok) return common;
-
   const token = env.LUOLI_TELEGRAM_TOKEN;
   if (!token) return { ok: false, error: '缺少环境变量 LUOLI_TELEGRAM_TOKEN' };
   // BotFather 给的格式：数字 id、冒号、一串字母数字。不合格式时不回显它
@@ -64,7 +63,6 @@ export function parseTelegramConfig(
   return {
     ok: true,
     config: {
-      ...common.config,
       token,
       chats: chats.ids,
       users: users.ids,
