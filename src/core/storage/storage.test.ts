@@ -834,6 +834,44 @@ describe.each([
         ],
       );
     });
+
+    it('lastReply：结束得最晚的、正常完成的回复，结束时间是开始加耗时；没有时为 undefined', async () => {
+      const storage = await open();
+      expect(await storage.lastReply()).toBeUndefined();
+
+      const a = await storage.createConversation({ platform: 'telegram', title: '甲' });
+      const b = await storage.createConversation({ platform: 'cli' });
+      const storeA = await storage.openConversation(a);
+      const storeB = await storage.openConversation(b);
+      await storeB.recordCall(
+        call({ startedAt: '2026-10-30T10:00:00.000Z', durationMs: 1500, replyId: 'r-b' }),
+      );
+      await storeA.recordCall(
+        call({ startedAt: '2026-10-30T09:00:00.000Z', durationMs: 1000, replyId: 'r-a' }),
+      );
+      // 更晚开始的失败、中止、摘要都不算
+      await storeA.recordCall(call({ startedAt: '2026-10-30T11:00:00.000Z', outcome: 'failed' }));
+      await storeA.recordCall(call({ startedAt: '2026-10-30T11:01:00.000Z', outcome: 'aborted' }));
+      await storeA.recordCall(
+        call({ startedAt: '2026-10-30T11:02:00.000Z', purpose: 'summary', replyId: undefined }),
+      );
+
+      expect(await storage.lastReply()).toEqual({
+        conversationId: b,
+        replyId: 'r-b',
+        endedAt: '2026-10-30T10:00:01.500Z',
+      });
+
+      // 开始得早、结束得晚的那次算最近：与运行中按结束时间更新的口径相同
+      await storeA.recordCall(
+        call({ startedAt: '2026-10-30T09:59:00.000Z', durationMs: 65_000, replyId: 'r-long' }),
+      );
+      expect(await storage.lastReply()).toEqual({
+        conversationId: a,
+        replyId: 'r-long',
+        endedAt: '2026-10-30T10:00:05.000Z',
+      });
+    });
   });
 });
 

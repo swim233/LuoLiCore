@@ -52,10 +52,14 @@ export class StreamText {
       { duration: 300, delay: nd._drop, easing: EASE_OUT_CSS, fill: 'backwards' },
     );
   }
-  /* 收到新的片段：几个字按到达顺序每个晚 28 ms 开始落下 */
-  delta(chunk: string, fullText: string) {
+  /* 收到新的片段：几个字按到达顺序每个晚 28 ms 开始落下。
+     同一行可能同时挂在两处（浮起的卡片和全屏里的列），各自订阅，同一个片段会到两次：以全文为准，已经落过的字不再重复落 */
+  delta(_chunk: string, fullText: string) {
+    const all = chars(fullText);
+    if (all.length <= this.nodes.length) return;
     let k = 0;
-    for (const c of chars(chunk)) this.nodes.push(this.charNode(c, motionOn(), k++ * 28));
+    for (const c of all.slice(this.nodes.length))
+      this.nodes.push(this.charNode(c, motionOn(), k++ * 28));
     this.regroup(fullText);
   }
   private regroup(text: string) {

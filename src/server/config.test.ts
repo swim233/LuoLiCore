@@ -30,10 +30,23 @@ describe('洛璃服务的配置', () => {
         filesDir: 'data/files',
         promptPath: undefined,
         requestLog: { path: 'data/requests.db', retentionDays: 30 },
+        name: '洛璃',
         telegram: undefined,
         web: { port: 7310, dbPath: 'data/web.db' },
       },
     });
+  });
+
+  it('LUOLI_NAME：助手的显示名，去掉首尾空白；空的、只有空白的按没设，用「洛璃」', () => {
+    const nameOf = (value: string | undefined) => {
+      const result = parse({ LUOLI_NAME: value });
+      return result.ok ? result.config.name : undefined;
+    };
+    expect(nameOf(undefined)).toBe('洛璃');
+    expect(nameOf('Nori')).toBe('Nori');
+    expect(nameOf('  小璃 ')).toBe('小璃');
+    expect(nameOf('')).toBe('洛璃');
+    expect(nameOf('   ')).toBe('洛璃');
   });
 
   it('token 为空字符串也按没设处理：不启动 Telegram，Telegram 的其余变量不检查', () => {

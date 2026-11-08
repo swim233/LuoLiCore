@@ -303,6 +303,20 @@ export function createMemoryStorage(): Storage {
       summary.repliesByConversation.sort((a, b) => b.replies - a.replies);
       return summary;
     },
+    async lastReply() {
+      let latest: { conversationId: string; call: ModelCall; endedMs: number } | undefined;
+      for (const [conversationId, { data }] of conversations) {
+        for (const call of data.calls) {
+          if (call.purpose !== 'reply' || call.outcome !== 'completed') continue;
+          // 按结束时间；同一时刻的取后写入的（会话之间按建立先后，与 SQLite 按行号近似）
+          const endedMs = Date.parse(call.startedAt) + call.durationMs;
+          if (!latest || endedMs >= latest.endedMs) latest = { conversationId, call, endedMs };
+        }
+      }
+      if (!latest) return undefined;
+      const { conversationId, call, endedMs } = latest;
+      return { conversationId, replyId: call.replyId, endedAt: new Date(endedMs).toISOString() };
+    },
     close() {},
   };
 }

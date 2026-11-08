@@ -38,6 +38,30 @@ export function inputLine(input: unknown, max = 80): string {
   return s.length > max ? s.slice(0, max) + '…' : s;
 }
 
+/** 「此刻」里工具行的参数：实时的（服务给的 JSON 字符串，最多 200 个字符，可能被截断）和历史消息里的（对象）都用它压成一行。
+    第一个字符串参数（如网址）原样，其余写成 名=值，如「https://example.com offset=0 mode=article」 */
+export function argsLine(input: unknown, max = 70): string {
+  let v = input;
+  if (typeof v === 'string') {
+    try {
+      v = JSON.parse(v);
+    } catch {
+      /* 被截断的 JSON：原样 */
+    }
+  }
+  let s: string;
+  if (v && typeof v === 'object' && !Array.isArray(v)) {
+    s = Object.entries(v)
+      .map(([k, x], i) =>
+        typeof x === 'string' ? (i === 0 ? x : `${k}=${x}`) : `${k}=${JSON.stringify(x)}`,
+      )
+      .join(' ');
+  } else if (typeof v === 'string') s = v;
+  else s = v === undefined ? '' : (JSON.stringify(v) ?? String(v));
+  s = s.replace(/\s+/g, ' ').trim();
+  return s.length > max ? s.slice(0, max) + '…' : s;
+}
+
 /** 工具结果里的文字与图片：字符串、带图片的 luoli-content、其他能转成 JSON 的值 */
 export function toolOutput(output: unknown): {
   text: string;

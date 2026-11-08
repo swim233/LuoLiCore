@@ -236,11 +236,19 @@ export class MockServer implements Api {
     this.calls = [];
     this.unreadPlan.clear();
   }
-  lastAssistantAt() {
-    let t = 0;
+  /** 最近一条助手消息所在的会话与时间（模拟「上次回复」的初始值） */
+  lastAssistant(): { conversationId: string; at: string } | undefined {
+    let best: { conversationId: string; at: string } | undefined;
     for (const c of this.convs.values())
-      for (const m of c.msgs) if (m.role === 'assistant') t = Math.max(t, Date.parse(m.createdAt));
-    return t;
+      for (const m of c.msgs)
+        if (
+          m.role === 'assistant' &&
+          !m.message.metadata?.failed &&
+          !m.message.metadata?.aborted &&
+          (!best || Date.parse(m.createdAt) > Date.parse(best.at))
+        )
+          best = { conversationId: c.id, at: m.createdAt };
+    return best;
   }
 
   /* ---------- 读：和服务的接口一样 ---------- */

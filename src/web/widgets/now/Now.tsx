@@ -3,12 +3,14 @@ import { Badge, ToolName } from '../../components/Badge';
 import { IconNow } from '../../components/icons';
 import { env } from '../../lib/env';
 import { pulse } from '../../lib/fx-dom';
-import { fmtTime, relTime } from '../../lib/util';
+import { lastReplyText, recentReply, relTime } from '../../lib/util';
+import { prefs } from '../../lib/prefs';
 import { bus } from '../../model/bus';
 import { db } from '../../model/db';
 import { nowModel } from '../../model/nowModel';
 import type { Session } from '../../model/nowModel';
-import { STATE_TEXT, status, useStatus } from '../../model/status';
+import { lastOnlineText, STATE_TEXT, status, useStatus } from '../../model/status';
+import { useAssistantName } from '../../model/who';
 import { nowCtl } from '../../state/actions';
 import { pop } from '../../state/ui';
 import { stardust } from './stardust';
@@ -37,15 +39,16 @@ const sessionFor = (id: string | null) =>
     : null;
 
 function Empty() {
+  const name = useAssistantName();
   return (
     <div className="now-empty">
       <div>
         <div style={{ color: 'var(--fg-2)', fontSize: 14, marginBottom: 4 }}>
-          {status.online ? '现在很安静' : '洛璃离线了'}
+          {status.online ? '现在很安静' : `${name}离线了`}
         </div>
         {status.online
-          ? '有人叫洛璃时，这里会实时显示那个会话的对话'
-          : '上线后，这里会实时显示进行中的对话'}
+          ? `有人叫${name}时，这里会实时显示那个会话的对话`
+          : '连上 Telegram 后，这里会实时显示进行中的对话'}
       </div>
     </div>
   );
@@ -63,14 +66,19 @@ function NowView({ mode, handle }: ViewProps) {
   const list = nowModel.list();
   const last = nowModel.last;
   let where: string;
-  if (snap.state === 'offline') where = 'bot 没在运行 · 上次在线 ' + fmtTime(status.lastOnlineAt);
+  if (snap.state === 'offline') where = '连不上 Telegram · ' + lastOnlineText();
   else if (snap.count >= 2)
     where = snap.count + ' 个会话在回复：' + snap.list.map((x) => x.title).join('、');
   else if (snap.count === 1) where = snap.list[0].title;
-  else if (last)
-    where = `上次回复 · ${last.title} · ${relTime(status.lastReplyAt || last.endedAt || 0)}`;
-  else
-    where = status.lastReplyAt ? '上次回复在 ' + relTime(status.lastReplyAt) : '没有进行中的对话';
+  else if (status.lastReplyAt) {
+    // 上次回复由服务告诉面板（启动时从数据库取，之后每次回复结束时更新）
+    const title = db.conv(status.lastReplyConv)?.title;
+    where = !title
+      ? lastReplyText(status.lastReplyAt)
+      : recentReply(status.lastReplyAt)
+        ? `刚刚回复过 · ${title}`
+        : `上次回复 · ${title} · ${relTime(status.lastReplyAt)}`;
+  } else where = '没有进行中的对话';
 
   const pickSel = () => {
     if (!list.length) return last ? last.convId : null;
@@ -192,10 +200,13 @@ export const NOW_DEF: WidgetDef = {
   sky: true,
   refreshOn: ['status'],
   init(w) {
-    w.on('reply:wait', ({ convId }) => {
+    /* 有人触发洛璃（等待合并，或者不等待、直接开始的回复）：「此刻」自动展开成浮窗，受设置里的开关控制；网页会话里的回复不自动展开 */
+    const expand = ({ convId }: { convId: string }) => {
       const c = db.conv(convId);
-      if (c && c.platform !== 'web') nowCtl.autoExpand();
-    });
+      if (prefs.get().autoNow && c && c.platform !== 'web') nowCtl.autoExpand();
+    };
+    w.on('reply:wait', expand);
+    w.on('reply:start', expand);
     w.on('reply:end', ({ convId }) => stardust(convId));
     w.on('reply:error', () => {
       w.flash('error');
@@ -205,13 +216,12 @@ export const NOW_DEF: WidgetDef = {
   thumb() {
     const s = status.snapshot();
     const short = env.narrow;
-    if (s.state === 'offline')
-      return short ? '离线' : `离线 · 上次在线 ${fmtTime(status.lastOnlineAt)}`;
+    if (s.state === 'offline') return short ? '离线' : `离线 · ${lastOnlineText()}`;
     if (!s.count) {
       if (!status.lastReplyAt) return short ? '空闲' : '空闲 · 今天还没有新的回复';
       return short
-        ? '空闲 · ' + relTime(status.lastReplyAt)
-        : '空闲 · 上次回复在 ' + relTime(status.lastReplyAt);
+        ? '空闲 · ' + (recentReply(status.lastReplyAt) ? '刚刚回复过' : relTime(status.lastReplyAt))
+        : '空闲 · ' + lastReplyText(status.lastReplyAt);
     }
     const name = s.state === 'tool' ? '调用 ' + (s.tool || '工具') : STATE_TEXT[s.state];
     return (

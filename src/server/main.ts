@@ -3,24 +3,28 @@ import { dirname } from 'node:path';
 import {
   createModel,
   createPromptFiles,
+  createRedactor,
   openFileStore,
   openSqliteStorage,
+  type RecentReply,
   type Storage,
 } from '../core/index.js';
-import { createLogger, jsonEscapedForms } from '../shared/logger.js';
+import { createLogger } from '../shared/logger.js';
 import { openRequestLogging, type RequestLogging } from '../shared/request-log.js';
 import { setupTools } from '../shared/tools.js';
-import { startTelegram } from '../telegram/app.js';
+import type { startTelegram } from '../telegram/app.js';
 import { tools as toolList } from '../tools/index.js';
 import { createApp } from './app.js';
 import { parseServerConfig } from './config.js';
 import { createEvents, type Events } from './events.js';
 import { hostname, listen, type Listener } from './listen.js';
+import { createLive } from './live.js';
 import { observeStorage } from './observed-storage.js';
 import { isBuilt, notBuiltText, webDist } from './pages.js';
 import { relayChanges } from './relay.js';
 import { createSessions } from './sessions.js';
-import type { ServiceStatus } from './types.js';
+import { createStatus } from './status.js';
+import { startTelegramFrontend } from './telegram.js';
 import { createViews } from './views.js';
 import { openWebState, type WebState } from './web-state.js';
 
@@ -35,11 +39,7 @@ const { config } = parsed;
 const startedAt = new Date();
 // token 与 API key 写进日志前都会被抹掉；打到终端的错误同样先抹一遍
 const logger = createLogger(config.model, config.telegram ? [config.telegram.token] : []);
-const redact = (text: string) =>
-  [config.telegram?.token, config.model.apiKey]
-    .filter((secret): secret is string => Boolean(secret))
-    .flatMap(jsonEscapedForms)
-    .reduce((result, form) => result.replaceAll(form, '***'), text);
+const redact = createRedactor([config.telegram?.token, config.model.apiKey]);
 
 if (!config.telegram) console.error('没有设置 LUOLI_TELEGRAM_TOKEN，不启动 Telegram');
 
@@ -111,19 +111,35 @@ if (config.web) {
 
 let telegram: Awaited<ReturnType<typeof startTelegram>> | undefined;
 
-function status(): ServiceStatus {
-  return {
-    startedAt: startedAt.toISOString(),
-    uptimeSeconds: Math.floor((Date.now() - startedAt.getTime()) / 1000),
-    telegram: {
-      enabled: config.telegram !== undefined,
-      connected: telegram?.adapter.connected ?? false,
-    },
-  };
+// 上次回复：启动时从数据库取，之后每次回复正常完成时更新
+let lastReply: RecentReply | undefined;
+try {
+  lastReply = await storage.lastReply();
+} catch (error) {
+  logger.error({ error: (error as Error).message }, 'service.last_reply_failed');
 }
 
-// 网页服务的数据与实时事件。写入经过包了一层的存储时，变化转成 SSE 事件推给面板
-const events = config.web ? createEvents({ status, logger }) : undefined;
+// 「此刻」：旁听会话管理里的每次回复，转成 live 事件；记着进行中回复的现场
+const live = createLive({
+  broadcast: (event) => events?.broadcast('live', event),
+  logger,
+  lastReply,
+  redact,
+});
+
+// 服务的状态：GET /api/health、SSE 的 hello 与 status 事件
+const status = createStatus({
+  startedAt,
+  name: config.name,
+  telegram: config.telegram && { wakeWords: config.telegram.wakeWords },
+  lastReply: () => live.lastReply,
+});
+
+// 网页服务的数据与实时事件。写入经过包了一层的存储时，变化转成 SSE 事件推给面板；
+// 连上时先发状态与现场
+const events = config.web
+  ? createEvents({ hello: () => ({ ...status.status(), live: live.snapshot() }), logger })
+  : undefined;
 const views = webState && createViews({ storage, fileStore, webState });
 const relay = views && events && relayChanges({ views, events, logger });
 const observed = relay ? observeStorage(storage, relay.onChange) : storage;
@@ -142,6 +158,7 @@ const sessions = createSessions({
   toolHistoryChars: config.toolHistoryChars,
   segments: config.segments,
 });
+sessions.onReply(live.listener);
 
 /** 启动失败时：关掉已经打开的，退出 */
 async function fail(message: string, web?: { events: Events; listener: Listener }): Promise<never> {
@@ -163,7 +180,7 @@ if (config.web && events && views) {
     console.error(notBuiltText);
     logger.warn({ dist: webDist }, 'web.not_built');
   }
-  const app = createApp({ port, dist: webDist, events, views, status, logger });
+  const app = createApp({ port, dist: webDist, events, views, status: status.status, logger });
   try {
     web = { events, listener: await listen(app, port), port };
   } catch (error) {
@@ -174,11 +191,14 @@ if (config.web && events && views) {
 
 if (config.telegram) {
   try {
-    telegram = await startTelegram({
+    telegram = await startTelegramFrontend({
       config: config.telegram,
-      open: (conversationId, options) => sessions.open(conversationId, options),
+      sessions,
       storage: observed,
       logger,
+      live,
+      status,
+      events,
     });
   } catch (error) {
     await fail(`Telegram 启动失败：${(error as Error).message}`, web);

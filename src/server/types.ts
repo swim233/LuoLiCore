@@ -2,20 +2,46 @@
 // 这里只引用纯类型的模块（core 的消息类型，它只引用 ai 的类型），网页的 tsconfig 也能检查：
 // 不要在这里引用带 Node 类型或服务端代码的模块
 
-import type { Message } from '../core/message.js';
+import type { Message, Usage } from '../core/message.js';
 
-/** 洛璃服务此刻的状态：SSE 的 hello 与 GET /api/health 都用它 */
+/**
+ * 洛璃服务此刻的状态：GET /api/health 返回它，SSE 的 hello 带着它（另加现场），
+ * Telegram 连上、断开或拿到 bot 的用户名时推 status 事件
+ */
 export type ServiceStatus = {
   /** 服务启动的时间，ISO */
   startedAt: string;
   /** 服务启动了多少秒 */
   uptimeSeconds: number;
   telegram: {
-    /** 设了 token、启动了 Telegram 前端 */
+    /** 设了 token、启动了 Telegram 前端。false 时面板显示「空闲」，弹出框写「Telegram 服务未启动」 */
     enabled: boolean;
-    /** 连得上 Telegram（最近一次拉取更新成功）；没启动时为 false */
+    /** 连得上 Telegram（最近一次拉取更新成功）；没启动时为 false。启动了但为 false 时显示「离线」 */
     connected: boolean;
+    /**
+     * 最近一次确认连得上 Telegram 的时间（最近一次拉取更新成功），ISO：离线时显示「上次在线 HH:MM」。
+     * 这次启动后还没连上过时没有。连着的时候它不随时更新，只在连接状态变了时准确
+     */
+    lastOnlineAt?: string;
   };
+  /** 助手：面板上显示的名字，以及消息里提到她时要高亮的几样 */
+  assistant: {
+    /** 显示名：LUOLI_NAME，默认「洛璃」。只用于面板显示，与人设、发给模型的内容无关 */
+    name: string;
+    /** 唤醒词（LUOLI_WAKE_WORDS，不分大小写）；没启动 Telegram 时为空数组 */
+    wakeWords: string[];
+    /** bot 在 Telegram 里的用户名，不带 @；没启动 Telegram、还没拿到（没连上过）时没有 */
+    username?: string;
+  };
+  /** 上次回复：最近一次正常完成的回复（口径同今日概况的回复数）；还没有过时没有 */
+  lastReply?: LastReply;
+};
+
+/** 最近一次正常完成的回复 */
+export type LastReply = {
+  conversationId: string;
+  /** 回复结束的时间，ISO */
+  at: string;
 };
 
 // ─── 会话 ───────────────────────────────────────────────────────────────
@@ -190,6 +216,196 @@ export type TodaySummary = {
   conversations: Array<{ id: string; title?: string; replies: number }>;
 };
 
+// ─── 此刻：进行中的回复 ─────────────────────────────────────────────────
+
+/**
+ * 一个进行中的回复此刻在做什么。等待合并（Telegram 被触发后先等一会儿，把接连发来的消息合在一起）；
+ * 思考中（回复开始后、模型在想、工具结束后等下一步）；回复中（在输出文字）；调用工具；重试中
+ */
+export type LiveState = 'waiting' | 'thinking' | 'replying' | 'tool' | 'retry';
+
+/**
+ * 现场里的一个进行中的回复（含还在等待合并的）。每个会话同一时间最多一个，按 conversationId 认。
+ * 回复结束（完成、出错、中止）或等待被放弃后从现场里去掉
+ */
+export type LiveReply = {
+  conversationId: string;
+  /**
+   * 回复 id：核心 start 段的 messageId，回复写入历史后就是那条助手消息的 id。还在等待合并时没有；
+   * 一开始就失败、没有 start 段的回复（如提示词文件有误）也没有
+   */
+  replyId?: string;
+  state: LiveState;
+  /** state 为 tool 时：最近开始、还没结束的那个工具的名字 */
+  toolName?: string;
+  /**
+   * Telegram：被触发、进入等待合并的时间，ISO。网页、CLI 的回复没有；state 为 waiting 却没有它的，
+   * 是上一次回复刚结束、Telegram 还在发最后几条时又被触发，等着「再回复一次」开始
+   */
+  waitingSince?: string;
+  /** 回复开始的时间，ISO；还在等待合并时没有 */
+  startedAt?: string;
+  /** Telegram：回复中又被触发，这次发出后再回复一次 */
+  again: boolean;
+  /** 已经推出去的内容，按出现的顺序；事件里的 part 就是这里的下标 */
+  parts: LivePart[];
+  /** 最近一次重试 */
+  retry?: LiveRetry;
+};
+
+/** 回复里的一段：思考、文字、工具调用。step 是第几步（从 1 起，一步是向模型发一次请求） */
+export type LivePart = LiveReasoning | LiveText | LiveTool;
+
+export type LiveReasoning = {
+  type: 'reasoning';
+  step: number;
+  /** 思考的内容（全量） */
+  text: string;
+  /** 开始、结束的时间（服务端），ISO：「思考了 N 秒」= endedAt − startedAt；还在想时没有 endedAt */
+  startedAt: string;
+  endedAt?: string;
+};
+
+export type LiveText = {
+  type: 'text';
+  step: number;
+  /** 已经输出的文字（全量） */
+  text: string;
+};
+
+export type LiveTool = {
+  type: 'tool';
+  step: number;
+  /** 调用 id（toolCallId） */
+  callId: string;
+  /** 工具名 */
+  name: string;
+  /** 参数的前一截：JSON，最多 200 个字符，截了以「…」结尾 */
+  input: string;
+  /** 开始、结束的时间（服务端），ISO：耗时 = endedAt − startedAt；还在跑时没有 endedAt */
+  startedAt: string;
+  endedAt?: string;
+  /** 结束后才有：true 成功；false 出错（含超时、被中止、参数不对、没有完成） */
+  ok?: boolean;
+  /** 出错时：错误的一句话（模型看到的错误说明的第一行，最多 200 个字符） */
+  error?: string;
+  /** 结果里的图片（取图片的地址与宽高）；没有图片时没有 */
+  images?: ImageInfo[];
+};
+
+/** 一次重试（核心的 data-retry 段） */
+export type LiveRetry = {
+  /** request：请求失败后重发；stream：流中途出错后重新生成（之后紧跟一个 reset 事件） */
+  phase: 'request' | 'stream';
+  /** 第几次重试，共几次 */
+  attempt: number;
+  maxRetries: number;
+  /** HTTP 状态码；网络错误、流中途出错时没有 */
+  statusCode?: number;
+  /** 什么时候，ISO */
+  at: string;
+};
+
+/**
+ * 现场：全部进行中的回复，以及它包含到了第几个 live 事件。hello 里带着，面板据此重建「此刻」，
+ * 之后收到的 live 事件都是在它之后发生的（seq 从 seq + 1 起，一个不缺、不重）
+ */
+export type LiveSnapshot = {
+  /** 现场已经包含的最后一个 live 事件的序号；还没有过时为 0 */
+  seq: number;
+  replies: LiveReply[];
+};
+
+/** 每个 live 事件都有的字段 */
+type LiveBase = {
+  /**
+   * 序号：服务每推一个 live 事件加一（所有会话共用）。面板收到的序号总是接着 hello 里 live.seq 往下，
+   * 比它小或相等的可以丢掉（不会出现）
+   */
+  seq: number;
+  conversationId: string;
+  /** 回复 id，知道时才有（见 LiveReply.replyId） */
+  replyId?: string;
+  /** 这件事发生的时间（服务端），ISO */
+  at: string;
+};
+
+/** 回复还在进行的事件带上这次回复此刻的状态（这个事件之后的），与现场里的 state、toolName 相同 */
+type LiveProgress = LiveBase & { state: LiveState; toolName?: string };
+
+/**
+ * 「此刻」的实时事件（SSE 的 live 事件），按 type 区分。同一个回复的事件按流里的顺序推；
+ * 逐字的文字与思考攒约 50 毫秒合成一个事件，其余的马上推。part 是现场里 parts 的下标
+ */
+export type LiveEvent =
+  /** Telegram 被触发，进入等待合并 */
+  | (LiveProgress & { type: 'wait' })
+  /** Telegram 回复中又被触发：这次发出后再回复一次。回复刚结束、下一次还没开始时被触发，现场里新建一条等待中的 */
+  | (LiveProgress & { type: 'again' })
+  /** 等待合并被放弃，不回复了（如服务退出），现场里去掉这个会话 */
+  | (LiveBase & { type: 'cancel' })
+  /** 回复开始（at 即开始的时间）。之前在等待合并的，接着用同一条现场 */
+  | (LiveProgress & { type: 'start' })
+  /** 开始一段思考，在 parts 末尾新加一段（下标 part） */
+  | (LiveProgress & { type: 'reasoning-start'; part: number; step: number })
+  /** 思考的内容接上 text */
+  | (LiveProgress & { type: 'reasoning-delta'; part: number; text: string })
+  /** 这段思考结束（at 即结束的时间） */
+  | (LiveProgress & { type: 'reasoning-end'; part: number; startedAt: string })
+  /** 文字接上 text；part 等于 parts 的长度时在末尾新加一段文字 */
+  | (LiveProgress & { type: 'text-delta'; part: number; step: number; text: string })
+  /** 开始调用工具，在 parts 末尾新加一段（at 即开始的时间） */
+  | (LiveProgress & {
+      type: 'tool-start';
+      part: number;
+      step: number;
+      callId: string;
+      name: string;
+      input: string;
+    })
+  /** 工具调用结束（at 即结束的时间）。出错、超时、被中止都是 ok: false */
+  | (LiveProgress & {
+      type: 'tool-end';
+      part: number;
+      callId: string;
+      startedAt: string;
+      ok: boolean;
+      error?: string;
+      images?: ImageInfo[];
+    })
+  /** 要重试了 */
+  | (LiveProgress & { type: 'retry'; retry: LiveRetry })
+  /**
+   * 流中途出错、重新生成：这一步已经推出的内容作废，parts 只留前 keep 段（即这一步之前的）。
+   * 紧跟在 phase 为 stream 的 retry 之后
+   */
+  | (LiveProgress & { type: 'reset'; step: number; keep: number })
+  /**
+   * 回复结束（at 即结束的时间），现场里去掉这个会话。之前还开着的思考、工具调用，先各推一个
+   * reasoning-end、tool-end（工具的 error 为「工具调用未完成」）
+   */
+  | (LiveBase & {
+      type: 'end';
+      /** completed：正常完成；failed：出错；aborted：被中止（含前端不读了、取消） */
+      outcome: 'completed' | 'failed' | 'aborted';
+      /** 回复开始的时间：用时 = at − startedAt */
+      startedAt: string;
+      /** 正常完成时：各步之和；服务端没报的项没有 */
+      usage?: Usage;
+      /**
+       * 出错时：错误的一句话。能从错误里认出 HTTP 状态码时为「请求失败（429）」；认不出（超时、
+       * 网络错误、服务端自己写的说明等）时为错误说明的第一行，最多 200 个字符，抹掉了 key
+       */
+      error?: string;
+      /** 出错且认出了 HTTP 状态码（400～599）时才有 */
+      statusCode?: number;
+      /** 这次结束之后的「上次回复」：正常完成时就是这一次 */
+      lastReply?: LastReply;
+    });
+
+/** SSE 的 hello：服务此刻的状态，加上现场 */
+export type Hello = ServiceStatus & { live: LiveSnapshot };
+
 // ─── SSE ────────────────────────────────────────────────────────────────
 
 /** SSE 的 message 事件 */
@@ -204,19 +420,24 @@ export type MessageEvent = {
  * 经 SSE（GET /api/events）推给面板的事件：事件名 → data 的类型。
  * 每个事件是一条 `event: 名字` 加一行 `data: JSON`；面板不认识的事件名直接忽略，
  * 以后加事件只在这里加一项，旧的不改。
+ * 读得太慢的连接（待发的事件攒到上限）会被服务断开，面板重连后从 hello 重新开始
  */
 export type ServerEvents = {
   /**
-   * 连上时的第一个事件：服务此刻的状态。之后的事件都是增量；连上（含重连）后自己取一次
+   * 连上时的第一个事件：服务此刻的状态与现场。之后的事件都是增量；连上（含重连）后自己取一次
    * 会话列表与今日概况
    */
-  hello: ServiceStatus;
+  hello: Hello;
   /** 会话列表里的一行变了：新建、改名、切段、来了新消息、消息被编辑、未读数变了。整行替换 */
   conversation: ConversationRow;
   /** 一条消息写入或被编辑；之后紧跟着这个会话的 conversation 事件 */
   message: MessageEvent;
   /** 有模型调用写入（回复或摘要结束）：新的今日概况 */
   today: TodaySummary;
+  /** 服务的状态变了：Telegram 连上、断开，拿到了 bot 的用户名。整份替换 */
+  status: ServiceStatus;
+  /** 「此刻」：进行中的回复的一步进展，见 LiveEvent */
+  live: LiveEvent;
 };
 
 /** 接口出错时的返回（400、403、404、415、500） */

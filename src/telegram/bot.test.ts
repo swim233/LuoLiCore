@@ -14,7 +14,7 @@ import {
   type Storage,
 } from '../core/index.js';
 import { testPrompts } from '../core/test-prompts.js';
-import { createTelegramBot, type ChatTarget } from './bot.js';
+import { createTelegramBot, type ChatTarget, type RoundNotice } from './bot.js';
 import { imageBytes } from './fake-api.js';
 import type { TelegramRaw } from './message.js';
 import { telegramMessageLimit } from './split.js';
@@ -86,6 +86,7 @@ function setup({
   files = {},
   tools = [],
   sendDelayMs = 0,
+  onRound,
 }: {
   model: MockLanguageModelV4;
   storage?: Storage;
@@ -100,6 +101,7 @@ function setup({
   tools?: InstalledTool[];
   /** 每次发送要等这么久才发出（像真的网络请求） */
   sendDelayMs?: number;
+  onRound?: (notice: RoundNotice) => void;
 }) {
   const sent: Sent[] = [];
   const typing: ChatTarget[] = [];
@@ -148,6 +150,7 @@ function setup({
     staleMs: 60 * 60_000,
     typingIntervalMs,
     wait,
+    onRound,
   });
   cleanups.push(() => bot.close(0));
   return { bot, sent, typing, entries, storage, conversations };
@@ -604,6 +607,84 @@ describe('等待合并与合并回复', () => {
     expect(model.doStreamCalls).toHaveLength(0);
     expect(sent).toEqual([]);
     expect(typing.length).toBe(count);
+  });
+});
+
+describe('通知洛璃服务（onRound）', () => {
+  async function conversationId(storage: Storage): Promise<string> {
+    return (await storage.findConversation('telegram', String(group.id)))!.id;
+  }
+
+  it('进入等待、回复中又被触发、这一轮结束：各通知一次，带会话 id', async () => {
+    const notices: RoundNotice[] = [];
+    const { model, release, calledAt } = gated('第一次', '第二次');
+    const { bot, sent, storage } = setup({ model, onRound: (notice) => notices.push(notice) });
+
+    await bot.handle(message({ text: 'nori 讲个故事' }));
+    expect(notices.map((notice) => notice.type)).toEqual(['wait']);
+    while (calledAt.length === 0) await sleep(5);
+    await bot.handle(message({ text: 'nori 我也要听' }));
+    expect(notices.map((notice) => notice.type)).toEqual(['wait', 'again']);
+    release();
+    await bot.idle();
+
+    expect(sent.map((s) => s.text)).toEqual(['第一次', '第二次']);
+    const id = await conversationId(storage);
+    expect(notices).toEqual([
+      { type: 'wait', conversationId: id },
+      { type: 'again', conversationId: id },
+      { type: 'end', conversationId: id },
+    ]);
+  });
+
+  it('退出时放弃等待：通知等待与结束，没有回复', async () => {
+    const notices: RoundNotice[] = [];
+    const model = replying('不该出现');
+    const { bot, storage } = setup({
+      model,
+      wait: { idleMs: 5000, maxMs: 8000 },
+      onRound: (notice) => notices.push(notice),
+    });
+
+    await bot.handle(message({ text: 'nori 在吗' }));
+    await bot.close(0);
+
+    const id = await conversationId(storage);
+    expect(notices).toEqual([
+      { type: 'wait', conversationId: id },
+      { type: 'end', conversationId: id },
+    ]);
+    expect(model.doStreamCalls).toHaveLength(0);
+  });
+
+  it('回调出错不影响 Telegram：照常回复，日志多一条 telegram.notify_failed', async () => {
+    const { model, release, calledAt } = gated('第一次', '第二次');
+    const { bot, sent, entries } = setup({
+      model,
+      onRound: () => {
+        throw new Error('推不出去');
+      },
+    });
+
+    const first = message({ text: 'nori 讲个故事' });
+    await bot.handle(first);
+    while (calledAt.length === 0) await sleep(5);
+    const second = message({ text: 'nori 我也要听' });
+    await bot.handle(second);
+    release();
+    await bot.idle();
+
+    expect(sent.map(({ text, replyTo }) => ({ text, replyTo }))).toEqual([
+      { text: '第一次', replyTo: first.message_id },
+      { text: '第二次', replyTo: second.message_id },
+    ]);
+    const failures = entries.filter((entry) => entry.msg === 'telegram.notify_failed');
+    expect(failures.map((entry) => [entry.level, entry.fields.notice])).toEqual([
+      ['warn', 'wait'],
+      ['warn', 'again'],
+      ['warn', 'end'],
+    ]);
+    expect(failures[0]!.fields.error).toEqual({ type: 'Error', message: '推不出去' });
   });
 });
 

@@ -5,8 +5,16 @@ import { parseTelegramConfig, type TelegramConfig } from '../telegram/config.js'
 /** 网页服务的默认端口 */
 export const defaultWebPort = 7310;
 
+/** 助手的显示名默认值 */
+export const defaultName = '洛璃';
+
 /** 洛璃服务的配置：共用配置，加上两个前端各自开不开 */
 export type ServerConfig = CommonConfig & {
+  /**
+   * 助手在网页面板上显示的名字：LUOLI_NAME，默认「洛璃」。只影响面板的显示（名字、消息里提到她时的高亮），
+   * 不改人设，也不改发给模型的内容
+   */
+  name: string;
   /** Telegram 前端；没设 LUOLI_TELEGRAM_TOKEN 时为 undefined，不启动 Telegram */
   telegram?: TelegramConfig;
   /**
@@ -19,7 +27,7 @@ export type ServerConfig = CommonConfig & {
 };
 
 /**
- * 解析洛璃服务的配置。模型取 LUOLI_MODEL；Telegram 的其余配置（白名单、唤醒词……）只在设了 token 时
+ * 解析洛璃服务的配置。模型取 LUOLI_MODEL；助手的显示名取 LUOLI_NAME（去掉首尾空白，空的按没设）；Telegram 的其余配置（白名单、唤醒词……）只在设了 token 时
  * 才检查，端口只在网页服务打开时才检查。两个前端都没开时报错。空字符串按未设置处理
  */
 export function parseServerConfig(
@@ -43,7 +51,8 @@ export function parseServerConfig(
   if (!telegram && !web.config) {
     return { ok: false, error: 'Telegram 和网页都没有开，服务没有事可做' };
   }
-  return { ok: true, config: { ...common.config, telegram, web: web.config } };
+  const name = env.LUOLI_NAME?.trim() || defaultName;
+  return { ok: true, config: { ...common.config, name, telegram, web: web.config } };
 }
 
 function parseWeb(

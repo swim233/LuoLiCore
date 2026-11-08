@@ -251,6 +251,14 @@ export function openSqliteStorage(path: string): Storage {
      ORDER BY replies DESC, c.created_at, c.rowid`,
   );
 
+  // 按结束时间（开始加耗时，毫秒）取最晚的，同一时刻的取后写入的。结束时间没有索引，
+  // 要看一遍完成的回复；只在启动时查一次
+  const latestReply = db.prepare(
+    `SELECT conversation_id, reply_id, started_at, duration_ms FROM model_calls
+     WHERE purpose = 'reply' AND outcome = 'completed'
+     ORDER BY unixepoch(started_at, 'subsec') * 1000 + duration_ms DESC, id DESC LIMIT 1`,
+  );
+
   const reserve = (conversationId: string): number => {
     const row = reserveSeq.get(conversationId);
     if (!row) throw new Error(`会话 ${conversationId} 不存在`);
@@ -488,6 +496,15 @@ export function openSqliteStorage(path: string): Storage {
         })),
       };
     },
+    async lastReply() {
+      const row = latestReply.get();
+      if (!row) return undefined;
+      return {
+        conversationId: String(row.conversation_id),
+        replyId: optional(row.reply_id),
+        endedAt: endOf(String(row.started_at), Number(row.duration_ms)),
+      };
+    },
     close() {
       if (db.isOpen) db.close();
     },
@@ -629,6 +646,11 @@ function isPlatformMessageConflict(error: unknown): boolean {
 }
 
 // NULL 列读成 undefined
+/** 开始时间（ISO）加上耗时（毫秒） */
+function endOf(startedAt: string, durationMs: number): string {
+  return new Date(Date.parse(startedAt) + durationMs).toISOString();
+}
+
 function optional(value: unknown): string | undefined {
   return value === null || value === undefined ? undefined : String(value);
 }

@@ -34,7 +34,7 @@ export const toolOutputChars = 2000;
 /** 预览最多多少个字符 */
 const previewChars = 80;
 
-const fileScheme = 'luoli-file:';
+export const fileScheme = 'luoli-file:';
 
 export type Views = ReturnType<typeof createViews>;
 
@@ -337,7 +337,8 @@ function cut(text: string, max: number): string {
   return text.slice(0, end);
 }
 
-function fileSrc(url: string): string {
+/** luoli-file: 地址 → 取图片的路径 /api/files/<文件名> */
+export function fileSrc(url: string): string {
   return `/api/files/${url.slice(fileScheme.length)}`;
 }
 

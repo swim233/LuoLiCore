@@ -44,6 +44,10 @@ export function relTime(ms: number) {
   if (s < 86400) return Math.round(s / 3600) + ' 小时前';
   return Math.round(s / 86400) + ' 天前';
 }
+/** 上次回复的说法：1 分钟内「刚刚回复过」，其余「上次回复在 X 前」 */
+export const recentReply = (ms: number) => Date.now() - ms < 60e3;
+export const lastReplyText = (ms: number) =>
+  recentReply(ms) ? '刚刚回复过' : '上次回复在 ' + relTime(ms);
 let idSeq = 0;
 export const uid = (p: string) => p + '_' + Date.now().toString(36) + (idSeq++).toString(36);
 export const chars = (s: string) => Array.from(s);

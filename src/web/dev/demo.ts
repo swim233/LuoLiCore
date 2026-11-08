@@ -1,11 +1,12 @@
 import { pick, randi } from '../lib/util';
-import { bot, nextScript, PLAIN, SCRIPTS, initLastReply } from './bot';
+import { bot, nextScript, PLAIN, SCRIPTS } from './bot';
 import type { Script } from './bot';
 import { db } from '../model/db';
+import { resetLive } from '../model/live-feed';
+import { mockLive, mockStatus } from './mock-live';
 import { mockServer as server } from './mock-server';
 import { mockSource } from './mock-source';
 import { imgPart, loadData } from './seed';
-import { status } from '../model/status';
 import { addWidget, nowCtl, relayout, removeWidget } from '../state/actions';
 import { resetLayoutToDefault } from '../state/appearance';
 import { desk, hasDef } from '../state/desk';
@@ -42,7 +43,11 @@ function convFor(key: string) {
 }
 function needOnline() {
   if (bot.online) return true;
-  toast('洛璃离线了：先点「bot 上线」');
+  toast(
+    mockStatus.enabled
+      ? '连不上 Telegram：先点「bot 上线」'
+      : 'Telegram 服务未启动：先点「启动 Telegram」',
+  );
   return false;
 }
 function runScript(sc: Script, key?: string) {
@@ -89,8 +94,28 @@ export const ACTIONS: Record<string, () => void> = {
     }, 450);
   },
   online() {
-    bot.setOnline(!bot.online);
-    toast(bot.online ? '洛璃上线了' : '洛璃离线了：进行中的回复已中止');
+    if (!mockStatus.enabled) {
+      toast('Telegram 服务未启动：先点「启动 Telegram」');
+      return;
+    }
+    bot.setOnline(!mockStatus.connected);
+    toast(mockStatus.connected ? '连上 Telegram 了' : '连不上 Telegram 了：进行中的回复不受影响');
+  },
+  /* 没启动 Telegram 前端（没设 token）：徽记显示「空闲」，弹出框写「Telegram 服务未启动」；进行中的 Telegram 回复中止 */
+  tg() {
+    const on = !mockStatus.enabled;
+    if (!on) bot.abortAll();
+    mockStatus.setEnabled(on);
+    toast(on ? '启动了 Telegram' : 'Telegram 服务未启动');
+  },
+  /* 断线重连：断开几秒，期间服务照常推进，重连后按现场重建「此刻」（不丢不重） */
+  reconnect() {
+    mockLive.connected = false;
+    toast('断开了 SSE，3 秒后重连');
+    setTimeout(() => {
+      mockLive.connected = true;
+      mockSource.resync();
+    }, 3000);
   },
   widget() {
     if (hasDef('today')) removeWidget('today');
@@ -148,8 +173,12 @@ export const ACTIONS: Record<string, () => void> = {
 };
 export function setData(kind: Dataset) {
   bot.reset();
+  mockLive.clear();
+  mockLive.connected = true;
+  mockStatus.reset();
+  resetLive();
   loadData(kind);
-  status.lastReplyAt = initLastReply();
+  mockLive.lastReply = server.lastAssistant();
   resetChatState();
   nowCtl.cancel();
   desk.set({ nowFloat: false, floatTop: null });

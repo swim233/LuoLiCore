@@ -1,18 +1,20 @@
 import { STAR_PATH, GLINT_PATH } from './icons';
 import { STATE_TEXT, useStatus } from '../model/status';
 import type { Snap } from '../model/status';
+import { useAssistantName } from '../model/who';
 
 /* 状态徽记：一颗四角星（SVG），八种状态。星星自己是一个 <svg> 元素（不是 SVG 里的 <g>）：
    HTML 元素上的 transform / opacity 动画跑在合成器上，SVG 里的子元素的动画要主线程每帧重画 */
 const SPARKS = [0, 60, 120, 180, 240, 300];
 export function BadgeView({ size, snap }: { size: number; snap: Snap }) {
+  const name = useAssistantName();
   return (
     <span
       className="badge"
       role="img"
       data-s={snap.state}
       style={{ '--bs': size + 'px' }}
-      aria-label={'洛璃：' + STATE_TEXT[snap.state]}
+      aria-label={name + '：' + STATE_TEXT[snap.state]}
     >
       <span className="badge-halo" />
       <svg className="badge-svg" viewBox="-50 -50 100 100" aria-hidden="true">

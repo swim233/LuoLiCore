@@ -7,6 +7,7 @@ import { morphStore } from '../../shell/morph';
 import { fmtShort } from '../../lib/util';
 import { db } from '../../model/db';
 import { status } from '../../model/status';
+import { useAssistantName } from '../../model/who';
 import type { Conversation, ConvKind } from '../../model/types';
 
 /* 会话行：左边 34px 的圆角方块图标，中间标题和最近一条消息预览，右边时间和未读数 */
@@ -37,6 +38,7 @@ const ConvRow = memo(function ConvRow({
   onPick: (id: string) => void;
 }) {
   void rev;
+  useAssistantName(); // 助手的名字变了，预览里的名字跟着变
   const n = conv.unread;
   const last = db.previewOf(conv) || '还没有消息';
   const st = status.conv.get(conv.id);

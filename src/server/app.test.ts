@@ -6,7 +6,7 @@ import type { Logger } from '../core/index.js';
 import { createApp } from './app.js';
 import { createEvents } from './events.js';
 import type { ServiceStatus } from './types.js';
-import { emptyViews } from './test-kit.js';
+import { emptyLive, emptyViews } from './test-kit.js';
 
 const port = 7310;
 const self = `127.0.0.1:${port}`;
@@ -47,11 +47,12 @@ const status: ServiceStatus = {
   startedAt: '2026-11-08T00:00:00.000Z',
   uptimeSeconds: 42,
   telegram: { enabled: true, connected: false },
+  assistant: { name: '洛璃', wakeWords: ['nori'] },
 };
 
 function setup({ dist = fakeDist(), heartbeat }: { dist?: string; heartbeat?: number } = {}) {
   const { logger, entries } = recordingLogger();
-  const events = createEvents({ status: () => status, logger, heartbeat });
+  const events = createEvents({ hello: () => ({ ...status, live: emptyLive }), logger, heartbeat });
   const app = createApp({ port, dist, events, views: emptyViews(), status: () => status, logger });
   /** 发一个请求，默认带上本机的 Host */
   const request = (path: string, init: RequestInit = {}) =>

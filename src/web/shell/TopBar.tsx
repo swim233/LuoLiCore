@@ -3,6 +3,7 @@ import { ICON_ARRANGE } from '../components/icons';
 import { useNarrow } from '../lib/env';
 import { chooseMotion, usePrefs } from '../lib/prefs';
 import { STATE_TEXT, useStatus } from '../model/status';
+import { useAssistantName } from '../model/who';
 import { hasDef, useDefsRev, useDesk } from '../state/desk';
 import { nowCtl, setArranging } from '../state/actions';
 import { pop } from '../state/ui';
@@ -12,12 +13,14 @@ import { Cap } from './Cap';
 export function TopBar() {
   useDefsRev();
   const snap = useStatus();
+  const name = useAssistantName();
   const narrow = useNarrow();
   const arranging = useDesk((s) => s.arranging);
   const motion = usePrefs((p) => p.motion);
   const L = useDesk((s) => s.layout);
   const islandOn = narrow && hasDef('now') && !L.hidden.now;
-  const name = snap.state === 'tool' ? '调用 ' + (snap.tool || '工具') : STATE_TEXT[snap.state];
+  const stateName =
+    snap.state === 'tool' ? '调用 ' + (snap.tool || '工具') : STATE_TEXT[snap.state];
   const where = snap.count >= 2 ? snap.count + ' 个群' : snap.list[0] ? snap.list[0].title : '';
   return (
     <header className="top" id="top">
@@ -26,7 +29,7 @@ export function TopBar() {
           className={'top-status' + (islandOn ? ' is-island-mode' : '')}
           id="top-status"
           type="button"
-          aria-label="洛璃的状态，点一下展开「此刻」"
+          aria-label={`${name}的状态，点一下展开「此刻」`}
           onClick={() => {
             pop.hide();
             nowCtl.manualExpand();
@@ -39,7 +42,7 @@ export function TopBar() {
           <span className="top-badge" id="top-badge">
             <Badge size={22} />
           </span>
-          <span className="top-name">洛璃</span>
+          <span className="top-name">{name}</span>
           <span className="top-state" id="top-state">
             {snap.state === 'offline' ? (
               '离线'
@@ -47,7 +50,7 @@ export function TopBar() {
               '空闲'
             ) : (
               <>
-                <b>{name}</b>
+                <b>{stateName}</b>
                 {where ? ' · ' + where : ''}
               </>
             )}

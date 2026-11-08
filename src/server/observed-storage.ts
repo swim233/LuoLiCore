@@ -71,6 +71,7 @@ export function observeStorage(
     overviews: (options) => storage.overviews(options),
     overview: (id, options) => storage.overview(id, options),
     callSummary: (since) => storage.callSummary(since),
+    lastReply: () => storage.lastReply(),
     close: () => storage.close(),
     async createConversation(conversation) {
       const id = await storage.createConversation(conversation);

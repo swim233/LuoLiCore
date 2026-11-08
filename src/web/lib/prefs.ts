@@ -9,6 +9,8 @@ const stored: Record<string, unknown> =
 export interface Prefs {
   hover: 'B' | 'C' | 'D';
   collapse: 30 | 5;
+  /** 有回复时「此刻」自动展开成浮窗（默认开） */
+  autoNow: boolean;
   fps: boolean;
   motion: boolean;
   motionChosen: boolean;
@@ -17,6 +19,7 @@ const HOVERS: Prefs['hover'][] = ['B', 'C', 'D'];
 export const prefs = createStore<Prefs>({
   hover: HOVERS.find((h) => h === stored.hover) ?? 'C',
   collapse: stored.collapse === 5 ? 5 : 30,
+  autoNow: stored.autoNow !== false,
   fps: stored.fps === true,
   motionChosen: typeof stored.motion === 'boolean',
   motion: typeof stored.motion === 'boolean' ? stored.motion : !MQ.reduced.matches,
@@ -29,7 +32,7 @@ export function setPrefs(patch: Partial<Prefs>) {
   storage.set(
     PREFS_KEY,
     Object.assign(
-      { hover: p.hover, collapse: p.collapse, fps: p.fps },
+      { hover: p.hover, collapse: p.collapse, autoNow: p.autoNow, fps: p.fps },
       p.motionChosen ? { motion: p.motion } : {},
     ),
   );

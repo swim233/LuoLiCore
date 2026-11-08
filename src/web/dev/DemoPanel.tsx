@@ -6,9 +6,9 @@ import { EASE_OUT_CSS } from '../lib/easing';
 import { chooseMotion, usePrefs } from '../lib/prefs';
 import type { Prefs } from '../lib/prefs';
 import { useBusRev } from '../model/rev';
-import { setCollapse, setFps, setHover } from '../state/appearance';
+import { setAutoNow, setCollapse, setFps, setHover } from '../state/appearance';
 import { hasDef, useDefsRev } from '../state/desk';
-import { bot } from './bot';
+import { mockStatus } from './mock-live';
 import { ACTIONS, setData } from './demo';
 import { toggleDemo, useDevUi } from './demo-state';
 import type { Dataset } from './demo-state';
@@ -20,7 +20,7 @@ export function DemoPanel() {
   const dataset = useDevUi((s) => s.dataset);
   const p = usePrefs((x) => x);
   useDefsRev();
-  useBusRev(['bot:online', 'bot:offline', 'data:reset']);
+  useBusRev(['bot:online', 'bot:offline', 'status', 'data:reset']);
   const ref = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   /* 展开：240 ms，从下面 10px、缩放 .98、透明度 0 */
@@ -76,8 +76,26 @@ export function DemoPanel() {
               <button className="dbtn" type="button" data-act="two">
                 两个群同时在回复
               </button>
-              <button className="dbtn is-wide" type="button" data-act="online" id="demo-online">
-                {bot.online ? 'bot 离线' : 'bot 上线'}
+              <button className="dbtn" type="button" data-act="online" id="demo-online">
+                {mockStatus.connected ? '连不上 Telegram' : '连上 Telegram'}
+              </button>
+              <button
+                className="dbtn"
+                type="button"
+                data-act="tg"
+                id="demo-tg"
+                title="没设 token：徽记显示空闲，弹出框写 Telegram 服务未启动"
+              >
+                {mockStatus.enabled ? 'Telegram 未启动' : '启动 Telegram'}
+              </button>
+              <button
+                className="dbtn is-wide"
+                type="button"
+                data-act="reconnect"
+                id="demo-reconnect"
+                title="断开 3 秒，服务照常推进，重连后按现场重建「此刻」"
+              >
+                断线重连（按现场重建）
               </button>
             </div>
           </section>
@@ -147,6 +165,18 @@ export function DemoPanel() {
                   ['D', 'D 倾斜', '卡牌倾斜'],
                 ]}
                 onPick={(v) => setHover(v as Prefs['hover'])}
+              />
+            </div>
+            <div className="demo-row" style={{ marginTop: 6 }}>
+              <span>有回复时自动展开「此刻」</span>
+              <Seg
+                id="demo-autonow"
+                value={p.autoNow ? 'on' : 'off'}
+                items={[
+                  ['on', '开'],
+                  ['off', '关'],
+                ]}
+                onPick={(v) => setAutoNow(v === 'on')}
               />
             </div>
             <div className="demo-row" style={{ marginTop: 6 }}>

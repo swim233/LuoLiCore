@@ -2,10 +2,37 @@ import { Fragment, memo } from 'react';
 import type { CSSProperties } from 'react';
 import { motionOn } from '../lib/prefs';
 import type { ImagePart } from '../model/types';
+import { assistant, useAssistant } from '../model/who';
 
-/* 正文高亮：网址、@提及、引号里的话、提到洛璃（唤醒词）、数字 */
-const HL_RE =
-  /(https?:\/\/[^\s，。！？、；：（）()《》“”"'‘’「」<>]+|\b(?:[a-z0-9-]+\.)+(?:com|org|net|cn|io|dev|me|jp|edu|gov|info)(?:\/[^\s，。！？、；：（）()《》“”"'‘’「」<>]*)?)|(@[\w一-龥]+)|(“[^”]*”|「[^」]*」|"[^"\n]*"|‘[^’]*’)|(洛璃|\bnori\b)|(\d+(?:[.:]\d+)*%?)/gi;
+/* 正文高亮：网址、@提及、引号里的话、提到助手（名字、唤醒词，由服务告诉面板）、数字。
+   @提及里认名字、唤醒词和 bot 的 @用户名：提到她的 @ 加亮 */
+const URL_RE = String.raw`https?:\/\/[^\s，。！？、；：（）()《》“”"'‘’「」<>]+|\b(?:[a-z0-9-]+\.)+(?:com|org|net|cn|io|dev|me|jp|edu|gov|info)(?:\/[^\s，。！？、；：（）()《》“”"'‘’「」<>]*)?`;
+const QUOTE_RE = String.raw`“[^”]*”|「[^」]*」|"[^"\n]*"|‘[^’]*’`;
+const escRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+/* 纯英文数字的词要按词的边界认（nori 不认 norita），中文名字直接认 */
+const word = (w: string) => (/^[\w-]+$/.test(w) ? `\\b${escRe(w)}\\b` : escRe(w));
+interface Matcher {
+  re: RegExp;
+  at: RegExp | null;
+}
+let cache: { key: string; m: Matcher } | null = null;
+function matcher(): Matcher {
+  const a = assistant.get();
+  const key = JSON.stringify([a.name, a.wakeWords, a.username]);
+  if (cache?.key === key) return cache.m;
+  const uniq = (xs: string[]) =>
+    [...new Set(xs.map((x) => x.trim()).filter(Boolean))].sort((p, q) => q.length - p.length);
+  const names = uniq([a.name, ...a.wakeWords]);
+  const handles = uniq([a.name, ...a.wakeWords, ...(a.username ? [a.username] : [])]);
+  const mention = names.length ? `(${names.map(word).join('|')})` : '(\\b\\B)';
+  const re = new RegExp(
+    `(${URL_RE})|(@[\\w一-龥]+)|(${QUOTE_RE})|${mention}|(\\d+(?:[.:]\\d+)*%?)`,
+    'gi',
+  );
+  const at = handles.length ? new RegExp(`^@(${handles.map(escRe).join('|')})`, 'i') : null;
+  cache = { key, m: { re, at } };
+  return cache.m;
+}
 export interface Tok {
   t: string;
   c: string;
@@ -14,12 +41,13 @@ export function hlTokens(text: string, hits: boolean): Tok[] {
   const out: Tok[] = [];
   let last = 0,
     m: RegExpExecArray | null;
-  const re = new RegExp(HL_RE.source, HL_RE.flags);
+  const { re: base, at } = matcher();
+  const re = new RegExp(base.source, base.flags);
   while ((m = re.exec(text))) {
     if (m.index > last) out.push({ t: text.slice(last, m.index), c: '' });
     let c = '';
     if (m[1]) c = 'hl-url';
-    else if (m[2]) c = 'hl-at' + (hits && /^@(洛璃|nori)/i.test(m[2]) ? ' hl-hit' : '');
+    else if (m[2]) c = 'hl-at' + (hits && at?.test(m[2]) ? ' hl-hit' : '');
     else if (m[3]) c = 'hl-q';
     else if (m[4]) c = hits ? 'hl-hit' : '';
     else if (m[5]) c = 'hl-num';
@@ -30,6 +58,7 @@ export function hlTokens(text: string, hits: boolean): Tok[] {
   return out;
 }
 export const Hl = memo(function Hl({ text, hits }: { text: string; hits: boolean }) {
+  useAssistant(); // 名字、唤醒词变了要重新高亮
   return (
     <>
       {hlTokens(text, hits).map((x, i) =>

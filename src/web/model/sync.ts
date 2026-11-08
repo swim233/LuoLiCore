@@ -307,6 +307,19 @@ export function markRead(convId: string, seq: number) {
     });
 }
 
+/** 一个会话最近的 n 条消息（「此刻」里一个会话开头的几行）：已经取到的直接用，没有就向服务取；取不到是空的。
+    fresh：一定向服务取（断开期间可能有新消息，已经取到的不是最新的） */
+export async function recentMessages(convId: string, n: number, fresh = false): Promise<MsgRow[]> {
+  const cached = db.msgInfo.get(convId)?.state === 'ready' ? db.msgs(convId).slice(-n) : null;
+  if (cached && !fresh) return cached;
+  if (!api) return cached ?? [];
+  try {
+    return (await api.messages(convId, { limit: n })).messages;
+  } catch {
+    return cached ?? [];
+  }
+}
+
 /** 重新取今日概况 */
 export async function refreshToday() {
   if (!api) return;

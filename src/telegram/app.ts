@@ -2,14 +2,30 @@ import { createMemoryState } from '@chat-adapter/state-memory';
 import { Chat, type StateAdapter } from 'chat';
 import type { Logger, Storage } from '../core/index.js';
 import { LuoliTelegramAdapter, sdkLogger } from './adapter.js';
-import { createTelegramBot, type ChatTarget, type OpenConversation } from './bot.js';
+import {
+  createTelegramBot,
+  type ChatTarget,
+  type OpenConversation,
+  type RoundNotice,
+} from './bot.js';
 import type { TelegramConfig } from './config.js';
 import type { TelegramRaw } from './message.js';
+
+/** 和 Telegram 的连接（洛璃服务的状态里用） */
+export type TelegramLink = {
+  /** 连得上 Telegram：最近一次拉取更新成功 */
+  connected: boolean;
+  /** 最近一次拉取更新成功的时间；还没成功过时没有 */
+  lastOnlineAt?: Date;
+  /** bot 的用户名（不带 @）；还没拿到 bot 的身份（getMe 没成功过）时没有 */
+  username?: string;
+};
 
 /**
  * 启动 Telegram 前端：Chat SDK 轮询收消息（平台状态放内存），每条消息交给 bot 处理。
  * 会话对象由 open 提供（洛璃服务里是会话管理）。
- * 返回 stop()：停止轮询、收尾进行中的回复，再对各会话对象调 close()。数据库由调用方关闭
+ * 返回 stop()：停止轮询、收尾进行中的回复，再对各会话对象调 close()。数据库由调用方关闭；
+ * link()：此刻和 Telegram 的连接
  */
 export async function startTelegram({
   config,
@@ -20,6 +36,8 @@ export async function startTelegram({
   typingIntervalMs,
   wait,
   state = createMemoryState(),
+  onRound,
+  onConnectionChange,
 }: {
   config: TelegramConfig;
   /** 按会话 id 取核心的会话对象，见 createTelegramBot */
@@ -34,6 +52,10 @@ export async function startTelegram({
   wait?: { idleMs: number; maxMs: number };
   /** Chat SDK 的平台状态（去重、轮询进度等），默认放内存；测试里可以换成记录调用的 */
   state?: StateAdapter;
+  /** 一轮回复里的等待合并、回复中又被触发、这一轮结束，见 RoundNotice */
+  onRound?: (notice: RoundNotice) => void;
+  /** 连上、断开 Telegram 时调用（启动期间第一次连上也算），读 link() 得到此刻的连接 */
+  onConnectionChange?: () => void;
 }) {
   const adapter = new LuoliTelegramAdapter({
     botToken: config.token,
@@ -45,6 +67,7 @@ export async function startTelegram({
     mentionOnReply: false,
     logger: sdkLogger(logger, 'telegram'),
   });
+  adapter.onConnectionChange = onConnectionChange && (() => onConnectionChange());
   const chat = new Chat({
     // 只是占位：适配器启动时用 getMe 拿到真正的用户名
     userName: 'bot',
@@ -79,6 +102,7 @@ export async function startTelegram({
     staleMs: config.staleMs,
     typingIntervalMs,
     wait,
+    onRound,
   });
 
   // 不订阅任何线程：私聊进 onDirectMessage，@bot 进 onNewMention，其余进不带模式的
@@ -115,6 +139,14 @@ export async function startTelegram({
     adapter,
     /** 离线积压处理完、其余会话也已打开（测试用） */
     caughtUp,
+    link(): TelegramLink {
+      return {
+        connected: adapter.connected,
+        lastOnlineAt: adapter.lastPolledAt,
+        // 拿到 bot 的身份之前 userName 是占位的 bot
+        username: adapter.botUserId ? adapter.userName : undefined,
+      };
+    },
     async stop(): Promise<void> {
       await chat.shutdown();
       await bot.close();

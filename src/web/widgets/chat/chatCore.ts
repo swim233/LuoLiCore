@@ -245,8 +245,6 @@ function onMessages(r: Rec) {
           callId: p.toolCallId,
           ok: true,
           ms: p.output?.ms || 800,
-          summary: p.output?.summary,
-          image: null,
         });
       }
     } else if (p.type === 'text') {
@@ -376,6 +374,3 @@ bus.on('data:reset', () => {
   [...recs.keys()].forEach(disposeChat);
 });
 bus.on('conv:remove', ({ id }) => disposeChat(id));
-bus.on('bot:offline', () => {
-  for (const r of recs.values()) if (!r.finished) r.chat.stop();
-});

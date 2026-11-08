@@ -1,6 +1,7 @@
 import { useLayoutEffect, useRef } from 'react';
-import { STATE_TEXT, status, useStatus } from '../model/status';
-import { clamp, fmtTime, relTime } from '../lib/util';
+import { lastOnlineText, STATE_TEXT, status, useStatus } from '../model/status';
+import { useAssistantName } from '../model/who';
+import { clamp, lastReplyText } from '../lib/util';
 import { getDef, useDesk, useDefsRev } from '../state/desk';
 import { pop, useUi } from '../state/ui';
 import { unhideWidget } from '../state/actions';
@@ -10,6 +11,7 @@ import { dragStart, wasDragged } from './drag';
 export function Pop() {
   const anchor = useUi((s) => s.popAnchor);
   const s = useStatus();
+  const name = useAssistantName();
   const ref = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
     if (!anchor || !ref.current) return;
@@ -27,7 +29,7 @@ export function Pop() {
     <div className="pop" id="pop" ref={ref}>
       <div className="pop-title">
         {s.state === 'offline'
-          ? '洛璃离线'
+          ? `${name}离线`
           : s.count
             ? `${s.count} 个会话在回复`
             : '没有进行中的对话'}
@@ -35,17 +37,13 @@ export function Pop() {
       {s.state === 'offline' && (
         <div className="pop-row">
           <span className="sdot" data-s="offline" />
-          <b>{'上次在线 ' + fmtTime(status.lastOnlineAt)}</b>
+          <b>{lastOnlineText()}</b>
         </div>
       )}
       {s.state !== 'offline' && !s.count && (
         <div className="pop-row">
           <span className="sdot" data-s="idle" />
-          <b>
-            {status.lastReplyAt
-              ? '上次回复在 ' + relTime(status.lastReplyAt)
-              : '今天还没有新的回复'}
-          </b>
+          <b>{status.lastReplyAt ? lastReplyText(status.lastReplyAt) : '今天还没有新的回复'}</b>
         </div>
       )}
       {s.list.map((x) => (
@@ -55,6 +53,12 @@ export function Pop() {
           <span>{x.state === 'tool' ? '调用 ' + (x.tool || '工具') : STATE_TEXT[x.state]}</span>
         </div>
       ))}
+      {!s.tgEnabled && (
+        <div className="pop-row">
+          <span className="sdot" data-s="offline" />
+          <b>Telegram 服务未启动</b>
+        </div>
+      )}
     </div>
   );
 }

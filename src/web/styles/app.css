@@ -2197,6 +2197,25 @@ button {
   display: block;
   color: var(--fg-2);
 }
+.tl-sum.is-bad {
+  color: var(--err);
+}
+.tl-tool {
+  font-weight: 600;
+}
+/* 终端里的真图：缩略图的大小与间距（宽高由 Pic 按原图比例算好） */
+.tl-pics {
+  display: block;
+}
+.tl-body .pic {
+  margin: 4px 6px 2px 0;
+  border-radius: 6px;
+}
+.tl-body .pic.is-lost {
+  width: 84px;
+  height: 58px;
+  font-size: 11px;
+}
 .tl-think {
   all: unset;
   cursor: pointer;

@@ -1,8 +1,8 @@
 import { chars, rand, randi, uid } from '../lib/util';
-import { bus } from '../model/bus';
 import { withDemo } from '../model/parts';
 import type { ImageInfo, ImagePart, MsgRow, Part, ToolResultInfo } from '../model/types';
-import { mockServer as server } from './mock-server';
+import { mockLive, mockStatus } from './mock-live';
+import { mockServer as server, svgImage } from './mock-server';
 import { U, imgPart, toolPart } from './seed';
 
 /* 模拟 bot 的剧本 */
@@ -20,11 +20,15 @@ export interface Script {
     image?: ImagePart;
     chars?: number;
     wait?: number;
+    /** 工具出错：错误说明（模型看到的第一行） */
+    fail?: string;
   };
   text: string;
   usage?: [number, number, number];
   errorAt?: number;
   errorStatus?: number;
+  /** 输出到第几个字时流中断，重新生成一次（流中途重试） */
+  restreamAt?: number;
 }
 
 /* 可取消的流程：模拟数据的每一次回复都跑在一个 run 里，切换数据、离线、删会话时整体取消 */
@@ -69,7 +73,10 @@ interface RunState {
 /* 模拟 bot：一次回复 = 等待合并 →（重试）→ 思考 →（工具）→ 逐字输出 → 结束。
    回复期间又被触发：照「合并回复」，当前回复发出后再回复一次 */
 class Bot {
-  online = true;
+  /** 能收到 Telegram 的消息：启动了 Telegram 前端，而且连得上 */
+  get online() {
+    return mockStatus.enabled && mockStatus.connected;
+  }
   runs = new Map<string, RunState>();
 
   post(
@@ -95,7 +102,7 @@ class Bot {
     }
     const first = !cur.pending;
     cur.pending = script;
-    if (first) bus.emit('reply:queued', { convId, replyId: cur.replyId });
+    if (first) mockLive.again(convId);
     return true;
   }
   abort(convId: string) {
@@ -103,11 +110,10 @@ class Bot {
     if (!st) return;
     st.run.cancel();
     this.runs.delete(convId);
-    let row: MsgRow | null = null;
     if (server.has(convId) && (st.text || st.parts.length)) {
       const parts = st.parts.slice();
       if (st.text) parts.push({ type: 'text', text: st.text });
-      row = server.addMsg(convId, {
+      const row = server.addMsg(convId, {
         role: 'assistant',
         parts,
         images: st.images,
@@ -116,7 +122,7 @@ class Bot {
       });
       server.addCall({
         conversation_id: convId,
-        reply_id: row!.id,
+        reply_id: row?.id ?? null,
         started_at: new Date(st.started).toISOString(),
         duration_ms: Date.now() - st.started,
         outcome: 'aborted',
@@ -124,7 +130,7 @@ class Bot {
         output_tokens: null,
       });
     }
-    bus.emit('reply:abort', { convId, replyId: st.replyId, row });
+    mockLive.end(convId, 'aborted');
   }
   abortAll() {
     [...this.runs.keys()].forEach((id) => this.abort(id));
@@ -133,12 +139,9 @@ class Bot {
     this.runs.forEach((st) => st.run.cancel());
     this.runs.clear();
   }
+  /** 连上、连不上 Telegram。连不上时进行中的回复照样跑完（只是发不到群里），新的触发进不来 */
   setOnline(on: boolean) {
-    if (on === this.online) return;
-    this.online = on;
-    /* 先发离线事件再中止进行中的回复：「此刻」里「回复被中止：bot 离线」那一行要看 status.online */
-    bus.emit(on ? 'bot:online' : 'bot:offline');
-    if (!on) this.abortAll();
+    mockStatus.setConnected(on);
   }
 }
 export const bot = new Bot();
@@ -158,8 +161,9 @@ async function replyFlow(convId: string, script: Script, merged = false) {
     tools: {},
   };
   bot.runs.set(convId, st);
+  /* 回复中又被触发而再回复一次的（merged），不再等待合并：直接开始 */
   const noWait = merged || script.wait === 0;
-  bus.emit('reply:wait', { convId, replyId: st.replyId, noWait });
+  if (!merged) mockLive.wait(convId);
   st.waitUntil = Date.now() + (noWait ? 300 : script.wait || 2400);
   if (!noWait && script.during)
     for (const m of script.during) {
@@ -169,33 +173,39 @@ async function replyFlow(convId: string, script: Script, merged = false) {
     await run.sleep(Math.min(200, Math.max(10, st.waitUntil - Date.now())));
 
   st.phase = 'request';
-  const tReq = Date.now();
+  mockLive.start(convId, st.replyId);
   let attempts = 1;
   if (script.retry) {
     await run.sleep(900);
-    bus.emit('reply:retry', {
-      convId,
-      replyId: st.replyId,
+    mockLive.retry(convId, {
+      phase: 'request',
       attempt: 1,
-      max: 2,
-      status: script.retry,
+      maxRetries: 2,
+      statusCode: script.retry,
     });
     await run.sleep(1800);
     attempts++;
   }
   if (script.think) {
     st.phase = 'thinking';
-    bus.emit('reply:think', { convId, replyId: st.replyId });
-    await run.sleep(script.think.ms);
+    const part = mockLive.reasoningStart(convId);
+    /* 思考的内容分几次到：「此刻」不逐字显示，只显示「思考中…」，结束后才有内容 */
+    const cs = chars(script.think.text);
+    const pieces = 4;
+    const size = Math.ceil(cs.length / pieces);
+    for (let k = 0; k < pieces; k++) {
+      await run.sleep(script.think.ms / pieces);
+      mockLive.reasoningDelta(convId, part, cs.slice(k * size, (k + 1) * size).join(''));
+    }
     const sec = Math.max(1, Math.round(script.think.ms / 1000));
     st.parts.push(withDemo({ type: 'reasoning', text: script.think.text }, { sec }));
-    bus.emit('reply:thinkEnd', { convId, replyId: st.replyId, sec, text: script.think.text });
+    mockLive.reasoningEnd(convId, part);
   }
   if (script.tool) {
     st.phase = 'tool';
     const callId = uid('call');
     const t = script.tool;
-    bus.emit('tool:start', { convId, replyId: st.replyId, callId, name: 'fetch', label: t.url });
+    mockLive.toolStart(convId, callId, 'fetch', { url: t.url });
     await run.sleep(t.wait || 1500);
     const built = toolPart(callId, {
       url: t.url,
@@ -203,36 +213,48 @@ async function replyFlow(convId: string, script: Script, merged = false) {
       ms: t.ms,
       chars: t.chars || 2400,
       image: t.image,
+      ok: !t.fail,
     });
     st.parts.push(built.part);
     Object.assign(st.images, built.images);
     Object.assign(st.tools, built.tools);
-    bus.emit('tool:end', {
+    mockLive.toolEnd(
       convId,
-      replyId: st.replyId,
       callId,
-      ok: true,
-      ms: t.ms,
-      summary: t.summary,
-      image: t.image || null,
-    });
+      t.fail
+        ? { ok: false, error: t.fail }
+        : { ok: true, images: t.image ? [svgImage(t.image)] : undefined },
+    );
     attempts++;
+    mockLive.nextStep(convId);
     await run.sleep(700);
   }
   st.phase = 'replying';
   const cs = chars(script.text);
   let i = 0;
+  let restreamed = script.restreamAt == null;
   while (i < cs.length) {
     if (script.errorAt != null && i >= script.errorAt)
       return failFlow(convId, st, script, attempts);
+    if (!restreamed && i >= script.restreamAt!) {
+      /* 流中途出错：重试，这一步已输出的内容作废，从头再来 */
+      restreamed = true;
+      await run.sleep(500);
+      mockLive.retry(convId, { phase: 'stream', attempt: 1, maxRetries: 2 });
+      mockLive.resetStep(convId, st.parts.length);
+      st.text = '';
+      i = 0;
+      attempts++;
+      await run.sleep(1200);
+      continue;
+    }
     const n = randi(1, 3);
     const chunk = cs.slice(i, i + n).join('');
     i += n;
     st.text += chunk;
-    bus.emit('reply:delta', { convId, replyId: st.replyId, text: chunk });
+    mockLive.text(convId, chunk);
     await run.sleep(randi(45, 90));
   }
-  const ms = Date.now() - tReq;
   const inp = script.usage ? script.usage[0] : randi(1600, 4200);
   const usage = script.usage
     ? { input: script.usage[0], cache: script.usage[1], output: script.usage[2] }
@@ -267,7 +289,10 @@ async function replyFlow(convId: string, script: Script, merged = false) {
       steps: script.tool ? 2 : 1,
       tool_calls: script.tool ? 1 : 0,
     });
-  bus.emit('reply:end', { convId, replyId: st.replyId, ms, usage, row });
+  mockLive.lastReply = row ? { conversationId: convId, at: row.createdAt } : mockLive.lastReply;
+  mockLive.end(convId, 'completed', {
+    usage: { input: usage.input, cacheRead: usage.cache, output: usage.output },
+  });
   if (st.pending) {
     const next = st.pending;
     setTimeout(() => {
@@ -279,6 +304,7 @@ async function replyFlow(convId: string, script: Script, merged = false) {
 function failFlow(convId: string, st: RunState, script: Script, attempts: number) {
   bot.runs.delete(convId);
   let row: MsgRow | null = null;
+  const status = script.errorStatus || 429;
   if (server.has(convId)) {
     const parts = st.parts.slice();
     if (st.text) parts.push({ type: 'text', text: st.text });
@@ -297,10 +323,10 @@ function failFlow(convId: string, st: RunState, script: Script, attempts: number
       duration_ms: Date.now() - st.started,
       attempts: attempts + 2,
       outcome: 'failed',
-      error: 'APICallError ' + (script.errorStatus || 429),
+      error: 'APICallError ' + status,
     });
   }
-  bus.emit('reply:error', { convId, replyId: st.replyId, status: script.errorStatus || 429, row });
+  mockLive.end(convId, 'failed', { error: `请求失败（${status}）`, statusCode: status });
   if (st.pending) {
     const next = st.pending;
     setTimeout(() => {
@@ -365,6 +391,20 @@ export const SCRIPTS: Record<'trigger' | 'tool' | 'error' | 'retry', Script[]> =
       text: '是新译本，评分 9.1，封面是星空蓝的，好看！详情在 https://book.example.com/fox ，纸质书 32 块，比图书馆的版本多了 20 幅插图～',
       usage: [3880, 2048, 71],
     },
+    {
+      convId: 'c-star',
+      msgs: [[2002, '洛璃 这个链接帮我看一下 https://example.com/gone']],
+      think: { ms: 1100, text: '小星发了一个链接，先读一下。' },
+      tool: {
+        url: 'example.com/gone',
+        ms: 600,
+        summary: '',
+        wait: 1200,
+        fail: '抓取失败：HTTP 404',
+      },
+      text: '这个链接打不开呢，网站返回了 404，可能页面已经被删掉了～ 换个链接再发给我试试？',
+      usage: [2650, 1536, 60],
+    },
   ],
   error: [
     {
@@ -385,6 +425,15 @@ export const SCRIPTS: Record<'trigger' | 'tool' | 'error' | 'retry', Script[]> =
       think: { ms: 1300, text: '小雨想让我叫她起床，我做不到主动发消息，要说清楚。' },
       text: '我还不能主动发消息呢……不过可以提醒你：今晚早点睡，定好 7 点的闹钟，明早见～',
       usage: [1320, 768, 52],
+    },
+    {
+      convId: 'c-dm',
+      msgs: [[1002, '洛璃 晚上吃什么好呢，纠结']],
+      wait: 1200,
+      think: { ms: 1200, text: '小雨在纠结晚饭，给一个轻松的建议。' },
+      text: '天冷了，来一碗热乎乎的面吧～ 加个蛋，再配点青菜，简单又舒服。',
+      restreamAt: 12,
+      usage: [1410, 768, 48],
     },
   ],
 };
@@ -411,6 +460,3 @@ export const nextScript = (kind: keyof typeof scriptIdx) => {
   const list = SCRIPTS[kind];
   return list[scriptIdx[kind]++ % list.length];
 };
-export function initLastReply() {
-  return server.lastAssistantAt();
-}

@@ -11,7 +11,7 @@ import { fmtDay, fmtShort } from '../../lib/util';
 import { bus } from '../../model/bus';
 import { db } from '../../model/db';
 import { useBusRev } from '../../model/rev';
-import { colorOf, LUOLI } from '../../model/who';
+import { colorOf, useAssistantName } from '../../model/who';
 import { toast } from '../../state/ui';
 import { ConvList } from '../sessions/ConvList';
 import { chatCur, chatState, draftOf, newWebConv, switchTo, webConvs } from './chatState';
@@ -88,6 +88,7 @@ const ChatItem = memo(function ChatItem({
   streaming: boolean;
   isNew: boolean;
 }) {
+  const luoli = useAssistantName();
   const you = m.role === 'user';
   const meta: Partial<NonNullable<ChatMsg['metadata']>> = m.metadata ?? {};
   const aborted = !!meta.aborted,
@@ -107,7 +108,7 @@ const ChatItem = memo(function ChatItem({
       style={you ? { '--who': colorOf(meta.name || '你') } : undefined}
     >
       <div className="msg-meta">
-        <b>{you ? meta.name || '你' : LUOLI}</b>
+        <b>{you ? meta.name || '你' : luoli}</b>
         <time>{label}</time>
       </div>
       <div className="bubble">
@@ -239,6 +240,7 @@ function ChatLog({ convId }: { convId: string }) {
 
 /* 输入：Enter 发送、Shift+Enter 换行（输入法组词中不发送）；粘贴或拖入图片；生成中按 Esc 中止并阻止冒泡 */
 function Composer({ convId, fullId }: { convId: string | null; fullId: string }) {
+  const luoli = useAssistantName();
   const gen = useStore(chatState, (s) => !!s.gen && s.gen === convId);
   const [text, setText] = useState(() => (convId ? draftOf(convId).text : ''));
   const [atts, setAtts] = useState<Att[]>(() => (convId ? draftOf(convId).atts.slice() : []));
@@ -319,8 +321,8 @@ function Composer({ convId, fullId }: { convId: string | null; fullId: string })
           className="chat-ta"
           rows={1}
           id={fullId}
-          placeholder="和洛璃说点什么…"
-          aria-label="给洛璃的消息"
+          placeholder={`和${luoli}说点什么…`}
+          aria-label={`给${luoli}的消息`}
           value={text}
           onChange={(e) => {
             setText(e.target.value);

@@ -3,7 +3,14 @@ import { Star4, IconSettings } from '../../components/icons';
 import { Seg } from '../../components/Seg';
 import { chooseMotion, usePrefs } from '../../lib/prefs';
 import type { Prefs } from '../../lib/prefs';
-import { resetLayoutToDefault, setCollapse, setFps, setHover } from '../../state/appearance';
+import {
+  resetLayoutToDefault,
+  setAutoNow,
+  setCollapse,
+  setFps,
+  setHover,
+} from '../../state/appearance';
+import { useAssistantName } from '../../model/who';
 import type { ViewProps, WidgetDef } from '../types';
 
 /* 设置：「外观」是浏览器里的偏好，现在就能改（存 localStorage，不经服务）；
@@ -104,6 +111,7 @@ function Field({
    状态在 lib/prefs.ts，开发模式的演示面板也是它，所以两处同步 */
 function AppearanceFields() {
   const p = usePrefs((x) => x);
+  const name = useAssistantName();
   const hint = HOVER_ITEMS.find(([v]) => v === p.hover)?.[2];
   return (
     <>
@@ -132,6 +140,17 @@ function AppearanceFields() {
           value={p.hover}
           items={HOVER_ITEMS}
           onPick={(v) => setHover(v as Prefs['hover'])}
+        />
+      </Field>
+      <Field
+        label="有回复时自动展开「此刻」"
+        hint={`有人叫${name}时，「此刻」自动浮起来显示这次回复；关掉后只在点开它时才展开。网页会话里的回复不自动展开`}
+      >
+        <Seg
+          label="有回复时自动展开「此刻」"
+          value={p.autoNow ? 'on' : 'off'}
+          items={ON_OFF}
+          onPick={(v) => setAutoNow(v === 'on')}
         />
       </Field>
       <Field label="「此刻」自动缩回" hint="回复都结束后，浮起的「此刻」等这么久再自动缩回">

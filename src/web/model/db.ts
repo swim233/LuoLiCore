@@ -1,4 +1,4 @@
-import { LUOLI } from './who';
+import { assistantName } from './who';
 import type { Conversation, MsgRow, Segment, TodaySummary } from './types';
 
 /* 客户端的数据层：部件在渲染里同步读它。数据是服务给的样子（会话一行、消息整条 UI 消息、段、今日概况），
@@ -68,7 +68,7 @@ class Db {
   previewOf(c: Conversation): string {
     const l = c.last;
     if (!l) return '';
-    const name = l.role === 'assistant' ? LUOLI : l.author;
+    const name = l.role === 'assistant' ? assistantName() : l.author;
     const text = l.text || '（没有文字）';
     return name ? name + '：' + text : text;
   }

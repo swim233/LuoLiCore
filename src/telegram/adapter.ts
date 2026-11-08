@@ -19,7 +19,9 @@ import type { TelegramRaw } from './message.js';
  * - 相册：适配器攒齐后只派发一条（原始数据只有最后一条），各条原始消息另记一份，由 takeAlbum 取回。
  *   相册某一条的编辑不再攒，立即按单条派发。
  * - 下载文件：公开基类的 downloadFile。
- * - 连接状态：记下最近一次拉取更新是否成功（connected），洛璃服务据此报告「离线」。
+ * - 连接状态：记下最近一次拉取更新是否成功（connected）与成功的时间，变了时调 onConnectionChange，
+ *   洛璃服务据此报告「离线」。断开期间的拉取不长轮询（timeout 0），恢复后第一次拉取就立即返回、
+ *   变回连上；之后照旧长轮询。否则恢复后要等一次长轮询返回（默认 30 秒）才知道连上了。
  */
 export class LuoliTelegramAdapter extends TelegramAdapter {
   private readonly chains = new Map<string, Promise<void>>();
@@ -32,8 +34,12 @@ export class LuoliTelegramAdapter extends TelegramAdapter {
   private markCaughtUp!: () => void;
   /** 启动后离线积压的更新都处理完时兑现；没有积压时，第一次拉取返回空之后兑现 */
   readonly caughtUp = new Promise<void>((resolve) => (this.markCaughtUp = resolve));
-  // 最近一次拉取更新是否成功
+  // 最近一次拉取更新是否成功，以及最近一次成功的时间
   private polled = false;
+  private polledAt?: Date;
+
+  /** connected 变了（连上、断开）时调用；抛错不影响轮询 */
+  onConnectionChange?: (connected: boolean) => void;
 
   /**
    * 连得上 Telegram：最近一次拉取更新（getUpdates）成功。拉取失败（网络不通、token 失效等）时为 false，
@@ -41,6 +47,22 @@ export class LuoliTelegramAdapter extends TelegramAdapter {
    */
   get connected(): boolean {
     return this.polled;
+  }
+
+  /** 最近一次拉取更新成功的时间；还没成功过时没有 */
+  get lastPolledAt(): Date | undefined {
+    return this.polledAt;
+  }
+
+  private setPolled(polled: boolean): void {
+    if (polled) this.polledAt = new Date();
+    if (polled === this.polled) return;
+    this.polled = polled;
+    try {
+      this.onConnectionChange?.(polled);
+    } catch {
+      // 通知出错不影响轮询
+    }
   }
 
   constructor(config: TelegramAdapterConfig) {
@@ -59,15 +81,15 @@ export class LuoliTelegramAdapter extends TelegramAdapter {
     }
     try {
       const updates = await this.fetchUpdates<TResult>(payload, request);
-      this.polled = true;
+      this.setPolled(true);
       return updates;
     } catch (error) {
-      if (!request?.signal?.aborted) this.polled = false;
+      if (!request?.signal?.aborted) this.setPolled(false);
       throw error;
     }
   }
 
-  /** getUpdates：积压取完之前不长轮询 */
+  /** getUpdates：积压取完之前、断开期间都不长轮询 */
   private async fetchUpdates<TResult>(
     payload: Record<string, unknown> | undefined,
     request?: { signal?: AbortSignal },
@@ -75,7 +97,13 @@ export class LuoliTelegramAdapter extends TelegramAdapter {
     if (this.backlogDrained) {
       // 轮询要等上一批都处理完才拉下一批：积压的最后一批这时已经处理完；相册要等它也派发完
       if (this.backlogAlbums.size === 0) this.markCaughtUp();
-      return super.telegramFetch<TResult>('getUpdates', payload, request);
+      // 断开期间（上一次拉取失败）：立即返回，成功了就算连上，下一次再长轮询
+      const quick = !this.polled;
+      return super.telegramFetch<TResult>(
+        'getUpdates',
+        quick ? { ...payload, timeout: 0 } : payload,
+        request,
+      );
     }
     // 还在取积压：不等新消息，立即返回
     const updates = await super.telegramFetch<TelegramUpdate[]>(

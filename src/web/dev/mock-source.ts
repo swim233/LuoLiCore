@@ -1,6 +1,6 @@
 import { DefaultChatTransport } from 'ai';
 import type { DataSource } from '../model/source';
-import { status } from '../model/status';
+import { applyHello } from '../model/live-feed';
 import {
   applyMessage,
   applyRemoved,
@@ -14,7 +14,7 @@ import {
   preload,
 } from '../model/sync';
 import type { ChatMsg } from '../model/types';
-import { bot, initLastReply } from './bot';
+import { mockLive, mockStatus } from './mock-live';
 import { mockServer as server } from './mock-server';
 import { loadData } from './seed';
 
@@ -33,14 +33,15 @@ export const mockSource: DataSource & { resync(): void } = {
       removed: applyRemoved,
     };
     loadData('normal');
+    mockLive.lastReply = server.lastAssistant();
     mockSource.resync();
-    status.lastReplyAt = initLastReply();
     return () => {
       server.hooks = null;
     };
   },
-  /** 模拟服务的数据整批交给客户端（启动、切换数据档位） */
+  /** 模拟服务的数据整批交给客户端（启动、切换数据档位）；「此刻」按现场重建，和真实的服务连上时一样 */
   resync() {
+    applyHello(mockStatus.hello());
     applyReset(
       server.rows(),
       server.todayNow(),
@@ -54,7 +55,8 @@ export const mockSource: DataSource & { resync(): void } = {
   openConversation: (id) => void openConversation(id),
   loadOlder: (id, manual) => void loadOlder(id, manual),
   markRead,
-  chatBlocked: () => (bot.online ? null : '洛璃离线了，上线后再发'),
+  // 网页对话与 Telegram 连不连得上没有关系
+  chatBlocked: () => null,
   chatTransport: () => new DefaultChatTransport<ChatMsg>({ api: '/api/chat' }),
   webChat: {
     newConv() {

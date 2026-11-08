@@ -23,7 +23,7 @@ import type { FilePart, ToolPart } from '../../model/parts';
 import { getSource } from '../../model/source';
 import { status } from '../../model/status';
 import type { MsgRow, Segment } from '../../model/types';
-import { colorOf, LUOLI } from '../../model/who';
+import { colorOf, useAssistantName } from '../../model/who';
 
 /* 时间线：聊天气泡、段分隔与摘要、折叠的工具调用和思考内容。用 @tanstack/react-virtual 排（动态高度，贴底）。
    数据按需取：打开会话时取最近一批（有未读就一次取到分隔线那条），滚到顶部时取更早的一批。
@@ -146,6 +146,7 @@ export const MsgView = memo(function MsgView({
   web: boolean;
   isNew: boolean;
 }) {
+  const luoli = useAssistantName();
   const conv = db.conv(convId);
   const m = row.message;
   const isA = row.role === 'assistant';
@@ -206,7 +207,7 @@ export const MsgView = memo(function MsgView({
       style={!isA ? { '--who': colorOf(who?.id || who?.name || '') } : undefined}
     >
       <div className="msg-meta">
-        <b>{isA ? LUOLI : (who?.name ?? '')}</b>
+        <b>{isA ? luoli : (who?.name ?? '')}</b>
         <time>{fmtDay(Date.parse(row.createdAt))}</time>
       </div>
       <div className="bubble">
@@ -220,10 +221,11 @@ export const MsgView = memo(function MsgView({
   );
 });
 function TypingView() {
+  const luoli = useAssistantName();
   return (
     <div className="msg is-luoli is-me typing-msg">
       <div className="msg-meta">
-        <b>{LUOLI}</b>
+        <b>{luoli}</b>
         <time>正在回复</time>
       </div>
       <div className="bubble">

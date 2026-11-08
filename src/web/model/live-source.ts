@@ -1,6 +1,7 @@
 import { DefaultChatTransport } from 'ai';
 import { httpApi } from './api';
 import { db } from './db';
+import { applyHello, applyLive, applyStatus, setGapHandler } from './live-feed';
 import { setLink } from './link';
 import type { DataSource } from './source';
 import {
@@ -16,12 +17,21 @@ import {
   refreshToday,
 } from './sync';
 import type { ChatMsg } from './types';
-import type { ConversationRow, MessageEvent, ServerEvents, TodaySummary } from '../../server/types';
+import type {
+  ConversationRow,
+  Hello,
+  LiveEvent,
+  MessageEvent,
+  ServerEvents,
+  ServiceStatus,
+  TodaySummary,
+} from '../../server/types';
 
 /* 真实的数据源：连洛璃服务。
    - 连上 SSE（GET /api/events）；每次收到 hello（第一次连上、断线重连）就重新取会话列表和今日概况：第一次整批放进去并发 data:reset，
      断线重连后合并（已经取到的消息和阅读位置留着，补取断线期间的新消息，见 sync.ts 的 applyResync）；
    - 之后的 conversation、message、today 事件增量放进 db，发部件在听的总线事件；
+   - hello 里的现场、status 与 live 事件交给 live-feed.ts：「此刻」、徽记、顶栏、助手的名字都从那里来；
    - 连不上时（SSE 断了，或取数据失败）连接状态是 down，部件显示「连不上洛璃服务」；EventSource 自己会重连，连上后自动恢复；
    - 今天的日期（服务器时区）变了就重新取今日概况。 */
 const RETRY_MS = 3000;
@@ -91,7 +101,13 @@ export const liveSource: DataSource = {
       if (stopped) return;
       const source = new EventSource('/api/events');
       es = source;
-      on(source, 'hello', () => void resync());
+      // hello：服务的状态加现场。「此刻」和状态按现场重建，之后的 live 事件接着它的序号；会话列表、今日概况另外取
+      on(source, 'hello', (h: Hello) => {
+        applyHello(h);
+        void resync();
+      });
+      on(source, 'status', (st: ServiceStatus) => applyStatus(st));
+      on(source, 'live', (ev: LiveEvent) => applyLive(ev));
       on(source, 'conversation', (row: ConversationRow) => applyRow(row));
       on(source, 'message', (ev: MessageEvent) => applyMessage(ev));
       on(source, 'today', (t: TodaySummary) => applyToday(t));
@@ -108,6 +124,12 @@ export const liveSource: DataSource = {
       });
     }
     connect();
+    // live 事件的序号接不上（理论上不会，服务积压太多会先断开）：重连，从新的现场重来
+    setGapHandler(() => {
+      es?.close();
+      clearTimeout(reconnect);
+      connect();
+    });
 
     // 过了 0 点（服务器时区）今日概况换成新的一天：定时看一眼，页面回到前台时也看一眼
     const checkDay = () => {
@@ -123,6 +145,7 @@ export const liveSource: DataSource = {
       clearTimeout(retry);
       clearTimeout(reconnect);
       clearInterval(dayTimer);
+      setGapHandler(null);
       document.removeEventListener('visibilitychange', checkDay);
       es?.close();
     };

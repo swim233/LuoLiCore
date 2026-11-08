@@ -133,6 +133,14 @@ export type ModelCallSummary = {
   repliesByConversation: Array<{ conversationId: string; title?: string; replies: number }>;
 };
 
+/** 最近一次正常完成的回复 */
+export type RecentReply = {
+  conversationId: string;
+  replyId?: string;
+  /** 结束的时间（开始时间加耗时），ISO */
+  endedAt: string;
+};
+
 /** 一个会话的消息与段的存取。消息按序号排列；序号由存储分配，可以先预留再写入 */
 export type ConversationStore = {
   /** 按序号升序返回区间内的整条消息 */
@@ -229,5 +237,10 @@ export type Storage = {
   overview(id: string, options?: { textChars?: number }): Promise<ConversationOverview | undefined>;
   /** since（ISO 时间）及以后开始的模型调用的汇总 */
   callSummary(since: string): Promise<ModelCallSummary>;
+  /**
+   * 最近一次正常完成的回复（模型调用里用途为回复、结果为 completed、结束得最晚的一次，
+   * 结束时间是开始时间加耗时）；还没有时为 undefined
+   */
+  lastReply(): Promise<RecentReply | undefined>;
   close(): void;
 };

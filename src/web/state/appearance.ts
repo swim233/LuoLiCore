@@ -26,6 +26,11 @@ export function setCollapse(collapse: Prefs['collapse']) {
   }
 }
 
+/* 有回复时「此刻」自动展开：关掉时手动展开才展开；正在浮着的不收，等它自己缩回 */
+export function setAutoNow(on: boolean) {
+  setPrefs({ autoNow: on });
+}
+
 export function resetLayoutToDefault() {
   resetLayout();
   toast('布局恢复成默认的了');

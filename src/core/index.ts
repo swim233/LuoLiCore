@@ -82,6 +82,7 @@ export type {
   MessagePage,
   ModelCall,
   ModelCallSummary,
+  RecentReply,
   NewConversation,
   Segment,
   SeqRange,

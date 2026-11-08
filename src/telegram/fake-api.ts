@@ -29,6 +29,8 @@ export async function startFakeTelegram() {
   let nextMessageId = 5000;
   // sendMessage 依次按这里的状态码失败；空了就成功
   const sendFailures: number[] = [];
+  // 为 true 时 getUpdates 一律返回 502（模拟连不上 Telegram）
+  let pollsFailing = false;
   // 可下载的文件：file_id → 内容；在 failingFiles 里的下载时返回 500
   const files = new Map<string, Uint8Array>();
   const failingFiles = new Set<string>();
@@ -58,6 +60,9 @@ export async function startFakeTelegram() {
         return ok(response, true);
       case 'getUpdates':
         polls.push(body);
+        if (pollsFailing) {
+          return reply(response, 502, { ok: false, error_code: 502, description: 'Bad Gateway' });
+        }
         return ok(response, await pending(body, request));
       case 'getFile': {
         const fileId = String(body.file_id);
@@ -163,6 +168,14 @@ export async function startFakeTelegram() {
     addFile(fileId: string, data: Uint8Array, { failing = false } = {}) {
       files.set(fileId, data);
       if (failing) failingFiles.add(fileId);
+    },
+    /**
+     * 之后的 getUpdates 一律失败（502），模拟连不上 Telegram；false 时恢复。
+     * 打开时正在等的长轮询立即返回（空的），下一次拉取就会失败
+     */
+    failPolls(failing: boolean) {
+      pollsFailing = failing;
+      if (failing) for (const wake of [...waiting]) wake();
     },
     /** 之后的 sendMessage 依次以这些状态码失败 */
     failSends(...statuses: number[]) {

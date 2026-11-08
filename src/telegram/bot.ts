@@ -31,6 +31,15 @@ export type OpenConversation = (
   options: { checkIdleOnCreate: boolean },
 ) => Promise<Conversation>;
 
+/**
+ * 一轮回复里只有 Telegram 前端知道的几件事，告诉洛璃服务（「此刻」显示用）：
+ * - wait：被触发，进入等待合并；
+ * - again：回复中又被触发，这次发出后再回复一次；
+ * - end：这一轮结束（回复都发完了，或者等待被放弃、没有回复，如退出时）。
+ * 回复本身的进展由洛璃服务从回复的流里旁听，不经这里
+ */
+export type RoundNotice = { type: 'wait' | 'again' | 'end'; conversationId: string };
+
 /** 等待合并：触发后这么久内没有新消息才开始生成 */
 export const waitMs = 2000;
 /** 等待合并：从第一条触发算起最多等这么久 */
@@ -82,6 +91,7 @@ export function createTelegramBot({
   staleMs,
   typingIntervalMs = 4000,
   wait = { idleMs: waitMs, maxMs: maxWaitMs },
+  onRound,
 }: {
   storage: Storage;
   /** 为存储里的会话取核心的会话对象，每个聊天只取一次 */
@@ -104,6 +114,8 @@ export function createTelegramBot({
   typingIntervalMs?: number;
   /** 等待合并的两个时长；测试里调小 */
   wait?: { idleMs: number; maxMs: number };
+  /** 一轮回复里的几件事（见 RoundNotice）；出错只记日志，不影响 Telegram */
+  onRound?: (notice: RoundNotice) => void;
 }) {
   // 按 chat id；正在打开的也在这里，同一个聊天不会建两个会话
   const sessions = new Map<string, Promise<Session>>();
@@ -111,6 +123,18 @@ export function createTelegramBot({
   const stopping = new AbortController();
   // 一开始关闭就置位：之后不再打开会话、不再开始新的一轮
   let closing = false;
+
+  function notify(type: RoundNotice['type'], session: Session): void {
+    if (!onRound) return;
+    try {
+      onRound({ type, conversationId: session.conversationId });
+    } catch (error) {
+      logger.warn(
+        { conversationId: session.conversationId, notice: type, error: describe(error) },
+        'telegram.notify_failed',
+      );
+    }
+  }
 
   /** 已经打开好的会话（打开失败的不算） */
   async function openedSessions(): Promise<Session[]> {
@@ -194,6 +218,7 @@ export function createTelegramBot({
     if (round?.state === 'replying') {
       round.again = true;
       round.trigger = trigger;
+      notify('again', session);
       return;
     }
     let finish!: () => void;
@@ -207,6 +232,7 @@ export function createTelegramBot({
       done,
       finish,
     };
+    notify('wait', session);
     schedule(session, session.round);
   }
 
@@ -241,6 +267,7 @@ export function createTelegramBot({
     round.stopTyping();
     if (session.round === round) session.round = undefined;
     round.finish();
+    notify('end', session);
   }
 
   /**

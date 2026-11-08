@@ -1,11 +1,12 @@
 import { memo, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { Hl, Spin, Thumb } from '../../components/Hl';
+import { Hl, Spin } from '../../components/Hl';
+import { Pic } from '../../components/Pic';
 import { STAR_SVG, StreamText } from '../../components/stream';
 import { EASE_OUT_CSS } from '../../lib/easing';
 import { motionOn } from '../../lib/prefs';
 import { fmtTime } from '../../lib/util';
-import { colorOf, LUOLI } from '../../model/who';
+import { colorOf, useAssistantName } from '../../model/who';
 import { nowModel } from '../../model/nowModel';
 import type { Line, Session } from '../../model/nowModel';
 
@@ -13,16 +14,17 @@ import type { Line, Session } from '../../model/nowModel';
    洛璃的行带淡金底；新行进来时整体平滑上推，最上面的行被裁掉。
    行用 @tanstack/react-virtual 排（动态高度、贴底，终端不能往回滚）；逐字落下的那一行是命令式的小岛（stream.ts） */
 const SYM: Record<string, string> = { user: '›', tool: '◇', status: '·', think: '·', stats: '' };
-const islands = new Map<string, StreamText>();
+const islands = new Map<string, Set<StreamText>>();
 const animated = new Set<string>(); // 已经放过淡入的行：虚拟滚动把它重新挂上时不重放
 
 function Head({ line, pad }: { line: Line; pad?: boolean }) {
+  const luoli = useAssistantName();
   return (
     <span className={'tl-head' + (pad ? ' tl-pad' : '')} aria-hidden={pad || undefined}>
       <span className="tl-time">{fmtTime(line.at)}</span>
       {line.kind === 'user' && <span className="tl-name">{line.name}</span>}
       {(line.kind === 'luoli' || line.kind === 'tool' || pad) && (
-        <span className="tl-name">{LUOLI}</span>
+        <span className="tl-name">{luoli}</span>
       )}
       {line.kind === 'luoli' || pad ? (
         <span className="tl-sym" dangerouslySetInnerHTML={{ __html: STAR_SVG }} />
@@ -43,10 +45,15 @@ function StreamBody({
   onSettled: () => void;
 }) {
   const ref = useRef<HTMLSpanElement>(null);
+  /* 这个实例自己的小岛。同一行可能同时挂在两处（浮起的卡片和全屏里的列），按行 id 登记一组，各管各的 */
+  const mine = useRef<StreamText | null>(null);
   useLayoutEffect(() => {
     const el = ref.current!;
     const st = new StreamText(el, line.text || '', convId);
-    islands.set(line.id, st);
+    mine.current = st;
+    let group = islands.get(line.id);
+    if (!group) islands.set(line.id, (group = new Set()));
+    group.add(st);
     let cancel = () => {};
     if (!line.streaming) {
       /* 已经出完了（挂上来时就结束）：光标停到 lingerUntil，再淡出，换成静态文字 */
@@ -55,7 +62,9 @@ function StreamBody({
     }
     return () => {
       cancel();
-      islands.delete(line.id);
+      group.delete(st);
+      if (!group.size) islands.delete(line.id);
+      mine.current = null;
       el.textContent = '';
     };
   }, []);
@@ -63,7 +72,7 @@ function StreamBody({
   const was = useRef(line.streaming);
   useEffect(() => {
     if (was.current && !line.streaming) {
-      const st = islands.get(line.id);
+      const st = mine.current;
       if (st) {
         const wait = Math.max(0, (line.lingerUntil || Date.now()) - Date.now());
         const c = st.finish(wait, 500, onSettled);
@@ -81,7 +90,7 @@ function ThinkBody({ line }: { line: Line }) {
   if (!line.done) return <span className="tl-body">思考中…</span>;
   if (line.aborted && !line.text)
     return <span className="tl-body">思考被中止</span>; /* 没有内容：不给展开箭头 */
-  const label = line.aborted ? '思考被中止' : `思考了 ${line.sec} 秒`;
+  const label = line.aborted ? '思考被中止' : line.sec ? `思考了 ${line.sec} 秒` : '思考过程';
   return (
     <span className="tl-body">
       <button
@@ -132,11 +141,13 @@ const TermLine = memo(function TermLine({
     body = (
       <span className="tl-body">
         <Hl text={line.text || ''} hits />
-        {line.image && (
+        {line.images && line.images.length > 0 && (
           <>
             {line.text ? ' ' : ''}
             <br />
-            <Thumb part={line.image} w={76} h={54} />
+            {line.images.map((img, i) => (
+              <Pic key={i} info={img} box={76} fallback={[76, 54]} />
+            ))}
           </>
         )}
       </span>
@@ -151,23 +162,34 @@ const TermLine = memo(function TermLine({
         </span>
       );
   } else if (line.kind === 'tool') {
+    /* 工具按名字通用显示：进行中是工具名加参数的前一截；结束后是成功或出错、耗时，出错时再加错误的一句话，结果里有图就带缩略图 */
+    const bad = line.ok === false;
+    const name = <b className="tl-tool">{line.toolName || '工具'}</b>;
     body = !line.done ? (
       <span className="tl-body">
-        <span>正在读 {line.label}…</span>
+        <span>
+          正在调用 {name} {line.label}…
+        </span>
         <Spin />
       </span>
     ) : (
       <span className="tl-body">
         <span>
-          {line.ok === false ? '没读到 ' : '读了 '}
-          {line.label}
+          {bad ? '调用出错 ' : '调用了 '}
+          {name} {line.label}
         </span>
-        <span className={'tl-ok' + (line.ok === false ? ' is-bad' : '') + ' is-new'}>
-          {line.ok === false ? '× ' : '✓ '}
-          {((line.ms || 0) / 1000).toFixed(1)}s
+        <span className={'tl-ok' + (bad ? ' is-bad' : '') + ' is-new'}>
+          {bad ? '×' : '✓'}
+          {line.ms !== undefined && ` ${(line.ms / 1000).toFixed(1)}s`}
         </span>
-        {line.summary && <span className="tl-sum">└ {line.summary}</span>}
-        {line.image && <Thumb part={line.image} w={84} h={58} />}
+        {bad && line.error && <span className="tl-sum is-bad">└ {line.error}</span>}
+        {line.images && line.images.length > 0 && (
+          <span className="tl-pics">
+            {line.images.map((img, i) => (
+              <Pic key={i} info={img} box={84} fallback={[84, 58]} />
+            ))}
+          </span>
+        )}
       </span>
     );
   } else if (line.kind === 'think') {
@@ -206,11 +228,10 @@ export function Terminal({ session }: { session: Session }) {
   useEffect(() => {
     const off = nowModel.sub((type, convId, line, extra) => {
       if (convId !== session.convId) return;
-      if (type === 'add') {
+      if (type === 'add' || type === 'seed' || type === 'reset') {
         bump((n) => n + 1);
       } else if (type === 'delta') {
-        const st = line && islands.get(line.id);
-        if (st) st.delta(extra ?? '', line!.text || '');
+        if (line) islands.get(line.id)?.forEach((st) => st.delta(extra ?? '', line.text || ''));
       } else if (type === 'update' && line) {
         vers.current.set(line.id, (vers.current.get(line.id) || 0) + 1);
         bump((n) => n + 1);
