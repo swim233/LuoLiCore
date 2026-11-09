@@ -6,6 +6,8 @@ import type {
   ImageInfo,
   MessagePreview,
   MessageEvent as ServerMessageEvent,
+  TaskBrief,
+  TaskRow,
   TodaySummary,
   ToolResultInfo,
 } from '../../server/types';
@@ -13,7 +15,16 @@ import type {
 /* 客户端数据的结构：和洛璃服务的接口同一种（类型来自 src/server/types.ts，只 import type）。
    正式构建里数据由 live-source 从服务取；开发模式里由 dev/mock-server.ts 按同样的结构造出来。
    开发模式里图片用生成的色块（ImagePart.demo），只在 dev/ 里用 */
-export type { ApiMessage, ApiSegment, ImageInfo, MessagePreview, TodaySummary, ToolResultInfo };
+export type {
+  ApiMessage,
+  ApiSegment,
+  ImageInfo,
+  MessagePreview,
+  TaskBrief,
+  TaskRow,
+  TodaySummary,
+  ToolResultInfo,
+};
 export type MessageEvent = ServerMessageEvent;
 export type ConvKind = ConversationKind;
 export type Platform = string;

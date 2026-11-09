@@ -1,8 +1,9 @@
+import { ApiError } from './api';
 import type { Api } from './api';
 import { bus } from './bus';
 import { db, defaultTitle } from './db';
 import type { MsgInfo } from './db';
-import type { Conversation, MessageEvent, MsgRow, Segment, TodaySummary } from './types';
+import type { Conversation, MessageEvent, MsgRow, Segment, TaskRow, TodaySummary } from './types';
 import type { ConversationRow } from '../../server/types';
 
 /* 服务给的数据怎么放进 db、再变成总线事件：正式构建（live-source.ts）和开发模式（dev/mock-source.ts）共用这一份。
@@ -25,7 +26,7 @@ const toConv = (row: ConversationRow): Conversation => ({
   title: row.title || defaultTitle(row.kind),
 });
 
-/** 会话列表与今日概况整批换掉（第一次连上、断线重连后、开发模式切换数据）。preloaded：同时放进去的会话消息 */
+/** 会话列表与今日概况整批换掉（第一次连上、开发模式切换数据；任务清空，取到了另外放，见 applyTasks）。preloaded：同时放进去的会话消息 */
 export function applyReset(
   rows: ConversationRow[],
   today: TodaySummary,
@@ -41,6 +42,7 @@ export function applyReset(
   setTimeout(() => bulk.clear(), 800);
   bus.emit('data:reset', {});
   bus.emit('today:update');
+  bus.emit('tasks:update');
 }
 
 /** 这一行比 db 里已有的旧：最后一条消息更靠前，或者最后一条一样但已读位置、消息数、段数更小 */
@@ -171,6 +173,77 @@ export function applyMessage({ conversationId: id, message, edited }: MessageEve
 export function applyToday(t: TodaySummary) {
   db.today = t;
   bus.emit('today:update');
+}
+
+/** 这一行比 db 里已有的旧：接口返回的和 SSE 推来的先后不一定。结束了的不会回到进行中，到点次数只增不减 */
+function isStaleTask(prev: TaskRow, row: TaskRow): boolean {
+  if (prev.status !== 'active') return row.status === 'active';
+  return row.status === 'active' && row.dueCount < prev.dueCount;
+}
+/** 整批换成这些任务：每行比已有的旧就不收；取任务的期间刚建好的（事件先到了）、还没在这批里的进行中的任务留着 */
+function putTasks(rows: TaskRow[]) {
+  const next = new Map<number, TaskRow>();
+  for (const row of rows) {
+    const prev = db.tasks.get(row.id);
+    next.set(row.id, prev && isStaleTask(prev, row) ? prev : row);
+  }
+  for (const [id, t] of db.tasks) if (!next.has(id) && t.status === 'active') next.set(id, t);
+  db.tasks = next;
+}
+/** 任务整批换了（连上、重连后重新取到的）：取任务的状态也成了「取到了」 */
+export function applyTasks(rows: TaskRow[]) {
+  putTasks(rows);
+  // 整批到的（第一次连上、重连后重新取的）直接出现，不放进场动画；之后新来的任务才放
+  const bulk = new Set<number | string>(rows.flatMap((r) => [r.id, r.conversation.id]));
+  db.taskBulk = bulk;
+  setTimeout(() => db.taskBulk === bulk && bulk.clear(), 800);
+  db.taskLoad = { state: 'ready' };
+  bus.emit('tasks:update');
+}
+/** 取任务失败：只有任务部件和全屏会话头部的任务数受影响（见 Db.taskLoad）。已经取到的任务留在 db 里，但界面不再显示它们 */
+export function applyTasksError(e: unknown) {
+  db.taskLoad = {
+    state: 'error',
+    status: e instanceof ApiError ? e.status : 0,
+    message: e instanceof Error ? e.message : String(e),
+  };
+  bus.emit('tasks:update');
+}
+/** 一个任务新建了或变了（到点、完成、取消）：整行替换；接口返回的行可能比 SSE 推来的晚到，旧的不收。
+    上次取任务失败了（版本旧、没取到），来了任务事件说明服务能给了：再取一次 */
+export function applyTask(row: TaskRow) {
+  if (db.taskLoad.state === 'error') {
+    void refreshTasks();
+    return;
+  }
+  const prev = db.tasks.get(row.id);
+  if (prev && isStaleTask(prev, row)) return;
+  db.tasks.set(row.id, row);
+  bus.emit('tasks:update');
+}
+
+/** 重新取任务。失败时：silent 就留着已经取到的，不改状态（取消碰上 409 时顺带刷新）；否则标成取任务失败 */
+export async function refreshTasks(silent = false) {
+  if (!api) return;
+  const myEpoch = epoch;
+  try {
+    const { tasks } = await api.tasks();
+    if (myEpoch === epoch) applyTasks(tasks);
+  } catch (e) {
+    if (myEpoch === epoch && !silent) applyTasksError(e);
+  }
+}
+
+/** 取消一个任务：成功了这一行换成取消后的样子（SSE 的 task 事件也会推一次，同样的行不要紧）；失败时抛错，说明原因。
+    已经结束了（409）、没有这个任务（404）说明这边的数据旧了，重新取一次 */
+export async function cancelTask(id: number) {
+  if (!api) throw new Error('数据源还没有设置');
+  try {
+    applyTask(await api.cancelTask(id));
+  } catch (e) {
+    if (e instanceof ApiError && (e.status === 409 || e.status === 404)) void refreshTasks(true);
+    throw e;
+  }
 }
 
 /** 会话没了（只有开发模式的演示用，真实的服务没有删除会话） */

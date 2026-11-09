@@ -219,10 +219,11 @@ export const NOW_DEF: WidgetDef = {
   sky: true,
   refreshOn: ['status'],
   init(w) {
-    /* 有人触发洛璃（等待合并，或者不等待、直接开始的回复）：「此刻」自动展开成浮窗，受设置里的开关控制；网页会话里的回复不自动展开 */
-    const expand = ({ convId }: { convId: string }) => {
+    /* 有人触发洛璃（等待合并，或者不等待、直接开始的回复；任务到点也一样，Telegram 里它先有等待合并）：「此刻」自动展开成浮窗，
+       受设置里的开关控制；网页会话里的回复不自动展开；刷新、重连时按现场补发的（replay）是已经在进行的回复，不展开 */
+    const expand = ({ convId, replay }: { convId: string; replay?: boolean }) => {
       const c = db.conv(convId);
-      if (prefs.get().autoNow && c && c.platform !== 'web') nowCtl.autoExpand();
+      if (!replay && prefs.get().autoNow && c && c.platform !== 'web') nowCtl.autoExpand();
     };
     w.on('reply:wait', expand);
     w.on('reply:start', expand);

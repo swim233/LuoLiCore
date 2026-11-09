@@ -133,6 +133,7 @@ const TermLine = memo(function TermLine({
     luoli && 'is-luoli',
     line.err && 'is-err',
     line.retry && 'is-retry',
+    line.task && 'is-task',
     isNew && motionOn() && 'is-new',
   ]
     .filter(Boolean)

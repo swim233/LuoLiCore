@@ -2,11 +2,13 @@ import { memo, useEffect, useRef, useState } from 'react';
 import { VirtualLog } from '../../components/VirtualLog';
 import type { LogItem, ScrollState } from '../../components/VirtualLog';
 import { MsgBubble } from '../../components/Bubble';
+import { EventLine } from '../../components/EventLine';
 import { EASE_OUT_CSS } from '../../lib/easing';
 import { motionOn } from '../../lib/prefs';
 import { fmtDay } from '../../lib/util';
 import { useBusRev } from '../../model/rev';
 import { db } from '../../model/db';
+import { eventOf } from '../../model/events';
 import { link, useLinkPhase } from '../../model/link';
 import { partsOfRow } from '../../model/bubble';
 import { authorOf } from '../../model/parts';
@@ -87,6 +89,8 @@ export const MsgView = memo(function MsgView({
 }) {
   const luoli = useAssistantName();
   const conv = db.conv(convId);
+  // 事件（任务到点）：居中的一行灰字，不是气泡；不能按「没有发言人」认，网页会话里发言人也没有 uid
+  if (eventOf(row)) return <EventLine row={row} isNew={isNew} />;
   const isA = row.role === 'assistant';
   const who = authorOf(row);
   const you = !isA && !!conv && conv.platform === 'web';

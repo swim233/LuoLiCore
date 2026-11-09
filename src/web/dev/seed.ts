@@ -1,6 +1,6 @@
 import { hashStr, pick, rand, randi, startOfDay, uid } from '../lib/util';
 import type { NewMessage } from '../model/source';
-import type { ImageInfo, ImagePart, Part, ToolResultInfo } from '../model/types';
+import type { ImageInfo, ImagePart, Part, TaskRow, ToolResultInfo } from '../model/types';
 import { devUi, WEB_AUTHOR } from './demo-state';
 import type { Dataset } from './demo-state';
 import { mockServer as server, svgImage, toolBody } from './mock-server';
@@ -174,6 +174,36 @@ export function A(convId: string, text: string, at: number, o: AOpts = {}) {
 const MIN = 60e3,
   HOUR = 60 * MIN,
   DAY = 24 * HOUR;
+const pad = (n: number) => String(n).padStart(2, '0');
+
+/* --- 任务：今天往后第几天的几点几分 --- */
+const clock = (dayOffset: number, hh: number, mm = 0) => {
+  const d = new Date();
+  d.setDate(d.getDate() + dayOffset);
+  d.setHours(hh, mm, 0, 0);
+  return d.getTime();
+};
+const isoOf = (ms: number) => new Date(ms).toISOString();
+type Sched = TaskRow['schedule'];
+const once = (ms: number): Sched => ({ kind: 'once', at: isoOf(ms) });
+/** 谁让建的：演示里的人（带 uid），或网页发言人 */
+const byPerson = (uidv: number | string) => ({
+  id: UIDS[uidv] || String(uidv),
+  name: PEOPLE[uidv] || String(uidv),
+});
+/** 已经结束的任务的状态：正常到点完成、超时完成（到点次数 0）、取消 */
+const doneAt = (ms: number) => ({
+  status: 'done' as const,
+  dueCount: 1,
+  lastDueAt: isoOf(ms),
+  endedAt: isoOf(ms),
+});
+const missedAt = (ms: number) => ({ status: 'done' as const, dueCount: 0, endedAt: isoOf(ms) });
+const cancelledAt = (ms: number) => ({
+  status: 'cancelled' as const,
+  dueCount: 0,
+  endedAt: isoOf(ms),
+});
 
 function seedNormal() {
   const now = Date.now();
@@ -186,6 +216,36 @@ function seedNormal() {
     id: 'c-book',
   }).id;
   server.addSeg(book, 'first', now - 2 * DAY - 3 * HOUR, null);
+  server.addTask({
+    convId: book,
+    action: '提醒大家周六下午 3 点在咖啡馆聚会',
+    schedule: once(clock(1, 10)),
+    by: byPerson(1004),
+    createdAt: now - 3 * HOUR,
+  });
+  server.addTask({
+    convId: book,
+    action: '提醒大家周日晚上聊聊这周读到的章节',
+    schedule: { kind: 'weekly', weekday: 7, time: '20:00' },
+    by: byPerson(1001),
+    createdAt: now - 2 * DAY,
+  });
+  const tBring = server.addTask({
+    convId: book,
+    action: '提醒小明带书',
+    schedule: once(now - 100 * MIN),
+    by: byPerson(1002),
+    createdAt: now - 2 * DAY,
+    state: doneAt(now - 100 * MIN),
+  }).id;
+  server.addTask({
+    convId: book,
+    action: '每天早上提醒大家读 10 页',
+    schedule: { kind: 'daily', time: '07:30' },
+    by: byPerson(1004),
+    createdAt: now - 6 * DAY,
+    state: cancelledAt(now - 2 * DAY - HOUR),
+  });
   U(book, 1001, '这个月读什么？我提名《三体》', now - 2 * DAY - 3 * HOUR);
   U(book, 1004, '三体我读过三遍了😂 换一本吧', now - 2 * DAY - 3 * HOUR + 2 * MIN);
   U(book, 1002, '@洛璃 有没有不太长、又能聊很久的书', now - 2 * DAY - 3 * HOUR + 4 * MIN);
@@ -246,6 +306,15 @@ function seedNormal() {
     },
   );
   U(book, 1003, '好，周六见', now - 2 * HOUR);
+  server.addEvent(book, tBring, 'task', now - 100 * MIN);
+  A(
+    book,
+    '@小明 到点啦～ 记得把《献给阿尔吉侬的花束》带上，周六聚会要用～',
+    now - 100 * MIN + 20e3,
+    {
+      usage: [1710, 1024, 44],
+    },
+  );
 
   const star = server.addConv({
     platform: 'telegram',
@@ -254,6 +323,32 @@ function seedNormal() {
     chatId: '-1001288362002',
     at: now - 30 * DAY,
     id: 'c-star',
+  }).id;
+  server.addTask({
+    convId: star,
+    action: '提醒大家狮子座流星雨的观测时间',
+    schedule: { kind: 'monthly', day: 17, time: '21:00' },
+    by: byPerson(2001),
+    createdAt: now - 5 * DAY,
+  });
+  server.addTask({
+    convId: star,
+    action: '说说今晚的云量和月相',
+    schedule: {
+      kind: 'weekdays',
+      time: '08:30',
+      until: isoOf(new Date(new Date().getFullYear(), 11, 31, 23, 59, 59, 999).getTime()),
+    },
+    by: byPerson(2002),
+    createdAt: now - 4 * DAY,
+  });
+  const tTripod = server.addTask({
+    convId: star,
+    action: '提醒老周带三脚架',
+    schedule: once(now - 30 * HOUR),
+    by: byPerson(1002),
+    createdAt: now - 3 * DAY,
+    state: missedAt(now - 14 * MIN),
   }).id;
   server.addSeg(
     star,
@@ -279,6 +374,7 @@ function seedNormal() {
     aborted: true,
     usage: [3720, 3072, 31],
   });
+  server.addEvent(star, tTripod, 'task-missed', now - 14 * MIN);
   U(star, 2002, '那 17 号一起去水库？', now - 12 * MIN);
   U(star, 1002, '我可以！', now - 8 * MIN);
   server.setUnread(star, 2);
@@ -292,6 +388,21 @@ function seedNormal() {
     id: 'c-ball',
   }).id;
   server.addSeg(ball, 'first', now - 6 * HOUR, null);
+  server.addTask({
+    convId: ball,
+    action: '提醒大家周六带球和打气筒',
+    schedule: { kind: 'weekly', weekday: 6, time: '08:30' },
+    by: byPerson(3001),
+    createdAt: now - 6 * HOUR,
+  });
+  server.addTask({
+    convId: ball,
+    action: '提醒大家交场地费',
+    schedule: once(clock(2, 12)),
+    by: byPerson(3002),
+    createdAt: now - 5 * HOUR,
+    state: cancelledAt(now - 4 * HOUR),
+  });
   U(ball, 3001, '周六上午 9 点，老地方', now - 6 * HOUR);
   U(ball, 3002, '我带球，谁带打气筒', now - 5 * HOUR - 30 * MIN);
   U(ball, 1003, 'nori 周六会下雨吗', now - 5 * HOUR);
@@ -309,6 +420,21 @@ function seedNormal() {
     id: 'c-dm',
   }).id;
   server.addSeg(dm, 'first', now - 13 * HOUR, null);
+  server.addTask({
+    convId: dm,
+    action: '提醒小雨早点睡',
+    schedule: { kind: 'daily', time: '22:30' },
+    by: byPerson(1002),
+    createdAt: now - 4 * DAY,
+  });
+  server.addTask({
+    convId: dm,
+    action: '提醒小雨去取快递',
+    schedule: once(now - 25 * HOUR),
+    by: byPerson(1002),
+    createdAt: now - 2 * DAY,
+    state: doneAt(now - 25 * HOUR),
+  });
   U(dm, 1002, '洛璃晚安～', now - 13 * HOUR);
   A(dm, '晚安小雨！明天也要元气满满哦！', now - 13 * HOUR + MIN, { usage: [980, 768, 18] });
   U(dm, 1002, '早！今天降温了', now - 70 * MIN);
@@ -348,6 +474,14 @@ function seedNormal() {
     id: 'c-web1',
   }).id;
   server.addSeg(w1, 'first', now - 3 * DAY, null);
+  const tReview = server.addTask({
+    convId: w1,
+    action: '提醒我看科幻小说的书评',
+    schedule: once(now - 2 * DAY - 4 * HOUR),
+    by: { name: WEB_AUTHOR },
+    createdAt: now - 3 * DAY,
+    state: missedAt(now - 2 * DAY),
+  }).id;
   U(w1, WEB_AUTHOR, '推荐几部科幻小说', now - 3 * DAY);
   A(
     w1,
@@ -355,6 +489,7 @@ function seedNormal() {
     now - 3 * DAY + MIN,
     { usage: [1210, 0, 52] },
   );
+  server.addEvent(w1, tReview, 'task-missed', now - 2 * DAY);
   const w2 = server.addConv({
     platform: 'web',
     kind: 'web',
@@ -363,9 +498,28 @@ function seedNormal() {
     id: 'c-web2',
   }).id;
   server.addSeg(w2, 'first', now - 20 * HOUR, null);
+  server.addTask({
+    convId: w2,
+    action: '提醒我把本周的周报整理好发给团队，别忘了附上上周的遗留问题清单和下周的计划',
+    schedule: once(Math.ceil((now + 20 * MIN) / MIN) * MIN),
+    by: { name: WEB_AUTHOR },
+    createdAt: now - 20 * HOUR + 2 * MIN,
+  });
+  const tWater = server.addTask({
+    convId: w2,
+    action: '提醒我喝水',
+    schedule: once(now - 19 * HOUR),
+    by: { name: WEB_AUTHOR },
+    createdAt: now - 20 * HOUR + 2 * MIN,
+    state: doneAt(now - 19 * HOUR),
+  }).id;
   U(w2, WEB_AUTHOR, '帮我给天文社团起个群名', now - 20 * HOUR);
   A(w2, '“今晚有星星”“拾星社”“仰望小分队”——我最喜欢第一个，像一句约定～', now - 20 * HOUR + MIN, {
     usage: [1180, 768, 40],
+  });
+  server.addEvent(w2, tWater, 'task', now - 19 * HOUR);
+  A(w2, '到点啦～ 该喝水了，顺便站起来活动一下～', now - 19 * HOUR + 20e3, {
+    usage: [1230, 768, 28],
   });
 
   /* 今天的模型调用（模拟）：42 次完成，2 次失败 */
@@ -531,6 +685,21 @@ function seedBig() {
     }
     if (long) server.setUnread(c, 320);
     else if (i % 3 === 0) server.setUnread(c, randi(1, 99));
+    // 前十个会话各有几个任务（看分组很多时的样子）
+    if (i < 10) {
+      const acts = ['提醒大家交周报', '说说今天的天气', '提醒大家晚上 8 点开会', '汇总这周的活动'];
+      for (let k = 0; k <= i % 3; k++)
+        server.addTask({
+          convId: c,
+          action: acts[(i + k) % acts.length],
+          schedule:
+            k % 2
+              ? { kind: 'weekdays', time: `${pad(8 + k)}:${pad((i * 7) % 60)}` }
+              : once(clock(1 + ((i + k) % 5), 9 + k, (i * 5) % 60)),
+          by: byPerson(1001 + ((i + k) % 4)),
+          createdAt: now - (i + 1) * HOUR,
+        });
+    }
   });
   ['帮我写一段很长很长的自我介绍，用在社团招新上', '新对话'].forEach((title, i) => {
     const c = server.addConv({ platform: 'web', kind: 'web', title, at: now - (i + 1) * HOUR }).id;

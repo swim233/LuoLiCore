@@ -5,7 +5,13 @@ import { chatRequestBody, ObservedTransport } from '../model/chat-api';
 import type { ChatApi } from '../model/chat-api';
 import { textOf } from '../model/parts';
 import type { ImageInfo, ImagePart, Part, ToolResultInfo } from '../model/types';
-import type { AbortResponse, ChatMessage, ChatRequest, UploadResponse } from '../../server/types';
+import type {
+  AbortResponse,
+  ChatMessage,
+  ChatRequest,
+  LiveTask,
+  UploadResponse,
+} from '../../server/types';
 import { WEB_AUTHOR } from './demo-state';
 import { mockLive } from './mock-live';
 import { mockServer as server, svgImage, toolBody } from './mock-server';
@@ -51,6 +57,13 @@ interface Script {
   text: string;
   failAt?: number;
   retry?: boolean;
+}
+/** 任务到点触发的回复：没有人说话，照任务说的做 */
+function taskScript(tasks: LiveTask[]): Script {
+  return {
+    think: { ms: randi(900, 1500), text: '任务到点了，按任务里写的做。' },
+    text: tasks.map((t) => `到点啦～ ${t.action}`).join('\n'),
+  };
 }
 function scriptOf(text: string, nImg: number): Script {
   const think = { ms: randi(1100, 2000), text: '想一想怎么回答比较好。' };
@@ -141,9 +154,13 @@ interface Run {
 }
 interface Queue {
   fromSeq: number;
-  /** 最后一个排队的请求：补回复的流交给它 */
+  /** 最后一个排队的请求：补回复的流交给它。任务到点排的补回复没有请求接，是个丢弃的出口（服务自己把流读完） */
   sink: Sink;
+  /** 补的这次回复里有任务到点：是哪几个任务 */
+  tasks?: LiveTask[];
 }
+/** 没有请求接着的流：写进去的都丢掉（回复由服务读完，照常写进历史） */
+const discardSink = (): Sink => ({ closed: false, write() {}, close() {} });
 interface CState {
   run: Run | null;
   queue: Queue | null;
@@ -173,16 +190,20 @@ const abortRun = (run: Run) => {
 };
 
 /** 一次回复：流里写思考、工具、文字，「此刻」的实时事件同时推；结束时写进历史，再看有没有排队的补回复 */
-async function runReply(convId: string, sink: Sink, again = false) {
+async function runReply(convId: string, sink: Sink, again = false, tasks?: LiveTask[]) {
   const st = stateOf(convId);
   const run: Run = { replyId: uid('reply'), sink, aborted: false, wake: new Set() };
   st.run = run;
   const conv = server.conv(convId)!;
-  const lastUser = [...conv.msgs].reverse().find((m) => m.role === 'user');
-  const sc = scriptOf(
-    lastUser ? textOf(lastUser) : '',
-    lastUser ? lastUser.message.parts.filter((p) => p.type === 'file').length : 0,
-  );
+  const lastUser = [...conv.msgs]
+    .reverse()
+    .find((m) => m.role === 'user' && !m.message.metadata?.event);
+  const sc = tasks?.length
+    ? taskScript(tasks)
+    : scriptOf(
+        lastUser ? textOf(lastUser) : '',
+        lastUser ? lastUser.message.parts.filter((p) => p.type === 'file').length : 0,
+      );
   // 重试：这次不再出错
   if (again) delete sc.failAt;
   const seq = server.reserve(convId);
@@ -196,7 +217,7 @@ async function runReply(convId: string, sink: Sink, again = false) {
   let steps = 1;
   let toolCalls = 0;
   const w = (c: UIMessageChunk) => sink.write(c);
-  mockLive.start(convId, run.replyId);
+  mockLive.start(convId, run.replyId, tasks);
   w({ type: 'start', messageId: run.replyId });
 
   /** 结束：写进历史、推结束事件、关流，再看补回复。aborted 时没有任何内容就不写 */
@@ -266,7 +287,7 @@ async function runReply(convId: string, sink: Sink, again = false) {
     if (!q) return;
     st.queue = null;
     if (conv.msgs.at(-1)?.role === 'assistant' || !server.has(convId)) q.sink.close();
-    else void runReply(convId, q.sink);
+    else void runReply(convId, q.sink, false, q.tasks);
   };
 
   // 请求失败，自动重试
@@ -457,11 +478,14 @@ function handle(body: ChatRequest): ReadableStream<UIMessageChunk> {
   const id = convId!;
   const st = stateOf(id);
   const { stream, sink } = makeStream(() => {
-    // 请求断开：它在回复就中止这次回复；它是排队的最后一个就取消补回复
+    // 请求断开：它在回复就中止这次回复；它是排队的最后一个就取消补回复（补的那次里有任务到点时不取消，没有请求接流，由服务读完）
     if (st.run?.sink === sink) abortRun(st.run);
     else if (st.queue?.sink === sink) {
-      st.queue = null;
-      mockLive.unqueue(id);
+      if (st.queue.tasks?.length) st.queue.sink = discardSink();
+      else {
+        st.queue = null;
+        mockLive.unqueue(id);
+      }
     }
   });
   sink.write({
@@ -477,7 +501,11 @@ function handle(body: ChatRequest): ReadableStream<UIMessageChunk> {
     // 生成中又发：排队。前一个排队的请求正常结束，补回复的流交给这一个
     const first = st.queue === null;
     const prev = st.queue?.sink;
-    st.queue = { fromSeq: first ? seq : st.queue!.fromSeq, sink };
+    st.queue = {
+      fromSeq: first ? seq : st.queue!.fromSeq,
+      sink,
+      ...(st.queue?.tasks ? { tasks: st.queue.tasks } : {}),
+    };
     prev?.close();
     sink.write({
       type: 'data-queued',
@@ -487,6 +515,34 @@ function handle(body: ChatRequest): ReadableStream<UIMessageChunk> {
     if (first) mockLive.queue(id, seq);
   } else void runReply(id, sink, retry);
   return stream;
+}
+
+/**
+ * 网页会话里任务到点：服务写事件消息、改任务，再回复一次，回复由服务读完（没有请求接这个流，对话部件看不到逐字的过程，
+ * 「此刻」里看）。空闲时直接开始；正在回复就排一次补回复（又被触发，queuedFrom 是事件消息的序号），补的那次带任务
+ */
+export function webTasksDue(convId: string, ids: number[]) {
+  const live: LiveTask[] = [];
+  let seq: number | undefined;
+  for (const id of ids) {
+    const t = server.task(id);
+    const ev = t && server.fireTask(id, 'task');
+    if (!t || !ev) continue;
+    live.push({ id: t.id, ref: t.ref, action: t.action });
+    seq ??= ev.seq;
+  }
+  if (!live.length || seq === undefined) return;
+  const st = stateOf(convId);
+  if (!st.run) {
+    void runReply(convId, discardSink(), false, live);
+    return;
+  }
+  if (st.queue) {
+    st.queue.tasks = [...(st.queue.tasks ?? []), ...live];
+    return;
+  }
+  st.queue = { fromSeq: seq, sink: discardSink(), tasks: live };
+  mockLive.queue(convId, seq);
 }
 
 /** 中止这个会话进行中的回复，同时取消排队的补回复（排队的消息留在历史里） */

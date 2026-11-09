@@ -7,6 +7,7 @@ import { db } from '../../model/db';
 import { link, useLinkPhase } from '../../model/link';
 import type { LinkPhase } from '../../model/link';
 import { useBusRev } from '../../model/rev';
+import { TaskChip } from '../tasks/TaskChip';
 import { ConvList, KIND_LABEL, lightUp } from './ConvList';
 import { Timeline } from './Timeline';
 import type { FullParams, ViewProps, WidgetDef } from '../types';
@@ -158,6 +159,7 @@ function FullView({ params }: { params: FullParams }) {
                 ? `${c.messages} 条消息 · ${c.segments} 段${c.platformConversationId ? ' · id ' + c.platformConversationId : ''}`
                 : ''}
             </span>
+            {c && <TaskChip convId={c.id} />}
           </div>
         }
       >

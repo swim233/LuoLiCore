@@ -57,7 +57,7 @@ const ConvRow = memo(function ConvRow({
       </span>
       <span className="conv-main">
         <span className="conv-title">{conv.title}</span>
-        <span className="conv-last">{last}</span>
+        <span className={'conv-last' + (conv.last?.event ? ' is-event' : '')}>{last}</span>
       </span>
       <span className="conv-side">
         <span

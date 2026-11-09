@@ -49,6 +49,13 @@ export const IconToday = (
     <path d="M4 16V10M8 16V5.5M12 16v-7M16 16V7.5" />
   </svg>
 );
+export const IconTasks = (
+  <svg {...lineIcon} strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="10" cy="10.5" r="6.6" />
+    <path d="M10 6.8v4l2.6 1.6" />
+    <path d="M4.6 3.4 2.9 5M15.4 3.4 17.1 5" />
+  </svg>
+);
 export const ICON_MIN = (
   <svg
     viewBox="0 0 16 16"

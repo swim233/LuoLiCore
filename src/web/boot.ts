@@ -8,6 +8,7 @@ import { NOW_DEF } from './widgets/now/Now';
 import { SESSIONS_DEF } from './widgets/sessions/Sessions';
 import { CHAT_DEF } from './widgets/chat/Chat';
 import { SETTINGS_DEF } from './widgets/settings/Settings';
+import { TASKS_DEF } from './widgets/tasks/Tasks';
 import { TODAY_DEF } from './widgets/today/Today';
 import { desk, registerWidget } from './state/desk';
 import { closeFull, installPressTracking, setArranging } from './state/actions';
@@ -32,6 +33,7 @@ export function boot({ todayAlways }: { todayAlways: boolean }) {
   registerWidget(CHAT_DEF);
   registerWidget(SETTINGS_DEF);
   if (todayAlways || desk.get().layout.extra.includes('today')) registerWidget(TODAY_DEF);
+  registerWidget(TASKS_DEF);
   installPressTracking();
   /* Esc：① 对话正在生成且对话是当前操作的部件 → 中止；② 额外的处理（开发模式：演示面板开着且焦点在里面 → 收起）；③ 全屏 → 退出；④ 整理模式 → 退出；⑤ 收起弹出框 */
   document.addEventListener('keydown', (e) => {

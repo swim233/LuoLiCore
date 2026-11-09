@@ -51,7 +51,14 @@ function handle(ev: LiveEvent) {
       return;
     case 'start':
       thoughts.delete(convId);
-      bus.emit('reply:start', { convId, replyId, at, again: ev.again, queuedFrom: ev.queuedFrom });
+      bus.emit('reply:start', {
+        convId,
+        replyId,
+        at,
+        again: ev.again,
+        queuedFrom: ev.queuedFrom,
+        tasks: ev.tasks,
+      });
       break;
     case 'reasoning-start':
       thoughtOf(convId).set(ev.part, '');
@@ -211,9 +218,15 @@ function applySnapshot(live: Hello['live']) {
   nowModel.rebuild(ids, () => {
     for (const r of live.replies) {
       const convId = r.conversationId;
-      if (r.waitingSince) bus.emit('reply:wait', { convId, at: ms(r.waitingSince) });
+      if (r.waitingSince) bus.emit('reply:wait', { convId, at: ms(r.waitingSince), replay: true });
       if (r.replyId && r.startedAt)
-        bus.emit('reply:start', { convId, replyId: r.replyId, at: ms(r.startedAt) });
+        bus.emit('reply:start', {
+          convId,
+          replyId: r.replyId,
+          at: ms(r.startedAt),
+          tasks: r.tasks,
+          replay: true,
+        });
       r.parts.forEach((p, i) => replayPart(r, p, i));
       if (r.retry)
         bus.emit('reply:retry', {

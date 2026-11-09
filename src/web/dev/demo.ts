@@ -3,19 +3,20 @@ import { bot, nextScript, PLAIN, SCRIPTS } from './bot';
 import type { Script } from './bot';
 import { db } from '../model/db';
 import { resetLive } from '../model/live-feed';
-import { resetMockChat } from './mock-chat';
+import { refreshTasks } from '../model/sync';
+import { resetMockChat, webTasksDue } from './mock-chat';
 import { mockLive, mockStatus } from './mock-live';
 import { mockServer as server } from './mock-server';
 import { mockSource } from './mock-source';
-import { imgPart, loadData } from './seed';
+import { PEOPLE, UIDS, imgPart, loadData } from './seed';
 import { addWidget, nowCtl, relayout, removeWidget } from '../state/actions';
 import { resetLayoutToDefault } from '../state/appearance';
 import { desk, hasDef } from '../state/desk';
 import { toast } from '../state/ui';
-import { toggleDemo } from './demo-state';
+import { WEB_AUTHOR, toggleDemo } from './demo-state';
 import type { Dataset } from './demo-state';
 import { TODAY_DEF } from '../widgets/today/Today';
-import { resetChatState } from '../widgets/chat/chatState';
+import { chatCur, resetChatState } from '../widgets/chat/chatState';
 
 /* 演示控制的动作：用模拟事件检验自适应和动画 */
 const CONV_KEYS: Record<string, { title: string; kind: 'group' | 'private'; chat: string }> = {
@@ -57,6 +58,59 @@ function runScript(sc: Script, key?: string) {
   bot.trigger(id, sc);
   return id;
 }
+/* ---------- 任务（演示） ---------- */
+/** 网页会话：对话部件里正开着的那个（在那里看得到变化），没有就用数据里第一个，再没有就建一个 */
+function webConv() {
+  const cur = chatCur();
+  if (cur && server.has(cur)) return cur;
+  const found = server.all().find((c) => c.platform === 'web');
+  if (found) return found.id;
+  let id = '';
+  server.batch(() => {
+    id = server.addConv({ platform: 'web', kind: 'web', title: '任务演示' }).id;
+    server.addSeg(id, 'first', Date.now(), null);
+  });
+  return id;
+}
+/** 这个会话里 n 个进行中的任务；不够的现建一分钟后到点的一次性任务（演示按钮总能用） */
+function tasksFor(convId: string, n: number): number[] {
+  const ids = server.activeTasks(convId).map((t) => t.id);
+  const c = server.conv(convId)!;
+  const by = c.platform === 'web' ? { name: WEB_AUTHOR } : { id: UIDS[1001], name: PEOPLE[1001] };
+  while (ids.length < n)
+    ids.push(
+      server.addTask({
+        convId,
+        action: ['提醒大家喝水', '提醒大家站起来活动一下', '说说今天的天气'][ids.length % 3],
+        schedule: { kind: 'once', at: new Date(Date.now() + 60e3).toISOString() },
+        by,
+      }).id,
+    );
+  return ids.slice(0, n);
+}
+const NEW_TASKS: {
+  key: string;
+  action: string;
+  schedule: () => Parameters<typeof server.addTask>[0]['schedule'];
+}[] = [
+  {
+    key: 'c-book',
+    action: '提醒大家周五交读书笔记',
+    schedule: () => ({ kind: 'weekly', weekday: 5, time: '18:00' }),
+  },
+  {
+    key: 'web',
+    action: '提醒我下午站起来活动一下',
+    schedule: () => ({ kind: 'once', at: new Date(Date.now() + 3 * 3600e3).toISOString() }),
+  },
+  { key: 'c-star', action: '说说明早的云量', schedule: () => ({ kind: 'daily', time: '07:45' }) },
+  {
+    key: 'c-dm',
+    action: '提醒小雨周日晚上整理房间',
+    schedule: () => ({ kind: 'weekly', weekday: 7, time: '20:30' }),
+  },
+];
+let newTaskN = 0;
 const NEW_GROUPS: [string, number, string][] = [
   ['摄影小组', 1001, '周末去植物园扫街，有人一起吗'],
   ['猫咪互助会', 1002, '我家猫今天学会开柜门了😂'],
@@ -93,6 +147,63 @@ export const ACTIONS: Record<string, () => void> = {
     setTimeout(() => {
       if (bot.online) runScript(SCRIPTS.tool[0]);
     }, 450);
+  },
+  /* 新建任务：模拟洛璃用 create_task 建了一个，服务推 task 事件，任务部件里立刻出现 */
+  'task-new'() {
+    const t = NEW_TASKS[newTaskN++ % NEW_TASKS.length];
+    const id = t.key === 'web' ? webConv() : convFor(t.key);
+    const c = server.conv(id)!;
+    server.addTask({
+      convId: id,
+      action: t.action,
+      schedule: t.schedule(),
+      by: c.platform === 'web' ? { name: WEB_AUTHOR } : { id: UIDS[1001], name: PEOPLE[1001] },
+    });
+    toast(`新建任务：${t.action}`);
+  },
+  /* 群里任务到点：先写事件消息，再像有人触发那样等待合并，开始时带着任务 */
+  'task-due'() {
+    const id = convFor('c-book');
+    if (!bot.dueTasks(id, tasksFor(id, 1), nextScript('due')))
+      toast(
+        mockStatus.enabled
+          ? '连不上 Telegram：只写了事件，没有回复'
+          : 'Telegram 服务未启动：只写了事件，没有回复',
+      );
+  },
+  /* 网页会话里任务到点：没有请求接这个流，对话部件看不到逐字的过程（「此刻」里看），输入框上方写「正在回复」 */
+  'task-due-web'() {
+    const id = webConv();
+    webTasksDue(id, tasksFor(id, 1));
+  },
+  /* 回复中任务到点：当前回复发完后再回复一次，补的那次带任务 */
+  'task-due-busy'() {
+    if (!needOnline()) return;
+    const id = convFor('c-book');
+    runScript(nextScript('trigger'), 'c-book');
+    setTimeout(() => {
+      if (bot.online) bot.dueTasks(id, tasksFor(id, 1), nextScript('due'));
+    }, 3600);
+  },
+  /* 同时到点两个：一次回复，「此刻」里两个任务都列出来 */
+  'task-due-two'() {
+    const id = convFor('c-star');
+    if (!bot.dueTasks(id, tasksFor(id, 2), nextScript('due')))
+      toast('连不上 Telegram：只写了事件，没有回复');
+  },
+  /* 取任务失败：404（服务版本旧，没有这个接口）→ 500 → 恢复。只有任务部件、全屏会话头部的任务数、胶囊受影响，其余照常 */
+  'task-fail'() {
+    const f = server.tasksFail;
+    server.tasksFail = f === null ? 404 : f === 404 ? 500 : null;
+    toast(server.tasksFail ? `取任务失败：${server.tasksFail}` : '取任务恢复正常');
+    void refreshTasks();
+  },
+  /* 任务超时：服务停着时错过的，只有事件消息和 task 事件，不回复 */
+  'task-missed'() {
+    const id = convFor('c-star');
+    const [tid] = tasksFor(id, 1);
+    server.fireTask(tid, 'task-missed');
+    toast('任务超时：写了事件，没有回复');
   },
   online() {
     if (!mockStatus.enabled) {

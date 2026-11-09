@@ -1,6 +1,7 @@
 import { uid } from '../lib/util';
 import { bus } from './bus';
 import { db } from './db';
+import { eventOf } from './events';
 import { argsLine, authorOf, isFile, isReasoning, isTool, textOf, toolName } from './parts';
 import { recentMessages } from './sync';
 import { status } from './status';
@@ -38,6 +39,8 @@ export interface Line {
   aborted?: boolean;
   err?: boolean;
   retry?: boolean;
+  /** status：任务到点触发了这次回复（「任务到点 · 做什么」） */
+  task?: boolean;
   open?: boolean;
   /** user：这一行对应哪条消息（防止同一条显示两次） */
   rowId?: string;
@@ -74,8 +77,10 @@ const emit: Sub = (type, convId, line, extra) =>
     }
   });
 
-/** 一条消息变成终端里的几行。时间、秒数、耗时历史消息里都没有，不显示 */
+/** 一条消息变成终端里的几行。时间、秒数、耗时历史消息里都没有，不显示。
+    事件（任务到点）不是人说的话，不显示成一行用户消息：任务到点触发的回复开始时，「此刻」按服务给的任务标出（reply:start 的 tasks） */
 function linesFromRow(row: MsgRow): Line[] {
+  if (eventOf(row)) return [];
   const at = Date.parse(row.createdAt);
   const m = row.message;
   if (row.role === 'user') {
@@ -266,11 +271,14 @@ bus.on('reply:wait', ({ convId, replyId, noWait, at }) => {
   if (!noWait) push(s, { kind: 'status', text: '等待合并', at });
   emit('sessions');
 });
-bus.on('reply:start', ({ convId, replyId }) => {
+bus.on('reply:start', ({ convId, replyId, at, tasks }) => {
   replying.add(convId);
   const s = ensure(convId);
   s.replyId = replyId;
   s.cur = null;
+  // 任务到点触发的回复：几个任务都列出来
+  for (const t of tasks ?? [])
+    push(s, { kind: 'status', task: true, text: `任务到点 · ${t.action}`, at });
   emit('sessions');
 });
 bus.on('reply:queued', ({ convId }) => {

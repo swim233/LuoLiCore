@@ -23,6 +23,10 @@ export const SIZE_LABEL: Record<SizeKey, string> = {
   full: '通栏',
 };
 export const LAYOUT_KEY = 'luoli-webui-demo-layout-v1';
+/* 后来新增的默认部件：浏览器里已经存过布局的用户，布局里没有它时自动加一次（放在最后）。加过就记在这里（部件 id 的列表），
+   之后用户把它收进收纳盒、拖到哪儿都照用户的，不再自动加；「恢复默认布局」用的是默认布局，本来就有 */
+const ADDED_KEY = 'luoli-webui-demo-added-widgets-v1';
+const LATE_WIDGETS = ['tasks'];
 
 export interface Layout {
   order: string[];
@@ -32,7 +36,7 @@ export interface Layout {
   extra: string[];
 }
 export const DEFAULT_LAYOUT = (): Layout => ({
-  order: ['now', 'sessions', 'chat', 'settings', 'today'],
+  order: ['now', 'sessions', 'chat', 'settings', 'today', 'tasks'],
   size: {},
   hidden: {},
   mini: { now: true },
@@ -42,6 +46,10 @@ export const DEFAULT_LAYOUT = (): Layout => ({
 function loadLayout(): Layout {
   const d = DEFAULT_LAYOUT();
   const s = storage.get<Record<string, unknown> | null>(LAYOUT_KEY, null);
+  const added = storage.get<unknown>(ADDED_KEY, []);
+  const seen = Array.isArray(added) ? added.filter((x): x is string => typeof x === 'string') : [];
+  const todo = LATE_WIDGETS.filter((id) => !seen.includes(id));
+  if (todo.length) storage.set(ADDED_KEY, [...seen, ...todo]);
   if (!s || !Array.isArray(s.order)) return d;
   const rec = <T>(v: unknown) => (v && typeof v === 'object' ? (v as Record<string, T>) : {});
   const strs = (v: unknown[]) => v.filter((x): x is string => typeof x === 'string');
@@ -52,7 +60,9 @@ function loadLayout(): Layout {
     mini: rec<boolean>(s.mini),
     extra: Array.isArray(s.extra) ? strs(s.extra) : [],
   };
-  for (const id of d.order) if (!L.order.includes(id)) L.order.push(id);
+  for (const id of d.order)
+    if (!L.order.includes(id) && !LATE_WIDGETS.includes(id)) L.order.push(id);
+  for (const id of todo) if (!L.order.includes(id)) L.order.push(id);
   return L;
 }
 

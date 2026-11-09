@@ -10,6 +10,7 @@ import { setAutoNow, setCollapse, setFps, setHover } from '../state/appearance';
 import { hasDef, useDefsRev } from '../state/desk';
 import { BadgeLab } from './BadgeLab';
 import { mockStatus } from './mock-live';
+import { mockServer } from './mock-server';
 import { ACTIONS, setData } from './demo';
 import { toggleDemo, useDevUi } from './demo-state';
 import type { Dataset } from './demo-state';
@@ -21,7 +22,7 @@ export function DemoPanel() {
   const dataset = useDevUi((s) => s.dataset);
   const p = usePrefs((x) => x);
   useDefsRev();
-  useBusRev(['bot:online', 'bot:offline', 'status', 'data:reset']);
+  useBusRev(['bot:online', 'bot:offline', 'status', 'data:reset', 'tasks:update']);
   const ref = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   /* 展开：240 ms，从下面 10px、缩放 .98、透明度 0 */
@@ -97,6 +98,68 @@ export function DemoPanel() {
                 title="断开 3 秒，服务照常推进，重连后按现场重建「此刻」"
               >
                 断线重连（按现场重建）
+              </button>
+            </div>
+          </section>
+          <section>
+            <h4>任务</h4>
+            <div className="demo-grid">
+              <button
+                className="dbtn"
+                type="button"
+                data-act="task-new"
+                title="模拟 SSE 的 task 事件"
+              >
+                新建任务
+              </button>
+              <button
+                className="dbtn"
+                type="button"
+                data-act="task-due"
+                title="读书会：事件 → 等待合并 → 带任务的回复"
+              >
+                任务到点（群）
+              </button>
+              <button
+                className="dbtn"
+                type="button"
+                data-act="task-due-web"
+                title="网页会话：没有请求接流，对话里写「正在回复」，「此刻」不自动展开"
+              >
+                任务到点（网页）
+              </button>
+              <button
+                className="dbtn"
+                type="button"
+                data-act="task-due-busy"
+                title="先触发一次回复，回复中再到点"
+              >
+                回复中到点
+              </button>
+              <button
+                className="dbtn"
+                type="button"
+                data-act="task-due-two"
+                title="星空观测站：两个任务一起"
+              >
+                同时到点两个
+              </button>
+              <button
+                className="dbtn"
+                type="button"
+                data-act="task-missed"
+                title="只写事件，不回复"
+              >
+                任务超时
+              </button>
+              <button
+                className="dbtn is-wide"
+                type="button"
+                data-act="task-fail"
+                id="demo-task-fail"
+                title="取任务失败：404（服务版本旧）→ 500 → 恢复；只有任务部件、全屏会话头部的任务数、胶囊受影响"
+              >
+                {`取任务失败：${mockServer.tasksFail ?? '正常'}（点一下切换）`}
               </button>
             </div>
           </section>

@@ -9,8 +9,12 @@ import {
   applyReset,
   applyResync,
   applyRow,
+  applyTask,
+  applyTasks,
+  applyTasksError,
   applyToday,
   bindApi,
+  cancelTask,
   loadOlder,
   markRead,
   openConversation,
@@ -23,13 +27,14 @@ import type {
   MessageEvent,
   ServerEvents,
   ServiceStatus,
+  TaskRow,
   TodaySummary,
 } from '../../server/types';
 
 /* 真实的数据源：连洛璃服务。
-   - 连上 SSE（GET /api/events）；每次收到 hello（第一次连上、断线重连）就重新取会话列表和今日概况：第一次整批放进去并发 data:reset，
+   - 连上 SSE（GET /api/events）；每次收到 hello（第一次连上、断线重连）就重新取会话列表、今日概况和任务（hello 里没有它们）：第一次整批放进去并发 data:reset，
      断线重连后合并（已经取到的消息和阅读位置留着，补取断线期间的新消息，见 sync.ts 的 applyResync）；
-   - 之后的 conversation、message、today 事件增量放进 db，发部件在听的总线事件；
+   - 之后的 conversation、message、today、task 事件增量放进 db，发部件在听的总线事件；
    - hello 里的现场、status 与 live 事件交给 live-feed.ts：「此刻」、徽记、顶栏、助手的名字都从那里来；
    - 连不上时（SSE 断了，或取数据失败）连接状态是 down，部件显示「连不上洛璃服务」；EventSource 自己会重连，连上后自动恢复；
    - 今天的日期（服务器时区）变了就重新取今日概况。 */
@@ -67,10 +72,20 @@ export const liveSource: DataSource = {
       const gen = ++syncGen;
       clearTimeout(retry);
       try {
-        const [list, today] = await Promise.all([httpApi.conversations(), httpApi.today()]);
+        // 任务单独取、单独算成败：取任务失败（如服务版本旧、没有这个接口）不能让整个面板变成「连不上」
+        const [list, today, tasks] = await Promise.all([
+          httpApi.conversations(),
+          httpApi.today(),
+          httpApi.tasks().then(
+            (r) => ({ tasks: r.tasks }),
+            (e: unknown) => ({ error: e }),
+          ),
+        ]);
         if (stopped || gen !== syncGen) return;
         if (synced) applyResync(list.conversations, today);
         else applyReset(list.conversations, today);
+        if ('tasks' in tasks) applyTasks(tasks.tasks);
+        else applyTasksError(tasks.error);
         synced = true;
         setLink('ready');
       } catch {
@@ -110,6 +125,7 @@ export const liveSource: DataSource = {
       on(source, 'conversation', (row: ConversationRow) => applyRow(row));
       on(source, 'message', (ev: MessageEvent) => applyMessage(ev));
       on(source, 'today', (t: TodaySummary) => applyToday(t));
+      on(source, 'task', (row: TaskRow) => applyTask(row));
       source.addEventListener('error', () => {
         if (stopped || es !== source) return;
         // 断了：显示连不上。EventSource 会自己重连；被服务拒绝（状态码不对）时它不再重连，这里补一次
@@ -152,5 +168,6 @@ export const liveSource: DataSource = {
   openConversation: (id) => void openConversation(id),
   loadOlder: (id, manual) => void loadOlder(id, manual),
   markRead,
+  cancelTask,
   chat: httpChatApi,
 };

@@ -94,6 +94,12 @@ export function isBusy(convId: string | null): boolean {
   if (reqs.some((r) => r.convId === convId && !r.finished)) return true;
   return convId !== null && replyInfo.active(convId);
 }
+/** 这个会话在生成，但不是这个标签页发出的请求：别的标签页发的，或者任务到点触发的（没有哪个页面的请求接着它的流）。
+    这个标签页看不到逐字的过程（那在「此刻」里），对话里在输入框上方写一行「正在回复」，带「中止」 */
+export function isBusyElsewhere(convId: string | null): boolean {
+  if (convId === null) return false;
+  return replyInfo.active(convId) && !reqs.some((r) => r.convId === convId && !r.finished);
+}
 /** 有没有任何网页对话在生成（缩略文字用） */
 export const anyBusy = () =>
   reqs.some((r) => !r.finished) ||

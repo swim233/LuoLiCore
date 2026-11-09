@@ -1,5 +1,6 @@
+import { firstSentence } from './events';
 import { assistantName } from './who';
-import type { Conversation, MsgRow, Segment, TodaySummary } from './types';
+import type { Conversation, MsgRow, Segment, TaskRow, TodaySummary } from './types';
 
 /* 客户端的数据层：部件在渲染里同步读它。数据是服务给的样子（会话一行、消息整条 UI 消息、段、今日概况），
    由数据源（source.ts）经 sync.ts 灌进来：正式构建里来自洛璃服务，开发模式里来自模拟服务。
@@ -20,6 +21,10 @@ export interface MsgInfo {
   error?: string;
 }
 
+/** 取任务的结果（见 Db.taskLoad） */
+export type TaskLoad =
+  { state: 'loading' | 'ready' } | { state: 'error'; status: number; message: string };
+
 /** 没有标题的会话（CLI）按种类给个说法 */
 export function defaultTitle(kind: Conversation['kind']): string {
   return (
@@ -35,6 +40,15 @@ class Db {
   msgInfo = new Map<string, MsgInfo>();
   /** 今日概况；还没取到时为 null */
   today: TodaySummary | null = null;
+  /** 任务：进行中的，加上最近 30 天里结束的（服务给的那一行）；按 id 放 */
+  tasks = new Map<number, TaskRow>();
+  /**
+   * 取任务的结果，和连接状态分开：取任务失败（如服务版本旧、没有这个接口，404）只影响任务部件和全屏会话头部的任务数，
+   * 其余部件照常。loading：还没取到；error：这次取失败了（status 是 HTTP 状态码，网络错误为 0）
+   */
+  taskLoad: TaskLoad = { state: 'loading' };
+  /** 刚整批到的任务（任务 id）和它们所在的会话（会话 id）：任务部件里这些行、组出现时不放进场动画，和会话列表的 bulk 一样 */
+  taskBulk = new Set<number | string>();
   /** 刚整批到的会话：列表里这些行出现时不放进场动画 */
   bulk = new Set<string>();
   /** 数据版本：列表类视图靠它判断要不要重画 */
@@ -64,10 +78,11 @@ class Db {
     }
     return this.sortedCache!.list;
   }
-  /** 列表里的预览行：「名字：正文」，只有图时「[图片]」 */
+  /** 列表里的预览行：「名字：正文」，只有图时「[图片]」；事件（任务到点）是「任务到点 · 做什么」，前面没有名字 */
   previewOf(c: Conversation): string {
     const l = c.last;
     if (!l) return '';
+    if (l.event) return firstSentence(l.event, l.text);
     const name = l.role === 'assistant' ? assistantName() : l.author;
     const text = l.text || '（没有文字）';
     return name ? name + '：' + text : text;
@@ -101,6 +116,9 @@ class Db {
     this.segments = new Map();
     this.msgInfo = new Map();
     this.today = null;
+    this.tasks = new Map();
+    this.taskLoad = { state: 'loading' };
+    this.taskBulk = new Set();
     this.bulk = new Set();
     this.rev++;
   }

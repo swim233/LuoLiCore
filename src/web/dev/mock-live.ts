@@ -10,6 +10,7 @@ import type {
   LiveRetry,
   LiveSnapshot,
   LiveState,
+  LiveTask,
   LiveTool,
   ServiceStatus,
 } from '../../server/types';
@@ -93,7 +94,8 @@ class MockLive {
     this.replies.delete(convId);
     this.emit({ type: 'cancel', conversationId: convId });
   }
-  start(convId: string, replyId: string) {
+  /** 回复开始。tasks：任务到点触发的，是哪几个任务（人发消息触发的没有） */
+  start(convId: string, replyId: string, tasks?: LiveTask[]) {
     const at = Date.now();
     const old = this.need(convId);
     const waiting = old?.startedAt === undefined ? old?.waitingSince : undefined;
@@ -105,10 +107,11 @@ class MockLive {
       startedAt: iso(at),
       again: waiting !== undefined && !!old?.again,
       parts: [],
+      ...(tasks?.length ? { tasks } : {}),
     };
     this.replies.set(convId, r);
     this.steps.set(convId, 1);
-    this.emit({ type: 'start', ...this.progress(r) }, at);
+    this.emit({ type: 'start', ...this.progress(r), ...(tasks?.length ? { tasks } : {}) }, at);
   }
   /** 下一步（向模型再发一次请求） */
   nextStep(convId: string) {

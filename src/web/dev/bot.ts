@@ -1,5 +1,6 @@
 import { chars, rand, randi, uid } from '../lib/util';
 import type { ImageInfo, ImagePart, MsgRow, Part, ToolResultInfo } from '../model/types';
+import type { LiveTask } from '../../server/types';
 import { mockLive, mockStatus } from './mock-live';
 import { mockServer as server, svgImage } from './mock-server';
 import { U, imgPart, toolPart, toolSummary } from './seed';
@@ -28,6 +29,8 @@ export interface Script {
   errorStatus?: number;
   /** 输出到第几个字时流中断，重新生成一次（流中途重试） */
   restreamAt?: number;
+  /** 任务到点触发的回复：是哪几个任务（开始时带给「此刻」） */
+  tasks?: LiveTask[];
 }
 
 /* 可取消的流程：模拟数据的每一次回复都跑在一个 run 里，切换数据、离线、删会话时整体取消 */
@@ -69,6 +72,8 @@ interface RunState {
   reasoningMs: number[];
   images: Record<string, ImageInfo | null>;
   tools: Record<string, ToolResultInfo>;
+  /** 这次回复是哪几个任务到点触发的（等待合并时到点的并进来） */
+  tasks: LiveTask[];
 }
 
 /* 模拟 bot：一次回复 = 等待合并 →（重试）→ 思考 →（工具）→ 逐字输出 → 结束。
@@ -103,6 +108,35 @@ class Bot {
     }
     const first = !cur.pending;
     cur.pending = script;
+    if (first) mockLive.again(convId);
+    return true;
+  }
+  /**
+   * 任务到点（Telegram 会话）：服务先写事件消息、改任务，再把它当作一次触发：空闲时走等待合并，开始时带着是哪几个任务；
+   * 正在等待合并就并进这一轮（到点本身不推事件）；正在回复就等这次发完再回复一次（推「又被触发」，补的那次带任务）。
+   * Telegram 连不上时只有事件消息，不回复。返回有没有回复
+   */
+  dueTasks(convId: string, ids: number[], script: Script) {
+    const live: LiveTask[] = [];
+    for (const id of ids) {
+      const t = server.task(id);
+      if (!t || !server.fireTask(id, 'task')) continue;
+      live.push({ id: t.id, ref: t.ref, action: t.action });
+    }
+    if (!live.length || !this.online) return false;
+    // 洛璃照任务说的做：回复里说一遍任务
+    script = { ...script, text: live.map((t) => `到点啦～ ${t.action}`).join('；') };
+    const cur = this.runs.get(convId);
+    if (!cur) {
+      replyFlow(convId, { ...script, tasks: live });
+      return true;
+    }
+    if (cur.phase === 'waiting') {
+      cur.tasks.push(...live);
+      return true;
+    }
+    const first = !cur.pending;
+    cur.pending = { ...script, tasks: [...(cur.pending?.tasks ?? []), ...live] };
     if (first) mockLive.again(convId);
     return true;
   }
@@ -164,6 +198,7 @@ async function replyFlow(convId: string, script: Script, merged = false) {
     reasoningMs: [],
     images: {},
     tools: {},
+    tasks: [...(script.tasks ?? [])],
   };
   bot.runs.set(convId, st);
   /* 回复中又被触发而再回复一次的（merged），不再等待合并：直接开始 */
@@ -178,7 +213,7 @@ async function replyFlow(convId: string, script: Script, merged = false) {
     await run.sleep(Math.min(200, Math.max(10, st.waitUntil - Date.now())));
 
   st.phase = 'request';
-  mockLive.start(convId, st.replyId);
+  mockLive.start(convId, st.replyId, st.tasks);
   let attempts = 1;
   if (script.retry) {
     await run.sleep(900);
@@ -351,7 +386,7 @@ function failFlow(convId: string, st: RunState, script: Script, attempts: number
 }
 
 /* --- 演示用的剧本 --- */
-export const SCRIPTS: Record<'trigger' | 'tool' | 'error' | 'retry', Script[]> = {
+export const SCRIPTS: Record<'trigger' | 'tool' | 'error' | 'retry' | 'due', Script[]> = {
   trigger: [
     {
       msgs: [[1002, '@洛璃 下周读书会读什么好呀？想要轻松一点的']],
@@ -431,6 +466,21 @@ export const SCRIPTS: Record<'trigger' | 'tool' | 'error' | 'retry', Script[]> =
       errorStatus: 429,
     },
   ],
+  /* 任务到点触发的回复：没有人说话，洛璃照任务说的做 */
+  due: [
+    {
+      wait: 1500,
+      think: { ms: 1400, text: '任务到点了，按任务里写的提醒大家。' },
+      text: '到点啦～ 提醒一下：周六下午 3 点在咖啡馆聚会，别迟到哦！',
+      usage: [1688, 1024, 52],
+    },
+    {
+      wait: 1500,
+      think: { ms: 1200, text: '到了说天气的时间，简单说两句。' },
+      text: '早上好！今天多云，最高 9 度，出门记得围巾～ 晚上 9 点的空间站过境也别错过。',
+      usage: [1742, 1024, 63],
+    },
+  ],
   retry: [
     {
       convId: 'c-dm',
@@ -470,7 +520,7 @@ export const PLAIN: Record<string, [number, string, boolean?][]> = {
     [1003, '收到'],
   ],
 };
-const scriptIdx = { trigger: 0, tool: 0, error: 0, retry: 0 };
+const scriptIdx = { trigger: 0, tool: 0, error: 0, retry: 0, due: 0 };
 export const nextScript = (kind: keyof typeof scriptIdx) => {
   const list = SCRIPTS[kind];
   return list[scriptIdx[kind]++ % list.length];

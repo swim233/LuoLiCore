@@ -5,8 +5,12 @@ import {
   applyRemoved,
   applyReset,
   applyRow,
+  applyTask,
+  applyTasks,
+  applyTasksError,
   applyToday,
   bindApi,
+  cancelTask,
   loadOlder,
   markRead,
   openConversation,
@@ -28,6 +32,7 @@ export const mockSource: DataSource & { resync(): void } = {
       conversation: applyRow,
       message: applyMessage,
       today: applyToday,
+      task: applyTask,
       removed: applyRemoved,
     };
     loadData('normal');
@@ -41,10 +46,14 @@ export const mockSource: DataSource & { resync(): void } = {
   resync() {
     applyHello(mockStatus.hello());
     applyReset(server.rows(), server.todayNow());
+    const err = server.tasksError();
+    if (err) applyTasksError(err);
+    else applyTasks(server.taskRows());
   },
   openConversation: (id) => void openConversation(id),
   loadOlder: (id, manual) => void loadOlder(id, manual),
   markRead,
+  cancelTask,
   // 网页对话：在浏览器里模拟洛璃服务的对话接口（mock-chat.ts），和正式构建走同一份界面代码
   chat: mockChatApi,
 };

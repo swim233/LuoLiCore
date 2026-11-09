@@ -24,7 +24,7 @@ export function createTaskTools(service: () => Service): ToolDefinition[] {
 
 const createDescription = [
   '建一个任务：到约好的时间，你会在这个会话里收到一条 <event type="task">，照它去做。有人让你到时候提醒、到时候做某件事、每天几点做什么时用它。',
-  `- action：到点时要做什么，写成能单独看懂的一句话，写明对谁、做什么（到点时原来的对话可能只剩摘要），最多 ${maxActionChars} 字。如「提醒小明（uid 123）交周报」。`,
+  `- action：到点时要做什么，写成能单独看懂的一句话，写明对谁、做什么（到点时原来的对话可能只剩摘要），最多 ${maxActionChars} 字。对谁用名字称呼，不写 uid，如「提醒小明交周报」。`,
   '- 时间都按服务器的时区，和 <message> 的 time 相同。kind 选一种：',
   '  - once：一次性，at 写到点的时刻，如 2026-11-10 09:00；不能是已经过了的时刻，最远一年后。',
   '  - daily：每天；weekdays：每个工作日（周一到周五）；weekly：每周几，weekday 写 1–7（1 是周一，7 是周日）；monthly：每月几号，day 写 1–31，那个月没有这一天时（如 31 号碰上 2 月）在那个月的最后一天到点。',
@@ -37,7 +37,9 @@ const createDescription = [
 const createInput = z.object({
   action: z
     .string()
-    .describe(`到点时要做什么：能单独看懂的一句话，写明对谁、做什么，最多 ${maxActionChars} 字`),
+    .describe(
+      `到点时要做什么：能单独看懂的一句话，写明对谁（用名字，不写 uid）、做什么，最多 ${maxActionChars} 字`,
+    ),
   kind: z
     .enum(scheduleKinds)
     .describe('once 一次性；daily 每天；weekdays 每个工作日；weekly 每周几；monthly 每月几号'),

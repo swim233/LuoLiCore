@@ -1,4 +1,5 @@
-import { startOfDay, uid } from '../lib/util';
+import { pad2, startOfDay, uid } from '../lib/util';
+import { ApiError } from '../model/api';
 import type { Api } from '../model/api';
 import { defaultTitle } from '../model/db';
 import { textOf } from '../model/parts';
@@ -11,6 +12,8 @@ import type {
   MessageEvent,
   ModelCall,
   MsgRow,
+  TaskBrief,
+  TaskRow,
   TodaySummary,
 } from '../model/types';
 import type { ConversationRow } from '../../server/types';
@@ -36,6 +39,7 @@ export interface MockHooks {
   conversation(row: ConversationRow): void;
   message(ev: MessageEvent): void;
   today(t: TodaySummary): void;
+  task(row: TaskRow): void;
   removed(id: string): void;
 }
 
@@ -67,8 +71,62 @@ export function toolBody(summary: string, chars: number): string {
   return s.slice(0, Math.max(chars, summary.length));
 }
 
+/* ---------- 任务：和服务的 describeSchedule、nextDue 同一种说法（时间按这台机器的时区，开发模式里它就是「服务器」） ---------- */
+const WEEK = ['日', '一', '二', '三', '四', '五', '六'];
+const mdOf = (d: Date) => `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+const stampOf = (ms: number) =>
+  `${mdOf(new Date(ms))} ${pad2(new Date(ms).getHours())}:${pad2(new Date(ms).getMinutes())}`;
+export function describeSchedule(s: TaskRow['schedule']): string {
+  if (s.kind === 'once') return '一次性';
+  const base =
+    s.kind === 'daily'
+      ? `每天 ${s.time}`
+      : s.kind === 'weekdays'
+        ? `每个工作日 ${s.time}`
+        : s.kind === 'weekly'
+          ? `每周${WEEK[s.weekday % 7]} ${s.time}`
+          : `每月 ${s.day} 号 ${s.time}`;
+  return s.until ? `${base}，到 ${mdOf(new Date(s.until))} 为止` : base;
+}
+/** 在 after 之后第一次到点；一次性的 at 已经过了、周期的过了截止时没有 */
+export function nextDue(s: TaskRow['schedule'], after: number): number | undefined {
+  if (s.kind === 'once') return Date.parse(s.at) > after ? Date.parse(s.at) : undefined;
+  const [hh, mm] = s.time.split(':').map(Number);
+  const until = s.until ? Date.parse(s.until) : Infinity;
+  const base = new Date(after);
+  for (let i = 0; i <= 400; i++) {
+    const day = new Date(base.getFullYear(), base.getMonth(), base.getDate() + i);
+    const wd = day.getDay() === 0 ? 7 : day.getDay();
+    const last = new Date(day.getFullYear(), day.getMonth() + 1, 0).getDate();
+    const hit =
+      s.kind === 'daily' ||
+      (s.kind === 'weekdays' && wd <= 5) ||
+      (s.kind === 'weekly' && wd === s.weekday) ||
+      (s.kind === 'monthly' && day.getDate() === Math.min(s.day, last));
+    if (!hit) continue;
+    const t = new Date(day.getFullYear(), day.getMonth(), day.getDate(), hh, mm).getTime();
+    if (t <= after) continue;
+    return t > until ? undefined : t;
+  }
+  return undefined;
+}
+export interface NewMockTask {
+  convId: string;
+  action: string;
+  schedule: TaskRow['schedule'];
+  by: { id?: string; name: string };
+  createdAt?: number;
+  /** 不给时按 schedule 算下次到点；给了就是这个状态（种子数据里已经结束的任务） */
+  state?: Partial<Pick<TaskRow, 'status' | 'nextDueAt' | 'lastDueAt' | 'dueCount' | 'endedAt'>>;
+}
+const THIRTY_DAYS = 30 * 864e5;
+
 export class MockServer implements Api {
   private convs = new Map<string, MockConv>();
+  private taskMap = new Map<number, TaskRow>();
+  private taskSeq = 0;
+  /** 演示：取任务失败时的 HTTP 状态码（演示面板切换），null 为正常 */
+  tasksFail: number | null = null;
   private calls: ModelCall[] = [];
   hooks: MockHooks | null = null;
   /** true：写入不推事件（灌种子数据时） */
@@ -192,6 +250,7 @@ export class MockServer implements Api {
       metadata: {
         createdAt,
         ...(m.role === 'user' && m.author ? { author: m.author } : {}),
+        ...(m.event ? { event: m.event } : {}),
         ...(m.meta?.aborted ? { aborted: true as const } : {}),
         ...(m.meta?.failed ? { failed: true as const } : {}),
         ...(m.meta?.usage ? { usage: m.meta.usage } : {}),
@@ -206,6 +265,9 @@ export class MockServer implements Api {
       message,
       tools: m.tools ?? {},
       images: m.images ?? {},
+      ...(m.event && this.taskMap.has(m.event.taskId)
+        ? { task: this.briefOf(this.taskMap.get(m.event.taskId)!) }
+        : {}),
     };
     // 按序号插入（预留过序号的回复比后来写入的消息序号小）
     let pos = c.msgs.length;
@@ -233,7 +295,7 @@ export class MockServer implements Api {
       c.readSeq = c.msgs.at(-1)?.seq ?? 0;
       const n = this.unreadPlan.get(c.id);
       if (n === undefined || n <= 0) continue;
-      const users = c.msgs.filter((m) => m.role === 'user');
+      const users = c.msgs.filter((m) => m.role === 'user' && !m.message.metadata?.event);
       const firstUnread = users[users.length - n];
       if (firstUnread) c.readSeq = firstUnread.seq - 1;
     }
@@ -241,8 +303,116 @@ export class MockServer implements Api {
   }
   reset() {
     this.convs.clear();
+    this.taskMap.clear();
+    this.taskSeq = 0;
     this.calls = [];
     this.unreadPlan.clear();
+  }
+
+  /* ---------- 任务 ---------- */
+  briefOf(t: TaskRow): TaskBrief {
+    return { id: t.id, ref: t.ref, action: t.action, scheduleText: t.scheduleText };
+  }
+  task(id: number) {
+    return this.taskMap.get(id);
+  }
+  /** 这个会话进行中的任务 */
+  activeTasks(convId: string) {
+    return [...this.taskMap.values()].filter(
+      (t) => t.status === 'active' && t.conversation.id === convId,
+    );
+  }
+  /** 接口返回的：进行中的，加上最近 30 天里结束的，按 id 排 */
+  taskRows(): TaskRow[] {
+    const since = Date.now() - THIRTY_DAYS;
+    return [...this.taskMap.values()]
+      .filter((t) => t.status === 'active' || Date.parse(t.endedAt ?? '') >= since)
+      .sort((a, b) => a.id - b.id);
+  }
+  private putTask(row: TaskRow) {
+    this.taskMap.set(row.id, row);
+    this.fire(() => this.hooks!.task(row));
+  }
+  /** 新建一个任务（工具 create_task 的结果）：进行中，推 task 事件 */
+  addTask(n: NewMockTask): TaskRow {
+    const c = this.convs.get(n.convId)!;
+    const id = ++this.taskSeq;
+    const created = n.createdAt ?? Date.now();
+    const status = n.state?.status ?? 'active';
+    const next =
+      status === 'active' ? nextDue(n.schedule, Math.max(created, Date.now())) : undefined;
+    const row: TaskRow = {
+      id,
+      ref: 't' + id,
+      action: n.action,
+      scheduleText: describeSchedule(n.schedule),
+      conversation: {
+        id: c.id,
+        platform: c.platform,
+        kind: c.kind,
+        ...(c.title ? { title: c.title } : {}),
+      },
+      schedule: n.schedule,
+      status,
+      ...(status === 'active'
+        ? { nextDueAt: n.state?.nextDueAt ?? (next ? new Date(next).toISOString() : undefined) }
+        : {}),
+      ...(n.state?.lastDueAt ? { lastDueAt: n.state.lastDueAt } : {}),
+      dueCount: n.state?.dueCount ?? 0,
+      requestedBy: n.by,
+      createdAt: new Date(created).toISOString(),
+      ...(n.state?.endedAt ? { endedAt: n.state.endedAt } : {}),
+    };
+    this.putTask(row);
+    return row;
+  }
+  /** 事件消息：没有发言人的用户消息，正文是写给模型看的完整句子（只写消息，不改任务） */
+  addEvent(convId: string, taskId: number, type: 'task' | 'task-missed', at = Date.now()) {
+    const t = this.taskMap.get(taskId);
+    if (!t) return null;
+    const who = t.requestedBy.id
+      ? `${t.requestedBy.name}（uid ${t.requestedBy.id}）`
+      : t.requestedBy.name;
+    const kind = t.schedule.kind === 'once' ? '一次性任务' : `周期任务（${t.scheduleText}）`;
+    const due = t.lastDueAt ? stampOf(Date.parse(t.lastDueAt)) : stampOf(at);
+    const text =
+      type === 'task'
+        ? `任务到点：${t.action}。${who}在 ${stampOf(Date.parse(t.createdAt))} 让你建的，${kind}。`
+        : t.schedule.kind === 'once'
+          ? `任务超时：${t.action}（本该 ${due} 到点，那时洛璃服务没在运行）。这个一次性任务已经结束。`
+          : `任务超时：${t.action}（${t.scheduleText}；本该 ${due} 到点，那时洛璃服务没在运行）。`;
+    return this.addMsg(convId, {
+      role: 'user',
+      parts: [{ type: 'text', text }],
+      event: { type, taskId },
+      at,
+    });
+  }
+  /**
+   * 到点（task）或任务超时（task-missed）：写事件消息，改任务（一次性的完成；周期的下次到点往后挪，到点的次数加一），推 task 事件。
+   * 返回事件消息。顺序同真实的服务：事件消息先写，任务的新样子接着推
+   */
+  fireTask(taskId: number, type: 'task' | 'task-missed'): MsgRow | null {
+    const t = this.taskMap.get(taskId);
+    if (!t || t.status !== 'active') return null;
+    const now = Date.now();
+    const due = t.nextDueAt ?? new Date(now).toISOString();
+    const row = this.addEvent(t.conversation.id, taskId, type, now);
+    const next =
+      type === 'task' || t.schedule.kind !== 'once' ? nextDue(t.schedule, now) : undefined;
+    const upd: TaskRow = { ...t };
+    if (type === 'task') {
+      upd.dueCount = t.dueCount + 1;
+      upd.lastDueAt = due;
+    }
+    if (next) upd.nextDueAt = new Date(next).toISOString();
+    else {
+      upd.status = 'done';
+      upd.endedAt = new Date(now).toISOString();
+      delete upd.nextDueAt;
+    }
+    this.putTask(upd);
+    return row;
   }
   /** 最近一条助手消息所在的会话与时间（模拟「上次回复」的初始值） */
   lastAssistant(): { conversationId: string; at: string } | undefined {
@@ -264,13 +434,15 @@ export class MockServer implements Api {
     let text = textOf(m).replace(/\s+/g, ' ').trim();
     if (text.length > PREVIEW_CHARS) text = text.slice(0, PREVIEW_CHARS);
     else if (!text && m.message.parts.some((p) => p.type === 'file')) text = '[图片]';
+    const event = m.message.metadata?.event?.type;
     return {
       seq: m.seq,
       createdAt: m.createdAt,
       role: m.role,
-      ...(m.role === 'user' && m.message.metadata?.author
+      ...(m.role === 'user' && m.message.metadata?.author && !event
         ? { author: m.message.metadata.author.name }
         : {}),
+      ...(event ? { event } : {}),
       text,
     };
   }
@@ -279,7 +451,8 @@ export class MockServer implements Api {
     const last = c.msgs.at(-1);
     const unread =
       c.kind === 'group' || c.kind === 'private'
-        ? c.msgs.filter((m) => m.seq > c.readSeq && m.role === 'user').length
+        ? c.msgs.filter((m) => m.seq > c.readSeq && m.role === 'user' && !m.message.metadata?.event)
+            .length
         : 0;
     return {
       id: c.id,
@@ -373,6 +546,28 @@ export class MockServer implements Api {
   async today() {
     await delay(40);
     return this.todayNow();
+  }
+  /** 演示取任务失败（版本旧的服务没有这个接口：404）时，取任务会碰到的错 */
+  tasksError(): ApiError | null {
+    if (!this.tasksFail) return null;
+    const msg = this.tasksFail === 404 ? '没有这个接口' : `请求失败（HTTP ${this.tasksFail}）`;
+    return new ApiError(msg, this.tasksFail);
+  }
+  async tasks() {
+    await delay(60);
+    const err = this.tasksError();
+    if (err) throw err;
+    return { tasks: this.taskRows() };
+  }
+  async cancelTask(id: number) {
+    await delay(300);
+    const t = this.taskMap.get(id);
+    if (!t) throw new ApiError('没有这个任务', 404);
+    if (t.status !== 'active') throw new ApiError('任务已经结束了', 409);
+    const row: TaskRow = { ...t, status: 'cancelled', endedAt: new Date().toISOString() };
+    delete row.nextDueAt;
+    this.putTask(row);
+    return row;
   }
 }
 

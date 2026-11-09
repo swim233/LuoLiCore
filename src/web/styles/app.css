@@ -2264,6 +2264,14 @@ button {
 .k-status.is-err .tl-body {
   color: var(--err);
 }
+/* 任务到点触发的回复：开头标出是哪个任务（几个都列出来） */
+.k-status.is-task .tl-sym,
+.k-status.is-task .tl-body {
+  color: var(--tool);
+}
+.k-status.is-task .tl-body {
+  font-style: normal;
+}
 .k-status.is-retry .tl-body {
   color: var(--amber);
 }
@@ -2565,6 +2573,9 @@ button {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.conv-last.is-event {
+  color: var(--dim);
+}
 .conv-side {
   display: flex;
   flex-direction: column;
@@ -2609,7 +2620,7 @@ button {
   animation: lit 1.4s ease-out;
 }
 
-/* ---------- 悬停高亮（components/glide.ts）：会话列表和对话里选会话的菜单 ----------
+/* ---------- 悬停高亮（components/glide.ts）：会话列表、任务列表和对话里选会话的菜单 ----------
    一个列表一块高亮，用 transform 挪到鼠标所在的行，到位时回弹（位置的动画由 glide.ts 用 Web Animations 做，这里不过渡 transform），
    宽高跟着那一行（平滑、不回弹）；从隐藏到显示先瞬移再淡入，离开列表淡出。
    样子是边光：底是一团跟着鼠标的淡光，边是 1px 的一圈（单独一层、遮罩挖空），离鼠标近的那段被照亮。
@@ -2634,7 +2645,7 @@ button {
   transition-duration: var(--dur-glide-in), var(--dur-glide), var(--dur-glide);
 }
 .glide,
-:is(.conv-item, .chat-menu > button).is-hl::before {
+:is(.conv-item, .chat-menu > button, .task-row.is-live).is-hl::before {
   background: radial-gradient(
     240px 110px at var(--mx, 50%) var(--my, 50%),
     rgba(140, 160, 255, 0.15),
@@ -2643,7 +2654,7 @@ button {
   );
 }
 .glide::after,
-:is(.conv-item, .chat-menu > button).is-hl::after {
+:is(.conv-item, .chat-menu > button, .task-row.is-live).is-hl::after {
   content: '';
   position: absolute;
   inset: 0;
@@ -2665,8 +2676,8 @@ button {
     linear-gradient(var(--mask) 0 0);
 }
 /* 关掉动画：每行自己的高亮，平时透明，带 .is-hl 时淡入 */
-:is(.conv-item, .chat-menu > button)::before,
-:is(.conv-item, .chat-menu > button)::after {
+:is(.conv-item, .chat-menu > button, .task-row.is-live)::before,
+:is(.conv-item, .chat-menu > button, .task-row.is-live)::after {
   content: '';
   position: absolute;
   inset: 0;
@@ -2676,8 +2687,8 @@ button {
   opacity: 0;
   transition: opacity var(--dur-glide-out) ease;
 }
-:is(.conv-item, .chat-menu > button).is-hl::before,
-:is(.conv-item, .chat-menu > button).is-hl::after {
+:is(.conv-item, .chat-menu > button, .task-row.is-live).is-hl::before,
+:is(.conv-item, .chat-menu > button, .task-row.is-live).is-hl::after {
   opacity: 1;
   transition-duration: var(--dur-glide-in);
 }
@@ -2858,8 +2869,26 @@ button {
     transform: translateY(10px);
   }
 }
-.msg.is-new {
+.msg.is-new,
+.evt.is-new {
   animation: msg-in 0.35s var(--ease-out) both;
+}
+/* 事件（任务到点、任务超时）：不是气泡，居中的一行三级文字色的灰字，没有头像、名字；时间在末尾、小一号 */
+.evt {
+  align-self: center;
+  max-width: min(92%, 640px);
+  text-align: center;
+  color: var(--fg-3);
+  font-size: 12.5px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+.evt-time {
+  margin-left: 0.7em;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 /* 中止、出错的标记 */
 .mark {
@@ -3479,6 +3508,217 @@ button {
   white-space: pre-wrap;
 }
 
+/* 输入框上方的一行「洛璃正在回复…」加「中止」：这个会话在回复，但不是这个标签页发的请求（别的标签页、任务到点触发的） */
+.chat-live {
+  margin: 4px 14px -2px;
+  padding: 0 2px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--fg-2);
+}
+.chat-live .spin {
+  margin-left: 0;
+}
+.chat-live .log-retry {
+  margin-left: auto;
+}
+
+/* ---------- 任务 ----------
+   任务部件：按会话分组的列表（窗格的滚动区，悬停高亮同会话列表），行的字号、行距、次要文字的颜色和会话列表一致；
+   「下次到点」用强调色（蓝）：任务不是洛璃本人，不用金色。已结束的行整体暗一档。
+   全屏会话头部的浮层（.task-pop）借用 .chat-menu 的样子（玻璃底、模糊、形变期间关掉模糊的规则都在那一条上） */
+.tasks {
+  --sc-pt: 4px;
+  --sc-pb: 8px;
+  --hr: 12px;
+  padding-inline: 8px;
+  display: flex;
+  flex-direction: column;
+}
+.tasks.is-full {
+  padding-inline: max(16px, calc((100% - 760px) / 2));
+}
+.tasks > .empty {
+  margin-block: auto;
+}
+.task-none {
+  padding: 18px 10px 6px;
+  text-align: center;
+}
+.task-group {
+  flex: none;
+  overflow: hidden;
+}
+.task-gh {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px 10px 2px;
+}
+.task-gt {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg-3);
+}
+.task-wrap {
+  overflow: hidden;
+}
+.task-row {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 2px 12px;
+  margin-bottom: 1px;
+  padding: 9px 10px;
+  border-radius: 12px;
+  color: var(--fg);
+}
+.task-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.task-action {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.task-meta {
+  color: var(--fg-3);
+  font-size: 12.5px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.task-side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+}
+.task-next {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--blue);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.task-cancel {
+  height: 22px;
+  padding: 0 10px;
+  font-size: 11.5px;
+  transition:
+    background-color var(--dur-hover),
+    color var(--dur-hover),
+    opacity var(--dur-hover);
+}
+/* 有鼠标时「取消」悬停才出现（键盘走到它也出现）；触屏和窄屏一直显示 */
+@media (hover: hover) and (pointer: fine) and (min-width: 720px) {
+  .task-row:not(:hover, :focus-within) .task-cancel {
+    opacity: 0;
+    pointer-events: none;
+  }
+}
+/* 取消在这一行里确认：「取消这个任务？」「确认」「算了」 */
+.task-ask {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: 12.5px;
+  color: var(--fg-2);
+}
+.task-ask .chip {
+  height: 24px;
+}
+.task-err {
+  grid-column: 1 / -1;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--err);
+}
+.task-row.is-ended {
+  opacity: 0.6;
+}
+.task-state {
+  font-size: 12px;
+  color: var(--fg-3);
+  white-space: nowrap;
+}
+.task-at {
+  font-size: 11.5px;
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.task-ended {
+  margin-top: 8px;
+}
+.task-more {
+  all: unset;
+  box-sizing: border-box;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  margin: 2px 10px;
+  padding: 4px 0;
+  font-size: 12px;
+  color: var(--dim);
+}
+.task-more:hover {
+  color: var(--fg-2);
+}
+.task-more:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+/* 全屏会话头部的「N 个任务」和它的浮层 */
+.task-chip {
+  position: relative;
+  flex: none;
+  margin-left: auto;
+}
+.task-count {
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  font-family: inherit;
+  transition:
+    background-color var(--dur-hover),
+    color var(--dur-hover);
+}
+.task-count:hover,
+.task-count[aria-expanded='true'] {
+  background: var(--ctl-bg);
+  color: var(--fg);
+}
+.task-count .chev {
+  margin: 0 0 0 0.45em;
+}
+.chat-menu.task-pop {
+  --hr: 9px;
+  left: auto;
+  right: -8px;
+  top: calc(100% + 4px);
+  width: min(420px, calc(100vw - 48px));
+  max-height: min(380px, calc(var(--ph, 9999px) - var(--ht, 0px) - 8px));
+  gap: 0;
+}
+.task-pop .task-row {
+  border-radius: 9px;
+}
+
 /* ---------- 设置（骨架） ---------- */
 .skel {
   --sc-pt: 0px;
@@ -4025,7 +4265,8 @@ button {
 }
 .still .ch,
 .still .tl.is-new,
-.still .msg.is-new {
+.still .msg.is-new,
+.still .evt.is-new {
   animation: none !important;
 }
 .still .cur {

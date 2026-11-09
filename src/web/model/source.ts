@@ -17,6 +17,8 @@ export interface DataSource {
   loadOlder(convId: string, manual?: boolean): void;
   /** 已经看到了这个会话的第 seq 条消息（一般是最后一条）：未读清零 */
   markRead(convId: string, seq: number): void;
+  /** 取消一个任务：成功了任务这一行换成取消后的样子；失败时抛错，说明原因（已经结束了、没有这个任务、连不上） */
+  cancelTask(id: number): Promise<void>;
   /** 网页对话要用的服务接口：发消息、中止、上传图片（正式构建是洛璃服务的 HTTP 接口，开发模式在浏览器里模拟） */
   chat: ChatApi;
 }
@@ -35,6 +37,8 @@ export interface NewMessage {
   tools?: Record<string, ToolResultInfo>;
   /** 消息时间，默认现在 */
   at?: number;
+  /** 事件（任务到点、任务超时）：没有发言人的用户消息，说的是哪个任务 */
+  event?: { type: 'task' | 'task-missed'; taskId: number };
   meta?: {
     aborted?: true;
     failed?: true;

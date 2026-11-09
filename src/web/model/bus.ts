@@ -1,12 +1,14 @@
 import type { Conversation, ImageInfo, MsgRow } from './types';
 import type { Snap } from './status';
-import type { LiveState } from '../../server/types';
+import type { LiveState, LiveTask } from '../../server/types';
 
 /* 事件总线：数据层（db、status、nowModel）和部件之间的事件。服务端推来的事件由数据源转成这里的事件（live-feed.ts、sync.ts），部件不直接认服务的事件。
    事件：
      message        {convId, row, trigger}       新消息（记录到会话）
-     reply:wait     {convId, replyId?, noWait, at?}  Telegram 被触发，进入等待合并（noWait：不等待）
-     reply:start    {convId, replyId, at?, again?, queuedFrom?}  回复开始（again、queuedFrom：开始时就已经有排队的消息）
+     reply:wait     {convId, replyId?, noWait, at?, replay?}  Telegram 被触发，进入等待合并（noWait：不等待）
+     reply:start    {convId, replyId, at?, again?, queuedFrom?, tasks?, replay?}  回复开始（again、queuedFrom：开始时就已经有排队的消息；
+                                                 tasks：任务到点触发的，是哪几个任务）
+                                                 replay：按现场重建时补发的（刷新、重连时正在进行的回复），不是刚发生的事，不触发「此刻」自动展开
      reply:state    {convId, replyId?, state, tool?}  这个回复此刻的状态（服务给的，以它为准）
      reply:queued   {convId, replyId?, queuedFrom?}  回复中又被触发，发出后再回复一次（合并回复）；网页会话是生成中又发了消息，
                                                  queuedFrom 是排队的消息从第几条起
@@ -28,6 +30,7 @@ import type { LiveState } from '../../server/types';
      conv:add {conv} / conv:remove {id} / conv:update {id} / unread {convId} / data:reset {}
      conv:messages {convId}   某个会话已取到的消息、段或加载状态变了
      today:update             今日概况有了新数据
+     tasks:update             任务有了变化（整批换了、新建、到点、完成、取消）
      link                     和洛璃服务的连接状态变了
      chat:switch
      chat:flight    网页对话里发给服务的请求有了变化（发出、有了回复、结束）
@@ -36,13 +39,21 @@ import type { LiveState } from '../../server/types';
 type Empty = Record<string, never>;
 export interface BusEvents {
   message: { convId: string; row: MsgRow | null; trigger?: boolean };
-  'reply:wait': { convId: string; replyId?: string; noWait?: boolean; at?: number };
+  'reply:wait': {
+    convId: string;
+    replyId?: string;
+    noWait?: boolean;
+    at?: number;
+    replay?: boolean;
+  };
   'reply:start': {
     convId: string;
     replyId: string;
     at?: number;
     again?: boolean;
     queuedFrom?: number;
+    tasks?: LiveTask[];
+    replay?: boolean;
   };
   'reply:state': { convId: string; replyId?: string; state: LiveState; tool?: string };
   'reply:queued': { convId: string; replyId?: string; queuedFrom?: number };
@@ -107,6 +118,7 @@ export interface BusEvents {
   'data:reset': Empty;
   'conv:messages': { convId: string };
   'today:update': Empty;
+  'tasks:update': Empty;
   link: Empty;
   'chat:switch': Empty;
   'chat:flight': Empty;

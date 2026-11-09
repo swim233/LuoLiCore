@@ -1,6 +1,7 @@
 import { memo, useEffect, useRef, useState } from 'react';
 import { Chat, useChat } from '@ai-sdk/react';
 import { MsgBubble } from '../../components/Bubble';
+import { EventLine } from '../../components/EventLine';
 import { Spin, Thumb } from '../../components/Hl';
 import { VirtualLog } from '../../components/VirtualLog';
 import { Pane } from '../../components/Pane';
@@ -12,6 +13,7 @@ import { fmtDay, fmtShort } from '../../lib/util';
 import { bus } from '../../model/bus';
 import { partsOfChat, partsOfRow } from '../../model/bubble';
 import { db } from '../../model/db';
+import { eventOf } from '../../model/events';
 import { link, useLinkPhase } from '../../model/link';
 import { authorOf } from '../../model/parts';
 import { useBusRev } from '../../model/rev';
@@ -30,6 +32,7 @@ import {
   flightKey,
   flightsOf,
   isBusy,
+  isBusyElsewhere,
   removeAtt,
   retryChat,
   retryIsDenied,
@@ -307,8 +310,9 @@ function ChatLog({ convId }: { convId: string }) {
   type Entry = { key: string; row?: MsgRow; req?: Req; typing?: boolean };
   const entries: Entry[] = [];
   let placed = false;
-  // 在回复，可这个标签页里还没有它的内容（别的标签页发的、刚发出还没有第一段）：先显示「正在回复」，位置和有内容时一样
-  const typing = busy && !inflight.length;
+  // 在回复，可这个标签页里还没有它的内容（刚发出还没有第一段）：先显示「正在回复」，位置和有内容时一样。
+  // 别的标签页发的、任务到点触发的（这个标签页没有请求）不画，输入框上方有「正在回复」那一行（ReplyingBar）
+  const typing = busy && !inflight.length && !isBusyElsewhere(convId);
   const placeInflight = () => {
     placed = true;
     for (const f of inflight) entries.push({ key: flightKey(f), req: f });
@@ -341,7 +345,10 @@ function ChatLog({ convId }: { convId: string }) {
     seen.current.ids.add(e.key);
     const row = e.row;
     const retry = canRetry && i === entries.length - 1;
-    if (row?.role === 'user')
+    // 事件（任务到点）：居中的一行灰字，不是自己发的消息，不带「排队中」
+    if (row && eventOf(row))
+      items.push({ key: e.key, node: <EventLine row={row} isNew={isNew} /> });
+    else if (row?.role === 'user')
       items.push({
         key: e.key,
         node: (
@@ -387,6 +394,23 @@ function ChatLog({ convId }: { convId: string }) {
   );
 }
 
+/** 输入框上方的一行「洛璃正在回复…」加「中止」：这个会话在回复，但不是这个标签页发的请求（别的标签页发的、任务到点触发的），
+    这里收不到它的流，看不到逐字的过程；回复写进历史后这一行消失，回复照常出现。中止走服务的中止接口（同时取消排队的补回复） */
+function ReplyingBar({ convId }: { convId: string | null }) {
+  const luoli = useAssistantName();
+  useBusRev(['reply:info', 'chat:flight']);
+  if (!isBusyElsewhere(convId)) return null;
+  return (
+    <div className="chat-live" role="status">
+      <Spin />
+      <span>{luoli}正在回复…</span>
+      <button className="log-retry" type="button" onClick={() => void abortChat(convId)}>
+        中止
+      </button>
+    </div>
+  );
+}
+
 /* 输入：Enter 发送、Shift+Enter 换行（输入法组词中不发送）；粘贴或拖入图片（最多 10 张、每张不超过 20 MB）；
    生成中也能发（服务把它排队，当前回复结束后再回复一次）；生成中按 Esc 或点「中止」中止并取消排队的回复 */
 function Composer({ convId, fullId }: { convId: string | null; fullId: string }) {
@@ -426,6 +450,9 @@ function Composer({ convId, fullId }: { convId: string | null; fullId: string })
     return () => el.removeEventListener('wheel', onWheel);
   }, []);
   const hasContent = !!text.trim() || d.atts.length > 0;
+  // 输入框空着、在生成时发送键是「中止」。不是这个标签页发的请求（别的标签页、任务到点触发的）时，输入框上方已经有「正在回复」那一行带「中止」（ReplyingBar），
+  // 这里不再重复，发送键照常
+  const stop = busy && !hasContent && !isBusyElsewhere(convId);
   const canSend = hasContent && !d.sending;
   const send = () => {
     if (canSend) void sendChat(convId, text);
@@ -528,22 +555,18 @@ function Composer({ convId, fullId }: { convId: string | null; fullId: string })
           }}
         />
         <button
-          className={'chat-send' + (busy && !hasContent ? ' is-stop' : '')}
+          className={'chat-send' + (stop ? ' is-stop' : '')}
           type="button"
           disabled={d.sending}
           title={
-            busy && !hasContent
-              ? '中止生成（Esc）'
-              : busy
-                ? '发送：排在当前回复后面（Enter）'
-                : '发送（Enter）'
+            stop ? '中止生成（Esc）' : busy ? '发送：排在当前回复后面（Enter）' : '发送（Enter）'
           }
           onClick={() => {
-            if (busy && !hasContent) abort();
+            if (stop) abort();
             else send();
           }}
         >
-          {d.sending ? (uploading ? '上传中' : '发送中') : busy && !hasContent ? '中止' : '发送'}
+          {d.sending ? (uploading ? '上传中' : '发送中') : stop ? '中止' : '发送'}
         </button>
       </div>
       <div className="chat-hint">
@@ -591,6 +614,12 @@ function ChatView({ mode }: ViewProps) {
       fullId={full ? 'chat-input-full' : 'chat-input'}
     />
   );
+  const bottom = (
+    <>
+      <ReplyingBar convId={cur} />
+      {composer}
+    </>
+  );
   if (!full) {
     return (
       <Pane
@@ -621,7 +650,7 @@ function ChatView({ mode }: ViewProps) {
             {menu && <ChatMenu convs={convs} cur={cur} close={() => setMenu(false)} />}
           </div>
         }
-        bottom={composer}
+        bottom={bottom}
       >
         {body}
       </Pane>
@@ -678,7 +707,7 @@ function ChatView({ mode }: ViewProps) {
             <h3 className="chat-title">{title}</h3>
           </div>
         }
-        bottom={composer}
+        bottom={bottom}
       >
         {body}
       </Pane>

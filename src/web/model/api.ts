@@ -1,9 +1,11 @@
 import type {
+  CancelTaskResponse,
   ConversationResponse,
   ConversationRow,
   ConversationsResponse,
   ErrorResponse,
   MessagesResponse,
+  TasksResponse,
   TodaySummary,
 } from '../../server/types';
 
@@ -15,6 +17,10 @@ export interface Api {
   messages(id: string, q: { before?: number; limit?: number }): Promise<MessagesResponse>;
   markRead(id: string, seq: number): Promise<ConversationRow>;
   today(): Promise<TodaySummary>;
+  /** 进行中的任务，加上最近 30 天里结束的 */
+  tasks(): Promise<TasksResponse>;
+  /** 取消一个任务（任何会话的都行）；已经结束的 409，没有这个任务 404 */
+  cancelTask(id: number): Promise<CancelTaskResponse>;
 }
 
 export class ApiError extends Error {
@@ -71,4 +77,11 @@ export const httpApi: Api = {
       body: JSON.stringify({ seq }),
     }),
   today: () => request('/api/today'),
+  tasks: () => request('/api/tasks'),
+  cancelTask: (id) =>
+    request(`/api/tasks/${id}/cancel`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    }),
 };
