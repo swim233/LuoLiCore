@@ -167,7 +167,7 @@ const sessions = createSessions({
 });
 sessions.onReply(live.listener);
 
-// 网页会话的对话：发消息、排队与补回复、重试、中止。只在开网页服务时有
+// 网页会话与 CLI 会话的对话：发消息、排队与补回复、重试（只有网页）、中止。只在开网页服务时有
 const chats: Chats | undefined =
   config.web && webState && relay
     ? createChats({
@@ -176,9 +176,11 @@ const chats: Chats | undefined =
         fileStore,
         webState,
         live,
-        author: config.web.author,
+        webAuthor: config.web.author,
         logger,
         notify: relay.onChange,
+        summarize,
+        redact,
       })
     : undefined;
 

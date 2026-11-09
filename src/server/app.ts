@@ -28,6 +28,7 @@ export function createApp({
   logger,
   chats,
   fileStore,
+  chatHeartbeat,
 }: {
   /** 监听的端口：访问控制按它核对 Host 与 Origin */
   port: number;
@@ -42,6 +43,8 @@ export function createApp({
   chats?: Chats;
   /** 上传的图片存在这里；不给时没有上传接口 */
   fileStore?: FileStore;
+  /** 对话的流里心跳的间隔（毫秒），默认 25 秒（测试里改短） */
+  chatHeartbeat?: number;
 }) {
   const app = new Hono();
   app.use(requestLog(logger));
@@ -50,7 +53,7 @@ export function createApp({
   app.get('/api/health', (c) => c.json(status()));
   app.get('/api/events', (c) => events.handle(c));
   app.route('/api', apiRoutes({ views, events }));
-  if (chats) app.route('/api', chatRoutes({ chats }));
+  if (chats) app.route('/api', chatRoutes({ chats, heartbeat: chatHeartbeat }));
   if (fileStore) app.route('/api', uploadRoutes({ fileStore, logger }));
   app.all('/api', (c) => c.json({ error: '没有这个接口' }, 404));
   app.all('/api/*', (c) => c.json({ error: '没有这个接口' }, 404));

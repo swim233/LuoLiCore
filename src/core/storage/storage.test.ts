@@ -1771,6 +1771,6 @@ describe('只读读出会话（readConversations）', () => {
     db.exec(version1Schema);
     db.exec('PRAGMA user_version = 1');
     db.close();
-    expect(() => readConversations(old)).toThrow('先用新版本启动一次 CLI 或 bot');
+    expect(() => readConversations(old)).toThrow('先启动一次洛璃服务');
   });
 });

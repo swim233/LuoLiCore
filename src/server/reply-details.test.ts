@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { defineTool, installTools, type ToolCall } from '../core/index.js';
 import { testService } from './test-kit.js';
 import { toolSummaries } from './tool-summary.js';
-import type { LiveEvent, MessagesResponse, TodaySummary } from './types.js';
+import type { ChatChunk, LiveEvent, MessagesResponse, TodaySummary } from './types.js';
 import { toolDurations } from './views.js';
 
 type StreamResult = Awaited<ReturnType<MockLanguageModelV4['doStream']>>;
@@ -185,6 +185,81 @@ describe('回复的细节：思考秒数、工具摘要、工具耗时', () => {
 
     const today = (await (await service.request('/api/today')).json()) as TodaySummary;
     expect(today.conversations).toEqual([{ id, title: '帮我看看这几个网址', replies: 1 }]);
+  });
+});
+
+describe('对话的流里的工具摘要（data-tool-summary）', () => {
+  it('紧挨在 tool-input-available、tool-output-available、tool-output-error 之前；没写、出错的摘要不写', async () => {
+    const model = scripted(
+      [
+        ...call('look', { url: 'https://a.test' }, 'c1'),
+        ...call('broken', { url: 'https://b.test' }, 'c2'),
+        ...call('plain', {}, 'c3'),
+        ...call('oops', {}, 'c4'),
+        finish('tool-calls'),
+      ],
+      [
+        { type: 'text-start', id: 't' },
+        { type: 'text-delta', id: 't', delta: '好了' },
+        { type: 'text-end', id: 't' },
+        finish('stop'),
+      ],
+    );
+    const service = await testService({ model, tools });
+    cleanups.push(() => service.sessions!.close(0, 200));
+    const response = await service.request('/api/chat', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ platform: 'cli', author: 'Bob', text: '看看' }),
+    });
+    const chunks = (await response.text())
+      .split('\n\n')
+      .flatMap((line) =>
+        line.startsWith('data: {') ? [JSON.parse(line.slice(6)) as ChatChunk] : [],
+      );
+    // 只看工具相关的段：摘要写成「summary:调用:文字」，工具段写成「段的种类:调用」
+    const marks = chunks.flatMap((chunk) => {
+      if (chunk.type === 'data-tool-summary') {
+        return [`summary:${chunk.data.toolCallId}:${chunk.data.summary}`];
+      }
+      if (
+        chunk.type === 'tool-input-available' ||
+        chunk.type === 'tool-output-available' ||
+        chunk.type === 'tool-output-error'
+      ) {
+        return [`${chunk.type}:${chunk.toolCallId}`];
+      }
+      return [];
+    });
+    const of = (id: string) =>
+      marks.filter((mark) => mark.split(':')[1] === id || mark.endsWith(`:${id}`));
+
+    expect(of('c1')).toEqual([
+      'summary:c1:https://a.test',
+      'tool-input-available:c1',
+      'summary:c1:https://a.test · 标题',
+      'tool-output-available:c1',
+    ]);
+    expect(of('c2')).toEqual([
+      'summary:c2:坏的 https://b.test',
+      'tool-input-available:c2',
+      'summary:c2:坏的 https://b.test',
+      'tool-output-error:c2',
+    ]);
+    expect(of('c3')).toEqual(['tool-input-available:c3', 'tool-output-available:c3']);
+    expect(of('c4')).toEqual(['tool-input-available:c4', 'tool-output-available:c4']);
+    // 每段摘要的下一段就是它说的那个工具段
+    marks.forEach((mark, index) => {
+      if (!mark.startsWith('summary:')) return;
+      expect(marks[index + 1]!.endsWith(`:${mark.split(':')[1]}`)).toBe(true);
+    });
+    // transient：不进历史
+    const { messages } = (await (
+      await service.request(
+        `/api/conversations/${response.headers.get('x-conversation-id')}/messages`,
+      )
+    ).json()) as MessagesResponse;
+    expect(JSON.stringify(messages)).not.toContain('tool-summary');
   });
 });
 

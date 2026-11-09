@@ -416,7 +416,7 @@ describe('只读', () => {
     const newer = await run(f.dir);
 
     expect(older.code).toBe(1);
-    expect(older.stderr).toContain('先用新版本启动一次 CLI 或 bot');
+    expect(older.stderr).toContain('先启动一次洛璃服务');
     expect(newer.stderr).toContain('比程序新');
   });
 });

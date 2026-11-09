@@ -77,6 +77,19 @@ function restrictImports(files, patterns, message, { allowTypeImports = false } 
   };
 }
 
+// CLI 是洛璃服务的客户端（不带核心）：服务端的代码只许 import type；core 只许纯函数的
+// tool-content（图片说明、工具结果的文字）与类型；不引用其他前端、共用代码、导出脚本、工具、网页。
+// 测试不在此列（连接部分的测试要装一个真的服务）
+const cliForbidden = [
+  '(^|[/#])server(/|$)',
+  '(^|[/#])core(/(?!tool-content(\\.js)?$)|$)',
+  '(^|[/#])telegram(/|$)',
+  '(^|[/#])shared(/|$)',
+  '(^|[/#])requests(/|$)',
+  '(^|[/#])tools(/|$)',
+  '(^|[/#])web(/|$)',
+];
+
 const WEB_MESSAGE =
   '网页面板不得引用服务端、core、前端、工具的代码或 node 模块（import type 可以）';
 
@@ -110,6 +123,20 @@ export default defineConfig(
     // import { type X } from '...' 在 verbatimModuleSyntax 下运行时仍会 import 那个模块，
     // 会把 core 等模块带进浏览器包：只许写 import type { X }
     files: ['src/web/**/*.{ts,tsx}'],
+    rules: { '@typescript-eslint/no-import-type-side-effects': 'error' },
+  },
+  {
+    ...restrictImports(
+      ['src/cli/**/*.ts'],
+      cliForbidden,
+      'CLI 是洛璃服务的客户端：服务端只许 import type，core 只许 tool-content 与类型，不引用其他前端、共用代码、工具或网页',
+      { allowTypeImports: true },
+    ),
+    ignores: ['src/cli/**/*.test.ts'],
+  },
+  {
+    // 同上：CLI 引用服务、core 的类型时只许写 import type { X }，不把它们带进运行时
+    files: ['src/cli/**/*.ts'],
     rules: { '@typescript-eslint/no-import-type-side-effects': 'error' },
   },
 );

@@ -448,44 +448,83 @@ export type LiveEvent =
       lastReply?: LastReply;
     });
 
-// ─── 对话（网页会话）────────────────────────────────────────────────────
+// ─── 对话（网页会话与 CLI 会话）──────────────────────────────────────────
 
 /**
- * POST /api/chat 的请求体：在网页会话里发一条消息，或重试。返回回复的 UI message stream
- * （`createUIMessageStreamResponse`，网页用 `useChat` 接），段的类型是 ChatChunk。
- * - 发消息：conversationId（新会话不带，服务新建并记下标题）、text、files（先用 POST /api/files
- *   上传得到的 luoli-file: 地址，最多 10 个）；text 与 files 至少有一样。消息马上写进历史，
- *   发言人是 LUOLI_WEB_NAME。
+ * POST /api/chat 的请求体：在网页会话或 CLI 会话里发一条消息，或重试（只有网页）。返回回复的
+ * UI message stream（`createUIMessageStreamResponse`，网页用 `useChat` 接，CLI 自己读），段的类型
+ * 是 ChatChunk。
+ * - 发消息：platform（哪种会话：'web' 或 'cli'，不写时是 'web'）、conversationId（新会话不带，服务
+ *   按 platform 新建）、text、files（先用 POST /api/files 上传得到的 luoli-file: 地址，最多 10 个）；
+ *   text 与 files 至少有一样。消息马上写进历史。
+ *   - 网页：发言人是 LUOLI_WEB_NAME，请求不带 author（带了 400）；新会话记下标题（存在 web.db）。
+ *   - CLI：author 必须有（发言人的名字，去掉首尾空白后不能是空的，否则 400）；会话没有标题。
+ *   - 已有的会话，平台必须和 platform 一样（网页不能往 CLI 会话里发，反过来也不行，Telegram 的会话
+ *     都不行），不一样 400。
  *   - 这个会话空闲：开始回复，回复的流就在这个响应里。
  *   - 正在回复（或已有排队的）：消息排队。响应里先有 data-queued，然后等着；当前回复结束后补一次
- *     回复，看到期间所有新消息，补回复的流交给排队的最后一个请求。前面几个排队的请求不带回复，
- *     有下一条排进来时就正常结束。当前回复出错也照样补。
- * - 重试：{ conversationId, retry: true }，不带消息。会话正在回复或有排队时 409。只有上一次回复
+ *     回复，看到期间所有新消息，补回复的流交给排队的最后一个请求。前一个排队的请求在后一个排进来时
+ *     马上以 data-queue-end（merged）结束（一个会话最多只有一个排队的请求连着，省浏览器的连接）。
+ *     当前回复出错也照样补。
+ * - 重试：{ conversationId, retry: true }，不带消息，只给网页会话（CLI 会话 400）。会话正在回复或有排队时 409。只有上一次回复
  *   出错时才能重试：最后一条是出错的助手回复（metadata.failed），或者出错时一步都没写进历史、最后
  *   一条还是那条用户消息（服务这次运行期间记着；重启后、之后又有新消息时不算）。中止的回复、中止时
  *   取消了补回复留下的用户消息都 409。
- * - 请求断开（关页面、useChat 的 stop）：中止它的那次回复（半截写进历史，标记 aborted）；
- *   排队的请求断开时取消它的补回复。要同时中止当前回复并取消补回复，用 POST /api/chat/:id/abort。
- * 每个响应的第一段是 data-conversation（会话 id、这条消息的序号、新会话的标题）；响应头
- * X-Conversation-Id 也是会话 id。出错：400 参数不对或图片不在、404 会话不存在、409 见上、
- * 503 服务正在退出，都是 ErrorResponse
+ * - 请求断开（关页面、useChat 的 stop）：中止它的那次回复（半截写进历史，标记 aborted）。
+ *   接补回复的那个排队请求断开时，按 clientId 看这一轮排队的消息：有别的客户端发的，补回复照常，
+ *   只是流没人接（照常写进历史、「此刻」照常显示）；全是这个客户端的（比如网页关掉了发这几条的
+ *   标签页、只有一条），取消补回复。发起当前回复的请求断开而回复中止、又有排队时，服务先等 300
+ *   毫秒再决定（同一个页面的几个请求是先后几毫秒断开的）。要同时中止当前回复并取消补回复，
+ *   用 POST /api/chat/:id/abort。
+ * 每个响应的第一段是 data-conversation（会话 id、这条消息的序号、新网页会话的标题）；响应头
+ * X-Conversation-Id 也是会话 id。流里的错误文字（error 段、工具出错的 errorText）抹掉了 API key 与
+ * Telegram token（含它们在 JSON 里转义后的写法），写成 ***。
+ * 出错：400 参数不对、图片不在、平台不对，404 会话不存在，409 见上，503 服务正在退出，都是
+ * ErrorResponse
  */
 export type ChatRequest =
-  | { conversationId?: string; text?: string; files?: string[]; retry?: undefined }
+  | {
+      platform?: 'web' | 'cli';
+      conversationId?: string;
+      /** CLI 的发言人名字；网页不带 */
+      author?: string;
+      /**
+       * 客户端 id：每个网页标签页、每个 CLI 进程各一个，随机生成、只在内存里。排队的最后一个请求
+       * 断开时，按它判断这一轮里还有没有别人的消息（见上）；不带时这个请求自己算一个客户端
+       */
+      clientId?: string;
+      text?: string;
+      files?: string[];
+      retry?: undefined;
+    }
   | { conversationId: string; retry: true };
 
-/** 对话的流里服务自己加的数据段（都是 transient，不进消息）：核心的 retry，加上这两种 */
+/** 对话的流里服务自己加的数据段（都是 transient，不进消息）：核心的 retry，加上下面几种 */
 export type ChatData = MessageData & {
   /** 每个响应的第一段 */
   conversation: {
     conversationId: string;
     /** 发出的这条消息的序号；重试时没有 */
     seq?: number;
-    /** 新建的会话：标题（前 16 个字，超出加「…」；只有图片时为「图片」） */
+    /** 新建的网页会话：标题（前 16 个字，超出加「…」；只有图片时为「图片」）。CLI 会话没有 */
     title?: string;
   };
   /** 这条消息在排队：当前回复结束后补一次回复（补回复的流也会接在这个响应里，除非又有新的排进来） */
   queued: { fromSeq: number };
+  /**
+   * 排队的请求不带回复就结束了，写在结束之前：
+   * - merged：后面又排进来一条，补回复交给了后来的请求，那次回复会看到这条；
+   * - answered：正在进行的那次回复其实已经看到了这条（它开始读历史之前就写进去了），不用再补；
+   * - cancelled：补回复被取消了（POST /api/chat/:id/abort、服务退出），这条留在历史里、没有回复。
+   * 自己断开的请求收不到它
+   */
+  'queue-end': { reason: 'merged' | 'answered' | 'cancelled' };
+  /**
+   * 工具调用给界面看的一句话（工具定义里的摘要，算法同「此刻」）：写在这个调用的
+   * tool-input-available、tool-output-available、tool-output-error 各段之前，紧挨着它，
+   * 只管紧接着的那一段（调用时按参数，完成时按参数与结果，出错时按参数）。没有摘要时不写
+   */
+  'tool-summary': { toolCallId: string; summary: string };
 };
 
 /** 对话的流里的消息与段（网页的 useChat 用这个类型） */

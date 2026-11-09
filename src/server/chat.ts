@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import {
   mediaTypeOf,
   type Conversation,
@@ -9,7 +10,8 @@ import {
 import type { Live } from './live.js';
 import type { StorageChange } from './observed-storage.js';
 import type { Sessions } from './sessions.js';
-import type { ChatChunk, ChatRequest } from './types.js';
+import { noSummaries, type Summarize } from './tool-summary.js';
+import type { ChatChunk, ChatData, ChatRequest } from './types.js';
 import type { WebState } from './web-state.js';
 
 /** 一条消息最多几张图 */
@@ -18,6 +20,21 @@ export const maxFiles = 10;
 export const maxTextChars = 50_000;
 /** 网页会话的标题取第一句的前几个字 */
 export const titleChars = 16;
+/**
+ * 回复因为发起它的请求断开而中止、又有排队的补回复时，先等这么久再开始补回复：关掉页面时，
+ * 同一个页面的几个请求是先后几毫秒断开的，等一下，排队的那几个断开了就不用补
+ */
+export const disconnectSettleMs = 300;
+
+/** CLI 发言人的名字最多多少个字符 */
+export const maxAuthorChars = 100;
+
+/** 对话接口收的会话种类（会话的平台） */
+type ChatPlatform = 'web' | 'cli';
+
+/** 平台在提示里的叫法 */
+const platformNames: Record<string, string> = { web: '网页', cli: 'CLI', telegram: 'Telegram' };
+const platformName = (platform: string) => platformNames[platform] ?? platform;
 
 /** 对话接口的结果：回复的流（ChatChunk），或拒绝的原因 */
 export type ChatResult =
@@ -46,18 +63,30 @@ type Running = {
   queueCancelled?: boolean;
 };
 
-/** 排队等补回复：排队的消息从 fromSeq 起，补回复的流交给 sink（排队的最后一个请求） */
-type Pending = { fromSeq: number; sink: Sink };
+/**
+ * 这一轮排队（当前回复结束后补一次回复）：排队的消息从 fromSeq 起；clients 是发了这一轮消息的
+ * 客户端（请求带的 clientId，没带的每个请求算一个）。补回复的流交给 holder：排队的最后一个请求，
+ * 一个会话最多只有它一个排队的请求连着（前面的马上以 merged 结束，省浏览器的连接）。
+ * holder 断开了而这一轮还有别的客户端的消息时，holder 为空：补回复照常，流没人接
+ */
+type Pending = {
+  fromSeq: number;
+  clients: Set<string>;
+  holder?: { client: string; sink: Sink };
+};
 
 type ChatState = { running?: Running; pending?: Pending };
 
 /**
- * 网页会话的对话：发消息、生成中再发（排队，之后补一次回复）、重试、中止。会话管理里每个会话
+ * 网页会话与 CLI 会话的对话：发消息、生成中再发（排队，之后补一次回复）、重试（只有网页）、中止。
+ * 会话管理里每个会话
  * 同一时间只有一个回复，排队与补回复在这里做。每个会话一份状态：
  * - running：进行中的回复（它的流交给发起它的那个请求）；
- * - pending：排队的补回复（流交给排队的最后一个请求）。
+ * - pending：这一轮排队（补回复的流交给排队的最后一个请求；它断开时，这一轮还有别的客户端的消息就
+ *   照常补、流没人接，全是它这个客户端的就取消）。
  * 回复的流由这里读完（不看对面读没读）：对面断开时中止这次回复，接着读到结尾，核心照常收尾、
- * 把中止的回复写进历史；服务退出时进行中的回复被中止，对面收到的是 abort 段，不是连接断了
+ * 把中止的回复写进历史；服务退出时进行中的回复被中止，对面收到的是 abort 段，不是连接断了。
+ * 转发时每个工具段之前加上它的界面摘要（data-tool-summary），错误文字抹掉秘密（redact）
  */
 export function createChats({
   sessions,
@@ -65,9 +94,11 @@ export function createChats({
   fileStore,
   webState,
   live,
-  author,
+  webAuthor,
   logger,
   notify,
+  summarize = noSummaries,
+  redact = (text) => text,
 }: {
   sessions: Pick<Sessions, 'open'>;
   /** 包过一层的存储（写入有通知） */
@@ -75,11 +106,15 @@ export function createChats({
   fileStore: FileStore;
   webState: Pick<WebState, 'setTitle'>;
   live: Pick<Live, 'queue' | 'unqueue'>;
-  /** 发言人的名字（LUOLI_WEB_NAME） */
-  author: string;
+  /** 网页会话里发言人的名字（LUOLI_WEB_NAME）；CLI 的由请求带来 */
+  webAuthor: string;
   logger: Logger;
   /** 记下新会话的标题之后，让会话列表的那一行重新推一次（服务里是 relay.onChange） */
   notify: (change: StorageChange) => void;
+  /** 工具调用给界面看的一句话（与「此刻」同一个） */
+  summarize?: Summarize;
+  /** 抹掉错误文字里的 API key、Telegram token（与「此刻」、日志同一份秘密） */
+  redact?: (text: string) => string;
 }) {
   const states = new Map<string, ChatState>();
   // 回复出错、一步都没写进历史时，记下那时最后一条消息的 id：重试只认这种情况下的用户消息
@@ -117,11 +152,15 @@ export function createChats({
     return page.entries[0]?.message;
   }
 
-  /** 会话要是网页会话；不存在 404，别的平台 400 */
-  async function check(conversationId: string): Promise<ChatResult | undefined> {
+  /** 会话要存在（404），平台要和请求的一样（400）；refusal 是平台不对时的说法 */
+  async function check(
+    conversationId: string,
+    platform: ChatPlatform,
+    refusal: (actual: string) => string,
+  ): Promise<ChatResult | undefined> {
     const overview = await storage.overview(conversationId);
     if (!overview) return refuse(404, '没有这个会话');
-    if (overview.platform !== 'web') return refuse(400, '只能在网页会话里对话');
+    if (overview.platform !== platform) return refuse(400, refusal(overview.platform));
     return undefined;
   }
 
@@ -142,7 +181,7 @@ export function createChats({
       );
       out.write({
         type: 'error',
-        errorText: closing ? '洛璃服务正在退出' : (error as Error).message,
+        errorText: closing ? '洛璃服务正在退出' : redact((error as Error).message),
       });
       out.close();
       state.running = undefined;
@@ -155,6 +194,7 @@ export function createChats({
     out.onCancel = () => abort.abort();
     // 对面在排队时就走了（补回复刚要开始）
     if (!out.open) abort.abort();
+    const relay = relayChunks(summarize, redact);
     const pump = (async () => {
       const reader = stream.getReader();
       let failed = false;
@@ -162,7 +202,11 @@ export function createChats({
         for (let read = await reader.read(); !read.done; read = await reader.read()) {
           if (read.value.type === 'error') failed = true;
           else if (read.value.type === 'abort') failed = false;
-          out.write(read.value as ChatChunk);
+          for (const chunk of relay(read.value)) out.write(chunk);
+        }
+        // 发起它的请求断开了、回复因此中止：排队的补回复先等一下再说（见 disconnectSettleMs）
+        if (!out.open && abort.signal.aborted && states.get(conversationId)?.pending) {
+          await new Promise((resolve) => setTimeout(resolve, disconnectSettleMs));
         }
       } catch (error) {
         // 核心把错误都写成 error 段，这里只会是会话管理那层出错
@@ -186,7 +230,7 @@ export function createChats({
     if (!pending) return;
     state.pending = undefined;
     if (state.running) state.running.queueCancelled = true;
-    pending.sink.close();
+    endHolder(pending, 'cancelled');
     live.unqueue(conversationId);
   }
 
@@ -216,47 +260,78 @@ export function createChats({
       } catch {
         // 读不到就照补
       }
-      // 读历史期间排队可能换了、被取消了
+      // 读历史期间排队可能又进来了、被取消了
       const pending = state.pending;
       if (pending && !closing) {
         state.pending = undefined;
-        if (unseen && pending.sink.open) {
-          logger.info({ conversationId }, 'chat.follow_up');
-          start(conversationId, conversation, pending.sink);
+        if (unseen) {
+          // 补回复的流交给排队的最后一个请求；它断开了（这一轮还有别人的消息）就没人接，由服务读完
+          const sink = pending.holder?.sink.open ? pending.holder.sink : detachedSink();
+          logger.info({ conversationId, detached: !pending.holder }, 'chat.follow_up');
+          start(conversationId, conversation, sink);
           return;
         }
-        pending.sink.close();
+        // 这次回复已经看到了排队的消息
+        endHolder(pending, 'answered');
       }
     }
     state.running = undefined;
     tidy(conversationId);
   }
 
-  /** 生成中又发了一条：排队。之前排队的请求不带回复、正常结束，补回复的流交给这一个 */
-  function queue(conversationId: string, out: Sink, seq: number): void {
+  /**
+   * 生成中又发了一条：排队。补回复的流交给这个请求，前一个排队的请求马上以 merged 结束（一个会话
+   * 最多只有一个排队的请求连着）。这个请求断开时：这一轮里有别的客户端发的消息，补回复照常、流没人接；
+   * 全是这个客户端的（比如网页关掉了发这几条的标签页、只有一条），取消补回复
+   */
+  function queue(conversationId: string, out: Sink, seq: number, client: string): void {
     const state = stateOf(conversationId);
-    const previous = state.pending;
-    const fromSeq = previous?.fromSeq ?? seq;
-    const pending: Pending = { fromSeq, sink: out };
-    state.pending = pending;
+    const pending = (state.pending ??= { fromSeq: seq, clients: new Set() });
+    pending.clients.add(client);
+    const previous = pending.holder;
+    const holder = { client, sink: out };
+    pending.holder = holder;
     out.onCancel = () => {
-      // 排队的请求断开：取消它的补回复（之后又排进来的不受影响）
-      if (state.pending !== pending) return;
+      // 这一轮已经结束（补回复开始了、被取消了）或者它已经被接替时不用管
+      if (state.pending !== pending || pending.holder !== holder) return;
+      if ([...pending.clients].some((other) => other !== client)) {
+        pending.holder = undefined;
+        logger.info({ conversationId }, 'chat.queue_detached');
+        return;
+      }
       cancelQueue(conversationId, state);
       logger.info({ conversationId }, 'chat.queue_cancelled');
     };
-    out.write({ type: 'data-queued', data: { fromSeq }, transient: true });
-    previous?.sink.close();
-    live.queue(conversationId, fromSeq);
+    out.write({ type: 'data-queued', data: { fromSeq: pending.fromSeq }, transient: true });
+    if (previous) {
+      previous.sink.write(queueEnd('merged'));
+      previous.sink.close();
+    }
+    live.queue(conversationId, pending.fromSeq);
   }
 
   return {
-    /** 发一条消息（新会话不带 conversationId）。signal 是请求的中止信号 */
+    /**
+     * 发一条消息（新会话不带 conversationId），会话的种类看 request.platform（不写时是网页）。
+     * signal 是请求的中止信号
+     */
     async send(
       request: Extract<ChatRequest, { retry?: undefined }>,
       signal?: AbortSignal,
     ): Promise<ChatResult> {
       if (closing) return leaving();
+      const platform: ChatPlatform = request.platform ?? 'web';
+      let author: string;
+      if (platform === 'cli') {
+        const name = request.author?.trim();
+        if (!name) return refuse(400, 'CLI 的请求要带发言人的名字（author）');
+        author = name;
+      } else {
+        if (request.author !== undefined) {
+          return refuse(400, '网页的请求不带发言人的名字：网页会话的发言人是 LUOLI_WEB_NAME');
+        }
+        author = webAuthor;
+      }
       const text = request.text?.trim() ? request.text : undefined;
       const files = request.files ?? [];
       if (text === undefined && files.length === 0) {
@@ -270,13 +345,21 @@ export function createChats({
       let conversationId = request.conversationId;
       let title: string | undefined;
       if (conversationId === undefined) {
-        conversationId = await storage.createConversation({ platform: 'web' });
-        title = titleOf(text, files.length);
-        webState.setTitle(conversationId, title);
-        notify({ type: 'conversation', conversationId });
-        logger.info({ conversationId }, 'chat.created');
+        conversationId = await storage.createConversation({ platform });
+        // 网页会话的标题只给面板看，存在 web.db；CLI 会话没有标题
+        if (platform === 'web') {
+          title = titleOf(text, files.length);
+          webState.setTitle(conversationId, title);
+          notify({ type: 'conversation', conversationId });
+        }
+        logger.info({ conversationId, platform }, 'chat.created');
       } else {
-        const rejected = await check(conversationId);
+        const rejected = await check(
+          conversationId,
+          platform,
+          (actual) =>
+            `这是${platformName(actual)}的会话，不能从${platformName(platform)}往里发消息`,
+        );
         if (rejected) return rejected;
       }
       if (closing) return leaving();
@@ -305,22 +388,23 @@ export function createChats({
       });
       const state = stateOf(conversationId);
       const queued = state.running !== undefined;
-      logger.info({ conversationId, files: files.length, queued }, 'chat.send');
+      logger.info({ conversationId, platform, files: files.length, queued }, 'chat.send');
       if (closing) out.close();
-      else if (queued) queue(conversationId, out, seq ?? 0);
+      else if (queued)
+        queue(conversationId, out, seq ?? 0, request.clientId ?? `request:${randomUUID()}`);
       else start(conversationId, conversation, out);
       return { ok: true, conversationId, stream: out.stream };
     },
 
     /**
-     * 重试：对着同样的历史再回复一次。会话在回复或有排队时不行。可以重试的只有两种：
+     * 重试（只有网页会话）：对着同样的历史再回复一次。会话在回复或有排队时不行。可以重试的只有两种：
      * - 最后一条是出错的助手回复（metadata.failed）；
      * - 最后一条是用户消息，而这个会话上一次回复出错、一步都没写进历史，之后也没有新消息
      *   （服务这次运行期间记下的；中止、排队被取消留下的用户消息不算）
      */
     async retry(conversationId: string, signal?: AbortSignal): Promise<ChatResult> {
       if (closing) return leaving();
-      const rejected = await check(conversationId);
+      const rejected = await check(conversationId, 'web', () => '只有网页会话能重试');
       if (rejected) return rejected;
       const busy = () => states.get(conversationId) !== undefined;
       if (busy()) return refuse(409, '正在回复，等它结束再重试');
@@ -439,6 +523,79 @@ function sink(signal?: AbortSignal): Sink {
     { once: true },
   );
   return out;
+}
+
+/** 排队的请求（还连着的话）以 reason 结束 */
+function endHolder(pending: Pending, reason: ChatData['queue-end']['reason']): void {
+  pending.holder?.sink.write(queueEnd(reason));
+  pending.holder?.sink.close();
+}
+
+/** 没有请求接的流（接补回复的请求断开了，补回复照常进行）：写进来的段都丢掉 */
+function detachedSink(): Sink {
+  let open = true;
+  return {
+    stream: new ReadableStream<ChatChunk>(),
+    write() {},
+    close() {
+      open = false;
+    },
+    get open() {
+      return open;
+    },
+    onCancel: () => {},
+  };
+}
+
+/** 排队的请求不带回复就结束时，结束前写的那一段 */
+function queueEnd(reason: ChatData['queue-end']['reason']): ChatChunk {
+  return { type: 'data-queue-end', data: { reason }, transient: true };
+}
+
+/**
+ * 转发一次回复的流时逐段加工（一次回复一份，记着这次的工具调用）：
+ * - 工具的 tool-input-available、tool-output-available、tool-output-error 之前，先写一段
+ *   data-tool-summary（调用时按参数，完成时按参数与结果，出错时按参数）；没有摘要时不写；
+ * - error 段与工具出错的 errorText 抹掉秘密
+ */
+export function relayChunks(
+  summarize: Summarize,
+  redact: (text: string) => string,
+): (chunk: MessageChunk) => ChatChunk[] {
+  const calls = new Map<string, { name: string; input?: unknown }>();
+  const summary = (toolCallId: string, text: string | undefined): ChatChunk[] =>
+    text === undefined
+      ? []
+      : [{ type: 'data-tool-summary', data: { toolCallId, summary: text }, transient: true }];
+  const summarizeCall = (toolCallId: string, output?: unknown) => {
+    const call = calls.get(toolCallId);
+    return call && summarize(call.name, call.input, output);
+  };
+  return (chunk) => {
+    switch (chunk.type) {
+      case 'tool-input-start':
+        calls.set(chunk.toolCallId, { name: chunk.toolName });
+        return [chunk];
+      case 'tool-input-available':
+        calls.set(chunk.toolCallId, { name: chunk.toolName, input: chunk.input });
+        return [...summary(chunk.toolCallId, summarizeCall(chunk.toolCallId)), chunk];
+      case 'tool-input-error':
+        calls.set(chunk.toolCallId, { name: chunk.toolName, input: chunk.input });
+        return [{ ...chunk, errorText: redact(chunk.errorText) }];
+      case 'tool-output-available':
+        if (chunk.preliminary) return [chunk];
+        return [...summary(chunk.toolCallId, summarizeCall(chunk.toolCallId, chunk.output)), chunk];
+      case 'tool-output-error':
+        return [
+          ...summary(chunk.toolCallId, summarizeCall(chunk.toolCallId)),
+          { ...chunk, errorText: redact(chunk.errorText) },
+        ];
+      case 'error':
+        return [{ ...chunk, errorText: redact(chunk.errorText) }];
+      default:
+        return [chunk as ChatChunk];
+    }
+  };
 }
 
 /**

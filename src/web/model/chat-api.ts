@@ -32,6 +32,11 @@ export interface SendMeta {
   conversationId?: string;
 }
 
+/** 这个标签页的客户端 id：模块加载时随机生成一次，只在内存里。服务排队时按它分辨是不是同一个标签页发的 */
+const clientId = Array.from(crypto.getRandomValues(new Uint8Array(12)), (b) =>
+  b.toString(16).padStart(2, '0'),
+).join('');
+
 /** 发给 POST /api/chat 的请求体：只发新消息（会话的正本在服务端）；重试（regenerate）不带消息 */
 export function chatRequestBody(opts: {
   trigger: 'submit-message' | 'regenerate-message';
@@ -47,6 +52,7 @@ export function chatRequestBody(opts: {
   // 文件段的地址是先上传得到的 luoli-file: 引用
   const files = parts.flatMap((p) => (p.type === 'file' ? [p.url] : []));
   return {
+    clientId,
     ...(conversationId ? { conversationId } : {}),
     ...(text ? { text } : {}),
     ...(files.length ? { files } : {}),

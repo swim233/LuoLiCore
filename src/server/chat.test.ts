@@ -1,4 +1,4 @@
-import { APICallError } from 'ai';
+import { APICallError, DefaultChatTransport } from 'ai';
 import { MockLanguageModelV4 } from 'ai/test';
 import { afterEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
@@ -14,6 +14,7 @@ import { pngBytes, recordingLogger, testService } from './test-kit.js';
 import type {
   ApiMessage,
   ChatChunk,
+  ChatMessage,
   ConversationsResponse,
   ErrorResponse,
   LiveEvent,
@@ -301,7 +302,7 @@ describe('网页会话：发消息', () => {
     expect(await errorOf({ conversationId: 'nope', text: '在吗' })).toEqual([404, '没有这个会话']);
     expect(await errorOf({ conversationId: group, text: '在吗' })).toEqual([
       400,
-      '只能在网页会话里对话',
+      '这是Telegram的会话，不能从网页往里发消息',
     ]);
     expect(await errorOf({ text: '   ' })).toEqual([400, '消息是空的：要有文字或图片']);
     expect(await errorOf({ text: '看图', files: [image.url, missing] })).toEqual([
@@ -402,6 +403,392 @@ describe('网页会话：发消息', () => {
   });
 });
 
+describe('CLI 会话', () => {
+  it('新建：平台是 cli，发言人是请求里的名字，没有标题（data-conversation 不带，列表里也没有）', async () => {
+    const { chat, history, request, webState } = await setup(scripted(answer('你好，Bob')));
+    const sent = await chat({ platform: 'cli', author: '  Bob ', text: '在吗' });
+    await sent.end();
+    const id = sent.response.headers.get('x-conversation-id')!;
+
+    expect(sent.chunks[0]).toEqual({
+      type: 'data-conversation',
+      data: { conversationId: id, seq: 1 },
+      transient: true,
+    });
+    expect(sent.text()).toBe('你好，Bob');
+    const messages = await history(id);
+    expect(messages[0]!.message.metadata?.author).toEqual({ name: 'Bob' });
+    const { conversations } = (await (
+      await request('/api/conversations')
+    ).json()) as ConversationsResponse;
+    expect(conversations).toEqual([
+      expect.objectContaining({ id, platform: 'cli', kind: 'cli', messages: 2 }),
+    ]);
+    expect(conversations[0]).not.toHaveProperty('title');
+    expect(webState.title(id)).toBeUndefined();
+  });
+
+  it('接着发：同一个 CLI 会话，名字可以每次不同', async () => {
+    const model = scripted(answer('一'), answer('二'));
+    const { chat, history } = await setup(model);
+    const first = await chat({ platform: 'cli', author: 'Bob', text: '第一句' });
+    await first.end();
+    const id = first.response.headers.get('x-conversation-id')!;
+    const second = await chat({
+      platform: 'cli',
+      conversationId: id,
+      author: 'Carol',
+      text: '第二句',
+    });
+    await second.end();
+
+    expect(second.text()).toBe('二');
+    expect(
+      (await history(id)).map((m) => [m.message.metadata?.author?.name, textOf(m.message)]),
+    ).toEqual([
+      ['Bob', '第一句'],
+      [undefined, '一'],
+      ['Carol', '第二句'],
+      [undefined, '二'],
+    ]);
+    expect(promptOf(model, 1)).toContain('第一句');
+  });
+
+  it('平台不对 400：网页不能往 CLI 会话里发，CLI 不能往网页、Telegram 的会话里发；CLI 会话不能重试', async () => {
+    const storage = createMemoryStorage();
+    const group = await storage.createConversation({
+      platform: 'telegram',
+      platformConversationId: '-1001',
+      title: '读书会',
+    });
+    const { chat, post } = await setup(scripted(answer('一'), answer('二')), { storage });
+    const errorOf = async (body: unknown) => {
+      const response = await post('/api/chat', body);
+      return [response.status, ((await response.json()) as ErrorResponse).error];
+    };
+    const cli = await chat({ platform: 'cli', author: 'Bob', text: '在吗' });
+    await cli.end();
+    const cliId = cli.response.headers.get('x-conversation-id')!;
+    const web = await chat({ text: '在吗' });
+    await web.end();
+    const webId = web.response.headers.get('x-conversation-id')!;
+
+    expect(await errorOf({ conversationId: cliId, text: '在吗' })).toEqual([
+      400,
+      '这是CLI的会话，不能从网页往里发消息',
+    ]);
+    expect(await errorOf({ platform: 'web', conversationId: cliId, text: '在吗' })).toEqual([
+      400,
+      '这是CLI的会话，不能从网页往里发消息',
+    ]);
+    expect(
+      await errorOf({ platform: 'cli', author: 'Bob', conversationId: webId, text: '在吗' }),
+    ).toEqual([400, '这是网页的会话，不能从CLI往里发消息']);
+    expect(
+      await errorOf({ platform: 'cli', author: 'Bob', conversationId: group, text: '在吗' }),
+    ).toEqual([400, '这是Telegram的会话，不能从CLI往里发消息']);
+    expect(await errorOf({ conversationId: cliId, retry: true })).toEqual([
+      400,
+      '只有网页会话能重试',
+    ]);
+    expect((await errorOf({ platform: 'telnet', text: '在吗' }))[0]).toBe(400);
+  });
+
+  it('名字：CLI 的请求缺名字、名字是空白 400；网页的请求带名字 400；都不建会话', async () => {
+    const { post, request } = await setup(scripted());
+    const errorOf = async (body: unknown) => {
+      const response = await post('/api/chat', body);
+      return [response.status, ((await response.json()) as ErrorResponse).error];
+    };
+
+    expect(await errorOf({ platform: 'cli', text: '在吗' })).toEqual([
+      400,
+      'CLI 的请求要带发言人的名字（author）',
+    ]);
+    expect(await errorOf({ platform: 'cli', author: '   ', text: '在吗' })).toEqual([
+      400,
+      'CLI 的请求要带发言人的名字（author）',
+    ]);
+    expect(await errorOf({ author: 'Bob', text: '在吗' })).toEqual([
+      400,
+      '网页的请求不带发言人的名字：网页会话的发言人是 LUOLI_WEB_NAME',
+    ]);
+    expect((await errorOf({ platform: 'cli', author: 'x'.repeat(101), text: '在吗' }))[0]).toBe(
+      400,
+    );
+    const { conversations } = (await (
+      await request('/api/conversations')
+    ).json()) as ConversationsResponse;
+    expect(conversations).toEqual([]);
+  });
+
+  it('两个终端同一个会话：后发的排队；再排进来一条时，前一个马上以 merged 结束；补回复给最后一个，看到全部', async () => {
+    const hold = gate();
+    const model = scripted(
+      [...text('t', '说到'), { gate: hold.promise }, finish()],
+      answer('都看到了'),
+    );
+    const { chat, chats } = await setup(model);
+    const first = await chat({ platform: 'cli', author: 'Bob', clientId: 'p1', text: '第一句' });
+    await first.until((chunks) => chunks.some((chunk) => chunk.type === 'text-end'));
+    const id = first.response.headers.get('x-conversation-id')!;
+    const send = (clientId: string, text: string) =>
+      chat({ platform: 'cli', conversationId: id, author: 'Carol', clientId, text });
+    const second = await send('p2', '第二句');
+    await second.until((chunks) => chunks.some((chunk) => chunk.type === 'data-queued'));
+    const third = await send('p3', '第三句');
+    await third.until((chunks) => chunks.some((chunk) => chunk.type === 'data-queued'));
+    // 前一个马上结束：一个会话最多只有一个排队的请求连着
+    await second.end();
+    expect(second.chunks.slice(1)).toEqual([
+      { type: 'data-queued', data: { fromSeq: 3 }, transient: true },
+      { type: 'data-queue-end', data: { reason: 'merged' }, transient: true },
+    ]);
+
+    hold.open();
+    await first.end();
+    await third.end();
+    await waitUntil(() => !chats!.busy(id));
+    expect(first.text()).toBe('说到');
+    expect(third.text()).toBe('都看到了');
+    expect(promptOf(model, 1)).toContain('第二句');
+    expect(promptOf(model, 1)).toContain('第三句');
+  });
+
+  it('不同的客户端：接补回复的最后一个断开，这一轮还有别人的消息，补回复照常（流没人接），看到全部', async () => {
+    const hold = gate();
+    const model = scripted(
+      [...text('t', '说到'), { gate: hold.promise }, finish()],
+      answer('都看到了'),
+    );
+    const { chat, chats, history, live } = await setup(model);
+    const first = await chat({ platform: 'cli', author: 'A', clientId: 'a', text: '第一句' });
+    await first.until((chunks) => chunks.some((chunk) => chunk.type === 'text-end'));
+    const id = first.response.headers.get('x-conversation-id')!;
+    const queue = async (author: string, text: string) => {
+      const sent = await chat({
+        platform: 'cli',
+        conversationId: id,
+        author,
+        clientId: author,
+        text,
+      });
+      await sent.until((chunks) => chunks.some((chunk) => chunk.type === 'data-queued'));
+      return sent;
+    };
+    const b = await queue('B', '第二句');
+    const c = await queue('C', '第三句');
+    const d = await queue('D', '第四句');
+    await b.end();
+    await c.end();
+    await d.reader.cancel();
+    await sleep(20);
+    // 补回复没被取消：「此刻」里这条还记着排队
+    expect(live.snapshot().replies[0]).toMatchObject({ queuedFrom: 3 });
+
+    hold.open();
+    await first.end();
+    await waitUntil(() => model.doStreamCalls.length === 2);
+    await waitUntil(() => !chats!.busy(id));
+    for (const merged of [b, c]) {
+      expect(merged.chunks.at(-1)).toMatchObject({ data: { reason: 'merged' } });
+    }
+    const prompt = promptOf(model, 1);
+    for (const line of ['第二句', '第三句', '第四句']) expect(prompt).toContain(line);
+    expect((await history(id)).map((m) => textOf(m.message))).toEqual([
+      '第一句',
+      '说到',
+      '第二句',
+      '第三句',
+      '第四句',
+      '都看到了',
+    ]);
+    expect(live.snapshot().replies).toEqual([]);
+  });
+
+  it('同一个客户端排了几条后断开（网页关掉了发这几条的标签页）：取消补回复，推 dequeue', async () => {
+    const hold = gate();
+    const model = scripted([...text('t', '说到'), { gate: hold.promise }, finish()]);
+    const { chat, chats, live, history } = await setup(model);
+    const first = await chat({ clientId: 'tab', text: '第一句' });
+    await first.until((chunks) => chunks.some((chunk) => chunk.type === 'text-end'));
+    const id = first.response.headers.get('x-conversation-id')!;
+    const b = await chat({ conversationId: id, clientId: 'tab', text: '第二句' });
+    await b.until((chunks) => chunks.some((chunk) => chunk.type === 'data-queued'));
+    const c = await chat({ conversationId: id, clientId: 'tab', text: '第三句' });
+    await c.until((chunks) => chunks.some((chunk) => chunk.type === 'data-queued'));
+    await b.end();
+    await c.reader.cancel();
+    await waitUntil(() => live.snapshot().replies[0]?.queuedFrom === undefined);
+
+    hold.open();
+    await first.end();
+    await waitUntil(() => !chats!.busy(id));
+    expect(model.doStreamCalls).toHaveLength(1);
+    expect((await history(id)).map((m) => textOf(m.message))).toEqual([
+      '第一句',
+      '说到',
+      '第二句',
+      '第三句',
+    ]);
+  });
+
+  it('没带 clientId 的请求各算一个客户端：最后一个断开，前面还有别的请求的消息，补回复照常', async () => {
+    const hold = gate();
+    const model = scripted(
+      [...text('t', '说到'), { gate: hold.promise }, finish()],
+      answer('补上了'),
+    );
+    const { chat, chats } = await setup(model);
+    const first = await chat({ text: '第一句' });
+    await first.until((chunks) => chunks.some((chunk) => chunk.type === 'text-end'));
+    const id = first.response.headers.get('x-conversation-id')!;
+    const b = await chat({ conversationId: id, text: '第二句' });
+    await b.until((chunks) => chunks.some((chunk) => chunk.type === 'data-queued'));
+    const c = await chat({ conversationId: id, text: '第三句' });
+    await c.until((chunks) => chunks.some((chunk) => chunk.type === 'data-queued'));
+    await c.reader.cancel();
+    await sleep(20);
+
+    hold.open();
+    await first.end();
+    await waitUntil(() => model.doStreamCalls.length === 2);
+    await waitUntil(() => !chats!.busy(id));
+    expect(promptOf(model, 1)).toContain('第三句');
+  });
+
+  it('关掉页面：当前回复的请求先断开，排队的几毫秒后也断开：不补回复，模型只请求一次', async () => {
+    const hold = gate();
+    const model = scripted(
+      [...text('t', '说到'), { gate: hold.promise }, finish()],
+      answer('不该有'),
+    );
+    const { chat, chats, history } = await setup(model);
+    const first = await chat({ clientId: 'tab', text: '第一句' });
+    await first.until((chunks) => chunks.some((chunk) => chunk.type === 'text-end'));
+    const id = first.response.headers.get('x-conversation-id')!;
+    const b = await chat({ conversationId: id, clientId: 'tab', text: '第二句' });
+    await b.until((chunks) => chunks.some((chunk) => chunk.type === 'data-queued'));
+    const c = await chat({ conversationId: id, clientId: 'tab', text: '第三句' });
+    await c.until((chunks) => chunks.some((chunk) => chunk.type === 'data-queued'));
+
+    await first.reader.cancel();
+    await sleep(15);
+    await c.reader.cancel();
+    await waitUntil(() => !chats!.busy(id), 3000);
+    hold.open();
+
+    expect(model.doStreamCalls).toHaveLength(1);
+    const messages = await history(id);
+    expect(messages.map((m) => textOf(m.message))).toEqual(['第一句', '说到', '第二句', '第三句']);
+    expect(messages[1]!.message.metadata?.aborted).toBe(true);
+  });
+
+  it('当前回复的请求断开、排队的还连着：稍等一下，补回复照常', async () => {
+    const hold = gate();
+    const model = scripted(
+      [...text('t', '说到'), { gate: hold.promise }, finish()],
+      answer('补上了'),
+    );
+    const { chat, chats } = await setup(model);
+    const first = await chat({ platform: 'cli', author: 'A', clientId: 'a', text: '第一句' });
+    await first.until((chunks) => chunks.some((chunk) => chunk.type === 'text-end'));
+    const id = first.response.headers.get('x-conversation-id')!;
+    const b = await chat({
+      platform: 'cli',
+      conversationId: id,
+      author: 'B',
+      clientId: 'b',
+      text: '第二句',
+    });
+    await b.until((chunks) => chunks.some((chunk) => chunk.type === 'data-queued'));
+
+    await first.reader.cancel();
+    await b.end(3000);
+    await waitUntil(() => !chats!.busy(id));
+    hold.open();
+    expect(b.text()).toBe('补上了');
+    expect(model.doStreamCalls).toHaveLength(2);
+  });
+
+  it('只有一条在排队时断开：照旧取消补回复', async () => {
+    const hold = gate();
+    const model = scripted([...text('t', '说到'), { gate: hold.promise }, finish()]);
+    const { chat, chats, live } = await setup(model);
+    const first = await chat({ platform: 'cli', author: 'A', text: '第一句' });
+    await first.until((chunks) => chunks.some((chunk) => chunk.type === 'text-end'));
+    const id = first.response.headers.get('x-conversation-id')!;
+    const only = await chat({ platform: 'cli', conversationId: id, author: 'B', text: '第二句' });
+    await only.until((chunks) => chunks.some((chunk) => chunk.type === 'data-queued'));
+    await only.reader.cancel();
+    await waitUntil(() => live.snapshot().replies[0]?.queuedFrom === undefined);
+
+    hold.open();
+    await first.end();
+    await waitUntil(() => !chats!.busy(id));
+    expect(model.doStreamCalls).toHaveLength(1);
+  });
+
+  it('排队时被中止（POST abort）：排队的请求以 cancelled 结束', async () => {
+    const hold = gate();
+    const model = scripted([...text('t', '说到'), { gate: hold.promise }, finish()]);
+    const { chat, post, chats } = await setup(model);
+    const first = await chat({ platform: 'cli', author: 'Bob', text: '第一句' });
+    await first.until((chunks) => chunks.some((chunk) => chunk.type === 'text-end'));
+    const id = first.response.headers.get('x-conversation-id')!;
+    const queued = await chat({ platform: 'cli', conversationId: id, author: 'Bob', text: '二' });
+    await queued.until((chunks) => chunks.some((chunk) => chunk.type === 'data-queued'));
+
+    await post(`/api/chat/${id}/abort`, {});
+    await first.end();
+    await queued.end();
+    await waitUntil(() => !chats!.busy(id));
+
+    expect(first.types()).toContain('abort');
+    expect(queued.types()).toEqual(['data-conversation', 'data-queued', 'data-queue-end']);
+    expect(queued.chunks.at(-1)).toEqual({
+      type: 'data-queue-end',
+      data: { reason: 'cancelled' },
+      transient: true,
+    });
+    hold.open();
+  });
+
+  it('流里的错误文字抹掉 API key 与 Telegram token（含 JSON 转义的写法），「此刻」里的也是', async () => {
+    const key = 'sk-test/secret"42';
+    const token = '123456:TOKEN-abc';
+    const model = scripted(
+      Object.assign(httpError(400), {
+        message: `bad key ${key} / ${JSON.stringify(key)} / token ${token}`,
+      }),
+    );
+    const { chat, request } = await setup(model, { secrets: [key, token] });
+    // 「此刻」：在 SSE 上连一个面板，收下 live 事件的原文
+    const events = (await request('/api/events')).body!.getReader();
+    cleanups.push(() => events.cancel().catch(() => {}));
+    let seen = '';
+    const decoder = new TextDecoder();
+    void (async () => {
+      for (let read = await events.read(); !read.done; read = await events.read()) {
+        seen += decoder.decode(read.value, { stream: true });
+      }
+    })().catch(() => {});
+    const sent = await chat({ platform: 'cli', author: 'Bob', text: '在吗' });
+    await sent.end();
+    await waitUntil(() => seen.includes('"type":"end"'), 3000, 'live 的 end');
+
+    const error = sent.chunks.find((chunk) => chunk.type === 'error');
+    expect(error).toBeDefined();
+    const errorText = (error as { errorText: string }).errorText;
+    expect(errorText).toContain('***');
+    expect(errorText).not.toContain('secret');
+    expect(errorText).not.toContain('TOKEN-abc');
+    expect(seen).toContain('***');
+    expect(seen).not.toContain('secret');
+    expect(seen).not.toContain('TOKEN-abc');
+  });
+});
+
 describe('网页会话：生成中再发', () => {
   it('排队：消息马上写进历史；只补一次回复，看到期间所有新消息，流交给最后一个请求', async () => {
     const hold = gate();
@@ -426,9 +813,10 @@ describe('网页会话：生成中再发', () => {
     ]);
     const third = await chat({ conversationId: id, text: '补充二' });
     await third.until((chunks) => chunks.some((chunk) => chunk.type === 'data-queued'));
-    // 前一个排队的请求不带回复，正常结束；排队的起点不变
+    // 前一个排队的请求不带回复，马上以 merged 结束；排队的起点不变
     await second.end();
-    expect(second.types()).toEqual(['data-conversation', 'data-queued']);
+    expect(second.types()).toEqual(['data-conversation', 'data-queued', 'data-queue-end']);
+    expect(second.chunks.at(-1)).toMatchObject({ data: { reason: 'merged' } });
     expect(third.chunks[1]).toEqual({ type: 'data-queued', data: { fromSeq: 3 }, transient: true });
     expect((await history(id)).map((m) => textOf(m.message))).toEqual([
       '第一句',
@@ -494,7 +882,8 @@ describe('网页会话：生成中再发', () => {
     await waitUntil(() => !chats!.busy(id));
 
     expect(first.types()).toContain('abort');
-    expect(second.types()).toEqual(['data-conversation', 'data-queued']);
+    expect(second.types()).toEqual(['data-conversation', 'data-queued', 'data-queue-end']);
+    expect(second.chunks.at(-1)).toMatchObject({ data: { reason: 'cancelled' } });
     expect(model.doStreamCalls).toHaveLength(1);
     expect((await history(id)).map((m) => [m.role, textOf(m.message)])).toEqual([
       ['user', '第一句'],
@@ -753,7 +1142,7 @@ describe('网页会话：补回复开始不了', () => {
       fileStore: service.fileStore,
       webState: service.webState,
       live: service.live,
-      author: 'Alice',
+      webAuthor: 'Alice',
       logger: recordingLogger().logger,
       notify: service.relay.onChange,
     });
@@ -828,7 +1217,8 @@ describe('网页会话：退出', () => {
 
     chats!.close();
     await second.end();
-    expect(second.types()).toEqual(['data-conversation', 'data-queued']);
+    expect(second.types()).toEqual(['data-conversation', 'data-queued', 'data-queue-end']);
+    expect(second.chunks.at(-1)).toMatchObject({ data: { reason: 'cancelled' } });
     await sessions!.close(0, 500);
     await first.end();
     expect(model.doStreamCalls).toHaveLength(1);
@@ -846,5 +1236,74 @@ describe('网页会话的标题', () => {
     expect(titleOf('  早上\n\n好  ', 1)).toBe('早上 好');
     expect(titleOf(undefined, 2)).toBe('图片');
     expect(titleOf('😀'.repeat(20), 0)).toBe(`${'😀'.repeat(16)}…`);
+  });
+});
+
+describe('对话的流里的心跳', () => {
+  it('隔一段时间插一行注释 `: ping`：排队等着时也有；网页用的 DefaultChatTransport 照常解析，看不到它', async () => {
+    const hold = gate();
+    const model = scripted([
+      ...text('t', '说到'),
+      { gate: hold.promise },
+      ...text('u', '完'),
+      finish(),
+    ]);
+    const { request, chats } = await setup(model, { heartbeat: 20 });
+    // 网页的接法：DefaultChatTransport，只发新消息
+    const transport = new DefaultChatTransport<ChatMessage>({
+      api: '/api/chat',
+      fetch: async (input, init) => request(String(input), init),
+      prepareSendMessagesRequest: () => ({ body: { text: '在吗' } }),
+    });
+    const chunks: ChatChunk[] = [];
+    const reading = (async () => {
+      const stream = await transport.sendMessages({
+        chatId: 'c',
+        messages: [],
+        abortSignal: undefined,
+        trigger: 'submit-message',
+        messageId: undefined,
+      });
+      for await (const chunk of stream) chunks.push(chunk as ChatChunk);
+    })();
+    await waitUntil(() => chunks.some((chunk) => chunk.type === 'text-end'));
+    const id = (chunks[0] as { data: { conversationId: string } }).data.conversationId;
+    // 同时排一条，看原始的字节里有心跳
+    const raw = await request('/api/chat', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ conversationId: id, text: '排队的' }),
+    });
+    const reader = raw.body!.getReader();
+    cleanups.push(() => reader.cancel().catch(() => {}));
+    let rawText = '';
+    const decoder = new TextDecoder();
+    while (!rawText.includes(': ping')) {
+      const read = await reader.read();
+      if (read.done) break;
+      rawText += decoder.decode(read.value, { stream: true });
+    }
+    expect(rawText).toContain('"type":"data-queued"');
+    expect(rawText).toContain('\n\n: ping\n\n');
+    // 排队的这条断开（只有它一条，补回复取消）；接着等几个心跳，让 transport 那边也收到
+    await reader.cancel();
+    await sleep(80);
+    hold.open();
+    await reading;
+    await waitUntil(() => !chats!.busy(id));
+
+    expect(chunks.map((chunk) => chunk.type)).toEqual([
+      'data-conversation',
+      'start',
+      'start-step',
+      'text-start',
+      'text-delta',
+      'text-end',
+      'text-start',
+      'text-delta',
+      'text-end',
+      'finish-step',
+      'finish',
+    ]);
   });
 });

@@ -3,7 +3,9 @@ import { createUIMessageStreamResponse } from 'ai';
 import { Hono, type Context } from 'hono';
 import { z } from 'zod';
 import { limitBody } from './body-limit.js';
-import { maxFiles, maxTextChars, type Chats } from './chat.js';
+import { heartbeatMs } from './events.js';
+import { withHeartbeat } from './heartbeat.js';
+import { maxAuthorChars, maxFiles, maxTextChars, type Chats } from './chat.js';
 import type { Events } from './events.js';
 import type {
   AbortResponse,
@@ -17,19 +19,29 @@ import type {
 import { defaultMessages, maxMessages, type Views } from './views.js';
 
 /**
- * 对话的接口（挂在 /api 下，经过访问控制），见 types.ts 的 ChatRequest：
+ * 对话的接口（挂在 /api 下，经过访问控制），网页会话与 CLI 会话共用，见 types.ts 的 ChatRequest：
  * - POST /chat  ChatRequest → 回复的 UI message stream（ChatChunk），响应头 X-Conversation-Id
  * - POST /chat/:id/abort  {} → AbortResponse
- * 请求体最多 1 MB；参数不对 400
+ * 请求体最多 1 MB；参数不对 400。回复的流每 heartbeat 毫秒（默认 25 秒，与 SSE 相同）插一行注释
+ * `: ping`，排队等别人的回复时也有数据，客户端可以设一个有限的读取超时
  */
-export function chatRoutes({ chats }: { chats: Chats }) {
+export function chatRoutes({
+  chats,
+  heartbeat = heartbeatMs,
+}: {
+  chats: Chats;
+  heartbeat?: number;
+}) {
   const conversationId = z.string().min(1).max(200);
   // 先上传得到的文件存储地址
   const fileRef = z.string().regex(/^luoli-file:[0-9a-f]{64}\.(jpg|png|webp|gif)$/);
   const chatBody = z.union([
     z.object({ conversationId, retry: z.literal(true) }),
     z.object({
+      platform: z.enum(['web', 'cli']).optional(),
       conversationId: conversationId.optional(),
+      author: z.string().max(maxAuthorChars).optional(),
+      clientId: z.string().min(1).max(100).optional(),
       text: z.string().max(maxTextChars).optional(),
       files: z.array(fileRef).max(maxFiles).optional(),
       retry: z.undefined().optional(),
@@ -50,9 +62,13 @@ export function chatRoutes({ chats }: { chats: Chats }) {
             ? await chats.retry(body.conversationId, signal)
             : await chats.send(body, signal);
         if (!result.ok) return c.json<ErrorResponse>({ error: result.error }, result.status);
-        return createUIMessageStreamResponse({
+        const response = createUIMessageStreamResponse({
           stream: result.stream,
           headers: { 'X-Conversation-Id': result.conversationId },
+        });
+        return new Response(withHeartbeat(response.body!, heartbeat), {
+          status: response.status,
+          headers: response.headers,
         });
       },
     )

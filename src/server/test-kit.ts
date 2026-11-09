@@ -1,6 +1,7 @@
 import {
   createMemoryFileStore,
   createMemoryStorage,
+  createRedactor,
   type FileStore,
   type InstalledTool,
   type Logger,
@@ -86,6 +87,7 @@ export async function testService({
   tools = [],
   maxRetries = 0,
   author = 'Alice',
+  secrets = [],
 }: {
   storage?: Storage;
   fileStore?: FileStore;
@@ -107,6 +109,8 @@ export async function testService({
   maxRetries?: number;
   /** 网页会话里发言人的名字 */
   author?: string;
+  /** 要从错误文字里抹掉的秘密（服务里是 API key 与 Telegram token） */
+  secrets?: string[];
 } = {}) {
   const { logger, entries } = recordingLogger();
   const webState = await openWebState(':memory:', async () =>
@@ -115,6 +119,7 @@ export async function testService({
     ),
   );
   const summarize = toolSummaries(tools);
+  const redact = createRedactor(secrets);
   const views = createViews({ storage, fileStore, webState, timeZone, now, summarize });
   // events 的 hello 要用 live，live 推事件要用 events：互相在用到时才取
   const lastReply = await storage.lastReply();
@@ -130,6 +135,7 @@ export async function testService({
     lastReply,
     delayMs,
     summarize,
+    redact,
   });
   const service = createStatus({
     startedAt: new Date('2026-11-08T00:00:00.000Z'),
@@ -160,9 +166,11 @@ export async function testService({
       fileStore,
       webState,
       live,
-      author,
+      webAuthor: author,
       logger,
       notify: relay.onChange,
+      summarize,
+      redact,
     });
   }
   const app = createApp({
@@ -174,6 +182,7 @@ export async function testService({
     logger,
     chats,
     fileStore,
+    chatHeartbeat: heartbeat,
   });
   const request = (path: string, init: RequestInit = {}) =>
     app.request(path, { ...init, headers: { host: testHost, ...init.headers } });

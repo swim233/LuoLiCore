@@ -1,24 +1,13 @@
-import { mkdirSync } from 'node:fs';
 import { userInfo } from 'node:os';
-import { dirname } from 'node:path';
 import { createInterface } from 'node:readline/promises';
-import {
-  createConversation,
-  createModel,
-  createPromptFiles,
-  openFileStore,
-  openSqliteStorage,
-  type Storage,
-  type Usage,
-} from '../core/index.js';
+import { createClient, ServiceUnreachable, unreachableText } from './client.js';
 import { parseConfig, usage } from './config.js';
-import { createLogger, jsonEscapedForms, logFile } from '../shared/logger.js';
-import { openRequestLogging, type RequestLogging } from '../shared/request-log.js';
-import { setupTools } from '../shared/tools.js';
-import { tools as toolList } from '../tools/index.js';
-import { notice } from './notice.js';
-import { printReply } from './print-reply.js';
+import { errorLine, flushed, notice } from './notice.js';
+import { createChatSession } from './session.js';
 import { runTerminal } from './terminal.js';
+
+// CLI 是洛璃服务的客户端（ADR-0009）：经服务的 HTTP 接口发消息、收流式回复。
+// 不带核心，不读数据库、提示词与 key，不写日志与请求记录，这些都由服务做
 
 const parsed = parseConfig(process.argv.slice(2), process.env);
 if (!parsed.ok) {
@@ -26,142 +15,91 @@ if (!parsed.ok) {
   if (parsed.showUsage) console.error(usage);
   process.exit(1);
 }
-const {
-  model,
-  maxRetries,
-  timeouts,
-  maxSteps,
-  toolHistoryChars,
-  segments,
-  resume,
-  dbPath,
-  filesDir,
-  promptPath,
-  requestLog,
-} = parsed.config;
-const name = parsed.config.name ?? userInfo().username;
+const { port, resume } = parsed.config;
+const name = parsed.config.name ?? systemUserName();
 
-const logger = createLogger(model);
-// 人设与内置提示文件：启动时读一遍并检查，有错就退出；之后每次回复、每次摘要开始时重读
-const prompts = createPromptFiles({ personaPath: promptPath, logger });
-try {
-  await prompts.load();
-} catch (error) {
-  console.error((error as Error).message);
-  process.exit(1);
+const client = createClient({ port });
+
+/**
+ * 结束程序：关掉连接（最多等 1 秒），等 stdout、stderr 把输出都写出去（管道里的要等下游读走），
+ * 再明确退出，不让残留的连接或计时器拖住进程（实测服务冻住又恢复之后，偶尔按 Ctrl+D 后进程没有
+ * 马上结束）
+ */
+let exiting: Promise<never> | undefined;
+function exit(code: number): Promise<never> {
+  exiting ??= (async () => {
+    await client.close();
+    await Promise.all([flushed(process.stdout), flushed(process.stderr)]);
+    process.exit(code);
+  })();
+  return exiting;
 }
 
-// 工具清单：有误时退出；缺环境变量的不装，各提示一行
-const installed = setupTools(toolList, process.env, { logger, report: notice });
-if (!installed.ok) {
-  console.error(installed.error);
-  process.exit(1);
-}
-
-let storage: Storage;
-try {
-  mkdirSync(dirname(dbPath), { recursive: true });
-  storage = openSqliteStorage(dbPath);
-} catch (error) {
-  console.error(`打开数据库失败（${dbPath}）：${(error as Error).message}`);
-  process.exit(1);
-}
-
-// CLI 本身不发图片；文件目录照样交给核心（工具结果里的图片也存在这里），不写入时不会创建
-const fileStore = openFileStore(filesDir);
-
-// 请求记录：每次发给模型的请求原样记下（ADR-0008）；打不开时退出
-let requestLogging: RequestLogging;
-try {
-  requestLogging = openRequestLogging({
-    config: requestLog,
-    fileStore,
-    logger,
-    secrets: [model.apiKey],
-  });
-} catch (error) {
-  console.error((error as Error).message);
-  storage.close();
-  process.exit(1);
-}
-
-const conversationId = await chooseConversation(storage, resume);
-const conversation = createConversation({
-  model: createModel({ ...model, fetch: requestLogging.fetch }),
-  prompts,
-  store: await storage.openConversation(conversationId),
-  fileStore,
-  logger,
-  maxRetries,
-  timeouts,
-  maxSteps,
-  toolHistoryChars,
-  tools: installed.tools,
-  segments,
-  conversationId,
+// 下游不读了（管道的另一头关掉了：退出了 less、head 读够了）：像收到 SIGPIPE 的程序一样马上结束，
+// 退出码 0，不再处理后面的行。不先关连接：进程结束时连接随之断开，服务把断开当作中止，进行中的回复
+// 不会接着生成；先关连接的话，还在读的那一句会以为服务断了、打出「无法连接」。stderr 写不出去就算了
+process.stdout.on('error', (error: NodeJS.ErrnoException) => {
+  void flushed(process.stderr).then(() => process.exit(error.code === 'EPIPE' ? 0 : 1));
 });
-// CLI 没有不变的用户 id，发言人只有名字
-const author = { name };
+process.stderr.on('error', () => {});
+
+/** 连不上服务：打印提示，退出码 1 */
+async function unreachable(): Promise<never> {
+  errorLine(unreachableText(client.address));
+  return exit(1);
+}
+
+// 先确认服务在运行，回的是洛璃服务的状态
+if (!(await client.healthy())) await unreachable();
+
+// 默认每次新开会话（发第一句时才建）；--resume 接着最后消息最新的 CLI 会话
+let conversationId: string | undefined;
+if (resume) {
+  let latest;
+  try {
+    latest = await client.latestCliConversation();
+  } catch (error) {
+    if (!(error instanceof ServiceUnreachable)) throw error;
+    await unreachable();
+  }
+  if (latest) {
+    notice(`接着上次的会话（${latest.messages} 条消息）`);
+    conversationId = latest.id;
+  } else {
+    notice('没有之前的 CLI 会话，已新开一个');
+  }
+}
+
+const session = createChatSession({ client, author: name, conversationId });
 
 if (process.stdin.isTTY) {
-  await runTerminal(converse);
+  // 终端里连不上服务时打印提示、不退出，服务起来后接着用
+  await runTerminal(async (text, signal) => {
+    await session.say(text, signal);
+  });
 } else {
-  // 管道输入：逐行按顺序处理，读到 EOF 结束；不显示提示符，不处理 Ctrl+C（按默认退出）。
-  // 迭代 rl 会缓存读到的行：EOF 时 rl 立即关闭，已读入的行照常处理
+  // 管道输入：逐行按顺序处理，每行等回复结束再发下一行，读到 EOF 结束；不显示提示符，
+  // 不处理 Ctrl+C（按默认退出）。迭代 rl 会缓存读到的行：EOF 时 rl 立即关闭，已读入的行照常处理。
+  // 连不上服务（发不出去、流中途断了、超时）时不再处理后面的行，退出码 1；模型出错照常接着下一行
   const rl = createInterface({ input: process.stdin, terminal: false });
   for await (const line of rl) {
     const text = line.trim();
     if (text === '/exit') break;
-    if (text) await converse(text);
+    if (text && (await session.say(text)) === 'unreachable') {
+      process.exitCode = 1;
+      break;
+    }
   }
   rl.close();
 }
-// 退出时不等进行中的摘要：中止它，下次启动（空闲）或下次回复（压缩）时重做
-await conversation.close();
-// 等已经开始的请求记录写完再关
-await requestLogging.close();
-storage.close();
+// 用完了：等输出写完再退出（见 exit）
+await exit(Number(process.exitCode ?? 0));
 
-// 默认每次新开会话；--resume 接着 CLI 平台里最后一条消息最新的会话
-async function chooseConversation(storage: Storage, resume: boolean): Promise<string> {
-  if (resume) {
-    const latest = await storage.findLatestConversation('cli');
-    if (latest) {
-      const count = (await (await storage.openConversation(latest)).list()).length;
-      notice(`接着上次的会话（${count} 条消息）`);
-      return latest;
-    }
-    notice('没有之前的 CLI 会话，已新开一个');
+/** 系统用户名；取不到时（极少见）叫「CLI」 */
+function systemUserName(): string {
+  try {
+    return userInfo().username || 'CLI';
+  } catch {
+    return 'CLI';
   }
-  return storage.createConversation({ platform: 'cli' });
-}
-
-async function converse(text: string, abortSignal?: AbortSignal): Promise<void> {
-  await conversation.append({ author, text });
-  const result = await printReply(conversation.reply({ abortSignal }));
-  if (result.status === 'completed') {
-    const line = result.usage && formatUsage(result.usage);
-    if (line) notice(line);
-  } else if (result.status === 'aborted') {
-    notice('（已中止）');
-  } else {
-    // 出错不退出：用户消息已留在历史里，继续下一轮
-    console.error(
-      `模型调用失败（${model.modelId}）：${redactKey(result.errorText, model.apiKey)}（详见 ${logFile}）`,
-    );
-  }
-}
-
-// tokens 输入 1234（缓存 1000）· 输出 567。服务端报了缓存数才显示括号；
-// 输入、输出都没报时不打印，只缺一个时那个数显示 ?
-function formatUsage({ input, output, cacheRead }: Usage): string | undefined {
-  if (input === undefined && output === undefined) return undefined;
-  const cache = cacheRead === undefined ? ' ' : `（缓存 ${cacheRead}）`;
-  return `tokens 输入 ${input ?? '?'}${cache}· 输出 ${output ?? '?'}`;
-}
-
-// 服务端报错可能回显请求里的 key（也可能嵌在 JSON 文本里），打印前抹掉
-function redactKey(message: string, apiKey: string | undefined): string {
-  if (!apiKey) return message;
-  return jsonEscapedForms(apiKey).reduce((text, form) => text.replaceAll(form, '***'), message);
 }

@@ -169,7 +169,7 @@ export async function runExport({
 
   if (!existsSync(requestsDbPath)) {
     return fail(
-      `请求记录不存在：${requestsDbPath}（可能设置了 LUOLI_REQUEST_LOG=off，或还没有运行过 CLI 或 bot）`,
+      `请求记录不存在：${requestsDbPath}（可能设置了 LUOLI_REQUEST_LOG=off，或还没有运行过洛璃服务）`,
     );
   }
   if (!existsSync(dbPath)) return fail(`主库不存在：${dbPath}`);
