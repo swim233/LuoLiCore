@@ -1,4 +1,16 @@
 /* 演示控制面板的样式：只在开发模式里加载（dev/DemoPanel.tsx） */
+/* 面板自己的样式不跟着第 9 步的改版换：它用的几个颜色在这里按改版前的取值写死（样式表里已经没有这些变量了） */
+.demo {
+  --surface: #090f2c;
+  --surface-lo: #050920;
+  --edge: color-mix(in srgb, #c6cff2 32%, transparent);
+  --edge-hi: color-mix(in srgb, #c6cff2 58%, transparent);
+  --edge-gold: color-mix(in srgb, #e3c17a 38%, transparent);
+  --blue-wash: color-mix(in srgb, #6e82d2 12%, transparent);
+  --gold-soft: color-mix(in srgb, #e3c17a 16%, transparent);
+  --sky-0: #04081a;
+  --sky-2: #0d1436;
+}
 .demo {
   position: fixed;
   z-index: 100;

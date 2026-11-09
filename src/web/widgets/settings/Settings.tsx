@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Star4, IconSettings } from '../../components/icons';
 import { Seg } from '../../components/Seg';
+import { Pane } from '../../components/Pane';
 import { chooseMotion, usePrefs } from '../../lib/prefs';
 import type { Prefs } from '../../lib/prefs';
 import {
@@ -172,54 +173,60 @@ function SettingsView({ mode }: ViewProps) {
   const [cur, setCur] = useState(0);
   if (mode !== 'full') {
     return (
-      <div className="skel">
-        <div className="skel-note">
-          <Star4 />
-          <span>外观可以改，其余还不能在这里修改设置</span>
-        </div>
-        <section className="skel-live" aria-label={APPEARANCE}>
-          <b>{APPEARANCE}</b>
-          <AppearanceFields />
-        </section>
-        {SET_GROUPS.map(([g], i) => (
-          <div className="skel-group" key={g}>
-            <b>{g}</b>
-            <span className="skel-bar" style={{ maxWidth: `${60 + ((i * 37) % 40)}%` }} />
+      <Pane>
+        <div className="skel pane-sc">
+          <div className="skel-note">
+            <Star4 />
+            <span>外观可以改，其余还不能在这里修改设置</span>
           </div>
-        ))}
-      </div>
+          <section className="skel-live" aria-label={APPEARANCE}>
+            <b>{APPEARANCE}</b>
+            <AppearanceFields />
+          </section>
+          {SET_GROUPS.map(([g], i) => (
+            <div className="skel-group" key={g}>
+              <b>{g}</b>
+              <span className="skel-bar" style={{ maxWidth: `${60 + ((i * 37) % 40)}%` }} />
+            </div>
+          ))}
+        </div>
+      </Pane>
     );
   }
   const name = NAV_GROUPS[cur];
   const fields = cur === 0 ? null : SET_GROUPS[cur - 1][1];
   return (
     <div className="set-full">
-      <nav className="set-nav" aria-label="设置分组">
-        {NAV_GROUPS.map((g, i) => (
-          <button key={g} type="button" aria-current={i === cur} onClick={() => setCur(i)}>
-            {g}
-          </button>
-        ))}
-      </nav>
-      <div className="set-main">
-        <h3>{name}</h3>
-        {fields ? (
-          <>
-            <span className="ribbon">还不能在这里修改设置：这里以后放表单</span>
-            {fields.map(([label, tall]) => (
-              <div className="set-field" key={label}>
-                <label>{label}</label>
-                <div className={'set-input' + (tall ? ' is-tall' : '')} aria-hidden="true" />
-              </div>
-            ))}
-          </>
-        ) : (
-          <>
-            <p className="set-note">存在这个浏览器里，改了立刻生效，不经过服务。</p>
-            <AppearanceFields />
-          </>
-        )}
-      </div>
+      <Pane className="set-nav-pane is-side">
+        <nav className="set-nav pane-sc" aria-label="设置分组">
+          {NAV_GROUPS.map((g, i) => (
+            <button key={g} type="button" aria-current={i === cur} onClick={() => setCur(i)}>
+              {g}
+            </button>
+          ))}
+        </nav>
+      </Pane>
+      <Pane className="set-main-pane is-main">
+        <div className="set-main pane-sc">
+          <h3>{name}</h3>
+          {fields ? (
+            <>
+              <span className="ribbon">还不能在这里修改设置：这里以后放表单</span>
+              {fields.map(([label, tall]) => (
+                <div className="set-field" key={label}>
+                  <label>{label}</label>
+                  <div className={'set-input' + (tall ? ' is-tall' : '')} aria-hidden="true" />
+                </div>
+              ))}
+            </>
+          ) : (
+            <>
+              <p className="set-note">存在这个浏览器里，改了立刻生效，不经过服务。</p>
+              <AppearanceFields />
+            </>
+          )}
+        </div>
+      </Pane>
     </div>
   );
 }

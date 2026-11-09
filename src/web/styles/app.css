@@ -1,31 +1,35 @@
 /* 布局：顶栏 + 胶囊栏 + 网格桌面；部件停靠在 4/3/2/1 列的网格上，「此刻」从胶囊浮起，全屏盖在变暗变模糊的桌面上 */
+/* ---------- 配色：夜蓝 ----------
+   拷问定稿（.grill/ui/final.md）的取值：页面是夜蓝的底加两团辉光，部件是比页面亮一档的夜空窗口；金色只给洛璃（名字、星星、未读数）。
+   只做深色。透明度的变体用 color-mix 从这些变量算出来 */
 :root {
   color-scheme: dark;
-  /* 基础色：全部颜色从这里派生（透明度变体用 color-mix 从这些变量算出来） */
-  --bg-0: #0b1026;
-  --bg-1: #141b3d;
-  --bg-2: #1b2350;
-  --blue: #6e82d2; /* 矢车菊蓝，洛璃的瞳色，主强调 */
-  --gold: #e3c17a; /* 星星、洛璃的名字、高亮 */
-  --ok: #7ec699;
-  --err: #e07a7a;
+  /* 页面 */
+  --bg-0: #090d1f; /* 页面底 */
+  --glow: rgba(40, 56, 130, 0.48); /* 页面右上、左侧的两团辉光 */
+  /* 文字 */
+  --fg: #e9edfb;
+  --fg-2: #c5cdee;
+  --fg-3: #9ba6d3;
+  --dim: #7883b6;
+  /* 强调（蓝）与上面的字；金只给洛璃 */
+  --blue: #8a9cf0;
+  --on-blue: #0a0e22;
+  --gold: #e9c987;
+  --on-gold: #1d1608;
+  --ok: #86cfa2;
+  --err: #e58a8a;
   /* 中间色 */
   --gold-pale: #f4e6c0;
   --gold-star: #e9d8a6;
   --gold-deep: #c9a35a;
   --quote: #b9c4f5;
-  --tool: #8fa2e6;
   --amber: #d9a35f;
-  --pink: #f2a7c3;
-  --pink-pale: #f2c4d6;
-  --ok-pale: #b6e3c6;
   --err-pale: #ffd9d9;
-  --night: #080c1e;
-  --abyss: #020410;
   --white: #ffffff;
   --black: #000000;
   --mask: #000000; /* 只用于遮罩的不透明部分 */
-  /* 每人一个固定的颜色：按 uid 算下标 */
+  /* 每人一个固定的颜色：按 uid 算下标（名字显示时调淡，见 --who-name） */
   --who-0: #8fb4ff;
   --who-1: #9fe0c8;
   --who-2: #f2a7c3;
@@ -36,30 +40,58 @@
   --who-7: #f48fb1;
   --who-8: #a0c4ff;
   --who-9: #ce93d8;
+  /* 线：分隔、描边用的淡线，亮一档 */
+  --line: rgba(160, 175, 240, 0.1);
+  --line-hi: rgba(160, 175, 240, 0.2);
+  /* 面板（设置的分组、输入框、折叠的内容）：半透明的底加一道细边 */
+  --in-bg: rgba(255, 255, 255, 0.06);
+  --in-bd: rgba(255, 255, 255, 0.08);
+  /* 按钮、开关、分段控件的底：没有边框 */
+  --ctl-bg: rgba(255, 255, 255, 0.08);
+  --ctl-hi: rgba(255, 255, 255, 0.13);
+  --ctl-on: color-mix(in srgb, var(--blue) 30%, transparent);
+  /* 玻璃：会话菜单、弹出框、提示条、收纳盒 */
+  --glass: rgba(20, 27, 60, 0.82);
+  --glass-edge:
+    inset 0 1px 0 rgba(255, 255, 255, 0.1), inset 0 0 0 1px rgba(255, 255, 255, 0.07),
+    0 18px 40px -10px rgba(0, 0, 0, 0.8);
+  /* 夜空窗口：底（压暗层、两层星点贴图、左上一团紫、右下一团蓝、底色）、外阴影、四周的细线和暗边 */
+  --win-base: #060a1d;
+  --win-dark: rgba(6, 9, 24, 0.66);
+  --win-stars-a: none; /* 两层星点贴图，启动时由 lib/winSky.ts 画好填进来 */
+  --win-stars-b: none;
+  --win-shadow: 0 18px 40px rgba(0, 0, 0, 0.4);
+  --win-line: rgba(255, 255, 255, 0.05);
+  --cap-line: rgba(255, 255, 255, 0.06);
+  --win-vig: inset 0 0 46px rgba(0, 0, 0, 0.7);
+  --win-bg:
+    linear-gradient(var(--win-dark), var(--win-dark)), var(--win-stars-a) -40px -30px / 640px 390px,
+    var(--win-stars-b) -200px -90px / 900px 548px,
+    radial-gradient(520px 320px at 25% 0%, rgba(96, 82, 200, 0.6), transparent 70%),
+    radial-gradient(420px 320px at 100% 100%, rgba(40, 112, 196, 0.5), transparent 70%),
+    var(--win-base);
+  /* 全屏会话左边的列表暗一档 */
+  --side-bg: rgba(0, 0, 0, 0.22);
+  /* 窗格的渐变的底 */
+  --tint: rgb(7, 10, 27);
+  /* 气泡：群友、自己（网页会话里的用户）、洛璃 */
+  --b-o-bg: rgba(255, 255, 255, 0.065);
+  --b-o-bd: rgba(255, 255, 255, 0.13);
+  --b-o-fg: var(--fg);
+  --b-m-bg: color-mix(in srgb, var(--blue) 26%, transparent);
+  --b-m-bd: color-mix(in srgb, var(--blue) 44%, transparent);
+  --b-m-fg: var(--fg);
+  --b-l-bg: color-mix(in srgb, var(--gold) 10%, transparent);
+  --b-l-bd: color-mix(in srgb, var(--gold) 34%, transparent);
+  --b-l-fg: #f6ebcc;
   /* 派生的语义色 */
-  --ink: var(--bg-0);
-  --card: color-mix(in srgb, var(--surface) var(--card-a), transparent);
-  --card-hi: color-mix(in srgb, var(--surface-hi) 92%, transparent);
-  --card-solid: var(--surface);
-  --edge: color-mix(in srgb, var(--fg-2) var(--edge-a), transparent);
-  --edge-hi: color-mix(in srgb, var(--fg-2) var(--edge-hi-a), transparent);
-  --edge-gold: color-mix(in srgb, var(--gold) 38%, transparent);
-  --gold-wash: color-mix(in srgb, var(--gold) 7%, transparent);
+  --tool: color-mix(in srgb, var(--blue) 85%, var(--fg));
   --gold-glow: color-mix(in srgb, var(--gold) 70%, transparent);
-  --gold-soft: color-mix(in srgb, var(--gold) 16%, transparent);
-  --blue-wash: color-mix(in srgb, var(--blue) 12%, transparent);
-  --blue-soft: color-mix(in srgb, var(--blue) 25%, transparent);
-  --blue-glow: color-mix(in srgb, var(--blue) 40%, transparent);
+  --blue-soft: color-mix(in srgb, var(--blue) 22%, transparent);
   --red-glow: color-mix(in srgb, var(--err) 55%, transparent);
-  --shade: color-mix(in srgb, var(--night) 55%, transparent);
-  --shade-0: color-mix(in srgb, var(--night) 0%, transparent);
-  --scrim: color-mix(
-    in srgb,
-    var(--space-0) 58%,
-    transparent
-  ); /* 全屏时盖在桌面上的暗层（另有固定半径的模糊） */
-  --scrim-narrow: color-mix(in srgb, var(--space-0) 74%, transparent);
-  --hair: color-mix(in srgb, var(--white) 6%, transparent);
+  /* 全屏时盖在桌面上的暗层（另有固定半径的模糊） */
+  --scrim: color-mix(in srgb, var(--bg-0) 62%, transparent);
+  --scrim-narrow: color-mix(in srgb, var(--bg-0) 80%, transparent);
   /* 字体：已加载的思源黑体排在系统黑体（含雅黑）前面，避免本机只有粗体时全变粗 */
   --font-ui:
     -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Noto Sans SC Variable',
@@ -68,61 +100,12 @@
     'JetBrains Mono', 'Noto Sans SC Variable', 'Noto Sans SC', ui-monospace, 'SF Mono', Menlo,
     Consolas, 'DejaVu Sans Mono', monospace;
   /* 尺寸 */
-  --r-card: 16px;
+  --r-card: 22px;
+  --head-h: 44px; /* 窗口标题栏的高度：窗格顶上先空出这么多 */
   --gap: 16px;
   --row: 232px;
   --top-h: 56px;
-  /* 动画的曲线和时长（--ease-out、--dur-hover、--dur-card）由 lib/easing.ts 在页面启动时写进 <head> 里的 <style>，这里不再另写一份 */
-}
-
-/* ---------- 配色 ----------
-   「星夜」：矢车菊蓝和金色（品牌色）、状态色、群友的颜色在上面的基础色里；下面是大面积的面、文字、边线、气泡等的取值（第 4 版里的「暗底」）：
-   大面积的面（窗口底、时间线区、标题栏、气泡）压暗、降低饱和，文字略低于近白。面板和气泡用不透明色，对比度好算。 */
-:root {
-  --space-0: #02030a;
-  --space-1: #04061a;
-  --fog: #1c2a6a;
-  --vignette: #000104;
-  --sky-0: #04081a;
-  --sky-1: #070c26;
-  --sky-2: #0d1436;
-  --surface: #090f2c;
-  --surface-hi: #111847;
-  --surface-lo: #050920;
-  --card-a: 94%;
-  --fg: #e4e9fc;
-  --fg-2: #c6cff2;
-  --fg-3: #a5b1e0;
-  --dim: #8c99cb;
-  --edge-a: 32%;
-  --edge-hi-a: 58%;
-  --p-head: #131a45;
-  --p-side: #03051a;
-  --p-main: #0d1334;
-  --p-in: #070b26;
-  --rule: #424f98;
-  --rule-hi: #6475bf;
-  --li-hover: #111847;
-  --li-sel: #1d2974;
-  --li-sel-bd: #8b9cec;
-  --li-sel-t: #f1f4ff;
-  --li-sel-t2: #c4cdf2;
-  --li-sel-ico: #2c3b96;
-  --b-o-bg: #141c54;
-  --b-o-bd: #5a6cc0;
-  --b-o-fg: #e4e9fc;
-  --b-l-bg: #2a210c;
-  --b-l-bd: #c0a05a;
-  --b-l-fg: #f8edcc;
-  --b-m-bg: #20308a;
-  --b-m-bd: #96a5ee;
-  --b-m-fg: #f1f4ff;
-  --b-m-num: #ffe09a;
-  --sum-bg: #111748;
-  --sum-bd: #7686d3;
-  --fold-bg: #0a1034;
-  --fold-bd: #5a6bba;
-  --fold-body: #060a20;
+  /* 动画的曲线和时长（--ease-out、--dur-hover、--dur-card、--dur-glide……）由 lib/easing.ts 在页面启动时写进 <head> 里的 <style>，这里不再另写一份 */
 }
 
 [hidden] {
@@ -136,26 +119,23 @@ html {
   overflow-x: hidden;
   scrollbar-gutter: stable;
   scrollbar-width: thin;
-  scrollbar-color: color-mix(in srgb, var(--blue) 38%, transparent) transparent;
+  scrollbar-color: color-mix(in srgb, var(--blue) 35%, transparent) transparent;
+  background: var(--bg-0);
 }
+/* 页面：夜蓝的底，右上、左侧两团辉光（大小按视口算，和 1280×780 的演示页同样的比例） */
 body {
   min-height: 100%;
   margin: 0;
   font: 14px/1.55 var(--font-ui);
   color: var(--fg);
-  background-color: var(--space-0);
+  background-color: var(--bg-0);
   background-image:
+    radial-gradient(86% 77% at 82% -14%, var(--glow), transparent 70%),
     radial-gradient(
-      ellipse 62% 55% at 50% 42%,
-      color-mix(in srgb, var(--fog) 24%, transparent),
-      transparent 72%
-    ),
-    radial-gradient(
-      1000px 600px at 90% -14%,
-      color-mix(in srgb, var(--blue) 7%, transparent),
-      transparent 64%
-    ),
-    linear-gradient(180deg, var(--space-0), var(--space-1) 52%, var(--space-0));
+      62% 67% at -10% 45%,
+      color-mix(in srgb, var(--glow) 55%, transparent),
+      transparent 70%
+    );
   background-attachment: fixed;
   -webkit-font-smoothing: antialiased;
 }
@@ -165,20 +145,7 @@ body::before {
   inset: 0 0 auto;
   height: env(safe-area-inset-top, 0px);
   z-index: 70;
-  background: var(--space-0);
-}
-/* 暗角：盖在星空上面、桌面下面，四周的星星也跟着暗下去 */
-body::after {
-  content: '';
-  position: fixed;
-  inset: 0;
-  z-index: 0;
-  pointer-events: none;
-  background: radial-gradient(
-    ellipse 80% 72% at 50% 44%,
-    color-mix(in srgb, var(--vignette) 0%, transparent) 52%,
-    color-mix(in srgb, var(--vignette) 62%, transparent) 100%
-  );
+  background: var(--bg-0);
 }
 button {
   font: inherit;
@@ -204,7 +171,7 @@ button {
   summary,
   [tabindex]:not([tabindex='-1'])
 ):focus-visible {
-  outline: 2px solid var(--gold);
+  outline: 2px solid var(--blue);
   outline-offset: 2px;
 }
 .fs-win:focus,
@@ -253,8 +220,8 @@ button {
   font: 12px/1.45 var(--font-term);
   font-variant-numeric: tabular-nums;
   color: var(--fg-2);
-  background: color-mix(in srgb, var(--space-0) 84%, transparent);
-  border: 1px solid var(--edge);
+  background: var(--glass);
+  box-shadow: var(--glass-edge);
 }
 
 /* ---------- 顶栏 ---------- */
@@ -282,9 +249,9 @@ button {
   gap: 12px;
   background: linear-gradient(
     180deg,
-    color-mix(in srgb, var(--space-0) 94%, transparent),
-    color-mix(in srgb, var(--space-0) 72%, transparent) 70%,
-    color-mix(in srgb, var(--space-0) 0%, transparent)
+    color-mix(in srgb, var(--bg-0) 94%, transparent),
+    color-mix(in srgb, var(--bg-0) 72%, transparent) 70%,
+    color-mix(in srgb, var(--bg-0) 0%, transparent)
   );
 }
 .top-in {
@@ -302,21 +269,19 @@ button {
   min-width: 0;
   height: 40px;
   padding: 0 14px 0 8px;
-  border: 1px solid transparent;
+  border: 0;
   border-radius: 999px;
   background: transparent;
   cursor: pointer;
-  transition:
-    background-color var(--dur-hover),
-    border-color var(--dur-hover);
+  transition: background-color var(--dur-hover);
 }
 .top-status:hover {
-  background: var(--blue-wash);
-  border-color: var(--edge);
+  background: var(--ctl-bg);
 }
 .top-name {
+  font-size: 15px;
   font-weight: 600;
-  letter-spacing: 0.12em;
+  letter-spacing: 0.06em;
   color: var(--gold);
   white-space: nowrap;
 }
@@ -344,48 +309,46 @@ button {
   gap: 8px;
   flex: none;
 }
+/* 顶栏的按钮：没有边框的半透明底 */
 .tbtn {
-  height: 34px;
+  height: 32px;
   padding: 0 14px;
   border-radius: 999px;
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  background: var(--blue-wash);
-  border: 1px solid var(--edge);
+  background: var(--ctl-bg);
+  border: 0;
   cursor: pointer;
   font-size: 13px;
-  color: var(--fg);
+  color: var(--fg-2);
   transition:
     background-color var(--dur-hover),
-    border-color var(--dur-hover),
-    color var(--dur-hover),
-    box-shadow var(--dur-hover);
+    color var(--dur-hover);
 }
 .tbtn:hover {
-  border-color: var(--edge-hi);
-  background: color-mix(in srgb, var(--blue) 20%, transparent);
+  background: var(--ctl-hi);
+  color: var(--fg);
 }
 .tbtn[aria-pressed='true'] {
-  background: var(--gold-soft);
-  border-color: var(--edge-gold);
-  color: var(--gold-pale);
-  box-shadow: 0 0 18px color-mix(in srgb, var(--gold) 18%, transparent);
+  background: color-mix(in srgb, var(--blue) 22%, var(--ctl-bg));
+  color: var(--fg);
 }
 .tbtn svg {
-  width: 15px;
-  height: 15px;
+  width: 14px;
+  height: 14px;
   flex: none;
 }
 .tswitch {
   gap: 8px;
-  padding: 0 12px 0 6px;
+  padding: 0 13px 0 8px;
 }
+/* 开关：开着是强调色的底、白色的钮 */
 .tswitch-track {
-  width: 30px;
-  height: 18px;
+  width: 28px;
+  height: 16px;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--dim) 50%, transparent);
+  background: color-mix(in srgb, var(--dim) 45%, transparent);
   position: relative;
   transition: background-color var(--dur-hover);
   flex: none;
@@ -395,8 +358,8 @@ button {
   position: absolute;
   left: 2px;
   top: 2px;
-  width: 14px;
-  height: 14px;
+  width: 12px;
+  height: 12px;
   border-radius: 50%;
   background: var(--fg-2);
   transition:
@@ -404,11 +367,11 @@ button {
     background-color 0.2s;
 }
 .tswitch[aria-checked='true'] .tswitch-track {
-  background: color-mix(in srgb, var(--gold) 45%, transparent);
+  background: var(--blue);
 }
 .tswitch[aria-checked='true'] .tswitch-track::after {
   transform: translateX(12px);
-  background: var(--gold-pale);
+  background: var(--white);
 }
 
 /* ---------- 整理模式提示条 ---------- */
@@ -426,11 +389,12 @@ button {
   justify-content: center;
   padding: 8px 8px 8px 16px;
   border-radius: 999px;
-  background: var(--card-hi);
-  border: 1px solid var(--edge-gold);
+  background: var(--glass);
+  -webkit-backdrop-filter: blur(16px) saturate(1.2);
+  backdrop-filter: blur(16px) saturate(1.2);
+  box-shadow: var(--glass-edge);
   color: var(--fg-2);
   font-size: 13px;
-  box-shadow: 0 8px 30px -10px color-mix(in srgb, var(--black) 60%, transparent);
   /* 进出整理模式：从顶栏下面滑下来、滑回去（退出时先脱离文档流，固定在原处淡出） */
   opacity: 0;
   transform: translateY(-14px);
@@ -446,7 +410,7 @@ button {
   pointer-events: none;
 }
 .arrange-bar b {
-  color: var(--gold-pale);
+  color: var(--fg);
   font-weight: 500;
 }
 
@@ -508,7 +472,11 @@ button {
   padding: 48px 0;
 }
 
-/* 部件外壳：.w 负责位置（FLIP 动画），.w-card 负责外观（悬停、倾斜、晃动） */
+/* ---------- 部件：夜空窗口 ----------
+   .w 负责位置（FLIP 动画），.w-card 负责外观（悬停、倾斜、晃动）。
+   .w-card 里：内容（.w-body，窗格铺满整块）< 窗格的模糊（z 2）< 四周向内压暗的暗边和细线（.w-vig，z 3）< 窗格的浮层（z 4）
+   < 标题栏（.w-head，z 5，浮在最上面，没有底色和分隔线）< 整理模式的遮罩（z 6）< 悬停和流光（z 7）。
+   .w-card 要 isolation: isolate，浮层的 z-index 才不会漏到全屏的暗层上面 */
 .w {
   position: relative;
   min-width: 0;
@@ -533,104 +501,88 @@ button {
   visibility: hidden;
 }
 .w-card {
+  --pane-head: var(--head-h);
   position: relative;
   height: 100%;
   box-sizing: border-box;
-  display: flex;
-  flex-direction: column;
   border-radius: var(--r-card);
-  border: 1px solid var(--edge);
-  background:
-    linear-gradient(
-      180deg,
-      color-mix(in srgb, var(--white) 3.5%, transparent),
-      color-mix(in srgb, var(--white) 0%, transparent) 42%
-    ),
-    radial-gradient(
-      120% 90% at 0% 0%,
-      color-mix(in srgb, var(--blue) 11%, transparent),
-      transparent 62%
-    ),
-    var(--card);
-  box-shadow:
-    inset 0 1px 0 var(--hair),
-    0 18px 44px -22px color-mix(in srgb, var(--abyss) 95%, transparent),
-    0 0 0 1px color-mix(in srgb, var(--bg-0) 35%, transparent);
+  border: 0;
+  background: var(--win-bg);
+  box-shadow: var(--win-shadow);
   overflow: hidden;
   isolation: isolate;
   transition:
-    border-color var(--dur-card),
     box-shadow var(--dur-card),
     transform 0.18s ease-out;
   transform-style: flat;
 }
 .w.is-active > .w-card {
-  border-color: var(--edge-hi);
   box-shadow:
-    inset 0 1px 0 var(--hair),
-    0 22px 54px -20px color-mix(in srgb, var(--abyss) 100%, transparent),
-    0 0 0 1px color-mix(in srgb, var(--blue) 18%, transparent),
-    0 0 26px color-mix(in srgb, var(--blue) 14%, transparent);
+    var(--win-shadow),
+    0 0 26px color-mix(in srgb, var(--blue) 9%, transparent);
 }
 .w.is-float > .w-card,
 .w.is-island > .w-card {
-  border-color: var(--edge-gold);
   box-shadow:
-    inset 0 1px 0 var(--hair),
-    0 30px 70px -18px color-mix(in srgb, var(--abyss) 100%, transparent),
-    0 0 34px color-mix(in srgb, var(--blue) 28%, transparent),
-    0 0 0 1px color-mix(in srgb, var(--gold) 12%, transparent);
+    0 30px 70px -18px rgba(0, 0, 0, 0.85),
+    0 0 34px color-mix(in srgb, var(--blue) 16%, transparent);
 }
+/* 四周的细线和向内压暗的暗边：画在窗格的模糊上面，不跟着被糊开。「此刻」浮起时细线换成金色 */
+.w-vig {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  border-radius: inherit;
+  pointer-events: none;
+  box-shadow:
+    inset 0 0 0 1px var(--win-line),
+    var(--win-vig);
+}
+.w.is-float .w-vig,
+.w.is-island .w-vig {
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--gold) 38%, transparent),
+    var(--win-vig);
+}
+/* 标题栏：直接写在窗口上，浮在内容上面（内容滚到它下面时在窗格的模糊里） */
 .w-head {
-  position: relative;
-  flex: none;
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  z-index: 5;
+  box-sizing: border-box;
   display: flex;
   align-items: center;
-  gap: 10px;
-  height: 42px;
-  padding: 0 8px 0 14px;
+  gap: 8px;
+  height: var(--head-h);
+  padding: 6px 8px 0 18px;
   user-select: none;
   -webkit-user-select: none;
   cursor: default;
 }
-.w-head::after {
-  content: '';
-  position: absolute;
-  left: 14px;
-  right: 14px;
-  bottom: 0;
-  height: 1px;
-  background: linear-gradient(
-    90deg,
-    color-mix(in srgb, var(--gold) 0%, transparent),
-    color-mix(in srgb, var(--gold) 38%, transparent) 18%,
-    color-mix(in srgb, var(--gold) 14%, transparent) 70%,
-    color-mix(in srgb, var(--gold) 0%, transparent)
-  );
-}
 .w-icon {
-  width: 18px;
-  height: 18px;
+  width: 15px;
+  height: 15px;
   color: var(--fg-2);
   flex: none;
   display: grid;
   place-items: center;
 }
 .w-icon svg {
-  width: 18px;
-  height: 18px;
+  width: 15px;
+  height: 15px;
 }
 .w-title {
   margin: 0;
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 600;
-  letter-spacing: 0.08em;
   color: var(--fg);
   white-space: nowrap;
 }
 .w-sub {
   font-size: 12px;
-  color: var(--fg-3);
+  color: var(--dim);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -641,11 +593,10 @@ button {
   line-height: 18px;
   padding: 0 7px;
   border-radius: 999px;
-  background: var(--gold);
-  color: var(--ink);
+  background: var(--blue);
+  color: var(--on-blue);
   font-weight: 600;
   letter-spacing: 0.1em;
-  box-shadow: 0 0 14px color-mix(in srgb, var(--gold) 60%, transparent);
 }
 .w-btns {
   margin-left: auto;
@@ -656,45 +607,301 @@ button {
 .w-btn {
   width: 30px;
   height: 30px;
-  border-radius: 8px;
+  border-radius: 9px;
   border: 0;
   background: transparent;
   cursor: pointer;
   display: grid;
   place-items: center;
-  color: var(--fg-3);
+  color: var(--dim);
   transition:
     background-color var(--dur-hover),
     color var(--dur-hover);
 }
 .w-btn:hover {
-  background: var(--blue-wash);
+  background: var(--ctl-bg);
   color: var(--fg);
 }
 .w-btn svg {
   width: 15px;
   height: 15px;
 }
+/* 内容铺满整块：部件的视图（窗格，或几个窗格排成的栏）填满它 */
 .w-body {
-  position: relative;
-  flex: 1 1 auto;
-  min-height: 0;
+  position: absolute;
+  inset: 0;
   display: flex;
   flex-direction: column;
 }
-/* 部件的内容区比标题栏（卡片本色）亮或暗一档，由面板色（--p-side）决定；「此刻」自带夜空，不加 */
-.w:not(.now-card) .w-body {
-  background: var(--p-side);
+.w-body > * {
+  flex: 1 1 auto;
+  min-height: 0;
 }
 .w-edge {
   position: absolute;
   inset: 0;
   border-radius: inherit;
   pointer-events: none;
-  z-index: 3;
+  z-index: 7;
 }
 
-/* 胶囊（缩略） */
+/* ---------- 窗格（components/Pane.tsx）----------
+   内容（.pane-sc，滚动区）铺满整块，上下留出浮层的高度（--ht、--hb，Pane 量出来写在 .pane 上）再加它自己的留白（--sc-pt、--sc-pb）。
+   上下各一组模糊（.pane-ov）：6 层 backdrop-filter，模糊半径 20/32 … 20 px，每层只在一段里不透明（遮罩），由浅到深，
+   靠窗口边上最糊；加一层渐变的底（.tn）。一组的高度 = 浮层高度 + 渐变带长度（--rt）。
+   遮罩按「先慢后快」的曲线 f(t) = t^1.9、N = 6 算：p(k) = f(k/6)，从内容那一侧量到窗口边，
+   p = 0、3.3%、12.4%、26.8%、46.3%、70.7%、100%；第 i 层（0 起）在 p(i) 透明，p(i+1)～p(i+2) 不透明，p(i+3) 透明，最后两层不透明到边上。
+   「只在那一边还有内容时出现」：每层自己做透明度的 scroll-driven 动画（顶上那组在滚动的头 32px 里淡入，底下那组在最后 32px 里淡出），
+   基准透明度是 0：内容不够一屏（没有滚动范围，时间线不起作用）时两边都没有。
+   注意：模糊层的容器（.pane-ov、.pane）不能有透明度动画、opacity < 1、filter、mask（那样它就成了 backdrop root，模糊什么也看不到） */
+@keyframes pane-ot {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes pane-ob {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+.pane {
+  --bz: 20px;
+  --rtl: var(--r-card);
+  --rtr: var(--r-card);
+  --rbl: var(--r-card);
+  --rbr: var(--r-card);
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  timeline-scope: --pane-sc;
+}
+/* 左右分栏的全屏窗口：每栏只带外侧两个角 */
+.pane.is-side {
+  --rtr: 0px;
+  --rbr: 0px;
+}
+.pane.is-main {
+  --rtl: 0px;
+  --rbl: 0px;
+}
+.pane > .pane-sc {
+  position: absolute;
+  inset: 0;
+  box-sizing: border-box;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scroll-timeline: --pane-sc y;
+  padding-top: calc(var(--ht, 0px) + var(--sc-pt, 0px));
+  padding-bottom: calc(var(--hb, 0px) + var(--sc-pb, 0px));
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--blue) 35%, transparent) transparent;
+}
+.pane-top,
+.pane-bot {
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 4;
+  pointer-events: none;
+}
+.pane-top {
+  top: 0;
+}
+/* 上浮层里打开着下拉菜单（对话里选会话）：整层提到下浮层上面，矮的窗口里菜单压过输入框、点得到。
+   和窗口标题同一层（z 5）、排在它后面：上浮层顶上是透明、不接鼠标的空位，标题照旧看得见、点得到 */
+.pane-top:has(.chat-menu) {
+  z-index: 5;
+}
+.pane-bot {
+  bottom: 0;
+}
+.pane-top > *,
+.pane-bot > * {
+  pointer-events: auto;
+}
+.pane-hsp {
+  height: var(--pane-head);
+  pointer-events: none !important;
+}
+.pane-ov {
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 2;
+  pointer-events: none;
+}
+.pane-ov.t {
+  top: 0;
+  height: calc(var(--ht, 0px) + var(--rt, 16px));
+}
+.pane-ov.b {
+  bottom: 0;
+  height: calc(var(--hb, 0px) + var(--rt, 16px));
+}
+.pane-ov > i {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  /* 形变结束、换回模糊时：模糊半径从 0 长到原样（渐变的底一直在，模糊只是加上去）。
+     !important：形变收尾时 unmorph 用 .no-tr 关掉了所有过渡，这一个要留着 */
+  transition: backdrop-filter var(--dur-blur-in) ease-out !important;
+}
+.pane-ov.t > i {
+  border-radius: var(--rtl) var(--rtr) 0 0;
+  animation: pane-ot linear both;
+  animation-timeline: --pane-sc;
+  animation-range: 0 32px;
+}
+.pane-ov.b > i {
+  border-radius: 0 0 var(--rbr) var(--rbl);
+  animation: pane-ob linear both;
+  animation-timeline: --pane-sc;
+  animation-range: calc(100% - 32px) 100%;
+}
+.pane-ov > .l1 {
+  -webkit-backdrop-filter: blur(calc(var(--bz) / 32));
+  backdrop-filter: blur(calc(var(--bz) / 32));
+}
+.pane-ov > .l2 {
+  -webkit-backdrop-filter: blur(calc(var(--bz) / 16));
+  backdrop-filter: blur(calc(var(--bz) / 16));
+}
+.pane-ov > .l3 {
+  -webkit-backdrop-filter: blur(calc(var(--bz) / 8));
+  backdrop-filter: blur(calc(var(--bz) / 8));
+}
+.pane-ov > .l4 {
+  -webkit-backdrop-filter: blur(calc(var(--bz) / 4));
+  backdrop-filter: blur(calc(var(--bz) / 4));
+}
+.pane-ov > .l5 {
+  -webkit-backdrop-filter: blur(calc(var(--bz) / 2));
+  backdrop-filter: blur(calc(var(--bz) / 2));
+}
+.pane-ov > .l6 {
+  -webkit-backdrop-filter: blur(var(--bz));
+  backdrop-filter: blur(var(--bz));
+}
+.pane-ov.t > .l1 {
+  mask-image: linear-gradient(
+    to top,
+    transparent 0%,
+    var(--mask) 3.3%,
+    var(--mask) 12.4%,
+    transparent 26.8%
+  );
+}
+.pane-ov.t > .l2 {
+  mask-image: linear-gradient(
+    to top,
+    transparent 3.3%,
+    var(--mask) 12.4%,
+    var(--mask) 26.8%,
+    transparent 46.3%
+  );
+}
+.pane-ov.t > .l3 {
+  mask-image: linear-gradient(
+    to top,
+    transparent 12.4%,
+    var(--mask) 26.8%,
+    var(--mask) 46.3%,
+    transparent 70.7%
+  );
+}
+.pane-ov.t > .l4 {
+  mask-image: linear-gradient(
+    to top,
+    transparent 26.8%,
+    var(--mask) 46.3%,
+    var(--mask) 70.7%,
+    transparent 100%
+  );
+}
+.pane-ov.t > .l5 {
+  mask-image: linear-gradient(to top, transparent 46.3%, var(--mask) 70.7%, var(--mask) 100%);
+}
+.pane-ov.t > .l6 {
+  mask-image: linear-gradient(to top, transparent 70.7%, var(--mask) 100%);
+}
+.pane-ov.b > .l1 {
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 0%,
+    var(--mask) 3.3%,
+    var(--mask) 12.4%,
+    transparent 26.8%
+  );
+}
+.pane-ov.b > .l2 {
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 3.3%,
+    var(--mask) 12.4%,
+    var(--mask) 26.8%,
+    transparent 46.3%
+  );
+}
+.pane-ov.b > .l3 {
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 12.4%,
+    var(--mask) 26.8%,
+    var(--mask) 46.3%,
+    transparent 70.7%
+  );
+}
+.pane-ov.b > .l4 {
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 26.8%,
+    var(--mask) 46.3%,
+    var(--mask) 70.7%,
+    transparent 100%
+  );
+}
+.pane-ov.b > .l5 {
+  mask-image: linear-gradient(to bottom, transparent 46.3%, var(--mask) 70.7%, var(--mask) 100%);
+}
+.pane-ov.b > .l6 {
+  mask-image: linear-gradient(to bottom, transparent 70.7%, var(--mask) 100%);
+}
+/* 渐变的底：0 → 18%（p(2)）→ 45%（p(4)）→ 78%（窗口边） */
+.pane-ov.t > .tn {
+  background: linear-gradient(
+    to top,
+    transparent 0,
+    color-mix(in srgb, var(--tint) 18%, transparent) 12.4%,
+    color-mix(in srgb, var(--tint) 45%, transparent) 46.3%,
+    color-mix(in srgb, var(--tint) 78%, transparent) 100%
+  );
+}
+.pane-ov.b > .tn {
+  background: linear-gradient(
+    to bottom,
+    transparent 0,
+    color-mix(in srgb, var(--tint) 18%, transparent) 12.4%,
+    color-mix(in srgb, var(--tint) 45%, transparent) 46.3%,
+    color-mix(in srgb, var(--tint) 78%, transparent) 100%
+  );
+}
+/* 形变期间换成只有渐变的底：缩成胶囊、展开（复制层 .is-morphing、藏着的真身 [data-hide]）、全屏打开与关闭（全屏窗口 .is-morphing、
+   桌面上被挪走的那份 [data-lifted]）、整理模式（整个期间卡片在晃，含拖动的副本）。停下来换回时模糊淡入（见上面的 transition）。
+   窗口里别的带模糊的东西（时间线顶上的小提示、会话菜单）同样关掉，复制层里从头到尾没有 backdrop-filter */
+:is(.is-morphing, [data-hide], [data-lifted], .drag-clone, .arranging .w, .arr-leaving .w)
+  :is(.pane-ov > i:not(.tn), .log-pill, .chat-menu) {
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+  transition: none !important;
+}
+
+/* ---------- 胶囊（缩略）：小的夜空窗口，只有一圈细线、没有暗边 ---------- */
 .cap-wrap {
   position: relative;
   display: inline-flex;
@@ -704,61 +911,51 @@ button {
   position: relative;
   display: inline-flex;
   align-items: center;
-  gap: 10px;
+  gap: 9px;
   height: 44px;
   max-width: 100%;
   box-sizing: border-box;
-  padding: 0 18px 0 6px;
+  padding: 0 18px 0 7px;
   border-radius: 999px;
-  border: 1px solid var(--edge);
-  background:
-    linear-gradient(
-      180deg,
-      color-mix(in srgb, var(--white) 4%, transparent),
-      color-mix(in srgb, var(--white) 0%, transparent)
-    ),
-    var(--card);
+  border: 0;
+  background: var(--win-bg);
   box-shadow:
-    inset 0 1px 0 var(--hair),
-    0 10px 26px -14px color-mix(in srgb, var(--abyss) 90%, transparent);
+    inset 0 0 0 1px var(--cap-line),
+    var(--win-shadow);
   cursor: pointer;
   text-align: left;
   overflow: hidden;
   isolation: isolate;
-  transition:
-    border-color var(--dur-hover),
-    box-shadow var(--dur-hover),
-    background-color var(--dur-hover);
+  transition: box-shadow var(--dur-hover);
 }
 .cap:hover {
-  border-color: var(--edge-hi);
   box-shadow:
-    inset 0 1px 0 var(--hair),
-    0 0 22px color-mix(in srgb, var(--blue) 22%, transparent);
+    inset 0 0 0 1px color-mix(in srgb, var(--blue) 34%, transparent),
+    var(--win-shadow),
+    0 0 22px color-mix(in srgb, var(--blue) 16%, transparent);
 }
 .cap-icon {
-  width: 32px;
-  height: 32px;
+  width: 30px;
+  height: 30px;
   border-radius: 50%;
   display: grid;
   place-items: center;
   flex: none;
-  background: var(--blue-wash);
+  background: var(--in-bg);
   color: var(--fg-2);
 }
 .cap-icon svg {
-  width: 17px;
-  height: 17px;
+  width: 15px;
+  height: 15px;
 }
 .cap-name {
-  font-size: 12px;
-  color: var(--fg-3);
-  letter-spacing: 0.08em;
+  font-size: 12.5px;
+  color: var(--dim);
   flex: none;
 }
 .cap-text {
   font-size: 13px;
-  color: var(--fg);
+  color: var(--fg-2);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -766,10 +963,13 @@ button {
 }
 .cap-text em {
   font-style: normal;
-  color: var(--gold);
+  color: var(--fg);
 }
 .cap-now .cap-icon {
   background: transparent;
+}
+.cap-now .cap-text em {
+  color: var(--gold);
 }
 .cap-wrap.is-placeholder-float {
   visibility: hidden;
@@ -789,35 +989,32 @@ button {
 .in-island .cap-name {
   display: none;
 }
-/* 有对话但没自动展开（窄屏上用户正在操作别的部件）：胶囊发光提示，点一下再展开 */
+/* 有对话但没自动展开（窄屏上用户正在操作别的部件）：胶囊发光提示，点一下再展开（「此刻」是洛璃的，用金色） */
 @keyframes cap-call {
   0%,
   100% {
     box-shadow:
-      inset 0 1px 0 var(--hair),
-      0 0 0 1px var(--gold-soft),
-      0 0 14px color-mix(in srgb, var(--gold) 30%, transparent);
+      inset 0 0 0 1px color-mix(in srgb, var(--gold) 45%, transparent),
+      0 0 14px color-mix(in srgb, var(--gold) 26%, transparent);
   }
   50% {
     box-shadow:
-      inset 0 1px 0 var(--hair),
-      0 0 0 2px color-mix(in srgb, var(--gold) 45%, transparent),
-      0 0 30px color-mix(in srgb, var(--gold) 55%, transparent);
+      inset 0 0 0 1px color-mix(in srgb, var(--gold) 70%, transparent),
+      0 0 30px color-mix(in srgb, var(--gold) 50%, transparent);
   }
 }
 .cap.is-calling {
-  border-color: var(--gold);
   box-shadow:
-    inset 0 1px 0 var(--hair),
-    0 0 0 2px color-mix(in srgb, var(--gold) 45%, transparent),
-    0 0 26px color-mix(in srgb, var(--gold) 50%, transparent);
+    inset 0 0 0 1px color-mix(in srgb, var(--gold) 60%, transparent),
+    0 0 26px color-mix(in srgb, var(--gold) 45%, transparent);
 }
 .motion .cap.is-calling {
   animation: cap-call 1.6s ease-in-out infinite;
 }
 
-/* ---------- 悬停的三种效果（只在有鼠标的设备上） ---------- */
-/* 只有边缘发光：鼠标附近的那段边框被照亮（只露出 1px 的边）；卡片内部不放跟着鼠标走的光斑 */
+/* ---------- 悬停的三种效果（只在有鼠标的设备上） ----------
+   窗口没有边框：流光、边光画在窗口的圆角边缘上（1px 的一圈，遮罩挖空），在浮层、标题栏上面 */
+/* C 边光：鼠标附近的那段边被照亮（只露出 1px 的边）；卡片内部不放跟着鼠标走的光斑 */
 .w-card::after {
   content: '';
   position: absolute;
@@ -829,9 +1026,9 @@ button {
   padding: 1px;
   background: radial-gradient(
     280px circle at var(--mx, 50%) var(--my, 50%),
-    color-mix(in srgb, var(--gold-pale) 90%, transparent),
-    color-mix(in srgb, var(--gold) 55%, transparent) 30%,
-    color-mix(in srgb, var(--blue) 30%, transparent) 55%,
+    rgba(225, 232, 255, 0.85),
+    rgba(180, 194, 255, 0.45) 30%,
+    color-mix(in srgb, var(--blue) 22%, transparent) 55%,
     transparent 78%
   );
   -webkit-mask:
@@ -841,17 +1038,13 @@ button {
   mask:
     linear-gradient(var(--mask) 0 0) content-box exclude,
     linear-gradient(var(--mask) 0 0);
-  z-index: 4;
-}
-.w-head,
-.w-body {
-  z-index: 1;
+  z-index: 7;
 }
 .hover-C .w-card.is-hot::after,
 .hover-D .w-card.is-hot::after {
   opacity: 1;
 }
-/* 边缘流光：一道光绕边框一圈，之后保持淡淡的发光 */
+/* B 边缘流光：一道光绕窗口边缘一圈，之后保持淡淡的发光 */
 @property --sweep {
   syntax: '<angle>';
   inherits: false;
@@ -878,7 +1071,7 @@ button {
     transparent 0deg,
     transparent 290deg,
     color-mix(in srgb, var(--blue) 70%, transparent) 325deg,
-    var(--gold-pale) 352deg,
+    rgba(235, 240, 255, 0.95) 352deg,
     transparent 360deg
   );
   -webkit-mask:
@@ -891,13 +1084,12 @@ button {
   animation: sweep 1.15s linear both;
 }
 .hover-B .w-card.is-hot {
-  border-color: color-mix(in srgb, var(--gold) 42%, transparent);
   box-shadow:
-    inset 0 1px 0 var(--hair),
-    0 18px 44px -22px color-mix(in srgb, var(--abyss) 95%, transparent),
-    0 0 24px color-mix(in srgb, var(--blue) 26%, transparent),
-    0 0 2px color-mix(in srgb, var(--gold) 40%, transparent);
+    var(--win-shadow),
+    inset 0 0 0 1px color-mix(in srgb, var(--blue) 30%, transparent),
+    0 0 24px color-mix(in srgb, var(--blue) 22%, transparent);
 }
+/* D 卡牌倾斜（加 C 的边光） */
 .hover-D .w-card {
   transform: perspective(900px) rotateX(var(--rx, 0deg)) rotateY(var(--ry, 0deg));
 }
@@ -912,13 +1104,11 @@ button {
     box-shadow:
       0 0 0 0 var(--red-glow),
       0 0 0 0 var(--red-glow);
-    border-color: var(--err);
   }
   70% {
     box-shadow:
       0 0 0 10px color-mix(in srgb, var(--err) 0%, transparent),
       0 0 40px 4px color-mix(in srgb, var(--err) 25%, transparent);
-    border-color: var(--err);
   }
   100% {
     box-shadow: 0 0 0 0 color-mix(in srgb, var(--err) 0%, transparent);
@@ -927,39 +1117,17 @@ button {
 .fx-err {
   animation: err-pulse 0.9s ease-out 2;
 }
-@keyframes lit-flash {
-  0% {
-    box-shadow: 0 0 0 0 color-mix(in srgb, var(--gold) 55%, transparent);
-  }
-  100% {
-    box-shadow: 0 0 0 12px color-mix(in srgb, var(--gold) 0%, transparent);
-  }
-}
+/* 部件消失时留下的空壳：一扇空的夜空窗口 */
 .ghost {
   position: fixed;
   box-sizing: border-box;
-  border-radius: 16px;
-  border: 1px solid var(--edge-gold);
-  background:
-    linear-gradient(
-      180deg,
-      color-mix(in srgb, var(--white) 5%, transparent),
-      color-mix(in srgb, var(--white) 0%, transparent) 40%
-    ),
-    radial-gradient(
-      120% 90% at 0% 0%,
-      color-mix(in srgb, var(--blue) 16%, transparent),
-      transparent 62%
-    ),
-    var(--card-hi);
+  border-radius: var(--r-card);
+  background: var(--win-bg);
   box-shadow:
-    0 0 0 1px color-mix(in srgb, var(--blue) 18%, transparent),
-    0 0 36px color-mix(in srgb, var(--blue) 35%, transparent),
-    0 24px 60px -20px color-mix(in srgb, var(--abyss) 100%, transparent);
+    inset 0 0 0 1px var(--win-line),
+    0 0 36px color-mix(in srgb, var(--blue) 22%, transparent),
+    var(--win-shadow);
   overflow: hidden;
-}
-.ghost.is-sky {
-  background: linear-gradient(170deg, var(--sky-0), var(--sky-1) 70%, var(--sky-2));
 }
 .ghost::after {
   content: '';
@@ -968,7 +1136,7 @@ button {
   background: linear-gradient(
     105deg,
     transparent 30%,
-    color-mix(in srgb, var(--gold) 14%, transparent) 48%,
+    color-mix(in srgb, var(--blue) 14%, transparent) 48%,
     color-mix(in srgb, var(--white) 6%, transparent) 52%,
     transparent 70%
   );
@@ -1014,8 +1182,7 @@ button {
 .arr-leaving .cap-wrap > .cap {
   transition:
     transform 0.32s var(--ease-out) var(--ad, 0ms),
-    box-shadow 0.32s var(--ease-out) var(--ad, 0ms),
-    border-color 0.32s ease var(--ad, 0ms);
+    box-shadow 0.32s var(--ease-out) var(--ad, 0ms);
 }
 .arranging .w > .w-card,
 .arranging .cap-wrap > .cap {
@@ -1026,33 +1193,29 @@ button {
   cursor: grab;
   touch-action: pan-y;
   box-shadow:
-    inset 0 1px 0 var(--hair),
-    0 28px 54px -20px color-mix(in srgb, var(--abyss) 100%, transparent),
-    0 0 0 1px color-mix(in srgb, var(--gold) 16%, transparent),
-    0 0 22px color-mix(in srgb, var(--blue) 12%, transparent);
+    0 28px 54px -20px rgba(0, 0, 0, 0.9),
+    0 0 22px color-mix(in srgb, var(--blue) 14%, transparent);
 }
 .arranging .cap {
   cursor: grab;
   touch-action: none;
   box-shadow:
-    inset 0 1px 0 var(--hair),
-    0 18px 34px -14px color-mix(in srgb, var(--abyss) 100%, transparent),
-    0 0 0 1px color-mix(in srgb, var(--gold) 16%, transparent);
+    inset 0 0 0 1px color-mix(in srgb, var(--blue) 26%, transparent),
+    0 18px 34px -14px rgba(0, 0, 0, 0.9);
 }
 .arranging .w-body {
   pointer-events: none;
 }
 .w-arr {
   position: absolute;
-  inset: 42px 0 0;
+  inset: var(--head-h) 0 0;
   z-index: 6;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 12px;
-  background: color-mix(in srgb, var(--bg-0) 80%, transparent);
-  border-top: 1px dashed color-mix(in srgb, var(--gold) 25%, transparent);
+  background: color-mix(in srgb, var(--bg-0) 72%, transparent);
   padding: 12px;
   text-align: center;
   opacity: 0;
@@ -1090,8 +1253,8 @@ button {
   gap: 8px;
   padding: 6px 14px 6px 10px;
   border-radius: 999px;
-  border: 1px solid var(--edge-hi);
-  background: var(--blue-wash);
+  border: 0;
+  background: var(--ctl-bg);
   font-size: 12px;
   color: var(--fg-2);
   letter-spacing: 0.06em;
@@ -1112,27 +1275,25 @@ button {
 }
 .chip {
   height: 28px;
-  padding: 0 10px;
+  padding: 0 11px;
   border-radius: 999px;
   cursor: pointer;
-  border: 1px solid var(--edge);
-  background: var(--blue-wash);
+  border: 0;
+  background: var(--ctl-bg);
   color: var(--fg-2);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
   transition:
     background-color var(--dur-hover),
-    border-color var(--dur-hover),
     color var(--dur-hover);
 }
 .chip:hover {
-  border-color: var(--edge-hi);
+  background: var(--ctl-hi);
   color: var(--fg);
 }
 .chip[aria-pressed='true'] {
-  background: var(--gold-soft);
-  border-color: var(--edge-gold);
-  color: var(--gold-pale);
+  background: var(--ctl-on);
+  color: var(--fg);
 }
 .chip:disabled {
   opacity: 0.35;
@@ -1140,36 +1301,40 @@ button {
 }
 /* 要再点一次才生效的按钮（设置里的「恢复默认布局」）等待确认时 */
 .chip.is-armed {
-  background: color-mix(in srgb, var(--err) 14%, transparent);
-  border-color: color-mix(in srgb, var(--err) 60%, transparent);
+  background: color-mix(in srgb, var(--err) 22%, transparent);
   color: var(--err-pale);
   box-shadow: 0 0 14px -4px var(--red-glow);
 }
 /* 分段选择（components/Seg.tsx）：设置里的「外观」和开发模式的演示面板共用 */
+/* 分段选择：没有边框的底，选中的那段是强调色 30% 的底 */
 .seg-ctl {
   display: flex;
-  gap: 4px;
-  padding: 3px;
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--bg-0) 50%, transparent);
-  border: 1px solid var(--edge);
+  gap: 2px;
+  padding: 2px;
+  border-radius: 9px;
+  background: var(--ctl-bg);
 }
 .seg-ctl button {
   flex: 1;
-  height: 28px;
-  padding: 0 6px;
+  height: 26px;
+  padding: 0 8px;
   border-radius: 7px;
   border: 0;
   background: transparent;
-  color: var(--fg-2);
+  color: var(--fg-3);
   cursor: pointer;
-  font-size: 12.5px;
+  font-size: 12px;
   white-space: nowrap;
+  transition:
+    background-color var(--dur-hover),
+    color var(--dur-hover);
+}
+.seg-ctl button:hover {
+  color: var(--fg);
 }
 .seg-ctl button[aria-pressed='true'] {
-  background: var(--gold-soft);
-  color: var(--gold-pale);
-  box-shadow: inset 0 0 0 1px var(--edge-gold);
+  background: var(--ctl-on);
+  color: var(--fg);
 }
 .w-hide {
   color: var(--fg-2);
@@ -1184,8 +1349,9 @@ button {
   width: 22px;
   height: 22px;
   border-radius: 50%;
-  border: 1px solid var(--edge-hi);
-  background: var(--card-solid);
+  border: 0;
+  background: var(--glass);
+  box-shadow: var(--glass-edge);
   color: var(--fg-2);
   cursor: pointer;
   font-size: 12px;
@@ -1212,7 +1378,8 @@ button {
 [data-dragging] > .w-card,
 [data-dragging] > .cap {
   opacity: 0.22;
-  border-style: dashed;
+  outline: 1px dashed var(--line-hi);
+  outline-offset: -1px;
   animation: none !important;
 }
 .drag-clone {
@@ -1225,9 +1392,8 @@ button {
 .drag-clone > .w-card,
 .drag-clone > .cap {
   box-shadow:
-    0 30px 70px -18px color-mix(in srgb, var(--abyss) 100%, transparent),
-    0 0 30px color-mix(in srgb, var(--gold) 25%, transparent) !important;
-  border-color: var(--edge-gold) !important;
+    0 30px 70px -18px rgba(0, 0, 0, 0.95),
+    0 0 30px color-mix(in srgb, var(--blue) 26%, transparent) !important;
   animation: none !important;
 }
 .tray {
@@ -1239,9 +1405,11 @@ button {
   box-sizing: border-box;
   padding: 10px 14px;
   border-radius: 18px;
-  border: 1px dashed var(--edge-gold);
-  background: color-mix(in srgb, var(--surface-lo) 94%, transparent);
-  box-shadow: 0 20px 50px -18px color-mix(in srgb, var(--black) 80%, transparent);
+  border: 0;
+  background: var(--glass);
+  -webkit-backdrop-filter: blur(16px) saturate(1.2);
+  backdrop-filter: blur(16px) saturate(1.2);
+  box-shadow: var(--glass-edge);
   display: flex;
   align-items: center;
   gap: 12px;
@@ -1251,7 +1419,6 @@ button {
   visibility: hidden;
   transform: translate(-50%, 28px);
   transition:
-    border-color 0.2s,
     box-shadow 0.2s,
     background-color 0.2s,
     opacity 0.24s ease,
@@ -1263,7 +1430,6 @@ button {
   visibility: visible;
   transform: translate(-50%, 0);
   transition:
-    border-color 0.2s,
     box-shadow 0.2s,
     background-color 0.2s,
     opacity 0.26s ease 0.06s,
@@ -1271,13 +1437,15 @@ button {
     visibility 0s linear 0s;
 }
 .tray.is-over {
-  border-color: var(--gold);
-  background: color-mix(in srgb, var(--gold) 9%, var(--surface-lo));
-  box-shadow: 0 0 34px color-mix(in srgb, var(--gold) 30%, transparent);
+  background: color-mix(in srgb, var(--blue) 18%, var(--glass));
+  box-shadow:
+    var(--glass-edge),
+    inset 0 0 0 1px color-mix(in srgb, var(--blue) 55%, transparent),
+    0 0 34px color-mix(in srgb, var(--blue) 26%, transparent);
 }
 .tray-label {
   font-size: 12px;
-  color: var(--gold);
+  color: var(--fg-3);
   letter-spacing: 0.12em;
   flex: none;
 }
@@ -1301,8 +1469,9 @@ button {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  border: 1px solid var(--edge);
-  background: var(--blue-wash);
+  border: 0;
+  background: var(--ctl-bg);
+  color: var(--fg-2);
   font-size: 13px;
 }
 .tray-item .cap-icon {
@@ -1326,8 +1495,8 @@ button {
   position: absolute;
   inset: 0;
   background: var(--scrim);
-  -webkit-backdrop-filter: blur(10px) saturate(0.8);
-  backdrop-filter: blur(10px) saturate(0.8);
+  -webkit-backdrop-filter: blur(7px);
+  backdrop-filter: blur(7px);
 }
 .fs-morph {
   position: fixed;
@@ -1466,29 +1635,25 @@ button {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  border: 1px solid var(--edge);
-  background: color-mix(in srgb, var(--surface) 85%, transparent);
+  border: 0;
+  background: var(--ctl-bg);
   color: var(--fg-2);
   font-size: 13px;
   transition:
     background-color var(--dur-hover),
-    border-color var(--dur-hover),
-    color var(--dur-hover),
-    box-shadow var(--dur-hover);
+    color var(--dur-hover);
 }
 .fs-tab svg {
-  width: 16px;
-  height: 16px;
+  width: 14px;
+  height: 14px;
 }
 .fs-tab:hover {
   color: var(--fg);
-  border-color: var(--edge-hi);
+  background: var(--ctl-hi);
 }
 .fs-tab[aria-current='true'] {
-  color: var(--gold-pale);
-  border-color: var(--edge-gold);
-  background: color-mix(in srgb, var(--gold) 12%, transparent);
-  box-shadow: 0 0 20px color-mix(in srgb, var(--gold) 20%, transparent);
+  color: var(--fg);
+  background: color-mix(in srgb, var(--blue) 22%, var(--ctl-bg));
 }
 .fs-stage {
   position: relative;
@@ -1499,20 +1664,11 @@ button {
   position: absolute;
   inset: 0;
 }
-/* 阴影的写法和桌面上的卡片一一对应（第一项都是内侧的高光），形变时外框的阴影才能连续过渡 */
+/* 全屏的窗口：同样的夜空窗口，阴影更深 */
 .fs-stage > .w > .w-card {
-  border-color: var(--edge-gold);
-  background:
-    linear-gradient(
-      180deg,
-      color-mix(in srgb, var(--white) 3%, transparent),
-      color-mix(in srgb, var(--white) 0%, transparent) 30%
-    ),
-    var(--card-solid);
   box-shadow:
-    inset 0 1px 0 var(--hair),
-    0 40px 100px -30px color-mix(in srgb, var(--black) 100%, transparent),
-    0 0 50px color-mix(in srgb, var(--blue) 20%, transparent);
+    0 40px 100px -30px rgba(0, 0, 0, 0.95),
+    0 0 50px color-mix(in srgb, var(--blue) 10%, transparent);
 }
 
 /* ---------- 状态徽记 ----------
@@ -1534,7 +1690,7 @@ button {
   flex: none;
   isolation: isolate;
   --zc: var(--quote);
-  --zg: color-mix(in srgb, var(--blue) 85%, transparent);
+  --zg: color-mix(in srgb, #6e82d2 85%, transparent); /* 徽记照旧：z 的光晕用改版前的蓝 */
 }
 .bd > *,
 .bd-fl,
@@ -1816,10 +1972,11 @@ button {
   min-width: 200px;
   max-width: min(320px, calc(100vw - 32px));
   padding: 10px 12px;
-  border-radius: 12px;
-  background: var(--card-hi);
-  border: 1px solid var(--edge-hi);
-  box-shadow: 0 18px 40px -12px color-mix(in srgb, var(--black) 80%, transparent);
+  border-radius: 14px;
+  background: var(--glass);
+  -webkit-backdrop-filter: blur(16px) saturate(1.2);
+  backdrop-filter: blur(16px) saturate(1.2);
+  box-shadow: var(--glass-edge);
   font-size: 13px;
   color: var(--fg-2);
   pointer-events: none;
@@ -1849,13 +2006,12 @@ button {
   white-space: nowrap;
 }
 
-/* ---------- 小星空（「此刻」自己的夜空） ---------- */
+/* ---------- 小星空（「此刻」自己的星星，叠在夜空窗口上面；底是窗口的） ---------- */
 .msky {
   position: absolute;
   inset: 0;
   overflow: hidden;
   pointer-events: none;
-  background: linear-gradient(170deg, var(--sky-0), var(--sky-1) 70%, var(--sky-2));
 }
 .msky i {
   position: absolute;
@@ -1882,28 +2038,30 @@ button {
   animation-delay: var(--l1, 0s), var(--l2, 0s);
 }
 
-/* ---------- 此刻 ---------- */
-.now-card > .w-card {
-  background: transparent;
-}
-.now-card > .w-card > .w-head {
-  background: color-mix(in srgb, var(--bg-0) 35%, transparent);
-}
+/* ---------- 此刻 ----------
+   上面一块（大徽记、状态名、一行说明）贴在标题栏下面、和标题一起浮在终端上面；终端是窗格，顶上空出的高度（--pane-head）
+   是标题栏加这一块，由 Now.tsx 量出来写在 .now 上。全屏时最多 3 栏并排，每栏一个窗格，各自的头部（会话名、状态、在会话中打开）也浮着 */
 .now {
   position: relative;
-  flex: 1 1 auto;
-  min-height: 0;
   display: flex;
   flex-direction: column;
 }
+.now > .pane,
+.now > .now-cols {
+  flex: 1 1 auto;
+  min-height: 0;
+}
 .now-top {
-  position: relative;
-  z-index: 1;
-  flex: none;
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: var(--head-h);
+  z-index: 5;
+  box-sizing: border-box;
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 10px 16px 6px;
+  padding: 2px 18px 8px;
   min-width: 0;
   flex-wrap: wrap;
 }
@@ -1921,7 +2079,7 @@ button {
 }
 .now-where {
   font-size: 12px;
-  color: var(--fg-2);
+  color: var(--dim);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1933,62 +2091,63 @@ button {
 }
 .now-tab {
   height: 26px;
-  padding: 0 10px;
+  padding: 0 11px;
   border-radius: 999px;
   cursor: pointer;
   display: inline-flex;
   align-items: center;
   gap: 6px;
   font-size: 12px;
-  border: 1px solid var(--edge);
-  background: color-mix(in srgb, var(--bg-0) 45%, transparent);
+  border: 0;
+  background: var(--ctl-bg);
   color: var(--fg-2);
 }
 .now-tab[aria-selected='true'] {
-  color: var(--gold-pale);
-  border-color: var(--edge-gold);
-  background: color-mix(in srgb, var(--gold) 10%, transparent);
-}
-.now-term {
-  position: relative;
-  z-index: 1;
-  flex: 1 1 auto;
-  min-height: 0;
+  color: var(--fg);
+  background: color-mix(in srgb, var(--blue) 22%, var(--ctl-bg));
 }
 .now-empty {
-  position: absolute;
-  inset: 0;
   display: grid;
   place-items: center;
   text-align: center;
   color: var(--fg-3);
   font-size: 13px;
-  padding: 16px;
+  padding-inline: 16px;
+}
+.now-empty-t {
+  color: var(--fg-2);
+  font-size: 14px;
+  margin-bottom: 4px;
 }
 .now-cols {
   position: relative;
-  z-index: 1;
-  flex: 1 1 auto;
-  min-height: 0;
   display: grid;
   grid-template-columns: repeat(var(--n, 1), minmax(0, 1fr));
   gap: 0;
 }
+/* 几栏并排：只有最左、最右那栏带窗口的圆角；栏与栏之间一道淡线 */
 .now-col {
-  position: relative;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
+  --rtl: 0px;
+  --rtr: 0px;
+  --rbl: 0px;
+  --rbr: 0px;
+}
+.now-col:first-child {
+  --rtl: var(--r-card);
+  --rbl: var(--r-card);
+}
+.now-col:last-child {
+  --rtr: var(--r-card);
+  --rbr: var(--r-card);
 }
 .now-col + .now-col {
-  border-left: 1px solid var(--rule);
+  box-shadow: inset 1px 0 0 var(--line);
 }
 .now-col-head {
-  flex: none;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 16px;
+  padding: 4px 18px 6px;
   min-width: 0;
   flex-wrap: wrap;
 }
@@ -2003,16 +2162,16 @@ button {
 }
 .now-col-head .st {
   font-size: 12px;
-  color: var(--fg-2);
+  color: var(--dim);
   white-space: nowrap;
 }
 .now-open {
   margin-left: auto;
   height: 26px;
-  padding: 0 10px;
+  padding: 0 11px;
   border-radius: 999px;
-  border: 1px solid var(--edge);
-  background: var(--blue-wash);
+  border: 0;
+  background: var(--ctl-bg);
   color: var(--fg-2);
   font-size: 12px;
   cursor: pointer;
@@ -2020,33 +2179,19 @@ button {
 }
 .now-open:hover {
   color: var(--fg);
-  border-color: var(--edge-hi);
-}
-.now-col .now-term {
-  flex: 1 1 auto;
+  background: var(--ctl-hi);
 }
 
-/* ---------- 终端（「此刻」的样式，用户逐项拼出来的） ---------- */
+/* ---------- 终端（「此刻」的样式，用户逐项拼出来的） ----------
+   终端自己是窗格的滚动区（不能往回滚，一直贴底）：最上面的行滚到浮着的头部下面，在窗格的模糊里糊掉 */
 .term {
-  position: absolute;
-  inset: 0;
+  --sc-pt: 4px;
+  --sc-pb: 10px;
+  padding-inline: 12px;
   font: 13px/1.6 var(--font-term);
   color: var(--fg);
   font-synthesis: none;
   font-variant-ligatures: none;
-}
-.term-shade {
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(to top, var(--shade), var(--shade-0));
-  pointer-events: none;
-}
-.term-clip {
-  position: absolute;
-  inset: 0 12px 10px;
-  overflow: hidden;
-  -webkit-mask-image: linear-gradient(to bottom, transparent 0, var(--mask) 30px);
-  mask-image: linear-gradient(to bottom, transparent 0, var(--mask) 30px);
 }
 .term-rows {
   position: absolute;
@@ -2074,7 +2219,7 @@ button {
   animation: tl-in 0.3s var(--ease-out) both;
 }
 .tl.is-luoli {
-  background: var(--gold-wash);
+  background: rgba(255, 255, 255, 0.06);
 }
 .tl-head {
   flex: none;
@@ -2085,7 +2230,7 @@ button {
   color: var(--dim);
 }
 .tl-name {
-  color: var(--who, var(--fg-2));
+  color: color-mix(in srgb, var(--who, var(--fg-2)) 55%, var(--fg-2));
   margin-left: 1ch;
 }
 .tl-sym {
@@ -2104,7 +2249,7 @@ button {
   color: var(--gold);
 }
 .k-tool .tl-sym {
-  color: var(--blue);
+  color: var(--tool);
 }
 .k-tool .tl-body {
   color: var(--tool);
@@ -2187,7 +2332,7 @@ button {
   color: var(--fg-2);
 }
 .tl-think:focus-visible {
-  outline: 2px solid var(--gold);
+  outline: 2px solid var(--blue);
   outline-offset: 1px;
   border-radius: 3px;
 }
@@ -2199,7 +2344,7 @@ button {
   color: var(--dim);
   font-style: normal;
 }
-/* 正文高亮 */
+/* 正文高亮：网址、数字用淡的强调色；@ 某人是强调色的底；提到洛璃（名字、唤醒词、@bot）是金色 */
 .hl-url {
   color: var(--blue);
   text-decoration: underline dashed;
@@ -2207,12 +2352,13 @@ button {
   text-decoration-thickness: 1px;
 }
 .hl-num {
-  color: var(--gold);
+  color: color-mix(in srgb, var(--blue) 60%, var(--fg));
 }
 .hl-at {
   background: var(--blue-soft);
-  border-radius: 4px;
-  padding: 0 3px;
+  color: var(--fg);
+  border-radius: 5px;
+  padding: 0 4px;
 }
 /* 逐字输出时：一个词元一个外层 span，里面的字各自落下。下划线不会画到 inline-block 的字上，改用下边框 */
 .tk.hl-url {
@@ -2228,8 +2374,7 @@ button {
   font-style: italic;
 }
 .hl-hit {
-  color: var(--gold-pale);
-  text-shadow: 0 0 6px var(--gold-glow);
+  color: var(--gold);
 }
 .k-stats .hl-num {
   color: inherit;
@@ -2338,80 +2483,67 @@ button {
 }
 
 /* ---------- 会话 ---------- */
+/* 列表：窗格的滚动区。悬停高亮（.glide）是列表的第一个子元素，行浮在它上面 */
 .list {
-  position: relative;
-  flex: 1 1 auto;
-  min-height: 0;
-  background: var(--p-side);
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  padding: 6px;
-  scrollbar-width: thin;
-  scrollbar-color: color-mix(in srgb, var(--blue) 35%, transparent) transparent;
+  --sc-pt: 4px;
+  --sc-pb: 8px;
+  --hr: 12px;
+  padding-inline: 8px;
+  display: flex;
+  flex-direction: column;
 }
 .li-wrap {
+  flex: none;
   overflow: hidden;
 }
 .conv-item {
   position: relative;
+  z-index: 1;
   width: 100%;
   display: grid;
   grid-template-columns: 34px minmax(0, 1fr) auto;
-  gap: 10px;
+  gap: 11px;
   align-items: center;
-  padding: 8px 10px;
+  padding: 9px 10px;
+  margin-bottom: 1px;
   border-radius: 12px;
-  border: 1px solid transparent;
+  border: 0;
   background: transparent;
   cursor: pointer;
   text-align: left;
-  transition:
-    background-color 0.2s,
-    border-color 0.2s;
+  color: var(--fg);
 }
-.conv-item:hover {
-  background: var(--li-hover);
+/* 键盘焦点环画在行里面（行外面一圈会被 .li-wrap 的 overflow: hidden 裁掉）；悬停高亮不替代它 */
+.conv-item:focus-visible {
+  outline-offset: -2px;
 }
+/* 选中的那行（全屏里正打开的会话）：左边一道强调色的光条，往右淡掉，标题变白；和悬停的那块叠在一起时都看得清 */
 .conv-item[aria-current='true'] {
-  background: var(--li-sel);
-  border-color: var(--li-sel-bd);
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--blue) 20%, transparent),
+    transparent 75%
+  );
+  box-shadow: inset 3px 0 0 var(--blue);
+  border-radius: 4px 12px 12px 4px;
 }
-.conv-item[aria-current='true'] .conv-title,
-.conv-item[aria-current='true'].has-new .conv-title {
-  color: var(--li-sel-t);
-}
-.conv-item[aria-current='true'] .conv-last,
-.conv-item[aria-current='true'] .conv-time {
-  color: var(--li-sel-t2);
-}
-.conv-item[aria-current='true'] .conv-ico {
-  background: var(--li-sel-ico);
-  color: var(--li-sel-t);
+.conv-item[aria-current='true'] .conv-title {
+  color: var(--white);
 }
 .conv-ico {
   width: 34px;
   height: 34px;
-  border-radius: 10px;
+  border-radius: 50%;
   display: grid;
   place-items: center;
   font-size: 12px;
   font-weight: 600;
   color: var(--fg-2);
-  background: color-mix(in srgb, var(--blue) 14%, transparent);
+  background: rgba(255, 255, 255, 0.07);
   letter-spacing: 0;
 }
-.conv-ico[data-p='private'] {
-  background: color-mix(in srgb, var(--pink) 14%, transparent);
-  color: var(--pink-pale);
-}
 .conv-ico[data-p='cli'] {
-  background: color-mix(in srgb, var(--ok) 13%, transparent);
-  color: var(--ok-pale);
   font-family: var(--font-term);
-}
-.conv-ico[data-p='web'] {
-  background: color-mix(in srgb, var(--gold) 13%, transparent);
-  color: var(--gold-pale);
 }
 .conv-main {
   min-width: 0;
@@ -2420,7 +2552,8 @@ button {
 }
 .conv-title {
   color: var(--fg);
-  font-weight: 500;
+  font-weight: 600;
+  font-size: 14px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2440,7 +2573,7 @@ button {
 }
 .conv-time {
   font-size: 11.5px;
-  color: var(--fg-3);
+  color: var(--dim);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -2451,45 +2584,106 @@ button {
   box-sizing: border-box;
   border-radius: 999px;
   background: var(--gold);
-  color: var(--ink);
+  color: var(--on-gold);
   font-size: 11px;
   font-weight: 700;
   line-height: 18px;
   text-align: center;
   font-variant-numeric: tabular-nums;
-  box-shadow: 0 0 10px color-mix(in srgb, var(--gold) 50%, transparent);
 }
 .conv-unread:empty {
   visibility: hidden;
 }
-.conv-item.has-new .conv-title {
-  color: var(--gold-pale);
-}
-.conv-item.has-new::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 18%;
-  bottom: 18%;
-  width: 2px;
-  border-radius: 2px;
-  background: var(--gold);
-  box-shadow: 0 0 8px var(--gold-glow);
-}
+/* 有新用户消息进来的行，整行亮一下（1.4 秒，强调色的底和外圈淡出） */
 @keyframes lit {
   0% {
-    background-color: color-mix(in srgb, var(--gold) 22%, transparent);
-    box-shadow:
-      0 0 0 1px color-mix(in srgb, var(--gold) 50%, transparent),
-      0 0 22px color-mix(in srgb, var(--gold) 30%, transparent);
+    background-color: color-mix(in srgb, var(--blue) 20%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--blue) 45%, transparent);
   }
   100% {
     background-color: transparent;
-    box-shadow: none;
+    box-shadow: inset 0 0 0 1px transparent;
   }
 }
-.conv-item.is-lit {
+.conv-item.is-lit:not([aria-current='true']) {
   animation: lit 1.4s ease-out;
+}
+
+/* ---------- 悬停高亮（components/glide.ts）：会话列表和对话里选会话的菜单 ----------
+   一个列表一块高亮，用 transform 挪到鼠标所在的行，到位时回弹（位置的动画由 glide.ts 用 Web Animations 做，这里不过渡 transform），
+   宽高跟着那一行（平滑、不回弹）；从隐藏到显示先瞬移再淡入，离开列表淡出。
+   样子是边光：底是一团跟着鼠标的淡光，边是 1px 的一圈（单独一层、遮罩挖空），离鼠标近的那段被照亮。
+   关掉动画时不滑：每一行自己淡入淡出（那一行带 .is-hl，画在它自己的 ::before、::after 上） */
+.glide {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 0;
+  box-sizing: border-box;
+  pointer-events: none;
+  opacity: 0;
+  border-radius: var(--hr, 12px);
+  will-change: transform;
+  transition:
+    opacity var(--dur-glide-out) ease,
+    height var(--dur-glide) var(--ease-out),
+    width var(--dur-glide) var(--ease-out);
+}
+.glide.on {
+  opacity: 1;
+  transition-duration: var(--dur-glide-in), var(--dur-glide), var(--dur-glide);
+}
+.glide,
+:is(.conv-item, .chat-menu > button).is-hl::before {
+  background: radial-gradient(
+    240px 110px at var(--mx, 50%) var(--my, 50%),
+    rgba(140, 160, 255, 0.15),
+    rgba(140, 160, 255, 0.045) 65%,
+    rgba(140, 160, 255, 0.03)
+  );
+}
+.glide::after,
+:is(.conv-item, .chat-menu > button).is-hl::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  padding: 1px;
+  background: radial-gradient(
+    130px 66px at var(--mx, 50%) var(--my, 50%),
+    rgba(215, 225, 255, 0.85),
+    rgba(215, 225, 255, 0.12) 75%,
+    rgba(215, 225, 255, 0.06)
+  );
+  -webkit-mask:
+    linear-gradient(var(--mask) 0 0) content-box,
+    linear-gradient(var(--mask) 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(var(--mask) 0 0) content-box exclude,
+    linear-gradient(var(--mask) 0 0);
+}
+/* 关掉动画：每行自己的高亮，平时透明，带 .is-hl 时淡入 */
+:is(.conv-item, .chat-menu > button)::before,
+:is(.conv-item, .chat-menu > button)::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity var(--dur-glide-out) ease;
+}
+:is(.conv-item, .chat-menu > button).is-hl::before,
+:is(.conv-item, .chat-menu > button).is-hl::after {
+  opacity: 1;
+  transition-duration: var(--dur-glide-in);
+}
+/* 整理模式：卡片里的内容不接鼠标，高亮也不出 */
+.arranging .glide {
+  opacity: 0 !important;
 }
 .empty {
   margin: auto;
@@ -2498,50 +2692,40 @@ button {
   color: var(--fg-3);
   font-size: 13px;
 }
+.empty.is-flat {
+  margin: 0;
+  padding: 0;
+}
 .empty b {
   display: block;
   color: var(--fg-2);
   font-weight: 500;
   margin-bottom: 4px;
 }
+.list > .empty {
+  margin-block: auto;
+}
 
+/* 全屏：左边列表暗一档、不画分隔线，右边时间线；窗口标题浮在两栏上面，各栏的头部浮在各自的内容上面 */
 .sess {
-  flex: 1 1 auto;
-  min-height: 0;
   display: grid;
   grid-template-columns: minmax(240px, 300px) minmax(0, 1fr);
 }
 .sess-side {
-  min-width: 0;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  background: var(--p-side);
-  border-right: 1px solid var(--rule);
+  background: var(--side-bg);
 }
 .sess-side-head {
-  flex: none;
-  padding: 10px 14px 4px;
+  padding: 6px 18px 4px;
   font-size: 12px;
-  color: var(--fg-3);
+  color: var(--dim);
   display: flex;
   justify-content: space-between;
 }
-.sess-main {
-  min-width: 0;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  background: var(--p-main);
-}
 .sess-main-head {
-  flex: none;
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 10px 18px;
-  background: var(--p-head);
-  border-bottom: 1px solid var(--rule);
+  padding: 4px 24px 8px;
   min-width: 0;
 }
 .sess-main-head h3 {
@@ -2556,8 +2740,8 @@ button {
   max-width: 60%;
 }
 .sess-meta {
-  font-size: 12px;
-  color: var(--fg-3);
+  font-size: 12.5px;
+  color: var(--dim);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2568,32 +2752,29 @@ button {
 }
 .pchip {
   font-size: 11px;
-  padding: 1px 8px;
+  line-height: 18px;
+  padding: 0 8px;
   border-radius: 999px;
-  background: var(--blue-wash);
   color: var(--fg-2);
-  border: 1px solid var(--edge);
+  box-shadow: inset 0 0 0 1px var(--line-hi);
   white-space: nowrap;
   flex: none;
 }
 
-/* 时间线：聊天气泡 */
+/* ---------- 时间线：玻璃气泡 ---------- */
 .tline {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  padding: 16px 18px 20px;
+  --sc-pt: 12px;
+  --sc-pb: 18px;
+  padding-inline: 24px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  scrollbar-width: thin;
-  scrollbar-color: color-mix(in srgb, var(--blue) 35%, transparent) transparent;
+  gap: 12px;
 }
 .msg {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
+  gap: 4px;
   max-width: min(78%, 640px);
   min-width: 0;
 }
@@ -2602,16 +2783,17 @@ button {
   align-items: flex-end;
 }
 .msg-meta {
-  font-size: 12px;
-  color: var(--fg-3);
-  margin: 0 6px 3px;
+  font-size: 11.5px;
+  color: var(--dim);
+  margin: 0 4px;
   display: flex;
-  gap: 8px;
+  gap: 6px;
   align-items: baseline;
 }
+/* 名字：每人一色，调淡；洛璃的是金色 */
 .msg-meta b {
-  font-weight: 500;
-  color: var(--who, var(--fg-2));
+  font-weight: 600;
+  color: color-mix(in srgb, var(--who, var(--fg-2)) 55%, var(--fg-2));
 }
 .msg-meta time {
   font-variant-numeric: tabular-nums;
@@ -2620,18 +2802,21 @@ button {
 .msg-meta .queued {
   padding: 0 8px;
   border-radius: 999px;
-  border: 1px dashed color-mix(in srgb, var(--gold) 55%, transparent);
-  color: var(--gold-pale);
+  background: var(--ctl-bg);
+  color: var(--fg-2);
   font-size: 11px;
   line-height: 16px;
 }
+/* 气泡：半透明的底加一道细边，圆角 16，靠近说话人的那个下角收尖（5）；群友在左，自己和洛璃在右 */
 .bubble {
   position: relative;
-  padding: 9px 13px;
-  border-radius: 14px 14px 14px 4px;
+  padding: 8px 13px;
+  border-radius: 16px 16px 16px 5px;
   min-width: 0;
   max-width: 100%;
   box-sizing: border-box;
+  font-size: 13.5px;
+  line-height: 1.6;
   background: var(--b-o-bg);
   border: 1px solid var(--b-o-bd);
   color: var(--b-o-fg);
@@ -2639,11 +2824,13 @@ button {
   white-space: pre-wrap;
   user-select: text;
 }
+.msg.is-me .bubble {
+  border-radius: 16px 16px 5px 16px;
+}
 .msg.is-luoli .bubble {
   background: var(--b-l-bg);
   border-color: var(--b-l-bd);
   color: var(--b-l-fg);
-  border-radius: 14px 14px 4px 14px;
 }
 .msg.is-luoli .msg-meta b {
   color: var(--gold);
@@ -2652,11 +2839,18 @@ button {
   background: var(--b-m-bg);
   border-color: var(--b-m-bd);
   color: var(--b-m-fg);
-  border-radius: 14px 14px 4px 14px;
+}
+/* 对话部件里洛璃在左、左下角收尖（用户定的，同演示页）；全屏时间线里照旧在右 */
+.chat .msg.is-luoli {
+  align-self: flex-start;
+  align-items: flex-start;
+}
+.chat .msg.is-luoli .bubble {
+  border-radius: 16px 16px 16px 5px;
 }
 .msg.is-you .bubble .hl-num,
 .msg.is-you .bubble .hl-url {
-  color: var(--b-m-num);
+  color: var(--white);
 }
 @keyframes msg-in {
   from {
@@ -2667,21 +2861,22 @@ button {
 .msg.is-new {
   animation: msg-in 0.35s var(--ease-out) both;
 }
+/* 中止、出错的标记 */
 .mark {
   display: block;
-  margin-top: 4px;
+  margin-top: 2px;
   font-size: 12px;
   font-style: italic;
-  color: var(--fg-2);
-  opacity: 0.85;
+  color: var(--dim);
 }
 .mark.is-err {
   color: var(--err);
 }
+/* 思考、工具调用：折叠。思考是一颗强调色的小胶囊（「思考了 3 秒」），工具是一行等宽字（「◇ fetch · 网址 ✓ 0.6s」） */
 .fold {
-  margin: 0 0 6px;
-  font-size: 12.5px;
-  color: var(--fg-2);
+  margin: 0 0 5px;
+  font-size: 11.5px;
+  color: var(--fg-3);
   white-space: normal;
 }
 .fold summary {
@@ -2690,33 +2885,41 @@ button {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  color: var(--fg-2);
-  padding: 2px 8px;
+  max-width: 100%;
+}
+.fold.is-think summary,
+.fold-tag {
+  color: var(--fg-3);
+  padding: 0 9px;
   border-radius: 999px;
-  background: var(--fold-bg);
-  border: 1px solid var(--fold-bd);
+  background: color-mix(in srgb, var(--blue) 14%, transparent);
 }
 .fold-tag {
   display: inline-flex;
   align-items: center;
-  color: var(--fg-2);
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: var(--fold-bg);
-  border: 1px solid var(--fold-bd);
   font-style: italic;
+}
+.fold.is-tool summary {
+  font: 11.5px/1.6 var(--font-term);
+  color: var(--tool);
+}
+.fold.is-tool summary > span:first-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .fold summary::-webkit-details-marker {
   display: none;
 }
 .fold summary::after {
   content: '';
+  flex: none;
   width: 0.38em;
   height: 0.38em;
   margin-left: 0.1em;
-  border-right: 1.5px solid var(--fg-3);
-  border-bottom: 1.5px solid var(--fg-3);
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
   transform: rotate(-45deg);
+  opacity: 0.7;
   transition: transform 0.2s;
 }
 .fold[open] summary::after {
@@ -2726,8 +2929,10 @@ button {
   margin-top: 6px;
   padding: 8px 10px;
   border-radius: 10px;
-  background: var(--fold-body);
+  background: var(--in-bg);
+  box-shadow: inset 0 0 0 1px var(--in-bd);
   color: var(--fg-2);
+  font-size: 12.5px;
 }
 .fold .ok {
   color: var(--ok);
@@ -2739,7 +2944,10 @@ button {
   display: flex;
   gap: 6px;
   flex-wrap: wrap;
-  margin-bottom: 4px;
+  margin-bottom: 6px;
+}
+.msg-imgs.is-out {
+  margin: 6px 0 0;
 }
 .msg-imgs .thumb {
   --tw: 120px;
@@ -2760,13 +2968,11 @@ button {
   width: 160px;
   height: 120px;
   max-width: 100%;
-  border-radius: 8px;
+  border-radius: 10px;
   overflow: hidden;
   vertical-align: middle;
-  background: var(--fold-body);
-  box-shadow:
-    0 0 0 1px color-mix(in srgb, var(--white) 10%, transparent),
-    0 6px 14px -6px color-mix(in srgb, var(--black) 70%, transparent);
+  background: var(--in-bg);
+  box-shadow: 0 6px 14px -6px color-mix(in srgb, var(--black) 70%, transparent);
 }
 .pic img {
   display: block;
@@ -2780,8 +2986,7 @@ button {
   justify-content: center;
   width: 120px;
   height: 84px;
-  box-shadow: none;
-  border: 1px dashed var(--rule-hi);
+  box-shadow: inset 0 0 0 1px var(--in-bd);
   color: var(--fg-3);
   font-size: 12px;
 }
@@ -2812,10 +3017,11 @@ button {
   flex: none;
   white-space: nowrap;
 }
-/* 时间线顶上的小提示（加载更早的消息）：贴在顶边，不占位置 */
+/* 时间线顶上的小提示（加载更早的消息、连不上服务）：贴在浮着的标题下面，不占位置 */
 .log-top {
   position: sticky;
-  top: 0;
+  /* sticky 从滚动区的内容框量起，内容框的上沿已经在浮着的标题下面（--ht）再加留白（--sc-pt）：减掉留白，贴在标题下沿 4px */
+  top: calc(4px - var(--sc-pt, 0px));
   height: 0;
   z-index: 3;
   display: flex;
@@ -2824,14 +3030,14 @@ button {
   pointer-events: none;
 }
 .log-pill {
-  margin-top: -4px;
   padding: 3px 12px;
   border-radius: 999px;
   font-size: 12px;
   color: var(--fg-2);
-  background: var(--fold-bg);
-  border: 1px solid var(--fold-bd);
-  backdrop-filter: blur(6px);
+  background: var(--glass);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  box-shadow: var(--glass-edge);
   pointer-events: auto;
 }
 .log-pill.is-err {
@@ -2841,35 +3047,25 @@ button {
   all: unset;
   cursor: pointer;
   margin-left: 8px;
-  color: var(--gold);
+  color: var(--fg);
   font-size: 12px;
-  padding: 0 6px;
+  padding: 0 9px;
   border-radius: 999px;
-  border: 1px solid var(--edge-gold);
+  background: var(--ctl-bg);
+}
+.log-retry:hover {
+  background: var(--ctl-hi);
 }
 .empty .log-retry {
   display: inline-block;
   margin: 8px 0 0;
-  padding: 2px 10px;
+  padding: 2px 12px;
 }
 .log-retry:focus-visible {
-  outline: 2px solid var(--gold);
+  outline: 2px solid var(--blue);
   outline-offset: 2px;
 }
-/* 「以下是新消息」：金色的分隔线 */
-.seg-line.is-new {
-  color: var(--gold);
-}
-.seg-line.is-new::before,
-.seg-line.is-new::after {
-  background: linear-gradient(
-    90deg,
-    transparent,
-    var(--edge-gold) 35%,
-    var(--edge-gold) 65%,
-    transparent
-  );
-}
+/* 段的分隔线（会话开始、空闲后新的一段、压缩）和摘要 */
 .seg {
   align-self: stretch;
   display: flex;
@@ -2882,8 +3078,8 @@ button {
   width: 100%;
   display: flex;
   align-items: center;
-  gap: 10px;
-  color: var(--fg-3);
+  gap: 12px;
+  color: var(--dim);
   font-size: 12px;
 }
 .seg-line::before,
@@ -2891,13 +3087,7 @@ button {
   content: '';
   flex: 1;
   height: 1px;
-  background: linear-gradient(
-    90deg,
-    transparent,
-    var(--rule-hi) 35%,
-    var(--rule-hi) 65%,
-    transparent
-  );
+  background: var(--line);
 }
 .seg-line span {
   white-space: nowrap;
@@ -2905,40 +3095,53 @@ button {
   text-overflow: ellipsis;
   min-width: 0;
 }
+/* 「以下是新消息」：金色的字和淡金的线 */
+.seg-line.is-new {
+  color: var(--gold);
+}
+.seg-line.is-new::before,
+.seg-line.is-new::after {
+  background: color-mix(in srgb, var(--gold) 30%, transparent);
+}
 .seg-btn {
   all: unset;
   cursor: pointer;
   font-size: 12px;
-  color: var(--gold);
-  padding: 1px 8px;
+  color: var(--fg-2);
+  padding: 0 9px;
   border-radius: 999px;
-  border: 1px solid var(--edge-gold);
+  background: var(--ctl-bg);
+}
+.seg-btn:hover {
+  background: var(--ctl-hi);
+  color: var(--fg);
 }
 .seg-btn:focus-visible {
-  outline: 2px solid var(--gold);
+  outline: 2px solid var(--blue);
   outline-offset: 2px;
 }
 .seg-sum {
   max-width: 560px;
   padding: 10px 14px;
   border-radius: 12px;
-  background: var(--sum-bg);
-  border: 1px dashed var(--sum-bd);
+  background: var(--in-bg);
+  box-shadow: inset 0 0 0 1px var(--in-bd);
   color: var(--fg-2);
   font-size: 13px;
 }
 .seg-sum b {
   display: block;
-  color: var(--gold);
+  color: var(--fg-3);
   font-weight: 500;
   font-size: 12px;
   margin-bottom: 2px;
   letter-spacing: 0.06em;
 }
+/* 正在回复：洛璃的气泡里三个点 */
 .typing {
   display: inline-flex;
   gap: 4px;
-  padding: 12px 14px;
+  padding: 8px 4px;
 }
 .typing i {
   width: 6px;
@@ -2968,38 +3171,37 @@ button {
   animation-delay: 0.3s;
 }
 
-/* ---------- 对话 ---------- */
-.chat {
-  flex: 1 1 auto;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  background: var(--p-main);
-}
+/* ---------- 对话 ----------
+   一个窗格：选会话、新对话那一行浮在上面，输入框浮在下面，消息铺满整块 */
 .chat-bar {
-  flex: none;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 12px;
-  background: var(--p-head);
-  border-bottom: 1px solid var(--rule);
+  padding: 2px 14px 8px;
   min-width: 0;
   position: relative;
 }
 .chat-pick {
   min-width: 0;
-  height: 30px;
-  padding: 0 10px;
+  height: 28px;
+  padding: 0 11px;
   border-radius: 999px;
-  border: 1px solid var(--edge);
-  background: color-mix(in srgb, var(--bg-0) 35%, transparent);
-  color: var(--fg);
+  border: 0;
+  background: var(--ctl-bg);
+  color: var(--fg-2);
   cursor: pointer;
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-size: 13px;
+  font-size: 12.5px;
+  transition:
+    background-color var(--dur-hover),
+    color var(--dur-hover);
+}
+.chat-pick:hover,
+.chat-pick[aria-expanded='true'] {
+  background: var(--ctl-hi);
+  color: var(--fg);
 }
 .chat-pick span {
   white-space: nowrap;
@@ -3019,36 +3221,70 @@ button {
 }
 .chat-new {
   margin-left: auto;
-  height: 30px;
+  height: 28px;
   padding: 0 12px;
   border-radius: 999px;
-  border: 1px solid var(--edge-gold);
-  background: var(--gold-soft);
-  color: var(--gold-pale);
+  border: 0;
+  background: var(--ctl-bg);
+  color: var(--fg-2);
   cursor: pointer;
-  font-size: 13px;
+  font-size: 12.5px;
   white-space: nowrap;
   flex: none;
+  transition:
+    background-color var(--dur-hover),
+    color var(--dur-hover);
 }
+.chat-new:hover {
+  background: var(--ctl-hi);
+  color: var(--fg);
+}
+.chat-new.is-side {
+  margin: 6px 16px 6px;
+  align-self: flex-start;
+}
+.chat-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+/* 选会话的下拉菜单：玻璃底；当前会话那项是强调色 15% 的底；悬停高亮同会话列表（.glide） */
 .chat-menu {
+  --hr: 9px;
   position: absolute;
   left: 12px;
-  top: 40px;
+  top: calc(100% - 2px);
   z-index: 10;
   width: min(280px, calc(100% - 24px));
-  max-height: 260px;
+  /* 不超出窗口：窗口矮时在菜单里面滚（--ph 是窗格的高度，--ht 是上浮层到这一行下沿的高度） */
+  max-height: min(260px, calc(var(--ph, 9999px) - var(--ht, 0px) - 8px));
+  box-sizing: border-box;
   overflow-y: auto;
-  padding: 6px;
-  border-radius: 12px;
-  background: var(--card-hi);
-  border: 1px solid var(--edge-hi);
-  box-shadow: 0 18px 40px -12px color-mix(in srgb, var(--black) 85%, transparent);
+  overscroll-behavior: contain;
+  padding: 5px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  border-radius: 14px;
+  background: var(--glass);
+  -webkit-backdrop-filter: blur(16px) saturate(1.2);
+  backdrop-filter: blur(16px) saturate(1.2);
+  box-shadow: var(--glass-edge);
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--blue) 35%, transparent) transparent;
 }
-.chat-menu button {
+.chat-menu > button {
+  position: relative;
+  z-index: 1;
+  flex: none;
   width: 100%;
   text-align: left;
   padding: 7px 10px;
-  border-radius: 8px;
+  border-radius: 9px;
   border: 0;
   background: transparent;
   cursor: pointer;
@@ -3056,10 +3292,11 @@ button {
   justify-content: space-between;
   gap: 8px;
   font-size: 13px;
+  color: var(--fg-2);
 }
-.chat-menu button:hover,
-.chat-menu button[aria-current='true'] {
-  background: var(--blue-wash);
+.chat-menu > button[aria-current='true'] {
+  background: color-mix(in srgb, var(--blue) 15%, transparent);
+  color: var(--fg);
 }
 .chat-menu button span {
   white-space: nowrap;
@@ -3068,34 +3305,39 @@ button {
   min-width: 0;
 }
 .chat-menu time {
-  color: var(--fg-3);
+  color: var(--dim);
   font-size: 12px;
   flex: none;
 }
-.chat .tline {
-  padding: 10px 14px 12px;
+.chat-menu-new {
+  color: var(--fg);
 }
+.chat .tline {
+  --sc-pt: 10px;
+  --sc-pb: 12px;
+  padding-inline: 16px;
+}
+/* 输入框：浮在消息上面，半透明的面板 */
 .chat-in {
-  flex: none;
-  margin: 0 10px 10px;
-  padding: 8px;
-  border-radius: 14px;
-  border: 1px solid var(--rule-hi);
-  background: var(--p-in);
+  margin: 6px 12px 12px;
+  padding: 9px 10px 7px 13px;
+  border-radius: 16px;
+  border: 1px solid var(--in-bd);
+  background: var(--in-bg);
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
   transition:
     border-color 0.2s,
     box-shadow 0.2s;
 }
 .chat-in:focus-within {
-  border-color: color-mix(in srgb, var(--blue) 55%, transparent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 14%, transparent);
+  border-color: color-mix(in srgb, var(--blue) 45%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 12%, transparent);
 }
 .chat-in.is-drop {
-  border-color: var(--gold);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--gold) 18%, transparent);
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 22%, transparent);
 }
 /* 待发的图片排成一行，多了横着滚：不换行，输入区的高度和一两张图时一样，上面的消息区不被挤。
    右上角的 × 伸出缩略图（-6px），滚动容器会把伸出去的裁掉，所以上、右留出边 */
@@ -3130,7 +3372,7 @@ button {
   place-items: center;
   border-radius: 6px;
   background: color-mix(in srgb, var(--black) 45%, transparent);
-  color: var(--gold-pale);
+  color: var(--fg);
   font-weight: 700;
 }
 .att-state.is-bad {
@@ -3143,7 +3385,7 @@ button {
 /* 输入框上的提示（图片超限、上传失败） */
 .chat-note {
   font-size: 12px;
-  padding: 0 6px;
+  padding: 0 2px;
   color: var(--fg-2);
 }
 .chat-note.is-err {
@@ -3151,7 +3393,7 @@ button {
 }
 /* 出错的回复下面的「重试」 */
 .msg .chat-retry {
-  margin: 6px 4px 0;
+  margin: 4px 4px 0;
   padding: 2px 14px;
   font-size: 12.5px;
 }
@@ -3162,8 +3404,9 @@ button {
   width: 20px;
   height: 20px;
   border-radius: 50%;
-  border: 1px solid var(--edge-hi);
-  background: var(--card-solid);
+  border: 0;
+  background: var(--glass);
+  box-shadow: var(--glass-edge);
   color: var(--fg);
   cursor: pointer;
   font-size: 11px;
@@ -3185,59 +3428,52 @@ button {
   outline: none;
   background: transparent;
   color: var(--fg);
-  font: 14px/1.5 var(--font-ui);
-  padding: 4px 6px;
+  font: 13.5px/1.5 var(--font-ui);
+  padding: 3px 0;
   max-height: 140px;
   min-height: 22px;
 }
 .chat-ta::placeholder {
-  color: var(--fg-3);
+  color: var(--dim);
 }
+/* 发送：强调色的胶囊；生成中、输入框空着时是「中止」 */
 .chat-send {
   flex: none;
-  height: 32px;
-  min-width: 56px;
-  padding: 0 12px;
-  border-radius: 10px;
+  height: 28px;
+  min-width: 52px;
+  padding: 0 13px;
+  border-radius: 999px;
   cursor: pointer;
-  font-size: 13px;
-  font-weight: 500;
-  border: 1px solid var(--edge-gold);
-  background: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--gold) 32%, transparent),
-    color-mix(in srgb, var(--gold) 18%, transparent)
-  );
-  color: var(--gold-pale);
+  font-size: 12.5px;
+  font-weight: 600;
+  border: 0;
+  background: var(--blue);
+  color: var(--on-blue);
 }
 .chat-send:disabled {
   opacity: 0.6;
   cursor: default;
 }
 .chat-send.is-stop {
-  border-color: color-mix(in srgb, var(--err) 50%, transparent);
-  background: color-mix(in srgb, var(--err) 16%, transparent);
+  background: color-mix(in srgb, var(--err) 24%, transparent);
   color: var(--err-pale);
 }
 .chat-hint {
-  font-size: 11.5px;
-  color: var(--fg-3);
-  padding: 0 6px;
+  font-size: 11px;
+  color: var(--dim);
   display: flex;
   justify-content: space-between;
   gap: 8px;
 }
 .chat-full {
-  flex: 1 1 auto;
-  min-height: 0;
   display: grid;
   grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
 }
-.chat-full .sess-side {
-  border-right: 1px solid var(--rule);
+.chat-full .chat-bar {
+  padding: 4px 24px 8px;
 }
-.chat-full .chat-bar .chat-pick {
-  display: none;
+.chat-full .tline {
+  padding-inline: 24px;
 }
 .bubble .ch {
   white-space: pre-wrap;
@@ -3245,35 +3481,34 @@ button {
 
 /* ---------- 设置（骨架） ---------- */
 .skel {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
-  padding: 10px 14px 14px;
+  --sc-pt: 0px;
+  --sc-pb: 12px;
+  padding-inline: 12px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  -webkit-mask-image: linear-gradient(to bottom, var(--mask) calc(100% - 34px), transparent);
-  mask-image: linear-gradient(to bottom, var(--mask) calc(100% - 34px), transparent);
+  gap: 10px;
 }
 .skel-note {
   font-size: 12px;
-  color: var(--gold);
+  color: color-mix(in srgb, var(--gold) 75%, var(--fg-2));
   display: flex;
   align-items: center;
   gap: 6px;
+  padding: 0 6px;
 }
+/* 分组：半透明的面板加一道细边 */
 .skel-group {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 7px 10px;
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--bg-0) 30%, transparent);
-  border: 1px solid color-mix(in srgb, var(--fg-2) 8%, transparent);
+  padding: 8px 12px;
+  border-radius: 12px;
+  background: var(--in-bg);
+  box-shadow: inset 0 0 0 1px var(--in-bd);
 }
 .skel-group b {
-  font-weight: 500;
-  font-size: 13px;
+  font-weight: 600;
+  font-size: 12.5px;
   color: var(--fg-2);
   flex: none;
   min-width: 6em;
@@ -3281,16 +3516,17 @@ button {
 .skel-live {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  padding: 10px 12px 12px;
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--bg-0) 30%, transparent);
-  border: 1px solid var(--edge-gold);
+  gap: 8px;
+  padding: 8px 12px 10px;
+  border-radius: 12px;
+  background: var(--in-bg);
+  box-shadow: inset 0 0 0 1px var(--in-bd);
 }
 .skel-live > b {
-  font-weight: 500;
-  font-size: 13px;
-  color: var(--gold-pale);
+  font-weight: 600;
+  font-size: 12.5px;
+  color: var(--fg-2);
+  padding: 2px 0;
 }
 /* 桌面卡片里紧凑一些：标签在左、选项在右，放不下就换行；说明文字不占地方（悬停时看 title，全屏里有） */
 .skel-live .set-field {
@@ -3300,6 +3536,10 @@ button {
   justify-content: space-between;
   gap: 6px 12px;
 }
+.skel-live .set-field .set-label {
+  font-size: 12.5px;
+  color: var(--fg-2);
+}
 .skel-live .set-field .seg-ctl,
 .skel-live .set-field .chip {
   align-self: center;
@@ -3308,31 +3548,30 @@ button {
   display: none;
 }
 .skel-bar {
-  height: 8px;
+  height: 6px;
   border-radius: 999px;
-  background: linear-gradient(
-    90deg,
-    color-mix(in srgb, var(--blue) 16%, transparent),
-    color-mix(in srgb, var(--blue) 6%, transparent)
-  );
+  background: var(--line);
   flex: 1 1 auto;
   min-width: 0;
 }
+/* 全屏：左边分组导航（暗一档，不画分隔线），右边表单；两栏各是一个窗格 */
 .set-full {
-  flex: 1 1 auto;
-  min-height: 0;
   display: grid;
   grid-template-columns: 220px minmax(0, 1fr);
 }
+.set-nav-pane {
+  background: var(--side-bg);
+}
 .set-nav {
-  padding: 12px;
+  --sc-pt: 4px;
+  --sc-pb: 12px;
+  padding-inline: 10px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  border-right: 1px solid var(--rule);
-  overflow-y: auto;
+  gap: 2px;
 }
 .set-nav button {
+  flex: none;
   text-align: left;
   padding: 8px 12px;
   border-radius: 10px;
@@ -3340,19 +3579,25 @@ button {
   background: transparent;
   color: var(--fg-2);
   cursor: pointer;
+  transition:
+    background-color var(--dur-hover),
+    color var(--dur-hover);
+}
+.set-nav button:hover {
+  background: var(--ctl-bg);
+  color: var(--fg);
 }
 .set-nav button[aria-current='true'] {
-  background: var(--blue-wash);
+  background: color-mix(in srgb, var(--blue) 15%, transparent);
   color: var(--fg);
 }
 .set-main {
-  min-width: 0;
-  overflow-y: auto;
-  padding: 20px 28px;
+  --sc-pt: 6px;
+  --sc-pb: 24px;
+  padding-inline: 28px;
   display: flex;
   flex-direction: column;
   gap: 18px;
-  background: var(--p-main);
 }
 .set-main h3 {
   margin: 0;
@@ -3376,7 +3621,7 @@ button {
   max-width: 100%;
 }
 .set-field .seg-ctl button {
-  padding: 0 14px;
+  padding: 0 12px;
 }
 .set-hint,
 .set-note {
@@ -3395,8 +3640,8 @@ button {
 .set-input {
   height: 34px;
   border-radius: 10px;
-  border: 1px dashed color-mix(in srgb, var(--fg-2) 20%, transparent);
-  background: color-mix(in srgb, var(--bg-0) 35%, transparent);
+  background: var(--in-bg);
+  box-shadow: inset 0 0 0 1px var(--in-bd);
 }
 .set-input.is-tall {
   height: 120px;
@@ -3404,38 +3649,43 @@ button {
 .ribbon {
   align-self: flex-start;
   font-size: 12px;
-  padding: 3px 10px;
+  padding: 3px 11px;
   border-radius: 999px;
-  background: var(--gold-soft);
-  border: 1px solid var(--edge-gold);
-  color: var(--gold-pale);
+  background: var(--ctl-bg);
+  color: color-mix(in srgb, var(--gold) 75%, var(--fg-2));
 }
 
 /* ---------- 今日概况 ---------- */
 .today {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
-  padding: 12px 16px 14px;
+  --sc-pt: 2px;
+  --sc-pb: 12px;
+  padding-inline: 18px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
+}
+.today.is-full {
+  --sc-pt: 12px;
+  --sc-pb: 24px;
+  padding-inline: 28px;
+  gap: 22px;
 }
 .today-hero {
   display: flex;
   align-items: baseline;
   gap: 8px;
+  padding-bottom: 2px;
 }
 .today-hero .roll {
-  font-size: 40px;
+  font-size: 42px;
   font-weight: 600;
-  line-height: 1;
-  color: var(--gold-pale);
+  line-height: 1.1;
+  color: var(--fg);
   letter-spacing: -0.01em;
-  text-shadow: 0 0 22px color-mix(in srgb, var(--gold) 35%, transparent);
 }
 .today-hero span {
-  color: var(--fg-2);
+  color: var(--fg-3);
+  font-size: 13px;
 }
 .stat {
   display: flex;
@@ -3446,13 +3696,14 @@ button {
   display: flex;
   justify-content: space-between;
   gap: 10px;
-  font-size: 13px;
+  font-size: 12.5px;
   color: var(--fg-2);
   min-width: 0;
   flex-wrap: wrap;
+  font-variant-numeric: tabular-nums;
 }
 .stat-row b {
-  font-weight: 500;
+  font-weight: 600;
   color: var(--fg);
 }
 .roll {
@@ -3460,7 +3711,7 @@ button {
   display: inline-block;
 }
 .roll.is-up {
-  color: var(--gold-pale);
+  color: var(--white);
 }
 .today-grid {
   display: grid;
@@ -3470,8 +3721,8 @@ button {
 .tile {
   padding: 14px 16px;
   border-radius: 14px;
-  background: color-mix(in srgb, var(--bg-0) 35%, transparent);
-  border: 1px solid color-mix(in srgb, var(--fg-2) 10%, transparent);
+  background: var(--in-bg);
+  box-shadow: inset 0 0 0 1px var(--in-bd);
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -3511,15 +3762,12 @@ button {
   font-variant-numeric: tabular-nums;
 }
 
-/* 能量槽 */
+/* 能量槽：细的一条，强调色到金色；失败率是红色 */
 .energy {
   position: relative;
-  height: 10px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--white) 6%, transparent);
-  box-shadow:
-    inset 0 1px 2px color-mix(in srgb, var(--black) 50%, transparent),
-    0 0 0 1px color-mix(in srgb, var(--fg-2) 10%, transparent);
+  height: 6px;
+  border-radius: 3px;
+  background: var(--ctl-bg);
   overflow: hidden;
 }
 .energy-fill {
@@ -3530,39 +3778,13 @@ button {
   width: 0;
   border-radius: inherit;
   background: linear-gradient(90deg, var(--blue), var(--gold));
-  box-shadow: 0 0 12px color-mix(in srgb, var(--gold) 40%, transparent);
   transition: width 0.9s var(--ease-out);
 }
-.energy-fill::after {
-  content: '';
-  position: absolute;
-  right: 0;
-  top: -2px;
-  bottom: -2px;
-  width: 6px;
-  border-radius: 3px;
-  background: var(--gold-pale);
-  box-shadow: 0 0 10px 2px color-mix(in srgb, var(--gold-pale) 80%, transparent);
-}
 .energy.is-bad .energy-fill {
-  background: linear-gradient(90deg, color-mix(in srgb, var(--err) 50%, transparent), var(--err));
-  box-shadow: 0 0 10px color-mix(in srgb, var(--err) 40%, transparent);
-}
-.energy.is-bad .energy-fill::after {
-  background: var(--err-pale);
-  box-shadow: 0 0 8px 2px color-mix(in srgb, var(--err) 70%, transparent);
+  background: var(--err);
 }
 .energy-ticks {
-  position: absolute;
-  inset: 0;
-  background: repeating-linear-gradient(
-    90deg,
-    transparent 0,
-    transparent calc(10% - 2px),
-    color-mix(in srgb, var(--bg-0) 55%, transparent) calc(10% - 2px),
-    color-mix(in srgb, var(--bg-0) 55%, transparent) 10%
-  );
-  pointer-events: none;
+  display: none;
 }
 @keyframes energy-shine {
   from {
@@ -3601,8 +3823,10 @@ button {
   padding: 9px 16px;
   border-radius: 999px;
   box-sizing: border-box;
-  background: var(--card-hi);
-  border: 1px solid var(--edge-gold);
+  background: var(--glass);
+  -webkit-backdrop-filter: blur(16px) saturate(1.2);
+  backdrop-filter: blur(16px) saturate(1.2);
+  box-shadow: var(--glass-edge);
   color: var(--fg);
   font-size: 13px;
   opacity: 0;
@@ -3625,10 +3849,10 @@ button {
   }
   .top {
     gap: 8px;
-    background: color-mix(in srgb, var(--space-0) 88%, transparent);
+    background: color-mix(in srgb, var(--bg-0) 88%, transparent);
     -webkit-backdrop-filter: blur(12px);
     backdrop-filter: blur(12px);
-    box-shadow: 0 1px 0 color-mix(in srgb, var(--fg-2) 10%, transparent);
+    box-shadow: 0 1px 0 var(--line);
   }
   .top-in {
     gap: 8px;
@@ -3692,9 +3916,13 @@ button {
   .chat-full {
     grid-template-columns: minmax(0, 1fr);
   }
-  .sess-side,
-  .chat-full .sess-side {
-    border-right: 0;
+  /* 窄屏的全屏：两栏变两层（列表、详情），各占满窗口，带全部四个角 */
+  .pane.is-side,
+  .pane.is-main {
+    --rtl: var(--r-card);
+    --rtr: var(--r-card);
+    --rbl: var(--r-card);
+    --rbr: var(--r-card);
   }
   .sess.is-detail .sess-side,
   .chat-full.is-detail .sess-side {
@@ -3707,28 +3935,43 @@ button {
   .sess-back {
     display: inline-flex;
   }
+  /* 设置：分组导航是窗口标题下面横着的一条（标题加一行按钮那么高），下面是内容；导航那一栏带上面两个角，内容带下面两个 */
   .set-full {
     grid-template-columns: minmax(0, 1fr);
-    /* 分组导航只占它自己的高度，剩下的给内容（内容矮时不让导航被撑高，内容高时在里面滚动） */
-    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-rows: calc(var(--head-h) + 56px) minmax(0, 1fr);
   }
-  .set-nav {
+  .set-nav-pane {
+    --rbl: 0px;
+    --rbr: 0px;
+  }
+  .set-main-pane {
+    --rtl: 0px;
+    --rtr: 0px;
+  }
+  .set-main-pane .pane-hsp {
+    height: 0;
+  }
+  /* 横着的一条：只横向滚（.pane > .pane-sc 的 overflow-y: auto 特异度更高，这里要写得比它高）；
+     高度留出横向滚动条，竖向不溢出，底下那组模糊也就不出现 */
+  .pane > .set-nav.pane-sc {
+    --sc-pt: 0px;
+    --sc-pb: 6px;
     flex-direction: row;
+    align-items: center;
     overflow-x: auto;
-    border-right: 0;
-    border-bottom: 1px solid color-mix(in srgb, var(--fg-2) 10%, transparent);
+    overflow-y: hidden;
   }
   .set-nav button {
     white-space: nowrap;
   }
   .set-main {
-    padding: 16px;
+    --sc-pt: 14px;
+    padding-inline: 16px;
   }
   .msg {
     max-width: 88%;
   }
   .w-head {
-    height: 44px;
     cursor: pointer;
   }
   .arrange-bar {
@@ -3738,16 +3981,30 @@ button {
   .tray {
     bottom: calc(68px + env(safe-area-inset-bottom, 0px));
   }
-  .w-arr {
-    inset: 44px 0 0;
-  }
+  /* 「此刻」全屏的几栏上下叠：只有第一栏顶上空出标题，第一栏带上面两个角、最后一栏带下面两个 */
   .now-cols {
     grid-template-columns: minmax(0, 1fr);
     grid-auto-rows: minmax(0, 1fr);
   }
+  .now-col {
+    --rtl: 0px;
+    --rtr: 0px;
+    --rbl: 0px;
+    --rbr: 0px;
+  }
+  .now-col:first-child {
+    --rtl: var(--r-card);
+    --rtr: var(--r-card);
+  }
+  .now-col:last-child {
+    --rbl: var(--r-card);
+    --rbr: var(--r-card);
+  }
   .now-col + .now-col {
-    border-left: 0;
-    border-top: 1px solid color-mix(in srgb, var(--fg-2) 10%, transparent);
+    box-shadow: inset 0 1px 0 var(--line);
+  }
+  .now-col + .now-col .pane-hsp {
+    height: 0;
   }
 }
 @media (max-width: 380px) {
@@ -3779,7 +4036,7 @@ button {
 .still .arranging .cap-wrap > .cap {
   animation: none !important;
   transform: none !important;
-  outline: 1px dashed color-mix(in srgb, var(--gold) 45%, transparent);
+  outline: 1px dashed color-mix(in srgb, var(--blue) 45%, transparent);
   outline-offset: 3px;
 }
 .still .arrange-bar,

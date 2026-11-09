@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { IconSessions } from '../../components/icons';
+import { Pane } from '../../components/Pane';
 import { bus } from '../../model/bus';
 import type { BusEventName } from '../../model/bus';
 import { db } from '../../model/db';
@@ -58,16 +59,19 @@ function ListView({ handle }: { handle: ViewProps['handle'] }) {
   /* 连不上服务时不显示旧的列表，免得当成现在的 */
   const convs = phase === 'ready' ? db.sorted() : [];
   return (
-    <ConvList
-      convs={convs}
-      onPick={(id) => handle.openFull('sessions', { convId: id })}
-      rev={rev}
-      label="会话列表"
-      empty={emptyOf(phase)}
-    />
+    <Pane>
+      <ConvList
+        convs={convs}
+        onPick={(id) => handle.openFull('sessions', { convId: id })}
+        rev={rev}
+        label="会话列表"
+        empty={emptyOf(phase)}
+      />
+    </Pane>
   );
 }
-/* 全屏：左边列表（宽 240–300px，标题「全部会话」加个数），右边选中会话的时间线；窄屏分两层 */
+/* 全屏：左边列表（宽 240–300px，标题「全部会话」加个数），右边选中会话的时间线；窄屏分两层。
+   两栏各是一个窗格：窗口标题浮在两栏上面，各栏自己的头部浮在各自的内容上面 */
 function FullView({ params }: { params: FullParams }) {
   const rev = useBusRev(EVENTS);
   const phase = useLinkPhase();
@@ -116,11 +120,15 @@ function FullView({ params }: { params: FullParams }) {
   const c = db.conv(selected);
   return (
     <div className={'sess' + (detail ? ' is-detail' : '')}>
-      <aside className="sess-side">
-        <div className="sess-side-head">
-          <span>全部会话</span>
-          <span>{phase === 'ready' ? `${convs.length} 个` : ''}</span>
-        </div>
+      <Pane
+        className="sess-side is-side"
+        top={
+          <div className="sess-side-head">
+            <span>全部会话</span>
+            <span>{phase === 'ready' ? `${convs.length} 个` : ''}</span>
+          </div>
+        }
+      >
         <ConvList
           convs={convs}
           selectedId={selected}
@@ -129,28 +137,32 @@ function FullView({ params }: { params: FullParams }) {
           label="会话列表"
           empty={emptyOf(phase)}
         />
-      </aside>
-      <section className="sess-main">
-        <div className="sess-main-head">
-          <button
-            className="w-btn sess-back"
-            type="button"
-            title="返回列表"
-            aria-label="返回列表"
-            onClick={() => setDetail(false)}
-          >
-            ‹
-          </button>
-          <h3>{c ? c.title : '没有选中的会话'}</h3>
-          {c && <span className="pchip">{KIND_LABEL[c.kind]}</span>}
-          <span className="sess-meta">
-            {c
-              ? `${c.messages} 条消息 · ${c.segments} 段${c.platformConversationId ? ' · id ' + c.platformConversationId : ''}`
-              : ''}
-          </span>
-        </div>
+      </Pane>
+      <Pane
+        className="sess-main is-main"
+        top={
+          <div className="sess-main-head">
+            <button
+              className="w-btn sess-back"
+              type="button"
+              title="返回列表"
+              aria-label="返回列表"
+              onClick={() => setDetail(false)}
+            >
+              ‹
+            </button>
+            <h3>{c ? c.title : '没有选中的会话'}</h3>
+            {c && <span className="pchip">{KIND_LABEL[c.kind]}</span>}
+            <span className="sess-meta">
+              {c
+                ? `${c.messages} 条消息 · ${c.segments} 段${c.platformConversationId ? ' · id ' + c.platformConversationId : ''}`
+                : ''}
+            </span>
+          </div>
+        }
+      >
         <Timeline convId={selected} />
-      </section>
+      </Pane>
     </div>
   );
 }

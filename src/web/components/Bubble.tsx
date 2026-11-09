@@ -32,12 +32,12 @@ function ThinkFold({
     // 还在想：没出结果时只有一行「思考中…」；消息已经结束（中止、出错）还停在这里的，写明是怎么断的
     if (ended)
       return (
-        <div className="fold">
+        <div className="fold is-think">
           <span className="fold-tag">{ended === 'fail' ? '思考中断' : '思考被中止'}</span>
         </div>
       );
     return (
-      <details className="fold">
+      <details className="fold is-think">
         <summary>
           <span>思考中…</span>
         </summary>
@@ -46,7 +46,7 @@ function ThinkFold({
   }
   if (!p.text.trim()) return null;
   return (
-    <details className="fold">
+    <details className="fold is-think">
       <summary>
         <span>{p.sec ? `思考了 ${p.sec} 秒` : '思考过程'}</span>
       </summary>
@@ -61,7 +61,7 @@ function ToolFold({ p, ended }: { p: Extract<BPart, { kind: 'tool' }>; ended: bo
   const done = p.state === 'ok';
   const one = p.summary ?? argsLine(p.input);
   return (
-    <details className="fold">
+    <details className="fold is-tool">
       <summary>
         <span>{`◇ ${p.name}${one ? ' · ' + one : ''}`}</span>
         {running ? (
@@ -87,7 +87,7 @@ function ToolFold({ p, ended }: { p: Extract<BPart, { kind: 'tool' }>; ended: bo
             </div>
             {p.outText && <pre className="fold-pre">{p.outText}</pre>}
             {p.images.length > 0 && (
-              <div className="msg-imgs" style={{ marginTop: 6 }}>
+              <div className="msg-imgs is-out">
                 {p.images.map((info, i) => (
                   <Pic key={i} info={info} />
                 ))}

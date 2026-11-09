@@ -251,7 +251,7 @@ export function Timeline({ convId, web = false }: { convId: string | null; web?:
   }, [convId]);
 
   const note = (title: string, text?: string, action?: React.ReactNode) => (
-    <div className="tline" role="log" aria-label="时间线">
+    <div className="tline pane-sc" role="log" aria-label="时间线">
       <div className="empty">
         <b>{title}</b>
         {text}
@@ -300,7 +300,9 @@ export function Timeline({ convId, web = false }: { convId: string | null; web?:
       node: <MsgView row={e.row} convId={convId} web={web} isNew={isNew} />,
     };
   });
-  const anchorKey = o?.anchorId ?? null;
+  /* 打开时停在哪：画了分隔线就停在分隔线（离浮着的标题下沿 40px，在模糊的渐变带下面，看得清）；
+     第一条未读还没取到、没画分隔线时停在取到的最上面那条 */
+  const anchorKey = dividerSeq !== null ? 'new-divider' : (o?.anchorId ?? null);
   const topNotice =
     phase === 'down' ? (
       <span className="log-pill is-err">连不上洛璃服务，连上后会自动恢复</span>

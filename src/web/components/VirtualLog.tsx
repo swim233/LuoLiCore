@@ -1,12 +1,15 @@
-import { useEffect, useLayoutEffect, useRef } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { motionOn } from '../lib/prefs';
 
 /* 虚拟滚动的时间线：@tanstack/react-virtual，动态高度，贴底。
-   - 切换会话（resetKey 变）：给了 anchorKey 就停在那一条（顶上留一点空）并且不贴底，否则直接到底；
+   它自己就是窗格（components/Pane.tsx）的滚动区（.pane-sc）：上下的内边距里有浮在上面的标题、输入框，位置都要算上它们：
+   - 切换会话（resetKey 变）：给了 anchorKey 就停在那一条（离浮着的标题下沿留一点空）并且不贴底，否则直接到底；
    - 新条目进来时如果本来就在底部附近（距底 < 80px）就平滑跟到底（动画开着时）；内容变高（逐字、折叠展开）时，原本贴底的继续贴底；
    - 顶上多了条目（往上翻取回了更早的消息）：画面停在原来看的那一条，不跳；
    - onScrollState：滚动、内容变了之后报告「在不在最底下」「是不是快到顶了」（时间线据此标已读、取更早的消息）。
+     「在最底下」是最后一条完整露在输入框（没有输入框时是窗口底边）上面；
+   - 输入框变高（多行、加图片）、窗格变高变矮：原本贴底的继续贴底，最后一条不被盖住。
    定位用 DOM 的真实位置逐帧校正：条目高度是估的，量到真实高度以前，只靠估算位置会偏。 */
 export interface LogItem {
   key: string;
@@ -14,16 +17,25 @@ export interface LogItem {
   est?: number;
 }
 export interface ScrollState {
-  /** 最后一条消息在可视区里（距底不到一个底部留白） */
+  /** 最后一条消息完整露在下面的浮层（输入框）上面 */
   atBottom: boolean;
   /** 离顶部不到 160px */
   nearTop: boolean;
 }
-/** 停在 anchorKey 那一条时，它的顶边离可视区顶边多少 px */
+/** 停在 anchorKey 那一条时，它的顶边离浮着的标题下沿多少 px */
 const ANCHOR_OFFSET = 40;
-/** .tline 的上内边距：虚拟列表的起点离滚动内容顶部这么多 */
-const PAD_TOP = 16;
-const BOTTOM_SLACK = 24;
+/* 窗格量出来的浮层高度（--ht、--hb），滚动区从 .pane 继承 */
+const cssPx = (c: HTMLElement, name: string) =>
+  parseFloat(getComputedStyle(c).getPropertyValue(name)) || 0;
+/** 上下的内边距：浮层的高度加滚动区自己的留白。虚拟列表的起点离滚动内容顶部 top 这么多 */
+function pads(c: HTMLElement) {
+  const cs = getComputedStyle(c);
+  const top = parseFloat(cs.paddingTop) || 0,
+    bottom = parseFloat(cs.paddingBottom) || 0;
+  return { top, bottom, ht: cssPx(c, '--ht'), hb: cssPx(c, '--hb') };
+}
+/** 停在某一条时它的顶边离滚动区顶边多少：浮着的标题下沿再往下 ANCHOR_OFFSET */
+const anchorAt = (c: HTMLElement) => () => pads(c).ht + ANCHOR_OFFSET;
 
 /* 逐帧把 find() 说的偏差滚掉，最多 40 帧；连着 4 帧偏差小于 0.5px 就算稳了；用户自己滚动、点按时立刻放手。
    结束时（不管怎么结束）调 onDone */
@@ -54,10 +66,14 @@ function settle(c: HTMLElement, find: () => number | null, onDone?: () => void) 
 }
 const elOf = (c: HTMLElement, key: string | number) =>
   c.querySelector<HTMLElement>(`[data-key="${CSS.escape(String(key))}"]`);
-/** 条目的顶边比「想要的位置」低多少（正数：要往下滚） */
-const offBy = (c: HTMLElement, key: string | number, want: number) => () => {
+/** 条目的顶边比「想要的位置」低多少（正数：要往下滚）。想要的位置每帧重读（浮层的高度可能刚量好）；
+    全屏打开的形变期间窗口带着缩放，量到的距离按缩放换回排版的像素 */
+const offBy = (c: HTMLElement, key: string | number, want: () => number) => () => {
   const el = elOf(c, key);
-  return el ? el.getBoundingClientRect().top - c.getBoundingClientRect().top - want : null;
+  if (!el) return null;
+  const r = c.getBoundingClientRect();
+  const k = c.offsetHeight ? r.height / c.offsetHeight : 1;
+  return (el.getBoundingClientRect().top - r.top) / (k || 1) - want();
 };
 
 export function VirtualLog({
@@ -82,6 +98,8 @@ export function VirtualLog({
   onScrollState?: (s: ScrollState) => void;
 }) {
   const scRef = useRef<HTMLDivElement>(null);
+  /* 上内边距（浮着的标题加留白）：虚拟列表从这里开始，告诉虚拟器（scrollMargin），它算可视范围、滚到某一条才是对的 */
+  const [padTop, setPadTop] = useState(0);
   const virt = useVirtualizer({
     count: items.length,
     getScrollElement: () => scRef.current,
@@ -90,6 +108,7 @@ export function VirtualLog({
     overscan: 6,
     getItemKey: (i) => items[i]?.key ?? i,
     initialRect: { width: 600, height: 500 },
+    scrollMargin: padTop,
   });
   const nearBottom = () => {
     const c = scRef.current;
@@ -120,14 +139,35 @@ export function VirtualLog({
       }
     }
   }
+  /* 在最底下：离滚到底还差的距离不超过滚动区自己的底部留白（再多一点，最后一条的下沿就到输入框下面去了） */
   const report = () => {
     const c = scRef.current;
     if (!c || !onScrollState) return;
+    const p = pads(c);
     onScrollState({
-      atBottom: c.scrollHeight - c.scrollTop - c.clientHeight <= BOTTOM_SLACK,
+      atBottom: c.scrollHeight - c.scrollTop - c.clientHeight <= Math.max(0, p.bottom - p.hb) + 1,
       nearTop: c.scrollTop < 160,
     });
   };
+  const reportRef = useRef(report);
+  reportRef.current = report;
+  /* 量上内边距；之后滚动区的内容框变了（浮层变高变矮、窗格大小变了）：重量，原本贴底的继续贴底。
+     第一次只量：第一次定位（停在分隔线还是到底）由下面的 layout effect 做，这里先滚到底、报「在最底下」会误标已读 */
+  useLayoutEffect(() => {
+    const c = scRef.current;
+    if (!c) return;
+    const fit = (first: boolean) => {
+      const t = pads(c).top;
+      setPadTop((v) => (Math.abs(v - t) < 0.5 ? v : t));
+      if (first) return;
+      if (stick.current) c.scrollTop = c.scrollHeight;
+      reportRef.current();
+    };
+    fit(true);
+    const ro = new ResizeObserver(() => fit(false));
+    ro.observe(c);
+    return () => ro.disconnect();
+  }, []);
   useLayoutEffect(() => {
     const c = scRef.current;
     if (!c) return;
@@ -136,16 +176,19 @@ export function VirtualLog({
     const snap = topSnap.current;
     topSnap.current = null;
     const anchorIdx = anchorKey ? items.findIndex((it) => it.key === anchorKey) : -1;
+    /* 虚拟器算的位置用的是上一次渲染的上内边距；刚量出新的、还没重新渲染时按差补上 */
+    const dm = pads(c).top - virt.options.scrollMargin;
     if (switched) {
       stopSettle.current?.();
       stopSettle.current = null;
       if (anchorIdx >= 0) {
         stick.current = false;
         const m = virt.measurementsCache[anchorIdx];
-        if (m) c.scrollTop = Math.max(0, m.start + PAD_TOP - ANCHOR_OFFSET);
+        const want = anchorAt(c);
+        if (m) c.scrollTop = Math.max(0, m.start + dm - want());
         // 定位期间不贴底（免得和校正打架）；定好以后按真实位置定：内容不满一屏时本来就在底部，
         // 没有滚动事件，不在这里设的话新消息永远不跟到底
-        stopSettle.current = settle(c, offBy(c, items[anchorIdx].key, ANCHOR_OFFSET), () => {
+        stopSettle.current = settle(c, offBy(c, items[anchorIdx].key, want), () => {
           stick.current = nearBottom();
         });
       } else {
@@ -164,8 +207,11 @@ export function VirtualLog({
           restored = true;
           stopSettle.current?.();
           const m = virt.measurementsCache[idx];
-          if (m) c.scrollTop = Math.max(0, m.start + PAD_TOP - snap.top);
-          stopSettle.current = settle(c, offBy(c, snap.key, snap.top));
+          if (m) c.scrollTop = Math.max(0, m.start + dm - snap.top);
+          stopSettle.current = settle(
+            c,
+            offBy(c, snap.key, () => snap.top),
+          );
         }
       }
       if (!restored && items.length !== prevCount.current && stick.current && items.length) {
@@ -190,7 +236,7 @@ export function VirtualLog({
   });
   return (
     <div
-      className="tline"
+      className="tline pane-sc"
       ref={scRef}
       role="log"
       aria-label={label}
@@ -217,7 +263,7 @@ export function VirtualLog({
                 top: 0,
                 left: 0,
                 right: 0,
-                transform: `translateY(${v.start}px)`,
+                transform: `translateY(${v.start - padTop}px)`,
                 display: 'flex',
                 flexDirection: 'column',
               }}

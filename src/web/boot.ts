@@ -1,4 +1,5 @@
 import { fpsMeter } from './lib/fps';
+import { startWinSky } from './lib/winSky';
 import { MQ } from './lib/env';
 import { prefs } from './lib/prefs';
 import { getSource } from './model/source';
@@ -24,6 +25,7 @@ export function boot({ todayAlways }: { todayAlways: boolean }) {
     r.classList.add('hover-' + prefs.get().hover);
   }
   fpsMeter.set(prefs.get().fps);
+  startWinSky();
   getSource().start();
   registerWidget(NOW_DEF);
   registerWidget(SESSIONS_DEF);
@@ -60,7 +62,7 @@ function warmFs() {
   const g = document.createElement('div');
   g.setAttribute('aria-hidden', 'true');
   g.style.cssText =
-    'position:fixed;left:0;bottom:0;width:48px;height:48px;opacity:.01;pointer-events:none;z-index:1;-webkit-backdrop-filter:blur(10px) saturate(.8);backdrop-filter:blur(10px) saturate(.8)';
+    'position:fixed;left:0;bottom:0;width:48px;height:48px;opacity:.01;pointer-events:none;z-index:1;-webkit-backdrop-filter:blur(7px);backdrop-filter:blur(7px)';
   const inner = document.createElement('div');
   inner.style.cssText = 'width:100%;height:100%;font-size:12px;color:var(--fg)';
   inner.textContent = '洛璃';

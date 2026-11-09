@@ -3,6 +3,8 @@ import { Chat, useChat } from '@ai-sdk/react';
 import { MsgBubble } from '../../components/Bubble';
 import { Spin, Thumb } from '../../components/Hl';
 import { VirtualLog } from '../../components/VirtualLog';
+import { Pane } from '../../components/Pane';
+import { useGlide } from '../../components/glide';
 import type { LogItem, ScrollState } from '../../components/VirtualLog';
 import { IconChat } from '../../components/icons';
 import { useStore } from '../../lib/store';
@@ -179,7 +181,7 @@ function SegLine({ convId }: { convId: string }) {
 }
 
 const note = (title: string, text?: string, action?: React.ReactNode) => (
-  <div className="tline" role="log" aria-live="polite" aria-label="对话">
+  <div className="tline pane-sc" role="log" aria-live="polite" aria-label="对话">
     <div className="empty">
       <b>{title}</b>
       {text}
@@ -591,83 +593,64 @@ function ChatView({ mode }: ViewProps) {
   );
   if (!full) {
     return (
-      <div className="chat">
-        <div className="chat-bar" ref={barRef}>
-          <button
-            className="chat-pick"
-            ref={pickRef}
-            type="button"
-            aria-haspopup="true"
-            aria-expanded={menu}
-            title="切换对话"
-            onClick={() => setMenu(!menu)}
-          >
-            <span>{title}</span>
-          </button>
-          <button
-            className="chat-new"
-            type="button"
-            onClick={() => {
-              newWebConv();
-              setTimeout(() => document.getElementById('chat-input')?.focus());
-            }}
-          >
-            ＋ 新对话
-          </button>
-          {menu && (
-            <div className="chat-menu" role="menu">
-              {convs.map((x) => (
-                <button
-                  key={x.id}
-                  type="button"
-                  role="menuitem"
-                  aria-current={x.id === cur}
-                  onClick={() => {
-                    setMenu(false);
-                    switchTo(x.id);
-                  }}
-                >
-                  <span>{x.title}</span>
-                  <time>{fmtShort(db.lastAt(x.id))}</time>
-                </button>
-              ))}
-              <button
-                type="button"
-                role="menuitem"
-                onClick={() => {
-                  setMenu(false);
-                  newWebConv();
-                }}
-              >
-                <span style={{ color: 'var(--gold-pale)' }}>＋ 新对话</span>
-              </button>
-            </div>
-          )}
-        </div>
+      <Pane
+        className="chat"
+        top={
+          <div className="chat-bar" ref={barRef}>
+            <button
+              className="chat-pick"
+              ref={pickRef}
+              type="button"
+              aria-haspopup="true"
+              aria-expanded={menu}
+              title="切换对话"
+              onClick={() => setMenu(!menu)}
+            >
+              <span>{title}</span>
+            </button>
+            <button
+              className="chat-new"
+              type="button"
+              onClick={() => {
+                newWebConv();
+                setTimeout(() => document.getElementById('chat-input')?.focus());
+              }}
+            >
+              ＋ 新对话
+            </button>
+            {menu && <ChatMenu convs={convs} cur={cur} close={() => setMenu(false)} />}
+          </div>
+        }
+        bottom={composer}
+      >
         {body}
-        {composer}
-      </div>
+      </Pane>
     );
   }
   return (
     <div className={'chat-full' + (detail ? ' is-detail' : '')}>
-      <aside className="sess-side">
-        <div className="sess-side-head">
-          <span>网页对话</span>
-          <span>{convs.length} 个</span>
-        </div>
-        <button
-          className="chat-new"
-          type="button"
-          style={{ margin: '8px 12px 2px', alignSelf: 'flex-start' }}
-          onClick={() => {
-            newWebConv();
-            setDetail(true);
-            setTimeout(() => document.getElementById('chat-input-full')?.focus());
-          }}
-        >
-          ＋ 新对话
-        </button>
+      <Pane
+        className="sess-side is-side"
+        top={
+          <>
+            <div className="sess-side-head">
+              <span>网页对话</span>
+              <span>{convs.length} 个</span>
+            </div>
+            <button
+              className="chat-new is-side"
+              type="button"
+              onClick={() => {
+                newWebConv();
+                setDetail(true);
+                setTimeout(() => document.getElementById('chat-input-full')?.focus());
+              }}
+            >
+              ＋ 新对话
+            </button>
+          </>
+        }
+      >
         <ConvList
           convs={convs}
           selectedId={cur}
@@ -678,35 +661,76 @@ function ChatView({ mode }: ViewProps) {
           rev={db.rev}
           label="对话列表"
         />
-      </aside>
-      <div className="chat sess-main">
-        <div className="chat-bar">
-          <button
-            className="w-btn sess-back"
-            type="button"
-            title="返回列表"
-            aria-label="返回列表"
-            onClick={() => setDetail(false)}
-          >
-            ‹
-          </button>
-          <h3
-            style={{
-              margin: 0,
-              fontSize: 15,
-              fontWeight: 600,
-              whiteSpace: 'nowrap',
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              minWidth: 0,
-            }}
-          >
-            {title}
-          </h3>
-        </div>
+      </Pane>
+      <Pane
+        className="chat sess-main is-main"
+        top={
+          <div className="chat-bar">
+            <button
+              className="w-btn sess-back"
+              type="button"
+              title="返回列表"
+              aria-label="返回列表"
+              onClick={() => setDetail(false)}
+            >
+              ‹
+            </button>
+            <h3 className="chat-title">{title}</h3>
+          </div>
+        }
+        bottom={composer}
+      >
         {body}
-        {composer}
-      </div>
+      </Pane>
+    </div>
+  );
+}
+
+/* 对话里选会话的下拉菜单：玻璃底；悬停时一块高亮跟着鼠标从一项滑到另一项（和会话列表同一套，components/glide.ts） */
+function ChatMenu({
+  convs,
+  cur,
+  close,
+}: {
+  convs: ReturnType<typeof webConvs>;
+  cur: string | null;
+  close: () => void;
+}) {
+  const g = useGlide('.chat-menu > button');
+  return (
+    <div
+      className="chat-menu"
+      role="menu"
+      ref={(el) => {
+        g.list.current = el;
+      }}
+    >
+      <i className="glide" ref={(el) => void (g.glide.current = el)} aria-hidden="true" />
+      {convs.map((x) => (
+        <button
+          key={x.id}
+          type="button"
+          role="menuitem"
+          aria-current={x.id === cur}
+          onClick={() => {
+            close();
+            switchTo(x.id);
+          }}
+        >
+          <span>{x.title}</span>
+          <time>{fmtShort(db.lastAt(x.id))}</time>
+        </button>
+      ))}
+      <button
+        type="button"
+        role="menuitem"
+        onClick={() => {
+          close();
+          newWebConv();
+        }}
+      >
+        <span className="chat-menu-new">＋ 新对话</span>
+      </button>
     </div>
   );
 }

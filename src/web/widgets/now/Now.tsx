@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Badge, ToolName } from '../../components/Badge';
+import { Pane } from '../../components/Pane';
 import { IconNow } from '../../components/icons';
 import { env } from '../../lib/env';
 import { pulse } from '../../lib/fx-dom';
@@ -17,7 +18,9 @@ import { stardust } from './stardust';
 import { Terminal } from './Terminal';
 import type { ViewProps, WidgetDef } from '../types';
 
-/* 「此刻」的版面：窗口里上面一块（大徽记、状态名、一行说明）、下面是终端；全屏时最多 3 栏并排 */
+/* 「此刻」的版面：窗口里上面一块（大徽记、状态名、一行说明）、下面是终端；全屏时最多 3 栏并排。
+   上面那一块和窗口标题一起浮在终端上面（贴在标题栏下面）；终端是窗格，它顶上空出的高度（--pane-head）是标题栏加这一块，
+   量出来写在 .now 上，全屏时几栏共用 */
 function useNowSessions() {
   const [n, setN] = useState(0);
   useEffect(
@@ -38,14 +41,28 @@ const sessionFor = (id: string | null) =>
     ? nowModel.get(id) || (nowModel.last && nowModel.last.convId === id ? nowModel.last : null)
     : null;
 
+/* 量浮着的那一块：它排在终端前面，ref 比终端里的 layout effect 先执行 */
+function useNowTop() {
+  return useCallback((el: HTMLDivElement | null) => {
+    const now = el?.parentElement;
+    if (!el || !now) return;
+    const fit = () => {
+      const v = `calc(var(--head-h) + ${el.offsetHeight}px)`;
+      if (now.style.getPropertyValue('--pane-head') !== v) now.style.setProperty('--pane-head', v);
+    };
+    fit();
+    const ro = new ResizeObserver(fit);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+}
+
 function Empty() {
   const name = useAssistantName();
   return (
-    <div className="now-empty">
+    <div className="now-empty pane-sc">
       <div>
-        <div style={{ color: 'var(--fg-2)', fontSize: 14, marginBottom: 4 }}>
-          {status.online ? '现在很安静' : `${name}离线了`}
-        </div>
+        <div className="now-empty-t">{status.online ? '现在很安静' : `${name}离线了`}</div>
         {status.online
           ? `有人叫${name}时，这里会实时显示那个会话的对话`
           : '连上 Telegram 后，这里会实时显示进行中的对话'}
@@ -87,6 +104,7 @@ function NowView({ mode, handle }: ViewProps) {
     return (act.length ? act[act.length - 1] : list[list.length - 1]).convId;
   };
   const curId = pickSel();
+  const topRef = useNowTop();
   const badgeEl = (
     <span
       onPointerEnter={(e) => {
@@ -102,13 +120,13 @@ function NowView({ mode, handle }: ViewProps) {
   if (!full) {
     const s = sessionFor(curId);
     host = (
-      <div className="now-term">
+      <Pane>
         {s ? (
           <Terminal key={s.convId + (s === nowModel.get(s.convId) ? '' : '*')} session={s} />
         ) : (
           <Empty />
         )}
-      </div>
+      </Pane>
     );
   } else {
     let cols: Session[] = list.slice(-3);
@@ -116,48 +134,49 @@ function NowView({ mode, handle }: ViewProps) {
     host = (
       <div className="now-cols" style={{ '--n': Math.max(1, cols.length) }}>
         {!cols.length && (
-          <div className="now-col">
-            <div className="now-term">
-              <Empty />
-            </div>
-          </div>
+          <Pane className="now-col">
+            <Empty />
+          </Pane>
         )}
         {cols.map((s) => {
           const x = status.conv.get(s.convId);
           return (
-            <div className="now-col" key={s.convId + (s === nowModel.get(s.convId) ? '' : '*')}>
-              <div className="now-col-head">
-                <span className="sdot" data-s={x ? x.state : 'idle'} />
-                <b>{s.title}</b>
-                <span className="st">
-                  {x
-                    ? x.state === 'tool'
-                      ? '调用 ' + (x.tool || '工具')
-                      : STATE_TEXT[x.state]
-                    : s.active
-                      ? ''
-                      : '已回复'}
-                </span>
-                <button
-                  className="now-open"
-                  type="button"
-                  onClick={() => handle.openFull('sessions', { convId: s.convId })}
-                >
-                  在会话中打开
-                </button>
-              </div>
-              <div className="now-term">
-                <Terminal session={s} />
-              </div>
-            </div>
+            <Pane
+              className="now-col"
+              key={s.convId + (s === nowModel.get(s.convId) ? '' : '*')}
+              top={
+                <div className="now-col-head">
+                  <span className="sdot" data-s={x ? x.state : 'idle'} />
+                  <b>{s.title}</b>
+                  <span className="st">
+                    {x
+                      ? x.state === 'tool'
+                        ? '调用 ' + (x.tool || '工具')
+                        : STATE_TEXT[x.state]
+                      : s.active
+                        ? ''
+                        : '已回复'}
+                  </span>
+                  <button
+                    className="now-open"
+                    type="button"
+                    onClick={() => handle.openFull('sessions', { convId: s.convId })}
+                  >
+                    在会话中打开
+                  </button>
+                </div>
+              }
+            >
+              <Terminal session={s} />
+            </Pane>
           );
         })}
       </div>
     );
   }
   return (
-    <div className="now">
-      <div className="now-top">
+    <div className={'now' + (full ? ' is-full' : '')}>
+      <div className="now-top" ref={topRef}>
         {badgeEl}
         <div className="now-meta">
           <div className="now-state">

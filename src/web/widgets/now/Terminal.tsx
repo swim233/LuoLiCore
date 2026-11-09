@@ -11,7 +11,8 @@ import { nowModel } from '../../model/nowModel';
 import type { Line, Session } from '../../model/nowModel';
 
 /* 「此刻」的终端：用户逐项拼出来的样式。一行：23:37 小明 › 正文；洛璃的回复 ✦（内联 SVG 的四角星）、工具调用 ◇、状态行 ·；
-   洛璃的行带淡金底；新行进来时整体平滑上推，最上面的行被裁掉。
+   洛璃的行带一层淡淡的底；新行进来时整体平滑上推，最上面的行滚到浮着的头部下面，在那里糊掉。
+   终端自己是窗格的滚动区（.pane-sc，不能往回滚，overflow: hidden，一直贴底），上下的内边距里是浮着的头部和底边的留白。
    行用 @tanstack/react-virtual 排（动态高度、贴底，终端不能往回滚）；逐字落下的那一行是命令式的小岛（stream.ts） */
 const SYM: Record<string, string> = { user: '›', tool: '◇', status: '·', think: '·', stats: '' };
 const islands = new Map<string, Set<StreamText>>();
@@ -215,7 +216,9 @@ export function Terminal({ session }: { session: Session }) {
   const vers = useRef(new Map<string, number>());
   const mounted = useRef(false);
   const lines = session.lines;
-  const [viewH, setViewH] = useState(300);
+  /* 可以放行的高度（去掉上下的内边距）和上内边距（虚拟器的 scrollMargin：行区域从这里开始） */
+  const [view, setView] = useState({ h: 300, top: 0, bottom: 0 });
+  const viewH = view.h;
   const virt = useVirtualizer({
     count: lines.length,
     getScrollElement: () => clipRef.current,
@@ -224,6 +227,7 @@ export function Terminal({ session }: { session: Session }) {
     overscan: 12,
     getItemKey: (i) => lines[i]?.id ?? i,
     initialRect: { width: 400, height: 300 },
+    scrollMargin: view.top,
   });
   useEffect(() => {
     const off = nowModel.sub((type, convId, line, extra) => {
@@ -241,9 +245,16 @@ export function Terminal({ session }: { session: Session }) {
   }, [session.convId]);
   useLayoutEffect(() => {
     const clip = clipRef.current!;
-    const ro = new ResizeObserver(() => setViewH(clip.clientHeight));
+    const measure = () => {
+      const cs = getComputedStyle(clip);
+      const top = parseFloat(cs.paddingTop) || 0,
+        bottom = parseFloat(cs.paddingBottom) || 0;
+      const h = Math.max(0, clip.clientHeight - top - bottom);
+      setView((v) => (v.h === h && v.top === top && v.bottom === bottom ? v : { h, top, bottom }));
+    };
+    const ro = new ResizeObserver(measure);
     ro.observe(clip);
-    setViewH(clip.clientHeight);
+    measure();
     mounted.current = true;
     return () => ro.disconnect();
   }, []);
@@ -258,7 +269,9 @@ export function Terminal({ session }: { session: Session }) {
        再次渲染时会多滚下去一截，和上推抵消，看上去新行直接就到位了 */
     clip.scrollTop = Math.max(
       0,
-      (rowsRef.current?.offsetHeight ?? clip.scrollHeight) - clip.clientHeight,
+      (rowsRef.current
+        ? rowsRef.current.offsetHeight + view.top + view.bottom
+        : clip.scrollHeight) - clip.clientHeight,
     );
     const dy = total - prevTotal.current;
     prevTotal.current = total;
@@ -277,54 +290,53 @@ export function Terminal({ session }: { session: Session }) {
   const items = virt.getVirtualItems();
   return (
     <div
-      className="term"
+      className="term pane-sc"
+      ref={clipRef}
       role="log"
       aria-live="polite"
       aria-label="实时对话"
       data-conv={session.convId}
+      style={{ overflow: 'hidden' }}
     >
-      <div className="term-shade" />
-      <div className="term-clip" ref={clipRef} style={{ overflow: 'hidden' }}>
-        <div
-          className="term-rows"
-          ref={rowsRef}
-          style={{
-            position: 'relative',
-            height: Math.max(total, viewH),
-            left: 'auto',
-            right: 'auto',
-            bottom: 'auto',
-            display: 'block',
-          }}
-        >
-          {items.map((v) => {
-            const line = lines[v.index];
-            if (!line) return null;
-            const isNew = !animated.has(line.id) && mounted.current;
-            animated.add(line.id);
-            return (
-              <div
-                key={v.key}
-                data-index={v.index}
-                ref={virt.measureElement}
-                style={{
-                  position: 'absolute',
-                  top: 0,
-                  left: 0,
-                  right: 0,
-                  transform: `translateY(${v.start + pad}px)`,
-                }}
-              >
-                <TermLine
-                  line={line}
-                  ver={vers.current.get(line.id) || 0}
-                  isNew={isNew}
-                  convId={session.convId}
-                />
-              </div>
-            );
-          })}
-        </div>
+      <div
+        className="term-rows"
+        ref={rowsRef}
+        style={{
+          position: 'relative',
+          height: Math.max(total, viewH),
+          left: 'auto',
+          right: 'auto',
+          bottom: 'auto',
+          display: 'block',
+        }}
+      >
+        {items.map((v) => {
+          const line = lines[v.index];
+          if (!line) return null;
+          const isNew = !animated.has(line.id) && mounted.current;
+          animated.add(line.id);
+          return (
+            <div
+              key={v.key}
+              data-index={v.index}
+              ref={virt.measureElement}
+              style={{
+                position: 'absolute',
+                top: 0,
+                left: 0,
+                right: 0,
+                transform: `translateY(${v.start - view.top + pad}px)`,
+              }}
+            >
+              <TermLine
+                line={line}
+                ver={vers.current.get(line.id) || 0}
+                isNew={isNew}
+                convId={session.convId}
+              />
+            </div>
+          );
+        })}
       </div>
     </div>
   );

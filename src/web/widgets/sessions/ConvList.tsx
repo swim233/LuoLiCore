@@ -8,6 +8,7 @@ import { fmtShort } from '../../lib/util';
 import { db } from '../../model/db';
 import { status } from '../../model/status';
 import { useAssistantName } from '../../model/who';
+import { useGlide } from '../../components/glide';
 import type { Conversation, ConvKind } from '../../model/types';
 
 /* 会话行：左边 34px 的圆角方块图标，中间标题和最近一条消息预览，右边时间和未读数 */
@@ -100,7 +101,8 @@ function useLayoutAfterMorph(motionOn: boolean) {
 }
 
 /* 列表：新条目进入（高度 0 → 实际高度、淡入、从左 −16px 滑入，420 ms）；删掉的条目收起（高度 → 0、淡出、向右 16px，320 ms ease-in）；
-   顺序变了位移 FLIP 420 ms；首次渲染和动画关掉时无动画 */
+   顺序变了位移 FLIP 420 ms；首次渲染和动画关掉时无动画。
+   列表自己是窗格的滚动区（.pane-sc）；悬停时一块高亮跟着鼠标从一行滑到另一行（components/glide.ts） */
 export function ConvList({
   convs,
   selectedId,
@@ -118,8 +120,17 @@ export function ConvList({
 }) {
   const motionOn = usePrefs((p) => p.motion);
   const layoutOn = useLayoutAfterMorph(motionOn);
+  const g = useGlide('.conv-item');
   return (
-    <div className="list" role="list" aria-label={label}>
+    <div
+      className="list pane-sc"
+      role="list"
+      aria-label={label}
+      ref={(el) => {
+        g.list.current = el;
+      }}
+    >
+      <i className="glide" ref={(el) => void (g.glide.current = el)} aria-hidden="true" />
       <AnimatePresence initial={false}>
         {convs.map((c) => (
           <motion.div
