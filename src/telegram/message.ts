@@ -14,6 +14,17 @@ export function conversationTitle(chat: TelegramChat): string | undefined {
   return `与 ${displayName({ first_name: chat.first_name ?? '', last_name: chat.last_name })} 的私聊`;
 }
 
+/**
+ * 白名单，只有 chat id 时（如任务到点，手里只有存下的会话）：私聊的 chat id 是正数，就是对方的
+ * 用户 id，看用户；群（负数）看 chat id
+ */
+export function isAllowedChat(
+  chatId: string,
+  { chats, users }: { chats: ReadonlySet<string>; users: ReadonlySet<string> },
+): boolean {
+  return Number(chatId) > 0 ? users.has(chatId) : chats.has(chatId);
+}
+
 /** 白名单：群看 chat id，私聊看发送者 id；频道不工作 */
 export function isAllowed(
   raw: TelegramRaw,

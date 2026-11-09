@@ -1,3 +1,4 @@
+import type { TelegramChat, TelegramUser } from '@chat-adapter/telegram';
 import { MockLanguageModelV4 } from 'ai/test';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
@@ -13,7 +14,9 @@ import {
   type ToolDefinition,
   type Trigger,
 } from '../../core/index.js';
-import { fakeClock, testService } from '../test-kit.js';
+import { startFakeTelegram } from '../../telegram/fake-api.js';
+import { startTelegramFrontend } from '../telegram.js';
+import { fakeClock, recordingLogger, testService } from '../test-kit.js';
 import type {
   ChatChunk,
   ConversationsResponse,
@@ -505,7 +508,7 @@ describe('任务工具', () => {
     const merged = [trigger(alice, 'm-1'), trigger(bob, 'm-2'), trigger(alice, 'm-3')];
 
     expect(await refused('create_task', input, { conversationId: id })).toBe(
-      '只能在有人让你建任务时建：这次回复不是哪个人的消息触发的',
+      '只能在有人让你建任务时建：这次回复是任务到点之类的事件触发的，不是哪个人发来的消息',
     );
     expect(await refused('create_task', input, { conversationId: id, triggers: merged })).toBe(
       '这次回复是几个人的消息一起触发的（Alice（uid u-alice）、Bob（uid u-bob）），用 requested_by 写明是谁让建的：<message> 里的 uid，没有 uid 时写名字',
@@ -852,7 +855,7 @@ describe('定时器', () => {
     expect((await s.storage.getTask(1))?.status).toBe('active');
   });
 
-  it('Telegram 会话到点：只写事件、不回复（第 4 步再接），记一行日志', async () => {
+  it('没启动 Telegram 时，Telegram 会话到点：只写事件、不回复，记一行日志', async () => {
     const model = scripted();
     const s = await setup(model);
     const id = await s.observed.createConversation({
@@ -1056,22 +1059,22 @@ describe('到点进网页会话', () => {
   });
 });
 
-describe('对话接口传触发者', () => {
-  /** 记下每次调用时 ctx.triggers 的工具 */
-  function probe() {
-    const seen: Array<readonly Trigger[]> = [];
-    const definition = defineTool({
-      name: 'probe',
-      description: '记下触发者',
-      input: z.object({}),
-      execute: (_input, ctx) => {
-        seen.push(ctx.triggers);
-        return 'ok';
-      },
-    });
-    return { tools: installTools([definition], {}).tools, seen };
-  }
+/** 记下每次调用时 ctx.triggers 的工具 */
+function probe() {
+  const seen: Array<readonly Trigger[]> = [];
+  const definition = defineTool({
+    name: 'probe',
+    description: '记下触发者',
+    input: z.object({}),
+    execute: (_input, ctx) => {
+      seen.push(ctx.triggers);
+      return 'ok';
+    },
+  });
+  return { tools: installTools([definition], {}).tools, seen };
+}
 
+describe('对话接口传触发者', () => {
   it('网页会话：直接回复的是这条消息；排队的补回复是这一轮排队的几条，按先后', async () => {
     const hold = gate();
     const { tools, seen } = probe();
@@ -1140,6 +1143,537 @@ describe('对话接口传触发者', () => {
     const [message] = await s.messages(id);
 
     expect(seen).toEqual([[{ author: { name: 'Eve' }, messageId: message!.id }]]);
+  });
+});
+
+// ─── Telegram ───────────────────────────────────────────────────────────
+
+const token = '123456:TEST-token_abc';
+const group: TelegramChat = { id: -1001, type: 'supergroup', title: '读书会' };
+/** 不在白名单里的群 */
+const otherGroup: TelegramChat = { id: -1002, type: 'supergroup', title: '别的群' };
+const aliceUser: TelegramUser = {
+  id: 11,
+  is_bot: false,
+  first_name: 'Alice',
+  last_name: 'Liddell',
+};
+const bobUser: TelegramUser = { id: 22, is_bot: false, first_name: 'Bob' };
+
+/**
+ * 接上 Telegram 前端（本地假 Bot API），照 main.ts 的接法：会话从会话管理取，登记到点入口。
+ * 等待合并调小（用真的计时器）；定时器在这之后才开始，和服务里一样
+ */
+async function withTelegram(
+  s: Awaited<ReturnType<typeof setup>>,
+  wait = { idleMs: 100, maxMs: 1000 },
+) {
+  const api = await startFakeTelegram();
+  cleanups.push(() => api.close());
+  const { logger, entries } = recordingLogger();
+  const telegram = await startTelegramFrontend({
+    config: {
+      token,
+      apiUrl: api.url,
+      chats: new Set([String(group.id)]),
+      // 私聊只允许 Alice
+      users: new Set([String(aliceUser.id)]),
+      wakeWords: ['nori'],
+      errorText: '（出了点问题）',
+      staleMs: 60 * 60_000,
+    },
+    sessions: s.sessions!,
+    storage: s.observed,
+    logger,
+    live: s.live,
+    status: s.status,
+    events: s.events,
+    tasks: s.tasks,
+    pollTimeoutSeconds: 1,
+    wait,
+  });
+  cleanups.push(() => telegram.stop());
+  await telegram.caughtUp;
+
+  /** 等到满足条件（条件要读库时用） */
+  async function poll<T>(read: () => Promise<T | undefined>, what: string): Promise<T> {
+    const deadline = Date.now() + 3000;
+    for (;;) {
+      const value = await read();
+      if (value !== undefined) return value;
+      if (Date.now() > deadline) throw new Error(`等待${what}超时`);
+      await sleep(5);
+    }
+  }
+  return {
+    api,
+    telegram,
+    entries,
+    /** 群对应的会话：群里有消息记下之后才有 */
+    conversationOf: (chat: TelegramChat) =>
+      poll(
+        async () => (await s.storage.findConversation('telegram', String(chat.id)))?.id,
+        '群的会话',
+      ),
+    /** 群里这条消息（Telegram 的 message_id）作为触发者的样子：发言人、核心的消息 id、平台的 id */
+    triggerOf: (conversationId: string, platformId: number) =>
+      poll(async (): Promise<Trigger | undefined> => {
+        const message = (await s.messages(conversationId)).find(
+          (m) => m.metadata?.platformMessageId === String(platformId),
+        );
+        return (
+          message && {
+            author: message.metadata!.author!,
+            messageId: message.id,
+            platformMessageId: String(platformId),
+          }
+        );
+      }, '消息记下'),
+  };
+}
+
+type Telegram = Awaited<ReturnType<typeof withTelegram>>;
+
+/** 群里那条消息让建的任务（默认 21:31 提醒 Alice 交周报） */
+async function taskFrom(
+  s: Awaited<ReturnType<typeof setup>>,
+  t: Telegram,
+  conversationId: string,
+  platformId: number,
+  input: Record<string, unknown> = {},
+): Promise<void> {
+  await s.run(
+    'create_task',
+    { action: '提醒 Alice 交周报', kind: 'once', at: '2026-11-09 21:31', ...input },
+    { conversationId, triggers: [await t.triggerOf(conversationId, platformId)] },
+  );
+}
+
+/** 会话里各条的种类：事件写类型，其余写角色 */
+async function kinds(s: Awaited<ReturnType<typeof setup>>, conversationId: string) {
+  return (await s.messages(conversationId)).map((m) => m.metadata?.event?.type ?? m.role);
+}
+
+describe('到点进 Telegram', () => {
+  it('普通的触发：回复带上触发者；合并时是等待期间的每一条触发，补回复只算回复期间新来的，按先后', async () => {
+    const hold = gate();
+    const { tools, seen } = probe();
+    const model = scripted(
+      call('probe', {}, 'p1'),
+      [...text('第一次'), { gate: hold.promise }, finish()],
+      call('probe', {}, 'p2'),
+      answer('第二次'),
+    );
+    const s = await setup(model, { tools });
+    const t = await withTelegram(s, { idleMs: 200, maxMs: 2000 });
+
+    const [one, , two] = t.api.push(
+      { chat: group, from: aliceUser, text: 'nori 一' },
+      { chat: group, from: bobUser, text: '闲聊，不触发' },
+      { chat: group, from: bobUser, text: 'nori 二' },
+    );
+    await waitUntil(() => model.doStreamCalls.length === 2, '第一次回复');
+    const [, three] = t.api.push(
+      { chat: group, from: bobUser, text: '路过，不触发' },
+      { chat: group, from: aliceUser, text: 'nori 三' },
+    );
+    await waitUntil(() => s.lives().some((event) => event.type === 'again'), '又被触发');
+    hold.open();
+    await waitUntil(() => t.api.delivered.length === 2, '两次回复发出');
+    await t.telegram.bot.idle();
+    const id = await t.conversationOf(group);
+
+    expect(seen).toEqual([
+      [await t.triggerOf(id, one!), await t.triggerOf(id, two!)],
+      [await t.triggerOf(id, three!)],
+    ]);
+    expect(seen[0]![0]).toEqual({
+      author: { id: '11', name: 'Alice Liddell' },
+      messageId: expect.any(String),
+      platformMessageId: String(one),
+    });
+    expect(t.api.delivered).toMatchObject([
+      { chatId: String(group.id), text: '第一次', replyTo: two },
+      { chatId: String(group.id), text: '第二次', replyTo: three },
+    ]);
+  });
+
+  it('空闲时到点：等待合并后回复，引用任务的来源消息；事件在历史里，「此刻」先 wait，start 带着任务', async () => {
+    const model = scripted(answer('Alice，该交周报了'));
+    const s = await setup(model);
+    const t = await withTelegram(s);
+    const [source] = t.api.push({ chat: group, from: aliceUser, text: '一会儿提醒我交周报' });
+    const id = await t.conversationOf(group);
+    await taskFrom(s, t, id, source!);
+    s.tasks.start();
+    await s.tasks.settled();
+
+    await s.advance(minute);
+    await waitUntil(() => t.api.delivered.length === 1, '回复发出');
+    await t.telegram.bot.idle();
+
+    expect(t.api.delivered).toEqual([
+      {
+        chatId: String(group.id),
+        messageId: expect.any(Number),
+        text: 'Alice，该交周报了',
+        replyTo: source,
+      },
+    ]);
+    expect(await kinds(s, id)).toEqual(['user', 'task', 'assistant']);
+    expect(promptOf(model, 0)).toContain('<event type=\\"task\\" task=\\"t1\\"');
+    const lives = s.lives();
+    const wait = lives.findIndex((event) => event.type === 'wait');
+    const start = lives.findIndex((event) => event.type === 'start');
+    expect(wait).toBeGreaterThanOrEqual(0);
+    expect(start).toBeGreaterThan(wait);
+    expect(lives[wait]).toMatchObject({ conversationId: id });
+    expect(lives[wait]).not.toHaveProperty('tasks');
+    expect(lives[start]).toMatchObject({
+      conversationId: id,
+      tasks: [{ id: 1, ref: 't1', action: '提醒 Alice 交周报' }],
+    });
+    // 等待合并时就在发「正在输入」
+    const methods = t.api.calls.map((call) => call.method);
+    expect(methods.indexOf('sendChatAction')).toBeGreaterThanOrEqual(0);
+    expect(methods.indexOf('sendChatAction')).toBeLessThan(methods.indexOf('sendMessage'));
+  });
+
+  it('等待合并中到点：并进这一轮，只回复一次；触发者是群里那条，回复引用最后的触发（任务的来源）', async () => {
+    const { tools, seen } = probe();
+    const model = scripted(call('probe', {}), answer('一起说'), answer('不该出现'));
+    const s = await setup(model, { tools });
+    const t = await withTelegram(s, { idleMs: 400, maxMs: 3000 });
+    const [source] = t.api.push({ chat: group, from: aliceUser, text: '一会儿提醒我交周报' });
+    const id = await t.conversationOf(group);
+    await taskFrom(s, t, id, source!);
+    s.tasks.start();
+    await s.tasks.settled();
+
+    const [asked] = t.api.push({ chat: group, from: bobUser, text: 'nori 在吗' });
+    await waitUntil(() => s.lives().some((event) => event.type === 'wait'), '等待合并');
+    await s.advance(minute);
+    await waitUntil(() => t.api.delivered.length === 1, '回复发出');
+    await t.telegram.bot.idle();
+    await sleep(100);
+
+    expect(model.doStreamCalls).toHaveLength(2);
+    expect(promptOf(model, 0)).toContain('nori 在吗');
+    expect(promptOf(model, 0)).toContain('task=\\"t1\\"');
+    expect(seen).toEqual([[await t.triggerOf(id, asked!)]]);
+    expect(t.api.delivered).toMatchObject([{ text: '一起说', replyTo: source }]);
+    expect(s.lives().filter((event) => event.type === 'wait')).toHaveLength(1);
+    const starts = s.lives().filter((event) => event.type === 'start');
+    expect(starts).toHaveLength(1);
+    expect(starts[0]).toMatchObject({ tasks: [{ id: 1, ref: 't1' }] });
+  });
+
+  it('回复中到点：这次发出后补一次，补的那次看得到事件、触发者为空、引用任务的来源；只有它的 start 带着任务', async () => {
+    const hold = gate();
+    const { tools, seen } = probe();
+    const model = scripted(
+      [...text('慢慢说'), { gate: hold.promise }, finish()],
+      call('probe', {}),
+      answer('该交周报啦'),
+    );
+    const s = await setup(model, { tools });
+    const t = await withTelegram(s);
+    const [source] = t.api.push({ chat: group, from: aliceUser, text: '一会儿提醒我交周报' });
+    const id = await t.conversationOf(group);
+    await taskFrom(s, t, id, source!);
+    s.tasks.start();
+    await s.tasks.settled();
+
+    const [asked] = t.api.push({ chat: group, from: bobUser, text: 'nori 讲个故事' });
+    await waitUntil(() => model.doStreamCalls.length === 1, '第一次回复');
+    await s.advance(minute);
+    await waitUntil(() => s.lives().some((event) => event.type === 'again'), '又被触发');
+    hold.open();
+    await waitUntil(() => t.api.delivered.length === 2, '两次回复发出');
+    await t.telegram.bot.idle();
+
+    expect(t.api.delivered).toMatchObject([
+      { text: '慢慢说', replyTo: asked },
+      { text: '该交周报啦', replyTo: source },
+    ]);
+    // 事件排在这次回复后面：回复排在它开始时看到的最后一条之后
+    expect(await kinds(s, id)).toEqual(['user', 'user', 'assistant', 'task', 'assistant']);
+    expect(promptOf(model, 0)).not.toContain('task=\\"t1\\"');
+    expect(promptOf(model, 1)).toContain('task=\\"t1\\"');
+    expect(seen).toEqual([[]]);
+    const starts = s.lives().filter((event) => event.type === 'start');
+    expect(starts).toHaveLength(2);
+    expect(starts[0]).not.toHaveProperty('tasks');
+    expect(starts[1]).toMatchObject({ tasks: [{ id: 1, ref: 't1' }] });
+  });
+
+  it('同时到点的几个任务：只回复一次，引用最后一个任务的来源；start 带着这几个任务', async () => {
+    const model = scripted(answer('两件事都到点了'), answer('不该出现'));
+    const s = await setup(model);
+    const t = await withTelegram(s);
+    const [fromAlice, fromBob] = t.api.push(
+      { chat: group, from: aliceUser, text: '一会儿提醒我交周报' },
+      { chat: group, from: bobUser, text: '也提醒我交周报' },
+    );
+    const id = await t.conversationOf(group);
+    await taskFrom(s, t, id, fromAlice!);
+    await taskFrom(s, t, id, fromBob!, { action: '提醒 Bob 交周报' });
+    s.tasks.start();
+    await s.tasks.settled();
+
+    await s.advance(minute);
+    await waitUntil(() => t.api.delivered.length === 1, '回复发出');
+    await t.telegram.bot.idle();
+    await sleep(150);
+
+    expect(model.doStreamCalls).toHaveLength(1);
+    expect(t.api.delivered).toMatchObject([{ text: '两件事都到点了', replyTo: fromBob }]);
+    expect(await kinds(s, id)).toEqual(['user', 'user', 'task', 'task', 'assistant']);
+    expect(s.lives().find((event) => event.type === 'start')).toMatchObject({
+      tasks: [
+        { id: 1, ref: 't1', action: '提醒 Alice 交周报' },
+        { id: 2, ref: 't2', action: '提醒 Bob 交周报' },
+      ],
+    });
+  });
+
+  it('bot 里还没有这个会话（服务启动后 Alice 没私聊过）：按会话 id 取会话，发到会话的 chat id，引用任务的来源', async () => {
+    const model = scripted(answer('到点啦'));
+    const s = await setup(model);
+    const t = await withTelegram(s);
+    // 启动之后才有的会话，bot 从没打开过（启动时打开已知会话那一步已经过了）
+    const id = await s.observed.createConversation({
+      platform: 'telegram',
+      platformConversationId: String(aliceUser.id),
+      title: '与 Alice Liddell 的私聊',
+    });
+    await s.run(
+      'create_task',
+      { action: '提醒 Alice', kind: 'once', at: '2026-11-09 21:31' },
+      {
+        conversationId: id,
+        triggers: [
+          {
+            author: { id: '11', name: 'Alice Liddell' },
+            messageId: 'm-src',
+            platformMessageId: '4242',
+          },
+        ],
+      },
+    );
+    s.tasks.start();
+    await s.tasks.settled();
+
+    await s.advance(minute);
+    await waitUntil(() => t.api.delivered.length === 1, '回复发出');
+    await t.telegram.bot.idle();
+
+    expect(t.api.delivered).toMatchObject([{ chatId: String(aliceUser.id), text: '到点啦' }]);
+    // 引用的是任务的来源（假接口里没有这条，所以群里看到的不带引用）
+    const sent = t.api.calls.filter((call) => call.method === 'sendMessage');
+    expect(sent.map((call) => call.body.reply_parameters)).toEqual([
+      { message_id: 4242, allow_sending_without_reply: true },
+    ]);
+    expect(await kinds(s, id)).toEqual(['task', 'assistant']);
+    expect(s.entries.some((entry) => entry.msg === 'task.no_entrance')).toBe(false);
+  });
+
+  it('群、私聊的用户被移出白名单之后，任务到点不回复：事件照写，只记一行日志（会话、任务、原因）', async () => {
+    const model = scripted(answer('不该出现'));
+    const s = await setup(model);
+    const t = await withTelegram(s);
+    // 建任务时还在白名单里，之后被移出：现在的白名单里没有这个群，也没有 Bob
+    const inGroup = await s.observed.createConversation({
+      platform: 'telegram',
+      platformConversationId: String(otherGroup.id),
+      title: '别的群',
+    });
+    const withBob = await s.observed.createConversation({
+      platform: 'telegram',
+      platformConversationId: String(bobUser.id),
+      title: '与 Bob 的私聊',
+    });
+    for (const id of [inGroup, withBob]) {
+      await s.run(
+        'create_task',
+        { action: '提醒一下', kind: 'once', at: '2026-11-09 21:31' },
+        { conversationId: id, triggers: [trigger(bob, 'm-src')] },
+      );
+    }
+    s.tasks.start();
+    await s.tasks.settled();
+
+    await s.advance(minute);
+    const skipped = () => t.entries.filter((e) => e.msg === 'telegram.due_skipped');
+    await waitUntil(() => skipped().length === 2, '日志');
+    await sleep(150);
+
+    expect(skipped().map((e) => e.fields)).toEqual(
+      expect.arrayContaining([
+        { conversationId: inGroup, tasks: [1], reason: 'not_allowed' },
+        { conversationId: withBob, tasks: [2], reason: 'not_allowed' },
+      ]),
+    );
+    expect(skipped().map((e) => e.level)).toEqual(['info', 'info']);
+    expect(await kinds(s, inGroup)).toEqual(['task']);
+    expect(await kinds(s, withBob)).toEqual(['task']);
+    expect(model.doStreamCalls).toHaveLength(0);
+    expect(t.api.calls.map((call) => call.method)).not.toContain('sendMessage');
+    expect(t.api.calls.map((call) => call.method)).not.toContain('sendChatAction');
+    expect(s.lives().filter((event) => event.type === 'wait')).toEqual([]);
+  });
+
+  it('取不到群（会话没有 chat id）：事件照写，只记日志，不回复', async () => {
+    const model = scripted(answer('不该出现'));
+    const s = await setup(model);
+    const t = await withTelegram(s);
+    const id = await s.observed.createConversation({ platform: 'telegram' });
+    await s.run(
+      'create_task',
+      { action: '提醒 Alice', kind: 'once', at: '2026-11-09 21:31' },
+      { conversationId: id, triggers: [trigger(alice, 'm-src')] },
+    );
+    s.tasks.start();
+    await s.tasks.settled();
+
+    await s.advance(minute);
+    const skipped = () => t.entries.find((e) => e.msg === 'telegram.due_skipped');
+    await waitUntil(() => skipped() !== undefined, '日志');
+    await sleep(150);
+
+    expect(await kinds(s, id)).toEqual(['task']);
+    expect(model.doStreamCalls).toHaveLength(0);
+    expect(t.api.delivered).toEqual([]);
+    expect(skipped()).toMatchObject({
+      level: 'warn',
+      fields: { conversationId: id, tasks: [1], reason: 'no_chat', platform: 'telegram' },
+    });
+  });
+
+  it('引用不上（来源消息被删了）：照样发出，不带引用', async () => {
+    const model = scripted(answer('该交周报了'));
+    const s = await setup(model);
+    const t = await withTelegram(s);
+    const [source] = t.api.push({ chat: group, from: aliceUser, text: '一会儿提醒我交周报' });
+    const id = await t.conversationOf(group);
+    await taskFrom(s, t, id, source!);
+    t.api.deleteMessage(group.id, source!);
+    s.tasks.start();
+    await s.tasks.settled();
+
+    await s.advance(minute);
+    await waitUntil(() => t.api.delivered.length === 1, '回复发出');
+    await t.telegram.bot.idle();
+
+    expect(t.api.delivered).toEqual([
+      { chatId: String(group.id), messageId: expect.any(Number), text: '该交周报了' },
+    ]);
+    expect(t.entries.filter((e) => e.msg === 'telegram.send_failed')).toEqual([]);
+  });
+
+  it('到点的入口马上返回：不等合并、不等回复；回复期间照样能建任务，现场里这次回复带着任务', async () => {
+    const hold = gate();
+    const model = scripted([...text('该交'), { gate: hold.promise }, finish()]);
+    const s = await setup(model);
+    const t = await withTelegram(s, { idleMs: 300, maxMs: 2000 });
+    const [source] = t.api.push({ chat: group, from: aliceUser, text: '一会儿提醒我交周报' });
+    const id = await t.conversationOf(group);
+    await taskFrom(s, t, id, source!);
+    s.tasks.start();
+    await s.tasks.settled();
+
+    // 定时器那一串（写事件、改任务、交给入口）做完才返回：入口要是等合并或回复，这里就回不来
+    await s.advance(minute);
+    expect(model.doStreamCalls).toHaveLength(0);
+    await waitUntil(() => model.doStreamCalls.length === 1, '回复开始');
+    expect(s.live.snapshot().replies).toEqual([
+      expect.objectContaining({
+        conversationId: id,
+        tasks: [{ id: 1, ref: 't1', action: '提醒 Alice 交周报' }],
+      }),
+    ]);
+    // 任务服务那一串没被占着：回复还没结束，建任务照样做完
+    await taskFrom(s, t, id, source!, { at: '2026-11-09 22:00' });
+    expect(await s.storage.getTask(2)).toMatchObject({ status: 'active' });
+
+    hold.open();
+    await waitUntil(() => t.api.delivered.length === 1, '回复发出');
+    await t.telegram.bot.idle();
+  });
+
+  it('正在关闭时到点：事件照写，不再开始新的一轮；进行中的那次照常发完', async () => {
+    const hold = gate();
+    const model = scripted(
+      [...text('先说完这句'), { gate: hold.promise }, finish()],
+      answer('不该出现'),
+    );
+    const s = await setup(model);
+    const t = await withTelegram(s);
+    const [source] = t.api.push({ chat: group, from: aliceUser, text: '一会儿提醒我交周报' });
+    const id = await t.conversationOf(group);
+    await taskFrom(s, t, id, source!);
+    s.tasks.start();
+    await s.tasks.settled();
+
+    const [asked] = t.api.push({ chat: group, from: bobUser, text: 'nori 讲个故事' });
+    await waitUntil(() => model.doStreamCalls.length === 1, '回复开始');
+    const closed = t.telegram.bot.close(10_000);
+    await s.advance(minute);
+    await waitUntil(
+      () =>
+        t.entries.some((e) => e.msg === 'telegram.due_skipped' && e.fields.reason === 'closing'),
+      '到点被放下',
+    );
+    hold.open();
+    await closed;
+    await sleep(150);
+
+    expect(model.doStreamCalls).toHaveLength(1);
+    expect(t.api.delivered).toMatchObject([{ text: '先说完这句', replyTo: asked }]);
+    expect(await kinds(s, id)).toEqual(['user', 'user', 'assistant', 'task']);
+    expect(s.lives().some((event) => event.type === 'again')).toBe(false);
+  });
+
+  it('在群里让洛璃建任务：工具拿到的触发者是那条消息，任务的来源是它；到点时回复引用它', async () => {
+    const model = scripted(
+      call('create_task', { action: '提醒 Alice 交周报', kind: 'once', at: '2026-11-09 21:32' }),
+      answer('好，21:32 提醒你'),
+      answer('Alice，该交周报了'),
+    );
+    const s = await setup(model);
+    const t = await withTelegram(s);
+    s.tasks.start();
+    await s.tasks.settled();
+
+    const [asked] = t.api.push({
+      chat: group,
+      from: aliceUser,
+      text: 'nori 两分钟后提醒我交周报',
+    });
+    await waitUntil(() => t.api.delivered.length === 1, '建好任务的回复');
+    await t.telegram.bot.idle();
+    const id = await t.conversationOf(group);
+
+    expect(await s.storage.getTask(1)).toMatchObject({
+      conversationId: id,
+      source: {
+        author: { id: '11', name: 'Alice Liddell' },
+        messageId: (await t.triggerOf(id, asked!)).messageId,
+        platformMessageId: String(asked),
+      },
+    });
+    expect(promptOf(model, 1)).toContain('已建任务 t1');
+
+    await s.advance(minute);
+    await s.advance(minute);
+    await waitUntil(() => t.api.delivered.length === 2, '到点的回复');
+    await t.telegram.bot.idle();
+
+    expect(t.api.delivered).toMatchObject([
+      { text: '好，21:32 提醒你', replyTo: asked },
+      { text: 'Alice，该交周报了', replyTo: asked },
+    ]);
+    expect(await kinds(s, id)).toEqual(['user', 'assistant', 'task', 'assistant']);
   });
 });
 

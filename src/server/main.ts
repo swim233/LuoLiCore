@@ -155,7 +155,8 @@ const relay = views && events && relayChanges({ views, events, logger });
 const observed = relay ? observeStorage(storage, relay.onChange) : storage;
 
 // 任务（ADR-0010）：建、列出、取消，定时器。事件写进会话管理里的会话，任务的写入经包过的存储推给面板。
-// 到点交给会话所在平台的前端（网页会话在下面登记）；定时器在所有前端都起来之后才开始
+// 到点交给会话所在平台的前端（网页会话在下面登记，Telegram 在它启动时登记）；定时器在所有前端都起来
+// 之后才开始
 const taskService = createTaskService({
   storage: observed,
   open: (conversationId) => sessions.open(conversationId),
@@ -248,6 +249,7 @@ if (config.telegram) {
       live,
       status,
       events,
+      tasks: taskService,
     });
   } catch (error) {
     await fail(`Telegram 启动失败：${(error as Error).message}`, web);

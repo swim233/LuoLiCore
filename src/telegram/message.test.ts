@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import type { TelegramChat, TelegramUser } from '@chat-adapter/telegram';
-import { conversationTitle, displayName, isAllowed, type TelegramRaw } from './message.js';
+import {
+  conversationTitle,
+  displayName,
+  isAllowed,
+  isAllowedChat,
+  type TelegramRaw,
+} from './message.js';
 import { sdkLogger } from './adapter.js';
 import { splitMessage, telegramMessageLimit } from './split.js';
 import { isTriggered } from './trigger.js';
@@ -41,6 +47,16 @@ describe('白名单', () => {
     expect(isAllowed(message({ chat: privateChat(alice) }), allow)).toBe(true);
     expect(isAllowed(message({ chat: privateChat(bob), from: bob }), allow)).toBe(false);
     expect(isAllowed(message({ chat: { id: -1001, type: 'channel' } }), allow)).toBe(false);
+  });
+
+  it('只有 chat id 时（任务到点）：负数是群，看群；正数是私聊，就是对方的用户 id，看用户', () => {
+    expect(isAllowedChat('-1001', allow)).toBe(true);
+    expect(isAllowedChat('-1002', allow)).toBe(false);
+    expect(isAllowedChat('11', allow)).toBe(true);
+    expect(isAllowedChat('22', allow)).toBe(false);
+    // 群 id 不会因为碰巧在用户名单里就算允许，反过来也一样
+    expect(isAllowedChat('-1001', { chats: new Set(), users: new Set(['-1001']) })).toBe(false);
+    expect(isAllowedChat('11', { chats: new Set(['11']), users: new Set() })).toBe(false);
   });
 });
 

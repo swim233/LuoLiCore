@@ -41,8 +41,11 @@ export const systemClock: Clock = {
   clearTimeout: (handle) => clearTimeout(handle as NodeJS.Timeout),
 };
 
-/** 到点的一个任务：前端据此在「此刻」标出 */
-export type DueTask = { id: number; action: string };
+/**
+ * 到点的一个任务：前端据此在「此刻」标出。platformMessageId 是任务来源消息在平台上的 id
+ * （Telegram 的回复引用它）；来源没有时没有
+ */
+export type DueTask = { id: number; action: string; platformMessageId?: string };
 
 /**
  * 交给前端的一次到点：这个会话有任务到点了，事件已经写进去，前端当作一次触发。同一个会话同时到点的
@@ -237,7 +240,12 @@ export function createTaskService({
       });
       if (event) {
         fromSeq ??= event.seq;
-        written.push({ id: task.id, action: task.action });
+        const { platformMessageId } = task.source;
+        written.push({
+          id: task.id,
+          action: task.action,
+          ...(platformMessageId === undefined ? {} : { platformMessageId }),
+        });
       }
       const next = task.schedule.kind === 'once' ? undefined : nextDue(task.schedule, now);
       try {
@@ -272,6 +280,8 @@ export function createTaskService({
         ...(fromSeq === undefined ? {} : { fromSeq }),
       });
     } catch (error) {
+      // 只记日志、不用 backOff：事件写了，任务也已经往下走了（改任务失败的上面已经记了），
+      // 下一次看一眼时不会再拿出这一次到点
       logger.error(
         { conversationId, platform, error: describeError(error) },
         'task.deliver_failed',
@@ -341,7 +351,10 @@ export function createTaskService({
   }
 
   return {
-    /** 登记一个平台的到点入口（网页会话在服务里，Telegram 在第 4 步） */
+    /**
+     * 登记一个平台的到点入口（网页会话的在服务里登记，Telegram 的在它启动时登记）。入口在这一串里
+     * 被 await：要马上返回，不等合并、不等回复
+     */
     setEntrance(platform: string, entrance: TaskEntrance): void {
       entrances.set(platform, entrance);
     },
@@ -480,7 +493,9 @@ function sourceOf(
   requestedBy: string | undefined,
 ): { ok: true; trigger: Trigger } | Failure {
   if (triggers.length === 0) {
-    return fail('只能在有人让你建任务时建：这次回复不是哪个人的消息触发的');
+    return fail(
+      '只能在有人让你建任务时建：这次回复是任务到点之类的事件触发的，不是哪个人发来的消息',
+    );
   }
   const keyOf = (trigger: Trigger) =>
     trigger.author.id === undefined ? `name:${trigger.author.name}` : `id:${trigger.author.id}`;

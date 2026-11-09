@@ -15,9 +15,14 @@ export const fakeBot: TelegramUser = {
   username: 'nori_test_bot',
 };
 
+/** 群里看得到的一条 bot 发的消息：在哪个聊天、文字、引用了哪条（没引用时没有） */
+export type Delivered = { chatId: string; messageId: number; text: string; replyTo?: number };
+
 /**
  * 只实现前端用到的方法：getMe、deleteWebhook、getUpdates（长轮询）、
- * sendMessage、sendChatAction、getFile，以及文件下载（/file/bot<token>/<路径>）。其他返回 404
+ * sendMessage、sendChatAction、getFile，以及文件下载（/file/bot<token>/<路径>）。其他返回 404。
+ * sendMessage 的引用照真的 Bot API：被引用的消息不在这个聊天里（没发过、被删了）时，
+ * 带 allow_sending_without_reply 就不带引用发出，否则 400
  */
 export async function startFakeTelegram() {
   const updates: TelegramUpdate[] = [];
@@ -36,6 +41,15 @@ export async function startFakeTelegram() {
   const failingFiles = new Set<string>();
   // 下载请求的文件路径（地址里的 token 不记）
   const downloads: string[] = [];
+  // 每个聊天里现有的消息（推送的、bot 发的；删掉的去掉），按 chat id
+  const existing = new Map<string, Set<number>>();
+  const exists = (chatId: string, messageId: number) =>
+    existing.get(chatId)?.has(messageId) ?? false;
+  const remember = (chatId: string, messageId: number) => {
+    existing.set(chatId, (existing.get(chatId) ?? new Set()).add(messageId));
+  };
+  // bot 发出、群里看得到的消息
+  const delivered: Delivered[] = [];
 
   const server = createServer((request, response) => {
     void handle(request, response);
@@ -84,6 +98,17 @@ export async function startFakeTelegram() {
             description: 'Internal Server Error',
           });
         }
+        const chatId = String(body.chat_id);
+        const quoted = body.reply_parameters as
+          { message_id: number; allow_sending_without_reply?: boolean } | undefined;
+        const replyTo = quoted && exists(chatId, quoted.message_id) ? quoted.message_id : undefined;
+        if (quoted && replyTo === undefined && !quoted.allow_sending_without_reply) {
+          return reply(response, 400, {
+            ok: false,
+            error_code: 400,
+            description: 'Bad Request: message to be replied not found',
+          });
+        }
         const sent: TelegramMessage = {
           message_id: nextMessageId++,
           chat: {
@@ -94,6 +119,13 @@ export async function startFakeTelegram() {
           from: fakeBot,
           text: String(body.text),
         };
+        remember(chatId, sent.message_id);
+        delivered.push({
+          chatId,
+          messageId: sent.message_id,
+          text: sent.text!,
+          ...(replyTo === undefined ? {} : { replyTo }),
+        });
         return ok(response, sent);
       }
       default:
@@ -142,10 +174,13 @@ export async function startFakeTelegram() {
     calls,
     polls,
     downloads,
+    /** bot 发出、群里看得到的消息，按发出先后 */
+    delivered,
     /** 推送一批更新（同一次 getUpdates 里返回），返回各自的 message_id */
     push(...messages: Array<Omit<TelegramRaw, 'message_id' | 'date'> & { date?: number }>) {
       const ids = messages.map((message) => {
         const message_id = nextMessageId++;
+        remember(String(message.chat.id), message_id);
         updates.push({
           update_id: nextUpdateId++,
           message: { date: Math.floor(Date.now() / 1000), ...message, message_id },
@@ -163,6 +198,10 @@ export async function startFakeTelegram() {
         edited_message: { date: now, edit_date: now, ...message },
       });
       for (const wake of [...waiting]) wake();
+    },
+    /** 群里删掉一条消息（Bot 收不到删除的通知）：之后引用它就引用不上 */
+    deleteMessage(chatId: number, messageId: number) {
+      existing.get(String(chatId))?.delete(messageId);
     },
     /** 登记一个可下载的文件；failing 时 getFile 成功、下载返回 500 */
     addFile(fileId: string, data: Uint8Array, { failing = false } = {}) {
