@@ -20,6 +20,8 @@ export const STATE_TEXT: Record<State, string> = {
   error: '出错',
 };
 const BUSY_ORDER: State[] = ['error', 'retry', 'tool', 'replying', 'thinking', 'waiting'];
+/** 一个会话是怎么离开「进行中」的：正常完成、中止、等待被放弃、出错后的 3.6 秒到了、别的原因（会话被删） */
+export type EndKind = 'end' | 'abort' | 'cancel' | 'error' | 'removed';
 export interface Snap {
   state: State;
   tool?: string;
@@ -27,6 +29,8 @@ export interface Snap {
   list: { id: string; title: string; state: State; tool?: string }[];
   /** 启动了 Telegram 前端。没启动时显示「空闲」，弹出框里写「Telegram 服务未启动」 */
   tgEnabled: boolean;
+  /** 最近一个离开进行中的会话是怎么结束的（徽记靠它判断：最后一个会话正常完成才闪一下）；还没有过为 null */
+  ended: EndKind | null;
 }
 
 class Status {
@@ -42,7 +46,9 @@ class Status {
   lastOnlineAt: number | null = Date.now();
   conv = new Map<string, { state: State; tool?: string; replyId?: string }>();
   errTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  private snap: Snap = { state: 'idle', count: 0, list: [], tgEnabled: true };
+  /** 最近一次 clear 是怎么结束的 */
+  private lastEnd: EndKind | null = null;
+  private snap: Snap = { state: 'idle', count: 0, list: [], tgEnabled: true, ended: null };
 
   set(convId: string, state: State, extra: { tool?: string; replyId?: string } = {}) {
     const cur = this.conv.get(convId);
@@ -50,8 +56,11 @@ class Status {
     this.conv.set(convId, Object.assign({ state }, extra));
     this.emit();
   }
-  clear(convId: string) {
-    if (this.conv.delete(convId)) this.emit();
+  clear(convId: string, how: EndKind = 'removed') {
+    if (this.conv.delete(convId)) {
+      this.lastEnd = how;
+      this.emit();
+    }
   }
   setLastReply(convId: string | null, at: number) {
     this.lastReplyConv = convId;
@@ -62,21 +71,23 @@ class Status {
     for (const t of this.errTimers.values()) clearTimeout(t);
     this.errTimers.clear();
     this.conv.clear();
+    this.lastEnd = null;
     this.emit();
   }
   private compute(): Snap {
     const tgEnabled = this.tgEnabled;
-    if (!this.online) return { state: 'offline', count: 0, list: [], tgEnabled };
+    const ended = this.lastEnd;
+    if (!this.online) return { state: 'offline', count: 0, list: [], tgEnabled, ended };
     const list = [...this.conv].map(([id, s]) => ({
       id,
       title: db.conv(id)?.title || '会话',
       state: s.state,
       tool: s.tool,
     }));
-    if (!list.length) return { state: 'idle', count: 0, list, tgEnabled };
+    if (!list.length) return { state: 'idle', count: 0, list, tgEnabled, ended };
     const state = BUSY_ORDER.find((p) => list.some((x) => x.state === p)) || 'idle';
     const tool = list.find((x) => x.state === 'tool')?.tool;
-    return { state, tool, count: list.length, list, tgEnabled };
+    return { state, tool, count: list.length, list, tgEnabled, ended };
   }
   snapshot() {
     return this.snap;
@@ -101,10 +112,10 @@ bus.on('reply:retry', ({ convId }) => status.set(convId, 'retry'));
 bus.on('reply:end', ({ convId }) => {
   status.lastReplyAt = Date.now();
   status.lastReplyConv = convId;
-  status.clear(convId);
+  status.clear(convId, 'end');
 });
-bus.on('reply:abort', ({ convId }) => status.clear(convId));
-bus.on('reply:cancel', ({ convId }) => status.clear(convId));
+bus.on('reply:abort', ({ convId }) => status.clear(convId, 'abort'));
+bus.on('reply:cancel', ({ convId }) => status.clear(convId, 'cancel'));
 bus.on('reply:error', ({ convId, replyId }) => {
   status.set(convId, 'error', { replyId });
   clearTimeout(status.errTimers.get(convId));
@@ -112,7 +123,7 @@ bus.on('reply:error', ({ convId, replyId }) => {
     convId,
     setTimeout(() => {
       const cur = status.conv.get(convId);
-      if (cur && cur.state === 'error' && cur.replyId === replyId) status.clear(convId);
+      if (cur && cur.state === 'error' && cur.replyId === replyId) status.clear(convId, 'error');
     }, 3600),
   );
 });

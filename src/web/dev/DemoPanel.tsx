@@ -8,6 +8,7 @@ import type { Prefs } from '../lib/prefs';
 import { useBusRev } from '../model/rev';
 import { setAutoNow, setCollapse, setFps, setHover } from '../state/appearance';
 import { hasDef, useDefsRev } from '../state/desk';
+import { BadgeLab } from './BadgeLab';
 import { mockStatus } from './mock-live';
 import { ACTIONS, setData } from './demo';
 import { toggleDemo, useDevUi } from './demo-state';
@@ -99,6 +100,7 @@ export function DemoPanel() {
               </button>
             </div>
           </section>
+          <BadgeLab />
           <section>
             <h4>部件与数据</h4>
             <div className="demo-grid">

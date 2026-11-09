@@ -1,6 +1,7 @@
 import { env, particleScale } from '../lib/env';
 import { motionOn, prefs } from '../lib/prefs';
 import { cssRGB } from '../lib/util';
+import type { BadgeReply, BadgeStats, Op } from './badge-msg';
 
 /* 星空和粒子的主线程这一头：把画布交给 Worker（OffscreenCanvas），之后只发消息（尺寸、动画开关、全屏停住、粒子的位置） */
 interface RectLike {
@@ -13,8 +14,20 @@ interface RectLike {
 }
 const dprOf = () => Math.min(2, window.devicePixelRatio || 1);
 let skyW: Worker | null = null,
-  fxW: Worker | null = null;
+  fxW: Worker | null = null,
+  fxCanvas = false;
 const SKY_FPS = 30;
+/* 星尘 Worker：整屏的星尘和徽记的小画布共用一个。徽记可能比整屏画布先挂上，所以谁先用谁创建 */
+function fxWorker() {
+  if (!fxW) {
+    fxW = new Worker(new URL('./fx.worker.ts', import.meta.url), { type: 'module' });
+    fxW.onmessage = (e: MessageEvent<BadgeReply>) => {
+      if (e.data.type === 'bd-stats') statsWait.splice(0).forEach((f) => f(e.data.stats));
+    };
+  }
+  return fxW;
+}
+const statsWait: ((s: BadgeStats[]) => void)[] = [];
 
 export const sky = {
   start(canvas: HTMLCanvasElement) {
@@ -67,16 +80,18 @@ export const sky = {
 };
 export const fx = {
   start(canvas: HTMLCanvasElement) {
-    if (fxW) return;
+    if (fxCanvas) return;
+    fxCanvas = true;
     const off = canvas.transferControlToOffscreen();
-    fxW = new Worker(new URL('./fx.worker.ts', import.meta.url), { type: 'module' });
-    fxW.postMessage(
+    fxWorker().postMessage(
       { type: 'init', canvas: off, w: window.innerWidth, h: window.innerHeight, dpr: dprOf() },
       [off],
     );
   },
   size() {
-    fxW?.postMessage({ type: 'size', w: window.innerWidth, h: window.innerHeight, dpr: dprOf() });
+    if (fxCanvas)
+      fxW?.postMessage({ type: 'size', w: window.innerWidth, h: window.innerHeight, dpr: dprOf() });
+    badgeFx.size();
   },
   /* 粒子的颜色在发给 Worker 之前从 CSS 变量读取（配色变了跟着变） */
   palette(kind: 'burst' | 'assemble' | 'scatter') {
@@ -87,8 +102,8 @@ export const fx = {
   },
   /* 回复完成：星尘散开 */
   burst(x: number, y: number, { n = 30, speed = 150 }: { n?: number; speed?: number } = {}) {
-    if (!motionOn() || !fxW) return;
-    fxW.postMessage({
+    if (!motionOn() || !fxCanvas) return;
+    fxW!.postMessage({
       type: 'burst',
       x,
       y,
@@ -99,8 +114,8 @@ export const fx = {
   },
   /* 新增部件：星点从四周汇聚成形；时间到 80% 就 resolve，不等粒子全部落完 */
   assemble(r: RectLike, ms = 950) {
-    if (!motionOn() || !fxW) return Promise.resolve();
-    fxW.postMessage({
+    if (!motionOn() || !fxCanvas) return Promise.resolve();
+    fxW!.postMessage({
       type: 'assemble',
       r: {
         left: r.left,
@@ -118,8 +133,8 @@ export const fx = {
   },
   /* 部件消散 */
   scatter(r: RectLike) {
-    if (!motionOn() || !fxW) return;
-    fxW.postMessage({
+    if (!motionOn() || !fxCanvas) return;
+    fxW!.postMessage({
       type: 'scatter',
       r: {
         left: r.left,
@@ -134,3 +149,61 @@ export const fx = {
     });
   },
 };
+
+/* 徽记的小画布：每个徽记一张，交给同一个 Worker。消息的结构见 badge-msg.ts */
+const badgeIds = new Set<number>();
+let badgeSeq = 0;
+export const badgeFx = {
+  add(canvas: HTMLCanvasElement, s: number): number {
+    const id = ++badgeSeq;
+    badgeIds.add(id);
+    const off = canvas.transferControlToOffscreen();
+    fxWorker().postMessage({ type: 'bd-add', id, canvas: off, s, dpr: dprOf() }, [off]);
+    return id;
+  },
+  del(id: number) {
+    badgeIds.delete(id);
+    fxW?.postMessage({ type: 'bd-del', id });
+  },
+  post(id: number, ops: Op[]) {
+    fxW?.postMessage({ type: 'bd-do', id, ops });
+  },
+  /* 缩放页面、窗口换到另一个屏幕时 DPR 变了：小画布按新的 DPR 重设像素尺寸 */
+  size() {
+    for (const id of badgeIds) fxW?.postMessage({ type: 'bd-size', id, dpr: dprOf() });
+  },
+  /* 清空（看不见了、关掉动画、重建）：粒子和特效都不淡出 */
+  reset(id: number) {
+    fxW?.postMessage({ type: 'bd-reset', id });
+  },
+  /* 现有的特效淡出 */
+  stop(id: number) {
+    fxW?.postMessage({ type: 'bd-stop', id });
+  },
+  /* 时间倍率：只有开发模式的实验台会改它 */
+  rate(rate: number) {
+    fxW?.postMessage({ type: 'bd-rate', rate });
+  },
+  /* 每个徽记画了多少帧、此刻有多少粒子（检查看不见的徽记有没有在画） */
+  stats(): Promise<BadgeStats[]> {
+    return new Promise((res) => {
+      statsWait.push(res);
+      fxWorker().postMessage({ type: 'bd-stats' });
+    });
+  },
+};
+(window as Window & { __badgeStats?: () => Promise<BadgeStats[]> }).__badgeStats = () =>
+  badgeFx.stats();
+/* DPR 变了（缩放 110%、125%，换屏）：不一定有 resize 事件，用分辨率的媒体查询盯着 */
+function watchDpr() {
+  const mq = matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
+  mq.addEventListener(
+    'change',
+    () => {
+      badgeFx.size();
+      watchDpr();
+    },
+    { once: true },
+  );
+}
+watchDpr();

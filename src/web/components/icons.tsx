@@ -1,7 +1,5 @@
 /* 小四角星、各部件的图标、标题栏按钮的图标：内联 SVG，各平台长得一样，不靠字体里的 ✦ */
 export const STAR_PATH = 'M0-42C3-14 14-3 42 0C14 3 3 14 0 42C-3 14-14 3-42 0C-14-3-3-14 0-42Z';
-export const GLINT_PATH =
-  'M27-38C27.8-30 30-27.8 38-27C30-26.2 27.8-24 27-16C26.2-24 24-26.2 16-27C24-27.8 26.2-30 27-38Z';
 
 export function Star4({ className = 'st4' }: { className?: string }) {
   return (

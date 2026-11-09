@@ -1,7 +1,10 @@
 /// <reference lib="webworker" />
+import { badgeMessage } from './badge-canvas';
+import type { BadgeMsg } from './badge-msg';
 /* 星尘粒子：新增部件时汇聚、移除时散开、回复完成时迸发。画在一张固定的整屏画布上（OffscreenCanvas，在 Worker 里画），
    每个粒子是一张 32×32 的径向渐变小图（中心 100% 不透明，25% 处 85%，边缘 0%）。参数照第 4.1 版；
-   速度的阻尼原来是每帧乘 0.985（按帧算），换成按时间：0.985^(60·t) */
+   速度的阻尼原来是每帧乘 0.985（按帧算），换成按时间：0.985^(60·t)。
+   徽记的小画布也在这个 Worker 里画（bd- 开头的消息，见 badge-canvas.ts），和整屏的星尘各画各的 */
 interface P {
   x: number;
   y: number;
@@ -118,8 +121,9 @@ function size() {
   cv.height = Math.round(H * dpr);
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 }
-self.onmessage = (e: MessageEvent<Msg>) => {
+self.onmessage = (e: MessageEvent<Msg | BadgeMsg>) => {
   const m = e.data;
+  if (badgeMessage(m)) return;
   if (m.type === 'init') {
     cv = m.canvas;
     ctx = cv.getContext('2d')!;

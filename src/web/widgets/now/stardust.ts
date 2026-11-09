@@ -25,10 +25,7 @@ export function stardust(convId: string) {
     .slice(0, 2)
     .map((c) => c.getBoundingClientRect());
   if (!pts.length) {
-    const cand = [
-      document.getElementById('top-badge'),
-      faces('now').capBtn?.querySelector('.badge'),
-    ]
+    const cand = [document.getElementById('top-badge'), faces('now').capBtn?.querySelector('.bd')]
       .filter(Boolean)
       .map((x) => (x as Element).getBoundingClientRect())
       .filter((r) => r.width > 0);

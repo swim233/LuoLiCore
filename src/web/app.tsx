@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { MOON_GRAD } from './components/badge/geometry';
 import { fx, sky } from './fx/client';
 import { MotionConfig } from 'motion/react';
 import { usePrefs } from './lib/prefs';
@@ -75,18 +76,33 @@ export function App() {
         focusable="false"
       >
         <defs>
-          <linearGradient
-            id="g-star"
-            x1="0"
-            y1="-1"
-            x2="0"
-            y2="1"
-            gradientUnits="objectBoundingBox"
-          >
+          {/* 徽记的渐变：星星从上到下由淡金到金，弯月由里向外（凹处一侧偏暗）；徽记的几张 <svg> 共用 */}
+          <linearGradient id="g-bd-star" x1="0" y1="0" x2="0" y2="1">
             <stop offset="0" style={{ stopColor: 'var(--gold-pale)' }} />
             <stop offset=".55" style={{ stopColor: 'var(--gold)' }} />
             <stop offset="1" style={{ stopColor: 'var(--gold-deep)' }} />
           </linearGradient>
+          <radialGradient
+            id="g-bd-moon"
+            gradientUnits="userSpaceOnUse"
+            cx={MOON_GRAD.cx}
+            cy={MOON_GRAD.cy}
+            r={MOON_GRAD.r}
+          >
+            <stop offset=".6" style={{ stopColor: 'var(--bd-moon-lo)' }} />
+            <stop offset="1" style={{ stopColor: 'var(--bd-moon-hi)' }} />
+          </radialGradient>
+          {/* 弯月提亮的一层：同一个渐变，亮度 ×1.35、更饱和（等待合并时弯月醒着，聚散时闪一下） */}
+          <radialGradient
+            id="g-bd-moon-hot"
+            gradientUnits="userSpaceOnUse"
+            cx={MOON_GRAD.cx}
+            cy={MOON_GRAD.cy}
+            r={MOON_GRAD.r}
+          >
+            <stop offset=".6" style={{ stopColor: 'var(--bd-moon-lo-hot)' }} />
+            <stop offset="1" style={{ stopColor: 'var(--bd-moon-hi-hot)' }} />
+          </radialGradient>
         </defs>
       </svg>
       <canvas id="sky" className="sky" ref={skyRef} aria-hidden="true" />

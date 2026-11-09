@@ -88,6 +88,47 @@
 .dbtn:active {
   transform: translateY(1px);
 }
+.dbtn[aria-pressed='true'] {
+  border-color: var(--edge-gold);
+  background: var(--gold-soft);
+  color: var(--gold-pale);
+}
+.demo-sky {
+  height: 170px;
+  margin-bottom: 8px;
+  border-radius: 10px;
+  border: 1px solid var(--edge);
+  background: radial-gradient(120% 90% at 50% 100%, var(--sky-2), var(--sky-0));
+  display: grid;
+  place-items: center;
+}
+.demo-stepper {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.demo-stepper .dbtn {
+  min-width: 30px;
+  text-align: center;
+}
+.demo-stepper output {
+  min-width: 1.2em;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.demo-line {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--fg-3);
+}
+.demo-line b {
+  color: var(--fg);
+  font-weight: 600;
+}
+.demo-line .q {
+  color: var(--gold);
+}
 .dbtn.is-wide {
   grid-column: 1 / -1;
 }

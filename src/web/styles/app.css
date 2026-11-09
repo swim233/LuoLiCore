@@ -1490,9 +1490,6 @@ button {
   background: color-mix(in srgb, var(--gold) 12%, transparent);
   box-shadow: 0 0 20px color-mix(in srgb, var(--gold) 20%, transparent);
 }
-.fs-tab .badge {
-  --bs: 18px;
-}
 .fs-stage {
   position: relative;
   flex: 1 1 auto;
@@ -1518,206 +1515,246 @@ button {
     0 0 50px color-mix(in srgb, var(--blue) 20%, transparent);
 }
 
-/* ---------- 状态徽记 ---------- */
-.badge {
+/* ---------- 状态徽记 ----------
+   待机是冷色弯月；工作时弯月散成星尘、聚成金色四角星，右上角有一颗绕着转的小卫星，几个会话同时回复时主星外面有伴星。
+   骨架在 components/Badge.tsx，动画由 components/badge/controller.ts 用 Web Animations 管（只动 transform 和 opacity，变亮用提亮层的透明度，不用 filter），
+   所以这里只有静态的样子：层的叠放、颜色、基准值。粒子画在每个徽记自己的小画布（.bd-fx）上，在星尘 Worker 里。 */
+:root {
+  --bd-moon-hi: #a3b3ee;
+  --bd-moon-lo: #5165b8;
+  --bd-moon-hi-hot: #dcf2ff;
+  --bd-moon-lo-hot: #6d88f8;
+}
+.bd {
   position: relative;
-  display: inline-grid;
-  place-items: center;
-  width: var(--bs, 22px);
-  height: var(--bs, 22px);
+  display: inline-block;
+  vertical-align: top;
+  width: var(--s, 22px);
+  height: var(--s, 22px);
   flex: none;
-  --halo: color-mix(in srgb, var(--gold) 55%, transparent);
+  isolation: isolate;
+  --zc: var(--quote);
+  --zg: color-mix(in srgb, var(--blue) 85%, transparent);
 }
-.badge > * {
-  grid-area: 1 / 1;
-}
-/* 光晕画在星星上面（和第 3 版一样：星星是 <svg> 元素后，它有 transform / opacity 时会自成一层、盖到光晕上面，这里把层次定死） */
-.badge-halo {
-  width: 100%;
-  height: 100%;
-  border-radius: 50%;
-  background: radial-gradient(circle, var(--halo) 0, transparent 66%);
-  transform: scale(1.55);
-  opacity: 0.7;
-  z-index: 1;
-  transition: opacity 0.4s;
-}
-.badge-svg {
-  width: 100%;
-  height: 100%;
-  overflow: visible;
-}
-/* 星星自己是一个 <svg> 元素（不是 SVG 里的 <g>）：HTML 元素上的 transform / opacity 动画跑在合成器上，SVG 里的子元素的动画要主线程每帧重画 */
-.b-star {
-  transform-origin: 50% 50%;
-  transition: opacity 0.3s;
-}
-.b-star-path {
-  fill: url(#g-star);
-  transition: fill 0.3s;
-}
-.b-glint {
-  fill: var(--gold-pale);
-  opacity: 0.85;
-}
-.b-rings circle {
-  fill: none;
-  stroke: var(--gold);
-  stroke-width: 2.5;
-  opacity: 0;
-  transform-box: view-box;
-  transform-origin: 0 0;
-}
-.b-sparks circle {
-  fill: var(--gold-pale);
-  opacity: 0;
-  transform-box: view-box;
-  transform-origin: 0 0;
-}
-.badge-count {
+.bd > *,
+.bd-fl,
+.bd-fl2,
+.bd-mo,
+.bd-mb,
+.bd-starw,
+.bd-sti,
+.bd-sw,
+.bd-sat,
+.bd-cloud,
+.bd-cmv,
+.bd-cpop {
   position: absolute;
-  right: -7px;
-  top: -6px;
-  grid-area: auto;
-  z-index: 2;
-  min-width: 15px;
-  height: 15px;
-  padding: 0 3px;
-  box-sizing: border-box;
-  border-radius: 999px;
-  background: var(--gold);
-  color: var(--ink);
-  font-size: 10px;
-  font-weight: 700;
-  line-height: 15px;
-  text-align: center;
-  font-variant-numeric: tabular-nums;
-  box-shadow: 0 0 8px color-mix(in srgb, var(--gold) 60%, transparent);
+  inset: 0;
+  display: block;
+  pointer-events: none;
 }
-.badge-count:empty {
-  display: none;
+/* 徽记里每一层 svg 都和徽记一样大。宽高写 !important：.cap-icon svg、.w-icon svg、.fs-tab svg、.tbtn svg 这类
+   给「图标里的 svg」定固定大小的通用规则（不管特异性多高、写在前面还是后面）都不许改它，不靠尺寸碰巧相同 */
+.bd-svg {
+  position: absolute;
+  inset: 0;
+  width: 100% !important;
+  height: 100% !important;
+  overflow: visible;
+  display: block;
 }
-.badge[data-s='offline'] {
-  --halo: transparent;
+/* 弯月：浮动（.bd-fl）加轻摆（.bd-fl2），.bd-mb 是本体，上面叠着变亮、变暗的两层 */
+.bd-moon path {
+  fill: url(#g-bd-moon);
 }
-.badge[data-s='offline'] .b-star-path {
-  fill: var(--dim);
-}
-.badge[data-s='offline'] .b-glint {
+.bd-mhot,
+.bd-mdim,
+.bd-red,
+.bd-hot {
   opacity: 0;
 }
-.badge[data-s='offline'] .b-star {
-  opacity: 0.7;
+.bd-mhot path {
+  fill: url(#g-bd-moon-hot);
 }
-.badge[data-s='waiting'] {
-  --halo: color-mix(in srgb, var(--blue) 55%, transparent);
+.bd-mdim path {
+  fill: var(--bg-0);
 }
-.badge[data-s='thinking'] {
-  --halo: color-mix(in srgb, var(--blue) 60%, transparent);
+/* 星星：.bd-starw 管出现和消失、给侧身一个透视；.bd-sti 管整颗的缩放、浮动、侧身；.bd-sw 是挂着摆的那一层。
+   红色层（出错）和提亮层（闪一下、再亮起）叠在星星上 */
+.bd-starw {
+  z-index: 2;
+  opacity: 0;
+  perspective: calc(var(--s) * 3.2);
 }
-.badge[data-s='replying'] {
-  --halo: color-mix(in srgb, var(--gold) 75%, transparent);
+.bd-sti {
+  z-index: 1;
+  transform-origin: 50% 55%;
 }
-.badge[data-s='tool'] {
-  --halo: color-mix(in srgb, var(--tool) 60%, transparent);
+.bd-sw {
+  transform-origin: 50% -28%;
 }
-.badge[data-s='retry'] {
-  --halo: color-mix(in srgb, var(--amber) 50%, transparent);
+.bd-star path {
+  fill: url(#g-bd-star);
 }
-.badge[data-s='error'] {
-  --halo: color-mix(in srgb, var(--err) 75%, transparent);
-}
-.badge[data-s='error'] .b-star-path {
+.bd-red path {
   fill: var(--err);
 }
-.badge[data-s='error'] .b-glint {
-  fill: var(--err-pale);
+.bd-hot path {
+  fill: #fff6dc;
 }
-.badge[data-s='error'] .b-rings circle {
-  stroke: var(--err);
+/* 小卫星：从星星里分出来单独一层，不跟星星的摇摆和侧身动；转到后面时压到星星下面（z-index 由控制器改） */
+.bd-glint {
+  opacity: 0.85;
 }
-/* 动画关掉时的静态区别 */
-.badge[data-s='waiting'] .b-rings circle:first-child {
-  opacity: 0.55;
-  transform: scale(0.72);
+.bd-glint path {
+  fill: var(--gold-pale);
 }
-.badge[data-s='thinking'] .b-star {
-  transform: rotate(45deg);
+/* 离线：云遮月 */
+.bd-cloud {
+  z-index: 3;
+  opacity: 0;
 }
-.badge[data-s='replying'] .b-sparks circle {
-  opacity: 0.8;
-  transform: rotate(var(--a)) translateY(-40px) scale(0.8);
+.bd-cloud-i {
+  position: absolute;
+  left: 2%;
+  top: 30%;
+  width: 96%;
+  height: 46%;
+  background:
+    radial-gradient(circle at 26% 62%, #39426e 0 21%, transparent 22%),
+    radial-gradient(circle at 48% 44%, #3d4776 0 27%, transparent 28%),
+    radial-gradient(circle at 72% 58%, #353e69 0 22%, transparent 23%),
+    radial-gradient(ellipse at 50% 74%, #333c66 0 40%, transparent 41%);
+  filter: blur(calc(var(--s) * 0.025));
 }
-.badge[data-s='tool'] .b-star {
-  opacity: 0.6;
+/* 伴星：锚点（.bd-comp，徽记的 30%，在正中）> 自己的轨道（.bd-cmv）> 出现、离开（.bd-cpop）> 星星（自己闪） */
+.bd-comp {
+  inset: auto;
+  left: 35%;
+  top: 35%;
+  width: 30%;
+  height: 30%;
+  z-index: 4;
 }
-.badge[data-s='retry'] .b-star {
-  opacity: 0.38;
+.bd-cpop {
+  opacity: 0;
+  transform: scale(0);
 }
-.badge[data-s='error'] .b-rings circle:first-child {
-  opacity: 0.6;
-  transform: scale(1.05);
+.bd-cstar path {
+  fill: var(--gold-pale);
 }
-@keyframes b-breathe {
-  0%,
-  100% {
-    transform: scale(1.3);
-    opacity: 0.45;
-  }
-  50% {
-    transform: scale(1.7);
-    opacity: 0.9;
-  }
+/* 静态底子：徽记「现在该是什么样子」写在 .bd 的 data-look（主状态）、data-comps（伴星数）、data-offline 上（控制器一直维护，
+   看不见时也维护；cloneNode 复制出来的形变用的复制层会带着），这里按它画出静止的样子：弯月还是星星、哪一层亮、伴星在哪、有没有云。
+   动画和控制器写的行内样式都叠在它上面，所以新挂上的徽记、重新看得见的徽记、复制层不跑脚本，第一帧就是当前的样子。
+   各项的数值和 controller.ts 里的 POSE 一致（星星的浮动、摇摆等循环动作是动画，不在这里） */
+.bd:is(
+    [data-look='thinking'],
+    [data-look='replying'],
+    [data-look='tool'],
+    [data-look='retry'],
+    [data-look='linger']
+  )
+  .bd-starw {
+  opacity: 1;
 }
-@keyframes b-star-breathe {
-  0%,
-  100% {
-    transform: scale(1);
-  }
-  50% {
-    transform: scale(1.05);
-  }
+/* 出错：星星已经碎了，弯月也不在（留一点红光是画布上的） */
+.bd:is(
+    [data-look='thinking'],
+    [data-look='replying'],
+    [data-look='tool'],
+    [data-look='retry'],
+    [data-look='linger'],
+    [data-look='error']
+  )
+  .bd-mo {
+  opacity: 0;
 }
-@keyframes b-ring-in {
-  0% {
-    transform: scale(1.25);
-    opacity: 0;
-  }
-  30% {
-    opacity: 0.75;
-  }
-  100% {
-    transform: scale(0.32);
-    opacity: 0;
-  }
+.bd[data-look='waiting'] .bd-mhot {
+  opacity: 1;
 }
-@keyframes b-ring-out {
-  0% {
-    transform: scale(0.45);
-    opacity: 0.95;
-  }
-  100% {
-    transform: scale(1.6);
-    opacity: 0;
-  }
+.bd[data-look='thinking'] .bd-sti {
+  transform: scale(0.88);
 }
-@keyframes b-spin {
-  to {
-    transform: rotate(360deg);
-  }
+.bd[data-look='thinking'] .bd-glint {
+  opacity: 0.7;
 }
-@keyframes b-spark {
-  0% {
-    transform: rotate(var(--a)) translateY(-12px) scale(1);
-    opacity: 0;
-  }
-  20% {
-    opacity: 1;
-  }
-  100% {
-    transform: rotate(var(--a)) translateY(-56px) scale(0.35);
-    opacity: 0;
-  }
+.bd[data-look='replying'] .bd-hot {
+  opacity: 0.1;
+}
+.bd[data-look='tool'] .bd-hot {
+  opacity: 0.05;
+}
+.bd[data-look='linger'] .bd-hot {
+  opacity: 0.06;
+}
+.bd[data-offline] .bd-cloud {
+  opacity: 0.96;
+}
+.bd[data-offline] .bd-mdim {
+  opacity: 0.5;
+}
+/* 小卫星停在右上角（轨道的起点，geometry.ts 的 SAT_ORBIT） */
+.bd-sat {
+  z-index: 2;
+  transform: translate(36.31%, -24.84%) scale(0.8);
+  opacity: 0.62;
+}
+/* 伴星：停在轨道上 COMP_STATIC_TH 那个角度的位置；百分比是伴星自己（徽记的 30%）的大小，所以和徽记的尺寸无关 */
+.bd-c2 {
+  z-index: 1; /* 静止的位置在主星后面 */
+}
+.bd-c0 .bd-cmv {
+  transform: translate(184.64%, -23.1%) scale(0.937);
+  opacity: 0.844;
+}
+.bd-c1 .bd-cmv {
+  transform: translate(-192.17%, -38.15%) scale(0.956);
+  opacity: 0.88;
+}
+.bd-c2 .bd-cmv {
+  transform: translate(-137.68%, -106.6%) scale(0.729);
+  opacity: 0.455;
+}
+.bd[data-comps='1'] .bd-c0 .bd-cpop,
+.bd[data-comps='2'] .bd-c0 .bd-cpop,
+.bd[data-comps='3'] .bd-c0 .bd-cpop,
+.bd[data-comps='2'] .bd-c1 .bd-cpop,
+.bd[data-comps='3'] .bd-c1 .bd-cpop,
+.bd[data-comps='3'] .bd-c2 .bd-cpop {
+  opacity: 1;
+  transform: none;
+}
+/* 粒子的小画布：比徽记大一圈（边长 3 倍，位置由控制器定），粒子可以飞出徽记的范围 */
+.bd-fx {
+  position: absolute;
+  z-index: 3;
+  pointer-events: none;
+}
+/* zzz */
+.bd-zs {
+  inset: auto;
+  left: 50%;
+  top: 50%;
+  width: 0;
+  height: 0;
+  z-index: 4;
+}
+.z {
+  position: absolute;
+  left: 0;
+  top: 0;
+  font-weight: 700;
+  font-style: italic;
+  line-height: 1;
+  color: var(--zc);
+  text-shadow: 0 0 5px var(--zg);
+  white-space: nowrap;
+  opacity: 0;
+  font-family: var(--font-ui);
+}
+.z.static {
+  opacity: 0.85;
+  transform: translate(-50%, -50%);
 }
 @keyframes b-blink {
   0%,
@@ -1727,79 +1764,6 @@ button {
   50% {
     opacity: 0.28;
   }
-}
-@keyframes b-retry {
-  0% {
-    opacity: 1;
-    transform: scale(1);
-  }
-  25%,
-  55% {
-    opacity: 0.22;
-    transform: scale(0.86);
-  }
-  80% {
-    opacity: 1;
-    transform: scale(1.08);
-  }
-  100% {
-    opacity: 1;
-    transform: scale(1);
-  }
-}
-@keyframes b-halo-flash {
-  0%,
-  55% {
-    opacity: 0.15;
-  }
-  80% {
-    opacity: 1;
-  }
-  100% {
-    opacity: 0.6;
-  }
-}
-.motion .badge[data-s='idle'] .badge-halo {
-  animation: b-breathe 3.6s ease-in-out infinite;
-}
-.motion .badge[data-s='idle'] .b-star {
-  animation: b-star-breathe 3.6s ease-in-out infinite;
-}
-.motion .badge[data-s='waiting'] .b-rings circle {
-  animation: b-ring-in 1.35s ease-in infinite;
-}
-.motion .badge[data-s='waiting'] .b-rings circle:nth-child(2) {
-  animation-delay: 0.45s;
-}
-.motion .badge[data-s='waiting'] .b-rings circle:nth-child(3) {
-  animation-delay: 0.9s;
-}
-.motion .badge[data-s='thinking'] .b-star {
-  animation: b-spin 7s linear infinite;
-}
-.motion .badge[data-s='replying'] .b-star {
-  animation: b-spin 2.2s linear infinite;
-}
-.motion .badge[data-s='replying'] .b-sparks circle {
-  animation: b-spark 1.1s ease-out infinite;
-  animation-delay: var(--d);
-}
-.motion .badge[data-s='tool'] .b-star {
-  animation: b-blink 0.8s ease-in-out infinite;
-}
-.motion .badge[data-s='retry'] .b-star {
-  animation: b-retry 1.6s ease-in-out infinite;
-}
-.motion .badge[data-s='retry'] .badge-halo {
-  animation: b-halo-flash 1.6s ease-in-out infinite;
-}
-.motion .badge[data-s='error'] .b-rings circle {
-  opacity: 0;
-  transform: none;
-  animation: b-ring-out 1.1s ease-out 2;
-}
-.motion .badge[data-s='error'] .b-rings circle:nth-child(2) {
-  animation-delay: 0.25s;
 }
 .badge-tool {
   font: 500 12px/1 var(--font-term);
@@ -1942,9 +1906,6 @@ button {
   padding: 10px 16px 6px;
   min-width: 0;
   flex-wrap: wrap;
-}
-.now-top .badge {
-  --bs: 44px;
 }
 .now-meta {
   min-width: 0;
@@ -3724,9 +3685,6 @@ button {
   }
   .w-arr {
     inset: 44px 0 0;
-  }
-  .now-top .badge {
-    --bs: 38px;
   }
   .now-cols {
     grid-template-columns: minmax(0, 1fr);

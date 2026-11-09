@@ -30,7 +30,7 @@ import {
   shrinkRect,
   unmorph,
 } from '../shell/faceUtil';
-import type { CloneEl, Face } from '../shell/faceUtil';
+import type { Face } from '../shell/faceUtil';
 import { faces, fsFace } from '../shell/faces';
 import type { FrameSpec, LayerSpec, MorphRec, Rect } from '../shell/morph';
 import {
@@ -185,8 +185,6 @@ function morphWidget(
   ];
   oc.dataset.clone = '1';
   nc.dataset.clone = '1';
-  attachCloneScrolls(oc);
-  attachCloneScrolls(nc);
   const drivers: ((g: number) => void)[] = [];
   const sheens: HTMLElement[] = [];
   const sheen = (bg: string | null, rect: Rect, toCap: boolean) => {
@@ -225,19 +223,6 @@ function morphWidget(
   rec.hide = hide;
   return p;
 }
-function attachCloneScrolls(c: CloneEl) {
-  /* 滚动位置在挂到页面上之后补（MorphFrame 把它挂进内容层容器时调用 restoreScrolls） */
-  c._restore = () => {
-    if (!c._scrolls?.length) return;
-    const call = c.querySelectorAll('*');
-    for (const [i, t, l] of c._scrolls)
-      if (call[i]) {
-        call[i].scrollTop = t;
-        call[i].scrollLeft = l;
-      }
-  };
-}
-
 /* ---------- 重新布局 ---------- */
 export interface RelayoutOpts {
   instant?: boolean;

@@ -159,18 +159,17 @@ export function cloneFace(face: Face): CloneEl {
   for (let i = 0; i < all.length; i++)
     if (all[i].scrollTop || all[i].scrollLeft)
       c._scrolls.push([i, all[i].scrollTop, all[i].scrollLeft]);
-  return c;
-}
-export function attachClone(c: ReturnType<typeof cloneFace>, host: HTMLElement) {
-  host.append(c);
-  if (c._scrolls.length) {
+  /* 滚动位置要等复制层挂到页面上之后才能设（MorphWrap 把它挂进内容层容器后调用）。
+     所有用复制层的形变（桌面重排、全屏打开、全屏关闭）都靠它，所以放在 cloneFace 里，不让哪一处漏调 */
+  c._restore = () => {
+    if (!c._scrolls.length) return;
     const call = c.querySelectorAll('*');
     for (const [i, t, l] of c._scrolls)
       if (call[i]) {
         call[i].scrollTop = t;
         call[i].scrollLeft = l;
       }
-  }
+  };
   return c;
 }
 /* 形变结束：去掉 is-morphing 时不要让卡片的边框、阴影再过渡一遍 */
