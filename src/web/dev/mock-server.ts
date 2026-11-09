@@ -176,10 +176,14 @@ export class MockServer implements Api {
     this.pushRow(convId);
     return seg;
   }
-  addMsg(convId: string, m: NewMessage): MsgRow | null {
+  /** 预留一个序号（回复开始时，和 core 一样）：回复写入时用它，生成期间写入的消息排在回复后面 */
+  reserve(convId: string): number {
+    return this.convs.get(convId)!.nextSeq++;
+  }
+  addMsg(convId: string, m: NewMessage, seq?: number): MsgRow | null {
     const c = this.convs.get(convId);
     if (!c) return null;
-    const id = uid('msg');
+    const id = m.id ?? uid('msg');
     const createdAt = new Date(m.at ?? Date.now()).toISOString();
     const message = {
       id,
@@ -191,10 +195,11 @@ export class MockServer implements Api {
         ...(m.meta?.aborted ? { aborted: true as const } : {}),
         ...(m.meta?.failed ? { failed: true as const } : {}),
         ...(m.meta?.usage ? { usage: m.meta.usage } : {}),
+        ...(m.meta?.reasoningMs ? { reasoningMs: m.meta.reasoningMs } : {}),
       },
     } as MsgRow['message'];
     const row: MsgRow = {
-      seq: c.nextSeq++,
+      seq: seq ?? c.nextSeq++,
       id,
       role: m.role,
       createdAt,
@@ -202,7 +207,10 @@ export class MockServer implements Api {
       tools: m.tools ?? {},
       images: m.images ?? {},
     };
-    c.msgs.push(row);
+    // 按序号插入（预留过序号的回复比后来写入的消息序号小）
+    let pos = c.msgs.length;
+    while (pos > 0 && c.msgs[pos - 1].seq > row.seq) pos--;
+    c.msgs.splice(pos, 0, row);
     this.fire(() => {
       this.hooks!.message({ conversationId: convId, message: row, edited: false });
       this.hooks!.conversation(this.rowOf(convId));

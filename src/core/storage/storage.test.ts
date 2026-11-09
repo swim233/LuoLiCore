@@ -103,6 +103,7 @@ const toolCallColumns = [
   'outcome',
   'error',
   'output_chars',
+  'tool_call_id',
 ];
 
 async function tempDir(): Promise<string> {
@@ -472,6 +473,7 @@ describe.each([
     const completed = toolCall();
     const failed = toolCall({
       replyId: 'r2',
+      toolCallId: 'call_9',
       tool: 'nope',
       step: 2,
       durationMs: 0,
@@ -915,7 +917,7 @@ describe('SQLite 存储', () => {
     expect(await store.reserve()).toBe(2);
   });
 
-  it('新库：WAL 模式、user_version 为 3、五张表与索引按 ADR-0005 建好', async () => {
+  it('新库：WAL 模式、user_version 为 4、五张表与索引按 ADR-0005 建好', async () => {
     const dir = await tempDir();
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
     const path = join(dir, 'luoli.db');
@@ -924,7 +926,7 @@ describe('SQLite 存储', () => {
     const db = new DatabaseSync(path);
     try {
       expect(db.prepare('PRAGMA journal_mode').get()?.journal_mode).toBe('wal');
-      expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(3);
+      expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(4);
       const objects = db
         .prepare(
           "SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
@@ -1060,12 +1062,12 @@ describe('SQLite 存储', () => {
     }
   });
 
-  it('user_version 大于 3 时打开报错', async () => {
+  it('user_version 大于 4 时打开报错', async () => {
     const dir = await tempDir();
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
     const path = join(dir, 'luoli.db');
     const db = new DatabaseSync(path);
-    db.exec('PRAGMA user_version = 4');
+    db.exec('PRAGMA user_version = 5');
     db.close();
 
     expect(() => openSqliteStorage(path)).toThrow('数据库版本比程序新');
@@ -1228,7 +1230,7 @@ describe('SQLite 存储', () => {
     cleanups.push(async () => storage.close());
     const id = await storage.createConversation({ platform: 'cli' });
     const store = await storage.openConversation(id);
-    await store.recordToolCall(toolCall());
+    await store.recordToolCall(toolCall({ toolCallId: 'call_1' }));
     await store.recordToolCall(
       toolCall({
         tool: 'nope',
@@ -1259,6 +1261,7 @@ describe('SQLite 存储', () => {
           outcome: 'completed',
           error: null,
           output_chars: 11,
+          tool_call_id: 'call_1',
         },
         {
           id: 2,
@@ -1271,6 +1274,7 @@ describe('SQLite 存储', () => {
           outcome: 'failed',
           error: 'NoSuchToolError',
           output_chars: null,
+          tool_call_id: null,
         },
       ]);
     } finally {
@@ -1278,7 +1282,53 @@ describe('SQLite 存储', () => {
     }
   });
 
-  it('版本 2 的库：打开时升到版本 3，旧的模型调用行两列为空，新写入的有值；能写工具调用', async () => {
+  it('版本 3 的库：打开时升到版本 4，旧的工具调用行没有调用 id，新写入的有；都能读回', async () => {
+    const dir = await tempDir();
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    const path = join(dir, 'luoli.db');
+    // 第三阶段到第六阶段第 6 步的程序建的库：五张表，user_version 为 3，已有一行工具调用
+    const old = new DatabaseSync(path);
+    old.exec('PRAGMA journal_mode = WAL');
+    old.exec(version1Schema);
+    old.exec(version2Schema);
+    old.exec(version3Schema);
+    old.exec('PRAGMA user_version = 3');
+    old.exec(`
+      INSERT INTO conversations (id, platform, next_seq, created_at)
+        VALUES ('c1', 'web', 1, '2026-10-29T00:00:00.000Z');
+      INSERT INTO tool_calls
+          (conversation_id, reply_id, tool, step, started_at, duration_ms, outcome, error,
+           output_chars)
+        VALUES ('c1', 'r1', 'dice', 1, '2026-10-30T06:02:01.000Z', 120, 'completed', NULL, 11);
+    `);
+    old.close();
+
+    const storage = openSqliteStorage(path);
+    const store = await storage.openConversation('c1');
+    await store.recordToolCall(toolCall({ toolCallId: 'call_2', durationMs: 40 }));
+    storage.close();
+
+    const db = new DatabaseSync(path, { readOnly: true });
+    try {
+      expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(4);
+      expect(
+        db
+          .prepare('SELECT tool_call_id FROM tool_calls ORDER BY id')
+          .all()
+          .map((row) => row.tool_call_id),
+      ).toEqual([null, 'call_2']);
+    } finally {
+      db.close();
+    }
+
+    const reopened = openSqliteStorage(path);
+    cleanups.push(async () => reopened.close());
+    const rows = await (await reopened.openConversation('c1')).toolCalls();
+    expect(rows).toEqual([toolCall(), toolCall({ toolCallId: 'call_2', durationMs: 40 })]);
+    expect(rows[0]!.toolCallId).toBeUndefined();
+  });
+
+  it('版本 2 的库：打开时升到版本 4，旧的模型调用行两列为空，新写入的有值；能写工具调用', async () => {
     const dir = await tempDir();
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
     const path = join(dir, 'luoli.db');
@@ -1312,7 +1362,7 @@ describe('SQLite 存储', () => {
 
     const db = new DatabaseSync(path, { readOnly: true });
     try {
-      expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(3);
+      expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(4);
       const rows = db
         .prepare('SELECT * FROM model_calls ORDER BY id')
         .all()
@@ -1331,7 +1381,7 @@ describe('SQLite 存储', () => {
     expect(await (await reopened.openConversation('c1')).toolCalls()).toEqual([toolCall()]);
   });
 
-  it('版本 1 的库：打开时升到版本 3，原有的表与数据不变，能写模型调用；重新打开后能读回', async () => {
+  it('版本 1 的库：打开时升到版本 4，原有的表与数据不变，能写模型调用；重新打开后能读回', async () => {
     const dir = await tempDir();
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
     const path = join(dir, 'luoli.db');
@@ -1388,7 +1438,7 @@ describe('SQLite 存储', () => {
 
     const db = new DatabaseSync(path, { readOnly: true });
     try {
-      expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(3);
+      expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(4);
       expect(dump(db)).toEqual(before);
       expect(
         db
@@ -1598,6 +1648,27 @@ describe('SQLite 存储', () => {
     }
   });
 });
+
+// 第三阶段（表结构版本 3）加的工具调用表与模型调用表的两列，接在 version2Schema 之后
+const version3Schema = `
+ALTER TABLE model_calls ADD COLUMN steps      INTEGER;
+ALTER TABLE model_calls ADD COLUMN tool_calls INTEGER;
+
+CREATE TABLE tool_calls (
+  id              INTEGER PRIMARY KEY,
+  conversation_id TEXT NOT NULL REFERENCES conversations(id),
+  reply_id        TEXT NOT NULL,
+  tool            TEXT NOT NULL,
+  step            INTEGER NOT NULL,
+  started_at      TEXT NOT NULL,
+  duration_ms     INTEGER NOT NULL,
+  outcome         TEXT NOT NULL,
+  error           TEXT,
+  output_chars    INTEGER
+);
+CREATE INDEX tool_calls_time ON tool_calls(started_at);
+CREATE INDEX tool_calls_tool ON tool_calls(tool, started_at);
+`;
 
 // 第 7 步（表结构版本 1）的建表语句，用来造一个旧库
 // 第二阶段第 8 步（表结构版本 2）加的模型调用表，接在 version1Schema 之后，用来造一个版本 2 的库

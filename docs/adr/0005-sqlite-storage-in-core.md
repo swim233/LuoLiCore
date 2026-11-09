@@ -77,7 +77,8 @@ CREATE TABLE tool_calls (
   duration_ms     INTEGER NOT NULL,  -- 超时时算到超时为止
   outcome         TEXT NOT NULL,     -- 'completed' | 'failed' | 'timeout' | 'aborted'
   error           TEXT,              -- 失败时的错误类型，如 'InvalidToolInputError'；不含正文
-  output_chars    INTEGER            -- 结果转成文字后的长度（带图片时只算文字部分）；没有结果时为空
+  output_chars    INTEGER,           -- 结果转成文字后的长度（带图片时只算文字部分）；没有结果时为空
+  tool_call_id    TEXT               -- 表结构版本 4 加入：模型给的调用 id，与助手消息里工具调用的 id 相同；之前的行为空
 );
 CREATE INDEX tool_calls_time ON tool_calls(started_at);
 CREATE INDEX tool_calls_tool ON tool_calls(tool, started_at);
@@ -88,7 +89,7 @@ CREATE INDEX tool_calls_tool ON tool_calls(tool, started_at);
 - 回复开始生成时从 `next_seq` 预留序号，所以回复排在它看到的最后一条消息之后。回复失败或没有输出时序号空着，序号只用于排序。
 - 图片存为 `data/files/<内容哈希>.<扩展名>`，消息里以 `luoli-file:` 开头的地址引用，发请求时换成图片数据。同一张图只存一份。不建文件表、成员表：名字随每条消息存快照。
 - 模型调用一次一行：一次回复或一次摘要，期间的重试都合在这一行，成功、失败、中止都记。只追加，用来统计 token、缓存命中与失败率；不记金额，要算钱时按当时的单价现算。正常完成的回复的用量仍随助手消息存一份。常用查询在 `docs/queries/usage.sql`。
-- 工具调用一次一行（ADR-0006），挂在所在回复下，用来统计每个工具的次数、失败与超时、耗时，以及结果长度（据此调整历史呈现）。模型传错参数、调了不存在的工具也记一行（结果 `failed`）。不存参数和结果：它们是对话内容，完整的在助手消息里。
+- 工具调用一次一行（ADR-0006），挂在所在回复下，用来统计每个工具的次数、失败与超时、耗时，以及结果长度（据此调整历史呈现）。模型传错参数、调了不存在的工具也记一行（结果 `failed`）。不存参数和结果：它们是对话内容，完整的在助手消息里。调用 id 不是对话内容，记下它，面板才能把耗时对上消息里的那次调用；以前的行没有，只能按第几步、工具名和先后对，同一时刻开始的同名调用可能对反。
 - 原文永久保留。开 WAL 模式，表结构版本记在 `PRAGMA user_version`。
 - 每次发给模型的请求原文不在这个库里，存在单独的 `data/requests.db`（ADR-0008）。
 

@@ -1,5 +1,5 @@
-import type { ChatTransport } from 'ai';
-import type { ChatMsg, ImageInfo, ModelCall, MsgRow, Part, ToolResultInfo } from './types';
+import type { ChatApi } from './chat-api';
+import type { ImageInfo, ModelCall, Part, ToolResultInfo } from './types';
 
 /* 数据源：数据层（db、bus、status、nowModel）的「进口」。
    部件读的是客户端的数据层，不关心数据从哪来；数据源负责把数据灌进去、把实时事件发到总线上，并提供界面要用的几个操作。
@@ -17,23 +17,21 @@ export interface DataSource {
   loadOlder(convId: string, manual?: boolean): void;
   /** 已经看到了这个会话的第 seq 条消息（一般是最后一条）：未读清零 */
   markRead(convId: string, seq: number): void;
-  /** 网页对话现在能不能发。能发返回 null，不能发返回要提示用户的话 */
-  chatBlocked(): string | null;
-  /** 网页对话（useChat 用的那个 Chat）的 transport。第 6 步在这里带上会话 id、只发最新一条 */
-  chatTransport(convId: string): ChatTransport<ChatMsg>;
-  /** 网页对话把消息记进「服务」的几个操作：第 6 步之前只有模拟数据源有（真实数据源的 chatBlocked 挡住了发送） */
-  webChat: WebChatStore | null;
+  /** 网页对话要用的服务接口：发消息、中止、上传图片（正式构建是洛璃服务的 HTTP 接口，开发模式在浏览器里模拟） */
+  chat: ChatApi;
 }
 
 /** 新写进服务的一条消息 */
 export interface NewMessage {
+  /** 消息 id；回复写入历史时用回复 id，和真实的服务一样 */
+  id?: string;
   role: 'user' | 'assistant';
   /** 用户消息的发言人 */
   author?: { id?: string; name: string };
   parts: Part[];
   /** 消息里的图片：luoli-file: 地址 → 信息 */
   images?: Record<string, ImageInfo | null>;
-  /** 有结果的工具调用：toolCallId → 结果长度 */
+  /** 有结果的工具调用：toolCallId → 结果长度、摘要、耗时 */
   tools?: Record<string, ToolResultInfo>;
   /** 消息时间，默认现在 */
   at?: number;
@@ -41,6 +39,8 @@ export interface NewMessage {
     aborted?: true;
     failed?: true;
     usage?: { input?: number; output?: number; cacheRead?: number };
+    /** 每段思考用了多少毫秒（按 reasoning 段的顺序） */
+    reasoningMs?: (number | null)[];
   };
 }
 export type NewCall = Partial<ModelCall> & {
@@ -49,12 +49,6 @@ export type NewCall = Partial<ModelCall> & {
   duration_ms: number;
   outcome: ModelCall['outcome'];
 };
-export interface WebChatStore {
-  newConv(): string;
-  setTitle(convId: string, title: string): void;
-  addMessage(convId: string, m: NewMessage): MsgRow | null;
-  addCall(call: NewCall): void;
-}
 
 let current: DataSource | null = null;
 export function setSource(s: DataSource) {

@@ -7,11 +7,13 @@ import {
   type FileStore,
   type Message,
   type Storage,
-  type StoredImage,
   type StoredMessage,
   type StoredToolContent,
+  type ToolCall,
 } from '../core/index.js';
+import { contentImages, contentText, isRecord, isToolPart, toolNameOf } from './parts.js';
 import { serverTimeZone, startOfDay } from './today.js';
+import { noSummaries, type Summarize } from './tool-summary.js';
 import type {
   ApiMessage,
   ApiSegment,
@@ -48,10 +50,13 @@ export function createViews({
   webState,
   timeZone = serverTimeZone(),
   now = () => new Date(),
+  summarize = noSummaries,
 }: {
   storage: Storage;
   fileStore: FileStore;
   webState: WebState;
+  /** 工具调用给界面看的一句话（见 tool-summary.ts）；不给时都没有 */
+  summarize?: Summarize;
   /** 「今天」按这个时区算，默认服务器的时区 */
   timeZone?: string;
   /** 测试里换掉 */
@@ -84,7 +89,9 @@ export function createViews({
       id: overview.id,
       platform: overview.platform,
       kind,
-      title: overview.title,
+      // 网页会话的标题只在 web.db 里（只给面板显示，不进 prompt）
+      title:
+        (overview.platform === 'web' ? webState.title(overview.id) : undefined) ?? overview.title,
       platformConversationId: overview.platformConversationId,
       createdAt: overview.createdAt,
       lastAt: last?.createdAt ?? overview.createdAt,
@@ -136,11 +143,18 @@ export function createViews({
     return info;
   }
 
-  async function apiMessage(entry: StoredMessage): Promise<ApiMessage> {
+  async function apiMessage(entry: StoredMessage, calls: readonly ToolCall[]): Promise<ApiMessage> {
     // 消息是核心写的，形状本来就对；这里仍不完全信它，一条坏消息不拖垮整批
     const stored: Record<string, unknown> = isRecord(entry.message) ? entry.message : {};
     const parts: unknown[] = Array.isArray(stored.parts) ? stored.parts : [];
-    const { parts: trimmed, tools } = trimTools(parts);
+    const durations =
+      stored.role === 'assistant' && typeof stored.id === 'string'
+        ? toolDurations(
+            parts,
+            calls.filter((call) => call.replyId === stored.id),
+          )
+        : new Map<string, number>();
+    const { parts: trimmed, tools } = trimTools(parts, { summarize, durations });
     return {
       seq: entry.seq,
       id: typeof stored.id === 'string' ? stored.id : '',
@@ -190,13 +204,18 @@ export function createViews({
       const store = await open(conversationId);
       if (!store) return undefined;
       const page = await store.page({ before, limit });
-      return { messages: await Promise.all(page.entries.map(apiMessage)), hasMore: page.hasMore };
+      const calls = await toolCallsFor(store, page.entries);
+      return {
+        messages: await Promise.all(page.entries.map((entry) => apiMessage(entry, calls))),
+        hasMore: page.hasMore,
+      };
     },
 
     /** 一条消息；会话或消息不存在时为 undefined */
     async message(conversationId: string, messageId: string): Promise<ApiMessage | undefined> {
-      const entry = await (await open(conversationId))?.entry(messageId);
-      return entry && apiMessage(entry);
+      const store = await open(conversationId);
+      const entry = await store?.entry(messageId);
+      return entry && apiMessage(entry, await toolCallsFor(store!, [entry]));
     },
 
     /**
@@ -225,7 +244,8 @@ export function createViews({
         outputTokens: summary.outputTokens,
         conversations: summary.repliesByConversation.map(({ conversationId, title, replies }) => ({
           id: conversationId,
-          title,
+          // 网页会话没有核心的标题，用 web.db 里的
+          title: title ?? webState.title(conversationId),
           replies,
         })),
       };
@@ -264,8 +284,14 @@ function preview(last: NonNullable<ConversationOverview['last']>): MessagePrevie
   };
 }
 
-/** 工具结果的文字太长时截短；记下每个结果原来的长度。不是对象的段、形状不对的字段原样放过 */
-function trimTools(parts: readonly unknown[]): {
+/**
+ * 工具结果的文字太长时截短；记下每个结果原来的长度、给界面看的一句话（用截短之前的结果）、
+ * 耗时（durations，按调用 id）。不是对象的段、形状不对的字段原样放过
+ */
+function trimTools(
+  parts: readonly unknown[],
+  { summarize, durations }: { summarize: Summarize; durations: ReadonlyMap<string, number> },
+): {
   parts: unknown[];
   tools: Record<string, ToolResultInfo>;
 } {
@@ -273,10 +299,23 @@ function trimTools(parts: readonly unknown[]): {
   const trimmed = parts.map((part) => {
     if (!isRecord(part) || !isToolPart(part)) return part;
     const id = String(part.toolCallId);
+    const name = toolNameOf(part);
+    const extra = (output?: unknown) => {
+      const summary = summarize(name, part.input, output);
+      const durationMs = durations.get(id);
+      return {
+        ...(summary !== undefined ? { summary } : {}),
+        ...(durationMs !== undefined ? { durationMs } : {}),
+      };
+    };
     if (part.state === 'output-error') {
       // 缺错误说明时按空算
       const errorText = typeof part.errorText === 'string' ? part.errorText : '';
-      tools[id] = { chars: errorText.length, truncated: errorText.length > toolOutputChars };
+      tools[id] = {
+        chars: errorText.length,
+        truncated: errorText.length > toolOutputChars,
+        ...extra(),
+      };
       return errorText.length > toolOutputChars
         ? { ...part, errorText: cut(errorText, toolOutputChars) }
         : part;
@@ -285,7 +324,11 @@ function trimTools(parts: readonly unknown[]): {
     const output = part.output;
     if (isStoredToolContent(output)) {
       const text = contentText(output);
-      tools[id] = { chars: text.length, truncated: text.length > toolOutputChars };
+      tools[id] = {
+        chars: text.length,
+        truncated: text.length > toolOutputChars,
+        ...extra(output),
+      };
       if (text.length <= toolOutputChars) return part;
       const shortened: StoredToolContent = {
         type: 'luoli-content',
@@ -294,40 +337,75 @@ function trimTools(parts: readonly unknown[]): {
       return { ...part, output: shortened };
     }
     const text = typeof output === 'string' ? output : (JSON.stringify(output) ?? 'null');
-    tools[id] = { chars: text.length, truncated: text.length > toolOutputChars };
+    tools[id] = { chars: text.length, truncated: text.length > toolOutputChars, ...extra(output) };
     return text.length > toolOutputChars ? { ...part, output: cut(text, toolOutputChars) } : part;
   });
   return { parts: trimmed, tools };
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null;
+/**
+ * 一条助手消息里每个工具调用的耗时（调用 id → 毫秒），从工具调用表对出来。calls 是这条回复的行。
+ * - 表里有调用 id 的行（表结构版本 4 起）按 id 对上；
+ * - 以前写的行没有调用 id：按「第几步、工具名」分组，组里按开始时间的先后与消息里的先后一一对上，
+ *   同一组里结果不同（成功、出错）的先按结果对。同一毫秒开始、结果又相同的同名调用分不开，可能对反。
+ * 对不上的（表里没有、行数不够）不给
+ */
+export function toolDurations(
+  parts: readonly unknown[],
+  calls: readonly ToolCall[],
+): Map<string, number> {
+  const durations = new Map<string, number>();
+  if (calls.length === 0) return durations;
+  const byId = new Map<string, ToolCall>();
+  const groups = new Map<string, ToolCall[]>();
+  const unnamed = calls
+    .filter((call) => {
+      if (call.toolCallId === undefined) return true;
+      byId.set(call.toolCallId, call);
+      return false;
+    })
+    .sort((a, b) => (a.startedAt < b.startedAt ? -1 : a.startedAt > b.startedAt ? 1 : 0));
+  for (const call of unnamed) {
+    const key = `${call.step}\u0000${call.tool}`;
+    groups.set(key, [...(groups.get(key) ?? []), call]);
+  }
+  let step = 0;
+  for (const part of parts) {
+    if (!isRecord(part)) continue;
+    if (part.type === 'step-start') {
+      step++;
+      continue;
+    }
+    if (!isToolPart(part)) continue;
+    const id = String(part.toolCallId);
+    const named = byId.get(id);
+    if (named) {
+      durations.set(id, named.durationMs);
+      continue;
+    }
+    const group = groups.get(`${Math.max(step, 1)}\u0000${toolNameOf(part)}`);
+    if (!group || group.length === 0) continue;
+    const ok = part.state === 'output-available';
+    const index = group.findIndex((call) => (call.outcome === 'completed') === ok);
+    const [call] = group.splice(index === -1 ? 0 : index, 1);
+    durations.set(id, call!.durationMs);
+  }
+  return durations;
 }
 
-/** 工具调用段：type 为 tool-<工具名>，或 dynamic-tool（与 ai 的 isToolUIPart 相同，但不怕缺字段） */
-function isToolPart(part: Record<string, unknown>): boolean {
-  return (
-    typeof part.type === 'string' && (part.type.startsWith('tool-') || part.type === 'dynamic-tool')
+/** 这些消息里助手回复的工具调用表的行；没有工具调用时不读表 */
+async function toolCallsFor(
+  store: ConversationStore,
+  entries: readonly StoredMessage[],
+): Promise<ToolCall[]> {
+  const hasTools = entries.some(
+    ({ message }) =>
+      isRecord(message) &&
+      message.role === 'assistant' &&
+      Array.isArray(message.parts) &&
+      (message.parts as unknown[]).some((part) => isRecord(part) && isToolPart(part)),
   );
-}
-
-/** 带图片的工具结果的文字（同 core 的 toolContentText），不是对象、没有文字的段跳过 */
-function contentText(output: unknown): string {
-  if (!isStoredToolContent(output)) return '';
-  return (output.parts as unknown[])
-    .flatMap((part) =>
-      isRecord(part) && part.type === 'text' && typeof part.text === 'string' ? [part.text] : [],
-    )
-    .join('\n');
-}
-
-/** 带图片的工具结果里的图片（同 core 的 toolContentImages），没有地址的跳过 */
-function contentImages(output: unknown): StoredImage[] {
-  if (!isStoredToolContent(output)) return [];
-  return (output.parts as unknown[]).filter(
-    (part): part is StoredImage =>
-      isRecord(part) && part.type === 'image' && typeof part.url === 'string',
-  );
+  return hasTools ? store.toolCalls() : [];
 }
 
 /** 开头 max 个字符（UTF-16 单位，与工具结果长度的口径相同）；不在代理对中间切开 */

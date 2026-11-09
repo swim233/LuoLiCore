@@ -10,6 +10,13 @@ CREATE TABLE read_marks (
   updated_at      TEXT NOT NULL      -- 最后一次往前推的时间（ISO）
 );
 `,
+  `
+CREATE TABLE titles (
+  conversation_id TEXT PRIMARY KEY,  -- 网页会话的 id（核心的会话 id）
+  title           TEXT NOT NULL,     -- 发出第一句时取的标题，只给面板显示，不进 prompt
+  created_at      TEXT NOT NULL
+);
+`,
 ];
 
 const schemaVersion = migrations.length;
@@ -19,6 +26,10 @@ export type WebState = {
   readSeq(conversationId: string): number;
   /** 把已读位置往前推到 seq；不比现在的大时不变。返回之后的位置 */
   advanceRead(conversationId: string, seq: number): number;
+  /** 网页会话的标题；没有记过时为 undefined */
+  title(conversationId: string): string | undefined;
+  /** 记下网页会话的标题（已有的照样覆盖） */
+  setTitle(conversationId: string, title: string): void;
   close(): void;
 };
 
@@ -65,12 +76,24 @@ export async function openWebState(
      WHERE excluded.seq > read_marks.seq`,
   );
   const readSeq = (conversationId: string) => Number(readMark.get(conversationId)?.seq ?? 0);
+  const titleOf = db.prepare('SELECT title FROM titles WHERE conversation_id = ?');
+  const writeTitle = db.prepare(
+    `INSERT INTO titles (conversation_id, title, created_at) VALUES (?, ?, ?)
+     ON CONFLICT (conversation_id) DO UPDATE SET title = excluded.title`,
+  );
 
   return {
     readSeq,
     advanceRead(conversationId, seq) {
       advance.run(conversationId, seq, new Date().toISOString());
       return readSeq(conversationId);
+    },
+    title(conversationId) {
+      const row = titleOf.get(conversationId);
+      return row ? String(row.title) : undefined;
+    },
+    setTitle(conversationId, title) {
+      writeTitle.run(conversationId, title, new Date().toISOString());
     },
     close() {
       if (db.isOpen) db.close();

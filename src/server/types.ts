@@ -2,7 +2,8 @@
 // 这里只引用纯类型的模块（core 的消息类型，它只引用 ai 的类型），网页的 tsconfig 也能检查：
 // 不要在这里引用带 Node 类型或服务端代码的模块
 
-import type { Message, Usage } from '../core/message.js';
+import type { InferUIMessageChunk, UIMessage } from 'ai';
+import type { Message, MessageData, MessageMetadata, Usage } from '../core/message.js';
 
 /**
  * 洛璃服务此刻的状态：GET /api/health 返回它，SSE 的 hello 带着它（另加现场），
@@ -33,6 +34,13 @@ export type ServiceStatus = {
     /** bot 在 Telegram 里的用户名，不带 @；没启动 Telegram、还没拿到（没连上过）时没有 */
     username?: string;
   };
+  /**
+   * 网页会话：面板的「对话」里自己发的消息显示的名字（还没写进历史的那条用它；写进历史的消息各自存着发言人，
+   * 显示那个）。LUOLI_WEB_NAME（去掉首尾空白，空的按没设），默认系统用户名；和发给模型的发言人名字是同一个
+   */
+  web: {
+    author: string;
+  };
   /** 上次回复：最近一次正常完成的回复（口径同今日概况的回复数）；还没有过时没有 */
   lastReply?: LastReply;
 };
@@ -61,7 +69,10 @@ export type ConversationRow = {
   /** 'telegram' | 'cli' | 'web' */
   platform: string;
   kind: ConversationKind;
-  /** 群名；私聊为「与 某人 的私聊」；CLI 会话没有标题 */
+  /**
+   * 群名；私聊为「与 某人 的私聊」；网页会话为发出第一句时取的标题（存在 web.db，只给面板显示，
+   * 不进 prompt）；CLI 会话没有标题
+   */
   title?: string;
   /** 平台里的会话 id（Telegram 的 chat id）；CLI、网页没有 */
   platformConversationId?: string;
@@ -142,7 +153,9 @@ export type ApiMessage = {
    * 工具的 output：字符串；或能转成 JSON 的值；或带图片的结果
    * `{ type: 'luoli-content', parts: [{ type: 'text', text }, { type: 'image', url, mediaType, width?, height?, bytes }] }`。
    * 结果的文字超过 2000 个字符时截成开头 2000 个字符（不是字符串的值截成 JSON 文字的开头，
-   * 变成字符串；带图片的结果只截文字，图片照留），errorText 同样。截没截、原来多长见 tools
+   * 变成字符串；带图片的结果只截文字，图片照留），errorText 同样。截没截、原来多长见 tools。
+   * 助手消息的 metadata 里：reasoningMs 是每段思考用了多少毫秒（按 reasoning 段的顺序一一对应，
+   * 中止时还在想的那段为 null；以前的消息没有，就不显示秒数）；aborted、failed、usage 等见 core
    */
   message: Message;
   /** 每个有结果的工具调用：toolCallId → 结果的长度 */
@@ -162,6 +175,13 @@ export type ToolResultInfo = {
   chars: number;
   /** 接口里截短了 */
   truncated: boolean;
+  /**
+   * 给界面看的一句话（工具定义里的摘要，如 fetch 为「网址 · 页面标题」）；工具没写摘要、摘要出错时
+   * 没有，界面显示工具名加参数的前一截
+   */
+  summary?: string;
+  /** 用了多少毫秒，取自工具调用表；对不上时没有。参数不对、调了不存在的工具（没有执行）为 0 */
+  durationMs?: number;
 };
 
 export type ImageInfo = {
@@ -245,8 +265,14 @@ export type LiveReply = {
   waitingSince?: string;
   /** 回复开始的时间，ISO；还在等待合并时没有 */
   startedAt?: string;
-  /** Telegram：回复中又被触发，这次发出后再回复一次 */
+  /** Telegram：回复中又被触发，这次发出后再回复一次。网页会话：生成中又发了消息（排队），同上 */
   again: boolean;
+  /**
+   * 网页会话：排队的消息从这个序号起（这次回复开始之后写入、还没被回复看到的），对话里显示
+   * 「排队中」。补的那次回复开始（start）、排队被取消（dequeue）或这次回复结束（end，之后紧接着
+   * 开始补的那次）时就不再排队。Telegram 没有
+   */
+  queuedFrom?: number;
   /** 已经推出去的内容，按出现的顺序；事件里的 part 就是这里的下标 */
   parts: LivePart[];
   /** 最近一次重试 */
@@ -291,6 +317,11 @@ export type LiveTool = {
   error?: string;
   /** 结果里的图片（取图片的地址与宽高）；没有图片时没有 */
   images?: ImageInfo[];
+  /**
+   * 给界面看的一句话（见 ToolResultInfo.summary）：开始时按参数给（还没有结果），结束时按参数
+   * 和结果重新给；没写摘要的工具没有
+   */
+  summary?: string;
 };
 
 /** 一次重试（核心的 data-retry 段） */
@@ -340,12 +371,22 @@ type LiveProgress = LiveBase & { state: LiveState; toolName?: string };
 export type LiveEvent =
   /** Telegram 被触发，进入等待合并 */
   | (LiveProgress & { type: 'wait' })
-  /** Telegram 回复中又被触发：这次发出后再回复一次。回复刚结束、下一次还没开始时被触发，现场里新建一条等待中的 */
-  | (LiveProgress & { type: 'again' })
+  /**
+   * Telegram 回复中又被触发，或网页会话生成中又发了消息（排队）：这次发出后再回复一次。
+   * 回复刚结束、下一次还没开始时被触发，现场里新建一条等待中的。网页会话带 queuedFrom
+   */
+  | (LiveProgress & { type: 'again'; queuedFrom?: number })
+  /** 网页会话排队的补回复被取消（发那条消息的请求断开了）：现场里那条的 again、queuedFrom 去掉 */
+  | (LiveProgress & { type: 'dequeue' })
   /** 等待合并被放弃，不回复了（如服务退出），现场里去掉这个会话 */
   | (LiveBase & { type: 'cancel' })
-  /** 回复开始（at 即开始的时间）。之前在等待合并的，接着用同一条现场 */
-  | (LiveProgress & { type: 'start' })
+  /**
+   * 回复开始（at 即开始的时间）。之前在等待合并的，接着用同一条现场（waitingSince 照旧）。
+   * again、queuedFrom 是这次回复开始时的「又被触发」与排队（开始之前就又被触发、排了队的接着算；
+   * 上一次回复刚结束时又被触发的，这次就是「再回复一次」，不算），面板照它设。服务总会带上
+   * again；没有时当作 false
+   */
+  | (LiveProgress & { type: 'start'; again?: boolean; queuedFrom?: number })
   /** 开始一段思考，在 parts 末尾新加一段（下标 part） */
   | (LiveProgress & { type: 'reasoning-start'; part: number; step: number })
   /** 思考的内容接上 text */
@@ -362,6 +403,8 @@ export type LiveEvent =
       callId: string;
       name: string;
       input: string;
+      /** 给界面看的一句话（按参数，还没有结果）；没写摘要的工具没有 */
+      summary?: string;
     })
   /** 工具调用结束（at 即结束的时间）。出错、超时、被中止都是 ok: false */
   | (LiveProgress & {
@@ -372,6 +415,8 @@ export type LiveEvent =
       ok: boolean;
       error?: string;
       images?: ImageInfo[];
+      /** 给界面看的一句话（按参数和结果）；没写摘要的工具没有 */
+      summary?: string;
     })
   /** 要重试了 */
   | (LiveProgress & { type: 'retry'; retry: LiveRetry })
@@ -402,6 +447,78 @@ export type LiveEvent =
       /** 这次结束之后的「上次回复」：正常完成时就是这一次 */
       lastReply?: LastReply;
     });
+
+// ─── 对话（网页会话）────────────────────────────────────────────────────
+
+/**
+ * POST /api/chat 的请求体：在网页会话里发一条消息，或重试。返回回复的 UI message stream
+ * （`createUIMessageStreamResponse`，网页用 `useChat` 接），段的类型是 ChatChunk。
+ * - 发消息：conversationId（新会话不带，服务新建并记下标题）、text、files（先用 POST /api/files
+ *   上传得到的 luoli-file: 地址，最多 10 个）；text 与 files 至少有一样。消息马上写进历史，
+ *   发言人是 LUOLI_WEB_NAME。
+ *   - 这个会话空闲：开始回复，回复的流就在这个响应里。
+ *   - 正在回复（或已有排队的）：消息排队。响应里先有 data-queued，然后等着；当前回复结束后补一次
+ *     回复，看到期间所有新消息，补回复的流交给排队的最后一个请求。前面几个排队的请求不带回复，
+ *     有下一条排进来时就正常结束。当前回复出错也照样补。
+ * - 重试：{ conversationId, retry: true }，不带消息。会话正在回复或有排队时 409。只有上一次回复
+ *   出错时才能重试：最后一条是出错的助手回复（metadata.failed），或者出错时一步都没写进历史、最后
+ *   一条还是那条用户消息（服务这次运行期间记着；重启后、之后又有新消息时不算）。中止的回复、中止时
+ *   取消了补回复留下的用户消息都 409。
+ * - 请求断开（关页面、useChat 的 stop）：中止它的那次回复（半截写进历史，标记 aborted）；
+ *   排队的请求断开时取消它的补回复。要同时中止当前回复并取消补回复，用 POST /api/chat/:id/abort。
+ * 每个响应的第一段是 data-conversation（会话 id、这条消息的序号、新会话的标题）；响应头
+ * X-Conversation-Id 也是会话 id。出错：400 参数不对或图片不在、404 会话不存在、409 见上、
+ * 503 服务正在退出，都是 ErrorResponse
+ */
+export type ChatRequest =
+  | { conversationId?: string; text?: string; files?: string[]; retry?: undefined }
+  | { conversationId: string; retry: true };
+
+/** 对话的流里服务自己加的数据段（都是 transient，不进消息）：核心的 retry，加上这两种 */
+export type ChatData = MessageData & {
+  /** 每个响应的第一段 */
+  conversation: {
+    conversationId: string;
+    /** 发出的这条消息的序号；重试时没有 */
+    seq?: number;
+    /** 新建的会话：标题（前 16 个字，超出加「…」；只有图片时为「图片」） */
+    title?: string;
+  };
+  /** 这条消息在排队：当前回复结束后补一次回复（补回复的流也会接在这个响应里，除非又有新的排进来） */
+  queued: { fromSeq: number };
+};
+
+/** 对话的流里的消息与段（网页的 useChat 用这个类型） */
+export type ChatMessage = UIMessage<MessageMetadata, ChatData>;
+export type ChatChunk = InferUIMessageChunk<ChatMessage>;
+
+/**
+ * POST /api/chat/:id/abort：中止这个会话进行中的回复，同时取消排队的补回复（排队的消息留在历史里）。
+ * 网页按 Esc、点中止都用它，另一个标签页也能中止。请求体用不到，但和别的 POST 一样要带
+ * Content-Type: application/json（访问控制的要求，不带的 415），请求体写 {}
+ */
+export type AbortResponse = {
+  /** 有进行中的回复或排队被取消了 */
+  aborted: boolean;
+};
+
+/**
+ * POST /api/files：上传一张图片。请求体就是图片的原始字节，Content-Type 是图片的类型
+ * （image/png、image/jpeg、image/webp、image/gif，不收动图），这是「只收 JSON 请求体」的例外。
+ * 每张不超过 20 MB（超过 413，不读完）；内容与声明的类型不符 400；类型不收 415。
+ * 按内容存，同样的图片只存一份；上传了没发出去的不清理
+ */
+export type UploadResponse = {
+  /** 文件存储里的地址，发消息时放进 files */
+  url: string;
+  mediaType: string;
+  /** 取图片的地址：/api/files/<文件名> */
+  src: string;
+  bytes: number;
+  /** 宽高（像素），读不出时没有 */
+  width?: number;
+  height?: number;
+};
 
 /** SSE 的 hello：服务此刻的状态，加上现场 */
 export type Hello = ServiceStatus & { live: LiveSnapshot };

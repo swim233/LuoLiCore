@@ -1,8 +1,12 @@
 import { zValidator } from '@hono/zod-validator';
+import { createUIMessageStreamResponse } from 'ai';
 import { Hono, type Context } from 'hono';
 import { z } from 'zod';
+import { limitBody } from './body-limit.js';
+import { maxFiles, maxTextChars, type Chats } from './chat.js';
 import type { Events } from './events.js';
 import type {
+  AbortResponse,
   ConversationResponse,
   ConversationRow,
   ConversationsResponse,
@@ -11,6 +15,51 @@ import type {
   TodaySummary,
 } from './types.js';
 import { defaultMessages, maxMessages, type Views } from './views.js';
+
+/**
+ * 对话的接口（挂在 /api 下，经过访问控制），见 types.ts 的 ChatRequest：
+ * - POST /chat  ChatRequest → 回复的 UI message stream（ChatChunk），响应头 X-Conversation-Id
+ * - POST /chat/:id/abort  {} → AbortResponse
+ * 请求体最多 1 MB；参数不对 400
+ */
+export function chatRoutes({ chats }: { chats: Chats }) {
+  const conversationId = z.string().min(1).max(200);
+  // 先上传得到的文件存储地址
+  const fileRef = z.string().regex(/^luoli-file:[0-9a-f]{64}\.(jpg|png|webp|gif)$/);
+  const chatBody = z.union([
+    z.object({ conversationId, retry: z.literal(true) }),
+    z.object({
+      conversationId: conversationId.optional(),
+      text: z.string().max(maxTextChars).optional(),
+      files: z.array(fileRef).max(maxFiles).optional(),
+      retry: z.undefined().optional(),
+    }),
+  ]);
+  return new Hono()
+    .post(
+      '/chat',
+      limitBody(1024 * 1024, () =>
+        Response.json({ error: '请求体太大' } satisfies ErrorResponse, { status: 413 }),
+      ),
+      zValidator('json', chatBody, invalid),
+      async (c) => {
+        const body = c.req.valid('json');
+        const signal = c.req.raw.signal;
+        const result =
+          body.retry === true
+            ? await chats.retry(body.conversationId, signal)
+            : await chats.send(body, signal);
+        if (!result.ok) return c.json<ErrorResponse>({ error: result.error }, result.status);
+        return createUIMessageStreamResponse({
+          stream: result.stream,
+          headers: { 'X-Conversation-Id': result.conversationId },
+        });
+      },
+    )
+    .post('/chat/:id/abort', zValidator('param', z.object({ id: conversationId }), invalid), (c) =>
+      c.json<AbortResponse>({ aborted: chats.abort(c.req.valid('param').id) }),
+    );
+}
 
 /**
  * 读数据的接口（挂在 /api 下，经过访问控制），返回的类型见 types.ts：

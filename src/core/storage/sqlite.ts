@@ -121,6 +121,9 @@ CREATE TABLE tool_calls (
 CREATE INDEX tool_calls_time ON tool_calls(started_at);
 CREATE INDEX tool_calls_tool ON tool_calls(tool, started_at);
 `,
+  `
+ALTER TABLE tool_calls ADD COLUMN tool_call_id TEXT;
+`,
 ];
 
 const schemaVersion = migrations.length;
@@ -206,8 +209,8 @@ export function openSqliteStorage(path: string): Storage {
   const insertToolCall = db.prepare(
     `INSERT INTO tool_calls
        (conversation_id, reply_id, tool, step, started_at, duration_ms, outcome, error,
-        output_chars)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        output_chars, tool_call_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   const listToolCalls = db.prepare(
     'SELECT * FROM tool_calls WHERE conversation_id = ? ORDER BY id',
@@ -434,6 +437,7 @@ export function openSqliteStorage(path: string): Storage {
         call.outcome,
         call.error ?? null,
         call.outputChars ?? null,
+        call.toolCallId ?? null,
       );
     },
     async toolCalls() {
@@ -626,6 +630,7 @@ function modelCall(row: Record<string, unknown>): ModelCall {
 function toolCall(row: Record<string, unknown>): ToolCall {
   return {
     replyId: String(row.reply_id),
+    toolCallId: optional(row.tool_call_id),
     tool: String(row.tool),
     step: Number(row.step),
     startedAt: String(row.started_at),

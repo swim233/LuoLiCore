@@ -27,6 +27,11 @@ export type MessageMetadata = {
   failed?: true;
   /** 正常完成的助手回复才有；只算最终成功的那次请求 */
   usage?: Usage;
+  /**
+   * 每段思考用了多少毫秒（从这段思考开始到结束），按 parts 里 reasoning 段的顺序一一对应；
+   * 没有结束的（中止时还在想的那段）为 null。有思考的助手回复才有，以前写入的消息没有
+   */
+  reasoningMs?: Array<number | null>;
 };
 
 /** 一次回复的 token 用量。服务端没报的项为 undefined */

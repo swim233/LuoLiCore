@@ -8,6 +8,7 @@ import {
 import type { RoundNotice } from '../telegram/bot.js';
 import { errorLine, type ErrorLine } from './error-line.js';
 import type { ReplyWatcher } from './sessions.js';
+import { noSummaries, type Summarize } from './tool-summary.js';
 import { fileScheme, fileSrc } from './views.js';
 import type {
   ImageInfo,
@@ -52,6 +53,7 @@ export function createLive({
   now = () => new Date(),
   delayMs = flushMs,
   redact = (text) => text,
+  summarize = noSummaries,
 }: {
   /** 推一个 live 事件（服务里是 events.broadcast('live', …)） */
   broadcast: (event: LiveEvent) => void;
@@ -63,6 +65,8 @@ export function createLive({
   delayMs?: number;
   /** 抹掉错误说明里的 key、token */
   redact?: (text: string) => string;
+  /** 工具调用给界面看的一句话（见 tool-summary.ts）；不给时都没有 */
+  summarize?: Summarize;
 }) {
   // 按会话 id：每个会话同一时间最多一个进行中的回复（含等待合并的）
   const replies = new Map<string, LiveReply>();
@@ -73,6 +77,17 @@ export function createLive({
   };
 
   const iso = () => now().toISOString();
+
+  /** 通知（Telegram、排队）出错只记日志 */
+  function report(conversationId: string, failure: unknown): void {
+    logger.error(
+      {
+        conversationId,
+        error: failure instanceof Error ? `${failure.name}: ${failure.message}` : String(failure),
+      },
+      'live.failed',
+    );
+  }
 
   function emit(draft: Draft): void {
     seq++;
@@ -93,13 +108,15 @@ export function createLive({
   /** 一次回复的旁听者（sessions.onReply 的返回） */
   function watch(conversationId: string): ReplyWatcher {
     const startedAt = iso();
+    // 这次回复开始时现场里已有的那条（等待合并中的，或上一次回复刚结束时又被触发而建的）
+    const before = replies.get(conversationId);
     let reply: LiveReply | undefined;
     let replyId: string | undefined;
     // 还开着的文字段、思考段：流里的 id → parts 的下标（文字段在第一个非空片段推出时才建）
     const texts = new Map<string, number | undefined>();
     const reasonings = new Map<string, number>();
     // 工具调用：调用 id → 工具名（参数开始流出时就知道），以及 parts 的下标（开始调用后）
-    const tools = new Map<string, { name: string; part?: number }>();
+    const tools = new Map<string, { name: string; input?: unknown; part?: number }>();
     // 这一步从 parts 的哪个下标开始（reset-step 时从这里截掉）、第几步
     let stepStart = 0;
     let step = 0;
@@ -147,20 +164,31 @@ export function createLive({
         // 同一个会话上一个回复的旁听者还没收尾（不该发生）：新的接替它，旧的不再推事件
         logger.warn({ conversationId }, 'live.replaced');
       }
-      // 等待合并中的（或等待期间、开始之前又被触发的）：接着用它的等待时间与「又被触发」。
-      // 上一次回复刚结束时又被触发而建的那条（没有等待时间）：这次就是「再回复一次」，不再带着它
-      const waiting = existing?.startedAt === undefined ? existing?.waitingSince : undefined;
+      // 还没开始的那条（等待中）：
+      // - 等待合并的（有等待时间），或这次回复开始之后才建的（开始了、还没出第一段时又被触发、
+      //   网页又发了消息）：接着用它的等待时间、「又被触发」与排队；
+      // - 这次回复开始之前就有、又没有等待时间的：上一次回复刚结束时又被触发而建的，这次就是
+      //   「再回复一次」，不再带着它
+      const pending = existing?.startedAt === undefined ? existing : undefined;
+      const carry =
+        pending !== undefined && (pending.waitingSince !== undefined || pending !== before);
       reply = {
         conversationId,
         ...(replyId ? { replyId } : {}),
         state: 'thinking',
-        ...(waiting ? { waitingSince: waiting } : {}),
+        ...(pending?.waitingSince ? { waitingSince: pending.waitingSince } : {}),
         startedAt,
-        again: waiting !== undefined && existing!.again,
+        again: carry && pending.again,
+        ...(carry && pending.queuedFrom !== undefined ? { queuedFrom: pending.queuedFrom } : {}),
         parts: [],
       };
       replies.set(conversationId, reply);
-      emit({ type: 'start', ...progress(reply, startedAt) });
+      emit({
+        type: 'start',
+        ...progress(reply, startedAt),
+        again: reply.again,
+        ...(reply.queuedFrom !== undefined ? { queuedFrom: reply.queuedFrom } : {}),
+      });
       return reply;
     }
 
@@ -254,6 +282,7 @@ export function createLive({
     function startTool(current: LiveReply, callId: string, name: string, input: unknown): number {
       const known = tools.get(callId);
       if (known?.part !== undefined) return known.part;
+      const summary = summarize(name, input);
       const part: LiveTool = {
         type: 'tool',
         step,
@@ -261,9 +290,10 @@ export function createLive({
         name,
         input: brief(json(input)),
         startedAt: iso(),
+        ...(summary !== undefined ? { summary } : {}),
       };
       const index = current.parts.push(part) - 1;
-      tools.set(callId, { name, part: index });
+      tools.set(callId, { name, input, part: index });
       setState(current, 'tool', name);
       emit({
         type: 'tool-start',
@@ -273,6 +303,7 @@ export function createLive({
         callId,
         name,
         input: part.input,
+        ...(summary !== undefined ? { summary } : {}),
       });
       return index;
     }
@@ -294,6 +325,14 @@ export function createLive({
       } else {
         part.error = brief(firstLine(redact(result.error)));
       }
+      // 有了结果（出错时没有）再给一次摘要
+      const summary = summarize(
+        part.name,
+        tools.get(callId)?.input,
+        result.ok ? result.output : undefined,
+      );
+      if (summary !== undefined) part.summary = summary;
+      else delete part.summary;
       afterTool(current);
       emit({
         type: 'tool-end',
@@ -304,6 +343,7 @@ export function createLive({
         ok: part.ok,
         ...(part.error !== undefined ? { error: part.error } : {}),
         ...(part.images ? { images: part.images } : {}),
+        ...(part.summary !== undefined ? { summary: part.summary } : {}),
       });
     }
 
@@ -540,14 +580,56 @@ export function createLive({
           emit({ type: 'cancel', conversationId, at: iso() });
         }
       } catch (failure) {
-        logger.error(
-          {
-            conversationId: notice.conversationId,
-            error:
-              failure instanceof Error ? `${failure.name}: ${failure.message}` : String(failure),
-          },
-          'live.failed',
-        );
+        report(notice.conversationId, failure);
+      }
+    },
+
+    /**
+     * 网页会话生成中又发了消息（排队）：现场里那条记上「又被触发」与排队的起点 fromSeq，推 again
+     * （已经在排队时不变）。现场里没有这个会话（回复刚结束、补的那次还没开始）时新建一条等待中的
+     */
+    queue(conversationId: string, fromSeq: number): void {
+      try {
+        const existing = replies.get(conversationId);
+        if (existing) {
+          if (existing.again && existing.queuedFrom !== undefined) return;
+          existing.again = true;
+          existing.queuedFrom = fromSeq;
+          emit({ type: 'again', ...progress(existing), queuedFrom: fromSeq });
+          return;
+        }
+        const reply: LiveReply = {
+          conversationId,
+          state: 'waiting',
+          again: true,
+          queuedFrom: fromSeq,
+          parts: [],
+        };
+        replies.set(conversationId, reply);
+        emit({ type: 'again', ...progress(reply), queuedFrom: fromSeq });
+      } catch (failure) {
+        report(conversationId, failure);
+      }
+    },
+
+    /**
+     * 网页会话排队的补回复取消了：进行中的那条去掉「又被触发」与排队，推 dequeue；
+     * 只是在等补回复的那条（还没开始）整条去掉，推 cancel
+     */
+    unqueue(conversationId: string): void {
+      try {
+        const existing = replies.get(conversationId);
+        if (!existing || existing.queuedFrom === undefined) return;
+        if (existing.startedAt === undefined) {
+          replies.delete(conversationId);
+          emit({ type: 'cancel', conversationId, at: iso() });
+          return;
+        }
+        existing.again = false;
+        delete existing.queuedFrom;
+        emit({ type: 'dequeue', ...progress(existing) });
+      } catch (failure) {
+        report(conversationId, failure);
       }
     },
 

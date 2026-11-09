@@ -12,6 +12,7 @@ export {
   mediaTypeOf,
   openFileStore,
   type FileStore,
+  type FileRef,
   type NewFile,
 } from './files.js';
 export { imageSize, type ImageSize } from './image-size.js';
@@ -73,6 +74,7 @@ export {
   type ToolDefinition,
   type ToolHistory,
   type ToolSetup,
+  type ToolSummary,
 } from './tools.js';
 export type {
   ConversationInfo,

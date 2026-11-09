@@ -1,11 +1,13 @@
 import { Hono, type MiddlewareHandler } from 'hono';
 import { HTTPException } from 'hono/http-exception';
-import type { Logger } from '../core/index.js';
+import type { FileStore, Logger } from '../core/index.js';
 import { accessControl } from './access.js';
-import { apiRoutes } from './api.js';
+import { apiRoutes, chatRoutes } from './api.js';
+import type { Chats } from './chat.js';
 import type { Events } from './events.js';
 import { webPages } from './pages.js';
 import type { ErrorResponse, ServiceStatus } from './types.js';
+import { uploadRoutes } from './upload.js';
 import type { Views } from './views.js';
 
 /**
@@ -13,6 +15,7 @@ import type { Views } from './views.js';
  * - GET /api/health：服务此刻的状态（JSON）；
  * - GET /api/events：SSE，见 events.ts；
  * - 会话、消息、已读、今日概况、文件：见 api.ts；
+ * - 对话（发消息、重试、中止）：见 api.ts 的 chatRoutes；上传图片：见 upload.ts；
  * - /api/ 下其余的路径：404 与 JSON；
  * - 其余 GET：网页面板的静态文件，不认识的路径回退到 index.html。
  */
@@ -23,6 +26,8 @@ export function createApp({
   views,
   status,
   logger,
+  chats,
+  fileStore,
 }: {
   /** 监听的端口：访问控制按它核对 Host 与 Origin */
   port: number;
@@ -33,6 +38,10 @@ export function createApp({
   views: Views;
   status: () => ServiceStatus;
   logger: Logger;
+  /** 网页会话的对话；不给时没有对话接口（只测别的接口时） */
+  chats?: Chats;
+  /** 上传的图片存在这里；不给时没有上传接口 */
+  fileStore?: FileStore;
 }) {
   const app = new Hono();
   app.use(requestLog(logger));
@@ -41,6 +50,8 @@ export function createApp({
   app.get('/api/health', (c) => c.json(status()));
   app.get('/api/events', (c) => events.handle(c));
   app.route('/api', apiRoutes({ views, events }));
+  if (chats) app.route('/api', chatRoutes({ chats }));
+  if (fileStore) app.route('/api', uploadRoutes({ fileStore, logger }));
   app.all('/api', (c) => c.json({ error: '没有这个接口' }, 404));
   app.all('/api/*', (c) => c.json({ error: '没有这个接口' }, 404));
 

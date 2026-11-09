@@ -50,13 +50,26 @@ export type ToolDefinition = {
   readonly env: readonly string[];
   readonly timeoutMs?: number;
   readonly history?: ToolHistory;
+  /** 给界面看的一句话摘要，见 defineTool。核心只把它带在定义上，不调用 */
+  readonly summary?: ToolSummary;
   readonly execute: (input: unknown, ctx: ToolContext) => unknown;
 };
+
+/**
+ * 给界面看的一句话摘要：拿到参数与结果（还没有结果、出错时 output 为 undefined；带图片的结果
+ * 只给文字部分），返回一句话；没有可说的返回 undefined。面板与 CLI 显示工具调用时用它，
+ * 没写时显示工具名加参数的前一截。由洛璃服务调用，出错时当作没写
+ */
+export type ToolSummary<INPUT = unknown, OUTPUT = unknown> = (call: {
+  input: INPUT;
+  output?: OUTPUT;
+}) => string | undefined;
 
 /** 定义一个工具。一个工具一个文件，放在 src/tools/，再列进 src/tools/index.ts 的清单 */
 export function defineTool<SCHEMA extends z.ZodType, OUTPUT, ENV extends string = never>({
   env = [],
   history,
+  summary,
   execute,
   ...rest
 }: {
@@ -72,6 +85,8 @@ export function defineTool<SCHEMA extends z.ZodType, OUTPUT, ENV extends string 
   timeoutMs?: number;
   /** 以后的回复里怎么呈现结果，见 ToolHistory */
   history?: ToolHistory<z.output<SCHEMA>, HistoryOutput<Awaited<OUTPUT>>>;
+  /** 给界面看的一句话摘要（可选），见 ToolSummary。如 fetch：网址加页面标题 */
+  summary?: ToolSummary<z.output<SCHEMA>, HistoryOutput<Awaited<OUTPUT>>>;
   /**
    * 执行：返回能转成 JSON 的值（字符串也行），或者带图片的 TextAndImages；抛错即这次调用失败，
    * 模型会看到错误说明
@@ -86,6 +101,12 @@ export function defineTool<SCHEMA extends z.ZodType, OUTPUT, ENV extends string 
         ? (call) =>
             history(call as { input: z.output<SCHEMA>; output: HistoryOutput<Awaited<OUTPUT>> })
         : history,
+    ...(summary
+      ? {
+          summary: (call) =>
+            summary(call as { input: z.output<SCHEMA>; output?: HistoryOutput<Awaited<OUTPUT>> }),
+        }
+      : {}),
     execute: (input, ctx) => execute(input as z.output<SCHEMA>, ctx),
   };
 }
@@ -139,7 +160,7 @@ export function installTools(
   const counts = new Map<string, number>();
   for (const { name } of definitions) counts.set(name, (counts.get(name) ?? 0) + 1);
   for (const definition of definitions) {
-    const { name, timeoutMs, history } = definition;
+    const { name, timeoutMs, history, summary } = definition;
     if (!toolName.test(name)) report(name, '名字只能用小写字母、数字和下划线，以字母开头');
     if (counts.get(name)! > 1) report(name, '重名');
     if (
@@ -150,6 +171,9 @@ export function installTools(
     }
     if (history !== undefined && !isHistory(history)) {
       report(name, 'history 只能是 full、omit、{ maxChars: 正整数 } 或函数');
+    }
+    if (summary !== undefined && typeof summary !== 'function') {
+      report(name, 'summary 只能是函数');
     }
   }
   if (problems.size > 0) {
@@ -298,6 +322,7 @@ export async function runTool(
     };
     logger[level]({ ...fields, step, durationMs, outcome, ...details }, 'tool.end');
     await record({
+      toolCallId,
       tool: definition.name,
       step,
       startedAt: new Date(startedAt).toISOString(),
@@ -437,6 +462,7 @@ export function watchToolCalls({
             'tool.end',
           );
           await record({
+            toolCallId: part.toolCallId,
             tool: part.toolName,
             step,
             startedAt: new Date().toISOString(),

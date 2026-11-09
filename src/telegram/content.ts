@@ -166,7 +166,7 @@ export async function toAppendInput(
     /** 下载到的内容不是声明的图片；bytes 为实际字节数 */
     onImageRejected: (image: ImageRef, bytes: number) => void;
   },
-): Promise<AppendInput | undefined> {
+): Promise<(Omit<AppendInput, 'files'> & { files: NewFile[] }) | undefined> {
   const [first] = raws;
   if (!first?.from) return undefined;
   const items = raws.map(describe);

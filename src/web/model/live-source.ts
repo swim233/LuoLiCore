@@ -1,5 +1,5 @@
-import { DefaultChatTransport } from 'ai';
 import { httpApi } from './api';
+import { httpChatApi } from './chat-api';
 import { db } from './db';
 import { applyHello, applyLive, applyStatus, setGapHandler } from './live-feed';
 import { setLink } from './link';
@@ -16,7 +16,6 @@ import {
   openConversation,
   refreshToday,
 } from './sync';
-import type { ChatMsg } from './types';
 import type {
   ConversationRow,
   Hello,
@@ -153,8 +152,5 @@ export const liveSource: DataSource = {
   openConversation: (id) => void openConversation(id),
   loadOlder: (id, manual) => void loadOlder(id, manual),
   markRead,
-  // 网页对话还不能用（第 6 步）
-  chatBlocked: () => '网页对话还不能用',
-  chatTransport: () => new DefaultChatTransport<ChatMsg>({ api: '/api/chat' }),
-  webChat: null,
+  chat: httpChatApi,
 };

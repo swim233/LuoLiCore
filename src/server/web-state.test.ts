@@ -60,6 +60,36 @@ describe('网页状态库（web.db）', () => {
     expect(state.readSeq('a')).toBe(8);
   });
 
+  it('网页会话的标题：记下、覆盖、再打开还在；没记过的为 undefined', async () => {
+    const path = await tempPath();
+    const first = await open(path);
+    expect(first.state.title('w1')).toBeUndefined();
+    first.state.setTitle('w1', '今天天气怎么样');
+    first.state.setTitle('w2', '图片');
+    first.state.setTitle('w2', '改过的');
+    first.state.close();
+
+    const second = await open(path);
+    expect(second.state.title('w1')).toBe('今天天气怎么样');
+    expect(second.state.title('w2')).toBe('改过的');
+  });
+
+  it('第 4 步建的旧文件（只有已读位置）：升级加上标题表，已读位置照旧、不再初始化', async () => {
+    const path = await tempPath();
+    const raw = new DatabaseSync(path);
+    raw.exec(`CREATE TABLE read_marks (
+      conversation_id TEXT PRIMARY KEY, seq INTEGER NOT NULL, updated_at TEXT NOT NULL)`);
+    raw.exec("INSERT INTO read_marks VALUES ('a', 7, '2026-11-08T00:00:00.000Z')");
+    raw.exec('PRAGMA user_version = 1');
+    raw.close();
+
+    const { state, asked } = await open(path, [['a', 100]]);
+    expect(asked()).toBe(0);
+    expect(state.readSeq('a')).toBe(7);
+    state.setTitle('w', '新对话的标题');
+    expect(state.title('w')).toBe('新对话的标题');
+  });
+
   it('文件的版本比程序新时报错，不动文件', async () => {
     const path = await tempPath();
     const raw = new DatabaseSync(path);

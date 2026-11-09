@@ -2616,6 +2616,15 @@ button {
 .msg-meta time {
   font-variant-numeric: tabular-nums;
 }
+/* 排队中：生成中又发的消息，洛璃正在回复上一条，这条还没被她看到 */
+.msg-meta .queued {
+  padding: 0 8px;
+  border-radius: 999px;
+  border: 1px dashed color-mix(in srgb, var(--gold) 55%, transparent);
+  color: var(--gold-pale);
+  font-size: 11px;
+  line-height: 16px;
+}
 .bubble {
   position: relative;
   padding: 9px 13px;
@@ -3088,21 +3097,63 @@ button {
   border-color: var(--gold);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--gold) 18%, transparent);
 }
+/* 待发的图片排成一行，多了横着滚：不换行，输入区的高度和一两张图时一样，上面的消息区不被挤。
+   右上角的 × 伸出缩略图（-6px），滚动容器会把伸出去的裁掉，所以上、右留出边 */
 .chat-atts {
   display: flex;
   gap: 6px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 7px 7px 2px 0;
+  margin: -7px -7px 0 0;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--blue) 35%, transparent) transparent;
 }
 .chat-atts:empty {
   display: none;
 }
 .att {
   position: relative;
+  flex: none;
 }
 .att .thumb {
   --tw: 56px;
   --th: 56px;
   margin: 0;
+}
+/* 待发图片上传时盖一层转圈，失败时红框加感叹号 */
+.att-state {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--black) 45%, transparent);
+  color: var(--gold-pale);
+  font-weight: 700;
+}
+.att-state.is-bad {
+  background: color-mix(in srgb, var(--err) 38%, transparent);
+  color: var(--white);
+}
+.att.is-bad .thumb {
+  box-shadow: 0 0 0 2px var(--err);
+}
+/* 输入框上的提示（图片超限、上传失败） */
+.chat-note {
+  font-size: 12px;
+  padding: 0 6px;
+  color: var(--fg-2);
+}
+.chat-note.is-err {
+  color: var(--err);
+}
+/* 出错的回复下面的「重试」 */
+.msg .chat-retry {
+  margin: 6px 4px 0;
+  padding: 2px 14px;
+  font-size: 12.5px;
 }
 .att button {
   position: absolute;
@@ -3158,6 +3209,10 @@ button {
     color-mix(in srgb, var(--gold) 18%, transparent)
   );
   color: var(--gold-pale);
+}
+.chat-send:disabled {
+  opacity: 0.6;
+  cursor: default;
 }
 .chat-send.is-stop {
   border-color: color-mix(in srgb, var(--err) 50%, transparent);

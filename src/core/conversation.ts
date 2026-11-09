@@ -12,7 +12,13 @@ import {
 } from 'ai';
 import { trackAttempts } from './attempts.js';
 import { errorKind, summarizeError } from './errors.js';
-import { createMemoryFileStore, inlineFiles, type FileStore, type NewFile } from './files.js';
+import {
+  createMemoryFileStore,
+  inlineFiles,
+  type FileRef,
+  type FileStore,
+  type NewFile,
+} from './files.js';
 import {
   isRejectedRequest,
   suspectImages,
@@ -68,7 +74,11 @@ export type Conversation = {
 export type AppendInput = {
   author: Author;
   text?: string;
-  files?: NewFile[];
+  /**
+   * 图片：新的（带数据，先存进文件存储），或已经在文件存储里的（只有地址，直接引用，
+   * 调用方保证文件在）
+   */
+  files?: Array<NewFile | FileRef>;
   /** 消息发出的时间（ISO），平台给出时用它；默认为写入时间 */
   createdAt?: string;
   /** 平台里的消息 id，存进 metadata 与 platform_message_id 列 */
@@ -407,8 +417,10 @@ export function createConversation({
 
   return {
     async append({ author, text, files = [], createdAt, platformMessageId }) {
-      // 先存文件，再写消息：消息里的地址总能找到文件
-      const urls = await Promise.all(files.map((file) => fileStore.save(file)));
+      // 先存文件，再写消息：消息里的地址总能找到文件。已经存好的直接用它的地址
+      const urls = await Promise.all(
+        files.map((file) => ('url' in file ? file.url : fileStore.save(file))),
+      );
       const message: Message = {
         id: generateId(),
         role: 'user',
@@ -526,6 +538,36 @@ export function createConversation({
         });
       };
 
+      // 每段思考的起止时间，按出现的顺序，与回复里的 reasoning 段一一对应。流中途重新生成
+      // （reset-step）时，作废那一步的思考连同它的段一起去掉
+      const reasoningTimes: Array<{
+        step: number;
+        id: string;
+        startedAt: number;
+        endedAt?: number;
+      }> = [];
+      const timeReasoning = () => {
+        let step = 0;
+        return new TransformStream<MessageChunk, MessageChunk>({
+          transform(chunk, controller) {
+            if (chunk.type === 'start-step') step++;
+            else if (chunk.type === 'reasoning-start') {
+              reasoningTimes.push({ step, id: chunk.id, startedAt: Date.now() });
+            } else if (chunk.type === 'reasoning-end') {
+              const open = reasoningTimes.findLast(
+                (time) => time.id === chunk.id && time.endedAt === undefined,
+              );
+              if (open) open.endedAt = Date.now();
+            } else if (chunk.type === 'reset-step') {
+              for (let i = reasoningTimes.length - 1; i >= 0; i--) {
+                if (reasoningTimes[i]!.step === step) reasoningTimes.splice(i, 1);
+              }
+            }
+            controller.enqueue(chunk);
+          },
+        });
+      };
+
       /** 写入的回复正常结束后，按最后一步的输入看是否要在后台压缩 */
       function checkCompress() {
         if (segment && seq !== undefined) {
@@ -548,6 +590,12 @@ export function createConversation({
             : [part];
         });
         while (parts.at(-1)?.type === 'step-start') parts.pop();
+        // 写入的 reasoning 段是出现过的前几段（出错时只写完成的步）：时长取同样的前几段
+        const reasoning = parts.filter((part) => part.type === 'reasoning').length;
+        const reasoningMs = Array.from({ length: reasoning }, (_, i) => {
+          const time = reasoningTimes[i];
+          return time?.endedAt === undefined ? null : time.endedAt - time.startedAt;
+        });
         await store.add(
           {
             ...message,
@@ -557,6 +605,7 @@ export function createConversation({
               ...message.metadata,
               ...extra,
               ...(unreadable.length > 0 ? { unreadableFiles: unreadable } : {}),
+              ...(reasoning > 0 ? { reasoningMs } : {}),
             },
           },
           seq,
@@ -705,7 +754,8 @@ export function createConversation({
             })
               .pipeThrough(tracker.markStreamRetries())
               .pipeThrough(timeoutAsFailure())
-              .pipeThrough(countFinishedSteps()),
+              .pipeThrough(countFinishedSteps())
+              .pipeThrough(timeReasoning()),
           );
         },
         onError: describeError,

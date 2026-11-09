@@ -8,7 +8,7 @@ const base = {
 };
 
 function parse(env: Record<string, string | undefined>) {
-  return parseServerConfig({ ...base, ...env });
+  return parseServerConfig({ ...base, ...env }, { systemUser: () => 'alice' });
 }
 
 function errorOf(env: Record<string, string | undefined>): string {
@@ -32,9 +32,22 @@ describe('洛璃服务的配置', () => {
         requestLog: { path: 'data/requests.db', retentionDays: 30 },
         name: '洛璃',
         telegram: undefined,
-        web: { port: 7310, dbPath: 'data/web.db' },
+        web: { port: 7310, dbPath: 'data/web.db', author: 'alice' },
       },
     });
+  });
+
+  it('LUOLI_WEB_NAME：网页会话里发言人的名字，去掉首尾空白；没设或只有空白时取系统用户名', () => {
+    const authorOf = (value: string | undefined) => {
+      const result = parse({ LUOLI_WEB_NAME: value });
+      return result.ok ? result.config.web?.author : undefined;
+    };
+    expect(authorOf(undefined)).toBe('alice');
+    expect(authorOf(' 小明 ')).toBe('小明');
+    expect(authorOf('  ')).toBe('alice');
+    // 默认取真的系统用户名
+    const real = parseServerConfig(base);
+    expect(real.ok && real.config.web?.author).toBeTruthy();
   });
 
   it('LUOLI_NAME：助手的显示名，去掉首尾空白；空的、只有空白的按没设，用「洛璃」', () => {
@@ -78,7 +91,11 @@ describe('洛璃服务的配置', () => {
 
     expect(off.ok && off.config.web).toBeUndefined();
     expect(off.ok && off.config.telegram?.token).toBe(token);
-    expect(port.ok && port.config.web).toEqual({ port: 8080, dbPath: 'data/web.db' });
+    expect(port.ok && port.config.web).toEqual({
+      port: 8080,
+      dbPath: 'data/web.db',
+      author: 'alice',
+    });
   });
 
   it('web.db 默认在数据库所在目录下；LUOLI_WEB_DB 改路径，空字符串按没设处理', () => {

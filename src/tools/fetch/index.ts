@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { defineTool, ToolError, type Logger, type ToolDefinition } from '../../core/index.js';
 import { defaultJina } from './jina.js';
-import { renderPage, truncatedNote } from './page.js';
+import { fetchSummary, renderPage, truncatedNote } from './page.js';
 import { readGeneric, type ReadOptions, type ReadResult } from './read.js';
 import { createRequester, FetchError, type FetchErrorKind, type Requester } from './request.js';
 import { siteHandlers, type SiteHandler } from './sites.js';
@@ -65,6 +65,9 @@ export function createFetchTool({
     description,
     input,
     timeoutMs: 30_000,
+    // 网址加页面标题；带图片的结果给的是它的文字部分，开头同样是元数据
+    summary: ({ input: { url }, output }) =>
+      fetchSummary(url, typeof output === 'string' ? output : undefined),
     async execute({ url: raw, offset, mode }, ctx) {
       const options: ReadOptions = {
         requester: (shared ??= createRequester()),

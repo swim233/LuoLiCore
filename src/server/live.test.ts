@@ -342,6 +342,11 @@ function rebuild(snapshot: LiveSnapshot, events: LiveEvent[]): LiveSnapshot {
           reply = { conversationId: id, state: event.state, again: true, parts: [] };
           replies.set(id, reply);
         }
+        if (event.queuedFrom !== undefined) reply.queuedFrom = event.queuedFrom;
+        break;
+      case 'dequeue':
+        reply!.again = false;
+        delete reply!.queuedFrom;
         break;
       case 'start': {
         const waiting = reply?.startedAt === undefined ? reply?.waitingSince : undefined;
@@ -351,7 +356,8 @@ function rebuild(snapshot: LiveSnapshot, events: LiveEvent[]): LiveSnapshot {
           state: event.state,
           ...(waiting ? { waitingSince: waiting } : {}),
           startedAt: event.at,
-          again: waiting !== undefined && reply!.again,
+          again: event.again ?? false,
+          ...(event.queuedFrom !== undefined ? { queuedFrom: event.queuedFrom } : {}),
           parts: [],
         };
         replies.set(id, reply);
@@ -384,16 +390,21 @@ function rebuild(snapshot: LiveSnapshot, events: LiveEvent[]): LiveSnapshot {
           name: event.name,
           input: event.input,
           startedAt: event.at,
+          ...(event.summary !== undefined ? { summary: event.summary } : {}),
         };
         break;
-      case 'tool-end':
-        Object.assign(reply!.parts[event.part]!, {
+      case 'tool-end': {
+        const tool = reply!.parts[event.part] as LiveTool;
+        Object.assign(tool, {
           endedAt: event.at,
           ok: event.ok,
           ...(event.error !== undefined ? { error: event.error } : {}),
           ...(event.images ? { images: event.images } : {}),
         });
+        if (event.summary !== undefined) tool.summary = event.summary;
+        else delete tool.summary;
         break;
+      }
       case 'retry':
         reply!.retry = event.retry;
         break;
@@ -900,6 +911,7 @@ describe('服务的状态', () => {
       uptimeSeconds: watcher.hello.uptimeSeconds,
       telegram: { enabled: false, connected: false },
       assistant: { name: '洛璃', wakeWords: [] },
+      web: { author: 'Alice' },
       live: { seq: 0, replies: [] },
     });
     const health = (await (await service.request('/api/health')).json()) as ServiceStatus;
@@ -916,6 +928,15 @@ describe('服务的状态', () => {
 
     expect(watcher.hello.assistant).toEqual({ name: 'Nori', wakeWords: ['nori', '小璃'] });
     expect(watcher.hello.telegram).toEqual({ enabled: true, connected: false });
+  });
+
+  it('网页会话发言人的名字取配置（LUOLI_WEB_NAME），hello 与 /api/health 都带着', async () => {
+    const service = await testService({ author: 'Swim' });
+    const watcher = await panel(service.request);
+
+    expect(watcher.hello.web).toEqual({ author: 'Swim' });
+    const health = (await (await service.request('/api/health')).json()) as ServiceStatus;
+    expect(health.web).toEqual({ author: 'Swim' });
   });
 
   it('上次回复：启动时取自数据库；回复正常完成后更新，出错的不算', async () => {
@@ -1130,5 +1151,118 @@ describe('Telegram：等待合并、再次触发与连接状态', () => {
     // 再等一会儿：恢复后只有那一次立即返回的拉取，接着是长轮询，没有空转
     await sleep(300);
     expect(api.polls.slice(mark).map((poll) => poll.timeout)).toEqual([0, 30]);
+  });
+});
+
+describe('「此刻」：网页会话的排队', () => {
+  it('排队之后才开始出第一段的回复：接着算这次回复的排队；开始之前就有的那条（上次刚结束）不算', () => {
+    const sent: LiveEvent[] = [];
+    const { logger } = recordingLogger();
+    const live = createLive({ broadcast: (event) => sent.push(event), logger });
+
+    // 回复已经开始（旁听者已建）、还没出第一段时排了队
+    const watcher = live.listener({ conversationId: 'w1' });
+    live.queue('w1', 5);
+    watcher.chunk?.({ type: 'start', messageId: 'r1' });
+    expect(live.snapshot().replies).toEqual([
+      expect.objectContaining({
+        conversationId: 'w1',
+        again: true,
+        queuedFrom: 5,
+        state: 'thinking',
+      }),
+    ]);
+    expect(sent.at(-1)).toMatchObject({ type: 'start', again: true, queuedFrom: 5 });
+
+    // 上一次回复刚结束、补的那次开始之前排的队：补的这次就是「再回复一次」
+    watcher.end?.();
+    live.queue('w1', 7);
+    const next = live.listener({ conversationId: 'w1' });
+    next.chunk?.({ type: 'start', messageId: 'r2' });
+    expect(live.snapshot().replies).toEqual([
+      expect.objectContaining({ conversationId: 'w1', again: false, replyId: 'r2' }),
+    ]);
+    expect(live.snapshot().replies[0]).not.toHaveProperty('queuedFrom');
+    expect(sent.at(-1)).toMatchObject({ type: 'start', again: false });
+    // 面板照事件重建的与现场相同
+    expect(rebuild({ seq: 0, replies: [] }, sent)).toEqual(live.snapshot());
+  });
+
+  it('取消排队：进行中的那条推 dequeue；只是在等补回复的那条推 cancel；没有排队时不推', () => {
+    const sent: LiveEvent[] = [];
+    const { logger } = recordingLogger();
+    const live = createLive({ broadcast: (event) => sent.push(event), logger });
+    const watcher = live.listener({ conversationId: 'w1' });
+    watcher.chunk?.({ type: 'start', messageId: 'r1' });
+
+    live.unqueue('w1');
+    expect(sent.map((event) => event.type)).toEqual(['start']);
+    live.queue('w1', 3);
+    live.queue('w1', 4);
+    expect(sent.map((event) => event.type)).toEqual(['start', 'again']);
+    live.unqueue('w1');
+    expect(sent.at(-1)).toMatchObject({ type: 'dequeue', state: 'thinking' });
+    expect(live.snapshot().replies[0]).toMatchObject({ again: false });
+    expect(live.snapshot().replies[0]).not.toHaveProperty('queuedFrom');
+
+    watcher.end?.();
+    live.queue('w1', 9);
+    live.unqueue('w1');
+    expect(sent.slice(-2).map((event) => event.type)).toEqual(['again', 'cancel']);
+    expect(live.snapshot().replies).toEqual([]);
+    expect(rebuild({ seq: 0, replies: [] }, sent)).toEqual(live.snapshot());
+  });
+
+  it('经对话接口：排队、取消、再排、补回复，面板照事件重建的与现场处处相同', async () => {
+    const hold = gate();
+    const model = scripted(
+      [...text('t', ['第一次']), { gate: hold.promise }, finish('stop')],
+      [...text('t', ['补的']), finish('stop')],
+    );
+    const service = await testService({ model });
+    cleanups.push(() => service.sessions!.close(0, 200));
+    const watcher = await panel(service.request);
+    const post = (body: unknown) =>
+      service.request('/api/chat', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    const consistent = async () => {
+      const now = service.live.snapshot();
+      await watcher.upTo(now.seq);
+      expect(rebuild(watcher.hello.live, watcher.live())).toEqual(now);
+    };
+
+    const first = await post({ text: '第一句' });
+    const id = first.headers.get('x-conversation-id')!;
+    void first.text();
+    await watcher.next((event) => event.type === 'text-delta');
+    const second = await post({ conversationId: id, text: '第二句' });
+    const secondReader = second.body!.getReader();
+    await watcher.next((event) => event.type === 'again');
+    expect(service.live.snapshot().replies[0]).toMatchObject({ again: true, queuedFrom: 3 });
+    await consistent();
+    const late = await panel(service.request);
+    expect(late.hello.live).toEqual(service.live.snapshot());
+
+    await secondReader.cancel();
+    await watcher.next((event) => event.type === 'dequeue');
+    await consistent();
+    const third = await post({ conversationId: id, text: '第三句' });
+    void third.text();
+    await waitUntil(() => watcher.live().filter((event) => event.type === 'again').length === 2);
+    expect(service.live.snapshot().replies[0]).toMatchObject({ again: true, queuedFrom: 4 });
+    await consistent();
+
+    hold.open();
+    await waitUntil(() => watcher.live().filter((event) => event.type === 'end').length === 2);
+    const starts = watcher.live().filter((event) => event.type === 'start');
+    expect(starts.map((event) => event.type === 'start' && event.again)).toEqual([false, false]);
+    await consistent();
+    expect(service.live.snapshot().replies).toEqual([]);
+    // 另一个面板也一样
+    await late.upTo(service.live.snapshot().seq);
+    expect(rebuild(late.hello.live, late.live())).toEqual(service.live.snapshot());
   });
 });

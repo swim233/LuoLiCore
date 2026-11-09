@@ -1,9 +1,8 @@
 import { chars, rand, randi, uid } from '../lib/util';
-import { withDemo } from '../model/parts';
 import type { ImageInfo, ImagePart, MsgRow, Part, ToolResultInfo } from '../model/types';
 import { mockLive, mockStatus } from './mock-live';
 import { mockServer as server, svgImage } from './mock-server';
-import { U, imgPart, toolPart } from './seed';
+import { U, imgPart, toolPart, toolSummary } from './seed';
 
 /* 模拟 bot 的剧本 */
 export interface Script {
@@ -66,6 +65,8 @@ interface RunState {
   waitUntil: number;
   text: string;
   parts: Part[];
+  /** 每段思考用了多少毫秒 */
+  reasoningMs: number[];
   images: Record<string, ImageInfo | null>;
   tools: Record<string, ToolResultInfo>;
 }
@@ -118,7 +119,10 @@ class Bot {
         parts,
         images: st.images,
         tools: st.tools,
-        meta: { aborted: true },
+        meta: {
+          aborted: true,
+          ...(st.reasoningMs.length ? { reasoningMs: st.reasoningMs } : {}),
+        },
       });
       server.addCall({
         conversation_id: convId,
@@ -157,6 +161,7 @@ async function replyFlow(convId: string, script: Script, merged = false) {
     waitUntil: 0,
     text: '',
     parts: [],
+    reasoningMs: [],
     images: {},
     tools: {},
   };
@@ -197,15 +202,15 @@ async function replyFlow(convId: string, script: Script, merged = false) {
       await run.sleep(script.think.ms / pieces);
       mockLive.reasoningDelta(convId, part, cs.slice(k * size, (k + 1) * size).join(''));
     }
-    const sec = Math.max(1, Math.round(script.think.ms / 1000));
-    st.parts.push(withDemo({ type: 'reasoning', text: script.think.text }, { sec }));
+    st.parts.push({ type: 'reasoning', text: script.think.text });
+    st.reasoningMs.push(script.think.ms);
     mockLive.reasoningEnd(convId, part);
   }
   if (script.tool) {
     st.phase = 'tool';
     const callId = uid('call');
     const t = script.tool;
-    mockLive.toolStart(convId, callId, 'fetch', { url: t.url });
+    mockLive.toolStart(convId, callId, 'fetch', { url: t.url }, t.url);
     await run.sleep(t.wait || 1500);
     const built = toolPart(callId, {
       url: t.url,
@@ -222,8 +227,12 @@ async function replyFlow(convId: string, script: Script, merged = false) {
       convId,
       callId,
       t.fail
-        ? { ok: false, error: t.fail }
-        : { ok: true, images: t.image ? [svgImage(t.image)] : undefined },
+        ? { ok: false, error: t.fail, summary: t.url }
+        : {
+            ok: true,
+            images: t.image ? [svgImage(t.image)] : undefined,
+            summary: toolSummary(t),
+          },
     );
     attempts++;
     mockLive.nextStep(convId);
@@ -270,7 +279,10 @@ async function replyFlow(convId: string, script: Script, merged = false) {
         parts: [...st.parts, { type: 'text', text: st.text }],
         images: st.images,
         tools: st.tools,
-        meta: { usage: { input: usage.input, cacheRead: usage.cache, output: usage.output } },
+        meta: {
+          usage: { input: usage.input, cacheRead: usage.cache, output: usage.output },
+          ...(st.reasoningMs.length ? { reasoningMs: st.reasoningMs } : {}),
+        },
       })
     : null;
   if (row)
@@ -314,7 +326,10 @@ function failFlow(convId: string, st: RunState, script: Script, attempts: number
         parts,
         images: st.images,
         tools: st.tools,
-        meta: { failed: true },
+        meta: {
+          failed: true,
+          ...(st.reasoningMs.length ? { reasoningMs: st.reasoningMs } : {}),
+        },
       });
     server.addCall({
       conversation_id: convId,

@@ -98,10 +98,21 @@ function linesFromRow(row: MsgRow): Line[] {
     ];
   }
   const out: Line[] = [];
+  let thinkIndex = 0;
   for (const p of m.parts) {
-    if (isReasoning(p))
-      out.push({ id: uid('l'), kind: 'think', at, done: true, text: p.text, rowId: row.id });
-    else if (isTool(p)) {
+    if (isReasoning(p)) {
+      // 思考用了几秒：消息里记的毫秒（以前的消息没有，就不显示秒数）
+      const ms = m.metadata?.reasoningMs?.[thinkIndex++];
+      out.push({
+        id: uid('l'),
+        kind: 'think',
+        at,
+        done: true,
+        text: p.text,
+        sec: typeof ms === 'number' ? Math.max(1, Math.round(ms / 1000)) : undefined,
+        rowId: row.id,
+      });
+    } else if (isTool(p)) {
       const out_ = (p as { output?: unknown }).output;
       const images: ImageInfo[] = [];
       if (out_ && typeof out_ === 'object' && (out_ as { type?: unknown }).type === 'luoli-content')
@@ -116,9 +127,10 @@ function linesFromRow(row: MsgRow): Line[] {
         kind: 'tool',
         at,
         toolName: toolName(p),
-        label: argsLine((p as { input?: unknown }).input),
+        label: row.tools[p.toolCallId]?.summary ?? argsLine((p as { input?: unknown }).input),
         done: true,
         ok: p.state !== 'output-error',
+        ms: row.tools[p.toolCallId]?.durationMs,
         error:
           p.state === 'output-error'
             ? firstLine((p as { errorText?: string }).errorText)
@@ -265,6 +277,10 @@ bus.on('reply:queued', ({ convId }) => {
   const s = get(convId);
   if (s) push(s, { kind: 'status', text: '回复中又被触发，这条发出后再回复一次' });
 });
+bus.on('reply:dequeue', ({ convId }) => {
+  const s = get(convId);
+  if (s) push(s, { kind: 'status', text: '排队的回复取消了' });
+});
 bus.on('reply:cancel', ({ convId }) => {
   replying.delete(convId);
   const s = get(convId);
@@ -291,11 +307,12 @@ bus.on('tool:start', ({ convId, name, label, part, at, callId }) => {
   endCur(s);
   s.tools.set(callId, push(s, { kind: 'tool', toolName: name, label, part, done: false, at }));
 });
-bus.on('tool:end', ({ convId, callId, ok, ms, error, images }) => {
+bus.on('tool:end', ({ convId, callId, ok, ms, error, images, summary }) => {
   const s = get(convId),
     l = s && s.tools.get(callId);
   if (!l) return;
-  Object.assign(l, { done: true, ok, ms, error, images });
+  // 结束时的摘要比开始时的完整（fetch：开始时只有网址，结束时带页面标题）
+  Object.assign(l, { done: true, ok, ms, error, images, ...(summary ? { label: summary } : {}) });
   emit('update', convId, l);
 });
 bus.on('reply:delta', ({ convId, replyId, text, part, at }) => {

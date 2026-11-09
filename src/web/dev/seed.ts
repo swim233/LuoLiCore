@@ -1,8 +1,7 @@
 import { hashStr, pick, rand, randi, startOfDay, uid } from '../lib/util';
-import { withDemo } from '../model/parts';
 import type { NewMessage } from '../model/source';
 import type { ImageInfo, ImagePart, Part, ToolResultInfo } from '../model/types';
-import { devUi } from './demo-state';
+import { devUi, WEB_AUTHOR } from './demo-state';
 import type { Dataset } from './demo-state';
 import { mockServer as server, svgImage, toolBody } from './mock-server';
 
@@ -81,21 +80,18 @@ export function toolPart(callId: string, t: ToolSpec) {
   const images: Record<string, ImageInfo | null> = {};
   const tools: Record<string, ToolResultInfo> = {};
   const full = t.chars || 1830;
-  const demo = { ms: t.ms || 800, summary: t.summary, image: t.image || null };
+  const durationMs = t.ms || 800;
   if (t.ok === false) {
     const errorText = '抓取失败：HTTP 404';
-    tools[callId] = { chars: errorText.length, truncated: false };
+    tools[callId] = { chars: errorText.length, truncated: false, durationMs };
     return {
-      part: withDemo(
-        {
-          type: 'tool-fetch',
-          toolCallId: callId,
-          state: 'output-error',
-          input: { url: t.url },
-          errorText,
-        } as Part,
-        demo,
-      ),
+      part: {
+        type: 'tool-fetch',
+        toolCallId: callId,
+        state: 'output-error',
+        input: { url: t.url },
+        errorText,
+      } as Part,
       images,
       tools,
     };
@@ -119,22 +115,22 @@ export function toolPart(callId: string, t: ToolSpec) {
     };
     images[t.image.url] = svgImage(t.image);
   }
-  tools[callId] = { chars: full, truncated: full > 2000 };
+  tools[callId] = { chars: full, truncated: full > 2000, summary: toolSummary(t), durationMs };
   return {
-    part: withDemo(
-      {
-        type: 'tool-fetch',
-        toolCallId: callId,
-        state: 'output-available',
-        input: { url: t.url },
-        output,
-      } as Part,
-      demo,
-    ),
+    part: {
+      type: 'tool-fetch',
+      toolCallId: callId,
+      state: 'output-available',
+      input: { url: t.url },
+      output,
+    } as Part,
     images,
     tools,
   };
 }
+/** fetch 给界面看的一句话：网址加页面标题（演示数据里标题就是 summary 的开头一段） */
+export const toolSummary = (t: { url: string; summary: string }) =>
+  t.summary ? `${t.url} · ${t.summary}` : t.url;
 export interface AOpts {
   think?: [string, number];
   tool?: ToolSpec;
@@ -146,7 +142,7 @@ export function A(convId: string, text: string, at: number, o: AOpts = {}) {
   const parts: Part[] = [];
   let images: Record<string, ImageInfo | null> = {};
   let tools: Record<string, ToolResultInfo> = {};
-  if (o.think) parts.push(withDemo({ type: 'reasoning', text: o.think[0] }, { sec: o.think[1] }));
+  if (o.think) parts.push({ type: 'reasoning', text: o.think[0] });
   if (o.tool) {
     const t = toolPart(uid('call'), o.tool);
     parts.push(t.part);
@@ -156,6 +152,7 @@ export function A(convId: string, text: string, at: number, o: AOpts = {}) {
   if (text) parts.push({ type: 'text', text });
   const meta: NewMessage['meta'] = {};
   if (o.usage) meta.usage = { input: o.usage[0], cacheRead: o.usage[1], output: o.usage[2] };
+  if (o.think) meta.reasoningMs = [o.think[1] * 1000];
   if (o.failed) meta.failed = true;
   if (o.aborted) meta.aborted = true;
   const row = server.addMsg(convId, { role: 'assistant', parts, images, tools, at, meta })!;
@@ -351,7 +348,7 @@ function seedNormal() {
     id: 'c-web1',
   }).id;
   server.addSeg(w1, 'first', now - 3 * DAY, null);
-  U(w1, '你', '推荐几部科幻小说', now - 3 * DAY);
+  U(w1, WEB_AUTHOR, '推荐几部科幻小说', now - 3 * DAY);
   A(
     w1,
     '好呀～ 按口味挑：想烧脑就读《你一生的故事》，想热血就读《火星救援》，想哭一场就读《献给阿尔吉侬的花束》！',
@@ -366,7 +363,7 @@ function seedNormal() {
     id: 'c-web2',
   }).id;
   server.addSeg(w2, 'first', now - 20 * HOUR, null);
-  U(w2, '你', '帮我给天文社团起个群名', now - 20 * HOUR);
+  U(w2, WEB_AUTHOR, '帮我给天文社团起个群名', now - 20 * HOUR);
   A(w2, '“今晚有星星”“拾星社”“仰望小分队”——我最喜欢第一个，像一句约定～', now - 20 * HOUR + MIN, {
     usage: [1180, 768, 40],
   });
@@ -539,10 +536,32 @@ function seedBig() {
     const c = server.addConv({ platform: 'web', kind: 'web', title, at: now - (i + 1) * HOUR }).id;
     server.addSeg(c, 'first', now - (i + 1) * HOUR, null);
     if (i === 0) {
-      U(c, '你', title, now - HOUR);
+      U(c, WEB_AUTHOR, title, now - HOUR);
       A(c, '好的！' + LONG_LINES[2] + LONG_LINES[1], now - HOUR + MIN, { usage: [1800, 0, 260] });
     }
   });
+  // 一个很长的网页对话（520 条）：看对话里往上翻、分批取更早的消息
+  const long = server.addConv({
+    platform: 'web',
+    kind: 'web',
+    title: '很长的对话（520 条）',
+    at: now - 3 * HOUR,
+  }).id;
+  let lt = now - 3 * HOUR - 520 * MIN;
+  server.addSeg(long, 'first', lt, null);
+  for (let j = 0; j < 260; j++) {
+    U(long, WEB_AUTHOR, `第 ${j + 1} 个问题：` + pick(LONG_LINES).slice(0, 40), lt);
+    lt += MIN;
+    A(long, `第 ${j + 1} 个回答：` + pick(LONG_LINES).slice(0, 70), lt, {
+      think: j % 7 === 0 ? ['想一想这个问题怎么答。', 2 + (j % 3)] : undefined,
+      tool:
+        j % 13 === 0
+          ? { url: 'example.com/p' + j, summary: '示例页面 ' + j, ms: 600 + j, chars: 1200 }
+          : undefined,
+      usage: [1800, 0, 60],
+    });
+    lt += MIN;
+  }
   const t0 = startOfDay(now);
   for (let i = 0; i < 380; i++)
     server.addCall({

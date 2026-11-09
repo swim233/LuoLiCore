@@ -56,6 +56,11 @@ export type ModelCall = {
 export type ToolCall = {
   /** 所在回复的 id，与 ModelCall 的 replyId 相同 */
   replyId: string;
+  /**
+   * 这次调用的 id（模型给的，与消息里工具段的 toolCallId 相同），用来对上消息里的调用。
+   * 表结构版本 4 之前写的行没有
+   */
+  toolCallId?: string;
   /** 工具名；模型调了不存在的工具时，是模型给的名字 */
   tool: string;
   /** 第几步，从 1 开始 */

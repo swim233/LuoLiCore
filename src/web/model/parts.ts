@@ -1,5 +1,5 @@
 import { getToolName, isToolUIPart } from 'ai';
-import type { ImagePart, MsgRow, Part } from './types';
+import type { MsgRow, Part } from './types';
 
 /* 读 UI 消息里的段：文字、思考、图片、工具调用。不认识的段（step-start、data-* 等）调用方忽略就行 */
 
@@ -90,15 +90,3 @@ export function toolOutput(output: unknown): {
   if (output === undefined) return { text: '', images: [] };
   return { text: JSON.stringify(output, null, 2) ?? '', images: [] };
 }
-
-/* 模拟数据里挂在 part 上的演示字段：「此刻」「对话」还在读它们（思考秒数、工具耗时、一句话摘要、工具结果里的图）。
-   真实数据没有；第 5、6 步换成真实来源后删 */
-export interface Demo {
-  sec?: number;
-  ms?: number;
-  summary?: string;
-  image?: ImagePart | null;
-}
-export const demoOf = (p: unknown): Demo | undefined => (p as { demo?: Demo } | null)?.demo;
-/** 给 part 挂上演示字段（模拟数据用） */
-export const withDemo = <P extends Part>(p: P, demo: Demo): P => Object.assign(p, { demo });

@@ -330,17 +330,33 @@ describe('工具调用表', () => {
 
     const rows = await store.toolCalls();
     const base = { replyId, startedAt: now, durationMs: 0 };
+    // 每行带上调用 id（与消息里工具段的 toolCallId 相同），执行的与不合规的都有
     expect(byTool(rows)).toEqual([
-      { ...base, tool: 'boom', step: 1, outcome: 'failed', error: 'TypeError' },
-      { ...base, tool: 'dice', step: 1, outcome: 'completed', outputChars: 11 },
-      { ...base, tool: 'dice', step: 1, outcome: 'failed', error: 'InvalidToolInputError' },
-      { ...base, tool: 'nope', step: 1, outcome: 'failed', error: 'NoSuchToolError' },
-      { ...base, tool: 'stuck', step: 1, outcome: 'timeout' },
-      { ...base, tool: 'slow', step: 2, outcome: 'aborted' },
+      { ...base, toolCallId: 'c2', tool: 'boom', step: 1, outcome: 'failed', error: 'TypeError' },
+      { ...base, toolCallId: 'c1', tool: 'dice', step: 1, outcome: 'completed', outputChars: 11 },
+      {
+        ...base,
+        toolCallId: 'c4',
+        tool: 'dice',
+        step: 1,
+        outcome: 'failed',
+        error: 'InvalidToolInputError',
+      },
+      {
+        ...base,
+        toolCallId: 'c5',
+        tool: 'nope',
+        step: 1,
+        outcome: 'failed',
+        error: 'NoSuchToolError',
+      },
+      { ...base, toolCallId: 'c3', tool: 'stuck', step: 1, outcome: 'timeout' },
+      { ...base, toolCallId: 'c6', tool: 'slow', step: 2, outcome: 'aborted' },
     ]);
     // 每行都有一条同样的 tool.end
     const ends = logsOf(entries, 'tool.end').map((e) => ({
       replyId: e.fields.replyId,
+      toolCallId: e.fields.toolCallId,
       tool: e.fields.tool,
       step: e.fields.step,
       outcome: e.fields.outcome,
@@ -348,8 +364,9 @@ describe('工具调用表', () => {
       outputChars: e.fields.resultLength,
     }));
     expect(byTool(ends as ToolCall[])).toEqual(
-      byTool(rows).map(({ replyId, tool, step, outcome, error, outputChars }) => ({
+      byTool(rows).map(({ replyId, toolCallId, tool, step, outcome, error, outputChars }) => ({
         replyId,
+        toolCallId,
         tool,
         step,
         outcome,

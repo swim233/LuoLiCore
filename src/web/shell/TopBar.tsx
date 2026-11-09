@@ -21,7 +21,7 @@ export function TopBar() {
   const islandOn = narrow && hasDef('now') && !L.hidden.now;
   const stateName =
     snap.state === 'tool' ? '调用 ' + (snap.tool || '工具') : STATE_TEXT[snap.state];
-  const where = snap.count >= 2 ? snap.count + ' 个群' : snap.list[0] ? snap.list[0].title : '';
+  const where = snap.count >= 2 ? snap.count + ' 个会话' : snap.list[0] ? snap.list[0].title : '';
   return (
     <header className="top" id="top">
       <div className="top-in">

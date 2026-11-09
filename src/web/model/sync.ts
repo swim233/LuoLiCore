@@ -71,6 +71,27 @@ export function applyRow(row: ConversationRow, force = false) {
   if (prev.segments !== conv.segments && db.msgInfo.has(conv.id)) void refreshSegments(conv.id);
 }
 
+/**
+ * 服务刚建好的网页会话（对话的响应里先告诉了），列表还没有这一行（SSE 还没推来，不通、被缓冲时更不会来）：
+ * 先放一行占位，对话好立刻切过去。消息、段、完整的这一行由 openConversation 取；SSE 推来的行、取到的行都整行换掉它
+ */
+export function ensureConversation(id: string, title?: string) {
+  if (db.conv(id)) return;
+  const now = new Date().toISOString();
+  applyRow({
+    id,
+    platform: 'web',
+    kind: 'web',
+    title,
+    createdAt: now,
+    lastAt: now,
+    messages: 0,
+    segments: 0,
+    unread: 0,
+    readSeq: 0,
+  });
+}
+
 const sameRow = (a: Conversation, b: ConversationRow) =>
   a.title === (b.title || defaultTitle(b.kind)) &&
   a.kind === b.kind &&

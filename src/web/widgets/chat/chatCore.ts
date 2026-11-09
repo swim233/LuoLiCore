@@ -1,376 +1,442 @@
 import { Chat } from '@ai-sdk/react';
-import { chars, uid } from '../../lib/util';
+import type { FileUIPart } from 'ai';
+import { uid } from '../../lib/util';
 import { bus } from '../../model/bus';
+import { chatErrorStatus, chatErrorText } from '../../model/chat-api';
+import type { SendMeta } from '../../model/chat-api';
 import { db } from '../../model/db';
+import { replyInfo } from '../../model/replyInfo';
 import { getSource } from '../../model/source';
-import {
-  demoOf,
-  isFile,
-  isReasoning,
-  isText,
-  isTool,
-  toolOutput,
-  withDemo,
-} from '../../model/parts';
-import type { NewMessage } from '../../model/source';
-import type { ChatMsg, ChatPart, ImageInfo, MsgRow, Part, ToolResultInfo } from '../../model/types';
+import { ensureConversation } from '../../model/sync';
+import type { ChatChunk, ChatMessage } from '../../../server/types';
 import { toast } from '../../state/ui';
-import { chatState, draftOf, newWebConv } from './chatState';
+import {
+  chatCur,
+  chatState,
+  draftChanged,
+  draftKey,
+  draftOf,
+  IMAGE_TYPES,
+  MAX_BYTES,
+  MAX_IMAGES,
+  switchTo,
+} from './chatState';
+import type { Att } from './chatState';
 
-/* 「对话」的核心：每个网页对话一个 Chat（@ai-sdk/react 的 useChat 用的同一个类），接本地模拟的 /api/chat。
-   普通大小和全屏里的两个视图共用同一个 Chat，所以生成到一半放大、缩小，对话不会断。
-   这里把 Chat 的消息流翻译成总线事件（状态徽记、「此刻」、会话列表都订阅它们），结束时写进模拟数据库（今日概况、会话时间线用）。 */
-export type { ChatMsg };
-/* 消息里的 part 按网页对话用到的形状读（demo 时期的字段也在里面） */
-export const partsOf = (m: ChatMsg) => m.parts as unknown as ChatPart[];
-interface Rec {
-  chat: Chat<ChatMsg>;
-  convId: string;
-  replyId: string;
-  t0: number;
-  state: {
-    think?: number;
-    tools: Set<string>;
-    textLen: number;
-    thinkSeen: boolean;
-    thinkDone: boolean;
-    toolDone: Set<string>;
-    started: boolean;
-  };
+/* 「对话」的核心：怎么把消息发给洛璃服务、怎么看到回复。
+   - 会话的正本在服务里：对话里的历史消息、别的标签页发的消息、写入历史的回复，都和「会话」部件一样从服务取、经 SSE 的 message 事件推来（db）；
+   - 这个标签页发的每个请求（一次发消息、一次重试）是一个 Req，各用一个 @ai-sdk/react 的 Chat 接服务的 /api/chat（只发新消息）：
+     它的流里是这次回复逐字出的内容，对话里这条回复先画它（FlightBubble），回复写入历史（同一个消息 id）后改画历史里的，气泡不重建。
+   - 生成中又发一条：服务把它排队，请求一直开着等补的那次回复。每个请求各有一个 Chat，所以几个请求互不干扰：
+     第一个请求断开就是中止当前回复，所以排队的消息不能复用第一个请求的 Chat（见 ai 的 AbstractChat.sendMessage：生成中再调用会换掉 activeResponse）；
+     补回复的流由发出最后一条排队消息的那个请求带，它的 Chat 里就是补回复的内容。
+   - 新对话发出第一句：服务回的第一段（data-conversation）带着会话 id，收到就切到这个会话，不等 SSE 把新会话推来
+     （SSE 不通或被代理缓冲时它不来，但对话的流是通的）；这之前的 Esc 直接断开请求（服务把断开当作中止）。
+   - 中止用 POST /api/chat/:id/abort（同时取消排队的补回复），不用 Chat.stop（它只断开这一个请求）。
+   - 只用了 Chat 的公开接口（构造参数 id、transport、onError、onFinish，以及 sendMessage、regenerate、useChat）；
+     「此刻」「会话」的更新、回复的计时都来自服务的实时事件，不靠 Chat 的内部接口。 */
+
+/** 这个标签页发给服务的一个请求 */
+export interface Req {
+  id: string;
+  kind: 'send' | 'retry';
+  chat: Chat<ChatMessage>;
+  /** 会话 id：新会话要等服务回 data-conversation 才知道 */
+  convId: string | null;
+  /** 从新对话（还没建的会话）发出的 */
+  fromNew: boolean;
+  /** 从哪个草稿发出的 */
+  draftKey: string;
+  /** 发出的文字与图片的预览（新会话还不在历史里时，对话里先显示它） */
+  preview: { text: string; images: string[] };
+  /** 发出去的图片（出错时放回输入框） */
+  atts: Att[];
+  startedAt: number;
+  /** 服务收下了（回了 data-conversation）：消息已经写进历史 */
+  accepted: boolean;
+  /** 发出的这条消息的序号 */
+  seq?: number;
+  /** 这条消息在排队（data-queued） */
+  queued: boolean;
+  /** 回复 id（start 段的 messageId）：回复写入历史后就是那条助手消息的 id */
+  replyId?: string;
+  /** 流里出现了真正的内容（思考、文字、工具、图片） */
+  content: boolean;
+  /** 对话里要显示这条回复：有内容，或者结束时是出错、中止 */
+  shown: boolean;
+  sawAbort: boolean;
   finished: boolean;
-  /** 最后一条助手消息的 id，正在逐字出、或者结束后光标还没淡掉的那条 */
-  liveMsg: string | null;
+  how: 'end' | 'abort' | 'error' | null;
+  errorText?: string;
+  /** 请求没发成时服务回的 HTTP 状态码（网络错误没有） */
+  errorStatus?: number;
+  /** 结束后光标还停到这个时刻（正常 2 秒，中止、出错 .3 秒） */
   lingerUntil: number;
-  unreg: (() => void)[];
 }
-const recs = new Map<string, Rec>();
+const reqs: Req[] = [];
+const flight = () => bus.emit('chat:flight');
 
-/* 服务里的一条消息 → useChat 的消息。图片用服务给的地址（开发模式是色块的数据地址）；
-   思考秒数、工具耗时与摘要读模拟数据里的演示字段（第 6 步换成真实来源） */
-function rowToMsg(row: MsgRow): ChatMsg {
-  const m = row.message;
-  const parts: ChatPart[] = [];
-  for (const p of m.parts) {
-    if (isText(p)) parts.push({ type: 'text', text: p.text, state: 'done' });
-    else if (isFile(p))
-      parts.push({
-        type: 'file',
-        mediaType: p.mediaType,
-        url: row.images[p.url]?.src ?? p.url,
-        filename: p.filename,
-      });
-    else if (isReasoning(p)) {
-      const sec = demoOf(p)?.sec;
-      parts.push({
-        type: 'reasoning',
-        text: p.text,
-        state: 'done',
-        demo: sec ? { sec } : undefined,
-      });
-    } else if (isTool(p)) {
-      const d = demoOf(p);
-      const out =
-        p.state === 'output-available' ? toolOutput((p as { output?: unknown }).output) : null;
-      parts.push({
-        type: 'tool-fetch',
-        toolCallId: p.toolCallId,
-        state:
-          p.state === 'output-error'
-            ? 'output-error'
-            : p.state === 'output-available'
-              ? 'output-available'
-              : 'input-available',
-        input: { url: (p as { input?: { url?: string } }).input?.url },
-        output: out
-          ? {
-              summary: d?.summary ?? out.text.slice(0, 120),
-              chars: row.tools[p.toolCallId]?.chars ?? out.text.length,
-              ms: d?.ms,
-            }
-          : undefined,
-        demo: d ? { ms: d.ms, summary: d.summary, image: d.image } : undefined,
-      });
+/** 这个会话里这个标签页发出的、对话里要显示的回复 */
+export const flightsOf = (convId: string | null) =>
+  reqs.filter((r) => r.convId === convId && r.shown);
+/** 回复的键：回复 id（写入历史后就是那条助手消息的 id）；一开始就失败、没有 start 段的回复没有，用请求 id */
+export const flightKey = (r: Req) => r.replyId ?? r.id;
+/** 从新对话发出、服务还没回应（还不知道会话 id）的请求 */
+export const creatingReq = () => {
+  const id = chatState.get().creating;
+  return id ? reqs.find((r) => r.id === id) : undefined;
+};
+/** 对话刚从新对话切到这个会话、它的消息还没取到时，先显示的那条请求（发出的那句和它的回复） */
+export const startedFrom = (convId: string) => reqs.find((r) => r.fromNew && r.convId === convId);
+
+/** 这个会话在生成：这个标签页发的请求还开着（含排队等着补回复的），或者服务说有进行中的回复（别的标签页发的） */
+export function isBusy(convId: string | null): boolean {
+  if (reqs.some((r) => r.convId === convId && !r.finished)) return true;
+  return convId !== null && replyInfo.active(convId);
+}
+/** 有没有任何网页对话在生成（缩略文字用） */
+export const anyBusy = () =>
+  reqs.some((r) => !r.finished) ||
+  db.conversations.some((c) => c.platform === 'web' && replyInfo.active(c.id));
+
+/** 重试被服务拒绝的（最后一条不是出错的回复）：这个会话、这条最后的消息上不再给「重试」 */
+const retryDenied = new Set<string>();
+export const retryKey = (convId: string, lastSeq: number) => convId + ':' + lastSeq;
+export const retryIsDenied = (convId: string, lastSeq: number) =>
+  retryDenied.has(retryKey(convId, lastSeq));
+
+function onChunk(req: Req, c: ChatChunk) {
+  switch (c.type) {
+    case 'data-conversation':
+      req.convId = c.data.conversationId;
+      req.seq = c.data.seq;
+      req.accepted = true;
+      // 服务收下了：这个会话里出了错留着的旧请求（重试、再发一句之前的）不再需要
+      forgetFinished(req);
+      if (req.fromNew) {
+        // 新对话发出的第一句：不等服务的 SSE 把新会话推来（SSE 不通、被代理缓冲时它不来），收到就切到这个会话。
+        // 列表里还没有这一行时先放一行占位，消息、段由 openConversation 取；SSE 的行到了照常整行换掉
+        if (chatState.get().creating === req.id) chatState.set({ creating: null });
+        if (chatCur() === null) {
+          ensureConversation(req.convId, c.data.title);
+          getSource().openConversation(req.convId);
+          switchTo(req.convId);
+        }
+      }
+      flight();
+      break;
+    case 'data-queued':
+      req.queued = true;
+      flight();
+      break;
+    case 'start':
+      req.replyId = c.messageId;
+      flight();
+      break;
+    case 'reasoning-start':
+    case 'text-start':
+    case 'tool-input-start':
+    case 'tool-input-available':
+    case 'file':
+      if (!req.content) {
+        req.content = true;
+        req.shown = true;
+        flight();
+      }
+      break;
+    case 'abort':
+      req.sawAbort = true;
+      break;
+    default:
+  }
+}
+
+function finish(req: Req, isError: boolean, isAbort: boolean) {
+  if (req.finished) return;
+  req.finished = true;
+  req.how = req.sawAbort || isAbort ? 'abort' : isError ? 'error' : 'end';
+  req.lingerUntil = Date.now() + (req.how === 'end' ? 2000 : 300);
+  if (req.how !== 'end' && !req.accepted) {
+    // 服务没收下（被拒、连不上、还没回应就中止了）：消息没写进历史。发送时清掉的文字和图片放回输入框，出错的提示原因
+    if (req.how === 'error') toast(req.errorText || '请求失败');
+    if (req.kind === 'send') restoreDraft(req);
+    else if (req.convId && req.how === 'error' && req.errorStatus && req.errorStatus < 500) {
+      // 服务不让重试（最后一条不是出错的回复、正在回复……）：出错的气泡留着，不再给「重试」；
+      // 网络错误、服务那边的错误不算，还能再点
+      const last = db.msgs(req.convId).at(-1);
+      if (last) retryDenied.add(retryKey(req.convId, last.seq));
+    }
+    if (chatState.get().creating === req.id) chatState.set({ creating: null });
+    drop(req);
+  } else if (req.how !== 'end') {
+    // 出错或中止：有内容的留着（标「回复出错中断」「已中止」，出错的下面有「重试」）
+    req.shown = req.shown || req.how === 'error' || req.sawAbort;
+  }
+  flight();
+  sweepLater(req.lingerUntil - Date.now() + 200);
+}
+
+function drop(req: Req) {
+  const i = reqs.indexOf(req);
+  if (i >= 0) reqs.splice(i, 1);
+  if (req.kind === 'send' && !req.accepted) return; // 图片放回输入框了，预览地址还要用
+  for (const a of req.atts) URL.revokeObjectURL(a.url);
+}
+
+/** 结束了、光标停够了的请求，回复已经写进历史（或者本来就没有内容）的，不再需要了。出错的（没写进历史、留着给「重试」用的）留到下一次发送 */
+function sweep() {
+  const now = Date.now();
+  let changed = false;
+  for (const r of [...reqs]) {
+    if (!r.finished || now < r.lingerUntil) continue;
+    const written = !!r.convId && !!r.replyId && db.msgs(r.convId).some((m) => m.id === r.replyId);
+    const keep = r.how === 'error' && r.accepted && !written;
+    if (written || (!r.content && !keep)) {
+      drop(r);
+      changed = true;
     }
   }
-  const usage = m.metadata?.usage;
-  return {
-    id: row.id,
-    role: row.role,
-    parts: parts as unknown as ChatMsg['parts'],
-    metadata: {
-      at: Date.parse(row.createdAt),
-      name: m.metadata?.author?.name,
-      aborted: m.metadata?.aborted,
-      failed: m.metadata?.failed,
-      usage: usage
-        ? { input: usage.input ?? 0, cache: usage.cacheRead ?? 0, output: usage.output ?? 0 }
-        : undefined,
-    },
-  } as ChatMsg;
+  if (changed) flight();
 }
-/* useChat 的消息 → 服务里的消息。图片：浏览器里的 blob 地址就是它的显示地址（第 6 步改成上传进文件存储） */
-function msgToParts(m: ChatMsg): Pick<NewMessage, 'parts' | 'images' | 'tools'> {
-  const parts: Part[] = [];
-  const images: Record<string, ImageInfo | null> = {};
-  const tools: Record<string, ToolResultInfo> = {};
-  for (const p of partsOf(m)) {
-    if (p.type === 'file') {
-      const url = 'luoli-file:' + uid('web') + '.png';
-      parts.push({ type: 'file', mediaType: p.mediaType, url, filename: p.filename });
-      images[url] = { src: p.url };
-    } else if (p.type === 'reasoning')
-      parts.push(withDemo({ type: 'reasoning', text: p.text }, { sec: p.sec || 2 }));
-    else if (p.type === 'tool-fetch' && p.state === 'output-available') {
-      const text = p.output?.summary ?? '';
-      tools[p.toolCallId] = { chars: p.output?.chars ?? text.length, truncated: false };
-      parts.push(
-        withDemo(
-          {
-            type: 'tool-fetch',
-            toolCallId: p.toolCallId,
-            state: 'output-available',
-            input: { url: p.input?.url ?? '' },
-            output: text,
-          } as Part,
-          { ms: p.output?.ms || 800, summary: text, image: null },
-        ),
-      );
-    } else if (p.type === 'text' && p.text) parts.push({ type: 'text', text: p.text });
-  }
-  return { parts, images, tools };
+let sweepTimer: ReturnType<typeof setTimeout> | undefined;
+function sweepLater(ms: number) {
+  clearTimeout(sweepTimer);
+  sweepTimer = setTimeout(sweep, Math.max(0, ms));
+}
+bus.on('message', () => sweepLater(300));
+// SSE 不通时回复没经 message 事件写进历史：重新连上、补取到历史以后也要清
+bus.on('conv:messages', () => sweepLater(300));
+
+/** 服务收下了新的一次发送、重试：这个会话里出了错留着的旧请求不再留（没收下之前留着，被拒了气泡还在） */
+function forgetFinished(except: Req) {
+  for (const r of [...reqs])
+    if (r !== except && r.finished && r.convId === except.convId && r.how === 'error') drop(r);
 }
 
-export function getRec(convId: string): Rec {
-  let r = recs.get(convId);
-  if (r) return r;
-  const chat = new Chat<ChatMsg>({
-    id: convId,
-    messages: db.msgs(convId).map(rowToMsg),
-    transport: getSource().chatTransport(convId),
-    onData: (d) => {
-      if (d.type !== 'data-retry') return;
-      const x = d.data as { attempt: number; max: number; status: number };
-      bus.emit('reply:retry', {
-        convId,
-        replyId: r!.replyId,
-        attempt: x.attempt,
-        max: x.max,
-        status: x.status,
-      });
-    },
-    onFinish: ({ isAbort, isError, isDisconnect }) =>
-      finalize(r!, isAbort ? 'abort' : isError || isDisconnect ? 'error' : 'end'),
-    onError: () => {
-      if (!r!.finished) finalize(r!, 'error');
-    },
-  });
-  r = {
-    chat,
+function restoreDraft(req: Req) {
+  const d = draftOf(req.draftKey);
+  if (!d.text) d.text = req.preview.text;
+  for (const a of req.atts) if (d.atts.length < MAX_IMAGES) d.atts.push(a);
+  draftChanged();
+  bus.emit('chat:flight');
+}
+
+function newReq(
+  kind: Req['kind'],
+  convId: string | null,
+  key: string,
+  preview: Req['preview'],
+  atts: Att[],
+  messages: ChatMessage[],
+): Req {
+  const req: Req = {
+    id: uid('req'),
+    kind,
+    chat: undefined as never,
     convId,
-    replyId: '',
-    t0: 0,
-    state: {
-      tools: new Set(),
-      textLen: 0,
-      thinkSeen: false,
-      thinkDone: false,
-      toolDone: new Set(),
-      started: false,
-    },
-    finished: true,
-    liveMsg: null,
+    fromNew: convId === null,
+    draftKey: key,
+    preview,
+    atts,
+    startedAt: Date.now(),
+    accepted: false,
+    queued: false,
+    content: false,
+    shown: false,
+    sawAbort: false,
+    finished: false,
+    how: null,
     lingerUntil: 0,
-    unreg: [],
   };
-  r.unreg.push(chat['~registerMessagesCallback'](() => onMessages(r!)));
-  r.unreg.push(chat['~registerStatusCallback'](() => onStatus(r!)));
-  recs.set(convId, r);
-  return r;
+  req.chat = new Chat<ChatMessage>({
+    id: req.id,
+    messages,
+    transport: getSource().chat.transport((c) => onChunk(req, c)),
+    onError: (e) => {
+      req.errorText = chatErrorText(e);
+      req.errorStatus = chatErrorStatus(e);
+    },
+    onFinish: ({ isAbort, isError }) => finish(req, isError, isAbort),
+  });
+  reqs.push(req);
+  if (convId === null) chatState.set({ creating: req.id });
+  flight();
+  return req;
 }
-/* Chat 的状态变了：提交（submitted）时开一次回复 */
-function onStatus(r: Rec) {
-  const st = r.chat.status;
-  if (st === 'submitted' && r.finished) {
-    r.finished = false;
-    r.replyId = uid('reply');
-    r.t0 = Date.now();
-    r.state = {
-      tools: new Set(),
-      textLen: 0,
-      thinkSeen: false,
-      thinkDone: false,
-      toolDone: new Set(),
-      started: true,
-    };
-    chatState.set({ gen: r.convId });
-    bus.emit('reply:wait', { convId: r.convId, replyId: r.replyId, noWait: true });
-  }
-}
-/* 消息流更新：对照上一次看到的，发出 reply:think、tool:start、reply:delta 这些事件 */
-function onMessages(r: Rec) {
-  if (r.finished) return;
-  const last = r.chat.messages[r.chat.messages.length - 1];
-  if (!last || last.role !== 'assistant') return;
-  r.liveMsg = last.id;
-  const s = r.state;
-  for (const p of partsOf(last)) {
-    if (p.type === 'reasoning') {
-      if (!s.thinkSeen) {
-        s.thinkSeen = true;
-        s.think = Date.now();
-        bus.emit('reply:think', { convId: r.convId, replyId: r.replyId });
-      }
-      if (p.state === 'done' && !s.thinkDone) {
-        s.thinkDone = true;
-        const sec = Math.max(1, Math.round((Date.now() - (s.think || Date.now())) / 1000));
-        p.sec = sec;
-        bus.emit('reply:thinkEnd', { convId: r.convId, replyId: r.replyId, sec, text: p.text });
-      }
-    } else if (p.type === 'tool-fetch') {
-      if (!s.tools.has(p.toolCallId)) {
-        s.tools.add(p.toolCallId);
-        bus.emit('tool:start', {
-          convId: r.convId,
-          replyId: r.replyId,
-          callId: p.toolCallId,
-          name: 'fetch',
-          label: p.input?.url,
-        });
-      }
-      if (p.state === 'output-available' && !s.toolDone.has(p.toolCallId)) {
-        s.toolDone.add(p.toolCallId);
-        bus.emit('tool:end', {
-          convId: r.convId,
-          replyId: r.replyId,
-          callId: p.toolCallId,
-          ok: true,
-          ms: p.output?.ms || 800,
-        });
-      }
-    } else if (p.type === 'text') {
-      const cs = chars(p.text || '');
-      if (cs.length > s.textLen) {
-        const chunk = cs.slice(s.textLen).join('');
-        s.textLen = cs.length;
-        bus.emit('reply:delta', { convId: r.convId, replyId: r.replyId, text: chunk });
-      }
+
+/* ---------- 图片 ---------- */
+
+/** 往草稿里加图片（粘贴、拖入）：只收几种格式，每张不超过 20 MB，一条消息最多 10 张；不合的不加，在输入框上提示 */
+export function addFiles(key: string, files: File[]) {
+  const d = draftOf(key);
+  const msgs: string[] = [];
+  let notImage = false;
+  for (const f of files) {
+    const name = f.name || '粘贴的图片';
+    if (!f.type.startsWith('image/')) {
+      notImage = true;
+      continue;
     }
-  }
-}
-/* 一次回复结束：写进模拟数据库，发 reply:end / reply:abort / reply:error */
-function finalize(r: Rec, how: 'end' | 'abort' | 'error') {
-  if (r.finished) return;
-  r.finished = true;
-  const { convId } = r;
-  const last = r.chat.messages[r.chat.messages.length - 1];
-  const msg = last && last.role === 'assistant' ? last : null;
-  const ms = Date.now() - r.t0;
-  const meta: NonNullable<NewMessage['meta']> = {};
-  if (how === 'abort') meta.aborted = true;
-  if (how === 'error') meta.failed = true;
-  const usage = msg?.metadata?.usage || { input: 1500, cache: 0, output: 30 };
-  if (how === 'end')
-    meta.usage = { input: usage.input, cacheRead: usage.cache, output: usage.output };
-  let row: MsgRow | null = null;
-  const built = msg ? msgToParts(msg) : null;
-  const store = getSource().webChat;
-  if (store && db.conv(convId) && built && built.parts.length)
-    row = store.addMessage(convId, { role: 'assistant', ...built, meta });
-  if (store && db.conv(convId)) {
-    store.addCall({
-      conversation_id: convId,
-      reply_id: row?.id ?? null,
-      started_at: new Date(r.t0).toISOString(),
-      duration_ms: ms,
-      first_output_ms: 900,
-      attempts: 1,
-      outcome: how === 'end' ? 'completed' : how === 'abort' ? 'aborted' : 'failed',
-      finish_reason: how === 'end' ? 'stop' : undefined,
-      input_tokens: how === 'end' ? usage.input : null,
-      cache_read_tokens: how === 'end' ? usage.cache : null,
-      output_tokens: how === 'end' ? usage.output : null,
-      steps: r.state.tools.size ? 2 : 1,
-      tool_calls: r.state.tools.size,
-      error: how === 'error' ? 'APICallError 429' : null,
+    if (!IMAGE_TYPES.includes(f.type)) {
+      msgs.push(`「${name}」不是 PNG、JPEG、WebP、GIF，不收`);
+      continue;
+    }
+    if (f.size > MAX_BYTES) {
+      msgs.push(`「${name}」超过 20 MB，不收`);
+      continue;
+    }
+    if (d.atts.length >= MAX_IMAGES) {
+      msgs.push(`一条消息最多 ${MAX_IMAGES} 张图片`);
+      break;
+    }
+    d.atts.push({
+      id: uid('att'),
+      file: f,
+      url: URL.createObjectURL(f),
+      name,
+      type: f.type,
+      bytes: f.size,
+      state: 'ready',
     });
   }
-  /* 界面上这条消息的标记 */
-  if (msg && how !== 'end')
-    r.chat.messages = r.chat.messages.map((m) =>
-      m.id === msg.id
-        ? ({
-            ...m,
-            metadata: { ...m.metadata, aborted: meta.aborted, failed: meta.failed },
-          } as ChatMsg)
-        : m,
+  if (notImage && !msgs.length && files.length) toast('只能放图片');
+  setNote(key, msgs.length ? { text: msgs.join('；'), err: true } : undefined);
+}
+const noteTimers = new Map<string, ReturnType<typeof setTimeout>>();
+function setNote(key: string, note: { text: string; err: boolean } | undefined) {
+  const d = draftOf(key);
+  d.note = note;
+  clearTimeout(noteTimers.get(key));
+  if (note)
+    noteTimers.set(
+      key,
+      setTimeout(() => setNote(key, undefined), 6000),
     );
-  r.lingerUntil = Date.now() + (how === 'end' ? 2000 : 300);
-  if (chatState.get().gen === convId) chatState.set({ gen: null });
-  if (how === 'end') bus.emit('reply:end', { convId, replyId: r.replyId, ms, usage, row });
-  else if (how === 'abort') bus.emit('reply:abort', { convId, replyId: r.replyId, row });
-  else bus.emit('reply:error', { convId, replyId: r.replyId, status: 429, row });
+  draftChanged();
+}
+export function removeAtt(key: string, id: string) {
+  const d = draftOf(key);
+  const i = d.atts.findIndex((a) => a.id === id);
+  if (i < 0) return;
+  URL.revokeObjectURL(d.atts[i].url);
+  d.atts.splice(i, 1);
+  if (!d.atts.some((a) => a.state === 'failed') && d.note?.err) setNote(key, undefined);
+  draftChanged();
 }
 
-export function abortChat(convId: string) {
-  recs.get(convId)?.chat.stop();
+async function uploadOne(a: Att) {
+  a.state = 'uploading';
+  a.error = undefined;
+  draftChanged();
+  try {
+    a.ref = await getSource().chat.upload(a.file);
+    a.state = 'done';
+  } catch (e) {
+    a.state = 'failed';
+    a.error = e instanceof Error ? e.message : '上传失败';
+  }
+  draftChanged();
 }
-export const isGenerating = (convId: string | null) => !!convId && chatState.get().gen === convId;
 
-/* 发送：用户的消息进数据库和会话列表，再交给 Chat */
-export function sendChat(convId: string | null, text: string): boolean {
-  const id0 = convId;
-  const d = id0 ? draftOf(id0) : { text: '', atts: [] };
-  if (!text && !d.atts.length) return false;
-  const blocked = getSource().chatBlocked();
-  if (blocked) {
-    toast(blocked);
-    return false;
+/* ---------- 发送、重试、中止 ---------- */
+
+/**
+ * 发送：先把还没传的图片传上去（有一张失败就不发，留着文字和图片，提示哪张怎么了），再发出请求。
+ * 生成中也能发：服务把它排队。返回有没有发出去
+ */
+export async function sendChat(convId: string | null, rawText: string): Promise<boolean> {
+  const key = draftKey(convId);
+  const d = draftOf(key);
+  const text = rawText.trim();
+  if ((!text && !d.atts.length) || d.sending) return false;
+  d.sending = true;
+  setNote(key, undefined);
+  try {
+    const pending = d.atts.filter((a) => a.state !== 'done');
+    await Promise.all(pending.map(uploadOne));
+    const failed = d.atts.filter((a) => a.state === 'failed');
+    if (failed.length) {
+      setNote(key, {
+        text: `「${failed[0].name}」没传上去：${failed[0].error ?? '上传失败'}。去掉它，或者再点发送重试`,
+        err: true,
+      });
+      return false;
+    }
+    // 上传时用户可能又加了图、改了字：以现在草稿里的图片为准
+    const atts = d.atts.splice(0);
+    if (!atts.length && !text) return false;
+    d.text = '';
+    const files: FileUIPart[] = atts.map((a) => ({
+      type: 'file',
+      mediaType: a.ref!.mediaType,
+      url: a.ref!.url,
+      filename: a.name,
+    }));
+    const req = newReq('send', convId, key, { text, images: atts.map((a) => a.url) }, atts, []);
+    const meta: SendMeta = convId ? { conversationId: convId } : {};
+    void req.chat
+      .sendMessage({ ...(text ? { text } : {}), files }, { metadata: meta })
+      .catch(() => {});
+    draftChanged();
+    return true;
+  } finally {
+    d.sending = false;
+    draftChanged();
   }
-  if (chatState.get().gen) {
-    toast('另一个对话还在生成，先等等或中止它');
-    return false;
-  }
-  const id = id0 || newWebConv();
-  const store = getSource().webChat;
-  if (!id || !store) return false;
-  const files = draftOf(id).atts.splice(0);
-  const parts: Part[] = [];
-  const images: Record<string, ImageInfo | null> = {};
-  for (const a of files) {
-    const url = 'luoli-file:' + uid('web') + '.png';
-    parts.push({ type: 'file', mediaType: a.type, url, filename: a.name });
-    images[url] = { src: a.url };
-  }
-  if (text) parts.push({ type: 'text', text });
-  // 用户的消息记进「服务」：服务把它推回来，会话列表、时间线、「此刻」从事件里看到
-  store.addMessage(id, { role: 'user', author: { name: '你' }, parts, images });
-  const c = db.conv(id);
-  if (c && c.title === '新对话')
-    store.setTitle(
-      id,
-      text ? (chars(text).length > 16 ? chars(text).slice(0, 16).join('') + '…' : text) : '图片',
-    );
-  draftOf(id).text = '';
-  const r = getRec(id);
-  r.liveMsg = null;
-  const fileParts = files.map((a) => ({
-    type: 'file' as const,
-    mediaType: a.type,
-    url: a.url,
-    filename: a.name,
-  }));
-  r.chat.sendMessage(text ? { text, files: fileParts } : { files: fileParts }).catch(() => {});
-  return true;
 }
-/* 数据重置、会话被删：丢掉 Chat */
+
+/** 重试：让洛璃对着同样的历史再回复一次。只在上一次回复出错、没有在生成时可用，服务端也会检查（不符合回 409） */
+export function retryChat(convId: string) {
+  if (isBusy(convId)) return;
+  // regenerate 需要 Chat 里至少有一条消息；请求体不带消息（见 chatRequestBody），这条只是个占位
+  const placeholder: ChatMessage = {
+    id: uid('m'),
+    role: 'user',
+    parts: [{ type: 'text', text: '' }],
+  };
+  const req = newReq(
+    'retry',
+    convId,
+    draftKey(convId),
+    { text: '', images: [] },
+    [],
+    [placeholder],
+  );
+  const meta: SendMeta = { conversationId: convId };
+  void req.chat.regenerate({ metadata: meta }).catch(() => {});
+}
+
+/** 中止这个会话进行中的回复，同时取消排队的补回复（排队的消息留在历史里）。还没建好的新会话，直接断开请求 */
+export async function abortChat(convId: string | null) {
+  if (convId === null) {
+    for (const r of reqs) if (r.convId === null && !r.finished) void r.chat.stop();
+    return;
+  }
+  try {
+    await getSource().chat.abort(convId);
+  } catch (e) {
+    toast(chatErrorText(e));
+  }
+}
+
+/** 数据整批重置（重新连上服务、切换模拟数据）、会话没了：丢掉这个会话里发出的请求 */
 export function disposeChat(convId: string) {
-  const r = recs.get(convId);
-  if (!r) return;
-  r.unreg.forEach((f) => f());
-  r.chat.stop().catch(() => {});
-  recs.delete(convId);
+  for (const r of [...reqs]) {
+    if (r.convId !== convId) continue;
+    void r.chat.stop().catch(() => {});
+    drop(r);
+  }
+  flight();
 }
-bus.on('data:reset', () => {
-  [...recs.keys()].forEach(disposeChat);
-});
 bus.on('conv:remove', ({ id }) => disposeChat(id));
+bus.on('data:reset', () => {
+  // 正式构建里只有第一次取到数据时会发：它可能比用户发出的第一句晚（SSE 不通、很慢），这时发出的请求不能因此中止；
+  // 模拟数据切换时旧数据里的请求都不要了
+  const live = getSource().kind === 'live';
+  for (const r of [...reqs]) {
+    if (live && (r.convId === null || db.conv(r.convId))) continue;
+    void r.chat.stop().catch(() => {});
+    drop(r);
+  }
+  flight();
+});

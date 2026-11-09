@@ -1,8 +1,9 @@
 import { bus } from './bus';
 import { nowModel } from './nowModel';
 import { argsLine } from './parts';
+import { replyInfo } from './replyInfo';
 import { status } from './status';
-import { setAssistant } from './who';
+import { setAssistant, setWebAuthor } from './who';
 import type { Hello, LiveEvent, LiveReply, LivePart, ServiceStatus } from '../../server/types';
 
 /* 服务推来的「此刻」数据（hello 里的现场、status 事件、live 事件）变成总线事件：nowModel、status 只认总线事件，
@@ -39,7 +40,10 @@ function handle(ev: LiveEvent) {
       bus.emit('reply:wait', { convId, at });
       break;
     case 'again':
-      bus.emit('reply:queued', { convId });
+      bus.emit('reply:queued', { convId, queuedFrom: ev.queuedFrom });
+      break;
+    case 'dequeue':
+      bus.emit('reply:dequeue', { convId });
       break;
     case 'cancel':
       thoughts.delete(convId);
@@ -47,7 +51,7 @@ function handle(ev: LiveEvent) {
       return;
     case 'start':
       thoughts.delete(convId);
-      bus.emit('reply:start', { convId, replyId, at });
+      bus.emit('reply:start', { convId, replyId, at, again: ev.again, queuedFrom: ev.queuedFrom });
       break;
     case 'reasoning-start':
       thoughtOf(convId).set(ev.part, '');
@@ -76,7 +80,8 @@ function handle(ev: LiveEvent) {
         replyId,
         callId: ev.callId,
         name: ev.name,
-        label: argsLine(ev.input),
+        label: ev.summary ?? argsLine(ev.input),
+        summary: ev.summary,
         part: ev.part,
         at,
       });
@@ -90,6 +95,7 @@ function handle(ev: LiveEvent) {
         ms: Math.max(0, at - ms(ev.startedAt)),
         error: ev.error,
         images: ev.images,
+        summary: ev.summary,
       });
       break;
     case 'retry':
@@ -175,7 +181,8 @@ function replayPart(r: LiveReply, part: LivePart, index: number) {
       replyId,
       callId: part.callId,
       name: part.name,
-      label: argsLine(part.input),
+      label: part.summary ?? argsLine(part.input),
+      summary: part.summary,
       part: index,
       at: ms(part.startedAt),
     });
@@ -188,6 +195,7 @@ function replayPart(r: LiveReply, part: LivePart, index: number) {
         ms: Math.max(0, ms(part.endedAt) - ms(part.startedAt)),
         error: part.error,
         images: part.images,
+        summary: part.summary,
       });
   }
 }
@@ -198,6 +206,8 @@ function applySnapshot(live: Hello['live']) {
   broken = false;
   thoughts.clear();
   const ids = new Set(live.replies.map((r) => r.conversationId));
+  // 断开期间结束了的回复：不再算进行中
+  replyInfo.reconcile(ids);
   nowModel.rebuild(ids, () => {
     for (const r of live.replies) {
       const convId = r.conversationId;
@@ -215,19 +225,20 @@ function applySnapshot(live: Hello['live']) {
           phase: r.retry.phase,
           at: ms(r.retry.at),
         });
-      if (r.again) bus.emit('reply:queued', { convId });
+      if (r.again) bus.emit('reply:queued', { convId, queuedFrom: r.queuedFrom });
       bus.emit('reply:state', { convId, replyId: r.replyId, state: r.state, tool: r.toolName });
     }
   });
 }
 
-/** 服务的状态变了（hello 里、status 事件）：助手的名字、Telegram 的连接、上次回复 */
+/** 服务的状态变了（hello 里、status 事件）：助手的名字、网页会话发言人的名字、Telegram 的连接、上次回复 */
 export function applyStatus(s: ServiceStatus) {
   setAssistant({
     name: s.assistant.name,
     wakeWords: s.assistant.wakeWords,
     username: s.assistant.username,
   });
+  setWebAuthor(s.web.author);
   if (status.tgEnabled !== s.telegram.enabled) {
     status.tgEnabled = s.telegram.enabled;
     status.emit();
@@ -262,6 +273,7 @@ export function resetLive() {
   lastSeq = 0;
   broken = false;
   thoughts.clear();
+  replyInfo.reset();
   nowModel.reset();
   status.reset();
 }

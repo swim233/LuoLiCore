@@ -1,5 +1,6 @@
 import { applyLive, applyStatus } from '../model/live-feed';
 import type { ImageInfo } from '../model/types';
+import { WEB_AUTHOR } from './demo-state';
 import type {
   Hello,
   LastReply,
@@ -143,13 +144,15 @@ class MockLive {
     this.setState(r, 'thinking');
     this.emit({ type: 'reasoning-delta', ...this.progress(r), part, text });
   }
-  reasoningEnd(convId: string, part: number) {
+  /** 返回这段思考用了多少毫秒（取自推出去的开始、结束时间） */
+  reasoningEnd(convId: string, part: number): number {
     const r = this.need(convId)!;
     const p = r.parts[part];
-    if (p?.type !== 'reasoning' || p.endedAt) return;
+    if (p?.type !== 'reasoning' || p.endedAt) return 0;
     const at = Date.now();
     p.endedAt = iso(at);
     this.emit({ type: 'reasoning-end', ...this.progress(r), part, startedAt: p.startedAt }, at);
+    return at - Date.parse(p.startedAt);
   }
   /** 文字接在这一步最后一段文字后面；没有就新建一段 */
   text(convId: string, text: string) {
@@ -165,7 +168,13 @@ class MockLive {
     this.setState(r, 'replying');
     this.emit({ type: 'text-delta', ...this.progress(r), part: index, step, text });
   }
-  toolStart(convId: string, callId: string, name: string, input: unknown): number {
+  toolStart(
+    convId: string,
+    callId: string,
+    name: string,
+    input: unknown,
+    summary?: string,
+  ): number {
     const r = this.need(convId)!;
     const at = Date.now();
     const json = JSON.stringify(input);
@@ -175,6 +184,7 @@ class MockLive {
       callId,
       name,
       input: json.length > 200 ? json.slice(0, 199) + '…' : json,
+      ...(summary ? { summary } : {}),
       startedAt: iso(at),
     };
     const index = r.parts.push(part) - 1;
@@ -188,6 +198,7 @@ class MockLive {
         callId,
         name,
         input: part.input,
+        ...(part.summary ? { summary: part.summary } : {}),
       },
       at,
     );
@@ -196,15 +207,18 @@ class MockLive {
   toolEnd(
     convId: string,
     callId: string,
-    result: { ok: true; images?: ImageInfo[] } | { ok: false; error: string },
-  ) {
+    result:
+      | { ok: true; images?: ImageInfo[]; summary?: string }
+      | { ok: false; error: string; summary?: string },
+  ): number {
     const r = this.need(convId)!;
     const index = r.parts.findIndex((p) => p.type === 'tool' && p.callId === callId);
     const part = r.parts[index];
-    if (part?.type !== 'tool' || part.endedAt) return;
+    if (part?.type !== 'tool' || part.endedAt) return 0;
     const at = Date.now();
     part.endedAt = iso(at);
     part.ok = result.ok;
+    if (result.summary) part.summary = result.summary;
     if (result.ok) {
       if (result.images?.length) part.images = result.images;
     } else part.error = result.error;
@@ -224,9 +238,44 @@ class MockLive {
         ok: part.ok,
         ...(part.error !== undefined ? { error: part.error } : {}),
         ...(part.images ? { images: part.images } : {}),
+        ...(part.summary ? { summary: part.summary } : {}),
       },
       at,
     );
+    return at - Date.parse(part.startedAt);
+  }
+  /** 网页会话生成中又发了消息（排队）：现场里那条记上「又被触发」与排队的起点；没有现场（回复刚结束）时新建一条等着补回复的 */
+  queue(convId: string, fromSeq: number) {
+    const r = this.replies.get(convId);
+    if (r) {
+      if (r.again && r.queuedFrom !== undefined) return;
+      r.again = true;
+      r.queuedFrom = fromSeq;
+      this.emit({ type: 'again', ...this.progress(r), queuedFrom: fromSeq });
+      return;
+    }
+    const n: LiveReply = {
+      conversationId: convId,
+      state: 'waiting',
+      again: true,
+      queuedFrom: fromSeq,
+      parts: [],
+    };
+    this.replies.set(convId, n);
+    this.emit({ type: 'again', ...this.progress(n), queuedFrom: fromSeq });
+  }
+  /** 排队的补回复取消了（发那条消息的请求断开、中止）：进行中的那条去掉排队；只是在等补回复的整条去掉 */
+  unqueue(convId: string) {
+    const r = this.replies.get(convId);
+    if (!r || r.queuedFrom === undefined) return;
+    if (r.startedAt === undefined) {
+      this.replies.delete(convId);
+      this.emit({ type: 'cancel', conversationId: convId });
+      return;
+    }
+    r.again = false;
+    delete r.queuedFrom;
+    this.emit({ type: 'dequeue', ...this.progress(r) });
   }
   retry(convId: string, retry: Omit<LiveRetry, 'at'>) {
     const r = this.need(convId)!;
@@ -327,6 +376,7 @@ class MockStatus {
         wakeWords: enabled ? this.wakeWords : [],
         ...(enabled ? { username: this.username } : {}),
       },
+      web: { author: WEB_AUTHOR },
       ...(mockLive.lastReply ? { lastReply: mockLive.lastReply } : {}),
     };
   }

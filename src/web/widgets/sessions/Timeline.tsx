@@ -1,29 +1,19 @@
 import { memo, useEffect, useRef, useState } from 'react';
 import { VirtualLog } from '../../components/VirtualLog';
 import type { LogItem, ScrollState } from '../../components/VirtualLog';
-import { Hl } from '../../components/Hl';
-import { Pic } from '../../components/Pic';
+import { MsgBubble } from '../../components/Bubble';
 import { EASE_OUT_CSS } from '../../lib/easing';
 import { motionOn } from '../../lib/prefs';
-import { fmtDay, nf } from '../../lib/util';
+import { fmtDay } from '../../lib/util';
 import { useBusRev } from '../../model/rev';
 import { db } from '../../model/db';
 import { link, useLinkPhase } from '../../model/link';
-import {
-  authorOf,
-  inputLine,
-  isFile,
-  isReasoning,
-  isText,
-  isTool,
-  toolName,
-  toolOutput,
-} from '../../model/parts';
-import type { FilePart, ToolPart } from '../../model/parts';
+import { partsOfRow } from '../../model/bubble';
+import { authorOf } from '../../model/parts';
 import { getSource } from '../../model/source';
 import { status } from '../../model/status';
 import type { MsgRow, Segment } from '../../model/types';
-import { colorOf, useAssistantName } from '../../model/who';
+import { useAssistantName } from '../../model/who';
 
 /* 时间线：聊天气泡、段分隔与摘要、折叠的工具调用和思考内容。用 @tanstack/react-virtual 排（动态高度，贴底）。
    数据按需取：打开会话时取最近一批（有未读就一次取到分隔线那条），滚到顶部时取更早的一批。
@@ -83,58 +73,7 @@ function NewDivider() {
   );
 }
 
-/** 工具参数的全文（太长截短） */
-function prettyInput(input: unknown) {
-  const s = typeof input === 'string' ? input : (JSON.stringify(input, null, 2) ?? '');
-  return s.length > 1000 ? s.slice(0, 1000) + '…' : s;
-}
-/* 工具调用，按工具名通用显示：折叠时是工具名、参数的前一截、成功或出错；展开后是参数、结果的开头、结果总长度、结果里的图片，出错时是错误说明。
-   工具耗时和一句话摘要还没有来源，不显示 */
-function ToolFold({ p, row }: { p: ToolPart; row: MsgRow }) {
-  const input = (p as { input?: unknown }).input;
-  const done = p.state === 'output-available';
-  const err = p.state === 'output-error';
-  const out = done ? toolOutput((p as { output?: unknown }).output) : null;
-  const errorText = err ? ((p as { errorText?: string }).errorText ?? '') : '';
-  const info = row.tools[p.toolCallId];
-  const chars = info ? info.chars : (out?.text.length ?? errorText.length);
-  return (
-    <details className="fold">
-      <summary>
-        <span>{`◇ ${toolName(p)} · ${inputLine(input)}`}</span>
-        <span className={err ? 'bad' : done ? 'ok' : undefined}>
-          {err ? '× 出错' : done ? '✓' : '…'}
-        </span>
-      </summary>
-      <div className="fold-body">
-        <div className="fold-k">参数</div>
-        <pre className="fold-pre">{prettyInput(input) || '（无）'}</pre>
-        {done && out && (
-          <>
-            <div className="fold-k">
-              {`结果 · 共 ${nf(chars)} 字符${info?.truncated ? '，这里只有开头' : ''}`}
-            </div>
-            {out.text && <pre className="fold-pre">{out.text}</pre>}
-            {out.images.length > 0 && (
-              <div className="msg-imgs" style={{ marginTop: 6 }}>
-                {out.images.map((img, i) => (
-                  <Pic key={i} info={row.images[img.url]} />
-                ))}
-              </div>
-            )}
-          </>
-        )}
-        {err && (
-          <>
-            <div className="fold-k bad">出错</div>
-            <pre className="fold-pre">{errorText || '（没有错误说明）'}</pre>
-          </>
-        )}
-        {!done && !err && <div>工具调用未完成</div>}
-      </div>
-    </details>
-  );
-}
+/* 一条消息：段的画法（思考、工具调用、文字、图片）与对话部件共用，见 components/Bubble.tsx */
 export const MsgView = memo(function MsgView({
   row,
   convId,
@@ -148,79 +87,26 @@ export const MsgView = memo(function MsgView({
 }) {
   const luoli = useAssistantName();
   const conv = db.conv(convId);
-  const m = row.message;
   const isA = row.role === 'assistant';
   const who = authorOf(row);
-  const you = !isA && conv && conv.platform === 'web';
-  const cls =
-    'msg' +
-    (isA ? ' is-luoli is-me' : '') +
-    (you ? ' is-you is-me' : '') +
-    (isNew && motionOn() ? ' is-new' : '');
-  /* 按消息里段的先后画：思考、工具调用、文字各是一块；连着的图片并成一排 */
-  const blocks: React.ReactNode[] = [];
-  let imgs: FilePart[] = [];
-  const flush = () => {
-    if (!imgs.length) return;
-    const group = imgs;
-    imgs = [];
-    blocks.push(
-      <div className="msg-imgs" key={'i' + blocks.length}>
-        {group.map((f, j) => (
-          <Pic key={j} info={row.images[f.url]} name={f.filename} />
-        ))}
-      </div>,
-    );
-  };
-  for (const p of m.parts) {
-    if (isFile(p)) {
-      if (p.mediaType.startsWith('image/')) imgs.push(p);
-      continue;
-    }
-    flush();
-    if (isReasoning(p)) {
-      if (p.text.trim())
-        blocks.push(
-          <details className="fold" key={blocks.length}>
-            <summary>
-              <span>思考过程</span>
-            </summary>
-            <div className="fold-body">{p.text}</div>
-          </details>,
-        );
-    } else if (isTool(p)) {
-      blocks.push(<ToolFold p={p} row={row} key={blocks.length} />);
-    } else if (isText(p)) {
-      if (p.text)
-        blocks.push(
-          <span className="msg-text" key={blocks.length}>
-            <Hl text={p.text} hits={!isA} />
-          </span>,
-        );
-    }
-    /* 其他段（step-start、data-*……）不显示 */
-  }
-  flush();
+  const you = !isA && !!conv && conv.platform === 'web';
+  const meta = row.message.metadata;
   return (
-    <div
-      className={cls}
-      style={!isA ? { '--who': colorOf(who?.id || who?.name || '') } : undefined}
-    >
-      <div className="msg-meta">
-        <b>{isA ? luoli : (who?.name ?? '')}</b>
-        <time>{fmtDay(Date.parse(row.createdAt))}</time>
-      </div>
-      <div className="bubble">
-        {blocks}
-        {m.metadata?.aborted && (
-          <span className="mark">{web ? '（已中止）' : '（回复被中止）'}</span>
-        )}
-        {m.metadata?.failed && <span className="mark is-err">（回复出错中断）</span>}
-      </div>
-    </div>
+    <MsgBubble
+      isA={isA}
+      you={you}
+      name={isA ? luoli : (who?.name ?? '')}
+      who={who?.id || who?.name || ''}
+      label={fmtDay(Date.parse(row.createdAt))}
+      parts={partsOfRow(row)}
+      aborted={meta?.aborted}
+      failed={meta?.failed}
+      abortMark={web ? '（已中止）' : '（回复被中止）'}
+      isNew={isNew}
+    />
   );
 });
-function TypingView() {
+export function TypingView() {
   const luoli = useAssistantName();
   return (
     <div className="msg is-luoli is-me typing-msg">

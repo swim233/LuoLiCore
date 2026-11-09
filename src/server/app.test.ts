@@ -48,6 +48,7 @@ const status: ServiceStatus = {
   uptimeSeconds: 42,
   telegram: { enabled: true, connected: false },
   assistant: { name: '洛璃', wakeWords: ['nori'] },
+  web: { author: 'Alice' },
 };
 
 function setup({ dist = fakeDist(), heartbeat }: { dist?: string; heartbeat?: number } = {}) {

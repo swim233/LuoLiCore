@@ -15,6 +15,7 @@ import { setupTools } from '../shared/tools.js';
 import type { startTelegram } from '../telegram/app.js';
 import { tools as toolList } from '../tools/index.js';
 import { createApp } from './app.js';
+import { createChats, type Chats } from './chat.js';
 import { parseServerConfig } from './config.js';
 import { createEvents, type Events } from './events.js';
 import { hostname, listen, type Listener } from './listen.js';
@@ -25,6 +26,7 @@ import { relayChanges } from './relay.js';
 import { createSessions } from './sessions.js';
 import { createStatus } from './status.js';
 import { startTelegramFrontend } from './telegram.js';
+import { toolSummaries } from './tool-summary.js';
 import { createViews } from './views.js';
 import { openWebState, type WebState } from './web-state.js';
 
@@ -120,17 +122,22 @@ try {
 }
 
 // 「此刻」：旁听会话管理里的每次回复，转成 live 事件；记着进行中回复的现场
+// 工具调用给界面看的一句话（工具定义里的摘要），整理消息与推实时事件时用
+const summarize = toolSummaries(installed.tools);
+
 const live = createLive({
   broadcast: (event) => events?.broadcast('live', event),
   logger,
   lastReply,
   redact,
+  summarize,
 });
 
 // 服务的状态：GET /api/health、SSE 的 hello 与 status 事件
 const status = createStatus({
   startedAt,
   name: config.name,
+  webAuthor: config.web?.author ?? '',
   telegram: config.telegram && { wakeWords: config.telegram.wakeWords },
   lastReply: () => live.lastReply,
 });
@@ -140,7 +147,7 @@ const status = createStatus({
 const events = config.web
   ? createEvents({ hello: () => ({ ...status.status(), live: live.snapshot() }), logger })
   : undefined;
-const views = webState && createViews({ storage, fileStore, webState });
+const views = webState && createViews({ storage, fileStore, webState, summarize });
 const relay = views && events && relayChanges({ views, events, logger });
 const observed = relay ? observeStorage(storage, relay.onChange) : storage;
 
@@ -159,6 +166,21 @@ const sessions = createSessions({
   segments: config.segments,
 });
 sessions.onReply(live.listener);
+
+// 网页会话的对话：发消息、排队与补回复、重试、中止。只在开网页服务时有
+const chats: Chats | undefined =
+  config.web && webState && relay
+    ? createChats({
+        sessions,
+        storage: observed,
+        fileStore,
+        webState,
+        live,
+        author: config.web.author,
+        logger,
+        notify: relay.onChange,
+      })
+    : undefined;
 
 /** 启动失败时：关掉已经打开的，退出 */
 async function fail(message: string, web?: { events: Events; listener: Listener }): Promise<never> {
@@ -180,7 +202,16 @@ if (config.web && events && views) {
     console.error(notBuiltText);
     logger.warn({ dist: webDist }, 'web.not_built');
   }
-  const app = createApp({ port, dist: webDist, events, views, status: status.status, logger });
+  const app = createApp({
+    port,
+    dist: webDist,
+    events,
+    views,
+    status: status.status,
+    logger,
+    chats,
+    fileStore,
+  });
   try {
     web = { events, listener: await listen(app, port), port };
   } catch (error) {
@@ -221,10 +252,13 @@ const stop = async () => {
   console.log('正在退出……');
   // 不再接新连接；开着的连接留到最后，期间面板还连着
   web?.listener.stopListening();
-  // Telegram 先收尾：不再开始新的一轮，进行中的回复照它的做法等完或中止
-  await telegram?.stop();
-  // 其余进行中的回复同样等完或中止，再关闭各会话
-  await sessions.close();
+  // 网页会话不再接新消息，排队的补回复取消
+  chats?.close();
+  // Telegram 收尾（不再开始新的一轮，进行中的回复照它的做法等完或中止），同时其余进行中的回复
+  // 也等完或中止，再关闭各会话：两段宽限期一起等，最多 10 秒
+  await Promise.all([telegram?.stop(), sessions.close()]);
+  // 网页里中止的回复：abort 段写进响应再断开，网页显示「已中止」
+  await chats?.settled();
   // 已经发生的写入，事件推完再断开面板
   await relay?.settled();
   await web?.events.close();

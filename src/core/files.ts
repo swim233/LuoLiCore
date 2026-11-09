@@ -18,6 +18,9 @@ export type FileStore = {
 
 export type NewFile = { data: Uint8Array; mediaType: string };
 
+/** 已经在文件存储里的文件（如网页先上传好的图片）：只有地址与媒体类型 */
+export type FileRef = { url: string; mediaType: string };
+
 const scheme = 'luoli-file:';
 
 const ascii = (text: string) => [...text].map((char) => char.charCodeAt(0));

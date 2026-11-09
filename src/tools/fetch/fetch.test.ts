@@ -125,6 +125,37 @@ describe('工具定义', () => {
   });
 });
 
+describe('给界面看的摘要', () => {
+  const summary = (url: string, output?: string) =>
+    fetchTool.summary!({ input: { url, offset: 0, mode: 'article' }, output });
+
+  it('网址加页面标题，都取自结果的元数据（跳转后的网址）', async () => {
+    const { call, url } = await fixture({ '/article': html(articleHtml()) });
+    const output = await call({ url: url('/article') });
+
+    expect(summary(url('/article'), output)).toBe(`${url('/article')} · 测试文章`);
+    expect(
+      summary(
+        'example.com',
+        ['URL：https://example.com/', '标题：Example Domain', notice].join('\n'),
+      ),
+    ).toBe('https://example.com/ · Example Domain');
+  });
+
+  it('还没有结果、出错时只有网址；没有标题时只有网址；正文里的「标题：」不算', () => {
+    expect(summary('example.com')).toBe('example.com');
+    expect(
+      summary('https://a.test/x', ['URL：https://a.test/x', '方法：本地转换', notice].join('\n')),
+    ).toBe('https://a.test/x');
+    expect(
+      summary(
+        'https://a.test/x',
+        ['URL：https://a.test/x', notice, '---', '标题：正文里的一行'].join('\n'),
+      ),
+    ).toBe('https://a.test/x');
+  });
+});
+
 describe('网址', () => {
   // 认得所有网址的处理器：记下拿到的网址，不发请求
   const seen: string[] = [];

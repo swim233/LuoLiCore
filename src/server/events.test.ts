@@ -86,6 +86,7 @@ function statusAt(uptimeSeconds: number, connected = false): ServiceStatus {
     uptimeSeconds,
     telegram: { enabled: true, connected },
     assistant: { name: '洛璃', wakeWords: ['nori'] },
+    web: { author: 'Alice' },
   };
 }
 

@@ -6,15 +6,18 @@ import type { LiveState } from '../../server/types';
    事件：
      message        {convId, row, trigger}       新消息（记录到会话）
      reply:wait     {convId, replyId?, noWait, at?}  Telegram 被触发，进入等待合并（noWait：不等待）
-     reply:start    {convId, replyId, at?}       回复开始
+     reply:start    {convId, replyId, at?, again?, queuedFrom?}  回复开始（again、queuedFrom：开始时就已经有排队的消息）
      reply:state    {convId, replyId?, state, tool?}  这个回复此刻的状态（服务给的，以它为准）
-     reply:queued   {convId, replyId?}           回复中又被触发，发出后再回复一次（合并回复）
+     reply:queued   {convId, replyId?, queuedFrom?}  回复中又被触发，发出后再回复一次（合并回复）；网页会话是生成中又发了消息，
+                                                 queuedFrom 是排队的消息从第几条起
+     reply:dequeue  {convId}                     网页会话排队的补回复取消了（发消息的请求断开、中止）
+     reply:info     {convId}                     这个会话进行中的回复的详情（思考秒数、工具摘要与耗时、排队）变了
      reply:cancel   {convId}                     等待合并被放弃，不回复了
      reply:think    {convId, replyId, part?, at?}  开始一段思考
      reply:thinkEnd {convId, replyId, sec, text}   这段思考结束
      reply:delta    {convId, replyId, text, part?, at?}  输出片段（part：第几段，换了一段就是新的一行）
-     tool:start     {convId, replyId, callId, name, label?, part?, at?}
-     tool:end       {convId, replyId, callId, ok, ms, error?, images?}
+     tool:start     {convId, replyId, callId, name, label?, summary?, part?, at?}
+     tool:end       {convId, replyId, callId, ok, ms, error?, images?, summary?}
      reply:retry    {convId, replyId, attempt, max, status?, phase?}
      reply:reset    {convId, replyId, keep}      流中途出错、重新生成：parts 只留前 keep 段，后面的行作废
      reply:error    {convId, replyId, status, message?, row?}
@@ -27,14 +30,24 @@ import type { LiveState } from '../../server/types';
      today:update             今日概况有了新数据
      link                     和洛璃服务的连接状态变了
      chat:switch
+     chat:flight    网页对话里发给服务的请求有了变化（发出、有了回复、结束）
+     chat:draft     输入框的草稿（文字、待发的图片、上传状态）变了
      status         汇总后的状态（status.ts 算出） */
 type Empty = Record<string, never>;
 export interface BusEvents {
   message: { convId: string; row: MsgRow | null; trigger?: boolean };
   'reply:wait': { convId: string; replyId?: string; noWait?: boolean; at?: number };
-  'reply:start': { convId: string; replyId: string; at?: number };
+  'reply:start': {
+    convId: string;
+    replyId: string;
+    at?: number;
+    again?: boolean;
+    queuedFrom?: number;
+  };
   'reply:state': { convId: string; replyId?: string; state: LiveState; tool?: string };
-  'reply:queued': { convId: string; replyId?: string };
+  'reply:queued': { convId: string; replyId?: string; queuedFrom?: number };
+  'reply:dequeue': { convId: string };
+  'reply:info': { convId: string };
   'reply:cancel': { convId: string };
   'reply:think': { convId: string; replyId: string; part?: number; at?: number };
   'reply:thinkEnd': { convId: string; replyId: string; sec: number; text: string };
@@ -45,6 +58,7 @@ export interface BusEvents {
     callId: string;
     name: string;
     label?: string;
+    summary?: string;
     part?: number;
     at?: number;
   };
@@ -56,6 +70,7 @@ export interface BusEvents {
     ms: number;
     error?: string;
     images?: ImageInfo[];
+    summary?: string;
   };
   'reply:retry': {
     convId: string;
@@ -94,6 +109,8 @@ export interface BusEvents {
   'today:update': Empty;
   link: Empty;
   'chat:switch': Empty;
+  'chat:flight': Empty;
+  'chat:draft': Empty;
   status: Snap;
 }
 export type BusEventName = keyof BusEvents;

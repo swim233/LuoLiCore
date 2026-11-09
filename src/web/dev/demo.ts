@@ -3,6 +3,7 @@ import { bot, nextScript, PLAIN, SCRIPTS } from './bot';
 import type { Script } from './bot';
 import { db } from '../model/db';
 import { resetLive } from '../model/live-feed';
+import { resetMockChat } from './mock-chat';
 import { mockLive, mockStatus } from './mock-live';
 import { mockServer as server } from './mock-server';
 import { mockSource } from './mock-source';
@@ -173,6 +174,7 @@ export const ACTIONS: Record<string, () => void> = {
 };
 export function setData(kind: Dataset) {
   bot.reset();
+  resetMockChat();
   mockLive.clear();
   mockLive.connected = true;
   mockStatus.reset();

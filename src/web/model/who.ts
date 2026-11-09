@@ -6,6 +6,14 @@ import { bus } from './bus';
 const PALETTE = Array.from({ length: 10 }, (_, i) => `var(--who-${i})`);
 export const colorOf = (key: string) => PALETTE[hashStr(key) % PALETTE.length];
 
+/* 网页会话里自己发的消息显示的名字（LUOLI_WEB_NAME，不设时是系统用户名），由服务告诉面板（hello、status 事件里的 web.author）。
+   写进历史的消息各自存着发言人，显示那个（以后改了名字，旧消息照旧）；这个只用于还没写进历史的那条。服务还没告诉面板时是空的 */
+export const webAuthor = createStore<{ name: string }>({ name: '' });
+export const useWebAuthor = () => useStore(webAuthor, (s) => s.name);
+export function setWebAuthor(name: string) {
+  if (webAuthor.get().name !== name) webAuthor.set({ name });
+}
+
 /* 助手：显示名与「提到她」时要高亮的几样，由服务告诉面板（hello、status 事件里的 assistant）。
    名字只用于显示，和人设、发给模型的内容无关。服务还没告诉面板时用默认名；唤醒词、用户名没有 */
 export interface Assistant {
