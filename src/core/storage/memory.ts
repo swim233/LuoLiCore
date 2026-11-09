@@ -112,9 +112,12 @@ function memoryStore(data: Data): ConversationStore {
       const taken = earlier.slice(Math.max(0, earlier.length - limit));
       return { entries: taken.map(storedMessage), hasMore: earlier.length > taken.length };
     },
-    async count({ after = 0, role } = {}) {
+    async count({ after = 0, role, excludeEvents = false } = {}) {
       return rows.filter(
-        (row) => row.seq > after && (role === undefined || row.message.role === role),
+        (row) =>
+          row.seq > after &&
+          (role === undefined || row.message.role === role) &&
+          !(excludeEvents && row.message.metadata?.event !== undefined),
       ).length;
     },
     async findByPlatformMessageId(platformMessageId) {
@@ -176,11 +179,13 @@ function glance(row: Row, textChars: number): MessageGlance {
     .flatMap((part) => (part.type === 'text' ? [part.text] : []))
     .join('\n');
   const author = message.metadata?.author;
+  const event = message.metadata?.event?.type;
   return structuredClone({
     seq: row.seq,
     createdAt: row.createdAt,
     role: message.role,
     ...(author === undefined ? {} : { author }),
+    ...(event === undefined ? {} : { event }),
     text: [...text].slice(0, textChars).join(''),
     files: message.parts.filter((part) => part.type === 'file').length,
   });

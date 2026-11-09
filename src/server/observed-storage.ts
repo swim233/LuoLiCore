@@ -7,7 +7,9 @@ export type StorageChange =
   /** 写入了一条消息（edited 为 false），或改了一条已有的消息（true） */
   | { type: 'message'; conversationId: string; messageId: string; edited: boolean }
   /** 记了一次模型调用 */
-  | { type: 'call'; conversationId: string };
+  | { type: 'call'; conversationId: string }
+  /** 新建或改了一个任务（到点、完成、取消） */
+  | { type: 'task'; conversationId: string; taskId: number };
 
 /**
  * 给核心的存储包一层：写入成功之后调用 onChange，说明写了什么。读取与写入本身原样转给里面的
@@ -72,13 +74,20 @@ export function observeStorage(
     overview: (id, options) => storage.overview(id, options),
     callSummary: (since) => storage.callSummary(since),
     lastReply: () => storage.lastReply(),
-    // 任务的读写先原样转发，写入还没有通知（面板显示任务时再加）
-    createTask: (task) => storage.createTask(task),
     getTask: (id) => storage.getTask(id),
     listTasks: (filter) => storage.listTasks(filter),
-    updateTask: (id, changes) => storage.updateTask(id, changes),
     dueTasks: (at) => storage.dueTasks(at),
     nextDueAt: () => storage.nextDueAt(),
+    async createTask(input) {
+      const task = await storage.createTask(input);
+      notify({ type: 'task', conversationId: task.conversationId, taskId: task.id });
+      return task;
+    },
+    async updateTask(id, changes) {
+      const task = await storage.updateTask(id, changes);
+      notify({ type: 'task', conversationId: task.conversationId, taskId: task.id });
+      return task;
+    },
     close: () => storage.close(),
     async createConversation(conversation) {
       const id = await storage.createConversation(conversation);

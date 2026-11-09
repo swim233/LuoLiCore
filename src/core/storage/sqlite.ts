@@ -7,6 +7,7 @@ import type {
   ConversationInfo,
   ConversationOverview,
   ConversationStore,
+  MessageGlance,
   ModelCall,
   Segment,
   SeqRange,
@@ -35,6 +36,7 @@ SELECT
   l.created_at AS last_created_at,
   l.role AS last_role,
   json_extract(l.ui_message, '$.metadata.author') AS last_author,
+  json_extract(l.ui_message, '$.metadata.event.type') AS last_event,
   (SELECT substr(group_concat(json_extract(p.value, '$.text'), char(10)), 1, :chars)
      FROM json_each(l.ui_message, '$.parts') p
      WHERE json_extract(p.value, '$.type') = 'text') AS last_text,
@@ -249,11 +251,13 @@ export function openSqliteStorage(path: string): Storage {
     `SELECT seq, created_at, ui_message FROM messages
      WHERE conversation_id = ? AND seq < ? ORDER BY seq DESC LIMIT ?`,
   );
+  // 条件为 NULL 的一项不筛；不数事件时看 ui_message 里的 metadata.event（事件不另存一列）。
+  // 走 messages_order：会话加序号的范围
   const countAfter = db.prepare(
-    'SELECT COUNT(*) AS n FROM messages WHERE conversation_id = ? AND seq > ?',
-  );
-  const countAfterByRole = db.prepare(
-    'SELECT COUNT(*) AS n FROM messages WHERE conversation_id = ? AND seq > ? AND role = ?',
+    `SELECT COUNT(*) AS n FROM messages
+     WHERE conversation_id = :conversation AND seq > :after
+       AND (:role IS NULL OR role = :role)
+       AND (:events = 1 OR json_extract(ui_message, '$.metadata.event') IS NULL)`,
   );
   const listSegments = db.prepare(
     `SELECT start_seq, start_reason, conversation_title, prior_summary, created_at FROM segments
@@ -365,11 +369,13 @@ export function openSqliteStorage(path: string): Storage {
         hasMore: rows.length > limit,
       };
     },
-    async count({ after = 0, role } = {}) {
-      const row =
-        role === undefined
-          ? countAfter.get(conversationId, after)
-          : countAfterByRole.get(conversationId, after, role);
+    async count({ after = 0, role, excludeEvents = false } = {}) {
+      const row = countAfter.get({
+        conversation: conversationId,
+        after,
+        role: role ?? null,
+        events: excludeEvents ? 0 : 1,
+      });
       return Number(row?.n ?? 0);
     },
     async findByPlatformMessageId(platformMessageId) {
@@ -700,6 +706,9 @@ function overview(row: Record<string, unknown>): ConversationOverview {
             ...(row.last_author === null || row.last_author === undefined
               ? {}
               : { author: JSON.parse(String(row.last_author)) as Author }),
+            ...(row.last_event === null || row.last_event === undefined
+              ? {}
+              : { event: String(row.last_event) as NonNullable<MessageGlance['event']> }),
             text: optional(row.last_text) ?? '',
             files: Number(row.last_files ?? 0),
           },

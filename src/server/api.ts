@@ -7,13 +7,16 @@ import { heartbeatMs } from './events.js';
 import { withHeartbeat } from './heartbeat.js';
 import { maxAuthorChars, maxFiles, maxTextChars, type Chats } from './chat.js';
 import type { Events } from './events.js';
+import type { TaskService } from './tasks/service.js';
 import type {
   AbortResponse,
+  CancelTaskResponse,
   ConversationResponse,
   ConversationRow,
   ConversationsResponse,
   ErrorResponse,
   MessagesResponse,
+  TasksResponse,
   TodaySummary,
 } from './types.js';
 import { defaultMessages, maxMessages, type Views } from './views.js';
@@ -84,6 +87,7 @@ export function chatRoutes({
  * - GET  /conversations/:id/messages?before=&limit=   MessagesResponse
  * - POST /conversations/:id/read  { seq }      ConversationRow（同时推给所有面板）
  * - GET  /today                                TodaySummary
+ * - GET  /tasks                                TasksResponse
  * - GET  /files/:name                          图片本身
  * 参数不对返回 400，会话不存在返回 404，都是 ErrorResponse
  */
@@ -128,6 +132,7 @@ export function apiRoutes({ views, events }: { views: Views; events: Events }) {
       },
     )
     .get('/today', async (c) => c.json<TodaySummary>(await views.today()))
+    .get('/tasks', async (c) => c.json<TasksResponse>({ tasks: await views.tasks() }))
     .get('/files/:name', zValidator('param', fileName, invalid), async (c) => {
       const file = await views.file(c.req.valid('param').name);
       if (!file) return c.json<ErrorResponse>({ error: '没有这个文件' }, 404);
@@ -137,6 +142,27 @@ export function apiRoutes({ views, events }: { views: Views; events: Events }) {
         'Cache-Control': 'public, max-age=31536000, immutable',
       });
     });
+}
+
+/**
+ * 任务的接口（挂在 /api 下，经过访问控制）：
+ * - POST /tasks/:id/cancel  {} → CancelTaskResponse（取消后的那一行；task 事件由存储的通知推）
+ * 没有这个任务 404，已经结束的 409，id 不是数字 400，都是 ErrorResponse
+ */
+export function taskRoutes({ tasks, views }: { tasks: Pick<TaskService, 'cancel'>; views: Views }) {
+  const taskId = z.object({ id: z.coerce.number().int().min(1).max(Number.MAX_SAFE_INTEGER) });
+  return new Hono().post('/tasks/:id/cancel', zValidator('param', taskId, invalid), async (c) => {
+    const result = await tasks.cancel(c.req.valid('param').id);
+    if (!result.ok) {
+      return result.reason === 'missing'
+        ? c.json<ErrorResponse>({ error: '没有这个任务' }, 404)
+        : c.json<ErrorResponse>({ error: '任务已经结束了' }, 409);
+    }
+    const row = await views.task(result.task.id);
+    return row
+      ? c.json<CancelTaskResponse>(row)
+      : c.json<ErrorResponse>({ error: '没有这个任务' }, 404);
+  });
 }
 
 /** 参数校验失败：400，说明哪一项不对（只有参数名与原因，不回显值） */

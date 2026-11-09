@@ -2,6 +2,7 @@ import {
   createMemoryFileStore,
   createMemoryStorage,
   createRedactor,
+  installTools,
   type FileStore,
   type InstalledTool,
   type Logger,
@@ -16,6 +17,8 @@ import { observeStorage } from './observed-storage.js';
 import { relayChanges } from './relay.js';
 import { createSessions, type SessionOptions, type Sessions } from './sessions.js';
 import { createStatus } from './status.js';
+import { createTaskService, type Clock, type TaskService } from './tasks/service.js';
+import { createTaskTools } from './tasks/tools.js';
 import { toolSummaries } from './tool-summary.js';
 import type { LiveSnapshot, ServiceStatus } from './types.js';
 import { createViews } from './views.js';
@@ -68,8 +71,9 @@ export function emptyViews() {
 /**
  * 装一套：storage 是核心的存储（默认内存），observed 是包过一层的（写入经过它才有事件）；
  * 已读位置存在内存里的 web.db，第一次打开时照常用现有会话初始化；「此刻」与服务的状态照服务里的
- * 接法装上（status 给了就用它代替）。给了 model 时再装上会话管理（回复由「此刻」旁听）与网页会话的
- * 对话接口，接法与 main.ts 相同。request 默认带上本机的 Host
+ * 接法装上（status 给了就用它代替）。给了 model 时再装上会话管理（回复由「此刻」旁听）、网页会话的
+ * 对话接口与任务服务（网页会话的到点入口、取消任务的接口），接法与 main.ts 相同；taskTools 时
+ * 任务工具接在 tools 后面。定时器不自己开始（测试里调 tasks.start()）。request 默认带上本机的 Host
  */
 export async function testService({
   storage = createMemoryStorage(),
@@ -88,6 +92,8 @@ export async function testService({
   maxRetries = 0,
   author = 'Alice',
   secrets = [],
+  taskTools = false,
+  clock,
 }: {
   storage?: Storage;
   fileStore?: FileStore;
@@ -111,6 +117,10 @@ export async function testService({
   author?: string;
   /** 要从错误文字里抹掉的秘密（服务里是 API key 与 Telegram token） */
   secrets?: string[];
+  /** 装上任务工具（接在 tools 后面） */
+  taskTools?: boolean;
+  /** 任务服务的时钟（测试里用假的） */
+  clock?: Clock;
 } = {}) {
   const { logger, entries } = recordingLogger();
   const webState = await openWebState(':memory:', async () =>
@@ -118,7 +128,17 @@ export async function testService({
       overview.last ? [[overview.id, overview.last.seq] as const] : [],
     ),
   );
-  const summarize = toolSummaries(tools);
+  let tasks: TaskService | undefined;
+  const installed = taskTools
+    ? [
+        ...tools,
+        ...installTools(
+          createTaskTools(() => tasks!),
+          {},
+        ).tools,
+      ]
+    : tools;
+  const summarize = toolSummaries(installed);
   const redact = createRedactor(secrets);
   const views = createViews({ storage, fileStore, webState, timeZone, now, summarize });
   // events 的 hello 要用 live，live 推事件要用 events：互相在用到时才取
@@ -150,10 +170,17 @@ export async function testService({
   let sessions: Sessions | undefined;
   let chats: Chats | undefined;
   if (model) {
+    const opened = (): Sessions => sessions!;
+    tasks = createTaskService({
+      storage: observed,
+      open: (conversationId) => opened().open(conversationId),
+      logger,
+      clock,
+    });
     sessions = createSessions({
       model,
       prompts: testPrompts('你是测试助手'),
-      tools,
+      tools: installed,
       storage: observed,
       fileStore,
       logger,
@@ -172,6 +199,8 @@ export async function testService({
       summarize,
       redact,
     });
+    const webChats = chats;
+    tasks.setEntrance('web', (due) => webChats.due(due));
   }
   const app = createApp({
     port: testPort,
@@ -181,6 +210,7 @@ export async function testService({
     status: statusOf,
     logger,
     chats,
+    tasks,
     fileStore,
     chatHeartbeat: heartbeat,
   });
@@ -199,8 +229,47 @@ export async function testService({
     status: service,
     sessions,
     chats,
+    tasks,
     entries,
     request,
+  };
+}
+
+/**
+ * 假时钟：now 只在 advance 时往前走；setTimeout 排的到时候（按到点的先后）在 advance 里执行。
+ * 别的计时器（模型的流、「此刻」的合并）照常用真的
+ */
+export function fakeClock(start: Date | string) {
+  let now = new Date(start).getTime();
+  let nextId = 1;
+  const timers = new Map<number, { at: number; run: () => void }>();
+  return {
+    now: () => new Date(now),
+    setTimeout(run: () => void, ms: number): unknown {
+      const id = nextId++;
+      timers.set(id, { at: now + Math.max(0, ms), run });
+      return id;
+    },
+    clearTimeout(handle: unknown): void {
+      timers.delete(handle as number);
+    },
+    /** 往前走 ms 毫秒，途中到时候的计时器依次执行 */
+    advance(ms: number): void {
+      const target = now + ms;
+      for (;;) {
+        const due = [...timers].filter(([, timer]) => timer.at <= target);
+        if (due.length === 0) break;
+        const [id, timer] = due.reduce((a, b) => (b[1].at < a[1].at ? b : a));
+        timers.delete(id);
+        now = Math.max(now, timer.at);
+        timer.run();
+      }
+      now = target;
+    },
+    /** 排着的计时器还要等多久（毫秒），按先后 */
+    pending(): number[] {
+      return [...timers.values()].map((timer) => timer.at - now).sort((a, b) => a - b);
+    },
   };
 }
 

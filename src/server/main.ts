@@ -25,6 +25,8 @@ import { isBuilt, notBuiltText, webDist } from './pages.js';
 import { relayChanges } from './relay.js';
 import { createSessions } from './sessions.js';
 import { createStatus } from './status.js';
+import { createTaskService } from './tasks/service.js';
+import { createTaskTools } from './tasks/tools.js';
 import { startTelegramFrontend } from './telegram.js';
 import { toolSummaries } from './tool-summary.js';
 import { createViews } from './views.js';
@@ -55,8 +57,9 @@ try {
   process.exit(1);
 }
 
-// 工具清单：有误时退出；缺环境变量的不装，各提示一行。所有会话共用装上的这一份
-const installed = setupTools(toolList, process.env, {
+// 工具清单：通用工具，后面接上任务工具（ADR-0010）。有误时退出；缺环境变量的不装，各提示一行。
+// 所有会话共用装上的这一份。任务服务要等包过一层的存储建好才有（见下文），任务工具执行时才取它
+const installed = setupTools([...toolList, ...createTaskTools(() => taskService)], process.env, {
   logger,
   report: (line) => console.error(line),
 });
@@ -151,6 +154,14 @@ const views = webState && createViews({ storage, fileStore, webState, summarize 
 const relay = views && events && relayChanges({ views, events, logger });
 const observed = relay ? observeStorage(storage, relay.onChange) : storage;
 
+// 任务（ADR-0010）：建、列出、取消，定时器。事件写进会话管理里的会话，任务的写入经包过的存储推给面板。
+// 到点交给会话所在平台的前端（网页会话在下面登记）；定时器在所有前端都起来之后才开始
+const taskService = createTaskService({
+  storage: observed,
+  open: (conversationId) => sessions.open(conversationId),
+  logger,
+});
+
 // 会话管理：所有会话对象都从这里取，同一个会话只有一个
 const sessions = createSessions({
   model: createModel({ ...config.model, fetch: requestLogging.fetch }),
@@ -183,6 +194,10 @@ const chats: Chats | undefined =
         redact,
       })
     : undefined;
+if (chats) {
+  const webChats = chats;
+  taskService.setEntrance('web', (due) => webChats.due(due));
+}
 
 /** 启动失败时：关掉已经打开的，退出 */
 async function fail(message: string, web?: { events: Events; listener: Listener }): Promise<never> {
@@ -212,6 +227,7 @@ if (config.web && events && views) {
     status: status.status,
     logger,
     chats,
+    tasks: taskService,
     fileStore,
   });
   try {
@@ -238,6 +254,9 @@ if (config.telegram) {
   }
 }
 
+// 前端都起来了：先处理停机期间错过的、正好到点的任务，再盯着最近的下次到点
+taskService.start();
+
 logger.info(
   { web: web ? { port: web.port } : false, telegram: telegram !== undefined },
   'service.start',
@@ -252,6 +271,8 @@ const stop = async () => {
   if (stopping) process.exit(1);
   stopping = true;
   console.log('正在退出……');
+  // 先停掉定时器：不再有新的到点（正在处理的那次做完）
+  await taskService.stop();
   // 不再接新连接；开着的连接留到最后，期间面板还连着
   web?.listener.stopListening();
   // 网页会话不再接新消息，排队的补回复取消

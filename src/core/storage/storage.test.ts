@@ -641,6 +641,48 @@ describe.each([
       expect(await store.count({ after: 5 })).toBe(0);
     });
 
+    it('count：excludeEvents 时不数事件（metadata 有 event 的用户消息），没有发言人的普通用户消息照数', async () => {
+      const storage = await open();
+      const store = await storage.openConversation(
+        await storage.createConversation({ platform: 'web' }),
+      );
+      await store.add(message('user', '早', { author: alice }));
+      await store.add(message('user', '任务到点', { event: { type: 'task', taskId: 1 } }));
+      await store.add(message('assistant', '好的'));
+      await store.add(message('user', '错过了', { event: { type: 'task-missed', taskId: 2 } }));
+      // 没有发言人、也不是事件（如很早以前写的）
+      await store.add(message('user', '无名'));
+
+      expect(await store.count({ role: 'user' })).toBe(4);
+      expect(await store.count({ role: 'user', excludeEvents: true })).toBe(2);
+      expect(await store.count({ after: 1, role: 'user', excludeEvents: true })).toBe(1);
+      expect(await store.count({ excludeEvents: true })).toBe(3);
+      expect(await store.count({ excludeEvents: false })).toBe(5);
+    });
+
+    it('概览：最后一条是事件时，要点里有事件的类型，没有发言人', async () => {
+      const storage = await open();
+      const id = await storage.createConversation({ platform: 'web' });
+      const store = await storage.openConversation(id);
+      await store.add(message('user', '早', { author: alice }));
+      await store.add(
+        message('user', '错过了：交周报', { event: { type: 'task-missed', taskId: 3 } }),
+      );
+
+      const last = (await storage.overview(id))?.last;
+      expect(last).toStrictEqual({
+        seq: 2,
+        createdAt: '2026-10-30T12:00:00.000Z',
+        role: 'user',
+        event: 'task-missed',
+        text: '错过了：交周报',
+        files: 0,
+      });
+      expect((await storage.overviews())[0]?.last?.event).toBe('task-missed');
+      await store.add(message('user', '收到', { author: alice }));
+      expect((await storage.overview(id))?.last).not.toHaveProperty('event');
+    });
+
     it('segments：全部段按开始的序号升序，带标题快照、摘要与时间', async () => {
       const storage = await open();
       const id = await storage.createConversation({ platform: 'telegram', title: '读书会' });

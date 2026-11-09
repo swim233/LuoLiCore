@@ -19,6 +19,7 @@ import type {
   LiveReply,
   LiveSnapshot,
   LiveState,
+  LiveTask,
   LiveText,
   LiveTool,
 } from './types.js';
@@ -105,8 +106,8 @@ export function createLive({
     };
   }
 
-  /** 一次回复的旁听者（sessions.onReply 的返回） */
-  function watch(conversationId: string): ReplyWatcher {
+  /** 一次回复的旁听者（sessions.onReply 的返回）；tasks：任务到点触发的回复是哪几个任务 */
+  function watch(conversationId: string, tasks?: readonly LiveTask[]): ReplyWatcher {
     const startedAt = iso();
     // 这次回复开始时现场里已有的那条（等待合并中的，或上一次回复刚结束时又被触发而建的）
     const before = replies.get(conversationId);
@@ -181,6 +182,7 @@ export function createLive({
         again: carry && pending.again,
         ...(carry && pending.queuedFrom !== undefined ? { queuedFrom: pending.queuedFrom } : {}),
         parts: [],
+        ...(tasks && tasks.length > 0 ? { tasks: structuredClone([...tasks]) } : {}),
       };
       replies.set(conversationId, reply);
       emit({
@@ -188,6 +190,7 @@ export function createLive({
         ...progress(reply, startedAt),
         again: reply.again,
         ...(reply.queuedFrom !== undefined ? { queuedFrom: reply.queuedFrom } : {}),
+        ...(reply.tasks ? { tasks: reply.tasks } : {}),
       });
       return reply;
     }
@@ -537,8 +540,13 @@ export function createLive({
 
   return {
     /** 给 sessions.onReply：每次回复开始时调用，返回这次回复的旁听者 */
-    listener: ({ conversationId }: { conversationId: string }): ReplyWatcher =>
-      watch(conversationId),
+    listener: ({
+      conversationId,
+      tasks,
+    }: {
+      conversationId: string;
+      tasks?: readonly LiveTask[];
+    }): ReplyWatcher => watch(conversationId, tasks),
 
     /** Telegram 的等待合并、回复中又被触发、一轮结束（见 RoundNotice） */
     round(notice: RoundNotice): void {

@@ -10,6 +10,7 @@ import {
   type SegmentOptions,
   type Storage,
 } from '../core/index.js';
+import type { LiveTask } from './types.js';
 
 /** 建会话对象的参数，所有会话共用这一份 */
 export type SessionOptions = {
@@ -27,10 +28,25 @@ export type SessionOptions = {
 };
 
 /**
- * 旁听回复：每次回复开始时调用，返回的对象依次收到这次回复的每个段，结束时（读完、出错或被取消）
- * 收到 end。不想听这次回复时返回 undefined。抛错只记日志，不影响回复
+ * 会话管理里回复的参数：核心的那些，加上 tasks（任务到点触发的回复：是哪几个任务）。tasks 不交给核心，
+ * 只交给旁听者
  */
-export type ReplyListener = (reply: { conversationId: string }) => ReplyWatcher | undefined;
+export type SessionReplyOptions = ReplyOptions & { tasks?: readonly LiveTask[] };
+
+/** 会话管理给出的会话对象：reply 多收一个 tasks（见 SessionReplyOptions） */
+export type SharedConversation = Omit<Conversation, 'reply'> & {
+  reply(options?: SessionReplyOptions): ReadableStream<MessageChunk>;
+};
+
+/**
+ * 旁听回复：每次回复开始时调用，返回的对象依次收到这次回复的每个段，结束时（读完、出错或被取消）
+ * 收到 end。不想听这次回复时返回 undefined。抛错只记日志，不影响回复。
+ * tasks：这次回复是任务到点触发的（见 SessionReplyOptions）
+ */
+export type ReplyListener = (reply: {
+  conversationId: string;
+  tasks?: readonly LiveTask[];
+}) => ReplyWatcher | undefined;
 
 export type ReplyWatcher = {
   chunk?(chunk: MessageChunk): void;
@@ -63,7 +79,7 @@ type ActiveReply = {
 export function createSessions(options: SessionOptions) {
   const { storage, logger } = options;
   // 按会话 id；正在打开的也在这里，并发打开只建一个
-  const opened = new Map<string, Promise<{ core: Conversation; shared: Conversation }>>();
+  const opened = new Map<string, Promise<{ core: Conversation; shared: SharedConversation }>>();
   // 进行中的回复
   const replies = new Set<ActiveReply>();
   const listeners = new Set<ReplyListener>();
@@ -72,7 +88,7 @@ export function createSessions(options: SessionOptions) {
   let closing = false;
 
   /** 包一层：reply 经过会话管理，close 留给会话管理 */
-  function share(conversationId: string, core: Conversation): Conversation {
+  function share(conversationId: string, core: Conversation): SharedConversation {
     return {
       append: (input) => core.append(input),
       reply: (replyOptions) => reply(conversationId, core, replyOptions),
@@ -84,7 +100,7 @@ export function createSessions(options: SessionOptions) {
   function reply(
     conversationId: string,
     core: Conversation,
-    replyOptions: ReplyOptions = {},
+    { tasks, ...replyOptions }: SessionReplyOptions = {},
   ): ReadableStream<MessageChunk> {
     if (closing) throw new Error('洛璃服务正在退出，不再开始新的回复');
     const { abortSignal } = replyOptions;
@@ -92,7 +108,7 @@ export function createSessions(options: SessionOptions) {
       ...replyOptions,
       abortSignal: abortSignal ? AbortSignal.any([abortSignal, stopping.signal]) : stopping.signal,
     });
-    const watchers = watch(conversationId);
+    const watchers = watch(conversationId, tasks);
     const hear = (chunk: MessageChunk) => {
       for (const watcher of watchers) safely(conversationId, () => watcher.chunk?.(chunk));
     };
@@ -178,11 +194,11 @@ export function createSessions(options: SessionOptions) {
   }
 
   /** 这次回复的旁听者 */
-  function watch(conversationId: string): ReplyWatcher[] {
+  function watch(conversationId: string, tasks?: readonly LiveTask[]): ReplyWatcher[] {
     return [...listeners].flatMap((listener) => {
       let watcher: ReplyWatcher | undefined;
       safely(conversationId, () => {
-        watcher = listener({ conversationId });
+        watcher = listener({ conversationId, ...(tasks && tasks.length > 0 ? { tasks } : {}) });
       });
       return watcher ? [watcher] : [];
     });
@@ -211,7 +227,7 @@ export function createSessions(options: SessionOptions) {
     open(
       conversationId: string,
       { checkIdleOnCreate = true }: { checkIdleOnCreate?: boolean } = {},
-    ): Promise<Conversation> {
+    ): Promise<SharedConversation> {
       if (closing) return Promise.reject(new Error('洛璃服务正在退出，不再打开会话'));
       let entry = opened.get(conversationId);
       if (!entry) {

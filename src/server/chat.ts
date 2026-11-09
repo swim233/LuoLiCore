@@ -1,17 +1,20 @@
 import { randomUUID } from 'node:crypto';
 import {
   mediaTypeOf,
-  type Conversation,
+  taskRef,
   type FileStore,
   type Logger,
+  type Message,
   type MessageChunk,
   type Storage,
+  type Trigger,
 } from '../core/index.js';
 import type { Live } from './live.js';
 import type { StorageChange } from './observed-storage.js';
-import type { Sessions } from './sessions.js';
+import type { Sessions, SharedConversation } from './sessions.js';
+import type { TaskDue } from './tasks/service.js';
 import { noSummaries, type Summarize } from './tool-summary.js';
-import type { ChatChunk, ChatData, ChatRequest } from './types.js';
+import type { ChatChunk, ChatData, ChatRequest, LiveTask } from './types.js';
 import type { WebState } from './web-state.js';
 
 /** 一条消息最多几张图 */
@@ -67,13 +70,20 @@ type Running = {
  * 这一轮排队（当前回复结束后补一次回复）：排队的消息从 fromSeq 起；clients 是发了这一轮消息的
  * 客户端（请求带的 clientId，没带的每个请求算一个）。补回复的流交给 holder：排队的最后一个请求，
  * 一个会话最多只有它一个排队的请求连着（前面的马上以 merged 结束，省浏览器的连接）。
- * holder 断开了而这一轮还有别的客户端的消息时，holder 为空：补回复照常，流没人接
+ * holder 断开了而这一轮还有别的客户端的消息、或者有任务到点时，holder 为空：补回复照常，流没人接。
+ * triggers 是这一轮客户端发来的消息（补回复交给工具的触发者），tasks 是这一轮到点的任务
+ * （它们不属于任何客户端，关页面、断开请求都不取消补回复；中止接口照常能取消）
  */
 type Pending = {
   fromSeq: number;
   clients: Set<string>;
   holder?: { client: string; sink: Sink };
+  triggers: Trigger[];
+  tasks: LiveTask[];
 };
+
+/** 一次回复由谁触发：客户端发来的消息（交给工具），到点的任务（交给「此刻」） */
+type Round = { triggers: Trigger[]; tasks?: LiveTask[] };
 
 type ChatState = { running?: Running; pending?: Pending };
 
@@ -165,12 +175,21 @@ export function createChats({
   }
 
   /** 开始回复，流写进 out；回复结束后看要不要补一次 */
-  function start(conversationId: string, conversation: Conversation, out: Sink): void {
+  function start(
+    conversationId: string,
+    conversation: SharedConversation,
+    out: Sink,
+    { triggers, tasks }: Round,
+  ): void {
     const state = stateOf(conversationId);
     const abort = new AbortController();
     let stream: ReadableStream<MessageChunk>;
     try {
-      stream = conversation.reply({ abortSignal: abort.signal });
+      stream = conversation.reply({
+        abortSignal: abort.signal,
+        triggers,
+        ...(tasks && tasks.length > 0 ? { tasks } : {}),
+      });
     } catch (error) {
       // 服务正在退出，或核心那边上一次回复还没收尾（按约定不会发生）。这个请求以出错结束。
       // 补回复开始不了时，state.running 还是上一次的回复：一并清掉，免得这个会话一直「在回复」，
@@ -234,6 +253,34 @@ export function createChats({
     live.unqueue(conversationId);
   }
 
+  /**
+   * 重试时交给工具的触发者：出错的那次回复回答的那几条消息。从最后往前：跳过最后那条出错的助手回复，
+   * 到上一条助手回复为止的用户消息（事件不算），按先后。读不到时为空
+   */
+  async function triggersBefore(conversationId: string): Promise<Trigger[]> {
+    let messages: Message[];
+    try {
+      const page = await (await storage.openConversation(conversationId)).page({ limit: 50 });
+      messages = page.entries.map((entry) => entry.message);
+    } catch {
+      return [];
+    }
+    if (messages.at(-1)?.role === 'assistant') messages.pop();
+    const triggers: Trigger[] = [];
+    for (const message of messages.reverse()) {
+      if (message.role === 'assistant') break;
+      const author = message.metadata?.author;
+      if (!author || message.metadata?.event) continue;
+      const platformMessageId = message.metadata?.platformMessageId;
+      triggers.unshift({
+        author,
+        messageId: message.id,
+        ...(platformMessageId === undefined ? {} : { platformMessageId }),
+      });
+    }
+    return triggers;
+  }
+
   /** 一次回复结束：出错的记下那时最后一条消息，别的结果清掉 */
   async function remember(conversationId: string, failed: boolean): Promise<void> {
     failedAt.delete(conversationId);
@@ -250,7 +297,7 @@ export function createChats({
    * 一次回复结束：有排队的就补一次（看到期间所有新消息）。补之前看一眼历史：最后一条要是这次的
    * 回复（排队的消息其实在它开始读历史之前就写进去了，已经看到），就不用补了
    */
-  async function next(conversationId: string, conversation: Conversation, done: Running) {
+  async function next(conversationId: string, conversation: SharedConversation, done: Running) {
     const state = states.get(conversationId);
     if (!state || state.running !== done) return;
     if (state.pending && !closing) {
@@ -267,8 +314,14 @@ export function createChats({
         if (unseen) {
           // 补回复的流交给排队的最后一个请求；它断开了（这一轮还有别人的消息）就没人接，由服务读完
           const sink = pending.holder?.sink.open ? pending.holder.sink : detachedSink();
-          logger.info({ conversationId, detached: !pending.holder }, 'chat.follow_up');
-          start(conversationId, conversation, sink);
+          logger.info(
+            { conversationId, detached: !pending.holder, tasks: pending.tasks.length },
+            'chat.follow_up',
+          );
+          start(conversationId, conversation, sink, {
+            triggers: pending.triggers,
+            tasks: pending.tasks,
+          });
           return;
         }
         // 这次回复已经看到了排队的消息
@@ -279,22 +332,34 @@ export function createChats({
     tidy(conversationId);
   }
 
+  /** 这个会话这一轮的排队；还没有时从 seq 起新开一轮 */
+  function pendingOf(state: ChatState, seq: number): Pending {
+    return (state.pending ??= { fromSeq: seq, clients: new Set(), triggers: [], tasks: [] });
+  }
+
   /**
    * 生成中又发了一条：排队。补回复的流交给这个请求，前一个排队的请求马上以 merged 结束（一个会话
-   * 最多只有一个排队的请求连着）。这个请求断开时：这一轮里有别的客户端发的消息，补回复照常、流没人接；
-   * 全是这个客户端的（比如网页关掉了发这几条的标签页、只有一条），取消补回复
+   * 最多只有一个排队的请求连着）。这个请求断开时：这一轮里有别的客户端发的消息、或者有任务到点，
+   * 补回复照常、流没人接；全是这个客户端的（比如网页关掉了发这几条的标签页、只有一条），取消补回复
    */
-  function queue(conversationId: string, out: Sink, seq: number, client: string): void {
+  function queue(
+    conversationId: string,
+    out: Sink,
+    seq: number,
+    client: string,
+    trigger: Trigger,
+  ): void {
     const state = stateOf(conversationId);
-    const pending = (state.pending ??= { fromSeq: seq, clients: new Set() });
+    const pending = pendingOf(state, seq);
     pending.clients.add(client);
+    pending.triggers.push(trigger);
     const previous = pending.holder;
     const holder = { client, sink: out };
     pending.holder = holder;
     out.onCancel = () => {
       // 这一轮已经结束（补回复开始了、被取消了）或者它已经被接替时不用管
       if (state.pending !== pending || pending.holder !== holder) return;
-      if ([...pending.clients].some((other) => other !== client)) {
+      if (pending.tasks.length > 0 || [...pending.clients].some((other) => other !== client)) {
         pending.holder = undefined;
         logger.info({ conversationId }, 'chat.queue_detached');
         return;
@@ -363,7 +428,7 @@ export function createChats({
         if (rejected) return rejected;
       }
       if (closing) return leaving();
-      let conversation: Conversation;
+      let conversation: SharedConversation;
       try {
         conversation = await sessions.open(conversationId);
       } catch {
@@ -375,6 +440,8 @@ export function createChats({
         files: files.map((url) => ({ url, mediaType: mediaTypeOf(url)! })),
       });
       const seq = (await (await storage.openConversation(conversationId)).entry(message.id))?.seq;
+      // 交给工具的触发者：发言人是网页的 LUOLI_WEB_NAME，或 CLI 请求带的名字
+      const trigger: Trigger = { author: { name: author }, messageId: message.id };
 
       const out = sink(signal);
       out.write({
@@ -391,8 +458,14 @@ export function createChats({
       logger.info({ conversationId, platform, files: files.length, queued }, 'chat.send');
       if (closing) out.close();
       else if (queued)
-        queue(conversationId, out, seq ?? 0, request.clientId ?? `request:${randomUUID()}`);
-      else start(conversationId, conversation, out);
+        queue(
+          conversationId,
+          out,
+          seq ?? 0,
+          request.clientId ?? `request:${randomUUID()}`,
+          trigger,
+        );
+      else start(conversationId, conversation, out, { triggers: [trigger] });
       return { ok: true, conversationId, stream: out.stream };
     },
 
@@ -415,20 +488,44 @@ export function createChats({
           ? last.metadata?.failed === true
           : failedAt.get(conversationId) === last.id;
       if (!failed) return refuse(409, '最后一条不是出错的回复，不用重试');
-      let conversation: Conversation;
+      let conversation: SharedConversation;
       try {
         conversation = await sessions.open(conversationId);
       } catch {
         return leaving();
       }
+      const triggers = await triggersBefore(conversationId);
       // 读历史期间别的请求开始了回复
       if (closing) return leaving();
       if (busy()) return refuse(409, '正在回复，等它结束再重试');
       const out = sink(signal);
       out.write({ type: 'data-conversation', data: { conversationId }, transient: true });
       logger.info({ conversationId }, 'chat.retry');
-      start(conversationId, conversation, out);
+      start(conversationId, conversation, out, { triggers });
       return { ok: true, conversationId, stream: out.stream };
+    },
+
+    /**
+     * 任务到点（服务的到点入口，网页会话用）：事件已经写进历史，这次触发不来自哪个请求。照排队的
+     * 规矩走：空闲时开始回复，由服务把流读完；正在回复时排一个补回复，它不属于任何客户端，关页面、
+     * 断开请求都不取消它，中止接口照常能取消。正在退出时什么也不做（事件留在历史里）
+     */
+    async due({ conversationId, tasks, fromSeq }: TaskDue): Promise<void> {
+      if (closing) return;
+      const refs: LiveTask[] = tasks.map(({ id, action }) => ({ id, ref: taskRef(id), action }));
+      const conversation = await sessions.open(conversationId);
+      // 打开会话期间可能开始了退出、开始了别的回复
+      if (closing) return;
+      const state = stateOf(conversationId);
+      if (state.running) {
+        const pending = pendingOf(state, fromSeq ?? 0);
+        pending.tasks.push(...refs);
+        logger.info({ conversationId, tasks: refs.length, queued: true }, 'chat.task_due');
+        live.queue(conversationId, pending.fromSeq);
+        return;
+      }
+      logger.info({ conversationId, tasks: refs.length, queued: false }, 'chat.task_due');
+      start(conversationId, conversation, detachedSink(), { triggers: [], tasks: refs });
     },
 
     /** 中止这个会话进行中的回复，同时取消排队的补回复；返回有没有可中止的 */

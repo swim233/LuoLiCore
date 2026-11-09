@@ -2,6 +2,7 @@ import {
   imageSize,
   isStoredToolContent,
   mediaTypeOf,
+  taskRef,
   type ConversationOverview,
   type ConversationStore,
   type FileStore,
@@ -9,9 +10,11 @@ import {
   type Storage,
   type StoredMessage,
   type StoredToolContent,
+  type Task,
   type ToolCall,
 } from '../core/index.js';
 import { contentImages, contentText, isRecord, isToolPart, toolNameOf } from './parts.js';
+import { describeSchedule } from './tasks/schedule.js';
 import { serverTimeZone, startOfDay } from './today.js';
 import { noSummaries, type Summarize } from './tool-summary.js';
 import type {
@@ -23,6 +26,8 @@ import type {
   ImageInfo,
   MessagePreview,
   MessagesResponse,
+  TaskBrief,
+  TaskRow,
   TodaySummary,
   ToolResultInfo,
 } from './types.js';
@@ -35,6 +40,8 @@ export const defaultMessages = 200;
 export const toolOutputChars = 2000;
 /** 预览最多多少个字符 */
 const previewChars = 80;
+/** 任务列表里，已经结束的任务只列最近这么多天结束的 */
+export const endedTaskDays = 30;
 
 export const fileScheme = 'luoli-file:';
 
@@ -78,12 +85,12 @@ export function createViews({
     const kind = kindOf(overview.platform, overview.platformConversationId);
     const readSeq = webState.readSeq(overview.id);
     const last = overview.last;
-    // 未读只算 Telegram 里别人（用户）发的；最后一条都没超过已读位置时不用数
+    // 未读只算 Telegram 里别人（用户）发的，事件不算；最后一条都没超过已读位置时不用数
     const unread =
       (kind === 'group' || kind === 'private') && last !== undefined && last.seq > readSeq
         ? await (
             await storage.openConversation(overview.id)
-          ).count({ after: readSeq, role: 'user' })
+          ).count({ after: readSeq, role: 'user', excludeEvents: true })
         : 0;
     return {
       id: overview.id,
@@ -155,6 +162,7 @@ export function createViews({
           )
         : new Map<string, number>();
     const { parts: trimmed, tools } = trimTools(parts, { summarize, durations });
+    const task = stored.role === 'user' ? await eventTask(stored.metadata) : undefined;
     return {
       seq: entry.seq,
       id: typeof stored.id === 'string' ? stored.id : '',
@@ -163,7 +171,56 @@ export function createViews({
       message: { ...stored, parts: trimmed } as Message,
       tools,
       images: await images(parts),
+      ...(task ? { task } : {}),
     };
+  }
+
+  /** 事件说的那个任务的要点；不是事件、任务不在了时 undefined */
+  async function eventTask(metadata: unknown): Promise<TaskBrief | undefined> {
+    if (!isRecord(metadata) || !isRecord(metadata.event)) return undefined;
+    const { taskId } = metadata.event;
+    if (typeof taskId !== 'number') return undefined;
+    const task = await storage.getTask(taskId);
+    return task && brief(task);
+  }
+
+  function brief(task: Task): TaskBrief {
+    return {
+      id: task.id,
+      ref: taskRef(task.id),
+      action: task.action,
+      scheduleText: describeSchedule(task.schedule, now()),
+    };
+  }
+
+  /** 任务的一行；会话的标题同会话列表（网页会话取 web.db 里的） */
+  async function taskRow(task: Task, overviews: Map<string, ConversationOverview | undefined>) {
+    if (!overviews.has(task.conversationId)) {
+      overviews.set(task.conversationId, await storage.overview(task.conversationId));
+    }
+    const overview = overviews.get(task.conversationId);
+    const platform = overview?.platform ?? '';
+    const title =
+      (platform === 'web' ? webState.title(task.conversationId) : undefined) ?? overview?.title;
+    const { author } = task.source;
+    const row: TaskRow = {
+      ...brief(task),
+      conversation: {
+        id: task.conversationId,
+        platform,
+        kind: kindOf(platform, overview?.platformConversationId),
+        ...(title === undefined ? {} : { title }),
+      },
+      schedule: task.schedule,
+      status: task.status,
+      ...(task.nextDueAt === undefined ? {} : { nextDueAt: task.nextDueAt }),
+      ...(task.lastDueAt === undefined ? {} : { lastDueAt: task.lastDueAt }),
+      dueCount: task.dueCount,
+      requestedBy: { ...(author.id === undefined ? {} : { id: author.id }), name: author.name },
+      createdAt: task.createdAt,
+      ...(task.endedAt === undefined ? {} : { endedAt: task.endedAt }),
+    };
+    return row;
   }
 
   return {
@@ -229,6 +286,23 @@ export function createViews({
       return row(overview);
     },
 
+    /** 进行中的任务，加上最近 endedTaskDays 天里结束的，按建立先后 */
+    async tasks(): Promise<TaskRow[]> {
+      const since = new Date(now().getTime() - endedTaskDays * 86_400_000).toISOString();
+      const overviews = new Map<string, ConversationOverview | undefined>();
+      const rows: TaskRow[] = [];
+      for (const task of await storage.listTasks({ endedSince: since })) {
+        rows.push(await taskRow(task, overviews));
+      }
+      return rows;
+    },
+
+    /** 一个任务的一行；没有时为 undefined */
+    async task(id: number): Promise<TaskRow | undefined> {
+      const task = await storage.getTask(id);
+      return task && taskRow(task, new Map());
+    },
+
     /** 今天（服务器时区）0 点以来的模型调用汇总 */
     async today(): Promise<TodaySummary> {
       const { date, since } = startOfDay(now(), timeZone);
@@ -280,6 +354,7 @@ function preview(last: NonNullable<ConversationOverview['last']>): MessagePrevie
     createdAt: last.createdAt,
     role: last.role === 'assistant' ? 'assistant' : 'user',
     ...(last.role === 'user' && last.author ? { author: last.author.name } : {}),
+    ...(last.event ? { event: last.event } : {}),
     text: text === '' && last.files > 0 ? '[图片]' : text,
   };
 }

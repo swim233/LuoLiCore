@@ -3,7 +3,14 @@
 // 不要在这里引用带 Node 类型或服务端代码的模块
 
 import type { InferUIMessageChunk, UIMessage } from 'ai';
-import type { Message, MessageData, MessageMetadata, Usage } from '../core/message.js';
+import type {
+  ConversationEvent,
+  Message,
+  MessageData,
+  MessageMetadata,
+  Usage,
+} from '../core/message.js';
+import type { TaskSchedule, TaskStatus } from '../core/storage/types.js';
 
 /**
  * 洛璃服务此刻的状态：GET /api/health 返回它，SSE 的 hello 带着它（另加现场），
@@ -105,8 +112,10 @@ export type MessagePreview = {
   /** 消息的时间，ISO */
   createdAt: string;
   role: 'user' | 'assistant';
-  /** 用户消息的发言人显示名；助手的消息没有（显示「洛璃」） */
+  /** 用户消息的发言人显示名；助手的消息、事件没有（助手显示「洛璃」） */
   author?: string;
+  /** 这一条是事件（洛璃服务写的，如任务到点）时它的类型；不是人说的话 */
+  event?: ConversationEvent['type'];
   /** 正文开头的一截（空白合成一个空格，最多 80 个字符）；只有图片时为「[图片]」；都没有时为空 */
   text: string;
 };
@@ -165,6 +174,24 @@ export type ApiMessage = {
    * 文件已经不在了为 null（显示「图片已丢失」）
    */
   images: Record<string, ImageInfo | null>;
+  /**
+   * 事件（message.metadata.event，没有发言人的用户消息）说的那个任务：时间线里显示成一行灰字，如
+   * 「任务到点 · 提醒小明交周报」「任务超时 · 每天 08:00 说说天气」（task-missed 给人看的说法一律叫
+   * 「任务超时」）。任务已经不在表里时没有，
+   * 只显示事件的正文
+   */
+  task?: TaskBrief;
+};
+
+/** 一个任务的要点 */
+export type TaskBrief = {
+  id: number;
+  /** 给模型看的写法，如 t7 */
+  ref: string;
+  /** 做什么 */
+  action: string;
+  /** 一句人话的周期，如「一次性」「每个工作日 08:00，到 12-31 为止」 */
+  scheduleText: string;
 };
 
 export type ToolResultInfo = {
@@ -277,6 +304,20 @@ export type LiveReply = {
   parts: LivePart[];
   /** 最近一次重试 */
   retry?: LiveRetry;
+  /**
+   * 这次回复是任务到点触发的（或补的那次里有任务到点）：是哪几个任务，按先后。人发消息触发的没有。
+   * 「此刻」据此标出，按平台决定是否自动展开
+   */
+  tasks?: LiveTask[];
+};
+
+/** 触发回复的一个任务 */
+export type LiveTask = {
+  id: number;
+  /** 给模型看的写法，如 t7 */
+  ref: string;
+  /** 做什么 */
+  action: string;
 };
 
 /** 回复里的一段：思考、文字、工具调用。step 是第几步（从 1 起，一步是向模型发一次请求） */
@@ -386,7 +427,13 @@ export type LiveEvent =
    * 上一次回复刚结束时又被触发的，这次就是「再回复一次」，不算），面板照它设。服务总会带上
    * again；没有时当作 false
    */
-  | (LiveProgress & { type: 'start'; again?: boolean; queuedFrom?: number })
+  | (LiveProgress & {
+      type: 'start';
+      again?: boolean;
+      queuedFrom?: number;
+      /** 任务到点触发的回复：是哪几个任务（见 LiveReply.tasks）；人发消息触发的没有 */
+      tasks?: LiveTask[];
+    })
   /** 开始一段思考，在 parts 末尾新加一段（下标 part） */
   | (LiveProgress & { type: 'reasoning-start'; part: number; step: number })
   /** 思考的内容接上 text */
@@ -559,6 +606,45 @@ export type UploadResponse = {
   height?: number;
 };
 
+// ─── 任务 ───────────────────────────────────────────────────────────────
+
+/**
+ * 一个任务（ADR-0010）。GET /api/tasks 返回进行中的与最近 30 天里结束的，SSE 的 task 事件推一个
+ * （新建、到点、完成、取消时，这一行的新样子）。时间都是 ISO（UTC）
+ */
+export type TaskRow = TaskBrief & {
+  /** 任务所在的会话 */
+  conversation: {
+    id: string;
+    platform: string;
+    kind: ConversationKind;
+    /** 同会话列表的 title（网页会话取 web.db 里的标题） */
+    title?: string;
+  };
+  /**
+   * 什么时候到点（与核心存的相同）：once 带 at（ISO）；周期的带 time（HH:mm，服务器的时区），
+   * weekly 带 weekday（1 是周一，7 是周日），monthly 带 day（1–31，那个月没有这一天时在最后一天），
+   * 可以带 until（截止的时刻，ISO，截止那天本地的 23:59:59.999）。一句人话见 scheduleText
+   */
+  schedule: TaskSchedule;
+  /** active 进行中；done 已完成（一次性的到点了或任务超时，周期的过了截止）；cancelled 已取消 */
+  status: TaskStatus;
+  /** 下次到点；进行中的才有 */
+  nextDueAt?: string;
+  /** 上次到点（按约好的时刻）；还没到过点时没有 */
+  lastDueAt?: string;
+  /** 到点了几次（错过的不算） */
+  dueCount: number;
+  /** 谁让建的：发言人当时的名字，平台提供时还有 uid */
+  requestedBy: { id?: string; name: string };
+  createdAt: string;
+  /** 完成或取消的时间；进行中的没有 */
+  endedAt?: string;
+};
+
+/** GET /api/tasks 的返回：按建立先后 */
+export type TasksResponse = { tasks: TaskRow[] };
+
 /** SSE 的 hello：服务此刻的状态，加上现场 */
 export type Hello = ServiceStatus & { live: LiveSnapshot };
 
@@ -594,7 +680,16 @@ export type ServerEvents = {
   status: ServiceStatus;
   /** 「此刻」：进行中的回复的一步进展，见 LiveEvent */
   live: LiveEvent;
+  /** 一个任务新建或变了（到点、完成、取消）：这一行的新样子，按 id 整行替换 */
+  task: TaskRow;
 };
 
-/** 接口出错时的返回（400、403、404、415、500） */
+/**
+ * POST /api/tasks/:id/cancel：取消一个任务（任何会话的都行），请求体写 {}（和别的 POST 一样要带
+ * Content-Type: application/json）。成功返回取消后的 TaskRow，同时推 task 事件；没有这个任务 404，
+ * 已经结束（完成、取消）的 409，都是 ErrorResponse
+ */
+export type CancelTaskResponse = TaskRow;
+
+/** 接口出错时的返回（400、403、404、409、415、500） */
 export type ErrorResponse = { error: string };

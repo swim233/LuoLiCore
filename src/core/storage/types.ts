@@ -1,4 +1,4 @@
-import type { Author, Message, Trigger } from '../message.js';
+import type { Author, ConversationEvent, Message, Trigger } from '../message.js';
 
 /** 序号区间：from 起（含）到 before 之前（不含），不给的一端不限 */
 export type SeqRange = { from?: number; before?: number };
@@ -106,6 +106,8 @@ export type MessageGlance = {
   role: Message['role'];
   /** 用户消息的发言人；事件没有 */
   author?: Author;
+  /** 事件才有：它的类型（metadata.event.type） */
+  event?: ConversationEvent['type'];
   /** 文字部分按顺序用换行连起来，最多取开头若干个字符（按 Unicode 字符计） */
   text: string;
   /** 文件（图片）部分的个数；工具结果里的图片不算 */
@@ -165,8 +167,15 @@ export type ConversationStore = {
    * 用来从新到旧一批批往前取
    */
   page(options: { before?: number; limit: number }): Promise<MessagePage>;
-  /** 序号大于 after（不给时不限）的消息条数；给了 role 时只数这种角色的 */
-  count(options?: { after?: number; role?: Message['role'] }): Promise<number>;
+  /**
+   * 序号大于 after（不给时不限）的消息条数；给了 role 时只数这种角色的；excludeEvents 时不数事件
+   * （metadata 有 event 的用户消息），如未读只算人发的消息
+   */
+  count(options?: {
+    after?: number;
+    role?: Message['role'];
+    excludeEvents?: boolean;
+  }): Promise<number>;
   /** 按平台消息 id 找消息；没有时为 undefined */
   findByPlatformMessageId(platformMessageId: string): Promise<Message | undefined>;
   /** 按 id 换掉已写入的消息（如编辑后的正文）。序号与查询用的副本列不变；没有这条时抛错 */
