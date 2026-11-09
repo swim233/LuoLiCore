@@ -7,10 +7,28 @@ export type Author = {
   name: string;
 };
 
+/**
+ * 触发一次回复的一条消息（触发者）：发言人、核心的消息 id，平台上有 id 时还有平台消息 id。
+ * 工具据此知道是谁让它做的（ADR-0006、ADR-0010）
+ */
+export type Trigger = {
+  readonly author: Readonly<Author>;
+  readonly messageId: string;
+  readonly platformMessageId?: string;
+};
+
+/**
+ * 事件（ADR-0010）：洛璃服务写进会话的一条不是人说的消息，按用户消息存。
+ * task：任务到点；task-missed：服务停着时错过了。taskId 是任务的 id（Task.id）
+ */
+export type ConversationEvent = { type: 'task' | 'task-missed'; taskId: number };
+
 export type MessageMetadata = {
-  /** 用户消息必有 */
+  /** 用户消息的发言人。事件没有 */
   author?: Author;
-  /** ISO 时间。用户消息取平台上的发送时间（平台给出时） */
+  /** 事件才有：它的类型与相关的任务。有它的用户消息是事件，送模型时包成 `<event>` */
+  event?: ConversationEvent;
+  /** ISO 时间。用户消息取平台上的发送时间（平台给出时），事件取服务给的时间 */
   createdAt: string;
   /** 平台里的消息 id（如 Telegram 的 message_id），编辑消息时靠它找到这条 */
   platformMessageId?: string;

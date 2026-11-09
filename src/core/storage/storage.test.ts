@@ -11,7 +11,10 @@ import {
   type Message,
   type MessageMetadata,
   type ModelCall,
+  type NewTask,
   type Storage,
+  type Task,
+  type TaskSchedule,
   type ToolCall,
 } from '../index.js';
 
@@ -31,6 +34,20 @@ function message(
 }
 
 const alice = { id: 'u-alice', name: 'Alice' };
+const bob = { id: 'u-bob', name: 'Bob' };
+
+/** 一个新任务，默认是明早 9 点（上海）提醒交周报的一次性任务，Alice 在 42 号消息里让建的 */
+function newTask(conversationId: string, fields: Partial<NewTask> = {}): NewTask {
+  return {
+    conversationId,
+    action: '提醒 Alice 交周报',
+    schedule: { kind: 'once', at: '2026-11-10T01:00:00.000Z' },
+    source: { author: alice, messageId: 'm-src', platformMessageId: '42' },
+    nextDueAt: '2026-11-10T01:00:00.000Z',
+    createdAt: '2026-11-09T13:30:00.000Z',
+    ...fields,
+  };
+}
 
 /** 一次模型调用，默认是正常完成的回复 */
 function call(fields: Partial<ModelCall> = {}): ModelCall {
@@ -104,6 +121,24 @@ const toolCallColumns = [
   'error',
   'output_chars',
   'tool_call_id',
+];
+
+// ADR-0005 里 tasks 的列，按顺序
+const taskColumns = [
+  'id',
+  'conversation_id',
+  'action',
+  'schedule',
+  'source_author_id',
+  'source_author_name',
+  'source_message_id',
+  'source_platform_message_id',
+  'status',
+  'next_due_at',
+  'last_due_at',
+  'due_count',
+  'created_at',
+  'ended_at',
 ];
 
 async function tempDir(): Promise<string> {
@@ -875,6 +910,306 @@ describe.each([
       });
     });
   });
+
+  describe('任务', () => {
+    it('新建：返回带 id 的任务，进行中、到点 0 次，没有上次到点与结束时间；id 从 1 起递增', async () => {
+      const storage = await open();
+      const c = await storage.createConversation({ platform: 'web' });
+
+      const first = await storage.createTask(newTask(c));
+      const second = await storage.createTask(
+        newTask(c, {
+          action: '说说今天的天气',
+          schedule: { kind: 'daily', time: '08:00' },
+          nextDueAt: '2026-11-10T00:00:00.000Z',
+        }),
+      );
+
+      expect(first).toStrictEqual({
+        id: 1,
+        conversationId: c,
+        action: '提醒 Alice 交周报',
+        schedule: { kind: 'once', at: '2026-11-10T01:00:00.000Z' },
+        source: { author: alice, messageId: 'm-src', platformMessageId: '42' },
+        status: 'active',
+        nextDueAt: '2026-11-10T01:00:00.000Z',
+        dueCount: 0,
+        createdAt: '2026-11-09T13:30:00.000Z',
+      });
+      expect(second).toMatchObject({ id: 2, action: '说说今天的天气', status: 'active' });
+    });
+
+    it('新建：不给建立时间时取写入时间；不给下次到点时没有；来源没有平台消息 id、发言人没有 id 时也没有这两项', async () => {
+      const storage = await open();
+      const c = await storage.createConversation({ platform: 'web' });
+      const before = new Date().toISOString();
+
+      const task = await storage.createTask({
+        conversationId: c,
+        action: '提醒喝水',
+        schedule: { kind: 'once', at: '2026-11-10T01:00:00.000Z' },
+        source: { author: { name: '网页用户' }, messageId: 'm-web' },
+      });
+
+      expect(task.createdAt >= before && task.createdAt <= new Date().toISOString()).toBe(true);
+      expect(new Date(task.createdAt).toISOString()).toBe(task.createdAt);
+      expect(task.source).toStrictEqual({ author: { name: '网页用户' }, messageId: 'm-web' });
+      expect(task).not.toHaveProperty('nextDueAt');
+      expect(await storage.getTask(task.id)).toStrictEqual(task);
+    });
+
+    it('新建：每种时间原样往返（截止时刻、星期几、几号都在）', async () => {
+      const storage = await open();
+      const c = await storage.createConversation({ platform: 'web' });
+      const schedules: TaskSchedule[] = [
+        { kind: 'once', at: '2026-11-10T01:00:00.000Z' },
+        { kind: 'daily', time: '08:00' },
+        { kind: 'weekdays', time: '09:30', until: '2026-12-31T15:59:59.999Z' },
+        { kind: 'weekly', weekday: 7, time: '20:00' },
+        { kind: 'monthly', day: 31, time: '10:00', until: '2027-06-30T15:59:59.999Z' },
+      ];
+
+      for (const schedule of schedules) {
+        const created = await storage.createTask(newTask(c, { schedule }));
+        expect((await storage.getTask(created.id))?.schedule).toStrictEqual(schedule);
+      }
+    });
+
+    it('新建：时间里的 at、until 也换成 toISOString 的写法，time 等其余项原样；不合法时报错，不建任务', async () => {
+      const storage = await open();
+      const c = await storage.createConversation({ platform: 'web' });
+      const create = async (schedule: TaskSchedule) =>
+        (await storage.getTask((await storage.createTask(newTask(c, { schedule }))).id))?.schedule;
+
+      expect(await create({ kind: 'once', at: '2026-11-10T09:00:00+08:00' })).toStrictEqual({
+        kind: 'once',
+        at: '2026-11-10T01:00:00.000Z',
+      });
+      expect(
+        await create({ kind: 'weekdays', time: '9:30', until: '2026-12-31T23:59:59.999+08:00' }),
+      ).toStrictEqual({ kind: 'weekdays', time: '9:30', until: '2026-12-31T15:59:59.999Z' });
+      expect(
+        await create({ kind: 'monthly', day: 1, time: '10:00', until: '2027-01-01T00:00Z' }),
+      ).toStrictEqual({
+        kind: 'monthly',
+        day: 1,
+        time: '10:00',
+        until: '2027-01-01T00:00:00.000Z',
+      });
+      // 不给的截止不会多出一项
+      expect(await create({ kind: 'daily', time: '08:00', until: undefined })).toStrictEqual({
+        kind: 'daily',
+        time: '08:00',
+      });
+
+      await expect(
+        storage.createTask(newTask(c, { schedule: { kind: 'once', at: '明早九点' } })),
+      ).rejects.toThrow('不是合法的时间');
+      await expect(
+        storage.createTask(
+          newTask(c, { schedule: { kind: 'weekly', weekday: 1, time: '09:00', until: 'x' } }),
+        ),
+      ).rejects.toThrow('不是合法的时间');
+      expect(await storage.listTasks()).toHaveLength(4);
+    });
+
+    it('新建：会话不存在时报错，不建任务', async () => {
+      const storage = await open();
+
+      await expect(storage.createTask(newTask('nope'))).rejects.toThrow('会话 nope 不存在');
+      expect(await storage.listTasks()).toEqual([]);
+    });
+
+    it('时间换成 toISOString 的写法再存：带时区偏移、没有毫秒的都能比较；不合法的时间报错', async () => {
+      const storage = await open();
+      const c = await storage.createConversation({ platform: 'web' });
+
+      const task = await storage.createTask(
+        newTask(c, { nextDueAt: '2026-11-10T09:00:00+08:00', createdAt: '2026-11-09T13:30:00Z' }),
+      );
+      expect(task).toMatchObject({
+        nextDueAt: '2026-11-10T01:00:00.000Z',
+        createdAt: '2026-11-09T13:30:00.000Z',
+      });
+      expect(await storage.updateTask(task.id, { lastDueAt: '2026-11-10T01:00Z' })).toMatchObject({
+        lastDueAt: '2026-11-10T01:00:00.000Z',
+      });
+      expect(await storage.dueTasks('2026-11-10T09:00:00+08:00')).toHaveLength(1);
+      expect(await storage.dueTasks('2026-11-10T08:59:59+08:00')).toEqual([]);
+
+      await expect(storage.createTask(newTask(c, { nextDueAt: '明天' }))).rejects.toThrow(
+        '不是合法的时间',
+      );
+      await expect(storage.updateTask(task.id, { endedAt: 'x' })).rejects.toThrow('不是合法的时间');
+      expect(await storage.listTasks()).toHaveLength(1);
+    });
+
+    it('按 id 取：没有时为 undefined；取回的是副本，改动不影响存储', async () => {
+      const storage = await open();
+      const c = await storage.createConversation({ platform: 'web' });
+      const created = await storage.createTask(newTask(c));
+
+      const got = await storage.getTask(created.id);
+      expect(got).toStrictEqual(created);
+      got!.status = 'done';
+      (got!.source.author as { name: string }).name = '改过';
+      created.action = '改过';
+
+      expect(await storage.getTask(created.id)).toStrictEqual({
+        ...created,
+        action: '提醒 Alice 交周报',
+      });
+      expect(await storage.getTask(99)).toBeUndefined();
+    });
+
+    it('列出：按建立先后；可以按会话、按状态筛选，两个条件一起用', async () => {
+      const storage = await open();
+      const a = await storage.createConversation({ platform: 'web' });
+      const b = await storage.createConversation({ platform: 'web' });
+      const t1 = await storage.createTask(newTask(a));
+      const t2 = await storage.createTask(newTask(b));
+      const t3 = await storage.updateTask((await storage.createTask(newTask(a))).id, {
+        status: 'cancelled',
+        nextDueAt: null,
+        endedAt: '2026-11-09T14:00:00.000Z',
+      });
+      const t4 = await storage.updateTask((await storage.createTask(newTask(a))).id, {
+        status: 'done',
+        nextDueAt: null,
+        endedAt: '2026-11-10T01:00:00.000Z',
+      });
+
+      expect(await storage.listTasks()).toStrictEqual([t1, t2, t3, t4]);
+      expect(await storage.listTasks({ conversationId: a })).toStrictEqual([t1, t3, t4]);
+      expect(await storage.listTasks({ status: 'active' })).toStrictEqual([t1, t2]);
+      expect(await storage.listTasks({ conversationId: a, status: 'active' })).toStrictEqual([t1]);
+      expect(await storage.listTasks({ conversationId: b, status: 'done' })).toEqual([]);
+      expect(await storage.listTasks({ conversationId: 'nope' })).toEqual([]);
+    });
+
+    it('结束时间的筛选：已结束的只要这个时刻（含）以后结束的，进行中的不受影响', async () => {
+      const storage = await open();
+      const c = await storage.createConversation({ platform: 'web' });
+      const active = await storage.createTask(newTask(c));
+      const end = async (status: 'done' | 'cancelled', endedAt: string) =>
+        storage.updateTask((await storage.createTask(newTask(c))).id, {
+          status,
+          nextDueAt: null,
+          endedAt,
+        });
+      await end('cancelled', '2026-09-30T23:59:59.999Z');
+      const recent = await end('done', '2026-10-10T00:00:00.000Z');
+      const latest = await end('cancelled', '2026-11-09T00:00:00.000Z');
+
+      expect(await storage.listTasks({ endedSince: '2026-10-10T00:00:00.000Z' })).toStrictEqual([
+        active,
+        recent,
+        latest,
+      ]);
+      // 同一时刻的别种写法
+      expect(await storage.listTasks({ endedSince: '2026-10-10T08:00:00+08:00' })).toHaveLength(3);
+      expect(
+        await storage.listTasks({ endedSince: '2026-10-10T00:00:00.001Z', status: 'done' }),
+      ).toEqual([]);
+      expect(
+        await storage.listTasks({ endedSince: '2027-01-01T00:00:00.000Z', conversationId: c }),
+      ).toStrictEqual([active]);
+    });
+
+    it('修改：只改给出的项，null 清掉；返回改过的任务，再取也一样；什么都不给时原样返回', async () => {
+      const storage = await open();
+      const c = await storage.createConversation({ platform: 'web' });
+      const daily = await storage.createTask(
+        newTask(c, {
+          schedule: { kind: 'daily', time: '09:00' },
+          source: { author: bob, messageId: 'm-bob' },
+        }),
+      );
+      const other = await storage.createTask(newTask(c));
+
+      const fired = await storage.updateTask(daily.id, {
+        lastDueAt: '2026-11-10T01:00:00.000Z',
+        nextDueAt: '2026-11-11T01:00:00.000Z',
+        dueCount: 1,
+      });
+      expect(fired).toStrictEqual({
+        ...daily,
+        lastDueAt: '2026-11-10T01:00:00.000Z',
+        nextDueAt: '2026-11-11T01:00:00.000Z',
+        dueCount: 1,
+      });
+      expect(await storage.getTask(daily.id)).toStrictEqual(fired);
+
+      const withoutNext: Task = { ...fired };
+      delete withoutNext.nextDueAt;
+      const ended = await storage.updateTask(daily.id, {
+        status: 'done',
+        nextDueAt: null,
+        endedAt: '2026-11-11T01:00:00.000Z',
+      });
+      expect(ended).toStrictEqual({
+        ...withoutNext,
+        status: 'done',
+        endedAt: '2026-11-11T01:00:00.000Z',
+      });
+      expect(await storage.updateTask(daily.id, {})).toStrictEqual(ended);
+      // 没给的项（含显式的 undefined）不动
+      expect(await storage.updateTask(daily.id, { status: undefined })).toStrictEqual(ended);
+      expect(await storage.getTask(other.id)).toStrictEqual(other);
+    });
+
+    it('修改：没有这个任务时报错', async () => {
+      const storage = await open();
+
+      await expect(storage.updateTask(7, { status: 'cancelled' })).rejects.toThrow('任务 7 不存在');
+      await expect(storage.updateTask(7, {})).rejects.toThrow('任务 7 不存在');
+    });
+
+    it('取要到点的：进行中、下次到点不晚于给定时刻（含）的，按下次到点先后，同一时刻按建立先后', async () => {
+      const storage = await open();
+      const a = await storage.createConversation({ platform: 'web' });
+      const b = await storage.createConversation({ platform: 'web' });
+      const nine = await storage.createTask(newTask(a, { nextDueAt: '2026-11-10T01:00:00.000Z' }));
+      const eight = await storage.createTask(newTask(b, { nextDueAt: '2026-11-10T00:00:00.000Z' }));
+      const alsoNine = await storage.createTask(
+        newTask(b, { nextDueAt: '2026-11-10T01:00:00.000Z' }),
+      );
+      await storage.createTask(newTask(a, { nextDueAt: '2026-11-10T02:00:00.000Z' }));
+      // 已结束却留着下次到点的、没有下次到点的：都不算
+      await storage.updateTask(
+        (await storage.createTask(newTask(a, { nextDueAt: '2026-11-09T23:00:00.000Z' }))).id,
+        { status: 'cancelled', endedAt: '2026-11-09T22:00:00.000Z' },
+      );
+      await storage.createTask(newTask(a, { nextDueAt: undefined }));
+
+      expect(await storage.dueTasks('2026-11-10T01:00:00.000Z')).toStrictEqual([
+        eight,
+        nine,
+        alsoNine,
+      ]);
+      expect(await storage.dueTasks('2026-11-10T00:59:59.999Z')).toStrictEqual([eight]);
+      expect(await storage.dueTasks('2026-11-09T00:00:00.000Z')).toEqual([]);
+    });
+
+    it('最近的到点：进行中任务里最早的下次到点；没有时为 undefined；结束了的不算', async () => {
+      const storage = await open();
+      const c = await storage.createConversation({ platform: 'web' });
+      expect(await storage.nextDueAt()).toBeUndefined();
+
+      await storage.createTask(newTask(c, { nextDueAt: undefined }));
+      expect(await storage.nextDueAt()).toBeUndefined();
+
+      const nine = await storage.createTask(newTask(c, { nextDueAt: '2026-11-10T01:00:00.000Z' }));
+      const eight = await storage.createTask(newTask(c, { nextDueAt: '2026-11-10T00:00:00.000Z' }));
+      expect(await storage.nextDueAt()).toBe('2026-11-10T00:00:00.000Z');
+
+      // 取消时留着下次到点也不算
+      await storage.updateTask(eight.id, { status: 'cancelled' });
+      expect(await storage.nextDueAt()).toBe('2026-11-10T01:00:00.000Z');
+      await storage.updateTask(nine.id, { nextDueAt: '2026-11-10T00:30:00.000Z' });
+      expect(await storage.nextDueAt()).toBe('2026-11-10T00:30:00.000Z');
+    });
+  });
 });
 
 describe('SQLite 存储', () => {
@@ -917,7 +1252,7 @@ describe('SQLite 存储', () => {
     expect(await store.reserve()).toBe(2);
   });
 
-  it('新库：WAL 模式、user_version 为 4、五张表与索引按 ADR-0005 建好', async () => {
+  it('新库：WAL 模式、user_version 为 5、六张表与索引按 ADR-0005 建好', async () => {
     const dir = await tempDir();
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
     const path = join(dir, 'luoli.db');
@@ -926,7 +1261,7 @@ describe('SQLite 存储', () => {
     const db = new DatabaseSync(path);
     try {
       expect(db.prepare('PRAGMA journal_mode').get()?.journal_mode).toBe('wal');
-      expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(4);
+      expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(5);
       const objects = db
         .prepare(
           "SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
@@ -940,12 +1275,15 @@ describe('SQLite 存储', () => {
         'index:model_calls_conversation',
         'index:model_calls_time',
         'index:segments_order',
+        'index:tasks_conversation',
+        'index:tasks_due',
         'index:tool_calls_time',
         'index:tool_calls_tool',
         'table:conversations',
         'table:messages',
         'table:model_calls',
         'table:segments',
+        'table:tasks',
         'table:tool_calls',
       ]);
       const columns = (table: string) =>
@@ -982,6 +1320,7 @@ describe('SQLite 存储', () => {
       ]);
       expect(columns('model_calls')).toEqual(modelCallColumns);
       expect(columns('tool_calls')).toEqual(toolCallColumns);
+      expect(columns('tasks')).toEqual(taskColumns);
       const indexed = (index: string) =>
         db
           .prepare(`PRAGMA index_info(${index})`)
@@ -991,6 +1330,8 @@ describe('SQLite 存储', () => {
       expect(indexed('model_calls_conversation')).toEqual(['conversation_id', 'started_at']);
       expect(indexed('tool_calls_time')).toEqual(['started_at']);
       expect(indexed('tool_calls_tool')).toEqual(['tool', 'started_at']);
+      expect(indexed('tasks_due')).toEqual(['status', 'next_due_at']);
+      expect(indexed('tasks_conversation')).toEqual(['conversation_id', 'status']);
     } finally {
       db.close();
     }
@@ -1062,12 +1403,12 @@ describe('SQLite 存储', () => {
     }
   });
 
-  it('user_version 大于 4 时打开报错', async () => {
+  it('user_version 大于 5 时打开报错', async () => {
     const dir = await tempDir();
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
     const path = join(dir, 'luoli.db');
     const db = new DatabaseSync(path);
-    db.exec('PRAGMA user_version = 5');
+    db.exec('PRAGMA user_version = 6');
     db.close();
 
     expect(() => openSqliteStorage(path)).toThrow('数据库版本比程序新');
@@ -1282,7 +1623,187 @@ describe('SQLite 存储', () => {
     }
   });
 
-  it('版本 3 的库：打开时升到版本 4，旧的工具调用行没有调用 id，新写入的有；都能读回', async () => {
+  it('任务的行：时间是一段 JSON，来源拆成四列，各列照写入的值；没有的为 NULL', async () => {
+    const dir = await tempDir();
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    const path = join(dir, 'luoli.db');
+    const storage = openSqliteStorage(path);
+    cleanups.push(async () => storage.close());
+    const id = await storage.createConversation({
+      platform: 'telegram',
+      platformConversationId: '-1',
+    });
+    await storage.createTask(
+      newTask(id, {
+        schedule: { kind: 'weekly', weekday: 1, time: '09:00', until: '2026-12-31T15:59:59.999Z' },
+      }),
+    );
+    const web = await storage.createTask(
+      newTask(id, {
+        source: { author: { name: '网页用户' }, messageId: 'm-web' },
+        nextDueAt: undefined,
+      }),
+    );
+    await storage.updateTask(web.id, {
+      status: 'cancelled',
+      lastDueAt: '2026-11-10T01:00:00.000Z',
+      dueCount: 3,
+      endedAt: '2026-11-10T02:00:00.000Z',
+    });
+
+    const db = new DatabaseSync(path, { readOnly: true });
+    try {
+      const rows = db
+        .prepare('SELECT * FROM tasks ORDER BY id')
+        .all()
+        .map((row) => ({ ...row }));
+      expect(rows).toEqual([
+        {
+          id: 1,
+          conversation_id: id,
+          action: '提醒 Alice 交周报',
+          schedule: expect.any(String),
+          source_author_id: 'u-alice',
+          source_author_name: 'Alice',
+          source_message_id: 'm-src',
+          source_platform_message_id: '42',
+          status: 'active',
+          next_due_at: '2026-11-10T01:00:00.000Z',
+          last_due_at: null,
+          due_count: 0,
+          created_at: '2026-11-09T13:30:00.000Z',
+          ended_at: null,
+        },
+        {
+          id: 2,
+          conversation_id: id,
+          action: '提醒 Alice 交周报',
+          schedule: expect.any(String),
+          source_author_id: null,
+          source_author_name: '网页用户',
+          source_message_id: 'm-web',
+          source_platform_message_id: null,
+          status: 'cancelled',
+          next_due_at: null,
+          last_due_at: '2026-11-10T01:00:00.000Z',
+          due_count: 3,
+          created_at: '2026-11-09T13:30:00.000Z',
+          ended_at: '2026-11-10T02:00:00.000Z',
+        },
+      ]);
+      expect(JSON.parse(String(rows[0]!.schedule))).toEqual({
+        kind: 'weekly',
+        weekday: 1,
+        time: '09:00',
+        until: '2026-12-31T15:59:59.999Z',
+      });
+      // 按 JSON 里的种类也能直接查
+      expect(db.prepare("SELECT id FROM tasks WHERE schedule ->> '$.kind' = 'once'").all()).toEqual(
+        [{ id: 2 }],
+      );
+    } finally {
+      db.close();
+    }
+  });
+
+  it('任务的 id 不重用：最大的那行被删掉后，新建的任务也不会拿到它的 id', async () => {
+    const dir = await tempDir();
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    const path = join(dir, 'luoli.db');
+    const storage = openSqliteStorage(path);
+    cleanups.push(async () => storage.close());
+    const id = await storage.createConversation({ platform: 'web' });
+    await storage.createTask(newTask(id));
+    await storage.createTask(newTask(id));
+    const raw = new DatabaseSync(path);
+    raw.prepare('DELETE FROM tasks WHERE id = 2').run();
+    raw.close();
+
+    expect((await storage.createTask(newTask(id))).id).toBe(3);
+  });
+
+  it('版本 4 的库：打开时升到版本 5，只加任务表，已有的数据不变；任务表能用，重新打开后能读回', async () => {
+    const dir = await tempDir();
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    const path = join(dir, 'luoli.db');
+    // 第六阶段第 7 步到第七阶段第 1 步的程序建的库：五张表，user_version 为 4，各表都有数据
+    const old = new DatabaseSync(path);
+    old.exec('PRAGMA journal_mode = WAL');
+    old.exec(version1Schema);
+    old.exec(version2Schema);
+    old.exec(version3Schema);
+    old.exec(version4Schema);
+    old.exec('PRAGMA user_version = 4');
+    const saved = message('user', '明早九点提醒我交周报', {
+      author: alice,
+      platformMessageId: '42',
+    });
+    old.exec(`
+      INSERT INTO conversations (id, platform, platform_conversation_id, title, next_seq, created_at)
+        VALUES ('c1', 'telegram', '-100', '读书会', 2, '2026-10-29T00:00:00.000Z');
+      INSERT INTO segments
+          (id, conversation_id, start_seq, start_reason, conversation_title, prior_summary, created_at)
+        VALUES ('s1', 'c1', 1, 'first', '读书会', NULL, '2026-10-29T00:00:00.000Z');
+      INSERT INTO model_calls
+          (conversation_id, purpose, reply_id, model, started_at, duration_ms, attempts, outcome,
+           steps, tool_calls)
+        VALUES ('c1', 'reply', 'r0', 'test-model', '2026-10-29T06:00:00.000Z', 900, 1, 'completed',
+                1, 0);
+      INSERT INTO tool_calls
+          (conversation_id, reply_id, tool, step, started_at, duration_ms, outcome, tool_call_id)
+        VALUES ('c1', 'r0', 'fetch', 1, '2026-10-29T06:00:00.100Z', 300, 'completed', 'call_1');
+    `);
+    old
+      .prepare(
+        `INSERT INTO messages
+           (id, conversation_id, seq, role, author_id, platform_message_id, created_at, ui_message)
+         VALUES (?, 'c1', 1, 'user', 'u-alice', '42', ?, ?)`,
+      )
+      .run(saved.id, saved.metadata!.createdAt, JSON.stringify(saved));
+    const tables = ['conversations', 'messages', 'segments', 'model_calls', 'tool_calls'];
+    const dump = (db: DatabaseSync) =>
+      tables.map((table) =>
+        db
+          .prepare(`SELECT * FROM ${table} ORDER BY rowid`)
+          .all()
+          .map((row) => ({ ...row })),
+      );
+    const before = dump(old);
+    old.close();
+
+    const storage = openSqliteStorage(path);
+    expect(await (await storage.openConversation('c1')).list()).toEqual([saved]);
+    const created = await storage.createTask(
+      newTask('c1', { source: { author: alice, messageId: saved.id, platformMessageId: '42' } }),
+    );
+    expect(created.id).toBe(1);
+    storage.close();
+
+    const db = new DatabaseSync(path, { readOnly: true });
+    try {
+      expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(5);
+      expect(dump(db)).toEqual(before);
+      expect(
+        db
+          .prepare("SELECT name FROM sqlite_master WHERE tbl_name = 'tasks' ORDER BY name")
+          .all()
+          .map((row) => row.name),
+      ).toEqual(['tasks', 'tasks_conversation', 'tasks_due']);
+    } finally {
+      db.close();
+    }
+    // 只读打开（导出脚本用）认得版本 5 的库
+    expect(readConversations(path)).toEqual([
+      { id: 'c1', platform: 'telegram', platformConversationId: '-100', title: '读书会' },
+    ]);
+
+    const reopened = openSqliteStorage(path);
+    cleanups.push(async () => reopened.close());
+    expect(await reopened.getTask(1)).toStrictEqual(created);
+    expect(await reopened.dueTasks('2026-11-10T01:00:00.000Z')).toStrictEqual([created]);
+  });
+
+  it('版本 3 的库：打开时升到版本 5，旧的工具调用行没有调用 id，新写入的有；都能读回', async () => {
     const dir = await tempDir();
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
     const path = join(dir, 'luoli.db');
@@ -1310,7 +1831,7 @@ describe('SQLite 存储', () => {
 
     const db = new DatabaseSync(path, { readOnly: true });
     try {
-      expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(4);
+      expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(5);
       expect(
         db
           .prepare('SELECT tool_call_id FROM tool_calls ORDER BY id')
@@ -1328,7 +1849,7 @@ describe('SQLite 存储', () => {
     expect(rows[0]!.toolCallId).toBeUndefined();
   });
 
-  it('版本 2 的库：打开时升到版本 4，旧的模型调用行两列为空，新写入的有值；能写工具调用', async () => {
+  it('版本 2 的库：打开时升到版本 5，旧的模型调用行两列为空，新写入的有值；能写工具调用', async () => {
     const dir = await tempDir();
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
     const path = join(dir, 'luoli.db');
@@ -1362,7 +1883,7 @@ describe('SQLite 存储', () => {
 
     const db = new DatabaseSync(path, { readOnly: true });
     try {
-      expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(4);
+      expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(5);
       const rows = db
         .prepare('SELECT * FROM model_calls ORDER BY id')
         .all()
@@ -1381,7 +1902,7 @@ describe('SQLite 存储', () => {
     expect(await (await reopened.openConversation('c1')).toolCalls()).toEqual([toolCall()]);
   });
 
-  it('版本 1 的库：打开时升到版本 4，原有的表与数据不变，能写模型调用；重新打开后能读回', async () => {
+  it('版本 1 的库：打开时升到版本 5，原有的表与数据不变，能写模型调用；重新打开后能读回', async () => {
     const dir = await tempDir();
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
     const path = join(dir, 'luoli.db');
@@ -1438,7 +1959,7 @@ describe('SQLite 存储', () => {
 
     const db = new DatabaseSync(path, { readOnly: true });
     try {
-      expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(4);
+      expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(5);
       expect(dump(db)).toEqual(before);
       expect(
         db
@@ -1648,6 +2169,11 @@ describe('SQLite 存储', () => {
     }
   });
 });
+
+// 第六阶段第 7 步（表结构版本 4）加的工具调用 id，接在 version3Schema 之后
+const version4Schema = `
+ALTER TABLE tool_calls ADD COLUMN tool_call_id TEXT;
+`;
 
 // 第三阶段（表结构版本 3）加的工具调用表与模型调用表的两列，接在 version2Schema 之后
 const version3Schema = `

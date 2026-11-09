@@ -1,4 +1,4 @@
-import type { Author, Message } from '../message.js';
+import type { Author, Message, Trigger } from '../message.js';
 
 /** 序号区间：from 起（含）到 before 之前（不含），不给的一端不限 */
 export type SeqRange = { from?: number; before?: number };
@@ -104,7 +104,7 @@ export type MessageGlance = {
   /** 同 StoredMessage.createdAt */
   createdAt: string;
   role: Message['role'];
-  /** 用户消息的发言人 */
+  /** 用户消息的发言人；事件没有 */
   author?: Author;
   /** 文字部分按顺序用换行连起来，最多取开头若干个字符（按 Unicode 字符计） */
   text: string;
@@ -217,6 +217,77 @@ export type ConversationInfo = {
 /** 会话连同所在的平台（readConversations 的结果） */
 export type StoredConversation = ConversationInfo & { platform: string };
 
+/**
+ * 任务什么时候到点（ADR-0010），整条存成 JSON（ADR-0005）。核心不解读，下次到点由洛璃服务算。
+ * 一次性的是一个时刻（ISO，UTC）；周期的是种类加时刻 time（`HH:mm`，按服务器所在时区），
+ * 每周的加星期几 weekday（1 是周一，7 是周日），每月的加几号 day（1–31）；
+ * until 是截止的时刻（ISO，UTC），下一次到点晚于它就算完成，不给时不截止。
+ * 新建时 at、until 换成 toISOString 的写法，其余原样。
+ * 以后的触发方式（第八阶段的监视）在这里加一种 kind
+ */
+export type TaskSchedule =
+  | { kind: 'once'; at: string }
+  | { kind: 'daily'; time: string; until?: string }
+  | { kind: 'weekdays'; time: string; until?: string }
+  | { kind: 'weekly'; weekday: number; time: string; until?: string }
+  | { kind: 'monthly'; day: number; time: string; until?: string };
+
+/** active：进行中；done：已完成（一次性的到点了，周期的过了截止）；cancelled：已取消（不删） */
+export type TaskStatus = 'active' | 'done' | 'cancelled';
+
+/**
+ * 一个任务，对应 tasks 的一行（ADR-0005、ADR-0010）。
+ * 时间都是 ISO 的 UTC（toISOString 的写法；写入时换成这种写法）
+ */
+export type Task = {
+  /** 整数，从 1 起，不重用。给模型看的是 t 加它（taskRef） */
+  id: number;
+  conversationId: string;
+  /** 做什么：洛璃建任务时写的一句话 */
+  action: string;
+  schedule: TaskSchedule;
+  /** 谁让建的：触发建任务那次回复的那条消息，连同发言人 */
+  source: Trigger;
+  status: TaskStatus;
+  /** 下次到点；进行中的任务才有（结束时由调用方清掉，查询只看进行中的） */
+  nextDueAt?: string;
+  /** 上次到点；还没到过点时没有 */
+  lastDueAt?: string;
+  /** 到点了几次 */
+  dueCount: number;
+  createdAt: string;
+  /** 完成或取消的时间；进行中的没有 */
+  endedAt?: string;
+};
+
+/** 新建任务：状态为进行中，到点次数为 0 */
+export type NewTask = {
+  conversationId: string;
+  action: string;
+  schedule: TaskSchedule;
+  source: Trigger;
+  nextDueAt?: string;
+  /** 默认为写入时间 */
+  createdAt?: string;
+};
+
+/** 修改任务：只改给出的项；给 null 是清掉（如结束时清掉下次到点） */
+export type TaskChanges = {
+  status?: TaskStatus;
+  nextDueAt?: string | null;
+  lastDueAt?: string | null;
+  dueCount?: number;
+  endedAt?: string | null;
+};
+
+/** 列出任务的条件，都不给时列出全部 */
+export type TaskFilter = {
+  conversationId?: string;
+  status?: TaskStatus;
+  /** 已结束的任务只要这个时刻（含）以后结束的；进行中的不受影响 */
+  endedSince?: string;
+};
+
 /** 一个数据库：多个会话 */
 export type Storage = {
   /** 新建会话，同时写入它的第一段，返回会话 id */
@@ -247,5 +318,19 @@ export type Storage = {
    * 结束时间是开始时间加耗时）；还没有时为 undefined
    */
   lastReply(): Promise<RecentReply | undefined>;
+  // 以下是任务的存取（ADR-0010）。核心只存取，不调度、不检查限额与平台、不计算下次到点。
+  // 读出的都是副本
+  /** 新建任务，返回带 id 的任务；会话不存在时抛错 */
+  createTask(task: NewTask): Promise<Task>;
+  /** 按 id 取；没有时为 undefined */
+  getTask(id: number): Promise<Task | undefined>;
+  /** 按条件列出，按建立先后 */
+  listTasks(filter?: TaskFilter): Promise<Task[]>;
+  /** 修改任务，返回改过的；没有这个任务时抛错 */
+  updateTask(id: number, changes: TaskChanges): Promise<Task>;
+  /** 下次到点不晚于 at 的进行中任务，按下次到点先后（同一时刻按建立先后） */
+  dueTasks(at: string): Promise<Task[]>;
+  /** 进行中任务里最早的下次到点；没有时为 undefined */
+  nextDueAt(): Promise<string | undefined>;
   close(): void;
 };

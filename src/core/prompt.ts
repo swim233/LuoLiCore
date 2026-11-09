@@ -44,6 +44,7 @@ export function summaryInstruction(
 /**
  * 送模型前的格式化，只改送给模型的副本，存储里的消息不变：
  * 用户消息包成 `<message from="名字" uid="id" time="时间">…</message>`，带图片时图片在标签之间；
+ * 事件（metadata 有 event 的用户消息）包成 `<event type="task" task="t7" time="时间">…</event>`；
  * 被中止的助手回复末尾加「（回复被中止）」，出错中断的加「（回复出错中断）」；其他消息原样返回。
  */
 export function formatForModel(message: Message): Message {
@@ -55,22 +56,24 @@ export function formatForModel(message: Message): Message {
 
   // 标签属性，按顺序输出，值为 undefined 的不输出。以后加字段（回复对象等）在这里加一项，
   // 并在 prompts/message-format.md 里说明
-  const attributes: Record<string, string | undefined> = {
-    from: message.metadata?.author?.name,
-    uid: message.metadata?.author?.id,
-    time: formatTime(message.metadata?.createdAt),
-  };
+  const time = formatTime(message.metadata?.createdAt);
+  const event = message.metadata?.event;
+  const tag = event ? 'event' : 'message';
+  const attributes: Record<string, string | undefined> = event
+    ? { type: event.type, task: taskRef(event.taskId), time }
+    : { from: message.metadata?.author?.name, uid: message.metadata?.author?.id, time };
   const attributeText = Object.entries(attributes)
     .flatMap(([name, value]) =>
       value === undefined ? [] : [` ${name}="${escapeAttribute(value)}"`],
     )
     .join('');
-  const open = `<message${attributeText}>`;
+  const open = `<${tag}${attributeText}>`;
+  const close = `</${tag}>`;
   const body = texts.length > 0 ? `\n${escapeBody(texts.join('\n'))}` : '';
 
   if (files.length === 0) {
     // 所有 text part 合成一个，放在第一个 text part 的位置；其他 part 原样保留
-    const text = `${open}${body}\n</message>`;
+    const text = `${open}${body}\n${close}`;
     const firstText = message.parts.findIndex((part) => part.type === 'text');
     return {
       ...message,
@@ -86,9 +89,14 @@ export function formatForModel(message: Message): Message {
     parts: [
       { type: 'text', text: `${open}${body}` },
       ...message.parts.filter((part) => part.type !== 'text'),
-      { type: 'text', text: '</message>' },
+      { type: 'text', text: close },
     ],
   };
+}
+
+/** 给模型看的任务 id：t 加任务的 id，如 t7。事件的 task 属性、任务工具里都用它 */
+export function taskRef(id: number): string {
+  return `t${id}`;
 }
 
 /**
@@ -140,8 +148,8 @@ function escapeAttribute(value: string): string {
     .replaceAll('>', '&gt;');
 }
 
-// 正文只处理会被当成标签的部分：<message、</message 开头的 <（不分大小写）。
-// 代码里的 a < b、<div> 等保持原样
+// 正文只处理会被当成标签的部分：<message、</message、<event、</event 开头的 <（不分大小写），
+// 用户消息与事件的正文都这样转，谁也冒充不了另一种。代码里的 a < b、<div> 等保持原样
 function escapeBody(text: string): string {
-  return text.replace(/<(?=\/?message)/gi, '&lt;');
+  return text.replace(/<(?=\/?(?:message|event))/gi, '&lt;');
 }

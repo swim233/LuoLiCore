@@ -1,6 +1,7 @@
 import { generateId } from 'ai';
 import type { Message } from '../message.js';
 import { DuplicateMessageError } from './errors.js';
+import { isoTime, matchesTask, normalizeChanges, normalizeSchedule, taskSource } from './tasks.js';
 import type {
   ConversationOverview,
   ConversationStore,
@@ -10,6 +11,7 @@ import type {
   Storage,
   StoredMessage,
   StoredSegment,
+  Task,
   ToolCall,
 } from './types.js';
 
@@ -190,6 +192,16 @@ export function createMemoryStorage(): Storage {
     string,
     { platform: string; platformConversationId?: string; data: Data; store: ConversationStore }
   >();
+  // 按 id 升序（即建立先后）；id 从 1 起，不重用
+  const tasks: Task[] = [];
+  let lastTaskId = 0;
+  const findTask = (id: number) => tasks.find((task) => task.id === id);
+  /** 进行中、有下次到点的任务 */
+  const scheduled = () =>
+    tasks.filter(
+      (task): task is Task & { nextDueAt: string } =>
+        task.status === 'active' && task.nextDueAt !== undefined,
+    );
 
   const overviewOf = (id: string, textChars: number): ConversationOverview | undefined => {
     const conversation = conversations.get(id);
@@ -316,6 +328,66 @@ export function createMemoryStorage(): Storage {
       if (!latest) return undefined;
       const { conversationId, call, endedMs } = latest;
       return { conversationId, replyId: call.replyId, endedAt: new Date(endedMs).toISOString() };
+    },
+    async createTask({ conversationId, action, schedule, source, nextDueAt, createdAt }) {
+      if (!conversations.has(conversationId)) throw new Error(`会话 ${conversationId} 不存在`);
+      // 与 SQLite 一样：时间先换成同一种写法，schedule 经过一次 JSON
+      const task: Task = {
+        id: lastTaskId + 1,
+        conversationId,
+        action,
+        schedule: normalizeSchedule(schedule),
+        source: taskSource(source),
+        status: 'active',
+        ...(nextDueAt === undefined ? {} : { nextDueAt: isoTime(nextDueAt) }),
+        dueCount: 0,
+        createdAt: isoTime(createdAt ?? new Date().toISOString()),
+      };
+      lastTaskId = task.id;
+      tasks.push(task);
+      return structuredClone(task);
+    },
+    async getTask(id) {
+      const task = findTask(id);
+      return task && structuredClone(task);
+    },
+    async listTasks(filter = {}) {
+      const { endedSince } = filter;
+      const normalized = {
+        ...filter,
+        ...(endedSince === undefined ? {} : { endedSince: isoTime(endedSince) }),
+      };
+      return structuredClone(tasks.filter((task) => matchesTask(task, normalized)));
+    },
+    async updateTask(id, changes) {
+      // 先换好写法：时间不合法时抛错，任务不变
+      const { status, dueCount, ...times } = normalizeChanges(changes);
+      const task = findTask(id);
+      if (!task) throw new Error(`任务 ${id} 不存在`);
+      if (status !== undefined) task.status = status;
+      if (dueCount !== undefined) task.dueCount = dueCount;
+      for (const key of ['nextDueAt', 'lastDueAt', 'endedAt'] as const) {
+        const value = times[key];
+        if (value === null) delete task[key];
+        else if (value !== undefined) task[key] = value;
+      }
+      return structuredClone(task);
+    },
+    async dueTasks(at) {
+      const time = isoTime(at);
+      return structuredClone(
+        scheduled()
+          .filter((task) => task.nextDueAt <= time)
+          // sort 是稳定的：同一时刻保持建立先后
+          .sort((a, b) => (a.nextDueAt < b.nextDueAt ? -1 : a.nextDueAt > b.nextDueAt ? 1 : 0)),
+      );
+    },
+    async nextDueAt() {
+      return scheduled().reduce<string | undefined>(
+        (earliest, task) =>
+          earliest === undefined || task.nextDueAt < earliest ? task.nextDueAt : earliest,
+        undefined,
+      );
     },
     close() {},
   };

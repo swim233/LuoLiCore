@@ -470,6 +470,47 @@ describe('多步回复', () => {
     expect(logsOf(entries, 'tool.end')[0]?.fields.resultLength).toBe(2);
   });
 
+  it('回复带着 triggers：工具在 ctx.triggers 里拿到原样的一份，改不了，也不受调用方之后改动的影响；不传时为空', async () => {
+    const dice = diceTool();
+    const model = scriptedModel(
+      calls(call('dice', { sides: 6 }, 'call-1'), call('dice', { sides: 8 }, 'call-2')),
+      answer('一个 4 一个 6'),
+      calls(call('dice', { sides: 6 })),
+      answer('4'),
+    );
+    const { conversation } = setup({ model, definitions: [dice.definition] });
+    // 发言人用副本：下面要改调用方的那份，不能改到模块级的 alice
+    const merged = [
+      { author: { ...alice }, messageId: 'm-1', platformMessageId: '41' },
+      { author: { name: '网页用户' }, messageId: 'm-2' },
+    ];
+    const expected = structuredClone(merged);
+
+    await conversation.append({ author: alice, text: '掷两个骰子' });
+    const stream = conversation.reply({ triggers: merged });
+    // 回复开始之后调用方再改自己的那份
+    merged.push({ author: { ...alice }, messageId: 'm-3' });
+    merged[0]!.author.name = '改过';
+    await readAll(stream);
+
+    expect(dice.received).toHaveLength(2);
+    const [first, second] = dice.received.map(({ ctx }) => ctx.triggers);
+    expect(first).toEqual(expected);
+    // 同一次回复的工具拿到同一份
+    expect(second).toBe(first);
+    expect(Object.isFrozen(first)).toBe(true);
+    expect(() => (first as unknown[]).push({})).toThrow(TypeError);
+    expect(() => {
+      (first![0]!.author as { name: string }).name = '工具改的';
+    }).toThrow(TypeError);
+    expect(first).toEqual(expected);
+
+    await conversation.append({ author: alice, text: '再掷一个' });
+    await readAll(conversation.reply());
+    expect(dice.received[2]?.ctx.triggers).toEqual([]);
+    expect(alice).toEqual({ id: 'u-alice', name: 'Alice' });
+  });
+
   it('一步里的两个调用并发执行：两个都等到对方开始才返回', async () => {
     let started = 0;
     let bothStarted: () => void = () => {};

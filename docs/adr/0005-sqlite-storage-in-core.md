@@ -20,8 +20,8 @@ CREATE TABLE messages (
   id                  TEXT PRIMARY KEY,
   conversation_id     TEXT NOT NULL REFERENCES conversations(id),
   seq                 INTEGER NOT NULL,   -- 会话内的顺序
-  role                TEXT NOT NULL,      -- 'user' | 'assistant'
-  author_id           TEXT,               -- 发言人 id；助手的消息为空
+  role                TEXT NOT NULL,      -- 'user' | 'assistant'；事件也是 'user'
+  author_id           TEXT,               -- 发言人 id；助手的消息、事件为空
   platform_message_id TEXT,               -- 平台里的消息 id；编辑时靠它找到这条消息
   created_at          TEXT NOT NULL,      -- 消息本身的时间（用户消息取平台上的发送时间）
   ui_message          TEXT NOT NULL       -- 整条消息的 JSON；上面几列是它的副本，用于查询
@@ -82,6 +82,26 @@ CREATE TABLE tool_calls (
 );
 CREATE INDEX tool_calls_time ON tool_calls(started_at);
 CREATE INDEX tool_calls_tool ON tool_calls(tool, started_at);
+
+-- 表结构版本 5 加入
+CREATE TABLE tasks (
+  id                         INTEGER PRIMARY KEY AUTOINCREMENT, -- 不重用；给模型看的是 't' 加它，如 t7
+  conversation_id            TEXT NOT NULL REFERENCES conversations(id), -- 任务所在的会话，到点时在这里开口
+  action                     TEXT NOT NULL,     -- 做什么：洛璃建任务时写的一句话
+  schedule                   TEXT NOT NULL,     -- 什么时候到点，整条 JSON，见下文
+  source_author_id           TEXT,              -- 谁让建的：发言人 id；平台不提供时为空
+  source_author_name         TEXT NOT NULL,     -- 谁让建的：发言人当时的显示名
+  source_message_id          TEXT NOT NULL,     -- 来源消息：让建任务的那条消息在 messages 里的 id
+  source_platform_message_id TEXT,              -- 来源消息在平台上的 id；到点的回复引用它；没有时为空
+  status                     TEXT NOT NULL,     -- 'active' | 'done' | 'cancelled'
+  next_due_at                TEXT,              -- 下次到点（ISO，UTC）；进行中的任务才有
+  last_due_at                TEXT,              -- 上次到点（ISO，UTC）；还没到过点时为空
+  due_count                  INTEGER NOT NULL DEFAULT 0, -- 到点了几次
+  created_at                 TEXT NOT NULL,     -- 建立时间（ISO，UTC）
+  ended_at                   TEXT               -- 完成或取消的时间（ISO，UTC）；进行中为空
+);
+CREATE INDEX tasks_due          ON tasks(status, next_due_at); -- 要到点的、最近的到点
+CREATE INDEX tasks_conversation ON tasks(conversation_id, status);
 ```
 
 - 消息一条一行，整条 `UIMessage` 存在 `ui_message` 里（ADR-0001）。查询要用的几列是它的副本，写入时一起写，读取以 JSON 为准。消息结构以后加工具调用、图片，不用改表。
@@ -90,6 +110,12 @@ CREATE INDEX tool_calls_tool ON tool_calls(tool, started_at);
 - 图片存为 `data/files/<内容哈希>.<扩展名>`，消息里以 `luoli-file:` 开头的地址引用，发请求时换成图片数据。同一张图只存一份。不建文件表、成员表：名字随每条消息存快照。
 - 模型调用一次一行：一次回复或一次摘要，期间的重试都合在这一行，成功、失败、中止都记。只追加，用来统计 token、缓存命中与失败率；不记金额，要算钱时按当时的单价现算。正常完成的回复的用量仍随助手消息存一份。常用查询在 `docs/queries/usage.sql`。
 - 工具调用一次一行（ADR-0006），挂在所在回复下，用来统计每个工具的次数、失败与超时、耗时，以及结果长度（据此调整历史呈现）。模型传错参数、调了不存在的工具也记一行（结果 `failed`）。不存参数和结果：它们是对话内容，完整的在助手消息里。调用 id 不是对话内容，记下它，面板才能把耗时对上消息里的那次调用；以前的行没有，只能按第几步、工具名和先后对，同一时刻开始的同名调用可能对反。
+- 事件（ADR-0010）按用户消息存在 messages 里：`author_id`、`platform_message_id` 为空，`ui_message` 的 metadata 带 `event`（类型与任务 id）。不另建表，它和消息一起排序号、进段、进摘要。
+- 任务一个一行（ADR-0010），核心只存取：不调度、不检查限额与平台、不计算下次到点，这些在洛璃服务里。取消、完成的任务不删。
+  - `schedule` 整条存 JSON，和消息的做法一样：时间有几种形状（一次性的 `{ kind: 'once', at }`；周期的 `daily`、`weekdays`、`weekly`（加 `weekday`，1 是周一，7 是周日）、`monthly`（加 `day`，1–31），都带 `time`（`HH:mm`，按服务器所在时区），可以带截止时刻 `until`），SQL 不按其中任何一项筛选，只有服务算下次到点时读它。第八阶段的监视是另一种 `kind`（监视器加参数），时间这一列不用改；监视任务没有下次到点，`next_due_at` 为空，定时器取不到它。监视任务的「处理方式」（触发回复、只写历史、洛璃自己决定）到时放进这段 JSON，或者追加一列（一次只加列的迁移）。
+  - 要查的、会改的拆成列：状态、下次到点、上次到点、到点次数、结束时间。定时器只按「进行中 + 下次到点」查（`tasks_due`），面板与工具按会话查。
+  - 来源是建任务那次回复的触发者：发言人的 id 与名字（快照，和消息里的名字一样）、核心的消息 id 与平台消息 id。
+  - 时间都是 ISO 的 UTC，写入时统一成 `toISOString` 的写法（含 `schedule` 里的 `at`、`until`）：到点按字符串比较，写法不一会比错。`schedule` 里的 `time` 是墙上时间，不换。
 - 原文永久保留。开 WAL 模式，表结构版本记在 `PRAGMA user_version`。
 - 每次发给模型的请求原文不在这个库里，存在单独的 `data/requests.db`（ADR-0008）。
 
@@ -104,6 +130,8 @@ CREATE INDEX tool_calls_tool ON tool_calls(tool, started_at);
 - 用量只看日志：日志会被清理，也不便统计；只存在消息 metadata 里：摘要与失败的调用没有地方放。
 - 模型调用按 HTTP 请求一行：失败的请求服务端多半不返回用量，每次请求的细节日志里已有。按步一行同理：一次回复算一次模型调用，费用一眼可见。
 - 工具调用只记日志、不建表：日志会被清理，统计每个工具的成功率与耗时不方便。
+- 任务的时间拆成列（种类、时刻、星期几、几号、截止）：多一种形状就要加列，监视任务的参数更放不下。
+- 整个任务存 JSON、查询的列存副本：状态、下次到点这些常改的项，每次都要连同 JSON 一起改。
 
 ## Consequences
 

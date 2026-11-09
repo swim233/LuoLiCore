@@ -2,6 +2,7 @@ export {
   createConversation,
   type AppendInput,
   type Conversation,
+  type EventInput,
   type ReplyOptions,
 } from './conversation.js';
 export { editMessage } from './edit.js';
@@ -19,13 +20,16 @@ export { imageSize, type ImageSize } from './image-size.js';
 export { silentLogger, type Logger } from './logger.js';
 export type {
   Author,
+  ConversationEvent,
   Message,
   MessageChunk,
   MessageData,
   MessageMetadata,
+  Trigger,
   Usage,
 } from './message.js';
 export { createModel, type ModelOptions } from './model.js';
+export { taskRef } from './prompt.js';
 export {
   createPromptFiles,
   PromptFileError,
@@ -86,11 +90,17 @@ export type {
   ModelCallSummary,
   RecentReply,
   NewConversation,
+  NewTask,
   Segment,
   SeqRange,
   Storage,
   StoredConversation,
   StoredMessage,
   StoredSegment,
+  Task,
+  TaskChanges,
+  TaskFilter,
+  TaskSchedule,
+  TaskStatus,
   ToolCall,
 } from './storage/types.js';

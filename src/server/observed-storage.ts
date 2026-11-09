@@ -72,6 +72,13 @@ export function observeStorage(
     overview: (id, options) => storage.overview(id, options),
     callSummary: (since) => storage.callSummary(since),
     lastReply: () => storage.lastReply(),
+    // 任务的读写先原样转发，写入还没有通知（面板显示任务时再加）
+    createTask: (task) => storage.createTask(task),
+    getTask: (id) => storage.getTask(id),
+    listTasks: (filter) => storage.listTasks(filter),
+    updateTask: (id, changes) => storage.updateTask(id, changes),
+    dueTasks: (at) => storage.dueTasks(at),
+    nextDueAt: () => storage.nextDueAt(),
     close: () => storage.close(),
     async createConversation(conversation) {
       const id = await storage.createConversation(conversation);

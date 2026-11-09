@@ -99,6 +99,7 @@ export function caller(tool: ToolDefinition, logs: Log[]) {
     Promise.resolve(
       tool.execute(tool.input.parse(input), {
         conversation: {},
+        triggers: [],
         abortSignal: signal,
         logger: recorder(logs),
         env: {},

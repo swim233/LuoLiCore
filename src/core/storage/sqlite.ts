@@ -1,6 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { generateId } from 'ai';
 import { DuplicateMessageError } from './errors.js';
+import { isoTime, normalizeChanges, normalizeSchedule, taskSource } from './tasks.js';
 import type { Author, Message } from '../message.js';
 import type {
   ConversationInfo,
@@ -13,6 +14,10 @@ import type {
   StoredConversation,
   StoredMessage,
   StoredSegment,
+  Task,
+  TaskChanges,
+  TaskSchedule,
+  TaskStatus,
   ToolCall,
 } from './types.js';
 
@@ -123,6 +128,26 @@ CREATE INDEX tool_calls_tool ON tool_calls(tool, started_at);
 `,
   `
 ALTER TABLE tool_calls ADD COLUMN tool_call_id TEXT;
+`,
+  `
+CREATE TABLE tasks (
+  id                         INTEGER PRIMARY KEY AUTOINCREMENT,
+  conversation_id            TEXT NOT NULL REFERENCES conversations(id),
+  action                     TEXT NOT NULL,
+  schedule                   TEXT NOT NULL,
+  source_author_id           TEXT,
+  source_author_name         TEXT NOT NULL,
+  source_message_id          TEXT NOT NULL,
+  source_platform_message_id TEXT,
+  status                     TEXT NOT NULL,
+  next_due_at                TEXT,
+  last_due_at                TEXT,
+  due_count                  INTEGER NOT NULL DEFAULT 0,
+  created_at                 TEXT NOT NULL,
+  ended_at                   TEXT
+);
+CREATE INDEX tasks_due          ON tasks(status, next_due_at);
+CREATE INDEX tasks_conversation ON tasks(conversation_id, status);
 `,
 ];
 
@@ -261,6 +286,28 @@ export function openSqliteStorage(path: string): Storage {
      WHERE purpose = 'reply' AND outcome = 'completed'
      ORDER BY unixepoch(started_at, 'subsec') * 1000 + duration_ms DESC, id DESC LIMIT 1`,
   );
+
+  // 任务：要到点的、最近的到点走 tasks_due，按会话列出走 tasks_conversation
+  const insertTask = db.prepare(
+    `INSERT INTO tasks
+       (conversation_id, action, schedule, source_author_id, source_author_name,
+        source_message_id, source_platform_message_id, status, next_due_at, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+     RETURNING *`,
+  );
+  const taskById = db.prepare('SELECT * FROM tasks WHERE id = ?');
+  // 条件为 NULL 的一项不筛；已结束的（不是进行中的）只要结束时间不早于 since 的。
+  // 按会话列出另用一条：写成 (:conversation IS NULL OR …) 时 SQLite 用不上 tasks_conversation
+  const taskFilter = `(:status IS NULL OR status = :status)
+       AND (:since IS NULL OR status = 'active' OR ended_at >= :since)`;
+  const listTasks = db.prepare(`SELECT * FROM tasks WHERE ${taskFilter} ORDER BY id`);
+  const listConversationTasks = db.prepare(
+    `SELECT * FROM tasks WHERE conversation_id = :conversation AND ${taskFilter} ORDER BY id`,
+  );
+  const dueTasks = db.prepare(
+    `SELECT * FROM tasks WHERE status = 'active' AND next_due_at <= ? ORDER BY next_due_at, id`,
+  );
+  const nextDueAt = db.prepare("SELECT MIN(next_due_at) AS at FROM tasks WHERE status = 'active'");
 
   const reserve = (conversationId: string): number => {
     const row = reserveSeq.get(conversationId);
@@ -509,6 +556,61 @@ export function openSqliteStorage(path: string): Storage {
         endedAt: endOf(String(row.started_at), Number(row.duration_ms)),
       };
     },
+    async createTask({ conversationId, action, schedule, source, nextDueAt, createdAt }) {
+      // 外键也会拦，这里先查，报错与内存存储一致
+      if (!conversationExists.get(conversationId)) throw new Error(`会话 ${conversationId} 不存在`);
+      const row = insertTask.get(
+        conversationId,
+        action,
+        JSON.stringify(normalizeSchedule(schedule)),
+        source.author.id ?? null,
+        source.author.name,
+        source.messageId,
+        source.platformMessageId ?? null,
+        nextDueAt === undefined ? null : isoTime(nextDueAt),
+        isoTime(createdAt ?? new Date().toISOString()),
+      );
+      return task(row!);
+    },
+    async getTask(id) {
+      const row = taskById.get(id);
+      return row && task(row);
+    },
+    async listTasks({ conversationId, status, endedSince } = {}) {
+      const filter = {
+        status: status ?? null,
+        since: endedSince === undefined ? null : isoTime(endedSince),
+      };
+      const rows =
+        conversationId === undefined
+          ? listTasks.all(filter)
+          : listConversationTasks.all({ ...filter, conversation: conversationId });
+      return rows.map(task);
+    },
+    async updateTask(id, changes) {
+      // 先换好写法：时间不合法时抛错，任务不变。只改给出的项（null 也是给出，清掉这一列）
+      const normalized = normalizeChanges(changes);
+      const given = (Object.keys(taskColumns) as Array<keyof TaskChanges>).filter(
+        (key) => normalized[key] !== undefined,
+      );
+      const row =
+        given.length === 0
+          ? taskById.get(id)
+          : db
+              .prepare(
+                `UPDATE tasks SET ${given.map((key) => `${taskColumns[key]} = ?`).join(', ')}
+                 WHERE id = ? RETURNING *`,
+              )
+              .get(...given.map((key) => normalized[key] ?? null), id);
+      if (!row) throw new Error(`任务 ${id} 不存在`);
+      return task(row);
+    },
+    async dueTasks(at) {
+      return dueTasks.all(isoTime(at)).map(task);
+    },
+    async nextDueAt() {
+      return optional(nextDueAt.get()?.at);
+    },
     close() {
       if (db.isOpen) db.close();
     },
@@ -624,6 +726,39 @@ function modelCall(row: Record<string, unknown>): ModelCall {
     error: optional(row.error),
     steps: optionalNumber(row.steps),
     toolCalls: optionalNumber(row.tool_calls),
+  };
+}
+
+/** 修改任务时能改的几项与对应的列 */
+const taskColumns = {
+  status: 'status',
+  nextDueAt: 'next_due_at',
+  lastDueAt: 'last_due_at',
+  dueCount: 'due_count',
+  endedAt: 'ended_at',
+} as const satisfies Record<keyof TaskChanges, string>;
+
+/** tasks 的一行；为 NULL 的项不写（与内存存储的形状一致） */
+function task(row: Record<string, unknown>): Task {
+  const nextDueAt = optional(row.next_due_at);
+  const lastDueAt = optional(row.last_due_at);
+  const endedAt = optional(row.ended_at);
+  return {
+    id: Number(row.id),
+    conversationId: String(row.conversation_id),
+    action: String(row.action),
+    schedule: JSON.parse(String(row.schedule)) as TaskSchedule,
+    source: taskSource({
+      author: { id: optional(row.source_author_id), name: String(row.source_author_name) },
+      messageId: String(row.source_message_id),
+      platformMessageId: optional(row.source_platform_message_id),
+    }),
+    status: String(row.status) as TaskStatus,
+    ...(nextDueAt === undefined ? {} : { nextDueAt }),
+    ...(lastDueAt === undefined ? {} : { lastDueAt }),
+    dueCount: Number(row.due_count),
+    createdAt: String(row.created_at),
+    ...(endedAt === undefined ? {} : { endedAt }),
   };
 }
 

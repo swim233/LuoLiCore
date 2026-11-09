@@ -28,7 +28,14 @@ import {
 } from './image-fallback.js';
 import { silentLogger, type Logger } from './logger.js';
 import { combineSteps, toCallTokens, toUsage } from './model.js';
-import type { Author, Message, MessageChunk, MessageMetadata } from './message.js';
+import type {
+  Author,
+  ConversationEvent,
+  Message,
+  MessageChunk,
+  MessageMetadata,
+  Trigger,
+} from './message.js';
 import { formatForModel, summaryInstruction, systemPrompt } from './prompt.js';
 import { PromptFileError, type PromptSource } from './prompt-files.js';
 import { createSegmenter, type SegmentOptions, type Summarize } from './segments.js';
@@ -41,9 +48,11 @@ import { runTool, toToolSet, ToolError, watchToolCalls, type InstalledTool } fro
 export type Conversation = {
   /**
    * 记录一条用户消息，不产生回复。可以附带图片（先存进文件存储，消息里只存地址），
-   * 有图片时可以没有文字。写入前发现会话已空闲太久时，在后台切段，这条消息归入新段
+   * 有图片时可以没有文字。写入前发现会话已空闲太久时，在后台切段，这条消息归入新段。
+   * 给 EventInput 时记录的是一条事件（ADR-0010）：按用户消息存，没有发言人与平台消息 id，
+   * metadata 的 event 带类型与任务 id，只有文字；写入前的空闲检查同上
    */
-  append(input: AppendInput): Promise<Message>;
+  append(input: AppendInput | EventInput): Promise<Message>;
   /**
    * 根据当前历史生成回复。错误以 error chunk 出现在流中，不会抛出；
    * 每次重试前流中出现一个 transient 的 `data-retry` 段；流中途重新生成时随后还有
@@ -85,9 +94,23 @@ export type AppendInput = {
   platformMessageId?: string;
 };
 
+/** 一条事件：由洛璃服务写，正文原样放进 `<event>` 标签（照样转义） */
+export type EventInput = {
+  /** 类型与相关的任务，存进 metadata 的 event */
+  event: ConversationEvent;
+  text: string;
+  /** 事件的时间（ISO）；默认为写入时间 */
+  createdAt?: string;
+};
+
 export type ReplyOptions = {
   /** 中止当前回复。调用时已中止的信号照常走中止路径 */
   abortSignal?: AbortSignal;
+  /**
+   * 触发这次回复的消息，一项一条；合并回复时可能有几项，按先后排。不给时为空。
+   * 核心不读它，只原样交给工具（ctx.triggers）
+   */
+  triggers?: readonly Trigger[];
 };
 
 /** 装了工具时传给 streamText 的几项：工具集与多步的控制 */
@@ -415,46 +438,73 @@ export function createConversation({
     checkOnCreate: checkIdleOnCreate,
   });
 
+  /** 一条用户消息。先存文件，再写消息：消息里的地址总能找到文件。已经存好的直接用它的地址 */
+  async function userMessage({
+    author,
+    text,
+    files = [],
+    createdAt,
+    platformMessageId,
+  }: AppendInput): Promise<Message> {
+    const urls = await Promise.all(
+      files.map((file) => ('url' in file ? file.url : fileStore.save(file))),
+    );
+    return {
+      id: generateId(),
+      role: 'user',
+      metadata: {
+        author,
+        createdAt: createdAt ?? new Date().toISOString(),
+        ...(platformMessageId === undefined ? {} : { platformMessageId }),
+      },
+      parts: [
+        // 有图片时文字可以省略；只有文字时照旧（空文字也写一个 text part）
+        ...(text || files.length === 0 ? [{ type: 'text' as const, text: text ?? '' }] : []),
+        ...files.map((file, index) => ({
+          type: 'file' as const,
+          mediaType: file.mediaType,
+          url: urls[index]!,
+        })),
+      ],
+    };
+  }
+
+  /** 一条事件：按用户消息存，没有发言人与平台消息 id，只有一个文字段 */
+  function eventMessage({ event, text, createdAt }: EventInput): Message {
+    return {
+      id: generateId(),
+      role: 'user',
+      metadata: {
+        event: { type: event.type, taskId: event.taskId },
+        createdAt: createdAt ?? new Date().toISOString(),
+      },
+      parts: [{ type: 'text', text }],
+    };
+  }
+
   return {
-    async append({ author, text, files = [], createdAt, platformMessageId }) {
-      // 先存文件，再写消息：消息里的地址总能找到文件。已经存好的直接用它的地址
-      const urls = await Promise.all(
-        files.map((file) => ('url' in file ? file.url : fileStore.save(file))),
-      );
-      const message: Message = {
-        id: generateId(),
-        role: 'user',
-        metadata: {
-          author,
-          createdAt: createdAt ?? new Date().toISOString(),
-          ...(platformMessageId === undefined ? {} : { platformMessageId }),
-        },
-        parts: [
-          // 有图片时文字可以省略；只有文字时照旧（空文字也写一个 text part）
-          ...(text || files.length === 0 ? [{ type: 'text' as const, text: text ?? '' }] : []),
-          ...files.map((file, index) => ({
-            type: 'file' as const,
-            mediaType: file.mediaType,
-            url: urls[index]!,
-          })),
-        ],
-      };
+    async append(input) {
+      const message = 'event' in input ? eventMessage(input) : await userMessage(input);
       // 写入前看是否已经空闲太久：定时器没赶上、或上次空闲切段失败时，在这里补做，
       // 这条消息归入新段。消息带着平台的发送时间时，按它与上一条的间隔判断：
       // 离线期间积压的消息彼此只隔几秒，不应因为「距今」很久而切段
+      const { createdAt } = input;
       await segmenter.checkIdle(createdAt === undefined ? undefined : Date.parse(createdAt));
       await store.add(message);
       segmenter.wrote();
       return message;
     },
 
-    reply({ abortSignal }: ReplyOptions = {}) {
+    reply({ abortSignal, triggers = [] }: ReplyOptions = {}) {
       if (replying) throw new Error('上一个回复还没结束');
       replying = true;
 
       // 回复 id 也是写入历史的助手消息 id，日志与历史可以对上
       const replyId = generateId();
       const logFields = { conversationId, replyId, modelId: model.modelId };
+      // 交给工具的触发者：复制一份并冻结，这次回复的每个工具拿到的都是同一份，改不了，
+      // 也不受调用方之后改动的影响
+      const toolTriggers = frozenTriggers(triggers);
       // 回复在历史里的序号，开始时预留：生成期间记录进来的消息排在回复之后。
       // 回复失败或没有输出时不写入，这个序号空着
       let seq: number | undefined;
@@ -632,6 +682,7 @@ export function createConversation({
                 timeoutMs: toolMs,
                 step: step + 1,
                 conversation: { id: conversationId, title },
+                triggers: toolTriggers,
                 logger,
                 logFields,
                 record: recordToolCall,
@@ -888,6 +939,15 @@ function replyOutcome({
 
 function hasText(message: Message): boolean {
   return message.parts.some((part) => part.type === 'text' && part.text.trim() !== '');
+}
+
+/** 触发者的副本，数组、每一项、每一项的发言人都冻结 */
+function frozenTriggers(triggers: readonly Trigger[]): readonly Trigger[] {
+  return Object.freeze(
+    triggers.map(({ author, ...rest }) =>
+      Object.freeze({ ...rest, author: Object.freeze({ ...author }) }),
+    ),
+  );
 }
 
 /** 前 count 步的段：每一步从一个 step-start 开始，切在第 count + 1 个 step-start 之前 */

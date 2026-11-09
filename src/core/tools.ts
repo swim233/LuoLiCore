@@ -3,6 +3,7 @@ import type { z } from 'zod';
 import { errorKind } from './errors.js';
 import type { FileStore } from './files.js';
 import type { Logger } from './logger.js';
+import type { Trigger } from './message.js';
 import type { ToolCall } from './storage/types.js';
 import {
   storeToolContent,
@@ -13,7 +14,7 @@ import {
 } from './tool-content.js';
 
 /**
- * 工具执行时拿到的上下文。只往里加字段：以后的能力（触发者、读本会话、平台操作……）都作为新字段
+ * 工具执行时拿到的上下文。只往里加字段：以后的能力（读本会话、平台操作……）都作为新字段
  * 加进来，已有的工具不用改（ADR-0006）
  */
 export type ToolContext<ENV extends string = string> = {
@@ -22,6 +23,11 @@ export type ToolContext<ENV extends string = string> = {
    * title 是这次回复所在段的会话名称（与 system 里的一致，没有名称时没有）
    */
   conversation: { id?: string; title?: string };
+  /**
+   * 触发这次回复的消息（触发者），回复时由前端给出，按先后排；合并回复时可能有几项，
+   * 没给时为空（如任务到点的回复、测试）。只读：同一次回复的工具拿到的是同一份冻结的副本
+   */
+  triggers: readonly Trigger[];
   /** 回复被中止、等模型输出超时、或这次调用超时时触发。核心不等工具停下，有副作用的工具要响应它 */
   abortSignal: AbortSignal;
   /** 日志，每条自动带上会话 id、回复 id、工具名与 toolCallId。不要记参数与结果里的对话内容 */
@@ -281,6 +287,7 @@ export async function runTool(
     timeoutMs,
     step,
     conversation,
+    triggers,
     logger,
     logFields,
     record,
@@ -294,6 +301,7 @@ export async function runTool(
     /** 第几步（从 1 数） */
     step: number;
     conversation: ToolContext['conversation'];
+    triggers: ToolContext['triggers'];
     logger: Logger;
     logFields: object;
     /** 写工具调用表；出错由它自己处理，不抛出 */
@@ -353,6 +361,7 @@ export async function runTool(
   });
   const ctx: ToolContext = {
     conversation,
+    triggers,
     abortSignal: abortSignal ? AbortSignal.any([abortSignal, limit.signal]) : limit.signal,
     logger: withFields(logger, fields),
     env,

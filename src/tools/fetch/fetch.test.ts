@@ -202,6 +202,7 @@ describe('网址', () => {
       Promise.resolve(
         tool.execute(tool.input.parse({ url: `${web.origin}/` }), {
           conversation: {},
+          triggers: [],
           abortSignal: new AbortController().signal,
           logger: recorder([]),
           env: {},
