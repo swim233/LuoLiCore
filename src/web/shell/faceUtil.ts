@@ -117,6 +117,66 @@ export const shrinkRect = (r: Rect, k: number): Rect => ({
   height: r.height * k,
 });
 
+/* 滚动驱动的动画（窗格上下的渐变和模糊，见 app.css「窗格」一节）此刻该有的透明度。
+   刚挂上的窗口里这些动画还没有开始（pending）：时间线要到下一帧才有当前时间，这时读到的是基准值（透明度 0）；
+   从胶囊展开、全屏退回桌面时，复制层是在挂上的那一刻复制的，把这个 0 写死进去，副本里上下的渐变就一直是没有的，
+   滚进头部、输入框下面的内容露出来压在它们上面。这里按动画自己的关键帧、范围和滚动区此刻的位置直接算出该有的值。
+   算不了（时间线已经有当前时间、不是纵向、没有滚动范围、不是线性缓动、关键帧里不只是透明度、范围的写法认不得）就返回 null，
+   调用的地方照旧用读到的值 */
+type Numeric = { value?: number; unit?: string; operator?: string; values?: Iterable<Numeric> };
+function rangePx(v: unknown, max: number): number | null {
+  const n = v as Numeric | null;
+  if (!n) return null;
+  if (n.unit === 'px') return n.value ?? null;
+  if (n.unit === 'percent') return n.value === undefined ? null : (n.value / 100) * max;
+  if (n.operator === 'negate') {
+    const x = rangePx((n as { value?: unknown }).value, max);
+    return x === null ? null : -x;
+  }
+  if (n.operator === 'sum' && n.values) {
+    let sum = 0;
+    for (const x of n.values) {
+      const px = rangePx(x, max);
+      if (px === null) return null;
+      sum += px;
+    }
+    return sum;
+  }
+  return null;
+}
+function scrollDrivenOpacity(a: Animation): number | null {
+  if (typeof ScrollTimeline === 'undefined' || !(a.timeline instanceof ScrollTimeline)) return null;
+  const eff = a.effect as KeyframeEffect | null;
+  const src = a.timeline.source as HTMLElement | null;
+  if (a.timeline.currentTime !== null || !eff || !src || a.timeline.axis === 'x') return null;
+  const max = src.scrollHeight - src.clientHeight;
+  if (max <= 0) return null;
+  const range = a as unknown as {
+    rangeStart?: { offset: unknown };
+    rangeEnd?: { offset: unknown };
+  };
+  const start = rangePx(range.rangeStart?.offset, max);
+  const end = rangePx(range.rangeEnd?.offset, max);
+  if (start === null || end === null || end <= start) return null;
+  const tm = eff.getTiming();
+  if (tm.easing !== 'linear' || tm.direction !== 'normal' || tm.iterations !== 1) return null;
+  const kf = eff.getKeyframes();
+  if (kf.length < 2 || kf.some((k) => k.easing !== 'linear' || k.opacity === undefined))
+    return null;
+  const p = Math.min(1, Math.max(0, (src.scrollTop - start) / (end - start)));
+  for (let i = 1; i < kf.length; i++) {
+    const o0 = kf[i - 1].computedOffset;
+    const o1 = kf[i].computedOffset;
+    if (p <= o1 || i === kf.length - 1) {
+      const v0 = parseFloat(String(kf[i - 1].opacity));
+      const v1 = parseFloat(String(kf[i].opacity));
+      if (Number.isNaN(v0) || Number.isNaN(v1)) return null;
+      return o1 > o0 ? v0 + (v1 - v0) * Math.min(1, Math.max(0, (p - o0) / (o1 - o0))) : v1;
+    }
+  }
+  return null;
+}
+
 /* 复制一份桌面上的部件当形变用的内容层：滚动位置、正在跑的动画此刻的样子都照搬，第一帧和原来的一模一样 */
 /* 复制出来的内容层，带着形变要用的几个临时属性：起点的矩形、各处的滚动位置、挂上页面后补滚动位置的函数 */
 export type CloneEl = HTMLElement & {
@@ -159,7 +219,8 @@ export function cloneFace(face: Face): CloneEl {
     if (!ct) continue;
     const cs = getComputedStyle(t);
     ct.style.transform = cs.transform;
-    ct.style.opacity = cs.opacity;
+    const sd = scrollDrivenOpacity(a);
+    ct.style.opacity = sd === null ? cs.opacity : String(sd);
   }
   const all = src.querySelectorAll('*');
   c._scrolls = [];

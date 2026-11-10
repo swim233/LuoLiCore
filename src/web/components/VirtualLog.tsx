@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { motionOn } from '../lib/prefs';
 
@@ -120,6 +120,22 @@ export function VirtualLog({
     const c = scRef.current;
     return !c || c.scrollHeight - c.scrollTop - c.clientHeight < 80;
   };
+  /* 把虚拟器的位置对到滚动区此刻真实的 scrollTop，并马上重画。
+     虚拟器的位置只靠滚动事件更新，事件要到下一帧才来：挂上这一刻（从胶囊展开、打开全屏时形变用的冻结副本就是这一刻的 DOM），
+     它画的还是 scrollTop 为 0 的那一屏，滚动区却已经在底部或分隔线那里，副本里正文是空白的，要等到副本换成真窗口才出现。
+     layout effect 里定好位置以后调它，重画在同一次提交里同步完成，副本拿到的就是最终要停的那一屏。
+     不用派发滚动事件：虚拟器对滚动事件的通知会 flushSync，在提交阶段调用会报警告 */
+  const [, redraw] = useReducer((n: number) => n + 1, 0);
+  /* 定位之后再校正几次：重画出来的那些条目挂上时量到了真实高度（之前只是估的），位置比估的差几 px。
+     校正在随后的几次提交里做（skip：定位的那次提交自己不做；left：还要做几次，每次按虚拟器此刻的测量重算，几次就收敛），
+     副本才和随后真正停下的位置一致，换成真窗口时不会挪。key 为 null：贴底；否则对齐到那一条 */
+  const fixup = useRef<{ key: string | null; skip: boolean; left: number } | null>(null);
+  const syncOffset = () => {
+    const c = scRef.current;
+    if (!c) return;
+    virt.scrollOffset = c.scrollTop;
+    redraw();
+  };
   const stick = useRef(true);
   const lastKey = useRef<string | null | undefined>(undefined);
   const prevCount = useRef(0);
@@ -192,6 +208,8 @@ export function VirtualLog({
         const m = virt.measurementsCache[anchorIdx];
         const want = anchorAt(c);
         if (m) c.scrollTop = Math.max(0, m.start + dm - want());
+        syncOffset();
+        fixup.current = { key: items[anchorIdx].key, skip: true, left: 3 };
         // 定位期间不贴底（免得和校正打架）；定好以后按真实位置定：内容不满一屏时本来就在底部，
         // 没有滚动事件，不在这里设的话新消息永远不跟到底
         stopSettle.current = settle(c, offBy(c, items[anchorIdx].key, want), () => {
@@ -200,6 +218,10 @@ export function VirtualLog({
       } else {
         stick.current = true;
         if (items.length) virt.scrollToIndex(items.length - 1, { align: 'end' });
+        /* 这一帧就滚到底（虚拟器自己滚到的位置不含底部浮层那一段内边距），并让虚拟器画这一屏 */
+        c.scrollTop = c.scrollHeight;
+        syncOffset();
+        fixup.current = { key: null, skip: true, left: 3 };
         requestAnimationFrame(() => {
           if (items.length) virt.scrollToIndex(items.length - 1, { align: 'end' });
           c.scrollTop = c.scrollHeight;
@@ -229,6 +251,28 @@ export function VirtualLog({
     }
     prevCount.current = items.length;
     prevFirst.current = items[0]?.key;
+  });
+  useLayoutEffect(() => {
+    const f = fixup.current;
+    const c = scRef.current;
+    if (!f || !c) return;
+    if (f.skip) {
+      f.skip = false;
+      return;
+    }
+    if (--f.left <= 0) fixup.current = null;
+    if (f.key === null) {
+      if (stick.current) c.scrollTop = c.scrollHeight;
+    } else {
+      /* 用虚拟器此刻的测量算（不量 DOM 的位置：从胶囊展开时挂上的窗口还带着缩放，量出来的距离不准） */
+      const idx = items.findIndex((it) => it.key === f.key);
+      const m = idx >= 0 ? virt.measurementsCache[idx] : undefined;
+      if (m)
+        c.scrollTop = Math.max(
+          0,
+          m.start + pads(c).top - virt.options.scrollMargin - anchorAt(c)(),
+        );
+    }
   });
   useEffect(() => () => stopSettle.current?.(), []);
   /* 发出消息：先滚到底、设成贴底，之后 1.5 秒内逐帧把没滚到的距离滚掉：新消息、回复进来时高度是慢慢长出来的，

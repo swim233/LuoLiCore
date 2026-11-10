@@ -4394,6 +4394,15 @@ button {
 .still .cur {
   animation: none !important;
 }
+/* 窗格的滚动区、上下的渐变带、虚拟列表的总高和条目的位置：这些是排版，不是装饰，直接变，不用上面统一的 0.12 秒过渡。
+   窗口挂上后浮层的高度（--ht、--hb）要量一次才有，滚动区的内边距、条目的位置随之变；过渡会让它们在头 120 ms 里一边渐变、
+   一边被虚拟列表的定位逻辑校正，时间线里的内容来回挪（有动画时没有这个问题，因为那时没有这个过渡） */
+.still .pane > .pane-sc,
+.still .pane-ov,
+.still .tline > div,
+.still .tline [data-index] {
+  transition: none !important;
+}
 /* 整理模式：不缩、不浮、不晃，直接换成虚线框；按钮、提示条、收纳盒只是很快地淡入淡出 */
 .still .arranging .w > .w-card,
 .still .arranging .cap-wrap > .cap {
