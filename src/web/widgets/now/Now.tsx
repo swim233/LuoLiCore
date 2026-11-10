@@ -36,6 +36,15 @@ function useNowSessions() {
   }, []);
   return n;
 }
+/* 终端的键：一个会话对象一个。会话被拿掉（空闲清理、缩回）后还在显示时对象没变，键也不变，终端不重建（滚动位置、贴底状态都在）；
+   同一个会话再回复时接着用原来的对象（nowModel 的 retained），也不重建；换成别的对象才重建（从底部开始） */
+const sessKeys = new WeakMap<Session, number>();
+let sessKeyN = 0;
+const sessKey = (s: Session) => {
+  let k = sessKeys.get(s);
+  if (k === undefined) sessKeys.set(s, (k = ++sessKeyN));
+  return s.convId + '#' + k;
+};
 const sessionFor = (id: string | null) =>
   id
     ? nowModel.get(id) || (nowModel.last && nowModel.last.convId === id ? nowModel.last : null)
@@ -119,15 +128,7 @@ function NowView({ mode, handle }: ViewProps) {
   let host: React.ReactNode;
   if (!full) {
     const s = sessionFor(curId);
-    host = (
-      <Pane>
-        {s ? (
-          <Terminal key={s.convId + (s === nowModel.get(s.convId) ? '' : '*')} session={s} />
-        ) : (
-          <Empty />
-        )}
-      </Pane>
-    );
+    host = <Pane>{s ? <Terminal key={sessKey(s)} session={s} /> : <Empty />}</Pane>;
   } else {
     let cols: Session[] = list.slice(-3);
     if (!cols.length && last) cols = [last];
@@ -143,7 +144,7 @@ function NowView({ mode, handle }: ViewProps) {
           return (
             <Pane
               className="now-col"
-              key={s.convId + (s === nowModel.get(s.convId) ? '' : '*')}
+              key={sessKey(s)}
               top={
                 <div className="now-col-head">
                   <span className="sdot" data-s={x ? x.state : 'idle'} />

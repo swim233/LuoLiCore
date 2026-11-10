@@ -10,7 +10,8 @@ import type { ImageInfo, MsgRow } from './types';
 /* 「此刻」的数据：每个进行中的回复一份终端日志。只列正在回复的会话加上最近结束的一个。
    行由总线事件拼出来：服务推来的实时事件经 live-feed.ts 变成 reply:*、tool:* 事件（开发模式的模拟服务也一样），
    所以这里只认一种事件，时间（思考了几秒、工具用了多久）都来自事件的时间，没有兜底值。
-   一个会话开头的几行是它最近的几条消息，向服务取（sync.ts 的 recentMessages），取到了排在最前面 */
+   一个会话开头的几行是它最近的几条消息，向服务取（sync.ts 的 recentMessages），取到了排在最前面。
+   「此刻」只列进行中的会话加最近结束的一个，别的被拿掉的会话（finish、clearEnded）的行不丢，收进 retained：同一个会话再回复时接着原来的行往下写 */
 export type LineKind = 'user' | 'luoli' | 'tool' | 'status' | 'think' | 'stats';
 export interface Line {
   id: string;
@@ -64,6 +65,11 @@ export interface Session {
 type Sub = (type: string, convId?: string, line?: Line, extra?: string) => void;
 
 const sessions = new Map<string, Session>();
+/* 被拿掉（不在「此刻」里列了）的会话，它已有的行留在这里，最近回复过的 RETAIN_SESSIONS 个；刷新页面后没有，只剩从服务取的那些 */
+const RETAIN_SESSIONS = 20;
+const retained = new Map<string, Session>();
+/* 每个会话最多留多少行（超出的从最前面丢） */
+const MAX_LINES = 140;
 const subs = new Set<Sub>();
 let last: Session | null = null;
 /** 正在按现场重建（页面刚连上、重连）：文字行不放光标停留的动画 */
@@ -170,17 +176,16 @@ function newSession(convId: string, active: boolean): Session {
     rows: new Set(),
   };
 }
-/* 一个会话开头放几行：取最近几条消息，最多放几行（只留最后的） */
-const SEED_MESSAGES = 5;
-const SEED_LINES = 8;
+/* 一个会话开头放几行：向服务取最近 SEED_MESSAGES 条消息，变成的行都放（总数受 MAX_LINES 限制） */
+const SEED_MESSAGES = 20;
 /** 把取到的消息变成行，排在已有的行前面；放进了几行就返回 true */
 function placeSeed(s: Session, rows: MsgRow[]): boolean {
   const lines: Line[] = [];
   for (const r of rows) if (!s.rows.has(r.id)) lines.push(...linesFromRow(r));
   if (!lines.length) return false;
   for (const r of rows) s.rows.add(r.id);
-  s.lines.unshift(...lines.slice(-SEED_LINES));
-  if (s.lines.length > 140) s.lines.splice(0, s.lines.length - 140);
+  s.lines.unshift(...lines);
+  if (s.lines.length > MAX_LINES) s.lines.splice(0, s.lines.length - MAX_LINES);
   return true;
 }
 /** 取这个会话最近的几条消息，排在已有的行前面。页面里已经取到过这个会话的消息时同步放进来（调用返回时行就在了，
@@ -197,12 +202,39 @@ function seed(s: Session, fresh = false) {
     if (placeSeed(s, rows)) emit('seed', s.convId);
   });
 }
+/** 一个会话不再在「此刻」里列了：它已有的行收进 retained，只留最近的 RETAIN_SESSIONS 个 */
+function retire(s: Session) {
+  if (!s.lines.length) return;
+  retained.delete(s.convId);
+  retained.set(s.convId, s);
+  for (const k of retained.keys()) {
+    if (retained.size <= RETAIN_SESSIONS) break;
+    retained.delete(k);
+  }
+}
 function ensure(convId: string) {
   let s = sessions.get(convId);
   if (!s) {
-    s = newSession(convId, true);
-    sessions.set(convId, s);
-    seed(s);
+    const old = retained.get(convId);
+    if (old) {
+      /* 这个会话以前回复过、被拿掉了：接着原来的行往下写（上一轮的思考、工具、用量行都在），不重新取开头那几条 */
+      retained.delete(convId);
+      s = old;
+      Object.assign(s, {
+        web: db.conv(convId)?.platform === 'web',
+        active: true,
+        endedAt: undefined,
+        replyId: undefined,
+        cur: null,
+        think: null,
+      });
+      s.tools.clear();
+      sessions.set(convId, s);
+    } else {
+      s = newSession(convId, true);
+      sessions.set(convId, s);
+      seed(s);
+    }
     emit('sessions');
   } else if (!s.active) {
     s.active = true;
@@ -215,7 +247,7 @@ function push(s: Session, line: Partial<Line> & { kind: LineKind }) {
   l.id = l.id || uid('l');
   l.at = l.at || Date.now();
   s.lines.push(l);
-  if (s.lines.length > 140) s.lines.splice(0, s.lines.length - 140);
+  if (s.lines.length > MAX_LINES) s.lines.splice(0, s.lines.length - MAX_LINES);
   emit('add', s.convId, l);
   return l;
 }
@@ -252,7 +284,10 @@ function finish(s: Session) {
   s.endedAt = Date.now();
   last = s;
   sessions.forEach((x, k) => {
-    if (x !== s && !x.active) sessions.delete(k);
+    if (x !== s && !x.active) {
+      sessions.delete(k);
+      retire(x);
+    }
   });
   emit('sessions');
 }
@@ -271,7 +306,9 @@ const replying = new Set<string>();
 const get = (id: string) => sessions.get(id);
 
 bus.on('message', ({ convId, row }) => {
-  const s = get(convId);
+  /* 被拿掉的会话（retained）也要收：空闲期别人说的话、触发下一次回复的那一条，都是在会话回复之前到的，
+     那时它不在 sessions 里；下一轮回复接着它的行往下写，不重新取开头，这些消息只能在这里补上 */
+  const s = get(convId) ?? retained.get(convId);
   // 助手的消息写入时回复已经在这里逐行显示过了（reply:* 事件），只加别人发的
   if (s && row && row.role === 'user' && !s.rows.has(row.id)) {
     s.rows.add(row.id);
@@ -404,6 +441,7 @@ bus.on('reply:end', ({ convId, ms, usage }) => {
 bus.on('conv:remove', ({ id }) => {
   replying.delete(id);
   sessions.delete(id);
+  retained.delete(id);
   if (last && last.convId === id) last = null;
   emit('sessions');
 });
@@ -430,6 +468,7 @@ export const nowModel = {
     sessions.forEach((s, k) => {
       if (!s.active) {
         sessions.delete(k);
+        retire(s);
         changed = true;
       }
     });
@@ -438,6 +477,7 @@ export const nowModel = {
   /** 全部清掉（开发模式切换数据） */
   reset() {
     sessions.clear();
+    retained.clear();
     replying.clear();
     last = null;
     emit('sessions');
@@ -451,6 +491,9 @@ export const nowModel = {
    * ids 之外、这边还以为在回复的会话，是断开期间结束了的，悄悄收尾
    */
   rebuild(ids: Set<string>, replay: () => void) {
+    /* 重连：断开期间的消息、回复这边没收到，被拿掉的会话留着的行可能缺了一段。和刷新页面一样，都不要了，
+       这些会话再回复时按新建的来，开头向服务取最近的消息 */
+    retained.clear();
     for (const s of [...sessions.values()]) {
       if (ids.has(s.convId)) {
         sessions.delete(s.convId);

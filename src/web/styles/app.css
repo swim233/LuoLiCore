@@ -895,7 +895,7 @@ button {
    桌面上被挪走的那份 [data-lifted]）、整理模式（整个期间卡片在晃，含拖动的副本）。停下来换回时模糊淡入（见上面的 transition）。
    窗口里别的带模糊的东西（时间线顶上的小提示、会话菜单）同样关掉，复制层里从头到尾没有 backdrop-filter */
 :is(.is-morphing, [data-hide], [data-lifted], .drag-clone, .arranging .w, .arr-leaving .w)
-  :is(.pane-ov > i:not(.tn), .log-pill, .chat-menu) {
+  :is(.pane-ov > i:not(.tn), .log-pill, .chat-menu, .term-jump) {
   -webkit-backdrop-filter: none !important;
   backdrop-filter: none !important;
   transition: none !important;
@@ -2183,11 +2183,15 @@ button {
 }
 
 /* ---------- 终端（「此刻」的样式，用户逐项拼出来的） ----------
-   终端自己是窗格的滚动区（不能往回滚，一直贴底）：最上面的行滚到浮着的头部下面，在窗格的模糊里糊掉 */
+   终端自己是窗格的滚动区：停在底部时一直贴底，可以往上翻（滚动条和会话时间线一样，样式在 .pane > .pane-sc）；
+   滚到浮着的头部、底部下面的行在窗格的模糊里糊掉。滚动条的位置一直留着（scrollbar-gutter: stable，没有溢出时只是一条空的边），
+   有没有滚动条行宽都不变，折行不会因为它出现而变；右边的内边距减掉它的宽度，没有滚动条时文字右边缘和以前一样 */
 .term {
   --sc-pt: 4px;
   --sc-pb: 10px;
-  padding-inline: 12px;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
+  padding-inline: 12px 2px;
   font: 13px/1.6 var(--font-term);
   color: var(--fg);
   font-synthesis: none;
@@ -2209,6 +2213,61 @@ button {
   border-radius: 4px;
   overflow-wrap: anywhere;
   word-break: normal;
+}
+/* 往上翻着、下面来了新内容时，窗格的下浮层里浮出来的「回到最新」：玻璃小药丸（同 .log-pill），在内容和底部渐进模糊的上面 */
+.term-jump-wrap {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 12px;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+}
+.term-jump {
+  all: unset;
+  box-sizing: border-box;
+  pointer-events: auto;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 13px 0 14px;
+  border-radius: 999px;
+  font: 12.5px/1 var(--font-ui, inherit);
+  color: var(--fg);
+  background: var(--glass);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  box-shadow:
+    var(--glass-edge),
+    0 8px 20px -8px rgba(0, 0, 0, 0.7);
+  white-space: nowrap;
+  animation: term-jump-in 0.22s var(--ease-out) both;
+  transition: background-color var(--dur-hover);
+}
+.term-jump:hover {
+  background: color-mix(in srgb, var(--glass) 70%, var(--ctl-hi));
+}
+.term-jump:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+.term-jump .chev {
+  width: 0.42em;
+  height: 0.42em;
+  margin-top: -0.12em;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(45deg);
+  opacity: 0.8;
+}
+@keyframes term-jump-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
 }
 @keyframes tl-in {
   from {
