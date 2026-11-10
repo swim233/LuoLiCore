@@ -7,6 +7,7 @@ import { motionOn } from '../lib/prefs';
    - 切换会话（resetKey 变）：给了 anchorKey 就停在那一条（离浮着的标题下沿留一点空）并且不贴底，否则直接到底；
    - 新条目进来时如果本来就在底部附近（距底 < 80px）就平滑跟到底（动画开着时）；内容变高（逐字、折叠展开）时，原本贴底的继续贴底；
    - 顶上多了条目（往上翻取回了更早的消息）：画面停在原来看的那一条，不跳；
+   - jumpKey 加一（对话里发出了消息）：不管现在滚到哪里，回到最底下，之后新来的内容照常贴底；
    - onScrollState：滚动、内容变了之后报告「在不在最底下」「是不是快到顶了」（时间线据此标已读、取更早的消息）。
      「在最底下」是最后一条完整露在输入框（没有输入框时是窗口底边）上面；
    - 输入框变高（多行、加图片）、窗格变高变矮：原本贴底的继续贴底，最后一条不被盖住。
@@ -38,8 +39,9 @@ function pads(c: HTMLElement) {
 const anchorAt = (c: HTMLElement) => () => pads(c).ht + ANCHOR_OFFSET;
 
 /* 逐帧把 find() 说的偏差滚掉，最多 40 帧；连着 4 帧偏差小于 0.5px 就算稳了；用户自己滚动、点按时立刻放手。
-   结束时（不管怎么结束）调 onDone */
-function settle(c: HTMLElement, find: () => number | null, onDone?: () => void) {
+   结束时（不管怎么结束）调 onDone。holdMs 不为 0 时不看稳不稳、不限帧数，一直校正到过了这么多毫秒（或用户自己滚动）才结束 */
+function settle(c: HTMLElement, find: () => number | null, onDone?: () => void, holdMs = 0) {
+  const t0 = performance.now();
   let frames = 0;
   let stable = 0;
   let dead = false;
@@ -58,7 +60,8 @@ function settle(c: HTMLElement, find: () => number | null, onDone?: () => void) 
       c.scrollTop += d;
       stable = 0;
     } else stable++;
-    if (++frames >= 40 || stable >= 4) return stop();
+    const over = holdMs ? performance.now() - t0 >= holdMs : ++frames >= 40 || stable >= 4;
+    if (over) return stop();
     requestAnimationFrame(step);
   };
   requestAnimationFrame(step);
@@ -85,6 +88,7 @@ export function VirtualLog({
   anchorKey,
   topNotice,
   onScrollState,
+  jumpKey,
 }: {
   items: LogItem[];
   resetKey: string | null;
@@ -96,6 +100,8 @@ export function VirtualLog({
   /** 贴在顶上的小提示（「加载中」） */
   topNotice?: React.ReactNode;
   onScrollState?: (s: ScrollState) => void;
+  /** 每加一次，时间线滚到最底下并重新贴底（对话里发出消息、重试） */
+  jumpKey?: number;
 }) {
   const scRef = useRef<HTMLDivElement>(null);
   /* 上内边距（浮着的标题加留白）：虚拟列表从这里开始，告诉虚拟器（scrollMargin），它算可视范围、滚到某一条才是对的 */
@@ -225,6 +231,27 @@ export function VirtualLog({
     prevFirst.current = items[0]?.key;
   });
   useEffect(() => () => stopSettle.current?.(), []);
+  /* 发出消息：先滚到底、设成贴底，之后 1.5 秒内逐帧把没滚到的距离滚掉：新消息、回复进来时高度是慢慢长出来的，
+     虚拟器自己的滚动（scrollToIndex）在刚滚动过之后会排队等一会儿，不能只靠它跟上。不用平滑滚动（途中的滚动事件会把「贴底」清掉）；
+     用户自己滚动、点按就放手 */
+  const jumpSeen = useRef(jumpKey);
+  useLayoutEffect(() => {
+    if (jumpKey === jumpSeen.current) return;
+    jumpSeen.current = jumpKey;
+    const c = scRef.current;
+    if (!c) return;
+    stopSettle.current?.();
+    stick.current = true;
+    c.scrollTop = c.scrollHeight;
+    stopSettle.current = settle(
+      c,
+      () => c.scrollHeight - c.scrollTop - c.clientHeight,
+      () => {
+        stick.current = nearBottom();
+      },
+      1500,
+    );
+  }, [jumpKey]);
   const total = virt.getTotalSize();
   useEffect(() => {
     const c = scRef.current;

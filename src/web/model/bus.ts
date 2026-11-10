@@ -34,6 +34,7 @@ import type { LiveState, LiveTask } from '../../server/types';
      link                     和洛璃服务的连接状态变了
      chat:switch
      chat:flight    网页对话里发给服务的请求有了变化（发出、有了回复、结束）
+     chat:sent      网页对话里发出了一次请求（发消息、重试）：convId 是它发给的会话，新对话（还没建）是 null；时间线收到后滚到最底下
      chat:draft     输入框的草稿（文字、待发的图片、上传状态）变了
      status         汇总后的状态（status.ts 算出） */
 type Empty = Record<string, never>;
@@ -122,6 +123,7 @@ export interface BusEvents {
   link: Empty;
   'chat:switch': Empty;
   'chat:flight': Empty;
+  'chat:sent': { convId: string | null };
   'chat:draft': Empty;
   status: Snap;
 }

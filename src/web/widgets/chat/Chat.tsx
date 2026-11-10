@@ -201,6 +201,19 @@ const emptyItem = (): LogItem => ({
   ),
 });
 
+/* 这个会话里发出了消息、点了重试：时间线要滚到最底下（窗口里的和全屏里的两份都收到）。返回的数交给 VirtualLog 的 jumpKey */
+function useJumpOnSend(convId: string | null) {
+  const [n, setN] = useState(0);
+  useEffect(
+    () =>
+      bus.on('chat:sent', (e) => {
+        if (e.convId === convId) setN((x) => x + 1);
+      }),
+    [convId],
+  );
+  return n;
+}
+
 /* 刚发出的第一句和它的回复：新对话发出以后，服务回应（收下）之前；收下后对话马上换成这个会话，但它的消息还没取到时也先这样显示 */
 function startedItems(req: Req): LogItem[] {
   const items: LogItem[] = [{ key: 'pending', node: <PendingBubble req={req} /> }];
@@ -216,9 +229,16 @@ function startedItems(req: Req): LogItem[] {
 function NewLog() {
   useBusRev(['chat:flight', 'reply:info', 'conv:messages']);
   useStore(chatState, (s) => s.creating);
+  const jump = useJumpOnSend(null);
   const req = creatingReq();
   return (
-    <VirtualLog items={req ? startedItems(req) : [emptyItem()]} resetKey="new" label="对话" live />
+    <VirtualLog
+      items={req ? startedItems(req) : [emptyItem()]}
+      resetKey="new"
+      label="对话"
+      live
+      jumpKey={jump}
+    />
   );
 }
 
@@ -236,6 +256,7 @@ function ChatLog({ convId }: { convId: string }) {
     'link',
   ]);
   const phase = useLinkPhase();
+  const jump = useJumpOnSend(convId);
   const conv = db.conv(convId);
   const info = db.msgInfo.get(convId);
   const hasInfo = !!info;
@@ -275,7 +296,13 @@ function ChatLog({ convId }: { convId: string }) {
   const started = !info || info.state === 'loading' ? startedFrom(convId) : undefined;
   if (started)
     return (
-      <VirtualLog items={startedItems(started)} resetKey={'new:' + convId} label="对话" live />
+      <VirtualLog
+        items={startedItems(started)}
+        resetKey={'new:' + convId}
+        label="对话"
+        live
+        jumpKey={jump}
+      />
     );
   if (phase === 'down' && info?.state !== 'ready')
     return note('连不上洛璃服务', '连上后会自动恢复');
@@ -390,6 +417,7 @@ function ChatLog({ convId }: { convId: string }) {
       live
       topNotice={topNotice}
       onScrollState={onScrollState}
+      jumpKey={jump}
     />
   );
 }
@@ -579,11 +607,23 @@ function Composer({ convId, fullId }: { convId: string | null; fullId: string })
   );
 }
 
+/* 输入框的键：换会话就重建（草稿按会话分开）；唯一的例外是新对话发出第一句、服务把会话建好切过来：
+   输入框接着用，它还握着焦点，接着打的字要进输入框（带过去的字见 chatCore.ts 的 carryNewDraft） */
+function useInputKey(cur: string | null) {
+  const s = useRef({ cur, n: 0 });
+  if (s.current.cur !== cur) {
+    const created = s.current.cur === null && cur !== null && !!startedFrom(cur);
+    s.current = { cur, n: created ? s.current.n : s.current.n + 1 };
+  }
+  return 'input-' + s.current.n;
+}
+
 function ChatView({ mode }: ViewProps) {
   const full = mode === 'full';
   useBusRev(['chat:switch', 'conv:add', 'conv:update', 'conv:remove', 'data:reset', 'message']);
   useStore(chatState, (s) => s.cur + (s.isNew ? '*' : ''));
   const cur = chatCur();
+  const inputKey = useInputKey(cur);
   const c = db.conv(cur);
   const [menu, setMenu] = useState(false);
   const [detail, setDetail] = useState(true);
@@ -608,11 +648,7 @@ function ChatView({ mode }: ViewProps) {
   const title = c ? c.title : '新对话';
   const body = cur ? <ChatLog key={'log-' + cur} convId={cur} /> : <NewLog key="log-new" />;
   const composer = (
-    <Composer
-      key={'input-' + (cur || 'none')}
-      convId={cur}
-      fullId={full ? 'chat-input-full' : 'chat-input'}
-    />
+    <Composer key={inputKey} convId={cur} fullId={full ? 'chat-input-full' : 'chat-input'} />
   );
   const bottom = (
     <>

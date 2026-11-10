@@ -19,6 +19,7 @@ import {
   IMAGE_TYPES,
   MAX_BYTES,
   MAX_IMAGES,
+  NEW_KEY,
   switchTo,
 } from './chatState';
 import type { Att } from './chatState';
@@ -126,6 +127,7 @@ function onChunk(req: Req, c: ChatChunk) {
         if (chatCur() === null) {
           ensureConversation(req.convId, c.data.title);
           getSource().openConversation(req.convId);
+          carryNewDraft(req.convId);
           switchTo(req.convId);
         }
       }
@@ -155,6 +157,19 @@ function onChunk(req: Req, c: ChatChunk) {
       break;
     default:
   }
+}
+
+/** 发出第一句以后、服务回应之前，在新对话的输入框里接着打的字（和图片）：切到新会话时带过去，接着打字不丢 */
+function carryNewDraft(convId: string) {
+  const from = draftOf(NEW_KEY),
+    to = draftOf(convId);
+  if (from === to) return;
+  if (from.text) {
+    to.text = to.text ? to.text + from.text : from.text;
+    from.text = '';
+  }
+  to.atts.push(...from.atts.splice(0));
+  draftChanged();
 }
 
 function finish(req: Req, isError: boolean, isAbort: boolean) {
@@ -384,6 +399,7 @@ export async function sendChat(convId: string | null, rawText: string): Promise<
       .sendMessage({ ...(text ? { text } : {}), files }, { metadata: meta })
       .catch(() => {});
     draftChanged();
+    bus.emit('chat:sent', { convId });
     return true;
   } finally {
     d.sending = false;
@@ -410,6 +426,7 @@ export function retryChat(convId: string) {
   );
   const meta: SendMeta = { conversationId: convId };
   void req.chat.regenerate({ metadata: meta }).catch(() => {});
+  bus.emit('chat:sent', { convId });
 }
 
 /** 中止这个会话进行中的回复，同时取消排队的补回复（排队的消息留在历史里）。还没建好的新会话，直接断开请求 */
