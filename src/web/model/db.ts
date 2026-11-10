@@ -1,3 +1,4 @@
+import { plainPreview } from '../lib/markdown';
 import { firstSentence } from './events';
 import { assistantName } from './who';
 import type { Conversation, MsgRow, Segment, TaskRow, TodaySummary } from './types';
@@ -84,7 +85,8 @@ class Db {
     if (!l) return '';
     if (l.event) return firstSentence(l.event, l.text);
     const name = l.role === 'assistant' ? assistantName() : l.author;
-    const text = l.text || '（没有文字）';
+    // 洛璃的回复是 Markdown，预览里去掉符号；别人发的消息在气泡里就是原样的文字，预览也原样
+    const text = (l.role === 'assistant' ? plainPreview(l.text) : l.text) || '（没有文字）';
     return name ? name + '：' + text : text;
   }
 

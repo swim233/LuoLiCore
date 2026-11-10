@@ -43,6 +43,8 @@ const REPLIES = [
   '唔，让我数数星星再回答你……一、二、三……好啦，答案是：先去喝杯水，休息一下眼睛！',
   '这个可以有！要不要我帮你列个清单？一步一步来，一点都不难～',
 ];
+const MD_REPLY =
+  '## 清单\n\n**第一步**：先 `npm install`，再看 https://example.com/docs。\n\n- 第一项\n- 第二项\n  - 嵌套的\n\n| 名字 | 数量 |\n|---|---|\n| 苹果 | 3 |\n\n```js\nconsole.log("你好");\n```\n\n> 一句引用';
 let chatN = 0;
 interface Script {
   think: { ms: number; text: string };
@@ -82,6 +84,8 @@ function scriptOf(text: string, nImg: number): Script {
   if (/重试/.test(text)) base.retry = true;
   if (/出错|报错/.test(text)) base.failAt = 14;
   if (/慢/.test(text)) base.text = REPLIES.join('').repeat(2);
+  /* 消息里写「写法」：回复里带各种 Markdown，看逐字结束后换成 Markdown 排版 */
+  if (/写法|markdown/i.test(text)) base.text = MD_REPLY;
   if (url) {
     const bad = /gone|404/.test(url);
     return {

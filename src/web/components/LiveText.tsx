@@ -1,8 +1,8 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { Hl } from './Hl';
+import { Markdown } from './Markdown';
 import { StreamText } from './stream';
 
-/* 对话气泡里正在逐字出的正文：命令式的小岛（每个字各自落下），出完后光标再停一会儿（lingerUntil 之前），淡出，换成静态的高亮文字 */
+/* 对话气泡里正在逐字出的正文：命令式的小岛（每个字各自落下），出完后光标再停一会儿（lingerUntil 之前），淡出，换成静态的 Markdown（洛璃的回复） */
 export function LiveText({
   convId,
   text,
@@ -43,11 +43,6 @@ export function LiveText({
   }, [streaming, lingerUntil]);
   /* 两个分支要有不同的 key：React 看两个都是同一位置的 span 会复用同一个节点，StreamText 命令式插进去的逐字节点（.ch）还留在里面，
      换成静态文字时就追加在后面，正文出现两份。有了 key 就整个换掉 */
-  if (done)
-    return (
-      <span key="static">
-        <Hl text={text} hits={false} />
-      </span>
-    );
+  if (done) return <Markdown key="static" text={text} hits={false} />;
   return <span key="stream" ref={ref} style={{ whiteSpace: 'pre-wrap' }} />;
 }

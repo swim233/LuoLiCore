@@ -1,8 +1,10 @@
 import { Fragment, memo } from 'react';
 import type { CSSProperties } from 'react';
 import { motionOn } from '../lib/prefs';
+import { linkHref, splitUrlTail } from '../lib/url';
 import type { ImagePart } from '../model/types';
 import { assistant, useAssistant } from '../model/who';
+import { Link } from './Link';
 
 /* 正文高亮：网址、@提及、引号里的话、提到助手（名字、唤醒词，由服务告诉面板）、数字。
    @提及里认名字、唤醒词和 bot 的 @用户名：提到她的 @ 加亮 */
@@ -57,19 +59,43 @@ export function hlTokens(text: string, hits: boolean): Tok[] {
   if (last < text.length) out.push({ t: text.slice(last), c: '' });
   return out;
 }
-export const Hl = memo(function Hl({ text, hits }: { text: string; hits: boolean }) {
+/* links：认出的网址是不是做成能点的链接（默认是；已经在链接里面的文字不能再嵌一层链接，传 false）。
+   网址末尾紧跟的标点不算网址；不是 http、https 的（认不出来的）当普通文字 */
+export const Hl = memo(function Hl({
+  text,
+  hits,
+  links = true,
+}: {
+  text: string;
+  hits: boolean;
+  links?: boolean;
+}) {
   useAssistant(); // 名字、唤醒词变了要重新高亮
   return (
     <>
-      {hlTokens(text, hits).map((x, i) =>
-        x.c ? (
+      {hlTokens(text, hits).map((x, i) => {
+        if (x.c === 'hl-url') {
+          const [url, tail] = splitUrlTail(x.t);
+          const href = links ? linkHref(url) : null;
+          if (href)
+            return (
+              <Fragment key={i}>
+                <Link href={href} className="hl-url">
+                  {url}
+                </Link>
+                {tail}
+              </Fragment>
+            );
+          return <Fragment key={i}>{x.t}</Fragment>;
+        }
+        return x.c ? (
           <span key={i} className={x.c}>
             {x.t}
           </span>
         ) : (
           <Fragment key={i}>{x.t}</Fragment>
-        ),
-      )}
+        );
+      })}
     </>
   );
 });

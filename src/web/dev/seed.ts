@@ -205,6 +205,118 @@ const cancelledAt = (ms: number) => ({
   endedAt: isoOf(ms),
 });
 
+/* 各种 Markdown 的写法（洛璃的回复）和带网址的群友消息：看气泡、时间线、「此刻」里怎么画。放在最旧的两个会话里，不挤占列表顶上的位置 */
+const MD_RICH = [
+  '## 周末聚会安排',
+  '',
+  '**时间**：周六下午 3 点，*老地方*咖啡馆（~~原定周日~~ 已改）。行内代码 `npm run build` 和 `a < b && c > d`。',
+  '一个回车就换行（第二行）',
+  '**注意：**请先备份。前文**加粗**后文，说**「引号」**内容，*斜体：*文字，**年龄：**12 岁，使用 Docker**（推荐）**默认。2*3*4 和 snake_case_name 照旧。',
+  '符号 a < b && c > d、R&D，实体 &amp; &lt;div&gt; 和 &#38;，代码里的 `&amp;` 不解。',
+  '第三行，带一个网址 https://example.com/a?b=1。后面的句号不算网址。',
+  '',
+  '1. 带书：《献给阿尔吉侬的花束》',
+  '2. 带零食',
+  '   - 甜的',
+  '   - 咸的',
+  '3. 看看 [活动页面](https://example.com/events?id=7) 里的说明',
+  '',
+  '- [x] 订位',
+  '- [ ] 买蛋糕',
+  '',
+  '> 读书是一个人的狂欢，聊书是一群人的。',
+  '> 第二行引用',
+  '',
+  '### 安排表',
+  '',
+  '| 日期 | 地点 | 备注 |',
+  '|:--|:-:|--:|',
+  '| 周六 | 老地方咖啡馆，三楼靠窗的位置，记得带伞 | 15:00 |',
+  '| 周日 | 线上 | 20:00 |',
+  '',
+  '| 列一 | 列二 | 列三 | 列四 | 列五 | 列六 | 列七 | 列八 |',
+  '|---|---|---|---|---|---|---|---|',
+  '| aaaaaaaaaaaaaa | bbbbbbbbbbbbbbbbbb | cccccccccccccccc | dddddddddddddd | eeeeeeeeeeeeee | ffffffffffff | gggggggggg | hhhhhhhhhhhh |',
+  '',
+  '```ts',
+  'const message = `这是一行很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长的字符串 ${a + b}`;',
+  'function add(a: number, b: number) {',
+  '  return a + b;',
+  '}',
+  '```',
+  '',
+  '---',
+  '',
+  '这句有半个 **加粗没闭合，照原样显示。',
+  '',
+  '图片 ![封面](https://example.com/cover.png) 不加载，显示成链接；裸网址 example.com/docs 和 www.example.org 也能点；',
+  '这个 [坏链接](javascript:alert(1)) 和 javascript:alert(1) 不能点；<b>原始 HTML</b> 当文字。',
+].join('\n');
+const MD_SHORT = '只有一个网址的回复：https://book.example.com/algernon';
+
+function seedMarkdown(now: number) {
+  const md = server.addConv({
+    platform: 'telegram',
+    kind: 'group',
+    title: '写法测试',
+    chatId: '-1001288369999',
+    at: now - 15 * DAY,
+    id: 'c-md',
+  }).id;
+  server.addSeg(md, 'first', now - 15 * DAY, null);
+  U(
+    md,
+    1001,
+    '看这个 https://example.com/a?b=1。还有 example.com/docs 和 www.example.org',
+    now - 15 * DAY,
+  );
+  U(
+    md,
+    1002,
+    '这些不是 Markdown：**不是加粗** `不是代码` [不是链接](https://example.com)',
+    now - 15 * DAY + MIN,
+  );
+  U(
+    md,
+    1003,
+    'javascript:alert(1) 和 https://example.com@evil.com/ 都不能点',
+    now - 15 * DAY + 2 * MIN,
+  );
+  U(md, 1001, '@洛璃 把周末聚会的安排整理一下', now - 15 * DAY + 3 * MIN);
+  A(md, MD_RICH, now - 15 * DAY + 4 * MIN, { usage: [2400, 1536, 380] });
+  U(md, 1004, '谢谢～ 再给个网址', now - 15 * DAY + 5 * MIN);
+  A(md, MD_SHORT, now - 15 * DAY + 6 * MIN, { usage: [2600, 2304, 30] });
+
+  const web = server.addConv({
+    platform: 'web',
+    kind: 'web',
+    title: '写法测试（对话）',
+    at: now - 16 * DAY,
+    id: 'c-md-web',
+  }).id;
+  server.addSeg(web, 'first', now - 16 * DAY, null);
+  U(
+    web,
+    WEB_AUTHOR,
+    '把周末聚会的安排整理一下，看这个 https://example.com/a?b=1。**不是加粗**',
+    now - 16 * DAY,
+  );
+  A(web, MD_SHORT, now - 16 * DAY + MIN, { usage: [2600, 2304, 30] });
+  A(web, MD_RICH, now - 16 * DAY + 2 * MIN, { usage: [2400, 1536, 380] });
+
+  // 预览：只剩代码围栏的一行（被截断的回复），退回原文显示，不是「没有文字」
+  const fence = server.addConv({
+    platform: 'web',
+    kind: 'web',
+    title: '预览测试',
+    at: now - 17 * DAY,
+    id: 'c-md-fence',
+  }).id;
+  server.addSeg(fence, 'first', now - 17 * DAY, null);
+  U(fence, WEB_AUTHOR, '写个脚本', now - 17 * DAY);
+  A(fence, '```python', now - 17 * DAY + MIN, { usage: [2600, 2304, 30] });
+}
+
 function seedNormal() {
   const now = Date.now();
   const book = server.addConv({
@@ -521,6 +633,8 @@ function seedNormal() {
   A(w2, '到点啦～ 该喝水了，顺便站起来活动一下～', now - 19 * HOUR + 20e3, {
     usage: [1230, 768, 28],
   });
+
+  seedMarkdown(now);
 
   /* 今天的模型调用（模拟）：42 次完成，2 次失败 */
   const t0 = startOfDay(now),

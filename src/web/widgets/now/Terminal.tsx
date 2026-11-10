@@ -2,6 +2,7 @@ import { memo, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { Hl, Spin } from '../../components/Hl';
+import { Markdown } from '../../components/Markdown';
 import { Pic } from '../../components/Pic';
 import { STAR_SVG, StreamText } from '../../components/stream';
 import { EASE_OUT_CSS } from '../../lib/easing';
@@ -176,7 +177,7 @@ const TermLine = memo(function TermLine({
         <StreamBody line={line} convId={convId} onSettled={() => setSettled(true)} />
       ) : (
         <span className="tl-body">
-          <Hl text={line.text || ''} hits={false} />
+          <Markdown text={line.text || ''} hits={false} />
         </span>
       );
   } else if (line.kind === 'tool') {

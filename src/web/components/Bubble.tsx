@@ -1,6 +1,7 @@
 import { memo, useLayoutEffect, useRef } from 'react';
 import { Hl, Spin } from './Hl';
 import { LiveText } from './LiveText';
+import { Markdown } from './Markdown';
 import { Pic } from './Pic';
 import { motionOn } from '../lib/prefs';
 import { nf } from '../lib/util';
@@ -12,7 +13,8 @@ import { colorOf } from '../model/who';
    - 思考：折叠，写「思考了 N 秒」（消息里记了才有，以前的消息写「思考过程」），展开是思考的内容；
    - 工具调用：折叠，一行是工具名加给界面看的一句话（没有就是参数的前一截），右边是状态（转圈、✓ 0.8s、× 0.8s）；
      展开是参数、结果的开头与总长度、结果里的图片，出错时是错误说明；
-   - 文字：live 时最后一段文字逐字落下（对话里自己这个标签页正在出的回复），其余静态高亮。 */
+   - 文字：洛璃的回复按 Markdown 画（components/Markdown.tsx），别人发的消息保留原样的文字和换行、只做高亮（网址是能点的链接）；
+     live 时最后一段文字逐字落下（对话里自己这个标签页正在出的回复），出完以后换成静态的。 */
 const fmtMs = (ms: number) => (ms / 1000).toFixed(1) + 's';
 
 /** 工具参数的全文（太长截短） */
@@ -139,11 +141,14 @@ export interface LiveInfo {
 export function Blocks({
   parts,
   hits,
+  md,
   live,
   ended,
 }: {
   parts: BPart[];
   hits: boolean;
+  /** 文字按 Markdown 画（洛璃的回复）；否则原样显示 */
+  md: boolean;
   live?: LiveInfo;
   /** 这条消息已经结束的方式：中止、出错；还在进行或正常结束为 null */
   ended: 'abort' | 'fail' | null;
@@ -176,18 +181,18 @@ export function Blocks({
     else if (p.text) {
       blocks.push(
         i === liveAt && live ? (
-          <span className="msg-text" key={i}>
+          <div className="msg-text" key={i}>
             <LiveText
               convId={live.convId}
               text={p.text}
               streaming={live.streaming}
               lingerUntil={live.lingerUntil}
             />
-          </span>
+          </div>
         ) : (
-          <span className="msg-text" key={i}>
-            <Hl text={p.text} hits={hits} />
-          </span>
+          <div className="msg-text" key={i}>
+            {md ? <Markdown text={p.text} hits={hits} /> : <Hl text={p.text} hits={hits} />}
+          </div>
         ),
       );
     }
@@ -251,7 +256,7 @@ export const MsgBubble = memo(function MsgBubble({
         )}
       </div>
       <div className="bubble">
-        <Blocks parts={parts} hits={!isA} live={live} ended={ended} />
+        <Blocks parts={parts} hits={!isA} md={isA} live={live} ended={ended} />
         {aborted && <span className="mark">{abortMark}</span>}
         {failed && <span className="mark is-err">（回复出错中断）</span>}
       </div>
