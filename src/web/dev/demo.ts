@@ -17,6 +17,7 @@ import { WEB_AUTHOR, toggleDemo } from './demo-state';
 import type { Dataset } from './demo-state';
 import { TODAY_DEF } from '../widgets/today/Today';
 import { chatCur, resetChatState } from '../widgets/chat/chatState';
+import { resetSessState } from '../widgets/sessions/sessionsState';
 
 /* 演示控制的动作：用模拟事件检验自适应和动画 */
 const CONV_KEYS: Record<string, { title: string; kind: 'group' | 'private'; chat: string }> = {
@@ -293,6 +294,7 @@ export function setData(kind: Dataset) {
   loadData(kind);
   mockLive.lastReply = server.lastAssistant();
   resetChatState();
+  resetSessState();
   nowCtl.cancel();
   desk.set({ nowFloat: false, floatTop: null });
   mockSource.resync();

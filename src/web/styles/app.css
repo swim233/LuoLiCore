@@ -2820,6 +2820,55 @@ button {
 .sess-back {
   display: none;
 }
+/* 窗口里的会话：列表、时间线两层叠在一起，各铺满窗口；不显示的那层只是隐藏（visibility，滚动位置原样留着），切换的位移和淡入由 Sessions.tsx 的动画做 */
+.sess-win {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+}
+.sess-layer {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+}
+.sess-layer > .pane {
+  flex: 1 1 auto;
+}
+.sess-layer.is-off {
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+/* 动画关掉时直接切，不用样式表里统一的那个 0.12 秒淡入淡出 */
+.still .sess-layer {
+  transition: none !important;
+}
+/* 窗口里时间线的头部：「‹ 返回」是带字的按钮，标题让给后面的平台标记和任务数 */
+.sess-win-head {
+  padding-inline: 12px;
+  gap: 8px;
+}
+.sess-win-head .sess-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  width: auto;
+  height: 28px;
+  padding: 0 10px 0 8px;
+  margin-left: -4px;
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+.sess-win-head .sess-back span {
+  font-size: 17px;
+  line-height: 1;
+  transform: translateY(-1px);
+}
+.sess-win-head h3 {
+  max-width: none;
+}
 .pchip {
   font-size: 11px;
   line-height: 18px;
@@ -3779,6 +3828,14 @@ button {
   width: min(420px, calc(100vw - 48px));
   max-height: min(380px, calc(var(--ph, 9999px) - var(--ht, 0px) - 8px));
   gap: 0;
+}
+/* 窗口里的头部窄：浮层相对头部（整排的宽度）定位，右对齐，宽度不超过窗口 */
+.sess-win-head .task-chip {
+  position: static;
+}
+.sess-win-head .chat-menu.task-pop {
+  right: 8px;
+  width: min(420px, calc(100% - 16px));
 }
 .task-pop .task-row {
   border-radius: 9px;

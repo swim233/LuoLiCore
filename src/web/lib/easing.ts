@@ -38,6 +38,10 @@ export const DUR_GLIDE_IN = 140;
 export const DUR_GLIDE_OUT = 250;
 /* 窗格的模糊：形变结束后换回模糊时的淡入（模糊半径从 0 长到原样，渐变的底一直在） */
 export const DUR_BLUR_IN = 200;
+/* 会话部件在窗口里的两层（列表、时间线）互相切换：位移加淡入，曲线用 EASE_OUT */
+export const DUR_LAYER = 260;
+/* 切换时两层各自平移的距离（像素），进来的从这里滑到位，出去的滑向反方向 */
+export const LAYER_SHIFT = 28;
 
 /* CSS 变量：写进 <head> 里的一个 <style>（不写 <html> 的行内样式，免得和「结束后没有残留的行内样式」的检查混在一起） */
 document.getElementById('easing-vars')?.remove();
