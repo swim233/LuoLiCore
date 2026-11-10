@@ -14,7 +14,7 @@ import { lastOnlineText, STATE_TEXT, status, useStatus } from '../../model/statu
 import { useAssistantName } from '../../model/who';
 import { nowCtl } from '../../state/actions';
 import { pop } from '../../state/ui';
-import { stardust } from './stardust';
+import { stardustAtEnd, stardustStart } from './stardust';
 import { Terminal } from './Terminal';
 import type { ViewProps, WidgetDef } from '../types';
 
@@ -228,7 +228,9 @@ export const NOW_DEF: WidgetDef = {
     };
     w.on('reply:wait', expand);
     w.on('reply:start', expand);
-    w.on('reply:end', ({ convId }) => stardust(convId));
+    w.on('reply:start', ({ convId }) => stardustStart(convId));
+    /* 回复正常完成时的星尘：最后一个字出现时从光标散开（逐字放完的那一刻，Typed.tsx 各处各自调 stardustAt）；这里只管没有光标可散的情况 */
+    w.on('reply:end', ({ convId }) => stardustAtEnd(convId));
     w.on('reply:error', () => {
       w.flash('error');
       pulse(document.getElementById('top-status'));

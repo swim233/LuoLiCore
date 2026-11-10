@@ -194,7 +194,7 @@ function finish(req: Req, isError: boolean, isAbort: boolean) {
     req.shown = req.shown || req.how === 'error' || req.sawAbort;
   }
   flight();
-  sweepLater(req.lingerUntil - Date.now() + 200);
+  sweepLater(req.lingerUntil - Date.now() + CURSOR_GRACE_MS);
 }
 
 function drop(req: Req) {
@@ -204,12 +204,16 @@ function drop(req: Req) {
   for (const a of req.atts) URL.revokeObjectURL(a.url);
 }
 
+/** 光标停留到 lingerUntil 以后，再留这么久才清：逐字输出放完队列里剩下的字要一会儿（最多约 0.3 秒，lib/typing.ts 的 LAG_MS），
+ *  停留是从放完起算的，再加光标淡出的 0.5 秒（Typed.tsx） */
+const CURSOR_GRACE_MS = 1000;
+
 /** 结束了、光标停够了的请求，回复已经写进历史（或者本来就没有内容）的，不再需要了。出错的（没写进历史、留着给「重试」用的）留到下一次发送 */
 function sweep() {
   const now = Date.now();
   let changed = false;
   for (const r of [...reqs]) {
-    if (!r.finished || now < r.lingerUntil) continue;
+    if (!r.finished || now < r.lingerUntil + CURSOR_GRACE_MS) continue;
     const written = !!r.convId && !!r.replyId && db.msgs(r.convId).some((m) => m.id === r.replyId);
     const keep = r.how === 'error' && r.accepted && !written;
     if (written || (!r.content && !keep)) {

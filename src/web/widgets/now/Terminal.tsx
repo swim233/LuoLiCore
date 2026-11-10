@@ -2,9 +2,10 @@ import { memo, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { Hl, Spin } from '../../components/Hl';
+import { Star4 } from '../../components/icons';
 import { Markdown } from '../../components/Markdown';
 import { Pic } from '../../components/Pic';
-import { STAR_SVG, StreamText } from '../../components/stream';
+import { Typed } from '../../components/Typed';
 import { EASE_OUT_CSS } from '../../lib/easing';
 import { motionOn } from '../../lib/prefs';
 import { fmtTime } from '../../lib/util';
@@ -12,15 +13,15 @@ import { colorOf, useAssistantName } from '../../model/who';
 import { nowModel } from '../../model/nowModel';
 import type { Line, Session } from '../../model/nowModel';
 import { pushAmount } from './push';
+import { stardustAt } from './stardust';
 
 /* 「此刻」的终端：用户逐项拼出来的样式。一行：23:37 小明 › 正文；洛璃的回复 ✦（内联 SVG 的四角星）、工具调用 ◇、状态行 ·；
    洛璃的行带一层淡淡的底；新行进来时整体平滑上推，最上面的行滚到浮着的头部下面，在那里糊掉。
    终端自己是窗格的滚动区（.pane-sc），上下的内边距里是浮着的头部和底边的留白。
-   行用 @tanstack/react-virtual 排（动态高度）；逐字落下的那一行是命令式的小岛（stream.ts）。
+   行用 @tanstack/react-virtual 排（动态高度）；洛璃正在说的那一行是光标打字（Typed.tsx）：按 Markdown 排版，高度随放出的字变。
    滚动：挂上时从底部开始；停在底部时（离底小于 STICK_PX）新内容贴底、照常上推；往上翻着时新内容不把人拉回底部、也不上推，
    视野里的行不跳；下面来了新内容时底部浮出「回到最新」，点了平滑滚到底、恢复贴底 */
 const SYM: Record<string, string> = { user: '›', tool: '◇', status: '·', think: '·', stats: '' };
-const islands = new Map<string, Set<StreamText>>();
 const animated = new Set<string>(); // 已经放过淡入的行：虚拟滚动把它重新挂上时不重放
 /* 上推（新行进来、末尾的行变长时整体往下挪回去再推回原位）的参数 */
 const PUSH_MS = 300;
@@ -45,7 +46,9 @@ function Head({ line, pad }: { line: Line; pad?: boolean }) {
         <span className="tl-name">{luoli}</span>
       )}
       {line.kind === 'luoli' || pad ? (
-        <span className="tl-sym" dangerouslySetInnerHTML={{ __html: STAR_SVG }} />
+        <span className="tl-sym">
+          <Star4 />
+        </span>
       ) : (
         <span className="tl-sym">{SYM[line.kind]}</span>
       )}
@@ -53,6 +56,8 @@ function Head({ line, pad }: { line: Line; pad?: boolean }) {
   );
 }
 
+/* 洛璃正在说的一行。文字是 nowModel 里就地累加的（line.text），到一批来一次 delta：这里自己订阅，只重画这一行；
+   同一行可能同时挂在两处（浮起的卡片和全屏里的列），各挂各的、各按全文放。流结束（streaming 变假）由外面的 TermLine 重画带进来 */
 function StreamBody({
   line,
   convId,
@@ -62,45 +67,27 @@ function StreamBody({
   convId: string;
   onSettled: () => void;
 }) {
-  const ref = useRef<HTMLSpanElement>(null);
-  /* 这个实例自己的小岛。同一行可能同时挂在两处（浮起的卡片和全屏里的列），按行 id 登记一组，各管各的 */
-  const mine = useRef<StreamText | null>(null);
-  useLayoutEffect(() => {
-    const el = ref.current!;
-    const st = new StreamText(el, line.text || '', convId);
-    mine.current = st;
-    let group = islands.get(line.id);
-    if (!group) islands.set(line.id, (group = new Set()));
-    group.add(st);
-    let cancel = () => {};
-    if (!line.streaming) {
-      /* 已经出完了（挂上来时就结束）：光标停到 lingerUntil，再淡出，换成静态文字 */
-      const wait = Math.max(0, (line.lingerUntil || Date.now()) - Date.now());
-      cancel = st.finish(wait, 500, onSettled);
-    }
-    return () => {
-      cancel();
-      group.delete(st);
-      if (!group.size) islands.delete(line.id);
-      mine.current = null;
-      el.textContent = '';
-    };
-  }, []);
-  /* 流结束（streaming 从真变假）：同样处理 */
-  const was = useRef(line.streaming);
+  const [text, setText] = useState(line.text || '');
   useEffect(() => {
-    if (was.current && !line.streaming) {
-      const st = mine.current;
-      if (st) {
-        const wait = Math.max(0, (line.lingerUntil || Date.now()) - Date.now());
-        const c = st.finish(wait, 500, onSettled);
-        was.current = false;
-        return c;
-      }
-    }
-    was.current = line.streaming;
-  });
-  return <span className="tl-body" ref={ref} />;
+    setText(line.text || ''); // 挂上到订阅之间来的字
+    return nowModel.sub((type, cid, l) => {
+      if (type === 'delta' && cid === convId && l && l.id === line.id) setText(l.text || '');
+    });
+  }, [line.id, convId]);
+  return (
+    <span className="tl-body">
+      <Typed
+        convId={convId}
+        text={text}
+        streaming={!!line.streaming}
+        lingerUntil={line.lingerUntil || 0}
+        onSettled={onSettled}
+        onRevealed={(cursor) => {
+          if (line.completed) stardustAt(convId, cursor);
+        }}
+      />
+    </span>
+  );
 }
 
 function ThinkBody({ line }: { line: Line }) {
@@ -270,13 +257,11 @@ export function Terminal({ session }: { session: Session }) {
     scrollMargin: view.top,
   });
   useEffect(() => {
-    const off = nowModel.sub((type, convId, line, extra) => {
+    const off = nowModel.sub((type, convId, line) => {
       if (convId !== session.convId) return;
       if (type === 'add' && line) live.current.add(line.id);
       if (type === 'add' || type === 'seed' || type === 'reset') {
         bump((n) => n + 1);
-      } else if (type === 'delta') {
-        if (line) islands.get(line.id)?.forEach((st) => st.delta(extra ?? '', line.text || ''));
       } else if (type === 'update' && line) {
         vers.current.set(line.id, (vers.current.get(line.id) || 0) + 1);
         bump((n) => n + 1);

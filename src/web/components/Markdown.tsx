@@ -1,7 +1,11 @@
-import { Fragment, memo, useEffect, useRef, useState } from 'react';
+import { Fragment, memo, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
+import type { Token } from 'marked';
 import { lexMarkdown } from '../lib/markdown';
+import { cpLen, makeCuts } from '../lib/typing';
+import type { Batch } from '../lib/typing';
 import { linkHref } from '../lib/url';
+import { freshNodes } from './Fresh';
 import { Hl } from './Hl';
 import { Link } from './Link';
 
@@ -10,12 +14,15 @@ import { Link } from './Link';
    支持：加粗、斜体、删除线、行内代码、代码块（语言名、复制）、列表（有序、无序、嵌套、任务）、引用、标题、表格、分隔线、链接。
    没闭合的写法（半个 **、没写完的代码块）marked 本来就不当格式，原样显示。
 
-   结构（第 6 步逐字输出要接在这上面）：
+   结构（逐字输出，Typed.tsx，接在这上面）：
    - Markdown 把文字拆成顶层的块，每块一个 Block（memo，按块自己的原文比较）：已经写完的块，后面加字时不重画；
    - 行内的文字走 Hl（网址、@提及、引号、提到洛璃、数字的高亮），代码里不高亮；
-   - tail：画在整段内容最后一个字后面的东西（第 6 步的光标）。每一层只把它交给自己的最后一个孩子，
-     最后落在：段落、标题的末尾，列表最后一项的末尾，引用的最后一块的末尾，表格最后一个单元格里，代码块的 <code> 里，其余块的后面。
-     所以不管最后一个字在列表项、表格还是代码块里，tail 都紧贴着它。 */
+   - tail：画在整段内容最后一个字后面的东西（光标）。每一层只把它交给自己的最后一个孩子，
+     最后落在：段落、标题的末尾，列表最后一项的末尾，引用的最后一块的末尾，表格最后一个单元格里，代码块的 <code> 里，其余块的后面
+     （分隔线后面不放：放了要多占一行，结束时去掉会跳）。所以不管最后一个字在列表项、表格还是代码块里，tail 都紧贴着它；
+   - fresh：刚出现的几个字（lib/typing.ts 的 Batch，一个字一批，开始时刻几乎相同的合成一批）。和 tail 一起走到最后一个文字片段（或代码块的 <code>）里，
+     把末尾这几批字各包一个落下的 span；最后一个词元不是文字（加粗、链接、行内代码）时不落，直接出现；
+   - tokens：调用方自己分好的词元（逐字时用增量分析，不走缓存）；不给就按 text 分。 */
 interface Tk {
   type: string;
   raw: string;
@@ -40,17 +47,29 @@ interface Cell {
 interface Ctx {
   hits: boolean;
 }
+/** 画在最后一个字后面的东西和刚放出的字（见文件开头），一起往最后一个孩子里传 */
+interface Tail {
+  node: ReactNode;
+  fresh?: readonly Batch[];
+}
 
 /* 行内词元 → 节点。inLink：已经在链接的文字里（不能再嵌链接）。tail 接在最后 */
-function inlines(tokens: Tk[] | undefined, c: Ctx, inLink: boolean, tail?: ReactNode): ReactNode[] {
-  const out: ReactNode[] = (tokens ?? []).map((t, i) => {
+function inlines(tokens: Tk[] | undefined, c: Ctx, inLink: boolean, tail?: Tail): ReactNode[] {
+  const list = tokens ?? [];
+  const out: ReactNode[] = list.map((t, i) => {
     switch (t.type) {
       case 'text':
         // 列表项、引用里的文字块自己带着行内词元
         return t.tokens ? (
           <Fragment key={i}>{inlines(t.tokens, c, inLink)}</Fragment>
         ) : (
-          <Hl key={i} text={t.text ?? t.raw} hits={c.hits} links={!inLink} />
+          <Hl
+            key={i}
+            text={t.text ?? t.raw}
+            hits={c.hits}
+            links={!inLink}
+            fresh={i === list.length - 1 ? tail?.fresh : undefined}
+          />
         );
       case 'escape':
         return <Fragment key={i}>{t.text}</Fragment>;
@@ -97,7 +116,7 @@ function inlines(tokens: Tk[] | undefined, c: Ctx, inLink: boolean, tail?: React
         return <Fragment key={i}>{t.text ?? t.raw}</Fragment>;
     }
   });
-  if (tail) out.push(<Fragment key="tail">{tail}</Fragment>);
+  if (tail) out.push(<Fragment key="tail">{tail.node}</Fragment>);
   return out;
 }
 
@@ -126,7 +145,7 @@ const COPIED_MS = 1600;
 const stopEv = (e: React.SyntheticEvent) => e.stopPropagation();
 
 /* 代码块：等宽字体、不着色、太宽时横向滚动；上面一条小字：左边语言名（有的话），右边「复制」，点了变成「已复制」一会儿再变回来 */
-function CodeBlock({ lang, code, tail }: { lang?: string; code: string; tail?: ReactNode }) {
+function CodeBlock({ lang, code, tail }: { lang?: string; code: string; tail?: Tail }) {
   const [copied, setCopied] = useState(false);
   const timer = useRef(0);
   useEffect(() => () => window.clearTimeout(timer.current), []);
@@ -155,8 +174,8 @@ function CodeBlock({ lang, code, tail }: { lang?: string; code: string; tail?: R
       </div>
       <pre>
         <code>
-          {code}
-          {tail}
+          {tail?.fresh?.length ? freshNodes(code, 0, makeCuts(cpLen(code), tail.fresh)) : code}
+          {tail?.node}
         </code>
       </pre>
     </div>
@@ -166,13 +185,13 @@ function CodeBlock({ lang, code, tail }: { lang?: string; code: string; tail?: R
 const isBlank = (t: Tk) => t.type === 'space' || t.type === 'def';
 
 /* 块（含列表项、引用里面的）→ 节点。tail 只给最后一个 */
-function blocks(tokens: Tk[] | undefined, c: Ctx, tail?: ReactNode): ReactNode[] {
+function blocks(tokens: Tk[] | undefined, c: Ctx, tail?: Tail): ReactNode[] {
   const shown = (tokens ?? []).filter((t) => !isBlank(t));
   return shown.map((t, i) => (
     <Fragment key={i}>{block(t, c, i === shown.length - 1 ? tail : undefined)}</Fragment>
   ));
 }
-function block(t: Tk, c: Ctx, tail?: ReactNode): ReactNode {
+function block(t: Tk, c: Ctx, tail?: Tail): ReactNode {
   switch (t.type) {
     case 'paragraph':
       return <p className="md-p">{inlines(t.tokens, c, false, tail)}</p>;
@@ -216,31 +235,35 @@ function block(t: Tk, c: Ctx, tail?: ReactNode): ReactNode {
         </span>
       );
     case 'hr':
-      return (
-        <>
-          <hr className="md-hr" />
-          {tail && <p className="md-p">{tail}</p>}
-        </>
-      );
+      // 光标不放在分隔线后面：要另起一行放，结束时去掉这一行高度会跳
+      return <hr className="md-hr" />;
     case 'table': {
       const rows = t.rows ?? [];
-      const cell = (x: Cell, k: number, last: boolean, Tag: 'th' | 'td') => (
+      const head = t.header ?? [];
+      // 光标放在最后一个有字的单元格里：写到一半的一行，marked 会把没写的格子补成空的，放进最后一个空格子就离字很远了
+      let at = [-1, head.length - 1];
+      head.forEach((x, k) => {
+        if (x.tokens.length) at = [-1, k];
+      });
+      rows.forEach((r, j) =>
+        r.forEach((x, k) => {
+          if (x.tokens.length) at = [j, k];
+        }),
+      );
+      const cell = (x: Cell, j: number, k: number, Tag: 'th' | 'td') => (
         <Tag key={k} style={x.align ? { textAlign: x.align } : undefined}>
-          {inlines(x.tokens, c, false, last ? tail : undefined)}
+          {inlines(x.tokens, c, false, at[0] === j && at[1] === k ? tail : undefined)}
         </Tag>
       );
-      const head = t.header ?? [];
       return (
         <div className="md-tw">
           <table className="md-t">
             <thead>
-              <tr>{head.map((x, k) => cell(x, k, !rows.length && k === head.length - 1, 'th'))}</tr>
+              <tr>{head.map((x, k) => cell(x, -1, k, 'th'))}</tr>
             </thead>
             <tbody>
               {rows.map((r, j) => (
-                <tr key={j}>
-                  {r.map((x, k) => cell(x, k, j === rows.length - 1 && k === r.length - 1, 'td'))}
-                </tr>
+                <tr key={j}>{r.map((x, k) => cell(x, j, k, 'td'))}</tr>
               ))}
             </tbody>
           </table>
@@ -252,7 +275,7 @@ function block(t: Tk, c: Ctx, tail?: ReactNode): ReactNode {
       return (
         <p className="md-p md-raw">
           {(t.text ?? t.raw).replace(/\n+$/, '')}
-          {tail}
+          {tail?.node}
         </p>
       );
   }
@@ -260,7 +283,7 @@ function block(t: Tk, c: Ctx, tail?: ReactNode): ReactNode {
 
 /* 顶层的块：memo，按块自己的原文和高亮方式比较。后面加字时前面写完的块不重画；最后一块变了（或 tail 变了）才重画 */
 const Block = memo(
-  function Block({ t, c, tail }: { t: Tk; c: Ctx; tail?: ReactNode }) {
+  function Block({ t, c, tail }: { t: Tk; c: Ctx; tail?: Tail }) {
     return <>{block(t, c, tail)}</>;
   },
   (a, b) => a.t.raw === b.t.raw && a.c.hits === b.c.hits && a.tail === b.tail,
@@ -270,20 +293,30 @@ export const Markdown = memo(function Markdown({
   text,
   hits = false,
   tail,
+  fresh,
+  tokens,
 }: {
   text: string;
   /** 提到洛璃的名字、唤醒词是不是加亮（洛璃自己的回复不加） */
   hits?: boolean;
   /** 画在最后一个字后面的东西（逐字输出的光标），见文件开头的说明 */
   tail?: ReactNode;
+  /** 逐字输出时刚出现的字：各自落下 */
+  fresh?: readonly Batch[];
+  /** text 已经分好的词元（逐字时用增量分析）；不给就按 text 分 */
+  tokens?: Token[];
 }) {
-  const shown = (lexMarkdown(text) as unknown as Tk[]).filter((t) => !isBlank(t));
+  const shown = ((tokens ?? lexMarkdown(text)) as unknown as Tk[]).filter((t) => !isBlank(t));
   const c: Ctx = { hits };
+  const end = useMemo<Tail | undefined>(
+    () => (tail ? { node: tail, fresh } : undefined),
+    [tail, fresh],
+  );
   return (
     <div className="md">
       {shown.length
         ? shown.map((t, i) => (
-            <Block key={i} t={t} c={c} tail={i === shown.length - 1 ? tail : undefined} />
+            <Block key={i} t={t} c={c} tail={i === shown.length - 1 ? end : undefined} />
           ))
         : tail}
     </div>

@@ -109,6 +109,51 @@ export function lexMarkdown(text: string): Token[] {
   return tokens;
 }
 
+/* 逐字输出时每一帧多几个字，就要重新分析一次。长回复（几千字）不每帧把全文重来：前面写完的块沿用上一次的词元，
+   只从倒数第二块起重新分析（最后一块还在长；倒数第二块也可能变：后面接上缩进的行，空行前后的列表并成一个；块之间的空行不算一块）。
+   结果和整段重新分析完全一样（markdown.test.ts 里逐字比对），区别只是前面的块是同一批词元对象，界面上的块按原文比较就不会重画。
+   前提：顶层词元的原文拼起来正好是原文；不是的话（对不上就不增量了）每次整段重来。
+   不走 lexMarkdown 的缓存：逐字时每个前缀只用一次，塞进去会把别的消息的缓存挤掉 */
+export class IncrementalLexer {
+  private text = '';
+  private tokens: Token[] = [];
+  private whole = true; // 词元的原文拼得回原文，才能增量
+  private defs = false; // 有链接定义（[名字]: 网址）：前后的块里的引用互相要用，不增量
+  /* 沿用前几个词元：从倒数第二块「有内容的」起重新分析。块之间的空行也是词元（space），不算一块：
+     「1. 一\n\n2. 二」整段分析是一个松散列表，要是把 space 算成倒数第二块，前面的列表就不重排，会一直拆成两个列表 */
+  private keepBlocks(): number {
+    let keep = this.tokens.length;
+    let blocks = 0;
+    while (keep > 0 && blocks < 2) {
+      keep--;
+      if (this.tokens[keep].type !== 'space') blocks++;
+    }
+    return blocks < 2 ? 0 : keep;
+  }
+  lex(text: string): Token[] {
+    if (text === this.text && this.tokens.length) return this.tokens;
+    const keep = this.keepBlocks();
+    if (this.whole && !this.defs && keep > 0 && text.startsWith(this.text)) {
+      let at = 0;
+      for (let i = 0; i < keep; i++) at += this.tokens[i].raw.length;
+      const rest = text.slice(at);
+      const tail = newLexer().lex(rest);
+      if (rawOf(tail) === rest && !tail.some((t) => t.type === 'def')) {
+        this.text = text;
+        this.tokens = [...this.tokens.slice(0, keep), ...tail];
+        return this.tokens;
+      }
+    }
+    const tokens = newLexer().lex(text);
+    this.whole = rawOf(tokens) === text.replace(/\r\n?/g, '\n');
+    this.defs = tokens.some((t) => t.type === 'def');
+    this.text = text;
+    this.tokens = tokens;
+    return tokens;
+  }
+}
+const rawOf = (tokens: Token[]) => tokens.map((t) => t.raw).join('');
+
 type Tk = Token & {
   tokens?: Token[];
   items?: Tk[];

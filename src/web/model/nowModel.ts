@@ -24,6 +24,8 @@ export interface Line {
   images?: ImageInfo[];
   streaming?: boolean;
   lingerUntil?: number;
+  /** luoli：回复正常完成时这是它的最后一行（reply:end）。中止、出错没有。逐字放完最后一个字时据此放星尘 */
+  completed?: boolean;
   replyId?: string;
   /** luoli、think、tool：这一行是回复里的第几段（服务事件里的 part）。重新生成时按它去掉作废的行 */
   part?: number;
@@ -430,6 +432,7 @@ bus.on('reply:end', ({ convId, ms, usage }) => {
   replying.delete(convId);
   const s = get(convId);
   if (!s) return;
+  if (s.cur) s.cur.completed = true;
   endCur(s);
   const tokens: string[] = [];
   if (usage.input !== undefined)

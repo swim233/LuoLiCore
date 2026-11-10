@@ -2427,15 +2427,6 @@ button {
   border-radius: 5px;
   padding: 0 4px;
 }
-/* 逐字输出时：一个词元一个外层 span，里面的字各自落下。下划线不会画到 inline-block 的字上，改用下边框 */
-.tk.hl-url {
-  text-decoration: none;
-  border-bottom: 1px dashed currentColor;
-}
-.tk.hl-at {
-  -webkit-box-decoration-break: clone;
-  box-decoration-break: clone;
-}
 .hl-q {
   color: var(--quote);
   font-style: italic;
@@ -2446,22 +2437,13 @@ button {
 .k-stats .hl-num {
   color: inherit;
 }
-/* 逐字：每个字从上方轻轻落下 */
-@keyframes ch-drop {
-  from {
-    transform: translateY(-8px);
-    opacity: 0;
-  }
+/* 逐字（Typed.tsx）：刚放出的字每一批包一个行内 span，从上方轻轻落下。
+   行内元素加 position: relative 的 top 和透明度，不用 inline-block 加 transform：折行规则和静态文字完全一样。
+   落下的动画不在样式表里：Fresh.tsx 用 Web Animations 按每个字自己的开始时刻做（8 像素的位移加淡入，0.3 秒） */
+.tw-in {
+  position: relative;
 }
-.ch {
-  display: inline-block;
-  white-space: pre;
-  animation: ch-drop 0.3s var(--ease-out) both;
-}
-.ch.is-waapi {
-  animation: none;
-}
-/* 光标：一颗金色小星，一明一暗 */
+/* 光标：一颗金色小星，一明一暗。不占宽度（零宽的行内块，星浮在它右边），所以有没有光标折行都一样，结束时去掉它排版不动 */
 @keyframes cur-star {
   0%,
   100% {
@@ -2475,16 +2457,21 @@ button {
 }
 .cur {
   display: inline-block;
+  position: relative;
+  width: 0;
+  height: 0;
   color: var(--gold);
-  margin-left: 2px;
   line-height: 1;
-  animation: cur-star 1.2s ease-in-out infinite;
   transition: opacity 0.5s;
 }
 .cur .st4 {
+  position: absolute;
+  left: 2px;
+  bottom: -0.1em;
   width: 0.8em;
   height: 0.8em;
-  vertical-align: -0.05em;
+  vertical-align: baseline;
+  animation: cur-star 1.2s ease-in-out infinite;
 }
 /* 四角星（内联 SVG），颜色跟随文字 */
 .st4 {
@@ -3885,9 +3872,6 @@ a.hl-url:focus-visible {
 .chat-full .tline {
   padding-inline: 24px;
 }
-.bubble .ch {
-  white-space: pre-wrap;
-}
 
 /* 输入框上方的一行「洛璃正在回复…」加「中止」：这个会话在回复，但不是这个标签页发的请求（别的标签页、任务到点触发的） */
 .chat-live {
@@ -4652,13 +4636,12 @@ a.hl-url:focus-visible {
   transition-delay: 0s !important;
   animation-delay: 0s !important;
 }
-.still .ch,
 .still .tl.is-new,
 .still .msg.is-new,
 .still .evt.is-new {
   animation: none !important;
 }
-.still .cur {
+.still .cur .st4 {
   animation: none !important;
 }
 /* 窗格的滚动区、上下的渐变带、虚拟列表的总高和条目的位置：这些是排版，不是装饰，直接变，不用上面统一的 0.12 秒过渡。

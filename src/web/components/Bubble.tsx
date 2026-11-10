@@ -1,6 +1,7 @@
 import { memo, useLayoutEffect, useRef } from 'react';
 import { Hl, Spin } from './Hl';
-import { LiveText } from './LiveText';
+import { Typed } from './Typed';
+import type { CursorRef } from './Typed';
 import { Markdown } from './Markdown';
 import { Pic } from './Pic';
 import { motionOn } from '../lib/prefs';
@@ -136,6 +137,8 @@ export interface LiveInfo {
   convId: string;
   streaming: boolean;
   lingerUntil: number;
+  /** 回复正常完成、最后一个字出现的那一刻（星尘从这一处的光标散开，参数是取光标的函数）。中止、出错不给 */
+  onRevealed?: (cursor: CursorRef) => void;
 }
 
 export function Blocks({
@@ -182,11 +185,12 @@ export function Blocks({
       blocks.push(
         i === liveAt && live ? (
           <div className="msg-text" key={i}>
-            <LiveText
+            <Typed
               convId={live.convId}
               text={p.text}
               streaming={live.streaming}
               lingerUntil={live.lingerUntil}
+              onRevealed={live.onRevealed}
             />
           </div>
         ) : (

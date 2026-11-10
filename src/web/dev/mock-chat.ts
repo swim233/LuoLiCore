@@ -59,6 +59,8 @@ interface Script {
   text: string;
   failAt?: number;
   retry?: boolean;
+  /** 消息里写「快速」：回复来得很快（看逐字落下） */
+  fast?: boolean;
 }
 /** 任务到点触发的回复：没有人说话，照任务说的做 */
 function taskScript(tasks: LiveTask[]): Script {
@@ -86,6 +88,13 @@ function scriptOf(text: string, nImg: number): Script {
   if (/慢/.test(text)) base.text = REPLIES.join('').repeat(2);
   /* 消息里写「写法」：回复里带各种 Markdown，看逐字结束后换成 Markdown 排版 */
   if (/写法|markdown/i.test(text)) base.text = MD_REPLY;
+  /* 消息里写「快速」：一段很长的回复来得很快，夹一次 100 个字；带 Markdown 和换行 */
+  if (/快速/.test(text))
+    return {
+      think: { ms: 600, text: '想一想怎么回答比较好。' },
+      text: [MD_REPLY, ...REPLIES].join('\n\n'),
+      fast: true,
+    };
   if (url) {
     const bad = /gone|404/.test(url);
     return {
@@ -425,18 +434,21 @@ async function runReply(convId: string, sink: Sink, again = false, tasks?: LiveT
   w({ type: 'text-start', id: textId });
   const tcs = chars(sc.text);
   let i = 0;
+  let k = 0;
   while (i < tcs.length) {
     if (sc.failAt !== undefined && i >= sc.failAt) {
       w({ type: 'error', errorText: '请求失败（429）' });
       return end('failed');
     }
-    const n = randi(1, 3);
+    /* 快速：每 30 毫秒 6～8 个字，第 12 批一次来 100 个字 */
+    const n = sc.fast ? (k === 12 ? 100 : randi(6, 8)) : randi(1, 3);
+    k++;
     const chunk = tcs.slice(i, i + n).join('');
     i += n;
     out += chunk;
     w({ type: 'text-delta', id: textId, delta: chunk });
     mockLive.text(convId, chunk);
-    await sleepIn(run, randi(45, 90));
+    await sleepIn(run, sc.fast ? 30 : randi(45, 90));
     if (run.aborted) return end('aborted');
   }
   w({ type: 'text-end', id: textId });

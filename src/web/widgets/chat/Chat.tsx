@@ -24,6 +24,7 @@ import { useAssistantName, useWebAuthor } from '../../model/who';
 import type { ChatMessage } from '../../../server/types';
 import { ConvList } from '../sessions/ConvList';
 import { TypingView } from '../sessions/Timeline';
+import { stardustAt } from '../now/stardust';
 import {
   abortChat,
   addFiles,
@@ -161,7 +162,16 @@ const ReplyBubble = memo(function ReplyBubble({
       name={luoli}
       label={streaming ? '正在回复' : fmtDay(at)}
       parts={parts}
-      live={req ? { convId, streaming, lingerUntil: req.lingerUntil } : undefined}
+      live={
+        req
+          ? {
+              convId,
+              streaming,
+              lingerUntil: req.lingerUntil,
+              onRevealed: req.how === 'end' ? (cursor) => stardustAt(convId, cursor) : undefined,
+            }
+          : undefined
+      }
       aborted={aborted}
       failed={failed}
       abortMark="（已中止）"

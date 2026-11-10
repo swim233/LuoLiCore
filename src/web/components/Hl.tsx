@@ -1,9 +1,12 @@
 import { Fragment, memo } from 'react';
-import type { CSSProperties } from 'react';
+import type { CSSProperties, ReactNode } from 'react';
 import { motionOn } from '../lib/prefs';
+import { cpLen, makeCuts } from '../lib/typing';
+import type { Batch } from '../lib/typing';
 import { linkHref, splitUrlTail } from '../lib/url';
 import type { ImagePart } from '../model/types';
 import { assistant, useAssistant } from '../model/who';
+import { freshNodes } from './Fresh';
 import { Link } from './Link';
 
 /* 正文高亮：网址、@提及、引号里的话、提到助手（名字、唤醒词，由服务告诉面板）、数字。
@@ -60,17 +63,28 @@ export function hlTokens(text: string, hits: boolean): Tok[] {
   return out;
 }
 /* links：认出的网址是不是做成能点的链接（默认是；已经在链接里面的文字不能再嵌一层链接，传 false）。
-   网址末尾紧跟的标点不算网址；不是 http、https 的（认不出来的）当普通文字 */
+   网址末尾紧跟的标点不算网址；不是 http、https 的（认不出来的）当普通文字。
+   fresh：逐字输出时这段文字末尾刚出现的字（Typed.tsx），各包一个落下的 span，其余不变；高亮的外壳（网址、@、引号）照常 */
 export const Hl = memo(function Hl({
   text,
   hits,
   links = true,
+  fresh,
 }: {
   text: string;
   hits: boolean;
   links?: boolean;
+  fresh?: readonly Batch[];
 }) {
   useAssistant(); // 名字、唤醒词变了要重新高亮
+  const cuts = fresh?.length ? makeCuts(cpLen(text), fresh) : null;
+  let pos = 0; // 已经处理到第几个字，按文字的顺序往后数
+  const piece = (str: string): ReactNode => {
+    if (!cuts) return str;
+    const from = pos;
+    pos += cpLen(str);
+    return freshNodes(str, from, cuts);
+  };
   return (
     <>
       {hlTokens(text, hits).map((x, i) => {
@@ -81,19 +95,19 @@ export const Hl = memo(function Hl({
             return (
               <Fragment key={i}>
                 <Link href={href} className="hl-url">
-                  {url}
+                  {piece(url)}
                 </Link>
-                {tail}
+                {piece(tail)}
               </Fragment>
             );
-          return <Fragment key={i}>{x.t}</Fragment>;
+          return <Fragment key={i}>{piece(x.t)}</Fragment>;
         }
         return x.c ? (
           <span key={i} className={x.c}>
-            {x.t}
+            {piece(x.t)}
           </span>
         ) : (
-          <Fragment key={i}>{x.t}</Fragment>
+          <Fragment key={i}>{piece(x.t)}</Fragment>
         );
       })}
     </>
