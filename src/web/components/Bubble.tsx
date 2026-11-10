@@ -1,4 +1,4 @@
-import { memo } from 'react';
+import { memo, useLayoutEffect, useRef } from 'react';
 import { Hl, Spin } from './Hl';
 import { LiveText } from './LiveText';
 import { Pic } from './Pic';
@@ -21,6 +21,29 @@ function prettyInput(input: unknown) {
   return s.length > 1000 ? s.slice(0, 1000) + '…' : s;
 }
 
+/* 思考的内容：高度有上限、自己滚动。思考中（follow）展开着时，停在它的底部就跟着贴底，往上翻了就不拉回来 */
+const NEAR_BOTTOM = 24;
+function ThinkBody({ text, follow }: { text: string; follow: boolean }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const stuck = useRef(true);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (follow && el && stuck.current) el.scrollTop = el.scrollHeight;
+  }, [text, follow]);
+  return (
+    <div
+      className="fold-body"
+      ref={ref}
+      onScroll={(e) => {
+        const el = e.currentTarget;
+        stuck.current = el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM;
+      }}
+    >
+      {text}
+    </div>
+  );
+}
+
 function ThinkFold({
   p,
   ended,
@@ -28,29 +51,28 @@ function ThinkFold({
   p: Extract<BPart, { kind: 'think' }>;
   ended: 'abort' | 'fail' | null;
 }) {
-  if (p.streaming) {
-    // 还在想：没出结果时只有一行「思考中…」；消息已经结束（中止、出错）还停在这里的，写明是怎么断的
-    if (ended)
-      return (
-        <div className="fold is-think">
-          <span className="fold-tag">{ended === 'fail' ? '思考中断' : '思考被中止'}</span>
-        </div>
-      );
+  // 消息已经结束（中止、出错）还停在「思考中」的，写明是怎么断的
+  if (p.streaming && ended)
     return (
-      <details className="fold is-think">
-        <summary>
-          <span>思考中…</span>
-        </summary>
-      </details>
+      <div className="fold is-think">
+        <span className="fold-tag">{ended === 'fail' ? '思考中断' : '思考被中止'}</span>
+      </div>
     );
-  }
-  if (!p.text.trim()) return null;
+  if (!p.streaming && !p.text.trim()) return null;
+  /* 思考中和思考结束是同一个 <details>：思考中点开了，结束后仍是打开的，里面的内容和滚动位置也接着用，只有标题换成「思考了 N 秒」。
+     思考中的内容随流增长；刚展开时（思考中）跳到底部 */
   return (
-    <details className="fold is-think">
+    <details
+      className="fold is-think"
+      onToggle={(e) => {
+        const body = e.currentTarget.querySelector('.fold-body');
+        if (p.streaming && e.currentTarget.open && body) body.scrollTop = body.scrollHeight;
+      }}
+    >
       <summary>
-        <span>{p.sec ? `思考了 ${p.sec} 秒` : '思考过程'}</span>
+        <span>{p.streaming ? '思考中…' : p.sec ? `思考了 ${p.sec} 秒` : '思考过程'}</span>
       </summary>
-      <div className="fold-body">{p.text}</div>
+      {p.text.trim() && <ThinkBody text={p.text} follow={p.streaming} />}
     </details>
   );
 }

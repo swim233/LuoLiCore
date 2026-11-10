@@ -67,6 +67,14 @@ function taskScript(tasks: LiveTask[]): Script {
 }
 function scriptOf(text: string, nImg: number): Script {
   const think = { ms: randi(1100, 2000), text: '想一想怎么回答比较好。' };
+  /* 消息里写「长思考」：思考很长、很慢，演示思考中展开跟着滚 */
+  if (/长思考/.test(text)) {
+    think.ms = 9000;
+    think.text = Array.from(
+      { length: 40 },
+      (_, i) => `第 ${i + 1} 步：再想想这个问题的另一个角度。`,
+    ).join('\n');
+  }
   const url = (text.match(/https?:\/\/[^\s]+|\b(?:[a-z0-9-]+\.)+(?:com|org|net|cn|io|dev)\S*/i) ||
     [])[0];
   chatN++;
@@ -311,7 +319,7 @@ async function runReply(convId: string, sink: Sink, again = false, tasks?: LiveT
   w({ type: 'reasoning-start', id: thinkId });
   const livePart = mockLive.reasoningStart(convId);
   const cs = chars(sc.think.text);
-  const pieces = 3;
+  const pieces = Math.max(3, Math.ceil(cs.length / 12));
   const size = Math.ceil(cs.length / pieces);
   for (let k = 0; k < pieces; k++) {
     await sleepIn(run, sc.think.ms / pieces);

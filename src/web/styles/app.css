@@ -2963,6 +2963,12 @@ button {
   color: var(--fg-2);
   font-size: 12.5px;
 }
+/* 思考的内容太长时在框里滚动（思考中展开着，跟着滚到最新的一行：Bubble.tsx 的 ThinkBody） */
+.fold.is-think .fold-body {
+  max-height: 240px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
 .fold .ok {
   color: var(--ok);
 }
