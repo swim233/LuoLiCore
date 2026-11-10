@@ -411,10 +411,12 @@ export function setSize(id: string, key: SizeKey) {
     desk.get().layout.size[id] = key;
   });
 }
-export function hideWidget(id: string) {
+/* 收进收纳盒。整理时把部件拖进收纳盒：拖的路上它可能已经换过位置，restoreBefore 给了就在同一次重排里先放回原来的位置
+   （原来排在谁的前面；null 是原来在最后），收纳盒里「放回原处」才回得到原处 */
+export function hideWidget(id: string, restoreBefore?: string | null) {
   if (fsBusy()) {
     if (desk.get().full?.id === id && fsMorph!.kind !== 'close') closeFull();
-    whenMorphsDone(isFsMorph, () => hideWidget(id));
+    whenMorphsDone(isFsMorph, () => hideWidget(id, restoreBefore));
     return;
   }
   if (desk.get().full?.id === id) closeFull();
@@ -425,7 +427,9 @@ export function hideWidget(id: string) {
   }
   relayout(
     () => {
-      desk.get().layout.hidden[id] = true;
+      const L = desk.get().layout;
+      if (restoreBefore !== undefined) orderBefore(L.order, id, restoreBefore);
+      L.hidden[id] = true;
     },
     { now: true },
   );
@@ -441,18 +445,21 @@ export function unhideWidget(id: string, beforeId?: string | null) {
     }
   });
 }
-export function moveTo(id: string, targetId: string) {
-  relayout(
-    () => {
-      const o = desk.get().layout.order;
-      const from = o.indexOf(id),
-        to = o.indexOf(targetId);
-      if (from < 0 || to < 0) return;
-      o.splice(from, 1);
-      o.splice(to, 0, id);
-    },
-    { flipDur: 340, flipEase: EASE_OUT },
-  );
+/* 整理时拖动换位：把部件排到 beforeId 的前面（beforeId 为 null：排到最后）。同样的参数再调一次不会再变，
+   其他部件由 Motion 的 layout 动画让位 */
+export function placeBefore(id: string, beforeId: string | null) {
+  relayout(() => orderBefore(desk.get().layout.order, id, beforeId), {
+    flipDur: 340,
+    flipEase: EASE_OUT,
+  });
+}
+/** 就地把 id 排到 beforeId 前面；beforeId 是 null、或不在顺序里：排到最后 */
+function orderBefore(o: string[], id: string, beforeId: string | null) {
+  const from = o.indexOf(id);
+  if (from < 0) return;
+  o.splice(from, 1);
+  const to = beforeId == null ? -1 : o.indexOf(beforeId);
+  o.splice(to < 0 ? o.length : to, 0, id);
 }
 export function flashWidget(id: string, kind: 'stream' | 'error') {
   const f = faces(id);
