@@ -16,6 +16,9 @@ export interface WidgetHandle {
   flash(kind: 'stream' | 'error'): void;
   openFull(targetId?: string, params?: FullParams): void;
   readonly isFull: boolean;
+  /** 等这个部件自己的形变（从胶囊展开、打开全屏、全屏里切换）结束以后再调 fn；现在没有形变就马上调。返回取消函数。
+      形变期间看到的是挂上那一刻的画面（桌面上是冻结的副本），数字滚动这类一次性的入场动画要等它结束才开始，用户才看得到整段 */
+  afterMorph(fn: () => void): () => void;
 }
 export interface ViewProps {
   mode: 'normal' | 'full';

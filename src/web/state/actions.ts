@@ -471,6 +471,20 @@ export function flashWidget(id: string, kind: 'stream' | 'error') {
 }
 hooks.flash = flashWidget;
 hooks.openFull = (id, params) => openFull(id, params);
+/* 部件自己的形变结束以后再调 fn（WidgetHandle.afterMorph）：这个部件现在有进行中的形变（桌面上的、全屏的都算，按部件 id 认）就排队等它们都走完，
+   没有就马上调。部件视图挂上时形变要么还没建（和挂上在同一个同步调用里，开始形变在它后面），要么就在眼前，所以视图要在挂上之后的下一拍再问 */
+hooks.afterMorph = (id, fn) => {
+  let off = false;
+  whenMorphsDone(
+    (m) => m.id === id,
+    () => {
+      if (!off) fn();
+    },
+  );
+  return () => {
+    off = true;
+  };
+};
 
 /* 新增部件的「新」标记 */
 const freshTimers = new Map<string, ReturnType<typeof setTimeout>>();

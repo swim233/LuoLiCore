@@ -40,19 +40,29 @@ function Notice({ phase }: { phase: 'loading' | 'down' }) {
   );
 }
 
-function TodayView({ mode }: ViewProps) {
+function TodayView({ mode, handle }: ViewProps) {
   const full = mode === 'full';
   const phase = useLinkPhase();
   const [t, setT] = useState<TodaySummary>(zero);
-  /* 打开 80 ms 后放进数字，数字从 0 滚上来；之后每次服务推来新的汇总就换 */
+  /* 打开 80 ms 后放进数字，数字从 0 滚上来；之后每次服务推来新的汇总就换。
+     这个部件自己正在形变（从胶囊展开、打开全屏）时，形变期间看到的是挂上那一刻的画面，数字要等形变结束再放，用户才看得到从 0 滚完的整段；
+     等的时候服务推来新的汇总不用记：放进去的那一刻读的就是最新的（db.today） */
   useEffect(() => {
+    let landed = false;
+    let offMorph: (() => void) | undefined;
     const take = () => {
       if (db.today) setT(db.today);
     };
-    const timer = setTimeout(take, 80);
-    const off = bus.on('today:update', take);
+    const timer = setTimeout(() => {
+      offMorph = handle.afterMorph(() => {
+        landed = true;
+        take();
+      });
+    }, 80);
+    const off = bus.on('today:update', () => landed && take());
     return () => {
       clearTimeout(timer);
+      offMorph?.();
       off();
     };
   }, []);

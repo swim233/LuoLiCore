@@ -136,9 +136,17 @@ export function spanOf(id: string, n: number): [number, number] {
 
 /* 总线订阅挂在部件上：部件移除时一起取消 */
 export type FlashFn = (id: string, kind: 'stream' | 'error') => void;
-export const hooks: { flash: FlashFn; openFull: (id: string, params?: FullParams) => void } = {
+export const hooks: {
+  flash: FlashFn;
+  openFull: (id: string, params?: FullParams) => void;
+  afterMorph: (id: string, fn: () => void) => () => void;
+} = {
   flash: () => {},
   openFull: () => {},
+  afterMorph: (_id, fn) => {
+    fn();
+    return () => {};
+  },
 };
 
 export function registerWidget(def: WidgetDef) {
@@ -157,6 +165,9 @@ export function registerWidget(def: WidgetDef) {
     get isFull() {
       const f = desk.get().full;
       return !!(f && f.id === def.id);
+    },
+    afterMorph(fn) {
+      return hooks.afterMorph(def.id, fn);
     },
   };
   const entry = Object.assign(def, { _offs: offs, _h: handle });

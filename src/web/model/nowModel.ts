@@ -3,7 +3,7 @@ import { bus } from './bus';
 import { db } from './db';
 import { eventOf } from './events';
 import { argsLine, authorOf, isFile, isReasoning, isTool, textOf, toolName } from './parts';
-import { recentMessages } from './sync';
+import { cachedRecentMessages, recentMessages } from './sync';
 import { status } from './status';
 import type { ImageInfo, MsgRow } from './types';
 
@@ -170,25 +170,40 @@ function newSession(convId: string, active: boolean): Session {
     rows: new Set(),
   };
 }
-/** 取这个会话最近的几条消息，排在已有的行前面（开头的几行用户消息，至多 8 行） */
-async function seed(s: Session, fresh = false) {
-  const rows = await recentMessages(s.convId, 5, fresh);
-  if (sessions.get(s.convId) !== s && last !== s) return;
+/* 一个会话开头放几行：取最近几条消息，最多放几行（只留最后的） */
+const SEED_MESSAGES = 5;
+const SEED_LINES = 8;
+/** 把取到的消息变成行，排在已有的行前面；放进了几行就返回 true */
+function placeSeed(s: Session, rows: MsgRow[]): boolean {
   const lines: Line[] = [];
   for (const r of rows) if (!s.rows.has(r.id)) lines.push(...linesFromRow(r));
-  if (!lines.length) return;
+  if (!lines.length) return false;
   for (const r of rows) s.rows.add(r.id);
-  s.lines.unshift(...lines.slice(-8));
+  s.lines.unshift(...lines.slice(-SEED_LINES));
   if (s.lines.length > 140) s.lines.splice(0, s.lines.length - 140);
-  emit('seed', s.convId);
+  return true;
+}
+/** 取这个会话最近的几条消息，排在已有的行前面。页面里已经取到过这个会话的消息时同步放进来（调用返回时行就在了，
+    不发事件：调用的人接着就会让界面重画；「此刻」从胶囊展开、形变拿到的是挂上那一刻的画面，不能等一个微任务）；
+    没有就向服务取，取到了发 seed。fresh：一定向服务取 */
+function seed(s: Session, fresh = false) {
+  const cached = fresh ? null : cachedRecentMessages(s.convId, SEED_MESSAGES);
+  if (cached) {
+    placeSeed(s, cached);
+    return;
+  }
+  void recentMessages(s.convId, SEED_MESSAGES, fresh).then((rows) => {
+    if (sessions.get(s.convId) !== s && last !== s) return;
+    if (placeSeed(s, rows)) emit('seed', s.convId);
+  });
 }
 function ensure(convId: string) {
   let s = sessions.get(convId);
   if (!s) {
     s = newSession(convId, true);
     sessions.set(convId, s);
+    seed(s);
     emit('sessions');
-    void seed(s);
   } else if (!s.active) {
     s.active = true;
     emit('sessions');
@@ -247,7 +262,7 @@ function lastFromServer(): Session | null {
   if (!id || !db.conv(id)) return null;
   const s = newSession(id, false);
   s.endedAt = status.lastReplyAt || undefined;
-  void seed(s);
+  seed(s);
   return s;
 }
 /* 正在回复的会话：reply:wait、reply:start 加进来，reply:end / abort / error / cancel 先拿掉再收尾。
@@ -448,7 +463,7 @@ export const nowModel = {
         fresh.endedAt = Date.now();
         sessions.set(s.convId, fresh);
         last = fresh;
-        void seed(fresh, true);
+        seed(fresh, true);
       }
     }
     for (const k of [...status.conv.keys()]) if (!ids.has(k)) status.clear(k);

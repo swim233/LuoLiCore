@@ -9,6 +9,7 @@ import { fmtTime } from '../../lib/util';
 import { colorOf, useAssistantName } from '../../model/who';
 import { nowModel } from '../../model/nowModel';
 import type { Line, Session } from '../../model/nowModel';
+import { pushAmount } from './push';
 
 /* 「此刻」的终端：用户逐项拼出来的样式。一行：23:37 小明 › 正文；洛璃的回复 ✦（内联 SVG 的四角星）、工具调用 ◇、状态行 ·；
    洛璃的行带一层淡淡的底；新行进来时整体平滑上推，最上面的行滚到浮着的头部下面，在那里糊掉。
@@ -17,6 +18,10 @@ import type { Line, Session } from '../../model/nowModel';
 const SYM: Record<string, string> = { user: '›', tool: '◇', status: '·', think: '·', stats: '' };
 const islands = new Map<string, Set<StreamText>>();
 const animated = new Set<string>(); // 已经放过淡入的行：虚拟滚动把它重新挂上时不重放
+/* 上推（新行进来、末尾的行变长时整体往下挪回去再推回原位）的参数 */
+const PUSH_MS = 300;
+/* 窗口宽度变了（形变、调整大小、进出全屏）：折行变了，行高跟着变，之后这么久内的变高不上推 */
+const RESIZE_QUIET_MS = 400;
 
 function Head({ line, pad }: { line: Line; pad?: boolean }) {
   const luoli = useAssistantName();
@@ -216,6 +221,11 @@ export function Terminal({ session }: { session: Session }) {
   const [, bump] = useState(0);
   const vers = useRef(new Map<string, number>());
   const mounted = useRef(false);
+  /* 挂上以后才来的行（add 事件）。挂上时就有的行、开头补进来的行（seed）不算 */
+  const live = useRef(new Set<string>());
+  /* 提交的序号，和每一行第一次画出来是第几次提交（见下面的上推） */
+  const commitNo = useRef(0);
+  const bornAt = useRef(new Map<string, number>());
   const lines = session.lines;
   /* 可以放行的高度（去掉上下的内边距）和上内边距（虚拟器的 scrollMargin：行区域从这里开始） */
   const [view, setView] = useState({ h: 300, top: 0, bottom: 0 });
@@ -233,6 +243,7 @@ export function Terminal({ session }: { session: Session }) {
   useEffect(() => {
     const off = nowModel.sub((type, convId, line, extra) => {
       if (convId !== session.convId) return;
+      if (type === 'add' && line) live.current.add(line.id);
       if (type === 'add' || type === 'seed' || type === 'reset') {
         bump((n) => n + 1);
       } else if (type === 'delta') {
@@ -261,8 +272,12 @@ export function Terminal({ session }: { session: Session }) {
   }, []);
   const total = virt.getTotalSize();
   const pad = Math.max(0, viewH - total);
-  /* 贴底；内容变高时先把整体往下挪回去，再用 .3 秒推到原位（平滑上推） */
-  const prevTotal = useRef(total);
+  /* 贴底；末尾来了新行、末尾的行变长时，先把整体往下挪回去，再用 .3 秒推到原位（平滑上推）。
+     总高变了不一定是它（挂载后第一次量出真实行高、开头补进较早的行、窗口宽度变化引起折行变化），这些不推：
+     推多少按行算，规则和原因见 push.ts。窗口宽度变了以后 RESIZE_QUIET_MS 内的变高也不推（折行变化是分几次量出来的） */
+  const prevSizes = useRef(new Map<string, number>());
+  const prevWidth = useRef(-1);
+  const quietUntil = useRef(0);
   const push = useRef<Animation | null>(null);
   useLayoutEffect(() => {
     const clip = clipRef.current!;
@@ -274,9 +289,34 @@ export function Terminal({ session }: { session: Session }) {
         ? rowsRef.current.offsetHeight + view.top + view.bottom
         : clip.scrollHeight) - clip.clientHeight,
     );
-    const dy = total - prevTotal.current;
-    prevTotal.current = total;
-    if (dy > 0.5 && motionOn() && rowsRef.current && clip.isConnected && mounted.current) {
+    const no = commitNo.current++;
+    const now = performance.now();
+    const width = clip.clientWidth;
+    if (prevWidth.current >= 0 && Math.abs(width - prevWidth.current) > 0.5)
+      quietUntil.current = now + RESIZE_QUIET_MS;
+    prevWidth.current = width;
+    const sizes = new Map<string, number>();
+    lines.forEach((l, i) => sizes.set(l.id, virt.measurementsCache[i]?.size ?? 0));
+    const dy = pushAmount({
+      ids: lines.map((l) => l.id),
+      sizes,
+      prev: prevSizes.current,
+      live: live.current,
+      born: bornAt.current,
+      no,
+      gap: virt.options.gap,
+    });
+    prevSizes.current = sizes;
+    for (const k of bornAt.current.keys()) if (!sizes.has(k)) bornAt.current.delete(k);
+    for (const k of live.current) if (!sizes.has(k)) live.current.delete(k);
+    if (
+      dy > 0.5 &&
+      now >= quietUntil.current &&
+      motionOn() &&
+      rowsRef.current &&
+      clip.isConnected &&
+      mounted.current
+    ) {
       /* 和第 4.1 版一样：从「此刻还没推完的偏移」再加上这次变高的量出发，推回 0。
          不能直接从 dy 开始：新行先按估计的高度挂上、量出真高度后又变一次，后一次的动画会顶掉前一次，整行的上推就只剩下零头 */
       const el = rowsRef.current;
@@ -284,7 +324,7 @@ export function Terminal({ session }: { session: Session }) {
       push.current?.cancel();
       push.current = el.animate(
         [{ transform: `translateY(${cur + dy}px)` }, { transform: 'translateY(0px)' }],
-        { duration: 300, easing: EASE_OUT_CSS },
+        { duration: PUSH_MS, easing: EASE_OUT_CSS },
       );
     }
   });
@@ -316,6 +356,7 @@ export function Terminal({ session }: { session: Session }) {
           if (!line) return null;
           const isNew = !animated.has(line.id) && mounted.current;
           animated.add(line.id);
+          if (!bornAt.current.has(line.id)) bornAt.current.set(line.id, commitNo.current);
           return (
             <div
               key={v.key}
