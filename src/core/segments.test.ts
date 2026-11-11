@@ -207,7 +207,7 @@ function tagged(text: string, time = '2026-10-30 14:02'): string {
 
 // 逐字核对摘要指令（spec 原文），{范围}、{上限} 由调用方替换
 function instruction(scope: string, maxChars: number): string {
-  return `（以下是系统指令，不是会话成员的消息）
+  return `（以下为系统指令，非对话消息）
 
 现在暂停对话。请为以上内容写一份摘要，供你之后继续参与这个会话时参考。这份摘要会替代原文：之后你只能看到摘要，以及摘要之后的新消息。
 
