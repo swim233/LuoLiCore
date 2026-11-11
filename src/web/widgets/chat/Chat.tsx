@@ -29,6 +29,7 @@ import {
   abortChat,
   addFiles,
   anyBusy,
+  awaitingReply,
   creatingReq,
   flightKey,
   flightsOf,
@@ -347,9 +348,10 @@ function ChatLog({ convId }: { convId: string }) {
   type Entry = { key: string; row?: MsgRow; req?: Req; typing?: boolean };
   const entries: Entry[] = [];
   let placed = false;
-  // 在回复，可这个标签页里还没有它的内容（刚发出还没有第一段）：先显示「正在回复」，位置和有内容时一样。
+  // 这个标签页发的请求在等回复，可它的内容还没有（刚发出还没有第一段）：先显示「正在回复」，位置和有内容时一样。
+  // 回复已经写进历史、请求的流还没收尾的那一小段不画（历史里已经有这条回复了，画出来会闪一下，时间线跟着跳）；
   // 别的标签页发的、任务到点触发的（这个标签页没有请求）不画，输入框上方有「正在回复」那一行（ReplyingBar）
-  const typing = busy && !inflight.length && !isBusyElsewhere(convId);
+  const typing = awaitingReply(convId, written) && !inflight.length;
   const placeInflight = () => {
     placed = true;
     for (const f of inflight) entries.push({ key: flightKey(f), req: f });

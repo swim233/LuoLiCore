@@ -10,6 +10,7 @@ import { getSource } from '../../model/source';
 import { ensureConversation } from '../../model/sync';
 import type { ChatChunk, ChatMessage } from '../../../server/types';
 import { toast } from '../../state/ui';
+import { awaitingOwnReply, busyElsewhere } from './replyWait';
 import {
   chatCur,
   chatState,
@@ -96,11 +97,14 @@ export function isBusy(convId: string | null): boolean {
   return convId !== null && replyInfo.active(convId);
 }
 /** 这个会话在生成，但不是这个标签页发出的请求：别的标签页发的，或者任务到点触发的（没有哪个页面的请求接着它的流）。
-    这个标签页看不到逐字的过程（那在「此刻」里），对话里在输入框上方写一行「正在回复」，带「中止」 */
+    这个标签页看不到逐字的过程（那在「此刻」里），对话里在输入框上方写一行「正在回复」，带「中止」。
+    这个标签页自己的请求刚收尾、服务的「回复结束」还没到时不算（回复 id 一样，见 replyWait.ts） */
 export function isBusyElsewhere(convId: string | null): boolean {
-  if (convId === null) return false;
-  return replyInfo.active(convId) && !reqs.some((r) => r.convId === convId && !r.finished);
+  return busyElsewhere(reqs, convId, replyInfo.active(convId), replyInfo.details(convId)?.replyId);
 }
+/** 这个标签页发的请求在等回复（对话里要不要先画「正在回复」的气泡）：written 是历史里已有的消息 id。回复已经写进历史的不算（见 replyWait.ts） */
+export const awaitingReply = (convId: string | null, written: ReadonlySet<string>) =>
+  awaitingOwnReply(reqs, convId, written);
 /** 有没有任何网页对话在生成（缩略文字用） */
 export const anyBusy = () =>
   reqs.some((r) => !r.finished) ||
