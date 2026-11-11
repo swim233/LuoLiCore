@@ -1,4 +1,4 @@
-import { memo, useLayoutEffect, useRef } from 'react';
+import { memo, useEffect, useLayoutEffect, useRef } from 'react';
 import { attachBubbleFrame } from './bubble-frame';
 import { Hl, Spin } from './Hl';
 import { Typed } from './Typed';
@@ -7,6 +7,7 @@ import { Markdown } from './Markdown';
 import { Pic } from './Pic';
 import { motionOn } from '../lib/prefs';
 import { isSliding, maxScrollTop, SLIDE_FOLLOW_TAU, sliderOf } from '../lib/slide';
+import { WHEEL_EVENT, wheelDir } from '../lib/wheel';
 import { nf } from '../lib/util';
 import { argsLine } from '../model/parts';
 import type { BPart } from '../model/bubble';
@@ -31,6 +32,16 @@ const NEAR_BOTTOM = 24;
 function ThinkBody({ text, follow }: { text: string; follow: boolean }) {
   const ref = useRef<HTMLDivElement>(null);
   const stuck = useRef(true);
+  /* 用户的滚轮缓动往上滚：马上不再跟着（同步的事件，比第一帧的滚动事件早） */
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const on = (e: Event) => {
+      if ((e as CustomEvent<{ dy: number }>).detail.dy < 0) stuck.current = false;
+    };
+    el.addEventListener(WHEEL_EVENT, on);
+    return () => el.removeEventListener(WHEEL_EVENT, on);
+  }, []);
   useLayoutEffect(() => {
     const el = ref.current;
     if (!follow || !el || !stuck.current) return;
@@ -45,7 +56,8 @@ function ThinkBody({ text, follow }: { text: string; follow: boolean }) {
         const el = e.currentTarget;
         // 自己在滑的时候离底部还远，不算用户往上翻了
         if (isSliding(el)) return;
-        stuck.current = el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM;
+        stuck.current =
+          wheelDir(el) < 0 ? false : el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM;
       }}
     >
       {text}

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState }
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { motionOn } from '../lib/prefs';
 import { isSliding, maxScrollTop, SLIDE_PUSH_TAU, slideSendMs, sliderOf } from '../lib/slide';
+import { isWheeling, WHEEL_EVENT, wheelDir } from '../lib/wheel';
 
 /* 虚拟滚动的时间线：@tanstack/react-virtual，动态高度，贴底。
    它自己就是窗格（components/Pane.tsx）的滚动区（.pane-sc）：上下的内边距里有浮在上面的标题、输入框，位置都要算上它们：
@@ -65,6 +66,8 @@ function settle(c: HTMLElement, find: () => number | null, onDone?: () => void) 
   for (const e of events) c.addEventListener(e, stop, { passive: true });
   const step = () => {
     if (dead) return;
+    // 用户的鼠标滚轮缓动在走：位置是用户在挪，不再往回校正（滚轮的事件本身在上面已经让它停过一次，这里是事件之后还没走完的那段）
+    if (isWheeling(c)) return stop();
     const d = find();
     if (d !== null && Math.abs(d) > 0.5) {
       c.scrollTop += d;
@@ -207,6 +210,17 @@ export function VirtualLog({
     },
     [],
   );
+  /* 滚轮缓动开始往上滚（shell/wheel.ts 同步发的事件，比第一帧的滚动事件早）：马上不再贴底，
+     第一帧之前来的新内容不会把人拉回底部 */
+  useEffect(() => {
+    const c = scRef.current;
+    if (!c) return;
+    const on = (e: Event) => {
+      if ((e as CustomEvent<{ dy: number }>).detail.dy < 0) stick.current = false;
+    };
+    c.addEventListener(WHEEL_EVENT, on);
+    return () => c.removeEventListener(WHEEL_EVENT, on);
+  }, []);
   const lastKey = useRef<string | null | undefined>(undefined);
   const prevCount = useRef(0);
   /** 上一次渲染时最后一条的 key：条数没变、最后一条换了（「正在回复」换成回复的气泡）也算新来了一条 */
@@ -411,8 +425,9 @@ export function VirtualLog({
       aria-label={label}
       aria-live={live ? 'polite' : undefined}
       onScroll={() => {
-        // 程序自己在滑的时候离底部还远，不算用户往上翻了
-        if (!isSliding(scRef.current!)) stick.current = nearBottom();
+        const c = scRef.current!;
+        // 程序自己在滑的时候离底部还远，不算用户往上翻了；用户的滚轮正往上滚时，哪怕离底部还不到 80px 也已经不贴底了
+        if (!isSliding(c)) stick.current = wheelDir(c) < 0 ? false : nearBottom();
         report();
       }}
       style={{ display: 'block' }}

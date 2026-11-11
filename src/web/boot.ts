@@ -13,6 +13,7 @@ import { TODAY_DEF } from './widgets/today/Today';
 import { desk, registerWidget } from './state/desk';
 import { closeFull, installPressTracking, setArranging } from './state/actions';
 import { pop } from './state/ui';
+import { installWheel } from './shell/wheel';
 import { chatEscAbort } from './widgets/chat/chatEsc';
 import { escHooks } from './lib/dev-slot';
 
@@ -35,6 +36,7 @@ export function boot({ todayAlways }: { todayAlways: boolean }) {
   if (todayAlways || desk.get().layout.extra.includes('today')) registerWidget(TODAY_DEF);
   registerWidget(TASKS_DEF);
   installPressTracking();
+  installWheel();
   /* Esc：① 对话正在生成且对话是当前操作的部件 → 中止；② 额外的处理（开发模式：演示面板开着且焦点在里面 → 收起）；③ 全屏 → 退出；④ 整理模式 → 退出；⑤ 收起弹出框 */
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;

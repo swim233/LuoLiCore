@@ -8,6 +8,7 @@ import { Pic } from '../../components/Pic';
 import { Typed } from '../../components/Typed';
 import { EASE_OUT_CSS } from '../../lib/easing';
 import { motionOn } from '../../lib/prefs';
+import { cancelWheel, isWheeling } from '../../lib/wheel';
 import { fmtTime } from '../../lib/util';
 import { colorOf, useAssistantName } from '../../model/who';
 import { nowModel } from '../../model/nowModel';
@@ -331,7 +332,9 @@ export function Terminal({ session }: { session: Session }) {
     const up = top < lastTop.current;
     lastTop.current = top;
     if (jump.current) return;
-    const byUser = pressed.current || performance.now() - userAt.current < USER_MS;
+    /* 用户的鼠标滚轮缓动在走也算用户在滚：滑行要 0.3 秒以上，最后一个滚轮事件过了 USER_MS 以后的滚动事件不能当成程序自己滚的 */
+    const byUser =
+      pressed.current || performance.now() - userAt.current < USER_MS || isWheeling(clip);
     if (byUser) {
       const near = bottomTop() - top < STICK_PX;
       const next = up ? false : near ? true : stick.current;
@@ -366,6 +369,7 @@ export function Terminal({ session }: { session: Session }) {
   const toLatest = () => {
     const clip = clipRef.current!;
     jump.current?.stop();
+    cancelWheel(clip); // 程序要自己滚了：没走完的滚轮距离清掉
     stick.current = true;
     leftAt.current = null;
     setAway(false);

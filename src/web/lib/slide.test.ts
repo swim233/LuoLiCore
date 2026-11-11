@@ -322,3 +322,33 @@ describe('Slider：passthrough（目标一直在长）', () => {
     expect(r.st.top).toBeGreaterThanOrEqual(before);
   });
 });
+
+describe('Slider：onStart（程序要自己滚了，别处要让位）', () => {
+  it('每次 to() 开头调一次（含换目标、已经在目标上直接结束的），cancel 不调', () => {
+    const t = 0;
+    let pending: (() => void) | null = null;
+    let top = 0;
+    const host: SlideHost = {
+      get: () => top,
+      set: (v) => (top = v),
+      now: () => t,
+      raf: (cb) => {
+        pending = cb;
+        return 1;
+      },
+      caf: () => (pending = null),
+    };
+    let starts = 0;
+    const s = new Slider(host, { onStart: () => starts++ });
+    s.to(500, { kind: 'exp', tau: 40 });
+    expect(starts).toBe(1);
+    s.to(800, { kind: 'exp', tau: 40 });
+    expect(starts).toBe(2);
+    s.to(top, { kind: 'exp', tau: 40 }); // 已经在目标上
+    expect(starts).toBe(3);
+    s.to(900, { kind: 'ease', ms: 200 });
+    s.cancel();
+    expect(starts).toBe(4);
+    expect(pending).toBeNull();
+  });
+});

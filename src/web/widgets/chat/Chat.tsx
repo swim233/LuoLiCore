@@ -467,7 +467,8 @@ function Composer({ convId, fullId }: { convId: string | null; fullId: string })
       el.style.height = Math.min(140, el.scrollHeight) + 'px';
     }
   }, [text]);
-  /* 待发的图片是横着的一行：鼠标滚轮竖着滚时也横着走（能滚的时候才接管，滚到头了让页面接着滚） */
+  /* 待发的图片是横着的一行：鼠标滚轮竖着滚时也横着走（能滚的时候才接管，滚到头了让页面接着滚）。
+     这一行带 data-native-wheel：全局的滚轮缓动（shell/wheel.ts）不处理它里面的滚轮，留给这里 */
   const attsRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const el = attsRef.current;
@@ -521,7 +522,7 @@ function Composer({ convId, fullId }: { convId: string | null; fullId: string })
           {d.note.text}
         </div>
       )}
-      <div className="chat-atts" ref={attsRef}>
+      <div className="chat-atts" ref={attsRef} data-native-wheel="">
         {d.atts.map((a) => (
           <span
             className={'att' + (a.state === 'failed' ? ' is-bad' : '')}
