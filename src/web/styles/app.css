@@ -706,6 +706,12 @@ button {
   scrollbar-width: thin;
   scrollbar-color: color-mix(in srgb, var(--blue) 35%, transparent) transparent;
 }
+/* 对话和会话的时间线：滚动条的位置一直留着（没有溢出时只是一条空的边）。内容第一次超出一屏、或者刚好一屏左右来回超出时，
+   滚动条出现、消失都不会让滚动区变窄、变宽——气泡的宽度（滚动区的 78%）和折行不跟着变。
+   左右的留白不用另调：留着的这条边就在右边，短对话里自己的气泡离窗口右边的距离，和长对话（滚动条在的时候）一样 */
+.pane > .tline {
+  scrollbar-gutter: stable;
+}
 .pane-top,
 .pane-bot {
   position: absolute;
