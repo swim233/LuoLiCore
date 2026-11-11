@@ -1,17 +1,26 @@
-import { useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { motionOn } from '../lib/prefs';
+import { isSliding, maxScrollTop, SLIDE_PUSH_TAU, slideSendMs, sliderOf } from '../lib/slide';
 
 /* 虚拟滚动的时间线：@tanstack/react-virtual，动态高度，贴底。
    它自己就是窗格（components/Pane.tsx）的滚动区（.pane-sc）：上下的内边距里有浮在上面的标题、输入框，位置都要算上它们：
-   - 切换会话（resetKey 变）：给了 anchorKey 就停在那一条（离浮着的标题下沿留一点空）并且不贴底，否则直接到底；
-   - 新条目进来时如果本来就在底部附近（距底 < 80px）就平滑跟到底（动画开着时）；内容变高（逐字、折叠展开）时，原本贴底的继续贴底；
-   - 顶上多了条目（往上翻取回了更早的消息）：画面停在原来看的那一条，不跳；
-   - jumpKey 加一（对话里发出了消息）：不管现在滚到哪里，回到最底下，之后新来的内容照常贴底；
+   - 切换会话（resetKey 变）：给了 anchorKey 就停在那一条（离浮着的标题下沿留一点空）并且不贴底，否则直接到底（瞬间，不滑）；
+   - 新条目进来时如果本来就在底部附近（距底 < 80px）就滑过去：贴底、内容往上推，约 0.18 秒（动画开着时；lib/slide.ts）；
+     内容变高（逐字、气泡外框的补间、折叠展开）时，原本贴底的在同一帧里继续贴底（见下面「同一帧」）；
+   - 顶上多了条目（往上翻取回了更早的消息）：画面停在原来看的那一条，不跳（瞬间）；
+   - jumpKey 加一（对话里发出了消息）：不管现在滚到哪里，回到最底下，之后新来的内容照常贴底。离得远时滑过去
+     （ease-out，最长 0.45 秒），滑的途中新内容长出来、目标跟着往下走；用户自己滚动、点按就放手；
    - onScrollState：滚动、内容变了之后报告「在不在最底下」「是不是快到顶了」（时间线据此标已读、取更早的消息）。
      「在最底下」是最后一条完整露在输入框（没有输入框时是窗口底边）上面；
    - 输入框变高（多行、加图片）、窗格变高变矮：原本贴底的继续贴底，最后一条不被盖住。
-   定位用 DOM 的真实位置逐帧校正：条目高度是估的，量到真实高度以前，只靠估算位置会偏。 */
+   定位用 DOM 的真实位置逐帧校正：条目高度是估的，量到真实高度以前，只靠估算位置会偏。
+
+   同一帧：条目是绝对定位的，容器高度和各条的位置原本要等虚拟器的 ResizeObserver、再等 React 重渲染才更新，贴底的 scrollTop 在 useEffect 里改，
+   气泡每多一行都有一帧最后一条的下沿伸到输入框下面、下一帧才被拉回来。现在自己也观察每一条的高度（watchRow）：
+   量到变了就在同一个 ResizeObserver 回调里（布局之后、绘制之前）把新高度交给虚拟器、直接写容器的高度和各条的 transform、
+   贴底时把 scrollTop 滚到底，这一帧画出来的就是对好的。React 之后渲染出的是同样的值。
+   滑动（上推、发出后回到底部）正在进行时 scrollTop 由滑动写，这里只更新位置与高度，滑动的目标（每帧重取「最底下」）自己会跟上。 */
 export interface LogItem {
   key: string;
   node: React.ReactNode;
@@ -23,6 +32,8 @@ export interface ScrollState {
   /** 离顶部不到 160px */
   nearTop: boolean;
 }
+/** 发出消息后滑回底部：最多从离底部这么多屏的地方开始滑 */
+const SEND_SLIDE_VIEWPORTS = 2;
 /** 停在 anchorKey 那一条时，它的顶边离浮着的标题下沿多少 px */
 const ANCHOR_OFFSET = 40;
 /* 窗格量出来的浮层高度（--ht、--hb），滚动区从 .pane 继承 */
@@ -38,10 +49,9 @@ function pads(c: HTMLElement) {
 /** 停在某一条时它的顶边离滚动区顶边多少：浮着的标题下沿再往下 ANCHOR_OFFSET */
 const anchorAt = (c: HTMLElement) => () => pads(c).ht + ANCHOR_OFFSET;
 
-/* 逐帧把 find() 说的偏差滚掉，最多 40 帧；连着 4 帧偏差小于 0.5px 就算稳了；用户自己滚动、点按时立刻放手。
-   结束时（不管怎么结束）调 onDone。holdMs 不为 0 时不看稳不稳、不限帧数，一直校正到过了这么多毫秒（或用户自己滚动）才结束 */
-function settle(c: HTMLElement, find: () => number | null, onDone?: () => void, holdMs = 0) {
-  const t0 = performance.now();
+/* 逐帧把 find() 说的偏差滚掉（瞬间的定位：停在某一条、取回更早的消息后保持位置，不滑），最多 40 帧；连着 4 帧偏差小于 0.5px 就算稳了；
+   用户自己滚动、点按时立刻放手。结束时（不管怎么结束）调 onDone */
+function settle(c: HTMLElement, find: () => number | null, onDone?: () => void) {
   let frames = 0;
   let stable = 0;
   let dead = false;
@@ -60,8 +70,7 @@ function settle(c: HTMLElement, find: () => number | null, onDone?: () => void, 
       c.scrollTop += d;
       stable = 0;
     } else stable++;
-    const over = holdMs ? performance.now() - t0 >= holdMs : ++frames >= 40 || stable >= 4;
-    if (over) return stop();
+    if (++frames >= 40 || stable >= 4) return stop();
     requestAnimationFrame(step);
   };
   requestAnimationFrame(step);
@@ -137,8 +146,71 @@ export function VirtualLog({
     redraw();
   };
   const stick = useRef(true);
+  const sizer = useRef<HTMLDivElement>(null);
+  /** 发出消息后的滑动正在进行（新条目进来时不换成上推的走法） */
+  const sendSlide = useRef(false);
+  const padTopRef = useRef(padTop);
+  padTopRef.current = padTop;
+  /* 条目量到新高度时虚拟器默认会补偿 scrollTop（让看着的那一屏不动）：第一次量到、顶边在可视范围上面的，补偿估算和真实的差；
+     之后再量到的，只补偿整条都在上面的。这里原样保留，只加一条：贴着底部时不补偿。贴底的由 syncRows 在同一帧里滚到底；
+     补偿的写入会被浏览器夹住（容器的高度还没跟上），虚拟器把它记下来，之后每次内容变高都重发一遍旧的目标位置，和贴底、滑动拉扯 */
+  virt.shouldAdjustScrollPositionOnItemSizeChange = (item, _delta, inst) => {
+    if (stick.current) return false;
+    const off = inst.scrollOffset ?? 0;
+    return inst.itemSizeCache.has(item.key)
+      ? item.start + item.size <= off && inst.scrollDirection !== 'backward'
+      : item.start < off;
+  };
+  /* 同一帧：某几条的高度变了（回调在布局之后、绘制之前）——交给虚拟器，容器的高度、各条的位置、贴底都当场对上 */
+  const syncRows = (entries: ResizeObserverEntry[]) => {
+    const c = scRef.current,
+      box = sizer.current;
+    if (!c || !box) return;
+    for (const e of entries) {
+      const el = e.target as HTMLElement;
+      const i = Number(el.dataset.index);
+      if (!el.isConnected || !Number.isInteger(i)) continue;
+      virt.resizeItem(i, e.borderBoxSize?.[0]?.blockSize ?? el.offsetHeight);
+    }
+    box.style.height = `${virt.getTotalSize()}px`;
+    const pt = padTopRef.current;
+    for (const el of box.children as HTMLCollectionOf<HTMLElement>) {
+      const m = virt.measurementsCache[Number(el.dataset.index)];
+      if (m) el.style.transform = `translateY(${m.start - pt}px)`;
+    }
+    if (stick.current) {
+      /* 滑动的目标（最底下）这一帧又往下走了：当场按新目标算位置写进去（slide.sync），否则最后一条的下沿要晚一帧才跟上 */
+      const sl = sliderOf(c);
+      if (sl.active) sl.sync();
+      else c.scrollTop = c.scrollHeight;
+    }
+  };
+  const syncRef = useRef(syncRows);
+  syncRef.current = syncRows;
+  const rowRo = useRef<ResizeObserver | null>(null);
+  const watchRow = useCallback(
+    (el: HTMLDivElement) => {
+      virt.measureElement(el);
+      rowRo.current ??= new ResizeObserver((es) => syncRef.current(es));
+      rowRo.current.observe(el);
+      return () => {
+        rowRo.current?.unobserve(el);
+        virt.measureElement(null);
+      };
+    },
+    [virt],
+  );
+  useEffect(
+    () => () => {
+      rowRo.current?.disconnect();
+      rowRo.current = null;
+    },
+    [],
+  );
   const lastKey = useRef<string | null | undefined>(undefined);
   const prevCount = useRef(0);
+  /** 上一次渲染时最后一条的 key：条数没变、最后一条换了（「正在回复」换成回复的气泡）也算新来了一条 */
+  const prevLastKey = useRef<string | undefined>(undefined);
   const prevFirst = useRef<string | undefined>(undefined);
   const stopSettle = useRef<(() => void) | null>(null);
   /* 顶上的内容变了：趁 DOM 还是旧的，记下现在看着的第一条和它的位置 */
@@ -182,7 +254,7 @@ export function VirtualLog({
       const t = pads(c).top;
       setPadTop((v) => (Math.abs(v - t) < 0.5 ? v : t));
       if (first) return;
-      if (stick.current) c.scrollTop = c.scrollHeight;
+      if (stick.current && !isSliding(c)) c.scrollTop = c.scrollHeight;
       reportRef.current();
     };
     fit(true);
@@ -203,6 +275,7 @@ export function VirtualLog({
     if (switched) {
       stopSettle.current?.();
       stopSettle.current = null;
+      sliderOf(c).cancel();
       if (anchorIdx >= 0) {
         stick.current = false;
         const m = virt.measurementsCache[anchorIdx];
@@ -217,13 +290,12 @@ export function VirtualLog({
         });
       } else {
         stick.current = true;
-        if (items.length) virt.scrollToIndex(items.length - 1, { align: 'end' });
-        /* 这一帧就滚到底（虚拟器自己滚到的位置不含底部浮层那一段内边距），并让虚拟器画这一屏 */
+        /* 这一帧就滚到底，并让虚拟器画这一屏。不用虚拟器自己的 scrollToIndex：它留下的「滚到某一条」的命令会在随后的每一帧里
+           接着往它算出的位置写 scrollTop（不含底部浮层那一段内边距，永远到不了），和这里的贴底、上面的滑动互相拉扯 */
         c.scrollTop = c.scrollHeight;
         syncOffset();
         fixup.current = { key: null, skip: true, left: 3 };
         requestAnimationFrame(() => {
-          if (items.length) virt.scrollToIndex(items.length - 1, { align: 'end' });
           c.scrollTop = c.scrollHeight;
         });
       }
@@ -242,15 +314,26 @@ export function VirtualLog({
           );
         }
       }
-      if (!restored && items.length !== prevCount.current && stick.current && items.length) {
-        virt.scrollToIndex(items.length - 1, {
-          align: 'end',
-          behavior: motionOn() ? 'smooth' : 'auto',
-        });
+      const lastKeyNow = items[items.length - 1]?.key;
+      if (
+        !restored &&
+        (items.length !== prevCount.current || lastKeyNow !== prevLastKey.current) &&
+        stick.current &&
+        items.length
+      ) {
+        /* 新条目：贴着底部就往上推。滑的目标每帧重取（最底下会随内容变高往下走）；已经在滑（发出消息后的滑动）就让它继续，不换走法 */
+        if (!motionOn()) c.scrollTop = c.scrollHeight;
+        else if (!sendSlide.current)
+          sliderOf(c).to(() => maxScrollTop(c), {
+            kind: 'exp',
+            tau: SLIDE_PUSH_TAU,
+            passthrough: true,
+          });
       }
     }
     prevCount.current = items.length;
     prevFirst.current = items[0]?.key;
+    prevLastKey.current = items[items.length - 1]?.key;
   });
   useLayoutEffect(() => {
     const f = fixup.current;
@@ -275,9 +358,10 @@ export function VirtualLog({
     }
   });
   useEffect(() => () => stopSettle.current?.(), []);
-  /* 发出消息：先滚到底、设成贴底，之后 1.5 秒内逐帧把没滚到的距离滚掉：新消息、回复进来时高度是慢慢长出来的，
-     虚拟器自己的滚动（scrollToIndex）在刚滚动过之后会排队等一会儿，不能只靠它跟上。不用平滑滚动（途中的滚动事件会把「贴底」清掉）；
-     用户自己滚动、点按就放手 */
+  /* 发出消息：设成贴底，回到最底下。离得远（动画开着时）滑过去，不是跳：ease-out，时长随距离，最长 0.45 秒；
+     本来就在底部（或关了动画）直接到。之后新消息、回复进来时高度是慢慢长出来的：滑动的目标每帧重取「最底下」，
+     滑完以后靠同一帧贴底（syncRows）。滑的途中不用 settle 那样的逐帧校正，滚动事件也不会把「贴底」清掉（isSliding）；
+     用户自己滚动、点按（slide.ts 里的监听）就放手 */
   const jumpSeen = useRef(jumpKey);
   useLayoutEffect(() => {
     if (jumpKey === jumpSeen.current) return;
@@ -285,21 +369,35 @@ export function VirtualLog({
     const c = scRef.current;
     if (!c) return;
     stopSettle.current?.();
+    stopSettle.current = null;
     stick.current = true;
-    c.scrollTop = c.scrollHeight;
-    stopSettle.current = settle(
-      c,
-      () => c.scrollHeight - c.scrollTop - c.clientHeight,
-      () => {
-        stick.current = nearBottom();
+    const sl = sliderOf(c);
+    let dist = maxScrollTop(c) - c.scrollTop;
+    if (!motionOn() || dist < 2) {
+      sl.cancel();
+      sendSlide.current = false;
+      c.scrollTop = c.scrollHeight;
+      return;
+    }
+    /* 离得更远的（几千像素）先直接到离底部两屏的地方再滑：滑过的每一屏都要挂上、画出来，一路滑过去只是白费力气，帧也会卡 */
+    if (dist > c.clientHeight * SEND_SLIDE_VIEWPORTS) {
+      c.scrollTop = maxScrollTop(c) - c.clientHeight * SEND_SLIDE_VIEWPORTS;
+      dist = maxScrollTop(c) - c.scrollTop;
+    }
+    sendSlide.current = true;
+    sl.to(
+      () => maxScrollTop(c),
+      { kind: 'ease', ms: slideSendMs(dist) },
+      (r) => {
+        if (r !== 'replace') sendSlide.current = false;
+        if (r === 'done') stick.current = true;
       },
-      1500,
     );
   }, [jumpKey]);
   const total = virt.getTotalSize();
   useEffect(() => {
     const c = scRef.current;
-    if (c && stick.current) c.scrollTop = c.scrollHeight;
+    if (c && stick.current && !isSliding(c)) c.scrollTop = c.scrollHeight;
   }, [total]);
   /* 内容变了之后也报一次：没有滚动事件时（新消息把内容撑高、取回了更早的消息）时间线也要知道现在的位置 */
   useEffect(() => {
@@ -313,13 +411,14 @@ export function VirtualLog({
       aria-label={label}
       aria-live={live ? 'polite' : undefined}
       onScroll={() => {
-        stick.current = nearBottom();
+        // 程序自己在滑的时候离底部还远，不算用户往上翻了
+        if (!isSliding(scRef.current!)) stick.current = nearBottom();
         report();
       }}
       style={{ display: 'block' }}
     >
       {topNotice && <div className="log-top">{topNotice}</div>}
-      <div style={{ position: 'relative', height: total, width: '100%' }}>
+      <div ref={sizer} style={{ position: 'relative', height: total, width: '100%' }}>
         {virt.getVirtualItems().map((v) => {
           const it = items[v.index];
           if (!it) return null;
@@ -328,7 +427,7 @@ export function VirtualLog({
               key={v.key}
               data-index={v.index}
               data-key={String(v.key)}
-              ref={virt.measureElement}
+              ref={watchRow}
               style={{
                 position: 'absolute',
                 top: 0,

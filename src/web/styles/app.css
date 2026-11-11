@@ -2861,6 +2861,19 @@ button {
   white-space: pre-wrap;
   user-select: text;
 }
+/* 气泡里面的一层：平时只是个普通的块（装下所有内容，外框的大小就是它的大小）。
+   内容自己变大变小时外框在补间（components/bubble-frame.ts）：外框的宽高写死、裁住内容（data-tw），内容脱离排版流、
+   按自然的大小排版（位置 left、top 和最大宽度由脚本按内边距和 .msg 的上限写成行内样式，补间结束时去掉） */
+.bubble-in {
+  display: flow-root;
+}
+.bubble[data-tw] {
+  overflow: hidden;
+}
+.bubble[data-tw] > .bubble-in {
+  position: absolute;
+  width: max-content;
+}
 .msg.is-me .bubble {
   border-radius: 16px 16px 5px 16px;
 }
@@ -2933,6 +2946,21 @@ button {
   font-size: 11.5px;
   color: var(--fg-3);
   white-space: normal;
+  interpolate-size: allow-keywords;
+}
+/* 展开、收起：折叠的内容自己缓缓撑开、收起（高度从 0 到 auto 的过渡，约 0.2 秒），它下面的字、气泡、下面的消息每帧跟着挪。
+   不在折叠里做补间：气泡的外框平时就是内容的大小，会跟着变；时间线贴着底部时 VirtualLog 每帧跟到底。
+   display: flow-root：里面 .fold-body 的上外边距不会漏到外面。关掉动画时（.still）直接到位 */
+.fold::details-content {
+  display: flow-root;
+  height: 0;
+  overflow: clip;
+  transition:
+    height 0.2s var(--ease-out),
+    content-visibility 0.2s allow-discrete;
+}
+.fold[open]::details-content {
+  height: auto;
 }
 .fold summary {
   cursor: pointer;
@@ -4590,6 +4618,9 @@ a.hl-url:focus-visible {
 }
 .still .cur .st4 {
   animation: none !important;
+}
+.still .fold::details-content {
+  transition: none !important;
 }
 /* 窗格的滚动区、上下的渐变带、虚拟列表的总高和条目的位置：这些是排版，不是装饰，直接变，不用上面统一的 0.12 秒过渡。
    窗口挂上后浮层的高度（--ht、--hb）要量一次才有，滚动区的内边距、条目的位置随之变；过渡会让它们在头 120 ms 里一边渐变、

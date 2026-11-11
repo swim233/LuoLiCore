@@ -1,10 +1,12 @@
 import { memo, useLayoutEffect, useRef } from 'react';
+import { attachBubbleFrame } from './bubble-frame';
 import { Hl, Spin } from './Hl';
 import { Typed } from './Typed';
 import type { CursorRef } from './Typed';
 import { Markdown } from './Markdown';
 import { Pic } from './Pic';
 import { motionOn } from '../lib/prefs';
+import { isSliding, maxScrollTop, SLIDE_FOLLOW_TAU, sliderOf } from '../lib/slide';
 import { nf } from '../lib/util';
 import { argsLine } from '../model/parts';
 import type { BPart } from '../model/bubble';
@@ -24,14 +26,16 @@ function prettyInput(input: unknown) {
   return s.length > 1000 ? s.slice(0, 1000) + '…' : s;
 }
 
-/* 思考的内容：高度有上限、自己滚动。思考中（follow）展开着时，停在它的底部就跟着贴底，往上翻了就不拉回来 */
+/* 思考的内容：高度有上限、自己滚动。思考中（follow）展开着时，停在它的底部就跟着滑到最新（不是跳），往上翻了就不拉回来 */
 const NEAR_BOTTOM = 24;
 function ThinkBody({ text, follow }: { text: string; follow: boolean }) {
   const ref = useRef<HTMLDivElement>(null);
   const stuck = useRef(true);
   useLayoutEffect(() => {
     const el = ref.current;
-    if (follow && el && stuck.current) el.scrollTop = el.scrollHeight;
+    if (!follow || !el || !stuck.current) return;
+    if (motionOn()) sliderOf(el).to(() => maxScrollTop(el), { kind: 'exp', tau: SLIDE_FOLLOW_TAU });
+    else el.scrollTop = el.scrollHeight;
   }, [text, follow]);
   return (
     <div
@@ -39,6 +43,8 @@ function ThinkBody({ text, follow }: { text: string; follow: boolean }) {
       ref={ref}
       onScroll={(e) => {
         const el = e.currentTarget;
+        // 自己在滑的时候离底部还远，不算用户往上翻了
+        if (isSliding(el)) return;
         stuck.current = el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM;
       }}
     >
@@ -68,8 +74,11 @@ function ThinkFold({
     <details
       className="fold is-think"
       onToggle={(e) => {
-        const body = e.currentTarget.querySelector('.fold-body');
-        if (p.streaming && e.currentTarget.open && body) body.scrollTop = body.scrollHeight;
+        const body = e.currentTarget.querySelector<HTMLElement>('.fold-body');
+        if (p.streaming && e.currentTarget.open && body) {
+          sliderOf(body).cancel();
+          body.scrollTop = body.scrollHeight;
+        }
       }}
     >
       <summary>
@@ -205,6 +214,18 @@ export function Blocks({
   return <>{blocks}</>;
 }
 
+/* 气泡的外框与里面的内容分两层（外框的补间见 bubble-frame.ts）。平时 .bubble-in 只是个普通的块 */
+function useBubbleFrame() {
+  const frame = useRef<HTMLDivElement>(null);
+  const inner = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const f = frame.current,
+      c = inner.current;
+    if (f && c) return attachBubbleFrame(f, c);
+  }, []);
+  return { frame, inner };
+}
+
 /** 一条消息：名字与时间一行，气泡，标记，（出错时）下面的按钮 */
 export const MsgBubble = memo(function MsgBubble({
   isA,
@@ -247,6 +268,7 @@ export const MsgBubble = memo(function MsgBubble({
     (you ? ' is-you is-me' : '') +
     (isNew && motionOn() ? ' is-new' : '');
   const ended = failed ? 'fail' : aborted ? 'abort' : null;
+  const { frame, inner } = useBubbleFrame();
   return (
     <div className={cls} style={!isA ? { '--who': colorOf(who ?? '') } : undefined}>
       <div className="msg-meta">
@@ -259,10 +281,12 @@ export const MsgBubble = memo(function MsgBubble({
           <time>{label}</time>
         )}
       </div>
-      <div className="bubble">
-        <Blocks parts={parts} hits={!isA} md={isA} live={live} ended={ended} />
-        {aborted && <span className="mark">{abortMark}</span>}
-        {failed && <span className="mark is-err">（回复出错中断）</span>}
+      <div className="bubble" ref={frame}>
+        <div className="bubble-in" ref={inner}>
+          <Blocks parts={parts} hits={!isA} md={isA} live={live} ended={ended} />
+          {aborted && <span className="mark">{abortMark}</span>}
+          {failed && <span className="mark is-err">（回复出错中断）</span>}
+        </div>
       </div>
       {below}
     </div>
