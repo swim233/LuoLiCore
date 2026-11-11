@@ -647,10 +647,15 @@ button {
 
 /* ---------- 窗格（components/Pane.tsx）----------
    内容（.pane-sc，滚动区）铺满整块，上下留出浮层的高度（--ht、--hb，Pane 量出来写在 .pane 上）再加它自己的留白（--sc-pt、--sc-pb）。
-   上下各一组模糊（.pane-ov）：6 层 backdrop-filter，模糊半径 20/32 … 20 px，每层只在一段里不透明（遮罩），由浅到深，
-   靠窗口边上最糊；加一层渐变的底（.tn）。一组的高度 = 浮层高度 + 渐变带长度（--rt）。
-   遮罩按「先慢后快」的曲线 f(t) = t^1.9、N = 6 算：p(k) = f(k/6)，从内容那一侧量到窗口边，
-   p = 0、3.3%、12.4%、26.8%、46.3%、70.7%、100%；第 i 层（0 起）在 p(i) 透明，p(i+1)～p(i+2) 不透明，p(i+3) 透明，最后两层不透明到边上。
+   上下各一组模糊（.pane-ov）：4 层 backdrop-filter，每层只在一段里不透明（遮罩），由浅到深，靠窗口边上最糊；加一层渐变的底（.tn）。
+   一组的高度 = 浮层高度 + 渐变带长度（--rt，窗口高度的 10.5%，24～82 px）。
+   模糊强度按指数曲线涨：位置 x 从内容一侧（0）量到窗口边（1），沿整组的高度，目标是 T(x) = 22.36 × (e^(5x) − 1) ÷ (e^5 − 1) px，
+   x = 0.25 处 0.38、0.5 处 1.70、0.75 处 6.30、1 处 22.36。开头几乎不糊，内容刚滚进来时看不出一条分界线。
+   叠出来的等效模糊按 eff(x) = sqrt(Σ a_i(x) · σ_i²) 算（a_i 是第 i 层在 x 处的遮罩不透明度，σ_i 是它的模糊半径）。
+   节点 x_j = j/4：第 i 层（0 起）在 x_i 透明，x_(i+1)～x_(i+2) 不透明，x_(i+3) 透明，最后两层不透明到边上，即遮罩的 0/25/50/75/100%。
+   让 eff(x_j) = T(x_j) 解出半径：σ_0 = T(x_1)，σ_j = sqrt(T(x_(j+1))² − σ_(j−1)²)，
+   = 0.38、1.65、6.08、21.52 px（下面写死；改曲线时照这个式子重算）。
+   渐变的底同一条曲线：78% × (e^(2.5x) − 1) ÷ (e^2.5 − 1)，取 12 段连成渐变（每 1/12 处一个点）。
    「只在那一边还有内容时出现」：每层自己做透明度的 scroll-driven 动画（顶上那组在滚动的头 32px 里淡入，底下那组在最后 32px 里淡出），
    基准透明度是 0：内容不够一屏（没有滚动范围，时间线不起作用）时两边都没有。
    注意：模糊层的容器（.pane-ov、.pane）不能有透明度动画、opacity < 1、filter、mask（那样它就成了 backdrop root，模糊什么也看不到） */
@@ -671,7 +676,6 @@ button {
   }
 }
 .pane {
-  --bz: 20px;
   --rtl: var(--r-card);
   --rtr: var(--r-card);
   --rbl: var(--r-card);
@@ -736,13 +740,16 @@ button {
   z-index: 2;
   pointer-events: none;
 }
+/* --toward：渐变从内容一侧走向窗口边的方向（遮罩、渐变的底共用），0% 在内容一侧 */
 .pane-ov.t {
+  --toward: to top;
   top: 0;
-  height: calc(var(--ht, 0px) + var(--rt, 16px));
+  height: calc(var(--ht, 0px) + var(--rt, 24px));
 }
 .pane-ov.b {
+  --toward: to bottom;
   bottom: 0;
-  height: calc(var(--hb, 0px) + var(--rt, 16px));
+  height: calc(var(--hb, 0px) + var(--rt, 24px));
 }
 .pane-ov > i {
   position: absolute;
@@ -765,129 +772,53 @@ button {
   animation-range: calc(100% - 32px) 100%;
 }
 .pane-ov > .l1 {
-  -webkit-backdrop-filter: blur(calc(var(--bz) / 32));
-  backdrop-filter: blur(calc(var(--bz) / 32));
+  -webkit-backdrop-filter: blur(0.38px);
+  backdrop-filter: blur(0.38px);
+  mask-image: linear-gradient(
+    var(--toward),
+    transparent 0%,
+    var(--mask) 25%,
+    var(--mask) 50%,
+    transparent 75%
+  );
 }
 .pane-ov > .l2 {
-  -webkit-backdrop-filter: blur(calc(var(--bz) / 16));
-  backdrop-filter: blur(calc(var(--bz) / 16));
+  -webkit-backdrop-filter: blur(1.65px);
+  backdrop-filter: blur(1.65px);
+  mask-image: linear-gradient(
+    var(--toward),
+    transparent 25%,
+    var(--mask) 50%,
+    var(--mask) 75%,
+    transparent 100%
+  );
 }
 .pane-ov > .l3 {
-  -webkit-backdrop-filter: blur(calc(var(--bz) / 8));
-  backdrop-filter: blur(calc(var(--bz) / 8));
+  -webkit-backdrop-filter: blur(6.08px);
+  backdrop-filter: blur(6.08px);
+  mask-image: linear-gradient(var(--toward), transparent 50%, var(--mask) 75%, var(--mask) 100%);
 }
 .pane-ov > .l4 {
-  -webkit-backdrop-filter: blur(calc(var(--bz) / 4));
-  backdrop-filter: blur(calc(var(--bz) / 4));
+  -webkit-backdrop-filter: blur(21.52px);
+  backdrop-filter: blur(21.52px);
+  mask-image: linear-gradient(var(--toward), transparent 75%, var(--mask) 100%);
 }
-.pane-ov > .l5 {
-  -webkit-backdrop-filter: blur(calc(var(--bz) / 2));
-  backdrop-filter: blur(calc(var(--bz) / 2));
-}
-.pane-ov > .l6 {
-  -webkit-backdrop-filter: blur(var(--bz));
-  backdrop-filter: blur(var(--bz));
-}
-.pane-ov.t > .l1 {
-  mask-image: linear-gradient(
-    to top,
-    transparent 0%,
-    var(--mask) 3.3%,
-    var(--mask) 12.4%,
-    transparent 26.8%
-  );
-}
-.pane-ov.t > .l2 {
-  mask-image: linear-gradient(
-    to top,
-    transparent 3.3%,
-    var(--mask) 12.4%,
-    var(--mask) 26.8%,
-    transparent 46.3%
-  );
-}
-.pane-ov.t > .l3 {
-  mask-image: linear-gradient(
-    to top,
-    transparent 12.4%,
-    var(--mask) 26.8%,
-    var(--mask) 46.3%,
-    transparent 70.7%
-  );
-}
-.pane-ov.t > .l4 {
-  mask-image: linear-gradient(
-    to top,
-    transparent 26.8%,
-    var(--mask) 46.3%,
-    var(--mask) 70.7%,
-    transparent 100%
-  );
-}
-.pane-ov.t > .l5 {
-  mask-image: linear-gradient(to top, transparent 46.3%, var(--mask) 70.7%, var(--mask) 100%);
-}
-.pane-ov.t > .l6 {
-  mask-image: linear-gradient(to top, transparent 70.7%, var(--mask) 100%);
-}
-.pane-ov.b > .l1 {
-  mask-image: linear-gradient(
-    to bottom,
-    transparent 0%,
-    var(--mask) 3.3%,
-    var(--mask) 12.4%,
-    transparent 26.8%
-  );
-}
-.pane-ov.b > .l2 {
-  mask-image: linear-gradient(
-    to bottom,
-    transparent 3.3%,
-    var(--mask) 12.4%,
-    var(--mask) 26.8%,
-    transparent 46.3%
-  );
-}
-.pane-ov.b > .l3 {
-  mask-image: linear-gradient(
-    to bottom,
-    transparent 12.4%,
-    var(--mask) 26.8%,
-    var(--mask) 46.3%,
-    transparent 70.7%
-  );
-}
-.pane-ov.b > .l4 {
-  mask-image: linear-gradient(
-    to bottom,
-    transparent 26.8%,
-    var(--mask) 46.3%,
-    var(--mask) 70.7%,
-    transparent 100%
-  );
-}
-.pane-ov.b > .l5 {
-  mask-image: linear-gradient(to bottom, transparent 46.3%, var(--mask) 70.7%, var(--mask) 100%);
-}
-.pane-ov.b > .l6 {
-  mask-image: linear-gradient(to bottom, transparent 70.7%, var(--mask) 100%);
-}
-/* 渐变的底：0 → 18%（p(2)）→ 45%（p(4)）→ 78%（窗口边） */
-.pane-ov.t > .tn {
+/* 渐变的底：78% × (e^(2.5x) − 1) ÷ (e^2.5 − 1)，每 1/12 处一个点：0、1.6、3.6、6.1、9.1、12.8、17.4、23.0、30.0、38.5、49.0、62.0、78.0 % */
+.pane-ov > .tn {
   background: linear-gradient(
-    to top,
+    var(--toward),
     transparent 0,
-    color-mix(in srgb, var(--tint) 18%, transparent) 12.4%,
-    color-mix(in srgb, var(--tint) 45%, transparent) 46.3%,
-    color-mix(in srgb, var(--tint) 78%, transparent) 100%
-  );
-}
-.pane-ov.b > .tn {
-  background: linear-gradient(
-    to bottom,
-    transparent 0,
-    color-mix(in srgb, var(--tint) 18%, transparent) 12.4%,
-    color-mix(in srgb, var(--tint) 45%, transparent) 46.3%,
+    color-mix(in srgb, var(--tint) 1.6%, transparent) 8.333%,
+    color-mix(in srgb, var(--tint) 3.6%, transparent) 16.667%,
+    color-mix(in srgb, var(--tint) 6.1%, transparent) 25%,
+    color-mix(in srgb, var(--tint) 9.1%, transparent) 33.333%,
+    color-mix(in srgb, var(--tint) 12.8%, transparent) 41.667%,
+    color-mix(in srgb, var(--tint) 17.4%, transparent) 50%,
+    color-mix(in srgb, var(--tint) 23%, transparent) 58.333%,
+    color-mix(in srgb, var(--tint) 30%, transparent) 66.667%,
+    color-mix(in srgb, var(--tint) 38.5%, transparent) 75%,
+    color-mix(in srgb, var(--tint) 49%, transparent) 83.333%,
+    color-mix(in srgb, var(--tint) 62%, transparent) 91.667%,
     color-mix(in srgb, var(--tint) 78%, transparent) 100%
   );
 }

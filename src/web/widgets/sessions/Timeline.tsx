@@ -304,7 +304,7 @@ export function Timeline({ convId, web = false }: { convId: string | null; web?:
       node: <MsgView row={e.row} convId={convId} web={web} isNew={isNew} />,
     };
   });
-  /* 打开时停在哪：画了分隔线就停在分隔线（离浮着的标题下沿 40px，在模糊的渐变带下面，看得清）；
+  /* 打开时停在哪：画了分隔线就停在分隔线（离浮着的标题下沿 40px；渐变带最长 82px，分隔线可能落在带里，但那里按指数曲线几乎不糊，看得清）；
      第一条未读还没取到、没画分隔线时停在取到的最上面那条 */
   const anchorKey = dividerSeq !== null ? 'new-divider' : (o?.anchorId ?? null);
   const topNotice =
