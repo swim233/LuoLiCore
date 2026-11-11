@@ -3836,12 +3836,34 @@ a.hl-url:focus-visible {
   background: color-mix(in srgb, var(--err) 24%, transparent);
   color: var(--err-pale);
 }
+/* 输入框下面的提示：始终只占一行，高度不随「生成中」那段出现、消失、变长而变（它一变，底部浮层的高度跟着变，时间线整块上下挪）。
+   左边是按键的提示，右边是生成中的提示（生成中才有，有字时多一句「发出的会排队」）。
+   两段放不下时右边的留着、左边让位（换到第二行，被这一行裁掉）：窄的窗口里生成中只看得到「生成中 · Esc 中止」，
+   宽的窗口、全屏里两段都在。视觉上右边在右（row-reverse）、左边在左（margin-right: auto），但排版的先后是右边先，所以空间不够时是左边被挤到下一行；
+   DOM 的顺序还是左边在前。一行也放不下左边时（没有生成中那段）它自己加省略号 */
 .chat-hint {
   font-size: 11px;
   color: var(--dim);
   display: flex;
-  justify-content: space-between;
-  gap: 8px;
+  flex-direction: row-reverse;
+  flex-wrap: wrap;
+  column-gap: 8px;
+  row-gap: 0;
+  height: 1lh;
+  overflow: hidden;
+}
+.chat-hint-busy {
+  order: 0;
+  white-space: nowrap;
+}
+.chat-hint-keys {
+  order: 1;
+  margin-right: auto;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .chat-full {
   display: grid;

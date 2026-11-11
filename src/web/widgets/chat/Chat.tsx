@@ -609,10 +609,12 @@ function Composer({ convId, fullId }: { convId: string | null; fullId: string })
         </button>
       </div>
       <div className="chat-hint">
-        <span>Enter 发送 · Shift+Enter 换行 · 可以粘贴或拖入图片</span>
-        <span>
-          {busy ? (hasContent ? '生成中 · 发出的会排队 · Esc 中止' : '生成中 · Esc 中止') : ''}
-        </span>
+        <span className="chat-hint-keys">Enter 发送 · Shift+Enter 换行 · 可以粘贴或拖入图片</span>
+        {busy && (
+          <span className="chat-hint-busy">
+            {hasContent ? '生成中 · 发出的会排队 · Esc 中止' : '生成中 · Esc 中止'}
+          </span>
+        )}
       </div>
     </div>
   );
