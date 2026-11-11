@@ -1,5 +1,16 @@
 import { describe, expect, it } from 'vitest';
-import { advanceCp, cpLen, GAP_MS, LAG_MS, makeCuts, MIN_GAP_MS, Pacer } from './typing';
+import {
+  advanceCp,
+  cpLen,
+  cpSpans,
+  GAP_MS,
+  LAG_MS,
+  makeCuts,
+  MIN_GAP_MS,
+  Pacer,
+  Spans,
+  trimBatches,
+} from './typing';
 
 /* 假的时钟：按 hz 一帧一帧往前走，arrivals 是（到达的时刻，字数）；
    返回每个字的到达时刻、开始落下的时刻（Pacer 给的，每个字各有各的）、每一帧里轮到了几个字 */
@@ -197,5 +208,94 @@ describe('makeCuts 末尾刚放出的字怎么按批切开', () => {
   it('没有批、空文字：没有切口', () => {
     expect(makeCuts(5, [])).toEqual([]);
     expect(makeCuts(0, [b(1, 3)])).toEqual([]);
+  });
+});
+
+describe('不占放字时间的字（链接的网址）', () => {
+  it('Spans：位置在不在范围里、一段里有几个', () => {
+    const sp = new Spans([
+      [3, 6],
+      [10, 12],
+    ]);
+    expect([2, 3, 5, 6, 10, 11, 12].map((i) => sp.has(i))).toEqual([
+      false,
+      true,
+      true,
+      false,
+      true,
+      true,
+      false,
+    ]);
+    expect(sp.count(0, 20)).toBe(5);
+    expect(sp.count(4, 11)).toBe(3);
+    expect(sp.count(6, 10)).toBe(0);
+    expect(new Spans().has(0)).toBe(false);
+  });
+
+  it('cpSpans：UTF-16 下标的范围换成字（码点）的范围', () => {
+    const text = 'a😀[b](u)';
+    const i = text.indexOf('](u)');
+    const sp = cpSpans(text, [[i, text.length]]);
+    expect(sp.has(cpLen(text.slice(0, i)))).toBe(true);
+    expect(sp.count(0, cpLen(text))).toBe(4);
+    expect(sp.has(2)).toBe(false); // 表情后面的 [ 是第 3 个字
+  });
+
+  it('这些字一到就算放完：不要间隔，不在返回的开始时刻里，后面的字接着照节奏出', () => {
+    // 「看[文字](https://e.com)吧」：从 ] 起的 17 个字不占时间
+    const text = '看[文字](https://e.com)吧';
+    const url = cpSpans(text, [[text.indexOf(']'), text.indexOf('吧')]]);
+    const p = new Pacer(0);
+    p.arrive(cpLen(text), 0);
+    const starts = p.advance(10_000, url);
+    // 看 [ 文 字 | 吧：5 个字有时间，其余不占
+    expect(starts).toEqual([0, 28, 56, 84, 112]);
+    expect(p.shown).toBe(cpLen(text));
+    expect(p.pending).toBe(0);
+  });
+
+  it('网址在队尾、字没到齐：放到哪算哪，后来的字接着排', () => {
+    const p = new Pacer(0);
+    const sp = new Spans([[3, 9]]);
+    p.arrive(6, 0); // 到了 6 个字：前 3 个有时间，后面 3 个是网址
+    expect(p.advance(0, sp)).toEqual([0]);
+    expect(p.advance(100, sp)).toEqual([28, 56]);
+    expect(p.shown).toBe(6); // 网址的 3 个字紧接着放完
+    p.arrive(9, 150); // 网址又到了 3 个字（还是网址）
+    expect(p.advance(150, sp)).toEqual([]);
+    expect(p.shown).toBe(9);
+    p.arrive(11, 160); // 后面 2 个字是正文：接在上一个有时间的字后面
+    expect(p.advance(1000, sp)).toEqual([160, 188]);
+  });
+
+  it('追赶只看有时间的字：一大批里网址很长，间隔不因为它缩短', () => {
+    const p = new Pacer(0);
+    const sp = new Spans([[10, 110]]); // 100 个字的网址
+    p.arrive(120, 0);
+    const starts = p.advance(10_000, sp);
+    expect(starts).toHaveLength(20);
+    // 只有 20 个字要排：在 LAG_MS 内排完，间隔约 12 毫秒；算上网址的 100 个字会缩到 2 毫秒
+    expect(starts[19]).toBeLessThanOrEqual(LAG_MS + 1e-6);
+    expect(starts[1] - starts[0]).toBeGreaterThan(10);
+  });
+});
+
+describe('trimBatches 去掉最新的几个没显示的字', () => {
+  const b = (id: number, n: number) => ({ id, n, at: id * 10 });
+  it('不去：原样（同一个数组）', () => {
+    const list = [b(1, 3), b(2, 1)];
+    expect(trimBatches(list, 0)).toBe(list);
+  });
+  it('从最新的一批往前去，去不完的批减少个数', () => {
+    expect(trimBatches([b(1, 3), b(2, 2), b(3, 1)], 1)).toEqual([b(1, 3), b(2, 2)]);
+    expect(trimBatches([b(1, 3), b(2, 2), b(3, 1)], 2)).toEqual([b(1, 3), b(2, 1)]);
+    expect(trimBatches([b(1, 3), b(2, 2), b(3, 1)], 4)).toEqual([b(1, 2)]);
+    expect(trimBatches([b(1, 3)], 9)).toEqual([]);
+  });
+  it('配合 makeCuts：结尾的符号一到，前面显示出来的最后几个字的批不变（不再落一次）', () => {
+    // 「加粗」两个字各一批，接着 ** 到了：* 的批不能算在「加粗」头上
+    const before = makeCuts(2, [b(1, 1), b(2, 1)]);
+    const after = makeCuts(2, trimBatches([b(1, 1), b(2, 1), b(3, 1), b(4, 1)], 2));
+    expect(after).toEqual(before);
   });
 });

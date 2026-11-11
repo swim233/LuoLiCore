@@ -43,6 +43,40 @@ export function advanceCp(s: string, at: number, n: number): number {
   return i;
 }
 
+/** 一组字（码点）的位置范围 [from, to)，按位置排好、互不重叠。放字时这些字不占时间（链接的网址：显示出来的只有方括号里的字） */
+export class Spans {
+  constructor(private readonly ranges: readonly (readonly [number, number])[] = []) {}
+  has(pos: number): boolean {
+    for (const [a, b] of this.ranges) {
+      if (pos < a) return false;
+      if (pos < b) return true;
+    }
+    return false;
+  }
+  /** [from, to) 里有几个字在范围里 */
+  count(from: number, to: number): number {
+    let n = 0;
+    for (const [a, b] of this.ranges) {
+      if (a >= to) break;
+      n += Math.max(0, Math.min(b, to) - Math.max(a, from));
+    }
+    return n;
+  }
+}
+/** 把文字里 UTF-16 下标的范围（按位置排好）换成字（码点）的范围 */
+export function cpSpans(text: string, ranges: readonly (readonly [number, number])[]): Spans {
+  const out: [number, number][] = [];
+  let at = 0; // 已经数到的 UTF-16 下标
+  let cp = 0; // 到 at 为止有几个字
+  const upTo = (i: number) => {
+    cp += cpLen(text.slice(at, i));
+    at = i;
+    return cp;
+  };
+  for (const [a, b] of ranges) out.push([upTo(a), upTo(b)]);
+  return new Spans(out);
+}
+
 /**
  * 放字的节奏：到达的字排成一条队，每个字各自开始落下。
  * 每个字的开始时刻 = max(它到达的时刻, 上一个字的开始时刻 + 间隔)；新到的字接在队尾，不从头数，所以同一时刻只有一个波前。
@@ -51,6 +85,8 @@ export function advanceCp(s: string, at: number, n: number): number {
  * 来得慢（队列里没有等着的字）时回到 GAP_MS，来得比 GAP_MS 一个还慢时字到了就落。
  * 每一帧问它到现在为止轮到了哪些字，每个字有自己的开始时刻（可以比这一帧早：一帧里轮到好几个字时各有各的），
  * 落下的动画按各自的开始时刻对起点。
+ * free：不占时间的字（链接的网址，见 Spans）：到了就算放完，不要间隔，也不在返回的开始时刻里；
+ * 放了几个字看 shown 的变化。追赶时队列里这些字也不算。
  */
 export class Pacer {
   private pos: number;
@@ -83,13 +119,18 @@ export class Pacer {
     this.gap = GAP_MS;
     this.lastStart = -Infinity;
   }
-  /** 到 now 为止轮到的字：每个字一个开始时刻（毫秒，不晚于 now），按顺序；没有就是空的 */
-  advance(now: number): number[] {
+  /** 到 now 为止轮到的字：每个字一个开始时刻（毫秒，不晚于 now），按顺序；没有就是空的。不占时间的字（free）放了但不在里面 */
+  advance(now: number, free?: Spans): number[] {
     const out: number[] = [];
     // marks[mi] 是装着下一个字（第 pos 个）的那一批
     let mi = 0;
     while (mi < this.marks.length && this.marks[mi].end <= this.pos) mi++;
     while (this.pos < this.total) {
+      if (free?.has(this.pos)) {
+        this.pos++;
+        while (mi < this.marks.length && this.marks[mi].end <= this.pos) mi++;
+        continue;
+      }
       const arrived = this.marks[mi].at;
       const t = Math.max(arrived, this.lastStart + this.gap);
       if (t > now) break;
@@ -102,7 +143,8 @@ export class Pacer {
       let gap = GAP_MS;
       for (let k = mi; k < this.marks.length && this.marks[k].at <= t; k++) {
         const m = this.marks[k];
-        gap = Math.min(gap, (m.at + LAG_MS - t) / (m.end - this.pos));
+        const ahead = m.end - this.pos - (free ? free.count(this.pos, m.end) : 0);
+        if (ahead > 0) gap = Math.min(gap, (m.at + LAG_MS - t) / ahead);
       }
       this.gap = Math.max(MIN_GAP_MS, gap);
     }
@@ -139,4 +181,22 @@ export function makeCuts(len: number, batches: readonly Batch[]): Cut[] {
     end = from;
   }
   return out.reverse();
+}
+
+/** 去掉最新的 hidden 个字（不在显示里的结尾符号等）以后的各批：落下的动画只对显示出来的字 */
+export function trimBatches(batches: readonly Batch[], hidden: number): readonly Batch[] {
+  if (hidden <= 0) return batches;
+  const out = batches.slice();
+  let left = hidden;
+  while (left > 0 && out.length) {
+    const b = out[out.length - 1];
+    if (b.n <= left) {
+      left -= b.n;
+      out.pop();
+    } else {
+      out[out.length - 1] = { ...b, n: b.n - left };
+      left = 0;
+    }
+  }
+  return out;
 }

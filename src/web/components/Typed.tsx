@@ -2,7 +2,8 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { Ref } from 'react';
 import { IncrementalLexer } from '../lib/markdown';
 import { motionOn } from '../lib/prefs';
-import { advanceCp, cpLen, DROP_MS, Pacer } from '../lib/typing';
+import { hiddenTail, linkTailSpans, settleMarkdown } from '../lib/stream-md';
+import { advanceCp, cpLen, cpSpans, DROP_MS, Pacer, Spans, trimBatches } from '../lib/typing';
 import type { Batch } from '../lib/typing';
 import { Star4 } from './icons';
 import { Markdown } from './Markdown';
@@ -10,8 +11,11 @@ import { Markdown } from './Markdown';
 /* 正在逐字输出的回复：光标打字。对话部件的气泡、「此刻」终端里洛璃正在说的那一行用的是同一个。
    - 到达的文字排成一条队（lib/typing.ts 的 Pacer），一个字一个字轮到：每个字的开始时刻 = max(到达的时刻, 上一个字的开始时刻 + 间隔)，
      间隔平时 28 ms，来得快时缩短，显示最多落后到达约 0.3 秒。轮到的字才出现；没轮到的字不进 DOM、不占位置；
-   - 已经出现的部分按 Markdown 排版（Markdown.tsx）：没闭合的 ** 先原样显示，闭合时变加粗，代码块一开头就是代码块的样子；
-     换行（breaks）逐字时就显示；
+   - 已经出现的部分按 Markdown 排版（Markdown.tsx）：换行（breaks）逐字时就显示；排版只往前走，已经显示出来的字和块不因为
+     后面的字到了而变回别的样子（lib/stream-md.ts 把放出来的文字改一遍再分析：行首还看不出是什么的符号先不显示，
+     没写完的加粗、行内代码、删除线、链接一出现就是最终的样子，符号和网址不露出来；到这一行结束都没闭合的变回原样）。
+     被压住的字照样算放出（光标停在上一个显示出来的字后面）；链接的网址不占时间（Pacer 的 free）；
+     回复结束、全部放完以后用原文，不再改（结束那一下没闭合的写法变回原样，允许变一次）；
    - 光标是 tail：紧跟在最后一个出现的字后面，不管它在段落、列表项、表格还是代码块里。光标不占宽度，有没有它折行都一样；
    - 每个字各自轻轻落下（Fresh.tsx）：近 0.3 秒内出现的字各包一个行内 span，每个字的落下从它自己的开始时刻起，落完就是普通文字。
      新到的字接在队尾，不从头数，所以同一时刻只有末尾这一段在落、只有一个波前；
@@ -66,6 +70,8 @@ interface Run {
   reported: boolean;
   timer: ReturnType<typeof setTimeout> | 0;
   lexer: IncrementalLexer;
+  /** 已经到达的全文里不占放字时间的字（链接的网址） */
+  free: Spans;
 }
 
 export function Typed({
@@ -100,6 +106,7 @@ export function Typed({
       reported: !streaming,
       timer: 0,
       lexer: new IncrementalLexer(),
+      free: new Spans(),
     };
   }
   const r = run.current;
@@ -145,12 +152,14 @@ export function Typed({
   };
   const tick = (now: number) => {
     r.raf = 0;
-    const starts = r.pacer.advance(now);
+    const before = r.pacer.shown;
+    const starts = r.pacer.advance(now, r.free);
+    const released = r.pacer.shown - before; // 比 starts 多出来的是不占时间的字
     // 落完的字：和新出现的一起更新（没有新字时等全落完再清，不白白每帧重画）
     const cutoff = now - DROP_MS;
     const alive = r.batches.filter((b) => b.at > cutoff);
-    if (starts.length) {
-      r.end = advanceCp(r.text, r.end, starts.length);
+    if (released > 0) {
+      r.end = advanceCp(r.text, r.end, released);
       for (const t of starts) {
         // 开始时刻早于 DROP_MS 以前的，落下的时间已经过完（切回标签页，一次轮到一大堆）：直接是普通文字，不建 span
         if (t <= cutoff) continue;
@@ -176,6 +185,7 @@ export function Typed({
     const prev = r.text;
     if (text === prev) return;
     r.text = text;
+    r.free = cpSpans(text, linkTailSpans(text));
     if (!text.startsWith(prev) || !motionOn()) {
       r.pacer.snap(cpLen(text));
       r.end = text.length;
@@ -223,5 +233,13 @@ export function Typed({
     [convId, phase],
   );
   if (phase === 'done') return <Markdown text={text} />;
-  return <Markdown text={shown} tokens={r.lexer.lex(shown)} tail={cursor} fresh={view.fresh} />;
+  // 回复结束、全部放完：用原文（和结束后的静态显示完全一样）；还在放的时候改一遍，排版只往前走
+  const whole = !streaming && r.pacer.pending === 0;
+  const lexed = r.lexer.lex(whole ? shown : settleMarkdown(shown));
+  // 落下的动画对「显示出来的最后几个字」：末尾没显示的字（结尾的符号、压住的符号、换行）的时刻要去掉；
+  // 链接的网址本来就不在时刻里（不占放字的时间）
+  const hidden = hiddenTail(shown, lexed);
+  const end = cpLen(shown);
+  const fresh = trimBatches(view.fresh, hidden - r.free.count(end - hidden, end));
+  return <Markdown text={shown} tokens={lexed} tail={cursor} fresh={fresh} />;
 }
