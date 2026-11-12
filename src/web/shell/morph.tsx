@@ -1,6 +1,7 @@
 import { useLayoutEffect, useRef } from 'react';
 import { motion } from 'motion/react';
 import { animate, cancelFrame, frame, motionValue, type MotionValue } from 'motion';
+import { realignSky } from '../components/bubble-sky';
 import { createStore, useStore } from '../lib/store';
 import { clamp } from '../lib/util';
 import { cssBezier, EASE_MORPH } from '../lib/easing';
@@ -543,6 +544,7 @@ function MorphWrap({ m }: { m: MorphRec }) {
       if (L.el.parentNode !== host && L.el.dataset.clone === '1') {
         host.append(L.el);
         (L.el as HTMLElement & { _restore?: () => void })._restore?.();
+        realignSky(L.el);
       }
       L.el.style.willChange = 'transform';
       (L.tgt || (L.el.firstElementChild as HTMLElement) || L.el).style.willChange =

@@ -1,9 +1,11 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { IconSessions } from '../../components/icons';
+import { BakedGlass } from '../../components/Bubble';
 import { Pane } from '../../components/Pane';
 import { DUR_LAYER, EASE_OUT_CSS, LAYER_SHIFT } from '../../lib/easing';
 import { SLOW } from '../../lib/debug';
 import { useNarrow } from '../../lib/env';
+import { glassMode } from '../../lib/glass';
 import { motionOn } from '../../lib/prefs';
 import { useStore } from '../../lib/store';
 import { bus } from '../../model/bus';
@@ -75,14 +77,27 @@ function WindowView({ handle }: { handle: ViewProps['handle'] }) {
   const detEl = useRef<HTMLDivElement>(null);
   const prevOpen = useRef(open);
   const anims = useRef<Animation[]>([]);
+  /* 两层切换的动画放着时为真：时间线里的气泡暂时按「预先糊好」画（见 components/Bubble.tsx 的 BakedGlass）。
+     只有实时模糊才用得上（那时整层在淡入淡出，气泡拿不到窗口的星空；预先糊好的气泡本来就没有这个问题），其余情形不动它，免得白白多渲染一次。
+     open 变了的那一次渲染里就置上（不等动画开始的 layout effect 里再置）：刚挂上的时间线一开始就按预先糊好的画，不先挂一遍实时模糊的再整个换掉，
+     少一次整层气泡的重渲染（第一次点开会话那一下的长任务因此比先挂后换短一些） */
+  const [fading, setFading] = useState(false);
+  const [fadeOpen, setFadeOpen] = useState(open);
+  if (fadeOpen !== open) {
+    setFadeOpen(open);
+    setFading(motionOn() && glassMode() === 'live');
+  }
+  const fadeTok = useRef(0);
   useLayoutEffect(() => {
     if (prevOpen.current === open) return;
     prevOpen.current = open;
     for (const a of anims.current) a.cancel();
     anims.current = [];
+    const tok = ++fadeTok.current;
     const l = listEl.current;
     const d = detEl.current;
     if (!l || !d || !motionOn()) {
+      setFading(false);
       if (!open) setLayer({ tl: false, conv: null });
       return;
     }
@@ -106,6 +121,10 @@ function WindowView({ handle }: { handle: ViewProps['handle'] }) {
       run(l, -LAYER_SHIFT, 0, 0, 1);
       run(d, 0, LAYER_SHIFT, 1, 0).onfinish = () => setLayer({ tl: false, conv: null });
     }
+    // 放完（或者被取消）就换回去；中途又开始了新的切换（fadeTok 变了）由新的那次管
+    void Promise.allSettled(anims.current.map((a) => a.finished)).then(() => {
+      if (fadeTok.current === tok) setFading(false);
+    });
   }, [open]);
   /* 离开时取消没放完的动画 */
   useEffect(
@@ -160,7 +179,9 @@ function WindowView({ handle }: { handle: ViewProps['handle'] }) {
               </div>
             }
           >
-            <Timeline convId={c.id} />
+            <BakedGlass.Provider value={fading}>
+              <Timeline convId={c.id} />
+            </BakedGlass.Provider>
           </Pane>
         </div>
       )}

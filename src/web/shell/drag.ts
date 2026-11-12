@@ -4,6 +4,7 @@ import { motionOn } from '../lib/prefs';
 import { desk, spanOf } from '../state/desk';
 import { hideWidget, placeBefore, unhideWidget } from '../state/actions';
 import { ui } from '../state/ui';
+import { realignSky } from '../components/bubble-sky';
 import { markBusy } from './morph';
 import { faces } from './faces';
 import { chooseOrder, flowWrap, packDense } from './dragLayout';
@@ -182,6 +183,7 @@ export function dragStart(
     clone.classList.add('drag-clone');
     clone.style.cssText = `left:0;top:0;width:${r.width}px;height:${r.height}px;transform:translate(${r.left}px,${r.top}px)`;
     document.body.append(clone);
+    realignSky(clone);
     if (kind !== 'tray') src!.setAttribute('data-dragging', '');
   }
   const cancelEnd = () => {

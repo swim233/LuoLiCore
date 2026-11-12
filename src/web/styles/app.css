@@ -58,6 +58,8 @@
   /* 夜空窗口：底（压暗层、两层星点贴图、左上一团紫、右下一团蓝、底色）、外阴影、四周的细线和暗边 */
   --win-base: #060a1d;
   --win-dark: rgba(6, 9, 24, 0.66);
+  --win-glow-a: rgba(96, 82, 200, 0.6); /* 左上那团紫 */
+  --win-glow-b: rgba(40, 112, 196, 0.5); /* 右下那团蓝 */
   --win-stars-a: none; /* 两层星点贴图，启动时由 lib/winSky.ts 画好填进来 */
   --win-stars-b: none;
   --win-shadow: 0 18px 40px rgba(0, 0, 0, 0.4);
@@ -67,23 +69,26 @@
   --win-bg:
     linear-gradient(var(--win-dark), var(--win-dark)), var(--win-stars-a) -40px -30px / 640px 390px,
     var(--win-stars-b) -200px -90px / 900px 548px,
-    radial-gradient(520px 320px at 25% 0%, rgba(96, 82, 200, 0.6), transparent 70%),
-    radial-gradient(420px 320px at 100% 100%, rgba(40, 112, 196, 0.5), transparent 70%),
-    var(--win-base);
+    radial-gradient(520px 320px at 25% 0%, var(--win-glow-a), transparent 70%),
+    radial-gradient(420px 320px at 100% 100%, var(--win-glow-b), transparent 70%), var(--win-base);
   /* 全屏会话左边的列表暗一档 */
   --side-bg: rgba(0, 0, 0, 0.22);
   /* 窗格的渐变的底 */
   --tint: rgb(7, 10, 27);
-  /* 气泡：群友、自己（网页会话里的用户）、洛璃 */
-  --b-o-bg: rgba(255, 255, 255, 0.065);
-  --b-o-bd: rgba(255, 255, 255, 0.13);
+  /* 气泡：群友、自己（网页会话里的用户）、洛璃。没有边，只靠底色（叠在糊好的星空上，所以比没有毛玻璃时淡两成）；
+     洛璃是淡的星紫配接近白色的字，名字仍是金色 */
+  --b-o-bg: linear-gradient(rgba(255, 255, 255, 0.052), rgba(255, 255, 255, 0.052));
   --b-o-fg: var(--fg);
-  --b-m-bg: color-mix(in srgb, var(--blue) 26%, transparent);
-  --b-m-bd: color-mix(in srgb, var(--blue) 44%, transparent);
+  --b-m-bg: linear-gradient(
+    color-mix(in srgb, var(--blue) 21%, transparent),
+    color-mix(in srgb, var(--blue) 21%, transparent)
+  );
   --b-m-fg: var(--fg);
-  --b-l-bg: color-mix(in srgb, var(--gold) 10%, transparent);
-  --b-l-bd: color-mix(in srgb, var(--gold) 34%, transparent);
-  --b-l-fg: #f6ebcc;
+  --b-l-bg: linear-gradient(160deg, rgba(134, 112, 232, 0.16), rgba(96, 82, 200, 0.07));
+  --b-l-fg: #f0eefc;
+  /* 气泡里的代码：比气泡更深一点的底（黑加透明度） */
+  --b-code-in: rgba(0, 0, 0, 0.28);
+  --b-code-bk: rgba(0, 0, 0, 0.32);
   /* 派生的语义色 */
   --tool: color-mix(in srgb, var(--blue) 85%, var(--fg));
   --gold-glow: color-mix(in srgb, var(--gold) 70%, transparent);
@@ -2804,7 +2809,7 @@ button {
   flex: none;
 }
 
-/* ---------- 时间线：玻璃气泡 ---------- */
+/* ---------- 时间线：毛玻璃气泡 ---------- */
 .tline {
   --sc-pt: 12px;
   --sc-pb: 18px;
@@ -2850,22 +2855,63 @@ button {
   font-size: 11px;
   line-height: 16px;
 }
-/* 气泡：半透明的底加一道细边，圆角 16，靠近说话人的那个下角收尖（5）；群友在左，自己和洛璃在右 */
+/* 气泡：毛玻璃，没有边，圆角 16，靠近说话人的那个下角收尖（5）；群友在左，自己和洛璃在右。
+   毛玻璃是「气泡后面的星空被糊开」，有两种做法（lib/glass.ts：正式页面里用实时模糊，预先糊好只在下面说的一处用到，
+   开发模式的演示控制面板里能整个切过去），气泡的大小、文字、配色两种完全一样：
+   - 实时模糊（.has-blur，默认）：气泡自己 backdrop-filter: blur(20px) saturate(1.3)，不垫 .bubble-sky（元素都不渲染），没有对位的脚本。
+     两种静止时逐像素比过：气泡内部平均色差 ≤ 0.91/255、最大 4。
+     backdrop-filter 的坑：祖先带 opacity < 1、filter、mask、clip-path、mix-blend-mode（或 will-change 这些）时，那个祖先就是「背景根」，
+     气泡只拿得到它里面的画面，拿不到它外面（窗口的星空），模糊就没有了，那层效果去掉的一瞬又突然糊上。所以气泡和窗口的星空之间的祖先上不能有这些，
+     要淡入淡出的话放在气泡自己身上（气泡自己的 opacity 会连它的模糊一起淡）：
+     · 新消息的出现动画见下面的 msg-in-*（淡入在气泡自己身上，.msg 只做位移）；
+     · 形变（缩成胶囊、展开、全屏、退出全屏、整理拖动）里，带 opacity、filter 的是窗口的外框 .w-card 自己，窗口的星空是它自己的背景、在这一层里面，
+       气泡拿得到，所以形变期间气泡照常模糊，不用换成别的做法（副本换成真窗口那一下气泡底色差 ≤ 4/255）；
+     · 会话窗口里列表、时间线两层的切换是整层在淡入淡出（sessions/Sessions.tsx），层在气泡的祖先上，放不到气泡身上：
+       那 0.26 秒里面的气泡暂时按预先糊好的画（components/Bubble.tsx 的 BakedGlass），放完换回来。
+   - 预先糊好：气泡后面只有窗口里的星空，它不动，所以预先糊好。.bubble-sky 是垫在气泡里的一层，画着和窗口同一套背景
+     （压暗层、两层星点、两团光晕、底色），星点换成页面空闲时糊好的那两张（20 像素），颜色整体 saturate(1.3)；
+     各自的底色（--tint）是 ::after，叠在它上面。这层的背景规则由 lib/winSky.ts 生成（图和颜色都要写在里面，原因见那里），
+     这里只管它的位置和形状。背景要和窗口里的星空对齐：光晕的位置是按窗口大小算的，星点贴图的起点是窗口的左上角，所以每层背景都按
+     窗口的大小铺、按「窗口的左上角相对这个气泡的左上角」挪（--sk-x、--sk-y、--sk-w、--sk-h，components/bubble-sky.ts 在滚动、变大变小、
+     窗口变大变小时写在这一层自己身上）。
+   去掉了原来 1px 的边，内边距加 1px 补上：气泡的大小和文字的位置不变 */
 .bubble {
   position: relative;
-  padding: 8px 13px;
+  isolation: isolate;
+  padding: 9px 14px;
   border-radius: 16px 16px 16px 5px;
   min-width: 0;
   max-width: 100%;
   box-sizing: border-box;
   font-size: 13.5px;
   line-height: 1.6;
-  background: var(--b-o-bg);
-  border: 1px solid var(--b-o-bd);
+  --tint: var(--b-o-bg);
   color: var(--b-o-fg);
   overflow-wrap: anywhere;
   white-space: pre-wrap;
   user-select: text;
+}
+.bubble-sky,
+.bubble::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  pointer-events: none;
+}
+.bubble-sky {
+  --sk-x: 0px;
+  --sk-y: 0px;
+  --sk-w: 100%;
+  --sk-h: 100%;
+}
+.bubble::after {
+  background: var(--tint);
+}
+.bubble.has-blur {
+  -webkit-backdrop-filter: blur(20px) saturate(1.3);
+  backdrop-filter: blur(20px) saturate(1.3);
 }
 /* 气泡里面的一层：平时只是个普通的块（装下所有内容，外框的大小就是它的大小）。
    内容自己变大变小时外框在补间（components/bubble-frame.ts）：外框的宽高写死、裁住内容（data-tw），内容脱离排版流、
@@ -2883,18 +2929,37 @@ button {
 .msg.is-me .bubble {
   border-radius: 16px 16px 5px 16px;
 }
+/* 洛璃：淡的星紫配接近白色的字；名字仍是金色。气泡里的 Markdown 在这层底上的调整：行内代码、代码块的底，加粗用白 */
 .msg.is-luoli .bubble {
-  background: var(--b-l-bg);
-  border-color: var(--b-l-bd);
+  --tint: var(--b-l-bg);
   color: var(--b-l-fg);
 }
 .msg.is-luoli .msg-meta b {
   color: var(--gold);
 }
 .msg.is-you .bubble {
-  background: var(--b-m-bg);
-  border-color: var(--b-m-bd);
+  --tint: var(--b-m-bg);
   color: var(--b-m-fg);
+}
+.bubble .md strong {
+  color: var(--white);
+}
+.bubble .md-ic {
+  background: var(--b-code-in);
+}
+.bubble .md-code {
+  background: var(--b-code-bk);
+}
+/* 淡紫的底上线要看得清：引用的竖线、表格的线、分隔线比平时（「此刻」里的）亮一点 */
+.bubble .md-q {
+  border-left-color: color-mix(in srgb, var(--blue) 75%, transparent);
+}
+.bubble .md-t th,
+.bubble .md-t td {
+  border-color: color-mix(in srgb, var(--fg) 18%, transparent);
+}
+.bubble .md-hr {
+  background: color-mix(in srgb, var(--fg) 24%, transparent);
 }
 /* 对话部件里洛璃在左、左下角收尖（用户定的，同演示页）；全屏时间线里照旧在右 */
 .chat .msg.is-luoli {
@@ -2917,6 +2982,25 @@ button {
 .msg.is-new,
 .evt.is-new {
   animation: msg-in 0.35s var(--ease-out) both;
+}
+/* 实时模糊的气泡：淡入不能放在 .msg 上（带 opacity 的祖先会让里面的 backdrop-filter 看不到窗口的星空，这 0.35 秒气泡没有模糊，结束时突然糊上），
+   所以 .msg 只做位移，淡入放在它的几个子元素上（名字那一行、气泡自己、下面的按钮）：气泡自己的 opacity 会把它的模糊一起淡入，
+   和预先糊好的气泡整个淡入是同一个混合（透明度 α 的「糊好的底 + 底色」叠在清楚的星空上），时长、缓动一样 */
+@keyframes msg-in-move {
+  from {
+    transform: translateY(10px);
+  }
+}
+@keyframes msg-in-fade {
+  from {
+    opacity: 0;
+  }
+}
+.msg.has-blur.is-new {
+  animation: msg-in-move 0.35s var(--ease-out) backwards;
+}
+.msg.has-blur.is-new > * {
+  animation: msg-in-fade 0.35s var(--ease-out) backwards;
 }
 /* 事件（任务到点、任务超时）：不是气泡，居中的一行三级文字色的灰字，没有头像、名字；时间在末尾、小一号 */
 .evt {
@@ -4641,6 +4725,7 @@ a.hl-url:focus-visible {
 }
 .still .tl.is-new,
 .still .msg.is-new,
+.still .msg.is-new > *,
 .still .evt.is-new {
   animation: none !important;
 }
@@ -4648,6 +4733,12 @@ a.hl-url:focus-visible {
   animation: none !important;
 }
 .still .fold::details-content {
+  transition: none !important;
+}
+/* 「预先糊好」的气泡里垫的那层星空（.bubble-sky）：新挂上时先按默认的 --sk-x、--sk-y、--sk-w、--sk-h 算出第一份样式，脚本马上写进对好的值；
+   上面统一的 0.12 秒过渡会让 background-position、background-size 从默认值滑到对好的位置，那几帧里星空和窗口对不齐（色差 1～3/255）。
+   位置是排版不是装饰，直接变 */
+.still .bubble-sky {
   transition: none !important;
 }
 /* 窗格的滚动区、上下的渐变带、虚拟列表的总高和条目的位置：这些是排版，不是装饰，直接变，不用上面统一的 0.12 秒过渡。

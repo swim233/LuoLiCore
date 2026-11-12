@@ -3,6 +3,8 @@ import { motionOn } from '../lib/prefs';
 import { Star4 } from '../components/icons';
 import { Seg } from '../components/Seg';
 import { EASE_OUT_CSS } from '../lib/easing';
+import { setGlass, useGlassMode } from '../lib/glass';
+import type { Glass } from '../lib/glass';
 import { chooseMotion, usePrefs } from '../lib/prefs';
 import type { Prefs } from '../lib/prefs';
 import { useBusRev } from '../model/rev';
@@ -15,12 +17,14 @@ import { ACTIONS, setData } from './demo';
 import { toggleDemo, useDevUi } from './demo-state';
 import type { Dataset } from './demo-state';
 
-/* 右下角一个可以收起的小面板，用模拟事件检验自适应和动画。「外观」一节的几项和设置部件里的「外观」组是同一份状态。点演示控制不抢焦点（pointerdown 里 preventDefault）：
+/* 右下角一个可以收起的小面板，用模拟事件检验自适应和动画。「外观」一节的几项和设置部件里的「外观」组是同一份状态（「气泡的毛玻璃」例外：它只在这里，
+   设置里没有，状态在 lib/glass.ts，只存内存）。点演示控制不抢焦点（pointerdown 里 preventDefault）：
    比如在对话里打字时点「洛璃被触发」，焦点仍留在输入框里，模拟的就是「正在打字时有人叫洛璃」 */
 export function DemoPanel() {
   const open = useDevUi((s) => s.open);
   const dataset = useDevUi((s) => s.dataset);
   const p = usePrefs((x) => x);
+  const glass = useGlassMode();
   useDefsRev();
   useBusRev(['bot:online', 'bot:offline', 'status', 'data:reset', 'tasks:update']);
   const ref = useRef<HTMLDivElement>(null);
@@ -230,6 +234,22 @@ export function DemoPanel() {
                   ['D', 'D 倾斜', '卡牌倾斜'],
                 ]}
                 onPick={(v) => setHover(v as Prefs['hover'])}
+              />
+            </div>
+            <div className="demo-row" style={{ marginTop: 6 }}>
+              <span>气泡的毛玻璃</span>
+              <Seg
+                id="demo-glass"
+                value={glass}
+                items={[
+                  ['live', '实时模糊', '正式页面用的：气泡自己 backdrop-filter，开销在 GPU 上'],
+                  [
+                    'baked',
+                    '预先糊好',
+                    '垫一层预先糊好的星空，滚动时脚本要跟着对位，主线程开销大。只存在内存里，刷新后回到实时模糊',
+                  ],
+                ]}
+                onPick={(v) => setGlass(v as Glass)}
               />
             </div>
             <div className="demo-row" style={{ marginTop: 6 }}>

@@ -3,6 +3,7 @@ import { useVirtualizer } from '@tanstack/react-virtual';
 import { motionOn } from '../lib/prefs';
 import { isSliding, maxScrollTop, SLIDE_PUSH_TAU, slideSendMs, sliderOf } from '../lib/slide';
 import { isWheeling, WHEEL_EVENT, wheelDir } from '../lib/wheel';
+import { flushSky, touchSky } from './bubble-sky';
 
 /* 虚拟滚动的时间线：@tanstack/react-virtual，动态高度，贴底。
    它自己就是窗格（components/Pane.tsx）的滚动区（.pane-sc）：上下的内边距里有浮在上面的标题、输入框，位置都要算上它们：
@@ -187,6 +188,9 @@ export function VirtualLog({
       if (sl.active) sl.sync();
       else c.scrollTop = c.scrollHeight;
     }
+    // 各条的位置挪了、滚动位置也写完了（这里在布局之后、绘制之前）：气泡里垫的星空当场跟着重新对齐，接下来几帧也每帧对一次
+    flushSky();
+    touchSky();
   };
   const syncRef = useRef(syncRows);
   syncRef.current = syncRows;
@@ -348,6 +352,8 @@ export function VirtualLog({
     prevCount.current = items.length;
     prevFirst.current = items[0]?.key;
     prevLastKey.current = items[items.length - 1]?.key;
+    // 条目有增减、重新排了：气泡里垫的星空要重新对齐
+    touchSky(120);
   });
   useLayoutEffect(() => {
     const f = fixup.current;

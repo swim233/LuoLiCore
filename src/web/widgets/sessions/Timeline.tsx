@@ -1,7 +1,7 @@
 import { memo, useEffect, useRef, useState } from 'react';
 import { VirtualLog } from '../../components/VirtualLog';
 import type { LogItem, ScrollState } from '../../components/VirtualLog';
-import { MsgBubble } from '../../components/Bubble';
+import { MsgBubble, useGlass } from '../../components/Bubble';
 import { EventLine } from '../../components/EventLine';
 import { EASE_OUT_CSS } from '../../lib/easing';
 import { motionOn } from '../../lib/prefs';
@@ -112,13 +112,15 @@ export const MsgView = memo(function MsgView({
 });
 export function TypingView() {
   const luoli = useAssistantName();
+  const { blur, layer } = useGlass();
   return (
-    <div className="msg is-luoli is-me typing-msg">
+    <div className={'msg is-luoli is-me typing-msg' + (blur ? ' has-blur' : '')}>
       <div className="msg-meta">
         <b>{luoli}</b>
         <time>正在回复</time>
       </div>
-      <div className="bubble">
+      <div className={'bubble' + (blur ? ' has-blur' : '')}>
+        {layer}
         <span className="typing" aria-label="正在回复">
           <i />
           <i />

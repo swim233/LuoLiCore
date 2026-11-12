@@ -1,10 +1,12 @@
-import { memo, useEffect, useLayoutEffect, useRef } from 'react';
+import { createContext, memo, useContext, useEffect, useLayoutEffect, useRef } from 'react';
 import { attachBubbleFrame } from './bubble-frame';
+import { attachBubbleSky } from './bubble-sky';
 import { Hl, Spin } from './Hl';
 import { Typed } from './Typed';
 import type { CursorRef } from './Typed';
 import { Markdown } from './Markdown';
 import { Pic } from './Pic';
+import { useGlassMode } from '../lib/glass';
 import { motionOn } from '../lib/prefs';
 import { isSliding, maxScrollTop, SLIDE_FOLLOW_TAU, sliderOf } from '../lib/slide';
 import { WHEEL_EVENT, wheelDir } from '../lib/wheel';
@@ -226,6 +228,33 @@ export function Blocks({
   return <>{blocks}</>;
 }
 
+/* 毛玻璃的两种做法（lib/glass.ts 里说了选哪种；样式在 app.css 的「时间线：毛玻璃气泡」）：
+   - 实时模糊（默认，正式页面里一律用它）：气泡自己 backdrop-filter（.bubble.has-blur），不垫那一层、不渲染那个元素，也没有对位的脚本在跑；
+   - 预先糊好：气泡里垫一层星空（.bubble-sky），位置的对齐见 bubble-sky.ts。正式页面里只有下面 BakedGlass 的那一处用到它，
+     另外开发模式的演示控制面板里能整个切过去（用来对比和验收）。
+   每个气泡自己订阅这个选择，切换时当场换（同一次提交里换掉那个元素、挂上或摘掉对位）。
+   「正在回复」的气泡（sessions/Timeline.tsx 的 TypingView）也用它，和有内容的气泡一样糊。
+   实时模糊有个限制：气泡的祖先（窗口那层星空以内、气泡以外）带 opacity < 1 时，气泡拿不到窗口的星空，模糊没有了，那层淡完的一瞬又突然糊上。
+   气泡自己的出现动画已经放在气泡自己身上（app.css 的 msg-in-*），会话窗口里列表和时间线两层的切换动画（sessions/Sessions.tsx）是整层在淡入淡出，
+   没法放到气泡上：那一层在动的时候给里面的气泡一个 BakedGlass 的 context，它们暂时按「预先糊好」画（淡入淡出和整层一起，没有这个限制），
+   动画放完换回实时模糊（两种做法逐像素比过，换的这一下平均色差不到 1） */
+export const BakedGlass = createContext(false);
+export function useGlass() {
+  const wantsBlur = useGlassMode() === 'live';
+  const forcedBaked = useContext(BakedGlass);
+  const blur = wantsBlur && !forcedBaked;
+  const sky = useRef<HTMLSpanElement>(null);
+  useLayoutEffect(() => {
+    if (!blur && sky.current) return attachBubbleSky(sky.current);
+  }, [blur]);
+  return {
+    /** 实时模糊：气泡和它的 .msg 要带 has-blur */
+    blur,
+    /** 气泡里的第一个子元素：预先糊好时是那层星空，实时模糊时没有 */
+    layer: blur ? null : <span className="bubble-sky" ref={sky} aria-hidden="true" />,
+  };
+}
+
 /* 气泡的外框与里面的内容分两层（外框的补间见 bubble-frame.ts）。平时 .bubble-in 只是个普通的块 */
 function useBubbleFrame() {
   const frame = useRef<HTMLDivElement>(null);
@@ -274,10 +303,12 @@ export const MsgBubble = memo(function MsgBubble({
   isNew: boolean;
   below?: React.ReactNode;
 }) {
+  const { blur, layer } = useGlass();
   const cls =
     'msg' +
     (isA ? ' is-luoli is-me' : '') +
     (you ? ' is-you is-me' : '') +
+    (blur ? ' has-blur' : '') +
     (isNew && motionOn() ? ' is-new' : '');
   const ended = failed ? 'fail' : aborted ? 'abort' : null;
   const { frame, inner } = useBubbleFrame();
@@ -293,7 +324,8 @@ export const MsgBubble = memo(function MsgBubble({
           <time>{label}</time>
         )}
       </div>
-      <div className="bubble" ref={frame}>
+      <div className={'bubble' + (blur ? ' has-blur' : '')} ref={frame}>
+        {layer}
         <div className="bubble-in" ref={inner}>
           <Blocks parts={parts} hits={!isA} md={isA} live={live} ended={ended} />
           {aborted && <span className="mark">{abortMark}</span>}
