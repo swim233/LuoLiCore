@@ -1,5 +1,5 @@
 /* 把一个滚动区的 scrollTop 滑到某个位置：程序自己要滚的地方（贴底时上推、发出消息后回到最底下、思考内容框跟到最新）都用它。
-   用户的鼠标滚轮缓动不用它，在 lib/wheel.ts：那边记的是「剩下的距离」而不是绝对的目标位置（别处改了 scrollTop 剩下的距离不变），
+   用户的鼠标滚轮缓动不用它，在 @luoli/ui/wheel：那边记的是「剩下的距离」而不是绝对的目标位置（别处改了 scrollTop 剩下的距离不变），
    而且不能被滚轮打断；这里的滑动是程序在滚，用户一滚轮、按下、按键就要放手。两边互相让位：这里每次 to() 开头把那个滚动区没走完的滚轮距离清掉（onStart），
    滚轮缓动开始时这里的监听（wheel，捕获）先把程序的滑动放掉。
    - 一个滚动区同一时刻只有一个目标（sliderOf(el) 每个元素一个 Slider）。再调 to() 就是换目标：从此刻的位置接着走，不回头；
@@ -16,7 +16,7 @@
    - 滑的途中 active 为真：滚动事件处理里用它区分「自己在滚」和「用户在滚」（不能因为滑到一半离底部还远就把「贴底」清掉）；
    - 到位时恰好写到目标；dt 很大（标签页在后台）时不插值，直接到位。
    Slider 不碰 DOM：时钟、帧回调、读写位置都由 host 给，测试里用假的（slide.test.ts）。 */
-import { cancelWheel } from './wheel';
+import { cancelWheel } from '@luoli/ui/wheel';
 
 export type Ease = (t: number) => number;
 export const easeOutCubic: Ease = (t) => 1 - Math.pow(1 - t, 3);
@@ -63,7 +63,7 @@ export class Slider {
   private id = 0;
   /** 用户做了这些事就放手（事件名）。DOM 一侧的 sliderOf 照它挂监听 */
   interruptOn: string[] = ['wheel', 'pointerdown', 'touchstart', 'keydown'];
-  /** onStart：每次 to() 开头调一次（程序要自己滚了：滚轮缓动没走完的距离要清掉，见 lib/wheel.ts） */
+  /** onStart：每次 to() 开头调一次（程序要自己滚了：滚轮缓动没走完的距离要清掉，见 @luoli/ui/wheel） */
   constructor(
     private host: SlideHost,
     private opts: { onStart?: () => void } = {},

@@ -1,5 +1,5 @@
 import { SizeFollower } from '../lib/follow';
-import { motionOn } from '../lib/prefs';
+import { motionOn } from '@luoli/ui/motion';
 import { motionBusy } from '../shell/morph';
 
 /* 气泡外框的补间（对话部件、会话时间线里的气泡；「此刻」的终端不用）。数学在 lib/follow.ts，这里是 DOM 的部分。

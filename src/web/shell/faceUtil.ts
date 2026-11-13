@@ -1,4 +1,4 @@
-import { cssRGB } from '../lib/util';
+import { cssRGB } from '@luoli/ui/util';
 import { faces } from './faces';
 import type { FrameSpec, Rect } from './morph';
 

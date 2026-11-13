@@ -1,6 +1,6 @@
-import { env } from '../lib/env';
+import { env } from '@luoli/ui/env';
 import { prefs } from '../lib/prefs';
-import { motionOn } from '../lib/prefs';
+import { motionOn } from '@luoli/ui/motion';
 import { desk } from '../state/desk';
 import { edgeRun } from '../lib/fx-dom';
 

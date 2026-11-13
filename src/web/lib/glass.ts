@@ -1,4 +1,4 @@
-import { createStore, useStore } from './store';
+import { createStore, useStore } from '@luoli/ui/store';
 
 /* 聊天气泡的毛玻璃（气泡后面的星空被糊开）有两种做法：
    - live：实时模糊。气泡自己 backdrop-filter: blur(20px) saturate(1.3)，开销在 GPU 上，不垫那一层、没有任何对位的脚本。正式页面里一律用它；

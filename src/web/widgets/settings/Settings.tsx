@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Star4, IconSettings } from '../../components/icons';
 import { Seg } from '../../components/Seg';
 import { Pane } from '../../components/Pane';
+import { useMotionOn } from '@luoli/ui/motion';
 import { chooseMotion, usePrefs } from '../../lib/prefs';
 import type { Prefs } from '../../lib/prefs';
 import {
@@ -109,9 +110,10 @@ function Field({
 }
 
 /* 「外观」的各项：桌面卡片和全屏里是同一份。改了立刻生效（顶栏的动画开关、帧率、悬停、「此刻」的缩回），
-   状态在 lib/prefs.ts，开发模式的演示面板也是它，所以两处同步 */
+   状态在 lib/prefs.ts（动画开关在 @luoli/ui/motion，由 prefs.ts 存），开发模式的演示面板也是它，所以两处同步 */
 function AppearanceFields() {
   const p = usePrefs((x) => x);
+  const motion = useMotionOn();
   const name = useAssistantName();
   const hint = HOVER_ITEMS.find(([v]) => v === p.hover)?.[2];
   return (
@@ -122,7 +124,7 @@ function AppearanceFields() {
       >
         <Seg
           label="动画"
-          value={p.motion ? 'on' : 'off'}
+          value={motion ? 'on' : 'off'}
           items={ON_OFF}
           onPick={(v) => chooseMotion(v === 'on')}
         />

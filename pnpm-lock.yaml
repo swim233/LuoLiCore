@@ -193,6 +193,9 @@ importers:
       '@joplin/turndown-plugin-gfm':
         specifier: ^1.0.68
         version: 1.0.68
+      '@luoli/ui':
+        specifier: workspace:*
+        version: link:packages/ui
       '@mozilla/readability':
         specifier: ^0.6.0
         version: 0.6.0
@@ -272,6 +275,16 @@ importers:
       vitest:
         specifier: ^5.0.5
         version: 5.0.5(@types/node@22.20.5)(vite@8.3.5(@types/node@22.20.5)(esbuild@0.28.2)(tsx@4.23.15))
+
+  packages/ui:
+    dependencies:
+      react:
+        specifier: ^19
+        version: 19.3.1
+    devDependencies:
+      '@types/react':
+        specifier: ^19.3.0
+        version: 19.3.0
 
 packages:
 

@@ -1,5 +1,5 @@
 import { bus } from './bus';
-import { createStore, useStore } from '../lib/store';
+import { createStore, useStore } from '@luoli/ui/store';
 
 /* 和洛璃服务的连接：loading（第一次的数据还没到）、ready、down（连不上，会自动重连，连上后恢复）。
    开发模式的模拟数据源始终是 ready */

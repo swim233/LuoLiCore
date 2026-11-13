@@ -1,6 +1,6 @@
-import { env, particleScale } from '../lib/env';
-import { motionOn, prefs } from '../lib/prefs';
-import { cssRGB } from '../lib/util';
+import { env, particleScale } from '@luoli/ui/env';
+import { motionOn } from '@luoli/ui/motion';
+import { cssRGB } from '@luoli/ui/util';
 import type { BadgeReply, BadgeStats, Op } from './badge-msg';
 
 /* 星空和粒子的主线程这一头：把画布交给 Worker（OffscreenCanvas），之后只发消息（尺寸、动画开关、全屏停住、粒子的位置） */
@@ -51,7 +51,7 @@ export const sky = {
         colors,
         narrow: env.narrow,
         lowPower: env.lowPower,
-        motion: prefs.get().motion,
+        motion: motionOn(),
         fps: SKY_FPS,
       },
       [off],
@@ -71,7 +71,7 @@ export const sky = {
     skyW?.postMessage({ type: 'hold', on });
   },
   sync() {
-    skyW?.postMessage({ type: 'motion', on: prefs.get().motion });
+    skyW?.postMessage({ type: 'motion', on: motionOn() });
   },
   /* 星座的点和线各自的透明度：第 6 版的接口位置 */
   setConstellation(id: number, o: { dotAlpha?: number[]; lineAlpha?: number[] }) {

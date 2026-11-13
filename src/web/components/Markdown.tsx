@@ -5,7 +5,7 @@ import { lexMarkdown } from '../lib/markdown';
 import { PENDING_HREF } from '../lib/stream-md';
 import { cpLen, makeCuts } from '../lib/typing';
 import type { Batch } from '../lib/typing';
-import { linkHref } from '../lib/url';
+import { linkHref } from '@luoli/ui/url';
 import { freshNodes } from './Fresh';
 import { Hl } from './Hl';
 import { Link } from './Link';

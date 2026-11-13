@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { motionOn } from '../lib/prefs';
+import { motionOn } from '@luoli/ui/motion';
 import { isSliding, maxScrollTop, SLIDE_PUSH_TAU, slideSendMs, sliderOf } from '../lib/slide';
-import { isWheeling, WHEEL_EVENT, wheelDir } from '../lib/wheel';
+import { isWheeling, WHEEL_EVENT, wheelDir } from '@luoli/ui/wheel';
 import { flushSky, touchSky } from './bubble-sky';
 
 /* 虚拟滚动的时间线：@tanstack/react-virtual，动态高度，贴底。

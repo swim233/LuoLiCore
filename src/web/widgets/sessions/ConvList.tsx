@@ -1,8 +1,8 @@
 import { memo } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import { useEffect, useState } from 'react';
-import { DUR_VANISH, EASE_OUT } from '../../lib/easing';
-import { usePrefs } from '../../lib/prefs';
+import { DUR_VANISH, EASE_OUT } from '@luoli/ui/easing';
+import { motionOn as motionNow, useMotionOn } from '@luoli/ui/motion';
 import { morphStore } from '../../shell/morph';
 import { fmtShort } from '../../lib/util';
 import { db } from '../../model/db';
@@ -118,7 +118,7 @@ export function ConvList({
   label: string;
   empty?: React.ReactNode;
 }) {
-  const motionOn = usePrefs((p) => p.motion);
+  const motionOn = useMotionOn();
   const layoutOn = useLayoutAfterMorph(motionOn);
   const g = useGlide('.conv-item');
   return (
@@ -172,11 +172,10 @@ export function ConvList({
 }
 /* 有新用户消息进来的行，整行亮一下（1.4 秒，金色底和外圈淡出） */
 export function lightUp(convId: string) {
-  if (!usePrefsMotion()) return;
+  if (!motionNow()) return;
   for (const b of document.querySelectorAll(`.li-wrap[data-id="${convId}"] > .conv-item`)) {
     b.classList.remove('is-lit');
     void (b as HTMLElement).offsetWidth;
     b.classList.add('is-lit');
   }
 }
-import { motionOn as usePrefsMotion } from '../../lib/prefs';

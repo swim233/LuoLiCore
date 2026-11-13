@@ -1,4 +1,4 @@
-import { pick, randi } from '../lib/util';
+import { pick, randi } from '@luoli/ui/util';
 import { bot, nextScript, PLAIN, SCRIPTS } from './bot';
 import type { Script } from './bot';
 import { db } from '../model/db';

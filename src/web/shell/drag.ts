@@ -1,6 +1,6 @@
 import { animate } from 'motion';
-import { EASE_OUT } from '../lib/easing';
-import { motionOn } from '../lib/prefs';
+import { EASE_OUT } from '@luoli/ui/easing';
+import { motionOn } from '@luoli/ui/motion';
 import { desk, spanOf } from '../state/desk';
 import { hideWidget, placeBefore, unhideWidget } from '../state/actions';
 import { ui } from '../state/ui';

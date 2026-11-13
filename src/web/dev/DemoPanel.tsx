@@ -1,8 +1,8 @@
 import { useLayoutEffect, useRef } from 'react';
-import { motionOn } from '../lib/prefs';
+import { motionOn, useMotionOn } from '@luoli/ui/motion';
 import { Star4 } from '../components/icons';
 import { Seg } from '../components/Seg';
-import { EASE_OUT_CSS } from '../lib/easing';
+import { EASE_OUT_CSS } from '@luoli/ui/easing';
 import { setGlass, useGlassMode } from '../lib/glass';
 import type { Glass } from '../lib/glass';
 import { chooseMotion, usePrefs } from '../lib/prefs';
@@ -24,6 +24,7 @@ export function DemoPanel() {
   const open = useDevUi((s) => s.open);
   const dataset = useDevUi((s) => s.dataset);
   const p = usePrefs((x) => x);
+  const motion = useMotionOn();
   const glass = useGlassMode();
   useDefsRev();
   useBusRev(['bot:online', 'bot:offline', 'status', 'data:reset', 'tasks:update']);
@@ -203,7 +204,7 @@ export function DemoPanel() {
               <span>动画</span>
               <Seg
                 id="demo-motion"
-                value={p.motion ? 'on' : 'off'}
+                value={motion ? 'on' : 'off'}
                 items={[
                   ['on', '开'],
                   ['off', '关'],

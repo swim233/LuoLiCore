@@ -1,4 +1,4 @@
-import { motionOn } from './prefs';
+import { motionOn } from '@luoli/ui/motion';
 
 /* 边缘流光、出错脉冲：给元素加类名触发 CSS 动画 */
 export function edgeRun(host: Element | null | undefined) {

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { MOON_GRAD } from './components/badge/geometry';
 import { fx, sky } from './fx/client';
 import { MotionConfig } from 'motion/react';
+import { useMotionOn } from '@luoli/ui/motion';
 import { usePrefs } from './lib/prefs';
 import { DeskWrap } from './shell/Desk';
 import { TopBar } from './shell/TopBar';
@@ -15,7 +16,7 @@ import { useDesk } from './state/desk';
 export function App() {
   const DevPanel = devSlot.Panel;
   /* 「动画」开关的设置（motionPref）立刻管新开始的转场；html 的 .still 类和 MotionConfig 用的是 motion，等正在走的动画都走完再跟上（见 motionBusy） */
-  const motionPref = usePrefs((p) => p.motion);
+  const motionPref = useMotionOn();
   const [motion, setMotion] = useState(motionPref);
   useEffect(() => {
     let t: ReturnType<typeof setTimeout>;

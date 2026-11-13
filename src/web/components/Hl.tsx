@@ -1,9 +1,9 @@
 import { Fragment, memo } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
-import { motionOn } from '../lib/prefs';
+import { motionOn } from '@luoli/ui/motion';
 import { cpLen, makeCuts } from '../lib/typing';
 import type { Batch } from '../lib/typing';
-import { linkHref, splitUrlTail } from '../lib/url';
+import { linkHref, splitUrlTail } from '@luoli/ui/url';
 import type { ImagePart } from '../model/types';
 import { assistant, useAssistant } from '../model/who';
 import { freshNodes } from './Fresh';

@@ -1,4 +1,4 @@
-import { uid } from '../lib/util';
+import { uid } from '@luoli/ui/util';
 import { bus } from './bus';
 import { db } from './db';
 import { eventOf } from './events';

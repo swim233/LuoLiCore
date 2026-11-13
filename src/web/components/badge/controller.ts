@@ -1,7 +1,7 @@
 import { badgeFx } from '../../fx/client';
 import type { ColKey, FxName, Op } from '../../fx/badge-msg';
-import { motionOn, prefs } from '../../lib/prefs';
-import { rand } from '../../lib/util';
+import { motionOn, subscribeMotion } from '@luoli/ui/motion';
+import { rand } from '@luoli/ui/util';
 import { getLook, onLook } from './appearance';
 import type { Look, Main } from './appearance';
 import {
@@ -165,7 +165,7 @@ export class BadgeController {
     this.compStarEl = qa('bd-cstar');
     this.offs.push(
       onLook((l) => this.onLook(l)),
-      prefs.subscribe(() => {
+      subscribeMotion(() => {
         const still = !motionOn();
         if (still === this.still) return;
         this.still = still;

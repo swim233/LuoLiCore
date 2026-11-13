@@ -1,6 +1,6 @@
 import { useMemo } from 'react';
-import { env } from '../lib/env';
-import { rand } from '../lib/util';
+import { env } from '@luoli/ui/env';
+import { rand } from '@luoli/ui/util';
 
 /* 小星空：「此刻」自己的夜空，文字直接浮在上面。数量普通大小 26 颗、全屏 48 颗（性能低 ×0.6） */
 export function MiniSky({ n }: { n: number }) {

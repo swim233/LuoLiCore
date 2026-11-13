@@ -1,12 +1,12 @@
-import { motionOn } from '../lib/prefs';
-import { WHEEL_EVENT, wheelPixels, WheelMotion, wheelRegistry, WheelStream } from '../lib/wheel';
+import { motionOn } from '@luoli/ui/motion';
+import { WHEEL_EVENT, wheelPixels, WheelMotion, wheelRegistry, WheelStream } from '@luoli/ui/wheel';
 import { motionBusy } from './morph';
 
 /* 滚轮缓动：整个页面只在 document 上挂一份监听（boot.ts 里装），按滚轮事件的位置找到该滚的竖向滚动区，
-   以后新加的竖向滚动区不用单独接。数学（剩下的距离、每帧走多少）在 lib/wheel.ts。
+   以后新加的竖向滚动区不用单独接。数学（剩下的距离、每帧走多少）在 @luoli/ui/wheel。
    接管：鼠标滚轮这种整格的滚动。触控板一类的像素级小步、按着 Ctrl/Shift/Alt/Meta 的、关掉动画时、
    形变和让位动画进行中，都不接管，交给浏览器，而且此刻还没走完的滚轮缓动立刻清掉（不要两边抢）；键盘、按下鼠标、触屏也一样。
-   大小步混在一起的一串事件（触控板甩动）接不接管只在这一串的第一个事件上定，整串一致（lib/wheel.ts 的 WheelStream）。
+   大小步混在一起的一串事件（触控板甩动）接不接管只在这一串的第一个事件上定，整串一致（@luoli/ui/wheel 的 WheelStream）。
    找滚动区：从事件的目标往外一层一层找，第一个 overflow-y 是 auto、scroll（或 overlay）而且内容真的超出了的元素；
    找到页面根（html）就用 document.scrollingElement（桌面本身的滚动；全屏锁滚动时 html 的 overflow-y 是 hidden，不算）。
    - 输入框一类（textarea、input、select）自己能滚的，整个交给浏览器；
@@ -16,7 +16,7 @@ import { motionBusy } from './morph';
      没设的（思考内容框）接着滚外面一层；设了 contain / none 的滚动区哪怕内容放得下、没有可滚的，也停在这里（浏览器也是这样，不带着外面走）；
    - 连着滚的一串滚轮事件锁在同一个滚动区（LATCH_MS 内没有新的滚轮事件才重新找）：滚到头的那一瞬间不会突然换成滚外层，
      和浏览器原生「滚到头也不立刻换」的手感一样。
-   每个滚动区一个 WheelMotion（登记在 lib/wheel.ts 的 wheelRegistry 里，别的代码用 isWheeling、wheelDir、cancelWheel 看它或让它放手）。
+   每个滚动区一个 WheelMotion（登记在 @luoli/ui/wheel 的 wheelRegistry 里，别的代码用 isWheeling、wheelDir、cancelWheel 看它或让它放手）。
    开始往某个方向滚时在滚动区上同步发 WHEEL_EVENT（带 detail.dy），虚拟列表、思考框据此马上不再贴底。 */
 const LATCH_MS = 400;
 /** 还能往这个方向滚的距离不到这么多 px 算到头了 */

@@ -1,4 +1,4 @@
-import { createStore, useStore } from '../lib/store';
+import { createStore, useStore } from '@luoli/ui/store';
 
 /** 模拟的网页会话发言人名字（真实的服务里是 LUOLI_WEB_NAME）：模拟的状态、对话接口、演示数据里的网页会话都用它 */
 export const WEB_AUTHOR = '星河';

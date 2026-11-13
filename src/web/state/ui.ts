@@ -1,4 +1,4 @@
-import { createStore, useStore } from '../lib/store';
+import { createStore, useStore } from '@luoli/ui/store';
 
 /* 页面上零碎的界面状态：toast、各群状态弹出框、收纳盒的悬停 */
 export const ui = createStore<{

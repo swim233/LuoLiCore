@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Badge, ToolName } from '../../components/Badge';
 import { Pane } from '../../components/Pane';
 import { IconNow } from '../../components/icons';
-import { env } from '../../lib/env';
+import { env } from '@luoli/ui/env';
 import { pulse } from '../../lib/fx-dom';
 import { lastReplyText, recentReply, relTime } from '../../lib/util';
 import { prefs } from '../../lib/prefs';

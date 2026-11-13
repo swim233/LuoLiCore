@@ -1,4 +1,4 @@
-import { createStore } from '../../lib/store';
+import { createStore } from '@luoli/ui/store';
 import { db } from '../../model/db';
 
 /* 会话部件的状态：窗口和全屏共用。普通视图在进全屏、缩成胶囊时会卸载，所以放在模块里，不放组件的 useState。

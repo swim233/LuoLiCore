@@ -1,7 +1,7 @@
 import { useLayoutEffect, useRef } from 'react';
 import type { ReactNode } from 'react';
-import { EASE_OUT_CSS } from '../lib/easing';
-import { motionOn } from '../lib/prefs';
+import { EASE_OUT_CSS } from '@luoli/ui/easing';
+import { motionOn } from '@luoli/ui/motion';
 import { DROP_MS } from '../lib/typing';
 import type { Cut } from '../lib/typing';
 

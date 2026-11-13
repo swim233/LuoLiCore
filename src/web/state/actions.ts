@@ -1,9 +1,10 @@
 import { flushSync } from 'react-dom';
 import { animate } from 'motion';
-import { motionOn, prefs } from '../lib/prefs';
-import { env } from '../lib/env';
-import { storage } from '../lib/storage';
-import { DUR_MORPH, DUR_VANISH, EASE_MORPH, EASE_OUT, EASE_OUT_CSS } from '../lib/easing';
+import { motionOn } from '@luoli/ui/motion';
+import { prefs } from '../lib/prefs';
+import { env } from '@luoli/ui/env';
+import { storage } from '@luoli/ui/storage';
+import { DUR_MORPH, DUR_VANISH, EASE_MORPH, EASE_OUT, EASE_OUT_CSS } from '@luoli/ui/easing';
 import { edgeRun, pulse } from '../lib/fx-dom';
 import { fx, sky } from '../fx/client';
 import { bus } from '../model/bus';

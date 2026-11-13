@@ -1,5 +1,5 @@
 import { memo } from 'react';
-import { motionOn } from '../lib/prefs';
+import { motionOn } from '@luoli/ui/motion';
 import { fmtDay } from '../lib/util';
 import { eventLine, eventOf } from '../model/events';
 import { textOf } from '../model/parts';

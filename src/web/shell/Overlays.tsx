@@ -1,7 +1,8 @@
 import { useLayoutEffect, useRef } from 'react';
 import { lastOnlineText, STATE_TEXT, status, useStatus } from '../model/status';
 import { useAssistantName } from '../model/who';
-import { clamp, lastReplyText } from '../lib/util';
+import { clamp } from '@luoli/ui/util';
+import { lastReplyText } from '../lib/util';
 import { getDef, useDesk, useDefsRev } from '../state/desk';
 import { pop, useUi } from '../state/ui';
 import { unhideWidget } from '../state/actions';

@@ -1,5 +1,5 @@
 import { colsNow } from '../lib/useCols';
-import { clamp } from '../lib/util';
+import { clamp } from '@luoli/ui/util';
 import { desk, spanOf } from '../state/desk';
 import { faces } from './faces';
 

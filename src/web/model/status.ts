@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from 'react';
 import { bus } from './bus';
 import type { BusEventName } from './bus';
-import { fmtTime } from '../lib/util';
+import { fmtTime } from '@luoli/ui/util';
 import { db } from './db';
 
 /* 状态汇总：八种状态。几个会话同时在回复时显示最忙的状态，并给出会话数（数字只由事件推出来，UI 不自己猜）。

@@ -1,4 +1,4 @@
-import { motionOn } from '../../lib/prefs';
+import { motionOn } from '@luoli/ui/motion';
 import { fx } from '../../fx/client';
 import { desk } from '../../state/desk';
 import { faces } from '../../shell/faces';

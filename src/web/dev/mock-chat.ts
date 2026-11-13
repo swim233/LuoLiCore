@@ -1,5 +1,5 @@
 import type { ChatTransport, UIMessageChunk } from 'ai';
-import { chars, randi, uid } from '../lib/util';
+import { chars, randi, uid } from '@luoli/ui/util';
 import { ApiError } from '../model/api';
 import { chatRequestBody, ObservedTransport } from '../model/chat-api';
 import type { ChatApi } from '../model/chat-api';

@@ -1,7 +1,7 @@
 import { memo, useLayoutEffect, useRef } from 'react';
 import { motion } from 'motion/react';
 import { Badge } from '../components/Badge';
-import { env } from '../lib/env';
+import { env } from '@luoli/ui/env';
 import { SLOW } from '../lib/debug';
 import { desk, getDef, useDesk, useWidgetRefresh } from '../state/desk';
 import { expand, hideWidget } from '../state/actions';

@@ -1,0 +1,25 @@
+{
+  "name": "@luoli/ui",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "sideEffects": [
+    "./src/easing.ts"
+  ],
+  "exports": {
+    "./easing": "./src/easing.ts",
+    "./env": "./src/env.ts",
+    "./motion": "./src/motion.ts",
+    "./storage": "./src/storage.ts",
+    "./store": "./src/store.ts",
+    "./url": "./src/url.ts",
+    "./util": "./src/util.ts",
+    "./wheel": "./src/wheel.ts"
+  },
+  "peerDependencies": {
+    "react": "^19"
+  },
+  "devDependencies": {
+    "@types/react": "^19.3.0"
+  }
+}

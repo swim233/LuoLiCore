@@ -7,15 +7,15 @@ import {
   GLIDE_OVERSHOOT,
   GLIDE_PEAK,
   cssBezier,
-} from '../lib/easing';
-import { env } from '../lib/env';
-import { motionOn } from '../lib/prefs';
+} from '@luoli/ui/easing';
+import { env } from '@luoli/ui/env';
+import { motionOn } from '@luoli/ui/motion';
 import { morphStore } from '../shell/morph';
 
 /* 列表的悬停高亮：会话列表（桌面、全屏）和对话里选会话的菜单共用。只在有鼠标时（env.hover，触屏没有）。
    - 一个列表一块高亮（.glide，列表的第一个子元素，绝对定位在列表的内容里，跟着内容滚）：
      鼠标进到一行时用 transform 把它挪过去（0.3 秒）：先滑过目标约 4 像素再回来，过冲的距离固定、方向跟着滑动的方向，
-     曲线与数字见 lib/easing.ts。位置用 Web Animations 的三段关键帧做。
+     曲线与数字见 @luoli/ui/easing。位置用 Web Animations 的三段关键帧做。
      中途换目标（鼠标连着划过几行）时从此刻（动画里）的位置接着走：新动画从上一帧的时刻算起（不在原地多停一帧），
      顺着原来的方向时起步不比此刻慢（不先顿一下再走）。宽高跟着那一行，用 CSS 过渡，不回弹。
      从隐藏到显示时先瞬移到那一行再淡入（0.14 秒，不回弹）；离开列表淡出（0.25 秒）。

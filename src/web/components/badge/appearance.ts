@@ -1,7 +1,7 @@
 import { bus } from '../../model/bus';
 import { status } from '../../model/status';
 import type { EndKind, Snap } from '../../model/status';
-import { createStore } from '../../lib/store';
+import { createStore } from '@luoli/ui/store';
 import { onTimeRate, real, timeRate, vnow } from './timescale';
 
 /* 徽记的「样子」：接在状态汇总（model/status.ts）后面的一层。

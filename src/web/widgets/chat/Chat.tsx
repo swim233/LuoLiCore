@@ -8,7 +8,7 @@ import { Pane } from '../../components/Pane';
 import { useGlide } from '../../components/glide';
 import type { LogItem, ScrollState } from '../../components/VirtualLog';
 import { IconChat } from '../../components/icons';
-import { useStore } from '../../lib/store';
+import { useStore } from '@luoli/ui/store';
 import { fmtDay, fmtShort } from '../../lib/util';
 import { bus } from '../../model/bus';
 import { partsOfChat, partsOfRow } from '../../model/bubble';

@@ -3,7 +3,7 @@ import type { Look, Main } from '../components/badge/appearance';
 import { setTimeRate, timeRate } from '../components/badge/timescale';
 import { Badge } from '../components/Badge';
 import { Seg } from '../components/Seg';
-import { createStore, useStore } from '../lib/store';
+import { createStore, useStore } from '@luoli/ui/store';
 import type { EndKind } from '../model/status';
 
 /* 演示面板里的「徽记」一节：切换实验台。手动切状态（接管徽记的「样子」，顶栏文字等仍是实时的）、中止回复、离线、会话数、慢放。

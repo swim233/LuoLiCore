@@ -1,4 +1,4 @@
-import { hashStr, pick, rand, randi, startOfDay, uid } from '../lib/util';
+import { hashStr, pick, rand, randi, startOfDay, uid } from '@luoli/ui/util';
 import type { NewMessage } from '../model/source';
 import type { ImageInfo, ImagePart, Part, TaskRow, ToolResultInfo } from '../model/types';
 import { devUi, WEB_AUTHOR } from './demo-state';

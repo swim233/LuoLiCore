@@ -1,4 +1,4 @@
-import { pad2 } from './util';
+import { pad2 } from '@luoli/ui/util';
 
 /* 服务器时区里的日期与时刻：任务的时间都是 ISO（UTC），「今天、明天」「09:00」要按服务器的时区算
    （今日概况里的 timeZone），不是浏览器本机的。时区读不出来（还没取到、写法不认识）时用本机的 */

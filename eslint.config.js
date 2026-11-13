@@ -2,6 +2,7 @@ import { builtinModules } from 'node:module';
 import js from '@eslint/js';
 import { defineConfig, globalIgnores } from 'eslint/config';
 import tseslint from 'typescript-eslint';
+import uiManifest from './packages/ui/package.json' with { type: 'json' };
 
 // 前端（CLI、Telegram）、导出脚本（src/requests/）与前端共用的配置、日志：任何含这些路径段的写法，
 // 如 ../cli/x.js、../../src/cli/x.js、./../cli 等（不区分大小写）
@@ -52,30 +53,60 @@ const webPatterns = (d) => [
 const webPatternsDeep = [`(^|[/#])(${outsideDirs})(/|$)`, nodeBuiltins];
 
 /**
- * files 里的代码不得引用 patterns 匹配的模块，静态 import 与动态 import() 都查。
+ * 一组引用规则：patterns 里任一个匹配就报 message。
  * allowTypeImports 为真时 import type 不查（动态 import() 是值，照查）
  */
-function restrictImports(files, patterns, message, { allowTypeImports = false } = {}) {
+const rule = (patterns, message, { allowTypeImports = false } = {}) => ({
+  patterns,
+  message,
+  allowTypeImports,
+});
+
+/**
+ * files 里的代码不得引用 groups 里各组规则匹配的模块，静态 import 与动态 import() 都查。
+ * 一个文件只认最后一份匹配到它的 no-restricted-imports、no-restricted-syntax 设置（后面的整份覆盖前面的，
+ * 不合并），所以一个文件要守的几组规则要写在同一次调用里
+ */
+function restrictImports(files, ...groups) {
   // 动态 import() 不受 no-restricted-imports 检查，用选择器补上；模板字符串只看开头一段
-  const selector = `/${patterns.join('|').replaceAll('/', '\\/')}/i`;
+  const re = (patterns) => `/${patterns.join('|').replaceAll('/', '\\/')}/i`;
   return {
     files,
     rules: {
       'no-restricted-imports': [
         'error',
-        { patterns: patterns.map((regex) => ({ regex, message, allowTypeImports })) },
+        {
+          patterns: groups.flatMap(({ patterns, message, allowTypeImports }) =>
+            patterns.map((regex) => ({ regex, message, allowTypeImports })),
+          ),
+        },
       ],
       'no-restricted-syntax': [
         'error',
-        { selector: `ImportExpression > Literal[value=${selector}]`, message },
-        {
-          selector: `ImportExpression > TemplateLiteral[quasis.0.value.cooked=${selector}]`,
-          message,
-        },
+        ...groups.flatMap(({ patterns, message }) => [
+          { selector: `ImportExpression > Literal[value=${re(patterns)}]`, message },
+          {
+            selector: `ImportExpression > TemplateLiteral[quasis.0.value.cooked=${re(patterns)}]`,
+            message,
+          },
+        ]),
       ],
     },
   };
 }
+
+// 组件库（packages/ui，包名 @luoli/ui）是浏览器里的代码：src/ 下只有网页面板能引用。
+// core、工具、服务、CLI、Telegram、导出脚本、共用代码都不能（测试也不例外，import type 也不行）
+const noUi = rule(
+  ['^@luoli/ui(/|$)'],
+  '组件库 @luoli/ui 是浏览器里的代码，src/ 下只有网页面板（src/web/）能引用',
+);
+// src/ 下的代码（含网页面板）只能按包名 @luoli/ui/… 引组件库：任何含 packages 路径段的写法
+// （相对路径、绝对路径）都拦，经 node_modules/@luoli/ui 的路径也拦
+const viaPackageName = rule(
+  ['(^|[/#])packages(/|$)', '(^|/)node_modules/@luoli/ui(/|$)'],
+  '组件库只能按包名 @luoli/ui/… 引用，不能用相对路径或含 packages/ 的路径绕进去',
+);
 
 // CLI 是洛璃服务的客户端（不带核心）：服务端的代码只许 import type；core 只许纯函数的
 // tool-content（图片说明、工具结果的文字）与类型；不引用其他前端、共用代码、导出脚本、工具、网页。
@@ -93,31 +124,81 @@ const cliForbidden = [
 const WEB_MESSAGE =
   '网页面板不得引用服务端、core、前端、工具的代码或 node 模块（import type 可以）';
 
+// 组件库（packages/ui）：只许引用包里自己的文件，和它自己 package.json 里声明的依赖。
+// 根目录的 node_modules 里解析得到的别的包（hono、ai、marked……）不能靠这个引到；import type 也不行。
+const uiDeps = Object.keys({
+  ...uiManifest.dependencies,
+  ...uiManifest.peerDependencies,
+  ...uiManifest.optionalDependencies,
+});
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+// 测试由根目录的 vitest 跑，测试文件另外可以引 vitest
+const uiTestDeps = [...uiDeps, 'vitest'];
+// 按文件所在的深度（d = packages/ui 到文件之间隔了几层目录）分别写：走出 packages/ui 要 d+1 个 ../
+// （中间夹着 ./ 也算）；任何含 src/ 路径段的写法一律拦（面板、core、服务都在根目录的 src/ 下）；
+// 不以 . 开头的（裸模块名、绝对路径、node: 与内置模块、#子路径）只放过声明了的依赖。
+// d 达到 UI_DEPTHS 的文件用最宽的写法：开头有 UI_DEPTHS+1 个以上 ../ 的都拦
+const UI_DEPTHS = 5;
+const uiPatterns = (ups, deps) => [
+  `^(\\./)*(\\.\\.(/|$)(\\./)*){${ups}}`,
+  '(^|[/#])src(/|$)',
+  `^(?!\\.|(${deps.map(escapeRe).join('|')})(/|$))`,
+  nodeBuiltins,
+];
+const UI_MESSAGE = `组件库只许引用包里自己的文件和 packages/ui/package.json 里声明的依赖（${uiDeps.join('、')}），不得引用面板、core、服务的代码或 node 模块`;
+const uiRules = (ext, deps, message) => [
+  ...Array.from({ length: UI_DEPTHS }, (_, d) =>
+    restrictImports(
+      [`packages/ui/${'*/'.repeat(d)}*.${ext}`],
+      rule(uiPatterns(d + 1, deps), message),
+    ),
+  ),
+  restrictImports(
+    [`packages/ui/${'*/'.repeat(UI_DEPTHS)}**/*.${ext}`],
+    rule(uiPatterns(UI_DEPTHS + 1, deps), message),
+  ),
+];
+
 export default defineConfig(
   globalIgnores(['node_modules', 'dist', '.grill', '.handoff', 'coverage']),
   js.configs.recommended,
   tseslint.configs.recommended,
+  // src/ 下除了网页面板的全部代码（含测试）：不得引用组件库，也不得绕路径进 packages/。
+  // 写在最前面：后面 core、工具、CLI 各自的规则对它们的文件整份覆盖这一份，所以那几处也带上这两组
+  { ...restrictImports(['src/**'], noUi, viaPackageName), ignores: ['src/web/**'] },
   restrictImports(
     ['src/core/**'],
-    forbiddenInCore,
-    'core 不得引用前端、服务、网页、平台代码或工具清单',
+    rule(forbiddenInCore, 'core 不得引用前端、服务、网页、平台代码或工具清单'),
+    noUi,
+    viaPackageName,
   ),
   restrictImports(
     ['src/tools/**'],
-    [...frontends, ...serverAndWeb],
-    '工具不得引用前端、服务或网页代码',
+    rule([...frontends, ...serverAndWeb], '工具不得引用前端、服务或网页代码'),
+    noUi,
+    viaPackageName,
   ),
-  // 网页面板：不得引用服务端、core、前端、工具的代码或 node 模块（import type 可以）
+  // 组件库：不得引用包外面的文件、node 模块和没声明的依赖
+  ...uiRules('{ts,tsx,js,mjs}', uiDeps, UI_MESSAGE),
+  // 测试文件另外可以引 vitest（写在后面，对测试文件覆盖上面那一组）
+  ...uiRules('test.{ts,tsx,js,mjs}', uiTestDeps, UI_MESSAGE + '；测试文件另外可以引 vitest'),
+  {
+    // 同网页面板：只许写 import type { X }
+    files: ['packages/ui/**/*.{ts,tsx}'],
+    rules: { '@typescript-eslint/no-import-type-side-effects': 'error' },
+  },
+  // 网页面板：不得引用服务端、core、前端、工具的代码或 node 模块（import type 可以）；组件库只能按包名引
   ...Array.from({ length: WEB_DEPTHS }, (_, d) =>
-    restrictImports([`src/web/${'*/'.repeat(d)}*.{ts,tsx}`], webPatterns(d), WEB_MESSAGE, {
-      allowTypeImports: true,
-    }),
+    restrictImports(
+      [`src/web/${'*/'.repeat(d)}*.{ts,tsx}`],
+      rule(webPatterns(d), WEB_MESSAGE, { allowTypeImports: true }),
+      viaPackageName,
+    ),
   ),
   restrictImports(
     [`src/web/${'*/'.repeat(WEB_DEPTHS)}**/*.{ts,tsx}`],
-    webPatternsDeep,
-    WEB_MESSAGE,
-    { allowTypeImports: true },
+    rule(webPatternsDeep, WEB_MESSAGE, { allowTypeImports: true }),
+    viaPackageName,
   ),
   {
     // import { type X } from '...' 在 verbatimModuleSyntax 下运行时仍会 import 那个模块，
@@ -128,10 +209,15 @@ export default defineConfig(
   {
     ...restrictImports(
       ['src/cli/**/*.ts'],
-      cliForbidden,
-      'CLI 是洛璃服务的客户端：服务端只许 import type，core 只许 tool-content 与类型，不引用其他前端、共用代码、工具或网页',
-      { allowTypeImports: true },
+      rule(
+        cliForbidden,
+        'CLI 是洛璃服务的客户端：服务端只许 import type，core 只许 tool-content 与类型，不引用其他前端、共用代码、工具或网页',
+        { allowTypeImports: true },
+      ),
+      noUi,
+      viaPackageName,
     ),
+    // 测试走最前面那一份（不得引用组件库）
     ignores: ['src/cli/**/*.test.ts'],
   },
   {

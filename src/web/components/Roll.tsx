@@ -1,8 +1,8 @@
 import { useEffect, useRef } from 'react';
 import { animate, cubicBezier } from 'motion';
-import { EASE_OUT } from '../lib/easing';
-import { motionOn } from '../lib/prefs';
-import { clamp, nf } from '../lib/util';
+import { EASE_OUT } from '@luoli/ui/easing';
+import { motionOn } from '@luoli/ui/motion';
+import { clamp, nf } from '@luoli/ui/util';
 
 /* 滚动数字：从旧值到新值 900 ms，曲线和能量条的宽度过渡是同一条（EASE_OUT），滚动期间变 --gold-pale，结束后 .5 秒还原；动画关掉时直接跳到新值 */
 const rollEase = cubicBezier(...EASE_OUT);

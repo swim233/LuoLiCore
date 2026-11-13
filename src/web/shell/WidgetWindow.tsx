@@ -1,6 +1,6 @@
 import { memo, useLayoutEffect, useRef } from 'react';
 import { motion } from 'motion/react';
-import { env } from '../lib/env';
+import { env } from '@luoli/ui/env';
 import { SLOW } from '../lib/debug';
 import { MiniSky } from '../components/MiniSky';
 import { GripIcon, ICON_MAX, ICON_MIN, ICON_RESTORE } from '../components/icons';

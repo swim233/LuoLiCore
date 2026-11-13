@@ -1,6 +1,6 @@
 import { createPortal } from 'react-dom';
 import { LayoutGroup } from 'motion/react';
-import { useNarrow } from '../lib/env';
+import { useNarrow } from '@luoli/ui/env';
 import { useCols } from '../lib/useCols';
 import { hasDef, useDesk, useDefsRev } from '../state/desk';
 import { Cap } from './Cap';

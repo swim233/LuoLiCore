@@ -1,4 +1,4 @@
-import { pad2, startOfDay, uid } from '../lib/util';
+import { pad2, startOfDay, uid } from '@luoli/ui/util';
 import { ApiError } from '../model/api';
 import type { Api } from '../model/api';
 import { defaultTitle } from '../model/db';

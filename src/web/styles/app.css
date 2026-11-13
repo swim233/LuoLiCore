@@ -110,7 +110,7 @@
   --gap: 16px;
   --row: 232px;
   --top-h: 56px;
-  /* 动画的曲线和时长（--ease-out、--dur-hover、--dur-card、--dur-glide……）由 lib/easing.ts 在页面启动时写进 <head> 里的 <style>，这里不再另写一份 */
+  /* 动画的曲线和时长（--ease-out、--dur-hover、--dur-card、--dur-glide……）由 @luoli/ui/easing 在页面启动时写进 <head> 里的 <style>，这里不再另写一份 */
 }
 
 [hidden] {

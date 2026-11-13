@@ -1,7 +1,8 @@
 import { Badge } from '../components/Badge';
 import { ICON_ARRANGE } from '../components/icons';
-import { useNarrow } from '../lib/env';
-import { chooseMotion, usePrefs } from '../lib/prefs';
+import { useNarrow } from '@luoli/ui/env';
+import { useMotionOn } from '@luoli/ui/motion';
+import { chooseMotion } from '../lib/prefs';
 import { STATE_TEXT, useStatus } from '../model/status';
 import { useAssistantName } from '../model/who';
 import { hasDef, useDefsRev, useDesk } from '../state/desk';
@@ -16,7 +17,7 @@ export function TopBar() {
   const name = useAssistantName();
   const narrow = useNarrow();
   const arranging = useDesk((s) => s.arranging);
-  const motion = usePrefs((p) => p.motion);
+  const motion = useMotionOn();
   const L = useDesk((s) => s.layout);
   const islandOn = narrow && hasDef('now') && !L.hidden.now;
   const stateName =

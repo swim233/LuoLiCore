@@ -1,6 +1,6 @@
 import { Chat } from '@ai-sdk/react';
 import type { FileUIPart } from 'ai';
-import { uid } from '../../lib/util';
+import { uid } from '@luoli/ui/util';
 import { bus } from '../../model/bus';
 import { chatErrorStatus, chatErrorText } from '../../model/chat-api';
 import type { SendMeta } from '../../model/chat-api';

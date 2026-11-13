@@ -1,4 +1,4 @@
-import { createStore } from '../../lib/store';
+import { createStore } from '@luoli/ui/store';
 import { bus } from '../../model/bus';
 import { db } from '../../model/db';
 import type { UploadResponse } from '../../../server/types';

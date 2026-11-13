@@ -1,6 +1,6 @@
 import { fpsMeter } from './lib/fps';
 import { startWinSky, warmBubbleSky } from './lib/winSky';
-import { MQ } from './lib/env';
+import { motionOn } from '@luoli/ui/motion';
 import { prefs } from './lib/prefs';
 import { getSource } from './model/source';
 import { status } from './model/status';
@@ -22,8 +22,8 @@ import { escHooks } from './lib/dev-slot';
 export function boot({ todayAlways }: { todayAlways: boolean }) {
   {
     const r = document.documentElement;
-    r.classList.toggle('motion', prefs.get().motion);
-    r.classList.toggle('still', !prefs.get().motion);
+    r.classList.toggle('motion', motionOn());
+    r.classList.toggle('still', !motionOn());
     r.classList.add('hover-' + prefs.get().hover);
   }
   fpsMeter.set(prefs.get().fps);
@@ -57,14 +57,13 @@ export function boot({ todayAlways }: { todayAlways: boolean }) {
     }
     pop.hide();
   });
-  MQ.reduced.addEventListener('change', () => {});
   status.emit();
   setTimeout(warmFs, 700);
 }
 /* 第一次进全屏时，显卡要现编模糊用的着色器，第一帧会卡一下。页面空闲时先在角落里用一个几乎看不见的小块
    把背景模糊和内容模糊各走一遍，之后第一次进全屏就和以后一样顺 */
 function warmFs() {
-  if (!prefs.get().motion) return;
+  if (!motionOn()) return;
   const g = document.createElement('div');
   g.setAttribute('aria-hidden', 'true');
   g.style.cssText =

@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { Ref } from 'react';
 import { IncrementalLexer } from '../lib/markdown';
-import { motionOn } from '../lib/prefs';
+import { motionOn } from '@luoli/ui/motion';
 import { hiddenTail, linkTailSpans, settleMarkdown } from '../lib/stream-md';
 import { advanceCp, cpLen, cpSpans, DROP_MS, Pacer, Spans, trimBatches } from '../lib/typing';
 import type { Batch } from '../lib/typing';

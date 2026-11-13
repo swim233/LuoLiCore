@@ -1,7 +1,7 @@
-import { createStore, useStore } from '../lib/store';
-import { storage } from '../lib/storage';
-import { DUR_MORPH, EASE_MORPH } from '../lib/easing';
-import type { Bezier } from '../lib/easing';
+import { createStore, useStore } from '@luoli/ui/store';
+import { storage } from '@luoli/ui/storage';
+import { DUR_MORPH, EASE_MORPH } from '@luoli/ui/easing';
+import type { Bezier } from '@luoli/ui/easing';
 import { bus } from '../model/bus';
 import type { FullParams, SizeKey, WidgetDef, WidgetHandle } from '../widgets/types';
 import { useEffect, useState } from 'react';

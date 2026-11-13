@@ -1,5 +1,5 @@
 import { useCallback } from 'react';
-import { clamp } from '../lib/util';
+import { clamp } from '@luoli/ui/util';
 
 /* 窗格：部件里的一块滚动区。内容铺满整块，上面、下面浮着的东西（标题、选会话那一行、输入框）盖在内容上面；
    内容滚进它们下面时由浅到深地糊：每一边一组 4 层 backdrop-filter 加一层渐变的底，强度按指数曲线涨（层数、半径、曲线见 app.css「窗格」一节）。

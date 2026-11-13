@@ -1,4 +1,4 @@
-import { chars, rand, randi, uid } from '../lib/util';
+import { chars, rand, randi, uid } from '@luoli/ui/util';
 import type { ImageInfo, ImagePart, MsgRow, Part, ToolResultInfo } from '../model/types';
 import type { LiveTask } from '../../server/types';
 import { mockLive, mockStatus } from './mock-live';

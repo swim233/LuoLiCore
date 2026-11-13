@@ -3,8 +3,8 @@ import { AnimatePresence, motion } from 'motion/react';
 import { useGlide } from '../../components/glide';
 import { IconTasks } from '../../components/icons';
 import { Pane } from '../../components/Pane';
-import { DUR_VANISH, EASE_OUT } from '../../lib/easing';
-import { usePrefs } from '../../lib/prefs';
+import { DUR_VANISH, EASE_OUT } from '@luoli/ui/easing';
+import { useMotionOn } from '@luoli/ui/motion';
 import { db, defaultTitle } from '../../model/db';
 import { link, useLinkPhase } from '../../model/link';
 import { useBusRev } from '../../model/rev';
@@ -44,7 +44,7 @@ export function convTitleOf(c: TaskRow['conversation']): string {
 /* 行、组进出场：高度从 0 长出来、淡入（和会话列表一样，420 ms）；收起时高度收到 0、淡出（320 ms）；动画关掉时只淡出。
    整批到的（第一次连上、重连后，db.taskBulk）直接出现，只有之后新来的才放进场动画。key：任务 id 或会话 id */
 function useCollapse() {
-  const motionOn = usePrefs((p) => p.motion);
+  const motionOn = useMotionOn();
   return (key?: number | string) =>
     ({
       initial:
