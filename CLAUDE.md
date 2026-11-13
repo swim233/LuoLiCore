@@ -8,11 +8,14 @@ LuoLiCore：群聊助手 agent，核心基于 Vercel AI SDK v7。术语见 `CONT
 
 第一阶段（CLI MVP：多轮对话、重试与日志、中止、用量）、第二阶段（持久化与 Telegram）、第三阶段（工具接口与多步循环，ADR-0006）、第四阶段（fetch 工具与工具结果里的图片，ADR-0007）、第五阶段（请求记录与导出，ADR-0008）、第六阶段（洛璃服务与网页面板，ADR-0009）、第七阶段（定时任务，ADR-0010）已完成。第七阶段之后修过一轮网页面板（11 个问题，拷问记录在 `.grill/ui-fixes/`，已完成），又打磨过一轮（模糊过渡的曲线、平滑滚动、气泡的毛玻璃和洛璃气泡的配色、逐字输出时气泡的形变；拷问记录在 `.grill/ui-polish/`，结论和参数在那里的 `final.md`，已完成）。两轮留下没做的小问题记在 `.handoff/ui-fixes/notes-for-later.md`。
 
+正在做组件库：把网页面板里的组件抽成 `@luoli/ui`（`packages/ui/`），以后别的项目能复用。结论和 11 步的清单在 `.grill/component-lib/final.md`，每步的记录在 `.handoff/ui-lib/step-N/`。第 1 步（建包、搬入不带样式的基础模块）已完成；11 步做完再进第八阶段。
+
 之后的第八阶段是监视器、插件与动态，结论已写进 ADR-0010 的「以后怎么接」，开始前再确认一轮。登录与公网部署是第九阶段，设置的修改是第十阶段，各自开始前再拷问。
 
 已定的实现选择：
 
-- 单包：`src/core`、`src/cli`、`src/telegram`、`src/server`（洛璃服务）、`src/web`（网页面板）。core 不得引用前端、服务、网页或任何平台代码，由 lint 规则保证。网页只能引用 core 与服务的类型，不能引用它们的代码。CLI 是服务的客户端，只引用服务的类型，core 只用纯函数（`tool-content`），也由 lint 规则保证。
+- 两个包（pnpm workspace）：根包是洛璃本体，`src/core`、`src/cli`、`src/telegram`、`src/server`（洛璃服务）、`src/web`（网页面板）；`packages/ui` 是组件库 `@luoli/ui`。core 不得引用前端、服务、网页或任何平台代码，由 lint 规则保证。网页只能引用 core 与服务的类型，不能引用它们的代码。CLI 是服务的客户端，只引用服务的类型，core 只用纯函数（`tool-content`），也由 lint 规则保证。
+- 组件库 `@luoli/ui`：面板按包名引用它的源码（子路径，如 `@luoli/ui/easing`，没有总入口），不单独构建。它只许引用包里自己的文件和自己 `package.json` 里声明的依赖；`src/` 下只有网页面板能引用它，而且只能按包名引用。都由 lint 规则保证。动画开关在 `@luoli/ui/motion`（跟随系统、开、关），库不存储，面板的偏好替它记住用户的选择。
 - 洛璃服务（ADR-0009）：
   - 进程与入口：一个常驻进程。`pnpm start` 先构建网页（`pnpm web:build`），成功后再启动服务，构建失败就不启动；`pnpm serve` 只启动服务、不构建。设了 Telegram token 才启动 bot，没设时 stderr 提示一行；网页服务用 `LUOLI_WEB=off` 关闭，端口由 `LUOLI_WEB_PORT` 配置（默认 7310），被占用时报错退出。两个都没开时报错退出。
   - 网页的构建产物：用 `pnpm serve` 时，改了网页要先跑 `pnpm web:build`。还没有构建（`dist/web/`）时服务照常启动，stderr 与日志各提示一行，页面显示同样的提示；构建好之后不用重启。
@@ -216,6 +219,7 @@ AI SDK v7 与旧版本的差异（以 https://ai-sdk.dev 为准）：`system` �
 
 - 核心不 import 任何平台代码。平台差异只存在于前端与洛璃服务。
 - 网页面板（`src/web/`）只 import 核心与服务的类型，不 import 它们的代码。
+- 组件库（`packages/ui/`）不 import 面板、核心、服务的代码，只 import 自己声明的依赖。
 - 功能凭具体用例进入范围。非目标写进文档。
 - 文档轻量：`CONTEXT.md` 术语表加必要的 ADR，不写多轮 review 文档。
 - 新增依赖需说明用途并经用户确认。
@@ -239,7 +243,7 @@ AI SDK v7 与旧版本的差异（以 https://ai-sdk.dev 为准）：`system` �
 
 每步流程：
 
-1. 主会话写 `.handoff/step-N/spec.md`（第二阶段起为 `.handoff/phase-N/step-N/spec.md`，这一轮面板修复是 `.handoff/ui-fixes/step-N/`）：目标、范围、验收标准、不做的事。
+1. 主会话写 `.handoff/step-N/spec.md`（第二阶段起为 `.handoff/phase-N/step-N/spec.md`，面板修复是 `.handoff/ui-fixes/step-N/`，组件库是 `.handoff/ui-lib/step-N/`）：目标、范围、验收标准、不做的事。
 2. dev 实现，回报写在同目录 `dev-report.md`。
 3. QA 审核，结论写在同目录 `qa-report.md`。不通过则打回 dev，循环至通过。
 4. 主会话读改动，向用户讲解：做了什么、为什么这样设计、代码从哪里读起。
