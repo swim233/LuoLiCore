@@ -1,0 +1,16 @@
+/* ll.base 层：各种控件共用的基础样式。
+   - 按钮的字体和字色继承：浏览器默认表单元素（按钮）不继承页面的字体和字色，库统一成继承。放在层里，
+     所以用它的项目任何自己的样式（不在层里）都能盖过；
+   - 键盘焦点环统一：键盘走到控件上（:focus-visible）时，在控件外面画一圈强调色的线。被父元素裁掉的地方（overflow: hidden 的容器里），
+     由用它的项目自己改成画在里面；
+   - 以后各批控件的可聚焦元素也加进这里的选择器。 */
+@layer ll.base {
+  button {
+    font: inherit;
+    color: inherit;
+  }
+  :where(.ll-btn, .ll-icon-btn, .ll-switch, .ll-seg > button):focus-visible {
+    outline: 2px solid var(--ll-accent);
+    outline-offset: var(--ll-space-2);
+  }
+}

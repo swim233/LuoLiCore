@@ -1,0 +1,18 @@
+/* 转圈 .ll-spin：一个字符轮着换（React 的 Spinner 管，所有转圈共用一个定时器；动画关掉时显示「⋯」）。
+   颜色默认点睛色，data-tone 换：accent、tool、dim。左边的空隙（margin）是版面的事，不在这里。 */
+@layer ll.controls {
+  .ll-spin {
+    display: inline-block;
+    width: 1.2ch;
+    color: var(--ll-star);
+  }
+  .ll-spin[data-tone='accent'] {
+    color: var(--ll-accent);
+  }
+  .ll-spin[data-tone='tool'] {
+    color: var(--ll-tool);
+  }
+  .ll-spin[data-tone='dim'] {
+    color: var(--ll-fg-dim);
+  }
+}

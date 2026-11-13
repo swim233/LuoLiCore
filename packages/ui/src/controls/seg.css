@@ -1,0 +1,45 @@
+/* 分段选择 .ll-seg：一排互斥的按钮，aria-pressed='true' 的是当前项。没有边框的底，选中的那段是强调色 30% 的底。
+   外框圆角 md、里面的按钮圆角 sm；按钮的高 26px 是控件自己的尺寸（外框连内边距 30）。 */
+@layer ll.controls {
+  .ll-seg {
+    box-sizing: border-box;
+    display: flex;
+    gap: var(--ll-space-2);
+    padding: var(--ll-space-2);
+    border-radius: var(--ll-radius-md);
+    background: var(--ll-ctl-bg);
+  }
+  .ll-seg > button {
+    box-sizing: border-box;
+    flex: 1;
+    height: 26px;
+    margin: 0;
+    padding: 0 var(--ll-space-8);
+    border: 0;
+    border-radius: var(--ll-radius-sm);
+    background: transparent;
+    color: var(--ll-fg-3);
+    font: inherit;
+    font-size: var(--ll-text-sm);
+    line-height: 1;
+    white-space: nowrap;
+    cursor: pointer;
+    appearance: none;
+    transition:
+      background-color var(--ll-dur-hover),
+      color var(--ll-dur-hover);
+  }
+  .ll-seg > button[aria-pressed='true'] {
+    background: var(--ll-ctl-bg-on);
+    color: var(--ll-fg);
+  }
+  .ll-seg > button:disabled {
+    opacity: var(--ll-disabled-opacity);
+    cursor: default;
+  }
+  @media (hover: hover) {
+    .ll-seg > button:not(:disabled):hover {
+      color: var(--ll-fg);
+    }
+  }
+}

@@ -43,5 +43,6 @@ export function subscribeMotion(fn: () => void) {
     subs.delete(fn);
   };
 }
-/** 组件里读动画开着没有，变了就重新渲染 */
-export const useMotionOn = () => useSyncExternalStore(subscribeMotion, motionOn);
+/** 组件里读动画开着没有，变了就重新渲染。服务端渲染时（没有浏览器，没有系统的设置可读）当作动画开着，
+    到了浏览器里再按实际的来（useSyncExternalStore 的第三个参数就是服务端的快照） */
+export const useMotionOn = () => useSyncExternalStore(subscribeMotion, motionOn, () => true);

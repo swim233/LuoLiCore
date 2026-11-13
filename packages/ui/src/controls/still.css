@@ -1,0 +1,15 @@
+/* 动画关掉时（页面根上有 still 类，或系统开了「减少动态效果」而页面根上没有 motion 类）：控件的过渡去掉，状态照常切换。
+   页面根上的 motion / still 类由用它的项目按 @luoli/ui/motion 的 motionOn() 挂（照面板的做法）。 */
+@layer ll.controls {
+  :root.still :is(.ll-btn, .ll-icon-btn, .ll-switch, .ll-switch-track, .ll-seg > button, .ll-chev),
+  :root.still .ll-switch-track::after {
+    transition: none;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    :root:not(.motion)
+      :is(.ll-btn, .ll-icon-btn, .ll-switch, .ll-switch-track, .ll-seg > button, .ll-chev),
+    :root:not(.motion) .ll-switch-track::after {
+      transition: none;
+    }
+  }
+}

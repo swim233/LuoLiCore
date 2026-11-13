@@ -1,0 +1,44 @@
+/* 图标按钮 .ll-icon-btn：30×30，透明底，里面一个 15px 的图标。必须有 aria-label（React 组件的类型上要求）。 */
+@layer ll.controls {
+  .ll-icon-btn {
+    box-sizing: border-box;
+    display: inline-grid;
+    place-items: center;
+    /* 控件自己的尺寸：30×30，图标 15px */
+    width: 30px;
+    height: 30px;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    border-radius: var(--ll-radius-md);
+    background: transparent;
+    color: var(--ll-fg-dim);
+    font: inherit;
+    cursor: pointer;
+    appearance: none;
+    transition:
+      background-color var(--ll-dur-hover),
+      color var(--ll-dur-hover);
+  }
+  .ll-icon-btn > svg {
+    width: 15px;
+    height: 15px;
+  }
+  .ll-icon-btn[aria-pressed='true'] {
+    background: var(--ll-ctl-bg-on);
+    color: var(--ll-fg);
+  }
+  .ll-icon-btn:disabled {
+    opacity: var(--ll-disabled-opacity);
+    cursor: default;
+  }
+  @media (hover: hover) {
+    .ll-icon-btn:not(:disabled):hover {
+      background: var(--ll-ctl-bg);
+      color: var(--ll-fg);
+    }
+    .ll-icon-btn[aria-pressed='true']:not(:disabled):hover {
+      background: var(--ll-ctl-bg-on);
+    }
+  }
+}

@@ -5,11 +5,13 @@
   "type": "module",
   "sideEffects": [
     "./src/easing.ts",
-    "./src/*.css"
+    "./src/**/*.css"
   ],
   "exports": {
+    "./controls": "./src/controls/index.ts",
     "./easing": "./src/easing.ts",
     "./env": "./src/env.ts",
+    "./icons": "./src/icons/index.ts",
     "./motion": "./src/motion.ts",
     "./storage": "./src/storage.ts",
     "./store": "./src/store.ts",

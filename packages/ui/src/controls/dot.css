@@ -1,0 +1,36 @@
+/* 状态点 .ll-dot：7px 的圆点。data-tone：默认（灰）、accent、quote、star（带光晕）、tool、warning、danger（带光晕）、ok。
+   这里只认色调，洛璃的状态名（等待、思考、回复……）由用它的项目对到色调上。 */
+@layer ll.controls {
+  .ll-dot {
+    display: inline-block;
+    flex: none;
+    /* 控件自己的尺寸 */
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--ll-fg-dim);
+  }
+  .ll-dot[data-tone='accent'] {
+    background: var(--ll-accent);
+  }
+  .ll-dot[data-tone='quote'] {
+    background: var(--ll-quote);
+  }
+  .ll-dot[data-tone='star'] {
+    background: var(--ll-star);
+    box-shadow: 0 0 8px var(--ll-star-glow);
+  }
+  .ll-dot[data-tone='tool'] {
+    background: var(--ll-tool);
+  }
+  .ll-dot[data-tone='warning'] {
+    background: var(--ll-warning);
+  }
+  .ll-dot[data-tone='danger'] {
+    background: var(--ll-danger);
+    box-shadow: 0 0 8px var(--ll-danger-glow);
+  }
+  .ll-dot[data-tone='ok'] {
+    background: var(--ll-ok);
+  }
+}

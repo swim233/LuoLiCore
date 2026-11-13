@@ -96,6 +96,7 @@ export const TOKEN_GROUPS: TokenGroup[] = [
       c('danger', '出错'),
       c('danger-pale', '出错的浅色字'),
       c('danger-glow', '出错的光晕（55%）'),
+      c('danger-soft', '出错的淡底（24%）：危险按钮'),
       c('warning', '重试中'),
     ],
   },
@@ -120,7 +121,12 @@ export const TOKEN_GROUPS: TokenGroup[] = [
     id: 'ctl',
     title: '控件的底',
     note: '按钮、开关、分段控件的底：没有边框。',
-    items: [c('ctl-bg', '平时'), c('ctl-bg-hover', '悬停'), c('ctl-bg-on', '选中（强调色 30%）')],
+    items: [
+      c('ctl-bg', '平时'),
+      c('ctl-bg-hover', '悬停'),
+      c('ctl-bg-on', '选中（强调色 30%）'),
+      t('disabled-opacity', 'number', '禁用的控件整个变淡到这个不透明度'),
+    ],
   },
   {
     id: 'inset',

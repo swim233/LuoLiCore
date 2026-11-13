@@ -1,0 +1,79 @@
+/* 开关 .ll-switch：一个 role="switch" 的按钮，里面是轨道（.ll-switch-track）和可选的文字（.ll-switch-label）。
+   开着是强调色的底、白色的钮（aria-checked='true'）。两种用法：只有轨道；加上 data-boxed，外面是按钮的底
+   （高度 md 28 或 lg 32，用 data-size 选；现在顶栏的动画开关就是 lg）。 */
+@layer ll.controls {
+  .ll-switch {
+    box-sizing: border-box;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--ll-space-8);
+    margin: 0;
+    padding: 0;
+    border: 0;
+    border-radius: var(--ll-radius-full);
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    line-height: 1;
+    white-space: nowrap;
+    cursor: pointer;
+    appearance: none;
+  }
+  /* 轨道 28×16、钮 12×12、钮离边 2px：控件自己的尺寸 */
+  .ll-switch-track {
+    position: relative;
+    flex: none;
+    width: 28px;
+    height: 16px;
+    border-radius: var(--ll-radius-full);
+    background: color-mix(in srgb, var(--ll-fg-dim) 45%, transparent);
+    transition: background-color var(--ll-dur-hover);
+  }
+  .ll-switch-track::after {
+    content: '';
+    position: absolute;
+    left: 2px;
+    top: 2px;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--ll-fg-2);
+    transition:
+      transform var(--ll-dur-hover) var(--ll-ease-out),
+      background-color var(--ll-dur-hover);
+  }
+  .ll-switch[aria-checked='true'] .ll-switch-track {
+    background: var(--ll-accent);
+  }
+  .ll-switch[aria-checked='true'] .ll-switch-track::after {
+    transform: translateX(12px);
+    background: var(--ll-white);
+  }
+
+  /* 外面是按钮的底：高度和按钮的 md（28）、lg（32）一样 */
+  .ll-switch[data-boxed] {
+    height: 28px;
+    padding: 0 var(--ll-space-12) 0 var(--ll-space-8);
+    background: var(--ll-ctl-bg);
+    color: var(--ll-fg-2);
+    font-size: var(--ll-text-sm);
+    transition:
+      background-color var(--ll-dur-hover),
+      color var(--ll-dur-hover);
+  }
+  .ll-switch[data-boxed][data-size='lg'] {
+    height: 32px;
+    padding: 0 var(--ll-space-14) 0 var(--ll-space-8);
+    font-size: var(--ll-text-md);
+  }
+  .ll-switch:disabled {
+    opacity: var(--ll-disabled-opacity);
+    cursor: default;
+  }
+  @media (hover: hover) {
+    .ll-switch[data-boxed]:not(:disabled):hover {
+      background: var(--ll-ctl-bg-hover);
+      color: var(--ll-fg);
+    }
+  }
+}

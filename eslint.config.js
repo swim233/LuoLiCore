@@ -132,8 +132,8 @@ const uiDeps = Object.keys({
   ...uiManifest.optionalDependencies,
 });
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-// 测试由根目录的 vitest 跑，测试文件另外可以引 vitest
-const uiTestDeps = [...uiDeps, 'vitest'];
+// 测试由根目录的 vitest 跑，测试文件另外可以引 vitest；控件的测试用 react-dom/server 渲染（不需要 DOM），react-dom 在包的 devDependencies 里
+const uiTestDeps = [...uiDeps, 'vitest', 'react-dom'];
 // 按文件所在的深度（d = packages/ui 到文件之间隔了几层目录）分别写：走出 packages/ui 要 d+1 个 ../
 // （中间夹着 ./ 也算）；任何含 src/ 路径段的写法一律拦（面板、core、服务都在根目录的 src/ 下）；
 // 不以 . 开头的（裸模块名、绝对路径、node: 与内置模块、#子路径）只放过声明了的依赖。

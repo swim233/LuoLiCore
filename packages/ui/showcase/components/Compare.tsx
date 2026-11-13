@@ -22,6 +22,7 @@ export function Compare({
   note,
   stage = 'sky',
   mode: initialMode = 'side',
+  className = '',
 }: {
   title: ReactNode;
   now: ReactNode;
@@ -31,6 +32,8 @@ export function Compare({
   note?: ReactNode;
   stage?: StageKind;
   mode?: CompareMode;
+  /** 加在最外层上（比如 is-wide：独占一整行） */
+  className?: string;
 }) {
   const [kind, setKind] = useState<StageKind>(stage);
   const [mode, setMode] = useState<CompareMode>(initialMode);
@@ -43,7 +46,7 @@ export function Compare({
     e.preventDefault();
   };
   return (
-    <figure className="sc-cmp" data-compare="" data-mode={mode}>
+    <figure className={`sc-cmp ${className}`} data-compare="" data-mode={mode}>
       <header className="sc-cmp-head">
         <h4 className="sc-cmp-title">{title}</h4>
         <div className="sc-cmp-heads">

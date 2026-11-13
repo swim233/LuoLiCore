@@ -1,9 +1,19 @@
 /* @luoli/ui 的样式入口：项目里 import '@luoli/ui/styles.css'（先于自己的样式）。
    库的样式都放在 @layer 里；这一行先把层的顺序定下来（后面的盖过前面的）：
    - ll.tokens：设计变量（配色、字体、动画、刻度）；
-   - ll.base：基础的重置和元素样式；
-   - ll.controls：各种控件的样式。
-   使用方自己的样式不放进层里，所以天然盖过库的。现在只有 ll.tokens 有内容，后面几层随各批控件加进来。 */
+   - ll.base：各种控件共用的基础样式（按钮继承页面的字体和字色、键盘焦点环）；
+   - ll.controls：各种控件的样式（一个控件一个文件，放在 controls/）。
+   使用方自己的样式不放进层里，所以天然盖过库的。 */
 @layer ll.tokens, ll.base, ll.controls;
 
 @import './tokens.css';
+@import './base.css';
+@import './controls/button.css';
+@import './controls/icon-button.css';
+@import './controls/switch.css';
+@import './controls/seg.css';
+@import './controls/tag.css';
+@import './controls/dot.css';
+@import './controls/spin.css';
+@import './controls/chev.css';
+@import './controls/still.css';

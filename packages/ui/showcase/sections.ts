@@ -1,4 +1,5 @@
 import type { ComponentType } from 'react';
+import { Controls } from './sections/Controls';
 import { Scale } from './sections/Scale';
 import { Tokens } from './sections/Tokens';
 
@@ -15,7 +16,7 @@ export interface SectionDef {
 export const SECTIONS: SectionDef[] = [
   { id: 'tokens', title: '变量', Component: Tokens },
   { id: 'scale', title: '刻度', Component: Scale },
-  { id: 'controls', title: '基础控件', steps: '4、5' },
+  { id: 'controls', title: '基础控件', Component: Controls, steps: '4、5' },
   { id: 'scroll', title: '滚动', steps: '6' },
   { id: 'overlay', title: '浮层', steps: '7' },
   { id: 'forms', title: '表单', steps: '8' },

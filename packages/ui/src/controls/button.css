@@ -1,0 +1,112 @@
+/* 按钮 .ll-btn：五种样子（data-variant：soft 默认、primary、danger、glass、ghost）、四档尺寸（data-size：xs、sm、md 默认、lg），都是全圆角。
+   按下保持的状态用 aria-pressed='true'，禁用用 :disabled，两步确认等待时用 data-armed。里面可以放图标（14px）和小箭头。
+   布局上的样式（margin、min-width、flex、进场动画）不在这里，用它的地方自己写。 */
+@layer ll.controls {
+  .ll-btn {
+    box-sizing: border-box;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--ll-space-6);
+    /* 控件自己的高度：四档是 18、22、28、32，不在刻度里 */
+    height: 28px;
+    margin: 0;
+    padding: 0 var(--ll-space-12);
+    border: 0;
+    border-radius: var(--ll-radius-full);
+    background: var(--ll-ctl-bg);
+    color: var(--ll-fg-2);
+    font: inherit;
+    font-size: var(--ll-text-sm);
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    cursor: pointer;
+    appearance: none;
+    transition:
+      background-color var(--ll-dur-hover),
+      color var(--ll-dur-hover);
+  }
+  .ll-btn[data-size='xs'] {
+    height: 18px;
+    padding-inline: var(--ll-space-8);
+  }
+  .ll-btn[data-size='sm'] {
+    height: 22px;
+    padding-inline: var(--ll-space-10);
+    font-size: var(--ll-text-xs);
+  }
+  .ll-btn[data-size='lg'] {
+    height: 32px;
+    padding-inline: var(--ll-space-14);
+    font-size: var(--ll-text-md);
+  }
+  /* 里面的图标：14px，和字隔 gap 那么宽 */
+  .ll-btn > svg {
+    flex: none;
+    width: 14px;
+    height: 14px;
+  }
+
+  /* 样子 */
+  .ll-btn[data-variant='primary'] {
+    background: var(--ll-accent);
+    color: var(--ll-on-accent);
+    font-weight: 600;
+  }
+  .ll-btn[data-variant='danger'] {
+    background: var(--ll-danger-soft);
+    color: var(--ll-danger-pale);
+  }
+  .ll-btn[data-variant='glass'] {
+    background: var(--ll-glass-bg);
+    color: var(--ll-fg);
+    -webkit-backdrop-filter: blur(12px);
+    backdrop-filter: blur(12px);
+    box-shadow:
+      var(--ll-glass-edge),
+      0 8px 20px -8px color-mix(in srgb, var(--ll-black) 70%, transparent);
+  }
+  .ll-btn[data-variant='ghost'] {
+    background: transparent;
+  }
+  /* ghost 当「点开一个东西」的按钮用：展开着的时候保持亮着的底 */
+  .ll-btn[data-variant='ghost'][aria-expanded='true'] {
+    background: var(--ll-ctl-bg);
+    color: var(--ll-fg);
+  }
+  /* 两步确认等待时：危险的样子加一圈红光 */
+  .ll-btn[data-armed] {
+    box-shadow: 0 0 14px -4px var(--ll-danger-glow);
+  }
+
+  /* 按下保持（所有样子都一样） */
+  .ll-btn[aria-pressed='true'] {
+    background: var(--ll-ctl-bg-on);
+    color: var(--ll-fg);
+  }
+  .ll-btn:disabled {
+    opacity: var(--ll-disabled-opacity);
+    cursor: default;
+  }
+
+  /* 悬停只在有鼠标的设备上；primary、danger 悬停不变 */
+  @media (hover: hover) {
+    .ll-btn:where(:not([data-variant]), [data-variant='soft']):not(:disabled):hover {
+      background: var(--ll-ctl-bg-hover);
+      color: var(--ll-fg);
+    }
+    .ll-btn[data-variant='ghost']:not(:disabled):hover {
+      background: var(--ll-ctl-bg);
+      color: var(--ll-fg);
+    }
+    .ll-btn[data-variant='glass']:not(:disabled):hover {
+      background: color-mix(in srgb, var(--ll-glass-bg) 70%, var(--ll-ctl-bg-hover));
+    }
+    /* 按下保持的在悬停时也不变 */
+    .ll-btn[aria-pressed='true']:not(:disabled):hover {
+      background: var(--ll-ctl-bg-on);
+      color: var(--ll-fg);
+    }
+  }
+}

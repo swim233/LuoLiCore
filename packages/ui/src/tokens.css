@@ -54,6 +54,8 @@
     --ll-ctl-bg: rgba(255, 255, 255, 0.08);
     --ll-ctl-bg-hover: rgba(255, 255, 255, 0.13);
     --ll-ctl-bg-on: color-mix(in srgb, var(--ll-accent) 30%, transparent);
+    /* 禁用的控件：整个变淡 */
+    --ll-disabled-opacity: 0.5;
     /* 玻璃：菜单、弹出框、提示条、收纳盒 */
     --ll-glass-bg: rgba(20, 27, 60, 0.82);
     --ll-glass-edge:
@@ -104,6 +106,7 @@
     --ll-star-glow: color-mix(in srgb, var(--ll-star) 70%, transparent);
     --ll-accent-soft: color-mix(in srgb, var(--ll-accent) 22%, transparent);
     --ll-danger-glow: color-mix(in srgb, var(--ll-danger) 55%, transparent);
+    --ll-danger-soft: color-mix(in srgb, var(--ll-danger) 24%, transparent);
 
     /* ---------- 字体 ---------- */
     /* 已加载的思源黑体排在系统黑体（含雅黑）前面，避免本机只有粗体时全变粗 */

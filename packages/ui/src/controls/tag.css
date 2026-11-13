@@ -1,0 +1,69 @@
+/* 标签 .ll-tag（不能点的一小条字）和数字徽标 .ll-badge。
+   Tag：data-variant 是 outline（默认，一圈细线）或 soft（半透明底）；data-tone 是默认、accent、star；data-size 是 sm（默认）或 md。
+   Badge：数字徽标；data-tone 是 star（默认）、accent、neutral；没有内容时留着位置、不显示（:empty）。 */
+@layer ll.controls {
+  .ll-tag {
+    --ll-tag-fg: var(--ll-fg-2);
+    --ll-tag-bg: var(--ll-ctl-bg);
+    --ll-tag-line: var(--ll-line-hi);
+    box-sizing: border-box;
+    display: inline-flex;
+    align-items: center;
+    /* 控件自己的高度：sm 18、md 22 */
+    height: 18px;
+    padding: 0 var(--ll-space-8);
+    border-radius: var(--ll-radius-full);
+    color: var(--ll-tag-fg);
+    font-size: var(--ll-text-xs);
+    line-height: 1;
+    white-space: nowrap;
+  }
+  .ll-tag[data-size='md'] {
+    height: 22px;
+    padding-inline: var(--ll-space-10);
+    font-size: var(--ll-text-sm);
+  }
+  .ll-tag[data-tone='accent'] {
+    --ll-tag-fg: var(--ll-fg-3);
+    --ll-tag-bg: color-mix(in srgb, var(--ll-accent) 14%, transparent);
+    --ll-tag-line: color-mix(in srgb, var(--ll-accent) 45%, transparent);
+  }
+  .ll-tag[data-tone='star'] {
+    --ll-tag-fg: color-mix(in srgb, var(--ll-star) 75%, var(--ll-fg-2));
+    --ll-tag-line: color-mix(in srgb, var(--ll-star) 40%, transparent);
+  }
+  .ll-tag:where(:not([data-variant]), [data-variant='outline']) {
+    box-shadow: inset 0 0 0 1px var(--ll-tag-line);
+  }
+  .ll-tag[data-variant='soft'] {
+    background: var(--ll-tag-bg);
+  }
+
+  .ll-badge {
+    box-sizing: border-box;
+    display: inline-block;
+    /* 控件自己的尺寸：最小 18×18 */
+    min-width: 18px;
+    height: 18px;
+    padding: 0 var(--ll-space-4);
+    border-radius: var(--ll-radius-full);
+    background: var(--ll-star);
+    color: var(--ll-on-star);
+    font-size: var(--ll-text-xs);
+    font-weight: 700;
+    line-height: 18px;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+  }
+  .ll-badge[data-tone='accent'] {
+    background: var(--ll-accent);
+    color: var(--ll-on-accent);
+  }
+  .ll-badge[data-tone='neutral'] {
+    background: var(--ll-ctl-bg-hover);
+    color: var(--ll-fg-2);
+  }
+  .ll-badge:empty {
+    visibility: hidden;
+  }
+}
