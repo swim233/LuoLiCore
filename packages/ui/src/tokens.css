@@ -1,0 +1,162 @@
+/* 组件库的设计变量：配色、字体、动画的曲线和时长、字号、间距、圆角、层级。
+   - 前缀一律 --ll-，按用途起名、不按颜色起名（以后换一套配色，名字不用变）；
+   - 都在 ll.tokens 这一层里（层的顺序见 styles.css）：使用方自己的、不在层里的样式天然盖过这里；
+   - 夜蓝配色，只做深色。透明度的变体用 color-mix 从这些变量算出来。
+   别处（用到的项目）不要再写第二份这里的值。只有动画的那几个有两处（这里和 easing.ts），原因见下面「动画的曲线和时长」。 */
+@layer ll.tokens {
+  :root {
+    color-scheme: dark;
+
+    /* ---------- 配色 ---------- */
+    /* 页面 */
+    --ll-bg: #090d1f; /* 页面底 */
+    --ll-bg-glow: rgba(40, 56, 130, 0.48); /* 页面右上、左侧的两团辉光 */
+    /* 文字 */
+    --ll-fg: #e9edfb;
+    --ll-fg-2: #c5cdee;
+    --ll-fg-3: #9ba6d3;
+    --ll-fg-dim: #7883b6;
+    /* 强调（现在是蓝）与上面的字；点睛色（现在是金）只给主角用 */
+    --ll-accent: #8a9cf0;
+    --ll-on-accent: #0a0e22;
+    --ll-star: #e9c987;
+    --ll-on-star: #1d1608;
+    --ll-ok: #86cfa2;
+    --ll-danger: #e58a8a;
+    /* 中间色 */
+    --ll-star-pale: #f4e6c0;
+    --ll-star-dust: #e9d8a6;
+    --ll-star-deep: #c9a35a;
+    --ll-quote: #b9c4f5;
+    --ll-warning: #d9a35f; /* 重试中 */
+    --ll-danger-pale: #ffd9d9;
+    --ll-white: #ffffff;
+    --ll-black: #000000;
+    --ll-mask: #000000; /* 只用于遮罩的不透明部分 */
+    /* 每人一个固定的颜色：按 uid 算下标 */
+    --ll-who-0: #8fb4ff;
+    --ll-who-1: #9fe0c8;
+    --ll-who-2: #f2a7c3;
+    --ll-who-3: #c3a6ff;
+    --ll-who-4: #ffab91;
+    --ll-who-5: #80deea;
+    --ll-who-6: #b5e48c;
+    --ll-who-7: #f48fb1;
+    --ll-who-8: #a0c4ff;
+    --ll-who-9: #ce93d8;
+    /* 线：分隔、描边用的淡线，亮一档 */
+    --ll-line: rgba(160, 175, 240, 0.1);
+    --ll-line-hi: rgba(160, 175, 240, 0.2);
+    /* 嵌进去的面（设置的分组、输入框、折叠的内容）：半透明的底加一道细边 */
+    --ll-inset-bg: rgba(255, 255, 255, 0.06);
+    --ll-inset-line: rgba(255, 255, 255, 0.08);
+    /* 按钮、开关、分段控件的底：没有边框 */
+    --ll-ctl-bg: rgba(255, 255, 255, 0.08);
+    --ll-ctl-bg-hover: rgba(255, 255, 255, 0.13);
+    --ll-ctl-bg-on: color-mix(in srgb, var(--ll-accent) 30%, transparent);
+    /* 玻璃：菜单、弹出框、提示条、收纳盒 */
+    --ll-glass-bg: rgba(20, 27, 60, 0.82);
+    --ll-glass-edge:
+      inset 0 1px 0 rgba(255, 255, 255, 0.1), inset 0 0 0 1px rgba(255, 255, 255, 0.07),
+      0 18px 40px -10px rgba(0, 0, 0, 0.8);
+    /* 夜空窗口：底（压暗层、两层星点贴图、左上一团紫、右下一团蓝、底色）、外阴影、四周的细线和暗边 */
+    --ll-sky-base: #060a1d;
+    --ll-sky-shade: rgba(6, 9, 24, 0.66);
+    --ll-sky-glow-a: rgba(96, 82, 200, 0.6); /* 左上那团紫 */
+    --ll-sky-glow-b: rgba(40, 112, 196, 0.5); /* 右下那团蓝 */
+    --ll-sky-stars-a: none; /* 两层星点贴图：用的项目启动时画好、写进来（这里只是没有写时的默认） */
+    --ll-sky-stars-b: none;
+    --ll-sky-shadow: 0 18px 40px rgba(0, 0, 0, 0.4);
+    --ll-sky-line: rgba(255, 255, 255, 0.05);
+    --ll-sky-line-cap: rgba(255, 255, 255, 0.06); /* 胶囊四周的细线 */
+    --ll-sky-vignette: inset 0 0 46px rgba(0, 0, 0, 0.7);
+    --ll-sky-bg:
+      linear-gradient(var(--ll-sky-shade), var(--ll-sky-shade)),
+      var(--ll-sky-stars-a) -40px -30px / 640px 390px,
+      var(--ll-sky-stars-b) -200px -90px / 900px 548px,
+      radial-gradient(520px 320px at 25% 0%, var(--ll-sky-glow-a), transparent 70%),
+      radial-gradient(420px 320px at 100% 100%, var(--ll-sky-glow-b), transparent 70%),
+      var(--ll-sky-base);
+    /* 全屏会话左边的列表暗一档 */
+    --ll-side-bg: rgba(0, 0, 0, 0.22);
+    /* 窗格的渐变的底 */
+    --ll-pane-tint: rgb(7, 10, 27);
+    /* 气泡：群友、自己、洛璃（主角）。没有边，只靠底色（叠在糊好的星空上，所以比没有毛玻璃时淡两成）；
+       主角是淡的星紫配接近白色的字 */
+    --ll-bubble-other-bg: linear-gradient(rgba(255, 255, 255, 0.052), rgba(255, 255, 255, 0.052));
+    --ll-bubble-other-fg: var(--ll-fg);
+    --ll-bubble-self-bg: linear-gradient(
+      color-mix(in srgb, var(--ll-accent) 21%, transparent),
+      color-mix(in srgb, var(--ll-accent) 21%, transparent)
+    );
+    --ll-bubble-self-fg: var(--ll-fg);
+    --ll-bubble-assistant-bg: linear-gradient(
+      160deg,
+      rgba(134, 112, 232, 0.16),
+      rgba(96, 82, 200, 0.07)
+    );
+    --ll-bubble-assistant-fg: #f0eefc;
+    /* 气泡里的代码：比气泡更深一点的底（黑加透明度） */
+    --ll-bubble-code-inline: rgba(0, 0, 0, 0.28);
+    --ll-bubble-code-block: rgba(0, 0, 0, 0.32);
+    /* 派生的语义色 */
+    --ll-tool: color-mix(in srgb, var(--ll-accent) 85%, var(--ll-fg));
+    --ll-star-glow: color-mix(in srgb, var(--ll-star) 70%, transparent);
+    --ll-accent-soft: color-mix(in srgb, var(--ll-accent) 22%, transparent);
+    --ll-danger-glow: color-mix(in srgb, var(--ll-danger) 55%, transparent);
+
+    /* ---------- 字体 ---------- */
+    /* 已加载的思源黑体排在系统黑体（含雅黑）前面，避免本机只有粗体时全变粗 */
+    --ll-font-ui:
+      -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Noto Sans SC Variable',
+      'Noto Sans SC', 'Noto Sans CJK SC', 'Source Han Sans SC', system-ui, sans-serif;
+    --ll-font-mono:
+      'JetBrains Mono', 'Noto Sans SC Variable', 'Noto Sans SC', ui-monospace, 'SF Mono', Menlo,
+      Consolas, 'DejaVu Sans Mono', monospace;
+
+    /* ---------- 动画的曲线和时长 ----------
+       出处是 easing.ts（@luoli/ui/easing）：TS 里直接用那里的常量；它在加载时把这几个写进 <head> 里一个不在层里的
+       <style>，有 JS 时以那里写的为准（盖过这里）。这里静态地再写一份同样的值，只引样式、没有加载 easing 的项目也能用。
+       两处的值必须一样：改一处要改另一处。 */
+    --ll-ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+    --ll-dur-hover: 200ms;
+    --ll-dur-card: 300ms;
+    --ll-dur-glide: 300ms;
+    --ll-dur-glide-in: 140ms;
+    --ll-dur-glide-out: 250ms;
+    --ll-dur-blur-in: 200ms;
+
+    /* ---------- 刻度 ----------
+       提案，还没有套用到任何样式上。 */
+    /* 字号 */
+    --ll-text-xs: 11px;
+    --ll-text-sm: 12px;
+    --ll-text-md: 13px;
+    --ll-text-lg: 15px;
+    --ll-text-xl: 17px;
+    /* 间距：名字里的数就是像素 */
+    --ll-space-2: 2px;
+    --ll-space-4: 4px;
+    --ll-space-6: 6px;
+    --ll-space-8: 8px;
+    --ll-space-12: 12px;
+    --ll-space-16: 16px;
+    --ll-space-24: 24px;
+    /* 圆角 */
+    --ll-radius-sm: 6px;
+    --ll-radius-md: 10px;
+    --ll-radius-lg: 14px;
+    --ll-radius-full: 999px;
+    --ll-radius-window: 22px; /* 窗口的圆角：专用值 */
+    /* 层级：以后的浮层（画在页面最上层）用 */
+    --ll-z-popover: 1000;
+    --ll-z-dialog: 1100;
+    --ll-z-toast: 1200;
+    --ll-z-tooltip: 1300;
+    /* 专门调过的值：气泡的字号、行高、圆角、收尖的角 */
+    --ll-bubble-text: 13.5px;
+    --ll-bubble-leading: 1.6;
+    --ll-bubble-radius: 16px;
+    --ll-bubble-radius-tail: 5px;
+  }
+}

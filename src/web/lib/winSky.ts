@@ -1,6 +1,6 @@
 /* 夜空窗口里那层更深更密的星空：两张静态的星点贴图（同一组星，640×390 和 900×548 两种大小），所有窗口、胶囊共用。
    启动时在主线程用 canvas 按固定的种子画一次，按 devicePixelRatio 画清楚；DPR 变了（浏览器缩放、换屏幕）重画。
-   画好的图写成 :root 的 --win-stars-a、--win-stars-b（data: 地址，不请求外部地址），写在 <head> 里一个 <style> 里，
+   画好的图写成 :root 的 --ll-sky-stars-a、--ll-sky-stars-b（data: 地址，不请求外部地址），写在 <head> 里一个 <style> 里，
    和 easing.ts 一样不写 <html> 的行内样式。样式表里两个变量默认是 none，图还没画好时窗口只是没有这层星点。
 
    气泡的毛玻璃用实时模糊（lib/glass.ts），气泡自己 backdrop-filter，不需要糊好的星空。「预先糊好」那一做法用的星空在这里画：同样这两张星点贴图各糊一份，
@@ -17,10 +17,10 @@
    十几个气泡每帧多花 1 毫秒多；写成字面的值就只剩位置和大小那几个短的 var()。颜色取自 app.css 里窗口背景用的那几个变量 */
 const W = 1280,
   H = 780;
-/* 两层贴图的大小（CSS 像素）和起点（相对窗口左上角，和 app.css 的 --win-bg 一致）：同一组星按比例缩小，越小越密 */
+/* 两层贴图的大小（CSS 像素）和起点（相对窗口左上角，和 app.css 的 --ll-sky-bg 一致）：同一组星按比例缩小，越小越密 */
 const TILES: [string, number, number, number, number][] = [
-  ['--win-stars-a', 640, 390, -40, -30],
-  ['--win-stars-b', 900, 548, -200, -90],
+  ['--ll-sky-stars-a', 640, 390, -40, -30],
+  ['--ll-sky-stars-b', 900, 548, -200, -90],
 ];
 /** 糊好的贴图和上面的两张一一对应；模糊半径（CSS 像素，和实时的 blur(20px) 一样）；画的时候缩小到几分之一 */
 const SKY_BLUR = 20;
@@ -129,7 +129,7 @@ function saturated(color: string, alpha: boolean) {
   const ch = (i: number) => `calc(r * ${m[i]} + g * ${m[i + 1]} + b * ${m[i + 2]})`;
   return `rgb(from ${color} ${ch(0)} ${ch(3)} ${ch(6)}${alpha ? ' / alpha' : ''})`;
 }
-/* 气泡里垫的星空（.bubble-sky）的背景：和窗口的 --win-bg 同一套（压暗层、两层星点、左上一团紫、右下一团蓝、底色），星点换成糊好的两张，
+/* 气泡里垫的星空（.bubble-sky）的背景：和窗口的 --ll-sky-bg 同一套（压暗层、两层星点、左上一团紫、右下一团蓝、底色），星点换成糊好的两张，
    颜色整体 saturate(1.3)。窗口里的星空和光晕是按窗口的大小铺的，所以每一层都按窗口的大小铺、按「窗口的左上角相对这个气泡的
    左上角」（--sk-x、--sk-y，窗口的大小是 --sk-w、--sk-h，components/bubble-sky.ts 写在这一层自己身上）挪。
    CSS 还没有加载好、读不到颜色时返回空（ensureBubbleSky 下次再试） */
@@ -137,10 +137,10 @@ function skyRule() {
   const cs = getComputedStyle(document.documentElement);
   const v = (name: string) => cs.getPropertyValue(name).trim();
   const [base, dark, glowA, glowB] = [
-    '--win-base',
-    '--win-dark',
-    '--win-glow-a',
-    '--win-glow-b',
+    '--ll-sky-base',
+    '--ll-sky-shade',
+    '--ll-sky-glow-a',
+    '--ll-sky-glow-b',
   ].map(v);
   if (!base || !dark || !glowA || !glowB) return '';
   const d = saturated(dark, true);

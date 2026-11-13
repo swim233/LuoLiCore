@@ -35,11 +35,11 @@ export const sky = {
     const off = canvas.transferControlToOffscreen();
     skyW = new Worker(new URL('./sky.worker.ts', import.meta.url), { type: 'module' });
     const colors = {
-      goldStar: `rgb(${cssRGB('--gold-star')})`,
-      fg2: `rgb(${cssRGB('--fg-2')})`,
-      fg: `rgb(${cssRGB('--fg')})`,
-      goldLine: `rgba(${cssRGB('--gold')},.06)`,
-      goldDot: `rgba(${cssRGB('--gold-star')},.34)`,
+      goldStar: `rgb(${cssRGB('--ll-star-dust')})`,
+      fg2: `rgb(${cssRGB('--ll-fg-2')})`,
+      fg: `rgb(${cssRGB('--ll-fg')})`,
+      goldLine: `rgba(${cssRGB('--ll-star')},.06)`,
+      goldDot: `rgba(${cssRGB('--ll-star-dust')},.34)`,
     };
     skyW.postMessage(
       {
@@ -95,9 +95,9 @@ export const fx = {
   },
   /* 粒子的颜色在发给 Worker 之前从 CSS 变量读取（配色变了跟着变） */
   palette(kind: 'burst' | 'assemble' | 'scatter') {
-    const GOLD = cssRGB('--gold-pale'),
-      BLUE = cssRGB('--fg-2'),
-      WHITE = cssRGB('--white');
+    const GOLD = cssRGB('--ll-star-pale'),
+      BLUE = cssRGB('--ll-fg-2'),
+      WHITE = cssRGB('--ll-white');
     return kind === 'scatter' ? [GOLD, BLUE, WHITE] : [GOLD, GOLD, BLUE, WHITE];
   },
   /* 回复完成：星尘散开 */

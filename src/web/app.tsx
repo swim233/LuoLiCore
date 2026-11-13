@@ -79,9 +79,9 @@ export function App() {
         <defs>
           {/* 徽记的渐变：星星从上到下由淡金到金，弯月由里向外（凹处一侧偏暗）；徽记的几张 <svg> 共用 */}
           <linearGradient id="g-bd-star" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0" style={{ stopColor: 'var(--gold-pale)' }} />
-            <stop offset=".55" style={{ stopColor: 'var(--gold)' }} />
-            <stop offset="1" style={{ stopColor: 'var(--gold-deep)' }} />
+            <stop offset="0" style={{ stopColor: 'var(--ll-star-pale)' }} />
+            <stop offset=".55" style={{ stopColor: 'var(--ll-star)' }} />
+            <stop offset="1" style={{ stopColor: 'var(--ll-star-deep)' }} />
           </linearGradient>
           <radialGradient
             id="g-bd-moon"

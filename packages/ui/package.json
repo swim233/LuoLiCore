@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "sideEffects": [
-    "./src/easing.ts"
+    "./src/easing.ts",
+    "./src/*.css"
   ],
   "exports": {
     "./easing": "./src/easing.ts",
@@ -12,6 +13,7 @@
     "./motion": "./src/motion.ts",
     "./storage": "./src/storage.ts",
     "./store": "./src/store.ts",
+    "./styles.css": "./src/styles.css",
     "./url": "./src/url.ts",
     "./util": "./src/util.ts",
     "./wheel": "./src/wheel.ts"

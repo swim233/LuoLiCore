@@ -1,7 +1,9 @@
 /* 动画的曲线和时长：每一条只在这里定义一次，别处都引用，不再自己写数字。
    - TS 里直接用这里的常量；
-   - CSS 用的几个（--ease-out、--dur-hover、--dur-card，悬停高亮的 --dur-glide*，模糊淡入的 --dur-blur-in）在模块加载时写成 <head> 里一个 <style> 的 :root 自定义属性，样式表里只有 var(...)，没有写死的数字。
+   - CSS 用的几个（--ll-ease-out、--ll-dur-hover、--ll-dur-card，悬停高亮的 --ll-dur-glide*，模糊淡入的 --ll-dur-blur-in）在模块加载时写成 <head> 里一个 <style> 的 :root 自定义属性，样式表里只有 var(...)，没有写死的数字。
      样式表在这个模块之后才会用到它们：应用要等 main.tsx 里的 import 全部执行完才渲染。
+   - 同样的值在 tokens.css（@luoli/ui/styles.css）里静态地也写了一份，给只引样式、没有加载这个模块的项目用；两处的值必须一样（改一处要改另一处）。
+     这里写的 <style> 不在层里，有 JS 时盖过 tokens.css 里的。两处的写法不一定逐字相同（prettier 会给曲线加空格，构建压缩会把 200ms 写成 .2s），比的时候要按数值比。
    曲线的分工见 .handoff/phase-6/easing-inventory.md */
 
 export type Bezier = [number, number, number, number];
@@ -48,7 +50,7 @@ document.getElementById('easing-vars')?.remove();
 const vars = document.createElement('style');
 vars.id = 'easing-vars';
 vars.textContent =
-  `:root{--ease-out:${EASE_OUT_CSS};--dur-hover:${DUR_HOVER}ms;--dur-card:${DUR_CARD}ms;` +
-  `--dur-glide:${DUR_GLIDE}ms;--dur-glide-in:${DUR_GLIDE_IN}ms;` +
-  `--dur-glide-out:${DUR_GLIDE_OUT}ms;--dur-blur-in:${DUR_BLUR_IN}ms}`;
+  `:root{--ll-ease-out:${EASE_OUT_CSS};--ll-dur-hover:${DUR_HOVER}ms;--ll-dur-card:${DUR_CARD}ms;` +
+  `--ll-dur-glide:${DUR_GLIDE}ms;--ll-dur-glide-in:${DUR_GLIDE_IN}ms;` +
+  `--ll-dur-glide-out:${DUR_GLIDE_OUT}ms;--ll-dur-blur-in:${DUR_BLUR_IN}ms}`;
 document.head.append(vars);

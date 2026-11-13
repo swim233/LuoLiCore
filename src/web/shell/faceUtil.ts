@@ -58,7 +58,7 @@ const rgbNums = (s: string) =>
     .map(Number);
 
 /* 外框在某个位置上的样子：照抄那张卡片（或胶囊）算好的底色、边框、圆角。
-   夜空窗口没有边框：边线取窗口四周那圈细线的颜色（--win-line，胶囊是 --cap-line），压在底色上 */
+   夜空窗口没有边框：边线取窗口四周那圈细线的颜色（--ll-sky-line，胶囊是 --ll-sky-line-cap），压在底色上 */
 export function frameAt(
   inner: HTMLElement,
   r: Rect,
@@ -66,13 +66,13 @@ export function frameAt(
   opacity = 1,
 ): FrameSpec {
   const cs = getComputedStyle(inner);
-  const page = cssRGB('--bg-0').split(',').map(Number);
+  const page = cssRGB('--ll-bg').split(',').map(Number);
   const bg = over(cs.backgroundColor, page);
   const line =
     parseFloat(cs.borderTopWidth) > 0
       ? cs.borderTopColor
       : getComputedStyle(document.documentElement)
-          .getPropertyValue(kind === 'cap' ? '--cap-line' : '--win-line')
+          .getPropertyValue(kind === 'cap' ? '--ll-sky-line-cap' : '--ll-sky-line')
           .trim();
   const bd = over(line || cs.borderTopColor, rgbNums(bg));
   return {

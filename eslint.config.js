@@ -179,9 +179,13 @@ export default defineConfig(
     viaPackageName,
   ),
   // 组件库：不得引用包外面的文件、node 模块和没声明的依赖
-  ...uiRules('{ts,tsx,js,mjs}', uiDeps, UI_MESSAGE),
+  ...uiRules('{ts,tsx,js,mjs,mts,cts,cjs,jsx}', uiDeps, UI_MESSAGE),
   // 测试文件另外可以引 vitest（写在后面，对测试文件覆盖上面那一组）
-  ...uiRules('test.{ts,tsx,js,mjs}', uiTestDeps, UI_MESSAGE + '；测试文件另外可以引 vitest'),
+  ...uiRules(
+    'test.{ts,tsx,js,mjs,mts,cts,cjs,jsx}',
+    uiTestDeps,
+    UI_MESSAGE + '；测试文件另外可以引 vitest',
+  ),
   {
     // 同网页面板：只许写 import type { X }
     files: ['packages/ui/**/*.{ts,tsx}'],

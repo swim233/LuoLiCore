@@ -62,7 +62,9 @@ const ConvRow = memo(function ConvRow({
       <span className="conv-side">
         <span
           className="conv-time"
-          style={st ? { color: st.state === 'error' ? 'var(--err)' : 'var(--gold)' } : undefined}
+          style={
+            st ? { color: st.state === 'error' ? 'var(--ll-danger)' : 'var(--ll-star)' } : undefined
+          }
         >
           {time}
         </span>

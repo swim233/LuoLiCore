@@ -1,116 +1,17 @@
 /* 布局：顶栏 + 胶囊栏 + 网格桌面；部件停靠在 4/3/2/1 列的网格上，「此刻」从胶囊浮起，全屏盖在变暗变模糊的桌面上 */
 /* ---------- 配色：夜蓝 ----------
+   配色、字体、动画的曲线和时长这些设计变量（--ll-*）在组件库里（packages/ui/src/tokens.css，入口 @luoli/ui/styles.css，main.tsx 先于这份样式引进来）。
    拷问定稿（.grill/ui/final.md）的取值：页面是夜蓝的底加两团辉光，部件是比页面亮一档的夜空窗口；金色只给洛璃（名字、星星、未读数）。
-   只做深色。透明度的变体用 color-mix 从这些变量算出来 */
+   这里只留面板自己的：全屏的暗层和外壳的布局尺寸。动画的曲线和时长（--ll-ease-out、--ll-dur-hover……）由 @luoli/ui/easing 在页面启动时再写进 <head> 里的 <style>（值和 tokens.css 里的一样，有 JS 时以它为准） */
 :root {
-  color-scheme: dark;
-  /* 页面 */
-  --bg-0: #090d1f; /* 页面底 */
-  --glow: rgba(40, 56, 130, 0.48); /* 页面右上、左侧的两团辉光 */
-  /* 文字 */
-  --fg: #e9edfb;
-  --fg-2: #c5cdee;
-  --fg-3: #9ba6d3;
-  --dim: #7883b6;
-  /* 强调（蓝）与上面的字；金只给洛璃 */
-  --blue: #8a9cf0;
-  --on-blue: #0a0e22;
-  --gold: #e9c987;
-  --on-gold: #1d1608;
-  --ok: #86cfa2;
-  --err: #e58a8a;
-  /* 中间色 */
-  --gold-pale: #f4e6c0;
-  --gold-star: #e9d8a6;
-  --gold-deep: #c9a35a;
-  --quote: #b9c4f5;
-  --amber: #d9a35f;
-  --err-pale: #ffd9d9;
-  --white: #ffffff;
-  --black: #000000;
-  --mask: #000000; /* 只用于遮罩的不透明部分 */
-  /* 每人一个固定的颜色：按 uid 算下标（名字显示时调淡，见 --who-name） */
-  --who-0: #8fb4ff;
-  --who-1: #9fe0c8;
-  --who-2: #f2a7c3;
-  --who-3: #c3a6ff;
-  --who-4: #ffab91;
-  --who-5: #80deea;
-  --who-6: #b5e48c;
-  --who-7: #f48fb1;
-  --who-8: #a0c4ff;
-  --who-9: #ce93d8;
-  /* 线：分隔、描边用的淡线，亮一档 */
-  --line: rgba(160, 175, 240, 0.1);
-  --line-hi: rgba(160, 175, 240, 0.2);
-  /* 面板（设置的分组、输入框、折叠的内容）：半透明的底加一道细边 */
-  --in-bg: rgba(255, 255, 255, 0.06);
-  --in-bd: rgba(255, 255, 255, 0.08);
-  /* 按钮、开关、分段控件的底：没有边框 */
-  --ctl-bg: rgba(255, 255, 255, 0.08);
-  --ctl-hi: rgba(255, 255, 255, 0.13);
-  --ctl-on: color-mix(in srgb, var(--blue) 30%, transparent);
-  /* 玻璃：会话菜单、弹出框、提示条、收纳盒 */
-  --glass: rgba(20, 27, 60, 0.82);
-  --glass-edge:
-    inset 0 1px 0 rgba(255, 255, 255, 0.1), inset 0 0 0 1px rgba(255, 255, 255, 0.07),
-    0 18px 40px -10px rgba(0, 0, 0, 0.8);
-  /* 夜空窗口：底（压暗层、两层星点贴图、左上一团紫、右下一团蓝、底色）、外阴影、四周的细线和暗边 */
-  --win-base: #060a1d;
-  --win-dark: rgba(6, 9, 24, 0.66);
-  --win-glow-a: rgba(96, 82, 200, 0.6); /* 左上那团紫 */
-  --win-glow-b: rgba(40, 112, 196, 0.5); /* 右下那团蓝 */
-  --win-stars-a: none; /* 两层星点贴图，启动时由 lib/winSky.ts 画好填进来 */
-  --win-stars-b: none;
-  --win-shadow: 0 18px 40px rgba(0, 0, 0, 0.4);
-  --win-line: rgba(255, 255, 255, 0.05);
-  --cap-line: rgba(255, 255, 255, 0.06);
-  --win-vig: inset 0 0 46px rgba(0, 0, 0, 0.7);
-  --win-bg:
-    linear-gradient(var(--win-dark), var(--win-dark)), var(--win-stars-a) -40px -30px / 640px 390px,
-    var(--win-stars-b) -200px -90px / 900px 548px,
-    radial-gradient(520px 320px at 25% 0%, var(--win-glow-a), transparent 70%),
-    radial-gradient(420px 320px at 100% 100%, var(--win-glow-b), transparent 70%), var(--win-base);
-  /* 全屏会话左边的列表暗一档 */
-  --side-bg: rgba(0, 0, 0, 0.22);
-  /* 窗格的渐变的底 */
-  --tint: rgb(7, 10, 27);
-  /* 气泡：群友、自己（网页会话里的用户）、洛璃。没有边，只靠底色（叠在糊好的星空上，所以比没有毛玻璃时淡两成）；
-     洛璃是淡的星紫配接近白色的字，名字仍是金色 */
-  --b-o-bg: linear-gradient(rgba(255, 255, 255, 0.052), rgba(255, 255, 255, 0.052));
-  --b-o-fg: var(--fg);
-  --b-m-bg: linear-gradient(
-    color-mix(in srgb, var(--blue) 21%, transparent),
-    color-mix(in srgb, var(--blue) 21%, transparent)
-  );
-  --b-m-fg: var(--fg);
-  --b-l-bg: linear-gradient(160deg, rgba(134, 112, 232, 0.16), rgba(96, 82, 200, 0.07));
-  --b-l-fg: #f0eefc;
-  /* 气泡里的代码：比气泡更深一点的底（黑加透明度） */
-  --b-code-in: rgba(0, 0, 0, 0.28);
-  --b-code-bk: rgba(0, 0, 0, 0.32);
-  /* 派生的语义色 */
-  --tool: color-mix(in srgb, var(--blue) 85%, var(--fg));
-  --gold-glow: color-mix(in srgb, var(--gold) 70%, transparent);
-  --blue-soft: color-mix(in srgb, var(--blue) 22%, transparent);
-  --red-glow: color-mix(in srgb, var(--err) 55%, transparent);
   /* 全屏时盖在桌面上的暗层（另有固定半径的模糊） */
-  --scrim: color-mix(in srgb, var(--bg-0) 62%, transparent);
-  --scrim-narrow: color-mix(in srgb, var(--bg-0) 80%, transparent);
-  /* 字体：已加载的思源黑体排在系统黑体（含雅黑）前面，避免本机只有粗体时全变粗 */
-  --font-ui:
-    -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Noto Sans SC Variable',
-    'Noto Sans SC', 'Noto Sans CJK SC', 'Source Han Sans SC', system-ui, sans-serif;
-  --font-term:
-    'JetBrains Mono', 'Noto Sans SC Variable', 'Noto Sans SC', ui-monospace, 'SF Mono', Menlo,
-    Consolas, 'DejaVu Sans Mono', monospace;
-  /* 尺寸 */
-  --r-card: 22px;
+  --scrim: color-mix(in srgb, var(--ll-bg) 62%, transparent);
+  --scrim-narrow: color-mix(in srgb, var(--ll-bg) 80%, transparent);
+  /* 外壳的布局尺寸 */
   --head-h: 44px; /* 窗口标题栏的高度：窗格顶上先空出这么多 */
   --gap: 16px;
   --row: 232px;
   --top-h: 56px;
-  /* 动画的曲线和时长（--ease-out、--dur-hover、--dur-card、--dur-glide……）由 @luoli/ui/easing 在页面启动时写进 <head> 里的 <style>，这里不再另写一份 */
 }
 
 [hidden] {
@@ -124,21 +25,21 @@ html {
   overflow-x: hidden;
   scrollbar-gutter: stable;
   scrollbar-width: thin;
-  scrollbar-color: color-mix(in srgb, var(--blue) 35%, transparent) transparent;
-  background: var(--bg-0);
+  scrollbar-color: color-mix(in srgb, var(--ll-accent) 35%, transparent) transparent;
+  background: var(--ll-bg);
 }
 /* 页面：夜蓝的底，右上、左侧两团辉光（大小按视口算，和 1280×780 的演示页同样的比例） */
 body {
   min-height: 100%;
   margin: 0;
-  font: 14px/1.55 var(--font-ui);
-  color: var(--fg);
-  background-color: var(--bg-0);
+  font: 14px/1.55 var(--ll-font-ui);
+  color: var(--ll-fg);
+  background-color: var(--ll-bg);
   background-image:
-    radial-gradient(86% 77% at 82% -14%, var(--glow), transparent 70%),
+    radial-gradient(86% 77% at 82% -14%, var(--ll-bg-glow), transparent 70%),
     radial-gradient(
       62% 67% at -10% 45%,
-      color-mix(in srgb, var(--glow) 55%, transparent),
+      color-mix(in srgb, var(--ll-bg-glow) 55%, transparent),
       transparent 70%
     );
   background-attachment: fixed;
@@ -150,7 +51,7 @@ body::before {
   inset: 0 0 auto;
   height: env(safe-area-inset-top, 0px);
   z-index: 70;
-  background: var(--bg-0);
+  background: var(--ll-bg);
 }
 button {
   font: inherit;
@@ -176,7 +77,7 @@ button {
   summary,
   [tabindex]:not([tabindex='-1'])
 ):focus-visible {
-  outline: 2px solid var(--blue);
+  outline: 2px solid var(--ll-accent);
   outline-offset: 2px;
 }
 .fs-win:focus,
@@ -184,8 +85,8 @@ button {
   outline: none;
 }
 ::selection {
-  background: color-mix(in srgb, var(--blue) 45%, transparent);
-  color: var(--fg);
+  background: color-mix(in srgb, var(--ll-accent) 45%, transparent);
+  color: var(--ll-fg);
 }
 
 /* ---------- 背景星空（<canvas id="sky">，由 fx/sky.worker 在 Worker 里画）、特效画布 ---------- */
@@ -222,11 +123,11 @@ button {
   border-radius: 10px;
   pointer-events: none;
   white-space: pre;
-  font: 12px/1.45 var(--font-term);
+  font: 12px/1.45 var(--ll-font-mono);
   font-variant-numeric: tabular-nums;
-  color: var(--fg-2);
-  background: var(--glass);
-  box-shadow: var(--glass-edge);
+  color: var(--ll-fg-2);
+  background: var(--ll-glass-bg);
+  box-shadow: var(--ll-glass-edge);
 }
 
 /* ---------- 顶栏 ---------- */
@@ -254,9 +155,9 @@ button {
   gap: 12px;
   background: linear-gradient(
     180deg,
-    color-mix(in srgb, var(--bg-0) 94%, transparent),
-    color-mix(in srgb, var(--bg-0) 72%, transparent) 70%,
-    color-mix(in srgb, var(--bg-0) 0%, transparent)
+    color-mix(in srgb, var(--ll-bg) 94%, transparent),
+    color-mix(in srgb, var(--ll-bg) 72%, transparent) 70%,
+    color-mix(in srgb, var(--ll-bg) 0%, transparent)
   );
 }
 .top-in {
@@ -278,20 +179,20 @@ button {
   border-radius: 999px;
   background: transparent;
   cursor: pointer;
-  transition: background-color var(--dur-hover);
+  transition: background-color var(--ll-dur-hover);
 }
 .top-status:hover {
-  background: var(--ctl-bg);
+  background: var(--ll-ctl-bg);
 }
 .top-name {
   font-size: 15px;
   font-weight: 600;
   letter-spacing: 0.06em;
-  color: var(--gold);
+  color: var(--ll-star);
   white-space: nowrap;
 }
 .top-state {
-  color: var(--fg-2);
+  color: var(--ll-fg-2);
   font-size: 13px;
   white-space: nowrap;
   overflow: hidden;
@@ -299,7 +200,7 @@ button {
 }
 .top-state b {
   font-weight: 500;
-  color: var(--fg);
+  color: var(--ll-fg);
 }
 .island-slot {
   flex: 1 1 auto;
@@ -322,22 +223,22 @@ button {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  background: var(--ctl-bg);
+  background: var(--ll-ctl-bg);
   border: 0;
   cursor: pointer;
   font-size: 13px;
-  color: var(--fg-2);
+  color: var(--ll-fg-2);
   transition:
-    background-color var(--dur-hover),
-    color var(--dur-hover);
+    background-color var(--ll-dur-hover),
+    color var(--ll-dur-hover);
 }
 .tbtn:hover {
-  background: var(--ctl-hi);
-  color: var(--fg);
+  background: var(--ll-ctl-bg-hover);
+  color: var(--ll-fg);
 }
 .tbtn[aria-pressed='true'] {
-  background: color-mix(in srgb, var(--blue) 22%, var(--ctl-bg));
-  color: var(--fg);
+  background: color-mix(in srgb, var(--ll-accent) 22%, var(--ll-ctl-bg));
+  color: var(--ll-fg);
 }
 .tbtn svg {
   width: 14px;
@@ -353,9 +254,9 @@ button {
   width: 28px;
   height: 16px;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--dim) 45%, transparent);
+  background: color-mix(in srgb, var(--ll-fg-dim) 45%, transparent);
   position: relative;
-  transition: background-color var(--dur-hover);
+  transition: background-color var(--ll-dur-hover);
   flex: none;
 }
 .tswitch-track::after {
@@ -366,17 +267,17 @@ button {
   width: 12px;
   height: 12px;
   border-radius: 50%;
-  background: var(--fg-2);
+  background: var(--ll-fg-2);
   transition:
-    transform 0.2s var(--ease-out),
+    transform 0.2s var(--ll-ease-out),
     background-color 0.2s;
 }
 .tswitch[aria-checked='true'] .tswitch-track {
-  background: var(--blue);
+  background: var(--ll-accent);
 }
 .tswitch[aria-checked='true'] .tswitch-track::after {
   transform: translateX(12px);
-  background: var(--white);
+  background: var(--ll-white);
 }
 
 /* ---------- 整理模式提示条 ---------- */
@@ -394,18 +295,18 @@ button {
   justify-content: center;
   padding: 8px 8px 8px 16px;
   border-radius: 999px;
-  background: var(--glass);
+  background: var(--ll-glass-bg);
   -webkit-backdrop-filter: blur(16px) saturate(1.2);
   backdrop-filter: blur(16px) saturate(1.2);
-  box-shadow: var(--glass-edge);
-  color: var(--fg-2);
+  box-shadow: var(--ll-glass-edge);
+  color: var(--ll-fg-2);
   font-size: 13px;
   /* 进出整理模式：从顶栏下面滑下来、滑回去（退出时先脱离文档流，固定在原处淡出） */
   opacity: 0;
   transform: translateY(-14px);
   transition:
     opacity 0.26s ease,
-    transform 0.34s var(--ease-out);
+    transform 0.34s var(--ll-ease-out);
 }
 .arrange-bar.is-on {
   opacity: 1;
@@ -415,7 +316,7 @@ button {
   pointer-events: none;
 }
 .arrange-bar b {
-  color: var(--fg);
+  color: var(--ll-fg);
   font-weight: 500;
 }
 
@@ -472,7 +373,7 @@ button {
 }
 .desk-empty {
   grid-column: 1 / -1;
-  color: var(--fg-3);
+  color: var(--ll-fg-3);
   text-align: center;
   padding: 48px 0;
 }
@@ -510,27 +411,27 @@ button {
   position: relative;
   height: 100%;
   box-sizing: border-box;
-  border-radius: var(--r-card);
+  border-radius: var(--ll-radius-window);
   border: 0;
-  background: var(--win-bg);
-  box-shadow: var(--win-shadow);
+  background: var(--ll-sky-bg);
+  box-shadow: var(--ll-sky-shadow);
   overflow: hidden;
   isolation: isolate;
   transition:
-    box-shadow var(--dur-card),
+    box-shadow var(--ll-dur-card),
     transform 0.18s ease-out;
   transform-style: flat;
 }
 .w.is-active > .w-card {
   box-shadow:
-    var(--win-shadow),
-    0 0 26px color-mix(in srgb, var(--blue) 9%, transparent);
+    var(--ll-sky-shadow),
+    0 0 26px color-mix(in srgb, var(--ll-accent) 9%, transparent);
 }
 .w.is-float > .w-card,
 .w.is-island > .w-card {
   box-shadow:
     0 30px 70px -18px rgba(0, 0, 0, 0.85),
-    0 0 34px color-mix(in srgb, var(--blue) 16%, transparent);
+    0 0 34px color-mix(in srgb, var(--ll-accent) 16%, transparent);
 }
 /* 四周的细线和向内压暗的暗边：画在窗格的模糊上面，不跟着被糊开。「此刻」浮起时细线换成金色 */
 .w-vig {
@@ -540,14 +441,14 @@ button {
   border-radius: inherit;
   pointer-events: none;
   box-shadow:
-    inset 0 0 0 1px var(--win-line),
-    var(--win-vig);
+    inset 0 0 0 1px var(--ll-sky-line),
+    var(--ll-sky-vignette);
 }
 .w.is-float .w-vig,
 .w.is-island .w-vig {
   box-shadow:
-    inset 0 0 0 1px color-mix(in srgb, var(--gold) 38%, transparent),
-    var(--win-vig);
+    inset 0 0 0 1px color-mix(in srgb, var(--ll-star) 38%, transparent),
+    var(--ll-sky-vignette);
 }
 /* 标题栏：直接写在窗口上，浮在内容上面（内容滚到它下面时在窗格的模糊里） */
 .w-head {
@@ -569,7 +470,7 @@ button {
 .w-icon {
   width: 15px;
   height: 15px;
-  color: var(--fg-2);
+  color: var(--ll-fg-2);
   flex: none;
   display: grid;
   place-items: center;
@@ -582,12 +483,12 @@ button {
   margin: 0;
   font-size: 15px;
   font-weight: 600;
-  color: var(--fg);
+  color: var(--ll-fg);
   white-space: nowrap;
 }
 .w-sub {
   font-size: 12px;
-  color: var(--dim);
+  color: var(--ll-fg-dim);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -598,8 +499,8 @@ button {
   line-height: 18px;
   padding: 0 7px;
   border-radius: 999px;
-  background: var(--blue);
-  color: var(--on-blue);
+  background: var(--ll-accent);
+  color: var(--ll-on-accent);
   font-weight: 600;
   letter-spacing: 0.1em;
 }
@@ -618,14 +519,14 @@ button {
   cursor: pointer;
   display: grid;
   place-items: center;
-  color: var(--dim);
+  color: var(--ll-fg-dim);
   transition:
-    background-color var(--dur-hover),
-    color var(--dur-hover);
+    background-color var(--ll-dur-hover),
+    color var(--ll-dur-hover);
 }
 .w-btn:hover {
-  background: var(--ctl-bg);
-  color: var(--fg);
+  background: var(--ll-ctl-bg);
+  color: var(--ll-fg);
 }
 .w-btn svg {
   width: 15px;
@@ -681,10 +582,10 @@ button {
   }
 }
 .pane {
-  --rtl: var(--r-card);
-  --rtr: var(--r-card);
-  --rbl: var(--r-card);
-  --rbr: var(--r-card);
+  --rtl: var(--ll-radius-window);
+  --rtr: var(--ll-radius-window);
+  --rbl: var(--ll-radius-window);
+  --rbr: var(--ll-radius-window);
   position: relative;
   min-width: 0;
   min-height: 0;
@@ -709,7 +610,7 @@ button {
   padding-top: calc(var(--ht, 0px) + var(--sc-pt, 0px));
   padding-bottom: calc(var(--hb, 0px) + var(--sc-pb, 0px));
   scrollbar-width: thin;
-  scrollbar-color: color-mix(in srgb, var(--blue) 35%, transparent) transparent;
+  scrollbar-color: color-mix(in srgb, var(--ll-accent) 35%, transparent) transparent;
 }
 /* 对话和会话的时间线：滚动条的位置一直留着（没有溢出时只是一条空的边）。内容第一次超出一屏、或者刚好一屏左右来回超出时，
    滚动条出现、消失都不会让滚动区变窄、变宽——气泡的宽度（滚动区的 78%）和折行不跟着变。
@@ -768,7 +669,7 @@ button {
   opacity: 0;
   /* 形变结束、换回模糊时：模糊半径从 0 长到原样（渐变的底一直在，模糊只是加上去）。
      !important：形变收尾时 unmorph 用 .no-tr 关掉了所有过渡，这一个要留着 */
-  transition: backdrop-filter var(--dur-blur-in) ease-out !important;
+  transition: backdrop-filter var(--ll-dur-blur-in) ease-out !important;
 }
 .pane-ov.t > i {
   border-radius: var(--rtl) var(--rtr) 0 0;
@@ -788,8 +689,8 @@ button {
   mask-image: linear-gradient(
     var(--toward),
     transparent 0%,
-    var(--mask) 25%,
-    var(--mask) 50%,
+    var(--ll-mask) 25%,
+    var(--ll-mask) 50%,
     transparent 75%
   );
 }
@@ -799,38 +700,43 @@ button {
   mask-image: linear-gradient(
     var(--toward),
     transparent 25%,
-    var(--mask) 50%,
-    var(--mask) 75%,
+    var(--ll-mask) 50%,
+    var(--ll-mask) 75%,
     transparent 100%
   );
 }
 .pane-ov > .l3 {
   -webkit-backdrop-filter: blur(6.08px);
   backdrop-filter: blur(6.08px);
-  mask-image: linear-gradient(var(--toward), transparent 50%, var(--mask) 75%, var(--mask) 100%);
+  mask-image: linear-gradient(
+    var(--toward),
+    transparent 50%,
+    var(--ll-mask) 75%,
+    var(--ll-mask) 100%
+  );
 }
 .pane-ov > .l4 {
   -webkit-backdrop-filter: blur(21.52px);
   backdrop-filter: blur(21.52px);
-  mask-image: linear-gradient(var(--toward), transparent 75%, var(--mask) 100%);
+  mask-image: linear-gradient(var(--toward), transparent 75%, var(--ll-mask) 100%);
 }
 /* 渐变的底：78% × (e^(2.5x) − 1) ÷ (e^2.5 − 1)，每 1/12 处一个点：0、1.6、3.6、6.1、9.1、12.8、17.4、23.0、30.0、38.5、49.0、62.0、78.0 % */
 .pane-ov > .tn {
   background: linear-gradient(
     var(--toward),
     transparent 0,
-    color-mix(in srgb, var(--tint) 1.6%, transparent) 8.333%,
-    color-mix(in srgb, var(--tint) 3.6%, transparent) 16.667%,
-    color-mix(in srgb, var(--tint) 6.1%, transparent) 25%,
-    color-mix(in srgb, var(--tint) 9.1%, transparent) 33.333%,
-    color-mix(in srgb, var(--tint) 12.8%, transparent) 41.667%,
-    color-mix(in srgb, var(--tint) 17.4%, transparent) 50%,
-    color-mix(in srgb, var(--tint) 23%, transparent) 58.333%,
-    color-mix(in srgb, var(--tint) 30%, transparent) 66.667%,
-    color-mix(in srgb, var(--tint) 38.5%, transparent) 75%,
-    color-mix(in srgb, var(--tint) 49%, transparent) 83.333%,
-    color-mix(in srgb, var(--tint) 62%, transparent) 91.667%,
-    color-mix(in srgb, var(--tint) 78%, transparent) 100%
+    color-mix(in srgb, var(--ll-pane-tint) 1.6%, transparent) 8.333%,
+    color-mix(in srgb, var(--ll-pane-tint) 3.6%, transparent) 16.667%,
+    color-mix(in srgb, var(--ll-pane-tint) 6.1%, transparent) 25%,
+    color-mix(in srgb, var(--ll-pane-tint) 9.1%, transparent) 33.333%,
+    color-mix(in srgb, var(--ll-pane-tint) 12.8%, transparent) 41.667%,
+    color-mix(in srgb, var(--ll-pane-tint) 17.4%, transparent) 50%,
+    color-mix(in srgb, var(--ll-pane-tint) 23%, transparent) 58.333%,
+    color-mix(in srgb, var(--ll-pane-tint) 30%, transparent) 66.667%,
+    color-mix(in srgb, var(--ll-pane-tint) 38.5%, transparent) 75%,
+    color-mix(in srgb, var(--ll-pane-tint) 49%, transparent) 83.333%,
+    color-mix(in srgb, var(--ll-pane-tint) 62%, transparent) 91.667%,
+    color-mix(in srgb, var(--ll-pane-tint) 78%, transparent) 100%
   );
 }
 /* 形变期间换成只有渐变的底：缩成胶囊、展开（复制层 .is-morphing、藏着的真身 [data-hide]）、全屏打开与关闭（全屏窗口 .is-morphing、
@@ -860,21 +766,21 @@ button {
   padding: 0 18px 0 7px;
   border-radius: 999px;
   border: 0;
-  background: var(--win-bg);
+  background: var(--ll-sky-bg);
   box-shadow:
-    inset 0 0 0 1px var(--cap-line),
-    var(--win-shadow);
+    inset 0 0 0 1px var(--ll-sky-line-cap),
+    var(--ll-sky-shadow);
   cursor: pointer;
   text-align: left;
   overflow: hidden;
   isolation: isolate;
-  transition: box-shadow var(--dur-hover);
+  transition: box-shadow var(--ll-dur-hover);
 }
 .cap:hover {
   box-shadow:
-    inset 0 0 0 1px color-mix(in srgb, var(--blue) 34%, transparent),
-    var(--win-shadow),
-    0 0 22px color-mix(in srgb, var(--blue) 16%, transparent);
+    inset 0 0 0 1px color-mix(in srgb, var(--ll-accent) 34%, transparent),
+    var(--ll-sky-shadow),
+    0 0 22px color-mix(in srgb, var(--ll-accent) 16%, transparent);
 }
 .cap-icon {
   width: 30px;
@@ -883,8 +789,8 @@ button {
   display: grid;
   place-items: center;
   flex: none;
-  background: var(--in-bg);
-  color: var(--fg-2);
+  background: var(--ll-inset-bg);
+  color: var(--ll-fg-2);
 }
 .cap-icon svg {
   width: 15px;
@@ -892,12 +798,12 @@ button {
 }
 .cap-name {
   font-size: 12.5px;
-  color: var(--dim);
+  color: var(--ll-fg-dim);
   flex: none;
 }
 .cap-text {
   font-size: 13px;
-  color: var(--fg-2);
+  color: var(--ll-fg-2);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -905,13 +811,13 @@ button {
 }
 .cap-text em {
   font-style: normal;
-  color: var(--fg);
+  color: var(--ll-fg);
 }
 .cap-now .cap-icon {
   background: transparent;
 }
 .cap-now .cap-text em {
-  color: var(--gold);
+  color: var(--ll-star);
 }
 .cap-wrap.is-placeholder-float {
   visibility: hidden;
@@ -936,19 +842,19 @@ button {
   0%,
   100% {
     box-shadow:
-      inset 0 0 0 1px color-mix(in srgb, var(--gold) 45%, transparent),
-      0 0 14px color-mix(in srgb, var(--gold) 26%, transparent);
+      inset 0 0 0 1px color-mix(in srgb, var(--ll-star) 45%, transparent),
+      0 0 14px color-mix(in srgb, var(--ll-star) 26%, transparent);
   }
   50% {
     box-shadow:
-      inset 0 0 0 1px color-mix(in srgb, var(--gold) 70%, transparent),
-      0 0 30px color-mix(in srgb, var(--gold) 50%, transparent);
+      inset 0 0 0 1px color-mix(in srgb, var(--ll-star) 70%, transparent),
+      0 0 30px color-mix(in srgb, var(--ll-star) 50%, transparent);
   }
 }
 .cap.is-calling {
   box-shadow:
-    inset 0 0 0 1px color-mix(in srgb, var(--gold) 60%, transparent),
-    0 0 26px color-mix(in srgb, var(--gold) 45%, transparent);
+    inset 0 0 0 1px color-mix(in srgb, var(--ll-star) 60%, transparent),
+    0 0 26px color-mix(in srgb, var(--ll-star) 45%, transparent);
 }
 .motion .cap.is-calling {
   animation: cap-call 1.6s ease-in-out infinite;
@@ -964,22 +870,22 @@ button {
   border-radius: inherit;
   pointer-events: none;
   opacity: 0;
-  transition: opacity var(--dur-card);
+  transition: opacity var(--ll-dur-card);
   padding: 1px;
   background: radial-gradient(
     280px circle at var(--mx, 50%) var(--my, 50%),
     rgba(225, 232, 255, 0.85),
     rgba(180, 194, 255, 0.45) 30%,
-    color-mix(in srgb, var(--blue) 22%, transparent) 55%,
+    color-mix(in srgb, var(--ll-accent) 22%, transparent) 55%,
     transparent 78%
   );
   -webkit-mask:
-    linear-gradient(var(--mask) 0 0) content-box,
-    linear-gradient(var(--mask) 0 0);
+    linear-gradient(var(--ll-mask) 0 0) content-box,
+    linear-gradient(var(--ll-mask) 0 0);
   -webkit-mask-composite: xor;
   mask:
-    linear-gradient(var(--mask) 0 0) content-box exclude,
-    linear-gradient(var(--mask) 0 0);
+    linear-gradient(var(--ll-mask) 0 0) content-box exclude,
+    linear-gradient(var(--ll-mask) 0 0);
   z-index: 7;
 }
 .hover-C .w-card.is-hot::after,
@@ -1012,24 +918,24 @@ button {
     from var(--sweep),
     transparent 0deg,
     transparent 290deg,
-    color-mix(in srgb, var(--blue) 70%, transparent) 325deg,
+    color-mix(in srgb, var(--ll-accent) 70%, transparent) 325deg,
     rgba(235, 240, 255, 0.95) 352deg,
     transparent 360deg
   );
   -webkit-mask:
-    linear-gradient(var(--mask) 0 0) content-box,
-    linear-gradient(var(--mask) 0 0);
+    linear-gradient(var(--ll-mask) 0 0) content-box,
+    linear-gradient(var(--ll-mask) 0 0);
   -webkit-mask-composite: xor;
   mask:
-    linear-gradient(var(--mask) 0 0) content-box exclude,
-    linear-gradient(var(--mask) 0 0);
+    linear-gradient(var(--ll-mask) 0 0) content-box exclude,
+    linear-gradient(var(--ll-mask) 0 0);
   animation: sweep 1.15s linear both;
 }
 .hover-B .w-card.is-hot {
   box-shadow:
-    var(--win-shadow),
-    inset 0 0 0 1px color-mix(in srgb, var(--blue) 30%, transparent),
-    0 0 24px color-mix(in srgb, var(--blue) 22%, transparent);
+    var(--ll-sky-shadow),
+    inset 0 0 0 1px color-mix(in srgb, var(--ll-accent) 30%, transparent),
+    0 0 24px color-mix(in srgb, var(--ll-accent) 22%, transparent);
 }
 /* D 卡牌倾斜（加 C 的边光） */
 .hover-D .w-card {
@@ -1044,16 +950,16 @@ button {
 @keyframes err-pulse {
   0% {
     box-shadow:
-      0 0 0 0 var(--red-glow),
-      0 0 0 0 var(--red-glow);
+      0 0 0 0 var(--ll-danger-glow),
+      0 0 0 0 var(--ll-danger-glow);
   }
   70% {
     box-shadow:
-      0 0 0 10px color-mix(in srgb, var(--err) 0%, transparent),
-      0 0 40px 4px color-mix(in srgb, var(--err) 25%, transparent);
+      0 0 0 10px color-mix(in srgb, var(--ll-danger) 0%, transparent),
+      0 0 40px 4px color-mix(in srgb, var(--ll-danger) 25%, transparent);
   }
   100% {
-    box-shadow: 0 0 0 0 color-mix(in srgb, var(--err) 0%, transparent);
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--ll-danger) 0%, transparent);
   }
 }
 .fx-err {
@@ -1063,12 +969,12 @@ button {
 .ghost {
   position: fixed;
   box-sizing: border-box;
-  border-radius: var(--r-card);
-  background: var(--win-bg);
+  border-radius: var(--ll-radius-window);
+  background: var(--ll-sky-bg);
   box-shadow:
-    inset 0 0 0 1px var(--win-line),
-    0 0 36px color-mix(in srgb, var(--blue) 22%, transparent),
-    var(--win-shadow);
+    inset 0 0 0 1px var(--ll-sky-line),
+    0 0 36px color-mix(in srgb, var(--ll-accent) 22%, transparent),
+    var(--ll-sky-shadow);
   overflow: hidden;
 }
 .ghost::after {
@@ -1078,8 +984,8 @@ button {
   background: linear-gradient(
     105deg,
     transparent 30%,
-    color-mix(in srgb, var(--blue) 14%, transparent) 48%,
-    color-mix(in srgb, var(--white) 6%, transparent) 52%,
+    color-mix(in srgb, var(--ll-accent) 14%, transparent) 48%,
+    color-mix(in srgb, var(--ll-white) 6%, transparent) 52%,
     transparent 70%
   );
   background-size: 250% 100%;
@@ -1123,8 +1029,8 @@ button {
 .arr-leaving .w > .w-card,
 .arr-leaving .cap-wrap > .cap {
   transition:
-    transform 0.32s var(--ease-out) var(--ad, 0ms),
-    box-shadow 0.32s var(--ease-out) var(--ad, 0ms);
+    transform 0.32s var(--ll-ease-out) var(--ad, 0ms),
+    box-shadow 0.32s var(--ll-ease-out) var(--ad, 0ms);
 }
 .arranging .w > .w-card,
 .arranging .cap-wrap > .cap {
@@ -1136,13 +1042,13 @@ button {
   touch-action: pan-y;
   box-shadow:
     0 28px 54px -20px rgba(0, 0, 0, 0.9),
-    0 0 22px color-mix(in srgb, var(--blue) 14%, transparent);
+    0 0 22px color-mix(in srgb, var(--ll-accent) 14%, transparent);
 }
 .arranging .cap {
   cursor: grab;
   touch-action: none;
   box-shadow:
-    inset 0 0 0 1px color-mix(in srgb, var(--blue) 26%, transparent),
+    inset 0 0 0 1px color-mix(in srgb, var(--ll-accent) 26%, transparent),
     0 18px 34px -14px rgba(0, 0, 0, 0.9);
 }
 .arranging .w-body {
@@ -1157,7 +1063,7 @@ button {
   align-items: center;
   justify-content: center;
   gap: 12px;
-  background: color-mix(in srgb, var(--bg-0) 72%, transparent);
+  background: color-mix(in srgb, var(--ll-bg) 72%, transparent);
   padding: 12px;
   text-align: center;
   opacity: 0;
@@ -1165,7 +1071,7 @@ button {
   transform: translateY(6px);
   transition:
     opacity 0.2s ease var(--ad, 0ms),
-    transform 0.28s var(--ease-out) var(--ad, 0ms),
+    transform 0.28s var(--ll-ease-out) var(--ad, 0ms),
     visibility 0s linear calc(var(--ad, 0ms) + 0.28s);
 }
 .arranging .w-arr {
@@ -1174,7 +1080,7 @@ button {
   transform: none;
   transition:
     opacity 0.24s ease calc(var(--ad, 0ms) + 80ms),
-    transform 0.3s var(--ease-out) calc(var(--ad, 0ms) + 80ms),
+    transform 0.3s var(--ll-ease-out) calc(var(--ad, 0ms) + 80ms),
     visibility 0s linear calc(var(--ad, 0ms) + 80ms);
 }
 .w-btns {
@@ -1196,9 +1102,9 @@ button {
   padding: 6px 14px 6px 10px;
   border-radius: 999px;
   border: 0;
-  background: var(--ctl-bg);
+  background: var(--ll-ctl-bg);
   font-size: 12px;
-  color: var(--fg-2);
+  color: var(--ll-fg-2);
   letter-spacing: 0.06em;
   cursor: grab;
   touch-action: none;
@@ -1221,21 +1127,21 @@ button {
   border-radius: 999px;
   cursor: pointer;
   border: 0;
-  background: var(--ctl-bg);
-  color: var(--fg-2);
+  background: var(--ll-ctl-bg);
+  color: var(--ll-fg-2);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
   transition:
-    background-color var(--dur-hover),
-    color var(--dur-hover);
+    background-color var(--ll-dur-hover),
+    color var(--ll-dur-hover);
 }
 .chip:hover {
-  background: var(--ctl-hi);
-  color: var(--fg);
+  background: var(--ll-ctl-bg-hover);
+  color: var(--ll-fg);
 }
 .chip[aria-pressed='true'] {
-  background: var(--ctl-on);
-  color: var(--fg);
+  background: var(--ll-ctl-bg-on);
+  color: var(--ll-fg);
 }
 .chip:disabled {
   opacity: 0.35;
@@ -1243,9 +1149,9 @@ button {
 }
 /* 要再点一次才生效的按钮（设置里的「恢复默认布局」）等待确认时 */
 .chip.is-armed {
-  background: color-mix(in srgb, var(--err) 22%, transparent);
-  color: var(--err-pale);
-  box-shadow: 0 0 14px -4px var(--red-glow);
+  background: color-mix(in srgb, var(--ll-danger) 22%, transparent);
+  color: var(--ll-danger-pale);
+  box-shadow: 0 0 14px -4px var(--ll-danger-glow);
 }
 /* 分段选择（components/Seg.tsx）：设置里的「外观」和开发模式的演示面板共用 */
 /* 分段选择：没有边框的底，选中的那段是强调色 30% 的底 */
@@ -1254,7 +1160,7 @@ button {
   gap: 2px;
   padding: 2px;
   border-radius: 9px;
-  background: var(--ctl-bg);
+  background: var(--ll-ctl-bg);
 }
 .seg-ctl button {
   flex: 1;
@@ -1263,23 +1169,23 @@ button {
   border-radius: 7px;
   border: 0;
   background: transparent;
-  color: var(--fg-3);
+  color: var(--ll-fg-3);
   cursor: pointer;
   font-size: 12px;
   white-space: nowrap;
   transition:
-    background-color var(--dur-hover),
-    color var(--dur-hover);
+    background-color var(--ll-dur-hover),
+    color var(--ll-dur-hover);
 }
 .seg-ctl button:hover {
-  color: var(--fg);
+  color: var(--ll-fg);
 }
 .seg-ctl button[aria-pressed='true'] {
-  background: var(--ctl-on);
-  color: var(--fg);
+  background: var(--ll-ctl-bg-on);
+  color: var(--ll-fg);
 }
 .w-hide {
-  color: var(--fg-2);
+  color: var(--ll-fg-2);
 }
 .cap-x {
   display: grid;
@@ -1292,9 +1198,9 @@ button {
   height: 22px;
   border-radius: 50%;
   border: 0;
-  background: var(--glass);
-  box-shadow: var(--glass-edge);
-  color: var(--fg-2);
+  background: var(--ll-glass-bg);
+  box-shadow: var(--ll-glass-edge);
+  color: var(--ll-fg-2);
   cursor: pointer;
   font-size: 12px;
   line-height: 1;
@@ -1303,7 +1209,7 @@ button {
   transform: scale(0.5);
   transition:
     opacity 0.18s ease var(--ad, 0ms),
-    transform 0.24s var(--ease-out) var(--ad, 0ms),
+    transform 0.24s var(--ll-ease-out) var(--ad, 0ms),
     visibility 0s linear calc(var(--ad, 0ms) + 0.24s);
 }
 .arranging .cap-x {
@@ -1320,7 +1226,7 @@ button {
 [data-dragging] > .w-card,
 [data-dragging] > .cap {
   opacity: 0.22;
-  outline: 1px dashed var(--line-hi);
+  outline: 1px dashed var(--ll-line-hi);
   outline-offset: -1px;
   animation: none !important;
 }
@@ -1335,7 +1241,7 @@ button {
 .drag-clone > .cap {
   box-shadow:
     0 30px 70px -18px rgba(0, 0, 0, 0.95),
-    0 0 30px color-mix(in srgb, var(--blue) 26%, transparent) !important;
+    0 0 30px color-mix(in srgb, var(--ll-accent) 26%, transparent) !important;
   animation: none !important;
 }
 .tray {
@@ -1348,10 +1254,10 @@ button {
   padding: 10px 14px;
   border-radius: 18px;
   border: 0;
-  background: var(--glass);
+  background: var(--ll-glass-bg);
   -webkit-backdrop-filter: blur(16px) saturate(1.2);
   backdrop-filter: blur(16px) saturate(1.2);
-  box-shadow: var(--glass-edge);
+  box-shadow: var(--ll-glass-edge);
   display: flex;
   align-items: center;
   gap: 12px;
@@ -1364,7 +1270,7 @@ button {
     box-shadow 0.2s,
     background-color 0.2s,
     opacity 0.24s ease,
-    transform 0.32s var(--ease-out),
+    transform 0.32s var(--ll-ease-out),
     visibility 0s linear 0.32s;
 }
 .tray.is-on {
@@ -1375,19 +1281,19 @@ button {
     box-shadow 0.2s,
     background-color 0.2s,
     opacity 0.26s ease 0.06s,
-    transform 0.34s var(--ease-out) 0.06s,
+    transform 0.34s var(--ll-ease-out) 0.06s,
     visibility 0s linear 0s;
 }
 .tray.is-over {
-  background: color-mix(in srgb, var(--blue) 18%, var(--glass));
+  background: color-mix(in srgb, var(--ll-accent) 18%, var(--ll-glass-bg));
   box-shadow:
-    var(--glass-edge),
-    inset 0 0 0 1px color-mix(in srgb, var(--blue) 55%, transparent),
-    0 0 34px color-mix(in srgb, var(--blue) 26%, transparent);
+    var(--ll-glass-edge),
+    inset 0 0 0 1px color-mix(in srgb, var(--ll-accent) 55%, transparent),
+    0 0 34px color-mix(in srgb, var(--ll-accent) 26%, transparent);
 }
 .tray-label {
   font-size: 12px;
-  color: var(--fg-3);
+  color: var(--ll-fg-3);
   letter-spacing: 0.12em;
   flex: none;
 }
@@ -1400,7 +1306,7 @@ button {
 }
 .tray-empty {
   font-size: 12px;
-  color: var(--fg-3);
+  color: var(--ll-fg-3);
 }
 .tray-item {
   height: 32px;
@@ -1412,8 +1318,8 @@ button {
   align-items: center;
   gap: 6px;
   border: 0;
-  background: var(--ctl-bg);
-  color: var(--fg-2);
+  background: var(--ll-ctl-bg);
+  color: var(--ll-fg-2);
   font-size: 13px;
 }
 .tray-item .cap-icon {
@@ -1484,7 +1390,7 @@ button {
   margin: 0 !important;
 }
 .w.is-morphing {
-  border-radius: var(--r-card);
+  border-radius: var(--ll-radius-window);
 }
 .cap-wrap.is-morphing {
   border-radius: 999px;
@@ -1534,7 +1440,7 @@ button {
 }
 .fs-stage.is-switching {
   overflow: hidden;
-  border-radius: var(--r-card);
+  border-radius: var(--ll-radius-window);
 }
 .fs-win {
   position: absolute;
@@ -1578,24 +1484,24 @@ button {
   align-items: center;
   gap: 8px;
   border: 0;
-  background: var(--ctl-bg);
-  color: var(--fg-2);
+  background: var(--ll-ctl-bg);
+  color: var(--ll-fg-2);
   font-size: 13px;
   transition:
-    background-color var(--dur-hover),
-    color var(--dur-hover);
+    background-color var(--ll-dur-hover),
+    color var(--ll-dur-hover);
 }
 .fs-tab svg {
   width: 14px;
   height: 14px;
 }
 .fs-tab:hover {
-  color: var(--fg);
-  background: var(--ctl-hi);
+  color: var(--ll-fg);
+  background: var(--ll-ctl-bg-hover);
 }
 .fs-tab[aria-current='true'] {
-  color: var(--fg);
-  background: color-mix(in srgb, var(--blue) 22%, var(--ctl-bg));
+  color: var(--ll-fg);
+  background: color-mix(in srgb, var(--ll-accent) 22%, var(--ll-ctl-bg));
 }
 .fs-stage {
   position: relative;
@@ -1610,7 +1516,7 @@ button {
 .fs-stage > .w > .w-card {
   box-shadow:
     0 40px 100px -30px rgba(0, 0, 0, 0.95),
-    0 0 50px color-mix(in srgb, var(--blue) 10%, transparent);
+    0 0 50px color-mix(in srgb, var(--ll-accent) 10%, transparent);
 }
 
 /* ---------- 状态徽记 ----------
@@ -1631,7 +1537,7 @@ button {
   height: var(--s, 22px);
   flex: none;
   isolation: isolate;
-  --zc: var(--quote);
+  --zc: var(--ll-quote);
   --zg: color-mix(in srgb, #6e82d2 85%, transparent); /* 徽记照旧：z 的光晕用改版前的蓝 */
 }
 .bd > *,
@@ -1675,7 +1581,7 @@ button {
   fill: url(#g-bd-moon-hot);
 }
 .bd-mdim path {
-  fill: var(--bg-0);
+  fill: var(--ll-bg);
 }
 /* 星星：.bd-starw 管出现和消失、给侧身一个透视；.bd-sti 管整颗的缩放、浮动、侧身；.bd-sw 是挂着摆的那一层。
    红色层（出错）和提亮层（闪一下、再亮起）叠在星星上 */
@@ -1695,7 +1601,7 @@ button {
   fill: url(#g-bd-star);
 }
 .bd-red path {
-  fill: var(--err);
+  fill: var(--ll-danger);
 }
 .bd-hot path {
   fill: #fff6dc;
@@ -1705,7 +1611,7 @@ button {
   opacity: 0.85;
 }
 .bd-glint path {
-  fill: var(--gold-pale);
+  fill: var(--ll-star-pale);
 }
 /* 离线：云遮月 */
 .bd-cloud {
@@ -1739,7 +1645,7 @@ button {
   transform: scale(0);
 }
 .bd-cstar path {
-  fill: var(--gold-pale);
+  fill: var(--ll-star-pale);
 }
 /* 静态底子：徽记「现在该是什么样子」写在 .bd 的 data-look（主状态）、data-comps（伴星数）、data-offline 上（控制器一直维护，
    看不见时也维护；cloneNode 复制出来的形变用的复制层会带着），这里按它画出静止的样子：弯月还是星星、哪一层亮、伴星在哪、有没有云。
@@ -1848,7 +1754,7 @@ button {
   text-shadow: 0 0 5px var(--zg);
   white-space: nowrap;
   opacity: 0;
-  font-family: var(--font-ui);
+  font-family: var(--ll-font-ui);
 }
 .z.static {
   opacity: 0.85;
@@ -1864,8 +1770,8 @@ button {
   }
 }
 .badge-tool {
-  font: 500 12px/1 var(--font-term);
-  color: var(--tool);
+  font: 500 12px/1 var(--ll-font-mono);
+  color: var(--ll-tool);
   white-space: nowrap;
 }
 .badge-tool:empty {
@@ -1881,30 +1787,30 @@ button {
   height: 7px;
   border-radius: 50%;
   flex: none;
-  background: var(--dim);
+  background: var(--ll-fg-dim);
 }
 .sdot[data-s='waiting'] {
-  background: var(--blue);
+  background: var(--ll-accent);
 }
 .sdot[data-s='thinking'] {
-  background: var(--quote);
+  background: var(--ll-quote);
 }
 .sdot[data-s='replying'] {
-  background: var(--gold);
-  box-shadow: 0 0 8px var(--gold-glow);
+  background: var(--ll-star);
+  box-shadow: 0 0 8px var(--ll-star-glow);
 }
 .sdot[data-s='tool'] {
-  background: var(--tool);
+  background: var(--ll-tool);
 }
 .sdot[data-s='retry'] {
-  background: var(--amber);
+  background: var(--ll-warning);
 }
 .sdot[data-s='error'] {
-  background: var(--err);
-  box-shadow: 0 0 8px var(--red-glow);
+  background: var(--ll-danger);
+  box-shadow: 0 0 8px var(--ll-danger-glow);
 }
 .sdot[data-s='idle'] {
-  background: var(--ok);
+  background: var(--ll-ok);
 }
 
 /* ---------- 弹出的各群状态 ---------- */
@@ -1915,17 +1821,17 @@ button {
   max-width: min(320px, calc(100vw - 32px));
   padding: 10px 12px;
   border-radius: 14px;
-  background: var(--glass);
+  background: var(--ll-glass-bg);
   -webkit-backdrop-filter: blur(16px) saturate(1.2);
   backdrop-filter: blur(16px) saturate(1.2);
-  box-shadow: var(--glass-edge);
+  box-shadow: var(--ll-glass-edge);
   font-size: 13px;
-  color: var(--fg-2);
+  color: var(--ll-fg-2);
   pointer-events: none;
 }
 .pop-title {
   font-size: 12px;
-  color: var(--fg-3);
+  color: var(--ll-fg-3);
   margin-bottom: 6px;
   letter-spacing: 0.06em;
 }
@@ -1937,7 +1843,7 @@ button {
 }
 .pop-row b {
   font-weight: 500;
-  color: var(--fg);
+  color: var(--ll-fg);
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1960,7 +1866,7 @@ button {
   width: var(--s, 2px);
   height: var(--s, 2px);
   border-radius: 50%;
-  background: var(--gold-star);
+  background: var(--ll-star-dust);
   opacity: var(--o, 0.5);
 }
 @keyframes msky-drift {
@@ -2014,14 +1920,14 @@ button {
 .now-state {
   font-size: 15px;
   font-weight: 600;
-  color: var(--fg);
+  color: var(--ll-fg);
   display: flex;
   align-items: center;
   gap: 8px;
 }
 .now-where {
   font-size: 12px;
-  color: var(--dim);
+  color: var(--ll-fg-dim);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2041,23 +1947,23 @@ button {
   gap: 6px;
   font-size: 12px;
   border: 0;
-  background: var(--ctl-bg);
-  color: var(--fg-2);
+  background: var(--ll-ctl-bg);
+  color: var(--ll-fg-2);
 }
 .now-tab[aria-selected='true'] {
-  color: var(--fg);
-  background: color-mix(in srgb, var(--blue) 22%, var(--ctl-bg));
+  color: var(--ll-fg);
+  background: color-mix(in srgb, var(--ll-accent) 22%, var(--ll-ctl-bg));
 }
 .now-empty {
   display: grid;
   place-items: center;
   text-align: center;
-  color: var(--fg-3);
+  color: var(--ll-fg-3);
   font-size: 13px;
   padding-inline: 16px;
 }
 .now-empty-t {
-  color: var(--fg-2);
+  color: var(--ll-fg-2);
   font-size: 14px;
   margin-bottom: 4px;
 }
@@ -2075,15 +1981,15 @@ button {
   --rbr: 0px;
 }
 .now-col:first-child {
-  --rtl: var(--r-card);
-  --rbl: var(--r-card);
+  --rtl: var(--ll-radius-window);
+  --rbl: var(--ll-radius-window);
 }
 .now-col:last-child {
-  --rtr: var(--r-card);
-  --rbr: var(--r-card);
+  --rtr: var(--ll-radius-window);
+  --rbr: var(--ll-radius-window);
 }
 .now-col + .now-col {
-  box-shadow: inset 1px 0 0 var(--line);
+  box-shadow: inset 1px 0 0 var(--ll-line);
 }
 .now-col-head {
   display: flex;
@@ -2095,7 +2001,7 @@ button {
 }
 .now-col-head b {
   font-weight: 600;
-  color: var(--fg);
+  color: var(--ll-fg);
   font-size: 14px;
   white-space: nowrap;
   overflow: hidden;
@@ -2104,7 +2010,7 @@ button {
 }
 .now-col-head .st {
   font-size: 12px;
-  color: var(--dim);
+  color: var(--ll-fg-dim);
   white-space: nowrap;
 }
 .now-open {
@@ -2113,15 +2019,15 @@ button {
   padding: 0 11px;
   border-radius: 999px;
   border: 0;
-  background: var(--ctl-bg);
-  color: var(--fg-2);
+  background: var(--ll-ctl-bg);
+  color: var(--ll-fg-2);
   font-size: 12px;
   cursor: pointer;
   white-space: nowrap;
 }
 .now-open:hover {
-  color: var(--fg);
-  background: var(--ctl-hi);
+  color: var(--ll-fg);
+  background: var(--ll-ctl-bg-hover);
 }
 
 /* ---------- 终端（「此刻」的样式，用户逐项拼出来的） ----------
@@ -2134,8 +2040,8 @@ button {
   overflow-x: hidden;
   scrollbar-gutter: stable;
   padding-inline: 12px 2px;
-  font: 13px/1.6 var(--font-term);
-  color: var(--fg);
+  font: 13px/1.6 var(--ll-font-mono);
+  color: var(--ll-fg);
   font-synthesis: none;
   font-variant-ligatures: none;
 }
@@ -2177,23 +2083,23 @@ button {
   height: 28px;
   padding: 0 13px 0 14px;
   border-radius: 999px;
-  font: 12.5px/1 var(--font-ui, inherit);
-  color: var(--fg);
-  background: var(--glass);
+  font: 12.5px/1 var(--ll-font-ui, inherit);
+  color: var(--ll-fg);
+  background: var(--ll-glass-bg);
   -webkit-backdrop-filter: blur(12px);
   backdrop-filter: blur(12px);
   box-shadow:
-    var(--glass-edge),
+    var(--ll-glass-edge),
     0 8px 20px -8px rgba(0, 0, 0, 0.7);
   white-space: nowrap;
-  animation: term-jump-in 0.22s var(--ease-out) both;
-  transition: background-color var(--dur-hover);
+  animation: term-jump-in 0.22s var(--ll-ease-out) both;
+  transition: background-color var(--ll-dur-hover);
 }
 .term-jump:hover {
-  background: color-mix(in srgb, var(--glass) 70%, var(--ctl-hi));
+  background: color-mix(in srgb, var(--ll-glass-bg) 70%, var(--ll-ctl-bg-hover));
 }
 .term-jump:focus-visible {
-  outline: 2px solid var(--blue);
+  outline: 2px solid var(--ll-accent);
   outline-offset: 2px;
 }
 .term-jump .chev {
@@ -2217,7 +2123,7 @@ button {
   }
 }
 .tl.is-new {
-  animation: tl-in 0.3s var(--ease-out) both;
+  animation: tl-in 0.3s var(--ll-ease-out) both;
 }
 .tl.is-luoli {
   background: rgba(255, 255, 255, 0.06);
@@ -2228,56 +2134,56 @@ button {
   margin-right: 0.6ch;
 }
 .tl-time {
-  color: var(--dim);
+  color: var(--ll-fg-dim);
 }
 .tl-name {
-  color: color-mix(in srgb, var(--who, var(--fg-2)) 55%, var(--fg-2));
+  color: color-mix(in srgb, var(--who, var(--ll-fg-2)) 55%, var(--ll-fg-2));
   margin-left: 1ch;
 }
 .tl-sym {
   margin-left: 1ch;
 }
 .k-user .tl-sym {
-  color: var(--dim);
+  color: var(--ll-fg-dim);
 }
 .k-luoli .tl-name {
-  color: var(--gold);
+  color: var(--ll-star);
 }
 .k-luoli .tl-sym {
-  color: var(--gold);
+  color: var(--ll-star);
 }
 .k-tool .tl-name {
-  color: var(--gold);
+  color: var(--ll-star);
 }
 .k-tool .tl-sym {
-  color: var(--tool);
+  color: var(--ll-tool);
 }
 .k-tool .tl-body {
-  color: var(--tool);
+  color: var(--ll-tool);
 }
 .k-status .tl-sym {
-  color: var(--dim);
+  color: var(--ll-fg-dim);
 }
 .k-status .tl-body {
-  color: var(--dim);
+  color: var(--ll-fg-dim);
   font-style: italic;
 }
 .k-status.is-err .tl-body {
-  color: var(--err);
+  color: var(--ll-danger);
 }
 /* 任务到点触发的回复：开头标出是哪个任务（几个都列出来） */
 .k-status.is-task .tl-sym,
 .k-status.is-task .tl-body {
-  color: var(--tool);
+  color: var(--ll-tool);
 }
 .k-status.is-task .tl-body {
   font-style: normal;
 }
 .k-status.is-retry .tl-body {
-  color: var(--amber);
+  color: var(--ll-warning);
 }
 .k-stats .tl-body {
-  color: var(--dim);
+  color: var(--ll-fg-dim);
 }
 .tl-body {
   flex: 1 1 auto;
@@ -2290,15 +2196,15 @@ button {
   display: inline-block;
   width: 1.2ch;
   margin-left: 0.6ch;
-  color: var(--gold);
+  color: var(--ll-star);
 }
 .tl-ok {
-  color: var(--ok);
+  color: var(--ll-ok);
   margin-left: 0.6ch;
   white-space: nowrap;
 }
 .tl-ok.is-bad {
-  color: var(--err);
+  color: var(--ll-danger);
 }
 @keyframes ok-in {
   from {
@@ -2306,14 +2212,14 @@ button {
   }
 }
 .tl-ok.is-new {
-  animation: ok-in 0.4s var(--ease-out) both;
+  animation: ok-in 0.4s var(--ll-ease-out) both;
 }
 .tl-sum {
   display: block;
-  color: var(--fg-2);
+  color: var(--ll-fg-2);
 }
 .tl-sum.is-bad {
-  color: var(--err);
+  color: var(--ll-danger);
 }
 .tl-tool {
   font-weight: 600;
@@ -2334,14 +2240,14 @@ button {
 .tl-think {
   all: unset;
   cursor: pointer;
-  color: var(--dim);
+  color: var(--ll-fg-dim);
   font-style: italic;
 }
 .tl-think:hover {
-  color: var(--fg-2);
+  color: var(--ll-fg-2);
 }
 .tl-think:focus-visible {
-  outline: 2px solid var(--blue);
+  outline: 2px solid var(--ll-accent);
   outline-offset: 1px;
   border-radius: 3px;
 }
@@ -2349,32 +2255,32 @@ button {
   display: block;
   margin: 2px 0 2px;
   padding-left: 1.2ch;
-  border-left: 1px solid color-mix(in srgb, var(--dim) 50%, transparent);
-  color: var(--dim);
+  border-left: 1px solid color-mix(in srgb, var(--ll-fg-dim) 50%, transparent);
+  color: var(--ll-fg-dim);
   font-style: normal;
 }
 /* 正文高亮：网址、数字用淡的强调色；@ 某人是强调色的底；提到洛璃（名字、唤醒词、@bot）是金色 */
 .hl-url {
-  color: var(--blue);
+  color: var(--ll-accent);
   text-decoration: underline dashed;
   text-underline-offset: 3px;
   text-decoration-thickness: 1px;
 }
 .hl-num {
-  color: color-mix(in srgb, var(--blue) 60%, var(--fg));
+  color: color-mix(in srgb, var(--ll-accent) 60%, var(--ll-fg));
 }
 .hl-at {
-  background: var(--blue-soft);
-  color: var(--fg);
+  background: var(--ll-accent-soft);
+  color: var(--ll-fg);
   border-radius: 5px;
   padding: 0 4px;
 }
 .hl-q {
-  color: var(--quote);
+  color: var(--ll-quote);
   font-style: italic;
 }
 .hl-hit {
-  color: var(--gold);
+  color: var(--ll-star);
 }
 .k-stats .hl-num {
   color: inherit;
@@ -2402,7 +2308,7 @@ button {
   position: relative;
   width: 0;
   height: 0;
-  color: var(--gold);
+  color: var(--ll-star);
   line-height: 1;
   transition: opacity 0.5s;
 }
@@ -2461,8 +2367,8 @@ button {
     radial-gradient(70% 80% at 20% 80%, hsla(var(--h1, 230), 60%, 45%, 0.95), transparent 75%),
     linear-gradient(135deg, hsl(var(--h1, 230), 45%, 22%), hsl(var(--h2, 40), 50%, 35%));
   box-shadow:
-    0 0 0 1px color-mix(in srgb, var(--white) 10%, transparent),
-    0 6px 14px -6px color-mix(in srgb, var(--black) 70%, transparent);
+    0 0 0 1px color-mix(in srgb, var(--ll-white) 10%, transparent),
+    0 6px 14px -6px color-mix(in srgb, var(--ll-black) 70%, transparent);
   position: relative;
   overflow: hidden;
 }
@@ -2470,9 +2376,9 @@ button {
   position: absolute;
   left: 6px;
   bottom: 3px;
-  font: 10px/1.3 var(--font-ui);
-  color: color-mix(in srgb, var(--white) 80%, transparent);
-  text-shadow: 0 1px 2px color-mix(in srgb, var(--black) 60%, transparent);
+  font: 10px/1.3 var(--ll-font-ui);
+  color: color-mix(in srgb, var(--ll-white) 80%, transparent);
+  text-shadow: 0 1px 2px color-mix(in srgb, var(--ll-black) 60%, transparent);
 }
 .thumb.is-real {
   background: center / cover no-repeat var(--img);
@@ -2507,7 +2413,7 @@ button {
   background: transparent;
   cursor: pointer;
   text-align: left;
-  color: var(--fg);
+  color: var(--ll-fg);
 }
 /* 键盘焦点环画在行里面（行外面一圈会被 .li-wrap 的 overflow: hidden 裁掉）；悬停高亮不替代它 */
 .conv-item:focus-visible {
@@ -2517,14 +2423,14 @@ button {
 .conv-item[aria-current='true'] {
   background: linear-gradient(
     90deg,
-    color-mix(in srgb, var(--blue) 20%, transparent),
+    color-mix(in srgb, var(--ll-accent) 20%, transparent),
     transparent 75%
   );
-  box-shadow: inset 3px 0 0 var(--blue);
+  box-shadow: inset 3px 0 0 var(--ll-accent);
   border-radius: 4px 12px 12px 4px;
 }
 .conv-item[aria-current='true'] .conv-title {
-  color: var(--white);
+  color: var(--ll-white);
 }
 .conv-ico {
   width: 34px;
@@ -2534,12 +2440,12 @@ button {
   place-items: center;
   font-size: 12px;
   font-weight: 600;
-  color: var(--fg-2);
+  color: var(--ll-fg-2);
   background: rgba(255, 255, 255, 0.07);
   letter-spacing: 0;
 }
 .conv-ico[data-p='cli'] {
-  font-family: var(--font-term);
+  font-family: var(--ll-font-mono);
 }
 .conv-main {
   min-width: 0;
@@ -2547,7 +2453,7 @@ button {
   flex-direction: column;
 }
 .conv-title {
-  color: var(--fg);
+  color: var(--ll-fg);
   font-weight: 600;
   font-size: 14px;
   white-space: nowrap;
@@ -2555,14 +2461,14 @@ button {
   text-overflow: ellipsis;
 }
 .conv-last {
-  color: var(--fg-3);
+  color: var(--ll-fg-3);
   font-size: 12.5px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .conv-last.is-event {
-  color: var(--dim);
+  color: var(--ll-fg-dim);
 }
 .conv-side {
   display: flex;
@@ -2572,7 +2478,7 @@ button {
 }
 .conv-time {
   font-size: 11.5px;
-  color: var(--dim);
+  color: var(--ll-fg-dim);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -2582,8 +2488,8 @@ button {
   padding: 0 5px;
   box-sizing: border-box;
   border-radius: 999px;
-  background: var(--gold);
-  color: var(--on-gold);
+  background: var(--ll-star);
+  color: var(--ll-on-star);
   font-size: 11px;
   font-weight: 700;
   line-height: 18px;
@@ -2596,8 +2502,8 @@ button {
 /* 有新用户消息进来的行，整行亮一下（1.4 秒，强调色的底和外圈淡出） */
 @keyframes lit {
   0% {
-    background-color: color-mix(in srgb, var(--blue) 20%, transparent);
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--blue) 45%, transparent);
+    background-color: color-mix(in srgb, var(--ll-accent) 20%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ll-accent) 45%, transparent);
   }
   100% {
     background-color: transparent;
@@ -2624,13 +2530,13 @@ button {
   border-radius: var(--hr, 12px);
   will-change: transform;
   transition:
-    opacity var(--dur-glide-out) ease,
-    height var(--dur-glide) var(--ease-out),
-    width var(--dur-glide) var(--ease-out);
+    opacity var(--ll-dur-glide-out) ease,
+    height var(--ll-dur-glide) var(--ll-ease-out),
+    width var(--ll-dur-glide) var(--ll-ease-out);
 }
 .glide.on {
   opacity: 1;
-  transition-duration: var(--dur-glide-in), var(--dur-glide), var(--dur-glide);
+  transition-duration: var(--ll-dur-glide-in), var(--ll-dur-glide), var(--ll-dur-glide);
 }
 .glide,
 :is(.conv-item, .chat-menu > button, .task-row.is-live).is-hl::before {
@@ -2656,12 +2562,12 @@ button {
     rgba(215, 225, 255, 0.06)
   );
   -webkit-mask:
-    linear-gradient(var(--mask) 0 0) content-box,
-    linear-gradient(var(--mask) 0 0);
+    linear-gradient(var(--ll-mask) 0 0) content-box,
+    linear-gradient(var(--ll-mask) 0 0);
   -webkit-mask-composite: xor;
   mask:
-    linear-gradient(var(--mask) 0 0) content-box exclude,
-    linear-gradient(var(--mask) 0 0);
+    linear-gradient(var(--ll-mask) 0 0) content-box exclude,
+    linear-gradient(var(--ll-mask) 0 0);
 }
 /* 关掉动画：每行自己的高亮，平时透明，带 .is-hl 时淡入 */
 :is(.conv-item, .chat-menu > button, .task-row.is-live)::before,
@@ -2673,12 +2579,12 @@ button {
   border-radius: inherit;
   pointer-events: none;
   opacity: 0;
-  transition: opacity var(--dur-glide-out) ease;
+  transition: opacity var(--ll-dur-glide-out) ease;
 }
 :is(.conv-item, .chat-menu > button, .task-row.is-live).is-hl::before,
 :is(.conv-item, .chat-menu > button, .task-row.is-live).is-hl::after {
   opacity: 1;
-  transition-duration: var(--dur-glide-in);
+  transition-duration: var(--ll-dur-glide-in);
 }
 /* 整理模式：卡片里的内容不接鼠标，高亮也不出 */
 .arranging .glide {
@@ -2688,7 +2594,7 @@ button {
   margin: auto;
   padding: 24px 16px;
   text-align: center;
-  color: var(--fg-3);
+  color: var(--ll-fg-3);
   font-size: 13px;
 }
 .empty.is-flat {
@@ -2697,7 +2603,7 @@ button {
 }
 .empty b {
   display: block;
-  color: var(--fg-2);
+  color: var(--ll-fg-2);
   font-weight: 500;
   margin-bottom: 4px;
 }
@@ -2711,12 +2617,12 @@ button {
   grid-template-columns: minmax(240px, 300px) minmax(0, 1fr);
 }
 .sess-side {
-  background: var(--side-bg);
+  background: var(--ll-side-bg);
 }
 .sess-side-head {
   padding: 6px 18px 4px;
   font-size: 12px;
-  color: var(--dim);
+  color: var(--ll-fg-dim);
   display: flex;
   justify-content: space-between;
 }
@@ -2740,7 +2646,7 @@ button {
 }
 .sess-meta {
   font-size: 12.5px;
-  color: var(--dim);
+  color: var(--ll-fg-dim);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2803,8 +2709,8 @@ button {
   line-height: 18px;
   padding: 0 8px;
   border-radius: 999px;
-  color: var(--fg-2);
-  box-shadow: inset 0 0 0 1px var(--line-hi);
+  color: var(--ll-fg-2);
+  box-shadow: inset 0 0 0 1px var(--ll-line-hi);
   white-space: nowrap;
   flex: none;
 }
@@ -2832,7 +2738,7 @@ button {
 }
 .msg-meta {
   font-size: 11.5px;
-  color: var(--dim);
+  color: var(--ll-fg-dim);
   margin: 0 4px;
   display: flex;
   gap: 6px;
@@ -2841,7 +2747,7 @@ button {
 /* 名字：每人一色，调淡；洛璃的是金色 */
 .msg-meta b {
   font-weight: 600;
-  color: color-mix(in srgb, var(--who, var(--fg-2)) 55%, var(--fg-2));
+  color: color-mix(in srgb, var(--who, var(--ll-fg-2)) 55%, var(--ll-fg-2));
 }
 .msg-meta time {
   font-variant-numeric: tabular-nums;
@@ -2850,8 +2756,8 @@ button {
 .msg-meta .queued {
   padding: 0 8px;
   border-radius: 999px;
-  background: var(--ctl-bg);
-  color: var(--fg-2);
+  background: var(--ll-ctl-bg);
+  color: var(--ll-fg-2);
   font-size: 11px;
   line-height: 16px;
 }
@@ -2885,8 +2791,8 @@ button {
   box-sizing: border-box;
   font-size: 13.5px;
   line-height: 1.6;
-  --tint: var(--b-o-bg);
-  color: var(--b-o-fg);
+  --tint: var(--ll-bubble-other-bg);
+  color: var(--ll-bubble-other-fg);
   overflow-wrap: anywhere;
   white-space: pre-wrap;
   user-select: text;
@@ -2931,35 +2837,35 @@ button {
 }
 /* 洛璃：淡的星紫配接近白色的字；名字仍是金色。气泡里的 Markdown 在这层底上的调整：行内代码、代码块的底，加粗用白 */
 .msg.is-luoli .bubble {
-  --tint: var(--b-l-bg);
-  color: var(--b-l-fg);
+  --tint: var(--ll-bubble-assistant-bg);
+  color: var(--ll-bubble-assistant-fg);
 }
 .msg.is-luoli .msg-meta b {
-  color: var(--gold);
+  color: var(--ll-star);
 }
 .msg.is-you .bubble {
-  --tint: var(--b-m-bg);
-  color: var(--b-m-fg);
+  --tint: var(--ll-bubble-self-bg);
+  color: var(--ll-bubble-self-fg);
 }
 .bubble .md strong {
-  color: var(--white);
+  color: var(--ll-white);
 }
 .bubble .md-ic {
-  background: var(--b-code-in);
+  background: var(--ll-bubble-code-inline);
 }
 .bubble .md-code {
-  background: var(--b-code-bk);
+  background: var(--ll-bubble-code-block);
 }
 /* 淡紫的底上线要看得清：引用的竖线、表格的线、分隔线比平时（「此刻」里的）亮一点 */
 .bubble .md-q {
-  border-left-color: color-mix(in srgb, var(--blue) 75%, transparent);
+  border-left-color: color-mix(in srgb, var(--ll-accent) 75%, transparent);
 }
 .bubble .md-t th,
 .bubble .md-t td {
-  border-color: color-mix(in srgb, var(--fg) 18%, transparent);
+  border-color: color-mix(in srgb, var(--ll-fg) 18%, transparent);
 }
 .bubble .md-hr {
-  background: color-mix(in srgb, var(--fg) 24%, transparent);
+  background: color-mix(in srgb, var(--ll-fg) 24%, transparent);
 }
 /* 对话部件里洛璃在左、左下角收尖（用户定的，同演示页）；全屏时间线里照旧在右 */
 .chat .msg.is-luoli {
@@ -2971,7 +2877,7 @@ button {
 }
 .msg.is-you .bubble .hl-num,
 .msg.is-you .bubble .hl-url {
-  color: var(--white);
+  color: var(--ll-white);
 }
 @keyframes msg-in {
   from {
@@ -2981,7 +2887,7 @@ button {
 }
 .msg.is-new,
 .evt.is-new {
-  animation: msg-in 0.35s var(--ease-out) both;
+  animation: msg-in 0.35s var(--ll-ease-out) both;
 }
 /* 实时模糊的气泡：淡入不能放在 .msg 上（带 opacity 的祖先会让里面的 backdrop-filter 看不到窗口的星空，这 0.35 秒气泡没有模糊，结束时突然糊上），
    所以 .msg 只做位移，淡入放在它的几个子元素上（名字那一行、气泡自己、下面的按钮）：气泡自己的 opacity 会把它的模糊一起淡入，
@@ -2997,17 +2903,17 @@ button {
   }
 }
 .msg.has-blur.is-new {
-  animation: msg-in-move 0.35s var(--ease-out) backwards;
+  animation: msg-in-move 0.35s var(--ll-ease-out) backwards;
 }
 .msg.has-blur.is-new > * {
-  animation: msg-in-fade 0.35s var(--ease-out) backwards;
+  animation: msg-in-fade 0.35s var(--ll-ease-out) backwards;
 }
 /* 事件（任务到点、任务超时）：不是气泡，居中的一行三级文字色的灰字，没有头像、名字；时间在末尾、小一号 */
 .evt {
   align-self: center;
   max-width: min(92%, 640px);
   text-align: center;
-  color: var(--fg-3);
+  color: var(--ll-fg-3);
   font-size: 12.5px;
   line-height: 1.5;
   overflow-wrap: anywhere;
@@ -3025,16 +2931,16 @@ button {
   margin-top: 2px;
   font-size: 12px;
   font-style: italic;
-  color: var(--dim);
+  color: var(--ll-fg-dim);
 }
 .mark.is-err {
-  color: var(--err);
+  color: var(--ll-danger);
 }
 /* 思考、工具调用：折叠。思考是一颗强调色的小胶囊（「思考了 3 秒」），工具是一行等宽字（「◇ fetch · 网址 ✓ 0.6s」） */
 .fold {
   margin: 0 0 5px;
   font-size: 11.5px;
-  color: var(--fg-3);
+  color: var(--ll-fg-3);
   white-space: normal;
   interpolate-size: allow-keywords;
 }
@@ -3046,7 +2952,7 @@ button {
   height: 0;
   overflow: clip;
   transition:
-    height 0.2s var(--ease-out),
+    height 0.2s var(--ll-ease-out),
     content-visibility 0.2s allow-discrete;
 }
 .fold[open]::details-content {
@@ -3062,10 +2968,10 @@ button {
 }
 .fold.is-think summary,
 .fold-tag {
-  color: var(--fg-3);
+  color: var(--ll-fg-3);
   padding: 0 9px;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--blue) 14%, transparent);
+  background: color-mix(in srgb, var(--ll-accent) 14%, transparent);
 }
 .fold-tag {
   display: inline-flex;
@@ -3073,8 +2979,8 @@ button {
   font-style: italic;
 }
 .fold.is-tool summary {
-  font: 11.5px/1.6 var(--font-term);
-  color: var(--tool);
+  font: 11.5px/1.6 var(--ll-font-mono);
+  color: var(--ll-tool);
 }
 .fold.is-tool summary > span:first-child {
   min-width: 0;
@@ -3102,9 +3008,9 @@ button {
   margin-top: 6px;
   padding: 8px 10px;
   border-radius: 10px;
-  background: var(--in-bg);
-  box-shadow: inset 0 0 0 1px var(--in-bd);
-  color: var(--fg-2);
+  background: var(--ll-inset-bg);
+  box-shadow: inset 0 0 0 1px var(--ll-inset-line);
+  color: var(--ll-fg-2);
   font-size: 12.5px;
 }
 /* 思考的内容太长时在框里滚动（思考中展开着，跟着滚到最新的一行：Bubble.tsx 的 ThinkBody） */
@@ -3114,10 +3020,10 @@ button {
   scrollbar-width: thin;
 }
 .fold .ok {
-  color: var(--ok);
+  color: var(--ll-ok);
 }
 .fold .bad {
-  color: var(--err);
+  color: var(--ll-danger);
 }
 .msg-imgs {
   display: flex;
@@ -3193,7 +3099,7 @@ button {
   margin: 0.15em 0;
 }
 .md-l li::marker {
-  color: var(--dim);
+  color: var(--ll-fg-dim);
   font-variant-numeric: tabular-nums;
 }
 .md-l li > .md-p {
@@ -3201,7 +3107,7 @@ button {
 }
 .md-box {
   margin-right: 0.4em;
-  color: var(--dim);
+  color: var(--ll-fg-dim);
 }
 /* 任务列表：方框代替圆点，放在圆点的位置 */
 .md-l li.md-task {
@@ -3212,7 +3118,7 @@ button {
 .md-q {
   margin: 0.45em 0 0.55em;
   padding: 0.05em 0 0.05em 0.85em;
-  border-left: 2px solid color-mix(in srgb, var(--blue) 55%, transparent);
+  border-left: 2px solid color-mix(in srgb, var(--ll-accent) 55%, transparent);
   color: color-mix(in srgb, currentColor 82%, transparent);
 }
 .md-q > :last-child {
@@ -3222,18 +3128,18 @@ button {
 .md-ic {
   padding: 0.08em 0.4em;
   border-radius: 5px;
-  background: color-mix(in srgb, var(--black) 30%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--fg) 7%, transparent);
-  color: var(--fg);
-  font: 0.9em/1.4 var(--font-term);
+  background: color-mix(in srgb, var(--ll-black) 30%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ll-fg) 7%, transparent);
+  color: var(--ll-fg);
+  font: 0.9em/1.4 var(--ll-font-mono);
   overflow-wrap: anywhere;
 }
 /* 代码块：上面一条小字（左语言名，右「复制」），下面代码，太宽时横向滚动 */
 .md-code {
   margin: 0.45em 0 0.6em;
   border-radius: 10px;
-  background: color-mix(in srgb, var(--black) 34%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--fg) 8%, transparent);
+  background: color-mix(in srgb, var(--ll-black) 34%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ll-fg) 8%, transparent);
   max-width: 100%;
   overflow: hidden;
 }
@@ -3246,7 +3152,7 @@ button {
   padding: 2px 6px 0 11px;
   font-size: 11px;
   line-height: 1;
-  color: var(--dim);
+  color: var(--ll-fg-dim);
   user-select: none;
 }
 .md-lang {
@@ -3259,17 +3165,17 @@ button {
   padding: 4px 8px;
   border-radius: 6px;
   font-size: 11px;
-  color: var(--dim);
+  color: var(--ll-fg-dim);
   transition:
-    background-color var(--dur-hover),
-    color var(--dur-hover);
+    background-color var(--ll-dur-hover),
+    color var(--ll-dur-hover);
 }
 .md-copy:hover {
-  background: var(--ctl-bg);
-  color: var(--fg);
+  background: var(--ll-ctl-bg);
+  color: var(--ll-fg);
 }
 .md-copy:focus-visible {
-  outline: 2px solid var(--blue);
+  outline: 2px solid var(--ll-accent);
   outline-offset: -1px;
 }
 /* 右边的内边距比左边宽：逐字时光标的小星星画在 <code> 里最后一个字的右边（左偏 2px、宽 0.8em，一共伸出约 12px），
@@ -3281,10 +3187,10 @@ button {
   overflow-x: auto;
   white-space: pre;
   tab-size: 2;
-  color: var(--fg);
-  font: 12.5px/1.55 var(--font-term);
+  color: var(--ll-fg);
+  font: 12.5px/1.55 var(--ll-font-mono);
   scrollbar-width: thin;
-  scrollbar-color: color-mix(in srgb, var(--blue) 35%, transparent) transparent;
+  scrollbar-color: color-mix(in srgb, var(--ll-accent) 35%, transparent) transparent;
 }
 .md-code code {
   font: inherit;
@@ -3300,7 +3206,7 @@ button {
   max-width: 100%;
   overflow-x: auto;
   scrollbar-width: thin;
-  scrollbar-color: color-mix(in srgb, var(--blue) 35%, transparent) transparent;
+  scrollbar-color: color-mix(in srgb, var(--ll-accent) 35%, transparent) transparent;
 }
 .md-t {
   border-collapse: collapse;
@@ -3309,7 +3215,7 @@ button {
 .md-t th,
 .md-t td {
   padding: 4px 11px;
-  border: 1px solid color-mix(in srgb, var(--fg) 11%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ll-fg) 11%, transparent);
   text-align: left;
   vertical-align: top;
   overflow-wrap: normal;
@@ -3317,13 +3223,13 @@ button {
 }
 .md-t th {
   font-weight: 650;
-  background: color-mix(in srgb, var(--black) 18%, transparent);
+  background: color-mix(in srgb, var(--ll-black) 18%, transparent);
 }
 .md-hr {
   height: 1px;
   margin: 0.75em 0;
   border: 0;
-  background: color-mix(in srgb, var(--fg) 14%, transparent);
+  background: color-mix(in srgb, var(--ll-fg) 14%, transparent);
 }
 /* 链接：强调色加细下划线；自动认出的网址（.hl-url）还是原来的虚线 */
 .md-a,
@@ -3331,11 +3237,11 @@ a.hl-url {
   cursor: pointer;
 }
 .md-a {
-  color: var(--blue);
+  color: var(--ll-accent);
   text-decoration: underline;
   text-decoration-thickness: 1px;
   text-underline-offset: 3px;
-  text-decoration-color: color-mix(in srgb, var(--blue) 55%, transparent);
+  text-decoration-color: color-mix(in srgb, var(--ll-accent) 55%, transparent);
   overflow-wrap: anywhere;
 }
 /* 逐字时还没写完的链接（只有方括号里的字，网址还没到）：链接色，不能点 */
@@ -3343,17 +3249,17 @@ a.hl-url {
   cursor: inherit;
 }
 .md-a.is-pending:hover {
-  color: var(--blue);
-  text-decoration-color: color-mix(in srgb, var(--blue) 55%, transparent);
+  color: var(--ll-accent);
+  text-decoration-color: color-mix(in srgb, var(--ll-accent) 55%, transparent);
 }
 .md-a:hover,
 a.hl-url:hover {
-  color: color-mix(in srgb, var(--blue) 70%, var(--white));
+  color: color-mix(in srgb, var(--ll-accent) 70%, var(--ll-white));
   text-decoration-color: currentColor;
 }
 .md-a:focus-visible,
 a.hl-url:focus-visible {
-  outline: 2px solid var(--blue);
+  outline: 2px solid var(--ll-accent);
   outline-offset: 1px;
   border-radius: 3px;
 }
@@ -3433,8 +3339,8 @@ a.hl-url:focus-visible {
   border-radius: 10px;
   overflow: hidden;
   vertical-align: middle;
-  background: var(--in-bg);
-  box-shadow: 0 6px 14px -6px color-mix(in srgb, var(--black) 70%, transparent);
+  background: var(--ll-inset-bg);
+  box-shadow: 0 6px 14px -6px color-mix(in srgb, var(--ll-black) 70%, transparent);
 }
 .pic img {
   display: block;
@@ -3448,21 +3354,21 @@ a.hl-url:focus-visible {
   justify-content: center;
   width: 120px;
   height: 84px;
-  box-shadow: inset 0 0 0 1px var(--in-bd);
-  color: var(--fg-3);
+  box-shadow: inset 0 0 0 1px var(--ll-inset-line);
+  color: var(--ll-fg-3);
   font-size: 12px;
 }
 /* 工具调用展开后：参数、结果、错误各一块，等宽字，太长在块里滚动 */
 .fold-k {
   font-size: 11.5px;
-  color: var(--fg-3);
+  color: var(--ll-fg-3);
   margin: 6px 0 2px;
 }
 .fold-k:first-child {
   margin-top: 0;
 }
 .fold-k.bad {
-  color: var(--err);
+  color: var(--ll-danger);
 }
 .fold-pre {
   margin: 0;
@@ -3470,8 +3376,8 @@ a.hl-url:focus-visible {
   overflow: auto;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  font: 12px/1.5 var(--font-term);
-  color: var(--fg-2);
+  font: 12px/1.5 var(--ll-font-mono);
+  color: var(--ll-fg-2);
   scrollbar-width: thin;
 }
 /* 工具调用折叠行右边的状态（✓、× 出错）不换行 */
@@ -3495,28 +3401,28 @@ a.hl-url:focus-visible {
   padding: 3px 12px;
   border-radius: 999px;
   font-size: 12px;
-  color: var(--fg-2);
-  background: var(--glass);
+  color: var(--ll-fg-2);
+  background: var(--ll-glass-bg);
   -webkit-backdrop-filter: blur(12px);
   backdrop-filter: blur(12px);
-  box-shadow: var(--glass-edge);
+  box-shadow: var(--ll-glass-edge);
   pointer-events: auto;
 }
 .log-pill.is-err {
-  color: var(--err);
+  color: var(--ll-danger);
 }
 .log-retry {
   all: unset;
   cursor: pointer;
   margin-left: 8px;
-  color: var(--fg);
+  color: var(--ll-fg);
   font-size: 12px;
   padding: 0 9px;
   border-radius: 999px;
-  background: var(--ctl-bg);
+  background: var(--ll-ctl-bg);
 }
 .log-retry:hover {
-  background: var(--ctl-hi);
+  background: var(--ll-ctl-bg-hover);
 }
 .empty .log-retry {
   display: inline-block;
@@ -3524,7 +3430,7 @@ a.hl-url:focus-visible {
   padding: 2px 12px;
 }
 .log-retry:focus-visible {
-  outline: 2px solid var(--blue);
+  outline: 2px solid var(--ll-accent);
   outline-offset: 2px;
 }
 /* 段的分隔线（会话开始、空闲后新的一段、压缩）和摘要 */
@@ -3541,7 +3447,7 @@ a.hl-url:focus-visible {
   display: flex;
   align-items: center;
   gap: 12px;
-  color: var(--dim);
+  color: var(--ll-fg-dim);
   font-size: 12px;
 }
 .seg-line::before,
@@ -3549,7 +3455,7 @@ a.hl-url:focus-visible {
   content: '';
   flex: 1;
   height: 1px;
-  background: var(--line);
+  background: var(--ll-line);
 }
 .seg-line span {
   white-space: nowrap;
@@ -3559,41 +3465,41 @@ a.hl-url:focus-visible {
 }
 /* 「以下是新消息」：金色的字和淡金的线 */
 .seg-line.is-new {
-  color: var(--gold);
+  color: var(--ll-star);
 }
 .seg-line.is-new::before,
 .seg-line.is-new::after {
-  background: color-mix(in srgb, var(--gold) 30%, transparent);
+  background: color-mix(in srgb, var(--ll-star) 30%, transparent);
 }
 .seg-btn {
   all: unset;
   cursor: pointer;
   font-size: 12px;
-  color: var(--fg-2);
+  color: var(--ll-fg-2);
   padding: 0 9px;
   border-radius: 999px;
-  background: var(--ctl-bg);
+  background: var(--ll-ctl-bg);
 }
 .seg-btn:hover {
-  background: var(--ctl-hi);
-  color: var(--fg);
+  background: var(--ll-ctl-bg-hover);
+  color: var(--ll-fg);
 }
 .seg-btn:focus-visible {
-  outline: 2px solid var(--blue);
+  outline: 2px solid var(--ll-accent);
   outline-offset: 2px;
 }
 .seg-sum {
   max-width: 560px;
   padding: 10px 14px;
   border-radius: 12px;
-  background: var(--in-bg);
-  box-shadow: inset 0 0 0 1px var(--in-bd);
-  color: var(--fg-2);
+  background: var(--ll-inset-bg);
+  box-shadow: inset 0 0 0 1px var(--ll-inset-line);
+  color: var(--ll-fg-2);
   font-size: 13px;
 }
 .seg-sum b {
   display: block;
-  color: var(--fg-3);
+  color: var(--ll-fg-3);
   font-weight: 500;
   font-size: 12px;
   margin-bottom: 2px;
@@ -3609,7 +3515,7 @@ a.hl-url:focus-visible {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--gold);
+  background: var(--ll-star);
   opacity: 0.4;
 }
 @keyframes typing {
@@ -3649,21 +3555,21 @@ a.hl-url:focus-visible {
   padding: 0 11px;
   border-radius: 999px;
   border: 0;
-  background: var(--ctl-bg);
-  color: var(--fg-2);
+  background: var(--ll-ctl-bg);
+  color: var(--ll-fg-2);
   cursor: pointer;
   display: inline-flex;
   align-items: center;
   gap: 6px;
   font-size: 12.5px;
   transition:
-    background-color var(--dur-hover),
-    color var(--dur-hover);
+    background-color var(--ll-dur-hover),
+    color var(--ll-dur-hover);
 }
 .chat-pick:hover,
 .chat-pick[aria-expanded='true'] {
-  background: var(--ctl-hi);
-  color: var(--fg);
+  background: var(--ll-ctl-bg-hover);
+  color: var(--ll-fg);
 }
 .chat-pick span {
   white-space: nowrap;
@@ -3677,8 +3583,8 @@ a.hl-url:focus-visible {
   width: 0.4em;
   height: 0.4em;
   margin: 0 0.15em 0 0.1em;
-  border-right: 1.5px solid var(--fg-3);
-  border-bottom: 1.5px solid var(--fg-3);
+  border-right: 1.5px solid var(--ll-fg-3);
+  border-bottom: 1.5px solid var(--ll-fg-3);
   transform: translateY(-0.15em) rotate(45deg);
 }
 .chat-new {
@@ -3687,19 +3593,19 @@ a.hl-url:focus-visible {
   padding: 0 12px;
   border-radius: 999px;
   border: 0;
-  background: var(--ctl-bg);
-  color: var(--fg-2);
+  background: var(--ll-ctl-bg);
+  color: var(--ll-fg-2);
   cursor: pointer;
   font-size: 12.5px;
   white-space: nowrap;
   flex: none;
   transition:
-    background-color var(--dur-hover),
-    color var(--dur-hover);
+    background-color var(--ll-dur-hover),
+    color var(--ll-dur-hover);
 }
 .chat-new:hover {
-  background: var(--ctl-hi);
-  color: var(--fg);
+  background: var(--ll-ctl-bg-hover);
+  color: var(--ll-fg);
 }
 .chat-new.is-side {
   margin: 6px 16px 6px;
@@ -3732,12 +3638,12 @@ a.hl-url:focus-visible {
   flex-direction: column;
   gap: 1px;
   border-radius: 14px;
-  background: var(--glass);
+  background: var(--ll-glass-bg);
   -webkit-backdrop-filter: blur(16px) saturate(1.2);
   backdrop-filter: blur(16px) saturate(1.2);
-  box-shadow: var(--glass-edge);
+  box-shadow: var(--ll-glass-edge);
   scrollbar-width: thin;
-  scrollbar-color: color-mix(in srgb, var(--blue) 35%, transparent) transparent;
+  scrollbar-color: color-mix(in srgb, var(--ll-accent) 35%, transparent) transparent;
 }
 .chat-menu > button {
   position: relative;
@@ -3754,11 +3660,11 @@ a.hl-url:focus-visible {
   justify-content: space-between;
   gap: 8px;
   font-size: 13px;
-  color: var(--fg-2);
+  color: var(--ll-fg-2);
 }
 .chat-menu > button[aria-current='true'] {
-  background: color-mix(in srgb, var(--blue) 15%, transparent);
-  color: var(--fg);
+  background: color-mix(in srgb, var(--ll-accent) 15%, transparent);
+  color: var(--ll-fg);
 }
 .chat-menu button span {
   white-space: nowrap;
@@ -3767,12 +3673,12 @@ a.hl-url:focus-visible {
   min-width: 0;
 }
 .chat-menu time {
-  color: var(--dim);
+  color: var(--ll-fg-dim);
   font-size: 12px;
   flex: none;
 }
 .chat-menu-new {
-  color: var(--fg);
+  color: var(--ll-fg);
 }
 .chat .tline {
   --sc-pt: 10px;
@@ -3784,8 +3690,8 @@ a.hl-url:focus-visible {
   margin: 6px 12px 12px;
   padding: 9px 10px 7px 13px;
   border-radius: 16px;
-  border: 1px solid var(--in-bd);
-  background: var(--in-bg);
+  border: 1px solid var(--ll-inset-line);
+  background: var(--ll-inset-bg);
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -3794,12 +3700,12 @@ a.hl-url:focus-visible {
     box-shadow 0.2s;
 }
 .chat-in:focus-within {
-  border-color: color-mix(in srgb, var(--blue) 45%, transparent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 12%, transparent);
+  border-color: color-mix(in srgb, var(--ll-accent) 45%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ll-accent) 12%, transparent);
 }
 .chat-in.is-drop {
-  border-color: var(--blue);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 22%, transparent);
+  border-color: var(--ll-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ll-accent) 22%, transparent);
 }
 /* 待发的图片排成一行，多了横着滚：不换行，输入区的高度和一两张图时一样，上面的消息区不被挤。
    右上角的 × 伸出缩略图（-6px），滚动容器会把伸出去的裁掉，所以上、右留出边 */
@@ -3812,7 +3718,7 @@ a.hl-url:focus-visible {
   padding: 7px 7px 2px 0;
   margin: -7px -7px 0 0;
   scrollbar-width: thin;
-  scrollbar-color: color-mix(in srgb, var(--blue) 35%, transparent) transparent;
+  scrollbar-color: color-mix(in srgb, var(--ll-accent) 35%, transparent) transparent;
 }
 .chat-atts:empty {
   display: none;
@@ -3833,25 +3739,25 @@ a.hl-url:focus-visible {
   display: grid;
   place-items: center;
   border-radius: 6px;
-  background: color-mix(in srgb, var(--black) 45%, transparent);
-  color: var(--fg);
+  background: color-mix(in srgb, var(--ll-black) 45%, transparent);
+  color: var(--ll-fg);
   font-weight: 700;
 }
 .att-state.is-bad {
-  background: color-mix(in srgb, var(--err) 38%, transparent);
-  color: var(--white);
+  background: color-mix(in srgb, var(--ll-danger) 38%, transparent);
+  color: var(--ll-white);
 }
 .att.is-bad .thumb {
-  box-shadow: 0 0 0 2px var(--err);
+  box-shadow: 0 0 0 2px var(--ll-danger);
 }
 /* 输入框上的提示（图片超限、上传失败） */
 .chat-note {
   font-size: 12px;
   padding: 0 2px;
-  color: var(--fg-2);
+  color: var(--ll-fg-2);
 }
 .chat-note.is-err {
-  color: var(--err);
+  color: var(--ll-danger);
 }
 /* 出错的回复下面的「重试」 */
 .msg .chat-retry {
@@ -3867,9 +3773,9 @@ a.hl-url:focus-visible {
   height: 20px;
   border-radius: 50%;
   border: 0;
-  background: var(--glass);
-  box-shadow: var(--glass-edge);
-  color: var(--fg);
+  background: var(--ll-glass-bg);
+  box-shadow: var(--ll-glass-edge);
+  color: var(--ll-fg);
   cursor: pointer;
   font-size: 11px;
   line-height: 1;
@@ -3889,14 +3795,14 @@ a.hl-url:focus-visible {
   border: 0;
   outline: none;
   background: transparent;
-  color: var(--fg);
-  font: 13.5px/1.5 var(--font-ui);
+  color: var(--ll-fg);
+  font: 13.5px/1.5 var(--ll-font-ui);
   padding: 3px 0;
   max-height: 140px;
   min-height: 22px;
 }
 .chat-ta::placeholder {
-  color: var(--dim);
+  color: var(--ll-fg-dim);
 }
 /* 发送：强调色的胶囊；生成中、输入框空着时是「中止」 */
 .chat-send {
@@ -3909,16 +3815,16 @@ a.hl-url:focus-visible {
   font-size: 12.5px;
   font-weight: 600;
   border: 0;
-  background: var(--blue);
-  color: var(--on-blue);
+  background: var(--ll-accent);
+  color: var(--ll-on-accent);
 }
 .chat-send:disabled {
   opacity: 0.6;
   cursor: default;
 }
 .chat-send.is-stop {
-  background: color-mix(in srgb, var(--err) 24%, transparent);
-  color: var(--err-pale);
+  background: color-mix(in srgb, var(--ll-danger) 24%, transparent);
+  color: var(--ll-danger-pale);
 }
 /* 输入框下面的提示：始终只占一行，高度不随「生成中」那段出现、消失、变长而变（它一变，底部浮层的高度跟着变，时间线整块上下挪）。
    左边是按键的提示，右边是生成中的提示（生成中才有，有字时多一句「发出的会排队」）。
@@ -3927,7 +3833,7 @@ a.hl-url:focus-visible {
    DOM 的顺序还是左边在前。一行也放不下左边时（没有生成中那段）它自己加省略号 */
 .chat-hint {
   font-size: 11px;
-  color: var(--dim);
+  color: var(--ll-fg-dim);
   display: flex;
   flex-direction: row-reverse;
   flex-wrap: wrap;
@@ -3968,7 +3874,7 @@ a.hl-url:focus-visible {
   align-items: center;
   gap: 4px;
   font-size: 12px;
-  color: var(--fg-2);
+  color: var(--ll-fg-2);
 }
 .chat-live .spin {
   margin-left: 0;
@@ -4017,7 +3923,7 @@ a.hl-url:focus-visible {
   white-space: nowrap;
   font-size: 12px;
   font-weight: 600;
-  color: var(--fg-3);
+  color: var(--ll-fg-3);
 }
 .task-wrap {
   overflow: hidden;
@@ -4032,7 +3938,7 @@ a.hl-url:focus-visible {
   margin-bottom: 1px;
   padding: 9px 10px;
   border-radius: 12px;
-  color: var(--fg);
+  color: var(--ll-fg);
 }
 .task-main {
   min-width: 0;
@@ -4046,7 +3952,7 @@ a.hl-url:focus-visible {
   overflow-wrap: anywhere;
 }
 .task-meta {
-  color: var(--fg-3);
+  color: var(--ll-fg-3);
   font-size: 12.5px;
   line-height: 1.55;
   overflow-wrap: anywhere;
@@ -4060,7 +3966,7 @@ a.hl-url:focus-visible {
 .task-next {
   font-size: 12.5px;
   font-weight: 600;
-  color: var(--blue);
+  color: var(--ll-accent);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -4069,9 +3975,9 @@ a.hl-url:focus-visible {
   padding: 0 10px;
   font-size: 11.5px;
   transition:
-    background-color var(--dur-hover),
-    color var(--dur-hover),
-    opacity var(--dur-hover);
+    background-color var(--ll-dur-hover),
+    color var(--ll-dur-hover),
+    opacity var(--ll-dur-hover);
 }
 /* 有鼠标时「取消」悬停才出现（键盘走到它也出现）；触屏和窄屏一直显示 */
 @media (hover: hover) and (pointer: fine) and (min-width: 720px) {
@@ -4088,7 +3994,7 @@ a.hl-url:focus-visible {
   gap: 8px;
   margin-top: 6px;
   font-size: 12.5px;
-  color: var(--fg-2);
+  color: var(--ll-fg-2);
 }
 .task-ask .chip {
   height: 24px;
@@ -4097,19 +4003,19 @@ a.hl-url:focus-visible {
   grid-column: 1 / -1;
   margin-top: 4px;
   font-size: 12px;
-  color: var(--err);
+  color: var(--ll-danger);
 }
 .task-row.is-ended {
   opacity: 0.6;
 }
 .task-state {
   font-size: 12px;
-  color: var(--fg-3);
+  color: var(--ll-fg-3);
   white-space: nowrap;
 }
 .task-at {
   font-size: 11.5px;
-  color: var(--dim);
+  color: var(--ll-fg-dim);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -4125,13 +4031,13 @@ a.hl-url:focus-visible {
   margin: 2px 10px;
   padding: 4px 0;
   font-size: 12px;
-  color: var(--dim);
+  color: var(--ll-fg-dim);
 }
 .task-more:hover {
-  color: var(--fg-2);
+  color: var(--ll-fg-2);
 }
 .task-more:focus-visible {
-  outline: 2px solid var(--blue);
+  outline: 2px solid var(--ll-accent);
   outline-offset: 2px;
   border-radius: 4px;
 }
@@ -4147,13 +4053,13 @@ a.hl-url:focus-visible {
   cursor: pointer;
   font-family: inherit;
   transition:
-    background-color var(--dur-hover),
-    color var(--dur-hover);
+    background-color var(--ll-dur-hover),
+    color var(--ll-dur-hover);
 }
 .task-count:hover,
 .task-count[aria-expanded='true'] {
-  background: var(--ctl-bg);
-  color: var(--fg);
+  background: var(--ll-ctl-bg);
+  color: var(--ll-fg);
 }
 .task-count .chev {
   margin: 0 0 0 0.45em;
@@ -4190,7 +4096,7 @@ a.hl-url:focus-visible {
 }
 .skel-note {
   font-size: 12px;
-  color: color-mix(in srgb, var(--gold) 75%, var(--fg-2));
+  color: color-mix(in srgb, var(--ll-star) 75%, var(--ll-fg-2));
   display: flex;
   align-items: center;
   gap: 6px;
@@ -4203,13 +4109,13 @@ a.hl-url:focus-visible {
   gap: 10px;
   padding: 8px 12px;
   border-radius: 12px;
-  background: var(--in-bg);
-  box-shadow: inset 0 0 0 1px var(--in-bd);
+  background: var(--ll-inset-bg);
+  box-shadow: inset 0 0 0 1px var(--ll-inset-line);
 }
 .skel-group b {
   font-weight: 600;
   font-size: 12.5px;
-  color: var(--fg-2);
+  color: var(--ll-fg-2);
   flex: none;
   min-width: 6em;
 }
@@ -4219,13 +4125,13 @@ a.hl-url:focus-visible {
   gap: 8px;
   padding: 8px 12px 10px;
   border-radius: 12px;
-  background: var(--in-bg);
-  box-shadow: inset 0 0 0 1px var(--in-bd);
+  background: var(--ll-inset-bg);
+  box-shadow: inset 0 0 0 1px var(--ll-inset-line);
 }
 .skel-live > b {
   font-weight: 600;
   font-size: 12.5px;
-  color: var(--fg-2);
+  color: var(--ll-fg-2);
   padding: 2px 0;
 }
 /* 桌面卡片里紧凑一些：标签在左、选项在右，放不下就换行；说明文字不占地方（悬停时看 title，全屏里有） */
@@ -4238,7 +4144,7 @@ a.hl-url:focus-visible {
 }
 .skel-live .set-field .set-label {
   font-size: 12.5px;
-  color: var(--fg-2);
+  color: var(--ll-fg-2);
 }
 .skel-live .set-field .seg-ctl,
 .skel-live .set-field .chip {
@@ -4250,7 +4156,7 @@ a.hl-url:focus-visible {
 .skel-bar {
   height: 6px;
   border-radius: 999px;
-  background: var(--line);
+  background: var(--ll-line);
   flex: 1 1 auto;
   min-width: 0;
 }
@@ -4260,7 +4166,7 @@ a.hl-url:focus-visible {
   grid-template-columns: 220px minmax(0, 1fr);
 }
 .set-nav-pane {
-  background: var(--side-bg);
+  background: var(--ll-side-bg);
 }
 .set-nav {
   --sc-pt: 4px;
@@ -4277,19 +4183,19 @@ a.hl-url:focus-visible {
   border-radius: 10px;
   border: 0;
   background: transparent;
-  color: var(--fg-2);
+  color: var(--ll-fg-2);
   cursor: pointer;
   transition:
-    background-color var(--dur-hover),
-    color var(--dur-hover);
+    background-color var(--ll-dur-hover),
+    color var(--ll-dur-hover);
 }
 .set-nav button:hover {
-  background: var(--ctl-bg);
-  color: var(--fg);
+  background: var(--ll-ctl-bg);
+  color: var(--ll-fg);
 }
 .set-nav button[aria-current='true'] {
-  background: color-mix(in srgb, var(--blue) 15%, transparent);
-  color: var(--fg);
+  background: color-mix(in srgb, var(--ll-accent) 15%, transparent);
+  color: var(--ll-fg);
 }
 .set-main {
   --sc-pt: 6px;
@@ -4313,7 +4219,7 @@ a.hl-url:focus-visible {
 .set-field label,
 .set-field .set-label {
   font-size: 12px;
-  color: var(--fg-3);
+  color: var(--ll-fg-3);
 }
 .set-field .seg-ctl,
 .set-field .chip {
@@ -4328,7 +4234,7 @@ a.hl-url:focus-visible {
   margin: 0;
   font-size: 12px;
   line-height: 1.5;
-  color: var(--fg-3);
+  color: var(--ll-fg-3);
 }
 .set-hint {
   min-height: 1.5em;
@@ -4340,8 +4246,8 @@ a.hl-url:focus-visible {
 .set-input {
   height: 34px;
   border-radius: 10px;
-  background: var(--in-bg);
-  box-shadow: inset 0 0 0 1px var(--in-bd);
+  background: var(--ll-inset-bg);
+  box-shadow: inset 0 0 0 1px var(--ll-inset-line);
 }
 .set-input.is-tall {
   height: 120px;
@@ -4351,8 +4257,8 @@ a.hl-url:focus-visible {
   font-size: 12px;
   padding: 3px 11px;
   border-radius: 999px;
-  background: var(--ctl-bg);
-  color: color-mix(in srgb, var(--gold) 75%, var(--fg-2));
+  background: var(--ll-ctl-bg);
+  color: color-mix(in srgb, var(--ll-star) 75%, var(--ll-fg-2));
 }
 
 /* ---------- 今日概况 ---------- */
@@ -4380,11 +4286,11 @@ a.hl-url:focus-visible {
   font-size: 42px;
   font-weight: 600;
   line-height: 1.1;
-  color: var(--fg);
+  color: var(--ll-fg);
   letter-spacing: -0.01em;
 }
 .today-hero span {
-  color: var(--fg-3);
+  color: var(--ll-fg-3);
   font-size: 13px;
 }
 .stat {
@@ -4397,21 +4303,21 @@ a.hl-url:focus-visible {
   justify-content: space-between;
   gap: 10px;
   font-size: 12.5px;
-  color: var(--fg-2);
+  color: var(--ll-fg-2);
   min-width: 0;
   flex-wrap: wrap;
   font-variant-numeric: tabular-nums;
 }
 .stat-row b {
   font-weight: 600;
-  color: var(--fg);
+  color: var(--ll-fg);
 }
 .roll {
   font-variant-numeric: tabular-nums;
   display: inline-block;
 }
 .roll.is-up {
-  color: var(--white);
+  color: var(--ll-white);
 }
 .today-grid {
   display: grid;
@@ -4421,8 +4327,8 @@ a.hl-url:focus-visible {
 .tile {
   padding: 14px 16px;
   border-radius: 14px;
-  background: var(--in-bg);
-  box-shadow: inset 0 0 0 1px var(--in-bd);
+  background: var(--ll-inset-bg);
+  box-shadow: inset 0 0 0 1px var(--ll-inset-line);
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -4430,13 +4336,13 @@ a.hl-url:focus-visible {
 }
 .tile small {
   font-size: 12px;
-  color: var(--fg-3);
+  color: var(--ll-fg-3);
   letter-spacing: 0.06em;
 }
 .tile .roll {
   font-size: 28px;
   font-weight: 600;
-  color: var(--fg);
+  color: var(--ll-fg);
   line-height: 1.1;
 }
 .per-conv {
@@ -4450,7 +4356,7 @@ a.hl-url:focus-visible {
   gap: 10px;
   align-items: center;
   font-size: 13px;
-  color: var(--fg-2);
+  color: var(--ll-fg-2);
 }
 .per-row span:first-child {
   white-space: nowrap;
@@ -4467,7 +4373,7 @@ a.hl-url:focus-visible {
   position: relative;
   height: 6px;
   border-radius: 3px;
-  background: var(--ctl-bg);
+  background: var(--ll-ctl-bg);
   overflow: hidden;
 }
 .energy-fill {
@@ -4477,11 +4383,11 @@ a.hl-url:focus-visible {
   bottom: 0;
   width: 0;
   border-radius: inherit;
-  background: linear-gradient(90deg, var(--blue), var(--gold));
-  transition: width 0.9s var(--ease-out);
+  background: linear-gradient(90deg, var(--ll-accent), var(--ll-star));
+  transition: width 0.9s var(--ll-ease-out);
 }
 .energy.is-bad .energy-fill {
-  background: var(--err);
+  background: var(--ll-danger);
 }
 .energy-ticks {
   display: none;
@@ -4503,7 +4409,7 @@ a.hl-url:focus-visible {
   background: linear-gradient(
     90deg,
     transparent,
-    color-mix(in srgb, var(--white) 35%, transparent),
+    color-mix(in srgb, var(--ll-white) 35%, transparent),
     transparent
   );
   transform: translateX(-100%);
@@ -4523,17 +4429,17 @@ a.hl-url:focus-visible {
   padding: 9px 16px;
   border-radius: 999px;
   box-sizing: border-box;
-  background: var(--glass);
+  background: var(--ll-glass-bg);
   -webkit-backdrop-filter: blur(16px) saturate(1.2);
   backdrop-filter: blur(16px) saturate(1.2);
-  box-shadow: var(--glass-edge);
-  color: var(--fg);
+  box-shadow: var(--ll-glass-edge);
+  color: var(--ll-fg);
   font-size: 13px;
   opacity: 0;
   pointer-events: none;
   transition:
     opacity 0.25s,
-    transform 0.25s var(--ease-out);
+    transform 0.25s var(--ll-ease-out);
 }
 .toast.is-on {
   opacity: 1;
@@ -4549,10 +4455,10 @@ a.hl-url:focus-visible {
   }
   .top {
     gap: 8px;
-    background: color-mix(in srgb, var(--bg-0) 88%, transparent);
+    background: color-mix(in srgb, var(--ll-bg) 88%, transparent);
     -webkit-backdrop-filter: blur(12px);
     backdrop-filter: blur(12px);
-    box-shadow: 0 1px 0 var(--line);
+    box-shadow: 0 1px 0 var(--ll-line);
   }
   .top-in {
     gap: 8px;
@@ -4619,10 +4525,10 @@ a.hl-url:focus-visible {
   /* 窄屏的全屏：两栏变两层（列表、详情），各占满窗口，带全部四个角 */
   .pane.is-side,
   .pane.is-main {
-    --rtl: var(--r-card);
-    --rtr: var(--r-card);
-    --rbl: var(--r-card);
-    --rbr: var(--r-card);
+    --rtl: var(--ll-radius-window);
+    --rtr: var(--ll-radius-window);
+    --rbl: var(--ll-radius-window);
+    --rbr: var(--ll-radius-window);
   }
   .sess.is-detail .sess-side,
   .chat-full.is-detail .sess-side {
@@ -4693,15 +4599,15 @@ a.hl-url:focus-visible {
     --rbr: 0px;
   }
   .now-col:first-child {
-    --rtl: var(--r-card);
-    --rtr: var(--r-card);
+    --rtl: var(--ll-radius-window);
+    --rtr: var(--ll-radius-window);
   }
   .now-col:last-child {
-    --rbl: var(--r-card);
-    --rbr: var(--r-card);
+    --rbl: var(--ll-radius-window);
+    --rbr: var(--ll-radius-window);
   }
   .now-col + .now-col {
-    box-shadow: inset 0 1px 0 var(--line);
+    box-shadow: inset 0 1px 0 var(--ll-line);
   }
   .now-col + .now-col .pane-hsp {
     height: 0;
@@ -4755,7 +4661,7 @@ a.hl-url:focus-visible {
 .still .arranging .cap-wrap > .cap {
   animation: none !important;
   transform: none !important;
-  outline: 1px dashed color-mix(in srgb, var(--blue) 45%, transparent);
+  outline: 1px dashed color-mix(in srgb, var(--ll-accent) 45%, transparent);
   outline-offset: 3px;
 }
 .still .arrange-bar,
@@ -4773,7 +4679,7 @@ a.hl-url:focus-visible {
 }
 .still .fx-err {
   animation: none !important;
-  border-color: var(--err) !important;
+  border-color: var(--ll-danger) !important;
 }
 .still .ghost::after {
   animation: none !important;

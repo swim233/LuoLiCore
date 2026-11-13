@@ -2,8 +2,8 @@ import { hashStr } from '@luoli/ui/util';
 import { createStore, useStore } from '@luoli/ui/store';
 import { bus } from './bus';
 
-/* 每人一个固定的颜色：按 uid 算（CLI 没有 uid 时按名字），同一个人永远同一个颜色；颜色本身在 :root 的 --who-0…9 */
-const PALETTE = Array.from({ length: 10 }, (_, i) => `var(--who-${i})`);
+/* 每人一个固定的颜色：按 uid 算（CLI 没有 uid 时按名字），同一个人永远同一个颜色；颜色本身在 :root 的 --ll-who-0…9 */
+const PALETTE = Array.from({ length: 10 }, (_, i) => `var(--ll-who-${i})`);
 export const colorOf = (key: string) => PALETTE[hashStr(key) % PALETTE.length];
 
 /* 网页会话里自己发的消息显示的名字（LUOLI_WEB_NAME，不设时是系统用户名），由服务告诉面板（hello、status 事件里的 web.author）。

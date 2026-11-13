@@ -4,7 +4,7 @@ import { EASE_OUT } from '@luoli/ui/easing';
 import { motionOn } from '@luoli/ui/motion';
 import { clamp, nf } from '@luoli/ui/util';
 
-/* 滚动数字：从旧值到新值 900 ms，曲线和能量条的宽度过渡是同一条（EASE_OUT），滚动期间变 --gold-pale，结束后 .5 秒还原；动画关掉时直接跳到新值 */
+/* 滚动数字：从旧值到新值 900 ms，曲线和能量条的宽度过渡是同一条（EASE_OUT），滚动期间变 --ll-star-pale，结束后 .5 秒还原；动画关掉时直接跳到新值 */
 const rollEase = cubicBezier(...EASE_OUT);
 export function Roll({ value, fmt = nf }: { value: number; fmt?: (n: number) => string }) {
   const el = useRef<HTMLSpanElement>(null);
