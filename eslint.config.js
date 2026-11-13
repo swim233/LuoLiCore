@@ -142,20 +142,56 @@ const UI_DEPTHS = 5;
 const uiPatterns = (ups, deps) => [
   `^(\\./)*(\\.\\.(/|$)(\\./)*){${ups}}`,
   '(^|[/#])src(/|$)',
+  // 展示页（packages/ui/showcase/）是开发时用的，库的代码不能反过来引用它
+  '(^|[/#])showcase(/|$)',
   `^(?!\\.|(${deps.map(escapeRe).join('|')})(/|$))`,
   nodeBuiltins,
 ];
 const UI_MESSAGE = `组件库只许引用包里自己的文件和 packages/ui/package.json 里声明的依赖（${uiDeps.join('、')}），不得引用面板、core、服务的代码或 node 模块`;
-const uiRules = (ext, deps, message) => [
+const uiRules = (ext, deps, message) =>
+  [
+    ...Array.from({ length: UI_DEPTHS }, (_, d) =>
+      restrictImports(
+        [`packages/ui/${'*/'.repeat(d)}*.${ext}`],
+        rule(uiPatterns(d + 1, deps), message),
+      ),
+    ),
+    restrictImports(
+      [`packages/ui/${'*/'.repeat(UI_DEPTHS)}**/*.${ext}`],
+      rule(uiPatterns(UI_DEPTHS + 1, deps), message),
+    ),
+    // 展示页有自己的一套规则（见下），不走库的这套
+  ].map((config) => ({ ...config, ignores: ['packages/ui/showcase/**'] }));
+
+// 组件库的展示页（packages/ui/showcase/，开发时用，不进任何构建）：只许引用库自己的文件（按相对路径 ../src/…）、
+// 展示页自己的文件，和 packages/ui/package.json 里声明的包（含 devDependencies）；不得引用仓库 src/ 下的任何东西（面板、core、服务）。
+// 按文件所在的深度（d = showcase 到文件之间隔了几层目录）分别写：走出 packages/ui 要 d+2 个 ../（d+1 个到 packages/ui，库的 src 在那里）；
+// 先进目录再往上退的写法（a/../../x）一律拦；不以 . 开头的（裸模块名、绝对路径、node: 与内置模块、#子路径）只放过声明了的包
+const showcaseDeps = Object.keys({
+  ...uiManifest.dependencies,
+  ...uiManifest.peerDependencies,
+  ...uiManifest.optionalDependencies,
+  ...uiManifest.devDependencies,
+});
+const SHOWCASE_EXT = '{ts,tsx,js,mjs,mts,cts,cjs,jsx}';
+const showcasePatterns = (d, deps) => [
+  `^(\\./)*(\\.\\.(/|$)(\\./)*){${d + 2}}`,
+  '(^|/)[^/.][^/]*/\\.\\.(/|$)',
+  '(^|[/#])packages(/|$)',
+  `^(?!\\.|(${deps.map(escapeRe).join('|')})(/|$))`,
+  nodeBuiltins,
+];
+const SHOWCASE_MESSAGE = `组件库的展示页只许引用库自己的文件（../src/…）、展示页自己的文件和 packages/ui/package.json 里声明的包，不得引用仓库 src/ 下的面板、core、服务的代码或 node 模块`;
+const showcaseRules = (ext, deps, message) => [
   ...Array.from({ length: UI_DEPTHS }, (_, d) =>
     restrictImports(
-      [`packages/ui/${'*/'.repeat(d)}*.${ext}`],
-      rule(uiPatterns(d + 1, deps), message),
+      [`packages/ui/showcase/${'*/'.repeat(d)}*.${ext}`],
+      rule(showcasePatterns(d, deps), message),
     ),
   ),
   restrictImports(
-    [`packages/ui/${'*/'.repeat(UI_DEPTHS)}**/*.${ext}`],
-    rule(uiPatterns(UI_DEPTHS + 1, deps), message),
+    [`packages/ui/showcase/${'*/'.repeat(UI_DEPTHS)}**/*.${ext}`],
+    rule(showcasePatterns(UI_DEPTHS, deps), message),
   ),
 ];
 
@@ -185,6 +221,13 @@ export default defineConfig(
     'test.{ts,tsx,js,mjs,mts,cts,cjs,jsx}',
     uiTestDeps,
     UI_MESSAGE + '；测试文件另外可以引 vitest',
+  ),
+  // 展示页：同理（写在后面，测试文件覆盖前一组）
+  ...showcaseRules(SHOWCASE_EXT, showcaseDeps, SHOWCASE_MESSAGE),
+  ...showcaseRules(
+    `test.${SHOWCASE_EXT}`,
+    [...showcaseDeps, 'vitest'],
+    SHOWCASE_MESSAGE + '；测试文件另外可以引 vitest',
   ),
   {
     // 同网页面板：只许写 import type { X }

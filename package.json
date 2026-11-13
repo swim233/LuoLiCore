@@ -13,11 +13,12 @@
     "requests": "tsx --env-file-if-exists=.env src/requests/main.ts",
     "web:dev": "vite src/web",
     "web:build": "vite build src/web",
-    "typecheck": "tsc --noEmit && tsc --noEmit -p src/web && tsc --noEmit -p packages/ui",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p src/web && tsc --noEmit -p packages/ui && tsc --noEmit -p packages/ui/showcase",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "test": "vitest run"
+    "test": "vitest run",
+    "ui:dev": "vite packages/ui/showcase"
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "^3.0.80",
