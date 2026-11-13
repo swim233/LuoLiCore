@@ -1,22 +1,53 @@
+import type { ReactNode } from 'react';
 import { Compare } from '../../components/Compare';
 import { CopyName } from '../../components/CopyName';
 import { ProposalCells, ProposalNote } from '../../components/Proposal';
 import { Stage } from '../../components/Stage';
 import { RADIUS_OTHER, RADIUS_STATS, RADIUS_WINDOW } from '../../data/scale-stats';
 import { nearestTier, radiusTiers } from '../../lib/tiers';
+import type { Tier } from '../../lib/tiers';
+import { MenuSample, SegSample, SmallSample, TraySample } from './samples';
 
 /* 圆角：每档一个方块，专用值单独一排，一张对照表，几个对比块 */
 
-function RowSample({ radius }: { radius: string }) {
-  return (
-    <div className="sc-rowsample" style={{ borderRadius: radius }}>
-      <b>周末打球</b>
-      <span className="sc-dim">胖虎：那就先按不下雨准备</span>
-    </div>
-  );
+/* 对比块：面板里真实用到这个值的东西（照面板现在的样子画，样例在 samples.tsx）。[现在的 px, 画什么, 在哪用到] */
+const PAIRS: {
+  px: number;
+  what: string;
+  where: string;
+  render: (r: string, tiers: readonly Tier[]) => ReactNode;
+}[] = [
+  {
+    px: 14,
+    what: '会话菜单',
+    where: '对话里选会话的菜单（.chat-menu）；弹出框（.pop）、今日概况的数字格（.tile）也是 14px。',
+    render: (r) => <MenuSample radius={r} />,
+  },
+  {
+    px: 18,
+    what: '收纳盒',
+    where: '整理时从底部滑上来的收纳盒（.tray），只有这一处是 18px。',
+    render: (r) => <TraySample radius={r} />,
+  },
+  {
+    px: 9,
+    what: '分段选择',
+    where:
+      '分段选择（.seg-ctl，外框 9px、里面选中的按钮 7px，两个一起并）；窗口标题栏的按钮（.w-btn）、菜单项也是 9px。',
+    render: (r, tiers) => <SegSample outer={r} inner={innerOf(r, tiers)} />,
+  },
+  {
+    px: 3,
+    what: '能量槽和焦点环',
+    where:
+      '今日概况的能量槽（.energy，高 6px）和键盘焦点环（链接、折叠上的 :focus-visible）。能量槽只有 6px 高，圆角到 3px 就已经是整圆头，再大看不出差别。',
+    render: (r) => <SmallSample radius={r} />,
+  },
+];
+/** 分段选择里的按钮 7px：并的时候用「7 的最近一档」。现在的写法传 7px，并过去的写法传那一档的 var() */
+function innerOf(outer: string, tiers: readonly Tier[]) {
+  return outer.startsWith('var(') ? `var(${nearestTier(7, tiers).name})` : '7px';
 }
-
-const PAIRS = [12, 18, 16, 9];
 
 export function RadiusScale() {
   const tiers = radiusTiers();
@@ -92,17 +123,7 @@ export function RadiusScale() {
                 <td className="sc-mono">{s.px}px</td>
                 <td className="sc-mono sc-num">{s.decl || '—'}</td>
                 <td className="sc-mono sc-num">{s.bubble || '—'}</td>
-                {s.px === 999 ? (
-                  <>
-                    <td data-merge="--ll-radius-full">
-                      <code className="sc-merge">--ll-radius-full</code>{' '}
-                      <span className="sc-dim sc-mono">999px</span>
-                    </td>
-                    <td className="sc-mono sc-num sc-dim">已在档上</td>
-                  </>
-                ) : (
-                  <ProposalCells value={s.px} tiers={tiers} />
-                )}
+                <ProposalCells value={s.px} tiers={tiers} />
               </tr>
             ))}
             <tr data-row="window" data-decl={RADIUS_WINDOW.decl}>
@@ -150,19 +171,21 @@ export function RadiusScale() {
         开头。
       </p>
 
-      <h4 className="sc-h4">几个用得多、又不在档上的值</h4>
+      <h4 className="sc-h4">几个不在档上的值，拿面板里真实用到它的东西来看</h4>
       <div className="sc-cmps">
-        {PAIRS.map((px) => {
+        {PAIRS.map(({ px, what, where, render }) => {
           const t = nearestTier(px, tiers);
           const n = RADIUS_STATS.find((s) => s.px === px)?.decl ?? 0;
+          const extra = px === 9 ? `（里面的按钮 7px → ${nearestTier(7, tiers).px}px）` : '';
           return (
             <Compare
               key={px}
-              title={`${px}px → ${t.px}px`}
+              title={`${what} ${px}px → ${t.px}px${extra}`}
               nowLabel={`现在 ${px}px（${n} 处）`}
               mergedLabel={`并到 ${t.name} · ${t.px}px`}
-              now={<RowSample radius={`${px}px`} />}
-              merged={<RowSample radius={`var(${t.name})`} />}
+              now={render(`${px}px`, tiers)}
+              merged={render(`var(${t.name})`, tiers)}
+              note={where}
             />
           );
         })}

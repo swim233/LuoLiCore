@@ -11,7 +11,9 @@
      `50%`、`inherit`、写成 var() 的单独列；
    - 窗口的 22 在面板里一直写成 var(--ll-radius-window)，不是 22px 字面，所以单独一行（专用，不并）；
    - 气泡的 16 和收尖的 5（`.bubble`、`.msg.is-me .bubble`、`.chat .msg.is-luoli .bubble` 三条声明）在「专用」那一列，
-     不并；`decl` 列只算别的地方用到的。 */
+     不并；`decl` 列只算别的地方用到的；
+   - 字号 28、42 是今日概况的数字（28 是数字格里的、42 是头条的大数字），在 tokens.css 里是专用值（--ll-text-figure、--ll-text-figure-lg），
+     对照表里写「专用，不并」；间距 28、48、112（共 4 处）是版面上个别的留白，写「原样保留，不并」，都不再标「差得多」。 */
 
 export interface FontStat {
   px: number;
@@ -76,6 +78,9 @@ export const SPACE_STATS: SpaceStat[] = [
 ];
 /** 整条声明记在「其他写法」里的条数 */
 export const SPACE_OTHER = { gap: 1, padding: 14 };
+/** 版面上个别的留白（共 4 处：28 是全屏的今日概况和设置的左右内边距 .today.is-full、.set-main，48 是桌面空了时的上下内边距 .desk-empty，
+ *  112 是页面底部给收纳盒让的位置 .main），不做成变量，原样保留，不并 */
+export const SPACE_KEEP = new Set([28, 48, 112]);
 
 export interface RadiusStat {
   px: number;

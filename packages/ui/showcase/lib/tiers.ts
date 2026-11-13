@@ -43,8 +43,15 @@ export function readTiers(match: (name: string) => boolean): Tier[] {
   return out.sort((a, b) => a.px - b.px);
 }
 
-export const textTiers = () => readTiers((n) => n.startsWith('--ll-text-'));
+/** 专用值（不并到档位上，也不算档位）：窗口的圆角、气泡的各个值、统计数字的两个大字号 */
+export const isDedicated = (name: string) => /^--ll-(radius-window|bubble-|text-figure)/.test(name);
+
+export const textTiers = () => readTiers((n) => n.startsWith('--ll-text-') && !isDedicated(n));
 export const spaceTiers = () => readTiers((n) => n.startsWith('--ll-space-'));
-/** 圆角的档位：sm、md、lg、full；窗口的 22（--ll-radius-window）是专用值，不在里面 */
-export const radiusTiers = () =>
-  readTiers((n) => n.startsWith('--ll-radius-') && n !== '--ll-radius-window');
+/** 圆角的档位；窗口的 22（--ll-radius-window）是专用值，不在里面 */
+export const radiusTiers = () => readTiers((n) => n.startsWith('--ll-radius-') && !isDedicated(n));
+
+/** 字号的专用值：名字 → 页面上读到的 px（统计数字的 28 和 42），对照表里等于这个 px 的行写「专用，不并」 */
+export function dedicatedText(): Tier[] {
+  return readTiers((n) => n.startsWith('--ll-text-') && isDedicated(n));
+}

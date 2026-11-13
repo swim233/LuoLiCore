@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { diffText, nearestTier } from '../lib/tiers';
 import type { Tier } from '../lib/tiers';
 
@@ -36,6 +37,15 @@ export function ProposalCells({
         {same ? '已在档上' : diffText(value, t.px)}
       </td>
     </>
+  );
+}
+
+/** 对照表里不并的行（专用值、原样保留）：「并到」和「差」两格合成一格 */
+export function SpecialCells({ children }: { children: ReactNode }) {
+  return (
+    <td colSpan={2} data-special="">
+      {children}
+    </td>
   );
 }
 

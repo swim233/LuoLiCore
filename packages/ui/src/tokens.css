@@ -139,13 +139,17 @@
     --ll-space-4: 4px;
     --ll-space-6: 6px;
     --ll-space-8: 8px;
+    --ll-space-10: 10px;
     --ll-space-12: 12px;
+    --ll-space-14: 14px;
     --ll-space-16: 16px;
     --ll-space-24: 24px;
     /* 圆角 */
+    --ll-radius-xs: 4px;
     --ll-radius-sm: 6px;
     --ll-radius-md: 10px;
-    --ll-radius-lg: 14px;
+    --ll-radius-lg: 12px;
+    --ll-radius-xl: 16px;
     --ll-radius-full: 999px;
     --ll-radius-window: 22px; /* 窗口的圆角：专用值 */
     /* 层级：以后的浮层（画在页面最上层）用 */
@@ -158,5 +162,8 @@
     --ll-bubble-leading: 1.6;
     --ll-bubble-radius: 16px;
     --ll-bubble-radius-tail: 5px;
+    /* 专门调过的值：统计数字（今日概况里的大数字）：数字格里的 28px、头条的 42px */
+    --ll-text-figure: 28px;
+    --ll-text-figure-lg: 42px;
   }
 }

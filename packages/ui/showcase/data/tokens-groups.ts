@@ -212,12 +212,14 @@ export const TOKEN_GROUPS: TokenGroup[] = [
     note: '提案，还没有套用到面板上。样子和「现在的数字并到哪一档」在「刻度」一节。',
     items: [
       ...['xs', 'sm', 'md', 'lg', 'xl'].map((n) => t(`text-${n}`, 'length')),
-      ...[2, 4, 6, 8, 12, 16, 24].map((n) => t(`space-${n}`, 'length')),
-      ...['sm', 'md', 'lg', 'full', 'window'].map((n) => t(`radius-${n}`, 'length')),
+      ...[2, 4, 6, 8, 10, 12, 14, 16, 24].map((n) => t(`space-${n}`, 'length')),
+      ...['xs', 'sm', 'md', 'lg', 'xl', 'full', 'window'].map((n) => t(`radius-${n}`, 'length')),
       t('bubble-text', 'length', '气泡的字号（专用）'),
       t('bubble-leading', 'number', '气泡的行高（专用）'),
       t('bubble-radius', 'length', '气泡的圆角（专用）'),
       t('bubble-radius-tail', 'length', '气泡靠近说话人的下角（专用）'),
+      t('text-figure', 'length', '今日概况数字格里的数字（专用）'),
+      t('text-figure-lg', 'length', '今日概况头条的大数字（专用）'),
     ],
   },
 ];

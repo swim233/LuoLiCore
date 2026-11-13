@@ -1,10 +1,10 @@
 import { Compare } from '../../components/Compare';
 import { CopyName } from '../../components/CopyName';
-import { ProposalCells, ProposalNote } from '../../components/Proposal';
+import { ProposalCells, ProposalNote, SpecialCells } from '../../components/Proposal';
 import { FONT_OTHER, FONT_STATS } from '../../data/scale-stats';
-import { nearestTier, textTiers } from '../../lib/tiers';
+import { dedicatedText, nearestTier, textTiers } from '../../lib/tiers';
 
-/* 字号：每档两行示例（界面字体、等宽字体），一张对照表，半号的字各一个对比块 */
+/* 字号：每档两行示例（界面字体、等宽字体），专用值（统计数字的 28 和 42）一排，一张对照表，半号的字各一个对比块 */
 
 const HALF = [10.5, 11.5, 12.5, 13.5];
 
@@ -22,6 +22,7 @@ function Sample({ size }: { size: string }) {
 
 export function FontScale() {
   const tiers = textTiers();
+  const dedicated = dedicatedText();
   const decl = FONT_STATS.reduce((n, s) => n + s.decl, 0);
   const sh = FONT_STATS.reduce((n, s) => n + s.shorthand, 0);
   return (
@@ -51,6 +52,25 @@ export function FontScale() {
         ))}
       </div>
 
+      <h4 className="sc-h4">专用值（专用，不并）</h4>
+      <div className="sc-figures">
+        {dedicated.map((d) => (
+          <div className="sc-figure" key={d.name} data-tier={d.name}>
+            <div className="sc-tier-name">
+              <CopyName name={d.name} />
+              <span className="sc-px">{d.px}px</span>
+              <span className="sc-tag is-ded">专用，不并</span>
+            </div>
+            <b style={{ fontSize: `var(${d.name})` }}>1,284</b>
+            <span className="sc-dim">
+              {d.px === 28
+                ? '今日概况数字格里的数字（.tile .roll）'
+                : '今日概况头条的大数字（.today-hero .roll）'}
+            </span>
+          </div>
+        ))}
+      </div>
+
       <h4 className="sc-h4">面板现在的字号，并到哪一档</h4>
       <ProposalNote how="数 app.css 里每条 font-size 声明（只数 px 的）；font 简写里的字号另数一列，不混进去；em 这样的相对写法不统计。" />
       <div className="sc-scroll">
@@ -70,7 +90,20 @@ export function FontScale() {
                 <td className="sc-mono">{s.px}px</td>
                 <td className="sc-mono sc-num">{s.decl || '—'}</td>
                 <td className="sc-mono sc-num">{s.shorthand || '—'}</td>
-                <ProposalCells value={s.px} tiers={tiers} />
+                {(() => {
+                  const d = dedicated.find((x) => x.px === s.px);
+                  return d ? (
+                    <SpecialCells>
+                      <code className="sc-merge">{d.name}</code>{' '}
+                      <span className="sc-tag is-ded">专用，不并</span>
+                      <span className="sc-dim">
+                        {s.px === 28 ? '今日概况数字格里的数字' : '今日概况头条的大数字'}
+                      </span>
+                    </SpecialCells>
+                  ) : (
+                    <ProposalCells value={s.px} tiers={tiers} />
+                  );
+                })()}
               </tr>
             ))}
           </tbody>
