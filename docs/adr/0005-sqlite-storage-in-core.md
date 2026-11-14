@@ -34,10 +34,12 @@ CREATE TABLE segments (
   id                 TEXT PRIMARY KEY,
   conversation_id    TEXT NOT NULL REFERENCES conversations(id),
   start_seq          INTEGER NOT NULL,   -- 本段从这个序号的消息开始
-  start_reason       TEXT NOT NULL,      -- 'first' | 'idle' | 'compress'
+  start_reason       TEXT NOT NULL,      -- 'first' | 'idle' | 'compress' | 'manual'（手动压缩）| 'clear'（清空）
   conversation_title TEXT,               -- 段开始时会话标题的快照；一段内不变
-  prior_summary      TEXT,               -- 本段开始之前全部内容的滚动摘要；第一段为空
-  created_at         TEXT NOT NULL
+  prior_summary      TEXT,               -- 本段开始之前全部内容的滚动摘要；第一段、清空的段为空
+  created_at         TEXT NOT NULL,
+  started_by         TEXT,               -- 表结构版本 6 加入：手动压缩、清空的执行人的显示名；其他原因的段、之前的行为空
+  started_by_id      TEXT                -- 表结构版本 6 加入：执行人的 id；平台不提供时为空
 );
 CREATE UNIQUE INDEX segments_order ON segments(conversation_id, start_seq);
 
@@ -46,7 +48,7 @@ CREATE TABLE model_calls (
   id                INTEGER PRIMARY KEY,
   conversation_id   TEXT NOT NULL REFERENCES conversations(id),
   purpose           TEXT NOT NULL,     -- 'reply' | 'summary'
-  summary_reason    TEXT,              -- 摘要：'idle' | 'compress'；回复为空
+  summary_reason    TEXT,              -- 摘要：'idle' | 'compress' | 'manual'（手动压缩）；回复为空
   reply_id          TEXT,              -- 回复 id：与写入历史的助手消息 id、日志里的 replyId 相同；摘要为空
   model             TEXT NOT NULL,     -- 模型 id
   started_at        TEXT NOT NULL,     -- 开始时间（ISO，UTC，与其他表一致）
@@ -106,6 +108,8 @@ CREATE INDEX tasks_conversation ON tasks(conversation_id, status);
 
 - 消息一条一行，整条 `UIMessage` 存在 `ui_message` 里（ADR-0001）。查询要用的几列是它的副本，写入时一起写，读取以 JSON 为准。消息结构以后加工具调用、图片，不用改表。
 - 段是连续的序号区间，从本段的 `start_seq` 到下一段的 `start_seq` 之前。切段只插入一行，不改消息。滚动摘要存在下一段的 `prior_summary` 上，因为它是与下一段一起发给模型的。摘要写好之前不插入新段，中途崩溃只是下次重做。
+  - 手动压缩、清空的段（ADR-0011）记下执行人：显示名是当时的快照，和消息里的名字一样；平台有不变的 id 时连同 id。
+  - 唯一改写段的情况：清空时当前段还没有消息（如空闲切段之后还没人说话），把这一行改成清空的段，去掉摘要，时间和标题的快照改成清空这一刻的，不另插一行。这是一条 UPDATE，条件是它仍是当前段、而且没有消息，不满足时不改。
 - 回复开始生成时从 `next_seq` 预留序号，所以回复排在它看到的最后一条消息之后。回复失败或没有输出时序号空着，序号只用于排序。
 - 图片存为 `data/files/<内容哈希>.<扩展名>`，消息里以 `luoli-file:` 开头的地址引用，发请求时换成图片数据。同一张图只存一份。不建文件表、成员表：名字随每条消息存快照。
 - 模型调用一次一行：一次回复或一次摘要，期间的重试都合在这一行，成功、失败、中止都记。只追加，用来统计 token、缓存命中与失败率；不记金额，要算钱时按当时的单价现算。正常完成的回复的用量仍随助手消息存一份。常用查询在 `docs/queries/usage.sql`。
