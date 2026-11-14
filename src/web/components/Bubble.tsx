@@ -9,7 +9,7 @@ import { Markdown } from './Markdown';
 import { Pic } from './Pic';
 import { useGlassMode } from '../lib/glass';
 import { motionOn } from '@luoli/ui/motion';
-import { isSliding, maxScrollTop, SLIDE_FOLLOW_TAU, sliderOf } from '../lib/slide';
+import { isSliding, maxScrollTop, SLIDE_FOLLOW_TAU, sliderOf } from '@luoli/ui/slide';
 import { WHEEL_EVENT, wheelDir } from '@luoli/ui/wheel';
 import { nf } from '@luoli/ui/util';
 import { argsLine } from '../model/parts';

@@ -5,8 +5,9 @@
    - 根可以是 <button>（整行能点，手型）也可以是 <div>（行里另有按钮）。键盘焦点环画在行里面（行通常在会裁切的容器里）；
      用的地方在层外有全局的 :focus-visible 规则（比如 outline-offset: 2px）时，会盖过这里层里的 −2px，环又画回行外面、被裁掉：
      要自己留一条 .你的行类名:focus-visible { outline-offset: -2px }（或者让那条全局规则不管 ll- 开头的类）；
-   - 悬停高亮（跟着鼠标滑的那块）这一批不在库里：行是 position: relative、自成一个层叠上下文（z-index: 1）、自己没有不透明的底，
-     高亮浮在它下面、关动画时画在它自己的 ::before、::after 上，所以不会被库的行挡住。 */
+   - 悬停高亮（跟着鼠标滑的那块）在 scroll/（useGlide，样式 scroll/glide.css）：行是 position: relative、自成一个层叠上下文（z-index: 1）、
+     自己没有不透明的底，高亮浮在它下面，所以不会被行挡住；关动画时每一行自己淡入淡出，画在行自己的 ::before、::after 上（.ll-row 自带这两个伪元素，
+     样式在 glide.css 里）。 */
 @layer ll.controls {
   .ll-row {
     position: relative;

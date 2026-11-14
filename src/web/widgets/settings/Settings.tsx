@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { IconSettings } from '../../components/icons';
-import { Pane } from '../../components/Pane';
+import { Pane } from '@luoli/ui/scroll';
 import { ConfirmButton, Field, Seg, Skeleton, Tab, TabList, Tabs, Tag } from '@luoli/ui/controls';
 import { useNarrow } from '@luoli/ui/env';
 import { Star4 } from '@luoli/ui/icons';
@@ -146,7 +146,7 @@ function SettingsView({ mode }: ViewProps) {
   if (mode !== 'full') {
     return (
       <Pane>
-        <div className="skel pane-sc">
+        <div className="skel ll-pane-sc">
           <div className="skel-note">
             <Star4 className="st4" />
             <span>外观可以改，其余还不能在这里修改设置</span>
@@ -175,7 +175,12 @@ function SettingsView({ mode }: ViewProps) {
       onValueChange={(v) => setCur(Number(v))}
     >
       <Pane className="set-nav-pane is-side">
-        <TabList variant="side" className="set-nav pane-sc" aria-label="设置分组" activateOnFocus>
+        <TabList
+          variant="side"
+          className="set-nav ll-pane-sc"
+          aria-label="设置分组"
+          activateOnFocus
+        >
           {NAV_GROUPS.map((g, i) => (
             <Tab key={g} value={String(i)}>
               {g}
@@ -184,7 +189,7 @@ function SettingsView({ mode }: ViewProps) {
         </TabList>
       </Pane>
       <Pane className="set-main-pane is-main">
-        <div className="set-main pane-sc">
+        <div className="set-main ll-pane-sc">
           <h3>{name}</h3>
           {fields ? (
             <>

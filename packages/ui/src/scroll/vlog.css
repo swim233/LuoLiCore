@@ -1,0 +1,17 @@
+/* 长列表 VirtualLog（VirtualLog.tsx）：滚动区本身带 .ll-pane-sc（样式在 pane.css）和 .ll-vlog（没有自己的样式，给用的地方当钩子）。
+   这里只有贴在顶上的小提示（topNotice）那一层 .ll-vlog-top：贴在浮着的标题下面，不占位置；
+   小提示本身要不要收鼠标事件（外层 .ll-pane-ov 不收，这一层也不收）由小提示自己定：要点的（带「重试」的）自己写 pointer-events: auto。
+   变量：--ll-pane-sc-pt（滚动区自己的上留白，窗格的变量，sticky 要把它减掉才贴在标题下沿）。 */
+@layer ll.controls {
+  .ll-vlog-top {
+    position: sticky;
+    /* sticky 从滚动区的内容框量起，内容框的上沿已经在浮着的标题下面（--ll-pane-ht）再加留白（--ll-pane-sc-pt）：减掉留白，贴在标题下沿 4px */
+    top: calc(4px - var(--ll-pane-sc-pt, 0px));
+    height: 0;
+    z-index: 3;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    pointer-events: none;
+  }
+}

@@ -1,0 +1,79 @@
+/* 悬停高亮（glide.ts 的 useGlide）：会话列表、任务列表和选会话的菜单。
+   一个列表一块高亮 .ll-glide（列表的第一个子元素），用 transform 挪到鼠标所在的行，到位时回弹（位置的动画由 glide.ts 用 Web Animations 做，
+   这里不过渡 transform），宽高跟着那一行（平滑、不回弹）；从隐藏到显示先瞬移再淡入，离开列表淡出。
+   样子是边光：底是一团跟着鼠标的淡光，边是 1px 的一圈（单独一层、遮罩挖空），离鼠标近的那段被照亮。
+   显示着的高亮带 .ll-on（glide.ts 加、去）。
+   关掉动画时不滑：每一行自己淡入淡出（那一行带 .ll-hl，画在它自己的 ::before、::after 上）。行是库的 .ll-row，
+   不是 .ll-row 的行（比如菜单里的按钮）自己加 .ll-glide-item，两样都有这两个伪元素。
+   变量：--ll-glide-radius（高亮的圆角，写在列表上，要和行的圆角一样，不写是 12px）；--ll-glide-mx、--ll-glide-my（鼠标相对那一行的坐标，glide.ts 写）。
+   用的地方的约定：行是 position: relative、自成一个层叠上下文、自己没有不透明的底（.ll-row 是这样）；
+   不想让高亮出现的时候（面板的整理模式）自己写 .ll-glide { opacity: 0 }：用的地方的样式不在层里，不带 important 标记也盖得过库的 .ll-on。 */
+@layer ll.controls {
+  .ll-glide {
+    position: absolute;
+    left: 0;
+    top: 0;
+    z-index: 0;
+    box-sizing: border-box;
+    pointer-events: none;
+    opacity: 0;
+    border-radius: var(--ll-glide-radius, 12px);
+    will-change: transform;
+    transition:
+      opacity var(--ll-dur-glide-out) ease,
+      height var(--ll-dur-glide) var(--ll-ease-out),
+      width var(--ll-dur-glide) var(--ll-ease-out);
+  }
+  .ll-glide.ll-on {
+    opacity: 1;
+    transition-duration: var(--ll-dur-glide-in), var(--ll-dur-glide), var(--ll-dur-glide);
+  }
+  .ll-glide,
+  :is(.ll-row, .ll-glide-item).ll-hl::before {
+    background: radial-gradient(
+      240px 110px at var(--ll-glide-mx, 50%) var(--ll-glide-my, 50%),
+      rgba(140, 160, 255, 0.15),
+      rgba(140, 160, 255, 0.045) 65%,
+      rgba(140, 160, 255, 0.03)
+    );
+  }
+  .ll-glide::after,
+  :is(.ll-row, .ll-glide-item).ll-hl::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    pointer-events: none;
+    padding: 1px;
+    background: radial-gradient(
+      130px 66px at var(--ll-glide-mx, 50%) var(--ll-glide-my, 50%),
+      rgba(215, 225, 255, 0.85),
+      rgba(215, 225, 255, 0.12) 75%,
+      rgba(215, 225, 255, 0.06)
+    );
+    -webkit-mask:
+      linear-gradient(var(--ll-mask) 0 0) content-box,
+      linear-gradient(var(--ll-mask) 0 0);
+    -webkit-mask-composite: xor;
+    mask:
+      linear-gradient(var(--ll-mask) 0 0) content-box exclude,
+      linear-gradient(var(--ll-mask) 0 0);
+  }
+  /* 关掉动画：每行自己的高亮，平时透明，带 .ll-hl 时淡入 */
+  :is(.ll-row, .ll-glide-item)::before,
+  :is(.ll-row, .ll-glide-item)::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    border-radius: inherit;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity var(--ll-dur-glide-out) ease;
+  }
+  :is(.ll-row, .ll-glide-item).ll-hl::before,
+  :is(.ll-row, .ll-glide-item).ll-hl::after {
+    opacity: 1;
+    transition-duration: var(--ll-dur-glide-in);
+  }
+}

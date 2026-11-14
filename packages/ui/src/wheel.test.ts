@@ -422,7 +422,7 @@ describe('WheelStream：同一串事件接不接管只判一次', () => {
   });
 });
 
-/* 把一串事件按 shell/wheel.ts 的做法喂给假的滚动区：接管的加进剩下的距离，不接管的清掉余量、由「浏览器」原样滚。
+/* 把一串事件按 scroll/install-wheel.ts 的做法喂给假的滚动区：接管的加进剩下的距离，不接管的清掉余量、由「浏览器」原样滚。
    事件之间隔 gap 毫秒，帧是 144 Hz，同时记下事件进行当中每一帧走了多少 */
 function playback(seq: number[], gap: number, start = 5000) {
   const r = rig(start);

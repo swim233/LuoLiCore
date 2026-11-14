@@ -7,26 +7,42 @@ import {
   GLIDE_OVERSHOOT,
   GLIDE_PEAK,
   cssBezier,
-} from '@luoli/ui/easing';
-import { env } from '@luoli/ui/env';
-import { motionOn } from '@luoli/ui/motion';
-import { morphStore } from '../shell/morph';
+} from '../easing';
+import { motionOn } from '../motion';
 
-/* 列表的悬停高亮：会话列表（桌面、全屏）和对话里选会话的菜单共用。只在有鼠标时（env.hover，触屏没有）。
-   - 一个列表一块高亮（.glide，列表的第一个子元素，绝对定位在列表的内容里，跟着内容滚）：
+/* 列表的悬停高亮：会话列表（桌面、全屏）、任务列表和对话里选会话的菜单共用。只在有鼠标时（(hover: hover) and (pointer: fine)，触屏没有）。
+   对外：useGlide(行的选择器)、hideGlides()；样子在 glide.css（.ll-glide，.ll-hl，行的集合 .ll-row 和 .ll-glide-item）。
+   - 一个列表一块高亮（.ll-glide，列表的第一个子元素，绝对定位在列表的内容里，跟着内容滚）：
      鼠标进到一行时用 transform 把它挪过去（0.3 秒）：先滑过目标约 4 像素再回来，过冲的距离固定、方向跟着滑动的方向，
      曲线与数字见 @luoli/ui/easing。位置用 Web Animations 的三段关键帧做。
      中途换目标（鼠标连着划过几行）时从此刻（动画里）的位置接着走：新动画从上一帧的时刻算起（不在原地多停一帧），
      顺着原来的方向时起步不比此刻慢（不先顿一下再走）。宽高跟着那一行，用 CSS 过渡，不回弹。
      从隐藏到显示时先瞬移到那一行再淡入（0.14 秒，不回弹）；离开列表淡出（0.25 秒）。
-   - 边光要的 --mx、--my 是鼠标相对那一行的坐标（写在高亮上；关掉动画时写在那一行上）。
+   - 边光要的 --ll-glide-mx、--ll-glide-my 是鼠标相对那一行的坐标（写在高亮上；关掉动画时写在那一行上）。
    - 列表变了，高亮不停在错的行上：
      - 列表滚动（鼠标没动）：瞬移到鼠标下现在的那一行；
      - 行进出场、重新排序（DOM 的子节点变了），或者鼠标下那一行自己挪了位置（进出场的高度动画、FLIP 排序）：
        淡掉，等鼠标再动、而且那一行停稳了（连着两帧位置不变）再出现；
-     - 窗口开始形变（缩成胶囊、全屏）：淡掉。
-   - 关掉动画（motionOn() 为假）：不滑，每一行自己淡入淡出（那一行加 .is-hl，样式在行自己的 ::before、::after 上）。
-   用法：const g = useGlide('.conv-item')；列表元素 ref={g.list}，第一个子元素 <i className="glide" ref={g.glide} />。 */
+     - 用的地方调 hideGlides()（面板：窗口开始形变——缩成胶囊、全屏——时调）：此刻显示着的高亮淡掉，等鼠标再动、行停稳了再出现；
+       库不认识外壳，什么时候该淡掉由用的地方说了算。
+   - 关掉动画（motionOn() 为假）：不滑，每一行自己淡入淡出（那一行加 .ll-hl，样式在行自己的 ::before、::after 上）。
+   用法：const g = useGlide('.conv-item')；列表元素 ref={g.list}，第一个子元素 <i className="ll-glide" ref={g.glide} />。
+   行要是库的 .ll-row，或者带 .ll-glide-item（不是 .ll-row 的行，比如菜单里的按钮），关动画时才有那两个伪元素。
+   行得是 position: relative、自成一个层叠上下文、自己没有不透明的底（.ll-row 就是这样）。
+   列表只看直接子节点的增减（MutationObserver）：行嵌在更里面的容器里时，行的增减不会让高亮淡掉。
+   useGlide 只在挂载（和选择器变）时接一次：列表元素和 .ll-glide 要在挂载时就在。 */
+/* 此刻有没有鼠标：用到的时候才读（这个入口加载时不碰 window） */
+let hoverQuery: MediaQueryList | undefined;
+const canHover = () =>
+  (hoverQuery ??= window.matchMedia('(hover: hover) and (pointer: fine)')).matches;
+
+/* 所有挂着的高亮各自「马上淡掉」的函数 */
+const hiders = new Set<() => void>();
+/** 让所有挂着的高亮马上淡掉：显示着的那块高亮（或关动画时那一行的高亮）淡出，等鼠标再动、鼠标下那一行停稳（连着两帧位置不变）再出现 */
+export function hideGlides() {
+  for (const hide of [...hiders]) hide();
+}
+
 export function useGlide(itemSel: string) {
   const list = useRef<HTMLElement | null>(null);
   const glide = useRef<HTMLElement | null>(null);
@@ -85,8 +101,8 @@ function attach(l: HTMLElement, g: HTMLElement, sel: string) {
   const point = (it: HTMLElement) => {
     const r = it.getBoundingClientRect();
     const t = fade() ? it : g;
-    t.style.setProperty('--mx', (lx - r.left).toFixed(1) + 'px');
-    t.style.setProperty('--my', (ly - r.top).toFixed(1) + 'px');
+    t.style.setProperty('--ll-glide-mx', (lx - r.left).toFixed(1) + 'px');
+    t.style.setProperty('--ll-glide-my', (ly - r.top).toFixed(1) + 'px');
   };
   const tr = (x: number, y: number) => `translate(${x.toFixed(1)}px, ${y.toFixed(1)}px)`;
   const read = () => {
@@ -160,20 +176,20 @@ function attach(l: HTMLElement, g: HTMLElement, sel: string) {
   };
   const show = (it: HTMLElement, snap: boolean) => {
     if (fade()) {
-      if (at !== it) at?.classList.remove('is-hl');
-      it.classList.add('is-hl');
+      if (at !== it) at?.classList.remove('ll-hl');
+      it.classList.add('ll-hl');
       at = it;
       box = boxIn(l, it);
     } else put(it, boxIn(l, it), snap || !shown);
     shown = true;
     stale = false;
-    g.classList.toggle('on', !fade());
+    g.classList.toggle('ll-on', !fade());
     point(it);
     loop();
   };
   const hide = () => {
-    g.classList.remove('on');
-    at?.classList.remove('is-hl');
+    g.classList.remove('ll-on');
+    at?.classList.remove('ll-hl');
     if (fade()) at = null;
     shown = false;
   };
@@ -214,7 +230,7 @@ function attach(l: HTMLElement, g: HTMLElement, sel: string) {
   };
 
   const onMove = (e: PointerEvent) => {
-    if (e.pointerType !== 'mouse' || !env.hover) return;
+    if (e.pointerType !== 'mouse' || !canHover()) return;
     lx = e.clientX;
     ly = e.clientY;
     inside = true;
@@ -256,25 +272,26 @@ function attach(l: HTMLElement, g: HTMLElement, sel: string) {
     prev = null;
   });
   mo.observe(l, { childList: true });
-  /* 窗口开始形变：淡掉（形变的复制层里留着的是开始那一刻的样子） */
-  const offMorph = morphStore.subscribe(() => {
-    if (shown && morphStore.get().list.some((m) => !m.dead)) {
+  /* hideGlides()：淡掉，等鼠标再动、行停稳 */
+  const hideNow = () => {
+    if (shown) {
       hide();
       stale = true;
       prev = null;
     }
-  });
+  };
+  hiders.add(hideNow);
   l.addEventListener('pointermove', onMove);
   l.addEventListener('pointerleave', onLeave);
   l.addEventListener('scroll', onScroll, { passive: true });
   return () => {
     mo.disconnect();
-    offMorph();
+    hiders.delete(hideNow);
     cancelAnimationFrame(raf);
     slide?.cancel();
     l.removeEventListener('pointermove', onMove);
     l.removeEventListener('pointerleave', onLeave);
     l.removeEventListener('scroll', onScroll);
-    at?.classList.remove('is-hl');
+    at?.classList.remove('ll-hl');
   };
 }

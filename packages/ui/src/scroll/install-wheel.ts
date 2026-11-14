@@ -1,11 +1,12 @@
-import { motionOn } from '@luoli/ui/motion';
-import { WHEEL_EVENT, wheelPixels, WheelMotion, wheelRegistry, WheelStream } from '@luoli/ui/wheel';
-import { motionBusy } from './morph';
+import { motionOn } from '../motion';
+import { WHEEL_EVENT, wheelPixels, WheelMotion, wheelRegistry, WheelStream } from '../wheel';
 
-/* 滚轮缓动：整个页面只在 document 上挂一份监听（boot.ts 里装），按滚轮事件的位置找到该滚的竖向滚动区，
-   以后新加的竖向滚动区不用单独接。数学（剩下的距离、每帧走多少）在 @luoli/ui/wheel。
+/* 滚轮缓动挂监听的部分：整个页面只在 document 上挂一份监听（用的地方启动时调一次 installWheel），按滚轮事件的位置找到该滚的竖向滚动区，
+   以后新加的竖向滚动区不用单独接。数学（剩下的距离、每帧走多少）在 ../wheel.ts（@luoli/ui/wheel）。
+   对外：installWheel({ busy? })。busy 是用的地方给的函数：返回真表示「此刻有大动画在走（形变、让位、拖动副本飞回……）」，
+   库在每个滚轮事件上（决定接不接管）、滚动途中的每一帧上（决定还走不走）都调它；不传就是从不忙。
    接管：鼠标滚轮这种整格的滚动。触控板一类的像素级小步、按着 Ctrl/Shift/Alt/Meta 的、关掉动画时、
-   形变和让位动画进行中，都不接管，交给浏览器，而且此刻还没走完的滚轮缓动立刻清掉（不要两边抢）；键盘、按下鼠标、触屏也一样。
+   busy() 为真时，都不接管，交给浏览器，而且此刻还没走完的滚轮缓动立刻清掉（不要两边抢）；键盘、按下鼠标、触屏也一样。
    大小步混在一起的一串事件（触控板甩动）接不接管只在这一串的第一个事件上定，整串一致（@luoli/ui/wheel 的 WheelStream）。
    找滚动区：从事件的目标往外一层一层找，第一个 overflow-y 是 auto、scroll（或 overlay）而且内容真的超出了的元素；
    找到页面根（html）就用 document.scrollingElement（桌面本身的滚动；全屏锁滚动时 html 的 overflow-y 是 hidden，不算）。
@@ -26,6 +27,8 @@ const KEY = '__luoliWheelOff';
 const live = new Set<WheelMotion>();
 const stream = new WheelStream();
 let latch: { el: HTMLElement; t: number } | null = null;
+/** 用的地方给的「此刻忙不忙」（installWheel 里设，拆掉时还原） */
+let busy: () => boolean = () => false;
 
 const maxOf = (el: HTMLElement) => Math.max(0, el.scrollHeight - el.clientHeight);
 
@@ -43,7 +46,7 @@ function motionFor(el: HTMLElement): WheelMotion {
       raf: (cb) => requestAnimationFrame(cb),
       caf: (id) => cancelAnimationFrame(id),
     },
-    { onIdle: () => live.delete(m), alive: () => motionOn() && !motionBusy() },
+    { onIdle: () => live.delete(m), alive: () => motionOn() && !busy() },
   );
   wheelRegistry.set(el, m);
   return m;
@@ -65,8 +68,9 @@ const containsOverscroll = (cs: CSSStyleDeclaration) =>
   cs.overscrollBehaviorY === 'contain' || cs.overscrollBehaviorY === 'none';
 
 /** 该滚的滚动区：找到了返回它，交给浏览器（输入框、没有可滚的）返回 null。
-    返回的滚动区可能这个方向已经滚不动（contain / none 挡在这里），调用的人要看 capacity */
-function pick(target: Element, dir: 1 | -1, now: number): HTMLElement | null {
+    返回的滚动区可能这个方向已经滚不动（contain / none 挡在这里），调用的人要看 capacity。
+    导出只为测试（scroll/install-wheel.test.ts 用假的节点和 getComputedStyle 试这些规则），不在 @luoli/ui/scroll 的入口里 */
+export function pickScroller(target: Element, dir: 1 | -1, now: number): HTMLElement | null {
   if (target.closest('[data-native-wheel]')) return null;
   if (latch && now - latch.t < LATCH_MS && latch.el.isConnected && latch.el.contains(target))
     return latch.el;
@@ -104,7 +108,7 @@ function onWheel(e: WheelEvent) {
   if (e.defaultPrevented) return;
   // 没有位移的事件（只带阶段信息）不算，不打断一串，也不清余量
   if (!e.deltaX && !e.deltaY) return;
-  const take = stream.decide(e, motionOn() && !motionBusy(), e.timeStamp || performance.now());
+  const take = stream.decide(e, motionOn() && !busy(), e.timeStamp || performance.now());
   // 浏览器已经在原生滚动、事件取消不掉（比如主线程卡了一下，合成线程先滚了）：让它滚，不要两边一起滚
   if (!take || !e.cancelable) {
     cancelAll();
@@ -114,7 +118,7 @@ function onWheel(e: WheelEvent) {
   if (!(t instanceof Element)) return;
   const dir = e.deltaY > 0 ? 1 : -1;
   const now = performance.now();
-  const el = pick(t, dir, now);
+  const el = pickScroller(t, dir, now);
   if (!el) {
     cancelAll();
     return;
@@ -130,10 +134,16 @@ function onWheel(e: WheelEvent) {
   el.dispatchEvent(new CustomEvent(WHEEL_EVENT, { detail: { dy } }));
 }
 
-/** 装上滚轮缓动，返回拆掉的函数。整个页面只装一份 */
-export function installWheel(): () => void {
+export interface InstallWheelOptions {
+  /** 此刻有大动画在走就返回真（面板传形变、让位动画、副本飞回的那个判断）；不传就是从不忙 */
+  busy?: () => boolean;
+}
+
+/** 装上滚轮缓动，返回拆掉的函数。整个页面只装一份（再装一次先拆掉上一次的，热更新也不会装两份） */
+export function installWheel(options: InstallWheelOptions = {}): () => void {
   const w = window as unknown as Record<string, (() => void) | undefined>;
   w[KEY]?.();
+  busy = options.busy ?? (() => false);
   const opts = { capture: true, passive: true } as const;
   const stop = () => cancelAll();
   document.addEventListener('wheel', onWheel, { capture: true, passive: false });
@@ -146,6 +156,7 @@ export function installWheel(): () => void {
     cancelAll();
     latch = null;
     stream.reset();
+    busy = () => false;
     w[KEY] = undefined;
   };
   w[KEY] = off;

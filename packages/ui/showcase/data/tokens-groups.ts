@@ -109,6 +109,7 @@ export const TOKEN_GROUPS: TokenGroup[] = [
       c('mask', '只用于遮罩的不透明部分'),
       c('quote', '引用的竖线、徽记里的 z'),
       c('tool', '调用工具的颜色'),
+      c('scrollbar', '滚动条的颜色（强调色 35%）'),
     ],
   },
   {

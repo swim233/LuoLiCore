@@ -1,6 +1,7 @@
 import { memo, useEffect, useRef, useState } from 'react';
-import { VirtualLog } from '../../components/VirtualLog';
-import type { LogItem, ScrollState } from '../../components/VirtualLog';
+import { VirtualLog } from '@luoli/ui/scroll';
+import { skyLogHooks } from '../../components/bubble-sky';
+import type { LogItem, ScrollState } from '@luoli/ui/scroll';
 import { MsgBubble, useGlass } from '../../components/Bubble';
 import { EventLine } from '../../components/EventLine';
 import { Button, Chevron, Empty, Notice } from '@luoli/ui/controls';
@@ -248,7 +249,7 @@ export function Timeline({ convId, web = false }: { convId: string | null; web?:
   }, [convId]);
 
   const note = (title: string, text?: string, action?: React.ReactNode) => (
-    <div className="tline pane-sc" role="log" aria-label="时间线">
+    <div className="tline ll-pane-sc" role="log" aria-label="时间线">
       <Empty title={title} action={action}>
         {text}
       </Empty>
@@ -313,6 +314,8 @@ export function Timeline({ convId, web = false }: { convId: string | null; web?:
     ) : null;
   return (
     <VirtualLog
+      className="tline"
+      {...skyLogHooks}
       items={items}
       resetKey={resetKey}
       label="时间线"

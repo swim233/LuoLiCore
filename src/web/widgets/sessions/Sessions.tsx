@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { IconSessions } from '../../components/icons';
 import { BakedGlass } from '../../components/Bubble';
-import { Pane } from '../../components/Pane';
+import { Pane } from '@luoli/ui/scroll';
 import { Button, Empty, IconButton, Tag } from '@luoli/ui/controls';
 import { DUR_LAYER, EASE_OUT_CSS, LAYER_SHIFT } from '@luoli/ui/easing';
 import { IconChevronLeft } from '@luoli/ui/icons';

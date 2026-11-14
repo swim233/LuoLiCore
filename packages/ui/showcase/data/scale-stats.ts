@@ -112,6 +112,6 @@ export const RADIUS_OTHER: { value: string; count: number; note: string }[] = [
   {
     value: 'var(--…)',
     count: 3,
-    note: '写在元素上的变量（--rtl、--rtr、--rbl、--rbr、--hr），不统计',
+    note: '写在元素上的变量（--ll-pane-rtl、--ll-pane-rtr、--ll-pane-rbl、--ll-pane-rbr、--ll-glide-radius），不统计',
   },
 ];

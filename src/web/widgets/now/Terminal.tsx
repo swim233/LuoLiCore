@@ -19,7 +19,7 @@ import { stardustAt } from './stardust';
 
 /* 「此刻」的终端：用户逐项拼出来的样式。一行：23:37 小明 › 正文；洛璃的回复 ✦（内联 SVG 的四角星）、工具调用 ◇、状态行 ·；
    洛璃的行带一层淡淡的底；新行进来时整体平滑上推，最上面的行滚到浮着的头部下面，在那里糊掉。
-   终端自己是窗格的滚动区（.pane-sc），上下的内边距里是浮着的头部和底边的留白。
+   终端自己是窗格的滚动区（.ll-pane-sc），上下的内边距里是浮着的头部和底边的留白。
    行用 @tanstack/react-virtual 排（动态高度）；洛璃正在说的那一行是光标打字（Typed.tsx）：按 Markdown 排版，高度随放出的字变。
    滚动：挂上时从底部开始；停在底部时（离底小于 STICK_PX）新内容贴底、照常上推；往上翻着时新内容不把人拉回底部、也不上推，
    视野里的行不跳；下面来了新内容时底部浮出「回到最新」，点了平滑滚到底、恢复贴底 */
@@ -287,8 +287,8 @@ export function Terminal({ session }: { session: Session }) {
     /* 虚拟器的位置只靠滚动事件更新：滚动范围是 0（内容放得下）时挂上以后不会有滚动事件，它还停在 initialOffset 那个超过总高的数上，
        只画最后的 OVERSCAN 行。下一帧补发一次，让它读到真实的滚动位置 */
     const sync = requestAnimationFrame(() => clip.dispatchEvent(new Event('scroll')));
-    /* 「回到最新」浮在窗格的下浮层里（在内容和底部的渐进模糊上面，Pane.tsx 的 .pane-bot） */
-    setHost(clip.parentElement?.querySelector<HTMLElement>(':scope > .pane-bot') ?? null);
+    /* 「回到最新」浮在窗格的下浮层里（在内容和底部的渐进模糊上面，@luoli/ui/scroll 的 Pane 的 .ll-pane-bot） */
+    setHost(clip.parentElement?.querySelector<HTMLElement>(':scope > .ll-pane-bot') ?? null);
     return () => {
       ro.disconnect();
       cancelAnimationFrame(sync);
@@ -480,7 +480,7 @@ export function Terminal({ session }: { session: Session }) {
   return (
     <>
       <div
-        className="term pane-sc"
+        className="term ll-pane-sc"
         ref={clipRef}
         role="log"
         aria-live="polite"

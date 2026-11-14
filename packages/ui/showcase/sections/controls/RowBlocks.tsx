@@ -3,7 +3,7 @@ import { Badge, Button, Row, RowButton } from '../../../src/controls';
 import { Stage } from '../../components/Stage';
 import { Group, Matrix, PanelEnv, useStageKind } from './shared';
 
-/* 「列表行」一块：会话列表的行、任务的行。悬停高亮（glide）在特效那一步，这里的行自己没有悬停的样子 */
+/* 「列表行」一块：会话列表的行、任务的行。悬停高亮（useGlide）在「滚动」一节，这里的行自己没有悬停的样子 */
 
 interface Conv {
   id: string;
@@ -143,8 +143,8 @@ export function RowBlock() {
         键盘焦点环画在行里面。字号：标题 13、次要文字 12、右边的小字 11；头、主区、右列之间隔 12。
         <b>
           {' '}
-          悬停高亮（跟着鼠标滑的那块）在「特效」那一步
-        </b>，这一批的行自己没有悬停的样子；行是 <code>position: relative</code>
+          悬停高亮（跟着鼠标滑的那块）在「滚动」一节（useGlide）
+        </b>，行自己没有悬停的样子；行是 <code>position: relative</code>
         、自成一个层叠上下文、自己没有不透明的底，不会挡住它。
       </p>
       <Stage kind={kind}>

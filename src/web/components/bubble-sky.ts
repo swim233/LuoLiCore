@@ -120,8 +120,8 @@ function unwatch(el: Element) {
 }
 
 const onScroll = () => touchSky(HOLD_SCROLL);
-/* 滚轮缓动（shell/wheel.ts）在滚轮事件之后的 rAF 里写 scrollTop，滚动事件要晚一帧才来：滚轮事件一来就先排上，
-   排的 rAF 在滚轮缓动的 rAF 后面（这个监听比 shell/wheel.ts 的晚装），同一帧里写完 scrollTop 再量，头一帧也是对的 */
+/* 滚轮缓动（@luoli/ui/scroll 的 installWheel）在滚轮事件之后的 rAF 里写 scrollTop，滚动事件要晚一帧才来：滚轮事件一来就先排上，
+   排的 rAF 在滚轮缓动的 rAF 后面（这个监听比 installWheel 里的晚装），同一帧里写完 scrollTop 再量，头一帧也是对的 */
 const onWheel = () => touchSky(HOLD_SCROLL);
 const LISTEN = { capture: true, passive: true } as const;
 
@@ -191,3 +191,13 @@ export function realignSky(root: HTMLElement) {
     if (box) apply({ leaf, box, card: null, v: [NaN, NaN, NaN, NaN] }, cards, true);
   }
 }
+
+/* 时间线（@luoli/ui/scroll 的 VirtualLog）的两个回调：条目的高度变了、位置挪了（同一帧里，布局之后绘制之前）让「预先糊好」的气泡星空当场重新对齐，
+   接下来几帧也每帧对一次；每次定位做完（条目有增减、重新排了）再对一次，120 毫秒内每帧对。以前是 VirtualLog 自己调 flushSky、touchSky */
+export const skyLogHooks = {
+  onRowsMoved: () => {
+    flushSky();
+    touchSky();
+  },
+  onPositioned: () => touchSky(120),
+};

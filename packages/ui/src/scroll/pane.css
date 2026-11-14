@@ -1,0 +1,186 @@
+/* 窗格 Pane（Pane.tsx）：部件里的一块滚动区，内容铺满整块，上下浮着的东西盖在内容上面，滚进它们下面的内容由浅到深地糊。
+   内容（.ll-pane-sc，滚动区）上下留出浮层的高度（--ll-pane-ht、--ll-pane-hb，Pane 量出来写在 .ll-pane 上）再加它自己的留白（--ll-pane-sc-pt、--ll-pane-sc-pb）。
+   上下各一组模糊（.ll-pane-ov，data-side="t" 在上、"b" 在下）：4 层 backdrop-filter（.ll-pane-l1～l4），每层只在一段里不透明（遮罩），由浅到深，靠窗口边上最糊；
+   加一层渐变的底（.ll-pane-tn）。一组的高度 = 浮层高度 + 渐变带长度（--ll-pane-rt，窗口高度的 10.5%，24～82 px）。
+   模糊强度按指数曲线涨：位置 x 从内容一侧（0）量到窗口边（1），沿整组的高度，目标是 T(x) = 22.36 × (e^(5x) − 1) ÷ (e^5 − 1) px，
+   x = 0.25 处 0.38、0.5 处 1.70、0.75 处 6.30、1 处 22.36。开头几乎不糊，内容刚滚进来时看不出一条分界线。
+   叠出来的等效模糊按 eff(x) = sqrt(Σ a_i(x) · σ_i²) 算（a_i 是第 i 层在 x 处的遮罩不透明度，σ_i 是它的模糊半径）。
+   节点 x_j = j/4：第 i 层（0 起）在 x_i 透明，x_(i+1)～x_(i+2) 不透明，x_(i+3) 透明，最后两层不透明到边上，即遮罩的 0/25/50/75/100%。
+   让 eff(x_j) = T(x_j) 解出半径：σ_0 = T(x_1)，σ_j = sqrt(T(x_(j+1))² − σ_(j−1)²)，
+   = 0.38、1.65、6.08、21.52 px（下面写死；改曲线时照这个式子重算）。
+   渐变的底同一条曲线：78% × (e^(2.5x) − 1) ÷ (e^2.5 − 1)，取 12 段连成渐变（每 1/12 处一个点）。
+   「只在那一边还有内容时出现」：每层自己做透明度的 scroll-driven animation（顶上那组在滚动的头 32px 里淡入，底下那组在最后 32px 里淡出），
+   基准透明度是 0：内容不够一屏（没有滚动范围，时间线不起作用）时两边都没有。
+
+   对外的约定（用的地方要知道的）：
+   - 类名：.ll-pane（根，也可以再带用的地方自己的类）；里面依次是 .ll-pane-top（上浮层，Pane 的 top 在里面，前面是空出标题高度的 .ll-pane-hsp）、
+     滚动区 .ll-pane-sc（由用的地方渲染，必须是 .ll-pane 的直接子元素）、.ll-pane-bot（下浮层）、两组 .ll-pane-ov（里面是 i.ll-pane-l1～l4 和 i.ll-pane-tn）。
+   - 变量：Pane 量出来写在 .ll-pane 上的 --ll-pane-ht（上浮层高）、--ll-pane-hb（下浮层高）、--ll-pane-rt（渐变带长）、--ll-pane-ph（窗格高）；
+     用的地方写的：--ll-pane-head（.ll-pane-hsp 的高，窗口标题栏的高度，写在外层）、--ll-pane-sc-pt、--ll-pane-sc-pb（滚动区自己的留白，写在滚动区上）、
+     --ll-pane-rtl、--ll-pane-rtr、--ll-pane-rbl、--ll-pane-rbr（贴着窗口的四个圆角，默认都是 --ll-radius-window，渐变带的四角跟着它）。
+     --ll-pane-sc、--ll-pane-toward、关键帧 ll-pane-ot、ll-pane-ob 是内部的。--ll-pane-tint（渐变的底的颜色）、--ll-scrollbar 在 tokens.css。
+   - 大动画期间（形变、整理拖动）要关掉模糊、只留渐变的底：对 .ll-pane-ov > i:not(.ll-pane-tn) 写 backdrop-filter: none（用的地方的样式不在层里，盖得过这里；
+     要和这里的过渡一起关就再写 transition: none）；停下来撤掉它，模糊会按下面的 transition 淡回来。库里不写 important 标记（层里的 important 比层外的还强，会盖过用的地方的样式）：
+     用的地方想让「关模糊」压过自己别处的过渡规则，自己在那条规则里带 important 标记。
+   - 上浮层里有要压到下浮层上面的东西（下拉菜单）：自己写 .ll-pane-top { z-index: 5 }。滚动区的圆角、上下浮层之外的层次（窗口的暗边、标题）也是用的地方的事。
+   - 注意：模糊层的容器（.ll-pane-ov、.ll-pane）不能有透明度动画、opacity < 1、filter、mask（那样它就成了 backdrop root，模糊什么也看不到），
+     它上面几层祖先也一样。
+   - 关动画：库不管（滚动驱动的透明度、淡回来的过渡都由用的地方的「关动画」规则决定）；面板在 .still 里把滚动区、渐变带的过渡设成 none（这是排版，不是装饰）。 */
+@layer ll.controls {
+  @keyframes ll-pane-ot {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+  @keyframes ll-pane-ob {
+    from {
+      opacity: 1;
+    }
+    to {
+      opacity: 0;
+    }
+  }
+  .ll-pane {
+    --ll-pane-rtl: var(--ll-radius-window);
+    --ll-pane-rtr: var(--ll-radius-window);
+    --ll-pane-rbl: var(--ll-radius-window);
+    --ll-pane-rbr: var(--ll-radius-window);
+    position: relative;
+    min-width: 0;
+    min-height: 0;
+    timeline-scope: --ll-pane-sc;
+  }
+  .ll-pane > .ll-pane-sc {
+    position: absolute;
+    inset: 0;
+    box-sizing: border-box;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scroll-timeline: --ll-pane-sc y;
+    padding-top: calc(var(--ll-pane-ht, 0px) + var(--ll-pane-sc-pt, 0px));
+    padding-bottom: calc(var(--ll-pane-hb, 0px) + var(--ll-pane-sc-pb, 0px));
+    scrollbar-width: thin;
+    scrollbar-color: var(--ll-scrollbar) transparent;
+  }
+  .ll-pane-top,
+  .ll-pane-bot {
+    position: absolute;
+    left: 0;
+    right: 0;
+    z-index: 4;
+    pointer-events: none;
+  }
+  .ll-pane-top {
+    top: 0;
+  }
+  .ll-pane-bot {
+    bottom: 0;
+  }
+  .ll-pane-top > *,
+  .ll-pane-bot > * {
+    pointer-events: auto;
+  }
+  .ll-pane-hsp {
+    height: var(--ll-pane-head);
+  }
+  /* 上浮层里别的东西都收鼠标（.ll-pane-top > *），空出标题的这一块不收：选择器比上面那条权重高，不用 important 标记 */
+  .ll-pane-top > .ll-pane-hsp {
+    pointer-events: none;
+  }
+  .ll-pane-ov {
+    position: absolute;
+    left: 0;
+    right: 0;
+    z-index: 2;
+    pointer-events: none;
+  }
+  /* --ll-pane-toward：渐变从内容一侧走向窗口边的方向（遮罩、渐变的底共用），0% 在内容一侧 */
+  .ll-pane-ov[data-side='t'] {
+    --ll-pane-toward: to top;
+    top: 0;
+    height: calc(var(--ll-pane-ht, 0px) + var(--ll-pane-rt, 24px));
+  }
+  .ll-pane-ov[data-side='b'] {
+    --ll-pane-toward: to bottom;
+    bottom: 0;
+    height: calc(var(--ll-pane-hb, 0px) + var(--ll-pane-rt, 24px));
+  }
+  .ll-pane-ov > i {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    /* 换回模糊时（大动画结束，用的地方撤掉了 backdrop-filter: none）：模糊半径从 0 长到原样（渐变的底一直在，模糊只是加上去） */
+    transition: backdrop-filter var(--ll-dur-blur-in) ease-out;
+  }
+  .ll-pane-ov[data-side='t'] > i {
+    border-radius: var(--ll-pane-rtl) var(--ll-pane-rtr) 0 0;
+    animation: ll-pane-ot linear both;
+    animation-timeline: --ll-pane-sc;
+    animation-range: 0 32px;
+  }
+  .ll-pane-ov[data-side='b'] > i {
+    border-radius: 0 0 var(--ll-pane-rbr) var(--ll-pane-rbl);
+    animation: ll-pane-ob linear both;
+    animation-timeline: --ll-pane-sc;
+    animation-range: calc(100% - 32px) 100%;
+  }
+  .ll-pane-ov > .ll-pane-l1 {
+    -webkit-backdrop-filter: blur(0.38px);
+    backdrop-filter: blur(0.38px);
+    mask-image: linear-gradient(
+      var(--ll-pane-toward),
+      transparent 0%,
+      var(--ll-mask) 25%,
+      var(--ll-mask) 50%,
+      transparent 75%
+    );
+  }
+  .ll-pane-ov > .ll-pane-l2 {
+    -webkit-backdrop-filter: blur(1.65px);
+    backdrop-filter: blur(1.65px);
+    mask-image: linear-gradient(
+      var(--ll-pane-toward),
+      transparent 25%,
+      var(--ll-mask) 50%,
+      var(--ll-mask) 75%,
+      transparent 100%
+    );
+  }
+  .ll-pane-ov > .ll-pane-l3 {
+    -webkit-backdrop-filter: blur(6.08px);
+    backdrop-filter: blur(6.08px);
+    mask-image: linear-gradient(
+      var(--ll-pane-toward),
+      transparent 50%,
+      var(--ll-mask) 75%,
+      var(--ll-mask) 100%
+    );
+  }
+  .ll-pane-ov > .ll-pane-l4 {
+    -webkit-backdrop-filter: blur(21.52px);
+    backdrop-filter: blur(21.52px);
+    mask-image: linear-gradient(var(--ll-pane-toward), transparent 75%, var(--ll-mask) 100%);
+  }
+  /* 渐变的底：78% × (e^(2.5x) − 1) ÷ (e^2.5 − 1)，每 1/12 处一个点：0、1.6、3.6、6.1、9.1、12.8、17.4、23.0、30.0、38.5、49.0、62.0、78.0 % */
+  .ll-pane-ov > .ll-pane-tn {
+    background: linear-gradient(
+      var(--ll-pane-toward),
+      transparent 0,
+      color-mix(in srgb, var(--ll-pane-tint) 1.6%, transparent) 8.333%,
+      color-mix(in srgb, var(--ll-pane-tint) 3.6%, transparent) 16.667%,
+      color-mix(in srgb, var(--ll-pane-tint) 6.1%, transparent) 25%,
+      color-mix(in srgb, var(--ll-pane-tint) 9.1%, transparent) 33.333%,
+      color-mix(in srgb, var(--ll-pane-tint) 12.8%, transparent) 41.667%,
+      color-mix(in srgb, var(--ll-pane-tint) 17.4%, transparent) 50%,
+      color-mix(in srgb, var(--ll-pane-tint) 23%, transparent) 58.333%,
+      color-mix(in srgb, var(--ll-pane-tint) 30%, transparent) 66.667%,
+      color-mix(in srgb, var(--ll-pane-tint) 38.5%, transparent) 75%,
+      color-mix(in srgb, var(--ll-pane-tint) 49%, transparent) 83.333%,
+      color-mix(in srgb, var(--ll-pane-tint) 62%, transparent) 91.667%,
+      color-mix(in srgb, var(--ll-pane-tint) 78%, transparent) 100%
+    );
+  }
+}

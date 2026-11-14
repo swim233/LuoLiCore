@@ -51,7 +51,7 @@ export function bezierAt([x1, y1, x2, y2]: Bezier, t: number): number {
   }
   return y(u);
 }
-/* 列表的悬停高亮从一行滑到另一行，到位时回弹（components/glide.ts 用 Web Animations 的三段关键帧）：
+/* 列表的悬停高亮从一行滑到另一行，到位时回弹（scroll/glide.ts 用 Web Animations 的三段关键帧）：
    - 先滑过目标 GLIDE_OVERSHOOT 像素，在全程的 GLIDE_PEAK 处到最远、速度减到 0（EASE_GLIDE_GO），再回到目标（EASE_GLIDE_BACK）；
    - 过冲的距离固定，和滑多远无关（一行到下一行、跨好几行都是这么多），方向跟着滑动的方向；
      剩下的路不到过冲的 4 倍时（中途换回附近的行）按 1/4 缩小，免得几像素的挪动冲得比走得还远；

@@ -3,10 +3,11 @@ import { Chat, useChat } from '@ai-sdk/react';
 import { MsgBubble } from '../../components/Bubble';
 import { EventLine } from '../../components/EventLine';
 import { Thumb } from '../../components/Hl';
-import { VirtualLog } from '../../components/VirtualLog';
-import { Pane } from '../../components/Pane';
-import { useGlide } from '../../components/glide';
-import type { LogItem, ScrollState } from '../../components/VirtualLog';
+import { VirtualLog } from '@luoli/ui/scroll';
+import { skyLogHooks } from '../../components/bubble-sky';
+import { Pane } from '@luoli/ui/scroll';
+import { useGlide } from '@luoli/ui/scroll';
+import type { LogItem, ScrollState } from '@luoli/ui/scroll';
 import { IconChat } from '../../components/icons';
 import { Button, Chevron, Empty, IconButton, Notice, Spinner } from '@luoli/ui/controls';
 import { IconChevronLeft } from '@luoli/ui/icons';
@@ -197,7 +198,7 @@ function SegLine({ convId }: { convId: string }) {
 }
 
 const note = (title: string, text?: string, action?: React.ReactNode) => (
-  <div className="tline pane-sc" role="log" aria-live="polite" aria-label="对话">
+  <div className="tline ll-pane-sc" role="log" aria-live="polite" aria-label="对话">
     <Empty title={title} action={action}>
       {text}
     </Empty>
@@ -240,6 +241,8 @@ function NewLog() {
   const req = creatingReq();
   return (
     <VirtualLog
+      className="tline"
+      {...skyLogHooks}
       items={req ? startedItems(req) : [emptyItem()]}
       resetKey="new"
       label="对话"
@@ -304,6 +307,8 @@ function ChatLog({ convId }: { convId: string }) {
   if (started)
     return (
       <VirtualLog
+        className="tline"
+        {...skyLogHooks}
         items={startedItems(started)}
         resetKey={'new:' + convId}
         label="对话"
@@ -415,6 +420,8 @@ function ChatLog({ convId }: { convId: string }) {
     ) : null;
   return (
     <VirtualLog
+      className="tline"
+      {...skyLogHooks}
       items={items}
       resetKey={resetKey}
       label="对话"
@@ -462,7 +469,7 @@ function Composer({ convId, fullId }: { convId: string | null; fullId: string })
     }
   }, [text]);
   /* 待发的图片是横着的一行：鼠标滚轮竖着滚时也横着走（能滚的时候才接管，滚到头了让页面接着滚）。
-     这一行带 data-native-wheel：全局的滚轮缓动（shell/wheel.ts）不处理它里面的滚轮，留给这里 */
+     这一行带 data-native-wheel：全局的滚轮缓动（@luoli/ui/scroll 的 installWheel）不处理它里面的滚轮，留给这里 */
   const attsRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const el = attsRef.current;
@@ -755,7 +762,7 @@ function ChatView({ mode }: ViewProps) {
   );
 }
 
-/* 对话里选会话的下拉菜单：玻璃底；悬停时一块高亮跟着鼠标从一项滑到另一项（和会话列表同一套，components/glide.ts） */
+/* 对话里选会话的下拉菜单：玻璃底；悬停时一块高亮跟着鼠标从一项滑到另一项（和会话列表同一套，@luoli/ui/scroll 的 useGlide） */
 function ChatMenu({
   convs,
   cur,
@@ -774,12 +781,13 @@ function ChatMenu({
         g.list.current = el;
       }}
     >
-      <i className="glide" ref={(el) => void (g.glide.current = el)} aria-hidden="true" />
+      <i className="ll-glide" ref={(el) => void (g.glide.current = el)} aria-hidden="true" />
       {convs.map((x) => (
         <button
           key={x.id}
           type="button"
           role="menuitem"
+          className="ll-glide-item"
           aria-current={x.id === cur}
           onClick={() => {
             close();
@@ -793,6 +801,7 @@ function ChatMenu({
       <button
         type="button"
         role="menuitem"
+        className="ll-glide-item"
         onClick={() => {
           close();
           newWebConv();

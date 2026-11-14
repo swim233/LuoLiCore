@@ -1,14 +1,13 @@
 import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { motionOn } from '@luoli/ui/motion';
-import { isSliding, maxScrollTop, SLIDE_PUSH_TAU, slideSendMs, sliderOf } from '../lib/slide';
-import { isWheeling, WHEEL_EVENT, wheelDir } from '@luoli/ui/wheel';
-import { flushSky, touchSky } from './bubble-sky';
+import { motionOn } from '../motion';
+import { isSliding, maxScrollTop, SLIDE_PUSH_TAU, slideSendMs, sliderOf } from '../slide';
+import { isWheeling, WHEEL_EVENT, wheelDir } from '../wheel';
 
-/* 虚拟滚动的时间线：@tanstack/react-virtual，动态高度，贴底。
-   它自己就是窗格（components/Pane.tsx）的滚动区（.pane-sc）：上下的内边距里有浮在上面的标题、输入框，位置都要算上它们：
+/* 虚拟滚动的长列表（时间线）：@tanstack/react-virtual，动态高度，贴底。
+   它自己就是窗格（Pane.tsx）的滚动区（.ll-pane-sc）：上下的内边距里有浮在上面的标题、输入框，位置都要算上它们：
    - 切换会话（resetKey 变）：给了 anchorKey 就停在那一条（离浮着的标题下沿留一点空）并且不贴底，否则直接到底（瞬间，不滑）；
-   - 新条目进来时如果本来就在底部附近（距底 < 80px）就滑过去：贴底、内容往上推，约 0.18 秒（动画开着时；lib/slide.ts）；
+   - 新条目进来时如果本来就在底部附近（距底 < 80px）就滑过去：贴底、内容往上推，约 0.18 秒（动画开着时；../slide.ts）；
      内容变高（逐字、气泡外框的补间、折叠展开）时，原本贴底的在同一帧里继续贴底（见下面「同一帧」）；
    - 顶上多了条目（往上翻取回了更早的消息）：画面停在原来看的那一条，不跳（瞬间）；
    - jumpKey 加一（对话里发出了消息）：不管现在滚到哪里，回到最底下，之后新来的内容照常贴底。离得远时滑过去
@@ -22,7 +21,18 @@ import { flushSky, touchSky } from './bubble-sky';
    气泡每多一行都有一帧最后一条的下沿伸到输入框下面、下一帧才被拉回来。现在自己也观察每一条的高度（watchRow）：
    量到变了就在同一个 ResizeObserver 回调里（布局之后、绘制之前）把新高度交给虚拟器、直接写容器的高度和各条的 transform、
    贴底时把 scrollTop 滚到底，这一帧画出来的就是对好的。React 之后渲染出的是同样的值。
-   滑动（上推、发出后回到底部）正在进行时 scrollTop 由滑动写，这里只更新位置与高度，滑动的目标（每帧重取「最底下」）自己会跟上。 */
+   滑动（上推、发出后回到底部）正在进行时 scrollTop 由滑动写，这里只更新位置与高度，滑动的目标（每帧重取「最底下」）自己会跟上。
+
+   对外：VirtualLog 的 props（items、resetKey、label、live、children、anchorKey、topNotice、onScrollState、jumpKey、className，
+   和两个回调 onRowsMoved、onPositioned）、类型 LogItem、ScrollState。DOM：滚动区带 class ll-pane-sc、ll-vlog，加 className；
+   里面是 div.ll-vlog-top（topNotice，样式在 vlog.css）和绝对定位的各条（data-index、data-key，高度变了会被逐条观察）。
+   滚动区的 display 在行内样式里写成 block（盖过用的地方给 className 带来的 flex 之类）。
+   用的地方的约定：滚动区要放在 Pane 里（浮层的高度、留白变量都从 .ll-pane 来）；气泡等条目里的东西高度变了，不用通知，行高会被观察到。
+   - onScrollState：滚动时、每次渲染之后都会调（没有滚动事件时，内容变了、取回了更早的条目也要报位置）：在里面设 React 状态时，值没变就别设，不然会循环渲染；
+   回调：
+   - onRowsMoved：某几条的高度变了，已经同步到虚拟器、容器高度和各条的位置、滚动位置也写完了（ResizeObserver 回调里，布局之后绘制之前）。
+     面板在这里让「预先糊好」的气泡星空当场对位；
+   - onPositioned：每次渲染提交后的定位（layout effect）做完时调，条目有增减、重新排了也包括在内。 */
 export interface LogItem {
   key: string;
   node: React.ReactNode;
@@ -38,7 +48,7 @@ export interface ScrollState {
 const SEND_SLIDE_VIEWPORTS = 2;
 /** 停在 anchorKey 那一条时，它的顶边离浮着的标题下沿多少 px */
 const ANCHOR_OFFSET = 40;
-/* 窗格量出来的浮层高度（--ht、--hb），滚动区从 .pane 继承 */
+/* 窗格量出来的浮层高度（--ll-pane-ht、--ll-pane-hb），滚动区从 .ll-pane 继承 */
 const cssPx = (c: HTMLElement, name: string) =>
   parseFloat(getComputedStyle(c).getPropertyValue(name)) || 0;
 /** 上下的内边距：浮层的高度加滚动区自己的留白。虚拟列表的起点离滚动内容顶部 top 这么多 */
@@ -46,7 +56,7 @@ function pads(c: HTMLElement) {
   const cs = getComputedStyle(c);
   const top = parseFloat(cs.paddingTop) || 0,
     bottom = parseFloat(cs.paddingBottom) || 0;
-  return { top, bottom, ht: cssPx(c, '--ht'), hb: cssPx(c, '--hb') };
+  return { top, bottom, ht: cssPx(c, '--ll-pane-ht'), hb: cssPx(c, '--ll-pane-hb') };
 }
 /** 停在某一条时它的顶边离滚动区顶边多少：浮着的标题下沿再往下 ANCHOR_OFFSET */
 const anchorAt = (c: HTMLElement) => () => pads(c).ht + ANCHOR_OFFSET;
@@ -102,6 +112,9 @@ export function VirtualLog({
   topNotice,
   onScrollState,
   jumpKey,
+  className,
+  onRowsMoved,
+  onPositioned,
 }: {
   items: LogItem[];
   resetKey: string | null;
@@ -115,6 +128,12 @@ export function VirtualLog({
   onScrollState?: (s: ScrollState) => void;
   /** 每加一次，时间线滚到最底下并重新贴底（对话里发出消息、重试） */
   jumpKey?: number;
+  /** 加在滚动区上的类名（用的地方自己的版面：内边距变量、左右留白……） */
+  className?: string;
+  /** 逐条行高同步完以后调（见上面「对外」） */
+  onRowsMoved?: () => void;
+  /** 每次定位的 layout effect 末尾调 */
+  onPositioned?: () => void;
 }) {
   const scRef = useRef<HTMLDivElement>(null);
   /* 上内边距（浮着的标题加留白）：虚拟列表从这里开始，告诉虚拟器（scrollMargin），它算可视范围、滚到某一条才是对的 */
@@ -188,9 +207,8 @@ export function VirtualLog({
       if (sl.active) sl.sync();
       else c.scrollTop = c.scrollHeight;
     }
-    // 各条的位置挪了、滚动位置也写完了（这里在布局之后、绘制之前）：气泡里垫的星空当场跟着重新对齐，接下来几帧也每帧对一次
-    flushSky();
-    touchSky();
+    // 各条的位置挪了、滚动位置也写完了（这里在布局之后、绘制之前）：交给用的地方（面板让气泡里垫的星空当场重新对齐，接下来几帧也每帧对一次）
+    onRowsMoved?.();
   };
   const syncRef = useRef(syncRows);
   syncRef.current = syncRows;
@@ -214,7 +232,7 @@ export function VirtualLog({
     },
     [],
   );
-  /* 滚轮缓动开始往上滚（shell/wheel.ts 同步发的事件，比第一帧的滚动事件早）：马上不再贴底，
+  /* 滚轮缓动开始往上滚（install-wheel.ts 同步发的事件，比第一帧的滚动事件早）：马上不再贴底，
      第一帧之前来的新内容不会把人拉回底部 */
   useEffect(() => {
     const c = scRef.current;
@@ -352,8 +370,8 @@ export function VirtualLog({
     prevCount.current = items.length;
     prevFirst.current = items[0]?.key;
     prevLastKey.current = items[items.length - 1]?.key;
-    // 条目有增减、重新排了：气泡里垫的星空要重新对齐
-    touchSky(120);
+    // 条目有增减、重新排了：交给用的地方（面板让气泡里垫的星空重新对齐）
+    onPositioned?.();
   });
   useLayoutEffect(() => {
     const f = fixup.current;
@@ -381,7 +399,7 @@ export function VirtualLog({
   /* 发出消息：设成贴底，回到最底下。离得远（动画开着时）滑过去，不是跳：ease-out，时长随距离，最长 0.45 秒；
      本来就在底部（或关了动画）直接到。之后新消息、回复进来时高度是慢慢长出来的：滑动的目标每帧重取「最底下」，
      滑完以后靠同一帧贴底（syncRows）。滑的途中不用 settle 那样的逐帧校正，滚动事件也不会把「贴底」清掉（isSliding）；
-     用户自己滚动、点按（slide.ts 里的监听）就放手 */
+     用户自己滚动、点按（../slide.ts 里的监听）就放手 */
   const jumpSeen = useRef(jumpKey);
   useLayoutEffect(() => {
     if (jumpKey === jumpSeen.current) return;
@@ -425,7 +443,7 @@ export function VirtualLog({
   });
   return (
     <div
-      className="tline pane-sc"
+      className={'ll-pane-sc ll-vlog' + (className ? ' ' + className : '')}
       ref={scRef}
       role="log"
       aria-label={label}
@@ -438,7 +456,7 @@ export function VirtualLog({
       }}
       style={{ display: 'block' }}
     >
-      {topNotice && <div className="log-top">{topNotice}</div>}
+      {topNotice && <div className="ll-vlog-top">{topNotice}</div>}
       <div ref={sizer} style={{ position: 'relative', height: total, width: '100%' }}>
         {virt.getVirtualItems().map((v) => {
           const it = items[v.index];

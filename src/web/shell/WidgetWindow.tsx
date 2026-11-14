@@ -41,7 +41,7 @@ interface Props {
 
 /* 部件的外壳：.w 负责位置（Motion 的 layout 动画：其他卡片让位），.w-card 负责外观（悬停、倾斜、晃动）。
    .w-card 是夜空窗口：部件的内容（.w-body，里面是窗格）铺满整块，标题栏（.w-head）浮在最上面；
-   四周向内压暗的暗边和细线（.w-vig）画在窗格的模糊上面、浮层下面，不跟着被糊开（层次见 components/Pane.tsx） */
+   四周向内压暗的暗边和细线（.w-vig）画在窗格的模糊上面、浮层下面，不跟着被糊开（层次见 @luoli/ui 的 scroll/pane.css、Pane.tsx） */
 export const WidgetWindow = memo(function WidgetWindow({
   id,
   variant,

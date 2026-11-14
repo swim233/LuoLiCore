@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Badge, ToolName } from '../../components/Badge';
-import { Pane } from '../../components/Pane';
+import { Pane } from '@luoli/ui/scroll';
 import { IconNow } from '../../components/icons';
 import { Button, Dot, Empty, Tab, TabList, Tabs } from '@luoli/ui/controls';
 import { env } from '@luoli/ui/env';
@@ -20,7 +20,7 @@ import { Terminal } from './Terminal';
 import type { ViewProps, WidgetDef } from '../types';
 
 /* 「此刻」的版面：窗口里上面一块（大徽记、状态名、一行说明）、下面是终端；全屏时最多 3 栏并排。
-   上面那一块和窗口标题一起浮在终端上面（贴在标题栏下面）；终端是窗格，它顶上空出的高度（--pane-head）是标题栏加这一块，
+   上面那一块和窗口标题一起浮在终端上面（贴在标题栏下面）；终端是窗格，它顶上空出的高度（--ll-pane-head）是标题栏加这一块，
    量出来写在 .now 上，全屏时几栏共用 */
 function useNowSessions() {
   const [n, setN] = useState(0);
@@ -58,7 +58,8 @@ function useNowTop() {
     if (!el || !now) return;
     const fit = () => {
       const v = `calc(var(--head-h) + ${el.offsetHeight}px)`;
-      if (now.style.getPropertyValue('--pane-head') !== v) now.style.setProperty('--pane-head', v);
+      if (now.style.getPropertyValue('--ll-pane-head') !== v)
+        now.style.setProperty('--ll-pane-head', v);
     };
     fit();
     const ro = new ResizeObserver(fit);
@@ -70,7 +71,7 @@ function useNowTop() {
 function NowEmpty() {
   const name = useAssistantName();
   return (
-    <div className="now-empty pane-sc">
+    <div className="now-empty ll-pane-sc">
       <Empty flat title={status.online ? '现在很安静' : `${name}离线了`}>
         {status.online
           ? `有人叫${name}时，这里会实时显示那个会话的对话`

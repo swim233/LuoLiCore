@@ -4,7 +4,7 @@ import { bus } from '../../model/bus';
 import { db } from '../../model/db';
 import { link, useLinkPhase } from '../../model/link';
 import { IconToday } from '../../components/icons';
-import { Pane } from '../../components/Pane';
+import { Pane } from '@luoli/ui/scroll';
 import type { TodaySummary } from '../../model/types';
 import type { ViewProps, WidgetDef } from '../types';
 
@@ -25,7 +25,7 @@ const zero = (): TodaySummary => ({
 function Notice({ phase }: { phase: 'loading' | 'down' }) {
   return (
     <Pane>
-      <div className="today pane-sc">
+      <div className="today ll-pane-sc">
         {phase === 'down' ? (
           <Empty title="连不上洛璃服务">连上后会自动恢复</Empty>
         ) : (
@@ -76,7 +76,7 @@ function TodayView({ mode, handle }: ViewProps) {
   if (!full) {
     return (
       <Pane>
-        <div className="today pane-sc">
+        <div className="today ll-pane-sc">
           <Stat variant="hero" value={<Roll value={s.replies} />} unit="次回复" />
           <Stat
             variant="row"
@@ -127,7 +127,7 @@ function TodayView({ mode, handle }: ViewProps) {
   const max = rows.length ? rows[0].replies : 1;
   return (
     <Pane>
-      <div className="today is-full pane-sc">
+      <div className="today is-full ll-pane-sc">
         <div className="today-grid">
           <Stat label="今天的回复" value={<Roll value={s.replies} />} />
           <Stat label="输入 token" value={<Roll value={s.input} />} />

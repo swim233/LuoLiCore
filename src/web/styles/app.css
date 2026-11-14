@@ -25,7 +25,7 @@ html {
   overflow-x: hidden;
   scrollbar-gutter: stable;
   scrollbar-width: thin;
-  scrollbar-color: color-mix(in srgb, var(--ll-accent) 35%, transparent) transparent;
+  scrollbar-color: var(--ll-scrollbar) transparent;
   background: var(--ll-bg);
 }
 /* 页面：夜蓝的底，右上、左侧两团辉光（大小按视口算，和 1280×780 的演示页同样的比例） */
@@ -327,7 +327,7 @@ body::before {
   visibility: hidden;
 }
 .w-card {
-  --pane-head: var(--head-h);
+  --ll-pane-head: var(--head-h);
   position: relative;
   height: 100%;
   box-sizing: border-box;
@@ -427,199 +427,39 @@ body::before {
   z-index: 7;
 }
 
-/* ---------- 窗格（components/Pane.tsx）----------
-   内容（.pane-sc，滚动区）铺满整块，上下留出浮层的高度（--ht、--hb，Pane 量出来写在 .pane 上）再加它自己的留白（--sc-pt、--sc-pb）。
-   上下各一组模糊（.pane-ov）：4 层 backdrop-filter，每层只在一段里不透明（遮罩），由浅到深，靠窗口边上最糊；加一层渐变的底（.tn）。
-   一组的高度 = 浮层高度 + 渐变带长度（--rt，窗口高度的 10.5%，24～82 px）。
-   模糊强度按指数曲线涨：位置 x 从内容一侧（0）量到窗口边（1），沿整组的高度，目标是 T(x) = 22.36 × (e^(5x) − 1) ÷ (e^5 − 1) px，
-   x = 0.25 处 0.38、0.5 处 1.70、0.75 处 6.30、1 处 22.36。开头几乎不糊，内容刚滚进来时看不出一条分界线。
-   叠出来的等效模糊按 eff(x) = sqrt(Σ a_i(x) · σ_i²) 算（a_i 是第 i 层在 x 处的遮罩不透明度，σ_i 是它的模糊半径）。
-   节点 x_j = j/4：第 i 层（0 起）在 x_i 透明，x_(i+1)～x_(i+2) 不透明，x_(i+3) 透明，最后两层不透明到边上，即遮罩的 0/25/50/75/100%。
-   让 eff(x_j) = T(x_j) 解出半径：σ_0 = T(x_1)，σ_j = sqrt(T(x_(j+1))² − σ_(j−1)²)，
-   = 0.38、1.65、6.08、21.52 px（下面写死；改曲线时照这个式子重算）。
-   渐变的底同一条曲线：78% × (e^(2.5x) − 1) ÷ (e^2.5 − 1)，取 12 段连成渐变（每 1/12 处一个点）。
-   「只在那一边还有内容时出现」：每层自己做透明度的 scroll-driven 动画（顶上那组在滚动的头 32px 里淡入，底下那组在最后 32px 里淡出），
-   基准透明度是 0：内容不够一屏（没有滚动范围，时间线不起作用）时两边都没有。
-   注意：模糊层的容器（.pane-ov、.pane）不能有透明度动画、opacity < 1、filter、mask（那样它就成了 backdrop root，模糊什么也看不到） */
-@keyframes pane-ot {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
-}
-@keyframes pane-ob {
-  from {
-    opacity: 1;
-  }
-  to {
-    opacity: 0;
-  }
-}
-.pane {
-  --rtl: var(--ll-radius-window);
-  --rtr: var(--ll-radius-window);
-  --rbl: var(--ll-radius-window);
-  --rbr: var(--ll-radius-window);
-  position: relative;
-  min-width: 0;
-  min-height: 0;
-  timeline-scope: --pane-sc;
-}
+/* ---------- 窗格（@luoli/ui/scroll 的 Pane）：留在面板里的 ----------
+   窗格本身的样子（滚动区、上下浮层、4 层模糊和渐变的底）是库的，在 @luoli/ui 的 scroll/pane.css，对外的约定也写在那里。
+   这里只有面板自己的：每栏的圆角、对话时间线的滚动条位置、会话菜单压过下浮层、形变收尾时的过渡、大动画期间关模糊 */
 /* 左右分栏的全屏窗口：每栏只带外侧两个角 */
-.pane.is-side {
-  --rtr: 0px;
-  --rbr: 0px;
+.ll-pane.is-side {
+  --ll-pane-rtr: 0px;
+  --ll-pane-rbr: 0px;
 }
-.pane.is-main {
-  --rtl: 0px;
-  --rbl: 0px;
-}
-.pane > .pane-sc {
-  position: absolute;
-  inset: 0;
-  box-sizing: border-box;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  scroll-timeline: --pane-sc y;
-  padding-top: calc(var(--ht, 0px) + var(--sc-pt, 0px));
-  padding-bottom: calc(var(--hb, 0px) + var(--sc-pb, 0px));
-  scrollbar-width: thin;
-  scrollbar-color: color-mix(in srgb, var(--ll-accent) 35%, transparent) transparent;
+.ll-pane.is-main {
+  --ll-pane-rtl: 0px;
+  --ll-pane-rbl: 0px;
 }
 /* 对话和会话的时间线：滚动条的位置一直留着（没有溢出时只是一条空的边）。内容第一次超出一屏、或者刚好一屏左右来回超出时，
    滚动条出现、消失都不会让滚动区变窄、变宽——气泡的宽度（滚动区的 78%）和折行不跟着变。
    左右的留白不用另调：留着的这条边就在右边，短对话里自己的气泡离窗口右边的距离，和长对话（滚动条在的时候）一样 */
-.pane > .tline {
+.ll-pane > .tline {
   scrollbar-gutter: stable;
-}
-.pane-top,
-.pane-bot {
-  position: absolute;
-  left: 0;
-  right: 0;
-  z-index: 4;
-  pointer-events: none;
-}
-.pane-top {
-  top: 0;
 }
 /* 上浮层里打开着下拉菜单（对话里选会话）：整层提到下浮层上面，矮的窗口里菜单压过输入框、点得到。
    和窗口标题同一层（z 5）、排在它后面：上浮层顶上是透明、不接鼠标的空位，标题照旧看得见、点得到 */
-.pane-top:has(.chat-menu) {
+.ll-pane-top:has(.chat-menu) {
   z-index: 5;
 }
-.pane-bot {
-  bottom: 0;
-}
-.pane-top > *,
-.pane-bot > * {
-  pointer-events: auto;
-}
-.pane-hsp {
-  height: var(--pane-head);
-  pointer-events: none !important;
-}
-.pane-ov {
-  position: absolute;
-  left: 0;
-  right: 0;
-  z-index: 2;
-  pointer-events: none;
-}
-/* --toward：渐变从内容一侧走向窗口边的方向（遮罩、渐变的底共用），0% 在内容一侧 */
-.pane-ov.t {
-  --toward: to top;
-  top: 0;
-  height: calc(var(--ht, 0px) + var(--rt, 24px));
-}
-.pane-ov.b {
-  --toward: to bottom;
-  bottom: 0;
-  height: calc(var(--hb, 0px) + var(--rt, 24px));
-}
-.pane-ov > i {
-  position: absolute;
-  inset: 0;
-  opacity: 0;
-  /* 形变结束、换回模糊时：模糊半径从 0 长到原样（渐变的底一直在，模糊只是加上去）。
-     !important：形变收尾时 unmorph 用 .no-tr 关掉了所有过渡，这一个要留着 */
+/* 形变结束、换回模糊时：模糊半径从 0 长到原样（库里写的同一条过渡）。
+   !important：形变收尾时 unmorph 用 .no-tr 关掉了所有过渡，这一个要留着（库里不写 !important，层里的 !important 会盖过下面形变时关模糊的那一条） */
+.ll-pane-ov > i {
   transition: backdrop-filter var(--ll-dur-blur-in) ease-out !important;
-}
-.pane-ov.t > i {
-  border-radius: var(--rtl) var(--rtr) 0 0;
-  animation: pane-ot linear both;
-  animation-timeline: --pane-sc;
-  animation-range: 0 32px;
-}
-.pane-ov.b > i {
-  border-radius: 0 0 var(--rbr) var(--rbl);
-  animation: pane-ob linear both;
-  animation-timeline: --pane-sc;
-  animation-range: calc(100% - 32px) 100%;
-}
-.pane-ov > .l1 {
-  -webkit-backdrop-filter: blur(0.38px);
-  backdrop-filter: blur(0.38px);
-  mask-image: linear-gradient(
-    var(--toward),
-    transparent 0%,
-    var(--ll-mask) 25%,
-    var(--ll-mask) 50%,
-    transparent 75%
-  );
-}
-.pane-ov > .l2 {
-  -webkit-backdrop-filter: blur(1.65px);
-  backdrop-filter: blur(1.65px);
-  mask-image: linear-gradient(
-    var(--toward),
-    transparent 25%,
-    var(--ll-mask) 50%,
-    var(--ll-mask) 75%,
-    transparent 100%
-  );
-}
-.pane-ov > .l3 {
-  -webkit-backdrop-filter: blur(6.08px);
-  backdrop-filter: blur(6.08px);
-  mask-image: linear-gradient(
-    var(--toward),
-    transparent 50%,
-    var(--ll-mask) 75%,
-    var(--ll-mask) 100%
-  );
-}
-.pane-ov > .l4 {
-  -webkit-backdrop-filter: blur(21.52px);
-  backdrop-filter: blur(21.52px);
-  mask-image: linear-gradient(var(--toward), transparent 75%, var(--ll-mask) 100%);
-}
-/* 渐变的底：78% × (e^(2.5x) − 1) ÷ (e^2.5 − 1)，每 1/12 处一个点：0、1.6、3.6、6.1、9.1、12.8、17.4、23.0、30.0、38.5、49.0、62.0、78.0 % */
-.pane-ov > .tn {
-  background: linear-gradient(
-    var(--toward),
-    transparent 0,
-    color-mix(in srgb, var(--ll-pane-tint) 1.6%, transparent) 8.333%,
-    color-mix(in srgb, var(--ll-pane-tint) 3.6%, transparent) 16.667%,
-    color-mix(in srgb, var(--ll-pane-tint) 6.1%, transparent) 25%,
-    color-mix(in srgb, var(--ll-pane-tint) 9.1%, transparent) 33.333%,
-    color-mix(in srgb, var(--ll-pane-tint) 12.8%, transparent) 41.667%,
-    color-mix(in srgb, var(--ll-pane-tint) 17.4%, transparent) 50%,
-    color-mix(in srgb, var(--ll-pane-tint) 23%, transparent) 58.333%,
-    color-mix(in srgb, var(--ll-pane-tint) 30%, transparent) 66.667%,
-    color-mix(in srgb, var(--ll-pane-tint) 38.5%, transparent) 75%,
-    color-mix(in srgb, var(--ll-pane-tint) 49%, transparent) 83.333%,
-    color-mix(in srgb, var(--ll-pane-tint) 62%, transparent) 91.667%,
-    color-mix(in srgb, var(--ll-pane-tint) 78%, transparent) 100%
-  );
 }
 /* 形变期间换成只有渐变的底：缩成胶囊、展开（复制层 .is-morphing、藏着的真身 [data-hide]）、全屏打开与关闭（全屏窗口 .is-morphing、
    桌面上被挪走的那份 [data-lifted]）、整理模式（整个期间卡片在晃，含拖动的副本）。停下来换回时模糊淡入（见上面的 transition）。
    窗口里别的带模糊的东西（时间线顶上的小提示、会话菜单）同样关掉，复制层里从头到尾没有 backdrop-filter */
 :is(.is-morphing, [data-hide], [data-lifted], .drag-clone, .arranging .w, .arr-leaving .w)
-  :is(.pane-ov > i:not(.tn), .log-pill, .chat-menu, .term-jump) {
+  :is(.ll-pane-ov > i:not(.ll-pane-tn), .log-pill, .chat-menu, .term-jump) {
   -webkit-backdrop-filter: none !important;
   backdrop-filter: none !important;
   transition: none !important;
@@ -1622,14 +1462,14 @@ body::before {
 }
 
 /* ---------- 此刻 ----------
-   上面一块（大徽记、状态名、一行说明）贴在标题栏下面、和标题一起浮在终端上面；终端是窗格，顶上空出的高度（--pane-head）
+   上面一块（大徽记、状态名、一行说明）贴在标题栏下面、和标题一起浮在终端上面；终端是窗格，顶上空出的高度（--ll-pane-head）
    是标题栏加这一块，由 Now.tsx 量出来写在 .now 上。全屏时最多 3 栏并排，每栏一个窗格，各自的头部（会话名、状态、在会话中打开）也浮着 */
 .now {
   position: relative;
   display: flex;
   flex-direction: column;
 }
-.now > .pane,
+.now > .ll-pane,
 .now > .now-cols {
   flex: 1 1 auto;
   min-height: 0;
@@ -1684,18 +1524,18 @@ body::before {
 }
 /* 几栏并排：只有最左、最右那栏带窗口的圆角；栏与栏之间一道淡线 */
 .now-col {
-  --rtl: 0px;
-  --rtr: 0px;
-  --rbl: 0px;
-  --rbr: 0px;
+  --ll-pane-rtl: 0px;
+  --ll-pane-rtr: 0px;
+  --ll-pane-rbl: 0px;
+  --ll-pane-rbr: 0px;
 }
 .now-col:first-child {
-  --rtl: var(--ll-radius-window);
-  --rbl: var(--ll-radius-window);
+  --ll-pane-rtl: var(--ll-radius-window);
+  --ll-pane-rbl: var(--ll-radius-window);
 }
 .now-col:last-child {
-  --rtr: var(--ll-radius-window);
-  --rbr: var(--ll-radius-window);
+  --ll-pane-rtr: var(--ll-radius-window);
+  --ll-pane-rbr: var(--ll-radius-window);
 }
 .now-col + .now-col {
   box-shadow: inset 1px 0 0 var(--ll-line);
@@ -1727,12 +1567,12 @@ body::before {
 }
 
 /* ---------- 终端（「此刻」的样式，用户逐项拼出来的） ----------
-   终端自己是窗格的滚动区：停在底部时一直贴底，可以往上翻（滚动条和会话时间线一样，样式在 .pane > .pane-sc）；
+   终端自己是窗格的滚动区：停在底部时一直贴底，可以往上翻（滚动条和会话时间线一样，样式是库的窗格滚动区 .ll-pane > .ll-pane-sc，@luoli/ui 的 scroll/pane.css）；
    滚到浮着的头部、底部下面的行在窗格的模糊里糊掉。滚动条的位置一直留着（scrollbar-gutter: stable，没有溢出时只是一条空的边），
    有没有滚动条行宽都不变，折行不会因为它出现而变；右边的内边距减掉它的宽度，没有滚动条时文字右边缘和以前一样 */
 .term {
-  --sc-pt: 4px;
-  --sc-pb: 10px;
+  --ll-pane-sc-pt: 4px;
+  --ll-pane-sc-pb: 10px;
   overflow-x: hidden;
   scrollbar-gutter: stable;
   padding-inline: 12px 2px;
@@ -2027,11 +1867,11 @@ body::before {
 }
 
 /* ---------- 会话 ---------- */
-/* 列表：窗格的滚动区。悬停高亮（.glide）是列表的第一个子元素，行浮在它上面 */
+/* 列表：窗格的滚动区。悬停高亮（.ll-glide）是列表的第一个子元素，行浮在它上面 */
 .list {
-  --sc-pt: 4px;
-  --sc-pb: 8px;
-  --hr: 12px;
+  --ll-pane-sc-pt: 4px;
+  --ll-pane-sc-pb: 8px;
+  --ll-glide-radius: 12px;
   padding-inline: 8px;
   display: flex;
   flex-direction: column;
@@ -2083,80 +1923,8 @@ body::before {
   animation: lit 1.4s ease-out;
 }
 
-/* ---------- 悬停高亮（components/glide.ts）：会话列表、任务列表和对话里选会话的菜单 ----------
-   一个列表一块高亮，用 transform 挪到鼠标所在的行，到位时回弹（位置的动画由 glide.ts 用 Web Animations 做，这里不过渡 transform），
-   宽高跟着那一行（平滑、不回弹）；从隐藏到显示先瞬移再淡入，离开列表淡出。
-   样子是边光：底是一团跟着鼠标的淡光，边是 1px 的一圈（单独一层、遮罩挖空），离鼠标近的那段被照亮。
-   关掉动画时不滑：每一行自己淡入淡出（那一行带 .is-hl，画在它自己的 ::before、::after 上） */
-.glide {
-  position: absolute;
-  left: 0;
-  top: 0;
-  z-index: 0;
-  box-sizing: border-box;
-  pointer-events: none;
-  opacity: 0;
-  border-radius: var(--hr, 12px);
-  will-change: transform;
-  transition:
-    opacity var(--ll-dur-glide-out) ease,
-    height var(--ll-dur-glide) var(--ll-ease-out),
-    width var(--ll-dur-glide) var(--ll-ease-out);
-}
-.glide.on {
-  opacity: 1;
-  transition-duration: var(--ll-dur-glide-in), var(--ll-dur-glide), var(--ll-dur-glide);
-}
-.glide,
-:is(.conv-item, .chat-menu > button, .task-row.is-live).is-hl::before {
-  background: radial-gradient(
-    240px 110px at var(--mx, 50%) var(--my, 50%),
-    rgba(140, 160, 255, 0.15),
-    rgba(140, 160, 255, 0.045) 65%,
-    rgba(140, 160, 255, 0.03)
-  );
-}
-.glide::after,
-:is(.conv-item, .chat-menu > button, .task-row.is-live).is-hl::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  pointer-events: none;
-  padding: 1px;
-  background: radial-gradient(
-    130px 66px at var(--mx, 50%) var(--my, 50%),
-    rgba(215, 225, 255, 0.85),
-    rgba(215, 225, 255, 0.12) 75%,
-    rgba(215, 225, 255, 0.06)
-  );
-  -webkit-mask:
-    linear-gradient(var(--ll-mask) 0 0) content-box,
-    linear-gradient(var(--ll-mask) 0 0);
-  -webkit-mask-composite: xor;
-  mask:
-    linear-gradient(var(--ll-mask) 0 0) content-box exclude,
-    linear-gradient(var(--ll-mask) 0 0);
-}
-/* 关掉动画：每行自己的高亮，平时透明，带 .is-hl 时淡入 */
-:is(.conv-item, .chat-menu > button, .task-row.is-live)::before,
-:is(.conv-item, .chat-menu > button, .task-row.is-live)::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  z-index: -1;
-  border-radius: inherit;
-  pointer-events: none;
-  opacity: 0;
-  transition: opacity var(--ll-dur-glide-out) ease;
-}
-:is(.conv-item, .chat-menu > button, .task-row.is-live).is-hl::before,
-:is(.conv-item, .chat-menu > button, .task-row.is-live).is-hl::after {
-  opacity: 1;
-  transition-duration: var(--ll-dur-glide-in);
-}
 /* 整理模式：卡片里的内容不接鼠标，高亮也不出 */
-.arranging .glide {
+.arranging .ll-glide {
   opacity: 0 !important;
 }
 .list > .ll-empty {
@@ -2219,7 +1987,7 @@ body::before {
   display: flex;
   flex-direction: column;
 }
-.sess-layer > .pane {
+.sess-layer > .ll-pane {
   flex: 1 1 auto;
 }
 .sess-layer.is-off {
@@ -2252,8 +2020,8 @@ body::before {
 
 /* ---------- 时间线：毛玻璃气泡 ---------- */
 .tline {
-  --sc-pt: 12px;
-  --sc-pb: 18px;
+  --ll-pane-sc-pt: 12px;
+  --ll-pane-sc-pb: 18px;
   padding-inline: 24px;
   display: flex;
   flex-direction: column;
@@ -2671,7 +2439,7 @@ body::before {
   color: var(--ll-fg);
   font: 12.5px/1.55 var(--ll-font-mono);
   scrollbar-width: thin;
-  scrollbar-color: color-mix(in srgb, var(--ll-accent) 35%, transparent) transparent;
+  scrollbar-color: var(--ll-scrollbar) transparent;
 }
 .md-code code {
   font: inherit;
@@ -2687,7 +2455,7 @@ body::before {
   max-width: 100%;
   overflow-x: auto;
   scrollbar-width: thin;
-  scrollbar-color: color-mix(in srgb, var(--ll-accent) 35%, transparent) transparent;
+  scrollbar-color: var(--ll-scrollbar) transparent;
 }
 .md-t {
   border-collapse: collapse;
@@ -2834,19 +2602,7 @@ body::before {
   flex: none;
   white-space: nowrap;
 }
-/* 时间线顶上的小提示（加载更早的消息、连不上服务）：贴在浮着的标题下面，不占位置 */
-.log-top {
-  position: sticky;
-  /* sticky 从滚动区的内容框量起，内容框的上沿已经在浮着的标题下面（--ht）再加留白（--sc-pt）：减掉留白，贴在标题下沿 4px */
-  top: calc(4px - var(--sc-pt, 0px));
-  height: 0;
-  z-index: 3;
-  display: flex;
-  justify-content: center;
-  align-items: flex-start;
-  pointer-events: none;
-}
-/* 时间线、对话顶上的小提示（样子是库的 .ll-notice）：外层 .pane-ov 不收鼠标事件，这里要收，「重试」才点得到 */
+/* 时间线、对话顶上的小提示（样子是库的 .ll-notice）：外层 .ll-pane-ov 不收鼠标事件，这里要收，「重试」才点得到 */
 .log-pill {
   pointer-events: auto;
 }
@@ -2974,16 +2730,16 @@ body::before {
   text-overflow: ellipsis;
   min-width: 0;
 }
-/* 选会话的下拉菜单：玻璃底；当前会话那项是强调色 15% 的底；悬停高亮同会话列表（.glide） */
+/* 选会话的下拉菜单：玻璃底；当前会话那项是强调色 15% 的底；悬停高亮同会话列表（.ll-glide） */
 .chat-menu {
-  --hr: 9px;
+  --ll-glide-radius: 9px;
   position: absolute;
   left: 12px;
   top: calc(100% - 2px);
   z-index: 10;
   width: min(280px, calc(100% - 24px));
-  /* 不超出窗口：窗口矮时在菜单里面滚（--ph 是窗格的高度，--ht 是上浮层到这一行下沿的高度） */
-  max-height: min(260px, calc(var(--ph, 9999px) - var(--ht, 0px) - 8px));
+  /* 不超出窗口：窗口矮时在菜单里面滚（--ll-pane-ph 是窗格的高度，--ll-pane-ht 是上浮层到这一行下沿的高度） */
+  max-height: min(260px, calc(var(--ll-pane-ph, 9999px) - var(--ll-pane-ht, 0px) - 8px));
   box-sizing: border-box;
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -2997,7 +2753,7 @@ body::before {
   backdrop-filter: blur(16px) saturate(1.2);
   box-shadow: var(--ll-glass-edge);
   scrollbar-width: thin;
-  scrollbar-color: color-mix(in srgb, var(--ll-accent) 35%, transparent) transparent;
+  scrollbar-color: var(--ll-scrollbar) transparent;
 }
 .chat-menu > button {
   position: relative;
@@ -3035,8 +2791,8 @@ body::before {
   color: var(--ll-fg);
 }
 .chat .tline {
-  --sc-pt: 10px;
-  --sc-pb: 12px;
+  --ll-pane-sc-pt: 10px;
+  --ll-pane-sc-pb: 12px;
   padding-inline: 16px;
 }
 /* 输入框：浮在消息上面，半透明的面板 */
@@ -3072,7 +2828,7 @@ body::before {
   padding: 7px 7px 2px 0;
   margin: -7px -7px 0 0;
   scrollbar-width: thin;
-  scrollbar-color: color-mix(in srgb, var(--ll-accent) 35%, transparent) transparent;
+  scrollbar-color: var(--ll-scrollbar) transparent;
 }
 .chat-atts:empty {
   display: none;
@@ -3223,9 +2979,9 @@ body::before {
    「下次到点」用强调色（蓝）：任务不是洛璃本人，不用金色。已结束的行整体暗一档。
    全屏会话头部的浮层（.task-pop）借用 .chat-menu 的样子（玻璃底、模糊、形变期间关掉模糊的规则都在那一条上） */
 .tasks {
-  --sc-pt: 4px;
-  --sc-pb: 8px;
-  --hr: 12px;
+  --ll-pane-sc-pt: 4px;
+  --ll-pane-sc-pb: 8px;
+  --ll-glide-radius: 12px;
   padding-inline: 8px;
   display: flex;
   flex-direction: column;
@@ -3329,12 +3085,12 @@ body::before {
   margin-left: auto;
 }
 .chat-menu.task-pop {
-  --hr: 9px;
+  --ll-glide-radius: 9px;
   left: auto;
   right: -8px;
   top: calc(100% + 4px);
   width: min(420px, calc(100vw - 48px));
-  max-height: min(380px, calc(var(--ph, 9999px) - var(--ht, 0px) - 8px));
+  max-height: min(380px, calc(var(--ll-pane-ph, 9999px) - var(--ll-pane-ht, 0px) - 8px));
   gap: 0;
 }
 /* 窗口里的头部窄：浮层相对头部（整排的宽度）定位，右对齐，宽度不超过窗口 */
@@ -3351,8 +3107,8 @@ body::before {
 
 /* ---------- 设置（骨架） ---------- */
 .skel {
-  --sc-pt: 0px;
-  --sc-pb: 12px;
+  --ll-pane-sc-pt: 0px;
+  --ll-pane-sc-pb: 12px;
   padding-inline: 12px;
   display: flex;
   flex-direction: column;
@@ -3410,13 +3166,13 @@ body::before {
   background: var(--ll-side-bg);
 }
 .set-nav {
-  --sc-pt: 4px;
-  --sc-pb: 12px;
+  --ll-pane-sc-pt: 4px;
+  --ll-pane-sc-pb: 12px;
   padding-inline: 10px;
 }
 .set-main {
-  --sc-pt: 6px;
-  --sc-pb: 24px;
+  --ll-pane-sc-pt: 6px;
+  --ll-pane-sc-pb: 24px;
   padding-inline: 28px;
   display: flex;
   flex-direction: column;
@@ -3450,16 +3206,16 @@ body::before {
 
 /* ---------- 今日概况 ---------- */
 .today {
-  --sc-pt: 2px;
-  --sc-pb: 12px;
+  --ll-pane-sc-pt: 2px;
+  --ll-pane-sc-pb: 12px;
   padding-inline: 18px;
   display: flex;
   flex-direction: column;
   gap: 10px;
 }
 .today.is-full {
-  --sc-pt: 12px;
-  --sc-pb: 24px;
+  --ll-pane-sc-pt: 12px;
+  --ll-pane-sc-pb: 24px;
   padding-inline: 28px;
   gap: 22px;
 }
@@ -3603,12 +3359,12 @@ body::before {
     grid-template-columns: minmax(0, 1fr);
   }
   /* 窄屏的全屏：两栏变两层（列表、详情），各占满窗口，带全部四个角 */
-  .pane.is-side,
-  .pane.is-main {
-    --rtl: var(--ll-radius-window);
-    --rtr: var(--ll-radius-window);
-    --rbl: var(--ll-radius-window);
-    --rbr: var(--ll-radius-window);
+  .ll-pane.is-side,
+  .ll-pane.is-main {
+    --ll-pane-rtl: var(--ll-radius-window);
+    --ll-pane-rtr: var(--ll-radius-window);
+    --ll-pane-rbl: var(--ll-radius-window);
+    --ll-pane-rbr: var(--ll-radius-window);
   }
   .sess.is-detail .sess-side,
   .chat-full.is-detail .sess-side {
@@ -3627,28 +3383,28 @@ body::before {
     grid-template-rows: calc(var(--head-h) + 56px) minmax(0, 1fr);
   }
   .set-nav-pane {
-    --rbl: 0px;
-    --rbr: 0px;
+    --ll-pane-rbl: 0px;
+    --ll-pane-rbr: 0px;
   }
   .set-main-pane {
-    --rtl: 0px;
-    --rtr: 0px;
+    --ll-pane-rtl: 0px;
+    --ll-pane-rtr: 0px;
   }
-  .set-main-pane .pane-hsp {
+  .set-main-pane .ll-pane-hsp {
     height: 0;
   }
-  /* 横着的一条：只横向滚（.pane > .pane-sc 的 overflow-y: auto 特异度更高，这里要写得比它高）；
+  /* 横着的一条：只横向滚（窗格的 overflow-y: auto 是库里层内的规则，这条不在层里，本来就盖得过；选择器照旧写长）；
      高度留出横向滚动条，竖向不溢出，底下那组模糊也就不出现 */
-  .pane > .set-nav.pane-sc {
-    --sc-pt: 0px;
-    --sc-pb: 6px;
+  .ll-pane > .set-nav.ll-pane-sc {
+    --ll-pane-sc-pt: 0px;
+    --ll-pane-sc-pb: 6px;
     flex-direction: row;
     align-items: center;
     overflow-x: auto;
     overflow-y: hidden;
   }
   .set-main {
-    --sc-pt: 14px;
+    --ll-pane-sc-pt: 14px;
     padding-inline: 16px;
   }
   .msg {
@@ -3670,23 +3426,23 @@ body::before {
     grid-auto-rows: minmax(0, 1fr);
   }
   .now-col {
-    --rtl: 0px;
-    --rtr: 0px;
-    --rbl: 0px;
-    --rbr: 0px;
+    --ll-pane-rtl: 0px;
+    --ll-pane-rtr: 0px;
+    --ll-pane-rbl: 0px;
+    --ll-pane-rbr: 0px;
   }
   .now-col:first-child {
-    --rtl: var(--ll-radius-window);
-    --rtr: var(--ll-radius-window);
+    --ll-pane-rtl: var(--ll-radius-window);
+    --ll-pane-rtr: var(--ll-radius-window);
   }
   .now-col:last-child {
-    --rbl: var(--ll-radius-window);
-    --rbr: var(--ll-radius-window);
+    --ll-pane-rbl: var(--ll-radius-window);
+    --ll-pane-rbr: var(--ll-radius-window);
   }
   .now-col + .now-col {
     box-shadow: inset 0 1px 0 var(--ll-line);
   }
-  .now-col + .now-col .pane-hsp {
+  .now-col + .now-col .ll-pane-hsp {
     height: 0;
   }
 }
@@ -3722,10 +3478,10 @@ body::before {
   transition: none !important;
 }
 /* 窗格的滚动区、上下的渐变带、虚拟列表的总高和条目的位置：这些是排版，不是装饰，直接变，不用上面统一的 0.12 秒过渡。
-   窗口挂上后浮层的高度（--ht、--hb）要量一次才有，滚动区的内边距、条目的位置随之变；过渡会让它们在头 120 ms 里一边渐变、
+   窗口挂上后浮层的高度（--ll-pane-ht、--ll-pane-hb）要量一次才有，滚动区的内边距、条目的位置随之变；过渡会让它们在头 120 ms 里一边渐变、
    一边被虚拟列表的定位逻辑校正，时间线里的内容来回挪（有动画时没有这个问题，因为那时没有这个过渡） */
-.still .pane > .pane-sc,
-.still .pane-ov,
+.still .ll-pane > .ll-pane-sc,
+.still .ll-pane-ov,
 .still .tline > div,
 .still .tline [data-index] {
   transition: none !important;

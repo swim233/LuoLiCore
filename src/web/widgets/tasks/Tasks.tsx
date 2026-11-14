@@ -1,8 +1,8 @@
 import { useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
-import { useGlide } from '../../components/glide';
+import { useGlide } from '@luoli/ui/scroll';
 import { IconTasks } from '../../components/icons';
-import { Pane } from '../../components/Pane';
+import { Pane } from '@luoli/ui/scroll';
 import { Button, Chevron, Empty, Fold, Tag } from '@luoli/ui/controls';
 import { DUR_VANISH, EASE_OUT } from '@luoli/ui/easing';
 import { useMotionOn } from '@luoli/ui/motion';
@@ -27,7 +27,7 @@ import type { ViewProps, WidgetDef } from '../types';
 /* 任务部件：进行中的任务按会话分组（组按最近的下次到点排，组内也是），每一行能取消；
    下面收着「已结束（N）」，默认折叠，展开后是最近 30 天里完成和取消的任务。
    数据来自服务（GET /api/tasks，SSE 的 task 事件整行替换），连不上服务时显示提示，重连后自动恢复。
-   行的悬停高亮和会话列表是同一块（components/glide.ts）；列表元素一直在，连不上、加载中也是它里面的提示（高亮挂在它上面） */
+   行的悬停高亮和会话列表是同一块（@luoli/ui/scroll 的 useGlide）；列表元素一直在，连不上、加载中也是它里面的提示（高亮挂在它上面） */
 const EVENTS = [
   'tasks:update',
   'data:reset',
@@ -144,12 +144,12 @@ function TasksView({ mode }: ViewProps) {
   return (
     <Pane>
       <div
-        className={'tasks pane-sc' + (full ? ' is-full' : '')}
+        className={'tasks ll-pane-sc' + (full ? ' is-full' : '')}
         ref={(el) => {
           g.list.current = el;
         }}
       >
-        <i className="glide" ref={(el) => void (g.glide.current = el)} aria-hidden="true" />
+        <i className="ll-glide" ref={(el) => void (g.glide.current = el)} aria-hidden="true" />
         <AnimatePresence initial={false}>
           {groups.map((grp) => (
             <motion.section

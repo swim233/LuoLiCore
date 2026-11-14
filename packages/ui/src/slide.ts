@@ -16,7 +16,7 @@
    - 滑的途中 active 为真：滚动事件处理里用它区分「自己在滚」和「用户在滚」（不能因为滑到一半离底部还远就把「贴底」清掉）；
    - 到位时恰好写到目标；dt 很大（标签页在后台）时不插值，直接到位。
    Slider 不碰 DOM：时钟、帧回调、读写位置都由 host 给，测试里用假的（slide.test.ts）。 */
-import { cancelWheel } from '@luoli/ui/wheel';
+import { cancelWheel } from './wheel';
 
 export type Ease = (t: number) => number;
 export const easeOutCubic: Ease = (t) => 1 - Math.pow(1 - t, 3);

@@ -1,0 +1,7 @@
+/* 细滚动条加库的颜色（--ll-scrollbar，强调色 35%）：窗格的滚动区已经带着，别的滚动区（菜单、横向滚的代码块……）加这个类。 */
+@layer ll.controls {
+  .ll-scrollbar {
+    scrollbar-width: thin;
+    scrollbar-color: var(--ll-scrollbar) transparent;
+  }
+}

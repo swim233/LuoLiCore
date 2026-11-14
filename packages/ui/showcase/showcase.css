@@ -1824,3 +1824,150 @@ a:not(.ll-link) {
   flex-wrap: wrap;
   align-items: flex-start;
 }
+
+/* ---------- 滚动 ---------- */
+/* 窗格演示的「窗口」：夜空的底，窗口标题浮在最上面（外壳画的那一层），暗边在模糊上面、浮层下面（z 3），库的 Pane 里是内容 < 模糊 < 浮层 */
+.sc-scr-win {
+  position: relative;
+  width: 340px;
+  height: 320px;
+  flex: none;
+  --ll-pane-head: 44px;
+}
+.sc-scr-win .ll-pane {
+  position: absolute;
+  inset: 0;
+}
+.sc-scr-title {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 5;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  padding: 0 16px;
+  font-weight: 600;
+  pointer-events: none;
+}
+.sc-scr-bar,
+.sc-scr-composer {
+  margin: 0 12px;
+  padding: 7px 12px;
+  border-radius: var(--ll-radius-full);
+  background: var(--ll-glass-bg);
+  box-shadow: var(--ll-glass-edge);
+  font-size: var(--ll-text-md);
+  color: var(--ll-fg-2);
+}
+.sc-scr-composer {
+  margin-bottom: 12px;
+  border-radius: var(--ll-radius-lg);
+  padding: 12px;
+}
+.sc-scr-body {
+  --ll-pane-sc-pt: 8px;
+  --ll-pane-sc-pb: 12px;
+  padding-inline: 16px;
+  color: var(--ll-fg-2);
+}
+.sc-scr-body p {
+  margin: 0 0 10px;
+}
+/* 大动画期间关掉模糊（库对外的约定）：对模糊层写 backdrop-filter: none，渐变的底（.ll-pane-tn）照旧 */
+.sc-scr-noblur .ll-pane-ov > i:not(.ll-pane-tn) {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  transition: none;
+}
+.sc-scr-ctl {
+  margin-bottom: 10px;
+  align-items: center;
+}
+.sc-scr-log {
+  --ll-pane-sc-pt: 8px;
+  --ll-pane-sc-pb: 12px;
+  padding-inline: 14px;
+}
+.sc-scr-msg {
+  padding: 8px 12px;
+  border-radius: var(--ll-radius-lg);
+  background: var(--ll-bubble-other-bg);
+  color: var(--ll-fg);
+  font-size: var(--ll-text-md);
+  line-height: 1.5;
+}
+/* 悬停高亮的演示：列表是定位的、能滚的容器（高亮定位在它里面） */
+.sc-scr-rows,
+.sc-scr-menu {
+  position: relative;
+  box-sizing: border-box;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  padding: 8px;
+  border-radius: var(--ll-radius-xl);
+  background: var(--ll-glass-bg);
+  box-shadow: var(--ll-glass-edge);
+}
+.sc-scr-rows {
+  width: 360px;
+  --ll-glide-radius: 12px;
+}
+.sc-scr-menu {
+  width: 200px;
+  align-self: flex-start;
+  --ll-glide-radius: 9px;
+}
+.sc-scr-menu > button {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  height: 32px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--ll-fg);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+/* 滚轮缓动的演示：两个能滚的框，一条横着滚的带子 */
+.sc-scr-box {
+  box-sizing: border-box;
+  width: 260px;
+  height: 220px;
+  flex: none;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 12px 16px;
+  border-radius: var(--ll-radius-lg);
+  background: var(--ll-inset-bg, rgba(255, 255, 255, 0.05));
+  color: var(--ll-fg-2);
+}
+.sc-scr-loose {
+  overscroll-behavior: auto;
+}
+.sc-scr-box p {
+  margin: 0 0 8px;
+}
+.sc-scr-strip {
+  box-sizing: border-box;
+  width: 360px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  overflow-x: auto;
+  padding: 12px 16px;
+  border-radius: var(--ll-radius-lg);
+  background: var(--ll-inset-bg, rgba(255, 255, 255, 0.05));
+  color: var(--ll-fg-2);
+  white-space: nowrap;
+}
+.sc-scr-strip i {
+  font-style: normal;
+}

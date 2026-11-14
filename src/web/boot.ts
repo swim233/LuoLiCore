@@ -14,7 +14,8 @@ import { TODAY_DEF } from './widgets/today/Today';
 import { desk, registerWidget } from './state/desk';
 import { closeFull, installPressTracking, setArranging } from './state/actions';
 import { pop } from './state/ui';
-import { installWheel } from './shell/wheel';
+import { hideGlides, installWheel } from '@luoli/ui/scroll';
+import { morphStore, motionBusy } from './shell/morph';
 import { chatEscAbort } from './widgets/chat/chatEsc';
 import { escHooks } from './lib/dev-slot';
 
@@ -39,7 +40,13 @@ export function boot({ todayAlways }: { todayAlways: boolean }) {
   if (todayAlways || desk.get().layout.extra.includes('today')) registerWidget(TODAY_DEF);
   registerWidget(TASKS_DEF);
   installPressTracking();
-  installWheel();
+  /* 窗口开始形变（缩成胶囊、全屏、桌面重排）时悬停高亮淡掉：高亮是库的，不认识外壳，由这里在有活着的形变时通知它
+     （形变的复制层里留着的是开始那一刻的样子）；等鼠标再动、那一行停稳了再出现 */
+  morphStore.subscribe(() => {
+    if (morphStore.get().list.some((m) => !m.dead)) hideGlides();
+  });
+  /* 滚轮缓动：形变、让位动画、拖动副本飞回期间不接管（motionBusy 是外壳的判断） */
+  installWheel({ busy: motionBusy });
   /* Esc：① 对话正在生成且对话是当前操作的部件 → 中止；② 额外的处理（开发模式：演示面板开着且焦点在里面 → 收起）；③ 全屏 → 退出；④ 整理模式 → 退出；⑤ 收起弹出框 */
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;

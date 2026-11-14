@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Button, Chevron } from '@luoli/ui/controls';
-import { useGlide } from '../../components/glide';
+import { useGlide } from '@luoli/ui/scroll';
 import { useLinkPhase } from '../../model/link';
 import { useBusRev } from '../../model/rev';
 import { activeTasks, tasksReady } from '../../model/tasks';
@@ -21,7 +21,7 @@ function TaskPop({ list, now }: { list: TaskRow[]; now: number }) {
         g.list.current = el;
       }}
     >
-      <i className="glide" ref={(el) => void (g.glide.current = el)} aria-hidden="true" />
+      <i className="ll-glide" ref={(el) => void (g.glide.current = el)} aria-hidden="true" />
       {list.map((t) => (
         <TaskItem key={t.id} task={t} now={now} />
       ))}
