@@ -101,7 +101,7 @@ export function SkyDemo() {
         <div className="sc-skywin-main">
           <div className="sc-skywin-title">夜空窗口</div>
           <div className="sc-dim">
-            底、外阴影、四周的细线和暗边。星点贴图还在面板里，所以这里没有星点。
+            底、外阴影、四周的细线和暗边、两层星点贴图（startSkyStars() 画好写进变量）。
           </div>
         </div>
         <div className="sc-skywin-tint">窗格渐变的底（--ll-pane-tint）</div>

@@ -1,0 +1,60 @@
+/* 能量槽 .ll-meter：细的一条，填充的宽度是 .ll-meter-fill 的 style.width（0%～100%）。默认是强调色到点睛色的渐变，data-tone='danger' 是危险色。
+   宽度变化有 0.9 秒的过渡；数值变大时 React 的 Meter 给 .ll-meter-shine 写 data-run，一道光从左扫到右（装饰性的动画，动画关掉时不放）。 */
+@layer ll.controls {
+  .ll-meter {
+    position: relative;
+    box-sizing: border-box;
+    /* 控件自己的高度：6 */
+    height: 6px;
+    border-radius: var(--ll-radius-full);
+    background: var(--ll-ctl-bg);
+    overflow: hidden;
+  }
+  .ll-meter-fill {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 0;
+    border-radius: inherit;
+    background: linear-gradient(90deg, var(--ll-accent), var(--ll-star));
+    transition: width 0.9s var(--ll-ease-out);
+  }
+  .ll-meter[data-tone='danger'] > .ll-meter-fill {
+    background: var(--ll-danger);
+  }
+  .ll-meter-shine {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: 40%;
+    background: linear-gradient(
+      90deg,
+      transparent,
+      color-mix(in srgb, var(--ll-white) 35%, transparent),
+      transparent
+    );
+    transform: translateX(-100%);
+    pointer-events: none;
+  }
+  @keyframes ll-meter-shine {
+    from {
+      transform: translateX(-100%);
+    }
+    to {
+      transform: translateX(260%);
+    }
+  }
+  /* 动画开着时才扫（根上没有 still 类，系统没开「减少动态效果」；或者根上有 motion 类，不管系统怎么设） */
+  @media (prefers-reduced-motion: no-preference) {
+    :root:not(.still) .ll-meter-shine[data-run] {
+      animation: ll-meter-shine 1s ease-out;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    :root.motion:not(.still) .ll-meter-shine[data-run] {
+      animation: ll-meter-shine 1s ease-out;
+    }
+  }
+}

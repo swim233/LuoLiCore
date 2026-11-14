@@ -1,0 +1,62 @@
+/* 统计格 .ll-stat：三种样子（data-variant），里面的小件是 .ll-stat-label、.ll-stat-value、.ll-stat-unit、.ll-stat-line；下面可以放能量槽 .ll-meter。
+   - 不写（方格）：半透明的底加细线（和 .ll-inset 一样的样子），小标题在上、大数字在下；
+   - hero（头条）：没有底，大数字后面跟一个单位；
+   - row（一行）：标签在左、数字在右（放在 .ll-stat-line 里），下面可以放能量槽。
+   「一行」里的标签和数字放在 .ll-stat-line 里（直接放在 .ll-stat 里的才是方格、头条的小标题和大数字）；数字里要强调的用 <b>。各格怎么排（几列、间距）由用的地方定。 */
+@layer ll.controls {
+  .ll-stat {
+    box-sizing: border-box;
+    display: flex;
+    min-width: 0;
+  }
+  .ll-stat:where(:not([data-variant])) {
+    flex-direction: column;
+    gap: var(--ll-space-8);
+    padding: var(--ll-space-14) var(--ll-space-16);
+    border-radius: var(--ll-radius-lg);
+    background: var(--ll-inset-bg);
+    box-shadow: inset 0 0 0 1px var(--ll-inset-line);
+  }
+  .ll-stat > .ll-stat-label {
+    font-size: var(--ll-text-sm);
+    color: var(--ll-fg-3);
+    letter-spacing: 0.06em;
+  }
+  .ll-stat > .ll-stat-value {
+    font-size: var(--ll-text-figure);
+    font-weight: 600;
+    color: var(--ll-fg);
+    line-height: 1.1;
+  }
+  .ll-stat[data-variant='hero'] {
+    align-items: baseline;
+    gap: var(--ll-space-8);
+    padding-bottom: var(--ll-space-2);
+  }
+  .ll-stat[data-variant='hero'] > .ll-stat-value {
+    font-size: var(--ll-text-figure-lg);
+    letter-spacing: -0.01em;
+  }
+  .ll-stat-unit {
+    color: var(--ll-fg-3);
+    font-size: var(--ll-text-md);
+  }
+  .ll-stat[data-variant='row'] {
+    flex-direction: column;
+    gap: var(--ll-space-6);
+  }
+  .ll-stat-line {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: var(--ll-space-10);
+    min-width: 0;
+    font-size: var(--ll-text-sm);
+    color: var(--ll-fg-2);
+    font-variant-numeric: tabular-nums;
+  }
+  .ll-stat-line b {
+    font-weight: 600;
+    color: var(--ll-fg);
+  }
+}

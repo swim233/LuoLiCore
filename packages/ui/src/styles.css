@@ -2,12 +2,16 @@
    库的样式都放在 @layer 里；这一行先把层的顺序定下来（后面的盖过前面的）：
    - ll.tokens：设计变量（配色、字体、动画、刻度）；
    - ll.base：各种控件共用的基础样式（按钮继承页面的字体和字色、键盘焦点环）；
-   - ll.controls：各种控件的样式（一个控件一个文件，放在 controls/）。
+   - ll.controls：各种面（surfaces/，玻璃面板、半透明面板、夜空窗口的底）和控件（controls/）的样式，一样东西一个文件；
+     同一层里后写的盖过先写的，所以面的文件排在控件前面（控件要能盖过面）。
    使用方自己的样式不放进层里，所以天然盖过库的。 */
 @layer ll.tokens, ll.base, ll.controls;
 
 @import './tokens.css';
 @import './base.css';
+@import './surfaces/glass.css';
+@import './surfaces/inset.css';
+@import './surfaces/sky.css';
 @import './controls/button.css';
 @import './controls/icon-button.css';
 @import './controls/switch.css';
@@ -16,4 +20,15 @@
 @import './controls/dot.css';
 @import './controls/spin.css';
 @import './controls/chev.css';
+@import './controls/fold.css';
+@import './controls/tabs.css';
+@import './controls/row.css';
+@import './controls/notice.css';
+@import './controls/empty.css';
+@import './controls/skeleton.css';
+@import './controls/field.css';
+@import './controls/link.css';
+@import './controls/stat.css';
+@import './controls/roll.css';
+@import './controls/meter.css';
 @import './controls/still.css';

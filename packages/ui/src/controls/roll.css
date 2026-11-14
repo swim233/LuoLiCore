@@ -1,0 +1,11 @@
+/* 数字滚动 .ll-roll：数字用等宽的数字（不会因为位数变而晃）；滚动期间（根上有 data-rolling）颜色变白，滚完半秒后还原。
+   字号、字重、颜色由放它的地方定（比如 .ll-stat-value）。滚动本身是 React 的 Roll 用 requestAnimationFrame 走的。 */
+@layer ll.controls {
+  .ll-roll {
+    display: inline-block;
+    font-variant-numeric: tabular-nums;
+  }
+  .ll-roll[data-rolling] {
+    color: var(--ll-white);
+  }
+}

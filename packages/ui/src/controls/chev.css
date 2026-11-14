@@ -1,6 +1,6 @@
 /* 小箭头 .ll-chev：CSS 画的（不靠字体），颜色跟着文字，大小跟着字号。
    在 flex 居中的按钮里看起来居中：朝右、朝左的左右对称，不用挪；朝下、朝上的尖头一边多出半条对角线（约 0.18em），往回挪一点。
-   默认朝右；父元素 aria-expanded='true' 时转向下；data-dir（right、down、left、up）可以直接指定方向（指定了就不再跟着 aria-expanded）。
+   默认朝右；父元素 aria-expanded='true' 时、或放在展开着的折叠（.ll-fold[open]）的头里时转向下；data-dir（right、down、left、up）可以直接指定方向（指定了就不再跟着 aria-expanded）。
    两边的空隙（margin）是版面的事，不在这里：放在按钮里时由按钮的 gap 隔开。 */
 @layer ll.controls {
   .ll-chev {
@@ -20,8 +20,10 @@
   .ll-chev[data-dir='up'] {
     transform: translateY(0.18em) rotate(-135deg);
   }
+  /* 折叠（.ll-fold）展开时，头里的箭头也转向下 */
   .ll-chev[data-dir='down'],
-  [aria-expanded='true'] > .ll-chev:not([data-dir]) {
+  [aria-expanded='true'] > .ll-chev:not([data-dir]),
+  .ll-fold[open] > .ll-fold-head .ll-chev:not([data-dir]) {
     transform: translateY(-0.18em) rotate(45deg);
   }
 }

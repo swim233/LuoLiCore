@@ -1,0 +1,742 @@
+/* 面板里第 5 步第二批这些东西的旧样式（折叠、标签页、列表行、几样小件），原样抄一份，给展示页「基础控件」一节第二批的对比块当「现在」用（b 段结束时整个删掉）。
+   来源是 src/web/styles/app.css（HEAD 的版本）：规则的内容一个字不改，只是每条选择器前面加了 `.sc-legacy ` 前缀；每条前面的注释写了它在 app.css 里的行号。
+   由脚本按选择器从 app.css 里抄出来（不手改）。没有抄的：状态带出来的阴影和过渡、窄屏的覆盖（对比块里按真实的写进 showcase.css 的 sc-env-*）、
+   悬停才出现的「取消」、悬停高亮（glide）、新消息亮一下的动画。 */
+
+/* step5.css 里那条「面板里没有全局的 box-sizing」的重置只该管面板自己的元素：旧标记里夹着的库控件（类名以 ll- 开头，比如会话行右边的数字徽标）
+   在面板里用的是库自己的 box-sizing，这里把重置撤回去（revert-layer：回到库那一层里写的值）。 */
+.sc-legacy :is([class^='ll-'], [class*=' ll-']):not(button),
+.sc-legacy :is([class^='ll-'], [class*=' ll-']):not(button)::before,
+.sc-legacy :is([class^='ll-'], [class*=' ll-']):not(button)::after {
+  box-sizing: revert-layer;
+}
+/* app.css:67 */
+.sc-legacy
+  :where(
+    a[href],
+    .sc-legacy button,
+    .sc-legacy input,
+    .sc-legacy select,
+    .sc-legacy textarea,
+    .sc-legacy summary,
+    .sc-legacy [tabindex]:not([tabindex='-1'])
+  ):focus-visible {
+  outline: 2px solid var(--ll-accent);
+  outline-offset: 2px;
+}
+
+/* app.css:429 */
+.sc-legacy .w-new {
+  font-size: 11px;
+  line-height: 18px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--ll-accent);
+  color: var(--ll-on-accent);
+  font-weight: 600;
+  letter-spacing: 0.1em;
+}
+
+/* app.css:695 */
+.sc-legacy .cap-icon {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  flex: none;
+  background: var(--ll-inset-bg);
+  color: var(--ll-fg-2);
+}
+
+/* app.css:705 */
+.sc-legacy .cap-icon svg {
+  width: 15px;
+  height: 15px;
+}
+
+/* app.css:1155 */
+.sc-legacy .tray-item {
+  height: 32px;
+  padding: 0 12px 0 6px;
+  border-radius: 999px;
+  cursor: grab;
+  touch-action: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  background: var(--ll-ctl-bg);
+  color: var(--ll-fg-2);
+  font-size: 13px;
+}
+
+/* app.css:1169 */
+.sc-legacy .tray-item .cap-icon {
+  width: 22px;
+  height: 22px;
+}
+
+/* app.css:1173 */
+.sc-legacy .tray-item .cap-icon svg {
+  width: 13px;
+  height: 13px;
+}
+
+/* app.css:1300 */
+.sc-legacy .fs-switch {
+  flex: none;
+  display: flex;
+  gap: 6px;
+  justify-content: center;
+  align-items: center;
+  align-self: center;
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding: 2px 4px;
+}
+
+/* app.css:1318 */
+.sc-legacy .fs-switch::-webkit-scrollbar {
+  display: none;
+}
+
+/* app.css:1321 */
+.sc-legacy .fs-tab {
+  height: 34px;
+  padding: 0 14px 0 10px;
+  border-radius: 999px;
+  cursor: pointer;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  background: var(--ll-ctl-bg);
+  color: var(--ll-fg-2);
+  font-size: 13px;
+  transition:
+    background-color var(--ll-dur-hover),
+    color var(--ll-dur-hover);
+}
+
+/* app.css:1338 */
+.sc-legacy .fs-tab svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* app.css:1342 */
+.sc-legacy .fs-tab:hover {
+  color: var(--ll-fg);
+  background: var(--ll-ctl-bg-hover);
+}
+
+/* app.css:1346 */
+.sc-legacy .fs-tab[aria-current='true'] {
+  color: var(--ll-fg);
+  background: color-mix(in srgb, var(--ll-accent) 22%, var(--ll-ctl-bg));
+}
+
+/* app.css:1747 */
+.sc-legacy .now-tabs {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+/* app.css:1752 */
+.sc-legacy .now-tab {
+  height: 26px;
+  padding: 0 11px;
+  border-radius: 999px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  border: 0;
+  background: var(--ll-ctl-bg);
+  color: var(--ll-fg-2);
+}
+
+/* app.css:1765 */
+.sc-legacy .now-tab[aria-selected='true'] {
+  color: var(--ll-fg);
+  background: color-mix(in srgb, var(--ll-accent) 22%, var(--ll-ctl-bg));
+}
+
+/* app.css:2016 */
+.sc-legacy .task-more .ll-chev {
+  margin: 0 0.2em 0 0.5em;
+}
+
+/* app.css:2141 */
+.sc-legacy .list {
+  --sc-pt: 4px;
+  --sc-pb: 8px;
+  --hr: 12px;
+  padding-inline: 8px;
+  display: flex;
+  flex-direction: column;
+}
+
+/* app.css:2149 */
+.sc-legacy .li-wrap {
+  flex: none;
+  overflow: hidden;
+}
+
+/* app.css:2153 */
+.sc-legacy .conv-item {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  gap: 11px;
+  align-items: center;
+  padding: 9px 10px;
+  margin-bottom: 1px;
+  border-radius: 12px;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  color: var(--ll-fg);
+}
+
+/* app.css:2171 */
+.sc-legacy .conv-item:focus-visible {
+  outline-offset: -2px;
+}
+
+/* app.css:2175 */
+.sc-legacy .conv-item[aria-current='true'] {
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--ll-accent) 20%, transparent),
+    transparent 75%
+  );
+  box-shadow: inset 3px 0 0 var(--ll-accent);
+  border-radius: 4px 12px 12px 4px;
+}
+
+/* app.css:2184 */
+.sc-legacy .conv-item[aria-current='true'] .conv-title {
+  color: var(--ll-white);
+}
+
+/* app.css:2187 */
+.sc-legacy .conv-ico {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ll-fg-2);
+  background: rgba(255, 255, 255, 0.07);
+  letter-spacing: 0;
+}
+
+/* app.css:2199 */
+.sc-legacy .conv-ico[data-p='cli'] {
+  font-family: var(--ll-font-mono);
+}
+
+/* app.css:2202 */
+.sc-legacy .conv-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* app.css:2207 */
+.sc-legacy .conv-title {
+  color: var(--ll-fg);
+  font-weight: 600;
+  font-size: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* app.css:2215 */
+.sc-legacy .conv-last {
+  color: var(--ll-fg-3);
+  font-size: 12.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* app.css:2222 */
+.sc-legacy .conv-last.is-event {
+  color: var(--ll-fg-dim);
+}
+
+/* app.css:2225 */
+.sc-legacy .conv-side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+}
+
+/* app.css:2231 */
+.sc-legacy .conv-time {
+  font-size: 11.5px;
+  color: var(--ll-fg-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* app.css:2474 */
+.sc-legacy .msg-meta .queued {
+  padding: 0 8px;
+  border-radius: 999px;
+  background: var(--ll-ctl-bg);
+  color: var(--ll-fg-2);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+/* app.css:2658 */
+.sc-legacy .fold {
+  margin: 0 0 5px;
+  font-size: 11.5px;
+  color: var(--ll-fg-3);
+  white-space: normal;
+  interpolate-size: allow-keywords;
+}
+
+/* app.css:2668 */
+.sc-legacy .fold::details-content {
+  display: flow-root;
+  height: 0;
+  overflow: clip;
+  transition:
+    height 0.2s var(--ll-ease-out),
+    content-visibility 0.2s allow-discrete;
+}
+
+/* app.css:2676 */
+.sc-legacy .fold[open]::details-content {
+  height: auto;
+}
+
+/* app.css:2679 */
+.sc-legacy .fold summary {
+  cursor: pointer;
+  list-style: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+}
+
+/* app.css:2687 */
+.sc-legacy .fold.is-think summary {
+  color: var(--ll-fg-3);
+  padding: 0 9px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ll-accent) 14%, transparent);
+}
+
+/* app.css:2693 */
+.sc-legacy .fold-tag {
+  font-style: italic;
+}
+
+/* app.css:2696 */
+.sc-legacy .fold.is-tool summary {
+  font: 11.5px/1.6 var(--ll-font-mono);
+  color: var(--ll-tool);
+}
+
+/* app.css:2700 */
+.sc-legacy .fold.is-tool summary > span:first-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* app.css:2704 */
+.sc-legacy .fold summary::-webkit-details-marker {
+  display: none;
+}
+
+/* app.css:2707 */
+.sc-legacy .fold summary::after {
+  content: '';
+  flex: none;
+  width: 0.38em;
+  height: 0.38em;
+  margin-left: 0.1em;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+  opacity: 0.7;
+  transition: transform 0.2s;
+}
+
+/* app.css:2719 */
+.sc-legacy .fold[open] summary::after {
+  transform: translateY(-0.1em) rotate(45deg);
+}
+
+/* app.css:2722 */
+.sc-legacy .fold-body {
+  margin-top: 6px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: var(--ll-inset-bg);
+  box-shadow: inset 0 0 0 1px var(--ll-inset-line);
+  color: var(--ll-fg-2);
+  font-size: 12.5px;
+}
+
+/* app.css:2732 */
+.sc-legacy .fold.is-think .fold-body {
+  max-height: 240px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+/* app.css:2737 */
+.sc-legacy .fold .ok {
+  color: var(--ll-ok);
+}
+
+/* app.css:2740 */
+.sc-legacy .fold .bad {
+  color: var(--ll-danger);
+}
+
+/* app.css:3077 */
+.sc-legacy .fold-k {
+  font-size: 11.5px;
+  color: var(--ll-fg-3);
+  margin: 6px 0 2px;
+}
+
+/* app.css:3082 */
+.sc-legacy .fold-k:first-child {
+  margin-top: 0;
+}
+
+/* app.css:3085 */
+.sc-legacy .fold-k.bad {
+  color: var(--ll-danger);
+}
+
+/* app.css:3088 */
+.sc-legacy .fold-pre {
+  margin: 0;
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: 12px/1.5 var(--ll-font-mono);
+  color: var(--ll-fg-2);
+  scrollbar-width: thin;
+}
+
+/* app.css:3099 */
+.sc-legacy .fold summary > span + span {
+  flex: none;
+  white-space: nowrap;
+}
+
+/* app.css:3235 */
+.sc-legacy .chat-pick {
+  min-width: 0;
+  height: 28px;
+  padding: 0 11px;
+  border-radius: 999px;
+  border: 0;
+  background: var(--ll-ctl-bg);
+  color: var(--ll-fg-2);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  transition:
+    background-color var(--ll-dur-hover),
+    color var(--ll-dur-hover);
+}
+
+/* app.css:3252 */
+.sc-legacy .chat-pick:hover,
+.sc-legacy .chat-pick[aria-expanded='true'] {
+  background: var(--ll-ctl-bg-hover);
+  color: var(--ll-fg);
+}
+
+/* app.css:3257 */
+.sc-legacy .chat-pick span {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+/* app.css:3263 */
+.sc-legacy .chat-pick::after {
+  content: '';
+  flex: none;
+  width: 0.4em;
+  height: 0.4em;
+  margin: 0 0.15em 0 0.1em;
+  border-right: 1.5px solid var(--ll-fg-3);
+  border-bottom: 1.5px solid var(--ll-fg-3);
+  transform: translateY(-0.15em) rotate(45deg);
+}
+
+/* app.css:3273 */
+.sc-legacy .chat-new {
+  margin-left: auto;
+  height: 28px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 0;
+  background: var(--ll-ctl-bg);
+  color: var(--ll-fg-2);
+  cursor: pointer;
+  font-size: 12.5px;
+  white-space: nowrap;
+  flex: none;
+  transition:
+    background-color var(--ll-dur-hover),
+    color var(--ll-dur-hover);
+}
+
+/* app.css:3289 */
+.sc-legacy .chat-new:hover {
+  background: var(--ll-ctl-bg-hover);
+  color: var(--ll-fg);
+}
+
+/* app.css:3293 */
+.sc-legacy .chat-new.is-side {
+  margin: 6px 16px 6px;
+  align-self: flex-start;
+}
+
+/* app.css:3554 */
+.sc-legacy .tasks {
+  --sc-pt: 4px;
+  --sc-pb: 8px;
+  --hr: 12px;
+  padding-inline: 8px;
+  display: flex;
+  flex-direction: column;
+}
+
+/* app.css:3572 */
+.sc-legacy .task-group {
+  flex: none;
+  overflow: hidden;
+}
+
+/* app.css:3576 */
+.sc-legacy .task-gh {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px 10px 2px;
+}
+
+/* app.css:3583 */
+.sc-legacy .task-gt {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ll-fg-3);
+}
+
+/* app.css:3592 */
+.sc-legacy .task-wrap {
+  overflow: hidden;
+}
+
+/* app.css:3595 */
+.sc-legacy .task-row {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 2px 12px;
+  margin-bottom: 1px;
+  padding: 9px 10px;
+  border-radius: 12px;
+  color: var(--ll-fg);
+}
+
+/* app.css:3607 */
+.sc-legacy .task-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* app.css:3612 */
+.sc-legacy .task-action {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+/* app.css:3618 */
+.sc-legacy .task-meta {
+  color: var(--ll-fg-3);
+  font-size: 12.5px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+/* app.css:3624 */
+.sc-legacy .task-side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+}
+
+/* app.css:3630 */
+.sc-legacy .task-next {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ll-accent);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* app.css:3637 */
+.sc-legacy .task-cancel {
+  transition:
+    background-color var(--ll-dur-hover),
+    color var(--ll-dur-hover),
+    opacity var(--ll-dur-hover);
+}
+
+/* app.css:3651 */
+.sc-legacy .task-ask {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: 12.5px;
+  color: var(--ll-fg-2);
+}
+
+/* app.css:3660 */
+.sc-legacy .task-err {
+  grid-column: 1 / -1;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--ll-danger);
+}
+
+/* app.css:3666 */
+.sc-legacy .task-row.is-ended {
+  opacity: 0.6;
+}
+
+/* app.css:3669 */
+.sc-legacy .task-state {
+  font-size: 12px;
+  color: var(--ll-fg-3);
+  white-space: nowrap;
+}
+
+/* app.css:3674 */
+.sc-legacy .task-at {
+  font-size: 11.5px;
+  color: var(--ll-fg-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* app.css:3680 */
+.sc-legacy .task-ended {
+  margin-top: 8px;
+}
+
+/* app.css:3683 */
+.sc-legacy .task-more {
+  all: unset;
+  box-sizing: border-box;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  margin: 2px 10px;
+  padding: 4px 0;
+  font-size: 12px;
+  color: var(--ll-fg-dim);
+}
+
+/* app.css:3694 */
+.sc-legacy .task-more:hover {
+  color: var(--ll-fg-2);
+}
+
+/* app.css:3697 */
+.sc-legacy .task-more:focus-visible {
+  outline: 2px solid var(--ll-accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* app.css:3812 */
+.sc-legacy .set-nav {
+  --sc-pt: 4px;
+  --sc-pb: 12px;
+  padding-inline: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* app.css:3820 */
+.sc-legacy .set-nav button {
+  flex: none;
+  text-align: left;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 0;
+  background: transparent;
+  color: var(--ll-fg-2);
+  cursor: pointer;
+  transition:
+    background-color var(--ll-dur-hover),
+    color var(--ll-dur-hover);
+}
+
+/* app.css:3833 */
+.sc-legacy .set-nav button:hover {
+  background: var(--ll-ctl-bg);
+  color: var(--ll-fg);
+}
+
+/* app.css:3837 */
+.sc-legacy .set-nav button[aria-current='true'] {
+  background: color-mix(in srgb, var(--ll-accent) 15%, transparent);
+  color: var(--ll-fg);
+}
+
+/* app.css:4276 */
+.still .sc-legacy .fold::details-content {
+  transition: none !important;
+}

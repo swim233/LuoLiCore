@@ -1,0 +1,79 @@
+/* 标签页 .ll-tabs-list（一排标签）和 .ll-tab（一个标签）；React 的 Tabs 用 Base UI 打底，也可以不用 React 直接写类名。
+   选中认 aria-selected='true'，也认 aria-current='true'（给不是标签页的导航用，比如全屏的部件切换栏：<nav> 里的按钮）。
+   - 药丸（默认）：.ll-tabs-list 横排，隔 6；.ll-tab 两个尺寸：sm（默认，高 26、字 12，「此刻」的会话标签）、md（高 34、字 13，左边留给图标，全屏的部件切换栏，里面的图标 14px）。
+     平常的底 --ll-ctl-bg，悬停 --ll-ctl-bg-hover，选中 --ll-ctl-bg-on，底和字色有过渡；
+   - 侧栏（.ll-tabs-list 写 data-variant='side'）：竖排，一项一整行、靠左、圆角 --ll-radius-md、平常没有底，悬停 --ll-ctl-bg，选中 --ll-item-bg-on。
+   换不换行、要不要横向滚动、窄屏怎么排（比如侧栏横过来）是版面，由用的地方定；方向键走哪个方向由 Tabs 的 orientation 定。 */
+@layer ll.controls {
+  .ll-tabs-list {
+    display: flex;
+    gap: var(--ll-space-6);
+  }
+  .ll-tab {
+    box-sizing: border-box;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--ll-space-6);
+    /* 控件自己的高度：sm 26、md 34，不在刻度里 */
+    height: 26px;
+    margin: 0;
+    padding: 0 var(--ll-space-10);
+    border: 0;
+    border-radius: var(--ll-radius-full);
+    background: var(--ll-ctl-bg);
+    color: var(--ll-fg-2);
+    font: inherit;
+    font-size: var(--ll-text-sm);
+    white-space: nowrap;
+    cursor: pointer;
+    transition:
+      background-color var(--ll-dur-hover),
+      color var(--ll-dur-hover);
+  }
+  .ll-tab[data-size='md'] {
+    height: 34px;
+    /* 左边少一点：标签里最前面放图标 */
+    padding: 0 var(--ll-space-14) 0 var(--ll-space-10);
+    gap: var(--ll-space-8);
+    font-size: var(--ll-text-md);
+  }
+  .ll-tab svg {
+    flex: none;
+    width: 14px;
+    height: 14px;
+  }
+  @media (hover: hover) {
+    .ll-tab:hover {
+      color: var(--ll-fg);
+      background: var(--ll-ctl-bg-hover);
+    }
+  }
+  .ll-tab:is([aria-selected='true'], [aria-current='true']) {
+    color: var(--ll-fg);
+    background: var(--ll-ctl-bg-on);
+  }
+  /* 侧栏 */
+  .ll-tabs-list[data-variant='side'] {
+    flex-direction: column;
+    gap: var(--ll-space-2);
+  }
+  .ll-tabs-list[data-variant='side'] > .ll-tab {
+    height: auto;
+    justify-content: flex-start;
+    padding: var(--ll-space-8) var(--ll-space-12);
+    border-radius: var(--ll-radius-md);
+    background: transparent;
+    font-size: var(--ll-text-md);
+    text-align: left;
+  }
+  @media (hover: hover) {
+    .ll-tabs-list[data-variant='side'] > .ll-tab:hover {
+      color: var(--ll-fg);
+      background: var(--ll-ctl-bg);
+    }
+  }
+  .ll-tabs-list[data-variant='side'] > .ll-tab:is([aria-selected='true'], [aria-current='true']) {
+    color: var(--ll-fg);
+    background: var(--ll-item-bg-on);
+  }
+}

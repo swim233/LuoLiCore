@@ -1,0 +1,36 @@
+/* 提示条 .ll-notice：玻璃的小药丸，一句话，后面可以带一个按钮（.ll-btn）。
+   data-size：sm（默认，时间线顶上的小提示）、lg（整理模式的提示条：字大一点、四周留得宽，末尾是按钮时右边收成 8）；
+   data-tone：不写是平常的字，danger 是危险色的字。
+   位置（贴顶、居中）、进出场动画、窄屏的圆角由用的地方定。 */
+@layer ll.controls {
+  .ll-notice {
+    box-sizing: border-box;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--ll-space-8);
+    /* 控件自己的最小高度：sm 24 */
+    min-height: 24px;
+    padding: 0 var(--ll-space-12);
+    border-radius: var(--ll-radius-full);
+    background: var(--ll-glass-bg);
+    -webkit-backdrop-filter: var(--ll-glass-blur);
+    backdrop-filter: var(--ll-glass-blur);
+    box-shadow: var(--ll-glass-edge);
+    color: var(--ll-fg-2);
+    font-size: var(--ll-text-sm);
+  }
+  .ll-notice[data-tone='danger'] {
+    color: var(--ll-danger);
+  }
+  .ll-notice[data-size='lg'] {
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: var(--ll-space-12);
+    min-height: 0;
+    padding: var(--ll-space-8) var(--ll-space-16);
+    font-size: var(--ll-text-md);
+  }
+  .ll-notice[data-size='lg']:has(> .ll-btn:last-child) {
+    padding-right: var(--ll-space-8);
+  }
+}

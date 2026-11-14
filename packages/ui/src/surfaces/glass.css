@@ -1,0 +1,17 @@
+/* 玻璃面板 .ll-glass：底、边光和下方的阴影（--ll-glass-edge）、背后模糊（--ll-glass-blur）。菜单、弹出框、提示条、收纳盒的样子。
+   圆角默认 --ll-radius-xl；data-shape='pill' 是全圆角。
+   背后的模糊糊的是它后面的东西：它的祖先里不能有不透明度小于 1、带 filter 或 mask 的（那样模糊拿不到后面的画面）；
+   放在夜空窗口（.ll-sky）里，糊开的就是窗口的星空。
+   位置、大小、层级、进出场由用的地方定，不在这里。 */
+@layer ll.controls {
+  .ll-glass {
+    border-radius: var(--ll-radius-xl);
+    background: var(--ll-glass-bg);
+    -webkit-backdrop-filter: var(--ll-glass-blur);
+    backdrop-filter: var(--ll-glass-blur);
+    box-shadow: var(--ll-glass-edge);
+  }
+  .ll-glass[data-shape='pill'] {
+    border-radius: var(--ll-radius-full);
+  }
+}

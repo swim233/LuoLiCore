@@ -1,0 +1,12 @@
+/* 半透明面板 .ll-inset：嵌进去的一块，半透明的底加一圈细线（画在阴影里，不占版面）。设置的分组、折叠展开的内容、摘要、统计方格、占位输入框都是这个样子。
+   圆角默认 --ll-radius-lg；data-size='sm' 是 --ll-radius-md，给嵌在别的东西里面的小块用。内边距、排版由用的地方定。 */
+@layer ll.controls {
+  .ll-inset {
+    border-radius: var(--ll-radius-lg);
+    background: var(--ll-inset-bg);
+    box-shadow: inset 0 0 0 1px var(--ll-inset-line);
+  }
+  .ll-inset[data-size='sm'] {
+    border-radius: var(--ll-radius-md);
+  }
+}

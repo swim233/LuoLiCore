@@ -1,0 +1,30 @@
+/* 夜空窗口的底 .ll-sky：窗口、胶囊、消失时留下的空壳都是这个样子。
+   - .ll-sky：底（--ll-sky-bg：压暗层、两层星点、两团光、底色）、外阴影、窗口的圆角、内容贴着圆角裁掉（overflow: hidden）、
+     自成一个层叠上下文（isolation: isolate），里面的毛玻璃以它为界。星点贴图由 @luoli/ui/sky-stars 的 startSkyStars() 启动时画好写进变量；
+   - .ll-sky-vig：盖在内容上面的一层，画四周的细线和向内压暗。铺满父元素（父元素要有定位）、跟着圆角、不挡鼠标；它在第几层由用的地方定；
+   - data-shape='pill'（胶囊）：全圆角，细线直接画在自己的阴影里，没有压暗的那一层。
+   激活、浮起、全屏、整理、悬停时带出来的阴影和过渡是外壳的事，不在这里。 */
+@layer ll.controls {
+  .ll-sky {
+    border-radius: var(--ll-radius-window);
+    background: var(--ll-sky-bg);
+    box-shadow: var(--ll-sky-shadow);
+    overflow: hidden;
+    isolation: isolate;
+  }
+  .ll-sky[data-shape='pill'] {
+    border-radius: var(--ll-radius-full);
+    box-shadow:
+      inset 0 0 0 1px var(--ll-sky-line-cap),
+      var(--ll-sky-shadow);
+  }
+  .ll-sky-vig {
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    pointer-events: none;
+    box-shadow:
+      inset 0 0 0 1px var(--ll-sky-line),
+      var(--ll-sky-vignette);
+  }
+}

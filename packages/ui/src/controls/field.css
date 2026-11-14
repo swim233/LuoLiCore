@@ -1,0 +1,34 @@
+/* 表单项 .ll-field：标签（.ll-field-label）、控件、说明（.ll-field-hint，可没有）。
+   默认竖排：标签在上，说明在下；data-layout='row' 横排：标签在左、控件在右、放不下就折行，说明不显示（改成悬停看根上的 title）。
+   最大宽、控件的对齐方式由用的地方定。 */
+@layer ll.controls {
+  .ll-field {
+    display: flex;
+    flex-direction: column;
+    gap: var(--ll-space-6);
+  }
+  .ll-field-label {
+    font-size: var(--ll-text-sm);
+    color: var(--ll-fg-3);
+  }
+  .ll-field-hint {
+    margin: 0;
+    min-height: 1.5em;
+    font-size: var(--ll-text-sm);
+    line-height: 1.5;
+    color: var(--ll-fg-3);
+  }
+  .ll-field[data-layout='row'] {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--ll-space-6) var(--ll-space-12);
+  }
+  .ll-field[data-layout='row'] > .ll-field-label {
+    color: var(--ll-fg-2);
+  }
+  .ll-field[data-layout='row'] > .ll-field-hint {
+    display: none;
+  }
+}

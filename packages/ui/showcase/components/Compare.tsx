@@ -14,6 +14,7 @@ export type CompareMode = 'side' | 'switch';
 type View = 'now' | 'merged';
 
 export function Compare({
+  id,
   title,
   now,
   merged,
@@ -24,6 +25,8 @@ export function Compare({
   mode: initialMode = 'side',
   className = '',
 }: {
+  /** 给 QA 的脚本和变化表认的编号（写在 data-cmp-id 上） */
+  id?: string;
   title: ReactNode;
   now: ReactNode;
   merged: ReactNode;
@@ -46,7 +49,7 @@ export function Compare({
     e.preventDefault();
   };
   return (
-    <figure className={`sc-cmp ${className}`} data-compare="" data-mode={mode}>
+    <figure className={`sc-cmp ${className}`} data-compare="" data-cmp-id={id} data-mode={mode}>
       <header className="sc-cmp-head">
         <h4 className="sc-cmp-title">{title}</h4>
         <div className="sc-cmp-heads">

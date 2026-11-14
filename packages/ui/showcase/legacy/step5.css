@@ -1,0 +1,629 @@
+/* 面板里第 5 步第一批这些东西的旧样式，原样抄一份，给展示页「基础控件」「面」两节的对比块当「现在」用（b 段结束时整个删掉）。
+   来源是 src/web/styles/app.css（第 4 步 4b 提交之后的版本）：规则的内容一个字不改，只是每条选择器前面加了 `.sc-legacy ` 前缀，
+   这样它们不会漏到展示页的别处；每条前面的注释写了它在 app.css 里的行号。由脚本按选择器从 app.css 里抄出来（不手改）。
+   「现在」那一边的外层元素带 `.sc-ctx .sc-legacy`，「归并后」那边只带 `.sc-ctx`（给字体、字号、行高、字色）。
+   没有抄的：状态带出来的阴影和过渡（激活、浮起、全屏、整理、悬停）、窄屏的覆盖、「取消」那类悬停才出现的、形变里去掉底的规则。 */
+.sc-ctx {
+  /* 照面板的 body：字体、字号、行高、颜色都从这里继承下去 */
+  font: 14px/1.55 var(--ll-font-ui);
+  color: var(--ll-fg);
+  -webkit-font-smoothing: antialiased;
+}
+/* 面板里没有全局的 box-sizing（浏览器默认的 content-box），展示页的版面是 border-box：旧样式这边改回面板的样子（按钮的浏览器默认本来就是 border-box，不动） */
+.sc-legacy :not(button),
+.sc-legacy *::before,
+.sc-legacy *::after {
+  box-sizing: content-box;
+}
+
+/* app.css:216 */
+.sc-legacy .arrange-bar {
+  position: sticky;
+  top: calc(env(safe-area-inset-top, 0px) + var(--top-h));
+  z-index: 45;
+  margin: 0 auto 8px;
+  width: fit-content;
+  max-width: calc(100% - 32px);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  justify-content: center;
+  padding: 8px 8px 8px 16px;
+  border-radius: 999px;
+  background: var(--ll-glass-bg);
+  -webkit-backdrop-filter: blur(16px) saturate(1.2);
+  backdrop-filter: blur(16px) saturate(1.2);
+  box-shadow: var(--ll-glass-edge);
+  color: var(--ll-fg-2);
+  font-size: 13px;
+  /* 进出整理模式：从顶栏下面滑下来、滑回去（退出时先脱离文档流，固定在原处淡出） */
+  opacity: 0;
+  transform: translateY(-14px);
+  transition:
+    opacity 0.26s ease,
+    transform 0.34s var(--ll-ease-out);
+}
+
+/* app.css:243 */
+.sc-legacy .arrange-bar.is-on {
+  opacity: 1;
+  transform: none;
+}
+
+/* app.css:250 */
+.sc-legacy .arrange-bar b {
+  color: var(--ll-fg);
+  font-weight: 500;
+}
+
+/* app.css:306 */
+.sc-legacy .desk-empty {
+  grid-column: 1 / -1;
+  color: var(--ll-fg-3);
+  text-align: center;
+  padding: 48px 0;
+}
+
+/* app.css:341 */
+.sc-legacy .w-card {
+  --pane-head: var(--head-h);
+  position: relative;
+  height: 100%;
+  box-sizing: border-box;
+  border-radius: var(--ll-radius-window);
+  border: 0;
+  background: var(--ll-sky-bg);
+  box-shadow: var(--ll-sky-shadow);
+  overflow: hidden;
+  isolation: isolate;
+  transition:
+    box-shadow var(--ll-dur-card),
+    transform 0.18s ease-out;
+  transform-style: flat;
+}
+
+/* app.css:369 */
+.sc-legacy .w-vig {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  border-radius: inherit;
+  pointer-events: none;
+  box-shadow:
+    inset 0 0 0 1px var(--ll-sky-line),
+    var(--ll-sky-vignette);
+}
+
+/* app.css:668 */
+.sc-legacy .cap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  height: 44px;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: 0 18px 0 7px;
+  border-radius: 999px;
+  border: 0;
+  background: var(--ll-sky-bg);
+  box-shadow:
+    inset 0 0 0 1px var(--ll-sky-line-cap),
+    var(--ll-sky-shadow);
+  cursor: pointer;
+  text-align: left;
+  overflow: hidden;
+  isolation: isolate;
+  transition: box-shadow var(--ll-dur-hover);
+}
+
+/* app.css:879 */
+.sc-legacy .ghost {
+  position: fixed;
+  box-sizing: border-box;
+  border-radius: var(--ll-radius-window);
+  background: var(--ll-sky-bg);
+  box-shadow:
+    inset 0 0 0 1px var(--ll-sky-line),
+    0 0 36px color-mix(in srgb, var(--ll-accent) 22%, transparent),
+    var(--ll-sky-shadow);
+  overflow: hidden;
+}
+
+/* app.css:1091 */
+.sc-legacy .tray {
+  position: fixed;
+  z-index: 55;
+  left: 50%;
+  bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  width: min(720px, calc(100% - 32px));
+  box-sizing: border-box;
+  padding: 10px 14px;
+  border-radius: 18px;
+  border: 0;
+  background: var(--ll-glass-bg);
+  -webkit-backdrop-filter: blur(16px) saturate(1.2);
+  backdrop-filter: blur(16px) saturate(1.2);
+  box-shadow: var(--ll-glass-edge);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  /* 平时藏在下面；整理时从底部滑上来，退出时滑回去 */
+  opacity: 0;
+  visibility: hidden;
+  transform: translate(-50%, 28px);
+  transition:
+    box-shadow 0.2s,
+    background-color 0.2s,
+    opacity 0.24s ease,
+    transform 0.32s var(--ll-ease-out),
+    visibility 0s linear 0.32s;
+}
+
+/* app.css:1120 */
+.sc-legacy .tray.is-on {
+  opacity: 1;
+  visibility: visible;
+  transform: translate(-50%, 0);
+  transition:
+    box-shadow 0.2s,
+    background-color 0.2s,
+    opacity 0.26s ease 0.06s,
+    transform 0.34s var(--ll-ease-out) 0.06s,
+    visibility 0s linear 0s;
+}
+
+/* app.css:1769 */
+.sc-legacy .now-empty {
+  display: grid;
+  place-items: center;
+  text-align: center;
+  color: var(--ll-fg-3);
+  font-size: 13px;
+  padding-inline: 16px;
+}
+
+/* app.css:1777 */
+.sc-legacy .now-empty-t {
+  color: var(--ll-fg-2);
+  font-size: 14px;
+  margin-bottom: 4px;
+}
+
+/* app.css:2029 */
+.sc-legacy .hl-url {
+  color: var(--ll-accent);
+  text-decoration: underline dashed;
+  text-underline-offset: 3px;
+  text-decoration-thickness: 1px;
+}
+
+/* app.css:2328 */
+.sc-legacy .empty {
+  margin: auto;
+  padding: 24px 16px;
+  text-align: center;
+  color: var(--ll-fg-3);
+  font-size: 13px;
+}
+
+/* app.css:2335 */
+.sc-legacy .empty.is-flat {
+  margin: 0;
+  padding: 0;
+}
+
+/* app.css:2339 */
+.sc-legacy .empty b {
+  display: block;
+  color: var(--ll-fg-2);
+  font-weight: 500;
+  margin-bottom: 4px;
+}
+
+/* app.css:2950 */
+.sc-legacy .md-a,
+.sc-legacy a.hl-url {
+  cursor: pointer;
+}
+
+/* app.css:2954 */
+.sc-legacy .md-a {
+  color: var(--ll-accent);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+  text-decoration-color: color-mix(in srgb, var(--ll-accent) 55%, transparent);
+  overflow-wrap: anywhere;
+}
+
+/* app.css:2963 */
+.sc-legacy .md-a.is-pending {
+  cursor: inherit;
+}
+
+/* app.css:2966 */
+.sc-legacy .md-a.is-pending:hover {
+  color: var(--ll-accent);
+  text-decoration-color: color-mix(in srgb, var(--ll-accent) 55%, transparent);
+}
+
+/* app.css:2970 */
+.sc-legacy .md-a:hover,
+.sc-legacy a.hl-url:hover {
+  color: color-mix(in srgb, var(--ll-accent) 70%, var(--ll-white));
+  text-decoration-color: currentColor;
+}
+
+/* app.css:2975 */
+.sc-legacy .md-a:focus-visible,
+.sc-legacy a.hl-url:focus-visible {
+  outline: 2px solid var(--ll-accent);
+  outline-offset: 1px;
+  border-radius: 3px;
+}
+
+/* app.css:3115 */
+.sc-legacy .log-pill {
+  padding: 3px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--ll-fg-2);
+  background: var(--ll-glass-bg);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  box-shadow: var(--ll-glass-edge);
+  pointer-events: auto;
+}
+
+/* app.css:3126 */
+.sc-legacy .log-pill.is-err {
+  color: var(--ll-danger);
+}
+
+/* app.css:3130 */
+.sc-legacy .log-pill .ll-btn {
+  margin-left: 8px;
+}
+
+/* app.css:3133 */
+.sc-legacy .empty .ll-btn {
+  margin: 8px 0 0;
+}
+
+/* app.css:3174 */
+.sc-legacy .seg-sum {
+  max-width: 560px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  background: var(--ll-inset-bg);
+  box-shadow: inset 0 0 0 1px var(--ll-inset-line);
+  color: var(--ll-fg-2);
+  font-size: 13px;
+}
+
+/* app.css:3183 */
+.sc-legacy .seg-sum b {
+  display: block;
+  color: var(--ll-fg-3);
+  font-weight: 500;
+  font-size: 12px;
+  margin-bottom: 2px;
+  letter-spacing: 0.06em;
+}
+
+/* app.css:3747 */
+.sc-legacy .skel-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: 12px;
+  background: var(--ll-inset-bg);
+  box-shadow: inset 0 0 0 1px var(--ll-inset-line);
+}
+
+/* app.css:3756 */
+.sc-legacy .skel-group b {
+  font-weight: 600;
+  font-size: 12.5px;
+  color: var(--ll-fg-2);
+  flex: none;
+  min-width: 6em;
+}
+
+/* app.css:3763 */
+.sc-legacy .skel-live {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 12px 10px;
+  border-radius: 12px;
+  background: var(--ll-inset-bg);
+  box-shadow: inset 0 0 0 1px var(--ll-inset-line);
+}
+
+/* app.css:3772 */
+.sc-legacy .skel-live > b {
+  font-weight: 600;
+  font-size: 12.5px;
+  color: var(--ll-fg-2);
+  padding: 2px 0;
+}
+
+/* app.css:3779 */
+.sc-legacy .skel-live .set-field {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 12px;
+}
+
+/* app.css:3786 */
+.sc-legacy .skel-live .set-field .set-label {
+  font-size: 12.5px;
+  color: var(--ll-fg-2);
+}
+
+/* app.css:3790 */
+.sc-legacy .skel-live .set-field .ll-seg,
+.sc-legacy .skel-live .set-field .ll-btn {
+  align-self: center;
+}
+
+/* app.css:3794 */
+.sc-legacy .skel-live .set-hint {
+  display: none;
+}
+
+/* app.css:3797 */
+.sc-legacy .skel-bar {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--ll-line);
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* app.css:3854 */
+.sc-legacy .set-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 520px;
+}
+
+/* app.css:3860 */
+.sc-legacy .set-field label,
+.sc-legacy .set-field .set-label {
+  font-size: 12px;
+  color: var(--ll-fg-3);
+}
+
+/* app.css:3865 */
+.sc-legacy .set-field .ll-seg,
+.sc-legacy .set-field .ll-btn {
+  align-self: flex-start;
+  max-width: 100%;
+}
+
+/* app.css:3870 */
+.sc-legacy .set-field .ll-seg > button {
+  padding: 0 12px;
+}
+
+/* app.css:3873 */
+.sc-legacy .set-hint,
+.sc-legacy .set-note {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ll-fg-3);
+}
+
+/* app.css:3880 */
+.sc-legacy .set-hint {
+  min-height: 1.5em;
+}
+
+/* app.css:3883 */
+.sc-legacy .set-input {
+  height: 34px;
+  border-radius: 10px;
+  background: var(--ll-inset-bg);
+  box-shadow: inset 0 0 0 1px var(--ll-inset-line);
+}
+
+/* app.css:3889 */
+.sc-legacy .set-input.is-tall {
+  height: 120px;
+}
+
+/* app.css:3911 */
+.sc-legacy .today-hero {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding-bottom: 2px;
+}
+
+/* app.css:3917 */
+.sc-legacy .today-hero .roll {
+  font-size: 42px;
+  font-weight: 600;
+  line-height: 1.1;
+  color: var(--ll-fg);
+  letter-spacing: -0.01em;
+}
+
+/* app.css:3924 */
+.sc-legacy .today-hero span {
+  color: var(--ll-fg-3);
+  font-size: 13px;
+}
+
+/* app.css:3928 */
+.sc-legacy .stat {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* app.css:3933 */
+.sc-legacy .stat-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12.5px;
+  color: var(--ll-fg-2);
+  min-width: 0;
+  flex-wrap: wrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* app.css:3943 */
+.sc-legacy .stat-row b {
+  font-weight: 600;
+  color: var(--ll-fg);
+}
+
+/* app.css:3947 */
+.sc-legacy .roll {
+  font-variant-numeric: tabular-nums;
+  display: inline-block;
+}
+
+/* app.css:3951 */
+.sc-legacy .roll.is-up {
+  color: var(--ll-white);
+}
+
+/* app.css:3954 */
+.sc-legacy .today-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 14px;
+}
+
+/* app.css:3959 */
+.sc-legacy .tile {
+  padding: 14px 16px;
+  border-radius: 14px;
+  background: var(--ll-inset-bg);
+  box-shadow: inset 0 0 0 1px var(--ll-inset-line);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* app.css:3969 */
+.sc-legacy .tile small {
+  font-size: 12px;
+  color: var(--ll-fg-3);
+  letter-spacing: 0.06em;
+}
+
+/* app.css:3974 */
+.sc-legacy .tile .roll {
+  font-size: 28px;
+  font-weight: 600;
+  color: var(--ll-fg);
+  line-height: 1.1;
+}
+
+/* app.css:3980 */
+.sc-legacy .per-conv {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* app.css:3985 */
+.sc-legacy .per-row {
+  display: grid;
+  grid-template-columns: minmax(80px, 160px) minmax(0, 1fr) 3em;
+  gap: 10px;
+  align-items: center;
+  font-size: 13px;
+  color: var(--ll-fg-2);
+}
+
+/* app.css:3993 */
+.sc-legacy .per-row span:first-child {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* app.css:3998 */
+.sc-legacy .per-row span:last-child {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* app.css:4004 */
+.sc-legacy .energy {
+  position: relative;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--ll-ctl-bg);
+  overflow: hidden;
+}
+
+/* app.css:4011 */
+.sc-legacy .energy-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 0;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--ll-accent), var(--ll-star));
+  transition: width 0.9s var(--ll-ease-out);
+}
+
+/* app.css:4021 */
+.sc-legacy .energy.is-bad .energy-fill {
+  background: var(--ll-danger);
+}
+
+/* app.css:4024 */
+.sc-legacy .energy-ticks {
+  display: none;
+}
+
+/* app.css:4027 */
+@keyframes energy-shine {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(260%);
+  }
+}
+
+/* app.css:4035 */
+.sc-legacy .energy-shine {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 40%;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--ll-white) 35%, transparent),
+    transparent
+  );
+  transform: translateX(-100%);
+  pointer-events: none;
+}
+
+/* app.css:4050 */
+.motion .sc-legacy .energy-shine.run {
+  animation: energy-shine 1s ease-out;
+}

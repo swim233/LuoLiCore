@@ -15,6 +15,42 @@ export const EASE_MORPH: Bezier = [0.35, 0.2, 0.15, 1];
 /* 出现、进入、到位：很快到位再收尾。部件出现、新行淡入、新条目、整理模式和拖动的位移、数字滚动和能量条 */
 export const EASE_OUT: Bezier = [0.2, 0.8, 0.2, 1];
 export const EASE_OUT_CSS = cssBezier(EASE_OUT);
+
+/** 按 CSS 的 cubic-bezier(x1, y1, x2, y2) 求值（端点是 (0,0) 和 (1,1)）：t 是 0–1 的时间比例，返回 0–1 的进度。
+    给不用 CSS 过渡、自己每帧算进度的地方用（比如数字滚动），曲线和 CSS 里同一条是一样的 */
+export function bezierAt([x1, y1, x2, y2]: Bezier, t: number): number {
+  if (t <= 0) return 0;
+  if (t >= 1) return 1;
+  const ax = 3 * x1 - 3 * x2 + 1;
+  const bx = 3 * x2 - 6 * x1;
+  const cx = 3 * x1;
+  const ay = 3 * y1 - 3 * y2 + 1;
+  const by = 3 * y2 - 6 * y1;
+  const cy = 3 * y1;
+  const x = (u: number) => ((ax * u + bx) * u + cx) * u;
+  const y = (u: number) => ((ay * u + by) * u + cy) * u;
+  const dx = (u: number) => (3 * ax * u + 2 * bx) * u + cx;
+  /* 先用牛顿法解 x(u) = t（几步就收敛）；导数太小或没收敛，退回二分 */
+  let u = t;
+  for (let i = 0; i < 8; i++) {
+    const err = x(u) - t;
+    if (Math.abs(err) < 1e-7) return y(u);
+    const d = dx(u);
+    if (Math.abs(d) < 1e-6) break;
+    u -= err / d;
+  }
+  let lo = 0;
+  let hi = 1;
+  u = t;
+  for (let i = 0; i < 60 && lo < hi; i++) {
+    const err = x(u);
+    if (Math.abs(err - t) < 1e-7) break;
+    if (t > err) lo = u;
+    else hi = u;
+    u = (lo + hi) / 2;
+  }
+  return y(u);
+}
 /* 列表的悬停高亮从一行滑到另一行，到位时回弹（components/glide.ts 用 Web Animations 的三段关键帧）：
    - 先滑过目标 GLIDE_OVERSHOOT 像素，在全程的 GLIDE_PEAK 处到最远、速度减到 0（EASE_GLIDE_GO），再回到目标（EASE_GLIDE_BACK）；
    - 过冲的距离固定，和滑多远无关（一行到下一行、跨好几行都是这么多），方向跟着滑动的方向；
@@ -45,12 +81,15 @@ export const DUR_LAYER = 260;
 /* 切换时两层各自平移的距离（像素），进来的从这里滑到位，出去的滑向反方向 */
 export const LAYER_SHIFT = 28;
 
-/* CSS 变量：写进 <head> 里的一个 <style>（不写 <html> 的行内样式，免得和「结束后没有残留的行内样式」的检查混在一起） */
-document.getElementById('easing-vars')?.remove();
-const vars = document.createElement('style');
-vars.id = 'easing-vars';
-vars.textContent =
-  `:root{--ll-ease-out:${EASE_OUT_CSS};--ll-dur-hover:${DUR_HOVER}ms;--ll-dur-card:${DUR_CARD}ms;` +
-  `--ll-dur-glide:${DUR_GLIDE}ms;--ll-dur-glide-in:${DUR_GLIDE_IN}ms;` +
-  `--ll-dur-glide-out:${DUR_GLIDE_OUT}ms;--ll-dur-blur-in:${DUR_BLUR_IN}ms}`;
-document.head.append(vars);
+/* CSS 变量：写进 <head> 里的一个 <style>（不写 <html> 的行内样式，免得和「结束后没有残留的行内样式」的检查混在一起）。
+   没有 document（node 里的测试、服务端渲染）时不写：常量和 bezierAt 在哪里都能用。 */
+if (typeof document !== 'undefined') {
+  document.getElementById('easing-vars')?.remove();
+  const vars = document.createElement('style');
+  vars.id = 'easing-vars';
+  vars.textContent =
+    `:root{--ll-ease-out:${EASE_OUT_CSS};--ll-dur-hover:${DUR_HOVER}ms;--ll-dur-card:${DUR_CARD}ms;` +
+    `--ll-dur-glide:${DUR_GLIDE}ms;--ll-dur-glide-in:${DUR_GLIDE_IN}ms;` +
+    `--ll-dur-glide-out:${DUR_GLIDE_OUT}ms;--ll-dur-blur-in:${DUR_BLUR_IN}ms}`;
+  document.head.append(vars);
+}

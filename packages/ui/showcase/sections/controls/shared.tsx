@@ -103,3 +103,16 @@ export function StateTable({
     />
   );
 }
+
+/* 对比块里的两边：「现在」套旧样式（.sc-legacy，legacy/ 里原样抄来的），「归并后」只套 .sc-ctx（给字体、字号、行高、字色）。
+   className 是归并后那边要带上的、留在面板里的布局（showcase.css 里写的 .sc-m-…） */
+export const Now = ({ children }: { children: ReactNode }) => (
+  <div className="sc-ctx sc-legacy">{children}</div>
+);
+export const Merged = ({
+  children,
+  className = '',
+}: {
+  children: ReactNode;
+  className?: string;
+}) => <div className={`sc-ctx ${className}`}>{children}</div>;

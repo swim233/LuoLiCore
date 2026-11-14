@@ -1,0 +1,28 @@
+/* 链接 .ll-link：强调色的字、1px 的下划线（下划线淡一档）、悬停变亮。
+   data-variant='auto'：自动认出来的网址，下划线是虚线（和字一个颜色）。键盘焦点环用 base.css 里统一的那一条。
+   链接的「样子」（颜色、下划线、折行）对任何元素都生效；手型和悬停变亮只给真的链接（带 href 的 <a>，写成 :any-link）。
+   所以还不能点的（比如逐字输出时还没写完的链接，只有方括号里的字）写成 <span class="ll-link">：长得和链接一样，不是手型、悬停也不变。 */
+@layer ll.controls {
+  .ll-link {
+    color: var(--ll-accent);
+    text-decoration: underline;
+    text-decoration-thickness: 1px;
+    /* 控件自己的尺寸：下划线离字 3px（太近会割到字的下沿） */
+    text-underline-offset: 3px;
+    text-decoration-color: color-mix(in srgb, var(--ll-accent) 55%, transparent);
+    overflow-wrap: anywhere;
+  }
+  .ll-link:any-link {
+    cursor: pointer;
+  }
+  .ll-link[data-variant='auto'] {
+    text-decoration-style: dashed;
+    text-decoration-color: currentColor;
+  }
+  @media (hover: hover) {
+    .ll-link:any-link:hover {
+      color: color-mix(in srgb, var(--ll-accent) 70%, var(--ll-white));
+      text-decoration-color: currentColor;
+    }
+  }
+}

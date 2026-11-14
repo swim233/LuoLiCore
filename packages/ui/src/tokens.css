@@ -54,10 +54,13 @@
     --ll-ctl-bg: rgba(255, 255, 255, 0.08);
     --ll-ctl-bg-hover: rgba(255, 255, 255, 0.13);
     --ll-ctl-bg-on: color-mix(in srgb, var(--ll-accent) 30%, transparent);
+    /* 侧栏里选中的项（侧栏的标签、以后菜单里选中的项）：强调色 15%，叠在没有底的项上（列表的行选中是光条加渐变底，不用它） */
+    --ll-item-bg-on: color-mix(in srgb, var(--ll-accent) 15%, transparent);
     /* 禁用的控件：整个变淡 */
     --ll-disabled-opacity: 0.5;
     /* 玻璃：菜单、弹出框、提示条、收纳盒 */
     --ll-glass-bg: rgba(20, 27, 60, 0.82);
+    --ll-glass-blur: blur(16px) saturate(1.2); /* 背后的模糊：整个库就这一档 */
     --ll-glass-edge:
       inset 0 1px 0 rgba(255, 255, 255, 0.1), inset 0 0 0 1px rgba(255, 255, 255, 0.07),
       0 18px 40px -10px rgba(0, 0, 0, 0.8);

@@ -120,11 +120,12 @@ export const TOKEN_GROUPS: TokenGroup[] = [
   {
     id: 'ctl',
     title: '控件的底',
-    note: '按钮、开关、分段控件的底：没有边框。',
+    note: '按钮、开关、分段控件、标签页的底：没有边框。',
     items: [
       c('ctl-bg', '平时'),
       c('ctl-bg-hover', '悬停'),
       c('ctl-bg-on', '选中（强调色 30%）'),
+      c('item-bg-on', '侧栏里选中的一项（强调色 15%）'),
       t('disabled-opacity', 'number', '禁用的控件整个变淡到这个不透明度'),
     ],
   },
@@ -137,20 +138,24 @@ export const TOKEN_GROUPS: TokenGroup[] = [
   {
     id: 'glass',
     title: '玻璃',
-    note: '菜单、弹出框、提示条、收纳盒。底之外还要自己加 backdrop-filter（面板里是 blur(16px) saturate(1.2)）。',
-    items: [c('glass-bg', '底'), s('glass-edge', '边光和外阴影', '--ll-glass-bg')],
+    note: '菜单、弹出框、提示条、收纳盒。库里的 .ll-glass、提示条用的就是这三样；自己写别的玻璃面时，backdrop-filter 用 --ll-glass-blur。',
+    items: [
+      c('glass-bg', '底'),
+      t('glass-blur', 'text', '背后的模糊（backdrop-filter 的值）：整个库就这一档'),
+      s('glass-edge', '边光和外阴影', '--ll-glass-bg'),
+    ],
   },
   {
     id: 'sky',
     title: '夜空窗口',
-    note: '底从上到下叠：压暗层、两层星点贴图、左上一团紫、右下一团蓝、底色；再加外阴影、四周的细线和暗边。星点贴图现在还在面板里（用的项目启动时画好、写进来），所以这里是 none，窗口里没有星点。',
+    note: '底从上到下叠：压暗层、两层星点贴图、左上一团紫、右下一团蓝、底色；再加外阴影、四周的细线和暗边。星点贴图由 @luoli/ui/sky-stars 的 startSkyStars() 在启动时画好、写进这两个变量；没有调用时是 none，窗口里就没有星点（这一页调了，所以窗口里有）。',
     items: [
       c('sky-base', '底色'),
       c('sky-shade', '压暗层'),
       c('sky-glow-a', '左上那团紫'),
       c('sky-glow-b', '右下那团蓝'),
-      t('sky-stars-a', 'text', '星点贴图 A（没有写时是 none）'),
-      t('sky-stars-b', 'text', '星点贴图 B（没有写时是 none）'),
+      t('sky-stars-a', 'text', '星点贴图 A（startSkyStars() 写入；没有写时是 none）'),
+      t('sky-stars-b', 'text', '星点贴图 B（startSkyStars() 写入；没有写时是 none）'),
       s('sky-shadow', '窗口的外阴影', '--ll-sky-base'),
       c('sky-line', '窗口四周的细线'),
       c('sky-line-cap', '胶囊四周的细线'),

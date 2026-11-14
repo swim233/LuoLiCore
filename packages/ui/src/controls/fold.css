@@ -1,0 +1,41 @@
+/* 折叠 .ll-fold：<details class="ll-fold"><summary class="ll-fold-head">头</summary>内容……</details>。
+   展开收起时内容自己缓缓撑开、收起（高度从 0 到 auto 的过渡，0.2 秒，用 ::details-content 加 interpolate-size，不引 JS 和 Motion），
+   它下面的东西每帧跟着挪；动画关掉时直接到位（still.css）。收起时里面的东西 Tab 键走不到。
+   头：去掉浏览器自带的三角，一行暗色的小字（12px、--ll-fg-dim，悬停变亮）；用的地方可以整个换掉头里的内容和颜色（比如放一枚标签、一行等宽字）。
+   小箭头不自己画：头里放库的 .ll-chev，展开时它转向下（chev.css）。展开的内容不带样子，要一块底就自己加 .ll-inset。
+   外边距、头和内容之间的距离、字号以外的版面由用的地方定。 */
+@layer ll.controls {
+  .ll-fold {
+    interpolate-size: allow-keywords;
+  }
+  /* display: flow-root：里面内容的上外边距不会漏到外面 */
+  .ll-fold::details-content {
+    display: flow-root;
+    height: 0;
+    overflow: clip;
+    transition:
+      height 0.2s var(--ll-ease-out),
+      content-visibility 0.2s allow-discrete;
+  }
+  .ll-fold[open]::details-content {
+    height: auto;
+  }
+  .ll-fold-head {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--ll-space-6);
+    max-width: 100%;
+    list-style: none;
+    cursor: pointer;
+    color: var(--ll-fg-dim);
+    font-size: var(--ll-text-sm);
+  }
+  .ll-fold-head::-webkit-details-marker {
+    display: none;
+  }
+  @media (hover: hover) {
+    .ll-fold-head:hover {
+      color: var(--ll-fg-2);
+    }
+  }
+}

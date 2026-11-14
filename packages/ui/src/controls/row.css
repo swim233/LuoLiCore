@@ -1,0 +1,96 @@
+/* 列表行 .ll-row：会话列表、任务列表的一行。可选的头（.ll-row-lead，左边的图标位）、主区（.ll-row-main：标题 .ll-row-title、下面的次要文字 .ll-row-sub）、
+   右边的一列（.ll-row-side，竖着排、靠右；里面的小字用 .ll-row-meta）；行后面可以接占满整行的东西（加 .ll-row-full，比如任务行的确认、出错提示）。
+   - 两种排法：默认一行一行截断（上下居中，标题和次要文字各一行、超出省略，会话的行）；data-wrap 能折行（顶对齐，行高 1.55，任务的行）；
+   - 选中（aria-current='true'）：左边一道强调色的光条，向右淡出的底，标题变白；
+   - 根可以是 <button>（整行能点，手型）也可以是 <div>（行里另有按钮）。键盘焦点环画在行里面（行通常在会裁切的容器里）；
+     用的地方在层外有全局的 :focus-visible 规则（比如 outline-offset: 2px）时，会盖过这里层里的 −2px，环又画回行外面、被裁掉：
+     要自己留一条 .你的行类名:focus-visible { outline-offset: -2px }（或者让那条全局规则不管 ll- 开头的类）；
+   - 悬停高亮（跟着鼠标滑的那块）这一批不在库里：行是 position: relative、自成一个层叠上下文（z-index: 1）、自己没有不透明的底，
+     高亮浮在它下面、关动画时画在它自己的 ::before、::after 上，所以不会被库的行挡住。 */
+@layer ll.controls {
+  .ll-row {
+    position: relative;
+    z-index: 1;
+    box-sizing: border-box;
+    width: 100%;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: var(--ll-space-2) var(--ll-space-12);
+    margin: 0;
+    /* 行自己的内边距：上下 9（不在刻度里）、左右 10 */
+    padding: 9px var(--ll-space-10);
+    border: 0;
+    border-radius: var(--ll-radius-lg);
+    background: transparent;
+    color: var(--ll-fg);
+    font: inherit;
+    text-align: left;
+  }
+  .ll-row:has(> .ll-row-lead) {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+  .ll-row:is(button, a) {
+    cursor: pointer;
+  }
+  .ll-row:focus-visible {
+    outline-offset: calc(var(--ll-space-2) * -1);
+  }
+  .ll-row[data-wrap] {
+    align-items: start;
+  }
+  .ll-row-main {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .ll-row-title {
+    color: var(--ll-fg);
+    font-weight: 600;
+    font-size: var(--ll-text-md);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .ll-row-sub {
+    color: var(--ll-fg-3);
+    font-size: var(--ll-text-sm);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .ll-row[data-wrap] :is(.ll-row-title, .ll-row-sub) {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    line-height: 1.55;
+    overflow-wrap: anywhere;
+  }
+  .ll-row-side {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: var(--ll-space-4);
+  }
+  .ll-row-meta {
+    color: var(--ll-fg-dim);
+    font-size: var(--ll-text-xs);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .ll-row-full {
+    grid-column: 1 / -1;
+  }
+  .ll-row[aria-current='true'] {
+    background: linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--ll-accent) 20%, transparent),
+      transparent 75%
+    );
+    box-shadow: inset 3px 0 0 var(--ll-accent);
+    border-radius: var(--ll-radius-xs) var(--ll-radius-lg) var(--ll-radius-lg) var(--ll-radius-xs);
+  }
+  .ll-row[aria-current='true'] .ll-row-title {
+    color: var(--ll-white);
+  }
+}
