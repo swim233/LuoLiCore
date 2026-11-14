@@ -66,6 +66,23 @@ export class ConversationBusyError extends Error {
   }
 }
 
+/** 等 promise 兑现（返回 true）；signal 已经中止或先中止时马上返回 false */
+function unlessAborted(
+  promise: Promise<unknown>,
+  signal: AbortSignal | undefined,
+): Promise<boolean> {
+  if (!signal) return promise.then(() => true);
+  if (signal.aborted) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    const onAbort = () => resolve(false);
+    signal.addEventListener('abort', onAbort, { once: true });
+    void promise.then(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve(true);
+    });
+  });
+}
+
 /** 会话关闭之后调用清空 */
 function closedError(): Error {
   return new Error('会话已关闭，不能清空上下文');
@@ -388,8 +405,10 @@ export function createSegmenter({
     },
 
     /**
-     * 手动压缩：当前段的全部消息连同之前的摘要并成新摘要（与空闲切段的请求相同），成功后从最后
-     * 一条消息之后开始新的一段，原因 manual，记下执行人。进行中的自动摘要先中止。
+     * 手动压缩：当前段到界线为止的消息连同之前的摘要并成新摘要（与空闲切段的请求相同），成功后
+     * 从界线的下一个序号开始新的一段，原因 manual，记下执行人。界线是调用那一刻的最后一条消息：
+     * 之后写入的消息（等自动摘要收尾、压缩进行中的时候）归入新段，不进这次摘要。
+     * 进行中的自动摘要先中止。
      * 回复进行中、另一次手动压缩还没结束时以 ConversationBusyError 拒绝，什么都不改。
      * 失败时不切段、抛出错误（不影响自动压缩的间隔）；被中止（abortSignal、关闭会话、清空接手）
      * 时不切段，结果是 aborted
@@ -400,6 +419,10 @@ export function createSegmenter({
       // 调用时就已经中止、会话已关闭：什么都不动，进行中的自动摘要也不打断
       if (abortSignal?.aborted || closing.signal.aborted) return Promise.resolve('aborted');
       compacting = true;
+      // 界线在调用的那一刻取定：这时的最后一条消息。之后写入的消息（如等自动摘要收尾的时候）
+      // 归入新的一段，不进这次摘要
+      const boundary = store.last();
+      boundary.catch(() => {});
       const operation = exclusive('manual', async (own): Promise<CompactResult> => {
         const signal = AbortSignal.any([
           closing.signal,
@@ -407,12 +430,14 @@ export function createSegmenter({
           ...(abortSignal === undefined ? [] : [abortSignal]),
         ]);
         if (signal.aborted) return 'aborted';
-        // 从最后一条消息之后开新段：压缩期间写入的消息都归入新段
+        // 摘要到界线为止，新段从界线的下一个序号开始：调用之后写入的消息都归入新段。
+        // 当前段在轮到自己之后再读：被中止的自动摘要要是赶在中止之前切完了，按切完之后的当前段算，
+        // 界线落在它之前时就是没有可压缩的内容
         const outcome = await summarizeAndCut(
           { reason: 'manual', startedBy: by },
           async () => {
+            const last = await boundary;
             const segment = await store.currentSegment();
-            const last = await store.last();
             if (!last || last.seq < segment.startSeq) return undefined;
             const history = await store.list({ from: segment.startSeq, before: last.seq + 1 });
             return {
@@ -436,19 +461,23 @@ export function createSegmenter({
     },
 
     /**
-     * 清空：之后的回复看不到之前的原文与摘要，不请求模型。当前段有消息时从最后一条之后新开一段
-     * 清空的段（没有摘要，记下执行人）；没有消息、带着摘要时把这一段改成清空的段；都没有时什么
-     * 都不做。进行中的自动摘要、手动压缩先中止。回复进行中时以 ConversationBusyError 拒绝；
+     * 清空：之后的回复看不到之前的原文与摘要，不请求模型。界线是调用那一刻的最后一条消息，之后
+     * 写入的消息归入清空之后的一段、不被清掉。当前段有界线之前的消息时从界线之后新开一段清空的段
+     * （没有摘要，记下执行人）；没有消息、带着摘要时把这一段改成清空的段；都没有时什么都不做。
+     * 进行中的自动摘要、手动压缩先中止。回复进行中时以 ConversationBusyError 拒绝；
      * 会话已关闭时以普通的错误拒绝，什么都不写
      */
     clear({ by }: ClearOptions): Promise<ClearResult> {
       if (isReplying()) return Promise.reject(new ConversationBusyError('replying'));
       if (closing.signal.aborted) return Promise.reject(closedError());
+      // 界线在调用的那一刻取定（同压缩）：之后写入的消息归入清空之后的一段，不被清掉
+      const boundary = store.last();
+      boundary.catch(() => {});
       return exclusive('clear', async () => {
-        // 读当前段与写入之间可能刚写进一条消息（这时改写不成），按新的情况再来一次
+        // 改写空段时，读当前段与写入之间可能刚写进一条消息（这时改写不成），按新的情况再来一次
         for (let attempt = 1; ; attempt++) {
           const segment = await store.currentSegment();
-          const last = await store.last();
+          const last = attempt === 1 ? await boundary : await store.last();
           // 等着的时候会话被关闭了：什么都不写
           if (closing.signal.aborted) throw closedError();
           const fields = { ...logFields, byId: by.id };
@@ -481,18 +510,22 @@ export function createSegmenter({
 
     /**
      * 等正在进行的空闲检查、空闲切段与手动操作（手动压缩、清空）结束：之后读到的是它们之后的
-     * 当前段。不等自动压缩：压缩进行中照常用当前段，压缩完成后，下一次读当前段时自然用上新段
+     * 当前段。不等自动压缩：压缩进行中照常用当前段，压缩完成后，下一次读当前段时自然用上新段。
+     * 等完返回 true。有要等的切段或手动操作，而 abortSignal 已经中止或等的时候中止了，马上返回
+     * false，不再等（切段与手动操作照常做完）；没有要等的时不看 abortSignal
      */
-    async settled(): Promise<void> {
+    async settled(abortSignal?: AbortSignal): Promise<boolean> {
       for (;;) {
         await checking;
-        if (manual.size > 0) {
-          await Promise.allSettled([...manual]);
-          continue;
-        }
         const current = cutting;
-        if (!current || current.kind === 'compress') return;
-        await current.done;
+        const wait =
+          manual.size > 0
+            ? Promise.allSettled([...manual])
+            : current && current.kind !== 'compress'
+              ? current.done
+              : undefined;
+        if (!wait) return true;
+        if (!(await unlessAborted(wait, abortSignal))) return false;
       }
     },
 

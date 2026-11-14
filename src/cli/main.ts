@@ -2,6 +2,7 @@ import { userInfo } from 'node:os';
 import { createInterface } from 'node:readline/promises';
 import { createClient, ServiceUnreachable, unreachableText } from './client.js';
 import { parseConfig, usage } from './config.js';
+import { handleLine, runLines } from './lines.js';
 import { errorLine, flushed, notice } from './notice.js';
 import { createChatSession } from './session.js';
 import { runTerminal } from './terminal.js';
@@ -73,23 +74,17 @@ if (resume) {
 const session = createChatSession({ client, author: name, conversationId });
 
 if (process.stdin.isTTY) {
-  // 终端里连不上服务时打印提示、不退出，服务起来后接着用
+  // 终端里连不上服务时打印提示、不退出，服务起来后接着用。整行是 /compact、/clear 时是指令
   await runTerminal(async (text, signal) => {
-    await session.say(text, signal);
+    await handleLine(session, text, signal);
   });
 } else {
-  // 管道输入：逐行按顺序处理，每行等回复结束再发下一行，读到 EOF 结束；不显示提示符，
+  // 管道输入：逐行按顺序处理，每行（消息或指令）等它结束再处理下一行，读到 EOF 结束；不显示提示符，
   // 不处理 Ctrl+C（按默认退出）。迭代 rl 会缓存读到的行：EOF 时 rl 立即关闭，已读入的行照常处理。
   // 连不上服务（发不出去、流中途断了、超时）时不再处理后面的行，退出码 1；模型出错照常接着下一行
   const rl = createInterface({ input: process.stdin, terminal: false });
-  for await (const line of rl) {
-    const text = line.trim();
-    if (text === '/exit') break;
-    if (text && (await session.say(text)) === 'unreachable') {
-      process.exitCode = 1;
-      break;
-    }
-  }
+  const code = await runLines(rl, session);
+  if (code !== 0) process.exitCode = code;
   rl.close();
 }
 // 用完了：等输出写完再退出（见 exit）

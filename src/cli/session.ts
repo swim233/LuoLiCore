@@ -1,11 +1,25 @@
 import { randomUUID } from 'node:crypto';
 import type { Usage } from '../core/message.js';
+import type { CommandKind, CommandResult } from '../server/types.js';
+import { StreamBroken } from './chat-stream.js';
 import { ServiceUnreachable, unreachableText, type Client } from './client.js';
 import { errorLine, notice } from './notice.js';
 import { printReply } from './print-reply.js';
 
 /** Ctrl+C 后等 abort 段最多这么久，没等到就直接断开 */
 export const abortWaitMs = 2000;
+
+/** 指令结果的提示 */
+const resultTexts: Record<CommandResult, string> = {
+  cleared: '（已清空上下文）',
+  'already-empty': '（上下文已经是空的）',
+  compacted: '（已压缩）',
+  'nothing-to-compact': '（没有可压缩的内容）',
+  aborted: '（已中止）',
+};
+
+/** 指令在提示里的叫法 */
+const commandNames: Record<CommandKind, string> = { compact: '压缩', clear: '清空' };
 
 /**
  * CLI 的一个会话：一行一行发给洛璃服务，打印回复。会话 id 在发第一句、服务建好会话时才有
@@ -129,8 +143,73 @@ export function createChatSession({
     }
   }
 
+  /**
+   * 执行一条指令（压缩、清空），等它结束才返回；返回值同 say。还没有会话 id（新会话还没发过第一句）
+   * 时不请求服务，上下文本来就是空的。按服务的事件打提示：要等时「（等当前回复结束）」，压缩开始时
+   * 「（压缩中…）」，最后是结果或「（压缩失败：原因）」。signal 是 Ctrl+C：等着、执行中都直接断开
+   * 请求（服务把断开当作取消），打「（已中止）」
+   */
+  async function command(kind: CommandKind, signal?: AbortSignal): Promise<'done' | 'unreachable'> {
+    if (conversationId === undefined) {
+      notice(resultTexts[kind === 'clear' ? 'already-empty' : 'nothing-to-compact']);
+      return 'done';
+    }
+    const connection = new AbortController();
+    const stop = () => connection.abort();
+    signal?.addEventListener('abort', stop, { once: true });
+    try {
+      if (signal?.aborted) stop();
+      let sent;
+      try {
+        sent = await client.command(conversationId, kind, author, connection.signal);
+      } catch (error) {
+        if (connection.signal.aborted) {
+          notice('（已中止）');
+          return 'done';
+        }
+        if (!(error instanceof ServiceUnreachable)) throw error;
+        errorLine(unreachableText(client.address));
+        return 'unreachable';
+      }
+      if (!sent.ok) {
+        errorLine(`发送失败：${sent.error}`);
+        return 'done';
+      }
+      try {
+        for await (const event of sent.events) {
+          if (event.type === 'waiting') notice('（等当前回复结束）');
+          else if (event.type === 'start') {
+            if (kind === 'compact') notice('（压缩中…）');
+          } else if (event.type === 'result') {
+            notice(resultTexts[event.result]);
+            return 'done';
+          } else {
+            notice(`（${commandNames[kind]}失败：${event.error}）`);
+            return 'done';
+          }
+        }
+        // 流结束了却没有结果：自己断开的是中止，不然是服务那边出了问题
+        if (connection.signal.aborted) notice('（已中止）');
+        else notice(`（${commandNames[kind]}失败：服务没有给出结果，详见服务的日志）`);
+        return 'done';
+      } catch (error) {
+        if (!(error instanceof StreamBroken)) throw error;
+        // 自己断开的是中止；不然是服务那边断了（服务被强行结束、连接断开、超时没有数据）
+        if (connection.signal.aborted) {
+          notice('（已中止）');
+          return 'done';
+        }
+        errorLine(unreachableText(client.address));
+        return 'unreachable';
+      }
+    } finally {
+      signal?.removeEventListener('abort', stop);
+    }
+  }
+
   return {
     say,
+    command,
     /** 现在的会话 id；还没建时 undefined */
     get conversationId() {
       return conversationId;

@@ -594,6 +594,44 @@ export type AbortResponse = {
   aborted: boolean;
 };
 
+// ─── 指令（压缩、清空）────────────────────────────────────────────────────
+
+/** 指令：compact 是手动压缩（之前的对话并成摘要），clear 是清空上下文 */
+export type CommandKind = 'compact' | 'clear';
+
+/**
+ * POST /api/conversations/:id/compact、POST /api/conversations/:id/clear 的请求体：执行人的名字
+ * （1～100 个字符，去掉首尾空白后不能是空的），记在新的一段上。现在只收 CLI 会话。
+ * 开始之前就能判断的照 ErrorResponse 返回：404 没有这个会话，400 不是 CLI 会话、参数不对，
+ * 415 不是 JSON，503 洛璃服务正在退出。其余情况返回一串 CommandEvent：text/event-stream，
+ * 一个事件一行 `data: {JSON}`，事件之间空一行，最后一行是 `data: [DONE]`（和对话接口的流一样）；
+ * 每 25 秒插一行注释 `: ping` 作心跳。
+ * 会话空着（没有进行中的回复、排队的补回复、前面的指令）时马上执行，否则先发 waiting，等它们全部结束
+ * 再执行；同一个会话的指令按到达的先后一个个执行。执行期间往这个会话发的消息照常写进历史、开始回复，
+ * 回复等这次指令做完再读上下文。
+ * 断开请求就是取消：还在等的不执行；进行中的压缩中止（段不变）；清空很快，已经开始的照常做完
+ */
+export type CommandRequest = { author: string };
+
+/**
+ * 指令的结果。cleared：已清空；already-empty：上下文本来就是空的（没有消息也没有摘要），什么都没做；
+ * compacted：已压缩；nothing-to-compact：当前段还没有消息，什么都没做；aborted：被中止（服务退出），
+ * 没有执行或者压缩到一半停下，段不变
+ */
+export type CommandResult =
+  'cleared' | 'already-empty' | 'compacted' | 'nothing-to-compact' | 'aborted';
+
+/**
+ * 指令的流里的一个事件，按顺序：waiting（要等，不用等时没有）、start（轮到它，开始执行）、
+ * 最后 result 或 error 之一，然后流结束。error 是执行出错（如压缩时模型报错），带一句原因，
+ * 抹掉了 API key 与 Telegram token
+ */
+export type CommandEvent =
+  | { type: 'waiting' }
+  | { type: 'start' }
+  | { type: 'result'; result: CommandResult }
+  | { type: 'error'; error: string };
+
 /**
  * POST /api/files：上传一张图片。请求体就是图片的原始字节，Content-Type 是图片的类型
  * （image/png、image/jpeg、image/webp、image/gif，不收动图），这是「只收 JSON 请求体」的例外。

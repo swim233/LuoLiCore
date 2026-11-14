@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import {
+  ConversationBusyError,
   mediaTypeOf,
   taskRef,
   type FileStore,
@@ -14,7 +15,15 @@ import type { StorageChange } from './observed-storage.js';
 import type { Sessions, SharedConversation } from './sessions.js';
 import type { TaskDue } from './tasks/service.js';
 import { noSummaries, type Summarize } from './tool-summary.js';
-import type { ChatChunk, ChatData, ChatRequest, LiveTask } from './types.js';
+import type {
+  ChatChunk,
+  ChatData,
+  ChatRequest,
+  CommandEvent,
+  CommandKind,
+  CommandResult,
+  LiveTask,
+} from './types.js';
 import type { WebState } from './web-state.js';
 
 /** 一条消息最多几张图 */
@@ -44,10 +53,15 @@ export type ChatResult =
   | { ok: true; conversationId: string; stream: ReadableStream<ChatChunk> }
   | { ok: false; status: 400 | 404 | 409 | 503; error: string };
 
+/** 指令接口的结果：事件的流，或拒绝的原因 */
+export type CommandStart =
+  | { ok: true; stream: ReadableStream<CommandEvent> }
+  | { ok: false; status: 400 | 404 | 503; error: string };
+
 /** 一个响应：往里写段；对面不读了（断开）时调 onCancel */
-type Sink = {
-  stream: ReadableStream<ChatChunk>;
-  write(chunk: ChatChunk): void;
+type Sink<T = ChatChunk> = {
+  stream: ReadableStream<T>;
+  write(chunk: T): void;
   /** 正常结束 */
   close(): void;
   /** 还开着：没结束、对面也没走 */
@@ -85,7 +99,33 @@ type Pending = {
 /** 一次回复由谁触发：客户端发来的消息（交给工具），到点的任务（交给「此刻」） */
 type Round = { triggers: Trigger[]; tasks?: LiveTask[] };
 
-type ChatState = { running?: Running; pending?: Pending };
+/**
+ * 一条指令（压缩、清空），排在这个会话的指令队列里。conversation 在收到时就打开好：轮到它时同步地
+ * 调用核心，中间不留空当让别的请求先开始回复
+ */
+type Command = {
+  kind: CommandKind;
+  /** 执行人的名字 */
+  author: string;
+  conversation: SharedConversation;
+  out: Sink<CommandEvent>;
+  /** 收到的时刻（Date.now()），等了多久从这里算 */
+  receivedAt: number;
+  /** 开始执行的时刻；还在等时没有 */
+  startedAt?: number;
+  /** 中止进行中的压缩：客户端断开、服务退出 */
+  abort: AbortController;
+  /** 已经结束（结果写了、流关了、日志记了） */
+  finished?: boolean;
+  /** 结束时兑现（退出时等它） */
+  done: () => void;
+};
+
+/**
+ * 一个会话的状态：进行中的回复、这一轮排队的补回复、指令队列（第一条在执行或在等，其余的在等）。
+ * 三样都没有时不留这个状态
+ */
+type ChatState = { running?: Running; pending?: Pending; commands?: Command[] };
 
 /**
  * 网页会话与 CLI 会话的对话：发消息、生成中再发（排队，之后补一次回复）、重试（只有网页）、中止。
@@ -150,10 +190,12 @@ export function createChats({
     return state;
   }
 
-  /** 没有进行中的、也没有排队的：不留空的状态 */
+  /** 没有进行中的、也没有排队的、也没有指令：不留空的状态 */
   function tidy(conversationId: string): void {
     const state = states.get(conversationId);
-    if (state && !state.running && !state.pending) states.delete(conversationId);
+    if (state && !state.running && !state.pending && !state.commands?.length) {
+      states.delete(conversationId);
+    }
   }
 
   /** 序号最大的那条消息 */
@@ -206,6 +248,7 @@ export function createChats({
       state.running = undefined;
       live.unqueue(conversationId);
       tidy(conversationId);
+      runCommands(conversationId);
       return;
     }
     const running: Running = { abort };
@@ -330,6 +373,8 @@ export function createChats({
     }
     state.running = undefined;
     tidy(conversationId);
+    // 回复全部结束：轮到等着的指令
+    runCommands(conversationId);
   }
 
   /** 这个会话这一轮的排队；还没有时从 seq 起新开一轮 */
@@ -373,6 +418,103 @@ export function createChats({
       previous.sink.close();
     }
     live.queue(conversationId, pending.fromSeq);
+  }
+
+  /**
+   * 会话空着（没有进行中的回复、排队的补回复，最前面的指令也还没开始）时，开始排在最前面的指令。
+   * 正在退出时，等着的指令都以 aborted 结束，不再执行
+   */
+  function runCommands(conversationId: string): void {
+    const state = states.get(conversationId);
+    if (!state?.commands) return;
+    if (closing) {
+      for (const command of [...state.commands]) {
+        if (command.startedAt === undefined) abandon(conversationId, state, command);
+      }
+      return;
+    }
+    const first = state.commands[0];
+    if (!first || first.startedAt !== undefined || state.running || state.pending) return;
+    execute(conversationId, state, first);
+  }
+
+  /**
+   * 执行一条指令：写 start，同步地调用核心（这之前不 await，别的请求插不进来先开始回复），
+   * 结束时写结果或出错
+   */
+  function execute(conversationId: string, state: ChatState, command: Command): void {
+    command.startedAt = Date.now();
+    command.out.write({ type: 'start' });
+    const by = { name: command.author };
+    let running: Promise<CommandResult>;
+    try {
+      running =
+        command.kind === 'compact'
+          ? command.conversation.compact({ by, abortSignal: command.abort.signal })
+          : command.conversation.clear({ by });
+    } catch (error) {
+      running = Promise.reject(error);
+    }
+    void running.then(
+      (result) => {
+        command.out.write({ type: 'result', result });
+        finish(conversationId, state, command, result);
+      },
+      (error: unknown) => {
+        // 正忙：按排队的规矩不该发生（会话有回复在进行时指令只会等着）
+        if (error instanceof ConversationBusyError) {
+          logger.error(
+            { conversationId, command: command.kind, reason: error.reason },
+            'command.busy',
+          );
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        command.out.write({ type: 'error', error: redact(message) });
+        finish(conversationId, state, command, 'failed');
+      },
+    );
+  }
+
+  /** 还没开始的指令不再执行，以 aborted 结束（服务退出） */
+  function abandon(conversationId: string, state: ChatState, command: Command): void {
+    if (command.finished) return;
+    command.out.write({ type: 'result', result: 'aborted' });
+    finish(conversationId, state, command, 'aborted');
+  }
+
+  /**
+   * 一条指令结束：关掉它的流，从队列里拿掉，记一行 command.end（会话、哪条指令、结果、等了多久、
+   * 执行了多久；不记执行人的名字），然后看下一条能不能开始
+   */
+  function finish(
+    conversationId: string,
+    state: ChatState,
+    command: Command,
+    result: CommandResult | 'failed',
+    { disconnected = false }: { disconnected?: boolean } = {},
+  ): void {
+    if (command.finished) return;
+    command.finished = true;
+    command.out.close();
+    const commands = state.commands ?? [];
+    commands.splice(commands.indexOf(command), 1);
+    if (commands.length === 0) state.commands = undefined;
+    const now = Date.now();
+    const { startedAt, receivedAt } = command;
+    logger.info(
+      {
+        conversationId,
+        command: command.kind,
+        result,
+        waitedMs: (startedAt ?? now) - receivedAt,
+        ...(startedAt === undefined ? {} : { ranMs: now - startedAt }),
+        ...(disconnected ? { disconnected } : {}),
+      },
+      'command.end',
+    );
+    command.done();
+    tidy(conversationId);
+    runCommands(conversationId);
   }
 
   return {
@@ -528,6 +670,74 @@ export function createChats({
       start(conversationId, conversation, detachedSink(), { triggers: [], tasks: refs });
     },
 
+    /**
+     * 指令（压缩、清空，只收 CLI 会话），见 types.ts 的 CommandRequest：返回事件的流。会话空着时
+     * 马上执行；有进行中的回复、排队的补回复或前面的指令时先写 waiting，等它们全部结束。
+     * signal 是请求的中止信号：断开时还在等的不执行，进行中的压缩中止，进行中的清空照常做完
+     */
+    async command(
+      conversationId: string,
+      kind: CommandKind,
+      author: string,
+      signal?: AbortSignal,
+    ): Promise<CommandStart> {
+      const leavingCommand: CommandStart = { ok: false, status: 503, error: '洛璃服务正在退出' };
+      if (closing) return leavingCommand;
+      const name = author.trim();
+      if (!name) return { ok: false, status: 400, error: '要带执行人的名字（author）' };
+      const overview = await storage.overview(conversationId);
+      if (!overview) return { ok: false, status: 404, error: '没有这个会话' };
+      if (overview.platform !== 'cli') {
+        return {
+          ok: false,
+          status: 400,
+          error: `压缩、清空现在只给 CLI 会话用，这是${platformName(overview.platform)}的会话`,
+        };
+      }
+      if (closing) return leavingCommand;
+      let conversation: SharedConversation;
+      try {
+        conversation = await sessions.open(conversationId);
+      } catch {
+        return leavingCommand;
+      }
+      if (closing) return leavingCommand;
+
+      const out = sink<CommandEvent>(signal);
+      let done!: () => void;
+      const ended = new Promise<void>((resolve) => (done = resolve));
+      pumps.add(ended);
+      void ended.finally(() => pumps.delete(ended));
+      const command: Command = {
+        kind,
+        author: name,
+        conversation,
+        out,
+        receivedAt: Date.now(),
+        abort: new AbortController(),
+        done,
+      };
+      const state = stateOf(conversationId);
+      (state.commands ??= []).push(command);
+      out.onCancel = () => {
+        if (command.finished) return;
+        // 还在等：不执行了。在执行：压缩中止（核心以 aborted 结束，段不变）；清空照常做完
+        if (command.startedAt === undefined) {
+          finish(conversationId, state, command, 'aborted', { disconnected: true });
+        } else {
+          command.abort.abort();
+        }
+      };
+      // 请求在这之前就断开了（建好 sink 时已经调过一次空的 onCancel）：不执行
+      if (!out.open) {
+        out.onCancel();
+        return { ok: true, stream: out.stream };
+      }
+      runCommands(conversationId);
+      if (command.startedAt === undefined) out.write({ type: 'waiting' });
+      return { ok: true, stream: out.stream };
+    },
+
     /** 中止这个会话进行中的回复，同时取消排队的补回复；返回有没有可中止的 */
     abort(conversationId: string): boolean {
       const state = states.get(conversationId);
@@ -545,21 +755,27 @@ export function createChats({
       return aborted;
     },
 
-    /** 这个会话在回复或有排队（测试用） */
+    /** 这个会话在回复、有排队或有指令（测试用） */
     busy(conversationId: string): boolean {
       return states.has(conversationId);
     },
 
     /**
-     * 退出的第一步：不再接新的消息，排队的补回复都取消（排队的请求正常结束）。进行中的回复由
-     * 会话管理等完或中止
+     * 退出的第一步：不再接新的消息与指令，排队的补回复都取消（排队的请求正常结束）；等着的指令
+     * 以 aborted 结束、不执行，进行中的压缩中止（以 aborted 结束）。进行中的回复由会话管理等完或中止
      */
     close(): void {
       closing = true;
-      for (const [conversationId, state] of states) cancelQueue(conversationId, state);
+      for (const [conversationId, state] of [...states]) {
+        cancelQueue(conversationId, state);
+        for (const command of [...(state.commands ?? [])]) {
+          if (command.startedAt === undefined) abandon(conversationId, state, command);
+          else command.abort.abort();
+        }
+      }
     },
 
-    /** 各回复的流都写完（中止的写到 abort 段为止），最多等 timeoutMs */
+    /** 各回复与指令的流都写完（中止的写到 abort 段、aborted 的结果为止），最多等 timeoutMs */
     async settled(timeoutMs = 1000): Promise<void> {
       let timer: NodeJS.Timeout | undefined;
       await Promise.race([
@@ -576,11 +792,11 @@ export function createChats({
 export type Chats = ReturnType<typeof createChats>;
 
 /** 一个响应的流；请求断开（signal）或对面取消读取时调 onCancel，之后写的都丢掉 */
-function sink(signal?: AbortSignal): Sink {
-  let controller!: ReadableStreamDefaultController<ChatChunk>;
+function sink<T = ChatChunk>(signal?: AbortSignal): Sink<T> {
+  let controller!: ReadableStreamDefaultController<T>;
   let open = true;
-  const out: Sink = {
-    stream: new ReadableStream<ChatChunk>({
+  const out: Sink<T> = {
+    stream: new ReadableStream<T>({
       start(c) {
         controller = c;
       },

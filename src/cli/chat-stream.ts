@@ -10,12 +10,22 @@ export class StreamBroken extends Error {
 
 /**
  * 读对话接口的响应体（UI message stream：一行一个 `data: {段的 JSON}`，段之间空一行，最后是
- * `data: [DONE]`），按顺序给出各段。不是 data 的行（注释、空行）跳过，解析不了的段跳过。
- * 读出错，或者没读到 [DONE] 就结束了，抛 StreamBroken。中途不读了（break）时取消读取
+ * `data: [DONE]`），按顺序给出各段。见 readEventStream
  */
-export async function* readChatStream(
+export function readChatStream(
   body: ReadableStream<Uint8Array>,
 ): AsyncGenerator<ChatChunk, void, undefined> {
+  return readEventStream<ChatChunk>(body);
+}
+
+/**
+ * 读服务的事件流（对话接口、指令接口都是这种写法：一行一个 `data: {JSON}`，之间空一行，最后是
+ * `data: [DONE]`），按顺序给出各项。不是 data 的行（注释、空行）跳过，解析不了的跳过。
+ * 读出错，或者没读到 [DONE] 就结束了，抛 StreamBroken。中途不读了（break）时取消读取
+ */
+export async function* readEventStream<T>(
+  body: ReadableStream<Uint8Array>,
+): AsyncGenerator<T, void, undefined> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
@@ -39,13 +49,13 @@ export async function* readChatStream(
           finished = true;
           continue;
         }
-        let chunk: ChatChunk;
+        let item: T;
         try {
-          chunk = JSON.parse(data) as ChatChunk;
+          item = JSON.parse(data) as T;
         } catch {
           continue;
         }
-        yield chunk;
+        yield item;
       }
     }
   } finally {

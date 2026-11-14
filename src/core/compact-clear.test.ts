@@ -969,6 +969,198 @@ describe('会话关闭之后', () => {
   });
 });
 
+describe('回复在等切段时被中止', () => {
+  it.each(['手动压缩', '空闲切段'] as const)(
+    '等%s时中止：回复马上以中止结束（不发请求、不写进历史），不等摘要；那次切段照常完成',
+    async (kind) => {
+      const { gate, release } = gated();
+      const { conversation, model, store, entries, round } = setup({
+        turns: ['答1', { text: '这次的摘要', gate }, '答2'],
+        segments: kind === '空闲切段' ? { idleMs: 30 } : {},
+      });
+      await round('第1句');
+      const compacting = kind === '手动压缩' ? conversation.compact({ by: bob }) : undefined;
+      if (kind === '空闲切段') advance(60_000);
+      await until(() => model.doStreamCalls.length === 2);
+      await conversation.append({ author: alice, text: '第2句' });
+      const controller = new AbortController();
+      const replying = readAll(conversation.reply({ abortSignal: controller.signal }));
+      await sleep(30);
+
+      controller.abort();
+      // 摘要还挂着，回复已经结束
+      const chunks = await replying;
+
+      expect(chunks.map((chunk) => chunk.type)).toEqual(['start', 'abort']);
+      expect(model.doStreamCalls).toHaveLength(2);
+      expect((await conversation.messages()).map((m) => m.role)).toEqual([
+        'user',
+        'assistant',
+        'user',
+      ]);
+      expect(logsOf(entries, 'reply.end').at(-1)?.fields).toMatchObject({
+        outcome: 'aborted',
+        saved: false,
+      });
+      // 没发出请求，模型调用表里没有这次回复：只有第一轮的回复（摘要还没结束）
+      expect((await store.calls()).map((call) => [call.purpose, call.outcome])).toEqual([
+        ['reply', 'completed'],
+      ]);
+
+      release();
+      if (compacting) expect(await compacting).toBe('compacted');
+      else await until(async () => (await store.currentSegment()).startReason === 'idle');
+      expect(await store.currentSegment()).toMatchObject({
+        startSeq: 3,
+        priorSummary: '这次的摘要',
+      });
+      // 之后的回复照常，用的是新的一段
+      await readAll(conversation.reply());
+      expect((await store.calls()).map((call) => [call.purpose, call.outcome])).toEqual([
+        ['reply', 'completed'],
+        ['summary', 'completed'],
+        ['reply', 'completed'],
+      ]);
+      expect(messagesOf(model, 2)).toEqual([
+        tagged(
+          '第2句',
+          // 空闲切段那条把时钟拨过一分钟
+          kind === '空闲切段' ? '2026-10-30 14:03' : '2026-10-30 14:02',
+        ),
+      ]);
+    },
+  );
+});
+
+describe('以调用那一刻为界', () => {
+  /**
+   * 包一层的存储：被中止的自动摘要记模型调用时停住（它在收尾，手动操作在等它），
+   * reached 表示已经停住，release 放行
+   */
+  function slowAbortStore() {
+    const base = createMemoryStore({ title: '读书会' });
+    const hold = { ...gated(), reached: false };
+    const store: ConversationStore = {
+      ...base,
+      recordCall: async (call) => {
+        if (call.purpose === 'summary' && call.outcome === 'aborted' && !hold.reached) {
+          hold.reached = true;
+          await hold.gate;
+        }
+        return base.recordCall(call);
+      },
+    };
+    releases.push(hold.release);
+    return { store, hold };
+  }
+
+  it.each([
+    ['空闲切段', 'compact'],
+    ['自动压缩', 'compact'],
+    ['空闲切段', 'clear'],
+    ['自动压缩', 'clear'],
+  ] as const)(
+    '%s进行中调用 %s，等它收尾时写进一条消息并开始回复：这条消息归入之后的一段，不进摘要、不被清掉；回复正常完成',
+    async (auto, operation) => {
+      const { store, hold } = slowAbortStore();
+      const idle = auto === '空闲切段';
+      const { conversation, model, round } = setup({
+        turns: [
+          ...(idle
+            ? ['答1']
+            : [
+                { text: '答1', input: 50 },
+                { text: '答2', input: 150 },
+              ]),
+          { text: '自动的摘要', gate: never },
+          ...(operation === 'compact' ? ['手动摘要'] : []),
+          '收到',
+        ],
+        segments: idle ? { idleMs: 30 } : { compressTokens: 100, keepMessages: 1 },
+        store,
+      });
+      await round('第1句');
+      advance(idle ? 60_000 : 3 * 60_000);
+      if (!idle) await round('第2句');
+      // 调用那一刻的最后一条消息
+      const boundary = idle ? 2 : 4;
+      const autoCall = idle ? 1 : 2;
+      await until(() => model.doStreamCalls.length === autoCall + 1);
+
+      const manual =
+        operation === 'compact'
+          ? conversation.compact({ by: bob })
+          : conversation.clear({ by: bob });
+      await until(() => hold.reached);
+      const during = await conversation.append({ author: alice, text: '收尾期间说的话' });
+      const replying = readAll(conversation.reply());
+      hold.release();
+
+      expect(await manual).toBe(operation === 'compact' ? 'compacted' : 'cleared');
+      const chunks = await replying;
+      expect(chunks.filter((chunk) => chunk.type === 'error')).toEqual([]);
+      expect(await store.currentSegment()).toMatchObject({
+        startSeq: boundary + 1,
+        startReason: operation === 'compact' ? 'manual' : 'clear',
+      });
+      expect((await store.entry(during.id))?.seq).toBe(boundary + 1);
+      if (operation === 'compact') {
+        // 摘要请求到界线为止
+        const summary = messagesOf(model, autoCall + 1);
+        expect(summary.some((text) => text.includes('收尾期间说的话'))).toBe(false);
+        expect(summary.at(-1)).toBe(instruction(wholeSegment, 1500));
+      }
+      const reply = model.doStreamCalls.length - 1;
+      expect(messagesOf(model, reply)).toEqual([
+        tagged('收尾期间说的话', idle ? '2026-10-30 14:03' : '2026-10-30 14:05'),
+      ]);
+      expect(systemOf(model, reply)).toContain(
+        operation === 'compact'
+          ? summarySection('手动摘要')
+          : clearedSection(idle ? '2026-10-30 14:03' : '2026-10-30 14:05'),
+      );
+      expect((await conversation.messages()).at(-1)?.role).toBe('assistant');
+    },
+  );
+
+  it('自动的那次赶在被中止之前切完了：按切完之后的当前段算，界线落在它之前，没有可压缩的内容；之后写入的消息留在那一段', async () => {
+    const base = createMemoryStore({ title: '读书会' });
+    // 空闲切段写新段时停住：摘要已经回来，中止赶不上它
+    const hold = { ...gated(), reached: false };
+    const store: ConversationStore = {
+      ...base,
+      addSegment: async (segment) => {
+        if (segment.startReason === 'idle') {
+          hold.reached = true;
+          await hold.gate;
+        }
+        return base.addSegment(segment);
+      },
+    };
+    releases.push(hold.release);
+    const { conversation, model, round } = setup({
+      turns: ['答1', '空闲摘要'],
+      segments: { idleMs: 30 },
+      store,
+    });
+    await round('第1句');
+    advance(60_000);
+    await until(() => hold.reached);
+
+    const compacting = conversation.compact({ by: bob });
+    const during = await conversation.append({ author: alice, text: '切段收尾时说的话' });
+    hold.release();
+
+    expect(await compacting).toBe('nothing-to-compact');
+    expect(await segmentsOf(store)).toEqual([
+      [1, 'first'],
+      [3, 'idle'],
+    ]);
+    expect((await store.entry(during.id))?.seq).toBe(3);
+    expect(model.doStreamCalls).toHaveLength(2);
+  });
+});
+
 describe('正忙', () => {
   it('回复进行中（含刚调用 reply、还没发出请求）：压缩、清空都以 ConversationBusyError 拒绝，段不变，没有请求模型', async () => {
     const { gate, release } = gated();
