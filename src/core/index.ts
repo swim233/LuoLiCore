@@ -55,7 +55,14 @@ export {
   type RequestRecorder,
 } from './request-log/capture.js';
 export { startRequestLogCleanup } from './request-log/cleanup.js';
-export type { SegmentOptions } from './segments.js';
+export {
+  ConversationBusyError,
+  type ClearOptions,
+  type ClearResult,
+  type CompactOptions,
+  type CompactResult,
+  type SegmentOptions,
+} from './segments.js';
 export {
   describeImage,
   isStoredToolContent,
@@ -90,8 +97,10 @@ export type {
   ModelCallSummary,
   RecentReply,
   NewConversation,
+  NewSegment,
   NewTask,
   Segment,
+  SegmentReason,
   SeqRange,
   Storage,
   StoredConversation,

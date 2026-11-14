@@ -2,7 +2,7 @@ import type { ConversationStore, Storage } from '../core/index.js';
 
 /** 存储里发生的一次写入（只说是什么、在哪，不带内容） */
 export type StorageChange =
-  /** 会话新建、改了标题、切了新段 */
+  /** 会话新建、改了标题、切了新段（含把空的当前段改成清空的段） */
   | { type: 'conversation'; conversationId: string }
   /** 写入了一条消息（edited 为 false），或改了一条已有的消息（true） */
   | { type: 'message'; conversationId: string; messageId: string; edited: boolean }
@@ -57,6 +57,11 @@ export function observeStorage(
       const added = await store.addSegment(segment);
       if (added) notify({ type: 'conversation', conversationId });
       return added;
+    },
+    async clearSegment(segment) {
+      const cleared = await store.clearSegment(segment);
+      if (cleared) notify({ type: 'conversation', conversationId });
+      return cleared;
     },
     async recordCall(call) {
       await store.recordCall(call);

@@ -26,6 +26,8 @@ const SEG_REASON = {
   first: '会话开始',
   idle: '空闲 4 小时后开始新的一段',
   compress: '上下文太长，压缩后开始新的一段',
+  manual: '手动压缩',
+  clear: '清空',
 };
 
 function SegView({ seg }: { seg: Segment }) {

@@ -304,6 +304,29 @@ describe('读取与检查', () => {
     ).toBe('提示词文件有误：prompts/tool-limit.md（不认识的变量 {{step}}）');
   });
 
+  it('清空的提示 cleared.md：缺文件、漏了 {{time}}、写了不认识的变量，各报一个错', async () => {
+    const missing = await promptDir();
+    await rm(join(missing.dir, 'cleared.md'));
+    expect(
+      (await loadError(createPromptFiles({ personaPath: missing.personaPath, dir: missing.dir })))
+        .message,
+    ).toBe('提示词文件有误：prompts/cleared.md（文件不存在）');
+
+    const noTime = await promptDir();
+    await noTime.edit('cleared.md', (text) => text.replace('{{time}}', '某个时候'));
+    expect(
+      (await loadError(createPromptFiles({ personaPath: noTime.personaPath, dir: noTime.dir })))
+        .message,
+    ).toBe('提示词文件有误：prompts/cleared.md（缺少变量 {{time}}）');
+
+    const unknown = await promptDir();
+    await unknown.edit('cleared.md', (text) => `${text}\n由 {{by}} 清空。`);
+    expect(
+      (await loadError(createPromptFiles({ personaPath: unknown.personaPath, dir: unknown.dir })))
+        .message,
+    ).toBe('提示词文件有误：prompts/cleared.md（不认识的变量 {{by}}）');
+  });
+
   it('summary.md 不用 {{maxChars}} 也可以：摘要指令里就没有字数', async () => {
     const { dir, personaPath, edit } = await promptDir();
     await edit('summary.md', (text) => text.replace('{{maxChars}}', '若干'));
@@ -356,6 +379,54 @@ describe('每次回复、每次摘要开始时重读', () => {
     expect(requestOf(mock, 0).system).not.toContain('新加的一句。');
     expect(summary.system?.endsWith('\n新加的一句。')).toBe(true);
     expect(summary.messages.at(-1)).toContain('\n- 新的范围说明。\n');
+  });
+});
+
+describe('清空的提示', () => {
+  it('清空的段里每次回复开始时重读 cleared.md：改了文件，下一次请求生效', async () => {
+    const { dir, personaPath, edit } = await promptDir();
+    const { conversation, mock, round } = setup({
+      prompts: createPromptFiles({ personaPath, dir }),
+    });
+    await round('一');
+    await conversation.clear({ by: alice });
+
+    await round('二');
+    await edit('cleared.md', () => '## 之前的对话\n\n{{time}} 以前的都忘了。\n');
+    await round('三');
+
+    expect(
+      requestOf(mock, 1).system?.endsWith(
+        '\n\n## 之前的对话\n\n更早的对话已在 2026-10-30 14:02 被清空。',
+      ),
+    ).toBe(true);
+    expect(
+      requestOf(mock, 2).system?.endsWith('\n\n## 之前的对话\n\n2026-10-30 14:02 以前的都忘了。'),
+    ).toBe(true);
+  });
+
+  it('运行中改坏 cleared.md：清空的段里的回复按失败处理，不发请求；改好后照常', async () => {
+    const { dir, personaPath, edit } = await promptDir();
+    const { conversation, mock, round } = setup({
+      prompts: createPromptFiles({ personaPath, dir }),
+    });
+    await round('一');
+    await conversation.clear({ by: alice });
+    await edit('cleared.md', (text) => text.replace('{{time}}', '{{when}}'));
+
+    const chunks = await round('二');
+
+    expect(chunks.filter((chunk) => chunk.type === 'error')).toEqual([
+      {
+        type: 'error',
+        errorText: '提示词文件有误：prompts/cleared.md（不认识的变量 {{when}}，缺少变量 {{time}}）',
+      },
+    ]);
+    expect(mock.doStreamCalls).toHaveLength(1);
+
+    await edit('cleared.md', (text) => text.replace('{{when}}', '{{time}}'));
+    await round('三');
+    expect(mock.doStreamCalls).toHaveLength(2);
   });
 });
 

@@ -1,5 +1,5 @@
 import { generateId } from 'ai';
-import type { Message } from '../message.js';
+import type { Author, Message } from '../message.js';
 import { DuplicateMessageError } from './errors.js';
 import { isoTime, matchesTask, normalizeChanges, normalizeSchedule, taskSource } from './tasks.js';
 import type {
@@ -8,6 +8,7 @@ import type {
   MessageGlance,
   ModelCall,
   ModelCallSummary,
+  NewSegment,
   Storage,
   StoredMessage,
   StoredSegment,
@@ -130,27 +131,37 @@ function memoryStore(data: Data): ConversationStore {
       row.message = structuredClone(message);
     },
     async currentSegment() {
-      const current = segments.reduce<StoredSegment | undefined>(
-        (a, b) => (a && a.startSeq > b.startSeq ? a : b),
-        undefined,
-      );
-      if (!current) return { startSeq: 1, startReason: 'first', conversationTitle: data.title };
-      // 不带时间：只有 segments() 给时间
-      const { startSeq, startReason, conversationTitle, priorSummary } = current;
-      return structuredClone({ startSeq, startReason, conversationTitle, priorSummary });
+      const current = currentOf(segments);
+      if (!current) {
+        return {
+          startSeq: 1,
+          startReason: 'first',
+          conversationTitle: data.title,
+          createdAt: data.createdAt,
+        };
+      }
+      return structuredClone(current);
     },
     async segments() {
       return structuredClone([...segments].sort((a, b) => a.startSeq - b.startSeq));
     },
-    async addSegment({ startSeq, startReason, priorSummary }) {
-      if (segments.some((segment) => segment.startSeq === startSeq)) return false;
-      segments.push({
-        startSeq,
-        startReason,
-        conversationTitle: data.title,
-        priorSummary,
-        createdAt: new Date().toISOString(),
-      });
+    async addSegment(segment) {
+      const { startSeq } = segment;
+      if (segments.some((existing) => existing.startSeq === startSeq)) return false;
+      segments.push(
+        storedSegment(segment, { title: data.title, createdAt: new Date().toISOString() }),
+      );
+      return true;
+    },
+    async clearSegment({ startSeq, startedBy }) {
+      // 读与改之间没有 await：与 SQLite 的单条 UPDATE 一样是一次原子的写入
+      const current = currentOf(segments);
+      if (!current || current.startSeq !== startSeq) return false;
+      if (rows.some((row) => row.seq >= startSeq)) return false;
+      segments[segments.indexOf(current)] = storedSegment(
+        { startSeq, startReason: 'clear', startedBy },
+        { title: data.title, createdAt: new Date().toISOString() },
+      );
       return true;
     },
     async recordCall(call) {
@@ -166,6 +177,34 @@ function memoryStore(data: Data): ConversationStore {
       return structuredClone(toolCalls);
     },
   };
+}
+
+/** startSeq 最大的一段；没有段时为 undefined */
+function currentOf(segments: StoredSegment[]): StoredSegment | undefined {
+  return segments.reduce<StoredSegment | undefined>(
+    (a, b) => (a && a.startSeq > b.startSeq ? a : b),
+    undefined,
+  );
+}
+
+/** 新的一段存成的样子：没有的项不写（与 SQLite 读出的形状一致），执行人复制一份 */
+function storedSegment(
+  segment: NewSegment,
+  { title, createdAt }: { title: string | undefined; createdAt: string },
+): StoredSegment {
+  return {
+    startSeq: segment.startSeq,
+    startReason: segment.startReason,
+    ...(title === undefined ? {} : { conversationTitle: title }),
+    ...('priorSummary' in segment ? { priorSummary: segment.priorSummary } : {}),
+    ...('startedBy' in segment ? { startedBy: author(segment.startedBy) } : {}),
+    createdAt,
+  };
+}
+
+/** 执行人：只留显示名与（有时的）id */
+function author({ id, name }: Author): Author {
+  return id === undefined ? { name } : { id, name };
 }
 
 function lastRow(rows: Row[]): Row | undefined {

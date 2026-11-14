@@ -4,13 +4,14 @@
 
 import type { InferUIMessageChunk, UIMessage } from 'ai';
 import type {
+  Author,
   ConversationEvent,
   Message,
   MessageData,
   MessageMetadata,
   Usage,
 } from '../core/message.js';
-import type { TaskSchedule, TaskStatus } from '../core/storage/types.js';
+import type { SegmentReason, TaskSchedule, TaskStatus } from '../core/storage/types.js';
 
 /**
  * 洛璃服务此刻的状态：GET /api/health 返回它，SSE 的 hello 带着它（另加现场），
@@ -124,12 +125,17 @@ export type MessagePreview = {
 export type ApiSegment = {
   /** 本段从这个序号的消息开始：分隔线画在这条消息前面 */
   startSeq: number;
-  /** first：会话开始；idle：空闲太久后开始新的一段；compress：上下文太长，压缩后开始新的一段 */
-  startReason: 'first' | 'idle' | 'compress';
+  /**
+   * first：会话开始；idle：空闲太久后开始新的一段；compress：上下文太长，压缩后开始新的一段；
+   * manual：有人手动压缩；clear：有人清空了上下文
+   */
+  startReason: SegmentReason;
   /** 本段开始时的会话标题 */
   conversationTitle?: string;
-  /** 本段开始之前全部内容的滚动摘要；第一段没有 */
+  /** 本段开始之前全部内容的滚动摘要；第一段、清空的段没有 */
   priorSummary?: string;
+  /** 谁开始的这一段（显示名，平台有不变的 id 时连同 id）：手动压缩、清空的段才有 */
+  startedBy?: Author;
   /** 这一段开始的时间，ISO */
   createdAt: string;
 };

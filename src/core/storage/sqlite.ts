@@ -9,7 +9,8 @@ import type {
   ConversationStore,
   MessageGlance,
   ModelCall,
-  Segment,
+  NewSegment,
+  SegmentReason,
   SeqRange,
   Storage,
   StoredConversation,
@@ -151,6 +152,10 @@ CREATE TABLE tasks (
 CREATE INDEX tasks_due          ON tasks(status, next_due_at);
 CREATE INDEX tasks_conversation ON tasks(conversation_id, status);
 `,
+  `
+ALTER TABLE segments ADD COLUMN started_by    TEXT;
+ALTER TABLE segments ADD COLUMN started_by_id TEXT;
+`,
 ];
 
 const schemaVersion = migrations.length;
@@ -195,17 +200,31 @@ export function openSqliteStorage(path: string): Storage {
   const lastMessage = db.prepare(
     'SELECT seq, created_at FROM messages WHERE conversation_id = ? ORDER BY seq DESC LIMIT 1',
   );
+  const segmentColumns =
+    'start_seq, start_reason, conversation_title, prior_summary, started_by, started_by_id, created_at';
   const currentSegment = db.prepare(
-    `SELECT start_seq, start_reason, conversation_title, prior_summary FROM segments
+    `SELECT ${segmentColumns} FROM segments
      WHERE conversation_id = ? ORDER BY start_seq DESC LIMIT 1`,
   );
-  const conversationTitle = db.prepare('SELECT title FROM conversations WHERE id = ?');
   // 标题取会话此刻的标题，与插入在同一条语句里。同一序号已有一段时什么也不做
   const insertSegment = db.prepare(
     `INSERT INTO segments
-       (id, conversation_id, start_seq, start_reason, conversation_title, prior_summary, created_at)
-     SELECT ?, id, ?, ?, title, ?, ? FROM conversations WHERE id = ?
+       (id, conversation_id, start_seq, start_reason, conversation_title, prior_summary,
+        started_by, started_by_id, created_at)
+     SELECT ?, id, ?, ?, title, ?, ?, ?, ? FROM conversations WHERE id = ?
      ON CONFLICT (conversation_id, start_seq) DO NOTHING`,
+  );
+  // 把还没有消息的当前段改成清空的段。条件与改写在同一条语句里，是一次原子的写入：
+  // 这一段还是当前段（startSeq 最大），而且序号不小于它的消息一条都没有
+  const clearSegment = db.prepare(
+    `UPDATE segments
+     SET start_reason = 'clear', prior_summary = NULL, started_by = :name, started_by_id = :authorId,
+         created_at = :at,
+         conversation_title = (SELECT title FROM conversations WHERE id = :conversation)
+     WHERE conversation_id = :conversation AND start_seq = :start
+       AND start_seq = (SELECT MAX(start_seq) FROM segments WHERE conversation_id = :conversation)
+       AND NOT EXISTS
+         (SELECT 1 FROM messages WHERE conversation_id = :conversation AND seq >= :start)`,
   );
   // 最后一条消息最新的会话；时间相同时按写入先后（rowid）
   const findConversation = db.prepare(
@@ -260,8 +279,7 @@ export function openSqliteStorage(path: string): Storage {
        AND (:events = 1 OR json_extract(ui_message, '$.metadata.event') IS NULL)`,
   );
   const listSegments = db.prepare(
-    `SELECT start_seq, start_reason, conversation_title, prior_summary, created_at FROM segments
-     WHERE conversation_id = ? ORDER BY start_seq`,
+    `SELECT ${segmentColumns} FROM segments WHERE conversation_id = ? ORDER BY start_seq`,
   );
   const conversationRow = db.prepare('SELECT title, created_at FROM conversations WHERE id = ?');
   const allOverviews = db.prepare(`${overviewSelect} ORDER BY c.created_at, c.rowid`);
@@ -327,17 +345,31 @@ export function openSqliteStorage(path: string): Storage {
 
   const addSegment = (
     conversationId: string,
-    { startSeq, startReason, priorSummary }: Omit<Segment, 'conversationTitle'>,
+    segment: NewSegment | { startSeq: 1; startReason: 'first' },
   ): boolean => {
+    const startedBy = 'startedBy' in segment ? segment.startedBy : undefined;
     const { changes } = insertSegment.run(
       generateId(),
-      startSeq,
-      startReason,
-      priorSummary ?? null,
+      segment.startSeq,
+      segment.startReason,
+      'priorSummary' in segment ? segment.priorSummary : null,
+      startedBy?.name ?? null,
+      startedBy?.id ?? null,
       new Date().toISOString(),
       conversationId,
     );
     return Number(changes) > 0;
+  };
+
+  /** 第 2 步建的会话没有段时，视为一段：从 1 开始、标题取会话标题、时间取会话的建立时间 */
+  const implicitFirstSegment = (conversationId: string): StoredSegment => {
+    const conversation = conversationRow.get(conversationId);
+    return {
+      startSeq: 1,
+      startReason: 'first',
+      conversationTitle: optional(conversation?.title),
+      createdAt: String(conversation?.created_at),
+    };
   };
 
   const storedMessage = (row: Record<string, unknown>): StoredMessage => ({
@@ -417,42 +449,27 @@ export function openSqliteStorage(path: string): Storage {
     },
     async currentSegment() {
       const row = currentSegment.get(conversationId);
-      if (!row) {
-        // 第 2 步建的会话没有段：整个会话算第一段
-        const title = conversationTitle.get(conversationId)?.title;
-        return { startSeq: 1, startReason: 'first', conversationTitle: optional(title) };
-      }
-      return {
-        startSeq: Number(row.start_seq),
-        startReason: String(row.start_reason) as Segment['startReason'],
-        conversationTitle: optional(row.conversation_title),
-        priorSummary: optional(row.prior_summary),
-      };
+      // 第 2 步建的会话没有段：整个会话算第一段
+      return row ? storedSegment(row) : implicitFirstSegment(conversationId);
     },
     async segments() {
       const rows = listSegments.all(conversationId);
-      if (rows.length === 0) {
-        // 第 2 步建的会话没有段：整个会话算第一段，同 currentSegment
-        const conversation = conversationRow.get(conversationId);
-        return [
-          {
-            startSeq: 1,
-            startReason: 'first',
-            conversationTitle: optional(conversation?.title),
-            createdAt: String(conversation?.created_at),
-          },
-        ];
-      }
-      return rows.map((row): StoredSegment => ({
-        startSeq: Number(row.start_seq),
-        startReason: String(row.start_reason) as Segment['startReason'],
-        conversationTitle: optional(row.conversation_title),
-        priorSummary: optional(row.prior_summary),
-        createdAt: String(row.created_at),
-      }));
+      // 第 2 步建的会话没有段：整个会话算第一段，同 currentSegment
+      if (rows.length === 0) return [implicitFirstSegment(conversationId)];
+      return rows.map(storedSegment);
     },
     async addSegment(segment) {
       return addSegment(conversationId, segment);
+    },
+    async clearSegment({ startSeq, startedBy }) {
+      const { changes } = clearSegment.run({
+        conversation: conversationId,
+        start: startSeq,
+        name: startedBy.name,
+        authorId: startedBy.id ?? null,
+        at: new Date().toISOString(),
+      });
+      return Number(changes) > 0;
     },
     async recordCall(call) {
       insertCall.run(
@@ -686,6 +703,23 @@ function conversationInfo(row: Record<string, unknown>): ConversationInfo {
     id: String(row.id),
     platformConversationId: optional(row.platform_conversation_id),
     title: optional(row.title),
+  };
+}
+
+/** segments 的一行；started_by 为 NULL 时（以前的行、其他原因的段）没有执行人 */
+function storedSegment(row: Record<string, unknown>): StoredSegment {
+  const priorSummary = optional(row.prior_summary);
+  const name = optional(row.started_by);
+  const authorId = optional(row.started_by_id);
+  return {
+    startSeq: Number(row.start_seq),
+    startReason: String(row.start_reason) as SegmentReason,
+    conversationTitle: optional(row.conversation_title),
+    ...(priorSummary === undefined ? {} : { priorSummary }),
+    ...(name === undefined
+      ? {}
+      : { startedBy: authorId === undefined ? { name } : { id: authorId, name } }),
+    createdAt: String(row.created_at),
   };
 }
 

@@ -248,6 +248,7 @@ export function createViews({
           startReason: segment.startReason,
           conversationTitle: segment.conversationTitle,
           priorSummary: segment.priorSummary,
+          ...(segment.startedBy === undefined ? {} : { startedBy: segment.startedBy }),
           createdAt: segment.createdAt,
         })),
       };

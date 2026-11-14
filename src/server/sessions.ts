@@ -87,11 +87,13 @@ export function createSessions(options: SessionOptions) {
   const stopping = new AbortController();
   let closing = false;
 
-  /** 包一层：reply 经过会话管理，close 留给会话管理 */
+  /** 包一层：reply 经过会话管理，close 留给会话管理；压缩、清空原样交给核心 */
   function share(conversationId: string, core: Conversation): SharedConversation {
     return {
       append: (input) => core.append(input),
       reply: (replyOptions) => reply(conversationId, core, replyOptions),
+      compact: (compactOptions) => core.compact(compactOptions),
+      clear: (clearOptions) => core.clear(clearOptions),
       messages: () => core.messages(),
       close: async () => {},
     };

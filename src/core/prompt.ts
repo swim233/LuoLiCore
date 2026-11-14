@@ -1,19 +1,23 @@
 import { isToolUIPart } from 'ai';
 import type { Message } from './message.js';
 import { fill, type PromptTexts } from './prompt-files.js';
-import type { Segment } from './storage/types.js';
+import type { StoredSegment } from './storage/types.js';
 
 /**
  * 一段的 system：人设、格式说明、当前会话、之前的对话摘要，依次用空行隔开。
  * 越稳定的越靠前（ADR-0004）；后两节一段之内不变，没有内容时整节省略。
+ * 清空的段没有摘要，在摘要的位置写「更早的对话已在某时被清空」，时间是这一段写入的时刻。
  * 各节的文字来自这次读到的提示词文件
  */
-export function systemPrompt(texts: PromptTexts, segment: Segment): string {
+export function systemPrompt(texts: PromptTexts, segment: StoredSegment): string {
   const sections = [texts.persona, texts.messageFormat];
   if (segment.conversationTitle) {
     sections.push(fill(texts.conversation, { title: segment.conversationTitle }));
   }
-  if (segment.priorSummary) {
+  if (segment.startReason === 'clear') {
+    const time = formatTime(segment.createdAt) ?? segment.createdAt;
+    sections.push(fill(texts.cleared, { time }));
+  } else if (segment.priorSummary) {
     sections.push(fill(texts.priorSummary, { summary: segment.priorSummary }));
   }
   return sections.join('\n\n');

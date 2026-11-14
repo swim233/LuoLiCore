@@ -38,9 +38,17 @@ import type {
 } from './message.js';
 import { formatForModel, summaryInstruction, systemPrompt } from './prompt.js';
 import { PromptFileError, type PromptSource } from './prompt-files.js';
-import { createSegmenter, type SegmentOptions, type Summarize } from './segments.js';
+import {
+  createSegmenter,
+  type ClearOptions,
+  type ClearResult,
+  type CompactOptions,
+  type CompactResult,
+  type SegmentOptions,
+  type Summarize,
+} from './segments.js';
 import { createMemoryStore } from './storage/memory.js';
-import type { ConversationStore, ModelCall, Segment, ToolCall } from './storage/types.js';
+import type { ConversationStore, ModelCall, StoredSegment, ToolCall } from './storage/types.js';
 import { isStoredToolContent, toolContentOutput } from './tool-content.js';
 import { hasToolCalls, settleToolParts, toolHistory } from './tool-history.js';
 import { runTool, toToolSet, ToolError, watchToolCalls, type InstalledTool } from './tools.js';
@@ -58,7 +66,8 @@ export type Conversation = {
    * 每次重试前流中出现一个 transient 的 `data-retry` 段；流中途重新生成时随后还有
    * 一个 `reset-step`，失败那次已输出的内容不会写入历史。
    * 流读完时回复已写入历史；被取消、一步都没完成就出错、没有任何文字也没有执行过工具时不写入。
-   * 后台正在空闲切段时，等它结束再读当前段；压缩进行中不等，照常用当前段。
+   * 后台正在空闲切段、或手动压缩与清空还没结束时，等它们结束再读当前段；自动压缩进行中不等，
+   * 照常用当前段。
    * 开始时读一次提示词，这次的重试与拒收图片后的恢复都用这一份；提示词文件有误时按失败处理
    * （流里一个 error 段，不发请求，不记模型调用）。
    * 请求还没有输出就被拒收（400、413、422），且上一条助手消息之后有新图片时，把这些图片换成
@@ -75,6 +84,22 @@ export type Conversation = {
    * 上一个回复的流还没结束时调用会立即抛错。
    */
   reply(options?: ReplyOptions): ReadableStream<MessageChunk>;
+  /**
+   * 手动压缩：当前段的全部消息连同之前的摘要并成新摘要（请求与空闲切段的相同：沿用这一段的前缀，
+   * 末尾追加摘要指令），成功后新开一段，原因 manual，记下执行人。当前段没有消息时不请求模型，
+   * 结果是 nothing-to-compact。失败（请求出错、超时、摘要为空、提示词文件有误）时不切段、抛出；
+   * abortSignal 中止或会话被关闭时不切段，结果是 aborted。进行中的自动摘要先中止。
+   * 压缩期间写入的消息归入新段，期间开始的回复等它结束。
+   * 回复进行中、另一次手动压缩还没结束时以 ConversationBusyError 拒绝，什么都不改
+   */
+  compact(options: CompactOptions): Promise<CompactResult>;
+  /**
+   * 清空：之后的回复看不到之前的原文与摘要，system 里写一句更早的对话已在何时被清空。不请求模型，
+   * 不删任何消息。当前段有消息时新开一段清空的段；没有消息、带着摘要时把这一段改成清空的段；
+   * 都没有时结果是 already-empty。进行中的自动摘要、手动压缩先中止。
+   * 回复进行中时以 ConversationBusyError 拒绝，会话已关闭时以普通的错误拒绝，都什么都不改
+   */
+  clear(options: ClearOptions): Promise<ClearResult>;
   messages(): Promise<Message[]>;
   /** 停止后台的空闲检查，中止进行中的摘要并等它结束。之后不再使用这个会话 */
   close(): Promise<void>;
@@ -509,7 +534,7 @@ export function createConversation({
       // 回复失败或没有输出时不写入，这个序号空着
       let seq: number | undefined;
       // 这次回复所在的段，回复完成后据此决定是否压缩
-      let segment: Segment | undefined;
+      let segment: StoredSegment | undefined;
       const startedAt = Date.now();
 
       let writeNotice: (chunk: MessageChunk) => void = () => {};
@@ -740,7 +765,8 @@ export function createConversation({
         generateId: () => replyId,
         execute: async ({ writer }) => {
           writeNotice = (chunk) => writer.write(chunk);
-          // 正在空闲切段时先等它结束，读到的才是切段之后的当前段（压缩不等，见 settled）
+          // 正在空闲切段、手动压缩或清空时先等它们结束，读到的才是之后的当前段
+          // （自动压缩不等，见 settled）
           await segmenter.settled();
           // 读一次提示词：这次的重试（SDK 内部的两类）与拒收图片后的恢复都用这一份，
           // 期间文件再变也不影响。读到有错时抛出，按失败处理
@@ -912,6 +938,10 @@ export function createConversation({
         },
       });
     },
+
+    compact: (options) => segmenter.compact(options),
+
+    clear: (options) => segmenter.clear(options),
 
     messages: () => store.list(),
 
