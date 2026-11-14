@@ -2,6 +2,7 @@ import { builtinModules } from 'node:module';
 import js from '@eslint/js';
 import { defineConfig, globalIgnores } from 'eslint/config';
 import tseslint from 'typescript-eslint';
+import markdownManifest from './packages/markdown/package.json' with { type: 'json' };
 import uiManifest from './packages/ui/package.json' with { type: 'json' };
 
 // 前端（CLI、Telegram）、导出脚本（src/requests/）与前端共用的配置、日志：任何含这些路径段的写法，
@@ -101,11 +102,11 @@ const noUi = rule(
   ['^@luoli/ui(/|$)'],
   '组件库 @luoli/ui 是浏览器里的代码，src/ 下只有网页面板（src/web/）能引用',
 );
-// src/ 下的代码（含网页面板）只能按包名 @luoli/ui/… 引组件库：任何含 packages 路径段的写法
-// （相对路径、绝对路径）都拦，经 node_modules/@luoli/ui 的路径也拦
+// src/ 下的代码（含网页面板）只能按包名引工作区的包（组件库 @luoli/ui/…、Markdown 解析 @luoli/markdown）：
+// 任何含 packages 路径段的写法（相对路径、绝对路径）都拦，经 node_modules/@luoli/ 的路径也拦
 const viaPackageName = rule(
-  ['(^|[/#])packages(/|$)', '(^|/)node_modules/@luoli/ui(/|$)'],
-  '组件库只能按包名 @luoli/ui/… 引用，不能用相对路径或含 packages/ 的路径绕进去',
+  ['(^|[/#])packages(/|$)', '(^|/)node_modules/@luoli/'],
+  '工作区的包（组件库 @luoli/ui/…、@luoli/markdown）只能按包名引用，不能用相对路径或含 packages/、node_modules/@luoli/ 的路径绕进去',
 );
 
 // CLI 是洛璃服务的客户端（不带核心）：服务端的代码只许 import type；core 只许纯函数的
@@ -195,6 +196,41 @@ const showcaseRules = (ext, deps, message) => [
   ),
 ];
 
+// Markdown 解析（packages/markdown，包名 @luoli/markdown）：面板和 Telegram 前端共用，浏览器和 Node 里都要能跑。
+// 只许引用包里自己的文件和它 package.json 里声明的依赖（marked）；不得引用面板、core、服务、前端的代码，
+// node 模块和没声明的包；import type 也不行。测试文件另外可以引 vitest。
+// 按文件所在的深度（d = packages/markdown 到文件之间隔了几层目录）分别写：走出 packages/markdown 要 d+1 个 ../
+// （中间夹着 ./ 也算）；先进目录再往上退的写法（a/../../x）一律拦；任何含 src/ 路径段的写法也拦
+// （包里的文件之间按 ./x.js、../x.js 引，用不到）；不以 . 开头的（裸模块名、绝对路径、node: 与内置模块、
+// #子路径）只放过声明了的依赖。d 达到 MARKDOWN_DEPTHS 的文件用最宽的写法
+const markdownDeps = Object.keys({
+  ...markdownManifest.dependencies,
+  ...markdownManifest.peerDependencies,
+  ...markdownManifest.optionalDependencies,
+});
+const MARKDOWN_DEPTHS = 5;
+const MARKDOWN_EXT = '{ts,tsx,js,mjs,mts,cts,cjs,jsx}';
+const markdownPatterns = (ups, deps) => [
+  `^(\\./)*(\\.\\.(/|$)(\\./)*){${ups}}`,
+  '(^|/)[^/.][^/]*/\\.\\.(/|$)',
+  '(^|[/#])src(/|$)',
+  `^(?!\\.|(${deps.map(escapeRe).join('|')})(/|$))`,
+  nodeBuiltins,
+];
+const MARKDOWN_MESSAGE = `Markdown 解析的包只许引用包里自己的文件和 packages/markdown/package.json 里声明的依赖（${markdownDeps.join('、')}），不得引用面板、core、服务、前端的代码或 node 模块`;
+const markdownRules = (ext, deps, message) => [
+  ...Array.from({ length: MARKDOWN_DEPTHS }, (_, d) =>
+    restrictImports(
+      [`packages/markdown/${'*/'.repeat(d)}*.${ext}`],
+      rule(markdownPatterns(d + 1, deps), message),
+    ),
+  ),
+  restrictImports(
+    [`packages/markdown/${'*/'.repeat(MARKDOWN_DEPTHS)}**/*.${ext}`],
+    rule(markdownPatterns(MARKDOWN_DEPTHS + 1, deps), message),
+  ),
+];
+
 export default defineConfig(
   globalIgnores(['node_modules', 'dist', '.grill', '.handoff', 'coverage']),
   js.configs.recommended,
@@ -232,6 +268,19 @@ export default defineConfig(
   {
     // 同网页面板：只许写 import type { X }
     files: ['packages/ui/**/*.{ts,tsx}'],
+    rules: { '@typescript-eslint/no-import-type-side-effects': 'error' },
+  },
+  // Markdown 解析的包：不得引用包外面的文件、node 模块和没声明的依赖
+  ...markdownRules(MARKDOWN_EXT, markdownDeps, MARKDOWN_MESSAGE),
+  // 测试文件另外可以引 vitest（写在后面，对测试文件覆盖上面那一组）
+  ...markdownRules(
+    `test.${MARKDOWN_EXT}`,
+    [...markdownDeps, 'vitest'],
+    MARKDOWN_MESSAGE + '；测试文件另外可以引 vitest',
+  ),
+  {
+    // 同组件库：只许写 import type { X }
+    files: ['packages/markdown/**/*.ts'],
     rules: { '@typescript-eslint/no-import-type-side-effects': 'error' },
   },
   // 网页面板：不得引用服务端、core、前端、工具的代码或 node 模块（import type 可以）；组件库只能按包名引
