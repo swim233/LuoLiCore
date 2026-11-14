@@ -8,7 +8,7 @@ LuoLiCore：群聊助手 agent，核心基于 Vercel AI SDK v7。术语见 `CONT
 
 第一阶段（CLI MVP：多轮对话、重试与日志、中止、用量）、第二阶段（持久化与 Telegram）、第三阶段（工具接口与多步循环，ADR-0006）、第四阶段（fetch 工具与工具结果里的图片，ADR-0007）、第五阶段（请求记录与导出，ADR-0008）、第六阶段（洛璃服务与网页面板，ADR-0009）、第七阶段（定时任务，ADR-0010）已完成。第七阶段之后修过一轮网页面板（11 个问题，拷问记录在 `.grill/ui-fixes/`，已完成），又打磨过一轮（模糊过渡的曲线、平滑滚动、气泡的毛玻璃和洛璃气泡的配色、逐字输出时气泡的形变；拷问记录在 `.grill/ui-polish/`，结论和参数在那里的 `final.md`，已完成）。两轮留下没做的小问题记在 `.handoff/ui-fixes/notes-for-later.md`。
 
-正在做组件库：把网页面板里的组件抽成 `@luoli/ui`（`packages/ui/`），以后别的项目能复用。结论和 11 步的清单在 `.grill/component-lib/final.md`，每步的记录在 `.handoff/ui-lib/step-N/`。前 5 步（建包、设计变量、展示页、两批基础控件）已完成；11 步做完再进第八阶段。
+正在做组件库：把网页面板里的组件抽成 `@luoli/ui`（`packages/ui/`），以后别的项目能复用。结论和 11 步的清单在 `.grill/component-lib/final.md`，每步的记录在 `.handoff/ui-lib/step-N/`。前 6 步（建包、设计变量、展示页、两批基础控件、滚动）已完成；11 步做完再进第八阶段。
 
 之后的第八阶段是监视器、插件与动态，结论已写进 ADR-0010 的「以后怎么接」，开始前再确认一轮。登录与公网部署是第九阶段，设置的修改是第十阶段，各自开始前再拷问。
 
@@ -21,6 +21,7 @@ LuoLiCore：群聊助手 agent，核心基于 Vercel AI SDK v7。术语见 `CONT
   - 三种「面」用库的类：玻璃面板 `ll-glass`、半透明面板 `ll-inset`、夜空窗口的底 `ll-sky`（窗口、胶囊、消失时的空壳）。夜空窗口的星点贴图由 `@luoli/ui/sky-stars` 画。外壳为形变写的 `!important` 靠「不在层里」盖过库，库的样式里不许写 `!important`。
   - 标签页用 Base UI 打底（`@base-ui/react`，用户已确认，版本写死），键盘走法由它给；库的其他基础控件不依赖它。
   - 面板自己的全局 `:focus-visible` 规则不在层里，会盖过库里个别控件自己的焦点环（比如列表行画在里面的那一圈），这种地方面板要自己留一条。
+  - 滚动用库的（`@luoli/ui/scroll`）：窗格 `Pane`（标题和输入框浮在内容上、上下渐变模糊）、长列表 `VirtualLog`（依赖 `@tanstack/react-virtual`，库里也声明了一份）、悬停高亮 `useGlide`、滚轮缓动 `installWheel`；滑动的算法在 `@luoli/ui/slide`。库不认识外壳，由面板在 `boot.ts` 里接上：形变开始时调 `hideGlides()`，大动画在不在走传给 `installWheel({ busy })`，气泡星空的重画经长列表的回调接上。点名外壳状态的样式（形变、整理期间关模糊等）留在面板的 `app.css`，对着库的类名写。「此刻」的终端自己滚，不用库的长列表。
   - 库有自己的展示页：`pnpm ui:dev`（`127.0.0.1:5174`），不经过面板。
 - 洛璃服务（ADR-0009）：
   - 进程与入口：一个常驻进程。`pnpm start` 先构建网页（`pnpm web:build`），成功后再启动服务，构建失败就不启动；`pnpm serve` 只启动服务、不构建。设了 Telegram token 才启动 bot，没设时 stderr 提示一行；网页服务用 `LUOLI_WEB=off` 关闭，端口由 `LUOLI_WEB_PORT` 配置（默认 7310），被占用时报错退出。两个都没开时报错退出。
