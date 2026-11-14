@@ -46,7 +46,18 @@ function SegView({ seg }: { seg: Segment }) {
   return (
     <div className="seg">
       <div className="seg-line">
-        <span>{`${SEG_REASON[seg.startReason]} · ${fmtDay(Date.parse(seg.createdAt))}`}</span>
+        {seg.startedBy?.name ? (
+          <span className="seg-text">
+            <span className="seg-reason">{SEG_REASON[seg.startReason]}</span>
+            <span className="seg-dot"> · </span>
+            <span className="seg-who" title={seg.startedBy.name}>
+              {seg.startedBy.name}
+            </span>
+            <span className="seg-time">{` · ${fmtDay(Date.parse(seg.createdAt))}`}</span>
+          </span>
+        ) : (
+          <span>{`${SEG_REASON[seg.startReason]} · ${fmtDay(Date.parse(seg.createdAt))}`}</span>
+        )}
         {seg.priorSummary && (
           <Button size="xs" aria-expanded={open} onClick={() => setOpen(!open)}>
             摘要

@@ -427,6 +427,27 @@ function seedNormal() {
       usage: [1710, 1024, 44],
     },
   );
+  server.addSeg(
+    book,
+    'manual',
+    now - 80 * MIN,
+    '本月读《献给阿尔吉侬的花束》，每周读到第 5 章左右，周日晚上讨论。下次聚会定在周六下午 3 点，咖啡馆营业到 22 点。小明负责带书，洛璃已提醒。',
+    byPerson(1001),
+  );
+  U(book, 1002, '压缩完了？我接着说，周六我可能晚 10 分钟', now - 75 * MIN);
+  server.addSeg(
+    book,
+    'clear',
+    now - 60 * MIN,
+    null,
+    // 很长的显示名：分隔线上名字截短、悬停看完整的
+    { id: '5210999001', name: '夜观天象的小明同学（读书会管理员、咖啡馆常客、周六聚会的召集人）' },
+  );
+  U(book, 1001, '@洛璃 我们刚才在聊什么来着？', now - 55 * MIN);
+  A(book, '我这边看不到之前的内容了，你们可以再说一下～', now - 55 * MIN + 10e3, {
+    usage: [880, 0, 30],
+  });
+  U(book, 1003, '哈哈，被清空了', now - 50 * MIN);
 
   const star = server.addConv({
     platform: 'telegram',
